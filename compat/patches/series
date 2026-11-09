@@ -521,3 +521,4 @@
 20261107-1006-ast-no-elseif.patch
 20261107-1457-ast-dead-local-side-effect.patch
 20261107-1718-raw-pool-range-cache-inline.patch
+20261109-1510-apple-audio-51-output-modes.patch

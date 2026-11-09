@@ -1,0 +1,1056 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+index 18d5512..5b8db2c 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+@@ -63,6 +63,14 @@ namespace Ryujinx.Audio.Backends.Apple
+         private readonly nint[] _audioQueueBuffers = new nint[NumBuffers];
+ 
+         private readonly int _bytesPerFrame;
++        // S2Arm (5.1 output): guest bytes/frame (6-channel PCM16) and device bytes/frame (stereo after the optional
++        // downmix/spatial stage). Equal for every other configuration.
++        private readonly int _guestBytesPerFrame;
++        private readonly int _deviceChannelCount;
++        // S2Arm (5.1 output): null when the 6-channel stream goes to the queue as is (native) or the session is not 6-channel.
++        private readonly AppleOutputProcessor _processor;
++        private readonly ConvertingReader _convertingReader;
++        private byte[] _convertedData;
+ 
+         private ulong _playedSampleCount;
+         private bool _started;
+@@ -120,8 +128,40 @@ namespace Ryujinx.Audio.Backends.Apple
+             _driver = driver;
+             _updateRequiredEvent = driver.GetUpdateRequiredEvent();
+             _callbackDelegate = OutputCallback;
+-            _bytesPerFrame = BackendHelper.GetSampleSize(requestedSampleFormat) * (int)requestedChannelCount;
+-            _diag = S2AOutputDiag.Create(_bytesPerFrame, (int)requestedChannelCount, (int)requestedSampleRate, BackendHelper.GetSampleSize(requestedSampleFormat) * 8);
++            _guestBytesPerFrame = BackendHelper.GetSampleSize(requestedSampleFormat) * (int)requestedChannelCount;
++            _deviceChannelCount = (int)requestedChannelCount;
++
++            // S2Arm (5.1 output): a 6-channel renderer mix is folded to stereo before the AudioQueue. The queue's implicit
++            // 6 -> 2 conversion only copies front L/R when no layout is known (FC/LFE/BL/BR measured zero), which loses
++            // dialogue and surround; the modes below make the fold explicit. Everything else is passed through unchanged.
++            if (requestedChannelCount == 6)
++            {
++                string configuredMode = Environment.GetEnvironmentVariable("S2A_AUDIO_OUT");
++                AppleOutputMode mode = AppleOutputModeSelector.FromEnvironment();
++
++                if (mode != AppleOutputMode.Native)
++                {
++                    if (requestedSampleFormat != SampleFormat.PcmInt16)
++                    {
++                        Console.Error.WriteLine($"[声] 【红】S2A_AUDIO_OUT={mode} 只支持 PCM16 的 5.1（本次 {requestedSampleFormat}）：按 native 直交 AudioQueue");
++                    }
++                    else
++                    {
++                        _deviceChannelCount = 2;
++                        _processor = AppleOutputProcessor.Create(mode, (int)requestedSampleRate, MaxFrames);
++                        Console.Error.WriteLine($"[声] 5.1→2.0 档「{AppleOutputModeSelector.ModeName(_processor.EffectiveMode)}」：6 声道 FL FR FC LFE BL BR → 2 声道（S2A_AUDIO_OUT；一片最多 {MaxFrames} 帧）" +
++                            (_processor.InitError != null ? $"；【红】器件没建起来，这一路按矩阵下混：{_processor.InitError}" : ""));
++                    }
++                }
++                else if (!string.IsNullOrWhiteSpace(configuredMode))
++                {
++                    Console.Error.WriteLine("[声] 5.1→2.0 档「native」：显式保持上游现状（6 声道直交 AudioQueue）");
++                }
++            }
++
++            _bytesPerFrame = BackendHelper.GetSampleSize(requestedSampleFormat) * _deviceChannelCount;
++            _diag = S2AOutputDiag.Create(_bytesPerFrame, _deviceChannelCount, (int)requestedSampleRate, BackendHelper.GetSampleSize(requestedSampleFormat) * 8);
++            _convertingReader = _processor != null ? new ConvertingReader(this, _processor) : null;
+ 
+             _gcHandle = GCHandle.Alloc(this, GCHandleType.Normal);
+ 
+@@ -402,11 +442,16 @@ namespace Ryujinx.Audio.Backends.Apple
+         }
+ 
+         private uint BufferBytes => RequestedSampleRate * BufferMilliseconds / 1000 * (uint)_bytesPerFrame;
++        private int MaxFrames => (int)(RequestedSampleRate * BufferMilliseconds / 1000);
++
++        // S2Arm (5.1 output): frame count of a queued buffer in device bytes. Equivalent to the base helper for native
++        // sessions; for a folded 6-channel session DataSize holds stereo bytes, so RequestedChannelCount must not be used.
++        private ulong GetFrameCount(AudioBuffer buffer) => buffer.DataSize / (ulong)_bytesPerFrame;
+ 
+         // S2Arm: 建 AudioQueue 和它的 32 个缓冲（起会话与媒体服务重置后重建共用）。缓冲放回同一个数组：泵按槽号取，换队列不用换泵
+         private int CreateQueue()
+         {
+-            AudioStreamBasicDescription format = AppleHardwareDeviceDriver.GetAudioFormat(RequestedSampleFormat, RequestedSampleRate, RequestedChannelCount);
++            AudioStreamBasicDescription format = AppleHardwareDeviceDriver.GetAudioFormat(RequestedSampleFormat, RequestedSampleRate, (uint)_deviceChannelCount);
+             nint callbackPtr = Marshal.GetFunctionPointerForDelegate(_callbackDelegate);
+             nint userData = GCHandle.ToIntPtr(_gcHandle);
+             int result = AudioQueueNewOutput(ref format, callbackPtr, userData, nint.Zero, nint.Zero, 0, out _audioQueue);
+@@ -547,7 +592,7 @@ namespace Ryujinx.Audio.Backends.Apple
+ 
+         private void ProcessPlayedSamples(int bytesPlayed)
+         {
+-            ulong samplesPlayed = GetSampleCount(bytesPlayed);
++            ulong samplesPlayed = (ulong)bytesPlayed / (ulong)_bytesPerFrame;
+             ulong remaining = samplesPlayed;
+             bool needUpdate = false;
+ 
+@@ -615,6 +660,29 @@ namespace Ryujinx.Audio.Backends.Apple
+             }
+         }
+ 
++        // S2Arm (5.1 output): guest buffers are folded while the device reads them (AudioSampleQueue -> ReadSamples), so the
++        // samples stay in guest memory and the session's frame accounting, credit and release cadence are unchanged.
++        public override bool RegisterBuffer(AudioBuffer buffer)
++        {
++            if (buffer.DataPointer == 0)
++            {
++                return false;
++            }
++
++            if (_processor == null)
++            {
++                return base.RegisterBuffer(buffer);
++            }
++
++            ulong frames = buffer.DataSize / (ulong)_guestBytesPerFrame;
++
++            buffer.DataSize = frames * (ulong)_bytesPerFrame;
++            _convertingReader.Inner = buffer.SampleReader ?? this;
++            buffer.SampleReader = _convertingReader;
++
++            return true;
++        }
++
+         public override void QueueBuffer(AudioBuffer buffer)
+         {
+             if (_testProdStall.AtS > 0 && !_testProdStallDone && _started && Stopwatch.GetTimestamp() - _startTicks >= (long)_testProdStall.AtS * Stopwatch.Frequency)
+@@ -624,7 +692,24 @@ namespace Ryujinx.Audio.Backends.Apple
+                 Thread.Sleep(_testProdStall.Ms);
+             }
+ 
+-            ulong sampleCount = GetSampleCount(buffer);
++            // S2Arm (5.1 output): renderer buffers (Data) are copied in by AudioSampleQueue right below, so one staging
++            // array can be reused; the queue never reads it after Enqueue returns.
++            if (_processor != null && buffer.Data != null)
++            {
++                int frames = buffer.Data.Length / _guestBytesPerFrame;
++                int outputBytes = frames * _bytesPerFrame;
++
++                if (_convertedData == null || _convertedData.Length != outputBytes)
++                {
++                    _convertedData = new byte[outputBytes];
++                }
++
++                _processor.Process(buffer.Data.AsSpan(0, frames * _guestBytesPerFrame), _convertedData);
++                buffer.Data = _convertedData;
++                buffer.DataSize = (ulong)outputBytes;
++            }
++
++            ulong sampleCount = GetFrameCount(buffer);
+ 
+             // S2Arm (11-02): register before its samples can be submitted: submitted samples may count as played at once (PlaybackCredit),
+             //   and played samples must find their buffer in _queued
+@@ -772,6 +857,7 @@ namespace Ryujinx.Audio.Backends.Apple
+                     // Synchronous queue disposal completes callbacks before their
+                     // handle is released. A repeated Dispose cannot free a reused slot.
+                     if (_gcHandle.IsAllocated) _gcHandle.Free();
++                    _processor?.Dispose();
+                     _diag.Dispose();
+                     _driver.Unregister(this);
+                     Volatile.Write(ref _disposed, true);
+@@ -785,5 +871,70 @@ namespace Ryujinx.Audio.Backends.Apple
+             Dispose(true);
+             GC.SuppressFinalize(this);
+         }
++
++        // S2Arm (5.1 output): the SampleReader the audio queue uses for guest buffers. It maps the device byte offset
++        // (stereo after folding) back to the guest stream (6-channel) and folds only the frames the queue asks for.
++        private sealed class ConvertingReader : HardwareDeviceSessionOutputBase
++        {
++            private readonly AppleOutputProcessor _processor;
++            private readonly int _guestBytesPerFrame;
++            private readonly int _deviceBytesPerFrame;
++            private HardwareDeviceSessionOutputBase _inner;
++            private byte[] _scratch = Array.Empty<byte>();
++
++            public ConvertingReader(AppleHardwareDeviceSession owner, AppleOutputProcessor processor)
++                : base(owner.MemoryManager, owner.RequestedSampleFormat, owner.RequestedSampleRate, owner.RequestedChannelCount)
++            {
++                _processor = processor;
++                _guestBytesPerFrame = owner._guestBytesPerFrame;
++                _deviceBytesPerFrame = owner._bytesPerFrame;
++            }
++
++            public HardwareDeviceSessionOutputBase Inner
++            {
++                set => _inner = value;
++            }
++
++            public override void ReadSamples(AudioBuffer buffer, ulong offset, Span<byte> destination)
++            {
++                int frames = destination.Length / _deviceBytesPerFrame;
++                int outputBytes = frames * _deviceBytesPerFrame;
++
++                if (frames == 0)
++                {
++                    destination.Clear();
++
++                    return;
++                }
++
++                int inputBytes = frames * _guestBytesPerFrame;
++
++                if (_scratch.Length < inputBytes)
++                {
++                    _scratch = new byte[inputBytes];
++                }
++
++                ReadOnlySpan<byte> input = _scratch.AsSpan(0, inputBytes);
++                ulong guestOffset = offset / (ulong)_deviceBytesPerFrame * (ulong)_guestBytesPerFrame;
++
++                _inner.ReadSamples(buffer, guestOffset, _scratch.AsSpan(0, inputBytes));
++                _processor.Process(input, destination[..outputBytes]);
++
++                if (destination.Length > outputBytes)
++                {
++                    destination[outputBytes..].Clear();
++                }
++            }
++
++            public override void Dispose() => throw new NotSupportedException();
++            public override void PrepareToClose() => throw new NotSupportedException();
++            public override void QueueBuffer(AudioBuffer buffer) => throw new NotSupportedException();
++            public override void SetVolume(float volume) => throw new NotSupportedException();
++            public override float GetVolume() => throw new NotSupportedException();
++            public override void Start() => throw new NotSupportedException();
++            public override void Stop() => throw new NotSupportedException();
++            public override ulong GetPlayedSampleCount() => throw new NotSupportedException();
++            public override bool WasBufferFullyConsumed(AudioBuffer buffer) => throw new NotSupportedException();
++        }
+     }
+ }
+diff --git b/src/Ryujinx.Audio.Backends.Apple/AppleOutputProcessor.cs b/src/Ryujinx.Audio.Backends.Apple/AppleOutputProcessor.cs
+new file mode 100644
+index 0000000..e4bdfe8
+--- /dev/null
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleOutputProcessor.cs
+@@ -0,0 +1,661 @@
++using Ryujinx.Audio.Backends.Apple.Native;
++using Ryujinx.Audio.Backends.CompatLayer;
++using System;
++using System.Runtime.InteropServices;
++
++namespace Ryujinx.Audio.Backends.Apple
++{
++    // S2Arm: 5.1 (6-channel PCM16) -> stereo output modes for the Apple backend.
++    //
++    // Why: the Apple backend reports 6-channel support, so the renderer produces a 5.1 mix, and the AudioQueue is
++    // created with a 6-channel format. AudioQueue's implicit 6 -> 2 conversion only copies front left/right when no
++    // channel layout is known (measured on macOS 26.7.1 with AudioQueueSetOfflineRenderFormat: FC, LFE, BL and BR
++    // all came out zero), so dialogue and surround were lost. Even with the layout declared, the implicit mix is
++    // L = FL + 0.704*C + 0.704*BL (and the right mirror) with LFE dropped, i.e. no headroom.
++    //
++    // Modes (S2A_AUDIO_OUT, opt-in; the default is native and keeps the upstream path):
++    //   sys     - AudioConverter with kAudioConverterPropertyPerformDownmix + channel layouts: the system's explicit
++    //             downmix. Measured gains: front 0.4142, centre/surround 0.2929, LFE dropped.
++    //   spatial - AUSM ('3dem'), kSpatializationAlgorithm_UseOutputType + AmbienceBed, 6-channel bed -> stereo.
++    //   matrix  - host Q15 downmix with the same coefficients as Downmixing.DownMixSurroundToStereo. This is the
++    //             fallback when a sys/spatial device cannot be built or a slice fails; it can also be selected
++    //             explicitly for A/B against the compat layer.
++    //   native  - 6-channel PCM straight into the AudioQueue (the upstream behaviour, default).
++    internal enum AppleOutputMode
++    {
++        Native = 0,
++        Matrix = 1,
++        System = 2,
++        Spatial = 3,
++    }
++
++    internal static class AppleOutputModeSelector
++    {
++        private const AppleOutputMode DefaultMode = AppleOutputMode.Native;
++
++        public static AppleOutputMode FromEnvironment()
++        {
++            string value = Environment.GetEnvironmentVariable("S2A_AUDIO_OUT");
++
++            if (string.IsNullOrWhiteSpace(value))
++            {
++                return DefaultMode;
++            }
++
++            switch (value.Trim().ToLowerInvariant())
++            {
++                case "matrix":
++                case "q15":
++                    return AppleOutputMode.Matrix;
++                case "sys":
++                case "system":
++                case "converter":
++                    return AppleOutputMode.System;
++                case "spatial":
++                case "ausm":
++                    return AppleOutputMode.Spatial;
++                case "native":
++                case "off":
++                    return AppleOutputMode.Native;
++                default:
++                    Console.Error.WriteLine($"[声] 【红】S2A_AUDIO_OUT=「{value}」不认识（可用 matrix / sys / spatial / native）：按 {ModeName(DefaultMode)}");
++                    return DefaultMode;
++            }
++        }
++
++        public static string ModeName(AppleOutputMode mode)
++        {
++            return mode switch
++            {
++                AppleOutputMode.Matrix => "矩阵（Q15）",
++                AppleOutputMode.System => "系统显式下混（AudioConverter）",
++                AppleOutputMode.Spatial => "空间化（AUSM '3dem'）",
++                _ => "native（上游现状：6 声道直交 AudioQueue）",
++            };
++        }
++    }
++
++    // One instance per 6-channel output session. Process() is called from the device pump (guest buffers) and from
++    // the renderer thread (Data buffers), so it serialises internally. Input is interleaved PCM16 6-channel
++    // (FL FR FC LFE BL BR, the renderer's channel order), output is interleaved PCM16 stereo; the frame count is
++    // preserved, so the session's byte accounting and release cadence stay unchanged.
++    internal sealed unsafe class AppleOutputProcessor : IDisposable
++    {
++        private const int InputChannels = 6;
++        private const int OutputChannels = 2;
++        private const int InputBytesPerFrame = InputChannels * sizeof(short);
++        private const int OutputBytesPerFrame = OutputChannels * sizeof(short);
++
++        private readonly object _lock = new();
++        private readonly AppleOutputMode _requestedMode;
++        private readonly int _sampleRate;
++        private readonly int _maxFrames;
++        private AppleOutputMode _mode;
++        private int _failures;
++        private bool _disposed;
++
++        // AudioConverter ('sys')
++        private nint _converter;
++        private nint _convInputProcPtr;
++        private nint _convOutputAbl;
++        private AppleAudioUnits.AudioConverterComplexInputDataProc _convInputProc;
++        private int _convFrames;
++        private nint _convInput;
++        private int _convDone;
++
++        // AUSM ('spatial')
++        private nint _unit;
++        private nint _renderProcPtr;
++        private AppleAudioUnits.AURenderCallback _renderProc;
++        private nint _outAbl;
++        private readonly nint[] _inPlanes = new nint[InputChannels];
++        private nint _outLeft;
++        private nint _outRight;
++        private double _sequence;
++
++        private GCHandle _self;
++
++        public string InitError { get; private set; }
++        public AppleOutputMode EffectiveMode => _mode;
++
++        private AppleOutputProcessor(AppleOutputMode mode, int sampleRate, int maxFrames)
++        {
++            _requestedMode = mode;
++            _sampleRate = sampleRate;
++            _maxFrames = Math.Max(16, maxFrames);
++            _mode = mode;
++        }
++
++        // Never returns null and never leaves a mode that cannot produce audio: a converter / AUSM that cannot be
++        // built falls back to matrix (InitError says why; the caller logs it once).
++        public static AppleOutputProcessor Create(AppleOutputMode mode, int sampleRate, int maxFrames)
++        {
++            AppleOutputProcessor processor = new(mode, sampleRate, maxFrames);
++
++            if (mode == AppleOutputMode.System && !processor.InitSystem())
++            {
++                processor._mode = AppleOutputMode.Matrix;
++            }
++            else if (mode == AppleOutputMode.Spatial && !processor.InitSpatial())
++            {
++                processor._mode = AppleOutputMode.Matrix;
++            }
++
++            return processor;
++        }
++
++        private static AudioToolbox.AudioStreamBasicDescription MakeFormat(int rate, int channels)
++        {
++            return new AudioToolbox.AudioStreamBasicDescription
++            {
++                SampleRate = rate,
++                FormatID = AudioToolbox.kAudioFormatLinearPCM,
++                FormatFlags = AudioToolbox.kAudioFormatFlagIsSignedInteger | AudioToolbox.kAudioFormatFlagIsPacked,
++                BytesPerPacket = (uint)(channels * sizeof(short)),
++                FramesPerPacket = 1,
++                BytesPerFrame = (uint)(channels * sizeof(short)),
++                ChannelsPerFrame = (uint)channels,
++                BitsPerChannel = 16,
++                Reserved = 0,
++            };
++        }
++
++        private static AudioToolbox.AudioChannelLayout Layout(uint tag)
++        {
++            return new AudioToolbox.AudioChannelLayout
++            {
++                AudioChannelLayoutTag = tag,
++                AudioChannelBitmap = 0,
++                NumberChannelDescriptions = 0,
++            };
++        }
++
++        private bool InitSystem()
++        {
++            AudioToolbox.AudioStreamBasicDescription input = MakeFormat(_sampleRate, InputChannels);
++            AudioToolbox.AudioStreamBasicDescription output = MakeFormat(_sampleRate, OutputChannels);
++
++            int rc = AppleAudioUnits.AudioConverterNew(ref input, ref output, out _converter);
++
++            if (rc != 0 || _converter == 0)
++            {
++                InitError = $"AudioConverterNew rc={rc}";
++
++                return false;
++            }
++
++            AudioToolbox.AudioChannelLayout inputLayout = Layout(AppleAudioUnits.ChannelLayoutTagMpeg51A);
++            AudioToolbox.AudioChannelLayout outputLayout = Layout(AppleAudioUnits.ChannelLayoutTagStereo);
++
++            rc = AppleAudioUnits.AudioConverterSetProperty(_converter, AppleAudioUnits.PropertyInputChannelLayout,
++                (uint)sizeof(AudioToolbox.AudioChannelLayout), &inputLayout);
++
++            if (rc == 0)
++            {
++                rc = AppleAudioUnits.AudioConverterSetProperty(_converter, AppleAudioUnits.PropertyOutputChannelLayout,
++                    (uint)sizeof(AudioToolbox.AudioChannelLayout), &outputLayout);
++            }
++
++            uint downmix = 1;
++
++            if (rc == 0)
++            {
++                rc = AppleAudioUnits.AudioConverterSetProperty(_converter, AppleAudioUnits.PropertyPerformDownmix,
++                    sizeof(uint), &downmix);
++            }
++
++            if (rc != 0)
++            {
++                InitError = $"AudioConverter 布局 / PerformDownmix rc={rc}";
++                AppleAudioUnits.AudioConverterDispose(_converter);
++                _converter = 0;
++
++                return false;
++            }
++
++            _self = GCHandle.Alloc(this);
++            _convInputProc = ConverterInput;
++            _convInputProcPtr = Marshal.GetFunctionPointerForDelegate(_convInputProc);
++            _convOutputAbl = Marshal.AllocHGlobal(AppleAudioUnits.AudioBufferListBuffersOffset + sizeof(AppleAudioUnits.AudioBuffer));
++
++            return true;
++        }
++
++        private bool InitSpatial()
++        {
++            AppleAudioUnits.AudioComponentDescription desc = new()
++            {
++                ComponentType = AppleAudioUnits.AudioUnitTypeMixer,
++                ComponentSubType = AppleAudioUnits.AudioUnitSubTypeSpatialMixer,
++                ComponentManufacturer = AppleAudioUnits.AudioUnitManufacturerApple,
++            };
++
++            nint component = AppleAudioUnits.AudioComponentFindNext(0, ref desc);
++
++            if (component == 0)
++            {
++                InitError = "AUSM '3dem' 组件不存在";
++
++                return false;
++            }
++
++            int rc = AppleAudioUnits.AudioComponentInstanceNew(component, out _unit);
++
++            if (rc != 0 || _unit == 0)
++            {
++                InitError = $"AUSM 实例 rc={rc}";
++
++                return false;
++            }
++
++            AudioToolbox.AudioStreamBasicDescription format = new()
++            {
++                SampleRate = _sampleRate,
++                FormatID = AudioToolbox.kAudioFormatLinearPCM,
++                FormatFlags = AudioToolbox.kAudioFormatFlagIsFloat | AudioToolbox.kAudioFormatFlagsNativeEndian | AudioToolbox.kAudioFormatFlagIsNonInterleaved,
++                BytesPerPacket = sizeof(float),
++                FramesPerPacket = 1,
++                BytesPerFrame = sizeof(float),
++                ChannelsPerFrame = OutputChannels,
++                BitsPerChannel = 32,
++                Reserved = 0,
++            };
++
++            AudioToolbox.AudioChannelLayout outputLayout = Layout(AppleAudioUnits.ChannelLayoutTagStereo);
++            rc = AppleAudioUnits.AudioUnitSetProperty(_unit, AppleAudioUnits.PropertyStreamFormat,
++                AppleAudioUnits.ScopeOutput, 0, &format, (uint)sizeof(AudioToolbox.AudioStreamBasicDescription));
++
++            if (rc == 0)
++            {
++                rc = AppleAudioUnits.AudioUnitSetProperty(_unit, AppleAudioUnits.PropertyAudioChannelLayout,
++                    AppleAudioUnits.ScopeOutput, 0, &outputLayout, (uint)sizeof(AudioToolbox.AudioChannelLayout));
++            }
++
++            format.ChannelsPerFrame = InputChannels;
++
++            if (rc == 0)
++            {
++                rc = AppleAudioUnits.AudioUnitSetProperty(_unit, AppleAudioUnits.PropertyStreamFormat,
++                    AppleAudioUnits.ScopeInput, 0, &format, (uint)sizeof(AudioToolbox.AudioStreamBasicDescription));
++            }
++
++            AudioToolbox.AudioChannelLayout inputLayout = Layout(AppleAudioUnits.ChannelLayoutTagMpeg51A);
++
++            if (rc == 0)
++            {
++                rc = AppleAudioUnits.AudioUnitSetProperty(_unit, AppleAudioUnits.PropertyAudioChannelLayout,
++                    AppleAudioUnits.ScopeInput, 0, &inputLayout, (uint)sizeof(AudioToolbox.AudioChannelLayout));
++            }
++
++            uint one = 1;
++
++            if (rc == 0)
++            {
++                rc = AppleAudioUnits.AudioUnitSetProperty(_unit, AppleAudioUnits.PropertyElementCount,
++                    AppleAudioUnits.ScopeInput, 0, &one, sizeof(uint));
++            }
++
++            uint maxFrames = (uint)_maxFrames;
++
++            if (rc == 0)
++            {
++                rc = AppleAudioUnits.AudioUnitSetProperty(_unit, AppleAudioUnits.PropertyMaximumFramesPerSlice,
++                    AppleAudioUnits.ScopeGlobal, 0, &maxFrames, sizeof(uint));
++            }
++
++            uint algorithm = AppleAudioUnits.SpatializationUseOutputType;
++            uint sourceMode = AppleAudioUnits.SpatialMixerSourceModeAmbienceBed;
++
++            if (rc == 0)
++            {
++                rc = AppleAudioUnits.AudioUnitSetProperty(_unit, AppleAudioUnits.PropertySpatializationAlgorithm,
++                    AppleAudioUnits.ScopeInput, 0, &algorithm, sizeof(uint));
++            }
++
++            if (rc == 0)
++            {
++                rc = AppleAudioUnits.AudioUnitSetProperty(_unit, AppleAudioUnits.PropertySpatialMixerSourceMode,
++                    AppleAudioUnits.ScopeInput, 0, &sourceMode, sizeof(uint));
++            }
++
++            if (rc != 0)
++            {
++                InitError = $"AUSM 属性 rc={rc}";
++                DisposeUnit();
++
++                return false;
++            }
++
++            _self = GCHandle.Alloc(this);
++            _renderProc = RenderInput;
++            _renderProcPtr = Marshal.GetFunctionPointerForDelegate(_renderProc);
++            nint callback = Marshal.AllocHGlobal(sizeof(nint) * 2);
++
++            *(nint*)callback = _renderProcPtr;
++            *(nint*)(callback + sizeof(nint)) = GCHandle.ToIntPtr(_self);
++
++            if (rc == 0)
++            {
++                rc = AppleAudioUnits.AudioUnitSetProperty(_unit, AppleAudioUnits.PropertySetRenderCallback,
++                    AppleAudioUnits.ScopeInput, 0, (void*)callback, (uint)(sizeof(nint) * 2));
++            }
++
++            Marshal.FreeHGlobal(callback);
++
++            if (rc != 0)
++            {
++                InitError = $"AUSM 渲染回调 rc={rc}";
++                DisposeUnit();
++
++                return false;
++            }
++
++            for (int i = 0; i < InputChannels; i++)
++            {
++                _inPlanes[i] = Marshal.AllocHGlobal(_maxFrames * sizeof(float));
++            }
++
++            _outLeft = Marshal.AllocHGlobal(_maxFrames * sizeof(float));
++            _outRight = Marshal.AllocHGlobal(_maxFrames * sizeof(float));
++            _outAbl = Marshal.AllocHGlobal(AppleAudioUnits.AudioBufferListBuffersOffset + 2 * sizeof(AppleAudioUnits.AudioBuffer));
++
++            rc = AppleAudioUnits.AudioUnitInitialize(_unit);
++
++            if (rc != 0)
++            {
++                InitError = $"AUSM 初始化 rc={rc}";
++                DisposeUnit();
++
++                return false;
++            }
++
++            return true;
++        }
++
++        public bool Process(ReadOnlySpan<byte> input, Span<byte> output)
++        {
++            int frames = Math.Min(input.Length / InputBytesPerFrame, output.Length / OutputBytesPerFrame);
++
++            if (frames <= 0)
++            {
++                return true;
++            }
++
++            lock (_lock)
++            {
++                if (_disposed)
++                {
++                    return false;
++                }
++
++                if (_mode == AppleOutputMode.Matrix)
++                {
++                    MatrixDownmix(input, output, frames);
++
++                    return true;
++                }
++
++                if (_mode == AppleOutputMode.System && ConvertSystem(input, output, frames))
++                {
++                    return true;
++                }
++
++                if (_mode == AppleOutputMode.Spatial && RenderSpatial(input, output, frames))
++                {
++                    return true;
++                }
++
++                MatrixDownmix(input, output, frames);
++                CountFailure();
++
++                return false;
++            }
++        }
++
++        private void CountFailure()
++        {
++            _failures++;
++
++            if (_failures == 1)
++            {
++                Console.Error.WriteLine($"[声] 【红】5.1→2.0 档「{AppleOutputModeSelector.ModeName(_requestedMode)}」这一次没出数：这一片按矩阵下混");
++            }
++        }
++
++        private static void MatrixDownmix(ReadOnlySpan<byte> input, Span<byte> output, int frames)
++        {
++            ReadOnlySpan<short> source = MemoryMarshal.Cast<byte, short>(input)[..(frames * InputChannels)];
++            Span<short> destination = MemoryMarshal.Cast<byte, short>(output)[..(frames * OutputChannels)];
++
++            Downmixing.DownMixSurroundToStereo(source, destination);
++        }
++
++        private bool ConvertSystem(ReadOnlySpan<byte> input, Span<byte> output, int frames)
++        {
++            int remaining = frames;
++            int frameOffset = 0;
++
++            while (remaining > 0)
++            {
++                int chunk = Math.Min(remaining, _maxFrames);
++                int inputBytes = chunk * InputBytesPerFrame;
++                int outputBytes = chunk * OutputBytesPerFrame;
++                bool ok;
++
++                fixed (byte* inputPtr = input.Slice(frameOffset * InputBytesPerFrame, inputBytes))
++                fixed (byte* outputPtr = output.Slice(frameOffset * OutputBytesPerFrame, outputBytes))
++                {
++                    _convInput = (nint)inputPtr;
++                    _convFrames = chunk;
++                    _convDone = 0;
++
++                    AppleAudioUnits.AudioBuffer* buffer = (AppleAudioUnits.AudioBuffer*)(_convOutputAbl + AppleAudioUnits.AudioBufferListBuffersOffset);
++
++                    *(uint*)_convOutputAbl = 1;
++                    buffer->NumberChannels = OutputChannels;
++                    buffer->DataByteSize = (uint)outputBytes;
++                    buffer->Data = outputPtr;
++
++                    uint outputFrames = (uint)chunk;
++                    int rc = AppleAudioUnits.AudioConverterFillComplexBuffer(_converter, _convInputProcPtr,
++                        GCHandle.ToIntPtr(_self), ref outputFrames, _convOutputAbl, 0);
++
++                    ok = rc == 0 && outputFrames == (uint)chunk;
++                }
++
++                if (!ok)
++                {
++                    return false;
++                }
++
++                frameOffset += chunk;
++                remaining -= chunk;
++            }
++
++            return true;
++        }
++
++        private static int ConverterInput(nint converter, ref uint ioPackets, nint ioData, nint packetDescription, nint userData)
++        {
++            AppleOutputProcessor processor = (AppleOutputProcessor)GCHandle.FromIntPtr(userData).Target;
++
++            if (processor._convDone != 0)
++            {
++                ioPackets = 0;
++
++                return 0;
++            }
++
++            AppleAudioUnits.AudioBuffer* buffer = (AppleAudioUnits.AudioBuffer*)(ioData + AppleAudioUnits.AudioBufferListBuffersOffset);
++
++            *(uint*)ioData = 1;
++            buffer->NumberChannels = InputChannels;
++            buffer->DataByteSize = (uint)(processor._convFrames * InputBytesPerFrame);
++            buffer->Data = (void*)processor._convInput;
++            processor._convDone = 1;
++            ioPackets = (uint)processor._convFrames;
++
++            return 0;
++        }
++
++        private bool RenderSpatial(ReadOnlySpan<byte> input, Span<byte> output, int frames)
++        {
++            int remaining = frames;
++            int frameOffset = 0;
++
++            while (remaining > 0)
++            {
++                int chunk = Math.Min(remaining, _maxFrames);
++
++                ReadOnlySpan<short> source = MemoryMarshal.Cast<byte, short>(input.Slice(frameOffset * InputBytesPerFrame, chunk * InputBytesPerFrame));
++
++                for (int channel = 0; channel < InputChannels; channel++)
++                {
++                    float* plane = (float*)_inPlanes[channel];
++                    int index = channel;
++
++                    for (int frame = 0; frame < chunk; frame++, index += InputChannels)
++                    {
++                        plane[frame] = source[index] * (1.0f / 32768.0f);
++                    }
++                }
++
++                AppleAudioUnits.AudioBuffer* outputLeft = (AppleAudioUnits.AudioBuffer*)(_outAbl + AppleAudioUnits.AudioBufferListBuffersOffset);
++                AppleAudioUnits.AudioBuffer* outputRight = outputLeft + 1;
++                uint bytes = (uint)(chunk * sizeof(float));
++
++                *(uint*)_outAbl = 2;
++                outputLeft->NumberChannels = 1;
++                outputLeft->DataByteSize = bytes;
++                outputLeft->Data = (void*)_outLeft;
++                outputRight->NumberChannels = 1;
++                outputRight->DataByteSize = bytes;
++                outputRight->Data = (void*)_outRight;
++
++                AppleAudioUnits.AudioTimeStamp timestamp = default;
++                timestamp.SampleTime = _sequence;
++                timestamp.Flags = AppleAudioUnits.AudioTimeStampSampleTimeValid;
++
++                uint renderFlags = 0;
++                int rc = AppleAudioUnits.AudioUnitRender(_unit, (nint)(&renderFlags), ref timestamp, 0, (uint)chunk, _outAbl);
++
++                if (rc != 0)
++                {
++                    return false;
++                }
++
++                _sequence += chunk;
++
++                Span<short> destination = MemoryMarshal.Cast<byte, short>(output.Slice(frameOffset * OutputBytesPerFrame, chunk * OutputBytesPerFrame));
++                float* left = (float*)_outLeft;
++                float* right = (float*)_outRight;
++
++                for (int frame = 0; frame < chunk; frame++)
++                {
++                    destination[frame * 2] = ToPcm16(left[frame]);
++                    destination[frame * 2 + 1] = ToPcm16(right[frame]);
++                }
++
++                frameOffset += chunk;
++                remaining -= chunk;
++            }
++
++            return true;
++        }
++
++        private static short ToPcm16(float value)
++        {
++            long sample = (long)MathF.Round(value * 32768.0f);
++
++            return (short)Math.Clamp(sample, short.MinValue, short.MaxValue);
++        }
++
++        private static int RenderInput(nint refCon, nint actionFlags, nint timeStamp, uint busNumber, uint frames, nint ioData)
++        {
++            AppleOutputProcessor processor = (AppleOutputProcessor)GCHandle.FromIntPtr(refCon).Target;
++            uint buffers = *(uint*)ioData;
++            AppleAudioUnits.AudioBuffer* first = (AppleAudioUnits.AudioBuffer*)(ioData + AppleAudioUnits.AudioBufferListBuffersOffset);
++            uint bytes = frames * sizeof(float);
++
++            for (uint i = 0; i < buffers && i < InputChannels; i++)
++            {
++                first[i].NumberChannels = 1;
++                first[i].DataByteSize = bytes;
++                first[i].Data = (void*)processor._inPlanes[i];
++            }
++
++            return 0;
++        }
++
++        private void DisposeUnit()
++        {
++            if (_unit != 0)
++            {
++                AppleAudioUnits.AudioUnitSetProperty(_unit, AppleAudioUnits.PropertySetRenderCallback,
++                    AppleAudioUnits.ScopeInput, 0, null, 0);
++                AppleAudioUnits.AudioUnitUninitialize(_unit);
++                AppleAudioUnits.AudioComponentInstanceDispose(_unit);
++                _unit = 0;
++            }
++
++            for (int i = 0; i < InputChannels; i++)
++            {
++                if (_inPlanes[i] != 0)
++                {
++                    Marshal.FreeHGlobal(_inPlanes[i]);
++                    _inPlanes[i] = 0;
++                }
++            }
++
++            if (_outLeft != 0)
++            {
++                Marshal.FreeHGlobal(_outLeft);
++                _outLeft = 0;
++            }
++
++            if (_outRight != 0)
++            {
++                Marshal.FreeHGlobal(_outRight);
++                _outRight = 0;
++            }
++
++            if (_outAbl != 0)
++            {
++                Marshal.FreeHGlobal(_outAbl);
++                _outAbl = 0;
++            }
++
++            if (_self.IsAllocated)
++            {
++                _self.Free();
++            }
++        }
++
++        public void Dispose()
++        {
++            lock (_lock)
++            {
++                if (_disposed)
++                {
++                    return;
++                }
++
++                _disposed = true;
++
++                if (_converter != 0)
++                {
++                    AppleAudioUnits.AudioConverterDispose(_converter);
++                    _converter = 0;
++                }
++
++                if (_convOutputAbl != 0)
++                {
++                    Marshal.FreeHGlobal(_convOutputAbl);
++                    _convOutputAbl = 0;
++                }
++
++                DisposeUnit();
++            }
++        }
++    }
++}
+diff --git b/src/Ryujinx.Audio.Backends.Apple/AssemblyInfo.cs b/src/Ryujinx.Audio.Backends.Apple/AssemblyInfo.cs
+new file mode 100644
+index 0000000..0fb06dc
+--- /dev/null
++++ b/src/Ryujinx.Audio.Backends.Apple/AssemblyInfo.cs
+@@ -0,0 +1,3 @@
++using System.Runtime.CompilerServices;
++
++[assembly: InternalsVisibleTo("S2A.Services.Tests")]
+diff --git b/src/Ryujinx.Audio.Backends.Apple/Native/AppleAudioUnits.cs b/src/Ryujinx.Audio.Backends.Apple/Native/AppleAudioUnits.cs
+new file mode 100644
+index 0000000..0f72de3
+--- /dev/null
++++ b/src/Ryujinx.Audio.Backends.Apple/Native/AppleAudioUnits.cs
+@@ -0,0 +1,133 @@
++using System;
++using System.Runtime.InteropServices;
++
++namespace Ryujinx.Audio.Backends.Apple.Native
++{
++    // S2Arm: the small slice of AudioConverter / AudioUnit used by the optional 5.1 -> 2.0 output modes
++    // (AppleOutputProcessor). The queue format bindings live in AudioToolbox.cs; these are the C APIs the
++    // system downmix converter and the AUSM ('3dem') spatial mixer need.
++    internal static unsafe class AppleAudioUnits
++    {
++        private const string Lib = "/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox";
++
++        // AudioComponentDescription
++        public const uint AudioUnitTypeMixer = 0x61756D78;              // 'aumx'
++        public const uint AudioUnitSubTypeSpatialMixer = 0x3364656D;    // '3dem'
++        public const uint AudioUnitManufacturerApple = 0x6170706C;      // 'appl'
++
++        // AudioUnit scopes
++        public const uint ScopeGlobal = 0;
++        public const uint ScopeInput = 1;
++        public const uint ScopeOutput = 2;
++
++        // AudioUnitPropertyID
++        public const uint PropertyStreamFormat = 8;
++        public const uint PropertyElementCount = 11;
++        public const uint PropertyMaximumFramesPerSlice = 14;
++        public const uint PropertyAudioChannelLayout = 19;
++        public const uint PropertySetRenderCallback = 23;
++        public const uint PropertySpatializationAlgorithm = 3000;
++        public const uint PropertySpatialMixerSourceMode = 3005;
++
++        public const uint SpatializationUseOutputType = 7;
++        public const uint SpatialMixerSourceModeAmbienceBed = 3;
++
++        // AudioConverterPropertyID
++        public const uint PropertyPerformDownmix = 0x646D6978;          // 'dmix'
++        public const uint PropertyInputChannelLayout = 0x69636C20;      // 'icl '
++        public const uint PropertyOutputChannelLayout = 0x6F636C20;     // 'ocl '
++
++        // AudioChannelLayoutTag
++        public const uint ChannelLayoutTagStereo = 0x650002;            // (101 << 16) | 2
++        public const uint ChannelLayoutTagMpeg51A = 0x790006;           // (121 << 16) | 6: FL FR FC LFE BL BR
++
++        public const int AudioTimeStampSampleTimeValid = 1;
++
++        [StructLayout(LayoutKind.Sequential)]
++        public struct AudioComponentDescription
++        {
++            public uint ComponentType;
++            public uint ComponentSubType;
++            public uint ComponentManufacturer;
++            public uint ComponentFlags;
++            public uint ComponentFlagsMask;
++        }
++
++        [StructLayout(LayoutKind.Sequential)]
++        public struct SmpteTime
++        {
++            public short Subframes;
++            public short SubframeDivisor;
++            public uint Counter;
++            public uint Type;
++            public uint Flags;
++            public short Hours;
++            public short Minutes;
++            public short Seconds;
++            public short Frames;
++        }
++
++        [StructLayout(LayoutKind.Sequential)]
++        public struct AudioTimeStamp
++        {
++            public double SampleTime;
++            public ulong HostTime;
++            public double RateScalar;
++            public ulong WordClockTime;
++            public SmpteTime SmpteTime;
++            public uint Flags;
++            public uint Reserved;
++        }
++
++        [StructLayout(LayoutKind.Sequential)]
++        public struct AudioBuffer
++        {
++            public uint NumberChannels;
++            public uint DataByteSize;
++            public void* Data;
++        }
++
++        // AudioBufferList is { UInt32 mNumberBuffers; AudioBuffer mBuffers[1]; }; on 64-bit the array starts at
++        // offset 8 (the pointer in AudioBuffer aligns the struct to 8). Helpers below use that offset.
++        public const int AudioBufferListBuffersOffset = 8;
++
++        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
++        public delegate int AURenderCallback(nint inRefCon, nint ioActionFlags, nint inTimeStamp, uint inBusNumber, uint inNumberFrames, nint ioData);
++
++        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
++        public delegate int AudioConverterComplexInputDataProc(nint inAudioConverter, ref uint ioNumberDataPackets, nint ioData, nint outDataPacketDescription, nint inUserData);
++
++        [DllImport(Lib)]
++        public static extern nint AudioComponentFindNext(nint inComponent, ref AudioComponentDescription inDesc);
++
++        [DllImport(Lib)]
++        public static extern int AudioComponentInstanceNew(nint inComponent, out nint outInstance);
++
++        [DllImport(Lib)]
++        public static extern int AudioComponentInstanceDispose(nint inInstance);
++
++        [DllImport(Lib)]
++        public static extern int AudioUnitSetProperty(nint inUnit, uint inID, uint inScope, uint inElement, void* inData, uint inDataSize);
++
++        [DllImport(Lib)]
++        public static extern int AudioUnitInitialize(nint inUnit);
++
++        [DllImport(Lib)]
++        public static extern int AudioUnitUninitialize(nint inUnit);
++
++        [DllImport(Lib)]
++        public static extern int AudioUnitRender(nint inUnit, nint ioActionFlags, ref AudioTimeStamp inTimeStamp, uint inOutputBusNumber, uint inNumberFrames, nint ioData);
++
++        [DllImport(Lib)]
++        public static extern int AudioConverterNew(ref AudioToolbox.AudioStreamBasicDescription inSourceFormat, ref AudioToolbox.AudioStreamBasicDescription inDestinationFormat, out nint outAudioConverter);
++
++        [DllImport(Lib)]
++        public static extern int AudioConverterDispose(nint inAudioConverter);
++
++        [DllImport(Lib)]
++        public static extern int AudioConverterSetProperty(nint inAudioConverter, uint inID, uint inPropertyDataSize, void* inPropertyData);
++
++        [DllImport(Lib)]
++        public static extern int AudioConverterFillComplexBuffer(nint inAudioConverter, nint inInputDataProc, nint inInputDataProcUserData, ref uint ioOutputDataPacketSize, nint outOutputData, nint outPacketDescription);
++    }
++}
+diff --git a/src/Ryujinx.Audio.Backends.Apple/Native/AudioToolbox.cs b/src/Ryujinx.Audio.Backends.Apple/Native/AudioToolbox.cs
+index ea2a786..900bf17 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/Native/AudioToolbox.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/Native/AudioToolbox.cs
+@@ -29,8 +29,11 @@ namespace Ryujinx.Audio.Backends.Apple.Native
+ 
+         internal const uint kAudioFormatLinearPCM = 0x6C70636D;
+         internal const uint kAudioQueueProperty_ChannelLayout = 0x6171636c;
+-        internal const uint kAudioChannelLayoutTag_MPEG_5_1_A = 0x650006;
++        // (121 << 16) | 6. The old value here (0x650006) was (101 << 16) | 6, i.e. the Stereo family with six channels:
++        // AudioQueue accepted it but treated the layout as unknown (measured with AudioQueueSetOfflineRenderFormat).
++        internal const uint kAudioChannelLayoutTag_MPEG_5_1_A = 0x790006;
+         internal const uint kAudioFormatFlagIsFloat = (1 << 0);
++        internal const uint kAudioFormatFlagsNativeEndian = 0;
+         internal const uint kAudioFormatFlagIsSignedInteger = (1 << 2);
+         internal const uint kAudioFormatFlagIsPacked = (1 << 3);
+         internal const uint kAudioFormatFlagIsBigEndian = (1 << 1);

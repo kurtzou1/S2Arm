@@ -29,8 +29,11 @@ namespace Ryujinx.Audio.Backends.Apple.Native
 
         internal const uint kAudioFormatLinearPCM = 0x6C70636D;
         internal const uint kAudioQueueProperty_ChannelLayout = 0x6171636c;
-        internal const uint kAudioChannelLayoutTag_MPEG_5_1_A = 0x650006;
+        // (121 << 16) | 6. The old value here (0x650006) was (101 << 16) | 6, i.e. the Stereo family with six channels:
+        // AudioQueue accepted it but treated the layout as unknown (measured with AudioQueueSetOfflineRenderFormat).
+        internal const uint kAudioChannelLayoutTag_MPEG_5_1_A = 0x790006;
         internal const uint kAudioFormatFlagIsFloat = (1 << 0);
+        internal const uint kAudioFormatFlagsNativeEndian = 0;
         internal const uint kAudioFormatFlagIsSignedInteger = (1 << 2);
         internal const uint kAudioFormatFlagIsPacked = (1 << 3);
         internal const uint kAudioFormatFlagIsBigEndian = (1 << 1);
