@@ -21,8 +21,9 @@ case $(uname -m) in
 esac
 # VP8 解码（libvpx + 垫片）：单测经动态库调（宿主里是静态链）
 VPX_A=$(bash "$HERE/vpx/build.sh" "$HOST_RID" 2>/dev/null | tail -1); [ -f "$VPX_A" ] && export S2A_VPX_DYLIB=${VPX_A%/*}/libs2a_vpx.dylib
-# Opus 解码（libopus + 垫片）：同上
+# Opus 解码（libopus + 垫片）：同上；S2A_OPUS_SYSTEM=1 时单流/多流、8–48 kHz 全部走系统 AudioToolbox，宿主静态库不再含 libopus
 OPUS_A=$(bash "$HERE/opus/build.sh" "$HOST_RID" 2>/dev/null | tail -1); [ -f "$OPUS_A" ] && export S2A_OPUS_DYLIB=${OPUS_A%/*}/libs2a_opus.dylib
+[ "${S2A_OPUS_SYSTEM:-0}" = 1 ] && echo "Opus 解码后端：全量系统 AudioToolbox（单流/多流、8–48 kHz；宿主不链 libopus）"
 cd "$HERE/S2A.Services.Tests"
 # 构建成败看命令自己的退出码，筛选只决定打印什么（10-26 #414）：原先这条管道在 set -euo pipefail 下，
 #   中文成功汇总（「0 个错误」）与合法空输出会让 grep 返回 1、整步提前退出，后面的单测一次都不跑；
