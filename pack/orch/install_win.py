@@ -99,8 +99,9 @@ def plumesign_env():
     return dict(os.environ, RUST_LOG='info')
 
 
-def sign_install(exe, ipa, dev_id, name, log, out_ipa, bundle=None):
-    cmd = [exe, 'sign', '--package', str(ipa), '--apple-id', '--register-and-install', '--udid', str(dev_id), '-o', str(out_ipa)]
+def sign_install(exe, ipa, dev_id, name, log, out_ipa, bundle=None, register=True):
+    """register=False：只签名出 out_ipa、不登记设备也不装（设备已在团队里、plumesign 却认不出时用，见 ALREADY_REGISTERED），装机另走 install_signed"""
+    cmd = [exe, 'sign', '--package', str(ipa), '--apple-id'] + (['--register-and-install', '--udid', str(dev_id)] if register else []) + ['-o', str(out_ipa)]
     if name: cmd += ['--custom-name', name]
     # 包名由调用方定（install.container_bundle_id，和 Mac 一致的小写团队号）：不给时 plumesign 自己在包里的包名后接「.大写团队号」，
     #   它查已有 App ID 分大小写，同一团队在 Mac 注册过的小写包名认不出、去新建又撞 Apple 9401（包名不分大小写已被占）。给了它就原样用、不再接团队号
@@ -108,10 +109,17 @@ def sign_install(exe, ipa, dev_id, name, log, out_ipa, bundle=None):
     p = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', env=plumesign_env())
     text = p.stdout + p.stderr
     Path(log).write_text(text, encoding='utf-8')
-    if p.returncode or 'Installation complete' not in text:
+    if p.returncode or (register and 'Installation complete' not in text) or (not register and not Path(out_ipa).is_file()):
         tail = [ln for ln in text.splitlines() if ln.strip() and 'DEBUG' not in ln][-1:] or ['（没有输出）']
         code = impactor.explain(text)
         raise Fail(f'签名装机失败（{code}）：{tail[0][-300:]}', 1, code)
+
+
+# 第二次起装同一台手机（#800）：plumesign 登记设备前按设备号查团队里有没有，比较是精确字符串（同版 v2.7.2 源码
+#   crates/plume_core/src/developer/qh/devices.rs `dev.device_number == *device_udid`）。Windows 的设备服务报的是不带横线的 24 位，
+#   苹果那边存的是带横线的 25 位，永远对不上 → 每次都去登记 → 苹果回 35「already exists on this team」，签名装机整个中止（Mac 的设备号带横线，不中招）。
+#   设备其实已经在团队里了，这次签出的描述文件会带上它：认出这句就改成「只签名不登记」再用 device --install 装签好的包
+ALREADY_REGISTERED = re.compile(r'already exists on this team', re.I)
 
 
 def install_signed(exe, app, udid, log):
@@ -158,7 +166,17 @@ def install_app(a, say=lambda m: print(m, flush=True)):
         out = Path(t, 'signed.ipa'); say(f'签名 + 装机（设备编号 {dev}）…')
         bundle = getattr(a, 'bundle', None)
         try:
-            sign_install(exe, a.ipa, dev, a.name, log, out, bundle)
+            try:
+                sign_install(exe, a.ipa, dev, a.name, log, out, bundle)
+            except Fail:
+                first = Path(log).read_text(encoding='utf-8', errors='replace') if Path(log).is_file() else ''
+                if not ALREADY_REGISTERED.search(first): raise
+                say('这台手机已经登记在这个 Apple ID 的团队里（plumesign 认不出、又去登记被拒），改成只签名、再装到手机')
+                try:
+                    sign_install(exe, a.ipa, dev, a.name, log, out, bundle, register=False)
+                    install_signed(exe, out, a.udid, log)
+                finally:
+                    Path(log).write_text(first + '\n--- 设备已在团队里：只签名再装 ---\n' + Path(log).read_text(encoding='utf-8', errors='replace'), encoding='utf-8')
         except Fail:
             # 9401 = 这个包名苹果那边已被占用。本机记录里没有旧包名时（换了电脑 / 重装启动器 / 新游戏库），旧写法是唯一可能的占用者：换它重试一次，
             #   成功后调用方把实际包名记进设备记录，下次直接用（install.WinPhone.bundle_for_signing）。两次的输出都留在日志里
@@ -183,20 +201,21 @@ def run(a, say=lambda m: print(m, flush=True)):
     return bid
 
 
-def push_pack(udid, bid, pack, devpush=None, full=False, say=lambda m: print(m, flush=True), docs=None, ctx=None, apply_after=False, progress=None, stage=None, pack_root=None):
+def push_pack(udid, bid, pack, devpush=None, full=False, say=lambda m: print(m, flush=True), docs=None, ctx=None, apply_after=False, progress=None, stage=None, pack_root=None, accept_low_space=False):
     """推资源包到已装 App（Windows 没有 devicectl：s2a-devpush 走本机苹果设备服务 usbmuxd + house_arrest + AFC）→ (文件数, 字节数)；失败抛 Fail。
     容器：docs / ctx = 本款设备侧文档根 / 启动上下文，pack_root = 本款设备侧资源包根（pack/jobs/install.py pick_pack_root；不给按 <docs>/资源包）；apply_after = 推完起一次 App 只解包并等解完（同 Mac --apply）"""
     sys.path.insert(0, str(R / 'tools')); import push_pack as P   # Mac / Windows 共用的推资源包 tools/push_pack.py（11-06 两端合一）
     with tempfile.TemporaryDirectory(dir=os.environ.get('S2A_PUSH_TMP')) as w:
         try:
             dev = P.device(udid, bid, w, udid, devpush, 'devpush', say=say, **({'docs': docs, 'ctx': ctx} if docs else {}), pack=pack_root)
-            nb, nt, nbytes = P.run(dev, Path(pack), Path(w), full, say, progress=progress, stage=stage)   # progress(已传, 本次待传总量, 批, 总批)：装机作业转成计数（#266 / #308）；stage：准备子阶段
+            nb, nt, nbytes = P.run(dev, Path(pack), Path(w), full, say, progress=progress, stage=stage, accept_low_space=accept_low_space)   # progress(已传, 本次待传总量, 批, 总批)：装机作业转成计数（#266 / #308）；stage：准备子阶段
             if apply_after:
                 try: P.apply(dev, Path(pack), Path(w), nb, say)
                 except P.NeedsPlayer as e:   # 传输是成功的：带上传了多少，装机作业按提醒收尾（#192）
                     need = Fail(str(e), 0, 'manual_unpack_required'); need.transferred = (nt, nbytes); raise need
         except P.Fail as e:   # 推之前探针写不进 = 锁屏 / 断开：单独报 device_locked（#333）
-            raise Fail(f'推资源包失败：{e}', 1, getattr(e, 'code', None) or 'device_install_failed')
+            code = getattr(e, 'code', None)
+            raise Fail(str(e) if code in ('device_space_low', 'ios_install_no_space') else f'推资源包失败：{e}', 1, code or 'device_install_failed')
     return nt, nbytes
 
 

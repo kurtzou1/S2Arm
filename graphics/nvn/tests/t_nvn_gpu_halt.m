@@ -7,14 +7,15 @@
 //   ③ 停后：旧队列真命令缓冲 cb_put / cb_run 都不交（状态仍 NotEnqueued、计数不涨、不阻塞）；m3_commit 不交；Metal 4 直交 rec_commit_upload 不交；
 //      上屏 present_now 返回 0 且上屏计数不涨、present_enqueue 回票号 0；nvn_be_drain（进后台排空）立即返回、不交不等
 //   ⓪ 帧 GPU 时间 1 秒门（gpu_tag_done）：照 11-09 M1 Pro 时之笛 S2 切回前台那一局，结束时间在现在之后的跨度（算出 6147890790964 ms）不判挂死、不计时间；
-//      同一帧真实的 1.5 秒跨度（结束在现在）过门：单帧只记黄行、不停（11-13：一帧 1020 ms 就冻结玩家的局）
-//   ⓪d 持续形态才停：GPU 时间线上 10 秒内 3 帧各过 1 秒 → 第 3 帧停；3 帧过门但首尾隔 12 秒（每两次之间 6 秒）→ 不停（负对照）；
-//      同一帧过门后再来几份不重复计次（只在跨过门的那一份计）
+//      同一帧真实的 1.5 秒跨度（结束在现在）：过 1 秒门只记黄行、不停（11-13：一帧 1020 ms 就冻结玩家的局）
+//   ⓪d GPU 卡住（连续 3 帧、每帧都过 3 秒才暂停，不是安全停）：连续 3 帧各 3.5 秒 → 第 3 帧暂停一次、不置安全停；点继续（mtl_gpu_stuck_resume）→ 解除、
+//      提交照放行；再连续 3 帧各 3.5 秒 → 再暂停一次（判据复位了）。负对照：隔帧 3 帧各 3.5 秒不暂停；连续 5 帧各 2.5 秒不暂停（只算慢帧）；
+//      同一帧过门后再来一份不重复计次
 //   ⓪b #647（Mac mini M4 / macOS 27.2.1 Metal 4，23 局假安全停）：每帧 16 ms 提交一次、真跑 10 ms，回报的 GPU 开始时间却停在第 0 帧之前 0.1 秒不动
 //      → 100 帧后旧算法的跨度 = 第 99 帧结束 − 停住的开始 ≈ 0.1 + 99×0.016 + 0.01 = 1.694 秒 > 1 秒（会停）；新判据按提交时刻截 → 每帧 10 ms、不停，
 //      「开始早于提交」计数 = 100（期望按构造手算）
 //   ⓪c 一帧 10 段同队列排队、回报的开始都是第一段开始那一刻（跨度层层包含）：跨度和 3.3 秒、独占 600 ms → 不停；
-//      两段首尾相接各 0.6 秒 → 独占 1.2 秒 → 过门计一次（独占没把真活算少；停不停归 ⓪d 的持续判据）
+//      两段首尾相接各 0.6 秒 → 独占 1.2 秒 → 慢帧记一次（独占没把真活算少；不停）
 #include "../gfx/nvn/nvn_mtl.m"
 #include "s2a_t_result.h"
 
@@ -23,6 +24,10 @@ static int bad, checks;
 
 static int g_notified; static char g_note[2048];
 static void rec_notify(const char *why) { g_notified++; snprintf(g_note, sizeof g_note, "%s", why ? why : ""); }
+static int g_stuck_n; static char g_stuck_note[512];
+static void rec_stuck(const char *why) { g_stuck_n++; snprintf(g_stuck_note, sizeof g_stuck_note, "%s", why ? why : ""); }
+// 一帧 GPU 时间线上首尾相接的一段：[e - d, e]，提交时刻在开始前 1 ms
+static void frame_span(uint64_t fr, double e, double d) { gpu_tag_begin(fr); gpu_tag_done(fr, 0, e - d - 0.001, e - d, e); }
 static int ns_near(uint64_t got, uint64_t want) { return (got > want ? got - want : want - got) <= 1000; }   // 纳秒读数 ±1 µs（见 ⓪b 注释）
 
 // 照真机日志的错误结构：MTL4CommandQueueErrorDomain(code) → [NSMultipleUnderlyingErrorsKey: (MTL4 err with reason), NSUnderlyingErrorKey: same] → IOGPUCommandQueueErrorDomain(io)
@@ -40,7 +45,7 @@ int main(void) {
     @autoreleasepool {
         char map[] = "/tmp/t_gpu_halt_map_XXXXXX"; int fd = mkstemp(map); if (fd < 0) return 2; close(fd); setenv("DM_NVN_SHMAP", map, 1);
         mtl_init();
-        g_gpu_halt_notify = rec_notify;
+        g_gpu_halt_notify = rec_notify; g_gpu_stuck_notify = rec_stuck;
         NSError *hang = mtl4_err(1, @"Caused GPU Hang Error (00000003:kIOGPUCommandBufferCallbackErrorHang)", 3);
         NSError *victim = mtl4_err(1, @"Discarded (victim of GPU error/recovery) (00000005:kIOGPUCommandBufferCallbackErrorInnocentVictim)", 5);
         NSError *ignored = mtl4_err(5, @"Ignored (for causing prior/excessive GPU errors) (00000004:kIOGPUCommandBufferCallbackErrorSubmissionsIgnored)", 4);
@@ -54,19 +59,27 @@ int main(void) {
         gpu_tag_begin(23924); gpu_tag_done(23924, 0, now - 0.05, now - 0.04, now - 0.04 + 6147890790.964);
         VERIFY(!mtl_gpu_halted() && !g_notified && atomic_load(&g_gpu[23924 % GRING].ns) == 0, "结束在现在之后的跨度（6147890790964 ms）不判挂死、不计进本帧 GPU 时间");
         gpu_tag_begin(23925); now = CACurrentMediaTime(); gpu_tag_done(23925, 0, now - 1.6, now - 1.5, now);
-        VERIFY(!mtl_gpu_halted() && !g_notified && g_gpu_over_n == 1, "单帧真实 1.5 秒跨度过门：记一次（%u）、不停", g_gpu_over_n);
-        // ⓪d 稀疏过门：时间线上第 0 / 6 / 12 秒各一帧过门（连上面那次，最近 3 次首尾隔 ≥ 12 秒 > 10 秒）→ 不停
-        g_gpu_over_n = 0; atomic_store(&g_gpu_qend[0], 0); double tb = CACurrentMediaTime() - 30.0;
-        for (int i = 0; i < 3; i++) { uint64_t fr = 24000 + i; double e = tb + 6.0 * i; gpu_tag_begin(fr); gpu_tag_done(fr, 0, e - 1.2, e - 1.1, e); }
-        VERIFY(!mtl_gpu_halted() && !g_notified && g_gpu_over_n == 3, "3 帧各过门、首尾隔 12 秒：不停（计 %u 次）", g_gpu_over_n);
-        // 同一帧过门后再来一份：不重复计次
-        gpu_tag_begin(24002); gpu_tag_done(24002, 0, tb + 12.0, tb + 12.0, tb + 12.3);
-        VERIFY(!mtl_gpu_halted() && g_gpu_over_n == 3, "同一帧过门后再来一份不重复计次（%u）", g_gpu_over_n);
-        // 持续形态：第 20 / 21.5 / 23 秒三帧各 1.2 秒 → 3 帧在 3 秒内 → 第 3 帧停
-        g_gpu_over_n = 0;
-        for (int i = 0; i < 3; i++) { uint64_t fr = 24100 + i; double e = tb + 20.0 + 1.5 * i; gpu_tag_begin(fr); gpu_tag_done(fr, 0, e - 1.3, e - 1.2, e); }
-        VERIFY(mtl_gpu_halted() && g_notified == 1 && strstr(g_note, "frame 24102 kept the GPU busy 1200 ms") && strstr(g_note, "3 frames over the limit within 3.0 s"), "10 秒内 3 帧各过门：第 3 帧安全停（%s）", g_note);
-        atomic_store(&g_gpu_halt, 0); g_notified = 0; g_note[0] = 0; g_gpu_over_n = 0;   // 复位
+        VERIFY(!mtl_gpu_halted() && !g_notified && !g_stuck_n && g_gpu_slow_n == 1, "单帧真实 1.5 秒跨度：慢帧记一次（%u）、不停、不暂停", g_gpu_slow_n);
+        // ⓪d GPU 卡住：各用例在自己的时间线上（结束都在现在之前），先清队列最晚结束
+        atomic_store(&g_gpu_qend[0], 0); double tb = CACurrentMediaTime() - 100.0;
+        for (int i = 0; i < 3; i++) frame_span(24000 + i, tb + 3.6 * (i + 1), 3.5);
+        VERIFY(g_stuck_n == 1 && mtl_gpu_stuck() && !mtl_gpu_halted() && !g_notified && strstr(g_stuck_note, "frame 24002 kept the GPU busy 3500 ms, 3 frames in a row over 3000 ms"),
+               "连续 3 帧各 3.5 秒：第 3 帧暂停一次、不是安全停（%s）", g_stuck_note);
+        frame_span(24002, tb + 11.0, 0.2);   // 同一帧过门后再来一份
+        VERIFY(g_stuck_n == 1, "同一帧过门后再来一份不重复计次（暂停 %d 次）", g_stuck_n);
+        uint64_t gc0 = atomic_load(&g_gpu_commits);
+        mtl_gpu_stuck_resume();
+        VERIFY(!mtl_gpu_stuck() && mtl_gpu_go() && atomic_load(&g_gpu_commits) == gc0 + 1, "点继续：解除暂停，提交照放行（放行 +%llu）", (unsigned long long)(atomic_load(&g_gpu_commits) - gc0));
+        for (int i = 0; i < 3; i++) frame_span(24010 + i, tb + 12.0 + 3.6 * (i + 1), 3.5);
+        VERIFY(g_stuck_n == 2 && mtl_gpu_stuck() && strstr(g_stuck_note, "frame 24012"), "继续之后又连续 3 帧各 3.5 秒：再暂停一次（共 %d 次，%s）", g_stuck_n, g_stuck_note);
+        mtl_gpu_stuck_resume();
+        for (int i = 0; i < 3; i++) frame_span(24100 + 2 * i, tb + 30.0 + 3.6 * (i + 1), 3.5);   // 隔帧：24100 / 24102 / 24104
+        VERIFY(g_stuck_n == 2 && !mtl_gpu_stuck(), "负对照：隔帧 3 帧各 3.5 秒不暂停（共 %d 次）", g_stuck_n);
+        unsigned slow0 = g_gpu_slow_n;
+        for (int i = 0; i < 5; i++) frame_span(24200 + i, tb + 45.0 + 2.6 * (i + 1), 2.5);
+        VERIFY(g_stuck_n == 2 && !mtl_gpu_stuck() && g_gpu_slow_n == slow0 + 5, "负对照：连续 5 帧各 2.5 秒不暂停，只记慢帧 %u 次", g_gpu_slow_n - slow0);
+        VERIFY(!mtl_gpu_halted() && !g_notified, "以上计时判据从不置安全停");
+        g_gpu_slow_n = 0;   // 复位
 
         // ⓪b #647 形态：开始时间停在过去，跨度一路拉长——不停；计数 100
         atomic_store(&g_gpu_qend[0], 0);   // 各用例自造时间线：先清本队列的最晚结束（真实运行时间单调向前）
@@ -87,8 +100,8 @@ int main(void) {
         // 真挂死形态（10-31 那种：一帧的活真跑了 1.2 秒）：两段首尾相接各 0.6 秒 → 独占 1.2 秒 → 照停
         atomic_store(&g_gpu_qend[0], 0); now = CACurrentMediaTime(); gpu_tag_begin(31001); gpu_tag_begin(31001);
         gpu_tag_done(31001, 0, now - 1.25, now - 1.2, now - 0.6); gpu_tag_done(31001, 0, now - 1.25, now - 0.6, now);
-        VERIFY(!mtl_gpu_halted() && g_gpu_over_n == 1, "首尾相接真跑满 1.2 秒：独占算对、过门计一次（%u；单帧不停）", g_gpu_over_n);
-        atomic_store(&g_gpu_halt, 0); g_notified = 0; g_note[0] = 0; g_gpu_over_n = 0;   // 复位，下面的流程从没停过的状态开始
+        VERIFY(!mtl_gpu_halted() && g_gpu_slow_n == 1, "首尾相接真跑满 1.2 秒：独占算对、慢帧记一次（%u；不停）", g_gpu_slow_n);
+        atomic_store(&g_gpu_halt, 0); g_notified = 0; g_note[0] = 0; g_gpu_slow_n = 0;   // 复位，下面的流程从没停过的状态开始
 
         // ① 判定
         VERIFY(!legacy_judge(hang), "负对照：旧判法（只看 localizedDescription「%s」）对真机结构的 Hang 错误不命中", hang.localizedDescription.UTF8String);

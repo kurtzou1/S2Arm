@@ -376,6 +376,7 @@ static void layout_prepare(const char *npdm) {
     if (rc == -2) {   // #446：设备地址空间 / App 内存上限不够（iPad mini 6：2^39 以下只有 6 GB）。原先 die → abort，玩家只看到加载页后闪退；改走初启失败出口，iOS 停在提示页说清原因
         LOG("【红】窗口 %#llx +%llu MB 连模块段（%llu MB）、栈、堆前段都放不下（SystemResourceSize %#llx，标准布局要 %llu MB）：这台设备的地址空间 / 内存不够跑这款", (unsigned long long)wb, (unsigned long long)(ws >> 20),
             (unsigned long long)(mod >> 20), (unsigned long long)sr, (unsigned long long)(g_lay_need >> 20));
+        { void (*forget)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "s2a_window_span_forget"); if (forget) forget(); }   // 窗口是按学到的跨度收窄的：删掉那份记录，下一局不再收窄（vawin.c；安卓 / 单测没有这个就不调）
         s2a_init_failed(S2A_INIT_FAIL_E_DEVICE_ADDRESS);   // 宿主里不返回
         die("窗口放不下（没链宿主的失败出口）");
     }

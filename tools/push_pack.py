@@ -104,6 +104,23 @@ class DeviceLocked(Fail):
     code = "device_locked"
 
 
+class LowSpace(Fail):
+    """推之前估算手机空间不够（估算值偏小：AFC 报的空闲不含 iOS 随时能清掉的空间，「设置 → 储存空间」里的「可用」含它）：
+    认得出的风险让玩家确认——调用方报 device_space_low，界面「仍然继续」带 acceptLowSpace 重来就照推，真写满了才停"""
+    code = "device_space_low"
+
+
+class SpaceFull(Fail):
+    """推的时候手机真写满了（推失败后再量，空闲已近 0）：说清这次要多少、手机此刻还剩多少"""
+    code = "ios_install_no_space"
+
+
+FULL_LEFT = 256 << 20   # 推失败后手机空闲低于它 = 写满了（按写满报，不报成传输失败）
+
+
+def gb1(n): return f"{n / 2**30:.1f}"
+
+
 class NeedsPlayer(Fail):
     """资源已传完，只差玩家在手机上打开 App 解开（电脑拉不起 App，#192）：不是传输失败，调用方按「需要玩家操作」收尾"""
 
@@ -728,8 +745,9 @@ def probe(dev, work):
         raise DeviceLocked("iPhone 写不进资源包：多半是手机锁屏了或数据线松了。解锁手机、保持亮屏，插稳数据线后再点一次。") from e
 
 
-def run(dev, pack, work, full=False, say=print, env=None, on_plan=None, progress=None, stage=None):
-    """一条龙：探针（写不进就停）→ 算 → 核空间（不够报红；读不到提示后照推：探针已证明手机可写）→ 推 → (推了几批, 文件数, 字节数)。
+def run(dev, pack, work, full=False, say=print, env=None, on_plan=None, progress=None, stage=None, accept_low_space=False):
+    """一条龙：探针（写不进就停）→ 算 → 核空间（估算不够：没确认过就停下问玩家 LowSpace，确认过 accept_low_space / S2A_PUSH_ACCEPT_LOW_SPACE=1 打黄照推；
+    读不到提示后照推：探针已证明手机可写）→ 推（真写满了停下 SpaceFull，说清缺多少）→ (推了几批, 文件数, 字节数)。
     stage(名字, 已做, 总量)：推之前的准备步骤报给装机页（核对手机上的文件 / 检查手机空间 / 准备资源（拼镜像）按字节），每一刻都看得到在做什么"""
     stage = stage or (lambda name, done=None, total=None: None)
     stage(STAGE_CHECK)
@@ -739,14 +757,30 @@ def run(dev, pack, work, full=False, say=print, env=None, on_plan=None, progress
     if nbytes:
         stage(STAGE_SPACE)
         fb, need = space(dev, nbytes, work, env)
+        accept = accept_low_space or (env or os.environ).get("S2A_PUSH_ACCEPT_LOW_SPACE") == "1"
         if fb is None: say(f"🟡 读不到 iPhone 剩余空间，这次要传 {max(1, nbytes >> 30)} GB：空间不够时会中途停下，请确认手机上留有足够空间")
         elif fb < need:
-            say(f"【红】测试设备剩余空间不足：可写 {fb >> 30} GB < 要 {need >> 30} GB（待推 {nbytes >> 30} GB + 解开时最大一批 + 余量）；先卸掉机上不用的包")
-            raise Fail("测试设备空间不足")
-    send(dev, pack, work, say, progress, stage)
+            # 手机报的空闲（AFC）不含系统随时能清掉的空间，比「设置 → 储存空间」里的「可用」小，常差好几 GB：估算不够不等于放不下
+            head = (f"iPhone 剩余空间看起来不够：这次要传约 {gb1(nbytes)} GB，连同解开时临时多占的约要 {gb1(need)} GB，"
+                    f"手机报的空闲约 {gb1(fb)} GB。")
+            if not accept:
+                raise LowSpace(head + "「设置 → 通用 → iPhone 储存空间」里的「可用」还包括系统随时能清掉的空间，实际多半放得下；"
+                               "点「仍然继续」照传，真写满了会停下并说明还差多少。")
+            say("🟡 " + head + "已按你的选择仍然继续；真写满了会停下并说明还差多少")
+    try:
+        send(dev, pack, work, say, progress, stage)
+    except (DeviceLocked, NeedsPlayer):
+        raise
+    except Fail as e:
+        left = dev.free() if nbytes else None
+        if left is not None and left < FULL_LEFT:
+            raise SpaceFull(f"iPhone 空间写满了，传到一半停下：这次要传约 {gb1(nbytes)} GB，手机现在只剩 {left >> 20} MB。"
+                            f"在「设置 → 通用 → iPhone 储存空间」腾出空间后再装一次（已传完的文件不用重传）。") from e
+        raise
     return nb, nt, nbytes
 
 
+CODE_PREFIX = "S2A_PUSH_CODE"   # 失败的机器读行：S2A_PUSH_CODE <码>\t<给玩家的话>（device_space_low / ios_install_no_space / device_locked）
 STAGE_CHECK, STAGE_SPACE, STAGE_IMAGE = "核对手机上的文件", "检查手机空间", "准备资源（拼镜像）"   # 装机页的准备子阶段（作业层原样上屏）
 STAGE_PREFIX = "S2A_PUSH_STAGE"   # --progress-lines 打的机器读行：S2A_PUSH_STAGE <名字>\t<已做字节>\t<总字节>（没有字节的两栏为空）
 
@@ -819,7 +853,9 @@ def main(argv=None):
         return 0
     except Fail as e:
         state.write_text(f"FAIL {e}\n")
-        if stamp: print(f"【红】{e}"); print(f"RESULT=push out= reason={e}")
+        if stamp:
+            print(f"【红】{e}"); print(f"RESULT=push out= reason={e}")
+            if getattr(e, "code", None): print(f"{CODE_PREFIX} {e.code}\t{e}", flush=True)   # 装机作业按码收尾（pack/jobs/install.py push_pack）
         return 1
     finally:
         if tmp: tmp.cleanup()

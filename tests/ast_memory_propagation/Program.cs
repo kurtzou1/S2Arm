@@ -102,6 +102,19 @@ static class Program
         return 0;
     }
 
+    // 传播到多处时第二处起是一份拷贝（不共享节点，见 AstOptimizer PropagateExpression）：同结构、不同对象，操作数照用
+    private static bool SameTree(IAstNode a, IAstNode b)
+    {
+        if (a is AstOperation x && b is AstOperation y)
+        {
+            if (x.Inst != y.Inst || x.SourcesCount != y.SourcesCount || x.StorageKind != y.StorageKind || x.Index != y.Index) return false;
+            for (int i = 0; i < x.SourcesCount; i++) if (!SameTree(x.GetSource(i), y.GetSource(i))) return false;
+            return true;
+        }
+        return ReferenceEquals(a, b);
+    }
+    private static bool CopyOf(IAstNode copy, IAstNode original) => !ReferenceEquals(copy, original) && SameTree(copy, original);
+
     private static void Straight(IAstNode source, AstOperation effect, bool retain, bool multiple = false)
     {
         Fixture f = new();
@@ -115,7 +128,7 @@ static class Program
         IAstNode expected = retain ? assignment.Destination : source;
         f.KeptIs(retain ? 1 : 0);
         Check(ReferenceEquals(first.GetSource(3), expected), "first consumer evaluation location changed");
-        if (second != null) Check(ReferenceEquals(second.GetSource(3), expected), "second consumer evaluation location changed");
+        if (second != null) Check(retain ? ReferenceEquals(second.GetSource(3), expected) : CopyOf(second.GetSource(3), expected), "second consumer evaluation location changed");
         if (retain)
         {
             f.Retained(assignment, f.Main, source);
@@ -240,8 +253,35 @@ static class Program
             f.Optimize();
             f.Removed(assignment);
             f.KeptIs(0);
-            Check(ReferenceEquals(first.GetSource(0), source) && ReferenceEquals(second.GetSource(0), source),
+            Check(ReferenceEquals(first.GetSource(0), source) && CopyOf(second.GetSource(0), source),
                 "no-write multi-use did not propagate");
+        });
+        // 「只用一次」按出现次数算：t 在同一个父节点里出现两次（fma(t, t, c)），Uses 只记一个父节点，原先当成只用一次整棵搬进两个槽位（共享节点）
+        Run("occurrences/same-parent-twice-kept", () =>
+        {
+            Fixture f = new();
+            AstAssignment t = f.Define(new AstOperation(Instruction.Add, Const(1), Const(2)));
+            AstOperation fma = new(Instruction.FusedMultiplyAdd, t.Destination, t.Destination, Const(3));
+            f.Main.Add(Sink(fma));
+            f.Optimize();
+            Check(ReferenceEquals(fma.GetSource(0), t.Destination) && ReferenceEquals(fma.GetSource(1), t.Destination), "twice-used definition was propagated");
+            f.Retained(t, f.Main, t.Source);
+        });
+        // 一款 Unity 游戏的一支着色器：27 层 t[i+1] = fma(t[i], t[i], c)。原先每层共享整棵下一层、生成 SPIR-V 时按 2^27 展开（几分钟几十 GB）。
+        //   期望：每层都保留成局部变量，优化后表达式树节点数随层数线性（不展开）
+        Run("occurrences/fma-chain-linear", () =>
+        {
+            Fixture f = new();
+            IAstNode prev = f.Define(new AstOperation(Instruction.Add, Const(1), Const(2))).Destination;
+            var defs = new System.Collections.Generic.List<AstAssignment>();
+            for (int i = 0; i < 27; i++) { AstAssignment a = f.Define(new AstOperation(Instruction.FusedMultiplyAdd, prev, prev, Const(3))); defs.Add(a); prev = a.Destination; }
+            AstOperation sink = Sink(prev);
+            f.Main.Add(sink);
+            f.Optimize();
+            static int Nodes(IAstNode n) { if (n is not AstOperation o) return 1; int c = 1; for (int i = 0; i < o.SourcesCount; i++) c += Nodes(o.GetSource(i)); return c; }
+            int total = 0;
+            foreach (IAstNode n in f.Main) total += n is AstAssignment a ? Nodes(a.Source) : Nodes(n);
+            Check(total < 27 * 8, $"expression nodes {total} after optimize: chain expanded");
         });
         Run("while/body-definition-resets-before-use", () =>
         {

@@ -82,9 +82,16 @@ int s2a_spin_step(const uint64_t *tid, const char *const *name, const double *co
 void s2a_spin_test_reset(void);
 // 初始启动/运行时仍按原规则中止。重启的纯 C 装载事务可以回到失败
 // 边界，保留失败现场并通知壳；该边界不包住 C#、GPU 或客体执行。
+// 静默致命退出：出包期的辅助运行（游戏 GLSLC / Oodle 工具模式、管线归档、帧回放）与作业层标了 S2A_CRASH_QUIET=1 的起局，
+//   出错只写日志、以退出码交回调用方，不 abort / 不按信号死——按信号死 macOS 会给 App 弹「意外退出」系统框，玩家看到的却是出包成功
+static inline int s2a_crash_quiet(void) {
+    const char *q = getenv("S2A_CRASH_QUIET");
+    return (q && q[0] == '1') || getenv("DM_GLSLC_JOB") || getenv("DM_OODLE_SERVE") || getenv("S2A_PSO_HARVEST") || getenv("S2A_FRAME_REPLAY");
+}
 __attribute__((noreturn)) static inline void s2a_native_fatal(void) {
     void (*boot_abort)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "s2a_session_abort_boot");
     if (boot_abort) boot_abort();
+    if (s2a_crash_quiet()) _exit(70);
     abort();
 }
 #define die(...) do { LOG("FATAL " __VA_ARGS__); s2a_native_fatal(); } while (0)

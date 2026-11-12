@@ -511,7 +511,7 @@ timeout 300 python3 graphics/tools/direct/tests/t_unity.py > "$LOG/unity.log" 2>
 timeout 120 python3 graphics/tools/direct/tests/t_lib_pack.py > "$LOG/lib_pack.log" 2>&1; r=$?; reg $r "直连库打包容器：$(tail -1 "$LOG/lib_pack.log")（退出 ${r}）" "$LOG/lib_pack.log"
 # 直连曲面阶段翻译（libdsx nxgal_dmsh_xc_tess，与渲染器同一套曲面改写）：手算槽号、Metal 编过、非曲面阶段反证
 if has "$RUNG" direct_link; then
-has "$RUNG" metal || { G=$(pwd -P)/build/gal; "${S2A_PY:-python3}" tools/nostall.py --watch build/gal 300 -- make -s -j"${S2A_CPU_GATE:-$(sysctl -n hw.ncpu 2> /dev/null || echo 8)}" -C graphics/metal "$G/t_tess/vs.spv" "$G/t_tess/tcs.spv" "$G/t_tess/tes.spv" "$G/t_tess/fs.spv" > "$LOG/direct_link_build.log" 2>&1 || reg 1 "直连链接版组预编 t_tess：$(tail -1 "$LOG/direct_link_build.log")"; }
+has "$RUNG" metal || { G=$(pwd -P)/build/gal; "${S2A_PY:-python3}" tools/nostall.py --watch build/gal 300 -- make -s -j"${S2A_CPU_GATE:-$(sysctl -n hw.ncpu 2> /dev/null || echo 8)}" -C graphics/metal "$G/t_tess/vs.spv" "$G/t_tess/tcs.spv" "$G/t_tess/tes.spv" "$G/t_tess/fs.spv" "$G/t_tess/tesatom.spv" > "$LOG/direct_link_build.log" 2>&1 || reg 1 "直连链接版组预编 t_tess：$(tail -1 "$LOG/direct_link_build.log")"; }
 make -s -C graphics/dsx "$(pwd -P)/build/dsx/libdsx.dylib" > "$LOG/direct_link_dsx.log" 2>&1 || reg 1 "直连链接版组预编 libdsx：$(tail -1 "$LOG/direct_link_dsx.log")" "$LOG/direct_link_dsx.log"
 timeout 60 python3 graphics/tools/direct/tests/t_dmsh_tess.py build/dsx/libdsx.dylib build/gal/t_tess > "$LOG/dmsh_tess.log" 2>&1; dt_=$?; reg $dt_ "直连曲面阶段翻译：$(tail -1 "$LOG/dmsh_tess.log")（退出 ${dt_}）" "$LOG/dmsh_tess.log"
 # 直连计算着色器共享内存溢出（libdsx nxgal_dmsh_spill + S2A.Dsh NxgalSpvCross.SpillFix，10-26 怪猎脸黑）：超限改写、Metal 编过、不超限原样、认不出报错（编 dsh_cmp 冷编约 1 分钟）

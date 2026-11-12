@@ -1309,6 +1309,7 @@ public sealed partial class EnvironmentWindow
     internal static readonly IReadOnlyDictionary<string, string> ConfirmCodes = new Dictionary<string, string>
     {
         ["container_would_drop"] = "acceptDropped", ["save_backup_failed"] = "acceptNoBackup", ["container_stale"] = "acceptStale",
+        ["device_space_low"] = "acceptLowSpace",
     };
 
     /// <summary>可确认的停装码要问的那句标题：文案表有 errors.&lt;码&gt;.title 就用它，没有用通用的 install.drop_title</summary>

@@ -1,0 +1,53 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+index b69103397093735cf80ef81a58a9398560b6979c..384124797ebd53ef6d164ac78e6280a3b02dea89 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+@@ -3,6 +3,7 @@ using Ryujinx.Audio.Common;
+ using Ryujinx.Memory;
+ using System;
+ using System.Collections.Concurrent;
++using System.Collections.Generic;
+ using System.Diagnostics;
+ using System.Runtime.InteropServices;
+ using System.Threading;
+@@ -69,6 +70,9 @@ namespace Ryujinx.Audio.Backends.Apple
+ 
+         private nint _audioQueue;
+         private readonly nint[] _audioQueueBuffers = new nint[NumBuffers];
++        // S2Arm (11-12 #767): 交还回调的缓冲→槽号查表——建队时随缓冲整表建好、原子发布（见 CreateQueue），回调免锁只读
++        //   （见 OutputCallback）；回调是实时线程、每次交还都走，不该每次对 32 槽线性扫
++        private Dictionary<nint, int> _bufferSlots;
+ 
+         // S2Arm (#189): guest bytes/frame (6-channel PCM16) and device bytes/frame (stereo after the explicit downmix
+         //   stage). Equal for every other configuration.
+@@ -508,11 +512,18 @@ namespace Ryujinx.Audio.Backends.Apple
+                 }
+             }
+ 
++            // S2Arm (11-12 #767): 缓冲→槽号表随缓冲一起整表建好再原子发布：重建期间旧队列迟到的交还
++            //   查旧表命中 / 查新表落空，都同旧数组扫描的「查不到就返回」，见不到半张表
++            Dictionary<nint, int> bufferSlots = new(NumBuffers);
++
+             for (int i = 0; i < NumBuffers; i++)
+             {
+                 AudioQueueAllocateBuffer(_audioQueue, BufferBytes, out _audioQueueBuffers[i]);
++                bufferSlots[_audioQueueBuffers[i]] = i;
+             }
+ 
++            Volatile.Write(ref _bufferSlots, bufferSlots);
++
+             return 0;
+         }
+ 
+@@ -578,8 +589,9 @@ namespace Ryujinx.Audio.Backends.Apple
+             if (bufferPtr == nint.Zero)
+                 return;
+ 
+-            int bufferIndex = Array.IndexOf(_audioQueueBuffers, bufferPtr);
+-            if (bufferIndex < 0)
++            // S2Arm (11-12 #767): 槽号改查表（建表见 CreateQueue）：实时回调里不再对 32 槽线性扫；
++            //   查不到（重建后旧队列的迟到交还）照旧直接返回——本回调从不解引用未认出的指针，同旧扫描
++            if (!Volatile.Read(ref _bufferSlots).TryGetValue(bufferPtr, out int bufferIndex))
+                 return;
+ 
+             // S2Arm: recycle every returned device buffer, but advance guest progress only for its queued-sample bytes,

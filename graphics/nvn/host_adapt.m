@@ -527,6 +527,18 @@ void s2a_gpu_safe_stop(const char *why) {
         if (down) down(m); else _exit(70);
     });
 }
+// GPU 卡住暂停的宿主一侧（11-13；判据在 nvn_mtl.m gpu_frame_stuck：连续 3 帧各过 3 秒）：iOS 盖「继续玩 / 退出」页（app.m s2a_ios_gpu_stuck），
+//   Mac 弹同样两个按钮（macos/front_mac.m s2a_mac_gpu_stuck）；两边都先冻游戏线程，不再往 GPU 送新活。选继续 → s2a_gpu_stuck_resume。
+//   哪边都没有入口（单测 / 无界面）：只记一行、照常跑（不停局）
+void mtl_gpu_stuck_resume(void);
+void s2a_gpu_stuck_resume(void) { mtl_gpu_stuck_resume(); }
+void s2a_gpu_stuck(const char *why) {
+    LOG("【红】GPU 卡住：%s → 暂停游戏，等玩家选继续或退出", why ? why : "-");
+    void (*page)(const char *) = (void (*)(const char *))dlsym(RTLD_DEFAULT, TARGET_OS_IPHONE ? "s2a_ios_gpu_stuck" : "s2a_mac_gpu_stuck");
+    if (page) { page(why ? why : "-"); return; }
+    LOG("【黄】GPU 卡住：宿主没有暂停页入口，照常继续");
+    mtl_gpu_stuck_resume();
+}
 // nvn_mtl.m：命令缓冲执行报错（判挂死在 nvn_mtl.m mtl_gpu_cb_error，这里只打直连异常红行）。后台时（iOS 不许后台提交）的报错不算
 void s2a_direct_gpu_error(const char *desc) {
     if (atomic_load(&g_suspended)) { LOG("直连：后台时的命令缓冲报错不判失败（%s）", desc ? desc : "-"); return; }

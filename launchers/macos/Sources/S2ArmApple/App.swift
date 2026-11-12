@@ -54,6 +54,14 @@ enum AppSetup {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // --control（S2ARM_CONTROL=1）= AI / 测试驱动的实例：按后台辅助应用起——不进 Dock、不抢焦点（窗口照建：s2armctl snapshot 截它）。
+        //   S2ARM_CONTROL=1 写进本进程环境，作业层据此让测试起局的 s2arm-host 静默崩溃（pack/jobs/core.py env）
+        let args = CommandLine.arguments
+        if args.contains("--control") || ProcessInfo.processInfo.environment["S2ARM_CONTROL"] == "1" {
+            setenv("S2ARM_CONTROL", "1", 1)
+            NSApp.setActivationPolicy(.accessory)
+            return
+        }
         // swift run 起的是裸可执行文件：要成为前台普通 App 才有 Dock 图标和菜单
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)

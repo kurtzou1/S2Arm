@@ -14,6 +14,7 @@
 #include "s2a_session.h"
 #include "s2a_dguard.h"
 #include "s2a_init_fail.h"   // 初启失败页的标题 / 按钮文案（与 launchers/shared/experience.v1.json init_fail_page 逐字一致；中英按 App 语言取，S2APICK）
+#include "s2a_ui_text.h"   // GPU 卡住暂停页文案（S2A_GPU_STUCK_*，与 macos/front_mac.m 同一套）
 #include "s2a_direct_prompt.h"   // 「切换游戏」确认框文案（规格 prompts，S2APICK）
 #include "s2a_selfcheck_page.h"   // 起局自检提示页文案：C 层（selfcheck.c）递中文原宏，这里按 App 语言换成 <宏>_EN（host_text）
 void s2a_loadpage_attach(UIView *root); void s2a_loadpage_front(void);   // loadpage.m：首次加载页 / 简短启动画面
@@ -168,6 +169,7 @@ static void mem_split_start(void) {
 }
 static UIView *g_root;
 static _Atomic int g_render_failed;
+static _Atomic int g_gpu_stuck_page;   // GPU 卡住暂停页在屏上（s2a_ios_gpu_stuck）：回前台不解冻游戏线程，等玩家在页上选
 static _Atomic int g_gpu_stopped;   // GPU 挂死安全停页在屏上（s2a_ios_gpu_stopped 置位）：停帧看门的提示不盖掉它
 void s2a_guest_freeze(int on);                   // thread.c
 void s2a_host_focus_set(int focused);            // os.c（接口 v2.15）
@@ -221,7 +223,8 @@ static void s2a_ios_suspend(int on, const char *why) {
     // A failed render startup is terminal for this session. Foregrounding must
     // not restart the guest behind the error page.
     if (atomic_load(&g_render_failed)) { s2a_controller_set_foreground(0); s2a_guest_freeze(1); s2a_session_background_end(); return; }
-    s2a_controller_set_foreground(!on);
+    int stuck = atomic_load(&g_gpu_stuck_page);   // GPU 卡住暂停页在屏上：回前台照常恢复图形与时钟，但游戏线程留在冻结、手柄不接，等玩家在页上选
+    s2a_controller_set_foreground(!on && !stuck);
     // 焦点报给服务层（接口 v2.15，缺口扫描族 1）：服务层把它转成游戏的焦点消息（失焦 / 回到前台）；进后台的消息在回前台解冻后游戏才读到
     s2a_host_focus_set(!on); s2a_host_sleep_set(on);   // iOS 后台同时算睡眠（psc 休眠 / 唤醒请求）
     // 直连模式进出后台（双轨 §12.2，s2a_direct_suspend 在直连图形层 graphics/nvn/host_adapt.m）：运行时取符号，没链直连层的构建取不到就不调；通用模式下它是空操作
@@ -230,7 +233,7 @@ static void s2a_ios_suspend(int on, const char *why) {
     // 游戏时钟（#495）：进后台最先冻、回前台最后放——解冻瞬间先跑的线程看到的是停住的时钟，不会看到后台那段时间
     if (on) { guest_clock_freeze_for(1, 1); s2a_guest_freeze(1); nxgal_gpu_hold(1, why); atomic_store(&g_bg, 1); LOG("iOS 壳：%s → 游戏时钟与线程冻结、GPU 停止提交", why); }
     else {
-        uint64_t t1 = now_ns(); nxgal_gpu_hold(0, why); uint64_t t2 = now_ns(); s2a_guest_freeze(0); guest_clock_freeze_for(1, 0); uint64_t t3 = now_ns();
+        uint64_t t1 = now_ns(); nxgal_gpu_hold(0, why); uint64_t t2 = now_ns(); if (!stuck) s2a_guest_freeze(0); guest_clock_freeze_for(1, 0); uint64_t t3 = now_ns();
         s2a_clock_catchup();   // 游戏日历（#863）：后台那段（含锁屏睡眠）补进 Ryujinx 稳态时钟；计数器仍从冻结那一刻接着走（#495）
         if (atomic_exchange(&g_bg, 0)) {   // 从后台回来的第一次（回前台 / 获得焦点两条通知都会到这里）：打恢复时间线（ap_host.c）
             uint64_t t0 = atomic_load(&g_fg_note); if (!t0 || t0 > t_ds) t0 = t_ds;
@@ -268,6 +271,7 @@ static void s2a_ios_suspend_enqueue(int on, const char *why) {
 // 提示 / 出错页（notice.m 画；11-02 维护者：满屏、一句人话 + 下一步、和加载页同一套样子、技术细节进诊断包不上屏）。窗口还没建时只记下，建窗口时显示
 static NSString *g_msg;   // 正在屏上（或待显示）的提示，s2a_ios_clear_message 按它认
 static NSArray *g_note;   // 待显示 / 正显示的提示页参数：@[符号, 标题, 正文, 进度, 进度小字, 是否给「导出诊断包」]
+static NSArray *g_note_alt;   // 第二个按钮：@[按钮字, 点了调的块]（GPU 卡住页的「退出」；别的提示页清掉）
 static NSArray *g_note_go;   // 提示页上的「仍要启动」这类继续按钮：@[按钮字, 点了调的块]（s2a_ios_ask_continue 设，别的提示页清掉）
 static UIView *g_note_view;
 static UIView *g_help; static NSArray *g_help_args; static void (*g_help_recheck)(void);   // 缺资源包说明页（见 s2a_ios_show_pack_help）
@@ -277,6 +281,7 @@ static void note_build(void) {
     if (!g_root || !g_note) return;
     NSMutableArray *bs = [NSMutableArray array];
     if (g_note_go) { void (^go)(void) = g_note_go[1]; [bs addObject:s2a_notice_button(g_note_go[0], YES, ^(UIButton *b) { b.enabled = NO; go(); })]; }
+    if (g_note_alt) { void (^alt)(void) = g_note_alt[1]; [bs addObject:s2a_notice_button(g_note_alt[0], NO, ^(UIButton *b) { b.enabled = NO; alt(); })]; }
     if (g_note.count > 6) { NSString *text = g_note[6];   // 「复制诊断」（初启失败页）：诊断文本放进剪贴板，玩家直接粘贴发给我们
         [bs addObject:s2a_notice_button(S2APICK(S2A_INIT_FAIL_COPY), YES, ^(UIButton *b) { UIPasteboard.generalPasteboard.string = text; [b setTitle:S2APICK(S2A_INIT_FAIL_COPIED) forState:UIControlStateNormal]; LOG("初启失败页：诊断已复制到剪贴板"); })]; }
     if ([g_note[5] boolValue]) [bs addObject:s2a_notice_button(S2AL(@"diag.export"), NO, ^(UIButton *b) { (void)b; s2a_diag_export(); })];
@@ -306,7 +311,7 @@ void s2a_ios_show_notice(const char *symbol, const char *title, const char *body
     title = host_text(title); body = host_text(body);
     NSString *sy = @(symbol), *t = @(title), *b = @(body ?: ""), *key = [NSString stringWithFormat:@"%@\n\n%@", t, b];
     NSArray *n = @[sy, t, b, @(total > 0 ? (float)done / total : -1.0f), total > 0 ? [NSString stringWithFormat:S2AL(@"notice.batch"), done < total ? done + 1 : total, total] : @"", @(diag != 0)];
-    void (^show)(void) = ^{ g_msg = key; g_note = n; g_note_go = nil; [g_help removeFromSuperview]; g_help = nil; g_help_args = nil; note_build(); };
+    void (^show)(void) = ^{ g_msg = key; g_note = n; g_note_go = nil; g_note_alt = nil; [g_help removeFromSuperview]; g_help = nil; g_help_args = nil; note_build(); };
     if (NSThread.isMainThread) show(); else dispatch_async(dispatch_get_main_queue(), show);
 }
 // 带「继续」按钮的提示页，调用线程等玩家点（v0.3.1：起局自检只差内存上限时「仍要启动」）。只在宿主工作线程上用（游戏库已在主线程跑 UIKit）：
@@ -318,7 +323,7 @@ int s2a_ios_ask_continue(const char *symbol, const char *title, const char *body
     NSString *sy = @(symbol), *t = @(title), *b = @(body ?: ""), *label = @(go), *key = [NSString stringWithFormat:@"%@\n\n%@", t, b];
     NSArray *n = @[sy, t, b, @(-1.0f), @"", @YES];
     dispatch_async(dispatch_get_main_queue(), ^{
-        g_msg = key; g_note = n; [g_help removeFromSuperview]; g_help = nil; g_help_args = nil;
+        g_msg = key; g_note = n; g_note_alt = nil; [g_help removeFromSuperview]; g_help = nil; g_help_args = nil;
         g_note_go = @[label, ^{ g_note_go = nil; g_note = nil; g_msg = nil; [g_note_view removeFromSuperview]; g_note_view = nil; dispatch_semaphore_signal(done); }];
         note_build();
     });
@@ -326,8 +331,15 @@ int s2a_ios_ask_continue(const char *symbol, const char *title, const char *body
     return 1;
 }
 // 老入口（停帧看门 ap_host.c 经 dlsym 调）：第一段当标题、其余当正文
+// 可用空间按「重要用途」口径（含系统随时能清掉的空间，同「设置 → 储存空间」里的「可用」）：statfs 的 f_bavail 不含这部分，常小好几 GB，
+//   拿它判「空间不够」会冤枉玩家（runtime/src/vawin.c 客体内存文件后备经 dlsym 调）。取不到回 0
+uint64_t s2a_ios_free_important(const char *path) {
+    NSNumber *n = nil;
+    [[NSURL fileURLWithPath:@(path)] getResourceValue:&n forKey:NSURLVolumeAvailableCapacityForImportantUsageKey error:nil];
+    return n.longLongValue > 0 ? (uint64_t)n.longLongValue : 0;
+}
 void s2a_ios_show_message(const char *m) {
-    if (atomic_load(&g_gpu_stopped)) return;   // GPU 安全停页在屏上：不盖掉
+    if (atomic_load(&g_gpu_stopped) || atomic_load(&g_gpu_stuck_page)) return;   // GPU 安全停页 / 卡住暂停页在屏上：不盖掉（卡住页冻了游戏，停帧看门照样会到点）
     const char *nl = strchr(m, '\n'); char t[512]; size_t k = nl ? (size_t)(nl - m) : strlen(m); if (k >= sizeof t) k = sizeof t - 1;
     memcpy(t, m, k); t[k] = 0; const char *b = nl ? nl : ""; while (*b == '\n') b++;
     s2a_ios_show_notice("info.circle.fill", t, b, 0, 0, 0);
@@ -416,6 +428,35 @@ void s2a_ios_render_init_failed(void) {
     { int s2a_dump_threads(const char *why); s2a_dump_threads("iOS 出图层挂接失败"); }
     s2a_logcon_flush();
 }
+// GPU 卡住暂停页（11-13；graphics/nvn/host_adapt.m s2a_gpu_stuck 经 dlsym 调，Metal 完成回调线程）：连续 3 帧各过 3 秒，判据在 nvn_mtl.m gpu_frame_stuck。
+//   冻游戏线程（不再往 GPU 送新活，已交的跑完）、手柄不接，盖「继续玩 / 退出」：继续 → 收页、解冻、清判据（s2a_gpu_stuck_resume）；
+//   退出 → 同「切换游戏」收尾退出，下次打开回到游戏库。驱动报挂死的安全停页（下面）是终局、不给继续，在屏上时这页不盖它
+void s2a_ios_gpu_stuck(const char *why) {
+    (void)why;   // 原文已打进 host.log（nvn_mtl.m gpu_frame_stuck），不上屏
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (atomic_load(&g_gpu_stopped)) return;
+        atomic_store(&g_gpu_stuck_page, 1);
+        s2a_controller_set_foreground(0); s2a_guest_freeze(1);
+        NSString *t = S2APICK(S2A_GPU_STUCK_TITLE), *b = S2APICK(S2A_GPU_STUCK_BODY);
+        g_msg = [NSString stringWithFormat:@"%@\n\n%@", t, b]; g_note = @[@"hourglass", t, b, @(-1.0f), @"", @YES];
+        g_note_go = @[S2APICK(S2A_GPU_STUCK_GO), ^{
+            g_note_go = nil; g_note_alt = nil; g_note = nil; g_msg = nil; [g_note_view removeFromSuperview]; g_note_view = nil;
+            void (*resume)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "s2a_gpu_stuck_resume"); if (resume) resume();
+            atomic_store(&g_gpu_stuck_page, 0); s2a_guest_freeze(0);
+            if (UIApplication.sharedApplication.applicationState == UIApplicationStateActive) s2a_controller_set_foreground(1);
+            LOG("GPU 卡住暂停页：玩家选继续玩，游戏线程解冻");
+        }];
+        g_note_alt = @[S2APICK(S2A_GPU_STUCK_QUIT), ^{
+            LOG("GPU 卡住暂停页：玩家选退出，收尾退出，下次打开回到游戏库");
+            void s2a_host_shutdown(const char *why);
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ s2a_host_shutdown("GPU 卡住，玩家选退出"); });
+        }];
+        [g_help removeFromSuperview]; g_help = nil; g_help_args = nil; note_build();
+        if (g_note_view) [g_root bringSubviewToFront:g_note_view];
+        LOG("【红】iOS 壳：GPU 卡住 → 冻结游戏线程、显示「继续玩 / 退出」页（%s）", g_note_view ? "已显示" : "窗口还没建，建好窗口再画");
+    });
+    s2a_logcon_flush();
+}
 // GPU 挂死安全停页（11-07 Switch2 线 84；graphics/nvn/host_adapt.m s2a_gpu_safe_stop 经 dlsym 调，Metal 完成回调线程）：GPU 已在 nvn_mtl.m 那道门停交，这里冻游戏线程、
 //   盖一张 UIKit 原生错误页（不经 Metal：上屏本身也是 GPU 提交），停在这页。复用渲染失败的终局标记：回前台不恢复游戏、不碰 GPU 闸门 / 后台排空（s2a_ios_suspend 早返），
 //   之后停帧看门的提示（s2a_ios_show_message / clear_message）不盖掉它。玩家从后台划掉再开 = 新进程，唯一干净的重置
@@ -428,6 +469,7 @@ void s2a_ios_gpu_stopped(const char *why) {
         s2a_controller_set_foreground(0); s2a_guest_freeze(1);
         NSString *t = S2AL(@"app.gpuStop.title"), *b = S2AL(@"app.gpuStop.body");
         g_msg = [NSString stringWithFormat:@"%@\n\n%@", t, b]; g_note = @[@"exclamationmark.triangle.fill", t, b, @(-1.0f), @"", @YES];
+        g_note_go = nil; g_note_alt = nil; atomic_store(&g_gpu_stuck_page, 0);   // 终局页盖过卡住页：不留「继续玩」
         [g_help removeFromSuperview]; g_help = nil; g_help_args = nil; note_build();
         if (g_note_view) [g_root bringSubviewToFront:g_note_view];
         LOG("GPU 挂死安全停页：%s", g_note_view ? "已显示" : "窗口还没建，建好窗口再画");

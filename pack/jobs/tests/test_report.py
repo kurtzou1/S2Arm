@@ -134,6 +134,26 @@ class ReportTests(unittest.TestCase):
         self.assertNotIn("start\nxxx", text)
         self.assertLess(len(text), 20000)
 
+    def test_crash_scene_survives_long_thread_table(self):
+        """宿主崩溃：现场那行与回溯在前、全线程等待栈几百 KB 在后（#806 / #786 摘要只剩别的线程）。期望按规则手写：
+        【崩溃现场】节带最后一次【红】CRASH 行、其缩进回溯与之前的【红】行，不带线程表；日志末尾照旧"""
+        threads = "".join(f"[s2a] [现场] 线程 {i}/114 等待\n[s2a] [现场]     #0 __psynch_cvwait+0x8\n" for i in range(4000))
+        (self.private / "logs" / "t7-game.log").write_text("[s2a] 【红】音频队列起不来\n[s2a] 普通行\n"
+            "[s2a] 【红】CRASH 信号 11 地址 0x0 pc main+0x1234 lr sdk+0x99 sp 0x16f000000\n[s2a]   x0  0000000000000000\n[s2a]   #0 main+0x1234\n[s2a]   #1 sdk+0x99\n"
+            + threads + "[s2a] ===== 现场完 =====\n")
+        self.job("t7", operation="launch")
+        text = report.build(self.private, "t7")
+        scene = text.split("【崩溃现场】", 1)[1].split("【日志末尾】", 1)[0]
+        for expected in ("【红】音频队列起不来", "【红】CRASH 信号 11", "#0 main+0x1234", "#1 sdk+0x99"):
+            self.assertIn(expected, scene)
+        self.assertNotIn("[现场] 线程", scene)
+        self.assertIn("===== 现场完 =====", text)
+
+    def test_no_crash_no_scene_section(self):
+        (self.private / "logs" / "t8.log").write_text("plain failure\n")
+        self.job("t8")
+        self.assertNotIn("【崩溃现场】", report.build(self.private, "t8"))
+
     def test_newest_failed_task_is_picked_within_filters(self):
         self.job("old", gameId="0100", started=1.0); self.job("new", gameId="0100", started=2.0); self.job("mac", gameId="0100", operation="build", started=3.0)
         self.job("ok", gameId="0100", state="completed", started=4.0)

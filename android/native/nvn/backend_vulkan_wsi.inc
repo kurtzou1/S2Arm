@@ -23,7 +23,22 @@ struct nvn_gpu_surface_s {
     int held;                                   // 取了没呈现、留作下次取图结果的那张（没有就是 -1）
     uint32_t held_sem;
     uint64_t presents;
+    VkSurfaceTransformFlagBitsKHR built_transform;   // 建这一代交换链时表面的方向与尺寸：判「次优」是不是真的变了（见 wsi_suboptimal_stale）
+    VkExtent2D built_cur;
+    uint32_t subopt_n;
 };
+
+// 取图 / 呈现回「次优」（VK_SUBOPTIMAL_KHR）时要不要重建交换链。
+// 安卓上交换链按不旋转建（preTransform = IDENTITY，由系统的显示引擎去转），横屏时表面的当前方向是转过的，于是**每一次**呈现都回「次优」。
+// 原先见「次优」就标过期、下一帧整条重建——重建前还要等在途的段全做完——等于每帧排空一次显卡再建一次交换链
+// （真机：一局 7800 帧里「建交换链」7579 次；游戏不等显卡的时候，等待原样出现在呈现里 11–14 毫秒）。
+// 「次优」只在表面的方向或尺寸相对建链时真的变了才值得重建；没变就照用。每 30 次「次优」问一次表面（第一次就问）。
+static int wsi_suboptimal_stale(struct nvn_gpu_surface_s *s) {
+    if (s->subopt_n++ % 30) return 0;
+    VkSurfaceCapabilitiesKHR caps;
+    if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g.phys, s->surface, &caps) != VK_SUCCESS) return 1;
+    return caps.currentTransform != s->built_transform || caps.currentExtent.width != s->built_cur.width || caps.currentExtent.height != s->built_cur.height;
+}
 static struct nvn_gpu_surface_s *g_surface;    // 一个后端同时只接一个面
 
 // 取图发过而没被等掉的信号量不能直接销毁（VUID-vkDestroySemaphore-semaphore-05149）：提交一个只等它的空批次把它消费掉
@@ -135,6 +150,7 @@ static nvn_gpu_rc wsi_build(struct nvn_gpu_surface_s *s, nvn_gpu_err *err) {
     for (uint32_t i = 0; i < ni + 1; i++) if (!s->acquire[i] && vkCreateSemaphore(g.d, &si, NULL, &s->acquire[i]) != VK_SUCCESS) { wsi_destroy_swapchain(s); return fail(err, NVN_GPU_E_OOM, "信号量创建失败"); }
     for (uint32_t i = 0; i < ni; i++) if (!s->rendered[i] && vkCreateSemaphore(g.d, &si, NULL, &s->rendered[i]) != VK_SUCCESS) { wsi_destroy_swapchain(s); return fail(err, NVN_GPU_E_OOM, "信号量创建失败"); }
     s->held = -1; s->outdated = 0; s->acquire_next = 0; s->acquire_pending = 0;
+    s->built_transform = caps.currentTransform; s->built_cur = caps.currentExtent; s->subopt_n = 0;
     return rc(NVN_GPU_OK);
 }
 
@@ -208,7 +224,7 @@ nvn_gpu_rc nvn_gpu_drawable_acquire(nvn_gpu_surface s, uint64_t timeout_ns, void
         if (r == VK_ERROR_OUT_OF_DATE_KHR) { s->outdated = 1; return fail(err, NVN_GPU_E_OUTDATED, "交换链已过期"); }
         if (r == VK_ERROR_SURFACE_LOST_KHR) { s->gen = 0; return fail(err, NVN_GPU_E_REVOKED, "表面已丢失"); }
         if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) return fail(err, r == VK_ERROR_DEVICE_LOST ? NVN_GPU_E_DEVICE : NVN_GPU_E_UNSUPPORTED, "vkAcquireNextImageKHR 失败（%d）", (int)r);
-        if (r == VK_SUBOPTIMAL_KHR) s->outdated = 2;   // 这张还能用，呈现之后要重建
+        if (r == VK_SUBOPTIMAL_KHR && wsi_suboptimal_stale(s)) s->outdated = 2;   // 表面真变了：这张还能用，呈现之后要重建
         s->acquire_pending |= 1u << sem;
         s->acquire_next = (s->acquire_next + 1) % (s->nimages + 1);
     }
@@ -237,11 +253,41 @@ nvn_gpu_rc nvn_gpu_present(nvn_gpu_surface s, const nvn_gpu_drawable *dr, const 
     nvn_gpu_rc out = rc(NVN_GPU_OK);
     nvn_gpu_shown shown = {ticket, NVN_GPU_SHOWN_DROPPED, 0.0};
     nvn_gpu_cmd ch = NULL;
-    { static uint64_t np; if (++np % 300 == 0 && nvn_plat_flag("nvk_gputime", 0)) {   // 诊断读数：见 g_oc
+    { static uint64_t np; if (np % 300 == 1) g_draw_tm = nvn_plat_flag("nvk_gputime", 0) != 0;
+      if (++np % 300 == 0 && g_draw_tm) {   // 诊断读数：见 g_oc
         uint64_t v[OC_N]; for (int i = 0; i < OC_N; i++) v[i] = __atomic_exchange_n(&g_oc[i], 0, __ATOMIC_RELAXED);
         char b[400]; snprintf(b, sizeof b, "对象读数（每帧，近 300 帧）：新建渲染通道 %.1f、帧缓冲 %.1f、命令池 %.1f、描述符池 %.1f；分配描述符集 %.1f 次、写描述符 %.1f 次；遮挡查询 %.1f 个；新建视图 %.1f 个；取窗口图 %.1f 毫秒",
             v[OC_RP] / 300.0, v[OC_FB] / 300.0, v[OC_CPOOL] / 300.0, v[OC_DPOOL] / 300.0, v[OC_DALLOC] / 300.0, v[OC_DWRITE] / 300.0, v[OC_QUERY] / 300.0, v[OC_VIEW] / 300.0, (double)__atomic_exchange_n(&g_acq_ns, 0, __ATOMIC_RELAXED) / 300.0 / 1e6);
-        nvn_plat_log(NVN_PLAT_LOG_INFO, "gpu", b); } }
+        nvn_plat_log(NVN_PLAT_LOG_INFO, "gpu", b);
+        // 驱动调用数（每帧）：经过两级回放包装的各类 vkCmd*，按次数从多到少列前 10 类和总数
+        { uint64_t c[OP_N], tot = 0; int idx[OP_N];
+          for (int i = 0; i < OP_N; i++) { c[i] = __atomic_exchange_n(&g_dq_cnt[i], 0, __ATOMIC_RELAXED); tot += c[i]; idx[i] = i; }
+          for (int i = 1; i < OP_N; i++) { int k = idx[i], j = i - 1; while (j >= 0 && c[idx[j]] < c[k]) { idx[j + 1] = idx[j]; j--; } idx[j + 1] = k; }
+          size_t o = (size_t)snprintf(b, sizeof b, "驱动调用（每帧，近 300 帧）：共 %.0f 次", tot / 300.0);
+          for (int i = 0; i < 10 && i < OP_N && c[idx[i]] && o < sizeof b - 48; i++) if (idx[i] != OP_WRAP) o += (size_t)snprintf(b + o, sizeof b - o, "；%s %.1f", g_dq_names[idx[i]] + 5, c[idx[i]] / 300.0);   // + 5：去掉 vkCmd
+          nvn_plat_log(NVN_PLAT_LOG_INFO, "gpu", b); }
+        { uint64_t d0 = __atomic_exchange_n(&g_draw_ns[0], 0, __ATOMIC_RELAXED), d1 = __atomic_exchange_n(&g_draw_ns[1], 0, __ATOMIC_RELAXED), d2 = __atomic_exchange_n(&g_draw_ns[2], 0, __ATOMIC_RELAXED);
+          snprintf(b, sizeof b, "后端绘制细分（每帧毫秒，近 300 帧）：描述符 %.2f、推常量与状态 %.2f、顶点索引与绘制调用 %.2f", d0 / 300.0 / 1e6, d1 / 300.0 / 1e6, d2 / 300.0 / 1e6);
+          nvn_plat_log(NVN_PLAT_LOG_INFO, "gpu", b); }
+        { uint64_t v4[4], nwt = __atomic_exchange_n(&g_desc_nw, 0, __ATOMIC_RELAXED), nst = __atomic_exchange_n(&g_desc_sets, 0, __ATOMIC_RELAXED);
+          for (int i = 0; i < 4; i++) v4[i] = __atomic_exchange_n(&g_desc_ns[i], 0, __ATOMIC_RELAXED);
+          snprintf(b, sizeof b, "描述符细分（每帧毫秒，近 300 帧）：分配 %.2f、构造写入项 %.2f、写入 %.2f、绑定 %.2f；每帧重写 %.0f 组（其中备忘命中 %.0f 组）、写 %.0f 条描述符",
+              v4[0] / 300.0 / 1e6, v4[1] / 300.0 / 1e6, v4[2] / 300.0 / 1e6, v4[3] / 300.0 / 1e6, nst / 300.0, __atomic_exchange_n(&g_desc_hit, 0, __ATOMIC_RELAXED) / 300.0, nwt / 300.0);
+          nvn_plat_log(NVN_PLAT_LOG_INFO, "gpu", b); }
+        { uint64_t ns = __atomic_exchange_n(&g_pl_ns, 0, __ATOMIC_RELAXED), n = __atomic_exchange_n(&g_pl_n, 0, __ATOMIC_RELAXED), st = __atomic_exchange_n(&g_pl_steps, 0, __ATOMIC_RELAXED);
+          snprintf(b, sizeof b, "取管线查找（每帧，近 300 帧）：%.1f 次、共 %.0f 微秒、每次比 %.1f 条", n / 300.0, ns / 300.0 / 1000.0, n ? (double)st / (double)n : 0.0);
+          nvn_plat_log(NVN_PLAT_LOG_INFO, "gpu", b); }
+        // 后端现存对象（显存涨在哪）。悬着 = 上层已放、还被引用着没销毁
+        { uint64_t nt = 0, ntd = 0, tb = 0, tdb = 0, nb = 0, nbd = 0, bb = 0, nvw = 0, nq = 0;
+          pthread_mutex_lock(&g_mu);
+          for (struct nvn_gpu_tex_s *t = g.texs; t; t = t->all_next) { uint64_t sz = (uint64_t)t->w * t->h * (t->depth ? t->depth : 1) * (t->layers ? t->layers : 1) * 4; nt++; tb += sz; if (t->released) { ntd++; tdb += sz; } }
+          for (struct nvn_gpu_buf_s *x = g.bufs; x; x = x->all_next) { nb++; bb += x->bytes; if (x->released) nbd++; }
+          for (struct nvn_gpu_view_s *x = g.views; x; x = x->all_next) nvw++;
+          for (struct vk_segment *q = g.qhead; q; q = q->next) nq++;
+          pthread_mutex_unlock(&g_mu);
+          snprintf(b, sizeof b, "现存对象：贴图 %llu 张约 %llu MB（其中悬着 %llu 张约 %llu MB）；缓冲 %llu 个 %llu MB（悬着 %llu 个）；视图 %llu 个；在途段 %llu 个",
+              (unsigned long long)nt, (unsigned long long)(tb >> 20), (unsigned long long)ntd, (unsigned long long)(tdb >> 20), (unsigned long long)nb, (unsigned long long)(bb >> 20), (unsigned long long)nbd, (unsigned long long)nvw, (unsigned long long)nq);
+          nvn_plat_log(NVN_PLAT_LOG_INFO, "gpu", b); } } }
     if (!s || !dr || !d || !d->src || !d->src->tex) { out = fail(err, NVN_GPU_E_ARG, "present 参数为空"); goto done; }
     if (!s->gen) { out = fail(err, NVN_GPU_E_REVOKED, "面已撤销"); goto done; }
     if (dr->gen != s->gen || !(dr->token >> 16)) { out = fail(err, NVN_GPU_E_OUTDATED, "drawable 不属于当前交换链"); goto done; }
@@ -324,7 +370,7 @@ nvn_gpu_rc nvn_gpu_present(nvn_gpu_surface s, const nvn_gpu_drawable *dr, const 
     s->presents++;
     if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) {
         shown.status = NVN_GPU_SHOWN_UNKNOWN;   // 交给了呈现引擎，但没有实际上屏时刻（没有 CAP_SHOWN_TIME）
-        if (r == VK_SUBOPTIMAL_KHR || s->outdated == 2) s->outdated = 1;
+        if ((r == VK_SUBOPTIMAL_KHR && wsi_suboptimal_stale(s)) || s->outdated == 2) s->outdated = 1;
     } else if (r == VK_ERROR_OUT_OF_DATE_KHR) { s->outdated = 1; out = fail(err, NVN_GPU_E_OUTDATED, "呈现时交换链已过期"); }
     else if (r == VK_ERROR_SURFACE_LOST_KHR) { s->gen = 0; out = fail(err, NVN_GPU_E_REVOKED, "表面已丢失"); }
     else out = fail(err, r == VK_ERROR_DEVICE_LOST ? NVN_GPU_E_DEVICE : NVN_GPU_E_UNSUPPORTED, "vkQueuePresentKHR 失败（%d）", (int)r);

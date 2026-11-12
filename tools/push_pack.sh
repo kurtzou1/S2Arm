@@ -29,10 +29,10 @@ push_pack() {   # push_pack <设备> <bundle id> <资源包目录> <scratch 目�
   [ $# = 3 ] || fin push "算待推清单失败"
   # 推之前核剩余空间：要的 = 待推量 + 最大一批 + 每文件 4 KB + 余量（push_pack.py need）；读不到只记一行、照推
   if [ "$3" -gt 0 ]; then fb=$(push_free_b "$D" "$B" "$PACK" "$O"); nd=$(python3 -B "$PUSH_PY" need "$D" "$B" "$PACK" --work "$O" 2> /dev/null | grep -E '^[0-9]+$'); nd=${nd:-$(( $3 * 2 + ${S2A_PUSH_SPARE_GB:-1} * 1073741824 ))}
-    if [ -z "$fb" ]; then t "🟡 读不到测试设备剩余空间（ideviceinfo），不核、照推"
+    if [ -z "$fb" ]; then t "🟡 读不到手机剩余空间（ideviceinfo），不核、照推"
     elif [ "$fb" -lt "$nd" ] && [ -n "${PUSH_ON_LOWSPACE:-}" ] && "$PUSH_ON_LOWSPACE" $((nd >> 20)) && fb=$(push_free_b "$D" "$B" "$PACK" "$O") && [ -n "$fb" ] && [ "$fb" -ge "$nd" ]; then
       t "腾空间后可写 $((fb >> 30)) GB ≥ 要 $((nd >> 30)) GB，照推"   # 11-06 维护者：空间不够先卸 24 小时以上的我方 App（调用方 PUSH_ON_LOWSPACE <要的 MB>，dev_run 挂 tools/dev_prune.sh）
-    elif [ "$fb" -lt "$nd" ]; then t "【红】测试设备剩余空间不足：可写 $((fb >> 30)) GB < 要 $((nd >> 30)) GB（待推 $(( $3 >> 30 )) GB + 解开时最大一批 + 余量）；先卸掉机上不用的包（tools/dev_uninstall.sh）"; fin push "测试设备空间不足"; fi
+    elif [ "$fb" -lt "$nd" ]; then t "【红】手机剩余空间不足：可写 $((fb >> 30)) GB < 要 $((nd >> 30)) GB（待推 $(( $3 >> 30 )) GB + 解开时最大一批 + 余量）；先卸掉机上不用的包（tools/dev_uninstall.sh）"; fin push "测试设备空间不足"; fi
   fi
   # 调用方的看门预算按推送量放大（dev_run 的 push_budget：已用 + 300 秒 + 推送 15 MB/s + 机上解包 50 MB/s）
   [ -z "${PUSH_ON_PLAN:-}" ] || "$PUSH_ON_PLAN" "$1" "$2" "$3"

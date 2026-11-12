@@ -68,6 +68,15 @@ int s2a_ui_zh(void);
 // 两本账一起写（11-13 玩家复盘：GPU 已分配撞上系统上限报 OutOfMemory，浮层只写进程实占 0.9 GB，看着像内存没吃多少）
 #define S2A_UI_HUD_MEM_GPU              "进程 %.1f GB · GPU %.1f GB"
 #define S2A_UI_HUD_MEM_GPU_EN           "App %.1f GB · GPU %.1f GB"
+// ---------- GPU 卡住暂停页（graphics/nvn host_adapt.m s2a_gpu_stuck → ios/app.m、macos/front_mac.m）：连续几帧每帧几秒才出现，玩家自己选 ----------
+#define S2A_GPU_STUCK_TITLE             "画面卡住了"
+#define S2A_GPU_STUCK_TITLE_EN          "The game is stuck"
+#define S2A_GPU_STUCK_BODY              "显卡连续几秒都没画完一帧，游戏已暂停。可以继续玩（可能还会卡），或者退出。"
+#define S2A_GPU_STUCK_BODY_EN           "The GPU has taken several seconds per frame, so the game is paused. You can keep playing (it may stall again) or quit."
+#define S2A_GPU_STUCK_GO                "继续玩"
+#define S2A_GPU_STUCK_GO_EN             "Keep playing"
+#define S2A_GPU_STUCK_QUIT              "退出"
+#define S2A_GPU_STUCK_QUIT_EN           "Quit"
 #ifdef __cplusplus
 }
 #endif

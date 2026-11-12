@@ -32,7 +32,15 @@ VkResult nvn_plat_vk_surface_create(VkInstance instance, void *native, VkSurface
     return vkCreateHeadlessSurfaceEXT(instance, &ci, NULL, out);
 }
 int nvn_plat_window_size(void *native, uint32_t *w, uint32_t *h) { (void)native; *w = 320; *h = 180; return 1; }
-int nvn_plat_flag(const char *name, int dflt) { (void)name; return dflt; }
+// S2A_TEST_NVK_DQ=1：整套用例在「两级回放开」下再跑一遍（run.sh 第二遍）
+// S2A_TEST_NVK_DQ=1：整套用例在「两级回放开」下再跑一遍；S2A_TEST_DESC_MEMO=1：在「描述符组备忘开」下再跑一遍
+// （备忘开着时内容相同的组不再分配，按「分配了几组」写的那几条期望在这一遍里不比，像素期望照比）。
+static int g_memo_on;
+int nvn_plat_flag(const char *name, int dflt) {
+    if (!strcmp(name, "nvk_dq") && getenv("S2A_TEST_NVK_DQ")) return 1;
+    if (!strcmp(name, "nvk_desc_memo") && getenv("S2A_TEST_DESC_MEMO")) { g_memo_on = 1; return 1; }
+    return dflt;
+}
 void nvn_plat_log(int level, const char *cls, const char *text) { (void)level; printf("[%s] %s\n", cls ? cls : "", text ? text : ""); }
 static int g_tri_origin_ul;   // 1 = 按 NVN 窗口原点在左上画（视口翻转）：期望上下对调。缺省 0 = 原点在左下（Vulkan 的自然方向）
 
@@ -152,6 +160,19 @@ VKAPI_ATTR VkResult VKAPI_CALL vkWaitForFences(VkDevice d, uint32_t n, const VkF
     }
     if (g_bc_early_n > 0 && n == 1) { g_bc_early_n--; g_bc_early_seen++; return VK_TIMEOUT; }   // 提前返回（#697）：不等、立刻报超时
     return real(d, n, f, all, timeout);
+}
+// 呈现「次优」注入（C199）：呈现照常做，结果改报 VK_SUBOPTIMAL_KHR；g_wsi_rotated 让表面的当前方向报成转了 90 度。
+static int g_wsi_subopt, g_wsi_rotated;
+VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(VkQueue q, const VkPresentInfoKHR *pi) {
+    PFN_vkQueuePresentKHR real = (PFN_vkQueuePresentKHR)vkGetDeviceProcAddr(g_dev.device, "vkQueuePresentKHR");
+    VkResult r = real(q, pi);
+    return r == VK_SUCCESS && g_wsi_subopt ? VK_SUBOPTIMAL_KHR : r;
+}
+VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceCapabilitiesKHR(VkPhysicalDevice pd, VkSurfaceKHR sf, VkSurfaceCapabilitiesKHR *caps) {
+    PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR real = (PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR)vkGetInstanceProcAddr(g_dev.instance, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
+    VkResult r = real(pd, sf, caps);
+    if (r == VK_SUCCESS && g_wsi_rotated) caps->currentTransform = VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR;
+    return r;
 }
 VKAPI_ATTR void VKAPI_CALL vkDestroyImageView(VkDevice d, VkImageView view, const VkAllocationCallbacks *a) {
     PFN_vkDestroyImageView real = (PFN_vkDestroyImageView)vkGetDeviceProcAddr(d, "vkDestroyImageView");
@@ -828,6 +849,31 @@ static void c71_present(void) {
     g_shown_n = 0;
     r = nvn_gpu_present(sf, &nd, &pd, 46, on_shown, NULL, &e);
     CHECK(OK(r) && g_shown_n == 1, "C71 重建后 present：%d %s", r.code, e.why);
+
+    // C199：呈现回「次优」但表面的方向和尺寸没变（安卓横屏的常态）→ 不重建，下一帧照常取图；表面真转了 → 30 次以内标过期
+    { uint64_t gen0 = nvn_gpu_surface_gen(sf); int bad = 0;
+      g_wsi_subopt = 1;
+      for (int i = 0; i < 40; i++) {
+          nvn_gpu_drawable q; memset(&q, 0, sizeof q);
+          nvn_gpu_rc ra = nvn_gpu_drawable_acquire(sf, 1000000000ull, NULL, &q, &e);
+          if (!OK(ra)) { bad++; break; }
+          if (!OK(nvn_gpu_present(sf, &q, &pd, 100 + (uint64_t)i, on_shown, NULL, &e))) bad++;
+      }
+      CHECK(!bad && nvn_gpu_surface_gen(sf) == gen0, "C199 表面没变、连着 40 帧「次优」：期望每帧取图和呈现都成、不换代 → 失败 %d 次、代 %llu（原 %llu）：%s", bad, (unsigned long long)nvn_gpu_surface_gen(sf), (unsigned long long)gen0, e.why);
+      g_wsi_rotated = 1;
+      int outdated_at = -1;
+      for (int i = 0; i < 31 && outdated_at < 0; i++) {
+          nvn_gpu_drawable q; memset(&q, 0, sizeof q);
+          nvn_gpu_rc ra = nvn_gpu_drawable_acquire(sf, 1000000000ull, NULL, &q, &e);
+          if (ra.code == NVN_GPU_E_OUTDATED) { outdated_at = i; break; }
+          if (!OK(ra)) break;
+          nvn_gpu_present(sf, &q, &pd, 200 + (uint64_t)i, on_shown, NULL, &e);
+      }
+      CHECK(outdated_at >= 0, "C199 表面转了 90 度：期望 31 帧以内取图报过期（要重建）→ 没报");
+      g_wsi_subopt = g_wsi_rotated = 0;
+      r = nvn_gpu_surface_rebuild(sf, &e);
+      CHECK(OK(r), "C199 rebuild：%d %s", r.code, e.why);
+    }
 
     nvn_gpu_view_release(view); nvn_gpu_tex_release(tex);
     r = nvn_gpu_surface_detach(sf, 5000000000ull, &e);
@@ -2792,6 +2838,40 @@ static void c55_compute(const char *dir) {
     bad = 0;
     for (uint32_t i = 0; i < 64; i++) if (rd[i] != i + 1) bad++;
     CHECK(bad == 0, "C55 间接 dispatch 结果错 %d 项", bad);
+    // #659: GPU writes parameters, then native indirect dispatch consumes them
+    // in the same submission. No CPU read/patch of generated parameters.
+    memset(buf_cpu(buf), 0, sizeof rd);
+    uint32_t zeros[64] = {0};
+    uint32_t stale[4] = {99, 0, 0, 0};
+    nvn_gpu_buf generated = make_buf(sizeof zeros, NVN_GPU_MEM_SHARED, zeros);
+    nvn_gpu_buf gpu_ind = make_buf(sizeof stale, NVN_GPU_MEM_SHARED, stale);
+    nvn_gpu_buf drv = make_buf(sizeof stale, NVN_GPU_MEM_SHARED, stale);
+    nvn_gpu_binding producer = b; producer.u.b.buf = generated;
+    nvn_gpu_cmd c3 = begin_cmd();
+    nvn_gpu_set_pipe(c3, cp);
+    nvn_gpu_bind(c3, NVN_GPU_SH_CS, &producer, 1);
+    nvn_gpu_dispatch(c3, cp, 1, 1, 1, NULL, 0);
+    // Existing comp.comp produces 1..16. Assemble {2,1,1} on GPU at offset 4.
+    nvn_gpu_copy_buf(c3, generated, 4, gpu_ind, 4, 4);
+    nvn_gpu_copy_buf(c3, generated, 0, gpu_ind, 8, 4);
+    nvn_gpu_copy_buf(c3, generated, 0, gpu_ind, 12, 4);
+    // Model DRV0's group-count copy from the exact same authoritative buffer.
+    nvn_gpu_copy_buf(c3, gpu_ind, 4, drv, 4, 12);
+    nvn_gpu_barrier(c3, NVN_BARRIER_ORDER_INDIRECT_DATA_BIT | NVN_BARRIER_INVALIDATE_SHADER_BIT);
+    nvn_gpu_bind(c3, NVN_GPU_SH_CS, &b, 1);
+    nvn_gpu_dispatch(c3, cp, 0, 0, 0, gpu_ind, 4);
+    CHECK(OK(nvn_gpu_cmd_commit(c3, 19, on_done, NULL, &e)), "C55 GPU indirect commit: %d %s", e.rc.code, e.why);
+    CHECK(OK(nvn_gpu_fence_wait(19, 5000000000ull, &e)), "C55 GPU indirect wait: %d %s", e.rc.code, e.why);
+    memcpy(rd, buf_cpu(buf), sizeof rd);
+    bad = 0;
+    for (uint32_t i = 0; i < 64; i++) if (rd[i] != (i < 32 ? i + 1 : 0)) bad++;
+    CHECK(bad == 0, "C55 GPU generated indirect: %d wrong outputs", bad);
+    uint32_t counts[4]; memcpy(counts, buf_cpu(drv), sizeof counts);
+    CHECK(counts[0] == 99 && counts[1] == 2 && counts[2] == 1 && counts[3] == 1,
+          "C55 GPU DRV0 copy: %u %u %u %u", counts[0], counts[1], counts[2], counts[3]);
+    nvn_gpu_buf_release(drv, NULL, NULL);
+    nvn_gpu_buf_release(gpu_ind, NULL, NULL);
+    nvn_gpu_buf_release(generated, NULL, NULL);
     // 0 组 dispatch：空操作，命令缓冲仍应可提交
     nvn_gpu_cmd c4 = begin_cmd();
     nvn_gpu_set_pipe(c4, cp);
@@ -3631,7 +3711,7 @@ static void c66_pool_sets(const char *dir) {
     g_c66_inject_pool_limit = 0;
     nvn_gpu_err e;
     nvn_gpu_rc r = nvn_gpu_cmd_commit(c, 112, on_done, NULL, &e);
-    CHECK(g_c66_rejects == 1 && g_c66_sets_requested == 6, "C66 应被拒 1 次、新池上请求 6 组，实为 被拒 %u 次、%u 组", g_c66_rejects, g_c66_sets_requested);
+    CHECK(g_memo_on || (g_c66_rejects == 1 && g_c66_sets_requested == 6), "C66 应被拒 1 次、新池上请求 6 组，实为 被拒 %u 次、%u 组", g_c66_rejects, g_c66_sets_requested);
     CHECK(OK(r), "C66 commit：%d %s", r.code, e.why);
     r = nvn_gpu_fence_wait(112, 5000000000ull, &e);
     CHECK(OK(r), "C66 wait：%d %s", r.code, e.why);
@@ -4453,14 +4533,14 @@ static void c85_descriptor_reuse(const char *dir) {
         // 内部清除后所有组失效；重新发同绑定也必须重建两组。
         nvn_gpu_clear cl={0}; cl.color=0; cl.color_mask=0xf; cl.stencil_mask=0xff; cl.x=8; cl.w=4; cl.h=4; cl.value.f[1]=1; cl.value.f[3]=1;
         nvn_gpu_clear_rect(c,&cl); nvn_gpu_set_pipe(c,pipe); nvn_gpu_set_dyn(c,&dyn); nvn_gpu_set_vbuf(c,0,vb,0); nvn_gpu_bind(c,NVN_GPU_SH_FS,binds,2);
-        unsigned before=g_desc_sets_total; nvn_gpu_draw(c,&da); CHECK(g_desc_sets_total-before==2,"C85 clear后重建两组");
+        unsigned before=g_desc_sets_total; nvn_gpu_draw(c,&da); CHECK(g_memo_on || g_desc_sets_total-before==2,"C85 clear后重建两组");
         nvn_gpu_set_pipe(c,pipe2); nvn_gpu_bind(c,NVN_GPU_SH_FS,binds,2); da.prim=5; before=g_desc_sets_total; nvn_gpu_draw(c,&da);
         CHECK(g_desc_sets_total-before==2,"C85 layout换后重建两组");
         // 旧 stage 绑定仍保留：无组管线必须忽略它们，回来后重建全部组。
         nvn_gpu_set_pipe(c,no_sets); before=g_desc_sets_total; nvn_gpu_draw(c,&da);
         CHECK(g_desc_sets_total==before,"C85 无组管线不分配");
         nvn_gpu_set_pipe(c,pipe2); before=g_desc_sets_total; nvn_gpu_draw(c,&da);
-        CHECK(g_desc_sets_total-before==2,"C85 有组→无组→有组重建两组");
+        CHECK(g_memo_on || g_desc_sets_total-before==2,"C85 有组→无组→有组重建两组");
         nvn_gpu_pass_end(c); nvn_gpu_copy_tex_buf(c,out,0,0,NULL,rb,0,48,192);
         CHECK(OK(nvn_gpu_cmd_commit(c,130+seg,on_done,NULL,&e)),"C85 commit %s",e.why); CHECK(OK(nvn_gpu_fence_wait(130+seg,5000000000ull,&e)),"C85 wait %s",e.why);
         const uint8_t *px=buf_cpu(rb); int bad=0; for(int y=0;y<4;y++)for(int x=0;x<12;x++){const uint8_t *v=px+(y*12+x)*4;if(v[0]!=(x<8?255:0)||v[1]||v[2]!=(x<8?0:255)||v[3]!=255)bad++;}
@@ -5164,5 +5244,8 @@ int main(int argc, char **argv) {
     printf("nvn_gpu Vulkan 后端 C01–C08/C23/C25/C26/C27–C55/C56–C69/C74–C75 + 清屏/复制/深度/纹理三角形用例：%s（%d 处不符，done %d 次，retired %d 次）\n",
            g_fail ? "红" : "绿", g_fail, atomic_load(&g_ndone), atomic_load(&g_retired));
     s2a_vk_device_destroy(&g_dev, 1);   // 最后一个会话已在 t20 close 里证明空闲
+    { extern uint64_t nvn_vk_dbg_dq_recs(void); uint64_t n = nvn_vk_dbg_dq_recs();
+      if (getenv("S2A_TEST_NVK_DQ")) { CHECK(n > 1000, "两级回放开着跑完整套：期望交给录制线程的调用远多于 1000 条 → %llu 条", (unsigned long long)n); printf("两级回放：交给录制线程 %llu 条调用\n", (unsigned long long)n); }
+      else CHECK(n == 0, "两级回放关着：期望没有调用进队列 → %llu 条", (unsigned long long)n); }
     return g_fail ? 1 : 0;
 }

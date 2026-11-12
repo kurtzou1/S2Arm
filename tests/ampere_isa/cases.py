@@ -99,6 +99,24 @@ for left in (True, False):
                          inp, body, want, '64位整数字段独立期望；零值缺陷/非零正控；默认32位clamp端点另待规格裁决')
 
 
+# ---- #798 Maxwell FMUL / FFMA .FMZ（InstEmitFloatArithmetic EmitFmz，不走 Ampere AFmz）：积里有一个因子是 0，积就是 0（D3D9 规则，Inf / NaN × 0 = 0）----
+#   编码按 Ryujinx 解码器（InstDecoders.cs InstFmulR / InstFfmaR）：FMUL R = 0101110001101…（0x5c68 << 48），Rd 0..8、Ra 8..16、Rb 20..28、守卫 16..19 = PT、
+#   .FMZ = 44..46 取 2、乘数缩放 41..44 = 0（不缩放）；FFMA R = 010110011…（0x5980 << 48），Rc 39..47、.FMZ = 53..55 取 2。期望按规则手算，不跑翻译器
+def maxwell_load(rd, word): return 0x4c40000000000000 | 7 << 48 | 3 << 41 | 3 << 34 | word << 20 | 7 << 16 | 255 << 8 | rd   # LOP.PASS_B Rd, RZ, c[3][4·word]（同上 SHF 例）
+def maxwell_fmul_fmz(rd, ra, rb): return 0x5c68000000000000 | 2 << 44 | rb << 20 | 7 << 16 | ra << 8 | rd
+def maxwell_ffma_fmz(rd, ra, rb, rc): return 0x5980000000000000 | 2 << 53 | rc << 39 | rb << 20 | 7 << 16 | ra << 8 | rd
+INF, NAN = float('inf'), float('nan')
+fm = [(0.0, INF), (INF, 0.0), (NAN, 0.0), (2.0, 3.0)]   # 车道 3 是非零正控
+case('Maxwell FMUL.FMZ（0 × Inf / Inf × 0 / NaN × 0 = 0）', True, [f32(v) for a in fm for v in a],
+     maxwell_shader([maxwell_load(4 + 2 * i, 2 * i) for i in range(4)] + [maxwell_load(5 + 2 * i, 2 * i + 1) for i in range(4)]
+                    + [maxwell_fmul_fmz(i, 4 + 2 * i, 5 + 2 * i) for i in range(4)]),
+     [0, 0, 0, f32(6.0)], 'D3D9 乘零规则（FMZ）：因子有一个是 0 → 积为 +0；车道 3 = 2 × 3')
+ff = [(0.0, INF, 5.0), (INF, 0.0, -1.0), (NAN, 0.0, 2.0), (2.0, 3.0, 1.0)]
+case('Maxwell FFMA.FMZ（0 × Inf + c = c）', True, [f32(v) for a in ff for v in a],
+     maxwell_shader([maxwell_load(4 + 3 * i + k, 3 * i + k) for i in range(4) for k in range(3)]
+                    + [maxwell_ffma_fmz(i, 4 + 3 * i, 5 + 3 * i, 6 + 3 * i) for i in range(4)]),
+     [f32(5.0), f32(-1.0), f32(2.0), f32(7.0)], 'FMZ：积为 0 → 结果 = 加数 c；车道 3 = 2 × 3 + 1')
+
 # ---- BMSK / UBMSK（0x01b / 0x09b；位置 A、宽度第二源、.W = 75）：PTX bmsk —— .wrap 两者取模 32，.clamp 两者封顶 32；宽 0 → 0；超出 31 位的截掉 ----
 def bmsk(pos, width, wrap):
     if wrap: pos &= 31; width &= 31

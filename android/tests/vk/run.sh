@@ -137,6 +137,34 @@ if [ "$bad" -ne 0 ]; then
     exit 1
 fi
 
+# 同一套用例在「两级回放开」（vkCmd* 调用交给录制线程）下再跑一遍：像素期望和校验层判据不变。
+set +e
+S2A_TEST_NVK_DQ=1 timeout 240 "$out/t_backend_vk" "$out/shaders" 2>&1 | tee "$out/log_dq"
+rc=${PIPESTATUS[0]}
+set -e
+if [ "$rc" -ne 0 ]; then
+    echo "【红】两级回放开着的那一遍用例失败（rc=${rc}）" >&2
+    exit 1
+fi
+bad=$(grep -cE "Validation Error|VUID-" "$out/log_dq" || true)
+if [ "$bad" -ne 0 ] || ! grep -q "两级回放：交给录制线程" "$out/log_dq"; then
+    echo "【红】两级回放开着的那一遍：validation 报错 $bad 条，或没有调用进队列：" >&2
+    grep -E "Validation Error|VUID-" "$out/log_dq" | head -20 >&2
+    exit 1
+fi
+
+# 描述符组备忘开着（开关 nvk_desc_memo）再跑一遍：像素期望不变、校验层 0 条。
+set +e
+S2A_TEST_DESC_MEMO=1 timeout 240 "$out/t_backend_vk" "$out/shaders" 2>&1 | tee "$out/log_memo"
+rc=${PIPESTATUS[0]}
+set -e
+bad=$(grep -cE "Validation Error|VUID-" "$out/log_memo" || true)
+if [ "$rc" -ne 0 ] || [ "$bad" -ne 0 ]; then
+    echo "【红】描述符组备忘开着的那一遍：rc=${rc}，validation 报错 $bad 条" >&2
+    grep -E "Validation Error|VUID-" "$out/log_memo" | head -20 >&2
+    exit 1
+fi
+
 # BC1–BC7 compute 解码逐像素用例（#1199）：16 格式 × 2 尺寸 + 反证；同一 validation 环境。
 # S2A_BCDEC_HOST_TEST 使 S2A_VK_BC_DECODE=force 在主机用例里生效（等同 debug 构建门）。
 cc "${cflags[@]}" -DS2A_BCDEC_HOST_TEST "${inc[@]}" "${bc_src[@]}" -lvulkan -lpthread -lm -o "$out/t_bc_decode"

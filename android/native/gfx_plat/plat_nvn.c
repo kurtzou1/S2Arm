@@ -16,6 +16,9 @@ const char *nvk_session_cache_dir(void);
 void nvn_plat_log(int level, const char *cls, const char *text) {
     int prio = level == NVN_PLAT_LOG_RED ? ANDROID_LOG_ERROR : level == NVN_PLAT_LOG_WARN ? ANDROID_LOG_WARN : ANDROID_LOG_INFO;
     __android_log_print(prio, "S2Arm", "%snvk %s: %s", level == NVN_PLAT_LOG_RED ? "【红】" : "", cls ? cls : "", text ? text : "");
+    // 调试入口开着时同一行也写进本局的宿主日志文件（标准错误已接到 host-*.log）。系统日志在真机上会整段丢掉某个进程的行
+    // （一晚上遇到五次「游戏在跑、logcat 里这个进程 0 行」，宿主日志文件完好），读数不能只押在它上面。
+    if (s2a_debug_entries_open()) fprintf(stderr, "[s2a] %snvk %s: %s\n", level == NVN_PLAT_LOG_RED ? "【红】" : "", cls ? cls : "", text ? text : "");
 }
 
 int nvn_plat_flag(const char *name, int dflt) {

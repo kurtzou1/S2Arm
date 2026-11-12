@@ -1,0 +1,148 @@
+diff --git a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitFloatArithmetic.cs b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitFloatArithmetic.cs
+index 7d974a37072c988cbcb4ad02479b444b44e6db87..443e07315b0b2effdf36462cce38bd256c91cf3c 100644
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitFloatArithmetic.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitFloatArithmetic.cs
+@@ -161,7 +161,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             Operand srcB = GetSrcReg(context, op.SrcB);
+             Operand srcC = GetSrcReg(context, op.SrcC);
+ 
+-            EmitFfma(context, Instruction.FP32, srcA, srcB, srcC, op.Dest, op.NegA, op.NegC, op.Sat, op.WriteCC);
++            EmitFfma(context, Instruction.FP32, srcA, srcB, srcC, op.Dest, op.NegA, op.NegC, op.Sat, op.WriteCC, op.Fmz);
+         }
+ 
+         public static void FfmaI(EmitterContext context)
+@@ -172,7 +172,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             Operand srcB = GetSrcImm(context, Imm20ToFloat(op.Imm20));
+             Operand srcC = GetSrcReg(context, op.SrcC);
+ 
+-            EmitFfma(context, Instruction.FP32, srcA, srcB, srcC, op.Dest, op.NegA, op.NegC, op.Sat, op.WriteCC);
++            EmitFfma(context, Instruction.FP32, srcA, srcB, srcC, op.Dest, op.NegA, op.NegC, op.Sat, op.WriteCC, op.Fmz);
+         }
+ 
+         public static void FfmaC(EmitterContext context)
+@@ -183,7 +183,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             Operand srcB = GetSrcCbuf(context, op.CbufSlot, op.CbufOffset);
+             Operand srcC = GetSrcReg(context, op.SrcC);
+ 
+-            EmitFfma(context, Instruction.FP32, srcA, srcB, srcC, op.Dest, op.NegA, op.NegC, op.Sat, op.WriteCC);
++            EmitFfma(context, Instruction.FP32, srcA, srcB, srcC, op.Dest, op.NegA, op.NegC, op.Sat, op.WriteCC, op.Fmz);
+         }
+ 
+         public static void FfmaRc(EmitterContext context)
+@@ -194,7 +194,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             Operand srcB = GetSrcReg(context, op.SrcC);
+             Operand srcC = GetSrcCbuf(context, op.CbufSlot, op.CbufOffset);
+ 
+-            EmitFfma(context, Instruction.FP32, srcA, srcB, srcC, op.Dest, op.NegA, op.NegC, op.Sat, op.WriteCC);
++            EmitFfma(context, Instruction.FP32, srcA, srcB, srcC, op.Dest, op.NegA, op.NegC, op.Sat, op.WriteCC, op.Fmz);
+         }
+ 
+         public static void Ffma32i(EmitterContext context)
+@@ -205,7 +205,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             Operand srcB = GetSrcImm(context, op.Imm32);
+             Operand srcC = GetSrcReg(context, op.Dest);
+ 
+-            EmitFfma(context, Instruction.FP32, srcA, srcB, srcC, op.Dest, op.NegA, op.NegC, op.Sat, op.WriteCC);
++            EmitFfma(context, Instruction.FP32, srcA, srcB, srcC, op.Dest, op.NegA, op.NegC, op.Sat, op.WriteCC, op.Fmz);
+         }
+ 
+         public static void FmulR(EmitterContext context)
+@@ -215,7 +215,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             Operand srcA = GetSrcReg(context, op.SrcA);
+             Operand srcB = GetSrcReg(context, op.SrcB);
+ 
+-            EmitFmul(context, Instruction.FP32, op.Scale, srcA, srcB, op.Dest, op.NegA, op.Sat, op.WriteCC);
++            EmitFmul(context, Instruction.FP32, op.Scale, srcA, srcB, op.Dest, op.NegA, op.Sat, op.WriteCC, op.Fmz);
+         }
+ 
+         public static void FmulI(EmitterContext context)
+@@ -225,7 +225,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             Operand srcA = GetSrcReg(context, op.SrcA);
+             Operand srcB = GetSrcImm(context, Imm20ToFloat(op.Imm20));
+ 
+-            EmitFmul(context, Instruction.FP32, op.Scale, srcA, srcB, op.Dest, op.NegA, op.Sat, op.WriteCC);
++            EmitFmul(context, Instruction.FP32, op.Scale, srcA, srcB, op.Dest, op.NegA, op.Sat, op.WriteCC, op.Fmz);
+         }
+ 
+         public static void FmulC(EmitterContext context)
+@@ -235,7 +235,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             Operand srcA = GetSrcReg(context, op.SrcA);
+             Operand srcB = GetSrcCbuf(context, op.CbufSlot, op.CbufOffset);
+ 
+-            EmitFmul(context, Instruction.FP32, op.Scale, srcA, srcB, op.Dest, op.NegA, op.Sat, op.WriteCC);
++            EmitFmul(context, Instruction.FP32, op.Scale, srcA, srcB, op.Dest, op.NegA, op.Sat, op.WriteCC, op.Fmz);
+         }
+ 
+         public static void Fmul32i(EmitterContext context)
+@@ -245,7 +245,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             Operand srcA = GetSrcReg(context, op.SrcA);
+             Operand srcB = GetSrcImm(context, op.Imm32);
+ 
+-            EmitFmul(context, Instruction.FP32, MultiplyScale.NoScale, srcA, srcB, op.Dest, false, op.Sat, op.WriteCC);
++            EmitFmul(context, Instruction.FP32, MultiplyScale.NoScale, srcA, srcB, op.Dest, false, op.Sat, op.WriteCC, op.Fmz);
+         }
+ 
+         public static void Hadd2R(EmitterContext context)
+@@ -418,20 +418,36 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             bool negateB,
+             bool negateC,
+             bool saturate,
+-            bool writeCC)
++            bool writeCC,
++            Fmz fmz = 0)
+         {
+             bool isFP64 = fpType == Instruction.FP64;
+ 
+             srcB = context.FPNegate(srcB, negateB, fpType);
+             srcC = context.FPNegate(srcC, negateC, fpType);
+ 
+-            Operand res = context.FPSaturate(context.FPFusedMultiplyAdd(srcA, srcB, srcC, fpType), saturate, fpType);
++            Operand res = context.FPSaturate(EmitFmz(context, fmz, srcA, srcB, context.FPFusedMultiplyAdd(srcA, srcB, srcC, fpType), srcC), saturate, fpType);
+ 
+             SetDest(context, res, rd, isFP64);
+ 
+             SetFPZnFlags(context, res, writeCC, fpType);
+         }
+ 
++        // S2Arm: .FMZ (FMUL bits 44-45 / FMUL32I and FFMA bits 53-54 = 2): a product with a zero factor is zero whatever the other factor
++        //   (Direct3D 9's rule: Inf or NaN times 0 is 0, not NaN). Maxwell honours it; ignoring it turns 0 * Inf into NaN, which then smears through
++        //   blur passes (#798: one-pixel horizontal red / green streaks). Same rule as the Ampere path (InstEmitAmpereAlu AFmz). FP32 only
++        private static Operand EmitFmz(EmitterContext context, Fmz fmz, Operand a, Operand b, Operand res, Operand zeroProduct)
++        {
++            if (fmz != Fmz.Fmz)
++            {
++                return res;
++            }
++
++            Operand zero = context.BitwiseOr(context.FPCompareEqual(a, ConstF(0)), context.FPCompareEqual(b, ConstF(0)));
++
++            return context.ConditionalSelect(zero, zeroProduct, res);
++        }
++
+         private static void EmitFmul(
+             EmitterContext context,
+             Instruction fpType,
+@@ -441,11 +457,13 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             int rd,
+             bool negateB,
+             bool saturate,
+-            bool writeCC)
++            bool writeCC,
++            Fmz fmz = 0)
+         {
+             bool isFP64 = fpType == Instruction.FP64;
+ 
+             srcB = context.FPNegate(srcB, negateB, fpType);
++            Operand factorA = srcA;
+ 
+             if (scale != MultiplyScale.NoScale)
+             {
+@@ -473,7 +491,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
+                 srcA = context.FPMultiply(srcA, scaleConst, fpType);
+             }
+ 
+-            Operand res = context.FPSaturate(context.FPMultiply(srcA, srcB, fpType), saturate, fpType);
++            Operand res = context.FPSaturate(EmitFmz(context, fmz, factorA, srcB, context.FPMultiply(srcA, srcB, fpType), ConstF(0)), saturate, fpType);
+ 
+             SetDest(context, res, rd, isFP64);
+ 

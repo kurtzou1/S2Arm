@@ -17,7 +17,7 @@
 
 extern void *h_nvnBootstrapLoader(const char *name);
 extern int mtl_last_commit_error(void);
-extern uint64_t s2a_hle_cmdshadow_live(void);
+extern uint64_t s2a_hle_cmdshadow_live(void), s2a_hle_cmdshadow_live_bytes(void), s2a_hle_cmdshadow_shared(void);
 static const char *phase = "准备";
 static unsigned checks;
 #define CHECK(expr) do { checks++; if (!(expr)) { \
@@ -210,7 +210,7 @@ static void release(void) {
     memset(datamem, 0, 4096); run(hz); CHECK(slot_is(2, 520)); CHECK(slot_is(3, 530));
     NVNcommandBuffer u; new_cmd(&u, R + 175, 8);
     API(nvnCommandBufferBeginRecording)(&u); CHECK(API(nvnCommandBufferEndRecording)(&u) != 0);
-    CHECK(s2a_hle_cmdshadow_live() == live0 + 4);   // b 释放、空录制 +1
+    CHECK(s2a_hle_cmdshadow_live() == live0 + 3);   // b 释放；空录制共用一份常驻 END，不算活录制（#783）
     // 另一个内存池里的录制：池销毁即释放
     NVNmemoryPool p2; uint8_t *m2; new_pool(&p2, &m2, 65536);
     NVNcommandBuffer w; memset(&w, 0, sizeof w); CHECK(API(nvnCommandBufferInitialize)(&w, &device));
@@ -225,6 +225,32 @@ static void release(void) {
 }
 
 // ⑥ CopyCommands 复制记录：之后源内存被游戏重用（重录 + 清零），副本照样回放拷贝时的内容；目标已用 = 源已用（END 不拷、目标自己的 END 补上）
+// ⑫ 不占命令内存、只含池绑定 / END 的录制按内容共用（#783：某款每帧约 10 个这种录制，各挂 1 字节锚点、落在游戏从不写的段尾，永远不释放）。
+//   期望按规则手写：连录 1000 个空录制 → 活录制数与宿主字节都不变、共用 +1000、句柄全相同；回放空表什么都不做，别的录制 CALL 它照常往下跑；
+//   只绑池、不占命令内存的录制（没给内存也没回调的宿主借窗口里录）：同内容同句柄、不同内容不同句柄，连录 500 轮活录制数不变、共用 +1000
+static void interned(void) {
+    phase = "⑫ 不占命令内存的录制按内容共用";
+    NVNcommandBuffer x; new_cmd(&x, 0xC0000, 0x10000);   // 前面各组没用过的一段：空录制的设备字节不盖到别的录制
+    uint64_t n0 = s2a_hle_cmdshadow_live(), b0 = s2a_hle_cmdshadow_live_bytes(), e0 = s2a_hle_cmdshadow_shared();
+    NVNcommandHandle first = 0; int same = 1;
+    for (int i = 0; i < 1000; i++) { API(nvnCommandBufferBeginRecording)(&x); NVNcommandHandle h = API(nvnCommandBufferEndRecording)(&x); if (!first) first = h; same &= h == first; }
+    CHECK(first && same && s2a_hle_cmdshadow_live() == n0 && s2a_hle_cmdshadow_live_bytes() == b0 && s2a_hle_cmdshadow_shared() == e0 + 1000);
+    memset(datamem, 0, 4096); run(first); CHECK(!slot_is(30, 900));
+    API(nvnCommandBufferBeginRecording)(&x); API(nvnCommandBufferCallCommands)(&x, 1, &first); ub(&x, 30, 900); NVNcommandHandle c = API(nvnCommandBufferEndRecording)(&x);
+    memset(datamem, 0, 4096); run(c); CHECK(slot_is(30, 900));
+    NVNtexturePool tp1, tp2; memset(&tp1, 0, sizeof tp1); memset(&tp2, 0, sizeof tp2);
+    NVNcommandBuffer y; new_cmd(&y, 0, 0);
+    uint64_t n1 = s2a_hle_cmdshadow_live(), e1 = s2a_hle_cmdshadow_shared();
+    NVNcommandHandle p1 = 0, p2 = 0; int same1 = 1, same2 = 1;
+    for (int i = 0; i < 500; i++) {
+        API(nvnCommandBufferBeginRecording)(&y); API(nvnCommandBufferSetTexturePool)(&y, &tp1); NVNcommandHandle a1 = API(nvnCommandBufferEndRecording)(&y);
+        API(nvnCommandBufferBeginRecording)(&y); API(nvnCommandBufferSetTexturePool)(&y, &tp2); NVNcommandHandle a2 = API(nvnCommandBufferEndRecording)(&y);
+        if (!p1) { p1 = a1; p2 = a2; } same1 &= a1 == p1; same2 &= a2 == p2;
+    }
+    CHECK(p1 && p2 && p1 != p2 && same1 && same2 && s2a_hle_cmdshadow_live() == n1 && s2a_hle_cmdshadow_shared() == e1 + 1000);
+    API(nvnCommandBufferFinalize)(&x); API(nvnCommandBufferFinalize)(&y);
+    printf("%s：通过\n", phase); fflush(stdout);
+}
 static void copy_then_reuse(void) {
     phase = "⑥ 复制后源内存被重用不影响副本";
     const size_t R2 = 0x60000;
@@ -274,7 +300,7 @@ static void spanning(void) {
     // 只写第 3 段（0x71000 + 64 × 2 起）的一字节范围：跨段的录制 h 释放
     NVNcommandBuffer o; new_cmd(&o, 0x71000 + 64 * 2 + 16, 64);
     API(nvnCommandBufferBeginRecording)(&o); CHECK(API(nvnCommandBufferEndRecording)(&o) != 0);
-    CHECK(s2a_hle_cmdshadow_live() == live0 + 2);   // h 释放、空录制 +1
+    CHECK(s2a_hle_cmdshadow_live() == live0 + 1);   // h 释放；空录制共用常驻 END，不算活录制（#783）
     API(nvnCommandBufferFinalize)(&c); API(nvnCommandBufferFinalize)(&b); API(nvnCommandBufferFinalize)(&o);
     printf("%s：通过\n", phase); fflush(stdout);
 }
@@ -378,7 +404,7 @@ int main(int argc, char **argv) {
     NVNqueueBuilder qb = {{0}}; API(nvnQueueBuilderSetDefaults)(&qb); API(nvnQueueBuilderSetDevice)(&qb, &device); CHECK(API(nvnQueueInitialize)(&queue, &qb));
     new_pool(&cmdpool, &cmdmem, CMD_BYTES); new_pool(&datapool, &datamem, DATA_BYTES);
     data_ga = API(nvnMemoryPoolGetBufferAddress)(&datapool);
-    guest_untouched(); used_by_device(); callback_timing(); totk_slots(); release(); copy_then_reuse(); spanning(); lm3_patch(); pool_binds_no_cmd_memory(); replayable(argv[0]);
+    guest_untouched(); used_by_device(); callback_timing(); totk_slots(); release(); copy_then_reuse(); spanning(); lm3_patch(); pool_binds_no_cmd_memory(); interned(); replayable(argv[0]);
     API(nvnQueueFinish)(&queue);
     API(nvnMemoryPoolFinalize)(&cmdpool); API(nvnMemoryPoolFinalize)(&datapool); API(nvnQueueFinalize)(&queue); API(nvnDeviceFinalize)(&device);
     printf("✓ t_nvn_cmdshadow：%u 条断言（10 组：游戏内存不动、设备口径已用、回调时机、王国之泪排槽、覆盖释放、复制后重用、跨段跨块、录后改写句柄、池绑定不占命令内存、回放放回影子块）\n", checks);

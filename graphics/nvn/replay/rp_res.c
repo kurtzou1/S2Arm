@@ -19,7 +19,10 @@ struct rp_tex {
     uint8_t gpu_written;       // 内容以 GPU 为准
     uint8_t uploaded;
     uint8_t need_init;         // 刚建的存储，初始内容还没定（init_content）
+    uint8_t zero_pending;      // 初始内容该是全零、还没填：等第一个通道用清零载入做掉（rp_view_for_attach / rp_tex_take_zero）
     uint8_t in_alias;
+    uint64_t seen;             // 共用表里的：最近一次被查到 / 新建时的提交号 + 1（alias_take_over 用）
+    uint64_t wrote;            // 最近一次被 GPU 写时的提交号 + 1（0 = 没写过）
     uint64_t stamp;            // 最近一次上传取的脏页代号
     uint64_t up_sub;           // 最近一次上传所在的提交序号
     const uint8_t *mem; uint64_t size;
@@ -42,7 +45,7 @@ static nvn_hmap g_alias = {.klen = sizeof(alias_key)};      // 键 → struct rp
 static nvn_hmap g_cpu_ser = {.klen = 8};                    // 游戏用 WriteTexels 写过的序号（可能早于首次使用）
 static nvn_hmap g_pool_gpu = {.klen = 8};                   // GPU 写过的内存池
 static uint64_t g_ser_gen = 1;                              // 任何「序号 → 存储」映射变了就 +1：各贴图号缓存的视图据此重验
-static int g_built; static uint64_t g_uploads;
+static int g_built; static uint64_t g_uploads, g_alias_taken, g_alias_dead;   // g_alias_taken：被新贴图占了存储而出表的共用存储数；g_alias_dead：其中还有对象指着的
 
 // 声明类型的零贴图与默认视图：会话内共用，不参与视图环淘汰。
 static struct { nvn_gpu_tex tex; nvn_gpu_view view; } g_zero[NVN_TEXTURE_TARGET_BUFFER + 1][4];
@@ -114,13 +117,20 @@ void rp_tex_mark_gpu_written(const tex_t *t) {
     if (!t || !t->serial) return;
     pthread_mutex_lock(&g_rmu);
     struct rp_tex *x = nvn_hm_get(&g_by_serial, &t->serial);
-    if (x) { x->gpu_written = 1; x->cpu = 0; }
+    if (x) { x->gpu_written = 1; x->cpu = 0; x->wrote = rp_sub_serial() + 1; }
     pthread_mutex_unlock(&g_rmu);
 }
 
 static int fmt_compressed(int f) { nvn_fmt_info i; return nvn_fmt_info_of((uint32_t)f, &i) && (i.bw > 1 || i.bh > 1); }
 static int fmt_depth(int f) { nvn_fmt_info i; return nvn_fmt_info_of((uint32_t)f, &i) && (i.depth || i.stencil); }
-static int mem_any(const uint8_t *p, uint64_t n) { for (uint64_t i = 0; i < n; i++) if (p[i]) return 1; return 0; }
+static uint64_t res_now(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec; }
+// 有没有非零字节。按 8 字节一比：新建的渲染目标每张都要扫一遍自己的存储（常是几兆全 0），逐字节扫在真机上是每帧毫秒级。
+static int mem_any(const uint8_t *p, uint64_t n) {
+    uint64_t i = 0;
+    for (; i + 8 <= n; i += 8) { uint64_t v; memcpy(&v, p + i, 8); if (v) return 1; }
+    for (; i < n; i++) if (p[i]) return 1;
+    return 0;
+}
 
 // LINEAR 贴图（CPU 写入的字体 / UI 图集；iOS 同名语义见 nvn_mtl.m tex_linear @3756 / tex_linear_needs_upload @3777）。
 // 返回 0 = 不是线性族；1 = 第一批准入（走 CPU 内容路径）；-1 = 线性族但第一批不收（*why 是未接名，调用方记账）。
@@ -217,6 +227,13 @@ static int init_from_storage(const tex_t *t) {
     if (no_cpu && fmt_nonfinite(t)) return 0;   // 游戏写不了这种池：里面的 Inf / NaN 是别人留下的，不是数据
     return 1;
 }
+static _Thread_local int g_attach_intent;   // 正在给颜色附件取视图（rp_view_for_attach）
+// 填零能不能交给第一个通道的清零载入：zero_fill 会填的格式里，只有一级一层的二维图（一个附件视图盖住整张图）
+static int zero_deferrable(const tex_t *t) {
+    int bw = 1, bh = 1; int bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
+    if (!bpb || bw != 1 || bh != 1 || fmt_depth(t->d.format) || t->d.samples > 1) return 0;
+    return t->d.target == NVN_TEXTURE_TARGET_2D && t->d.levels <= 1 && t->L.layers <= 1;
+}
 static void zero_fill(const tex_t *t, struct rp_tex *x, nvn_gpu_cmd c) {
     int bw = 1, bh = 1; int bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     if (!bpb || bw != 1 || bh != 1 || fmt_depth(t->d.format) || t->d.samples > 1 || t->d.target == NVN_TEXTURE_TARGET_BUFFER) return;   // 压缩 / 深度模板 / 多重采样的不清（同 iOS）
@@ -252,37 +269,109 @@ static void tex_unref(struct rp_tex *x) {
     nvn_gpu_tex_release(x->g); g_built--; free(x);
 }
 
+// 新的共用存储占了同一段池内存时，放掉被它盖住的旧条目。照 iOS nvn_mtl.m 的 alias_take_over，两条规则：
+//   ① 没有贴图对象指着（users == 0）：同池、存储区间重叠、描述不同、闲置满 ALIAS_IDLE 次提交 → 放。在 NVN 上那段内存现在归新贴图，
+//      旧的那张只是没人再能叫到的一份拷贝。闲置窗口保住「每帧 Finalize 再按同描述重建」的瞬态目标（靠同描述再查到同一份）。
+//   ② 还有对象指着：它自己最近 ALIAS_IDLE 次提交里没被 GPU 写过，并且在它最后一次被用 / 被写之后，另一张与它存储重叠的贴图被 GPU 写了
+//      → 也放（Switch 上几张贴图建在同一段内存就共用那些字节，别的贴图写过去，它的内容就没了）。对象下次再用时按新存储重建，
+//      初始内容照新建存储的规矩取。
+// 不搬的后果（真机，一款带动态分辨率的 3D 游戏）：十来个渲染目标在同一批偏移上每帧换一个宽高（1617x910、1604x902、1607x904…），
+// 每个宽高是一个并存的贴图对象、表里一个新条目，只进不出——标题画面一分钟后端贴图 297 → 2299 张、显存 8.7 GB，手机内存吃光、游戏被杀。
+// iOS 的同类事故：一款游戏的阴影图几乎每帧换尺寸，同一偏移 429 张深度贴图。持 g_rmu。
+enum { ALIAS_IDLE = 16 };
+static void vf_drop_of(const struct rp_tex *x);   // 按目标取视图的表里指着这份存储的项（定义在那张表后面）
+static int alias_overwritten(const alias_key *a, const struct rp_tex *self, uint64_t since) {   // 与 a 存储重叠的别的条目里，有没有在 since 之后被 GPU 写过的
+    const int64_t lo = a->off, hi = a->off + (int64_t)self->size;
+    for (uint32_t i = 0; i < g_alias.cap; i++) {
+        const struct rp_tex *y = g_alias.vals[i];
+        if (!y || y == self) continue;
+        alias_key k; memcpy(&k, g_alias.keys + (size_t)i * g_alias.klen, sizeof k);
+        if (k.pool != a->pool || k.off >= hi || k.off + (int64_t)y->size <= lo) continue;
+        if (y->wrote > since) return 1;
+    }
+    return 0;
+}
+static void alias_take_over(const alias_key *nk, uint64_t nsize) {
+    if (!nsize) return;
+    const int64_t lo = nk->off, hi = nk->off + (int64_t)nsize;
+    const uint64_t now = rp_sub_serial() + 1;
+    for (int again = 1; again;) {
+        again = 0;
+        for (uint32_t i = 0; i < g_alias.cap; i++) {
+            struct rp_tex *x = g_alias.vals[i];
+            if (!x) continue;
+            alias_key k; memcpy(&k, g_alias.keys + (size_t)i * g_alias.klen, sizeof k);
+            if (k.pool != nk->pool || !memcmp(&k, nk, sizeof k) || k.off >= hi || k.off + (int64_t)x->size <= lo) continue;
+            if (x->seen && now - x->seen < ALIAS_IDLE) continue;
+            if (x->users > 0) {   // ②
+                const uint64_t last = x->seen > x->wrote ? x->seen : x->wrote;
+                if ((x->wrote && now - x->wrote < ALIAS_IDLE) || !alias_overwritten(&k, x, last)) continue;
+                for (int more = 1; more;) {   // 指着它的序号都出表：对象下次用到时重建
+                    more = 0;
+                    for (uint32_t q = 0; q < g_by_serial.cap; q++) if (g_by_serial.vals[q] == x) {
+                        uint64_t sk; memcpy(&sk, g_by_serial.keys + (size_t)q * g_by_serial.klen, sizeof sk);
+                        nvn_hm_del(&g_by_serial, &sk); nvn_hm_del(&g_cpu_ser, &sk); more = 1; break; }
+                }
+                x->users = 0; g_alias_dead++;
+            }
+            nvn_hm_del(&g_alias, &k);   // 删除会挪动别的格：从头再扫
+            vf_drop_of(x);
+            for (int r = 0; r < g_ntreg; r++) if (g_treg[r].of == x) treg_drop_view(&g_treg[r]);
+            nvn_gpu_tex_release(x->g); g_built--; free(x); g_ser_gen++; g_alias_taken++;
+            again = 1; break;
+        }
+    }
+}
+
 nvn_gpu_tex rp_tex_resolve(const tex_t *t, nvn_gpu_cmd c) {
     if (!t || !t->serial) return NULL;
+    uint64_t r0_ = res_now();
     pthread_mutex_lock(&g_rmu);
+    uint64_t r1_ = res_now(); rp_perf_add(RP_PERF_RES_LOCK, r1_ - r0_);
     struct rp_tex *x = nvn_hm_get(&g_by_serial, &t->serial);
     if (!x) {
+        rp_perf_add(RP_PERF_RES_NEW, 1);
         int cpu = cpu_content(t);
         alias_key k; alias_key_of(&k, t);
-        if (!cpu && t->pool) x = nvn_hm_get(&g_alias, &k);   // 同存储同描述的另一个对象已经建过：共用
+        if (!cpu && t->pool) { x = nvn_hm_get(&g_alias, &k); if (x) x->seen = rp_sub_serial() + 1; }   // 同存储同描述的另一个对象已经建过：共用
         if (!x) {
             nvn_gpu_tex_desc d = {0}; d.d = t->d; d.usage = usage_of(t, cpu); d.swz = t->set_swz && t->swz != SWZ_IDENTITY ? t->swz : 0; d.stencil_view = t->stencil;
             nvn_gpu_tex g = NULL; nvn_gpu_err err = {0};
-            if (!nvn_gpu_ok(nvn_gpu_tex_create(&d, &g, &err))) {
+            uint64_t mk0_ = res_now(); nvn_gpu_rc mkr_ = nvn_gpu_tex_create(&d, &g, &err); rp_perf_add(RP_PERF_RES_MAKE, res_now() - mk0_);
+            if (!nvn_gpu_ok(mkr_)) {
                 pthread_mutex_unlock(&g_rmu);
                 char name[48]; snprintf(name, sizeof name, "tex_create_fmt_%#x_target_%d", (unsigned)t->d.format, t->d.target); if (nvn_unimpl("gpu", name, t) == 1) nvn_plat_log(NVN_PLAT_LOG_RED, "gpu", err.why);   // 首次：带上后端给的原因
                 return NULL;
             }
             x = calloc(1, sizeof *x); x->g = g; x->cpu = (uint8_t)cpu; x->mem = t->mem; x->size = t->L.size; x->need_init = 1; g_built++;
-            if (!cpu && t->pool) { nvn_hm_put(&g_alias, &k, x); x->in_alias = 1; }
+            if (!cpu && t->pool) { alias_take_over(&k, t->L.size); nvn_hm_put(&g_alias, &k, x); x->in_alias = 1; x->seen = rp_sub_serial() + 1; }
         }
         x->users++;
         nvn_hm_put(&g_by_serial, &t->serial, x); g_ser_gen++;
     }
     if (x->need_init && c) {   // 刚建的存储：CPU 贴图走下面的上传；其余的取一次存储里现有的内容，取不了的清零
         x->need_init = 0;
-        if (!x->cpu && !x->gpu_written) { nvn_gpu_cmd xc = rp_xfer_cmd(&x->up_sub); if (xc && (!init_from_storage(t) || upload_all(t, x, xc, 0))) zero_fill(t, x, xc); }
+        if (!x->cpu && !x->gpu_written) {
+            nvn_gpu_cmd xc = rp_xfer_cmd(&x->up_sub);
+            if (xc) {   // 三段分别计时：扫存储定来源 / 整张上传 / 整张填零
+                uint64_t i0_ = res_now(); int from = init_from_storage(t); uint64_t i1_ = res_now(); rp_perf_add(RP_PERF_RES_SCAN, i1_ - i0_);
+                int zero = !from;
+                if (from) { zero = upload_all(t, x, xc, 0); uint64_t i2_ = res_now(); rp_perf_add(RP_PERF_RES_UP, i2_ - i1_); rp_perf_add(RP_PERF_RES_UPN, 1); i1_ = i2_; }
+                if (zero && g_attach_intent && zero_deferrable(t)) { x->zero_pending = 1; rp_perf_add(RP_PERF_RES_ZDEFER, 1); }
+                else if (zero) { zero_fill(t, x, xc); rp_perf_add(RP_PERF_RES_ZERO, res_now() - i1_); rp_perf_add(RP_PERF_RES_ZERON, 1); }
+            }
+        }
+    }
+    if (x->zero_pending && !g_attach_intent && c) {   // 待清零没被通道取走（开通道失败），现在有别的用途要它：照旧填零
+        nvn_gpu_cmd xc = rp_xfer_cmd(&x->up_sub);
+        if (xc) { x->zero_pending = 0; if (!x->gpu_written) { zero_fill(t, x, xc); rp_perf_add(RP_PERF_RES_ZERON, 1); } }
     }
     if (x->cpu && !x->gpu_written && c && t->mem && (!x->uploaded || nvn_dirty_since(t->mem, t->L.size, x->stamp))) {
         nvn_gpu_cmd xc = rp_xfer_cmd(&x->up_sub);   // 上传是传输：录进前置段（本次提交里第二次上传才回主段）
         if (xc) upload_all(t, x, xc, 1);
     }
     nvn_gpu_tex g = x->g;
+    rp_perf_add(RP_PERF_RES_INIT, res_now() - r1_);   // 持锁做的全部事（查表 / 新建 / 初始化 / 上传）
     pthread_mutex_unlock(&g_rmu);
     return g;
 }
@@ -315,8 +404,19 @@ void rp_view_pin_end(void) {
     }
     pthread_mutex_unlock(&g_rmu);
 }
+static void vf_drop_of(const struct rp_tex *x) { for (int i = 0; i < VF_N; i++) if (g_vf[i].view && g_vf[i].of == x) { nvn_gpu_view_release(g_vf[i].view); memset(&g_vf[i], 0, sizeof g_vf[i]); } }   // 持 g_rmu
 static void vf_drop_serial(uint64_t serial) {   // 持 g_rmu
     for (int i = 0; i < VF_N; i++) if (g_vf[i].view && (!serial || g_vf[i].serial == serial)) { nvn_gpu_view_release(g_vf[i].view); memset(&g_vf[i], 0, sizeof g_vf[i]); }
+}
+nvn_gpu_view rp_view_for_attach(const tex_t *t, const view_t *v, nvn_gpu_cmd c) { g_attach_intent = 1; nvn_gpu_view o = rp_view_for(t, v, c); g_attach_intent = 0; return o; }
+int rp_tex_take_zero(const tex_t *t) {
+    if (!t || !t->serial) return 0;
+    pthread_mutex_lock(&g_rmu);
+    struct rp_tex *x = nvn_hm_get(&g_by_serial, &t->serial);
+    int r = x && x->zero_pending;
+    if (r) x->zero_pending = 0;
+    pthread_mutex_unlock(&g_rmu);
+    return r;
 }
 nvn_gpu_view rp_view_for(const tex_t *t, const view_t *v, nvn_gpu_cmd c) {
     nvn_gpu_tex g = rp_tex_resolve(t, c);
@@ -348,6 +448,7 @@ nvn_gpu_view rp_view_for(const tex_t *t, const view_t *v, nvn_gpu_cmd c) {
         } else {
         if (g_vf[slot].view) nvn_gpu_view_release(g_vf[slot].view);
         memset(&g_vf[slot], 0, sizeof g_vf[slot]);
+        rp_perf_add(RP_PERF_RES_VIEWMAKE, 1);
         if (nvn_gpu_ok(nvn_gpu_view_create(x->g, v, &g_vf[slot].view, &err))) { g_vf[slot].serial = t->serial; g_vf[slot].has_v = v != NULL; if (v) g_vf[slot].v = *v; g_vf[slot].of = x; out = g_vf[slot].view; if (g_pin_depth > 0) g_vf_seen[slot] = g_pin_token; }
         else { g_vf[slot].view = NULL; if (nvn_unimpl("gpu", "view_create", t) == 1) nvn_plat_log(NVN_PLAT_LOG_RED, "gpu", err.why); }
         }

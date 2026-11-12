@@ -339,7 +339,7 @@ g_prune() { grp prune   # 装包 / 推包前机上空间不够 → 卸 24 小时
 g_space() { grp space; run
 echo "file 1 改" > $J/pack/romfs/f1.bin; mkpack $J/pack
 printf '#!/bin/sh\necho 1000\n' > $G/ideviceinfo; chmod +x $G/ideviceinfo; PATH=$G:$PATH run
-ck "① 读到可写 1000 字节 → RESULT=push「测试设备空间不足」、一批没推" '[[ $RES == RESULT=push*测试设备空间不足* ]] && grep -q "测试设备剩余空间不足：可写 0 GB < 要 1 GB" $OUT/run.log && ! ls $DV/apps/com.s2arm.test/Documents/资源包/.incoming/*.tar > /dev/null 2>&1'
+ck "① 读到可写 1000 字节 → RESULT=push「测试设备空间不足」、一批没推" '[[ $RES == RESULT=push*测试设备空间不足* ]] && grep -q "手机剩余空间不足：可写 0 GB < 要 1 GB" $OUT/run.log && ! ls $DV/apps/com.s2arm.test/Documents/资源包/.incoming/*.tar > /dev/null 2>&1'
 FAKE_ENOSPC=.incoming run
 ck "② 读不到剩余、推 tar 时 POSIX 28 → RESULT=push「测试设备空间不足（推 … POSIX 28）」、本机不留 push.tar" '[[ $RES == RESULT=push*测试设备空间不足*POSIX\ 28* ]] && [ ! -e $OUT/push.tar ]'
 printf '#!/bin/sh\necho 1000000000000\n' > $G/ideviceinfo; PATH=$G:$PATH run

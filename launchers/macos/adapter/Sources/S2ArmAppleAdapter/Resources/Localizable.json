@@ -6232,6 +6232,18 @@
   "en": "No iPhone found: connect the cable, unlock it and tap Trust on the phone."
  },
  {
+  "source": "点「仍然继续」照传：手机报的空闲不含系统随时能清掉的空间，实际多半放得下，真写满了会停下并说明还差多少；也可以先在「设置 → 通用 → iPhone 储存空间」腾出空间。",
+  "en": "Tap Continue Anyway to send it: the free space the iPhone reports leaves out space iOS can clear at any time, so it usually fits, and it stops and says how much is missing only if storage really fills up. You can also free up space first in Settings → General → iPhone Storage."
+ },
+ {
+  "source": "iPhone 剩余空间看起来不够：这次要传约 {0} GB，连同解开时临时多占的约要 {1} GB，手机报的空闲约 {2} GB。「设置 → 通用 → iPhone 储存空间」里的「可用」还包括系统随时能清掉的空间，实际多半放得下；点「仍然继续」照传，真写满了会停下并说明还差多少。",
+  "en": "iPhone storage looks low: this transfer is about {0} GB, about {1} GB including the temporary space used while unpacking, and the iPhone reports about {2} GB free. The Available figure in Settings → General → iPhone Storage also counts space iOS can clear at any time, so it usually fits; tap Continue Anyway to send it, and it stops and says how much is missing only if storage really fills up."
+ },
+ {
+  "source": "iPhone 空间写满了，传到一半停下：这次要传约 {0} GB，手机现在只剩 {1} MB。在「设置 → 通用 → iPhone 储存空间」腾出空间后再装一次（已传完的文件不用重传）。",
+  "en": "iPhone storage is full, so the transfer stopped partway: this transfer is about {0} GB and the iPhone now has only {1} MB free. Free up space in Settings → General → iPhone Storage, then install again (files already sent are not sent again)."
+ },
+ {
   "source": "资源包推不进 iPhone：{0}",
   "en": "Could not push the resource pack to the iPhone: {0}"
  },

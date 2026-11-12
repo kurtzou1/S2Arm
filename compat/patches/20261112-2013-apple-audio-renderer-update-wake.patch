@@ -1,0 +1,42 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+index b69103397093735cf80ef81a58a9398560b6979c..e145a2ad1f398b9cc6750bb1cf024d5992b66df3 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+@@ -84,6 +84,7 @@ namespace Ryujinx.Audio.Backends.Apple
+         private ulong _playedSampleCount;
+         private bool _started;
+         private bool _primeConfigured;   // S2Arm (11-09): the first queued buffer decided the renderer/audout start gate (see ConfigurePrimeFloor)
++        private bool _rendererProducer;  // S2Arm (11-12 功耗): 同一个首缓冲定性——渲染器（audren）缓冲样本在 Data 里、audout 客体缓冲 Data 空，用于播完唤醒的门（见 ProcessPlayedSamples）
+         // S2Arm (10-22 杂音): AudioQueue 是否已 AudioQueueStart（预充满足或兜底后才启播）；_startTicks = Start 时刻
+         private bool _queueRunning;
+         private long _startTicks;
+@@ -665,7 +666,12 @@ namespace Ryujinx.Audio.Backends.Apple
+                 }
+             }
+ 
+-            if (needUpdate)
++            // S2Arm (11-12 功耗): 播完需要唤醒 AudioManager.Worker 的只有 audout 的客体缓冲——Worker 醒来只做
++            //   AudioOutputManager.Update / AudioInputManager.Update（AudioManagers 的接线），即 audout / audin 会话的
++            //   缓冲释放；audren 游戏自己的更新事件在 5 ms 渲染线程上直接 Signal（AudioRenderSystem.SendCommands）。
++            //   渲染器会话每个 5 ms 块播完也置一次事件：纯 audren 游戏把 Worker 每秒叫醒约 200 次，只为扫两圈空
++            //   会话数组。生产方定性来自首个缓冲（见 ConfigurePrimeFloor）；audout / audsmx 客体缓冲照旧唤醒。
++            if (needUpdate && !_rendererProducer)
+             {
+                 _updateRequiredEvent.Set();
+             }
+@@ -710,6 +716,7 @@ namespace Ryujinx.Audio.Backends.Apple
+         // S2Arm (11-09): the first buffer tells the producer apart. Renderer output (audren) carries its samples in Data;
+         // an AudioOut guest buffer keeps them in guest memory (Data == null, SampleReader set by RegisterBuffer). The latter
+         // keeps the 64 ms pre-roll that fixed audout's start underruns; the former starts on its first 5 ms block.
++        // S2Arm (11-12 功耗): 定性顺带记给播完唤醒的门用（见 ProcessPlayedSamples）。
+         private void ConfigurePrimeFloor(AudioBuffer buffer)
+         {
+             if (_primeConfigured)
+@@ -718,6 +725,7 @@ namespace Ryujinx.Audio.Backends.Apple
+             }
+ 
+             _primeConfigured = true;
++            _rendererProducer = buffer.Data != null;
+ 
+             if (buffer.Data == null || _rendererPrimeMilliseconds == PrimeMilliseconds)
+             {

@@ -68,6 +68,31 @@ def tail(path, limit=LOG_CHARS):
         return handle.read().decode(errors="replace")[-limit:]
 
 
+CRASH_SCAN = 32 << 20   # 往前找崩溃现场的最大字节（现场后面的全线程表可达几 MB）
+CRASH_LINES = 60        # 现场节最多几行（寄存器 + 回溯）
+
+
+def crash_excerpt(path):
+    """宿主崩溃现场（runtime/src/crash.c：一行「【红】CRASH 信号 … pc … lr …」，后跟缩进的寄存器与 #0…#N 回溯）：
+    取最后一次的那行与其后缩进行，外加它之前最近 5 条【红】行。现场后面是所有线程的等待栈（「[现场] 线程 …」，一百多条线程几百 KB），
+    原先只截日志末尾就只剩别的线程在等锁，崩溃线程被挤掉、玩家贴了摘要也定不了因（#806 / #786）。没有现场返回空串"""
+    try:
+        with path.open("rb") as handle:
+            size = path.stat().st_size; handle.seek(max(0, size - CRASH_SCAN))
+            lines = handle.read().decode(errors="replace").splitlines()
+    except OSError:
+        return ""
+    at = max((i for i, line in enumerate(lines) if "【红】CRASH" in line), default=-1)
+    if at < 0:
+        return ""
+    keep = [line for line in lines[max(0, at - 400):at] if "【红】" in line and "崩溃原始现场" not in line][-5:] + [lines[at]]
+    for line in lines[at + 1:]:
+        if len(keep) >= CRASH_LINES + 6 or not line.startswith("[s2a]   "):
+            break
+        keep.append(line)
+    return "\n".join(line[:300] for line in keep)
+
+
 def memory_bytes():
     if os.name == "nt":
         class Status(ctypes.Structure):
@@ -196,6 +221,9 @@ def build(private, task, extra=None):
     if not body:
         details = [str(d["detail"]) for d in diagnostics if d.get("detail")]
         body = "\n\n".join(details) or "（这条作业没有留下日志文件）"
+    crash = next((c for c in (crash_excerpt(p) for p in reversed(logs[-2:])) if c), "")
+    if crash:
+        lines += ["", "【崩溃现场】", crash]
     lines += ["", "【日志末尾】", body, "", FEEDBACK]
     # 任务号是 UUID，脱敏规则会当成设备号抹掉；它不敏感，分析时要靠它对上日志
     mark = "S2ARMTASKMARK"

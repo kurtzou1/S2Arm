@@ -3,6 +3,7 @@ using Ryujinx.Audio.Common;
 using Ryujinx.Memory;
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -69,6 +70,9 @@ namespace Ryujinx.Audio.Backends.Apple
 
         private nint _audioQueue;
         private readonly nint[] _audioQueueBuffers = new nint[NumBuffers];
+        // S2Arm (11-12 #767): 交还回调的缓冲→槽号查表——建队时随缓冲整表建好、原子发布（见 CreateQueue），回调免锁只读
+        //   （见 OutputCallback）；回调是实时线程、每次交还都走，不该每次对 32 槽线性扫
+        private Dictionary<nint, int> _bufferSlots;
 
         // S2Arm (#189): guest bytes/frame (6-channel PCM16) and device bytes/frame (stereo after the explicit downmix
         //   stage). Equal for every other configuration.
@@ -84,6 +88,7 @@ namespace Ryujinx.Audio.Backends.Apple
         private ulong _playedSampleCount;
         private bool _started;
         private bool _primeConfigured;   // S2Arm (11-09): the first queued buffer decided the renderer/audout start gate (see ConfigurePrimeFloor)
+        private bool _rendererProducer;  // S2Arm (11-12 功耗): 同一个首缓冲定性——渲染器（audren）缓冲样本在 Data 里、audout 客体缓冲 Data 空，用于播完唤醒的门（见 ProcessPlayedSamples）
         // S2Arm (10-22 杂音): AudioQueue 是否已 AudioQueueStart（预充满足或兜底后才启播）；_startTicks = Start 时刻
         private bool _queueRunning;
         private long _startTicks;
@@ -508,10 +513,17 @@ namespace Ryujinx.Audio.Backends.Apple
                 }
             }
 
+            // S2Arm (11-12 #767): 缓冲→槽号表随缓冲一起整表建好再原子发布：重建期间旧队列迟到的交还
+            //   查旧表命中 / 查新表落空，都同旧数组扫描的「查不到就返回」，见不到半张表
+            Dictionary<nint, int> bufferSlots = new(NumBuffers);
+
             for (int i = 0; i < NumBuffers; i++)
             {
                 AudioQueueAllocateBuffer(_audioQueue, BufferBytes, out _audioQueueBuffers[i]);
+                bufferSlots[_audioQueueBuffers[i]] = i;
             }
+
+            Volatile.Write(ref _bufferSlots, bufferSlots);
 
             return 0;
         }
@@ -578,8 +590,9 @@ namespace Ryujinx.Audio.Backends.Apple
             if (bufferPtr == nint.Zero)
                 return;
 
-            int bufferIndex = Array.IndexOf(_audioQueueBuffers, bufferPtr);
-            if (bufferIndex < 0)
+            // S2Arm (11-12 #767): 槽号改查表（建表见 CreateQueue）：实时回调里不再对 32 槽线性扫；
+            //   查不到（重建后旧队列的迟到交还）照旧直接返回——本回调从不解引用未认出的指针，同旧扫描
+            if (!Volatile.Read(ref _bufferSlots).TryGetValue(bufferPtr, out int bufferIndex))
                 return;
 
             // S2Arm: recycle every returned device buffer, but advance guest progress only for its queued-sample bytes,
@@ -665,7 +678,12 @@ namespace Ryujinx.Audio.Backends.Apple
                 }
             }
 
-            if (needUpdate)
+            // S2Arm (11-12 功耗): 播完需要唤醒 AudioManager.Worker 的只有 audout 的客体缓冲——Worker 醒来只做
+            //   AudioOutputManager.Update / AudioInputManager.Update（AudioManagers 的接线），即 audout / audin 会话的
+            //   缓冲释放；audren 游戏自己的更新事件在 5 ms 渲染线程上直接 Signal（AudioRenderSystem.SendCommands）。
+            //   渲染器会话每个 5 ms 块播完也置一次事件：纯 audren 游戏把 Worker 每秒叫醒约 200 次，只为扫两圈空
+            //   会话数组。生产方定性来自首个缓冲（见 ConfigurePrimeFloor）；audout / audsmx 客体缓冲照旧唤醒。
+            if (needUpdate && !_rendererProducer)
             {
                 _updateRequiredEvent.Set();
             }
@@ -710,6 +728,7 @@ namespace Ryujinx.Audio.Backends.Apple
         // S2Arm (11-09): the first buffer tells the producer apart. Renderer output (audren) carries its samples in Data;
         // an AudioOut guest buffer keeps them in guest memory (Data == null, SampleReader set by RegisterBuffer). The latter
         // keeps the 64 ms pre-roll that fixed audout's start underruns; the former starts on its first 5 ms block.
+        // S2Arm (11-12 功耗): 定性顺带记给播完唤醒的门用（见 ProcessPlayedSamples）。
         private void ConfigurePrimeFloor(AudioBuffer buffer)
         {
             if (_primeConfigured)
@@ -718,6 +737,7 @@ namespace Ryujinx.Audio.Backends.Apple
             }
 
             _primeConfigured = true;
+            _rendererProducer = buffer.Data != null;
 
             if (buffer.Data == null || _rendererPrimeMilliseconds == PrimeMilliseconds)
             {

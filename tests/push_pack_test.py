@@ -506,9 +506,27 @@ class SpaceNeed(Base):
     def test_exact_need_passes(self):
         self.assertEqual(self.run_with_free(8198)[2], 3)
 
-    def test_one_byte_short_reports(self):
-        with self.assertRaises(push.Fail) as e: self.run_with_free(8197)
-        self.assertIn("空间不足", str(e.exception)); self.assertEqual(self.dev.puts, [f"{RP}/{push.PROBE}"])   # 只写了探针（#333），资源一个没推
+    # 估算不够（手机报的空闲不含系统可清除空间，偏小）：认得出的风险让玩家确认——没确认停下报 device_space_low、只写了探针；确认过照推、打一行黄
+    def test_one_byte_short_asks(self):
+        with self.assertRaises(push.LowSpace) as e: self.run_with_free(8197)
+        self.assertEqual(e.exception.code, "device_space_low"); self.assertIn("仍然继续", str(e.exception))
+        self.assertEqual(self.dev.puts, [f"{RP}/{push.PROBE}"])   # 只写了探针（#333），资源一个没推
+
+    def test_one_byte_short_accepted_pushes(self):
+        self.dev = Fake({}); self.dev.free = lambda: 8197
+        self.assertEqual(push.run(self.dev, self.pk, self.w, full=True, say=self.log.append, env={"S2A_PUSH_SPARE_GB": "0", "S2A_PUSH_ACCEPT_LOW_SPACE": "1"})[2], 3)
+        self.assertTrue(any(m.startswith("🟡 iPhone 剩余空间看起来不够") for m in self.log))
+
+    # 真写满：推失败后再量、空闲 < 256 MB → 报 ios_install_no_space，说清要传多少、手机还剩多少；空闲还多 = 别的原因，照原样往上抛
+    def test_real_full_says_how_much(self):
+        frees = iter([10**9, 5 << 20])
+        self.dev = Fake({}, full_disk=True); self.dev.free = lambda: next(frees)
+        with self.assertRaises(push.SpaceFull) as e: push.run(self.dev, self.pk, self.w, full=True, say=self.log.append, env={"S2A_PUSH_SPARE_GB": "0"})
+        self.assertEqual(e.exception.code, "ios_install_no_space"); self.assertIn("只剩 5 MB", str(e.exception))
+        frees = iter([10**9, 10**9])
+        self.dev = Fake({}, full_disk=True); self.dev.free = lambda: next(frees)
+        with self.assertRaises(push.Fail) as e: push.run(self.dev, self.pk, self.w, full=True, say=self.log.append, env={"S2A_PUSH_SPARE_GB": "0"})
+        self.assertNotIsInstance(e.exception, push.SpaceFull)
 
     def test_devpush_free_parses_or_none(self):
         d = push.Devpush("exe", "U", "b", self.w)

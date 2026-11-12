@@ -43,8 +43,11 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                         // StructuredProgram creates these temporaries for GetLocalPointer;
                         // propagating even a constant would remove that pointer boundary.
                         bool isCallArgument = propVar.Uses.Any(use => use is AstOperation { Inst: Instruction.Call });
+                        // S2Arm：「只用一次」按出现次数算，不按父节点个数（Uses 是父节点的集合，fma(t, t, c) 只记一个）；
+                        //   出现多次的照旧只传播 IsWorthPropagating 的表达式，但各处一份深拷贝（PropagateExpression），只拷小树（CloneSize）
+                        int occurrences = Occurrences(propVar);
                         bool isWorthPropagating = !isCallArgument &&
-                            (propVar.Uses.Count == 1 || IsWorthPropagating(assignment.Source));
+                            (occurrences == 1 || (IsWorthPropagating(assignment.Source) && CloneSize(assignment.Source) <= MaxCloneNodes));
 
                         if (propVar.Defs.Count == 1 && isWorthPropagating)
                         {
@@ -306,15 +309,99 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
             return srcOp.GetSource(0) is AstOperand || srcOp.Inst == Instruction.Copy;
         }
 
+        // S2Arm：同一个表达式节点不许塞进多个使用处。共享的节点里引用的局部变量只记一次使用（Uses 按父节点计），
+        //   之后它的定义会被当成「只用一次」继续传播进这个共享节点——一层套一层，生成 SPIR-V 时每个使用处都把整棵共享子树
+        //   重新生成一遍，指令数按共享层数指数增长（一款 Unity 游戏一支着色器 27 层乘加链，几分钟几十 GB、永远翻不完）。
+        //   出现多次的（Optimize 里判过可拷）第一处用原节点、其余各用一份深拷贝
+        // 传播到多处时拷贝的上限（节点数）：只拷小树，「Copy 套 Copy」一层层用两次的链拷贝也不会指数长；超过就保留成局部变量
+        private const int MaxCloneNodes = 8;
+
+        // 可拷的树的节点数：只认普通 AstOperation（贴图运算等带额外字段的子类不拷）与操作数；拷不了返回 int.MaxValue
+        private static int CloneSize(IAstNode node)
+        {
+            if (node is AstOperand)
+            {
+                return 1;
+            }
+
+            if (node is not AstOperation op || op.GetType() != typeof(AstOperation))
+            {
+                return int.MaxValue;
+            }
+
+            int size = 1;
+
+            for (int index = 0; index < op.SourcesCount && size <= MaxCloneNodes; index++)
+            {
+                int child = CloneSize(op.GetSource(index));
+                size = child == int.MaxValue ? int.MaxValue : size + child;
+            }
+
+            return size;
+        }
+
+        // 这个局部变量在各使用处一共出现几次（同一父节点的多个槽位分别算）
+        private static int Occurrences(AstOperand propVar)
+        {
+            int count = 0;
+
+            foreach (IAstNode use in propVar.Uses)
+            {
+                if (use is AstOperation op)
+                {
+                    for (int index = 0; index < op.SourcesCount; index++)
+                    {
+                        if (op.GetSource(index) == propVar)
+                        {
+                            count++;
+                        }
+                    }
+                }
+                else
+                {
+                    count++;
+                }
+            }
+
+            return count;
+        }
+
+        // 深拷贝（只用于 CloneSize 认得的小树）：每个运算节点新建，操作数照用、其中的局部变量多记一次使用
+        private static IAstNode CloneTree(IAstNode node)
+        {
+            if (node is not AstOperation op)
+            {
+                return node;
+            }
+
+            IAstNode[] sources = new IAstNode[op.SourcesCount];
+
+            for (int index = 0; index < sources.Length; index++)
+            {
+                sources[index] = CloneTree(op.GetSource(index));
+            }
+
+            return new AstOperation(op.Inst, op.StorageKind, op.ForcePrecise, op.Index, sources, sources.Length);
+        }
+
         private static void PropagateExpression(AstOperand propVar, IAstNode source)
         {
             IAstNode[] uses = propVar.Uses.ToArray();
+            bool first = true;
+            // 每一次出现各取一份：同一父节点的两个槽位（x * x）也不共享
+            IAstNode Next()
+            {
+                IAstNode value = first ? source : CloneTree(source);
+                first = false;
+                return value;
+            }
 
             foreach (IAstNode useNode in uses)
             {
+
                 if (useNode is AstBlock useBlock)
                 {
-                    useBlock.Condition = source;
+                    useBlock.Condition = Next();
                 }
                 else if (useNode is AstOperation useOperation)
                 {
@@ -322,13 +409,13 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                     {
                         if (useOperation.GetSource(srcIndex) == propVar)
                         {
-                            useOperation.SetSource(srcIndex, source);
+                            useOperation.SetSource(srcIndex, Next());
                         }
                     }
                 }
                 else if (useNode is AstAssignment useAssignment)
                 {
-                    useAssignment.Source = source;
+                    useAssignment.Source = Next();
                 }
             }
         }

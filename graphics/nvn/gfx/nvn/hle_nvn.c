@@ -1609,10 +1609,14 @@ static snode *g_sh_bkt[SH_NBKT];
 static srec g_sh_all = { .prev = &g_sh_all, .next = &g_sh_all };
 static srec *g_sh_qhead, *g_sh_qtail; static uint64_t g_sh_qbytes;
 static uint64_t g_sh_nlive, g_sh_live_bytes, g_sh_unanchored;
+typedef struct { uint64_t h; uint32_t len; struct sblk *b; } sintern;
+static sintern *g_sh_it; static size_t g_sh_itcap, g_sh_itn; static uint64_t g_sh_shared_n;   // interned recordings (sh_intern)
 static uint32_t sh_hash(uintptr_t page) { return (uint32_t)((page * 0x9E3779B97F4A7C15ull) >> 48) & (SH_NBKT - 1); }
 static void sh_live(uint64_t *recs, uint64_t *bytes) { pthread_mutex_lock(&g_sh_mu); *recs = g_sh_nlive; *bytes = g_sh_live_bytes; pthread_mutex_unlock(&g_sh_mu); }
 // Live recordings (begun and not released), for diagnostics and the unit tests
 uint64_t s2a_hle_cmdshadow_live(void) { uint64_t r, b; sh_live(&r, &b); return r; }
+uint64_t s2a_hle_cmdshadow_live_bytes(void) { uint64_t r, b; sh_live(&r, &b); return b; }
+uint64_t s2a_hle_cmdshadow_shared(void) { pthread_mutex_lock(&g_sh_mu); uint64_t n = g_sh_shared_n; pthread_mutex_unlock(&g_sh_mu); return n; }   // 单测：按内容共用了几次
 // 帧录（nvn_frame_rec.inc）：命令记录都在宿主块里（游戏窗口外），录像按原地址另存，回放映射回原地址
 int s2a_hle_cmdshadow_list(void (*cb)(void *ctx, const void *mem, size_t size), void *ctx) {
     pthread_mutex_lock(&g_sh_mu); int n = 0; size_t pg = (size_t)getpagesize();
@@ -1716,7 +1720,7 @@ static void sh_shutdown(void) {   // session end: every recording and chunk goes
     for (int i = 0; i < g_sh_nchunk; i++) sh_chunk_unmap(g_sh_chunk[i].mem);
     free(g_sh_chunk); g_sh_chunk = NULL; g_sh_nchunk = g_sh_cchunk = 0;
     memset(g_sh_carving, 0, sizeof g_sh_carving); memset(g_sh_free, 0, sizeof g_sh_free); memset(g_sh_bkt, 0, sizeof g_sh_bkt);
-    g_sh_all.next = g_sh_all.prev = &g_sh_all; g_sh_qhead = g_sh_qtail = NULL; g_sh_qbytes = g_sh_nlive = g_sh_live_bytes = g_sh_unanchored = 0;
+    g_sh_all.next = g_sh_all.prev = &g_sh_all; g_sh_qhead = g_sh_qtail = NULL; g_sh_qbytes = g_sh_nlive = g_sh_live_bytes = g_sh_unanchored = 0; free(g_sh_it); g_sh_it = NULL; g_sh_itcap = g_sh_itn = 0; g_sh_shared_n = 0;
     pthread_mutex_unlock(&g_sh_mu);
 }
 // The open recording leaves the command buffer's current window: note the device bytes it took there. In a host-lent window it took none of the game's memory; it hangs off
@@ -1815,10 +1819,49 @@ static void sh_anchor_empty(cmd_t *o, srec *r) {
     uintptr_t a = o->gvirt ? o->vanc : o->gcur > o->gstart ? o->gcur - 1 : o->gend ? o->gend - 1 : 0;
     if (a) { r->iv[0] = (siv){a, a + 1}; r->niv = 1; }
 }
+// Recordings that take none of the game's command memory and hold only control-memory records (texture / sampler pool binds) and their END are interned by content
+//   (#783). Nothing the device cursor writes ever covers them, so they hung off a 1-byte anchor; one first in a fresh segment anchored at the segment's last byte, a tail
+//   the game never writes, and none was ever released: Ocarina of Time on Switch 2 ends ~10 such lists a frame (9 of them empty), thousands piled on one byte, ~10 MB of
+//   host blocks a minute. These records carry only the pool pointer and are fixed once ended, so every recording with the same bytes replays the same from one permanent
+//   copy, and the copies are as many as the distinct contents. Empty recordings (only END) share one copy in every mode. Other records are not interned: some keep host
+//   addresses inside their own recording, which a copy would leave pointing at the old block
+#define SH_INTERN_MAX 256
+static uint64_t sh_fnv(const uint8_t *p, size_t n) { uint64_t h = 0xcbf29ce484222325ull; while (n--) { h ^= *p++; h *= 0x100000001b3ull; } return h; }
+static int sh_intern(cmd_t *o, srec *r) {   // g_sh_mu held: 1 = r dropped, handle now the shared copy
+    sblk *b = r->blk; if (!b || b != r->last || o->begin != (uint8_t *)(b + 1) || o->cur < o->begin) return 0;
+    size_t len = (size_t)(o->cur - o->begin); if (!len || len > SH_INTERN_MAX) return 0;
+    if (r->niv && len != 8) return 0;   // takes device bytes and is not empty: released by overwrite as before
+    for (const uint8_t *p = o->begin; p < o->cur; ) {   // only pool binds and END
+        op_hdr h; memcpy(&h, p, sizeof h);
+        if (h.size < sizeof h || p + h.size > o->cur || (h.op != OP_END && h.op != OP_SET_TEX_POOL && h.op != OP_SET_SAMP_POOL) || (r->niv && h.op != OP_END)) return 0;
+        p += h.size;
+    }
+    uint64_t hv = sh_fnv(o->begin, len); size_t i; sblk *copy = NULL;
+    if (g_sh_itcap) for (i = hv & (g_sh_itcap - 1); g_sh_it[i].b; i = (i + 1) & (g_sh_itcap - 1))
+        if (g_sh_it[i].h == hv && g_sh_it[i].len == len && !memcmp(g_sh_it[i].b + 1, o->begin, len)) { copy = g_sh_it[i].b; break; }
+    if (!copy) {
+        if ((g_sh_itn + 1) * 2 > g_sh_itcap) {   // grow (load <= 1/2) and rehash
+            size_t nc = g_sh_itcap ? g_sh_itcap * 2 : 64; sintern *t = calloc(nc, sizeof *t); if (!t) return 0;
+            for (size_t k = 0; k < g_sh_itcap; k++) if (g_sh_it[k].b) { size_t j = g_sh_it[k].h & (nc - 1); while (t[j].b) j = (j + 1) & (nc - 1); t[j] = g_sh_it[k]; }
+            free(g_sh_it); g_sh_it = t; g_sh_itcap = nc;
+        }
+        copy = sh_blk_get(sizeof(sblk) + len, sizeof(sblk) + len); copy->next = NULL; memcpy(copy + 1, o->begin, len);
+        for (i = hv & (g_sh_itcap - 1); g_sh_it[i].b; i = (i + 1) & (g_sh_itcap - 1)) {}
+        g_sh_it[i] = (sintern){hv, (uint32_t)len, copy}; g_sh_itn++;
+    }
+    r->prev->next = r->next; r->next->prev = r->prev; g_sh_nlive--; g_sh_live_bytes -= r->bytes;
+    b->next = g_sh_free[b->cls]; g_sh_free[b->cls] = b;   // nothing points into it yet: the handle is handed out below
+    if (r->iv != r->ivs) free(r->iv);
+    free(r);
+    o->begin = (uint8_t *)(copy + 1); o->cur = o->end = NULL; g_sh_shared_n++;
+    return 1;
+}
 static void sh_end(cmd_t *o) {
-    srec *r = o->rec; sh_piece(o); sh_anchor_empty(o, r);
+    srec *r = o->rec; sh_piece(o);
     uint64_t h = r->rbytes + OP_RESERVE + sizeof(sblk); o->hint = (uint32_t)(h < 256 ? 256 : h > (1u << 20) ? (1u << 20) : h);
-    pthread_mutex_lock(&g_sh_mu); r->open = 0;
+    pthread_mutex_lock(&g_sh_mu);
+    if (sh_intern(o, r)) { pthread_mutex_unlock(&g_sh_mu); o->rec = NULL; return; }
+    sh_anchor_empty(o, r); r->open = 0;
     uint64_t un = 0; if (r->niv) sh_index(r); else un = ++g_sh_unanchored;
     pthread_mutex_unlock(&g_sh_mu);
     if (un && (un == 1 || un % 1024 == 0)) LOG("【黄】[nvn] command recording without any of the game's memory: its host blocks stay until the session ends (%llu so far)", (unsigned long long)un);

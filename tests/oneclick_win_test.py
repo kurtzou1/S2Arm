@@ -583,6 +583,29 @@ class InstallWin(unittest.TestCase):
             self.ns = old_ns
         self.assertIsInstance(e, install_win.Fail); self.assertEqual(e.err, 'app_id_taken'); self.assertNotIn('push', got)
 
+    def test_already_registered_device_signs_then_installs(self):
+        # #800：Windows 设备号不带横线、苹果存的带横线，plumesign 精确比较认不出已登记的这台 → 再登记被拒 35「already exists on this team」。
+        #   期望（手写）：认出这句改成只签名（命令里没有 --register-and-install / --udid）、再 device --install 装签好的包，照常推资源、回包名；
+        #   两段输出都在日志里。假 plumesign：带登记参数就报 35；只签名时写出 -o；device --install 打装好
+        body = ("print('args', a)\n"
+                "if a[0] == 'device': print('INFO Installation complete!'); sys.exit(0)\n"
+                "if '--register-and-install' in a:\n"
+                "    print(\"Error: Developer API error 35 (HTTP Some(200)): A device with number '00000000-0000000000000000' already exists on this team.\"); sys.exit(1)\n"
+                "z = zipfile.ZipFile(a[a.index('-o') + 1], 'w')\n"
+                "z.writestr('Payload/S2Arm.app/Info.plist', b'<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>a.b.TEAM</string></dict></plist>')\nz.close()\n")
+        bid, got, log = self.run_fake(body)
+        self.assertEqual(bid, 'a.b.TEAM')
+        self.assertEqual(got['push'][:2], ['U1', 'a.b.TEAM'])
+        self.assertIn('already exists on this team', log)
+        self.assertIn("'device', '--udid', '42', '--install'", log)
+        second = log.split('只签名再装', 1)[1]
+        self.assertIn("'sign'", second); self.assertNotIn('--register-and-install', second.split("'device'")[0])
+
+    def test_other_sign_failure_is_not_retried(self):
+        body = "print('Error: Developer API error 1100: Your session has expired.')\nsys.exit(1)\n"
+        e, got, _ = self.run_fake(body)
+        self.assertIsInstance(e, install_win.Fail); self.assertEqual(e.err, 'apple_session_expired'); self.assertNotIn('push', got)
+
     def test_legacy_case_bundle(self):
         self.assertEqual(install_win.legacy_case_bundle('io.s2arm.games.abcde12345'), 'io.s2arm.games.ABCDE12345')
         for other in (None, 'io.s2arm.games.ABCDE12345', 'io.s2arm.games.0123456789', 'io.s2arm.games.abcde12345.dev', 'a.b.c'):

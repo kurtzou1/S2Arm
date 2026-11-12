@@ -196,7 +196,9 @@ static void crash_other_wait(int sig) {
 //   （控制台「崩溃报告」/ ~/Library/Logs/DiagnosticReports），iOS 进系统崩溃日志——原先 _exit(128 + sig) 是正常退出，系统不出报告。
 //   处理函数里本信号是屏蔽的，先放开再抛；万一没结束（不该发生）照旧 _exit(128 + sig)。
 //   读退出码的地方：shell 里被信号结束的 $? 仍是 128 + sig；作业层 Context.run 把 Python 的负返回码折回 128 + sig（pack/jobs/core.py）
+static int g_crash_quiet;   // s2a_crash_install 时取（信号处理里不读环境）：native.h s2a_crash_quiet
 static void crash_reraise(int sig) {
+    if (g_crash_quiet) _exit(128 + sig);   // 辅助运行 / 静默起局：现场已写进日志，不按信号死（不弹系统「意外退出」框）
     signal(sig, SIG_DFL);
     sigset_t m; sigemptyset(&m); sigaddset(&m, sig); pthread_sigmask(SIG_UNBLOCK, &m, NULL);
     raise(sig);
@@ -296,6 +298,7 @@ void s2a_crash_thread_init(void) {
 void s2a_crash_install(void) {
     int sigs[] = {SIGSEGV, SIGBUS, SIGILL, SIGTRAP, SIGFPE, SIGABRT};   // SIGABRT：die() 与 C# FailFast 都走 abort，要现场
     g_dsh_crash_dump = (void (*)(void))dlsym(RTLD_DEFAULT, "s2a_dsh_crash_dump");
+    g_crash_quiet = s2a_crash_quiet();
     for (size_t i = 0; i < sizeof sigs / sizeof *sigs; i++) {
         int e = plat_fault_install(sigs[i], on_crash, PLAT_FAULT_ONSTACK);
         if (e) LOG("【红】崩溃：安装信号 %d 失败 errno=%d", sigs[i], e);

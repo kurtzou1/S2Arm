@@ -1281,3 +1281,26 @@ void s2a_front_run(void (*guest_main)(void)) {
         set_mouse_capture(NO); focused = NO; reset_input(); s2a_mac_ns2_detach(); front_layer_detach();
     }
 }
+// GPU 卡住暂停（11-13；graphics/nvn/host_adapt.m s2a_gpu_stuck 经 dlsym 调，Metal 完成回调线程）：连续 3 帧各过 3 秒。冻游戏线程（不再往 GPU 送新活，已交的跑完），
+//   弹「继续玩 / 退出」：继续 → 清判据（s2a_gpu_stuck_resume）、解冻；退出 → 收尾（同关窗）。文案与 iOS 同一套（runtime/include/s2a_ui_text.h）
+void s2a_mac_gpu_stuck(const char *why) {
+    (void)why;   // 原文已打进 host.log
+    s2a_guest_freeze(1);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        int zh = s2a_ui_zh();
+        NSAlert *a = [NSAlert new];
+        a.messageText = zh ? @S2A_GPU_STUCK_TITLE : @S2A_GPU_STUCK_TITLE_EN;
+        a.informativeText = zh ? @S2A_GPU_STUCK_BODY : @S2A_GPU_STUCK_BODY_EN;
+        [a addButtonWithTitle:zh ? @S2A_GPU_STUCK_GO : @S2A_GPU_STUCK_GO_EN];
+        [a addButtonWithTitle:zh ? @S2A_GPU_STUCK_QUIT : @S2A_GPU_STUCK_QUIT_EN];
+        fprintf(stderr, "[s2a] 【红】Mac 壳：GPU 卡住 → 冻结游戏线程、弹「继续玩 / 退出」\n");
+        if ([a runModal] == NSAlertFirstButtonReturn) {
+            void (*resume)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "s2a_gpu_stuck_resume"); if (resume) resume();   // 直连层 host_adapt.m：按名取（不链直连层的构建 / 输入单测里没有它）
+            s2a_guest_freeze(0);
+            fprintf(stderr, "[s2a] GPU 卡住暂停：玩家选继续玩，游戏线程解冻\n");
+        } else {
+            fprintf(stderr, "[s2a] GPU 卡住暂停：玩家选退出，收尾\n");
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ s2a_host_shutdown("GPU 卡住，玩家选退出"); });
+        }
+    });
+}

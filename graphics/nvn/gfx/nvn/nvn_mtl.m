@@ -2182,22 +2182,37 @@ static double gpu_tag_begin(uint64_t f) {   // 返回提交时刻（CACurrentMed
     atomic_fetch_add(&g_gpu[k].pending, 1);
     return CACurrentMediaTime();
 }
-// A frame whose command buffers keep the GPU busy longer than this in all is no longer usable: the run stops (mtl_gpu_halt: GPU safe stop) before the driver's timeout recovery takes over
-//   (10-31: the Mac's kernel panicked in the GPU driver's event machine after runs whose frames took 1.5-3.3 s of GPU)
-#define S2A_GPU_FRAME_MAX_MS 1000
-// 一帧过门只记黄行、不停（11-13 iPad14,8 iOS 26.6：一帧 1020 ms 就把玩家的局冻结了；单帧偶发超时的代价是一次卡顿，不是整机卡死）。
-//   要停的是持续形态：GPU 时间线上 10 秒内有 3 帧各过 1 秒（10-31 内核恐慌前就是一帧接一帧 1.5–3.3 秒）。驱动报的 Hang / PageFault 不经这里，照旧当场停
-#define S2A_GPU_OVER_N 3
-#define S2A_GPU_OVER_WINDOW_S 10.0
-static os_unfair_lock g_gpu_over_lk = OS_UNFAIR_LOCK_INIT; static double g_gpu_over_t[S2A_GPU_OVER_N]; static unsigned g_gpu_over_n;
-static void gpu_frame_over(uint64_t f, uint64_t busy, double at) {   // at = 这一份的 GPU 结束（与 CACurrentMediaTime 同一时基）
-    os_unfair_lock_lock(&g_gpu_over_lk);
-    unsigned n = ++g_gpu_over_n; g_gpu_over_t[(n - 1) % S2A_GPU_OVER_N] = at;
-    double first = g_gpu_over_t[n % S2A_GPU_OVER_N];   // 连这一帧在内最近 S2A_GPU_OVER_N 帧里最早那一帧
-    int stop = n >= S2A_GPU_OVER_N && at - first <= S2A_GPU_OVER_WINDOW_S;
-    os_unfair_lock_unlock(&g_gpu_over_lk);
-    if (stop) { char w[160]; snprintf(w, sizeof w, "frame %llu kept the GPU busy %.0f ms (limit %d ms), %d frames over the limit within %.1f s", (unsigned long long)f, busy / 1e6, S2A_GPU_FRAME_MAX_MS, S2A_GPU_OVER_N, at - first); mtl_gpu_halt(w); }
-    else MLOG("【黄】 帧 %llu GPU 忙 %.0f ms（过 %d ms 门，第 %u 次）：照常继续；10 秒内 %d 帧都过门才安全停", (unsigned long long)f, busy / 1e6, S2A_GPU_FRAME_MAX_MS, n, S2A_GPU_OVER_N);
+// 帧 GPU 时间两道门（11-13 改，维护者：GPU 真卡死要停提交，但不许误伤单帧慢）：
+//   ① 一帧独占过 1 秒：只记黄行、照常继续（iPad14,8 / iOS 26.6 给人物画脸那一帧 1020 ms，原先这一帧就把玩家的局冻在错误页上）。
+//   ② 连续 3 帧、每帧都过 3 秒：判 GPU 卡住，暂停游戏、等玩家选（S2A_GPU_STUCK_*）。阈值按 10-31 那次定——Mac 内核在 GPU 驱动事件机里恐慌之前，
+//      是一帧接一帧 1.5–3.3 秒；3 帧各 3 秒要求 GPU 被持续压满约 10 秒，单帧慢、偶发慢够不着。宿主侧（s2a_gpu_stuck）冻游戏线程（不再往 GPU 送新活，
+//      已交的跑完），iOS 盖「继续玩 / 退出」页、Mac 弹同样两个按钮；选继续 → mtl_gpu_stuck_resume 清计数、解冻。不置 g_gpu_halt：已交、在交的照常跑完，
+//      恢复后游戏等的栅栏都还在（拒交会让恢复后的局等一个永远不来的栅栏）。驱动报 Hang / PageFault 不经这里，仍是 mtl_gpu_halt 终局
+#define S2A_GPU_FRAME_SLOW_MS 1000
+#define S2A_GPU_STUCK_MS 3000
+#define S2A_GPU_STUCK_N 3
+void s2a_gpu_stuck(const char *why);   // graphics/nvn/host_adapt.m：暂停游戏、出「继续玩 / 退出」
+static void (*g_gpu_stuck_notify)(const char *why) = s2a_gpu_stuck;   // 单测换成自己的记录函数
+static _Atomic unsigned g_gpu_slow_n;
+static os_unfair_lock g_gpu_stuck_lk = OS_UNFAIR_LOCK_INIT; static uint64_t g_gpu_stuck_last; static unsigned g_gpu_stuck_run; static int g_gpu_stuck_on;
+static void gpu_frame_slow(uint64_t f, uint64_t busy) {
+    unsigned n = atomic_fetch_add(&g_gpu_slow_n, 1) + 1;
+    if (n <= 8 || !(n & (n - 1))) MLOG("【黄】 帧 %llu GPU 忙 %.0f ms（过 %d ms，第 %u 次）：照常继续；连续 %d 帧各过 %d ms 才暂停", (unsigned long long)f, busy / 1e6, S2A_GPU_FRAME_SLOW_MS, n, S2A_GPU_STUCK_N, S2A_GPU_STUCK_MS);
+}
+static void gpu_frame_stuck(uint64_t f, uint64_t busy) {
+    os_unfair_lock_lock(&g_gpu_stuck_lk);
+    g_gpu_stuck_run = g_gpu_stuck_run && f == g_gpu_stuck_last + 1 ? g_gpu_stuck_run + 1 : 1; g_gpu_stuck_last = f;
+    unsigned run = g_gpu_stuck_run; int fire = run >= S2A_GPU_STUCK_N && !g_gpu_stuck_on; if (fire) { g_gpu_stuck_on = 1; g_gpu_stuck_run = 0; }
+    os_unfair_lock_unlock(&g_gpu_stuck_lk);
+    char w[200]; snprintf(w, sizeof w, "frame %llu kept the GPU busy %.0f ms, %u frames in a row over %d ms", (unsigned long long)f, busy / 1e6, run, S2A_GPU_STUCK_MS);
+    MLOG("【%s】 GPU 卡住判据：%s%s", fire ? "红" : "黄", w, fire ? "：暂停游戏、等玩家选继续或退出" : "");
+    if (fire && g_gpu_stuck_notify) g_gpu_stuck_notify(w);
+}
+int mtl_gpu_stuck(void) { os_unfair_lock_lock(&g_gpu_stuck_lk); int on = g_gpu_stuck_on; os_unfair_lock_unlock(&g_gpu_stuck_lk); return on; }
+// 玩家选「继续玩」：清连续计数、放开判据（宿主侧解冻游戏线程）
+void mtl_gpu_stuck_resume(void) {
+    os_unfair_lock_lock(&g_gpu_stuck_lk); int was = g_gpu_stuck_on; g_gpu_stuck_on = 0; g_gpu_stuck_run = 0; os_unfair_lock_unlock(&g_gpu_stuck_lk);
+    MLOG("GPU 卡住暂停：玩家选继续%s", was ? "，恢复" : "（本来没暂停）");
 }
 // 开始时间早于提交时刻（11-11 #647：Mac mini M4 / macOS 27.2.1，Metal 4，23 局都以本门收局，停前每帧整帧 16–24 ms 照常出帧，记到的帧 GPU
 //   每帧线性涨约一帧时长、涨过 1 秒——某个提交回报的 GPUStartTime 停在过去，跨度被一路拉长；驱动没报任何命令缓冲错误）：GPU 不可能在提交之前开始干这份活，
@@ -2234,7 +2249,9 @@ static void gpu_tag_done(uint64_t f, int qi, double sub, double g0, double g1) {
         uint64_t busy = atomic_fetch_add(&g_gpu[k].ns, excl) + excl;
         for (v = atomic_load(&g_gpu[k].t0); s0 < v && !atomic_compare_exchange_weak(&g_gpu[k].t0, &v, s0);) {}
         for (v = atomic_load(&g_gpu[k].t1); s1 > v && !atomic_compare_exchange_weak(&g_gpu[k].t1, &v, s1);) {}
-        if (busy > S2A_GPU_FRAME_MAX_MS * 1000000ull && busy - excl <= S2A_GPU_FRAME_MAX_MS * 1000000ull) gpu_frame_over(f, busy, g1);   // 这一份让本帧过门（每帧只算一次）
+        // 每道门只在让本帧跨过去的那一份算一次
+        if (busy > S2A_GPU_FRAME_SLOW_MS * 1000000ull && busy - excl <= S2A_GPU_FRAME_SLOW_MS * 1000000ull) gpu_frame_slow(f, busy);
+        if (busy > S2A_GPU_STUCK_MS * 1000000ull && busy - excl <= S2A_GPU_STUCK_MS * 1000000ull) gpu_frame_stuck(f, busy);
     }
     atomic_fetch_sub(&g_gpu[k].pending, 1);
 }
@@ -11114,6 +11131,16 @@ static int fz_reuse_op(const uint8_t *p) { for (int i = 0; i < g_fz.nreuse; i++)
 static int fz_check_on(void) { static int v = -1; if (v < 0) v = getenv("DM_NVN_FUSE_CHECK") != NULL; return v; }
 typedef struct { int idx; p_draw dw; p_draw_idx di; p_scissor sc; int has_sc; void *S_; } fz_snap;
 static fz_snap g_fzs[8]; static int g_nfzs, g_fzs_bad, g_fz_checking; static uint64_t g_fzc_same, g_fzc_diff;
+// 诊断双画（DM_NVN_FUSE_CHECK 合遍检查、DM_NVN_FB_TILE_CHECK 片上读检查）现建的临时纹理 / 缓冲（11-12：原先不进驻留集、编完命令就丢引用——
+//   Metal 4 的命令缓冲不保留资源，GPU 执行时它们已不驻留 / 已释放，报 kIOGPUCommandBufferCallbackErrorPageFault；Mac 上开片上读检查的两局缺页即此，
+//   旧的双画检查读数作废）：dbl_keep 进驻留集并记进 keep；dbl_retire 在本次提交的提交回调（GPU 做完）里才出驻留集、放引用——回调块捕获 keep，
+//   所以 GPU 执行期间它们一直活着。回调块按加入顺序跑：放在各比对块之后加
+static void dbl_keep(NSMutableArray *keep, id<MTLResource> r) { if (!r) return; res_add(r); [keep addObject:r]; }
+static void dbl_retire(NSMutableArray *keep) {
+    if (!keep.count) return;
+    NSArray *held = [keep copy]; [keep removeAllObjects];
+    [g_commit_blocks addObject:^{ for (id<MTLResource> r in held) res_remove(r); }];
+}
 static void draw(const p_draw *dw, const p_draw_idx *di);
 static void fz_snap_take(const p_draw *dw, const p_draw_idx *di) {
     if (g_nfzs >= 8) { g_fzs_bad = 1; return; }
@@ -11123,13 +11150,14 @@ static void fz_snap_take(const p_draw *dw, const p_draw_idx *di) {
 static void fz_check_run(const fuse_t *fz) {
     if (!g_nfzs || g_fzs_bad) { if (g_fzs_bad) MLOG("【红】 in-game double render: the later pass has more than 8 draws, not compared"); goto out; }
     {
-    id<MTLTexture> att[8], scr[8]; uint64_t sers[8]; int na = 0;
+    id<MTLTexture> att[8], scr[8]; uint64_t sers[8]; int na = 0; NSMutableArray *keep = [NSMutableArray array];
     // fz_end has already restored R.rt from the physical union to the later pass's logical targets; wrote is still registered by physical slot and must be aligned through p2map.
     for (int j = 0; j < fz->rt2.n && j < 8; j++) if (fz->p2map[j] >= 0 && fz->wrote[fz->p2map[j]] && fz->rt2.color[j]) {
         id<MTLTexture> t = tex_mtl(fz->rt2.color[j]); if (!t) continue;
         MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:t.pixelFormat width:t.width height:t.height mipmapped:NO];
         d.usage = MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate;
         id<MTLTexture> c = [g_dev newTextureWithDescriptor:d]; if (!c) continue;
+        dbl_keep(keep, c);
         enc_b_copy_texture(blit(), t, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(t.width, t.height, 1), c, 0, 0, MTLOriginMake(0, 0, 0));
         att[na] = t; scr[na] = c; sers[na] = fz->rt2.color[j]->serial; na++; }
     if (!na) { MLOG("【红】 in-game double render: %d draw snapshots kept, but no comparable attachment", g_nfzs); goto out; }
@@ -11143,6 +11171,8 @@ static void fz_check_run(const fuse_t *fz) {
     for (int a = 0; a < na; a++) {
         id<MTLTexture> t = att[a], c = scr[a]; NSUInteger W = t.width, H = t.height, bpp = (NSUInteger)(att_bytes(t, 0) / (W * H));
         id<MTLBuffer> b1 = [g_dev newBufferWithLength:W * H * bpp options:MTLResourceStorageModeShared], b2 = [g_dev newBufferWithLength:W * H * bpp options:MTLResourceStorageModeShared];
+        if (!b1 || !b2) continue;
+        dbl_keep(keep, b1); dbl_keep(keep, b2);
         id<MTL4ComputeCommandEncoder> b = blit();
         enc_b_copy_texture_buffer(b, c, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(W, H, 1), b1, 0, W * bpp, W * H * bpp);
         enc_b_copy_texture_buffer(b, t, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(W, H, 1), b2, 0, W * bpp, W * H * bpp);
@@ -11155,6 +11185,7 @@ static void fz_check_run(const fuse_t *fz) {
             if ((g_fzc_same + g_fzc_diff) % 300 == 0) MLOG("in-game double render totals: identical %llu times, different %llu times", (unsigned long long)g_fzc_same, (unsigned long long)g_fzc_diff);
         }];
     }
+    dbl_retire(keep);   // 临时纹理与读回缓冲持有到这次提交的 GPU 做完（排在上面各比对块之后）
     }
 out:
     for (int i = 0; i < g_nfzs; i++) free(g_fzs[i].S_);
@@ -11992,12 +12023,14 @@ static id<MTLTexture> fb_snap_shape(MTLTextureType tt, MTLPixelFormat pf, NSUInt
 static uint64_t g_fb_l5, g_fb_l5_unpush, g_fb_l5ld;   // ⑤ 的次数；其中外推参数非零、这一笔不外推的次数（fb_report）
 // DM_NVN_FB_TILE_CHECK=1（诊断，同局双画逐字节比对；每帧最多 DM_NVN_FB_TILE_CHECK 次，=1 时每帧 8 次）：命中 ⑤ 的笔先按常规路径（③ / ④）画、
 //   结果拷出；附件恢复成这一笔之前的底，再按 ⑤（读瓦片）画同一笔；两份逐字节比。同一帧、同一笔、同一组输入，不依赖两局能否复现。只比单命中的笔
-static struct { int pending, forcing, fx[32], n; uint8_t fbmask, lmap[8]; __strong id<MTLFunction> fn; __strong id<MTLTexture> att[8], s0[8]; uint64_t ser[8], frame, quota; } g_fbc;
+static struct { int pending, forcing, fx[32], n; uint8_t fbmask, lmap[8]; __strong id<MTLFunction> fn; __strong id<MTLTexture> att[8], s0[8]; __strong NSMutableArray *keep; uint64_t ser[8], frame, quota; } g_fbc;
 static _Atomic uint64_t g_fbc_same, g_fbc_diff;
 static long fbc_limit(void) { static long v = -2; if (v == -2) { const char *e = getenv("DM_NVN_FB_TILE_CHECK"); v = e && atol(e) > 0 ? (atol(e) == 1 ? 8 : atol(e)) : 0; if (v) MLOG("same-pass feedback sampling: on-chip read double render on (DM_NVN_FB_TILE_CHECK, up to %ld draws a frame)", v); } return v; }
-static id<MTLTexture> fbc_copy(id<MTLTexture> t) {   // 同形私有纹理，拷 0 级 0 层
+static id<MTLTexture> fbc_copy(id<MTLTexture> t) {   // 同形私有纹理，拷 0 级 0 层；进驻留集并持有到提交回调（dbl_keep，draw_top 末尾 dbl_retire）
     MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:t.pixelFormat width:t.width height:t.height mipmapped:NO];
     d.usage = MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate; id<MTLTexture> c = [g_dev newTextureWithDescriptor:d]; if (!c) return nil;
+    if (!g_fbc.keep) g_fbc.keep = [NSMutableArray array];
+    dbl_keep(g_fbc.keep, c);
     enc_b_copy_texture(blit(), t, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(t.width, t.height, 1), c, 0, 0, MTLOriginMake(0, 0, 0)); return c;
 }
 static struct { int on; int fx[32]; uint8_t fbmask, lmap[8]; id<MTLFunction> fn; } g_fbt;   // 本笔的片上读取方案（fb_prepare 定，draw 取管线时用，下一笔清）
@@ -12081,6 +12114,8 @@ static void draw_top(const p_draw *dw, const p_draw_idx *di) {
     for (int a = 0; a < n; a++) {
         id<MTLTexture> t = g_fbc.att[a], c = r3[a]; NSUInteger W = t.width, H = t.height, bpp = (NSUInteger)(att_bytes(t, 0) / (W * H)); if (!bpp) continue;
         id<MTLBuffer> b1 = [g_dev newBufferWithLength:W * H * bpp options:MTLResourceStorageModeShared], b2 = [g_dev newBufferWithLength:W * H * bpp options:MTLResourceStorageModeShared];
+        if (!b1 || !b2) continue;
+        dbl_keep(g_fbc.keep, b1); dbl_keep(g_fbc.keep, b2);
         enc_b_copy_texture_buffer(blit(), c, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(W, H, 1), b1, 0, W * bpp, W * H * bpp);   // 经后端 blit()，不直写 MTL4 类型（mtl4_baseline）
         enc_b_copy_texture_buffer(blit(), t, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(W, H, 1), b2, 0, W * bpp, W * H * bpp);
         unsigned long long ser = g_fbc.ser[a], pass = g_stat_pass, frame = atomic_load(&g_cur_frame); NSUInteger nb = W * H * bpp;
@@ -12093,6 +12128,7 @@ static void draw_top(const p_draw *dw, const p_draw_idx *di) {
             if (tot % 100 == 0) MLOG("on-chip read double render totals: identical %llu, different %llu", (unsigned long long)atomic_load(&g_fbc_same), (unsigned long long)atomic_load(&g_fbc_diff));
         }];
     }
+    dbl_retire(g_fbc.keep);   // s0 / r3 / b1 / b2 持有到这次提交的 GPU 做完（排在上面各比对块之后）
     for (int a = 0; a < n; a++) { g_fbc.att[a] = nil; g_fbc.s0[a] = nil; } g_fbc.fn = nil;
 }
 // After a draw: the color slots it wrote now differ from memory until the pass ends (fb_prepare copies a hit on such a slot); the same write test as udc_note_draw

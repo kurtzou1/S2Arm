@@ -983,6 +983,11 @@ class Context:
         env.pop("DEVELOPER_DIR", None)
         # GUI 不接受继承的通用 J；抽取与直连分别由 cores.sh 的阶段预算决定。
         env.pop("J", None)
+        # 宿主静默崩溃（runtime/src/native.h s2a_crash_quiet）：出包类作业里起的 s2arm-host 都是辅助运行（游戏 GLSLC / Oodle 工具模式、管线归档），
+        #   出错只写日志、按退出码交回，不按信号死、不弹 macOS「意外退出」框（玩家看到系统崩溃框、出包却成功）。起局（launch）是玩家真在玩：
+        #   照旧交给系统；只有启动器按 --control 测试实例起（S2ARM_CONTROL=1）时也静默
+        if getattr(self, "operation", None) != "launch" or os.environ.get("S2ARM_CONTROL") == "1":
+            env["S2A_CRASH_QUIET"] = "1"
         if self.r.get("spaceOverride") is True:   # 玩家点过「仍然继续」：直连阶段开工前的空间复核也只打黄（pack/jobs/space_rule.py）
             env["S2A_SPACE_OVERRIDE"] = "1"
         gid = self.r.get("gameId")

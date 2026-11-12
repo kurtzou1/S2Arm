@@ -27,6 +27,12 @@ int main(void) {
     CHECK(s2a_window_span_seen(0x0400486024DEC000ull) == 0, "⑤ 记录读不出：0（照旧 3 GiB）");
     unlink(p);
     CHECK(s2a_window_span_seen(0x0400486024DEC000ull) == 0, "⑤ 没有记录：0");
+    // ⑥ 只记真跑起来的局（11-12 iPhone 实机：一局刚开就死只碰到 2.26 GB，记下后下一局窗口缩到 5 GB 起不来、且锁死）：出图满 300 次才记
+    extern int s2a_window_span_worth(uint64_t presents);
+    CHECK(!s2a_window_span_worth(0) && !s2a_window_span_worth(299) && s2a_window_span_worth(300), "⑥ 出图 0 / 299 次不记、300 次起记");
+    // ⑦ 自愈：没按学到的跨度收窄（本进程 g_span_learned = 0）时调 forget 不动别人的记录
+    { extern void s2a_window_span_forget(void); char q[] = "/tmp/s2a_span_keep_XXXXXX"; int qd = mkstemp(q); dprintf(qd, "123\n"); close(qd);
+      setenv("S2A_WIN_SPAN_PEAK", q, 1); s2a_window_span_forget(); CHECK(access(q, F_OK) == 0, "⑦ 没收窄过：forget 不删记录"); unlink(q); }
     printf("%s t_vawin_learned：%d 处不符\n", bad ? "✗" : "✓", bad);
     return bad ? 1 : 0;
 }

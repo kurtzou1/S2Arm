@@ -566,3 +566,7 @@
 20261112-0345-joycon2-style-bits-only-when-declared.patch
 20261112-0704-nim-shop-async-object-only.patch
 20261112-0915-save-size-fallback.patch
+20261112-0935-maxwell-fmz.patch
+20261112-1144-ast-propagate-occurrences.patch
+20261112-2013-apple-audio-renderer-update-wake.patch
+20261112-2051-apple-audio-callback-slot-map.patch
