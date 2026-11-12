@@ -1,0 +1,23 @@
+name: Sync fork with upstream
+
+on:
+  schedule:
+    # Every 15 minutes (UTC). Best-effort: GitHub may delay scheduled runs under high load.
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-fork
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync fork default branch from upstream (equivalent to the "Sync fork" button)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh api -X POST /repos/kurtzou1/S2Arm/merge-upstream -f branch=main
