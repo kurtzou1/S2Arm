@@ -1,0 +1,43 @@
+name: PR branch cleanup
+
+on:
+  schedule:
+    # Every 15 minutes (UTC), offset from sync-fork's */15 to spread load.
+    - cron: '7-59/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pr-branch-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete fork branches whose upstream PRs were merged
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          FORK="kurtzou1/S2Arm"
+          UPSTREAM="jhaizhou-ops/S2Arm"
+          OWNER="kurtzou1"
+          DEFAULT=$(gh api "repos/$FORK" --jq '.default_branch')
+          # NOTE: branch names containing spaces would break this loop (none exist today).
+          for BR in $(gh api "repos/$FORK/branches?per_page=100" --jq '.[].name'); do
+            [ "$BR" = "$DEFAULT" ] && continue
+            ENC=$(printf '%s' "$BR" | jq -Rr @uri)
+            OPEN=$(gh api "repos/$UPSTREAM/pulls?state=open&head=$OWNER:$BR" --jq 'length' || echo 0)
+            if [ "${OPEN:-0}" -gt 0 ] 2>/dev/null; then echo "keep $BR (open PR)"; continue; fi
+            MERGED_AT=$(gh api "repos/$UPSTREAM/pulls?state=closed&head=$OWNER:$BR" \
+              --jq '[.[] | select(.merged_at != null)] | max_by(.merged_at) | .merged_at // empty' || true)
+            if [ -z "${MERGED_AT:-}" ]; then echo "keep $BR (no merged PR)"; continue; fi
+            TIP=$(gh api "repos/$FORK/commits/$ENC" --jq '.commit.committer.date' || true)
+            if [ -n "$TIP" ] && [[ "$TIP" > "$MERGED_AT" ]]; then
+              echo "keep $BR (has commits newer than the merged PR)"; continue
+            fi
+            gh api -X DELETE "repos/$FORK/git/refs/heads/$ENC" && echo "deleted $BR (PR merged upstream at $MERGED_AT)"
+          done
