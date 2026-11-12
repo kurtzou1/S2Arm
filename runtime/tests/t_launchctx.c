@@ -41,8 +41,10 @@ static int child_container(const char *home) {
     CK(!s2a_launch_ctx_game_env_dir("/x"), "选之前没有每款 env.txt 目录");
     const char *r = s2a_launch_ctx_select("0100000000000BAD");
     CK(r && strstr(r, "不在本包游戏清单"), "gid 不在清单 → 拒绝");
+    CK(s2a_launch_ctx_select_kind() == S2A_SELECT_APP_INCOMPLETE, "不在清单 → 类别 APP_INCOMPLETE（屏上说「在电脑上重新装到 iPhone」）");
     r = s2a_launch_ctx_select("0100000000000002");
     CK(r && strstr(r, "镜像包"), "清单里有、镜像包缺 → 拒绝");
+    CK(s2a_launch_ctx_select_kind() == S2A_SELECT_APP_INCOMPLETE, "镜像包缺 → 类别 APP_INCOMPLETE");
     CK(!s2a_launch_ctx_get() && !getenv("S2A_DOCS"), "选失败不冻结、不写环境");
     r = s2a_launch_ctx_select("0100000000000001");
     CK(!r, "合规的那款 → 选中");
@@ -58,6 +60,7 @@ static int child_container(const char *home) {
     const char *gd = s2a_launch_ctx_game_env_dir(pd); CK(gd && !strcmp(gd, want), "本款 env.txt 目录 = 本款文档根（host_run 补读）");
     r = s2a_launch_ctx_select("0100000000000001");
     CK(r && strstr(r, "重新打开"), "同一款二次 select → 拒绝，提示重开");
+    CK(s2a_launch_ctx_select_kind() == S2A_SELECT_OTHER, "二次 select → 类别 OTHER（不说成「不完整」）");
     r = s2a_launch_ctx_select("0100000000000BAD");
     CK(r && strstr(r, "重新打开") && s2a_launch_ctx_get() == g && !strcmp(g->game_id, "0100000000000001"), "换一款二次 select → 拒绝，上下文不变");
     return bad;

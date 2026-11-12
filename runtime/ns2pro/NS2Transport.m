@@ -88,7 +88,8 @@ static dispatch_source_t mailboxWake;
 static char queueKey;
 static float rumbleGain = 2;
 static ns2_info deviceInfo;
-static ns2_motion latestMotion;
+static ns2_motion latestMotion, latestMotionLeft;
+static ns2_mouse latestMouse[2];   // Joy-Con 2 光学鼠标最近一笔，[0] 左只、[1] 右只（拼成一对时两只各一份），只经 ns2_get_mouse_side 读   // latestMotionLeft：拼对时左只的六轴（latestMotion 是右只的），只经 ns2_get_motion_left 读
 static BOOL motionRequested;
 static ns2_state_callback stateCallback;
 static ns2_status_callback statusCallback;
@@ -177,13 +178,13 @@ static void refresh_locked(void) {
 static void reset_global_locked(void) {
     ready = NO; wantedMask = submittedMask = stopMask = 0;
     rumbleRequests = quantizedSilentRequests = 0;
-    memset(&latestMotion, 0, sizeof latestMotion);
+    memset(&latestMotion, 0, sizeof latestMotion); memset(&latestMotionLeft, 0, sizeof latestMotionLeft); memset(latestMouse, 0, sizeof latestMouse);
     memset(wanted, 0, sizeof wanted); memset(actual, 0, sizeof actual);
 }
 // 输出形态在单只 / 拼对之间切换：震动归属变了，丢掉未发的请求、已提交有效幅码的侧安排停止包，运动样本作废；游戏的下一次请求照常进来。
 static void reroute_locked(void) {
     memset(wanted, 0, sizeof wanted); wantedMask = 0; stopMask |= submittedMask;
-    memset(&latestMotion, 0, sizeof latestMotion);
+    memset(&latestMotion, 0, sizeof latestMotion); memset(&latestMotionLeft, 0, sizeof latestMotionLeft); memset(latestMouse, 0, sizeof latestMouse);
 }
 // 一条链路失效 / 重新开始握手：断线后立即丢弃旧物理连接的输入和震动数值。
 // 另一条没有在用时等同改前的 reset_state（Pro 永远走这一支）；另一条在用而这条刚才也在用，说明拼对拆开，改走 reroute。
@@ -462,6 +463,8 @@ static NS2Bridge *bridge;
 - (NSString *)vibrationUUIDForKind { return kind == NS2_KIND_JOYCON_L ? joyconLeftVibrationUUID : kind == NS2_KIND_JOYCON_R ? joyconRightVibrationUUID : vibrationUUID; }
 - (BOOL)joycon { return is_joycon(kind); }
 - (NSUInteger)initializationSteps { return 9u; }
+// 功能位：Pro 0x2b / 0x2f（带 IMU）；Joy-Con 2 去掉 Pro 才有的 0x08、加上 0x10 光学鼠标 = 0x33 / 0x37（同官方序列）
+- (uint8_t)featureBits:(BOOL)imu { return (uint8_t)(((imu ? 0x2f : 0x2b) & ([self joycon] ? ~0x08 : 0xff)) | ([self joycon] ? 0x10 : 0)); }
 - (NSData *)commandForStep {
     uint8_t bytes[28] = {0, 0x91, 1, 0, 0, 0, 0, 0}; size_t length = 8;
     switch (step) {
@@ -470,15 +473,15 @@ static NS2Bridge *bridge;
             bytes[0] = 2; bytes[3] = 4; bytes[5] = 8; length = 16;
             bytes[8] = 0x40; bytes[9] = 0x7e; bytes[12] = step == 1 ? 0x80 : 0xc0; bytes[13] = 0x30; bytes[14] = 1; break;
         case 3: bytes[0] = 3; bytes[3] = 0x0a; bytes[5] = 4; bytes[8] = 5; length = 12; break;
-        // 功能位：Pro 0x2b / 0x2f；Joy-Con 2 去掉 Pro 才有的 0x08（官方 Joy-Con 序列是 0x37，其中 0x10 光学鼠标不开）= 0x23 / 0x27
-        case 4: bytes[0] = 0x0c; bytes[3] = 2; bytes[5] = 4; bytes[8] = (motionCallback ? 0x2f : 0x2b) & ([self joycon] ? ~0x08 : 0xff); length = 12; break;
+        // 功能位见 featureBits：Joy-Con 2 另开 0x10 光学鼠标（官方序列 0x37 也开），要 Joy-Con 2 鼠标的游戏读它判断是不是 Joy-Con 2、取位移
+        case 4: bytes[0] = 0x0c; bytes[3] = 2; bytes[5] = 4; bytes[8] = [self featureBits:motionCallback != nil]; length = 12; break;
         case 5: {
             bytes[0] = 0x0a; bytes[3] = 8; bytes[5] = 20; length = 28;
             bytes[8] = 1; memset(bytes + 9, 0xff, 8); bytes[17] = 0x35; bytes[19] = 0x46; break;
         }
         case 6:
             bytes[0] = 0x0c; bytes[3] = 4; bytes[5] = 4; length = 12;
-            pthread_mutex_lock(&stateMu); bytes[8] = (motionCallback && motionRequested ? 0x2f : 0x2b) & ([self joycon] ? ~0x08 : 0xff); pthread_mutex_unlock(&stateMu);
+            pthread_mutex_lock(&stateMu); bytes[8] = [self featureBits:motionCallback && motionRequested]; pthread_mutex_unlock(&stateMu);
             break;
         // 玩家1常亮；采用已公开且在冷启动有效的 09/07 bitmask 命令。
         // Player1 steady light, using the documented 09/07 bitmask command that works on cold start.
@@ -652,14 +655,25 @@ static NS2Bridge *bridge;
     // 拼对时单路六轴只用右只的、不转向；否则（Pro / 单只）同改前
     BOOL paired = pair_locked();
     ns2_motion motion = {0};
-    BOOL publishMotion = motionCallback && motionRequested && imuEnabled && !motionCommand && active && linkShared[slot].ready && !terminal &&
-        (!paired || kind == NS2_KIND_JOYCON_R);
+    BOOL motionOn = motionRequested && imuEnabled && !motionCommand && active && linkShared[slot].ready && !terminal;
+    BOOL publishMotion = motionCallback && motionOn && (!paired || kind == NS2_KIND_JOYCON_R);
     if (publishMotion && ns2_decode_report05_motion(data.bytes, data.length, &motion)) {
         // 部分固件的设备时钟不可靠；对外用接收时的单调时钟，设备值保留用于诊断。
         // Some firmware has unreliable device timestamps; export monotonic arrival time and retain the device value for diagnostics.
         motion.host_timestamp_us = now_ns() / 1000;
         if (!paired) ns2_joycon_sideways_motion(kind, &motion);   // 单只 Joy-Con 2：换成横握视角；Pro 不动
         latestMotion = motion;
+    }
+    // 拼对时左只的六轴另存（不经回调、不转向）：Mac 启动器通道 INPUT 包的 motion_left 带给宿主，游戏的左手传感器用它（手柄当车把左右一起倾斜时，左右两只坐标相反，
+    //   只给右只的读数会被游戏当成两只反向转、互相抵消）
+    else if (paired && kind == NS2_KIND_JOYCON_L && motionOn) {
+        ns2_motion left = {0};
+        if (ns2_decode_report05_motion(data.bytes, data.length, &left)) { left.host_timestamp_us = now_ns() / 1000; latestMotionLeft = left; }
+    }
+    // Joy-Con 2 光学鼠标：左右两只各存一份（拼成一对时游戏左右两侧都读；只存右只的话玩家拿左只玩鼠标操作没反应）；与体感开不开无关
+    if ((kind == NS2_KIND_JOYCON_L || kind == NS2_KIND_JOYCON_R) && active && linkShared[slot].ready && !terminal) {
+        ns2_mouse mouse = {0};
+        if (ns2_decode_report05_mouse(data.bytes, data.length, &mouse)) { mouse.kind = kind; mouse.host_timestamp_us = now_ns() / 1000; latestMouse[kind == NS2_KIND_JOYCON_R] = mouse; }
     }
     pthread_mutex_unlock(&stateMu);
     if (headsetChanged) LOG("NS2 Pro BLE 耳机插入：%s（仅插入检测，未实现音频流）", headsetConnected ? "是" : "否");
@@ -1037,7 +1051,7 @@ static NS2Bridge *bridge;
     if (scanRequested || scanDeadline) [self stopScanning];   // 给单只找另一侧的扫描一并停掉（Pro 连着时本来就没在扫）
     pthread_mutex_lock(&stateMu);
     active = NO;
-    memset(&latestMotion, 0, sizeof latestMotion);
+    memset(&latestMotion, 0, sizeof latestMotion); memset(&latestMotionLeft, 0, sizeof latestMotionLeft); memset(latestMouse, 0, sizeof latestMouse);
     memset(wanted, 0, sizeof wanted); memset(actual, 0, sizeof actual); wantedMask = 0;
     pthread_mutex_unlock(&stateMu);
     if (keepA) [a beginPause];
@@ -1250,7 +1264,7 @@ int ns2_start_with_motion(ns2_state_callback state, ns2_status_callback status, 
         rumbleRequests = quantizedSilentRequests = 0;
         memset(linkShared, 0, sizeof linkShared);
         memset(&deviceInfo, 0, sizeof deviceInfo);
-        memset(&latestMotion, 0, sizeof latestMotion);
+        memset(&latestMotion, 0, sizeof latestMotion); memset(&latestMotionLeft, 0, sizeof latestMotionLeft); memset(latestMouse, 0, sizeof latestMouse);
         motionRequested = motion != NULL;
         memset(wanted, 0, sizeof wanted); memset(actual, 0, sizeof actual); rumbleGain = gainValue;
         pthread_mutex_unlock(&stateMu);
@@ -1265,7 +1279,7 @@ void ns2_set_motion_enabled(int enabled) {
     BOOL next = enabled && !terminal;
     if (motionRequested != next) {
         motionRequested = next;
-        memset(&latestMotion, 0, sizeof latestMotion);
+        memset(&latestMotion, 0, sizeof latestMotion); memset(&latestMotionLeft, 0, sizeof latestMotionLeft); memset(latestMouse, 0, sizeof latestMouse);
         if (mailboxWake) dispatch_source_merge_data(mailboxWake, 1);
     }
     pthread_mutex_unlock(&stateMu);
@@ -1277,7 +1291,7 @@ void ns2_set_active(int enabled) {
         BOOL changed = active != next;
         active = next;
         if (changed) {
-            memset(&latestMotion, 0, sizeof latestMotion);
+            memset(&latestMotion, 0, sizeof latestMotion); memset(&latestMotionLeft, 0, sizeof latestMotionLeft); memset(latestMouse, 0, sizeof latestMouse);
             memset(wanted, 0, sizeof wanted); memset(actual, 0, sizeof actual);
             wantedMask = 0; stopMask |= submittedMask;
         }
@@ -1365,6 +1379,22 @@ void ns2_get_motion(ns2_motion *out) {
     pthread_mutex_lock(&stateMu);
     *out = latestMotion;
     if (!ready || !active || !motionRequested || terminal || now_ns() / 1000 - out->host_timestamp_us > 250000)
+        memset(out, 0, sizeof *out);
+    pthread_mutex_unlock(&stateMu);
+}
+void ns2_get_motion_left(ns2_motion *out) {   // 拼对时左只的六轴；没拼对、没开、超过 250 毫秒没更新 → 全 0（同 ns2_get_motion）
+    if (!out) return;
+    pthread_mutex_lock(&stateMu);
+    *out = latestMotionLeft;
+    if (!ready || !active || !motionRequested || terminal || !pair_locked() || now_ns() / 1000 - out->host_timestamp_us > 250000)
+        memset(out, 0, sizeof *out);
+    pthread_mutex_unlock(&stateMu);
+}
+void ns2_get_mouse_side(int side, ns2_mouse *out) {
+    if (!out) return;
+    pthread_mutex_lock(&stateMu);
+    *out = side == 0 || side == 1 ? latestMouse[side] : (ns2_mouse){0};
+    if (!ready || !active || terminal || now_ns() / 1000 - out->host_timestamp_us > 250000)
         memset(out, 0, sizeof *out);
     pthread_mutex_unlock(&stateMu);
 }

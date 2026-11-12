@@ -162,6 +162,22 @@ static void send_snapshot(void) {
     packet = snapshot;
     pthread_mutex_unlock(&relayLock);
     if (fd < 0) return;
+    // Joy-Con 2 拼成一对：左只的六轴放进 INPUT 包的 motion_left（motion 是右只的，ns2_relay.h）
+    ns2_motion left = {0};
+    if (packet.ready) ns2_get_motion_left(&left);
+    packet.motion_left_known = left.known ? 1 : 0;
+    if (left.known) packet.motion_left = (ns2_relay_motion_left){left.acceleration_x, left.acceleration_y, left.acceleration_z, left.gyro_x, left.gyro_y, left.gyro_z,
+        (uint32_t)left.host_timestamp_us, (uint32_t)(left.host_timestamp_us >> 32)};
+
+    // Joy-Con 2 光学鼠标：放进 INPUT 包的 mouse（ns2_relay.h；旧宿主不读这段）。只有一份位置：拼成一对、两只都有读数时一包左一包右轮流
+    //   （mouse_kind 标是哪一只；坐标是绝对值，宿主按一侧各自求差，轮流只是每侧取样减半）
+    static unsigned mouseTurn;
+    ns2_mouse mouse = {0}, sides[2] = {{0}};
+    if (packet.ready) { ns2_get_mouse_side(0, &sides[0]); ns2_get_mouse_side(1, &sides[1]); }
+    if (sides[0].known && sides[1].known) mouse = sides[mouseTurn++ & 1];
+    else mouse = sides[1].known ? sides[1] : sides[0];
+    packet.mouse_kind = mouse.known ? (uint8_t)mouse.kind : 0;
+    if (mouse.known) packet.mouse = (ns2_relay_mouse){mouse.x, mouse.y, mouse.surface, mouse.distance};
 
     ssize_t sent = send(fd, &packet, sizeof packet, MSG_DONTWAIT);
     if (sent != (ssize_t)sizeof packet) drop_client(fd);

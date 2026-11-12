@@ -51,6 +51,21 @@ ns2_kind ns2_get_output_kind(void);
 // 复制最近运动样本，超过 250 ms 或断开后清空；不产生设备访问。
 // Copy the latest motion sample, clearing it after 250 ms or disconnection without accessing hardware.
 void ns2_get_motion(ns2_motion *out);
+// Joy-Con 2 左右拼成一对时左只的六轴（ns2_get_motion 给的是右只的）；不在拼对 / 没开 / 过期时全 0
+void ns2_get_motion_left(ns2_motion *out);
+// Joy-Con 2 光学鼠标（report05 0x10–0x17，功能位 0x10）：x / y 是绝对坐标（16 位、会回绕，用的一方自己求差），
+//   surface 未知含义（研究资料写「表面质量？」），distance = 离开桌面的距离（0x17 一个字节，0 = 贴在桌面上）。kind 是读数来自哪一只（左 / 右）
+typedef struct {
+    uint8_t known;
+    ns2_kind kind;
+    int16_t x, y;
+    uint16_t surface, distance;
+    uint64_t host_timestamp_us;
+} ns2_mouse;
+// https://github.com/ndeadly/switch2_controller_research/blob/master/hid_reports.md#input-report-0x05
+int ns2_decode_report05_mouse(const uint8_t *bytes, size_t length, ns2_mouse *out);
+// 指定一侧（0 左、1 右，拼成一对时两只各一份）最近一笔 Joy-Con 2 鼠标读数；Pro / 断开 / 那一侧没有 / 超过 250 毫秒没更新 → 全 0
+void ns2_get_mouse_side(int side, ns2_mouse *out);
 typedef struct {
     uint8_t connected, ready;
     uint8_t battery_known;

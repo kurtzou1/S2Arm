@@ -6,15 +6,21 @@ mode 0700; a concurrently hostile process with the same UID is outside this
 boundary. Inside staging, directory/file creation remains exclusive and uses
 no-follow descriptors. Linux publishes the complete absent destination with
 renameat2(RENAME_NOREPLACE); macOS keeps normal clonefile behavior and publishes
-only each EXDEV fallback item with renamex_np(RENAME_EXCL); a volume without
-RENAME_EXCL (exFAT) publishes after an existence check instead. Traversal holds a constant number of descriptors.
-Stale staging cleanup assumes users of a parent share the same PID namespace;
-the parent must not be shared between containers with separate PID namespaces.
-The published Linux snapshot root retains mode 0700, like the staging root.
-Regular-file and directory mode and timestamps are copied; directory owner write
-is added for disposable snapshots. Symlink timestamps are copied when the host
-supports it. File/directory extended attributes are best effort where Python and
-the filesystem expose them; ACLs are not guaranteed by this fallback.
+each EXDEV / ENOTSUP fallback item with renamex_np(RENAME_EXCL). When the volume
+does not support exclusive rename (exFAT on macOS), publication falls back to
+"rename only if the target is absent"—the private staging directory keeps the
+same-UID race outside this boundary. Traversal holds a constant number of
+descriptors. Stale staging cleanup assumes users of a parent share the same PID
+namespace; the parent must not be shared between containers with separate PID
+namespaces. The published Linux snapshot root retains mode 0700, like the staging
+root. Regular-file and directory mode and timestamps are copied; directory owner
+write is added for disposable snapshots. Symlink timestamps are copied when the
+host supports it. File/directory extended attributes are best effort where Python
+and the filesystem expose them; ACLs are not guaranteed by this fallback.
+
+macOS exFAT stores Finder metadata as AppleDouble ``._*`` sidecars next to every
+file. Those names are skipped as content, and ENOENT while removing a staging
+tree (the sidecar vanishing with its data file) is treated as already gone.
 """
 import ctypes, errno, os, re, shutil, stat, sys, tempfile, time
 
@@ -37,6 +43,11 @@ platform = sys.platform
 if platform != 'darwin' and not platform.startswith('linux') and platform != 'win32':
     print('克隆失败：不支持的宿主', file=sys.stderr); sys.exit(1)
 libc = ctypes.CDLL('libc.dylib' if platform == 'darwin' else None, use_errno=True) if platform != 'win32' else None
+
+
+def appledouble(name):
+    """macOS 在 exFAT / 部分外接盘上为每个文件生成的 AppleDouble 附属名（._main 配 main）。不是游戏内容。"""
+    return isinstance(name, str) and name.startswith('._')
 
 
 def publish_noreplace(source, target):
@@ -148,6 +159,7 @@ def copy_one(source_root_fd, source_name, target_root_fd, target_name, _depth, f
                         os.mkdir(dest, 0o700, dir_fd=target_parent)
                         stack.append(('finish', source_parts, target_parts, (actual.st_dev, actual.st_ino)))
                         for entry in reversed(sorted(os.listdir(inp))):
+                            if appledouble(entry) or entry in skip: continue
                             stack.append(('copy', source_parts + (entry,), target_parts + (entry,), None))
                     else:
                         out = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=target_parent)
@@ -172,7 +184,12 @@ def reject_followed_overlap(source_fd, name, target, staging):
 
 
 def remove_stage(path):
-    """Remove a private tree without retaining an fd per level."""
+    """Remove a private tree without retaining an fd per level.
+
+    On exFAT, creating ``payload`` also creates ``._payload``. Renaming or
+    unlinking the data file can make the sidecar vanish before we reach it in
+    the directory listing; treat that ENOENT as already removed.
+    """
     root = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         stack = [((), False)]
@@ -180,7 +197,9 @@ def remove_stage(path):
             parts, finish = stack.pop()
             if finish:
                 parent = open_parent(root, parts[:-1])
-                try: os.rmdir(parts[-1], dir_fd=parent)
+                try:
+                    try: os.rmdir(parts[-1], dir_fd=parent)
+                    except FileNotFoundError: pass
                 finally: os.close(parent)
                 continue
             fd = open_parent(root, parts)
@@ -188,12 +207,19 @@ def remove_stage(path):
                 os.fchmod(fd, stat.S_IMODE(os.fstat(fd).st_mode) | 0o700)
                 if parts: stack.append((parts, True))
                 for name in os.listdir(fd):
-                    st = os.stat(name, dir_fd=fd, follow_symlinks=False)
-                    if stat.S_ISDIR(st.st_mode): stack.append((parts + (name,), False))
-                    else: os.unlink(name, dir_fd=fd)
+                    try:
+                        st = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue
+                    if stat.S_ISDIR(st.st_mode):
+                        stack.append((parts + (name,), False))
+                    else:
+                        try: os.unlink(name, dir_fd=fd)
+                        except FileNotFoundError: pass
             finally: os.close(fd)
     finally: os.close(root)
-    os.rmdir(path)
+    try: os.rmdir(path)
+    except FileNotFoundError: pass
 
 
 def sweep_stale(parent):
@@ -228,7 +254,7 @@ def linux_snapshot():
             stage_fd = os.open(stage, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             try:
                 for name in sorted(os.listdir(source_fd)):
-                    if name in skip: continue
+                    if name in skip or appledouble(name): continue
                     reject_followed_overlap(source_fd, name, dst, stage)
                     copy_one(source_fd, name, stage_fd, name, 1, True)
                 # Keep the unpublished tree private throughout construction.
@@ -258,7 +284,7 @@ def mac_snapshot():
     made = []; bad = 0
     try:
         for name in sorted(os.listdir(source_fd)):
-            if name in skip: continue
+            if name in skip or appledouble(name): continue
             target = os.path.join(dst, name)
             try:
                 reject_followed_overlap(source_fd, name, target, dst)
@@ -289,7 +315,7 @@ def win_snapshot():
         if m and not pid_alive(int(m.group(1))): shutil.rmtree(os.path.join(parent, name), ignore_errors=True)
     stage = private_stage(parent)
     try:
-        shutil.copytree(src, os.path.join(stage, 'payload'), symlinks=True, ignore=lambda d, names: [n for n in names if os.path.samefile(d, src) and n in skip])
+        shutil.copytree(src, os.path.join(stage, 'payload'), symlinks=True, ignore=lambda d, names: [n for n in names if (os.path.samefile(d, src) and n in skip) or appledouble(n)])
         os.rename(os.path.join(stage, 'payload'), dst)
     finally: shutil.rmtree(stage, ignore_errors=True)
 

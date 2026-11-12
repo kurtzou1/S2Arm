@@ -19,6 +19,7 @@
 #include <errno.h>
 #if defined(__APPLE__)
 #include <mach/mach.h>
+#include <sys/sysctl.h>
 #endif
 #ifdef S2A_THREAD_PLAT_VARIANT
 #define main t_thread_main
@@ -1597,6 +1598,22 @@ int main(void) {
         for (int i = 0; i < 300; i++) { uint64_t *r = SV(0x15, 0, ta, 0x1000, 3); if (r[0]) { rc = r[0]; break; } nt++; }
         CHECK(nt == 128 && rc == 0x10801, "传输内存上限：应同时存在 128 个后回 0x10801；实 %d 个、回 %#llx", nt, (unsigned long long)rc);
         #undef SV
+    }
+    {   // 3 号核游戏线程的 QoS（11-12 一款 Switch 2 游戏 0400486024DEC000 长帧）：性能核 ≥ 4 缺省与其余游戏线程同档、不足 4 个缺省 UTILITY；
+        //   S2A_SYSCORE_QOS=same / utility 两头强制。期望按「本机性能核数」手写分支（hw.perflevel0.physicalcpu）
+        g_case = "3 号核线程 QoS";
+        qos_class_t s2a_test_guest_qos(int, uint64_t);
+        unsetenv("S2A_SYSCORE_QOS"); unsetenv("S2A_GUEST_QOS");
+        int pc = 0; size_t pcs = sizeof pc; if (sysctlbyname("hw.perflevel0.physicalcpu", &pc, &pcs, NULL, 0) || pc <= 0) { pcs = sizeof pc; if (sysctlbyname("hw.physicalcpu", &pc, &pcs, NULL, 0) || pc <= 0) pc = 8; }
+        qos_class_t other = s2a_test_guest_qos(0, 0x7), core3 = s2a_test_guest_qos(0, 1ull << 3);
+        if (pc >= 4) CHECK(core3 == other && core3 != QOS_CLASS_UTILITY, "缺省（性能核 %d ≥ 4）：3 号核线程应与其余游戏线程同档（%#x），实 %#x", pc, other, core3);
+        else CHECK(core3 == QOS_CLASS_UTILITY, "缺省（性能核 %d < 4）：3 号核线程应为 UTILITY，实 %#x", pc, core3);
+        setenv("S2A_SYSCORE_QOS", "same", 1);
+        CHECK(s2a_test_guest_qos(0, 1ull << 3) == other, "S2A_SYSCORE_QOS=same：3 号核线程应与其余游戏线程同档（%#x），实 %#x", other, s2a_test_guest_qos(0, 1ull << 3));
+        setenv("S2A_SYSCORE_QOS", "utility", 1);
+        CHECK(s2a_test_guest_qos(0, 1ull << 3) == QOS_CLASS_UTILITY, "S2A_SYSCORE_QOS=utility：3 号核线程应为 UTILITY，实 %#x", s2a_test_guest_qos(0, 1ull << 3));
+        CHECK(s2a_test_guest_qos(0, 0x7) == other, "S2A_SYSCORE_QOS=utility 不该动别的核掩码（%#x），实 %#x", other, s2a_test_guest_qos(0, 0x7));
+        unsetenv("S2A_SYSCORE_QOS");
     }
     {   // SleepThread 按时醒（10-25 数码宝贝断续：utility QoS 下 nanosleep 睡 31 ms 平均多睡 103 ms）：本线程降 utility，睡 30 ms，
         //   判挂的定时器（见 timer_ok）；实测多睡只报数。放最后：本线程 QoS 改了不影响前面各例

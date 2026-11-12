@@ -75,4 +75,15 @@ void s2a_pad_set_motion_enabled(int enabled);
 int s2a_pad_read_motion(s2a_pad_motion *out);
 // 可选：左右两路体感（Mac Joy-Con HID）。返回写入条数 0..2；out[0]=左、out[1]=右。没有此导出时服务层只走 s2a_pad_read_motion。
 int s2a_pad_read_motion_pair(s2a_pad_motion out[2]);
+// 可选（Mac）：Joy-Con 2 光学鼠标，一侧一份。side 0 = 左只、1 = 右只、0xff = 这一侧没连；
+//   known = 有鼠标读数：x / y 是手柄报告的绝对坐标（16 位、会回绕，服务层求差），distance = 离开桌面的距离（0 = 贴着桌面）。
+//   没有此导出时服务层不写 Jcms 缓冲（游戏认为没有 Joy-Con 2）
+typedef struct {
+    uint64_t host_timestamp_us;
+    int16_t x, y;
+    uint16_t distance;
+    uint8_t side, known;
+} s2a_pad_mouse;
+// 左右各一份。返回连着几侧（0 = 没有 Joy-Con 2）；out[0] 左只、out[1] 右只，没连的那侧 side = 0xff
+int s2a_pad_read_mouse_pair(s2a_pad_mouse out[2]);
 #endif

@@ -25,4 +25,6 @@ uint64_t s2a_mac_ns2_rumble_session(void);
 void s2a_mac_ns2_set_rumble_pair(uint64_t session, const s2a_pad_vibration values[2]);
 void s2a_mac_ns2_stop_rumble(uint64_t session);
 int s2a_mac_ns2_read_motion(s2a_pad_motion *out);
+int s2a_mac_ns2_read_motion_pair(s2a_pad_motion out[2]);   // Joy-Con 2 拼对：[左, 右] 返回 2；一路返回 1
+int s2a_mac_ns2_read_mouse_pair(s2a_pad_mouse out[2]);   // 左右各一份（s2a_pad.h s2a_pad_read_mouse_pair）
 #endif

@@ -113,8 +113,10 @@ PY
     [ -s "$OUT/vk/vk_shaders.tsv" ] || { say "🔴 没出 $OUT/vk/vk_shaders.tsv"; exit 1; }
     : > "$OUT/keys.tsv"; say "🟡 Vulkan 款 ${TID}：离线一支没编成（失败 ${VOK##* }），只出表头、全部设备首遇现编，$((SECONDS - s)) 秒"; exit 0
   fi
-  [ -s "$OUT/vk/vk_shaders.metallib" ] && [ -s "$OUT/vk/vk_shaders.tsv" ] || { say "🔴 没出 $OUT/vk/vk_shaders.metallib / .tsv"; exit 1; }
+  # 两个目标各剔各的（审计 P1-176）：别的目标编成、这个目标（$OUT = iPhone）一支不剩时只有表头没有库，照出、keys.tsv 空
+  [ -s "$OUT/vk/vk_shaders.tsv" ] || { say "🔴 没出 $OUT/vk/vk_shaders.tsv"; exit 1; }
   grep -v '^#' "$OUT/vk/vk_shaders.tsv" | cut -f1 | sort -u > "$OUT/keys.tsv"
+  [ ! -s "$OUT/keys.tsv" ] || [ -s "$OUT/vk/vk_shaders.metallib" ] || { say "🔴 表里有 $(wc -l < "$OUT/keys.tsv" | tr -d ' ') 支却没出 $OUT/vk/vk_shaders.metallib"; exit 1; }
   say "Vulkan 款 ${TID}：SPIR-V $(wc -l < "$OUT/keys.tsv" | tr -d ' ') 支 → vk/vk_shaders.metallib $(du -h "$OUT/vk/vk_shaders.metallib" | cut -f1)，$((SECONDS - s)) 秒（$(tail -1 "$C/vk_shaders.log" | cut -c1-120)）"
   exit 0
 fi
@@ -139,11 +141,13 @@ if [ "${API%%	*}" = gl ]; then
   if [ "$grc" = 0 ] && [ "${GOK%% *}" = 0 ]; then   # 成功 0：离线一支没有（失败 0）或一支都没译成（失败 > 0，v0.3.1 起照出空表）
     [ -s "$OUT/gl/gl_shaders.tsv" ] || { say "🔴 没出 $OUT/gl/gl_shaders.tsv"; exit 1; }
     : > "$OUT/keys.tsv"
-    say "🟡 OpenGL 款 ${TID}：离线 0 支 GLSL（运行时拼源码的引擎；没有 main 的片段记跳过），只出表头、全部运行时首遇现编（gl/gl_shaders.tsv），$((SECONDS - s)) 秒（$(tail -1 "$C/gl_shaders.log" | cut -c1-120)）"
+    if [ "${GMISS:-0}" -gt 0 ]; then say "🟡 OpenGL 款 ${TID}：离线一支没编成（编译失败 ${GMISS} 支），只出表头、全部运行时首遇现编（gl/gl_shaders.tsv），$((SECONDS - s)) 秒"
+    else say "🟡 OpenGL 款 ${TID}：离线 0 支 GLSL（运行时拼源码的引擎；没有 main 的片段记跳过），只出表头、全部运行时首遇现编（gl/gl_shaders.tsv），$((SECONDS - s)) 秒（$(tail -1 "$C/gl_shaders.log" | cut -c1-120)）"; fi
     exit 0
   fi
-  [ -s "$OUT/gl/gl_shaders.metallib" ] && [ -s "$OUT/gl/gl_shaders.tsv" ] || { say "🔴 没出 $OUT/gl/gl_shaders.metallib / .tsv"; exit 1; }
+  [ -s "$OUT/gl/gl_shaders.tsv" ] || { say "🔴 没出 $OUT/gl/gl_shaders.tsv"; exit 1; }
   grep -v '^#' "$OUT/gl/gl_shaders.tsv" | cut -f1 | sort -u > "$OUT/keys.tsv"
+  [ ! -s "$OUT/keys.tsv" ] || [ -s "$OUT/gl/gl_shaders.metallib" ] || { say "🔴 表里有 $(wc -l < "$OUT/keys.tsv" | tr -d ' ') 支却没出 $OUT/gl/gl_shaders.metallib"; exit 1; }   # 同 Vulkan：这个目标一支不剩时只有表头
   say "$([ "$GMISS" = 0 ] || echo "🟡 直连缺口（部分出库）：GLSL 翻不了 ${GMISS} 支（运行时走现编 / 兜底）；")OpenGL 款 ${TID}：GLSL $(wc -l < "$OUT/keys.tsv" | tr -d ' ') 支 → gl/gl_shaders.metallib $(du -h "$OUT/gl/gl_shaders.metallib" | cut -f1)，$((SECONDS - s)) 秒（$(tail -1 "$C/gl_shaders.log" | cut -c1-120)）"
   exit 0
 fi

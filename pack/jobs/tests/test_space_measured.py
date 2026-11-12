@@ -180,9 +180,9 @@ class SpaceMeasured(JobCase):
 
     def test_windows_exfat_location_counts_two_more_copies(self):
         # v0.3.1：Windows 存放位置在 exFAT / FAT32（建不了目录链接，实目录模式 + 工作根整份拷）：再多两份。原件 10 GB 的 iPhone 包：
-        #   NTFS = 解包 11 + Windows 不克隆 11 + 直连 15 + IMG 10 = 47 GB；exFAT 再加 22 = 69 GB
+        #   NTFS = 解包 11 + Windows 不克隆 11 + 直连 15 = 37 GB（IMG 边写边腾解包、不另占，#746）；exFAT 再加 22 = 59 GB
         c = self.context("ipa")
-        for fmt, need in (("ntfs", 47_000_000_000), ("exfat", 69_000_000_000)):
+        for fmt, need in (("ntfs", 37_000_000_000), ("exfat", 59_000_000_000)):
             import space_rule
             with self.subTest(fmt=fmt), as_windows(library, space_rule), patch.object(library, "volume_format", return_value=fmt):
                 b = self.budget(c, self.game(10 * 10**9))
@@ -200,8 +200,8 @@ class SpaceMeasured(JobCase):
                 self.assertEqual("不能克隆" in b.get("note", ""), fmt == "hfs")
 
     def test_budget_splits_location_and_cache_volumes(self):
-        # P1-165：存放位置与工具缓存在两块盘时，各按自己那份需求和自己的余量判；期望手算：原件 16 GB → 存放位置 16 × 1.1 + 单一 IMG 16 = 33.6 GB
-        #   （打 iPhone 包写 game.img 在存放位置，11-11），工具缓存 15 GB（≥ 3 GB 档）
+        # P1-165：存放位置与工具缓存在两块盘时，各按自己那份需求和自己的余量判；期望手算：原件 16 GB → 存放位置 16 × 1.1 = 17.6 GB
+        #   （打 iPhone 包写 game.img 在存放位置，边写边腾解包、不另占，#746），工具缓存 15 GB（≥ 3 GB 档）
         c = self.context("ipa")
         loc, cache = Path(self.root) / "ext", Path(self.root) / "cache"
         class St:   # 两个假卷号
@@ -214,9 +214,9 @@ class SpaceMeasured(JobCase):
                 patch.object(library, "_volume", side_effect=lambda p: os.fspath(p)):
             vols = library.space_budget(c, self.game(16 * 10**9))["volumes"]
         self.assertEqual([(v["role"], v["needBytes"], v["freeBytes"], v["enough"]) for v in vols],
-                         [("library", 33_600_000_000, 20 * 10**9, False), ("cache", 15_000_000_000, 10 * 10**9, False)])
+                         [("library", 17_600_000_000, 20 * 10**9, True), ("cache", 15_000_000_000, 10 * 10**9, False)])
         # 同一块盘：合成一项，需求 = 两份之和（同原来）
-        self.assertEqual(self.budget(c, self.game(16 * 10**9))["needBytes"], 33_600_000_000 + 15_000_000_000)
+        self.assertEqual(self.budget(c, self.game(16 * 10**9))["needBytes"], 17_600_000_000 + 15_000_000_000)
 
     def test_direct_cache_follows_game_volume(self):
         # 11-10 网友：存放位置设到外接盘，系统盘仍被写满。直连缓存（含编译中的翻译中间产物）跟着游戏的存放位置走：
@@ -239,27 +239,71 @@ class SpaceMeasured(JobCase):
         c = self.context("ipa")
         self.ledger(("2026-11-07T10:00:00", GID, "ipa", "1", 16 * 10**9, 500 * 10**9, "旧账"))
         v = self.budget(c, self.game(16 * 10**9))
-        self.assertEqual((v["basis"], v["needBytes"]), ("rule", 33_600_000_000 + 15_000_000_000))   # 解包 17.6 + IMG 16 + 直连 15
+        self.assertEqual((v["basis"], v["needBytes"]), ("rule", 17_600_000_000 + 15_000_000_000))   # 解包 17.6 + 直连 15（IMG 边写边腾解包）
 
     def test_rejection_names_need_and_free(self):
         with patch("shutil.disk_usage", return_value=DU(0, 0, 20 * 10**9)):
             with self.assertRaises(Failure) as e:
                 library.check_pack_space(self.context("ipa"), self.game(16 * 10**9))
         self.assertEqual(e.exception.code, "disk_full")
-        self.assertIn("要 49 GB", str(e.exception));   # 16 × 1.1 + IMG 16 + 直连 15 = 48.6 → 49 GB
+        self.assertIn("要 33 GB", str(e.exception));   # 16 × 1.1 + 直连 15 = 32.6 → 33 GB（IMG 边写边腾解包，#746）
+        self.assertIn("解包 18 GB", str(e.exception)); self.assertIn("直连着色器上限 15 GB", str(e.exception))   # 分项（#746）
         self.assertIn("只剩 20 GB", str(e.exception)); self.assertIn("「仍然继续」", str(e.exception))
 
     def test_mac_build_has_no_image_and_ocarina_peak_is_covered(self):
-        # 单一 IMG 只在打 iPhone 包时写（Mac 打包不写）：同一款 Mac 打包少 IMG 那一份。
-        #   11-11 实测 0400486024DEC000（NUP，资源 26.27 GB）冷出 iPhone 包整次峰值 57.90 GiB（写 game.img 时）：预留须 ≥ 峰值且 ≤ 峰值 × 1.2。
+        # 单一 IMG 只在打 iPhone 包时写（Mac 打包不写）。#746：写 IMG 时边写边腾解包，iPhone 包和 Mac 打包一样多；
+        #   同一款接着还要出别的平台（followUp）留着解包，IMG 照旧另占一份。
+        #   11-11 实测 0400486024DEC000（NUP，资源 26.27 GB）冷出 iPhone 包、不边写边腾时整次峰值 57.90 GiB（写 game.img 时）：留解包的预留须 ≥ 峰值且 ≤ 峰值 × 1.2。
         #   手算：26.27 × 1.1 + IMG 26.27 + 直连 15 = 70.167 GB；峰值 57.90 GiB = 62.17 GB；比值 1.13
         mac, ipa = self.budget(self.context("build"), self.game(16 * 10**9))["needBytes"], self.budget(self.context("ipa"), self.game(16 * 10**9))["needBytes"]
-        self.assertEqual(ipa - mac, 16 * 10**9)
-        need = library.pack_need_bytes([dict(size=25_622_267_860, contentBytes=26_270_000_000, sha256="b" * 64, format="nup")], windows=False, image=True)
+        self.assertEqual(ipa, mac)
+        keep = self.budget(self.context("ipa", followUp=True), self.game(16 * 10**9))["needBytes"]
+        self.assertEqual(keep - mac, 16 * 10**9)
+        need = library.pack_need_bytes([dict(size=25_622_267_860, contentBytes=26_270_000_000, sha256="b" * 64, format="nup")], windows=False, image=True, keep_unpack=True)
         self.assertEqual(need, 70_167_000_000)
         peak = int(57.90 * 2**30)
         self.assertGreaterEqual(need, peak)
         self.assertLessEqual(need, peak * 1.2)
+
+    def test_old_iphone_pack_counts_as_reclaimable_and_override_drops_it_first(self):
+        # #746：这款上一次出的 iPhone 资源包出完会被新包换掉。空间不够时失败页点名它、说「仍然继续会先删掉它」；
+        #   点了「仍然继续」先删掉它再出（旧包和新包同时在盘上那段原先是峰值的一部分）；一键装 / Mac 打包不算它
+        c = self.context("ipa")
+        old = library.layout.image_ios(c, GID) / library.layout.IOS_PACK
+        write(old / "game.img", 1 << 20)
+        v = self.budget(c, self.game(16 * 10**9), free=20 * 10**9)
+        self.assertGreaterEqual(v["reclaimBytes"], 1 << 20)
+        self.assertEqual(self.budget(self.context("build"), self.game(16 * 10**9))["reclaimBytes"], 0)
+        with patch("shutil.disk_usage", return_value=DU(0, 0, 20 * 10**9)):
+            with self.assertRaises(Failure) as e:
+                library.check_pack_space(c, self.game(16 * 10**9))
+        self.assertIn("点「仍然继续」会先删掉这款上一次的 iPhone 包，腾出", str(e.exception))
+        self.assertTrue(old.is_dir())   # 只问，不删
+        c = self.context("ipa", spaceOverride=True)
+        with patch("shutil.disk_usage", return_value=DU(0, 0, 20 * 10**9)):
+            library.check_pack_space(c, self.game(16 * 10**9))
+        self.assertFalse(old.exists())
+        [d] = c.job["diagnostics"]
+        self.assertIn("已按你的选择先删掉这款上一次的 iPhone 包", d["summary"])
+
+    def test_player_746_numbers(self):
+        # #746 玩家原数：NUP 原件 43.46 GB、可用 36.86 GB、库里旧 iPhone 包 29 GB（升级后解包不在盘上）。独立手算：
+        #   预估 = 解包 43.46 × 1.1 = 47.806（显示 48 GB）+ 直连 15 = 62.806 → 「要 63 GB」（原先再加 IMG 43.46 = 106.27）；
+        #   不够 → 失败页给「仍然继续」并说会先删旧包腾出 29 GB；删后 36.86 + 29 = 65.86 ≥ 62.8，放得下
+        c = self.context("ipa")
+        old = library.layout.image_ios(c, GID) / library.layout.IOS_PACK
+        write(old / "game.img", 1 << 20)
+        nup = dict(id=GID, name="x", packages=[dict(titleId=GID, baseId=GID, type="base", version=0, path="sources/x.nsp", sha256="c" * 64,
+                                                     size=43_460_000_000, contentBytes=43_460_000_000, format="nup", guestIsa="aarch64")])
+        with patch.object(library, "_part_bytes", return_value=29 * 10**9), patch("shutil.disk_usage", return_value=DU(0, 0, 36_860_000_000)):
+            v = library.space_budget(c, nup)["volumes"][0]
+            self.assertEqual((v["needBytes"], v["reclaimBytes"]), (62_806_000_000, 29 * 10**9))
+            self.assertLessEqual(v["needBytes"], v["freeBytes"] + v["reclaimBytes"])
+            with self.assertRaises(Failure) as e:
+                library.check_pack_space(c, nup)
+        msg = str(e.exception)
+        for want in ("要 63 GB", "解包 48 GB", "直连着色器上限 15 GB", "只剩 37 GB", "点「仍然继续」会先删掉这款上一次的 iPhone 包，腾出 29 GB"):
+            self.assertIn(want, msg)
 
     def test_space_override_passes_with_warning(self):
         c = self.context("ipa", spaceOverride=True)

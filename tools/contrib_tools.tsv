@@ -50,3 +50,5 @@ iOS 全量编译	Xcode
 单测 cpatch_test	Python 包
 单测 cpatch_twopath_test	Python 包
 单测 widen_aspcap_test	Python 包
+单测 macos_swift_build_test	Xcode
+单测 android_runtime_build_test	Android NDK

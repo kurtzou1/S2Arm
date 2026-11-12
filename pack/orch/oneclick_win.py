@@ -287,9 +287,19 @@ class Run:
         with open(self.out / log, 'w', encoding='utf-8', newline='\n') as f:
             p = subprocess.run(args, stdout=f, stderr=subprocess.STDOUT, env=env, cwd=cwd or R)
         if p.returncode not in ok:
-            tail = (self.out / log).read_text(encoding='utf-8', errors='replace').strip().splitlines()[-3:]
-            raise Fail(f'{log}：rc={p.returncode}；' + ' / '.join(tail)[-300:], p.returncode if p.returncode in (3, 75) else 1)   # 3 内容缺口 / 75 环境缺件（如缺 Git Bash、gamedec 编不出）原样上交，Windows 出包机道按 75 落回 Mac
+            raise Fail(f'{log}：rc={p.returncode}；' + log_reason((self.out / log).read_text(encoding='utf-8', errors='replace')), p.returncode if p.returncode in (3, 75) else 1)   # 3 内容缺口 / 75 环境缺件（如缺 Git Bash、gamedec 编不出）原样上交，Windows 出包机道按 75 落回 Mac
         return p.returncode
+
+
+def log_reason(text, limit=600):
+    """工具日志 → 一句原因：有 Python 异常就以异常那一行（「XxxError: …」）开头、保住它，后面的附注（清理也失败之类，PEP 678 打在异常行之后）
+    能放多少放多少；没有异常行照旧取末 3 行。原先一律取末 3 行的末 300 字，附注把原异常挤掉（#754：玩家报告里只剩「改名回去也失败」）"""
+    lines = text.strip().splitlines()
+    exc = max((i for i, l in enumerate(lines) if re.match(r'^[A-Za-z_][\w.]*(Error|Exception|Exit|Interrupt|Fail|Conflict|UnsafeRoot)\b.*', l)), default=None)
+    if exc is None:
+        return ' / '.join(lines[-3:])[-300:]
+    head = ' / '.join(lines[exc:])
+    return head if len(head) <= limit else head[:limit] + '…'
 
 
 def nx_unpack_id():   # 源码身份（现编目录名与预编件 .src_digest 共用）

@@ -72,6 +72,16 @@ static void boundary_cases(const char *T) {
         if (pid > 0) { int status = 0; CHECK(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0,
             "pax case %u: 期望 %s 且不崩，wait status=%d", i, i == 0 ? "-2/0文件/0字节" : "0/1文件/2字节", status); }
     }
+    // v0.3.1：认不出的条目类型（软链 '2'、带数据的 'Z'）跳过、后面的文件照解：期望 rc 0、2 个文件 / 4 字节、没有链接落地
+    { char lt[1024], lr[1024]; snprintf(lt, sizeof lt, "%s/odd.tar", T); snprintf(lr, sizeof lr, "%s/odd", T); CHECK(!mkdir(lr, 0755), "建 odd 目录失败");
+      FILE *o = fopen(lt, "wb"); CHECK(o != NULL, "造 odd 包失败");
+      if (o) { tar_entry(o, "a.bin", '0', "ab", 2); tar_entry(o, "link", '2', "", 0); tar_entry(o, "weird", 'Z', "xxxxxxxxxx", 10);
+               tar_entry(o, "b.bin", '0', "cd", 2); char z[1024] = {0}; fwrite(z, 1, sizeof z, o); fclose(o);
+               unsigned nf = 0; uint64_t nb = 0; int rc = s2a_untar(lt, lr, &nf, &nb); char q[1100]; struct stat qs;
+               CHECK(rc == 0 && nf == 2 && nb == 4, "认不出的条目：期望 rc 0 / 2 文件 / 4 字节，实际 %d / %u / %llu", rc, nf, (unsigned long long)nb);
+               snprintf(q, sizeof q, "%s/b.bin", lr); CHECK(!stat(q, &qs) && qs.st_size == 2, "认不出的条目之后的 b.bin 没解出来");
+               snprintf(q, sizeof q, "%s/link", lr); CHECK(lstat(q, &qs) != 0, "认不出的软链条目不该落地");
+               snprintf(q, sizeof q, "%s/weird", lr); CHECK(lstat(q, &qs) != 0, "认不出的条目不该落地"); } }
     snprintf(path, sizeof path, "%s/abc", root); FILE *f = fopen(path, "rb"); char value[3] = {0};
     CHECK(f && fread(value, 1, 2, f) == 2 && !strcmp(value, "ok"), "合法 pax path 内容不符"); if (f) fclose(f);
 }
@@ -566,6 +576,14 @@ int main(void) {
         sh(c);
         snprintf(c, sizeof c, "test -s '%s/.incoming/1_000.tar' && test ! -e '%s/资源包'", N1, G1);
         CHECK(s2a_pack_migrate_one(G1) == 1 && sh(c) == 0, "⑮⑧ 旧位置有待解包：换掉新位置（待解包到了新位置、旧位置没了）");
+        // ⑧c 审计 P1-169：换的时候第二步改名失败（旧位置的上级只读，删不掉旧条目）→ 新位置原样（清单 q9、待解包还在）、
+        //   不留挪开的 .s2a-old-* 副本、旧位置那份也在、返回 -2（新位置此时是上一步换进来的那份：只有待解包、没有清单）。原先先删新位置再改名：这一步失败新位置就没了
+        snprintf(c, sizeof c, "set -e; mkdir -p '%s/资源包'; printf '{\"index_sha256\": \"q7\"}' > '%s/资源包/manifest.json'; chmod 555 '%s'", G1, G1, G1);
+        CHECK(sh(c) == 0, "⑮⑧c 造：旧位置清单 q7、上级只读");
+        int r8 = s2a_pack_migrate_one(G1);
+        snprintf(c, sizeof c, "chmod 755 '%s'; test -s '%s/.incoming/1_000.tar' && test ! -e '%s/manifest.json' && ! ls -d '%s'.s2a-old-* >/dev/null 2>&1 && grep -q q7 '%s/资源包/manifest.json'", G1, N1, N1, N1, G1);
+        CHECK(r8 == -2 && sh(c) == 0, "⑮⑧c 第二步改名失败：返回 -2（实际 %d）、新位置原样（待解包在、没有清单）、没留挪开的副本、旧位置在", r8);
+        snprintf(c, sizeof c, "rm -rf '%s/资源包'", G1); sh(c);
         snprintf(c, sizeof c, "set -e; printf '{\"index_sha256\": \"abc\"}' > '%s/manifest.json'; printf abc > '%s/.applied'; mkdir -p '%s/exefs'; head -c 100 /dev/urandom > '%s/exefs/main.npdm'; rm -rf '%s/.incoming'", N1, N1, N1, N1, N1);
         sh(c);
         // ⑤ 迁到一半被杀：30 款，子进程迁、几毫秒后 SIGKILL，再迁一次 → 30 款都在新位置、每款 50 个文件一个不少、存档都在

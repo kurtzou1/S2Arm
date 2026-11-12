@@ -2,6 +2,7 @@
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
+#include <string.h>
 
 // 真实公开 BLE 通知，来源沿用 ns2pro-bridge 的 MotionAccessoryTests.swift；并非生成的设备样本。
 // Real public BLE notifications retained from ns2pro-bridge MotionAccessoryTests.swift, not generated device samples.
@@ -47,6 +48,19 @@ int main(void) {
     assert(motion.device_timestamp_us == 175031 && motion.host_timestamp_us == 0);
     assert(fabsf(motion.acceleration_z - 4149.f * 8.f / 32767.f) < 0.00001f);
     assert(fabsf(motion.gyro_x - -18.f * 2000.f / 32767.f) < 0.0001f);
+
+    // Joy-Con 2 光学鼠标块（0x10 起 8 字节，小端）：抓包是 Pro 手柄、这段全 0，改几个字节当 Joy-Con 2 的读数
+    ns2_mouse mouse;
+    assert(ns2_decode_report05_mouse(report05, sizeof report05, &mouse));
+    assert(mouse.known && mouse.x == 0 && mouse.y == 0 && mouse.distance == 0);
+    uint8_t joycon05[sizeof report05];
+    memcpy(joycon05, report05, sizeof joycon05);
+    const uint8_t block[8] = {0xfe, 0xff, 0x34, 0x12, 0x05, 0x00, 0x06, 0x0c};   // 0x16 = 6 不算进距离（实机读数）
+    memcpy(joycon05 + 0x10, block, sizeof block);
+    assert(ns2_decode_report05_mouse(joycon05, sizeof joycon05, &mouse));
+    assert(mouse.x == -2 && mouse.y == 0x1234 && mouse.surface == 5 && mouse.distance == 12);
+    assert(!ns2_decode_report05_mouse(joycon05, sizeof joycon05 - 1, &mouse));
+    assert(!mouse.known && mouse.x == 0 && mouse.distance == 0);
 
     ns2_info info = {0};
     assert(ns2_decode_report05_accessories(report05, sizeof report05, &info));

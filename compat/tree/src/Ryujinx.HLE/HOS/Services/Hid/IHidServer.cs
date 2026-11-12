@@ -2046,16 +2046,71 @@ namespace Ryujinx.HLE.HOS.Services.Hid
         public ResultCode IsFirmwareUpdateNeededForNotification(ServiceCtx context) { context.ResponseData.Write(false); return ResultCode.Success; }
 
         [CommandCmif(3110)]
-        public ResultCode RegisterJcmsMemory(ServiceCtx context) => ResultCode.Success;
+        // InitializeJcms(pid, nn::applet::AppletResourceUserId, u64 TransferMemorySize, TransferMemoryHandle)：S2Arm——形状读自随游戏 SDK 的
+        //   nn::hid::InitializeJcms(void*, size_t)（同 320：建传输内存、交出句柄与大小）；缓冲格式与写入见 HidDevices/NpadJcms.cs。
+        //   原先是空桩：回成功但不写，游戏读到全 0，认为连着的手柄不是 Joy-Con 2
+        public ResultCode InitializeJcms(ServiceCtx context)
+        {
+            long appletResourceUserId = context.RequestData.ReadInt64();
+            ulong size = context.RequestData.ReadUInt64();
+            int handle = context.Request.HandleDesc.ToCopy[0];
+
+            KTransferMemory transferMemory = context.Process.HandleTable.GetObject<KTransferMemory>(handle);
+
+            if (transferMemory == null)
+            {
+                S2AHooks.Red?.Invoke($"hid InitializeJcms：句柄 0x{handle:X} 不是传输内存，Joy-Con 2 鼠标传感器不可用");
+
+                return ResultCode.Success;
+            }
+
+            if (size > transferMemory.Size || transferMemory.Size < NpadJcms.MinimumSize)
+            {
+                S2AHooks.Red?.Invoke($"hid InitializeJcms：缓冲大小 0x{size:X}（传输内存 0x{transferMemory.Size:X}）小于 SDK 布局要的 0x{NpadJcms.MinimumSize:X}，Joy-Con 2 鼠标传感器不可用");
+
+                return ResultCode.Success;
+            }
+
+            context.Device.Hid.Npads.Jcms.Register(context.Memory, transferMemory.Address);
+
+            Logger.Info?.Print(LogClass.ServiceHid, $"InitializeJcms: aruid {appletResourceUserId}, buffer 0x{transferMemory.Address:X}+0x{size:X}");
+
+            return ResultCode.Success;
+        }
 
         [CommandCmif(3111)]
-        public ResultCode NativeInputCommand3111(ServiceCtx context) => ResultCode.Success;
+        // FinalizeJcms(pid, nn::applet::AppletResourceUserId)
+        public ResultCode FinalizeJcms(ServiceCtx context)
+        {
+            context.Device.Hid.Npads.Jcms.Unregister();
+
+            return ResultCode.Success;
+        }
 
         [CommandCmif(3112)]
-        public ResultCode SetNativeInputFlags3112(ServiceCtx context) => ResultCode.Success;
+        // StartJcms(nn::hid::JcmsHandle)：hid 一直按手柄读数写缓冲，这里只记开关（日志用）
+        public ResultCode StartJcms(ServiceCtx context)
+        {
+            uint jcmsHandle = context.RequestData.ReadUInt32();
+
+            if (!context.Device.Hid.Npads.Jcms.Started)
+            {
+                Logger.Info?.Print(LogClass.ServiceHid, $"StartJcms: npad {jcmsHandle & 0xff} type {(jcmsHandle >> 8) & 0xff}");
+            }
+
+            context.Device.Hid.Npads.Jcms.Started = true;
+
+            return ResultCode.Success;
+        }
 
         [CommandCmif(3113)]
-        public ResultCode SetNativeInputFlags3113(ServiceCtx context) => ResultCode.Success;
+        // StopJcms(nn::hid::JcmsHandle)
+        public ResultCode StopJcms(ServiceCtx context)
+        {
+            context.Device.Hid.Npads.Jcms.Started = false;
+
+            return ResultCode.Success;
+        }
 
         [CommandCmif(3131)]
         public ResultCode NativeInputCommand3131(ServiceCtx context) => ResultCode.Success;

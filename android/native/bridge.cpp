@@ -728,7 +728,7 @@ static void *stop_game(void *context) {
 extern "C" JNIEXPORT jint JNICALL
 Java_org_s2arm_android_NativeBridge_configureInlineSmeContext(JNIEnv *, jclass, jboolean enabled) {
 #ifdef S2A_ANDROID_GAME_RUNTIME
-    if (enabled && !s2a_debug_entries_open()) return EPERM;   // 非缺省值是调试入口（debug_gate.h）
+    if (!enabled && !s2a_debug_entries_open()) return EPERM;   // 缺省开（#573：SME 核心的信号帧必带 TPIDR2 / ZA）；关掉才是调试入口（debug_gate.h）
     return s2a_android_fault_configure_inline_sme(enabled ? 1 : 0);
 #else
     (void)enabled;

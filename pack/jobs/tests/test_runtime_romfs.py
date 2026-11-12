@@ -131,6 +131,19 @@ class RuntimeRomfs(unittest.TestCase):
             build.validate_runtime(self.c, self.dest)
         self.assertEqual(error.exception.code, "runtime_invalid")
 
+    def test_memory_table_mismatch_or_missing_still_launches(self):
+        # v0.3.1（认不出的直接做）：宿主读 addr_need.tsv 只认几行、程序号不符按 0，表坏了 / 没了最多布局提示不生效，不挡起局
+        host = self.dest / "S2ArmGame.app/Contents/MacOS/s2arm-host"
+        host.parent.mkdir(parents=True); host.write_bytes(b"synthetic"); host.chmod(0o755)
+        (self.dest / "romfs").mkdir(); (self.dest / "addr_need.tsv").write_text("程序号\t0100000000000001\n")
+        manifest = dict(schema=1, engine="S2Arm", target="macos-arm64", files=build.snapshot(self.c, self.dest),
+                        memoryRequirementsVersion=2, memoryRequirementsSha256="0" * 64)
+        (self.dest / "manifest.json").write_text(json.dumps(manifest))
+        with patch.object(build, "validate_files"):
+            self.assertEqual(build.validate_runtime(self.c, self.dest)["memoryRequirementsVersion"], 2)
+            (self.dest / "addr_need.tsv").unlink()
+            build.validate_runtime(self.c, self.dest)
+
     def test_runtime_rejects_missing_romfs_even_with_matching_manifest(self):
         host = self.dest / "S2ArmGame.app/Contents/MacOS/s2arm-host"
         host.parent.mkdir(parents=True); host.write_bytes(b"synthetic"); host.chmod(0o755)

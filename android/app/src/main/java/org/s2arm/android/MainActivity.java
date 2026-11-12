@@ -309,8 +309,10 @@ public class MainActivity extends Activity
                 int mirrorError = NativeBridge.configureMirror(coldMirror == BootSpec.Mirror.ON);
                 if (mirrorError != 0) throw new IllegalStateException("Mirror switch configuration failed: " + mirrorError);
                 Log.i("S2Arm", "Mirror switch: " + coldMirror.value);
-                boolean inlineSme = getIntent() != null
-                    && getIntent().getBooleanExtra("s2arm.experimental_inline_sme_context", false);
+                // 缺省开（#573 / #736）：SME 核心（骁龙 8 Elite Gen 5 起）每个信号帧都带 TPIDR2 / ZA 记录，不认就接不住缺页；
+                //   这个开关只留给调试时关掉
+                boolean inlineSme = getIntent() == null
+                    || getIntent().getBooleanExtra("s2arm.experimental_inline_sme_context", true);
                 int error = NativeBridge.configureInlineSmeContext(inlineSme);
                 if (error != 0) throw new IllegalStateException("Signal context experiment configuration failed: " + error);
                 Log.i("S2Arm", "Inline SME signal context experiment: " + inlineSme);

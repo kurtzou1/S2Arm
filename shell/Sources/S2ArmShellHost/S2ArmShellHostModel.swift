@@ -13,9 +13,9 @@ import ShellUI
 public final class S2ArmShellHostModel {
     /// 清单里的全部款（容器里的）
     private var allGames: [GameDetail]
-    /// 这台设备上资源没到位的款：不在库里显示
+    /// 不在库里显示的款：玩家在这台设备上删掉的、资源也确实不在（审计 P1-155：资源没到位但玩家没删的款留在库里，显示「需要游戏数据」、点进去看说明）
     private var notOnDevice: Set<String> = []
-    /// 库里显示的款：只有这台设备上真能玩的（清单列着、资源已到位）
+    /// 库里显示的款：清单列着、且不是玩家删掉的（资源没到位的显示「需要游戏数据」）
     public var games: [GameDetail] { allGames.filter { !notOnDevice.contains($0.id) } }
     public private(set) var controllers: [ControllerInfo] = []
     public private(set) var input = ShellInputLog()
@@ -174,8 +174,11 @@ public final class S2ArmShellHostModel {
             case 1, 4: want = listed; installTried.remove(id)   // 4 = 只缺非核心文件：库里照样可玩，点开始时宿主问一次「仍要启动」（v0.3.1）
             case 2: want = .installing(unpackStage(id))
             case 3: want = .installing(transferStage(id))   // 断了也接着看：电脑重新插上续传时字节又涨
-            default: missing.insert(id); want = listed == .playable ? .needsGameData : listed   // 不显示；Play 点到也只给导入说明，不放行
+            default:   // 资源不在：玩家删掉的不显示；没删过的留在库里显示「需要游戏数据」，Play 点到只给导入说明，不放行（审计 P1-155）
+                if removed.contains(id) { missing.insert(id) }
+                want = listed == .playable ? .needsGameData : listed
             }
+            if installState(id) != 0, removed.contains(id) { removed.remove(id); saveRemoved() }   // 资源又回来了（电脑重装）：不再当删掉的
             noteDataSize(i, ready: [1, 4].contains(installState(id)))
             let fresh = want == .playable && isFresh(id)
             if allGames[i].game.isNew != fresh { allGames[i].game.isNew = fresh }
@@ -365,6 +368,19 @@ public final class S2ArmShellHostModel {
 
     /// 存档在这款数据根下的 S2A/（Ryujinx 数据根 <文档根>/S2A/ryujinx，存档 bis/user/save，同 pack/jobs/install.py SAVE_REL）
     static let saveRoot = "S2A"
+    /// 玩家在这台设备上删掉的游戏号（一行一个，<游戏根>/.s2a-removed.txt）：资源不在时这些款不显示，别的款显示「需要游戏数据」
+    nonisolated static let removedList = ".s2a-removed.txt"
+    @ObservationIgnored private lazy var removed: Set<String> = {
+        let text = (try? String(contentsOf: gamesRoot.appendingPathComponent(Self.removedList), encoding: .utf8)) ?? ""
+        return Set(text.split(whereSeparator: \.isNewline).map(String.init).filter { $0.allSatisfy(\.isHexDigit) && !$0.isEmpty })
+    }()
+    private func saveRemoved() {   // 写不进只记日志：最坏是删掉的款下次显示成「需要游戏数据」
+        let text = removed.sorted().joined(separator: "\n")
+        do {
+            try FileManager.default.createDirectory(at: gamesRoot, withIntermediateDirectories: true)
+            try Data(text.utf8).write(to: gamesRoot.appendingPathComponent(Self.removedList), options: .atomic)
+        } catch { NSLog("S2Arm 游戏库：记删除名单失败：%@", error.localizedDescription) }
+    }
 
     /// 删除这款的本机数据：saves = 连存档一起删（整个数据根），否则留下 S2A/（存档与用户资料）、其余（资源包、名字封面等）删掉。
     /// v0.2.6 玩家反馈「点删除完全没反应」：原先在主线程上同步 removeItem，一款资源包约 10 万文件，删完前界面整个冻住、对话框都不关，
@@ -392,6 +408,7 @@ public final class S2ArmShellHostModel {
                 try fm.moveItem(at: packs, to: trash.appendingPathComponent(".pack")); moved = true
             }
         } catch { moveError = error }
+        if moveError == nil { removed.insert(id); saveRemoved() }   // 玩家删的：资源不在时不再显示（没删成的照旧留在库里）
         refreshGameData()
         if let moveError {   // 挪了一半的照样后台删掉，提示失败原因
             NSLog("S2Arm 游戏库：删除 %@ 失败（挪进待删目录）：%@", id, moveError.localizedDescription)

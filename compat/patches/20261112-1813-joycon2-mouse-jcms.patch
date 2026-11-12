@@ -1,0 +1,454 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
+index d7dc7ccc730cbc0b4bd8da61c37374b41dd9693a..3bf5731084c2c2cdfbd442b1058dfd97fb315eda 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
+@@ -36,10 +36,13 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+         // S2Arm：Switch 2 Npad IMU 缓冲（hid 320 / 321，见 NpadImu.cs）；读数与六轴同源，由宿主的体感读取一并写入
+         public readonly NpadImu Imu = new();
+ 
++        // S2Arm：Joy-Con 2 光学鼠标传感器缓冲（hid 3110–3113，见 NpadJcms.cs）；由宿主的 Joy-Con 2 鼠标读取写入
++        public readonly NpadJcms Jcms = new();
++
+         // sensor：双 Joy-Con 左右各有读数时 0 = 左只、1 = 右只；-1 = 单一体感源（NpadImu.Push）
+         public void PushImu(PlayerIndex player, System.Numerics.Vector3 accelerationG, System.Numerics.Vector3 angularVelocityDegrees, ulong timestampUs, int sensor = -1)
+         {
+-            bool joyDual = player <= PlayerIndex.Handheld && _device.Hid.SharedMemory.Npads[(int)player].InternalState.StyleSet == NpadStyleTag.JoyDual;
++            bool joyDual = player <= PlayerIndex.Handheld && Base(_device.Hid.SharedMemory.Npads[(int)player].InternalState.StyleSet) == NpadStyleTag.JoyDual;
+ 
+             Imu.Push(player, joyDual, accelerationG, angularVelocityDegrees, timestampUs, sensor);
+         }
+@@ -54,6 +57,45 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+         }
+         internal ControllerType SupportedStyleSets { get; set; }
+ 
++        // S2Arm：Joy-Con 2 的样式位。随游戏 SDK 的手柄分派（读 GetNpadStyleSet）把 bit 12 / 13 / 14 当成 JoyDual / JoyLeft / JoyRight 一样读，
++        //   即 Joy-Con 2 的一对 / 左只 / 右只；只收 Joy-Con 2 的场景游戏只声明这几位（例：掌机 | bit 12），一代样式的手柄就被提示「请重新连接 Joy-Con 2」。
++        //   连着的实体手柄是 Joy-Con 2 时（宿主报的型号，见 SetJoycon2），样式在一代位之外再加对应的 Joy-Con 2 位；内部按一代位走（Base）
++        internal const NpadStyleTag JoyDual2 = (NpadStyleTag)(1 << 12), JoyLeft2 = (NpadStyleTag)(1 << 13), JoyRight2 = (NpadStyleTag)(1 << 14);
++        private const NpadStyleTag Joycon2Bits = JoyDual2 | JoyLeft2 | JoyRight2;
++        public bool Joycon2 { get; private set; }
++
++        // 这一格现在的样式（共享内存里的值，含 Joy-Con 2 位）
++        internal NpadStyleTag StyleOf(PlayerIndex player) => _device.Hid.SharedMemory.Npads[(int)player].InternalState.StyleSet;
++
++        // 去掉 Joy-Con 2 位（只剩一代样式），供内部按样式分派
++        internal static NpadStyleTag Base(NpadStyleTag style) => style & ~Joycon2Bits;
++
++        // 一代样式对应的 Joy-Con 2 位（不是 Joy-Con 2 / 不是 Joy-Con 样式时 None）
++        internal NpadStyleTag Joycon2Style(ControllerType type) => !Joycon2 ? NpadStyleTag.None : type switch
++        {
++            ControllerType.JoyconPair => JoyDual2,
++            ControllerType.JoyconLeft => JoyLeft2,
++            ControllerType.JoyconRight => JoyRight2,
++            _ => NpadStyleTag.None,
++        };
++
++        // 游戏声明收不收这一样式：一代位，或（连着 Joy-Con 2 时）对应的 Joy-Con 2 位
++        public bool StyleSupported(ControllerType type, ControllerType supported) =>
++            (type & supported) != 0 || ((uint)Joycon2Style(type) & (uint)supported) != 0;
++
++        // 宿主报连着的实体手柄是不是 Joy-Con 2；变了就重新配一遍（样式位跟着变，游戏收到样式更新事件）
++        public void SetJoycon2(bool joycon2)
++        {
++            if (Joycon2 == joycon2)
++            {
++                return;
++            }
++
++            Joycon2 = joycon2;
++            Logger.Info?.Print(LogClass.Hid, $"Joy-Con 2 style bits {(joycon2 ? "on" : "off")}");
++            Remap();
++        }
++
+         public Dictionary<PlayerIndex, ConcurrentQueue<(VibrationValue, VibrationValue)>> RumbleQueues = new();
+         public Dictionary<PlayerIndex, (VibrationValue, VibrationValue)> LastVibrationValues = new();
+         private readonly object _rumbleLock = new();
+@@ -161,9 +203,9 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+                     continue;
+                 }
+ 
+-                ControllerType currentType = (ControllerType)nPadsSpan[i].InternalState.StyleSet;
++                ControllerType currentType = (ControllerType)Base(nPadsSpan[i].InternalState.StyleSet);
+ 
+-                if (currentType != ControllerType.None && (npad & acceptedTypes) != 0 && _supportedPlayers[i])
++                if (currentType != ControllerType.None && StyleSupported(npad, acceptedTypes) && _supportedPlayers[i])   // S2Arm：连着 Joy-Con 2 时只收 Joy-Con 2 位也算（手柄设置小程序原先判不收、游戏反复重开）
+                 {
+                     configuredCount++;
+                     if (primaryIndex == PlayerIndex.Unknown)
+@@ -254,8 +296,8 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+                     config = ControllerType.JoyconPair;
+                 }
+ 
+-                // Check StyleSet and PlayerSet
+-                if ((config & SupportedStyleSets) == 0 || !_supportedPlayers[i])
++                // Check StyleSet and PlayerSet（S2Arm：连着 Joy-Con 2 时，游戏只声明 Joy-Con 2 位也算收）
++                if (!StyleSupported(config, SupportedStyleSets) || !_supportedPlayers[i])
+                 {
+                     config = ControllerType.None;
+                 }
+@@ -274,9 +316,9 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+         {
+             ref NpadInternalState controller = ref _device.Hid.SharedMemory.Npads[(int)player].InternalState;
+ 
+-            ControllerType oldType = (ControllerType)controller.StyleSet;
++            ControllerType oldType = (ControllerType)Base(controller.StyleSet);
+ 
+-            if (oldType == type)
++            if (oldType == type && (controller.StyleSet & Joycon2Bits) == Joycon2Style(type))
+             {
+                 return; // Already configured
+             }
+@@ -363,15 +405,17 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+ #pragma warning restore IDE0055
+             }
+ 
++            controller.StyleSet |= Joycon2Style(type);   // S2Arm：连着 Joy-Con 2 时加上对应的 Joy-Con 2 位
++
+             _styleSetUpdateEvents[(int)player].ReadableEvent.Signal();
+             _activeCount++;
+ 
+-            Logger.Info?.Print(LogClass.Hid, $"Connected Controller {type} to {player}");
++            Logger.Info?.Print(LogClass.Hid, $"Connected Controller {type}{(Joycon2Style(type) != NpadStyleTag.None ? " (Joy-Con 2)" : "")} to {player}");
+         }
+ 
+         private ref RingLifo<NpadCommonState> GetCommonStateLifo(ref NpadInternalState npad)
+         {
+-            switch (npad.StyleSet)
++            switch (Base(npad.StyleSet))
+             {
+                 case NpadStyleTag.FullKey:
+                     return ref npad.FullKey;
+@@ -460,7 +504,7 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+                 Attributes = NpadAttribute.IsConnected,
+             };
+ 
+-            switch (currentNpad.StyleSet)
++            switch (Base(currentNpad.StyleSet))
+             {
+                 case NpadStyleTag.Handheld:
+                     // S2Arm：掌机 = 左右两只 Joy-Con 都插在机身滑轨上，真机属性里左右各自「已连 + 有线」都置位。原先只给已连 + 有线，
+@@ -548,7 +592,7 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+ 
+         private ref RingLifo<SixAxisSensorState> GetSixAxisSensorLifo(ref NpadInternalState npad, bool isRightPair)
+         {
+-            switch (npad.StyleSet)
++            switch (Base(npad.StyleSet))
+             {
+                 case NpadStyleTag.FullKey:
+                     return ref npad.FullKeySixAxisSensor;
+@@ -621,7 +665,7 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+ 
+             WriteNewSixInputEntry(ref lifo, ref newState);
+ 
+-            bool needUpdateRight = currentNpad.StyleSet == NpadStyleTag.JoyDual && !isRightPair;
++            bool needUpdateRight = Base(currentNpad.StyleSet) == NpadStyleTag.JoyDual && !isRightPair;
+ 
+             if (!isRightPair)
+             {
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadJcms.cs b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadJcms.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..9d80f548903ac914c27bc32c2b7b78f06b9c56ab
+--- /dev/null
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadJcms.cs
+@@ -0,0 +1,208 @@
++using Ryujinx.Memory;
++using System;
++using System.Threading;
++
++namespace Ryujinx.HLE.HOS.Services.Hid
++{
++    // S2Arm：Joy-Con 2 光学鼠标传感器（Jcms）的状态缓冲（hid 3110 / 3111 = 交出 / 收回缓冲，3112 / 3113 = 开始 / 停止取样）。
++    // 游戏 SDK 的 nn::hid::InitializeJcms(void* buffer, size_t size) 把一块缓冲做成传输内存交给 hid（形状同 320 EnableNpadImu），
++    //   之后 GetJcmsState(s) 直接读这块缓冲、不再发命令；hid 不写，缓冲一直是 0，游戏就认为连着的手柄不是 Joy-Con 2
++    //   （一款体育游戏要 Joy-Con 2 的项目会一直提示「请重新连接 Joy-Con 2」）。
++    // 格式读自随游戏的 SDK 反汇编（公开资料只有命令名）：
++    //   格子 idx = npadId × 2 + 类型（0 = 左只、1 = 右只），npadId 0–7，每格 0x2c8 字节 = Ryujinx RingLifo 版面：
++    //   +0x00 未用、+0x08 缓冲格数 17、+0x10 最新一笔的槽号、+0x18 有效笔数（≤16）、+0x20 起 17 × 0x28（u64 顺序锁 + 0x20 字节状态）。
++    //   顺序锁：读方见到奇数（正在写）就重读、读前读后不等也重读——写成奇数会让读方一直重读、游戏主线程卡死（实机 11-12：出图停在第 882 帧），
++    //   所以写时先写奇数、写完状态再写偶数（= 取样序号 × 2）；读方另要求相邻两笔的取样序号差 1。
++    //   状态：+0x00 u64 距上一笔的时间（纳秒；游戏把它累加成总时长）、+0x08 u64 取样序号、+0x10 s32 X 位移、+0x14 s32 Y 位移（每笔的增量，游戏逐笔累加）、
++    //   +0x18 u32 属性：bit0 = 已连接（游戏靠它判断是不是 Joy-Con 2）、bit1 = 贴在桌面上（离开桌面时游戏累计离地时间）。
++    // 宿主读的是手柄报告里的绝对坐标（16 位、会回绕），这里换成增量；没有鼠标读数（旧启动器）时照样写已连接、位移 0。
++    public sealed class NpadJcms
++    {
++        public const int NpadCount = 8;
++        public const int SlotSize = 0x2c8;
++        public const int SlotCount = NpadCount * 2;
++        public const ulong MinimumSize = SlotCount * SlotSize; // 0x2c80
++        private const int MaxEntries = 17;
++        private const int EntrySize = 0x28;
++        private const int EntriesOffset = 0x20;
++        public const uint AttributeConnected = 1;
++        public const uint AttributeOnSurface = 2;
++        private const ulong DefaultDeltaNs = 8_000_000;
++
++        private readonly object _lock = new();
++        private IVirtualMemoryManager _memory;
++        private ulong _address;
++        private readonly ulong[] _samplingNumber = new ulong[SlotCount];
++        private readonly ulong[] _index = new ulong[SlotCount];
++        private readonly ulong[] _count = new ulong[SlotCount];
++        private readonly ulong[] _lastTimestampUs = new ulong[SlotCount];
++        private readonly short[] _lastX = new short[SlotCount], _lastY = new short[SlotCount];
++        private readonly bool[] _positionKnown = new bool[SlotCount];
++        private readonly bool[] _connected = new bool[SlotCount];
++
++        public bool Active { get { lock (_lock) return _memory != null; } }
++        public bool Started { get; set; }
++
++        public static int SlotIndex(int npadId, int type) => npadId * 2 + type;
++        public static ulong SlotOffset(int slot) => (ulong)slot * SlotSize;
++
++        public void Register(IVirtualMemoryManager memory, ulong address)
++        {
++            lock (_lock)
++            {
++                _memory = memory;
++                _address = address;
++                Array.Clear(_connected);
++                Array.Clear(_samplingNumber);
++                Array.Clear(_index);
++                Array.Clear(_count);
++                Array.Clear(_lastTimestampUs);
++                Array.Clear(_positionKnown);
++                Span<byte> zero = stackalloc byte[SlotSize];
++                BitConverter.TryWriteBytes(zero[0x08..], (ulong)MaxEntries);
++                for (int slot = 0; slot < SlotCount; slot++)
++                {
++                    memory.Write(address + SlotOffset(slot), zero);
++                }
++            }
++        }
++
++        public void Unregister()
++        {
++            lock (_lock)
++            {
++                _memory = null;
++                _address = 0;
++                Array.Clear(_connected);
++                Started = false;
++            }
++        }
++
++        // 一侧的读数：present = 这一侧连着 Joy-Con 2；known = 有鼠标读数（x / y 是手柄报告的绝对坐标），onSurface = 贴在桌面上
++        public struct Side
++        {
++            public bool Present, Known, OnSurface;
++            public short X, Y;
++        }
++
++        // 一笔读数（单侧，旧接口）：npadId 0–7、type 0 = 左只 / 1 = 右只。bothSides：手柄样式是一对时另一侧也写已连接、位移 0
++        public void Push(int npadId, int type, bool known, short x, short y, bool onSurface, ulong timestampUs, bool bothSides = false)
++        {
++            Side mine = new() { Present = true, Known = known, X = x, Y = y, OnSurface = onSurface }, none = default;
++            Push(npadId, type == 0 ? mine : none, type == 1 ? mine : none, timestampUs, bothSides);
++        }
++
++        // 左右两侧各一份：连着的那侧写它自己的读数；pair（手柄样式是一对）时没连的那侧也写已连接、位移 0（游戏左右两侧都查）。
++        //   不再连着的格写成未连接，游戏不会把别的手柄也当成 Joy-Con 2
++        public void Push(int npadId, in Side left, in Side right, ulong timestampUs, bool pair = false)
++        {
++            lock (_lock)
++            {
++                if (_memory == null || npadId < 0 || npadId >= NpadCount)
++                {
++                    return;
++                }
++
++                bool anySide = left.Present || right.Present;
++                int l = left.Present || (pair && anySide) ? SlotIndex(npadId, 0) : -1;
++                int r = right.Present || (pair && anySide) ? SlotIndex(npadId, 1) : -1;
++                for (int i = 0; i < SlotCount; i++)
++                {
++                    if (_connected[i] && i != l && i != r)
++                    {
++                        WriteEntry(i, 0, 0, 0, 0);
++                        _positionKnown[i] = false;
++                        _lastTimestampUs[i] = 0;
++                        _connected[i] = false;
++                    }
++                }
++
++                if (l >= 0) WriteSide(l, left, timestampUs);
++                if (r >= 0) WriteSide(r, right, timestampUs);
++            }
++        }
++
++        private void WriteSide(int slot, in Side side, ulong timestampUs)
++        {
++            _connected[slot] = true;
++
++            int dx = 0, dy = 0;
++            if (side.Known)
++            {
++                if (_positionKnown[slot])
++                {
++                    dx = (short)(side.X - _lastX[slot]);
++                    dy = (short)(side.Y - _lastY[slot]);
++                }
++                _lastX[slot] = side.X;
++                _lastY[slot] = side.Y;
++                _positionKnown[slot] = true;
++            }
++            else
++            {
++                _positionKnown[slot] = false;
++            }
++
++            ulong last = _lastTimestampUs[slot];
++            ulong deltaNs = last != 0 && timestampUs > last ? (timestampUs - last) * 1000 : DefaultDeltaNs;
++            _lastTimestampUs[slot] = timestampUs;
++
++            uint attributes = AttributeConnected | (side.Known && side.OnSurface ? AttributeOnSurface : 0);
++            WriteEntry(slot, deltaNs, dx, dy, attributes);
++        }
++
++        // 手柄断开：已连接的格写一笔未连接
++        public void Disconnect()
++        {
++            lock (_lock)
++            {
++                if (_memory == null)
++                {
++                    return;
++                }
++
++                for (int i = 0; i < SlotCount; i++)
++                {
++                    if (_connected[i])
++                    {
++                        WriteEntry(i, 0, 0, 0, 0);
++                        _positionKnown[i] = false;
++                        _lastTimestampUs[i] = 0;
++                        _connected[i] = false;
++                    }
++                }
++            }
++        }
++
++        private void WriteEntry(int slot, ulong deltaNs, int dx, int dy, uint attributes)
++        {
++            ulong slotAddress = _address + SlotOffset(slot);
++            ulong index = (_index[slot] + 1) % MaxEntries;
++            ulong sampling = ++_samplingNumber[slot];
++
++            Span<byte> entry = stackalloc byte[EntrySize];
++            BitConverter.TryWriteBytes(entry[0x00..], sampling * 2);   // 顺序锁（偶数 = 写完）
++            BitConverter.TryWriteBytes(entry[0x08..], deltaNs);        // 状态 +0x00
++            BitConverter.TryWriteBytes(entry[0x10..], sampling);       // 状态 +0x08
++            BitConverter.TryWriteBytes(entry[0x18..], dx);             // 状态 +0x10
++            BitConverter.TryWriteBytes(entry[0x1c..], dy);             // 状态 +0x14
++            BitConverter.TryWriteBytes(entry[0x20..], attributes);     // 状态 +0x18
++            ulong entryAddress = slotAddress + EntriesOffset + index * EntrySize;
++            _memory.Write(entryAddress, sampling * 2 - 1);   // 先标「正在写」（奇数）
++            Thread.MemoryBarrier();
++            _memory.Write(entryAddress + 8, entry[8..]);
++            Thread.MemoryBarrier();
++            _memory.Write(entryAddress, sampling * 2);
++
++            // 先写这一笔、再推进槽号与笔数（读方先读槽号与笔数再读样本）
++            Thread.MemoryBarrier();
++            _index[slot] = index;
++            _memory.Write(slotAddress + 0x10, index);
++            if (_count[slot] < MaxEntries - 1)
++            {
++                _count[slot]++;
++                _memory.Write(slotAddress + 0x18, _count[slot]);
++            }
++        }
++    }
++}
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs b/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
+index 8be96feb860d28c40c14b3f03ac76ee9b7d7cc10..4d3e4fca5faf15c707ec00295c007de6f11de840 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
+@@ -2046,16 +2046,71 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+         public ResultCode IsFirmwareUpdateNeededForNotification(ServiceCtx context) { context.ResponseData.Write(false); return ResultCode.Success; }
+ 
+         [CommandCmif(3110)]
+-        public ResultCode RegisterJcmsMemory(ServiceCtx context) => ResultCode.Success;
++        // InitializeJcms(pid, nn::applet::AppletResourceUserId, u64 TransferMemorySize, TransferMemoryHandle)：S2Arm——形状读自随游戏 SDK 的
++        //   nn::hid::InitializeJcms(void*, size_t)（同 320：建传输内存、交出句柄与大小）；缓冲格式与写入见 HidDevices/NpadJcms.cs。
++        //   原先是空桩：回成功但不写，游戏读到全 0，认为连着的手柄不是 Joy-Con 2
++        public ResultCode InitializeJcms(ServiceCtx context)
++        {
++            long appletResourceUserId = context.RequestData.ReadInt64();
++            ulong size = context.RequestData.ReadUInt64();
++            int handle = context.Request.HandleDesc.ToCopy[0];
++
++            KTransferMemory transferMemory = context.Process.HandleTable.GetObject<KTransferMemory>(handle);
++
++            if (transferMemory == null)
++            {
++                S2AHooks.Red?.Invoke($"hid InitializeJcms：句柄 0x{handle:X} 不是传输内存，Joy-Con 2 鼠标传感器不可用");
++
++                return ResultCode.Success;
++            }
++
++            if (size > transferMemory.Size || transferMemory.Size < NpadJcms.MinimumSize)
++            {
++                S2AHooks.Red?.Invoke($"hid InitializeJcms：缓冲大小 0x{size:X}（传输内存 0x{transferMemory.Size:X}）小于 SDK 布局要的 0x{NpadJcms.MinimumSize:X}，Joy-Con 2 鼠标传感器不可用");
++
++                return ResultCode.Success;
++            }
++
++            context.Device.Hid.Npads.Jcms.Register(context.Memory, transferMemory.Address);
++
++            Logger.Info?.Print(LogClass.ServiceHid, $"InitializeJcms: aruid {appletResourceUserId}, buffer 0x{transferMemory.Address:X}+0x{size:X}");
++
++            return ResultCode.Success;
++        }
+ 
+         [CommandCmif(3111)]
+-        public ResultCode NativeInputCommand3111(ServiceCtx context) => ResultCode.Success;
++        // FinalizeJcms(pid, nn::applet::AppletResourceUserId)
++        public ResultCode FinalizeJcms(ServiceCtx context)
++        {
++            context.Device.Hid.Npads.Jcms.Unregister();
++
++            return ResultCode.Success;
++        }
+ 
+         [CommandCmif(3112)]
+-        public ResultCode SetNativeInputFlags3112(ServiceCtx context) => ResultCode.Success;
++        // StartJcms(nn::hid::JcmsHandle)：hid 一直按手柄读数写缓冲，这里只记开关（日志用）
++        public ResultCode StartJcms(ServiceCtx context)
++        {
++            uint jcmsHandle = context.RequestData.ReadUInt32();
++
++            if (!context.Device.Hid.Npads.Jcms.Started)
++            {
++                Logger.Info?.Print(LogClass.ServiceHid, $"StartJcms: npad {jcmsHandle & 0xff} type {(jcmsHandle >> 8) & 0xff}");
++            }
++
++            context.Device.Hid.Npads.Jcms.Started = true;
++
++            return ResultCode.Success;
++        }
+ 
+         [CommandCmif(3113)]
+-        public ResultCode SetNativeInputFlags3113(ServiceCtx context) => ResultCode.Success;
++        // StopJcms(nn::hid::JcmsHandle)
++        public ResultCode StopJcms(ServiceCtx context)
++        {
++            context.Device.Hid.Npads.Jcms.Started = false;
++
++            return ResultCode.Success;
++        }
+ 
+         [CommandCmif(3131)]
+         public ResultCode NativeInputCommand3131(ServiceCtx context) => ResultCode.Success;
+diff --git a/src/Ryujinx.HLE/UI/Input/NpadReader.cs b/src/Ryujinx.HLE/UI/Input/NpadReader.cs
+index 8d26cf440e4a3f1eb40e452d7f7a0e2bcbdf378c..ebfbc4ada23dd36912b693a0682e329031e01eb8 100644
+--- a/src/Ryujinx.HLE/UI/Input/NpadReader.cs
++++ b/src/Ryujinx.HLE/UI/Input/NpadReader.cs
+@@ -40,7 +40,7 @@ namespace Ryujinx.HLE.UI.Input
+ 
+         private static ref RingLifo<NpadCommonState> GetCommonStateLifo(ref NpadInternalState npad)
+         {
+-            switch (npad.StyleSet)
++            switch (Ryujinx.HLE.HOS.Services.Hid.NpadDevices.Base(npad.StyleSet))
+             {
+                 case NpadStyleTag.FullKey:
+                     return ref npad.FullKey;

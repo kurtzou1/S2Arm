@@ -71,7 +71,7 @@ static class Metal {
     public static readonly ConcurrentDictionary<string, long> St = new();
     static readonly ConcurrentBag<(double S, string Target, int Bytes)> Times = new();
     static readonly ConcurrentDictionary<string, string[]> Pch = new();
-    const int PchTrip = 8, FailTrip = 64;
+    const int PchTrip = 8;
     public static byte[] Output = new byte[] {1, 2, 3};
     public static int CompilerCalls;
     static IEnumerable<string> Native(string[] cmd) => cmd;

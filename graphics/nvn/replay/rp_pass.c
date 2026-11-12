@@ -153,6 +153,16 @@ static nvn_gpu_view shadow_attach(nvn_gpu_cmd c, int i, const tex_t *t, uint32_t
     if (!cleared) shadow_copy(c, i, 0);
     return s->v;
 }
+// ---------- 3D 贴图的深度切片当附件 ----------
+// NVN 视图的层号在 3D 贴图上是深度切片（nvn_mtl.m attach() 落到 depthPlane）。Vulkan 的 3D 视图起点只能是 0，深度子范围只能用 2D（阵列）视图
+//（nvn_vk_texview.h 文件头与 plan_make 的错误信息都这么说），所以 3D 附件带层号时请求 2D 阵列目标，层号、级别等其余字段原样。
+// 游戏自己设了目标的、没带层号的（首片）、不是 3D 的贴图：视图记录原样。tmp 由调用方给，生命期同这次取视图。
+static const view_t *att_view(const tex_t *t, int has_v, const view_t *v, view_t *tmp) {
+    if (!has_v) return NULL;
+    if (t->d.target != NVN_TEXTURE_TARGET_3D || !v->set_layers || v->set_target) return v;
+    *tmp = *v; tmp->set_target = 1; tmp->target = NVN_TEXTURE_TARGET_2D_ARRAY;
+    return tmp;
+}
 void rp_pass_note_draw(int uses_ds) { P.ndraw++; if (uses_ds) P.ds_used = 1; }
 void rp_pass_slot_size(int i, uint32_t *w, uint32_t *h) { level_size(P.rt.color[i], &P.rt.cview[i], P.rt.has_cview[i], w, h); }
 int rp_pass_slot_attached(int i) { return P.has_rt && i >= 0 && i < P.rt.n && i < 8 && P.rt.color[i] && !dup_slot(i) && slot_kind(i, NULL, NULL) >= 0; }
@@ -180,7 +190,8 @@ int rp_pass_begin(nvn_gpu_cmd c) {
         if (dup_slot(i)) continue;   // 同一张图的同一级同一层挂了两个槽：只挂前一个（nvn_mtl.m rt_dup_slot @4797）
         uint32_t sbytes = 0; const char *why = NULL; int kind = slot_kind(i, &sbytes, &why);
         if (kind < 0) { nvn_unimpl("pass", why, t); continue; }   // 深度 / 块压缩格式的图挂在颜色槽、又走不了影子：当空槽（画到这个槽的内容丢掉）
-        nvn_gpu_view v = kind ? shadow_attach(c, i, t, sbytes, P.clear_c[i]) : rp_view_for(t, P.rt.has_cview[i] ? &P.rt.cview[i] : NULL, c);
+        view_t av;
+        nvn_gpu_view v = kind ? shadow_attach(c, i, t, sbytes, P.clear_c[i]) : rp_view_for(t, att_view(t, P.rt.has_cview[i], &P.rt.cview[i], &av), c);
         if (!v) { memset(g_shu, 0, sizeof g_shu); rp_view_pin_end(); return 0; }
         nattached++;
         d.color[i].view = v; d.color[i].store = NVN_GPU_STORE_STORE;
@@ -193,7 +204,8 @@ int rp_pass_begin(nvn_gpu_cmd c) {
     if (!d.w && P.rt.depth) level_size(P.rt.depth, &P.rt.dview, P.rt.has_dview, &d.w, &d.h);   // 只有深度的通道（阴影图、深度预通道）：尺寸取深度目标的
     if (P.rt.depth) {
         nvn_fmt_info fi; int ok = nvn_fmt_info_of((uint32_t)P.rt.depth->d.format, &fi);
-        nvn_gpu_view v = rp_view_for(P.rt.depth, P.rt.has_dview ? &P.rt.dview : NULL, c);
+        view_t av;
+        nvn_gpu_view v = rp_view_for(P.rt.depth, att_view(P.rt.depth, P.rt.has_dview, &P.rt.dview, &av), c);
         if (!v) { memset(g_shu, 0, sizeof g_shu); rp_view_pin_end(); return 0; }
         if (!ok || fi.depth) { d.depth.view = v; d.depth.store = NVN_GPU_STORE_STORE; d.depth.load = P.clear_d ? NVN_GPU_LOAD_CLEAR : NVN_GPU_LOAD_LOAD; d.clear_depth = P.cd; }
         if (ok && fi.stencil) { d.stencil.view = v; d.stencil.store = NVN_GPU_STORE_STORE; d.stencil.load = P.clear_s ? NVN_GPU_LOAD_CLEAR : NVN_GPU_LOAD_LOAD; d.clear_stencil = (uint32_t)P.cs & 0xff; }

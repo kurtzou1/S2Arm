@@ -104,9 +104,11 @@ namespace S2A.Services
         {
             HorizonClient hc = device.System.LibHacHorizonManager.RyujinxClient;
             ApplicationId app = new(programId);
+            int total = 0, done = 0;
 
             foreach ((string kind0, string sub) in sources)
             {
+                total++;
                 string kind = kind0;
                 Result r;
                 var u = device.System.AccountManager.LastOpenedUser.UserId;
@@ -145,6 +147,7 @@ namespace S2A.Services
                         if (r.IsSuccess())
                         {
                             Console.Error.WriteLine($"S2A 带存档起局：{kind} ← {sub}（{files} 个文件，{bytes} 字节）");
+                            done++;
                         }
                     }
 
@@ -158,7 +161,16 @@ namespace S2A.Services
                     hc.Fs.Unmount("s2asave"u8);
                 }
             }
+
+            // 每一类都灌进去了才打这一行（审计 P1-156）：作业层只认它才删待放入的种子；有一类挂不上（上面 continue）就不打，种子留到下次
+            if (total > 0 && done == total)
+            {
+                Console.Error.WriteLine($"{SeedAllDoneLine}{done} 类全部灌入");
+            }
         }
+
+        // 作业层 pack/jobs/saves.py SEED_DONE_LINE 认这一句（两边要一字不差）
+        internal const string SeedAllDoneLine = "S2A 带存档起局完成：";
 
         // 存档点副本（录手柄，见 ios/vpad.m）：把本游戏此刻已提交的存档整份拷到 dir，布局同 S2A_SAVE_DIR（account/ device/ + user），回放局直接拿来带存档起局。
         //   读 Ryujinx 数据根里目录存档的已提交副本 bis/user/save/<存档号>/0（Commit 返回后即是提交态），不再挂载游戏正开着的存档。

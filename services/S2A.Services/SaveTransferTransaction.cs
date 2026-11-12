@@ -184,6 +184,13 @@ public static partial class SaveTransfer
                 if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
                 else if (File.Exists(path)) File.Delete(path);
             }
+            // 审计 P1-178：备份里没有的本地玩家，删掉他们外部存档文件夹的「上次读写摘要」（SaveFolder.StatePath 的按玩家文件名），
+            //   下一局按已有的 SeedFrom 把他文件夹里的进度读回来；恢复进来的玩家的摘要不动（不然他文件夹里恢复前的旧档会盖掉刚恢复的）
+            foreach (string user in UsersNotInBackup(c, archive.Manifest))
+            {
+                string state = Path.Combine(next, Path.GetFileNameWithoutExtension(SaveFolder.StateFile) + "-" + user + ".txt");
+                if (File.Exists(state)) { File.Delete(state); Console.Error.WriteLine($"S2A 存档恢复：玩家 {user} 不在这份备份里，下一局从他的存档位置重新读入"); }
+            }
             foreach (var dir in archive.Manifest["directories"].AsArray()) Directory.CreateDirectory(Path.Combine(next, dir.GetValue<string>()));
             foreach (var item in archive.Manifest["files"].AsArray())
             {

@@ -1,6 +1,6 @@
 // S2Arm（不是上游文件）：环境检查页（preflight 作业的清单）。没过的在前、按组放进 NXLauncher 的卡片（CardGroup / CardRow），
 // 每项给一键处理：缺 Xcode → 去 App Store 安装；装了没打开过 → 打开 Xcode；缺 Metal 组件 → 一键下载（downloadMetal 作业）；缺 iOS 平台组件 → 一键下载（downloadIosPlatform 作业，约 8 GB）；
-// 缺 .NET SDK → 一键安装（installDotnet 作业）；游戏库在云盘同步目录 / 非 APFS 盘上 → 换游戏库（选目录 → setup 作业）。
+// 缺 .NET SDK → 一键安装（installDotnet 作业）；游戏库在云盘同步目录 / 不支持的盘格式上 → 换游戏库（选目录 → setup 作业）。
 // 作业跑在作业页，做完自动重新检查。通过的折起来。
 import AppKit
 import SwiftUI
@@ -162,7 +162,7 @@ struct EnvironmentView: View {
     private func ordered(_ checks: [ToolCheck]) -> [String] { Self.groups.filter { g in checks.contains { groupOf($0) == g } } }
     private func groupName(_ group: String) -> String { loc.t("s2arm.env.group." + group) }
 
-    /// 换游戏库：选一个本机、不同步的文件夹（作业层 setup 再拦一遍云盘 / 非 APFS），交给 model.changeLibrary。
+    /// 换游戏库：选一个本机、不同步的文件夹（作业层 setup 再拦一遍云盘 / 不支持的盘格式），交给 model.changeLibrary。
     private func chooseCloudFolder() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.canCreateDirectories = true

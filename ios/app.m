@@ -755,8 +755,13 @@ static void library_play(const char *gid, void *ctx) {   // 主线程（s2a_shel
         top_alert(sd.window, S2AL(@"app.library.reopen.title"), S2AL(@"app.library.reopen.message")); return;
     }
     const char *why = s2a_launch_ctx_select(gid);
-    // why 是 launchctx.c 的内部原因（路径 / errno，已进 host.log「选游戏…被拒」）：中文 App 照旧显示原文；英文 App 显示通用一句（#316）
-    if (why) { top_alert(sd.window, S2AL(@"app.library.cantOpen"), s2a_l10n_zh() ? @(why) : S2AL(@"app.library.cantOpen.message")); return; }
+    // why 是 launchctx.c 的内部原因（路径 / errno，已进 host.log「选游戏…被拒」）：屏上按类别说人话 + 下一步，原文只进日志 / 诊断（v0.3.1）
+    if (why) {
+        int kind = s2a_launch_ctx_select_kind();
+        top_alert(sd.window, S2AL(@"app.library.cantOpen"), kind == S2A_SELECT_APP_INCOMPLETE ? S2AL(@"app.library.cantOpen.incomplete")
+                  : kind == S2A_SELECT_STORAGE ? S2AL(@"app.library.cantOpen.storage") : S2AL(@"app.library.cantOpen.message"));
+        return;
+    }
     atomic_store(&g_game_picked, 1);
     s2a_boot_rebase("点 Play（多款容器选了游戏、启动上下文已冻结）");   // 起局计时从这里算，库界面停留不计
     LOG("游戏库：选了 %s，%s", gid, s2a_host_pre_ui_checks());

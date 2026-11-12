@@ -29,3 +29,17 @@ int ns2_decode_report05_motion(const uint8_t *bytes, size_t length, ns2_motion *
     out->gyro_z = read_i16(bytes + 0x3a) * (2000.0f / 32767.0f);
     return 1;
 }
+
+// Joy-Con 2 光学鼠标块（report05 0x10 起 8 字节，功能位 0x10 打开才有；Pro 没有）：x、y 为小端 16 位绝对坐标，0x14–0x16 未知、0x17 离开桌面的距离（0 = 贴着桌面）。
+//   https://github.com/ndeadly/switch2_controller_research/blob/master/hid_reports.md#input-report-0x05
+int ns2_decode_report05_mouse(const uint8_t *bytes, size_t length, ns2_mouse *out) {
+    if (!out) return 0;
+    memset(out, 0, sizeof *out);
+    if (!bytes || length < 63) return 0;
+    out->known = 1;
+    out->x = (int16_t)read_i16(bytes + 0x10);
+    out->y = (int16_t)read_i16(bytes + 0x12);
+    out->surface = (uint16_t)(bytes[0x14] | bytes[0x15] << 8);
+    out->distance = bytes[0x17];   // 只取 0x17 一个字节（实机：0x16 另有其值，贴桌面时 0x17 = 0、拿起来约 12）
+    return 1;
+}

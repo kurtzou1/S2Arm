@@ -823,8 +823,8 @@ class EnvironmentTests(unittest.TestCase):
         fields = self.budget_catalog()
         before = self.catalog_path.read_bytes()
         c = self.item(self.budget_report(**fields), "disk")
-        # Windows：10,700,000,000 × 1.1 × 2（解包 + 拷贝）+ 15,000,000,000 + 单一 IMG 10,700,000,000（只出 iPhone 包，11-11），独立手算
-        self.assertEqual(c["detected"]["requiredFreeBytes"], 49_240_000_000)   # + 单一 IMG 10.7 GB（Windows 只出 iPhone 包，11-11）
+        # Windows：10,700,000,000 × 1.1 × 2（解包 + 拷贝）+ 15,000,000,000，独立手算；单一 IMG 边写边腾解包、不另占（#746）
+        self.assertEqual(c["detected"]["requiredFreeBytes"], 38_540_000_000)
         self.assertTrue(c["ok"])
         self.assertEqual(self.catalog_path.read_bytes(), before)
         self.assertIn("space_rule.py", c["source"])
@@ -910,14 +910,14 @@ class EnvironmentTests(unittest.TestCase):
         fields = self.budget_catalog()
         with patch.object(self.mod._space_rule(), "DIRECT_LARGE_BYTES", int(22e9)):
             c = self.item(self.budget_report(**fields), "disk")
-        self.assertEqual(c["detected"]["requiredFreeBytes"], 56_240_000_000)   # 10.7 GB × 1.1 × 2 + 22 GB + 单一 IMG 10.7 GB，独立手算
+        self.assertEqual(c["detected"]["requiredFreeBytes"], 45_540_000_000)   # 10.7 GB × 1.1 × 2 + 22 GB，独立手算（IMG 边写边腾解包，#746）
 
     def test_budget_pure_function_needs_no_context_or_mac_import(self):
         self.budget_catalog()
         before = set(sys.modules)
         rules = self.mod._space_rule()
         selected = rules.selected_packages(self.budget_game)
-        self.assertEqual(rules.pack_need_bytes(selected, windows=True, image=True), 49_240_000_000)
+        self.assertEqual(rules.pack_need_bytes(selected, windows=True, image=True), 38_540_000_000)
         self.assertFalse({"core", "fcntl", "library"} & (set(sys.modules) - before))
 
     def test_budget_native_cli_valid_catalog_no_mac_context_import(self):
@@ -929,7 +929,7 @@ class EnvironmentTests(unittest.TestCase):
                            capture_output=True, env=env, timeout=30)
         self.assertEqual(p.returncode, 1, p.stderr)
         report = json.loads(p.stdout.decode("utf-8"))
-        self.assertEqual(self.item(report, "disk")["detected"]["requiredFreeBytes"], 49_240_000_000)
+        self.assertEqual(self.item(report, "disk")["detected"]["requiredFreeBytes"], 38_540_000_000)
         self.assertFalse(any(x.name == "sources" for x in self.catalog_path.parent.iterdir()))
 
     def test_budget_request_types_remain_strict(self):

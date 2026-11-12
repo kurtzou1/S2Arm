@@ -148,17 +148,40 @@ public static partial class SaveTransfer
         Require(string.Equals(Str(manifest["game"], "id"), Str(c.Game, "id"), StringComparison.OrdinalIgnoreCase), T("备份属于另一款游戏。", "The backup belongs to a different game."), "save_wrong_game");
         Require(manifest["game"]["version"].GetValue<long>() == c.Game["version"].GetValue<long>() &&
             Str(manifest["game"], "contentIdentity") == Str(c.Game, "contentIdentity"), T("备份的游戏版本或 DLC 组合不符。", "The backup’s game version or DLC combination doesn’t match."), "save_version");
-        var scan = Scan(c.Root);
-        if (!scan.Files.Keys.Any(n => n.StartsWith("bis/user/save/", StringComparison.Ordinal))) return;
-        var target = Entries(name => SmallFile(Path.Combine(c.Root, name)), scan.Files.Keys, scan.Directories);
-        var incoming = manifest["saveEntries"].AsArray();
-        static Dictionary<string, HashSet<string>> Owners(JsonArray entries) => entries.GroupBy(e => Str(e, "programId") + "/" + Str(e, "type"))
-            .ToDictionary(g => g.Key, g => g.Select(e => Str(e, "userId")).ToHashSet(StringComparer.Ordinal));
-        var a = Owners(target); var b = Owners(incoming);
+        var owners = OwnerSets(c, manifest);
+        if (owners == null) return;
+        var (a, b) = owners.Value;
         // 本地玩家（#623）：一台设备上加了 / 删了玩家，两边的账号集合是包含关系（另一台设备还没建这个玩家、恢复建玩家之前的备份），照常恢复；
         //   两边各有对方没有的账号 = 不是同一套账号，照旧拒绝（原先要求完全相同，加了第二个玩家后 iCloud 另一端、旧备份都恢复不了）
         foreach (string group in a.Keys.Intersect(b.Keys))
             Require(a[group].IsSubsetOf(b[group]) || b[group].IsSubsetOf(a[group]), T("备份与目标存档账号归属不同。", "The backup and the target save belong to different accounts."), "save_wrong_user");
+    }
+    // 目标（数据根现有）与备份两边的账号存档归属：组 = 程序号/类型，值 = 用户号集合。目标里没有存档 → null
+    private static (Dictionary<string, HashSet<string>> target, Dictionary<string, HashSet<string>> backup)? OwnerSets(Context c, JsonNode manifest)
+    {
+        var scan = Scan(c.Root);
+        if (!scan.Files.Keys.Any(n => n.StartsWith("bis/user/save/", StringComparison.Ordinal))) return null;
+        var target = Entries(name => SmallFile(Path.Combine(c.Root, name)), scan.Files.Keys, scan.Directories);
+        static Dictionary<string, HashSet<string>> Owners(JsonArray entries) => entries.GroupBy(e => Str(e, "programId") + "/" + Str(e, "type"))
+            .ToDictionary(g => g.Key, g => g.Select(e => Str(e, "userId")).ToHashSet(StringComparer.Ordinal));
+        return (Owners(target), Owners(manifest["saveEntries"].AsArray()));
+    }
+    // 审计 P1-178：恢复一份只含部分本地玩家的备份时，目标里有、备份里没有的账号用户号（全 0 的设备存档不算）。
+    //   这些玩家的外部存档文件夹（SaveData-<玩家>）不在数据根里、恢复不动它；恢复时删掉他们的「上次读写摘要」，
+    //   下一局摘要对不上，就按已有的 SeedFrom 把文件夹里他自己的进度读回来（不再看到新建的空档、退出也不会用空档盖掉文件夹）
+    private static HashSet<string> UsersNotInBackup(Context c, JsonNode manifest)
+    {
+        var owners = OwnerSets(c, manifest);
+        return owners == null ? new HashSet<string>(StringComparer.Ordinal) : DroppedUsers(owners.Value.target, owners.Value.backup);
+    }
+    // 纯集合：目标里有、备份同组里没有的用户号（全 0 = 设备存档，不算玩家）
+    internal static HashSet<string> DroppedUsers(Dictionary<string, HashSet<string>> target, Dictionary<string, HashSet<string>> backup)
+    {
+        var dropped = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var (group, users) in target)
+            foreach (string u in users)
+                if (u.Any(ch => ch != '0') && !(backup.TryGetValue(group, out var inBackup) && inBackup.Contains(u))) dropped.Add(u);
+        return dropped;
     }
     private static string Source(Context c)
     {

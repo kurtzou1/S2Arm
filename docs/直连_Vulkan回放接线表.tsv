@@ -32,7 +32,7 @@
 30	OP_SET_SAMP_POOL	状态（绘制时生效）	14651	state_op:10388	已接（rp_draw 在绘制时取用）	t_draw	否
 31	OP_COPY_B2T	拷贝 / 填充	14639	copy_b2t	已接（线性行直传；3D 多片、LINEAR 贴图未接）	t_copy_b2t	0100633007D48000
 32	OP_BLEND_COLOR	状态（绘制时生效）	14631	state_op:10440	已接（rp_draw 在绘制时取用）	t_state_persists	否
-33	OP_COPY_T2B	拷贝 / 填充	14640	copy_t2b	未接	无	否
+33	OP_COPY_T2B	拷贝 / 填充	14640	copy_t2b	部分：常规颜色及原生块压缩按行写回；线性、多采样、深度模板及不支持的格式记未接	t_nvn_copy_t2b	否
 34	OP_BIND_IMG	状态（绘制时生效）	14630	state_op:10428	状态已记；图像绑定未接	无	否
 35	OP_COPY_T2T	拷贝 / 填充	14641	copy_t2t	未接	无	否
 36	OP_RESET_COUNTER	同步 / 查询	14548	（就地：遮挡计数开）	未接	无	否
@@ -49,7 +49,7 @@
 47	OP_PRIM_RESTART	状态（绘制时生效）	14636	state_op:10444	已接（rp_draw 在绘制时取用）	t_draw	否
 48	OP_SET_PATCH_SIZE	状态（绘制时生效）	14637	state_op:10446	已接（rp_draw 在绘制时取用）	t_jump_call	否
 49	OP_DRAW_TEX	绘制	14627	draw_tex	未接	无	否
-50	OP_WAIT_SYNC	同步 / 查询	14542	queue_wait_event	未接	无	否
+50	OP_WAIT_SYNC	同步 / 查询	14542	queue_wait_event	部分：同后端队列已发布栅栏按序；未发布及外部事件记未接	t_nvn_wait_sync.c	否
 51	OP_ALPHA_REF	状态（绘制时生效）	14637	state_op:10445	状态已记；绘制侧未接	t_unimpl_names	否
 52	OP_PUSH_CONST	状态（绘制时生效）	14643	state_op:10382	状态已记；绘制侧未接	无	否
 53	OP_DLSS	计算	14642	dlss_eval	未接	无	否

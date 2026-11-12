@@ -114,17 +114,6 @@ if ! command -v zstd > /dev/null; then
   if [ "$(uname -s)" = Linux ]; then die "没有 zstd：请用系统包管理器安装 zstd（例如 apt install zstd）"
   else die "没有 zstd（解社区着色器参考库要用）：brew install zstd，或装 S2Arm.app（自带一份）"; fi
 fi
-#   .NET 10 SDK：DOTNET → PATH → ~/.dotnet（前端「一键安装」/ applenv.py --install dotnet 装的位置）；读取器的 apphost 要 DOTNET_ROOT，按 --list-sdks 给的真实 SDK 根补
-DN=${DOTNET:-$(command -v dotnet || true)}; [ -n "$DN" ] || { [ -x "$HOME/.dotnet/dotnet" ] && DN=$HOME/.dotnet/dotnet; }
-if [ -n "${S2A_PREBUILT_TOOLS:-}" ] && [ -n "${S2A_NX_UNPACK:-}" ] && [ -n "${S2A_SHELL:-}" ]; then
-  #   发版应用（启动器 pack/jobs/ipa.py 给齐预编件 / 读取器 / 随包壳）：C# 只运行不现编，有 .NET 10 运行时即可（DOTNET_ROOT 由作业环境给随包那份）
-  [ -n "$DN" ] && "$DN" --list-runtimes 2> /dev/null | grep -q '^Microsoft\.NETCore\.App 10\.' || die "应用内置 .NET 10 运行时缺失：重新安装完整的 S2Arm"
-  export DOTNET=$DN PATH="$(dirname "$DN"):$PATH"
-else
-[ -n "$DN" ] && "$DN" --list-sdks 2> /dev/null | grep -q '^10\.' || die "没有 .NET 10 SDK：python3 pack/jobs/applenv.py --install dotnet（装到 ~/.dotnet，不要管理员密码）"
-export DOTNET=$DN PATH="$(dirname "$DN"):$PATH"
-[ -n "${DOTNET_ROOT:-}" ] || export DOTNET_ROOT="$(dirname "$("$DN" --list-sdks | grep '^10\.' | tail -1 | sed 's/.*\[\(.*\)\]$/\1/')")"
-fi
 #   Python：S2A_PYTHON → S2A_PY（环境 → tools/machine.local：开发机在那里声明钉版 venv，代码里不探私人路径）→ 装着的 S2Arm.app 内置 Python（钉版、包齐）→ PATH 上的 python3；
 #   出包要的包与 App 内置 Python 同一份钉版清单
 PY=${S2A_PYTHON:-${S2A_PY:-$(bash "$P/../tools/machine.sh" get S2A_PY 2> /dev/null)}}
@@ -137,6 +126,21 @@ for c in /Applications/S2Arm.app/Contents/Resources/Runtime/python/bin/python3 "
 #   选定的解释器所在目录放到 PATH 最前（#447 评审，照启动器 pack/jobs/core.py 的 env() 做）：出包链各 .sh 里的裸 python3 都落到这一个解释器，
 #   不会在装了 anaconda 的机器上拿到 PATH 最前面那个 3.9（缺包 / 版本不对，在后面某个阶段再停）
 export S2A_PYTHON=$PY S2A_PY=$PY PATH="$(dirname "$PY"):$PATH"
+#   .NET 10：读取器的 apphost 要 DOTNET_ROOT，按 --list-sdks 给的真实 SDK 根补（在 Python 之后查：选 SDK 用 Python 那一处判法）
+if [ -n "${S2A_PREBUILT_TOOLS:-}" ] && [ -n "${S2A_NX_UNPACK:-}" ] && [ -n "${S2A_SHELL:-}" ]; then
+  #   发版应用（启动器 pack/jobs/ipa.py 给齐预编件 / 读取器 / 随包壳）：C# 只运行不现编，有 .NET 10 运行时即可（DOTNET_ROOT 由作业环境给随包那份）
+  DN=${DOTNET:-$(command -v dotnet || true)}; [ -n "$DN" ] || { [ -x "$HOME/.dotnet/dotnet" ] && DN=$HOME/.dotnet/dotnet; }
+  [ -n "$DN" ] && "$DN" --list-runtimes 2> /dev/null | grep -q '^Microsoft\.NETCore\.App 10\.' || die "应用内置 .NET 10 运行时缺失：重新安装完整的 S2Arm"
+  export DOTNET=$DN PATH="$(dirname "$DN"):$PATH"
+else
+#   源码树现编 C#：SDK 版本按 compat/tree/global.json 判（#449：只 grep 10.x 会放过 10.0.301，到编 C# 时才红）：选哪个 dotnet、够不够版本、报什么，都用 pack/jobs/ipa.py
+#   dotnet_sdk() / dotnet_missing() 那一处（applenv.py 与启动器环境检查同一判法）；它按 DOTNET → DOTNET_ROOT → ~/.dotnet → PATH → 常见安装位置找
+DNR=$("$PY" -c 'import sys; sys.path.insert(0, sys.argv[1]); from ipa import dotnet_sdk, dotnet_missing; r, e = dotnet_sdk(); print(f"{e}\t{r}" if e else "\t" + dotnet_missing())' "$P/../pack/jobs") \
+  || die "查不了 .NET SDK（${PY} 跑 pack/jobs/ipa.py 失败）"
+DN=${DNR%%$'\t'*}; [ -n "$DN" ] || die "${DNR#*$'\t'}"
+export DOTNET=$DN PATH="$(dirname "$DN"):$PATH"
+[ -n "${DOTNET_ROOT:-}" ] || export DOTNET_ROOT="${DNR#*$'\t'}"
+fi
 #   共享字体：没给 --fonts 就用开源替代字体（维护者 10-30：缺省开源、原版只在显式给时用；来源规则在 pack/stages/sysdata.sh，一处定）
 # 并行度按本机核数（tools/cores.sh：重烘 / 出库路数 = min(核数, 内存一半 ÷ 1.5 GB)，make 等按全部核；G04 10-23 起一键出包就按本机用满，10-25 起 refresh / ipa.sh 直调也同一处算）
 #   在本单起任何子进程（现编 nx_unpack、认游戏、解包）之前算：cores.sh 按 1 分钟负载封顶，原先放在解包之后，读到的是自己刚跑完的 8 路解包，

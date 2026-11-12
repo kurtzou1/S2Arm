@@ -76,7 +76,8 @@ namespace Ryujinx.HLE.HOS.Services.Hid
         }
 
         // accelerationG：加速度（g），angularVelocityDegrees：角速度（度/秒），都是 NS2 原始坐标；timestampUs：读数的单调时间戳（微秒）
-        public void Push(PlayerIndex player, bool joyDual, Vector3 accelerationG, Vector3 angularVelocityDegrees, ulong timestampUs)
+        // sensor：双 Joy-Con 左右各有读数时 0 = 左只、1 = 右只各写各的；-1 = 单一体感源（双 Joy-Con 时左右写同一份，同改前）
+        public void Push(PlayerIndex player, bool joyDual, Vector3 accelerationG, Vector3 angularVelocityDegrees, ulong timestampUs, int sensor = -1)
         {
             lock (_lock)
             {
@@ -87,14 +88,18 @@ namespace Ryujinx.HLE.HOS.Services.Hid
 
                 if (player == PlayerIndex.Handheld)
                 {
-                    Write(HandheldSlot, accelerationG, angularVelocityDegrees, timestampUs);
+                    if (sensor != 1) Write(HandheldSlot, accelerationG, angularVelocityDegrees, timestampUs);
                 }
                 else if (player >= PlayerIndex.Player1 && player <= PlayerIndex.Player8)
                 {
-                    Write((int)player, accelerationG, angularVelocityDegrees, timestampUs);
+                    // 双 Joy-Con：左右各一支传感器（传感器 0 / 1）。左右各有读数时各写各的；单一体感源时左右同一份读数（同 NpadDevices.UpdateSixAxis 的 #55 做法）。
+                    //   左右同一份在手柄当车把一起倾斜时会被游戏当成两只反向转（左右两只坐标相反）、互相抵消
+                    if (sensor != 1)   // 不是双 Joy-Con 样式时只认第一路（左只 / 单源），右只那份不写，免得一格里交错两只的读数
+                    {
+                        Write((int)player, accelerationG, angularVelocityDegrees, timestampUs);
+                    }
 
-                    // 双 Joy-Con：左右各一支传感器（传感器 0 / 1）。单一体感源时左右同一份读数（同 NpadDevices.UpdateSixAxis 的 #55 做法）
-                    if (joyDual)
+                    if (joyDual && sensor != 0)
                     {
                         Write(NpadSlotCount + (int)player, accelerationG, angularVelocityDegrees, timestampUs);
                     }

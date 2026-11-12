@@ -90,7 +90,7 @@ namespace S2A.Services
         private static PlayerIndex _playerBefore;
         private static bool Accepts(Switch device, ControllerType styles, ControllerType type) =>
             type == ControllerType.Handheld ? (styles & type) != 0 && !device.System.State.DockedMode
-            : (styles & type) != 0 || (type == ControllerType.ProController && (styles & ControllerType.JoyconPair) != 0)
+            : device.Hid.Npads.StyleSupported(type, styles) || (type == ControllerType.ProController && (styles & ControllerType.JoyconPair) != 0)
                                    || (type == ControllerType.JoyconPair && (styles & ControllerType.ProController) != 0);   // 这一对 Remap 自己会换
         internal static void FollowSupportedStyles(Switch device)
         {

@@ -671,6 +671,22 @@ class LogCauses(JobCase):
         self.assertIn("刷新停在 sysdata 阶段", d["detail"])
 
 
+class ToolReason(unittest.TestCase):
+    def test_own_cleanup_note_is_not_the_reason(self):
+        # #711：写 IMG 的工具崩了只留调用栈，作业层收尾往同一份日志追加「[s2a] 收掉本阶段工具会话里的残留进程…」，原先摘要的原因就成了这一行。
+        #   期望：跳过 [s2a] 开头的作业层记录；有红行取最后一条红行，没有就取工具自己的最后一行（异常那行）
+        import tempfile
+        from errors import tool_reason
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "img.log"
+            log.write_text("Traceback (most recent call last):\n  File \"pack/img.py\", line 82, in build\n"
+                           "AttributeError: 'os.stat_result' object has no attribute 'st_blocks'\n"
+                           "[s2a] 收掉本阶段工具会话里的残留进程 1 个：dotnet.exe\n", encoding="utf-8")
+            self.assertEqual(tool_reason(log), "AttributeError: 'os.stat_result' object has no attribute 'st_blocks'")
+            log.write_text("【红】写标准 RomFS 段失败：x\nmore\n[s2a] 收掉本阶段工具会话里的残留进程 1 个：dotnet.exe\n", encoding="utf-8")
+            self.assertEqual(tool_reason(log), "【红】写标准 RomFS 段失败：x")
+
+
 class PlayerSummary(unittest.TestCase):
     def test_player_reason_follows_experience_and_has_english(self):
         from errors import PLAYER_REASON

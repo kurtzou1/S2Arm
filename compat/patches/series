@@ -561,3 +561,6 @@
 20261111-1804-audio-perf-entry-double-release.patch
 20261111-1514-audio-renderer-preroll.patch
 20261110-1325-vp9-intra-coded-bounds.patch
+20261112-1530-joycon-pair-imu-sides.patch
+20261112-1813-joycon2-mouse-jcms.patch
+20261112-0345-joycon2-style-bits-only-when-declared.patch

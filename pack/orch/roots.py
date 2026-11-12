@@ -678,21 +678,37 @@ class Roots:
             directory.mkdir(exist_ok=True)
         identity = f'{version.name.split("@", 1)[1].split(".tmp", 1)[0]}-{time.time_ns()}'
         temp = version / '.romfs.intern'
-        if os.name == 'nt':
-            _win_acl(p, False)
-        else:
-            p.chmod(stat.S_IMODE(p.stat().st_mode) | 0o200)
-        rename_dir(p, temp)
+        # 收进共享存储只是省时间 / 空间的优化（不用每个阶段整棵克隆）：做不成就撤回原样、RomFS 留在本版本里照常出包，记一行黄（#754：
+        #   玩家 Windows 11 上任何游戏出包都停在这一步，三版启动器 3/3 必现，我方机器复现不出；原先这里一失败整次出包失败，
+        #   回滚又只认「链接」不认 junction 退路留下的空目录，改名回去撞「文件已存在」把原错误盖住）。撤不回来才报原错误
+        try:
+            if os.name == 'nt':
+                _win_acl(p, False)
+            else:
+                p.chmod(stat.S_IMODE(p.stat().st_mode) | 0o200)
+            rename_dir(p, temp)
+        except OSError as e:
+            print(f'【黄】RomFS 没收进共享存储（{e!r}），留在本版本里照常出包', file=sys.stderr)
+            return
         try:
             directory_link(store / identity, p, relative=f'../.romfs_store/{game}/{identity}')
             rename_dir(temp, store / identity)
+        except OSError as e:
+            try:
+                if os.path.lexists(p):   # 链接，或 junction 退路建了一半留下的空目录
+                    p.rmdir() if not is_link(p) or (os.name == 'nt' and p.is_dir()) else p.unlink()
+                if (store / identity).is_dir() and not temp.exists():   # 已经挪进存储：挪回来
+                    rename_dir(store / identity, temp)
+                rename_dir(temp, p)
+            except OSError as undo:
+                e.add_note(f'（撤回也失败：{undo!r}；以上面的原错误为准）')
+                raise e
+            print(f'【黄】RomFS 没收进共享存储（{e!r}），已撤回、留在本版本里照常出包', file=sys.stderr)
+            return
+        try:
             seal(store / identity)
-        except BaseException as e:
-            if is_link(p):
-                cleanup_after(e, remove_owned, p)
-            if temp.exists():
-                cleanup_after(e, rename_dir, temp, p)
-            raise
+        except OSError as e:   # 已经在存储里、链接也指好了：只是没封成只读，照用
+            print(f'【黄】RomFS 共享存储没能设成只读（{e!r}），照用', file=sys.stderr)
 
     def _pinned(self, version):
         for pin in self.path.glob(f'.pin.{version.name}.*'):

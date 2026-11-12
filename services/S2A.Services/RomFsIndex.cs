@@ -179,7 +179,10 @@ namespace S2A.Services
 
         // IMG v1 的 RomFS 段（单一 IMG 方案，v0.3.0）：把 romfsDir 的真实文件建成 Switch 标准 RomFS（LibHac RomFsBuilder，与 hactool / nxdumptool 的 romfs.bin 同一种布局），
         //   写进 outPath 的 offset 处（文件须已存在；不落临时副本）。→ 写入的字节数。文件集合与排序同 Write（清单给了就不枚举目录）
-        public static long WriteStandard(string romfsDir, string listPath, string outPath, long offset)
+        /// <summary>consume：边写边释放原件——某个文件的数据读到末尾（标准 RomFS 段按顺序整读、每个文件只读一遍）就关句柄、删掉它（#746：
+        ///   v0.3.0 起写 game.img 时解包出来的 RomFS 和 IMG 同时在盘上，峰值多一整份游戏大小，256 GB 的 Mac 出不了 40 GB 级的游戏）。
+        ///   只有出包写 IMG 用（pack/img.py convert --consume）；写到一半失败，原件已经删了一部分，调用方负责让这款下次重新解包</summary>
+        public static long WriteStandard(string romfsDir, string listPath, string outPath, long offset, bool consume = false)
         {
             string root = Path.GetFullPath(romfsDir);
             List<string> rel = new();
@@ -203,7 +206,9 @@ namespace S2A.Services
             foreach (string r in rel)
             {
                 string full = Path.Combine(root, r);
-                builder.AddFile("/" + r, new LazyHostFile(full, new FileInfo(full).Length));
+                long length = new FileInfo(full).Length;
+                LazyHostFile file = new(full, length);
+                builder.AddFile("/" + r, consume ? new ConsumingFile(file, full, length) : file);
             }
             IStorage image = builder.Build();
             image.GetSize(out long total).ThrowIfFailure();
@@ -220,6 +225,49 @@ namespace S2A.Services
             }
             LazyHostFile.CloseAll();
             return total;
+        }
+
+        /// <summary>WriteStandard consume 用：读到文件末尾就关句柄、去掉只读属性、删掉（长度 0 的文件不会被读到，留着，几乎不占空间）</summary>
+        private sealed class ConsumingFile : IFile
+        {
+            private readonly LazyHostFile _inner;
+            private readonly string _path;
+            private readonly long _size;
+            private bool _gone;
+
+            public ConsumingFile(LazyHostFile inner, string path, long size)
+            {
+                _inner = inner;
+                _path = path;
+                _size = size;
+            }
+
+            protected override Result DoRead(out long bytesRead, long offset, Span<byte> destination, in ReadOption option)
+            {
+                Result rc = _inner.Read(out bytesRead, offset, destination, option);
+                if (rc.IsSuccess() && !_gone && offset + bytesRead >= _size)
+                {
+                    _gone = true;
+                    _inner.Release();
+                    File.SetAttributes(_path, FileAttributes.Normal);
+                    File.Delete(_path);
+                }
+
+                return rc;
+            }
+
+            protected override Result DoGetSize(out long size)
+            {
+                size = _size;
+                return Result.Success;
+            }
+
+            protected override Result DoWrite(long offset, ReadOnlySpan<byte> source, in WriteOption option) => ResultFs.WriteUnpermitted.Value;
+            protected override Result DoFlush() => Result.Success;
+            protected override Result DoSetSize(long size) => ResultFs.WriteUnpermitted.Value;
+
+            protected override Result DoOperateRange(Span<byte> outBuffer, OperationId operationId, long offset, long size, ReadOnlySpan<byte> inBuffer)
+                => ResultFs.NotImplemented.Value;
         }
 
         public static IStorage Open(string romfsDir, string indexPath, string overlayDir = null) =>
@@ -249,7 +297,8 @@ namespace S2A.Services
 
         // 单一 IMG v1（pack/img.py，v0.3.0）：<程序目录>/game.img。头：0 "S2AIMG01" | 8 u32 格式号 | 96/104 RomFS 段偏移 / 长 | 112/120 目录表偏移 / 长 | 128 整个文件长。
         //   RomFS 段是 Switch 标准 RomFS，LibHac 原生读。没有界面覆盖层 → 直接交这段（零额外开销）；有覆盖层 → 按目录表里的 romfs.list 重建虚拟 RomFS，
-        //   被覆盖的文件读覆盖层（同旧镜像的覆盖层语义）。文件不在 → null；长度不等于头里的整个文件长（推到一半）→ null（调用方照旧退回）；
+        //   被覆盖的文件读覆盖层（同旧镜像的覆盖层语义）。文件不在 → null；长度不等于头里的整个文件长（推到一半）→ 旁边有 romfs/ 时 null（调用方退回读目录），
+        //   没有就抛（资源没传完，起局失败、宿主说「请重新装到 iPhone」；审计 P1-170）；
         //   魔数 / 格式号不认识 → 抛（起局失败、说清原因，不读坏数据）。格式号只在布局真变时加一，新壳必须保留读旧号的分支
         public const string ImgName = "game.img";
         // IMG 旁的派生偏移表（pack/img.py convert 写）：格式同 romfs.imgmap（"S2ARIM01" | i64 镜像长 = game.img 整个文件长 | i32 条数 | 条数 × i64），
@@ -267,7 +316,14 @@ namespace S2A.Services
             uint fmt = BitConverter.ToUInt32(hdr, 8);
             if (fmt != 1) { h.Dispose(); throw new InvalidDataException($"资源包 IMG 格式号 {fmt}，这个 S2Arm 只认 1：请更新 S2Arm（{path}）"); }
             long ro = BitConverter.ToInt64(hdr, 96), rl = BitConverter.ToInt64(hdr, 104), to = BitConverter.ToInt64(hdr, 112), tl = BitConverter.ToInt64(hdr, 120), total = BitConverter.ToInt64(hdr, 128);
-            if (RandomAccess.GetLength(h) != total || rl <= 0) { h.Dispose(); return null; }
+            if (RandomAccess.GetLength(h) != total || rl <= 0)
+            {
+                long have = RandomAccess.GetLength(h); h.Dispose();
+                // 推到一半（审计 P1-170）：旁边还有旧形态的 romfs/ 目录就退回读它（同单文件镜像不完整时）；没有就是资源确实没传完，
+                //   物理上起不了：抛错让会话失败，宿主按事实归到「游戏文件缺失，请在电脑上重新装到 iPhone」（init_fail.c），不再报「缺 romfs/」后照样起空数据
+                if (Directory.Exists(Path.Combine(programDir, "romfs"))) { Red.Report($"资源包 IMG 不完整（{have} / {total} 字节，多半推到一半），这局改读 romfs/ 目录", path); return null; }
+                throw new InvalidDataException($"资源包 IMG 没传完（{have} / {total} 字节）：请在电脑上的 S2Arm 里对这款游戏重新「装到 iPhone」（{path}）");
+            }
             Dictionary<string, string> overlay = OverlayFiles(Path.Combine(programDir, ImageOverlayDir));
             string map = Path.Combine(programDir, ImgMapName), index = Path.Combine(programDir, FileName);
             if (File.Exists(map) && File.Exists(index))

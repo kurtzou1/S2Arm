@@ -586,7 +586,23 @@ def _zstd_lib():
         _zstd.ZSTD_createDCtx.restype = ctypes.c_void_p
         _zstd.ZSTD_decompress_usingDict.restype = ctypes.c_size_t
         _zstd.ZSTD_decompress_usingDict.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_size_t]
+        global _ZBuf
+        class _ZBuf(ctypes.Structure): _fields_ = [('p', ctypes.c_void_p), ('size', ctypes.c_size_t), ('pos', ctypes.c_size_t)]   # ZSTD_inBuffer / ZSTD_outBuffer
+        _zstd.ZSTD_createDStream.restype = ctypes.c_void_p; _zstd.ZSTD_freeDStream.argtypes = [ctypes.c_void_p]; _zstd.ZSTD_initDStream.argtypes = [ctypes.c_void_p]
+        _zstd.ZSTD_decompressStream.restype = ctypes.c_size_t; _zstd.ZSTD_decompressStream.argtypes = [ctypes.c_void_p, ctypes.POINTER(_ZBuf), ctypes.POINTER(_ZBuf)]
     return _zstd
+ZSTD_BLOCK_IN = (128 << 10) + 3 + 18   # 解出帧的头几个字节最多要读到的压缩字节：帧头 ≤ 18 + 首块（块头 3 + 块内容 ≤ 128 KB）
+def zstd_head(b, n=4):   # 不带字典号的 zstd 帧（b 为文件开头，至少 ZSTD_BLOCK_IN 字节或整个文件）只解出前 n 字节；解不开返回已解出的部分
+    import ctypes
+    z = _zstd_lib(); ds = z.ZSTD_createDStream(); z.ZSTD_initDStream(ds)
+    try:
+        src, dst = ctypes.create_string_buffer(b, len(b)), ctypes.create_string_buffer(n)
+        i, o = _ZBuf(ctypes.cast(src, ctypes.c_void_p), len(b), 0), _ZBuf(ctypes.cast(dst, ctypes.c_void_p), n, 0)
+        while o.pos < n and i.pos < i.size:
+            r = z.ZSTD_decompressStream(ds, ctypes.byref(o), ctypes.byref(i))
+            if z.ZSTD_isError(r) or r == 0: break
+        return dst.raw[:o.pos]
+    finally: z.ZSTD_freeDStream(ds)
 # zstd 字典（王国之泪 romfs/Pack/ZsDic.pack.zs 里 3 本：帧头写字典号，不给字典解不开）：扫描前 find_zsdicts 从资源里收齐、写进目录，
 #   经环境变量 NXSH_ZSDICT 交给各工作进程（spawn 起的进程不继承全局变量）；帧头字典号非 0 就按号取字典解
 _zd = None; _zdctx = None
@@ -620,13 +636,22 @@ def find_zsdicts(roots, outd):   # 资源里所有 zstd 字典：文件本身是
         return h[:4] == b'\x28\xb5\x2f\xfd' and bool(z.ZSTD_getDictID_fromFrame(h, len(h)))
     # 按需：先只看每个文件开头 18 字节探有没有带字典号的 zstd 帧；没有就不收（动森这类不用字典的款不必把小文件整读一遍；着色器线审，抽取墙钟增量 ≤ 10%）
     # 文件头取 RomFS 清单（romfs_list.heads：前 32 字节，同一份 RomFS 各阶段只读一次；打不开的文件同原先算「没有」）
-    def uses_dict():
-        return any(head(e.head) for t in trees for e in romfs_list.heads(t.top, tree=t).files() if e.error is None)
-    if not os.listdir(outd) and not uses_dict(): return 0
+    hd = {e.path: e.head for t in trees for e in romfs_list.heads(t.top, tree=t).files() if e.error is None and e.head is not None}
+    if not os.listdir(outd) and not any(head(h) for h in hd.values()): return 0
+    # 只把开头可能带字典的文件交给 dicts：字典本身、SARC、不带字典号的 zstd 帧（解开后可能是 SARC）；别的文件 dicts 整读完也只会返回空（#639：
+    #   用到字典的款原先把每个 ≤ 8 MB 的文件都整读一遍）。头表里没有的（读头失败）照原样交给 dicts
+    def maybe(p):
+        h = hd.get(p)
+        return h is None or h[:4] in (ZDICT_MAGIC, b'SARC') or (h[:4] == b'\x28\xb5\x2f\xfd' and not head(h))
+    paths = [p for p in paths if maybe(p)]
     def dicts(p):   # → 这个文件里的字典（文件本身，或 SARC 成员）
         try:
             if os.path.getsize(p) > 8 << 20: return []
-            b = open(p, 'rb').read()
+            with open(p, 'rb') as f:
+                b = f.read(ZSTD_BLOCK_IN)
+                # 不带字典号的 zstd 帧先只解开头 4 字节：不是 SARC 就不会有字典成员，不必整读整解（#639：0400486024DEC000 这类有 5.9 万个，解出来是 SARC 的只有 1 个）
+                if b[:4] == b'\x28\xb5\x2f\xfd' and not z.ZSTD_getDictID_fromFrame(b, len(b)) and zstd_head(b) != b'SARC': return []
+                b += f.read()
             if b[:4] == ZDICT_MAGIC: return [b]
             if b[:4] == b'\x28\xb5\x2f\xfd' and not z.ZSTD_getDictID_fromFrame(b, len(b)):
                 try: b = zstd_dec(b)
@@ -634,11 +659,18 @@ def find_zsdicts(roots, outd):   # 资源里所有 zstd 字典：文件本身是
             if b[:4] == b'SARC': return [bytes(m.data) for m in nxfmt.Sarc(b).get_files() if bytes(m.data[:4]) == ZDICT_MAGIC]
         except Exception: pass
         return []
+    def take(ds):   # 结果按文件顺序取、写字典在本线程：同一字典号先到先留，同串行版
+        nonlocal n
+        for d in ds:
+            did = z.ZSTD_getDictID_fromDict(d, len(d))
+            if did and not os.path.exists(os.path.join(outd, f'{did}.zsdict')): open(os.path.join(outd, f'{did}.zsdict'), 'wb').write(d); n += 1
+    # 有界提交：同时在排队的任务不超过 4 × 读线程数（ex.map 一开始就把全部文件提交成任务，文件数到几十万时排队本身就占内存，#639）
     with cf.ThreadPoolExecutor(PJ) as ex:
-        for ds in ex.map(dicts, paths, chunksize=64):   # 结果按文件顺序回来、写字典在本线程：同一字典号先到先留，同串行版
-            for d in ds:
-                did = z.ZSTD_getDictID_fromDict(d, len(d))
-                if did and not os.path.exists(os.path.join(outd, f'{did}.zsdict')): open(os.path.join(outd, f'{did}.zsdict'), 'wb').write(d); n += 1
+        pend = collections.deque()
+        for p in paths:
+            pend.append(ex.submit(dicts, p))
+            if len(pend) >= 4 * PJ: take(pend.popleft().result())
+        while pend: take(pend.popleft().result())
     return n
 def zstd_dec(data):
     import ctypes

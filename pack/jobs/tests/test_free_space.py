@@ -79,7 +79,7 @@ class CloudFolder(unittest.TestCase):
         self.assertIsNone(libloc.cloud_folder("C:\\Users\\player\\OneDrive\\x", system="Windows", home=home, env={}))   # 没装 OneDrive：缺省目录名不算
 
     def test_format_ok(self):
-        for fmt, mac, win in (("apfs", True, False), ("APFS", True, False), ("hfs", True, False), ("exfat", False, False), ("msdos", False, False),
+        for fmt, mac, win in (("apfs", True, False), ("APFS", True, False), ("hfs", True, False), ("exfat", True, False), ("msdos", False, False),
                               ("ntfs", False, True), ("NTFS", False, True), ("refs", False, True), ("fat32", False, False), ("", True, True)):
             with self.subTest(fmt=fmt):
                 self.assertEqual(libloc.format_ok(fmt, system="Darwin"), mac)
@@ -87,9 +87,10 @@ class CloudFolder(unittest.TestCase):
 
     def test_problems_codes(self):
         self.assertEqual(libloc.problems("/Volumes/Example/库", system="Darwin", home="/Users/player", fmt="apfs"), [])
-        got = libloc.problems("/Users/player/Library/Mobile Documents/x", system="Darwin", home="/Users/player", fmt="exfat")
+        self.assertEqual(libloc.problems("/Volumes/Example/库", system="Darwin", home="/Users/player", fmt="exfat"), [])
+        got = libloc.problems("/Users/player/Library/Mobile Documents/x", system="Darwin", home="/Users/player", fmt="msdos")
         self.assertEqual([p["code"] for p in got], ["library_in_cloud", "library_not_apfs"])
-        self.assertIn("iCloud 云盘", got[0]["message"]); self.assertIn("EXFAT", got[1]["message"])
+        self.assertIn("iCloud 云盘", got[0]["message"]); self.assertIn("MSDOS", got[1]["message"])
         got = libloc.problems("E:\\库", system="Windows", home="C:\\Users\\player", fmt="exfat")
         self.assertEqual([p["code"] for p in got], ["library_bad_format"]); self.assertIn("NTFS", got[0]["message"])
 

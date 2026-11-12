@@ -81,7 +81,9 @@ int main(void) {
           "w main 0x5000 i32 60 off 30\n"        // game data variable: guest-memory write
           "w main 0x5100 i32 61 *0\n", f);       // pointer chain to a target outside the window
     fclose(f);
-    unsetenv("S2A_FPS_TABLE"); unsetenv("S2A_FPS60"); unsetenv("S2A_FSTEP"); unsetenv("DM_PRESENT_INTERVAL");
+    unsetenv("S2A_FPS_TABLE"); unsetenv("S2A_FSTEP"); unsetenv("DM_PRESENT_INTERVAL");
+    // 24a353e2 起 60 帧默认关、只有 S2A_FPS60=1 才开（runtime/src/fps.c fps_on_at_start）；本例测的是「开」这一侧
+    setenv("S2A_FPS60", "1", 1);
     setenv("S2A_FPS_CAP", "0", 1);
 
     s2a_fps_start(dir);   // before the fix this aborts: the key-page slot write went through the checked guest write

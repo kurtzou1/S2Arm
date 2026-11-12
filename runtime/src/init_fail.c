@@ -17,7 +17,18 @@ int s2a_init_fail_service_code(const char *game_data) {
     char p[2048]; struct stat st;
     if (!game_data || !*game_data) return S2A_INIT_FAIL_E_SERVICE_INIT;
     snprintf(p, sizeof p, "%s/exefs/main.npdm", game_data);
-    return stat(p, &st) || !S_ISREG(st.st_mode) ? S2A_INIT_FAIL_E_GAME_FILES : S2A_INIT_FAIL_E_SERVICE_INIT;
+    if (stat(p, &st) || !S_ISREG(st.st_mode)) return S2A_INIT_FAIL_E_GAME_FILES;
+    // 单一 IMG（game.img）没传完（审计 P1-170）：头里 128 起的「整个文件长」不等于实际长度 → 资源没传完，同「游戏文件缺失，请重新装到 iPhone」。
+    //   服务层 RomFsIndex.OpenImg 遇到这种又没有 romfs/ 可退时抛错让会话失败（原先只报「缺 romfs/」照样起局，游戏数据是空的）
+    snprintf(p, sizeof p, "%s/game.img", game_data);
+    int fd = open(p, O_RDONLY);
+    if (fd >= 0) {
+        unsigned char h[136]; long long total = 0; int got = (int)read(fd, h, sizeof h);
+        int short_img = got == (int)sizeof h && !memcmp(h, "S2AIMG01", 8) && !fstat(fd, &st) && (memcpy(&total, h + 128, 8), total != (long long)st.st_size);
+        close(fd);
+        if (short_img) return S2A_INIT_FAIL_E_GAME_FILES;
+    }
+    return S2A_INIT_FAIL_E_SERVICE_INIT;
 }
 
 // 码表（头文件 S2A_INIT_FAIL_CODES 展开）：下标 = 错误码，0 = 码表外

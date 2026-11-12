@@ -5884,18 +5884,6 @@
   "en": "This folder is on a drive formatted as "
  },
  {
-  "source": " 格式的磁盘上。游戏原件放在这里没问题：放游戏时直接选它们，S2Arm 只读、不复制也不改。导出时的工作数据（游戏库）要放在 APFS 格式的磁盘上，会放到这台 Mac 上的默认位置。想把工作数据也放外接盘，可以在「磁盘工具」里给它另分出一个 APFS 分区（盘上要有空闲空间，原有数据不动），再选那个分区。",
-  "en": ". Your game files can stay here: pick them when adding games, and S2Arm only reads them without copying or changing them. The working data for exporting (the game library) must be on an APFS drive, so it goes to the default location on this Mac. To keep working data on the external drive too, add an APFS partition to it in Disk Utility (the drive needs free space; existing data stays), then choose that partition."
- },
- {
-  "source": "游戏库放导出时的工作数据和存档，要在 APFS 格式的磁盘上；游戏原件留在原处（哪块盘都行），S2Arm 只读、不复制。",
-  "en": "The library holds export working data and saves and must be on an APFS drive. Game files stay where they are (any drive); S2Arm only reads them and makes no copies."
- },
- {
-  "source": "游戏原件放哪块盘都行，导出时的工作数据（游戏库）要放在 APFS 格式的磁盘上：在「设置 → 游戏库与玩家数据」改用这台 Mac 上的默认位置（内置盘），或选一块 APFS 格式的外接盘（可在「磁盘工具」里另分出一个 APFS 分区，盘上要有空闲空间、原有数据不动），再重试；游戏原件不用挪。",
-  "en": "Game files can be on any drive, but the working data for exporting (the game library) must be on an APFS drive. In Settings → Library & Player Data, switch to the default location on this Mac (built-in drive), or choose an APFS external drive (in Disk Utility you can add an APFS partition if the drive has free space; existing data stays), then try again. Your game files don't need to move."
- },
- {
   "source": "接上游戏原件所在的磁盘，确认文件仍在原位置且可读取；原件挪了位置就把它重新放进来一次。",
   "en": "Connect the drive that holds the game file and make sure the file is still in place and readable. If you moved it, add it again from its new location."
  },
@@ -6082,10 +6070,6 @@
  {
   "source": "保留现行与上一次成功版本，清掉 {0} 个旧版本",
   "en": "Kept the current and last successful builds, removed {0} older builds"
- },
- {
-  "source": "着色器准备存在缺口，请查看构建日志；未替换上次成功版本。",
-  "en": "Shader preparation has gaps; see the build log. The last successful build was kept."
  },
  {
   "source": "Mac 着色器产物不完整。",
@@ -7150,5 +7134,29 @@
  {
   "source": "在出包页「存放位置」换到 NTFS 格式的盘（上面列出了这台电脑上可用的），再出包；游戏原件放在哪都行。",
   "en": "On the export page, change Storage Location to an NTFS drive (the available ones on this PC are listed above), then export again. Your game files can stay wherever they are."
+ },
+ {
+  "source": "游戏库在 EXFAT 格式的磁盘上（支持出包）。",
+  "en": "The library is on an EXFAT drive (supported for packaging)."
+ },
+ {
+  "source": " 格式的磁盘上。游戏原件放在这里没问题：放游戏时直接选它们，S2Arm 只读、不复制也不改。导出时的工作数据（游戏库）要放在 APFS 或 exFAT 格式的磁盘上，会放到这台 Mac 上的默认位置。想把工作数据也放外接盘，请选一块 APFS / exFAT 盘（FAT32 单文件有 4 GB 上限，不适合做游戏库）。",
+  "en": ". Your game files can stay here: pick them when adding games, and S2Arm only reads them without copying or changing them. The working data for exporting (the game library) must be on an APFS or exFAT drive, so it goes to the default location on this Mac. To keep working data on an external drive too, choose an APFS or exFAT disk (FAT32 has a 4 GB file-size limit and is not suitable for the library)."
+ },
+ {
+  "source": "游戏库放导出时的工作数据和存档，要在 APFS 或 exFAT 格式的磁盘上；游戏原件留在原处（哪块盘都行），S2Arm 只读、不复制。",
+  "en": "The library holds export working data and saves and must be on an APFS or exFAT drive. Game files stay where they are (any drive); S2Arm only reads them and makes no copies."
+ },
+ {
+  "source": "游戏原件放哪块盘都行，导出时的工作数据（游戏库）要放在 APFS 或 exFAT 格式的磁盘上：在「设置 → 游戏库与玩家数据」改用这台 Mac 上的默认位置（内置盘），或选一块 APFS / exFAT 外接盘，再重试；FAT32 等格式不适合做游戏库。游戏原件不用挪。",
+  "en": "Game files can be on any drive, but the working data for exporting (the game library) must be on an APFS or exFAT drive. In Settings → Library & Player Data, switch to the default location on this Mac (built-in drive), or choose an APFS / exFAT external drive, then try again. FAT32 and similar formats are not suitable for the library. Your game files don't need to move."
+ },
+ {
+  "source": "选的文件夹里已有别的文件：确认「仍然继续」就照用这个文件夹，S2Arm 只在自己建的文件和子文件夹里读写，不改也不删它们；不想这样就选一个空文件夹。",
+  "en": "This folder already has other files. Choose Continue Anyway to use it: S2Arm only reads and writes the files and subfolders it creates, and never changes or deletes the others. Otherwise choose an empty folder."
+ },
+ {
+  "source": "这个文件夹里已有别的文件。S2Arm 只在自己建的文件和子文件夹里读写，不改也不删它们；以后「搬游戏库」时它们会跟着一起搬到新位置。仍要用这个文件夹吗？不想这样就选一个空文件夹。",
+  "en": "This folder already has other files. S2Arm only reads and writes the files and subfolders it creates, and never changes or deletes them; if you move the library later, they move with it. Use this folder anyway? Otherwise choose an empty folder."
  }
 ]

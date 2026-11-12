@@ -20,7 +20,7 @@ typedef enum {
     S2A_QOS_GAME_MAIN,         // 游戏主线程（runtime/src/thread.c）：USER_INTERACTIVE（S2A_GAME_MAIN_QOS 可改，能耗对照用）
     S2A_QOS_GAME_OTHER,        // 其余游戏线程：性能核 ≥ 4（Mac）USER_INTERACTIVE；< 4（iPhone）USER_INITIATED，排在渲染关键线程之后（S2A_GUEST_QOS 可改）。
                                //   其中提交 NVN 的那一个按 S2A_QOS_SUBMIT 另提
-    S2A_QOS_GAME_SYSCORE,      // 核掩码只给 Switch 系统核（3 号）的游戏线程：UTILITY（Horizon 留给系统 / 后台）
+    S2A_QOS_GAME_SYSCORE,      // 核掩码只给 3 号核的游戏线程：性能核不足 4 个（或 S2A_SYSCORE_QOS=utility）时 UTILITY，性能核 ≥ 4 与其余游戏线程同档（见 thread.c syscore_utility）
     S2A_QOS_SUBMIT,            // NVN 提交线程（hle_nvn.c nvnQueueSubmitCommands）：USER_INTERACTIVE（依据 ①）
     S2A_QOS_ENCODE,            // Metal 编码线程 dm-encode（nvn_rec.h）：USER_INTERACTIVE，提交线程每次提交末尾等它
     S2A_QOS_UB_COPY,           // 统一缓冲影子拷贝线程 dm-ub-copy（nvn_rec.h）：USER_INTERACTIVE，提交前等它

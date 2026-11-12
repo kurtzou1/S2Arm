@@ -15,6 +15,9 @@ struct nvn_vk_bcdec;
 // 建四条族的全部管线变体；任何一族失败返回非零，why 写明族名（整局不进直连的上层凭此报红）。
 int nvn_vk_bcdec_create(struct s2a_vk_device *d, struct nvn_vk_bcdec **out, char *why, size_t why_size);
 void nvn_vk_bcdec_destroy(struct s2a_vk_device *d, struct nvn_vk_bcdec *bc);
+// 等所有未证明完成的解码并回收内部资源；0 = 全部完成，-1 = 未证明完成（对象与目标图继续由调用方保活）。
+// destroy 内部也会尝试等待；未完成时保留对象，调用方可稍后再调 wait / destroy。
+int nvn_vk_bcdec_wait(struct s2a_vk_device *d, struct nvn_vk_bcdec *bc, uint64_t timeout_ns);
 
 // nvn 格式 → 解码路由。返回 1 时给出：dst 存储视图格式、采样（逻辑）格式、物理建图格式、
 // BC 族名、每块字节数。sRGB 格式物理图是 UNORM（移动端 sRGB+STORAGE 普遍不支持），SRGB 只放视图。

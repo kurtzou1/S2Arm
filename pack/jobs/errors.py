@@ -52,8 +52,9 @@ RECOVERY = {
     "input_base_missing": "将对应的游戏本体 NSP 或 XCI 一并导入；仅更新或 DLC 不能单独打包。",
     "guest_isa_unsupported": "这款游戏的 32 位 ARM 程序暂不支持，重试无法解决；请选择 64 位 ARM 游戏。",
     "content_invalid": "检查原始游戏文件是否完整，重新导入后再试；仍失败时复制错误摘要并保留对应日志。",
-    "library_not_apfs": "游戏原件放哪块盘都行，导出时的工作数据（游戏库）要放在 APFS 格式的磁盘上：在「设置 → 游戏库与玩家数据」改用这台 Mac 上的默认位置（内置盘），或选一块 APFS 格式的外接盘（可在「磁盘工具」里另分出一个 APFS 分区，盘上要有空闲空间、原有数据不动），再重试；游戏原件不用挪。",
+    "library_not_apfs": "游戏原件放哪块盘都行，导出时的工作数据（游戏库）要放在 APFS 或 exFAT 格式的磁盘上：在「设置 → 游戏库与玩家数据」改用这台 Mac 上的默认位置（内置盘），或选一块 APFS / exFAT 外接盘，再重试；FAT32 等格式不适合做游戏库。游戏原件不用挪。",
     "library_in_cloud": "游戏库在云盘同步目录里（iCloud 云盘、OneDrive、Dropbox 等）：出包时会写几十 GB 中间文件，云盘会上传它们、换成占位文件，出包中途会读不到。在「设置 → 游戏库与玩家数据」把游戏库改到本机磁盘上不同步的位置（例如默认位置），再重试；游戏原件放在哪都行。",
+    "library_folder_not_empty": "选的文件夹里已有别的文件：确认「仍然继续」就照用这个文件夹，S2Arm 只在自己建的文件和子文件夹里读写，不改也不删它们；不想这样就选一个空文件夹。",
     "library_bad_format": "可以点「仍然用这里」照用这块盘（出包会多占空间）；想省空间就从下面列出的 NTFS 盘里选一块，点「放到这里」。",
     "fat32_file_too_large": "在出包页「存放位置」换到 NTFS 格式的盘（上面列出了这台电脑上可用的），再出包；游戏原件放在哪都行。",
     "library_move_failed": "游戏库还在原来的位置，什么都没有丢：按上面的原因处理后再搬一次。",
@@ -481,7 +482,8 @@ def tool_reason(log):
                 stream.seek(0, 2)
                 stream.seek(max(0, stream.tell() - 16000))
                 lines = stream.read().decode("utf-8", errors="replace").splitlines()
-            nonempty = [line.strip() for line in lines if line.strip()]
+            # 作业层自己往工具日志里追加的记录（[s2a] 开头，如收掉残留进程）不是工具的报错，不当失败原因（#711：真报错被它盖住）
+            nonempty = [line.strip() for line in lines if line.strip() and not line.strip().startswith("[s2a] ")]
             red = [line for line in nonempty if "【红】" in line]
             if nonempty:
                 return (red or nonempty)[-1][-1500:]

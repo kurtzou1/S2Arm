@@ -85,6 +85,20 @@ namespace S2A.Services.Tests
             npads.PushImu(PlayerIndex.Player1, a, g, 200000);
             Check("NpadImu ⑥ 321 后不在用、不再写", "结果 0、不在用、格 0 写入位置 1",
                 $"结果 {dr.Result}、{(npads.Imu.Active ? "在用" : "不在用")}、格 0 写入位置 {Wi(0)}");
+
+            // ⑦ 双 Joy-Con 左右各有读数（Joy-Con 2 拼对，ns2_relay.h motion_left）：左只只写传感器 0、右只只写传感器 1。
+            //   当车把左右一起倾斜时两只的角速度 X 相反：原先单源左右同一份，游戏读到的两只就不再相反
+            Reply en2 = Call(hid, Enable(Size));
+            npads.Configure(new ControllerConfig { Player = PlayerIndex.Player1, Type = ControllerType.JoyconPair });
+            npads.Update(new System.Collections.Generic.List<GamepadInput> { new() { PlayerId = PlayerIndex.Player1 } });
+            npads.PushImu(PlayerIndex.Player1, a, new Vector3(90, 0, 0), 300000, 0);
+            npads.PushImu(PlayerIndex.Player1, a, new Vector3(-90, 0, 0), 300000, 1);
+            Check("NpadImu ⑦ 双 Joy-Con 左右各写各的：格 0 / 传感器 1 格写入位置、角速度 X", "结果 0、1 / 1、1.5707964 / -1.5707964",
+                $"结果 {en2.Result}、{Wi(0)} / {Wi(0x1950)}、{F32(0x1c)} / {F32(0x1950 + 0x1c)}");
+            npads.Configure(new ControllerConfig { Player = PlayerIndex.Player1, Type = ControllerType.ProController });
+            npads.Update(new System.Collections.Generic.List<GamepadInput> { new() { PlayerId = PlayerIndex.Player1 } });
+            npads.PushImu(PlayerIndex.Player1, a, new Vector3(-90, 0, 0), 305000, 1);
+            Check("NpadImu ⑦ 不是双 Joy-Con 样式时右只那路不写（不在一格里交错两只）", "格 0 写入位置 1、传感器 1 格写入位置 1", $"格 0 写入位置 {Wi(0)}、传感器 1 格写入位置 {Wi(0x1950)}");
             npads.Configure();
         }
     }

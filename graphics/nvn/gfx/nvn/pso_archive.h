@@ -26,6 +26,16 @@ static NSMutableDictionary<NSString *, id<MTLBinaryArchive>> *g_par_open; // ope
 static NSString *g_par_dir, *g_par_bdir;                                // g_par_bdir: the package's read-only archives (shaders/direct/pipelines, made at pack time)
 static NSMutableSet<NSString *> *g_par_bhave;                             // keys with a package file
 static int g_par_on;
+// #756（iPad Pro M1、iOS 18.3.1：每次起局预热后，后台写管线归档时在 Metal 里 objc_retain 崩，之后每次打开都闪退）：写归档只是「下次起得快」的优化，
+//   写不成不影响玩。每批写之前在归档目录留 .writing、写完删掉；起局发现它还在 = 上次进程死在写归档里 → 这台设备这个系统版本不再写（照常读已有的、照常编），
+//   记一行黄字。标记留着不删，之后每次起局都不写；系统 / GPU / 翻译链一变，identity.json 对不上，整个目录连标记一起删掉、重新开写
+static int g_par_nowrite;
+#define PAR_WRITING @".writing"
+static void par_check_dead_write(void) {   // 起局（打开归档目录时）调：上次进程死在写归档里 → 这个系统版本不再写
+    if (![NSFileManager.defaultManager fileExistsAtPath:[g_par_dir stringByAppendingPathComponent:PAR_WRITING]]) return;
+    g_par_nowrite = 1;
+    MLOG("【黄】 pipeline archive: the last run died while writing it (#756: Metal crashed inside the archive writer on iOS 18): reading it as usual, writing nothing more on this OS version");
+}
 static const char *g_par_harvest;                                        // S2A_PSO_HARVEST: the folder the harvest writes into (nvn_pso_harvest); writes at once instead of noting
 static _Atomic uint64_t g_par_hits, g_par_misses, g_par_written, g_par_write_failed, g_par_stale, g_par_ga_removed;
 static __thread int par_write_in_place;                                  // the prewarm's threads: what they compile is noted for writing (par_flush_bg)
@@ -146,6 +156,7 @@ static void par_open_dir(void) {
             g_par_bmap[c[0]] = c[1]; [g_par_have addObject:c[0]];
         }
         for (NSString *f in bfiles) { bytes += [[fm attributesOfItemAtPath:[g_par_dir stringByAppendingPathComponent:f] error:nil] fileSize]; nb++; }
+        par_check_dead_write();
         g_par_on = 1;
         MLOG("pipeline archive %s: %lu pipelines (%lu in %lu batch files, the rest one file each; %.1f MB), opened when used", g_par_dir.UTF8String, (unsigned long)g_par_have.count,
              (unsigned long)g_par_bmap.count, (unsigned long)nb, bytes / 1048576.0);
@@ -232,6 +243,9 @@ static void par_write_batch(NSArray<NSArray *> *items) {
     NSMutableArray<NSString *> *keys = [NSMutableArray array]; NSError *e = nil; BOOL ok = NO;
     pthread_mutex_lock(&g_par_wmu); int lk = par_ga_lock();
     NSSet<NSString *> *before = par_ga_list(0);
+    // #756：写之前留标记、写完（成不成都算）删掉；进程死在这一段里，标记留下，下次起局就不再写
+    const char *writing = [g_par_dir stringByAppendingPathComponent:PAR_WRITING].fileSystemRepresentation;
+    { int fd = open(writing, O_WRONLY | O_CREAT | O_TRUNC, 0644); if (fd >= 0) { (void)!write(fd, name.UTF8String, strlen(name.UTF8String)); fsync(fd); close(fd); } }
     @autoreleasepool {
         id<MTLBinaryArchive> a = [g_dev newBinaryArchiveWithDescriptor:[MTLBinaryArchiveDescriptor new] error:&e];
         for (NSArray *it in todo) { NSError *e1 = nil; id desc = it[1];
@@ -239,6 +253,7 @@ static void par_write_batch(NSArray<NSArray *> *items) {
             if (one) [keys addObject:it[0]]; else { e = e1; atomic_fetch_add(&g_par_write_failed, 1); } }
         if (keys.count) ok = [a serializeToURL:[NSURL fileURLWithPath:temp] error:&e] && rename(temp.fileSystemRepresentation, path.fileSystemRepresentation) == 0;
     }
+    unlink(writing);
     par_ga_remove_new(before);
     if (ok) {   // the index after the file: a line always names a file that is there
         NSMutableString *lines = [NSMutableString string]; for (NSString *k in keys) [lines appendFormat:@"%@\t%@\n", k, name];
@@ -264,6 +279,7 @@ static void par_writer(void) { @autoreleasepool {
     }
 } }
 static void par_note(NSString *key, id desc) {
+    if (g_par_nowrite) return;   // #756：上次死在写归档里，这个系统版本不再写
     pthread_mutex_lock(&g_par_mu);
     if (!g_par_todo) g_par_todo = [NSMutableArray array];
     [g_par_todo addObject:@[key, desc]];

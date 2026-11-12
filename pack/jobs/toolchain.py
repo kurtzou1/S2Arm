@@ -257,10 +257,10 @@ def preflight(c):
         from library import LIBRARY_FORMAT_MESSAGE, volume_format
         import libloc
         fmt = volume_format(library)
-        ok = libloc.format_ok(fmt, system="Darwin")   # APFS / HFS+（v0.3.1 放开 HFS+，libloc.MAC_OK_FORMATS）
+        ok = libloc.format_ok(fmt, system="Darwin")   # APFS / HFS+ / exFAT（v0.3.1 放开，libloc.MAC_OK_FORMATS）
         add("library_disk", "游戏库所在磁盘", ok,
             LIBRARY_FORMAT_MESSAGE.format(fmt=fmt.upper()) if not ok else
-            HFS_NOTE if fmt == "hfs" else "游戏库在 APFS 格式的磁盘上。",
+            HFS_NOTE if fmt == "hfs" else EXFAT_NOTE if fmt == "exfat" else "游戏库在 APFS 格式的磁盘上。",
             action="library", code="library_not_apfs", group="storage")
         # 云盘同步目录（11-07 启动器）：iCloud Drive / OneDrive / Dropbox 等同步目录里放游戏库，中间产物会被上传、换占位，拦下给「换游戏库」
         cloud = libloc.cloud_folder(library, system="Darwin", home=str(Path.home()), exists=os.path.exists)
@@ -375,6 +375,7 @@ def download_metal(c):
 SDK_SIM_MAPPING = Path.home() / "Library/Developer/Xcode/SDKToSimulatorIndexMapping.plist"   # Xcode 自己写的「iOS SDK 构建号 → 可配的模拟器运行时构建号」表
 BYTE_SCALE = {"b": 1, "kb": 1000, "mb": 1000 ** 2, "gb": 1000 ** 3, "tb": 1000 ** 4}   # 与 ByteCountFormatter(.file) 一致，也和 xcodebuild 打印的 8.32 GB 对得上
 HFS_NOTE = "游戏库在 Mac OS 扩展（HFS+）格式的磁盘上：可以出包，但这种盘不能克隆，出包会多占一份资源包的空间。"   # v0.3.1 放开 HFS+
+EXFAT_NOTE = "游戏库在 exFAT 格式的磁盘上：可以出包，但这种盘不能克隆，出包会多占一份资源包的空间。"   # v0.3.1 放开 exFAT（外部 PR #395）
 PYTHON_MINIMUM = (3, 11)   # 作业层要的 Python 最低版本：预检（preflight）与 Windows 环境检查（winenv 直接读这个常量）同一份
 
 

@@ -35,12 +35,17 @@ static struct shadow *shadow_get(const uint8_t *mem, uint64_t size) {
     nvn_gpu_buf b = NULL; nvn_gpu_err err = {0};
     if (!nvn_gpu_ok(nvn_gpu_buf_create(size, NVN_GPU_MEM_SHARED, NULL, &b, &err))) { nvn_unimpl("gpu", "buf_create_pool_mirror", mem); return NULL; }
     size_t ps = nvn_dirty_page_size();
-    s = calloc(1, sizeof *s); s->mem = mem; s->size = size; s->buf = b;
+    s = calloc(1, sizeof *s);
+    if (!s) { nvn_gpu_buf_release(b, NULL, NULL); nvn_unimpl("gpu", "pool_mirror_alloc_failed", mem); return NULL; }
+    s->mem = mem; s->size = size; s->buf = b;
     s->page0 = (uintptr_t)mem & ~(uintptr_t)(ps - 1);
     s->npages = ((uintptr_t)mem + size - s->page0 + ps - 1) / ps;
     s->synced = calloc(s->npages ? s->npages : 1, sizeof *s->synced);
     s->sub = calloc(s->npages ? s->npages : 1, sizeof *s->sub);   // 各页上次同步所在的提交序号
     s->checked = calloc(s->npages ? s->npages : 1, sizeof *s->checked);
+    if (!s->synced || !s->sub || !s->checked) {   // 页表没分出来：不把半张表放进镜像表（之后每次使用都会读它），这一笔按取不到缓冲处理
+        free(s->synced); free(s->sub); free(s->checked); free(s); nvn_gpu_buf_release(b, NULL, NULL);
+        nvn_unimpl("gpu", "pool_mirror_alloc_failed", mem); return NULL; }
     nvn_hm_put(&g_shadow, &k, s);
     return s;
 }
@@ -121,7 +126,9 @@ int rp_buf_resolve(nvn_gpu_cmd c, uint64_t addr, uint64_t len, nvn_gpu_buf *buf,
         // 游戏在提交前把这次提交要用的内容写好，这一条本来就成立（原先录进前置段，也是先于本次提交的全部通道）。
         // 真机读数（3D 那款场景，同一局里来回切）：每帧约 27 MB、100 次带全局屏障的 GPU 拷贝改成直写，帧率 11.0 → 12.9。
         // 同一次提交里已经同步过又变了的，必须排在已录的绘制之后：照旧结束通道、录进主段。镜像 CPU 读不到的后端也照旧。
-        uint8_t *m = last != rp_sub_serial() ? nvn_gpu_buf_cpu(s->buf) : NULL;
+        // 还要此前的提交都已经做完：显卡还在执行上一次提交时，镜像里的旧内容它可能还没读，直接写会让上一帧画到这一帧的数据。
+        // 游戏每帧等显卡做完（Finish / 等同步）时这个条件总成立；不等的游戏退回按序拷。
+        uint8_t *m = last != rp_sub_serial() && rp_prev_subs_done() ? nvn_gpu_buf_cpu(s->buf) : NULL;
         if (m) { sync_write(NULL, m, s, a - (uintptr_t)mem, b - (uintptr_t)mem); last = rp_sub_serial(); }
         else { nvn_gpu_cmd xc = rp_xfer_cmd(&last); if (xc) sync_write(xc, NULL, s, a - (uintptr_t)mem, b - (uintptr_t)mem); }
         for (uint64_t k = i; k <= j; k++) { s->synced[k] = st; s->sub[k] = last; }
@@ -155,30 +162,32 @@ int rp_buf_mirrors(void) { pthread_mutex_lock(&g_bmu); int n = (int)g_shadow.n; 
 
 // ---------- 缓冲类命令：只改游戏内存（见文件头）----------
 static int in_pool(uint64_t a, uint64_t n) { return n && rp_pool_find(a, n, NULL, NULL); }
+// 回放时在 CPU 上改游戏缓冲内容的三个命令：改一次代号加一（rp_draw 的段内常量缓冲切片按它失效）
+uint64_t rp_cpu_write_gen;
 void rp_op_update_ub(const void *a, const void *rec) {
     uint64_t d, n; memcpy(&d, a, 8); memcpy(&n, (const uint8_t *)a + 8, 8);
     if (!n) return;
     if (!in_pool(d, n)) { nvn_unimpl("buf", "update_outside_pools", rec); return; }
-    memcpy((void *)(uintptr_t)d, (const uint8_t *)a + 16, (size_t)n);
+    memcpy((void *)(uintptr_t)d, (const uint8_t *)a + 16, (size_t)n); rp_cpu_write_gen++;
 }
 void rp_op_copy_b2b(const void *a, const void *rec) {
     uint64_t s, d, n; memcpy(&s, a, 8); memcpy(&d, (const uint8_t *)a + 8, 8); memcpy(&n, (const uint8_t *)a + 16, 8);
     if (!n) return;
     if (!in_pool(s, n) || !in_pool(d, n)) { nvn_unimpl("buf", "copy_outside_pools", rec); return; }
-    memmove((void *)(uintptr_t)d, (const void *)(uintptr_t)s, (size_t)n);
+    memmove((void *)(uintptr_t)d, (const void *)(uintptr_t)s, (size_t)n); rp_cpu_write_gen++;
 }
 void rp_op_clear_buf(const p_clear_buf *cb, const void *rec) {   // 32 位样式填充（不是按字节）
     if (!cb->size) return;
     if (!in_pool(cb->addr, cb->size)) { nvn_unimpl("buf", "clear_outside_pools", rec); return; }
-    uint8_t *p = (uint8_t *)(uintptr_t)cb->addr; uint64_t n = cb->size, i = 0;
+    uint8_t *p = (uint8_t *)(uintptr_t)cb->addr; uint64_t n = cb->size, i = 0; rp_cpu_write_gen++;
     for (; i + 4 <= n; i += 4) memcpy(p + i, &cb->value, 4);
     if (i < n) memcpy(p + i, &cb->value, (size_t)(n - i));
 }
 
-// OP_COPY_B2T：缓冲里是线性行（行距 / 片距可由游戏设），直接从游戏内存按当前段的 GPU 顺序传进贴图（nvn_mtl.m copy_b2t @13762）
+// OP_COPY_B2T：缓冲里是线性行（行距 / 片距可由游戏设），直接从游戏内存按当前段的 GPU 顺序传进贴图（nvn_mtl.m copy_b2t @13762）。
+// 线性 / 线性渲染目标贴图走同一条路：宿主贴图不按游戏的内存布局建，拷贝只看区域、行距、片距（iOS copy_b2t 同样不分）
 void rp_op_copy_b2t(nvn_gpu_cmd c, const p_copy_b2t *o, const void *rec) {
     const tex_t *t = o->tex; if (!t) return;
-    if (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) { nvn_unimpl("tex", "b2t_linear", rec); return; }
     int bw = 1, bh = 1, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     if (!bpb || o->r.width <= 0 || o->r.height <= 0) { nvn_unimpl("tex", "b2t_bad_format_or_region", rec); return; }
     uint32_t level = o->has_view && o->view.set_levels ? o->view.base_level : 0, layer0 = o->has_view && o->view.set_layers ? o->view.min_layer : 0;
@@ -219,6 +228,24 @@ void rp_op_copy_t2t(nvn_gpu_cmd c, const p_copy_t2t *o, const void *rec) {
         nvn_plat_log(NVN_PLAT_LOG_INFO, "copy", b); } }
     if (o->flags & DM_COPY_RESOLVE) {
         int ss = s->d.samples > 1 ? s->d.samples : 1, ds = d->d.samples > 1 ? d->d.samples : 1;
+        if (ss > 1 && ds == 1 && sfmt == dfmt && sfmt == s->d.format && dfmt == d->d.format &&
+            s->d.width == d->d.width && s->d.height == d->d.height && !s3 && !d3 && sl == 0 && dl == 0) {
+            nvn_fmt_info f;
+            if (!nvn_fmt_info_of((uint32_t)sfmt, &f) || f.kind == NVN_FMT_UINT || f.kind == NVN_FMT_SINT || f.depth || f.stencil) {
+                nvn_unimpl("tex", "t2t_multisample_resolve", rec); return;
+            }
+            view_t vs = {0}, vd = {0};
+            vs.set_levels = vd.set_levels = 1; vs.nlevels = vd.nlevels = 1;
+            vs.set_layers = vd.set_layers = 1; vs.min_layer = (int)sz0; vd.min_layer = (int)dz0; vs.nlayers = vd.nlayers = 1;
+            rp_view_pin_begin();   // 连取两个视图：取第二个时不能把第一个轮转放掉
+            nvn_gpu_view gv = rp_view_for(s, &vs, c), hv = rp_view_for(d, &vd, c);
+            if (!gv || !hv) { rp_view_pin_end(); return; }
+            NVNcopyRegion r = {0, 0, 0, s->d.width, s->d.height, 1};
+            nvn_gpu_blit(c, gv, &r, hv, &r, 0);
+            rp_view_pin_end();
+            rp_tex_mark_gpu_written(d);
+            return;
+        }
         if (ss != ds || sfmt != dfmt || s->d.width != d->d.width || s->d.height != d->d.height) { nvn_unimpl("tex", ss > 1 && ds == 1 ? "t2t_multisample_resolve" : "t2t_downsample_case", rec); return; }
         uint32_t w = (uint32_t)s->d.width >> sl, h = (uint32_t)s->d.height >> sl; if (!w) w = 1; if (!h) h = 1;
         sr = (NVNcopyRegion){0, 0, 0, (int)w, (int)h, 1}; dr = sr;

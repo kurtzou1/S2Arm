@@ -136,7 +136,7 @@ import SwiftUI
         XCTAssertNil(Store.dataRoot(from: ["S2Arm", "--data-root"]))
     }
 
-    // 游戏库只能放 APFS（11-02）：选库时读所在卷格式；普通文件夹、还不存在的子路径都按上级卷读（exFAT 判定在后端单测打桩，手测见提交说明）
+    // 游戏库可放 APFS / exFAT（11-02 / 11-10）：选库时读所在卷格式；普通文件夹、还不存在的子路径都按上级卷读（FAT32 等判定在后端单测打桩）
     func testLibraryVolumeFormat() throws {
         let tmp = FileManager.default.temporaryDirectory
         XCTAssertEqual(Store.volumeFormat(tmp), "apfs")

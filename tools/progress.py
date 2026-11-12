@@ -22,5 +22,7 @@ class Ticker:
         if not self.path or not self.total or (not force and now - self.last < self.every):
             return
         self.last = now
-        with open(self.path, "a", encoding="utf-8") as f:
+        # newline="\n"：Windows 文本模式会把 \n 写成 \r\n，读端（pack/jobs/core.py stage_progress）按 \n 切行后末列带 \r、整行判不是数字丢掉——
+        #   Windows 上 Python 写的阶段进度（写单一 IMG、克隆算 SHA、播种…）一条都发不出去（v0.3.1 热修实测）。协议是 LF，同 progress.sh / pack/ipa_tail.py
+        with open(self.path, "a", encoding="utf-8", newline="\n") as f:
             f.write(f"{int(now)}\t{self.stage}\t{self.done}\t{self.total}\n")

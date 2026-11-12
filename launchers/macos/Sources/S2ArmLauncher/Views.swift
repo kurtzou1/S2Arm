@@ -77,7 +77,7 @@ struct ContentView: View {
             Button(L("好，用这台 Mac 上的默认位置")) { store.libraryFormatProblem = nil; store.useDefaultLibrary() }
             Button(L("重新选一个文件夹")) { store.libraryFormatProblem = nil; store.chooseLibrary() }
             Button(L("取消"), role:.cancel) { store.libraryFormatProblem = nil }
-        } message: { p in Text(L("这个文件夹在 ") + p.format.uppercased() + L(" 格式的磁盘上。游戏原件放在这里没问题：放游戏时直接选它们，S2Arm 只读、不复制也不改。导出时的工作数据（游戏库）要放在 APFS 格式的磁盘上，会放到这台 Mac 上的默认位置。想把工作数据也放外接盘，可以在「磁盘工具」里给它另分出一个 APFS 分区（盘上要有空闲空间，原有数据不动），再选那个分区。")) }
+        } message: { p in Text(L("这个文件夹在 ") + p.format.uppercased() + L(" 格式的磁盘上。游戏原件放在这里没问题：放游戏时直接选它们，S2Arm 只读、不复制也不改。导出时的工作数据（游戏库）要放在 APFS 或 exFAT 格式的磁盘上，会放到这台 Mac 上的默认位置。想把工作数据也放外接盘，请选一块 APFS / exFAT 盘（FAT32 单文件有 4 GB 上限，不适合做游戏库）。")) }
         .sheet(isPresented:$store.showInstallGuide,onDismiss:store.installGuideDismissed) { InstallGuideView().environmentObject(store).tint(Brand.accent) }
     }
     var library: some View {
@@ -427,7 +427,7 @@ struct SettingsView: View {
                         Spacer()
                         Button(L("选择或切换游戏库…"),action:store.chooseLibrary).disabled(store.executionBusy).controlSize(.small)
                     }
-                    Text(L("游戏库放导出时的工作数据和存档，要在 APFS 格式的磁盘上；游戏原件留在原处（哪块盘都行），S2Arm 只读、不复制。")).font(.caption).foregroundStyle(.secondary)
+                    Text(L("游戏库放导出时的工作数据和存档，要在 APFS 或 exFAT 格式的磁盘上；游戏原件留在原处（哪块盘都行），S2Arm 只读、不复制。")).font(.caption).foregroundStyle(.secondary)
                     HStack {
                         Label(L(store.keyStatus),systemImage:"key").font(.caption).foregroundStyle(.secondary)
                         Spacer()

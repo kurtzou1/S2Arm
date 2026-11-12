@@ -10,6 +10,9 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -23,21 +26,70 @@ import toolchain  # noqa: E402
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def machine_py():
-    """开发机在 tools/machine.local 声明的 S2A_PY（tools/machine.sh get；同 oneclick.sh）。源码树外（App 的 Resources/Jobs）没有 tools/，返回 None"""
+def machine_get(key):
+    """开发机在 tools/machine.local 声明的值（tools/machine.sh get）。源码树外（App 的 Resources/Jobs）没有 tools/，返回 None"""
     m = ROOT / "tools/machine.sh"
     if not m.is_file():
         return None
     try:
-        return subprocess.run(["bash", str(m), "get", "S2A_PY"], capture_output=True, text=True, timeout=30).stdout.strip() or None
+        return subprocess.run(["bash", str(m), "get", key], capture_output=True, text=True, timeout=30).stdout.strip() or None
     except (OSError, subprocess.SubprocessError):
         return None
+
+
+def machine_py():
+    """开发机在 tools/machine.local 声明的 S2A_PY（同 oneclick.sh）"""
+    return machine_get("S2A_PY")
 # 「装了 3.11+ 但 pip 被拒」（uv / Homebrew 的 PEP 668）时的出路；一键出包的报错用同一句
 VENV = "装不进包（externally-managed / uv 托管）就建个虚拟环境：python3 -m venv ~/s2a-venv && ~/s2a-venv/bin/python3 -m pip install -r launchers/macos/requirements-runtime.txt -r pack/fonts/requirements.txt，再 export S2A_PYTHON=~/s2a-venv/bin/python3"
 
 
+def sdk_pin():
+    """tools/toolchain.env 钉的 iOS SDK 主版本（IPHONEOS_SDK_MAJOR，pack/shell_build.sh 出壳时核）；源码树外没有这个文件 → None"""
+    try:
+        m = re.search(r"^IPHONEOS_SDK_MAJOR=(\d+)\s*$", (ROOT / "tools/toolchain.env").read_text(), re.M)
+    except OSError:
+        return None
+    return int(m.group(1)) if m else None
+
+
+def source_build_checks(run_path):
+    """源码树一键出包开跑后才现编的东西（#449：applenv 全绿、一键出包却在改写 / 出壳时红）：改写器固定依赖、cmake / ninja / meson、GNU Make。
+    命令按一键出包的 PATH 查（run_path：选定 Python 所在目录在最前）"""
+    import importlib.util
+    out = []
+    spec = importlib.util.spec_from_file_location("s2a_pack_rewriter", ROOT / "pack/rewriter.py")
+    rw = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rw)
+    #   改写器：S2A_REWRITER_C 指定的 / 指纹相同的随包那份直接用，否则要现编（钉版 Capstone / LZ4 源码 + cmake），查法同 tools/doctor.sh
+    try:
+        given = rw.override() or rw.bundled()
+        deps = None if given else rw.dependency_dir()
+        out.append(dict(name="改写器固定依赖", ok=True, requiredFor=["prepare"], group="system",
+                        message=f"用现成的改写器 {given}" if given else f"{deps}（Capstone 5.0.7 / LZ4 4.4.5）"))
+    except ValueError as e:
+        out.append(dict(name="改写器固定依赖", ok=False, requiredFor=["prepare"], group="system",
+                        message=f"{e}（缺了出包「改写」一步必红，不是游戏问题）"))
+    pipdo = "，或 pip 装进一键出包用的那个 Python 的虚拟环境（它的 bin 目录会放到 PATH 最前）"
+    tools = [("cmake", ["prepare", "ipa"], "编 C 改写器、glslang 要用：brew install cmake" + pipdo),
+             ("ninja", ["ipa"], "编 glslang、dav1d 要用：brew install ninja" + pipdo)]
+    if os.environ.get("S2A_DAV1D", "1") != "0":
+        tools.append(("meson", ["ipa"], "编 dav1d（AV1 软件解码）要用：brew install meson" + pipdo))
+    for name, need, why in tools:
+        found = shutil.which(name, path=run_path)
+        out.append(dict(name=name, ok=bool(found), requiredFor=need, group="system", message=f"用 {found}" if found else f"没有 {name}（{why}）"))
+    #   GNU Make ≥ 4：出 iPhone 壳的 make -j 用（系统 make 3.81 会卡死），判法就是 tools/gmake.sh 那一处
+    p = subprocess.run(["bash", "-c", 'source "$1"; s2a_gmake', "-", str(ROOT / "tools/gmake.sh")], capture_output=True, text=True,
+                       env=dict(os.environ, PATH=run_path))
+    out.append(dict(name="GNU Make 4", ok=p.returncode == 0, requiredFor=["ipa"], group="system",
+                    message=f"用 {p.stdout.strip()}" if p.returncode == 0 else (p.stderr.strip().removeprefix("【红】") or "没有 GNU Make 4（brew install make）")))
+    return out
+
+
 def context(operation, private):
-    dev = toolchain.detect_xcode() or default_developer_dir()   # 同前端：装着的最新一个；都找不到 → None，预检里报没装（不写死 Xcode.app）
+    # 选 Xcode 同 tools/toolchain.sh 出壳的顺序（#449：SDK 主版本要核出壳真用的那套）：S2A_DEVELOPER_DIR（环境 → tools/machine.local）→
+    #   同前端：装着的最新一个；都找不到 → None，预检里报没装（不写死 Xcode.app）
+    dev = os.environ.get("S2A_DEVELOPER_DIR") or machine_get("S2A_DEVELOPER_DIR") or toolchain.detect_xcode() or default_developer_dir()
     req = dict(schema=1, taskId="applenv", operation=operation, privateRoot=str(private), library=str(Path(private) / "library"),
                engineDir=str(ROOT), developerDir=dev)
     return Context(req), dev
@@ -65,9 +117,17 @@ def main(argv):
     checks = [x for x in checks if x["name"] != "S2Arm 内容读取工具"]
     # 与 pack/oneclick/oneclick.sh 开头的自检同一口径（10-23 维护者：缺什么 doctor 先抓到）：
     #   timeout 系统没有时用仓库自带 perl 版；.NET 10 SDK 认 PATH 或 ~/.dotnet；spirv-as / spirv-val 只给 graphics/metal 单测夹具用，出包不需要
-    import shutil
-    from ipa import dotnet_sdk
-    dn = shutil.which("dotnet") or (str(dotnet_sdk()[1]) if dotnet_sdk()[1] else None)
+    from ipa import dotnet_sdk, dotnet_missing
+    #   Python 包按一键出包会用的那个解释器查（S2A_PYTHON → S2A_PY（环境 → tools/machine.local）→ S2Arm.app 内置 Python → PATH 上的 python3，同 oneclick.sh）
+    app_py = "Contents/Resources/Runtime/python/bin/python3"
+    cands = [Path("/Applications/S2Arm.app") / app_py, Path.home() / "Applications/S2Arm.app" / app_py]
+    py = os.environ.get("S2A_PYTHON") or os.environ.get("S2A_PY") or machine_py() or next((str(p) for p in cands if os.access(p, os.X_OK)), None) \
+        or shutil.which("python3") or sys.executable
+    #   一键出包把这个解释器所在目录放到 PATH 最前（#447）：虚拟环境里 pip 装的 ninja / meson 它也用得上，下面查命令按同一个 PATH
+    run_path = os.pathsep.join(filter(None, (str(Path(py).expanduser().parent), os.environ.get("PATH"))))
+    # .NET SDK 按 compat/tree/global.json 的版本要求判（#449）：只看 10.x 会放过 10.0.301，到编 C# 时才红；装着但太旧和没装分开报
+    _, sdk_exe = dotnet_sdk()
+    dn_msg = None if sdk_exe else dotnet_missing()
     for x in checks:
         if x["name"] == "timeout" and (ROOT / "tools/bin/timeout").is_file():
             x.update(ok=True, message=f"用 {shutil.which('timeout') or '仓库自带的 tools/bin/timeout（perl 实现）'}")
@@ -75,16 +135,12 @@ def main(argv):
             x["requiredFor"] = ["test"]
             if not x["ok"]:
                 x["message"] = "只有 graphics/metal 的单测夹具要它（brew install spirv-tools）；一键出包不需要"
-        elif x["name"] == ".NET 10" and not x["ok"] and dn:
-            ok, ver = toolchain.probe(c, [dn, "--list-sdks"])
-            if ok and any(line.startswith("10.") for line in ver.splitlines()):
-                x.update(ok=True, message=f"用 {dn}（不在 PATH 上，一键出包会自己找到）")
-        elif x["name"] == ".NET 10" and not x["ok"]:
-            x["message"] = "没有 .NET 10 SDK：python3 pack/jobs/applenv.py --install dotnet（装到 ~/.dotnet，不要管理员密码）"
-    import os
-    gen_ok = subprocess.run([shutil.which("python3") or sys.executable, "-c", "import fontTools, pathops"], capture_output=True).returncode == 0
-    FONTDEPS = "" if gen_ok else "（生成器要的 fonttools / skia-pathops 还没装：python3 -m pip install -r pack/fonts/requirements.txt；%s）" % VENV
+        elif x["name"] in (".NET 10", ".NET SDK（打 iPhone 包）"):
+            x.update(ok=bool(sdk_exe), message=f"用 {sdk_exe}" if sdk_exe else dn_msg)
     #   共享字体（维护者 10-30：缺省开源替代字体，原版只在显式给 S2A_FONTS 时用）：同 pack/stages/sysdata.sh 的来源顺序；都没有时出包现做，生成器依赖齐就算通过
+    #   生成器依赖按一键出包用的解释器查（#449：原先查 PATH 上的 python3，S2A_PYTHON 指的虚拟环境装齐了也报红）
+    gen_ok = toolchain.probe(c, [py, "-c", "import fontTools, pathops"])[0]
+    FONTDEPS = "" if gen_ok else "（生成器要的 fonttools / skia-pathops 还没装：%s -m pip install -r pack/fonts/requirements.txt；%s）" % (py, VENV)
     fonts = os.environ.get("S2A_FONTS") or next((str(f) for f in (Path("/Applications/S2Arm.app/Contents/Resources/Fonts"),
                                                   Path.home() / "Applications/S2Arm.app/Contents/Resources/Fonts",
                                                   Path(os.environ.get("S2A_OPENFONTS_DIR") or Path(os.environ.get("S2A_RUN_ROOT") or Path.home() / ".s2arm/run") / "s2arm/openfonts"))
@@ -92,11 +148,6 @@ def main(argv):
     checks.append(dict(name="共享字体", ok=bool(fonts) or gen_ok, requiredFor=["prepare"], group="system",
                        message=f"用 {fonts}" if fonts else "出包时现做开源替代字体（pack/fonts/make_open_fonts.py）" if gen_ok else
                        f"没有共享字体：一键出包给 --fonts <目录>（S2Arm.app 的 Contents/Resources/Fonts），或装好生成器依赖由出包现做开源替代字体{FONTDEPS}"))
-    #   Python 包按一键出包会用的那个解释器查（S2A_PYTHON → S2A_PY（环境 → tools/machine.local）→ S2Arm.app 内置 Python → PATH 上的 python3，同 oneclick.sh）
-    app_py = "Contents/Resources/Runtime/python/bin/python3"
-    cands = [Path("/Applications/S2Arm.app") / app_py, Path.home() / "Applications/S2Arm.app" / app_py]
-    py = os.environ.get("S2A_PYTHON") or os.environ.get("S2A_PY") or machine_py() or next((str(p) for p in cands if os.access(p, os.X_OK)), None) \
-        or shutil.which("python3") or sys.executable
     for x in checks:
         if x["name"] == "Python":
             x["ok"] = toolchain.probe(c, [py, "-c", "import sys; assert sys.version_info >= (3, 11)"])[0]
@@ -107,11 +158,11 @@ def main(argv):
             found = shutil.which("zstd") or next((str(p) for p in apps if os.access(p, os.X_OK)), None)
             x["ok"] = bool(found)
             x["message"] = f"用 {found}" if found else "没有 zstd（解社区着色器参考库要用）：brew install zstd，或装 S2Arm.app（自带一份）"
-        elif x["name"] == ".NET SDK（打 iPhone 包）" and not x["ok"]:
-            x["message"] = "打 iPhone 包需要 .NET 10 SDK：python3 pack/jobs/applenv.py --install dotnet（从微软官方下载装到 ~/.dotnet，约 300 MB，不要管理员密码）"
         elif x["name"].startswith("Python / "):
             x["ok"] = toolchain.probe(c, [py, "-c", "import " + x["name"][9:]])[0]
             x["message"] = f"用 {py}" if x["ok"] else f"{py} 缺 {x['name'][9:]}：{py} -m pip install -r launchers/macos/requirements-runtime.txt（与 App 内置 Python 同一份钉版清单；换解释器用 S2A_PYTHON=<路径>）。{VENV}"
+    if (ROOT / "tools/toolchain.env").is_file():   # 下面几项只有源码树（命令行一键出包）现编才要；App 的 Resources/Jobs 里没有 tools/
+        checks.extend(source_build_checks(run_path))
     env = c.env()
     sdk = None
     try:
@@ -119,6 +170,16 @@ def main(argv):
     except tg.TargetError as e:
         checks.append(dict(name="iOS SDK", ok=False, requiredFor=["ipa"], group="system",
                            code=e.code, message=str(e)))
+    #   iOS SDK 主版本（#449）：本机现出 iPhone 壳时 pack/shell_build.sh 要求它等于 tools/toolchain.env 的 IPHONEOS_SDK_MAJOR，对不上出壳报红；
+    #   给了现成的壳（S2A_SHELL）或壳发布源（S2A_SHELL_SOURCE）就不在本机出壳，不要求
+    pin = sdk_pin()
+    if sdk and pin:
+        prebuilt = os.environ.get("S2A_SHELL") or os.environ.get("S2A_SHELL_SOURCE")
+        checks.append(dict(name="iOS SDK 主版本", ok=bool(prebuilt) or sdk == pin, requiredFor=["ipa"], group="system",
+                           message=f"用现成的壳（{'S2A_SHELL' if os.environ.get('S2A_SHELL') else 'S2A_SHELL_SOURCE'}），不在本机出壳" if prebuilt else
+                           f"iOS SDK {sdk}，与 tools/toolchain.env 的 IPHONEOS_SDK_MAJOR={pin} 一致" if sdk == pin else
+                           f"这套 Xcode 带的是 iOS SDK {sdk}，出 iPhone 壳要 iOS SDK {pin}（tools/toolchain.env 的 IPHONEOS_SDK_MAJOR）：装 Xcode {pin}，装好打开一次；"
+                           f"装了几套 Xcode 时用 S2A_DEVELOPER_DIR=<Xcode.app>/Contents/Developer 指定"))
     out = dict(developerDir=dev, iosSdkMajor=sdk, checks=checks)
     if "--target" in argv:
         i = argv.index("--target"); pt, osv = argv[i + 1], int(argv[i + 2])

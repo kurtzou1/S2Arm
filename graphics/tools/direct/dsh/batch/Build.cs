@@ -959,7 +959,6 @@ static class Metal
     // 熔断：同一次出库里某个目标带预编头编不过（去掉预编头重编成了）已有 PchTrip 支、带预编头编成的一支都没有 = 这台机器的预编头整体用不了，
     //   本次出库对这个目标关掉预编头，不再每支编两遍（11-09 外部分析报「Windows 上预编头完全失效」：Windows 出包机实测 430 支 0 支重编、未复现，熔断作安全阀）
     const int PchTrip = 8;
-    const int FailTrip = 64;   // 全败熔断阈值（Compile 里）：真实出库里逐支编不过是零星的，编成第一支前就连败 64 支只会是编译器本身用不了
     const string PchPrelude = "#include <metal_stdlib>\n#include <simd/simd.h>\nusing namespace metal;\n"
         + "struct s2a_pch_force {\n"   // 类型取自出库 MSL 实际出现的拼法（马车8 / 旷野之息 1.4 万份统计），多放的只在建预编头时花时间
         + "  texture2d<float> a; texture2d_array<float> b; texturecube<float> c; texturecube_array<float> d; texture3d<float> e;\n"
@@ -1062,9 +1061,9 @@ static class Metal
                 if (bad != null) throw new InvalidOperationException($"Metal 编译环境坏了（{bad}），不是这支着色器编不过");
                 if (attempt == 2)
                 {
-                    // 全败熔断：某个目标已有 FailTrip 支编不过、一支都没编成 = 编译器在这台机器上整体用不了（路径、权限、装坏），不是逐支的翻译缺陷，整次停
-                    if (St.AddOrUpdate(target + " failed", 1, (_, v) => v + 1) >= FailTrip && St.GetValueOrDefault(target + " compiled") == 0)
-                        throw new InvalidOperationException($"Metal 编译环境坏了（{target} 连续 {FailTrip} 支编不过、一支都没编成，最后一支：{Trunc(CompilerWhy(err) ?? err.Trim(), 200)}），不是这支着色器编不过");
+                    // 逐支编不过只记这一支，不在这里整次停（审计 P1-150：原先「连败 64 支、编成 0」就停，热缓存上复用几千支照样被停掉整份直连库）。
+                    //   编译器整体用不了由编库收尾 Tally 的「编成 + 复用 = 0」判；环境类（盘满 / 打不开文件 / 工作区没了）上面已整次停
+                    St.AddOrUpdate(target + " failed", 1, (_, v) => v + 1);
                     throw new CompileError(CompilerWhy(err) ?? $"exit status {rc}: {err.Trim()} (Command '{string.Join(' ', cmd)} {m} -o {air}')");   // 原话放前面：汇总只留前 160 字符，命令回显占满就看不到原因（#165）
                 }   // 原话放前面：汇总只留前 160 字符，命令回显占满就看不到原因（#165）
             }
@@ -1125,7 +1124,7 @@ static class Metal
     //   原先逐支记编不过，1364 支全败照退 0，出了一个没有着色器库的包）
     internal static string OpenFail(string err) => err != null && err.Contains("LLVM ERROR: Error opening", StringComparison.Ordinal)
         ? "编译器打不开文件：" + Trunc(err.Trim().Split('\n')[0], 200) : null;
-    /// <summary>单测入口（dsh_batch --metal-compile &lt;工作目录&gt; &lt;源文件&gt;）：按 Mac 编译约定走一次真实的 Init + Compile → 0 编成 / 1 这一支编不过 / 2 整次停（编译环境坏了）</summary>
+    /// <summary>单测入口（dsh_batch --metal-compile &lt;工作目录&gt; &lt;源文件&gt;）：按 Mac 编译约定走一次真实的 Init + Compile + 编库收尾 Tally → 0 编成 / 1 有编不过的 / 2 整次停（编译环境坏了，或一份库都没出）</summary>
     internal static int CompileCli(string[] a)
     {
         Store.Open(Path.Combine(a[0], "store")); Init((Build.MacMetal, Build.MacRecord, "macosx"), null, a[0], 1);
@@ -1134,7 +1133,9 @@ static class Metal
             string last = null;
             foreach (var src in a[1..])
                 try { Compile("mac", File.ReadAllText(src), Path.GetFileNameWithoutExtension(src)); } catch (CompileError e) { last = e.Message; }
-            Console.WriteLine(last == null ? "ok" : "compile error: " + last); Console.WriteLine(Summary()); return last == null ? 0 : 1;
+            Console.WriteLine(last == null ? "ok" : "compile error: " + last); Console.WriteLine(Summary());
+            if (Tally(_ => { }) is { } none) { Console.WriteLine("stop: " + none); return 2; }   // 同出库：编库收尾判「编成 + 复用 = 0」整次停
+            return last == null ? 0 : 1;
         }
         catch (InvalidOperationException e) { Console.WriteLine("stop: " + e.Message); return 2; }
     }

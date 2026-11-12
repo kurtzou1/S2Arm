@@ -100,11 +100,40 @@ class MoveTests(unittest.TestCase):
         r = self.run_setup(lib, freeDefault=True)
         self.assertEqual((r["library"], r["outcome"]), (str(lib), "opened"))   # 已有游戏库照常打开
 
-    def test_occupied_folder_refused_without_free_default(self):
+    def test_occupied_folder_asks_then_uses_it_and_leaves_files_alone(self):
+        # v0.3.1：玩家自己选的位置有别的文件 → 不替他换、先问（library_folder_not_empty）；确认后照建游戏库，原有文件不动
         lib = self.root / "S2Arm"; lib.mkdir(); (lib / "S2Arm.exe").write_text("x")
         with self.assertRaises(Failure) as e:
-            self.run_setup(lib)   # 玩家自己选的位置不替他换
+            self.run_setup(lib)
+        self.assertEqual(e.exception.code, "library_folder_not_empty")
         self.assertIn("已有别的文件", str(e.exception))
+        self.assertEqual(sorted(p.name for p in lib.iterdir()), ["S2Arm.exe"])   # 问之前什么都没写
+        r = self.run_setup(lib, acceptForeign=True)
+        self.assertEqual((r["library"], r["outcome"]), (str(lib), "created"))
+        self.assertEqual((lib / "S2Arm.exe").read_text(), "x")
+        self.assertEqual(self.run_setup(lib)["outcome"], "opened")   # 建好以后再打开不再问
+
+    def test_occupied_folder_move_stops_on_same_name_without_touching_anything(self):
+        old = self.old(); new = self.root / "picked"; new.mkdir(); (new / "saves").write_text("玩家自己的")
+        with self.assertRaises(Failure) as e:
+            self.run_setup(new, moveFrom=str(old), acceptForeign=True)
+        self.assertEqual(e.exception.code, "library_move_failed"); self.assertIn("saves", str(e.exception))
+        self.assertEqual((new / "saves").read_text(), "玩家自己的")
+        self.assertTrue((old / "saves" / GID / "save.bin").is_file())
+        (new / "saves").unlink(); (new / "mine.txt").write_text("留着")
+        self.run_setup(new, moveFrom=str(old), acceptForeign=True)
+        self.assert_moved(old, new); self.assertEqual((new / "mine.txt").read_text(), "留着")
+
+    def test_broken_library_marker_opens_with_id_kept_or_new(self):
+        # v0.3.1：标识坏了不挡打开——有库号照用、补正 schema；没库号补一个新的
+        lib = self.old("lib")
+        (lib / ".s2arm-library.json").write_text(json.dumps({"schema": 7, "id": "library-id"}))
+        self.assertEqual(self.run_setup(lib)["libraryId"], "library-id")
+        self.assertEqual(json.loads((lib / ".s2arm-library.json").read_text())["schema"], 1)
+        (lib / ".s2arm-library.json").write_text(json.dumps({"schema": 1}))
+        r = self.run_setup(lib)
+        self.assertEqual(r["outcome"], "opened"); self.assertTrue(r["libraryId"])
+        self.assertEqual(json.loads((lib / ".s2arm-library.json").read_text())["id"], r["libraryId"])
 
     def test_setup_does_not_adopt_logs_of_a_plain_folder(self):
         import layout

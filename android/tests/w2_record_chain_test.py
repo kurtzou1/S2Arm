@@ -100,9 +100,13 @@ def main():
             if name=='positive':assert not failures,failures
             else:assert failures,(name,'mutant survived');print(name,'expected red',failures)
         # Explicit production source list and gate registration (weak hook is insufficient).
-        links=(ROOT/'android/core-link/LinkSources.cmake').read_text()
+        # 只数旧层（nvn_vk）的直连源清单：#631 之后新层清单 s2a_android_nvk_sources 也合法地列了
+        # nvn_vk_compute_request.c，整文件计数会把它算成 2 次。
+        cmake=(ROOT/'android/core-link/LinkSources.cmake').read_text()
+        start=cmake.index('function(s2a_android_direct_sources')
+        links=cmake[start:cmake.index('endfunction()',start)]
         for source_name in ('nvn_vk_compute_bridge.c','nvn_vk_compute_request.c','nvn_vk_compute_lookup.c','nvn_vk_compile_facts.c'):
-            assert links.count('native/nvn/'+source_name)==1
+            assert links.count('native/nvn/'+source_name)==1,source_name
         assert 'w2_record_chain_test.py' in (ROOT/'android/test.sh').read_text()
         print('PASS: 8 dynamic record default-hook cases with real worker, 8 effective negative controls; concurrent bounded compute accounting')
 if __name__=='__main__':main()

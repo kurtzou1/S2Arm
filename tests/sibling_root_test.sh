@@ -20,7 +20,7 @@ ck "② 戳 = 本树键 → 跳过（romfsidx ${a}）；戳是旧提交的键 �
 hdiutil create -quiet -size 40m -fs ExFAT -volname S2ASIBT "$T/x.dmg" && M=$(hdiutil attach -nobrowse -noverify "$T/x.dmg" | tail -1 | awk -F'\t' '{print $NF}')
 if [ -n "$M" ] && [ -d "$M" ]; then
   o=$(python3 "$H/tools/clonedir.py" --report "$S/party@pkg-a" "$M/G@sib-pkg-a" 2>&1); r=$?
-  ck "③ exFAT：普通拷贝发布、退出 0（${r}）、「${o##*$'\n'}」、内容原样" '[ $r = 0 ] && [[ "$o" == *"普通拷贝"* ]] && [ "$(cat "$M/G@sib-pkg-a/romfs/x")" = a ]'
+  ck "③ exFAT：普通拷贝发布、退出 0（${r}）、「${o##*$'\n'}」、内容与阶段戳原样" '[ $r = 0 ] && [[ "$o" == *"普通拷贝"* ]] && [ "$(cat "$M/G@sib-pkg-a/romfs/x")" = a ] && [ "$(cat "$M/G@sib-pkg-a/.stage_romfsidx")" = K-new ]'
   o=$(python3 "$H/tools/clonedir.py" --report "$S/party@pkg-a" "$M/G@sib-pkg-a" 2>&1); r=$?
   ck "③b exFAT 上目标已在 → 再发布失败、不覆盖（${r}）" '[ $r != 0 ] && [ "$(cat "$M/G@sib-pkg-a/romfs/x")" = a ]'
 else echo "不通 ③ hdiutil 建不了 exFAT 临时盘"; bad=1; fi

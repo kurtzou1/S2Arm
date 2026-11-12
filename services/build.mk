@@ -49,8 +49,9 @@ endif
 # iOS App 一律链 C#（产品）：同一份 NativeAOT 镜像（服务层 + Ryujinx + NxGal + 渲染循环）的 ios-arm64 版，-force_load 同 Mac。
 # 只在链接参数首次展开时出库并缓存结果；失败立即停止，诊断保存在本次 BUILD/cs 下。
 # 先检查脚本退出码再取最后一行，避免 tail 掩盖失败或把失败前的 stdout 当成链接参数。
+# 失败时把 stderr 里的红行（没有就末三行）带进错误行（#449）：出壳 pack/shell_build.sh 只摘 make.log 里的红行，出壳临时目录（含这份 .err）随后就删，原先报红内容是空的。
 define s2a_ios_lib
-$(eval $(1) := $(shell mkdir -p "$(BUILD)/cs" && result=$$(bash $(2) ios-arm64 2>"$(BUILD)/cs/$(3)_ios.err") && printf '%s\n' "$$result" | tail -1))$(if $(strip $($(1))),$($(1)),$(error $(2) 失败（全文 $(BUILD)/cs/$(3)_ios.err）))
+$(eval $(1) := $(shell mkdir -p "$(BUILD)/cs" && result=$$(bash $(2) ios-arm64 2>"$(BUILD)/cs/$(3)_ios.err") && printf '%s\n' "$$result" | tail -1))$(if $(strip $($(1))),$($(1)),$(error $(2) 失败：$(shell { grep -a -m1 -E '🔴|【红】' "$(BUILD)/cs/$(3)_ios.err" || tail -3 "$(BUILD)/cs/$(3)_ios.err"; } | tr '\n' ' ')（全文 $(BUILD)/cs/$(3)_ios.err）))
 endef
 S2A_CS_IOS_LDFLAGS = $(call s2a_ios_lib,S2A_CS_IOS_LDFLAGS,services/nxaot.sh,nxaot)
 S2A_VPX_IOS_LIB = $(call s2a_ios_lib,S2A_VPX_IOS_LIB,services/vpx/build.sh,vpx)

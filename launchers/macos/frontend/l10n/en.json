@@ -1463,7 +1463,7 @@
   "s2arm.library.choosePanel": "Choose where the game library goes: it holds export work data and saves; game files stay where they are. Pick an empty folder (your games can move with you) or an existing library, not a cloud-synced folder such as iCloud Drive.",
   "s2arm.env.library.group": "Library",
   "s2arm.env.library.title": "Library location",
-  "s2arm.env.library.detail": "Export files and caches live here. An external APFS drive works. Your games and builds can move with it.",
+  "s2arm.env.library.detail": "Export files and caches live here. An external APFS or exFAT drive works. Your games and builds can move with it.",
   "s2arm.env.library.change": "Change",
   "s2arm.library.moveTitle": "Move your games to the new location?",
   "s2arm.library.moveBody": "Games, finished builds, shader caches and saves all move, so you don't have to build again. If the move fails, the library stays where it is.",

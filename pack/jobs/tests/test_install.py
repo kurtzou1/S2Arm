@@ -219,13 +219,14 @@ class FlowTests(unittest.TestCase):
                 seen["env"] = env; seen["progress_flag"] = "--progress-lines" in args
                 if seen["progress_flag"]:   # 推包工具每推完一批打的机器读行（tools/push_pack.py --progress-lines）
                     for d, k in ((0, 0), (1 << 20, 1), (3 << 20, 2)): on_line(f"S2A_PUSH_PROGRESS {d} {3 << 20} {k} 2")
+                if locked:   # #333：推之前写探针就写不进（探针在推送之前，和带不带 --apply 无关）
+                    Path(log).parent.mkdir(parents=True, exist_ok=True)
+                    Path(log).write_text("【红】iPhone 写不进资源包：多半是手机锁屏了或数据线松了。解锁手机、保持亮屏，插稳数据线后再点一次。\n", encoding="utf-8")
+                    raise install.Failure("tool", code="tool_exit")
                 on_line(f"[12:00:00] 资源包：推 {pushed} 个文件 3 MB，分 1 批 + 索引 + 清单（1 秒）")
                 if "--apply" in args and not (pushed == 0 and state["applied"] == "cafe01"):
                     launches.append({"S2A_PACK_APPLY_ONLY": "1"})
                     on_line("[12:00:05] 机上解包 13/17")
-                    if locked:   # #333：推之前写探针就写不进
-                        Path(log).write_text("【红】iPhone 写不进资源包：多半是手机锁屏了或数据线松了。解锁手机、保持亮屏，插稳数据线后再点一次。\n", encoding="utf-8")
-                        raise install.Failure("tool", code="tool_exit")
                     if cant_open:
                         Path(log).parent.mkdir(parents=True, exist_ok=True)
                         Path(log).write_text("【红】资源包已传完，还差最后一步：在 iPhone 上打开 S2Arm（电脑这边打不开手机上的 App：起 App 失败：RSD 里没有 app_service）\n", encoding="utf-8")
@@ -256,30 +257,15 @@ class FlowTests(unittest.TestCase):
             r = install.install(self.c)
         return r, runs, seen, launches
 
-    def test_repush_same_pack_unpack_timeout_maps_to_player_message(self):
-        # 推包工具报解包停住（装机原则 11-11）：资源已全在手机上 → 装机成功 + 提醒打开 App 接着装（manual_unpack_required 警告），不报失败
-        gid = "0100535012974000"; self._fixture(gid); self.c.r.update(gameId=gid)
-        self._install(gid, pushed=2, applied_before="cafe01", unpack_ok=False)
-        warn = [d for d in self.c.job["diagnostics"] if d["code"] == "manual_unpack_required"]
-        self.assertTrue(warn and warn[-1]["severity"] == "warning", self.c.job["diagnostics"])
-        self.assertIn("机上解包 180 秒没有新进展（停在第 13 包）", warn[-1]["summary"])
-        self.assertIn("打开这款游戏", warn[-1]["summary"])
-        r, runs, seen, launches = self._install(gid, pushed=2, applied_before="cafe01", unpack_ok=True)
-        self.assertEqual(len(launches), 1)
-        ev = [json.loads(l) for l in self.c.events.read_text(encoding="utf-8").splitlines() if l.strip()]   # 推包工具的「机上解包 k/n」→ 作业进度事件（启动器显示）
-        self.assertTrue(any(e["type"] == "progress" and e["message"] == "机上解包 13/17" and (e["done"], e["total"], e.get("unit")) == (13, 17, "包") for e in ev), ev[-3:])
-
-    def test_push_batches_become_byte_progress_then_unpack_counts(self):   # #266：推送阶段按批发字节计数（分母 = 本次待传 3 MB），之后机上解包另起「包」计数
+    def test_push_batches_become_byte_progress(self):   # #266：推送阶段按批发字节计数（分母 = 本次待传 3 MB）；容器装机传完即装好，不再另起机上解包计数
         gid = "0100535012974000"; self._fixture(gid); self.c.r.update(gameId=gid)
         r, runs, seen, launches = self._install(gid, pushed=2, applied_before="", unpack_ok=True)
         self.assertTrue(seen["progress_flag"])
         ev = [json.loads(l) for l in self.c.events.read_text(encoding="utf-8").splitlines() if l.strip()]
         push = [(e["done"], e["total"], e.get("unit")) for e in ev if e.get("message") == install.PUSHING and e["type"] == "progress"]
         self.assertEqual(push[-1], (3 << 20, 3 << 20, "B")); self.assertTrue(all(t == 3 << 20 and u == "B" for _, t, u in push))
-        last_push = max(i for i, e in enumerate(ev) if e.get("message") == install.PUSHING)
-        unpack = next(i for i, e in enumerate(ev) if e.get("message") == "机上解包 13/17")
-        self.assertLess(last_push, unpack)                     # 传完之后才进解包
-        self.assertEqual((ev[unpack]["done"], ev[unpack]["total"], ev[unpack]["unit"]), (13, 17, "包"))   # 解包计数另起，不沿用传输 100%
+        self.assertFalse(any(str(e.get("message", "")).startswith("机上解包") for e in ev))   # 不等机上解开
+        self.assertTrue(r["openToFinish"])
 
     def test_locked_phone_push_reports_device_locked(self):   # #333：推包探针写不进 → device_locked，原因原话上屏（不是笼统的 resource_transfer_failed）
         gid = "0100535012974000"; self._fixture(gid); self.c.r.update(gameId=gid)
@@ -287,14 +273,6 @@ class FlowTests(unittest.TestCase):
             self._install(gid, pushed=2, applied_before="", locked=True)
         self.assertEqual(e.exception.code, "device_locked")
         self.assertIn("锁屏", str(e.exception))
-
-    def test_cant_open_app_is_warning_not_failure(self):   # #192：资源传完、电脑拉不起 App → 装机完成 + 黄字；推了多少照实报（替身：2 个文件 3 MB）
-        gid = "0100535012974000"; out, pack = self._fixture(gid); self.c.r.update(gameId=gid)
-        r, *_ = self._install(gid, pushed=2, applied_before="", cant_open=True)
-        d = [x for x in self.c.job["diagnostics"] if x["code"] == "manual_unpack_required"]
-        self.assertEqual(len(d), 1); self.assertEqual(d[0]["severity"], "warning"); self.assertIn("资源包已传完", d[0]["summary"])
-        self.assertEqual(r["packFiles"], 2)
-        self.assertIn("资源包已传完", r["unpackPending"])   # 结果带还差的一步（11-09 #336）：前端据此不说「已装到 iPhone」
 
     def test_img_pack_is_done_once_transferred(self):   # 11-11：单一 IMG 形态传完并核过长度即装好，不带 --apply、不起 App 等机上解开，结果带 openToFinish
         gid = "0100535012974000"; out, pack = self._fixture(gid); self.c.r.update(gameId=gid)
@@ -313,14 +291,15 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(ensure_profile[-2:], [str(self.c.engine / "pack/app.entitlements"), "00000000-0000000000000002"])   # 描述文件申请带设备 UDID（登记这台）
         self.assertIn(bid, ensure_profile); self.assertEqual(seen["bid"], bid)                                    # 签名前 Info.plist 已换成团队专属包名
         push = next(a for a in runs if a[2].endswith("tools/push_pack.py"))
-        self.assertIn("run", push[3:]); self.assertIn("--apply", push)
+        # 「装到手机卡 99%」：容器装机旧形态资源包也传完即装好，不带 --apply、不为解包起 App（App 打开时游戏库解开）
+        self.assertIn("run", push[3:]); self.assertNotIn("--apply", push)
         self.assertIn(f"Documents/games/{gid}", push)   # 资源包推进本款文档根
         self.assertTrue(seen["env"]["S2A_DEVICECTL"].endswith("Resources/bin/devicectl"))
         self.assertEqual(seen["env"]["S2A_PUSH_UDID"], "00000000-0000000000000002")   # 推包脚本据 UDID 走 s2a-devpush 流式（11-06）
-        self.assertEqual(launches, [{"S2A_PACK_APPLY_ONLY": "1"}])                                           # 推了就起一次 App 只解包
+        self.assertEqual(launches, [])                                                                     # 不为解包起 App、不等机上解开
         self.assertEqual((r["device"], r["bundleId"], r["packFiles"], r["free"]), ("测试设备2", bid, 2, True))
-        self.assertNotIn("unpackPending", r)   # 解开了：结果不带还差的一步
-        self.assertNotIn("openToFinish", r)    # 旧形态等机上解开，不写「打开 S2Arm 会自动完成」
+        self.assertNotIn("unpackPending", r)
+        self.assertTrue(r["openToFinish"])     # 成功页写「已传到 iPhone，打开 S2Arm 会自动完成安装」
 
 
     def test_container_install_paths(self):

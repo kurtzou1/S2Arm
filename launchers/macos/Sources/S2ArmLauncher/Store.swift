@@ -55,7 +55,7 @@ final class WorkerOutput: @unchecked Sendable {
     @Published var installReadiness: InstallReadiness?
     @Published var installWhenReady = false
     var installCheckStarted: Date?
-    /// 选的游戏库位置在非 APFS 磁盘上：弹框说明并给改用默认位置 / 重选
+    /// 选的游戏库位置在不支持的磁盘格式上：弹框说明并给改用默认位置 / 重选
     @Published var libraryFormatProblem: LibraryFormatProblem?
     /// 导出页同时勾了 iPhone / iPad 和 Mac 的游戏：iPhone 版结束后接着排 Mac 版
     var macAfterIPA: Set<String> = []
@@ -283,9 +283,10 @@ final class WorkerOutput: @unchecked Sendable {
     func chooseLibrary() {
         let panel = NSOpenPanel(); panel.title = L("选择游戏库位置：放导出时的工作数据和存档，游戏原件不用挪（首次请选择空文件夹）"); panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.canCreateDirectories = true; panel.prompt = L("选择")
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        // 游戏库（导出时的工作数据）要放 APFS；游戏原件放哪都行、原地只读（11-02 维护者定）。选到 exFAT 等不拦，说明后工作数据放内置盘的默认位置（后端 setup 同一规则兜底）
+        // 游戏库（导出时的工作数据）要放 APFS 或 exFAT；游戏原件放哪都行、原地只读。FAT32 等仍说明后改用默认位置（后端 setup 同一规则兜底）
         let format = Store.volumeFormat(url)
-        if !format.isEmpty, format != "apfs" { libraryFormatProblem = LibraryFormatProblem(path:url.path, format:format); return }
+        let ok = format.isEmpty || format == "apfs" || format == "exfat"
+        if !ok { libraryFormatProblem = LibraryFormatProblem(path:url.path, format:format); return }
         setupLibrary(url)
     }
     /// 改用这台 Mac 上的默认位置（~/S2Arm，在内置盘上）；用户指定过 S2Arm 数据目录时是数据目录下的「游戏库」，不一定在内置盘

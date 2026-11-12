@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import io
 import os
 from pathlib import Path
@@ -326,7 +327,16 @@ def write_ipa(signed_app, output_ipa):
             raise BundleError(f'非 zip64 的 IPA 装不下这份 App：{count} 个条目、文件合计 {total} 字节、最大 {biggest} {biggest_size} 字节；'
                               f'zipfile 报「{error}」') from error
         # Atomic no-replace publication on both hosts; no fallback that overwrites an existing IPA.
-        os.link(temp, dest)
+        try:
+            os.link(temp, dest)
+        except FileExistsError:
+            raise
+        except OSError as error:   # 盘上建不了硬链接（exFAT / FAT32，v0.3.1）：先核没有同名再改名放到位，仍不覆盖已有的 IPA
+            if error.errno not in (errno.ENOTSUP, errno.EOPNOTSUPP, errno.EPERM, errno.EXDEV, errno.EINVAL) and getattr(error, "winerror", None) != 1:
+                raise
+            if os.path.lexists(dest):
+                raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(dest)) from error
+            os.replace(temp, dest)
         return dest
     finally:
         temp.unlink(missing_ok=True)

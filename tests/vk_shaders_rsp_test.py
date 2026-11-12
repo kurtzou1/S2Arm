@@ -52,5 +52,36 @@ with tempfile.TemporaryDirectory() as t:
     chk('一支编不过：失败表只有它', [msls[1]], sorted(failed))
     chk('一支编不过：其余两支照链（响应文件 2 行）', 2, len(rsp.get('airs') or []))
     chk('一支编不过：库照出', True, bool(lib) and os.path.isfile(lib))
+# 审计 P1-176：两个目标各剔各的。翻译 / 逐目标编库都用替身：三支 A B C，Mac 目标编不过的支按场景给，iPhone 全编得过
+#   期望（手写）：Mac 只 A 编不过 → Mac 表 B C、iPhone 表 A B C（原先 iPhone 也只剩 B C）、汇总「成功 3、失败 1」
+#               Mac 三支全编不过 → Mac 只有表头且没有库、iPhone 表 A B C 且库在（原先 iPhone 库被删成表头）、汇总「成功 3、失败 3」
+import contextlib, io
+def main_run(mac_bad):
+    with tempfile.TemporaryDirectory() as t:
+        src = os.path.join(t, 'spv'); os.makedirs(src); mac, ios = os.path.join(t, 'mac'), os.path.join(t, 'ios')
+        keys = ['a', 'b', 'c']
+        def one(p, tmp, root): k = os.path.basename(p); return (k, 'vert', ['u:0.0=0'], [os.path.join(tmp, k + '.metal')], 'src/' + k)
+        def metallib(msls, d, sdk, extra, tmp):
+            bad = {m: 'synthetic error' for m in msls if sdk == 'macosx' and os.path.basename(m)[0] in mac_bad}
+            if len(bad) == len(msls): return None, bad
+            os.makedirs(d, exist_ok=True); lib = os.path.join(d, 'vk_shaders.metallib'); open(lib, 'wb').write(b'lib'); return lib, bad
+        class R: stdout = 'r'; stderr = ''; returncode = 0
+        out = io.StringIO()
+        with mock.patch.object(vs, 'spirv_files', lambda r: [os.path.join(r, k) for k in keys]), mock.patch.object(vs, 'one', one), \
+             mock.patch.object(vs, 'metallib', metallib), mock.patch.object(vs.subprocess, 'run', lambda *a, **k: R()), \
+             mock.patch.object(sys, 'argv', ['vk_shaders.py', src, mac, '--ios', ios]), contextlib.redirect_stdout(out):
+            vs.main()
+        rows = lambda d: [l.split('\t')[0] for l in open(os.path.join(d, 'vk', 'vk_shaders.tsv'), encoding='utf-8').read().splitlines() if not l.startswith('#')]
+        libs = lambda d: os.path.exists(os.path.join(d, 'vk', 'vk_shaders.metallib'))
+        summ = [l for l in out.getvalue().splitlines() if l.startswith('Vulkan 汇总')]
+        return rows(mac), libs(mac), rows(ios), libs(ios), summ
+m, ml, i, il, summ = main_run('a')
+chk('P1-176 Mac 只 A 编不过：Mac 表', ['b', 'c'], m)
+chk('P1-176 Mac 只 A 编不过：iPhone 表仍有 A', ['a', 'b', 'c'], i)
+chk('P1-176 Mac 只 A 编不过：汇总行', ['Vulkan 汇总：成功 3、失败 1'], summ)
+m, ml, i, il, summ = main_run('abc')
+chk('P1-176 Mac 全编不过：Mac 只有表头、没有库', ([], False), (m, ml))
+chk('P1-176 Mac 全编不过：iPhone 表与库都在', (['a', 'b', 'c'], True), (i, il))
+chk('P1-176 Mac 全编不过：汇总行', ['Vulkan 汇总：成功 3、失败 3'], summ)
 print(f'{"✓" if not bad else "✗"} vk_shaders_rsp：{bad} 不通')
 sys.exit(1 if bad else 0)

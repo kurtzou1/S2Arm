@@ -242,7 +242,7 @@ final class EnvironmentAndInstallTests: XCTestCase {
         XCTAssertEqual(service.repairStep(for: "downloadMetal"), .job("downloadMetal"))
         XCTAssertEqual(service.repairStep(for: "downloadIosPlatform"), .job("downloadIosPlatform"))   // 11-07：缺 Xcode 的 iOS 平台组件 → 一键下载作业
         XCTAssertEqual(service.repairStep(for: "installDotnet"), .job("installDotnet"))
-        XCTAssertEqual(service.repairStep(for: "library"), .chooseLibrary)   // 游戏库在云盘 / 非 APFS：换游戏库
+        XCTAssertEqual(service.repairStep(for: "library"), .chooseLibrary)   // 游戏库在云盘 / 不支持的盘格式：换游戏库
         XCTAssertEqual(service.repairStep(for: "prepareEngine"), .unavailable)
         XCTAssertFalse(service.ready(for: "prepare"))   // 还没查过算没齐
         // 没找到 Xcode 时「打开 Xcode」退成去 App Store

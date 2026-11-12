@@ -7,10 +7,14 @@
 extern "C" {
 #endif
 
-// Default-off process experiment: preserve inline TPIDR2 and inactive ZA records
-// in the existing complete ucontext copy. Active ZA / external records still fail.
+// Default ON since #573 / #736 (SME cores put these in every signal frame): preserve inline TPIDR2
+// and inactive ZA records in the existing complete ucontext copy. Active ZA / external records still fail.
+// enabled = 0 is a debug opt-out.
 // Configure before thread_init; later changes return EBUSY (same value is idempotent).
 int s2a_android_fault_configure_inline_sme(int enabled);
+// First signal-frame record magic that made a fault unclaimable (0 = none seen; 1 = frame without FPSIMD).
+// s2a_android_fault_probe() returns ENOTSUP in that case instead of crashing.
+unsigned s2a_android_fault_unsupported_record(void);
 
 // Call on every guest pthread before guest entry, outside signal context.
 // Installs the existing guest alternate signal stack and preallocates save state.

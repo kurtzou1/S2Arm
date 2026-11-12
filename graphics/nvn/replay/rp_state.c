@@ -1,5 +1,6 @@
 // 状态类命令的落地（对齐 nvn_mtl.m state_op @10374、state_reset @7222、bind_stages @7177、bb_fresh / bh_fresh @6478）。
 #include "rp_state.h"
+#include "rp_shader.h"
 #include "nvn_unimpl.h"
 #include <string.h>
 
@@ -12,6 +13,18 @@ int nvn_dpool_base(const void *pool, int tex);   // hle_nvn.c：描述符池的�
 
 static void args_dirty_all(void) { memset(rp_args_dirty, 1, sizeof rp_args_dirty); }
 void rp_dirty_all(void) { rp_pso_dirty = rp_dss_dirty = 1; args_dirty_all(); }
+
+// 着色器来源消费的「当前有效图形阶段」与各阶段的键：OP_BIND_PROGRAM 按阶段窄化后的结果。
+uint32_t rp_shader_graphics_stages(void) {
+    uint32_t m = 0;
+    for (int st = 0; st < 5; st++) if (rp_S.bser[st]) m |= 1u << st;
+    return m;
+}
+int rp_shader_stage_key(unsigned st, uint8_t key[8]) {
+    if (st > 4 || !rp_S.bser[st] || !(rp_S.skey_ok >> st & 1)) return 0;
+    if (key) memcpy(key, rp_S.skey[st], 8);
+    return 1;
+}
 
 void rp_state_reset(void) {
     memset(&rp_S, 0, sizeof rp_S); memset(&rp_R, 0, sizeof rp_R);
@@ -70,6 +83,18 @@ int rp_state_op(uint32_t op, const void *a, uint32_t size) {
             return 1; }
         case OP_BIND_PROGRAM: { p_bind_program t; const p_bind_program *bp = bind_program_rec(a, size, &t);
             const prog_t *p = prog_is(bp->prog, bp->snap.serial) ? bp->prog : NULL; uint64_t ser = bp->prog ? bp->snap.serial : 0;
+            // 程序实际有哪些阶段的着色器：快照的 stage_of[]（同旧 vk_record.c 的取法），nstage 是着色器项数。
+            // 取不到（快照缺 / 有认不出的阶段）时 known=0，沿用旧规则（本次掩码照单全收），留给绘制时按名字报。
+            uint32_t prog_st = 0; int prog_known = 0;
+            if (bp->snap.nstage > 0) {
+                uint32_t m = 0; int ok = 1;
+                for (uint32_t i = 0; i < bp->snap.nstage && i < 6u; i++) {
+                    unsigned st = bp->stage_of[i];
+                    if (st > 5) { ok = 0; break; }
+                    m |= 1u << st;
+                }
+                if (ok) { prog_st = m; prog_known = 1; }
+            }
             // 各阶段的着色器键：记录里的 keys 按程序的着色器数组序，stage_of 给出每一项是哪个 NVN 阶段
             for (int i = 0; i < 6; i++) { unsigned st = bp->stage_of[i]; if (st > 5 || !(bp->stages >> st & 1)) continue;
                 if (bp->kok >> i & 1) { memcpy(rp_S.skey[st], bp->keys[i], 8); rp_S.skey_ok |= (uint8_t)(1u << st); } else rp_S.skey_ok &= (uint8_t)~(1u << st); }
@@ -77,7 +102,17 @@ int rp_state_op(uint32_t op, const void *a, uint32_t size) {
             if (bp->stages & 0x20) { if (rp_S.cser != ser) args_dirty_all(); rp_S.cprog = p; rp_S.cser = ser; }
             if (bp->stages & 0x1f) {
                 int ch = 0;
-                for (int st = 0; st < 5; st++) if (bp->stages >> st & 1) { if (rp_S.bser[st] != ser) ch = 1; rp_S.bst[st] = p; rp_S.bser[st] = ser; }
+                for (int st = 0; st < 5; st++) {
+                    if (!(bp->stages >> st & 1)) continue;   // 本次掩码没覆盖的阶段：保留原绑定（NVN 按阶段绑定）
+                    if (prog_known && !(prog_st >> st & 1)) {
+                        if (st < 2) continue;   // 顶点 / 片元不能被关：程序没有就保留原绑定（同 iOS bind_stages，太鼓达人）
+                        if (rp_S.bser[st]) ch = 1;   // 几何 / 细分：程序没有就解绑旧程序（同 iOS，异度 3）
+                        rp_S.bst[st] = NULL; rp_S.bser[st] = 0; rp_S.skey_ok &= (uint8_t)~(1u << st);
+                        continue;
+                    }
+                    if (rp_S.bser[st] != ser) ch = 1;
+                    rp_S.bst[st] = p; rp_S.bser[st] = ser;
+                }
                 if (ch) { rp_pso_dirty = 1; args_dirty_all(); }
             }
             stage_sweep();

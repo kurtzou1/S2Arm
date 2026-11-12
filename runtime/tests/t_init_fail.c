@@ -110,13 +110,21 @@ int main(void) {
         char b[512]; s2a_init_fail_diag_file(b, sizeof b, S2A_INIT_FAIL_E_SERVICE_INIT, "B", "C", "/nonexistent/host.log");
         WANT(strstr(b, "失败摘要：服务会话初始化失败\n")); WANT(strstr(b, "最近的红行：无\n")); });
 
-    CASE("服务会话初始化失败归码（11-07 Duo）：资源包没有 exefs/main.npdm → game_files_missing；有 → service_init；没给资源包根 → service_init", {
+    CASE("服务会话初始化失败归码（11-07 Duo）：资源包没有 exefs/main.npdm 或 game.img 没传完 → game_files_missing；有 → service_init；没给资源包根 → service_init", {
         char d[] = "/tmp/t_init_fail_gd.XXXXXX"; WANT(mkdtemp(d) != NULL);
         WANT(s2a_init_fail_service_code(d) == S2A_INIT_FAIL_E_GAME_FILES);            // 资源包根在、exefs 不在（Duo 日志的 DirectoryNotFound）
         char p[256]; snprintf(p, sizeof p, "%s/exefs", d); WANT(!mkdir(p, 0755));
         WANT(s2a_init_fail_service_code(d) == S2A_INIT_FAIL_E_GAME_FILES);            // exefs 在、main.npdm 不在
         snprintf(p, sizeof p, "%s/exefs/main.npdm", d); FILE *f = fopen(p, "w"); WANT(f != NULL); if (f) fclose(f);
         WANT(s2a_init_fail_service_code(d) == S2A_INIT_FAIL_E_SERVICE_INIT);          // 游戏文件在：是别的原因
+        // 审计 P1-170：game.img 头里写的整个文件长 4096、实际只有 1000（推到一半）→ game_files_missing；长度对上 → 照旧 service_init
+        char img[256]; snprintf(img, sizeof img, "%s/game.img", d);
+        unsigned char hdr[1000] = {0}; memcpy(hdr, "S2AIMG01", 8); long long want = 4096; memcpy(hdr + 128, &want, 8);
+        FILE *g = fopen(img, "wb"); WANT(g != NULL); if (g) { fwrite(hdr, 1, sizeof hdr, g); fclose(g); }
+        WANT(s2a_init_fail_service_code(d) == S2A_INIT_FAIL_E_GAME_FILES);
+        want = sizeof hdr; memcpy(hdr + 128, &want, 8); g = fopen(img, "wb"); if (g) { fwrite(hdr, 1, sizeof hdr, g); fclose(g); }
+        WANT(s2a_init_fail_service_code(d) == S2A_INIT_FAIL_E_SERVICE_INIT);
+        unlink(img);
         WANT(s2a_init_fail_service_code("/nonexistent/资源包") == S2A_INIT_FAIL_E_GAME_FILES);
         WANT(s2a_init_fail_service_code(NULL) == S2A_INIT_FAIL_E_SERVICE_INIT); WANT(s2a_init_fail_service_code("") == S2A_INIT_FAIL_E_SERVICE_INIT);
         unlink(p); snprintf(p, sizeof p, "%s/exefs", d); rmdir(p); rmdir(d);

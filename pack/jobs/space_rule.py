@@ -65,14 +65,17 @@ def pack_direct_bytes(size):
     return DIRECT_SMALL_BYTES if size < PACK_SMALL_BYTES else DIRECT_LARGE_BYTES
 
 
-def pack_need_bytes(packages, unpacked=False, windows=None, image=False, clones=None, links=True):
+def pack_need_bytes(packages, unpacked=False, windows=None, image=False, clones=None, links=True, keep_unpack=False):
     """这次出包要多少盘；packages 已按 selected_packages 选定。unpacked：解包目录已完整在盘上。windows 不给就按当前系统。
     image：打 iPhone 包（单一 IMG 交付）——出包最后一步把资源整份写成 game.img（真数据，克隆不了），写时解包目录、直连缓存都还在盘上，
     再加一份原件大小（11-11 实测 0400486024DEC000：IMG 24.49 GiB ≈ 资源内容 24.47 GiB，整次峰值 57.90 GiB 出在写 IMG 时；原先没算，预留 43.9 GB < 峰值 62.2 GB）。
     直连段按原件大小分两档（pack_direct_bytes）。11-10 删掉 #265 的「按着色器抽取量 × 系数」：抽取字节数不是直连占用的驱动量——
     抽取产物有的是压缩过的着色器档案（0100559011740000 只有 23 个、0.48 GiB），有的是原文（01008FC00D964000 1.66 GiB），两者直连编译缓存峰值
     却差不多（6.3 / 7.0 GiB），乘系数注定一款多一款少；那条分支从 #265 起读的是 v2 旧路径、从没生效过。按原件的规则在克隆感知、只量出包作业目录的
-    峰值上三款都够（单测 test_space_budget_covers_measured_peaks）"""
+    峰值上三款都够（单测 test_space_budget_covers_measured_peaks）。
+    #746（11-12）：写 IMG 时边写边删解包出来的 RomFS（pack/img.py convert --consume，出包收尾本来就清整个出包工作目录，只是提前），
+    RomFS 那份逐文件挪进 game.img，不再同时占两份——IMG 这一项记 0。只有 keep_unpack（同一款接着还要出别的平台、或这次复用了已有解包：
+    可能和别的产物共享克隆，删了腾不出来）才照旧再加一份原件大小。原先一律加：256 GB 的 Mac 出 43 GB 的游戏预估 106 GB，从能出变成出不了"""
     size = pack_input_bytes(packages)
     copy = size * 11 // 10
     windows = os.name == "nt" if windows is None else windows
@@ -81,7 +84,7 @@ def pack_need_bytes(packages, unpacked=False, windows=None, image=False, clones=
     direct = pack_direct_bytes(size)
     # links=False：存放位置所在卷建不了目录链接（Windows exFAT / FAT32，v0.3.1 确认后照用）：产物根走实目录模式，RomFS 不进共享存储、
     #   出包工作根也整份拷——按多两份算
-    return (0 if unpacked else copy) + (copy if no_clone else 0) + (0 if links else 2 * copy) + direct + (size if image else 0)
+    return (0 if unpacked else copy) + (copy if no_clone else 0) + (0 if links else 2 * copy) + direct + (size if image and (keep_unpack or unpacked) else 0)
 
 
 def _existing(path):

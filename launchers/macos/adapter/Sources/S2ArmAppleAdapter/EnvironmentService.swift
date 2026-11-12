@@ -91,7 +91,7 @@ public final class EnvironmentService {
         case "recheck": return .recheck   // 运行时已下载未注册：别让人再下 8 GB
         case "systemUpdate": return .open(Self.softwareUpdate)
         case "reinstall": return .open(Self.releases)
-        case "library": return .chooseLibrary   // 游戏库在非 APFS 盘 / 云盘同步目录里：换游戏库
+        case "library": return .chooseLibrary   // 游戏库在不支持的盘格式 / 云盘同步目录里：换游戏库
         default: return .unavailable   // prepareEngine（开发模式）本前端没有入口
         }
     }

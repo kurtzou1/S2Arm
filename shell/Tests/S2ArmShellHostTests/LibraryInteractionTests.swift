@@ -92,8 +92,13 @@ import SwiftUI
     defer { defaults.removePersistentDomain(forName: suite) }
     let tiles = (1...4).map { GameTile(id: "\($0)", title: "Game \($0)") }
     var ready = Set(["1", "3", "4"])
+    // 隐藏项 = 玩家在这台设备上删掉、资源也不在的款（审计 P1-155 起，资源没到位但没删过的款留在库里）
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("s2a-hidden-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    try Data("2".utf8).write(to: root.appendingPathComponent(".s2a-removed.txt"))
     let model = S2ArmShellHostModel(catalogue: Catalogue(tiles: tiles, problems: []),
-        stores: .init(game: { _ in nil }, app: defaults), installState: { ready.contains($0) ? 1 : 0 })
+        stores: .init(game: { _ in nil }, app: defaults), installState: { ready.contains($0) ? 1 : 0 }, gamesRoot: root)
     let reorder = try #require(model.actions.onReorderGames)
     #expect(!reorder(["1", "2"], "4"))
     #expect(!reorder(["1"], "2"))

@@ -19,6 +19,7 @@
 #include "s2a_native.h"
 #include "s2a_gfx_mode.h"   // 冻结的图形模式（direct_session.c）：与选择器提交的 NVN 直连表对账
 #include "direct/provider_vk.h"   // 弱符号：没有 provider 的构建里为 NULL
+#include <errno.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
@@ -415,6 +416,21 @@ uint64_t s2a_android_runtime_session(void) {
 }
 // 强引用真实NativeAOT reverse-PInvoke，不能用Host.Init发生在另一线程代替附着。
 void s2a_capacity_child(void) __attribute__((weak));   // capacity_affinity.cpp（诊断探针等不带它的链接里没有）
+// 信号帧记录号 → 名字（Linux arm64 UAPI asm/sigcontext.h 的 *_MAGIC；1 = 帧里没有 FPSIMD 记录）
+static const char *sigframe_record_name(unsigned magic) {
+    switch (magic) {
+    case 1: return "FPSIMD 缺失";
+    case 0x54504902: return "TPIDR2（SME）";
+    case 0x54366345: return "ZA（SME，矩阵有内容）";
+    case 0x5a544e01: return "ZT（SME2）";
+    case 0x53564501: return "SVE（流式模式）";
+    case 0x46504d52: return "FPMR";
+    case 0x504f4530: return "POE";
+    case 0x45585401: return "EXTRA（帧外扩展）";
+    case 0x47435300: return "GCS";
+    default: return "未知";
+    }
+}
 int s2a_android_runtime_enter_guest_thread(void) {
     if (s2a_capacity_child) s2a_capacity_child();   // 先把继承来的窄亲和掩码放宽，再做下面的准入
     uint64_t session = s2a_android_runtime_session();
@@ -427,7 +443,22 @@ int s2a_android_runtime_enter_guest_thread(void) {
         status.session_id != session || status.state != S2A_SERVICES_READY || status.error)
         return failed(S2A_RUNTIME_SERVICES, rc ? rc : status.error, "managed guest thread attach failed");
     if (stop_requested()) return failed(S2A_RUNTIME_STOP, 0, "stop after managed thread attach");
-    if (s2a_android_fault_probe()) return failed(S2A_RUNTIME_SIGNALS, 0, "guest thread fault self-probe failed");
+    int probe = s2a_android_fault_probe();
+    if (probe) {
+        // 自检不让起局崩（#573）：信号帧里有本机认不出的记录时探针判 ENOTSUP 返回，这里说清是哪种记录、请玩家去 #573 反馈再停。
+        //   这句经 HostApi stop 原样进玩家看到的「S2Arm session ended: …」提示
+        static char why[320];
+        unsigned record = s2a_android_fault_unsupported_record();
+        if (probe == ENOTSUP)
+            snprintf(why, sizeof why, "缺页自检没过：这台设备的信号帧里有 S2Arm 还接不住的「%s」记录（0x%08x），游戏没法起局。"
+                     "请到 GitHub #573 留言告诉我们机型和系统版本 / Fault self-check failed: unsupported signal frame record %s (0x%08x); "
+                     "please report your device on GitHub #573", sigframe_record_name(record), record, sigframe_record_name(record), record);
+        else
+            snprintf(why, sizeof why, "缺页自检没过：故意制造的缺页没有被 S2Arm 接住（错误 %d），游戏没法起局。请到 GitHub #573 留言告诉我们机型和系统版本 / "
+                     "Fault self-check failed (error %d); please report your device on GitHub #573", probe, probe);
+        fprintf(stderr, "[s2a] 【红】%s\n", why);
+        return failed(S2A_RUNTIME_SIGNALS, probe, why);
+    }
     if (!s2a_track_runtime_ready()) return failed(S2A_RUNTIME_TRACKING, 0, "guest thread final tracking admission failed");
     if (stop_requested()) return failed(S2A_RUNTIME_STOP, 0, "stop after guest thread self-probe");
     return 0;

@@ -95,24 +95,28 @@ def main():
         # The iPhone library is compiled with -fmetal-math-mode=relaxed, as the NVN chain's (dm/ios/tools/ios_metal.py): the default fast mode lets the GPU compiler assume there is
         # no NaN / Inf, which would let it drop the NaN handling of the precise:: functions above
         if ios: dirs.append((os.path.join(ios, 'vk'), 'iphoneos', ['-mios-version-min=18.0', '-fmetal-math-mode=relaxed']))
+        anyok, anybad = set(), set()   # 至少一个目标编成 / 编不过的键（汇总行）
         for d, sdk, extra in dirs:
-            if not header_only:   # Metal 编不过的支剔掉、其余照链（v0.3.1）：先按目标编一遍，剔掉编不过的键再写表
+            if not header_only:   # Metal 编不过的支剔掉、其余照链（v0.3.1）；每个目标各剔各的（审计 P1-176：原先 Mac 剔掉的键 iOS 编得过也不收，Mac 全灭连 iOS 库一起删）
                 lib, bad = metallib(msls, d, sdk, extra, tmp)
-                for k in [k for k, v in seen.items() if any(m in bad for m in v[2])]:
-                    failed.append(f'{k}: ' + next(bad[m] for m in seen[k][2] if m in bad)); print(f'[RED] {failed[-1]}'); del seen[k]
-                tsv = tsv[:3] + [f'{k}\t{v[0]}\t{" ".join(v[1])}\t{v[3]}' for k, v in sorted(seen.items())]
-                if lib is None or not seen:   # 一支不剩：同 --header-only，只出表头、全部设备首遇现编
+                own = dict(seen)
+                for k in [k for k, v in own.items() if any(m in bad for m in v[2])]:
+                    why = next(bad[m] for m in own[k][2] if m in bad); print(f'[RED] {sdk} {k}: {why}'); del own[k]
+                    if k not in anybad: anybad.add(k); failed.append(f'{k}: {why}')
+                anyok |= own.keys()
+                rows = tsv[:3] + [f'{k}\t{v[0]}\t{" ".join(v[1])}\t{v[3]}' for k, v in sorted(own.items())]
+                if lib is None or not own:   # 这个目标一支不剩：同 --header-only，只这个目标出表头、设备首遇现编（另一个目标已链好的库照出）
                     os.makedirs(d, exist_ok=True); stale = os.path.join(d, 'vk_shaders.metallib')
                     if os.path.exists(stale): os.remove(stale)
                     open(os.path.join(d, 'vk_shaders.tsv'), 'w', encoding='utf-8', newline='\n').write('\n'.join(tsv[:3]) + '\n')
-                    print(f'{sdk}: 0 shaders after dropping the failed ones, table header only → {d}/vk_shaders.tsv'); continue
-                open(os.path.join(d, 'vk_shaders.tsv'), 'w', encoding='utf-8', newline='\n').write('\n'.join(tsv) + '\n')
-                print(f'{sdk}: {len(seen)} shaders → {lib}'); continue
+                    print(f'{sdk}: 0 shaders after dropping the ones this target cannot compile, table header only → {d}/vk_shaders.tsv'); continue
+                open(os.path.join(d, 'vk_shaders.tsv'), 'w', encoding='utf-8', newline='\n').write('\n'.join(rows) + '\n')
+                print(f'{sdk}: {len(own)} shaders → {lib}'); continue
             if header_only:   # no library: a stale one left in the folder would be loaded against an empty table
                 os.makedirs(d, exist_ok=True); lib = os.path.join(d, 'vk_shaders.metallib')
                 if os.path.exists(lib): os.remove(lib)
                 open(os.path.join(d, 'vk_shaders.tsv'), 'w', encoding='utf-8', newline='\n').write('\n'.join(tsv) + '\n')
                 print(f'{sdk}: 0 shaders, table header only → {d}/vk_shaders.tsv'); continue
-        if not header_only: print(f'Vulkan 汇总：成功 {len(seen)}、失败 {len(failed)}')
+        if not header_only: print(f'Vulkan 汇总：成功 {len(anyok)}、失败 {len(failed)}')
 
 if __name__ == '__main__': main()

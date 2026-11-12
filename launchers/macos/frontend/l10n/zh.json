@@ -1464,7 +1464,7 @@
   "s2arm.library.choosePanel": "选择游戏库位置：放导出时的工作数据和存档，游戏原件不用挪。可以选空文件夹（现有游戏能一起搬过去）或已有的游戏库，不要选 iCloud 云盘等同步目录。",
   "s2arm.env.library.group": "游戏库",
   "s2arm.env.library.title": "游戏库位置",
-  "s2arm.env.library.detail": "出包的工作文件和缓存都放在这里，可以选外接硬盘（APFS 格式）。换位置时游戏和成品可以一起搬过去。",
+  "s2arm.env.library.detail": "出包的工作文件和缓存都放在这里，可以选外接硬盘（APFS 或 exFAT）。换位置时游戏和成品可以一起搬过去。",
   "s2arm.env.library.change": "更改",
   "s2arm.library.moveTitle": "把现有游戏一起搬过去？",
   "s2arm.library.moveBody": "游戏、已出好的包、着色器缓存和存档都会搬到新位置，不用重新出包。搬失败时游戏库会留在原来的位置。",

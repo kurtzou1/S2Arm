@@ -627,7 +627,10 @@ def push_pack(c, ident, bid, pack, udid=None, docs=None, ctx=None, pack_root=Non
     log = c.logs / (c.task + "-push" + (f"-{docs.rsplit('/', 1)[-1]}" if docs else "") + ".log")
     extra = (["--docs", docs] if docs else []) + (["--pack-root", pack_root] if pack_root else []) + (["--launch-ctx", ctx] if ctx else [])
     try:
-        apply = [] if img_pack(pack) else ["--apply"]   # 旧形态（多程序合集等）照旧推完起 App 等解完
+        # 多款容器（ctx：装机总带）传完就算装好、不等机上解开（「装到手机卡 99%」：旧形态资源包推完要拉起 App、等手机解包，
+        #   电脑拉不起 App 时干等到 180 秒没进展，界面一直停在推送那一格；玩家自己打开 App，游戏库早就在后台解开了）——
+        #   App 打开时游戏库自己解开传完的这款（同单一 IMG）。只有不带上下文的单款旧壳（拉起才解）照旧等
+        apply = [] if img_pack(pack) or ctx else ["--apply"]
         c.run([sys.executable, "-B", c.engine / "tools/push_pack.py", "run", ident, bid, pack, "--via", "devicectl", *apply, "--progress-lines", *extra], log, env=env, on_line=line)
     except Failure as e:
         if e.code != "tool_exit":
@@ -1226,7 +1229,7 @@ class WinPhone:
     def push(self, g, pack):
         try:
             return self.W.push_pack(self.udid, self.bid, str(pack), str(self.devpush) if self.devpush.is_file() else None,
-                                    say=lambda m: self.c.emit("message", m), docs=game_docs(g), ctx=game_ctx(g), apply_after=not img_pack(pack),
+                                    say=lambda m: self.c.emit("message", m), docs=game_docs(g), ctx=game_ctx(g), apply_after=not img_pack(pack) and not game_ctx(g),   # 容器传完即装好（同 Mac push_pack）
                                     pack_root=pick_pack_root(self.c, self, g),
                                     progress=lambda d, t, k, n: push_progress(self.c, d, t, k, n),
                                     stage=lambda name, d=None, t=None: push_stage(self.c, name, d, t))
@@ -1386,7 +1389,7 @@ def put_game(c, gid, ph, steps=True, others=None):
     moved = bool(rec.get("bundleId")) and bool(ph.bid) and rec["bundleId"] != ph.bid
     stale = [g for g in games if moved or g == gid or pack_id(packs[g]) != (rec["games"].get(g) or {}).get("pack")]
     ph.before_push({g: packs[g] for g in stale})
-    img = bool(stale) and all(img_pack(packs[g]) for g in stale)   # 这次推的全是单一 IMG：传完并核过长度即装好，不等机上解开
+    img = bool(stale)   # 容器装机传完并核过即装好、不等机上解开（单一 IMG 与旧形态同口径，App 打开时游戏库解开；见 push_pack）
     if steps: c.begin("核对手机上游戏的资源（有变化的才推，通常一个都不用推）" if not gid else
                       "把游戏推进 iPhone（只推变了的文件；第一次大游戏要几分钟）" if img else "把资源包推进 iPhone 并解开（只推变了的文件；第一次大游戏要几分钟）", 6, 6)
     files = size = 0
@@ -1404,7 +1407,7 @@ def put_game(c, gid, ph, steps=True, others=None):
     packer.commit_phone_ipa(c, ipa, sid)
     # 资源传完但电脑没拉起 App 解开（manual_unpack_required，11-09 #336）：不算「已装好」，结果带上还差的一步，两端前端据此显示「还差最后一步」而不是「已装到 iPhone」
     extra = dict(unpackPending=ph.pending) if ph.pending else {}
-    if img: extra["openToFinish"] = True   # 两端成功页写「已传到 iPhone，打开 S2Arm 会自动完成安装」（机上从 game.img 解出几个小件由 App 打开时完成）
+    if img: extra["openToFinish"] = True   # 两端成功页写「已传到 iPhone，打开 S2Arm 会自动完成安装」（机上解开由 App 打开时游戏库完成）
     return dict(outputPath=str(layout.phone_ipa(c)), bundleId=ph.bid, games=games, packFiles=files, packBytes=size, **ph.info, **extra)
 
 

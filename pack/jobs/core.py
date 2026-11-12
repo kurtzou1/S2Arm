@@ -779,7 +779,8 @@ class Context:
         if seen is None:
             seen = self._counters = {}
         last, fine = None, None
-        lines = chunk[:end].decode(errors="replace").split("\n")
+        # 行尾 \r\n 也认（协议是 LF；Windows 上用文本模式写的工具会写成 CRLF，末列带 \r 就整行判成不是数字、进度丢掉）
+        lines = [line.rstrip("\r") for line in chunk[:end].decode(errors="replace").split("\n")]
         for line in lines:
             activity.accept(line)
         if final:   # 子进程树已收完时的补读：批次活动必然已结束，只发计数、不再发「还在编」的活动脉冲

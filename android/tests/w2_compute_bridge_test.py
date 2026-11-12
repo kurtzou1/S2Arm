@@ -138,9 +138,13 @@ def main():
         assert imported['identity']==mname.group(2)
         assert (td/'actual-import'/imported['request']).read_bytes()==reqfiles[0].read_bytes()
         # Explicit production source list and gate registration (weak hook is insufficient).
-        links=(ROOT/'android/core-link/LinkSources.cmake').read_text()
+        # 只数旧层（nvn_vk）的直连源清单：#631 之后新层清单 s2a_android_nvk_sources 也合法地列了
+        # nvn_vk_compute_request.c，整文件计数会把它算成 2 次。
+        cmake=(ROOT/'android/core-link/LinkSources.cmake').read_text()
+        start=cmake.index('function(s2a_android_direct_sources')
+        links=cmake[start:cmake.index('endfunction()',start)]
         for source_name in ('nvn_vk_compute_bridge.c','nvn_vk_compute_request.c','nvn_vk_compute_lookup.c','nvn_vk_compute_texture.c'):
-            assert links.count('native/nvn/'+source_name)==1
+            assert links.count('native/nvn/'+source_name)==1,source_name
         assert 'w2_compute_bridge_test.py' in (ROOT/'android/test.sh').read_text()
         print('PASS: 32 bridge cases, %d effective negative controls, request/result diag pairing, import/gate registration'%(len(mutations)-1))
 if __name__=='__main__':main()

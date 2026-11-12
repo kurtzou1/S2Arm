@@ -59,8 +59,17 @@ def toc_bytes(entries):
     return bytes(out + paths)
 
 
-def build(romfs_dir, others, out, gid, pack_id='', romfs_index=None, say=print):
-    """romfs_dir：RomFS 目录（None = 没有 RomFS）；others：[(相对路径, 源文件)]；→ 输出路径"""
+def written(path):
+    """.part 已写的字节（进度用）：POSIX 取实际分配的块（st_blocks，与写入顺序无关）；Windows 没有 st_blocks（#711：大游戏 RomFS 写满 1 秒就
+    AttributeError，img.py 半路退出、game.img 写失败），取文件长度（romfs_index 顺序写，长度就是写到哪）"""
+    st = os.stat(path)
+    blocks = getattr(st, 'st_blocks', None)
+    return blocks * 512 if blocks is not None else st.st_size
+
+
+def build(romfs_dir, others, out, gid, pack_id='', romfs_index=None, say=print, consume=False):
+    """romfs_dir：RomFS 目录（None = 没有 RomFS）；others：[(相对路径, 源文件)]；→ 输出路径。
+    consume：RomFS 段边写边删原件（romfs_index --consume，#746），调用方先 free_clones 只留这一份"""
     if len(gid) != 16 or any(c not in '0123456789ABCDEFabcdef' for c in gid): raise Red(f'游戏号不对：{gid!r}')
     part = out + '.part'
     try:
@@ -77,11 +86,16 @@ def build(romfs_dir, others, out, gid, pack_id='', romfs_index=None, say=print):
             if not romfs_index: raise Red('写 RomFS 段要 romfs_index 命令（services/romfs_index）')
             romfs_off = PAGE
             # romfs_index 是另一个进程：每秒看 .part 实际分配的字节（st_blocks，与写入顺序无关）当已写量
-            p = subprocess.Popen([*shlex.split(romfs_index), '--std', romfs_dir, '-', part, str(romfs_off)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            while True:
-                try: p.wait(timeout=1); break
-                except subprocess.TimeoutExpired: pass
-                tk.step(max(0, min(os.stat(part).st_blocks * 512 - PAGE, rom_bytes - 1) - tk.done))
+            if consume: writable(romfs_dir)   # 产物根的 RomFS 共享存储整棵只读（pack/roots.sh）：删文件要目录可写
+            p = subprocess.Popen([*shlex.split(romfs_index), '--std', romfs_dir, '-', part, str(romfs_off), *(['--consume'] if consume else [])],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                while True:
+                    try: p.wait(timeout=1); break
+                    except subprocess.TimeoutExpired: pass
+                    tk.step(max(0, min(written(part) - PAGE, rom_bytes - 1) - tk.done))
+            finally:   # 等它的时候本进程出了任何错：先把它收掉再往上抛，不留在后台接着写（#711：原先 Windows 上留下 dotnet.exe）
+                if p.poll() is None: p.kill(); p.wait()
             so, se = p.communicate()
             if p.returncode: raise Red(f'写标准 RomFS 段失败：{(se or so).strip()[-300:]}')
             romfs_len = int(so.strip().splitlines()[-1])
@@ -212,7 +226,72 @@ def default_romfs_index():
     return f'bash {shlex.quote(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "services", "romfs_index.sh"))}'
 
 
-def write(root, pack_dir, out_path, progress=None, romfs_index=None, gid=None):
+def writable(path):
+    """整棵目录加回写权限（只改目录：删文件看的是目录权限；Windows 的只读文件由删的那一方去掉只读属性）"""
+    import stat
+    for d, _, _ in romfs_list.walk(path):   # RomFS 遍历只走 romfs_list（romfs_walk_lint）
+        try: os.chmod(d, os.stat(d).st_mode | stat.S_IWUSR)
+        except OSError: pass
+
+
+def drop_tree(path):
+    """删一棵可能只读的目录（RomFS 共享存储）；是链接只删链接本身"""
+    import shutil, stat
+    if os.path.islink(path) or _is_junction(path):   # 链接 / Windows 目录联接：只删它自己（Windows 上指向目录的要 rmdir）
+        (os.rmdir if os.name == 'nt' and os.path.isdir(path) else os.unlink)(path); return
+    if not os.path.isdir(path): return
+    writable(path)
+    def unlock(fn, p, _):   # 删不动：它自己和上一级都加回读写（目录还要能进）再删一次（同 library._rm；Windows 只读文件去掉只读属性）
+        for q in (os.path.dirname(p), p):
+            try: os.chmod(q, os.stat(q).st_mode | stat.S_IRWXU)
+            except OSError: pass
+        fn(p)
+    os.chmod(os.path.dirname(os.path.abspath(path)), os.stat(os.path.dirname(os.path.abspath(path))).st_mode | stat.S_IRWXU)
+    shutil.rmtree(path, onexc=lambda fn, p, e: unlock(fn, p, e)) if sys.version_info >= (3, 12) else shutil.rmtree(path, onerror=unlock)
+
+
+def _is_junction(path):
+    try: return bool(getattr(os.path, 'isjunction', lambda _: False)(path))
+    except OSError: return False
+
+
+def free_clones(root, keep, pack_dir, work=None):
+    """边写边删之前（#746）：和这次读的 RomFS（keep）共享数据块的其余各份都删掉，只留 keep 这一份——APFS 克隆 / 硬链要所有份都删了才真腾出空间。
+    各份都在这款的出包工作目录里，从产物根自己的记录找，不按路径猜：
+      产物根各版本里是真目录的 romfs（链接不占空间，留着）、RomFS 共享存储（roots/.romfs_store/<款>/）里别的身份、seed.txt 记的解包目录 src/romfs、
+      资源包清单里的 RomFS 行（Mac 是克隆、Windows 是另一份拷贝；本来写完 IMG 就删）和旧形态库内镜像 romfs.files。
+    出包收尾本来就清掉整个出包工作目录（pack/jobs/library.py prune_build），这里只是提前；写到一半失败由调用方清掉整个工作目录、下次重新解包。
+    work：这款的出包工作目录（作业层传 build/ios）。删的每一份都必须在它里面——玩家导入的原件（NSP / XCI，包括外接盘上只读引用的）、
+    工作目录外的解包目录（命令行 --from-extract 给的）任何时候都不删；没给按产物根的上两级（roots/ 的上一级）"""
+    keep = os.path.realpath(keep)
+    roots_dir = os.path.dirname(os.path.abspath(root))
+    work = os.path.realpath(work or os.path.dirname(roots_dir))
+    def inside(p): return os.path.realpath(p).startswith(work + os.sep)
+    def other(p): r = os.path.realpath(p); return r != keep and not keep.startswith(r + os.sep) and inside(p)
+    for v in romfs_list.listdir(roots_dir):
+        rf = os.path.join(roots_dir, v, 'romfs')
+        if v.startswith('.') or os.path.islink(rf) or _is_junction(rf) or not os.path.isdir(rf): continue
+        if other(rf): drop_tree(rf)
+    store = os.path.join(roots_dir, '.romfs_store')
+    if os.path.isdir(store):
+        for g in romfs_list.listdir(store):
+            for ident in romfs_list.listdir(os.path.join(store, g)):
+                d = os.path.join(store, g, ident)
+                if os.path.isdir(d) and other(d): drop_tree(d)
+    sf = os.path.join(root, 'seed.txt')
+    src = next((l[4:].strip() for l in open(sf, encoding='utf-8') if l.startswith('src=')), '') if os.path.isfile(sf) else ''
+    if src:
+        s = os.path.join(src, 'romfs')
+        if os.path.lexists(s) and not os.path.islink(s) and not _is_junction(s) and other(s): drop_tree(s)
+    if not inside(pack_dir): return   # 资源包不在工作目录里（只可能是手工调用）：不碰
+    for rel, _ in pack_rows(pack_dir):
+        if rel.startswith(SKIP) and not rel.startswith(KEEP):
+            try: os.unlink(os.path.join(pack_dir, rel))
+            except FileNotFoundError: pass
+    drop_tree(os.path.join(pack_dir, 'romfs.files'))
+
+
+def write(root, pack_dir, out_path, progress=None, romfs_index=None, gid=None, consume=False, work=None):
     """产物根 root 的完整原始 romfs/ 建标准 RomFS 段（库里的 romfs.files 缺被覆盖层替换的原文件，不能用它建），
     资源包 pack_dir 清单（index.tsv）里的其余原始资源进其余文件段；游戏号 gid（没给取 root/unpack.tsv），资源包号 = image_id。
     多程序合集（programs/）这一版不出 IMG（报红，调用方照旧出旧形态）。原子写（先 .part 再改名）"""
@@ -227,13 +306,14 @@ def write(root, pack_dir, out_path, progress=None, romfs_index=None, gid=None):
         others.append((rel, src))
     rom, tmp = orig_romfs(root, os.path.dirname(os.path.abspath(out_path)))
     try:
-        return build(rom, others, out_path, gid, image_id(pack_dir), romfs_index or default_romfs_index(), say=say)
+        if consume and rom: free_clones(root, rom, pack_dir, work)
+        return build(rom, others, out_path, gid, image_id(pack_dir), romfs_index or default_romfs_index(), say=say, consume=consume and bool(rom))
     finally:
         if tmp:
             import shutil; shutil.rmtree(tmp, ignore_errors=True)
 
 
-def convert(root, pack_dir, progress=None, romfs_index=None, gid=None):
+def convert(root, pack_dir, progress=None, romfs_index=None, gid=None, consume=False, work=None):
     """出包交付（pack/jobs/ipa.py deliver）：资源包目录就地转成 IMG 形态——game.img（游戏原始资源）+ 照旧按文件的着色器库 / 覆盖层 +
     新 index.tsv（game.img 一行，第三列 = 资源包号；其余行原样）+ manifest.json v3（format img、imgFile、index_sha256 = 新 index.tsv 的 SHA-256）。
     进了 IMG 的旧形态文件删掉。多程序合集 → 返回 None、目录不动（照旧旧形态）。→ game.img 路径"""
@@ -241,7 +321,7 @@ def convert(root, pack_dir, progress=None, romfs_index=None, gid=None):
     rows = pack_rows(pack_dir)
     if any(r.startswith('programs/') for r, _ in rows): return None
     out = os.path.join(pack_dir, 'game.img')
-    write(root, pack_dir, out, progress, romfs_index, gid)
+    write(root, pack_dir, out, progress, romfs_index, gid, consume, work)
     h = header(out)
     mp = write_map(pack_dir, out)
     ix = f"game.img\t{h['total']}\t{h['pack_id']}\n" + ''.join(l for r, l in rows if r.startswith(KEEP))
@@ -308,6 +388,8 @@ def main(argv=None):
     b = sp.add_parser('build'); b.add_argument('romfs'); b.add_argument('others'); b.add_argument('out'); b.add_argument('--gid', required=True)
     b.add_argument('--pack-id', default=''); b.add_argument('--romfs-index')
     v = sp.add_parser('convert', help='资源包目录就地转 IMG 形态（出包交付）'); v.add_argument('root'); v.add_argument('pack_dir'); v.add_argument('--gid')
+    v.add_argument('--consume', action='store_true', help='边写边删解包出来的 RomFS（#746：出包收尾本来就清，提前到写 IMG 时；写到一半失败要重新解包）')
+    v.add_argument('--work', help='这款的出包工作目录：--consume 只删它里面的（玩家原件、外面的解包目录不碰）')
     l = sp.add_parser('ls'); l.add_argument('img')
     a = ap.parse_args(argv)
     try:
@@ -315,12 +397,14 @@ def main(argv=None):
             others = [tuple(l.rstrip('\n').split('\t', 1)) for l in open(a.others, encoding='utf-8') if '\t' in l]
             build(None if a.romfs == '-' else a.romfs, others, a.out, a.gid, a.pack_id, a.romfs_index)
         elif a.cmd == 'convert':
-            print(convert(a.root, a.pack_dir, gid=a.gid) or '多程序合集：照旧旧形态')
+            print(convert(a.root, a.pack_dir, gid=a.gid, consume=a.consume, work=a.work) or '多程序合集：照旧旧形态')
         else:
             print(header(a.img))
             for e in entries(a.img): print(*e, sep='\t')
     except (Red, OSError) as e:
         print(f'【红】{e}'); return 1
+    except Exception as e:   # 意料之外的错也打一行红（带类型）：作业层摘失败原因只认红行 / 末行（#711：原先只剩调用栈，摘要里成了别的日志行）
+        print(f'【红】写 IMG 时出了没料到的错：{type(e).__name__}: {e}', flush=True); raise
     return 0
 
 

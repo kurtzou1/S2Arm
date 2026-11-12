@@ -53,6 +53,7 @@ ck "② 运行环境表有 bash、作业 PATH 找到的 bash：${bv}" '[[ " $SHI
 R="$B/引擎 树"; mkdir -p "$R/pack/oneclick" "$R/tools" "$R/x/exefs" "$B/字体"
 cp "$H/pack/oneclick/oneclick.sh" "$H/pack/oneclick/cachehits.py" "$H/pack/oneclick/titles.tsv" "$H/pack/oneclick/ipa_mode.py" "$H/pack/oneclick/deliver_pack.py" "$R/pack/oneclick/"
 cp "$H/pack/direct_profile_input.py" "$R/pack/"   # 一键出包写直连版本旁注调它
+mkdir -p "$R/pack/jobs" "$R/compat/tree"; cp "$H"/pack/jobs/*.py "$R/pack/jobs/"; cp "$H/compat/tree/global.json" "$R/compat/tree/"   # 一键出包判 .NET SDK 调 pack/jobs/ipa.py dotnet_sdk()（版本按 global.json，全仓一处判法）
 cp "$H/pack/roots.sh" "$H/pack/srcs.sh" "$H/pack/build_id.sh" "$R/pack/"
 for f in cores.sh progress.sh machine.sh nospace.sh; do cp "$H/tools/$f" "$R/tools/"; done
 mkdir -p "$R/graphics/nvn/tools"; cp "$H/graphics/nvn/tools/romfs_list.py" "$R/graphics/nvn/tools/"   # --from-extract 播种键盘点 romfs/ aoc/（审计 #1534 P1-54）

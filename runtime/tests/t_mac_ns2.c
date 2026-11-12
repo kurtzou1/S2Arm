@@ -33,6 +33,8 @@ int ns2_shutdown(const char *reason, unsigned timeout) {
 void ns2_stop_rumble(void) { stops++; }
 void ns2_set_motion_enabled(int enabled) { imu = enabled; }
 void ns2_get_motion(ns2_motion *out) { *out = sample; }
+void ns2_get_motion_left(ns2_motion *out) { *out = (ns2_motion){0}; }   // 没拼对：左只没有读数（拼对左右两路由 launchers/macos/Tests/input_test.m 经启动器通道测）
+void ns2_get_mouse_side(int side, ns2_mouse *out) { (void)side; *out = (ns2_mouse){0}; }   // Joy-Con 2 光学鼠标：这里没有读数（通道左右鼠标由 launchers/macos/Tests/input_test.m 测）
 ns2_kind ns2_get_output_kind(void) { return output_kind; }
 void ns2_send_pair_lease(const ns2_vibration pair[2], unsigned duration) {
     assert(duration == 1000); memcpy(sent, pair, sizeof sent); sends++;

@@ -34,6 +34,15 @@ class BatchActivity(JobCase):
         self.assertEqual((event['done'], event['total']), (20, 100))
         self.assertTrue(event['message'].startswith(self.stage))
 
+    def test_crlf_progress_lines_still_count(self):
+        """Windows 文本模式写出的 CRLF 进度行照样发进度（v0.3.1 热修实测：写单一 IMG 24 行进度一条没发出去）"""
+        p = self.root / 'progress.tsv'
+        p.write_bytes('100\t写单一 IMG\t0\t4000\r\n101\t写单一 IMG\t1000\t4000\r\n'.encode('utf-8'))
+        with patch('core.time.monotonic', return_value=105), patch('core.time.time', return_value=105), patch.object(self.c, 'emit') as emit:
+            self.c.stage_progress(p, 0)
+        self.assertEqual(emit.call_count, 1)
+        self.assertEqual((emit.call_args.kwargs['done'], emit.call_args.kwargs['total']), (1000, 4000))
+
     def test_long_batch_pulse_preserves_done_weights_and_progress_file(self):
         p, pos, _ = self.begin_activity()
         before = p.read_bytes()

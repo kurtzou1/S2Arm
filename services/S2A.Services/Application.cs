@@ -456,6 +456,29 @@ namespace S2A.Services
             }
         }
 
+        /// <summary>关掉这个文件的句柄（在 LRU 里就摘掉）：出包写 IMG 边写边释放原件（RomFsIndex.WriteStandard consume）删文件前调——
+        ///   Windows 上开着的句柄删不掉，macOS 上删了也要等句柄关了才真腾出空间。有读正在进行 → 抛（调用方只在自己读完之后调）</summary>
+        internal void Release()
+        {
+            lock (_lock)
+            {
+                if (_stream == null)
+                {
+                    return;
+                }
+
+                if (_busy != 0)
+                {
+                    throw new InvalidOperationException("RomFS 读取尚未返回，禁止关闭");
+                }
+
+                _lru.Remove(_node);
+                _stream.Dispose();
+                _stream = null;
+                _node = null;
+            }
+        }
+
         // 以下两个持 _lock 调
         private void Touch()
         {

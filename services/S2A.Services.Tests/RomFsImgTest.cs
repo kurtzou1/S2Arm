@@ -2,7 +2,7 @@
 // 单一 IMG v1（pack/img.py 的布局，RomFsIndex.OpenImg）：服务层从 game.img 读 RomFS。夹具现造，期望 = 夹具文件本身（逐字节比）：
 //   ① 没有界面覆盖层：OpenImg 交出标准 RomFS 段，LibHac RomFsFileSystem 逐文件读回与源目录相同
 //   ② 有覆盖层（romfs_overlay/a/s.txt）：读到覆盖层那份（长度不同也行），其余文件仍读 IMG
-//   ③ 文件长度不等于头里的整个文件长（推到一半）→ null；④ 格式号 2 → 抛（起局失败、说清要更新 S2Arm）
+//   ③ 文件长度不等于头里的整个文件长（推到一半）→ 没有 romfs/ 时抛、有 romfs/ 时 null（审计 P1-170）；④ 格式号 2 → 抛（起局失败、说清要更新 S2Arm）
 //   ⑤ 旁边有 game.imgmap + romfs.s2aidx（pack/img.py convert 写）→ 走单文件镜像同一条预建路径（IndexedStorage，不重建目录表）：覆盖层文件读覆盖版、其余读 IMG 原件；
 //      偏移表记的镜像长与 game.img 不符（过期）→ 退回现建，读出的内容照样对
 using System;
@@ -85,7 +85,12 @@ namespace S2A.Services.Tests
                     "② 有覆盖层：a/s.txt 读覆盖层那份（长度不同），a/big.bin 仍读 IMG");
                 Directory.Delete(Path.Combine(game, RomFsIndex.ImageOverlayDir), true);
                 using (FileStream f = new(img, FileMode.Append)) f.WriteByte(0);
-                Ck(RomFsIndex.OpenImg(game) == null, "③ 长度与头里的整个文件长不符（推到一半）→ null");
+                // 审计 P1-170：长度不符、旁边没有 romfs/ → 抛（资源没传完，起局失败，宿主说「请重新装到 iPhone」）；有 romfs/ → null（退回读目录）
+                string why3 = null; try { RomFsIndex.OpenImg(game); } catch (InvalidDataException e) { why3 = e.Message; }
+                Ck(why3 != null && why3.Contains("没传完"), $"③ 长度与头里的整个文件长不符（推到一半）、没有 romfs/ → 抛：{why3}");
+                bool hadRomfs = Directory.Exists(Path.Combine(game, "romfs")); Directory.CreateDirectory(Path.Combine(game, "romfs"));
+                Ck(RomFsIndex.OpenImg(game) == null, "③b 长度不符、旁边有 romfs/ → null（退回读目录）");
+                if (!hadRomfs) Directory.Delete(Path.Combine(game, "romfs"));
                 string game2 = Path.Combine(root, "game2"); Directory.CreateDirectory(game2);   // 前面打开的句柄只许读，格式号 2 的夹具另放一个目录
                 WriteImgFixture(rom, Path.Combine(game2, RomFsIndex.ImgName), 2, rels);
                 string why = null; try { RomFsIndex.OpenImg(game2); } catch (InvalidDataException e) { why = e.Message; }

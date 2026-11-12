@@ -473,15 +473,20 @@ def main():
             ]
             with cf.ThreadPoolExecutor(args.jobs) as pool:
                 compiled = list(pool.map(lambda task: compile_msl(task, temp), tasks))
-            bad, airs = set(), {}
+            # 每个目标各记各的编不过（审计 P1-176：原先按着色器身份共用一份，Mac 编不过的支 iOS 编得过也不收）；
+            #   汇总行「失败」= 至少一个目标编不过的支（每支只记一次原话），「成功」= 至少一个目标编成的支
+            bad = {sdk: set() for _, sdk, _ in destinations}
+            airs, reported = {}, set()
             for identity, sdk, air, error in compiled:
                 if error:
-                    if identity not in bad:
+                    if identity not in reported:
                         failed.append(error)
-                    bad.add(identity)
+                    reported.add(identity)
+                    bad[sdk].add(identity)
                 else:
                     airs[identity, sdk] = air
-            rows = {identity: row for identity, row in rows.items() if identity not in bad}
+            mine = {sdk: {identity: row for identity, row in rows.items() if identity not in bad[sdk]} for _, sdk, _ in destinations}
+            rows = {identity: row for identity, row in rows.items() if any(identity in m for m in mine.values())}
             for error in failed:
                 print("[RED] " + error, file=sys.stderr)
             report = {
@@ -516,22 +521,27 @@ def main():
                 print(f"【黄】GLSL 离线一支没译成（{len(failed)} 支失败，见上方 [RED]），只出表头、运行时首遇现编", file=sys.stderr)
                 print(f"GLSL 汇总：成功 0、失败 {len(failed)}、跳过 {skipped}")
                 return 0
-            table = table_header()
-            table += [
-                f"{key}\t{stage}\t{' '.join(row['fields'])}\t{row['source']}"
-                for (key, stage), row in sorted(rows.items())
-            ]
-            libraries = [
-                (library([airs[identity, sdk] for identity in rows], temp, sdk), destination)
-                for destination, sdk, _ in destinations
-            ]
-            for compiled_lib, destination in libraries:
+            for destination, sdk, extra in destinations:
+                own = mine[sdk]
+                if not own:   # 这个目标一支不剩：只这个目标出表头（另一个目标已编成的库照出）
+                    if args.components_only:
+                        clear_products([(destination, sdk, extra)])
+                    else:
+                        write_empty([(destination, sdk, extra)])
+                    print(f"{sdk}: 0 shaders after dropping the ones this target cannot compile ({len(bad[sdk])}), table header only → {destination}/gl_shaders.tsv")
+                    continue
+                table = table_header()
+                table += [
+                    f"{key}\t{stage}\t{' '.join(row['fields'])}\t{row['source']}"
+                    for (key, stage), row in sorted(own.items())
+                ]
                 write_product(
-                    compiled_lib,
+                    library([airs[identity, sdk] for identity in own], temp, sdk),
                     destination,
                     None if args.components_only else "\n".join(table) + "\n",
                     diagnostics,
                 )
+                print(f"{sdk}: {len(own)} shaders（这个目标编不过 {len(bad[sdk])}）→ {destination}")
         print(f"GLSL 汇总：成功 {len(rows)}、失败 {len(failed)}、跳过 {skipped}")
         # 部分译不过：译成的照出库、退 0（v0.3.1 拿不准不停），失败数在汇总行；只校验阶段组件（--components-only）时照旧退 1
         return 1 if failed and args.components_only else 0

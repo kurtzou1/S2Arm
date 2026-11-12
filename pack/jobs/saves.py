@@ -1019,7 +1019,9 @@ def checked_archive(c, game, root):
 
 
 SEED_NOTICE = "这款游戏在这台电脑上还没玩过：存档会在下次启动游戏时放进去。"
-SEED_DONE_LINE = "S2A 带存档起局："
+# 服务层 SeedFrom 每一类都灌入后才打这一句（services/S2A.Services/Saves.cs SeedAllDoneLine，两边一字不差；审计 P1-156：
+#   原先认「S2A 带存档起局：」，它在真正灌入前的「当前用户」行和每一类成功行都有，前一类成功、后一类失败也删了种子）
+SEED_DONE_LINE = "S2A 带存档起局完成："
 
 
 def pending_seed(c, gid):
@@ -1115,7 +1117,7 @@ def claim_seed(c, gid):
 
 
 def finish_seed(c, gid, log):
-    """一局结束后：运行时报了灌入成功才删；没成功留着，下次启动再放"""
+    """一局结束后：运行时报了每一类都灌入成功才删；没全成功留着，下次启动再放"""
     pending = pending_seed(c, gid)
     with contextlib.suppress(OSError):
         if SEED_DONE_LINE in Path(log).read_text(encoding="utf-8", errors="replace"):

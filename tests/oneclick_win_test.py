@@ -218,6 +218,20 @@ class StepRc(unittest.TestCase):
             run.timing.close()
 
 
+class LogReason(unittest.TestCase):
+    # #754：子步骤失败时原因以 Python 异常那一行开头、保住它；后面的附注（清理也失败）放得下就带上。原先取末 3 行末 300 字，附注把原异常挤掉
+    def test_exception_line_kept_before_notes(self):
+        tb = ('Traceback (most recent call last):\n  File "x.py", line 1, in <module>\n'
+              "OSError: [WinError 145] 目录不是空的。: 'C:\\w\\v.tmp\\.romfs.intern\\arc'\n"
+              + ''.join(f"（随后的清理 rename_dir(a, b) 也失败：FileExistsError(17, '当文件已存在时，无法创建该文件。')；以上面的原错误为准）\n" for _ in range(3)))
+        got = oneclick_win.log_reason(tb)
+        self.assertTrue(got.startswith("OSError: [WinError 145] 目录不是空的。"), got)
+        self.assertIn("也失败：FileExistsError", got)
+
+    def test_no_exception_keeps_last_three_lines(self):
+        self.assertEqual(oneclick_win.log_reason("a\nb\nc\nd\n"), "b / c / d")
+
+
 class Product(unittest.TestCase):
     def test_links_not_copies(self):
         with tempfile.TemporaryDirectory() as t:

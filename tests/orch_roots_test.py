@@ -115,6 +115,40 @@ class RootsTest(unittest.TestCase):
         self.assertEqual((first / 'exefs/main').read_bytes(), b'original main\x00')
         self.assertEqual(self.store.cur('原创'), second)
 
+    def intern_fails(self, how):
+        """收进共享存储那几步按 how 出错：期望提交照常成功，RomFS 以真目录留在本版本里、内容不变，存储里没有半截身份，打一行黄（#754）"""
+        tx = self.store.begin('原创', 'seed')
+        (tx.path / 'exefs').mkdir(); (tx.path / 'exefs/main').write_bytes(b'm')
+        (tx.path / 'romfs/arc/sub').mkdir(parents=True); (tx.path / 'romfs/arc/sub/f').write_bytes(b'resource')
+        real_link, real_rename = roots.directory_link, roots.rename_dir
+        def half_junction(target, link, **k):   # junction 退路建了空目录、写重解析点时失败（_junction 自己的回收也没成）；别的链接照常
+            if Path(link).name != 'romfs': return real_link(target, link, **k)
+            Path(link).mkdir(); raise OSError(145, '目录不是空的。')
+        def move_fails(src, dst, **k):
+            if Path(dst).parent.name == '原创' and '.romfs_store' in str(dst): raise PermissionError(5, '拒绝访问。')
+            return real_rename(src, dst, **k)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), \
+             patch.object(roots, 'directory_link', side_effect=half_junction if how == 'link' else real_link), \
+             patch.object(roots, 'rename_dir', side_effect=move_fails if how == 'move' else real_rename):
+            final = tx.commit()
+        self.assertFalse(roots.is_link(final / 'romfs'))
+        self.assertEqual((final / 'romfs/arc/sub/f').read_bytes(), b'resource')
+        self.assertFalse((final / '.romfs.intern').exists())
+        store = self.home / 'roots/.romfs_store/原创'
+        self.assertEqual(list(store.iterdir()) if store.is_dir() else [], [])
+        self.assertIn('【黄】RomFS 没收进共享存储', err.getvalue())
+        return final
+
+    def test_intern_link_failure_keeps_romfs_in_version(self):
+        final = self.intern_fails('link')
+        tx = self.store.begin('原创', 'next')   # 下一个阶段照常从这一版开工
+        self.assertEqual((tx.path / 'romfs/arc/sub/f').read_bytes(), b'resource')
+        tx.abort()
+
+    def test_intern_move_failure_keeps_romfs_in_version(self):
+        self.intern_fails('move')
+
     def test_failed_activation_leaves_current(self):
         first = self.seed()
         tx = self.store.begin('原创', 'fail')

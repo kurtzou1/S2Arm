@@ -383,6 +383,24 @@ class BundleTests(unittest.TestCase):
         self.assertEqual({p.relative_to(self.app).as_posix(): p.stat().st_mode for p in self.app.rglob('*')},
                          modes_before)
 
+    def test_ipa_publish_on_drive_without_hard_links(self):
+        # v0.3.1 exFAT：盘上建不了硬链接（macOS exFAT 实测 ENOTSUP、Windows WinError 1）→ 先核没有同名再改名放到位，内容完整；
+        #   同名 IPA 已在照旧不覆盖（报错、原文件不变）；别的硬链接错误（如权限之外的 IO 错）照旧原样报
+        import errno
+        from unittest import mock
+        output = self.root / 'exfat.ipa'
+        with mock.patch.object(bundle.os, 'link', side_effect=OSError(errno.ENOTSUP, 'Operation not supported')):
+            bundle.write_ipa(self.app, output)
+            with zipfile.ZipFile(output) as archive:
+                self.assertIn('Payload/S2Arm.app/', archive.namelist())
+            before = output.read_bytes()
+            with self.assertRaises((bundle.BundleError, FileExistsError)):   # 已有同名：先在 _destination 就拦（不覆盖）
+                bundle.write_ipa(self.app, output)
+            self.assertEqual(output.read_bytes(), before)
+        with mock.patch.object(bundle.os, 'link', side_effect=OSError(errno.EIO, 'I/O error')), self.assertRaises(OSError):
+            bundle.write_ipa(self.app, self.root / 'io.ipa')
+        self.assertFalse((self.root / 'io.ipa').exists())
+
     def test_ipa_local_headers_match_central_directory(self):
         """11-04 S0-5：AltServer for Windows 1.8.1 自带 minizip 1.01e（不认 zip64），打开条目时核本地文件头与中央目录的 CRC / 两个大小一致；
         原先每个文件都强制 zip64，本地头写占位 0xFFFFFFFF + zip64 额外字段，侧载报「An unknown error occured while reading the file」。

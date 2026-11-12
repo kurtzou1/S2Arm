@@ -235,6 +235,8 @@
 "app.library.broken.title" = "Game files are incomplete";
 "app.library.cantOpen" = "This game can’t be opened";
 "app.library.cantOpen.message" = "This game couldn’t be prepared to start. Swipe the app away in the app switcher and open it again; if it still fails, export diagnostics and send them to us.";
+"app.library.cantOpen.incomplete" = "This game is incomplete in S2Arm on this phone. In S2Arm on your computer, install it on iPhone again; your saves are kept.";
+"app.library.cantOpen.storage" = "This phone couldn’t create a folder for this game, most likely because storage is full. Free up space in Settings > General > iPhone Storage, then swipe the app away and open it again.";
 "app.library.missing.title" = "Game resources are missing";
 "app.library.packBroken" = "Only part of this game’s resources were copied — the copy was probably interrupted. In S2Arm on your computer, click “Install on iPhone” for this game again to add what’s missing. When it’s done, tap “Check again”.";
 "app.library.packMissing" = "This game’s resources aren’t on the phone yet. In S2Arm on your computer, click “Install on iPhone” for this game and the resources are copied over automatically. You can also put this game’s game.img file in this app’s “Import Here” folder in the Files app. Then tap “Check again”.";

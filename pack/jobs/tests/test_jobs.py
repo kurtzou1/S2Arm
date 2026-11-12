@@ -229,7 +229,7 @@ class JobsTests(unittest.TestCase):
 
     def test_seed_from_sibling_clones_current_root_and_names_commit(self):
         # 11-02：本平台还没现行根、别的平台有 → 克隆它的现行根起步（不从解包目录重新播种），复用行带被复用根的提交号；没有兄弟根 → False；
-        #   克隆不过来（如 exFAT：clonedir 失败关闭）→ 黄字 sibling_clone_failed、False（调用方从解包目录播种）
+        #   克隆失败（盘满 / 权限等）→ 黄字 sibling_clone_failed、False（调用方从解包目录播种）；exFAT 上 clonedir 走普通拷贝应成功
         import unittest.mock as um, build
         game = self.game()
         sib = layout.ios_work(self.c, "0100000000000000") / "roots"; v = sib / "party@pkg-abc"   # iPhone 出包工作目录 build/ios 的现行根
@@ -1315,11 +1315,11 @@ class JobsTests(unittest.TestCase):
         self.assertTrue(actual["S2A_INPUT_GUIDE_PREFS"].endswith(first["id"] + ".json"))
         self.assertNotEqual(actual["S2A_INPUT_GUIDE_PREFS"], other["S2A_INPUT_GUIDE_PREFS"])
 
-    def test_mac_input_guide_rejects_malformed_confirmed_mapping(self):
+    def test_mac_input_guide_malformed_confirmed_mapping_uses_default_keys(self):
+        # v0.3.1：起局时带来的映射不合规 → 这局用默认键位，不挡起局
         for value in ({}, [], {"schema": 1}):
             self.c.r["launchInputConfig"] = value
-            with self.assertRaises(Failure):
-                build.runtime_env(self.c, self.game(), self.root)
+            self.assertNotIn("S2A_INPUT_CONFIG", build.runtime_env(self.c, self.game(), self.root))
 
     def test_launch_rejects_another_games_runtime_before_starting_process(self):
         game = self.game(); self.catalogue([game]); self.c.r["gameId"] = game["id"]
@@ -1339,10 +1339,10 @@ class JobsTests(unittest.TestCase):
         game = self.game(); self.catalogue([game]); self.c.r.update(gameId=game["id"], launchInputConfig={"schema": 1})
         host = self.fake_host(game["id"])
         with patch.object(build, "validate_runtime", return_value={"gameId": game["id"], "memoryRequirementsVersion": 2}), patch.object(build.toolchain, "input_interface", return_value=(False, "legacy")) as probe, patch.object(self.c, "run") as run:
-            with self.assertRaisesRegex(Failure, "重新打包"):
-                build.launch(self.c)
-            probe.assert_called_once_with(self.c, host)
-            run.assert_not_called()
+            build.launch(self.c)   # v0.3.1：宿主不认映射 → 用默认键位照常起局（不再报「重新打包」挡住）
+            probe.assert_called_once_with(self.c, host)   # 照旧查的是这款在用的宿主
+            run.assert_called_once()
+            self.assertNotIn("S2A_INPUT_CONFIG", run.call_args.args[2])
 
     def test_launch_returns_to_library_only_when_the_host_left_the_switch_game_marker(self):
         # 宿主菜单栏「切换游戏」写 S2A_RETURN_MARKER 再退出：结果带 returnToLibrary；正常退出不带；上一局残留的标记不算
@@ -1407,6 +1407,27 @@ class JobsTests(unittest.TestCase):
             with self.assertRaises(Failure) as e:
                 build.launch(self.c)
         self.assertEqual(e.exception.code, "game_crashed")   # 文件都好：是真崩溃
+
+    def test_bad_or_unsupported_input_mapping_falls_back_to_default_keys(self):
+        # v0.3.1（认不出的直接做）：键位映射不合规 / 宿主不认映射 → 这局用默认键位照常起，不让玩家先去重新打包
+        game = self.game(); self.catalogue([game]); self.c.r["gameId"] = game["id"]
+        atomic(layout.path(self.c, game["id"], "input.json"), {"schema": 99})   # 存的映射坏了
+        env = build.runtime_env(self.c, game, self.root / "runtime")
+        self.assertNotIn("S2A_INPUT_CONFIG", env)
+        good = dict(schema=1, keyboard={"A": {"code": 14}}, mouse={}, gamepad={}, axes={}, deadzone=.15,
+                    mouseOptions=dict(mode="off", sensitivityX=1, sensitivityY=1))
+        self.c.r["launchInputConfig"] = good
+        self.assertIn("S2A_INPUT_CONFIG", build.runtime_env(self.c, game, self.root / "runtime"))
+        self.assertNotIn("S2A_INPUT_CONFIG", build.runtime_env(self.c, game, self.root / "runtime", input_ok=False))
+        # 起局：宿主不认映射 → 黄字提醒、照常起局（原先报 runtime_invalid 不让玩）
+        self.fake_host(game["id"]); notes, ran = [], []
+        with patch.object(build, "validate_runtime", return_value={"gameId": game["id"], "memoryRequirementsVersion": 2}), \
+             patch.object(build.toolchain, "input_interface", return_value=(False, "fixture")), \
+             patch.object(self.c, "run", side_effect=lambda command, log, env, **k: ran.append(env)), \
+             patch.object(self.c, "diagnostic", lambda m, **k: notes.append((m, k.get("severity")))):
+            build.launch(self.c)
+        self.assertEqual(len(ran), 1); self.assertNotIn("S2A_INPUT_CONFIG", ran[0])
+        self.assertTrue(any(sev == "warning" and "默认键位" in m for m, sev in notes), notes)
 
     def test_launch_removes_only_its_snapshot_after_exit_failure_or_cancellation(self):
         game = self.game(); self.catalogue([game]); self.c.r.update(gameId=game["id"], inputGuideHandled=True,

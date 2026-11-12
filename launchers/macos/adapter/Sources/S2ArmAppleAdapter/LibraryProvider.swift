@@ -196,7 +196,7 @@ public final class LibraryProvider {
         try await change(to: folder, events: events)
     }
 
-    /// 换游戏库（同旧启动器 chooseLibrary → setupLibrary）：setup 作业建好 / 认出这个文件夹（作业层拦非 APFS、云盘同步目录、非空的生文件夹），
+    /// 换游戏库（同旧启动器 chooseLibrary → setupLibrary）：setup 作业建好 / 认出这个文件夹（作业层拦不支持的盘格式、云盘同步目录、非空的生文件夹），
     /// 成了把 library / libraryId 写回 preferences.json，本进程之后的作业都用新库。没成抛错、什么都不改。
     @discardableResult
     /// accept：玩家在换库确认里同意过的参数（v0.3.1：library_in_cloud → acceptCloud、library_folder_not_empty → acceptForeign），逐次累积

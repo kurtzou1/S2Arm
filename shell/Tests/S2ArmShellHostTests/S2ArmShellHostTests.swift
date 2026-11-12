@@ -147,7 +147,8 @@ import S2ArmShellBridge
     var played: [String] = [], picked: [String] = []
     let model = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")), play: { played.append($0) },
                                     installState: { ready.contains($0) ? 1 : 0 }, pickGameData: { picked.append($0) })
-    #expect(model.games.map(\.id) == ["0100000000020000"])   // 只显示这台设备上资源到位的款
+    // 审计 P1-155：资源没到位、玩家也没删过的款留在库里，显示「需要游戏数据」，点进去看说明
+    #expect(model.games.map(\.id) == ["0100000000010000", "0100000000020000"] && model.games.map(\.game.state) == [.needsGameData, .needsGameData])
     model.actions.onPlay("0100000000010000")
     #expect(played.isEmpty && picked == ["0100000000010000"])
     model.actions.onPickGameData("0100000000010000")
@@ -159,7 +160,32 @@ import S2ArmShellBridge
     ready.remove("0100000000010000")              // 库开着时资源包被拿走：Play 当场重判、不放行
     model.actions.onPlay("0100000000010000")
     #expect(played == ["0100000000010000"] && picked.count == 3)
-    #expect(model.games.map(\.id) == ["0100000000020000"])   // 删掉后不再显示
+    #expect(model.games.map(\.game.state) == [.needsGameData, .needsGameData])   // 资源被拿走（不是玩家删的）：留在库里、回到「需要游戏数据」
+}
+
+// 审计 P1-155：玩家在这台设备上删掉的款，资源不在时不再显示（删除名单 .s2a-removed.txt 跨重开有效）；电脑重新装过来、资源回来就又显示
+@MainActor @Test func deletedGameStaysHiddenUntilItsDataReturns() async throws {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("s2a-removed-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: root) }
+    let (a, b) = ("0100000000010000", "0100000000020000")
+    try fm.createDirectory(at: root.appendingPathComponent("\(a)/资源包"), withIntermediateDirectories: true)
+    let data = Data(#"{"schema":1,"games":[{"title_id":"0100000000010000","name":"A"},{"title_id":"0100000000020000","name":"B"}]}"#.utf8)
+    let state: (String) -> Int32 = { fm.fileExists(atPath: root.appendingPathComponent("\($0)/资源包").path) ? 1 : 0 }
+    let model = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")), play: { _ in },
+                                    installState: state, gamesRoot: root)
+    #expect(model.games.map(\.id) == [a, b] && model.games.map(\.game.state) == [.playable, .needsGameData])
+    model.deleteGame(a, saves: true)
+    #expect(model.games.map(\.id) == [b])                          // 删掉的当场离开列表，没删的 B 照旧在
+    let again = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")), play: { _ in },
+                                    installState: state, gamesRoot: root)
+    #expect(again.games.map(\.id) == [b])                          // 重开 App 仍不显示
+    try fm.createDirectory(at: root.appendingPathComponent("\(a)/资源包"), withIntermediateDirectories: true)
+    again.refreshGameData()
+    #expect(again.games.map(\.id) == [a, b])                       // 电脑重新装过来：又显示
+    let third = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")), play: { _ in },
+                                    installState: { $0 == a ? 0 : 0 }, gamesRoot: root)
+    #expect(third.games.map(\.id) == [a, b])                       // 已从删除名单摘掉：资源再不在也显示「需要游戏数据」
 }
 
 // 宿主「重新检查」→ s2a_shell_refresh → 登记的处理函数
@@ -395,7 +421,7 @@ nonisolated(unsafe) private var lastPlayed = ""
     let data = Data(#"{"schema":1,"games":[{"title_id":"0100000000010000","name":"A"}]}"#.utf8)
     let model = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")), installState: { _ in stage },
                                     gamesRoot: URL(fileURLWithPath: "/nonexistent"))
-    #expect(model.games.isEmpty && model.watching)
+    #expect(model.games.map(\.game.state) == [.needsGameData] && model.watching)   // 审计 P1-155：还没推过来也留在库里，显示「需要游戏数据」
     stage = 3; model.refreshGameData()
     #expect(model.games.first?.game.state.installPhase == .transferring && model.watching)
     stage = 1; model.refreshGameData()

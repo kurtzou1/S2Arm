@@ -1,10 +1,10 @@
 """游戏库位置检查（纯函数，Mac / Windows 共用；11-07 启动器：预检加云盘目录与卷格式，拦下时给「换游戏库」）。
 
-游戏库是出包的工作数据（解包、产物根、缓存，几十 GB、上万个小文件），要放在本机磁盘、能原子改名的格式上：
+游戏库是出包的工作数据（解包、产物根、缓存，几十 GB、上万个小文件），要放在本机磁盘、能完成出包链的格式上：
   - 云盘同步目录（iCloud Drive、OneDrive、Dropbox、Google Drive …）：同步客户端会把文件换成占位、上传几十 GB 中间产物、
     改名 / 删除时和同步冲突，出包中途读不到文件或变慢；
-  - 卷格式：Mac 要 APFS 或 HFS+（播种、发布要原子的「不覆盖改名」；克隆是优化，HFS+ 上退回普通拷贝，同 library.LIBRARY_FORMAT_MESSAGE）；
-    Windows 要 NTFS / ReFS（FAT32 单文件 4 GB 上限，exFAT 没有硬链接 / 符号链接与可靠的原子替换）。
+  - 卷格式：Mac 要 APFS、HFS+ 或 exFAT（播种、发布要「不覆盖改名」：APFS / HFS+ 原生支持，exFAT 走「目标不存在才改名」，tools/clonedir.py；克隆是优化，非 APFS 退回普通拷贝）；
+    Windows 要 NTFS / ReFS；exFAT / FAT32 玩家确认后照用（建不了目录链接，产物根走实目录模式，pack/orch/roots.py）。
 不导入 core / fcntl：winenv.py 在 Windows 上直接 import 本模块。判断只看路径字符串与调用方给的环境，便于两边同一套单测。
 """
 from __future__ import annotations
@@ -19,7 +19,7 @@ MAC_ICLOUD_DESKTOP_DOCS = ("Desktop", "Documents")
 WIN_CLOUD_ENV = (("OneDrive", "OneDrive"), ("OneDrive", "OneDriveConsumer"), ("OneDrive", "OneDriveCommercial"))
 WIN_CLOUD_HOME = (("iCloud 云盘", "iCloudDrive"), ("Dropbox", "Dropbox"), ("Google 云端硬盘", "Google Drive"))
 
-MAC_OK_FORMATS = ("apfs", "hfs")   # HFS+（Mac OS 扩展）：不能克隆、出包多占一份资源包空间（space_budget 按不克隆算），其余照常（v0.3.1）
+MAC_OK_FORMATS = ("apfs", "hfs", "exfat")   # HFS+ / exFAT 不能克隆、出包多占一份资源包空间（space_budget 按不克隆算）；exFAT 发布走「目标不存在才改名」（外部 PR #395）
 WIN_OK_FORMATS = ("ntfs", "refs")
 
 
@@ -93,8 +93,8 @@ def cloud_accepted(library):
 
 
 LIBRARY_FORMAT_MESSAGE = ("这个位置所在的磁盘格式是 {fmt}。游戏原件放在这块盘上没问题（S2Arm 只读、不改不删），"
-                          "但导出时的工作数据（游戏库）要放在 APFS 或 Mac OS 扩展（HFS+）格式的磁盘上：请改用这台 Mac 上的默认位置（内置盘），"
-                          "或选一块 APFS 格式的外接盘；外接盘可以在「磁盘工具」里另分出一个 APFS 分区（盘上要有空闲空间，原有数据不动）。")
+                          "但导出时的工作数据（游戏库）要放在 APFS、Mac OS 扩展（HFS+）或 exFAT 格式的磁盘上：请改用这台 Mac 上的默认位置（内置盘），"
+                          "或选一块这几种格式的外接盘；FAT32 等格式单个文件有 4 GB 上限，不适合做游戏库。")
 CLOUD_MESSAGE = ("游戏库在「{cloud}」的同步目录里。出包时游戏库里会写几十 GB 的中间文件，云盘会把它们上传、换成占位文件，"
                  "出包中途读不到文件或变得很慢。请把游戏库换到本机磁盘上不同步的位置（例如默认位置）。游戏原件放在哪都行，不受影响。")
 # 只写玩家会碰到、能据此做选择的后果（11-12 维护者：断电之类的小概率风险不进界面）

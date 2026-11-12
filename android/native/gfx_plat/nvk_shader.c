@@ -28,9 +28,39 @@ struct entry { struct rp_prog prog; int failed; };
 static nvn_hmap g_progs = {.klen = 32};   // 内容身份（SHA-256）→ struct entry *
 static struct { uint64_t session, generation; uint8_t sha[32]; int ok; } g_profile;
 static uint64_t g_n_offline, g_n_cache, g_n_compiled, g_n_failed;
+static int g_texpool_logged, g_texpool_last_over_limit;
 
 static void sha256(const void *p, size_t n, uint8_t out[32]) { s2a_sha256 c; s2a_sha256_init(&c); s2a_sha256_update(&c, p, n); s2a_sha256_final(&c, out); }
 static void red1(const char *name, const char *why) { if (nvn_unimpl("shader", name, NULL) == 1) nvn_plat_log(NVN_PLAT_LOG_RED, "shader", why); }
+
+// 编译器 DirectProgram 的 program.textureArrayLength 合同：1..65536。
+// 不修改池值；零/负数是没有有效绑定，超限的真实值必须留在错误里。
+static int shader_texture_pool_ready(void) {
+    const int n = rp_S.tex_pool_n;
+    if (n > 0 && !g_texpool_logged) {
+        g_texpool_logged = 1;
+        if (nvn_plat_flag("nvk_texpool_log", 0)) {
+            char line[160];
+            snprintf(line, sizeof line, "texture_pool_capacity=%d sampler_pool_capacity=%d", n, rp_S.samp_pool_n);
+            nvn_plat_log(NVN_PLAT_LOG_INFO, "shader", line);
+        }
+    }
+    if (n <= 0) {
+        char why[96]; snprintf(why, sizeof why, "贴图池未绑定或容量无效：%d", n);
+        red1("texture_pool_missing", why);
+        return 0;
+    }
+    if (n > 65536) {
+        uint64_t count = nvn_unimpl("shader", "texture_pool_over_limit", NULL);
+        if (count == 1 || g_texpool_last_over_limit != n) {
+            char why[128]; snprintf(why, sizeof why, "贴图池容量 %d 超过编译器上限 65536", n);
+            nvn_plat_log(NVN_PLAT_LOG_RED, "shader", why);
+            g_texpool_last_over_limit = n;
+        }
+        return 0;
+    }
+    return 1;
+}
 
 // ---- 事实换算（同 nvn_vk_compile_facts.c）----
 static const char *topology(uint32_t prim) {
@@ -167,11 +197,18 @@ static struct entry *build(const uint8_t *bytes, size_t len, const struct s2a_so
 // 一张小的直映射表而不是只记上一次：相邻两笔常在两三种材质之间来回换，只记一项时每次都落空。
 enum { LAST_N = 1024 };
 static struct last_ent { int ok; uint64_t key; uint64_t session, generation; const struct rp_prog *prog; } g_lasts[LAST_N];
+// 阶段键一律经核心导出接口取（rp_shader_stage_key）：没绑定 / 键缺失给全 0，不读可能过期的核心内部分量。
+static const uint8_t *stage_key(unsigned st) {
+    static uint8_t k[2][8];
+    unsigned i = st ? 1u : 0u;
+    if (!rp_shader_stage_key(st, k[i])) memset(k[i], 0, 8);
+    return k[i];
+}
 static uint64_t input_sig(const struct rp_shader_req *q, const struct s2a_direct_compile_context *pc, uint32_t stages) {
     uint64_t h = 1469598103934665603ull;
     #define MIX(v) do { h ^= (uint64_t)(v); h *= 1099511628211ull; } while (0)
     MIX(stages); MIX(q->prim); MIX(q->rt_count); for (int i = 0; i < 8; i++) MIX(q->rt_format[i]);
-    for (int st = 0; st < 2; st++) { uint64_t k; memcpy(&k, rp_S.skey[st], 8); MIX(k); }
+    for (int st = 0; st < 2; st++) { uint64_t k; memcpy(&k, stage_key((unsigned)st), 8); MIX(k); }
     MIX(rp_S.color.alpha_func); { uint32_t ar; float r = rp_S.color.alpha_func >= 1 && rp_S.color.alpha_func <= 7 ? rp_S.alpha_ref : 0.0f; memcpy(&ar, &r, 4); MIX(ar); }
     MIX(rp_S.ms.a2c ? 1 : 0); MIX(rp_S.ms.a2c_dither ? 1 : 0);
     { int dual = 0; for (int i = 0; i < 8; i++) if (src1(rp_S.blend[i].src_rgb) || src1(rp_S.blend[i].dst_rgb) || src1(rp_S.blend[i].src_a) || src1(rp_S.blend[i].dst_a)) dual = 1; MIX(dual); }
@@ -188,11 +225,12 @@ static int resolve_slow(const struct rp_shader_req *q, const struct rp_prog **ou
 
 int rp_shader_resolve(const struct rp_shader_req *q, const struct rp_prog **out) {
     *out = NULL;
-    uint32_t stages = 0; for (int st = 0; st < 5; st++) if (rp_S.bser[st]) stages |= 1u << st;
+    uint32_t stages = rp_shader_graphics_stages();
     // 认两种：顶点 + 片元；只有顶点（只写深度的绘制：深度预通道、阴影图）。几何 / 细分阶段还没接
     if (stages != 3u && stages != 1u) { char nm[32]; snprintf(nm, sizeof nm, "stages_%#x_not_vs_fs", stages); nvn_unimpl("shader", nm, NULL); return -1; }
     const int nst = stages == 3u ? 2 : 1;
-    if ((rp_S.skey_ok & stages) != stages) { nvn_unimpl("shader", "stage_key_missing", NULL); return -1; }
+    for (uint32_t st2 = 0; st2 < 5; st2++) if ((stages >> st2 & 1) && !rp_shader_stage_key(st2, NULL)) { nvn_unimpl("shader", "stage_key_missing", NULL); return -1; }
+    if (!shader_texture_pool_ready()) return -1;
     struct s2a_direct_compile_context pc; memset(&pc, 0, sizeof pc);
     if (s2a_direct_provider_compile_context(&pc) || !pc.profile_json || !pc.profile_bytes) { nvn_unimpl("shader", "no_compile_context", NULL); return -1; }
     uint64_t key = input_sig(q, &pc, stages);
@@ -219,8 +257,8 @@ static int resolve_slow(const struct rp_shader_req *q, const struct rp_prog **ou
     id.direct_abi = (int)pc.direct_abi; id.translator_closure = pc.translator_closure; memcpy(id.profile_sha, g_profile.sha, 32);
     id.stage_mask = stages;
     for (int st = 0; st < nst; st++) {
-        memcpy(id.keys[st], rp_S.skey[st], 8);
-        if (s2a_source_identity(rp_S.skey[st], id.source_sha[st], &id.source_code_bytes[st], &id.source_control_bytes[st])) { nvn_unimpl("shader", "source_snapshot_missing", NULL); return -1; }
+        memcpy(id.keys[st], stage_key((unsigned)st), 8);
+        if (s2a_source_identity(stage_key((unsigned)st), id.source_sha[st], &id.source_code_bytes[st], &id.source_control_bytes[st])) { nvn_unimpl("shader", "source_snapshot_missing", NULL); return -1; }
         id.source_present |= (uint8_t)(1u << st);
     }
     memcpy(id.ubo_use, f.ubo_use, sizeof id.ubo_use);
@@ -232,7 +270,7 @@ static int resolve_slow(const struct rp_shader_req *q, const struct rp_prog **ou
     struct entry *e = nvn_hm_get(&g_progs, sha);
     if (!e) {
         struct s2a_source_entry_view views[2]; memset(views, 0, sizeof views);
-        for (int st = 0; st < nst; st++) if (!s2a_source_get_key(rp_S.skey[st], &views[st]) || !views[st].complete)   /* get_key：1 = 命中 */ { nvn_unimpl("shader", "source_snapshot_incomplete", NULL); return -1; }
+        for (int st = 0; st < nst; st++) if (!s2a_source_get_key(stage_key((unsigned)st), &views[st]) || !views[st].complete)   /* get_key：1 = 命中 */ { nvn_unimpl("shader", "source_snapshot_incomplete", NULL); return -1; }
         uint8_t *bytes = NULL; size_t len = 0; char why[256] = "";
         const char *root = getenv("S2A_SHADER_REVISION_ROOT"), *cdir = getenv("S2A_DIRECT_CACHE_DIR");
         if (root && pc.profile_hash && pc.profile_hash[0] && !nvn_plat_flag("no_offline", 0)) {
@@ -256,7 +294,7 @@ static int resolve_slow(const struct rp_shader_req *q, const struct rp_prog **ou
                 d->stage = st ? "fs" : "vs"; d->code = code; d->code_bytes = nb; d->control = views[st].control; d->control_bytes = views[st].control_bytes;
                 d->c1 = views[st].c1; d->c1_bytes = views[st].c1_bytes; d->constant_buffer_use = f.ubo_use[st];
                 if (!in.gfx.has_tess_mode && views[st].control_bytes >= 0x748) { memcpy(&in.gfx.tess_mode, views[st].control + 0x744, 4); in.gfx.has_tess_mode = 1; }
-                for (int b = 0; b < 8; b++) o += snprintf(ident + o, sizeof ident - (size_t)o, "%02x", rp_S.skey[st][b]);
+                for (int b = 0; b < 8; b++) o += snprintf(ident + o, sizeof ident - (size_t)o, "%02x", stage_key((unsigned)st)[b]);
             }
             in.request_id = ident;
             char *json = NULL; size_t jl = 0; char gaps[1024] = "";
@@ -288,7 +326,8 @@ static int resolve_slow(const struct rp_shader_req *q, const struct rp_prog **ou
 
 // ---------- 计算程序 ----------
 // 输入的构造与身份用旧层留下的零件（nvn_vk_compute_request.c：只做输入，不碰设备），结果解析用 nvn_vk_program_parse_compute。
-// 首版只认：常量缓冲（含驱动段 c0、着色器自带段 c1）、按 NVN 槽绑定的存储缓冲、组合贴图。图像、地址藏在常量缓冲里的存储缓冲：记账、取不到。
+// 首版只认：常量缓冲（含驱动段 c0、着色器自带段 c1）、存储缓冲（地址在 NVN 槽表，或在计算阶段的用户 UBO 槽表）、组合贴图。
+// 图像、地址藏在某个 UBO 内容里的存储缓冲（NVK_STORAGE_UBO_ADDRESS）：记账、取不到。
 static struct entry *build_compute(const uint8_t *bytes, size_t len, const struct s2a_source_entry_view *src) {
     struct entry *e = calloc(1, sizeof *e); e->prog.is_compute = 1;
     static struct nvn_vk_compute_program cp; char why[192] = "";
@@ -301,9 +340,13 @@ static struct entry *build_compute(const uint8_t *bytes, size_t len, const struc
         nvn_gpu_layout_ent *le = &e->prog.ent[0][e->prog.nent[0]]; int ok = 0;
         if (b->kind == 1) {
             const struct nvn_vk_compute_storage *sg = &cp.storage[i];
-            if (sg->mapping == NVK_STORAGE_NVN && sg->index < 16 && !sg->offset) {
+            // 两种来源绑出来的都是「池镜像里的一段」，只差在哪张表给地址：NVK_STORAGE_NVN 取 NVN 存储缓冲槽（NVN_RB_SBUFP）、
+            // NVK_STORAGE_UBO_PTR 取计算阶段的用户 UBO 槽（NVN_RB_UBOP，驱动段 c0 的 0x210 表）。access 一律取反射的 writable（翻译器见到写 / 原子操作才置位，
+            // 没置位的缓冲在 SPIR-V 里带 NonWritable）；核心据此决定登记不登记 GPU 写。NVK_STORAGE_UBO_ADDRESS 要先读 UBO 内容才拿得到地址，这里不接。
+            if ((sg->mapping == NVK_STORAGE_NVN || sg->mapping == NVK_STORAGE_UBO_PTR) && sg->index < 16 && !sg->offset) {
                 memset(le, 0, sizeof *le); le->set = (uint8_t)b->set; le->binding = (uint16_t)b->binding; le->count = 1;
-                le->cls = NVN_GPU_RES_SSBO; le->access = sg->writable ? NVN_GPU_ACC_RW : NVN_GPU_ACC_R; le->src_kind = NVN_RB_SBUFP; le->src_reg = (uint16_t)sg->index; ok = 1;
+                le->cls = NVN_GPU_RES_SSBO; le->access = sg->writable ? NVN_GPU_ACC_RW : NVN_GPU_ACC_R;
+                le->src_kind = sg->mapping == NVK_STORAGE_UBO_PTR ? NVN_RB_UBOP : NVN_RB_SBUFP; le->src_reg = (uint16_t)sg->index; ok = 1;
             }
         } else ok = layout_ent(b, le);
         if (!ok) { char nm[56]; snprintf(nm, sizeof nm, "compute_binding_kind_%d_slot_%d_map_%d", b->kind, b->slot, b->kind == 1 ? (int)cp.storage[i].mapping : 0); red1(nm, "cs"); e->failed = 1; break; }
@@ -325,6 +368,7 @@ static struct entry *build_compute(const uint8_t *bytes, size_t len, const struc
 int rp_shader_resolve_compute(const struct rp_prog **out) {
     *out = NULL;
     if (!(rp_S.skey_ok >> 5 & 1)) { nvn_unimpl("shader", "compute_stage_key_missing", NULL); return -1; }
+    if (!shader_texture_pool_ready()) return -1;
     struct s2a_direct_compile_context pc; memset(&pc, 0, sizeof pc);
     if (s2a_direct_provider_compile_context(&pc) || !pc.profile_json || !pc.profile_bytes) { nvn_unimpl("shader", "no_compile_context", NULL); return -1; }
     static struct s2a_record_dispatch_state st; memset(&st, 0, sizeof st);
@@ -392,4 +436,5 @@ void rp_shader_reset(void) {
         free(e); }
     free(g_progs.keys); free(g_progs.vals); nvn_hm_init(&g_progs, 32);
     g_profile.ok = 0; memset(g_lasts, 0, sizeof g_lasts);
+    g_texpool_logged = g_texpool_last_over_limit = 0;
 }

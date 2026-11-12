@@ -40,7 +40,7 @@ namespace Ryujinx.HLE.UI.Input
 
         private static ref RingLifo<NpadCommonState> GetCommonStateLifo(ref NpadInternalState npad)
         {
-            switch (npad.StyleSet)
+            switch (Ryujinx.HLE.HOS.Services.Hid.NpadDevices.Base(npad.StyleSet))
             {
                 case NpadStyleTag.FullKey:
                     return ref npad.FullKey;

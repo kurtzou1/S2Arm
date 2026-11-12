@@ -1,6 +1,7 @@
 using Ryujinx.HLE;
 using Ryujinx.HLE.HOS.Services.Hid;
 using Ryujinx.HLE.HOS.Services.Hid.Types;
+using Ryujinx.HLE.HOS.Services.Hid.Types.SharedMemory.Npad;
 using Ryujinx.Input;
 using System;
 using System.Collections.Generic;
@@ -21,7 +22,18 @@ namespace S2A.Services
             public float GyroX, GyroY, GyroZ;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MouseSample   // runtime/include/s2a_pad.h s2a_pad_mouse
+        {
+            public ulong TimestampUs;
+            public short X, Y;
+            public ushort Distance;
+            public byte Side, Known;
+        }
+
         private readonly NpadDevices _npads;
+        private readonly delegate* unmanaged<MouseSample*, int> _readMousePair;   // 可选（Mac）：Joy-Con 2 光学鼠标，左右各一份
+        private bool _mouseConnected, _mouseLogged;
         private readonly delegate* unmanaged<ulong, VibrationValue*, void> _setRumblePair;
         private readonly delegate* unmanaged<ulong, void> _stopRumble;
         private readonly delegate* unmanaged<ulong> _rumbleSession;
@@ -73,7 +85,9 @@ namespace S2A.Services
                 if (NativeLibrary.TryGetExport(program, "s2a_pad_read_motion_pair", out nint pair))   // 平台例外：Mac 宿主（macos/front_mac.m，Joy-Con HID 左右两路体感）专有的可选导出，同 s2a_pad_read_motion；iOS / 安卓宿主没有
                     _readMotionPair = (delegate* unmanaged<MotionSample*, int>)pair;
             }
-            Console.Error.WriteLine($"[输入反馈] hooks rumble_pair={_setRumblePair != null} stop={_stopRumble != null} session={_rumbleSession != null} motion={_readMotion != null} motion_pair={_readMotionPair != null} motion_enable={_setMotionEnabled != null} player={(int)player} session={_session} permit={_rumblePermitted}");
+            if (NativeLibrary.TryGetExport(program, "s2a_pad_read_mouse_pair", out nint mousePair))   // 平台例外：Mac 宿主（macos/front_mac.m，Joy-Con 2 光学鼠标）专有的可选导出
+                _readMousePair = (delegate* unmanaged<MouseSample*, int>)mousePair;
+            Console.Error.WriteLine($"[输入反馈] hooks rumble_pair={_setRumblePair != null} stop={_stopRumble != null} session={_rumbleSession != null} motion={_readMotion != null} motion_pair={_readMotionPair != null} motion_enable={_setMotionEnabled != null} mouse={_readMousePair != null} player={(int)player} session={_session} permit={_rumblePermitted}");
         }
 
         public void Update(PlayerIndex player)
@@ -169,6 +183,7 @@ namespace S2A.Services
         // Only the HID thread calls this; event wakes and heartbeats may share a native sample.
         public void TickMotion(PlayerIndex player)
         {
+            TickMouse(player);
             if (_readMotion == null || _stopped) return;
             ulong session = _rumbleSession != null ? _rumbleSession() : 0;
             if (player != _motionPlayer || session != _motionSession)
@@ -224,19 +239,47 @@ namespace S2A.Services
                 _motionLogged = true;
                 Console.Error.WriteLine($"[输入反馈] first motion known={known} pair={nPair} player={(int)player} timestamp_us={sample.TimestampUs} accel_g=({sample.AccelerationX},{sample.AccelerationY},{sample.AccelerationZ}) gyro_deg_s=({sample.GyroX},{sample.GyroY},{sample.GyroZ})");
             }
-            AddMotionState(player, sample, ref _motion, _orientation, pushImu: true);
-            // 左右 Joy-Con 各一路：同一 PlayerId 连续两份，UpdateSixAxis 把第二份写入右手六轴
+            // 左右 Joy-Con 各一路：同一 PlayerId 连续两份，UpdateSixAxis 把第二份写入右手六轴；Npad IMU 左只写传感器 0、右只写传感器 1（单路时 -1：左右同一份）
+            AddMotionState(player, sample, ref _motion, _orientation, imuSensor: nPair >= 2 ? 0 : -1);
             if (nPair >= 2)
-                AddMotionState(player, sampleR, ref _motionRight, _orientationRight, pushImu: false);
+                AddMotionState(player, sampleR, ref _motionRight, _orientationRight, imuSensor: 1);
             _npads.UpdateSixAxis(_motionStates);
             _motionPublished = true;
         }
 
-        private void AddMotionState(PlayerIndex player, MotionSample sample, ref MotionInput motion, float[] orientation, bool pushImu)
+        // Joy-Con 2 光学鼠标 → 游戏的 Jcms 缓冲（hid 3110，NpadJcms）：游戏靠「已连接」位认 Joy-Con 2，靠位移玩鼠标操作的项目。
+        //   连着 Joy-Con 2 就每次都写一笔（没有鼠标读数时位移 0）；Joy-Con 2 不在了写一笔未连接
+        private void TickMouse(PlayerIndex player)
+        {
+            if (_readMousePair == null || _stopped) return;
+            MouseSample* m = stackalloc MouseSample[2];
+            int sides = _readMousePair(m);
+            int npadId = player >= PlayerIndex.Player1 && player <= PlayerIndex.Player8 ? (int)player : 0;
+            if (sides == 0)
+            {
+                if (_mouseConnected) _npads.Jcms.Disconnect();
+                _mouseConnected = false;
+                _npads.SetJoycon2(false);
+                return;
+            }
+            _mouseConnected = true;
+            _npads.SetJoycon2(true);   // 样式加 Joy-Con 2 位（NpadDevices.Joycon2Style）：只收 Joy-Con 2 的场景游戏才认
+            if (!_mouseLogged && (m[0].Known != 0 || m[1].Known != 0))
+            {
+                _mouseLogged = true;
+                Console.Error.WriteLine($"[输入反馈] first mouse npad={npadId} sides={sides} L=({(m[0].Side == 0 ? $"{m[0].X},{m[0].Y} d{m[0].Distance} k{m[0].Known}" : "-")}) R=({(m[1].Side == 1 ? $"{m[1].X},{m[1].Y} d{m[1].Distance} k{m[1].Known}" : "-")})");
+            }
+            NpadJcms.Side left = new() { Present = m[0].Side == 0, Known = m[0].Known != 0, X = m[0].X, Y = m[0].Y, OnSurface = m[0].Distance == 0 };
+            NpadJcms.Side right = new() { Present = m[1].Side == 1, Known = m[1].Known != 0, X = m[1].X, Y = m[1].Y, OnSurface = m[1].Distance == 0 };
+            bool pair = player <= PlayerIndex.Handheld && NpadDevices.Base(_npads.StyleOf(player)) == NpadStyleTag.JoyDual;   // 一对：游戏左右两侧都查
+            if (_npads.Jcms.Active) _npads.Jcms.Push(npadId, left, right, m[0].Side == 0 ? m[0].TimestampUs : m[1].TimestampUs, pair);
+        }
+
+        private void AddMotionState(PlayerIndex player, MotionSample sample, ref MotionInput motion, float[] orientation, int imuSensor)
         {
             Vector3 accel = new(SixAxisSensorIc.ClampAcceleration(sample.AccelerationX), SixAxisSensorIc.ClampAcceleration(sample.AccelerationY), SixAxisSensorIc.ClampAcceleration(sample.AccelerationZ));
             Vector3 gyro = new(SixAxisSensorIc.ClampAngularRate(sample.GyroX), SixAxisSensorIc.ClampAngularRate(sample.GyroY), SixAxisSensorIc.ClampAngularRate(sample.GyroZ));
-            if (pushImu) _npads.PushImu(player, accel, gyro, sample.TimestampUs);
+            _npads.PushImu(player, accel, gyro, sample.TimestampUs, imuSensor);
             if (motion != null && (sample.TimestampUs < motion.TimeStamp || sample.TimestampUs - motion.TimeStamp > 250_000))
                 motion = null;
             motion ??= new MotionInput();
@@ -272,6 +315,9 @@ namespace S2A.Services
                 _left = _right = default;
                 for (int i = 0; i < NpadDevices.MaxControllers; i++) _npads.ResetRumble((PlayerIndex)i);
             }
+            // Jcms 与样式里的 Joy-Con 2 位都留着：反馈对象随焦点 / 会话重建，手柄本身没换。原先这里写「未连接」，
+            //   游戏失焦片刻就以为 Joy-Con 2 拔了、拉起手柄设置（11-12 实机：之后小程序认不了 Joy-Con 2 位、游戏反复重开卡住）
+            _mouseConnected = false;
             if (_setMotionEnabled != null) _setMotionEnabled(0);
             _motion = _motionRight = null;
             _motionTimestamp = 0;

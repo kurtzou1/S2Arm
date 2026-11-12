@@ -2,6 +2,7 @@
 #include "fault.h"
 #include "../../guest_signal.h"
 #include <asm/sigcontext.h>
+#include "sigframe_compat.h"
 #include <errno.h>
 #include <pthread.h>
 #include <signal.h>
@@ -53,7 +54,23 @@ _Static_assert(ATOMIC_INT_LOCK_FREE == 2, "signal-side readiness must be lock fr
 static atomic_int key_ready;
 static atomic_int dispatch_verified;
 // Bit 0: opt-in; bit 1: frozen before any thread can receive runtime faults.
-static atomic_int inline_sme_config;
+// Default ON (#573 / #736): kernels on SME-capable cores (Snapdragon 8 Elite Gen 5 / SM8850 and later)
+// append TPIDR2 and a header-only ZA record to EVERY signal frame. Rejecting them meant no fault was
+// ever claimed on those devices, so the startup probe and every tracked write died as chained SIGSEGV.
+// Both records are inline and fixed-size; the saved ucontext copy restores them byte-for-byte.
+// The launcher can still opt out (enabled = 0) before the first runtime thread freezes the choice.
+static atomic_int inline_sme_config = 1;
+// First signal-frame record that made a fault unclaimable (0 = none); read by the startup probe report.
+static atomic_uint unsupported_record;
+unsigned s2a_android_fault_unsupported_record(void) {
+    return atomic_load_explicit(&unsupported_record, memory_order_acquire);
+}
+static int unsupported(unsigned magic) {
+    unsigned none = 0;
+    atomic_compare_exchange_strong_explicit(&unsupported_record, &none, magic ? magic : 1u,
+        memory_order_acq_rel, memory_order_acquire);
+    return ENOTSUP;
+}
 int s2a_android_fault_configure_inline_sme(int enabled) {
     if (enabled != 0 && enabled != 1) return EINVAL;
     int old = atomic_load_explicit(&inline_sme_config, memory_order_acquire);
@@ -148,7 +165,7 @@ static int records(const ucontext_t *context, uint64_t *esr, int *has_esr) {
     *has_esr = 0;
     while (left >= sizeof(struct _aarch64_ctx)) {
         const struct _aarch64_ctx *head = (const void *)at;
-        if (!head->magic && !head->size) return (seen & 1) ? 0 : ENOTSUP;
+        if (!head->magic && !head->size) return (seen & 1) ? 0 : unsupported(FPSIMD_MAGIC);
         if (head->size < 16 || (head->size & 15) || head->size > left) return EINVAL;
         unsigned bit;
         switch (head->magic) {
@@ -160,21 +177,32 @@ static int records(const ucontext_t *context, uint64_t *esr, int *has_esr) {
             bit = 2; *has_esr = 1; *esr = ((const struct esr_context *)head)->esr; break;
         case SVE_MAGIC:
             if (head->size < sizeof(struct sve_context)) return EINVAL;
+            // Streaming SVE live at the fault: the redirected host body would resume in streaming
+            // mode, where plain FP/SIMD traps. Neither guest nor host code enables it; refuse if seen.
+            if (((const struct sve_context *)head)->flags & SVE_SIG_FLAG_SM) return unsupported(SVE_MAGIC);
             bit = 4; break;
         case TPIDR2_MAGIC:
-            if (!(atomic_load_explicit(&inline_sme_config, memory_order_acquire) & 1)) return ENOTSUP;
+            if (!(atomic_load_explicit(&inline_sme_config, memory_order_acquire) & 1)) return unsupported(TPIDR2_MAGIC);
             if (head->size != sizeof(struct tpidr2_context)) return EINVAL;
             bit = 8; break;
         case ZA_MAGIC: {
-            if (!(atomic_load_explicit(&inline_sme_config, memory_order_acquire) & 1)) return ENOTSUP;
+            if (!(atomic_load_explicit(&inline_sme_config, memory_order_acquire) & 1)) return unsupported(ZA_MAGIC);
             // Header-only ZA means no live matrix payload. Never discard active
             // ZA or chase an extra_context pointer into a previous signal frame.
-            if (head->size != sizeof(struct za_context)) return ENOTSUP;
+            if (head->size != sizeof(struct za_context)) return unsupported(ZA_MAGIC);
             const struct za_context *za = (const void *)head;
             if (!sve_vl_valid(za->vl) || za->__reserved[0] || za->__reserved[1] || za->__reserved[2]) return EINVAL;
             bit = 16; break;
         }
-        default: return ENOTSUP;
+        // FPMR (FP8) and POE (permission overlay) are likewise inline, fixed-size register snapshots
+        // that newer kernels append whenever the CPU has the feature; copied back intact like TPIDR2.
+        case FPMR_MAGIC:
+            if (head->size != sizeof(struct fpmr_context)) return EINVAL;
+            bit = 32; break;
+        case POE_MAGIC:
+            if (head->size != sizeof(struct poe_context)) return EINVAL;
+            bit = 64; break;
+        default: return unsupported(head->magic);
         }
         if (seen & bit) return EINVAL;
         seen |= bit;
@@ -263,11 +291,21 @@ int s2a_android_fault_handle(int signal, void *address, void *context, int is_gu
     }
     if (signal != SIGSEGV && signal != SIGBUS) return 0;
     int write;
-    if (!s2a_android_fault_esr(context, &write)) return 0;
     // Private startup probe, deliberately outside game modules. Exact PC,
     // address and current-thread activation are all required; no guest exception.
-    if (state && state->probe_page && address == state->probe_page
-        && ((ucontext_t *)context)->uc_mcontext.pc == (uintptr_t)s2a_android_fault_probe_store) {
+    int probe = state && state->probe_page && context && address == state->probe_page
+        && ((ucontext_t *)context)->uc_mcontext.pc == (uintptr_t)s2a_android_fault_probe_store;
+    if (!s2a_android_fault_esr(context, &write)) {
+        // A self-check must never take startup down (#573): when this device's signal frame cannot be
+        // redirected, open the probe page so the store completes, and let the probe report failure.
+        // The runtime then refuses guest start with a stated reason instead of a chained SIGSEGV.
+        if (probe && !mprotect(state->probe_page, state->probe_size, PROT_READ | PROT_WRITE)) {
+            state->probe_seen |= 8;
+            return 1;
+        }
+        return 0;
+    }
+    if (probe) {
         if (!write || handler_sp < state->alt_low || handler_sp >= state->alt_high) return -EFAULT;
         state->probe_seen |= 1;
         return s2a_android_fault_redirect(context, (uint64_t)address);
@@ -324,7 +362,8 @@ int s2a_android_fault_probe(void) {
     state->probe_seen = 0;
     state->probe_page = page;
     s2a_android_fault_probe_instruction(page);
-    int error = state->probe_seen == 7 && state->phase == IDLE && *(uint64_t *)page == 0x5a ? 0 : EIO;
+    int error = state->probe_seen == 7 && state->phase == IDLE && *(uint64_t *)page == 0x5a ? 0
+        : (state->probe_seen & 8) ? ENOTSUP : EIO;
     state->probe_page = NULL;
     munmap(page, (size_t)size);
     atomic_store_explicit(&dispatch_verified, !error, memory_order_release);

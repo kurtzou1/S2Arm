@@ -54,6 +54,10 @@ const char *s2a_launch_ctx_bundle_dir(void);
 // 多款容器选游戏（主线程，界面 Play 后、起宿主前）：按 ③ 构造本款上下文、校验、建本款文档根、冻结、写 S2A_GAME_DATA / S2A_DOCS / S2A_RYU_DATA / S2A_LAUNCH_GAME_ID。
 //   成功回 NULL，之后 s2a_launch_ctx_get() 回本款；失败回原因（不冻结，可换一款再选）。不是容器模式 / 本进程已选过 = 拒绝（一进程一款：请关掉 App 重新打开）
 const char *s2a_launch_ctx_select(const char *gid);
+// 上一次 s2a_launch_ctx_select 被拒的类别（给玩家看的话按它选，原文只进日志）：
+//   APP_INCOMPLETE = 这款在 App 里不完整（不在清单、随行目录 / 镜像包不在）→ 在电脑上重新装到 iPhone；STORAGE = 建不了本款文档目录（多半存储满）；OTHER = 其余
+enum { S2A_SELECT_OTHER = 0, S2A_SELECT_APP_INCOMPLETE = 1, S2A_SELECT_STORAGE = 2 };
+int s2a_launch_ctx_select_kind(void);
 // 进程内冻结一次（线程安全）：可执行文件目录取 _NSGetExecutablePath，home 取 $HOME（没有 = "."），文件取 S2A_LAUNCH_CTX。
 //   文件来源时把四个根写进进程环境。失败回 NULL，原因见 s2a_launch_ctx_error()（宿主 main 开头据此停）。
 //   多款容器模式：s2a_launch_ctx_select 成功之前一律回 NULL（error =「还没选游戏」），之后回本款

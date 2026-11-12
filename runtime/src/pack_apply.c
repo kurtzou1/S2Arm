@@ -35,7 +35,7 @@ static int mkdirs(char *p) {   // 建 p 的各级父目录（p 是文件路径�
 static uint64_t oct(const char *s, int n) { uint64_t v = 0; for (int i = 0; i < n && s[i]; i++) if (s[i] >= '0' && s[i] <= '7') v = v * 8 + (uint64_t)(s[i] - '0'); return v; }
 static int safe(const char *p) { return *p && *p != '/' && !strstr(p, "../") && strcmp(p, "..") && !(strlen(p) >= 3 && !strcmp(p + strlen(p) - 3, "/..")); }
 
-// 解一个 tar 到 root；返回 0 成功，负数 = 失败码（-1 读不了 -2 头坏 -3 路径不安全 -4 写失败 -5 条目类型不支持）；*nf / *nb 累计文件数与字节
+// 解一个 tar 到 root；返回 0 成功，负数 = 失败码（-1 读不了 -2 头坏 -3 路径不安全 -4 写失败；认不出的条目类型跳过、不算失败）；*nf / *nb 累计文件数与字节
 int s2a_untar(const char *tar, const char *root, unsigned *nf, uint64_t *nb) {
     g_untar_trunc = 0; g_untar_err[0] = 0;   // 每次从空现场开始：不写现场的失败不能贴上一次的（iOS 装机剃刀 #10）
     int fd = open(tar, O_RDONLY); if (fd < 0) { untar_err("打开包", tar, errno); return -1; }
@@ -74,7 +74,13 @@ int s2a_untar(const char *tar, const char *root, unsigned *nf, uint64_t *nb) {
         pax_path[0] = 0; pax_size = (uint64_t)-1;
         if (!strncmp(name, "./", 2)) memmove(name, name + 2, strlen(name + 2) + 1);
         if (type == '5') { if (!*name) continue; if (!safe(name)) { untar_err("路径不安全", name, EINVAL); rc = -3; break; } char p[8192]; snprintf(p, sizeof p, "%s/%s/x", root, name); if (mkdirs(p)) { rc = -4; break; } continue; }
-        if (type != '0' && type != 0) { LOG("【红】解包：%s 条目类型 %c 不支持", name, type); untar_err("条目类型不支持", name, EINVAL); rc = -5; break; }
+        // 普通文件 / 目录 / pax 头以外的条目（链接、设备等）：执行器打的包里没有，v0.3.1 起认不出的不挡整次解包——跳过它的数据、记一笔，
+        //   真缺了什么由后面 index.tsv 核对按缺文件 / 部分可玩处理（原先返回 -5，整个资源包「安装没完成」）
+        if (type != '0' && type != 0) {
+            LOG("【黄】解包：%s 条目类型 %c 认不出，跳过（%llu 字节）", name, type, (unsigned long long)size);
+            if (lseek(fd, (off_t)(size + pad), SEEK_CUR) < 0) { untar_err("跳过认不出的条目", name, errno); rc = -2; break; }
+            continue;
+        }
         if (!safe(name)) { LOG("【红】解包：路径不安全 %s", name); untar_err("路径不安全", name, EINVAL); rc = -3; break; }
         char p[8192], tmp[8300]; snprintf(p, sizeof p, "%s/%s", root, name); snprintf(tmp, sizeof tmp, "%s.part", p);
         if (mkdirs(p)) { rc = -4; break; }
@@ -505,8 +511,17 @@ int s2a_pack_migrate_one(const char *docs) {
         FILE *f = fopen(nap, "r"); if (f) { size_t k = fread(nsha, 1, sizeof nsha - 1, f); fclose(f); nsha[k] = 0; nsha[strcspn(nsha, "\r\n")] = 0; }
         int differs = !manifest_sha(omf, osha, sizeof osha) && strcmp(osha, nsha);
         if (pending || differs) {
-            remove_tree(neu);
-            if (rename(old, neu)) { snprintf(g_migrate_why, sizeof g_migrate_why, "把旧位置的新推送 %s 换到 %s：%s", old, neu, strerror(errno)); LOG("【红】资源包迁移：%s", g_migrate_why); return -2; }
+            // 三步改名（同 repair_tree；审计 P1-169：原先先删新位置再改名，改名失败或删到一半被杀，已经能玩的新位置就缺了文件）：
+            //   ① 新位置改名挪开留作退路 ② 旧位置改名进来 ③ 成功后才删挪开的那份；② 失败就把 ① 改回原名，两处都不丢
+            char keep[2300]; snprintf(keep, sizeof keep, "%s.s2a-old-%llu", neu, (unsigned long long)now_ns());
+            if (rename(neu, keep)) { snprintf(g_migrate_why, sizeof g_migrate_why, "把新位置 %s 挪开（换成旧位置的新推送前）：%s", neu, strerror(errno)); LOG("【红】资源包迁移：%s", g_migrate_why); return -2; }
+            if (rename(old, neu)) {
+                int e = errno, back = rename(keep, neu);
+                snprintf(g_migrate_why, sizeof g_migrate_why, "把旧位置的新推送 %s 换到 %s：%s%s", old, neu, strerror(e),
+                         back ? "；新位置原来那份也没能改回原名（在 .s2a-old-* 里，文件都在）" : "；新位置原来那份已改回原名");
+                LOG("【红】资源包迁移：%s", g_migrate_why); return -2;
+            }
+            remove_tree(keep);
             LOG("资源包迁移：旧位置是一次新推送（%s），换掉新位置的旧资源包", pending ? "有待解包" : "清单不同");
             return 1;
         }
@@ -713,14 +728,6 @@ static int partial_ready(const char *root) {
     size_t k = fread(got, 1, sizeof got - 1, f); fclose(f); got[k] = 0; got[strcspn(got, "\r\n")] = 0;
     return got[0] && !manifest_sha(mf, want, sizeof want) && !strcmp(got, want) && !stat(np, &ns) && S_ISREG(ns.st_mode) && ns.st_size > 0;
 }
-// 玩家对这份部分可玩的资源包点过「仍要启动」：.partial_ok = 当时的清单 sha（同一份资源包以后不再问；电脑补推齐了 / 换了包就失效）
-static int partial_confirmed(const char *root) {
-    char mf[2300], ok[2300], want[200], got[200] = "";
-    snprintf(mf, sizeof mf, "%s/manifest.json", root); snprintf(ok, sizeof ok, "%s/.partial_ok", root);
-    FILE *f = fopen(ok, "r"); if (!f) return 0;
-    size_t k = fread(got, 1, sizeof got - 1, f); fclose(f); got[k] = 0; got[strcspn(got, "\r\n")] = 0;
-    return got[0] && !manifest_sha(mf, want, sizeof want) && !strcmp(got, want);
-}
 int s2a_import_state_game_quick(const char *proc_docs, const char *gid) {
     if (proc_docs && *proc_docs && gid && *gid && !strchr(gid, '/') && gid[0] != '.') {
         char root[2200], gdocs[1200]; snprintf(gdocs, sizeof gdocs, "%s/games/%s", proc_docs, gid); s2a_pack_root(root, sizeof root, gdocs);
@@ -750,6 +757,14 @@ int s2a_game_install_state(const char *proc_docs, const char *gid) {
 #if defined(__APPLE__) && TARGET_OS_IPHONE
 #include <CoreFoundation/CoreFoundation.h>
 #include <pthread.h>
+// 只有 iOS 起局闸门问「仍要启动」用它（安卓没有这一问，放外面会 -Werror=unused-function）。玩家对这份部分可玩的资源包点过「仍要启动」：.partial_ok = 当时的清单 sha（同一份资源包以后不再问；电脑补推齐了 / 换了包就失效）
+static int partial_confirmed(const char *root) {
+    char mf[2300], ok[2300], want[200], got[200] = "";
+    snprintf(mf, sizeof mf, "%s/manifest.json", root); snprintf(ok, sizeof ok, "%s/.partial_ok", root);
+    FILE *f = fopen(ok, "r"); if (!f) return 0;
+    size_t k = fread(got, 1, sizeof got - 1, f); fclose(f); got[k] = 0; got[strcspn(got, "\r\n")] = 0;
+    return got[0] && !manifest_sha(mf, want, sizeof want) && !strcmp(got, want);
+}
 #include <dispatch/dispatch.h>
 #include <stdatomic.h>
 void s2a_ios_show_notice(const char *symbol, const char *title, const char *body, int done, int total, int diag);   // app.m：整屏提示页（notice.m 画）

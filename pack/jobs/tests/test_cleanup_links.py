@@ -45,6 +45,23 @@ class CleanupLinkTests(unittest.TestCase):
                     self.assertEqual(payload.read_bytes(), b"player data must survive")
                     self.assertFalse(link.is_symlink())
 
+    def test_direct_cache_on_game_volume_no_cross_root_error(self):
+        # #754：游戏库和数据目录不在一块盘时，直连缓存跟着游戏放在这款文件夹的 direct-cache（不在工具缓存下）。
+        #   原先查「沿途没有链接」一律从工具缓存起算，relative_to 抛 ValueError，出包失败后的清理整个没做；期望照常列出可删的中间件并删掉
+        self.c.work_root.mkdir()
+        direct = layout.path(self.c, self.gid, "direct-cache"); (direct / "work").mkdir(parents=True); (direct / "store").mkdir()
+        got = library.direct_transients(self.c, direct)
+        self.assertEqual(got, [direct / "work"])
+        self.assertTrue(library._rm_direct_transient(self.c, direct, direct / "work"))
+        self.assertFalse((direct / "work").exists()); self.assertTrue((direct / "store").is_dir())
+
+    def test_stage_logs_include_windows_work_logs(self):
+        # #754：Windows 一键出包各步日志（seed.log 等）写在 build/ios/work 下，失败后随 build/ 删掉、诊断包里没有；期望拷进 <任务>-stages
+        logs = self.root / "logs"; self.c.logs = logs; self.c.task = "t1"
+        (self.output / "work").mkdir(); (self.output / "work" / "seed.log").write_text("OSError: [WinError 145] 原错误\n", encoding="utf-8")
+        library._keep_stage_logs(self.c, self.gid)
+        self.assertEqual((logs / "t1-stages" / "seed.log").read_text(encoding="utf-8"), "OSError: [WinError 145] 原错误\n")
+
     def seed_root(self, root):
         (root / "ctl").mkdir(parents=True); (root / "programs/1").mkdir(parents=True); (root / "romfs").mkdir(); (root / ".stage_pkg").mkdir()
         for name in ("main.npdm", "main.fixups.tsv", "main.gates.tsv", "main.patched.bin", "icon.jpg", "romfs.s2aidx", "build.log", ".root_src", "ctl/control.nacp",

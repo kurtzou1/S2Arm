@@ -102,7 +102,7 @@ class DebugGateTest(unittest.TestCase):
             return bridge.split('Java_org_s2arm_android_NativeBridge_' + name + '(')[1].split('extern "C"')[0]
         self.assertIn('if (!s2a_debug_entries_open()) return ENOTSUP;', body('configureDebugEnvironment'))
         self.assertIn('if (!s2a_debug_entries_open()) return EPERM;', body('configureDmaPreserveRead'))
-        for name, cond in [('configureInlineSmeContext', 'enabled'), ('configureBufferReadScratch', 'enabled'),
+        for name, cond in [('configureInlineSmeContext', '!enabled'), ('configureBufferReadScratch', 'enabled'),
                            ('configureSsboOobDiag', 'enabled'), ('configureProfileFreeze', 'enabled'),
                            ('configureReadonlyRangeCheck', '!enabled')]:
             self.assertIn(f'if ({cond} && !s2a_debug_entries_open()) return EPERM;', body(name), name)

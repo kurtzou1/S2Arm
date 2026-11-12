@@ -198,20 +198,23 @@ const char *s2a_launch_ctx_error(void) { return s2a_launch_ctx_get() ? NULL : g_
 int s2a_launch_ctx_container(void) { pthread_once(&g_once, decide); return g_container; }
 const char *s2a_launch_ctx_bundle_dir(void) { pthread_once(&g_once, decide); return g_bundle; }
 
+static int g_sel_kind;   // 上一次 s2a_launch_ctx_select 被拒的类别（S2A_SELECT_*）：库界面按它给玩家说人话，原文只进日志
+int s2a_launch_ctx_select_kind(void) { return g_sel_kind; }
 const char *s2a_launch_ctx_select(const char *gid) {
     static char why[700];
     pthread_once(&g_once, decide);
+    g_sel_kind = S2A_SELECT_OTHER;
     if (!g_container) return "不是多款容器（包根没有 s2a_catalogue.json 与 Games/，或设了 S2A_LAUNCH_CTX）：启动上下文已在构造期定好，不能再选游戏";
     pthread_mutex_lock(&g_sel_mu);
     const char *r = NULL;
     if (g_selected) { snprintf(why, sizeof why, "本进程已经选过游戏 %s，同一进程不再起第二款：请关掉 App 重新打开", g_ctx.game_id); r = why; goto out; }
     s2a_launch_ctx c; char w[600];
-    if (s2a_launch_ctx_resolve_game(&c, g_bundle, getenv("HOME"), gid, w, sizeof w)) { snprintf(why, sizeof why, "%s", w); r = why; goto out; }
+    if (s2a_launch_ctx_resolve_game(&c, g_bundle, getenv("HOME"), gid, w, sizeof w)) { snprintf(why, sizeof why, "%s", w); g_sel_kind = S2A_SELECT_APP_INCOMPLETE; r = why; goto out; }
     // 本款文档根第一次用时还不在（存档 / wire / 加载页标记各自只建最后一级）：逐级建好
     for (char *q = c.docs + 1; ; q++) {
         if (*q && *q != '/') continue;
         char k = *q; *q = 0; int bad = mkdir(c.docs, 0755) && errno != EEXIST; *q = k;
-        if (bad) { snprintf(why, sizeof why, "建不了游戏 %s 的文档根 %s（errno %d）", c.game_id, c.docs, errno); r = why; goto out; }
+        if (bad) { snprintf(why, sizeof why, "建不了游戏 %s 的文档根 %s（errno %d）", c.game_id, c.docs, errno); g_sel_kind = S2A_SELECT_STORAGE; r = why; goto out; }
         if (!k) break;
     }
     g_ctx = c;

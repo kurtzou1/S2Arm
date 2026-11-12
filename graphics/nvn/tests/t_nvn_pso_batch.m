@@ -35,7 +35,17 @@ int main(void) { @autoreleasepool {
     VERIFY(got == N, "② 只准命中归档地建管线 %d/%d", got, N);
     VERIFY(atomic_load(&g_par_written) - w0 == N && atomic_load(&g_par_write_failed) == f0, "③ 写成 +%llu（期望 70）、写失败 +%llu（期望 0）",
            (unsigned long long)(atomic_load(&g_par_written) - w0), (unsigned long long)(atomic_load(&g_par_write_failed) - f0));
+    // #756：写归档前留 .writing、写完删掉；进程死在写里则留下，下次起局判「不再写」
+    NSString *wflag = [g_par_dir stringByAppendingPathComponent:PAR_WRITING];
+    VERIFY(![NSFileManager.defaultManager fileExistsAtPath:wflag], "④ 写完不留 .writing 标记");
+    REQUIRE([@"batch-x" writeToFile:wflag atomically:NO encoding:NSUTF8StringEncoding error:nil]);   // 模拟上次死在写里
+    par_check_dead_write();
+    VERIFY(g_par_nowrite == 1, "⑤ 起局见到 .writing → 这个系统版本不再写");
+    pthread_mutex_lock(&g_par_mu); NSUInteger before = g_par_todo.count; pthread_mutex_unlock(&g_par_mu);
+    par_note(@"t-after-dead-write", descs[0]);
+    pthread_mutex_lock(&g_par_mu); NSUInteger after = g_par_todo.count; pthread_mutex_unlock(&g_par_mu);
+    VERIFY(after == before, "⑥ 不再写时 par_note 不进待写队列（%lu → %lu）", (unsigned long)before, (unsigned long)after);
     [NSFileManager.defaultManager removeItemAtPath:g_par_dir error:nil];
     if (failures) { printf("✗ t_nvn_pso_batch：%u 项里 %u 项不符\n", checks, failures); return 1; }
-    printf("✓ t_nvn_pso_batch：%u 项全过（70 条管线写成 3 个批文件，按键全部取回）\n", checks); return 0;
+    printf("✓ t_nvn_pso_batch：%u 项全过（70 条管线写成 3 个批文件，按键全部取回；死在写里的标记生效）\n", checks); return 0;
 } }

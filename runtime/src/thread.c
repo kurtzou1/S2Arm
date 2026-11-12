@@ -632,12 +632,26 @@ static qos_class_t other_qos(void) {
     else if (v && *v) LOG("【红】S2A_GUEST_QOS=%s 不认（只认 interactive / initiated / utility），按缺省", v);
     done = 1; return q;
 }
+// 核掩码只给 3 号核的游戏线程降 UTILITY：v0.3.1 起缺省关（S2A_SYSCORE_QOS=utility 才开旧行为）。
+//   11-12 一款 Switch 2 游戏 0400486024DEC000（M5 Max）：游戏把工作线程挪到 3 号核再挪回，宿主跟着在 USER_INTERACTIVE / UTILITY 之间切，
+//   UTILITY 那条被排到能效核、低优先级，等这组工作线程的游戏主逻辑被拖住，>100 ms 长帧全在宿主外、GPU 只忙四成。
+//   「3 号核 = Horizon 系统核」只是 Switch 1 的约定，Switch 2 不成立，Switch 1 游戏放在 3 号核的也常是要按帧做完的活。
+//   每次现读环境（不缓存）：线程起 / 改核掩码时才调，A/B 与单测同进程切换
+//   按性能核数分（11-12 手机 A/B：Duo 上同档后帧率、p99 持平、能耗约 +5%，没有 Mac 的改善）：性能核 ≥ 4（Mac、M 系列 iPad，同 S2A_QOS_GAME_OTHER 的判法）同档，
+//   不足 4 个（iPhone）维持 UTILITY——性能核少时多一条 USER_INTERACTIVE 线程只是多抢那两个性能核。S2A_SYSCORE_QOS=utility / same 强制旧 / 新行为（A/B 用）
+static int syscore_utility(void) {
+    const char *v = getenv("S2A_SYSCORE_QOS");
+    if (v && !strcmp(v, "utility")) return 1;
+    if (v && !strcmp(v, "same")) return 0;
+    return perf_cores() < 4;
+}
 static qos_class_t guest_qos(int main_thread, uint64_t mask) {
     if (main_thread) return main_qos();
-    if (mask == 1ull << 3) return s2a_qos(S2A_QOS_GAME_SYSCORE);
+    if (mask == 1ull << 3 && syscore_utility()) return s2a_qos(S2A_QOS_GAME_SYSCORE);
     if (other_qos() != QOS_CLASS_UNSPECIFIED) return other_qos();
     return s2a_qos(S2A_QOS_GAME_OTHER);   // 性能核 ≥ 4 USER_INTERACTIVE、< 4 USER_INITIATED（表内同一判法）
 }
+qos_class_t s2a_test_guest_qos(int main_thread, uint64_t mask) { return guest_qos(main_thread, mask); }   // 单测入口（t_thread.c）
 // 设 QoS 并读回核对：设不上（如 .NET 建的线程 EPERM）或读回不符就报红一次
 static void set_qos(qos_class_t want) {
     int rc = pthread_set_qos_class_self_np(want, 0); qos_class_t got = QOS_CLASS_UNSPECIFIED; int rp = 0;
@@ -933,7 +947,8 @@ uint32_t s2a_thread_main_init(void) {
 #if defined(__APPLE__)
     atomic_store(&g_join_verified, 0);
     atomic_fetch_add(&g_live_threads, 1);
-    LOG("线程调度档：性能核 %d 个 → 游戏主线程 %s，其余游戏线程 %s", perf_cores(), main_qos() == QOS_CLASS_USER_INTERACTIVE ? "USER_INTERACTIVE" : main_qos() == QOS_CLASS_USER_INITIATED ? "USER_INITIATED" : "UTILITY", guest_qos(0, 7) == QOS_CLASS_USER_INTERACTIVE ? "USER_INTERACTIVE" : guest_qos(0, 7) == QOS_CLASS_USER_INITIATED ? "USER_INITIATED（核掩码只含 3 号核的为 UTILITY）" : "UTILITY");
+    LOG("线程调度档：性能核 %d 个 → 游戏主线程 %s，其余游戏线程 %s", perf_cores(), main_qos() == QOS_CLASS_USER_INTERACTIVE ? "USER_INTERACTIVE" : main_qos() == QOS_CLASS_USER_INITIATED ? "USER_INITIATED" : "UTILITY", guest_qos(0, 7) == QOS_CLASS_USER_INTERACTIVE ? "USER_INTERACTIVE" : guest_qos(0, 7) == QOS_CLASS_USER_INITIATED ? "USER_INITIATED" : "UTILITY");
+    { const char *v = getenv("S2A_SYSCORE_QOS"); LOG("线程调度档：核掩码只含 3 号核的游戏线程 %s（%s）", syscore_utility() ? "UTILITY" : "与其余游戏线程同档", v && (!strcmp(v, "utility") || !strcmp(v, "same")) ? "S2A_SYSCORE_QOS 强制" : perf_cores() >= 4 ? "性能核 ≥ 4 缺省" : "性能核不足 4 个缺省"); }
 #endif
     return t->handle;
 }

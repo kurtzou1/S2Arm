@@ -36,7 +36,7 @@ def main():
     sources = [FAULT / "fault.c", FAULT / "trampoline.S", FAULT / "tests/fault_test.c",
                FAULT / "tests/register_probe.S", FAULT / "tests/guest_stack.S",
                NATIVE / "guest_signal.c", NATIVE / "redzone.S"]
-    inputs = sources + [FAULT / "fault.h", NATIVE / "guest_signal.h", Path(__file__).resolve()]
+    inputs = sources + [FAULT / "fault.h", FAULT / "sigframe_compat.h", NATIVE / "guest_signal.h", Path(__file__).resolve()]
     before = {str(p.relative_to(ROOT)): digest(p) for p in inputs}
     receipt = {"kind": "object-compile" if args.objects_only else "linux-aarch64-signal-fixture",
                "source_sha256": before, "host": platform.platform(), "commands": [],

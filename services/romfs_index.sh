@@ -12,8 +12,8 @@ _s2a_d=$(CDPATH= cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd) || _s2a_d=; whi
 HERE=$(cd "$(dirname "$0")" && pwd -P)
 DN=${DOTNET:-$(command -v dotnet || echo "$HOME/.dotnet/dotnet")}
 # 可选 --list <RomFS 清单>：出包期由 graphics/nvn/tools/romfs_list.py sizes 写的「字节数\t相对路径」，索引器不再自己枚举目录、逐个打开取长度
-[ $# -eq 1 ] || { [ $# -eq 3 ] && [ "$2" = --list ]; } || { [ $# -eq 5 ] && [ "$1" = --std ]; } \
-  || { echo "用法：romfs_index.sh <游戏数据根> [--list <RomFS 清单>] | --std <RomFS 目录> <清单或 -> <输出文件> <偏移>（IMG v1 的 RomFS 段，pack/img.py）" >&2; exit 2; }
+[ $# -eq 1 ] || { [ $# -eq 3 ] && [ "$2" = --list ]; } || { [ $# -ge 5 ] && [ $# -le 6 ] && [ "$1" = --std ]; } \
+  || { echo "用法：romfs_index.sh <游戏数据根> [--list <RomFS 清单>] | --std <RomFS 目录> <清单或 -> <输出文件> <偏移> [--consume]（IMG v1 的 RomFS 段，pack/img.py）" >&2; exit 2; }
 if [ -n "${S2A_PREBUILT_TOOLS:-}" ]; then
   exec timeout 600 "$DN" "$S2A_PREBUILT_TOOLS/romfs/romfs_index.dll" "$@"
 fi

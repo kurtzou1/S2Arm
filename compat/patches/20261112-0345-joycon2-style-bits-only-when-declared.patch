@@ -1,0 +1,61 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
+index 3bf5731084c2c2cdfbd442b1058dfd97fb315eda..4dd8ac2b8a363d18c34dba106d653a58df6e0e87 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
+@@ -55,7 +55,19 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+                 else _sixAxisSensors.Remove((userId, handle));
+             }
+         }
+-        internal ControllerType SupportedStyleSets { get; set; }
++        // 游戏声明收哪些样式（SetSupportedNpadStyleSet）。S2Arm：连着 Joy-Con 2 时，声明里 Joy-Con 2 位的有无一变就重配一遍，
++        //   让刚声明只收 Joy-Con 2 的游戏拿到 Joy-Con 2 位（样式值只在游戏声明了这几位时才带，见 Joycon2StyleFor）
++        internal ControllerType SupportedStyleSets
++        {
++            get => _supportedStyleSets;
++            set
++            {
++                bool before = ((uint)_supportedStyleSets & (uint)Joycon2Bits) != 0, after = ((uint)value & (uint)Joycon2Bits) != 0;
++                _supportedStyleSets = value;
++                if (Joycon2 && before != after) Remap();
++            }
++        }
++        private ControllerType _supportedStyleSets;
+ 
+         // S2Arm：Joy-Con 2 的样式位。随游戏 SDK 的手柄分派（读 GetNpadStyleSet）把 bit 12 / 13 / 14 当成 JoyDual / JoyLeft / JoyRight 一样读，
+         //   即 Joy-Con 2 的一对 / 左只 / 右只；只收 Joy-Con 2 的场景游戏只声明这几位（例：掌机 | bit 12），一代样式的手柄就被提示「请重新连接 Joy-Con 2」。
+@@ -79,6 +91,11 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+             _ => NpadStyleTag.None,
+         };
+ 
++        // 共享内存里样式值要带的 Joy-Con 2 位：只给声明了 Joy-Con 2 位的游戏。没声明的（Switch 1 游戏）样式值保持一代原样——
++        //   按整值比较样式的老游戏不会把 JoyDual 加一个它不认识的位当成别的手柄（合入时补，同真机：应用只看到自己声明过的样式）
++        internal NpadStyleTag Joycon2StyleFor(ControllerType type) =>
++            ((uint)SupportedStyleSets & (uint)Joycon2Bits) != 0 ? Joycon2Style(type) : NpadStyleTag.None;
++
+         // 游戏声明收不收这一样式：一代位，或（连着 Joy-Con 2 时）对应的 Joy-Con 2 位
+         public bool StyleSupported(ControllerType type, ControllerType supported) =>
+             (type & supported) != 0 || ((uint)Joycon2Style(type) & (uint)supported) != 0;
+@@ -318,7 +335,7 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+ 
+             ControllerType oldType = (ControllerType)Base(controller.StyleSet);
+ 
+-            if (oldType == type && (controller.StyleSet & Joycon2Bits) == Joycon2Style(type))
++            if (oldType == type && (controller.StyleSet & Joycon2Bits) == Joycon2StyleFor(type))
+             {
+                 return; // Already configured
+             }
+@@ -405,12 +422,12 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+ #pragma warning restore IDE0055
+             }
+ 
+-            controller.StyleSet |= Joycon2Style(type);   // S2Arm：连着 Joy-Con 2 时加上对应的 Joy-Con 2 位
++            controller.StyleSet |= Joycon2StyleFor(type);   // S2Arm：连着 Joy-Con 2、且游戏声明了 Joy-Con 2 位时加上对应的位
+ 
+             _styleSetUpdateEvents[(int)player].ReadableEvent.Signal();
+             _activeCount++;
+ 
+-            Logger.Info?.Print(LogClass.Hid, $"Connected Controller {type}{(Joycon2Style(type) != NpadStyleTag.None ? " (Joy-Con 2)" : "")} to {player}");
++            Logger.Info?.Print(LogClass.Hid, $"Connected Controller {type}{(Joycon2StyleFor(type) != NpadStyleTag.None ? " (Joy-Con 2)" : "")} to {player}");
+         }
+ 
+         private ref RingLifo<NpadCommonState> GetCommonStateLifo(ref NpadInternalState npad)

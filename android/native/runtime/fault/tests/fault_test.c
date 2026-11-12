@@ -2,6 +2,7 @@
 #include "../fault.h"
 #include "../../../guest_signal.h"
 #include <asm/sigcontext.h>
+#include "../sigframe_compat.h"
 #include <errno.h>
 #include <pthread.h>
 #include <signal.h>
@@ -35,6 +36,8 @@ static void check(int yes, const char *name) {
     checks++;
     if (!yes) { fprintf(stderr, "FAIL %s\n", name); exit(1); }
 }
+// guest_signal.c logs forwarded faults through the app red log; the fixture only needs the symbol.
+void s2a_android_redlog_write(const char *line, size_t n) { (void)line; (void)n; }
 void s2a_core_leave(void) { leave_count++; }
 void s2a_core_enter(void) { enter_count++; }
 int s2a_track_fault_guest(void *address, int write, uint64_t skip) {
@@ -113,10 +116,49 @@ static void add_inline_sme(ucontext_t *context) {
 static void inline_sme_cases(int enabled) {
     ucontext_t context; int write;
     make_context(&context); add_inline_sme(&context);
-    check(!s2a_android_fault_esr(&context, &write), "inline SME experiment defaults off");
+    // #573 / #736: SME-capable cores put TPIDR2 + header-only ZA in every signal frame; default must accept.
+    check(s2a_android_fault_esr(&context, &write) && write, "inline TPIDR2 and inactive ZA accepted by default");
+    check(s2a_android_fault_unsupported_record() == 0, "no unsupported record reported while accepted");
     check(s2a_android_fault_configure_inline_sme(2) == EINVAL, "invalid experiment value rejected");
-    check(!s2a_android_fault_configure_inline_sme(1), "enable before runtime thread initialization");
+    check(!s2a_android_fault_configure_inline_sme(0), "opt out before runtime thread initialization");
+    check(!s2a_android_fault_esr(&context, &write), "opted-out SME frame is not claimed");
+    check(s2a_android_fault_unsupported_record() == TPIDR2_MAGIC, "first unclaimable record is reported (TPIDR2)");
+    check(!s2a_android_fault_configure_inline_sme(1), "opt back in before runtime thread initialization");
     check(s2a_android_fault_esr(&context, &write) && write, "inline TPIDR2 and inactive ZA retain valid ESR");
+    {   // One frame the way an SME + FP8 + POE kernel builds it: FPSIMD, ESR, TPIDR2, header-only ZA, FPMR, POE.
+        // Hand expectation: every record is inline and fixed-size, so the ESR (data abort, WnR = 1) is found and the
+        // fault is claimable; with the opt-out (old default) the first SME record makes it unclaimable.
+        ucontext_t all; make_context(&all); add_inline_sme(&all);
+        struct za_context *za0 = (void *)(all.uc_mcontext.__reserved + sizeof(struct fpsimd_context)
+            + sizeof(struct esr_context) + sizeof(struct tpidr2_context));
+        struct fpmr_context *fm0 = (void *)(za0 + 1);
+        fm0->head.magic = FPMR_MAGIC; fm0->head.size = sizeof *fm0;
+        struct poe_context *po0 = (void *)(fm0 + 1);
+        po0->head.magic = POE_MAGIC; po0->head.size = sizeof *po0;
+        check(s2a_android_fault_esr(&all, &write) && write, "full SME/FPMR/POE frame claimable by default");
+        check(!s2a_android_fault_configure_inline_sme(0), "opt out to replay the old default");
+        check(!s2a_android_fault_esr(&all, &write), "old default refuses the same frame");
+        check(!s2a_android_fault_configure_inline_sme(1), "back to default");
+        za0->head.size = 32;
+        check(!s2a_android_fault_esr(&all, &write), "ZA with live matrix payload still refused");
+    }
+    {   // FPMR and POE: inline fixed-size snapshots newer kernels append; accepted and copied intact
+        ucontext_t more; make_context(&more);
+        struct fpmr_context *fm = (void *)(more.uc_mcontext.__reserved + sizeof(struct fpsimd_context) + sizeof(struct esr_context));
+        fm->head.magic = FPMR_MAGIC; fm->head.size = sizeof *fm; fm->fpmr = 0x55;
+        struct poe_context *po = (void *)(fm + 1);
+        po->head.magic = POE_MAGIC; po->head.size = sizeof *po; po->por_el0 = 0x77;
+        check(s2a_android_fault_esr(&more, &write) && write, "inline FPMR and POE retain valid ESR");
+        po->head.size = 32;
+        check(!s2a_android_fault_esr(&more, &write), "malformed POE size rejected");
+        // Streaming SVE live at the fault cannot be redirected into plain host code
+        make_context(&more);
+        struct sve_context *sv = (void *)(more.uc_mcontext.__reserved + sizeof(struct fpsimd_context) + sizeof(struct esr_context));
+        sv->head.magic = SVE_MAGIC; sv->head.size = sizeof *sv; sv->vl = 16; sv->flags = SVE_SIG_FLAG_SM;
+        check(!s2a_android_fault_esr(&more, &write), "streaming SVE frame refused");
+        sv->flags = 0;
+        check(s2a_android_fault_esr(&more, &write) && write, "non-streaming SVE header accepted");
+    }
     struct tpidr2_context *tp = (void *)(context.uc_mcontext.__reserved
         + sizeof(struct fpsimd_context) + sizeof(struct esr_context));
     struct za_context *za = (void *)(tp + 1);
@@ -176,7 +218,8 @@ static void guest_operations(void) {
     check(s2a_redzone_store((uint64_t *)page) == 0x3fff, "real guest redzone 112 bytes preserved");
 }
 int main(int argc, char **argv) {
-    int inline_sme = getenv("S2A_TEST_INLINE_SME") && !strcmp(getenv("S2A_TEST_INLINE_SME"), "1");
+    // Default ON (#573); S2A_TEST_INLINE_SME=0 exercises the debug opt-out path.
+    int inline_sme = !getenv("S2A_TEST_INLINE_SME") || strcmp(getenv("S2A_TEST_INLINE_SME"), "0");
     inline_sme_cases(inline_sme);
     (void)argv;
     pthread_key_t key;

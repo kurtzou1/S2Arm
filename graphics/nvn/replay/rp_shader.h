@@ -20,6 +20,10 @@ struct rp_shader_req {
     int rt_count;               // 当前颜色目标个数
     uint32_t rt_format[8];      // 各颜色目标的 NVN 格式（视图改了格式的取视图的）；0 = 空槽
 };
+// 当前绘制生效的图形阶段（bit = NVN 阶段 0..4）与各阶段的着色器键。核心按「程序实际有哪些阶段」
+// 窄化后的结果（同 iOS bind_stages：VS/FS 不能被关，GS/TCS/TES 程序没有就解绑）；着色器来源只消费这份结果。
+uint32_t rp_shader_graphics_stages(void);
+int rp_shader_stage_key(unsigned st, uint8_t key[8]);   // 1 = 该阶段已绑定且有键；0 = 没绑定 / 键缺失
 // 取当前回放状态（rp_S）下这笔绘制的程序。0 = 得到；1 = 还没好，跳过这笔；-1 = 取不到（已记账）。线程：[提交]。
 int rp_shader_resolve(const struct rp_shader_req *q, const struct rp_prog **out);
 // 取当前回放状态下计算阶段（NVN 阶段 5）绑着的程序。返回值同上。

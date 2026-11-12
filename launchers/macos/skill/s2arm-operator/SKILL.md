@@ -117,7 +117,7 @@ s2armctl state | errors [游戏号] | logs <任务号|游戏号> [--lines N]
 
 | 错误码 | 谁 | 怎么办 |
 |---|---|---|
-| `library_not_apfs` 游戏库所在磁盘格式不支持 | confirm | 游戏原件放哪块盘都行（S2Arm 原地只读、不复制）；导出时的工作数据（游戏库）要放在 APFS 格式的磁盘上（Mac 内置盘就是）：问玩家同意后，请他在「设置 → 游戏库与玩家数据」改用这台 Mac 上的默认位置，或选一块 APFS 外接盘（「磁盘工具」里另分一个 APFS 分区，盘上要有空闲空间、原有数据不动），然后 `s2armctl env`；游戏原件不用挪 |
+| `library_not_apfs` 游戏库所在磁盘格式不支持 | confirm | 游戏原件放哪块盘都行（S2Arm 原地只读、不复制）；导出时的工作数据（游戏库）要放在 APFS 或 exFAT 上（Mac 内置盘是 APFS）：问玩家同意后，请他在「设置 → 游戏库与玩家数据」改用默认位置或一块 APFS / exFAT 外接盘，然后 `s2armctl env`；游戏原件不用挪 |
 | `disk_full` | confirm | 磁盘不够：`state --json` 看各游戏 `bytes`，征得同意后 `delete <不要的游戏号>`，或请玩家清理磁盘；然后 `retry <任务号>`。磁盘预检偏保守时，玩家同意后可以 `build <游戏号> <平台> --space-override`（同界面「仍然继续」，真写满会停下报错） |
 | `stage_timeout` | ai | `logs` 看卡在哪；`retry <任务号>` 一次 |
 | `configuration_failed` / `shader_extract_failed` / `rewrite_failed` / `compilation_failed` | ai | 不是玩家的问题：`retry` 一次；还失败就 `s2armctl diag export ~/Desktop/S2Arm-诊断.zip` 导出诊断包、帮玩家反馈（见「反馈问题」） |
