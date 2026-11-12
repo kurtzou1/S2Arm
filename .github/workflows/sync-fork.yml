@@ -21,3 +21,4 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh api -X POST /repos/kurtzou1/S2Arm/merge-upstream -f branch=main
+# rev2: re-registered after enabling repository Actions
