@@ -20,8 +20,27 @@ static void *hold(void *a) {
 }
 static void timeout(int s) { (void)s; static const char m[] = "✗ t_energy：采样 30 秒没返回（线程表满后死循环）\n"; write(1, m, sizeof m - 1); _exit(1); }
 
+// GPU 忙 ms/s（#647）：分母是 GPU 时钟差、不是墙钟差。期望手写：0.2 秒墙钟里入账了 300 ms GPU 忙、GPU 时钟走了 500 ms（慢帧后补入账）→ 600 ms/s
+//   （按墙钟是 1500，超过一条 GPU 时间线的物理上限）；没有直连层 / 时钟读不到 = -1；这段没有帧入账 = 0
+static int busy_rate_cases(void) {
+    struct { s2a_esnap a, b; double want; const char *what; } c[] = {
+        { { .wall = 0, .ok_g = 1, .gpu_ms = 100, .gpu_clk_ms = 1000 }, { .wall = 200000000, .ok_g = 1, .gpu_ms = 400, .gpu_clk_ms = 1500 }, 600, "慢帧后补入账" },
+        { { .wall = 0, .ok_g = 0 }, { .wall = 500000000, .ok_g = 0 }, -1, "没有直连层" },
+        { { .wall = 0, .ok_g = 1, .gpu_ms = 5, .gpu_clk_ms = -1 }, { .wall = 500000000, .ok_g = 1, .gpu_ms = 9, .gpu_clk_ms = -1 }, -1, "时钟读不到" },
+        { { .wall = 0, .ok_g = 1, .gpu_ms = 70, .gpu_clk_ms = 900 }, { .wall = 500000000, .ok_g = 1, .gpu_ms = 70, .gpu_clk_ms = 900 }, 0, "这段没有帧入账" },
+    };
+    int bad = 0;
+    for (unsigned i = 0; i < sizeof c / sizeof c[0]; i++) {
+        double got = s2a_gpu_busy_rate(&c[i].a, &c[i].b);
+        if (got != c[i].want) { printf("✗ t_energy：GPU 忙（%s）期望 %.1f，实得 %.1f\n", c[i].what, c[i].want, got); bad++; }
+    }
+    return bad;
+}
+
 int main(void) {
     signal(SIGALRM, timeout); alarm(30);
+    int bad = busy_rate_cases();
+    printf("%s t_energy：GPU 忙按 GPU 时钟算 4 例，错 %d 例\n", bad ? "✗" : "✓", bad);
     enum { ROUNDS = 5, PER = 300 };
     char line[2048]; int ok = 0;
     for (int r = 0; r < ROUNDS; r++) {
@@ -33,5 +52,5 @@ int main(void) {
         for (int i = 0; i < PER; i++) pthread_join(th[i], NULL);
     }
     printf("%s t_energy：%d 轮、经过 %d 个不同线程号，采样返回并写出 %d / %d 次（期望 %d）\n", ok == ROUNDS ? "✓" : "✗", ROUNDS, ROUNDS * PER, ok, ROUNDS, ROUNDS);
-    return ok == ROUNDS ? 0 : 1;
+    return ok == ROUNDS && !bad ? 0 : 1;
 }

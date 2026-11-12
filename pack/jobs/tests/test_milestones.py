@@ -29,7 +29,8 @@ class Estimates(unittest.TestCase):
 
     def test_plans_per_kind(self):
         # 只有直连（11-07 拆兼容模式 build / ipa 两种只出通用的计划）：打 iPhone 包 / Mac 打包各一种
-        self.assertEqual(set(ms.PLANS), {"ipa_dual", "build_dual"})
+        self.assertEqual(set(ms.PLANS), {"ipa_dual", "build_dual", "ipa_downstream"})
+        self.assertEqual(ms.PLANS["ipa_downstream"], ["unpack", "ipa"])   # 下游深度方案：共用解包 → 下游做包工具（pack/jobs/downstream.py）
         # 出包不再整份重算原件校验（11-07 维护者：玩家导入之后不会换原件，导入时算过一次 sha256）：任何计划里都没有 verify 段
         for kind, plan in ms.PLANS.items(): self.assertNotIn("verify", plan, kind)
 

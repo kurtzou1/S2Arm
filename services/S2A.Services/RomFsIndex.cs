@@ -5,6 +5,7 @@ using LibHac.Fs.Fsa;
 using LibHac.Tools.FsSystem;
 using LibHac.Tools.FsSystem.RomFs;
 using System;
+using System.Threading;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
@@ -227,7 +228,12 @@ namespace S2A.Services
             return total;
         }
 
-        /// <summary>WriteStandard consume 用：读到文件末尾就关句柄、去掉只读属性、删掉（长度 0 的文件不会被读到，留着，几乎不占空间）</summary>
+        /// <summary>consume 时删不掉的文件数与第一个的原因（#793 / #796：游戏库在 Xbox App 管的文件夹等删不了文件的地方，删除异常从读取里抛出、整段写失败）</summary>
+        public static int ConsumeSkipped;
+        public static string ConsumeFirstError;
+
+        /// <summary>WriteStandard consume 用：读到文件末尾就关句柄、去掉只读属性、删掉（长度 0 的文件不会被读到，留着，几乎不占空间）。
+        /// 删只是提前腾空间（出包收尾本来就清）：删不掉就留着、记一笔，照常写完，不让优化把出包弄失败</summary>
         private sealed class ConsumingFile : IFile
         {
             private readonly LazyHostFile _inner;
@@ -249,8 +255,15 @@ namespace S2A.Services
                 {
                     _gone = true;
                     _inner.Release();
-                    File.SetAttributes(_path, FileAttributes.Normal);
-                    File.Delete(_path);
+                    try
+                    {
+                        File.SetAttributes(_path, FileAttributes.Normal);
+                        File.Delete(_path);
+                    }
+                    catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+                    {
+                        if (Interlocked.Increment(ref ConsumeSkipped) == 1) ConsumeFirstError = $"{_path}：{e.GetType().Name}：{e.Message}";
+                    }
                 }
 
                 return rc;

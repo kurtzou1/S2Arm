@@ -145,6 +145,9 @@ public final class S2ArmLauncherModel: ObservableObject {
     @Published var session: JobSession?   // 批量出包时编排作业一步换一款，+Batch.swift batchStepStarted 换会话
     /// 出包页开着的那一款（nil = 游戏库）。
     @Published var exportFor: String?
+    /// 下游深度方案确认页（DownstreamConfirmSheet）：导出 iPhone 前弹，选完记下（downstreamChoice 作业）再接着导出这一单
+    @Published var downstreamPromptFor: String?
+    var downstreamPending: (platforms: [ExportPlatform]?, deviceTarget: [String: Any]?, spaceOverride: Bool, location: String?)?
     /// 存放位置（游戏库结构 v3）：出包页下拉框的各项、上次用的位置号
     @Published var locations: [StorageLocation] = []
     @Published var lastLocation = ""
@@ -636,6 +639,12 @@ public final class S2ArmLauncherModel: ObservableObject {
     @discardableResult
     func export(_ game: GameSummary, platforms chosen: [ExportPlatform]? = nil, deviceTarget: [String: Any]? = nil, spaceOverride: Bool = false, location: String? = nil) -> ExportBlocker? {
         if let blocker = exportBlocker(game, platforms: chosen), blocker.stopsStart { return blocker }
+        // 这款有下游深度方案、玩家还没选过、这次要出 iPhone：先问一次（选完 chooseDownstream 接着导出）。选过就照选的走，作业层按记下的选择分流
+        if game.downstream != nil, game.downstream?.choice == nil, (chosen ?? exportTargets).contains(.ios) {
+            downstreamPending = (chosen, deviceTarget, spaceOverride, location)
+            downstreamPromptFor = game.id
+            return nil
+        }
         let item = QueuedExport(game: game, platforms: chosen ?? exportTargets, target: deviceTarget ?? currentDeviceTarget, spaceOverride: spaceOverride, location: location)
         exportFor = nil
         welcomeGameID = nil
@@ -647,6 +656,21 @@ public final class S2ArmLauncherModel: ObservableObject {
         sessionHidden = false
         runExport(item)
         return nil
+    }
+
+    /// 确认页选完：记下选择（scheme = 方案 id；"" = 仍用原版），读库后接着导出刚才那一单
+    func chooseDownstream(_ gameID: String, scheme: String) {
+        downstreamPromptFor = nil
+        let pending = downstreamPending; downstreamPending = nil
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do { try await self.provider.setDownstreamChoice(gameId: gameID, scheme: scheme, events: .discard) }
+            catch { self.failAction(error.localizedDescription, game: gameID); return }
+            self.refresh { [weak self] in
+                guard let self, let p = pending, let g = self.games.first(where: { $0.id == gameID }) else { return }
+                _ = self.export(g, platforms: p.platforms, deviceTarget: p.deviceTarget, spaceOverride: p.spaceOverride, location: p.location)
+            }
+        }
     }
 
     /// 空闲时接着做排着的事（启动器剃刀 M2）：先装批量出完的款，再出批次进行中单独点的款。批次结束、装机结束都从这里走，

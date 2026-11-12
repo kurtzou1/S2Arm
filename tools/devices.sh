@@ -10,7 +10,9 @@
 #   SW_DEVLOCK_DIR / SW_DEVLOCK_QUEUE / SW_DEVBATTERY_LOCKS / DEVBATTERY_DIR（该机的锁与电量闸目录）。
 # 锁目录沿用旧库 / 研究员正在用的那两把（10-19 核过 维护方工具），新旧工具同时上机也互斥：
 #   测试设备1 在本机：~/sw-work/run/ios/device.lock；测试设备2 在 gate-host：~/.s2arm/run/devq2/device2.lock。
-# 选机前核 USB：电量闸只能走 USB 读，手机不在本机 USB 上 = 选错机器（测试设备2 只在 gate-host 上跑），直接报红。S2A_DEVICE_NO_USB_CHECK=1 跳过（单测用）。
+# 选机前核 devicectl 看得到（11-12 维护者：测试设备2 只走局域网（devicectl：connected / localNetwork），idevice_id -l 看不到它，原先「必须在本机 USB 上」让它永远挑不中）：
+#   USB 或局域网都算，devicectl list devices 里这台是 available / connected 即可；电量闸读不到电量时只记一行、照跑（tools/devbattery.sh）。S2A_DEVICE_NO_USB_CHECK=1 跳过（单测用）；
+#   S2A_DEVICECTL_LIST=<命令> 换掉 devicectl 列表（单测用）
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/machine.sh"
 _S2A_DEV_CODE_PHONE=00000000-0000000000000000
 _S2A_DEV_CODE_LIST="1|测试设备1|00000000-0000000000000001|00000000-0000-0000-0000-000000000001|$HOME/sw-work/run/ios/device.lock|$HOME/sw-work/run/ios|iphone
@@ -50,18 +52,24 @@ s2a_device_load() {
 # 选机：s2a_device_pick <any|iphone|duo> [包名] → 打出机号。候选 = 该类里在本机 USB 上的（单测 S2A_DEVICE_NO_USB_CHECK=1 不核）、调度没暂停的（sched/pause/<机号>）；
 #   按（负载，没装这款容器，机号）取最小；同包名的容器记录 = 调度的现装登记 <调度目录>/installed/<机号>_<包名>（记忆 place-game-on-device-with-container-1102）。
 #   选中即在 <锁>.claim/ 记一个占位（调用方 pid），取锁排号时 维护方工具 清掉；两家同时选不会挤到同一台（选机整段在 ~/.s2arm/devpick 互斥里）
+_s2a_dc_list() {   # devicectl 看得到的设备列表（一行一台，原文）；本机没 timeout 时直接跑
+  if [ -n "${S2A_DEVICECTL_LIST:-}" ]; then bash -c "$S2A_DEVICECTL_LIST" 2> /dev/null; return; fi
+  local tb; tb=$(command -v timeout || command -v gtimeout)
+  ${tb:+$tb 30} xcrun devicectl list devices 2> /dev/null; }
+_s2a_dc_seen() { printf '%s\n' "$1" | grep -F -- "$2" | grep -qE 'available|connected'; }   # <列表> <UDID>
 s2a_device_pick() {
   local spec=${1:-any} b=${2:-} sd=${S2A_SCHED_DIR:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/sched} n best= bk= k ld u p mx=${S2A_DEVICE_PICK_LOCK:-$HOME/.s2arm/devpick} i L
   [ -n "${S2A_TEST_ROOT:-}" ] && mx=$S2A_TEST_ROOT/devpick
   mkdir -p "${mx%/*}"; for i in $(seq 100); do mkdir "$mx" 2> /dev/null && break; p=$(cat "$mx/pid" 2> /dev/null); [ -n "$p" ] && ! kill -0 "$p" 2> /dev/null && rm -rf "$mx"; sleep 0.1; done; echo $$ > "$mx/pid" 2> /dev/null
+  local dcl=; [ "${S2A_DEVICE_NO_USB_CHECK:-0}" != 1 ] && dcl=$(_s2a_dc_list)
   for n in $(s2a_device_ids "$spec"); do
     [ -f "$sd/pause/$n" ] && continue
-    if [ "${S2A_DEVICE_NO_USB_CHECK:-0}" != 1 ]; then u=$(s2a_device_field "$n" udid); idevice_id -l 2> /dev/null | grep -qx "$u" || continue; fi
+    if [ "${S2A_DEVICE_NO_USB_CHECK:-0}" != 1 ]; then u=$(s2a_device_field "$n" udid); _s2a_dc_seen "$dcl" "$u" || continue; fi
     ld=$(s2a_device_load "$n"); k=$(printf '%04d%d%02d' "$ld" "$([ -n "$b" ] && [ -f "$sd/installed/${n}_$b" ] && echo 0 || echo 1)" "$n")
     { [ -z "$bk" ] || [ "$k" \< "$bk" ]; } && { bk=$k; best=$n; }
   done
   if [ -n "$best" ]; then L=$(s2a_device_field "$best" lock); mkdir -p "${L%.lock}.claim"; : > "${L%.lock}.claim/$$_$(date +%s)"; fi
-  rm -rf "$mx"; [ -n "$best" ] || { echo "【红】没有可用的 ${spec} 测试设备（都不在本机 USB 上或调度暂停中）" >&2; return 1; }
+  rm -rf "$mx"; [ -n "$best" ] || { echo "【红】没有可用的 ${spec} 测试设备（都不在 devicectl 列表里（USB / 局域网都没连上）或调度暂停中）" >&2; return 1; }
   echo "$best"; }
 s2a_device() {
   local want=${1:?s2a_device <1|2|3|any|iphone|duo|UDID|CoreDevice 标识>} line n name udid cd lock bdir cls
@@ -70,8 +78,7 @@ s2a_device() {
   while IFS='|' read -r n name udid cd lock bdir cls; do
     [ "$want" = "$n" ] || [ "$want" = "$name" ] || [ "$want" = "$udid" ] || [ "$want" = "$cd" ] || continue
     if [ "${S2A_DEVICE_NO_USB_CHECK:-0}" != 1 ]; then
-      command -v idevice_id > /dev/null || { echo "【红】本机缺 idevice_id（brew install libimobiledevice），核不了 $name 在不在本机 USB" >&2; return 3; }
-      idevice_id -l 2>/dev/null | grep -qx "$udid" || { echo "【红】${name}（${udid}）不在本机 USB 上：到它插着的那台机器上跑（测试设备1 在本机；测试设备2 10-20 晚起改插本机，也可能还在 gate-host）" >&2; return 1; }
+      _s2a_dc_seen "$(_s2a_dc_list)" "$udid" || { echo "【红】${name}（${udid}）devicectl 看不到（USB 和局域网都没连上），换一台或先把它连上" >&2; return 1; }
     fi
     [ -n "${S2A_TEST_ROOT:-}" ] && { lock=$S2A_TEST_ROOT/$(basename "$lock"); bdir=$S2A_TEST_ROOT/battery; }   # 单测：锁与电量目录落临时目录，不碰真锁
     mkdir -p "${lock%/*}" 2> /dev/null

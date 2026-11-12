@@ -22,6 +22,7 @@ final class WorkerOutput: @unchecked Sendable {
 @MainActor final class Store: ObservableObject {
     @Published var preferences = Preferences()
     @Published var games: [Game] = []
+    @Published var downstreamPrompt: Game?   // 下游深度方案确认页（DownstreamView.swift）：导出前弹，选完记下再接着导出
     @Published var tasks: [TaskRecord] = []
     @Published var checks: [ToolCheck] = []
     @Published var platformChecks: [String:[ToolCheck]] = [:]
@@ -970,7 +971,7 @@ final class WorkerOutput: @unchecked Sendable {
     // 装到 iPhone（10-26 维护者 定：Xcode 做主路、AltStore 备选）：用玩家在 Xcode 登录的 Apple ID 重签自签 IPA、数据线装上、拷资源包并逐文件核对（pack/jobs/install.py）
     func installToPhone(_ game: Game) {
         selection = "tasks"
-        executionTask = worker("install",extra:["gameId":game.id]) { r in
+        executionTask = worker("install",extra:["gameId":game.id].merging(downstreamScheme(game).map { ["scheme":$0] } ?? [:]) { a, _ in a }) { r in
             let device = (r["device"] as? String).map { "「\($0)」" } ?? ""   // 设备名夹在句中：按片段先翻译再拼（提示显示时 L() 整句查不到）
             // 资源传完但没拉起 App 解开（作业结果 unpackPending，11-09 #336）：不说「已装到 iPhone」，说还差的一步和原因 / 办法（后端原话）
             let done = (r["unpackPending"] as? String) ?? L("已装到 iPhone") + device + Store.packPushedClause(r["packFiles"] as? Int) + L("。打开游戏：第一次会先导入游戏资源（几分钟），保持在前台、别锁屏，导入完会自动进入游戏。免费 Apple ID 签的 App 7 天过期，到时连上再点一次「装到 iPhone」。")
@@ -980,6 +981,7 @@ final class WorkerOutput: @unchecked Sendable {
     /// 出 iPhone 包的请求：目标设备可有可无（有才带 target）
     func ipaRequest(_ game: Game, target: IPhoneTarget?, spaceOverride: Bool = false) -> [String:Any] {
         var r: [String:Any] = ["gameId":game.id]
+        if let s = downstreamScheme(game) { r["scheme"] = s }   // 玩家在确认页选了下游深度方案
         if spaceOverride { r["spaceOverride"] = true }   // 空间预检拦下后玩家点了「仍然继续」
         if let t = target { r["target"] = t.request }
         return r

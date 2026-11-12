@@ -31,9 +31,10 @@ def main():
     for name in ('vulkan', 'vk_video'):
         if (sysinc/name).exists() and not (include/name).exists():
             (include/name).symlink_to(sysinc/name)
-    inc = (include, native, native/'nvn', native/'direct', gfx, gfx/'replay', gfx/'gfx/nvn',
+    inc = (include, ROOT/'runtime/include', native, native/'nvn', native/'direct', gfx, gfx/'replay', gfx/'gfx/nvn',
            gfx/'gfx/nvn/include', ROOT/'android/tests/vkhost')
     libs = [gfx/'replay/nvn_unimpl.c', gfx/'replay/rp_state.c', native/'nvn/nvn_vk_compute_request.c']
+    libs += [ROOT/'runtime/src/direct_host.c']
     libs += [native/'direct'/f for f in ('source_store.c', 'control.c', 'input_identity.c',
                                         'texture_facts.c', 'sha256.c', 'json.c', 'compile_request.c')]
     strip = '-Wl,-dead_strip' if sys.platform == 'darwin' else '-Wl,--gc-sections'
@@ -61,6 +62,17 @@ def main():
              'id.texture_array_length = 1;', 1, 'rebind changes request and identity'),
             ('drop-debug-log', 'nvn_plat_flag("nvk_texpool_log", 0)',
              '(0 && nvn_plat_flag("nvk_texpool_log", 0))', 1, 'debug one line records first bound value'),
+            ('wrong-array-red', 'nvn_unimpl("shader", "texture_pool_array_unsupported", NULL);',
+             'nvn_unimpl("shader", "texture_pool_array_wrong", NULL);', 1,
+             'reports the dedicated unimplemented'),
+            ('drop-final-summary', 's2a_direct_summary_register(pool_final_summary);',
+             '(void)pool_final_summary;', 1, 'normal process-exit callback emits final stats'),
+            ('timeout-is-not-final', 'if (normal && (g_pool_programs || g_pool_request_rejected)) pool_stats("final");',
+             'if (g_pool_programs || g_pool_request_rejected) pool_stats("final");', 1, 'timeout summary is never labelled final'),
+            ('flatten-missing-fact', 'else if (!strcmp(code, "MISSING_FACT")) {',
+             'else if (0 && !strcmp(code, "MISSING_FACT")) {', 1, 'compiler reason counted accurately'),
+            ('drop-request-count', 'g_pool_request_rejected++;',
+             '(void)g_pool_request_rejected;', 1, 'request failure is counted separately'),
         ]
         for name, before, after, count, expected in changes:
             assert text.count(before) == count, (name, 'mutation anchor')
@@ -69,7 +81,7 @@ def main():
             result = run(name, path)
             assert result.returncode != 0 and expected in result.stderr, (name, result.stdout, result.stderr)
             print(f'{name}: expected assertion failure: {expected}', flush=True)
-        print('PASS: 5 negative controls')
+        print('PASS: 10 negative controls')
         return 0
     if sys.argv[1:]:
         raise ValueError('usage: nvk_shader_pool_test.py [--withdraw]')

@@ -117,7 +117,7 @@ public sealed partial class EnvironmentWindow
     private Control InstallModeLine()
     {
         EnsureInstallMode();
-        if (devCert is null && !devCertLoading) _ = RefreshDevCertAsync();
+        if (devCert is null) EnsureDevCert();
         var devcertOn = devCert is { } st && Flag(st, "active");
         var summary = installMode == "export" ? T("install.mode.export")
             : T("install.mode.device") + "（" + T(devcertOn ? "export.sign.devcert" : "export.sign.appleId") + "）";

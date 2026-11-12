@@ -86,6 +86,14 @@ Mac 和 Windows 启动器都开放了控制接口 `s2armctl`：AI 助手可以�
 
 [证据](docs/validation/证据.md#平台与系统)
 
+## 下游深度方案
+
+有的游戏有社区专门做的深度移植。S2Arm 认得出这些游戏：导出时弹一页说明，你可以改用下游项目的方案（导入、出包、装机仍在 S2Arm 里点按钮完成，底层换成下游项目的实现），也可以照常用原版方案。登记表在 [`pack/downstream/schemes.json`](pack/downstream/schemes.json)，两边的约定以下游项目的说明为准。
+
+| 方案 | 项目 | 终端 | 约定 |
+|---|---|---|---|
+| D2R-Mobile | [jhaizhou-ops/d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile) | iPhone / iPad（iOS 26 起；安卓、鸿蒙接入中） | [docs/S2ARM.zh-CN.md](https://github.com/jhaizhou-ops/d2r-mobile/blob/main/docs/S2ARM.zh-CN.md) |
+
 ## 开始使用
 
 1. 从[下载页](https://jhaizhou-ops.github.io/S2Arm/)下载 Mac 或 Windows 启动器，打开即用。在 Mac 上出 iPhone 包需要 App Store 免费的 Xcode，并在里面登录你的 Apple ID，启动器会一步步带你完成。

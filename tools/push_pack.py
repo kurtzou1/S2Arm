@@ -62,6 +62,27 @@ IMG = re.compile(r"(^|.*/)romfs\.img$|game\.img")   # 单文件镜像（旧形�
 #   CoreDeviceService 内存（#641 实测 12.2 GiB 的资源包：服务涨到约 20 GB、整机换页 10 GB 并卡死，下一次流式写在 0 字节就失败）。
 #   批次 tar（≤1 GB）照旧可以退回
 DC_FALLBACK_MAX = 2 << 30
+
+
+def push_reason(text):
+    """推送失败的原文 → 玩家一眼看得懂的一类（摘要第一条要能看出是哪种，11-12 v0.3.1 Mac 玩家「romfs.img 没传完」看不出原因）：
+    USB 看不到手机 / 手机锁屏 / 连接断了；认不出就空串（照原文报）。按 s2a-devpush 与 devicectl 的报错特征认，不看英文全文"""
+    t = str(text or "")
+    if "找不到设备" in t or "No device" in t or "usbmuxd" in t.lower() and "connect" in t.lower(): return "USB 看不到手机（没插数据线，或手机只在无线连接上）"
+    if "锁屏" in t or "locked" in t.lower() or "passcode" in t.lower(): return "手机锁屏了"
+    if "没有任何进展" in t or "socket io failed" in t or "Broken pipe" in t or "Connection reset" in t or "disconnected" in t.lower(): return "和手机的连接断了（数据线松了 / Wi-Fi 断开）"
+    return ""
+
+
+def avail_mem():
+    """本机现在能腾出来的内存（字节）：Mac 读 vm_stat（空闲 + 不活跃 + 可回收），读不到 0"""
+    try:
+        out = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    page = int(re.search(r"page size of (\d+)", out).group(1)) if re.search(r"page size of (\d+)", out) else 16384
+    n = sum(int(m) for k in ("Pages free", "Pages inactive", "Pages speculative") for m in re.findall(rf"{k}:\s+(\d+)", out))
+    return n * page
 IMG_PAGE = 16384   # 单一 IMG 的页（pack/img.py PAGE）：第 0 页是头，续传按页向下取整接着写
 IMG_PACK_ID = slice(32, 96)   # 头里的资源包号（ASCII，可空）：空 = 认不出是不是同一份，不续传
 DOCS = "Documents"   # 设备侧文档根（单款 App）；多款容器每款 Documents/games/<游戏号>（pack/ship_ext.py 容器布局），设备对象的 docs 属性
@@ -258,10 +279,12 @@ class Devicectl:
             try:
                 return self.dp.put(src, rel)
             except Fail as e:
-                size, cap = Path(src).stat().st_size, int((self.env or os.environ).get("S2A_DC_FALLBACK_MAX") or DC_FALLBACK_MAX)
+                # devicectl 会把整个文件读进系统设备服务的内存（#641）：本机可用内存的一半装得下才交给它（至少放行 S2A_DC_FALLBACK_MAX / 2 GiB）
+                size, mem = Path(src).stat().st_size, avail_mem()
+                cap = max(int((self.env or os.environ).get("S2A_DC_FALLBACK_MAX") or DC_FALLBACK_MAX), mem // 2)
                 if size > cap:
-                    raise Fail(f"流式写 {Path(rel).name} 中断（{str(e)[-160:]}）。这份有 {size / 2**30:.1f} GB，不改走 devicectl（它会把整个文件读进内存、"
-                               "拖垮系统的设备服务）：换一根数据线或换个接口、手机保持解锁，再装一次") from None
+                    raise Fail(f"流式写 {Path(rel).name} 中断（{str(e)[-160:]}）。这份有 {size / 2**30:.1f} GB，本机可用内存 {mem / 2**30:.1f} GB，"
+                               "交给 devicectl 会把整份读进内存、拖垮系统的设备服务，不改走 devicectl") from None
                 self.say(f"流式写 {Path(rel).name} 没成（{str(e)[-160:]}），改走 devicectl")
         self.put(src, rel)
 
@@ -545,6 +568,7 @@ def _send(dev, pack, work, say=print, progress=None):
         try: dev.put(e, f"{rp(dev)}/.applied")
         finally: e.unlink(missing_ok=True)
     for w in direct:
+      for attempt in (1, 2):   # 直写失败先原地再试一次（线缆抖一下、隧道重连）：game.img 接着已传的续传，旧形态从头写；两次都不成才停
         t1 = time.time(); size, rel = int(w[1]), f"{rp(dev)}/{w[0]}"
         off = resume_offset(dev, pack / w[0], rel, size)
         try:
@@ -564,13 +588,22 @@ def _send(dev, pack, work, say=print, progress=None):
                     raise Fail(f"传完后机上 {w[0]} 长度 {got} 字节，应为 {size} 字节")
         except Fail as e:
             if dev.nospc(): raise Fail(f"测试设备空间不足（推 {w[0]} 时 POSIX 28）")
+            if attempt == 1:
+                say(f"【黄】传 {w[0]} 中断（{str(e)[-200:]}），原地再试一次"); done -= off; continue
+            why = push_reason(e)
             again = "接着已传的部分续传" if w[0] == "game.img" else "从头重传"
             say(f"【红】传 {w[0]} 中断（{e}）；机上这份不完整，不会被当成可用，重新装机会{again}")
-            raise Fail(f"资源传输中断：{w[0]} 没传完，重新装到 iPhone 会{again}")
-        done += size - off; nt += 1; ledger += f"{w[0]}\t{w[2]}\n"; led.write_text(ledger, encoding="utf-8"); dev.put(led, f"{rp(dev)}/.pushed")
-        say(f"  直写 {w[0]}：{int(w[1]) / 1e9:.2f} GB，{time.time() - t1:.0f} 秒，{int(w[1]) / 1e6 / max(time.time() - t1, 1e-3):.1f} MB/s")
-        step += 1
-        if progress: progress(done, total, step, steps)
+            # 旧形态 romfs.img 没有 IMG 头，续传不了（resume_offset）；就地转 game.img 要原始 romfs（产物根），沿用的旧包一般已没有：说清新版能续传、怎么换。
+            #   句式在启动器中英对照表（launchers/macos/adapter/.../Localizable.json）里有登记，改字要两边一起改
+            reason = why or str(e)[-160:]
+            if w[0] == "game.img":
+                raise Fail(f"资源传输中断（{reason}）：{w[0]} 没传完，重新装到 iPhone 会接着已传的部分续传")
+            raise Fail(f"资源传输中断（{reason}）：{w[0]} 没传完。这款是旧版本出的包，断了只能从头传。新版已支持单一文件包和断点续传：在启动器里重新出一次这款的包，以后断了能接着传。")
+        break
+      done += size - off; nt += 1; ledger += f"{w[0]}\t{w[2]}\n"; led.write_text(ledger, encoding="utf-8"); dev.put(led, f"{rp(dev)}/.pushed")
+      say(f"  直写 {w[0]}：{int(w[1]) / 1e9:.2f} GB，{time.time() - t1:.0f} 秒，{int(w[1]) / 1e6 / max(time.time() - t1, 1e-3):.1f} MB/s")
+      step += 1
+      if progress: progress(done, total, step, steps)
     for k, b in enumerate(batches):
         lst = work / "push.lst"; lst.write_text("".join(w[0] + "\n" for w in b), encoding="utf-8")
         tn = f"{ts}_{k:03d}.tar"

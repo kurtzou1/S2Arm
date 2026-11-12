@@ -151,7 +151,7 @@ namespace S2A.DirectCompiler
     public sealed class DirectProgram
     {
         public readonly string Kind;
-        public readonly DirectStage[] Stages;   // graphics: vs, fs in that order; compute: cs
+        public readonly DirectStage[] Stages;   // graphics: NVN 槽顺序；compute: cs
         public readonly DirectGraphicsFacts Graphics;
         public readonly DirectComputeFacts Compute;
         public readonly DirectTextureFact[] Textures;
@@ -170,7 +170,7 @@ namespace S2A.DirectCompiler
 
         public DirectStage StageOf(string stage) => Stages.FirstOrDefault(s => s.Stage == stage);
 
-        public static DirectProgram Parse(JsonElement e, string where, DirectProfile profile)
+        public static DirectProgram Parse(JsonElement e, string where, DirectProfile profile, int requestVersion = 1)
         {
             JsonStrict.OnlyKeys(e, where, "kind", "stages", "graphicsState", "computeState", "textures",
                 "samplerArrayLength", "textureArrayLength", "textureBufferLengths", "transformFeedbackEnabled");
@@ -180,15 +180,22 @@ namespace S2A.DirectCompiler
             JsonElement stagesJson = JsonStrict.Array(e, "stages", where);
             if (stagesJson.GetArrayLength() < 1 || stagesJson.GetArrayLength() > 6)
                 throw new DirectCompileException("RESOURCE_LIMIT", where + ".stages must have 1..6 entries");
+            if (requestVersion == 2 && (kind != "graphics" || stagesJson.GetArrayLength() != 5))
+                throw new DirectCompileException("INVALID_JSON", where + ".stages v2 requires five graphics slots");
             var stages = new List<DirectStage>();
             long snapshotBytes = 0;
+            int slotIndex = 0;
             foreach (JsonElement stageJson in stagesJson.EnumerateArray())
             {
-                string sw = where + ".stages[" + stages.Count + "]";
+                int stageSlot = slotIndex++;
+                string sw = where + ".stages[" + stageSlot + "]";
+                if (requestVersion == 2 && stageJson.ValueKind == JsonValueKind.Null) continue;
                 JsonStrict.OnlyKeys(stageJson, sw, "stage", "code", "control", "c1", "constantBufferUse");
                 string stage = JsonStrict.String(stageJson, "stage", sw, 3);
-                if (stage != "vs" && stage != "fs" && stage != "cs")
+                if (stage != "vs" && stage != "fs" && stage != "cs" && !(requestVersion == 2 && stage == "gs"))
                     throw new DirectCompileException("UNSUPPORTED_PROGRAM", sw + ".stage " + stage + " is not implemented");
+                if (requestVersion == 2 && stage != new[] { "vs", "fs", "gs", "tcs", "tes" }[stageSlot])
+                    throw new DirectCompileException("INVALID_JSON", sw + ".stage does not match its NVN slot");
                 if (stages.Any(s => s.Stage == stage))
                     throw new DirectCompileException("INVALID_JSON", sw + ".stage duplicates " + stage);
                 byte[] code = JsonStrict.Base64(stageJson, "code", sw, 16 << 20);
@@ -198,6 +205,12 @@ namespace S2A.DirectCompiler
                     throw new DirectCompileException("RESOURCE_LIMIT", sw + ".code must be non-empty, 4-byte aligned and < 16 MiB");
                 if (stage != "cs" && code.Length < 0x50)
                     throw new DirectCompileException("INVALID_JSON", sw + ".code has no 0x50-byte Maxwell header");
+                if (requestVersion == 2)
+                {
+                    int expectedStage = stage switch { "vs" => 1, "fs" => 5, "gs" => 4, _ => -1 };
+                    if (((BitConverter.ToUInt32(code, 0) >> 10) & 15) != expectedStage)
+                        throw new DirectCompileException("INVALID_JSON", sw + ".code header does not match stage");
+                }
                 if (control.Length == 0)
                     throw new DirectCompileException("MISSING_FIELD", sw + ".control snapshot is empty");
                 snapshotBytes += code.Length + control.Length + c1.Length;
@@ -217,12 +230,14 @@ namespace S2A.DirectCompiler
             }
             else
             {
-                // 图形程序认两种：vs+fs；只有 vs（只写深度的绘制：深度预通道、阴影图，游戏本来就没绑片元阶段）
+                // v1 接 VS+FS 或只有 VS；v2 额外接 VS+GS+FS，其余阶段与组合继续报未实现。
                 bool vsFs = stages.Count == 2 && stages.Any(s => s.IsVertex) && stages.Any(s => s.IsFragment);
                 bool vsOnly = stages.Count == 1 && stages[0].IsVertex;
-                if (!vsFs && !vsOnly)
-                    throw new DirectCompileException("UNSUPPORTED_PROGRAM", where + ": graphics contract is vs+fs or vs alone");
-                stages = stages.OrderBy(s => s.IsVertex ? 0 : 1).ToList();
+                bool vsGsFs = requestVersion == 2 && stages.Count == 3 && stages.Any(s => s.IsVertex) &&
+                              stages.Any(s => s.IsFragment) && stages.Any(s => s.Stage == "gs");
+                if (!vsFs && !vsOnly && !vsGsFs)
+                    throw new DirectCompileException("UNSUPPORTED_PROGRAM", where + ": graphics contract is vs, vs+fs, or v2 vs+gs+fs");
+                if (requestVersion == 1) stages = stages.OrderBy(s => s.IsVertex ? 0 : 1).ToList();
             }
             bool tf = JsonStrict.Bool(e, "transformFeedbackEnabled", where);
             if (tf)
@@ -268,8 +283,8 @@ namespace S2A.DirectCompiler
                     bufferLengths[slot] = length;
                 }
             }
-            int samplerLength = JsonStrict.Int(e, "samplerArrayLength", where, 1, 65536);
-            int textureLength = JsonStrict.Int(e, "textureArrayLength", where, 1, 65536);
+            int samplerLength = JsonStrict.Int(e, "samplerArrayLength", where, 1, 1048576);
+            int textureLength = JsonStrict.Int(e, "textureArrayLength", where, 1, 1048576);
             return new DirectProgram(kind, stages.ToArray(), graphics, compute, textures.ToArray(),
                 bufferLengths, samplerLength, textureLength, tf);
         }

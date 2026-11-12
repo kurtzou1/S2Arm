@@ -39,7 +39,7 @@ static void wsi_consume_acquired(struct nvn_gpu_surface_s *s) {
         pthread_mutex_lock(&g_submit_mu);
         VkResult r = vkQueueSubmit(g.queue, 1, &si, f);
         pthread_mutex_unlock(&g_submit_mu);
-        if (r == VK_SUCCESS) vkWaitForFences(g.d, 1, &f, VK_TRUE, 2000000000ull);
+        if (r == VK_SUCCESS) s2a_vk_wait_fences(g.d, 1, &f, 2000000000ull);
         vkDestroyFence(g.d, f, NULL);
     }
     s->acquire_pending = 0;
@@ -104,6 +104,9 @@ static nvn_gpu_rc wsi_build(struct nvn_gpu_surface_s *s, nvn_gpu_err *err) {
     if (caps.maxImageExtent.width && ext.width > caps.maxImageExtent.width) ext.width = caps.maxImageExtent.width;
     if (caps.maxImageExtent.height && ext.height > caps.maxImageExtent.height) ext.height = caps.maxImageExtent.height;
     uint32_t n = caps.minImageCount + 1; if (n < 3) n = 3;
+    { int extra = nvn_plat_flag("nvk_swap_extra", 0); if (extra > 0 && extra <= 4) n += (uint32_t)extra;   // 诊断：多要几张窗口图，看取图的等待是不是交换链反压
+      if (caps.maxImageCount && n > caps.maxImageCount) n = caps.maxImageCount;
+      char b[160]; snprintf(b, sizeof b, "交换链：驱动最少 %u 张、最多 %u 张，要 %u 张", caps.minImageCount, caps.maxImageCount, n); nvn_plat_log(NVN_PLAT_LOG_INFO, "gpu", b); }
     if (caps.maxImageCount && n > caps.maxImageCount) n = caps.maxImageCount;
     if (n > WSI_MAX_IMAGES) n = WSI_MAX_IMAGES;
     VkSwapchainCreateInfoKHR ci; memset(&ci, 0, sizeof ci);
@@ -198,7 +201,9 @@ nvn_gpu_rc nvn_gpu_drawable_acquire(nvn_gpu_surface s, uint64_t timeout_ns, void
     if (s->held >= 0) { idx = (uint32_t)s->held; sem = s->held_sem; s->held = -1; }   // 上次取了没呈现的那张
     else {
         sem = s->acquire_next;
+        struct timespec q0, q1; clock_gettime(CLOCK_MONOTONIC, &q0);
         VkResult r = vkAcquireNextImageKHR(g.d, s->swapchain, timeout_ns, s->acquire[sem], VK_NULL_HANDLE, &idx);
+        clock_gettime(CLOCK_MONOTONIC, &q1); __atomic_fetch_add(&g_acq_ns, (uint64_t)(q1.tv_sec - q0.tv_sec) * 1000000000ull + (uint64_t)q1.tv_nsec - (uint64_t)q0.tv_nsec, __ATOMIC_RELAXED);
         if (r == VK_TIMEOUT || r == VK_NOT_READY) return fail(err, NVN_GPU_E_TIMEOUT, "没有空闲的交换链图");
         if (r == VK_ERROR_OUT_OF_DATE_KHR) { s->outdated = 1; return fail(err, NVN_GPU_E_OUTDATED, "交换链已过期"); }
         if (r == VK_ERROR_SURFACE_LOST_KHR) { s->gen = 0; return fail(err, NVN_GPU_E_REVOKED, "表面已丢失"); }
@@ -232,6 +237,11 @@ nvn_gpu_rc nvn_gpu_present(nvn_gpu_surface s, const nvn_gpu_drawable *dr, const 
     nvn_gpu_rc out = rc(NVN_GPU_OK);
     nvn_gpu_shown shown = {ticket, NVN_GPU_SHOWN_DROPPED, 0.0};
     nvn_gpu_cmd ch = NULL;
+    { static uint64_t np; if (++np % 300 == 0 && nvn_plat_flag("nvk_gputime", 0)) {   // 诊断读数：见 g_oc
+        uint64_t v[OC_N]; for (int i = 0; i < OC_N; i++) v[i] = __atomic_exchange_n(&g_oc[i], 0, __ATOMIC_RELAXED);
+        char b[400]; snprintf(b, sizeof b, "对象读数（每帧，近 300 帧）：新建渲染通道 %.1f、帧缓冲 %.1f、命令池 %.1f、描述符池 %.1f；分配描述符集 %.1f 次、写描述符 %.1f 次；遮挡查询 %.1f 个；新建视图 %.1f 个；取窗口图 %.1f 毫秒",
+            v[OC_RP] / 300.0, v[OC_FB] / 300.0, v[OC_CPOOL] / 300.0, v[OC_DPOOL] / 300.0, v[OC_DALLOC] / 300.0, v[OC_DWRITE] / 300.0, v[OC_QUERY] / 300.0, v[OC_VIEW] / 300.0, (double)__atomic_exchange_n(&g_acq_ns, 0, __ATOMIC_RELAXED) / 300.0 / 1e6);
+        nvn_plat_log(NVN_PLAT_LOG_INFO, "gpu", b); } }
     if (!s || !dr || !d || !d->src || !d->src->tex) { out = fail(err, NVN_GPU_E_ARG, "present 参数为空"); goto done; }
     if (!s->gen) { out = fail(err, NVN_GPU_E_REVOKED, "面已撤销"); goto done; }
     if (dr->gen != s->gen || !(dr->token >> 16)) { out = fail(err, NVN_GPU_E_OUTDATED, "drawable 不属于当前交换链"); goto done; }

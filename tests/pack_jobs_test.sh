@@ -1,5 +1,5 @@
 #!/bin/bash
-# 门禁覆盖：pack/jobs/*.py pack/jobs/tests/*.py
+# 门禁覆盖：pack/jobs/*.py pack/jobs/tests/*.py docs/site/notice.json
 # 启动器任务层单测进门禁（10-27 维护者：pack/jobs/tests 原先只挂在 launchers/macos/gate.sh 钩子下，tool 档不跑钩子，
 #   名单线 lists/save-zero 改 pack/jobs/saves.py 判 tool 档、test_saves.py 没进门禁）：bash tests/pack_jobs_test.sh
 # 选测：GATE_CHANGED（门禁给的改动清单）里只有 pack/jobs/<模块>.py → 只跑 import / 点名了这些模块的 pack/jobs/tests/test_*.py；

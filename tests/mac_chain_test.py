@@ -15,11 +15,11 @@ env = {key: value for key, value in os.environ.items()
        if key not in ("S2A_ALLOW_CHAIN_MISMATCH", "S2A_GAME_DATA", "S2A_IN")}
 
 
-def fixture(root, directory_chain, index_chain):
+def fixture(root, directory_chain, index_chain, flags=0):
     library = root / "shaders/direct" / ("b-" + directory_chain)
     library.mkdir(parents=True)
     (library / "lib.idx").write_bytes(struct.pack(
-        "<8sIIII12s12x", b"S2ALIB\0\0", 1, 0, 0, 0, index_chain.encode("ascii")))
+        "<8sIIII12s12x", b"S2ALIB\0\0", 1, 0, 0, flags, index_chain.encode("ascii")))
 
 
 def run(root, output, override=None, game_data=None):
@@ -69,3 +69,14 @@ with tempfile.TemporaryDirectory(prefix="s2arm-chain-") as temp:
     result = run(same, output, game_data=different)
     assert result.returncode != 0 and "【红】" in result.stderr and not output.exists(), result
     print("✓ 正式入口优先检查 S2A_GAME_DATA")
+    # lib.idx 头偏移 20 是 flags（位 0 = 全部计算程序为 tensor ABI 1，LibPack.cs 写）：带这一位的同链库照常放行，未定义的位才算头无效
+    tensor = temp / "tensor"
+    fixture(tensor, host, host, flags=1)
+    allowed(tensor)
+    print("✓ 同链、flags 位 0（tensor ABI）照常放行")
+    unknown = temp / "unknown"
+    fixture(unknown, host, host, flags=2)
+    output = temp / "run"
+    result = run(unknown, output)
+    assert result.returncode != 0 and "头无效" in (result.stdout + result.stderr) and not output.exists(), result
+    print("✓ flags 出现未定义的位 → 头无效、不起局")

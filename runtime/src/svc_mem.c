@@ -390,6 +390,18 @@ static void layout_prepare(const char *npdm) {
     g_lay_ok = 1;
 }
 uint64_t s2a_mem_mod_base(const char *npdm) { layout_prepare(npdm); return g_mod_base; }
+// 本局已碰到的地址跨度（#783）：同「地址按需」行的「本局所需跨度」口径（碰到的最高地址 − 窗口基址），但只读局内峰值、不扫别名区位图，心跳每 10 秒调也便宜：
+//   别名区高水位、堆峰值、栈区 / 可随机区用到的最高偏移、模块末（在窗口内的）。vawin.c 记进 wire/<程序号>/span_peak，下一局窗口放不下标准布局时按它给窗口。布局没定 = 0
+uint64_t s2a_mem_span_now(void) {
+    if (!g_lay_ok) return 0;
+    uint64_t top = 0;
+    if (g_pk_alias_end && L.alias_base + g_pk_alias_end > top) top = L.alias_base + g_pk_alias_end;
+    if (g_pk_heap && (uint64_t)g_heap + g_pk_heap > top) top = (uint64_t)g_heap + g_pk_heap;
+    if (g_pk_st_end && L.stack_base + g_pk_st_end > top) top = L.stack_base + g_pk_st_end;
+    if (g_pk_sh_end && L.aslr_base + g_pk_sh_end > top) top = L.aslr_base + g_pk_sh_end;
+    for (int i = 0; i < g_nmod; i++) { uint64_t e = (uint64_t)g_mod[i].base + g_mod[i].size; if (e > top && e <= L.win_base + L.win_size) top = e; }
+    return top > L.win_base ? top - L.win_base : 0;
+}
 // 本款标准布局的窗口大小（vawin.c 构造函数占窗口用，早于 s2a_mem_init）：读不到 0
 uint64_t s2a_npdm_window_need(const char *npdm) {
     uint32_t t, ms; uint64_t sr, pid;

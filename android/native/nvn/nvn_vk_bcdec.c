@@ -153,7 +153,7 @@ int nvn_vk_bcdec_wait(struct s2a_vk_device *d, struct nvn_vk_bcdec *bc, uint64_t
         VkFence *fences = malloc((size_t)n * sizeof *fences);
         if (!fences) return -1;
         uint32_t i = 0; for (struct retained *e = bc->kept; e; e = e->next) fences[i++] = e->fence;
-        VkResult result = vkWaitForFences(d->device, n, fences, VK_TRUE, timeout_ns);
+        VkResult result = s2a_vk_wait_fences(d->device, n, fences, timeout_ns);
         free(fences);
         if (result != VK_SUCCESS) return -1;
     }
@@ -306,7 +306,7 @@ int nvn_vk_bcdec_decode(struct nvn_vk_bcdec *bc, struct s2a_vk_device *d,
             snprintf(fail_why, sizeof fail_why, "bcdec: %s dispatch submit failed", family); goto cleanup;
         }
         submitted = 1;
-        if (vkWaitForFences(d->device, 1, &fence, VK_TRUE, 5000000000ull) != VK_SUCCESS) {
+        if (s2a_vk_wait_fences(d->device, 1, &fence, 5000000000ull) != VK_SUCCESS) {
             // 提交成功但没有完成证明：转入保留账本，资源不得释放/复用。
             keep->fence = fence; keep->cmd = cmd; keep->buf = buf; keep->mem = mem;
             keep->img = in; keep->img_mem = in_mem; keep->view = in_view; keep->out_view = out_view; keep->ds = ds;

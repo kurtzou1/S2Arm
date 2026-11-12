@@ -99,6 +99,20 @@ namespace Ryujinx.HLE.Loaders.Processes
 
             ref ApplicationControlProperty control = ref applicationControlProperty.Value;
 
+            // S2Arm: 控制数据有标题、却一个存档尺寸都没写（某款 Switch 2 游戏导入后固定段全零：0x3000 起全是 0）也按「没有」补账号存档，
+            //   不然游戏开存档拿到 2002-1002 自己中止、起局黑屏退回（标题等其余字段照用这份，只补存档字段；已出过包的玩家新壳起局即好，不用重出包）
+            if (!LibHac.Common.Utilities.IsZeros(applicationControlProperty.ByteSpan) && control.UserAccountSaveDataSize == 0 && control.DeviceSaveDataSize == 0)
+            {
+                var filled = new BlitStruct<ApplicationControlProperty>(1);
+                applicationControlProperty.ByteSpan.CopyTo(filled.ByteSpan);
+                control = ref filled.Value;
+                control.UserAccountSaveDataSize = 0x08000000;
+                control.UserAccountSaveDataJournalSize = 0x04000000;
+                if (control.SaveDataOwnerId == 0) control.SaveDataOwnerId = applicationId.Value;
+
+                Logger.Warning?.Print(LogClass.Application, $"[S2A 存档] 控制数据没声明任何存档尺寸，按账号存档 128 MB 补（存档归属号 {control.SaveDataOwnerId:x16}）");
+            }
+
             if (LibHac.Common.Utilities.IsZeros(applicationControlProperty.ByteSpan))
             {
                 // If the current application doesn't have a loaded control property, create a dummy one and set the savedata sizes so a user savedata will be created.

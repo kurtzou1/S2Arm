@@ -231,6 +231,31 @@ if shutil.which('dotnet') or os.path.exists(os.path.expanduser('~/.dotnet/dotnet
         for top in (T, X):
             for d, _, _ in os.walk(top): os.chmod(d, 0o755)
             shutil.rmtree(top, ignore_errors=True)
+    # ⑨c #793 / #796：游戏库在删不了文件的地方（玩家实报 Xbox App 管的文件夹）——边写边腾删除被拒，原先异常从读取里抛出、整段写失败。
+    #   夹具：正要读的那份（存储身份 id1）里的 z.dat 设成不可删（macOS chflags uchg，同 Windows 拒绝删除）。期望：照常写完、RomFS 段 = 原件，
+    #   z.dat 留着、其余照删，输出里有一行黄字点名删不掉的文件
+    if shutil.which('chflags'):
+        import contextlib, io
+        T = Path(tempfile.mkdtemp(prefix='img test 9c '))
+        try:
+            root, pk, store, src, data = scene(T)
+            locked = store / 'id1' / 'z.dat'; subprocess.run(['chflags', 'uchg', str(locked)], check=True)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf): out = img.convert(str(root), str(pk), consume=True)
+            h = img.header(out); got = std_romfs(out, h['romfs'][0])
+            ck(got == data, f'⑨c 有文件删不掉：照常写完、RomFS 段文件 = 原件（{sorted(got)}）')
+            ck(files_under(store) == ['id1/z.dat'] and not files_under(src / 'romfs'), f'⑨c 删不掉的那个留着、其余照删（剩 {files_under(store)} / {files_under(src / "romfs")}）')
+            ck('删不掉' in buf.getvalue() and 'z.dat' in buf.getvalue(), f'⑨c 输出里有黄字点名删不掉的文件（{buf.getvalue()[-200:]}）')
+        finally:
+            subprocess.run(['chflags', '-R', 'nouchg', str(T)], check=False)
+            for d, _, _ in os.walk(T): os.chmod(d, 0o755)
+            shutil.rmtree(T, ignore_errors=True)
+    else:
+        print('跳过 ⑨c：没有 chflags，造不出删不掉的文件')
+    # ⑨d 工具失败时报红保留 .NET 异常首行（#796：原先只取末尾 300 字，「类型: 消息」那行被截掉，只剩 FileStorage.Read 调用栈）
+    stack = 'Unhandled exception. System.UnauthorizedAccessException: Access to the path \'/x/a.bin\' is denied.\n' + '   at Some.Frame(Int64 offset)\n' * 40
+    e = img.tool_error(stack)
+    ck(e.startswith('Unhandled exception. System.UnauthorizedAccessException: Access to the path') and e.endswith('Some.Frame(Int64 offset)'), f'⑨d 报红保留异常首行 + 末尾（{e[:120]}）')
 else:
     print('跳过 ⑨：没有 dotnet，编不了 services/romfs_index')
 

@@ -564,3 +564,5 @@
 20261112-1530-joycon-pair-imu-sides.patch
 20261112-1813-joycon2-mouse-jcms.patch
 20261112-0345-joycon2-style-bits-only-when-declared.patch
+20261112-0704-nim-shop-async-object-only.patch
+20261112-0915-save-size-fallback.patch

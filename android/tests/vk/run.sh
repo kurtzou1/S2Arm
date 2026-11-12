@@ -114,6 +114,7 @@ if [ -n "${S2A_VK_PROFILE_LAYER_DIR:-}" ]; then
 fi
 
 if [ "$mode" = "" ]; then bash "$repo/android/tests/vk/run_replay_copy_t2b.sh"; fi
+if [ "$mode" = "" ]; then bash "$repo/android/tests/vk/run_replay_clear_tex.sh"; fi
 
 set +e
 timeout 180 "$out/t_backend_vk" "$out/shaders" 2>&1 | tee "$out/log"

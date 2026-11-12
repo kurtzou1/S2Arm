@@ -154,6 +154,24 @@
             <key>Type</key>
             <string>PSGroupSpecifier</string>
             <key>Title</key>
+            <string>Sound</string>
+            <key>FooterText</key>
+            <string>When on, game sound keeps playing while the iPhone is in Silent Mode. When off, S2Arm follows Silent Mode like other games. Takes effect when you switch back to the app.</string>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSToggleSwitchSpecifier</string>
+            <key>Title</key>
+            <string>Play Sound in Silent Mode</string>
+            <key>Key</key>
+            <string>S2APlayInSilentMode</string>
+            <key>DefaultValue</key>
+            <false/>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSGroupSpecifier</string>
+            <key>Title</key>
             <string>Saves</string>
             <key>FooterText</key>
             <string>Save in the game first, then close and reopen the app. Save management opens before the game starts, where you can export a backup or import a .s2asave file from a Mac. Your current save is kept before restoring. The switch turns off once the game starts.</string>

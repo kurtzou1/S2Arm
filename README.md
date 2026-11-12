@@ -86,6 +86,14 @@ A Switch 2 game, measured on an iPhone 17 Pro Max: a **full 60 fps** while the p
 
 [Evidence](docs/validation/EVIDENCE.md#platforms)
 
+## Downstream deep ports
+
+Some games have a deep port made specially by the community. S2Arm recognizes these games: on export it shows a page explaining the option, and you can switch to the downstream project's route (importing, packing and installing are still buttons in S2Arm, with the downstream project's implementation underneath) or keep the standard route. The registry is [`pack/downstream/schemes.json`](pack/downstream/schemes.json); the contract between the two is the downstream project's document.
+
+| Route | Project | Devices | Contract |
+|---|---|---|---|
+| D2R-Mobile | [jhaizhou-ops/d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile) | iPhone / iPad (iOS 26 and later; Android and HarmonyOS in progress) | [docs/S2ARM.md](https://github.com/jhaizhou-ops/d2r-mobile/blob/main/docs/S2ARM.md) |
+
 ## Getting started
 
 1. Download the Mac or Windows launcher from the [download page](https://jhaizhou-ops.github.io/S2Arm/) and open it. Building for iPhone on a Mac needs the free Xcode from the App Store, signed in with your Apple ID; the launcher walks you through it.

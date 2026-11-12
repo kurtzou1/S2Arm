@@ -158,6 +158,13 @@ chk('⑧ 原件 nacp', rc == 0 and open(f'{o8}/ctl/control.nacp', 'rb').read() =
 chk('⑧ 标题 / 版本取原件', u8['name'] == 'DK Ban' and u8['display_version'] == '1.2.0' and u8['name_zh'] == '大金', u8)
 chk('⑧ 图标', open(f'{o8}/icon.jpg', 'rb').read() == b'JPG')
 chk('⑧ 无 README.synth', not os.path.exists(f'{o8}/ctl/README.synth'))
+# ⑨ 原件只有标题、0x3000 起全 0（某款 Switch 2 更新包元数据带的控制数据）：标题照原件，补启动账号 1、归属号 = 程序号、账号存档 128 / 64 MB；语言位仍 0（#465 按宿主语言）
+d9 = f'{T}/TitleOnly'; mk(d9); n9 = bytearray(0x4000); n9[0:6] = b'Pokoti'; n9[0x200:0x206] = b'Publsh'
+w(f'{d9}/updates/458752/control/control.nacp', bytes(n9)); o9 = f'{T}/x9'
+rc, out = run(d9, o9); g9 = open(f'{o9}/ctl/control.nacp', 'rb').read()
+chk('⑨ 标题照原件', rc == 0 and g9[0:6] == b'Pokoti' and g9[0x200:0x206] == b'Publsh', out)
+chk('⑨ 补存档字段、语言位 0', g9[0x3025] == 1 and struct.unpack_from('<Q', g9, 0x3078)[0] == 0x040074A01BF12000 and struct.unpack_from('<q', g9, 0x3080)[0] == 0x08000000
+    and struct.unpack_from('<q', g9, 0x3088)[0] == 0x04000000 and struct.unpack_from('<I', g9, 0x302C)[0] == 0, g9[0x3020:0x3090].hex())
 # ⑥ 识别：本身 / 下一层；不是导出目录退出 1
 rc, out = run('--detect', d); chk('⑥ 本身', rc == 0 and out.startswith('040074A01BF12000\t'), out)
 os.makedirs(f'{T}/lib/040074A01BF12000'); os.rename(d, f'{T}/lib/040074A01BF12000/Game')

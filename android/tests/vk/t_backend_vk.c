@@ -142,11 +142,15 @@ static nvn_gpu_open_desc g_desc;
 // 保守故障注入：不等 fence 就返回 TIMEOUT，记录完成证明前的视图销毁；其余调用走真实 Vulkan。
 static int g_bc_inject_wait, g_bc_unproven, g_bc_early_destroy;
 static VkFence g_bc_injected_fence;
+static int g_bc_early_n, g_bc_early_seen;
 VKAPI_ATTR VkResult VKAPI_CALL vkWaitForFences(VkDevice d, uint32_t n, const VkFence *f, VkBool32 all, uint64_t timeout) {
     PFN_vkWaitForFences real = (PFN_vkWaitForFences)vkGetDeviceProcAddr(d, "vkWaitForFences");
-    if (g_bc_inject_wait && n == 1) {
-        g_bc_inject_wait = 0; g_bc_unproven = 1; g_bc_injected_fence = f[0]; return VK_TIMEOUT;
+    if (g_bc_inject_wait && n == 1) {   // 真超时：睡满调用方给的时限再报超时（等栅栏的包装按墙钟判，不睡满它会接着等）
+        g_bc_inject_wait = 0; g_bc_unproven = 1; g_bc_injected_fence = f[0];
+        struct timespec ts = {(time_t)(timeout / 1000000000ull), (long)(timeout % 1000000000ull)}; nanosleep(&ts, NULL);
+        return VK_TIMEOUT;
     }
+    if (g_bc_early_n > 0 && n == 1) { g_bc_early_n--; g_bc_early_seen++; return VK_TIMEOUT; }   // 提前返回（#697）：不等、立刻报超时
     return real(d, n, f, all, timeout);
 }
 VKAPI_ATTR void VKAPI_CALL vkDestroyImageView(VkDevice d, VkImageView view, const VkAllocationCallbacks *a) {
@@ -171,6 +175,11 @@ static void bc_timeout_lifetime(void) {
     vr = vkBindImageMemory(d, image, memory, 0); CHECK(vr == VK_SUCCESS, "BC timeout 绑定：%d", vr); if (vr != VK_SUCCESS) goto done;
     int br = nvn_vk_bcdec_create(&g_dev, &bc, why, sizeof why); CHECK(br == 0, "BC timeout 解码器：%s", why); if (br) goto done;
     { static const uint8_t block[8] = {0,0xf8,0,0xf8,0,0,0,0};
+      // #697：驱动的等待被信号打断、提前报超时（这里连着 3 次立刻返回 VK_TIMEOUT）→ 没到墙钟时限必须接着等，解码照常成功
+      g_bc_early_n = 3; g_bc_early_seen = 0;
+      br = nvn_vk_bcdec_decode(bc, &g_dev, image, NVN_FORMAT_RGBA_DXT1, 4, 4, 0, 0, block, sizeof block, why, sizeof why);
+      CHECK(br == 0 && g_bc_early_seen == 3 && g_bc_early_n == 0, "BC 等待提前返回 3 次：期望接着等、解码成功（0）且 3 次都被消耗 → 返回 %d、消耗 %d 次 %s", br, g_bc_early_seen, why);
+      g_bc_early_n = 0;
       g_bc_inject_wait = 1; g_bc_unproven = g_bc_early_destroy = 0; g_bc_injected_fence = VK_NULL_HANDLE;
       br = nvn_vk_bcdec_decode(bc, &g_dev, image, NVN_FORMAT_RGBA_DXT1, 4, 4, 0, 0, block, sizeof block, why, sizeof why);
       CHECK(br == -2 && g_bc_injected_fence, "BC timeout 应报告未证明完成，实得 %d %s", br, why);
@@ -1314,6 +1323,41 @@ static void t22_clear_view_fmt(void) {
     nvn_gpu_tex_release(t);
 }
 
+
+// C76：单次分配上限必须来自 maxMemoryAllocationSize，不能与 maxStorageBufferRange 共用同一个值。
+// 以前两者相等（都是 128 MiB）：回放核心把内存池整池镜像成一块 CPU 可见缓冲，任何大于 SSBO 范围上限的池
+// 都建不出镜像，池里的顶点 / 索引取不到，真机大地图进游戏后几何大面积不画（只剩 UI 与少数小池物件）。
+// 这里用一个「超过 SSBO 范围上限、仍在分配上限内」的缓冲做判据：修前 E_ARG，修后成功。
+static void t76_buf_create_alloc_cap(void) {
+    nvn_gpu_caps cp;
+    nvn_gpu_caps_get(&cp);
+    // 直接对设备真值：单次分配上限必须是 maxMemoryAllocationSize（没有该项时才退回 SSBO 范围上限）。
+    // 这一条不依赖设备上两个上限是否相等，能直接抓住「拿 maxStorageBufferRange 当分配上限」的回归。
+    VkPhysicalDeviceMaintenance3Properties m3; memset(&m3, 0, sizeof m3);
+    m3.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES;
+    VkPhysicalDeviceProperties2 p2; memset(&p2, 0, sizeof p2);
+    p2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2; p2.pNext = &m3;
+    vkGetPhysicalDeviceProperties2(g_dev.physical, &p2);
+    uint64_t expect = m3.maxMemoryAllocationSize ? (uint64_t)m3.maxMemoryAllocationSize
+                                                 : (uint64_t)g_dev.properties.limits.maxStorageBufferRange;
+    CHECK(cp.max_buf_bytes == expect, "C76: caps.max_buf_bytes=%llu 应等于设备 maxMemoryAllocationSize %llu（SSBO 范围上限 %llu 是另一项）",
+          (unsigned long long)cp.max_buf_bytes, (unsigned long long)expect, (unsigned long long)cp.max_ssbo_range);
+    if (cp.max_buf_bytes <= cp.max_ssbo_range) {
+        printf("C76 跳过：本设备 max_buf_bytes(%llu) <= max_ssbo_range(%llu)，没有可判别的区间\n",
+               (unsigned long long)cp.max_buf_bytes, (unsigned long long)cp.max_ssbo_range);
+        return;
+    }
+    uint64_t n = cp.max_ssbo_range + (1u << 20);
+    if (n > cp.max_buf_bytes) n = cp.max_buf_bytes;
+    nvn_gpu_err e; memset(&e, 0, sizeof e);
+    nvn_gpu_buf b = NULL;
+    nvn_gpu_rc r = nvn_gpu_buf_create(n, NVN_GPU_MEM_SHARED, NULL, &b, &e);
+    CHECK(nvn_gpu_ok(r) && b, "C76: 建 %llu 字节缓冲（> max_ssbo_range %llu，<= 分配上限 %llu）失败：%d %s",
+          (unsigned long long)n, (unsigned long long)cp.max_ssbo_range, (unsigned long long)cp.max_buf_bytes, r.code, e.why);
+    if (nvn_gpu_ok(r)) printf("C76: 分配上限 %llu > SSBO 范围上限 %llu，建 %llu 字节缓冲成功\n",
+                              (unsigned long long)cp.max_buf_bytes, (unsigned long long)cp.max_ssbo_range, (unsigned long long)n);
+    if (b) nvn_gpu_buf_release(b, NULL, NULL);
+}
 
 // C29：Vulkan 映射按中立表重定向：展开格式必须映射到目标格式的 VkFormat（纯格式检查，不用 GPU）。
 static void t29_format_expand(void) {
@@ -3773,6 +3817,48 @@ static void c76_vs_only_depth(const char *dir) {
 // C77：颜色槽里有空位的通道（槽 0 没有附件、槽 1 有）。槽 1 清成蓝，片元着色器只写输出 1（绿），整屏画一笔。
 // 期望（手算）：槽 1 的图整屏绿。空位没处理对的话：通道 / 管线建不出来（提交失败），或者写到别处、槽 1 仍是蓝。
 // C78：颜色写掩码为 0 的绘制一个通道都不写。同一张图清成蓝后，用写掩码 0 的管线整屏画绿。期望：仍然整屏蓝。
+// C197：通道对象缓存。同一组目标反复开通道，渲染通道对象和帧缓冲只建一次；视图销毁后帧缓冲作废、换新视图再开要重建一个，
+// 渲染通道对象（只看附件描述）不重建。期望的次数按「开了几次、目标变没变」数出来，不看实现。
+uint64_t nvn_vk_dbg_created(int which);
+static void c197_pass_cache(void) {
+    nvn_gpu_err e; nvn_gpu_rc r;
+    nvn_gpu_tex out = make_tex(64, 64, NVN_FORMAT_RGBA8, NVN_GPU_TEX_RENDER | NVN_GPU_TEX_SAMPLED);
+    nvn_gpu_view ov = make_view(out);
+    nvn_gpu_buf rb = make_buf(64 * 64 * 4, NVN_GPU_MEM_SHARED, NULL);
+    nvn_gpu_pass_desc p; memset(&p, 0, sizeof p);
+    p.ncolor = 1; p.color[0].view = ov; p.color[0].load = NVN_GPU_LOAD_CLEAR; p.color[0].store = NVN_GPU_STORE_STORE;
+    p.color[0].clear.f[0] = 1; p.color[0].clear.f[3] = 1; p.w = 64; p.h = 64; p.layers = 1;
+    uint64_t rp0 = nvn_vk_dbg_created(0), fb0 = nvn_vk_dbg_created(1);
+    nvn_gpu_cmd c = begin_cmd();
+    nvn_gpu_pass_begin(c, &p); nvn_gpu_pass_end(c);
+    nvn_gpu_pass_begin(c, &p); nvn_gpu_pass_end(c);
+    r = nvn_gpu_cmd_commit(c, 197, on_done, NULL, &e); CHECK(OK(r), "C197 commit 1：%d %s", r.code, e.why);
+    r = nvn_gpu_fence_wait(197, 5000000000ull, &e); CHECK(OK(r), "C197 wait 1：%d %s", r.code, e.why);
+    CHECK(nvn_vk_dbg_created(0) - rp0 <= 1 && nvn_vk_dbg_created(1) - fb0 == 1, "C197 同一段里同一目标开两次：期望新建渲染通道至多 1（前面的用例建过同样的附件描述就是 0）、帧缓冲 1 → %llu、%llu",
+          (unsigned long long)(nvn_vk_dbg_created(0) - rp0), (unsigned long long)(nvn_vk_dbg_created(1) - fb0));
+    uint64_t rp1 = nvn_vk_dbg_created(0);
+    c = begin_cmd();
+    nvn_gpu_pass_begin(c, &p); nvn_gpu_pass_end(c);
+    nvn_gpu_copy_tex_buf(c, out, 0, 0, NULL, rb, 0, 64 * 4, 64 * 64 * 4);
+    r = nvn_gpu_cmd_commit(c, 198, on_done, NULL, &e); CHECK(OK(r), "C197 commit 2：%d %s", r.code, e.why);
+    r = nvn_gpu_fence_wait(198, 5000000000ull, &e); CHECK(OK(r), "C197 wait 2：%d %s", r.code, e.why);
+    CHECK(nvn_vk_dbg_created(0) == rp1 && nvn_vk_dbg_created(1) - fb0 == 1, "C197 下一段再开同一目标：期望渲染通道不再新建、帧缓冲仍是 1 → %llu、%llu",
+          (unsigned long long)(nvn_vk_dbg_created(0) - rp0), (unsigned long long)(nvn_vk_dbg_created(1) - fb0));
+    expect_rect(buf_cpu(rb), 0, 0, 64, 64, 255, 0, 0, "C197 沿用缓存的帧缓冲清成红");
+    nvn_gpu_view_release(ov);
+    nvn_gpu_view ov2 = make_view(out);
+    p.color[0].view = ov2; p.color[0].clear.f[0] = 0; p.color[0].clear.f[2] = 1;
+    c = begin_cmd();
+    nvn_gpu_pass_begin(c, &p); nvn_gpu_pass_end(c);
+    nvn_gpu_copy_tex_buf(c, out, 0, 0, NULL, rb, 0, 64 * 4, 64 * 64 * 4);
+    r = nvn_gpu_cmd_commit(c, 199, on_done, NULL, &e); CHECK(OK(r), "C197 commit 3：%d %s", r.code, e.why);
+    r = nvn_gpu_fence_wait(199, 5000000000ull, &e); CHECK(OK(r), "C197 wait 3：%d %s", r.code, e.why);
+    CHECK(nvn_vk_dbg_created(0) == rp1 && nvn_vk_dbg_created(1) - fb0 == 2, "C197 旧视图销毁、换新视图再开：期望渲染通道不再新建、帧缓冲 2 → %llu、%llu",
+          (unsigned long long)(nvn_vk_dbg_created(0) - rp0), (unsigned long long)(nvn_vk_dbg_created(1) - fb0));
+    expect_rect(buf_cpu(rb), 0, 0, 64, 64, 0, 0, 255, "C197 新视图的帧缓冲清成蓝");
+    nvn_gpu_view_release(ov2); nvn_gpu_tex_release(out);
+}
+
 static void c77_null_color_slot(const char *dir) {
     nvn_gpu_shader vs = NULL, fs = NULL; void *vm = NULL, *fm = NULL;
     if (!load_shader_pair(dir, "tri3.vert", "out1_green.frag", NULL, NULL, &vs, &fs, &vm, &fm)) { CHECK(0, "读不到 out1_green"); return; }
@@ -4167,6 +4253,118 @@ static void c84_validation_classes(void) {
     CHECK(!bad, "C84 ④ D16 → R16：%d 个像素不是 0x8000", bad);
     nvn_gpu_view_release(mv); if (dv) nvn_gpu_view_release(dv);
     nvn_gpu_tex_release(m); if (ds) nvn_gpu_tex_release(ds); nvn_gpu_tex_release(one); if (bc) nvn_gpu_tex_release(bc); nvn_gpu_tex_release(d16); nvn_gpu_tex_release(r16); nvn_gpu_buf_release(rb, NULL, NULL);
+}
+
+// #690：原生 BC1 sRGB 的整级跨 mip 图像拷贝，按输入原始块字节核对结果。
+static void c690_native_bc_image_copy(uint32_t fmt, uint32_t block_bytes, uint64_t signal) {
+    if ((g_dev.bc_decode_mask & (1u << (fmt - 0x41))) ||
+        !(nvn_gpu_format_caps(fmt) & NVN_GPU_FMT_SAMPLE)) {
+        printf("C690：格式 %#x 非原生存储，跳过原块图像拷贝\n", fmt);
+        return;
+    }
+    nvn_gpu_tex_desc td; memset(&td, 0, sizeof td);
+    td.d.target = NVN_TEXTURE_TARGET_2D; td.d.format = (int)fmt;
+    td.d.width = 64; td.d.height = 64; td.d.depth = 1; td.d.levels = 7;
+    td.usage = NVN_GPU_TEX_SAMPLED | NVN_GPU_TEX_CPU_UPLOAD;
+    nvn_gpu_tex src = NULL, dst = NULL; nvn_gpu_err e = {0};
+    nvn_gpu_rc r = nvn_gpu_tex_create(&td, &src, &e);
+    CHECK(OK(r), "C690 源图创建：%d %s", r.code, e.why);
+    td.d.width = 1024; td.d.height = 1024; td.d.levels = 11;
+    r = nvn_gpu_tex_create(&td, &dst, &e);
+    CHECK(OK(r), "C690 目标图创建：%d %s", r.code, e.why);
+    uint32_t bytes = 256 * block_bytes, row = 16 * block_bytes;
+    nvn_gpu_buf rb = make_buf(bytes, NVN_GPU_MEM_SHARED, NULL);
+    if (src && dst && rb) {
+        uint8_t blocks[4096];
+        for (unsigned i = 0; i < bytes; i++) blocks[i] = (uint8_t)(i * 73u + i / block_bytes + 19u);
+        NVNcopyRegion region = {0, 0, 0, 64, 64, 1};
+        nvn_gpu_cmd c = begin_cmd();
+        if (c) {
+            nvn_gpu_tex_upload(c, src, 0, 0, &region, blocks, row, bytes);
+            nvn_gpu_copy_tex(c, src, 0, 0, &region, dst, 4, 0, &region);
+            nvn_gpu_copy_tex_buf(c, dst, 4, 0, &region, rb, 0, row, bytes);
+            r = nvn_gpu_cmd_commit(c, signal, on_done, NULL, &e);
+            CHECK(OK(r), "C690 原生 BC 格式 %#x 跨 mip 图像拷贝应成功：%d %s", fmt, r.code, e.why);
+            if (OK(r)) {
+                r = nvn_gpu_fence_wait(signal, 5000000000ull, &e);
+                CHECK(OK(r), "C690 等待：%d %s", r.code, e.why);
+                if (OK(r)) {
+                    int same = !memcmp(buf_cpu(rb), blocks, bytes);
+                    CHECK(same, "C690 格式 %#x 的 %u 字节原始 BC 块应逐字节相同", fmt, bytes);
+                    if (same) printf("C690 跨 mip 原块一致：格式 %#x，%u 字节\n", fmt, bytes);
+                }
+            }
+        }
+    }
+    if (src) nvn_gpu_tex_release(src);
+    if (dst) nvn_gpu_tex_release(dst);
+    if (rb) nvn_gpu_buf_release(rb, NULL, NULL);
+}
+
+// 不满块的区域同时落在两张图的右下边缘，合法且只应替换最后一个块。
+static void c690_edge_copy(void) {
+    const uint32_t fmt = NVN_FORMAT_RGB_DXT1_SRGB;
+    if ((g_dev.bc_decode_mask & (1u << (fmt - 0x41))) || !(nvn_gpu_format_caps(fmt) & NVN_GPU_FMT_SAMPLE)) return;
+    nvn_gpu_tex src = make_tex(6, 6, fmt, NVN_GPU_TEX_SAMPLED | NVN_GPU_TEX_CPU_UPLOAD);
+    nvn_gpu_tex dst = make_tex(6, 6, fmt, NVN_GPU_TEX_SAMPLED | NVN_GPU_TEX_CPU_UPLOAD);
+    nvn_gpu_buf rb = make_buf(32, NVN_GPU_MEM_SHARED, NULL);
+    uint8_t a[32], b[32], want[32];
+    for (unsigned i = 0; i < 32; i++) { a[i] = (uint8_t)(i + 1); b[i] = (uint8_t)(i + 101); }
+    memcpy(want, b, 32); memcpy(want + 24, a + 24, 8);
+    if (src && dst && rb) {
+        NVNcopyRegion edge = {4, 4, 0, 2, 2, 1};
+        nvn_gpu_cmd c = begin_cmd(); nvn_gpu_err e = {0};
+        if (c) {
+            nvn_gpu_tex_upload(c, src, 0, 0, NULL, a, 16, 32);
+            nvn_gpu_tex_upload(c, dst, 0, 0, NULL, b, 16, 32);
+            nvn_gpu_copy_tex(c, src, 0, 0, &edge, dst, 0, 0, &edge);
+            nvn_gpu_copy_tex_buf(c, dst, 0, 0, NULL, rb, 0, 16, 32);
+            nvn_gpu_rc r = nvn_gpu_cmd_commit(c, 3, on_done, NULL, &e);
+            CHECK(OK(r), "C690 不满块的双图边缘应允许：%d %s", r.code, e.why);
+            if (OK(r)) {
+                r = nvn_gpu_fence_wait(3, 5000000000ull, &e);
+                CHECK(OK(r), "C690 边缘等待：%d %s", r.code, e.why);
+                if (OK(r)) {
+                    int same = !memcmp(buf_cpu(rb), want, 32);
+                    CHECK(same, "C690 边缘仅替换最后 8 字节块");
+                    if (same) printf("C690 双图边缘：仅替换末块，32 字节一致\n");
+                }
+            }
+        }
+    }
+    if (src) nvn_gpu_tex_release(src);
+    if (dst) nvn_gpu_tex_release(dst);
+    if (rb) nvn_gpu_buf_release(rb, NULL, NULL);
+}
+
+// 每个非法命令都使时间线进入失败终态，调用方为每例另开会话。
+static void c690_bad_region(int k) {
+    const uint32_t fmt = NVN_FORMAT_RGB_DXT1_SRGB;
+    if ((g_dev.bc_decode_mask & (1u << (fmt - 0x41))) || !(nvn_gpu_format_caps(fmt) & NVN_GPU_FMT_SAMPLE)) return;
+    uint32_t sw = k == 6 ? 6 : 8, dw = k == 7 ? 6 : 8;
+    nvn_gpu_tex src = make_tex(sw, 8, fmt, NVN_GPU_TEX_SAMPLED);
+    nvn_gpu_tex dst = make_tex(dw, 8, fmt, NVN_GPU_TEX_SAMPLED);
+    if (src && dst) {
+        NVNcopyRegion sr = {0, 0, 0, 4, 4, 1}, dr = sr;
+        switch (k) {
+        case 0: sr.xoffset = 1; break;
+        case 1: sr.yoffset = 1; break;
+        case 2: dr.xoffset = 1; break;
+        case 3: dr.yoffset = 1; break;
+        case 4: sr.width = dr.width = 2; break;
+        case 5: sr.height = dr.height = 2; break;
+        case 6: case 7: sr.width = dr.width = 6; break; // 只到其中一张图的边缘
+        }
+        nvn_gpu_cmd c = begin_cmd(); nvn_gpu_err e = {0};
+        if (c) {
+            nvn_gpu_copy_tex(c, src, 0, 0, &sr, dst, 0, 0, &dr);
+            nvn_gpu_rc r = nvn_gpu_cmd_commit(c, 1, on_done, NULL, &e);
+            CHECK(r.code == NVN_GPU_E_ARG, "C690 非法块区域 %d 应 E_ARG，实为 %d", k, r.code);
+            if (r.code == NVN_GPU_E_ARG) printf("C690 非法块区域 %d：E_ARG\n", k);
+        }
+    }
+    if (src) nvn_gpu_tex_release(src);
+    if (dst) nvn_gpu_tex_release(dst);
 }
 
 // C84b（#709）：块压缩贴图与非压缩贴图之间经缓冲逐字节拷（核心的「一块当一个像素」影子就是这么拷的）。
@@ -4609,6 +4807,70 @@ static void c86b_3d_slice_attach(void) {
     nvn_gpu_tex_release(t); nvn_gpu_buf_release(ib, NULL, NULL); nvn_gpu_buf_release(rb, NULL, NULL);
 }
 
+// C86c（#773）：三维块压缩贴图的深度切片经缓冲与非压缩贴图之间逐字节拷。核心把三维块压缩目标的一个深度切片当影子拷就是这么拷的
+//   （graphics/nvn/replay/rp_pass.c shadow_copy：通道前基底的切片 → 缓冲 → 二维影子，通道后影子 → 缓冲 → 基底的同一个切片；
+//   层号在三维贴图上是深度切片，后端转成 zoffset、depth 1）。影子是 RG32UI，一个像素 8 字节 = BC1 一块。
+// 期望（手算）：
+//   ① BC1 8x4x2（两块宽、一块高、两个切片）：切片 0 = A0 A1、切片 1 = B0 B1（四块互不相同，A = 0x10..0x1f、B = 0x20..0x2f、C = 0x30..0x3f）。
+//      切片 1 经 缓冲 → 2x1 的影子 → 缓冲 读回 = B0 B1（取错切片会读到 A）；
+//   ② 往影子写 C0 C1，经缓冲拷回切片 1，再读两个切片：切片 1 = C0 C1，切片 0 仍是 A0 A1（写错切片会盖掉 A）；
+//   ③ 三级的 BC1 8x8x2：第 2 级是 2x2 个纹素（一块，不是块高 4 的整数倍）。写 D（0x40..0x47）、经 1x1 的影子拷到切片 0 再读回 = D
+//      （核心按「基底那一级的像素尺寸」给拷贝区域，不按块取整，深一级的区域就是这样的）。
+//   不能直接采样 BC 的设备（后端走计算解码）建不了原生压缩的三维贴图，跳过。
+static nvn_gpu_tex make_tex_3d_levels(uint32_t w, uint32_t h, uint32_t depth, uint32_t levels, uint32_t fmt, uint32_t usage) {
+    nvn_gpu_tex_desc td; memset(&td, 0, sizeof td);
+    td.d.target = NVN_TEXTURE_TARGET_3D; td.d.format = (int)fmt; td.d.width = w; td.d.height = h;
+    td.d.depth = (int)depth; td.d.levels = (int)levels; td.d.samples = 0; td.usage = usage;
+    nvn_gpu_tex t = NULL; nvn_gpu_err e;
+    nvn_gpu_rc r = nvn_gpu_tex_create(&td, &t, &e);
+    CHECK(OK(r) && t, "tex_create 三维 %ux%ux%u 级 %u 失败：%d %s", w, h, depth, levels, r.code, e.why);
+    return t;
+}
+static void c86c_bc_3d_slice_copy(void) {
+    if ((g_dev.bc_decode_mask & (1u << (NVN_FORMAT_RGBA_DXT1 - 0x41))) || !(nvn_gpu_format_caps(NVN_FORMAT_RGBA_DXT1) & NVN_GPU_FMT_SAMPLE)) { fprintf(stderr, "C86c：BC1 非原生压缩存储，跳过三维切片原块拷贝\n"); return; }
+    nvn_gpu_tex bc = make_tex_3d_levels(8, 4, 2, 1, NVN_FORMAT_RGBA_DXT1, NVN_GPU_TEX_SAMPLED);
+    nvn_gpu_tex bm = make_tex_3d_levels(8, 8, 2, 3, NVN_FORMAT_RGBA_DXT1, NVN_GPU_TEX_SAMPLED);
+    nvn_gpu_tex px = make_tex(2, 1, NVN_FORMAT_RG32UI, NVN_GPU_TEX_RENDER | NVN_GPU_TEX_SAMPLED), p1 = make_tex(1, 1, NVN_FORMAT_RG32UI, NVN_GPU_TEX_RENDER | NVN_GPU_TEX_SAMPLED);
+    uint8_t init[64]; for (int i = 0; i < 64; i++) init[i] = (uint8_t)(0x10 + i);   // A0 A1 = 0x10..0x1f、B = 0x20..0x2f、C = 0x30..0x3f、D（第 2 级的一块）= 0x40..0x47
+    nvn_gpu_buf ib = make_buf(sizeof init, NVN_GPU_MEM_SHARED, init), rb = make_buf(64, NVN_GPU_MEM_SHARED, NULL);
+    if (!bc || !bm || !px || !p1 || !ib || !rb) return;
+    nvn_gpu_err e; nvn_gpu_cmd c = begin_cmd();
+    NVNcopyRegion rbc = {0, 0, 0, 8, 4, 1}, rpx = {0, 0, 0, 2, 1, 1};   // 基底按像素（整级 8x4），影子按块（2x1）
+    NVNcopyRegion rm = {0, 0, 0, 2, 2, 1}, r1 = {0, 0, 0, 1, 1, 1};     // 第 2 级：2x2 个纹素，影子 1x1
+    nvn_gpu_slice s1, s2, s3, s4;
+    nvn_gpu_rc r = nvn_gpu_arena_alloc(c, 16, 16, &s1, &e); CHECK(OK(r), "C86c 暂存 1：%d %s", r.code, e.why);
+    r = nvn_gpu_arena_alloc(c, 16, 16, &s2, &e); CHECK(OK(r), "C86c 暂存 2：%d %s", r.code, e.why);
+    r = nvn_gpu_arena_alloc(c, 8, 16, &s3, &e); CHECK(OK(r), "C86c 暂存 3：%d %s", r.code, e.why);
+    r = nvn_gpu_arena_alloc(c, 8, 16, &s4, &e); CHECK(OK(r), "C86c 暂存 4：%d %s", r.code, e.why);
+    nvn_gpu_copy_buf_tex(c, ib, 0, 16, 16, bc, 0, 0, &rbc);                 // 切片 0 ← A0 A1
+    nvn_gpu_copy_buf_tex(c, ib, 16, 16, 16, bc, 0, 1, &rbc);                // 切片 1 ← B0 B1
+    nvn_gpu_copy_tex_buf(c, bc, 0, 1, &rbc, s1.buf, s1.off, 16, 16);        // ① 通道前：基底的切片 1 → 缓冲
+    nvn_gpu_copy_buf_tex(c, s1.buf, s1.off, 16, 16, px, 0, 0, &rpx);        //            缓冲 → 影子
+    nvn_gpu_copy_tex_buf(c, px, 0, 0, &rpx, rb, 0, 16, 16);                 //            影子读回到 rb[0..16)
+    nvn_gpu_copy_buf_tex(c, ib, 32, 16, 16, px, 0, 0, &rpx);                // ② 「通道」往影子写 C0 C1
+    nvn_gpu_copy_tex_buf(c, px, 0, 0, &rpx, s2.buf, s2.off, 16, 16);        //    通道后：影子 → 缓冲
+    nvn_gpu_copy_buf_tex(c, s2.buf, s2.off, 16, 16, bc, 0, 1, &rbc);        //            缓冲 → 基底的同一个切片 1
+    nvn_gpu_copy_tex_buf(c, bc, 0, 0, &rbc, rb, 16, 16, 16);                //            读回切片 0 → rb[16..32)
+    nvn_gpu_copy_tex_buf(c, bc, 0, 1, &rbc, rb, 32, 16, 16);                //            读回切片 1 → rb[32..48)
+    nvn_gpu_copy_buf_tex(c, ib, 48, 8, 8, bm, 2, 0, &rm);                   // ③ 第 2 级切片 0 ← D（2x2 个纹素、一块）
+    nvn_gpu_copy_tex_buf(c, bm, 2, 0, &rm, s3.buf, s3.off, 8, 8);           //    基底第 2 级 → 缓冲
+    nvn_gpu_copy_buf_tex(c, s3.buf, s3.off, 8, 8, p1, 0, 0, &r1);           //    缓冲 → 1x1 的影子
+    nvn_gpu_copy_tex_buf(c, p1, 0, 0, &r1, s4.buf, s4.off, 8, 8);           //    影子 → 缓冲
+    nvn_gpu_copy_buf_tex(c, s4.buf, s4.off, 8, 8, bm, 2, 0, &rm);           //    缓冲 → 基底第 2 级（同一个切片）
+    nvn_gpu_copy_tex_buf(c, bm, 2, 0, &rm, rb, 48, 8, 8);                   //    读回 → rb[48..56)
+    r = nvn_gpu_cmd_commit(c, 191, on_done, NULL, &e);   // 围栏号同一会话里严格递增：取合入时的下一个空号（比前面所有用例的都大）
+    CHECK(OK(r), "C86c commit：%d %s", r.code, e.why);
+    r = nvn_gpu_fence_wait(191, 5000000000ull, &e);
+    CHECK(OK(r), "C86c wait：%d %s", r.code, e.why);
+    const uint8_t *o = buf_cpu(rb);
+    CHECK(!memcmp(o, init + 16, 16), "C86c ① 三维切片 1 经影子读回 %02x%02x%02x%02x…，期望 B0 B1 = 20212223…（读到 10111213 = 取成了切片 0）", o[0], o[1], o[2], o[3]);
+    CHECK(!memcmp(o + 16, init, 16), "C86c ② 切片 0 %02x%02x%02x%02x…，期望仍是 A0 A1 = 10111213…（被盖掉 = 写回写错了切片）", o[16], o[17], o[18], o[19]);
+    CHECK(!memcmp(o + 32, init + 32, 16), "C86c ② 切片 1 %02x%02x%02x%02x…，期望 C0 C1 = 30313233…（还是 B = 没写回）", o[32], o[33], o[34], o[35]);
+    CHECK(!memcmp(o + 48, init + 48, 8), "C86c ③ 第 2 级 %02x%02x%02x%02x…，期望 D = 40414243…", o[48], o[49], o[50], o[51]);
+    nvn_gpu_tex_release(bc); nvn_gpu_tex_release(bm); nvn_gpu_tex_release(px); nvn_gpu_tex_release(p1);
+    nvn_gpu_buf_release(ib, NULL, NULL); nvn_gpu_buf_release(rb, NULL, NULL);
+}
+
 int main(int argc, char **argv) {
     t29_format_expand();
     char why[256] = {0};
@@ -4630,6 +4892,16 @@ int main(int argc, char **argv) {
     g_desc.host_device = &g_dev;
     g_desc.app_label = "nvn-backend-vk-test";
     if (!open_backend()) return 1;
+    c690_native_bc_image_copy(NVN_FORMAT_RGB_DXT1_SRGB, 8, 1);
+    c690_native_bc_image_copy(NVN_FORMAT_RGBA_DXT5, 16, 2);
+    c690_edge_copy();
+    { nvn_gpu_err e690; CHECK(OK(nvn_gpu_close(5000000000ull, &e690)), "C690 close：%d %s", e690.rc.code, e690.why); }
+    for (int k = 0; k < 8; k++) {
+        if (!open_backend()) return 1;
+        c690_bad_region(k);
+        nvn_gpu_err e690; CHECK(OK(nvn_gpu_close(5000000000ull, &e690)), "C690 负例 %d close：%d %s", k, e690.rc.code, e690.why);
+    }
+    if (!open_backend()) return 1;
 
     nvn_gpu_caps caps;
     nvn_gpu_caps_get(&caps);
@@ -4637,6 +4909,7 @@ int main(int argc, char **argv) {
     CHECK(caps.max_sets > 0 && caps.max_buf_bytes > 0, "caps 限值没有填");
     CHECK(caps.caps_id[0] | caps.caps_id[1] | caps.caps_id[15], "caps_id 全 0");
     CHECK(nvn_gpu_format_caps(0x1) != 0, "format_caps 对 R8 无能力位");   // NVN_FORMAT_R8
+    t76_buf_create_alloc_cap();
 
     t01_fill32();
     t02_write_copy();
@@ -4827,6 +5100,7 @@ int main(int argc, char **argv) {
     c86_polygon_modes(argv[1]);
     c87_resolve(argv[1]);
     c86b_3d_slice_attach();
+    c86c_bc_3d_slice_copy();
     nvn_gpu_err e18;
     CHECK(OK(nvn_gpu_close(5000000000ull, &e18)), "C56–C68 / C74 / C75 成功路径 close：%d %s", e18.rc.code, e18.why);
     for (int k = 0; k < 8; k++) {
@@ -4871,6 +5145,9 @@ int main(int argc, char **argv) {
     if (!open_backend()) return 1;
     cube_array_one_face();
     CHECK(OK(nvn_gpu_close(5000000000ull, &e18)), "cube-array view close：%d %s", e18.rc.code, e18.why);
+    if (!open_backend()) return 1;   // C197 自己一个会话：围栏号从这里重新算，和前后用例不相干
+    c197_pass_cache();
+    CHECK(OK(nvn_gpu_close(5000000000ull, &e18)), "C197 close：%d %s", e18.rc.code, e18.why);
 
     for (int sw = 0; sw < 2; sw++) {
         if (!open_backend()) return 1;

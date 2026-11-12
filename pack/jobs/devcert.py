@@ -455,5 +455,7 @@ def sign_app(c, app, log):
         # --team-name：团队号写进签名（苹果发的证书 rcodesign 会自己从证书读，这里显式给，免得认不出的证书签出「没有团队号」的签名）。
         # -e 是「作用范围:值」格式、按第一个冒号拆：绝对路径带盘符（R:\…，Windows 实机 11-10 实测权限挂到了不存在的路径「R」上、主程序没权限）
         #   或目录名带冒号都会拆错，所以在权限文件所在目录里跑、只传不含冒号的文件名
-        c.run([rcs, "sign", "--p12-file", p12, "--p12-password-file", pf, "--team-name", got["teamId"], "-e", ef.name, app], log, cwd=ef.parent)
+        # --timestamp-url none（#794）：rcodesign 缺省向苹果时间戳服务器（timestamp.apple.com/ts01）要安全时间戳，连不上就整次签名失败、装不了也更新不了。
+        #   开发签名装自己的设备不需要安全时间戳（苹果自己的 codesign 对开发签名也不打，pack/dev_sign.py 同样 --timestamp=none）
+        c.run([rcs, "sign", "--p12-file", p12, "--p12-password-file", pf, "--team-name", got["teamId"], "--timestamp-url", "none", "-e", ef.name, app], log, cwd=ef.parent)
     return got["bundleId"], got

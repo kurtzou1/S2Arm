@@ -31,7 +31,7 @@ sys.path.insert(0, f'{h}/pack/jobs'); import milestones as ms
 ids = {m for m, *_ in ms.MILESTONES}
 for k, plan in ms.PLANS.items():
     if not set(plan) <= ids: bad.append(f'进度计划 {k} 有不存在的步骤：{set(plan) - ids}')
-if set(ms.PLANS) != {'ipa_dual', 'build_dual'}: bad.append(f'进度计划应只有直连两种，实有 {sorted(ms.PLANS)}')
+if set(ms.PLANS) != {'ipa_dual', 'build_dual', 'ipa_downstream'}: bad.append(f'进度计划应只有直连两种加下游方案一种（ipa_downstream，pack/jobs/downstream.py），实有 {sorted(ms.PLANS)}')
 for b in bad: print('不通', b)
 print(f'pack_entry：扫 {len(files)} 个脚本，{len(bad)} 处不符' if bad else f'pack_entry 单测全过（扫 {len(files)} 个脚本，4 个入口经 refresh.sh，计划 {len(ms.PLANS)} 份）')
 sys.exit(1 if bad else 0)

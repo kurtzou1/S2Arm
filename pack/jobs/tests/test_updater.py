@@ -956,8 +956,13 @@ class NoticeTests(unittest.TestCase):
         self.assertEqual(json.loads(out.getvalue()), {})
         self.assertFalse((self.private / "logs").exists())   # 公告与更新无关：不写 update.log
 
-    def test_shipped_notice_is_valid(self):   # 仓库里那份（Pages 发布 + 随包兜底）要能显示，带官方链接
-        item = updater.notice_valid(json.loads(updater.notice_file().read_text(encoding="utf-8")))
+    def test_shipped_notice_is_valid(self):   # 仓库里那份（Pages 发布 + 随包兜底）：有公告就要能显示、带官方链接；撤了就必须是说明里写的撤法
+        data = json.loads(updater.notice_file().read_text(encoding="utf-8"))
+        self.assertEqual(data.get("schema"), 1)
+        item = updater.notice_valid(data)
+        if "id" not in data:   # 11-12 撤公告后改成 {"schema": 1}（docs/site/README.md「撤掉公告」）：没有公告是合法状态
+            self.assertEqual(data, {"schema": 1}); self.assertIsNone(item)
+            return
         self.assertIsNotNone(item); self.assertIn("url", item)
         self.assertIn("s2arm.com", item["text"]["zh-Hans"]); self.assertIn("s2arm.com", item["text"]["en"])
 

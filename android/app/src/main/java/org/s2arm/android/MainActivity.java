@@ -151,7 +151,9 @@ public class MainActivity extends Activity
             // A5/#163 读数落 logcat（采集的 logcat.txt）：数值变化才写一行，插电时
             // unavailable 只在状态变化时报一次；rails 是 Android 15+ 的 CPU/GPU 轨功耗
             //（插电也可读），event 是低频原始值行（保留电流原号，供真机对账）。
-            powerSampler = new SystemPowerSampler(this, lifecycleProbe, new SystemPowerSampler.Sink() {
+            powerSampler = new SystemPowerSampler(this, lifecycleProbe,
+                java.util.concurrent.Executors.newSingleThreadExecutor(r -> { Thread t = new Thread(r, "s2a-power-read"); t.setDaemon(true); return t; }),
+                getMainExecutor(), new SystemPowerSampler.Sink() {
                 private String lastBattery = "", lastRails = "";
                 @Override public void battery(double watts) {
                     String text = Double.isNaN(watts)

@@ -1,3 +1,6 @@
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L   // clock_gettime / nanosleep（s2a_vk_wait_fences）
+#endif
 #define VK_USE_PLATFORM_ANDROID_KHR 1
 #include "vk_device.h"
 #include "vk_membuf.h"
@@ -7,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #if defined(__ANDROID__)
 #include <sys/system_properties.h>
@@ -618,4 +622,17 @@ done:
     vkDestroyBuffer(device->device, buf, NULL);
     if (why && why_size) snprintf(why, why_size, "%s", text);
     return rc;
+}
+
+VkResult s2a_vk_wait_fences(VkDevice device, uint32_t n, const VkFence *fences, uint64_t timeout_ns) {
+    struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
+    uint64_t el = 0;
+    for (;;) {
+        VkResult r = vkWaitForFences(device, n, fences, VK_TRUE, timeout_ns - el);
+        if (r != VK_TIMEOUT) return r;
+        struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
+        el = (uint64_t)(t.tv_sec - t0.tv_sec) * 1000000000ull + (uint64_t)t.tv_nsec - (uint64_t)t0.tv_nsec;
+        if (el >= timeout_ns) return VK_TIMEOUT;                    // 墙钟真到时限
+        struct timespec nap = {0, 200000}; nanosleep(&nap, NULL);   // 提前返回：让出 0.2 毫秒再等，不空转
+    }
 }

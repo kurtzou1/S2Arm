@@ -1507,10 +1507,21 @@ class PhoneGamesTruthTests(unittest.TestCase):
         """删手机上这款：文档根（含旧位置资源包）和新位置本款目录都删；新位置删不掉 → 报没删干净"""
         rms = []
         install.purge_game(self.fs({}, rms=rms)(None, None, None, None), self.A)
-        self.assertEqual(rms, [f"Documents/games/{self.A}", f"Library/Application Support/S2Arm/games/{self.A}"])
+        self.assertEqual(rms, [f"Documents/games/{self.A}", f"Library/Application Support/S2Arm/games/{self.A}", f"Library/S2Arm/games/{self.A}"])
         rms = []
         ok, out = install.purge_game(self.fs({"fail": []}, rms=rms)(None, None, None, None), self.A)
         self.assertEqual((ok, out), (False, "清不掉"))
+
+    def test_alt_location_wins_once_it_exists(self):
+        """备用位置 Library/S2Arm/games 在（新壳把整条归 root 的 Application Support 搬出来过）：这款在不在都推它、列它；
+        不在：照旧新位置 → 旧位置 → 第一次装推新位置（期望按规则手写）"""
+        alt = f"Library/S2Arm/games/{self.A}/资源包"
+        cl = self.fs({"Library/S2Arm/games": [self.A], alt: [".applied", "index.tsv"], f"Library/Application Support/S2Arm/games/{self.A}/资源包": ["x"]})(None, None, None, None)
+        self.assertEqual(install.pack_listing(cl, self.A), (alt, [".applied", "index.tsv"]))
+        cl = self.fs({"Library/S2Arm/games": []})(None, None, None, None)
+        self.assertEqual(install.pack_listing(cl, self.A), (alt, None))
+        cl = self.fs({})(None, None, None, None)
+        self.assertEqual(install.pack_listing(cl, self.A), (f"Library/Application Support/S2Arm/games/{self.A}/资源包", None))
 
     def test_name_read_from_phone_with_the_bundle_being_installed(self):
         # Windows 第一次装（这台还没记录包名）：确认框里的名字照样按这次要装的包名去手机上读 control.nacp（Windows 实机曾显示成游戏号）

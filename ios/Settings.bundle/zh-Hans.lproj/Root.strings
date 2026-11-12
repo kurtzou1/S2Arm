@@ -28,6 +28,9 @@
 "Controller" = "手柄";
 "When on, you can connect a Switch 2 Pro Controller in game and use its buttons, HD rumble and motion controls. Hold the SYNC button on top of the controller to connect. This setting applies only to this app." = "开启后可在游戏中连接 Switch 2 Pro 手柄，使用按键、双频震动和体感。连接时需长按手柄顶部 SYNC 键。此设置仅对当前 App 生效。";
 "Enable Switch 2 Pro Controller Support" = "启用 Switch 2 Pro 手柄适配";
+"Sound" = "声音";
+"When on, game sound keeps playing while the iPhone is in Silent Mode. When off, S2Arm follows Silent Mode like other games. Takes effect when you switch back to the app." = "开启后，iPhone 处于静音模式时游戏照样出声；关闭时和其他游戏一样跟随静音模式。切回 App 即生效。";
+"Play Sound in Silent Mode" = "静音模式下也播放声音";
 "Saves" = "存档";
 "Save in the game first, then close and reopen the app. Save management opens before the game starts, where you can export a backup or import a .s2asave file from a Mac. Your current save is kept before restoring. The switch turns off once the game starts." = "先在游戏内保存，再关闭并重新打开 App。存档管理会在游戏启动前打开，可导出备份或导入 Mac 的 .s2asave 文件。恢复前会保留原存档。开始游戏后开关自动关闭。";
 "Manage Saves on Next Open" = "下次打开时管理存档";

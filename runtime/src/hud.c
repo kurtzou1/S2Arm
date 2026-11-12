@@ -22,6 +22,9 @@
 #include <os/proc.h>
 #endif
 
+// GPU 已分配（Metal 设备 currentAllocatedSize，直连层 graphics/nvn nvn_mtl.m 强定义）：和进程实占是两本账——内存池的零拷贝缓冲、贴图都记在这里，
+//   没有直连层 / 设备还没建 = 0（浮层就只写进程实占）
+__attribute__((weak)) uint64_t s2a_gpu_alloc_bytes(void) { return 0; }
 // 上屏时间戳环在 ap_host.c（逐帧路径只依赖它自己；只链 ap_host 的单测不用带上本文件）：写方只有上屏线程，界面线程按序号读，读到被覆盖的就停
 enum { HR = 2048 };
 extern _Atomic uint64_t g_s2a_hud_ft[HR], g_s2a_hud_fn;
@@ -150,7 +153,7 @@ static void line_energy(char *o, size_t n, const s2a_hud_host *h) {
     if (s2a_energy_snap(&s)) snprintf(w, sizeof w, NOT_GIVEN);
     else {
         if (have && s.wall > last.wall) {
-            double sec = (s.wall - last.wall) / 1e9, cpu = (s.nj - last.nj) / 1e9 / sec, gms = s.ok_g && last.ok_g ? (s.gpu_ms - last.gpu_ms) / sec : -1;   // GPU 只有忙的时间、没有瓦数（10-30 测量口径修法 5）
+            double sec = (s.wall - last.wall) / 1e9, cpu = (s.nj - last.nj) / 1e9 / sec, gms = s2a_gpu_busy_rate(&last, &s);   // GPU 只有忙的时间、没有瓦数（10-30 测量口径修法 5）
             if (gms >= 0) snprintf(w, sizeof w, "CPU %.2f W（GPU 忙 %.0f ms/s）", cpu, gms); else snprintf(w, sizeof w, "CPU %.2f W（GPU " NOT_GIVEN "）", cpu);
         }
         last = s; have = 1;
@@ -210,7 +213,8 @@ static void line_mem(char *o, size_t n) {
     uint64_t m = 0; size_t sz = sizeof m; if (!sysctlbyname("hw.memsize", &m, &sz, NULL, 0)) lim = m / 1048576.0;
 #endif
     char a[24] = "读取失败", b[24] = "未取得"; if (fp >= 0) snprintf(a, sizeof a, "%.0f MB", fp); if (lim > 0) snprintf(b, sizeof b, "%.0f MB", lim);
-    snprintf(o, n, "内存 %s / 上限 %s", a, b);
+    uint64_t g = s2a_gpu_alloc_bytes();
+    if (g) snprintf(o, n, "内存 %s / 上限 %s · GPU 已分配 %.0f MB（另一本账，撞上限报 OutOfMemory）", a, b, g / 1048576.0); else snprintf(o, n, "内存 %s / 上限 %s", a, b);
 }
 
 // 简版一行：近 1 秒上屏帧数 + 本进程物理内存占用（与开发浮层同源：上屏时间戳环、phys_footprint）
@@ -223,7 +227,8 @@ int s2a_hud_brief(char *out, size_t n) {
     }
     task_vm_info_data_t vi; mach_msg_type_number_t c = TASK_VM_INFO_COUNT;
     double gb = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &c) == KERN_SUCCESS ? vi.phys_footprint / 1073741824.0 : -1;
-    char m[24]; snprintf(m, sizeof m, "%s", S2A_UI(S2A_UI_HUD_MEM_FAIL)); if (gb >= 0) snprintf(m, sizeof m, "%.1f GB", gb);
+    char m[64]; snprintf(m, sizeof m, "%s", S2A_UI(S2A_UI_HUD_MEM_FAIL)); uint64_t g = s2a_gpu_alloc_bytes();
+    if (gb >= 0 && g) snprintf(m, sizeof m, S2A_UI(S2A_UI_HUD_MEM_GPU), gb, g / 1073741824.0); else if (gb >= 0) snprintf(m, sizeof m, "%.1f GB", gb);
     return snprintf(out, n, S2A_UI(S2A_UI_HUD_BRIEF), (unsigned long long)f1, m);
 }
 

@@ -527,19 +527,43 @@ int main(void) {
               "写不进 → 迁好：返回 1、克隆 3 个文件（romfs.img、a.tar、上一步失败写下的 unpack.log）、新资源包可写、内容一致、旧目录留在 .s2a-unwritable-*（实际 %d / %u / 内容「%s」）", r, s2a_games_repair_files(), buf);
         CHECK(s2a_pack_apply(gd) != 0 && !strstr(s2a_pack_apply_failure(), "写不进"), "迁好后解包不再报目录写不进（这里因夹具不是真包会别的原因失败）：「%s」", s2a_pack_apply_failure());
         CHECK(s2a_games_repair(base) == 0, "迁好后再查：都写得进（返回 0）");
-        // 迁移失败：新游戏目录放一个命名管道（不是普通文件 / 目录 / 链接）再设成写不进
+        // 反防御：读不到的项跳过、读得到的照搬——写不进的游戏目录里放一个命名管道（不是普通文件 / 目录 / 链接）、一个谁都读不了的文件（000）、一个正常文件：
+        //   迁好（返回 1），正常文件搬过去（1 个），管道与读不了的文件跳过（不在新树里），新目录可写、没有残留的 .s2a-games-new-*
         char g2[600]; snprintf(g2, sizeof g2, "%s/games/0100000000DEF000", base); mkdir(g2, 0755);
-        char fifo[700]; snprintf(fifo, sizeof fifo, "%s/pipe", g2); mkfifo(fifo, 0644); chmod(g2, 0555);
+        char fifo[700]; snprintf(fifo, sizeof fifo, "%s/pipe", g2); mkfifo(fifo, 0644);
+        char locked[700]; snprintf(locked, sizeof locked, "%s/locked.bin", g2); { FILE *lf = fopen(locked, "w"); if (lf) { fputs("x", lf); fclose(lf); } } chmod(locked, 0);
+        char okf[700]; snprintf(okf, sizeof okf, "%s/ok.bin", g2); { FILE *of = fopen(okf, "w"); if (of) { fputs("ok", of); fclose(of); } }
+        chmod(g2, 0555);
         int r2 = s2a_games_repair(base);
         snprintf(c, sizeof c, "ls -d '%s'/.s2a-games-new-* >/dev/null 2>&1", base);
         struct stat st2;
-        CHECK(r2 < 0 && strstr(s2a_games_repair_detail(), "不是普通文件") && !stat(fifo, &st2) && sh(c) != 0,
-              "迁移失败：返回负数、原因说明哪一个、原目录原样、新树清掉（实际 %d「%s」）", r2, s2a_games_repair_detail());
-        chmod(g2, 0755);
+        CHECK(r2 == 1 && !stat(okf, &st2) && stat(fifo, &st2) && stat(locked, &st2) && !access(g2, W_OK) && sh(c) != 0,
+              "读不到的跳过、读得到的照搬：返回 1、ok.bin 在新目录、管道与 000 文件不在、新目录可写、新树没残留（实际 %d「%s」）", r2, s2a_games_repair_detail());
+        snprintf(c, sizeof c, "chmod -R u+rw '%s'/.s2a-unwritable-* 2>/dev/null", base); sh(c);
 #endif
         chmod(root, 0755);
         snprintf(c, sizeof c, "chmod -R u+w '%s' 2>/dev/null; rm -rf '%s'", base, base); sh(c);
     }
+    // iOS 27 玩家机（v0.3.3）：Library/Application Support/S2Arm 整条 App 写不进（归 root），连迁移的新树都建不出 → 资源包改放备用位置 Library/S2Arm：
+    //   读得到的搬过去（返回 1、1 个文件、内容一致），旧的原样留着，之后本款资源包根取备用位置；再查一次不再动（返回 0）。期望按规则手写（s2a_docs.h、pack_apply.c repair_pack_base）
+#if defined(__APPLE__)
+    if (getuid() != 0) {
+        char base[] = "/tmp/s2a_t_alt_XXXXXX"; if (!mkdtemp(base)) return 1;
+        char c[4096], pd[600], sup[700], gd[700], want[800], root[800]; const char *gid = "0100F8D01A06E000";
+        snprintf(pd, sizeof pd, "%s/Documents", base); snprintf(sup, sizeof sup, "%s/Library/Application Support/S2Arm", base);
+        snprintf(c, sizeof c, "mkdir -p '%s/games/%s' '%s/games/%s/资源包' && printf 'hello' > '%s/games/%s/资源包/romfs.img' && chmod -R a-w '%s'", pd, gid, sup, gid, sup, gid, sup); sh(c);
+        snprintf(gd, sizeof gd, "%s/games/%s", pd, gid);
+        int r = s2a_games_repair(pd);
+        s2a_pack_root(root, sizeof root, gd);
+        snprintf(want, sizeof want, "%s/Library/S2Arm/games/%s/资源包", base, gid);
+        char buf[16] = ""; char fp[900]; snprintf(fp, sizeof fp, "%s/romfs.img", want); FILE *f = fopen(fp, "r"); if (f) { size_t k = fread(buf, 1, sizeof buf - 1, f); buf[k] = 0; fclose(f); }
+        char old[900]; snprintf(old, sizeof old, "%s/games/%s/资源包/romfs.img", sup, gid); struct stat so;
+        CHECK(r == 1 && s2a_games_repair_files() == 1 && !strcmp(root, want) && !strcmp(buf, "hello") && !access(want, W_OK) && !stat(old, &so),
+              "主位置整条写不进 → 搬到 Library/S2Arm：返回 1、1 个文件、资源包根换到备用位置、内容一致、可写、旧的还在（实际 %d / %u /「%s」/「%s」）", r, s2a_games_repair_files(), root, buf);
+        CHECK(s2a_games_repair(pd) == 0, "搬过之后再查：不再动（返回 0）");
+        snprintf(c, sizeof c, "chmod -R u+w '%s' 2>/dev/null; rm -rf '%s'", base, base); sh(c);
+    }
+#endif
     // ⑮ 资源包挪出 Documents（v0.3.0）：容器形状的临时目录 <容器>/Documents/games/<游戏号>；期望按规则手写（s2a_docs.h s2a_pack_root、pack_apply.c s2a_pack_migrate_one）
     {
         char base[] = "/tmp/s2a_t_migrate_XXXXXX"; if (!mkdtemp(base)) return 1;

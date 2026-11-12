@@ -14,9 +14,11 @@
 uint64_t nvn_new_serial(void);
 int s2a_test_gl_session_resources(unsigned rounds);
 int s2a_test_vk_session_resources(unsigned rounds);
+int s2a_test_vk_bc(void);   // 块压缩贴图上传（S2A_TEST_VK_BC=1 时只跑它；再配 DM_TEST_NO_BC=1 走解码路径）
 
 int main(void) {
     @autoreleasepool {
+        if (getenv("S2A_TEST_VK_BC")) return s2a_test_vk_bc();
         // Deliberately reuse this exact guest address in every generation.
         // A prior GPU-write page mark must not suppress the next run's initial bytes.
         uint8_t *pool = mmap(NULL, 1 << 20, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);

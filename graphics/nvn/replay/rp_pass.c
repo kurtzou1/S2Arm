@@ -80,7 +80,10 @@ static int dup_slot(int i) {
 // 等于基底一个像素的字节、且基底的存储字节就是游戏的字节的才走（D16、D32F；D24S8 不算）。影子按槽常驻复用。
 // 块压缩格式同一套影子（#709，iOS bcrt_attach）：视图一个像素的字节等于基底一块的字节（BC1 / BC4 8 字节，其余 16），一块当一个像素，
 // 影子按块数建；基底那边拷贝区域按像素给（整级），缓冲里一行就是一行块。基底在本设备上不能直接采样（后端走计算解码，存储里已经不是
-// 游戏的字节）或是三维贴图的不走，照旧当空槽记账。
+// 游戏的字节）的不走，照旧当空槽记账。
+// 三维的块压缩基底（#773，iOS bcrt_attach 的 z = depthPlane；一款程序的 32x32x32 三维压缩贴图一个深度切片一个通道）同一套影子：视图的
+// 层号在三维贴图上是深度切片，原样当基底拷贝的 layer——后端 nvn_gpu_copy_tex_buf / copy_buf_tex 在三维贴图上把它转成 zoffset、depth 1
+// （越界回 E_ARG）；影子仍是二维的块宽 x 块高，不建三维视图（附件视图见下面的 att_view，不经这条路）。
 typedef struct { nvn_gpu_tex g; nvn_gpu_view v; uint32_t fmt, w, h; } shadow_t;
 static shadow_t g_sh[8];
 static struct { nvn_gpu_tex base; uint32_t level, layer, w, h, bytes, bw, bh; } g_shu[8];   // 当前通道里各槽用着的影子（base 为空 = 没用）；w、h 是影子的尺寸，bw、bh 是基底那一级的像素尺寸
@@ -102,7 +105,6 @@ static int slot_kind(int i, uint32_t *bytes, const char **why) {
         uint32_t bw, bh;
         if (!bc_view(t, &P.rt.cview[i], P.rt.has_cview[i], &bw, &bh)) return -1;
         if (!(nvn_gpu_format_caps((uint32_t)t->d.format) & NVN_GPU_FMT_SAMPLE)) return -1;   // 设备不能直接采样（后端走计算解码）：存储里不是游戏的字节，不能逐字节拷
-        if (t->d.target == NVN_TEXTURE_TARGET_3D) { if (why) *why = "color_target_compressed_3d"; return -1; }   // 三维的一个深度切片一个通道：首版没做
         if (!(nvn_gpu_format_caps(P.rt.cview[i].format) & NVN_GPU_FMT_RENDER)) return -1;
         if (bytes) *bytes = b.bytes;
         return 1;

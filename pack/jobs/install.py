@@ -270,11 +270,14 @@ def game_docs(gid):
 
 DOCS_GAMES = "Documents/games"
 PACK_GAMES = "Library/Application Support/S2Arm/games"   # 每款资源包放 <PACK_GAMES>/<游戏号>/资源包（设备侧宿主同口径）
+# 备用位置（v0.3.3）：iOS 27 玩家机上 Library/Application Support/S2Arm 整条归 root、App 写不进，新壳把资源包搬到 Library/S2Arm/games（runtime/src/pack_apply.c
+#   repair_pack_base）；手机上有它就一律推它（宿主同一判据：s2a_docs.h s2a_pack_base_rel 看 Library/S2Arm/games 在不在）
+PACK_GAMES_ALT = "Library/S2Arm/games"
 
 
-def game_pack(gid):
-    """本款设备侧资源包根（新位置，不在 Documents 里）"""
-    return f"{PACK_GAMES}/{gid.upper()}/资源包"
+def game_pack(gid, games=PACK_GAMES):
+    """本款设备侧资源包根（新位置，不在 Documents 里；games = PACK_GAMES_ALT 时是备用位置）"""
+    return f"{games}/{gid.upper()}/资源包"
 
 
 def game_pack_old(gid):
@@ -1281,7 +1284,7 @@ def phone_games(c, ph):
     with tempfile.TemporaryDirectory(dir=c.private) as w:
         cl = devpush_client(c, ph.udid, bid, w)
         names = set()
-        for root in (DOCS_GAMES, PACK_GAMES):
+        for root in (DOCS_GAMES, PACK_GAMES, PACK_GAMES_ALT):
             rc, out = cl.call("ls", root)
             if rc:
                 if dir_missing(out):   # 这处还没建（App 在、还没装过任何一款 / 只有新或旧一处）：这处当 0 款，装机照常（推资源包时自会建目录）
@@ -1304,6 +1307,11 @@ def pack_listing(cl, gid, ph=None):
     含推进 .incoming 的包；增量仍按旧位置的 index.applied.tsv 算，不因新位置是空的整份重推几 GB）；两处都不在（第一次装这款）→ (新位置, None)。
     列不出（锁屏 / 断开等，不是「目录不在」）：照装机原则按「两处都不在」推到新位置继续，只记进日志（最多整份重推一次）。
     老位置真有一份旧的也不会两份长期并存：App 下次打开游戏库时 s2a_pack_migrate_one 见新旧都在、新的已应用，就删掉老的（runtime/src/pack_apply.c）"""
+    rc, out = cl.call("ls", PACK_GAMES_ALT)   # 手机上有备用位置（新壳搬过）：宿主只认它，这款在不在都推它
+    if not rc:
+        root = game_pack(gid, PACK_GAMES_ALT)
+        rc, out = cl.call("ls", root)
+        return root, (None if rc else out.splitlines())
     for root in (game_pack(gid), game_pack_old(gid)):
         rc, out = cl.call("ls", root)
         if not rc:
@@ -1325,7 +1333,8 @@ def purge_game(cl, gid):
     """删手机上这款的数据：文档根（存档 / 金手指 / 解包日志，连同旧位置的资源包）+ 新位置本款目录（资源包）。→ (都删掉?, 输出)"""
     ok1, out1 = cl.rm(game_docs(gid))
     ok2, out2 = cl.rm(f"{PACK_GAMES}/{gid.upper()}")
-    return ok1 and ok2, "\n".join(o for o in (out1, out2) if o)
+    ok3, out3 = cl.rm(f"{PACK_GAMES_ALT}/{gid.upper()}")   # 备用位置（不在算删掉）
+    return ok1 and ok2 and ok3, "\n".join(o for o in (out1, out2, out3) if o)
 
 
 def phone_game_name(c, ph, gid, names):
@@ -1337,7 +1346,7 @@ def phone_game_name(c, ph, gid, names):
         with tempfile.TemporaryDirectory(dir=c.private) as w:
             dst = Path(w) / "control.nacp"
             cl = devpush_client(c, ph.udid, phone_bid(ph), w)
-            if any(cl.get(f"{root}/ctl/control.nacp", dst) for root in (game_pack(gid), game_pack_old(gid))):
+            if any(cl.get(f"{root}/ctl/control.nacp", dst) for root in (game_pack(gid, PACK_GAMES_ALT), game_pack(gid), game_pack_old(gid))):
                 dump = library.engine_tool(c, "ns2_dump")
                 n = dst.read_bytes()
                 return dump.nacp_title(n, 14) or dump.nacp_title(n, 0) or gid
@@ -1470,6 +1479,10 @@ def update_phone(c):
 def install(c):
     """默认「装到 iPhone」：这款进容器（一个 App 装下整个游戏库，免费账号也只占 1 个 App 额度）。加款 = 同一个包名覆盖安装，Documents 保留"""
     gid = c.r.get("gameId") or ""
+    import downstream
+    scheme = downstream.requested(c, dict(id=gid))   # 下游深度方案出的是独立 App：自己的包名，不进容器（pack/jobs/downstream.py）
+    if scheme:
+        return downstream.install_ios(c, next((g for g in c.catalog()["games"] if g["id"].upper() == gid.upper()), dict(id=gid)), scheme)
     ios_pack(c, gid)
     c.begin("找签名账号与 iPhone", 1, 6)
     return put_game(c, gid, phone_for(c))

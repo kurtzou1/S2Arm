@@ -11,6 +11,9 @@ native-graphics-session-probe: $(BUILD)/s2arm-host graphics/nvn/tests/t_session_
 native-test-graphics_session:
 	$(MAKE) S2A_CS=1 BUILD=$(BUILD)/graphics-session-test native-graphics-session-probe
 	$(BUILD)/graphics-session-test/probe_graphics_session
+	S2A_TEST_VK_BC=1 $(BUILD)/graphics-session-test/probe_graphics_session
+	S2A_TEST_VK_BC=1 DM_TEST_NO_BC=1 $(BUILD)/graphics-session-test/probe_graphics_session
+	@echo '✓ t_session_resources'
 	@echo '✓ t_graphics_session'
 TEST_TARGETS += native-test-graphics_session
 endif

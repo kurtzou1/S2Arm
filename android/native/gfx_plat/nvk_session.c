@@ -45,7 +45,9 @@ int nvk_session_open(struct s2a_vk_device *dev, const char *cache_dir, char *why
       nvn_dirty_set_chunk_pages(cp > 0 ? (uint32_t)cp : 0); __android_log_print(ANDROID_LOG_INFO, TAG, "nvk session: 写跟踪保护分块 %d 页", cp); }
     g_ready = 1;
     nvn_gpu_caps caps; nvn_gpu_caps_get(&caps);
-    __android_log_print(ANDROID_LOG_INFO, TAG, "nvk session: backend open on %s (api %u, caps %#x)", caps.name, caps.api_version, caps.caps);
+    __android_log_print(ANDROID_LOG_INFO, TAG, "nvk session: backend open on %s (api %u, caps %#x, 单次分配上限 %llu, SSBO 范围上限 %llu)",
+                        caps.name, caps.api_version, caps.caps,
+                        (unsigned long long)caps.max_buf_bytes, (unsigned long long)caps.max_ssbo_range);
     pthread_mutex_unlock(&g_mu);
     return 0;
 }

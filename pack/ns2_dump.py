@@ -148,6 +148,23 @@ def synth_nacp(tid, name, saves=()):
     return bytes(n)
 
 
+def fill_fixed(nacp, tid, saves=()):
+    """原件的固定段（0x3000 起：启动账号、语言位、存档归属号与各存档尺寸）全零时补上存档字段 → (新内容, 是否补了)。
+    某款 Switch 2 游戏的更新包元数据里带的控制数据只有标题和发行商、0x3000 往后全 0：原样用时宿主不建账号存档，游戏开存档 2002-1002 自己中止、起局黑屏。
+    补法同 synth_nacp 的存档部分（启动账号 Required、归属号 = 程序号、账号存档 128 / 64 MB、游戏代码挂的其余存档类别）；
+    语言位保持 0：Switch 2 游戏支持表未知时服务层按宿主语言（#465），不写死英语。固定段不是全零（真原件）一字不动"""
+    if len(nacp) < NACP_SIZE or any(nacp[0x3000:NACP_SIZE]):
+        return nacp, False
+    n = bytearray(nacp)
+    n[0x3025] = 1
+    struct.pack_into('<Q', n, 0x3078, tid)
+    struct.pack_into('<q', n, 0x3080, 0x08000000)
+    struct.pack_into('<q', n, 0x3088, 0x04000000)
+    for off, v in saves:
+        struct.pack_into('<q', n, off, v)
+    return bytes(n), True
+
+
 def same_file(rb, ru, limit=64):
     """全量 / 差量判法：导出工具挂的是打过补丁的文件系统 = 全量，里面一定有没改过、与本体逐字节相同的文件；
     差量包只装改过 / 新增的，没有这种文件。只看同路径同大小的前 limit 个，找到一个就返回它的路径，找不到返回 None。
@@ -308,13 +325,14 @@ def convert(dump, out, name=None):
     real = find_control([upd, base] if upd else [base])
     if real:   # 导出带了控制分区：用原件，标题 / 显示版本 / 图标都是游戏自带的
         nacp, icons = real
+        nacp, filled = fill_fixed(nacp, tid, save_kinds(os.path.join(tmp, 'exefs'))[0])
         with open(os.path.join(tmp, 'ctl', 'control.nacp'), 'wb') as f:
             f.write(nacp)
         if icons:
             clone(icons[0], os.path.join(tmp, 'icon.jpg'))
         nm, nzh, dver = nacp_title(nacp, 0) or '', nacp_title(nacp, 14) or nacp_title(nacp, 13) or '', nacp[0x3060:0x3070].split(b'\0')[0].decode('ascii', 'replace')
         nm = nm or nzh or name or os.path.basename(os.path.normpath(dump))
-        ctl_note = '控制分区用原件'
+        ctl_note = '控制分区用原件' + ('（原件固定段全零，补了存档字段）' if filled else '')
     else:   # 没带：合成。README.synth 只标明来源（标题取导出目录名；维护者 11-04：导不出控制分区就用文件夹名，取名函数照读）
         nm, nzh, dver = name or os.path.basename(os.path.normpath(dump)), '', ''
         saves, snotes = save_kinds(os.path.join(tmp, 'exefs'))

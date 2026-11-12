@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #endif
@@ -39,26 +40,37 @@ static inline int s2a_docs_path(char *out, size_t n, const char *fmt, ...) {
 //   多款容器每款文档根是 <容器>/Documents/games/<游戏号>（存档 S2A/ryujinx、金手指、unpack.log 留在那里，玩家在「文件」里看得见），
 //   它的资源包放 <容器>/Library/Application Support/S2Arm/games/<游戏号>/资源包（不在「文件」里、不进 iCloud 备份）；
 //   别的文档根（单款兼容 App、Mac 局、单测临时目录）资源包照旧在 <文档根>/资源包。唯一取法：宿主、电脑端推包（pack/jobs/install.py game_pack）、
-//   出容器（pack/ship_ext.py launch.ctx game_data）都按这一条，不许另拼。纯字符串，不碰磁盘
+//   出容器（pack/ship_ext.py launch.ctx game_data）都按这一条，不许另拼。只看一处目录在不在（下面的备用位置），不读别的
+// 备用位置 <容器>/Library/S2Arm（v0.3.3，iOS 27 玩家机上 Library/Application Support/S2Arm 整条归 root、App 写不进，连迁移的新树都建不出来）：
+//   Library 本身归 App。<容器>/Library/S2Arm/games 在就用它（s2a_games_repair 搬过来时建；电脑端推包同一判据，pack/jobs/install.py pack_listing）
 #define S2A_PACK_BASE_REL "Library/Application Support/S2Arm"
+#define S2A_PACK_BASE_ALT_REL "Library/S2Arm"
 static inline int s2a_pack_legacy_root(char *out, size_t n, const char *docs) { return snprintf(out, n, "%s/资源包", docs); }
+static inline const char *s2a_pack_base_rel(const char *container, int clen) {   // 容器根（前 clen 字节）下用哪一处
+    char alt[1200]; struct stat st;
+    snprintf(alt, sizeof alt, "%.*s/" S2A_PACK_BASE_ALT_REL "/games", clen, container);
+    return !stat(alt, &st) && S_ISDIR(st.st_mode) ? S2A_PACK_BASE_ALT_REL : S2A_PACK_BASE_REL;
+}
 static inline int s2a_pack_root(char *out, size_t n, const char *docs) {
     static const char key[] = "/Documents/games/";
     const char *k = docs ? strstr(docs, key) : NULL;
     if (k) {
         const char *gid = k + sizeof key - 1;
         if (*gid && *gid != '.' && !strchr(gid, '/'))
-            return snprintf(out, n, "%.*s/" S2A_PACK_BASE_REL "/games/%s/资源包", (int)(k - docs), docs, gid);
+            return snprintf(out, n, "%.*s/%s/games/%s/资源包", (int)(k - docs), docs, s2a_pack_base_rel(docs, (int)(k - docs)), gid);
     }
     return s2a_pack_legacy_root(out, n, docs ? docs : ".");
 }
-// 进程级 Documents（<容器>/Documents）→ 新位置的根 <容器>/Library/Application Support/S2Arm（迁移、#569 写不进修复扫这里的 games/）；
-//   proc_docs 不以 /Documents 结尾返回 -1（不猜）
-static inline int s2a_pack_base(char *out, size_t n, const char *proc_docs) {
+// 进程级 Documents（<容器>/Documents）→ 资源包位置的根（备用位置在就是它，否则 Library/Application Support/S2Arm；迁移、#569 写不进修复扫这里的 games/）；
+//   proc_docs 不以 /Documents 结尾返回 -1（不猜）。s2a_pack_base_main / _alt：固定取其中一处（修复时两处都要看）
+static inline int s2a_pack_base_at(char *out, size_t n, const char *proc_docs, const char *rel) {
     size_t l = proc_docs ? strlen(proc_docs) : 0;
     if (l < 10 || strcmp(proc_docs + l - 10, "/Documents")) return -1;
-    return snprintf(out, n, "%.*s/" S2A_PACK_BASE_REL, (int)(l - 10), proc_docs);
+    return snprintf(out, n, "%.*s/%s", (int)(l - 10), proc_docs, rel ? rel : s2a_pack_base_rel(proc_docs, (int)(l - 10)));
 }
+static inline int s2a_pack_base(char *out, size_t n, const char *proc_docs) { return s2a_pack_base_at(out, n, proc_docs, NULL); }
+static inline int s2a_pack_base_main(char *out, size_t n, const char *proc_docs) { return s2a_pack_base_at(out, n, proc_docs, S2A_PACK_BASE_REL); }
+static inline int s2a_pack_base_alt(char *out, size_t n, const char *proc_docs) { return s2a_pack_base_at(out, n, proc_docs, S2A_PACK_BASE_ALT_REL); }
 
 #if defined(__APPLE__) && TARGET_OS_IPHONE
 // 进程级 App 容器 Documents（不看 S2A_DOCS）：只给 iOS 上本来就按容器、不按款的东西用（host.log 与日志归档、资源导入闸门、手柄录制）。

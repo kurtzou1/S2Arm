@@ -59,6 +59,10 @@ internal static unsafe class Program
     private static ulong Tex2D(int dest, int coord, int tid = 0) =>
         0xC000000000000000UL | (7UL << 16) | (2UL << 28) | (0xFUL << 31) |
         ((ulong)tid << 36) | ((ulong)coord << 8) | (uint)dest;
+    // TEX.B: SrcB supplies a runtime texture/sampler handle (InstTexB decoder).
+    private static ulong TexBindless2D(int dest, int coord, int handle) =>
+        0xDE80000000000000UL | (7UL << 16) | (2UL << 28) | (0xFUL << 31) |
+        ((ulong)handle << 20) | ((ulong)coord << 8) | (uint)dest;
     private static ulong Ast4Pos(int reg) =>
         0xEFF0000000000000UL | (0xFFUL << 39) | (3UL << 47) | (0x70UL << 20) | (7UL << 16) | (0xFFUL << 8) | (uint)reg;
     private static byte[] Guest(bool fragment, ulong[] ops, int[] reads = null)
@@ -80,6 +84,109 @@ internal static unsafe class Program
         return b;
     }
     private static byte[] ComputeGuest() => MemoryMarshal.AsBytes(new ulong[] { Sched, Exit, 0x50B0000000070F00UL, 0xE2400FFFFF07000FUL }.AsSpan()).ToArray();
+
+    // 原创合成 Maxwell GS：普通（非 passthrough）几何阶段，读写 loc0，发出顶点并结束图元。
+    // OUT 的 opcode / 类型域分别来自 InstTable 和 InstOutR，不依赖游戏输入。
+    private static byte[] GeometryGuest(bool viewportIndex = false, bool omitVaryingOutput = false, bool uniform = false)
+    {
+        ulong emit = 0xFBE0000000000000UL | (1UL << 39) | (0xFFUL << 20) | (7UL << 16) | (0xFFUL << 8) | 0xFFUL;
+        ulong emitAndCut = 0xFBE0000000000000UL | (3UL << 39) | (0xFFUL << 20) | (7UL << 16) | (0xFFUL << 8) | 0xFFUL;
+        var ops = new List<ulong> {
+            Ald(0), Ast(0), Fadd32i(4, -1), Fadd32i(5, -1), Fadd32i(6, 0), Fadd32i(7, 1), Ast4Pos(4), emit,
+            Fadd32i(4, 3), Ast4Pos(4), emit, Fadd32i(4, -1), Fadd32i(5, 3), Ast4Pos(4), emitAndCut,
+        };
+        // 仍把读到的 loc0 写到 loc1，防止编译器因读值未使用而合法消掉 GS 输入。
+        if (omitVaryingOutput) ops[1] = Ast(1);
+        if (uniform) ops.Insert(1, Ldc(0, 0));
+        // Maxwell AttributeConsts.ViewportIndex = 0x068；写到 GS 输出，不能以默认为 viewport 0 冒充。
+        if (viewportIndex) ops.Insert(2, (Ast(0) & ~(0x7ffUL << 20)) | (0x68UL << 20));
+        byte[] code = Guest(false, ops.ToArray());
+        BinaryPrimitives.WriteUInt32LittleEndian(code, 1u | (3u << 5) | (4u << 10));
+        BinaryPrimitives.WriteUInt32LittleEndian(code.AsSpan(8), 1u << 24);
+        BinaryPrimitives.WriteUInt32LittleEndian(code.AsSpan(12), 7u << 24);
+        BinaryPrimitives.WriteUInt32LittleEndian(code.AsSpan(16), 3);
+        return code;
+    }
+
+    // 从实际模块的 Location/OpVariable/类型声明读跨阶段接口；GS 输入按 SPIR-V 规则多一层顶点数组。
+    private static Dictionary<uint, string> ShaderInterface(JsonElement stage, uint storage, bool stripVertexArray = false)
+    {
+        uint[] words = MemoryMarshal.Cast<byte, uint>(stage.GetProperty("spirv").GetBytesFromBase64()).ToArray();
+        var instructions = new List<uint[]>();
+        for (int i = 5; i < words.Length;)
+        {
+            int count = (int)(words[i] >> 16);
+            if (count == 0 || i + count > words.Length) throw new InvalidDataException("invalid SPIR-V instruction");
+            instructions.Add(words[i..(i + count)]); i += count;
+        }
+        var types = instructions.Where(x => (x[0] & 0xffff) is 21 or 22 or 23 or 28 or 32).ToDictionary(x => x[1]);
+        var locations = instructions.Where(x => (x[0] & 0xffff) == 71 && x.Length >= 4 && x[2] == 30)
+            .ToDictionary(x => x[1], x => x[3]);
+        string Signature(uint id)
+        {
+            uint[] t = types[id];
+            return (t[0] & 0xffff) switch
+            {
+                21 => $"int{t[2]}:{t[3]}", 22 => $"float{t[2]}",
+                23 => $"vec{t[3]}<{Signature(t[2])}>",
+                _ => throw new InvalidDataException("unexpected SPIR-V interface type " + (t[0] & 0xffff)),
+            };
+        }
+        var result = new Dictionary<uint, string>();
+        foreach (uint[] v in instructions.Where(x => (x[0] & 0xffff) == 59 && x.Length >= 4 && x[3] == storage))
+        {
+            if (!locations.TryGetValue(v[2], out uint loc)) continue;
+            uint[] pointer = types[v[1]];
+            if ((pointer[0] & 0xffff) != 32 || pointer[2] != storage) throw new InvalidDataException("invalid interface pointer");
+            uint typeId = pointer[3];
+            if (stripVertexArray)
+            {
+                uint[] array = types[typeId];
+                if ((array[0] & 0xffff) != 28) throw new InvalidDataException("GS input is not a vertex array");
+                typeId = array[2];
+            }
+            result.Add(loc, Signature(typeId));
+        }
+        return result;
+    }
+
+    private static HashSet<(uint set, uint binding)> ShaderBindings(JsonElement stage)
+    {
+        uint[] words = MemoryMarshal.Cast<byte, uint>(stage.GetProperty("spirv").GetBytesFromBase64()).ToArray();
+        var sets = new Dictionary<uint, uint>();
+        var bindings = new Dictionary<uint, uint>();
+        for (int i = 5; i < words.Length;)
+        {
+            int count = (int)(words[i] >> 16);
+            if (count == 0 || i + count > words.Length) throw new InvalidDataException("invalid SPIR-V instruction");
+            if ((words[i] & 0xffff) == 71 && count >= 4)
+            {
+                if (words[i + 2] == 34) sets[words[i + 1]] = words[i + 3];
+                if (words[i + 2] == 33) bindings[words[i + 1]] = words[i + 3];
+            }
+            i += count;
+        }
+        return sets.Where(p => bindings.ContainsKey(p.Key)).Select(p => (p.Value, bindings[p.Key])).ToHashSet();
+    }
+
+    private static uint GeometryInputArrayLength(JsonElement stage, uint location)
+    {
+        uint[] words = MemoryMarshal.Cast<byte, uint>(stage.GetProperty("spirv").GetBytesFromBase64()).ToArray();
+        var instructions = new List<uint[]>();
+        for (int i = 5; i < words.Length;)
+        {
+            int count = (int)(words[i] >> 16);
+            if (count == 0 || i + count > words.Length) throw new InvalidDataException("invalid SPIR-V instruction");
+            instructions.Add(words[i..(i + count)]); i += count;
+        }
+        var locations = instructions.Where(x => (x[0] & 0xffff) == 71 && x.Length >= 4 && x[2] == 30 && x[3] == location)
+            .Select(x => x[1]).ToHashSet();
+        uint[] variable = instructions.Single(x => (x[0] & 0xffff) == 59 && x.Length >= 4 && x[3] == 1 && locations.Contains(x[2]));
+        uint[] pointer = instructions.Single(x => (x[0] & 0xffff) == 32 && x[1] == variable[1]);
+        uint[] array = instructions.Single(x => (x[0] & 0xffff) == 28 && x[1] == pointer[3]);
+        uint[] constant = instructions.Single(x => (x[0] & 0xffff) == 43 && x[2] == array[3]);
+        return constant[3];
+    }
 
     // 原创合成 CS，不来自游戏：编码依据本仓 Ryujinx.Graphics.Shader 的
     // Decoders/InstTable.cs、InstDecoders.cs 及 Instructions/InstEmitMemory.cs。
@@ -575,6 +682,46 @@ internal static unsafe class Program
             return;
         }
 
+        // A large pool must not prevent a program with constant texture handles from compiling.
+        {
+            byte[] fsConstant = Guest(true, new[] { Fadd32i(2, 0.5f), Fadd32i(3, 0.5f), Tex2D(0, 2) });
+            const string texFact = "[{\"stage\":\"fs\",\"handle\":0,\"cbufSlot\":-1,\"samplerType\":\"2d\",\"format\":\"R8G8B8A8Unorm\",\"isBuffer\":false,\"normalized\":true,\"separate\":false,\"arrayLength\":1}]";
+            string raw = Encoding.UTF8.GetString(RequestJson(profile, "graphics", 1, 1, "large-pool", vs, fsConstant, textureFacts: texFact));
+            foreach (int length in new[] { 524288, 1048576 })
+            {
+                string request = raw.Replace("\"textureArrayLength\":64", "\"textureArrayLength\":" + length)
+                                    .Replace("\"samplerArrayLength\":8", "\"samplerArrayLength\":" + length);
+                try
+                {
+                    using JsonDocument largeResult = ParseResult(DirectShaderCompiler.Compile(Encoding.UTF8.GetBytes(request)));
+                    var textures = largeResult.RootElement.GetProperty("content").GetProperty("bindings").EnumerateArray()
+                        .Where(b => b.GetProperty("kind").GetString() == "texture").ToArray();
+                    Check(textures.Length == 1 && textures[0].GetProperty("count").GetInt32() == 1,
+                        "large pool " + length + " compiles constant handle as one descriptor");
+                }
+                catch (Exception error) { Check(false, "large pool " + length + " constant handle: " + error.Message); }
+            }
+            string tooLarge = raw.Replace("\"textureArrayLength\":64", "\"textureArrayLength\":1048577");
+            Throws("MISSING_FIELD", () => DirectShaderCompiler.Compile(Encoding.UTF8.GetBytes(tooLarge)), "texture pool above cap rejected");
+            tooLarge = raw.Replace("\"samplerArrayLength\":8", "\"samplerArrayLength\":1048577");
+            Throws("MISSING_FIELD", () => DirectShaderCompiler.Compile(Encoding.UTF8.GetBytes(tooLarge)), "sampler pool above cap rejected");
+
+            // The real translator produces a runtime pool array, but this input currently hits
+            // the independent cbuf-slot limitation before a program result is emitted.
+            byte[] fsDynamic = Guest(true, new[] { Ald(1, 0, 4), Fadd32i(2, 0.5f), Fadd32i(3, 0.5f), TexBindless2D(0, 2, 4) }, new[] { 1 });
+            string dynamicRequest = Encoding.UTF8.GetString(RequestJson(profile, "graphics", 1, 1, "runtime-pool", vs, fsDynamic, textureFacts: texFact))
+                .Replace("\"textureArrayLength\":64", "\"textureArrayLength\":524288");
+            try
+            {
+                DirectShaderCompiler.Compile(Encoding.UTF8.GetBytes(dynamicRequest));
+                Check(false, "runtime handle must not claim an unsupported cbuf layout is usable");
+            }
+            catch (DirectCompileException error) {
+                Check(error.Code == "UNSUPPORTED_PROGRAM" && error.Message.Contains("texture handle from cbuf slot 0"),
+                    "runtime handle reports its actual upstream cbuf limitation: " + error.Message);
+            }
+        }
+
         // 1) 接口全覆盖（接口新增方法时这里先红）。
         var interfaceMethods = typeof(IGpuAccessor).GetMethods().Where(m => m.DeclaringType == typeof(IGpuAccessor)).ToList();
         var classMethods = typeof(DirectGpuAccessor).GetMethods().Where(m => m.DeclaringType == typeof(DirectGpuAccessor))
@@ -617,8 +764,11 @@ internal static unsafe class Program
             }
             Check(composed.SequenceEqual(DirectProfileComposer.Compose(CapsJson(), closure)),
                 "same caps compose the same profile bytes");
-            Check(composed.SequenceEqual(DirectProfileComposer.Compose(CapsJson(geometry: true), closure)),
-                "hardware-only geometry support does not change the enabled profile");
+            byte[] gsEnabled = DirectProfileComposer.Compose(CapsJson(geometry: true), closure);
+            Check(!composed.SequenceEqual(gsEnabled), "enabled geometry changes the profile");
+            using (JsonDocument enabled = JsonDocument.Parse(gsEnabled))
+                Check(DirectProfile.Parse(enabled.RootElement, "gs profile").Caps.SupportsGeometryShader,
+                    "enabled geometry reaches compiler profile");
             // #1456：capprobe 位是写进 profile 的设备事实——同 caps 不同判定必须产出不同 profileHash。
             byte[] gsOcc = DirectProfileComposer.Compose(CapsJson(geometry: true, gsOccQuery: true), closure);
             Check(!composed.SequenceEqual(gsOcc), "gs occlusion-query bit must change the profile");
@@ -689,6 +839,208 @@ internal static unsafe class Program
 
         // 2) 合成 VS/FS 编译；SPIR-V/反射/依赖/支持缓冲。
         byte[] graphicsRequest = RequestJson(profile, "graphics", 1, 1, "req-graphics-1", vs, fs);
+        // 先在真实请求解析器证明第三阶段不是被静默丢弃：没有替身解析器、没有游戏数据。
+        // 红线在 program.stages 的 GS 拒绝；后续还须经真实翻译检验接口与拓扑。
+        {
+            byte[] gs = GeometryGuest();
+            using var stageStream = new MemoryStream();
+            using (var w = new Utf8JsonWriter(stageStream)) WriteStage(w, "gs", gs, 0);
+            var requestNode = System.Text.Json.Nodes.JsonNode.Parse(graphicsRequest);
+            var oldStages = requestNode["program"]["stages"].AsArray();
+            requestNode["program"]["stages"] = new System.Text.Json.Nodes.JsonArray(
+                oldStages[0].DeepClone(), oldStages[1].DeepClone(),
+                System.Text.Json.Nodes.JsonNode.Parse(stageStream.ToArray()), null, null);
+            requestNode["schema"] = DirectShaderCompiler.GraphicsRequestSchemaV2;
+            string request = requestNode.ToJsonString();
+            using JsonDocument requestDoc = JsonDocument.Parse(request);
+            using JsonDocument profileDoc = JsonDocument.Parse(profile);
+            try
+            {
+                DirectProfile parsedProfile = DirectProfile.Parse(profileDoc.RootElement, "profile");
+                DirectProgram parsed = DirectProgram.Parse(requestDoc.RootElement.GetProperty("program"), "program", parsedProfile, 2);
+                Check(parsed.Stages.Length == 3 && parsed.StageOf("gs") != null &&
+                    parsed.StageOf("gs").Code.SequenceEqual(gs), "GS request preserves all three stages and exact GS code");
+            }
+            catch (DirectCompileException ex)
+            {
+                Console.Error.WriteLine("GS request rejected: " + ex.Code + " " + ex.Message);
+                Check(false, "GS request preserves all three stages and exact GS code");
+            }
+
+            Throws("UNSUPPORTED_PROGRAM", () => DirectShaderCompiler.Compile(Encoding.UTF8.GetBytes(request)),
+                "GS request rejected when geometry is not enabled");
+            byte[] enabledProfile = DirectProfileComposer.Compose(CapsJson(geometry: true), DirectBuildIdentity.TranslatorClosure);
+            requestNode["profile"] = System.Text.Json.Nodes.JsonNode.Parse(enabledProfile);
+            byte[] enabledRequest = Encoding.UTF8.GetBytes(requestNode.ToJsonString());
+            {
+                var badSlot = requestNode.DeepClone();
+                var badStages = badSlot["program"]["stages"].AsArray();
+                (badStages[1], badStages[2]) = (badStages[2].DeepClone(), badStages[1].DeepClone());
+                Throws("INVALID_JSON", () => DirectShaderCompiler.Compile(Encoding.UTF8.GetBytes(badSlot.ToJsonString())),
+                    "v2 rejects a stage in the wrong NVN slot");
+                var shortSlots = requestNode.DeepClone();
+                shortSlots["program"]["stages"].AsArray().RemoveAt(4);
+                Throws("INVALID_JSON", () => DirectShaderCompiler.Compile(Encoding.UTF8.GetBytes(shortSlots.ToJsonString())),
+                    "v2 requires all five slots including null slots");
+                var wrongHeader = requestNode.DeepClone();
+                wrongHeader["program"]["stages"][2]["code"] = Convert.ToBase64String(vs);
+                Throws("INVALID_JSON", () => DirectShaderCompiler.Compile(Encoding.UTF8.GetBytes(wrongHeader.ToJsonString())),
+                    "v2 rejects a GS slot containing a VS header");
+                var missingFs = requestNode.DeepClone();
+                missingFs["program"]["stages"][1] = null;
+                Throws("UNSUPPORTED_PROGRAM", () => DirectShaderCompiler.Compile(Encoding.UTF8.GetBytes(missingFs.ToJsonString())),
+                    "v2 rejects VS+GS without FS");
+                var adjacent = requestNode.DeepClone();
+                adjacent["program"]["graphicsState"]["topology"] = "TrianglesAdjacency";
+                Throws("UNSUPPORTED_PROGRAM", () => DirectShaderCompiler.Compile(Encoding.UTF8.GetBytes(adjacent.ToJsonString())),
+                    "GS adjacency remains unsupported");
+                var oldVersion = requestNode.DeepClone();
+                oldVersion["schema"] = DirectShaderCompiler.RequestSchema;
+                Throws("UNSUPPORTED_PROGRAM", () => DirectShaderCompiler.Compile(Encoding.UTF8.GetBytes(oldVersion.ToJsonString())),
+                    "v1 does not silently accept geometry");
+                var passthrough = requestNode.DeepClone();
+                byte[] pt = GeometryGuest(); pt[3] |= 1;
+                passthrough["program"]["stages"][2]["code"] = Convert.ToBase64String(pt);
+                Throws("UNSUPPORTED_PROGRAM", () => DirectShaderCompiler.Compile(Encoding.UTF8.GetBytes(passthrough.ToJsonString())),
+                    "GS passthrough remains unsupported");
+                var viewport = requestNode.DeepClone();
+                viewport["program"]["stages"][2]["code"] = Convert.ToBase64String(GeometryGuest(viewportIndex: true));
+                Throws("UNSUPPORTED_PROGRAM", () => DirectShaderCompiler.Compile(Encoding.UTF8.GetBytes(viewport.ToJsonString())),
+                    "GS viewport index remains unsupported");
+            }
+            try
+            {
+                using JsonDocument translated = ParseResult(DirectShaderCompiler.Compile(enabledRequest));
+                JsonElement stages = translated.RootElement.GetProperty("content").GetProperty("stages");
+                Check(stages.GetArrayLength() == 3 && stages[0].GetProperty("stage").GetString() == "vs" &&
+                    stages[1].GetProperty("stage").GetString() == "gs" && stages[2].GetProperty("stage").GetString() == "fs",
+                    "GS compilation uses VS->GS->FS execution order");
+                if (stages.GetArrayLength() == 3)
+                {
+                    uint[] words = MemoryMarshal.Cast<byte, uint>(stages[1].GetProperty("spirv").GetBytesFromBase64()).ToArray();
+                    var instructions = new List<uint[]>();
+                    for (int i = 5; i < words.Length;)
+                    {
+                        int count = (int)(words[i] >> 16);
+                        if (count == 0 || i + count > words.Length) throw new InvalidDataException("invalid SPIR-V instruction");
+                        instructions.Add(words[i..(i + count)]); i += count;
+                    }
+                    Check(instructions.Any(x => (x[0] & 0xffff) == 15 && x[1] == 3), "GS SPIR-V entry execution model Geometry");
+                    bool Mode(uint mode, uint? value = null) => instructions.Any(x => (x[0] & 0xffff) == 16 && x.Length >= 3 &&
+                        x[2] == mode && (!value.HasValue || x.Length >= 4 && x[3] == value.Value));
+                    Check(Mode(22) && Mode(29) && Mode(26, 3) && Mode(0, 1),
+                        "GS topology is triangles -> triangle strip, max 3 vertices, one invocation");
+                    Check(instructions.Count(x => (x[0] & 0xffff) == 218) == 3 && instructions.Count(x => (x[0] & 0xffff) == 219) == 1,
+                        "GS emits three vertices and ends one primitive");
+                    var locations = instructions.Where(x => (x[0] & 0xffff) == 71 && x.Length >= 4 && x[2] == 30)
+                        .ToDictionary(x => x[1], x => x[3]);
+                    var variables = instructions.Where(x => (x[0] & 0xffff) == 59 && x.Length >= 4).ToArray();
+                    Check(variables.Any(x => x[3] == 1 && locations.TryGetValue(x[2], out uint loc) && loc == 0) &&
+                        variables.Any(x => x[3] == 3 && locations.TryGetValue(x[2], out uint loc) && loc == 0),
+                        "GS consumes and produces location 0");
+                    var vsOut = ShaderInterface(stages[0], 3);
+                    var gsIn = ShaderInterface(stages[1], 1, stripVertexArray: true);
+                    var gsOut = ShaderInterface(stages[1], 3);
+                    var fsIn = ShaderInterface(stages[2], 1);
+                    Check(vsOut.TryGetValue(0, out string vsType) && gsIn.TryGetValue(0, out string gsInType) && vsType == gsInType,
+                        "VS output matches GS input location 0 and type");
+                    Check(gsOut.TryGetValue(0, out string gsOutType) && fsIn.TryGetValue(0, out string fsType) && gsOutType == fsType,
+                        "GS output matches FS input location 0 and type");
+                    if (args.Length == 2 && args[0] == "--emit-gs")
+                    {
+                        Directory.CreateDirectory(args[1]);
+                        foreach (JsonElement s in stages.EnumerateArray())
+                            File.WriteAllBytes(Path.Combine(args[1], s.GetProperty("stage").GetString() + ".spv"),
+                                s.GetProperty("spirv").GetBytesFromBase64());
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine("GS compile failed: " + ex);
+                Check(false, "GS real compiler translation succeeds");
+            }
+            // VS 与 GS 都没有显式写 location 0，而各自的下游阶段要读它。
+            // 只有正确 SetNextStage，翻译器才会在两个生产者补出接口与缺省输出。
+            try
+            {
+                var missingOutputs = requestNode.DeepClone();
+                missingOutputs["program"]["stages"][0]["code"] = Convert.ToBase64String(Guest(false, Array.Empty<ulong>()));
+                missingOutputs["program"]["stages"][2]["code"] = Convert.ToBase64String(GeometryGuest(omitVaryingOutput: true));
+                using JsonDocument linked = ParseResult(DirectShaderCompiler.Compile(Encoding.UTF8.GetBytes(missingOutputs.ToJsonString())));
+                JsonElement linkedStages = linked.RootElement.GetProperty("content").GetProperty("stages");
+                var vsDefaults = ShaderInterface(linkedStages[0], 3);
+                var gsNeeds = ShaderInterface(linkedStages[1], 1, stripVertexArray: true);
+                var gsDefaults = ShaderInterface(linkedStages[1], 3);
+                var fsNeeds = ShaderInterface(linkedStages[2], 1);
+                Check(vsDefaults.TryGetValue(0, out string v) && gsNeeds.TryGetValue(0, out string gi) && v == gi,
+                    "GS input causes unwritten VS location 0 interface to be synthesized");
+                Check(gsDefaults.TryGetValue(0, out string g) && fsNeeds.TryGetValue(0, out string f) && g == f,
+                    "FS input causes unwritten GS location 0 interface to be synthesized");
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine("GS linked defaults failed: " + ex);
+                Check(false, "GS linked default interface synthesis succeeds");
+            }
+            // 每个阶段都独立读取客体 c[0]。共享分配器必须在同一个 set 内分配不同 binding，
+            // 反射记录与各自实际模块的 DescriptorSet/Binding 必须一致。
+            try
+            {
+                var resources = requestNode.DeepClone();
+                var slots = resources["program"]["stages"];
+                slots[0]["code"] = Convert.ToBase64String(Guest(false, new[] { Ldc(0, 0), Ast(0) }));
+                slots[1]["code"] = Convert.ToBase64String(FsUniform());
+                slots[2]["code"] = Convert.ToBase64String(GeometryGuest(uniform: true));
+                for (int i = 0; i < 3; i++) slots[i]["constantBufferUse"] = 1;
+                using JsonDocument compiled = ParseResult(DirectShaderCompiler.Compile(Encoding.UTF8.GetBytes(resources.ToJsonString())));
+                JsonElement content = compiled.RootElement.GetProperty("content");
+                JsonElement[] stageResults = content.GetProperty("stages").EnumerateArray().ToArray();
+                JsonElement[] uniformBindings = content.GetProperty("bindings").EnumerateArray()
+                    .Where(b => b.GetProperty("kind").GetString() == "uniform").ToArray();
+                Check(uniformBindings.Length == 3 && uniformBindings.Select(b => b.GetProperty("binding").GetUInt32()).Distinct().Count() == 3,
+                    "VS, GS and FS uniforms have distinct bindings");
+                foreach (string name in new[] { "vs", "gs", "fs" })
+                {
+                    JsonElement binding = uniformBindings.Single(b => b.GetProperty("stage").GetString() == name);
+                    JsonElement stage = stageResults.Single(s => s.GetProperty("stage").GetString() == name);
+                    uint set = binding.GetProperty("set").GetUInt32(), index = binding.GetProperty("binding").GetUInt32();
+                    Check(set == 0 && binding.GetProperty("slot").GetInt32() == 0 && ShaderBindings(stage).Contains((set, index)),
+                        name + " uniform reflection matches its actual SPIR-V set/binding and guest slot");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine("GS resource fixture failed: " + ex);
+                Check(false, "GS per-stage uniform compilation succeeds");
+            }
+
+            // 输入图元由请求事实决定；几何头仍固定输出三角带。
+            foreach (var (topology, mode, vertices) in new[] { ("Points", 19u, 1), ("Lines", 20u, 2), ("Triangles", 22u, 3) })
+            {
+                try
+                {
+                    var variant = requestNode.DeepClone();
+                    variant["program"]["graphicsState"]["topology"] = topology;
+                    using JsonDocument compiled = ParseResult(DirectShaderCompiler.Compile(Encoding.UTF8.GetBytes(variant.ToJsonString())));
+                    JsonElement stage = compiled.RootElement.GetProperty("content").GetProperty("stages")[1];
+                    uint[] spv = MemoryMarshal.Cast<byte, uint>(stage.GetProperty("spirv").GetBytesFromBase64()).ToArray();
+                    bool found = false;
+                    for (int i = 5; i < spv.Length; i += (int)(spv[i] >> 16))
+                        if ((spv[i] & 0xffff) == 16 && (spv[i] >> 16) >= 3 && spv[i + 2] == mode) found = true;
+                    Check(found && GeometryInputArrayLength(stage, 0) == vertices &&
+                        stage.GetProperty("info").GetProperty("geometryVerticesPerPrimitive").GetInt32() == 3,
+                        "GS " + topology + " input matches SPIR-V mode and input array size; output primitive size is 3");
+                    if (args.Length == 2 && args[0] == "--emit-gs")
+                        File.WriteAllBytes(Path.Combine(args[1], "gs-" + topology + ".spv"), stage.GetProperty("spirv").GetBytesFromBase64());
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine("GS " + topology + " fixture failed: " + ex);
+                    Check(false, "GS " + topology + " topology compilation succeeds");
+                }
+            }
+        }
         byte[] result = DirectShaderCompiler.Compile(graphicsRequest);
         using (JsonDocument doc = ParseResult(result))
         {

@@ -20,6 +20,7 @@
 #include "../nvn/nvn_mtl.h"
 #include "../nvn/nvn_fps.h"
 #include "vk_lib.h"
+#include "../tex/nvn_bcdec.h"   // 显卡不认 BC 时在 CPU 上解（vk_no_bc）
 #include "../../../metal/gal_samp_caps.h"   // 采样器 LOD 偏置在本机 GPU 上原生生效没有（s2a_lodbias_native，直连 / 通用同一份判法，#800）
 #include <vulkan/vulkan_core.h>
 #include <vulkan/vulkan_vi.h>
@@ -246,7 +247,7 @@ struct VkDeviceMemory_T { VkDeviceSize size; uint32_t type; __strong id<MTLBuffe
 struct VkBuffer_T { VkDeviceSize size; VkBufferUsageFlags usage; VkDeviceMemory mem; VkDeviceSize off; };
 struct VkBufferView_T { VkBuffer buf; const fmt_t *f; VkDeviceSize off, range; __strong id<MTLTexture> tex; };
 struct VkImage_T { __strong id<MTLTexture> tex; const fmt_t *f; VkFormat fmt; VkImageType type; uint32_t w, h, d, mips, layers, samples; VkDeviceSize size; uint64_t serial; uint32_t wid; int swap; uint32_t ext_w, ext_h;   // wid：宽屏核心的贴图号（vk_widen.inc）；w 是游戏的宽，贴图可能被放宽
-                  VkImageUsageFlags usage; uint32_t pitch;   // pitch: row pitch of a linear image (its texture is made over the bound memory), 0 otherwise
+                  VkImageUsageFlags usage; uint32_t pitch; uint32_t bc;   // bc：显卡不认 BC 时这张图建成了解压格式，这里记原来的 BC 格式号（nvn_bcdec 的编号；0 = 不是这种图）；pitch: row pitch of a linear image (its texture is made over the bound memory), 0 otherwise
                   VkImageView views; };   // 本图像的视图链（宽屏按内容判画布后重建存储时按原参数重派生，vk_widen.inc wd_promote）
 struct VkImageView_T { __strong id<MTLTexture> tex; VkImage img; uint32_t wid, gw, gh;   // wid / gw / gh：宽屏核心的视图号与游戏看到的宽高
                       VkImageView vnext; MTLPixelFormat pf; MTLTextureType tt; uint32_t lv0, lvn, ly0, lyn; MTLTextureSwizzleChannels sw; int whole; };   // 派生参数（whole = 就是图像本身的贴图）
@@ -669,10 +670,44 @@ static VkDeviceSize img_bytes(const fmt_t *f, uint32_t w, uint32_t h, uint32_t d
     return s * layers * samples;
 }
 static uint32_t wd_new_id(void); static uint32_t wd_image(uint32_t id, uint32_t w, uint32_t h, int rebuild, uint32_t *rh); static void wd_track(VkImage im, int on); static void wd_view(uint32_t id, uint32_t parent, int level, uint32_t w0); static void wd_release(uint32_t id);   // vk_widen.inc
+// 不认 BC 压缩格式的显卡（A15 / A16 及更早，MTLDevice.supportsBCTextureCompression = NO）：用 BC 格式建贴图会被 Metal 校验中止（#542：首帧前崩，pixelFormat 152 = BC7）。
+// 做法同 NVN 那条路（nvn_mtl.m no_bc）：图像建成解压后的格式，缓冲 → 图像的上传在 CPU 上解码（tex/nvn_bcdec.c）。DM_TEST_NO_BC=1 在任何机器上强制走这条路（Mac 上验）。
+// 特性位与格式能力照报「支持 BC」：游戏的资源只有 BC，报不支持它也拿不出别的。
+static int vk_no_bc(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_TEST_NO_BC"); int t = e && *e && strcmp(e, "0"); v = t || ![g_dev supportsBCTextureCompression];
+        if (v) LOG("[vk] 显卡不认 BC 压缩格式%s：BC 图像建成解压格式，上传时解码", t ? "（测试开关 DM_TEST_NO_BC）" : ""); }
+    return v;
+}
+// BC 的 VkFormat → nvn_bcdec 的格式号与解压后的 VkFormat；不是 BC 回 0
+static uint32_t vk_bc_map(VkFormat f, VkFormat *plain) {
+    switch (f) {
+        case VK_FORMAT_BC1_RGB_UNORM_BLOCK: *plain = VK_FORMAT_R8G8B8A8_UNORM; return 0x41;
+        case VK_FORMAT_BC1_RGBA_UNORM_BLOCK: *plain = VK_FORMAT_R8G8B8A8_UNORM; return 0x42;
+        case VK_FORMAT_BC2_UNORM_BLOCK: *plain = VK_FORMAT_R8G8B8A8_UNORM; return 0x43;
+        case VK_FORMAT_BC3_UNORM_BLOCK: *plain = VK_FORMAT_R8G8B8A8_UNORM; return 0x44;
+        case VK_FORMAT_BC1_RGB_SRGB_BLOCK: *plain = VK_FORMAT_R8G8B8A8_SRGB; return 0x45;
+        case VK_FORMAT_BC1_RGBA_SRGB_BLOCK: *plain = VK_FORMAT_R8G8B8A8_SRGB; return 0x46;
+        case VK_FORMAT_BC2_SRGB_BLOCK: *plain = VK_FORMAT_R8G8B8A8_SRGB; return 0x47;
+        case VK_FORMAT_BC3_SRGB_BLOCK: *plain = VK_FORMAT_R8G8B8A8_SRGB; return 0x48;
+        case VK_FORMAT_BC4_UNORM_BLOCK: *plain = VK_FORMAT_R8_UNORM; return 0x49;
+        case VK_FORMAT_BC4_SNORM_BLOCK: *plain = VK_FORMAT_R8_SNORM; return 0x4a;
+        case VK_FORMAT_BC5_UNORM_BLOCK: *plain = VK_FORMAT_R8G8_UNORM; return 0x4b;
+        case VK_FORMAT_BC5_SNORM_BLOCK: *plain = VK_FORMAT_R8G8_SNORM; return 0x4c;
+        case VK_FORMAT_BC7_UNORM_BLOCK: *plain = VK_FORMAT_R8G8B8A8_UNORM; return 0x4d;
+        case VK_FORMAT_BC7_SRGB_BLOCK: *plain = VK_FORMAT_R8G8B8A8_SRGB; return 0x4e;
+        case VK_FORMAT_BC6H_SFLOAT_BLOCK: *plain = VK_FORMAT_R16G16B16A16_SFLOAT; return 0x4f;
+        case VK_FORMAT_BC6H_UFLOAT_BLOCK: *plain = VK_FORMAT_R16G16B16A16_SFLOAT; return 0x50;
+        default: return 0;
+    }
+}
 VKB(vkCreateImage, VkResult, VkDevice d, const VkImageCreateInfo *ci, const VkAllocationCallbacks *a, VkImage *out) {
     (void)d; (void)a; dev_init();
     const fmt_t *f = fmt_of(ci->format);
     if (!f || f->pf == MTLPixelFormatInvalid) { LOG("[vk] 【红】 image format %d not mapped", ci->format); return VK_ERROR_FORMAT_NOT_SUPPORTED; }
+    uint32_t bc = 0;   // 显卡不认 BC：这张图用解压后的格式建（表项整个换掉：之后图像的尺寸 / 视图 / 图像间拷贝都按不压缩的算），im->bc 记原格式供上传时解码
+    if (f->kind == K_BLOCK && vk_no_bc()) { VkFormat plain = VK_FORMAT_UNDEFINED; uint32_t n = vk_bc_map(ci->format, &plain); const fmt_t *pf2 = n ? fmt_of(plain) : NULL;
+        if (pf2 && pf2->pf != MTLPixelFormatInvalid) { bc = n; f = pf2; } }
     // Linear 2D images with one level and layer alias their memory, as on the Switch: the texture is made over the bound buffer at vkBindImageMemory, with rows at
     // Metal's linear-texture alignment (which vkGetImageSubresourceLayout reports). Super Mario Galaxy fills staging images from the CPU this way and samples a 4x4 one
     if (ci->tiling == VK_IMAGE_TILING_LINEAR && ci->imageType == VK_IMAGE_TYPE_2D && ci->mipLevels <= 1 && ci->arrayLayers <= 1 && ci->samples <= 1 && f->kind != K_BLOCK && !fmt_has_depth(f) && !fmt_has_stencil(f)) {
@@ -715,7 +750,7 @@ VKB(vkCreateImage, VkResult, VkDevice d, const VkImageCreateInfo *ci, const VkAl
         id<MTLTexture> t = [g_dev newTextureWithDescriptor:td];
         if (!t) { LOG("[vk] 【红】 cannot create image %ux%ux%u format %d levels %u layers %u", ci->extent.width, ci->extent.height, ci->extent.depth, ci->format, ci->mipLevels, layers); return VK_ERROR_OUT_OF_DEVICE_MEMORY; }
         VkImage im = obj_alloc(sizeof *im, O_IMAGE);
-        im->tex = t; im->f = f; im->fmt = ci->format; im->type = ci->imageType; im->w = ci->extent.width; im->h = umax(1, ci->extent.height); im->d = (uint32_t)td.depth; im->wid = wid;   // 游戏的宽高（存储可能被放宽 / 加高）
+        im->tex = t; im->f = f; im->bc = bc; im->fmt = ci->format; im->type = ci->imageType; im->w = ci->extent.width; im->h = umax(1, ci->extent.height); im->d = (uint32_t)td.depth; im->wid = wid;   // 游戏的宽高（存储可能被放宽 / 加高）
         im->mips = (uint32_t)td.mipmapLevelCount; im->layers = layers; im->samples = samples; im->size = img_bytes(f, im->w, im->h, im->d, im->mips, layers, samples);
         OLOG("CreateImage %p %ux%ux%u format %d levels %u layers %u usage %#x", (void *)im, im->w, im->h, im->d, ci->format, im->mips, layers, ci->usage);
         wd_track(im, 1);   // 本层存储可重建：宽屏核心按内容判成画布时按贴图号找回它（vk_widen.inc）
@@ -770,6 +805,7 @@ static void h_vkDestroyImageView(VkDevice d, VkImageView v, const VkAllocationCa
 VKB(vkCreateImageView, VkResult, VkDevice d, const VkImageViewCreateInfo *ci, const VkAllocationCallbacks *a, VkImageView *out) {
     (void)d; (void)a;
     VkImage im = ci->image; const fmt_t *f = fmt_of(ci->format);
+    if (im->bc && f && f->kind == K_BLOCK) { VkFormat plain = VK_FORMAT_UNDEFINED; f = vk_bc_map(ci->format, &plain) ? fmt_of(plain) : NULL; }   // 解压图上的 BC 视图：换成解压后的对应格式（UNORM / sRGB 两种视图各归各的）
     MTLPixelFormat pf = f && f->pf != MTLPixelFormatInvalid ? f->pf : im->f->pf;
     const VkImageSubresourceRange *r = &ci->subresourceRange;
     if (r->aspectMask == VK_IMAGE_ASPECT_STENCIL_BIT && pf == MTLPixelFormatDepth32Float_Stencil8) pf = MTLPixelFormatX32_Stencil8;
@@ -2047,6 +2083,27 @@ static void replay_cmds(rs_t *s, VkCommandBuffer cb) {
                 for (uint32_t i = 0; i < x->n; i++) {
                     const VkBufferImageCopy *r = &x->r[i];
                     uint32_t rl = r->bufferRowLength ? r->bufferRowLength : r->imageExtent.width, ih = r->bufferImageHeight ? r->bufferImageHeight : r->imageExtent.height;
+                    if (im->bc) {   // 显卡不认 BC：缓冲里是压缩块（按原格式的块行排），解成像素放进一块临时缓冲再传；图像本身是解压格式
+                        const fmt_t *bf = fmt_of(im->fmt); uint32_t w = r->imageExtent.width, hh = r->imageExtent.height, nl = r->imageSubresource.layerCount;
+                        NSUInteger cbpr = (NSUInteger)((rl + bf->bw - 1) / bf->bw) * bf->bytes, cbpi = cbpr * ((ih + bf->bh - 1) / bf->bh), dpr = (NSUInteger)w * f->bytes;
+                        VkDeviceSize need = buf_box_bytes(bf, bf->bytes, cbpr, cbpi, w, hh, 1);
+                        if (im->type == VK_IMAGE_TYPE_3D || r->imageExtent.depth > 1) { RED1("显卡不认 BC：三维 BC 图像的上传没接（这一条不编码）"); continue; }
+                        if (!img_box_ok(im, r->imageSubresource.mipLevel, r->imageSubresource.baseArrayLayer, nl, r->imageOffset, r->imageExtent) ||
+                            !mem_range_ok(x->src, sb, r->bufferOffset, (VkDeviceSize)(nl - 1) * cbpi + need)) {
+                            RED1("vkCmdCopyBufferToImage 越界（解压 BC）：图像 (%d,%d) %u×%u 级 %u 层 %u+%u，缓冲偏移 %llu：这一条不编码", r->imageOffset.x, r->imageOffset.y, w, hh,
+                                 r->imageSubresource.mipLevel, r->imageSubresource.baseArrayLayer, nl, (unsigned long long)r->bufferOffset);
+                            continue;
+                        }
+                        id<MTLBuffer> tmp = [g_dev newBufferWithLength:dpr * hh * nl options:MTLResourceStorageModeShared];
+                        if (!tmp) { RED1("显卡不认 BC：解码用的临时缓冲分不出来（%lu 字节）", (unsigned long)(dpr * hh * nl)); continue; }
+                        const uint8_t *src = (const uint8_t *)sb.contents + x->src->off + r->bufferOffset; uint8_t *dst = tmp.contents; int bad = 0;
+                        for (uint32_t l = 0; l < nl; l++) bad |= nvn_bc_decode(im->bc, src + l * cbpi, cbpr, w, hh, dst + l * dpr * hh, dpr);
+                        if (bad) { RED1("显卡不认 BC：格式 %#x 解码失败（这一条不编码）", im->bc); continue; }
+                        for (uint32_t l = 0; l < nl; l++)
+                            [be copyFromBuffer:tmp sourceOffset:l * dpr * hh sourceBytesPerRow:dpr sourceBytesPerImage:dpr * hh sourceSize:MTLSizeMake(w, hh, 1) toTexture:im->tex
+                              destinationSlice:r->imageSubresource.baseArrayLayer + l destinationLevel:r->imageSubresource.mipLevel destinationOrigin:MTLOriginMake(r->imageOffset.x, r->imageOffset.y, 0)];
+                        continue;
+                    }
                     NSUInteger bpr = (NSUInteger)((rl + f->bw - 1) / f->bw) * f->bytes, bpi = bpr * ((ih + f->bh - 1) / f->bh);
                     int is3d = im->type == VK_IMAGE_TYPE_3D;
                     // P1-68：图像盒子出图（负原点 / 越出这一级 / 级别层越界）或缓冲读出所绑内存的那一条不编码
@@ -2107,6 +2164,7 @@ static void replay_cmds(rs_t *s, VkCommandBuffer cb) {
                     uint32_t cw = sw < dw ? sw : dw, ch = sh < dh ? sh : dh;
                     // P1-68：级别 / 层越界的那一条不编码；矩形（存储坐标）夹进两边这一级（clamp_span，同 Blit 等尺寸与局部解析），夹空不编码。界内的原样整块拷
                     uint32_t sm = r->srcSubresource.mipLevel, dm = r->dstSubresource.mipLevel;
+                    if (!a->bc != !b->bc) { RED1("显卡不认 BC：解压后的 BC 图像与别的格式之间按块拷贝没接（这一条不编码）"); continue; }
                     if (!img_sub_ok(a, sm, r->srcSubresource.baseArrayLayer, nl) || !img_sub_ok(b, dm, r->dstSubresource.baseArrayLayer, b3 ? 1 : nl)) {
                         RED1("vkCmdCopyImage 级别 / 层越界：源级 %u 层 %u+%u（%u 级 %u 层）→ 目标级 %u 层 %u（%u 级 %u 层）：这一条不编码", sm, r->srcSubresource.baseArrayLayer, nl, a->mips, a->layers,
                              dm, r->dstSubresource.baseArrayLayer, b->mips, b->layers);
@@ -2135,6 +2193,7 @@ static void replay_cmds(rs_t *s, VkCommandBuffer cb) {
                 id<MTLBlitCommandEncoder> be = blit(s, h->op); id<MTLBuffer> db = mem_buf(x->dst->mem);
                 for (uint32_t i = 0; i < x->n; i++) {
                     const VkBufferImageCopy *r = &x->r[i]; int is3d = im->type == VK_IMAGE_TYPE_3D;
+                    if (im->bc) { RED1("显卡不认 BC：解压后的 BC 图像读回缓冲没接（游戏要的是压缩块，这里只有解出来的像素；这一条不编码）"); continue; }
                     uint32_t rl = r->bufferRowLength ? r->bufferRowLength : r->imageExtent.width, ih = r->bufferImageHeight ? r->bufferImageHeight : r->imageExtent.height;
                     MTLBlitOption opt = MTLBlitOptionNone; NSUInteger tb = f->bytes;
                     if (f->kind == K_DS) {   // one aspect: Metal writes 4-byte depth or 1-byte stencil, as Vulkan's buffer layout for that aspect

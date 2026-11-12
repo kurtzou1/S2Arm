@@ -173,6 +173,7 @@ struct PlatformBuildView: View {
             WorkspaceHeading(title:"导出",subtitle:"",symbol:"square.and.arrow.up.on.square") {EmptyView()}
             if let game {
                 ExportGameCard(game:game)
+                if let d = game.downstream { DownstreamRow(game:game, d:d) }
                 VStack(alignment:.leading,spacing:12) {
                     Text(L("导出到哪些设备")).font(.headline)
                     LazyVGrid(columns:Array(repeating:GridItem(.flexible(),spacing:12),count:4),spacing:12) {
@@ -193,6 +194,7 @@ struct PlatformBuildView: View {
             }
         }.id(Localization.language)
         .onAppear { if store.platformGame == nil, let g = store.games.first { store.selectedGame = g.id } }
+        .sheet(item:$store.downstreamPrompt) { g in if let d = g.downstream { DownstreamConfirmView(game:g, d:d) } }
     }
     @ViewBuilder private func actionBar(_ game: Game) -> some View {
         let reason: String? = picked.isEmpty ? L("先勾选要导出的平台")
@@ -209,7 +211,7 @@ struct PlatformBuildView: View {
             }
             Spacer()
             if reason == nil {
-                Button { store.exportTargets(game) } label: { Label(picked.count > 1 ? L("开始导出") + " · \(picked.count) " + L("个平台") : L("开始导出"),systemImage:"square.and.arrow.up") }
+                Button { store.exportChecked(game) } label: { Label(picked.count > 1 ? L("开始导出") + " · \(picked.count) " + L("个平台") : L("开始导出"),systemImage:"square.and.arrow.up") }
                     .platformButtonStyle(prominent:true).controlSize(.large).keyboardShortcut(.defaultAction)
             } else {
                 Label(L("开始导出"),systemImage:"square.and.arrow.up").font(.body.weight(.medium)).foregroundStyle(.secondary)

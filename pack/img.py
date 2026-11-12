@@ -16,7 +16,7 @@
 用法：img.py build <RomFS 目录> <其余文件清单 tsv：相对路径\\t源文件> <输出 .img> --gid <游戏号> [--pack-id <资源包号>] [--romfs-index <romfs_index 命令>]
       img.py convert <产物根> <资源包目录> [--gid <游戏号>]   出包交付：资源包目录就地转 IMG 形态
       img.py ls <img>   列目录表（单测 / 诊断）"""
-import argparse, os, shlex, struct, subprocess, sys
+import argparse, os, re, shlex, struct, subprocess, sys
 # RomFS 目录遍历一律经 graphics/nvn/tools/romfs_list.py（tools/romfs_walk_lint.py 守卫）
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'graphics', 'nvn', 'tools'))
 import romfs_list  # noqa: E402
@@ -97,7 +97,9 @@ def build(romfs_dir, others, out, gid, pack_id='', romfs_index=None, say=print, 
             finally:   # 等它的时候本进程出了任何错：先把它收掉再往上抛，不留在后台接着写（#711：原先 Windows 上留下 dotnet.exe）
                 if p.poll() is None: p.kill(); p.wait()
             so, se = p.communicate()
-            if p.returncode: raise Red(f'写标准 RomFS 段失败：{(se or so).strip()[-300:]}')
+            if p.returncode: raise Red(f'写标准 RomFS 段失败：{tool_error(se or so)}')
+            for l in (se or '').splitlines():   # 删不掉的解包文件（#793 / #796）等黄字：进 img.log，不算失败
+                if l.startswith('🟡'): print(l, flush=True)   # 直接打：命令行 convert 不传 progress，say 是空函数，黄字会丢
             romfs_len = int(so.strip().splitlines()[-1])
             lst = out + '.romfs.list'; open(lst, 'w', encoding='utf-8', newline='\n').write(''.join(n + '\n' for n in names)); others = [*others, ('romfs.list', lst)]
             tk.step(max(0, rom_bytes - tk.done))
@@ -229,6 +231,15 @@ def image_id(pack_dir):
     只随游戏原始资源变：着色器库重编、覆盖层更新都不改它，IMG 字节不变、启动器续传认得出是同一份"""
     import hashlib
     return hashlib.sha256(''.join(l for r, l in pack_rows(pack_dir) if not r.startswith(KEEP)).encode('utf-8')).hexdigest()
+
+
+def tool_error(text):
+    """工具失败的原文 → 报红用的一段：.NET 未处理异常先一行「类型: 消息」、再一长串调用栈；原先只取末尾 300 字，正好把第一行截掉，
+    玩家日志里只剩「FileStorage.Read(...)」看不出是删不掉、找不到还是读短了（#796）。有异常行就放前面，再接末尾"""
+    text = (text or '').strip()
+    head = next((l.strip() for l in text.splitlines() if l.startswith('Unhandled exception.') or re.match(r'\s*[\w.]+(Exception|Error): ', l)), '')
+    tail = text[-300:]
+    return f'{head[:300]} …… {tail}' if head and head[:300] not in tail else tail
 
 
 def default_romfs_index():

@@ -14,7 +14,8 @@ gate_tier() {
   #   11-04 列车快档 11:01–12:02 卡死在这里（进程链 76607→70661→70674→70676），所有 doc / tool 支一小时过不去
   local F=$1 n; n=$(printf '%s\n' "$F" | grep -c .)
   # 会影响运行/排查的数据与技能不按普通文档跳过单测；其余旧档位规则不变。
-  [ "$n" -eq "$(printf '%s\n' "$F" | grep -vE '^docs/.*\.tsv$|^docs/排查/|^skills/' | grep -cE "$GATE_DOC_RE")" ] && { echo doc; return; }
+  #   docs/site/notice.json（11-12）：启动器运行时读（Pages + 随包兜底），撤公告走 doc 档没跑 test_updater、main 全套红
+  [ "$n" -eq "$(printf '%s\n' "$F" | grep -vE '^docs/.*\.tsv$|^docs/排查/|^skills/|^docs/site/notice\.json$' | grep -cE "$GATE_DOC_RE")" ] && { echo doc; return; }
   [ "$n" -eq "$(printf '%s\n' "$F" | grep -E "$GATE_DOC_RE"'|^tools/|^tests/|^pack/|^skills/' | grep -vcE '^tests/visual/')" ] && { echo tool; return; }
   echo full
 }

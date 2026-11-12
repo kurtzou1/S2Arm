@@ -877,7 +877,39 @@ static void screen_fps_note(NSWindow *w) {
     //   直连第三层下一个渲染遍前按新比例重出图（runtime/src/widen.c s2a_screen_fit，钉了原生 16:9 / 环境变量给定屏幕时不跟）
     if (size.width >= 1 && size.height >= 1) s2a_screen_fit((int)size.width, (int)size.height);
 }
+// 全屏时的 Esc（玩家反馈：进了全屏回不到窗口）：Esc 没映射游戏按键就直接退全屏（鼠标锁着一并释放）；映射了就照常给游戏，按住 1 秒退全屏。
+//   ⌃⌘F、菜单「显示 → 退出全屏幕」、顶部绿色按钮走系统原生全屏，退出后回到进全屏前的窗口大小和位置（S2AMacDelegate windowDidExitFullScreen:）
+static NSTimer *esc_hold;
+static BOOL window_fullscreen_now(NSWindow *w) { return w && (w.styleMask & NSWindowStyleMaskFullScreen); }
+static void window_fullscreen_toggle(NSWindow *w) { [w toggleFullScreen:nil]; }
+static BOOL (*window_fullscreen)(NSWindow *) = window_fullscreen_now;   // 单测换桩（launchers/macos/Tests/input_test.m）
+static void (*fullscreen_toggle)(NSWindow *) = window_fullscreen_toggle;
+static BOOL esc_mapped(void) {
+    NSDictionary *keyboard = config[@"keyboard"];
+    for (NSString *name in keyboard) if ([keyboard[name][@"code"] intValue] == 53) return YES;
+    return NO;
+}
+static void esc_hold_cancel(void) { [esc_hold invalidate]; esc_hold = nil; }
+static void esc_hold_start(NSWindow *window) {
+    esc_hold_cancel();
+    __weak NSWindow *w = window;
+    esc_hold = [NSTimer scheduledTimerWithTimeInterval:1 repeats:NO block:^(NSTimer *t) { (void)t;
+        esc_hold = nil;
+        if (!window_fullscreen(w) || !read_key_state(kCGEventSourceStateCombinedSessionState, 53)) return;
+        [keys removeObject:@53]; [stale_keys removeObject:@53]; [key_up_polls removeObjectForKey:@53]; sample_input();   // 游戏那边松开这个键
+        fprintf(stderr, "[s2a] Mac 全屏：按住 Esc 1 秒，退出全屏\n");
+        fullscreen_toggle(w);
+    }];
+}
 - (void)keyDown:(NSEvent *)e {
+    if (e.keyCode == 53 && !e.isARepeat && window_fullscreen(self.window)) {
+        if (!esc_mapped()) {
+            if (mouse_captured || mouse_release_pending) set_mouse_capture(NO);
+            fprintf(stderr, "[s2a] Mac 全屏：Esc 退出全屏\n");
+            fullscreen_toggle(self.window); return;
+        }
+        esc_hold_start(self.window);
+    }
     if (e.keyCode == 53 && (mouse_captured || mouse_release_pending)) { set_mouse_capture(NO); return; }
     if (e.modifierFlags & NSEventModifierFlagCommand) { [super keyDown:e]; return; }
     if (!focused) return;
@@ -888,7 +920,7 @@ static void screen_fps_note(NSWindow *w) {
     }
     [stale_keys removeObject:@(e.keyCode)]; [keys addObject:@(e.keyCode)]; sample_input();
 }
-- (void)keyUp:(NSEvent *)e { [keys removeObject:@(e.keyCode)]; [stale_keys removeObject:@(e.keyCode)]; [key_up_polls removeObjectForKey:@(e.keyCode)]; sample_input(); }
+- (void)keyUp:(NSEvent *)e { if (e.keyCode == 53) esc_hold_cancel(); [keys removeObject:@(e.keyCode)]; [stale_keys removeObject:@(e.keyCode)]; [key_up_polls removeObjectForKey:@(e.keyCode)]; sample_input(); }
 - (void)flagsChanged:(NSEvent *)e {
     modifiers = ((e.modifierFlags & NSEventModifierFlagShift) ? 1 : 0) |
                 ((e.modifierFlags & NSEventModifierFlagControl) ? 2 : 0) |
@@ -1003,6 +1035,7 @@ static NSString *lan_warning(void) {
 @property(strong) NSMenuItem *controllerStatus;
 @property BOOL ns2ReconnectPending;
 @property BOOL ns2RelayDisconnectNoticeShown;
+@property NSRect windowedFrame;   // 进全屏前的窗口位置大小，退全屏时放回
 @end
 static __weak S2AMacDelegate *g_delegate;
 @implementation S2AMacDelegate
@@ -1078,6 +1111,14 @@ static __weak S2AMacDelegate *g_delegate;
     [self shutdown];
 }
 - (BOOL)windowShouldClose:(NSWindow *)sender { (void)sender; [self shutdown]; return NO; }
+- (void)toggleFullScreenItem:(id)sender { (void)sender; fullscreen_toggle(self.window); }
+- (BOOL)validateMenuItem:(NSMenuItem *)item {
+    if (item.action == @selector(toggleFullScreenItem:))
+        item.title = window_fullscreen(self.window) ? (s2a_ui_zh() ? @"退出全屏幕" : @"Exit Full Screen") : (s2a_ui_zh() ? @"进入全屏幕" : @"Enter Full Screen");
+    return YES;
+}
+- (void)windowWillEnterFullScreen:(NSNotification *)note { (void)note; self.windowedFrame = self.window.frame; }
+- (void)windowDidExitFullScreen:(NSNotification *)note { (void)note; esc_hold_cancel(); if (!NSIsEmptyRect(self.windowedFrame)) [self.window setFrame:self.windowedFrame display:YES]; }
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender { (void)sender; [self shutdown]; return NSTerminateCancel; }
 - (void)windowDidBecomeKey:(NSNotification *)note { (void)note; display_focus_publish(NSApp.isActive && self.window.isKeyWindow); if (mouse_release_pending) set_mouse_capture(NO); focused = YES; s2a_pad_set_active(1); reset_input(); }
 - (void)windowDidResignKey:(NSNotification *)note { (void)note; display_focus_publish(NO); set_mouse_capture(NO); focused = NO; s2a_pad_set_active(0); reset_input(); }
@@ -1166,13 +1207,21 @@ void s2a_front_run(void (*guest_main)(void)) {
         disconnect.target = delegate;
         NSMenuItem *rumble = [inputMenu addItemWithTitle:@"测试手柄震动" action:@selector(testNS2Rumble:) keyEquivalent:@""];
         rumble.target = delegate;
-        inputRoot.submenu = inputMenu; [menu addItem:inputRoot]; app.mainMenu = menu;
+        inputRoot.submenu = inputMenu; [menu addItem:inputRoot];
+        // 「显示」菜单的全屏项（原先没有：⌃⌘F 和菜单都退不出全屏）；系统不再自动插一份重复的
+        [NSUserDefaults.standardUserDefaults setBool:NO forKey:@"NSFullScreenMenuItemEverywhere"];
+        NSMenuItem *viewRoot = [NSMenuItem new]; NSMenu *viewMenu = [[NSMenu alloc] initWithTitle:s2a_ui_zh() ? @"显示" : @"View"];
+        NSMenuItem *fullScreen = [viewMenu addItemWithTitle:s2a_ui_zh() ? @"进入全屏幕" : @"Enter Full Screen" action:@selector(toggleFullScreenItem:) keyEquivalent:@"f"];
+        fullScreen.keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand; fullScreen.target = delegate;
+        NSMenuItem *escHint = [viewMenu addItemWithTitle:s2a_ui_zh() ? @"全屏时 Esc 退出（Esc 映射了游戏按键时按住 1 秒）" : @"In full screen, Esc exits (hold 1 s if Esc is mapped to a game button)" action:NULL keyEquivalent:@""];
+        escHint.enabled = NO;
+        viewRoot.submenu = viewMenu; [menu addItem:viewRoot]; app.mainMenu = menu;
         NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1280, 720)
             styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
             backing:NSBackingStoreBuffered defer:NO];
         NSDictionary *gameIdentity = s2a_mac_guide_identity();
         window.title = gameIdentity[@"name"];
-        window.contentMinSize = NSMakeSize(640, 360); window.delegate = delegate;
+        window.contentMinSize = NSMakeSize(640, 360); window.delegate = delegate; window.collectionBehavior |= NSWindowCollectionBehaviorFullScreenPrimary;
         S2AMetalView *view = [[S2AMetalView alloc] initWithFrame:NSMakeRect(0, 0, 1280, 720)];
         view.wantsLayer = YES; CAMetalLayer *layer = [CAMetalLayer layer]; layer.opaque = YES;
         view.layer = layer; window.contentView = view; window.acceptsMouseMovedEvents = YES;

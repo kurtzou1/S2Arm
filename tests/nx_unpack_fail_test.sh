@@ -140,6 +140,16 @@ ck "--title-keys 指的文件不在：rc=2（用法错，不冒作 3 = 容器读
 S2A_NXUNPACK_TEST_THROW=agg-key run "$T/a1" "$K" "$T/oa" "$T/junk.bin"
 ck "并行异常第二条才是缺密钥：分类 keys_missing、rc=1、不出调用栈" '[ "$(cat "$T/a1.rc")" = 1 ] && grep -q "【原因 keys_missing】" "$T/a1" && ! grep -q "Unhandled exception\|   at " "$T/a1"'
 
+# ---- 用例：并行异常里带位置的哈希错（#787：原先只有一行原因，不说读到哪个文件 / 偏移）----
+S2A_NXUNPACK_TEST_THROW=agg-hash run "$T/h1" "$K" "$T/oh" "$T/junk.bin"
+ck "并行异常第二条是带位置的哈希错：rc=1、报哈希红、点名阶段 + 文件 + 偏移、不出调用栈" '[ "$(cat "$T/h1.rc")" = 1 ] && grep -q "源文件数据哈希校验不过" "$T/h1" && grep -q "读到坏块时在：建索引，文件 romfs/x.bin，文件内偏移 7" "$T/h1" && ! grep -q "Unhandled exception\|   at " "$T/h1"'
+
+# ---- 用例：访问被拒（#792：原先落进 io「读源文件失败、文件被截断」，被拒的其实是我们自己的解包工作目录）----
+S2A_NXUNPACK_TEST_THROW=denied-out run "$T/d1" "$K" "$T/od" "$T/junk.bin"
+ck "写自己的工作目录被拒：分类 access_denied、点名是 S2Arm 的解包工作目录、不说源文件截断、rc=1" '[ "$(cat "$T/d1.rc")" = 1 ] && grep -q "【原因 access_denied】" "$T/d1" && grep -q "被拒的是S2Arm 自己的解包工作目录" "$T/d1" && ! grep -q "截断" "$T/d1"'
+S2A_NXUNPACK_TEST_THROW=denied-src run "$T/d2" "$K" "$T/od2" "$T/junk.bin"
+ck "源文件读被拒：分类 access_denied、点名是源文件" '[ "$(cat "$T/d2.rc")" = 1 ] && grep -q "【原因 access_denied】" "$T/d2" && grep -q "被拒的是源文件" "$T/d2"'
+
 echo "-----"
 echo "$([ "$fail" = 0 ] && echo "✓" || echo "✗") nx_unpack 解包失败回归：$((pass + fail)) 项，不通 $fail"
 [ "$fail" = 0 ]

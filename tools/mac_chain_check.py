@@ -6,6 +6,8 @@ import re
 import struct
 import sys
 
+LIB_FLAGS_KNOWN = 0x1   # lib.idx 头 flags 已定义的位（位 0：tensor ABI 1）
+
 
 def check(root):
     # 正常重建的 NVN 宿主编译这个生成头，不采用当前环境的出库选项。
@@ -28,8 +30,10 @@ def check(root):
                 raw = stream.read(48)
             if len(raw) != 48:
                 raise ValueError("直连库 lib.idx 头截断")
-            magic, version, _, _, reserved, chain = struct.unpack("<8sIIII12s12x", raw)
-            if magic != b"S2ALIB\0\0" or version != 1 or reserved != 0:
+            # 偏移 20 是 flags（graphics/nvn/lib_pack_core.inc 头格式；位 0 = 全部计算程序为 tensor ABI 1，LibPack.cs 11-09 起会写 1）：
+            #   原先当成保留字段要求为 0，带这个标志的游戏 Mac 局在起局前一律被拒。只认已定义的位，出现别的位才算头无效
+            magic, version, _, _, flags, chain = struct.unpack("<8sIIII12s12x", raw)
+            if magic != b"S2ALIB\0\0" or version != 1 or flags & ~LIB_FLAGS_KNOWN:
                 raise ValueError("直连库 lib.idx 头无效")
             actual = chain.rstrip(b"\0").decode("ascii")
             if actual == host:

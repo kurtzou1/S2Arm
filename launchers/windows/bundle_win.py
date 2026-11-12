@@ -39,13 +39,9 @@ def say(m): print(m, flush=True)
 
 def snapshot(engine):
     """仓库输入 → 全新单提交 Git 库（同 Mac bundle_engine.bundle 的快照段；出包各阶段按 git 对象号取源码身份）"""
-    names = subprocess.check_output(["git", "-C", str(ROOT), "ls-files", "-co", "--exclude-standard", "-z", "--", *bundle_engine.INPUTS]).split(b"\0")
     engine.mkdir(parents=True)
     n = 0
-    for name in sorted(set(names) - {b""}):
-        rel = Path(os.fsdecode(name))
-        if not bundle_engine.include_source(rel):
-            continue
+    for rel in bundle_engine.snapshot_files(ROOT):   # 挑文件与 Mac 同一个函数（单测 pack/jobs/tests/test_downstream.py 锁登记表在内）
         src = ROOT / rel
         if src.is_symlink():
             raise SystemExit("【红】引擎源码里有符号链接，要先显式展开：" + str(rel))

@@ -96,6 +96,11 @@ fi
 echo "offline CLI: bad request rejected, no output directory"
 
 if command -v spirv-val >/dev/null 2>&1; then
+    (cd "$tests" && dotnet run -c Release -- --emit-gs "$out/geometry")
+    for stage in vs gs fs gs-Points gs-Lines gs-Triangles; do
+        spirv-val --target-env vulkan1.1 "$out/geometry/$stage.spv"
+    done
+    echo "spirv-val: v2 VS/GS/FS and GS input topologies 6/6"
     python3 - "$out/first/program.json" "$out" <<'PY'
 import base64, json, subprocess, sys
 document = json.load(open(sys.argv[1], encoding='utf-8'))

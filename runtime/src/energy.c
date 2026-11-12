@@ -17,7 +17,8 @@
 
 int proc_pid_rusage(int pid, int flavor, rusage_info_t *buffer);
 int proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer, int buffersize);
-__attribute__((weak)) double s2a_gpu_busy_ms(void) { return -1; }   // 直连层（graphics/nvn hle_nvn.c）的强定义：GPU 忙累计毫秒；没有直连层（通用局 / 单测）→ −1
+__attribute__((weak)) double s2a_gpu_busy_ms(void) { return -1; }
+__attribute__((weak)) double s2a_gpu_clock_ms(void) { return -1; }   // 同上：已入账各帧最晚 GPU 结束（毫秒）   // 直连层（graphics/nvn hle_nvn.c）的强定义：GPU 忙累计毫秒；没有直连层（通用局 / 单测）→ −1
 struct s2a_tc_data { uint64_t instructions, cycles, user_mach, system_mach, energy_nj; };
 struct s2a_tc { uint16_t len, r0; uint32_t r1; struct s2a_tc_data d[4]; };
 #define S2A_PIDTHREADCOUNTS 34
@@ -47,8 +48,13 @@ int s2a_energy_snap(s2a_esnap *s) {
     s->cpu = (uint64_t)((ri.ri_user_time + ri.ri_system_time) * g_tb); s->pcpu = (uint64_t)((ri.ri_user_ptime + ri.ri_system_ptime) * g_tb);
     s->nj = ri.ri_energy_nj; s->pnj = ri.ri_penergy_nj; s->cyc = ri.ri_cycles; s->pcyc = ri.ri_pcycles;
     s->intr = ri.ri_interrupt_wkups; s->idle = ri.ri_pkg_idle_wkups;
-    double g = s2a_gpu_busy_ms(); if (g >= 0) { s->ok_g = 1; s->gpu_ms = g; }
+    double g = s2a_gpu_busy_ms(); if (g >= 0) { s->ok_g = 1; s->gpu_ms = g; s->gpu_clk_ms = s2a_gpu_clock_ms(); }
     return 0;
+}
+double s2a_gpu_busy_rate(const s2a_esnap *a, const s2a_esnap *b) {
+    if (!a->ok_g || !b->ok_g || a->gpu_clk_ms < 0 || b->gpu_clk_ms < 0) return -1;
+    double dc = b->gpu_clk_ms - a->gpu_clk_ms;
+    return dc > 0 ? (b->gpu_ms - a->gpu_ms) * 1000.0 / dc : 0;
 }
 
 // 线程：按线程号记上次的能耗与性能核时间（开放寻址，进程里线程 < 300）。每次采样只留这一次还活着的线程（审计 P1-85：原先只增不删，
@@ -134,7 +140,7 @@ int s2a_energy_capture(char *out, size_t n) {
     char tl[512] = "", gl[96] = "读不到"; size_t o = 0;
     for (int i = 0; i < nt && o < sizeof tl - 64; i++)
         o += (size_t)snprintf(tl + o, sizeof tl - o, "%s%s %.2f W（%.2f 核，性能核 %.0f%%）", i ? "、" : "", top[i].name, top[i].dnj / dt, top[i].dt / dt, top[i].dt ? 100.0 * top[i].dpt / top[i].dt : 0.0);
-    if (s.ok_g && g_last.ok_g) snprintf(gl, sizeof gl, "忙 %.1f ms/s（时间，非能耗）", (s.gpu_ms - g_last.gpu_ms) * 1e9 / dt);
+    double gr = s2a_gpu_busy_rate(&g_last, &s); if (gr >= 0) snprintf(gl, sizeof gl, "忙 %.1f ms/s（时间，非能耗）", gr);
     snprintf(out, n, "近 %.1f 秒：CPU %.2f W（性能核 %.2f W / 能效核 %.2f W；性能核 %.2f 核 @%.2f GHz、能效核 %.2f 核 @%.2f GHz）；GPU %s；唤醒 中断 %.0f/秒、空闲 %.0f/秒；耗能前 %d 线程：%s",
         dt / 1e9, (pnj + enj) / dt, pnj / dt, enj / dt, pcpu / dt, pcpu ? pcyc / pcpu : 0.0, ecpu / dt, ecpu ? ecyc / ecpu : 0.0, gl,
         (double)(s.intr - g_last.intr) * 1e9 / dt, (double)(s.idle - g_last.idle) * 1e9 / dt, nt, tl);

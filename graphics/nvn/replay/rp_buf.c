@@ -33,7 +33,17 @@ static struct shadow *shadow_get(const uint8_t *mem, uint64_t size) {
     struct shadow *s = nvn_hm_get(&g_shadow, &k);
     if (s) return s;
     nvn_gpu_buf b = NULL; nvn_gpu_err err = {0};
-    if (!nvn_gpu_ok(nvn_gpu_buf_create(size, NVN_GPU_MEM_SHARED, NULL, &b, &err))) { nvn_unimpl("gpu", "buf_create_pool_mirror", mem); return NULL; }
+    if (!nvn_gpu_ok(nvn_gpu_buf_create(size, NVN_GPU_MEM_SHARED, NULL, &b, &err))) {
+        // 完整原因：池大小、申请字节、单次分配上限、SSBO 范围上限、错误码、后端原文。按池大小去重（同一池每笔都会走到这里）。
+        nvn_gpu_caps cp; nvn_gpu_caps_get(&cp);
+        static uint64_t said_size[8]; static int nsaid;
+        int dup = 0; for (int i = 0; i < nsaid; i++) if (said_size[i] == size) dup = 1;
+        if (!dup && nsaid < 8) { said_size[nsaid++] = size;
+            char m[180]; snprintf(m, sizeof m, "池镜像建不出来：池 %p+%llu 字节，申请 %llu，分配上限 %llu，SSBO 范围上限 %llu，错误 %d：%s",
+                                  (const void *)mem, (unsigned long long)size, (unsigned long long)size,
+                                  (unsigned long long)cp.max_buf_bytes, (unsigned long long)cp.max_ssbo_range, (int)err.rc.code, err.why);
+            nvn_plat_log(NVN_PLAT_LOG_RED, "gpu", m); }
+        nvn_unimpl("gpu", "buf_create_pool_mirror", mem); return NULL; }
     size_t ps = nvn_dirty_page_size();
     s = calloc(1, sizeof *s);
     if (!s) { nvn_gpu_buf_release(b, NULL, NULL); nvn_unimpl("gpu", "pool_mirror_alloc_failed", mem); return NULL; }

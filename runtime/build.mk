@@ -98,6 +98,8 @@ IOS_LIBS   += -framework GameController -framework UniformTypeIdentifiers
 IOS_LIBS   += -framework CoreMotion -framework CoreHaptics -framework ExternalAccessory   # ExternalAccessory：GameSir G8+ MFi 有线的马达走配件协议（ios/ea_rumble.m，#462）
 # 诊断包（ios/diag.m）：MetricKit 收崩溃 / 卡顿诊断
 IOS_LIBS   += -framework MetricKit
+# 静音键下照样出声（ios/app.m audio_category_apply，#789）：AVAudioSession
+IOS_LIBS   += -framework AVFAudio
 # 诊断包自己写 zip（文件放根目录、文件名带 UTF-8 标记；系统「为上传而读」会多套一层文件夹、中文名按 cp437 解成乱码）：deflate 用系统 zlib
 IOS_LIBS   += -lz
 IOS_BUNDLE ?= local.s2arm.app

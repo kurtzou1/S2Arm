@@ -283,8 +283,10 @@ class RealTools(unittest.TestCase):
         (app / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "io.s2arm.template", "CFBundleExecutable": "S2Arm", "CFBundlePackageType": "APPL"}))
         sec = Secrets()
         log = t / "sign.log"
+        # 签名不许依赖网络（#794：rcodesign 缺省向苹果时间戳服务器要时间戳，连不上就整次失败）：代理指到不通的端口，要网就会失败
+        offline = dict(os.environ, HTTP_PROXY="http://127.0.0.1:9", HTTPS_PROXY="http://127.0.0.1:9", http_proxy="http://127.0.0.1:9", https_proxy="http://127.0.0.1:9")
         def run(args, logp, cwd=None):
-            r = subprocess.run(list(map(str, args)), capture_output=True, text=True, cwd=cwd)
+            r = subprocess.run(list(map(str, args)), capture_output=True, text=True, cwd=cwd, env=offline)
             Path(logp).write_text(r.stdout + r.stderr)
             self.assertEqual(r.returncode, 0, r.stderr[-500:])
         c = types.SimpleNamespace(r=dict(action="import", p12Path=str(t / "in.p12"), profilePath=str(t / "in.mobileprovision")), private=t / "private",

@@ -15,6 +15,9 @@ const char *s2a_gfx_mode_brief(void) { return "单测"; }
 int s2a_widen_full(void) { return 0; }
 int s2a_widen_game(void) { return 0; }
 int s2a_energy_snap(s2a_esnap *s) { (void)s; return 1; }
+static uint64_t g_gpu_alloc;   // 浮层「GPU 已分配」（生产在 nvn_mtl.m）：0 = 没有直连层
+uint64_t s2a_gpu_alloc_bytes(void) { return g_gpu_alloc; }
+double s2a_gpu_busy_rate(const s2a_esnap *a, const s2a_esnap *b) { (void)a; (void)b; return -1; }   // 桩：上面采样恒失败，走不到这里
 int nvn_gl_game_fps(void) { return g_gl; }   // 浮层按名字取（dlsym），这里给强定义当 GL 前端
 int nvn_game_fps(void) { return g_nv; }
 // 固定内存采样结果，验证成功和失败都不会因 Metal HUD 请求被隐藏。
@@ -77,6 +80,18 @@ int main(void) {
     check_display("官方 HUD 已请求，1 帧 / 内存可读", &h, 1, 1);
     check_display("官方 HUD 已请求，空帧环 / 内存读取失败", &h, 0, 0);
     check_display("宿主信息缺失，空帧环 / 内存读取失败", NULL, 0, 0);
+    // 两本账（11-13）：期望手写——桩的实占 123 MB = 0.12 GB → 「0.1」；GPU 已分配 5.5 GiB = 5905580032 字节 → 简版「5.5 GB」、开发浮层「5632 MB」；
+    //   没有直连层（0）时简版只写实占「0.1 GB」、不出 GPU
+    {
+        char b[256], t[4096]; g_mem_ok = 1; s2a_hud_host hh = {.thermal = "单测", .build_id = "t_hud", .battery_rate_pm = NAN, .battery_level = -1};
+        g_gpu_alloc = 5905580032ull; s2a_hud_brief(b, sizeof b); s2a_hud_text(t, sizeof t, &hh);
+        int ok1 = strstr(b, "进程 0.1 GB · GPU 5.5 GB") != NULL, ok2 = strstr(t, "GPU 已分配 5632 MB") != NULL;
+        printf("GPU 已分配 5.5 GiB：简版期望含「进程 0.1 GB · GPU 5.5 GB」→ %s；开发浮层期望含「GPU 已分配 5632 MB」→ %s\n", b, ok2 ? "含" : "不含");
+        if (!ok1 || !ok2) fails++;
+        g_gpu_alloc = 0; s2a_hud_brief(b, sizeof b);
+        int ok3 = strstr(b, "· 0.1 GB") && !strstr(b, "GPU");
+        printf("没有直连层：简版期望只写「0.1 GB」→ %s\n", b); if (!ok3) fails++;
+    }
     if (fails) printf("✗ t_hud：%d 项不符\n", fails); else printf("✓ t_hud：浮层目标 = min(游戏帧率, 上限)，GL 不锁时 = 上限，非法上限不进浮层，全过\n");
     return fails != 0;
 }

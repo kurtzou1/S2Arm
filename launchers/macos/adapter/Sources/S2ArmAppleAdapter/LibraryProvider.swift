@@ -26,6 +26,33 @@ public struct GamePackage: Equatable {
 }
 
 /// 游戏库里的一款（catalog 作业 result.games 的一项，只取界面要的字段）。
+/// 下游深度方案（pack/downstream/schemes.json）：方案、能不能选与原因、确认页文案（中英）、玩家上次的选择（nil = 没选过；"" = 仍用原版）
+public struct DownstreamOffer: Equatable {
+    public struct Copy: Equatable { public let title: String; public let body: String; public let points: [String]; public let recommend: String; public let original: String }
+    public let id: String
+    public let name: String
+    public let eligible: Bool
+    public let reason: [String: String]
+    public let copy: [String: Copy]
+    public let choice: String?
+    public init?(catalog d: [String: Any]) {
+        guard let id = d["id"] as? String, let name = d["name"] as? String else { return nil }
+        self.id = id; self.name = name; self.eligible = d["eligible"] as? Bool ?? false
+        self.reason = d["reason"] as? [String: String] ?? [:]
+        var copy: [String: Copy] = [:]
+        for (lang, v) in d["copy"] as? [String: [String: Any]] ?? [:] {
+            copy[lang] = Copy(title: v["title"] as? String ?? "", body: v["body"] as? String ?? "", points: v["points"] as? [String] ?? [],
+                              recommend: v["recommend"] as? String ?? "", original: v["original"] as? String ?? "")
+        }
+        self.copy = copy; self.choice = d["choice"] as? String
+    }
+    /// 按界面语言挑（zh-Hans → zh；没有就退回中文）
+    public func text(_ language: String) -> Copy? { copy[language.hasPrefix("zh") ? "zh" : String(language.prefix(2))] ?? copy["zh"] }
+    public func why(_ language: String) -> String { reason[language.hasPrefix("zh") ? "zh" : String(language.prefix(2))] ?? reason["zh"] ?? "" }
+    /// 选了下游且条件满足（出包会走下游）
+    public var chosen: Bool { eligible && !(choice ?? "").isEmpty }
+}
+
 public struct GameSummary: Identifiable, Equatable {
     public let id: String
     public let name: String
@@ -50,6 +77,8 @@ public struct GameSummary: Identifiable, Equatable {
     public let iphoneFree: Bool
     /// 上次装的那台设备（设备记录键，UDID）：「续签」装回当初那台，不换别的（pack/jobs/layout.py install_record 的 deviceKey）
     public var iphoneInstallDevice: String? = nil
+    /// 下游深度方案（pack/jobs/downstream.py describe）：这款有下游项目的专门移植时，导出 iPhone 前问玩家一次用哪套
+    public var downstream: DownstreamOffer? = nil
     /// 只换宿主（pack/jobs/host_update.py）：none / current / swap / incompatible（要重新准备才能用上新版修复）/ failed
     public let hostUpdate: String
     /// 存放位置（游戏库结构 v3）：state = ok / offline（位置没连上）/ missing（文件夹找不到）/ none（还没出过包）
@@ -83,6 +112,7 @@ public struct GameSummary: Identifiable, Equatable {
                   hostUpdate: g["hostUpdate"] as? String ?? "none", location: GameLocation(catalog: g["location"] as? [String: Any] ?? [:]), iphoneRestorable: g["iphoneRestorable"] as? Bool ?? false,
                   sizes: GameSizes(catalog: g["sizes"] as? [String: Any] ?? [:]))
         self.iphoneInstallDevice = (g["iphoneInstall"] as? [String: Any])?["deviceKey"] as? String
+        self.downstream = (g["downstream"] as? [String: Any]).flatMap(DownstreamOffer.init(catalog:))
     }
 
     /// 某类原件里版本最新的那个的显示版本（base / update）；没有这类为 nil。

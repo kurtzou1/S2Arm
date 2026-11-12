@@ -3074,6 +3074,10 @@ static int dcmp(const void *a, const void *b);
 //   （10-30 iOS 功耗测量口径修法 5：task_gpu_utilisation / 资源联盟的 GPU 能耗在真机一直读 0）
 static double g_gpu_busy_ms;
 double s2a_gpu_busy_ms(void) { return g_gpu_busy_ms; }
+// 入账到哪儿的 GPU 时钟（已入账各帧最晚 GPU 结束，毫秒）：GPU 忙晚 8 帧、在 CPU 的帧边界入账，CPU 一顿（慢帧）顿前的 GPU 时间就挤进下一个墙钟窗口，
+//   HUD 按墙钟算的「GPU 忙」跳过 1000 ms/s（#647：GPU 只有一条时间线，独占时间不可能超过 1 秒每秒）。按这个时钟差当分母，入账节奏不再进读数
+static double g_gpu_clk_ms;
+double s2a_gpu_clock_ms(void) { return g_gpu_clk_ms; }
 static int dcmp(const void *a, const void *b) { double x = *(const double *)a, y = *(const double *)b; return (x > y) - (x < y); }
 // Power over the window since the last summary, for the whole process: CPU energy (task_energy in nJ, Apple silicon), CPU time (100% = one core) and the share of it on performance cores,
 // wakeups per second (interrupt / out of platform idle), GPU time per second (task_gpu_utilisation), thermal state, and the guest threads that yielded most (hle_thread.c);
@@ -3609,7 +3613,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         trow(f, "@sub_wall_ms", sw / 1e6); trow(f, "@sub_cpu_ms", atomic_exchange(&g_sub_cpu_ns, 0) / 1e6); trow(f, "@sub_instr", (double)atomic_exchange(&g_sub_instr, 0));
     } else atomic_store(&g_nvn_ns, 0);
     g_acq_wait_ns = g_pq_wait_ns = 0;
-    if (f >= 8) { double g = nvn_be_gpu_ms(f - 8); if (g >= 0) { tpush(3, g); trow(f - 8, "@gpu_ms", g); g_gpu_busy_ms += g; }   // GPU time is taken 8 frames late (already completed)
+    if (f >= 8) { double g = nvn_be_gpu_ms(f - 8); if (g >= 0) { tpush(3, g); trow(f - 8, "@gpu_ms", g); g_gpu_busy_ms += g; uint64_t a, b; if (nvn_be_gpu_span(f - 8, &a, &b) && b / 1e6 > g_gpu_clk_ms) g_gpu_clk_ms = b / 1e6; }   // GPU time is taken 8 frames late (already completed)
         { lf_rec *r = &g_lf[(f - 8) % LFN];   // long-frame log (on by default, DM_LONGFRAME=0 turns it off): a line is printed only when the whole frame > 20 ms or GPU > 16.7 ms, and it is clearly above recent conditions
           static int on = -1; if (on < 0) { const char *e = getenv("DM_LONGFRAME"); on = !(e && !strcmp(e, "0")); }
           // "Long" is relative to recent conditions: when running steadily at 30 fps (menus / windowless host) or under sustained overload, every frame is > 20 ms; those are not long frames and must not flood the log - a frame has to be 40% above the sliding mean of the last 16 frames to count

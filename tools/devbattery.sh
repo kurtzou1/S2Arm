@@ -40,8 +40,10 @@ devbattery_gate() {
     [ -f "$flag" ] && { echo "【红】测试设备电量暂停中（标记 ${flag}：$(head -1 "$flag")），没有新读数确认回到 ${DEVBATTERY_RESUME}%，这局不跑" >&2; return 1; }
     return 0; fi
   if [ $rc != 0 ]; then
-    echo "$now 读不到" >> "$log"; DEVBATTERY_LINE="电量 读不到"
-    echo "【红】测试设备电量读不到（ideviceinfo 不通，设备多半离线或没电关机），这局不跑" >&2; devbattery_notify "测试设备电量读不到，真机局已拒绝"; return 1; fi
+    # 11-12 维护者：读不到电量只记一行、照跑，不拦（测试设备2 只走局域网，ideviceinfo 两条都不通，原先一直拒跑、设备闲着）。
+    #   设备真离线由后面的 devicectl 装机 / 起局自己报；读得到的低电量照旧拦
+    echo "$now 读不到（照跑）" >> "$log"; DEVBATTERY_LINE="电量 读不到（照跑）"
+    echo "【黄】测试设备电量读不到（ideviceinfo USB / 网络都不通，局域网连接的设备常见），照跑" >&2; return 0; fi
   read -r p c e f <<<"$r"; f=${f:-0}
   DEVBATTERY_LINE="电量 ${p}%（$([ "$c" = 1 ] && echo 充电 || echo 未充电)，电源 $([ "$e" = 1 ] && echo 有 || echo 无)）"
   echo "$now $p% 充电=$c 电源=$e 充满=$f" >> "$log"

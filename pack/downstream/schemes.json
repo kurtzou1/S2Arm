@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "about": "下游深度方案登记表（pack/jobs/downstream.py 读）。一条 = 一个下游项目做的专门移植：程序号命中时启动器弹确认页，玩家选了，出包最后一步改用下游的做包工具。下游自己适配 S2Arm，S2Arm 只下载它的包件（挂 s2arm.com：下游源码 + 壳 + 预编翻译工具 + bundle.json），按 sha256 核。升级下游 = 改 bundle 的 tag / commit / sha256 / urls。游戏名不写进这里，界面上的游戏名取玩家自己游戏包里的名字。",
+  "schemes": [
+    {
+      "id": "d2r-mobile",
+      "name": "D2R-Mobile",
+      "repo": "jhaizhou-ops/d2r-mobile",
+      "license": "MIT",
+      "titleIds": ["0100726014352000"],
+      "needs": {
+        "updateVersion": 2228224,
+        "updateDisplay": "1.0.34.0",
+        "exefsSha256": {
+          "main": "55fd909bb7230b002357e5b0d8499c11f06888f345c49e69eb4734df44a27d0e",
+          "sdk": "1c9f198a91c0bcfee5cf8f5b53fb941895e91334dfb766ce79fc68576797f017"
+        }
+      },
+      "bundle": {
+        "tag": "v2.3.1",
+        "commit": "18bd146f00fcadd0921beb9496c61e023c5950a1",
+        "urls": ["https://dl.s2arm.com/d2r/v2.3.1/D2RMobile-s2arm-bundle.zip",
+                 "https://github.com/jhaizhou-ops/d2r-mobile/releases/download/v2.3.1/D2RMobile-s2arm-bundle.zip"],
+        "sha256": "bac5b9c3d84009f578e1e4ccc0041da5b636d479835330ea2de0ed9f2bf7e5ed"
+      },
+      "targets": {
+        "ios": {
+          "tool": "dm/tools/d2rm_pack.py",
+          "entitlements": ["com.apple.developer.kernel.increased-memory-limit", "com.apple.developer.kernel.extended-virtual-addressing"]
+        }
+      },
+      "copy": {
+        "zh": {
+          "title": "这款有专门的深度优化方案",
+          "body": "用原版方案出的包，这款播完开场动画后会报「验证失败」，进不了主菜单。推荐用 D2R-Mobile 方案：专为这款做的移植，离线单机、60 帧、整套触屏操作。",
+          "points": ["只支持 1.0.34.0 更新",
+            "手机要 iOS 26 及以上", "手机上会多一个独立 App（免费 Apple ID 最多装 3 个 App）", "游戏资源约 5.6 GB，第一次装到手机要推一次"],
+          "recommend": "用 D2R-Mobile 方案（推荐）",
+          "original": "仍用原版方案"
+        },
+        "en": {
+          "title": "This game has a dedicated, deeply optimized port",
+          "body": "With the standard route, this game shows \"verification failed\" after the opening cinematic and never reaches the main menu. We recommend the D2R-Mobile route: a port made for this game, fully offline, 60 fps, with complete touch controls.",
+          "points": ["Supports update 1.0.34.0 only",
+            "The phone needs iOS 26 or later", "Your phone gets one more separate app (a free Apple ID can install at most 3 apps)", "About 5.6 GB of game resources are copied to the phone once"],
+          "recommend": "Use D2R-Mobile (recommended)",
+          "original": "Keep the standard route"
+        }
+      }
+    }
+  ]
+}

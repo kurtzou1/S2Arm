@@ -2,6 +2,7 @@
 Mac 的整条 dev_run 推包回归（假 devicectl）在 tests/dev_run_test.sh，本文件只核规则本身与 Windows 那支（原 tests/oneclick_win_test.py 推包几组搬来）"""
 import hashlib, json, os, struct, sys, tempfile, unittest
 from pathlib import Path
+from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import push_pack as push
 
@@ -389,8 +390,8 @@ class ContainerDocs(Base):
 
 class BigFallback(unittest.TestCase):
     """#641：流式写失败后，大于上限的文件不交给 devicectl 整份拷（CoreDeviceService 会把整个文件读进内存、拖垮整机）；小文件照旧退回"""
-    def run_put_big(self, size, cap):
-        with tempfile.TemporaryDirectory() as t:
+    def run_put_big(self, size, cap, mem=0):
+        with tempfile.TemporaryDirectory() as t, mock.patch.object(push, "avail_mem", lambda: mem):
             src = Path(t) / "game.img"; src.write_bytes(b"\0" * size)
             d = push.Devicectl("C891", "io.s2arm.games.t", t, env={"S2A_DC_FALLBACK_MAX": str(cap)})
             class Stream:
@@ -416,6 +417,74 @@ class BigFallback(unittest.TestCase):
 
     def test_default_cap_is_two_gib(self):
         self.assertEqual(push.DC_FALLBACK_MAX, 2 << 30)
+
+    def test_fits_in_half_of_free_memory_falls_back(self):
+        # 11-12：上限按「固定上限与本机可用内存一半取大」——4096 字节的文件，固定上限 1024、可用内存 10000（一半 5000 ≥ 4096）→ 交给 devicectl
+        err, copied, _ = self.run_put_big(4096, 1024, mem=10000)
+        self.assertIsNone(err)
+        self.assertEqual(copied, ["Documents/资源包/game.img"])
+
+    def test_more_than_half_of_free_memory_does_not(self):
+        err, copied, _ = self.run_put_big(4096, 1024, mem=8000)   # 一半 4000 < 4096
+        self.assertEqual(copied, [])
+        self.assertIn("本机可用内存", err)
+
+
+class PushReason(unittest.TestCase):
+    """推送失败的原文 → 摘要里一眼看得懂的一类（11-12 v0.3.1 Mac 玩家「romfs.img 没传完」看不出是哪种）。期望按 s2a-devpush / devicectl 的报错特征手写"""
+    def test_kinds(self):
+        self.assertIn("USB 看不到手机", push.push_reason("找不到设备 00008140-0001：DeviceNotFound"))
+        self.assertIn("手机锁屏", push.push_reason("取不到 io.s2arm.games.t 的容器（App 装着，可能锁屏 / 不是开发签名）：device socket io failed"))
+        self.assertIn("连接断了", push.push_reason("90 秒没有任何进展：和手机的连接可能断了"))
+        self.assertIn("连接断了", push.push_reason("写文件失败：device socket io failed"))
+        self.assertEqual(push.push_reason("别的原因"), "")
+
+    def make_pack(self, t):
+        pk, w = Path(t) / "pack", Path(t) / "work"; pk.mkdir(); w.mkdir()
+        (pk / "romfs.img").write_bytes(b"IMAGE"); (pk / "index.tsv").write_text(f"romfs.img\t5\t{sha(b'IMAGE')}\n")
+        (pk / "manifest.json").write_text('{"version": 2}')
+        return pk, w
+
+    def test_direct_write_retried_once(self):
+        with tempfile.TemporaryDirectory() as t:
+            pk, w = self.make_pack(t); dev = Fake({}); calls = []
+            def flaky(src, rel):
+                calls.append(rel)
+                if len(calls) == 1: raise push.Fail("写文件失败：device socket io failed")
+            dev.put_big = flaky; log = []
+            push.plan(dev, pk, w, full=True, say=log.append); push.send(dev, pk, w, say=log.append)
+            self.assertEqual(calls, [f"{RP}/romfs.img", f"{RP}/romfs.img"])
+            self.assertTrue(any("原地再试一次" in l for l in log))
+
+    def test_two_failures_name_the_reason_and_the_way_out(self):
+        with tempfile.TemporaryDirectory() as t:
+            pk, w = self.make_pack(t); dev = Fake({}); log = []
+            def gone(src, rel): raise push.Fail("找不到设备 00008140-0001：DeviceNotFound")
+            dev.put_big = gone
+            push.plan(dev, pk, w, full=True, say=log.append)
+            with self.assertRaises(push.Fail) as cm: push.send(dev, pk, w, say=log.append)
+            m = str(cm.exception)
+            self.assertTrue(m.startswith("资源传输中断（USB 看不到手机"), m)
+            self.assertIn("romfs.img 没传完", m); self.assertIn("新版已支持单一文件包和断点续传", m); self.assertIn("重新出一次这款的包", m)
+            self.assertTrue(localized(m), f"启动器中英对照表里没有对得上这句的句式：{m}")
+
+    def test_resumable_message_is_localized(self):
+        m = "资源传输中断（" + push.push_reason("找不到设备 x") + "）：game.img 没传完，重新装到 iPhone 会接着已传的部分续传"
+        self.assertTrue(localized(m), m)
+
+
+def localized(text):
+    """同启动器 BackendText 的句式匹配（{n} 占位 = 非贪婪任意串，整句锚定），占位里的值也要能翻（原因一类是整句对照）"""
+    import re
+    table = json.loads((Path(__file__).resolve().parents[1] / "launchers/macos/adapter/Sources/S2ArmAppleAdapter/Resources/Localizable.json").read_text(encoding="utf-8"))
+    exact = {e["source"] for e in table}
+    for e in table:
+        parts = re.split(r"\{\d+\}", e["source"])
+        if len(parts) < 2: continue
+        m = re.fullmatch("(.*?)".join(map(re.escape, parts)), text, re.S)
+        if m and all(g in exact or not re.search(r"[\u4e00-\u9fff]", g) or g.endswith(".img") for g in m.groups()):
+            return True
+    return False
 
 
 class SpaceNeed(Base):
@@ -567,7 +636,8 @@ class GameImgResume(Base):
         dev = self.device()
         def short_write(src, rel): dev.big.append(rel); dev.files[rel] = Path(src).read_bytes()[:-1]
         dev.put_big = short_write
-        with self.assertRaises(push.Fail) as e: self.push_it(dev)
+        # 直写失败会原地再试一次（11-12），这里两次都整份写短（不走续传），看长度核对本身
+        with mock.patch.object(push, "resume_offset", lambda *a: 0), self.assertRaises(push.Fail) as e: self.push_it(dev)
         self.assertIn("game.img 没传完", str(e.exception))
         self.assertTrue(any(f"长度 {len(self.local) - 1} 字节，应为 {len(self.local)} 字节" in l for l in self.log), self.log)
         self.assertNotIn(f"{RP}/.pushed", dev.files)   # 没记账：下次重新判断续传
@@ -779,7 +849,7 @@ sys.exit(0 if pathlib.Path(sys.argv[-1]).exists() else 1)
         dev.put_big = put_big
         with self.assertRaises(push.Fail):
             push.send(dev, self.pk, self.w, progress=lambda *a: calls.append(a))
-        self.assertEqual(calls, [(0, 100, 0, 1), (40, 100, 0, 1)])
+        self.assertEqual(calls, [(0, 100, 0, 1), (40, 100, 0, 1), (40, 100, 0, 1)])   # 直写失败原地再试一次（11-12）：第二次又报到 40，仍不报满
         self.assertNotIn(f"{RP}/.pushed", dev.files)
         self.assertIsNone(dev.progress)
 

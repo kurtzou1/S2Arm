@@ -5,6 +5,12 @@
 #include <stdint.h>
 #include <vulkan/vulkan.h>
 
+// 等栅栏，按墙钟算时限。有的驱动在等待被信号打断时不接着等，直接返回 VK_TIMEOUT（#697：天玑 9000+ / Mali-G710 r32p1 上，
+// 一次计算解码的提交之后 vkWaitForFences(5 秒) 不到 1 毫秒就返回超时、栅栏其实稍后才触发；等待期间屏蔽本线程的异步信号后正常）。
+// 我们的进程里信号很多（写跟踪的缺页、游戏线程的挂起），所以超时返回不能当真：没到墙钟时限就接着等。
+// 返回值同 vkWaitForFences：VK_SUCCESS / 真到时限的 VK_TIMEOUT / 设备错误原样。
+VkResult s2a_vk_wait_fences(VkDevice device, uint32_t n, const VkFence *fences, uint64_t timeout_ns);
+
 #ifdef __cplusplus
 extern "C" {
 #endif

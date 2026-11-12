@@ -164,7 +164,7 @@ struct InputEditor: View {
                 settingSlider(L("纵向灵敏度"), value:$config.mouseOptions.sensitivityY, range:0.1...10, readout:String(format:"%.1f",config.mouseOptions.sensitivityY))
                 Toggle(L("横向反转"),isOn:$config.mouseOptions.invertX).toggleStyle(.switch).controlSize(.small)
                 Toggle(L("纵向反转"),isOn:$config.mouseOptions.invertY).toggleStyle(.switch).controlSize(.small)
-                Text(L("在「转动视角」模式下，点击游戏画面锁定鼠标视角；鼠标锁定时 Esc 只释放，不触发映射的游戏按键。释放后再次按 Esc 才触发映射；窗口失焦时释放鼠标并清空输入。")).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                Text(L("在「转动视角」模式下，点击游戏画面锁定鼠标视角；鼠标锁定时 Esc 只释放，不触发映射的游戏按键。释放后再次按 Esc 才触发映射；窗口失焦时释放鼠标并清空输入。全屏时按 Esc 退出全屏；Esc 映射了游戏按键时，短按照常给游戏，按住 1 秒退出全屏。⌃⌘F 和菜单「显示 → 退出全屏幕」也能退出。")).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
                 Spacer(minLength:0)
             }.padding(12).frame(maxWidth:.infinity,maxHeight:.infinity,alignment:.topLeading).switchSettingsPanel()
             VStack(alignment: .leading, spacing: WorkspaceLayout.sectionSpacing) {

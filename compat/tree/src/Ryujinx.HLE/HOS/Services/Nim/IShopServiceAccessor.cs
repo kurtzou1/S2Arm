@@ -1,38 +1,19 @@
 using Ryujinx.Common.Logging;
-using Ryujinx.HLE.HOS.Ipc;
-using Ryujinx.HLE.HOS.Kernel.Threading;
 using Ryujinx.HLE.HOS.Services.Nim.ShopServiceAccessServerInterface.ShopServiceAccessServer.ShopServiceAccessor;
-using Ryujinx.Horizon.Common;
-using System;
 
 namespace Ryujinx.HLE.HOS.Services.Nim.ShopServiceAccessServerInterface.ShopServiceAccessServer
 {
     class IShopServiceAccessor : IpcService
     {
-        private readonly KEvent _event;
-
-        private int _eventHandle;
-
-        public IShopServiceAccessor(Horizon system)
-        {
-            _event = new KEvent(system.KernelContext);
-        }
+        public IShopServiceAccessor(Horizon system) { }
 
         [CommandCmif(0)]
-        // CreateAsyncInterface(u64) -> (handle<copy>, object<nn::ec::IShopServiceAsync>)
+        // CreateAsyncInterface(u64) -> object<nn::ec::IShopServiceAsync>
+        // Only the object, as yuzu and Skyline both answer it. With the extra copy handle this reply carried before, Minecraft (0100D71004694000) crashed in its
+        // sdk right after the reply, reading address 0, on every boot.
         public ResultCode CreateAsyncInterface(ServiceCtx context)
         {
             MakeObject(context, new IShopServiceAsync());
-
-            if (_eventHandle == 0)
-            {
-                if (context.Process.HandleTable.GenerateHandle(_event.ReadableEvent, out _eventHandle) != Result.Success)
-                {
-                    throw new InvalidOperationException("Out of handles!");
-                }
-            }
-
-            context.Response.HandleDesc = IpcHandleDesc.MakeCopy(_eventHandle);
 
             Logger.Stub?.PrintStub(LogClass.ServiceNim);
 

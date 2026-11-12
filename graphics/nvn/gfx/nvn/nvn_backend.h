@@ -39,7 +39,7 @@
 extern "C" {
 #endif
 
-#define NVN_GPU_CONTRACT_VERSION 6   // 改任何签名或语义 +1；两个后端与核心同批改，t_nvn_backend.c 的签名表同批改
+#define NVN_GPU_CONTRACT_VERSION 7   // 改任何签名或语义 +1；两个后端与核心同批改，t_nvn_backend.c 的签名表同批改
 /* 定稿 #1（调用形式）：链接期直接调用 nvn_gpu_*。每个平台构建只链一个后端，Metal 3 / 4 的选择留在 Metal 后端内部。
    理由：零间接、可内联；同进程 A/B 对照没有真实消费者，不为它新增注册实体（vickwv 同意）。 */
 
@@ -236,6 +236,7 @@ typedef struct {
     uint8_t src_kind;     // 来源：nvn_refl.h 的 NVN_RB_*（哪类 NVN 槽：CBUF / TEX / IMG / SAMP / SUPPORT / C1 / DRV0 …）
     uint16_t binding;     // 描述符号（Metal 忽略）
     uint16_t src_reg;     // 来源槽号（NVN 常量缓冲号 / 贴图槽号 …）
+    uint32_t src_off;     // v7：来源内的字节偏移；目前只有 NVN_RB_UBOA（UBO 里存 8 字节裸指针的位置）用
     uint16_t count;       // 数组长度（非数组为 1）
     uint16_t aid;         // Metal 参数号（Vulkan 忽略）
     uint32_t stages;      // 可见阶段位（1 << nvn_gpu_stage）

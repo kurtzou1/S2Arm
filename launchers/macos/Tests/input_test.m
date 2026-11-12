@@ -359,6 +359,40 @@ static void test_capture_held_key(BOOL system_state_matches) {
     puts("Mac mouse: held W across capture/Esc/recapture, first-click Y isolation and focus passed");
 }
 
+// 全屏 Esc（玩家反馈进了全屏回不到窗口）：期望按规则手写——Esc 没映射：全屏下按一次就退全屏（鼠标锁着一并释放），不发游戏键；不是全屏不退；
+//   Esc 映射了 PLUS：短按照常发 PLUS、1 秒内松开不退；按住满 1 秒退全屏一次、PLUS 随之松开
+static BOOL fake_fullscreen; static int fake_toggles;
+static BOOL fake_window_fullscreen(NSWindow *w) { (void)w; return fake_fullscreen; }
+static void fake_fullscreen_toggle(NSWindow *w) { (void)w; fake_toggles++; fake_fullscreen = !fake_fullscreen; }
+static void run_loop_for(double seconds) { [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:seconds]]; }
+static void test_fullscreen_esc(void) {
+    window_fullscreen = fake_window_fullscreen; fullscreen_toggle = fake_fullscreen_toggle;
+    S2AMetalView *view = [S2AMetalView new]; int32_t sticks[4];
+    config = default_config(); reset_input(); focused = YES;
+    expect(!esc_mapped(), "default keyboard leaves Esc unmapped");
+    fake_fullscreen = NO; fake_toggles = 0;
+    [view keyDown:capture_key_event(NSEventTypeKeyDown, 53, NO)]; [view keyUp:capture_key_event(NSEventTypeKeyUp, 53, NO)];
+    expect(fake_toggles == 0, "windowed Esc does not toggle full screen");
+    fake_fullscreen = YES; config = @{@"keyboard": @{@"A": @{@"code": @14}}, @"mouse": @{}, @"gamepad": @{}, @"axes": @{}, @"deadzone": @0.15, @"mouseOptions": @{@"mode": @"camera"}};
+    set_mouse_capture(YES);
+    [view keyDown:capture_key_event(NSEventTypeKeyDown, 53, NO)];
+    expect(fake_toggles == 1 && !fake_fullscreen && !mouse_captured && s2a_vpad_read(sticks) == 0, "unmapped Esc leaves full screen at once and releases the mouse");
+    [view keyUp:capture_key_event(NSEventTypeKeyUp, 53, NO)];
+    config = @{@"keyboard": @{@"PLUS": @{@"code": @53}}, @"mouse": @{}, @"gamepad": @{}, @"axes": @{}, @"deadzone": @0.15, @"mouseOptions": @{@"mode": @"camera"}};
+    reset_input(); fake_fullscreen = YES; fake_toggles = 0;
+    physical_keys[53] = YES; [view keyDown:capture_key_event(NSEventTypeKeyDown, 53, NO)];
+    expect(s2a_vpad_read(sticks) == (1u << 10) && fake_toggles == 0, "mapped Esc short press sends PLUS and stays full screen");
+    run_loop_for(0.4); physical_keys[53] = NO; [view keyUp:capture_key_event(NSEventTypeKeyUp, 53, NO)];
+    run_loop_for(0.9);
+    expect(fake_toggles == 0 && fake_fullscreen && s2a_vpad_read(sticks) == 0, "released before 1 s: no full-screen change");
+    physical_keys[53] = YES; [view keyDown:capture_key_event(NSEventTypeKeyDown, 53, NO)];
+    run_loop_for(1.2);
+    expect(fake_toggles == 1 && !fake_fullscreen && s2a_vpad_read(sticks) == 0, "mapped Esc held 1 s leaves full screen once and releases PLUS");
+    physical_keys[53] = NO; [view keyUp:capture_key_event(NSEventTypeKeyUp, 53, NO)];
+    window_fullscreen = window_fullscreen_now; fullscreen_toggle = window_fullscreen_toggle;
+    reset_input(); config = default_config();
+    puts("Mac full screen: Esc exits when unmapped, short press to game / hold 1 s exits when mapped");
+}
 static void test_capture_key_order(void) {
     config = @{@"keyboard": @{@"PLUS": @{@"code": @53}, @"A": @{@"code": @14}},
                @"mouse": @{}, @"gamepad": @{}, @"axes": @{}, @"deadzone": @0.15,
@@ -1019,6 +1053,7 @@ int main(int argc, const char **argv) {
         expect(!mouse_captured && !mouse_release_pending && cursor_hides == 1, "failed capture does not hide cursor");
         association_error = kCGErrorSuccess;
         test_capture_key_order();
+        test_fullscreen_esc();
         test_capture_held_key(YES);
         test_capture_held_key(NO);
         associate_mouse = CGAssociateMouseAndMouseCursorPosition; set_mouse_visible = cursor_visibility;

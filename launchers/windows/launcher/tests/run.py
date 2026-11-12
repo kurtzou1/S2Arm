@@ -53,6 +53,19 @@ def main():
             run([dotnet, "build", str(project), "--no-restore", "--disable-build-servers",
                  "-p:UseSharedCompilation=false", "--configuration", "Release", "--verbosity", "minimal"], env)
         run([dotnet, "run", "--project", str(projects[0]), "--no-build", "--configuration", "Release"], env)
+        # 引导页点设置键（玩家反馈闪退：没连库时读证书 → 渲染 → 再读的无限递归、栈溢出）：无头窗口按真实点击路径点一次，
+        #   栈溢出抓不住、进程直接退出，所以核退出码 0 + 末行「✓」（UI.Snapshots/SettingsProbe.cs）
+        probe = HERE / "../UI.Snapshots/UI.Snapshots.csproj"
+        if run([dotnet, "restore", str(probe), "--source", str(cache), "-p:NuGetAudit=false", "--disable-parallel"], env, ok=False).returncode:
+            print("OFFLINE DEPENDENCIES NOT READY: run a normal restore before the gate", file=sys.stderr)
+            return 75
+        run([dotnet, "build", str(probe), "--no-restore", "--disable-build-servers",
+             "-p:UseSharedCompilation=false", "--configuration", "Release", "--verbosity", "minimal"], env)
+        with tempfile.TemporaryDirectory(prefix="s2arm-settings-probe-") as temporary:
+            out = run([dotnet, "run", "--project", str(probe), "--no-build", "--configuration", "Release", "--",
+                       "--settings-probe", str(Path(temporary) / "out"), "--data-root=" + str(Path(temporary) / "data")], env)
+            if "✓ 引导状态下点设置键" not in out.stdout:
+                raise RuntimeError("settings probe did not report success")
         if args.negative_controls:
             with tempfile.TemporaryDirectory(prefix="s2arm-ui-negative-") as temporary:
                 target = Path(temporary).resolve()

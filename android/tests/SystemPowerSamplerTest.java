@@ -94,6 +94,37 @@ public final class SystemPowerSamplerTest {
         handler.runPending();
         check(output.size() == 12 && Math.abs(output.get(11) - 4.0) < 0.000001, "switch back on resumes real reads");
         stop.invoke(sampler);
+
+        // 读电池不在走拍子的线程上做（ANR：系统电池服务几秒不回时界面线程被卡住）。
+        // worker / main 两个执行器这里都只把任务记下、由用例决定什么时候跑——模拟「读卡住了」。
+        {
+            Constructor<?> ctor2 = type.getDeclaredConstructor(Context.class, Handler.class,
+                java.util.concurrent.Executor.class, java.util.concurrent.Executor.class, Class.forName("org.s2arm.android.SystemPowerSampler$Sink"));
+            ctor2.setAccessible(true);
+            ArrayList<Runnable> work = new ArrayList<>(), back = new ArrayList<>(); ArrayList<Double> out2 = new ArrayList<>();
+            Class<?> sinkType = Class.forName("org.s2arm.android.SystemPowerSampler$Sink");
+            Object sink2 = java.lang.reflect.Proxy.newProxyInstance(sinkType.getClassLoader(), new Class<?>[] { sinkType },
+                (proxy, method, a) -> { if (method.getName().equals("battery")) out2.add((Double) a[0]); return null; });
+            Context c2 = discharging(); Handler h2 = new Handler();
+            Object s2 = ctor2.newInstance(c2, h2, (java.util.concurrent.Executor) work::add, (java.util.concurrent.Executor) back::add, sink2);
+            SystemClock.now = 100000;
+            int r0 = c2.reads;
+            start.invoke(s2); h2.runPending();
+            check(c2.reads == r0 && out2.isEmpty() && work.size() == 1, "tick does not read on its own thread: one read handed to the worker");
+            h2.runPending(); h2.runPending();
+            check(work.size() == 1 && h2.pending != null, "while a read is outstanding, ticks keep running and hand out no second read");
+            work.remove(0).run();
+            check(c2.reads > r0 && out2.isEmpty() && back.size() == 1, "worker reads; result waits for the main executor");
+            back.remove(0).run();
+            check(out2.size() == 1 && Double.isNaN(out2.get(0)), "result published on main (first unplugged read is still settling)");
+            SystemClock.now = 109000;
+            h2.runPending(); work.remove(0).run(); back.remove(0).run();
+            check(out2.size() == 2 && Math.abs(out2.get(1) - 4.0) < 0.000001, "next read after settle publishes 4 W");
+            h2.runPending();                      // 派出一读，然后停表：这一读回来时必须丢掉
+            stop.invoke(s2);
+            work.remove(0).run(); back.remove(0).run();
+            check(out2.size() == 2, "a read handed out before stop is dropped when it returns");
+        }
         if (failures != 0) throw new AssertionError(failures + " sampler checks failed");
         System.out.println("BatteryManager settle / sign / plug transitions / stop / resume / readout switch passed");
     }

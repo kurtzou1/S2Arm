@@ -2185,6 +2185,20 @@ static double gpu_tag_begin(uint64_t f) {   // 返回提交时刻（CACurrentMed
 // A frame whose command buffers keep the GPU busy longer than this in all is no longer usable: the run stops (mtl_gpu_halt: GPU safe stop) before the driver's timeout recovery takes over
 //   (10-31: the Mac's kernel panicked in the GPU driver's event machine after runs whose frames took 1.5-3.3 s of GPU)
 #define S2A_GPU_FRAME_MAX_MS 1000
+// 一帧过门只记黄行、不停（11-13 iPad14,8 iOS 26.6：一帧 1020 ms 就把玩家的局冻结了；单帧偶发超时的代价是一次卡顿，不是整机卡死）。
+//   要停的是持续形态：GPU 时间线上 10 秒内有 3 帧各过 1 秒（10-31 内核恐慌前就是一帧接一帧 1.5–3.3 秒）。驱动报的 Hang / PageFault 不经这里，照旧当场停
+#define S2A_GPU_OVER_N 3
+#define S2A_GPU_OVER_WINDOW_S 10.0
+static os_unfair_lock g_gpu_over_lk = OS_UNFAIR_LOCK_INIT; static double g_gpu_over_t[S2A_GPU_OVER_N]; static unsigned g_gpu_over_n;
+static void gpu_frame_over(uint64_t f, uint64_t busy, double at) {   // at = 这一份的 GPU 结束（与 CACurrentMediaTime 同一时基）
+    os_unfair_lock_lock(&g_gpu_over_lk);
+    unsigned n = ++g_gpu_over_n; g_gpu_over_t[(n - 1) % S2A_GPU_OVER_N] = at;
+    double first = g_gpu_over_t[n % S2A_GPU_OVER_N];   // 连这一帧在内最近 S2A_GPU_OVER_N 帧里最早那一帧
+    int stop = n >= S2A_GPU_OVER_N && at - first <= S2A_GPU_OVER_WINDOW_S;
+    os_unfair_lock_unlock(&g_gpu_over_lk);
+    if (stop) { char w[160]; snprintf(w, sizeof w, "frame %llu kept the GPU busy %.0f ms (limit %d ms), %d frames over the limit within %.1f s", (unsigned long long)f, busy / 1e6, S2A_GPU_FRAME_MAX_MS, S2A_GPU_OVER_N, at - first); mtl_gpu_halt(w); }
+    else MLOG("【黄】 帧 %llu GPU 忙 %.0f ms（过 %d ms 门，第 %u 次）：照常继续；10 秒内 %d 帧都过门才安全停", (unsigned long long)f, busy / 1e6, S2A_GPU_FRAME_MAX_MS, n, S2A_GPU_OVER_N);
+}
 // 开始时间早于提交时刻（11-11 #647：Mac mini M4 / macOS 27.2.1，Metal 4，23 局都以本门收局，停前每帧整帧 16–24 ms 照常出帧，记到的帧 GPU
 //   每帧线性涨约一帧时长、涨过 1 秒——某个提交回报的 GPUStartTime 停在过去，跨度被一路拉长；驱动没报任何命令缓冲错误）：GPU 不可能在提交之前开始干这份活，
 //   早于提交时刻 sub 的开始按 sub 算，计数并打黄行（时间戳原样写出；本机 macOS 26.4 / 门禁机 27.0.1 的探针 900 次提交 0 次，是防线不是已证根因）。
@@ -2220,7 +2234,7 @@ static void gpu_tag_done(uint64_t f, int qi, double sub, double g0, double g1) {
         uint64_t busy = atomic_fetch_add(&g_gpu[k].ns, excl) + excl;
         for (v = atomic_load(&g_gpu[k].t0); s0 < v && !atomic_compare_exchange_weak(&g_gpu[k].t0, &v, s0);) {}
         for (v = atomic_load(&g_gpu[k].t1); s1 > v && !atomic_compare_exchange_weak(&g_gpu[k].t1, &v, s1);) {}
-        if (busy > S2A_GPU_FRAME_MAX_MS * 1000000ull) { char w[120]; snprintf(w, sizeof w, "frame %llu kept the GPU busy %.0f ms (limit %d ms)", (unsigned long long)f, busy / 1e6, S2A_GPU_FRAME_MAX_MS); mtl_gpu_halt(w); }
+        if (busy > S2A_GPU_FRAME_MAX_MS * 1000000ull && busy - excl <= S2A_GPU_FRAME_MAX_MS * 1000000ull) gpu_frame_over(f, busy, g1);   // 这一份让本帧过门（每帧只算一次）
     }
     atomic_fetch_sub(&g_gpu[k].pending, 1);
 }
@@ -2665,8 +2679,8 @@ static __unsafe_unretained id tex_get(uint64_t k) {
     pthread_mutex_unlock(&g_smu);
     return o;
 }
-static void tex_put(uint64_t k, id o) {   // serials from 2^62 up are external textures (mtl_ext_tex), never initialized by the game
-    pthread_mutex_lock(&g_smu);
+static void tex_put_locked(uint64_t k, id o) {   // caller owns g_smu
+    // Serials from 2^62 up are external textures, never initialized by the game.
     int live = k >= (1ull << 62) || nvn_hm_get(&g_tex_live, &k);
     id active = live ? nil : hm_get_id(&g_ghost_active, &k);
     nvn_hmap *m = live ? &g_by_serial : active && !hm_get_id(&g_ghost, &k) ? &g_ghost_active : &g_ghost;   // evicted from the ring earlier in this submission: replaced where it is held
@@ -2679,6 +2693,10 @@ static void tex_put(uint64_t k, id o) {   // serials from 2^62 up are external t
     }
     hm_put_id(m, &k, o); g_ser_gen++;
     if (m == &g_ghost && (active || (g_cb && on_sub_thread()))) hm_put_id(&g_ghost_active, &k, o);
+}
+static void tex_put(uint64_t k, id o) {
+    pthread_mutex_lock(&g_smu);
+    tex_put_locked(k, o);
     pthread_mutex_unlock(&g_smu);
 }
 // End of the submission's encoding (nvn_be_sub_commit, before its fence is taken): finalized textures the ring no longer holds are dropped behind this submission's fence, the rest stay in the ring.
@@ -4493,7 +4511,17 @@ void mtl_vc_drop(uint64_t ser);
 void nvn_be_tex_release(tex_t *t) {
     if (!t->serial) return;
     atomic_fetch_add(&g_tex_rel_n, 1);
-    pthread_mutex_lock(&g_smu); nvn_hm_del(&g_tex_live, &t->serial); pthread_mutex_unlock(&g_smu);
+    pthread_mutex_lock(&g_smu);
+    nvn_hm_del(&g_tex_live, &t->serial);
+    id holder = hm_get_id(&g_by_serial, &t->serial);
+    if ([holder isKindOfClass:[NvPkg class]]) {
+        // #778 (reporter shengyifan's minimal repro): a texture the GPU wrote (NvPkg) is finalized while recorded commands still sample it by this serial
+        //   (late / in flight). Dropping it from g_by_serial made tex_get re-create it from the all-zero guest storage (BotW's 100x56 / 400x225 R8 masks:
+        //   one-frame light / dark flashes on iPad). Keep the GPU result under the existing bounded ghost-ring lifetime instead, as tex_put does for evicted ones
+        tex_put_locked(t->serial, holder);
+        hm_del_id(&g_by_serial, &t->serial);
+    }
+    pthread_mutex_unlock(&g_smu);
     serial_del(t->serial);
     mtl_vc_drop(t->serial);
     gpw_forget(t->serial);
@@ -8911,6 +8939,7 @@ enum { POOL_FRAME_BYTES = 32u << 20, POOL_REQ_BYTES = 128u << 20 };
 static uint64_t g_walk_frame = ~0ull, g_walk_spent, g_walk_req;
 static uint64_t pool_tex_size(const tex_t *t) { return t->L.size ? t->L.size : 1; }
 static uint64_t pool_budget(void) { return g_dev.recommendedMaxWorkingSetSize / 20; }
+uint64_t s2a_gpu_alloc_bytes(void) { return g_dev ? (uint64_t)g_dev.currentAllocatedSize : 0; }   // 浮层「GPU 已分配」（runtime/src/hud.c 弱定义）
 static void pool_walk_frame(void) { uint64_t f = atomic_load(&g_cur_frame); if (f != g_walk_frame) { g_walk_frame = f; g_walk_spent = 0; g_walk_req = 0; } }
 static uint64_t pool_room(void) {   // what may still be made up front this frame
     pool_walk_frame();
@@ -11652,14 +11681,21 @@ static int uv_proof(NvShader *vs, int locn, const p_draw *dw, const p_draw_idx *
 //   这里核运行时的另一半：视口正好覆盖整个目标（同 uv_proof 的映射约定）；没走几何 / 曲面阶段、不写图层（只证了 main0 / main0_z）；宽屏外推参数为零（外推块会改 P.x）。
 //   push_late：外推参数此刻还没算（fb_tile_try 在 draw_widen 之前判）——不在这里拒带外推块的程序，改由 draw() 在 draw_widen 之后核：走了 ⑤ 的笔外推参数非零就不外推这一笔
 //   （fb_tile_unpush）。11-02 塞尔达：⑤ 被「宽屏 + 带外推块」一刀切拒了 430 次 / 帧，这些笔算出的外推参数 405/405 全是 0
-static int scr_proof(NvProg *pr, NvShader *vs, int locn, int push_late) {
+//   att（fb_tile_try 传本笔读的附件，跨遍合并传 NULL）：满屏加宽了它的存储（画布比游戏尺寸大），而这一笔的视口仍是游戏尺寸、原点在左上角——
+//   同样是「视口覆盖游戏画的那块」，屏幕坐标与存储纹素一一对应，也算成立（11-12 Mac 1920×1350 满屏局：画布 1600×1125、视口 1600×900，原先一律拒，⑤ 为 0）。
+//   这一笔片上读的是本像素瓦片，像素对不对由 DM_NVN_FB_TILE_CHECK 双画逐字节比核
+static uint64_t g_fb_l5wd;   // ⑤ 里靠「满屏加宽、视口 = 游戏尺寸」放行的次数（fb_report）
+static int scr_proof(NvProg *pr, NvShader *vs, int locn, int push_late, const tex_t *att) {
     if (!vs || locn < 0 || locn >= 32 || !(vs->rf.scr_uv >> locn & 1)) return 0;
     for (int st = 2; st < 6; st++) if (pr->sh[st]) return 0;
     if (vs->layer_out || (!push_late && g_wd > 0 && vs->push)) return 0;
     if (!vp_y_upper_left()) return 0;   // y 约定只在左上角原点、视口不 swizzle 时成立（画面线审 10-30）
     NSUInteger W = g_pass.cw, H = g_pass.ch;   // canvas units, as the viewport (internal resolution)
-    if (!W || !H || !S.has_vp || !(S.vp[0][0] == 0 && S.vp[0][1] == 0 && S.vp[0][2] == (float)W && S.vp[0][3] == (float)H)) return 0;
-    return 1;
+    if (!W || !H || !S.has_vp || S.vp[0][0] != 0 || S.vp[0][1] != 0) return 0;
+    if (S.vp[0][2] == (float)W && S.vp[0][3] == (float)H) return 1;
+    if (att && g_wd > 0 && g_pass.rs == 1.0 && S.vp[0][2] == (float)MAX(att->d.width, 1u) && S.vp[0][3] == (float)MAX(att->d.height, 1u)
+        && (att->d.width < W || att->d.height < H)) { g_fb_l5wd++; return 1; }
+    return 0;
 }
 // One draw of the later pass: verify and produce the specialization. Returns 0 = cannot be proven (the caller ends the merged render pass and reopens with the original targets)
 static int swz_ident_for(MTLPixelFormat f, MTLTextureSwizzleChannels s);   // 下面 fb_tile_try 前定义
@@ -11692,7 +11728,7 @@ static int fz_p2_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di, uint8_
                     PD("F %llu not provable: slot %d sampled view is not the attachment itself (level / layer / format / channel mapping differ)", g_stat_pass, b->reg); return 0; } }
             int any = 0;
             for (int c = 0; c < fs->rf.nfc; c++) if (fs->rf.fc_reg[c] == b->reg) {
-                if ((fs->rf.fc_proj >> c & 1) ? !scr_proof(pr, vs, fs->rf.fc_locn[c], 0) : !uv_proof(vs, fs->rf.fc_locn[c], dw, di)) { PD("F %llu not provable: slot %d sample coordinate is not this pixel (interpolated output %d)", g_stat_pass, b->reg, fs->rf.fc_locn[c]); return 0; }
+                if ((fs->rf.fc_proj >> c & 1) ? !scr_proof(pr, vs, fs->rf.fc_locn[c], 0, NULL) : !uv_proof(vs, fs->rf.fc_locn[c], dw, di)) { PD("F %llu not provable: slot %d sample coordinate is not this pixel (interpolated output %d)", g_stat_pass, b->reg, fs->rf.fc_locn[c]); return 0; }
                 fx[c] = j; fbmask |= (uint8_t)(1u << j); any = 1; }
             if (!any) { PD("F %llu not provable: slot %d sample is not in the rewritable table", g_stat_pass, b->reg); return 0; } } }
     memset(lmap, 0xff, 8);
@@ -11993,7 +12029,7 @@ static int fb_tile_try(NvProg *pr, NvShader *fs, int k, int reg, id<MTLTexture> 
     if (fs->rf.fc_mixed[reg >> 6] >> (reg & 63) & 1) return 0;   // 同一张纹理还有别的读法（如读邻像素）：只能结束遍
     int fx[32]; memcpy(fx, g_fbt.on ? g_fbt.fx : (int[32]){[0 ... 31] = -1}, sizeof fx); int any = 0;
     for (int c = 0; c < fs->rf.nfc; c++) if (fs->rf.fc_reg[c] == reg) {
-        if (!(fs->rf.fc_proj >> c & 1) || !scr_proof(pr, vs, fs->rf.fc_locn[c], 1)) return 0;
+        if (!(fs->rf.fc_proj >> c & 1) || !scr_proof(pr, vs, fs->rf.fc_locn[c], 1, R.rt.color[k])) return 0;
         fx[c] = k; any = 1; }
     if (!any) return 0;
     uint64_t s_; int lv, sl; rt_sub(&R.rt, k, &s_, &lv, &sl);
@@ -12003,7 +12039,11 @@ static int fb_tile_try(NvProg *pr, NvShader *fs, int k, int reg, id<MTLTexture> 
         if (g_wd > 0) return 0;
         for (int i = 0; i < R.rt.n && i < 8; i++) if (R.rt.color[i] && (MAX(R.rt.color[i]->d.width, 1u) != w0 || MAX(R.rt.color[i]->d.height, 1u) != h0)) return 0;
         if (R.rt.depth && (MAX(R.rt.depth->d.width, 1u) != w0 || MAX(R.rt.depth->d.height, 1u) != h0)) return 0;
-    } else if (MAX(R.rt.color[k]->d.width, 1u) != g_pass.cw || MAX(R.rt.color[k]->d.height, 1u) != g_pass.ch) return 0;
+    } else {   // 遍已开：附件 k 的画布（canvas 单位：内部分辨率按游戏尺寸、满屏按加宽后的存储，tex_extent_at）要正好是这一遍的画布，同像素由 scr_proof 证。
+        //   原先比游戏尺寸 d.width / d.height：满屏加宽了存储、画布跟着变宽 / 变高，永远不等，⑤ 一律被拒（11-12 Duo 一款开放世界游戏：13.3 万次自采样全走快照、累计拷 372 GB、每帧 412 遍）
+        id<MTLTexture> at = tex_mtl(R.rt.color[k]); if (!at) return 0;
+        tex_extent ex = tex_extent_at(R.rt.color[k], at, 0, 0);
+        if (MAX(ex.canvas.width, 1u) != g_pass.cw || MAX(ex.canvas.height, 1u) != g_pass.ch) return 0; }
     {   // 采样的视图必须就是附件本身（同 fz_p2_draw：起始级 / 层 0、单级、格式同附件实际格式、通道顺序恒等、单采样）
         uint32_t apf_ = tv.parentTexture ? (uint32_t)tv.parentTexture.pixelFormat : (uint32_t)tv.pixelFormat; uint8_t swz_[4];
         if (R.rt.has_cview[k] && R.rt.cview[k].set_format && !(nvn_fmt_to_mtl(R.rt.cview[k].format, &apf_, swz_) && apf_)) return 0;
@@ -12064,9 +12104,9 @@ static void fb_report(uint64_t frame) {   // every 300 frames: hits per layer an
     static uint64_t h0, a0, b0, c0, d0, y0;
     if (g_fb_hits == h0) return;
     static uint64_t e0, f0;
-    MLOG("same-pass feedback sampling up to frame %llu: %llu draws sampled their own pass's attachment: ① narrowed view %llu, ② read memory as it was %llu, ③ pass ended first %llu, ④ snapshot %llu (%.1f MB copied), ⑤ read on-chip, pass kept %llu (of them before the pass drew the slot, read as loaded %llu; widen push dropped on %llu)",
+    MLOG("same-pass feedback sampling up to frame %llu: %llu draws sampled their own pass's attachment: ① narrowed view %llu, ② read memory as it was %llu, ③ pass ended first %llu, ④ snapshot %llu (%.1f MB copied), ⑤ read on-chip, pass kept %llu (of them before the pass drew the slot, read as loaded %llu; widen push dropped on %llu; widened canvas, game-size viewport %llu)",
          (unsigned long long)frame, (unsigned long long)(g_fb_hits - h0), (unsigned long long)(g_fb_l1 - a0), (unsigned long long)(g_fb_l2 - b0), (unsigned long long)(g_fb_l3 - c0),
-         (unsigned long long)(g_fb_count - d0), (g_fb_bytes - y0) / 1048576.0, (unsigned long long)(g_fb_l5 - e0), (unsigned long long)(g_fb_l5ld - f0), (unsigned long long)g_fb_l5_unpush);
+         (unsigned long long)(g_fb_count - d0), (g_fb_bytes - y0) / 1048576.0, (unsigned long long)(g_fb_l5 - e0), (unsigned long long)(g_fb_l5ld - f0), (unsigned long long)g_fb_l5_unpush, (unsigned long long)g_fb_l5wd);
     h0 = g_fb_hits; a0 = g_fb_l1; b0 = g_fb_l2; c0 = g_fb_l3; d0 = g_fb_count; y0 = g_fb_bytes; e0 = g_fb_l5; f0 = g_fb_l5ld;
 }
 // Called before the draw opens its render pass: if a snapshot is needed, end the current render pass, copy the snapshot and register the substitution (used by this draw's argument encoding)

@@ -16,6 +16,7 @@ struct Game: Codable, Identifiable {
     var id: String; var name: String; var display: String; var packages: [NSPPackage]; var hidden: Bool
     var compatibility: String?; var missing: [String]?; var cover: String?; var ready: Bool?; var needsPreparation: Bool?; var inputConfig:Bool?
     var requirementDiagnostics: [TaskDiagnostic]?
+    var downstream: Downstream?   // 下游深度方案（pack/jobs/downstream.py describe）：命中时导出前弹确认页
     var compatibilityName: String { ["startup":L("仅验证启动"),"verified":L("Mac 已验证"),"experimental":L("实验性"),"unsupported":L("暂不支持")][compatibility ?? "unsupported"] ?? L("实验性") }
     var buildable: Bool { compatibility != "unsupported" && (missing ?? []).isEmpty }
     /// 这一项自己的字节：同一个原件里装了多项（合集 XCI / NUP 容器）时用本项内容字节，否则用原件大小（同 pack/jobs/report.py own_bytes；#141）
@@ -25,6 +26,13 @@ struct Game: Codable, Identifiable {
     }
     /// 原包合计：同一个原件里的多项只算一次
     var sourceBytes: Int64 { Dictionary(grouping:packages, by:\.sha256).values.compactMap(\.first).reduce(Int64(0)) { $0 + $1.size } }
+}
+/// 下游深度方案（pack/downstream/schemes.json）：方案、能不能选与原因、确认页文案（按界面语言挑）、玩家上次的选择（nil = 没选过；"" = 仍用原版）
+struct Downstream: Codable {
+    struct Copy: Codable { var title: String; var body: String; var points: [String]; var recommend: String; var original: String }
+    var id: String; var name: String; var eligible: Bool; var reason: [String:String]; var copy: [String:Copy]; var choice: String?
+    var text: Copy? { copy[Localization.language] ?? copy["zh"] }
+    var why: String { reason[Localization.language] ?? reason["zh"] ?? "" }
 }
 /// 里程碑与它的时间推算在适配层（S2ArmAppleAdapter Milestones.swift），新旧两个前端共用一份
 typealias Milestone = S2ArmAppleAdapter.Milestone

@@ -104,7 +104,7 @@ namespace S2A.DirectCompiler
                 // 只有 native 真的 enable 了该扩展才算 enabled。
                 supportsFragmentShaderInterlock: c.HasExtension("VK_EXT_fragment_shader_interlock"),
                 supportsFragmentShaderOrderingIntel: false,
-                supportsGeometryShader: false,
+                supportsGeometryShader: c.GeometryShader,
                 supportsGeometryShaderPassthrough: false,
                 // #1456：capprobe 能力位随 caps 透传——首版执行层 GS 仍关，位只记录
                 // 设备事实；启用 GS 时由它决定是否安全。

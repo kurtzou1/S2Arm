@@ -18,6 +18,14 @@ public sealed partial class EnvironmentWindow
 {
     private JsonElement? devCert;          // devCert status 作业的结果：imported / active / cert
     private bool devCertLoading;
+    // 渲染里自动读证书状态：每个游戏库只读一次，没连库不读。读的结果回来要 Render，Render 又会画到这一栏——没连库时作业同步返回 null，
+    //   原先「devCert 还是空、又不在读」就再读一次 → Render → 再读……无限递归栈溢出，引导页（还没建库）点设置键当场闪退。显式刷新（进设置页、导入后）照旧直接调
+    private string? devCertFor;
+    private void EnsureDevCert()
+    {
+        if (libraryId is null || devCertFor == libraryId || devCertLoading) return;
+        devCertFor = libraryId; _ = RefreshDevCertAsync();
+    }
 
     private string S(string id) => T("export.sign." + id);
 
@@ -50,7 +58,7 @@ public sealed partial class EnvironmentWindow
     /// <param name="card">false = 只要内容不包卡片（嵌在别的卡片里时）。</param>
     private Control DevCertRow(string? title = null, string? appleIdTitle = null, bool card = true)
     {
-        if (devCert is null && !devCertLoading) _ = RefreshDevCertAsync();
+        if (devCert is null) EnsureDevCert();
         var st = devCert;
         var imported = st is { } s0 && Flag(s0, "imported");
         var active = st is { } s1 && Flag(s1, "active");

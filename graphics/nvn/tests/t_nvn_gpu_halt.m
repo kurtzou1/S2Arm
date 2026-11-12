@@ -7,12 +7,14 @@
 //   ③ 停后：旧队列真命令缓冲 cb_put / cb_run 都不交（状态仍 NotEnqueued、计数不涨、不阻塞）；m3_commit 不交；Metal 4 直交 rec_commit_upload 不交；
 //      上屏 present_now 返回 0 且上屏计数不涨、present_enqueue 回票号 0；nvn_be_drain（进后台排空）立即返回、不交不等
 //   ⓪ 帧 GPU 时间 1 秒门（gpu_tag_done）：照 11-09 M1 Pro 时之笛 S2 切回前台那一局，结束时间在现在之后的跨度（算出 6147890790964 ms）不判挂死、不计时间；
-//      负对照：同一帧真实的 1.5 秒跨度（结束在现在）照判安全停，证明门没被关掉
+//      同一帧真实的 1.5 秒跨度（结束在现在）过门：单帧只记黄行、不停（11-13：一帧 1020 ms 就冻结玩家的局）
+//   ⓪d 持续形态才停：GPU 时间线上 10 秒内 3 帧各过 1 秒 → 第 3 帧停；3 帧过门但首尾隔 12 秒（每两次之间 6 秒）→ 不停（负对照）；
+//      同一帧过门后再来几份不重复计次（只在跨过门的那一份计）
 //   ⓪b #647（Mac mini M4 / macOS 27.2.1 Metal 4，23 局假安全停）：每帧 16 ms 提交一次、真跑 10 ms，回报的 GPU 开始时间却停在第 0 帧之前 0.1 秒不动
 //      → 100 帧后旧算法的跨度 = 第 99 帧结束 − 停住的开始 ≈ 0.1 + 99×0.016 + 0.01 = 1.694 秒 > 1 秒（会停）；新判据按提交时刻截 → 每帧 10 ms、不停，
 //      「开始早于提交」计数 = 100（期望按构造手算）
 //   ⓪c 一帧 10 段同队列排队、回报的开始都是第一段开始那一刻（跨度层层包含）：跨度和 3.3 秒、独占 600 ms → 不停；
-//      真挂死形态：两段首尾相接各 0.6 秒 → 独占 1.2 秒 → 停（真挂死不变弱）
+//      两段首尾相接各 0.6 秒 → 独占 1.2 秒 → 过门计一次（独占没把真活算少；停不停归 ⓪d 的持续判据）
 #include "../gfx/nvn/nvn_mtl.m"
 #include "s2a_t_result.h"
 
@@ -52,8 +54,19 @@ int main(void) {
         gpu_tag_begin(23924); gpu_tag_done(23924, 0, now - 0.05, now - 0.04, now - 0.04 + 6147890790.964);
         VERIFY(!mtl_gpu_halted() && !g_notified && atomic_load(&g_gpu[23924 % GRING].ns) == 0, "结束在现在之后的跨度（6147890790964 ms）不判挂死、不计进本帧 GPU 时间");
         gpu_tag_begin(23925); now = CACurrentMediaTime(); gpu_tag_done(23925, 0, now - 1.6, now - 1.5, now);
-        VERIFY(mtl_gpu_halted() && g_notified == 1 && strstr(g_note, "frame 23925 kept the GPU busy"), "负对照：真实 1.5 秒跨度照判安全停（%s）", g_note);
-        atomic_store(&g_gpu_halt, 0); g_notified = 0; g_note[0] = 0;   // 复位
+        VERIFY(!mtl_gpu_halted() && !g_notified && g_gpu_over_n == 1, "单帧真实 1.5 秒跨度过门：记一次（%u）、不停", g_gpu_over_n);
+        // ⓪d 稀疏过门：时间线上第 0 / 6 / 12 秒各一帧过门（连上面那次，最近 3 次首尾隔 ≥ 12 秒 > 10 秒）→ 不停
+        g_gpu_over_n = 0; atomic_store(&g_gpu_qend[0], 0); double tb = CACurrentMediaTime() - 30.0;
+        for (int i = 0; i < 3; i++) { uint64_t fr = 24000 + i; double e = tb + 6.0 * i; gpu_tag_begin(fr); gpu_tag_done(fr, 0, e - 1.2, e - 1.1, e); }
+        VERIFY(!mtl_gpu_halted() && !g_notified && g_gpu_over_n == 3, "3 帧各过门、首尾隔 12 秒：不停（计 %u 次）", g_gpu_over_n);
+        // 同一帧过门后再来一份：不重复计次
+        gpu_tag_begin(24002); gpu_tag_done(24002, 0, tb + 12.0, tb + 12.0, tb + 12.3);
+        VERIFY(!mtl_gpu_halted() && g_gpu_over_n == 3, "同一帧过门后再来一份不重复计次（%u）", g_gpu_over_n);
+        // 持续形态：第 20 / 21.5 / 23 秒三帧各 1.2 秒 → 3 帧在 3 秒内 → 第 3 帧停
+        g_gpu_over_n = 0;
+        for (int i = 0; i < 3; i++) { uint64_t fr = 24100 + i; double e = tb + 20.0 + 1.5 * i; gpu_tag_begin(fr); gpu_tag_done(fr, 0, e - 1.3, e - 1.2, e); }
+        VERIFY(mtl_gpu_halted() && g_notified == 1 && strstr(g_note, "frame 24102 kept the GPU busy 1200 ms") && strstr(g_note, "3 frames over the limit within 3.0 s"), "10 秒内 3 帧各过门：第 3 帧安全停（%s）", g_note);
+        atomic_store(&g_gpu_halt, 0); g_notified = 0; g_note[0] = 0; g_gpu_over_n = 0;   // 复位
 
         // ⓪b #647 形态：开始时间停在过去，跨度一路拉长——不停；计数 100
         atomic_store(&g_gpu_qend[0], 0);   // 各用例自造时间线：先清本队列的最晚结束（真实运行时间单调向前）
@@ -74,8 +87,8 @@ int main(void) {
         // 真挂死形态（10-31 那种：一帧的活真跑了 1.2 秒）：两段首尾相接各 0.6 秒 → 独占 1.2 秒 → 照停
         atomic_store(&g_gpu_qend[0], 0); now = CACurrentMediaTime(); gpu_tag_begin(31001); gpu_tag_begin(31001);
         gpu_tag_done(31001, 0, now - 1.25, now - 1.2, now - 0.6); gpu_tag_done(31001, 0, now - 1.25, now - 0.6, now);
-        VERIFY(mtl_gpu_halted() && g_notified == 1 && strstr(g_note, "frame 31001 kept the GPU busy 1200 ms"), "真跑满 1.2 秒照判安全停（%s）", g_note);
-        atomic_store(&g_gpu_halt, 0); g_notified = 0; g_note[0] = 0;   // 复位，下面的流程从没停过的状态开始
+        VERIFY(!mtl_gpu_halted() && g_gpu_over_n == 1, "首尾相接真跑满 1.2 秒：独占算对、过门计一次（%u；单帧不停）", g_gpu_over_n);
+        atomic_store(&g_gpu_halt, 0); g_notified = 0; g_note[0] = 0; g_gpu_over_n = 0;   // 复位，下面的流程从没停过的状态开始
 
         // ① 判定
         VERIFY(!legacy_judge(hang), "负对照：旧判法（只看 localizedDescription「%s」）对真机结构的 Hang 错误不命中", hang.localizedDescription.UTF8String);

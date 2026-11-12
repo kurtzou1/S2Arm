@@ -203,7 +203,7 @@ namespace S2A.DirectCompiler
             if (parsed.UniformBufferSetIndex != 0 || parsed.StorageBufferSetIndex != 1 ||
                 parsed.TextureSetIndex != 2 || parsed.ImageSetIndex != 3)
                 throw new DirectCompileException("UNSUPPORTED_PROFILE", cw + " set indices must be 0/1/2/3");
-            if (parsed.SupportsGeometryShader || parsed.SupportsGeometryShaderPassthrough ||
+            if (parsed.SupportsGeometryShaderPassthrough ||
                 parsed.SupportsTransformFeedback || parsed.SupportsLayerVertexTessellation ||
                 parsed.SupportsViewportIndexVertexTessellation || parsed.SupportsViewportMask ||
                 parsed.S2AVertexPull || parsed.RequiresLinkedVaryingInterface)

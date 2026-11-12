@@ -29,8 +29,10 @@ PY
 OLD_SOURCES='mtl_vk_shim|mtl_vk_adapter|vk_record|nvn_vk_first_draw|nvn_vk_texcache|nvn_be_android|vk_nvn_adapter|provider_vk\.c'
 
 ndk=
-for d in "${ANDROID_NDK_HOME:-}" "${ANDROID_NDK_ROOT:-}" "${ANDROID_HOME:-}/ndk/29.0.14206865" "${ANDROID_SDK_ROOT:-}/ndk/29.0.14206865" \
-         "$HOME/Library/Android/sdk/ndk/29.0.14206865" "$HOME/Android/Sdk/ndk/29.0.14206865"; do
+# 钉版目录优先，环境变量兜底：托管 macOS 镜像把 ANDROID_NDK_HOME 设成自带的旧 NDK（27.x），
+# 先认它就编不过 android/CMakeLists.txt 里 NDK 29 才认的告警选项，钉版那份装了也用不上。
+for d in "${ANDROID_HOME:-}/ndk/29.0.14206865" "${ANDROID_SDK_ROOT:-}/ndk/29.0.14206865" \
+         "$HOME/Library/Android/sdk/ndk/29.0.14206865" "$HOME/Android/Sdk/ndk/29.0.14206865" "${ANDROID_NDK_HOME:-}" "${ANDROID_NDK_ROOT:-}"; do
   if [ -n "$d" ] && [ -f "$d/build/cmake/android.toolchain.cmake" ]; then ndk=$d; break; fi
 done
 [ -n "$ndk" ] || { echo "【红】安卓门禁：找不到 NDK 29.0.14206865（ANDROID_NDK_HOME / ANDROID_HOME/ndk / ~/Library/Android/sdk/ndk）；不跳过"; exit 1; }

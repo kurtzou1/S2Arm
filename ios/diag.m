@@ -26,9 +26,19 @@
 static NSString *docs(void) { return NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject; }
 // 资源包根：启动上下文给了本款资源包就读它（上下文文件 / 多款容器选了游戏：v0.3.0 起在 Library 下，s2a_docs.h s2a_pack_root）；
 //   单款兼容照旧 Documents/资源包（不随 S2A_GAME_DATA，同改造前）
+//   多款容器还没选游戏（游戏库里导出：多半是上一局崩了 App 重开）：按上次在库里选的款（app.m library_play 记的 S2ALastGameId）解析本款资源包，
+//   诊断包对得上那一局的游戏（#795：原先落到不存在的 Documents/资源包，程序号 / 主程序构建号 / 包指纹全空）
+static NSString *last_container_game_root(void) {
+    if (!s2a_launch_ctx_container()) return nil;
+    NSString *gid = [NSUserDefaults.standardUserDefaults stringForKey:@"S2ALastGameId"]; if (!gid.length) return nil;
+    const char *home = getenv("HOME"); s2a_launch_ctx c; char why[256];
+    if (s2a_launch_ctx_resolve_game(&c, s2a_launch_ctx_bundle_dir(), home && *home ? home : ".", gid.UTF8String, why, sizeof why)) { LOG("诊断包：上次的游戏 %s 解析不了（%s），游戏信息留空", gid.UTF8String, why); return nil; }
+    return @(c.game_data);
+}
 static NSString *pack_root(void) {
     const s2a_launch_ctx *lc = s2a_launch_ctx_get();
-    return lc && (lc->source == S2A_LCTX_FILE || lc->source == S2A_LCTX_CONTAINER) ? @(lc->game_data) : [docs() stringByAppendingPathComponent:@"资源包"];
+    if (lc && (lc->source == S2A_LCTX_FILE || lc->source == S2A_LCTX_CONTAINER)) return @(lc->game_data);
+    return last_container_game_root() ?: [docs() stringByAppendingPathComponent:@"资源包"];
 }
 // 归档的往局日志（os.c 每局一份）：Documents 下相对路径 logs/host-<起局时刻>.log，新的在前（文件名带时刻，按名排序即按时间）
 static NSArray<NSString *> *archived_logs(void) {
@@ -115,6 +125,17 @@ static NSString *pack_fp(void) {
     NSData *d = [NSData dataWithContentsOfFile:[pack_root() stringByAppendingPathComponent:@"manifest.json"]]; if (!d) return @"";
     NSString *h = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil][@"index_sha256"];
     return [h isKindOfClass:NSString.class] ? [h substringToIndex:MIN(16u, h.length)] : @"";
+}
+// 着色器归档目标：单款包 Info.plist 有（ipa_tail.py 写）；多款容器的壳里没有按款的值，按本款资源包 shaders/gal_pso.<架构>.<系统>.<片>.bin 算（同 ipa_tail.py pso_target）
+static NSString *pso_target(void) {
+    NSString *t = [NSBundle.mainBundle objectForInfoDictionaryKey:@"S2APsoTarget"]; if (t.length) return t;
+    NSMutableSet *ts = [NSMutableSet set];
+    for (NSString *f in [NSFileManager.defaultManager contentsOfDirectoryAtPath:[pack_root() stringByAppendingPathComponent:@"shaders"] error:nil] ?: @[]) {
+        if (![f hasPrefix:@"gal_pso."] || ![f hasSuffix:@".bin"]) continue;
+        NSString *m = [f substringWithRange:NSMakeRange(8, f.length - 8 - 4)]; NSRange dot = [m rangeOfString:@"." options:NSBackwardsSearch];
+        [ts addObject:dot.location == NSNotFound ? m : [m substringToIndex:dot.location]];
+    }
+    return [[ts.allObjects sortedArrayUsingSelector:@selector(compare:)] componentsJoinedByString:@","];
 }
 static NSString *game_name(void) {   // 款名：包名 io.s2arm.<款> 的最后一段；别的包名用显示名
     NSString *b = NSBundle.mainBundle.bundleIdentifier ?: @"";
@@ -233,11 +254,12 @@ static NSURL *build_zip(NSUInteger cap, BOOL slim, NSString **err) {
         @"schema": @1, @"exported_at": [iso stringFromDate:NSDate.date],
         @"tester": @{@"id": tester_id(), @"group": @"", @"note": @""},
         @"app": @{@"bundle": bundle, @"version": [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"", @"commit": commit,
-                  @"build_id": [NSBundle.mainBundle objectForInfoDictionaryKey:@"S2ABuildID"] ?: @"",
+                  // 包号：单款包 S2ABuildID；多款容器的壳没有按款包号，记壳号 S2AShellId（同 s2a_catalogue.json shell_id）
+                  @"build_id": [NSBundle.mainBundle objectForInfoDictionaryKey:@"S2ABuildID"] ?: [NSBundle.mainBundle objectForInfoDictionaryKey:@"S2AShellId"] ?: @"",
                   // 界面版本字（设置页 / 游戏库顶部显示的 v0.3.0 / v0.2.6-dev+ba0ef07，电脑组装时写 Info.plist 的 S2ADisplayVersion）：玩家截图与诊断包对得上
                   @"display_version": [NSBundle.mainBundle objectForInfoDictionaryKey:@"S2ADisplayVersion"] ?: @"",
                   // 包里着色器归档的目标「架构.系统」（ipa.sh 写 Info.plist 的 S2APsoTarget，如 applegpu_g18p.ios27，多份逗号连）：和 device.gpu_family / ios 对照，一眼看出整份不命中
-                  @"pso_target": [NSBundle.mainBundle objectForInfoDictionaryKey:@"S2APsoTarget"] ?: @""},
+                  @"pso_target": pso_target()},
         @"game": @{@"name": game_name(), @"title_id": title_id(), @"build_id": main_build_id(), @"pack_fp": pack_fp()},
         @"device": @{@"model": hw_model(), @"ios": UIDevice.currentDevice.systemVersion, @"ram_mb": @(NSProcessInfo.processInfo.physicalMemory >> 20),
                      @"gpu_family": gpu_family(), @"low_power": @(NSProcessInfo.processInfo.lowPowerModeEnabled)},

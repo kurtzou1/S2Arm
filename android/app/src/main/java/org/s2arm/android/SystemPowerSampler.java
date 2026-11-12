@@ -7,10 +7,15 @@ import android.os.BatteryManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.SystemClock;
+import java.util.concurrent.Executor;
 import java.util.function.DoubleConsumer;
 
 /**
- * #48 A5 / #163：应用内电池净放电采样（主线程，1 秒一拍），只在游戏前台时运行。
+ * #48 A5 / #163：应用内电池净放电采样（1 秒一拍），只在游戏前台时运行。
+ * 拍子在主线程上走，但读电池的两次系统调用（registerReceiver / BatteryManager.getLongProperty，都是跨进程的同步调用）
+ * 交给 worker 线程做、结果回主线程发布：真机上系统电池服务有时几秒不回，原先在主线程直接读，游戏界面 5 秒不处理触摸
+ * 被系统判无响应、游戏被杀（ANR 栈停在 SystemPowerSampler.read → BatteryManager.getLongProperty）。
+ * 上一拍的读数还没回来时这一拍不再派新的。不给 worker 的构造（单测用）照旧同步读。
  * 读数经 Sink 落 logcat（采集的 logcat.txt）：battery=整机电池净放电、
  * rails=Android 15+ CPU/GPU 轨功耗（插电也可用）、event=低频原始值行。
  * 放电判定 = plugged==0 && status==DISCHARGING，且拔电后先等 8 秒让电量计
@@ -32,8 +37,11 @@ final class SystemPowerSampler implements Runnable {
     private final Handler handler;
     private final Sink sink;
     private final SystemPowerRails rails;
-    private boolean running;
-    private int ticks, lastPlugged = -1;
+    private final Executor worker, main;   // 都为 null = 同步读（单测）；否则读在 worker、发布回 main
+    private boolean running, reading;      // 只在主线程动
+    private int generation;                // 停表 +1：停表前派出去的读数回来时丢掉
+    private volatile boolean reset;        // 停表后置位：读的那条线程下次读之前把拔电起算清掉
+    private int ticks, lastPlugged = -1;   // 以下三个只在读的那条线程上动
     private long unpluggedAt = Long.MAX_VALUE;
 
     SystemPowerSampler(Context context, Handler handler, DoubleConsumer batterySink) {
@@ -44,9 +52,13 @@ final class SystemPowerSampler implements Runnable {
         });
     }
 
-    SystemPowerSampler(Context context, Handler handler, Sink sink) {
+    SystemPowerSampler(Context context, Handler handler, Sink sink) { this(context, handler, null, null, sink); }
+
+    SystemPowerSampler(Context context, Handler handler, Executor worker, Executor main, Sink sink) {
         this.context = context;
         this.handler = handler;
+        this.worker = worker;
+        this.main = main;
         this.sink = sink;
         rails = Build.VERSION.SDK_INT >= 35 ? SystemPowerRails.create(context, sink::event) : null;
     }
@@ -59,13 +71,14 @@ final class SystemPowerSampler implements Runnable {
 
     void stop() {
         running = false;
-        lastPlugged = -1;               // 停表期间设备状态未知，恢复后重新起算 settle
-        unpluggedAt = Long.MAX_VALUE;
+        generation++;
+        reset = true;                   // 停表期间设备状态未知，恢复后重新起算 settle（由读的那条线程清）
         handler.removeCallbacks(this);
         if (rails != null) rails.stop();
     }
 
     private double read() {
+        if (reset) { reset = false; lastPlugged = -1; unpluggedAt = Long.MAX_VALUE; }
         try {
             BatteryManager manager = context.getSystemService(BatteryManager.class);
             Intent state = context.registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
@@ -93,7 +106,16 @@ final class SystemPowerSampler implements Runnable {
     @Override public void run() {
         if (!running) return;   // stop 后迟到的回调不采
         boolean on = debugOn();
-        sink.battery(on ? read() : Double.NaN);
+        if (!on) sink.battery(Double.NaN);
+        else if (worker == null) sink.battery(read());
+        else if (!reading) {            // 上一拍还没回来就不再派：读卡住时主线程照常走拍子
+            reading = true;
+            final int gen = generation;
+            worker.execute(() -> {
+                final double watts = read();
+                main.execute(() -> { reading = false; if (running && gen == generation) sink.battery(watts); });
+            });
+        }
         sink.rails(on && rails != null ? rails.poll() : Double.NaN);
         if (running) handler.postDelayed(this, TICK_MS);
     }

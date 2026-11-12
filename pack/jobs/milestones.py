@@ -34,6 +34,7 @@ MILESTONES = [
 # - build_dual：Mac 打包（pack/refresh.sh S2A_PACK_PLAT=macos，同一键出包 --target mac）
 # - ipa_dual：打 iPhone 包（pack/oneclick/oneclick.sh）
 PLANS = {"ipa_dual": ["unpack", "refresh", "analyze", "direct", "ipa"],
+         "ipa_downstream": ["unpack", "ipa"],   # 下游深度方案出 iPhone 包：共用解包 → 下游做包工具（pack/jobs/downstream.py）
          "build_dual": ["unpack", "refresh", "analyze", "direct", "host", "install"]}
 
 

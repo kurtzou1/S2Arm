@@ -132,6 +132,11 @@ public final class S2ArmEngineProvider: EngineProvider {
         }
     }
 
+    /// 记玩家对这款的下游深度方案选择（scheme = 方案 id；"" = 仍用原版）。之后的出包 / 装机作业按它走（pack/jobs/downstream.py requested）
+    public func setDownstreamChoice(gameId: String, scheme: String, events: EventSink) async throws {
+        _ = try await client.perform("downstreamChoice", extra: ["gameId": gameId, "scheme": scheme], events: events)
+    }
+
     /// 出包编排（剃刀 H13，pack/jobs/export_plan.py）：plan = {source: inline, items, location, deviceTarget, spaceOverride} 或 {source: batch}。
     /// 每一步是作业层的普通子作业，事件经 sink 原样过来（step / child / stepEnded）；终态 paused 时抛 JobFailure（state = .paused，结果里有 pausedReason / stoppedAt）。
     /// 计划里有 iPhone 时先确认 .NET SDK（同 build：玩家只点一次）

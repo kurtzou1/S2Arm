@@ -65,6 +65,9 @@ int s2a_ui_zh(void);
 #define S2A_UI_HUD_BRIEF_EN             "%llu FPS · %s"
 #define S2A_UI_HUD_MEM_FAIL             "内存读取失败"
 #define S2A_UI_HUD_MEM_FAIL_EN          "Memory unavailable"
+// 两本账一起写（11-13 玩家复盘：GPU 已分配撞上系统上限报 OutOfMemory，浮层只写进程实占 0.9 GB，看着像内存没吃多少）
+#define S2A_UI_HUD_MEM_GPU              "进程 %.1f GB · GPU %.1f GB"
+#define S2A_UI_HUD_MEM_GPU_EN           "App %.1f GB · GPU %.1f GB"
 #ifdef __cplusplus
 }
 #endif

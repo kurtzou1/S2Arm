@@ -113,10 +113,16 @@ static inline void nvn_vk_texview_plan_make(uint32_t target, uint32_t depth, uin
             return;
         }
     }
-    // 立方体存储本质上是一组面：最终视图类型必须与实际面数相符，
-    // 不论类型来自默认目标还是显式目标。不要扩展用户指定的层范围。
+    // 立方体存储是一组面：显式目标合法时保留，否则按面数配对；不扩展层范围。
     if (!attachment && (target == NVN_TEXTURE_TARGET_CUBEMAP || target == NVN_TEXTURE_TARGET_CUBEMAP_ARRAY)) {
-        if (ny == 1) type = VK_IMAGE_VIEW_TYPE_2D;
+        int explicit_ok = v && v->set_target &&
+            ((v->target == NVN_TEXTURE_TARGET_2D && ny == 1) ||
+             v->target == NVN_TEXTURE_TARGET_2D_ARRAY ||
+             (v->target == NVN_TEXTURE_TARGET_CUBEMAP && ny == 6) ||
+             (v->target == NVN_TEXTURE_TARGET_CUBEMAP_ARRAY && ny >= 6 && ny % 6 == 0));
+        if (explicit_ok) {
+            if (v->target == NVN_TEXTURE_TARGET_2D) type = VK_IMAGE_VIEW_TYPE_2D;
+        } else if (ny == 1) type = VK_IMAGE_VIEW_TYPE_2D;
         else if (ny == 6) type = VK_IMAGE_VIEW_TYPE_CUBE;
         else if (ny > 6 && ny % 6 == 0) type = VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
         else type = VK_IMAGE_VIEW_TYPE_2D_ARRAY;

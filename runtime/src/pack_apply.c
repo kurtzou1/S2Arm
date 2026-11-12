@@ -394,7 +394,7 @@ int s2a_import_state(const char *docs) {
 //   全部成功后旧 games 改名成 Documents/.s2a-unwritable-<时刻>、新树改名成 games（第二步失败就改回去）；任何一步失败只删新树、不动原样。
 //   之后路径不变，判据、推送、起局都不用改。旧目录 App 删不掉（归 root），由电脑端下次连上时删（Documents/.s2a-unwritable-*）
 // 迁移结果给宿主拼成界面语言的一句话（ios/app.m）：旧目录属主、克隆的文件数、失败时哪一步怎么失败（路径 + 系统错误）
-static char g_repair_why[1600]; static unsigned g_repair_uid, g_repair_files;
+static char g_repair_why[1600], g_repair_skip1[1200]; static unsigned g_repair_uid, g_repair_files, g_repair_skipped;
 const char *s2a_games_repair_detail(void) { return g_repair_why; }
 unsigned s2a_games_repair_owner(void) { return g_repair_uid; }
 unsigned s2a_games_repair_files(void) { return g_repair_files; }
@@ -416,12 +416,29 @@ static int games_unwritable(const char *games, char *bad, size_t n, struct stat 
 #if defined(__APPLE__)
 #include <sys/clonefile.h>
 #endif
-// 把 from 整棵克隆到 to（to 不存在）：目录照建、普通文件克隆、符号链接照抄，别的类型算失败。失败返回负数并在 why 写哪一个
+// 读不到的那一项跳过、计数（反防御：读得到的都搬过去照常装；缺的文件由资源包核对报出来，从电脑重装补齐）
+static void clone_skip(const char *what, const char *path, int err) {
+    if (!g_repair_skipped++) snprintf(g_repair_skip1, sizeof g_repair_skip1, "%s %s：%s", what, path, err ? strerror(err) : "不是普通文件 / 目录 / 链接");
+    LOG("【黄】游戏目录迁移：%s %s 读不到（%s），跳过", what, path, err ? strerror(err) : "不是普通文件 / 目录 / 链接");
+}
+// 克隆不了（跨卷、文件系统不支持、属主限制）就逐字节拷：新文件归 App。源读不开回 1（调用方跳过）；写新文件失败回 -1（真写不进：停）
+static int copy_file(const char *from, const char *to, mode_t mode, char *why, size_t n) {
+    int in = open(from, O_RDONLY); if (in < 0) return 1;
+    int out = open(to, O_WRONLY | O_CREAT | O_EXCL, (mode & 0777) | 0600);
+    if (out < 0) { snprintf(why, n, "建 %s：%s", to, strerror(errno)); close(in); return -1; }
+    static char buf[1 << 20]; ssize_t k; int rc = 0;
+    while ((k = read(in, buf, sizeof buf)) > 0) if (write(out, buf, (size_t)k) != k) { snprintf(why, n, "写 %s：%s", to, strerror(errno)); rc = -1; break; }
+    if (!rc && k < 0) { rc = 1; unlink(to); }   // 读到一半读不下去：当读不到，跳过
+    close(in); if (close(out) && !rc) { snprintf(why, n, "写 %s：%s", to, strerror(errno)); rc = -1; }
+    if (rc < 0) unlink(to);
+    return rc;
+}
+// 把 from 整棵搬到 to（to 不存在）：目录照建、普通文件克隆（不行就拷）、符号链接照抄；读不到的项跳过计数。新位置建不了 / 写不进返回负数并在 why 写哪一个
 static int clone_tree(const char *from, const char *to, unsigned *files, uint64_t *bytes, char *why, size_t n) {
-    struct stat st; if (lstat(from, &st)) { snprintf(why, n, "读 %s：%s", from, strerror(errno)); return -1; }
+    struct stat st; if (lstat(from, &st)) { clone_skip("读", from, errno); return 0; }
     if (S_ISDIR(st.st_mode)) {
-        if (mkdir(to, 0755)) { snprintf(why, n, "建 %s：%s", to, strerror(errno)); return -1; }
-        DIR *d = opendir(from); if (!d) { snprintf(why, n, "列 %s：%s", from, strerror(errno)); return -1; }
+        DIR *d = opendir(from); if (!d) { clone_skip("列目录", from, errno); return 0; }
+        if (mkdir(to, 0755)) { snprintf(why, n, "建 %s：%s", to, strerror(errno)); closedir(d); return -1; }
         struct dirent *e; int rc = 0;
         while (!rc && (e = readdir(d))) {
             if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
@@ -431,16 +448,15 @@ static int clone_tree(const char *from, const char *to, unsigned *files, uint64_
         closedir(d); return rc;
     }
     if (S_ISLNK(st.st_mode)) {
-        char t[2400]; ssize_t k = readlink(from, t, sizeof t - 1); if (k < 0) { snprintf(why, n, "读链接 %s：%s", from, strerror(errno)); return -1; }
+        char t[2400]; ssize_t k = readlink(from, t, sizeof t - 1); if (k < 0) { clone_skip("读链接", from, errno); return 0; }
         t[k] = 0; if (symlink(t, to)) { snprintf(why, n, "建链接 %s：%s", to, strerror(errno)); return -1; }
         return 0;
     }
-    if (!S_ISREG(st.st_mode)) { snprintf(why, n, "%s 不是普通文件 / 目录 / 链接", from); return -1; }
+    if (!S_ISREG(st.st_mode)) { clone_skip("搬", from, 0); return 0; }
 #if defined(__APPLE__)
-    if (clonefile(from, to, CLONE_NOOWNERCOPY)) { snprintf(why, n, "克隆 %s：%s", from, strerror(errno)); return -1; }
-#else
-    snprintf(why, n, "这个平台没有文件克隆"); return -1;
+    if (clonefile(from, to, CLONE_NOOWNERCOPY))
 #endif
+    { int c = copy_file(from, to, st.st_mode, why, n); if (c < 0) return -1; if (c > 0) { clone_skip("读", from, errno); return 0; } }
     (*files)++; *bytes += (uint64_t)st.st_size; return 0;
 }
 static void remove_tree(const char *p) {   // 只删自己刚建的新树（归 App，删得掉）
@@ -456,7 +472,9 @@ static int repair_tree(const char *proc_docs) {
     LOG("【红】游戏目录：%s App 写不进（属主 uid %u、权限 %o，App 是 uid %u），迁到新目录", bad, (unsigned)bs.st_uid, (unsigned)(bs.st_mode & 07777), (unsigned)getuid());
     time_t now = time(NULL); char ts[32]; strftime(ts, sizeof ts, "%Y%m%d-%H%M%S", gmtime(&now));
     char fresh[2100], keep[2100], why[1600] = ""; snprintf(fresh, sizeof fresh, "%s/.s2a-games-new-%s", proc_docs, ts); snprintf(keep, sizeof keep, "%s/.s2a-unwritable-%s", proc_docs, ts);
-    unsigned files = 0; uint64_t bytes = 0; uint64_t t0 = now_ns();
+    { struct stat x; for (int k = 2; (!lstat(fresh, &x) || !lstat(keep, &x)) && k < 1000; k++) {   // 同一秒里第二次迁（上一回的旧目录还在）：名字加序号，不撞
+        snprintf(fresh, sizeof fresh, "%s/.s2a-games-new-%s-%d", proc_docs, ts, k); snprintf(keep, sizeof keep, "%s/.s2a-unwritable-%s-%d", proc_docs, ts, k); } }
+    unsigned files = 0; uint64_t bytes = 0; uint64_t t0 = now_ns(); g_repair_skipped = 0; g_repair_skip1[0] = 0;
     int rc = clone_tree(games, fresh, &files, &bytes, why, sizeof why);
     if (!rc && rename(games, keep)) { snprintf(why, sizeof why, "把旧目录改名成 %s：%s", keep, strerror(errno)); rc = -2; }
     if (!rc && rename(fresh, games)) {
@@ -470,17 +488,52 @@ static int repair_tree(const char *proc_docs) {
         snprintf(g_repair_why, sizeof g_repair_why, "%s（写不进的是 %s）", why, bad);
         LOG("【红】游戏目录：迁移没成：%s", g_repair_why); return rc;
     }
-    LOG("游戏目录：迁好了：%u 个文件 %llu MB 克隆进新目录（%.1f 秒），旧的改名为 %s", files, (unsigned long long)(bytes >> 20), (now_ns() - t0) / 1e9, keep);
+    LOG("游戏目录：迁好了：%u 个文件 %llu MB 克隆进新目录（%.1f 秒），旧的改名为 %s%s%s", files, (unsigned long long)(bytes >> 20), (now_ns() - t0) / 1e9, keep,
+        g_repair_skipped ? "；读不到跳过的第一项：" : "", g_repair_skipped ? g_repair_skip1 : "");
+    if (g_repair_skipped) LOG("【黄】游戏目录：%u 项读不到没搬（缺的文件资源包核对会报出来，从电脑重新装这款补齐）", g_repair_skipped);
     return 1;
+}
+// 资源包那棵（Library 下）：主位置 Library/Application Support/S2Arm 这条链 App 建不出 / 写不进（iOS 27 玩家机上 Application Support/S2Arm 归 root，
+//   连迁移用的新树都建不了）→ 建备用位置 Library/S2Arm（Library 归 App），games 下读得到的照搬过去，旧的原样留着；之后宿主与电脑端都认备用位置（s2a_docs.h）。
+//   已经在备用位置 / 主位置写得进：同 Documents 那棵，只修 games 往下写不进的目录
+static int mkdir_chain(const char *dir) {   // 逐级建（已有算成）；最后一级写得进回 0，否则回 errno
+    char p[2048]; snprintf(p, sizeof p, "%s", dir);
+    for (char *s = p + 1; *s; s++) if (*s == '/') { *s = 0; mkdir(p, 0755); *s = '/'; }
+    if (mkdir(p, 0755) && errno != EEXIST) return errno;
+    return access(p, W_OK) ? errno : 0;
+}
+static int repair_pack_base(const char *proc_docs) {
+    char main_[2048], alt[2048], altg[2100], games[2100]; struct stat st;
+    if (s2a_pack_base_main(main_, sizeof main_, proc_docs) < 0 || s2a_pack_base_alt(alt, sizeof alt, proc_docs) < 0) return 0;
+    snprintf(altg, sizeof altg, "%s/games", alt);
+    if (!stat(altg, &st) && S_ISDIR(st.st_mode)) return repair_tree(alt);
+    int e = mkdir_chain(main_);
+    if (!e) return repair_tree(main_);
+    snprintf(games, sizeof games, "%s/games", main_);
+    struct stat ms; unsigned uid = stat(main_, &ms) ? 0 : (unsigned)ms.st_uid;
+    LOG("【红】游戏目录：%s App 写不进（%s，属主 uid %u，App 是 uid %u），资源包改放 %s，读得到的搬过去", main_, strerror(e), uid, (unsigned)getuid(), alt);
+    g_repair_uid = uid; g_repair_skipped = 0; g_repair_skip1[0] = 0;
+    int ea = mkdir_chain(alt);
+    if (ea) { snprintf(g_repair_why, sizeof g_repair_why, "建 %s：%s（%s 也写不进：%s）", alt, strerror(ea), main_, strerror(e)); LOG("【红】游戏目录：迁移没成：%s", g_repair_why); return -1; }
+    time_t now = time(NULL); char ts[32]; strftime(ts, sizeof ts, "%Y%m%d-%H%M%S", gmtime(&now));
+    char fresh[2200], why[1600] = ""; snprintf(fresh, sizeof fresh, "%s/.s2a-games-new-%s", alt, ts);
+    unsigned files = 0; uint64_t bytes = 0; uint64_t t0 = now_ns(); int rc = 0;
+    if (!stat(games, &st) && S_ISDIR(st.st_mode)) rc = clone_tree(games, fresh, &files, &bytes, why, sizeof why);
+    else if (mkdir(fresh, 0755)) { snprintf(why, sizeof why, "建 %s：%s", fresh, strerror(errno)); rc = -1; }
+    if (!rc && rename(fresh, altg)) { snprintf(why, sizeof why, "把新目录改名成 %s：%s", altg, strerror(errno)); rc = -3; }
+    g_repair_files = files;
+    if (rc) { remove_tree(fresh); snprintf(g_repair_why, sizeof g_repair_why, "%s（写不进的是 %s）", why, main_); LOG("【红】游戏目录：迁移没成：%s", g_repair_why); return rc; }
+    LOG("游戏目录：资源包改放 %s：%u 个文件 %llu MB 搬过去（%.1f 秒），旧的 %s 留着不动%s%s", altg, files, (unsigned long long)(bytes >> 20), (now_ns() - t0) / 1e9, main_,
+        g_repair_skipped ? "；读不到跳过的第一项：" : "", g_repair_skipped ? g_repair_skip1 : "");
+    return files ? 1 : 0;
 }
 // 0 = 都写得进（没动）；1 = 迁好了；负数 = 迁移失败（原样留着）。结果细节经上面三个函数取。
 //   两棵树都修：进程级 Documents/games（存档、旧位置的资源包）与新位置 Library/Application Support/S2Arm/games（v0.3.0 起的资源包，电脑端推包也写这里）
 int s2a_games_repair(const char *proc_docs) {
     g_repair_why[0] = 0; g_repair_uid = 0; g_repair_files = 0;
     int a = repair_tree(proc_docs);
-    char base[2048]; if (s2a_pack_base(base, sizeof base, proc_docs) < 0) return a;
     char why_a[sizeof g_repair_why]; unsigned uid_a = g_repair_uid, files_a = g_repair_files; snprintf(why_a, sizeof why_a, "%s", g_repair_why);
-    int b = repair_tree(base);
+    int b = repair_pack_base(proc_docs);
     if (a < 0) { snprintf(g_repair_why, sizeof g_repair_why, "%s", why_a); g_repair_uid = uid_a; g_repair_files = files_a; return a; }   // 先报 Documents 那棵的失败
     if (b) return b;
     if (a) { snprintf(g_repair_why, sizeof g_repair_why, "%s", why_a); g_repair_uid = uid_a; g_repair_files = files_a; }

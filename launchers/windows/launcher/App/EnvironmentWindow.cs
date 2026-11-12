@@ -348,14 +348,16 @@ public sealed partial class EnvironmentWindow : Window
         var libraryButtons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         if (connectedFolder is { } openFolder) libraryButtons.Children.Add(Action("settings.open", () => OpenFolder(openFolder)));
         libraryButtons.Children.Add(Action("environment.library.change", () => BeginPicker(ChangeLibraryAsync), !libraryBusy && !PackBusy));
-        locations.Children.Add(SettingRow(T("settings.locations.library"), T("environment.library.detail"), libraryButtons, connectedFolder ?? libraryFolder));
+        // 还没连游戏库（引导页阶段）：照样能进设置页，没有的项写「还没设置」，不灰掉、不藏起整行
+        var libraryPath = connectedFolder ?? (string.IsNullOrEmpty(libraryFolder) ? null : libraryFolder);
+        locations.Children.Add(SettingRow(T("settings.locations.library"), T("environment.library.detail") + (libraryPath is null ? "\n" + T("settings.locations.not_set") : ""), libraryButtons, libraryPath));
         // 出 iPhone 包成功后组在游戏库根（pack/jobs/ipa.py refresh_library_ipa）
         var ipa = connectedFolder is null ? null : Path.Combine(connectedFolder, "S2Arm.ipa");
         var ipaReady = ipa is not null && File.Exists(ipa);
         locations.Children.Add(SettingRow(T("settings.locations.ipa"), ipaReady ? null : T("settings.locations.ipa_none"),
             ipaReady ? Action("progress.reveal_ipa", () => Reveal(ipa!)) : null, ipaReady ? ipa : null));
-        locations.Children.Add(SettingRow(T("settings.locations.space"), null,
-            Action("storage.open", OpenStorage, !libraryBusy && libraryId is not null)));
+        locations.Children.Add(SettingRow(T("settings.locations.space"), libraryId is null ? T("settings.locations.not_set") : null,
+            libraryId is null ? null : Action("storage.open", OpenStorage, !libraryBusy)));   // 没库时存储总览只有空页，先写「还没设置」，建好库再给按钮
         if (PrivateJobRequest.Warning is { } privateWarning) locations.Children.Add(Muted(privateWarning));   // 私有目录收不紧：照常用，这里说一句（#754）
         body.Children.Add(Card(locations));
 

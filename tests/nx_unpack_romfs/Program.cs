@@ -151,8 +151,10 @@ static class T {
             finally { Console.SetOut(previous); }
             Check(br.Bypassed && bad.Exact(Path.Combine(Root, "tampered", "romfs")) && br.Files == 3 && br.Bytes == bad.Expected.Sum(e => (long)e.Value.Length),
                 "数据块篡改：整分区降级后所有文件精确等于篡改后预期（含跨块 / 多任务 / 零长）");
-            Check(captured.ToString() == "🟡 原件数据哈希不符（疑改版 / 整合版），已跳过 RomFS 完整性校验解出 3 个文件" + Environment.NewLine &&
-                File.ReadAllText(Path.Combine(Root, "tampered", "unpack.tsv")) == "title_id\tfixture\nintegrity\tbypassed\n", "生产清单写入：一行黄 + unpack.tsv integrity=bypassed");
+            // #787：黄字末尾点名第一处坏块（只有 /big.bin 被篡改；并行哪一份先撞上坏块不定，只核到文件名与「文件内偏移」）
+            Check(captured.ToString().StartsWith("🟡 原件数据哈希不符（疑改版 / 整合版），已跳过 RomFS 完整性校验解出 3 个文件；第一处坏块在文件 romfs/big.bin，文件内偏移 ") &&
+                captured.ToString().EndsWith(Environment.NewLine) && captured.ToString().Split('\n').Length == 2 &&
+                File.ReadAllText(Path.Combine(Root, "tampered", "unpack.tsv")) == "title_id\tfixture\nintegrity\tbypassed\n", "生产清单写入：一行黄（点名坏块所在文件）+ unpack.tsv integrity=bypassed");
             var small = new Fixture(small: true); small.TamperData(7); var sr = Extract(small, "shared-block");
             Check(sr.Bypassed && small.Exact(Path.Combine(Root, "shared-block", "romfs")), "数据 / 头 / 目录共享 IVFC 块：结构合法仍能降级");
             var baseOnly = new Fixture(); baseOnly.TamperData(0x4321); Exception baseError = Error(() => Extract(baseOnly, "base-only", patched: false));

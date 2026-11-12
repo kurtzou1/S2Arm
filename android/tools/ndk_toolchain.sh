@@ -1,7 +1,7 @@
 # Android NDK 宿主工具链解析：直连探针脚本共用。
 # 以前每个脚本都写死 toolchains/llvm/prebuilt/linux-x86_64；换到 macOS 会直接找不到编译器。
-# 依次认 ANDROID_NDK_HOME / ANDROID_NDK / ANDROID_NDK_ROOT、$ANDROID_HOME 或
-# $ANDROID_SDK_ROOT 下的固定版本、Homebrew/发行版常见路径；再按宿主实际存在的
+# 先认 $ANDROID_HOME / $ANDROID_SDK_ROOT / 常见 SDK 目录下的固定版本，没有再认
+# ANDROID_NDK_HOME / ANDROID_NDK / ANDROID_NDK_ROOT，最后 /opt/android-ndk；再按宿主实际存在的
 # prebuilt 目录选（darwin-arm64 / darwin-x86_64 / linux-x86_64），
 # 找不到就返回非零，由调用方报红退出，不猜路径。
 #
@@ -15,17 +15,18 @@
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/versions.sh"
 
 s2a_ndk_resolve() {
-    local ndk=${ANDROID_NDK_HOME:-${ANDROID_NDK:-${ANDROID_NDK_ROOT:-}}} candidate
-    if [ -z "$ndk" ]; then
-        for candidate in \
-            "${ANDROID_HOME:-/nonexistent}/ndk/$S2A_ANDROID_NDK" \
-            "${ANDROID_SDK_ROOT:-/nonexistent}/ndk/$S2A_ANDROID_NDK" \
-            "$HOME/Android/Sdk/ndk/$S2A_ANDROID_NDK" \
-            "$HOME/Library/Android/sdk/ndk/$S2A_ANDROID_NDK" \
-            /opt/android-ndk; do
-            [ -d "$candidate" ] && { ndk=$candidate; break; }
-        done
-    fi
+    # 钉版目录优先，环境变量兜底：托管 macOS 镜像的 ANDROID_NDK_HOME 指向自带的旧 NDK（27.x），
+    # 先认它会在钉版已装的机器上用错编译器（NDK 29 才认的告警选项当场 -Werror 失败）。
+    local ndk= candidate
+    for candidate in \
+        "${ANDROID_HOME:-/nonexistent}/ndk/$S2A_ANDROID_NDK" \
+        "${ANDROID_SDK_ROOT:-/nonexistent}/ndk/$S2A_ANDROID_NDK" \
+        "$HOME/Android/Sdk/ndk/$S2A_ANDROID_NDK" \
+        "$HOME/Library/Android/sdk/ndk/$S2A_ANDROID_NDK"; do
+        [ -d "$candidate" ] && { ndk=$candidate; break; }
+    done
+    [ -n "$ndk" ] || ndk=${ANDROID_NDK_HOME:-${ANDROID_NDK:-${ANDROID_NDK_ROOT:-}}}
+    [ -n "$ndk" ] || { [ -d /opt/android-ndk ] && ndk=/opt/android-ndk; }
     [ -n "$ndk" ] || return 1
     printf '%s\n' "$ndk"
 }

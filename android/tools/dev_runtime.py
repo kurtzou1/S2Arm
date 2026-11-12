@@ -15,7 +15,8 @@ manifest generator and the pusher. A development run is no reading and no formal
       1. host: library SHA == manifest libSha256; the ELF checks above; sourceCommit is 40 hex.
       2. device: the package is run-as-able (debuggable); the installed base.apk SHA equals
          baseApkSha256 (Java changed: reinstall that APK first).
-      3. stop: --activity-single-top --ez s2arm.finish true (graceful: the shader cache is exported),
+      3. Refuse if the separate :game process is running; close the game before pushing.
+         For a remaining main process, stop: --activity-single-top --ez s2arm.finish true (graceful: the shader cache is exported),
          wait for the process to exit; force-stop only after 5 s (recorded as forced_stop).
          With wait_done= the graceful-shutdown dump (frame-log chunks) is awaited first
          (bounded) — force-stopping mid-dump truncates the block.
@@ -23,8 +24,12 @@ manifest generator and the pusher. A development run is no reading and no formal
          the files and 0555 the directory, check the SHA on the device, remove the /data/local/tmp copies.
          --clean first removes the other files/dev-runtime/* (chmod -R u+w, then rm: 0555 directories
          cannot be emptied otherwise).
-      5. am start -W --es s2arm.dev_runtime <sha> --es s2arm.console_mode <mode> [extras]; accepted only
-         when logcat shows `runtime-library: dev-override sha256=<sha>` within 20 s.
+      5. Save debug.s2a.debug_env, set it to 1 and verify it, then start LibraryActivity with
+         --es s2arm.dev_runtime <sha> --es s2arm.console_mode <mode> [extras]. Select the game
+         in the library within 20 s; acceptance requires its `runtime-library: dev-override
+         sha256=<sha>` log. Leave the property enabled during a successful run: native debug
+         entries read it later. The receipt records the old value and the command to restore it
+         after the game exits. Restore the original property immediately on failure.
       Writes <lib-dir>/push-<serial>-<UTC>.json. Exit 0 accepted (or pushed with --no-start), 1 refused
       on the device or timed out, 2 a host-side precondition failed. Run it under the device lease of
       your setup (it calls adb directly).
@@ -48,6 +53,8 @@ from pathlib import Path
 ANDROID = Path(__file__).resolve().parents[1]
 REPO = ANDROID.parents[0]
 ACTIVITY = "org.s2arm.android.MainActivity"
+LIBRARY_ACTIVITY = "org.s2arm.android.LibraryActivity"
+DEBUG_GATE = "debug.s2a.debug_env"
 SONAME = b"libs2arm_android.so"
 SHA = re.compile(r"[0-9a-f]{64}")
 EXTRA = re.compile(r"s2arm\.[a-z0-9_]+(=[A-Za-z0-9._-]+)?")
@@ -160,6 +167,17 @@ class Device:
     def run_as(self, package, command, timeout=120):
         return self.shell(f"run-as {package} sh -c {shlex.quote(command)}", timeout=timeout)
 
+    def game_running(self, package):
+        name = package + ":game"
+        r = subprocess.run([*self.argv, "shell", f"pidof {shlex.quote(name)}"], capture_output=True, timeout=60)
+        out = r.stdout.decode(errors="replace").strip()
+        err = r.stderr.decode(errors="replace").strip()
+        if r.returncode == 1 and not out and not err:
+            return False
+        if r.returncode != 0 or not re.fullmatch(r"[0-9]+(?:\s+[0-9]+)*", out):
+            raise RuntimeError(f"could not determine whether {name} is running (pidof rc={r.returncode}: {err or out})")
+        return True
+
 
 def push(args):
     lib_dir = Path(args.lib_dir).resolve()
@@ -182,6 +200,8 @@ def push(args):
     receipt_path = lib_dir / f"push-{args.serial}-{stamp}.json"
     d, pkg = Device(args.adb, args.serial), args.package
     rc = 1
+    gate_previous = None
+    restore_gate = False
     try:
         d.run_as(pkg, "id -u")
         base = [b[len("package:"):] for b in d.shell(f"pm path {pkg}").split() if b.endswith("/base.apk")]
@@ -191,7 +211,11 @@ def push(args):
         receipt["installed_apk_sha256"] = installed
         if installed != doc["baseApkSha256"]:
             raise Refuse(f"installed APK {installed[:12]} is not the library's base {doc['baseApkSha256'][:12]}: install that APK first")
+        if d.game_running(pkg):
+            raise RuntimeError("game process is running; close the game before pushing a development runtime")
         receipt["stop"] = stop(d, pkg)
+        if d.game_running(pkg):
+            raise RuntimeError("game process started during stop; close the game before pushing a development runtime")
         tmp_lib, tmp_json = f"/data/local/tmp/s2a-dev-{sha[:16]}.so", f"/data/local/tmp/s2a-dev-{sha[:16]}.json"
         start = time.monotonic()
         d.run("push", str(lib), tmp_lib, timeout=300)
@@ -213,25 +237,53 @@ def push(args):
         if args.no_start:
             rc = 0
         else:
+            # DebugGate caches the property in each cold process. Keep it set
+            # for the run: native debug entries also read it after the verdict.
+            gate_previous = d.shell(f"getprop {DEBUG_GATE}").rstrip("\r\n")
+            receipt["debug_gate_previous"] = gate_previous
+            restore_gate = True  # a failed setprop may still have changed the value
+            d.shell(f"setprop {DEBUG_GATE} 1")
+            if d.shell(f"getprop {DEBUG_GATE}").rstrip("\r\n") != "1":
+                raise RuntimeError(f"{DEBUG_GATE} did not read back as 1; refusing launch")
             extras = f" --es s2arm.dev_runtime {sha} --es s2arm.console_mode {args.console_mode}"
             for key in args.extra:
                 name, _, value = key.partition("=")
                 extras += f" --ez {name} {value or 'true'}" if value in ("", "true", "false") else f" --es {name} {value}"
             d.shell("logcat -c")
             started = time.monotonic()
-            receipt["am_start"] = d.shell(f"am start -W -n {pkg}/{ACTIVITY}{extras}").strip().splitlines()[-4:]
+            receipt["am_start"] = d.shell(f"am start -W -n {pkg}/{LIBRARY_ACTIVITY}{extras}").strip().splitlines()[-4:]
+            print("Select the game in the library within 20 seconds to verify the replacement runtime.", flush=True)
             receipt["accepted"], receipt["log"] = verdict(d, sha)
             receipt["start_to_verdict_s"] = round(time.monotonic() - started, 2)
             rc = 0 if receipt["accepted"] else 1
+            if rc == 0:
+                restore = f"setprop {DEBUG_GATE} {shlex.quote(gate_previous)}"
+                receipt["debug_gate_left_enabled"] = True
+                receipt["debug_gate_restore_command"] = " ".join(shlex.quote(arg) for arg in d.argv + ["shell", restore])
+                restore_gate = False
     except Refuse as error:
         receipt["error"] = str(error)
         rc = 2
     except (RuntimeError, IndexError, subprocess.TimeoutExpired) as error:
         receipt["error"] = str(error)
         rc = 1
+    finally:
+        if restore_gate:
+            try:
+                d.shell(f"setprop {DEBUG_GATE} {shlex.quote(gate_previous)}")
+                actual = d.shell(f"getprop {DEBUG_GATE}").rstrip("\r\n")
+                if actual != gate_previous:
+                    raise RuntimeError(f"{DEBUG_GATE} restore readback mismatch")
+                receipt["debug_gate_restored"] = True
+            except (RuntimeError, OSError, subprocess.TimeoutExpired) as error:
+                receipt["debug_gate_restored"] = False
+                receipt["error"] = (receipt.get("error", "") + f"; {DEBUG_GATE} restore failed: {error}").lstrip("; ")
+                rc = 1
     receipt_path.write_text(json.dumps(receipt, indent=1, ensure_ascii=False) + "\n")
     print(("accepted (development run: no reading)" if rc == 0 and not args.no_start else "pushed, not started"
            if rc == 0 else "REFUSED: " + receipt.get("error", receipt.get("log", ""))) + f"; receipt {receipt_path}")
+    if receipt.get("debug_gate_left_enabled"):
+        print("After the game exits, restore the debug gate: " + receipt["debug_gate_restore_command"])
     return rc
 
 

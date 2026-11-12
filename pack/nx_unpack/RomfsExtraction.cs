@@ -15,10 +15,13 @@ using LibHac.Tools.FsSystem;
 using LibHac.Tools.FsSystem.RomFs;
 using Path = System.IO.Path;
 
+// #787：读坏块时的位置（文件 + 文件内偏移），包住原异常往上抛；报红处（Program.HashWhere）沿异常链取出来写进日志
+internal sealed class ReadPlace : Exception { public ReadPlace(string where, Exception inner) : base(where, inner) { } }
+
 static class RomfsExtraction {
-    internal sealed record Result(int Files, long Bytes, int Parallelism, bool Bypassed) {
+    internal sealed record Result(int Files, long Bytes, int Parallelism, bool Bypassed, string FirstBad = null) {
         public string Manifest => Bypassed ? "integrity\tbypassed\n" : "";
-        public string Warning => Bypassed ? $"🟡 原件数据哈希不符（疑改版 / 整合版），已跳过 RomFS 完整性校验解出 {Files} 个文件" : null;
+        public string Warning => Bypassed ? $"🟡 原件数据哈希不符（疑改版 / 整合版），已跳过 RomFS 完整性校验解出 {Files} 个文件{(FirstBad == null ? "" : "；第一处坏块在" + FirstBad)}" : null;
     }
     sealed record Entry(string Path, long Size, long Off);
     sealed record Node(uint Parent, uint Sibling, uint ChildDir, uint ChildFile, uint Next, string Name, long Offset, long Size);
@@ -26,7 +29,7 @@ static class RomfsExtraction {
     const long PartSize = 1024L << 20;
 
     // 不能用消息文字，也不能只看 AggregateException 的第一项：混合 IO / 缺密钥等错误仍红。
-    internal static bool IsDataHashFailure(Exception e) => e is AggregateException a
+    internal static bool IsDataHashFailure(Exception e) => e is ReadPlace r ? IsDataHashFailure(r.InnerException) : e is AggregateException a
         ? a.InnerExceptions.Count > 0 && a.InnerExceptions.All(IsDataHashFailure)
         : e is HorizonResultException h && h.ResultValue == ResultFs.NonRealDataVerificationFailed.Value;
 
@@ -43,7 +46,8 @@ static class RomfsExtraction {
             catch (Exception e) when (patched && IsDataHashFailure(e)) {
                 // Parallel.For 抛出前已收齐 worker；所有视图已 Dispose，才能清掉失败前缀并整分区重读。
                 if (Directory.Exists(stage)) Directory.Delete(stage, true);
-                result = Attempt(open, stage, IntegrityCheckLevel.None, partSize, parallelism) with { Bypassed = true };
+                string first = (e is AggregateException g ? g.InnerExceptions.ToArray() : new[] { e }).OfType<ReadPlace>().Select(r => r.Message).FirstOrDefault();
+                result = Attempt(open, stage, IntegrityCheckLevel.None, partSize, parallelism) with { Bypassed = true, FirstBad = first };
             }
             Directory.Move(stage, destination);
             return result;
@@ -102,7 +106,9 @@ static class RomfsExtraction {
                     dst.Position = from - e.Off;
                     for (long p = from; p < to;) {
                         int want = (int)Math.Min(buffer.Length, to - p);
-                        file.Get.Read(out long got, p - e.Off, buffer.AsSpan(0, want), ReadOption.None).ThrowIfFailure();
+                        long got;
+                        try { file.Get.Read(out got, p - e.Off, buffer.AsSpan(0, want), ReadOption.None).ThrowIfFailure(); }
+                        catch (Exception x) when (x is not ReadPlace) { throw new ReadPlace($"文件 romfs{e.Path}，文件内偏移 {p - e.Off}（读 {want} 字节）", x); }
                         if (got <= 0 || got > want) throw new IOException("RomFS 文件未完整读出");
                         dst.Write(buffer, 0, (int)got); p += got;
                     }

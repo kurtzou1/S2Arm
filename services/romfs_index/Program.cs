@@ -9,6 +9,8 @@ using System.IO;
 if ((args.Length == 5 || args.Length == 6 && args[5] == "--consume") && args[0] == "--std")
 {
     long n = S2A.Services.RomFsIndex.WriteStandard(args[1], args[2] == "-" ? null : args[2], args[3], long.Parse(args[4]), args.Length == 6);
+    if (S2A.Services.RomFsIndex.ConsumeSkipped > 0)   // 删不掉的留着（#793 / #796）：说一句，不算失败
+        Console.Error.WriteLine($"🟡 边写边腾有 {S2A.Services.RomFsIndex.ConsumeSkipped} 个解包文件删不掉，留着照常写完（第一个：{S2A.Services.RomFsIndex.ConsumeFirstError}）；出包收尾再清，这次峰值多占它们的大小");
     Console.WriteLine(n);
     return 0;
 }
