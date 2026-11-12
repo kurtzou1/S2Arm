@@ -8,7 +8,9 @@
 # 读数（10-21）：234 个 Shader 对象（73 个借类型树）、1274 个 vs+ps 条目 → 1186 个程序 / 2373 支着色器；7 局 Mac 真值 43 个图形程序 43/43（旧抽取 0/43：着色器全在 LZ4 里）。
 import struct, lz4.block
 def _cstr(d, p):
-    e = d.index(b'\0', p); return d[p:e].decode('latin-1'), e + 1
+    e = d.find(b'\0', p)   # find：字节串 / 只读映射都有（mmap 没有 index）
+    if e < 0: raise ValueError('字符串没有结尾')
+    return d[p:e].decode('latin-1'), e + 1
 def is_bundle(head): return head[:8] == b'UnityFS\0'
 def _bundle_block(raw, method, size, kind):
     """解一块；UnityFS LZMA 是5字节属性+raw流，原长在块表而非流头。"""
@@ -41,8 +43,13 @@ def _bundle_block(raw, method, size, kind):
     if decoder.eof and decoder.unused_data:
         raise ValueError(f'{kind} LZMA 尾随数据')
     return decoded
+STREAMS = ('.resS', '.resource')   # 包内的贴图 / 音频流：原始字节、从不是序列化文件，常占包的大头
 def read_bundle(d):
-    """UnityFS → {包内文件名: 字节}"""
+    """UnityFS → {包内文件名: 字节}（全部节点；抽取用 iter_bundle，一次只占一个节点）"""
+    return dict(iter_bundle(d, skip=()))
+def iter_bundle(d, skip=STREAMS):
+    """UnityFS → 逐个 (包内文件名, 字节)，名字以 skip 结尾的跳过。只解这个节点覆盖到的块（上一块留着给下一个节点），内存里只有一个节点，
+    不是整包解开再每个节点复制一份（v0.3.0 Windows 8 GB 机：3.45 GB 的 Unity 游戏 data.unity3d 第一个文件就 MemoryError）。d 可以是字节或只读映射"""
     if d[:8] != b'UnityFS\0': raise ValueError('不是 UnityFS')
     ver = struct.unpack_from('>I', d, 8)[0]; p = 12
     _, p = _cstr(d, p); _, p = _cstr(d, p)
@@ -58,11 +65,22 @@ def read_bundle(d):
     for _ in range(nn):
         off, sz, fl = struct.unpack_from('>QQI', bi, q); q += 20; name, q = _cstr(bi, q); nodes.append((off, sz, name))
     if flags & 0x200: p = (p + 15) & ~15
-    out = bytearray()
-    for u, cc, fl in blocks:
-        raw = d[p:p + cc]; p += cc; m = fl & 0x3f
-        out += _bundle_block(raw, m, u, '数据块')
-    return {name: bytes(out[off:off + sz]) for off, sz, name in nodes}
+    import bisect
+    starts, at, u0 = [], [], 0
+    for u, cc, fl in blocks: starts.append(u0); at.append(p); u0 += u; p += cc
+    last = [None, b'']
+    def block(i):
+        if last[0] != i:
+            last[1] = b''   # 先放掉上一块再解下一块
+            u, cc, fl = blocks[i]; last[0], last[1] = i, _bundle_block(d[at[i]:at[i] + cc], fl & 0x3f, u, '数据块')
+        return last[1]
+    for off, sz, name in nodes:
+        if skip and name.endswith(skip): continue
+        parts, pos, end, i = [], off, off + sz, max(0, bisect.bisect_right(starts, off) - 1)
+        while pos < end and i < len(blocks):
+            b = block(i); take = b[pos - starts[i]:min(end, starts[i] + len(b)) - starts[i]]
+            parts.append(take); pos += len(take); i += 1
+        yield name, b''.join(parts)
 class _Node:
     __slots__ = ('level', 'flags', 'name', 'size', 'meta', 'kids')
 def parse_serialized(b):

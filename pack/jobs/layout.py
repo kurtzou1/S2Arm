@@ -15,6 +15,7 @@ import contextlib
 import json
 import os
 import re
+import sys
 import shutil
 import time
 from pathlib import Path
@@ -41,6 +42,10 @@ def folder_name(english, gid, taken=()):
         name = (name[:NAME_MAX - 7].strip(" .") + " [" + gid[-4:] + "]")
         if name.lower() in used:
             name = gid
+            # #765：游戏号本身也被占时原先就回游戏号，接着 mkdir 撞 File exists；加序号找一个空名（游戏号 + 「 (2)」「 (3)」…）
+            n = 2
+            while name.lower() in used:
+                name = f"{gid} ({n})"; n += 1
     return name
 
 
@@ -183,6 +188,10 @@ def indexed_dir(c, gid):
     if not entry or not entry.get("folder") or root is None or not root.is_dir():
         return None
     d = games_root(c, root) / entry["folder"]
+    other = str(read(d / GAME_JSON, {}).get("id", "") or gid).upper()   # game.json 删没了（删到一半）照认；写着别款的号就不是这款的
+    if other != gid.upper():
+        print(f"[s2a] {gid.upper()}：索引记的文件夹 {d.name} 是另一款 {other} 的，不当这款的删", file=sys.stderr)
+        return None
     return d if d.is_dir() else None
 
 
@@ -224,10 +233,25 @@ def game_dir(c, gid, english=None, location=None):
         register_location(c, root)
     g = games_root(c, root)
     g.mkdir(parents=True, exist_ok=True)
-    taken = [p.name for p in g.iterdir()]
-    d = g / folder_name(english, gid, taken)   # 返回原样路径（不解析软链）：调用方按位置根前缀比对（library._rm）
-    contained(root, d)
-    d.mkdir()
+    # #765（[Errno 17] File exists: games/<游戏号>，每次添加都失败）：首选名那里已有东西时，反防御处理——
+    #   是这款的空壳文件夹（没有 game.json，或 game.json 就是这款：上次添加到一半留下的）→ 沿用；是文件 / 断链 → 挪开（改名 .s2a-moved-<时刻>，不删）再建；
+    #   是别款的文件夹 → 按已占用的名字另取（folder_name 加号后 4 位 / 序号）
+    want = g / folder_name(english, gid)
+    if want.is_symlink() or (want.exists() and not want.is_dir()):   # 先挪开：断链可能指到库外，contained 会按解析后的路径判越界
+        os.replace(want, want.with_name(want.name + f".s2a-moved-{time.strftime('%Y%m%d-%H%M%S')}"))
+    contained(root, want)
+    if want.is_dir() and str(read(want / GAME_JSON, {}).get("id", "") or gid).upper() == gid:
+        d = want
+    else:
+        d = g / folder_name(english, gid, [p.name for p in g.iterdir()])   # 返回原样路径（不解析软链）：调用方按位置根前缀比对（library._rm）
+        contained(root, d)
+        try:
+            d.mkdir()
+        except FileExistsError:   # 列目录到建之间这个名字被占了：是这款（或没有 game.json 的空壳）就沿用，否则重新列一遍另取
+            if not (d.is_dir() and not d.is_symlink() and str(read(d / GAME_JSON, {}).get("id", "") or gid).upper() == gid):
+                d = g / folder_name(english, gid, [p.name for p in g.iterdir()])
+                contained(root, d)
+                d.mkdir()
     atomic(d / GAME_JSON, dict(schema=1, id=gid))
     _remember(c, gid, d)
     return d

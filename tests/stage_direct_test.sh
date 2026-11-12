@@ -15,7 +15,7 @@ cp "$H/pack/resource_input_key.py" $T/repo/pack/; cp "$H/pack/stage_keyfiles.sh"
 mkdir -p $T/repo/graphics/nvn/tools; cp "$H/graphics/nvn/tools/romfs_list.py" $T/repo/graphics/nvn/tools/; cp "$H/graphics/nvn/tools/gfx_api.py" $T/repo/graphics/nvn/tools/   # 出包分流判法（假 main 不是 NSO → unknown，走 NVN 路径）
 cp "$H/pack/roots.sh" "$H/pack/stage_direct.sh" "$H/pack/ipa_key.sh" "$H/pack/pkg_srcs.py" "$H/pack/pkg_inputs_key.py" "$H/pack/ue_pak.py" $T/repo/pack/; cp "$H/tools/toolchain.sh" "$H/tools/toolchain.env" "$H/tools/machine.sh" "$H/tools/clonedir.py" "$H/tools/plock.sh" "$H/tools/flock_hold.py" $T/repo/tools/
 cp "$H/graphics/tools/shbake/pak_crypto.py" $T/repo/graphics/tools/shbake/
-for f in run_knowledge.py fout_want.py se_want.py run_pairs.py pso_layout.py pso_layout.json runtime_only_lib.sh; do cp "$H/graphics/tools/direct/$f" $T/repo/graphics/tools/direct/; done   # 跑局知识快照进键（审计 #1534 P1-54；来源 S2A_PSO_SOURCES 指空目录，键规则在 tests/stage_direct_knowledge_test.sh 核）
+for f in run_knowledge.py fout_want.py se_want.py run_pairs.py pso_layout.py pso_layout.json runtime_only_lib.sh runtime_only_lib.py; do cp "$H/graphics/tools/direct/$f" $T/repo/graphics/tools/direct/; done   # 跑局知识快照进键（审计 #1534 P1-54；来源 S2A_PSO_SOURCES 指空目录，键规则在 tests/stage_direct_knowledge_test.sh 核）
 echo n > $T/repo/graphics/nvn/x; echo s > $T/repo/graphics/tools/shbake/x
 export DSX_LIB=$T/libdsx.dylib   # 调用方给了直连翻译库：stage_direct 不再现编（假仓库没有 graphics/dsx）
 mkdir -p $T/repo/graphics/metal; echo m > $T/repo/graphics/metal/gal_prog.m   # 共享内存溢出改写源码也进阶段键（stage_direct.sh KT）

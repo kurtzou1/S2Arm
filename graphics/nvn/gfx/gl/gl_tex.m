@@ -9,6 +9,7 @@
 // 体纹理（glTexImage3D / glTexSubImage3D）：GL_TEXTURE_2D_ARRAY 存 Metal 2D 数组、GL_TEXTURE_3D 存 Metal 3D，每级一张（level[0][l]），采样组链同 2D。
 // 读回（glGetTexImage / glGetCompressedTexImage）：等 GPU 写完后取存储原始字节，按要的格式 / 类型与 GL_PACK_ALIGNMENT 写给客户端。
 #include "gl_int.h"
+#include "../tex/nvn_bcdec.h"   // nvn_bc_unpacked / nvn_bc_decode（GPU 不支持 BC 时解码，#749）
 const char gl_slice_gl_tex = 1;   // 分片锚（gl_core.m 引用：静态链接时整片进来，见 gl_int.h「分片锚」）
 #include <math.h>
 
@@ -102,6 +103,37 @@ static int fmt_of(GLint internal, GLenum type) {
 static int is_rgb_internal(GLint i) { return i == GL_RGB || i == GL_RGB8 || i == 3 || i == 0x8C41 || i == 0x881B || i == 0x8815; }   // alpha 恒读 1 的 RGB 内部格式
 static size_t row_bytes(int f, NSUInteger w) { const fmt_t *m = &k_fmt[f]; return (size_t)((w + m->bw - 1) / m->bw) * m->bytes; }
 static size_t row_count(int f, NSUInteger h) { const fmt_t *m = &k_fmt[f]; return (size_t)((h + m->bw - 1) / m->bw); }
+// GPU 不支持 BC 压缩格式（A15 / A16 及更早，MTLDevice.supportsBCTextureCompression = NO）：BC 纹理按解压后的格式建存储、上传时在 CPU 上解码（#749：iPad15,7 上
+//   一款 GL 游戏建 BC3 纹理，Metal 断言「invalid pixelFormat (134)」中止进程）。同 NVN 支 nvn_mtl.m no_bc / fmt_unpack，解码与格式表共用 tex/nvn_bcdec.c（按 NVN 格式号）。
+//   DM_TEST_NO_BC=1 任何机器上强制走这条（Mac 核对用，同 NVN 支）
+static uint32_t bc_nvn(int f) {   // GL 存储格式 → NVN 格式号（nvn_bcdec.c 的表）；0 = 不是 BC
+    switch (f) {
+    case F_BC1_RGB: return 0x41; case F_BC1: return 0x42; case F_BC2: return 0x43; case F_BC3: return 0x44;
+    case F_BC1_SRGB: return 0x46; case F_BC2_SRGB: return 0x47; case F_BC3_SRGB: return 0x48;
+    case F_BC4: return 0x49; case F_BC4S: return 0x4a; case F_BC5: return 0x4b; case F_BC5S: return 0x4c;
+    case F_BC7: return 0x4d; case F_BC7_SRGB: return 0x4e; case F_BC6S: return 0x4f; case F_BC6U: return 0x50;
+    default: return 0;
+    }
+}
+static int gl_no_bc(void) {
+    static int v = -1;
+    if (v < 0) { gl_dev_init(); const char *e = getenv("DM_TEST_NO_BC"); int forced = e && *e && strcmp(e, "0");
+        v = forced || ![gl_dev supportsBCTextureCompression];
+        if (v) GLOG("GPU 不支持 BC 压缩格式%s：GL 的 BC 纹理按解压格式建存储、上传时 CPU 解码", forced ? "（测试开关 DM_TEST_NO_BC）" : ""); }
+    return v;
+}
+static int bc_unpacked(int f, uint32_t *pf, int *bpp) { uint32_t n = bc_nvn(f); return n && gl_no_bc() && nvn_bc_unpacked(n, pf, bpp); }   // 这个格式在本机按解压存
+static MTLPixelFormat store_pf(int f) { uint32_t pf; int bpp; return bc_unpacked(f, &pf, &bpp) ? (MTLPixelFormat)pf : k_fmt[f].pf; }
+static size_t store_row(int f, NSUInteger w) { uint32_t pf; int bpp; return bc_unpacked(f, &pf, &bpp) ? (size_t)w * (size_t)bpp : row_bytes(f, w); }   // 存储里一行的字节
+static size_t store_rows(int f, NSUInteger h) { uint32_t pf; int bpp; return bc_unpacked(f, &pf, &bpp) ? (size_t)h : row_count(f, h); }
+// 往存储写一块压缩数据（src：块紧排、每行 pitch 字节，覆盖 (x, y, w, h)）：本机按解压存就先解码
+static int put_blocks(id<MTLTexture> img, int f, NSUInteger x, NSUInteger y, NSUInteger w, NSUInteger h, const void *src, size_t pitch) {
+    uint32_t pf; int bpp;
+    if (!bc_unpacked(f, &pf, &bpp)) { [img replaceRegion:MTLRegionMake2D(x, y, w, h) mipmapLevel:0 withBytes:src bytesPerRow:pitch]; return 1; }
+    size_t dp = w * (size_t)bpp; uint8_t *out = malloc(dp * h ? dp * h : 1); if (!out) { gl_set_error(GL_OUT_OF_MEMORY); return 0; }
+    if (nvn_bc_decode(bc_nvn(f), src, pitch, (uint32_t)w, (uint32_t)h, out, dp)) { free(out); GLRED1("BC 解码失败（格式 %d）", f); gl_bad_feat++; return 0; }
+    [img replaceRegion:MTLRegionMake2D(x, y, w, h) mipmapLevel:0 withBytes:out bytesPerRow:dp]; free(out); return 1;
+}
 static size_t f_bytes(int f) { return f == F_D32FS8 ? 4 : k_fmt[f].bytes; }   // 读回时一个像素的原始字节（深度模板只取深度平面：4 字节浮点）
 
 // ---------- 对象 ----------
@@ -193,8 +225,8 @@ static GLenum sized_format(GLenum f) { return f == GL_RGBA ? GL_RGBA8 : f == GL_
 _Atomic uint64_t gl_n_tex_alloc;   // 贴图存储新建次数（egl.m 每 300 帧拆账打增量；11-01 街霸 Spare-host 每帧漏一张 384x224 定位用）
 static id<MTLTexture> allocate(int f, NSUInteger w, NSUInteger h, NSUInteger levels, int cube) {
     gl_dev_init(); gl_n_tex_alloc++; const fmt_t *m = &k_fmt[f];
-    MTLTextureDescriptor *d = cube ? [MTLTextureDescriptor textureCubeDescriptorWithPixelFormat:m->pf size:w mipmapped:NO]
-                                   : [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:m->pf width:w height:h mipmapped:NO];
+    MTLTextureDescriptor *d = cube ? [MTLTextureDescriptor textureCubeDescriptorWithPixelFormat:store_pf(f) size:w mipmapped:NO]
+                                   : [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:store_pf(f) width:w height:h mipmapped:NO];
     d.mipmapLevelCount = levels;
     // 深度 / 模板只能私有存储；压缩与要换位的格式不能当渲染目标（GL 也不能往里画）
     int ds = m->kind == K_DEPTH || m->kind == K_DS;
@@ -207,7 +239,7 @@ static id<MTLTexture> allocate(int f, NSUInteger w, NSUInteger h, NSUInteger lev
 // 体纹理存储：2D 数组（arrayLength = 层数）或 3D（depth），用途规则同 allocate
 static id<MTLTexture> allocate_vol(int f, NSUInteger w, NSUInteger h, NSUInteger d, NSUInteger levels, int is3d) {
     gl_dev_init(); gl_n_tex_alloc++; const fmt_t *m = &k_fmt[f];
-    MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:m->pf width:w height:h mipmapped:NO];
+    MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:store_pf(f) width:w height:h mipmapped:NO];
     desc.textureType = is3d ? MTLTextureType3D : MTLTextureType2DArray; if (is3d) desc.depth = d; else desc.arrayLength = d;
     desc.mipmapLevelCount = levels;
     int ds = m->kind == K_DEPTH || m->kind == K_DS;
@@ -231,7 +263,7 @@ static int gpu_settle(gl_texture *t) {
 // CPU 内容当前有效：上传只用 CPU 写；GenerateMipmap 在返回前等生成完成。无编码器 / 提交 / 等待。
 static int copy_level(id<MTLTexture> src, int f, id<MTLTexture> dst, NSUInteger level, NSUInteger slice) {
     if (!cpu_ok(src) || !cpu_ok(dst)) { GLRED1("私有存储（深度 / 模板）纹理拼链没实现"); gl_bad_feat++; return 0; }
-    size_t row = row_bytes(f, src.width), n = row * row_count(f, src.height);
+    size_t row = store_row(f, src.width), n = row * store_rows(f, src.height);
     void *bytes = malloc(n ? n : 1); if (!bytes) { gl_set_error(GL_OUT_OF_MEMORY); return 0; }
     [src getBytes:bytes bytesPerRow:row bytesPerImage:0 fromRegion:MTLRegionMake2D(0, 0, src.width, src.height) mipmapLevel:0 slice:0];
     [dst replaceRegion:MTLRegionMake2D(0, 0, src.width, src.height) mipmapLevel:level slice:slice withBytes:bytes bytesPerRow:row bytesPerImage:0]; free(bytes); return 1;
@@ -239,7 +271,7 @@ static int copy_level(id<MTLTexture> src, int f, id<MTLTexture> dst, NSUInteger 
 // 体纹理整级复制（在途换存储用，CPU 内容有效）：逐层 / 逐片
 static int copy_vol(id<MTLTexture> src, int f, id<MTLTexture> dst) {
     if (!cpu_ok(src) || !cpu_ok(dst)) { GLRED1("私有存储（深度 / 模板）体纹理换存储没实现"); gl_bad_feat++; return 0; }
-    size_t row = row_bytes(f, src.width), img = row * row_count(f, src.height); int is3d = src.textureType == MTLTextureType3D;
+    size_t row = store_row(f, src.width), img = row * store_rows(f, src.height); int is3d = src.textureType == MTLTextureType3D;
     void *bytes = malloc(img ? img : 1); if (!bytes) { gl_set_error(GL_OUT_OF_MEMORY); return 0; }
     for (NSUInteger i = 0; i < vol_depth(src); i++) {
         MTLRegion r = MTLRegionMake3D(0, 0, is3d ? i : 0, src.width, src.height, 1);
@@ -357,7 +389,7 @@ static int define(GLenum target, GLint level, GLint internal, GLsizei w, GLsizei
     if (!face && !level) { gl_wd_drop(&t->wd, 0); t->wd.cpu = data != NULL; }   // 宽屏：第 0 级换存储，影子作废
     if (!w || !h) { t->level[face][level].image = nil; sample_drop(t); return 1; }
     id<MTLTexture> image = allocate(f, (NSUInteger)w, (NSUInteger)h, 1, 0); if (!image) return 0;
-    if (compressed) { if (data) [image replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0 withBytes:data bytesPerRow:row_bytes(f, (NSUInteger)w)]; }
+    if (compressed) { if (data && !put_blocks(image, f, 0, 0, (NSUInteger)w, (NSUInteger)h, data, row_bytes(f, (NSUInteger)w))) return 0; }
     else if (!upload(image, f, 0, 0, 0, 0, w, h, format, type, data, is_rgb_internal(internal))) return 0;
     t->level[face][level].image = image; t->level[face][level].format = sized_format((GLenum)internal); t->level[face][level].fmt = f; sample_drop(t);
     return 1;
@@ -440,7 +472,7 @@ GLB(glCompressedTexSubImage2D, void, GLenum target, GLint level, GLint x, GLint 
         image = allocate(lv->fmt, old.width, old.height, 1, 0); if (!image || !copy_level(old, lv->fmt, image, 0, 0)) return;
         sample_drop(t);
     }
-    [image replaceRegion:MTLRegionMake2D((NSUInteger)x, (NSUInteger)y, (NSUInteger)w, (NSUInteger)h) mipmapLevel:0 withBytes:data bytesPerRow:row];
+    if (!put_blocks(image, lv->fmt, (NSUInteger)x, (NSUInteger)y, (NSUInteger)w, (NSUInteger)h, data, row)) return;
     lv->image = image;
     if (!face && !level) { gl_wd_drop(&t->wd, 1); t->wd.cpu = 1; }
     if (image != old) sample_drop(t);
@@ -826,7 +858,7 @@ static gl_texture *read_target(GLenum target, int *face) {
 // 某级原始字节（紧排：行 = 存储行字节、层 = 行 × 行数，n 层 / 片）：共享存储直接取；私有存储（深度）经 GPU 拷进共享缓冲、提交并等（深度模板取深度平面）
 static uint8_t *raw_level(id<MTLTexture> img, int f, size_t *row, size_t *ib, NSUInteger *n) {
     NSUInteger w = img.width, h = img.height; int is3d = img.textureType == MTLTextureType3D; *n = vol_depth(img);
-    *row = f == F_D32FS8 ? (size_t)w * 4 : row_bytes(f, w); *ib = *row * row_count(f, h);
+    *row = f == F_D32FS8 ? (size_t)w * 4 : store_row(f, w); *ib = *row * store_rows(f, h);
     uint8_t *out = malloc(*ib * *n ? *ib * *n : 1); if (!out) { gl_set_error(GL_OUT_OF_MEMORY); return NULL; }
     if (cpu_ok(img)) {
         for (NSUInteger i = 0; i < *n; i++)
@@ -935,6 +967,7 @@ GLB(glGetCompressedTexImage, void, GLenum target, GLint level, void *pixels) { @
     if (level < 0 || level >= TEX_LEVELS) { gl_set_error(GL_INVALID_VALUE); return; }
     tex_level *lv = &t->level[face][level];
     if (!lv->image || k_fmt[lv->fmt].kind != K_BLOCK) { gl_set_error(GL_INVALID_OPERATION); return; }   // 没定义或不是压缩存储（规范）
+    { uint32_t pf; int bpp; if (bc_unpacked(lv->fmt, &pf, &bpp)) { GLRED1("glGetCompressedTexImage：本机 GPU 不支持 BC，存储已解压，交不出原始压缩块"); gl_set_error(GL_INVALID_OPERATION); gl_bad_feat++; return; } }
     if (!pixels || !gpu_settle(t)) return;
     NSUInteger n; size_t row, ib; uint8_t *raw = raw_level(lv->image, lv->fmt, &row, &ib, &n); if (!raw) return;
     memcpy(pixels, raw, ib * n); free(raw);   // 压缩图像按块紧排（不受 PACK_ALIGNMENT 影响）

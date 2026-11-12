@@ -224,10 +224,12 @@ else X=$W/x; prog "抽取着色器（${J} 路）"; bash "$R/graphics/tools/direc
   # 退 3 = 只有直连用的那两份抽不出（extract.sh 头注：运行时现编的 GLSL 没抓到输出、认不出着色器容器……）：同 Mac 链抽取阶段（pack/stage_extract.sh 写 direct_gap.txt、
   #   pack/stage_direct.sh 出空库），出运行时现编空直连库、照常换进输出目录、退 0（11-06 Windows 出包机疯狂兔子 / 马力欧高尔夫：Windows 出包机链直接调本脚本、不走那两段，整单红）
   if [ "$xrc" = 3 ]; then
-    grep -a '直连库失败：' "$W/extract.log" | tail -1 | sed 's/^.*\(直连库失败：\)/\1/' | cut -c1-260 > "$W/direct_gap.txt"; [ -s "$W/direct_gap.txt" ] || echo '直连库失败：extract.sh 退 3 没写原因' > "$W/direct_gap.txt"
-    rm -rf "$OS" && bash "$R/graphics/tools/direct/runtime_only_lib.sh" "$OS" "$V" "$TID" "$("$PY" -c 'import hashlib,sys; print("x" + hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest()[:11])' "$W/direct_gap.txt")" "$W/direct_gap.txt" "$PROF/game.tsv" \
-      && swap_out || { say "🔴 出运行时现编空直连库失败"; exit 1; }
-    DONE=1; say "🟡 ${TID} 离线 0 支、运行时首遇现编（$(head -1 "$W/direct_gap.txt" | cut -c1-200)）"; exit 0
+    # 一个 Python 进程做完清目录、出空库、换进位、拷日志（不再 rm / 子壳 / 多次 python：抽取刚因内存吃紧失败，再起一串子进程会一起倒——
+    #   v0.3.0 Windows 8 GB 机 cygwin fork rm 报 Win32 299，兜底失败整单红）
+    "$PY" "$R/graphics/tools/direct/runtime_only_lib.py" "$OS" "$V" "$TID" auto "$W/direct_gap.txt" "$PROF/game.tsv" --gap-from "$W/extract.log" --swap-to "$OUT" --logs-from "$W" --logs-to "$C" \
+      || { say "🔴 出运行时现编空直连库失败"; exit 1; }
+    gap=; read -r gap < "$W/direct_gap.txt"   # 内建 read：这一段不再起子进程
+    DONE=1; say "🟡 ${TID} 离线 0 支、运行时首遇现编（${gap:0:200}）"; exit 0
   fi
   [ "$xrc" = 0 ] || { say "🔴 抽取失败（${X}）"; exit 1; }; fi
 # 翻译编译开工前复核盘（pack/jobs/space_rule.py，#265：预检放过、编到一半写满，十几分钟白编；Mac / Windows 两条链都过这里）：与出包预检同一规则，

@@ -24,7 +24,7 @@ mkdir -p "$T/o"; for f in "$NV"/gfx/gl/*.m; do
     clang "${CF[@]}" "${ALLOC[@]}" -c "$f" -o "$T/o/$(basename "$f" .m).o" || { echo "✗ t_gl_min：编译失败（${f}）"; exit 1; }
 done
 ar rcs "$T/libgl.a" "$T"/o/*.o
-clang "${CF[@]}" -o "$T/t_gl_min" "$H/t_gl_min.m" "$T/libgl.a" "$NV/gfx/nvn/nvn_fps.c" $(python3 "$R/tools/weak_link_decl.py" flags nvntest) -framework Metal -framework Foundation || { echo "✗ t_gl_min：编译失败"; exit 1; }
+clang "${CF[@]}" -o "$T/t_gl_min" "$H/t_gl_min.m" "$T/libgl.a" "$NV/gfx/nvn/nvn_fps.c" "$NV/gfx/tex/nvn_bcdec.c" $(python3 "$R/tools/weak_link_decl.py" flags nvntest) -framework Metal -framework Foundation || { echo "✗ t_gl_min：编译失败"; exit 1; }
 # 登记段核对：测试程序里 swgl / swglb 的字节数 = 各片 .o 之和（不管测试调没调到那片的入口，哪片被丢都红）
 "$PY" -I "$R/tools/reg_sections.py" "$T/t_gl_min" "$T"/o/*.o > "$T/reg.log" || { echo "✗ t_gl_min：有分片没被链进来（gl_int.h「分片锚」）"; cat "$T/reg.log"; exit 1; }
 S2A_WIDEN_DIRECT=0 T_GL_DIR=$H DM_MSL_DIR=$T/lib "$T/t_gl_min" || exit 1

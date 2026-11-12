@@ -30,10 +30,16 @@ def _decomp(raw, size, kind):
     raise ValueError(f'UnityFS: unknown compression {kind}')
 
 def _cstr(d, p):
-    e = d.index(b'\0', p); return d[p:e].decode('utf-8', 'replace'), e + 1
+    e = d.find(b'\0', p)   # find: bytes and a read-only map both have it (mmap has no index)
+    if e < 0: raise ValueError('unterminated string')
+    return d[p:e].decode('utf-8', 'replace'), e + 1
 
-def bundle_files(d):
-    """UnityFS bundle → [(path, bytes)]"""
+STREAMS = ('.resS', '.resource')   # streamed texture / audio data inside a bundle: raw bytes, never a serialized file, often most of the bundle
+
+def bundle_files(d, skip=STREAMS):
+    """UnityFS bundle → (path, bytes) one node at a time; nodes whose name ends with skip are left out. Only the blocks a node overlaps are inflated (the last one is kept for the
+    next node), so memory holds one node, not the whole inflated bundle: a 3.45 GB Unity game's data.unity3d inflated in one bytearray plus a copy of every node ran a Windows 8 GB
+    machine out of memory on the first file (MemoryError, v0.3.0). d may be bytes or a read-only map (shader_split maps big files)"""
     if d[:8] != b'UnityFS\0': raise ValueError('not UnityFS')
     fmt = struct.unpack_from('>I', d, 8)[0]
     _, p = _cstr(d, 12); _, p = _cstr(d, p)
@@ -52,10 +58,22 @@ def bundle_files(d):
         off, sz, f = struct.unpack_from('>qqI', info, q); q += 20
         name, q = _cstr(info, q); nodes.append((off, sz, name))
     if flags & 0x200: p = (p + 15) & ~15   # BlockInfoNeedPaddingAtStart
-    out = bytearray()
-    for u, c, f in blocks:
-        out += _decomp(d[p:p + c], u, f & 0x3f); p += c
-    return [(name, bytes(out[off:off + sz])) for off, sz, name in nodes]
+    import bisect
+    starts, at, u0 = [], [], 0
+    for u, c, f in blocks: starts.append(u0); at.append(p); u0 += u; p += c
+    last = [None, b'']
+    def block(i):
+        if last[0] != i:
+            last[1] = b''   # drop the previous block before inflating the next
+            u, c, f = blocks[i]; last[0], last[1] = i, _decomp(d[at[i]:at[i] + c], u, f & 0x3f)
+        return last[1]
+    for off, sz, name in nodes:
+        if skip and name.endswith(skip): continue
+        parts, pos, end, i = [], off, off + sz, max(0, bisect.bisect_right(starts, off) - 1)
+        while pos < end and i < len(blocks):
+            b = block(i); take = b[pos - starts[i]:min(end, starts[i] + len(b)) - starts[i]]
+            parts.append(take); pos += len(take); i += 1
+        yield name, b''.join(parts)
 
 def bundle_version(d):
     """UnityFS bundle → the Unity version its header records ('2019.4.31f1'; the serialized files inside may record none)"""

@@ -26,10 +26,76 @@ class FolderNameTests(unittest.TestCase):
             (("Hades", B, ("hades",)), "Hades [0000]"),                                                              # 重名（不分大小写）→ 加号后 4 位
             (("Hades", "01000000000ABCD0", ("Hades",)), "Hades [BCD0]"),
             (("", A.lower(), ()), A),                                                                                # 游戏号统一大写
+            (("塞尔达传说", A, (A, A + " [" + A[-4:] + "]")), A + " (2)"),                                          # #765：游戏号与「号后 4 位」都被占 → 加序号（原先回游戏号、mkdir 撞 File exists）
         ]
         for args, want in cases:
             with self.subTest(args=args):
                 self.assertEqual(layout.folder_name(*args), want)
+
+
+class GameDirExistsTests(JobCase):
+    """#765：games/<游戏号> 已有同名项时添加游戏报 [Errno 17] File exists。期望按规则手写：空壳文件夹沿用；文件 / 断链挪开再建；
+    游戏号与「号后 4 位」都被别款占着 → 「游戏号 (2)」。全中文名 → 文件夹名退回游戏号"""
+    def games(self):
+        g = self.c.library / "games"; g.mkdir(parents=True, exist_ok=True); return g
+
+    def test_empty_shell_folder_is_reused(self):
+        g = self.games(); (g / A).mkdir()   # 上次添加到一半留下的空文件夹（没有 game.json）
+        d = layout.game_dir(self.c, A, english="塞尔达传说")
+        self.assertEqual(d, g / A); self.assertEqual(json.loads((d / layout.GAME_JSON).read_text())["id"], A)
+
+    def test_file_in_the_way_is_moved_aside(self):
+        g = self.games(); (g / A).write_text("不是文件夹")
+        d = layout.game_dir(self.c, A, english="塞尔达传说")
+        self.assertTrue(d.is_dir() and d == g / A)
+        moved = [p for p in g.iterdir() if p.name.startswith(A + ".s2a-moved-")]
+        self.assertEqual(len(moved), 1); self.assertEqual(moved[0].read_text(), "不是文件夹")   # 挪开，不删
+
+    def test_broken_link_in_the_way_is_moved_aside(self):
+        g = self.games(); (g / A).symlink_to(self.root / "不存在的地方")
+        d = layout.game_dir(self.c, A, english="塞尔达传说")
+        self.assertTrue(d.is_dir() and not d.is_symlink())
+
+    def test_both_names_taken_by_other_games_gets_numbered_name(self):
+        g = self.games()
+        for n, owner in ((A, "0100000000099990"), (A + " [" + A[-4:] + "]", "0100000000099991")):
+            (g / n).mkdir(); atomic(g / n / layout.GAME_JSON, dict(schema=1, id=owner))
+        d = layout.game_dir(self.c, A, english="塞尔达传说")
+        self.assertEqual(d.name, A + " (2)"); self.assertEqual(json.loads((d / layout.GAME_JSON).read_text())["id"], A)
+
+
+class GameDirRaceTests(JobCase):
+    """#765：按已占用名单选好名字之后、mkdir 之前，同名文件夹被别处建出来（只建一次）——是这款就沿用，是别款就换名，都不报 File exists"""
+    OTHER = "0100000000099990"
+
+    def setUp(self):
+        super().setUp()
+        d = self.c.library / "games" / "Hades"; d.mkdir(parents=True)   # 首选名被别款占着，逼进「按名单另取」那一步
+        atomic(d / layout.GAME_JSON, dict(schema=1, id="0100000000088880"))
+
+    def _race(self, owner):
+        real, fired = layout.folder_name, []
+        def racing(english, gid, taken=()):
+            name = real(english, gid, taken)
+            if taken and not fired:
+                fired.append(name)
+                d = self.c.library / "games" / name; d.mkdir()
+                atomic(d / layout.GAME_JSON, dict(schema=1, id=owner))
+            return name
+        return patch.object(layout, "folder_name", racing)
+
+    def test_same_game_created_meanwhile_is_reused(self):
+        with self._race(A):
+            d = layout.game_dir(self.c, A, english="Hades")
+        self.assertEqual(d.name, "Hades [" + A[-4:] + "]")
+        self.assertEqual(json.loads((d / layout.GAME_JSON).read_text())["id"], A)
+
+    def test_other_game_created_meanwhile_gets_another_name(self):
+        with self._race(self.OTHER):
+            d = layout.game_dir(self.c, A, english="Hades")
+        self.assertEqual(d.name, A)   # 英文名与「号后 4 位」都被占 → 游戏号
+        self.assertEqual(json.loads((d / layout.GAME_JSON).read_text())["id"], A)
+        self.assertEqual(json.loads((self.c.library / "games" / ("Hades [" + A[-4:] + "]") / layout.GAME_JSON).read_text())["id"], self.OTHER)
 
 
 class MigrateTests(JobCase):
@@ -446,6 +512,54 @@ class HealFolderNamesTests(JobCase):
         self.assertEqual(layout.find_game(self.fresh(), A), L / "games" / A)
         names = {g["id"]: g.get("englishName") for g in json.loads((L / "catalog.json").read_text())["games"]}
         self.assertEqual(names, {A: None, B: None, C: "Hades"})
+
+
+class FolderIdentityTests(JobCase):
+    """出包、重解包、清理、删除取这款的文件夹，都要核文件夹里 game.json 的游戏号等于这一款；对不上就按程序号重认（没有就新建这款自己的），
+    绝不往别款的文件夹里写 / 删（v0.3.0 Windows 玩家：织梦岛出包的解包目录落在叫「…Breath of the Wild」的文件夹下）。期望按规则手写"""
+    LA, BOTW = "01006BB00C6F0000", "01007EF00011E000"
+
+    def fresh(self):
+        self.c._layout_idx = None
+        return self.c
+
+    def folder(self, name, gid):
+        d = self.c.library / "games" / name
+        d.mkdir(parents=True)
+        if gid:
+            atomic(d / "game.json", dict(schema=1, id=gid))
+        (d / "keep.bin").write_bytes(name.encode())
+        return d
+
+    def point_index(self, gid, name):
+        idx = layout.load_index(self.fresh())
+        idx["games"][gid] = dict(location=layout.default_id(self.c), folder=name)
+        layout.save_index(self.c)
+
+    def test_index_pointing_at_another_games_folder_finds_own_folder(self):
+        botw = self.folder("The Legend of Zelda Breath of the Wild", self.BOTW)
+        la = self.folder("The Legend of Zelda Links Awakening", self.LA)
+        self.point_index(self.LA, botw.name)
+        self.assertEqual(layout.find_game(self.fresh(), self.LA), la)
+        self.assertEqual(layout.build_dir(self.fresh(), self.LA), la / "build")
+        self.assertEqual(layout.indexed_dir(self.fresh(), self.LA), la)   # 重认后索引也改过来了
+
+    def test_folder_with_another_games_id_is_never_used_or_deleted(self):
+        botw = self.folder("The Legend of Zelda Breath of the Wild", self.BOTW)
+        self.point_index(self.LA, botw.name)   # 这款自己的文件夹不在了，索引还指着别款的
+        self.assertIsNone(layout.find_game(self.fresh(), self.LA))
+        self.assertIsNone(layout.indexed_dir(self.fresh(), self.LA))   # 删除重试（#433）不拿它当这款的删
+        d = layout.game_dir(self.fresh(), self.LA, english="The Legend of Zelda: Link's Awakening")
+        self.assertNotEqual(d, botw)
+        self.assertEqual(json.loads((d / "game.json").read_text())["id"], self.LA)
+        self.assertEqual(json.loads((botw / "game.json").read_text())["id"], self.BOTW)
+        self.assertEqual(sorted(p.name for p in botw.iterdir()), ["game.json", "keep.bin"])
+
+    def test_half_deleted_own_folder_still_found_for_retry(self):
+        # 删到一半 game.json 没了（#433）：索引记的还是这款自己的文件夹，照旧找回来接着删
+        la = self.folder("The Legend of Zelda Links Awakening", None)
+        self.point_index(self.LA, la.name)
+        self.assertEqual(layout.indexed_dir(self.fresh(), self.LA), la)
 
 
 class StoreMetaTests(JobCase):

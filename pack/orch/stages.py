@@ -50,6 +50,11 @@ REWRITE_OUTPUTS = tuple(('*.code_patch.tsv *.patched.bin *.fixups.tsv *.gates.ts
 
 LAYOUT_ZSTD = '1.5.7'   # 布局阶段要的 zstd 命令行钉版（Mac Homebrew 同版）；pack/orch/oneclick_win.py --check 起单前按它核
 
+def _title_id(directory):
+    """目录里 unpack.tsv 记的程序号（大写）；读不出 → ''"""
+    return next((line.split('\t', 1)[1].strip().upper() for line in read(Path(directory) / 'unpack.tsv').splitlines() if line.startswith('title_id\t')), '')
+
+
 class StageError(RuntimeError):
     def __init__(self, message, code=1):
         super().__init__(message)
@@ -731,10 +736,16 @@ class Stages:
         current = self._light_current(game)
         if not (current / 'romfs').is_dir():
             return self._result('uilayout', start, current, None, skipped=True)
+        # 原版：seed.txt 记的解包目录 romfs——它在、而且是这一款的（unpack.tsv 程序号对得上）才用（旧格式版本就地改过 RomFS 时靠它还原，见下面 restore）；
+        #   否则用现行产物根的 romfs：本阶段只写覆盖层，Windows 别的阶段也不改 romfs，它一直联到播种时那份不可变的身份。
+        #   解包目录不可靠：从原件解时 romfs 被挪进共享存储、原处链接在播种那一版修剪后悬空；玩家实报还指到过别的款的解包目录，
+        #   原先照用，拿别的款的布局文件生成覆盖叠到这一款上（v0.3.0 Windows）
         source = next((line[4:] for line in read(current / 'seed.txt').splitlines() if line.startswith('src=')), '')
-        original = Path(source) / 'romfs'
-        if not source or not original.is_dir():
-            raise StageError('布局找不到seed.txt记的原版romfs')
+        original = Path(source) / 'romfs' if source else None
+        theirs, ours = _title_id(Path(source)) if source else '', _title_id(current)
+        if original is None or not original.is_dir() or (theirs and ours and theirs != ours):
+            print(f'【黄】布局原版改用现行产物根的 RomFS（seed.txt 记的解包目录{"是另一款 " + theirs + " 的" if theirs and ours and theirs != ours else "不在或已失效"}）', file=sys.stderr)
+            original = current / 'romfs'
         plain_entries(original)
         generator = REPO / 'graphics/widen/scan/ui_lyt.py'
         # Current repository import closure, including both on-demand C codecs.

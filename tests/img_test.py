@@ -234,4 +234,33 @@ if shutil.which('dotnet') or os.path.exists(os.path.expanduser('~/.dotnet/dotnet
 else:
     print('跳过 ⑨：没有 dotnet，编不了 services/romfs_index')
 
+# ⑪ seed.txt 记的解包目录不可靠（v0.3.0 Windows 实报：悬空 / 指到别的款）。夹具：产物根 romfs = 本款原版（Pack/Bootup.pack = ORIGINAL），ui_overlay.tsv 列它。
+#   覆盖层形态（有 ui_overlay/ 层，Windows）：解包目录悬空、或是别的款的（unpack.tsv 程序号不同、里面的同名文件是 OTHER）→ 照写 IMG，RomFS 段 = 本款原版；
+#   就地改过的形态（没有 ui_overlay/ 层）：解包目录是别的款的 → 报红点名「不是这一款」，绝不把别的款的文件写进 IMG
+if shutil.which('dotnet') or os.path.exists(os.path.expanduser('~/.dotnet/dotnet')):
+    for layered, ext in ((True, 'dangling'), (True, 'other'), (False, 'other')):
+        T = Path(tempfile.mkdtemp(prefix='img test 11 '))
+        try:
+            root = T / 'roots' / 'k@v3'; (root / 'romfs' / 'Pack').mkdir(parents=True)
+            (root / 'romfs' / 'Pack' / 'Bootup.pack').write_bytes(b'ORIGINAL' * 100); (root / 'romfs' / 'a.bin').write_bytes(b'A' * 50)
+            (root / 'unpack.tsv').write_text('title_id\t0100F43008C44000\n', encoding='utf-8')
+            (root / 'ui_overlay.tsv').write_text('Pack/Bootup.pack\n', encoding='utf-8')
+            if layered: (root / 'ui_overlay' / 'romfs' / 'Pack').mkdir(parents=True); (root / 'ui_overlay' / 'romfs' / 'Pack' / 'Bootup.pack').write_bytes(b'WIDENED' * 100)
+            (T / 'extract').mkdir()
+            if ext == 'dangling':
+                os.symlink(T / 'roots' / '.romfs_store' / 'k' / 'gone', T / 'extract' / 'romfs')
+            else:
+                (T / 'extract' / 'romfs' / 'Pack').mkdir(parents=True); (T / 'extract' / 'romfs' / 'Pack' / 'Bootup.pack').write_bytes(b'OTHER GAME' * 80)
+                (T / 'extract' / 'unpack.tsv').write_text('title_id\t01007EF00011E000\n', encoding='utf-8')
+            (root / 'seed.txt').write_text(f'src={T / "extract"}\n', encoding='utf-8')
+            pk = T / 'pack'; pk.mkdir(); (pk / 'index.tsv').write_text('', encoding='utf-8')
+            try:
+                out = img.convert(str(root), str(pk))
+                got = std_romfs(out, img.header(out)['romfs'][0])
+                ck(layered and got == {'Pack/Bootup.pack': b'ORIGINAL' * 100, 'a.bin': b'A' * 50}, f'⑪ 覆盖层形态、解包目录 {ext}：照写 IMG，RomFS 段 = 本款原版（{sorted(got)}）')
+            except img.Red as e:
+                ck(not layered and '不是这一款' in str(e) and '01007EF00011E000' in str(e), f'⑪ 就地改过的形态、解包目录是别的款：报红点名（{e}）')
+        finally:
+            shutil.rmtree(T, ignore_errors=True)
+
 print(f'img 单测：{"全通" if not bad else f"{bad} 项不通"}'); sys.exit(1 if bad else 0)

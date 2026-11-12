@@ -1587,16 +1587,14 @@ def record_import_packages(c, cat, source, packages, icons, sha, extracted):
         if not same:
             icon = Path(icons) / (metadata["titleId"] + ".jpg")
             english_name = metadata.pop("englishName", "") or ""
-            if english_name and "englishName" not in game:
+            if english_name and not game.get("englishName"):   # #765：旧记录里英文名是空串也补上（原先只判键在不在，空串挡住新读到的英文名，文件夹落成游戏号）
                 game["englishName"] = english_name
             if icon.is_file():
                 try:
                     _copy_cover(c, tid, game, metadata, icon)
-                except OSError as error:
-                    # 只在逐来源模式下包成这款的失败；默认路径照旧抛原始 OSError，由 explain 归 permission_denied / input_missing 等（同 #124 之前）
-                    if explain(error).code == "disk_full" or c.r.get("partialResults") is not True:
-                        raise
-                    raise Failure("游戏库封面无法写入。", internal=str(error)) from error
+                except (OSError, Failure) as error:   # Failure：如这款文件夹所在位置没连上（layout.game_dir）
+                    # #765：封面只是显示用，写不进不让整个添加失败（原先报「游戏库封面无法写入」、这款进不了库）——记一笔，库里照常显示（没封面用缺省图）
+                    print(f"[s2a] 添加 {tid}：封面写不进，照常添加（{error}）", file=sys.stderr)
             metadata.pop("icon", None)
             package_size = metadata.get("contentBytes", 0) if extracted else size
             game["packages"].append(metadata | dict(path=str(source), sha256=package_sha, size=package_size))

@@ -129,6 +129,14 @@ KEEP = ('romfs_overlay/', 'shaders/', 'romfs.s2aidx')   # 转 IMG 后照旧按�
 MAP = 'game.imgmap'   # IMG 旁的派生偏移表（services RomFsIndex.OpenImg）：格式同 romfs.imgmap，偏移是 game.img 里的绝对位置，-1 = 界面覆盖层
 
 
+def title_of(d):
+    """目录里 unpack.tsv 记的程序号（大写）；读不出 → ''"""
+    try:
+        return next((l.split('\t', 1)[1].strip().upper() for l in open(os.path.join(d, 'unpack.tsv'), encoding='utf-8') if l.startswith('title_id\t')), '')
+    except OSError:
+        return ''
+
+
 def orig_romfs(root, work):
     """原始 RomFS（IMG 只装原始资源）→ (目录, 用完要删的临时目录或 None)。宽屏界面布局阶段（pack/stage_uilayout.sh）只把 ui_overlay.tsv 列的文件换进产物根 romfs、
     原版取自 seed.txt 记的游戏数据目录 /romfs；所以原件 = 产物根 romfs，但这几个文件换回数据目录里的原版。其余文件一律取产物根（与 romfs.s2aidx 天然一致；
@@ -139,8 +147,15 @@ def orig_romfs(root, work):
     try: ov = [l.strip() for l in open(os.path.join(root, 'ui_overlay.tsv'), encoding='utf-8') if l.strip()]
     except FileNotFoundError: ov = []
     if not ov: return romfs, None
+    # 覆盖层形态（Windows pack/orch/stages.py _uilayout，11-06 起）：产物根 romfs 本身一直是原版（仍联到共享存储那份不可变的身份），改动只写在 <版本>/ui_overlay/ 层，
+    #   原件就是产物根 romfs，不看 seed.txt。seed.txt 记的解包目录不可靠：Windows 播种从原件解时把它的 romfs 挪进共享存储、原处链接在播种那一版被修剪后悬空；
+    #   玩家实报它还指到过别的款的解包目录（v0.3.0 Windows：有界面覆盖的款写 IMG 报「找不到原版」）
+    if os.path.isdir(os.path.join(root, 'ui_overlay')): return romfs, None
     sf = os.path.join(root, 'seed.txt')
     src = next((l[4:].strip() for l in open(sf, encoding='utf-8') if l.startswith('src=')), '') if os.path.isfile(sf) else ''
+    ts, tr = (title_of(src), title_of(root)) if src else ('', '')
+    if ts and tr and ts != tr:   # 就地改过的形态（Mac pack/stage_uilayout.sh）才要原版：解包目录必须是这一款的，别的款的文件绝不进 IMG
+        raise Red(f'seed.txt 记的解包目录 {src} 是游戏 {ts} 的，不是这一款（{tr}）：要重新出包')
     lost = [r for r in ov if not os.path.isfile(os.path.join(src, 'romfs', r))] if src else ov
     if lost: raise Red(f'产物根 romfs 叠过 {len(ov)} 个界面覆盖文件，找不到其中 {len(lost)} 个的原版（seed.txt 的 src={src or "无"}，如 {lost[:2]}），不能当原件进 IMG')
     import shutil

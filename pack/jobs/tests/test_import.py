@@ -346,6 +346,37 @@ class NupImportTests(JobCase):
             (2, APP + 0x1001, 0, None, {"d.bin": b"DLC"}, {})])
         return path
 
+    def test_cover_write_failure_does_not_fail_import(self):
+        # #765：封面写不进（这里 cover.jpg 位置被一个文件夹占着 → IsADirectoryError）不让整个添加失败：照常收进库，记一笔；
+        #   上次添加到一半留下的空壳文件夹（games/Ocarina T，没有 game.json）沿用
+        src = self.nup(self.root / "drive" / "Zelda T [0400486024dec000][v131072].nup")
+        (self.c.library / "games/Ocarina T/cover.jpg").mkdir(parents=True)
+        result, done = self.worker("import", paths=[str(src)])
+        self.assertEqual(done["state"], "succeeded", result.stderr + str(done.get("diagnostics")))
+        [game] = self.c.catalog()["games"]
+        self.assertEqual((game["id"], len(game["packages"])), ("0400486024DEC000", 3))
+        self.assertTrue((self.c.library / "games/Ocarina T/cover.jpg").is_dir())
+        self.assertEqual(json.loads((self.c.library / "games/Ocarina T/game.json").read_text())["id"], "0400486024DEC000")
+
+    def test_cover_failure_of_any_kind_does_not_fail_import(self):
+        # #765：拷封面时 layout.game_dir 抛 Failure（如所在位置没连上）也不挡添加，这款照常记进库
+        icons = self.root / "icons"; icons.mkdir()
+        (icons / "0100000000010000.jpg").write_bytes(b"jpg")
+        cat = dict(schema=1, games=[])
+        meta = dict(titleId="0100000000010000", baseId="0100000000010000", version=0, type="base", name="Demo", englishName="Demo", display="1.0.0")
+        src = self.root / "demo.nsp"; src.write_bytes(b"x")
+        with patch.object(library, "_copy_cover", side_effect=library.Failure("这款游戏所在的存放位置没连上")):
+            [entry] = library.record_import_packages(self.c, cat, src, [meta], icons, "sha", False)
+        self.assertEqual((entry["id"], len(cat["games"][0]["packages"])), ("0100000000010000", 1))
+
+    def test_empty_english_name_is_filled_on_import(self):
+        # #765：旧记录英文名是空串时，新读到的英文名补上（原先只判键在不在，文件夹落成游戏号）
+        cat = dict(schema=1, games=[dict(id="0100000000010000", name="演示", englishName="", display="", packages=[], hidden=False)])
+        meta = dict(titleId="0100000000010000", baseId="0100000000010000", version=0, type="base", name="演示", englishName="Demo", display="1.0.0")
+        src = self.root / "demo.nsp"; src.write_bytes(b"x")
+        library.record_import_packages(self.c, cat, src, [meta], self.root, "sha", False)
+        self.assertEqual(cat["games"][0]["englishName"], "Demo")
+
     def test_nup_imported_without_prod_keys(self):
         # ① 没导 prod.keys、读取器也没装：.nup 照样收进库——本体 / 最新更新 / DLC 各一条、同一原件、format=nup；
         #   标题与显示版本取容器里的 NACP，封面取容器里的图标；密钥状态不动（没用到密钥）

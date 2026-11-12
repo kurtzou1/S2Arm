@@ -16,7 +16,7 @@ done
 CF=(-std=gnu11 -fobjc-arc -O1 -g -Wall -Wno-unused-function -Wno-unused-variable -I"$NV/gfx/nvn/include" -I"$NV/host" -I"$R/runtime/include")
 for f in "$SRC"/*.m; do clang "${CF[@]}" -c "$f" -o "$T/o/$(basename "$f" .m).o" || { echo "✗ t_gl_api：编译失败（${f}）"; exit 1; }; done
 ar rcs "$T/libgl.a" "$T"/o/*.o
-clang "${CF[@]}" -o "$T/t_gl_api" "$H/t_gl_api.m" "$T/libgl.a" "$NV/gfx/nvn/nvn_fps.c" $(python3 "$R/tools/weak_link_decl.py" flags nvntest) -framework Metal -framework Foundation || { echo "✗ t_gl_api：编译失败"; exit 1; }
+clang "${CF[@]}" -o "$T/t_gl_api" "$H/t_gl_api.m" "$T/libgl.a" "$NV/gfx/nvn/nvn_fps.c" "$NV/gfx/tex/nvn_bcdec.c" $(python3 "$R/tools/weak_link_decl.py" flags nvntest) -framework Metal -framework Foundation || { echo "✗ t_gl_api：编译失败"; exit 1; }
 S2A_WIDEN_DIRECT=0 MTL_DEBUG_LAYER=1 T_GL_DIR=$H DM_MSL_DIR=$T/lib "$T/t_gl_api"; rc=$?
 # GLB 入口（客体线程进来、调 Metal 的重活）函数体必须整个包在 @autoreleasepool 里（gl_int.h GLB 注释）：漏了就逐帧漏命令缓冲连带贴图，L 组只覆盖到几个入口，这里逐个核
 bad=$(grep -n '^GLB(' "$SRC"/*.m | grep -v ') { @autoreleasepool {' || true)

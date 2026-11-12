@@ -8,12 +8,7 @@
 #    缺表时宿主走安全缺省（每个 c1 给 64 KiB、整段绑定都可读）
 #   （runtime/src/gfxmode.c s2a_direct_packaged），映射表里没有的键首遇现编。同 OpenGL 款离线 0 支的先例。
 # 退出码：0 写成；1 参数 / 写文件失败。输出目录须是空的或新建的（调用方负责）
+# 实现在同目录 runtime_only_lib.py（一个进程做完，内存吃紧时也做得完；产物见它的头注）
 set -u
-D=${1:?输出目录}; CV=${2:?链号}; TID=${3:?程序号}; TAG=${4:?inputs 标签}; WHY=${5:?缺口原因文件}; GT=${6:-}
 PY=${S2A_PYTHON:-${S2A_PY:-$(command -v python3)}}
-mkdir -p "$D/b-$CV" \
-  && "$PY" -c 'import struct,sys; c=sys.argv[2].encode(); assert 0 < len(c) <= 12; open(sys.argv[1], "wb").write(b"S2ALIB\0\0" + struct.pack("<IIII", 1, 0, 0, 0) + c.ljust(12, b"\0") + bytes(12))' "$D/b-$CV/lib.idx" "$CV" \
-  && printf 'game\t%s\ninputs\truntime-only-%s\n' "$TID" "$TAG" > "$D/b-$CV/inputs.tsv" && : > "$D/shader_map.tsv" && : > "$D/keys.tsv" \
-  && printf '# 运行时现编空库：空答案表 = 全部按缺省答（graphics/tools/direct/dsh/Tables.cs）\n' > "$D/shader_facts.tsv" && printf '# 运行时现编空库：空配对表\n' > "$D/shader_pairs.tsv" \
-  && { [ -z "$GT" ] || [ ! -f "$GT" ] || cp "$GT" "$D/game.tsv"; } \
-  && { echo "本款离线直连库为空（离线 0 支），运行时首遇现编"; cat "$WHY"; } > "$D/runtime_only.txt"
+exec "$PY" "$(dirname "$0")/runtime_only_lib.py" "$@"

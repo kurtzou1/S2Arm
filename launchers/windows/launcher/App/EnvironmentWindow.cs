@@ -43,6 +43,7 @@ public sealed partial class EnvironmentWindow : Window
         var experience = reader.ReadToEnd();
         text = new SharedText(experience);
         PrivateJobRequest.Describe = (code, path) => T("private_root." + code).Replace("{0}", path);   // 私有目录用不了时的话按当前界面语言（#672）
+        PrivateJobRequest.Note = note => LauncherCrash.Log(null, note);   // 私有目录自愈 / 收不紧记一笔（#754）
         using var table = Assembly.GetExecutingAssembly().GetManifestResourceStream("S2Arm.Localizable.json")
             ?? throw new FileNotFoundException("Localization table resource is missing.");
         using var tableReader = new StreamReader(table);
@@ -355,6 +356,7 @@ public sealed partial class EnvironmentWindow : Window
             ipaReady ? Action("progress.reveal_ipa", () => Reveal(ipa!)) : null, ipaReady ? ipa : null));
         locations.Children.Add(SettingRow(T("settings.locations.space"), null,
             Action("storage.open", OpenStorage, !libraryBusy && libraryId is not null)));
+        if (PrivateJobRequest.Warning is { } privateWarning) locations.Children.Add(Muted(privateWarning));   // 私有目录收不紧：照常用，这里说一句（#754）
         body.Children.Add(Card(locations));
 
         // 密钥（原在游戏库页状态卡）：状态 + 导入

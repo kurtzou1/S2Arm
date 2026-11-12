@@ -1005,16 +1005,20 @@ def scan_unity(root, files, stat, known=None):
         except OSError: pass
     for p in files:   # 资源包先（类型树在这里）
         if not unity_res.is_bundle(heads.get(p, b'')): continue
-        try: inner = unity_res.read_bundle(open(p, 'rb').read())
+        # 只读映射 + 逐个节点解（unity_res.iter_bundle）：原先整个包读进内存、全部解开再每个节点复制一份，
+        #   v0.3.0 Windows 8 GB 机 3.45 GB 的 Unity 游戏第一个文件就 MemoryError
+        import mmap
+        try:
+            with open(p, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                for n, b in unity_res.iter_bundle(mm):
+                    try: entries(f'{_rel(p, root)}//{n}', b)
+                    except Exception: stat['UnityFS 包内文件不是序列化文件'] += 1
         except Exception as error:
             method = re.search(r'压缩方式 \d+（([^）]+)）', str(error))
             reason = method.group(1) if method else '其他'
             stat[f'UnityFS 解不开（{reason}）'] += 1
             continue
         stat['UnityFS 资源包'] += 1
-        for n, b in inner.items():
-            try: entries(f'{_rel(p, root)}//{n}', b)
-            except Exception: stat['UnityFS 包内文件不是序列化文件'] += 1
     for p in files:   # 播放器数据：Unity 序列化文件 v17–40
         h = heads.get(p, b'')
         if len(h) < 20 or unity_res.is_bundle(h) or h[16] > 1: continue

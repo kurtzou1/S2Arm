@@ -19,7 +19,7 @@ make -s -C "$R/graphics/dsx" "$R/build/dsx/mac/libspvc.a" > "$T/spvc.log" 2>&1 |
 CF=(-std=gnu11 -fobjc-arc -O1 -g -Wall -Wno-unused-function -I"$NV/gfx/nvn/include" -I"$NV/host" -I"$R/runtime/include")
 for f in "$NV"/gfx/gl/*.m; do clang "${CF[@]}" -c "$f" -o "$T/o/$(basename "$f" .m).o" || { echo "✗ t_gl_rt：编译失败（${f}）"; exit 1; }; done
 ar rcs "$T/libgl.a" "$T"/o/*.o
-clang "${CF[@]}" -o "$T/t_gl_rt" "$H/t_gl_rt.m" "$T/libgl.a" "$R/build/nvn/mac/libglx.a" "$R/build/dsx/mac/libspvc.a" "$NV/gfx/nvn/nvn_fps.c" \
+clang "${CF[@]}" -o "$T/t_gl_rt" "$H/t_gl_rt.m" "$T/libgl.a" "$R/build/nvn/mac/libglx.a" "$R/build/dsx/mac/libspvc.a" "$NV/gfx/nvn/nvn_fps.c" "$NV/gfx/tex/nvn_bcdec.c" \
   $(python3 "$R/tools/weak_link_decl.py" flags nvntest) -lc++ -framework Metal -framework Foundation || { echo "✗ t_gl_rt：链接失败"; exit 1; }
 rc=0
 for pass in 1 2; do

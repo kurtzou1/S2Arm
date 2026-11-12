@@ -94,6 +94,7 @@
 入	graphics/tools/direct/run_pairs.py
 入	graphics/tools/direct/run_knowledge.py	跑局知识快照（审计 #1534 P1-54）：配对 / 片元整数输出变体 / 采样模拟变体三张表的推导与归一化（表内容另进本阶段键 know-）
 入	graphics/tools/direct/runtime_only_lib.sh	抽取缺口时的运行时现编空直连库（11-06 两条链共用：stage_direct.sh 有 direct_gap.txt 时、direct_lib.sh 现场抽取退 3 时）
+入	graphics/tools/direct/runtime_only_lib.py	运行时现编空直连库的实现（runtime_only_lib.sh 调它；direct_lib.sh 现场抽取退 3 时直接调：一个进程做完，内存吃紧时也做得完）
 外	graphics/tools/direct/pso_seed.py	经本阶段出库不跑（S2A_PSO_SEED_STAGE=1）：零配置种子表归 pack/stage_direct_seed.sh，按 pack/stage_inputs/direct_seed.tsv 进那一段的键；只在单独调用 direct_lib.sh（Windows 出包、单测）时生成
 入	graphics/tools/shbake/casc_flat.py
 入	graphics/tools/shbake/cri_cpk.py

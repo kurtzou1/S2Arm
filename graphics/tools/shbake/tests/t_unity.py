@@ -331,5 +331,32 @@ with tempfile.TemporaryDirectory(prefix='t84-scan-') as directory:
           and counter['UnityFS 资源包'] == 2 and 'UnityFS 解不开' not in counter,
           f'scan_unity 混合8包：失败分项2+2+2，后续2个正常包仍读取 → {dict(counter)}')
 
+# 逐个节点解（v0.3.0 Windows 8 GB 机：3.45 GB 的 Unity 游戏 data.unity3d 整包解开再每个节点复制一份，第一个文件就 MemoryError）：
+#   手拼一个 UnityFS（48 个 LZ4 块各 128 KiB 原文、4 个节点，第二个跨块边界，末一个是贴图流 .resS、占大头）。期望：两个读包模块（S2Arm 抽取 unity_res.iter_bundle、
+#   直连抽取 translator/unityfs.bundle_files）逐个产出的节点 = 整包解开后按偏移切的（测试里独立算），默认跳过 .resS；read_bundle 照旧给全部节点；
+#   从只读映射读也一样；逐个读时 Python 内存峰值 < 2 × 最大普通节点 + 4 块（手算上界，与整包大小无关），远小于整包原文 6 MiB
+import mmap, tracemalloc, random
+rnd = random.Random(7); plain = bytes(rnd.getrandbits(8) for _ in range(1 << 16)) * 96   # 6 MiB、可压缩但不是全零
+BS = 1 << 17; blocks = [plain[i:i + BS] for i in range(0, len(plain), BS)]   # Unity 的 LZ4 分块 128 KiB
+comp = [lz4.block.compress(b, store_size=False) for b in blocks]
+nodes = [(0, 300000, 'globalgamemanagers'), (300000, 900_000, 'sharedassets0.assets'), (1_200_000, 300_000, 'resources.assets'), (1_500_000, len(plain) - 1_500_000, 'sharedassets0.assets.resS')]   # 第二个跨块边界；贴图流占大头（同真实 data.unity3d）
+info = bytes(16) + struct.pack('>i', len(blocks)) + b''.join(struct.pack('>IIH', len(b), len(c), 2) for b, c in zip(blocks, comp)) \
+    + struct.pack('>i', len(nodes)) + b''.join(struct.pack('>qqI', o, z, 4) + n.encode() + b'\0' for o, z, n in nodes)
+head = b'UnityFS\0' + struct.pack('>I', 6) + b'5.x.x\0' + b'2019.4.31f1\0'
+big = head + struct.pack('>qIII', 0, len(info), len(info), 0) + info + b''.join(comp)
+want = {n: plain[o:o + z] for o, z, n in nodes}
+sys.path.insert(0, os.path.join(D, '..', '..', '..', 'translator')); import unityfs
+for name, it in (('unity_res.iter_bundle', lambda d: U.iter_bundle(d)), ('unityfs.bundle_files', lambda d: unityfs.bundle_files(d))):
+    got = dict(it(big))
+    check(got == {n: b for n, b in want.items() if not n.endswith('.resS')}, f'{name}：逐个节点 = 整包解开按偏移切的，.resS 跳过（{sorted(got)}）')
+    with tempfile.TemporaryDirectory() as td:
+        bp = os.path.join(td, 'data.unity3d'); open(bp, 'wb').write(big)
+        with open(bp, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+            tracemalloc.start(); peak_names = [n for n, _ in it(mm)]; _, peak = tracemalloc.get_traced_memory(); tracemalloc.stop()
+    bound = 2 * max(z for _, z, n in nodes if not n.endswith('.resS')) + 4 * BS   # 一个节点（拼装中 + 交出的一份）+ 几块（压缩块读出、解开、交接）；与整包大小无关
+    check(peak_names == [n for _, _, n in nodes if not n.endswith('.resS')] and peak < bound < len(plain),
+          f'{name}：从只读映射逐个读，内存峰值 {peak / (1 << 20):.1f} MiB < 上界 {bound / (1 << 20):.1f} MiB < 整包原文 {len(plain) / (1 << 20):.0f} MiB')
+check(U.read_bundle(big) == want, 'read_bundle 照旧给全部节点（含 .resS）')
+
 print(f'期望 Unity 资源 {n} 项全过 → 真结果 失败 {fail} / {n}')
 sys.exit(1 if fail else 0)
