@@ -24,7 +24,7 @@ struct DevCertRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 12) {
-                Image(systemName: "signature").font(.system(size: 16, weight: .light)).foregroundStyle(LauncherPalette.cream)
+                LauncherRowIcon("signature")
                 Text(title ?? sx(loc, "title")).font(.manrope(13)).foregroundStyle(.secondary)
                 Spacer(minLength: 12)
                 Picker(title ?? sx(loc, "title"), selection: Binding(get: { on }, set: { model.setDevCertActive($0) })) {

@@ -11,8 +11,8 @@ using S2Arm.Launcher.Protocol;
 namespace S2Arm.Launcher;
 
 // 批量出包（v0.2.4，照 Mac S2ArmLauncherModel+Batch.swift / BatchExportView.swift）：一次放进多款 → 识别完列成清单，每款勾平台
-// （Windows 只出 iPhone，Mac 一栏置灰）→ 一批共用一个存放位置 → 一款接一款地出，每款用出包页同一条单款出包流程（StartBatchPack → RunPackAsync）。
-// 清单、状态和规则（下一个出谁、磁盘满暂停、继续 / 重试 / 取消、汇总）都在共用后端 pack/jobs/batch.py（BatchClient），这里只发起作业、画状态。
+// （Windows 只出 iPhone，Mac 一栏置灰）→ 一批共用一个存放位置 → 起一个出包编排作业（export，剃刀 H13）一款接一款地出。
+// 清单、状态和规则（下一个出谁、磁盘满暂停、继续 / 重试 / 取消、汇总）在共用后端 pack/jobs/batch.py，执行在 pack/jobs/export_plan.py，这里只发起作业、画状态。
 public sealed partial class EnvironmentWindow
 {
     /// <summary>出包前清单里的一行：识别出来的一款，勾没勾 iPhone；不能出的写原因（缺密钥、缺文件），勾选置灰、不进批次</summary>
@@ -24,8 +24,6 @@ public sealed partial class EnvironmentWindow
         public string? Problem { get; } = problem;
     }
 
-    // 这台电脑能出的平台（Windows 只有 iPhone）
-    private static readonly string[] BatchSupported = ["iphone"];
     private List<BatchRow> batchDraft = [];
     private IReadOnlyList<ImportOutcome.Unrecognized> batchUnrecognized = [];
     // 后端批次（batch.py 的结果，出包中途关掉启动器也在）；这批是不是正在一款接一款地出；玩家点了取消、等正在出的那款停下
@@ -44,7 +42,7 @@ public sealed partial class EnvironmentWindow
             {
                 var problem = g.Missing.Count > 0 ? T("library.requirements") + " · " + string.Join(" / ", g.Missing)
                     : g.NeedsKeys && catalog?.KeysReady != true ? T("batch.keys") : null;
-                return new BatchRow(g.Id, g.Name, problem is null && exportIos, problem);
+                return new BatchRow(g.Id, g.Name, exportIos, problem);   // 缺东西的款也照勾（只写原因，v0.3.1 不预先挡）：作业层核实，真缺就这一款失败、不挡后面
             }).ToList();
         batchUnrecognized = unrecognized;
         batchState = null; batchError = "";   // 新清单出包时 create 会盖掉上一批；没出包就退出时重读回来（CloseBatchDraft）
@@ -71,6 +69,9 @@ public sealed partial class EnvironmentWindow
             content.Children.Add(Label(T("batch.summary").Replace("{0}", state.Summary.Total.ToString())
                 .Replace("{1}", state.Summary.Completed.ToString()).Replace("{2}", state.Summary.Failed.ToString()), 16));
             if (state.Paused == "disk_full") { var paused = Muted(T("batch.paused"), 14); paused.Foreground = Brush.Parse("#FFC857"); content.Children.Add(paused); }
+            // 上次没出完（启动器退出 / 取消）：说停在第几款，底栏「继续」只出还没出的（剃刀 H13）
+            else if (!batchRunning && state.Summary.Pending + state.Summary.Cancelled > 0 && state.StoppedAt > 0)
+            { var stopped = Muted(T("batch.stopped_at").Replace("{0}", state.StoppedAt.ToString()), 14); AutomationId(stopped, "batch.stopped_at"); content.Children.Add(stopped); }
         }
         if (batchError.Length > 0) content.Children.Add(new TextBlock { Text = B(batchError), FontSize = 13, Foreground = Brush.Parse("#E55"), TextWrapping = TextWrapping.Wrap });
         if (batchState is null) RenderBatchDraft(content); else RenderBatchProgress(content, batchState);
@@ -86,7 +87,7 @@ public sealed partial class EnvironmentWindow
     private void RenderBatchDraft(StackPanel content)
     {
         if (batchDraft.FirstOrDefault() is { } first && BatchGame(first.Id) is { } firstGame) content.Children.Add(LocationRow(firstGame, "batch.location"));
-        var ok = batchDraft.Where(r => r.Problem is null).ToList();
+        var ok = batchDraft.ToList();
         var head = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"), ColumnSpacing = 10, Margin = new Thickness(14, 6, 14, 0) };
         head.Children.Add(Muted(T("batch.game")));
         var allIphone = Action("batch.all", () =>
@@ -113,12 +114,15 @@ public sealed partial class EnvironmentWindow
             line.Children.Add(BatchCover(row.Id));
             var name = Label(row.Name, 15); name.VerticalAlignment = VerticalAlignment.Center; name.TextWrapping = TextWrapping.NoWrap; name.TextTrimming = TextTrimming.CharacterEllipsis;
             Grid.SetColumn(name, 1); line.Children.Add(name);
-            if (row.Problem is { } problem)
+            if (row.Problem is { } problem)   // 只提示、不挡（v0.3.1）：原因写在名字下面，照样能勾
             {
-                var why = Muted(problem); why.Foreground = Brush.Parse("#FFC857"); why.VerticalAlignment = VerticalAlignment.Center; why.MaxWidth = 360;
-                Grid.SetColumn(why, 2); Grid.SetColumnSpan(why, 2); line.Children.Add(why);
+                line.Children.Remove(name);
+                var named = new StackPanel { Spacing = 3, VerticalAlignment = VerticalAlignment.Center };
+                named.Children.Add(name);
+                var why = Muted(problem); why.Foreground = Brush.Parse("#FFC857"); why.TextWrapping = TextWrapping.Wrap;
+                named.Children.Add(why);
+                Grid.SetColumn(named, 1); line.Children.Add(named);
             }
-            else
             {
                 var iphone = new CheckBox { Content = "iPhone", IsChecked = row.Iphone, IsEnabled = !batchRunning, MinWidth = 96, VerticalAlignment = VerticalAlignment.Center };
                 AutomationId(iphone, "batch.iphone." + row.Id);
@@ -208,7 +212,7 @@ public sealed partial class EnvironmentWindow
         void Put(Control c, int column) { Grid.SetColumn(c, column); inner.Children.Add(c); }
         if (batchState is null)
         {
-            var count = batchDraft.Count(r => r.Problem is null && r.Iphone);
+            var count = batchDraft.Count(r => r.Iphone);
             var start = Primary(T("batch.start").Replace("{0}", count.ToString()), () => _ = StartBatchAsync(), count > 0 && !PackBusy && !libraryBusy && !batchRunning);
             AutomationId(start, "batch.start");
             Put(start, 3);
@@ -262,10 +266,7 @@ public sealed partial class EnvironmentWindow
         return true;
     }
 
-    private Task<bool> BatchMarkAsync(string gameId, string platform, string state, string? message = null, string? code = null, string? output = null) =>
-        BatchRunAsync("mark", BatchClient.MarkArguments(gameId, platform, state, message, code, output));
-
-    /// <summary>点「出包（N 款）」：后端建批次（一批共用出包页选的存放位置），开始出第一款</summary>
+    /// <summary>点「出包（N 款）」：后端建批次（一批共用出包页选的存放位置），起出包编排作业一款接一款地出</summary>
     /// <param name="installAfter">「更新并重新出这几款」排的批：整批出完逐款装到 iPhone（InstallModePage.cs BatchFinishedAsync）</param>
     private async Task StartBatchAsync(bool installAfter = false)
     {
@@ -273,66 +274,38 @@ public sealed partial class EnvironmentWindow
         batchInstallAfter = installAfter;   // 每批自己定：界面 / 控制口建的批不接着装
         var control = batchControlPlatforms; batchControlPlatforms = null;
         var entries = control is null
-            ? batchDraft.Where(r => r.Problem is null && r.Iphone).Select(r => new BatchClient.Entry(r.Id, r.Name, ["iphone"])).ToList()
-            : batchDraft.Where(r => r.Problem is null && control.ContainsKey(r.Id)).Select(r => new BatchClient.Entry(r.Id, r.Name, control[r.Id])).ToList();
+            ? batchDraft.Where(r => r.Iphone).Select(r => new BatchClient.Entry(r.Id, r.Name, ["iphone"])).ToList()
+            : batchDraft.Where(r => control.ContainsKey(r.Id)).Select(r => new BatchClient.Entry(r.Id, r.Name, control[r.Id])).ToList();
         if (entries.Count == 0) return;
         var location = locationsFor == batchDraft[0].Id && exportLocation.Length > 0 ? exportLocation : null;
         if (!await BatchRunAsync("create", ["--json", BatchClient.CreateJson(entries, location)]) || batchState is null) { Render(); return; }
         batchDraft = []; batchUnrecognized = [];
-        batchRunning = true;
-        await AdvanceBatchAsync();
+        RunBatchExport();
     }
 
-    /// <summary>出下一款：后端说出谁就出谁；没有下一个 = 出完 / 暂停 / 取消了。正在出的那款结束时（BatchPackEndedAsync）再走这里</summary>
-    private async Task AdvanceBatchAsync()
+    /// <summary>按批次文件起出包编排作业（剃刀 H13，pack/jobs/export_plan.py）：下一个出谁、记账、磁盘满暂停、这台电脑出不了的平台都在后端；
+    /// 这里只显示它的事件（ExportPages.cs OnExportEvent），留在清单页看整批进度（单款进度页可从游戏库胶囊打开）</summary>
+    private void RunBatchExport()
     {
-        while (batchRunning)
-        {
-            if (batchStopping) { await StopBatchAsync(); return; }
-            if (packRunning) return;
-            if (libraryOperation is { IsCompleted: false } reload) { await reload; continue; }   // 上一款出好后重读游戏库：读完再出下一款
-            if (batchState?.Step(BatchSupported) is not { } run) { batchRunning = false; Render(); _ = BatchFinishedAsync(); return; }
-            var gid = run.Item.GameId;
-            var marked = true;
-            foreach (var p in run.Unsupported) marked &= await BatchMarkAsync(gid, p, "failed", "这台电脑出不了这个平台的包");
-            var game = BatchGame(gid);
-            if (marked && run.Runnable.Count > 0 && (game is null || connectedFolder is null || libraryId is null))
-                foreach (var p in run.Runnable) marked &= await BatchMarkAsync(gid, p, "failed", "游戏库里已经没有这款游戏");   // 玩家删了：记失败、接着下一款
-            else if (marked && run.Runnable.Count > 0)
-            {
-                if (!await BatchMarkAsync(gid, run.Runnable[0], "running")) { batchRunning = false; Render(); return; }
-                if (batchStopping) { await StopBatchAsync(); return; }
-                StartBatchPack(game!);
-                return;
-            }
-            if (!marked) { batchRunning = false; Render(); return; }   // 记不进批次就停下（不然下一个永远是这款）
-        }
-    }
-
-    /// <summary>单款出包流程出这款的 iPhone 包：存放位置用这批共用的那个；留在清单页看整批进度（单款进度页可从游戏库胶囊打开）</summary>
-    private void StartBatchPack(LibraryGame game)
-    {
-        packLocation = batchState?.Location;
-        ResetPack(game);
+        batchRunning = true; batchStopping = false; batchError = "";
+        packJob = BeginJob(JobKind.Pack);
         sessionHidden = true;
         Render();
-        packOperation = RunPackAsync(game, false);
+        packOperation = RunExportAsync(ExportStream.BatchPlan(), batch: true);
     }
 
-    /// <summary>这款出完（RunPackAsync 收尾调）：取消 = 整批停（已出好的保留）；否则记结果、接着出下一款</summary>
-    private async Task BatchPackEndedAsync(LibraryGame game)
+    /// <summary>编排作业结束（ExportPages.cs RunExportAsync 收尾调）：重读批次；整批出完接着装（更新发起的那批）</summary>
+    private async Task BatchExportEndedAsync(LibraryJobResult? report, string? error)
     {
-        if (packState == "cancelled") { await StopBatchAsync(); return; }
-        var why = packSummary.Length > 0 ? packSummary : packDiagnostics.Split('\n').FirstOrDefault(l => l.Trim().Length > 0) ?? "";
-        var marked = packState == "succeeded"
-            ? await BatchMarkAsync(game.Id, "iphone", "completed", output: packIpa)
-            : await BatchMarkAsync(game.Id, "iphone", "failed", why, packFailureCode);
-        if (!marked) { batchRunning = false; Render(); return; }
+        batchRunning = false; batchStopping = false;
+        await ReloadBatchAsync();
+        if (error is not null) batchError = error;
+        else if (report is { State: "failed" }) batchError = report.Message;   // 编排作业自己失败（批次记录写不进、已有一个在出）：原因写在清单页
         Render();
-        await AdvanceBatchAsync();
+        if (batchState is { Summary.Done: true }) _ = BatchFinishedAsync();
     }
 
-    /// <summary>底栏「取消」：正在出的那款停下后整批取消；两款之间点的，下一款不再开始</summary>
+    /// <summary>底栏「取消」：取消编排作业，它把正在出的那步停下，正在出的和没开始的记已取消（已出好的保留）</summary>
     private void StopBatch()
     {
         batchStopping = true;
@@ -340,21 +313,14 @@ public sealed partial class EnvironmentWindow
         Render();
     }
 
-    private async Task StopBatchAsync()
-    {
-        await BatchRunAsync("cancel");
-        batchRunning = false; batchStopping = false;
-        Render();
-    }
-
-    /// <summary>继续出剩下的（取消后 / 关掉启动器再打开后）、重试失败的（给游戏号只重试这一款；磁盘满那款释放空间后也走这里）</summary>
+    /// <summary>继续出剩下的（取消后 / 启动器退出后重开）、重试失败的（给游戏号只重试这一款；磁盘满那款释放空间后也走这里）：
+    /// 后端改好批次再起编排作业，只出还没出的</summary>
     private async Task BatchCommandAsync(string command, IEnumerable<string>? arguments = null)
     {
         if (packRunning) return;
         if (!await BatchRunAsync(command, arguments)) { Render(); return; }
-        if (batchRunning) { Render(); return; }   // 正在出的这批会自己取到重新排队的
-        batchRunning = true;
-        await AdvanceBatchAsync();
+        if (batchRunning) { Render(); return; }
+        RunBatchExport();
     }
 
     /// <summary>返回：出包中 / 出完都只是离开清单页（批次留着，顶栏胶囊能回来）；出包前的清单不要了，重读上一批（可能还有没出完的）</summary>

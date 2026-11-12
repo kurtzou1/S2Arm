@@ -110,6 +110,10 @@ import AppKit
         let source=library.appendingPathComponent("sources/fixture.bin")
         try FileManager.default.createDirectory(at:source.deletingLastPathComponent(),withIntermediateDirectories:true)
         try Data("synthetic input; never unpacked".utf8).write(to:source)
+        // 加密原件出包开头要 prod.keys（作业层 library.require_game，v0.3.1）：玩家已导入
+        let keys=privateRoot.appendingPathComponent("keys/prod.keys")
+        try FileManager.default.createDirectory(at:keys.deletingLastPathComponent(),withIntermediateDirectories:true)
+        try Data("header_key = 00\n".utf8).write(to:keys)
         let game:[String:Any] = ["id":gid,"name":"Synthetic budget fixture","display":"1.0","hidden":false,
             "packages":[["titleId":gid,"baseId":gid,"version":0,"type":"base","name":"Fixture","display":"1.0",
                          "path":"sources/fixture.bin","size":size,"sha256":String(repeating:"a",count:64),"builds":[:],"guestIsa":"aarch64"]]]

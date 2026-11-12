@@ -15,6 +15,9 @@ struct JobProgress: Equatable {
     private(set) var unit = ""
     /// 本阶段可能弹钥匙串授权（作业事件 keychainPrompt，pack/jobs/core.py begin(keychain=)）：只在这时挂「请在钥匙串弹框里允许」的提示
     private(set) var keychainPrompt = false
+    /// 整单进度（作业层每条事件的 overall，0–1，只增不减、成功才到 1；pack/jobs/overall.py）。作业页大百分比与分段条只显示它，不再按当前计数器自己拼
+    ///   （11-11 维护者：「百分比反复到 91% 又跳回 40%」）。没有的作业（导入等）为 nil，照旧
+    private(set) var overall: Double?
     /// 本阶段在这里开始的时刻（阶段时钟从它走）。
     private(set) var stageStarted: Date?
     /// 按实测速率算的剩余秒数，截至 etaAt。
@@ -28,7 +31,7 @@ struct JobProgress: Equatable {
     private(set) var track = MilestoneTrack()
 
     static func == (a: JobProgress, b: JobProgress) -> Bool {
-        a.stage == b.stage && a.keychainPrompt == b.keychainPrompt && a.index == b.index && a.count == b.count && a.done == b.done && a.total == b.total && a.unit == b.unit
+        a.stage == b.stage && a.overall == b.overall && a.keychainPrompt == b.keychainPrompt && a.index == b.index && a.count == b.count && a.done == b.done && a.total == b.total && a.unit == b.unit
             && a.stageStarted == b.stageStarted && a.eta == b.eta && a.etaAt == b.etaAt && a.rate == b.rate
             && a.origin?.t == b.origin?.t && a.origin?.done == b.origin?.done && a.track == b.track
     }
@@ -49,6 +52,7 @@ struct JobProgress: Equatable {
         if let newIndex { index = newIndex }
         if let k = e.fields["keychainPrompt"] as? Bool { keychainPrompt = k }
         if let c = number("stageCount") { count = Int(c) }
+        if let o = number("overall") { overall = max(overall ?? 0, min(1, o)) }
         guard let d = number("done"), let t = number("total"), t > 0 else { return }
         // 换了一个计数器（总量变了 / 从头数起）：速率从这一次读数重算
         if t != total || d < (done ?? 0) || origin == nil { origin = (e.t, d); eta = nil; etaAt = nil; rate = nil }

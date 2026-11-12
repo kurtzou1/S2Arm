@@ -11,7 +11,9 @@
 # 缓存键 = 改写器 + 扫描器源码树对象号 + 启用表 sha（+ 非苹果目标平台 S2A_TARGET）+ 本阶段脚本 + 实际读过的生成器与表（.stage_rewrite.deps，tools/stage_deps.py）：
 #   版本标签 rw-<不含实际读入部分的键前 10 位>（非苹果再带 -<平台>），现行根记的键相同就跳过。
 #   S2A_TARGET 决定改写器出的补丁代码（如鸿蒙线程槽取法），不进键会让一个平台的产物被当成另一个平台的现行产物复用；缺省 apple 时键与原先相同。
-# 改写失败（有缺口退出码 3 等）→ 中止新版本、现行不动、报红。单模块墙钟 ≤ 600 秒。
+# 改写有缺口（退出码 3、产物照出）→ 降级继续：缺口点保持原指令，按类汇总进产物根 degrade.rewrite.tsv、打【黄】（v0.3.1 拿不准不停）；
+#   退出码 3 却没产物（补丁区放不下 / 丢自旋回边）与其余失败 → 中止新版本、现行不动、报红。单模块按无进展看门狗停（tools/nostall.py：CPU 在涨 / 在写就不停，连续 S2A_NOSTALL_S 秒〔缺省 600〕没进展才停；
+#   v0.3.1 拿不准不停：原先固定墙钟 timeout 600，满载机上正常慢的大模块会被当挂死杀掉）。
 set -u
 G=${1:?款}; H=$(cd "$(dirname "$0")" && pwd); R=$(cd "$H/.." && pwd); source "$H/roots.sh"
 # 扫描器与本阶段各 Python 工具的解释器钉死一个（tools/rewriter-requirements.txt：capstone / lz4 版本固定，宽屏扫描器用；10-22 gate-host 的 /usr/bin/python3 没有 capstone，门禁改写全失败）
@@ -150,7 +152,7 @@ if [ -n "${FT}" ]; then export S2A_FPS_TSV="$W/fps.tsv"; else unset S2A_FPS_TSV;
 if [ -n "$CP" ]; then export S2A_CODE_PATCH=$CP S2A_CODE_BUILD=$BID; else unset S2A_CODE_PATCH S2A_CODE_BUILD; fi
 # 各模块并行改写（10-25 维护者「多核加速……要适配机器的核心数」）：改写器只读本模块与 widen_sites.tsv、产物都带模块名前缀（<模块>.patched.bin / .fixups.tsv / …），
 #   互不依赖；同时最多 S2A_JOBS（缺省本机核数，读不出就停：#824 F-pack-sysctl-jobs）个，退出码记临时目录（不进产物根），全部跑完再按模块名顺序判
-# rw_all <容许缺口>：全部模块改写一遍；容许缺口 = 1 时退出码 3（有缺口）的模块记进 R3、不当失败（社区补丁轮：缺口由 cpatch.py prune 认领）
+# rw_all：全部模块改写一遍；退出码 3（有缺口、产物照出）的模块记进 R3、不当失败（社区补丁轮：缺口由 cpatch.py prune 认领；其余缺口降级继续）
 rw_all() {
 NJ=${S2A_JOBS:-$(getconf _NPROCESSORS_ONLN)}; [ "$NJ" -ge 1 ] 2> /dev/null || { echo "【红】$G 并行度读不出（S2A_JOBS / getconf 核数），不放开并发"; root_abort "$G" "$TAG"; exit 1; }
 RC=$(mktemp -d); MS=(); R3=(); n=0
@@ -160,11 +162,12 @@ for f in "$W"/exefs/* "$W"/nroexe/nro*; do
   #   （11-02 普查 010020D01B890000 exefs 有 486 字节文本 main.moduleconfig「VIA_MODULE_AUDIORENDER;…」，原先按「不是 rtld / *.npdm」当模块改写 → 断言 NSO0 失败、整款出包红）
   m=$(basename "$f"); case $f in "$W"/exefs/*) case $m in main|sdk|subsdk[0-9]) ;; *) continue;; esac;; esac
   while [ "$(jobs -rp | wc -l)" -ge "$NJ" ]; do wait -n; done
-  ( env -u S2A_DEPS_OUT timeout 600 "${REWRITE[@]}" "$f" "$W" "$m" "$W/widen_sites.tsv" > "$W/$m.rewrite.log" 2>&1; echo $? > "$RC/$m" ) & MS+=("$m")
+  ( env -u S2A_DEPS_OUT "$PY" "$R/tools/nostall.py" "${S2A_NOSTALL_S:-600}" -- "${REWRITE[@]}" "$f" "$W" "$m" "$W/widen_sites.tsv" > "$W/$m.rewrite.log" 2>&1; echo $? > "$RC/$m" ) & MS+=("$m")
 done; wait
 for m in ${MS[@]+"${MS[@]}"}; do rc=$(cat "$RC/$m" 2> /dev/null || echo 9)
-  if [ "$1" = 1 ] && [ "$rc" = 3 ]; then R3+=("$m"); n=$((n + 1)); continue; fi
-  [ "$rc" = 0 ] || { echo "【红】$G 改写 $m 失败（rc=${rc}：$([ "$rc" = 124 ] && echo "超过 600 秒被停" || tail -1 "$W/$m.rewrite.log" | cut -c1-160)；日志 $S2A_ROOTS/.failed/${G}_$m.log）"; mkdir -p "$S2A_ROOTS/.failed"; cp "$W/$m.rewrite.log" "$S2A_ROOTS/.failed/${G}_$m.log"; rm -rf "$RC"; root_abort "$G" "$TAG"; exit 1; }
+  if [ "$rc" = 3 ] && [ -f "$W/$m.patched.bin" ]; then R3+=("$m"); n=$((n + 1)); continue; fi
+  [ "$rc" = 3 ] && { echo "【红】$G 改写 ${m}：这款有程序代码需要的改写空间超过了能放下的上限，出不了包（日志 $S2A_ROOTS/.failed/${G}_$m.log）"; mkdir -p "$S2A_ROOTS/.failed"; cp "$W/$m.rewrite.log" "$S2A_ROOTS/.failed/${G}_$m.log"; rm -rf "$RC"; root_abort "$G" "$TAG"; exit 1; }
+  [ "$rc" = 0 ] || { echo "【红】$G 改写 $m 失败（rc=${rc}：$([ "$rc" = 124 ] && echo "${S2A_NOSTALL_S:-600} 秒没有进展被停" || tail -1 "$W/$m.rewrite.log" | cut -c1-160)；日志 $S2A_ROOTS/.failed/${G}_$m.log）"; mkdir -p "$S2A_ROOTS/.failed"; cp "$W/$m.rewrite.log" "$S2A_ROOTS/.failed/${G}_$m.log"; rm -rf "$RC"; root_abort "$G" "$TAG"; exit 1; }
   n=$((n + 1))
 done; rm -rf "$RC"
 }
@@ -178,12 +181,36 @@ if [ -n "$CK" ]; then   # 社区补丁：先按不带补丁的改写点预筛出
     "$PY" "$R/pack/cpatch.py" prune "$W" 2>> "$W/cpatch_plan.log"; prc=$?
     [ "$prc" = 10 ] && continue
     [ "$prc" = 0 ] || { echo "【红】$G 社区补丁认领缺口出错"; root_abort "$G" "$TAG"; exit 1; }
-    [ ${#R3[@]} = 0 ] || { echo "【红】$G 改写 ${R3[*]} 有补丁以外的缺口（$(tail -1 "$W/${R3[0]}.rewrite.log" | cut -c1-160)）"; root_abort "$G" "$TAG"; exit 1; }
-    break
+    break   # 剩下的是补丁以外的缺口：降级继续，见下面 degrade.rewrite.tsv
   done
-  [ ${#R3[@]} = 0 ] || { echo "【红】$G 社区补丁剔了 6 轮仍有缺口"; root_abort "$G" "$TAG"; exit 1; }
   echo "  $G 社区补丁：$(grep -c . "$W/cpatch.tsv" | awk '{print $1 - 1}') 份进包（双路 $(grep -c '^p' "$W/cpatch_rows.tsv") 字、常写 $(grep -c '^w' "$W/cpatch_rows.tsv") 字），不收 $(grep -c '^不收' "$W/cpatch_plan.log") 份（$W/cpatch_plan.log）"
 fi
+# 降级汇总（v0.3.1）：缺口按类别、兼容写法按处数，写 degrade.rewrite.tsv（出包作业收尾读它给玩家提示、诊断包收它）；没有降级就删掉旧表
+"$PY" - "$W" "$G" <<'PYEOF' || { echo "【红】$G 写降级汇总失败"; root_abort "$G" "$TAG"; exit 1; }
+import collections, glob, os, re, sys
+w, g = sys.argv[1:3]; kinds = collections.Counter(); mods = collections.defaultdict(set); compat = 0
+for log in sorted(glob.glob(os.path.join(w, '*.rewrite.log'))):
+    m = os.path.basename(log)[:-len('.rewrite.log')]
+    for line in open(log, encoding='utf-8', errors='replace'):
+        c = re.search(r"'x18_compat': (\d+)", line)
+        if c: compat += int(c[1])
+    gp = os.path.join(w, m + '.gaps.tsv')
+    if os.path.isfile(gp):
+        for line in open(gp, encoding='utf-8', errors='replace'):
+            if line.startswith('#') or '\t' not in line: continue
+            k = line.split('\t')[1]; kinds[k] += 1; mods[k].add(m)
+out = os.path.join(w, 'degrade.rewrite.tsv'); n = sum(kinds.values())
+if not n and not compat:
+    if os.path.exists(out): os.remove(out)
+    sys.exit(0)
+with open(out, 'w', encoding='utf-8') as f:
+    f.write('# 阶段\t类别\t处数\t玩家提示\t说明\n')
+    if compat: f.write(f'rewrite\tx18_compat\t{compat}\t这款有 {compat} 处用了兼容写法，个别场景可能不稳定，遇到请反馈\t恢复 sp 后挑不出已死的临时寄存器，这几处退回压栈写法\n')
+    if n: f.write(f'rewrite\tgap\t{n}\t这款有 {n} 处程序代码暂时没法改写、保持原样，玩到用到它们的地方可能出错，遇到请反馈\t缺口点保持原指令，逐条见 <模块>.gaps.tsv\n')
+    for k, c in sorted(kinds.items()): f.write(f'rewrite\tgap:{k}\t{c}\t\t模块 {" ".join(sorted(mods[k]))}\n')
+parts = ([f'兼容写法 {compat} 处'] if compat else []) + ([f'没改写的缺口 {n} 处（{"、".join(f"{k} {c}" for k, c in sorted(kinds.items()))}）'] if n else [])
+print(f'【黄】{g} 改写降级继续：{"；".join(parts)}（{out}）')
+PYEOF
 cp "$W/exefs/main.npdm" "$W/" || { root_abort "$G" "$TAG"; echo "【红】缺 main.npdm"; exit 1; }
 [ -z "$AN" ] || cp "$AN" "$W/addr_need.tsv" || { root_abort "$G" "$TAG"; exit 1; }
 cp "$AD/log" "$W/addr_need.log" || { root_abort "$G" "$TAG"; exit 1; }
@@ -204,7 +231,7 @@ if [ -z "${FT}" ] && [ "$fw" != 0 ]; then "$PY" "$R/tools/fps_generic.py" "$W" "
 rm -rf "$W/nroexe"   # NRO 转出的中间 NSO（nro_to_nso.py），改写完删；要在收集阶段依赖之前删，免得进依赖表
 K=$(stage_deps_save "$W" rewrite "$KB" "$H/stage_rewrite.sh") || { root_abort "$G" "$TAG"; exit 1; }
 echo "$K" > "$W/.stage_rewrite"
-ROOT_REPLAY='*.code_patch.tsv *.patched.bin *.fixups.tsv *.gates.tsv *.sites.tsv *.gaps.tsv *.npdm *.widen.tsv widen_sites.tsv cpatch.tsv cpatch_rows.tsv cpatch_plan.log cpatch_excluded.tsv widen_enable*.tsv widen_verified.tsv fps.tsv nro_modules.tsv nro_to_nso.log widen_full*.tsv patch.tsv addr_need.tsv addr_need.log nro_exports.tsv nro_exports.log gpu_drivers.tsv widen_scan.log fps_generic.log *.rewrite.log .stage_rewrite .stage_rewrite.deps' root_commit "$G" "$TAG" || exit 1   # 与系统数据 / 界面布局并行（pack/refresh.sh）：本阶段只写这些
+ROOT_REPLAY='degrade.rewrite.tsv *.code_patch.tsv *.patched.bin *.fixups.tsv *.gates.tsv *.sites.tsv *.gaps.tsv *.npdm *.widen.tsv widen_sites.tsv cpatch.tsv cpatch_rows.tsv cpatch_plan.log cpatch_excluded.tsv widen_enable*.tsv widen_verified.tsv fps.tsv nro_modules.tsv nro_to_nso.log widen_full*.tsv patch.tsv addr_need.tsv addr_need.log nro_exports.tsv nro_exports.log gpu_drivers.tsv widen_scan.log fps_generic.log *.rewrite.log .stage_rewrite .stage_rewrite.deps' root_commit "$G" "$TAG" || exit 1   # 与系统数据 / 界面布局并行（pack/refresh.sh）：本阶段只写这些
 # 帧率表命中（情报 10-28：构建号对不上时增强静默失效）：没有本构建号的表要响亮；本款别的构建号有表（docs/名单_60帧/ 有登记、runtime/fps/ 有文件）就列出来——
 #   换了版本一眼看出。原生就 60 帧的款（0100152000022000）没有表、也不列
 FV=$(awk -F'\t' -v p="$PID" '!/^#/ && toupper($1) == p { print substr($2, 1, 16) }' "$R/docs/名单_60帧/"*.tsv 2> /dev/null | while read -r b; do [ -f "$R/runtime/fps/$b.tsv" ] && printf '%s ' "$b"; done)

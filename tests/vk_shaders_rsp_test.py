@@ -27,7 +27,8 @@ for nt in (False, True):
             return P()
         sep = '\\' if nt else os.sep
         with mock.patch.object(vs.subprocess, 'run', run), mock.patch.object(vs.os, 'name', 'nt' if nt else os.name), mock.patch.object(vs.os, 'sep', sep):
-            lib = vs.metallib(msls, os.path.join(t, 'out'), 'iphoneos', [], t)
+            lib, failed = vs.metallib(msls, os.path.join(t, 'out'), 'iphoneos', [], t)   # v0.3.1：返回（库路径, 编不过的支）
+            chk('没有编不过的支', {}, failed)
         # Windows 口径：清单里写相对工作目录（= 临时目录 t）的路径（编译器按 ANSI 开文件、会拆空格，见 spirv_msl.metal_run）
         want = ['"' + (os.path.basename(m[:-6]) + '.iphoneos.air' if nt else m[:-6] + '.iphoneos.air') + '"' for m in msls]
         tag = 'Windows 口径' if nt else '本机口径'
@@ -36,5 +37,20 @@ for nt in (False, True):
         chk(f'{tag}：调用后响应文件已删', False, bool(seen.get('path')) and os.path.exists(seen['path']))
         chk(f'{tag}：库挪进输出目录', (os.path.join(t, 'out', 'vk_shaders.metallib'), True), (lib, os.path.isfile(lib)))
         if nt: chk(f'{tag}：metallib 的工作目录 = 临时目录', t, seen.get('cwd'))
+# v0.3.1 拿不准不停：一支 Metal 编不过只剔这一支、其余照链（原先 red 退出、整份没有库）。替身编译器对第 2 支（下标 1）回 rc 1
+with tempfile.TemporaryDirectory() as t:
+    msls = [os.path.join(t, f's{i}.metal') for i in range(3)]; rsp = {}
+    def run2(cmd, **kw):
+        class P: returncode = 0; stderr = ''
+        if 'metallib' in os.path.basename(str(cmd[0])) or 'metallib' in cmd:
+            at = [str(c)[1:] for c in cmd if str(c).startswith('@')]; rsp['airs'] = open(at[0], encoding='utf-8').read().splitlines()
+            open(str(cmd[cmd.index('-o') + 1]), 'wb').write(b'lib')
+        elif any(str(c).endswith('s1.metal') for c in cmd): P.returncode = 1; P.stderr = 'synthetic error'
+        return P()
+    with mock.patch.object(vs.subprocess, 'run', run2):
+        lib, failed = vs.metallib(msls, os.path.join(t, 'out'), 'iphoneos', [], t)
+    chk('一支编不过：失败表只有它', [msls[1]], sorted(failed))
+    chk('一支编不过：其余两支照链（响应文件 2 行）', 2, len(rsp.get('airs') or []))
+    chk('一支编不过：库照出', True, bool(lib) and os.path.isfile(lib))
 print(f'{"✓" if not bad else "✗"} vk_shaders_rsp：{bad} 不通')
 sys.exit(1 if bad else 0)

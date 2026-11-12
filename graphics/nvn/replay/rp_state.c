@@ -132,7 +132,8 @@ int rp_state_op(uint32_t op, const void *a, uint32_t size) {
             return 1; }
         case OP_POLY_OFFSET: rp_S.po = *(const p_poly_offset *)a; return 1;
         case OP_VIEWPORTS: { const p_viewports *b = a; if (b->first < 0 || b->n < 0 || b->first + b->n > 16) return 1;
-            for (int i = 0; i < b->n; i++) memcpy(rp_S.vp[b->first + i], b->v[i], 16); rp_S.has_vp = 1; return 1; }
+            for (int i = 0; i < b->n; i++) { memcpy(rp_S.vp[b->first + i], b->v[i], 16); }
+            rp_S.has_vp = 1; return 1; }
         case OP_DEPTH_RANGE: { const p_depth_range *b = a; rp_S.dr[0] = b->n; rp_S.dr[1] = b->f; return 1; }
         case OP_DEPTH_CLAMP: { int on = ((const p_depth_clamp *)a)->on; if ((on != 0) != (rp_S.depth_clamp != 0)) rp_pso_dirty = 1;   // 原生接口里深度夹取是管线状态
             rp_S.depth_clamp = on; return 1; }

@@ -183,10 +183,23 @@ class WaitTests(unittest.TestCase):
         for argv, body in [(["install", "G", "--no-wait"], {"gameId": "G"}),
                            (["install", "G", "--team", "ABCDE12345", "--no-wait"], {"gameId": "G", "teamId": "ABCDE12345"}),
                            (["install", "G", "--device", "测试 iPhone", "--team", "ABCDE12345", "--no-wait"],
-                            {"gameId": "G", "teamId": "ABCDE12345", "device": "测试 iPhone"})]:
+                            {"gameId": "G", "teamId": "ABCDE12345", "device": "测试 iPhone"}),
+                           # 三个确认开关各自进请求体（--accept-stale 原先只在帮助里有、请求体漏了）
+                           (["install", "G", "--accept-dropped", "--accept-no-backup", "--accept-stale", "--no-wait"],
+                            {"gameId": "G", "acceptDropped": True, "acceptNoBackup": True, "acceptStale": True})]:
             with mock.patch.object(ctl, "call", return_value={"ok": True}) as call, mock.patch.object(ctl.sys, "argv", ["s2armctl", *argv]), mock.patch("builtins.print"):
                 ctl.main()
             call.assert_called_once_with("POST", "/install", body)
+
+    def test_update_phone_passes_accept_dropped_only_when_given(self):
+        # 同 install --accept-dropped：玩家同意让别的电脑装的款这次带不上（v0.3.0 只换壳验收：原先 update-phone 没有这个入口，永远过不去）
+        for argv, body in [(["update-phone", "--accept-stale", "--ask"], {"acceptStale": True, "ask": True}),
+                           (["update-phone", "--accept-stale", "--device", "测试 iPhone", "--accept-dropped", "--ask"],
+                            {"acceptStale": True, "ask": True, "device": "测试 iPhone", "acceptDropped": True})]:
+            with mock.patch.object(ctl, "call", side_effect=[{"tasks": []}, {"ok": True, "asked": True}]) as call, \
+                    mock.patch.object(ctl.sys, "argv", ["s2armctl", *argv]), mock.patch("builtins.print"):
+                ctl.main()
+            call.assert_called_with("POST", "/update-phone", body)
 
     def run_install(self, after):
         """install 默认等这次作业结束：发命令前已有一个上次成功的装机任务 old，之后出现的才是这次的"""

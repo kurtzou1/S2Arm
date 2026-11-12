@@ -182,7 +182,6 @@ def fps60_default(rows):
     return value == "1" and any(mark in why for mark in FPS60_VERIFIED)
 
 
-NO_RUNTIME = "这款还没有做好 Mac 版，或者是旧版本做的：重新准备后可用。"
 NO_FPS60 = "这款游戏没有可用的 60 帧方案。"
 NO_DIRECT = "这款游戏没有走直连渲染，用不了 MetalFX 放大。"
 
@@ -207,9 +206,11 @@ def mac_settings(c, gid):
     for key, item in table.items():
         if "mac" not in item.get("platforms", []) or item["type"] not in ("bool", "choice"):
             continue
-        ok, why = need.get(key, (bool(caps) or item.get("scope") == "app", ""))   # 全游戏共用的项不看这款有没有 Mac 版
+        # 还没出 Mac 版（读不到能力清单）：各项都能选、先存偏好，出好后生效（v0.3.1「拿不准不停」：有没有 60 帧方案、走不走直连此时还不知道，不先挡）；
+        #   清单明说没有 60 帧方案 / 没走直连的，才是物理上用不了
+        ok, why = need.get(key, (True, "")) if caps else (True, "")
         value = picked.get(key, _default(item, caps, rows=rows))
-        out[key] = dict(available=ok, value=value if ok else _default(item, caps, rows=rows), reason="" if ok else (NO_RUNTIME if not caps else why))
+        out[key] = dict(available=ok, value=value if ok else _default(item, caps, rows=rows), reason="" if ok else why)
     return out
 
 

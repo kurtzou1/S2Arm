@@ -33,6 +33,27 @@ def main() -> int:
             if key not in known:
                 missing.setdefault(key, []).append(cs_file.name)
 
+    # 手机作业结局卡（App/PhoneJobCard.cs）的键是按作业类型拼的，上面的字面量扫描看不到：按「作业类型 × 结局状态」整张矩阵核，
+    #   每一格用到的键中英都要有、不为空（11-11 维护者截图里缺文案露出机读码；运行时退回只是兜底，缺一格就红）
+    by_id = {it["id"]: it for it in items if it.get("id")}
+    phone_kinds = ("install", "installRemove", "installRestore", "installUpdate")
+    phone_states = {
+        "running": ["phone.title.{k}", "phone.status.running.{k}", "export.overall", "phone.steps.more", "phone.details"],
+        "succeeded": ["phone.title.{k}", "phone.headline.{k}", "phone.done.{k}", "phone.stat.time", "phone.stat.device", "phone.stat.games",
+                      "phone.stat.no_push", "phone.fact.no_push", "phone.fact.pushed", "phone.fact.skipped", "phone.details"],
+        "needsPlayer": ["phone.title.{k}", "install.needs_player", "phone.details"],
+        "cancelled": ["phone.title.{k}", "phone.cancelled", "phone.details"],
+        "failed": ["phone.title.{k}", "phone.failed.{k}", "phone.next", "phone.retry", "phone.details"],
+        "drop": ["phone.title.{k}", "install.drop_title", "install.drop_confirm", "phone.drop.cancel"],
+    }
+    for kind in phone_kinds:
+        for state, keys in phone_states.items():
+            for key in (k.format(k=kind) for k in keys):
+                row = by_id.get(key, {})
+                for lang in ("zh-Hans", "en"):
+                    if not str(row.get(lang) or "").strip():
+                        missing.setdefault(key, []).append(f"PhoneJobCard {kind}×{state} {lang}")
+
     if missing:
         print(f"MISSING TEXT KEYS ({len(missing)}):", file=sys.stderr)
         for key, files in sorted(missing.items()):

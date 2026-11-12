@@ -65,7 +65,7 @@ def pack_direct_bytes(size):
     return DIRECT_SMALL_BYTES if size < PACK_SMALL_BYTES else DIRECT_LARGE_BYTES
 
 
-def pack_need_bytes(packages, unpacked=False, windows=None, image=False):
+def pack_need_bytes(packages, unpacked=False, windows=None, image=False, clones=None, links=True):
     """这次出包要多少盘；packages 已按 selected_packages 选定。unpacked：解包目录已完整在盘上。windows 不给就按当前系统。
     image：打 iPhone 包（单一 IMG 交付）——出包最后一步把资源整份写成 game.img（真数据，克隆不了），写时解包目录、直连缓存都还在盘上，
     再加一份原件大小（11-11 实测 0400486024DEC000：IMG 24.49 GiB ≈ 资源内容 24.47 GiB，整次峰值 57.90 GiB 出在写 IMG 时；原先没算，预留 43.9 GB < 峰值 62.2 GB）。
@@ -76,8 +76,12 @@ def pack_need_bytes(packages, unpacked=False, windows=None, image=False):
     size = pack_input_bytes(packages)
     copy = size * 11 // 10
     windows = os.name == "nt" if windows is None else windows
+    # clones=False：存放位置所在卷不能克隆（Mac 上 HFS+ 等非 APFS，v0.3.1 放开后克隆自动退回普通拷贝），资源包同 Windows 再占一份；不给 = 按系统
+    no_clone = windows or clones is False
     direct = pack_direct_bytes(size)
-    return (0 if unpacked else copy) + (copy if windows else 0) + direct + (size if image else 0)
+    # links=False：存放位置所在卷建不了目录链接（Windows exFAT / FAT32，v0.3.1 确认后照用）：产物根走实目录模式，RomFS 不进共享存储、
+    #   出包工作根也整份拷——按多两份算
+    return (0 if unpacked else copy) + (copy if no_clone else 0) + (0 if links else 2 * copy) + direct + (size if image else 0)
 
 
 def _existing(path):

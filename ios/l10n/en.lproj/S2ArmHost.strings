@@ -237,7 +237,7 @@
 "app.library.cantOpen.message" = "This game couldn’t be prepared to start. Swipe the app away in the app switcher and open it again; if it still fails, export diagnostics and send them to us.";
 "app.library.missing.title" = "Game resources are missing";
 "app.library.packBroken" = "Only part of this game’s resources were copied — the copy was probably interrupted. In S2Arm on your computer, click “Install on iPhone” for this game again to add what’s missing. When it’s done, tap “Check again”.";
-"app.library.packMissing" = "This game’s resources aren’t on the phone yet. In S2Arm on your computer, click “Install on iPhone” for this game and the resources are copied over automatically. You can also put this game’s game.img file anywhere in this app in the Files app. Then tap “Check again”.";
+"app.library.packMissing" = "This game’s resources aren’t on the phone yet. In S2Arm on your computer, click “Install on iPhone” for this game and the resources are copied over automatically. You can also put this game’s game.img file in this app’s “Import Here” folder in the Files app. Then tap “Check again”.";
 "app.library.reopen.message" = "You can play only one game each time the app is opened. Swipe the app away in the app switcher, open it again, then choose this game.";
 "app.library.reopen.title" = "Close and reopen the app";
 "app.library.stillMissing" = "Checked just now — the complete resources still aren’t there.\n\n";
@@ -285,6 +285,7 @@
 "controller.scanning" = "Searching, tap to cancel";
 "controller.turnOnBluetooth" = "Turn on Bluetooth and try again";
 "error.sentence" = "%@. %@";
+"img.importFolder" = "Import Here";
 "img.scanFailed.title" = "Couldn't import the game file";
 "games.repair.done.title" = "Game folder repaired";
 "games.repair.done.body" = "The game folder belonged to a system account, so S2Arm could not write to it and installing never started. It has been moved to a new folder owned by S2Arm (%u files, sharing the original data, so no extra space). You can continue installing. S2Arm cannot delete the old folder; it is cleared the next time you connect to your computer.";
@@ -346,7 +347,7 @@
 "loadpage.subtitle" = "First launch: doing one-time setup for your device";
 "notice.batch" = "Batch %d of %d";
 "notice.cable" = "Cable";
-"notice.step.img" = "Or put this game’s game.img file anywhere in “%@” in the Files app, then open “%@” again. It’s picked up automatically.";
+"notice.step.img" = "Or put this game’s game.img file in the “Import Here” folder of “%@” in the Files app, then open “%@” again. It’s picked up automatically.";
 "notice.step.auto" = "In S2Arm on your computer, click “Install on iPhone” for this game and the resources are copied over automatically — the easiest way.";
 "save.blocked" = "%@\n\nCopy your data somewhere safe before deciding: open the Files app → “On My iPhone” (“On My iPad” on iPad) → “%@”, and copy the whole “S2A” folder somewhere else. Unfinished operations are recorded in S2A/save-transfer/save-transactions. You can also select this device in Finder on a Mac → “Files”, and drag out the “S2A” folder under this app.\n\nAfter copying, you can repackage and install to try again, or tap “Start game anyway…”.";
 "save.busy" = "The previous save operation is still running. Try again when it finishes.";

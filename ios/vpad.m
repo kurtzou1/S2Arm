@@ -431,6 +431,7 @@ typedef BOOL (^VPFlag)(void);
 - (void)openFullSettings { void s2a_diag_open_menu(void); s2a_diag_open_menu(); }   // 同四指长按：整页设置，游戏不退出，开着时触屏输入停住
 - (void)dealloc { [NSNotificationCenter.defaultCenter removeObserver:self]; [_gearFade invalidate]; [_fade invalidate]; [_holdLockTimer invalidate]; }
 - (void)clearTouches {
+    S2A_MAIN_ONLY("-[S2AVPadView clearTouches]");
     [_fade invalidate]; _fade = nil;
     [_held removeAllObjects]; _stickPress = 0;
     _hapticState = (S2AVPadHapticState){0}; memset(_stickTravel, 0, sizeof _stickTravel); _impactFeedback = nil;
@@ -901,6 +902,7 @@ static NSString *const kSlideSwitchKey = @"S2AVPadSlideSwitch";   // 滑动切�
         [UIView animateWithDuration:0.4 animations:^{ for (UILabel *l in self->_keys) if (!(self->_holdLock.locked >> l.tag & 1)) l.alpha = [self keyAlpha:l active:NO]; }]; }];
 }
 - (void)setInputEnabled:(BOOL)enabled {
+    S2A_MAIN_ONLY("-[S2AVPadView setInputEnabled:]");
     BOOL hide = !enabled && !_touchOnly;   // 纯触屏模式下接了实体手柄也留着这一层：手指和手柄是两条独立输入
     if (_inputEnabled == enabled && self.hidden == hide) return;
     _inputEnabled = enabled; [self clearTouches];

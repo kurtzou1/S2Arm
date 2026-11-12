@@ -6,7 +6,10 @@
 放在 tools/ 而不是 pack/jobs/：调度把 tools/ 整份单独拷到 gate-host 跑 dev_run（tools/sched.sh git archive tools），tools 树要自成一体（11-06 列车 sched_test / ssh_argv_test 退回）。
 
 口径（手机端 runtime/src/pack_apply.c 不变）：
-  ① 机上已有什么按 <文档根>/资源包/index.applied.tsv 认（文档根缺省 Documents，多款容器每款 Documents/games/<游戏号>）（App 解包成功时写；老 App 没有它才退回 index.tsv）
+  ① 机上已有什么按 <资源包根>/index.applied.tsv 认（App 解包成功时写；老 App 没有它才退回 index.tsv）。
+     资源包根：单款 App 缺省 <文档根>/资源包 = Documents/资源包；多款容器由调用方 --pack-root 给（pack/jobs/install.py pick_pack_root：
+     Library/Application Support/S2Arm/games/<游戏号>/资源包，过渡期新位置不在而旧位置 Documents/games/<游戏号>/资源包 在时给旧位置）；
+     解包日志总在 <文档根>/unpack.log（文档根缺省 Documents，多款容器每款 Documents/games/<游戏号>）
   ② .incoming 里本工具推的包（<时刻>_<三位序号>.tar）逐个核完整性（s2a-devpush tar-ok：512 整倍、末尾 1024 字节全零）：
      完整的留着（推完、还没起 App 解的批：出包重叠早推的、上次推完没起 App 的），其里的文件按 .pushed 算机上已有；
      不完整或核不了（Mac 没有 s2a-devpush / UDID）的用同名空 tar（1024 字节全零）盖掉，不信 .pushed、按已应用索引补推（10-26 截短残批）
@@ -26,7 +29,8 @@
 用法：
   python3 tools/push_pack.py run   <设备> <包名> <资源包目录> [--full] [--udid U] [--devpush P] [--work 目录] [--apply]   一条龙（启动器 / Windows / 手动装机）；
       --apply：推完起一次 App 只解包并等解完（.applied = 本包且解包日志本次新增完成行）
-  各子命令都收 --docs <设备侧文档根>（缺省 Documents；多款容器每款 Documents/games/<游戏号>，资源包 / 解包日志都在它下面）
+  各子命令都收 --docs <设备侧文档根>（缺省 Documents；多款容器每款 Documents/games/<游戏号>，解包日志在它下面）、
+      --pack-root <设备侧资源包根>（缺省 <文档根>/资源包；多款容器每款 Library/Application Support/S2Arm/games/<游戏号>/资源包）
       与 --launch-ctx <值>（多款容器：推完正常拉起 App 到游戏库、由库解开这款（值本身已不再传给 App））
   python3 tools/push_pack.py plan  <设备> <包名> <资源包目录> --work O [--full] [--udid U]   算待推批次（dev_run 用：之后它按推送量放大看门、腾空间）
   python3 tools/push_pack.py free  <设备> <包名> <资源包目录> --work O [--udid U]           机上可写字节（读不到不打印）
@@ -63,7 +67,7 @@ IMG_PACK_ID = slice(32, 96)   # 头里的资源包号（ASCII，可空）：空 
 DOCS = "Documents"   # 设备侧文档根（单款 App）；多款容器每款 Documents/games/<游戏号>（pack/ship_ext.py 容器布局），设备对象的 docs 属性
 
 
-def rp(dev): return f"{dev.docs}/资源包"
+def rp(dev): return dev.pack or f"{dev.docs}/资源包"   # 设备侧资源包根：设备对象的 pack 属性（--pack-root），没给按文档根推（单款 App）
 def inc(dev): return rp(dev) + "/.incoming"
 def unpack_log(dev): return f"{dev.docs}/unpack.log"   # runtime/src/pack_apply.c：<文档根>/unpack.log
 STALE = re.compile(r"\d+_\d{3}\.tar")
@@ -96,7 +100,7 @@ def devpush_path(given=None, env=None):
 class Devpush:
     """s2a-devpush（pack/devpush）：经 usbmuxd（USBMUXD_SOCKET_ADDRESS 可指别的机器）连手机，house_arrest 进 App 容器、AFC 读写"""
     kind = "devpush"
-    docs, ctx = DOCS, None
+    docs, ctx, pack = DOCS, None, None
     progress = None   # 当前文件 / 批次的有效载荷字节；不代表 .pushed 已提交
 
     def __init__(self, exe, udid, bid, work, env=None):
@@ -204,7 +208,7 @@ class Devicectl:
     """Mac：xcrun devicectl（口径同 tools/dev_run.sh：一律用 devicectl 自带 --timeout，外层 timeout 只在它自己卡死时兜底；拷贝按大小定超时、挂了重试一次）。
     有 s2a-devpush + UDID 时流式写批次、核待解批完整性借它（手机只在 CoreDevice 无线隧道上、usbmuxd 看不到时那批退回 devicectl）"""
     kind = "devicectl"
-    docs, ctx = DOCS, None
+    docs, ctx, pack = DOCS, None, None
 
     def __init__(self, device, bid, work, udid=None, devpush=None, env=None):
         self.device, self.bid, self.work, self.udid, self.env = device, bid, Path(work), udid, env
@@ -337,15 +341,15 @@ class Devicectl:
     say = staticmethod(lambda m: None)
 
 
-def device(dev, bid, work, udid=None, devpush=None, via=None, env=None, say=print, docs=DOCS, ctx=None):
+def device(dev, bid, work, udid=None, devpush=None, via=None, env=None, say=print, docs=DOCS, ctx=None, pack=None):
     """按平台挑设备操作：Windows（没有 devicectl）或 via=devpush → s2a-devpush（dev 就是 UDID）；Mac → devicectl（有工具 + UDID 时借 s2a-devpush 流式）"""
     env = dict(os.environ) if env is None else env
     udid = udid or env.get("S2A_PUSH_UDID") or env.get("SW_IOS_UDID") or None
     exe = devpush_path(devpush, env)
     if via == "devpush" or (via is None and os.name == "nt"):
         if not exe: raise Fail("没有 s2a-devpush（cargo build --release --manifest-path pack/devpush/Cargo.toml --target-dir build/devpush）")
-        d = Devpush(exe, udid or dev, bid, work, env); d.why = f"工具 {exe}"; d.docs, d.ctx = docs, ctx; return d
-    d = Devicectl(dev, bid, work, udid, exe, env); d.say = say; d.docs, d.ctx = docs, ctx
+        d = Devpush(exe, udid or dev, bid, work, env); d.why = f"工具 {exe}"; d.docs, d.ctx, d.pack = docs, ctx, pack; return d
+    d = Devicectl(dev, bid, work, udid, exe, env); d.say = say; d.docs, d.ctx, d.pack = docs, ctx, pack
     d.why = "没有 s2a-devpush" if not exe else "不知道手机 UDID（S2A_PUSH_UDID）" if not udid else f"工具 {exe}"
     return d
 
@@ -628,13 +632,14 @@ def apply(dev, pack, work, nb, say=print, sleep=time.sleep, now=time.time, stall
     """推完起一次 App 只解包（S2A_PACK_APPLY_ONLY=1，runtime/src/pack_apply.c）并等它解完：机上 .applied = 本包 index_sha256，且解包日志
     本次新增完成行「解开 N 个包 … .applied = <本包>」（只看 .applied 不够：同包重推时推之前就对得上，11-06 对照实测）。
     等待按进度：本次新增的进度行「进度：解开 <包>（k/n）」k 涨了就重新计时、打一行「机上解包 k/n」（装机作业据此发进度事件，pack/jobs/install.py）；
-    连续 stall 秒 k 没涨 → 判失败。没推东西且 .applied 已是本包 → 不起 App。失败抛 Fail"""
+    连续 stall 秒 k 没涨 → 抛 NeedsPlayer（传输成功、提醒玩家打开 App 接着装）。没推东西且 .applied 已是本包 → 不起 App。机上解开失败抛 Fail"""
     want = json.loads((Path(pack) / "manifest.json").read_text(encoding="utf-8")).get("index_sha256")
     def applied(): return (read(dev, f"{rp(dev)}/.applied", work, "r.applied") or "").strip()
     if not nb and applied() == want:
         return False
     u0 = len((read(dev, unpack_log(dev), work, "r.unpack0") or "").splitlines())
     done = re.compile(r"解开 \d+ 个包 .*\.applied = " + re.escape(want or "-"))
+    partial = re.compile(r"解开 \d+ 个包 .*缺 (\d+) 个非必需文件.*部分可玩 = " + re.escape(want or "-"))   # 手机上只缺非核心文件（v0.3.1 缺件照玩，pack_apply.c）
     # 多款容器：正常拉起到游戏库，由库在后台解开传完的这款（图块显示「安装中」和进度，S2ArmShellHostModel）。只解包模式是整屏导入页、解完进程自己退出，
     #   玩家正开着库时 App 会突然消失；拉不起时玩家手动打开也走库这同一条路。单款包照旧只解包模式
     say("拉起 App 到游戏库，由它解开这款" if dev.ctx else "起一次 App 解开推送包（S2A_PACK_APPLY_ONLY=1）")
@@ -657,6 +662,9 @@ def apply(dev, pack, work, nb, say=print, sleep=time.sleep, now=time.time, stall
         new = (read(dev, unpack_log(dev), work, "r.unpack1") or "").splitlines()[u0:]
         if applied() == want and any(done.search(l) for l in new):
             say("资源包：机上已解开（.applied = 本包）"); return True
+        part = [m for m in map(partial.search, new) if m]
+        if part:   # 解开了，但手机上缺几个非核心文件：能玩，提醒补（同「还差最后一步」口径，装机按传输成功 + 提醒收尾）
+            raise NeedsPlayer(f"资源包已传完，还差最后一步：手机上还缺 {part[-1].group(1)} 个文件，可以先玩，用到它们时可能会停；再点一次「装到 iPhone」会把缺的补上")
         failed = [m.group(1).strip() for m in map(FAILED.search, new) if m]
         if failed:   # App 已经起来解过、失败了：按它写的原因当场报（原先只看进度行，第一包前就失败时干等 stall 秒、再报「解包没有开始」，原因丢了）
             raise Fail(f"资源包推进去了，但手机上解开失败：{failed[-1][:600]}")
@@ -669,8 +677,9 @@ def apply(dev, pack, work, nb, say=print, sleep=time.sleep, now=time.time, stall
     if cant_open:
         why = LOCKED_WHY if was_locked else NO_DEVMODE_WHY if any(k in cant_open for k in DEVMODE_SIGNS) else CANT_OPEN_WHY
         raise NeedsPlayer(f"资源包已传完，还差最后一步：{why}{OPEN_BY_HAND}（电脑这边打不开手机上的 App：{cant_open}）")
-    raise Fail(f"资源包推进去了，但机上解包 {stall} 秒没有新进展（停在第 {seen} 包）：打开这款游戏、保持在前台等它导入完" if seen else
-               f"资源包推进去了，但起 App 后 {stall} 秒机上解包没有开始：打开这款游戏、保持在前台等它导入完")
+    # 解包停住（装机原则 11-11）：资源已经全在手机上，玩家打开 App 会接着装——和拉不起 App 同一口径（传输成功 + 提醒），不报装机失败
+    raise NeedsPlayer(f"资源包已传完，还差最后一步：机上解包 {stall} 秒没有新进展（停在第 {seen} 包）。{OPEN_BY_HAND}" if seen else
+                      f"资源包已传完，还差最后一步：起 App 后 {stall} 秒机上解包没有开始。{OPEN_BY_HAND}")
 
 
 PROBE = ".s2a-write-probe"   # 推之前写的几字节探针（资源包目录下，下次覆盖）
@@ -746,7 +755,7 @@ def main(argv=None):
     ap.add_argument("--work"); ap.add_argument("--full", action="store_true"); ap.add_argument("--udid"); ap.add_argument("--devpush")
     ap.add_argument("--via", choices=("devpush", "devicectl")); ap.add_argument("--apply", action="store_true")
     ap.add_argument("--progress-lines", action="store_true")   # 推送进度另打机器读的行「PROGRESS_PREFIX 已传 总量 批 总批」（Mac 装机作业 pack/jobs/install.py 解析成作业计数）
-    ap.add_argument("--docs", default=DOCS); ap.add_argument("--launch-ctx")   # 多款容器：本款设备侧文档根 Documents/games/<游戏号>、推完正常拉起 App 到游戏库由它解开   # run 推完等机上解开（s2armctl push-pack / Windows 装机）
+    ap.add_argument("--docs", default=DOCS); ap.add_argument("--pack-root"); ap.add_argument("--launch-ctx")   # 多款容器：本款设备侧文档根 Documents/games/<游戏号>、推完正常拉起 App 到游戏库由它解开   # run 推完等机上解开（s2armctl push-pack / Windows 装机）
     a = ap.parse_args(argv)
     pack = Path(a.pack)
     if not (pack / "index.tsv").is_file():
@@ -759,7 +768,7 @@ def main(argv=None):
     else: ap.error(f"{a.op} 要 --work")
     state = work / "push.state"
     try:
-        dev = device(a.device, a.bundle_id, work, a.udid, a.devpush, a.via, say=say, docs=a.docs.rstrip("/"), ctx=a.launch_ctx)
+        dev = device(a.device, a.bundle_id, work, a.udid, a.devpush, a.via, say=say, docs=a.docs.rstrip("/"), ctx=a.launch_ctx, pack=a.pack_root.rstrip("/") if a.pack_root else None)
         if a.op == "free":
             fb = dev.free(); print(fb if fb is not None else "", flush=True); return 0
         if a.op == "need":   # plan 之后：机上要的可写字节（tools/push_pack.sh）

@@ -9,7 +9,7 @@ public sealed record LibraryJobOutput(LibraryJobResult Report, ProbeOutput Outpu
 public static class LibraryJobClient
 {
     public static async Task<LibraryJobOutput> RunAsync(LauncherPaths paths, string privateRoot, string library,
-        string? libraryId, string operation, IReadOnlyList<string>? selectedPaths, CancellationToken cancellationToken, string? moveFrom = null, bool partialResults = false, string? probe = null, string? jobId = null, bool startup = false, bool freeDefault = false)
+        string? libraryId, string operation, IReadOnlyList<string>? selectedPaths, CancellationToken cancellationToken, string? moveFrom = null, bool partialResults = false, string? probe = null, string? jobId = null, bool startup = false, bool freeDefault = false, IReadOnlyCollection<string>? accept = null)
     {
         if (operation is not ("setup" or "catalog" or "keys" or "import" or "diagnostics" or "locations" or "storageOverview" or "spaceSurvey"))
             throw new ArgumentException("Unsupported library operation.", nameof(operation));
@@ -31,6 +31,8 @@ public static class LibraryJobClient
         {
             payload["installDir"] = Path.GetFullPath(AppContext.BaseDirectory);
             if (freeDefault) payload["freeDefault"] = true;
+            // accept：玩家在换库确认里同意过的参数（v0.3.1：acceptCloud 云盘同步目录、acceptForeign 有别的文件的文件夹、acceptFormat exFAT / FAT32 盘），逐次累积
+            foreach (var key in accept ?? []) payload[key] = true;
         }
         // 逐来源结果（pack/jobs/library.py import_games）：认不出的来源不挡别的，结果里带 sources（批量出包清单列出认不出的文件）
         if (partialResults && operation == "import") payload["partialResults"] = true;

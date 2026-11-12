@@ -20,7 +20,7 @@ printf '#!/bin/bash\necho "原件核对桩 rc=${FAKE_SRCVER_RC:-0}"; exit ${FAKE
 for s in rewrite sysdata uilayout aoc caps romfsidx direct_profile extract direct_seed direct; do
   cat > $T/repo/pack/stage_$s.sh <<EOF
 #!/bin/bash
-echo "$s 起 \$(python3 -c 'import time;print(time.time())') \${S2A_SHADER_NO_PSO:-0}\${S2A_SHADER_NO_DL:-0} J=\${J:-无} DD=\${DEVELOPER_DIR:-无} LZ=\${S2A_SHADER_LAZY:-0}" >> $T/log
+echo "$s 起 \$(python3 -c 'import time;print(time.time())') \${S2A_SHADER_NO_PSO:-0}\${S2A_SHADER_NO_DL:-0} J=\${J:-无} DD=\${DEVELOPER_DIR:-无} LZ=\${S2A_SHADER_LAZY:-0} BK=\${S2A_CPU_BAKE:-无}" >> $T/log
 [ "$s" = direct ] && sleep \${FAKE_DIRECT_SLEEP:-1}
 [ "$s" = rewrite ] && sleep \${FAKE_RW_SLEEP:-0}
 # FAKE_RW_UNTIL=<阶段>：改写等那个阶段在日志里记下「起」才结束（最多 30 秒）——按事件判并行，不靠墙钟窗口（⑬a：满载时直连库可能晚于固定的 2 秒才起）
@@ -44,6 +44,10 @@ ck "① 退出时一行分阶段用时，各段都在（缺：${miss:-无}）、
 jj() { grep ' 起 ' $T/log | awk -v s="$1" '$1 == s { sub("J=", "", $5); print $5; exit }'; }
 o=$(J=18 R); r=$?
 ck "① 调用方给 J=18 → 直连 J=$(jj direct) 开满" '[ $r = 0 ] && [ "$(jj direct)" = 18 ]'
+# #711：直连库段只拿编译路数 J（S2A_DIRECT_J），S2A_CPU_BAKE 保留按内存算的值给段里的抽取封顶（原先两个都设成 J，抽取跟着开到编译路数）
+bk() { grep ' 起 ' $T/log | awk -v s="$1" '$1 == s { for (i = 1; i <= NF; i++) if ($i ~ /^BK=/) { sub("BK=", "", $i); print $i; exit } }'; }
+o=$(S2A_DIRECT_J=7 S2A_CPU_BAKE=3 R); r=$?
+ck "① S2A_DIRECT_J=7、S2A_CPU_BAKE=3 → 直连 J=$(jj direct)、S2A_CPU_BAKE=$(bk direct)（期望 7 / 3）" '[ $r = 0 ] && [ "$(jj direct)" = 7 ] && [ "$(bk direct)" = 3 ]'
 # 阶段进度（10-25 维护者「能看到进度么」）：给 S2A_PROGRESS → 每完成一段追加一行「刷新各阶段 已完成 总数」
 o=$(S2A_PROGRESS=$T/prog R); r=$?; pg=$(cut -f3,4 $T/prog | tr '\t\n' '/ '); rm -f $T/prog
 #   11-06 依赖重排（快路）：追加内容 ‖ 界面布局 2 → 配置推导 + 抽取 4 → 直连库 5 → 种子表 6 → 汇合旁路（改写 / 系统数据 / 能力表 / RomFS 索引）10

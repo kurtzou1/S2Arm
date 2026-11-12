@@ -24,9 +24,9 @@ struct JobSessionView: View {
         switch session.phase {
         case .running: return loc.t(play ? "s2arm.play.running" : "s2arm.job.running")
         case .stopping: return loc.t(play ? "s2arm.play.stopping" : "s2arm.job.stopping")
-        case .finished(.completed): return loc.t(play ? "s2arm.play.completed" : "s2arm.job.done." + session.kind.rawValue)
+        case .finished(.completed): return play ? loc.t("s2arm.play.completed") : Self.text(loc, "s2arm.job.done." + session.kind.rawValue, fallback: "s2arm.job.done")
         case .finished(.cancelled): return loc.t(play ? "s2arm.play.cancelled" : "s2arm.job.cancelled")
-        case .finished(.failed): return loc.t(play ? "s2arm.play.failed" : "s2arm.job.failed")
+        case .finished(.failed), .finished(.paused): return loc.t(play ? "s2arm.play.failed" : "s2arm.job.failed")   // paused：出包会话按「没全成」收尾，不会停在它
         case .finished(.interrupted): return loc.t(play ? "s2arm.play.interrupted" : "s2arm.job.interrupted")
         }
     }
@@ -40,7 +40,36 @@ struct JobSessionView: View {
         }
     }
 
+    /// 文案查不到时退回通用句，不把键名上屏（11-11 截图里露出 S2ARM.JOB.DONE.INSTALLUPDATE）；各作业类型都有文案由单测守着
+    static func text(_ loc: Localizer, _ key: String, fallback: String) -> String {
+        let s = loc.t(key)
+        return s == key ? loc.t(fallback) : s
+    }
+
     var body: some View {
+        if session.isPhoneJob { phonePage } else { generalPage }
+    }
+
+    /// 手机作业：统一的三态结局（PhoneJobPanel），下面一排按钮
+    private var phonePage: some View {
+        VStack(alignment: .leading, spacing: 26) {
+            ScrollView { PhoneJobPanel(model: model, session: session).frame(maxWidth: .infinity, alignment: .leading) }
+            HStack(spacing: 14) {
+                if finished == nil {
+                    Button { model.stop() } label: { LauncherHeroActionLabel(title: loc.t("s2arm.job.cancel"), symbol: "stop.fill") }
+                        .buttonStyle(.plain).disabled(session.phase == .stopping).keyboardShortcut(".", modifiers: .command)
+                } else {
+                    Button { model.backToLibrary() } label: { LauncherHeroActionLabel(title: loc.t("s2arm.play.back"), symbol: "chevron.left") }
+                        .buttonStyle(.plain).keyboardShortcut(.defaultAction)
+                }
+                Spacer()
+            }
+        }
+        .padding(.horizontal, 48).padding(.vertical, 40)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var generalPage: some View {
         VStack(alignment: .leading, spacing: 22) {
             HStack(spacing: 8) {
                 Circle().fill(statusColor).frame(width: 9, height: 9)

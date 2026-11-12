@@ -94,6 +94,9 @@ public sealed class MilestoneTrack
     public IReadOnlyDictionary<string, double> Started => started;
     /// <summary>Real done / total of the current step (progress events); null without a real count.</summary>
     public double? Fraction { get; private set; }
+    /// <summary>整单进度（作业层每条事件的 overall，0–1，只增不减、成功才到 1；pack/jobs/overall.py）。大百分比与分段条只显示它，
+    /// 不再按当前计数器自己拼（11-11 维护者：「百分比反复到 91% 又跳回 40%」）。没有的作业为 null，照旧</summary>
+    public double? Overall { get; private set; }
     public string Message { get; private set; } = "";
 
     public void Ingest(JsonElement e, double now)
@@ -111,6 +114,8 @@ public sealed class MilestoneTrack
             Current = id; Fraction = null;
             started.TryAdd(id, now);
         }
+        if (e.TryGetProperty("overall", out var o) && o.ValueKind == JsonValueKind.Number)
+            Overall = Math.Max(Overall ?? 0, Math.Min(1, o.GetDouble()));
         if (type is "stage" or "message" or "cache") Fraction = null;   // 新的一句说明 = 上一个百分比不再代表当前在做的事（社区贡献者补丁 #8）
         if (type == "progress" && e.TryGetProperty("totalUnits", out var total) && total.ValueKind == JsonValueKind.Number && total.GetDouble() > 0 &&
             e.TryGetProperty("doneUnits", out var done) && done.ValueKind == JsonValueKind.Number)

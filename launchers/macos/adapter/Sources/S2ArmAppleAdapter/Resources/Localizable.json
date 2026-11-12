@@ -4952,8 +4952,8 @@
   "en": "Not enough disk space. Preparing this game needs more free space."
  },
  {
-  "source": "改写失败：这款游戏有一处程序代码暂不支持。",
-  "en": "Rewriting failed. This game has a code pattern that is not yet supported."
+  "source": "暂时出不了包：这款游戏里有程序代码我们的改写器还不支持，我们正在修。",
+  "en": "Can't build this game yet. This game uses code our rewriter doesn't support yet. We're working on a fix."
  },
  {
   "source": "着色器编译暂不支持：这款游戏的着色器编译目前只能在 Mac 上完成。",
@@ -5182,6 +5182,14 @@
  {
   "source": "打开 Xcode →「设置」→「账户」，点「+」登录你的 Apple ID（免费的就可以），再点一次「装到 iPhone」；不想登录 Xcode 也可以改用 AltStore 安装。",
   "en": "Open Xcode → Settings → Accounts, sign in with your Apple ID (a free account works), then retry installation. AltStore is also an installation option."
+ },
+ {
+  "source": "让你选的那台 iPhone / iPad 连上这台电脑：插上数据线，或解锁后和电脑连同一个 Wi-Fi；第一次连要在设备上点「信任」，并在「设置 → 隐私与安全性 → 开发者模式」打开开发者模式，然后再试。",
+  "en": "Connect the iPhone or iPad you chose to this computer: plug in a cable, or unlock it on the same Wi-Fi. The first time, tap Trust on the device and enable Developer Mode under Settings → Privacy & Security, then retry."
+ },
+ {
+  "source": "在装机页选好要装到哪台 iPhone / iPad，再点装机。",
+  "en": "Choose which iPhone or iPad to install to on the install page, then install."
  },
  {
   "source": "查看本任务日志里签名那一步的报错；确认 Xcode 能用你的账号给这台 iPhone 签名，或改用 AltStore 安装。",
@@ -5904,8 +5912,8 @@
   "en": "Check your network and try again. If it still fails, download the new version from the download page and install it over this one. Your current version and saves are not affected."
  },
  {
-  "source": "这款游戏有一处程序代码暂不支持，建议反馈让我们补上：点「复制错误摘要」并发给我们。",
-  "en": "This game has a code pattern that is not yet supported. We recommend reporting this: click Copy error summary and send it to us."
+  "source": "之前已经装到 iPhone 上的这款可以照常接着玩。点「复制错误摘要」发给我们，修好后更新 S2Arm 再出一次包。",
+  "en": "If this game is already on your iPhone, you can keep playing that copy. Click Copy error summary and send it to us; after the fix, update S2Arm and build again."
  },
  {
   "source": "这款游戏的着色器编译目前只能在 Mac 上完成，Windows 版暂不支持；请改用 Mac 版 S2Arm 出包。",
@@ -6508,12 +6516,12 @@
   "en": "The game was removed from the app, but its data on iPhone could not be deleted: "
  },
  {
-  "source": "确认后再点一次：点名的游戏会暂时不能玩（存档和资源包留在手机上），到装它们的那台电脑上再「装到 iPhone」一次就回来；不想这样就先别装。",
-  "en": "Click again to confirm: the games named will stop working for now (their saves and resources stay on the phone). Install them on iPhone again from the computer they came from to bring them back. If you don't want that, don't install now."
+  "source": "确认后再点一次就照装：存档没备份，万一覆盖出问题可能丢档；想先备份就把手机解锁、数据线插稳后再点一次。",
+  "en": "Click again to install anyway: your saves are not backed up, so a problem during the overwrite could lose them. To back them up first, unlock the phone, plug the cable in firmly, and click again."
  },
  {
-  "source": "先给点名的游戏各「打 iPhone 包」一次，再装到 iPhone；手机上现有的游戏不受影响。",
-  "en": "Run \"Build for iPhone\" once for each game named, then install on iPhone; the games already on your phone are not affected."
+  "source": "确认后再点一次：点名的游戏会暂时不能玩（存档和资源包留在手机上），到装它们的那台电脑上再「装到 iPhone」一次就回来；不想这样就先别装。",
+  "en": "Click again to confirm: the games named will stop working for now (their saves and resources stay on the phone). Install them on iPhone again from the computer they came from to bring them back. If you don't want that, don't install now."
  },
  {
   "source": "这款没法和手机上已有的游戏放进同一个 App：先从 iPhone 删掉不兼容的那款。",
@@ -6674,10 +6682,6 @@
  {
   "source": "这款游戏在这台电脑上还没玩过：存档会在下次启动游戏时放进去。",
   "en": "You haven't played this game on this Mac yet. The save will be added the next time you start the game."
- },
- {
-  "source": "这款还没有做好 Mac 版，或者是旧版本做的：重新准备后可用。",
-  "en": "This game has no Mac build yet, or it was built by an older version. Available after you prepare it again."
  },
  {
   "source": "这款游戏没有可用的 60 帧方案。",
@@ -6940,28 +6944,12 @@
   "en": "The game still runs; it just stutters briefly the first few times it reaches a new scene (shaders compile on first use and are remembered). Please export diagnostics and send them to us; after the fix, packaging again prebuilds them."
  },
  {
-  "source": "再启动一次试试；还是这样，就在「环境检查」导出诊断包，到 GitHub 发帖附上，我们按崩溃现场修。",
-  "en": "Try starting it again. If it happens again, export a diagnostics package from Environment Check and attach it to a GitHub issue so we can fix the crash."
- },
- {
-  "source": "让你选的那台 iPhone / iPad 连上这台电脑：插上数据线，或解锁后和电脑连同一个 Wi-Fi；第一次连要在设备上点「信任」，并在「设置 → 隐私与安全性 → 开发者模式」打开开发者模式，然后再试。",
-  "en": "Connect the iPhone or iPad you chose to this computer: plug in a cable, or unlock it on the same Wi-Fi. The first time, tap Trust on the device and enable Developer Mode under Settings → Privacy & Security, then retry."
- },
- {
-  "source": "在装机页选好要装到哪台 iPhone / iPad，再点装机。",
-  "en": "Choose which iPhone or iPad to install to on the install page, then install."
- },
- {
   "source": "没说要装到哪台设备：在装机页选好 iPhone / iPad 再装。",
   "en": "No device chosen: choose an iPhone or iPad on the install page, then install."
  },
  {
   "source": "{0}「{1}」现在不在线：插上数据线，或让它和这台电脑连同一个 Wi-Fi 并解锁，再试一次。",
   "en": "{0} “{1}” is offline: plug it in with a cable, or unlock it on the same Wi-Fi as this computer, then try again."
- },
- {
-  "source": "没找到要装的那台设备（{0}）：它还没和这台电脑配对过——插上数据线并解锁，在设备上点「信任」（配对过以后也可以连同一个 Wi-Fi 装）。",
-  "en": "The chosen device ({0}) hasn't been paired with this computer yet: plug it in, unlock it and tap Trust on the device (after that it can also install over the same Wi-Fi)."
  },
  {
   "source": "要装的那台设备（编号末尾 {0}）现在不在线：插上数据线并解锁，或让它和这台电脑连同一个 Wi-Fi，再试一次。",
@@ -7032,6 +7020,58 @@
   "en": "Drive format not supported: this drive doesn't support the file operations exporting needs (common on exFAT / FAT external drives)."
  },
  {
+  "source": "批次记录（数据目录下的 batch.json）写不进：检查数据目录所在磁盘的空间与权限，处理后在批量出包页点「继续」；已出好的包都在。",
+  "en": "The batch record (batch.json in the data folder) couldn't be written: check free space and permissions on that disk, then click \"Continue\" on the batch export page. Finished games are kept."
+ },
+ {
+  "source": "批次记录没写成（batch.json：{0}）：这一批停在这里，已出好的不受影响。",
+  "en": "The batch record wasn't saved (batch.json: {0}). The batch stopped here; finished games are kept."
+ },
+ {
+  "source": "批次文件不见了或读不出（batch.json）：这一批停在这里，已出好的不受影响。",
+  "en": "The batch file (batch.json) is missing or unreadable. The batch stopped here; finished games are kept."
+ },
+ {
+  "source": "已经有一个出包在进行：等它出完或取消后再出。",
+  "en": "Another export is already running. Wait for it to finish, or cancel it, then try again."
+ },
+ {
+  "source": "没有进行中的批次：先在批量出包页建好这一批。",
+  "en": "There's no batch in progress. Set one up on the batch export page first."
+ },
+ {
+  "source": "磁盘空间不足，这一批暂停了：释放空间后点「重试」接着出，已出好的不受影响。",
+  "en": "Not enough disk space, so the batch is paused. Free up space, then click \"Retry\" to continue. Finished games are kept."
+ },
+ {
+  "source": "这一步的出包作业没有给出结局就退出了（详见这一步的日志）。",
+  "en": "This export step exited without reporting a result (see this step's log)."
+ },
+ {
+  "source": "出 {0}（{1}）",
+  "en": "Exporting {0} ({1})"
+ },
+ {
+  "source": "出包计划不完整：plan.source 只认 inline / batch。",
+  "en": "The export plan is incomplete: plan.source must be inline or batch."
+ },
+ {
+  "source": "启动器退出了，这一批停在第 {0} 款：重开启动器后点「继续剩下的」，只出还没出的。",
+  "en": "The launcher was closed, so the batch stopped at game {0}. Reopen the launcher and click \"Continue the rest\" to export only what's left."
+ },
+ {
+  "source": "在等「{0}」结束…",
+  "en": "Waiting for “{0}” to finish…"
+ },
+ {
+  "source": "再启动一次试试；还是这样，就在「环境检查」导出诊断包，到 GitHub 发帖附上，我们按崩溃现场修。",
+  "en": "Try starting it again. If it happens again, export a diagnostics package from Environment Check and attach it to a GitHub issue so we can fix the crash."
+ },
+ {
+  "source": "没找到要装的那台设备（{0}）：它还没和这台电脑配对过——插上数据线并解锁，在设备上点「信任」（配对过以后也可以连同一个 Wi-Fi 装）。",
+  "en": "The chosen device ({0}) hasn't been paired with this computer yet: plug it in, unlock it and tap Trust on the device (after that it can also install over the same Wi-Fi)."
+ },
+ {
   "source": "重新打开 S2Arm（会自动修好），再从电脑推送一次。",
   "en": "Reopen S2Arm (it fixes this automatically), then push from the computer again."
  },
@@ -7082,5 +7122,33 @@
  {
   "source": "能装，但网络传资源包慢、容易断：插上数据线再装更稳。",
   "en": "Installing works, but sending game data over the network is slow and can drop. Plug in a cable for a steadier install."
+ },
+ {
+  "source": "电脑内存不够：出包时内存用完了。",
+  "en": "Not enough memory: this computer ran out of memory while exporting."
+ },
+ {
+  "source": "关掉其它占内存的程序（浏览器、游戏等）后重试；还不行就在 Windows 设置里调大虚拟内存（页面文件），或换一台内存更大的电脑出包。已做完的步骤下次会复用。",
+  "en": "Close other memory-heavy apps (browsers, games, etc.) and try again. If it still fails, increase virtual memory (the page file) in Windows settings, or export on a computer with more memory. Finished steps are reused next time."
+ },
+ {
+  "source": "游戏库在 Mac OS 扩展（HFS+）格式的磁盘上：可以出包，但这种盘不能克隆，出包会多占一份资源包的空间。",
+  "en": "The library is on a Mac OS Extended (HFS+) drive. Exporting works, but this drive can't clone files, so exports take an extra copy of the resources' space."
+ },
+ {
+  "source": "先给点名的游戏各「打 iPhone 包」一次，再装到 iPhone；也可以确认后这次先不带它们照装，它们的存档和资源留在手机上，重新出包再装就回来。",
+  "en": "Run \"Build for iPhone\" once for each game named, then install on iPhone. Or confirm to install without them this time: their saves and resources stay on the phone, and they come back once you rebuild and install them."
+ },
+ {
+  "source": "这款游戏暂不支持：程序的结构我们还不认识，多见于自制或移植的程序。",
+  "en": "This game is not supported yet. We don't recognize how this program is built yet; this is common for homebrew or ported programs."
+ },
+ {
+  "source": "可以点「仍然用这里」照用这块盘（出包会多占空间）；想省空间就从下面列出的 NTFS 盘里选一块，点「放到这里」。",
+  "en": "Choose \"Use this drive anyway\" to keep using this drive (exports take more space), or pick one of the NTFS drives listed below and choose \"Use this drive\" to save space."
+ },
+ {
+  "source": "在出包页「存放位置」换到 NTFS 格式的盘（上面列出了这台电脑上可用的），再出包；游戏原件放在哪都行。",
+  "en": "On the export page, change Storage Location to an NTFS drive (the available ones on this PC are listed above), then export again. Your game files can stay wherever they are."
  }
 ]

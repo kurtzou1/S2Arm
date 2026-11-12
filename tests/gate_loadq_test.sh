@@ -10,7 +10,7 @@ cp "$H/tools/gate.sh" "$H/tools/gate_plan.sh" "$T/tools/"
 mkdir -p "$T/tests"; printf '#!/bin/bash\nexit 0\n' > "$T/tests/a_test.sh"   # 有 1 步可跑（11-11 起排队挪到算出步数之后：0 步不排）
 git -C "$T" init -q
 # 外层门禁的角色变量不许漏进来（11-11：列车起的门禁带 GATE_NO_LOADQ=1，改 tools/gate.sh 的支在列车里跑本单测，「先排队」那条恒红）
-g() { (cd "$T" && env -u GATE_NO_LOADQ -u GATE_DUAL -u GATE_ROLE -u GATE_RERUN -u GATE_PLAN -u GATE_LAYER "$@" S2A_GATE_LOAD_WAIT_S=2 S2A_GATE_LOAD_POLL_S=0.5 GATE_HOST=local GATE_TIER=tool GATE_CHANGED="tools/gc.sh" GATE_TEST_CACHE=0 GATE_LEDGER=- timeout 600 bash tools/gate.sh 2>&1); }
+g() { (cd "$T" && env -u GATE_NO_LOADQ -u S2A_GATE_CPU_IDLE_MIN -u GATE_DUAL -u GATE_ROLE -u GATE_RERUN -u GATE_PLAN -u GATE_LAYER "$@" S2A_GATE_LOAD_WAIT_S=2 S2A_GATE_LOAD_POLL_S=0.5 GATE_HOST=local GATE_TIER=tool GATE_CHANGED="tools/gc.sh" GATE_TEST_CACHE=0 GATE_LEDGER=- timeout 600 bash tools/gate.sh 2>&1); }
 o1=$(g S2A_GATE_IDLE_TEST=3); o2=$(g S2A_GATE_IDLE_TEST=3 GATE_DUAL=1); o3=$(g S2A_GATE_IDLE_TEST=3 GATE_NO_LOADQ=1); o4=$(g S2A_GATE_IDLE_TEST=60)
 ck "CPU 空闲 3%：先排队、到上限照跑（打黄字）" 'grep -q "门禁先排队" <<< "$o1" && grep -q "到上限照跑" <<< "$o1"'
 ck "双轨门禁（GATE_DUAL=1）、列车门禁（GATE_NO_LOADQ=1）：CPU 空闲 3% 也不排" '! grep -q "CPU 实际空闲" <<< "$o2" && ! grep -q "CPU 实际空闲" <<< "$o3"'

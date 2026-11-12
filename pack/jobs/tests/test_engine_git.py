@@ -46,10 +46,20 @@ class EngineGit(unittest.TestCase):
         clone_tree(types.SimpleNamespace(check=lambda: None, progress=lambda *a: None), self.src, dst)
         for p in sorted((dst / ".git" / "refs").rglob("*"), reverse=True):
             p.rmdir() if p.is_dir() else p.unlink()
-        (dst / ".git" / "refs").rmdir()   # 模拟改前：refs 目录丢了
+        (dst / ".git" / "refs").rmdir()   # refs 空目录丢了（11-11 Windows 覆盖安装后的现场）
+        check_git(dst)   # 补上空目录、认出的就是自己的 .git（原先报「快照无效」、或一路往上认到外层仓库）
+        self.assertTrue((dst / ".git" / "refs" / "heads").is_dir())
+        out = subprocess.run(["git", "-C", str(dst), "rev-parse", "HEAD:runtime/rewriter"], capture_output=True, text=True, env=ENV)
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_really_broken_snapshot_says_reinstall(self):
+        dst = self.t / "engines" / "e4"; dst.mkdir(parents=True)
+        clone_tree(types.SimpleNamespace(check=lambda: None, progress=lambda *a: None), self.src, dst)
+        (dst / ".git" / "HEAD").unlink()   # 真坏了：补不了，照样拒绝，并且不往上认外层仓库
         with self.assertRaises(Failure) as caught:
             check_git(dst)
-        self.assertIn("快照无效", str(caught.exception))
+        self.assertIn("请重新安装", str(caught.exception))
+        self.assertEqual(caught.exception.code, "engine_incomplete")
 
     def test_git_failure_says_what_git_said(self):
         """#638：git 自己没跑成（如这台机的 git 起不来）时，提示带 git 的原话，不说成「快照无效，请重新安装」"""

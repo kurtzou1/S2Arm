@@ -115,6 +115,7 @@ LibraryFolderCases.Run(Check);
 MetalFolderCases.Run(Check);
 PackCases.Run(Check);
 BatchCases.Run(Check);
+ExportStreamCases.Run(Check);
 BackendTextCases.Run(Check);
 await WindowsLibraryCases.Run(Check);
 await WindowsProbeCases.Run(Check);

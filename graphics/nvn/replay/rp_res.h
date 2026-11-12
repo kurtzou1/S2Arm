@@ -11,6 +11,13 @@ nvn_gpu_tex rp_tex_resolve(const tex_t *t, nvn_gpu_cmd c);
 nvn_gpu_view rp_view_by_id(int id, nvn_gpu_cmd c, const tex_t **t_out);
 // 贴图对象 + 视图记录（NULL = 默认视图）→ 视图：渲染目标、拷贝端点用。线程：[提交]。
 nvn_gpu_view rp_view_for(const tex_t *t, const view_t *v, nvn_gpu_cmd c);
+// 上屏用的默认视图：不经可淘汰的视图缓存（上屏线程与提交线程共用一份环会互相淘汰；
+// iOS 的 present 直接拿贴图对象，没有这层缓存）。调用方用完即 release，后端段按引用保活。
+nvn_gpu_view rp_present_view(const tex_t *t);
+// 一段取视图的窗口：窗口内取到的缓存项不会被轮转淘汰（一笔通道要同时挂好几个附件，
+// 取第二个的时候不能把第一个已经从缓存里拿到、还没交给后端的视图放掉）。
+void rp_view_pin_begin(void);
+void rp_view_pin_end(void);
 // 贴图号 → 登记时的贴图 / 视图快照（不建图）。1 = 这个号登记过。
 int rp_tex_snap_by_id(int id, tex_t *t, view_t *v, int *has_v);
 // 采样器号 → 后端采样器（首次取用时建）。没登记 → NULL。线程：[提交]。

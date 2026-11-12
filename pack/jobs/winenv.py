@@ -836,10 +836,14 @@ def _library(request, probe):
         v = probe("volume", path=path)
         cloud = libloc.cloud_folder(path, system="Windows", home=v["home"], env=v["env"])
         fmt = v["format"]
-        out = [_item("library_cloud", "游戏库所在位置", "mismatch" if cloud else "ok",
-                     libloc.CLOUD_MESSAGE.format(cloud=cloud) if cloud else "游戏库不在云盘同步目录里。", source, {"cloud": cloud}),
-               _item("library_format", "游戏库所在磁盘", "ok" if libloc.format_ok(fmt, system="Windows") else "mismatch",
-                     "游戏库所在磁盘格式可用。" if libloc.format_ok(fmt, system="Windows") else libloc.WIN_FORMAT_MESSAGE.format(fmt=fmt.upper()),
+        accepted = bool(cloud) and libloc.cloud_accepted(path)   # 玩家换库时确认过放在云盘里也用（同 Mac toolchain）：照提示、不算要处理
+        out = [_item("library_cloud", "游戏库所在位置", "mismatch" if cloud and not accepted else "ok",
+                     (libloc.CLOUD_ACCEPTED_MESSAGE if accepted else libloc.CLOUD_MESSAGE).format(cloud=cloud) if cloud else "游戏库不在云盘同步目录里。",
+                     source, {"cloud": cloud}),
+               # exFAT / FAT32 玩家确认过（游戏库标识 formatAccepted，v0.3.1）：照提示、不算要处理
+               _item("library_format", "游戏库所在磁盘", "ok" if libloc.format_ok(fmt, system="Windows") or libloc.format_accepted(path) else "mismatch",
+                     "游戏库所在磁盘格式可用。" if libloc.format_ok(fmt, system="Windows") else
+                     libloc.WIN_FORMAT_ACCEPTED_MESSAGE.format(fmt=fmt.upper()) if libloc.format_accepted(path) else libloc.win_format_message(fmt),
                      source, {"format": fmt})]
         return out
     except Exception as exc:

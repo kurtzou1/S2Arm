@@ -37,6 +37,25 @@ class PinnablePath(unittest.TestCase):
                 w.pinnable_path(text)
 
 
+class ReferencedNamesExist(unittest.TestCase):
+    """全仓（pack/ tools/）代码里引用的 winproc.<名字> 都得在 winproc 里有，各平台都跑。
+    11-11 删请求文件 ACL 复核时把 _current_sid 一起删了，pack/orch/roots.py _win_acl 还在调，Windows 播种 / 删目录全部 AttributeError，
+    而 Windows 专属用例只在真 Windows 上跑、门禁没拦住（#669 复现时发现）"""
+    def test_every_reference_resolves(self):
+        import ast
+        import winproc as w
+        repo = JOBS.parents[1]
+        missing = []
+        for path in [*repo.joinpath('pack').rglob('*.py'), *repo.joinpath('tools').rglob('*.py')]:
+            if path.name == 'winproc.py' or 'tests' in path.parts:
+                continue
+            tree = ast.parse(path.read_text(encoding='utf-8'), str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == 'winproc' and not hasattr(w, node.attr):
+                    missing.append(f'{path.relative_to(repo)}:{node.lineno} winproc.{node.attr}')
+        self.assertEqual(missing, [])
+
+
 class OriginalContracts(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='s2arm winproc 中文 ')

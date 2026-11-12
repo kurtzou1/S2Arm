@@ -35,5 +35,21 @@ int main(void) {
     ck(k == 9 && !strcmp(s, "/d/ab"), "截断：返回完整长度 9（≥ 容量 6）、结果以 NUL 结尾");
     char t[2]; k = s2a_docs_path(t, sizeof t, "x");
     ck(k == 4 && !strcmp(t, "/"), "根本身就放不下：返回完整长度、不越界");
+    // 资源包根（v0.3.0 挪出 Documents）：多款容器每款文档根 → Library/Application Support/S2Arm/games/<游戏号>/资源包；别的文档根照旧 <文档根>/资源包
+    s2a_pack_root(o, sizeof o, "/var/mobile/C/X/Documents/games/0100ABCD00000000");
+    ck(!strcmp(o, "/var/mobile/C/X/Library/Application Support/S2Arm/games/0100ABCD00000000/资源包"), "多款容器文档根 → Library 下的资源包根");
+    s2a_pack_root(o, sizeof o, "/lib/temp/0100535012974000");
+    ck(!strcmp(o, "/lib/temp/0100535012974000/资源包"), "别的文档根（Mac 局、单测）→ <文档根>/资源包 不变");
+    s2a_pack_root(o, sizeof o, "/var/mobile/C/X/Documents");
+    ck(!strcmp(o, "/var/mobile/C/X/Documents/资源包"), "单款兼容 App 的 Documents → Documents/资源包 不变");
+    s2a_pack_root(o, sizeof o, "/x/Documents/games/A/sub");
+    ck(!strcmp(o, "/x/Documents/games/A/sub/资源包"), "games/ 下不止一层（不是每款文档根）→ 不改");
+    s2a_pack_root(o, sizeof o, "/x/Documents/games/.hidden");
+    ck(!strcmp(o, "/x/Documents/games/.hidden/资源包"), "以 . 开头的不当游戏号 → 不改");
+    s2a_pack_legacy_root(o, sizeof o, "/x/Documents/games/A");
+    ck(!strcmp(o, "/x/Documents/games/A/资源包"), "旧位置（迁移用）= <文档根>/资源包");
+    k = s2a_pack_base(o, sizeof o, "/var/mobile/C/X/Documents");
+    ck(k > 0 && !strcmp(o, "/var/mobile/C/X/Library/Application Support/S2Arm"), "进程级 Documents → 新位置的根");
+    ck(s2a_pack_base(o, sizeof o, "/var/mobile/C/X/Docs") < 0, "不以 /Documents 结尾 → -1（不猜）");
     return S2A_T_RESULT("t_docs", bad);
 }

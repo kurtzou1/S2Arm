@@ -51,7 +51,7 @@ for name, (words, base) in cases.items():
             proc = subprocess.run(([sys.executable, str(rew)] if rew.suffix == ".py" else [str(rew)]) + [str(source), str(out), 'main'], env=env, capture_output=True, text=True, timeout=30)
             expected = 0 if base is not None else 3
             assert proc.returncode == expected, (label, proc.returncode, proc.stdout, proc.stderr)
-            assert (out/'main.patched.bin').exists() == (base is not None), label
+            assert (out/'main.patched.bin').exists(), label   # v0.3.1 拿不准不停：有缺口（退 3）也照出产物
             if base is not None:
                 rows = [line.split('\t') for line in (out/'main.sites.tsv').read_text().splitlines()]
                 jumps = [row for row in rows if len(row) == 4 and row[1] == 'J']

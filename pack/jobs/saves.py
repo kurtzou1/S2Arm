@@ -374,7 +374,14 @@ def write_archive(c, game, root, destination):
             if checked != manifest:
                 raise ValueError("backup validation failed")
         c.check()
-        os.link(temporary, destination)
+        try:
+            os.link(temporary, destination)   # 不覆盖地放到位：目标已在就失败
+        except FileExistsError:
+            raise
+        except OSError:   # 盘上建不了硬链接（exFAT / FAT32，v0.3.1 玩家确认过照用）：先核没有同名，再改名放到位
+            if os.path.lexists(destination):
+                raise FileExistsError(destination)
+            os.replace(temporary, destination)
         fsync_dir(destination.parent)
     finally:
         temporary.unlink(missing_ok=True)

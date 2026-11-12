@@ -227,9 +227,15 @@ public sealed partial class EnvironmentWindow
             connectedFolder = null; libraryId = null; catalog = null; selectedGame = null; ClearCovers();
             PrivateJobRequest.EnsurePrivateRoot(privateRoot);
             var free = freeDefault; freeDefault = false;   // 文件夹由 setup 建（先过库路径规则，不在启动器目录里留空文件夹）
-            var setup = await LibraryJobClient.RunAsync(paths, privateRoot, folder, null, "setup", null, front.Token, libraryMoveFrom, jobId: front.Next(), freeDefault: free);
-            libraryMoveFrom = null;
+            var accept = new HashSet<string>();
+            if (acceptFormatOnce) accept.Add("acceptFormat");   // 「仍然用这里」（LibraryDrivePicker）：这一次带 acceptFormat
+            acceptFormatOnce = false;
+            var setup = await LibraryJobClient.RunAsync(paths, privateRoot, folder, null, "setup", null, front.Token, libraryMoveFrom, jobId: front.Next(), freeDefault: free, accept: accept);
+            while (await ConfirmLibraryAsync(setup, accept))   // 认得出的风险（云盘目录 / 有别的文件）：讲清后果、玩家选「仍然继续」就带上对应参数重来（v0.3.1）
+                setup = await LibraryJobClient.RunAsync(paths, privateRoot, folder, null, "setup", null, front.Token, libraryMoveFrom, jobId: front.Next(), freeDefault: free, accept: accept);
+            var moveFrom = libraryMoveFrom; libraryMoveFrom = null;
             DisplayJob(setup);
+            libraryFailCode = setup.Report.Succeeded ? null : JobCode(setup); libraryFailMoveFrom = moveFrom; libraryFailFolder = folder;   // 盘格式不对时给「换一个存放位置」（LibraryDrivePicker）
             if (!setup.Report.Succeeded) { librarySummary = "library.failed"; importError = libraryFailure = LibraryFailed(folder, setup.Report.Message); return; }
             var conn = LibraryConnection.Parse(setup.Report.Result);
             connectedFolder = conn.Folder; libraryId = conn.Id; libraryFolder = connectedFolder; libraryFailure = "";

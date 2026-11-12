@@ -10,6 +10,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #endif
@@ -32,6 +33,31 @@ static inline int s2a_docs_path(char *out, size_t n, const char *fmt, ...) {
     at = at + 1 < n ? at + 1 : n;
     va_list ap; va_start(ap, fmt); int m = vsnprintf(out + at, n - at, fmt, ap); va_end(ap);
     return m < 0 ? m : k + 1 + m;
+}
+
+// 资源包根（v0.3.0 起挪出 Documents，11-11 真机复现「文件」App / 选择器「最近项目」被 Documents 里几万个资源包文件拖住、一直「正在加载」）：
+//   多款容器每款文档根是 <容器>/Documents/games/<游戏号>（存档 S2A/ryujinx、金手指、unpack.log 留在那里，玩家在「文件」里看得见），
+//   它的资源包放 <容器>/Library/Application Support/S2Arm/games/<游戏号>/资源包（不在「文件」里、不进 iCloud 备份）；
+//   别的文档根（单款兼容 App、Mac 局、单测临时目录）资源包照旧在 <文档根>/资源包。唯一取法：宿主、电脑端推包（pack/jobs/install.py game_pack）、
+//   出容器（pack/ship_ext.py launch.ctx game_data）都按这一条，不许另拼。纯字符串，不碰磁盘
+#define S2A_PACK_BASE_REL "Library/Application Support/S2Arm"
+static inline int s2a_pack_legacy_root(char *out, size_t n, const char *docs) { return snprintf(out, n, "%s/资源包", docs); }
+static inline int s2a_pack_root(char *out, size_t n, const char *docs) {
+    static const char key[] = "/Documents/games/";
+    const char *k = docs ? strstr(docs, key) : NULL;
+    if (k) {
+        const char *gid = k + sizeof key - 1;
+        if (*gid && *gid != '.' && !strchr(gid, '/'))
+            return snprintf(out, n, "%.*s/" S2A_PACK_BASE_REL "/games/%s/资源包", (int)(k - docs), docs, gid);
+    }
+    return s2a_pack_legacy_root(out, n, docs ? docs : ".");
+}
+// 进程级 Documents（<容器>/Documents）→ 新位置的根 <容器>/Library/Application Support/S2Arm（迁移、#569 写不进修复扫这里的 games/）；
+//   proc_docs 不以 /Documents 结尾返回 -1（不猜）
+static inline int s2a_pack_base(char *out, size_t n, const char *proc_docs) {
+    size_t l = proc_docs ? strlen(proc_docs) : 0;
+    if (l < 10 || strcmp(proc_docs + l - 10, "/Documents")) return -1;
+    return snprintf(out, n, "%.*s/" S2A_PACK_BASE_REL, (int)(l - 10), proc_docs);
 }
 
 #if defined(__APPLE__) && TARGET_OS_IPHONE

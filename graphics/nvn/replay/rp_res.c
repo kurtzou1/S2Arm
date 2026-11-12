@@ -127,6 +127,7 @@ static int cpu_content(const tex_t *t) {
 // ---------- 上传：块线性存储 → 逐级逐层线性 → 后端 ----------
 // track：1 = CPU 贴图（先保护、记代号，之后脏了重传）；0 = 一次性的初始内容，不跟踪写
 static int upload_all(const tex_t *t, struct rp_tex *x, nvn_gpu_cmd c, int track) {
+    rp_perf_add(RP_PERF_TEX_UP_N, 1); rp_perf_add(RP_PERF_TEX_UP_KB, t->L.size / 1024);
     if (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_SPARSE)) { nvn_unimpl("tex", "upload_linear_or_sparse", t); return -1; }
     int bw = 1, bh = 1; int bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     if (!bpb) { nvn_unimpl("fmt", "upload_unknown_format", t); return -1; }
@@ -251,6 +252,22 @@ nvn_gpu_tex rp_tex_resolve(const tex_t *t, nvn_gpu_cmd c) {
 enum { VF_N = 64 };
 static struct { uint64_t serial; view_t v; uint8_t has_v; nvn_gpu_view view; struct rp_tex *of; } g_vf[VF_N];
 static int g_vf_next;
+static uint32_t g_vf_seen[VF_N];       // 本轮取用记号：等于 g_pin_token 的项已交给调用方，轮转不能放
+static uint32_t g_pin_token, g_pin_depth;
+// 窗口内取用数超过环容量时的溢出视图（生产上界：8 颜色 + 深度 + 影子 ≤ 12；这里只是防御）。
+// 不进环、由窗口结束时统一放：后端在 pass_begin 里已 cmd_ref，窗口之后不再需要核心持有。
+static struct { nvn_gpu_view view; } g_pin_tmp[256];
+static int g_npin_tmp;
+void rp_view_pin_begin(void) { pthread_mutex_lock(&g_rmu); if (g_pin_depth++ == 0) g_pin_token++; pthread_mutex_unlock(&g_rmu); }
+void rp_view_pin_end(void) {
+    pthread_mutex_lock(&g_rmu);
+    if (g_pin_depth > 0 && --g_pin_depth == 0) {
+        g_pin_token++;
+        for (int i = 0; i < g_npin_tmp; i++) if (g_pin_tmp[i].view) nvn_gpu_view_release(g_pin_tmp[i].view);
+        g_npin_tmp = 0;
+    }
+    pthread_mutex_unlock(&g_rmu);
+}
 static void vf_drop_serial(uint64_t serial) {   // 持 g_rmu
     for (int i = 0; i < VF_N; i++) if (g_vf[i].view && (!serial || g_vf[i].serial == serial)) { nvn_gpu_view_release(g_vf[i].view); memset(&g_vf[i], 0, sizeof g_vf[i]); }
 }
@@ -259,20 +276,46 @@ nvn_gpu_view rp_view_for(const tex_t *t, const view_t *v, nvn_gpu_cmd c) {
     if (!g) return NULL;
     pthread_mutex_lock(&g_rmu);
     struct rp_tex *x = nvn_hm_get(&g_by_serial, &t->serial);
-    nvn_gpu_view out = NULL; int slot = -1;
+    nvn_gpu_view out = NULL; int slot = -1, hit = -1;
     for (int i = 0; i < VF_N && x; i++) if (g_vf[i].view && g_vf[i].serial == t->serial && g_vf[i].has_v == (v != NULL) && (!v || !memcmp(&g_vf[i].v, v, sizeof *v))) {
+        hit = i;
         if (g_vf[i].of == x) out = g_vf[i].view; else slot = i;   // 序号换了存储：这一项作废重建
         break; }
+    if (hit >= 0 && g_pin_depth > 0) g_vf_seen[hit] = g_pin_token;   // 本轮已交给调用方：轮转不许放
     if (!out && x) {
-        if (slot < 0) slot = g_vf_next++ % VF_N;
+        // 没找到同项：挑一个本轮没钉住的槽（钉住 = 已交给调用方、还没交给后端）
+        int ring = 1;
+        if (slot < 0) {
+            uint32_t start = (uint32_t)g_vf_next; int pick = -1;
+            for (uint32_t k = 0; k < VF_N; k++) { uint32_t i = (start + k) % VF_N; if (g_pin_depth <= 0 || g_vf_seen[i] != g_pin_token) { pick = (int)i; break; } }
+            if (pick >= 0) { slot = pick; g_vf_next = (int)((pick + 1) % VF_N); }
+            else ring = 0;   // 整个环都在本轮钉住：走溢出表，不动环
+        }
+        nvn_gpu_err err = {0};
+        if (!ring) {
+            nvn_gpu_view tv = NULL;
+            if (nvn_gpu_ok(nvn_gpu_view_create(x->g, v, &tv, &err)) && g_npin_tmp < (int)(sizeof g_pin_tmp / sizeof g_pin_tmp[0])) { g_pin_tmp[g_npin_tmp++].view = tv; out = tv; }
+            else { if (tv) nvn_gpu_view_release(tv); if (nvn_unimpl("gpu", "view_pin_overflow", t) == 1) nvn_plat_log(NVN_PLAT_LOG_RED, "gpu", err.why); }
+        } else {
         if (g_vf[slot].view) nvn_gpu_view_release(g_vf[slot].view);
         memset(&g_vf[slot], 0, sizeof g_vf[slot]);
-        nvn_gpu_err err = {0};
-        if (nvn_gpu_ok(nvn_gpu_view_create(x->g, v, &g_vf[slot].view, &err))) { g_vf[slot].serial = t->serial; g_vf[slot].has_v = v != NULL; if (v) g_vf[slot].v = *v; g_vf[slot].of = x; out = g_vf[slot].view; }
+        if (nvn_gpu_ok(nvn_gpu_view_create(x->g, v, &g_vf[slot].view, &err))) { g_vf[slot].serial = t->serial; g_vf[slot].has_v = v != NULL; if (v) g_vf[slot].v = *v; g_vf[slot].of = x; out = g_vf[slot].view; if (g_pin_depth > 0) g_vf_seen[slot] = g_pin_token; }
         else { g_vf[slot].view = NULL; if (nvn_unimpl("gpu", "view_create", t) == 1) nvn_plat_log(NVN_PLAT_LOG_RED, "gpu", err.why); }
+        }
     }
     pthread_mutex_unlock(&g_rmu);
     return out;
+}
+
+nvn_gpu_view rp_present_view(const tex_t *t) {
+    nvn_gpu_tex g = rp_tex_resolve(t, NULL);
+    if (!g) return NULL;
+    nvn_gpu_view v = NULL; nvn_gpu_err err = {0};
+    if (!nvn_gpu_ok(nvn_gpu_view_create(g, NULL, &v, &err))) {
+        if (nvn_unimpl("gpu", "view_create", t) == 1) nvn_plat_log(NVN_PLAT_LOG_RED, "gpu", err.why);
+        return NULL;
+    }
+    return v;
 }
 
 // 贴图对象 Finalize（rp_entry.c nvn_be_tex_release 调）：序号不再指向这份存储

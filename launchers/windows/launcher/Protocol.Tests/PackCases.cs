@@ -72,6 +72,19 @@ public static class PackCases
         track.Finish(40);
         check(track.Duration("unpack") == 30, "track: last step ends at the job end");
 
+        // 整单进度只认作业层的 overall、只增不减（11-11「91% 又跳回 40%」）：中间夹一个更小的值（乱序 / 重发），读数不回退；成功结果到 1
+        var whole = new MilestoneTrack();
+        check(whole.Overall is null, "overall: absent until the backend sends it");
+        var sent = new[] { "0.12", "0.40", "0.35", "0.91", "1.0" };
+        var expected = new[] { 0.12, 0.40, 0.40, 0.91, 1.0 };   // 手算：取到目前为止的最大值
+        for (var i = 0; i < sent.Length; i++)
+        {
+            using var d = JsonDocument.Parse("{\"type\":\"progress\",\"milestone\":\"direct\",\"overall\":" + sent[i] + ",\"doneUnits\":1,\"totalUnits\":5}");
+            whole.Ingest(d.RootElement, i);
+            check(whole.Overall == expected[i], $"overall: reading after sending {sent[i]} is {expected[i]}");
+        }
+        check(whole.Overall == 1.0, "overall: success reaches 100%");
+
         // ---- checklist results ----
         const string checklist = """
 {"gameId":"G","items":[{"id":"package","ok":true,"waiting":false,"title":"t","detail":"","who":"human"},

@@ -1,0 +1,10 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Copyright 2026 S2Arm contributors -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><Nullable>disable</Nullable><AllowUnsafeBlocks>true</AllowUnsafeBlocks></PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Nvdec.Vp9/**/*.cs" Exclude="../../compat/tree/src/Ryujinx.Graphics.Nvdec.Vp9/obj/**;../../compat/tree/src/Ryujinx.Graphics.Nvdec.Vp9/bin/**" />
+    <ProjectReference Include="../../compat/tree/src/Ryujinx.Common/Ryujinx.Common.csproj" />
+    <ProjectReference Include="../../compat/tree/src/Ryujinx.Graphics.Video/Ryujinx.Graphics.Video.csproj" />
+  </ItemGroup>
+</Project>

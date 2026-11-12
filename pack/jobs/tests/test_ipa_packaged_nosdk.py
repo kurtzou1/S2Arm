@@ -18,11 +18,12 @@ import target as tg
 class PackagedNoSdk(unittest.TestCase):
     # 借 test_jobs 的夹具方法（不继承：继承会把那边全部用例再跑一遍）
     setUp, tearDown = test_jobs.JobsTests.setUp, test_jobs.JobsTests.tearDown
-    catalogue, package, game = test_jobs.JobsTests.catalogue, test_jobs.JobsTests.package, test_jobs.JobsTests.game
+    catalogue, package, game, player_keys = test_jobs.JobsTests.catalogue, test_jobs.JobsTests.package, test_jobs.JobsTests.game, test_jobs.JobsTests.player_keys
 
     def prepare(self):
         base = self.package("base")
         self.catalogue([self.game(packages=[base])])
+        self.player_keys()   # 加密原件出包开头要 prod.keys（library.require_game，v0.3.1）
         res = self.root / "res"; (res / "Fonts").mkdir(parents=True); (res / "Fonts/a.bfttf").write_bytes(b"x")
         (res / "Shell/root").mkdir(parents=True); (res / "Shell/manifest.json").write_text("{}")
         self.c.r.update(resources=str(res), gameId="0100000000000000", engineBundle=str(ROOT))

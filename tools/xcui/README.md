@@ -22,7 +22,7 @@ S2A_DEVELOPER_DIR=/Applications/Xcode-27.1.app/Contents/Developer \
   {"tapxy": [480, 220]}, {"press": [480, 220, 1.5]}, {"wait": 2}]}
 ```
 
-`tap` 按无障碍标识或标签找控件（系统弹框按钮用标题，如「立刻重启」）；`slider` 把滑条拖到 0~1 的归一位置（渲染分辨率 0.5 / 0.75 / 1 / 1.5 / 2 五档，1 = 最右 = 2 倍）。
+`tap` 按无障碍标识或标签找控件（系统弹框按钮用标题，如「立刻重启」）；整段找不到时退一步找标签以它开头的第一个（带副标题的菜单项，写标题即可，如「手柄按键：Xbox 布局」）；`slider` 把滑条拖到 0~1 的归一位置（渲染分辨率 0.5 / 0.75 / 1 / 1.5 / 2 五档，1 = 最右 = 2 倍）。
 
 设置页控件的无障碍标识：`settings.<键>`（如 S2ADockedMode / S2AResolutionScale）、`settings.done`、触屏布局行 `vpad.layout.*`（ios/app_settings.m、vpad_settings.m）。
 

@@ -34,13 +34,14 @@ MIRROR = "https://s2arm.com/update/latest.json"
 MIRROR_TIMEOUT = 8   # 官网是首选，连不上要尽快回退 GitHub：只试一次、不重试
 # 安装包仍从 GitHub Release 下载（下载链接不是 API，没有 60 次限制）；版本号取自签过名的清单
 RELEASE_DOWNLOAD = "https://github.com/jhaizhou-ops/S2Arm/releases/download/v{version}/{name}"
+R2_DOWNLOAD = "https://dl.s2arm.com/v{version}/{name}"   # 官网清单命中时安装包先从这里下（发版先传 R2、核过 sha256 才发官网清单），不通再退回 GitHub
 ASSETS = {"mac": "S2Arm-mac-arm64.dmg", "windows": "S2Arm-windows-x64.zip"}
 DELTAS = {"mac": "S2Arm-mac-arm64-delta-{}.zip", "windows": "S2Arm-windows-x64-delta-{}.zip"}
 MANIFEST = "update-manifest.json"
 SIGNATURE = "update-manifest.json.sig"
 # 发版清单的 Ed25519 公钥。私钥只在发版机上（tools/sign_update_manifest.py）：Release 或发布账号被改，也改不了这份清单。
 PUBLIC_KEY = "d553da82bad575ce87bf521a080c9d0997f97d189f0d517e97f80808bafc5225"
-TRUSTED_HOSTS = ("github.com", "api.github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com", "s2arm.com")
+TRUSTED_HOSTS = ("github.com", "api.github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com", "s2arm.com", "dl.s2arm.com")
 HEALTH_SECONDS = 90
 EXIT_SECONDS = 120
 CHUNK = 1 << 20
@@ -242,8 +243,13 @@ def query_latest(platform, current):
         if not mine or version <= mine:
             return {"available": False}
         template = os.environ.get("S2A_UPDATE_API") and os.environ.get("S2A_UPDATE_DOWNLOAD") or RELEASE_DOWNLOAD   # 假 Release 验收时下载也指到本机
-        return offer(platform, version, mine, manifest["files"],
-                     lambda name: template.format(version=".".join(map(str, version)), name=name))
+        v = ".".join(map(str, version))
+        info = offer(platform, version, mine, manifest["files"], lambda name: template.format(version=v, name=name))
+        # 安装包先走官方域名（R2）、GitHub 当退路；假 Release 验收只认 S2A_UPDATE_R2，没设就不走（单测不连真网）
+        r2 = os.environ.get("S2A_UPDATE_R2", "") if os.environ.get("S2A_UPDATE_API") else R2_DOWNLOAD
+        if info.get("available") and r2:
+            info.update(asset=r2.format(version=v, name=info["assetName"]), assetFallback=info["asset"])
+        return info
     release = json.loads(fetch(os.environ.get("S2A_UPDATE_API") or API, 15, 8 << 20))
     version = version_tuple(release.get("tag_name"))
     assets = {a.get("name"): a for a in release.get("assets") or [] if isinstance(a, dict)}
@@ -377,9 +383,10 @@ def sha256(path):
 
 DOWNLOAD_ATTEMPTS = 6   # 连续这么多次一点进展都没有才放弃；有进展就重新计数
 RETRY_SECONDS = 2
+PRIMARY_ATTEMPTS = 2   # 有退路时首选来源只试这么多次没进展就换退路（R2 整个不通时不让玩家干等几分钟）
 
 
-def download(url, target, size):
+def download(url, target, size, attempts=None):
     """断了接着下（Range），服务器不支持续传就从头来；下够清单写的长度才算完"""
     import http.client
     part = Path(str(target) + ".part")
@@ -410,12 +417,29 @@ def download(url, target, size):
         if isinstance(failure, urllib.error.HTTPError) and failure.code != 416:   # 安装包地址本身出错（404 / 5xx / 限流）：重试也没用
             raise network_error(failure, "下载新版") from failure
         stalled = 0 if done > before else stalled + 1
-        if stalled >= DOWNLOAD_ATTEMPTS:
+        if stalled >= (attempts or DOWNLOAD_ATTEMPTS):
             why = network_error(failure, "下载新版").detail if failure else "连接提前结束"
             raise UpdateError("update_download_failed", "下载一直断开，已停止，当前版本没有变化。请检查网络后重试，或打开下载页手动下载。", why)
         time.sleep(RETRY_SECONDS * stalled)
     # 已下完且文件句柄已关闭；Windows 扫描器可能仍短暂占用它，只重试落盘，不重新下载。
     retry_rename(part, target, replace=True)
+
+
+def fetch_package(info, package, size):
+    """下整包并按签名清单核 sha256。先下 info["asset"]；下不下来（连不上、非 200、比清单大、一直断开）且有 assetFallback（官网清单命中时 = GitHub）
+    就扔掉半截、从退路重下。下够了 sha256 不对 = 内容被改：直接报错，不退回（换个来源不该让被改的文件变成能用）"""
+    try:
+        download(info["asset"], package, size, attempts=PRIMARY_ATTEMPTS if info.get("assetFallback") else None)
+    except UpdateError as error:
+        if not info.get("assetFallback"):
+            raise
+        emit(state="downloadFallback", reason=error.code)
+        Path(str(package) + ".part").unlink(missing_ok=True)
+        download(info["assetFallback"], package, size)
+    emit(state="verifying")
+    if sha256(package) != info["sha256"]:
+        package.unlink()
+        raise UpdateError("update_checksum_mismatch", "下载的安装包校验不符，已删除，旧版没有变化。请稍后重试。")
 
 
 def extract_windows(package, dest, before_unpack=None):
@@ -604,11 +628,7 @@ def prepare(platform, current, private, install, protect):
         require_free(updates, size)   # 先只要下载这一份；解开要多少在解开前按确切大小核（require_unpack_space）
         package = work / info["assetName"]
         emit(state="downloading", done=0, total=size)
-        download(info["asset"], package, size)
-        emit(state="verifying")
-        if sha256(package) != info["sha256"]:
-            package.unlink()
-            raise UpdateError("update_checksum_mismatch", "下载的安装包校验不符，已删除，旧版没有变化。请稍后重试。")
+        fetch_package(info, package, size)
         emit(state="unpacking")
         unpack = work / "unpack"
         unpack.mkdir()

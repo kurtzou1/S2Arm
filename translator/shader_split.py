@@ -1250,9 +1250,21 @@ def var_pairs(found):
         if '#var' in where: var[where][st] = skey(ctl, code)
     return {(v['vs'], v['ps']) for v in var.values() if 'vs' in v and 'ps' in v}
 
+FILE_RED = '\0file_red'   # marks a file left out whole in the SKIPPED channel (v0.3.1)
+
+
 def scan_counted(job):
-    """scan_file + the Unity program blocks this file had left out (SKIPPED)"""
-    n = len(SKIPPED); r = scan_file(job)
+    """scan_file + the Unity program blocks this file had left out (SKIPPED). A file the readers cannot read (a [RED] exit or a parse
+    error inside its scan) is left out alone and recorded (FILE_RED), the rest are read on (v0.3.1: do not stop on what we cannot be sure of;
+    one unreadable file used to end the whole split and leave the game with no offline library at all). Out of memory still stops"""
+    n = len(SKIPPED)
+    try: r = scan_file(job)
+    except MemoryError: raise
+    except SystemExit as e:
+        if not str(e).startswith('[RED]'): raise
+        return (job[1], {}, set(), {}, [(FILE_RED, f'{job[1]}: {str(e)[6:]}')])
+    except Exception as e:   # struct.error / IndexError / ValueError / zlib.error … from a container the reader got wrong
+        return (job[1], {}, set(), {}, [(FILE_RED, f'{job[1]}: {type(e).__name__}: {e}')])
     return (*r, SKIPPED[n:])
 
 
@@ -1552,15 +1564,24 @@ def main():
             if extra == 'defer': red(f'{rel}: Unity serialized file without type trees, no bundle has a Shader type tree of the same hash to borrow, and no layout comes from its Unity version (see the [RED] above)')
         results = [r for r in results if r[3] != 'defer'] + again
     per_src = collections.Counter(); pairs = set()
-    skipped = [x for r in results for x in r[4]]
+    skipped = [x for r in results for x in r[4] if x[0] != FILE_RED]
+    file_red = [x[1] for r in results for x in r[4] if x[0] == FILE_RED]   # files left out whole (scan_counted)
+    same_key = []
     for rel, uniq, pr, _, _ in results:
         pairs |= pr
         for key, v in uniq.items():
             if key in keys:
-                if not same_shader(keys[key][2:4], v[2:4]): red(f'key {key} is the same but the control section or code area differs ({v[0]} / {keys[key][0]})')
+                if not same_shader(keys[key][2:4], v[2:4]): same_key.append(f'key {key} is the same but the control section or code area differs ({v[0]} / {keys[key][0]}): kept the first')
                 continue
             keys[key] = v; per_src[group(v[0])] += 1
     if skipped and not keys: red(f'every Unity program block was left out ({len(skipped)}, the first: {skipped[0][0]}: {skipped[0][1]}): a reader that is wrong for this game, not bad blocks')
+    # 降级汇总（v0.3.1）：读不了的文件 / 同键不同内容逐条打 [WARN]，按类计数写 <shader_map.tsv 同目录>/degrade.tsv（pack/stage_extract.sh 并进 degrade.extract.tsv）
+    for m in file_red: print('[WARN] skipped: ' + m, flush=True)
+    for m in same_key: print('[WARN] ' + m, flush=True)
+    with open(os.path.join(os.path.dirname(os.path.abspath(mapout)), 'degrade.tsv'), 'w', encoding='utf-8', newline='\n') as f:
+        if file_red: f.write(f'extract\tsplit:file_skipped\t{len(file_red)}\t\t直连抽取跳过读不了的文件，里面的着色器运行时首遇现编（首个：{file_red[0][:160]}）\n')
+        if same_key: f.write(f'extract\tsplit:same_key\t{len(same_key)}\t\t同键不同内容，留先到的那份（首个：{same_key[0][:160]}）\n')
+    if file_red or same_key: print(f'【黄】直连抽取：跳过读不了的文件 {len(file_red)} 个、同键不同内容 {len(same_key)} 处（留先到的），其余照抽；逐条见上方 [WARN]', file=sys.stderr)
     sp, cover = separable_pairs(keys); pairs |= sp
     if cover: print(f'single-stage programs: {len({v for v, _ in sp}):,} vertex shaders are paired with a cover of {len(cover)} pixel shader(s) ({" ".join(cover)})')
     os.makedirs(pkg, exist_ok=True)

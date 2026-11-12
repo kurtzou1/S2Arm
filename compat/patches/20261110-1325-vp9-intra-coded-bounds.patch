@@ -1,0 +1,27 @@
+diff --git a/src/Ryujinx.Graphics.Nvdec.Vp9/ReconIntra.cs b/src/Ryujinx.Graphics.Nvdec.Vp9/ReconIntra.cs
+index e85c501c79a5b5414a3b5208de4a0327ead7abdf..9ee2bc4ee57f30be50c3ab1b2982060d5eab86b0 100644
+--- a/src/Ryujinx.Graphics.Nvdec.Vp9/ReconIntra.cs
++++ b/src/Ryujinx.Graphics.Nvdec.Vp9/ReconIntra.cs
+@@ -391,16 +391,17 @@ namespace Ryujinx.Graphics.Nvdec.Vp9
+             // 129  G   H  ..  S   T   T   T   T   T
+             // ..
+ 
+-            // Get current frame pointer, width and height.
++            // Intra prediction includes coded samples outside the visible crop.
++            // Match libvpx's aligned y_width/y_height and uv_width/uv_height.
+             if (plane == 0)
+             {
+-                frameWidth = xd.CurBuf.Width;
+-                frameHeight = xd.CurBuf.Height;
++                frameWidth = xd.CurBuf.AlignedWidth;
++                frameHeight = xd.CurBuf.AlignedHeight;
+             }
+             else
+             {
+-                frameWidth = xd.CurBuf.UvWidth;
+-                frameHeight = xd.CurBuf.UvHeight;
++                frameWidth = xd.CurBuf.UvAlignedWidth;
++                frameHeight = xd.CurBuf.UvAlignedHeight;
+             }
+ 
+             // Get block position in current frame.

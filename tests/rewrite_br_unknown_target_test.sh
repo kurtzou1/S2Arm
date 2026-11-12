@@ -8,7 +8,7 @@
 # 两个合成函数都从 0x100 起（编码由 llvm-mc -triple=aarch64 汇编）：
 #   dead：mov x18,x1 / br x18(0x104) / ret                      —— 函数里没有读 x16 / x17 的指令
 #   live：mov x18,x1 / br x18(0x104) / mov x0,x16 / ret         —— 0x108 读 x16
-# ①② dead / live × 苹果 / 安卓：退出码 3、缺口恰 1 条「0x104 br_x18」、不出 patched.bin
+# ①② dead / live × 苹果 / 安卓：退出码 3、缺口恰 1 条「0x104 br_x18」、产物照出（v0.3.1 拿不准不停：缺口点保持原指令）
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); trap 'rm -rf "$T"' EXIT; bad=0
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
 PY=${PY:-${S2A_PY:-$HOME/.s2arm/venv/bin/python3}}   # 改写器钉死的解释器（tools/rewriter-requirements.txt）
@@ -38,7 +38,7 @@ rew() { local m=$1 o=$2; shift 2; mkdir -p "$T/$o"; env "$@" $PY "$H/tests/rewri
 for o in apple android; do
   for m in dead live; do
     r=$(rew $m ${m}_$o S2A_TARGET=$o); gx=$(grep '^GAP' "$T/${m}_$o.log" | cut -f3,4 | cut -d: -f1 | tr '\t' ' ')
-    ck "${m} ${o}：退出码 ${r}、缺口「${gx}」、不出 patched.bin" '[ "$r" = 3 ] && [ "$gx" = "0x104 br_x18" ] && [ ! -e "$T/${m}_$o/main.patched.bin" ]'
+    ck "${m} ${o}：退出码 ${r}、缺口「${gx}」、产物照出（v0.3.1 拿不准不停：缺口点保持原指令）" '[ "$r" = 3 ] && [ "$gx" = "0x104 br_x18" ] && [ -e "$T/${m}_$o/main.patched.bin" ]'
   done
 done
 [ $bad = 0 ] && echo "✅ 认不出目标的 br x18 一律记缺口" || { echo "🔴 认不出目标的 br x18 没记缺口"; exit 1; }

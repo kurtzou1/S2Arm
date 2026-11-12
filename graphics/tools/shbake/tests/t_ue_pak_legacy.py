@@ -95,7 +95,7 @@ def extract_rc(enc):
     r = subprocess.run([sys.executable, os.path.join(H, 'nxsh_extract.py'), os.path.join(d, 'out'), os.path.join(d, 'romfs')], capture_output=True, text=True, env=dict(os.environ, J='1'))
     return r.returncode, r.stderr
 rc1, err1 = extract_rc(1); rc0, err0 = extract_rc(0)
-ck(rc1 == 1 and '【红】pak 损坏：Content/Paks/Game-Switch.pak' in err1 and rc0 == 0 and '【红】' not in err0,
+ck(rc1 == 0 and '【红】pak 损坏：Content/Paks/Game-Switch.pak' in err1 and '【黄】抽取：跳过读不了的部分' in err1 and rc0 == 0 and '【红】' not in err0,   # v0.3.1：损坏的 pak 跳过、记降级（原先退 1）
    f'⑧ 抽取流程：伪加密 v7 pak → 退出 {rc1}、损坏红行{"有" if "【红】pak 损坏" in err1 else "无"}；不加密 → 退出 {rc0}')
 # ⑩ 未加密 Zlib 条目长度不符 / 空块表
 C460 = bytes(range(230)) * 2
@@ -109,8 +109,8 @@ ck(all(r.startswith('Corrupt') for r in rs), f'⑩ 未加密 Zlib 条目：原�
 d10 = os.path.join(T, 'e_usz'); os.makedirs(os.path.join(d10, 'romfs', 'Content', 'Paks'))
 build(4, [('Game/M_Cut.uasset', C460, 1, 16)], os.path.join(d10, 'romfs', 'Content', 'Paks', 'Game-Switch.pak'))
 r10 = subprocess.run([sys.executable, os.path.join(H, 'nxsh_extract.py'), os.path.join(d10, 'out'), os.path.join(d10, 'romfs')], capture_output=True, text=True, env=dict(os.environ, J='1'))
-ck(r10.returncode == 1 and '【红】' in r10.stderr and 'Game/M_Cut.uasset' in r10.stderr,
-   f'⑩ 抽取流程：原长记错的条目 → 退出 {r10.returncode}（期望 1）、红行点名条目{"有" if "Game/M_Cut.uasset" in r10.stderr and "【红】" in r10.stderr else "无"}（{r10.stderr.strip().splitlines()[-1] if r10.stderr.strip() else "无标准错误"}）')
+ck(r10.returncode == 0 and '【红】' in r10.stderr and 'Game/M_Cut.uasset' in r10.stderr and '【黄】抽取：跳过读不了的部分' in r10.stderr,   # v0.3.1：跳过、记降级（原先退 1）
+   f'⑩ 抽取流程：原长记错的条目 → 退出 {r10.returncode}（期望 0）、红行点名条目{"有" if "Game/M_Cut.uasset" in r10.stderr and "【红】" in r10.stderr else "无"}（{r10.stderr.strip().splitlines()[-1] if r10.stderr.strip() else "无标准错误"}）')
 # ⑪ 版本 8 / 9（压缩字段 = 文件尾名字表序号）：按 UE 4.22–4.25 FPakEntry::Serialize / FPakInfo 手写
 def build8(ver, files, path, names, u8=False, frozen=None):
     """files: [(名, 原文, 方式序号 0 = 不压缩)]；方式名按序号在 names 里取，Zlib 用 zlib、Zstd 用 zstd 命令行压"""

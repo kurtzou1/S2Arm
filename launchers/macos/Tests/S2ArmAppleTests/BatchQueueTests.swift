@@ -9,7 +9,7 @@ import S2ArmAppleAdapter
 // 批量出包的两条队列（启动器剃刀审查 M1 / M2，11-11）：
 //   M1 批量出完自动装机：装机不该被「装机页清单」门槛挡住（批量流程从没打开过装机页，原先悄悄 return、队列停住）
 //   M2 批次进行中又单独点了出包：那一款排进队，批次结束后要接着出（原先批次结束只看自动装机，单款永远「排队中」）
-// 假作业进程：记下每次起的作业；出包作业（ipa）可以扣住不放，模拟「正在出」。
+// 假作业进程：记下每次起的作业；出包编排作业（export，剃刀 H13）可以扣住不放，模拟「正在出」。
 @MainActor final class BatchQueueTests: XCTestCase {
     private var root: URL!
     private var runner: QueueRunner!
@@ -44,15 +44,17 @@ import S2ArmAppleAdapter
         model.checkEnvironment()
         for _ in 0..<300 where model.checking { try? await Task.sleep(for: .milliseconds(10)) }
         runner.holdExports = true
-        let a = model.games[0], b = model.games[1]
-        XCTAssertNil(model.export(a, platforms: [.ios]))
-        for _ in 0..<300 where runner.started("ipa").isEmpty { try? await Task.sleep(for: .milliseconds(10)) }
-        model.batchRunning = true   // 正在出的这款算批次里的（批次清单脚本的回执本测试不关心）
+        let b = model.games[1]
+        model.runBatchExport()   // 批量出包：一个编排作业按批次文件出（批次清单脚本的回执本测试不关心）
+        for _ in 0..<300 where runner.started("export").isEmpty { try? await Task.sleep(for: .milliseconds(10)) }
         XCTAssertNil(model.export(b, platforms: [.ios]), "批次进行中单独点出包：排队")
+        try? await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(runner.started("export"), ["batch"], "排队的那一款不在批次出完前起")
         runner.holdExports = false
         runner.releaseHeld()
-        for _ in 0..<300 where runner.started("ipa").count < 2 { try? await Task.sleep(for: .milliseconds(10)) }
-        XCTAssertEqual(runner.started("ipa"), ["0100A", "0100B"], "批次结束后接着出排队的那一款")
+        for _ in 0..<300 where runner.started("export").count < 2 { try? await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(runner.started("export"), ["batch", "0100B"], "批次结束后接着出排队的那一款")
+        XCTAssertFalse(model.batchRunning)
     }
 }
 
@@ -65,7 +67,10 @@ private final class QueueRunner: JobProcessRunner {
 
     func started(_ operation: String) -> [String] {
         requests.filter { $0["operation"] as? String == operation }.compactMap { r in
-            (r["game"] ?? r["gameId"] ?? (r["arguments"] as? [String: Any])?["game"]) as? String
+            if let plan = r["plan"] as? [String: Any] {   // 出包编排：批次 = "batch"，就地出 = 计划里的那一款
+                return plan["source"] as? String == "batch" ? "batch" : ((plan["items"] as? [[String: Any]])?.first?["gameId"] as? String)
+            }
+            return (r["game"] ?? r["gameId"] ?? (r["arguments"] as? [String: Any])?["game"]) as? String
         }
     }
 
@@ -87,14 +92,14 @@ private final class QueueRunner: JobProcessRunner {
             ? ["games": [["id": "0100A", "name": "Alpha", "ready": true, "missing": []],
                          ["id": "0100B", "name": "Beta", "ready": true, "missing": []]], "keys": [:]]
             : [:]
-        let state = operation == "catalog" || operation == "ipa" || operation == "install" ? "succeeded" : "failed"
+        let state = operation == "catalog" || operation == "export" || operation == "install" ? "succeeded" : "failed"
         let finish = {
             let event: [String: Any] = ["schema": 1, "taskId": request["taskId"] ?? "", "type": "result",
                                         "state": state, "result": result, "message": state == "failed" ? "Fixture failure" : ""]
             onLine(try! JSONSerialization.data(withJSONObject: event))
             onExit(state == "succeeded" ? 0 : 1)
         }
-        if operation == "ipa" && holdExports { held.append { DispatchQueue.main.async(execute: finish) } }
+        if operation == "export" && holdExports { held.append { DispatchQueue.main.async(execute: finish) } }
         else { DispatchQueue.main.async(execute: finish) }
         return Handle()
     }

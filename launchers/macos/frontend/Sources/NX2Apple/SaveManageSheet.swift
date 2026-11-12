@@ -113,7 +113,9 @@ struct SaveManageSheet: View {
             }
             Divider().opacity(0.3)
             HStack(spacing: 14) {
-                if model.busy {
+                if state.busy, let note = model.lockWaitNote {
+                    Text(loc.backend(note)).font(.manrope(12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                } else if model.busy {
                     Text(t("save.busy")).font(.manrope(12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 8)

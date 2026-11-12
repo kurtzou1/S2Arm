@@ -12,7 +12,7 @@
 #   W6 环内 ldur x18,[sp,#-8]：环内负偏移 → minoff<0 → F 抬到 32
 #   N2 环内 ldp x18,x19,[sp,#-0x1f0]：负偏移 -496 → 需 F=512 超抬帧上限 504 → 记缺口
 # ① 安卓 W1：0 缺口、sp-safe、进岛 STPRE 抬 16、环内 ldr 偏移 0xf0→0x100、补丁区无 sp 下方访存
-# ② 安卓 W2：rc=3、gaps.tsv 记窗口缺口、不产 fixups/patched（废包不出）
+# ② 安卓 W2：rc=3、gaps.tsv 记窗口缺口、产物照出（v0.3.1 拿不准不停：缺口点保持原指令）
 # ③ 安卓 W3：0 缺口、sp-safe（无 sp 环行为不变）
 # ④ 安卓 P1：0 缺口、sp-safe、str 写回平移成 stur [sp,#0x10]
 # ⑤ 安卓 N1：rc=3 缺口（不可平移记缺口不产 below-sp）
@@ -99,14 +99,14 @@ abi() { grep -qx "# TARGET	$1" "$T/$2/main.fixups.tsv" && grep -qx "# REWRITE_AB
 gap_rows() { if [ -f "$T/$1/main.gaps.tsv" ]; then grep -cv '^#\|^$' "$T/$1/main.gaps.tsv"; else echo 0; fi; }
 ck "① 安卓 W1：0 缺口 sp-safe，进岛 STPRE，环内 ldr 偏移 0xf0→0x100，补丁区无 sp 下方访存（rc=${ra}；块：${b1}；sp：${s1}）" \
    '[ "$ra" = 0 ] && abi android w1a android-sp-safe-v1 && [ "$(gap_rows w1a)" = 0 ] && [[ $b1 == "stp x0, x1, [sp, #-0x10]!"* ]] && [[ $b1 == *"ldr x0, [sp, #0x100]" ]] && [ "$s1" = "below_sp=0" ]'
-ck "② 安卓 W2：环内 sp 写回 → rc=3、窗口记缺口、不出产物（rc=${rg}）" \
-   '[ "$rg" = 3 ] && [ "$(gap_rows w2a)" -ge 1 ] && grep -q "0x100" "$T/w2a/main.gaps.tsv" && [ ! -e "$T/w2a/main.fixups.tsv" ] && [ ! -e "$T/w2a/main.patched.bin" ]'
+ck "② 安卓 W2：环内 sp 写回 → rc=3、窗口记缺口、产物照出（v0.3.1 拿不准不停，rc=${rg}）" \
+   '[ "$rg" = 3 ] && [ "$(gap_rows w2a)" -ge 1 ] && grep -q "0x100" "$T/w2a/main.gaps.tsv" && [ -e "$T/w2a/main.fixups.tsv" ] && [ -e "$T/w2a/main.patched.bin" ]'
 ck "③ 安卓 W3：无 sp 环 0 缺口 sp-safe（rc=${rn}）" \
    '[ "$rn" = 0 ] && abi android w3a android-sp-safe-v1 && [ "$(gap_rows w3a)" = 0 ]'
 ck "④ 安卓 P1：直写点 str 写回平移成 stur（rc=${rp}；命中：${p1b}；sp：${s2}）" \
    '[ "$rp" = 0 ] && abi android p1a android-sp-safe-v1 && [ "$(gap_rows p1a)" = 0 ] && [[ $p1b == *"stur x0, [sp, #0x10]" ]] && [ "$s2" = "below_sp=0" ]'
 ck "⑤ 安卓 N1：sp 上独占访存记缺口（rc=${rx}）" \
-   '[ "$rx" = 3 ] && [ "$(gap_rows n1a)" -ge 1 ] && [ ! -e "$T/n1a/main.patched.bin" ]'
+   '[ "$rx" = 3 ] && [ "$(gap_rows n1a)" -ge 1 ] && [ -e "$T/n1a/main.patched.bin" ]'
 ck "⑥ 苹果 W1：负对照，仍用 sp 下方暂存、产物不变（rc=${rp1}；sp：${sp1}）" \
    '[ "$rp1" = 0 ] && ! grep -q "# TARGET" "$T/w1p/main.fixups.tsv" && [ "${sp1#below_sp=}" != "$sp1" ] && [ "${sp1%% *}" != "below_sp=0" ]'
 ck "⑦ 安卓 W4：0 缺口 sp-safe，环内 ldr [sp] 平移 0→0x10（rc=${r4}；块：${b4}；sp：${s4}）" \
@@ -115,6 +115,6 @@ ck "⑧ 安卓 W5：0 缺口 sp-safe，环内 ldr [sp,#8] 平移 8→0x18（rc=$
    '[ "$r5" = 0 ] && abi android w5a android-sp-safe-v1 && [ "$(gap_rows w5a)" = 0 ] && [[ $b5 == "stp x0, x1, [sp, #-0x10]!"* ]] && [[ $b5 == *"ldr x0, [sp, #0x18]" ]] && [ "$s5" = "below_sp=0" ]'
 ck "⑨ 安卓 W6：0 缺口 sp-safe，进岛 STPRE 抬 32，环内 ldur 偏移 -8→0x18（rc=${r6}；块：${b6}；命中：${h6}；sp：${s6}）" \
    '[ "$r6" = 0 ] && abi android w6a android-sp-safe-v1 && [ "$(gap_rows w6a)" = 0 ] && [[ $b6 == "stp x0, x1, [sp, #-0x20]!"* ]] && [[ $h6 == *"ldur x0, [sp, #0x18]" ]] && [ "$s6" = "below_sp=0" ]'
-ck "⑩ 安卓 N2：环内负偏移 -496 需 F=512 超上限 → rc=3、窗口记缺口、不出产物（rc=${r7}）" \
-   '[ "$r7" = 3 ] && [ "$(gap_rows n2a)" -ge 1 ] && grep -q "0x100" "$T/n2a/main.gaps.tsv" && [ ! -e "$T/n2a/main.fixups.tsv" ] && [ ! -e "$T/n2a/main.patched.bin" ]'
+ck "⑩ 安卓 N2：环内负偏移 -496 需 F=512 超上限 → rc=3、窗口记缺口、产物照出（v0.3.1 拿不准不停，rc=${r7}）" \
+   '[ "$r7" = 3 ] && [ "$(gap_rows n2a)" -ge 1 ] && grep -q "0x100" "$T/n2a/main.gaps.tsv" && [ -e "$T/n2a/main.fixups.tsv" ] && [ -e "$T/n2a/main.patched.bin" ]'
 exit $bad

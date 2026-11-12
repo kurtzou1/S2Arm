@@ -129,6 +129,10 @@ SaveP("win_03_export_progress_mid", () => Navigate(pack, "progress"));
 InjectMockProgress(pack, fraction: 1.0, stepIndex: -1, running: false, state: "succeeded",
     ipaBytes: 1_200_000_000L, packBytes: 3_400_000_000L, elapsed: 247);
 SaveP("win_04_export_success", () => Navigate(pack, "progress"));
+// 降级继续（v0.3.1）：出成了，完成卡下方逐条列作业层给的玩家提示
+SetW(pack, "packNotes", (object?)new List<string> { "这款有 27 处用了兼容写法，个别场景可能不稳定，遇到请反馈", "3 支着色器首次遇到时现编，开头可能稍卡" });
+SaveP("win_04b_export_success_notes", () => Navigate(pack, "progress"));
+SetW(pack, "packNotes", (object?)new List<string>());
 
 InjectMockProgress(pack, fraction: 0.12, stepIndex: 0, running: false, state: "failed",
     summary: "磁盘空间不足，无法继续出包。");
@@ -148,6 +152,35 @@ InjectMockProgress(pack, fraction: 1.0, stepIndex: -1, running: false, state: "s
 SetW(pack, "revealProblem", "找不到这款游戏的文件夹：所在的磁盘可能没接上，或文件夹被移走了。");
 SaveP("win_08_export_success_folder_missing", () => Navigate(pack, "progress"));
 SetW(pack, "revealProblem", "");
+
+// 更新手机上的 S2Arm（v0.3.1 重做：进行中 / 成功 / 失败三态同一张结局卡，PhoneJobCard.cs；11-11 维护者「成功了也看不出成功」）
+//   updateTrack 用作业层真实事件喂（调它的 Begin / Ingest），状态与结局事实按作业结果设
+void PhoneTrackEvents(params string[] events)
+{
+    var track = GetW(pack, "updateTrack")!;
+    track.GetType().GetMethod("Begin")!.Invoke(track, ["installUpdate", "iPhone「我的 iPhone」"]);
+    foreach (var e in events) track.GetType().GetMethod("Ingest")!.Invoke(track, [JsonDocument.Parse(e).RootElement.Clone()]);
+}
+void TrackField(string field, object? value) { var track = GetW(pack, "updateTrack")!; track.GetType().GetField(field)!.SetValue(track, value); }
+PhoneTrackEvents(
+    """{"type":"stage","stage":"找签名账号与 iPhone","message":"找签名账号与 iPhone","stageIndex":1,"stageCount":6,"overall":0.0}""",
+    """{"type":"stage","stage":"把这款放进手机上的 S2Arm","message":"把这款放进手机上的 S2Arm","stageIndex":2,"stageCount":6,"overall":0.17}""",
+    """{"type":"stage","stage":"用你的 Apple ID 签名","message":"用你的 Apple ID 签名","stageIndex":4,"stageCount":6,"overall":0.5}""",
+    """{"type":"stage","stage":"装到 iPhone","message":"装到 iPhone","stageIndex":5,"stageCount":6,"overall":0.62}""");
+SetW(pack, "updateState", "running");
+SaveP("win_20_phone_update_running", () => Navigate(pack, "phoneupdate"));
+TrackField("Started", DateTime.UtcNow.AddSeconds(-47)); TrackField("Ended", (DateTime?)DateTime.UtcNow);
+TrackField("PackBytes", (long?)0L); TrackField("PackFiles", (int?)0); TrackField("Version", "0.3.0");
+SetW(pack, "updateState", "succeeded");
+SaveP("win_21_phone_update_done", () => Navigate(pack, "phoneupdate"));
+// 失败示例用真正做不下去的情况（签名失败）；认得出的风险走 drop 态让玩家确认，不当失败（维护者 11-11）
+TrackField("Suggestion", "在 Impactor 里重新登录你的 Apple ID，再点一次。");
+SetW(pack, "updateMessage", "签名没成功：Impactor 里的 Apple ID 登录已过期。");
+SetW(pack, "updateState", "failed");
+SaveP("win_22_phone_update_failed", () => Navigate(pack, "phoneupdate"));
+SetW(pack, "updateMessage", "这次会让手机上的 1 款游戏暂时不能玩：示例游戏。它们不是在这台电脑上装的，存档和资源包都还在手机上，到原来那台电脑上再点一次「装到 iPhone」就能回来。");
+SetW(pack, "updateState", "drop");
+SaveP("win_23_phone_update_drop", () => Navigate(pack, "phoneupdate"));
 
 // 封面兜底：游戏包没带图标时用商店横图（banner.jpg），在方形卡片里铺满裁切；没有横图才是 S2Arm 标志
 var bannerSrc = Environment.GetEnvironmentVariable("S2A_SNAPSHOT_BANNER") ?? "";
@@ -226,6 +259,19 @@ SetW(pack, "libraryDiagnostics", "");
 SetW(pack, "report", FakeReport(true));
 SetW(pack, "summaryKey", "environment.ready");
 SaveP("tidy_01_library_connected", () => Navigate(pack, "library"));
+// 游戏库选到 exFAT 盘（setup 报 library_bad_format，v0.3.1）：原因下面列出能放游戏库的 NTFS / ReFS 盘和剩余空间，点「放到这里」就建
+SetW(pack, "catalog", null); SetW(pack, "connectedFolder", null); SetW(pack, "libraryId", null);
+SetW(pack, "librarySummary", "library.failed");
+SetW(pack, "libraryDiagnostics", "这个盘是 EXFAT，可以用，但按现有 2 款游戏算，出包会多占约 61 GB；放在 NTFS 格式的盘上更省空间。");
+SetW(pack, "libraryFailCode", "library_bad_format"); SetW(pack, "libraryFailFolder", "E:\\S2Arm Library");
+SetW(pack, "drivesOverride", (object?)new List<(string Root, string Format, long Free)> { ("C:\\", "NTFS", 212_000_000_000L), ("D:\\", "NTFS", 1_480_000_000_000L) }.OrderByDescending(d => d.Free).ToList());
+SetW(pack, "importDialog", new ImportDialogState(ImportKind.Games));   // 连不上库时游戏库页是欢迎页，原因显示在「添加游戏」弹窗里
+SetW(pack, "importError", "游戏库没连上（E:\\S2Arm Library）：这个盘是 EXFAT，可以用，但按现有 2 款游戏算，出包会多占约 61 GB；放在 NTFS 格式的盘上更省空间。");
+SaveP("win_24_library_bad_format_drives", () => Navigate(pack, "library"));
+SetW(pack, "importDialog", null); SetW(pack, "importError", "");
+SetW(pack, "libraryFailCode", null); SetW(pack, "drivesOverride", null);
+SetW(pack, "catalog", new LibraryCatalog([atDefault, elsewhere], true, "密钥已就绪")); SetW(pack, "connectedFolder", tidyLib); SetW(pack, "libraryId", "mock-lib-id");
+SetW(pack, "librarySummary", "library.completed"); SetW(pack, "libraryDiagnostics", "");
 pack.Height = 2100;   // 设置页最长：装机方式 + 环境检查 + 运行路径都要在一张图里
 SaveP("tidy_02_settings", () => Navigate(pack, "settings"));
 pack.Height = 900;

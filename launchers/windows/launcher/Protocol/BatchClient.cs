@@ -23,8 +23,6 @@ public sealed record BatchSummary(int Total, int Completed, int Failed, int Canc
 /// <summary>后端给出的下一步：哪款的哪个平台。</summary>
 public sealed record BatchStep(string GameId, string Platform);
 
-/// <summary>界面这一步要做的：这款里这台电脑能出、还排着队的平台（同一款连着出），以及排着队但这台电脑出不了的平台。</summary>
-public sealed record BatchRun(BatchItem Item, IReadOnlyList<string> Runnable, IReadOnlyList<string> Unsupported);
 
 /// <summary>batch.py show / 各命令打印的批次。</summary>
 public sealed record BatchState(IReadOnlyList<BatchItem> Items, string? Location, string? Paused, BatchStep? Next, BatchSummary Summary)
@@ -71,12 +69,16 @@ public sealed record BatchState(IReadOnlyList<BatchItem> Items, string? Location
         return new(list, Text(batch, "location"), Text(batch, "paused"), next, summary);
     }
 
-    /// <summary>下一步做什么：后端 Next 指的那款，它还排着队的平台按这台电脑能出的（supported）分两组；没有下一步（出完 / 暂停 / 取消）→ null。</summary>
-    public BatchRun? Step(IReadOnlyCollection<string> supported)
+    /// <summary>重开启动器后说「上次停在第几款」（从 1 数）：被打断的那款（启动器退出时正在出、后端重新排队并记 interrupted）；
+    /// 没有被打断的就是第一款还有平台排着队的；都没有是 0</summary>
+    public int StoppedAt
     {
-        if (Next is null || Items.FirstOrDefault(i => i.GameId == Next.GameId) is not { } item) return null;
-        var pending = item.Platforms.Where(p => item.Results[p].State == "pending").ToList();
-        return new(item, pending.Where(supported.Contains).ToList(), pending.Where(p => !supported.Contains(p)).ToList());
+        get
+        {
+            int First(Func<BatchResult, bool> hit) { for (var n = 0; n < Items.Count; n++) if (Items[n].Platforms.Any(p => hit(Items[n].Results[p]))) return n + 1; return 0; }
+            var interrupted = First(r => r.State == "pending" && r.Interrupted);
+            return interrupted > 0 ? interrupted : First(r => r.State is "pending" or "running");
+        }
     }
 
     private static string? Text(JsonElement e, string key) =>
@@ -118,16 +120,6 @@ public static class BatchClient
         ["items"] = entries.Select(e => new Dictionary<string, object?> { ["gameId"] = e.GameId, ["name"] = e.Name, ["platforms"] = e.Platforms }).ToList(),
         ["location"] = string.IsNullOrEmpty(location) ? null : location
     });
-
-    /// <summary>mark 的参数：空的说明 / 错误码 / 产物不传。</summary>
-    public static IReadOnlyList<string> MarkArguments(string gameId, string platform, string state, string? message = null, string? code = null, string? output = null)
-    {
-        var args = new List<string> { "--game", gameId, "--platform", platform, "--state", state };
-        if (!string.IsNullOrEmpty(message)) args.AddRange(["--message", message]);
-        if (!string.IsNullOrEmpty(code)) args.AddRange(["--code", code]);
-        if (!string.IsNullOrEmpty(output)) args.AddRange(["--output", output]);
-        return args;
-    }
 
     /// <summary>读 batch.py 打印的那行 JSON（null = 没跑起来 / 没输出）。</summary>
     public static BatchOutcome Read(JsonElement? line)

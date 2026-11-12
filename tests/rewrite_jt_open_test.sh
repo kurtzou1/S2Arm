@@ -6,7 +6,7 @@
 #           表项不在 x18，旧规则（jt_targets 要 ldrsw x18 + add x18,x18,xB；jt_general 拒 x16/x17）都不认
 #   形态 B：adrp x11 / add x11,#0x820 / mov w0,w18 / cmp w18,#2 / b.hi / 14 条 add x1 / ldrsw x18,[x11,x0,lsl#2] / add x18,x18,x11 / br x18(0x18c) → 0x190 / 0x198 / 0x1a0
 #           界检查查的是 w18、离 br 超过 16 条，旧规则找不到下标 x0 的界检查
-#   反例：形态 A 但 add x18 与 br 之间是跳入点（cbz w3 跳到 mov x17,x10）→ br 处 x18 可能不是表算出的值，必须仍记缺口、退出码 3、不出 patched.bin
+#   反例：形态 A 但 add x18 与 br 之间是跳入点（cbz w3 跳到 mov x17,x10）→ br 处 x18 可能不是表算出的值，必须仍记缺口、退出码 3、产物照出（v0.3.1 拿不准不停：缺口点保持原指令）
 # ① 苹果 / 安卓：0 缺口、退出码 0、br_tab_open = 2
 # ② 两处 br 改成跳补丁区，分派块比对的目标集逐项等于手算值（期望按 AArch64 编码手算，不跑被测实现）
 # ③ 反例拒绝
@@ -72,5 +72,5 @@ for o in apple android; do
   ck "② ${o}：形态 A 目标 ${ta}；形态 B 目标 ${tb}" '[ "$ta" = "0x120,0x128,0x130" ] && [ "$tb" = "0x190,0x198,0x1a0" ]'
 done
 gx=$(grep '^GAP' "$T/negx.log" | cut -f3,4 | cut -d: -f1 | tr '\t' ' ')
-ck "③ 反例：退出码 ${rx}、缺口「${gx}」、不出 patched.bin" '[ "$rx" = 3 ] && [ "$gx" = "0x120 br_x18" ] && [ ! -e "$T/negx/main.patched.bin" ]'
+ck "③ 反例：退出码 ${rx}、缺口「${gx}」、产物照出（v0.3.1 拿不准不停：缺口点保持原指令）" '[ "$rx" = 3 ] && [ "$gx" = "0x120 br_x18" ] && [ -e "$T/negx/main.patched.bin" ]'
 [ $bad = 0 ] && echo "✅ 跳转表超集识别全通" || { echo "🔴 跳转表超集识别有不通项"; exit 1; }

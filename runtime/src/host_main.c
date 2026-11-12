@@ -6,6 +6,7 @@
 // 弱链接[host]：nvn_pso_harvest（直连层 graphics/nvn 提供；链接行按这行放行未定义，runtime/build.mk 自动收）
 // 弱链接[host,ios,nvntest,touchtest]：s2a_autoplay_on（自动玩家（C#）提供；链接行按这行放行未定义，runtime/build.mk 自动收）
 // 弱链接[host,ios,nvntest,touchtest]：s2a_autoplay_wait_s（自动玩家累计等模型秒数；同上）
+#include "s2a_selfcheck_page.h"   // 自检「仍要启动」按钮文案
 #include "native.h"
 #include "dev_facilities.h"
 #include "guest_main.h"
@@ -286,7 +287,11 @@ static int host_run(int argc, char **argv) {
       if (!s2a_selfcheck()) {
 #if TARGET_OS_IPHONE
           const char *t, *b; s2a_selfcheck_page(&t, &b);   // 细节（地址上限、内存上限）已在 host.log「【红】自检不过」，随诊断包带走
-          s2a_ios_show_notice("exclamationmark.triangle.fill", t, b, 0, 0, 1); s2a_front_run(NULL); for (;;) pause();   // 画面上给提示，不起游戏
+          int s2a_selfcheck_can_continue(void); int s2a_ios_ask_continue(const char *, const char *, const char *, const char *);
+          // 只差内存上限：提示页多一个「仍要启动」，玩家点了就照常起局（v0.3.1 装机原则）；物理上起不来的照旧只给提示、不起游戏
+          if (s2a_selfcheck_can_continue() && s2a_ios_ask_continue("exclamationmark.triangle.fill", t, b, S2A_SELFCHECK_GO))
+              LOG("自检：只差内存上限，玩家点了「仍要启动」，照常起局（大游戏可能被系统结束）");
+          else { s2a_ios_show_notice("exclamationmark.triangle.fill", t, b, 0, 0, 1); s2a_front_run(NULL); for (;;) pause(); }   // 画面上给提示，不起游戏
 #endif
       } }
 #if TARGET_OS_IPHONE

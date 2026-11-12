@@ -47,7 +47,7 @@ static struct shadow *shadow_get(const uint8_t *mem, uint64_t size) {
 
 // 把游戏内存的 [a, b)（池内偏移）传进镜像，绕开 GPU 写过、还没回写落地的那些段：
 // 那些字节镜像里的才是新的，游戏内存里是旧的（同步按页，一页里别的字节脏了不能连它一起盖回去）。
-static void sync_write(nvn_gpu_cmd xc, struct shadow *s, uint64_t a, uint64_t b) {
+static void sync_write(nvn_gpu_cmd xc, uint8_t *direct, struct shadow *s, uint64_t a, uint64_t b) {   // direct 非空：直接写进镜像的 CPU 映射（见 rp_buf_resolve）
     while (a < b) {
         uint64_t stop = b, skip_to = 0;   // 找起点落在 [a, b) 里最靠前的一段；a 本身在某段里就先跳过去
         int inside = 0;
@@ -55,7 +55,8 @@ static void sync_write(nvn_gpu_cmd xc, struct shadow *s, uint64_t a, uint64_t b)
             if (g0 <= a && a < g1) { inside = 1; if (g1 > skip_to) skip_to = g1; }
             else if (g0 > a && g0 < stop) stop = g0; }
         if (inside) { a = skip_to; continue; }
-        nvn_gpu_buf_write(xc, s->buf, a, s->mem + a, stop - a);
+        if (direct) memcpy(direct + a, s->mem + a, (size_t)(stop - a));
+        else nvn_gpu_buf_write(xc, s->buf, a, s->mem + a, stop - a);
         a = stop;
     }
 }
@@ -115,10 +116,16 @@ int rp_buf_resolve(nvn_gpu_cmd c, uint64_t addr, uint64_t len, nvn_gpu_buf *buf,
         nvn_dirty_protect((const void *)a, b - a); uint64_t st = nvn_dirty_now(); if (!st) st = 1;   // 先保护、取代号、再读
         // 这一串里只要有一页本次提交已同步过，整串就按「第二次同步」走主段
         uint64_t last = 0; for (uint64_t k = i; k <= j; k++) if (s->sub[k] > last) last = s->sub[k];
-        nvn_gpu_cmd xc = rp_xfer_cmd(&last);
-        if (xc) sync_write(xc, s, a - (uintptr_t)mem, b - (uintptr_t)mem);
+        // 本次提交里第一次同步这一串：镜像是 CPU 也能写的共享缓冲，直接写进去，不录成 GPU 上的拷贝。
+        // 等价于真机（和 iOS 的零拷贝包内存）的语义——缓冲就是游戏内存，GPU 执行到哪一笔读到的就是当时的内容；
+        // 游戏在提交前把这次提交要用的内容写好，这一条本来就成立（原先录进前置段，也是先于本次提交的全部通道）。
+        // 真机读数（3D 那款场景，同一局里来回切）：每帧约 27 MB、100 次带全局屏障的 GPU 拷贝改成直写，帧率 11.0 → 12.9。
+        // 同一次提交里已经同步过又变了的，必须排在已录的绘制之后：照旧结束通道、录进主段。镜像 CPU 读不到的后端也照旧。
+        uint8_t *m = last != rp_sub_serial() ? nvn_gpu_buf_cpu(s->buf) : NULL;
+        if (m) { sync_write(NULL, m, s, a - (uintptr_t)mem, b - (uintptr_t)mem); last = rp_sub_serial(); }
+        else { nvn_gpu_cmd xc = rp_xfer_cmd(&last); if (xc) sync_write(xc, NULL, s, a - (uintptr_t)mem, b - (uintptr_t)mem); }
         for (uint64_t k = i; k <= j; k++) { s->synced[k] = st; s->sub[k] = last; }
-        g_sync_bytes += b - a; g_sync_runs++;
+        g_sync_bytes += b - a; g_sync_runs++; rp_perf_add(RP_PERF_BUF_SYNC_KB, (b - a) / 1024);
         i = j + 1;
     }
     if (gens != stack) free(gens);
@@ -229,10 +236,14 @@ void rp_op_copy_t2t(nvn_gpu_cmd c, const p_copy_t2t *o, const void *rec) {
             view_t vs, vd; memset(&vs, 0, sizeof vs); memset(&vd, 0, sizeof vd);
             vs.set_levels = 1; vs.base_level = (int)sl; vs.nlevels = 1; vs.set_layers = 1; vs.min_layer = (int)(sz0 + (uint32_t)sr.zoffset); vs.nlayers = 1;
             vd.set_levels = 1; vd.base_level = (int)dl; vd.nlevels = 1; vd.set_layers = 1; vd.min_layer = (int)(dz0 + (uint32_t)dr.zoffset); vd.nlayers = 1;
+            // 一次取源 / 目标两个视图再 blit：同一段取用窗口，第二个不许把第一个轮转淘汰（#699）。
+            // 两笔连续取用本身最多推进一次轮转，但要和 pass 内多附件守同一条不变量。
+            rp_view_pin_begin();
             nvn_gpu_view gv = rp_view_for(s, &vs, c), hv = rp_view_for(d, &vd, c);
-            if (!gv || !hv) return;
+            if (!gv || !hv) { rp_view_pin_end(); return; }
             NVNcopyRegion a = sr, b = dr; a.zoffset = b.zoffset = 0; a.depth = b.depth = 1;
             nvn_gpu_blit(c, gv, &a, hv, &b, (o->flags & NVN_COPY_FLAGS_LINEAR_FILTER_BIT) != 0);
+            rp_view_pin_end();
             rp_tex_mark_gpu_written(d);
             return;
         }

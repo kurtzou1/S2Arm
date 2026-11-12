@@ -86,11 +86,11 @@ SIGNED_BIAS = {
     "ldrsb.w+sxtw": -128,
     "ldrh+sxth": -32768,
 }
-# 开关打开：这两条不按 256/65536 改写，退出 3、不出映像。
+# 开关打开：这两条不按 256/65536 改写，退出 3、产物照出（v0.3.1 拿不准不停）。
 W_LSL_GAP = {"ldrsb.w+lsl", "ldrsh.w+lsl"}
 
 # 表外配对：add 的扩展与加载宽度对不上，硬件落点远远跑出线性垫能盖的区间（ldrsb w + uxtw #2 落在 base+17G 量级）。
-# 编译器不会发出这三种；开关打开后按「认不出就记缺口」处理，退出 3、不出映像。
+# 编译器不会发出这三种；开关打开后按「认不出就记缺口」处理，退出 3、产物照出（v0.3.1 拿不准不停）。
 BAD_PAIRS = [
     ("badpair_uxtw", "ldrsb w6, [x1, x0]", "add x18, x18, w6, uxtw #2", "8 位加载配 uxtw"),
     ("badpair_uxth", "ldrsb w6, [x1, x0]", "add x18, x18, w6, uxth #2", "8 位加载配 uxth"),
@@ -372,7 +372,7 @@ int main(void) {
                         L = landings(data, patch_off(out / "main.fixups.tsv"), br)
                     results[(signed, tag, target)] = (rc, L, patched if patched.is_file() else None, out)
                     if signed and kind in W_LSL_GAP:
-                        ok = rc == 3 and not patched.is_file()
+                        ok = rc == 3 and patched.is_file()   # v0.3.1 拿不准不停：记缺口、产物照出
                         check(f"{name}/{kind} {tag} {target} 开关1", ok,
                               f"退出 {rc} 映像 {'无' if not patched.is_file() else '有'}（W 目的 lsl 记缺口）")
                         continue
@@ -425,7 +425,7 @@ int main(void) {
                 for target in ("apple", "android"):
                     c = results[(signed, "c", target)]
                     if signed and kind in W_LSL_GAP:
-                        ok = c[0] == 3 and c[2] is None
+                        ok = c[0] == 3 and c[2] is not None   # v0.3.1：记缺口、产物照出
                         check(f"{name} {target} 开关1 记缺口", ok, f"退出 {c[0]}")
                         continue
                     if c[2]:
@@ -535,7 +535,7 @@ int main(void) {
                 out = work / name / f"{tag}-{target}-s1"
                 rc, log = rewrite(rew, src, out, 1, target)
                 gone = not (out / "main.patched.bin").is_file()
-                check(f"{name}（{why}）{tag} {target} 开关1 记缺口", rc == 3 and gone,
+                check(f"{name}（{why}）{tag} {target} 开关1 记缺口", rc == 3 and not gone,   # v0.3.1：记缺口、产物照出
                       f"退出 {rc} 映像 {'无' if gone else '有'}")
 
     for err in golden.finish():

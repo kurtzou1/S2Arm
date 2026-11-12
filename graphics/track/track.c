@@ -26,6 +26,9 @@
 #include <time.h>
 #include <unistd.h>
 #include <errno.h>
+#if defined(__ARM_NEON)
+#include <arm_neon.h>   // psettle 排空比对 16 字节一次（见 psettle）
+#endif
 #if defined(__APPLE__)
 #include <mach/mach.h>
 #include <mach/mach_time.h>
@@ -1453,10 +1456,21 @@ static void psettle(uintptr_t pn, uint8_t ps, const uint16_t *k) {
     for (unsigned s = 0; s < g_subs; s++) if (ps >> s & 1) {
         const uint8_t *o = snap_at(k[s]), *c = (const uint8_t *)((pn << g_shift) + s * SUB);
         uint64_t bits[64] = {0}; unsigned nb = 0, runs = 0; int prev = 0;
+        // 比对（排空线程，正常上下文）：整块相等直接跳过。NEON 一次 vceqq 比 16 字节（比 8 字节快路径再少一半迭代）；
+        //   有差异的块退回逐字节，位图 / 字节计数 / 连续段计数与纯逐字节版完全一致（块内前 8 字节相等时旧版会整 8 字节跳过，
+        //   跳过的都是相等字节、对位图无贡献，prev 归零语义一致）。非 ARM 宿主（x86 CI / Linux 构建）照旧逐字节
+#if defined(__ARM_NEON)
+        for (unsigned i = 0; i + 16 <= SUB; i += 16) {
+            if (vminvq_u8(vceqq_u8(vld1q_u8(o + i), vld1q_u8(c + i))) == 0xff) { prev = 0; continue; }
+            for (unsigned j = i; j < i + 16; j++) { int d = o[j] != c[j]; if (d) { bits[j / 64] |= 1ull << (j % 64); nb++; runs += !prev; } prev = d; }
+        }
+        for (unsigned i = SUB & ~(unsigned)15; i < SUB; i++) { int d = o[i] != c[i]; if (d) { bits[i / 64] |= 1ull << (i % 64); nb++; runs += !prev; } prev = d; }
+#else
         for (unsigned i = 0; i < SUB; ) {
             if (i % 8 == 0 && *(const uint64_t *)(o + i) == *(const uint64_t *)(c + i)) { i += 8; prev = 0; continue; }
             int d = o[i] != c[i]; if (d) { bits[i / 64] |= 1ull << (i % 64); nb++; runs += !prev; } prev = d; i++;
         }
+#endif
         slot_put(k[s]);
         if (!nb) { atomic_fetch_add(&g_psame, 1); continue; }
         if (g_npr == g_cpr) { g_cpr = g_cpr ? g_cpr * 2 : 256; g_pr = realloc(g_pr, g_cpr * sizeof *g_pr); if (!g_pr) FATAL("精确写表分配失败"); }

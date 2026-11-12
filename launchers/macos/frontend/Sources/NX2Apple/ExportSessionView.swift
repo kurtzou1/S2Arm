@@ -151,7 +151,7 @@ struct ExportSessionView: View {
         let (symbol, color): (String, Color) = {
             switch outcome?.state {
             case .completed?: return ("checkmark.circle.fill", LauncherPalette.ready)
-            case .failed?, .interrupted?: return ("exclamationmark.circle.fill", LauncherPalette.danger)
+            case .failed?, .interrupted?, .paused?: return ("exclamationmark.circle.fill", LauncherPalette.danger)   // paused：平台结局不会是它（作业层 stepEnded 只给 completed / failed / cancelled）
             case .cancelled?: return ("minus.circle", LauncherPalette.unbuilt)
             case nil: return (active ? "circle.dotted" : "circle", active ? LauncherPalette.building : LauncherPalette.unbuilt)
             }
@@ -180,10 +180,17 @@ struct ExportSessionView: View {
         return measured.contains(-1) || measured.reduce(0, +) <= 0 ? plan.map { _ in 1 } : measured.map { max($0, 1) }
     }
 
-    /// 整单完成比例（多平台时算上前面做完的平台）。
+    /// 第 k 步的填充：作业层给了整单进度（overall）就按同一套权重从它切出这一段，各段和大百分比永远一致、只增不减；没有时照旧按估计
+    private func fill(_ k: Int, _ e: MilestoneEstimate, weights w: [Double]) -> Double {
+        guard let o = session.progress.overall, k < w.count else { return e.fill(k) }
+        let total = w.reduce(0, +), before = w[..<k].reduce(0, +)
+        return w[k] > 0 && total > 0 ? min(1, max(0, (o * total - before) / w[k])) : 0
+    }
+
+    /// 整单完成比例（多平台时算上前面做完的平台）。本平台这部分 = 作业层的 overall（没有时按各步估计）
     private func overallFraction(_ e: MilestoneEstimate, plan: [Milestone]) -> Double {
         let w = weights(plan), total = w.reduce(0, +)
-        let thisPlatform = total > 0 ? zip(plan.indices, w).reduce(0) { $0 + e.fill($1.0) * $1.1 } / total : 0
+        let thisPlatform = session.progress.overall ?? (total > 0 ? zip(plan.indices, w).reduce(0) { $0 + e.fill($1.0) * $1.1 } / total : 0)
         return min(1, (Double(run.index) + thisPlatform) / Double(max(1, run.platforms.count)))
     }
 
@@ -226,8 +233,8 @@ struct ExportSessionView: View {
                     let width = max(10, (g.size.width - 3 * Double(plan.count - 1)) * w[k] / total)
                     ZStack(alignment: .leading) {
                         Rectangle().fill(Color.white.opacity(0.10))
-                        Rectangle().fill(LauncherPalette.cream).frame(width: width * e.fill(k))
-                            .animation(.easeOut(duration: 0.9), value: e.fill(k))
+                        Rectangle().fill(LauncherPalette.cream).frame(width: width * fill(k, e, weights: w))
+                            .animation(.easeOut(duration: 0.9), value: fill(k, e, weights: w))
                         if k == e.index { ProgressSweep() }
                     }
                     .frame(width: width)
@@ -384,6 +391,15 @@ struct ExportSessionView: View {
                 if let bytes = o.appBytes { bigStat(x(platform == .ios ? "done.ipa" : "done.macSize"), size(bytes)) }
                 if platform == .ios, let bytes = o.packBytes { bigStat(x("done.pack"), size(bytes)) }
                 Spacer(minLength: 0)
+            }
+            if !o.notes.isEmpty {   // 降级继续的玩家提示（作业层原句）：出成了照常给按钮，这里说清哪里用了兼容做法
+                VStack(alignment: .leading, spacing: 8) {
+                    Label(x("done.notes"), systemImage: "exclamationmark.triangle.fill").font(.manrope(14, .bold)).foregroundStyle(LauncherPalette.building)
+                    ForEach(o.notes, id: \.self) { note in
+                        Text(note).font(.manrope(13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .accessibilityElement(children: .combine).accessibilityIdentifier("result.\(platform == .ios ? "ios" : "mac").notes")
             }
             HStack(spacing: 14) {
                 if platform == .ios {

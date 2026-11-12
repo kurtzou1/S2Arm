@@ -544,7 +544,8 @@ def _scan_blob(path, data, rows, blobs, stat):
     if b'HCPS' in data: owned |= scan_spch(path, data, rows, blobs, stat)
     if RAW and (b'BNSH\0\0\0\0' not in data or path.startswith('nso:')): scan_raw(path, data, rows, blobs, stat)
     for k, m in enumerate(re.finditer(b'BNSH\0\0\0\0', data)):
-        b = data[m.start():]; size = struct.unpack_from('<I', b, 0x1c)[0]; b = b[:size] if 0 < size <= len(b) else b
+        # 按头里的长度只切这一支（#711：原先先切到文件尾再截短，几 GB 的容器 mmap 每遇一处 BNSH 就拷一份到文件尾，Windows 提交上限下 MemoryError）
+        o = m.start(); size = struct.unpack_from('<I', data, o + 0x1c)[0]; b = data[o:o + size] if 0 < size <= len(data) - o else data[o:]
         try: codes = bnsh_codes(b)
         except Exception: stat['BNSH 解析失败'] += 1; continue
         if codes is None: stat['BNSH 无 grsc'] += 1; continue
@@ -1121,14 +1122,10 @@ if __name__ == '__main__':
         stat['Wwise 核查：包个数'] = len(ww); stat['【红】Wwise 核查：来自音频包的着色器记录（跳过规则反例）' if bad else 'Wwise 核查：反例'] = len(bad)
         for r in bad[:20]: print(f'【红】Wwise 核查反例：{r[2]} → {r[0]}', file=sys.stderr, flush=True)
     print('统计', dict(stat)); print('阶段记录', len(rows), '唯一键', len(uniq), '按阶段', dict(collections.Counter(v[0] for v in uniq.values())))
-    # 漏抽是硬错误（10-23 维护者）：分块压缩里续解不了的块 → 退出 1，shader_pack 报红中止，不静默少抽
-    if stat['【红】pak 索引加密']:
-        print(f"【红】抽取：{stat['【红】pak 索引加密']} 个 pak 索引加密、条目读不到（着色器会漏抽），见上方逐条", file=sys.stderr)
-    if stat['【红】zlib 块续解失败']:
-        print(f"【红】抽取：{stat['【红】zlib 块续解失败']} 个 zlib 块回指前块窗口、续解不了（块里的着色器会漏抽），见上方逐条", file=sys.stderr)
-    if stat['【红】PKZ/DAT 解析失败']:
-        print(f"【红】抽取：{stat['【红】PKZ/DAT 解析失败']} 处 PKZ/DAT 解析失败，见上方逐条", file=sys.stderr)
-    if stat['【红】pak 损坏'] or stat['【红】pak 条目解码失败']:
-        print(f"【红】抽取：pak 损坏 {stat['【红】pak 损坏']}、条目解码失败 {stat['【红】pak 条目解码失败']}", file=sys.stderr)
-    if stat['【红】厂商档案读不了']: print(f"【红】抽取：{stat['【红】厂商档案读不了']} 处厂商档案（kit! / HGPAK）读不了，见上方逐条", file=sys.stderr); sys.exit(1)
-    if stat['【红】pak 索引加密'] or stat['【红】pak 损坏'] or stat['【红】pak 条目解码失败'] or stat['【红】zlib 块续解失败'] or stat['【红】PKZ/DAT 解析失败']: sys.exit(1)
+    # 读不了的文件跳过、其余照抽（v0.3.1 拿不准不停；原先 10-23 定「漏抽是硬错误」退 1、整款出不了包）：漏的那部分着色器运行时首遇现编，
+    #   按类计数写进 <输出目录>/degrade.tsv（graphics/tools/direct/extract.sh 并进抽取的降级汇总），逐条原因见上方【红】行
+    skip = [(k, stat[k]) for k in ('【红】pak 索引加密', '【红】pak 损坏', '【红】pak 条目解码失败', '【红】zlib 块续解失败', '【红】PKZ/DAT 解析失败', '【红】厂商档案读不了') if stat[k]]
+    with open(os.path.join(outdir, 'degrade.tsv'), 'w', encoding='utf-8') as f:
+        for k, n in skip:
+            f.write(f"extract\ts2x:{k[3:]}\t{n}\t\tS2Arm 抽取跳过读不了的部分，里面的着色器运行时首遇现编\n")
+    if skip: print(f"【黄】抽取：跳过读不了的部分（{'、'.join(f'{k[3:]} {n}' for k, n in skip)}），其余照抽；这些着色器运行时首遇现编，逐条见上方", file=sys.stderr)

@@ -144,10 +144,11 @@ class MacDisplayTests(unittest.TestCase):
         self.caps()
         self.assertEqual(sorted(self.mac()), sorted(["enhance", "fps60", "widescreen", "widenForce", "docked", "language", "rumble", "rumbleLevel", "motion", "padFace", "hud", "diagRun"]))
 
-    def test_game_without_a_mac_build_says_why(self):
+    def test_game_without_a_mac_build_can_still_pick(self):
+        # v0.3.1：还没出 Mac 版也能先选、存成偏好（出好后生效）——原先整页置灰写「还没有做好 Mac 版」，玩家只能先去出包
         m = self.mac()
         for key in ("fps60", "widenForce", "enhance", "docked", "hud"):
-            self.assertFalse(m[key]["available"]); self.assertEqual(m[key]["reason"], community.NO_RUNTIME)
+            self.assertTrue(m[key]["available"]); self.assertEqual(m[key]["reason"], "")
 
     def test_missing_capabilities_give_their_own_reason(self):
         self.caps("widen\t0\ndirect\t0\n")

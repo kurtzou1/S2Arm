@@ -235,7 +235,8 @@ namespace S2A.Dsh
                 var code = Sl(area, 0x80, (int)ilen);
                 // 不支持的明确报红（接口约定 9）：自有共享内存会压在阶段内存上、控制段不给它的大小；阶段内存超 Metal 线程组内存；线程数为 0
                 if (MeshStage.OwnShared(code)) throw new DshError("mesh stage failed", stage + ": 指令里有自己的共享内存访问（LDS / STS / ATOMS），会压在阶段内存上");
-                if (size > MeshStage.METAL_MAX_SHARED) throw new DshError("mesh stage failed", $"{stage}: 阶段内存 {size} 字节超 Metal 线程组内存 {MeshStage.METAL_MAX_SHARED}");
+                // 载荷超 16 KB 的网格（MeshStage.Relay）：阶段内存整段在设备中转缓冲里，不受线程组内存限
+                if (size > MeshStage.METAL_MAX_SHARED && !(stage == "ms" && MeshStage.Relay(mi))) throw new DshError("mesh stage failed", $"{stage}: 阶段内存 {size} 字节超 Metal 线程组内存 {MeshStage.METAL_MAX_SHARED}");
                 if (mi.Threads == 0 || mi.Threads > 1024) throw new DshError("mesh stage failed", $"{stage}: 控制段 +0x58 每组线程数 {mi.Threads}");
                 string cp = Path.Combine(W, Key + ".bin"); XIo.WriteAllBytes(cp, code);
                 var j = new JsonObject { ["key"] = Key, ["stage"] = "cs", ["code"] = cp, ["arch"] = "sm86", ["tex"] = new JsonObject(), ["img"] = new JsonObject(), ["attr"] = new JsonObject(), ["fout"] = new JsonObject(), ["c1"] = Convert.ToHexStringLower(c1) };
@@ -498,6 +499,12 @@ namespace S2A.Dsh
                     ["entry"] = "main0", ["msl_entry_kind"] = kind == "ts" ? "object" : "mesh" };
                 if (kind == "ms") refl["entry_z"] = "main0_z";
                 refl["mesh_threads"] = (long)mi.Threads; refl["mesh_payload"] = (long)mi.Payload;
+                if (MeshStage.Relay(mi))   // 载荷走设备中转（MeshStage.Relay）：宿主按这几个数分配、绑中转缓冲（nvn_geometry.inc mtk_encode）
+                {
+                    var (pw, sw) = MeshStage.RelayWords(mi);
+                    refl["mesh_relay"] = (long)MeshStage.RELAY_SLOT; refl["mesh_relay_payload_words"] = (long)pw;
+                    if (kind == "ms") refl["mesh_relay_slice_words"] = (long)sw;   // 每个任务组的片数 = 任务线程数（mesh_threads），宿主写进中转头
+                }
                 if (kind == "ms") { refl["mesh_task"] = mi.Task; refl["max_vertices"] = (long)mi.MaxV; refl["max_primitives"] = (long)mi.MaxP; }
                 refl["threadgroup_size"] = j["local"]?.DeepClone();
                 refl["c1"] = Convert.ToHexStringLower(c1); refl["notes"] = notes; refl["drv_reads"] = dr; refl["drv_unfillable"] = Unfillable(dr, kind);

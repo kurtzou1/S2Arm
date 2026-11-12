@@ -2,7 +2,7 @@
 # 抽取阶段单测（pack/stage_extract.sh + 真的 graphics/tools/direct/extract.sh、pack/ue_pak.py；两个抽取器换成记账的假脚本，临时产物根，约 3 秒）：bash tests/stage_extract_test.sh
 # 期望按规则手写：首次 → 提交、extract/ok 与两份抽取在、记键、两个抽取器各跑 1 次且拿到 J 与配置档（DM_GAME）；同键 → 跳过、不再抽；
 #   游戏输入变（romfs 加文件）/ 配置档内容键变 → 键变、重抽；romfs 有 .pak → 先跑 ue_pak（这个 .pak 不是 Unreal pak → 0 个存档），shader_split 拿到 DM_UE_SHADERS；
-#   直连抽取失败 → 照常提交、退出 0、extract/direct_gap.txt 写「直连库失败：<原因>」、打黄（11-05 运行时现编兜底，原先退 3 整款出不了包）；S2Arm 抽取失败 → 退出 1；都现行不动、日志副本在 .failed/；Vulkan 款 → 跳过、不抽；
+#   直连抽取失败 → 照常提交、退出 0、extract/direct_gap.txt 写「直连库失败：<原因>」、打黄（11-05 运行时现编兜底，原先退 3 整款出不了包）；S2Arm 抽取失败 → v0.3.1 起也照常提交、退出 0、只用直连抽取的结果、degrade.extract.tsv 记 s2x_failed（原先退 1 整款停，#711）；日志副本在 .failed/；Vulkan 款 → 跳过、不抽；
 #   两边抽取合起来 0 支（10-29 神之天平 外传：运行时 GLSLC 款）→ 退出 3、红行「直连库失败：直连抽取 0 支着色器（缺口：<切分器的红行>」（原先退 0，出库到最后「一个键都没出」整包停住）；
 #   GLSLC 离线编出了 .glslc → shader_split 拿到 DM_GLSLC_CAPTURE=extract/glslc_capture、要编时先编宿主；离线编失败 → 退出 3、红行带原因
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); bad=0
@@ -83,9 +83,11 @@ ck "romfs 有 .pak → 先跑 ue_pak（$(tail -1 $c/extract/ue_pak.log 2>/dev/nu
 rin 'echo r3 > romfs/h'; b=$(cur); o=$(FAKE_FAIL=split S 2>&1); r=$?
 # 10-26 空洞骑士：只给直连用的直连抽取抽不出 → 退出 3（refresh 据此只出通用包），红行「直连库失败：」带切分器的原因
 ck "直连抽取失败 → 照常提交（11-05 运行时现编兜底）：退出 0（rc=${r}）、现行换新、extract/direct_gap.txt 带原因、【黄】抽取缺口、日志副本在 .failed/（$(echo "$o" | grep -a 抽取缺口 | cut -c1-90)）" '[ $r = 0 ] && [ "$(cur)" != "$b" ] && grep -q "直连库失败：直连抽取失败（Data/x: Unity serialized fi" "$(cur)/extract/direct_gap.txt" && [[ "$o" == *"【黄】acnh 抽取缺口：直连库失败：直连抽取失败"* ]] && [ -f $T/roots/.failed/acnh_extract.log ]'
+ck "直连抽取失败：degrade.extract.tsv 记 offline_zero 1、带玩家提示（实得 $(grep -v '^#' $(cur)/degrade.extract.tsv 2> /dev/null | cut -f1-4 | tr '\n\t' '; ' | cut -c1-80)）" '[ "$(grep -v "^#" $(cur)/degrade.extract.tsv | cut -f2,3 | tr "\n\t" "; ")" = "offline_zero 1;" ] && grep -q "第一次进新场景会卡一下" $(cur)/degrade.extract.tsv'
 rin 'echo r3b > romfs/h2'; b=$(cur); o=$(FAKE_FAIL=s2x S 2>&1); r=$?   # 上一条照常提交了：换输入让这条真去重抽
-ck "S2Arm 抽取失败（通用也要用）→ 照旧退出 1（rc=${r}）、现行不动、【红】抽取失败" '[ $r = 1 ] && [ "$(cur)" = "$b" ] && [[ "$o" == *"【红】acnh 抽取失败"* ]]'
-ck "S2Arm 抽取失败：各步日志留进 .failed/acnh_extract.d/（s2x.log 带失败原因，临时根删掉也看得到；实得 $(cd $T/roots/.failed/acnh_extract.d 2> /dev/null && find . -name '*.log' | tr '\n' ' ')）" 'grep -rq "fake s2x fail" $T/roots/.failed/acnh_extract.d/ 2> /dev/null'
+c=$(cur)
+ck "S2Arm 抽取失败 → 降级继续（v0.3.1）：退出 0（rc=${r}）、现行换新、extract/s2x/rows.tsv 只有表头、extract.log 有🟡" '[ $r = 0 ] && [ "$c" != "$b" ] && [ "$(grep -cv "^#" $c/extract/s2x/rows.tsv)" = 0 ] && grep -q "🟡 S2Arm 抽取没跑成" $c/extract.log'
+ck "S2Arm 抽取失败：degrade.extract.tsv 记 partial 1 + s2x_failed 1，原因带 s2x.log 原文（实得 $(grep -v '^#' $c/degrade.extract.tsv 2> /dev/null | cut -f1-3 | tr '\n\t' '; ')）" '[ "$(grep -v "^#" $c/degrade.extract.tsv | cut -f1-3 | tr "\n\t" "; ")" = "extract partial 1;extract s2x_failed 1;" ] && grep -q "fake s2x fail" $c/degrade.extract.tsv'
 # 10-29 神之天平 外传：运行时 GLSLC 款两边都抽到 0 支 → 与直连抽取失败同一口径（退 3、红行写缺口类别、通用照出），不再一路出库到「一个键都没出」整包停住
 rin 'rm -f romfs/x.pak'; b=$(cur); h0=$(grep -c ^host $T/calls); o=$(FAKE_FAIL=zero S 2>&1); r=$?
 ck "两边抽取 0 支 → 照常提交：退出 0（rc=${r}）、现行换新、direct_gap.txt 写「直连抽取 0 支着色器」带切分器红行（$(cat "$(cur)/extract/direct_gap.txt" 2> /dev/null | cut -c1-120)）" '[ $r = 0 ] && [ "$(cur)" != "$b" ] && grep -q "直连库失败：直连抽取 0 支着色器（缺口：" "$(cur)/extract/direct_gap.txt" && [[ "$o" == *"【黄】acnh 抽取缺口：直连库失败：直连抽取 0 支着色器"* ]]'

@@ -7,6 +7,8 @@ body:
     attributes:
       value: |
         感谢反馈！提交前请注意：**不要上传 prod.keys、游戏文件（NSP / XCI）或资源包**，它们涉及版权和你的个人密钥。上传日志和截图前，请检查并遮盖个人信息。
+
+        **已知问题（Windows）**：在启动器里自动更新时，如果 Impactor 开着，更新会失败，按钮又回到「更新并重启」。先在任务管理器里结束 Impactor 再点「更新并重启」；也可以直接从 s2arm.com 下载安装程序装新版，装到新位置不受影响。遇到这个不用另开问题。
   - type: input
     id: game
     attributes:

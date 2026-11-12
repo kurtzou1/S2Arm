@@ -20,6 +20,9 @@ R=$(cd "$(dirname "$0")/../../.." && pwd); NX=$R/graphics/nvn
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ROOT=$(cygpath -m "$ROOT"); X=$(cygpath -m "$X"); R=$(cygpath -m "$R"); NX=$R/graphics/nvn;; esac
 PY=${S2A_PYTHON:-${S2A_PY:-$(bash "$R/tools/machine.sh" get S2A_PY 2> /dev/null)}}; PY=${PY:-$(command -v python3)}
 export J=${J:-${S2A_CPU_BAKE:-${S2A_JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || nproc)}}}
+# 抽取每路吃内存（#711：Windows 16 GB 抽取 MemoryError）：给了 S2A_CPU_BAKE（按内存封顶的重活路数，tools/cores.sh / oneclick_win）就不超过它——
+#   调用方常把 J 设成直连库编译的路数（每路只吃一个 metal 进程，16 GB 可开 23 路），抽取照它开就绕过了内存封顶
+[ -n "${S2A_CPU_BAKE:-}" ] && [ "$S2A_CPU_BAKE" -ge 1 ] 2> /dev/null && [ "$J" -gt "$S2A_CPU_BAKE" ] && export J=$S2A_CPU_BAKE
 source "$R/tools/progress.sh"
 say() { echo "[抽取] $*"; }
 why() { local w; w=$(grep -a '\[RED\]\|【红】' "$1" 2> /dev/null | tail -1); [ -n "$w" ] || w=$(grep -a . "$1" 2> /dev/null | tail -1); echo "$w" | sed 's/^\[RED\] *//' | cut -c1-200; }   # 失败原因：红行优先，没有取末行
@@ -72,7 +75,13 @@ env ${GC[@]+"${GC[@]}"} "DM_UE_SHADERS=$X/ue_shaders" "DM_OODLE_LOG_DIR=$X" "$PY
 ts=$((SECONDS - s)); s=$SECONDS
 prog "抽取着色器（S2Arm，${JX} 路，开头已在后台起）"
 wait "$SXP"; sxrc=$?; SXP=
-[ $sxrc = 0 ] || { say "🔴 S2Arm 抽取失败（$X/s2x.log）"; tail -3 "$X/s2x.log"; exit 1; }
+# S2Arm 抽取没跑成（v0.3.1 拿不准不停；#711 Windows MemoryError 原先就停在这里）：只用直连抽取的结果往下走，S2Arm 那份置空、记一笔
+if [ $sxrc != 0 ]; then
+  sw=$(grep -a '\[RED\]\|【红】\|Error' "$X/s2x.log" 2> /dev/null | tail -1 | cut -c1-200); [ -n "$sw" ] || sw=$(grep -a . "$X/s2x.log" 2> /dev/null | tail -1 | cut -c1-200); [ -n "$sw" ] || sw="退出码 ${sxrc}"
+  say "🟡 S2Arm 抽取没跑成（${sw}；$X/s2x.log），只用直连抽取的结果"; tail -3 "$X/s2x.log"
+  mkdir -p "$X/s2x/src" && printf '# 键\t阶段\t来源\t变体号\n' > "$X/s2x/rows.tsv" && printf '# 键\t阶段\t首个来源\t变体号\n' > "$X/s2x/index.tsv" || exit 1
+  printf 'extract\ts2x_failed\t1\t\tS2Arm 抽取没跑成（%s），只用直连抽取的结果\n' "$sw" > "$X/s2x/degrade.tsv"
+fi
 tx=$((SECONDS - sx))
 # 两边合起来 0 支（直连库并集为空，direct_lib.sh 出到最后换库核验「一个键都没出」）：本款这次出不了直连库，按内容缺口退 3、红行写清缺口类别，通用包照出（同上面直连抽取失败）
 nsp=$(grep -cv -e '^#' -e '^package	' "$X/split/shader_map.tsv" 2> /dev/null); nsx=$(grep -cv '^#' "$X/s2x/rows.tsv" 2> /dev/null)

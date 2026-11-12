@@ -131,6 +131,33 @@ int main(void) {
               (int)p.type, p.base_layer, p.why);
     }
 
+    // 立方图按最终层数选视图类型；不改 mip / layer 范围。
+    // 包含继承和显式目标，跨越 1、2–5、6、非 6 倍数以及多个 cube 的边界。
+    {
+        const struct { uint32_t target, layers, first, count; int explicit_target; uint32_t desired_target; VkImageViewType want; } cases[] = {
+            {NVN_TEXTURE_TARGET_CUBEMAP, 6, 3, 1, 0, 0, VK_IMAGE_VIEW_TYPE_2D},
+            {NVN_TEXTURE_TARGET_CUBEMAP, 6, 0, 2, 0, 0, VK_IMAGE_VIEW_TYPE_2D_ARRAY},
+            {NVN_TEXTURE_TARGET_CUBEMAP, 6, 0, 5, 0, 0, VK_IMAGE_VIEW_TYPE_2D_ARRAY},
+            {NVN_TEXTURE_TARGET_CUBEMAP, 6, 0, 6, 0, 0, VK_IMAGE_VIEW_TYPE_CUBE},
+            {NVN_TEXTURE_TARGET_CUBEMAP_ARRAY, 12, 0, 1, 1, NVN_TEXTURE_TARGET_CUBEMAP_ARRAY, VK_IMAGE_VIEW_TYPE_2D},
+            {NVN_TEXTURE_TARGET_CUBEMAP_ARRAY, 12, 0, 2, 1, NVN_TEXTURE_TARGET_CUBEMAP, VK_IMAGE_VIEW_TYPE_2D_ARRAY},
+            {NVN_TEXTURE_TARGET_CUBEMAP_ARRAY, 12, 1, 6, 1, NVN_TEXTURE_TARGET_CUBEMAP_ARRAY, VK_IMAGE_VIEW_TYPE_CUBE},
+            {NVN_TEXTURE_TARGET_CUBEMAP_ARRAY, 12, 0, 7, 0, 0, VK_IMAGE_VIEW_TYPE_2D_ARRAY},
+            {NVN_TEXTURE_TARGET_CUBEMAP_ARRAY, 12, 0, 12, 0, 0, VK_IMAGE_VIEW_TYPE_CUBE_ARRAY},
+            {NVN_TEXTURE_TARGET_CUBEMAP_ARRAY, 18, 0, 18, 1, NVN_TEXTURE_TARGET_2D_ARRAY, VK_IMAGE_VIEW_TYPE_CUBE_ARRAY},
+        };
+        for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+            view_t v = view_levels_layers(2, 1, cases[i].first, cases[i].count);
+            v.set_target = cases[i].explicit_target; v.target = (uint8_t)cases[i].desired_target;
+            struct nvn_vk_texview_plan p = plan(cases[i].target, cases[i].layers, cases[i].layers, 8, &v, 0, 1);
+            CHECK(p.ok && p.type == cases[i].want && p.base_level == 2 && p.nlevels == 1 &&
+                  p.base_layer == cases[i].first && p.nlayers == cases[i].count,
+                  "cube sampling case %zu count=%u target=%d expected=%d actual=%d range=%u+%u mip=%u+%u: %s",
+                  i, cases[i].count, cases[i].explicit_target ? (int)cases[i].desired_target : -1,
+                  (int)cases[i].want, (int)p.type, p.base_layer, p.nlayers, p.base_level, p.nlevels, p.why);
+        }
+    }
+
     // ---- 单 mip / 单层约束、默认附件范围 ----
     {
         struct nvn_vk_texview_plan p = plan(NVN_TEXTURE_TARGET_2D, 1, 1, 3, NULL, 1, 1);

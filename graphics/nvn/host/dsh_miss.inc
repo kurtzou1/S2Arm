@@ -339,23 +339,33 @@ int dm_shader_se(const uint8_t key[8], uint64_t code, const void *control, char 
 //   出包时的配对表覆盖不全（游戏按阶段拼程序），以前只能这局跳过这笔绘制、记进 pso_user.tsv 等下次出包补（vs_pad），玩家拿到的包永远补不上。
 //   现在首遇时在设备上出：兜底目录里先要有这个键的 <键>_b.metal（库里的着色器此时才现编一份源码，同 dm_shader_se），再出 <键>_vp<掩码>.metal（S2A.Dsh VsPadMask，
 //   补 (0,0,0,1)，同离线 vs_pad；比源码旧就重出）。成功 0、path = 变体源码；没什么可补 3；做不了 1
+#include "mesh_pad.h"   // dm_mesh_pad_src：网格着色器补齐（#674）
+static int mesh_pad_file(const char *base, uint32_t mask, const char *path) {
+    FILE *f = fopen(base, "rb"); if (!f) return 1;
+    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET); char *src = sz > 0 ? malloc((size_t)sz + 1) : NULL;
+    if (!src || fread(src, 1, (size_t)sz, f) != (size_t)sz) { fclose(f); free(src); return 1; } fclose(f); src[sz] = 0;
+    char *o = NULL; int rc = dm_mesh_pad_src(src, mask, &o); free(src); if (rc) return rc;
+    char tmp[1300]; snprintf(tmp, sizeof tmp, "%s.tmp", path); f = fopen(tmp, "wb");   // 先写临时文件再改名：别的线程 / 下一局只会看到完整的
+    size_t len = strlen(o); int ok = f && fwrite(o, 1, len, f) == len; if (f) ok = !fclose(f) && ok; free(o);
+    return ok && !rename(tmp, path) ? 0 : 1;
+}
 int dm_shader_vpad(const uint8_t key[8], uint64_t code, const void *control, uint32_t mask, char *path, size_t n) {
     char k[17]; for (int i = 0; i < 8; i++) snprintf(k + 2 * i, 3, "%02x", key[i]);
     static int (*fv)(const char *, uint32_t, const char *); static dispatch_once_t once;
     dispatch_once(&once, ^{ fv = (int (*)(const char *, uint32_t, const char *))dlsym(RTLD_DEFAULT, "s2a_dsh_vs_pad"); });
     dsh_comp_fn comp = dsh_comp(); const char *out = getenv("DM_MSL_FALLBACK"); uint32_t ncode = 0, nctl = 0;
     int st = control && code ? dsh_stage((const uint8_t *)(uintptr_t)code, control, &ncode, &nctl) : -1;
-    if (!comp || !fv || !out || !*out || st != 0) { LOG("【红】直连：顶点 %s 要补齐变体 %#x，做不了（%s）", k, mask, !comp || !fv ? "S2A.Aot 没链进来" : !out || !*out ? "没设 DM_MSL_FALLBACK" : "不是顶点着色器或认不出"); return 1; }
+    if (!comp || (st == 0 && !fv) || !out || !*out || (st != 0 && st != 5)) { LOG("【红】直连：%s %s 要补齐变体 %#x，做不了（%s）", st == 5 ? "网格" : "顶点", k, mask, !comp || !fv ? "S2A.Aot 没链进来" : !out || !*out ? "没设 DM_MSL_FALLBACK" : "不是顶点 / 网格着色器或认不出"); return 1; }   // 5 = 网格（dsh_stage），宿主侧改文本补（dm_mesh_pad_src）
     mkdir(out, 0755);
     char base[1200]; snprintf(base, sizeof base, "%s/%s_b.metal", out, k);
     int fresh = !dsh_have(out, k);
     if (fresh && dsh_comp_src_locked(comp, k, st, (const void *)(uintptr_t)code, ncode, control, nctl, out)) { atomic_fetch_add_explicit(&g_dsh_failed, 1, memory_order_relaxed); LOG("【红】直连：顶点 %s 现编源码失败，出不了补齐变体", k); return 1; }
     snprintf(path, n, "%s/%s_vp%x.metal", out, k, mask);
     if (!fresh && dsh_variant_newer(path, base)) return 0;
-    int rc = fv(base, mask, path);
+    int rc = st == 5 ? mesh_pad_file(base, mask, path) : fv(base, mask, path);
     if (rc == 3) return 3;
     if (rc) { atomic_fetch_add_explicit(&g_dsh_failed, 1, memory_order_relaxed); return 1; }
-    LOG("直连顶点补齐变体：%s 补 user(locn) 掩码 %#x", k, mask);
+    LOG("直连%s补齐变体：%s 补 user(locn) 掩码 %#x", st == 5 ? "网格" : "顶点", k, mask);
     return 0;
 }
 // 后台出归约变体用的拷贝（nvn_mtl.m se_kick）：控制段只在 SetShaders 里保证有效、代码区游戏也可能另用，提交线程上先整份拷下（控制段在前、代码区在后），

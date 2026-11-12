@@ -138,7 +138,7 @@ fi
 if [ -s "$W/direct.tmp/keys.tsv" ] || [ -s "$W/direct.tmp/gl/gl_shaders.tsv" ] || [ -s "$W/direct.tmp/vk/vk_shaders.tsv" ] || [ -f "$W/direct.tmp/runtime_only.txt" ]; then mkdir -p "$W/shaders" && mv "$W/direct.tmp" "$W/shaders/direct"
 else rm -rf "$W/direct.tmp"; fi
 K=$(stage_deps_save "$W" direct "$KB" "$SELF") || { root_abort "$G" "$TAG"; exit 1; }
-echo "$K" > "$W/.stage_direct"; ROOT_REPLAY='shaders/direct knowledge/direct direct_lib.log .stage_direct .stage_direct.deps' root_commit "$G" "$TAG" || exit 1
+echo "$K" > "$W/.stage_direct"; ROOT_REPLAY='shaders/direct knowledge/direct direct_lib.log degrade.direct.tsv .stage_direct .stage_direct.deps' root_commit "$G" "$TAG" || exit 1
 L=$(grep '直连库\]' "$(root_cur "$G")/direct_lib.log" | tail -1 | sed 's/^\[直连库\] //')
 if [ -d "$(root_cur "$G")/shaders/direct" ]; then echo "${L}；库 $(du -sh "$(root_cur "$G")/shaders/direct" | cut -f1)，阶段 $((SECONDS - t0)) 秒，现行 → $(basename "$(root_cur "$G")")"
 else echo "🟡 $G 不出直连库：${L}（现行 → $(basename "$(root_cur "$G")")）"; fi

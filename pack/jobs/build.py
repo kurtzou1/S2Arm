@@ -82,7 +82,8 @@ QUICK_FILES = ("main", "main.npdm")   # 游戏库列表快判也核的几个文�
 
 def validate_runtime(c, runtime, full=False, files=True):
     """files=False：只看清单和入口（游戏库列表用），不逐文件读状态，只核主程序 / main.npdm 在且大小对（QUICK_FILES，审计 P2-212：
-    原先清单没变、主程序被删也报就绪，点开始才报错）；真正启动时还会完整校验"""
+    原先清单没变、主程序被删也报就绪，点开始才报错）。起局也用它（v0.3.1：原先每次起局逐个核约 6 万个文件，又慢、任何一个不对就不让玩）；
+    其余文件真坏了，游戏会非正常退出，launch 那时再完整核一遍、说清缺了什么（missing_after_crash）"""
     root = runtime.resolve()
     layout.require_in_location(c, root)
     manifest = read(root / "manifest.json", {})
@@ -101,6 +102,18 @@ def validate_runtime(c, runtime, full=False, files=True):
         if not table.is_file() or manifest.get("memoryRequirementsSha256") != digest(table):
             raise Failure("这款游戏的内存配置已损坏，请重新打包后再启动。", code="runtime_invalid")
     return manifest
+
+
+def missing_after_crash(c, runtime, manifest):
+    """游戏非正常退出后补核运行文件（起局前只核主程序，v0.3.1）：有缺 / 坏的 → 返回第一个的说明（给玩家看的例子），都好 → None。核不了（清单缺等）也返回 None"""
+    files = manifest.get("files")
+    if not isinstance(files, dict) or not files:
+        return None
+    try:
+        validate_files(c, runtime.resolve(), files, full=False)
+    except Failure as e:
+        return str(e).split("：", 1)[-1][:120] or str(e)[:120]
+    return None
 
 
 def require_automatic_memory(c):
@@ -188,7 +201,8 @@ def launch(c):
         from rewrite_refresh import refresh_mac
         refresh_mac(c, game["id"], runtime)
         c.begin("验证运行文件")
-        manifest = validate_runtime(c, runtime)
+        manifest = validate_runtime(c, runtime, files=False)   # 只核主程序 / 程序描述（QUICK_FILES），其余直接起（v0.3.1）
+        print("[起局] 只核主程序与程序描述，其余文件不逐个核（真读到坏的、游戏退出后再核、说清缺什么）", file=sys.stderr, flush=True)
         if manifest.get("gameId") != game["id"]:
             raise Failure("运行资源与所选游戏不匹配。", code="runtime_invalid")
         if manifest.get("memoryRequirementsVersion") != 2:
@@ -223,6 +237,10 @@ def launch(c):
                 if trial:   # 新宿主试玩：TRIAL_OK_SECONDS 内异常退出 = 不认这款，下次退回原来的；玩过这么久才崩不怪宿主
                     host_update.settle(c, game["id"], host, ok=time.monotonic() - started >= host_update.TRIAL_OK_SECONDS)
                 if f.code == "tool_exit":   # 游戏进程自己非 0 退出（多为崩溃，139 = 段错误）：给启动页一个说人话的码，原文与退出码随错误摘要带走
+                    broken = missing_after_crash(c, runtime, manifest)
+                    if broken:   # 起局前没逐个核（v0.3.1）：退出后再核，运行文件缺 / 坏了就直说，别让玩家以为是游戏崩了
+                        raise Failure(f"这款游戏的 Mac 运行文件缺了或坏了（例：{broken}），游戏读到它时退出了。重新出一次 Mac 版就能修好；存档不受影响。",
+                                      code="runtime_invalid", internal=str(f)) from None
                     raise Failure(f"游戏运行中意外退出了（退出码 {getattr(c, 'last_rc', '?')}）。", code="game_crashed", internal=str(f)) from None
                 raise
             if trial:
@@ -410,6 +428,47 @@ def warn_offline_empty(c, root):
         return
     why = (p.read_text(encoding="utf-8", errors="replace").strip().splitlines() or [""])[0][:300]
     c.diagnostic("这款的着色器离线预编 0 支，游戏能玩，但首次遇到的画面要现编、开头会卡顿" + (f"（{why}）" if why else ""), code="direct_offline_empty", severity="warning")
+
+
+DEGRADE_HEAD = "# 阶段\t类别\t处数\t玩家提示\t说明"
+
+
+def degrade_rows(text):
+    """降级表（各出包阶段降级时写在产物根的 degrade.<阶段>.tsv，开发丙线 v0.3.1 约定）→ (行, 格式不对的行号)。
+    每行 阶段 / 类别 / 处数 / 玩家提示 / 说明 五列，以 # 开头的是表头；格式不对的跳过、不报错（拿不准不停）"""
+    rows, bad = [], []
+    for i, line in enumerate(text.splitlines(), 1):
+        if not line.strip() or line.startswith("#"):
+            continue
+        f = line.split("\t")
+        if len(f) != 5 or not f[2].strip().isdigit():
+            bad.append(i)
+            continue
+        rows.append(dict(stage=f[0].strip(), kind=f[1].strip(), count=int(f[2]), hint=f[3].strip(), note=f[4].strip()))
+    return rows, bad
+
+
+def collect_degrade(c, root):
+    """出包成功收尾：读产物根的 degrade.*.tsv → 完成卡上逐条显示的玩家提示（去重、保序）。
+    同时把整表存进本任务日志目录（<任务>-degrade.log）：产物根出包后会清，诊断包只收日志目录（同 save_rewrite_digest），「降级汇总」也从这里算。
+    Mac 包（prepare）与 iPhone 包（ipa.build）共用"""
+    if not root:
+        return []
+    rows = []
+    for p in sorted(Path(root).glob("degrade.*.tsv")):
+        got, bad = degrade_rows(p.read_text(encoding="utf-8", errors="replace"))
+        rows += got
+        if bad:
+            c.emit("message", "降级表 %s 有 %d 行格式不对，已跳过（第 %s 行）" % (p.name, len(bad), "、".join(map(str, bad[:10]))))
+    if not rows:
+        return []
+    try:
+        log = c.logs / f"{c.task}-degrade.log"
+        log.write_text(DEGRADE_HEAD + "\n" + "".join("\t".join([r["stage"], r["kind"], str(r["count"]), r["hint"], r["note"]]) + "\n" for r in rows), encoding="utf-8")
+        log.chmod(0o600)
+    except OSError as e:
+        c.emit("message", f"降级表没存进日志目录（{e}），诊断包里会少这一份；出包结果不受影响")
+    return list(dict.fromkeys(r["hint"] for r in rows if r["hint"]))
 
 
 def extract_nup(c, game, packages, extraction, env, logs):
@@ -627,6 +686,7 @@ def prepare(c):
         if not (current / "shaders/direct/keys.tsv").is_file():   # 只有直连：refresh.sh 退 0 却没有直连库就是出包出错（11-07 拆通用模式）
             raise Failure("直连着色器库不完整。")
         warn_offline_empty(c, current)
+        notes = collect_degrade(c, current)   # 降级继续的玩家提示：随结果交给完成卡（v0.3.1）
         ms.enter(c, "host")
         host = compile_host(c, fingerprint, env, logs)
         ms.enter(c, "install")
@@ -680,4 +740,5 @@ def prepare(c):
             host_update.tidy(c, "删除解包目录", _rm, c, layout.root_of(c, game["id"]), unpacked)
         import sizes
         host_update.tidy(c, "刷新游戏占用大小", sizes.refresh, c, game["id"])   # 每款各部分大小写回 game.json（游戏库只读不量）
-        return dict(gameId=game["id"], outputPath=str(image), outputBytes=_part_bytes([image]), target="macos-arm64", compatibility="unverified")
+        return dict(gameId=game["id"], outputPath=str(image), outputBytes=_part_bytes([image]), target="macos-arm64", compatibility="unverified",
+                    **({"notes": notes} if notes else {}))

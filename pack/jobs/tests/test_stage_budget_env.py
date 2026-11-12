@@ -88,19 +88,20 @@ class StageBudgetEnv(unittest.TestCase):
     def test_windows_direct_receives_explicit_cli_jobs(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            run = SimpleNamespace(out=root, step=lambda label, action: action(), sh=Mock())
+            run = SimpleNamespace(out=root, step=lambda label, action: action(), sh=Mock(), say=Mock())
             with patch.object(oneclick_win, 'WIN', True), \
                  patch.object(oneclick_win, 'prebuilt', return_value=root / 'prebuilt'), \
                  patch.object(oneclick_win, 'metal_bin', return_value=root / 'metal'), \
                  patch.object(oneclick_win, 'pso_sources', return_value=None), \
                  patch.object(oneclick_win, 'bash_exe', return_value='/bin/bash'), \
-                 patch.dict(os.environ, {}, clear=True):
-                for jobs in [2, 12]:
+                 patch.dict(os.environ, {'S2A_MEM_TOTAL_GB': '16'}, clear=True):
+                # #711：按内存封顶（同 tools/cores.sh）。16 GB：抽取 12 × 2 // 3 = 8 路、直连库 1 + (12288 − 2805) // 420 = 23 路，再与核数取小
+                for jobs, bake, j in [(2, 2, 2), (12, 8, 12), (32, 8, 23)]:
                     with self.subTest(jobs=jobs):
                         oneclick_win.direct(run, root / 'input', 'ios', jobs)
                         actual = run.sh.call_args.kwargs['env']
-                        self.assertEqual(actual['J'], str(jobs))
-                        self.assertEqual(actual['S2A_CPU_BAKE'], str(jobs))
+                        self.assertEqual(actual['J'], str(j))
+                        self.assertEqual(actual['S2A_CPU_BAKE'], str(bake))
 
 
 if __name__ == '__main__':

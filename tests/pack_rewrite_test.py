@@ -217,17 +217,25 @@ class PackagingRewrite(unittest.TestCase):
         self.assertEqual(before, self.artifacts())
         self.assertIn("跳过", self.stage(S2A_REWRITER_DEPS=str(self.base / "absent")))
 
-    def test_actual_c_gap_aborts_transaction(self):
+    def test_actual_c_gap_degrades_and_continues(self):
+        # v0.3.1 拿不准不停：改写有缺口（退出码 3、产物照出）不再中止事务；新版本切成现行，缺口按类写进 degrade.rewrite.tsv、打【黄】（v0.3.0 起这里是 rc=1、现行不动）
+        good = self.good.read_bytes()
         self.stage()
         current = self.link.resolve()
         corpus.nso([0xd503207f, 0xd65f03c0], {}, 8, str(current / "exefs/main"))
-        before = hashes(current)
-        text = self.stage(expected=1, S2A_TARGET="android")
-        self.assertIn("rc=3", text)
-        self.assertEqual(current, self.link.resolve())
-        self.assertEqual(before, hashes(current))
-        self.assertEqual(list(current.parent.glob("*.tmp")), [])
-        self.assertTrue((current.parent / ".failed/probe_main.log").is_file())
+        text = self.stage(S2A_TARGET="android")
+        new = self.link.resolve()
+        self.assertNotEqual(current, new)
+        self.assertTrue((new / "main.patched.bin").is_file())
+        self.assertIn("【黄】probe 改写降级继续：没改写的缺口 1 处", text)
+        rows = [line.split("\t") for line in (new / "degrade.rewrite.tsv").read_text(encoding="utf-8").splitlines() if not line.startswith("#")]
+        self.assertEqual([r[:3] for r in rows][:1], [["rewrite", "gap", "1"]])
+        self.assertIn("这款有 1 处程序代码暂时没法改写", rows[0][3])
+        self.assertEqual(len([r for r in rows if r[1].startswith("gap:")]), 1)
+        self.assertEqual(list(new.parent.glob("*.tmp")), [])
+        (new / "exefs/main").write_bytes(good)   # 改回无缺口的输入：降级表随新版本消失
+        self.stage(S2A_TARGET="android")
+        self.assertFalse((self.link.resolve() / "degrade.rewrite.tsv").exists())
 
     def test_missing_c_and_invalid_backend_never_fall_back(self):
         current = self.link.resolve()

@@ -123,12 +123,10 @@ import S2ArmAppleAdapter
         case ("POST", "/install"):
             guard let g = game() else { return .bad("没有这个 gameId") }
             if let b = busy() { return b }
-            guard model.installAllowed(g.id) else {
-                return .bad("还不能装：先 install-check \(g.id)；这款的 iPhone 版没做好时要先出包")
-            }
             // 往设备上装东西一律要说明装到哪台（11-11：作业层不替玩家挑，控制口也不拿界面上选中的那台顶替）；s2armctl targets 列设备号
             guard let device = str("device") else { return .bad(Self.deviceRequired) }
-            model.install(g, teamId: str("teamId"), device: device, acceptDropped: a["acceptDropped"] as? Bool ?? false, ask: false); return .ok()
+            model.install(g, teamId: str("teamId"), device: device, acceptDropped: a["acceptDropped"] as? Bool ?? false,
+                          accept: Set(["acceptNoBackup", "acceptStale"].filter { a[$0] as? Bool == true }), ask: false); return .ok()
         case ("POST", "/signingProject"):
             model.openSigningProject(); return .ok()
         case ("POST", "/update-phone"):   // 更新 iPhone 上的 S2Arm（v0.3.0）：同库页右上角按钮；有要重新出包的款没给 acceptStale → 409 列出它们
@@ -143,7 +141,8 @@ import S2ArmAppleAdapter
                 return ControlReply(code: 409, body: ControlReply.json(["ok": false, "error": "这几款要按新版重新出包，重新出包前暂时打不开：带 acceptStale 确认（repack 为真时更新完把它们排进批量出包、出完自动装）", "stale": stale]))
             }
             model.updatePhone(acceptStale: accept, repack: a["repack"] as? Bool == true ? u.stale.map(\.id) : [], language: "zh-Hans",
-                              device: (a["device"] as? String).flatMap { $0.isEmpty ? nil : $0 })   // 同 /install：连着多台时指定哪台
+                              device: (a["device"] as? String).flatMap { $0.isEmpty ? nil : $0 },   // 同 /install：连着多台时指定哪台
+                              acceptDropped: a["acceptDropped"] as? Bool ?? false, accept: Set(["acceptNoBackup"].filter { a[$0] as? Bool == true }), ask: false)   // 同 /install：会挤掉别的电脑装的款时原样失败，带 acceptDropped 再发
             return .object(["ok": true, "stale": stale])
         case ("POST", "/restore-iphone"):
             guard let g = game() else { return .bad("没有这个 gameId") }
@@ -155,7 +154,7 @@ import S2ArmAppleAdapter
             guard let g = game() else { return .bad("没有这个 gameId") }
             if let b = busy() { return b }
             guard let device = str("device") else { return .bad(Self.deviceRequired) }
-            model.removeFromPhone(g, acceptDropped: a["acceptDropped"] as? Bool ?? false, ask: false, device: device); return .ok()
+            model.removeFromPhone(g, ask: false, device: device, accept: Set(["acceptDropped", "acceptNoBackup"].filter { a[$0] as? Bool == true })); return .ok()
         case ("POST", "/customize"):
             guard let g = game() else { return .bad("没有这个 gameId") }
             if let b = busy() { return b }
@@ -187,7 +186,6 @@ import S2ArmAppleAdapter
             case ("build", let g?): return blocked(model.export(g, platforms: [.mac]))
             case ("ipa", let g?): return blocked(model.export(g, platforms: [.ios], deviceTarget: deviceTarget))
             case ("install", let g?):
-                guard model.installAllowed(g.id) else { return .bad("还不能装：先 install-check \(g.id)；这款的 iPhone 版没做好时要先出包") }
                 model.install(g, ask: false); return .ok()
             case ("installRemove", let g?): model.removeFromPhone(g, ask: false); return .ok()
             case ("installRestore", let g?): model.restorePhone(g); return .ok()
@@ -282,8 +280,8 @@ import S2ArmAppleAdapter
         ["POST /build {gameId, target, spaceOverride?}", "出包：spaceOverride = true 同界面「仍然继续」，磁盘预检不够也照出；target = ios（iPhone / iPad，缺省）| mac | android | harmony；安卓、鸿蒙回 409「即将上线，敬请期待」"],
         ["POST /customize {gameId, name?, coverPath?}", "改游戏显示名 / 封面（JPG、PNG）；不传的不动，传空字符串恢复默认；下次装到 iPhone 时带上"],
         ["POST /installCheck {gameId}", "装机前清单（只读）：几秒后看 GET /state 的 installReadiness"],
-        ["POST /install {gameId, acceptDropped?}", "装到 iPhone（iPhone 版做好就能装，其余清单项只提示）；失败码 container_would_drop = 手机上有别的电脑装的游戏这次带不上，先问玩家，同意了带 acceptDropped = true 再发"],
-        ["POST /uninstall {gameId, acceptDropped?}", "从 iPhone 上的 S2Arm 删一款（备份存档 → 更新容器 → 删数据；其余游戏不动）；acceptDropped 同 /install"],
+        ["POST /install {gameId, acceptDropped?, acceptNoBackup?, acceptStale?}", "装到 iPhone（不用先 installCheck，缺什么作业报真实原因）；可确认的失败码先问玩家、同意了带对应参数再发：container_would_drop → acceptDropped（手机上有别的电脑装的游戏这次带不上）、save_backup_failed → acceptNoBackup（覆盖前没能备份存档）、container_stale → acceptStale（旧资源包要重出）"],
+        ["POST /uninstall {gameId, acceptDropped?, acceptNoBackup?}", "从 iPhone 上的 S2Arm 删一款（备份存档 → 更新容器 → 删数据；其余游戏不动）；acceptDropped / acceptNoBackup 同 /install"],
         ["POST /delete {gameId}", "删除这款游戏：IPA / 资源包 / 出包中间产物 / 缓存全删；存档与原始游戏文件保留"],
         ["POST /target {action:probe} | {productType, os}", "重新检测连接的设备 / 选出包提示用的机型和系统大版本"],
         ["POST /launch {gameId}", "在 Mac 上启动游戏"],

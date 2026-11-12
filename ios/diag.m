@@ -24,10 +24,11 @@
 #include "s2a_sesdiag.h"
 
 static NSString *docs(void) { return NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject; }
-// 资源包根：启动上下文文件给了本款资源包就读它（多款容器）；单款兼容照旧 Documents/资源包（不随 S2A_GAME_DATA，同改造前）
+// 资源包根：启动上下文给了本款资源包就读它（上下文文件 / 多款容器选了游戏：v0.3.0 起在 Library 下，s2a_docs.h s2a_pack_root）；
+//   单款兼容照旧 Documents/资源包（不随 S2A_GAME_DATA，同改造前）
 static NSString *pack_root(void) {
     const s2a_launch_ctx *lc = s2a_launch_ctx_get();
-    return lc && lc->source == S2A_LCTX_FILE ? @(lc->game_data) : [docs() stringByAppendingPathComponent:@"资源包"];
+    return lc && (lc->source == S2A_LCTX_FILE || lc->source == S2A_LCTX_CONTAINER) ? @(lc->game_data) : [docs() stringByAppendingPathComponent:@"资源包"];
 }
 // 归档的往局日志（os.c 每局一份）：Documents 下相对路径 logs/host-<起局时刻>.log，新的在前（文件名带时刻，按名排序即按时间）
 static NSArray<NSString *> *archived_logs(void) {

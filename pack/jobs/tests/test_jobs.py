@@ -103,6 +103,10 @@ class JobsTests(unittest.TestCase):
         self.assertEqual(self.c.env().get("S2A_PATCH_DIR"), str(res / "Patches"))
         self.assertNotIn("S2A_PATCH_DIR", build.runtime_env(self.c, self.game(), self.root / "runtime"))
 
+    def player_keys(self):
+        """玩家已导入 prod.keys（加密原件出包要它，library.require_game 开头核）"""
+        self.c.keys.parent.mkdir(parents=True, exist_ok=True); self.c.keys.write_text("header_key = " + "0" * 64 + "\n")
+
     def game(self, tid="0100000000000000", packages=None):
         return dict(id=tid, name="Test title", display="1.0", hidden=False, packages=packages or [])
 
@@ -433,6 +437,7 @@ class JobsTests(unittest.TestCase):
     @shared_extract
     def test_ipa_calls_oneclick_with_player_keys_fonts_and_ios(self):
         # 打 iPhone 包：没 SDK → 提示一键安装；有 SDK → 调引擎里的 oneclick.sh，带应用字体、iOS 平台、出到这款文件夹的 build/ios；交付件搬进 image/ios，单款 ipa 不留
+        self.player_keys()   # 加密原件出包开头要 prod.keys（library.require_game，v0.3.1）
         import unittest.mock as um, ipa
         base = self.package("base")
         self.catalogue([self.game(packages=[base])])
@@ -507,6 +512,7 @@ class JobsTests(unittest.TestCase):
     @shared_extract
     def test_ipa_result_is_the_delivered_file_not_the_newest_in_output(self):
         # #67 qidian99 反证：输出目录里有修改时间更「新」（2100 年）的旧 IPA 和资源包，本轮交付的是 current-title.ipa → 搬进 image/ios 的必须是本轮的资源包，不按 mtime 挑
+        self.player_keys()   # 加密原件出包开头要 prod.keys（library.require_game，v0.3.1）
         import unittest.mock as um, ipa
         base = self.package("base"); self.catalogue([self.game(packages=[base])])
         self.c.r.update(gameId="0100000000000000", target={"gpuArch": "applegpu_g18p", "os": 27})
@@ -603,6 +609,7 @@ class JobsTests(unittest.TestCase):
     @shared_extract
     def test_ipa_aoc_missing_becomes_warning(self):
         # 审计 P1-74：追加内容没解出，本体照常出（不挡），但结果事件的 aoc_missing 要成一条黄字 aoc_missing，任务记「完成（有警告）」、完成页不画完成章
+        self.player_keys()   # 加密原件出包开头要 prod.keys（library.require_game，v0.3.1）
         import unittest.mock as um, ipa
         base = self.package("base"); self.catalogue([self.game(packages=[base])])
         self.c.r.update(gameId="0100000000000000", target={"gpuArch": "applegpu_g18p", "os": 27})
@@ -687,6 +694,7 @@ class JobsTests(unittest.TestCase):
 
     @shared_extract
     def test_dotnet_wrapper_fallback_and_ipa_environment(self):
+        self.player_keys()   # 加密原件出包开头要 prod.keys（library.require_game，v0.3.1）
         import unittest.mock as um, ipa, shlex
         home = self.root / "user home"; home.mkdir()
         sdk_root = self.root / "actual SDK root"
@@ -855,6 +863,38 @@ class JobsTests(unittest.TestCase):
         self.assertIn("离线预编 0 支", d[0]["summary"] + d[0].get("detail", "") + str(d[0]))
         self.assertIn("没有改写模块目录", str(d[0])); self.assertNotIn("第二行不要", str(d[0]))
 
+    def test_degrade_notes_and_log(self):
+        # v0.3.1 降级继续（开发丙线约定）：产物根 degrade.<阶段>.tsv，五列 阶段 / 类别 / 处数 / 玩家提示 / 说明，# 开头是表头。
+        #   期望手写：两个阶段各一行 + 一行重复提示 → 完成卡提示两条（去重、按文件名序：direct 在 rewrite 前）；
+        #   列数不对 / 处数不是数字的行跳过、发一条消息、不报错；整表存进 <任务>-degrade.log；没有表 → 空、不写日志
+        import build
+        root = self.root / "rdeg"; root.mkdir()
+        self.assertEqual(build.collect_degrade(self.c, root), [])
+        self.assertFalse((self.c.logs / f"{self.c.task}-degrade.log").exists())
+        (root / "degrade.rewrite.tsv").write_text("# 阶段\t类别\t处数\t玩家提示\t说明\n"
+                                                  "rewrite\tx18_compat\t27\t这款有 27 处用了兼容写法\t恢复 sp 后挑不出临时寄存器\n"
+                                                  "rewrite\tbroken\n"
+                                                  "rewrite\tx\tmany\t提示\t说明\n", encoding="utf-8")
+        (root / "degrade.direct.tsv").write_text("direct\tlazy\t3\t3 支着色器首次遇到时现编\t抽不出\n"
+                                                 "direct\tlazy2\t1\t3 支着色器首次遇到时现编\t同一句\n", encoding="utf-8")
+        notes = build.collect_degrade(self.c, root)
+        self.assertEqual(notes, ["3 支着色器首次遇到时现编", "这款有 27 处用了兼容写法"])
+        log = (self.c.logs / f"{self.c.task}-degrade.log").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(log[0], build.DEGRADE_HEAD)
+        self.assertEqual(len(log), 4)   # 表头 + 3 条有效行
+        self.assertIn("rewrite\tx18_compat\t27\t", "\n".join(log))
+        self.assertEqual(self.c.job["diagnostics"], [])   # 降级不当错误
+
+    def test_diagnostics_degrade_summary(self):
+        # 诊断包：任务日志目录的 <任务>-degrade.log 随 logs/ 收进包，manifest 加「降级汇总」degrade_summary：任务号 → {阶段/类别: 处数}（同类别相加）
+        import zipfile
+        (self.c.logs / "t1-degrade.log").write_text("# 阶段\t类别\t处数\t玩家提示\t说明\nrewrite\tx18\t27\t提示\t说明\nrewrite\tx18\t3\t提示\t说明\ndirect\tlazy\t5\t提示\t说明\n", encoding="utf-8")
+        destination = self.root / "diag-degrade.zip"; self.c.r["path"] = str(destination)
+        library.diagnostics(self.c)
+        with zipfile.ZipFile(destination) as archive:
+            self.assertIn("logs/t1-degrade.log", archive.namelist())
+            self.assertEqual(json.loads(archive.read("manifest.json"))["degrade_summary"], {"t1": {"rewrite/x18": 30, "direct/lazy": 5}})
+
     def test_direct_check_counts_existing_cache_and_volume(self):
         # 直连阶段开工前复核（pack/jobs/space_rule.py direct_check）与出包预检同一规则：游戏内容（romfs + exefs + aoc）≥ 3e9 → 15e9、小于 → 5e9；
         #   已有的同款直连缓存扣掉；期望按 library.py 的两档常量手算
@@ -977,6 +1017,7 @@ class JobsTests(unittest.TestCase):
 
     def test_mac_prepare_space_rejection_keeps_previous_runtime(self):
         # Mac 打包：空间不够在建缓存 / 解包之前就拦；上次成功的运行版本与 current 链接原样保留，也不发计划
+        self.player_keys()   # 加密原件出包开头要 prod.keys（library.require_game，v0.3.1）
         import collections
         import unittest.mock as um
         base = dict(self.package("base"), size=1 << 30)
@@ -1085,6 +1126,18 @@ class JobsTests(unittest.TestCase):
         with self.assertRaises(Failure):
             library.setup(c)
         self.assertEqual((other / ".nsmac-library.json").read_text(), "original")
+
+    def test_export_checks_keys_at_start_not_in_catalog(self):
+        # v0.3.1：前端不再按 keysReady 置灰出包，出包开头（require_game）当场核：加密原件、没有 prod.keys → keys_missing 停；
+        #   导入 keys 后同一款照常过这一关；游戏库读数里的「缺文件」（requirements）不含 keys 这一条
+        game = self.game(packages=[self.package()])
+        self.c.keys.unlink(missing_ok=True)
+        self.assertEqual(library.requirements(self.c, game), [])
+        with self.assertRaises(Failure) as got:
+            library.require_game(self.c, game)
+        self.assertEqual(got.exception.code, "keys_missing")
+        self.c.keys.parent.mkdir(parents=True, exist_ok=True); self.c.keys.write_text("dummy = 00\n")
+        library.require_game(self.c, game)
 
     def test_missing_base_and_aarch32_are_not_buildable(self):
         update = self.package("update", 2)
@@ -1329,6 +1382,31 @@ class JobsTests(unittest.TestCase):
                 if want == "game_crashed":
                     self.assertIn("退出码 139", str(e.exception))
                     self.assertIn("fixture", e.exception.internal)   # 原文随错误摘要带走
+
+    def test_launch_quick_checks_then_explains_broken_files_after_crash(self):
+        # v0.3.1：起局前只核主程序 / 程序描述（validate_runtime files=False），不逐个核 6 万个文件；游戏非 0 退出后再完整核一遍：
+        #   有缺 / 坏的运行文件 → runtime_invalid、消息点名例子并说「重新出一次 Mac 版」；都好 → 照旧 game_crashed
+        game = self.game(); self.catalogue([game]); self.c.r["gameId"] = game["id"]
+        self.fake_host(game["id"])
+        runtime = layout.image_mac(self.c, game["id"], create=False)
+        runtime.mkdir(parents=True, exist_ok=True); (runtime / "ok.bin").write_bytes(b"12")
+        manifest = {"gameId": game["id"], "memoryRequirementsVersion": 2, "files": {"ok.bin": [2, ""], "romfs/gone.bin": [9, ""]}}
+        calls = []
+        def quick(c, rt, full=False, files=True):
+            calls.append(files); return manifest
+        def crash(command, log, env, **kwargs):
+            self.c.last_rc = 139; raise Failure("游戏运行中失败（退出码 139）：fixture", code="tool_exit")
+        with patch.object(build, "validate_runtime", side_effect=quick), patch.object(self.c, "run", side_effect=crash):
+            with self.assertRaises(Failure) as e:
+                build.launch(self.c)
+        self.assertEqual(calls, [False])   # 起局只做快核
+        self.assertEqual(e.exception.code, "runtime_invalid")
+        self.assertIn("romfs/gone.bin", str(e.exception)); self.assertIn("重新出一次 Mac 版", str(e.exception))
+        (runtime / "romfs").mkdir(exist_ok=True); (runtime / "romfs/gone.bin").write_bytes(b"123456789")
+        with patch.object(build, "validate_runtime", side_effect=quick), patch.object(self.c, "run", side_effect=crash):
+            with self.assertRaises(Failure) as e:
+                build.launch(self.c)
+        self.assertEqual(e.exception.code, "game_crashed")   # 文件都好：是真崩溃
 
     def test_launch_removes_only_its_snapshot_after_exit_failure_or_cancellation(self):
         game = self.game(); self.catalogue([game]); self.c.r.update(gameId=game["id"], inputGuideHandled=True,

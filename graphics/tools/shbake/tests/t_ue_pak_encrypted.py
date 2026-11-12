@@ -165,7 +165,9 @@ class EncryptedPakTests(unittest.TestCase):
         self.assertIn(expected, srcpack.Src(str(self.root / 'out')))
         self.assertNotIn(KEY.hex(), p.stdout + p.stderr)
         p = subprocess.run(command[:2] + [str(self.root / 'bad'), str(romfs)], capture_output=True, text=True, env=dict(os.environ, J='1'))
-        self.assertEqual(p.returncode, 1); self.assertIn('【红】pak 索引加密', p.stderr)
+        # v0.3.1 拿不准不停：索引读不到的 pak 跳过、记降级（原先退 1 整款停），逐条红行照打
+        self.assertEqual(p.returncode, 0, p.stderr); self.assertIn('【红】pak 索引加密', p.stderr); self.assertIn('【黄】抽取：跳过读不了的部分', p.stderr)
+        self.assertIn('extract\ts2x:pak 索引加密\t1', (self.root / 'bad' / 'degrade.tsv').read_text(encoding='utf-8'))
     def test_pack_cli_auto_main_and_explicit_main(self):
         romfs = self.root / 'romfs'; romfs.mkdir(); exefs = self.root / 'exefs'; exefs.mkdir()
         (exefs / 'main').write_bytes(nso())
@@ -259,7 +261,7 @@ class EncryptedPakTests(unittest.TestCase):
         main = self.root / 'main'; main.write_bytes(nso())
         p = subprocess.run([sys.executable, str(H / 'nxsh_extract.py'), str(self.root / 'out'), str(romfs), '--nso', str(main)],
                            capture_output=True, text=True, env=dict(os.environ, J='1'))
-        self.assertEqual(p.returncode, 1); self.assertIn('【红】pak 着色器存档', p.stderr)
+        self.assertEqual(p.returncode, 0, p.stderr); self.assertIn('【红】pak 着色器存档', p.stderr); self.assertIn('【黄】抽取：跳过读不了的部分', p.stderr)   # v0.3.1：跳过、记降级
 
 
 if __name__ == '__main__': unittest.main()

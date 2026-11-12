@@ -40,7 +40,7 @@ int dm_opmode(void) { const char *d = getenv("S2A_DOCKED"); return d && d[0] == 
 // 共用前端按 DM_GAME_* 读每款参数（graphics/nvn/host/game_profile.h）。没有随包档 / 没写的键按 Switch 真实语义的缺省
 // （game_tsv.h s2a_game_tsv_defaults：条件渲染照实求值、CPU 写进池的贴图要上传、动态句柄着色器、段内 GPU 时间戳都开）。
 // 这里是强定义；vk_engine_host_shim.c 的弱桩是全 0，等于把这些全关掉——贴图在首次使用之后才被游戏填进内容的那些永远传不上来
-// （块压缩贴图停在全 0：ASTC 解成错误色洋红，DXT 解成全透明）。随包 game.tsv 的读取等资源包带上它时再接。
+// （块压缩贴图停在全 0：ASTC 解成错误色洋红，DXT 解成全透明）。随包 game.tsv 由当前已激活 revision 提供。
 #include "../../../graphics/nvn/host/game_profile.h"
 
 // ---------- 调试：进程内取样剖析（开关 debug.s2a.nvk_prof=1；默认关） ----------
@@ -55,7 +55,7 @@ enum { PROF_RING = 1 << 16 };
 static uintptr_t g_prof_ring[PROF_RING]; static _Atomic uint64_t g_prof_w;
 static void prof_sig(int sig, siginfo_t *si, void *uc) {
     (void)sig; (void)si;
-#if defined(__aarch64__)
+#if defined(__aarch64__) && !defined(__APPLE__)   // 苹果芯片的宿主上也会编这个文件（宿主单测）：那边的信号上下文是另一种布局，取不到就记 0
     uintptr_t pc = (uintptr_t)((ucontext_t *)uc)->uc_mcontext.pc;
 #else
     uintptr_t pc = 0; (void)uc;
@@ -124,15 +124,56 @@ static void prof_start_once(void) {
     __android_log_print(ANDROID_LOG_INFO, "S2Arm", "nvk prof: 进程内取样剖析已开（每毫秒 CPU 一个样本）");
 }
 
-const s2a_nvn_profile *s2a_nvn_prof(void) {
-    prof_start_once();   // 借这个起局早期必被前端调到的入口开剖析（开关没开就什么都不做）
-    static s2a_nvn_profile p; static _Atomic int ready;
-    if (!atomic_load_explicit(&ready, memory_order_acquire)) {
-        static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
-        pthread_mutex_lock(&mu);
-        if (!atomic_load_explicit(&ready, memory_order_relaxed)) { s2a_game_tsv_defaults(&p.t); atomic_store_explicit(&ready, 1, memory_order_release); }
-        pthread_mutex_unlock(&mu);
+// 只在整份文件读完后调用共用解析器；读取错误 / 分配失败不能把半份参数当成成功。
+static int prof_read(const char *path, s2a_game_tsv *out, char *err, size_t en) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    char *text = NULL, chunk[4096]; size_t len = 0, n; int ok = 1;
+    while ((n = fread(chunk, 1, sizeof chunk, f)) != 0) {
+        if (len > SIZE_MAX - n - 1) { ok = 0; break; }
+        char *next = realloc(text, len + n + 1);
+        if (!next) { ok = 0; break; }
+        text = next; memcpy(text + len, chunk, n); len += n; text[len] = 0;
     }
+    if (ferror(f)) ok = 0;
+    if (fclose(f)) ok = 0;
+    if (ok) s2a_game_tsv_parse(text, out, err, en);
+    free(text); return ok;
+}
+
+const s2a_nvn_profile *s2a_nvn_prof(void) {
+    prof_start_once();
+    static s2a_nvn_profile p;
+    static char *loaded_root;
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    // provider 在激活前设置此根；revision 内容不可变。换局换根必须重读，不能沿用上一款。
+    // 与会话激活一样，环境变量只在无运行中游戏时更换；调用方不得跨换局持有此参数指针。
+    pthread_mutex_lock(&mu);
+    const char *root = getenv("S2A_SHADER_REVISION_ROOT");
+    if (!root) root = "";
+    if (!loaded_root || strcmp(loaded_root, root)) {
+        char *new_root = strdup(root);
+        if (!new_root) {
+            // 无法缓存身份时不发布可被下一位读者改写的 p；返回只初始化一次的缺省快照。
+            static s2a_nvn_profile fallback; static int fallback_ready;
+            if (!fallback_ready) { s2a_game_tsv_defaults(&fallback.t); fallback_ready = 1; }
+            nvn_plat_log(NVN_PLAT_LOG_WARN, "game.tsv", "无法分配参数路径，全按缺省");
+            pthread_mutex_unlock(&mu); return &fallback;
+        }
+        s2a_game_tsv_defaults(&p.t);
+        const char suffix[] = "/shaders/direct/game.tsv";
+        size_t len = strlen(root); char err[200] = ""; int got = 0;
+        char *path = len <= SIZE_MAX - sizeof suffix ? malloc(len + sizeof suffix) : NULL;
+        if (*root && path) {
+            memcpy(path, root, len); memcpy(path + len, suffix, sizeof suffix);
+            got = prof_read(path, &p.t, err, sizeof err);
+        }
+        free(path);
+        nvn_plat_log(*err ? NVN_PLAT_LOG_RED : got ? NVN_PLAT_LOG_INFO : NVN_PLAT_LOG_WARN,
+                     "game.tsv", *err ? err : got ? "已读取随包参数；未写的键按缺省" : "随包参数缺失或无法读取，全按缺省");
+        free(loaded_root); loaded_root = new_root;
+    }
+    pthread_mutex_unlock(&mu);
     return &p;
 }
 int s2a_nvn_render_cond(void) { return s2a_nvn_prof()->t.render_cond; }   // 回放核心问：条件渲染开没开

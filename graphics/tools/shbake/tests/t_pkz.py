@@ -385,8 +385,10 @@ class PkzTests(unittest.TestCase):
 
     def test_cli_failure_is_not_success(self):
         run = cli(b'pkzl' + bytes(28))
-        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        # v0.3.1 拿不准不停：解析失败的 PKZ / DAT 跳过、记降级（原先退 1 整款停），红行照打
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertIn('【红】PKZ/DAT', run.stderr)
+        self.assertIn('【黄】抽取：跳过读不了的部分（PKZ/DAT 解析失败 1）', run.stderr)
 
     def test_non_pkz_magic_collisions_preserve_original_scan(self):
         _, ctl, code = shader('ps')
@@ -423,7 +425,7 @@ class PkzTests(unittest.TestCase):
                                  (lambda b: archive([('arbitrary.bin', b, 'None')]), 1)):
                 with self.subTest(magic=magic, wrap=wrap.__name__):
                     run = cli(wrap(data))
-                    self.assertEqual(run.returncode, status, run.stdout + run.stderr)
+                    self.assertEqual(run.returncode, 0, run.stdout + run.stderr)   # v0.3.1：解析失败也退 0、跳过记降级
                     if status:
                         self.assertIn('【红】PKZ/DAT 解析失败', run.stdout)
                         self.assertIn('【红】PKZ/DAT', run.stderr)

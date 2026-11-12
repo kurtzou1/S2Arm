@@ -92,7 +92,17 @@ if [ $xrc != 0 ]; then mkdir -p "$S2A_ROOTS/.failed" && cp "$W/extract.log" "$S2
   root_abort "$G" "$TAG"
   [ $xrc = 3 ] && { echo "【红】$G $(grep -a '直连库失败：' "$S2A_ROOTS/.failed/${G}_extract.log" 2> /dev/null | tail -1 | sed 's/^.*\(直连库失败：\)/\1/' | cut -c1-260)"; exit 3; }
   echo "【红】$G 抽取失败（$(grep '抽取\]' "$S2A_ROOTS/.failed/${G}_extract.log" | tail -1 | sed "s#$W/extract/#$S2A_ROOTS/.failed/${G}_extract.d/#g" | cut -c1-240)）"; exit 1; fi   # 路径换成留下来的那份（临时根随 root_abort 删了，10-30 塞尔达照红行找日志以为丢了）
+# 降级汇总（v0.3.1）：离线 0 支（direct_gap.txt）、S2Arm 抽取没跑成 / 跳过读不了的部分（extract/s2x/degrade.tsv）→ 产物根 degrade.extract.tsv
+#   （格式同 degrade.rewrite.tsv：阶段 / 类别 / 处数 / 玩家提示 / 说明；出包作业收尾读它上屏、诊断包收它）；没有降级就删掉旧表
+{ rows=$(cat "$W/extract/s2x/degrade.tsv" "$W/extract/split/degrade.tsv" 2> /dev/null)
+  [ -s "$W/extract/direct_gap.txt" ] && rows="${rows:+$rows
+}extract	offline_zero	1	这款的着色器没能提前编好，第一次进新场景会卡一下，遇到请反馈	$(head -1 "$W/extract/direct_gap.txt")"
+  if [ -n "$rows" ]; then n=$(printf '%s\n' "$rows" | grep -c .)
+    [ -s "$W/extract/direct_gap.txt" ] || rows="extract	partial	${n}	这款有部分着色器没能提前编好，第一次进新场景可能会卡一下，遇到请反馈	逐类见下
+$rows"
+    printf '# 阶段\t类别\t处数\t玩家提示\t说明\n%s\n' "$rows" > "$W/degrade.extract.tsv" || { root_abort "$G" "$TAG"; exit 1; }
+  else rm -f "$W/degrade.extract.tsv"; fi; }
 K=$(stage_deps_save "$W" extract "$KB" "$SELF") || { root_abort "$G" "$TAG"; exit 1; }; echo "$K" > "$W/.stage_extract"
 # 与改写 / 能力表 / RomFS 索引并行（refresh.sh 快路，11-06）：本阶段只写这些，提交时现行被别的阶段改过就重放到新现行
-ROOT_REPLAY='extract extract.log host_build.log .stage_extract .stage_extract.deps' root_commit "$G" "$TAG" || exit 1
+ROOT_REPLAY='extract extract.log host_build.log degrade.extract.tsv .stage_extract .stage_extract.deps' root_commit "$G" "$TAG" || exit 1
 echo "$(grep '抽取\]' "$(root_cur "$G")/extract.log" | tail -1 | sed 's/^\[抽取\] //')；$(du -sh "$(root_cur "$G")/extract" | cut -f1)，阶段 $((SECONDS - t0)) 秒，现行 → $(basename "$(root_cur "$G")")"

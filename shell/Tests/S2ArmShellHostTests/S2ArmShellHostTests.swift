@@ -61,6 +61,36 @@ import S2ArmShellBridge
     #expect(model.games.isEmpty)
 }
 
+// v0.3.0 资源包挪出 Documents：游戏根是 <家>/Documents/games 时资源包在 <家>/Library/Application Support/S2Arm/games/<游戏号>/资源包（同宿主 s2a_pack_root）。
+//   只在新位置的别处电脑款照样认出；还没迁的老位置照样认；删除（不留存档）把新位置的资源包一起挪走、存档留在 Documents。期望按目录手写
+@MainActor @Test func packInLibraryIsFoundAndDeleted() throws {
+    let fm = FileManager.default, home = fm.temporaryDirectory.appendingPathComponent("s2a-home-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: home) }
+    let games = home.appendingPathComponent("Documents/games"), packs = home.appendingPathComponent("Library/Application Support/S2Arm/games")
+    let derived = S2ArmShellHostModel.packGamesRoot(for: games, home: home)?.standardizedFileURL.path
+    #expect(derived == packs.standardizedFileURL.path)
+    #expect(S2ArmShellHostModel.packGamesRoot(for: home.appendingPathComponent("x"), home: home) == nil)
+    let (a, newStray, oldStray) = ("0100000000010000", "0100000000060000", "0100000000070000")
+    let placed: [(URL, String)] = [(packs, a), (packs, newStray), (games, oldStray)]
+    for item in placed {
+        let pack = item.0.appendingPathComponent(item.1).appendingPathComponent("资源包")
+        try fm.createDirectory(at: pack, withIntermediateDirectories: true)
+        try Data("sha".utf8).write(to: pack.appendingPathComponent(".applied"))
+    }
+    try fm.createDirectory(at: games.appendingPathComponent("\(a)/S2A/ryujinx/bis/user/save"), withIntermediateDirectories: true)
+    let data = Data(#"{"schema":1,"games":[{"title_id":"0100000000010000","name":"A"}]}"#.utf8)
+    let model = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")), installState: { _ in 1 }, gamesRoot: games, packGamesRoot: packs)
+    #expect(model.games.map(\.id) == [a, newStray, oldStray])
+    let oldDir: String = S2ArmShellHostModel.packDir(oldStray, games: games, packs: packs).path
+    let newDir: String = S2ArmShellHostModel.packDir(a, games: games, packs: packs).path
+    #expect(oldDir == games.appendingPathComponent(oldStray).appendingPathComponent("资源包").path)
+    #expect(newDir == packs.appendingPathComponent(a).appendingPathComponent("资源包").path)
+    let delete = try #require(model.actions.onDeleteGame)
+    delete(a, false)
+    #expect(!fm.fileExists(atPath: packs.appendingPathComponent(a).path))
+    #expect(try fm.contentsOfDirectory(atPath: games.appendingPathComponent(a).path) == ["S2A"])
+}
+
 // v0.2.6「点删除没反应」：删除不在主线程同步做，点下当场离开列表、提示「正在删除」，后台删完提示释放了多少；挪不动提示原因、游戏留着；
 //   上次删到一半留下的 .deleting 下次打开时清掉。释放量期望手算：资源包 10 个 8192 字节 + 1 个 16384 字节文件 = 98304（APFS 按 4096 对齐，正好整块）
 @MainActor @Test func deleteGameIsInstantThenReportsFreedSpace() async throws {

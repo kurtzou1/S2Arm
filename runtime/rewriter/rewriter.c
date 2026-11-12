@@ -880,7 +880,7 @@ static Mask lv_range(int lo, int hi, int off) { Mask m = 0; for (int r = lo; r <
 /* 在 start 之后仍可能被读的 cand 子集（cand 以外不判）。一遍深度优先同时判全部候选；走满预算 / br / svc / 解不出，未判定的一律当活 */
 static Mask lv_live(A start, Mask cand, int budget0) {
   static TLS Mask callk, retk;
-  if (!callk) { callk = lv_range(9, 17, 0) | lv_range(16, 31, 33); retk = lv_range(2, 17, 0) | lv_range(4, 7, 33) | lv_range(16, 31, 33); }
+  if (!callk) { callk = lv_range(9, 17, 0) | BIT(30) | lv_range(16, 31, 33); retk = lv_range(2, 17, 0) | lv_range(4, 7, 33) | lv_range(16, 31, 33); }
   enum { SEEN = 1 << 17, ST = 1024 };
   if (!g->lv_sa) g->lv_sa = zalloc(SEEN * sizeof(A)), g->lv_sm = zalloc(SEEN * sizeof(Mask)), g->lv_sg = zalloc(SEEN * sizeof(uint32_t));
   A* sa = g->lv_sa; Mask* sm = g->lv_sm; uint32_t* sg = g->lv_sg;
@@ -928,6 +928,23 @@ static int sp_dyn_word(uint32_t w) {
   if ((w & 0xffe00000u) == 0x8b200000u || (w & 0xffe00000u) == 0xcb200000u) return 1;   /* add / sub 扩展寄存器写 sp（含 sub sp, sp, xN） */
   return 0;
 }
+/* a 处是「从帧指针恢复 sp（mov / add / sub sp, x29, #k）之后不是马上返回」：跳过随后的出栈（ldp …, [sp], #k / ldr …, [sp], #k / add sp, sp, #k）后
+ *   下一条不是 ret / 尾调用 b / br，说明恢复 sp 之后代码还在走，开出来的数组此时在 sp 以下 */
+static int sp_restore_mid(A a, Pair f) {
+  uint32_t w = u32(g->orig + a);
+  if (!((w & 31) == 31 && ((w >> 5) & 31) == 29 && ((w & 0xff800000u) == 0x91000000u || (w & 0xff800000u) == 0xd1000000u))) return 0;
+  A b = a + 4;
+  for (int k = 0; k < 12 && b + 4 <= f.b; k++, b += 4) {
+    uint32_t v = u32(g->orig + b);
+    if ((v & 0xff8003ffu) == 0x910003ffu) continue;   /* add sp, sp, #k */
+    Ins y;
+    if (decode(v, b, &y) && (pre(y.m, "ldp") || pre(y.m, "ldr") || pre(y.m, "ldur")) && strstr(operand_text(&y), "[sp")) continue;   /* 从 sp 出栈 */
+    break;
+  }
+  uint32_t v = b + 4 <= (A)g->text ? u32(g->orig + b) : 0;
+  return !((v & 0xfffffc1fu) == 0xd65f0000u || v == 0xd65f0bffu || v == 0xd65f0fffu || (v & 0xfc000000u) == 0x14000000u ||
+           (v & 0xfffffc1fu) == 0xd61f0000u);   /* ret / retaa / retab / 尾调用 b / 经寄存器尾调用 br */
+}
 static Pair func_of(A at);
 static int sp_dynamic(A at) {   /* 按函数起点缓存在 g->spd_*（开放寻址，值 1 / 2 = 否 / 是，0 = 空槽） */
   Pair f = func_of(at);
@@ -953,52 +970,84 @@ static int sp_dynamic(A at) {   /* 按函数起点缓存在 g->spd_*（开放寻
    *   开出来的数组此时在 sp 以下（一款第一方动作游戏：mov sp, x29; ldp x29, x30, [sp], #16; b.lt …）。普通变长数组在 sp 压低时用、收尾才恢复，不算 */
   int dyn = 0, mid = 0;
   for (A a = f.a; a + 4 <= f.b && a >= 0 && (uint64_t)a + 4 <= g->text; a += 4) {
-    uint32_t w = u32(g->orig + a);
-    if (sp_dyn_word(w)) dyn = 1;
-    if ((w & 31) == 31 && ((w >> 5) & 31) == 29 && ((w & 0xff800000u) == 0x91000000u || (w & 0xff800000u) == 0xd1000000u)) {
-      A b = a + 4;
-      for (int k = 0; k < 12 && b + 4 <= f.b; k++, b += 4) {
-        uint32_t v = u32(g->orig + b);
-        if ((v & 0xff8003ffu) == 0x910003ffu) continue;   /* add sp, sp, #k */
-        Ins y;
-        if (decode(v, b, &y) && (pre(y.m, "ldp") || pre(y.m, "ldr") || pre(y.m, "ldur")) && strstr(operand_text(&y), "[sp")) continue;   /* 从 sp 出栈 */
-        break;
-      }
-      uint32_t v = b + 4 <= (A)g->text ? u32(g->orig + b) : 0;
-      if (!((v & 0xfffffc1fu) == 0xd65f0000u || v == 0xd65f0bffu || v == 0xd65f0fffu || (v & 0xfc000000u) == 0x14000000u ||
-            (v & 0xfffffc1fu) == 0xd61f0000u))   /* ret / retaa / retab / 尾调用 b / 经寄存器尾调用 br */
-        mid = 1;
-    }
+    if (sp_dyn_word(u32(g->orig + a))) dyn = 1;
+    if (sp_restore_mid(a, f)) mid = 1;
   }
   dyn = dyn && mid;
   g->spd_key[h] = f.a, g->spd_val[h] = (int8_t)(dyn + 1), g->spd_n++;
   return dyn;
 }
-/* 改写点 x 之后可当临时的：两个已死的通用寄存器（x2–x17，不在本指令里），或一个已死的向量寄存器（v16–v31） */
-/* 两个在 a1（与 a2，若 ≥ 0）之后都已死的通用寄存器（x2–x17，不在本指令里）：条件跳转两个去向都要死 */
-static int pick_dead_gp2(const Ins* x, A a1, A a2, int budget, int* s, int* t) {
+
+/* 改写点 at 会不会撞上 sp 以下的活数据（#704）：只有从「恢复 sp 后还在走」的那几处（sp_restore_mid）沿控制流往后走得到的点才会——
+ *   恢复点之前的点（sp 还压在数组下面，数组在 sp 以上）照旧压栈不碰任何活数据。沿原映像走：顺序 / 直接跳转 / 条件跳转两个去向 / 过调用接着走（保守），
+ *   ret 与出函数（尾调用）停；遇 br / svc / 解不出（LV_STOP）或走满预算一律当危险（宁可不压栈）。sp_dynamic 为假的函数直接不危险 */
+static int sp_danger(A at) {
+  if (!sp_dynamic(at)) return 0;
+  Pair f = func_of(at);
+  size_t n = (size_t)(f.b - f.a) / 4;
+  if (!n || at < f.a || at >= f.b) return 1;
+  uint8_t* seen = zalloc(n);
+  A* st = zalloc((2 * n + 4) * sizeof(A));   /* 每弹一条最多压两条，压过 2n 即当危险 */
+  size_t ns = 0;
+  int hit = 0;
+  for (A a = f.a; a + 4 <= f.b && (uint64_t)a + 4 <= g->text; a += 4)
+    if (sp_restore_mid(a, f)) st[ns++] = a + 4;
+  while (ns && !hit) {
+    A p = st[--ns];
+    if (p < f.a || p >= f.b) continue;   /* 出函数：尾调用 / 落到别处，sp 状态归对方 */
+    size_t i = (size_t)(p - f.a) / 4;
+    if (seen[i]) continue;
+    seen[i] = 1;
+    if (p == at) { hit = 1; break; }
+    const LvI* e = lv_get(p);
+    if (e->k == LV_STOP) { hit = 1; break; }
+    if (e->k == LV_RET) continue;
+    if (e->k == LV_B) { st[ns++] = e->t; continue; }
+    if (e->k == LV_COND) st[ns++] = e->t;
+    st[ns++] = p + 4;   /* 顺序 / 条件跳转不跳 / 调用返回后 */
+    if (ns > 2 * n) { hit = 1; break; }
+  }
+  release(seen), release(st);
+  return hit;
+}/* 改写点 x 之后可当临时的寄存器（#704 放宽）：通用 x0–x17、x19–x28、x30（不在本指令里），向量 v0–v31。
+ *   x30 在函数中段多半已存进帧、或下一个 bl 就会覆盖（lv_live 把调用当作写 x30）；x19–x28 / v8–v15 过调用、返回都当活，只有先被整写才算死。
+ *   挑的先后：x9–x17、x2–x8（与旧版同序，旧版挑得出的点产物不变），再 x0–x1、x19–x28、x30 */
+static const int GP_ORDER[] = {9, 10, 11, 12, 13, 14, 15, 16, 17, 2, 3, 4, 5, 6, 7, 8, 0, 1, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 30};
+static Mask gp_cand(const Ins* x) {
   Mask used = x->rd | x->wr;
   for (int r = 0; r < 31; r++) if (x->regs & BIT(r)) used |= BIT(r);
-  Mask cand = lv_range(2, 17, 0) & ~used;
+  return (lv_range(0, 17, 0) | lv_range(19, 28, 0) | BIT(30) | lv_range(0, 31, 33)) & ~used;
+}
+static void gp_two(Mask dead, int* s, int* t) {
+  *s = *t = -1;
+  for (size_t i = 0; i < sizeof GP_ORDER / sizeof *GP_ORDER && *t < 0; i++)
+    if (dead & BIT(GP_ORDER[i])) { if (*s < 0) *s = GP_ORDER[i]; else *t = GP_ORDER[i]; }
+}
+static int vec_one(Mask dead) {
+  for (int n = 31; n >= 0; n--) if (dead & VB(n)) return n;
+  return -1;
+}
+/* cand 里在 a1（与 a2，若 ≥ 0）之后都已死的：条件跳转两个去向都要死 */
+static Mask dead_after(A a1, A a2, Mask cand, int budget) {
   Mask live = lv_live(a1, cand, budget);
   if (a2 >= 0) live |= lv_live(a2, cand & ~live, budget);
-  Mask dead = cand & ~live;
-  *s = *t = -1;
-  for (int r = 9; r <= 17 && *t < 0; r++) if (dead & BIT(r)) { if (*s < 0) *s = r; else *t = r; }
-  for (int r = 2; r <= 8 && *t < 0; r++) if (dead & BIT(r)) { if (*s < 0) *s = r; else *t = r; }
-  return *t >= 0;
+  return cand & ~live;
+}
+/* 两个在 a1（与 a2）之后都已死的通用寄存器 → 1；否则一个都已死的向量寄存器（暂存两个通用临时）→ 2，*v 给出；都没有 → 0。
+ *   先按旧候选（x2–x17、v16–v31）挑：旧版挑得出的点结果不变（候选多了活跃分析走得更久，可能撞预算反而挑不出）；挑不出再放宽 */
+static int pick_dead_gp2(const Ins* x, A a1, A a2, int budget, int* s, int* t, int* v) {
+  Mask all = gp_cand(x), old = all & (lv_range(2, 17, 0) | lv_range(16, 31, 33));
+  for (int pass = 0; pass < 2; pass++) {
+    Mask dead = dead_after(a1, a2, pass ? all : old, budget);
+    gp_two(dead, s, t);
+    *v = -1;
+    if (*t >= 0) return 1;
+    if ((*v = vec_one(dead)) >= 0) return 2;
+  }
+  return 0;
 }
 static int pick_dead_any(const Ins* x, int* s, int* t, int* v, int budget) {
-  Mask used = x->rd | x->wr;
-  for (int r = 0; r < 31; r++) if (x->regs & BIT(r)) used |= BIT(r);
-  Mask cand = (lv_range(2, 17, 0) | lv_range(16, 31, 33)) & ~used;
-  Mask dead = cand & ~lv_live(x->at + 4, cand, budget);
-  *s = *t = *v = -1;
-  for (int r = 9; r <= 17 && *t < 0; r++) if (dead & BIT(r)) { if (*s < 0) *s = r; else *t = r; }
-  for (int r = 2; r <= 8 && *t < 0; r++) if (dead & BIT(r)) { if (*s < 0) *s = r; else *t = r; }
-  if (*t >= 0) return 1;
-  for (int n = 31; n >= 16; n--) if (dead & VB(n)) { *v = n; return 2; }
-  return 0;
+  return pick_dead_gp2(x, x->at + 4, -1, budget, s, t, v);
 }
 static uint32_t subst(const Ins* x, int s) {
   char want[160] = {0};
@@ -1229,13 +1278,15 @@ static int plain_nosp(const Ins* x) {
 }
 static void plain(const Ins* x) {
   /* 只在「恢复 sp 后还用 sp 以下数据」的函数里改走死寄存器（sp_dynamic）：旧写法在这些点会盖游戏数据（受影响的款 = x18_spdyn > 0），
-   *   挑不出就记缺口报红。普通函数按 AAPCS64 sp 以下没有活数据，照旧写法——没受影响的款改写产物与旧改写器逐字节相同，改写速度不变 */
-  if (!noredzone() && sp_dynamic(x->at)) {
+   *   挑不出就退回旧写法、记兼容写法（x18_compat）。普通函数按 AAPCS64 sp 以下没有活数据，照旧写法——没受影响的款改写产物与旧改写器逐字节相同，改写速度不变 */
+  if (!noredzone() && sp_dynamic(x->at))
     bump("x18_spdyn");
+  if (!noredzone() && sp_danger(x->at)) {   /* #704：只有恢复 sp 后走得到的点才危险，恢复点之前的点照旧写法 */
+    bump("x18_spdanger");
     if (plain_nosp(x))
       return;
-    fail("RuntimeError: %" PRIx64 " %s %s：x18 改写点在恢复 sp 后还用 sp 以下数据的函数里、挑不出已死的临时寄存器（不能压 sp 以下）",
-         (uint64_t)x->at, x->m, operand_text(x));
+    /* 挑不出已死的临时（v0.3.1 拿不准不停）：这一处退回旧写法（压栈），记兼容写法；只有该点恰在恢复 sp 后、sp 以下有活数据时才会踩数据 */
+    bump("x18_compat");
   }
   int S, T;
   pick(x->regs, &S, &T);
@@ -1306,8 +1357,27 @@ static void spfrom18(const Ins* x) {
   emit(branch(here(), x->at + 4));
 }
 static void cond(const Ins* x) {
-  int S, T;
-  if (!noredzone() && sp_dynamic(x->at) && pick_dead_gp2(x, x->at + 4, target(x), LV_BUDGET, &S, &T)) {
+  int S, T, V, k = !noredzone() && sp_danger(x->at) ? pick_dead_gp2(x, x->at + 4, target(x), LV_BUDGET, &S, &T, &V) : 0;
+  if (k == 2) {   /* 两个去向之后都已死的向量寄存器：暂存两个通用临时，两个出口各自取回（#704） */
+    pick(x->regs, &S, &T);
+    emit(FMOV_DX(V, S));
+    emit(INS_D1(V, T));
+    tp(T, S);
+    slot(T, S, 0);
+    emit(LDR(S, T, 0));
+    A taken = here() + 16;
+    emit(in(x->m, "cbz|cbnz") ? ((x->w & 0xff000000) | (4 << 5) | S) : ((x->w & 0xfff80000) | (4 << 5) | S));
+    emit(FMOV_XD(S, V));
+    emit(UMOV_D1(T, V));
+    emit(branch(here(), x->at + 4));
+    REQUIRE(here() == taken);
+    emit(FMOV_XD(S, V));
+    emit(UMOV_D1(T, V));
+    emit(branch(here(), target(x)));
+    bump("x18_deadv_cond");
+    return;
+  }
+  if (k == 1) {
     /* 两个去向之后都已死的临时：不压 sp 以下（一款第一方动作游戏 同根：危险函数里压栈会盖游戏数据） */
     tp(T, S);
     slot(T, S, 0);
@@ -1336,8 +1406,25 @@ static void cond(const Ins* x) {
   emit(branch(here(), target(x)));
 }
 static void pcrel(const Ins* x) {
-  int P, Q;
-  if (!noredzone() && sp_dynamic(x->at) && pick_dead_gp2(x, x->at + 4, -1, LV_BUDGET, &P, &Q)) {
+  int P, Q, V, k = !noredzone() && sp_danger(x->at) ? pick_dead_gp2(x, x->at + 4, -1, LV_BUDGET, &P, &Q, &V) : 0;
+  if (k == 2) {   /* 已死的向量寄存器暂存两个通用临时（#704） */
+    pick(x->regs, &P, &Q);
+    emit(FMOV_DX(V, P));
+    emit(INS_D1(V, Q));
+    tp(Q, P);
+    slot(Q, P, 0);
+    A t = detail(x)->operands[1].imm;
+    emit(adrp(P, here(), t));
+    if (eq(x->m, "adr"))
+      emit(ADDI(P, P, t & 4095, 0));
+    emit(STR(P, Q, 0));
+    emit(FMOV_XD(P, V));
+    emit(UMOV_D1(Q, V));
+    emit(branch(here(), x->at + 4));
+    bump("x18_deadv_pcrel");
+    return;
+  }
+  if (k == 1) {
     tp(Q, P);
     slot(Q, P, 0);
     A t = detail(x)->operands[1].imm;
@@ -1478,6 +1565,17 @@ static void brrel(const Jump* j) {
     for (size_t k = 0; k < j->mids.n; k++) {
       uint32_t w = j->mids.v[k].w, r;
       int off;
+      if ((w & 0x1f000000u) == 0x10000000u) {   /* adr / adrp（#716：取表与 br 之间夹着 adrp x0, …）：与位置有关，按原目标在补丁区重算；adr 换成 adrp + add */
+        int d = w & 31;
+        int64_t im = (int64_t)((((w >> 5) & 0x7ffff) << 2) | ((w >> 29) & 3));
+        if (im & (1 << 20))
+          im -= 1 << 21;   /* 21 位有符号 */
+        A at = j->mids.v[k].at, t = (w >> 31) ? (at & ~4095LL) + im * 4096 : at + im;
+        emit(adrp(d, here(), t));
+        if (!(w >> 31))
+          emit(ADDI(d, d, t & 4095, 0));
+        continue;
+      }
       emit(noredzone() && j->mids.v[k].sp && sp_rebase(w, 32, &r, &off) ? r : w);   /* 安卓 / 鸿蒙块已 sub sp,#32：sp 访存偏移补回（general 里 sp_mid_ok 已核过编得出） */
     }
     emit(noredzone() ? STR(tmp1, 31, 0) : STUR(tmp1, 31, -16));
@@ -2521,7 +2619,7 @@ static int general(const IV* l, int j, Pair f, Jump* out, char* why, size_t n) {
   for (int q = k0 + 1; q < j; q++)
     if (q != ka) {
       Ins* x = l->v + q;
-      if (!midok(x) || (!strchr(operand_text(x), '[') && (pre(x->m, "ld") || pre(x->m, "st"))))
+      if ((!midok(x) && !in(x->m, "adr|adrp")) || (!strchr(operand_text(x), '[') && (pre(x->m, "ld") || pre(x->m, "st"))))   /* adr / adrp 搬过去按原目标重算（brrel） */
         BAD("中间指令不可搬移 %" PRIx64 " %s %s", (uint64_t)x->at, x->m, operand_text(x));
       /* x16 / x17 可以搬：brrel 先还原 x16 / x17 原值再执行搬来的指令，之后把它们的新值存回槽、每个落点还原后再跳（10-26 普查
        * 010095300B6A4000 / 0100C1F0051B6000：编译器把 mov/movk w16、mov w17 排在取表与 br 之间，跳转目标要读）。
@@ -3251,19 +3349,18 @@ static void gensite(Site* s) {
   int N = x.w & 31;
   /* 「恢复 sp 后还用 sp 以下数据」的函数里（sp_dynamic）：只有 x18 普通点走得通（plain → 挑死寄存器，不写 sp 以下）；
    *   别的生成器的块都会压 sp 以下，记缺口报红，不悄悄盖游戏数据（11-11 一款第一方动作游戏） */
-  if (!noredzone() && sp_dynamic(s->at)) {
+  if (!noredzone() && sp_danger(s->at)) {
     int plainish = eq(s->kind, "x18") && !in(x.m, "br|blr|ret|b|bl") && !(eq(x.m, "ldr") && !strchr(operand_text(&x), '[')) &&
                    !pre(operand_text(&x), "sp, ") && !pre(operand_text(&x), "wsp, ");
     if (eq(s->kind, "x18") && in(x.m, "cbz|cbnz|tbz|tbnz")) {
-      int S, T;
-      plainish = pick_dead_gp2(&x, x.at + 4, target(&x), LV_BUDGET, &S, &T);
+      int S, T, V;
+      plainish = pick_dead_gp2(&x, x.at + 4, target(&x), LV_BUDGET, &S, &T, &V) != 0;
     } else if (eq(s->kind, "x18") && in(x.m, "adr|adrp")) {
-      int S, T;
-      plainish = pick_dead_gp2(&x, x.at + 4, -1, LV_BUDGET, &S, &T);
+      int S, T, V;
+      plainish = pick_dead_gp2(&x, x.at + 4, -1, LV_BUDGET, &S, &T, &V) != 0;
     }
-    if (!plainish)
-      fail("RuntimeError: %" PRIx64 " %s %s %s：改写点在恢复 sp 后还用 sp 以下数据的函数里，这类改写块会压 sp 以下",
-           (uint64_t)s->at, s->kind, x.m, operand_text(&x));
+    if (!plainish)   /* 别的生成器 / 挑不出临时：照旧写法生成（压栈），记兼容写法（v0.3.1 拿不准不停；cond / pcrel 走旧路时不另计） */
+      bump("x18_compat");
   }
   if (N == 18 && (eq(s->kind, "tpidr_r") || eq(s->kind, "tpidrro_r"))) {
     /* 目标是 x18（#52 鬼灭之刃 2 main+0x23f5ec0 mrs x18, tpidr_el0）：线程指针取到临时寄存器，写进虚拟 x18 槽（slot 0，同 plain） */
@@ -4754,8 +4851,9 @@ static int outputs(void) {
   int retry_gaps = !g->dual && g->retry_front && g->gaps.n;
   int layout_fatal = retry_gaps || (!g->gaps.n && (capacity_short || lost));
   msg("PFRW mod=%s need=%zu gaps=%zu fatal=%d\n", g->r.module, total, g->gaps.n, layout_fatal);
-  if (g->gaps.n && !retry_gaps) {
-    /* 本轮 gaps.tsv 留作诊断；上一轮运行产物不能再与新输入混用。 */
+  if (g->gaps.n && !retry_gaps && (capacity_short || lost)) {
+    /* 有缺口且补丁区放不下 / 丢了自旋回边：布局不成立，不出产物（gaps.tsv 留作诊断；上一轮产物不能与新输入混用）。
+     *   其余有缺口的照出产物（v0.3.1 拿不准不停）：缺口点的单元已回滚、原指令不动，退出码仍是 3，出包按缺口数降级继续 */
     remove_output("patched.bin");
     remove_output("fixups.tsv");
     remove_output("gates.tsv");
@@ -4936,7 +5034,7 @@ static int outputs(void) {
   if (g->log)
     hex(g->log, g->po);
   msg(" slot_refs %zu gates %zu\n", g->fixrefs, g->gates.n);
-  return 0;
+  return g->gaps.n ? 3 : 0;   /* 有缺口：产物照出、退 3（pack/stage_rewrite.sh 记降级继续；社区补丁轮按 3 认领缺口） */
 }
 static void load(void) {
   FILE* f = fopen(g->r.input, "rb");

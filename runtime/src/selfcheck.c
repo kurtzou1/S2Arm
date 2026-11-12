@@ -65,13 +65,17 @@ void s2a_selfcheck_explain(char *out, size_t cap, int win_ok, int mem_ok, int en
 void s2a_selfcheck_screen(int win_ok, int mem_ok, int ent, uint64_t need_mb, int as_type, const char **title, const char **body) {
     if (win_ok && mem_ok) { *title = "自检通过"; *body = ""; return; }
     if (as_unsupported(win_ok, need_mb, as_type)) { *title = S2A_SELFCHECK_AS_TITLE; *body = S2A_SELFCHECK_AS32_BODY; return; }
-    if (ent == 0) { *title = S2A_SELFCHECK_ENT_TITLE; *body = S2A_SELFCHECK_ENT_BODY; return; }
+    if (ent == 0) { *title = S2A_SELFCHECK_ENT_TITLE; *body = win_ok ? S2A_SELFCHECK_MEM_BODY : S2A_SELFCHECK_ENT_BODY; return; }   // 窗口占到 = 只差内存上限：可以「仍要启动」
     if (!win_ok && !need_mb) { *title = S2A_SELFCHECK_PKG_TITLE; *body = S2A_SELFCHECK_PKG_BODY; return; }
     *title = S2A_SELFCHECK_DEVICE_TITLE; *body = S2A_SELFCHECK_DEVICE_BODY;
 }
 // 内存门槛只拦没签权限的（#29：4500 MB 是「有没有签权限」的分界，不是游戏的需求；6 GB 机型签了权限也可能不到，不能因此把所有游戏挡住）
 int s2a_selfcheck_mem_blocks(int mem_ok, int ent) { return !mem_ok && ent == 0; }
 static const char *g_scr_title = "", *g_scr_body = "";
+// 这次自检不过能不能让玩家「仍要启动」（v0.3.1）：只有地址窗口占到、单是内存上限不够（没签权限）时可以——内存偏少是玩家能理解、能自己选的风险
+//   （大游戏可能被系统结束）；窗口占不到 / 32 位 / 资源不完整是物理上起不来，照旧停
+static int g_can_continue;
+int s2a_selfcheck_can_continue(void) { return g_can_continue; }
 void s2a_selfcheck_page(const char **title, const char **body) { *title = g_scr_title; *body = g_scr_body; }
 
 #ifndef S2A_UNIT_TEST
@@ -112,6 +116,7 @@ int s2a_selfcheck(void) {
         int ast = s2a_window_astype();   // main.npdm 的地址空间类型（跨度为 0 时 vawin.c 读的，-1 = 没读到）
         s2a_selfcheck_explain(g_hint, sizeof g_hint, win_ok, !mem_block, ent, avail, pm, top, fit >> 20, need >> 20, ast);
         s2a_selfcheck_screen(win_ok, !mem_block, ent, need >> 20, ast, &g_scr_title, &g_scr_body);
+        g_can_continue = win_ok && mem_block;
         LOG("【红】自检不过：%s", g_hint); ok = 0;
     }
 #else

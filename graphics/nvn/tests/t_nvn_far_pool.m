@@ -56,6 +56,20 @@ int main(void) { @autoreleasepool {
         CHECK(n == 1 && runs && runs[0] == 0 && runs[1] == 512 && bytes == 512, "⑥ 过期判定读影子：没改的块仍算 GPU 写的、改过的块不算（%d 段 %llu 字节）", n, (unsigned long long)bytes);
         free(runs);
     }
+    {   // ⑦ 页 / GOB 指纹哈希（span_hash：打包贴图每个写过的 16 KB 页上传时取一次、检查时再取一次；gob_hash 每个 GPU 写记账的 512 B GOB 一次）改动必检得出来的性质，
+        //      不依赖具体哈希值（换哈希实现只要性质保持就过）：同一输入两次取值相同；任一字节翻转（主循环整词、不足 32 字节的余词、< 8 字节的尾段全覆盖，
+        //      逐个位置各判一次——实现漏看任何一个字节，对应位置当场红，每个位置自证、不需要另设负对照）；同前缀长度少一字节指纹必变；
+        //      n 覆盖 GOB 整块、整页、整页少 5 字节（主循环 + 余词 + 尾段）、512+13（主循环 + 1 余词 + 5 尾字节）、40（1 圈主循环 + 1 余词、无尾）、29（不足 32 字节整段余词 + 尾）
+        static const size_t ns[] = {512, 512 + 13, 29, 40, 16384, 16384 - 5};
+        static uint8_t buf[16384];
+        for (size_t i = 0; i < sizeof buf; i++) buf[i] = (uint8_t)(i * 131 + 7);
+        for (size_t j = 0; j < sizeof ns / sizeof *ns; j++) { size_t n = ns[j];
+            uint64_t h0 = span_hash(buf, n);
+            int det = h0 == span_hash(buf, n), len_ok = h0 != span_hash(buf, n - 1), ok = det && len_ok;
+            for (size_t bi = 0; bi < n && ok; bi++) { buf[bi] ^= 0x80; ok = span_hash(buf, n) != h0; buf[bi] ^= 0x80; }
+            CHECK(ok, "⑦ 指纹哈希 n=%zu：同一输入稳定、逐字节翻转必变、长度少一字节必变（%d）", n, ok);
+        }
+    }
     printf("%s t_nvn_far_pool: %u checks %u failures; backend %s\n", failures ? "✗" : "✓", checks, failures, g_m3 ? "Metal3" : "Metal4");
     return failures != 0;
 } }

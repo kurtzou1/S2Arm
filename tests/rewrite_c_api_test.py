@@ -42,9 +42,9 @@ def main():
             corpus.nso([0xd503207f, 0xd65f03c0], {}, 8, str(gap_source))  # wfi, ret
             stale = t/'stale'; stale.mkdir(); (stale/'main.patched.bin').write_bytes(b'stale')
             result = subprocess.run([str(binary), str(gap_source), str(stale), 'main'], capture_output=True, text=True, timeout=10)
-            assert result.returncode == 3 and not (stale/'main.patched.bin').exists(), (result.returncode, result.stderr)
+            assert result.returncode == 3 and (stale/'main.patched.bin').read_bytes() != b'stale', (result.returncode, result.stderr)   # v0.3.1：有缺口照出新产物、覆盖旧映像
             assert not result.stderr and 'sys' in (stale/'main.gaps.tsv').read_text(), result.stderr
-            print('缺口：退出码 3、记录原因并清除旧映像')
+            print('缺口：退出码 3、记录原因、产物照出并覆盖旧映像（v0.3.1）')
             valid = source.read_bytes()
             malformed = [b'', b'NSO0', bytes(256), valid[:270]]
             for index in (0x10, 0x14, 0x18, 0x60):

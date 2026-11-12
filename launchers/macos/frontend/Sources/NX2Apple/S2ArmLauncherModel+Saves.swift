@@ -84,26 +84,29 @@ struct SaveResultIncomplete: Error {}
 
 extension S2ArmLauncherModel {
     /// 交一个存档作业并等它结束，回作业结果。没配游戏库不起作业；失败抛 JobFailure（message 是作业层原话）。
-    func saveJob(_ operation: String, gameID: String, extra: [String: Any] = [:], events: EventSink = .discard) async throws -> [String: Any] {
+    func saveJob(_ operation: String, gameID: String, extra: [String: Any] = [:], events: EventSink? = nil) async throws -> [String: Any] {
         let client = provider.client
+        defer { lockWaitNote = nil }
+        let lock = lockWaitSink()   // 等锁原句另外显示（剃刀 M3）；调用方的去处（存档弹窗的进度）照收
+        let sink = EventSink { e in events?.emit(e); lock.emit(e) }
         guard !client.environment.library.isEmpty else { throw JobClientError(LibraryProvider.noLibraryMessage) }
         var request = extra
         request["gameId"] = gameID
-        return try await client.perform(operation, extra: request, events: events).result
+        return try await client.perform(operation, extra: request, events: sink).result
     }
 
-    func saveStatus(_ gameID: String, events: EventSink = .discard) async throws -> SaveStatusInfo {
+    func saveStatus(_ gameID: String, events: EventSink? = nil) async throws -> SaveStatusInfo {
         guard let info = SaveStatusInfo(try await saveJob("saveStatus", gameID: gameID, events: events)) else { throw SaveResultIncomplete() }
         return info
     }
 
     /// 备份到 destination（玩家在保存面板里选的文件）；回作业层实际写下的路径。
-    func saveBackup(_ gameID: String, to destination: URL, events: EventSink = .discard) async throws -> String {
+    func saveBackup(_ gameID: String, to destination: URL, events: EventSink? = nil) async throws -> String {
         let r = try await saveJob("saveBackup", gameID: gameID, extra: ["path": destination.path], events: events)
         return r["outputPath"] as? String ?? destination.path
     }
 
-    func saveInspect(_ gameID: String, source: URL, events: EventSink = .discard) async throws -> SavePreviewInfo {
+    func saveInspect(_ gameID: String, source: URL, events: EventSink? = nil) async throws -> SavePreviewInfo {
         var extra: [String: Any] = ["path": source.path]
         // 本地玩家（#623）：社区存档导进当前玩家的账号存档（pack/jobs/saves.py external_archive）；恢复时带同一个玩家
         if let player = S2ArmLauncherModel.playerRequest() { extra["player"] = player }
@@ -113,7 +116,7 @@ extension S2ArmLauncherModel {
     }
 
     /// 用检查过的备份覆盖当前存档：带回检查时的三个校验值，备份或当前存档变了作业层拒绝（save_changed）。
-    func saveRestore(_ gameID: String, preview: SavePreviewInfo, events: EventSink = .discard) async throws -> SaveRestoreInfo {
+    func saveRestore(_ gameID: String, preview: SavePreviewInfo, events: EventSink? = nil) async throws -> SaveRestoreInfo {
         var extra: [String: Any] = ["path": preview.source.path, "archiveSha256": preview.archiveSha256,
                                     "targetFingerprint": preview.targetFingerprint, "previewLibraryId": preview.previewLibraryId]
         if let player = S2ArmLauncherModel.playerRequest() { extra["player"] = player }

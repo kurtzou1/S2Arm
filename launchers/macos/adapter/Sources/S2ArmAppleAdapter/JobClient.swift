@@ -107,7 +107,8 @@ public struct JobEvent {
 
 /// 一次作业的结局。
 public struct JobOutcome {
-    public enum State: String { case completed, failed, cancelled, interrupted }
+    /// paused：出包编排停在要玩家处理的点上（磁盘满 / 启动器退出，剃刀 H13 pack/jobs/export_plan.py），不算完成也不算失败
+    public enum State: String { case completed, failed, cancelled, interrupted, paused }
     public let taskId: String
     public let state: State
     public let exitCode: Int32

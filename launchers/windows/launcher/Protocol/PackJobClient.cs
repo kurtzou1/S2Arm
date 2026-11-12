@@ -40,7 +40,8 @@ public sealed class JobEventReader(string jobId, string operation)
                 if (state != "running") throw new LibraryProtocolException("Terminal state lacks a result event.");
                 return e.Clone();
             }
-            if (state is not ("succeeded" or "failed" or "cancelled"))
+            // paused：出包编排停在要玩家处理的点上（磁盘满 / 启动器退出，剃刀 H13 pack/jobs/export_plan.py），不算完成也不算失败
+            if (state is not ("succeeded" or "failed" or "cancelled" or "paused"))
                 throw new LibraryProtocolException("Unknown terminal result state.");
             var payload = e.GetProperty("result");
             if (payload.ValueKind != JsonValueKind.Object) throw new LibraryProtocolException("Result must be an object.");
@@ -58,7 +59,7 @@ public sealed class JobEventReader(string jobId, string operation)
     public LibraryJobResult Finish(int exitCode)
     {
         if (Result is null) throw new LibraryProtocolException("EOF without a terminal result.");
-        if (exitCode != (Result.State == "succeeded" ? 0 : Result.State == "cancelled" ? 130 : 1))
+        if (exitCode != (Result.State is "succeeded" or "paused" ? 0 : Result.State == "cancelled" ? 130 : 1))
             throw new LibraryProtocolException("Terminal result disagrees with process exit.");
         return Result;
     }
@@ -73,7 +74,7 @@ public sealed class JobEventReader(string jobId, string operation)
 public static class PackJobClient
 {
     public static readonly IReadOnlySet<string> Operations =
-        new HashSet<string>(StringComparer.Ordinal) { "ipa", "installCheck", "install", "installRemove", "installRestore", "installMode", "installUpdate", "customize",
+        new HashSet<string>(StringComparer.Ordinal) { "export", "ipa", "installCheck", "install", "installRemove", "installRestore", "installMode", "installUpdate", "customize",
             "moveGame", "relinkGame", "forgetGame", "clean", "delete", "spaceFree", "devCert" };
 
     /// <param name="Secrets">Environment variables for this one job process only (the developer certificate password,
@@ -86,7 +87,8 @@ public static class PackJobClient
     {
         if (!Operations.Contains(request.Operation)) throw new ArgumentException("Unsupported pack operation.", nameof(request));
         // The developer certificate and the install mode belong to this computer, installUpdate to the phone (install.update_phone): no game.
-        var perGame = request.Operation is not ("devCert" or "installMode" or "installUpdate");
+        // export 的游戏在计划里（plan.items，ExportStream），信封上不带
+        var perGame = request.Operation is not ("devCert" or "installMode" or "installUpdate" or "export");
         if (perGame && string.IsNullOrWhiteSpace(request.GameId)) throw new ArgumentException("A game is required.", nameof(request));
         var payload = new Dictionary<string, object?>
         {
@@ -98,11 +100,12 @@ public static class PackJobClient
         };
         if (perGame) payload["gameId"] = request.GameId;
         // The bundled iPhone shell is a launcher path setting (Settings → Shell); ipa.bundled_shell reads shellDir.
-        if (request.Operation is "ipa" or "install" or "installUpdate") payload["shellDir"] = Path.GetFullPath(request.Paths.Shell);
+        // export 的每一步子作业沿用这份请求（pack/jobs/export_plan.py），iPhone 那步要的壳与随包资源一并带上
+        if (request.Operation is "ipa" or "install" or "installUpdate" or "export") payload["shellDir"] = Path.GetFullPath(request.Paths.Shell);
         // Bundled resources next to S2Arm.exe (bundle_win.py layout): ipa reads the shared fonts from resources/Fonts (core.fonts_dir; without it
         // "shared fonts missing", tianyan 11-07); installCheck / install use the Impactor + plumesign shipped in resources/ThirdParty/Impactor
         // (pack/jobs/impactor.py bundled, 11-07 维护者: no download detour for players).
-        if (request.Operation is "ipa" or "installCheck" or "install" or "installRemove" or "installRestore" or "installMode" or "installUpdate") payload["resources"] = Path.GetFullPath(AppContext.BaseDirectory);
+        if (request.Operation is "ipa" or "export" or "installCheck" or "install" or "installRemove" or "installRestore" or "installMode" or "installUpdate") payload["resources"] = Path.GetFullPath(AppContext.BaseDirectory);
         foreach (var (key, value) in request.Extra ?? new Dictionary<string, object?>())
         {
             if (payload.ContainsKey(key)) throw new ArgumentException("Extra field overrides the request envelope: " + key);

@@ -572,7 +572,7 @@ class PrepareTests(Base):
         part = work / "S2Arm-windows-x64.zip.part"
         part.write_bytes(self.zip[:100])
         seen = []
-        with patch.object(updater, "download", side_effect=lambda url, target, size: seen.append(Path(str(target) + ".part").read_bytes()) or Path(target).write_bytes(self.zip)):
+        with patch.object(updater, "download", side_effect=lambda url, target, size, **_: seen.append(Path(str(target) + ".part").read_bytes()) or Path(target).write_bytes(self.zip)):
             ready = self.prepare()
         self.assertEqual(ready["state"], "ready")
         self.assertEqual(seen, [self.zip[:100]])   # prepare 没删已下的字节，交给 download 续传
@@ -1053,6 +1053,51 @@ class MirrorTests(Base):
         with self.assertRaises(updater.UpdateError) as caught:
             updater.query_latest("windows", "0.1.1")
         self.assertEqual(caught.exception.code, "update_rate_limited")
+
+    def test_site_hit_downloads_from_r2_first_with_github_as_fallback(self):
+        """官网清单命中 → 安装包先走 R2（S2A_UPDATE_R2，正式构建 = dl.s2arm.com），GitHub 那个地址留作退路；没给 R2 就照旧只有 GitHub"""
+        self.site("0.3.0")
+        with patch.dict(os.environ, {"S2A_UPDATE_R2": self.base + "/r2/v{version}/{name}"}):
+            info = updater.query_latest("windows", "0.1.1")
+        self.assertEqual((info["asset"], info["assetFallback"]), (self.base + "/r2/v0.3.0/" + self.pkg, self.base + "/dl/0.3.0/" + self.pkg))
+        self.site("0.3.0")
+        self.assertNotIn("assetFallback", updater.query_latest("windows", "0.1.1"))
+
+    def fetch(self, r2, gh=(200, {}, b"package")):
+        """fetch_package：R2 回 r2、GitHub 回 gh；清单写的是「package」这 7 字节的 sha256"""
+        import hashlib
+        ScriptedHandler.scripts.update({"/r2/pkg": [r2], "/gh/pkg": [gh]})
+        info = {"asset": self.base + "/r2/pkg", "assetFallback": self.base + "/gh/pkg", "sha256": hashlib.sha256(b"package").hexdigest()}
+        target = Path(self.tmp.name) / "pkg.zip"
+        for name, value in (("emit", lambda **_: None), ("RETRY_SECONDS", 0)):
+            p = patch.object(updater, name, value); p.start(); self.addCleanup(p.stop)
+        updater.fetch_package(info, target, 7)
+        return target
+
+    def test_r2_ok_is_used_and_github_untouched(self):
+        self.assertEqual(self.fetch((200, {}, b"package")).read_bytes(), b"package")
+        self.assertNotIn("/gh/pkg", ScriptedHandler.hits)
+
+    def test_r2_down_falls_back_to_github(self):
+        self.assertEqual(self.fetch((404, {}, b"")).read_bytes(), b"package")
+        self.assertEqual([h for h in ScriptedHandler.hits if h.endswith("/pkg")], ["/r2/pkg", "/gh/pkg"])
+
+    def test_r2_oversized_falls_back_to_github(self):
+        self.assertEqual(self.fetch((200, {}, b"package-too-long")).read_bytes(), b"package")
+        self.assertIn("/gh/pkg", ScriptedHandler.hits)
+
+    def test_r2_tampered_content_is_an_error_without_fallback(self):
+        """长度对、内容被改：sha256 不对 → 报错并删掉，不去 GitHub 重下"""
+        with self.assertRaises(updater.UpdateError) as caught:
+            self.fetch((200, {}, b"PACKAGE"))
+        self.assertEqual(caught.exception.code, "update_checksum_mismatch")
+        self.assertNotIn("/gh/pkg", ScriptedHandler.hits)
+        self.assertFalse((Path(self.tmp.name) / "pkg.zip").exists())
+
+    def test_official_build_downloads_from_the_official_domain(self):
+        with patch.dict(os.environ, {"S2A_UPDATE_API": ""}):
+            self.assertTrue(updater.trusted(updater.R2_DOWNLOAD.format(version="0.3.1", name=self.pkg)))
+            self.assertTrue(updater.R2_DOWNLOAD.startswith("https://dl.s2arm.com/"))
 
     def test_official_build_trusts_the_site_but_tests_never_reach_it(self):
         with patch.dict(os.environ, {"S2A_UPDATE_API": ""}):

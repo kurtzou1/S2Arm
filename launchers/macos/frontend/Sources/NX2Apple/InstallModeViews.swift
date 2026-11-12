@@ -91,7 +91,7 @@ struct InstallModeLine: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "signature").font(.system(size: 16, weight: .light)).foregroundStyle(LauncherPalette.cream)
+            LauncherRowIcon("signature")
             Text(ix(loc, "install.mode.summary").replacingOccurrences(of: "{0}", with: summary)).font(.manrope(13)).foregroundStyle(.secondary)
             Spacer(minLength: 12)
             Button(ix(loc, "install.mode.change")) { model.showEnvironment = true }
@@ -137,6 +137,7 @@ struct PhoneUpdateButton: View {
                 Text(t("update.confirm.body").replacingOccurrences(of: "{0}", with: u.stale.map(\.name).joined(separator: "」「"))
                         .replacingOccurrences(of: "{1}", with: "\(u.games.count - u.stale.count)"))
             }
+            // 更新会让手机上别的电脑装的游戏暂时不能玩：在更新页里问（PhoneJobPanel.dropAsk），不在这里弹框
         }
     }
 }

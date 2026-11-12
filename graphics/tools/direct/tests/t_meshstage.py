@@ -36,6 +36,8 @@ def area(sph0=(0, 0), prim=None):
 A_CTL, A_AREA = ctl(7, 32, 0x100, task=1, mv=64, mp=126), area((0x3f, 0))          # 网格有任务：位置 xyzw、属性 0 xyzw、属性 1 xy
 B_CTL, B_AREA = ctl(7, 32, 0, mv=32, mp=32, prim_at=0x100), area((0, 0), (0xf0, 0, 0x01))   # 网格无任务：位置 xyzw；逐图元 SPH 位置（不算）+ 属性 2 x
 C_CTL, C_AREA = ctl(6, 32, 3200), area()                                            # 任务：载荷 3200 字节
+D_CTL, D_AREA = ctl(6, 32, 0x5000), area()                                          # 任务：载荷 20480 字节（超 Metal 对象载荷 16 KB → 设备中转）
+E_CTL, E_AREA = ctl(7, 26, 0x5000, task=1, mv=64, mp=126), area((0x3f, 0))          # 网格：同 A 的属性、载荷 20480 字节、26 线程（同一款体育游戏近海网格 d60092d7）
 
 HEAD = '''#include <metal_stdlib>
 using namespace metal;
@@ -47,6 +49,8 @@ struct spvUnsafeArray
     constexpr const thread T& operator [] (size_t pos) const thread { return elements[pos]; }
     threadgroup T& operator [] (size_t pos) threadgroup { return elements[pos]; }
     constexpr const threadgroup T& operator [] (size_t pos) const threadgroup { return elements[pos]; }
+    device T& operator [] (size_t pos) device { return elements[pos]; }
+    constexpr const device T& operator [] (size_t pos) const device { return elements[pos]; }
 };
 struct B { uint v[64]; };
 '''
@@ -71,7 +75,9 @@ r = dshfn.batch([('mesh_info', [A_CTL.hex(), A_AREA.hex()]), ('mesh_info', [B_CT
                  ('mesh_to_stage', [kernel(1604, False), C_CTL.hex(), C_AREA.hex()]),
                  ('mesh_to_stage', [kernel(64, False), ctl(7, 32, 0, mv=300, mp=32).hex(), area().hex()]),
                  ('mesh_info', [ctl(5, 32, 0).hex(), area().hex()]),
-                 ('mesh_own_shared', [(struct.pack('<H', 0x988) + bytes(14)).hex()]), ('mesh_own_shared', [(struct.pack('<H', 0x986) + bytes(14)).hex()])])
+                 ('mesh_own_shared', [(struct.pack('<H', 0x988) + bytes(14)).hex()]), ('mesh_own_shared', [(struct.pack('<H', 0x986) + bytes(14)).hex()]),
+                 ('mesh_memory', [D_CTL.hex(), D_AREA.hex()]), ('mesh_memory', [E_CTL.hex(), E_AREA.hex()]),
+                 ('mesh_to_stage', [kernel(5124, False), D_CTL.hex(), D_AREA.hex()]), ('mesh_to_stage', [kernel(6500, True), E_CTL.hex(), E_AREA.hex()])])
 pos = [[None, 0], [None, 1], [None, 2], [None, 3]]
 ck('① 网格有任务：事实', r[0].get('ok') == {'kind': 'ms', 'threads': 32, 'payload': 256, 'task': True, 'max_v': 64, 'max_p': 126,
                                          'vertex': pos + [[0, 0], [0, 1], [0, 2], [0, 3], [1, 0], [1, 1]], 'primitive': []}, r[0])
@@ -106,10 +112,26 @@ ck('③ 计算核本体成内联函数、阶段内存作引用参数、提前返
 ck('④ 300 顶点超 Metal 上限：报错不出包装', r[9].get('err') == 'DshError:mesh stage failed', r[9])
 ck('④ 阶段字节 5 不是任务 / 网格：报错', r[10].get('err') == 'DshError:bad record', r[10])
 ck('④ 自有共享内存：STS 0x988 认出、STG 0x986 不认', r[11].get('ok') is True and r[12].get('ok') is False, (r[11], r[12]))
+# ⑥ 载荷超 16 KB（设备中转，MeshStage.Relay；11-12 一款体育游戏近海任务 07abb052 / 网格 d60092d7 载荷 27904 字节，原先任务 55824、网格 39056 字节超 32 KB 线程组内存、整笔不画）
+#   任务不读输入：中转时不留载荷大小的输入区 → [0, 16, 16, 20496] / 20496（不中转时同 C 的排法会是 16 + 20480 + 20480 = 40976，超 32 KB）
+ck('⑥ 中转任务：不留输入区 [0, 16, 16, 20496] / 20496 字节', r[13].get('ok') == [[0, 16, 16, 20496], 20496], r[13])
+# E 网格照常：输出 16 + 20480 = 20496；4 块 × 10 分量 × 128 = 5120 → 图元 25616；+ 384 → 26000
+ck('⑥ 中转网格：布局不变 [0, 16, 20496, 25616] / 26000 字节', r[14].get('ok') == [[0, 16, 20496, 25616], 26000], r[14])
+D, E = (x.get('ok') or '' for x in r[15:17])
+ck('⑥ D：object_data 只带任务组号、中转缓冲在槽 27', 'struct dm_payload_t { uint tg; };' in D and 'device uint* dm_relay [[buffer(27)]]' in D and 'uint w[' not in D, D[-600:])
+ck('⑥ D：载荷 5120 字从字 4 写进中转（头 8 字后、每组 5120 字），越界组不写', 'device uint* dm_p = dm_relay + 8u + dm_tg * 5120u;' in D and 'bool dm_in = dm_tg < dm_relay[1];' in D
+   and 'if (dm_in) for (uint i = dm_lid; i < 5120u; i += 32u) dm_p[i] = _35[4u + i];' in D)
+ck('⑥ D：派生数 = 字 5 钳到任务线程数 32、越界组 0', 'dm_payload.tg = dm_tg; dm_grid.set_threadgroups_per_grid(uint3(dm_in ? min(_35[5], 32u) : 0u, 1u, 1u));' in D)
+ck('⑥ E：阶段内存是中转缓冲里一片（片号 = 任务组 × 头字 2 + 网格组）、不再有线程组阶段内存',
+   'device spvUnsafeArray<uint, 6500>& _35 = *(device spvUnsafeArray<uint, 6500>*)(dm_relay + dm_relay[0] + (dm_payload.tg * dm_relay[2] + dm_tg) * 6500u);' in E
+   and 'threadgroup spvUnsafeArray<uint, 6500>' not in E and 'device spvUnsafeArray<uint, 6500>& _35)' in E, E[-900:])
+ck('⑥ E：载荷从中转读进输入（字 4 起）、栅栏带 mem_device', 'for (uint i = gl_LocalInvocationID.x; i < 5120u; i += 26u) _35[4u + i] = dm_relay[8u + dm_payload.tg * 5120u + i];' in E
+   and 'threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);' in E and 'threadgroup_barrier(mem_flags::mem_threadgroup);' not in E)
+ck('⑥ 对照：载荷 ≤ 16 KB 的 A / C 不带中转', all('dm_relay' not in x and 'mem_device' not in x for x in (A, C)))
 with tempfile.TemporaryDirectory(prefix='t_meshstage_') as t:
-    for nm, src in (('A', A), ('B', B), ('C', C)):
+    for nm, src in (('A', A), ('B', B), ('C', C), ('D', D), ('E', E)):
         f = os.path.join(t, nm + '.metal'); open(f, 'w').write(src)
         p = subprocess.run(['xcrun', '-sdk', 'iphoneos', 'metal', '-c', '-w', '-mios-version-min=18.0', '-fmetal-math-mode=relaxed', '-fpreserve-invariance', f, '-o', f + '.air'], capture_output=True, text=True)
         ck(f'⑤ {nm} 交 xcrun metal（iphoneos，出包 iOS 编法）编过', p.returncode == 0, p.stderr.strip()[-300:])
-print(f"{'✗' if bad else '✓'} meshstage：{n} 项，{bad} 项不符（手排 3 种控制段 / SPH、2 种拒绝、3 份 MSL 编 iOS）")
+print(f"{'✗' if bad else '✓'} meshstage：{n} 项，{bad} 项不符（手排 5 种控制段 / SPH、2 种拒绝、载荷中转、5 份 MSL 编 iOS）")
 sys.exit(bool(bad))

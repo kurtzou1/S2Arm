@@ -7,6 +7,7 @@
 //   纯解析的各类拒绝；进程级用例把本测试程序拷进一个临时「App 包」（带 s2a_catalogue.json / Games/）再 exec，构造期（同 vawin.c 101）取上下文、再选游戏
 #include "../src/native.h"
 #include "s2a_launch_ctx.h"
+#include "s2a_docs.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,7 +51,7 @@ static int child_container(const char *home) {
     char want[1200]; snprintf(want, sizeof want, "%s/Documents/games/0100000000000001", home);
     CK(g && g->source == S2A_LCTX_CONTAINER && !strcmp(g->game_id, "0100000000000001") && !strcmp(g->docs, want), "选中后取到本款上下文（来源 CONTAINER、文档根 = $HOME/Documents/games/<gid>）");
     const char *e2 = getenv("S2A_DOCS"), *e4 = getenv("S2A_LAUNCH_GAME_ID"), *e1 = getenv("S2A_GAME_DATA");
-    char wgd[1300]; snprintf(wgd, sizeof wgd, "%s/资源包", want);
+    char wgd[1300]; s2a_pack_root(wgd, sizeof wgd, want);   // = <home>/Library/Application Support/S2Arm/games/<游戏号>/资源包（同解析，见上面「容器解析：资源包根」的手写期望）
     CK(e2 && !strcmp(e2, want) && e4 && !strcmp(e4, "0100000000000001") && e1 && !strcmp(e1, wgd), "选中后写环境：S2A_DOCS / S2A_GAME_DATA / S2A_LAUNCH_GAME_ID");
     struct stat st; CK(!stat(want, &st) && S_ISDIR(st.st_mode), "选中后本款文档根已建");
     char pd[1100]; snprintf(pd, sizeof pd, "%s/Documents", home);
@@ -193,7 +194,8 @@ int main(int argc, char **argv) {
     snprintf(w, sizeof w, "%s/Games/0100000000000001", app); ck(c.source == S2A_LCTX_CONTAINER && eq(c.module_dir, w) && eq(c.caps_dir, w), "容器解析：模块目录 = 能力清单目录 = <App>/Games/<gid>");
     snprintf(w, sizeof w, "%s/Frameworks/S2AImages-0100000000000001.dylib", app); ck(eq(c.images, w), "容器解析：镜像包 = <App>/Frameworks/S2AImages-<gid>.dylib");
     snprintf(w, sizeof w, "%s/Documents/games/0100000000000001", home); ck(eq(c.docs, w), "容器解析：文档根 = $HOME/Documents/games/<gid>");
-    snprintf(w, sizeof w, "%s/Documents/games/0100000000000001/资源包", home); ck(eq(c.game_data, w), "容器解析：资源包根 = <文档根>/资源包");
+    snprintf(w, sizeof w, "%s/Library/Application Support/S2Arm/games/0100000000000001/资源包", home);
+    ck(eq(c.game_data, w), "容器解析：资源包根 = Library/Application Support/S2Arm/games/<游戏号>/资源包（v0.3.0 挪出 Documents，s2a_pack_root）");
     snprintf(w, sizeof w, "%s/Documents/games/0100000000000001/S2A/ryujinx", home); ck(eq(c.ryu_data, w), "容器解析：Ryujinx 数据根 = <文档根>/S2A/ryujinx");
     snprintf(w, sizeof w, "%s/Documents", home); ck(eq(c.log_dir, w) && eq(c.bundle_dir, app) && eq(c.game_id, "0100000000000001"), "容器解析：host.log 目录进程级、包目录、game_id");
     static const struct { const char *gid, *needle, *what; } rej[] = {

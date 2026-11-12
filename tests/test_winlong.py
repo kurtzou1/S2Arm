@@ -69,6 +69,19 @@ class LongPathTest(unittest.TestCase):
         self.assertEqual(sr.to_long(link + "\\work", t), long + "\\work")
         self.assertEqual(sr.to_long("C:\\x", t), "C:\\x")
 
+    def test_remap_env_moves_tool_cache_vars_under_short_root(self):
+        # v0.3.0 win_cases deep：工具缓存 <库>/tool-cache 经环境变量传给出包链，库在深目录时要一并换成短入口。期望手写
+        from pack.orch import shortroot
+        lib = 'T:\\deep\\' + 'p' * 200 + '\\DefaultLibrary'
+        env = {'S2A_RUN_ROOT': lib + '\\tool-cache\\run', 'S2A_CS_CACHE': lib + '\\tool-cache\\cache\\nxaot',
+               'S2A_PROGRESS': 'C:\\Users\\u\\AppData\\Local\\S2Arm\\logs\\t.tsv', 'PATH': 'C:\\Windows', 'X': lib + '\\tool-cachex', 'EMPTY': ''}
+        changed = shortroot.remap_env(env, lib + '\\tool-cache', 'C:\\L\\S2A\\j\\ab12\\tool-cache')
+        self.assertEqual(sorted(changed), ['S2A_CS_CACHE', 'S2A_RUN_ROOT'])
+        self.assertEqual(env['S2A_RUN_ROOT'], 'C:\\L\\S2A\\j\\ab12\\tool-cache\\run')
+        self.assertEqual(env['S2A_CS_CACHE'], 'C:\\L\\S2A\\j\\ab12\\tool-cache\\cache\\nxaot')
+        self.assertEqual(env['X'], lib + '\\tool-cachex', '同名前缀的兄弟目录不动')
+        self.assertTrue(env['S2A_PROGRESS'].startswith('C:\\Users'), '不在工具缓存下的不动')
+
     def test_short_codes_are_stable_four_chars_and_probe(self):
         from pack.orch import shortroot as sr
         a = list(sr.codes("R:\\lib"))

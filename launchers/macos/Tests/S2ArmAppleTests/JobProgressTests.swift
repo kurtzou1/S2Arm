@@ -60,4 +60,16 @@ final class JobProgressTests: XCTestCase {
         XCTAssertEqual(p.stepLeft(at: at) ?? -1, 10, accuracy: 1e-9)
         XCTAssertEqual(p.estimate(at: at).stepRemainingByRate ?? -1, 10, accuracy: 1e-9)
     }
+
+    /// 整单进度只认作业层的 overall、只增不减（11-11「91% 又跳回 40%」）：中间夹一个更小的值，读数不回退；成功结果到 1。期望手算 = 到目前为止的最大值
+    func test_overall_reading_never_goes_back() {
+        var p = JobProgress()
+        XCTAssertNil(p.overall)
+        let sent = [0.12, 0.40, 0.35, 0.91, 1.0], expected = [0.12, 0.40, 0.40, 0.91, 1.0]
+        for (i, v) in sent.enumerated() {
+            p.ingest(EngineEvent(ev: "progress", t: Double(i), code: nil, severity: .info,
+                                 fields: ["stage": "编译着色器库", "stageIndex": 3, "stageCount": 4, "done": 1, "total": 5, "overall": v]))
+            XCTAssertEqual(p.overall, expected[i], "发 \(v) 之后读数")
+        }
+    }
 }

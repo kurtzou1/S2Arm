@@ -33,7 +33,9 @@ from spirv_msl import MAGIC, metal_cmd, metal_run, red, spirv_files, translate
 VK_LIB_ABI = 3   # = graphics/nvn/gfx/vk/vk_lib.h S2A_VK_LIB_ABI（3：MSL 3.1）
 
 def one(path, tmp, root):
-    return translate(path, tmp, root, stages=('vert', 'frag', 'comp'))
+    # 单支翻译失败（spirv_msl.red 退出）只剔这一支（v0.3.1 拿不准不停）：返回 ('failed', 原因)，main 计数、打 [RED]
+    try: return translate(path, tmp, root, stages=('vert', 'frag', 'comp'))
+    except SystemExit as e: return ('failed', f'{path}: {e}')
 
 def metallib(msls, out, sdk, extra, work):
     """work：临时目录（msls 都在它下面）；编译器的输入输出都放在这里（Windows 按相对路径交给编译器，见 spirv_msl.metal_run），库编好再挪进 out"""
@@ -42,10 +44,13 @@ def metallib(msls, out, sdk, extra, work):
     def comp(m):
         a = m[:-6] + f'.{sdk}.air'
         try: r = metal_run(metal_cmd(sdk, 'metal', '-c', '-fpreserve-invariance', *extra, m, '-o', a), work, capture_output=True, text=True)
-        except ValueError as e: red(str(e))
-        if r.returncode: red(f'{m}: metal compile failed: {r.stderr.strip()[:400]}')
-        return a
-    with cf.ThreadPoolExecutor(os.cpu_count()) as ex: airs = list(ex.map(comp, msls))
+        except ValueError as e: red(str(e))   # 工具链本身起不来：环境问题，照旧停
+        if r.returncode: return None, f'{m}: metal compile failed: {r.stderr.strip()[:400]}'
+        return a, None
+    with cf.ThreadPoolExecutor(os.cpu_count()) as ex: res = list(ex.map(comp, msls))
+    bad = {m: e for m, (a, e) in zip(msls, res) if e}
+    airs = [a for a, e in res if not e]
+    if not airs: return None, bad
     lib = os.path.join(work, f'vk_shaders.{sdk}.metallib')
     # .air 清单走响应文件（同 graphics/metal/tools/gal_offline.py link）：11-06 Windows 出包机银河 2 第二包 3795 支，路径全拼在命令行上超 Windows 32767 字符（WinError 206）。
     #   每行一个带引号的路径；Windows 上反斜杠换成正斜杠（响应文件按转义规则读，反斜杠会被吃掉；metallib.exe 认正斜杠，Windows 出包机实测 @响应文件 链出含两函数的库）
@@ -59,7 +64,7 @@ def metallib(msls, out, sdk, extra, work):
     except ValueError as e: red(str(e))
     finally: os.remove(rsp)
     dst = os.path.join(out, 'vk_shaders.metallib'); shutil.move(lib, dst)
-    return dst
+    return dst, bad
 
 def main():
     a = sys.argv[1:]
@@ -74,8 +79,10 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         with cf.ThreadPoolExecutor(os.cpu_count()) as ex: rows = list(ex.map(lambda pr: one(pr[0], tmp, pr[1]), files))
         seen, skipped = {}, {}
+        failed = []
         for row in rows:
             if isinstance(row, str): skipped[row] = skipped.get(row, 0) + 1; continue
+            if row[0] == 'failed': failed.append(row[1]); print('[RED] ' + row[1]); continue
             key, stage, res, msl, src = row
             if key in seen: continue
             seen[key] = (stage, res, msl, src)
@@ -89,14 +96,23 @@ def main():
         # no NaN / Inf, which would let it drop the NaN handling of the precise:: functions above
         if ios: dirs.append((os.path.join(ios, 'vk'), 'iphoneos', ['-mios-version-min=18.0', '-fmetal-math-mode=relaxed']))
         for d, sdk, extra in dirs:
+            if not header_only:   # Metal 编不过的支剔掉、其余照链（v0.3.1）：先按目标编一遍，剔掉编不过的键再写表
+                lib, bad = metallib(msls, d, sdk, extra, tmp)
+                for k in [k for k, v in seen.items() if any(m in bad for m in v[2])]:
+                    failed.append(f'{k}: ' + next(bad[m] for m in seen[k][2] if m in bad)); print(f'[RED] {failed[-1]}'); del seen[k]
+                tsv = tsv[:3] + [f'{k}\t{v[0]}\t{" ".join(v[1])}\t{v[3]}' for k, v in sorted(seen.items())]
+                if lib is None or not seen:   # 一支不剩：同 --header-only，只出表头、全部设备首遇现编
+                    os.makedirs(d, exist_ok=True); stale = os.path.join(d, 'vk_shaders.metallib')
+                    if os.path.exists(stale): os.remove(stale)
+                    open(os.path.join(d, 'vk_shaders.tsv'), 'w', encoding='utf-8', newline='\n').write('\n'.join(tsv[:3]) + '\n')
+                    print(f'{sdk}: 0 shaders after dropping the failed ones, table header only → {d}/vk_shaders.tsv'); continue
+                open(os.path.join(d, 'vk_shaders.tsv'), 'w', encoding='utf-8', newline='\n').write('\n'.join(tsv) + '\n')
+                print(f'{sdk}: {len(seen)} shaders → {lib}'); continue
             if header_only:   # no library: a stale one left in the folder would be loaded against an empty table
                 os.makedirs(d, exist_ok=True); lib = os.path.join(d, 'vk_shaders.metallib')
                 if os.path.exists(lib): os.remove(lib)
                 open(os.path.join(d, 'vk_shaders.tsv'), 'w', encoding='utf-8', newline='\n').write('\n'.join(tsv) + '\n')
                 print(f'{sdk}: 0 shaders, table header only → {d}/vk_shaders.tsv'); continue
-            lib = metallib(msls, d, sdk, extra, tmp)
-            open(os.path.join(d, 'vk_shaders.tsv'), 'w', encoding='utf-8', newline='\n').write(   # 一律 \n：Windows 文本模式缺省写 CRLF（11-05 Windows 出包机实测）
-                '\n'.join(tsv) + '\n')
-            print(f'{sdk}: {len(seen)} shaders → {lib}')
+        if not header_only: print(f'Vulkan 汇总：成功 {len(seen)}、失败 {len(failed)}')
 
 if __name__ == '__main__': main()

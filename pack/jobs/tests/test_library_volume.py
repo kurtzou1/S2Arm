@@ -22,7 +22,7 @@ class VolumeFormat(unittest.TestCase):
             with self.assertRaises(Failure) as e:
                 library.require_apfs("/外接盘/游戏库")
         self.assertEqual(e.exception.code, "library_not_apfs"); self.assertIn("EXFAT", str(e.exception)); self.assertIn("APFS", str(e.exception))
-        for ok in ("apfs", ""):   # 读不到格式不拦（不因为探测失败挡住玩家）
+        for ok in ("apfs", "", "hfs"):   # 读不到格式不拦（不因为探测失败挡住玩家）；HFS+ 放开（v0.3.1：克隆退回普通拷贝、不覆盖改名照常，11-12 映像实测）
             with um.patch.object(library, "volume_format", return_value=ok):
                 library.require_apfs("/x")
 

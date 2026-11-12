@@ -82,7 +82,7 @@ def judge(c, code, d):
         o = os.path.join(d, tgt); rc, gaps, stat, log = rewrite(os.path.join(d, 'main'), o, tgt)
         if 'gap' in c:
             want = sorted(c['gap']); got = sorted(gaps)
-            good = rc == 3 and got == want and not os.path.exists(os.path.join(o, 'main.patched.bin'))
+            good = rc == 3 and got == want and os.path.exists(os.path.join(o, 'main.patched.bin'))   # v0.3.1 拿不准不停：有缺口照出产物
             msgs.append(f'{tgt} 退出码 {rc} 缺口 {[(hex(a), k) for a, k in got]}'); ok &= good; continue
         if rc != 0 or gaps:
             msgs.append(f'{tgt} 退出码 {rc} 缺口 {[(hex(a), k) for a, k in gaps]}'); ok = False; continue

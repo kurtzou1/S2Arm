@@ -31,7 +31,7 @@ struct PlaySessionView: View {
         case .finished(.completed): return loc.t("s2arm.play.completed")
         case .finished(.cancelled): return loc.t("s2arm.play.cancelled")
         case .finished(.failed): return loc.t(currentStage == 1 ? "s2arm.play.crashed" : "s2arm.play.failed")   // 已经进了游戏才退出的不叫「启动失败」
-        case .finished(.interrupted): return loc.t("s2arm.play.interrupted")
+        case .finished(.interrupted), .finished(.paused): return loc.t("s2arm.play.interrupted")   // 开局作业不会暂停（只有出包编排会），归到「被打断」
         }
     }
 

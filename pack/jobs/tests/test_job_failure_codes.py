@@ -518,6 +518,20 @@ class LogCauses(JobCase):
         self.assertEqual(d["summary"], "存放位置所在磁盘格式不支持：这块盘不支持出包需要的文件操作（常见于 exFAT / FAT 格式的外接盘）。")
         self.assertEqual(d["suggestion"], RECOVERY["volume_ops_unsupported"])
 
+    def test_memory_error_says_out_of_memory(self):
+        # #711（11-11 Windows 16 GB）：抽取进程池按逻辑核数开满，Python 子进程打 MemoryError。原先落成笼统的阶段失败；
+        #   现在说「电脑内存不够」、下一步关掉占内存的程序 / 调大页面文件
+        from errors import RECOVERY
+        error, d = self.mac_refresh(["Traceback (most recent call last):", '  File "nxsh_extract.py", line 88, in <module>', "MemoryError", self.STOP])
+        self.assertEqual(error.code, "out_of_memory")
+        self.assertEqual(d["summary"], "电脑内存不够：出包时内存用完了。")
+        self.assertEqual(d["suggestion"], RECOVERY["out_of_memory"])
+
+    def test_memory_error_mentioned_in_prose_is_not_out_of_memory(self):
+        # 反例（同一用例里作业日志会累积，单拆一个）：句中提到 MemoryError 不算，只认独占一行的异常名
+        error, _ = self.mac_refresh(["说明：遇到 MemoryError 时请调小并行度", self.STOP])
+        self.assertNotEqual(error.code, "out_of_memory")
+
     def test_windows_precheck_missing_metal_says_metal_unavailable(self):
         # 11-09 Windows 出包机：S2A_METAL_BIN 指到不存在的目录，预检打「环境缺件 metal」、退 75。原先落成笼统的 package_failed（出包未完成）
         error, d = self.mac_refresh(["【红】环境缺件 metal：Metal Developer Tools（D:\\no_such_metal\\bin；S2A_METAL_BIN 可指定，否则查 PATH / 官方安装目录）",
@@ -615,10 +629,35 @@ class LogCauses(JobCase):
                                      "GAP\t1\t0x7100001000\tldr x1, [x2, #0x10]",
                                      "GAP\t2\t0x7100002000\tldr x3, [x4, #-8]",
                                      "GAP\t3\t0x7100003000\tsvc #0x55",
+                                     "【红】fixture 改写 main：这款有程序代码需要的改写空间超过了能放下的上限，出不了包（日志 x）",
                                      "【红】fixture 刷新停在 rewrite 阶段（rc=1），现行 = fixture@ex-1"])
         self.assertEqual(error.code, "rewrite_gap")
         self.assertEqual(d["facts"], {"module": "main", "need": 120, "gaps": 3, "fatal": 0,
                                       "gapKinds": [{"kind": "ldr _, [_, _]", "count": 2}, {"kind": "svc _", "count": 1}]})
+
+    def test_gap_line_from_a_degraded_rewrite_does_not_claim_a_later_failure(self):
+        # v0.3.1：改写有缺口照出产物、降级继续，日志里留着 PFRW gaps=3；之后直连阶段失败，不许归成 rewrite_gap（旧规则按 PFRW 认）
+        error, d = self.mac_refresh(["PFRW mod=main need=120 gaps=3 fatal=0",
+                                     "【黄】fixture 改写降级继续：没改写的缺口 3 处（svc 3）",
+                                     "【红】fixture 刷新停在 direct 阶段（rc=1），现行 = fixture@ex-1"])
+        self.assertNotEqual(error.code, "rewrite_gap")
+
+    # v0.3.1 拿不准不停 ⑪ / ⑧：物理做不下去照停，但归到说人话的码（原先落成笼统的 package_failed）。每例单独一个方法：任务日志按例累积
+    def test_profile_structure_unsupported_speaks_plainly(self):
+        error, d = self.mac_refresh(["【黄】直连缺口：配置推导不支持本款：main is not an NSO", "【红】fixture 直连单轨停在 直连配置推导：直连缺口：配置推导不支持本款（direct_profile rc=3）"])
+        self.assertEqual(error.code, "game_structure_unsupported", d)
+
+    def test_profile_graphics_api_still_wins(self):
+        error, d = self.mac_refresh(["【黄】直连缺口：配置推导不支持本款：unsupported graphics API: unknown（no NVN）", "【红】fixture 直连单轨停在 直连配置推导：直连缺口：配置推导不支持本款（direct_profile rc=3）"])
+        self.assertEqual(error.code, "graphics_api_unsupported", d)
+
+    def test_metal_none_built_is_metal_unavailable(self):
+        error, d = self.mac_refresh(["[RED] mac Metal 库一份都没出（编不过 12 支、编成 0、复用 0）：编译器在这台机器上用不了，不发布没有着色器库的包", "【红】fixture 刷新停在 direct 阶段（rc=1），现行 = fixture@ex-1"])
+        self.assertEqual(error.code, "metal_unavailable", d)
+
+    def test_native_library_missing_is_tool_missing(self):
+        error, d = self.mac_refresh(["[RED] 原生库缺件（出包机环境，不是游戏内容）：DllNotFoundException（abc）", "【红】fixture 刷新停在 direct 阶段（rc=1），现行 = fixture@ex-1"])
+        self.assertEqual(error.code, "tool_missing", d)
 
     def test_non_rewrite_failure_has_no_facts(self):
         error, d = self.mac_refresh(["【红】fixture 刷新停在 sysdata 阶段（rc=1），现行 = fixture@ex-1"])

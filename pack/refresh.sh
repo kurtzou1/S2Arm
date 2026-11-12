@@ -104,7 +104,7 @@ PYEOF
     if [ "$rc" != 0 ]; then ayel extract "$rc"
     else
       prog_tick 刷新各阶段 5 6
-      t=$SECONDS; J=$CT S2A_CPU_BAKE=$CT S2A_MEM_KEY=$G bash "$H/stage_direct.sh" "$G" > "$L/direct.out" 2>&1; rc=$?; tm direct $((SECONDS - t)); tail -1 "$L/direct.out"
+      t=$SECONDS; J=$CT S2A_MEM_KEY=$G bash "$H/stage_direct.sh" "$G" > "$L/direct.out" 2>&1; rc=$?; tm direct $((SECONDS - t)); tail -1 "$L/direct.out"
       if [ "$rc" != 0 ]; then ayel direct "$rc"
       elif tail -1 "$L/direct.out" | grep -q '^🟡'; then DY=$(tail -1 "$L/direct.out" | sed 's/^🟡 *//' | cut -c1-200); fi
     fi
@@ -144,7 +144,8 @@ run_extract() {   # 抽着色器（只做一次：直连库要的两份抽取出
 direct_tail() {   # 直连库 → 管线种子表
   local rc t
   CT=${J:-${S2A_DIRECT_J:-$S2A_CPU_BAKE}}
-  t=$SECONDS; J=$CT S2A_CPU_BAKE=$CT S2A_MEM_KEY=$G bash "$H/stage_direct.sh" "$G" > "$L/direct.out" 2>&1; rc=$?; tm direct $((SECONDS - t)); tail -1 "$L/direct.out"
+  # 只把编译路数给 J；S2A_CPU_BAKE 留 tools/cores.sh 按内存算的值，直连阶段里的抽取按它封顶（#711：原先两个都设成直连库路数，抽取跟着开到 J 路）
+  t=$SECONDS; J=$CT S2A_MEM_KEY=$G bash "$H/stage_direct.sh" "$G" > "$L/direct.out" 2>&1; rc=$?; tm direct $((SECONDS - t)); tail -1 "$L/direct.out"
   if [ "$rc" != 0 ]; then sed '$d' "$L/direct.out" | tail -5
     [ "$rc" = 3 ] && dred "直连库" "直连缺口：$(sed -n 's/.*直连缺口：//p' "$L/direct.out" | tail -1 | cut -c1-260)"
     echo "【红】$G 刷新停在 direct 阶段（rc=${rc}），现行 = $(basename "$(root_cur "$G")")"; exit 1; fi

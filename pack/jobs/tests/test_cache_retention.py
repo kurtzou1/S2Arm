@@ -328,6 +328,24 @@ class BudgetTests(unittest.TestCase):
         result = trim(self.private, min_free_bytes=1, free_bytes=lambda: 0, keep_titles=1, now=self.NOW + 3600)
         self.assertFalse(p.exists())
 
+    def test_current_title_touch_works_without_nofollow_utime(self):
+        # Windows 的 Python：os.utime 不在 os.supports_follow_symlinks 里，带 follow_symlinks=False 抛 NotImplementedError
+        #   （v0.3.0 候选 Windows 出 iPhone 包在这里必红）。模拟这种平台：本款的 store 照样记成刚用过（mtime = now），不抛
+        from unittest import mock
+        from cache_retention import trim
+        gid = '0100000000000000'
+        self.direct(gid)
+        real = os.utime
+        def windows_utime(path, times=None, *, follow_symlinks=True, **kw):
+            if not follow_symlinks:
+                raise NotImplementedError('utime: follow_symlinks unavailable on this platform')
+            return real(path, times, **kw)
+        with mock.patch.object(os, 'utime', windows_utime), mock.patch.object(os, 'supports_follow_symlinks', set()):
+            trim(self.private, min_free_bytes=1, free_bytes=lambda: 0, keep_titles=1, now=self.NOW + 7, current_gid=gid)
+        stores = [p for p in Path(self.private).rglob('store') if p.parent.name == gid]
+        self.assertTrue(stores, 'fixture: 本款有 store 目录')
+        self.assertEqual(stores[0].stat().st_mtime, self.NOW + 7)
+
     def test_direct_unknown_store_file_is_counted_but_not_evicted(self):
         import os
         base = self.private / 'run/s2arm/cache/direct/0100000000000000/store'

@@ -11,6 +11,19 @@ import uuid
 from core import PROBES, Failure, atomic, contained, read
 
 
+def repair_git_skeleton(git_dir):
+    """同 pack/orch/roots.py repair_git_skeleton（作业层不 import pack.orch）：HEAD 与 objects/ 都在、只缺 refs 空目录时补上"""
+    git_dir = Path(git_dir)
+    if not (git_dir / "HEAD").is_file() or not (git_dir / "objects").is_dir():
+        return []
+    made = []
+    for d in ("refs", "refs/heads", "refs/tags"):
+        if not (git_dir / d).is_dir():
+            (git_dir / d).mkdir(parents=True, exist_ok=True)
+            made.append(d)
+    return made
+
+
 def check_git(engine):
     """内置引擎的 Git 快照必须自成一库：Git 认出的仓库目录就是引擎自己的 .git，不许往上认到外层仓库"""
     import subprocess
@@ -25,10 +38,11 @@ def check_git(engine):
         said = (v.stderr or v.stdout).strip()
         raise Failure("内置 S2Arm 引擎初始化要用系统的 git，git 报错（退出码 " + str(v.returncode) + "）：" + (" ".join(said.split())[:300] if said else "没有输出"),
                       internal="git --version：" + said)
+    repair_git_skeleton(Path(engine) / ".git")   # 只缺 refs 这类空目录（安装 / 拷贝时丢了）：补上再认（pack/orch/roots.py 同一份规则）
     p = subprocess.run(["git", "-C", str(engine), "rev-parse", "--absolute-git-dir"], capture_output=True, text=True, env=env)
     found = Path(p.stdout.strip()).resolve() if not p.returncode else None
     if found != (Path(engine) / ".git").resolve():
-        raise Failure("应用内置引擎的版本快照无效，请重新安装完整应用。",
+        raise Failure("S2Arm 安装不完整（内置引擎的版本快照缺文件）：请重新安装 S2Arm。", code="engine_incomplete",
                       internal=f"git rev-parse --absolute-git-dir 退出码 {p.returncode}，认出 {found}；{(p.stderr or '').strip()}")
 
 
@@ -44,6 +58,7 @@ def install(c):
     root = engines_root(c)
     destination = contained(root, root / identity)
     _adopt_private_copy(c, root, identity)
+    repair_git_skeleton(destination / ".git")   # 已装的副本也补（覆盖安装 / 拷贝丢了 refs 空目录时，原先要到「播种」才以 git 128 失败）
     # 已装的副本每次用前按大小快速复核（#304：玩家机上已装副本里宿主的 Info.plist 被外部改过，0.1.7 只看安装标记、之后每次出包都报 runtime_invalid、
     #   重新打包也好不了）；对不上就挪开、从 App 包重解。逐文件 lstat，约 8500 个文件几十毫秒；摘要级核对仍在用到具体产物时（artifact）。
     #   不核 .git/（_stable_files：快照自带的 Git 仓库元数据，正常使用就可能变）。

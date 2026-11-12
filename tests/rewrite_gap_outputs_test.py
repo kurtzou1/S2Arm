@@ -15,7 +15,8 @@ OUTPUTS = ('patched.bin', 'fixups.tsv', 'gates.tsv', 'sites.tsv', 'widen.tsv')
 
 def nso(path, gap):
     # Success: mov x18,x1 / svc #0 / ret. Failure: same, with br x18 at 0x104.
-    # Unknown x18 branch must report precisely 0x104 br_x18, never a usable image.
+    # Unknown x18 branch must report precisely 0x104 br_x18. Since v0.3.1 (degrade, do not stop) the image is still written:
+    # the gap site keeps its original word, every other site is rewritten, and the exit code stays 3.
     code = (0xaa0103f2, 0xd61f0240 if gap else 0xd4000001, 0xd65f03c0)
     text = bytearray(0x1000)
     struct.pack_into('<II', text, 0, 0x14000040, 0x1000)
@@ -69,6 +70,7 @@ def run(rew, root, target):
     unrelated = ['other.' + s for s in (*OUTPUTS, 'gaps.tsv')] + ['keep.txt']
     for name in unrelated:
         (out / name).write_bytes(b'keep\n')
+    gap_out = []
     for repeat in range(2):
         result = invoke('gap')
         rows = [line.split('\t')[:2] for line in (out / 'main.gaps.tsv').read_text().splitlines()
@@ -76,14 +78,18 @@ def run(rew, root, target):
         check(f'缺口第{repeat + 1}次准确诊断', rows == [['0x104', 'br_x18']]
               and 'gaps=1 fatal=0' in result.stdout)
         for s in OUTPUTS:
-            check(f'缺口第{repeat + 1}次删除 {s}', not (out / ('main.' + s)).exists())
+            check(f'缺口第{repeat + 1}次照出 {s}', (out / ('main.' + s)).is_file())
+        img = (out / 'main.patched.bin').read_bytes() if (out / 'main.patched.bin').is_file() else b''
+        check(f'缺口第{repeat + 1}次缺口点 0x104 保持原字 br x18', len(img) >= 0x108 and struct.unpack_from('<I', img, 0x104)[0] == 0xd61f0240)
+        gap_out.append({s: (out / ('main.' + s)).read_bytes() for s in OUTPUTS if (out / ('main.' + s)).is_file()})
         check('不碰其它模块和无关文件', all((out / n).read_bytes() == b'keep\n' for n in unrelated))
+    check('缺口两次产物逐字节相同', len(gap_out) == 2 and gap_out[0] == gap_out[1] and len(gap_out[0]) == len(OUTPUTS))
     invoke('good')
     check('恢复成功六种产物逐字节不变', all((out / ('main.' + s)).read_bytes() == b for s, b in saved.items()))
     clean = root / (target + '-clean')
     clean.mkdir()
     invoke('gap', clean)
-    check('空目录缺口不生成运行产物', all(not (clean / ('main.' + s)).exists() for s in OUTPUTS))
+    check('空目录缺口也生成运行产物、与上面同', all((clean / ('main.' + s)).is_file() and (clean / ('main.' + s)).read_bytes() == gap_out[0].get(s) for s in OUTPUTS))
     print(f'{target}: {sum(checks)}/{len(checks)}')
     return sum(not c for c in checks)
 

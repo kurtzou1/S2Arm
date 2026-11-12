@@ -29,6 +29,10 @@ R=$(cd "$(dirname "$0")/../../.." && pwd); NX=$R/graphics/nvn
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ROOT=$(cygpath -m "$ROOT"); OUT=$(cygpath -m "$OUT"); R=$(cygpath -m "$R"); NX=$R/graphics/nvn;; esac
 PY=${S2A_PYTHON:-${S2A_PY:-$(bash "$R/tools/machine.sh" get S2A_PY 2> /dev/null)}}; PY=${PY:-$(command -v python3)}
 say() { echo "[直连库] $*"; }
+# 降级汇总（v0.3.1 拿不准不停）：离线翻译剔掉的支数写进产物根 degrade.direct.tsv（格式同 degrade.rewrite.tsv：阶段 / 类别 / 处数 / 玩家提示 / 说明；
+#   出包作业收尾读它上屏、诊断包收它）。本阶段开头删掉上一版的，有降级再写
+DEG=$ROOT/degrade.direct.tsv; rm -f "$DEG"
+deg() { [ -s "$DEG" ] || printf '# 阶段\t类别\t处数\t玩家提示\t说明\n' > "$DEG"; printf 'direct\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$DEG"; }
 # Windows 出包机（#1100 W6）：没有 Homebrew 的 spirv-cross，PATH 上没有就用仓库同一份源码（= 链锁版本）现编命令行、放进 PATH（translator/spvc_inproc.py cli）
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*)
   export PYTHONUTF8=1   # Windows 的 Python 缺省按系统代码页（GBK）写标准输出，中文 / 🟢 写不出就抛错；日志一律 UTF-8，同 Mac
@@ -102,6 +106,13 @@ PY
   [ "${NRT:-0}" = 0 ] || say "Vulkan 款 ${TID}：跑局知识里有设备现编存下的 SPIR-V ${NRT} 支，照 RomFS 一起翻进离线库"
   "$PY" "$R/tools/nostall.py" --watch "$C/vkmac" --watch "$OUT" "${S2A_NOSTALL_S:-600}" -- "$PY" "$NX/../../translator/vk_shaders.py" "${DIRS[@]}" "$C/vkmac" --ios "$OUT" > "$C/vk_shaders.log" 2>&1; vrc=$?
   [ "$vrc" = 0 ] || { [ "$vrc" = 1 ] && gap "$C/vk_shaders.log" "Vulkan 着色器"; say "🔴 Vulkan 着色器离线翻译失败 rc=${vrc}（$C/vk_shaders.log）"; tail -3 "$C/vk_shaders.log"; exit 1; }
+  # 单支翻不了 / Metal 编不过的已剔掉（vk_shaders.py，v0.3.1），汇总行「Vulkan 汇总：成功 N、失败 M」：M > 0 记降级；N = 0 只出表头、全部设备首遇现编
+  VOK=$(sed -n 's/^Vulkan 汇总：成功 \([0-9]*\)、失败 \([0-9]*\).*/\1 \2/p' "$C/vk_shaders.log" | tail -1)
+  [ "${VOK##* }" -gt 0 ] 2> /dev/null && deg vk_failed "${VOK##* }" "这款有 ${VOK##* } 个着色器没能提前编好，用到时会现场编译、可能卡一下，遇到请反馈" "Vulkan 离线翻译剔掉的支（$C/vk_shaders.log）"
+  if [ "${VOK%% *}" = 0 ]; then
+    [ -s "$OUT/vk/vk_shaders.tsv" ] || { say "🔴 没出 $OUT/vk/vk_shaders.tsv"; exit 1; }
+    : > "$OUT/keys.tsv"; say "🟡 Vulkan 款 ${TID}：离线一支没编成（失败 ${VOK##* }），只出表头、全部设备首遇现编，$((SECONDS - s)) 秒"; exit 0
+  fi
   [ -s "$OUT/vk/vk_shaders.metallib" ] && [ -s "$OUT/vk/vk_shaders.tsv" ] || { say "🔴 没出 $OUT/vk/vk_shaders.metallib / .tsv"; exit 1; }
   grep -v '^#' "$OUT/vk/vk_shaders.tsv" | cut -f1 | sort -u > "$OUT/keys.tsv"
   say "Vulkan 款 ${TID}：SPIR-V $(wc -l < "$OUT/keys.tsv" | tr -d ' ') 支 → vk/vk_shaders.metallib $(du -h "$OUT/vk/vk_shaders.metallib" | cut -f1)，$((SECONDS - s)) 秒（$(tail -1 "$C/vk_shaders.log" | cut -c1-120)）"
@@ -120,11 +131,12 @@ if [ "${API%%	*}" = gl ]; then
   "$PY" "$R/tools/nostall.py" --watch "$C/glmac" --watch "$OUT" "${S2A_NOSTALL_S:-600}" -- "$PY" "$NX/../../translator/gl_shaders.py" "${INS[@]}" "$C/glmac" --ios "$OUT" > "$C/gl_shaders.log" 2>&1; grc=$?
   # gl_shaders.py 翻成的照写库、有翻不了的退 1，汇总行「GLSL 汇总：成功 N、失败 M」：N > 0 = 部分出库（照常出、末行黄）；成功 0 或别的退出码 = 判不清，报红
   GOK=$(sed -n 's/^GLSL 汇总：成功 \([0-9]*\)、失败 \([0-9]*\).*/\1 \2/p' "$C/gl_shaders.log" | tail -1); GMISS=0
-  if [ "$grc" = 1 ] && [ "${GOK%% *}" -gt 0 ] 2> /dev/null; then GMISS=${GOK##* }
+  if [ "$grc" = 0 ] || { [ "$grc" = 1 ] && [ "${GOK%% *}" -gt 0 ] 2> /dev/null; }; then GMISS=${GOK##* }; [ "$GMISS" -ge 0 ] 2> /dev/null || GMISS=0
   elif [ "$grc" != 0 ]; then say "🔴 GLSL 着色器离线翻译失败 rc=${grc}（$C/gl_shaders.log）"; tail -3 "$C/gl_shaders.log"; exit 1; fi
   # 离线一支没有（成功 0、失败 0：GameMaker 等引擎运行时才拼 GLSL，RomFS / main 里没有成形源码，或只有没有 main 的拼接片段、gl_shaders.py 记跳过，#518）：照出，只有表头、没有库，keys.tsv 为空；
   #   宿主库里没有的源码首遇时现场翻译（gl_prog.m 运行时兜底，按源码哈希缓存），这里记一行黄
-  if [ "$grc" = 0 ] && [ "$GOK" = "0 0" ]; then
+  [ "$GMISS" -gt 0 ] && deg gl_failed "$GMISS" "这款有 ${GMISS} 个着色器没能提前编好，用到时会现场编译、可能卡一下，遇到请反馈" "GLSL 离线翻译译不过的支（$C/gl_shaders.log）"
+  if [ "$grc" = 0 ] && [ "${GOK%% *}" = 0 ]; then   # 成功 0：离线一支没有（失败 0）或一支都没译成（失败 > 0，v0.3.1 起照出空表）
     [ -s "$OUT/gl/gl_shaders.tsv" ] || { say "🔴 没出 $OUT/gl/gl_shaders.tsv"; exit 1; }
     : > "$OUT/keys.tsv"
     say "🟡 OpenGL 款 ${TID}：离线 0 支 GLSL（运行时拼源码的引擎；没有 main 的片段记跳过），只出表头、全部运行时首遇现编（gl/gl_shaders.tsv），$((SECONDS - s)) 秒（$(tail -1 "$C/gl_shaders.log" | cut -c1-120)）"
@@ -217,7 +229,9 @@ else X=$W/x; prog "抽取着色器（${J} 路）"; bash "$R/graphics/tools/direc
 # 翻译编译开工前复核盘（pack/jobs/space_rule.py，#265：预检放过、编到一半写满，十几分钟白编；Mac / Windows 两条链都过这里）：与出包预检同一规则，
 #   按产物根里的游戏内容大小（原件那一档）记、扣掉已有的同款缓存。玩家点过「仍然继续」（S2A_SPACE_OVERRIDE=1）只打黄。原话「磁盘空间不足」pack/jobs/errors.py 归 disk_full
 "$PY" "$R/pack/jobs/space_rule.py" direct-check "$ROOT" "$C" "$OUT"; src=$?   # 退 1 = 空间不够；别的非 0 = 复核本身没跑成（缺脚本 / Python 出错），不冒充空间问题
-[ "$src" = 0 ] || { [ "$src" = 1 ] && say "🔴 直连库开工前空间不足，没开始编" || say "🔴 直连库开工前的空间复核没跑成（pack/jobs/space_rule.py 退 ${src}）"; exit 1; }
+[ "$src" = 1 ] && { say "🔴 直连库开工前空间不足，没开始编"; exit 1; }   # 估不够：玩家点过「仍然继续」会带 S2A_SPACE_OVERRIDE 过这一关（space_rule.py）
+# 复核本身没跑成（缺脚本 / Python 出错）：拿不准就不停（v0.3.1 ⑫），打黄照编；真写满时写盘报 ENOSPC，那才是物理停（disk_full）
+[ "$src" = 0 ] || [ "$src" = 1 ] || say "🟡 直连库开工前的空间复核没跑成（pack/jobs/space_rule.py 退 ${src}），照常开编；真写满时会按盘满停"
 CPC=-c; [ "$(uname -s)" = Darwin ] || CPC=   # macOS cp -c = APFS 克隆；Linux（安卓出包机）的 GNU cp 没有 -c，普通拷贝
 rm -rf "$W/pkg" && cp $CPC -R "$X/pkg" "$X/split" "$X/s2x" "$W/" && cp $CPC "$X/split.log" "$X/s2x.log" "$W/" || { say "🔴 抽取结果克隆进工作目录失败（${X} → ${W}）"; exit 1; }
 PROF_ONLY=$("$PY" - "$W/split" "$W/profile/$TID" <<'PYEOF'

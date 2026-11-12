@@ -52,30 +52,33 @@ def main():
         if len(c) > 4 and not ln.startswith('#'): have.add(c[3])
     keys = sorted(f[:-5] for f in os.listdir(dump) if f.endswith('.code') and os.path.isfile(os.path.join(dump, f[:-5] + '.ctl')))
     recs, rows, facts, stat, skipped = collections.defaultdict(list), [], [], collections.Counter(), 0
+    bad = []   # 单支转储坏了：跳过这一支、记一笔，其余照并（v0.3.1 拿不准不停 ⑭；原先任一支坏整个合并退出）
+    def skip(k, why): bad.append(f'{k}：{why}'); print(f'[WARN] 转储 {k}：{why}，跳过这一支', flush=True)
     for k in keys:
         code = open(os.path.join(dump, k + '.code'), 'rb').read(); ctl = open(os.path.join(dump, k + '.ctl'), 'rb').read()
         kk = skey(ctl, code)
-        if kk != k: sys.exit(f'【红】转储 {k}：按 shader_split 键算法重算是 {kk}，与文件名不符（转储坏了或键算法变了），不进库')
+        if kk != k: skip(k, f'按 shader_split 键算法重算是 {kk}，与文件名不符（转储坏了或键算法变了）'); continue
         st = stage_of(ctl, code)
-        if st not in STAGE_NAME: sys.exit(f'【红】转储 {k}：认不出阶段（Switch 1 图形阶段本工具不收），不进库')
+        if st not in STAGE_NAME: skip(k, '认不出阶段（Switch 1 图形阶段本工具不收）'); continue
         why = check(k, st, ctl, code)
-        if why: sys.exit(f'【红】转储 {k}：{why}，不进库')
+        if why: skip(k, why); continue
         if k in have: skipped += 1; continue
         name = f'{st}_rt.bin'
         rec = bytearray(b'BTCDBTCD' + bytes(0x30)); struct.pack_into('<2I', rec, 0x28, len(ctl), len(code)); rec += code + ctl
-        if rec.count(b'BTCDBTCD') != 1: sys.exit(f'【红】转储 {k}：记录分隔符出现在记录里，出库会切错')
-        if not ns2.is_nvn2(ctl) and rec.find(CTL_MAGIC) != 0x38 + len(code): sys.exit(f'【红】转储 {k}：控制段魔数出现在代码区，出库会切错')
+        if rec.count(b'BTCDBTCD') != 1: skip(k, '记录分隔符出现在记录里，出库会切错'); continue
+        if not ns2.is_nvn2(ctl) and rec.find(CTL_MAGIC) != 0x38 + len(code): skip(k, '控制段魔数出现在代码区'); continue
         if os.path.exists(os.path.join(pkg, name)) and not recs[name]: sys.exit(f'【红】包目录里已有 {name}（重复并入？先用抽取阶段重出的包目录）')
         rows.append((name, len(recs[name]), STAGE_NAME[st], k, f'rt-dump:{k}')); recs[name].append(bytes(rec)); stat[st] += 1
         if st == 'cs':
             (x, y, z), sh = ns2.compute_facts(ctl) if ns2.is_nvn2(ctl) else (struct.unpack_from('<3I', ctl, 0x748), struct.unpack_from('<I', ctl, 0x754)[0])
-            if not x * y * z: sys.exit(f'【红】转储 {k}：控制段线程组为 0')
+            if not x * y * z: skip(k, '控制段线程组为 0'); rows.pop(); recs[name].pop(); stat[st] -= 1; continue
             facts.append(f'{k}\t' + json.dumps({'local': [x, y, z], 'shared': (sh + 15) // 16 * 16}, separators=(',', ':')) + '\n')
     for name, rr in recs.items():
         with open(os.path.join(pkg, name), 'wb') as f: f.write(b''.join(rr))
     with open(mapf, 'a', encoding='utf-8') as f: f.writelines('\t'.join(map(str, r)) + '\n' for r in rows)
     with open(factf, 'a', encoding='utf-8') as f: f.writelines(facts)
-    print(f'运行时转储：{len(keys)} 支，新进库 {len(rows)} 支（{" ".join(f"{s} {n}" for s, n in sorted(stat.items())) or "—"}），已在表里 {skipped} 支')
+    print(f'运行时转储：{len(keys)} 支，新进库 {len(rows)} 支（{" ".join(f"{s} {n}" for s, n in sorted(stat.items()) if n) or "—"}），已在表里 {skipped} 支'
+          + (f'，坏了跳过 {len(bad)} 支（逐条见上方 [WARN]）' if bad else ''))
 
 
 if __name__ == '__main__':

@@ -349,6 +349,32 @@ def _info(handle):
                            st_size=(info.size_high << 32) | info.size_low, attributes=info.attributes)
 
 
+def _sid_bytes(sid):
+    if not _api('advapi32', 'IsValidSid', W.BOOL, C.c_void_p)(sid):
+        raise OSError('invalid security identifier')
+    length = _api('advapi32', 'GetLengthSid', W.DWORD, C.c_void_p)(sid)
+    return C.string_at(sid, length)
+
+
+def _current_sid():
+    """当前进程用户的 SID（字节）。pack/orch/roots.py _win_acl 封存 / 删目录前改权限要用。
+    11-11 删请求文件 ACL 复核时连它一起删了，Windows 上播种、删目录全部报 AttributeError（#669 复现时发现）；
+    tests 里有守卫：全仓引用的 winproc.<名字> 必须存在"""
+    token = W.HANDLE()
+    current = _api('kernel32', 'GetCurrentProcess', W.HANDLE)()
+    _checked(_api('advapi32', 'OpenProcessToken', W.BOOL, W.HANDLE, W.DWORD, C.c_void_p)(current, 8, C.byref(token)))
+    try:
+        size = W.DWORD()
+        query = _api('advapi32', 'GetTokenInformation', W.BOOL, W.HANDLE, C.c_int,
+                     C.c_void_p, W.DWORD, C.c_void_p)
+        query(token, 1, None, 0, C.byref(size))
+        data = C.create_string_buffer(size.value)
+        _checked(query(token, 1, data, size, C.byref(size)))
+        return _sid_bytes(C.c_void_p.from_buffer(data).value)
+    finally:
+        _close(token)
+
+
 def request_is_private(path):
     """Mac / Linux：请求文件属主是本用户且只有本用户可读写（0600）。
     Windows 不在这里再核（11-11 装机链路审查）：启动器建请求文件时已带只给本人的权限（PrivateJobRequest.cs），这层是重复的；

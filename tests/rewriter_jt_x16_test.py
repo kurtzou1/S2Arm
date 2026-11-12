@@ -6,6 +6,7 @@
   adrp x18 / add x18,#0x800 / cmp wI,#3 / b.hi out / ldrsw x17,[x18,xI,lsl#2] / add x18,x17,x18 / [mov w17,w16] / br x18
   真实形态：I=T=x17，中间有 mov w17,w16（写表项寄存器 → 落点不写 x17）→ 分派块借 x9/x10
   变体：I=x9，无中间指令（落点要把表项写回 x17）→ x9 是下标，分派块改借 x10/x11
+  #716：中间夹 adrp x0（与位置有关）→ 搬进补丁区按原目标重算
   反例：表第 3 项指到函数外 → 仍记缺口、退出码 3
 """
 import os
@@ -29,6 +30,7 @@ LDRSW_I17 = 0xb8b17a51         # ldrsw x17,[x18,x17,lsl#2]
 LDRSW_I9 = 0xb8a97a51          # ldrsw x17,[x18,x9,lsl#2]
 ADD_X18 = 0x8b120232           # add x18,x17,x18
 MOV_W17_W16 = 0x2a1003f1       # mov w17,w16
+ADRP_X0 = 0xb0000000           # adrp x0,#0x1000（在 0x118，页 0：immlo=1 → 下一页）
 BR_X18 = 0xd61f0240
 NOP, RET = 0xd503201f, 0xd65f03c0
 
@@ -141,11 +143,17 @@ class JtX16Test(unittest.TestCase):
     def test_tmp_avoids_index(self):
         self.check(CMP_W9, LDRSW_I9, [], 'x10', 'x11', 'x9', [], True)
 
+    def test_mid_adrp_is_moved_with_its_target(self):
+        # #716（一款游戏 subsdk0 0xbd1c38 / 0xbd1d60）：取表与 br 之间夹着 adrp x0, …——与位置有关，原先「中间指令不可搬移」记缺口。
+        #   搬进补丁区按原目标重算：补丁区里那条 adrp 反汇编出来仍指向页 0x1000（v0.3.0 改写器：br_x18 缺口、退 3）
+        self.check(CMP_W17, LDRSW_I17, [ADRP_X0], 'x9', 'x10', 'x17', [('adrp', 'x0, #0x1000')], True)
+
     def test_target_outside_function_still_gap(self):
         nso, _, _ = make_nso(CMP_W17, LDRSW_I17, [MOV_W17_W16], bad_target=True)
         rc, log, img = run(nso)
-        self.assertEqual((rc, img is None), (3, True), log)
+        self.assertEqual((rc, img is None), (3, False), log)   # v0.3.1 拿不准不停：有缺口照出产物
         self.assertIn('br_x18', log)
+        self.assertEqual(struct.unpack_from('<I', img, 0x100 + 4 * 7)[0], BR_X18, '缺口点 br x18 保持原字')
 
 
 if __name__ == '__main__':

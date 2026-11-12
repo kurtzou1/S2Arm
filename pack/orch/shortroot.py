@@ -137,6 +137,22 @@ def sweep(root=None, alive=_alive):
     return n
 
 
+def remap_env(environ, long_root, short_root):
+    """环境变量里指向 long_root（或它下面）的路径改成经 short_root 访问；→ 改了的变量名。
+    作业层把工具缓存（<库>/tool-cache：直连 / 翻译缓存 S2A_RUN_ROOT、nxaot / vpx … 等 cache/*）用环境变量传给出包链，
+    游戏库搬进深目录后这些路径过 MAX_PATH（v0.3.0 win_cases deep：直连库抽取在 <库>/tool-cache/run/s2arm/cache/direct/… 下失败）"""
+    root = ntpath.normcase(ntpath.abspath(long_root)).rstrip("\\")
+    changed = []
+    for key, value in list(environ.items()):
+        if not value or not ntpath.isabs(value):
+            continue
+        norm = ntpath.normcase(ntpath.abspath(value))
+        if norm == root or norm.startswith(root + "\\"):
+            environ[key] = short_root + ntpath.abspath(value)[len(root):]
+            changed.append(key)
+    return changed
+
+
 def enter(*paths):
     """给这些工作区建短入口；→ {原路径: 短路径}，建不了 → None（已打印原因）。设 S2A_SHORT_ROOTS，进程退出时拆"""
     import _winapi

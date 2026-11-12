@@ -34,10 +34,14 @@ int nvk_session_open(struct s2a_vk_device *dev, const char *cache_dir, char *why
         return -1;
     }
     nvn_unimpl_reset();
-    // 写跟踪的保护分块：4 页（16 KB），和 iOS 的页大小同一粒度。逐 4 KB 页时 3D 那款场景里每帧缺页 3240 次、
-    // 改保护 145 毫秒；4 页是 819 次、31 毫秒（同一手机同一场景，11-11 量）。debug.s2a.nvk_chunk_pages 可改（0 = 逐页）。
+    // 写跟踪的保护分块：64 页（256 KB）。3D 那款场景里（同一手机，11-11 量，每帧约 2000 笔）：
+    //   逐 4 KB 页  每帧缺页 3240 次、改保护 145 毫秒、回放 83 毫秒，7.7 帧
+    //   4 页        819 次、31 毫秒、70 毫秒，8.4 帧
+    //   16 页       207 次、12 毫秒、37 毫秒，10.9 帧
+    //   64 页       54 次、2 毫秒、34 毫秒，11.1 帧
+    // 块越大一次缺页后要重传的字节越多，但一次缺页加两次改保护的代价抵得上拷两百多 KB。debug.s2a.nvk_chunk_pages 可改（0 = 逐页）。
     { extern void nvn_dirty_set_chunk_pages(uint32_t); extern int nvn_plat_flag(const char *, int);
-      int cp = nvn_plat_flag("nvk_chunk_pages", 4);
+      int cp = nvn_plat_flag("nvk_chunk_pages", 64);
       nvn_dirty_set_chunk_pages(cp > 0 ? (uint32_t)cp : 0); __android_log_print(ANDROID_LOG_INFO, TAG, "nvk session: 写跟踪保护分块 %d 页", cp); }
     g_ready = 1;
     nvn_gpu_caps caps; nvn_gpu_caps_get(&caps);

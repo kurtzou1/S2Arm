@@ -236,12 +236,15 @@ def cmd_build(a):
 #   S2Arm.app/s2a_catalogue.json                    {"schema":1,"shell_id":…,"games":[{title_id,name,display_version,icon,state}]}（不认识的键宿主忽略）
 #   S2Arm.app/Games/<游戏号>/                       每款随行表（单款放 App 根的那些，含 main.npdm）+ icon.jpg + launch.ctx（启动上下文 v1）
 #   S2Arm.app/Frameworks/S2AImages-<游戏号>.dylib   每款镜像包
-#   设备 Documents/games/<游戏号>/                  本款文档根：资源包/ = game_data，S2A/ryujinx/ = ryu_data（pack/jobs/install.py game_docs 同口径）
+#   设备 Documents/games/<游戏号>/                  本款文档根 docs：S2A/ryujinx/ = ryu_data、unpack.log（pack/jobs/install.py game_docs 同口径）
+#   设备 Library/Application Support/S2Arm/games/<游戏号>/资源包/   本款资源包 = game_data（install.py game_pack 同口径；11-11 挪出 Documents：
+#                                                   几万个文件让「文件」App 与文件选择器「最近项目」一直「正在加载」）
 # 容器判定：App 包根有 s2a_catalogue.json 且有 Games/。游戏号 = main.npdm 的程序号（16 位大写十六进制，同 Catalogue isTitleID）
 # 地址窗口：宿主构造期（UIKit 之前、玩家选游戏之前）对 Games/ 下每一款按单款同一套算法算需求、取最大占窗口（runtime/src/vawin.c s2a_window_container_need），
 #   组装期不算、包里没有窗口表；各款 NPDM 地址空间类型不一致宿主报红不占窗口，组装期按同一判据（npdm_ident）先拒
 CATALOGUE, GAMES, CTX = "s2a_catalogue.json", "Games", "launch.ctx"
 DOCS_GAMES = "Documents/games"
+PACK_GAMES = "Library/Application Support/S2Arm/games"
 
 
 def game_images(gid):
@@ -271,7 +274,7 @@ def ctx_text(gid):
     """本款启动上下文 v1（runtime/include/s2a_launch_ctx.h）：宿主起这一款时 S2A_LAUNCH_CTX=@bundle/Games/<游戏号>/launch.ctx"""
     docs = f"@home/{DOCS_GAMES}/{gid}"
     return (f"version\t1\ngame_id\t{gid}\nimages\t@bundle/{game_images(gid)}\nmodule_dir\t@bundle/{GAMES}/{gid}\n"
-            f"game_data\t{docs}/资源包\ndocs\t{docs}\n")
+            f"game_data\t@home/{PACK_GAMES}/{gid}/资源包\ndocs\t{docs}\n")
 
 
 def display_version(root):

@@ -1,9 +1,9 @@
 {
  "schema": 1,
- "id": "2026-11-10-official-site",
+ "id": "2026-11-12-update-close-impactor",
  "text": {
-  "zh-Hans": "好消息：s2arm.com 已正式成为 S2Arm 官方网站。S2Arm 免费开源，从不接受捐赠；请只从 s2arm.com 或 GitHub 仓库获取 S2Arm。",
-  "en": "Good news: s2arm.com is now the official S2Arm website. S2Arm is free and open source and never accepts donations; get S2Arm only from s2arm.com or the GitHub repository."
+  "zh-Hans": "Windows：启动器内自动更新前，请先关掉 Impactor（在任务管理器里结束它）。S2Arm 免费开源，请只从 s2arm.com 或 GitHub 仓库获取。",
+  "en": "Windows: before updating from inside the launcher, close Impactor first (end it in Task Manager). S2Arm is free and open source; get it only from s2arm.com or the GitHub repository."
  },
  "url": "https://github.com/jhaizhou-ops/S2Arm#readme"
 }

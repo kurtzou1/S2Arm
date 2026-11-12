@@ -47,15 +47,9 @@ public static class BatchCases
         check(pausedFailed.Unfinished == 2, "batch: paused counts failed as unfinished");
         var notPaused = BatchClient.Read(Json(show.Replace("\"paused\":\"disk_full\"", "\"paused\":null").Replace("\"failed\":0,\"cancelled\":0,\"pending\":2", "\"failed\":1,\"cancelled\":0,\"pending\":1"))).State!;
         check(notPaused.Unfinished == 1, "batch: not paused, failed goes to retry");
-        check(state.Step(["iphone"]) is null, "batch: paused (next null) has no step");
-
-        // 暂停解除后 next 指向 B 的 Mac；Windows 只出 iPhone → 这一步没有能出的，Mac 归「出不了」
-        var resumed = BatchClient.Read(Json(show.Replace("\"paused\":\"disk_full\"", "\"paused\":null")
-            .Replace("\"next\":null", "\"next\":{\"gameId\":\"0100BBBB00000000\",\"platform\":\"mac\"}"))).State!;
-        var step = resumed.Step(["iphone"])!;
-        check(resumed.Paused is null && step.Item.GameId == "0100BBBB00000000", "batch: step follows next");
-        check(step.Runnable.Count == 0 && step.Unsupported.SequenceEqual(["mac"]), "batch: mac pending is unsupported on this computer");
-        // 同一款两个平台都排队：iPhone 能出、Mac 出不了；两台都能出时按页面顺序 iPhone → Mac 连着出
+        // 停在第几款：C 被打断（启动器退出时正在出）→ 第 3 款，哪怕 B 也有排队的；没有被打断的才取第一款排着队的
+        check(state.StoppedAt == 3, "batch: stopped at the interrupted game");
+        check(BatchClient.Read(Json(show.Replace(",\"interrupted\":true", ""))).State!.StoppedAt == 2, "batch: no interrupted → first game with a pending platform");
         const string both = """
 {"batch":{"schema":1,"location":null,"paused":null,"items":[
  {"gameId":"G1","name":"G1","platforms":["iphone","mac"],"results":{"iphone":{"state":"pending"},"mac":{"state":"pending"}}}]},
@@ -63,12 +57,11 @@ public static class BatchCases
 """;
         var fresh = BatchClient.Read(Json(both)).State!;
         check(fresh.Location is null, "batch: null location");
-        check(fresh.Step(["iphone"]) is { Runnable: ["iphone"], Unsupported: ["mac"] }, "batch: windows runs iphone, mac unsupported");
-        check(fresh.Step(["iphone", "mac"]) is { Runnable: ["iphone", "mac"], Unsupported: [] }, "batch: both platforms back to back");
+        check(fresh.StoppedAt == 1, "batch: nothing exported yet = stopped at game 1");
         // 全取消：两款都算没出完，没有下一步
         var cancelled = BatchClient.Read(Json(both.Replace("\"state\":\"pending\"", "\"state\":\"cancelled\"").Replace("\"next\":{\"gameId\":\"G1\",\"platform\":\"iphone\"}", "\"next\":null")
             .Replace("\"cancelled\":0,\"pending\":1", "\"cancelled\":1,\"pending\":0"))).State!;
-        check(cancelled.Unfinished == 1 && cancelled.Step(["iphone"]) is null, "batch: cancelled counts as unfinished, no step");
+        check(cancelled.Unfinished == 1 && cancelled.StoppedAt == 0, "batch: cancelled counts as unfinished, not a stop point");
 
         // 形状不对：报错，不当成没有批次
         check(BatchClient.Read(Json(both.Replace("\"state\":\"pending\"", "\"state\":\"queued\""))).Error is { Length: > 0 }, "batch: unknown state rejected");
@@ -83,11 +76,6 @@ public static class BatchCases
         check(items[1].GetProperty("platforms").EnumerateArray().Select(p => p.GetString()).SequenceEqual(["iphone", "mac"]), "create: platforms in order");
         check(created.GetProperty("location").GetString() == "D:\\Games", "create: shared location");
         check(Json(BatchClient.CreateJson([new("G1", "G1", ["iphone"])], "")).GetProperty("location").ValueKind == JsonValueKind.Null, "create: empty location is null");
-        check(BatchClient.MarkArguments("G1", "iphone", "running").SequenceEqual(["--game", "G1", "--platform", "iphone", "--state", "running"]), "mark: no optional fields");
-        check(BatchClient.MarkArguments("G1", "iphone", "failed", "空间不足", "disk_full", "").SequenceEqual(
-            ["--game", "G1", "--platform", "iphone", "--state", "failed", "--message", "空间不足", "--code", "disk_full"]), "mark: message and code, empty output dropped");
-        check(BatchClient.MarkArguments("G1", "iphone", "completed", output: "D:\\x.ipa").SequenceEqual(
-            ["--game", "G1", "--platform", "iphone", "--state", "completed", "--output", "D:\\x.ipa"]), "mark: output only");
 
         // ---- 导入结果（partialResults）----
         var import = Json("""

@@ -294,7 +294,7 @@ class ContainerTest(unittest.TestCase):
             {"title_id": self.B, "name": "乙游戏", "icon": f"Games/{self.B}/icon.jpg", "state": "playable", "host_abi": 7, "chain": chain}]})
         self.assertEqual((app / "Games" / self.A / "launch.ctx").read_text(encoding="utf-8"),
                          f"version\t1\ngame_id\t{self.A}\nimages\t@bundle/Frameworks/S2AImages-{self.A}.dylib\nmodule_dir\t@bundle/Games/{self.A}\n"
-                         f"game_data\t@home/Documents/games/{self.A}/资源包\ndocs\t@home/Documents/games/{self.A}\n")
+                         f"game_data\t@home/Library/Application Support/S2Arm/games/{self.A}/资源包\ndocs\t@home/Documents/games/{self.A}\n")   # 资源包挪出 Documents（11-11）
         info = plistlib.loads((app / "Info.plist").read_bytes())
         self.assertEqual((info["CFBundleIdentifier"], info["CFBundleDisplayName"]), ("dev.example.games", "S2Arm"))
 

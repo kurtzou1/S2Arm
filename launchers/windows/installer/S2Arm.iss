@@ -34,6 +34,11 @@ AppUpdatesURL=https://s2arm.com
 VersionInfoVersion={#AppVersion}
 DefaultDirName={localappdata}\Programs\S2Arm
 PrivilegesRequired=lowest
+; Inno Setup 6.7 起缺省给 Setup 自己开 Windows 的 RedirectionGuard（不让穿过普通用户建的目录联接 / 符号链接），
+;   PrivilegesRequired=lowest 时会被 [Run] postinstall 拉起的进程继承（官方 whatsnew 写明，Inno 7 才修）：从完成页「现在打开 S2Arm」打开的
+;   启动器和它起的出包作业都带着它，出包走的短路径入口（%LOCALAPPDATA%\S2A\j 下的目录联接）一碰就 WinError 448，每次出 iPhone 包必红。
+;   我们按用户安装、不提权，这个防护防的提权攻击与我们无关；Setup 本来也不给装出来的应用开它，这里只关掉继承的副作用
+RedirectionGuard=no
 DisableDirPage=yes
 DisableProgramGroupPage=yes
 DisableReadyPage=yes

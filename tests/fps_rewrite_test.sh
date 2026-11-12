@@ -11,7 +11,7 @@
 # ④ bl_rec 的 Wt 写 w16 记缺口、退出码 3
 # ⑤ veneer（11-06 旷野之息镜头过渡首帧）：0x108 fmul s1,s2,s1 改成 B 跳板，体字 fcmp s1,#0.0 / b.ne +8 / fmax s0,s0,s8 / fmul s1,s2,s1，
 #    期望原位 b <跳板>、跳板依次是这四条（b.ne 落在跳板第 4 条）、再 b #0x10c；0 缺口、退出码 0
-# ⑥ 体字里有 B（与位置有关）：记缺口、退出码 3、不出改写产物（整模块报红不打）  ⑦ 条件跳出了跳板（b.ne +0x100）：同 ⑥
+# ⑥ 体字里有 B（与位置有关）：记缺口、退出码 3、改写产物照出（v0.3.1 拿不准不停）（v0.3.1 起产物照出、这一行不打）  ⑦ 条件跳出了跳板（b.ne +0x100）：同 ⑥
 # ⑧ 原字写错：同 ③，整组不改、记黄、原位不动
 # ⑨ veneer 记号（王国之泪布料时钟）：0x10c bl #0x114 改成 B 跳板，体字 adrp:x8 / ldr s0,[x8,#0x3fc0]（= 0xbd7fc100，槽 2040）/ bl:114，
 #    期望跳板依次是 adrp x8, 键页; ldr s0, [x8, #0x3fc0]; bl #0x114; b #0x110  ⑩ bl: 目标不在代码段（bl:900000）：记缺口、退出码 3
@@ -97,7 +97,7 @@ gv=$(lookv "$T/v_ok" 2>&1); rv=$(cat "$T/v_ok.rc")
 ck "⑤ veneer：rc=${rv}、0 缺口、原位 B 跳板且跳板如期（实得：${gv}）" '[ "$rv" = 0 ] && ! grep -qv "^#" "$T/v_ok/main.gaps.tsv" && [ "$gv" = "$wantv" ]'
 for n in b far; do
   rx=$(cat "$T/v_$n.rc"); gx=$(grep -v "^#" "$T/v_$n/main.gaps.tsv" | cut -f3- | head -1)
-  ck "⑥⑦ veneer 体字不能原样搬（${n}）：rc=${rx}、记缺口、不出改写产物（缺口：${gx}）" '[ "$rx" = 3 ] && grep -q "不能原样搬进跳板" "$T/v_$n/main.gaps.tsv" && [ ! -e "$T/v_$n/main.patched.bin" ]'
+  ck "⑥⑦ veneer 体字不能原样搬（${n}）：rc=${rx}、记缺口、改写产物照出（v0.3.1 拿不准不停）（缺口：${gx}）" '[ "$rx" = 3 ] && grep -q "不能原样搬进跳板" "$T/v_$n/main.gaps.tsv" && [ -e "$T/v_$n/main.patched.bin" ]'
 done
 printf 'c main 0x108 veneer deadbeef %s\n' "$VB" > "$T/v_bad.tsv"; mkdir -p "$T/v_bad"
 S2A_FPS_TSV="$T/v_bad.tsv" "$REW" "$T/exefs/main" "$T/v_bad" main > "$T/v_bad.log" 2>&1; rvb=$?; gvb=$(lookv "$T/v_bad" 2>&1)

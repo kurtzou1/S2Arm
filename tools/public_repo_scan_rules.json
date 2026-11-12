@@ -186,6 +186,18 @@
       "reason": "Windows 安装程序界面素材：同目录 make_header.py 生成的纯色底、圆角按钮 / 卡片 / 进度条、复选框和自家字标，不是游戏画面。"
     },
     {
+      "id": "inno_setup_dll_import",
+      "categories": [
+        "email"
+      ],
+      "paths": [
+        "launchers/windows/installer/*.iss"
+      ],
+      "regex": "^[A-Za-z0-9_]+@[A-Za-z0-9_]+\\.dll$",
+      "line_regex": "external '",
+      "reason": "Inno Setup 脚本里从系统库导入函数的外部声明（函数名、at 号、user32.dll 这样连写），形似邮箱、不是邮箱；只认 installer 目录下 .iss、整条命中为「名字@名字.dll」且所在行有 external 声明。"
+    },
+    {
       "id": "own_ui_docs",
       "categories": [
         "game_screenshot"
@@ -556,6 +568,7 @@
       "android/codecs/tests/vectors/*.json",
       "android/codecs/tests/vectors/*.hex",
       "android/tests/fixtures/storage-stages/*.hex",
+      "pack/jobs/tests/fixtures/progress_*.jsonl",
       "compat/tree/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/Resources/*.svg",
       "launchers/macos/adapter/Sources/S2ArmAppleAdapter/Resources/*.json",
       "launchers/windows/launcher/App/Assets/Fonts/*.txt",
@@ -709,7 +722,9 @@
       ".yaml",
       ".yml",
       ".patch",
-      ".diff"
+      ".diff",
+      ".iss",
+      ".isl"
     ],
     "text_names": [
       "Makefile",

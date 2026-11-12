@@ -824,6 +824,23 @@ static int pool_find(uint64_t addr, uint64_t len) {
     for (int i = 0; i < g_npool; i++) if (addr >= g_pools[i].lo && addr + len <= g_pools[i].hi) return g_plast = i;
     return -1;
 }
+// 地址不在任何池里时，它前后最近的两个池（11-11 #674：顶点缓冲槽读零那条红行只报地址，玩家的日志分不清是宿主的池登记有缺口——地址紧挨一个池的尾巴或在两个池的缝里——
+//   还是游戏用了一块没经 NVN 登记的内存——离所有池都远）。→ 写进 out 的一句：前一个池（结束不晚于 addr、结束最晚）与后一个池（开始晚于 addr、开始最早）的基址、长度、相距字节；
+//   addr 落在某个池里回 0（不写），否则回 1（英文，同本文件其余日志行）。线性扫全表：只在出错时调。调用方持有池表的锁（同 pool_find）
+int mtl_pool_near(uint64_t addr, char *out, size_t n) {
+    int before = -1, after = -1;
+    for (int i = 0; i < g_npool; i++) {
+        const pool_ent *p = &g_pools[i];
+        if (addr >= p->lo && addr < p->hi) return 0;
+        if (p->hi <= addr && (before < 0 || p->hi > g_pools[before].hi)) before = i;
+        if (p->lo > addr && (after < 0 || p->lo < g_pools[after].lo)) after = i;
+    }
+    char b1[96] = "no pool before it", b2[96] = "no pool after it";
+    if (before >= 0) snprintf(b1, sizeof b1, "previous pool %#lx size %#lx (ends %#llx before it)", (unsigned long)g_pools[before].lo, (unsigned long)(g_pools[before].hi - g_pools[before].lo), (unsigned long long)(addr - g_pools[before].hi));
+    if (after >= 0) snprintf(b2, sizeof b2, "next pool %#lx size %#lx (starts %#llx after it)", (unsigned long)g_pools[after].lo, (unsigned long)(g_pools[after].hi - g_pools[after].lo), (unsigned long long)(g_pools[after].lo - addr));
+    snprintf(out, n, "%s, %s; %d pools", b1, b2, g_npool);
+    return 1;
+}
 // An address no pool holds may lie in a virtual pool's pages that cannot be aliased (mapped at 4 KB, not on a host page): hle_nvn.c then makes copies of them from its page table
 //   and registers them as a pool (审计 #1592 P1-112; textures read the page table themselves), and the lookup is made once more: len bytes must be covered, up to want are copied
 //   where pages are mapped (a binding looked up by its first byte, as before, still gets its whole range copied)
@@ -3121,11 +3138,25 @@ static void up_blit_add(id<MTLBuffer> src, size_t off, size_t row, size_t image,
     up_blit_add_at(src, off, row, image, size, dst, slice, level, 0, 0);
 }
 
-static uint64_t span_hash(const uint8_t *m, size_t n) {   // 8 bytes at a time (the page check runs on every written page): a multiply-xorshift mix, then the tail bytes
-    uint64_t h = 0x9e3779b97f4a7c15ull ^ n, w; size_t i = 0;
-    for (; i + 8 <= n; i += 8) { memcpy(&w, m + i, 8); h = (h ^ w) * 0xff51afd7ed558ccdull; h ^= h >> 32; }
-    for (; i < n; i++) h = (h ^ m[i]) * 0x100000001b3ull;
-    return h;
+// 32 bytes (4 words) at a time (the page check runs on every written page: per written 16 KB page at upload / check, per marked 512 B GOB — docs/排查/帧率低与耗电高.md §6 第 3 条):
+//   four independent multiply-xorshift chains (the four words of each 32 bytes, different seeds and mix constants), folded at the end. The old single
+//   chain was one multiply-xorshift per word end to end (~7 cycles of dependency per 8 bytes); four interleaved chains overlap them. Same detection
+//   strength, every chain full 64-bit: each chain step is injective on any single word delta (xor with the word injective, multiply by an odd constant
+//   bijective mod 2^64, and x ^ (x >> 32) injective — its low 32 bits come through unchanged), so any changed 8-byte word always changes its chain's
+//   hash and the final XOR fold keeps that visible; two changed words cancel only if every chain they land in cancels — a same-chain pair at 2^-64 as
+//   the old chain, a cross-chain pair needs both (2^-128). The tail below 4 words runs on one chain (a change there moves that chain, the others stay).
+//   Values are only compared within a run (marked vs re-read), never persisted — the seeds are free to differ
+static uint64_t span_hash(const uint8_t *m, size_t n) {
+    uint64_t a = 0x9e3779b97f4a7c15ull ^ n, b = 0xbf58476d1ce4e5b9ull ^ n, c = 0x94d049bb133111ebull ^ n, d = 0x2545f4914f6cdd1dull ^ n, w; size_t i = 0;
+    for (; i + 32 <= n; i += 32) {
+        memcpy(&w, m + i, 8); a = (a ^ w) * 0xff51afd7ed558ccdull; a ^= a >> 32;
+        memcpy(&w, m + i + 8, 8); b = (b ^ w) * 0x2545f4914f6cdd1dull; b ^= b >> 32;
+        memcpy(&w, m + i + 16, 8); c = (c ^ w) * 0x94d049bb133111ebull; c ^= c >> 32;
+        memcpy(&w, m + i + 24, 8); d = (d ^ w) * 0x9e3779b97f4a7c15ull; d ^= d >> 32;
+    }
+    for (; i + 8 <= n; i += 8) { memcpy(&w, m + i, 8); a = (a ^ w) * 0xff51afd7ed558ccdull; a ^= a >> 32; }
+    for (; i < n; i++) a = (a ^ m[i]) * 0x100000001b3ull;
+    return a ^ b ^ c ^ d;
 }
 // Guest storage bytes as the host can read them (P1-160): a texture's storage address is the guest's (pool->mem + off), and in a far-alias pool (runtime/src/far.c) that address is
 //   unmapped — reading it directly faults once per load into the far-fault emulation, or stops the game where an access cannot be emulated. Read the shadow instead (s2a_far_g2h, the
@@ -5385,6 +5416,7 @@ static void shmap_load_once(void) {
     // NVN2 task / mesh shader (json msl_entry_kind object / mesh, at stage 3 / 4; nvn_geometry.inc mesh_tasks_draw): mesh_kind 1 object 2 mesh (0 = neither); its workgroup's threads,
     //   the payload's bytes (task), a task shader feeds it (mesh), the most vertices / primitives a mesh workgroup emits (Switch2 line's interface contract, item 6)
     uint8_t mesh_kind, mesh_task; uint16_t mesh_threads, mesh_payload, mesh_maxv, mesh_maxp;
+    uint8_t mesh_relay; uint32_t mesh_relay_pw, mesh_relay_sw;   // payload past Metal's 16 KB relayed through device memory (S2A.Dsh MeshStage.Relay): relay slot, words per payload / per mesh slice
     uint32_t geo_tf_stride[4], geo_tf_n[4], geo_tf_off[4][32], geo_tf_comp[4][32];   // S2Arm: the geometry shader's transform feedback (json geometry.tf, dmsh_build.py geo_tf): bytes per vertex, entries, record word offset and components per entry
     uint8_t geo_pt;   // json geometry.passthrough: a passthrough geometry shader whose library has the fast path's _bgs<i> / _bgc (Dsh.cs GeometryFinish; nvn_geometry.inc geo_draw)
     id<MTLComputePipelineState> geo_pso; uint8_t geo_pso_bad;   // geo_pso_bad：建几何计算管线失败过，之后这支的几何绘制直接跳过、不重建（11-01 异度3 Spare-host：编译器内部错误每笔重建 13337 次）
@@ -5882,11 +5914,13 @@ static NvShader *shader_build(NSString *pc, int stage, int layer, int depth_zero
         if (kind != stage - 2) { MLOG("【红】 shader %s at stage %d has msl_entry_kind %s (task shaders are object functions at stage 3, mesh shaders mesh functions at stage 4)", pc.UTF8String, stage, [j[@"msl_entry_kind"] UTF8String]); return nil; }
         o->mesh_kind = (uint8_t)kind; o->mesh_task = [j[@"mesh_task"] boolValue];
         o->mesh_threads = (uint16_t)[j[@"mesh_threads"] unsignedIntValue]; o->mesh_payload = (uint16_t)[j[@"mesh_payload"] unsignedIntValue];
+        if (j[@"mesh_relay"]) { o->mesh_relay = (uint8_t)[j[@"mesh_relay"] unsignedIntValue]; o->mesh_relay_pw = [j[@"mesh_relay_payload_words"] unsignedIntValue];
+                                o->mesh_relay_sw = [j[@"mesh_relay_slice_words"] unsignedIntValue]; }
         o->mesh_maxv = (uint16_t)[j[@"max_vertices"] unsignedIntValue]; o->mesh_maxp = (uint16_t)[j[@"max_primitives"] unsignedIntValue];
         // What Metal cannot run is red here, at the load (interface contract item 9): a workgroup of no thread or past Metal's 1024, a mesh workgroup past Metal's 256 vertices /
         //   512 primitives, a payload past Metal's 16 KB, shared memory of its own (the build spills it for compute shaders only: json spill)
         const char *why = !o->mesh_threads || o->mesh_threads > 1024 ? "workgroup threads outside 1-1024" : kind == 2 && (o->mesh_maxv > 256 || o->mesh_maxp > 512) ? "more than Metal's 256 vertices / 512 primitives a mesh workgroup" :
-                          o->mesh_payload > 16384 ? "a payload past Metal's 16 KB" : [j[@"spill"] unsignedIntValue] ? "shared memory of its own" : NULL;
+                          o->mesh_payload > 16384 && (!o->mesh_relay || !o->mesh_relay_pw || (kind == 2 && !o->mesh_relay_sw)) ? "a payload past Metal's 16 KB" : [j[@"spill"] unsignedIntValue] ? "shared memory of its own" : NULL;
         if (why) { MLOG("【红】 %s shader %s: %s (threads %u, payload %u, vertices %u, primitives %u): not usable, its draws are skipped", kind == 1 ? "task" : "mesh", pc.UTF8String, why,
                         o->mesh_threads, o->mesh_payload, o->mesh_maxv, o->mesh_maxp); return nil; }
         if (kind == 2 && depth_zero) {   // the depth convention, as a vertex shader's main0 / main0_z (contract item 2)
@@ -7124,8 +7158,13 @@ static void bind_vbufs(id<MTL4RenderCommandEncoder> en) {
         else {
             void *mb; uint64_t mo; g_vbuf_resolve++;
             // Not in any pool (审计 #1534 P1-112 读数缺口): the slot used to keep the previous draw's address, so the draw read another buffer silently;
-            //   now it reads the zero buffer and says so (the address and slot of the first case)
-            uint64_t pav; if (!gpu_addr_want(addr, 1, S.vbuf[s].size, &mb, &mo, &gpu, &pav)) { RED_ONCE(162, "vertex buffer slot %d address %#llx is in no memory pool: the slot reads zeros (first case)", s, (unsigned long long)addr); vbuf_zero(en, s); continue; }
+            //   now it reads the zero buffer and says so: the address, the nearest pools on either side (mtl_pool_near: a gap in the host's registration, or memory the game never gave NVN)
+            //   and the running count (draws whose slot read zeros), the first 4 times and then at powers of two
+            uint64_t pav; if (!gpu_addr_want(addr, 1, S.vbuf[s].size, &mb, &mo, &gpu, &pav)) {
+                static uint64_t nz; uint64_t k = ++nz;
+                if (k <= 4 || !(k & (k - 1))) { char near[300] = ""; mtl_pool_near(nvn_ga2ca(addr), near, sizeof near);
+                    MLOG("【红】 vertex buffer slot %d address %#llx (%llu bytes) is in no memory pool: the slot reads zeros (%llu so far); %s", s, (unsigned long long)addr, (unsigned long long)S.vbuf[s].size, (unsigned long long)k, near); }
+                vbuf_zero(en, s); continue; }
             cache[s].addr = addr; cache[s].gpu = gpu; cache[s].gen = gen;
         }
         enc_r_vbuf(en, VB_SLOT(s), gpu);

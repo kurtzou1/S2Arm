@@ -29,6 +29,26 @@ struct InputSettingsSheet: View {
 
     private var language: String { loc.lang == .zh ? "zh-Hans" : "en" }
     private func t(_ id: String) -> String { BackendText.launcherText("input." + id, language: language) }
+
+    /// 要绑的键已经给了别的功能（v0.3.1：原先存成冲突、保存键置灰，玩家被挡住）：先问「改给这个功能？」，确认就解开旧绑定再绑（摇杆两边互换方向），
+    ///   存进去的配置照样没有重复绑定（运行时 input_config.c、作业层 validate_input 都拒收重复）
+    struct Rebind: Identifiable { let id = UUID(); let kind: String; let key: String; let from: String; let to: String; let apply: () -> Void }
+    @State private var rebind: Rebind?
+    private func bind(_ kind: String, key: String, target: String, holder: String?, apply: @escaping () -> Void) {
+        if let holder, holder != target { rebind = Rebind(kind: kind, key: key, from: holder, to: target, apply: apply) } else { apply() }
+    }
+    private func rebindText(_ r: Rebind) -> String {
+        let name = { (x: String) in r.kind == "axes" ? names.axis(x) : names.target(x) }
+        return t(r.kind == "axes" ? "rebind.axes" : "rebind.body").replacingOccurrences(of: "{0}", with: name(r.from))
+            .replacingOccurrences(of: "{1}", with: name(r.to)).replacingOccurrences(of: "{2}", with: r.key)
+    }
+    private func setKey(_ key: KeyBinding, for target: String) {
+        let holder = config.keyboard.first { $0.key != target && $0.value == key }?.key
+        bind("keyboard", key: names.key(key), target: target, holder: holder) {
+            if let holder { config.keyboard[holder] = nil }
+            config.keyboard[target] = key; failure = nil
+        }
+    }
     private var names: InputNames { InputNames(text: t) }
     private var game: GameSummary? { model.games.first { $0.id == gameID } }
     private var canSave: Bool { loaded && !saving && recording == nil && config.conflicts.isEmpty }
@@ -70,8 +90,12 @@ struct InputSettingsSheet: View {
             Divider().opacity(0.3)
             footer
         }
+        .alert(t("rebind.title"), isPresented: Binding(get: { rebind != nil }, set: { if !$0 { rebind = nil } })) {
+            Button(t("rebind.confirm")) { rebind?.apply(); rebind = nil }
+            Button(t("cancel"), role: .cancel) { rebind = nil }
+        } message: { Text(rebind.map(rebindText) ?? "") }
         .background(InputKeyRecorder(active: recording != nil) { key in
-            if let target = recording, let key { config.keyboard[target] = key; failure = nil }
+            if let target = recording, let key { setKey(key, for: target) }
             recording = nil
         })
         .onAppear {
@@ -113,7 +137,7 @@ struct InputSettingsSheet: View {
                 keyField
                 LauncherDropdown(options: [("", t("key.common"))] + Self.commonKeys.map { (String($0), names.key(KeyBinding(code: $0))) },
                                  selection: "", label: t("key.common"), style: .button, fill: true) { value in
-                    if let code = Int(value) { config.keyboard[selected] = KeyBinding(code: code); failure = nil }
+                    if let code = Int(value) { setKey(KeyBinding(code: code), for: selected) }
                     recording = nil
                 }
             }
@@ -121,14 +145,26 @@ struct InputSettingsSheet: View {
                 Label(t("mouse"), systemImage: "computermouse").font(.manrope(13, .semibold))
                 LauncherDropdown(options: [("", t("unbound"))] + (0...4).map { (String($0), names.mouseButton($0)) },
                                  selection: config.mouse[selected].map(String.init) ?? "", label: t("mouse"), style: .button, fill: true, leading: true) { value in
-                    config.mouse[selected] = Int(value); recording = nil; failure = nil
+                    recording = nil
+                    let button = Int(value), target = selected
+                    let holder = button.flatMap { b in config.mouse.first { $0.key != target && $0.value == b }?.key }
+                    bind("mouse", key: button.map(names.mouseButton) ?? "", target: target, holder: holder) {
+                        if let holder { config.mouse[holder] = nil }
+                        config.mouse[target] = button; failure = nil
+                    }
                 }
             }
             VStack(alignment: .leading, spacing: 7) {
                 Label(t("gamepad"), systemImage: "gamecontroller").font(.manrope(13, .semibold))
                 LauncherDropdown(options: [("", t("unbound"))] + InputConfig.padCodes.map { ($0, names.pad($0)) },
                                  selection: config.gamepad[selected] ?? "", label: t("gamepad"), style: .button, fill: true, leading: true) { value in
-                    config.gamepad[selected] = value.isEmpty ? nil : value; recording = nil; failure = nil
+                    recording = nil
+                    let pad = value.isEmpty ? nil : value, target = selected
+                    let holder = pad.flatMap { p in config.gamepad.first { $0.key != target && $0.value == p }?.key }
+                    bind("gamepad", key: pad.map(names.pad) ?? "", target: target, holder: holder) {
+                        if let holder { config.gamepad[holder] = nil }
+                        config.gamepad[target] = pad; failure = nil
+                    }
                 }
             }
             if config.conflictingTargets.contains(selected) {
@@ -207,7 +243,12 @@ struct InputSettingsSheet: View {
                                 .padding(.trailing, 4)
                             LauncherDropdown(options: InputConfig.axisSources.map { ($0, names.axis($0)) },
                                              selection: config.axes[target]?.source ?? Self.ownSource(target), label: names.axis(target), style: .button) { source in
-                                config.axes[target] = AxisBinding(source: source, invert: config.axes[target]?.invert ?? false)
+                                let old = config.axes[target]?.source ?? Self.ownSource(target)
+                                let holder = config.axes.first { $0.key != target && $0.value.source == source }?.key
+                                bind("axes", key: names.axis(source), target: target, holder: holder) {   // 摇杆不能留空：两边互换方向
+                                    if let holder { config.axes[holder] = AxisBinding(source: old, invert: config.axes[holder]?.invert ?? false) }
+                                    config.axes[target] = AxisBinding(source: source, invert: config.axes[target]?.invert ?? false)
+                                }
                             }
                         }
                     }

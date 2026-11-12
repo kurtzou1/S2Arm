@@ -14,7 +14,7 @@ def sha(b): return hashlib.sha256(b).hexdigest()
 
 class Fake:
     """内存里的 App 容器：get / put / ls / tar_ok / put_tar / listing / free / nospc 同 push.Devpush 接口"""
-    kind = "fake"; why = "假设备"; docs = "Documents"; ctx = None
+    kind = "fake"; why = "假设备"; docs = "Documents"; ctx = None; pack = None
 
     def __init__(self, files, listing=False, full_disk=False):
         self.files = dict(files); self.puts = []; self.lists = []; self.list_ok = listing; self.full_disk = full_disk
@@ -157,6 +157,19 @@ class Apply(Base):
     def test_nothing_pushed_already_applied_skips(self):
         self.assertFalse(self.ap({f"{RP}/.applied": self.WANT}, 0, True)); self.assertFalse(hasattr(self.dev, "launches"))
 
+    def test_partial_line_is_needs_player_not_failure(self):
+        # v0.3.1 缺件照玩：手机解开了、只缺非核心文件，写「缺 N 个非必需文件 …部分可玩 = <本包>」（不写 .applied）→ 当场报「还差最后一步：还缺 N 个文件」，
+        #   是 NeedsPlayer（装机按传输成功 + 提醒收尾），不等 180 秒、不报失败
+        self.dev = Fake({}); clock = [0.0]
+        def done(d):
+            d.files["Documents/unpack.log"] = f"11-12 解开 1 个包 1 个文件 0 MB，缺 2 个非必需文件（例：romfs/b.bin（不在）），部分可玩 = {self.WANT}（0.1 秒）\n"
+        self.dev.on_launch = done
+        def sleep(x): clock[0] += x
+        with self.assertRaises(push.NeedsPlayer) as e:
+            push.apply(self.dev, self.pk, self.w, 1, say=self.log.append, sleep=sleep, now=lambda: clock[0])
+        self.assertIn("还缺 2 个文件", str(e.exception)); self.assertIn("资源包已传完，还差最后一步", str(e.exception))
+        self.assertLess(clock[0], 30)   # 当场报，不等停住
+
     def test_pushed_waits_for_new_done_line(self):
         self.assertTrue(self.ap({}, 1, True)); self.assertEqual(self.dev.launches, [{"S2A_PACK_APPLY_ONLY": "1"}])
 
@@ -258,6 +271,8 @@ See 'devicectl device process launch --help' for more information.
         old = {f"{RP}/.applied": self.WANT, "Documents/unpack.log": f"10-01 解开 3 个包 9 个文件 1 MB，.applied = {self.WANT}（0.2 秒）\n"}
         with self.assertRaises(push.Fail) as e: self.ap(old, 1, False)
         self.assertIn("起 App 后 180 秒机上解包没有开始", str(e.exception)); self.assertEqual(len(self.dev.launches), 1)
+        # 装机原则（11-11）：解包停住 = 资源已全在手机上，报 NeedsPlayer（装机按「传输成功 + 提醒打开 App 接着装」收尾），不是装机失败
+        self.assertIsInstance(e.exception, push.NeedsPlayer); self.assertIn("资源包已传完，还差最后一步", str(e.exception))
 
     def test_device_failure_reported_at_once_with_its_reason(self):
         # App 起来解开、第一包前就失败（#569：目录 App 写不进）：解包日志新增「解包失败：…」→ 当场按原因报，不再等 180 秒后说「没有开始」。期望手写
@@ -322,11 +337,54 @@ class ContainerDocs(Base):
         self.assertTrue(push.apply(self.dev, self.pk, self.w, nb, say=self.log.append, sleep=sleep, now=lambda: clock[0]))
         self.assertEqual(self.dev.launches, [{}])   # 多款容器：正常拉起到游戏库，由库解开（不用只解包模式、不直接起某一款）
 
+    def test_pack_root_separate_from_docs(self):
+        """11-11 资源包挪出 Documents：--pack-root 给了 → 探针、待解批、记账、索引、清单、.applied 都在资源包根下；解包日志仍读 <文档根>/unpack.log"""
+        P = "Library/Application Support/S2Arm/games/0100000000010000/资源包"
+        self.dev = Fake({f"{self.D}/资源包/manifest.json": '{"version": 2}', f"{self.D}/资源包/index.applied.tsv": self.row("a") + self.row("b")})   # 旧位置的账不算（调用方选了新位置）
+        self.dev.docs, self.dev.ctx, self.dev.pack = self.D, self.CTX, P
+        nb, nt, _ = push.run(self.dev, self.pk, self.w, False, say=self.log.append)
+        self.assertEqual((nb, nt), (1, 2))
+        self.assertEqual(self.dev.puts[:3], [f"{P}/{push.PROBE}", f"{P}/.transfer", f"{P}/manifest.json"])
+        self.assertTrue(self.dev.puts[3].startswith(f"{P}/.incoming/") and self.dev.puts[3].endswith("_000.tar"), self.dev.puts[3])
+        self.assertEqual(self.dev.puts[4:], [f"{P}/.pushed", f"{P}/index.tsv", f"{P}/manifest.json"])
+        def done(d):
+            d.files[f"{P}/.applied"] = "x"; d.files[f"{self.D}/unpack.log"] = "11-07 解开 1 个包 2 个文件 0 MB，.applied = x（0.1 秒）\n"
+        self.dev.on_launch = done; clock = [0.0]
+        def sleep(x): clock[0] += x
+        self.assertTrue(push.apply(self.dev, self.pk, self.w, nb, say=self.log.append, sleep=sleep, now=lambda: clock[0]))
+
+    def test_windows_install_writes_new_location(self):
+        """Windows 装机推包（pack/orch/install_win.push_pack，install.py 把 pick_pack_root 选的根作 pack_root 传进来）：走真的 push.device 的 s2a-devpush 那支
+        （Windows 没有 devicectl），只把底层读写换成内存容器 → 探针、待解批、记账、索引、清单都写进 Library 新位置，Documents 下本款资源包一个不写"""
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "pack/orch"))
+        import install_win
+        P = "Library/Application Support/S2Arm/games/0100000000010000/资源包"
+        exe = self.w / "s2a-devpush"; exe.write_text(""); exe.chmod(0o755)   # 工具在（不会被真调用：读写换成内存容器）
+        mem, made, real = Fake({}), [], push.device
+        def device(*a, **k):
+            d = real(*a, **k); made.append(d)
+            for m in ("get", "put", "ls", "tar_ok", "put_tar", "listing", "free", "nospc", "rm"):
+                if hasattr(mem, m): setattr(d, m, getattr(mem, m))
+            return d
+        push.device = device
+        try:
+            nt, _ = install_win.push_pack("U1", "s2arm.T.games", str(self.pk), devpush=str(exe), say=self.log.append, docs=self.D, ctx=self.CTX, pack_root=P)
+        finally:
+            push.device = real
+        self.assertEqual(nt, 2)
+        self.assertIsInstance(made[0], push.Devpush)   # Windows 那支：s2a-devpush，不是 devicectl
+        self.assertEqual((made[0].docs, made[0].pack), (self.D, P))
+        self.assertTrue(mem.puts and all(r.startswith(P + "/") for r in mem.puts), mem.puts)
+        self.assertIn(f"{P}/manifest.json", mem.files); self.assertIn(f"{P}/index.tsv", mem.files)
+        self.assertFalse([r for r in mem.files if r.startswith(f"{self.D}/资源包")])
+
     def test_device_factory_carries_docs(self):
         d = push.device("C891", "s2arm.z.games", self.w, via="devicectl", env={}, docs=self.D, ctx=self.CTX)
-        self.assertEqual((d.docs, d.ctx), (self.D, self.CTX))
+        self.assertEqual((d.docs, d.ctx, push.rp(d)), (self.D, self.CTX, f"{self.D}/资源包"))   # 没给资源包根：按文档根推
+        d = push.device("C891", "s2arm.z.games", self.w, via="devicectl", env={}, docs=self.D, ctx=self.CTX, pack="Library/Application Support/S2Arm/games/0100000000010000/资源包")
+        self.assertEqual(push.rp(d), "Library/Application Support/S2Arm/games/0100000000010000/资源包")
         d = push.device("C891", "s2arm.z.0100000000010000", self.w, via="devicectl", env={})
-        self.assertEqual((d.docs, d.ctx), ("Documents", None))   # 单款缺省不变
+        self.assertEqual((d.docs, d.ctx, push.rp(d)), ("Documents", None, "Documents/资源包"))   # 单款缺省不变
 
 
 class BigFallback(unittest.TestCase):

@@ -135,7 +135,12 @@ def trim(private, *, keep_titles=KEEP_TITLES, min_free_bytes=MIN_FREE_BYTES,
                         if game.name == current_gid:
                             # dmsh hits do not touch mtime. Jobs records conservative
                             # whole-title use, never claiming per-entry hit recency.
-                            os.utime(base, (now, now), follow_symlinks=False)
+                            # Windows 的 Python 不支持 os.utime 不跟随链接（NotImplementedError，v0.3.0 Windows 出 iPhone 包必红）：
+                            #   上面 _safe_root 已逐级 lstat 核过 base 及其上级都是真目录，不是链接，直接改
+                            if os.utime in os.supports_follow_symlinks:
+                                os.utime(base, (now, now), follow_symlinks=False)
+                            else:
+                                os.utime(base, (now, now))
                         direct_used[(game.name, platform)] = base.lstat().st_mtime
             except OSError as error:
                 scan_error(error)

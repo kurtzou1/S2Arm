@@ -90,6 +90,9 @@ struct ExportView: View {
                             .buttonStyle(.plain).font(.manrope(12.5)).foregroundStyle(.secondary).underline()
                             .disabled(model.busy || model.customizing).accessibilityIdentifier("export.cover.reset")
                     }
+                    if model.customizing, let note = model.lockWaitNote {
+                        Text(loc.backend(note)).font(.manrope(12.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
                     if let failed = model.customizeError {
                         Text(loc.backend(failed)).font(.manrope(12.5)).foregroundStyle(LauncherPalette.danger).fixedSize(horizontal: false, vertical: true)
                     }
@@ -158,7 +161,7 @@ struct ExportView: View {
         options.append((Self.otherFolder, x("location.other")))
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
-                Image(systemName: "externaldrive").font(.system(size: 16, weight: .light)).foregroundStyle(LauncherPalette.cream)
+                LauncherRowIcon("externaldrive")
                 Text(x("location.title")).font(.manrope(13)).foregroundStyle(.secondary)
                 Spacer(minLength: 12)
                 LauncherDropdown(options: options, selection: location, label: x("location.title"), style: .button) { value in
@@ -295,8 +298,8 @@ struct ExportView: View {
                 .contentShape(Capsule())
             }
             .buttonStyle(.plain)
-            .disabled(blocker != nil)
-            .opacity(blocker == nil ? 1 : 0.4)
+            .disabled(blocker?.stopsStart == true)   // 缺文件 / 缺 keys 只在左边提示，不置灰（作业层核实）
+            .opacity(blocker?.stopsStart == true ? 0.4 : 1)
             .busyHint(model, disabled: blocker == .busy)   // 别的任务（非出包）在跑：说在等谁（出包在跑时这里是「排队」，不置灰）
             .keyboardShortcut(.defaultAction)
             .padTarget("export.start", scope: "main", radius: 26) { model.export(game, location: location.isEmpty ? nil : location) }

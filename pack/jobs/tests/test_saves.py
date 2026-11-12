@@ -519,6 +519,19 @@ class SaveTests(unittest.TestCase):
             self.backup()
         self.assertEqual(self.archive.read_bytes(), b"existing backup")
 
+    def test_backup_on_drive_without_hard_links(self):
+        # v0.3.1：存档备份放到位用硬链接（不覆盖地落盘）；exFAT / FAT32 建不了硬链接（WinError 1 / EPERM）→ 退回「核没有同名再改名」，
+        #   备份照样落盘、内容完整；已有同名备份时照旧不覆盖
+        def no_links(*a, **k):
+            raise OSError(1, "Incorrect function")
+        with patch.object(saves.os, "link", no_links):
+            self.backup()
+            self.assertTrue(self.archive.is_file() and self.archive.stat().st_size > 0)
+            before = self.archive.read_bytes()
+            with self.assertRaises(Failure):
+                self.backup()
+            self.assertEqual(self.archive.read_bytes(), before)
+
     def test_disk_shortage_and_cancellation_leave_original_intact(self):
         c = self.prepare_restore()
         from collections import namedtuple

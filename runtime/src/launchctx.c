@@ -2,6 +2,7 @@
 //   各读者（host_main.c / loader.c / vawin.c / ios/settings.m）取冻结后的结构，C# 与其余原生读者经 S2A_GAME_DATA / S2A_DOCS / S2A_RYU_DATA 取。
 #include "native.h"
 #include "s2a_launch_ctx.h"
+#include "s2a_docs.h"   // 多款容器每款资源包根（s2a_pack_root）
 #include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -144,7 +145,9 @@ int s2a_launch_ctx_resolve_game(s2a_launch_ctx *c, const char *b, const char *ho
     snprintf(rel, sizeof rel, "Frameworks/S2AImages-%s.dylib", gid);
     if (join(c->images, b, rel) || !is_file(c->images)) { WHY("游戏 %s 的镜像包 %s 不在", gid, c->images); memset(c, 0, sizeof *c); return -1; }
     char hd[S2A_LCTX_PATH]; snprintf(rel, sizeof rel, "games/%s", gid);
-    if (join(hd, home, "Documents") || join(c->docs, hd, rel) || join(c->game_data, c->docs, "资源包") || join(c->ryu_data, c->docs, "S2A/ryujinx")
+    // 资源包根：Library/Application Support/S2Arm/games/<游戏号>/资源包（s2a_docs.h s2a_pack_root，v0.3.0 挪出 Documents）；存档仍在本款文档根下
+    if (join(hd, home, "Documents") || join(c->docs, hd, rel) || s2a_pack_root(c->game_data, sizeof c->game_data, c->docs) >= (int)sizeof c->game_data
+        || join(c->ryu_data, c->docs, "S2A/ryujinx")
         || put(c->caps_dir, c->module_dir) || put(c->bundle_dir, b) || put(c->log_dir, hd)) { WHY("HOME 或 App 包目录太长"); memset(c, 0, sizeof *c); return -1; }
     strcpy(c->game_id, gid);
     c->source = S2A_LCTX_CONTAINER;

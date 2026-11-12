@@ -89,6 +89,19 @@ static int child(int m3) {
         int dz = nvn_deswizzle(&t.d, 0, 0, mem, want, 64 * 4);
         CHECK(done && !dz && t.L.size >= sizeof want && !memcmp(got, want, sizeof want), "上传批：目的 = 源（%llu 字节存储，GPU 贴图读回 = CPU 解交错）", (unsigned long long)t.L.size);
     }
+    // ③'n 地址不在任何池里时报前后最近的两个池（#674 顶点缓冲槽读零，mtl_pool_near）。期望从自己分配的地址手算：一整块 1 MB 里登记 [base, +0x10000) 与 [base+0x40000, +0x20000)，
+    //   查 base+0x19000 → 前一个池结束处距它 0x9000、后一个池开始处距它 0x27000（这两段都在本块里，别的池插不进来）；落在池里的地址回 0、不写
+    {
+        int mtl_pool_near(uint64_t addr, char *out, size_t n);
+        uint8_t *blk = NULL; posix_memalign((void **)&blk, 1 << 20, 1 << 20); uintptr_t base = (uintptr_t)blk;
+        nvn_be_pool_add(blk, 0x10000); nvn_be_pool_add(blk + 0x40000, 0x20000);
+        char near[300] = "", want[300];
+        int r = mtl_pool_near(base + 0x19000, near, sizeof near);
+        snprintf(want, sizeof want, "previous pool %#lx size 0x10000 (ends 0x9000 before it), next pool %#lx size 0x20000 (starts 0x27000 after it); ", (unsigned long)base, (unsigned long)(base + 0x40000));
+        CHECK(r == 1 && !strncmp(near, want, strlen(want)), "池缝里的地址：报出前后最近的池（实得「%s」）", near);
+        char in[64] = "untouched"; r = mtl_pool_near(base + 0x41000, in, sizeof in);
+        CHECK(r == 0 && !strcmp(in, "untouched"), "落在池里的地址：回 0、不写（实得 %d「%s」）", r, in);
+    }
     // ③'a 解交错形状矩阵（#329 D3-4 第 3 类）：格式 / 块宽 / 数组层 / 3D 深度 / mip 级各取一个，同一份块线性存储经 GPU 解交错后读回，逐字节等于 CPU 解交错。
     //   回退到 CPU 会打 RED_ONCE(41)（不支持 format / target），父进程那条断言会变红，所以「形状都能上 GPU」本身也被核到
     {

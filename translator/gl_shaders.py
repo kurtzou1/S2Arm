@@ -507,9 +507,15 @@ def main():
                 print(f"GLSL 汇总：成功 0、失败 0、跳过 {skipped}")
                 return 0
             if not rows:
-                clear_products(destinations)
+                if args.components_only:
+                    clear_products(destinations)
+                    print(f"GLSL 汇总：成功 0、失败 {len(failed)}、跳过 {skipped}")
+                    return 1
+                # 一支都没译成（v0.3.1 拿不准不停；#702 原先整款停）：同离线一支没有，只出表头、全部运行时首遇现编；失败数留在汇总行，direct_lib.sh 记降级
+                write_empty(destinations)
+                print(f"【黄】GLSL 离线一支没译成（{len(failed)} 支失败，见上方 [RED]），只出表头、运行时首遇现编", file=sys.stderr)
                 print(f"GLSL 汇总：成功 0、失败 {len(failed)}、跳过 {skipped}")
-                return 1
+                return 0
             table = table_header()
             table += [
                 f"{key}\t{stage}\t{' '.join(row['fields'])}\t{row['source']}"
@@ -527,7 +533,8 @@ def main():
                     diagnostics,
                 )
         print(f"GLSL 汇总：成功 {len(rows)}、失败 {len(failed)}、跳过 {skipped}")
-        return 1 if failed else 0
+        # 部分译不过：译成的照出库、退 0（v0.3.1 拿不准不停），失败数在汇总行；只校验阶段组件（--components-only）时照旧退 1
+        return 1 if failed and args.components_only else 0
     except (ValueError, OSError, ImportError, subprocess.SubprocessError, SystemExit) as exc:
         if can_clear:
             clear_products(destinations)

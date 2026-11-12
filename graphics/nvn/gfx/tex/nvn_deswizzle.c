@@ -66,10 +66,23 @@ static int move(const nvn_texdesc *d, unsigned level, unsigned layer, uint8_t *b
     if (pitch < row_bytes) return -1;
     bl += base; uint32_t lb = nvn_tex_level_gobs(d, level) * 64;   // the row as laid out (padded in a sparse texture's tiled levels)
     if (lb < row_bytes) lb = row_bytes;
+    // A whole GOB column's four 16-byte pieces (x%64 = 0/16/32/48) lie inside one GOB, at the x terms of the layout formula only:
+    //   the y terms of gob_off are common to all four, so from the column's start (gob_off(0, y)) they sit at gob_off(16, 0) / gob_off(32, 0) / gob_off(48, 0)
+    //   — taken from the same formula, not hand-derived (the GPU kernel k_nvn_deswz does the same addressing per 16-byte piece). Computed once per call
+    uint32_t o1 = gob_off(16, 0), o2 = gob_off(32, 0), o3 = gob_off(48, 0);
     for (uint32_t z = 0; z < slices; z++)
         for (uint32_t y = 0; y < rows; y++) {
             uint8_t *row = lin + ((size_t)z * rows + y) * pitch;
-            for (uint32_t x = 0; x < row_bytes; x += 16) {             // 16-byte segments: 16 bytes are contiguous within a GOB, and 16 divides all block widths
+            uint32_t x = 0;
+            for (; x + 64 <= row_bytes; x += 64) {                    // whole GOB columns: the four 16-byte pieces straight to their addresses, one offset computation per column
+                uint8_t *p = bl + nvn_bl_offset(x, y, z, lb, rows, th, td);
+                if (to_linear) {
+                    memcpy(row + x, p, 16); memcpy(row + x + 16, p + o1, 16); memcpy(row + x + 32, p + o2, 16); memcpy(row + x + 48, p + o3, 16);
+                } else {
+                    memcpy(p, row + x, 16); memcpy(p + o1, row + x + 16, 16); memcpy(p + o2, row + x + 32, 16); memcpy(p + o3, row + x + 48, 16);
+                }
+            }
+            for (; x < row_bytes; x += 16) {                          // 16-byte segments: 16 bytes are contiguous within a GOB, and 16 divides all block widths
                 uint32_t n = row_bytes - x < 16 ? row_bytes - x : 16;
                 uint8_t *p = bl + nvn_bl_offset(x, y, z, lb, rows, th, td);
                 if (to_linear) memcpy(row + x, p, n); else memcpy(p, row + x, n);

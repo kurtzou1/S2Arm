@@ -12,11 +12,15 @@
 #      再按头里大小整帧解）；整份 NRO 的 SHA-256 **必须在 NRR 登记里**才收，没登记的一律不收（所以不会把归档里别的东西误当模块）。全部登记哈希都找到就停扫。
 #      11-03 大乱斗 SPECIAL：764 个 NRO 全以 zstd 帧藏在 romfs/data.arc（17.6 GB 游戏自有归档），romfs 没有一个 .nro → 原先一个没收、LoadNro 报不在表。
 #      ② 收的模块排在 ① 之后，按 NRR 文件名、表内登记顺序编号（与归档内摆放无关）；来源写 <romfs 相对路径>@<偏移>（原样）/ <…>@<偏移>:zstd（zstd 帧起点）。
-# 退出码：0（没有 NRO 也是 0，不出表），读坏的 NRO / NRR 报红退出 1。
+# 退出码：0（没有 NRO 也是 0，不出表）。读不懂的 NRR / 读坏的 NRO 跳过这一份、打【黄】记一笔，其余照转（#713：一份 NRR 认不出原先整款出不了包）；
+#   只有环境问题（找不到 libzstd）退出 1。
 # NRO 格式（switchbrew NRO）：+0x4 MOD0 偏移；+0x10 'NRO0'；+0x18 文件大小；+0x20 三段（文件偏移、大小）text / ro / data；+0x38 bss 大小；
 #   +0x40 构建号（0x20）；+0x68 / 0x70 / 0x78 api 信息 / 动态串表 / 动态符号表（相对 ro 段，与 NSO 同口径）。映像未压缩，文件偏移即模块内偏移。
 # NRR 格式（switchbrew NRR0）：+0x0 'NRR0'；+0x10 证书（0x220）；+0x230 签名（0x100）；+0x330 程序号（u64）；+0x338 大小（u32）；+0x33C NrrKind（u8）；
 #   +0x340 哈希表偏移（u32，实际总是 0x350）；+0x344 哈希个数（u32）；表内每项 32 字节 = 一个 NRO 整文件的 SHA-256。
+#   Switch 2 的 NRR（#713，一款 Switch 2 赛车游戏 .nrr/EffectScript.nrr，0x1000 字节）在 +0x340 读出的是乱数：签名等前面的字段变长、后面整体后移，
+#   switchbrew 没有这一版的定义。不猜签名长：「大小」字段等于文件长、紧跟着程序种类、再后面是哈希表偏移与个数，按这个锚点在头里找（nrr_table）；
+#   找错了也不会收错模块——只有整份 SHA-256 对得上登记的 NRO 才收。
 import hashlib, os, struct, sys
 # 仓库里唯一的 RomFS 遍历（graphics/nvn/tools/romfs_list.py，walk 同 os.walk）
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'graphics', 'nvn', 'tools')); import romfs_list
@@ -63,17 +67,28 @@ def to_nso(d, segs, bss):
     return bytes(h) + d
 
 
+def nrr_table(d):
+    """NRR 哈希表的 (偏移, 个数)：先按 switchbrew NRR0（+0x338 大小 = 文件长，+0x340 偏移 / 个数）；对不上再在头里找「u32 = 文件长」的锚点，
+    其后第 8 / 12 字节是偏移 / 个数，要求表在锚点之后、整张落在文件里、16 字节对齐、个数 ≥ 1（Switch 2 的 NRR 字段后移，#713）。认不出 → None"""
+    def ok(p):
+        if p + 0x10 > len(d) or struct.unpack_from('<I', d, p)[0] != len(d): return None
+        off, cnt = struct.unpack_from('<II', d, p + 8)
+        return (off, cnt) if cnt and off % 0x10 == 0 and off >= p + 0x10 and off + cnt * 32 <= len(d) else None
+    return ok(0x338) or next((t for p in range(0x300, min(len(d), 0x1000) - 0x10, 4) for t in [ok(p)] if t), None)
+
+
 def nrr_hashes(romfs):
-    """romfs/.nrr/*.nrr 登记的 NRO 哈希（十六进制），按 NRR 文件名、表内顺序，去重；没有 .nrr 目录 → []"""
+    """romfs/.nrr/*.nrr 登记的 NRO 哈希（十六进制），按 NRR 文件名、表内顺序，去重；没有 .nrr 目录 → []。认不出的 NRR 跳过、打【黄】"""
     nd = os.path.join(romfs, '.nrr')
     if not os.path.isdir(nd): return []
     out, seen = [], set()
     for f in sorted(romfs_list.listdir(nd)):
         if not f.lower().endswith('.nrr') or not os.path.isfile(os.path.join(nd, f)): continue
         d = open(os.path.join(nd, f), 'rb').read()
-        if len(d) < 0x350 or d[:4] != b'NRR0': raise ValueError(f'.nrr/{f}：不是 NRR（缺 NRR0 标记或不足 0x350 字节）')
-        off, cnt = struct.unpack_from('<II', d, 0x340)
-        if off + cnt * 32 > len(d): raise ValueError(f'.nrr/{f}：哈希表 {off:#x} + {cnt}×32 越出文件 {len(d):#x}')
+        t = nrr_table(d) if len(d) >= 0x350 and d[:4] == b'NRR0' else None
+        if not t:
+            print(f'【黄】.nrr/{f}：认不出哈希表（{len(d):#x} 字节，开头 {d[:4]!r}），这一份不用；它登记的、又不是 *.nro 文件的模块这次收不到', file=sys.stderr); continue
+        off, cnt = t
         for i in range(cnt):
             k = d[off + i * 32:off + i * 32 + 32].hex()
             if k not in seen: seen.add(k); out.append(k)
@@ -132,12 +147,12 @@ def main(argv):
             (found if f.lower().endswith('.nro') else rest).append(rel)
     found.sort(); rest.sort()
     try: reg = nrr_hashes(romfs)
-    except (ValueError, OSError) as e: print(f'【红】{e}', file=sys.stderr); return 1
+    except OSError as e: print(f'【黄】.nrr 读不了（{e}），不按登记找藏起来的 NRO', file=sys.stderr); reg = []
     mods = {}   # SHA-256 → [模块名, 大小, bss, 来源…]
     for rel in found:
         d = open(os.path.join(romfs, rel), 'rb').read()
         try: segs, bss = parse(d, rel)
-        except (ValueError, struct.error) as e: print(f'【红】{e}', file=sys.stderr); return 1
+        except (ValueError, struct.error) as e: print(f'【黄】{e}：这一份不转，游戏装它时会失败；其余照转', file=sys.stderr); continue
         k = hashlib.sha256(d).hexdigest()
         if k in mods: mods[k][3].append(rel); continue
         name = f'nro{len(mods)}'
@@ -157,7 +172,7 @@ def main(argv):
             if k not in hit: continue
             tmp = os.path.join(out, '.' + k); d = open(tmp, 'rb').read(); os.remove(tmp)
             try: segs, bss = parse(d, hit[k])
-            except (ValueError, struct.error) as e: print(f'【红】{e}', file=sys.stderr); return 1
+            except (ValueError, struct.error) as e: print(f'【黄】{e}：这一份不转，游戏装它时会失败；其余照转', file=sys.stderr); continue
             name = f'nro{len(mods)}'
             open(os.path.join(out, name), 'wb').write(to_nso(d, segs, bss))
             mods[k] = [name, len(d), bss, [hit[k]]]

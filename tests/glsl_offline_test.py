@@ -261,11 +261,12 @@ def main():
         ([FIX / "desktop.comp", out / "unsupported-comp"], "计算阶段", 1),
         ([FIX / "desktop.frag", out / "unsupported-resources"], "GL 库表口径 1", 1),
     ):
+        # v0.3.1 拿不准不停：一支都没译成也退 0、只出表头（运行时首遇现编），失败原因照打、汇总行留失败数（direct_lib.sh 记降级）；原先退非 0、不出表
         bad = run([sys.executable, CLI, *arguments], success=False)
-        assert bad.returncode != 0 and re.search(error, bad.stderr), bad.stderr
+        assert bad.returncode == 0 and re.search(error, bad.stderr) and "【黄】GLSL 离线一支没译成" in bad.stderr, bad.stderr
         assert f"成功 0、失败 {count}、跳过 0" in bad.stdout
         if arguments[-1] != runtime:
-            assert not (arguments[-1] / "gl/gl_shaders.tsv").exists()
+            assert (arguments[-1] / "gl/gl_shaders.tsv").exists() and not (arguments[-1] / "gl/gl_shaders.metallib").exists()
         failures += 1
     # 离线一支没有（GameMaker 等运行时才拼 GLSL）：退 0、汇总「成功 0、失败 0」，只出表头（3 行注释、第一行口径）、不出库，旧库删掉
     empty_in, empty_out = out / "empty-in", out / "empty"
@@ -330,7 +331,7 @@ def main():
     )
     mixed_out = out / "mixed"
     result = run([sys.executable, CLI, mixed, mixed_out, "--ios", out / "mixed-ios"], success=False)
-    assert result.returncode == 1 and "成功 7、失败 1、跳过 0" in result.stdout, (
+    assert result.returncode == 0 and "成功 7、失败 1、跳过 0" in result.stdout, (   # v0.3.1：部分译不过照出库、退 0
         result.stdout + result.stderr
     )
     assert re.search(r"broken\.frag:4:", result.stderr) and "custom.vert" not in result.stderr
@@ -361,11 +362,11 @@ def main():
         and "spirv-cross" in rerun[2]
     )
     assert {p.name for p in (runtime / "gl").iterdir()} == {"gl_shaders.metallib", "gl_shaders.tsv"}
-    # 全坏重跑必须移除上次的库与表，不能拿上次成功伪装本轮成功。
+    # 全坏重跑必须移除上次的库与表行，不能拿上次成功伪装本轮成功（v0.3.1：退 0、只留表头、运行时首遇现编）。
     result = run([sys.executable, CLI, FIX / "broken.frag", runtime], success=False)
-    assert result.returncode == 1 and "成功 0、失败 1、跳过 0" in result.stdout
+    assert result.returncode == 0 and "成功 0、失败 1、跳过 0" in result.stdout
     assert (
-        not (runtime / "gl/gl_shaders.tsv").exists()
+        all(line.startswith("#") for line in (runtime / "gl/gl_shaders.tsv").read_text().splitlines())
         and not (runtime / "gl/gl_shaders.metallib").exists()
     )
     summary = dict(
