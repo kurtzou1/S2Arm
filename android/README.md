@@ -627,6 +627,8 @@ python3 android/tools/game_apk.py --resources build/pack/<game> \
   android/app/build/outputs/apk/debug/app-debug.apk build/pack/<game>-res   # what that app installs
 ```
 
+出包链路（`pack/targets/android/package.py`）给 `--resources` 加 `--reuse-from <上一个已发布 release 的 resources/>`：上一包自己的 index 里与新包同路径、同大小、同 SHA-256 的**只读**文件改成硬链接，不再各写一份（ext4 没有 reflink，以前每个 release 的 `resources/` 都是一整份 RomFS）。链接后仍逐个核新包的 index；上一包不可用（读不出、与输出或输入重叠）、跨盘、链接被拒、文件可写或字节已变的，一律退回复制。所以同一台机器上相邻 release 的只读文件共享同一个 inode：别原地改 release 里的文件（先改权限再写会同时改到两个包），删哪个 release 都不影响另一个。
+
 构建后的设备部署统一用 `python3 android/tools/deploy_game.py --pack <完整源包> --apk <最终签名APK> --serial <设备> --mode direct`。
 脚本冻结 APK、生成配套资源绑定、安装、导入并核对设备 APK 哈希，避免重编后反复出现 `artifact.apk.sha256` 不匹配。
 同资源版本仅更新 APK 时加 `--refresh-existing`，通过正常安装事务刷新绑定，无须重传 RomFS。

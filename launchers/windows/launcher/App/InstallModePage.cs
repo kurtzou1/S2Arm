@@ -232,6 +232,7 @@ public sealed partial class EnvironmentWindow
                 e => Dispatcher.UIThread.Post(() => IngestUpdateEvent(e)), front.Token, front.Next());
             succeeded = job.Report.Succeeded;
             updateTrack.Finish(job, GameName);
+            if (succeeded && updateTrack.ExportFolder.Length > 0) OpenFolder(updateTrack.ExportFolder);   // 导出模式的「导出新版 S2Arm」：打开放好的文件夹
             updateState = job.Report.State;
             if (ask && JobCode(job) is { } c && ConfirmCodes.ContainsKey(c)) { dropAsk = job.Report.Message; updateAskCode = c; }
             updateOutcome = succeeded ? "" : job.Report.Message.Length > 0 ? job.Report.Message : job.Report.State;

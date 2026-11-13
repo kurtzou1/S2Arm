@@ -66,6 +66,7 @@ struct nvn_gpu_buf_s {
 struct nvn_gpu_tex_s {
     VkImage image;
     VkDeviceMemory memory;
+    VkDeviceSize mem_size; uint32_t mem_type;   // 这块显存向驱动要的大小和内存类型（还回 texmem 池时用）
     VkImageView view;
     VkFormat format, sample_format;
     VkImageAspectFlags aspect;
@@ -288,6 +289,12 @@ static void pc_drop_view(VkImageView v);
 static void pc_destroy_all(void);
 enum { PIPE_HT_N = 1024 };
 static uint64_t g_desc_ns[4], g_desc_nw, g_desc_sets, g_desc_hit;   // 描述符四步：分配 / 构造写入项 / 写入 / 绑定；写入的描述符条数；重写的组数
+// 诊断读数（nvk_gputime 开着才计）：贴图 / 视图 / 帧缓冲的建与拆各用多久、各几次。
+// 0 vkCreateImage，1 要显存并绑定，2 默认视图，3 帧缓冲，4 附件视图，5 拆视图，6 从帧缓冲表里摘（pc_drop_view），7 拆贴图（视图 + 图 + 还显存）
+static uint64_t g_life_ns[8], g_life_n[8];
+#define LIFE_T0 uint64_t lt_ = g_draw_tm ? now_ns() : 0
+#define LIFE_ADD(i) do { if (g_draw_tm) { uint64_t ln_ = now_ns(); __atomic_fetch_add(&g_life_ns[i], ln_ - lt_, __ATOMIC_RELAXED); __atomic_fetch_add(&g_life_n[i], 1, __ATOMIC_RELAXED); lt_ = ln_; } } while (0)
+static uint64_t now_ns(void);
 static int g_draw_tm; static uint64_t g_draw_ns[3];   // 绘制入口分段计时：描述符 / 状态 / 顶点索引与绘制调用
 static uint64_t g_pl_ns, g_pl_n, g_pl_steps;   // 取图形管线：命中查找的累计纳秒 / 次数 / 比过的条数
 static struct nvn_gpu_pipe_s *g_pipe_ht[PIPE_HT_N];   // 图形管线的散列桶（见 pipe_hash）；持 g_mu
@@ -407,16 +414,119 @@ static void newimg_del_locked(struct nvn_gpu_tex_s *t) {
     for (uint32_t i = 0; i < g_newimg_n; i++) if (g_newimg[i] == t) { g_newimg[i] = g_newimg[--g_newimg_n]; return; }
 }
 
+// 命令段用完的命令池（带它那一个命令缓冲）和描述符池留下来给后面的段用，不再每段新建、段完成就销毁。
+// 真机取样（一款 3D 游戏，每帧 9 个命令段）：回放线程约 14% 的时间在驱动向内核要显存（kgsl_sharedmem_alloc → ioctl + mmap），
+// 开命令段 nvn_gpu_cmd_begin 一项占 6%；每帧新建 9.2 个命令池、5.0 个描述符池。
+// 段做完后：命令池、描述符池各放进一张空闲表；开段 / 要描述符池时先从表里取，取出来再重置（vkResetCommandPool / vkResetDescriptorPool）。
+// 重置之后上一段分出去的描述符组句柄全部失效——段内的影子（desc_sets、备忘表）都随段对象一起没了，不会带到下一段。
+// 表有上限（多出来的照旧销毁），会话收尾全部销毁。诊断开关 nvk_seg_reuse=0 关掉（同一局里对照用），缺省开。
+enum { SEGPOOL_CMD_N = 32, SEGPOOL_DESC_N = 64 };
+static struct { VkCommandPool pool; VkCommandBuffer cb; } g_seg_cmd[SEGPOOL_CMD_N];
+static VkDescriptorPool g_seg_desc[SEGPOOL_DESC_N];
+static uint32_t g_seg_ncmd, g_seg_ndesc; static uint64_t g_seg_hit_cmd, g_seg_hit_desc;
+static int g_seg_closed;   // 会话收尾已经清过表：之后再还回来的一律直接销毁（持 g_seg_mu 读写）
+static pthread_mutex_t g_seg_mu = PTHREAD_MUTEX_INITIALIZER;
+static int seg_reuse_on(void) { static int cur = -1; static uint32_t k; if (cur < 0 || !(++k & 63)) cur = nvn_plat_flag("nvk_seg_reuse", 1) != 0; return cur; }
+static int seg_take_cmd(VkCommandPool *pool, VkCommandBuffer *cb) {
+    int ok = 0;
+    pthread_mutex_lock(&g_seg_mu);
+    if (g_seg_ncmd) { g_seg_ncmd--; *pool = g_seg_cmd[g_seg_ncmd].pool; *cb = g_seg_cmd[g_seg_ncmd].cb; g_seg_hit_cmd++; ok = 1; }
+    pthread_mutex_unlock(&g_seg_mu);
+    // 重置放在取用的这一刻、由要用它的线程做：放回时（完成线程）就重置的话，两条线程会在驱动里抢同一把锁，
+    // 真机上「交后端」从 0.4 涨到 1.5–2.2 毫秒 / 帧
+    if (ok && vkResetCommandPool(g.d, *pool, 0) != VK_SUCCESS) { vkDestroyCommandPool(g.d, *pool, NULL); *pool = VK_NULL_HANDLE; *cb = VK_NULL_HANDLE; ok = 0; }
+    return ok;
+}
+static void seg_give_cmd(VkCommandPool pool, VkCommandBuffer cb) {   // 这一段已经做完（或被放弃），池里没有在用的命令缓冲
+    if (!pool) return;
+    int kept = 0;
+    if (cb && seg_reuse_on()) {
+        pthread_mutex_lock(&g_seg_mu);
+        if (!g_seg_closed && g_seg_ncmd < SEGPOOL_CMD_N) { g_seg_cmd[g_seg_ncmd].pool = pool; g_seg_cmd[g_seg_ncmd].cb = cb; g_seg_ncmd++; kept = 1; }
+        pthread_mutex_unlock(&g_seg_mu);
+    }
+    if (!kept) vkDestroyCommandPool(g.d, pool, NULL);   // 池同时回收它的命令缓冲
+}
+static VkDescriptorPool seg_take_desc(void) {
+    VkDescriptorPool p = VK_NULL_HANDLE;
+    pthread_mutex_lock(&g_seg_mu);
+    if (g_seg_ndesc) { p = g_seg_desc[--g_seg_ndesc]; g_seg_hit_desc++; }
+    pthread_mutex_unlock(&g_seg_mu);
+    if (p && vkResetDescriptorPool(g.d, p, 0) != VK_SUCCESS) { vkDestroyDescriptorPool(g.d, p, NULL); p = VK_NULL_HANDLE; }   // 同上：取用时重置
+    return p;
+}
+static void seg_give_desc(VkDescriptorPool p) {
+    if (!p) return;
+    int kept = 0;
+    if (seg_reuse_on()) {
+        pthread_mutex_lock(&g_seg_mu);
+        if (!g_seg_closed && g_seg_ndesc < SEGPOOL_DESC_N) { g_seg_desc[g_seg_ndesc++] = p; kept = 1; }
+        pthread_mutex_unlock(&g_seg_mu);
+    }
+    if (!kept) vkDestroyDescriptorPool(g.d, p, NULL);
+}
+static void seg_drain(void) {
+    pthread_mutex_lock(&g_seg_mu);
+    for (uint32_t i = 0; i < g_seg_ncmd; i++) vkDestroyCommandPool(g.d, g_seg_cmd[i].pool, NULL);
+    for (uint32_t i = 0; i < g_seg_ndesc; i++) vkDestroyDescriptorPool(g.d, g_seg_desc[i], NULL);
+    g_seg_ncmd = g_seg_ndesc = 0; g_seg_closed = 1;
+    pthread_mutex_unlock(&g_seg_mu);
+}
+
+// 贴图显存块的小池。动态分辨率的游戏每帧换渲染目标的宽高，每张新图都向驱动要一块显存、旧图拆的时候还回去：
+// 一款 3D 游戏每帧 10 张时「要显存并绑定」1.24 毫秒 + 拆 0.41 毫秒（直接计时）。拆贴图时把显存块留在池里，
+// 新图要的大小落在某块的 [块的 4/5, 块] 之间、内存类型相同就直接绑它（图已经拆了的显存块可以再绑给别的图）。
+// 池按先进先出，最多 TEXMEM_N 块、TEXMEM_BYTES 字节，超了把最老的还给驱动；会话收尾全部还掉。
+// 诊断开关 nvk_texmem=0 关掉（同一局里对照用），缺省开。
+enum { TEXMEM_N = 48 };
+#define TEXMEM_BYTES (256ull << 20)
+static struct { VkDeviceMemory m; VkDeviceSize size; uint32_t type; } g_texmem[TEXMEM_N];
+static uint32_t g_texmem_n; static VkDeviceSize g_texmem_bytes; static uint64_t g_texmem_hit, g_texmem_miss;
+static pthread_mutex_t g_texmem_mu = PTHREAD_MUTEX_INITIALIZER;
+static int texmem_on(void) { static int cur = -1; static uint32_t k; if (cur < 0 || !(++k & 63)) cur = nvn_plat_flag("nvk_texmem", 1) != 0; return cur; }
+static VkDeviceMemory texmem_take(VkDeviceSize need, uint32_t type, VkDeviceSize *size) {
+    VkDeviceMemory m = VK_NULL_HANDLE; int best = -1;
+    pthread_mutex_lock(&g_texmem_mu);
+    for (uint32_t i = 0; i < g_texmem_n; i++)
+        if (g_texmem[i].type == type && g_texmem[i].size >= need && g_texmem[i].size - g_texmem[i].size / 5 <= need &&
+            (best < 0 || g_texmem[i].size < g_texmem[best].size)) best = (int)i;
+    if (best >= 0) { m = g_texmem[best].m; *size = g_texmem[best].size; g_texmem_bytes -= g_texmem[best].size;
+        memmove(&g_texmem[best], &g_texmem[best + 1], (g_texmem_n - (uint32_t)best - 1) * sizeof g_texmem[0]); g_texmem_n--; g_texmem_hit++; }
+    else g_texmem_miss++;
+    pthread_mutex_unlock(&g_texmem_mu);
+    return m;
+}
+static void texmem_give(VkDevice d, VkDeviceMemory m, VkDeviceSize size, uint32_t type) {
+    if (!m) return;
+    if (!size || size > TEXMEM_BYTES / 4 || !texmem_on()) { vkFreeMemory(d, m, NULL); return; }
+    VkDeviceMemory out[TEXMEM_N + 1]; uint32_t nout = 0;
+    pthread_mutex_lock(&g_texmem_mu);
+    while (g_texmem_n && (g_texmem_n == TEXMEM_N || g_texmem_bytes + size > TEXMEM_BYTES)) {   // 最老的在前
+        out[nout++] = g_texmem[0].m; g_texmem_bytes -= g_texmem[0].size;
+        memmove(&g_texmem[0], &g_texmem[1], (g_texmem_n - 1) * sizeof g_texmem[0]); g_texmem_n--; }
+    g_texmem[g_texmem_n].m = m; g_texmem[g_texmem_n].size = size; g_texmem[g_texmem_n].type = type; g_texmem_n++; g_texmem_bytes += size;
+    pthread_mutex_unlock(&g_texmem_mu);
+    for (uint32_t i = 0; i < nout; i++) vkFreeMemory(d, out[i], NULL);
+}
+static void texmem_drain(VkDevice d) {
+    pthread_mutex_lock(&g_texmem_mu);
+    for (uint32_t i = 0; i < g_texmem_n; i++) vkFreeMemory(d, g_texmem[i].m, NULL);
+    g_texmem_n = 0; g_texmem_bytes = 0;
+    pthread_mutex_unlock(&g_texmem_mu);
+}
+
 // 调用方持 g_mu。贴图 / 视图没有 retired 回调，最后一次引用结束即可销毁。
 static void destroy_tex_locked(struct nvn_gpu_vk *vk, struct nvn_gpu_tex_s *t) {
     newimg_del_locked(t);
     struct nvn_gpu_tex_s **pp = &vk->texs;
     while (*pp && *pp != t) pp = &(*pp)->all_next;
     if (*pp) *pp = t->all_next;
-    pc_drop_view(t->view);
+    LIFE_T0;
+    pc_drop_view(t->view); LIFE_ADD(6);
     if (t->view) vkDestroyImageView(vk->d, t->view, NULL);
     if (t->image) vkDestroyImage(vk->d, t->image, NULL);
-    if (t->memory) vkFreeMemory(vk->d, t->memory, NULL);
+    texmem_give(vk->d, t->memory, t->mem_size, t->mem_type);
+    LIFE_ADD(7);
     free(t);
 }
 
@@ -424,9 +534,11 @@ static void destroy_view_locked(struct nvn_gpu_vk *vk, struct nvn_gpu_view_s *v)
     struct nvn_gpu_view_s **pp = &vk->views;
     while (*pp && *pp != v) pp = &(*pp)->all_next;
     if (*pp) *pp = v->all_next;
-    pc_drop_view(v->att); pc_drop_view(v->view);
+    LIFE_T0;
+    pc_drop_view(v->att); pc_drop_view(v->view); LIFE_ADD(6);
     if (v->att) vkDestroyImageView(vk->d, v->att, NULL);
     if (v->view) vkDestroyImageView(vk->d, v->view, NULL);
+    LIFE_ADD(5);
     if (v->buffer_view) vkDestroyBufferView(vk->d, v->buffer_view, NULL);
     struct nvn_gpu_tex_s *t = v->tex;
     struct nvn_gpu_buf_s *b = v->buf;
@@ -715,8 +827,8 @@ static void finish_cmd(struct nvn_gpu_cmd_s *c, int executed) {
     free(c->passes);
     free(c->memo);
     for (int i = 0; i < 6; i++) free(c->push_data[i]);
-    if (c->dpool) vkDestroyDescriptorPool(g.d, c->dpool, NULL);
-    for (uint32_t i = 0; i < c->ndpools_full; i++) vkDestroyDescriptorPool(g.d, c->dpools_full[i], NULL);
+    seg_give_desc(c->dpool);
+    for (uint32_t i = 0; i < c->ndpools_full; i++) seg_give_desc(c->dpools_full[i]);
     free(c->dpools_full);
     if (c->tsq) vkDestroyQueryPool(g.d, c->tsq, NULL);
         if (c->qpool) vkDestroyQueryPool(g.d, c->qpool, NULL);
@@ -727,7 +839,7 @@ static void finish_cmd(struct nvn_gpu_cmd_s *c, int executed) {
         if (b->memory) vkFreeMemory(g.d, b->memory, NULL);
         free(b);
     }
-    if (c->pool) vkDestroyCommandPool(g.d, c->pool, NULL);   // pool 同时回收 command buffer
+    seg_give_cmd(c->pool, c->cb);
     free(c->refs);
     free(c->staging);
     free(c);
@@ -900,6 +1012,7 @@ nvn_gpu_rc nvn_gpu_open(const nvn_gpu_open_desc *d, nvn_gpu_err *err) {
     if (pthread_create(&g.worker, NULL, worker_main, &g) != 0)
         return fail(err, NVN_GPU_E_DEVICE, "worker 线程创建失败");
     g.worker_started = 1;
+    pthread_mutex_lock(&g_seg_mu); g_seg_closed = 0; pthread_mutex_unlock(&g_seg_mu);
     g_open = 1;
     return rc(NVN_GPU_OK);
 }
@@ -1085,6 +1198,8 @@ nvn_gpu_rc nvn_gpu_close(uint64_t timeout_ns, nvn_gpu_err *err) {
         free(tx);
         tx = tn;
     }
+    texmem_drain(g.d);
+    seg_drain();
     if (g.bc) nvn_vk_bcdec_destroy(g.dev, g.bc);
     free(g.submitted);
     g.submitted = NULL;
@@ -2346,7 +2461,7 @@ static VkImageView view_attachment(struct nvn_gpu_view_s *v) {
         ci.format = v->format ? v->format : t->format;
         ci.subresourceRange = (VkImageSubresourceRange){t->aspect, v->base_level, 1, image3d ? v->att_layer : v->base_layer, 1};
         OC(OC_VIEW);
-        if (vkCreateImageView(g.d, &ci, NULL, &v->att) != VK_SUCCESS) v->att = VK_NULL_HANDLE;
+        { LIFE_T0; if (vkCreateImageView(g.d, &ci, NULL, &v->att) != VK_SUCCESS) v->att = VK_NULL_HANDLE; LIFE_ADD(4); }
     }
     VkImageView r = v->att;
     pthread_mutex_unlock(&g_mu);
@@ -2390,7 +2505,7 @@ static VkFramebuffer pc_fb(const VkFramebufferCreateInfo *fi, int *cached) {
             !memcmp(e->v, fi->pAttachments, fi->attachmentCount * sizeof(VkImageView))) { fb = e->fb; *cached = 1; pthread_mutex_unlock(&g_pc_mu); return fb; }
     }
     OC(OC_FB);
-    if (vkCreateFramebuffer(g.d, fi, NULL, &fb) != VK_SUCCESS) { pthread_mutex_unlock(&g_pc_mu); return VK_NULL_HANDLE; }
+    { LIFE_T0; VkResult fr_ = vkCreateFramebuffer(g.d, fi, NULL, &fb); LIFE_ADD(3); if (fr_ != VK_SUCCESS) { pthread_mutex_unlock(&g_pc_mu); return VK_NULL_HANDLE; } }
     if (slot >= 0) { struct pc_fb *e = &g_pc_fb[slot]; memset(e, 0, sizeof *e); e->rp = fi->renderPass; e->natt = fi->attachmentCount; e->w = fi->width; e->h = fi->height; e->layers = fi->layers;
         memcpy(e->v, fi->pAttachments, fi->attachmentCount * sizeof(VkImageView)); e->fb = fb; *cached = 1; }
     pthread_mutex_unlock(&g_pc_mu);
@@ -2777,6 +2892,7 @@ static int new_dpool(struct nvn_gpu_cmd_s *c) {
     dpi.maxSets = DPOOL_SETS;
     dpi.poolSizeCount = 8;
     dpi.pPoolSizes = ps;
+    if (seg_reuse_on() && (c->dpool = seg_take_desc()) != VK_NULL_HANDLE) return 1;
     OC(OC_DPOOL);
     if (vkCreateDescriptorPool(g.d, &dpi, NULL, &c->dpool) != VK_SUCCESS) {
         c->dpool = VK_NULL_HANDLE;
@@ -3418,10 +3534,12 @@ nvn_gpu_rc nvn_gpu_tex_create(const nvn_gpu_tex_desc *d, nvn_gpu_tex *out, nvn_g
     ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (t->view_fmt || sample_fmt != fmt) ci.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+    LIFE_T0;
     if (vkCreateImage(g.d, &ci, NULL, &t->image) != VK_SUCCESS) {
         free(t);
         return fail(err, NVN_GPU_E_UNSUPPORTED, "vkCreateImage 拒绝（格式 0x%x / usage 0x%x / %ux%u）", d->d.format, usage, d->d.width, d->d.height);
     }
+    LIFE_ADD(0);
     VkMemoryRequirements req;
     vkGetImageMemoryRequirements(g.d, t->image, &req);
     uint32_t type = s2a_vk_memory_type(g.dev, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, NULL);
@@ -3431,13 +3549,16 @@ nvn_gpu_rc nvn_gpu_tex_create(const nvn_gpu_tex_desc *d, nvn_gpu_tex *out, nvn_g
     ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     ai.allocationSize = req.size;
     ai.memoryTypeIndex = type;
-    if (type == UINT32_MAX || vkAllocateMemory(g.d, &ai, NULL, &t->memory) != VK_SUCCESS ||
+    t->mem_size = req.size; t->mem_type = type;
+    if (type != UINT32_MAX && texmem_on()) t->memory = texmem_take(req.size, type, &t->mem_size);
+    if (type == UINT32_MAX || (!t->memory && vkAllocateMemory(g.d, &ai, NULL, &t->memory) != VK_SUCCESS) ||
         vkBindImageMemory(g.d, t->image, t->memory, 0) != VK_SUCCESS) {
         if (t->memory) vkFreeMemory(g.d, t->memory, NULL);
         vkDestroyImage(g.d, t->image, NULL);
         free(t);
         return fail(err, NVN_GPU_E_OOM, "贴图显存分配失败（%ux%u，%u 级）", d->d.width, d->d.height, levels);
     }
+    LIFE_ADD(1);
     VkImageViewCreateInfo vi;
     memset(&vi, 0, sizeof vi);
     vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -3451,6 +3572,7 @@ nvn_gpu_rc nvn_gpu_tex_create(const nvn_gpu_tex_desc *d, nvn_gpu_tex *out, nvn_g
         free(t);
         return fail(err, NVN_GPU_E_OOM, "默认贴图视图创建失败");
     }
+    LIFE_ADD(2);
     pthread_mutex_lock(&g_mu);
     if (!newimg_add_locked(t)) {
         pthread_mutex_unlock(&g_mu);
@@ -4228,6 +4350,7 @@ nvn_gpu_rc nvn_gpu_cmd_begin(const nvn_gpu_cmd_desc *d, nvn_gpu_cmd *out, nvn_gp
     pci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     pci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
     pci.queueFamilyIndex = g.dev->queue_family;
+    if (!seg_reuse_on() || !seg_take_cmd(&c->pool, &c->cb)) {   // 空闲表里没有：新建一个池和它的命令缓冲
     OC(OC_CPOOL);
     if (vkCreateCommandPool(g.d, &pci, NULL, &c->pool) != VK_SUCCESS) {
         free(c);
@@ -4243,6 +4366,7 @@ nvn_gpu_rc nvn_gpu_cmd_begin(const nvn_gpu_cmd_desc *d, nvn_gpu_cmd *out, nvn_gp
         vkDestroyCommandPool(g.d, c->pool, NULL);
         free(c);
         return fail(err, NVN_GPU_E_OOM, "vkAllocateCommandBuffers 失败");
+    }
     }
     VkCommandBufferBeginInfo bi;
     memset(&bi, 0, sizeof bi);

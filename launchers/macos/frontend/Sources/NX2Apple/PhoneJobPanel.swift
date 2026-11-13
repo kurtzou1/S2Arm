@@ -31,13 +31,21 @@ struct PhoneJobPanel: View {
         return d.isEmpty ? model.installTargetLabel : d
     }
 
+    /// 导出模式（装法「导出，自己签名安装」）：装机 / 更新作业不连手机、出到文件夹。完成后看结果，进行中看当前装法
+    private var exporting: Bool {
+        guard session.kind == .install || session.kind == .installUpdate else { return false }
+        if case .finished(.completed) = session.phase { return !(model.phoneOutcome?.exportFolder ?? "").isEmpty }
+        return model.installMode.mode == "export"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 30) {
             // 这是什么操作（维护者：原先只看得到「更新中 · …」一小行）
-            Text(t("phone.title." + session.kind.rawValue)).font(.manrope(18, .bold)).accessibilityIdentifier("phone.operation")
+            Text(t(exporting ? "phone.title.export" : "phone.title." + session.kind.rawValue)).font(.manrope(18, .bold)).accessibilityIdentifier("phone.operation")
             switch session.phase {
             case .running, .stopping: running
             case .finished(.failed) where pendingConfirm != nil: dropAsk
+            case .finished(.completed) where exporting: exported
             case .finished(.completed): success
             case .finished(.cancelled): headline(seal: AnyView(StatusSeal(symbol: "xmark", color: LauncherPalette.unbuilt)), title: t("phone.cancelled", "已取消"), subtitle: "")
             case .finished: failure
@@ -54,8 +62,8 @@ struct PhoneJobPanel: View {
         return VStack(alignment: .leading, spacing: 22) {
             HStack(spacing: 8) {
                 Circle().fill(LauncherPalette.building).frame(width: 9, height: 9)
-                Text(t("phone.status.running." + session.kind.rawValue)).font(.manrope(14, .bold)).foregroundStyle(LauncherPalette.building)
-                Text("· " + device).font(.manrope(13, .medium)).foregroundStyle(.secondary)
+                Text(t(exporting ? "phone.status.running.export" : "phone.status.running." + session.kind.rawValue)).font(.manrope(14, .bold)).foregroundStyle(LauncherPalette.building)
+                if !exporting { Text("· " + device).font(.manrope(13, .medium)).foregroundStyle(.secondary) }
             }
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text("\(Int(value * 100))%").font(.manrope(58, .heavy)).tracking(-2).monospacedDigit()
@@ -140,6 +148,42 @@ struct PhoneJobPanel: View {
                     }
                 }
             }
+        }
+        .accessibilityIdentifier("phone.done")
+    }
+
+    // ---- 导出好了：放进哪个文件夹、几款、多大，怎么装一句话，打开文件夹（作业完成时已自动打开一次）----
+    private var exported: some View {
+        let o = model.phoneOutcome ?? PhoneOutcome()
+        var stats: [(String, String)] = []
+        if let ended = session.ended { stats.append((t("phone.stat.time"), Self.duration(ended.timeIntervalSince(session.started), language: language))) }
+        stats.append((t("phone.stat.games"), "\(o.exportGames)"))
+        if let b = o.exportBytes { stats.append((t("phone.stat.size"), ByteCountFormatter.string(fromByteCount: b, countStyle: .file))) }
+        var lines = [t("phone.fact.export")]
+        if !o.skipped.isEmpty { lines.append(t("phone.fact.export_skipped").replacingOccurrences(of: "{0}", with: o.skipped.joined(separator: "、"))) }
+        // 紧凑排：勾与大字同一行、路径家目录写成 ~（装机窗 600×520，原先几款 / 多大 / 打开文件夹都被挤到第一屏下面）
+        return VStack(alignment: .leading, spacing: 20) {
+            HStack(alignment: .center, spacing: 18) {
+                SuccessSeal()
+                Text(t("phone.headline.export")).font(.manrope(44, .heavy)).tracking(-1.4).accessibilityIdentifier("phone.title")
+            }
+            Text(t("phone.done.export").replacingOccurrences(of: "{0}", with: (o.exportFolder as NSString).abbreviatingWithTildeInPath))
+                .font(.manrope(16)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+            HStack(alignment: .top, spacing: 52) {
+                ForEach(Array(stats.enumerated()), id: \.offset) { _, s in
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(s.0).font(.manrope(14, .semibold)).foregroundStyle(.secondary)
+                        Text(s.1).font(.manrope(30, .heavy)).tracking(-0.6).monospacedDigit().lineLimit(1)
+                    }
+                }
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                    Text(line).font(.manrope(14)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Button { NSWorkspace.shared.open(URL(fileURLWithPath: o.exportFolder)) } label: { LauncherHeroActionLabel(title: t("phone.export.open"), symbol: "folder") }
+                .buttonStyle(.plain).accessibilityIdentifier("phone.export.open")
         }
         .accessibilityIdentifier("phone.done")
     }

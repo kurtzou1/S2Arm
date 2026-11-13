@@ -98,13 +98,26 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
                 short[] outputBuffer = ArrayPool<short>.Shared.Rent((int)inputCount * SampleCount);
                 Array.Fill(outputBuffer, (short)0, 0, (int)inputCount * SampleCount);
 
-                for (int i = 0; i < bufferCount; i++)
+                // S2Arm: 立体声设备 + 双声道输入（最常见的设备形态）走 S2ADspMixHelper 的饱和窄化 + 交织内核；
+                //   其余布局（5.1、混上混等）照原逐样本循环。两条路径逐样本一致（FCVTZS+SQXTN ≡ 夹取后截断）。
+                if (channelCount == 2 && bufferCount == 2)
                 {
-                    ReadOnlySpan<float> inputBuffer = GetBuffer(InputBufferIndices[i], SampleCount);
-
-                    for (int j = 0; j < SampleCount; j++)
+                    S2ADspMixHelper.SaturateInterleaveStereo(
+                        outputBuffer,
+                        GetBuffer(InputBufferIndices[0], SampleCount),
+                        GetBuffer(InputBufferIndices[1], SampleCount),
+                        (int)SampleCount);
+                }
+                else
+                {
+                    for (int i = 0; i < bufferCount; i++)
                     {
-                        outputBuffer[i + j * channelCount] = PcmHelper.Saturate(inputBuffer[j]);
+                        ReadOnlySpan<float> inputBuffer = GetBuffer(InputBufferIndices[i], SampleCount);
+
+                        for (int j = 0; j < SampleCount; j++)
+                        {
+                            outputBuffer[i + j * channelCount] = PcmHelper.Saturate(inputBuffer[j]);
+                        }
                     }
                 }
 

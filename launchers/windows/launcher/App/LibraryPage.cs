@@ -31,6 +31,7 @@ public sealed partial class EnvironmentWindow
     {
         CapturePaths();
         if (page == "library") libraryFolder = libraryFolderBox.Text ?? "";
+        messagesOpen = false;   // 顶栏导航离开「消息」页
         page = destination;
         if (destination != "library") welcomeHome = false;   // 品牌名带去的欢迎页只管这一次回首页，去了别的页就回到平常
         // 环境检查页每次打开读一次装到 iPhone 的方式和开发者证书（InstallModePage.cs / DevCertPage.cs）

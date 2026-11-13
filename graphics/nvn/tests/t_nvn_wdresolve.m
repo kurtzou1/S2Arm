@@ -36,10 +36,11 @@ static unsigned failures, checks;
 
 static pool_t *g_pool_t;
 static uint32_t g_levels = 1;   // make_tex 建的级数（⑨ 用两级）
+static uint32_t g_fmt = NVN_FORMAT_RGBA8;   // make_tex 建的格式（⑯ 目标用 BGRA8）
 static size_t g_next;
 static void make_tex(tex_t *t, int w, int h, int samples) {
     memset(t, 0, sizeof *t); t->magic = MAGIC('T', 'E', 'X', 0); t->serial = nvn_new_serial();
-    t->d = (nvn_texdesc){.target = samples > 1 ? NVN_TEXTURE_TARGET_2D_MULTISAMPLE : NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8, .samples = samples,
+    t->d = (nvn_texdesc){.target = samples > 1 ? NVN_TEXTURE_TARGET_2D_MULTISAMPLE : NVN_TEXTURE_TARGET_2D, .format = g_fmt, .samples = samples,
                          .width = (uint32_t)w, .height = (uint32_t)h, .depth = 1, .levels = g_levels};
     t->pool = g_pool_t; t->off = g_next; t->mem = g_pool_t->mem + g_next; nvn_tex_layout(&t->d, &t->L); g_next += (t->L.size + 65535) & ~(size_t)65535;
     REQUIRE(g_next <= g_pool_t->size); nvn_be_tex_init(t); REQUIRE(tex_mtl(t));
@@ -251,6 +252,18 @@ int main(void) {
         { static tex_t plain; make_tex(&plain, 1024, 576, 1);   // 没当过目标、没被拷进过的普通贴图（④ 的目的现在随源加高了，不能再当对照）
           long y0 = 288, y1 = 576; wd_clear_y(&g_tall_src, &y0, &y1); long z0 = 288, z1 = 576; wd_clear_y(&plain, &z0, &z1);
           VERIFY(y0 == 351 && y1 == 702 && z0 == 288 && z1 == 576, "⑧ 带剪刀清屏的行按加高换算：加高目标 [288, 576) → [%ld, %ld)（期望 [351, 702)）、没加高的 → [%ld, %ld)（期望原样）", y0, y1, z0, z1); }
+        {   // ⑯ 单样本 RGBA8 → 同尺寸单样本 BGRA8 的 Downsample（#751：游戏最后一遍把 1280x720 RGBA8 画面「解析」进上屏用的 BGRA8 贴图；改前报未实现、整步跳过，黑屏有声）
+            //   期望手算：源整张红 (255, 0, 0, 255)；目标按 BGRA 字节序存，小端读一个像素 = B | G << 8 | R << 16 | A << 24 = ffff0000（改前目标没被写，读 0）
+            static tex_t s1, d1; g_fmt = NVN_FORMAT_RGBA8; make_tex(&s1, 1280, 720, 1); g_fmt = NVN_FORMAT_BGRA8; make_tex(&d1, 1280, 720, 1); g_fmt = NVN_FORMAT_RGBA8;
+            REQUIRE(tex_mtl(&s1).pixelFormat == MTLPixelFormatRGBA8Unorm && tex_mtl(&d1).pixelFormat == MTLPixelFormatBGRA8Unorm);   // 前提：就是 #751 日志里的 70 → 80
+            clear_red(tex_mtl(&s1));
+            nvn_be_sub_begin();
+            p_copy_t2t c; memset(&c, 0, sizeof c); c.src = &s1; c.dst = &d1; c.flags = DM_COPY_RESOLVE; c.sr = (NVNcopyRegion){.width = 1280, .height = 720, .depth = 1}; c.dr = c.sr;
+            copy_t2t(&c);
+            uint64_t f = nvn_be_sub_commit(); REQUIRE(nvn_be_wait(f, 10000000000ull)); REQUIRE(!mtl_last_commit_error());
+            uint32_t a = px_at(tex_mtl(&d1), 0, 0), b = px_at(tex_mtl(&d1), 1279, 719);
+            VERIFY(a == 0xffff0000u && b == 0xffff0000u, "⑯ 单样本 RGBA8 → BGRA8 同尺寸 Downsample：(0, 0) = %08x、(1279, 719) = %08x（期望都是 ffff0000：BGRA 存的红；改前 0，整步跳过）", a, b);
+        }
         nvn_be_drain();
         printf("%s t_nvn_wdresolve：%u 项，%u 项失败（%s）\n", failures ? "✗" : "✓", checks, failures, g_m3 ? "Metal 3" : "Metal 4");
         return failures != 0;

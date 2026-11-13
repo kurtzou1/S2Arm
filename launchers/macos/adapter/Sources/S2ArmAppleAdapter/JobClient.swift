@@ -242,21 +242,20 @@ public final class JobClient {
         }
     }
 
-    /// 启动器顶部公告条（pack/jobs/updater.py notice）：{id, text: {zh-Hans, en}, url?}；没有要显示的、取不到、起不来都返回 nil，不打扰玩家
-    public func notice() async -> [String: Any]? {
-        let result = await runUpdater(["notice", "--private-root", environment.privateRoot.path])
-        return result?["id"] is String ? result : nil
+    /// 打开时要给玩家看什么（pack/jobs/updater.py inbox，两端共用「永远只给最新一期」）：
+    ///   {popup?: {kind: update|afterUpdate, version, notes?}, banner?: 公告, messages: [...], unread, update: 查版本结果}；起不来返回 nil，不打扰玩家
+    public func inbox(current: String) async -> [String: Any]? {
+        let result = await runUpdater(["inbox", "--private-root", environment.privateRoot.path, "--platform", "mac", "--current", current])
+        return result?["messages"] is [Any] ? result : nil
     }
 
-    /// 玩家关掉公告：记下它的号，同一条不再出现（换了新号的公告照常出现）
-    public func noticeDismiss(id: String) async {
-        _ = await runUpdater(["notice-dismiss", "--private-root", environment.privateRoot.path, "--id", id])
-    }
-
-    /// 有比 current 高的正式版就返回版本号；查不到（没网、GitHub 不通）返回 nil，不打扰玩家。
-    public func updateCheck(current: String) async -> String? {
-        let result = await runUpdater(["check", "--platform", "mac", "--current", current])
-        return result?["available"] as? Bool == true ? result?["version"] as? String : nil
+    /// 玩家关掉了：update = 「有新版」那版（以后再说），after = 「这版更新了什么」那版，notice = 看过的最新一条公告号
+    public func inboxSeen(update: String? = nil, after: String? = nil, notice: String? = nil) async {
+        var command = ["inbox-seen", "--private-root", environment.privateRoot.path]
+        if let update { command += ["--update", update] }
+        if let after { command += ["--after", after] }
+        if let notice { command += ["--notice", notice] }
+        _ = await runUpdater(command)
     }
 
     /// 下载、校验、解开新版（不碰正在用的安装目录）。最后一行 state = ready 或 failed。

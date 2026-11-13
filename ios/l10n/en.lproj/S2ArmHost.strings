@@ -157,7 +157,7 @@
 "vpad.layouts.error" = "Layout action failed";
 "vpad.layouts.export" = "Export current layout";
 "vpad.layouts.footer.broken" = "Broken files are left as they are. Fix them and import again, or manage them in the Files app under this app / VPadLayouts.";
-"vpad.layouts.footer.choose" = "Changes are saved and applied right away.";
+"vpad.layouts.footer.choose" = "Edit the regular layout. Positions are saved separately from the split-screen layout. Changes apply immediately.";
 "vpad.layouts.footer.display" = "Button opacity after 3 seconds without input. At 0%, the buttons vanish when idle, but presses still work and the buttons reappear. Default: 25%. Haptic feedback taps lightly when a button is newly pressed, and the first time a stick reaches its edge during each hold; it doesn’t change the game’s own rumble.";
 "vpad.layouts.footer.stick" = "Shared by both sticks. The dead zone filters small movements near the center; the lower the outer saturation, the sooner the stick reaches full tilt; a response exponent above 1 gives finer control near the center, below 1 makes it more sensitive. Saved when you let go, applied on the next push. Defaults: 8% / 100% / 1.00.";
 "vpad.layouts.holdLock.note" = "Hold for 2 s to lock, tap again to unlock; this game only";
@@ -407,7 +407,7 @@
 "settings.footer.controls" = "When no controller is connected, you can use the phone’s gyro and haptics.";
 "settings.footer.dev" = "Takes effect next launch.\nS2Arm overlay: shows the target frame rate, slow-frame ratio, graphics mode, first-use compilation, audio status and build ID.\nMetal performance HUD: shows the frame rate, GPU time and a frame-interval graph. For manual viewing on development devices only; while it’s on, screenshots, frame capture, autoplay and full-screen checks aren’t used.";
 "settings.footer.diag" = "Includes recent run logs and diagnostics — no game files, keys or saves.\nExported the next time you open or switch back to the game; this option then turns off automatically.";
-"settings.footer.graphics" = "Takes effect after restarting the game. While a game is running, you can choose to restart right away when you tap Done; save in the game first.\nDocked mode is how the Switch runs in its dock; when off, Handheld mode is used. The actual resolution and quality are up to the game; this is set separately from the compatible / high-performance run mode.\nWidescreen and 60 FPS need resource pack support and may increase load and power use.";
+"settings.footer.graphics" = "Takes effect after restarting the game. While a game is running, you can choose to restart right away when you tap Done; save in the game first.\nDocked mode is how the Switch runs in its dock; when off, Handheld mode is used. The actual resolution and quality are up to the game; this is set separately from the compatible / high-performance run mode.\nWidescreen and 60 FPS need resource pack support and may increase load and power use.\nSetting the frame rate limit below the game's own frame rate slows the game down.";
 "settings.footer.saves" = "Save in the game first, then quit and reopen the app to manage saves.";
 "settings.fps.capLowPower" = "Temporarily at the native frame rate (Low Power Mode)";
 "settings.fps.capThermal" = "Temporarily at the native frame rate (phone is hot)";
@@ -438,3 +438,15 @@
 "textinput.min" = "At least %ld characters";
 "textinput.ok" = "OK";
 "textinput.range" = "%ld–%ld characters";
+"play.group" = "Screen layout";
+"play.footer" = "Applies to all games and adjusts layout immediately. Automatic split screen enables only when partially folded; it stays off if fold state is unavailable. Automatic orientation uses portrait for split screen and landscape otherwise.\nSome games need a restart to apply widescreen for the new area.";
+"play.split" = "Split screen";
+"play.orientation" = "Screen orientation";
+"play.auto" = "Automatic";
+"play.on" = "On";
+"play.off" = "Off";
+"play.landscape" = "Landscape";
+"play.portrait" = "Portrait";
+/* Duo shared layout settings and split touch editor */
+"vpad.layouts.split.title" = "Split-screen touch layout";
+"vpad.layouts.split.footer" = "Edit the lower controls area. Positions are saved separately from the regular layout; touch mode and stick response are shared.";

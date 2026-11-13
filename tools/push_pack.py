@@ -516,9 +516,30 @@ def need_bytes(work, nbytes, env=None):
     return nbytes + biggest + files * 4096 + spare * (1 << 30)
 
 
-def space(dev, nbytes, work, env=None):
-    """→ (可写字节或 None, 要的字节)"""
-    return dev.free(), need_bytes(work, nbytes, env)
+PHONE_FREE = "Documents/s2a_free.tsv"   # 手机上的 App 每次启动记的可用空间（ios/app.m free_note）：重要用途 \t 可选用途 \t statfs 空闲 \t 写入时刻
+
+
+def phone_free(dev, work):
+    """手机上的 App 上次启动时记的「重要用途」可用字节（含系统随时能清掉的空间，同「设置 → 通用 → iPhone 储存空间」的「可用」）和它记了多少秒：
+    电脑端经 AFC / lockdown 读到的空闲不含可清除空间（玩家反馈：「设置」里剩 70 多 GB，一键安装说只剩 2 GB）。没装过 / 没打开过 / 读不到 → (None, None)"""
+    dst = Path(work) / "s2a_free.tsv"
+    try:
+        if not dev.get(PHONE_FREE, str(dst), 30): return None, None
+        f = dst.read_text().split()
+        imp, at = int(f[0]), int(f[3])
+    except (OSError, ValueError, IndexError, Fail):
+        return None, None
+    return (imp, max(0, int(time.time()) - at)) if imp > 0 else (None, None)
+
+
+def space(dev, nbytes, work, env=None, say=print):
+    """→ (可写字节或 None, 要的字节, 是否手机记的重要用途口径)：AFC / lockdown 报的空闲与手机上的 App 记的「重要用途」可用取大的。
+    手机记的是 App 上次启动那一刻的：之后又装了东西会偏大——只用来决定要不要先问玩家，真写满了推送照样停下说明（SpaceFull）"""
+    fb = dev.free(); imp, age = phone_free(dev, work)
+    if imp is not None and (fb is None or imp > fb):
+        say(f"手机可用空间按 App 记的「重要用途」口径算：{gb1(imp)} GB（{age // 60} 分钟前记的；电脑端读到的空闲 {gb1(fb) if fb is not None else '读不到'} GB，不含可清除空间）")
+        return imp, need_bytes(work, nbytes, env), True
+    return fb, need_bytes(work, nbytes, env), False
 
 
 PROGRESS_PREFIX = "S2A_PUSH_PROGRESS"   # --progress-lines 打的机器读行：S2A_PUSH_PROGRESS <已传字节> <本次待传总字节> <已完成批次> <总批次>
@@ -756,16 +777,17 @@ def run(dev, pack, work, full=False, say=print, env=None, on_plan=None, progress
     if on_plan: on_plan(nb, nt, nbytes)
     if nbytes:
         stage(STAGE_SPACE)
-        fb, need = space(dev, nbytes, work, env)
+        fb, need, imp = space(dev, nbytes, work, env, say)
         accept = accept_low_space or (env or os.environ).get("S2A_PUSH_ACCEPT_LOW_SPACE") == "1"
         if fb is None: say(f"🟡 读不到 iPhone 剩余空间，这次要传 {max(1, nbytes >> 30)} GB：空间不够时会中途停下，请确认手机上留有足够空间")
         elif fb < need:
             # 手机报的空闲（AFC）不含系统随时能清掉的空间，比「设置 → 储存空间」里的「可用」小，常差好几 GB：估算不够不等于放不下
             head = (f"iPhone 剩余空间看起来不够：这次要传约 {gb1(nbytes)} GB，连同解开时临时多占的约要 {gb1(need)} GB，"
-                    f"手机报的空闲约 {gb1(fb)} GB。")
+                    + (f"手机可用约 {gb1(fb)} GB（含系统随时能清掉的空间）。" if imp else f"手机报的空闲约 {gb1(fb)} GB。"))
             if not accept:
-                raise LowSpace(head + "「设置 → 通用 → iPhone 储存空间」里的「可用」还包括系统随时能清掉的空间，实际多半放得下；"
-                               "点「仍然继续」照传，真写满了会停下并说明还差多少。")
+                raise LowSpace(head + ("可以先在「设置 → 通用 → iPhone 储存空间」腾出一些，或者" if imp else
+                                       "「设置 → 通用 → iPhone 储存空间」里的「可用」还包括系统随时能清掉的空间，实际多半放得下；")
+                               + "点「仍然继续」照传，真写满了会停下并说明还差多少。")
             say("🟡 " + head + "已按你的选择仍然继续；真写满了会停下并说明还差多少")
     try:
         send(dev, pack, work, say, progress, stage)

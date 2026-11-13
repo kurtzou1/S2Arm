@@ -4,7 +4,9 @@
 #pragma once
 #include <stdlib.h>
 #include <string.h>
+// S2A_UNATTENDED=1：自动玩家关着、由工具按实时通道（S2A_AP_LIVE）逐键驱动的局也是无人值守（11-12：手推按键进场景，真机上点不掉「把上次的诊断发给我们？」）
 static inline int s2a_unattended(void) {
+    const char *u = getenv("S2A_UNATTENDED"); if (u && !strcmp(u, "1")) return 1;
     const char *a = getenv("S2A_AUTOPLAY");
     return a && *a && strcmp(a, "0") != 0;
 }

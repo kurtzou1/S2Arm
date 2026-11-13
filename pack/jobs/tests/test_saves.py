@@ -168,6 +168,18 @@ class SaveTests(unittest.TestCase):
             self.assertNotIn("payload/system/prod.keys", z.namelist())
         self.assertFalse(list((self.directory / "library/save-transactions").glob("*.json")))
 
+    def test_scan_skips_os_junk_files(self):
+        """exFAT / FAT 上 macOS 给每个带扩展属性的文件生成 ._<名>（AppleDouble），访达写 .DS_Store：不是存档。
+        期望按构造写死：只剩 a.bin 与 sub/b.bin 两个文件、sub 一个目录；修前 ._a.bin、.DS_Store、sub/._b.bin 也进了备份清单"""
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t) / "saves"; (root / "sub").mkdir(parents=True)
+            (root / "a.bin").write_bytes(b"a"); (root / "sub" / "b.bin").write_bytes(b"b")
+            (root / "._a.bin").write_bytes(b"\x00\x05\x16\x07\x00\x02\x00\x00\x09\x00"); (root / ".DS_Store").write_bytes(b"Bud1"); (root / "sub" / "._b.bin").write_bytes(b"\x00\x05")
+            files, dirs = saves.scan(SimpleNamespace(check=lambda: None), root)
+            self.assertEqual(list(files), ["a.bin", "sub/b.bin"])
+            self.assertEqual(dirs, ["sub"])
+
     def test_export_manifest_lists_exact_files_without_keys(self):
         self.backup()
         result = self.preview()

@@ -92,6 +92,21 @@ int main(void) {
       int torn = 0; for (char *l = out; *l; ) { char *e = strchr(l, '\n'); if (!e) { torn++; break; }
           char *a = strstr(l, "[s2a]"); if (a && a < e) { char *b2 = strstr(a + 5, "[s2a]"); if (b2 && b2 < e) torn++; } l = e + 1; }
       eq("⑤ 没有被另一条线程插断的行（一行里两个 [s2a]、或末行没写完）", 0, torn); }
+    // ⑥ 出事那块内存（#523 / #815：SIGBUS 只有地址，看不出是只读还是没映射）：子进程往自己设成只读的匿名页写。
+    //   期望按构造写死：写（ESR WnR）、落在映射块、当前 r-- / 最大 rwx（匿名映射的最大权限）；块起点就是那一页
+    { char path[] = "/tmp/t_crash_ro_XXXXXX"; int fd = mkstemp(path);
+      volatile uint8_t *ro = mmap(NULL, 0x4000, PROT_READ, MAP_PRIVATE | MAP_ANON, -1, 0);
+      pid_t c = fork();
+      if (c == 0) { g_s2a_logfd = fd; s2a_crash_install(); ro[0x10] = 1; _exit(0); }
+      int ws = 0; waitpid(c, &ws, 0);
+      static char out[65536]; lseek(fd, 0, SEEK_SET); ssize_t k = read(fd, out, sizeof out - 1); out[k > 0 ? k : 0] = 0; close(fd); unlink(path);
+      char want[96]; snprintf(want, sizeof want, "出事那块内存：写 %#llx", (unsigned long long)(uintptr_t)(ro + 0x10));
+      char blk[64]; snprintf(blk, sizeof blk, "[%#llx, %#llx)", (unsigned long long)(uintptr_t)ro, (unsigned long long)(uintptr_t)(ro + 0x4000));
+      eq("⑥ 写只读页：子进程崩了", 1, !(WIFEXITED(ws) && WEXITSTATUS(ws) == 0));
+      eq("⑥ 出事那块内存行：写、地址照写的", 1, strstr(out, want) != NULL);
+      eq("⑥ 落在映射块、块起止就是那一页", 1, strstr(out, "落在映射块") != NULL && strstr(out, blk) != NULL);
+      eq("⑥ 权限 当前 r-- / 最大 rwx", 1, strstr(out, "权限 当前 r-- / 最大 rwx") != NULL);
+      munmap((void *)ro, 0x4000); }
     if (bad) { printf("✗ t_crash：%d/%d 项不符\n", bad, n); return 1; }
     printf("✓ t_crash：%d 项崩溃现场全符（回溯好链、坏指针不二次缺页、未映射起点、两段式第一段先落盘、两线程同时崩两份现场都在）\n", n);
     return 0;

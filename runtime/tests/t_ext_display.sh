@@ -7,11 +7,11 @@
 # ② 游戏界面控制器 S2AGameVC 建好就登记并持有（游戏库界面不登记）；
 # ③ 出图层挂 / 重摆都经出图视图（外接屏窗口的视图或根视图），重摆的后台判据走 pf_relayout_wait；
 # ④ 枚举场景找「最上层界面 / 手机朝向」的三处跳过外接屏场景（那块屏点不到）；
-# ⑤ 屏幕比例优先取外接屏的。
+# ⑤ 屏幕比例优先取外接屏的（#301 起屏幕比例在 ios/play_layout.m 的 screen_ratio，分屏布局与外接屏同一处）。
 set -u; H=$(cd "$(dirname "$0")/../.." && pwd); bad=0
 ck() { if eval "$2"; then echo "PASS $1"; else echo "FAIL $1"; bad=1; fi; }
 cd "$H"
-E=ios/extdisplay.m; A=ios/app.m; G=graphics/nvn/host_adapt.m; ROLE=UIWindowSceneSessionRoleExternalDisplayNonInteractive
+E=ios/extdisplay.m; A=ios/app.m; P=ios/play_layout.m; G=graphics/nvn/host_adapt.m; ROLE=UIWindowSceneSessionRoleExternalDisplayNonInteractive
 ck "① extdisplay.m 有场景代理类 S2AExternalSceneDelegate" 'grep -q "^@implementation S2AExternalSceneDelegate" $E'
 ck "① 登记场景配件：iOS 27 可用性判断 + 外接屏非交互角色 + 委托类 + registerSceneAccessory" \
    'grep -q "@available(iOS 27.0, \*)" $E && grep -q "sessionRole:$ROLE" $E && grep -q "delegateClass = S2AExternalSceneDelegate.class" $E && grep -q "registerSceneAccessory:\[UISceneAccessory externalNonInteractiveSceneAccessoryWithConfiguration:" $E'
@@ -25,5 +25,5 @@ ck "③ 重摆的后台判据走 pf_relayout_wait" 'sed -n "/^void s2a_direct_re
 for f in ios/lan_permission.m ios/textinput.m ios/phone_motion.m; do
   ck "④ $f 枚举场景跳过外接屏场景" 'grep -q "session.role isEqualToString:$ROLE" $f'
 done
-ck "⑤ 屏幕比例优先取外接屏" 'sed -n "/^static double screen_ratio/,/^}/p" $A | grep -q "double x = s2a_ios_ext_ratio(); if (x > 0) return x;"'
+ck "⑤ 屏幕比例优先取外接屏" 'sed -n "/^static double screen_ratio/,/^}/p" $P | grep -q "double x = s2a_ios_ext_ratio(); if (x > 0) return x;"'
 [ $bad = 0 ] && echo "外接显示器接线单测全过" || exit 1

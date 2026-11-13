@@ -41,24 +41,48 @@ extension S2ArmLauncherModel {
         }
     }
 
-    /// 启动时取一次公告（官方下载页上的 notice.json，取不到用随包那份；玩家关掉过的同一条不给）。内容是数据，不写在代码里
-    func loadNotice() {
-        Task { notice = await provider.client.notice() }
+    /// 启动时一次：查版本 + 取公告，按「永远只给最新一期」算出弹窗 / 横幅 / 消息（pack/jobs/updater.py inbox）。有新版照旧在后台下好，不打断玩家；
+    ///   查不到（没网、GitHub 不通）什么都不显示
+    func loadInbox() {
+        Task {
+            guard let result = await provider.client.inbox(current: currentVersion) else { return }
+            notice = result["banner"] as? [String: Any]
+            messages = result["messages"] as? [[String: Any]] ?? []
+            unreadMessages = result["unread"] as? Int ?? 0
+            if let update = result["update"] as? [String: Any], update["available"] as? Bool == true { availableUpdate = update }
+            updatePopup = result["popup"] as? [String: Any]
+            if availableUpdate != nil, updateState == .idle { downloadUpdate() }
+        }
     }
 
-    /// 玩家点 ×：当场收起，再记下这条的号
+    /// 玩家点 ×：当场收起，再记下这条（比它旧的也都算看过）
     func dismissNotice() {
         guard let id = notice?["id"] as? String else { return }
         notice = nil
-        Task { await provider.client.noticeDismiss(id: id) }
+        if (messages.first?["id"] as? String) == id { unreadMessages = 0 }
+        Task { await provider.client.inboxSeen(notice: id) }
     }
 
-    /// 启动时查一次；有新版就在后台下好，不打断玩家。查不到（没网、GitHub 不通）什么都不显示。
-    func checkForUpdate() {
-        guard updateState == .idle else { return }
-        Task {
-            guard await provider.client.updateCheck(current: currentVersion) != nil, updateState == .idle else { return }
-            downloadUpdate()
+    /// 关掉弹窗（以后再说 / 知道了）：这一版不再弹
+    func closeUpdatePopup() {
+        updateGate = nil
+        guard let popup = updatePopup, let version = popup["version"] as? String else { updatePopup = nil; return }
+        updatePopup = nil
+        let after = popup["kind"] as? String == "afterUpdate"
+        Task { await provider.client.inboxSeen(update: after ? nil : version, after: after ? version : nil) }
+    }
+
+    /// 顶栏「有新版 vX」：回到弹窗①
+    func showUpdatePopup() {
+        guard let update = availableUpdate, let version = update["version"] as? String else { return }
+        updatePopup = ["kind": "update", "version": version, "notes": update["notes"] ?? NSNull()]
+    }
+
+    /// 打开「消息」：看过最新那条公告，未读清零（更旧的本来就不算未读）
+    func openMessages() {
+        unreadMessages = 0
+        if let id = messages.first(where: { $0["kind"] as? String == "notice" })?["id"] as? String {
+            Task { await provider.client.inboxSeen(notice: id) }
         }
     }
 
@@ -87,9 +111,11 @@ extension S2ArmLauncherModel {
         }
     }
 
-    /// 只有玩家点了才重启；出包等作业进行中按钮置灰。
+    /// 只有玩家点了才重启。有局 / 任务在跑：先拦下说清（草图④：前置检查，不进换版；update_app_busy 是换版时旧 S2Arm 没退出，另说）
     func restartToUpdate() {
-        guard let ready = updateReady, !busy else { return }
+        if busy { updateGate = session?.kind == .play ? "update.gate.playing" : "update.gate.busy"; return }
+        guard let ready = updateReady else { return }
+        updatePopup = nil
         do {
             try provider.client.updateApply(ready: ready, install: Bundle.main.bundlePath, arguments: Array(CommandLine.arguments.dropFirst()))
             NSApp.terminate(nil)

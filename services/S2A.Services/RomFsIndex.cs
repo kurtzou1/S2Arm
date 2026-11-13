@@ -557,7 +557,34 @@ namespace S2A.Services
                 }
             }
 
+            // 诊断（缺省关）：S2A_ROMFS_STATS=1 时记每次读的耗时，约每 2 秒往 host.log 打一行累计（次数 / 字节 / 合计 / 单次 p50 p99 最大）。
+            //   单文件镜像与单一 IMG 都经这里读，用来比两种形态的读取本身（11-11 IMG 真机对比：游戏自身加载差 110 ms，要分清是读取还是管线现编的噪声）；不是产品行为
+            private static readonly bool Stats = Environment.GetEnvironmentVariable("S2A_ROMFS_STATS") == "1";
+            private static readonly object StatsLock = new();
+            private static readonly List<int> StatsUs = new();
+            private static long _statsBytes, _statsLast;
+
             public override Result Read(long offset, Span<byte> destination)
+            {
+                if (!Stats) return ReadCore(offset, destination);
+                long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                Result r = ReadCore(offset, destination);
+                long now = System.Diagnostics.Stopwatch.GetTimestamp();
+                int us = (int)Math.Min(int.MaxValue, (now - t0) * 1_000_000 / System.Diagnostics.Stopwatch.Frequency);
+                lock (StatsLock)
+                {
+                    StatsUs.Add(us); _statsBytes += destination.Length;
+                    if (now - _statsLast >= 2 * System.Diagnostics.Stopwatch.Frequency)
+                    {
+                        _statsLast = now;
+                        int[] v = StatsUs.ToArray(); Array.Sort(v); long sum = 0; foreach (int x in v) sum += x;
+                        Console.Error.WriteLine($"[S2A RomFS] 读取统计：{v.Length} 次、{_statsBytes / 1048576.0:0.0} MB、合计 {sum / 1000.0:0.0} ms、单次 p50 {v[v.Length / 2]} µs / p99 {v[(int)(v.Length * 0.99)]} µs / 最大 {v[^1]} µs");
+                    }
+                }
+                return r;
+            }
+
+            private Result ReadCore(long offset, Span<byte> destination)
             {
                 if (offset < 0 || offset + destination.Length > _size)
                 {

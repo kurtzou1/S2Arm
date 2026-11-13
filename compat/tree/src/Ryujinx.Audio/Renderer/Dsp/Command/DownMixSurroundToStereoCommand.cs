@@ -40,12 +40,6 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
             return this;
         }
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static float DownMixSurroundToStereo(ReadOnlySpan<float> coefficients, float back, float lfe, float center, float front)
-        {
-            return FloatingPointHelper.RoundUp(coefficients[3] * back + coefficients[2] * lfe + coefficients[1] * center + coefficients[0] * front);
-        }
-
         public void Process(CommandList context)
         {
             ReadOnlySpan<float> frontLeft = context.GetBuffer(InputBufferIndices[0]);
@@ -58,11 +52,18 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
             Span<float> stereoLeft = context.GetBuffer(OutputBufferIndices[0]);
             Span<float> stereoRight = context.GetBuffer(OutputBufferIndices[1]);
 
-            for (int i = 0; i < context.SampleCount; i++)
-            {
-                stereoLeft[i] = DownMixSurroundToStereo(Coefficients, backLeft[i], lowFrequency[i], frontCenter[i], frontLeft[i]);
-                stereoRight[i] = DownMixSurroundToStereo(Coefficients, backRight[i], lowFrequency[i], frontCenter[i], frontRight[i]);
-            }
+            // S2Arm: 内核抽到 S2ADspMixHelper（ARM 向量路径 + 标量路径逐样本一致）
+            S2ADspMixHelper.DownMixSurroundToStereo(
+                stereoLeft,
+                stereoRight,
+                frontLeft,
+                frontRight,
+                frontCenter,
+                lowFrequency,
+                backLeft,
+                backRight,
+                Coefficients,
+                (int)context.SampleCount);
 
             context.ClearBuffer(OutputBufferIndices[2]);
             context.ClearBuffer(OutputBufferIndices[3]);

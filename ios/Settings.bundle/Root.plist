@@ -5,6 +5,27 @@
     <key>PreferenceSpecifiers</key>
     <array>
         <dict>
+            <key>Type</key><string>PSGroupSpecifier</string>
+            <key>Title</key><string>Screen Layout</string>
+            <key>FooterText</key><string>Applies to every game. Automatic split screen enables only when partially folded; without hinge status it stays off. Automatic orientation uses portrait for split screen and landscape otherwise. Some games need a restart to apply widescreen to the new area.</string>
+        </dict>
+        <dict>
+            <key>Type</key><string>PSMultiValueSpecifier</string>
+            <key>Title</key><string>Split Screen</string>
+            <key>Key</key><string>splitScreen</string>
+            <key>DefaultValue</key><string>auto</string>
+            <key>Titles</key><array><string>Automatic</string><string>On</string><string>Off</string></array>
+            <key>Values</key><array><string>auto</string><string>on</string><string>off</string></array>
+        </dict>
+        <dict>
+            <key>Type</key><string>PSMultiValueSpecifier</string>
+            <key>Title</key><string>Screen Orientation</string>
+            <key>Key</key><string>screenOrientation</string>
+            <key>DefaultValue</key><string>auto</string>
+            <key>Titles</key><array><string>Automatic</string><string>Landscape</string><string>Portrait</string></array>
+            <key>Values</key><array><string>auto</string><string>landscape</string><string>portrait</string></array>
+        </dict>
+        <dict>
             <key>Type</key>
             <string>PSGroupSpecifier</string>
             <key>Title</key>

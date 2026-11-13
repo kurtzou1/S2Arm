@@ -1,6 +1,6 @@
 """推资源包（tools/push_pack.py，Mac / Windows 共用，11-06 两端合一）：假设备（内存里的 App 容器）上核口径。期望按文件头规则手写，不跑被测实现推导。
 Mac 的整条 dev_run 推包回归（假 devicectl）在 tests/dev_run_test.sh，本文件只核规则本身与 Windows 那支（原 tests/oneclick_win_test.py 推包几组搬来）"""
-import hashlib, json, os, struct, sys, tempfile, unittest
+import hashlib, json, os, struct, sys, tempfile, time, unittest
 from pathlib import Path
 from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
@@ -527,6 +527,28 @@ class SpaceNeed(Base):
         self.dev = Fake({}, full_disk=True); self.dev.free = lambda: next(frees)
         with self.assertRaises(push.Fail) as e: push.run(self.dev, self.pk, self.w, full=True, say=self.log.append, env={"S2A_PUSH_SPARE_GB": "0"})
         self.assertNotIsInstance(e.exception, push.SpaceFull)
+
+    # 手机上的 App 记的「重要用途」可用（Documents/s2a_free.tsv，含可清除空间）比电脑端读到的空闲大：按它判（玩家反馈：设置里剩 70 多 GB，一键安装说只剩 2 GB）
+    def phone(self, imp, afc):
+        self.dev = Fake({push.PHONE_FREE: f"{imp}\t0\t{afc}\t{int(time.time()) - 120}\n"}); self.dev.free = lambda: afc
+
+    def test_phone_important_enough_pushes(self):   # 电脑端空闲 100 字节、手机记 8198（正好够）→ 不问照推，日志说按哪个口径
+        self.phone(8198, 100)
+        self.assertEqual(push.run(self.dev, self.pk, self.w, full=True, say=self.log.append, env={"S2A_PUSH_SPARE_GB": "0"})[2], 3)
+        self.assertTrue(any("重要用途" in m and "2 分钟前" in m for m in self.log), self.log)
+
+    def test_phone_important_short_asks_without_purgeable_claim(self):   # 手机记的也差 1 字节 → 照样问；不再说「实际多半放得下」（已含可清除空间）
+        self.phone(8197, 100)
+        with self.assertRaises(push.LowSpace) as e: push.run(self.dev, self.pk, self.w, full=True, say=self.log.append, env={"S2A_PUSH_SPARE_GB": "0"})
+        self.assertIn("含系统随时能清掉的空间", str(e.exception)); self.assertNotIn("多半放得下", str(e.exception)); self.assertIn("仍然继续", str(e.exception))
+
+    def test_phone_smaller_than_afc_ignored(self):   # 手机记的（旧的）比电脑端读到的还小 → 用电脑端的
+        self.phone(100, 8198)
+        self.assertEqual(push.run(self.dev, self.pk, self.w, full=True, say=self.log.append, env={"S2A_PUSH_SPARE_GB": "0"})[2], 3)
+        self.assertFalse(any("重要用途" in m for m in self.log))
+
+    def test_phone_file_garbage_is_none(self):
+        self.dev = Fake({push.PHONE_FREE: "坏\n"}); self.assertEqual(push.phone_free(self.dev, self.w), (None, None))
 
     def test_devpush_free_parses_or_none(self):
         d = push.Devpush("exe", "U", "b", self.w)

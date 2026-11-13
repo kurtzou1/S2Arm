@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
-# 门禁覆盖：compat/tree/src/Ryujinx.Graphics.Nvdec/Vp9*.cs compat/tree/src/Ryujinx.Graphics.Nvdec/Vpx/* compat/tree/src/Ryujinx.Graphics.Nvdec/Types/Vp9/* compat/tree/src/Ryujinx.Graphics.Nvdec.Vp9/** compat/tree/src/Ryujinx.Graphics.Video/*Vp9* services/vpx/** tests/vp9_native_parity/* tests/vp9_synth_parity/* tests/data/vp9_synth/*
+# 门禁覆盖：compat/tree/src/Ryujinx.Graphics.Nvdec/Vp9*.cs compat/tree/src/Ryujinx.Graphics.Nvdec/Vpx/* compat/tree/src/Ryujinx.Graphics.Nvdec/Types/Vp9/* compat/tree/src/Ryujinx.Graphics.Nvdec.Vp9/** compat/tree/src/Ryujinx.Graphics.Video/*Vp9* services/vpx/** tests/vp9_native_parity/* tests/vp9_synth_parity/* tests/data/vp9_synth/* platform/apple/cs/video/AppleVideo.cs platform/apple/cs/video/VideoToolboxVp9Backend.cs
 # 原生 VP9（libvpx + S2Arm 补丁，Vp9NativeFrame.cs 写帧头 / 参考槽）与托管解码器的逐作业对拍，合成码流版（t_vp9_native_parity.sh 要设备抓取、门禁跑不了）：
 #   不打补丁的 libvpx 1.17.0（同 services/vpx/build.sh 的源码包）加测试专用钩子（tests/vp9_synth_parity/jobgen_hook.patch，默认 NULL）解 tests/data/vp9_synth
 #   的合成码流，jobgen.c 把每个解出的帧写成游戏驱动交给 NVDEC 的作业（S2V9 v1，与设备抓取同格式），再由 tests/vp9_native_parity 逐作业跑原生与托管：
 #   画面、MV 回写、计数逐字节相同，且画面等于 libvpx 自己解出的（三方一致）。不含任何游戏数据。
+# VT 腿（--vt）：同一对拍再跑一遍苹果 VideoToolbox 硬解后端（platform/apple/cs/video/VideoToolboxVp9Backend.cs，与安卓
+#   McVp9Backend 同一契约、不产 MV/计数）——每个 Decoded 作业的画面必须等于 libvpx 参考；隐藏帧 / 尺寸变化 / 压缩头
+#   检查拦下的作业按原因归桶（与 Vp9NativePath 的回退同语义）。探针不过的机器（无系统 VP9 解码器 / 非 macOS）
+#   程序退 75，如实记「跳过」不算失败；本机有系统 VP9 硬解时不许跳过。
 # 负对照（每次都跑）：只给托管解码器错的锐度 → 原生≠托管必须红；两边同样错 → 原生=托管但≠libvpx，必须靠参考哈希红（证明三方那一条不瞎）。
+#   VT 腿的负对照（VT 跑了的机器）：两边同样错 → 重打包非压缩头的 FilterLevel 变了、硬解画面跟着变，必须靠参考哈希红。
 # 已知缺口：fp_ragged（350x198）的托管画面在右下角最后一个不满的超级块与 libvpx 不同（原生一致），该流只要求原生=libvpx、MV / 计数原生=托管。
 set -euo pipefail
 H=$(cd "$(dirname "$0")/.." && pwd -P)
@@ -83,7 +88,24 @@ for s in adapt_720 resize fp_ragged; do
     if run "$s" "$mode"; then echo "通 ${s}（${mode}）"; else echo "🔴 ${s}：原生 / 托管 / libvpx 不一致"; fails=$((fails + 1)); fi
 done
 
+# 3b. VT 腿：苹果 VideoToolbox 硬解后端（--vt）走同一对拍。探针不过（程序退 75）按「跑不了」记跳过不算失败，
+#     也不算通过——第一条流跳过后面几条不再重复试；本机有系统 VP9 硬解（维护者机器）时全部三条都要绿。
+vt_skip=0
+for s in adapt_720 resize fp_ragged; do
+    [ "$vt_skip" = 1 ] && continue
+    rc=0; out=$(S2A_NVDEC_VP9_VT=1 run "$s" --vt 2>&1) || rc=$?   # 硬解缺省关：VT 腿显式打开
+    if [ "$rc" -eq 75 ]; then vt_skip=1; echo "跳过 vt-${s}：$out"
+    elif [ "$rc" -eq 0 ]; then echo "通 vt-${s}（--vt）"
+    else echo "🔴 vt-${s}：VideoToolbox 硬解画面与 libvpx 参考不一致"; echo "$out"; fails=$((fails + 1)); fi
+done
+
 # 4. 负对照：必须红
+# 4a. VT 腿负对照（VT 跑了的机器）：两边同样错 → 重打包非压缩头的 FilterLevel 变了、硬解画面跟着变，必须靠参考哈希红
+if [ "$vt_skip" = 0 ]; then
+    if S2A_VP9_PARITY_PERTURB=both run adapt_720 --vt > "$W/vtneg.log" 2>&1; then
+        echo "🔴 VT 腿负对照没红：硬解对拍看不出差别"; cat "$W/vtneg.log"; fails=$((fails + 1))
+    else echo "通 VT 腿负对照红了：$(tr "\n" " " < "$W/vtneg.log")"; fi
+fi
 for p in managed both; do
     if S2A_VP9_PARITY_PERTURB=$p run adapt_720 --ref > "$W/neg.log"; then
         echo "🔴 负对照 $p 没红：对拍看不出差别"; cat "$W/neg.log"; fails=$((fails + 1))

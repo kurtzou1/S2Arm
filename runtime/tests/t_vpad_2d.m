@@ -22,10 +22,17 @@ int main(void) {
         CGFloat cx = 0.17 * 832, cy = 0.66 * 419;
         struct { CGFloat dx, dy; int want; const char *what; } cases[] = {
             {60, 0, 8, "右"}, {42, 42, 8 | 2, "右下（斜角两位）"}, {0, -60, 1, "上"}, {-42, -42, 4 | 1, "左上"},
-            {-60, 0, 4, "左"}, {0, 60, 2, "下"}, {5, 5, 0, "正中心（半径 7 < 16）不算方向"}, {90, 0, -1, "圆区外（90 > 80）"}};
+            {-60, 0, 4, "左"}, {0, 60, 2, "下"}, {-42, 42, 4 | 2, "左下"}, {42, -42, 8 | 1, "右上"}, {5, 5, 0, "正中心（半径 7 < 16）不算方向"}, {90, 0, -1, "圆区外（90 > 80）"}};
         for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
             int got = [l dpadDirectionsAt:CGPointMake(cx + cases[i].dx, cy + cases[i].dy) safeRect:safe];
             CK(got == cases[i].want, "⑥ 十字键%s：期望 %d → 实得 %d", cases[i].what, cases[i].want, got);
+        }
+        // 分屏下区带有非零原点；八方向与中心 / 圆外判据仍以当前安全区为准，不沿用转屏前的原点。
+        CGRect lower = CGRectMake(16, 400, 832, 419);
+        S2AVPadLayout *lower2D = [S2AVPadLayout twoDForSafeRect:lower];
+        for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+            int got = [lower2D dpadDirectionsAt:CGPointMake(16 + cx + cases[i].dx, 400 + cy + cases[i].dy) safeRect:lower];
+            CK(got == cases[i].want, "⑥ 下区非零原点十字键%s：期望 %d → 实得 %d", cases[i].what, cases[i].want, got);
         }
         S2AVPadLayout *d = [S2AVPadLayout defaultForSafeRect:safe];
         CK([d dpadDirectionsAt:CGPointMake(0.235 * 832, 0.80 * 419) safeRect:safe] == -1, "⑦ 有摇杆的默认布局不走八方向（仍按单个方向键）");

@@ -2,15 +2,18 @@
 //   装到 iPhone 的方式存在作业层 install.json（installMode 作业，Mac / Windows 同一份）：一键装到 iPhone（签名身份 = Xcode 账号 / 我的开发者证书）
 //   或导出自己签名安装（导出作业合入前置灰）。完成页可临时换一次，不改这里。
 //   更新：库页右上角按钮（catalog phoneUpdates：设备记录的壳号比本版旧）→ 有要重新出包的款先三选一 → installUpdate 作业只换壳、不重推资源。
+import AppKit
 import Foundation
 import S2ArmAppleAdapter
 
 extension S2ArmLauncherModel {
     // 失败不吞（剃刀 M13）：读失败保留原值、报一次原因；切换失败报原因（界面停在旧值是真实状态，不再像点了没反应）
-    func refreshInstallMode() {
+    /// silent：App 启动时那一次。读不到（游戏库还没建、首次打开）保留缺省值、不弹框——启动就弹错误框不对，单测里模态框还会把测试挂死；
+    ///   打开设置 / 装机页时的读照旧失败如实报
+    func refreshInstallMode(silent: Bool = false) {
         Task {
             do { installMode = try await provider.installMode(); readOK("s2arm.fail.installMode") }
-            catch { reportFailure("s2arm.fail.installMode", error, passive: true) }
+            catch { if !silent { reportFailure("s2arm.fail.installMode", error, passive: true) } }
         }
     }
 
@@ -51,7 +54,10 @@ extension S2ArmLauncherModel {
                 self?.phoneOutcome = PhoneOutcome(device: Self.deviceLabel(kind: r["deviceKind"] as? String ?? "", name: r["deviceName"] as? String ?? ""),
                                                   packFiles: (r["packFiles"] as? NSNumber)?.intValue, packBytes: (r["packBytes"] as? NSNumber)?.int64Value,
                                                   skipped: (r["skipped"] as? [String] ?? []).map { names[$0.uppercased()] ?? $0 },
-                                                  version: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "")
+                                                  version: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "",
+                                                  exportFolder: r["exported"] as? Bool == true ? r["outputPath"] as? String ?? "" : "",
+                                                  exportGames: (r["games"] as? [Any])?.count ?? 0, exportBytes: (r["exportBytes"] as? NSNumber)?.int64Value)
+                if r["exported"] as? Bool == true, let folder = r["outputPath"] as? String { NSWorkspace.shared.open(URL(fileURLWithPath: folder)) }
             }
             catch let f as JobFailure where ask && Self.confirmCodes[f.code ?? ""] != nil {
                 self?.dropConfirm = DropConfirm(kind: .installUpdate, message: f.errorDescription ?? "",

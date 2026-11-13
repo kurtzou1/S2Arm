@@ -3,6 +3,7 @@
 #import "save_transfer.h"
 #import "s2a_l10n.h"
 #import "settings.h"
+#import "play_layout.h"
 #include "save_gate.h"
 #include "s2a_launch_ctx.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
@@ -132,7 +133,7 @@ int s2a_ios_save_management_requested(void) {
 @end
 
 @implementation S2ASaveManager
-- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return s2a_ios_play_orientations(); }
 - (UILabel *)label:(NSString *)text style:(UIFontTextStyle)style {
     UILabel *label = [UILabel new]; label.text = text; label.numberOfLines = 0;
     label.font = [UIFont preferredFontForTextStyle:style]; label.adjustsFontForContentSizeCategory = YES;

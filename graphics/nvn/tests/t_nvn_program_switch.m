@@ -6,6 +6,7 @@
 //   ① 起局按 A：认 aaaa、不认 bbbb，库容器 = 无（一键一文件）
 //   ② DM_NVN_SHMAP / DM_MSL_DIR 改到 B、调 nvn_be_reload_direct_library → 回 1；认 bbbb、不认 aaaa，库容器开在 B 的 b-<链号>
 //   ③ 路径没变再调 → 回 0，什么都不动（仍认 bbbb）
+//   ④ 目录里没有映射表（#786）→ 当空表：回 1、不中止，aaaa / bbbb 都不认
 // 反证：不重读（直接回 0）→ ② 仍认 aaaa、不认 bbbb、库容器仍是无（红）
 #include "../gfx/nvn/nvn_mtl.m"
 
@@ -44,6 +45,13 @@ int main(void) {
 
         r = nvn_be_reload_direct_library();
         CHECK(r == 0 && mtl_shmap_known(kb.UTF8String), "③ 路径没变再调 → 回 0、仍认 B（实得 %d）", r);
+
+        // ④ #786：换到没有映射表的目录（出包判成 OpenGL 款、没出 NVN 库的包）→ 照常回 1、进程不退，A / B 的键都不认（全部交设备上首遇现编）；改前 MDIE 中止整个进程
+        NSString *c = [root stringByAppendingPathComponent:@"c/shaders/direct"];
+        REQUIRE([NSFileManager.defaultManager createDirectoryAtPath:c withIntermediateDirectories:YES attributes:nil error:nil]);
+        use_dir(c);
+        r = nvn_be_reload_direct_library();
+        CHECK(r == 1 && !mtl_shmap_known(ka.UTF8String) && !mtl_shmap_known(kb.UTF8String), "④ 换到没有映射表的目录 → 回 1、不中止，A / B 的键都不认（实得 %d）", r);
         [NSFileManager.defaultManager removeItemAtPath:root error:nil];
     }
     printf("%u checks, %u failures\n", checks, failures);

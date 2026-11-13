@@ -13,7 +13,8 @@ void s2a_sesmark_clear_home(void);
 typedef struct {
     long long frames, thermal, peak_mb;   // -1 = 没见到
     int mark, end, last_state, truncated;  // last_state：S2A_SESMARK_FG / BG / 3 = 前台失焦，0 = 没有心跳
-    size_t bytes;
+    size_t bytes;   // 日志文件大小
+    size_t read;    // 实际读进来的字节数（头段 + 尾段；单测按它核「有界」，与负载无关）
 } s2a_log_sum;
 int s2a_log_summary(const char *path, size_t head_cap, size_t tail_cap, s2a_log_sum *o);
 #endif

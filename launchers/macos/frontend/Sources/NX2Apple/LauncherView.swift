@@ -38,6 +38,7 @@ struct LauncherView: View {
     @State var missingFor: GameSummary?
     @State private var showController = false
     @State private var dropTargeted = false
+    @State private var showMessages = false
     @State var collectionHeight: CGFloat = 300
     let brand: String
 
@@ -124,6 +125,13 @@ struct LauncherView: View {
             Button(txt("phone.drop.cancel"), role: .cancel) { model.libraryConfirm = nil }
         } message: { Text(loc.backend(model.libraryConfirm?.message ?? "")) }
         .sheet(isPresented: $model.showAddGames) { ImportSheet(model: model, kind: .games).environmentObject(loc) }
+        // 打开时最多一个更新弹窗（有新版 / 这版更新了什么），只给最新一期；关掉（含 Esc）= 这一版不再弹
+        .sheet(isPresented: Binding(get: { model.updatePopup != nil && !model.showAddGames && !model.showKeys }, set: { if !$0, model.updatePopup != nil { model.closeUpdatePopup() } })) {
+            UpdatePopupView(model: model, language: uiLanguage)
+        }
+        .alert(txt(model.updateGate ?? "update.gate.busy"), isPresented: Binding(get: { model.updateGate != nil && model.updatePopup == nil }, set: { if !$0 { model.updateGate = nil } })) {
+            Button(txt("update.after.ok"), role: .cancel) { model.updateGate = nil }
+        } message: { Text(txt((model.updateGate ?? "update.gate.busy") + ".body")) }
         .sheet(isPresented: $model.showKeys) { ImportSheet(model: model, kind: .keys).environmentObject(loc) }
         .sheet(isPresented: $model.showEnvironment) {
             EnvironmentView(model: model).environmentObject(loc)
@@ -161,7 +169,9 @@ struct LauncherView: View {
         return (info?["CFBundleShortVersionString"] as? String).map { "v" + $0 + "-dev" } ?? "dev"   // swift run 等不经 build_app 的开发构建
     }
 
-    private var topBar: some View {
+    private var topBar: some View { topBarRow.onChange(of: model.showInstallFor) { id in if let id { installFor = id; model.showInstallFor = nil } } }   // 控制口 /show install（单独一层：挂在 body 长链上编译器类型检查超时）
+
+    private var topBarRow: some View {
         HStack(spacing: 12) {
             // 点品牌名回欢迎页（社区贡献者补丁 #2）
             Button { installFor = nil; model.goToLibrary(); model.welcomeHome = true } label: {
@@ -191,6 +201,7 @@ struct LauncherView: View {
                 ControllerToolbarButton(controller: model.controller, show: $showController,
                                         simplifiedChinese: loc.lang == .zh)
                 updateButton
+                messagesButton
                 Button { installFor = nil; model.goToLibrary() } label: {
                     Label(loc.t("s2arm.nav.library"), systemImage: "square.grid.2x2").font(.manrope(12.5, .semibold))
                 }
@@ -293,10 +304,12 @@ struct LauncherView: View {
                 Text(txt(id).replacingOccurrences(of: "{0}", with: "\(percent ?? 0)")).font(.manrope(12)).monospacedDigit().foregroundStyle(.secondary)
             }
         case .ready:
-            Button { model.restartToUpdate() } label: {
-                Label(txt(model.busy ? "update.restart.busy" : "update.restart"), systemImage: "arrow.down.circle").font(.manrope(12.5, .semibold))
+            // 草图：「以后再说」之后顶栏留「有新版 vX」，点开回到更新弹窗①（「现在更新并重启」在弹窗里；有局在跑时那里先拦下说明）
+            Button { model.showUpdatePopup() } label: {
+                Label(txt("update.top.available").replacingOccurrences(of: "{0}", with: model.availableUpdate?["version"] as? String ?? ""), systemImage: "arrow.down.circle")
+                    .font(.manrope(12.5, .semibold))
             }
-            .buttonStyle(LauncherSecondaryButtonStyle()).disabled(model.busy)
+            .buttonStyle(LauncherSecondaryButtonStyle()).accessibilityIdentifier("top.update")
         case .failed(let code):
             // 失败原因直接写在按钮旁（人话 + 错误码），并给「打开下载页」：自动更新连不上 GitHub 时玩家能自己下（不再只藏在悬停提示里）
             HStack(spacing: 8) {
@@ -313,6 +326,22 @@ struct LauncherView: View {
     }
 
     func txt(_ id: String) -> String { BackendText.launcherText(id, language: uiLanguage) }
+
+    /// 「消息」：公告和更新说明都在这里（旧的只在这里、不弹）；未读只算最新那条公告
+    private var messagesButton: some View {
+        Button { showMessages = true; model.openMessages() } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "bell")
+                Text(txt("messages.button")).font(.manrope(12.5, .semibold))
+                if model.unreadMessages > 0 {
+                    Text("\(model.unreadMessages)").font(.manrope(10.5, .bold)).foregroundStyle(.white)
+                        .padding(.horizontal, 5).padding(.vertical, 1).background(LauncherPalette.danger, in: Capsule())
+                }
+            }
+        }
+        .buttonStyle(LauncherSecondaryButtonStyle()).accessibilityIdentifier("top.messages")
+        .popover(isPresented: $showMessages, arrowEdge: .bottom) { MessagesPanel(model: model, language: uiLanguage) }
+    }
 
     /// 批量出包（v0.2.4）：清单页没开着时，这批正在出 / 上次还有没出完的 → 顶部胶囊回到清单页
     @ViewBuilder private var batchPill: some View {
@@ -362,7 +391,7 @@ struct LauncherView: View {
                 Button { installFor = r.gameID } label: {
                     HStack(spacing: 7) {
                         Image(systemName: r.ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill").foregroundStyle(r.ok ? LauncherPalette.ready : LauncherPalette.danger)
-                        Text(txt(r.ok ? "install.pill.done" : "install.pill.failed").replacingOccurrences(of: "{0}", with: r.name)
+                        Text(txt(!r.ok ? "install.pill.failed" : (model.phoneOutcome?.exportFolder ?? "").isEmpty ? "install.pill.done" : "install.pill.exported").replacingOccurrences(of: "{0}", with: r.name)
                              .replacingOccurrences(of: "{1}", with: r.ok && !model.installedTo.isEmpty ? model.installedTo : model.installTargetLabel)).font(.manrope(12.5, .semibold)).lineLimit(1)
                     }
                 }

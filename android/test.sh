@@ -113,6 +113,8 @@ s2a_gate_step "$PY" "$android_dir/tests/direct_framelog_test.py"
 # 局目录被 tools/quality_check.py 安卓分支判读。
 s2a_gate_step "$PY" "$android_dir/tests/device_lock_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/run_game_test.py"
+# run_game_test 的用例收场后不留临时目录（通过 / 失败 / setUp 中途出错三种收场）。
+s2a_gate_step "$PY" "$android_dir/tests/run_game_tmp_cleanup_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/direct_game_mode_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/direct_refresh_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/direct_touch_generation_test.py"

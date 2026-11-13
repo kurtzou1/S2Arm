@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "contract": "s2a.game-settings.v1",
-  "revision": 4,
+  "revision": 5,
   "languages": ["zh-Hans", "en"],
   "coverage": "对应主线线 11-09 清单 18 行：fps60 / widenForce / widescreen（App 级旧开关并入按款）/ docked / rumble / rumbleLevel / touchHaptics / ns2ProAdapter / motion（S2APhoneGyro）/ phoneHaptics / hud（S2ADevHUD）/ metalHud / touchOpacity / slideSwitch / input（按键布局、逐键大小透明度配色、固定摇杆灵敏度死区都在虚拟手柄编辑页，iOS 独有，不逐项进表）/ holdLock / patches；另加 Mac 独有 enhance。",
   "note": "游戏设置项的唯一定义：Mac 启动设置页、iOS 游戏内齿轮菜单、iOS 游戏库长按设置都按这张表画，不各写文案和缺省。scope=game 的项存这款游戏文件夹的 launch.json（Mac：游戏文件夹；iOS：Documents/games/<游戏号>/launch.json），scope=app 的全游戏共用、留各端 App 偏好（Mac：数据目录 game-settings.json，同 launch.json 格式）。launch.json 只存玩家明确选过的项，没选的按 default；default 为对象时按平台取，为 \"caps\" 时按这款的能力清单 s2a_caps.tsv。apply：live = 改完立刻生效，restart = 下一局生效。ios_key 是 iOS 旧 UserDefaults 键，只给一次性迁移用，迁完删旧键。",
@@ -11,6 +11,14 @@
     "note": "settings 的键 = 本表 scope=game 的 id；patches 是画面补丁的开关（编号来自这款列得出的补丁）。读不到或认不得的键按缺省，不报错。"
   },
   "items": [
+    {"id": "splitScreen", "type": "choice", "default": "auto", "scope": "app", "apply": "live", "platforms": ["ios"], "group": "display", "ios_key": "S2ASplitScreen",
+     "options": [{"value": "auto", "label": {"zh-Hans": "自动", "en": "Automatic"}}, {"value": "on", "label": {"zh-Hans": "开启", "en": "On"}}, {"value": "off", "label": {"zh-Hans": "关闭", "en": "Off"}}],
+     "label": {"zh-Hans": "上下分屏", "en": "Split screen"},
+     "note": {"zh-Hans": "全部游戏共用；自动仅在半折叠时开启。", "en": "Applies to every game. Automatic enables split screen only when partially folded."}},
+    {"id": "screenOrientation", "type": "choice", "default": "auto", "scope": "app", "apply": "live", "platforms": ["ios"], "group": "display", "ios_key": "S2AScreenOrientation",
+     "options": [{"value": "auto", "label": {"zh-Hans": "自动", "en": "Automatic"}}, {"value": "landscape", "label": {"zh-Hans": "横屏", "en": "Landscape"}}, {"value": "portrait", "label": {"zh-Hans": "竖屏", "en": "Portrait"}}],
+     "label": {"zh-Hans": "屏幕方向", "en": "Screen orientation"},
+     "note": {"zh-Hans": "全部游戏共用；自动在分屏时使用竖屏，否则横屏。", "en": "Applies to every game. Automatic uses portrait for split screen and landscape otherwise."}},
     {"id": "enhance", "type": "bool", "default": false, "scope": "game", "apply": "restart", "platforms": ["mac"], "group": "display",
      "label": {"zh-Hans": "画面增强模式", "en": "Enhanced display"},
      "note": {"zh-Hans": "用 MetalFX 把画面放大到窗口分辨率，更清晰，稍费电。需要直连渲染。", "en": "Upscales the picture to the window with MetalFX. Sharper, uses a little more power. Needs direct rendering."}},

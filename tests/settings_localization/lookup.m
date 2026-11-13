@@ -31,16 +31,17 @@ int main(int argc, char **argv) { @autoreleasepool {
     // deliberately does. Do not require the previous PR's explicit table/en file.
     NSString *table=root[@"StringsTable"]?:@"Root";
     check([table isEqual:@"Root"],@"Settings uses its default Root table");
-    NSArray *specs=root[@"PreferenceSpecifiers"]; check(specs.count==29,@"29 real Settings elements");
+    NSArray *specs=root[@"PreferenceSpecifiers"]; check(specs.count==32,@"32 real Settings elements");
     NSBundle *bundle=[NSBundle bundleWithPath:path], *host=[NSBundle bundleWithPath:hostPath];
     check(bundle!=nil && host!=nil,@"Foundation opens shipped Settings and host localization bundles");
     NSDictionary *zh=plist([path stringByAppendingPathComponent:@"zh-Hans.lproj/Root.strings"]);
     NSDictionary *defaults=@{@"S2APhoneGyro":@YES,@"S2APhoneHaptics":@YES,@"S2ADockedMode":@NO,
         @"S2AResolutionScale":@"1",@"S2AAntiAliasing":@"None",@"S2AScalingFilter":@"Bilinear",@"S2AFrameRateLimit":@"0",
-        @"S2ANS2ProAdapterEnabled":@NO,@"S2APlayInSilentMode":@NO,@"S2ASaveManageOnOpen":@NO,@"S2ADiagExportOnOpen":@NO,@"S2ADevHUD":@NO,@"MetalHUDForceEnabled":@NO,
+        @"S2ANS2ProAdapterEnabled":@NO,@"S2APlayInSilentMode":@NO,@"splitScreen":@"auto",@"screenOrientation":@"auto",@"S2ASaveManageOnOpen":@NO,@"S2ADiagExportOnOpen":@NO,@"S2ADevHUD":@NO,@"MetalHUDForceEnabled":@NO,
         @"S2AGraphicsModeText":@"unknown",@"S2ADirectLibVersionText":@"unknown",@"S2APackTimeText":@"unknown",@"S2ABuildIDText":@"unknown"};
     NSDictionary *values=@{@"S2AResolutionScale":@[@"0.5",@"0.75",@"1",@"1.5",@"2"],@"S2AAntiAliasing":@[@"None",@"SmaaMedium",@"SmaaHigh"],
-        @"S2AScalingFilter":@[@"Bilinear",@"Nearest"],@"S2AFrameRateLimit":@[@"30",@"60",@"120",@"0"]};
+        @"S2AScalingFilter":@[@"Bilinear",@"Nearest"],@"S2AFrameRateLimit":@[@"30",@"60",@"120",@"0"],
+        @"splitScreen":@[@"auto",@"on",@"off"],@"screenOrientation":@[@"auto",@"landscape",@"portrait"]};
     NSDictionary *expected=@{@"Phone Gyro":@"手机陀螺仪",@"Docked Mode":@"主机模式",@"Anti-Aliasing":@"抗锯齿",@"Build ID":@"包号",
         @"1× (Native)":@"1×（原生）",@"Unlimited":@"不限",@"Unknown (shown after opening a game once)":@"未知（打开一次游戏后显示）"};
     // settings.m publishes these localized statuses. Read each real table once;
@@ -83,7 +84,7 @@ int main(int argc, char **argv) { @autoreleasepool {
                 check(![spec[@"Values"] containsObject:v],@"localized published status absent from fixed Values");
         }
     }
-    check(seen.count==17 && readOnly==4,@"17 preferences and four read-only rows");
+    check(seen.count==19 && readOnly==4,@"19 preferences and four read-only rows");
     printf("Settings Foundation localization: %u checks, %u failures; %u fields, %u real bundle lookups\n",checks,failures,fields,lookups);
     return failures?1:0;
 } }

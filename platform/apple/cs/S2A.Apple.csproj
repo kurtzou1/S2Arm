@@ -1,6 +1,7 @@
 <!-- 苹果平台实现（平台 adapter，#1069）：共享代码（compat/tree、services/S2A.Services）只认登记的接口，苹果的实现都在这个程序集，按面分子目录。
      由苹果装配（services/aot/Compose.cs；服务层单测宿主同样）在 Host.Boot 之前登记。
-     video/：H.264 走 VideoToolbox；VP8 用 Nvdec 里两端共用的 libvpx 封装（Vpx.VpxVp8Decoder），这里只登记
+     video/：H.264 走 VideoToolbox；VP8 用 Nvdec 里两端共用的 libvpx 封装（Vpx.VpxVp8Decoder），这里只登记；
+             VP9 走 macOS 系统 VP9 硬解（VideoToolboxVp9Backend，探针 + 失败回退 libvpx 原生段 / 托管，安卓 MediaCodec 同构）
      savecommit/：存档事务宿主目录原语（clonefile / renamex_np / xattr / F_FULLFSYNC），登记进 Ryujinx.HLE.FileSystem.S2AHostFileSystem
      capture/：游戏存相册截图的 JPEG 编码（ImageIO），登记进 S2A.Services.Exports.ScreenshotEncoder（苹果宿主不带 Skia） -->
 <Project Sdk="Microsoft.NET.Sdk">

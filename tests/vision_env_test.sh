@@ -1,5 +1,5 @@
 #!/bin/bash
-# tests/autoplay/vision.sh 解释器 / timeout 口径单测：bash tests/vision_env_test.sh（不联网：claude 是假的，没有中转站 / OpenRouter 钥匙）
+# tests/autoplay/vision.sh 解释器 / timeout 口径单测：bash tests/vision_env_test.sh（不联网：claude 是假的，没有 OpenRouter 钥匙）
 # 判据：PATH 上的 python3 不能用（模拟没装钉版包的系统 / Homebrew Python）、PATH 上的 timeout 是坏的，
 #   S2A_PY 指到能用的解释器时，驾驶员照常走到 claude CLI 后端答出按键（退出 0、回答里有 keys）；
 #   S2A_PY 没设、tools/machine.local 也不读（S2A_MACHINE_NO_LOCAL=1，门禁机的 machine.local 配了 S2A_PY）时退回 PATH 上的 python3（同 runtime/run_mac.sh），
@@ -20,8 +20,8 @@ chmod +x "$T/bin/"*
 "$PY" -c 'import struct, sys, zlib
 raw = b"\x00\x00\x00\x00"; ch = lambda t, d: struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d))
 open(sys.argv[1], "wb").write(b"\x89PNG\r\n\x1a\n" + ch(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)) + ch(b"IDAT", zlib.compress(raw)) + ch(b"IEND", b""))' "$T/s.png"
-run() { env -u OPENROUTER_API_KEY -u ANTHROPIC_API_KEY -u S2A_PYTHON -u S2A_PY S2A_MACHINE_NO_LOCAL=1 HOME="$T/home" PATH="$T/bin:/usr/bin:/bin" S2A_VISION_BACKEND=claude \
-          S2A_VISION_RELAY_KEY="$T/none" S2A_VISION_OR_KEY="$T/none" "$@" bash "$V" "$T/s.png" "$T/$N.json" > /dev/null 2>&1; }
+run() { env -u OPENROUTER_API_KEY -u ANTHROPIC_API_KEY -u S2A_PYTHON -u S2A_PY S2A_MACHINE_NO_LOCAL=1 HOME="$T/home" PATH="$T/bin:/usr/bin:/bin" S2A_VISION_BACKEND=cli \
+          S2A_VISION_OR_KEY="$T/none" "$@" bash "$V" "$T/s.png" "$T/$N.json" > /dev/null 2>&1; }
 
 N=good; run S2A_PY="$PY"; rc=$?
 ck "① S2A_PY 能用、PATH 上 python3 / timeout 都坏：退出 0（实为 ${rc}）、回答有 keys A（实为 $(cat "$T/good.json" 2> /dev/null)）" \

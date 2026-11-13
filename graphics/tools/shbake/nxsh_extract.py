@@ -880,8 +880,9 @@ def visit(path, data, rows, blobs, stat, depth=0, zl=True, in_pkz=False):
         return
     stat['叶子文件'] += 1; scan_blob(path, data, rows, blobs, stat)
     if b'LSLGS' in data: scan_ue(path, data, rows, blobs, stat)
-    # 内嵌 gzip / xz / LZ4 只在没被整文件解开的顶层文件里搜（10-22 量：15 款 0 命中；塞尔达 4 万个整文件 Yaz0 里盲搜 10.5 GB、CPU +20%）
-    if zl and depth == 0 and b'BNSH\0\0\0\0' not in data and data[:4] != b'BAHS': scan_zlib(path, data, rows, blobs, stat); scan_zstd_frames(path, data, rows, blobs, stat); scan_crilayla(path, data, rows, blobs, stat); not whole and scan_streams(path, data, rows, blobs, stat)   # 认不出容器的顶层文件再按 zlib 流扫一遍（大文件这一遍在 work_zlib 里分段并行）
+    # 内嵌压缩流只在没被整文件解开的顶层文件里搜：gzip / xz / LZ4（10-22 量：15 款 0 命中；塞尔达 4 万个整文件 Yaz0 里盲搜 10.5 GB、CPU +20%），
+    #   zlib 流 / zstd 帧 / CRILAYLA 同样（#744：0400486024DEC000 的 10 万个整文件 zstd 里搜出 5 万多个内嵌帧、38 万个假起点，键 0 个；不搜后抽取 CPU −25%、结果一致）
+    if zl and depth == 0 and not whole and b'BNSH\0\0\0\0' not in data and data[:4] != b'BAHS': scan_zlib(path, data, rows, blobs, stat); scan_zstd_frames(path, data, rows, blobs, stat); scan_crilayla(path, data, rows, blobs, stat); scan_streams(path, data, rows, blobs, stat)   # 认不出容器的顶层文件再按 zlib 流扫一遍（大文件这一遍在 work_zlib 里分段并行）
     undecoded(path, data); _COVER.pop(path, None)
 def flush(blobs, outdir):   # 着色器字节追加进本进程的 src/p<进程号>.pk（srcpack.py 头注：逐支两个小文件九成时间耗在元数据上）
     import srcpack

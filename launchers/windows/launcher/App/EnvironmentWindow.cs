@@ -55,7 +55,7 @@ public sealed partial class EnvironmentWindow : Window
         Closed += (_, _) => { CancelJob(JobKind.Environment); ClearCovers(); DisposeRetiredCovers(all: true); CloseControl(); };
         Opened += (_, _) =>
         {
-            StartControl(); FinishPendingUpdate(); SyncInstalledVersion(); _ = CheckForUpdateAsync(); _ = LoadNoticeAsync();
+            StartControl(); FinishPendingUpdate(); SyncInstalledVersion(); _ = LoadInboxAsync();
             _ = RecoverBatchAsync();   // 上次没出完的批量出包读回来（BatchPage.cs）
             // 已有游戏库（存过位置，或默认位置建好过）就一启动连上，同 Mac：原先只有控制口开着才连，玩家默认不开，
             //   开机 catalog 为空、点「游戏库」一直是欢迎页（社区贡献者补丁 #1）。全新玩家照旧走欢迎页，不替他建库
@@ -240,6 +240,7 @@ public sealed partial class EnvironmentWindow : Window
         if (BatchPill() is { } batchPill) rightBar.Children.Add(batchPill);
         rightBar.Children.Add(LiveSlot(PhoneUpdateControl));   // 更新 iPhone 上的 S2Arm（壳比本版旧才出现，InstallModePage.cs）；进度事件只刷新这里
         rightBar.Children.Add(LiveSlot(UpdateControls));   // 启动器自更新：下载百分比只刷新这里
+        rightBar.Children.Add(MessagesButton());   // 消息：公告和更新说明（旧的只在这里）
 
         // 游戏库：任何页面都能回去；出包还在跑就留在后台
         var libraryBtn = new Button
@@ -303,6 +304,18 @@ public sealed partial class EnvironmentWindow : Window
         {
             RenderImportDialog(body);
             ShowPage("import", body);
+            return;
+        }
+        if (updatePopup is not null)   // 打开时最多一个更新弹窗，只给最新一期（UpdateFlow.cs）
+        {
+            RenderUpdatePopup(body);
+            ShowPage("update", body);
+            return;
+        }
+        if (messagesOpen)
+        {
+            RenderMessages(body);
+            ShowPage("messages", body);
             return;
         }
         if (page == "library" && (ShowsWelcome || welcomeHome))

@@ -47,6 +47,8 @@ void s2a_host_shutdown(const char *why) {
     // Generation zero is reserved for this unconditional terminal publication.
     void (*session_exit)(unsigned) = (void (*)(unsigned))dlsym(RTLD_DEFAULT, "s2a_session_process_exit");
     if (session_exit) session_exit(0);
+    // #618：管线归档停写、删 .writing（graphics/nvn/gfx/nvn/pso_archive.h）：正常收局时写线程可能正写到一半，_exit 后留下的标记会被下一局当成 #756 的「死在写里」、从此不写
+    { void (*par_exit)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "s2a_pso_archive_exit"); if (par_exit) par_exit(); }
 #if defined(__ANDROID__)
     // 在任何诊断、锁或托管回调前开兜底；异常路径不能把超时记为成功退出。
     if (s2a_android_shutdown_watchdog_start()) { S2A_EXIT_FAIL("shutdown watchdog start failed"); _exit(125); }

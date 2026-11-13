@@ -132,6 +132,8 @@ def scan(c, root):
     for parent, children, leaves in os.walk(root, followlinks=False):
         for name in sorted(children + leaves):
             c.check()
+            if _lay.os_junk(name):   # 系统自动生成的附属文件（exFAT / FAT 上的 ._<名>、访达 .DS_Store 等）不是存档：不备份、不导入、不算「存档变了」
+                continue
             p = Path(parent) / name
             rel = p.relative_to(root).as_posix()
             path_name(rel)

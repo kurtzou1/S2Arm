@@ -21,3 +21,18 @@ CGSize S2APlayTargetSize(CGSize area);
 void S2APlayPublishSplit(BOOL split);
 int s2a_ios_split_active(void);
 CGRect s2a_ios_game_area(void);
+
+#if TARGET_OS_IPHONE
+#import <UIKit/UIKit.h>
+// 仅主线程。画面 / 手柄 / 编辑器读取同一套区域；CGRectZero 表示游戏视口尚未布局。
+S2APlayLayout s2a_ios_play_layout(void);
+CGRect s2a_ios_game_area(void);
+int s2a_ios_screen_known(void);
+int s2a_ios_screen_w(void);
+int s2a_ios_screen_h(void);
+UIInterfaceOrientationMask s2a_ios_play_orientations(void);
+CGRect S2APlayDivision(UIView *view);
+// 游戏壳和无商业资源的输入工作台共用铰链、方向和区域生命周期。
+@interface S2APlayViewController : UIViewController
+@end
+#endif

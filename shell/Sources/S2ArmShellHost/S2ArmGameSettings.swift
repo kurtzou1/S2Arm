@@ -13,6 +13,7 @@ public enum S2ArmGameSettings {
     public static let fps60 = "fps60", widenForce = "widenForce", opacity = "vpadOpacity", layout = "vpadLayout", holdLock = "vpadHoldLock", identity = "gameIdentity", editIdentity = "edit"
     /// 布局多选里打开二级编辑页的那一项（不是一个方案）
     public static let editLayout = "edit"
+    public static let splitScreen = "splitScreen", screenOrientation = "screenOrientation"
 
     /// 存偏好的地方；单测换成临时 suite
     public struct Stores {
@@ -25,10 +26,25 @@ public enum S2ArmGameSettings {
     /// 本款布局的当前状态（宿主接口给的 JSON）；读不到（Mac 单测、宿主没链）按「默认、没有我的布局」
     public struct LayoutState: Equatable { public var selected: String; public var hasMine: Bool; public var holdLock = true; public var customIdentity = false }
     public static func layoutState(_ id: String) -> LayoutState {
-        guard let p = id.withCString({ s2a_shell_vpad_layout_json($0, 832, 419) }) else { return LayoutState(selected: "default", hasMine: false) }
+        guard let p = id.withCString({ s2a_shell_vpad_layout_json($0, 832, 419, 0) }) else { return LayoutState(selected: "default", hasMine: false) }
         defer { free(p) }
         let obj = try? JSONSerialization.jsonObject(with: Data(String(cString: p).utf8)) as? [String: Any]
         return LayoutState(selected: obj?["selected"] as? String ?? "default", hasMine: obj?["hasMine"] as? Bool ?? false, holdLock: obj?["holdLock"] as? Bool ?? true)
+    }
+
+    // 与原生窗口、设置 App 及共享表使用相同 app scope id；旧键只作迁移来源。
+    // 生产入口不注册这两项缺省；未保存时为 nil，缺省由读取逻辑返回。
+    private static func playChoice(_ key: String, legacy: String, values: [String], app: UserDefaults) -> String {
+        var value = app.object(forKey: key)
+        if value == nil, let old = app.string(forKey: legacy), values.contains(old) {
+            value = old; app.set(old, forKey: key)
+        }
+        if app.object(forKey: legacy) != nil { app.removeObject(forKey: legacy) }
+        guard let selected = value as? String, values.contains(selected) else {
+            if value != nil { app.removeObject(forKey: key) }
+            return "auto"
+        }
+        return selected
     }
 
     public static func sections(for id: String, stores: Stores = .live, state: LayoutState) -> [SettingSection] {
@@ -41,16 +57,20 @@ public enum S2ArmGameSettings {
         if state.hasMine { options.append(SettingOption("mine", "My layout")) }
         options.append(SettingOption(editLayout, "Adjust positions…"))
         let current = state.selected == "mine" && state.hasMine ? "mine" : "default"
+        let splitValue = playChoice(splitScreen, legacy: "S2ASplitScreen", values: ["auto", "on", "off"], app: stores.app)
+        let direction = playChoice(screenOrientation, legacy: "S2AScreenOrientation", values: ["auto", "landscape", "portrait"], app: stores.app)
         return [
             SettingSection(id: "s2a.identity", title: "Display", rows: [
                 SettingRow(id: identity, label: "Name and Cover", note: "Only changes how it appears on this iPhone", kind: .choice([SettingOption("current", state.customIdentity ? "Customized" : "Default"), SettingOption(editIdentity, "Edit…")]), value: "current"),
             ]),
             SettingSection(id: "s2a.picture", title: "Picture", rows: [
+                SettingRow(id: splitScreen, label: "Split screen", note: "Applies to all games; Automatic enables split screen only when partially folded", kind: .choice([SettingOption("auto", "Automatic"), SettingOption("on", "On"), SettingOption("off", "Off")]), value: ["auto", "on", "off"].contains(splitValue) ? splitValue : "auto"),
+                SettingRow(id: screenOrientation, label: "Screen orientation", note: "Applies to all games; Automatic uses portrait for split screen and landscape otherwise", kind: .choice([SettingOption("auto", "Automatic"), SettingOption("landscape", "Landscape"), SettingOption("portrait", "Portrait")]), value: ["auto", "landscape", "portrait"].contains(direction) ? direction : "auto"),
                 SettingRow(id: fps60, label: "60 FPS", note: "Off returns to the game’s own frame rate (usually 30 FPS) and saves power", kind: .toggle(on: "on", off: "off"), value: on60 ? "on" : "off"),
                 SettingRow(id: widenForce, label: "Force widescreen", note: "Fills the screen even for unverified games; falls back to 16:9 if the picture stretches", kind: .toggle(on: "on", off: "off"), value: force ? "on" : "off"),
             ]),
             SettingSection(id: "s2a.vpad", title: "Virtual controller", rows: [
-                SettingRow(id: layout, label: "Button layout", note: "Position changes apply to this game only", kind: .choice(options), value: current),
+                SettingRow(id: layout, label: "Button layout", note: "Adjust normal and split positions separately; applies to this game only", kind: .choice(options), value: current),
                 SettingRow(id: holdLock, label: "Hold-lock ZL / ZR", note: "Hold for 2 s to lock, tap again to unlock; this game only", kind: .toggle(on: "on", off: "off"), value: state.holdLock ? "on" : "off"),
                 SettingRow(id: opacity, label: "Button opacity", note: "Shared by all games; takes effect the next time you enter a game", kind: .range(min: 10, max: 100, step: 5, unit: "%"), value: String(Int((op * 100).rounded()))),
             ]),
@@ -61,13 +81,15 @@ public enum S2ArmGameSettings {
     @discardableResult
     public static func apply(id: String, setting: String, value: String, stores: Stores = .live) -> Bool {
         switch setting {
+        case splitScreen: if ["auto", "on", "off"].contains(value) { stores.app.set(value, forKey: splitScreen); stores.app.removeObject(forKey: "S2ASplitScreen") }
+        case screenOrientation: if ["auto", "landscape", "portrait"].contains(value) { stores.app.set(value, forKey: screenOrientation); stores.app.removeObject(forKey: "S2AScreenOrientation") }
         case fps60: stores.game(id)?.set(value == "on", forKey: "S2AFps60")
         case widenForce: stores.game(id)?.set(value == "on", forKey: "S2AWidenForce")
         case opacity: if let v = Double(value) { stores.app.set(min(1, max(0.1, v / 100)), forKey: "S2AVPadOpacity") }
         case holdLock: _ = id.withCString { s2a_shell_vpad_set_hold_lock($0, value == "on" ? 1 : 0) }
         case layout:
             if value == editLayout { return true }
-            if value == "default" || value == "mine" { _ = id.withCString { i in value.withCString { s2a_shell_vpad_select(i, $0) } } }
+            if value == "default" || value == "mine" { _ = id.withCString { i in value.withCString { s2a_shell_vpad_select(i, $0, 0) } } }
         default: break
         }
         return false

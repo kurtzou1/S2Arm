@@ -617,6 +617,30 @@ def seed_from_sibling(c, game, roots, kuan):
     return False
 
 
+# 运行时不用、但会留在产物根顶层的项：pack/ipa_tail.py 的打包工作区 pkg/（打 iPhone 包时资源包与 ipa 都先落在这里）、组装临时 App build/、
+# 阶段日志与来源标记。image/mac 是 prepare() 从产物根克隆出来的，这些项属于「出包过程」而不属于「运行版本」；
+# 原先只清了顶层的 *.log 与三个标记文件，pkg/ 与 build/ 跟着克隆进了运行版本，此后没有任何一步回收（ipa_tail 只在下一次运行开头清 build/）。
+RUNTIME_EXTRAS = ("seed.txt", ".root_src", ".root_base", "pkg", "build")
+
+
+def prune_runtime_extras(root):
+    """删掉运行版本里不是运行依赖的顶层项（RUNTIME_EXTRAS 与顶层 *.log）。只动顶层、不跟软链。
+
+    运行依赖全在 romfs/、exefs/、ctl/、systemdata/、shaders/ 里：validate_runtime() 只核 romfs/ 与清单、
+    check_pack_inputs() 只核 exefs/main.npdm、ctl/control.nacp、systemdata/fonts、shaders/direct，都不看 pkg/ 与 build/。
+    清单 snapshot() 在本函数之后量，删掉的项因此也不会再记进 manifest.json（否则起局后的 missing_after_crash 会按清单照样报缺失）。"""
+    for log in root.glob("*.log"):
+        if not log.is_dir():
+            log.unlink(missing_ok=True)
+    for name in RUNTIME_EXTRAS:
+        extra = root / name
+        if extra.is_symlink() or extra.is_file():
+            extra.unlink(missing_ok=True)
+        elif extra.is_dir():
+            from library import _rmtree
+            _rmtree(extra)   # 走统一删除：pkg/pack/romfs 克隆自产物根，可能带只读目录；删不掉要报出来，不能悄悄留半棵进运行版本
+
+
 def prepare(c):
     with c.lock("execution"):
         c.begin("检查游戏输入")
@@ -706,11 +730,8 @@ def prepare(c):
         temporary.mkdir()
         try:
             all_cloned = clone_tree(c, current, temporary, materialize_romfs=True)
-            # Transient stage logs and source paths are not runtime dependencies.
-            for p in temporary.glob("*.log"):
-                p.unlink()
-            for name in ("seed.txt", ".root_src", ".root_base"):
-                (temporary / name).unlink(missing_ok=True)
+            # Transient stage logs, the packaging workspace and source paths are not runtime dependencies.
+            prune_runtime_extras(temporary)
             if not c.r.get("engineBundle") and fingerprint != source_fingerprint(c):   # 只有源码树开发会在出包中途改源码；发版引擎冻结
                 raise Failure("构建期间 S2Arm 源码发生变化，请重试；旧运行版本已保留。")
             manifest = dict(identity, memoryRequirementsVersion=2,

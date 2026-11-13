@@ -580,8 +580,11 @@ def assemble(c, gid, others=(), *, failed=(), root=None, dest=None):
         raise
     write_container_ipa(c, app, ipa, log)
     games = [g["title_id"] for g in json.loads((app / "s2a_catalogue.json").read_text(encoding="utf-8"))["games"]]
-    if gid and gid not in games:   # 产物根 main.npdm 的程序号和游戏库的不一致：设备侧目录按程序号，对不上就推错地方
-        raise Failure(f"这款的产物根程序号和游戏库不一致（游戏库 {gid}，组装结果 {' '.join(games)}）。", code="job_failed")
+    if gid and gid not in games:
+        # 程序文件（main.npdm 的程序号）和游戏包（导入时 CNMT 的发行号）对不上：游戏文件被改过、或混进了别的游戏的程序
+        #   （玩家实报：把别的游戏的程序换进了这款的包里）。设备侧目录按程序号，放过去就推错地方，这道核对保留，只把原因说清
+        raise Failure(f"这款游戏的程序文件和游戏包对不上（程序里是 {' '.join(games)}，游戏包是 {gid}），可能是游戏文件被改过或混了别的游戏。请用原版游戏文件重新导入。",
+                      code="game_files_mismatch")
     shutil.rmtree(app, ignore_errors=True)
     return ipa, games, sid
 

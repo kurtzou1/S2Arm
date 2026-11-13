@@ -18,6 +18,11 @@ struct S2ArmTouchEditorView: View {
     struct Key: Identifiable { let id: String; var center: CGPoint; let size: CGSize; let radius: CGFloat }
     @State private var keys: [Key] = []
     @State private var area: CGRect = .zero
+    @State private var game: CGRect = .zero
+    @State private var division: CGRect = .null
+    @State private var split = false
+    @State private var stickRadius: CGFloat = 60
+    @State private var lastPreview: Data?
     @State private var problem: String?
 
     // 方案三「描线」+ 摇杆区方案二「石墨」（同 vpad.m vp_line / vp_face / 摇杆圈）
@@ -28,17 +33,15 @@ struct S2ArmTouchEditorView: View {
             let full = proxy.size
             ZStack(alignment: .topLeading) {
                 background(full)
-                if full.width < full.height {
-                    Text(shellText("Turn your phone sideways to adjust button positions")).font(.headline).foregroundStyle(.white).frame(width: full.width, height: full.height)
-                    bar(full, landscape: false)
-                } else {
-                    sticks
-                    ForEach($keys) { $k in keyView(k).position(k.center).gesture(drag($k)) }
-                    bar(full, landscape: true)
+                if split {
+                    Color.black.opacity(0.8).frame(width: full.width, height: max(0, full.height - area.minY))
+                        .position(x: full.width / 2, y: (full.height + area.minY) / 2)
                 }
+                TouchEditorSurface(split: split, changed: load).allowsHitTesting(false)
+                if stickRadius > 0 { sticks }
+                ForEach($keys) { $k in keyView(k).position(k.center).gesture(drag($k)) }
+                bar(full)
             }
-            .onAppear { load(full) }
-            .onChange(of: full) { _, new in load(new) }
         }
         .ignoresSafeArea()
         .background(Color.black)
@@ -56,8 +59,10 @@ struct S2ArmTouchEditorView: View {
 
     /// 摇杆是浮动的（左 / 右半屏任意处按下），这里只画石墨圈示意大致的拇指位，不能拖
     private var sticks: some View {
-        let r = min(area.width, area.height) * 60 / 419   // 游戏内半径 60 点（短边 419 时）
-        return ForEach([(0.075, 0.69, shellText("Left stick: press anywhere on the left half")), (0.70, 0.81, shellText("Right stick: press anywhere on the right half"))], id: \.2) { x, y, text in
+        let r = stickRadius
+        let homes = split ? [(0.13, 0.63, shellText("Left stick: press in the blank left half")), (0.65, 0.75, shellText("Right stick: press in the blank right half"))] :
+                            [(0.075, 0.69, shellText("Left stick: press anywhere on the left half")), (0.70, 0.81, shellText("Right stick: press anywhere on the right half"))]
+        return ForEach(homes, id: \.2) { x, y, text in
             VStack(spacing: 6) {
                 ZStack {
                     Circle().fill(Color(red: 20 / 255, green: 22 / 255, blue: 26 / 255).opacity(0.32)).frame(width: 2 * r, height: 2 * r)
@@ -88,21 +93,34 @@ struct S2ArmTouchEditorView: View {
     private func drag(_ k: Binding<Key>) -> some Gesture {
         DragGesture(minimumDistance: 0).onChanged { g in
             let hw = k.wrappedValue.size.width / 2, hh = k.wrappedValue.size.height / 2   // 整个键不出可放区域
-            k.wrappedValue.center = CGPoint(x: min(area.maxX - hw, max(area.minX + hw, g.location.x)),
-                                            y: min(area.maxY - hh, max(area.minY + hh, g.location.y)))
+            let center = CGPoint(x: min(area.maxX - hw, max(area.minX + hw, g.location.x)),
+                                 y: min(area.maxY - hh, max(area.minY + hh, g.location.y)))
+            let frame = CGRect(x: center.x - hw, y: center.y - hh, width: hw * 2, height: hh * 2)
+            if split && !division.isNull && frame.intersects(division) { return }
+            k.wrappedValue.center = center
         }
     }
 
-    private func bar(_ size: CGSize, landscape: Bool) -> some View {
-        VStack(spacing: 10) {
-            if let problem { Text(problem).font(.footnote).foregroundStyle(.orange) }
-            else if landscape { Text(shellText("Drag a button to move it (this game only)")).font(.footnote).foregroundStyle(.white) }
-            HStack(spacing: 16) {
-                if landscape { button(shellText("Reset to default")) { _ = gameID.withCString { s2a_shell_vpad_select($0, "default") }; close() } }
-                button(shellText("Done")) { landscape ? save() : close() }
+    private func bar(_ size: CGSize) -> some View {
+        let canvas = split ? game : CGRect(origin: .zero, size: size)
+        let placement = toolbarArea(canvas)
+        let width = max(1, min(340, placement.width - 32))
+        return VStack(spacing: 10) {
+            Picker(shellText("Edit layout"), selection: $split) {
+                Text(shellText("Normal")).tag(false)
+                Text(shellText("Split screen")).tag(true)
             }
-            .frame(width: landscape ? 340 : 170)
-            if landscape {
+            .pickerStyle(.segmented)
+            .accessibilityIdentifier("vpad.editor.profile")
+            if let problem { Text(problem).font(.footnote).foregroundStyle(.orange) }
+            else { Text(shellText("Drag a button to move it (this game only)")).font(.footnote).foregroundStyle(.white) }
+            HStack(spacing: 16) {
+                button(shellText("Reset to default")) {
+                    let ok = gameID.withCString { s2a_shell_vpad_select($0, "default", split ? 1 : 0) }
+                    if ok == 1 { close() } else { problem = shellText("Reset wasn’t completed. Try again.") }
+                }
+                button(shellText("Done")) { save() }
+            }
                 VStack(spacing: 4) {
                     HStack(spacing: 10) {
                         Text(shellText("Button opacity")).font(.footnote.weight(.semibold)).foregroundStyle(.white)
@@ -114,12 +132,18 @@ struct S2ArmTouchEditorView: View {
                     }
                     Text(shellText("Applies to all games; drag to preview here")).font(.caption2).foregroundStyle(.white.opacity(0.75))
                 }
-                .frame(width: 340)
-            }
         }
+        .frame(width: width)
         .padding(.vertical, 12).padding(.horizontal, 16)
         .background(Color.black.opacity(0.35), in: RoundedRectangle(cornerRadius: 18))
-        .position(x: size.width / 2, y: size.height / 2)
+        .position(x: placement.midX, y: placement.midY)
+    }
+
+    private func toolbarArea(_ canvas: CGRect) -> CGRect {
+        guard !division.isNull, division.height > division.width, canvas.intersects(division) else { return canvas }
+        let left = CGRect(x: canvas.minX, y: canvas.minY, width: max(0, division.minX - canvas.minX), height: canvas.height)
+        let right = CGRect(x: division.maxX, y: canvas.minY, width: max(0, canvas.maxX - division.maxX), height: canvas.height)
+        return left.width >= right.width ? left : right
     }
 
     private func button(_ title: String, _ action: @escaping () -> Void) -> some View {
@@ -131,25 +155,32 @@ struct S2ArmTouchEditorView: View {
         .buttonStyle(.plain)
     }
 
-    /// 可放区域同 vpad.m layoutSafeRect：安全区，左右至少 16、底至少 8 点
-    private func load(_ full: CGSize) {
-        let w = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.keyWindow }.first
-        let i = w?.safeAreaInsets ?? .zero
-        let l = max(i.left, 16), r = max(i.right, 16), b = max(i.bottom, 8)
-        area = CGRect(x: l, y: i.top, width: max(1, full.width - l - r), height: max(1, full.height - i.top - b))
-        guard full.width >= full.height else { keys = []; return }
-        guard let p = gameID.withCString({ s2a_shell_vpad_layout_json($0, Double(area.width), Double(area.height)) }) else {
-            problem = shellText("Couldn’t read this game’s button layout"); keys = []; return
+    /// 宿主直接计算生产的区域、按键尺寸、折痕避让；在 updateConstraints 中读取，兼顾同尺寸下折叠变化。
+    private func load(_ view: UIView) {
+        guard let p = gameID.withCString({ s2a_shell_vpad_preview($0, Unmanaged.passUnretained(view).toOpaque(), split ? 1 : 0) }) else {
+            DispatchQueue.main.async { problem = shellText("Couldn’t read this game’s button layout"); keys = [] }
+            return
         }
         defer { free(p) }
-        let obj = try? JSONSerialization.jsonObject(with: Data(String(cString: p).utf8)) as? [String: Any]
-        let unit = min(area.width, area.height)
-        keys = (obj?["buttons"] as? [[String: Any]] ?? []).compactMap { b in
+        let data = Data(String(cString: p).utf8)
+        DispatchQueue.main.async { applyPreview(data) }
+    }
+
+    private func applyPreview(_ data: Data) {
+        guard data != lastPreview, let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              obj["split"] as? Bool == split, let a = obj["area"] as? [Double], a.count == 4,
+              let g = obj["game"] as? [Double], g.count == 4 else { return }
+        lastPreview = data; problem = nil
+        area = CGRect(x: a[0], y: a[1], width: a[2], height: a[3])
+        game = CGRect(x: g[0], y: g[1], width: g[2], height: g[3])
+        if let d = obj["division"] as? [Double], d.count == 4 { division = CGRect(x: d[0], y: d[1], width: d[2], height: d[3]) } else { division = .null }
+        stickRadius = obj["stickRadius"] as? Double ?? 60
+        keys = (obj["buttons"] as? [[String: Any]] ?? []).compactMap { b in
             guard let id = b["id"] as? String, let x = b["x"] as? Double, let y = b["y"] as? Double,
                   let bw = b["width"] as? Double, let bh = b["height"] as? Double else { return nil }
-            let size = CGSize(width: min(area.width, bw * unit), height: min(area.height, bh * unit))
-            let radius = min((b["cornerRadius"] as? Double ?? 0) * unit, min(size.width, size.height) / 2)
-            return Key(id: id, center: CGPoint(x: area.minX + x * area.width, y: area.minY + y * area.height), size: size, radius: radius)
+            let size = CGSize(width: bw, height: bh)
+            let radius = min(b["cornerRadius"] as? Double ?? 0, min(size.width, size.height) / 2)
+            return Key(id: id, center: CGPoint(x: x, y: y), size: size, radius: radius)
         }
     }
 
@@ -157,8 +188,24 @@ struct S2ArmTouchEditorView: View {
         var centers: [String: [Double]] = [:]
         for k in keys { centers[k.id] = [Double(k.center.x - area.minX), Double(k.center.y - area.minY)] }   // 区域坐标（原点左上）
         guard let data = try? JSONSerialization.data(withJSONObject: centers), let json = String(data: data, encoding: .utf8) else { problem = shellText("Button positions weren’t saved"); return }
-        let ok = gameID.withCString { g in json.withCString { s2a_shell_vpad_save(g, $0, Double(area.width), Double(area.height)) } }
+        let ok = gameID.withCString { g in json.withCString { s2a_shell_vpad_save(g, $0, Double(area.width), Double(area.height), split ? 1 : 0) } }
         if ok == 1 { close() } else { problem = shellText("Button positions weren’t saved. Try again.") }
+    }
+}
+
+/// 读取系统保留区必须发生在 updateConstraints；仅监听 GeometryReader 的尺寸变化会漏掉同尺寸半折。
+private struct TouchEditorSurface: UIViewRepresentable {
+    let split: Bool
+    let changed: @MainActor (UIView) -> Void
+    func makeUIView(context: Context) -> Surface { Surface() }
+    func updateUIView(_ view: Surface, context: Context) {
+        view.changed = changed; view.setNeedsUpdateConstraints(); view.setNeedsLayout()
+    }
+    final class Surface: UIView {
+        var changed: (@MainActor (UIView) -> Void)?
+        override func updateConstraints() { changed?(self); super.updateConstraints() }
+        override func layoutSubviews() { super.layoutSubviews(); changed?(self) }
+        override func safeAreaInsetsDidChange() { super.safeAreaInsetsDidChange(); setNeedsUpdateConstraints() }
     }
 }
 #endif

@@ -29,11 +29,16 @@ internal sealed class PhoneJobTrack
     public int? PackFiles;
     public List<string> Skipped = [];
     public string Version = "";
+    /// <summary>导出模式（装法「导出，自己签名安装」）：放进的文件夹、几款、多大（作业结果 exported / outputPath / games / exportBytes）；一键装为空</summary>
+    public string ExportFolder = "";
+    public int ExportGames;
+    public long? ExportBytes;
 
     public void Begin(string kind, string device)
     {
         Kind = kind; Device = device; Stages.Clear(); Log.Clear(); Overall = null; Step = Steps = null;
         Started = DateTime.UtcNow; Ended = null; Suggestion = ""; PackBytes = null; PackFiles = null; Skipped = []; Version = "";
+        ExportFolder = ""; ExportGames = 0; ExportBytes = null;
     }
 
     /// <summary>作业事件：阶段进步骤列表、整体进度只认作业层 overall（只增不减）、说明行进过程记录</summary>
@@ -64,6 +69,12 @@ internal sealed class PhoneJobTrack
         if (r.TryGetProperty("packFiles", out var pf) && pf.ValueKind == JsonValueKind.Number) PackFiles = pf.GetInt32();
         if (r.TryGetProperty("skipped", out var sk) && sk.ValueKind == JsonValueKind.Array)
             Skipped = sk.EnumerateArray().Select(x => gameName(x.GetString() ?? "")).ToList();
+        if (r.TryGetProperty("exported", out var ex) && ex.ValueKind == JsonValueKind.True && r.TryGetProperty("outputPath", out var op) && op.ValueKind == JsonValueKind.String)
+        {
+            ExportFolder = op.GetString() ?? "";
+            ExportGames = r.TryGetProperty("games", out var gs) && gs.ValueKind == JsonValueKind.Array ? gs.GetArrayLength() : 0;
+            if (r.TryGetProperty("exportBytes", out var eb) && eb.ValueKind == JsonValueKind.Number) ExportBytes = eb.GetInt64();
+        }
     }
 }
 
@@ -79,7 +90,9 @@ public sealed partial class EnvironmentWindow
         var device = tr.Device.Length > 0 ? tr.Device : T("phone.device.unknown");
         var panel = new StackPanel { Spacing = 22, HorizontalAlignment = HorizontalAlignment.Stretch };   // 撑满卡片、贴左（同别的卡片对齐）：进度条、详细过程不被压窄
         AutomationId(panel, "phone." + state);
-        var title = Label(T("phone.title." + tr.Kind), 18); title.FontWeight = FontWeight.Bold;   // 这是什么操作（维护者：只看得到「更新中 · …」一小行）
+        // 导出模式：装机 / 更新作业不连手机、出到文件夹。完成后看结果，进行中看当前装法
+        var exporting = tr.Kind is "install" or "installUpdate" && (tr.ExportFolder.Length > 0 || state == "running" && installMode == "export");
+        var title = Label(T(exporting ? "phone.title.export" : "phone.title." + tr.Kind), 18); title.FontWeight = FontWeight.Bold;   // 这是什么操作（维护者：只看得到「更新中 · …」一小行）
         AutomationId(title, "phone.operation");
         panel.Children.Add(title);
         if (state == "drop")
@@ -100,8 +113,8 @@ public sealed partial class EnvironmentWindow
         {
             var status = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
             status.Children.Add(new Border { Width = 9, Height = 9, CornerRadius = new CornerRadius(4.5), Background = Brush.Parse("#FFC857"), VerticalAlignment = VerticalAlignment.Center });
-            status.Children.Add(new TextBlock { Text = T("phone.status.running." + tr.Kind), FontSize = 14, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#FFC857") });
-            status.Children.Add(Muted("· " + device, 13));
+            status.Children.Add(new TextBlock { Text = T(exporting ? "phone.status.running.export" : "phone.status.running." + tr.Kind), FontSize = 14, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#FFC857") });
+            if (!exporting) status.Children.Add(Muted("· " + device, 13));
             panel.Children.Add(status);
             var value = tr.Overall ?? 0;
             var pct = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10 };
@@ -133,6 +146,32 @@ public sealed partial class EnvironmentWindow
                 steps.Children.Add(more);
             }
             panel.Children.Add(steps);
+        }
+        else if (state == "succeeded" && tr.ExportFolder.Length > 0)
+        {
+            // 导出好了：放进哪个文件夹、几款、多大，怎么装一句话，打开文件夹（作业完成时已自动打开一次）
+            panel.Children.Add(Seal("✓", "#40D678"));
+            panel.Children.Add(Headline(T("phone.headline.export")));
+            panel.Children.Add(WrappedMuted(T("phone.done.export").Replace("{0}", tr.ExportFolder), 17));
+            var stats = new WrapPanel { Orientation = Orientation.Horizontal };
+            void Stat(string label, string value)
+            {
+                var cell = new StackPanel { Spacing = 4, Margin = new Thickness(0, 0, 44, 0) };
+                cell.Children.Add(Muted(label, 13));
+                var v = Label(value, 28); v.FontWeight = FontWeight.Black;
+                cell.Children.Add(v);
+                stats.Children.Add(cell);
+            }
+            if (tr.Ended is { } end) Stat(T("phone.stat.time"), Duration((end - tr.Started).TotalSeconds));
+            Stat(T("phone.stat.games"), tr.ExportGames.ToString());
+            if (tr.ExportBytes is { } size) Stat(T("phone.stat.size"), FormatBytes(size));
+            panel.Children.Add(stats);
+            panel.Children.Add(WrappedMuted(T("phone.fact.export"), 14));
+            if (tr.Skipped.Count > 0) panel.Children.Add(WrappedMuted(T("phone.fact.export_skipped").Replace("{0}", string.Join("、", tr.Skipped)), 14));
+            var folder = tr.ExportFolder;
+            var open = Primary(T("phone.export.open"), () => OpenFolder(folder));
+            AutomationId(open, "phone.export.open");
+            panel.Children.Add(open);
         }
         else if (state is "succeeded" or "needsPlayer")
         {

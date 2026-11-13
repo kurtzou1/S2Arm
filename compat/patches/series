@@ -570,3 +570,5 @@
 20261112-1144-ast-propagate-occurrences.patch
 20261112-2013-apple-audio-renderer-update-wake.patch
 20261112-2051-apple-audio-callback-slot-map.patch
+20261111-2123-audio-dsp-arm-fast-on.patch
+20261111-2225-vp9-native-backend-neutral.patch

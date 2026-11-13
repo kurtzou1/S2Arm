@@ -90,5 +90,9 @@ public static class BatchCases
         check(failed.Count == 2 && failed[0] == new ImportOutcome.Unrecognized("bad.nsp", "文件内容不对。", "content_invalid"), "import: failed source with reason and code");
         check(failed[1].Code == "keys_outdated", "import: second failed source");
         check(ImportOutcome.GameIds(Json("""{"imports":[]}""")).Count == 0 && ImportOutcome.Failed(Json("""{"imports":[]}""")).Count == 0, "import: legacy shape without sources");
+        // #797：缺本体的款（imports[].missingBase）去重、按出现顺序；没有这个键的旧结果 = 不缺
+        check(ImportOutcome.MissingBase(import).Count == 0, "import: no missingBase key = nothing missing");
+        check(ImportOutcome.MissingBase(Json("""{"imports":[{"id":"0100CCCC00000000","missingBase":true},{"id":"0100CCCC00000000","missingBase":true},{"id":"0100DDDD00000000","missingBase":false}]}"""))
+            .SequenceEqual(["0100CCCC00000000"]), "import: missingBase ids deduped, false skipped");
     }
 }

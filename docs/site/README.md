@@ -12,12 +12,31 @@
 
 ## 启动器公告（notice.json）
 
-Mac / Windows 启动器顶部的公告条读 [notice.json](notice.json)：启动时从 <https://jhaizhou-ops.github.io/S2Arm/notice.json> 取（取不到用发版时打进包里的同一份，再没有就不显示，不报错），玩家点 × 关掉后同一条不再出现。
+Mac / Windows 启动器读 [notice.json](notice.json)：启动时从 <https://jhaizhou-ops.github.io/S2Arm/notice.json> 取（取不到用发版时打进包里的同一份，再没有就不显示，不报错）。
+判定在 `pack/jobs/updater.py inbox`，两端共用：**永远只给玩家看最新一期**——顶部横幅只放最新一条没看过的「重要」公告，更旧的不补弹、不叠加；
+所有公告都列在启动器的「消息」里，只有最新那条没看过时算未读。玩家关掉横幅或打开「消息」= 看过最新那条和它之前的全部。
 
-- 发新公告：改 `text` 的中英文，**同时换一个新的 `id`**（关掉过旧公告的玩家才会看到新的）。合进 `main` 后 Pages 自动发布，已发出的启动器下次启动就显示，不用发版。
-- 撤掉公告：把文件改成 `{"schema": 1}`（没有 `id` / `text` 就不显示）。
-- `url` 可选：公告条上「详情」打开的链接，只认 `https` 的 github.com / jhaizhou-ops.github.io。
-- 只放一条公告，纯文本，不支持格式。
+```json
+{"schema": 1,
+ "id": "给旧版启动器看的那条", "text": {"zh-Hans": "…", "en": "…"}, "url": "https://s2arm.com/…",
+ "messages": [
+   {"id": "2026-11-13-a", "level": "important", "platforms": ["windows"], "text": {"zh-Hans": "…", "en": "…"}, "url": "https://…"},
+   {"id": "2026-11-10-b", "level": "info", "text": {"zh-Hans": "…", "en": "…"}}
+ ]}
+```
+
+- `messages` 按**最新在前**排；发新公告就在最前面插一条，**换一个新的 `id`**。合进 `main` 后 Pages 自动发布，已发出的启动器下次启动就显示，不用发版。
+- `level`：`important` 出横幅（只看最新那条重要的），其余只进「消息」。`platforms` 不写 = 全平台；写了只给列着的（`mac` / `windows`）。
+- 顶层 `id` / `text` / `url` 给 v0.3.4 之前的启动器看（它们不认 `messages`、也不分平台）：只放全平台都要看的最要紧那一条，没有就不写。
+  新版启动器有 `messages` 时不看顶层；没有 `messages` 时把顶层当一条全平台「重要」公告。
+- 撤掉全部公告：把文件改成 `{"schema": 1}`。
+- `url` 可选：「详情」打开的链接，只认 `https` 的 github.com / jhaizhou-ops.github.io / s2arm.com。纯文本，不支持格式。
+
+## 更新说明（签名清单里的 notes）
+
+启动器打开时的「有新版」弹窗和更新后第一次打开的「这版更新了什么」，读签名清单（`update-manifest.json` / 官网 `latest.json`）里的 `notes`，
+由 `tools/sign_update_manifest.py --notes notes/vX.Y.Z.md` 从发版说明解析后一起签名：「## 小节」→ 弹窗里的分组，每条取加粗那句、下一行斜体当英文；
+「## 亮点」一节只用于「这版更新了什么」，**没写亮点就不弹它**（程序不替人挑）。同样只给最新一期：跳过的版本不补弹，看过关掉的不再弹。
 
 ## 发布
 

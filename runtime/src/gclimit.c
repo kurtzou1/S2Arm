@@ -28,12 +28,14 @@ int s2a_gc_limit_pick(uint64_t largest) {
     return GC_LIMIT_NONE;
 }
 
+static const char *const vars[] = {"DOTNET_GCHeapHardLimit", "DOTNET_GCHeapHardLimitPercent", "DOTNET_GCHeapHardLimitSOH",
+                                   "DOTNET_GCHeapHardLimitLOH", "DOTNET_GCHeapHardLimitPOH"};
+static int g_own;   // 变量是本函数按低区设的（不是外部指定）：低区变了可以重选（s2a_gc_limit_reapply）
 void s2a_gc_limit_apply(void) {
-    static const char *const vars[] = {"DOTNET_GCHeapHardLimit", "DOTNET_GCHeapHardLimitPercent", "DOTNET_GCHeapHardLimitSOH",
-                                       "DOTNET_GCHeapHardLimitLOH", "DOTNET_GCHeapHardLimitPOH"};
     for (unsigned i = 0; i < sizeof vars / sizeof *vars; i++)
-        if (getenv(vars[i])) { LOG("GC 上限：外部指定（%s=%s），照用", vars[i], getenv(vars[i])); return; }
+        if (getenv(vars[i])) { g_own = 0; LOG("GC 上限：外部指定（%s=%s），照用", vars[i], getenv(vars[i])); return; }
     uint64_t total = 0, largest = 0; s2a_low_holes(&total, &largest);
+    g_own = 1;
     switch (s2a_gc_limit_pick(largest)) {
     case GC_LIMIT_TOTAL:
         setenv("DOTNET_GCHeapHardLimit", "80000000", 1);   // DOTNET_ 数值按十六进制
@@ -54,4 +56,11 @@ void s2a_gc_limit_apply(void) {
         LOG("【黄】GC 上限：不设（低区最大一块 %llu MB、合计 %llu MB，放不下按需上限要的 %llu MB）——退回不设上限，GC 运行中扩表的那个缺陷没挡住",
             (unsigned long long)(largest / MB), (unsigned long long)(total / MB), (unsigned long long)((k_need_reserve + k_spare) / MB));
     }
+}
+// 低区在 GC 初始化前变小时重选（vawin.c s2a_window_span_widen，v0.3.4）：窗口按学到的跨度收窄时下方空着几十 GB，这里选了总上限档（开局一次保留 10 GB），
+//   布局放不下、窗口当场放宽后下方只剩 3 GiB，GC 初始化保留不到 → .NET 运行时初始化失败（iPhone 实机实测）。只重选本函数自己设的；外部指定的照用
+void s2a_gc_limit_reapply(void) {
+    if (!g_own) return;
+    for (unsigned i = 0; i < sizeof vars / sizeof *vars; i++) unsetenv(vars[i]);
+    g_own = 0; s2a_gc_limit_apply();
 }

@@ -227,6 +227,9 @@ static int init_from_storage(const tex_t *t) {
     if (no_cpu && fmt_nonfinite(t)) return 0;   // 游戏写不了这种池：里面的 Inf / NaN 是别人留下的，不是数据
     return 1;
 }
+static uint64_t g_new_sizes[64]; static int g_new_nsizes;   // 诊断读数：这一窗口里新建贴图的宽高（只在提交线程记，呈现线程取时可能少看一条，不要紧）
+static void new_size_note(uint32_t w, uint32_t h) { uint64_t k = (uint64_t)w << 32 | h; for (int i = 0; i < g_new_nsizes; i++) if (g_new_sizes[i] == k) return; if (g_new_nsizes < 64) g_new_sizes[g_new_nsizes++] = k; }
+int rp_res_new_sizes_take(void) { int n = g_new_nsizes; g_new_nsizes = 0; return n; }
 static _Thread_local int g_attach_intent;   // 正在给颜色附件取视图（rp_view_for_attach）
 // 填零能不能交给第一个通道的清零载入：zero_fill 会填的格式里，只有一级一层的二维图（一个附件视图盖住整张图）
 static int zero_deferrable(const tex_t *t) {
@@ -330,7 +333,7 @@ nvn_gpu_tex rp_tex_resolve(const tex_t *t, nvn_gpu_cmd c) {
     uint64_t r1_ = res_now(); rp_perf_add(RP_PERF_RES_LOCK, r1_ - r0_);
     struct rp_tex *x = nvn_hm_get(&g_by_serial, &t->serial);
     if (!x) {
-        rp_perf_add(RP_PERF_RES_NEW, 1);
+        rp_perf_add(RP_PERF_RES_NEW, 1); new_size_note(t->d.width, t->d.height);
         int cpu = cpu_content(t);
         alias_key k; alias_key_of(&k, t);
         if (!cpu && t->pool) { x = nvn_hm_get(&g_alias, &k); if (x) x->seen = rp_sub_serial() + 1; }   // 同存储同描述的另一个对象已经建过：共用

@@ -293,7 +293,10 @@ public sealed partial class EnvironmentWindow
                     case "export":
                         if (ControlGame(r) is not { } showGame) return NoGame;
                         selectedGame = showGame.Id; OpenBuild(); break;
-                    default: return ControlReply.Bad("page 只认 environment / export / library");
+                    case "install":   // 装机页（进度 / 完成页），同点顶栏「查看结果」
+                        if (ControlGame(r) is not { } installShow) return NoGame;
+                        selectedGame = installShow.Id; Navigate("install"); break;
+                    default: return ControlReply.Bad("page 只认 environment / export / library / install");
                 }
                 return ControlReply.Ok();
             case ("POST", "/refresh"):
@@ -321,7 +324,7 @@ public sealed partial class EnvironmentWindow
         ("POST /batch {games:[{gameId, platforms:[mac|iphone]}], location?}", "批量出包：一批几款、每款出哪些平台（Windows 只出 iPhone，要了 Mac 记失败「这台电脑出不了这个平台的包」），location = 一批共用的存放位置；一款接一款地出，失败不挡后面、磁盘满暂停；进度看 GET /state 的 batch（summary / items）"),
         ("POST /installCheck {gameId}", "装机前清单：几秒后看 GET /state 的 installReadiness"),
         ("POST /install {gameId, acceptDropped?, acceptNoBackup?, acceptStale?}", "用 Impactor 装到 iPhone（不用先 installCheck，缺什么作业报真实原因；Apple ID 由玩家本人在 Impactor 里登录）；可确认的失败码先问玩家、同意了带对应参数再发：container_would_drop → acceptDropped（手机上有别的电脑装的游戏这次带不上）、save_backup_failed → acceptNoBackup（覆盖前没能备份存档）、container_stale → acceptStale（旧资源包要重出）"),
-        ("POST /show {page: environment|library|export, gameId?}", "打开环境检查 / 回游戏库 / 打开这款的出包页（同点对应按钮）"),
+        ("POST /show {page: environment|library|export|install, gameId?}", "打开环境检查 / 回游戏库 / 打开这款的出包页 / 装机页（同点对应按钮）"),
         ("POST /update-phone {ask?, acceptStale?, repack?, acceptDropped?, acceptNoBackup?}", "更新 iPhone 上的 S2Arm（同游戏库右上角按钮；GET /state 的 phoneUpdates 不空才有）：本版壳 + 手机上已有的程序模块，只装 App；有要按新版重新出包的款时没带 acceptStale 回 409 并列出 stale，repack = true 时更新完把它们排进批量出包、出完自动装；作业报可确认的失败码时（同 /install）玩家同意后带对应参数再发"),
         ("POST /uninstall {gameId, acceptDropped?}", "从 iPhone 上的 S2Arm 删一款；acceptDropped 同 /install"),
         ("POST /cancel {taskId} | /retry {taskId}", "停掉在跑的作业 / 重试出包、装机任务"),

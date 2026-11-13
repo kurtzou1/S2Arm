@@ -175,7 +175,7 @@ struct InstallView: View {
 
     /// 装好以后的附加提示：只传到手机、要打开 S2Arm 才装完 / 第一次打开前信任开发者 / 免费 Apple ID 7 天到期
     private var doneNotes: [String] {
-        guard model.lastPhoneSession?.kind == .install else { return [] }
+        guard model.lastPhoneSession?.kind == .install, (model.phoneOutcome?.exportFolder ?? "").isEmpty else { return [] }   // 导出的说明在成功页自己那几行
         var n: [String] = []
         if model.installOpenToFinish { n.append(text("install.done.open")) }
         n.append(text("install.done.trust"))

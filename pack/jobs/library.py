@@ -705,6 +705,9 @@ def _rename_library_path(c, source, target):
     """同盘搬库的一次改名（外部 PR #363）：Windows 上资源管理器 / 杀软 / 下载工具开着里面的文件时改名报 WinError 5 / 32，扫完会放开——
     按 pack/orch/roots.rename_dir 同一套退避（DIR_RENAME_RETRIES，合计约 1 分钟）重试；等的时候在界面上说在等什么、等了多久，能取消（不静默卡住）。
     仍不行报人话，原游戏库保留在原位置。其它错误（盘满等）立即报"""
+    # 作业主程序（pack/jobs/main.py）只把 pack/jobs 放进 sys.path：pack.orch 从作业的引擎根导入（#812 换库报 No module named 'pack'；同 toolchain.reader）
+    if str(c.engine) not in sys.path:
+        sys.path.insert(0, str(c.engine))
     from pack.orch.roots import DIR_RENAME_RETRIES
     delays = DIR_RENAME_RETRIES if os.name == "nt" else ()
     waited = 0.0
@@ -1448,10 +1451,15 @@ def wait_readable(c, paths, poll=5.0):
             raise Failure(f"读不了游戏文件 {path.name}：{e}", code="input_unreadable")
 
 
+def lacks_base(game):
+    """只有更新 / DLC、没有本体（出包的 input_base_missing 与添加时的提示同一个判据，#797）"""
+    return not any(p["type"] == "base" for p in selected_packages(game))
+
+
 def requirement_errors(c, game):
     missing = []
     selected = selected_packages(game)
-    if not any(p["type"] == "base" for p in selected):
+    if lacks_base(game):
         missing.append(Failure("缺游戏本体：只放了更新或 DLC，把本体的 NSP / XCI 也放进来", code="input_base_missing"))
     if guest_isa(selected) == "aarch32":
         missing.append(Failure("这款游戏是 32 位程序，S2Arm 暂时只支持 64 位游戏，打不了包", code="guest_isa_unsupported"))
@@ -1704,6 +1712,12 @@ def import_games(c):
             if row["needsKeys"] and not verified:
                 atomic(c.private / "keys/status.json", dict(ready=True, verified=True))
                 verified = True
+    # #797：只放了更新 / DLC、库里也还没有这款的本体：添加完当场标出来（missingBase），前端在添加窗口里就说缺本体，不等到出包「检查游戏输入」才报。
+    #   按整批加完后的游戏库判：同一批里先读到更新、后读到本体不算缺
+    if results:
+        nobase = {g["id"].upper() for g in c.catalog()["games"] if lacks_base(g)}
+        for entry in results:
+            entry["missingBase"] = entry["id"].upper() in nobase
     added = {r["id"].upper() for r in results if not r["duplicate"]}
     if added:
         store_meta_background(c, added)   # 横图、英文标题：后台查（导入不等联网），查到英文名接着改文件夹名
@@ -2836,6 +2850,10 @@ def diagnostics(c):
                 manifest["files"] = sorted(archive.namelist() + ["manifest.json"])
                 manifest["truncated"] = truncated   # 超过单份上限被截的日志：原长、留下、截掉的字节（空 = 全部整份）
                 archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+            # 身份在写完、落盘后再取（仍握着句柄，防调包不变）：exFAT / FAT 上新文件写入数据分到存储后 inode 号会变，
+            #   建文件时取的身份必然对不上（诊断包存到 exFAT 盘上一律报「临时文件在导出期间发生变化」）
+            output.flush(); os.fsync(output.fileno())
+            created = os.fstat(output.fileno())
         c.check()
         step = "把诊断包放到所选位置"
         current = temporary.stat(follow_symlinks=False)

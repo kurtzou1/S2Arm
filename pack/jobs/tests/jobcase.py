@@ -204,6 +204,9 @@ if source.read_bytes() == b"chinese title fixture":   # 标题简体中文优先
     print(json.dumps({"schema":1,"packages":[{"titleId":"0100000000000000","baseId":"0100000000000000","type":"base","version":0,"name":"空洞骑士：丝之歌",
         "englishName":"Hollow Knight: Silksong","display":"1.0","guestIsa":"aarch64","builds":{}}]}))
     raise SystemExit(0)
+if source.read_bytes() == b"update only fixture":   # #797：只有更新包（本体另给）
+    print(json.dumps({"schema":1,"packages":[{"titleId":"0100000000000800","baseId":"0100000000000000","type":"update","version":65536,"name":"Synthetic","display":"1.1","guestIsa":"aarch64","builds":{}}]}))
+    raise SystemExit(0)
 if source.read_bytes() == b"disappear fixture":
     source.unlink()
 print(json.dumps({"schema":1,"packages":[{"titleId":"0100000000000000","baseId":"0100000000000000","type":"base","version":0,"name":"Synthetic","display":"1.0","guestIsa":"aarch64","builds":{}}]}))

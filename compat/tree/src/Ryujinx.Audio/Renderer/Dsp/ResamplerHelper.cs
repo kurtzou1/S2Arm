@@ -367,7 +367,7 @@ namespace Ryujinx.Audio.Renderer.Dsp
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static ReadOnlySpan<float> GetDefaultParameter(float ratio)
+        internal static ReadOnlySpan<float> GetDefaultParameter(float ratio) // S2Arm: internal，tests/audio_dsp_simd 直调对拍
         {
             if (ratio <= 1.0f)
             {
@@ -394,39 +394,9 @@ namespace Ryujinx.Audio.Renderer.Dsp
             //   乘积逐项算（不融合乘加），4×4 转置后按标量的求和顺序 ((x0+x1)+x2)+x3 相加，舍入用就近取偶（= Math.Round 缺省）。
             if (S2ADspFast.On && AdvSimd.Arm64.IsSupported)
             {
-                fixed (short* pInput = inputBuffer)
-                fixed (float* pOutput = outputBuffer, pParameters = parameters)
-                {
-                    for (; i < (sampleCount & ~3); i += 4)
-                    {
-                        int b0 = (int)(fraction * 128) * 4; int x0 = inputBufferIndex;
-                        fraction += ratio; inputBufferIndex += (int)fraction; fraction -= (int)fraction;
-                        int b1 = (int)(fraction * 128) * 4; int x1 = inputBufferIndex;
-                        fraction += ratio; inputBufferIndex += (int)fraction; fraction -= (int)fraction;
-                        int b2 = (int)(fraction * 128) * 4; int x2 = inputBufferIndex;
-                        fraction += ratio; inputBufferIndex += (int)fraction; fraction -= (int)fraction;
-                        int b3 = (int)(fraction * 128) * 4; int x3 = inputBufferIndex;
-                        fraction += ratio; inputBufferIndex += (int)fraction; fraction -= (int)fraction;
+                ResampleDefaultQualityAdvSimd(outputBuffer, inputBuffer, ratio, ref fraction, sampleCount, parameters);
 
-                        Vector128<float> m0 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x0))), AdvSimd.LoadVector128(pParameters + b0));
-                        Vector128<float> m1 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x1))), AdvSimd.LoadVector128(pParameters + b1));
-                        Vector128<float> m2 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x2))), AdvSimd.LoadVector128(pParameters + b2));
-                        Vector128<float> m3 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x3))), AdvSimd.LoadVector128(pParameters + b3));
-
-                        // 转置：c_k = (m0[k], m1[k], m2[k], m3[k])
-                        Vector128<ulong> t0 = AdvSimd.Arm64.ZipLow(m0, m1).AsUInt64();
-                        Vector128<ulong> t1 = AdvSimd.Arm64.ZipHigh(m0, m1).AsUInt64();
-                        Vector128<ulong> t2 = AdvSimd.Arm64.ZipLow(m2, m3).AsUInt64();
-                        Vector128<ulong> t3 = AdvSimd.Arm64.ZipHigh(m2, m3).AsUInt64();
-                        Vector128<float> c0 = AdvSimd.Arm64.ZipLow(t0, t2).AsSingle();
-                        Vector128<float> c1 = AdvSimd.Arm64.ZipHigh(t0, t2).AsSingle();
-                        Vector128<float> c2 = AdvSimd.Arm64.ZipLow(t1, t3).AsSingle();
-                        Vector128<float> c3 = AdvSimd.Arm64.ZipHigh(t1, t3).AsSingle();
-
-                        Vector128<float> sum = AdvSimd.Add(AdvSimd.Add(AdvSimd.Add(c0, c1), c2), c3);
-                        AdvSimd.Store(pOutput + i, AdvSimd.RoundToNearest(sum));
-                    }
-                }
+                return;
             }
             else if (Sse41.IsSupported)
             {
@@ -546,8 +516,77 @@ namespace Ryujinx.Audio.Renderer.Dsp
             }
         }
 
+        // S2Arm: 上面 ARM 快路径的本体（tests/audio_dsp_simd 直调对拍，不依赖运行时开关）；不满 4 个的尾部落回与原路径相同的逐样本循环。
+        //   fraction 先取进局部变量、循环里只在寄存器上推进、末尾一次写回（同 0197 双二阶快路径的做法）：
+        //   ref 参数在循环里逐次写回时，JIT 认为向量 Store 可能与之别名，每次推进都从内存往返（M5 JIT 反汇编实测），快路径反而慢。
+        internal unsafe static void ResampleDefaultQualityAdvSimd(
+            Span<float> outputBuffer,
+            ReadOnlySpan<short> inputBuffer,
+            float ratio,
+            ref float fraction,
+            int sampleCount,
+            ReadOnlySpan<float> parameters)
+        {
+            float frac = fraction;
+            int inputBufferIndex = 0, i = 0;
+
+            fixed (short* pInput = inputBuffer)
+            fixed (float* pOutput = outputBuffer, pParameters = parameters)
+            {
+                for (; i < (sampleCount & ~3); i += 4)
+                {
+                    int b0 = (int)(frac * 128) * 4; int x0 = inputBufferIndex;
+                    frac += ratio; inputBufferIndex += (int)frac; frac -= (int)frac;
+                    int b1 = (int)(frac * 128) * 4; int x1 = inputBufferIndex;
+                    frac += ratio; inputBufferIndex += (int)frac; frac -= (int)frac;
+                    int b2 = (int)(frac * 128) * 4; int x2 = inputBufferIndex;
+                    frac += ratio; inputBufferIndex += (int)frac; frac -= (int)frac;
+                    int b3 = (int)(frac * 128) * 4; int x3 = inputBufferIndex;
+                    frac += ratio; inputBufferIndex += (int)frac; frac -= (int)frac;
+
+                    Vector128<float> m0 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x0))), AdvSimd.LoadVector128(pParameters + b0));
+                    Vector128<float> m1 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x1))), AdvSimd.LoadVector128(pParameters + b1));
+                    Vector128<float> m2 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x2))), AdvSimd.LoadVector128(pParameters + b2));
+                    Vector128<float> m3 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x3))), AdvSimd.LoadVector128(pParameters + b3));
+
+                    // 转置：c_k = (m0[k], m1[k], m2[k], m3[k])
+                    Vector128<ulong> t0 = AdvSimd.Arm64.ZipLow(m0, m1).AsUInt64();
+                    Vector128<ulong> t1 = AdvSimd.Arm64.ZipHigh(m0, m1).AsUInt64();
+                    Vector128<ulong> t2 = AdvSimd.Arm64.ZipLow(m2, m3).AsUInt64();
+                    Vector128<ulong> t3 = AdvSimd.Arm64.ZipHigh(m2, m3).AsUInt64();
+                    Vector128<float> c0 = AdvSimd.Arm64.ZipLow(t0, t2).AsSingle();
+                    Vector128<float> c1 = AdvSimd.Arm64.ZipHigh(t0, t2).AsSingle();
+                    Vector128<float> c2 = AdvSimd.Arm64.ZipLow(t1, t3).AsSingle();
+                    Vector128<float> c3 = AdvSimd.Arm64.ZipHigh(t1, t3).AsSingle();
+
+                    Vector128<float> sum = AdvSimd.Add(AdvSimd.Add(AdvSimd.Add(c0, c1), c2), c3);
+                    AdvSimd.Store(pOutput + i, AdvSimd.RoundToNearest(sum));
+                }
+            }
+
+            for (; i < sampleCount; i++)
+            {
+                int baseIndex = (int)(frac * 128) * 4;
+                ReadOnlySpan<float> parameter = parameters.Slice(baseIndex, 4);
+                ReadOnlySpan<short> currentInput = inputBuffer.Slice(inputBufferIndex, 4);
+
+                outputBuffer[i] = (float)Math.Round(currentInput[0] * parameter[0] +
+                                                    currentInput[1] * parameter[1] +
+                                                    currentInput[2] * parameter[2] +
+                                                    currentInput[3] * parameter[3]);
+
+                frac += ratio;
+                inputBufferIndex += (int)frac;
+
+                // Only keep lower part (safe as fraction isn't supposed to be negative)
+                frac -= (int)frac;
+            }
+
+            fraction = frac;
+        }
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static ReadOnlySpan<float> GetHighParameter(float ratio)
+        internal static ReadOnlySpan<float> GetHighParameter(float ratio) // S2Arm: internal，tests/audio_dsp_simd 直调对拍
         {
             if (ratio <= 1.0f)
             {
@@ -565,6 +604,14 @@ namespace Ryujinx.Audio.Renderer.Dsp
         private static unsafe void ResampleHighQuality(Span<float> outputBuffer, ReadOnlySpan<short> inputBuffer, float ratio, ref float fraction, int sampleCount)
         {
             ReadOnlySpan<float> parameters = GetHighParameter(ratio);
+
+            // S2Arm: ARM 快路径（S2A_AUDIO_DSP_FAST=1）。与下方标量路径逐样本一致（见 ResampleHighQualityAdvSimd 头注）。
+            if (S2ADspFast.On && AdvSimd.Arm64.IsSupported)
+            {
+                ResampleHighQualityAdvSimd(outputBuffer, inputBuffer, ratio, ref fraction, sampleCount, parameters);
+
+                return;
+            }
 
             int inputBufferIndex = 0;
 
@@ -616,6 +663,98 @@ namespace Ryujinx.Audio.Renderer.Dsp
                     fraction -= (int)fraction;
                 }
             }
+        }
+
+        // S2Arm: 高质档 ARM 快路径（S2A_AUDIO_DSP_FAST=1；tests/audio_dsp_simd 直调对拍，不依赖运行时开关）。与下方标量路径逐样本一致：
+        //   下标 / 小数推进照标量逐个算（含 MathF.Truncate），乘积逐项算（不融合乘加）；
+        //   4 输出样本 × 8 抽头拆成两半（抽头 0–3 与 4–7）各自 4×4 转置后，先按标量的左结合顺序加前 4 抽头 ((p0+p1)+p2)+p3，
+        //   再把后 4 抽头逐个接上，每车道与标量的 ((((((p0+p1)+p2)+p3)+p4)+p5)+p6)+p7 完全同一顺序；舍入用就近取偶（= Math.Round 缺省）。
+        //   fraction 取局部变量只在寄存器上推进、末尾一次写回（同 ResampleDefaultQualityAdvSimd 头注的别名问题）。
+        internal static unsafe void ResampleHighQualityAdvSimd(
+            Span<float> outputBuffer,
+            ReadOnlySpan<short> inputBuffer,
+            float ratio,
+            ref float fraction,
+            int sampleCount,
+            ReadOnlySpan<float> parameters)
+        {
+            float frac = fraction;
+            int inputBufferIndex = 0, i = 0;
+
+            fixed (short* pInput = inputBuffer)
+            fixed (float* pOutput = outputBuffer, pParameters = parameters)
+            {
+                for (; i < (sampleCount & ~3); i += 4)
+                {
+                    int b0 = (int)(frac * 128) * 8; int x0 = inputBufferIndex;
+                    frac += ratio; inputBufferIndex += (int)MathF.Truncate(frac); frac -= (int)frac;
+                    int b1 = (int)(frac * 128) * 8; int x1 = inputBufferIndex;
+                    frac += ratio; inputBufferIndex += (int)MathF.Truncate(frac); frac -= (int)frac;
+                    int b2 = (int)(frac * 128) * 8; int x2 = inputBufferIndex;
+                    frac += ratio; inputBufferIndex += (int)MathF.Truncate(frac); frac -= (int)frac;
+                    int b3 = (int)(frac * 128) * 8; int x3 = inputBufferIndex;
+                    frac += ratio; inputBufferIndex += (int)MathF.Truncate(frac); frac -= (int)frac;
+
+                    // 每输出样本 8 抽头拆两半：m_k = 抽头 0–3 的乘积，n_k = 抽头 4–7 的乘积
+                    Vector128<float> m0 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x0))), AdvSimd.LoadVector128(pParameters + b0));
+                    Vector128<float> m1 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x1))), AdvSimd.LoadVector128(pParameters + b1));
+                    Vector128<float> m2 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x2))), AdvSimd.LoadVector128(pParameters + b2));
+                    Vector128<float> m3 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x3))), AdvSimd.LoadVector128(pParameters + b3));
+                    Vector128<float> n0 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x0 + 4))), AdvSimd.LoadVector128(pParameters + b0 + 4));
+                    Vector128<float> n1 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x1 + 4))), AdvSimd.LoadVector128(pParameters + b1 + 4));
+                    Vector128<float> n2 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x2 + 4))), AdvSimd.LoadVector128(pParameters + b2 + 4));
+                    Vector128<float> n3 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x3 + 4))), AdvSimd.LoadVector128(pParameters + b3 + 4));
+
+                    // 转置：c_k = (m0[k], m1[k], m2[k], m3[k])（抽头 0–3），d_k 同构（抽头 4–7）
+                    Vector128<ulong> t0 = AdvSimd.Arm64.ZipLow(m0, m1).AsUInt64();
+                    Vector128<ulong> t1 = AdvSimd.Arm64.ZipHigh(m0, m1).AsUInt64();
+                    Vector128<ulong> t2 = AdvSimd.Arm64.ZipLow(m2, m3).AsUInt64();
+                    Vector128<ulong> t3 = AdvSimd.Arm64.ZipHigh(m2, m3).AsUInt64();
+                    Vector128<float> c0 = AdvSimd.Arm64.ZipLow(t0, t2).AsSingle();
+                    Vector128<float> c1 = AdvSimd.Arm64.ZipHigh(t0, t2).AsSingle();
+                    Vector128<float> c2 = AdvSimd.Arm64.ZipLow(t1, t3).AsSingle();
+                    Vector128<float> c3 = AdvSimd.Arm64.ZipHigh(t1, t3).AsSingle();
+                    Vector128<ulong> u0 = AdvSimd.Arm64.ZipLow(n0, n1).AsUInt64();
+                    Vector128<ulong> u1 = AdvSimd.Arm64.ZipHigh(n0, n1).AsUInt64();
+                    Vector128<ulong> u2 = AdvSimd.Arm64.ZipLow(n2, n3).AsUInt64();
+                    Vector128<ulong> u3 = AdvSimd.Arm64.ZipHigh(n2, n3).AsUInt64();
+                    Vector128<float> d0 = AdvSimd.Arm64.ZipLow(u0, u2).AsSingle();
+                    Vector128<float> d1 = AdvSimd.Arm64.ZipHigh(u0, u2).AsSingle();
+                    Vector128<float> d2 = AdvSimd.Arm64.ZipLow(u1, u3).AsSingle();
+                    Vector128<float> d3 = AdvSimd.Arm64.ZipHigh(u1, u3).AsSingle();
+
+                    Vector128<float> sum = AdvSimd.Add(AdvSimd.Add(AdvSimd.Add(c0, c1), c2), c3);
+                    sum = AdvSimd.Add(sum, d0);
+                    sum = AdvSimd.Add(sum, d1);
+                    sum = AdvSimd.Add(sum, d2);
+                    sum = AdvSimd.Add(sum, d3);
+
+                    AdvSimd.Store(pOutput + i, AdvSimd.RoundToNearest(sum));
+                }
+            }
+
+            for (; i < sampleCount; i++)
+            {
+                int baseIndex = (int)(frac * 128) * 8;
+                ReadOnlySpan<float> parameter = parameters.Slice(baseIndex, 8);
+                ReadOnlySpan<short> currentInput = inputBuffer.Slice(inputBufferIndex, 8);
+
+                outputBuffer[i] = (float)Math.Round(currentInput[0] * parameter[0] +
+                                                    currentInput[1] * parameter[1] +
+                                                    currentInput[2] * parameter[2] +
+                                                    currentInput[3] * parameter[3] +
+                                                    currentInput[4] * parameter[4] +
+                                                    currentInput[5] * parameter[5] +
+                                                    currentInput[6] * parameter[6] +
+                                                    currentInput[7] * parameter[7]);
+
+                frac += ratio;
+                inputBufferIndex += (int)MathF.Truncate(frac);
+
+                frac -= (int)frac;
+            }
+
+            fraction = frac;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

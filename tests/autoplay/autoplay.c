@@ -761,20 +761,34 @@ static void vision_remote_open(void) {   // 自动玩家开局调一次：清上
     snprintf(p, sizeof p, "%s/session", vd); FILE *f = fopen(p, "w"); if (f) { fprintf(f, "%s\n", g_vis_sess); fclose(f); }
     LOG("自动玩家：驾驶员走远程信箱（%s，会话 %s；Mac 侧 tools/vision_bridge.sh 经 devicectl 答）", vd, g_vis_sess);
 }
+// 驾驶员一问回「后端不可用」（vision.sh 退出 3 / 答案带 "unavailable"）后记下原因：之后不再问、收局理由带上它（11-12：中转站停用后每问 0.3 秒退 1，被当成「这一问没答」静默重试）
+static char g_vis_unavail[600];
 #if TARGET_OS_IPHONE
-static const char *vision_missing(void) { return vision_remote() ? NULL : "iOS 上不带视觉脚本，起局没带 S2A_VISION_REMOTE=1（Mac 侧信箱桥）"; }
+static const char *vision_missing(void) { return g_vis_unavail[0] ? g_vis_unavail : vision_remote() ? NULL : "iOS 上不带视觉脚本，起局没带 S2A_VISION_REMOTE=1（Mac 侧信箱桥）"; }
 #else
 #include <spawn.h>
 #include <sys/wait.h>
 extern char **environ;
 static const char *vision_sh(void) { const char *sh = getenv("S2A_VISION_SH"); return sh && *sh ? sh : "tests/autoplay/vision.sh"; }
-// 可用 = 远程信箱，或脚本在且走缺省脚本 + Jev 后端时有 OpenRouter 密钥（单测的假脚本 / claude CLI 后端不要密钥）
+// PATH 上有没有可执行的 name（缺省后端 = 本机 claude CLI 直连）
+static int on_path(const char *name) {
+    const char *pa = getenv("PATH"); if (!pa) return 0;
+    for (const char *p = pa; *p;) { const char *e = strchr(p, ':'); size_t n = e ? (size_t)(e - p) : strlen(p); char f[1200];
+        if (n && n < sizeof f - 64) { snprintf(f, sizeof f, "%.*s/%s", (int)n, p, name); if (access(f, X_OK) == 0) return 1; }
+        if (!e) break; p = e + 1; }
+    return 0;
+}
+// 可用 = 远程信箱，或脚本在、且缺省脚本的后端在本机起得来：cli（缺省）要 PATH 上有 claude；jev / or 要 OpenRouter 钥匙（单测的假脚本不查）
 static const char *vision_missing(void) {
+    static char why[1200];
+    if (g_vis_unavail[0]) { snprintf(why, sizeof why, "%s", g_vis_unavail); return why; }
     if (vision_remote()) return NULL;
-    static char why[1200]; if (access(vision_sh(), R_OK) != 0) { snprintf(why, sizeof why, "没有 %s", vision_sh()); return why; }
+    if (access(vision_sh(), R_OK) != 0) { snprintf(why, sizeof why, "没有 %s", vision_sh()); return why; }
     const char *vsh = getenv("S2A_VISION_SH"), *vbk = getenv("S2A_VISION_BACKEND");
-    if ((!vsh || !*vsh) && (!vbk || !*vbk || !strcmp(vbk, "jev"))) { char k[1100]; snprintf(k, sizeof k, "%s/.s2arm/.secrets/openrouter.key", getenv("HOME") ? getenv("HOME") : ".");
-        if (access(k, R_OK) != 0) { snprintf(why, sizeof why, "没有 %s", k); return why; } }
+    if (vsh && *vsh) return NULL;
+    if (!vbk || !*vbk || !strcmp(vbk, "cli")) { if (!on_path("claude")) { snprintf(why, sizeof why, "本机没有 claude CLI（看屏驾驶员缺省走本机 claude CLI 直连；装 Claude Code 并登录，或设 S2A_VISION_BACKEND=or）"); return why; } }
+    else { char k[1100]; snprintf(k, sizeof k, "%s/.s2arm/.secrets/openrouter.key", getenv("HOME") ? getenv("HOME") : ".");
+        if (access(k, R_OK) != 0) { snprintf(why, sizeof why, "S2A_VISION_BACKEND=%s 要 OpenRouter 钥匙，没有 %s", vbk, k); return why; } }
     return NULL;
 }
 // 本机：起脚本等它退出；返回退出状态（-1 = 起不来）
@@ -829,6 +843,11 @@ static int vision_ask(const char *tried, int again, vkey *out, int cap, int *pla
     { char *pp = strstr(buf, "\"p_play\""); g_last_p_play = pp && strchr(pp, ':') ? atof(strchr(pp, ':') + 1) : (*playable ? 1.0 : 0.0); }   // Jev 带概率；升级后端只给是 / 否
     { char *em = strstr(buf, "\"empty\""); g_vis_empty = !em ? 0 : strstr(em, "\"tried\"") ? 2 : 1; }
     char *w = strstr(buf, "\"why\""); if (w) { w = strchr(w + 5, '"'); if (w) { snprintf(why, wcap, "%s", w + 1); char *z = strchr(why, '"'); if (z) *z = 0; } }
+    if (rc == 3 || strstr(buf, "\"unavailable\"")) {   // 后端起不来（没有 CLI / 没登录 / 没钥匙）：不是这一问没答，红停
+        snprintf(g_vis_unavail, sizeof g_vis_unavail, "看屏驾驶员不可用：%s", *why ? why : "vision.sh 退出 3（原因见局目录 vision/*.json.log）");
+        LOG("【红】自动玩家：驾驶员 #%d %s", g_vis_n, g_vis_unavail);
+        return -2;
+    }
     int n = 0; char got[256] = "", drop[128] = "";
     char *k = strstr(buf, "\"keys\""), *e = k ? strchr(k, ']') : NULL;
     for (char *q = k ? strchr(k, '[') : NULL; q && e && q < e && n < cap;) {
@@ -1065,7 +1084,8 @@ static void *ap_main(void *a) {
             asked_esc = again >= 2 && (g_pages[pi].jev_miss || g_pages[pi].fast_stay >= 3);
             if (asked_esc && !g_pages[pi].jev_miss) LOG("自动玩家：快档在这页连续 %d 问都只到页内新状态、没离开这页，这一问升级", g_pages[pi].fast_stay);
             int r = vision_ask(tried, asked_esc, ks, 8, &playable, why, sizeof why);
-            if (r == -2) { snprintf(fin_why, sizeof fin_why, "导航卡住（没有视觉驾驶员；回放到第 %d 步对不上）", g_lrn_cur + 1); break; }
+            if (r == -2) { if (g_vis_unavail[0]) snprintf(fin_why, sizeof fin_why, "导航卡住（%s）", g_vis_unavail);
+                else snprintf(fin_why, sizeof fin_why, "导航卡住（没有视觉驾驶员；回放到第 %d 步对不上）", g_lrn_cur + 1); break; }
             if (r == -3) { ap_sleep_us(2e6); poll_digest(0.5); continue; }   // 截图没写成：过会儿再截，不算驾驶员失败（11-03 归族 A：Overcooked 截图写盘卡住 3 次收局）
             if (r < 0) { if (++vis_fail >= 3) { snprintf(fin_why, sizeof fin_why, "导航卡住（驾驶员连续 3 次没给出回答）"); break; } ap_sleep_us(2e6); poll_digest(0.5); continue; }
             nk = r;

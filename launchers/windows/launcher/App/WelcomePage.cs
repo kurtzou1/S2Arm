@@ -190,7 +190,7 @@ public sealed partial class EnvironmentWindow
     {
         if (libraryBusy) return;
         // 确保游戏库存在（没库就建一个私有默认库）
-        importDialog = new ImportDialogState(ImportKind.Games); importError = "";   // 弹窗先开：建库失败的原因显示在弹窗里，不能点了没反应
+        importDialog = new ImportDialogState(ImportKind.Games); importError = ""; importNotice = "";   // 弹窗先开：建库失败的原因显示在弹窗里，不能点了没反应
         EnsureLibrary(() => { });
     }
 

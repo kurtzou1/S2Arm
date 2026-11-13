@@ -1,6 +1,7 @@
 #import "app_settings.h"
 #import "s2a_l10n.h"
 #import "settings.h"
+#import "play_layout.h"
 // 弱链接[lab]：s2a_fps_cap_reason（runtime/src/fps.c：60 帧降档原因 0 无 / 1 热 / 2 低电量 / 3 A/B 测原帧率段；输入工作台不链原生核，取不到就不写降档副标题）
 int s2a_fps_cap_reason(void) __attribute__((weak_import));
 #import "vpad.h"
@@ -64,11 +65,13 @@ static UILabel *textLabel(UIFontTextStyle style) {
 }
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     NSInteger g = self.groups[section].integerValue;
+    if (g == 6) return S2AL(@"play.group");
     if (g == 5) return S2APICK(S2A_DPROMPT_SWITCH_GAME_TITLE);
     return @[S2AL(@"cpatch.group.gfx"), S2AL(@"settings.group.controls"), S2AL(@"settings.group.diag"), S2AL(@"settings.group.dev"), S2AL(@"settings.group.saves")][g];
 }
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     switch (self.groups[section].integerValue) {
+        case 6: return S2AL(@"play.footer");
         case 0: return S2AL(@"settings.footer.graphics");
         case 1: return S2AL(@"settings.footer.controls");
         case 2: return S2AL(@"settings.footer.diag");
@@ -148,8 +151,12 @@ static UILabel *textLabel(UIFontTextStyle style) {
     BOOL compact = self.view.bounds.size.width < 650 || UIContentSizeCategoryIsAccessibilityCategory(self.traitCollection.preferredContentSizeCategory);
     NSArray *secondary = _runtime.manageSaves ? @[@1, @4, @2, @3] : @[@1, @2, @3];
     if (_runtime.switchGame) secondary = [@[@5] arrayByAddingObjectsFromArray:secondary];   // 多款容器：「切换游戏」放第二栏最上（找回游戏库的玩家先看到）
-    NSArray *groups = compact ? [@[@0] arrayByAddingObjectsFromArray:secondary] : @[@0];
-    if (![_left.groups isEqual:groups]) { _left.groups = groups; _right.groups = secondary; _right.view.hidden = compact; [self refresh]; }
+    NSArray *groups = compact ? [@[@6, @0] arrayByAddingObjectsFromArray:secondary] : @[@6, @0];
+    if (![_left.groups isEqual:groups]) {
+        _left.groups = groups; _right.groups = secondary; _right.view.hidden = compact;
+        // 转屏切换分组后必须直接失效旧行；refresh 先取 visibleCells 会让 UITableView 用旧 section 查询新数组，越界退出。
+        [_left.tableView reloadData]; [_right.tableView reloadData];
+    }
 }
 - (void)refresh {
     if (!NSThread.isMainThread) { dispatch_async(dispatch_get_main_queue(), ^{ [self refresh]; }); return; }
@@ -268,11 +275,21 @@ static UILabel *textLabel(UIFontTextStyle style) {
     cell.accessoryView = control; return cell;
 }
 - (NSInteger)rowsForGroup:(NSInteger)group {
+    if (group == 6) return 2;
     if (group == 4 || group == 5) return 1;
     return group == 0 ? 7 + (_patchGroups.count > 0) : [@[@0, @4, @4, @2][group] integerValue];   // 诊断组第 4 行：诊断局
 }
 - (UITableViewCell *)cellForGroup:(NSInteger)group row:(NSInteger)row {
     __weak S2ASettingsController *weakSelf = self;
+    if (group == 6) {
+        BOOL split=row==0;
+        NSString *key=split?S2APlaySplitKey:S2APlayOrientationKey;
+        NSArray *values=split?@[@"auto",@"on",@"off"]:@[@"auto",@"landscape",@"portrait"];
+        NSInteger selected=split?(NSInteger)S2APlayReadSplit(NSUserDefaults.standardUserDefaults):(NSInteger)S2APlayReadOrientation(NSUserDefaults.standardUserDefaults);
+        return [self dropdown:split?S2AL(@"play.split"):S2AL(@"play.orientation") labels:split?@[S2AL(@"play.auto"),S2AL(@"play.on"),S2AL(@"play.off")]:@[S2AL(@"play.auto"),S2AL(@"play.landscape"),S2AL(@"play.portrait")] selected:selected enabled:^BOOL(NSInteger i){ return YES; } choose:^(NSInteger i){
+            [NSUserDefaults.standardUserDefaults setObject:values[i] forKey:key]; [weakSelf refresh];
+        } identifier:[@"settings." stringByAppendingString:key]];
+    }
     if (group == 5) {   // 多款容器切换游戏：点了弹确认（runtime.switchGame），同「导出诊断包」一样是一行动作
         UITableViewCell *cell = [self baseCell:S2APICK(S2A_DPROMPT_SWITCH_GAME_ACTION)];
         cell.textLabel.textColor = self.view.tintColor; cell.textLabel.numberOfLines = 0;
@@ -387,7 +404,7 @@ static UILabel *textLabel(UIFontTextStyle style) {
 @interface S2ASettingsNavigation : UINavigationController
 @end
 @implementation S2ASettingsNavigation
-- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return s2a_ios_play_orientations(); }
 - (BOOL)prefersStatusBarHidden { return YES; }
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
 @end

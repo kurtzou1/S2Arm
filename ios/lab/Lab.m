@@ -3,6 +3,7 @@
 #import <UIKit/UIKit.h>
 #import "controller.h"
 #import "vpad.h"
+#import "play_layout.h"
 #include "s2a_pad.h"
 #include <math.h>
 
@@ -12,7 +13,7 @@ uint64_t s2a_ap_frames(void) { return displayTicks; }
 const char *s2a_main_build_id(void) { return "f01-input-lab-no-guest"; }
 int s2a_autoplay_on(void) { return 1; } // This workbench never records game replay/save markers.
 
-@interface S2AInputLabVC : UIViewController
+@interface S2AInputLabVC : S2APlayViewController
 - (void)record:(NSDictionary *)event;
 @end
 static __weak S2AInputLabVC *labController;
@@ -55,10 +56,12 @@ int s2a_screen_w_after_load(void) { return s2a_screen_w(); }
 }
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
-    _snapshot.frame = CGRectMake(170, CGRectGetMidY(self.view.bounds) - 70, MAX(1, self.view.bounds.size.width - 340), 140);
+    CGRect game=s2a_ios_game_area(); if (CGRectIsEmpty(game)) game=self.view.bounds;
+    _snapshot.frame = CGRectMake(game.origin.x+16, CGRectGetMidY(game)-70, MAX(1, game.size.width-32), 140);
     UIEdgeInsets safe = self.view.safeAreaInsets;
     [self record:@{@"kind": @"geometry", @"width": @(self.view.bounds.size.width), @"height": @(self.view.bounds.size.height),
-        @"safeTop": @(safe.top), @"safeLeft": @(safe.left), @"safeBottom": @(safe.bottom), @"safeRight": @(safe.right)}];
+        @"safeTop": @(safe.top), @"safeLeft": @(safe.left), @"safeBottom": @(safe.bottom), @"safeRight": @(safe.right),
+        @"split":@(s2a_ios_play_layout().split), @"gameX":@(game.origin.x), @"gameY":@(game.origin.y), @"gameWidth":@(game.size.width), @"gameHeight":@(game.size.height)}];
 }
 - (void)record:(NSDictionary *)event {
     NSMutableDictionary *row = [event mutableCopy]; row[@"run"] = _run; row[@"seq"] = @(++_sequence);
@@ -79,7 +82,6 @@ int s2a_screen_w_after_load(void) { return s2a_screen_w(); }
 }
 - (void)background:(NSNotification *)note { s2a_controller_set_foreground(0); [self record:@{@"kind": @"background"}]; [self refresh:nil]; }
 - (void)foreground:(NSNotification *)note { s2a_controller_set_foreground(1); [self record:@{@"kind": @"foreground"}]; [self refresh:nil]; }
-- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
 @end
 

@@ -239,7 +239,7 @@ namespace Ryujinx.Graphics.Nvdec
                     }
                 }
 
-                Fallback(result == Vp9NativeResult.Error ? "libvpx decode error" : $"libvpx: {result}{(error != null ? " (" + error + ")" : "")}");
+                Fallback(result == Vp9NativeResult.Error ? $"{_backend.GetType().Name} decode error" : $"{_backend.GetType().Name}: {result}{(error != null ? " (" + error + ")" : "")}");
                 return false;
             }
 
@@ -253,7 +253,7 @@ namespace Ryujinx.Graphics.Nvdec
             if (!_loggedFirst)
             {
                 _loggedFirst = true;
-                Logger.Info?.Print(LogClass.Nvdec, $"VP9（libvpx 原生，{VpxVp9Backend.Threads} 线程）首帧解出：{input.Width}x{input.Height}");
+                Logger.Info?.Print(LogClass.Nvdec, $"VP9（{_backend.GetType().Name} 原生）首帧解出：{input.Width}x{input.Height}");
             }
 
             return true;

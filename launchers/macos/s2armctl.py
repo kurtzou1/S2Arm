@@ -40,7 +40,7 @@ USAGE = """s2armctl —— 让 AI 助手操作 S2Arm（每条命令 = 玩家点�
                                     一款接一款地出，失败不挡后面、磁盘满暂停；等到出完，打印每款结果和汇总，有失败退出码 1
   install-check <游戏号> [--device UDID或设备名] [--json]    装到 iPhone 前的清单（--device：查哪一台，同 install --device；s2armctl targets 列设备号）：iPhone 版做好没有、Xcode 登录 Apple ID、连上、信任、开发者模式；没好的写谁做什么
   restore-iphone <游戏号>             手机上的 S2Arm 换了新版运行层后不好用：装回上一版（state 里 iphoneRestorable 为真才有）
-  show environment|library|export [游戏号]   打开环境检查 / 回游戏库 / 打开这款的出包页（同点对应按钮）
+  show environment|library|export|install [游戏号]   打开环境检查 / 回游戏库 / 打开这款的出包页 / 装机窗（进度与完成页）（同点对应按钮）
   update-phone [--ask | --accept-stale [--repack]] [--device UDID或设备名] [--accept-dropped] [--accept-no-backup]   更新 iPhone 上的 S2Arm（state 里 phoneUpdates 不空才有）：本版壳 + 已有程序模块，只装 App、不重推资源；
                                     有要按新版重新出包的款时不带 --accept-stale 退 1 并列出它们；--repack 更新完把它们排进批量出包、出完自动装
   customize <游戏号> [--name 名字] [--cover 图片] [--reset-name] [--reset-cover]   改显示名 / 封面（JPG、PNG），下次装到 iPhone 时带上

@@ -108,6 +108,19 @@ class StageDeps(unittest.TestCase):
                            env=dict(os.environ, TMPDIR=str(tmp), S2A_ROOTS=str(roots), S2A_JOB_TMP=str(job), S2A_DEPS_EXTERNAL=''))
         self.assertEqual((r.returncode, r.stdout.strip()), (0, 'BASEKEY'), r.stdout + r.stderr)
 
+    def test_skips_macos_metadata_in_records(self):
+        """#812：记录目录在游戏库卷上；exFAT / FAT 上 macOS 把扩展属性存成旁边的 ._<名>（AppleDouble 二进制，头里有 0x09 后跟 NUL），
+        还可能有 .DS_Store。期望：collect 只读本机制写的记录，清单只有真实记录里那一行；修前读到 ._ 文件报 ValueError: embedded null character"""
+        raw = Path(self.t.name) / 'raw_exfat'; raw.mkdir()
+        (raw / '1-2.tsv').write_text(f'f\t{self.repo}/table.tsv\n')
+        apple_double = bytes.fromhex('00051607000200004d6163204f53205820202020202020200002000000090000'
+                                     '00320000 0eb0000000020000 0ee20000 011e0000'.replace(' ', '')) + bytes(4096 - 0x30)
+        (raw / '._1-2.tsv').write_bytes(apple_double)   # 真实 exFAT 卷上 xattr -w 后系统生成的头（11-13 本机 hdiutil exFAT 镜像实录）
+        (raw / '.DS_Store').write_bytes(b'\x00\x00\x00\x01Bud1\t\x00')
+        import hashlib
+        want = [('f', 'R:table.tsv', hashlib.sha256(b'a\t1\n').hexdigest()[:16])]
+        self.assertEqual(stage_deps.collect(str(raw), str(self.repo), [str(self.excl)]), want)
+
     def test_hook_off_without_env(self):
         env = {k: v for k, v in os.environ.items() if k != 'S2A_DEPS_OUT'}; env['PYTHONPATH'] = str(ROOT / 'tools/stage_deps_hook')
         r = subprocess.run([sys.executable, '-c', 'import sys; print(sys.audit is not None)'], env=env, capture_output=True, text=True, check=True)

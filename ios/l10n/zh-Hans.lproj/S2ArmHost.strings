@@ -157,7 +157,7 @@
 "vpad.layouts.error" = "布局操作失败";
 "vpad.layouts.export" = "导出当前布局";
 "vpad.layouts.footer.broken" = "错误文件保留原样；修正后重新导入或从“文件”中的本 App / VPadLayouts 管理。";
-"vpad.layouts.footer.choose" = "切换立即保存并生效";
+"vpad.layouts.footer.choose" = "编辑普通布局；位置与分屏布局分别保存。切换立即生效。";
 "vpad.layouts.footer.display" = "停止操作 3 秒后保留的按键透明度。0% 时停手后完全看不见，手指按下仍有效、按键随即重新显示；默认 25%。触感反馈在按键新按下、每根摇杆每次按住期间首次到边时轻震一次；不改变游戏本身的震动。";
 "vpad.layouts.footer.stick" = "左右摇杆共用。死区过滤中心微动；外圈饱和越小，越早推满；响应指数大于 1 时中心更细，小于 1 时更灵敏。松手保存，下次推杆生效；默认 8% / 100% / 1.00。";
 "vpad.layouts.holdLock.note" = "按住 2 秒锁定，再点一下解锁；只对这款游戏生效";
@@ -407,7 +407,7 @@
 "settings.footer.controls" = "未连接手柄时，可使用手机陀螺仪和震动。";
 "settings.footer.dev" = "下次启动生效。\nS2Arm 浮层：显示目标帧率、慢帧比例、图形模式、首次编译、音频状态和包号。\nMetal 性能浮层：显示帧率、GPU 时间和帧间隔曲线。仅供开发设备上手动观察；开启时不使用截图、存帧、自动玩家或满屏判定。";
 "settings.footer.diag" = "包含近期运行日志和诊断信息，不含游戏文件、密钥或存档。\n下次打开或切回游戏时导出，随后自动关闭此选项。";
-"settings.footer.graphics" = "重新启动游戏后生效。游戏运行时，完成设置可选择立刻重启；请先在游戏内保存进度。\n主机模式对应 Switch 连接底座时的模式，关闭时使用掌机模式。实际分辨率和画质由游戏决定；与兼容 / 高性能运行模式分别设置。\n宽屏和 60 帧需资源包支持，开启后可能增加负载和耗电。";
+"settings.footer.graphics" = "重新启动游戏后生效。游戏运行时，完成设置可选择立刻重启；请先在游戏内保存进度。\n主机模式对应 Switch 连接底座时的模式，关闭时使用掌机模式。实际分辨率和画质由游戏决定；与兼容 / 高性能运行模式分别设置。\n宽屏和 60 帧需资源包支持，开启后可能增加负载和耗电。\n帧率上限低于游戏原本的帧率时，游戏速度会随之变慢。";
 "settings.footer.saves" = "请先在游戏内保存进度，退出并重新打开后管理存档。";
 "settings.fps.capLowPower" = "已暂时回到原生帧率（低电量模式）";
 "settings.fps.capThermal" = "已暂时回到原生帧率（手机发热）";
@@ -438,3 +438,15 @@
 "textinput.min" = "至少 %ld 个字";
 "textinput.ok" = "确定";
 "textinput.range" = "%ld–%ld 个字";
+"play.group" = "屏幕布局";
+"play.footer" = "所有游戏共用，立即调整布局。自动分屏仅在设备半折叠时开启；无法读取折叠状态时保持关闭。自动方向在分屏时使用竖屏，否则使用横屏。\n部分游戏需重新启动后才能按新区域应用宽屏比例。";
+"play.split" = "上下分屏";
+"play.orientation" = "屏幕方向";
+"play.auto" = "自动";
+"play.on" = "开启";
+"play.off" = "关闭";
+"play.landscape" = "横屏";
+"play.portrait" = "竖屏";
+/* Duo shared layout settings and split touch editor */
+"vpad.layouts.split.title" = "分屏触屏布局";
+"vpad.layouts.split.footer" = "编辑分屏下半区；位置与普通布局分别保存，键 / 触模式和手感共用。";

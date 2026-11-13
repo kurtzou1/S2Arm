@@ -175,6 +175,25 @@ class MoveTests(unittest.TestCase):
         self.assert_moved(old, new)
         self.assertFalse(old.exists())
 
+    def test_rename_imports_pack_like_the_job_runner(self):
+        """#812：作业主程序 pack/jobs/main.py 只把 pack/jobs 放进 sys.path（本文件开头导入了 pack.orch.roots，进程内跑测不出来）。
+        换一个干净的解释器（-I，只放 pack/jobs）调搬库最后那一步改名：期望先确认 pack 确实导入不了，再照常改名成功——
+        main 上这里报 ModuleNotFoundError: No module named 'pack'、目录没搬"""
+        import subprocess
+        jobs, engine = Path(library.__file__).resolve().parent, Path(library.__file__).resolve().parents[2]
+        a, b = self.root / "old" / "games", self.root / "new" / "games"
+        a.mkdir(parents=True); (a / "catalog.json").write_text("{}"); b.parent.mkdir()
+        probe = ("import importlib.util, sys; sys.path.insert(0, sys.argv[1]); from pathlib import Path; from types import SimpleNamespace\n"
+                 "assert importlib.util.find_spec('pack') is None, 'pack 不该在作业进程的 sys.path 上'\n"
+                 "import library\n"
+                 "c = SimpleNamespace(engine=Path(sys.argv[2]), emit=lambda **k: None, check=lambda: None)\n"
+                 "library._rename_library_path(c, sys.argv[3], sys.argv[4])\n")
+        run = subprocess.run([sys.executable, "-I", "-c", probe, str(jobs), str(engine), str(a), str(b)],
+                             cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertFalse(a.exists())
+        self.assertEqual((b / "catalog.json").read_text(), "{}")
+
     @unittest.skipUnless(os.name == "nt", "Windows directory-handle sharing errors")
     def test_same_volume_rename_retries_after_temporary_lock(self):
         old, new = self.old(), self.root / "new"

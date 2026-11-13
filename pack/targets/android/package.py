@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import platform
@@ -365,6 +366,50 @@ def export_sources(destination, env):
         archive.unlink(missing_ok=True)
 
 
+def direct_vulkan_candidate(root, tools):
+    """#48 P5：Vulkan 类游戏（main 导入 vk*、不导入 NVN / EGL，加载器 / 驱动模块能干净替换）出包要带 direct-vulkan.txt，
+    安卓侧 s2a_vk_lib_ready / AUTO 才有判定依据；别的游戏照旧不带。判定用导出源码树里同一份 vulkan_modules.replaced_modules
+    （make_pack --direct-vulkan 写描述符时也是它），返回 (是否带, 不带的原因)。读不了模块表这类意外也按「不带」处理并给出原因：
+    这一步只决定加不加一个可选描述符，不能让本来出得了的包因此失败。"""
+    exefs = Path(root) / 'exefs'
+    if not exefs.is_dir():
+        return False, ''
+    spec = importlib.util.spec_from_file_location('s2a_vulkan_modules', Path(tools) / 'vulkan_modules.py')
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+        module.replaced_modules(exefs)
+    except Exception as error:   # noqa: BLE001 — 原因原样交给调用方打印
+        return False, f'{type(error).__name__}: {error}'
+    return True, ''
+
+
+def latest_release(releases):
+    """The newest published release whose resource package is complete, or None.
+
+    The next release's read-only files are hard-linked to it (game_apk.py --resources --reuse-from) instead of
+    being written again: ext4 has no reflink, so every release used to keep a full copy of the RomFS.
+    A release is published only by the final rename (ledger written first), so '.'-named staging directories,
+    symlinks and directories missing the ledger or the package manifest are not candidates. What game_apk.py
+    actually links is decided by hash against the new package's own index, so a stale or foreign candidate
+    only costs the links, never correctness."""
+    newest = None
+    try:
+        candidates = list(releases.iterdir())
+    except OSError:
+        return None
+    for path in candidates:
+        if path.name.startswith('.') or path.is_symlink() or not path.is_dir():
+            continue
+        ledger = path / 'artifact.json'
+        if not ledger.is_file() or not (path / 'resources' / 'manifest.json').is_file():
+            continue
+        stamp = ledger.stat().st_mtime_ns
+        if newest is None or stamp > newest[0]:
+            newest = (stamp, path)
+    return newest[1] if newest else None
+
+
 def package(root, out):
     root, out = Path(root).resolve(), Path(out).resolve()
     releases = out / 'android-releases'
@@ -393,7 +438,15 @@ def package(root, out):
             original_pack = stage / 'source-pack'
             resources = stage / 'resources'
             apk = stage / 'game.apk'
-            subprocess.run([py, str(tool / 'make_pack.py'), str(original_pack), '--root', str(root)], env=env, check=True)
+            # 两次 make_pack 必须一致：describe 记下的 gameContentRoot 覆盖 direct-vulkan.txt 这一行，只在第二次带会对不上
+            vulkan, why_not = direct_vulkan_candidate(root, tool)
+            vulkan_flag = ['--direct-vulkan'] if vulkan else []
+            if vulkan:
+                print('Vulkan 类游戏：包里带 direct-vulkan.txt（AUTO 据此判直连）。')
+            elif why_not and not why_not.startswith('ValueError: direct Vulkan requires Vulkan main imports'):
+                print('🟡 不带 direct-vulkan.txt（' + why_not + '）：本包照旧走通用路径。')
+            subprocess.run([py, str(tool / 'make_pack.py'), str(original_pack), '--root', str(root), *vulkan_flag],
+                           env=env, check=True)
             backend = build_backend(env)
             builder = build_source / ('android/docker/build.sh' if backend == 'docker' else 'android/host/build.sh')
             # 描述符的翻译闭包取本源码树编译器的构建身份（与 APK 里的编译器同源同配置）。
@@ -404,7 +457,7 @@ def package(root, out):
                             '--identity', str(identity), '--descriptor', str(descriptor)], env=env, check=True)
             direct_pack = stage / 'direct-pack'
             subprocess.run([py, str(tool / 'make_pack.py'), str(direct_pack), '--root', str(root),
-                            '--direct-graphics', str(descriptor)], env=env, check=True)
+                            '--direct-graphics', str(descriptor), *vulkan_flag], env=env, check=True)
             shutil.rmtree(original_pack)
             original_pack = direct_pack
             # 离线 Vulkan 着色器包（target.json「shaders」，#1574）：包 manifest 绑定安装 revision 的
@@ -463,8 +516,10 @@ def package(root, out):
             verify_signature(build_source, apk, env, backend, variant)
             if sha256(apk) != sha256(built):
                 raise ValueError('构建输出在签名验证期间变化。')
-            subprocess.run([py, str(tool / 'game_apk.py'), '--resources', str(original_pack),
-                            str(apk), str(resources)], env=env, check=True)
+            previous = latest_release(releases)   # 持着出包锁：不会有别的出包在这时发布新的
+            subprocess.run([py, str(tool / 'game_apk.py'), '--resources',
+                            *(('--reuse-from', str(previous / 'resources')) if previous else ()),
+                            str(original_pack), str(apk), str(resources)], env=env, check=True)
             if shader_pack:
                 # 把离线包挂进安装资源包：行追加进 index、manifest 绑定的是挂前的内容根
                 #   （attach_shaders.py 自己核 contentRoot，与烘焙时 --content-root 一致）。

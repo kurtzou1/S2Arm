@@ -60,6 +60,61 @@ class BuildTests(JobCase):
                 self.assertEqual((run / "host.log").read_text().strip(),
                                  "unset" if override is None else override)
 
+    def test_runtime_extras_do_not_enter_the_mac_image(self):
+        # 出包收尾（pack/ipa_tail.py）在产物根里留下的 pkg/（打包工作区，打 iPhone 包时资源包与 ipa 的暂存处）与 build/（组装临时 App）
+        # 不是运行依赖。原先 prepare() 克隆产物根时只剔了顶层 *.log 与三个标记文件，它们跟着进了 image/mac，
+        # 此后没有任何一步回收（实测 0100F43008C44000：image/mac 的 du 11.40 GiB、真独占 209.8 MiB，其中 pkg/pack 独占 120 KiB）。
+        import build
+        root = self.root / "product"
+        (root / "romfs" / "arc").mkdir(parents=True)
+        (root / "romfs" / "arc" / "data.trpfs").write_bytes(b"game data")
+        (root / "exefs").mkdir()
+        (root / "exefs" / "main.npdm").write_bytes(b"npdm")
+        (root / "unpack.tsv").write_text("runtime dependency\n")
+        for name in ("pkg", "build"):
+            (root / name / "nested").mkdir(parents=True)
+            (root / name / "nested" / "junk.bin").write_bytes(b"packaging only")
+        for name in ("pkg/build.log", "sign.log", "seed.txt", ".root_src", ".root_base"):
+            (root / name).write_bytes(b"transient")
+        build.prune_runtime_extras(root)
+        self.assertEqual(sorted(p.name for p in root.iterdir()),
+                         ["exefs", "romfs", "unpack.tsv"],
+                         "pkg/ 与 build/ 必须留在产物根，不能进运行版本；运行依赖 unpack.tsv 与 romfs/、exefs/ 不能动")
+        self.assertEqual((root / "romfs" / "arc" / "data.trpfs").read_bytes(), b"game data")
+
+    def test_runtime_extras_never_follow_a_link_out_of_the_image(self):
+        # pkg/ 与 build/ 同名项若是软链（他人或旧版本留下的），只能删链接本身，不跟进去删目标（同 test_cleanup_links.py 的口径）。
+        import build
+        root = self.root / "product"
+        root.mkdir()
+        (root / "romfs").mkdir()
+        player = self.root / "player data"
+        (player / "saves").mkdir(parents=True)
+        keep = player / "saves" / "0.sav"
+        keep.write_bytes(b"must survive")
+        for name in ("pkg", "build"):
+            (root / name).symlink_to(player, target_is_directory=True)
+        (root / "sign.log").symlink_to(keep)
+        build.prune_runtime_extras(root)
+        self.assertEqual(keep.read_bytes(), b"must survive")
+        self.assertEqual(sorted(p.name for p in root.iterdir()), ["romfs"])
+
+    def test_runtime_extras_removes_read_only_packaging_dirs(self):
+        # pkg/pack/romfs 克隆自产物根，可能带只读目录（产物根 RomFS 共享存储整棵只读）。期望整个 pkg/ 删掉，不留半棵进运行版本
+        import build
+        root = self.root / "product"
+        (root / "romfs").mkdir(parents=True)
+        sealed = root / "pkg" / "pack" / "romfs" / "sealed"
+        sealed.mkdir(parents=True)
+        (sealed / "data.bin").write_bytes(b"cloned")
+        sealed.chmod(0o555)
+        try:
+            build.prune_runtime_extras(root)
+        finally:
+            if sealed.exists():
+                sealed.chmod(0o755)
+        self.assertEqual(sorted(p.name for p in root.iterdir()), ["romfs"])
+
 
 if __name__ == "__main__":
     unittest.main()

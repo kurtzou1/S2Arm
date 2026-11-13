@@ -160,6 +160,7 @@ static partial class P {
     static volatile string Stage = "建索引";
     static readonly List<(string Role, string Id)> Involved = new();
     static readonly Dictionary<string, string> FromOf = new();   // 内容号 → 选定那份来自哪个源文件（文件名）
+    static readonly Dictionary<string, string> PatchBase = new();   // 更新程序内容号 → 它叠在上面的本体程序内容号
     static void HashWhere(Exception e) {
         string at = Chain(e).OfType<ReadPlace>().Select(r => r.Message).FirstOrDefault();
         Console.Error.WriteLine($"   读到坏块时在：{Stage}{(at == null ? "" : "，" + at)}");
@@ -175,9 +176,15 @@ static partial class P {
         for (int s = 0; s < 4; s++) {
             if (!nca.SectionExists(s)) continue;
             string kind = nca.Header.ContentType == NcaContentType.Program ? s switch { 0 => "可执行", 1 => "资源", 2 => "标志", _ => "?" } : "数据";
+            // 更新的资源段（AesCtrEx + 重定位表）单独打开不是哈希校验层，LibHac 回 Unchecked——#787 v0.3.3 把它当「不过」报给了玩家；要叠在本体那段上核对
+            bool patch = nca.GetFsHeader(s).EncryptionType == NcaEncryptionType.AesCtrEx;
             string v;
-            try { v = nca.VerifySection(s) == Validity.Valid ? "通过" : "不过"; }
-            catch (Exception x) { v = HashFail(x) != null ? "不过" : $"没法单独核对（{x.GetType().Name}：{(x.Message ?? "").Split('\n')[0]}）"; }   // 更新的资源段要叠在本体上才能读
+            try {
+                Validity r = !patch ? nca.VerifySection(s)
+                    : PatchBase.TryGetValue(id, out var b) && Where.TryGetValue(b, out var ob) ? new Nca(Ks, ob()).VerifySection(nca, s) : Validity.Unchecked;
+                v = r switch { Validity.Valid => "通过", Validity.Invalid => "不过", _ => "没核对（这段要叠在本体上才能读）" } + (patch && r != Validity.Unchecked ? "（叠在本体上核对）" : "");
+            }
+            catch (Exception x) { v = HashFail(x) != null ? "不过" : $"没核对（{x.GetType().Name}：{(x.Message ?? "").Split('\n')[0]}）"; }
             parts.Add($"第 {s} 段{kind} {v}");
         }
         return parts.Count == 0 ? "没有分段" : string.Join("，", parts);
@@ -301,7 +308,7 @@ static partial class P {
         // 多程序合集才多写两行（单程序款 unpack.tsv 逐字节不变）：programs = 支数、program_index = 本次解的序号
         string multi = programs > 1 || programIndex > 0 ? $"programs\t{programs}\nprogram_index\t{programIndex}\n" : "";
         foreach (string need in new[] { baseId, patId }) if (need != null && !Where.ContainsKey(need)) { Console.Error.WriteLine($"🔴 清单里的内容 {need} 不在给的文件里（更新 / 基础分在别的文件？一起给）{BrokenNote()}"); return 1; }
-        Involved.Add(("本体程序", baseId)); if (patId != null) Involved.Add(("更新程序", patId));
+        Involved.Add(("本体程序", baseId)); if (patId != null) { Involved.Add(("更新程序", patId)); PatchBase[patId] = baseId; }
         if (ctrlId != null && Where.ContainsKey(ctrlId)) Involved.Add(("控制数据", ctrlId));
         Console.WriteLine($"程序号 {pid:x16}{(programs > 1 ? $"（多程序合集 {programs} 支，本次序号 {programIndex}）" : "")}；基础 {baseId[..8]}；更新 {(patId == null ? "无" : patId[..8] + " v" + pat.TitleVersion.Version)}；DLC {dlc.Count} 个");
         Func<IntegrityCheckLevel, IStorage> RomfsOpener = level => {   // 叠加更新后的资源分区（每次新开，线程各用各的）
@@ -385,9 +392,11 @@ static partial class P {
             if (did == null || !Where.ContainsKey(did)) { Console.WriteLine($"🟡 DLC 序号 {idx}：数据内容不在给的文件里（{(Broken.Count > 0 ? "源文件损坏，已跳过" + BrokenNote() : "只有授权？")}），跳过"); aocRows.Add($"{idx}\t{m.TitleId:x16}\t{m.TitleVersion.Version}\t-1\t0"); continue; }
             Involved.Add(($"DLC 序号 {idx} 数据", did)); Stage = $"DLC 序号 {idx} 数据分区（内容 {did[..8]}）";
             string id2 = did; Func<IStorage> op = () => new Nca(Ks, Where[id2]()).OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid);
+            Func<IStorage> lenient = () => new Nca(Ks, Where[id2]()).OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.None);
             var part = new List<Item>();   // 先在临时清单里列全：DLC 解不开（缺标题密钥 / 票据时解密结果过不了哈希校验）只丢这一个 DLC、明确报出来，基础游戏照常解
             try { Walk(new RomFsFileSystem(op()), "/", $"aoc/{idx}", Path.Combine(D, "aoc", idx.ToString()), op, part); }
             catch (Exception e) { Console.WriteLine($"🟡 DLC 序号 {idx}：数据分区解不开（{e.GetType().Name}：{e.Message.Split('\n')[0]}），不打包数据，aoc.tsv 记仅授权"); aocRows.Add($"{idx}\t{m.TitleId:x16}\t{m.TitleVersion.Version}\t-1\t0"); continue; }
+            foreach (Item it in part) { it.Lenient = lenient; it.Aoc = idx; }
             aocIdx.Add(idx); items.AddRange(part); aocRows.Add($"{idx}\t{m.TitleId:x16}\t{m.TitleVersion.Version}\t{part.Count}\t{part.Sum(i => i.Size)}");
         }
         // 只差大小写的两个路径：宿主 / iOS 都按客体原名找文件，但 Mac 与 iPhone 的文件系统不分大小写，松散文件会互相覆盖——宁可报红停下也不悄悄丢一个
@@ -402,6 +411,13 @@ static partial class P {
         Stage = "逐文件读出资源（RomFS / DLC）"; var offs = items.Select(i => i.Off).ToArray();
         var opts = new ParallelOptions { MaxDegreeOfParallelism = Math.Min(nparts, Environment.ProcessorCount) };
         var tl = new ThreadLocal<Dictionary<Func<IStorage>, IFileSystem>>(() => new());   // 每线程每个来源一份读视图
+        // #787：DLC 数据哈希不符（整合包合进改过的 DLC / 个别块坏）原先整次出包报红。同 #633 更新后的资源：这个 DLC 换不校验的视图照常解出，记一行黄；
+        //   本体可执行 / 控制 / 无更新的资源仍严格。键 = DLC 序号，值 = 第一处坏块
+        var aocBypass = new System.Collections.Concurrent.ConcurrentDictionary<int, string>();
+        IFile OpenIn(Func<IStorage> opener, string path, ref UniqueRef<IFile> fref) {
+            var map = tl.Value; if (!map.TryGetValue(opener, out var fs)) map[opener] = fs = new RomFsFileSystem(opener());
+            fs.OpenFile(ref fref.Ref, path.ToU8Span(), OpenMode.Read).ThrowIfFailure(); return fref.Get;
+        }
         Parallel.For(0, nparts, opts, k => {
             long lo = k * chunk, hi = Math.Min(total, lo + chunk); byte[] buf = new byte[4 << 20];
             int i = Array.BinarySearch(offs, lo); if (i < 0) i = ~i - 1; if (i < 0) i = 0;
@@ -409,19 +425,25 @@ static partial class P {
                 Item it = items[i]; if (it.Size == 0) continue;
                 long a0 = Math.Max(lo, it.Off), a1 = Math.Min(hi, it.Off + it.Size); if (a1 <= a0) continue;
                 using FileStream lf = it.Dst == null ? null : new FileStream(it.Dst, FileMode.OpenOrCreate, FileAccess.Write, FileShare.ReadWrite, 1);
-                var map = tl.Value; if (!map.TryGetValue(it.Opener, out var fs)) map[it.Opener] = fs = new RomFsFileSystem(it.Opener());
-                var fref = new UniqueRef<IFile>(); fs.OpenFile(ref fref.Ref, it.Path.ToU8Span(), OpenMode.Read).ThrowIfFailure(); IFile src = fref.Get;
+                var fref = new UniqueRef<IFile>(); bool loose = it.Lenient != null && aocBypass.ContainsKey(it.Aoc);
+                IFile src = OpenIn(loose ? it.Lenient : it.Opener, it.Path, ref fref);
                 if (lf != null) lf.Position = a0 - it.Off;
                 for (long p = a0; p < a1;) {
                     int want = (int)Math.Min(buf.Length, a1 - p); long got;
                     try { src.Read(out got, p - it.Off, buf.AsSpan(0, want), ReadOption.None).ThrowIfFailure(); }
-                    catch (Exception x) when (x is not ReadPlace) { throw new ReadPlace($"文件 {it.Rel}，文件内偏移 {p - it.Off}（读 {want} 字节）", x); }
+                    catch (Exception x) when (x is not ReadPlace) {
+                        string place = $"文件 {it.Rel}，文件内偏移 {p - it.Off}（读 {want} 字节）";
+                        if (it.Lenient == null || loose || !RomfsExtraction.IsDataHashFailure(x)) throw new ReadPlace(place, x);
+                        aocBypass.TryAdd(it.Aoc, place); fref.Destroy(); fref = new UniqueRef<IFile>(); src = OpenIn(it.Lenient, it.Path, ref fref); loose = true; continue;
+                    }
                     if (got <= 0) throw new IOException($"读不出 {it.Rel} @{p - it.Off}");
                     lf?.Write(buf, 0, (int)got); p += got;
                 }
                 fref.Destroy();
             }
         });
+        foreach (var (idx, place) in aocBypass.OrderBy(kv => kv.Key))
+            Console.WriteLine($"🟡 DLC 序号 {idx} 原件数据哈希不符（疑改版 / 整合版），已跳过这个 DLC 的完整性校验照常解出；第一处坏块在{place}");
         if (aocOnly) {
             File.WriteAllText(Path.Combine(D, "aoc.tsv"), "idx\ttitle_id\tversion\tfiles\tbytes\n" + string.Concat(aocRows.Select(r => r + "\n")));
             Console.WriteLine($"🟢 追加内容：程序号 {tid:x16}；清单里 {dlc.Count} 个，解出 {aocIdx.Count} 个（{items.Sum(i => i.Size) >> 20} MB）{string.Concat(aocRows.Select(r => "；" + r.Split('\t')[1]))}；{(DateTime.UtcNow - t0).TotalSeconds:F0} 秒");
@@ -441,7 +463,8 @@ static partial class P {
         if (romfs?.Warning is string warning) Console.WriteLine(warning);
     }
 
-    class Item { public string Rel, Path, Dst; public long Size, Off; public Func<IStorage> Opener; }
+    // Lenient：只有 DLC 有——读到数据哈希不符时换这个不校验的视图重读（#787），Aoc = DLC 序号
+    class Item { public string Rel, Path, Dst; public long Size, Off; public Func<IStorage> Opener, Lenient; public int Aoc = -1; }
     static void Walk(IFileSystem fs, string dir, string root, string dst, Func<IStorage> opener, List<Item> items) {
         var files = new List<DirectoryEntryEx>(); var dirs = new List<string>();
         foreach (DirectoryEntryEx e in fs.EnumerateEntries(dir, "*", SearchOptions.Default)) { if (e.Type == DirectoryEntryType.Directory) dirs.Add(e.Name); else files.Add(e); }

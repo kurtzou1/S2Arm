@@ -375,6 +375,31 @@ class FlowTests(unittest.TestCase):
             with self.assertRaises(Failure) as e: packer.assemble(self.c, "0100000000090000")
         self.assertEqual(e.exception.code, "container_stale")
 
+    def test_container_program_number_mismatch_says_files_dont_match(self):
+        """组装结果里这款的程序号（main.npdm）和游戏库的号（导入时 CNMT 发行号）不一样 → game_files_mismatch，原因说人话、两个号都给出；
+        核对本身保留（玩家实报：把别的游戏的程序换进了这款的包里，放过去就推到手机上错的目录）"""
+        import ipa as packer
+        A, OTHER = "0100DD2053220000", "010051F0207B2000"
+        ios_fixture(self.c, A, shell="SID1")
+        self.c.catalog = lambda: {"games": [{"id": A, "name": "甲"}]}
+        shell = self.c.private / "shell"; shell.mkdir(); (shell / "manifest.json").write_text("{}")
+        def run(args, log=None, env=None, cwd=None, on_line=None):
+            args = [str(a) for a in args]
+            if len(args) > 5 and args[4].endswith("ship_ext.py") and args[5] == "container":
+                o = Path(args[args.index("--out") + 1]); o.mkdir(parents=True, exist_ok=True)
+                (o / "s2a_catalogue.json").write_text(json.dumps({"schema": 1, "shell_id": "SID1", "games": [{"title_id": OTHER}]}))
+            if len(args) > 5 and args[4].endswith("app_bundle.py") and args[5] == "write_ipa":
+                Path(args[7]).write_bytes(b"ipa")
+        with um.patch.object(packer, "current_shell_id", return_value="SID1"), \
+             um.patch.object(packer, "container_shell", return_value=shell), \
+             um.patch.object(packer, "release_version", return_value="9.8.7"), \
+             um.patch.object(self.c, "run", run):
+            with self.assertRaises(Failure) as e: packer.assemble(self.c, A)
+        self.assertEqual(e.exception.code, "game_files_mismatch")
+        text = str(e.exception)
+        self.assertIn(OTHER, text); self.assertIn(A, text); self.assertIn("原版游戏文件重新导入", text)
+        self.assertNotIn("产物根", text)
+
     def _ready(self, devices, teams=(dict(id="team-a", name="我", free=True),), rc=0, usb=(), raises=None, want="测试设备2"):
         """跑装机前清单：devicectl list devices 回 devices（手造的 devicectl 行），Xcode 团队 teams；want = 玩家选的那台（None = 没选）"""
         import diag
@@ -1105,19 +1130,21 @@ class AssembleTests(unittest.TestCase):
             self.assertEqual(install.phone_updates(self.c), [])
 
     def test_install_mode_defaults_and_persists(self):
-        """装到 iPhone 的方式：没设过 = device；改 export 在导出作业合入前拒收；不认识的拒收；设成 device 写进 install.json"""
+        """装到 iPhone 的方式：没设过 = device；不认识的拒收；设成 device / export 写进 install.json；导出作业在 = exportAvailable"""
         self.assertEqual(install.install_mode_job(self.c)["mode"], "device")
-        for bad in ("export", "cloud"):
-            self.c.r = dict(self.c.r, mode=bad)
-            with self.assertRaises(Failure): install.install_mode_job(self.c)
+        self.c.r = dict(self.c.r, mode="cloud")
+        with self.assertRaises(Failure): install.install_mode_job(self.c)
         self.c.r = dict(self.c.r, mode="device")
-        self.assertEqual(install.install_mode_job(self.c), dict(mode="device", exportAvailable=False, signMode="appleId"))
+        self.assertEqual(install.install_mode_job(self.c), dict(mode="device", exportAvailable=True, signMode="appleId"))
         self.assertEqual(json.loads((self.c.private / "install.json").read_text()), {"mode": "device"})
-        with um.patch.object(install, "export_phone", lambda c: None, create=True):
+        self.c.r = dict(self.c.r, mode="export")
+        self.assertEqual(install.install_mode_job(self.c)["mode"], "export")
+        self.c.r = {k: v for k, v in self.c.r.items() if k != "mode"}
+        self.assertEqual(install.install_mode(self.c), "export")
+        with um.patch.object(install, "export_phone", None):   # 导出作业不在（旧版）：置灰、拒收 export
             self.c.r = dict(self.c.r, mode="export")
-            self.assertEqual(install.install_mode_job(self.c)["mode"], "export")
-            self.c.r = {k: v for k, v in self.c.r.items() if k != "mode"}
-            self.assertEqual(install.install_mode(self.c), "export")
+            with self.assertRaises(Failure): install.install_mode_job(self.c)
+            self.assertFalse(install.export_available(self.c))
     def test_other_signer_install_error_is_named(self):
         """玩家先自签装过同包名的 S2Arm：系统安装服务拒绝覆盖的两种原文都认成 app_other_signer（Mac devicectl / Windows 同一句），不落到笼统的装机失败"""
         import impactor
@@ -1323,6 +1350,120 @@ class AssembleTests(unittest.TestCase):
         self.assertEqual(dropped, [(layout.phone_ipa(self.c), A)])
         self.assertEqual(signed, [([B], ([B], "SID1"))])
         self.assertEqual((r["games"], install_ipa_games(layout.phone_ipa(self.c))), ([B], ([B], "SID1")))
+
+
+def library_pack(c, gid):
+    return layout.ios_pack(c, gid)
+
+
+def img_module():
+    """pack/img.py（按文件加载：把 pack/ 放进 sys.path 会让 pack/pack.py 盖住 pack 包）"""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("s2a_pack_img", Path(__file__).resolve().parents[2] / "img.py")
+    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return m
+
+
+class ExportPhoneTests(unittest.TestCase):
+    """导出，自己签名安装（export_phone）：不连手机、不签名；游戏库根「S2Arm 自签导出」= 未签名 S2Arm.ipa（能放进本壳的各款）+ 各款 <名字>.img + 说明"""
+    setUp = _jobs_setup_no_phone_games; tearDown = tj.JobsTests.tearDown
+    A, B, C, D = AssembleTests.A, AssembleTests.B, AssembleTests.C, "0100000000040000"
+    COMPAT = AssembleTests.COMPAT
+    _library, _run, _ipa = AssembleTests._library, AssembleTests._run, staticmethod(AssembleTests._ipa)   # 只借替身，不继承它的用例
+
+    def _img(self, gid, data):
+        """把这款的资源包改成单一 IMG 形态：真的 game.img（pack/img.py build，其余文件段放 data）+ 照旧按文件放的着色器库 shaders/direct/lib.bin，
+        清单 v3 format=img、index.tsv 登记 game.img 与着色器库"""
+        img = img_module()
+        _, pk = ios_fixture(self.c, gid)
+        for f in pk.iterdir():
+            shutil.rmtree(f) if f.is_dir() else f.unlink()
+        src = pk.parent / "data.bin"; src.write_bytes(data)
+        img.build(None, [("exefs/main", str(src))], str(pk / "game.img"), gid, "p" + gid[-5:], say=lambda *_: None); src.unlink()
+        (pk / "shaders/direct").mkdir(parents=True); (pk / "shaders/direct/lib.bin").write_bytes(b"LIB" + gid.encode())
+        (pk / "index.tsv").write_text(f"game.img\t{(pk / 'game.img').stat().st_size}\tp\nshaders/direct/lib.bin\t{3 + len(gid)}\th\n")
+        (pk / "manifest.json").write_text(json.dumps({"version": 3, "format": "img", "imgFile": "game.img", "index_sha256": "p" + gid[-5:]}))
+        return pk
+
+    def _export(self, request, fn=None):
+        import ipa as packer, host_update, rewrite_refresh
+        self.sid = "SID1"
+        shell = self.c.private / "shell"; shell.mkdir(exist_ok=True); (shell / "manifest.json").write_text("{}")
+        self.c.r = dict(self.c.r, **request)
+        def no_phone(c):
+            raise AssertionError("导出不该找手机")
+        fake = self._run([])
+        def run(args, log=None, env=None, cwd=None, on_line=None):   # 导出单文件 IMG（pack/img.py export）真跑，组装照旧用替身
+            if "pack/img.py" in [str(a) for a in args]:
+                r = subprocess.run([str(a) for a in args], cwd=cwd, env=env, capture_output=True, text=True)
+                if r.returncode: raise AssertionError(r.stdout + r.stderr)
+                return
+            return fake(args, log, env, cwd, on_line)
+        with um.patch.object(packer, "current_shell_id", return_value="SID1"), um.patch.object(packer, "container_shell", return_value=shell), \
+             um.patch.object(host_update, "engine_compat", return_value=dict(self.COMPAT)), um.patch.object(self.c, "run", run), \
+             um.patch.object(rewrite_refresh, "refresh_ios", lambda c, games: None), um.patch.object(install, "phone_for", no_phone):
+            return (fn or install.install)(self.c)
+
+    def test_export_folder_has_ipa_imgs_and_readme(self):
+        """装法 export：点甲 → 甲、乙（单一 IMG）进容器和文件夹；丙旧格式点名跳过；丁没出过 iPhone 版不提；文件夹里只有 ipa、两份 .img（内容同库里）、说明"""
+        A, B, C = self.A, self.B, self.C
+        self._library((A, "甲"), (B, "乙"), (C, "丙"), (self.D, "丁"))
+        self._img(A, b"S2AIMG01-a"); self._img(B, b"S2AIMG01-b"); ios_fixture(self.c, C)
+        (self.c.private / "install.json").write_text(json.dumps({"mode": "export"}))
+        r = self._export(dict(gameId=A))
+        out = self.c.library / install.EXPORT_DIR
+        self.assertEqual((r["exported"], r["outputPath"], r["games"], r["skipped"]), (True, str(out), [A, B], ["丙"]))
+        self.assertEqual(sorted(p.name for p in out.iterdir()), sorted(["S2Arm.ipa", "甲.img", "乙.img", install.EXPORT_README]))
+        # 一款一个文件：原资源包的其余文件段 + 着色器库进了目录表（手机认领后照常解出来）；原 game.img 不动
+        img = img_module()
+        for f, gid, data in (("甲.img", A, b"S2AIMG01-a"), ("乙.img", B, b"S2AIMG01-b")):
+            got = {p: (off, n) for p, off, n in img.entries(str(out / f))}
+            with open(out / f, "rb") as fh:
+                def rd(p): fh.seek(got[p][0]); return fh.read(got[p][1])
+                self.assertEqual((rd("exefs/main"), rd("shaders/direct/lib.bin"), img.header(str(out / f))["gid"]), (data, b"LIB" + gid.encode(), gid))
+            self.assertNotIn("shaders/direct/lib.bin", {p for p, _, _ in img.entries(str(library_pack(self.c, gid) / "game.img"))})
+        self.assertEqual(install_ipa_games(out / "S2Arm.ipa"), ([A, B], "SID1"))
+        readme = (out / install.EXPORT_README).read_text(encoding="utf-8-sig")
+        self.assertIn("甲.img（甲）", readme); self.assertIn("乙.img（乙）", readme); self.assertIn("放这里导入", readme)
+        self.assertEqual(r["exportBytes"], sum(p.stat().st_size for p in out.iterdir()))
+        self.assertEqual([p.name for p in self.c.library.iterdir() if p.name.startswith(".export-")], [])   # 临时目录收干净
+
+    def test_export_replaces_whole_folder(self):
+        """再导出一次：文件夹整个换新（上次的、玩家放进去的别的文件都不在了）"""
+        self._library((self.A, "甲")); self._img(self.A, b"S2AIMG01-a")
+        out = self.c.library / install.EXPORT_DIR; out.mkdir(); (out / "旧.img").write_bytes(b"old")
+        self._export(dict(gameId=self.A, mode="export"))
+        self.assertFalse((out / "旧.img").exists())
+        self.assertTrue((out / "甲.img").is_file())
+
+    def test_export_requested_old_format_is_named(self):
+        """点的这款还是旧格式资源包：导出不了单个 game.img，报 pack_missing 说要重新打 iPhone 包"""
+        self._library((self.A, "甲")); ios_fixture(self.c, self.A)
+        with self.assertRaises(Failure) as e: self._export(dict(gameId=self.A, mode="export"))
+        self.assertEqual(e.exception.code, "pack_missing")
+
+    def test_export_file_names(self):
+        """文件名取游戏名：不能做文件名的字符换空格；重名带游戏号"""
+        used = set()
+        self.assertEqual(install._img_name("a/b", self.A, used), "a b.img")
+        self.assertEqual(install._img_name("a b", self.B, used), f"a b {self.B}.img")
+        self.assertEqual(install._img_name("", self.C, used), f"{self.C}.img")
+
+    def test_request_mode_overrides_setting(self):
+        """完成页临时换一次：设置是 export、请求带 mode=device → 照一键装走（put_game）；设置是 device、请求带 export → 导出"""
+        self._library((self.A, "甲")); self._img(self.A, b"S2AIMG01-a")
+        (self.c.private / "install.json").write_text(json.dumps({"mode": "export"}))
+        with um.patch.object(install, "put_game", return_value=dict(device="x")) as put, um.patch.object(install, "phone_for", return_value=object()):
+            self.c.r = dict(self.c.r, gameId=self.A, mode="device")
+            self.assertEqual(install.install(self.c), dict(device="x"))
+            put.assert_called_once()
+        (self.c.private / "install.json").write_text(json.dumps({"mode": "device"}))
+        self.assertTrue(self._export(dict(gameId=self.A, mode="export"))["exported"])
+
+    def test_update_in_export_mode_exports(self):
+        """导出模式的「导出新版 S2Arm」：不连手机，游戏库里能带的各款出到文件夹，updated = True"""
+        self._library((self.A, "甲"), (self.B, "乙")); self._img(self.A, b"a"); self._img(self.B, b"b")
+        r = self._export(dict(mode="export"), fn=install.update_phone)
+        self.assertEqual((r["exported"], r["updated"], r["games"]), (True, True, [self.A, self.B]))
 
 
 def install_ipa_games(ipa):

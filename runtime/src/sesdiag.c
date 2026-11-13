@@ -71,9 +71,10 @@ int s2a_log_summary(const char *path, size_t head_cap, size_t tail_cap, s2a_log_
     size_t head = sz <= head_cap + tail_cap ? sz : head_cap, tail = sz <= head_cap + tail_cap ? 0 : tail_cap;
     char *b = malloc((head > tail ? head : tail) + 1); if (!b) { close(fd); return -1; }
     ssize_t r = head ? pread(fd, b, head, 0) : 0;
-    if (r > 0) scan(b, (size_t)r, o);
+    if (r > 0) { o->read += (size_t)r; scan(b, (size_t)r, o); }
     if (tail) {
         r = pread(fd, b, tail, (off_t)(sz - tail));
+        if (r > 0) o->read += (size_t)r;
         if (r > 0) { const char *s = memchr(b, '\n', (size_t)r); if (s) scan(s + 1, (size_t)(b + r - (s + 1)), o); }   // 尾段第一行多半被截断：从第一个换行后起
         o->truncated = 1;
     }

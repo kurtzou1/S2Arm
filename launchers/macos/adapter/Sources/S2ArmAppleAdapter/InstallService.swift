@@ -92,6 +92,12 @@ public struct InstallResult: Equatable {
     public var packBytes: Int64? = nil
     /// 这次推的全是单一 IMG：已传到手机、打开 S2Arm 会自动完成安装（作业结果 openToFinish）
     public var openToFinish: Bool = false
+    /// 导出模式（装法选了「导出，自己签名安装」）：没连手机，S2Arm.ipa + 各款 .img + 说明放进的文件夹（作业结果 exported / outputPath）；一键装为空
+    public var exportFolder: String = ""
+    /// 导出了几款、文件夹总字节数、没放进这次导出的款（要按新版重新出包，作业结果 skipped 是游戏名）
+    public var exportGames: Int = 0
+    public var exportBytes: Int64? = nil
+    public var skipped: [String] = []
 }
 
 /// 从手机删一款的结果（installRemove 作业，pack/jobs/install.py remove_from_phone）。
@@ -142,7 +148,10 @@ public final class InstallService {
         let r = try await client.perform("install", extra: extra, events: events).result
         return InstallResult(device: r["device"] as? String ?? "", deviceKind: r["deviceKind"] as? String ?? "", deviceName: r["deviceName"] as? String ?? "",
                              packFiles: (r["packFiles"] as? NSNumber)?.intValue, outputPath: r["outputPath"] as? String, packBytes: (r["packBytes"] as? NSNumber)?.int64Value,
-                             openToFinish: r["openToFinish"] as? Bool ?? false)
+                             openToFinish: r["openToFinish"] as? Bool ?? false,
+                             exportFolder: r["exported"] as? Bool == true ? r["outputPath"] as? String ?? "" : "",
+                             exportGames: (r["games"] as? [Any])?.count ?? 0, exportBytes: (r["exportBytes"] as? NSNumber)?.int64Value,
+                             skipped: r["skipped"] as? [String] ?? [])
     }
 
     // ---- 开发者证书（v0.2.4，pack/jobs/devcert.py）----

@@ -50,18 +50,9 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
         private float ProcessMixRamp(Span<float> outputBuffer, ReadOnlySpan<float> inputBuffer, int sampleCount)
         {
             float ramp = (Volume1 - Volume0) / sampleCount;
-            float volume = Volume0;
-            float state = 0;
 
-            for (int i = 0; i < sampleCount; i++)
-            {
-                state = FloatingPointHelper.MultiplyRoundUp(inputBuffer[i], volume);
-
-                outputBuffer[i] += state;
-                volume += ramp;
-            }
-
-            return state;
+            // S2Arm: 内核抽到 S2ADspMixHelper（ARM 向量路径与标量路径逐样本一致，含音量递推序列）
+            return S2ADspMixHelper.MixRamp(outputBuffer, inputBuffer, Volume0, ramp, sampleCount);
         }
 
         public void Process(CommandList context)

@@ -64,3 +64,24 @@ UninstalledAll=%1 已卸载。游戏库、存档和出好的 iPhone 包都还在
 UninstalledMost=%1 已卸载。%n%n有几个文件删不掉（可能正被占用），可以以后手动删除。
 WizardUninstalling=正在卸载
 StatusUninstalling=正在卸载 %1...
+
+; ---- 关程序 / 替换文件出错（11-11 维护者覆盖安装时弹出英文「DeleteFile failed; code 5」）----
+WizardPreparing=准备安装
+PreparingDesc=正在准备把 [name] 装到这台电脑上。
+CannotContinue=安装没法继续，请点「取消」退出。
+ApplicationsFound=下面这些程序正在用要更新的文件，建议让安装程序自动关掉它们。
+ApplicationsFound2=下面这些程序正在用要更新的文件，建议让安装程序自动关掉它们。装完后安装程序会试着重新打开它们。
+CloseApplications=自动关掉这些程序(&A)
+DontCloseApplications=不关(&D)
+ErrorCloseApplications=没能自动关掉所有程序。请先手动关掉 S2Arm（以及 Impactor），再继续安装。
+StatusClosingApplications=正在关掉占用文件的程序……
+StatusRestartingApplications=正在重新打开程序……
+SetupAborted=安装没有完成。%n%n把问题处理好后再运行一次安装程序。
+ErrorFunctionFailedNoCode=%1 没成功
+ErrorFunctionFailed=%1 没成功（代码 %2）。多半是这个文件正被别的程序占着：先关掉 S2Arm 和 Impactor，再点「再试一次」。
+ErrorFunctionFailedWithMessage=%1 没成功（代码 %2）。%n%3
+FileAbortRetryIgnoreSkipNotRecommended=跳过这个文件（不建议）(&S)
+FileAbortRetryIgnoreIgnoreNotRecommended=忽略这个错误继续（不建议）(&I)
+ErrorReplacingExistingFile=替换已有文件时出错：
+ErrorCopying=复制文件时出错：
+ErrorCreatingDir=没能创建文件夹「%1」

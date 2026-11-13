@@ -1,6 +1,6 @@
 // 上一局是否异常退出 + 有界日志摘要（runtime/src/sesdiag.c；11-07 测试设备2：重开 App 主线程整份读上一局 host.log 卡 1.67 s / 6.85 s，看门狗复位整机）。
-//   期望值手写：① 会话标记读写往返（无 / fg / bg / 删）；判定「上次是否异常」只读标记，和日志多大无关：放一份 200 MB 的假上一局日志，判定 < 1 ms（主线程预算 100 ms）。
-//   ② 摘要只读头 1 MB + 尾 3 MB：200 MB 假日志里，头部的标记行、尾部最后一次心跳的帧号 / 实占 / 热状态 / 收尾行都取到；读的字节数 = 4 MB，用时 < 100 ms。
+//   期望值手写：① 会话标记读写往返（无 / fg / bg / 删）；判定「上次是否异常」只读标记，和日志多大无关：放一份 200 MB 的假上一局日志，判定结论在日志不可读时照旧（= 不读日志；原判据「< 1 ms」随负载变，11-10 改）。
+//   ② 摘要只读头 1 MB + 尾 3 MB：200 MB 假日志里，头部的标记行、尾部最后一次心跳的帧号 / 实占 / 热状态 / 收尾行都取到；读的字节数恰为 4 MB（原判据「< 100 ms」随负载变，11-10 改）。
 //   负对照：同一个函数把头尾上限放到整份（旧做法 = 整份读），读的字节数 = 200 MB（并打用时作参考）
 #include "../src/native.h"
 #include "s2a_sesdiag.h"
@@ -38,21 +38,22 @@ int main(void) {
     CHECK(big > 200u * 1000 * 1000, "假日志 %.1f MB", big / 1048576.0);
 
     s2a_sesmark_set(dir, S2A_SESMARK_FG);
-    struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
-    int prev = s2a_sesmark_prev(dir); double dm = ms_since(t0);
-    CHECK(prev == S2A_SESMARK_FG && dm < 1.0, "上一局日志 200 MB 时判定「上次异常」用时 %.3f ms（< 1 ms，主线程预算 100 ms），不读日志", dm);
+    // 判据与负载无关（11-10 判据去负载化：原「用时 < 1 ms」在负载 35 时测得 1.289 ms 判红）：把 200 MB 日志设成不可读，结论照旧 = 判定不读日志；用时只打印作参考
+    struct timespec t0; chmod(log, 0); clock_gettime(CLOCK_MONOTONIC, &t0);
+    int prev = s2a_sesmark_prev(dir); double dm = ms_since(t0); chmod(log, 0644);
+    CHECK(prev == S2A_SESMARK_FG, "上一局日志 200 MB 且不可读时判定「上次异常」照旧 = fg（不读日志；用时 %.3f ms 仅供参考）", dm);
 
     // ② 有界摘要
     s2a_log_sum m; clock_gettime(CLOCK_MONOTONIC, &t0);
     int rc = s2a_log_summary(log, S2A_SUM_HEAD, S2A_SUM_TAIL, &m); double sm = ms_since(t0);
     CHECK(rc == 0 && m.frames == 2228 && m.peak_mb == 1500 && m.thermal == 2 && m.mark == 1 && m.end == S2A_SUM_END_EXIT && m.truncated,
           "有界摘要：帧 %lld（期望 2228）、实占峰 %lld（1500）、热 %lld（2）、标记 %d（1）、收尾 %d（1 = exit）", m.frames, m.peak_mb, m.thermal, m.mark, m.end);
-    CHECK(sm < 100, "有界摘要用时 %.1f ms（< 100 ms），只读 %u MB", sm, (S2A_SUM_HEAD + S2A_SUM_TAIL) >> 20);
+    CHECK(m.read == (size_t)S2A_SUM_HEAD + S2A_SUM_TAIL, "有界摘要读的字节数 %.2f MB = 头 %u MB + 尾 %u MB（用时 %.1f ms 仅供参考）", m.read / 1048576.0, S2A_SUM_HEAD >> 20, S2A_SUM_TAIL >> 20, sm);
     // 负对照：上限放到整份
     clock_gettime(CLOCK_MONOTONIC, &t0);
     s2a_log_sum f; rc = s2a_log_summary(log, big, big, &f); double fm = ms_since(t0);
-    CHECK(rc == 0 && !f.truncated && f.bytes == big, "负对照：头尾上限放到整份 = 读满 %.1f MB（用时 %.1f ms，旧做法在 NSString 上逐行折叠查找更慢，真机实测 6.85 s）", f.bytes / 1048576.0, fm);
-    CHECK(fm > sm, "负对照：整份读比有界摘要慢（%.1f ms > %.1f ms）", fm, sm);
+    CHECK(rc == 0 && !f.truncated && f.read == big, "负对照：头尾上限放到整份 = 读满 %.1f MB（用时 %.1f ms，旧做法在 NSString 上逐行折叠查找更慢，真机实测 6.85 s）", f.read / 1048576.0, fm);
+    CHECK(f.read > m.read, "负对照：整份读的字节数大于有界摘要（%.1f MB > %.1f MB；用时 %.1f / %.1f ms 仅供参考）", f.read / 1048576.0, m.read / 1048576.0, fm, sm);
     // 截断的尾段第一行不当成一行：尾段起点落在一行中间时，帧号仍取尾部最后一次心跳
     unlink(log); rmdir(dir);   // 标记文件
     char mk[1200]; snprintf(mk, sizeof mk, "%s/s2a_session.mark", dir); unlink(mk); rmdir(dir);

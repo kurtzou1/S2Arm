@@ -288,4 +288,26 @@ if shutil.which('dotnet') or os.path.exists(os.path.expanduser('~/.dotnet/dotnet
         finally:
             shutil.rmtree(T, ignore_errors=True)
 
+# ⑩ 自签导出单文件（export）：资源包 = game.img（其余文件段有 exefs/main）+ 照旧按文件放的 shaders/direct/a.bin、romfs.s2aidx、game.imgmap（头里记原 game.img 长）。
+#   期望：导出文件头里的文件长 = 实际长度；目录表 = 原有各项 + 三项派生件，字节与资源包里的相同；game.imgmap 头里的长度改成导出文件的长度、偏移数据不变；原 game.img 字节不变
+T = Path(tempfile.mkdtemp(prefix='img test 10 '))
+try:
+    pk = T / 'pack'; pk.mkdir(); src = T / 'main.bin'; src.write_bytes(b'MAIN' * 1000)
+    img.build(None, [('exefs/main', str(src))], str(pk / 'game.img'), '0100F43008C44000', 'pk10', say=lambda *_: None)
+    g0 = (pk / 'game.img').read_bytes(); n0 = len(g0)
+    (pk / 'shaders/direct').mkdir(parents=True); (pk / 'shaders/direct/a.bin').write_bytes(b'SHADER' * 500)
+    (pk / 'romfs.s2aidx').write_bytes(b'IDX' * 10)
+    mp = b'S2ARIM01' + struct.pack('<qi', n0, 2) + struct.pack('<2q', 16384, -1); (pk / 'game.imgmap').write_bytes(mp)
+    (pk / 'index.tsv').write_text(f'game.img\t{n0}\tpk10\nshaders/direct/a.bin\t3000\th\nromfs.s2aidx\t30\th\ngame.imgmap\t{len(mp)}\th\n', encoding='utf-8')
+    out = str(T / 'one.img'); img.export(str(pk), out)
+    h = img.header(out); got = {p: (o, n) for p, o, n in img.entries(out)}; f = open(out, 'rb')
+    def rd(p): f.seek(got[p][0]); return f.read(got[p][1])
+    ck(h['total'] == os.path.getsize(out), f'⑩ 导出文件头里的长度 = 实际长度（{h["total"]} / {os.path.getsize(out)}）')
+    ck(sorted(got) == ['exefs/main', 'game.imgmap', 'romfs.s2aidx', 'shaders/direct/a.bin'], f'⑩ 目录表 = 原有 + 三项派生件（{sorted(got)}）')
+    ck(rd('exefs/main') == b'MAIN' * 1000 and rd('shaders/direct/a.bin') == b'SHADER' * 500 and rd('romfs.s2aidx') == b'IDX' * 10, '⑩ 各项字节与资源包里的相同')
+    m = rd('game.imgmap'); ck(m[:8] == b'S2ARIM01' and struct.unpack_from('<q', m, 8)[0] == h['total'] and m[20:] == mp[20:], '⑩ game.imgmap 头里的长度改成导出文件的、偏移不变')
+    f.close(); ck((pk / 'game.img').read_bytes() == g0, '⑩ 原 game.img 字节不变')
+finally:
+    shutil.rmtree(T, ignore_errors=True)
+
 print(f'img 单测：{"全通" if not bad else f"{bad} 项不通"}'); sys.exit(1 if bad else 0)

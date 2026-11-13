@@ -916,6 +916,24 @@ class JobsTests(unittest.TestCase):
             self.assertIn("logs/t1-degrade.log", archive.namelist())
             self.assertEqual(json.loads(archive.read("manifest.json"))["degrade_summary"], {"t1": {"rewrite/x18": 30, "direct/lazy": 5}})
 
+    def test_diagnostics_export_to_volume_whose_new_files_change_inode(self):
+        # exFAT / FAT（macOS 驱动）：新文件写入数据、分到存储后 inode 号会变（本机 exFAT 镜像实测：mkstemp 后 18446744073709404714，写完 32987）。
+        #   模拟这条规则：空文件的 fstat 给一个临时号，有数据后给真号。期望导出照常成功、诊断包在所选位置；
+        #   修前身份在建文件时取（空文件，临时号），收尾比对必然不符，报「诊断临时文件在导出期间发生变化」
+        import zipfile
+        real = os.fstat
+        def exfat_fstat(fd):
+            st = real(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_size:
+                return st
+            v = list(st); v[stat.ST_INO] = st.st_ino ^ (1 << 40)
+            return os.stat_result(v)
+        destination = self.root / "diag-exfat.zip"; self.c.r["path"] = str(destination)
+        with unittest.mock.patch("os.fstat", side_effect=exfat_fstat):
+            library.diagnostics(self.c)
+        with zipfile.ZipFile(destination) as archive:
+            self.assertIn("manifest.json", archive.namelist())
+
     def test_direct_check_counts_existing_cache_and_volume(self):
         # 直连阶段开工前复核（pack/jobs/space_rule.py direct_check）与出包预检同一规则：游戏内容（romfs + exefs + aoc）≥ 3e9 → 15e9、小于 → 5e9；
         #   已有的同款直连缓存扣掉；期望按 library.py 的两档常量手算

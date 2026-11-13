@@ -4,6 +4,7 @@
 // 期望值全部是 CPU 手算 / 契约条文，不取自被测实现。
 #define _POSIX_C_SOURCE 200809L
 
+#include <dlfcn.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -161,15 +162,67 @@ VKAPI_ATTR VkResult VKAPI_CALL vkWaitForFences(VkDevice d, uint32_t n, const VkF
     if (g_bc_early_n > 0 && n == 1) { g_bc_early_n--; g_bc_early_seen++; return VK_TIMEOUT; }   // 提前返回（#697）：不等、立刻报超时
     return real(d, n, f, all, timeout);
 }
+// #697: synthetic driver enumeration, keeping real headless images/semaphores and VVL.
+// Virtual indices 8+ map to the driver's real indices; this is NOT a device result.
+static uint32_t g_w697_count, g_w697_real_count, g_w697_base = 8;
+static int g_w697_fail_sem;
+static int g_w697_incomplete, g_w697_invalid;
+static unsigned g_w697_queries, g_w697_fetches, g_w697_created, g_w697_destroyed, g_w697_sc_destroyed;
+VKAPI_ATTR VkResult VKAPI_CALL vkGetSwapchainImagesKHR(VkDevice d, VkSwapchainKHR sc, uint32_t *n, VkImage *images) {
+    PFN_vkGetSwapchainImagesKHR real = (PFN_vkGetSwapchainImagesKHR)vkGetDeviceProcAddr(d, "vkGetSwapchainImagesKHR");
+    if (!g_w697_count) return real(d, sc, n, images);
+    if (!images) { g_w697_queries++; *n = g_w697_count; return VK_SUCCESS; }
+    g_w697_fetches++;
+    VkImage actual[64]; uint32_t nr = 64;
+    VkResult r = real(d, sc, &nr, actual);
+    if (r != VK_SUCCESS || !nr || nr > 6) return VK_ERROR_INITIALIZATION_FAILED;
+    g_w697_real_count = nr;
+    uint32_t cap = *n, written = cap < g_w697_count ? cap : g_w697_count;
+    for (uint32_t i = 0; i < written; i++) images[i] = actual[(i >= g_w697_base ? i - g_w697_base : i) % nr];
+    *n = written;
+    if (g_w697_incomplete) { if (g_w697_incomplete > 0) g_w697_incomplete--; return VK_INCOMPLETE; }
+    return cap < g_w697_count ? VK_INCOMPLETE : VK_SUCCESS;
+}
+VKAPI_ATTR VkResult VKAPI_CALL vkAcquireNextImageKHR(VkDevice d, VkSwapchainKHR sc, uint64_t timeout, VkSemaphore sem, VkFence fence, uint32_t *idx) {
+    PFN_vkAcquireNextImageKHR real = (PFN_vkAcquireNextImageKHR)vkGetDeviceProcAddr(d, "vkAcquireNextImageKHR");
+    VkResult r = real(d, sc, timeout, sem, fence, idx);
+    if (g_w697_count && (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR)) *idx = g_w697_invalid ? g_w697_count : *idx + g_w697_base;
+    return r;
+}
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateSemaphore(VkDevice d, const VkSemaphoreCreateInfo *ci, const VkAllocationCallbacks *a, VkSemaphore *sem) {
+    PFN_vkCreateSemaphore real = (PFN_vkCreateSemaphore)vkGetDeviceProcAddr(d, "vkCreateSemaphore");
+    if (g_w697_count && g_w697_fail_sem > 0 && !--g_w697_fail_sem) return VK_ERROR_OUT_OF_HOST_MEMORY;
+    VkResult r = real(d, ci, a, sem);
+    if (g_w697_count && r == VK_SUCCESS) g_w697_created++;
+    return r;
+}
+VKAPI_ATTR void VKAPI_CALL vkDestroySemaphore(VkDevice d, VkSemaphore sem, const VkAllocationCallbacks *a) {
+    PFN_vkDestroySemaphore real = (PFN_vkDestroySemaphore)vkGetDeviceProcAddr(d, "vkDestroySemaphore");
+    if (g_w697_count && sem) g_w697_destroyed++;
+    real(d, sem, a);
+}
+VKAPI_ATTR void VKAPI_CALL vkDestroySwapchainKHR(VkDevice d, VkSwapchainKHR sc, const VkAllocationCallbacks *a) {
+    PFN_vkDestroySwapchainKHR real = (PFN_vkDestroySwapchainKHR)vkGetDeviceProcAddr(d, "vkDestroySwapchainKHR");
+    if (g_w697_count && sc) g_w697_sc_destroyed++;
+    real(d, sc, a);
+}
+
 // 呈现「次优」注入（C199）：呈现照常做，结果改报 VK_SUBOPTIMAL_KHR；g_wsi_rotated 让表面的当前方向报成转了 90 度。
 static int g_wsi_subopt, g_wsi_rotated;
 VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(VkQueue q, const VkPresentInfoKHR *pi) {
     PFN_vkQueuePresentKHR real = (PFN_vkQueuePresentKHR)vkGetDeviceProcAddr(g_dev.device, "vkQueuePresentKHR");
-    VkResult r = real(q, pi);
+    VkPresentInfoKHR mapped = *pi; uint32_t idx;
+    if (g_w697_count && pi->swapchainCount == 1) {
+        idx = pi->pImageIndices[0];
+        CHECK(idx >= g_w697_base && idx < g_w697_count, "C697 present virtual index %u outside range", idx);
+        idx = (idx >= g_w697_base ? idx - g_w697_base : idx) % g_w697_real_count;
+        mapped.pImageIndices = &idx;
+    }
+    VkResult r = real(q, &mapped);
     return r == VK_SUCCESS && g_wsi_subopt ? VK_SUBOPTIMAL_KHR : r;
 }
 VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceCapabilitiesKHR(VkPhysicalDevice pd, VkSurfaceKHR sf, VkSurfaceCapabilitiesKHR *caps) {
-    PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR real = (PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR)vkGetInstanceProcAddr(g_dev.instance, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
+    PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR real = (PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR)dlsym(RTLD_NEXT, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
     VkResult r = real(pd, sf, caps);
     if (r == VK_SUCCESS && g_wsi_rotated) caps->currentTransform = VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR;
     return r;
@@ -881,6 +934,86 @@ static void c71_present(void) {
     r = nvn_gpu_surface_attach((void *)1, &sf, &e);          // 撤掉以后可以再接
     CHECK(OK(r) && nvn_gpu_surface_gen(sf) == 1, "C71 再 attach：%d %s", r.code, e.why);
     // 不 detach 直接 close：close 负责收掉还接着的面（由 main 里紧跟的 close 验）
+}
+
+// C697: the fixed-eight implementation must fail before we submit an out-of-range image.
+static void c697_swapchain_images(void) {
+    nvn_gpu_err e = {0}; nvn_gpu_surface sf = NULL;
+    g_w697_count = 14; g_w697_queries = g_w697_fetches = 0;
+    g_w697_created = g_w697_destroyed = g_w697_sc_destroyed = 0;
+    g_w697_incomplete = 1; // valid count query followed by incomplete fill: must re-enumerate.
+    nvn_gpu_rc r = nvn_gpu_surface_attach((void *)1, &sf, &e);
+    CHECK(OK(r) && sf, "C697 attach 14 images/retry: %d %s", r.code, e.why);
+    CHECK(g_w697_queries >= 2 && g_w697_fetches >= 2, "C697 complete enumeration: queries=%u fetches=%u", g_w697_queries, g_w697_fetches);
+    CHECK(g_w697_created == 29, "C697 14 rendered + 15 acquire semaphores: got %u", g_w697_created);
+    // Do not let the negative control feed an out-of-bounds handle to the real driver.
+    if (!sf || g_w697_created != 29 || g_w697_queries < 2 || g_w697_fetches < 2) goto finish;
+    nvn_gpu_tex tex = make_tex(64, 36, NVN_FORMAT_RGBA8, NVN_GPU_TEX_SAMPLED | NVN_GPU_TEX_RENDER);
+    nvn_gpu_view view = make_view(tex);
+    nvn_gpu_present_desc pd = {0}; pd.src = view;
+    for (int k = 0; k < 16; k++) {
+        nvn_gpu_drawable dr = {0};
+        r = nvn_gpu_drawable_acquire(sf, 1000000000ull, NULL, &dr, &e);
+        CHECK(OK(r), "C697 acquire virtual index >=8 frame %d: %d %s", k, r.code, e.why);
+        if (!OK(r)) break;
+        CHECK(OK(nvn_gpu_present(sf, &dr, &pd, 697 + (uint64_t)k, NULL, NULL, &e)), "C697 present frame %d: %s", k, e.why);
+    }
+    // Exercise arrays/pending state beyond the old uint32_t bit mask.
+    g_w697_count = 40;
+    r = nvn_gpu_surface_rebuild(sf, &e);
+    CHECK(OK(r), "C697 rebuild with 40 images: %d %s", r.code, e.why);
+    if (OK(r)) {
+        for (int k = 0; k < 35; k++) {
+            nvn_gpu_drawable dr = {0};
+            r = nvn_gpu_drawable_acquire(sf, 1000000000ull, NULL, &dr, &e);
+            CHECK(OK(r), "C697 >32 acquire %d: %s", k, e.why);
+            if (!OK(r)) break;
+            CHECK(OK(nvn_gpu_present(sf, &dr, &pd, 797 + (uint64_t)k, NULL, NULL, &e)), "C697 >32 present %d: %s", k, e.why);
+        }
+        // Driver has signalled acquire slot 35, but returns the first invalid image index.
+        g_w697_invalid = 1;
+        nvn_gpu_drawable bad = {0};
+        r = nvn_gpu_drawable_acquire(sf, 1000000000ull, NULL, &bad, &e);
+        CHECK(!OK(r) && bad.token == 0, "C697 invalid index must fail with empty drawable: rc=%d token=%llu", r.code, (unsigned long long)bad.token);
+        g_w697_invalid = 0;
+    }
+    // Image and semaphore slots beyond 255 must not alias the old 8-bit token fields.
+    g_w697_count = 264; g_w697_base = 256;
+    r = nvn_gpu_surface_rebuild(sf, &e);
+    CHECK(OK(r), "C697 rebuild 264 images: %s", e.why);
+    if (OK(r)) {
+        for (int k = 0; k < 258; k++) {
+            nvn_gpu_drawable dr = {0}, held = {0};
+            r = nvn_gpu_drawable_acquire(sf, 1000000000ull, NULL, &dr, &e);
+            CHECK(OK(r), "C697 32-bit token acquire %d: %s", k, e.why);
+            if (!OK(r)) break;
+            nvn_gpu_drawable_release(sf, &dr);
+            CHECK(OK(nvn_gpu_drawable_acquire(sf, 1000000000ull, NULL, &held, &e)) && held.token == dr.token,
+                  "C697 32-bit token release/reacquire %d", k);
+            CHECK(OK(nvn_gpu_present(sf, &held, &pd, 897 + (uint64_t)k, NULL, NULL, &e)), "C697 32-bit token present %d: %s", k, e.why);
+        }
+    }
+    nvn_gpu_view_release(view); nvn_gpu_tex_release(tex);
+finish:
+    if (sf) CHECK(OK(nvn_gpu_surface_detach(sf, 5000000000ull, &e)), "C697 detach: %s", e.why);
+    CHECK(g_w697_created == g_w697_destroyed, "C697 semaphore cleanup: %u created / %u destroyed", g_w697_created, g_w697_destroyed);
+    // Permanently incomplete enumeration must fail cleanly, never publish a partial swapchain.
+    g_w697_count = 14; g_w697_incomplete = -1; sf = NULL;
+    unsigned destroyed_before = g_w697_sc_destroyed;
+    r = nvn_gpu_surface_attach((void *)1, &sf, &e);
+    CHECK(!OK(r) && !sf, "C697 perpetual VK_INCOMPLETE must fail: %d", r.code);
+    if (sf) nvn_gpu_surface_detach(sf, 5000000000ull, &e);
+    CHECK(g_w697_sc_destroyed > destroyed_before, "C697 failed enumeration destroyed swapchain");
+    CHECK(g_w697_created == g_w697_destroyed, "C697 failure semaphore cleanup");
+    // Failure after some semaphores exist must free every successfully-created handle.
+    g_w697_incomplete = 0; g_w697_fail_sem = 5; g_w697_base = 8; sf = NULL;
+    r = nvn_gpu_surface_attach((void *)1, &sf, &e);
+    CHECK(!OK(r) && !sf, "C697 partial semaphore creation must fail");
+    if (sf) nvn_gpu_surface_detach(sf, 5000000000ull, &e);
+    CHECK(g_w697_created == g_w697_destroyed, "C697 partial semaphore cleanup: %u / %u", g_w697_created, g_w697_destroyed);
+    g_w697_fail_sem = 0;
+    g_w697_count = 0; g_w697_incomplete = 0;
+    printf("C697 synthetic swapchain enumeration/index/cleanup complete; failures=%d\n", g_fail);
 }
 
 // C73：NVN 窗口原点在左上时视口翻转。同一张 2x2 贴图、同一个三角形，读回的图应当上下对调（期望在 tri_impl 里按行号手算）。
@@ -4972,6 +5105,15 @@ int main(int argc, char **argv) {
     g_desc.host_device = &g_dev;
     g_desc.app_label = "nvn-backend-vk-test";
     if (!open_backend()) return 1;
+    if (getenv("S2A_TEST_WSI697_ONLY")) {
+        c697_swapchain_images();
+        c71_present();
+        nvn_gpu_err close_err = {0};
+        CHECK(OK(nvn_gpu_close(5000000000ull, &close_err)), "C697 close: %s", close_err.why);
+        s2a_vk_device_destroy(&g_dev, 1);
+        return g_fail ? 1 : 0;
+    }
+    c697_swapchain_images();
     c690_native_bc_image_copy(NVN_FORMAT_RGB_DXT1_SRGB, 8, 1);
     c690_native_bc_image_copy(NVN_FORMAT_RGBA_DXT5, 16, 2);
     c690_edge_copy();

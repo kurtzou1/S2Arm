@@ -5,7 +5,6 @@
 #include "nvn_plat_vk.h"
 #include "nvn_plat.h"
 
-enum { WSI_MAX_IMAGES = 8 };
 struct nvn_gpu_surface_s {
     void *native;
     VkSurfaceKHR surface;
@@ -13,14 +12,14 @@ struct nvn_gpu_surface_s {
     VkFormat format;
     VkExtent2D extent;
     uint32_t nimages;
-    VkImage images[WSI_MAX_IMAGES];
-    VkSemaphore acquire[WSI_MAX_IMAGES + 1];   // 每次取图用下一把：一把信号量在被对应的呈现段等掉之前不能再交给取图
-    VkSemaphore rendered[WSI_MAX_IMAGES];      // 每张图一把：呈现段完成时发，vkQueuePresentKHR 等
+    VkImage *images;
+    VkSemaphore *acquire;   // 每次取图用下一把：一把信号量在被对应的呈现段等掉之前不能再交给取图
+    VkSemaphore *rendered;      // 每张图一把：呈现段完成时发，vkQueuePresentKHR 等
     uint32_t acquire_next;
-    uint32_t acquire_pending;                   // 位 i：acquire[i] 被取图发过、还没被呈现段等掉
+    unsigned char *acquire_pending;             // 每槽一字节：取图发过、还没被呈现段等掉；不受 32 位掩码限制
     uint64_t gen;                               // 0 = 已撤销
     int outdated;
-    int held;                                   // 取了没呈现、留作下次取图结果的那张（没有就是 -1）
+    int64_t held;                                   // 取了没呈现、留作下次取图结果的那张（没有就是 -1）
     uint32_t held_sem;
     uint64_t presents;
     VkSurfaceTransformFlagBitsKHR built_transform;   // 建这一代交换链时表面的方向与尺寸：判「次优」是不是真的变了（见 wsi_suboptimal_stale）
@@ -43,8 +42,8 @@ static struct nvn_gpu_surface_s *g_surface;    // 一个后端同时只接一个
 
 // 取图发过而没被等掉的信号量不能直接销毁（VUID-vkDestroySemaphore-semaphore-05149）：提交一个只等它的空批次把它消费掉
 static void wsi_consume_acquired(struct nvn_gpu_surface_s *s) {
-    for (uint32_t i = 0; i < WSI_MAX_IMAGES + 1; i++) {
-        if (!(s->acquire_pending >> i & 1) || !s->acquire[i]) continue;
+    for (uint32_t i = 0; i < s->nimages + 1; i++) {
+        if (!s->acquire_pending || !s->acquire || !s->acquire_pending[i] || !s->acquire[i]) continue;
         VkFenceCreateInfo fi; memset(&fi, 0, sizeof fi); fi.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
         VkFence f = VK_NULL_HANDLE;
         if (vkCreateFence(g.d, &fi, NULL, &f) != VK_SUCCESS) continue;
@@ -57,7 +56,7 @@ static void wsi_consume_acquired(struct nvn_gpu_surface_s *s) {
         if (r == VK_SUCCESS) s2a_vk_wait_fences(g.d, 1, &f, 2000000000ull);
         vkDestroyFence(g.d, f, NULL);
     }
-    s->acquire_pending = 0;
+    if (s->acquire_pending) memset(s->acquire_pending, 0, (size_t)s->nimages + 1);
     // 最后一次呈现对「呈现信号量」的等待要到队列空了才算结束：之后才能销毁那把信号量
     pthread_mutex_lock(&g_submit_mu);
     vkQueueWaitIdle(g.queue);
@@ -68,9 +67,11 @@ static void wsi_destroy_swapchain(struct nvn_gpu_surface_s *s) {
     wsi_consume_acquired(s);
     // 先销毁交换链再销毁信号量：取图发过、还没被呈现段等掉的信号量，要等它所属的交换链没了才算用完
     if (s->swapchain) { vkDestroySwapchainKHR(g.d, s->swapchain, NULL); s->swapchain = VK_NULL_HANDLE; }
-    for (uint32_t i = 0; i < WSI_MAX_IMAGES + 1; i++) if (s->acquire[i]) { vkDestroySemaphore(g.d, s->acquire[i], NULL); s->acquire[i] = VK_NULL_HANDLE; }
-    for (uint32_t i = 0; i < WSI_MAX_IMAGES; i++) if (s->rendered[i]) { vkDestroySemaphore(g.d, s->rendered[i], NULL); s->rendered[i] = VK_NULL_HANDLE; }
-    s->nimages = 0; s->held = -1;
+    for (uint32_t i = 0; i < s->nimages + 1; i++) if (s->acquire && s->acquire[i]) { vkDestroySemaphore(g.d, s->acquire[i], NULL); s->acquire[i] = VK_NULL_HANDLE; }
+    for (uint32_t i = 0; i < s->nimages; i++) if (s->rendered && s->rendered[i]) { vkDestroySemaphore(g.d, s->rendered[i], NULL); s->rendered[i] = VK_NULL_HANDLE; }
+    free(s->images); free(s->acquire); free(s->rendered); free(s->acquire_pending);
+    s->images = NULL; s->acquire = NULL; s->rendered = NULL; s->acquire_pending = NULL;
+    s->nimages = 0; s->held = -1; s->acquire_next = 0;
 }
 
 // 等内部段与游戏段都执行完：之后销毁交换链 / 信号量才合法。0 = 等到了。
@@ -118,12 +119,11 @@ static nvn_gpu_rc wsi_build(struct nvn_gpu_surface_s *s, nvn_gpu_err *err) {
     if (ext.height < caps.minImageExtent.height) ext.height = caps.minImageExtent.height;
     if (caps.maxImageExtent.width && ext.width > caps.maxImageExtent.width) ext.width = caps.maxImageExtent.width;
     if (caps.maxImageExtent.height && ext.height > caps.maxImageExtent.height) ext.height = caps.maxImageExtent.height;
-    uint32_t n = caps.minImageCount + 1; if (n < 3) n = 3;
-    { int extra = nvn_plat_flag("nvk_swap_extra", 0); if (extra > 0 && extra <= 4) n += (uint32_t)extra;   // 诊断：多要几张窗口图，看取图的等待是不是交换链反压
+    uint32_t n = caps.minImageCount == UINT32_MAX ? UINT32_MAX : caps.minImageCount + 1; if (n < 3) n = 3;
+    { int extra = nvn_plat_flag("nvk_swap_extra", 0); if (extra > 0 && extra <= 4 && n <= UINT32_MAX - (uint32_t)extra) n += (uint32_t)extra;   // 诊断：多要几张窗口图，看取图的等待是不是交换链反压
       if (caps.maxImageCount && n > caps.maxImageCount) n = caps.maxImageCount;
       char b[160]; snprintf(b, sizeof b, "交换链：驱动最少 %u 张、最多 %u 张，要 %u 张", caps.minImageCount, caps.maxImageCount, n); nvn_plat_log(NVN_PLAT_LOG_INFO, "gpu", b); }
     if (caps.maxImageCount && n > caps.maxImageCount) n = caps.maxImageCount;
-    if (n > WSI_MAX_IMAGES) n = WSI_MAX_IMAGES;
     VkSwapchainCreateInfoKHR ci; memset(&ci, 0, sizeof ci);
     ci.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
     ci.surface = s->surface; ci.minImageCount = n; ci.imageFormat = pick.format; ci.imageColorSpace = pick.colorSpace;
@@ -138,18 +138,35 @@ static nvn_gpu_rc wsi_build(struct nvn_gpu_surface_s *s, nvn_gpu_err *err) {
     ci.oldSwapchain = s->swapchain;
     VkSwapchainKHR nsc = VK_NULL_HANDLE;
     VkResult r = vkCreateSwapchainKHR(g.d, &ci, NULL, &nsc);
-    VkSwapchainKHR old = s->swapchain; s->swapchain = VK_NULL_HANDLE;
-    if (old) vkDestroySwapchainKHR(g.d, old, NULL);
+    // vkCreateSwapchainKHR 带 oldSwapchain 时旧链即退休（失败也一样）；此前已排空，连同旧数组一起回收。
+    if (s->swapchain || s->nimages) wsi_destroy_swapchain(s);
     if (r != VK_SUCCESS) return fail(err, r == VK_ERROR_SURFACE_LOST_KHR || r == VK_ERROR_NATIVE_WINDOW_IN_USE_KHR ? NVN_GPU_E_REVOKED : NVN_GPU_E_UNSUPPORTED, "vkCreateSwapchainKHR 失败（%d）", (int)r);
     s->swapchain = nsc; s->format = pick.format; s->extent = ext;
-    uint32_t ni = WSI_MAX_IMAGES;
-    VkResult ir = vkGetSwapchainImagesKHR(g.d, nsc, &ni, s->images);
-    if ((ir != VK_SUCCESS && ir != VK_INCOMPLETE) || !ni) { wsi_destroy_swapchain(s); return fail(err, NVN_GPU_E_UNSUPPORTED, "取不到交换链图"); }
+    // minImageCount 是下限，不是返回张数。先问实际张数；枚举期间变多则重新问，绝不接受部分句柄。
+    VkResult ir = VK_INCOMPLETE;
+    uint32_t ni = 0;
+    for (unsigned attempt = 0; attempt < 8; attempt++) {
+        ni = 0;
+        ir = vkGetSwapchainImagesKHR(g.d, nsc, &ni, NULL);
+        if (ir != VK_SUCCESS || !ni || ni == UINT32_MAX) break; // acquire 另需一槽
+        VkImage *images = calloc(ni, sizeof *images);
+        if (!images) { wsi_destroy_swapchain(s); return fail(err, NVN_GPU_E_OOM, "交换链图数组分配失败"); }
+        uint32_t capacity = ni;
+        ir = vkGetSwapchainImagesKHR(g.d, nsc, &ni, images);
+        if (ir == VK_SUCCESS && ni && ni <= capacity) { s->images = images; break; }
+        free(images);
+        if (ir != VK_INCOMPLETE) break;
+    }
+    if (!s->images) { wsi_destroy_swapchain(s); return fail(err, NVN_GPU_E_UNSUPPORTED, "取不到完整交换链图（%d）", (int)ir); }
     s->nimages = ni;
+    s->acquire = calloc((size_t)ni + 1, sizeof *s->acquire);
+    s->rendered = calloc(ni, sizeof *s->rendered);
+    s->acquire_pending = calloc((size_t)ni + 1, sizeof *s->acquire_pending);
+    if (!s->acquire || !s->rendered || !s->acquire_pending) { wsi_destroy_swapchain(s); return fail(err, NVN_GPU_E_OOM, "交换链信号量数组分配失败"); }
     VkSemaphoreCreateInfo si; memset(&si, 0, sizeof si); si.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
     for (uint32_t i = 0; i < ni + 1; i++) if (!s->acquire[i] && vkCreateSemaphore(g.d, &si, NULL, &s->acquire[i]) != VK_SUCCESS) { wsi_destroy_swapchain(s); return fail(err, NVN_GPU_E_OOM, "信号量创建失败"); }
     for (uint32_t i = 0; i < ni; i++) if (!s->rendered[i] && vkCreateSemaphore(g.d, &si, NULL, &s->rendered[i]) != VK_SUCCESS) { wsi_destroy_swapchain(s); return fail(err, NVN_GPU_E_OOM, "信号量创建失败"); }
-    s->held = -1; s->outdated = 0; s->acquire_next = 0; s->acquire_pending = 0;
+    s->held = -1; s->outdated = 0; s->acquire_next = 0;
     s->built_transform = caps.currentTransform; s->built_cur = caps.currentExtent; s->subopt_n = 0;
     return rc(NVN_GPU_OK);
 }
@@ -181,14 +198,10 @@ nvn_gpu_rc nvn_gpu_surface_rebuild(nvn_gpu_surface s, nvn_gpu_err *err) {
     if (!s || !s->gen) return fail(err, NVN_GPU_E_REVOKED, "面已撤销");
     if (wsi_wait_drained(2000000000ull)) return fail(err, NVN_GPU_E_TIMEOUT, "在途的段没有完成，不能换交换链");
     uint64_t gen = s->gen;
-    // 取了没等掉的信号量不能复用：新交换链用新的一套；旧的等旧交换链销毁（wsi_build 里）之后再销毁
+    // 先消费旧取图信号；wsi_build 建新链后回收旧链与数组，新链使用全新的信号量。
     wsi_consume_acquired(s);
-    VkSemaphore old_acq[WSI_MAX_IMAGES + 1], old_rend[WSI_MAX_IMAGES];
-    memcpy(old_acq, s->acquire, sizeof old_acq); memcpy(old_rend, s->rendered, sizeof old_rend);
-    memset(s->acquire, 0, sizeof s->acquire); memset(s->rendered, 0, sizeof s->rendered);
+    s->outdated = 1;
     nvn_gpu_rc b = wsi_build(s, err);
-    for (uint32_t i = 0; i < WSI_MAX_IMAGES + 1; i++) if (old_acq[i]) vkDestroySemaphore(g.d, old_acq[i], NULL);
-    for (uint32_t i = 0; i < WSI_MAX_IMAGES; i++) if (old_rend[i]) vkDestroySemaphore(g.d, old_rend[i], NULL);
     if (!nvn_gpu_ok(b)) { if (b.code == NVN_GPU_E_REVOKED) s->gen = 0; return b; }
     s->gen = gen + 1;
     return rc(NVN_GPU_OK);
@@ -217,6 +230,7 @@ nvn_gpu_rc nvn_gpu_drawable_acquire(nvn_gpu_surface s, uint64_t timeout_ns, void
     if (s->held >= 0) { idx = (uint32_t)s->held; sem = s->held_sem; s->held = -1; }   // 上次取了没呈现的那张
     else {
         sem = s->acquire_next;
+        if (sem > s->nimages) return fail(err, NVN_GPU_E_ORDER, "取图信号量下标越界");
         struct timespec q0, q1; clock_gettime(CLOCK_MONOTONIC, &q0);
         VkResult r = vkAcquireNextImageKHR(g.d, s->swapchain, timeout_ns, s->acquire[sem], VK_NULL_HANDLE, &idx);
         clock_gettime(CLOCK_MONOTONIC, &q1); __atomic_fetch_add(&g_acq_ns, (uint64_t)(q1.tv_sec - q0.tv_sec) * 1000000000ull + (uint64_t)q1.tv_nsec - (uint64_t)q0.tv_nsec, __ATOMIC_RELAXED);
@@ -225,17 +239,24 @@ nvn_gpu_rc nvn_gpu_drawable_acquire(nvn_gpu_surface s, uint64_t timeout_ns, void
         if (r == VK_ERROR_SURFACE_LOST_KHR) { s->gen = 0; return fail(err, NVN_GPU_E_REVOKED, "表面已丢失"); }
         if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) return fail(err, r == VK_ERROR_DEVICE_LOST ? NVN_GPU_E_DEVICE : NVN_GPU_E_UNSUPPORTED, "vkAcquireNextImageKHR 失败（%d）", (int)r);
         if (r == VK_SUBOPTIMAL_KHR && wsi_suboptimal_stale(s)) s->outdated = 2;   // 表面真变了：这张还能用，呈现之后要重建
-        s->acquire_pending |= 1u << sem;
+        s->acquire_pending[sem] = 1;
         s->acquire_next = (s->acquire_next + 1) % (s->nimages + 1);
     }
+    if (idx >= s->nimages || sem > s->nimages) {
+        // 成功取图已发信号，保留 pending 让重建 / 拆除消费；不把坏下标交给 GPU。
+        s->outdated = 1;
+        return fail(err, NVN_GPU_E_OUTDATED, "交换链取图下标越界（%u / %u）", idx, s->nimages);
+    }
     out->view = NULL; out->w = s->extent.width; out->h = s->extent.height; out->nvn_format = 0; out->gen = s->gen;
-    out->token = (uint64_t)idx | (uint64_t)sem << 8 | 1ull << 16;
+    out->token = (uint64_t)idx | ((uint64_t)sem + 1) << 32;
     return rc(NVN_GPU_OK);
 }
 
 void nvn_gpu_drawable_release(nvn_gpu_surface s, const nvn_gpu_drawable *dr) {
-    if (!s || !dr || !(dr->token >> 16) || dr->gen != s->gen) return;
-    s->held = (int)(dr->token & 0xff); s->held_sem = (uint32_t)(dr->token >> 8 & 0xff);   // 留作下次取图的结果
+    if (!s || !dr || !(dr->token >> 32) || dr->gen != s->gen) return;
+    uint32_t idx = (uint32_t)dr->token, sem = (uint32_t)(dr->token >> 32) - 1;
+    if (idx >= s->nimages || sem > s->nimages) return;
+    s->held = idx; s->held_sem = sem;   // 留作下次取图的结果
 }
 
 static void wsi_swap_barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, VkImageLayout to, VkAccessFlags sa, VkAccessFlags da, VkPipelineStageFlags ss, VkPipelineStageFlags ds) {
@@ -274,6 +295,12 @@ nvn_gpu_rc nvn_gpu_present(nvn_gpu_surface s, const nvn_gpu_drawable *dr, const 
           snprintf(b, sizeof b, "描述符细分（每帧毫秒，近 300 帧）：分配 %.2f、构造写入项 %.2f、写入 %.2f、绑定 %.2f；每帧重写 %.0f 组（其中备忘命中 %.0f 组）、写 %.0f 条描述符",
               v4[0] / 300.0 / 1e6, v4[1] / 300.0 / 1e6, v4[2] / 300.0 / 1e6, v4[3] / 300.0 / 1e6, nst / 300.0, __atomic_exchange_n(&g_desc_hit, 0, __ATOMIC_RELAXED) / 300.0, nwt / 300.0);
           nvn_plat_log(NVN_PLAT_LOG_INFO, "gpu", b); }
+        { static const char *const nm[8] = {"建图", "要显存并绑定", "默认视图", "帧缓冲", "附件视图", "拆视图", "从帧缓冲表里摘", "拆贴图"}; int o = snprintf(b, sizeof b, "建拆细分（每帧毫秒 / 次，近 300 帧）：");
+          for (int i = 0; i < 8 && o < (int)sizeof b - 40; i++) o += snprintf(b + o, sizeof b - (size_t)o, "%s%s %.2f / %.1f", i ? "、" : "", nm[i], __atomic_exchange_n(&g_life_ns[i], 0, __ATOMIC_RELAXED) / 300.0 / 1e6, __atomic_exchange_n(&g_life_n[i], 0, __ATOMIC_RELAXED) / 300.0);
+          nvn_plat_log(NVN_PLAT_LOG_INFO, "gpu", b);
+          pthread_mutex_lock(&g_texmem_mu); uint64_t th = g_texmem_hit, tm_ = g_texmem_miss; g_texmem_hit = g_texmem_miss = 0; uint32_t tn = g_texmem_n; uint64_t tb = g_texmem_bytes; pthread_mutex_unlock(&g_texmem_mu);
+          snprintf(b, sizeof b, "贴图显存池（每帧，近 300 帧）：复用 %.1f 次、向驱动要 %.1f 次；池里现有 %u 块 %llu MB", th / 300.0, tm_ / 300.0, tn, (unsigned long long)(tb >> 20));
+          nvn_plat_log(NVN_PLAT_LOG_INFO, "gpu", b); }
         { uint64_t ns = __atomic_exchange_n(&g_pl_ns, 0, __ATOMIC_RELAXED), n = __atomic_exchange_n(&g_pl_n, 0, __ATOMIC_RELAXED), st = __atomic_exchange_n(&g_pl_steps, 0, __ATOMIC_RELAXED);
           snprintf(b, sizeof b, "取管线查找（每帧，近 300 帧）：%.1f 次、共 %.0f 微秒、每次比 %.1f 条", n / 300.0, ns / 300.0 / 1000.0, n ? (double)st / (double)n : 0.0);
           nvn_plat_log(NVN_PLAT_LOG_INFO, "gpu", b); }
@@ -290,16 +317,17 @@ nvn_gpu_rc nvn_gpu_present(nvn_gpu_surface s, const nvn_gpu_drawable *dr, const 
           nvn_plat_log(NVN_PLAT_LOG_INFO, "gpu", b); } } }
     if (!s || !dr || !d || !d->src || !d->src->tex) { out = fail(err, NVN_GPU_E_ARG, "present 参数为空"); goto done; }
     if (!s->gen) { out = fail(err, NVN_GPU_E_REVOKED, "面已撤销"); goto done; }
-    if (dr->gen != s->gen || !(dr->token >> 16)) { out = fail(err, NVN_GPU_E_OUTDATED, "drawable 不属于当前交换链"); goto done; }
-    uint32_t idx = (uint32_t)(dr->token & 0xff), sem = (uint32_t)(dr->token >> 8 & 0xff);
+    if (dr->gen != s->gen || !(dr->token >> 32)) { out = fail(err, NVN_GPU_E_OUTDATED, "drawable 不属于当前交换链"); goto done; }
+    uint32_t idx = (uint32_t)dr->token, sem = (uint32_t)(dr->token >> 32) - 1;
+    if (idx >= s->nimages || sem > s->nimages) { out = fail(err, NVN_GPU_E_ARG, "drawable 下标越界"); goto done; }
     struct nvn_gpu_tex_s *st = d->src->tex;
     VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g.phys, st->format, &fp);
     if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) || st->samples > 1) {
-        s->held = (int)idx; s->held_sem = sem;
+        s->held = idx; s->held_sem = sem;
         out = fail(err, NVN_GPU_E_UNSUPPORTED, "上屏源格式 0x%x 不能当缩放拷贝的源（或是多重采样）", st->nvn_format); goto done;
     }
     out = nvn_gpu_cmd_begin(NULL, &ch, err);
-    if (!nvn_gpu_ok(out)) { s->held = (int)idx; s->held_sem = sem; goto done; }
+    if (!nvn_gpu_ok(out)) { s->held = idx; s->held_sem = sem; goto done; }
     struct nvn_gpu_cmd_s *c = ch;
     cmd_ref(c, d->src, REF_VIEW);   // 源视图活到呈现段完成（它同时让贴图活着）：后端记录用的是 image，调用方录完就 release 视图也不能把 image 提前拆掉
     image_barrier(c, st, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -355,11 +383,11 @@ nvn_gpu_rc nvn_gpu_present(nvn_gpu_surface s, const nvn_gpu_drawable *dr, const 
         if (fence) vkDestroyFence(g.d, fence, NULL);
         free(seg);
         finish_cmd(c, 0);   // 回滚这一段记下的布局变化
-        s->held = (int)idx; s->held_sem = sem;
+        s->held = idx; s->held_sem = sem;
         out = fail(err, !ok ? NVN_GPU_E_ARG : r == VK_ERROR_DEVICE_LOST ? NVN_GPU_E_DEVICE : NVN_GPU_E_OOM, !ok ? "上屏矩形越界" : "呈现段提交失败（%d）", (int)r);
         goto done;
     }
-    s->acquire_pending &= ~(1u << sem);   // 这把信号量已交给呈现段去等
+    s->acquire_pending[sem] = 0;   // 这把信号量已交给呈现段去等
     seg->cmd = c; seg->cb = c->cb; seg->fence = fence; seg->submitted = 1; seg->executed = 1; seg->internal = 1;
     enqueue_segment(&g, seg);
     VkPresentInfoKHR pi; memset(&pi, 0, sizeof pi);

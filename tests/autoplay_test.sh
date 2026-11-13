@@ -74,7 +74,17 @@ SCN=coop    run coop    FAKE_MAP='TITLE=A/2:A/A;MENU=A;GAME=LS_RIGHT:play' &
 SCN=pflash  run pflash  FAKE_MAP='TITLE=PLUS/A;MENU=A;GAME=LS_RIGHT:play;PAUSE=PLUS' S2A_AP_MAX_STEPS=16 &
 SCN=pmenu   run pmenu   FAKE_MAP='TITLE=PLUS/A;MENU=PLUS/A;GAME=LS_RIGHT:play' S2A_AP_MAX_STEPS=16 &
 SCN=cstay   run cstay   FAKE_MAP='TITLE=A;MENU=A;GAME=LS_RIGHT:play' FAKE_ESC_MAP='TITLE=X' S2A_AP_MAX_STEPS=12 &
-SCN=ok      run nokey   FAKE_MAP=$MAP_OK S2A_VISION_SH= HOME=$T/nohome &
+SCN=ok      run nokey   FAKE_MAP=$MAP_OK S2A_VISION_SH= S2A_VISION_BACKEND=or HOME=$T/nohome &
+# ⑨b 缺省后端 = 本机 claude CLI：PATH 上没有 claude（只放 timeout）→ 起步报红、不问；⑨c 驾驶员回「不可用」（退出 3 + unavailable）→ 红停、只问 1 次、收局理由带原因
+mkdir -p $T/nocli_bin; ln -sf "$(command -v timeout)" $T/nocli_bin/timeout
+cat > $T/unavail_vision.sh << 'SHEOF'
+#!/bin/bash
+echo 1 >> "$(dirname "$1")/../unavail_calls"
+echo '{"keys": [], "playable": false, "why": "本机 claude CLI 没登录（假）", "unavailable": true}' > "$2"
+exit 3
+SHEOF
+SCN=ok      run nocli   FAKE_MAP=$MAP_OK S2A_VISION_SH= PATH=$T/nocli_bin:/usr/bin:/bin HOME=$T/nohome_c &
+SCN=ok      run unavail FAKE_MAP=$MAP_OK S2A_VISION_SH=$T/unavail_vision.sh &
 SCN=ok      run hold    FAKE_MAP=$MAP_OK S2A_AP_HOLD=A &
 # ㉟ 局内段回放真机 padrec（S2A_AP_PADREC=<录像>@<起始帧>）：起始帧前一行（B，开放时先按住）、存档行跳过；之后 5 行、长 52 帧，A 从第 0 帧按到第 40 帧
 printf '# 构建号 x\n90\t0x2\t0\t0\t0\t0\t0\n100\t0x1\t0\t0\t0\t0\t10\n120\t0x1\t-30000\t0\t0\t0\t20\n140\t0\t0\t0\t0\t0\t30\n145\t存档\t1\t40\n150\t0x2\t0\t0\t0\t0\t50\n152\t0\t0\t0\t0\t0\t60\n' > $T/pad.tsv
@@ -125,7 +135,10 @@ ck "⑦ 第二局回放：导航 0 问、进局页确认 1 问（实为 $(calls 
 # ⑧
 ck "⑧ 回放对不上（学的是标题按 X，本局标题只认 A）：记「回放对不上」、交回 AI 问 1 次 + 进局页确认 1 次（实为 $(calls mism)）、打 MARK、路线重写成 A A MARK（实为 $(grep -v '^#' $T/learn_x/0100000000ab0002.tsv | cut -f2 | tr '\n' ' ')）" \
   'L mism | grep -q "回放对不上" && [ "$(calls mism)" = 2 ] && L mism | grep -q "S2A 标记 MARK" && [ "$(grep -v "^#" $T/learn_x/0100000000ab0002.tsv | cut -f2 | tr "\n" " ")" = "A A MARK " ]'
-ck "⑨ 缺省脚本没有 OpenRouter 密钥：报红「视觉测试员不可用」（判定脚本据此记未判）、没到 MARK、0 按键" 'L nokey | grep -q "【红】自动玩家：视觉测试员不可用（没有 .*openrouter.key）" && [ "$(J nokey marked)" = False ] && [ "$(J nokey presses)" = 0 ]'
+ck "⑨ 显式 OpenRouter 后端没有密钥：报红「视觉测试员不可用」（判定脚本据此记未判）、没到 MARK、0 按键" 'L nokey | grep -q "【红】自动玩家：视觉测试员不可用（S2A_VISION_BACKEND=or 要 OpenRouter 钥匙，没有 .*openrouter.key）" && [ "$(J nokey marked)" = False ] && [ "$(J nokey presses)" = 0 ]'
+ck "⑨b 缺省后端（本机 claude CLI）PATH 上没有 claude：起步报红「本机没有 claude CLI」、没到 MARK、0 按键" 'L nocli | grep -q "【红】自动玩家：视觉测试员不可用（本机没有 claude CLI" && [ "$(J nocli marked)" = False ] && [ "$(J nocli presses)" = 0 ]'
+ck "⑨c 驾驶员回「不可用」：红停（不当成没答连问 3 次；实问 $(wc -l < $T/unavail/unavail_calls 2> /dev/null | tr -d ' ') 次）、收局理由带原因（$(J unavail why | cut -c1-80)）" \
+  'L unavail | grep -q "【红】自动玩家：驾驶员 #1 看屏驾驶员不可用：本机 claude CLI 没登录（假）" && [ "$(wc -l < $T/unavail/unavail_calls | tr -d " ")" = 1 ] && [ "$(J unavail marked)" = False ] && J unavail why | grep -q "导航卡住（看屏驾驶员不可用：本机 claude CLI 没登录（假））"'
 ck "⑩ 回到问过的页带上答过的键：菜单答 B 退回标题、再到菜单时 S2A_VISION_TRIED 含 B、改答 X 进局打 MARK（实为：$(grep '^MENU' $T/pp/vision_calls.log 2> /dev/null | tr '\n' '|')）" 'grep -q "^MENU X B" $T/pp/vision_calls.log && L pp | grep -q "S2A 标记 MARK"'
 ck "⑪ 点触第一下只选中、页面没换：自动补第二下进菜单，不多问模型（标题问 $(grep -c '^TITLE' $T/tap2/vision_calls.log 2> /dev/null) 次，要 1）、打 MARK、点触没反应 0 次" 'L tap2 | grep -q "点触（第二下）" && [ "$(grep -c "^TITLE" $T/tap2/vision_calls.log)" = 1 ] && L tap2 | grep -q "S2A 标记 MARK" && L tap2 | grep -q "点触没反应 0 次"'
 ck "⑫ 页面刚出来不收键（菜单 1.5 秒）：A 第一次没反应 → 隔 2 秒再按进局、A 不进试过没用、打 MARK" 'L lag | grep -q "A 第一次没反应，隔 2 秒再按一次" && ! L lag | grep -q "试过没用的键 A" && L lag | grep -q "S2A 标记 MARK"'
@@ -151,88 +164,69 @@ ck "㉑ 实时通道：起局前写的 REC:x、局中追加的 REC:y 各落一�
 ck "㉑b 自动玩家没开、只开实时通道：通道照起（相对路径按输出目录）、KEY:A 按进菜单、认不得的键串记红、PASS:q 落图；自动玩家没起（无小结、无 MARK）" 'L liveoff | grep -q "实时通道 .*liveoff/lo.txt" && L liveoff | grep -q "\[游戏\] 进 MENU" && L liveoff | grep -q "KEY:BOGUS 认不得" && [ -s $T/liveoff/q.png ] && [ ! -e $T/liveoff/ap_summary.json ] && ! L liveoff | grep -q "S2A 标记 MARK"'
 # ㉒ vision.sh 试过没用过滤（按完整动作比）：拷进临时目录，升级后端换成打印固定答案的桩（不发网络），S2A_VISION_ESCALATE=1 跳过 Jev
 mkdir -p $T/vf; cp $H/autoplay/vision.sh $H/autoplay/nav_rules.txt $T/vf/; python3 -c 'import zlib,struct,sys; r=b"".join(b"\0"+b"\0"*3*64 for _ in range(36)); c=lambda t,d: struct.pack(">I",len(d))+t+d+struct.pack(">I",zlib.crc32(t+d)); open(sys.argv[1],"wb").write(b"\x89PNG\r\n\x1a\n"+c(b"IHDR",struct.pack(">IIBBBBB",64,36,8,2,0,0,0))+c(b"IDAT",zlib.compress(r))+c(b"IEND",b""))' $T/vf/s.png
-vf() { printf 'import sys; print(%s)\n' "'$2'" > $T/vf/vision_or.py; S2A_VISION_ESCALATE=1 S2A_VISION_TRIED="$1" bash $T/vf/vision.sh $T/vf/s.png $T/vf/o.json > /dev/null 2>&1; echo "$? $(cat $T/vf/o.json 2> /dev/null | python3 -c 'import json,sys; d = json.load(sys.stdin); print("+".join(d["keys"]) or d.get("empty", ""))' 2> /dev/null)"; rm -f $T/vf/o.json*; }
+vf() { printf 'import sys; print(%s)\n' "'$2'" > $T/vf/vision_or.py; S2A_VISION_BACKEND=or S2A_VISION_ESCALATE=1 S2A_VISION_TRIED="$1" bash $T/vf/vision.sh $T/vf/s.png $T/vf/o.json > /dev/null 2>&1; echo "$? $(cat $T/vf/o.json 2> /dev/null | python3 -c 'import json,sys; d = json.load(sys.stdin); print("+".join(d["keys"]) or d.get("empty", ""))' 2> /dev/null)"; rm -f $T/vf/o.json*; }
 r1=$(vf "DOWN,A" '{"keys":["DOWN","A"],"playable":false,"why":"x"}'); r2=$(vf "A" '{"keys":["A:2"],"playable":false,"why":"x"}')
 r3=$(vf "LS_RIGHT" '{"keys":["LS_RIGHT"],"playable":true,"why":"x"}'); r4=$(vf "DOWN+A" '{"keys":["DOWN","A"],"playable":false,"why":"x"}')
 ck "㉒ 试过没用按完整动作比：DOWN、A 各自试过答 DOWN+A 照用（实为 ${r1}）、A 试过答长按 A:2 照用（${r2}）、说可操控不滤（${r3}）、整组 DOWN+A 试过才滤空（${r4}，11-03 起滤空不算失败：退出 0、keys 空、带 "empty": "tried" 交自动玩家兜底）" '[ "$r1" = "0 DOWN+A" ] && [ "$r2" = "0 A:2" ] && [ "$r3" = "0 LS_RIGHT" ] && [ "$r4" = "0 tried" ]'
 # ㉒b 点触换算画布：78×36 截图（比 16:9 宽）答 TOUCH:39,18（正中）——给 S2A_VISION_TOUCH_W=1280（游戏不知道宽屏）x 按 1280 宽缩成 640；不给（游戏自己出宽图）宽随比例 780
 python3 -c 'import zlib,struct,sys; r=b"".join(b"\0"+b"\0"*3*78 for _ in range(36)); c=lambda t,d: struct.pack(">I",len(d))+t+d+struct.pack(">I",zlib.crc32(t+d)); open(sys.argv[1],"wb").write(b"\x89PNG\r\n\x1a\n"+c(b"IHDR",struct.pack(">IIBBBBB",78,36,8,2,0,0,0))+c(b"IDAT",zlib.compress(r))+c(b"IEND",b""))' $T/vf/w.png
-vw() { printf 'import sys; print(%s)\n' "'{\"keys\":[\"TOUCH:39,18\"],\"playable\":false,\"why\":\"x\"}'" > $T/vf/vision_or.py; env S2A_VISION_ESCALATE=1 "$@" bash $T/vf/vision.sh $T/vf/w.png $T/vf/o.json > /dev/null 2>&1; python3 -c 'import json,sys; print("+".join(json.load(sys.stdin)["keys"]))' < $T/vf/o.json 2> /dev/null; rm -f $T/vf/o.json*; }
+vw() { printf 'import sys; print(%s)\n' "'{\"keys\":[\"TOUCH:39,18\"],\"playable\":false,\"why\":\"x\"}'" > $T/vf/vision_or.py; env S2A_VISION_BACKEND=or S2A_VISION_ESCALATE=1 "$@" bash $T/vf/vision.sh $T/vf/w.png $T/vf/o.json > /dev/null 2>&1; python3 -c 'import json,sys; print("+".join(json.load(sys.stdin)["keys"]))' < $T/vf/o.json 2> /dev/null; rm -f $T/vf/o.json*; }
 t1=$(vw S2A_VISION_TOUCH_W=1280); t2=$(vw S2A_VISION_TOUCH_W=0)
 ck "㉒b 点触画布：给 1280 换成 TOUCH:640,360（实为 ${t1}）、给 0 宽随画面比例 TOUCH:780,360（${t2}）" '[ "$t1" = "TOUCH:640,360" ] && [ "$t2" = "TOUCH:780,360" ]'
 ck "㉓ 答 LEFT+A、LEFT 没动：A 不按（不选中指针下的空档），记 LEFT+A 试过没用、改答点触进菜单打 MARK" 'L navfail | grep -q "LEFT 按了没动，这组后面的键不按" && ! L navfail | grep -q "\[游戏\] 进 PAUSE" && L navfail | grep -q "S2A 标记 MARK"'
-# ㉔ vision_or.py 唯一顺序与 403 跳过（不联网）：临时家目录放假钥匙，拦 urllib 的请求按主机回假结果——OpenRouter sonnet 403、中转站答 A（VO_RELAY_FAIL=1 时中转站 500）
-#   11-02 维护者：中转站做主力。期望——中转站通：只问中转站 claude-sonnet-5 一次；中转站 500：再问 OpenRouter sonnet（403，记下）→ kimi 答出；再一问跳过 sonnet 直接 kimi
-mkdir -p $T/vo/home/.s2arm/.secrets $T/vo/site; echo k > $T/vo/home/.s2arm/.secrets/openrouter.key; echo k > $T/vo/home/.s2arm/.secrets/relay.key
-cat > $T/vo/site/vo_fakenet.py << 'PYEOF'
+# ㉔ vision_or.py（S2A_VISION_BACKEND=or，11-12 起只剩 OpenRouter）顺序与 403 跳过（不联网）：临时家目录放假钥匙，拦 urllib 的请求按主机回假结果——
+#   OpenRouter sonnet 403、kimi 答 A。期望：第一问 sonnet 403（记下）→ kimi 答出；再一问跳过 sonnet 直接 kimi；没钥匙 → 「不可用」退出 3
+mkdir -p $T/vo/home/.s2arm/.secrets $T/vo/site $T/vo/nokey; echo k > $T/vo/home/.s2arm/.secrets/openrouter.key
+cat > $T/vo/site/vo_fakenet.py << 'PYEOF2'
 import io, json, os, urllib.error, urllib.request
 def fake_open(self, req, data=None, timeout=None):
     url = req.full_url if hasattr(req, "full_url") else req; body = json.loads(req.data) if getattr(req, "data", None) else {}
     open(os.environ["VO_LOG"], "a").write(f"{url.split('/')[2]} {body.get('model')}\n")
     if "openrouter" in url and body.get("model", "").startswith("anthropic/"): raise urllib.error.HTTPError(url, 403, "forbidden", {}, io.BytesIO(b""))
-    if "relay.example" in url and os.environ.get("VO_RELAY_FAIL"): raise urllib.error.HTTPError(url, 500, "relay down", {}, io.BytesIO(b""))
     return io.BytesIO(json.dumps({"choices": [{"message": {"content": '{"keys":["A"],"playable":false,"why":"x"}'}}], "usage": {}}).encode())
 urllib.request.OpenerDirector.open = fake_open
 _eu = os.path.expanduser   # 钥匙 / 缓存路径的「~」映射到临时家目录（不改 HOME：PIL 等装在用户 site-packages 里，换 HOME 就找不到）
 os.path.expanduser = lambda p: os.environ["VO_HOME"] + p[1:] if p.startswith("~/") else _eu(p)
-PYEOF
+PYEOF2
 # 拦截写成普通模块、包装命令先导入再 runpy 跑 vision_or.py（不用 sitecustomize：本机 Python 靠自己的 sitecustomize 挂 PIL 等目录，同名会顶掉它）
-vo() { S2A_VISION_RELAY_URL=https://relay.example/v1/chat/completions VO_HOME=$T/vo/home VO_LOG=$T/vo/$1.log python3 -c 'import sys, runpy; sys.path.insert(0, sys.argv[1]); import vo_fakenet; sys.argv = sys.argv[2:]; runpy.run_path(sys.argv[0], run_name="__main__")' $T/vo/site $H/autoplay/vision_or.py $T/vf/s.png 题 > $T/vo/$1.out 2> $T/vo/$1.err; }
-vo r0; VO_RELAY_FAIL=1 vo r1; VO_RELAY_FAIL=1 vo r2
-ck "㉔ 驾驶员后端唯一顺序：中转站通 → 只问中转站（$(tr '\n' ' ' < $T/vo/r0.log)）；中转站 500 → OpenRouter sonnet 403 记下 → kimi 答出（$(tr '\n' ' ' < $T/vo/r1.log)）；再一问跳过 sonnet（$(tr '\n' ' ' < $T/vo/r2.log)）" \
-  'grep -q "\"A\"" $T/vo/r0.out && [ "$(cat $T/vo/r0.log)" = "relay.example claude-sonnet-5" ] && grep -q "\"A\"" $T/vo/r1.out && [ "$(tr "\n" " " < $T/vo/r1.log)" = "relay.example claude-sonnet-5 openrouter.ai anthropic/claude-sonnet-5.5 openrouter.ai moonshotai/kimi-k3 " ] && [ "$(tr "\n" " " < $T/vo/r2.log)" = "relay.example claude-sonnet-5 openrouter.ai moonshotai/kimi-k3 " ] && grep -q "or:anthropic/claude-sonnet-5.5" $T/vo/home/.cache/s2a/vision_or_403'
-# ㉔b 中转站丢图（11-02 OpenRouter 402 期间全线退到中转站，整段题面时中转站大多只计约 1400 个输入 token、模型回「未收到截图」）：
-#   假网络——OpenRouter 一律 402；中转站前 VO_DROP 次回 prompt_tokens=10（丢图）、之后回 99999。期望：每次请求体都带 data:image/jpeg 截图；
-#   丢 1 次 → 第 2 次答出；一直丢（VO_DROP=9）→ 问满 2 次、OpenRouter 只撞 1 次 402（记标记、不再问 kimi）、退出非零（vision.sh 据此退本机 claude CLI）；
-#   标记 1 小时内新 → 下一问不再碰 OpenRouter
-cat > $T/vo/site/vo_fakenet2.py << 'PYEOF'
-import io, json, os, urllib.error, urllib.request
-def fake_open(self, req, data=None, timeout=None):
-    url = req.full_url if hasattr(req, "full_url") else req; body = json.loads(req.data) if getattr(req, "data", None) else {}
-    parts = (body.get("messages") or [{}])[-1].get("content") or []; im = any(isinstance(x, dict) and x.get("type") == "image_url" and str(x.get("image_url", {}).get("url", "")).startswith("data:image/jpeg;base64,") for x in parts)
-    open(os.environ["VO_LOG"], "a").write(f"{url.split('/')[2]} 带图={int(im)}\n")
-    if "openrouter" in url: raise urllib.error.HTTPError(url, 402, "no credits", {}, io.BytesIO(b""))
-    n = sum(1 for l in open(os.environ["VO_LOG"]) if "openrouter" not in l)
-    pt = 10 if n <= int(os.environ["VO_DROP"]) else 99999
-    if n == 1 and os.environ.get("VO_SLOW1"): import time; time.sleep(float(os.environ["VO_SLOW1"]))   # ㉔e：第一份请求慢回（中转站长尾）
-    return io.BytesIO(json.dumps({"choices": [{"message": {"content": '{"keys":["A"],"playable":false,"why":"x"}'}}], "usage": {"prompt_tokens": pt}}).encode())
-urllib.request.OpenerDirector.open = fake_open
-_eu = os.path.expanduser
-os.path.expanduser = lambda p: os.environ["VO_HOME"] + p[1:] if p.startswith("~/") else _eu(p)
-PYEOF
-vo2() { S2A_VISION_RELAY_URL=https://relay.example/v1/chat/completions VO_DROP=$2 VO_HOME=$T/vo/home VO_LOG=$T/vo/$1.log python3 -c 'import sys, runpy; sys.path.insert(0, sys.argv[1]); import vo_fakenet2; sys.argv = sys.argv[2:]; runpy.run_path(sys.argv[0], run_name="__main__")' $T/vo/site $H/autoplay/vision_or.py $T/vf/s.png 题 > $T/vo/$1.out 2> $T/vo/$1.err; echo $?; }
-d2=$(vo2 d2 1); d9=$(vo2 d9 9); d9b=$(vo2 d9b 9)
-h0=$SECONDS; hd=$(VO_SLOW1=4 S2A_VISION_RELAY_HEDGE=0.5 vo2 hd 0); hs=$((SECONDS - h0))
-ck "㉔b 中转站丢图：每次请求都带截图（中转站请求 $(grep -vc openrouter $T/vo/d2.log) 次、带图 $(grep -v openrouter $T/vo/d2.log | grep -c '带图=1') 次）；丢 1 次后第 2 次答出（退出 ${d2}、判丢图 $(grep -c 判丢图 $T/vo/d2.err) 次）；一直丢 → 退出非零（${d9}），OpenRouter 只撞 $(grep -c openrouter $T/vo/d9.log) 次 402、下一问 $(grep -c openrouter $T/vo/d9b.log) 次" \
-  '[ "$d2" = 0 ] && grep -q "\"A\"" $T/vo/d2.out && [ "$(grep -c 判丢图 $T/vo/d2.err)" = 1 ] && [ "$(grep -vc openrouter $T/vo/d2.log)" = "$(grep -v openrouter $T/vo/d2.log | grep -c 带图=1)" ] && [ "$d9" != 0 ] && [ "$(grep -c openrouter $T/vo/d9.log)" = 1 ] && [ -f $T/vo/home/.cache/s2a/openrouter_402 ] && [ "$d9b" != 0 ] && [ "$(grep -c openrouter $T/vo/d9b.log)" = 0 ]'
-ck "㉔e 中转站长尾（11-03 普查：19:30–21:20 13% 的问 ≥ 30 秒）：第一份 4 秒才回、0.5 秒没回就同题再发一份，先回的那份答出、不等慢的（退出 ${hd}、中转站请求 $(grep -vc openrouter $T/vo/hd.log 2> /dev/null) 次、用时 ${hs} 秒）" \
-  '[ "$hd" = 0 ] && grep -q "\"A\"" $T/vo/hd.out && grep -q "同题再发一份" $T/vo/hd.err && [ "$(grep -vc openrouter $T/vo/hd.log)" = 2 ] && [ "$hs" -lt 3 ]'
-# ㉔c vision.sh（11-02）：402 标记 1 小时内新 → 不调 Jev；没有中转站钥匙时升级后端全失败退本机 claude CLI，假 CLI 超时退出 124 → 日志记「超时」与 rc=124（修前管道末段 python 吞成 rc=0）
-# ㉔d 有中转站钥匙：升级后端全失败不退 CLI（维护者：我方 CLI 走同一个中转站），假 CLI 没被调、退出非零
-mkdir -p $T/vc/bin; cp $H/autoplay/vision.sh $H/autoplay/nav_rules.txt $T/vc/; printf 'import sys; sys.exit(1)\n' > $T/vc/vision_or.py; printf 'import sys; open(sys.argv[2] + ".jev", "w").close(); sys.exit(1)\n' > $T/vc/vision_jev.py
+vo() { VO_HOME=$2 VO_LOG=$T/vo/$1.log python3 -c 'import sys, runpy; sys.path.insert(0, sys.argv[1]); import vo_fakenet; sys.argv = sys.argv[2:]; runpy.run_path(sys.argv[0], run_name="__main__")' $T/vo/site $H/autoplay/vision_or.py $T/vf/s.png 题 > $T/vo/$1.out 2> $T/vo/$1.err; echo $?; }
+r1=$(vo r1 $T/vo/home); r2=$(vo r2 $T/vo/home); rn=$(vo rn $T/vo/nokey)
+ck "㉔ OpenRouter 后端：sonnet 403 记下 → kimi 答出（$(tr '\n' ' ' < $T/vo/r1.log)）；再一问跳过 sonnet（$(tr '\n' ' ' < $T/vo/r2.log)）；没钥匙 → 不可用、退出 3（${rn}）、不发请求" \
+  '[ "$r1" = 0 ] && grep -q "\"A\"" $T/vo/r1.out && [ "$(tr "\n" " " < $T/vo/r1.log)" = "openrouter.ai anthropic/claude-sonnet-5.5 openrouter.ai moonshotai/kimi-k3 " ] && [ "$r2" = 0 ] && [ "$(tr "\n" " " < $T/vo/r2.log)" = "openrouter.ai moonshotai/kimi-k3 " ] && [ "$rn" = 3 ] && grep -q "不可用" $T/vo/rn.err && [ ! -s $T/vo/rn.log ]'
+# ㉔c vision.sh：402 标记在 → 显式 Jev 后端也跳过 Jev；问 CLI，假 CLI 超时退出 124 → 日志记「超时」与 rc=124（修前管道末段 python 吞成 rc=0）、退出 1（偶发失败，不是不可用）
+mkdir -p $T/vc/bin; cp $H/autoplay/vision.sh $H/autoplay/nav_rules.txt $T/vc/; printf 'import sys; open(sys.argv[0] + ".called", "w").close(); sys.exit(1)\n' > $T/vc/vision_or.py; printf 'import sys; open(sys.argv[2] + ".jev", "w").close(); sys.exit(1)\n' > $T/vc/vision_jev.py
 printf '#!/bin/sh\ncat > /dev/null; exit 124\n' > $T/vc/bin/claude; chmod +x $T/vc/bin/claude; cp $H/autoplay/or402.py $T/vc/
-#   402 标记 11-04 起是永久的、内容 = OpenRouter 钥匙指纹（or402.py；空标记算旧格式不生效）；缺省后端改中转站后 Jev 只在显式 S2A_VISION_BACKEND=jev 时才问，这里显式选 Jev 守「标记在 → 不白撞 402」
+#   402 标记 11-04 起是永久的、内容 = OpenRouter 钥匙指纹（or402.py；空标记算旧格式不生效）
 printf 'fake-or-key\n' > $T/vc/ork; python3 -c 'import hashlib,sys; print(hashlib.sha256(b"fake-or-key").hexdigest()[:16])' > $T/vc/m402
-PATH=$T/vc/bin:$PATH S2A_VISION_BACKEND=jev S2A_VISION_OR_KEY=$T/vc/ork S2A_OR_402_MARK=$T/vc/m402 S2A_VISION_RELAY_KEY=$T/vc/无钥匙 bash $T/vc/vision.sh $T/vf/s.png $T/vc/o.json > /dev/null 2>&1; vcrc=$?
-printf '#!/bin/sh\ncat > /dev/null; : > %s/vc/cli_called; exit 0\n' $T > $T/vc/bin/claude; : > $T/vc/rk
-PATH=$T/vc/bin:$PATH S2A_OR_402_MARK=$T/vc/m402 S2A_VISION_RELAY_KEY=$T/vc/rk bash $T/vc/vision.sh $T/vf/s.png $T/vc/p.json > /dev/null 2>&1; vdrc=$?
-ck "㉔c 402 标记新 → 跳过 Jev（Jev 调了：$([ -f $T/vc/o.json.jev ] && echo 是 || echo 否)）；CLI 超时 → 记超时、rc=124、退出非零（${vcrc}；日志：$(tr '\n' ' ' < $T/vc/o.json.log | cut -c1-160)）" \
-  '[ ! -f $T/vc/o.json.jev ] && grep -q "跳过 Jev" $T/vc/o.json.log && grep -q "claude CLI 超时" $T/vc/o.json.log && grep -q "升级后端失败 rc=124" $T/vc/o.json.log && [ "$vcrc" != 0 ]'
-ck "㉔d 有中转站钥匙 → 不退 CLI（CLI 调了：$([ -f $T/vc/cli_called ] && echo 是 || echo 否)）、退出非零（${vdrc}）" '[ ! -f $T/vc/cli_called ] && grep -q "不退 CLI" $T/vc/p.json.log && [ "$vdrc" != 0 ]'
-# ㉔f（11-04 驾驶员提速）缺省后端 = 中转站快档：有中转站钥匙、快档答出且把握 ≥ 0.6 → 用快档答案，不问升级后端（sonnet）、不碰 Jev
-mkdir -p $T/vf2; cp $H/autoplay/vision.sh $H/autoplay/nav_rules.txt $H/autoplay/or402.py $T/vf2/; : > $T/vf2/rk
-printf 'import os, sys\nfast = os.environ.get("S2A_VISION_RELAY_MODEL") == os.environ.get("FAKE_FAST")\nopen(os.path.join(os.path.dirname(sys.argv[0]), "fast_called" if fast else "slow_called"), "a").close()\nprint("{\\"keys\\": [\\"%%s\\"], \\"conf\\": 0.9, \\"why\\": \\"t\\"}" %% ("A" if fast else "B"))\n' > $T/vf2/vision_or.py
-printf 'import sys; open(sys.argv[2] + ".jev", "w").close(); sys.exit(1)\n' > $T/vf2/vision_jev.py
-FAKE_FAST=fastm S2A_VISION_FAST_MODEL=fastm S2A_VISION_RELAY_KEY=$T/vf2/rk bash $T/vf2/vision.sh $T/vf/s.png $T/vf2/o.json > /dev/null 2>&1; vfrc=$?
-ck "㉔f 缺省后端中转站快档：快档把握 0.9 → 用快档答案 A（实为 $(tr -d '\n' < $T/vf2/o.json 2> /dev/null | cut -c1-60)）、没问升级后端（$([ -f $T/vf2/slow_called ] && echo 问了 || echo 没问)）、没碰 Jev、退出 0（${vfrc}）" \
-  '[ "$vfrc" = 0 ] && [ -f $T/vf2/fast_called ] && [ ! -f $T/vf2/slow_called ] && [ ! -f $T/vf2/o.json.jev ] && grep -q "\"A\"" $T/vf2/o.json && grep -q "快档 中转站/fastm" $T/vf2/o.json.log'
+PATH=$T/vc/bin:$PATH S2A_VISION_BACKEND=jev S2A_VISION_OR_KEY=$T/vc/ork S2A_OR_402_MARK=$T/vc/m402 bash $T/vc/vision.sh $T/vf/s.png $T/vc/o.json > /dev/null 2>&1; vcrc=$?
+ck "㉔c 402 标记新 → 跳过 Jev（Jev 调了：$([ -f $T/vc/o.json.jev ] && echo 是 || echo 否)）；CLI 超时 → 记超时、rc=124、退出 1（${vcrc}；日志：$(tr '\n' ' ' < $T/vc/o.json.log | cut -c1-160)）" \
+  '[ ! -f $T/vc/o.json.jev ] && grep -q "跳过 Jev" $T/vc/o.json.log && grep -q "claude CLI 超时" $T/vc/o.json.log && grep -q "升级后端失败 rc=124" $T/vc/o.json.log && [ "$vcrc" = 1 ]'
+# ㉔d 缺省后端 = 本机 claude CLI 直连（11-12：中转站停用后原缺省档每问 0.3 秒退 1，#788）：
+#   假 CLI 按 stream-json 回结果行 → 用它的答案 A、退出 0、没碰 OpenRouter 脚本；
+#   PATH 上没有 claude / CLI 报没登录 → 【红】「看屏驾驶员不可用」、答案 JSON 带 unavailable、退出 3
+mkdir -p $T/vd/bin $T/vd/nocli; cp $H/autoplay/vision.sh $H/autoplay/nav_rules.txt $H/autoplay/or402.py $T/vd/; printf 'import sys; open(sys.argv[0] + ".called", "w").close(); sys.exit(1)\n' > $T/vd/vision_or.py
+cat > $T/vd/bin/claude << 'SHEOF'
+#!/bin/sh
+cat > /dev/null
+echo '{"type":"result","result":"{\"keys\":[\"A\"],\"playable\":false,\"why\":\"t\"}"}'
+SHEOF
+chmod +x $T/vd/bin/claude; ln -sf "$(command -v timeout)" $T/vd/nocli/timeout; PY3=$(command -v python3)
+PATH=$T/vd/bin:$PATH bash $T/vd/vision.sh $T/vf/s.png $T/vd/a.json > /dev/null 2>&1; vda=$?
+S2A_PY=$PY3 PATH=$T/vd/nocli:/usr/bin:/bin bash $T/vd/vision.sh $T/vf/s.png $T/vd/b.json > /dev/null 2> $T/vd/b.stderr; vdb=$?
+printf '#!/bin/sh\ncat > /dev/null; echo "Not logged in · Please run /login" >&2; exit 1\n' > $T/vd/bin/claude
+PATH=$T/vd/bin:$PATH bash $T/vd/vision.sh $T/vf/s.png $T/vd/c.json > /dev/null 2>&1; vdc=$?
+ck "㉔d 缺省后端本机 CLI：答出 A、退出 0（${vda}；$(tr -d '\n' < $T/vd/a.json 2> /dev/null | cut -c1-50)）、没碰 OpenRouter（$([ -f $T/vd/vision_or.py.called ] && echo 碰了 || echo 没碰)）；没有 CLI → 退出 3（${vdb}）带 unavailable；没登录 → 退出 3（${vdc}）" \
+  '[ "$vda" = 0 ] && grep -q "\"A\"" $T/vd/a.json && [ ! -f $T/vd/vision_or.py.called ] && grep -q "升级后端 claude CLI" $T/vd/a.json.log && [ "$vdb" = 3 ] && grep -q "\"unavailable\": true" $T/vd/b.json && grep -q "【红】看屏驾驶员不可用：本机没有 claude CLI" $T/vd/b.json.log && grep -q "【红】看屏驾驶员不可用" $T/vd/b.stderr && [ "$vdc" = 3 ] && grep -q "\"unavailable\": true" $T/vd/c.json && grep -q "没登录" $T/vd/c.json.log'
+# ㉔e 中转站档已删：显式 S2A_VISION_BACKEND=relay（旧配置）→ 不认、【红】不可用、退出 3，不静默落到别的后端
+S2A_VISION_BACKEND=relay PATH=$T/vd/bin:$PATH bash $T/vd/vision.sh $T/vf/s.png $T/vd/r.json > /dev/null 2>&1; vdr=$?
+ck "㉔e 旧配置 S2A_VISION_BACKEND=relay → 不可用、退出 3（${vdr}）" '[ "$vdr" = 3 ] && grep -q "relay 已停用" $T/vd/r.json.log && grep -q "\"unavailable\": true" $T/vd/r.json'
 # ㉔g 402 标记永久有效（11-04）：指纹对得上的标记过了 2 小时仍跳过 Jev；指纹对不上（换了钥匙）→ 不算，照问 Jev
 mkdir -p $T/vg; cp $H/autoplay/vision.sh $H/autoplay/nav_rules.txt $H/autoplay/or402.py $T/vg/; printf 'import sys; sys.exit(1)\n' > $T/vg/vision_or.py
 printf 'import sys; open(sys.argv[2] + ".jev", "w").close(); sys.exit(1)\n' > $T/vg/vision_jev.py; mkdir -p $T/vg/bin; printf '#!/bin/sh\ncat > /dev/null; exit 1\n' > $T/vg/bin/claude; chmod +x $T/vg/bin/claude
 printf 'k1\n' > $T/vg/ork; python3 -c 'import hashlib; print(hashlib.sha256(b"k1").hexdigest()[:16])' > $T/vg/m402; touch -t "$(date -v-2H +%Y%m%d%H%M)" $T/vg/m402
-PATH=$T/vg/bin:$PATH S2A_VISION_BACKEND=jev S2A_VISION_OR_KEY=$T/vg/ork S2A_OR_402_MARK=$T/vg/m402 S2A_VISION_RELAY_KEY=$T/vg/无钥匙 bash $T/vg/vision.sh $T/vf/s.png $T/vg/a.json > /dev/null 2>&1
+PATH=$T/vg/bin:$PATH S2A_VISION_BACKEND=jev S2A_VISION_OR_KEY=$T/vg/ork S2A_OR_402_MARK=$T/vg/m402 bash $T/vg/vision.sh $T/vf/s.png $T/vg/a.json > /dev/null 2>&1
 printf 'k2\n' > $T/vg/ork
-PATH=$T/vg/bin:$PATH S2A_VISION_BACKEND=jev S2A_VISION_OR_KEY=$T/vg/ork S2A_OR_402_MARK=$T/vg/m402 S2A_VISION_RELAY_KEY=$T/vg/无钥匙 bash $T/vg/vision.sh $T/vf/s.png $T/vg/b.json > /dev/null 2>&1
+PATH=$T/vg/bin:$PATH S2A_VISION_BACKEND=jev S2A_VISION_OR_KEY=$T/vg/ork S2A_OR_402_MARK=$T/vg/m402 bash $T/vg/vision.sh $T/vf/s.png $T/vg/b.json > /dev/null 2>&1
 ck "㉔g 402 标记永久：2 小时前的标记仍跳过 Jev（Jev 调了：$([ -f $T/vg/a.json.jev ] && echo 是 || echo 否)）；换钥匙后标记不算、照问 Jev（$([ -f $T/vg/b.json.jev ] && echo 问了 || echo 没问)）" \
   '[ ! -f $T/vg/a.json.jev ] && grep -q "跳过 Jev" $T/vg/a.json.log && [ -f $T/vg/b.json.jev ]'
 ck "㉕ 低绘制游戏（局内绘制 30 < 3×20）：Jev 低把握、升级后端连续 2 问确认可操控 + 绘制不低于基线 → 打 MARK；升级后端说不是 → 不打" 'L lowesc | grep -q "升级后端连续 2 问确认可操控" && L lowesc | grep -q "S2A 标记 MARK" && ! L lowno | grep -q "S2A 标记 MARK"'

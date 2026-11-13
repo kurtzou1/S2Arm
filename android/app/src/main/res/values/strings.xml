@@ -7,6 +7,11 @@
     <string name="native_unavailable">The native host could not start. See the S2Arm log for details.</string>
     <string name="capability_status" translatable="false">%1$s\n%2$s</string>
     <string name="import_game">Import game package…</string>
+    <!-- #528 item 15: player diagnostic bundle (library screen) -->
+    <string name="export_diagnostics">Export diagnostics…</string>
+    <string name="export_diagnostics_running">Exporting diagnostics…</string>
+    <string name="export_diagnostics_done">Diagnostics ready: %1$s</string>
+    <string name="export_diagnostics_failed">Diagnostics export failed: %1$s</string>
     <string name="console_mode_handheld">Console mode: handheld (tap for docked)</string>
     <string name="console_mode_docked">Console mode: docked (tap for handheld)</string>
     <string name="console_mode_switched">Console mode switched.</string>

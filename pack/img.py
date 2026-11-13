@@ -371,6 +371,50 @@ def convert(root, pack_dir, progress=None, romfs_index=None, gid=None, consume=F
     return out
 
 
+def export(pack_dir, out_path):
+    """自签导出用的「一款一个文件」（install.export_phone）：IMG 形态资源包的 game.img + 照旧按文件放的派生件（着色器库 shaders/、界面覆盖层 romfs_overlay/、
+    romfs.s2aidx、game.imgmap）写成一个 IMG：派生件进其余文件段的目录表，手机认领后照常从 game.img 解出来（pack_apply.c img_extract 解目录表里的每一项）。
+    原 game.img 不动：先复制（APFS 克隆不占新空间，别的盘实拷、报字节进度），截掉旧目录表，尾部页对齐追加派生件与 game.imgmap（总长度改成新文件的，
+    RomFS 段偏移不变），再写新目录表、改头里的目录表偏移 / 长度 / 文件长。原子写（先 .part 再改名）。→ 输出路径"""
+    import shutil
+    src = os.path.join(pack_dir, 'game.img'); h = header(src)
+    old = entries(src); have = {p for p, _, _ in old}
+    extras = sorted((rel, os.path.join(pack_dir, rel)) for rel, _ in pack_rows(pack_dir) if rel.startswith(KEEP))
+    for rel, p in extras:
+        if rel in have: raise Red(f'{rel} 已在 game.img 目录表里')
+        if not os.path.isfile(p): raise Red(f'资源包清单里的 {rel} 不在 {pack_dir}')
+    mp = os.path.join(pack_dir, MAP); mapb = bytearray(open(mp, 'rb').read()) if os.path.isfile(mp) else None
+    part = out_path + '.part'
+    try:
+        cloned = False
+        if sys.platform == 'darwin':
+            cloned = subprocess.run(['cp', '-c', src, part], capture_output=True).returncode == 0
+        if not cloned:   # 不能克隆（Windows NTFS / 跨盘）：实拷，报字节进度（几十 GB 要一两分钟）
+            tk = Ticker('导出单文件 IMG', os.path.getsize(src))
+            with open(src, 'rb') as a, open(part, 'wb') as b:
+                while chunk := a.read(1 << 22): b.write(chunk); tk.step(len(chunk))
+        pos, new = h['toc'][0], list(old)
+        with open(part, 'r+b') as f:
+            f.truncate(pos)
+            for rel, p in extras:
+                pos = up(pos); f.seek(pos); size = 0
+                with open(p, 'rb') as s:
+                    while chunk := s.read(1 << 22): f.write(chunk); size += len(chunk)
+                new.append((rel, pos, size)); pos += size
+            if mapb is not None:
+                pos = up(pos); map_off = pos; new.append((MAP, pos, len(mapb))); pos += len(mapb)
+            pos = up(pos); toc = toc_bytes(new); total = pos + len(toc)
+            if mapb is not None:   # 偏移表头里记的是整个 game.img 的长度（RomFsIndex.OpenImg 核它）：换成这个文件的
+                struct.pack_into("<q", mapb, 8, total); f.seek(map_off); f.write(mapb)
+            f.seek(pos); f.write(toc); f.truncate(total)
+            m, fmt, x, gid, pid, ro, rl, _, _, _ = HDR.unpack(open(src, 'rb').read(HDR.size))
+            f.seek(0); f.write(HDR.pack(m, fmt, x, gid, pid, ro, rl, pos, len(toc), total))
+        os.replace(part, out_path)
+    finally:
+        if os.path.exists(part): os.unlink(part)
+    return out_path
+
+
 def is_img(path):
     try:
         with open(path, 'rb') as f: return f.read(8) == MAGIC
@@ -416,12 +460,15 @@ def main(argv=None):
     v = sp.add_parser('convert', help='资源包目录就地转 IMG 形态（出包交付）'); v.add_argument('root'); v.add_argument('pack_dir'); v.add_argument('--gid')
     v.add_argument('--consume', action='store_true', help='边写边删解包出来的 RomFS（#746：出包收尾本来就清，提前到写 IMG 时；写到一半失败要重新解包）')
     v.add_argument('--work', help='这款的出包工作目录：--consume 只删它里面的（玩家原件、外面的解包目录不碰）')
+    x = sp.add_parser('export', help='自签导出：game.img + 着色器库等派生件写成一个文件'); x.add_argument('pack_dir'); x.add_argument('out')
     l = sp.add_parser('ls'); l.add_argument('img')
     a = ap.parse_args(argv)
     try:
         if a.cmd == 'build':
             others = [tuple(l.rstrip('\n').split('\t', 1)) for l in open(a.others, encoding='utf-8') if '\t' in l]
             build(None if a.romfs == '-' else a.romfs, others, a.out, a.gid, a.pack_id, a.romfs_index)
+        elif a.cmd == 'export':
+            print(export(a.pack_dir, a.out))
         elif a.cmd == 'convert':
             print(convert(a.root, a.pack_dir, gid=a.gid, consume=a.consume, work=a.work) or '多程序合集：照旧旧形态')
         else:

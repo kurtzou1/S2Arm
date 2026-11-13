@@ -1,0 +1,688 @@
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/Command/DeviceSinkCommand.cs b/src/Ryujinx.Audio/Renderer/Dsp/Command/DeviceSinkCommand.cs
+index 310bc0d0525179c6f0d72e73c57b93fb7c0049c5..750dd74de6433270274e4ab983cea80ab664625a 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/Command/DeviceSinkCommand.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/Command/DeviceSinkCommand.cs
+@@ -98,13 +98,26 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
+                 short[] outputBuffer = ArrayPool<short>.Shared.Rent((int)inputCount * SampleCount);
+                 Array.Fill(outputBuffer, (short)0, 0, (int)inputCount * SampleCount);
+ 
+-                for (int i = 0; i < bufferCount; i++)
++                // S2Arm: 立体声设备 + 双声道输入（最常见的设备形态）走 S2ADspMixHelper 的饱和窄化 + 交织内核；
++                //   其余布局（5.1、混上混等）照原逐样本循环。两条路径逐样本一致（FCVTZS+SQXTN ≡ 夹取后截断）。
++                if (channelCount == 2 && bufferCount == 2)
+                 {
+-                    ReadOnlySpan<float> inputBuffer = GetBuffer(InputBufferIndices[i], SampleCount);
+-
+-                    for (int j = 0; j < SampleCount; j++)
++                    S2ADspMixHelper.SaturateInterleaveStereo(
++                        outputBuffer,
++                        GetBuffer(InputBufferIndices[0], SampleCount),
++                        GetBuffer(InputBufferIndices[1], SampleCount),
++                        (int)SampleCount);
++                }
++                else
++                {
++                    for (int i = 0; i < bufferCount; i++)
+                     {
+-                        outputBuffer[i + j * channelCount] = PcmHelper.Saturate(inputBuffer[j]);
++                        ReadOnlySpan<float> inputBuffer = GetBuffer(InputBufferIndices[i], SampleCount);
++
++                        for (int j = 0; j < SampleCount; j++)
++                        {
++                            outputBuffer[i + j * channelCount] = PcmHelper.Saturate(inputBuffer[j]);
++                        }
+                     }
+                 }
+ 
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/Command/DownMixSurroundToStereoCommand.cs b/src/Ryujinx.Audio/Renderer/Dsp/Command/DownMixSurroundToStereoCommand.cs
+index 751954fc86873dcb4912b9e52e1fc8a172e6157e..4486e5e7b3d871013b9be3fb447d087dc4628fde 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/Command/DownMixSurroundToStereoCommand.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/Command/DownMixSurroundToStereoCommand.cs
+@@ -40,12 +40,6 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
+             return this;
+         }
+ 
+-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+-        private static float DownMixSurroundToStereo(ReadOnlySpan<float> coefficients, float back, float lfe, float center, float front)
+-        {
+-            return FloatingPointHelper.RoundUp(coefficients[3] * back + coefficients[2] * lfe + coefficients[1] * center + coefficients[0] * front);
+-        }
+-
+         public void Process(CommandList context)
+         {
+             ReadOnlySpan<float> frontLeft = context.GetBuffer(InputBufferIndices[0]);
+@@ -58,11 +52,18 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
+             Span<float> stereoLeft = context.GetBuffer(OutputBufferIndices[0]);
+             Span<float> stereoRight = context.GetBuffer(OutputBufferIndices[1]);
+ 
+-            for (int i = 0; i < context.SampleCount; i++)
+-            {
+-                stereoLeft[i] = DownMixSurroundToStereo(Coefficients, backLeft[i], lowFrequency[i], frontCenter[i], frontLeft[i]);
+-                stereoRight[i] = DownMixSurroundToStereo(Coefficients, backRight[i], lowFrequency[i], frontCenter[i], frontRight[i]);
+-            }
++            // S2Arm: 内核抽到 S2ADspMixHelper（ARM 向量路径 + 标量路径逐样本一致）
++            S2ADspMixHelper.DownMixSurroundToStereo(
++                stereoLeft,
++                stereoRight,
++                frontLeft,
++                frontRight,
++                frontCenter,
++                lowFrequency,
++                backLeft,
++                backRight,
++                Coefficients,
++                (int)context.SampleCount);
+ 
+             context.ClearBuffer(OutputBufferIndices[2]);
+             context.ClearBuffer(OutputBufferIndices[3]);
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/Command/MixRampCommand.cs b/src/Ryujinx.Audio/Renderer/Dsp/Command/MixRampCommand.cs
+index be6aec5a66cac976b3db3e3f778327d930effcf3..07f3a01e233d70ed80e94b06af714c6fb686332d 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/Command/MixRampCommand.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/Command/MixRampCommand.cs
+@@ -50,18 +50,9 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
+         private float ProcessMixRamp(Span<float> outputBuffer, ReadOnlySpan<float> inputBuffer, int sampleCount)
+         {
+             float ramp = (Volume1 - Volume0) / sampleCount;
+-            float volume = Volume0;
+-            float state = 0;
+ 
+-            for (int i = 0; i < sampleCount; i++)
+-            {
+-                state = FloatingPointHelper.MultiplyRoundUp(inputBuffer[i], volume);
+-
+-                outputBuffer[i] += state;
+-                volume += ramp;
+-            }
+-
+-            return state;
++            // S2Arm: 内核抽到 S2ADspMixHelper（ARM 向量路径与标量路径逐样本一致，含音量递推序列）
++            return S2ADspMixHelper.MixRamp(outputBuffer, inputBuffer, Volume0, ramp, sampleCount);
+         }
+ 
+         public void Process(CommandList context)
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/Command/MixRampGroupedCommand.cs b/src/Ryujinx.Audio/Renderer/Dsp/Command/MixRampGroupedCommand.cs
+index 7932dbb14cd96f284096cffb4be7bbd961b71af8..9e4ff95e8c08a3d16676a82ea862e8e25afd0d15 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/Command/MixRampGroupedCommand.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/Command/MixRampGroupedCommand.cs
+@@ -70,18 +70,9 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
+             int sampleCount)
+         {
+             float ramp = (volume1 - volume0) / sampleCount;
+-            float volume = volume0;
+-            float state = 0;
+ 
+-            for (int i = 0; i < sampleCount; i++)
+-            {
+-                state = FloatingPointHelper.MultiplyRoundUp(inputBuffer[i], volume);
+-
+-                outputBuffer[i] += state;
+-                volume += ramp;
+-            }
+-
+-            return state;
++            // S2Arm: 内核抽到 S2ADspMixHelper（ARM 向量路径与标量路径逐样本一致，含音量递推序列）
++            return S2ADspMixHelper.MixRamp(outputBuffer, inputBuffer, volume0, ramp, sampleCount);
+         }
+ 
+         public void Process(CommandList context)
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/Command/VolumeRampCommand.cs b/src/Ryujinx.Audio/Renderer/Dsp/Command/VolumeRampCommand.cs
+index 47753dc794f9343051f52691012f1c80196111d5..8d0eb9eb8aa501c4d145bd5f7a5f34aeb41e426d 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/Command/VolumeRampCommand.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/Command/VolumeRampCommand.cs
+@@ -43,13 +43,8 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
+         {
+             float ramp = (Volume1 - Volume0) / sampleCount;
+ 
+-            float volume = Volume0;
+-
+-            for (int i = 0; i < sampleCount; i++)
+-            {
+-                outputBuffer[i] = FloatingPointHelper.MultiplyRoundUp(inputBuffer[i], volume);
+-                volume += ramp;
+-            }
++            // S2Arm: 内核抽到 S2ADspMixHelper（ARM 向量路径与标量路径逐样本一致，含音量递推序列）
++            S2ADspMixHelper.VolumeRamp(outputBuffer, inputBuffer, Volume0, ramp, sampleCount);
+         }
+ 
+         public void Process(CommandList context)
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/ResamplerHelper.cs b/src/Ryujinx.Audio/Renderer/Dsp/ResamplerHelper.cs
+index be00d1b2fcf907e16cc0897b9ac309191c4a347a..70b96eb4f9bcafa9d7db040503dcaaf219561c34 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/ResamplerHelper.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/ResamplerHelper.cs
+@@ -367,7 +367,7 @@ namespace Ryujinx.Audio.Renderer.Dsp
+         }
+ 
+         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+-        private static ReadOnlySpan<float> GetDefaultParameter(float ratio)
++        internal static ReadOnlySpan<float> GetDefaultParameter(float ratio) // S2Arm: internal，tests/audio_dsp_simd 直调对拍
+         {
+             if (ratio <= 1.0f)
+             {
+@@ -394,39 +394,9 @@ namespace Ryujinx.Audio.Renderer.Dsp
+             //   乘积逐项算（不融合乘加），4×4 转置后按标量的求和顺序 ((x0+x1)+x2)+x3 相加，舍入用就近取偶（= Math.Round 缺省）。
+             if (S2ADspFast.On && AdvSimd.Arm64.IsSupported)
+             {
+-                fixed (short* pInput = inputBuffer)
+-                fixed (float* pOutput = outputBuffer, pParameters = parameters)
+-                {
+-                    for (; i < (sampleCount & ~3); i += 4)
+-                    {
+-                        int b0 = (int)(fraction * 128) * 4; int x0 = inputBufferIndex;
+-                        fraction += ratio; inputBufferIndex += (int)fraction; fraction -= (int)fraction;
+-                        int b1 = (int)(fraction * 128) * 4; int x1 = inputBufferIndex;
+-                        fraction += ratio; inputBufferIndex += (int)fraction; fraction -= (int)fraction;
+-                        int b2 = (int)(fraction * 128) * 4; int x2 = inputBufferIndex;
+-                        fraction += ratio; inputBufferIndex += (int)fraction; fraction -= (int)fraction;
+-                        int b3 = (int)(fraction * 128) * 4; int x3 = inputBufferIndex;
+-                        fraction += ratio; inputBufferIndex += (int)fraction; fraction -= (int)fraction;
+-
+-                        Vector128<float> m0 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x0))), AdvSimd.LoadVector128(pParameters + b0));
+-                        Vector128<float> m1 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x1))), AdvSimd.LoadVector128(pParameters + b1));
+-                        Vector128<float> m2 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x2))), AdvSimd.LoadVector128(pParameters + b2));
+-                        Vector128<float> m3 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x3))), AdvSimd.LoadVector128(pParameters + b3));
+-
+-                        // 转置：c_k = (m0[k], m1[k], m2[k], m3[k])
+-                        Vector128<ulong> t0 = AdvSimd.Arm64.ZipLow(m0, m1).AsUInt64();
+-                        Vector128<ulong> t1 = AdvSimd.Arm64.ZipHigh(m0, m1).AsUInt64();
+-                        Vector128<ulong> t2 = AdvSimd.Arm64.ZipLow(m2, m3).AsUInt64();
+-                        Vector128<ulong> t3 = AdvSimd.Arm64.ZipHigh(m2, m3).AsUInt64();
+-                        Vector128<float> c0 = AdvSimd.Arm64.ZipLow(t0, t2).AsSingle();
+-                        Vector128<float> c1 = AdvSimd.Arm64.ZipHigh(t0, t2).AsSingle();
+-                        Vector128<float> c2 = AdvSimd.Arm64.ZipLow(t1, t3).AsSingle();
+-                        Vector128<float> c3 = AdvSimd.Arm64.ZipHigh(t1, t3).AsSingle();
+-
+-                        Vector128<float> sum = AdvSimd.Add(AdvSimd.Add(AdvSimd.Add(c0, c1), c2), c3);
+-                        AdvSimd.Store(pOutput + i, AdvSimd.RoundToNearest(sum));
+-                    }
+-                }
++                ResampleDefaultQualityAdvSimd(outputBuffer, inputBuffer, ratio, ref fraction, sampleCount, parameters);
++
++                return;
+             }
+             else if (Sse41.IsSupported)
+             {
+@@ -546,8 +516,77 @@ namespace Ryujinx.Audio.Renderer.Dsp
+             }
+         }
+ 
++        // S2Arm: 上面 ARM 快路径的本体（tests/audio_dsp_simd 直调对拍，不依赖运行时开关）；不满 4 个的尾部落回与原路径相同的逐样本循环。
++        //   fraction 先取进局部变量、循环里只在寄存器上推进、末尾一次写回（同 0197 双二阶快路径的做法）：
++        //   ref 参数在循环里逐次写回时，JIT 认为向量 Store 可能与之别名，每次推进都从内存往返（M5 JIT 反汇编实测），快路径反而慢。
++        internal unsafe static void ResampleDefaultQualityAdvSimd(
++            Span<float> outputBuffer,
++            ReadOnlySpan<short> inputBuffer,
++            float ratio,
++            ref float fraction,
++            int sampleCount,
++            ReadOnlySpan<float> parameters)
++        {
++            float frac = fraction;
++            int inputBufferIndex = 0, i = 0;
++
++            fixed (short* pInput = inputBuffer)
++            fixed (float* pOutput = outputBuffer, pParameters = parameters)
++            {
++                for (; i < (sampleCount & ~3); i += 4)
++                {
++                    int b0 = (int)(frac * 128) * 4; int x0 = inputBufferIndex;
++                    frac += ratio; inputBufferIndex += (int)frac; frac -= (int)frac;
++                    int b1 = (int)(frac * 128) * 4; int x1 = inputBufferIndex;
++                    frac += ratio; inputBufferIndex += (int)frac; frac -= (int)frac;
++                    int b2 = (int)(frac * 128) * 4; int x2 = inputBufferIndex;
++                    frac += ratio; inputBufferIndex += (int)frac; frac -= (int)frac;
++                    int b3 = (int)(frac * 128) * 4; int x3 = inputBufferIndex;
++                    frac += ratio; inputBufferIndex += (int)frac; frac -= (int)frac;
++
++                    Vector128<float> m0 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x0))), AdvSimd.LoadVector128(pParameters + b0));
++                    Vector128<float> m1 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x1))), AdvSimd.LoadVector128(pParameters + b1));
++                    Vector128<float> m2 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x2))), AdvSimd.LoadVector128(pParameters + b2));
++                    Vector128<float> m3 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x3))), AdvSimd.LoadVector128(pParameters + b3));
++
++                    // 转置：c_k = (m0[k], m1[k], m2[k], m3[k])
++                    Vector128<ulong> t0 = AdvSimd.Arm64.ZipLow(m0, m1).AsUInt64();
++                    Vector128<ulong> t1 = AdvSimd.Arm64.ZipHigh(m0, m1).AsUInt64();
++                    Vector128<ulong> t2 = AdvSimd.Arm64.ZipLow(m2, m3).AsUInt64();
++                    Vector128<ulong> t3 = AdvSimd.Arm64.ZipHigh(m2, m3).AsUInt64();
++                    Vector128<float> c0 = AdvSimd.Arm64.ZipLow(t0, t2).AsSingle();
++                    Vector128<float> c1 = AdvSimd.Arm64.ZipHigh(t0, t2).AsSingle();
++                    Vector128<float> c2 = AdvSimd.Arm64.ZipLow(t1, t3).AsSingle();
++                    Vector128<float> c3 = AdvSimd.Arm64.ZipHigh(t1, t3).AsSingle();
++
++                    Vector128<float> sum = AdvSimd.Add(AdvSimd.Add(AdvSimd.Add(c0, c1), c2), c3);
++                    AdvSimd.Store(pOutput + i, AdvSimd.RoundToNearest(sum));
++                }
++            }
++
++            for (; i < sampleCount; i++)
++            {
++                int baseIndex = (int)(frac * 128) * 4;
++                ReadOnlySpan<float> parameter = parameters.Slice(baseIndex, 4);
++                ReadOnlySpan<short> currentInput = inputBuffer.Slice(inputBufferIndex, 4);
++
++                outputBuffer[i] = (float)Math.Round(currentInput[0] * parameter[0] +
++                                                    currentInput[1] * parameter[1] +
++                                                    currentInput[2] * parameter[2] +
++                                                    currentInput[3] * parameter[3]);
++
++                frac += ratio;
++                inputBufferIndex += (int)frac;
++
++                // Only keep lower part (safe as fraction isn't supposed to be negative)
++                frac -= (int)frac;
++            }
++
++            fraction = frac;
++        }
++
+         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+-        private static ReadOnlySpan<float> GetHighParameter(float ratio)
++        internal static ReadOnlySpan<float> GetHighParameter(float ratio) // S2Arm: internal，tests/audio_dsp_simd 直调对拍
+         {
+             if (ratio <= 1.0f)
+             {
+@@ -566,6 +605,14 @@ namespace Ryujinx.Audio.Renderer.Dsp
+         {
+             ReadOnlySpan<float> parameters = GetHighParameter(ratio);
+ 
++            // S2Arm: ARM 快路径（S2A_AUDIO_DSP_FAST=1）。与下方标量路径逐样本一致（见 ResampleHighQualityAdvSimd 头注）。
++            if (S2ADspFast.On && AdvSimd.Arm64.IsSupported)
++            {
++                ResampleHighQualityAdvSimd(outputBuffer, inputBuffer, ratio, ref fraction, sampleCount, parameters);
++
++                return;
++            }
++
+             int inputBufferIndex = 0;
+ 
+             if (Avx2.IsSupported)
+@@ -618,6 +665,98 @@ namespace Ryujinx.Audio.Renderer.Dsp
+             }
+         }
+ 
++        // S2Arm: 高质档 ARM 快路径（S2A_AUDIO_DSP_FAST=1；tests/audio_dsp_simd 直调对拍，不依赖运行时开关）。与下方标量路径逐样本一致：
++        //   下标 / 小数推进照标量逐个算（含 MathF.Truncate），乘积逐项算（不融合乘加）；
++        //   4 输出样本 × 8 抽头拆成两半（抽头 0–3 与 4–7）各自 4×4 转置后，先按标量的左结合顺序加前 4 抽头 ((p0+p1)+p2)+p3，
++        //   再把后 4 抽头逐个接上，每车道与标量的 ((((((p0+p1)+p2)+p3)+p4)+p5)+p6)+p7 完全同一顺序；舍入用就近取偶（= Math.Round 缺省）。
++        //   fraction 取局部变量只在寄存器上推进、末尾一次写回（同 ResampleDefaultQualityAdvSimd 头注的别名问题）。
++        internal static unsafe void ResampleHighQualityAdvSimd(
++            Span<float> outputBuffer,
++            ReadOnlySpan<short> inputBuffer,
++            float ratio,
++            ref float fraction,
++            int sampleCount,
++            ReadOnlySpan<float> parameters)
++        {
++            float frac = fraction;
++            int inputBufferIndex = 0, i = 0;
++
++            fixed (short* pInput = inputBuffer)
++            fixed (float* pOutput = outputBuffer, pParameters = parameters)
++            {
++                for (; i < (sampleCount & ~3); i += 4)
++                {
++                    int b0 = (int)(frac * 128) * 8; int x0 = inputBufferIndex;
++                    frac += ratio; inputBufferIndex += (int)MathF.Truncate(frac); frac -= (int)frac;
++                    int b1 = (int)(frac * 128) * 8; int x1 = inputBufferIndex;
++                    frac += ratio; inputBufferIndex += (int)MathF.Truncate(frac); frac -= (int)frac;
++                    int b2 = (int)(frac * 128) * 8; int x2 = inputBufferIndex;
++                    frac += ratio; inputBufferIndex += (int)MathF.Truncate(frac); frac -= (int)frac;
++                    int b3 = (int)(frac * 128) * 8; int x3 = inputBufferIndex;
++                    frac += ratio; inputBufferIndex += (int)MathF.Truncate(frac); frac -= (int)frac;
++
++                    // 每输出样本 8 抽头拆两半：m_k = 抽头 0–3 的乘积，n_k = 抽头 4–7 的乘积
++                    Vector128<float> m0 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x0))), AdvSimd.LoadVector128(pParameters + b0));
++                    Vector128<float> m1 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x1))), AdvSimd.LoadVector128(pParameters + b1));
++                    Vector128<float> m2 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x2))), AdvSimd.LoadVector128(pParameters + b2));
++                    Vector128<float> m3 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x3))), AdvSimd.LoadVector128(pParameters + b3));
++                    Vector128<float> n0 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x0 + 4))), AdvSimd.LoadVector128(pParameters + b0 + 4));
++                    Vector128<float> n1 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x1 + 4))), AdvSimd.LoadVector128(pParameters + b1 + 4));
++                    Vector128<float> n2 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x2 + 4))), AdvSimd.LoadVector128(pParameters + b2 + 4));
++                    Vector128<float> n3 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x3 + 4))), AdvSimd.LoadVector128(pParameters + b3 + 4));
++
++                    // 转置：c_k = (m0[k], m1[k], m2[k], m3[k])（抽头 0–3），d_k 同构（抽头 4–7）
++                    Vector128<ulong> t0 = AdvSimd.Arm64.ZipLow(m0, m1).AsUInt64();
++                    Vector128<ulong> t1 = AdvSimd.Arm64.ZipHigh(m0, m1).AsUInt64();
++                    Vector128<ulong> t2 = AdvSimd.Arm64.ZipLow(m2, m3).AsUInt64();
++                    Vector128<ulong> t3 = AdvSimd.Arm64.ZipHigh(m2, m3).AsUInt64();
++                    Vector128<float> c0 = AdvSimd.Arm64.ZipLow(t0, t2).AsSingle();
++                    Vector128<float> c1 = AdvSimd.Arm64.ZipHigh(t0, t2).AsSingle();
++                    Vector128<float> c2 = AdvSimd.Arm64.ZipLow(t1, t3).AsSingle();
++                    Vector128<float> c3 = AdvSimd.Arm64.ZipHigh(t1, t3).AsSingle();
++                    Vector128<ulong> u0 = AdvSimd.Arm64.ZipLow(n0, n1).AsUInt64();
++                    Vector128<ulong> u1 = AdvSimd.Arm64.ZipHigh(n0, n1).AsUInt64();
++                    Vector128<ulong> u2 = AdvSimd.Arm64.ZipLow(n2, n3).AsUInt64();
++                    Vector128<ulong> u3 = AdvSimd.Arm64.ZipHigh(n2, n3).AsUInt64();
++                    Vector128<float> d0 = AdvSimd.Arm64.ZipLow(u0, u2).AsSingle();
++                    Vector128<float> d1 = AdvSimd.Arm64.ZipHigh(u0, u2).AsSingle();
++                    Vector128<float> d2 = AdvSimd.Arm64.ZipLow(u1, u3).AsSingle();
++                    Vector128<float> d3 = AdvSimd.Arm64.ZipHigh(u1, u3).AsSingle();
++
++                    Vector128<float> sum = AdvSimd.Add(AdvSimd.Add(AdvSimd.Add(c0, c1), c2), c3);
++                    sum = AdvSimd.Add(sum, d0);
++                    sum = AdvSimd.Add(sum, d1);
++                    sum = AdvSimd.Add(sum, d2);
++                    sum = AdvSimd.Add(sum, d3);
++
++                    AdvSimd.Store(pOutput + i, AdvSimd.RoundToNearest(sum));
++                }
++            }
++
++            for (; i < sampleCount; i++)
++            {
++                int baseIndex = (int)(frac * 128) * 8;
++                ReadOnlySpan<float> parameter = parameters.Slice(baseIndex, 8);
++                ReadOnlySpan<short> currentInput = inputBuffer.Slice(inputBufferIndex, 8);
++
++                outputBuffer[i] = (float)Math.Round(currentInput[0] * parameter[0] +
++                                                    currentInput[1] * parameter[1] +
++                                                    currentInput[2] * parameter[2] +
++                                                    currentInput[3] * parameter[3] +
++                                                    currentInput[4] * parameter[4] +
++                                                    currentInput[5] * parameter[5] +
++                                                    currentInput[6] * parameter[6] +
++                                                    currentInput[7] * parameter[7]);
++
++                frac += ratio;
++                inputBufferIndex += (int)MathF.Truncate(frac);
++
++                frac -= (int)frac;
++            }
++
++            fraction = frac;
++        }
++
+         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+         public static void ResampleLowQuality(Span<float> outputBuffer, ReadOnlySpan<short> inputBuffer, float ratio, ref float fraction, int sampleCount)
+         {
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/S2ADspFast.cs b/src/Ryujinx.Audio/Renderer/Dsp/S2ADspFast.cs
+index 9a58076b2f5f1974c6b4746a61891d0767d751c7..9eda3cf03037bfa8e6e8e68e87773279e2874cfe 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/S2ADspFast.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/S2ADspFast.cs
+@@ -3,10 +3,12 @@ using System;
+ namespace Ryujinx.Audio.Renderer.Dsp
+ {
+     // S2Arm (10-23 塞尔达分层账：C# 前三热点全是音频 DSP)：ARM 上的音频 DSP 快路径开关。
+-    //   S2A_AUDIO_DSP_FAST=1 开（缺省关，测试设备2 同包 A/B 达标后翻缺省）。快路径与原路径逐样本输出一致（同运算、同求和顺序、同舍入），
+-    //   只去掉 ARM 上的多余开销：重采样走标量（SSE 快路径只认 x86）、每次 32 KB 栈缓冲清零、双二阶滤波器状态逐样本经引用读写。
++    //   S2A_AUDIO_DSP_FAST=0 关（缺省开；翻缺省依据：0197 的重采样/双二阶快路径离线逐字节对拍一致，
++    //   本补丁再把全部快路径收进 tests/audio_dsp_simd 逐位对拍单测，并补齐高质档重采样 / 降混 / 坡道 / 设备输出的向量路径）。
++    //   快路径与原路径逐样本输出一致（同运算、同求和顺序、同舍入），只去掉 ARM 上的多余开销：
++    //   重采样走标量（SSE 快路径只认 x86）、每次 32 KB 栈缓冲清零、双二阶滤波器状态逐样本经引用读写。
+     internal static class S2ADspFast
+     {
+-        public static readonly bool On = Environment.GetEnvironmentVariable("S2A_AUDIO_DSP_FAST") == "1";
++        public static readonly bool On = Environment.GetEnvironmentVariable("S2A_AUDIO_DSP_FAST") != "0";
+     }
+ }
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/S2ADspMixHelper.cs b/src/Ryujinx.Audio/Renderer/Dsp/S2ADspMixHelper.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..f8cc7a07e92f60521e2cee8f6657458d3f2aa641
+--- /dev/null
++++ b/src/Ryujinx.Audio/Renderer/Dsp/S2ADspMixHelper.cs
+@@ -0,0 +1,266 @@
++using System;
++using System.Runtime.CompilerServices;
++using System.Runtime.Intrinsics;
++using System.Runtime.Intrinsics.Arm;
++
++namespace Ryujinx.Audio.Renderer.Dsp
++{
++    // S2Arm (10-23 塞尔达分层账：C# 前三热点全是音频 DSP)：降混 / 坡道混音 / 设备输出命令的每缓冲区内核（S2A_AUDIO_DSP_FAST=1 开）。
++    //   原先这些循环逐样本写在各命令里，ARM 上没有向量路径（上游只给 Mix/Volume/float 转换写了 SSE/AVX）。
++    //   向量路径与标量路径逐样本输出一致：同运算、同求和顺序、同舍入（Math.Round 缺省 = 就近取偶；饱和窄化 = 夹取后截断，
++    //   FCVTZS + SQXTN 对 NaN / ±∞ / 越界值与 PcmHelper.Saturate 逐值等价）。坡道的音量序列用同样的逐样本浮点递推构造，
++    //   逐位保持与标量一致。本体独立成方法（不依赖运行时开关），tests/audio_dsp_simd 直调两条路径逐位对拍。
++    internal static class S2ADspMixHelper
++    {
++        // 5.1 → 立体声降混。求和顺序照原循环：coefficients[3]*back + coefficients[2]*lfe + coefficients[1]*center + coefficients[0]*front，就近取偶舍入。
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        public static void DownMixSurroundToStereo(
++            Span<float> stereoLeft,
++            Span<float> stereoRight,
++            ReadOnlySpan<float> frontLeft,
++            ReadOnlySpan<float> frontRight,
++            ReadOnlySpan<float> frontCenter,
++            ReadOnlySpan<float> lowFrequency,
++            ReadOnlySpan<float> backLeft,
++            ReadOnlySpan<float> backRight,
++            ReadOnlySpan<float> coefficients,
++            int sampleCount)
++        {
++            if (S2ADspFast.On && AdvSimd.IsSupported)
++            {
++                DownMixSurroundToStereoAdvSimd(stereoLeft, stereoRight, frontLeft, frontRight, frontCenter, lowFrequency, backLeft, backRight, coefficients, sampleCount);
++
++                return;
++            }
++
++            DownMixSurroundToStereoScalar(stereoLeft, stereoRight, frontLeft, frontRight, frontCenter, lowFrequency, backLeft, backRight, coefficients, 0, sampleCount);
++        }
++
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        internal static void DownMixSurroundToStereoScalar(
++            Span<float> stereoLeft,
++            Span<float> stereoRight,
++            ReadOnlySpan<float> frontLeft,
++            ReadOnlySpan<float> frontRight,
++            ReadOnlySpan<float> frontCenter,
++            ReadOnlySpan<float> lowFrequency,
++            ReadOnlySpan<float> backLeft,
++            ReadOnlySpan<float> backRight,
++            ReadOnlySpan<float> coefficients,
++            int start,
++            int sampleCount)
++        {
++            for (int i = start; i < sampleCount; i++)
++            {
++                stereoLeft[i] = FloatingPointHelper.RoundUp(coefficients[3] * backLeft[i] + coefficients[2] * lowFrequency[i] + coefficients[1] * frontCenter[i] + coefficients[0] * frontLeft[i]);
++                stereoRight[i] = FloatingPointHelper.RoundUp(coefficients[3] * backRight[i] + coefficients[2] * lowFrequency[i] + coefficients[1] * frontCenter[i] + coefficients[0] * frontRight[i]);
++            }
++        }
++
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        internal static unsafe void DownMixSurroundToStereoAdvSimd(
++            Span<float> stereoLeft,
++            Span<float> stereoRight,
++            ReadOnlySpan<float> frontLeft,
++            ReadOnlySpan<float> frontRight,
++            ReadOnlySpan<float> frontCenter,
++            ReadOnlySpan<float> lowFrequency,
++            ReadOnlySpan<float> backLeft,
++            ReadOnlySpan<float> backRight,
++            ReadOnlySpan<float> coefficients,
++            int sampleCount)
++        {
++            Vector128<float> c3 = Vector128.Create(coefficients[3]);
++            Vector128<float> c2 = Vector128.Create(coefficients[2]);
++            Vector128<float> c1 = Vector128.Create(coefficients[1]);
++            Vector128<float> c0 = Vector128.Create(coefficients[0]);
++
++            int i = 0;
++
++            fixed (float* pLeft = stereoLeft, pRight = stereoRight, pFrontLeft = frontLeft, pFrontRight = frontRight, pCenter = frontCenter, pLfe = lowFrequency, pBackLeft = backLeft, pBackRight = backRight)
++            {
++                for (; i < (sampleCount & ~3); i += 4)
++                {
++                    // 每车道与标量同一求和顺序 ((c3*back + c2*lfe) + c1*center) + c0*front，一次 SIMD 舍入（就近取偶）
++                    Vector128<float> left = AdvSimd.Add(AdvSimd.Add(AdvSimd.Add(
++                        AdvSimd.Multiply(AdvSimd.LoadVector128(pBackLeft + i), c3),
++                        AdvSimd.Multiply(AdvSimd.LoadVector128(pLfe + i), c2)),
++                        AdvSimd.Multiply(AdvSimd.LoadVector128(pCenter + i), c1)),
++                        AdvSimd.Multiply(AdvSimd.LoadVector128(pFrontLeft + i), c0));
++                    Vector128<float> right = AdvSimd.Add(AdvSimd.Add(AdvSimd.Add(
++                        AdvSimd.Multiply(AdvSimd.LoadVector128(pBackRight + i), c3),
++                        AdvSimd.Multiply(AdvSimd.LoadVector128(pLfe + i), c2)),
++                        AdvSimd.Multiply(AdvSimd.LoadVector128(pCenter + i), c1)),
++                        AdvSimd.Multiply(AdvSimd.LoadVector128(pFrontRight + i), c0));
++
++                    AdvSimd.Store(pLeft + i, AdvSimd.RoundToNearest(left));
++                    AdvSimd.Store(pRight + i, AdvSimd.RoundToNearest(right));
++                }
++            }
++
++            DownMixSurroundToStereoScalar(stereoLeft, stereoRight, frontLeft, frontRight, frontCenter, lowFrequency, backLeft, backRight, coefficients, i, sampleCount);
++        }
++
++        // 坡道混音（output[i] += round(input[i] * volume)）。返回最后一个样本的混音结果（命令要存进 LastSamples）。
++        //   音量序列 volume_{k+1} = volume_k + ramp（浮点逐样本递推），向量路径用同样的递推逐车道构造，逐位一致。
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        public static float MixRamp(Span<float> outputBuffer, ReadOnlySpan<float> inputBuffer, float volume, float ramp, int sampleCount)
++        {
++            if (S2ADspFast.On && AdvSimd.IsSupported)
++            {
++                return MixRampAdvSimd(outputBuffer, inputBuffer, volume, ramp, sampleCount);
++            }
++
++            return MixRampScalar(outputBuffer, inputBuffer, volume, ramp, 0, sampleCount);
++        }
++
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        internal static float MixRampScalar(Span<float> outputBuffer, ReadOnlySpan<float> inputBuffer, float volume, float ramp, int start, int sampleCount)
++        {
++            float state = 0;
++
++            for (int i = start; i < sampleCount; i++)
++            {
++                state = FloatingPointHelper.MultiplyRoundUp(inputBuffer[i], volume);
++
++                outputBuffer[i] += state;
++                volume += ramp;
++            }
++
++            return state;
++        }
++
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        internal static unsafe float MixRampAdvSimd(Span<float> outputBuffer, ReadOnlySpan<float> inputBuffer, float volume, float ramp, int sampleCount)
++        {
++            float state = 0;
++            int i = 0;
++
++            fixed (float* pOutput = outputBuffer, pInput = inputBuffer)
++            {
++                for (; i < (sampleCount & ~3); i += 4)
++                {
++                    // 逐车道音量 = 与标量完全相同的逐样本浮点递推 v, v+r, (v+r)+r, …
++                    float v0 = volume;
++                    float v1 = v0 + ramp;
++                    float v2 = v1 + ramp;
++                    float v3 = v2 + ramp;
++
++                    Vector128<float> rounded = AdvSimd.RoundToNearest(AdvSimd.Multiply(AdvSimd.LoadVector128(pInput + i), Vector128.Create(v0, v1, v2, v3)));
++
++                    AdvSimd.Store(pOutput + i, AdvSimd.Add(AdvSimd.LoadVector128(pOutput + i), rounded));
++
++                    state = rounded.GetElement(3);
++                    volume = v3 + ramp;
++                }
++            }
++
++            // 剩余样本（不满 4）落回标量尾部并带回其 state；全部向量处理完时 state 取最后一组的末车道
++            if (i < sampleCount)
++            {
++                return MixRampScalar(outputBuffer, inputBuffer, volume, ramp, i, sampleCount);
++            }
++
++            return state;
++        }
++
++        // 坡道音量（output[i] = round(input[i] * volume)，覆盖写；与 VolumeRampCommand 原循环一致）。
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        public static void VolumeRamp(Span<float> outputBuffer, ReadOnlySpan<float> inputBuffer, float volume, float ramp, int sampleCount)
++        {
++            if (S2ADspFast.On && AdvSimd.IsSupported)
++            {
++                VolumeRampAdvSimd(outputBuffer, inputBuffer, volume, ramp, sampleCount);
++
++                return;
++            }
++
++            VolumeRampScalar(outputBuffer, inputBuffer, volume, ramp, 0, sampleCount);
++        }
++
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        internal static void VolumeRampScalar(Span<float> outputBuffer, ReadOnlySpan<float> inputBuffer, float volume, float ramp, int start, int sampleCount)
++        {
++            for (int i = start; i < sampleCount; i++)
++            {
++                outputBuffer[i] = FloatingPointHelper.MultiplyRoundUp(inputBuffer[i], volume);
++                volume += ramp;
++            }
++        }
++
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        internal static unsafe void VolumeRampAdvSimd(Span<float> outputBuffer, ReadOnlySpan<float> inputBuffer, float volume, float ramp, int sampleCount)
++        {
++            int i = 0;
++
++            fixed (float* pOutput = outputBuffer, pInput = inputBuffer)
++            {
++                for (; i < (sampleCount & ~3); i += 4)
++                {
++                    float v0 = volume;
++                    float v1 = v0 + ramp;
++                    float v2 = v1 + ramp;
++                    float v3 = v2 + ramp;
++
++                    AdvSimd.Store(pOutput + i, AdvSimd.RoundToNearest(AdvSimd.Multiply(AdvSimd.LoadVector128(pInput + i), Vector128.Create(v0, v1, v2, v3))));
++
++                    volume = v3 + ramp;
++                }
++            }
++
++            VolumeRampScalar(outputBuffer, inputBuffer, volume, ramp, i, sampleCount);
++        }
++
++        // 设备输出立体声交织（output[2*j] = saturate(left[j])，output[2*j+1] = saturate(right[j])）。
++        //   饱和窄化 = FCVTZS（向零截断 + 饱和到 int32）后 SQXTN（饱和窄化到 int16），与 PcmHelper.Saturate 的夹取后截断逐值等价。
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        public static void SaturateInterleaveStereo(Span<short> outputBuffer, ReadOnlySpan<float> left, ReadOnlySpan<float> right, int sampleCount)
++        {
++            if (S2ADspFast.On && AdvSimd.Arm64.IsSupported)
++            {
++                SaturateInterleaveStereoAdvSimd(outputBuffer, left, right, sampleCount);
++
++                return;
++            }
++
++            SaturateInterleaveStereoScalar(outputBuffer, left, right, 0, sampleCount);
++        }
++
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        internal static void SaturateInterleaveStereoScalar(Span<short> outputBuffer, ReadOnlySpan<float> left, ReadOnlySpan<float> right, int start, int sampleCount)
++        {
++            for (int j = start; j < sampleCount; j++)
++            {
++                outputBuffer[j * 2] = PcmHelper.Saturate(left[j]);
++                outputBuffer[j * 2 + 1] = PcmHelper.Saturate(right[j]);
++            }
++        }
++
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        internal static unsafe void SaturateInterleaveStereoAdvSimd(Span<short> outputBuffer, ReadOnlySpan<float> left, ReadOnlySpan<float> right, int sampleCount)
++        {
++            int j = 0;
++
++            fixed (short* pOutput = outputBuffer)
++            fixed (float* pLeft = left, pRight = right)
++            {
++                for (; j < (sampleCount & ~7); j += 8)
++                {
++                    Vector128<float> fl0 = AdvSimd.LoadVector128(pLeft + j);
++                    Vector128<float> fl1 = AdvSimd.LoadVector128(pLeft + j + 4);
++                    Vector128<float> fr0 = AdvSimd.LoadVector128(pRight + j);
++                    Vector128<float> fr1 = AdvSimd.LoadVector128(pRight + j + 4);
++
++                    Vector128<short> l = AdvSimd.ExtractNarrowingSaturateUpper(AdvSimd.ExtractNarrowingSaturateLower(AdvSimd.ConvertToInt32RoundToZero(fl0)), AdvSimd.ConvertToInt32RoundToZero(fl1));
++                    Vector128<short> r = AdvSimd.ExtractNarrowingSaturateUpper(AdvSimd.ExtractNarrowingSaturateLower(AdvSimd.ConvertToInt32RoundToZero(fr0)), AdvSimd.ConvertToInt32RoundToZero(fr1));
++
++                    // 交织 8 帧：zip 后正好是设备输出的 (L, R, L, R, …) 布局
++                    AdvSimd.Store(pOutput + j * 2, AdvSimd.Arm64.ZipLow(l, r));
++                    AdvSimd.Store(pOutput + j * 2 + 8, AdvSimd.Arm64.ZipHigh(l, r));
++                }
++            }
++
++            SaturateInterleaveStereoScalar(outputBuffer, left, right, j, sampleCount);
++        }
++    }
++}

@@ -23,7 +23,8 @@ static int g_fail, g_checks;
 // ---------- 平台替身 ----------
 static int g_red_lines; static char g_last_red[200];
 void nvn_plat_log(int level, const char *cls, const char *text) { (void)cls; if (level == NVN_PLAT_LOG_RED) { g_red_lines++; snprintf(g_last_red, sizeof g_last_red, "%s", text); } }
-int nvn_plat_flag(const char *name, int dflt) { (void)name; return dflt; }
+static int g_flag_finish_lag;   // 用例设：开关 nvk_finish_lag 的值
+int nvn_plat_flag(const char *name, int dflt) { if (!strcmp(name, "nvk_finish_lag")) return g_flag_finish_lag; return dflt; }
 const char *nvn_plat_dir(int which) { (void)which; return NULL; }
 
 // ---------- 前端替身 ----------
@@ -104,10 +105,11 @@ uint64_t nvn_dirty_now(void) { return g_dirty_now; }
 int nvn_dirty_since(const void *addr, size_t len, uint64_t stamp) { (void)addr; (void)len; return g_dirty_written > stamp; }
 
 // 缓冲替身：记每次按 GPU 顺序的写（偏移、长度、首 8 字节）
-struct nvn_gpu_buf_s { uint64_t bytes; };
+struct nvn_gpu_buf_s { uint64_t bytes; uint8_t *cpu; };
+static int g_buf_cpu_auto;   // 1 = 新建的缓冲各带一块自己的 CPU 可见内存（两份池镜像要分得开的用例用）
 static int g_buf_creates, g_buf_releases; static uint64_t g_buf_bytes;
 static struct { uint64_t off, len; uint8_t head[8]; int pre; } g_bw[32]; static int g_nbw;
-nvn_gpu_rc nvn_gpu_buf_create(uint64_t bytes, int mem, const void *init, nvn_gpu_buf *out, nvn_gpu_err *err) { (void)mem; (void)init; (void)err; g_buf_creates++; g_buf_bytes = bytes; *out = calloc(1, sizeof **out); (*out)->bytes = bytes; return (nvn_gpu_rc){NVN_GPU_OK}; }
+nvn_gpu_rc nvn_gpu_buf_create(uint64_t bytes, int mem, const void *init, nvn_gpu_buf *out, nvn_gpu_err *err) { (void)mem; (void)init; (void)err; g_buf_creates++; g_buf_bytes = bytes; *out = calloc(1, sizeof **out); (*out)->bytes = bytes; if (g_buf_cpu_auto) (*out)->cpu = calloc(1, bytes); return (nvn_gpu_rc){NVN_GPU_OK}; }
 void nvn_gpu_tex_info_get(nvn_gpu_tex t, nvn_gpu_tex_info *out) { memset(out, 0, sizeof *out); (void)t; }   // 调试读回用；用例不开那个开关
 static struct { nvn_gpu_tex s, d; uint32_t sl, sy, dl, dy; NVNcopyRegion sr, dr; } g_ct[8]; static int g_nct;
 void nvn_gpu_copy_tex(nvn_gpu_cmd c, nvn_gpu_tex src, uint32_t slevel, uint32_t slayer, const NVNcopyRegion *sr, nvn_gpu_tex dst, uint32_t dlevel, uint32_t dlayer, const NVNcopyRegion *dr) {
@@ -125,8 +127,8 @@ void nvn_gpu_copy_tex_buf(nvn_gpu_cmd c, nvn_gpu_tex src, uint32_t level, uint32
 void nvn_gpu_copy_buf_tex(nvn_gpu_cmd c, nvn_gpu_buf src, uint64_t off, uint64_t row_bytes, uint64_t image_bytes, nvn_gpu_tex dst, uint32_t level, uint32_t layer, const NVNcopyRegion *r) {
     (void)c; (void)src; (void)off; tb_note(1, dst, level, layer, r, row_bytes, image_bytes); }
 static uint8_t *g_buf_cpu_fake;   // 用例要「GPU 写过镜像」时把它指到一块等大的内存；NULL = 这种缓冲 CPU 读不到
-uint8_t *nvn_gpu_buf_cpu(nvn_gpu_buf b) { (void)b; return g_buf_cpu_fake; }
-void nvn_gpu_buf_release(nvn_gpu_buf b, nvn_gpu_retired_fn retired, void *user) { (void)retired; (void)user; g_buf_releases++; free(b); }
+uint8_t *nvn_gpu_buf_cpu(nvn_gpu_buf b) { return b && b->cpu ? b->cpu : g_buf_cpu_fake; }
+void nvn_gpu_buf_release(nvn_gpu_buf b, nvn_gpu_retired_fn retired, void *user) { (void)retired; (void)user; g_buf_releases++; free(b->cpu); free(b); }
 void nvn_gpu_buf_write(nvn_gpu_cmd c, nvn_gpu_buf dst, uint64_t off, const void *src, uint64_t bytes) { (void)dst; if (g_nbw == 32) return;
     g_bw[g_nbw].off = off; g_bw[g_nbw].len = bytes; g_bw[g_nbw].pre = c->is_pre; memcpy(g_bw[g_nbw].head, src, bytes < 8 ? bytes : 8); g_nbw++; }
 // 页级脏账替身：4096 字节一页，g_pmem 这个池每页的写代号由用例设
@@ -1692,6 +1694,70 @@ static void t_dispatch(void) {
     g_cresolve_rc = 0; g_buf_cpu_fake = NULL; nvn_be_pool_del(g_pmem); pass_fresh();
 }
 
+// 帧重叠（开关 nvk_finish_lag）：游戏的 Finish 不等刚交的那一帧，下一帧的回放和它的显卡工作重叠。池镜像每放行一帧换一份：
+// 这一帧第一次同步的页直接写进「显卡已经不读」的那一份，上一帧还在读的那一份一个字节不动；两份各记各的页代号。
+// 池 g_pmem，4096 字节一页。期望值全部手算：页里写的是用例自己放的常数。
+uint64_t nvn_be_finish_publish(void); uint64_t nvn_be_last_fence(void);
+uint64_t rp_buf_gpu_write_note(uint64_t addr, uint64_t len, uint64_t *pool_key); void rp_buf_gpu_write_land(uint64_t pool_key, uint64_t id, int ok);
+static void fake_complete_first(int n) {   // 只做完最早交的 n 段
+    for (int i = 0; i < n && i < g_npend; i++) { nvn_gpu_done d = {0}; d.signal = g_pend[i].signal; d.status = NVN_GPU_DONE_OK; g_pend[i].fn(g_pend[i].user, &d); g_fdone = g_pend[i].signal; }
+    int k = n < g_npend ? n : g_npend; memmove(&g_pend[0], &g_pend[k], (size_t)(g_npend - k) * sizeof g_pend[0]); g_npend -= k;
+}
+static void t_frame_overlap(void) {
+    pass_fresh(); memset(g_pg_gen, 0, sizeof g_pg_gen); g_pg_tracked = 1; g_dirty_now = 100; g_nbw = 0; g_buf_cpu_fake = NULL;
+    g_buf_cpu_auto = 1; g_flag_finish_lag = 1;
+    uint64_t base = (uint64_t)(uintptr_t)g_pmem; nvn_be_pool_add(g_pmem, sizeof g_pmem);
+    nvn_gpu_buf b0 = NULL, b1 = NULL, b2 = NULL, bx = NULL;
+    // 第 1 帧：第 0 页 = 0xA1（每帧都改的动态数据），第 1 页 = 0x51（只写这一次的静态数据）
+    memset(g_pmem, 0xA1, PG); memset(g_pmem + PG, 0x51, PG); g_pg_gen[0] = g_pg_gen[1] = 101; g_dirty_now = 102;
+    nvn_be_sub_begin(); CHECK(rp_buf_resolve(&g_fake_cmd, base, 2 * PG, &b0, NULL) == 1); nvn_be_sub_commit();
+    CHECK(g_nbw == 0 && b0 && b0->cpu[0] == 0xA1 && b0->cpu[PG] == 0x51);              // 头一次用：直接写
+    uint64_t f1 = nvn_be_last_fence();
+    CHECK(nvn_be_finish_publish() < f1);                                               // Finish 放行：不等第 1 帧（它还没做完）
+    // 第 2 帧：游戏把第 0 页改成 0xB2。第 1 帧显卡还在做，读的是第一份镜像
+    memset(g_pmem, 0xB2, PG); g_pg_gen[0] = 103; g_dirty_now = 104;
+    nvn_be_sub_begin(); CHECK(rp_buf_resolve(&g_fake_cmd, base, 2 * PG, &b1, NULL) == 1); nvn_be_sub_commit();
+    CHECK(b1 && b1 != b0 && g_nbw == 0);                                               // 换了一份，照样直接写，没有退回按序拷
+    CHECK(b1->cpu[0] == 0xB2 && b1->cpu[PG] == 0x51);                                  // 第二份里：这一帧的动态数据 + 它从没同步过的静态页
+    CHECK(b0->cpu[0] == 0xA1 && b0->cpu[PG - 1] == 0xA1);                              // 第 1 帧还在读的那一份没被动
+    uint64_t f2 = nvn_be_last_fence();
+    CHECK(nvn_be_finish_publish() == f1);                                              // 这次 Finish 等到第 1 帧（上一次 Finish 时的最后一次提交）
+    fake_complete_first(1);                                                            // 第 1 帧做完；第 2 帧还没
+    // 第 3 帧：第 0 页 = 0xC3。换回第一份：用过它的第 1 帧已经做完 → 直接写；它自己记的代号认得出这页两帧里变过
+    memset(g_pmem, 0xC3, PG); g_pg_gen[0] = 105; g_dirty_now = 106;
+    nvn_be_sub_begin(); CHECK(rp_buf_resolve(&g_fake_cmd, base, 2 * PG, &b2, NULL) == 1);
+    CHECK(b2 == b0 && g_nbw == 0 && b0->cpu[0] == 0xC3 && b1->cpu[0] == 0xB2);         // 第 2 帧还在读的第二份没被动
+    // 显卡在这一帧往第 2 页写了 64 字节（登记在第一份上）
+    uint64_t key = 0, id = rp_buf_gpu_write_note(base + 2 * PG, 64, &key); CHECK(id && key == base);
+    nvn_be_sub_commit();
+    (void)f2;
+    CHECK(nvn_be_finish_publish() < nvn_be_last_fence());                              // 放行、换到第二份（那 64 字节的登记是用例直接做的，Finish 不知道）
+    nvn_be_sub_begin();
+    CHECK(rp_buf_resolve(&g_fake_cmd, base + 2 * PG, 64, &bx, NULL) == 1 && bx == b0); // 显卡写过还没落地的段：只在第一份里有
+    CHECK(rp_buf_resolve(&g_fake_cmd, base, PG, &bx, NULL) == 1 && bx == b1);          // 别的段照常用当前这一份
+    nvn_be_sub_commit();
+    memset(b0->cpu + 2 * PG, 0xEE, 64); fake_complete(NVN_GPU_DONE_OK); rp_buf_gpu_write_land(key, id, 1);
+    CHECK(g_pmem[2 * PG] == 0xEE && g_pmem[2 * PG + 63] == 0xEE && g_pmem[2 * PG + 64] != 0xEE);   // 落地：从写它的那一份回到游戏内存
+    nvn_be_sub_begin(); CHECK(rp_buf_resolve(&g_fake_cmd, base + 2 * PG, 64, &bx, NULL) == 1 && bx == b1); nvn_be_sub_commit(); fake_complete(NVN_GPU_DONE_OK);
+    // 这一帧做完时有东西要写回游戏内存（发一个事件）：Finish 等到它，回写一样不少；诊断档 2 连它也不等
+    { static volatile uint32_t ev; stream e1 = {0}; uint8_t *r = put(&e1, OP_SIGNAL_EVENT, 16); volatile uint32_t *pv = &ev; uint32_t m = 0, v = 7;
+      memcpy(r, &pv, 8); memcpy(r + 8, &m, 4); memcpy(r + 12, &v, 4); end(&e1); submit1(&e1);
+      CHECK(nvn_be_finish_publish() == nvn_be_last_fence());
+      submit1(&e1); g_flag_finish_lag = 2; CHECK(nvn_be_finish_publish() < nvn_be_last_fence()); g_flag_finish_lag = 1;
+      fake_complete(NVN_GPU_DONE_OK); CHECK(ev == 7); }
+    // 只有时间戳报告的提交不算「有东西要写回」：1 档照样放行；别的计数器（这里用图元数）要等
+    { static uint64_t ts[2], pr[2]; stream c1 = {0}; q_counter(&c1, OP_REPORT_COUNTER, NVN_COUNTER_TYPE_TIMESTAMP, ts); end(&c1); submit1(&c1);
+      CHECK(nvn_be_finish_publish() < nvn_be_last_fence());
+      stream c2 = {0}; q_counter(&c2, OP_REPORT_COUNTER, NVN_COUNTER_TYPE_PRIMITIVES_GENERATED, pr); end(&c2); submit1(&c2);
+      CHECK(nvn_be_finish_publish() == nvn_be_last_fence());
+      fake_complete(NVN_GPU_DONE_OK); }
+    // 关掉开关：Finish 照旧等到最后一次提交，镜像不再换
+    g_flag_finish_lag = 0; CHECK(nvn_be_finish_publish() == nvn_be_last_fence());
+    nvn_be_sub_begin(); CHECK(rp_buf_resolve(&g_fake_cmd, base, PG, &bx, NULL) == 1 && bx == b1); nvn_be_sub_commit(); fake_complete(NVN_GPU_DONE_OK);   // 前面一共放行 5 次：停在第二份
+    int rel0 = g_buf_releases; nvn_be_pool_del(g_pmem); CHECK(g_buf_releases - rel0 == 2);   // 池销毁：两份都放
+    g_buf_cpu_auto = 0; pass_fresh();
+}
+
 // 计算阶段「用户 UBO 当存储缓冲」（反射映射 NVK_STORAGE_UBO_PTR → 核心来源 NVN_RB_UBOP，#725）：
 // 取址的表是统一缓冲槽表 rp_S.ubo[5][r]，不是存储缓冲槽表 rp_S.ssbo[5][r]；其余同 SBUFP——绑池镜像里的那一段。
 // 这一项被着色器写不写由布局项的 access 定（来自反射的 rw）：写的登记一次 GPU 写（完成后回写游戏内存），只读的不登记。期望值手算。
@@ -2284,6 +2350,7 @@ int main(int argc, char **argv) {
     t_pass_bc_shadow_3d();
     t_autoflush();
     t_pass_fresh_zero();
+    t_frame_overlap();
     t_pass_target_persists();
     t_pass_switch_and_partial();
     t_clear_rect();

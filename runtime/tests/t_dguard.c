@@ -110,6 +110,8 @@ int main(void) {
         setenv("S2A_AUTOPLAY", "0", 1); WANT(!s2a_unattended()); WANT(s2a_dguard_needs_ui());
         setenv("S2A_AUTOPLAY", "", 1); WANT(!s2a_unattended()); WANT(s2a_dguard_needs_ui());
         unsetenv("S2A_AUTOPLAY"); WANT(!s2a_unattended()); WANT(s2a_dguard_needs_ui());
+        setenv("S2A_AUTOPLAY", "0", 1); setenv("S2A_UNATTENDED", "1", 1); WANT(s2a_unattended()); WANT(!s2a_dguard_needs_ui());   // 自动玩家关、工具逐键驱动的局
+        setenv("S2A_UNATTENDED", "0", 1); WANT(!s2a_unattended()); unsetenv("S2A_UNATTENDED"); unsetenv("S2A_AUTOPLAY");
         WANT(begin_count(PID, "aaaa", "h1") == 3); });   // 记录不因自动化局改动
     CASE("反证：不 arm 的起局崩了不算（计数只靠 arm 落盘）", {
         LAUNCH({ s2a_dguard_begin(PID, "aaaa", "h1"); CRASHED; });

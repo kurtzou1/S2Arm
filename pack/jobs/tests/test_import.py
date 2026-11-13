@@ -346,6 +346,22 @@ class NupImportTests(JobCase):
             (2, APP + 0x1001, 0, None, {"d.bin": b"DLC"}, {})])
         return path
 
+    def test_update_only_is_flagged_missing_base_at_import(self):
+        # #797：只放了更新包，添加结果当场标 missingBase（原先要到出包才报 input_base_missing）；再放进本体就不标；
+        #   同一批里更新排在本体前面也不标（按整批加完后的库判）
+        self.import_keys()
+        self.install_reader_fixture()
+        upd = self.root / "a_update.nsp"; upd.write_bytes(b"update only fixture")
+        base = self.root / "b_base.nsp"; base.write_bytes(b"base fixture")
+        _, done = self.worker("import", paths=[str(upd)])
+        self.assertEqual(done["state"], "succeeded", done.get("diagnostics"))
+        self.assertEqual([(e["id"], e["missingBase"]) for e in done["result"]["imports"]], [("0100000000000000", True)])
+        _, done = self.worker("import", paths=[str(base)])
+        self.assertEqual([e["missingBase"] for e in done["result"]["imports"]], [False])
+        atomic(self.c.library / "catalog.json", dict(schema=1, games=[]))
+        _, done = self.worker("import", paths=[str(upd), str(base)])
+        self.assertEqual([e["missingBase"] for e in done["result"]["imports"]], [False, False])
+
     def test_cover_write_failure_does_not_fail_import(self):
         # #765：封面写不进（这里 cover.jpg 位置被一个文件夹占着 → IsADirectoryError）不让整个添加失败：照常收进库，记一笔；
         #   上次添加到一半留下的空壳文件夹（games/Ocarina T，没有 game.json）沿用

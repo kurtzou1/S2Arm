@@ -33,6 +33,12 @@ int main(void) {
     // ⑦ 自愈：没按学到的跨度收窄（本进程 g_span_learned = 0）时调 forget 不动别人的记录
     { extern void s2a_window_span_forget(void); char q[] = "/tmp/s2a_span_keep_XXXXXX"; int qd = mkstemp(q); dprintf(qd, "123\n"); close(qd);
       setenv("S2A_WIN_SPAN_PEAK", q, 1); s2a_window_span_forget(); CHECK(access(q, F_OK) == 0, "⑦ 没收窄过：forget 不删记录"); unlink(q); }
+    // ⑧ 当场放宽的新起点（s2a_window_widen_lo，手算）：留宿主底 0x70_0000_0000、窗口底 0x7B_0000_0000（下方留了 44 GiB）
+    //   下方没别人：0x70_C000_0000（底 + 3 GiB）；已占到 0x75_0000_1000：向上取整 0x75_4000_0000；已占到窗口底：0（放不宽）
+    { extern uint64_t s2a_window_widen_lo(uint64_t, uint64_t, uint64_t); const uint64_t K = 0x7000000000ull, B = 0x7B00000000ull;
+      CHECK(s2a_window_widen_lo(K, B, K) == 0x70C0000000ull, "⑧ 下方空着：新起点 = 留宿主底 + 3 GiB");
+      CHECK(s2a_window_widen_lo(K, B, 0x7500001000ull) == 0x7540000000ull, "⑧ 下方已占到 0x7500001000：新起点取整到 0x7540000000、不盖");
+      CHECK(s2a_window_widen_lo(K, B, B) == 0, "⑧ 下方占满到窗口底：放不宽（0）"); }
     printf("%s t_vawin_learned：%d 处不符\n", bad ? "✗" : "✓", bad);
     return bad ? 1 : 0;
 }

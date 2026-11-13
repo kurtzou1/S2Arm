@@ -5398,10 +5398,10 @@ static void shmap_load_once(void) {
     if (g_shmap) return;
     NSString *path = shmap_path();   // default: the current game profile folder (Mac: dm/games/<id>; on iOS main.m sets DM_NVN_SHMAP)
     NSString *txt = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
-    // Switch 2 bring-up (nvn2.h): the Ampere shader library is not built yet; an absent map is an empty one (every shader reported missing, its draws skipped) so the device,
-    //   window and frame loop still run. Switch 1 keeps the fatal stop
-    if (!txt && nvn2_on()) { MLOG("【红】 Switch 2: no shader map %s yet: every shader is missing and its draws are skipped", path.UTF8String); txt = @""; }
-    if (!txt) MDIE("cannot read the shader map %s (DM_NVN_SHMAP can name another)", path.UTF8String);
+    // An absent map is an empty one: a key missing from the map is compiled on the device at its first use (dm_shader_miss, graphics/nvn/host/dsh_miss.inc), so the game still runs,
+    //   only with first-use compiles. #786: a game classified OpenGL at packing (EGL + GLSL, also importing NVN) got no NVN library and no map, yet drew through NVN -- the fatal
+    //   stop here ended every launch at its first shader. Switch 2 (nvn2.h, no Ampere library yet) takes the same path
+    if (!txt) { MLOG("【黄】 no shader map %s (DM_NVN_SHMAP can name another): every shader is compiled on this device at its first use", path.UTF8String); txt = @""; }
     g_shmap = [NSMutableDictionary dictionary];
     for (NSString *ln in [txt componentsSeparatedByString:@"\n"]) {
         if (!ln.length || [ln hasPrefix:@"#"] || [ln hasPrefix:@"package"]) continue;
@@ -13682,10 +13682,63 @@ static int dispatch_own(void) {
         if (getenv("DM_NVN_PASSGPU")) MLOG("【黄】 DM_NVN_PASSGPU was removed (it never produced data on Metal 4 and changed compute encoding): use DM_NVN_GPUPROF=<first frame>-<last frame>"); }
     return v;
 }
-static id<MTL4ComputeCommandEncoder> dispatch_enc(void) {
+// 派发的读写范围（按绑定算得出时）：存储缓冲槽读 + 写，统一缓冲槽只读。只有程序的每个绑定都属于「范围就是绑定本身」的种类才算得出：
+//   碰到图像、全局内存、追不到槽的句柄、贴图缓冲等任何一种就算不出（返回 0），照旧当成「全部写过」。间接派发也不算（它在同一编码器里另有一次拷贝）。
+//   算得出的派发与拷贝同一条规则（blit_buf）：读范围碰到此前的写、写范围碰到此前的写或读才放屏障，否则与前面的派发之间没有先后依赖，不需要屏障。
+//   原先每次派发前都放屏障：按帧推进特效的游戏一帧有上百次互不相干的小派发（每个发射器一次），屏障的固定开销占了计算段的大头。
+//   DM_NVN_DISPATCH_RANGE=0 关（回到每次都放）；alt:<N> = 每 N 次出图在关 / 开之间换一次（偶数段关、奇数段开），同局成对比较用
+enum { DR_MAX = 16 };
+typedef struct { int nw, nr; uint64_t wlo[DR_MAX], whi[DR_MAX], rlo[DR_MAX], rhi[DR_MAX]; } disp_rng;
+uint64_t mtl_present_count(void);
+static uint64_t g_disp_ranged, g_disp_full, g_disp_nobar;   // 算得出范围的派发 / 算不出的 / 算得出且没放屏障的
+uint64_t mtl_dispatch_range_stats(int k) { return k == 0 ? g_disp_ranged : k == 1 ? g_disp_full : g_disp_nobar; }
+static int disp_range_on(void) {
+    static int mode = -1, alt; if (mode < 0) { const char *e = getenv("DM_NVN_DISPATCH_RANGE"); mode = !(e && !strcmp(e, "0")); if (e && !strncmp(e, "alt:", 4)) alt = atoi(e + 4); }
+    return alt > 0 ? (int)((mtl_present_count() / (uint64_t)alt) & 1) : mode;
+}
+static int disp_ranges(NvShader *cs, int indirect, disp_rng *o) {
+    o->nw = o->nr = 0;
+    if (!cs || indirect || !disp_range_on()) return 0;
+    for (int i = 0; i < cs->rf.nb; i++) { const nvn_rbind *b = &cs->rf.b[i];
+        switch (b->kind) {
+            case NVN_RB_SUPPORT: case NVN_RB_C1: case NVN_RB_UBOLEN: case NVN_RB_SBSZ: case NVN_RB_SAMP: case NVN_RB_SAMPT: case NVN_RB_TEX: case NVN_RB_PUSH: case NVN_RB_LB: case NVN_RB_DRV0: case NVN_RB_DRV2: break;   // 宿主自己的表、采样器、只读贴图（贴图的写都走图像或拷贝，那些一律记成全部写过）
+            case NVN_RB_CBUF: case NVN_RB_UBOP: case NVN_RB_SBUFP: {
+                if (b->reg >= 16) return 0;
+                const p_bind_buf *u = b->kind == NVN_RB_SBUFP ? &S.ssbo[5][b->reg] : &S.ubo[5][b->reg];
+                if (!u->addr) break;                       // 没绑：着色器读不到游戏内存
+                if (!u->size || u->addr + u->size < u->addr) return 0;
+                if (o->nr == DR_MAX) return 0;
+                o->rlo[o->nr] = u->addr; o->rhi[o->nr++] = u->addr + u->size;
+                if (b->kind == NVN_RB_SBUFP) { if (o->nw == DR_MAX) return 0; o->wlo[o->nw] = u->addr; o->whi[o->nw++] = u->addr + u->size; }
+                break; }
+            default: return 0;
+        } }
+    return 1;
+}
+// 这次派发与「上次屏障以来的操作」有没有先后依赖（或记录表放不下）：有就要先放屏障
+static int disp_hits(const disp_rng *rg) {
+    if (g_bw_n + rg->nw > BW_MAX || g_br_n + rg->nr > BW_MAX) return 1;
+    for (int i = 0; i < rg->nr; i++) if (bw_hit(rg->rlo[i], rg->rhi[i])) return 1;
+    for (int i = 0; i < rg->nw; i++) if (bw_hit(rg->wlo[i], rg->whi[i]) || br_hit(rg->wlo[i], rg->whi[i])) return 1;
+    return 0;
+}
+static void disp_note(const disp_rng *rg) {   // 记下这次派发的读写范围（屏障之后表是空的，放得下）
+    for (int i = 0; i < rg->nw; i++) { g_bw_lo[g_bw_n] = rg->wlo[i]; g_bw_hi[g_bw_n++] = rg->whi[i]; }
+    for (int i = 0; i < rg->nr; i++) { g_br_lo[g_br_n] = rg->rlo[i]; g_br_hi[g_br_n++] = rg->rhi[i]; }
+    g_blit_ops++;
+}
+static id<MTL4ComputeCommandEncoder> dispatch_enc(const disp_rng *rg) {
     blit_open_k(1);   // Metal 3: a compute encoder (blit_open_k)
+    if ((g_disp_ranged + g_disp_full) && !((g_disp_ranged + g_disp_full) % 20000)) MLOG("compute dispatches: read / write ranges known for %llu (no barrier before %llu of them), not known for %llu (barrier before each)", (unsigned long long)g_disp_ranged, (unsigned long long)g_disp_nobar, (unsigned long long)g_disp_full);
+    if (rg) {
+        g_disp_ranged++;
+        if (g_blit_ops && disp_hits(rg)) blit_barrier(); else if (g_blit_ops) g_disp_nobar++;
+        disp_note(rg);
+    } else {
+    g_disp_full++;
     if (g_blit_ops) blit_barrier();
     g_bw_lo[0] = 0; g_bw_hi[0] = ~0ull; g_bw_n = 1; g_br_n = 0; g_blit_ops = 1;   // recorded as "everything written": the next copy or dispatch gets a barrier
+    }
     if (!g_blit_ct) { enc_c_table(g_blit, g_ct); g_blit_ct = 1; }
     args_dirty_all();
     return g_blit;
@@ -13768,7 +13821,8 @@ static void dispatch(const p_dispatch *dp) {
     uint32_t gx = (uint32_t)dp->x, gy = (uint32_t)dp->y; wd_dispatch(cs, &gx, &gy, dp->ind != 0);   // S2Arm widen: images it writes widened, X groups to the widened width, compute constants rewritten (widen_glue.inc)
     int own = dispatch_own();
     if (own && g_blit) { enc_b_end(g_blit); g_blit = nil; }
-    id<MTLComputeCommandEncoder> ce = own ? own_compute() : (id<MTLComputeCommandEncoder>)dispatch_enc();
+    disp_rng drg; int drok = !own && disp_ranges(cs, dp->ind != 0, &drg);
+    id<MTLComputeCommandEncoder> ce = own ? own_compute() : (id<MTLComputeCommandEncoder>)dispatch_enc(drok ? &drg : NULL);
     enc_c_pso(ce, ps);
     g_dispatch_dim[0] = gx; g_dispatch_dim[1] = gy; g_dispatch_dim[2] = (uint32_t)dp->z;   // read back by the driver segment c0 (encode_args_)
     g_c0_dim_buf = nil;
@@ -13806,7 +13860,7 @@ static void dispatch(const p_dispatch *dp) {
             if (own) enc_c_end(ce);
             enc_b_copy_buffer(blit_open(), (__bridge id<MTLBuffer>)ib, io, g_c0_dim_buf, g_c0_dim_off, 12);
             if (own) { enc_b_end(g_blit); g_blit = nil; }
-            ce = own ? own_compute() : (id<MTLComputeCommandEncoder>)dispatch_enc();
+            ce = own ? own_compute() : (id<MTLComputeCommandEncoder>)dispatch_enc(NULL);
             enc_c_pso(ce, ps);   // enc_c_dispatch_indirect rebinds the persistent DmTable3 on this encoder
             static int once; if (!once++) MLOG("Metal 3 indirect dispatch: GPU counts copied to c0 through a blit encoder");
         } else if (g_c0_dim_buf) { [(id<MTL4ComputeCommandEncoder>)ce copyFromBuffer:(__bridge id<MTLBuffer>)ib sourceOffset:io toBuffer:g_c0_dim_buf destinationOffset:g_c0_dim_off size:12];
@@ -14202,6 +14256,14 @@ static void copy_t2t_(const p_copy_t2t *c) {
             return;
         }
         if (s.sampleCount > 1 && d.sampleCount == 1 && s.pixelFormat == d.pixelFormat && (s.width != d.width || s.height != d.height) && copy_resolve_scaled(c, s, d, sl, sz0, dl, dz0)) return;
+        // Both single-sample but another format (or size): nothing to resolve, it is a whole-level converting copy -- draw it (#751: a game's last pass "downsamples" its 1280x720
+        //   RGBA8 scene into the 1280x720 BGRA8 texture it presents; skipping it left the screen black with sound playing)
+        if (s.sampleCount == 1 && d.sampleCount == 1 && !fmt_int_or_ds(s.pixelFormat) && !fmt_int_or_ds(d.pixelFormat) && !mtl_fmt_block(d.pixelFormat)) {
+            id<MTLTexture> dd = (d.usage & MTLTextureUsageRenderTarget) ? d : tex_upgrade(c->dst, d, MTLTextureUsageRenderTarget, d.pixelFormat);
+            unsigned sw = (unsigned)MAX(s.width >> sl, 1ul), sh = (unsigned)MAX(s.height >> sl, 1ul), dw = (unsigned)MAX(dd.width >> dl, 1ul), dh = (unsigned)MAX(dd.height >> dl, 1ul);
+            NVNcopyRegion sr = {0, 0, 0, (int)sw, (int)sh, 1}, dr = {0, 0, 0, (int)dw, (int)dh, 1};
+            if (copy_t2t_draw(s, dd, sl, sz0, dl, dz0, &sr, &dr, sw != dw || sh != dh, 0)) return;
+        }
         if (s.sampleCount <= 1 || d.sampleCount != 1 || s.pixelFormat != d.pixelFormat || s.width != d.width || s.height != d.height) {
             RED_ONCE(72, "Downsample case not implemented: %lux%lu %lu samples format %lu → %lux%lu %lu samples format %lu", (unsigned long)s.width, (unsigned long)s.height, (unsigned long)s.sampleCount,
                      (unsigned long)s.pixelFormat, (unsigned long)d.width, (unsigned long)d.height, (unsigned long)d.sampleCount, (unsigned long)d.pixelFormat);

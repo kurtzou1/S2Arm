@@ -7206,5 +7206,9 @@
  {
   "source": "检查这台电脑的网络（能打开 s2arm.com）后再点一次；下了一半的不会被当成好的用。",
   "en": "Check this computer's network (that s2arm.com opens) and click again; a partial download is never used as a good one."
+ },
+ {
+  "source": "用原版游戏文件重新导入这款：先在游戏库里移除它，再把原版文件拖进来。",
+  "en": "Re-import this game from the original game files: remove it from the library first, then drag the original files in."
  }
 ]

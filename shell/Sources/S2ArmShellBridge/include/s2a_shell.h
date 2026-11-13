@@ -58,11 +58,15 @@ void s2a_shell_refresh(void);
 //   cornerRadius 为区域短边比例，见 ios/layouts/layout.schema.json）。
 // 要编辑的布局：{"selected":"default|mine|touch|other","hasMine":bool,"holdLock":bool,"buttons":[{id,x,y,width,height,cornerRadius}…]}，
 //   有本款「我的布局」就是它，否则按这块区域现算的默认布局；malloc 出的 UTF-8，调用方 free。游戏号不合规返回 NULL
-char *s2a_shell_vpad_layout_json(const char *game_id, double safe_w, double safe_h);
+// split = 0 普通 / 1 分屏；布局、外观与固定摇杆设置分别保存；键/触模式、锁定和 App 级手感共用。
+char *s2a_shell_vpad_layout_json(const char *game_id, double safe_w, double safe_h, int split);
 // 存本款「我的布局」并选中：centers_json = {"A":[x,y],…}（区域坐标的点，只含挪过的键也行），返回 1 成功 / 0 失败
-int s2a_shell_vpad_save(const char *game_id, const char *centers_json, double safe_w, double safe_h);
+int s2a_shell_vpad_save(const char *game_id, const char *centers_json, double safe_w, double safe_h, int split);
 // 选方案：layout_id = "default" / "mine"，返回 1 成功 / 0 失败（「恢复默认」= 选 default，「我的布局」文件保留）
-int s2a_shell_vpad_select(const char *game_id, const char *layout_id);
+int s2a_shell_vpad_select(const char *game_id, const char *layout_id, int split);
+// iOS 主线程 UIView 预览：返回真实区域和已避让的按键框（点）；malloc / free，同生产布局。
+// {split:bool,area:[x,y,w,h],game:[x,y,w,h],division:[x,y,w,h]|null,buttons:[{id,x,y,width,height,cornerRadius}],stickRadius:number}
+char *s2a_shell_vpad_preview(const char *game_id, void *view, int split);
 // ZL / ZR 按住锁定开关（按游戏，与游戏内设置同一份数据），返回 1 成功 / 0 失败
 int s2a_shell_vpad_set_hold_lock(const char *game_id, int enabled);
 

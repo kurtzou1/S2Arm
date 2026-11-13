@@ -724,7 +724,8 @@
       ".patch",
       ".diff",
       ".iss",
-      ".isl"
+      ".isl",
+      ".ps1"
     ],
     "text_names": [
       "Makefile",

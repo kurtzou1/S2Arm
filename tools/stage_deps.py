@@ -120,6 +120,9 @@ def collect(raw, repo, excl):
     files, dirs = _listed(repo)
     rows, wrote = set(), set()
     for fn in sorted(os.listdir(raw)):
+        # 只读本机制写的记录（钩子的 <pid>-<纳秒>.tsv、stage_deps_save / orch 的 scripts.tsv）：记录目录在游戏库卷上，
+        #   exFAT / FAT 上 macOS 把扩展属性存成旁边的 ._<名>（AppleDouble 二进制，含 NUL），还有 .DS_Store（#812 exFAT 出包报 embedded null character）
+        if fn.startswith('.') or not fn.endswith('.tsv'): continue
         with open(os.path.join(raw, fn), encoding='utf-8', errors='surrogateescape') as f:
             for ln in f:
                 k, _, p = ln.rstrip('\n').partition('\t')

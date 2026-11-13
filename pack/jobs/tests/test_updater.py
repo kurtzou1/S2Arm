@@ -3,6 +3,7 @@ import io
 import http.server
 import json
 import os
+import shutil
 import sys
 import tempfile
 import threading
@@ -56,6 +57,27 @@ class Base(unittest.TestCase):
 class ApplyTests(Base):
     def run_apply(self, launch, **options):
         return updater.apply(self.staged, self.install, 2147483646, self.private, launch=launch, health_seconds=options.pop("health", 1), **options)
+
+    def test_failure_logged_when_run_from_runner_with_only_updater_py(self):
+        """#828：替换进程跑在 updates/runner/（只拷 updater.py）。原先 record_failure 要 import core，必然失败、被吞，换版失败从没进 update.log"""
+        runner = self.root / "runner"; runner.mkdir(); shutil.copy2(updater.__file__, runner / "updater.py")
+        run = __import__("subprocess").run([sys.executable, "-B", "-I", str(runner / "updater.py"), "apply", "--staged", str(self.root / "没有这个目录"),
+                                            "--install", str(self.install), "--pid", "2147483646", "--private-root", str(self.private)],
+                                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(run.returncode, 1, run.stderr)
+        log = (self.private / "logs" / "update.log").read_text(encoding="utf-8")
+        self.assertIn("update_swap_failed", log)
+        self.assertIn("apply 开始", (self.private / "updates" / "apply.log").read_text(encoding="utf-8"))
+        self.assertEqual((self.install / "S2Arm.exe").read_text(), "old")
+
+    def test_apply_that_cannot_get_the_lock_relaunches_old_and_records(self):
+        launched = []
+        with updater.UpdateLock(self.private / "updates"), patch.object(updater.UpdateLock.__init__, "__defaults__", (0.3,)):
+            rc = self.run_apply(lambda install, args: launched.append(install))
+        self.assertEqual(rc, 1)
+        self.assertEqual(json.loads((self.private / "updates" / "last_failure.json").read_text())["code"], "update_busy")
+        self.assertEqual(launched, [self.install])                     # 旧版被拉起来（启动器已退）
+        self.assertEqual((self.install / "S2Arm.exe").read_text(), "old")
 
     def healthy(self, install, args):
         (self.private / "updates/health.ok").write_text("ok")
@@ -610,6 +632,38 @@ class PrepareTests(Base):
                 self.assertEqual(len(attempts), 2)
                 self.assertEqual(tree(self.install), before)
 
+    # ---- #828（11-13）：prepare / apply 一把锁、同版本复用、换版失败有记录、手动装新版后清残留 ----
+    def test_second_prepare_reuses_ready_version_without_downloading(self):
+        first = self.prepare()
+        self.assertEqual(first["state"], "ready")
+        runner = Path(first["python"]); mtime = runner.stat().st_mtime_ns
+        with patch.object(updater, "fetch_package", side_effect=AssertionError("不该重下")):
+            second = self.prepare()
+        self.assertEqual((second["state"], second["staged"], second["python"]), ("ready", first["staged"], first["python"]))
+        self.assertEqual(runner.stat().st_mtime_ns, mtime)   # runner/ 没重建（apply 可能正用着它）
+
+    def test_prepare_waits_for_the_lock_then_reports_busy(self):
+        with updater.UpdateLock(self.private / "updates"), patch.object(updater, "PREPARE_LOCK_WAIT", 0.3):
+            # 锁在同一进程里另开描述符取：flock 按打开的文件算，同进程两次打开照样互斥
+            with self.assertRaises(updater.UpdateError) as caught:
+                with patch.object(updater.UpdateLock.__init__, "__defaults__", (0.3,)):
+                    self.prepare()
+        self.assertEqual(caught.exception.code, "update_busy")
+        self.assertEqual(self.prepare()["state"], "ready")   # 放锁后照常
+
+    def test_stale_pending_cleared_only_when_not_newer_and_not_locked(self):
+        u = self.private / "updates"
+        def setup(version):
+            (u / "pending.json").write_text(json.dumps({"version": version})); (u / version / "unpack").mkdir(parents=True, exist_ok=True)
+        setup("9.9.9")
+        self.assertFalse(updater.clear_stale_pending(self.private, "0.1.1"))   # 待换的是更新的版本：留着
+        self.assertTrue((u / "pending.json").exists())
+        with updater.UpdateLock(u):
+            self.assertFalse(updater.clear_stale_pending(self.private, "9.9.9"))   # 有更新在跑：不动
+        self.assertTrue((u / "9.9.9").exists())
+        self.assertTrue(updater.clear_stale_pending(self.private, "9.9.9"))   # 手动装好了同版本：清
+        self.assertFalse((u / "pending.json").exists()); self.assertFalse((u / "9.9.9").exists())
+
     def test_runs_the_way_the_launcher_starts_it(self):
         """两端都用 python -I 直接跑 updater.py：同目录的模块要自己能找到。"""
         self.publish(hashlib.sha256(self.zip).hexdigest())
@@ -909,29 +963,35 @@ class VersionTests(Base):
 
 
 class NoticeTests(unittest.TestCase):
-    """启动器公告条（v0.2.3）：官方下载页优先、取不到用随包那份、关掉的同一条不再给、换号再出现、已撤 / 无效不显示。期望手写"""
+    """公告条（v0.2.3 起；11-13 加 messages / platforms）：官方下载页优先、取不到用随包那份、已撤不显示、链接只认官方 https。期望手写"""
     ITEM = {"schema": 1, "id": "n1", "text": {"zh-Hans": "中文公告", "en": "English notice"}, "url": "https://github.com/jhaizhou-ops/S2Arm#readme"}
 
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
         self.bundled = self.root / "notice.json"; self.bundled.write_text(json.dumps(dict(self.ITEM, id="bundled")), encoding="utf-8")
-        self.private = self.root / "private"
 
-    def show(self, remote):
-        return updater.notice(self.private, remote=lambda: remote, bundled=self.bundled)
+    def ids(self, remote, platform="mac"):
+        return [n["id"] for n in updater.notice_messages(updater.notice_data(remote=lambda: remote, bundled=self.bundled), platform)]
 
     def test_remote_first_then_bundled(self):
-        self.assertEqual(self.show((True, updater.notice_valid(self.ITEM)))["id"], "n1")
-        self.assertEqual(self.show((False, None))["id"], "bundled")   # 没网 / 页面不通
-        self.assertEqual(self.show((False, None))["text"], {"zh-Hans": "中文公告", "en": "English notice"})
+        self.assertEqual(self.ids((True, self.ITEM)), ["n1"])
+        self.assertEqual(self.ids((False, None)), ["bundled"])   # 没网 / 页面不通
 
     def test_retracted_remote_wins_over_bundled(self):   # 页面取到了、但已撤（只剩 schema）：不显示，不退回随包那份
-        self.assertIsNone(self.show((True, updater.notice_valid({"schema": 1}))))
+        self.assertEqual(self.ids((True, {"schema": 1})), [])
 
-    def test_dismissed_stays_hidden_until_a_new_id(self):
-        updater.notice_dismiss(self.private, "n1")
-        self.assertIsNone(self.show((True, updater.notice_valid(self.ITEM))))
-        self.assertEqual(self.show((True, updater.notice_valid(dict(self.ITEM, id="n2"))))["id"], "n2")
+    def test_legacy_top_level_is_one_important_message(self):
+        [n] = updater.notice_messages(self.ITEM, "windows")
+        self.assertEqual((n["id"], n["level"], n["url"]), ("n1", "important", self.ITEM["url"]))
+
+    def test_messages_filtered_by_platform_newest_first(self):
+        data = {"schema": 1, "id": "old", "text": self.ITEM["text"], "messages": [
+            {"id": "w2", "level": "important", "platforms": ["windows"], "text": self.ITEM["text"]},
+            {"id": "a1", "level": "info", "text": self.ITEM["text"]},
+            {"id": "m0", "platforms": ["mac"], "text": self.ITEM["text"]},
+            {"id": "bad", "platforms": "mac", "text": self.ITEM["text"]}]}
+        self.assertEqual([(n["id"], n["level"]) for n in updater.notice_messages(data, "mac")], [("a1", "info"), ("m0", "info")])
+        self.assertEqual([n["id"] for n in updater.notice_messages(data, "windows")], ["w2", "a1"])   # 有 messages 就不再看顶层那条（给旧版看的）
 
     def test_invalid_shapes_are_not_shown(self):
         for bad in ({"schema": 2, "id": "a", "text": self.ITEM["text"]}, {"schema": 1, "text": self.ITEM["text"]},
@@ -939,6 +999,7 @@ class NoticeTests(unittest.TestCase):
                     {"schema": 1, "id": "a", "text": {"zh-Hans": " ", "en": "x"}}, [], "x"):
             with self.subTest(bad=bad):
                 self.assertIsNone(updater.notice_valid(bad))
+                self.assertEqual(updater.notice_messages(bad, "mac"), [])
 
     def test_link_only_official_https(self):
         for url, kept in (("https://github.com/jhaizhou-ops/S2Arm", True), ("https://jhaizhou-ops.github.io/S2Arm/", True),
@@ -946,25 +1007,137 @@ class NoticeTests(unittest.TestCase):
             with self.subTest(url=url):
                 self.assertEqual("url" in updater.notice_valid(dict(self.ITEM, url=url)), kept)
 
-    def test_cli_prints_empty_object_when_nothing_to_show(self):
-        import io, contextlib
-        self.bundled.unlink()
-        with patch.object(updater, "notice_file", return_value=self.bundled), patch.object(updater, "notice_remote", return_value=(False, None)):
-            out = io.StringIO()
-            with contextlib.redirect_stdout(out):
-                self.assertEqual(updater.main(["notice", "--private-root", str(self.private)]), 0)
-        self.assertEqual(json.loads(out.getvalue()), {})
-        self.assertFalse((self.private / "logs").exists())   # 公告与更新无关：不写 update.log
-
     def test_shipped_notice_is_valid(self):   # 仓库里那份（Pages 发布 + 随包兜底）：有公告就要能显示、带官方链接；撤了就必须是说明里写的撤法
         data = json.loads(updater.notice_file().read_text(encoding="utf-8"))
         self.assertEqual(data.get("schema"), 1)
-        item = updater.notice_valid(data)
-        if "id" not in data:   # 11-12 撤公告后改成 {"schema": 1}（docs/site/README.md「撤掉公告」）：没有公告是合法状态
-            self.assertEqual(data, {"schema": 1}); self.assertIsNone(item)
+        if "id" not in data and "messages" not in data:   # 11-12 撤公告后改成 {"schema": 1}（docs/site/README.md「撤掉公告」）：没有公告是合法状态
+            self.assertEqual(data, {"schema": 1})
             return
-        self.assertIsNotNone(item); self.assertIn("url", item)
-        self.assertIn("s2arm.com", item["text"]["zh-Hans"]); self.assertIn("s2arm.com", item["text"]["en"])
+        for platform in updater.PLATFORMS:
+            for n in updater.notice_messages(data, platform):
+                self.assertIn("url", n)
+
+
+class NotesTests(unittest.TestCase):
+    """发版说明 → 清单 notes（tools/sign_update_manifest.py --notes）。期望按发版说明的写法手写"""
+    MD = """# S2Arm v9.9.9
+
+开头一段不进清单。
+
+## 亮点
+- **第一条亮点。**（#1）
+  *First highlight. (#1)*
+- 没加粗的亮点
+
+## 修了哪些问题
+- **修复：A 不再失败。** 后面是细节，`代码`也去掉。
+  *Fixed: A no longer fails.*
+- **B 修了。**
+"""
+
+    def test_sections_highlights_and_english(self):
+        notes = updater.notes_from_markdown(self.MD)
+        self.assertEqual(notes["highlights"], [{"zh-Hans": "第一条亮点。", "en": "First highlight. (#1)"}, {"zh-Hans": "没加粗的亮点"}])
+        self.assertEqual(notes["sections"], [{"title": "修了哪些问题", "items": [{"zh-Hans": "修复：A 不再失败。", "en": "Fixed: A no longer fails."}, {"zh-Hans": "B 修了。"}]}])
+
+    def test_no_highlight_section_means_no_highlights(self):   # 程序不替人挑亮点：没写「## 亮点」就没有（更新后不弹「这版更新了什么」）
+        notes = updater.notes_from_markdown("## 其它改进\n- **C。**\n")
+        self.assertEqual((notes["highlights"], len(notes["sections"])), ([], 1))
+        self.assertIsNone(updater.notes_from_markdown("# 只有标题\n"))
+
+    def test_offer_passes_signed_notes_through(self):   # 清单里的 notes 随「有新版」一起给启动器；坏的丢掉、照常给新版
+        files = {updater.ASSETS["mac"]: {"sha256": "0" * 64, "size": 1}}
+        notes = {"highlights": [{"zh-Hans": "亮点"}], "sections": []}
+        self.assertEqual(updater.offer("mac", (0, 3, 5), (0, 3, 3), files, lambda n: "https://x/" + n, notes)["notes"], notes)
+        info = updater.offer("mac", (0, 3, 5), (0, 3, 3), files, lambda n: "https://x/" + n, {"sections": 1})
+        self.assertEqual((info["available"], "notes" in info), (True, False))
+
+    def test_invalid_notes_dropped(self):
+        for bad in (None, [], {"sections": "x"}, {"highlights": [{"en": "only en"}]}, {"sections": [{"title": "", "items": [{"zh-Hans": "a"}]}]}):
+            with self.subTest(bad=bad):
+                self.assertIsNone(updater.notes_valid(bad))
+
+
+class InboxTests(unittest.TestCase):
+    """打开启动器时给玩家看什么（11-13 维护者定：永远只给最新一期，不叠加、不补弹；看过关掉的不再弹）。期望按规则手写，不跑被测实现推"""
+    TEXT = {"zh-Hans": "公告", "en": "Notice"}
+    NOTES = {"highlights": [{"zh-Hans": "亮点"}], "sections": [{"title": "修好了", "items": [{"zh-Hans": "一条"}]}]}
+
+    def setUp(self):
+        self.private = Path(tempfile.mkdtemp())
+
+    def notices(self, *ids, level="important"):   # 最新在前
+        return updater.notice_messages({"schema": 1, "messages": [{"id": i, "level": level, "text": self.TEXT} for i in ids]}, "mac")
+
+    def open(self, current, check=None, notices=()):
+        return updater.inbox("mac", current, self.private, check or {"available": False}, list(notices))
+
+    def test_three_notices_and_skipped_versions_show_only_latest_once(self):
+        # 玩家停在 0.3.3，其间发了 0.3.4、0.3.5 两版和 n1、n2、n3 三期重要公告：一进来只弹最新版 0.3.5、横幅只有 n3、未读 1
+        check = {"available": True, "version": "0.3.5", "notes": self.NOTES}
+        first = self.open("0.3.3", check, self.notices("n3", "n2", "n1"))
+        self.assertEqual((first["popup"]["kind"], first["popup"]["version"]), ("update", "0.3.5"))
+        self.assertEqual(first["banner"]["id"], "n3")
+        self.assertEqual(first["unread"], 1)
+        self.assertEqual([m.get("id") or m.get("version") for m in first["messages"]], ["n3", "n2", "n1", "0.3.5"])   # 旧的都在消息里，不弹
+        self.assertEqual([m["unread"] for m in first["messages"] if m["kind"] == "notice"], [True, False, False])
+        # 关掉弹窗（以后再说）、关掉横幅：再进来什么都不弹，n2 / n1 不补
+        updater.inbox_seen(self.private, update="0.3.5", notice="n3")
+        again = self.open("0.3.3", check, self.notices("n3", "n2", "n1"))
+        self.assertEqual((again["popup"], again["banner"], again["unread"]), (None, None, 0))
+
+    def test_after_update_popup_once_then_newer_update_next_open(self):
+        # 从 0.3.3 点更新换上 0.3.5（prepare 记了 0.3.5 的说明），此时已有 0.3.6：先只弹「这版更新了什么」，关掉后下次才弹 0.3.6，再关掉就都不弹
+        updater.save_json(self.private / "updates/notes/0.3.4.json", self.NOTES)   # 跳过的那版：不补弹
+        updater.save_json(self.private / "updates/notes/0.3.5.json", self.NOTES)
+        check = {"available": True, "version": "0.3.6"}
+        r = self.open("0.3.5", check)
+        self.assertEqual((r["popup"]["kind"], r["popup"]["version"]), ("afterUpdate", "0.3.5"))
+        self.assertEqual(self.open("0.3.5", check)["popup"]["kind"], "afterUpdate")   # 没关（直接退出）下次还在
+        updater.inbox_seen(self.private, after="0.3.5")
+        r = self.open("0.3.5", check)
+        self.assertEqual((r["popup"]["kind"], r["popup"]["version"]), ("update", "0.3.6"))
+        updater.inbox_seen(self.private, update="0.3.6")
+        self.assertIsNone(self.open("0.3.5", check)["popup"])
+
+    def test_after_update_needs_highlights_and_our_own_update(self):
+        self.assertIsNone(self.open("0.3.5")["popup"])   # 手动装的新版：本机没有这版说明，不弹
+        updater.save_json(self.private / "updates/notes/0.3.5.json", {"sections": self.NOTES["sections"]})
+        r = self.open("0.3.5")
+        self.assertIsNone(r["popup"])   # 说明里没写亮点：不弹，说明只在消息里
+        self.assertEqual([m["version"] for m in r["messages"] if m["kind"] == "update"], ["0.3.5"])
+
+    def test_new_notice_after_seen_and_info_level_never_banners(self):
+        updater.inbox_seen(self.private, notice="n3")
+        r = self.open("0.3.3", notices=self.notices("n4", "n3", "n2"))
+        self.assertEqual((r["banner"]["id"], r["unread"]), ("n4", 1))
+        r = self.open("0.3.3", notices=self.notices("i5", level="info") + self.notices("n4", "n3"))
+        self.assertEqual((r["banner"]["id"], r["unread"]), ("n4", 1))   # 最新是普通公告：只算未读、不出横幅；横幅仍是没看过的最新重要那条
+        updater.inbox_seen(self.private, notice="i5")   # 打开消息 = 看过最新那条，更旧的都算看过
+        r = self.open("0.3.3", notices=self.notices("i5", level="info") + self.notices("n4", "n3"))
+        self.assertEqual((r["banner"], r["unread"]), (None, 0))
+
+    def test_seen_rejects_bad_values_and_inbox_does_not_write(self):
+        for kw in ({"update": "x"}, {"after": "../1.0.0"}, {"notice": "a b"}):
+            with self.subTest(kw=kw), self.assertRaises(ValueError):
+                updater.inbox_seen(self.private, **kw)
+        self.open("0.3.3", {"available": True, "version": "0.3.5"}, self.notices("n1"))
+        self.assertFalse((self.private / "updates/seen.json").exists())   # 只读：关掉时才记
+
+    def test_cli_offline_prints_nothing_to_show(self):
+        import io, contextlib
+        with patch.object(updater, "latest", side_effect=OSError("offline")), patch.object(updater, "notice_remote", return_value=(False, None)), \
+                patch.object(updater, "notice_file", return_value=self.private / "none.json"):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(updater.main(["inbox", "--private-root", str(self.private), "--platform", "mac", "--current", "0.3.3"]), 0)
+        r = json.loads(out.getvalue())
+        self.assertEqual((r["popup"], r["banner"], r["messages"], r["update"]["available"]), (None, None, [], False))
+        self.assertFalse((self.private / "logs").exists())   # 查不到不写 update.log
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(updater.main(["inbox-seen", "--private-root", str(self.private), "--notice", "n1"]), 0)
+        self.assertEqual(updater.seen_state(self.private), {"noticeSeen": "n1"})
 
 
 class MirrorTests(Base):

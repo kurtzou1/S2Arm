@@ -45,6 +45,45 @@ int main(void) { @autoreleasepool {
     [d setObject:@42 forKey:S2APlaySplitKey]; [d setObject:@[] forKey:S2APlayOrientationKey];
     CK(S2APlayReadSplit(d)==S2APlaySplitAuto && S2APlayReadOrientation(d)==S2APlayOrientationAuto,"错误类型按默认处理");
     [d removePersistentDomainForName:suite];
+    CK([S2APlaySplitKey isEqual:@"splitScreen"] && [S2APlayOrientationKey isEqual:@"screenOrientation"],"设置读写使用共享表 id");
+    NSDictionary *table=[NSJSONSerialization JSONObjectWithData:[NSData dataWithContentsOfFile:@"launchers/shared/game_settings.v1.json"] options:0 error:nil];
+    for (NSString *key in @[@"splitScreen",@"screenOrientation"]) {
+        NSDictionary *item=nil; for (NSDictionary *entry in table[@"items"]) if ([entry[@"id"] isEqual:key]) item=entry;
+        NSArray *values=[key isEqual:@"splitScreen"] ? @[@"auto",@"on",@"off"] : @[@"auto",@"landscape",@"portrait"];
+        CK([item[@"scope"] isEqual:@"app"] && [item[@"type"] isEqual:@"choice"] && [item[@"default"] isEqual:@"auto"] && [item[@"apply"] isEqual:@"live"] && [item[@"platforms"] isEqual:@[@"ios"]] && [[item[@"options"] valueForKey:@"value"] isEqual:values],"共享表登记 App 级三选项，不向未实现的 Mac 展示");
+    }
+    S2APlayReadSplit(d); S2APlayReadOrientation(d);
+    CK([d persistentDomainForName:suite].count==0,"未选择时使用自动，不写入缺省");
+    [d setObject:@"on" forKey:@"S2ASplitScreen"]; [d setObject:@"portrait" forKey:@"S2AScreenOrientation"];
+    CK(S2APlayReadSplit(d)==S2APlaySplitOn && S2APlayReadOrientation(d)==S2APlayOrientationPortrait,"保留旧键的有效选择");
+    CK([[d objectForKey:@"splitScreen"] isEqual:@"on"] && [[d objectForKey:@"screenOrientation"] isEqual:@"portrait"] && ![d objectForKey:@"S2ASplitScreen"] && ![d objectForKey:@"S2AScreenOrientation"],"迁移到规范键并删除旧键");
+    d=[[NSUserDefaults alloc] initWithSuiteName:suite];
+    CK(S2APlayReadSplit(d)==S2APlaySplitOn && S2APlayReadOrientation(d)==S2APlayOrientationPortrait,"重开偏好后保留迁移结果");
+    [d setObject:@"off" forKey:@"splitScreen"]; [d setObject:@"landscape" forKey:@"screenOrientation"];
+    [d setObject:@"on" forKey:@"S2ASplitScreen"]; [d setObject:@"portrait" forKey:@"S2AScreenOrientation"];
+    CK(S2APlayReadSplit(d)==S2APlaySplitOff && S2APlayReadOrientation(d)==S2APlayOrientationLandscape,"规范键已保存时不被旧键覆盖");
+    CK(![d objectForKey:@"S2ASplitScreen"] && ![d objectForKey:@"S2AScreenOrientation"],"新值优先时也清理旧键");
+    [d registerDefaults:@{@"splitScreen":@"auto",@"screenOrientation":@"auto"}];
+    CK(S2APlayReadSplit(d)==S2APlaySplitOff && S2APlayReadOrientation(d)==S2APlayOrientationLandscape,"持久选择优先于注册缺省");
+    [d setObject:@42 forKey:@"splitScreen"]; [d setObject:@[] forKey:@"screenOrientation"];
+    [d setObject:@"on" forKey:@"S2ASplitScreen"]; [d setObject:@"portrait" forKey:@"S2AScreenOrientation"];
+    CK(S2APlayReadSplit(d)==S2APlaySplitAuto && S2APlayReadOrientation(d)==S2APlayOrientationAuto,"规范键非法时回自动，不重新复活旧选择");
+    CK([d persistentDomainForName:suite].count==0,"非法规范值和旧键均清理，不强存自动");
+    [d setObject:@"invalid" forKey:@"S2ASplitScreen"]; [d setObject:@YES forKey:@"S2AScreenOrientation"];
+    CK(S2APlayReadSplit(d)==S2APlaySplitAuto && S2APlayReadOrientation(d)==S2APlayOrientationAuto && [d persistentDomainForName:suite].count==0,"非法旧值清理后保持自动");
+    [d setObject:@"off" forKey:@"splitScreen"];
+    CK(S2APlayReadSplit(d)==S2APlaySplitOff && S2APlayReadSplit(d)==S2APlaySplitOff && ![d objectForKey:@"S2ASplitScreen"],"重复读取不再迁移或改写新选择");
+    S2APlayPublishSplit(NO);
+    [d setObject:@"on" forKey:@"splitScreen"]; S2APlayReadSplit(d);
+    CGRect phone=CGRectMake(0,0,420,912), phoneSafe=CGRectMake(0,62,420,816);
+    for (S2APlaySplitMode mode=S2APlaySplitAuto;mode<=S2APlaySplitOff;mode+=2) {
+        l=S2APlayLayoutMake(phone,phoneSafe,mode,NO,CGRectNull);
+        CK(!l.split && CGRectEqualToRect(l.game,phone) && CGRectEqualToRect(l.controls,phoneSafe) && S2APlayPortrait(S2APlayOrientationPortrait,l.split),"普通手机手动竖屏、自动或关闭分屏时仍为整竖屏画面与叠加按键");
+    }
+    l=S2APlayLayoutMake(phone,phoneSafe,S2APlaySplitOn,NO,CGRectNull);
+    CK(l.split && rect(l.game,0,62,420,394) && rect(l.controls,0,456,420,422) && S2APlayPortrait(S2APlayOrientationAuto,l.split),"普通手机强制分屏也可自动竖屏、上画面下按键");
+    CK(!s2a_ios_split_active(),"读取偏好和纯几何预览不提前发布运行时分屏");
+    [d removePersistentDomainForName:suite];
     printf("%s t_play_layout：%d/%d 项符合（开关、区域、方向、上区宽屏比例）\n",bad?"✗":"✓",checks-bad,checks);
     return bad?1:0;
 } }

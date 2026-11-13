@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><Nullable>disable</Nullable><AllowUnsafeBlocks>true</AllowUnsafeBlocks></PropertyGroup>
+  <ItemGroup>
+    <!-- The kernels under test are internal: compile the Dsp files straight in, so the test calls both paths. -->
+    <Compile Include="../../compat/tree/src/Ryujinx.Audio/Renderer/Dsp/S2ADspFast.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Audio/Renderer/Dsp/S2ADspMixHelper.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Audio/Renderer/Dsp/ResamplerHelper.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Audio/Renderer/Dsp/FloatingPointHelper.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Audio/Renderer/Dsp/PcmHelper.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Audio/Renderer/Dsp/FixedPointHelper.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Audio/Renderer/Dsp/AdpcmHelper.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Audio/Renderer/Dsp/State/AdpcmLoopContext.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Audio/Renderer/Parameter/VoiceInParameter1.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Audio/Renderer/Parameter/BiquadFilterParameter1.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Audio/Renderer/Common/WaveBuffer.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Audio/Renderer/Common/PlayState.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Audio/Common/SampleFormat.cs" />
+    <ProjectReference Include="../../compat/tree/src/Ryujinx.Common/Ryujinx.Common.csproj" />
+  </ItemGroup>
+</Project>

@@ -770,7 +770,8 @@ def phone_ipa_path(c):
 
 
 def phone_img_path(c, gid):
-    """导出给自签玩家（v0.3.0）：这款的单一 IMG（image/ios/pack/game.img），和库根 S2Arm.ipa 一起就是玩家要拷的全部；
+    """这款的单一 IMG（image/ios/pack/game.img）。注意：自签玩家只拷它不够——着色器库等派生件不在 game.img 里（一键装机另推），
+    要给玩家一个文件用「导出，自己签名安装」（export_phone → pack/img.py export，11-12 真机验收 direct_lib_missing）；
     还没出成 IMG 形态（旧版出的包 / 多程序合集）→ 空串（界面不给按钮）"""
     img = layout.ios_pack(c, gid) / "game.img" if gid else None
     return str(img) if img and img.is_file() else ""
@@ -808,7 +809,7 @@ def install_mode(c):
 
 
 def export_available(c):
-    """「导出，自己签名安装」能不能用：导出作业（export_phone，IMG + 未签名壳）合入前为 False，两端把这一项置灰写「下一版提供」"""
+    """「导出，自己签名安装」能不能用：导出作业（export_phone，IMG + 未签名壳）在就是 True；两端为 False 时把这一项置灰写「下一版提供」"""
     return callable(globals().get("export_phone"))
 
 
@@ -822,6 +823,130 @@ def install_mode_job(c):
             raise Failure("「导出，自己签名安装」下一版提供。", code="job_failed")
         atomic(c.private / "install.json", dict(mode=mode))
     return dict(mode=install_mode(c), exportAvailable=export_available(c), signMode="devcert" if devcert.active(c) else "appleId")
+
+
+# 导出给自签玩家（v0.3.1，维护者 11-12「导出，自己签名安装」）：游戏库根下这个文件夹放未签名 S2Arm.ipa + 各款 <游戏名>.img + 一份说明。
+#   每次导出整个换新（先在同盘临时目录写好再对调），里面只有这次导出的东西
+EXPORT_DIR = "S2Arm 自签导出"
+EXPORT_README = "怎么装到 iPhone.txt"
+_BAD_NAME = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+
+
+def export_dir(c):
+    return c.library / EXPORT_DIR
+
+
+def wants_export(c):
+    """这次按导出走：请求带 mode（完成页「这次改为导出自签 / 一键装」临时换一次）就照它，不带按设置里的装法"""
+    m = c.r.get("mode")
+    return (m if m in INSTALL_MODES else install_mode(c)) == "export"
+
+
+def _img_name(name, gid, used):
+    """game.img 在导出文件夹里的名字：<游戏名>.img（玩家在「文件」App 里认得出）；名字不能做文件名 / 重名时带上游戏号。
+    手机上按文件头认游戏（pack_apply.c s2a_img_scan 认 S2AIMG01 魔数与头里的游戏号），文件叫什么都行"""
+    base = _BAD_NAME.sub(" ", name or "").strip().strip(".") or gid
+    out = base + ".img"
+    if out.lower() in used:
+        out = f"{base} {gid}.img"
+    used.add(out.lower())
+    return out
+
+
+def _export_img(c, pack, dst):
+    """一款一个文件（pack/img.py export）：game.img + 着色器库 / 覆盖层 / romfs.s2aidx / game.imgmap 写成一个 .img，手机认领后照常从里面解出来。
+    只放 game.img 不够——这几样不在 game.img 里、一键装机时随包另推；少了它们手机上起局报 direct_lib_missing（11-12 真机验收）。
+    走 c.run：Windows 实拷几十 GB 时出包页有进度"""
+    log = c.logs / (c.task + "-export.log")
+    try:
+        c.run([os.sys.executable, "-X", "utf8", "pack/img.py", "export", str(pack), str(dst)], log, c.env(), cwd=c.engine)
+    except Failure as e:
+        from errors import tool_reason
+        raise Failure("写导出用的游戏文件失败：" + (tool_reason(log) or str(e)), code="package_failed") from e
+
+
+def export_readme(games):
+    names = "\n".join(f"  · {g['file']}（{g['name']}）" for g in games)
+    return f"""S2Arm 自签安装说明
+
+这个文件夹里有：
+  · S2Arm.ipa：未签名的 S2Arm（里面带着下面这几款游戏的程序）
+  · 每款游戏一个 .img 文件：
+{names}
+
+一、装 S2Arm
+  用你常用的自签工具（如 Sideloadly、AltStore、爱思助手的「IPA 签名」等）签名并安装 S2Arm.ipa。
+  已经装过 S2Arm 的，直接覆盖安装：手机上的游戏、.img 和存档都会保留。
+  第一次装好后，在 iPhone「设置 → 通用 → VPN 与设备管理」里信任你的开发者账号，然后打开一次 S2Arm。
+
+二、放游戏
+  在 iPhone 的「文件」App 里打开「我的 iPhone → S2Arm → 放这里导入」（英文系统叫 Import Here），把 .img 文件拷进去。
+  可以用隔空投送、数据线（Mac 访达 / Windows 爱思助手等的文件共享）或网盘拷到手机，再在「文件」App 里挪进这个文件夹。
+  文件名随便改，S2Arm 按文件内容认游戏。手机上已经有、也没重新打过 iPhone 包的游戏，不用再放。
+
+三、开始玩
+  回到 S2Arm，游戏会出现在游戏库里，点开就能玩。.img 还在拷的时候 S2Arm 会等它拷完再导入。
+
+这个文件夹每次导出都会整个换新。
+"""
+
+
+def export_phone(c, gid=None):
+    """导出，自己签名安装：本版壳 + 游戏库里能放进本壳、已出成单一 IMG 的各款组一个容器（ipa.assemble，同一键装），
+    出未签名 S2Arm.ipa + 各款 game.img + 说明到游戏库根「S2Arm 自签导出」。不连手机、不签名。
+    gid：这次点的那款（必须带上，放不进就报真实原因）；None = 「导出新版 S2Arm」（只换壳，带上能带的各款）。
+    放不进本壳（要按新版重新出包）/ 还不是单一 IMG 形态的别的款不带，结果 skipped 点名"""
+    import ipa as packer
+    gid = gid.upper() if gid else None
+    c.begin("核对要导出的游戏", 1, 4)
+    sid = packer.current_shell_id(c)
+    if gid:
+        if not img_pack(ios_pack(c, gid)):
+            raise Failure("这款的 iPhone 包是旧格式，导出不了单个 game.img：请重新「打 iPhone 包」后再导出。", code="pack_missing")
+    names = {g["id"].upper(): g.get("name") or g["id"] for g in c.catalog()["games"]}
+    others, skipped = [], []
+    for g in sorted(names):
+        if g == gid:
+            continue
+        pack = layout.ios_pack(c, g)
+        if not (layout.ios_kit(c, g) / "main.npdm").is_file() or not (pack / "manifest.json").is_file():
+            continue   # 没出过 iPhone 版：本来就不在手机上，不算跳过
+        if packer.usable_kit(c, g, sid) is None or not img_pack(pack):
+            skipped.append(names[g])
+            continue
+        others.append(g)
+    if not gid and not others:
+        raise Failure("游戏库里还没有能导出的 iPhone 版：先给游戏「打 iPhone 包」。", code="job_failed")
+    from rewrite_refresh import refresh_ios
+    refresh_ios(c, ([gid] if gid else []) + others)
+    c.begin("组装 S2Arm.ipa（未签名）", 2, 4)
+    work = Path(tempfile.mkdtemp(prefix=".export-", dir=c.library))
+    try:
+        ipa, games, _ = packer.assemble(c, gid, others, dest=work / "assemble")
+        out = work / "out"
+        out.mkdir()
+        os.replace(ipa, out / "S2Arm.ipa")
+        shutil.rmtree(work / "assemble", ignore_errors=True)
+        c.begin("写各款游戏的 .img（含着色器库）", 3, 4)
+        used, listed = set(), []
+        for g in games:
+            f = _img_name(names.get(g, g), g, used)
+            _export_img(c, layout.ios_pack(c, g), out / f)
+            listed.append(dict(gameId=g, name=names.get(g, g), file=f))
+        c.begin("写安装说明", 4, 4)
+        (out / EXPORT_README).write_text(export_readme(listed), encoding="utf-8-sig" if os.name == "nt" else "utf-8")
+        dest = export_dir(c)
+        old = work / "old"
+        if dest.exists():
+            os.replace(dest, old)
+        os.replace(out, dest)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    size = sum(p.stat().st_size for p in dest.iterdir() if p.is_file())
+    if skipped:
+        c.diagnostic("这几款没放进这次导出（要按新版重新「打 iPhone 包」）：" + "、".join(skipped), code="container_stale", severity="warning")
+    return dict(exported=True, outputPath=str(dest), ipa=str(dest / "S2Arm.ipa"), readme=str(dest / EXPORT_README),
+                games=[x["gameId"] for x in listed], files=listed, skipped=skipped, exportBytes=size)
 
 
 def readiness(c):
@@ -1460,6 +1585,8 @@ def update_phone(c):
     手机上的游戏库、存档不动。新壳认不得的款（要按新版重新出包）：没带 acceptStale 就停下报 container_stale 列出它们，玩家确认后不带它们装
     （它们的资源包和存档还在手机上，重新出包后再装就回来）。壳已是本版 → 不装，结果 updated = False"""
     import ipa as packer
+    if wants_export(c):   # 导出模式的「导出新版 S2Arm」：本版壳带上游戏库里能带的各款出到文件夹，玩家自己覆盖安装
+        return dict(export_phone(c), updated=True)
     c.begin("找签名账号与 iPhone", 1, 6)
     ph = phone_for(c)
     rec = layout.load_device(c, ph.key)
@@ -1488,6 +1615,8 @@ def install(c):
     if scheme:
         return downstream.install_ios(c, next((g for g in c.catalog()["games"] if g["id"].upper() == gid.upper()), dict(id=gid)), scheme)
     ios_pack(c, gid)
+    if wants_export(c):   # 装法选了「导出，自己签名安装」（或完成页这次临时换成导出）：不连手机、不签名，出到文件夹
+        return export_phone(c, gid)
     c.begin("找签名账号与 iPhone", 1, 6)
     return put_game(c, gid, phone_for(c))
 

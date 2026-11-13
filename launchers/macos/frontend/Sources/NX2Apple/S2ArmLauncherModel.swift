@@ -101,6 +101,10 @@ struct PhoneOutcome: Equatable {
     var packBytes: Int64? = nil
     var skipped: [String] = []
     var version = ""
+    /// 导出模式：放进的文件夹、几款、多大（PhoneJobPanel 成功页改写「导出好了」+ 打开文件夹）；一键装为空
+    var exportFolder = ""
+    var exportGames = 0
+    var exportBytes: Int64? = nil
 }
 
 /// 排队的一次出包。
@@ -176,7 +180,16 @@ public final class S2ArmLauncherModel: ObservableObject {
     var installAfterQueue: [String] = []
     /// 添加游戏 / 放密钥弹窗（ImportSheet）：这两个作业的进度和失败原因都留在弹窗里，不换页。
     @Published var updateState: UpdateState = .idle
-    @Published var notice: [String: Any]?   // 顶部公告条（S2ArmLauncherModel+Update.swift loadNotice）；nil = 不显示
+    @Published var notice: [String: Any]?   // 顶部公告条：最新一条没看过的重要公告（S2ArmLauncherModel+Update.swift loadInbox）；nil = 不显示
+    /// 打开时最多一个弹窗：{kind: update | afterUpdate, version, notes?}（11-13 维护者：永远只给最新一期，看过不再弹）
+    @Published var updatePopup: [String: Any]?
+    /// 「消息」列表（公告最新在前 + 更新说明）与未读数（只算最新那条公告）
+    @Published var messages: [[String: Any]] = []
+    @Published var unreadMessages = 0
+    /// 有新版时的那一版 {version, notes?}：顶栏「有新版 vX」点开回到弹窗
+    @Published var availableUpdate: [String: Any]?
+    /// 点「现在更新并重启」时有局 / 任务在跑：先拦下说明（文案号 update.gate.playing / update.gate.busy）
+    @Published var updateGate: String?
     var updateReady: [String: Any]?
     @Published var showAddGames = false
     @Published var showKeys = false
@@ -201,6 +214,8 @@ public final class S2ArmLauncherModel: ObservableObject {
     /// 最近一次手机作业（装到 iPhone / 从手机删 / 装回上一版）的结局，玩家还没回去看：顶部胶囊「已装好 · 查看结果」靠它（#308：关掉装机弹窗后找不回结果）。
     /// 新的手机作业开始、或打开这款的装机弹窗时清掉。
     @Published var phoneResult: (gameID: String, name: String, ok: Bool)?
+    /// 控制口 /show install：打开这款的装机窗（同点顶栏「查看结果」/ 游戏的「装到 iPhone」）；界面接到后清空
+    @Published var showInstallFor: String?
     static let phoneKinds: Set<JobSession.Kind> = [.install, .installRemove, .installRestore]
     /// 连着的手机、可选机型（出包页用）；玩家选的机型（productType）。
     @Published private(set) var connectedDevices: [[String: Any]] = []
@@ -313,7 +328,8 @@ public final class S2ArmLauncherModel: ObservableObject {
     /// 原先 onAppear 一次并发起这几个作业，每个作业开头都做迁移 / 收日志：两个作业同时收私有目录日志、老库搬家时旧库目录被建回来（坑记录）。
     /// 不碰游戏库的（控制口、更新、公告、手柄中继）照常一起起。
     func startup() {
-        startControl(); finishPendingUpdate(); checkForUpdate(); loadNotice(); startControllerConnection()
+        startControl(); finishPendingUpdate(); loadInbox(); startControllerConnection()
+        refreshInstallMode(silent: true)   // 装法启动时就读（原先只在设置页 / 装机页出现时读）：控制口 /install 按它判断导出模式要不要 device，界面顶栏也按它
         refresh { [weak self] in self?.recoverBatch { self?.checkEnvironment() } }
     }
 
@@ -487,6 +503,8 @@ public final class S2ArmLauncherModel: ObservableObject {
     @Published private(set) var importPage: ImportPage?
     @Published private(set) var importSources: [ImportSource] = []
     @Published private(set) var importBatchFailure: String?
+    /// #797：刚添加的款只有更新 / DLC、缺本体（游戏名）：添加窗口不自动关，黄字说缺本体，玩家可以当场把本体拖进来
+    @Published private(set) var importNoBase: [String] = []
     private var importUsesResults = false
 
     var pendingSources: [ImportSource] { importSources.filter { !$0.succeeded } }
@@ -507,6 +525,7 @@ public final class S2ArmLauncherModel: ObservableObject {
         guard let first = urls.first, !busy else { return }
         importUsesResults = partialResults
         importBatchFailure = nil
+        importNoBase = []
         failAction(nil, game: nil)
         inlineFailure = nil
         start(.importGames, game: nil, name: first.lastPathComponent + (urls.count > 1 ? " +\(urls.count - 1)" : "")) { [weak self] sink in
@@ -516,6 +535,7 @@ public final class S2ArmLauncherModel: ObservableObject {
                 let result = try await self.provider.importGames(GameInputs(paths: urls), partialResults: partialResults, events: sink)
                 try Task.checkCancellation()
                 if partialResults { self.mergeImportSources(result.sources, submitted: urls) }
+                self.importNoBase = result.missingBase.map { id in result.games.first { $0.titleId == id }?.name ?? id }
                 self.selectImportedGame(result.games.first, forWelcome: wasEmpty)
                 // 批量出包（v0.2.4）：一次放进多款、或在出包页又放进游戏 → 识别完列成清单（出包页那款排第一）；认不出的也列上、写原因
                 let seed = self.batchSeed; self.batchSeed = nil
@@ -607,6 +627,7 @@ public final class S2ArmLauncherModel: ObservableObject {
         importSources = []
         pendingImport = []
         importBatchFailure = nil
+        importNoBase = []
         keysRejected = false
     }
 
@@ -896,7 +917,10 @@ public final class S2ArmLauncherModel: ObservableObject {
         start(.install, game: game, name: game.name) { [weak self] sink in
             do {
                 let r = try await self?.provider.install(gameId: game.id, teamId: teamId, device: device, accept: accept, events: sink)
-                if let r {
+                if let r, !r.exportFolder.isEmpty {   // 导出模式：没装手机，打开放好的文件夹
+                    self?.phoneOutcome = PhoneOutcome(skipped: r.skipped, exportFolder: r.exportFolder, exportGames: r.exportGames, exportBytes: r.exportBytes)
+                    NSWorkspace.shared.open(URL(fileURLWithPath: r.exportFolder))
+                } else if let r {
                     self?.installedTo = Self.deviceLabel(kind: r.deviceKind, name: r.deviceName)
                     self?.phoneOutcome = PhoneOutcome(device: Self.deviceLabel(kind: r.deviceKind, name: r.deviceName), packFiles: r.packFiles, packBytes: r.packBytes)
                 }
@@ -1364,7 +1388,7 @@ public final class S2ArmLauncherModel: ObservableObject {
             }
         }
         if state == .completed && session.kind == .importGames && importUsesResults &&
-            pendingImport.isEmpty && pendingSources.isEmpty {
+            pendingImport.isEmpty && pendingSources.isEmpty && importNoBase.isEmpty {
             closeImport()
         }
         if Self.repairKinds.contains(session.kind) {

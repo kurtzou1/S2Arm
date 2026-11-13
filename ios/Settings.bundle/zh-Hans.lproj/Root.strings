@@ -48,3 +48,11 @@
 "Build ID" = "包号";
 "Metal HUD" = "Metal HUD";
 "Unknown (shown after opening a game once)" = "未知（打开一次游戏后显示）";
+"Screen Layout" = "屏幕布局";
+"Applies to every game. Automatic split screen enables only when partially folded; without hinge status it stays off. Automatic orientation uses portrait for split screen and landscape otherwise. Some games need a restart to apply widescreen to the new area." = "所有游戏共用。自动分屏仅在设备半折叠时开启；无法读取折叠状态时保持关闭。自动方向在分屏时使用竖屏，否则使用横屏。部分游戏需重启后才能按新区域应用宽屏比例。";
+"Split Screen" = "上下分屏";
+"Screen Orientation" = "屏幕方向";
+"Automatic" = "自动";
+"On" = "开启";
+"Landscape" = "横屏";
+"Portrait" = "竖屏";

@@ -44,6 +44,13 @@ int main(void) {
     clear(); setenv("DOTNET_GCHeapHardLimit", "0", 1); g_largest = 30392 * MBy; s2a_gc_limit_apply();
     CHECK(!strcmp(ev("DOTNET_GCHeapHardLimit"), "0") && !strcmp(ev("DOTNET_GCHeapHardLimitSOH"), "-"), "外部已设 DOTNET_GCHeapHardLimit=0：应照用不改，实 总 %s / SOH %s",
           ev("DOTNET_GCHeapHardLimit"), ev("DOTNET_GCHeapHardLimitSOH"));
+    // 重选（窗口当场放宽后低区变小，v0.3.4）：自己选的总上限档 → 按 3072 MB 重选成按需档；外部指定的不动
+    { void s2a_gc_limit_reapply(void);
+      clear(); g_largest = 60416 * MBy; s2a_gc_limit_apply(); g_largest = 3072 * MBy; s2a_gc_limit_reapply();
+      CHECK(!strcmp(ev("DOTNET_GCHeapHardLimit"), "-") && !strcmp(ev("DOTNET_GCHeapHardLimitSOH"), "18000000"), "重选：60416 MB 选的总上限档，低区缩到 3072 MB 后应改按需档，实 总 %s / SOH %s",
+            ev("DOTNET_GCHeapHardLimit"), ev("DOTNET_GCHeapHardLimitSOH"));
+      clear(); setenv("DOTNET_GCHeapHardLimit", "0", 1); g_largest = 60416 * MBy; s2a_gc_limit_apply(); g_largest = 3072 * MBy; s2a_gc_limit_reapply();
+      CHECK(!strcmp(ev("DOTNET_GCHeapHardLimit"), "0") && !strcmp(ev("DOTNET_GCHeapHardLimitSOH"), "-"), "重选：外部指定的不动，实 总 %s / SOH %s", ev("DOTNET_GCHeapHardLimit"), ev("DOTNET_GCHeapHardLimitSOH")); }
     clear();
     printf("%s t_gclimit：%d 处不符（四档门槛 10 例、各档设变量、外部指定不改）\n", bad ? "✗" : "✓", bad);
     return bad != 0;

@@ -36,6 +36,8 @@ public struct ImportSource: Decodable, Identifiable {
 public struct ImportBatchResult {
     public let games: [GameInfo]
     public let sources: [ImportSource]
+    /// #797：这次放进来、但游戏库里只有更新 / DLC 没有本体的游戏号（作业结果 imports[].missingBase，按整批加完后的库判）
+    public let missingBase: [String]
 }
 
 public final class S2ArmEngineProvider: EngineProvider {
@@ -85,7 +87,11 @@ public final class S2ArmEngineProvider: EngineProvider {
         if partialResults { extra["partialResults"] = true }
         let result = try await client.perform("import", extra: extra, events: events).result
         let games = partialResults ? await importedGames(in: result) : try await resolveImportedGames(in: result)
-        return ImportBatchResult(games: games, sources: ImportSource.rows(in: result))
+        var missingBase: [String] = []
+        for item in result["imports"] as? [[String: Any]] ?? [] where item["missingBase"] as? Bool == true {
+            if let id = item["id"] as? String, !id.isEmpty, !missingBase.contains(id) { missingBase.append(id) }
+        }
+        return ImportBatchResult(games: games, sources: ImportSource.rows(in: result), missingBase: missingBase)
     }
 
     public func importedGames(in result: [String: Any]) async -> [GameInfo] {

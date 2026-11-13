@@ -41,7 +41,7 @@ struct post { volatile uint32_t *val; uint32_t mode, v; uint64_t report; uint32_
 struct occ_ev { uint32_t pos; uint32_t report; uint64_t addr; };   // 遮挡计数的事件：发生时本段已经开过 pos 个槽；report 0 = 复位、1 = 报告（写回 addr）
 struct gw_ev { uint64_t pool_key, id; };   // 本段里 GPU 写进池的一段（rp_buf_gpu_write_note 的登记）
 struct sub { uint32_t mids, freed; uint8_t orphan;   /* mids：还没完成的中途段里有几个指着这份提交；orphan：最后一段没交成，由最后一个中途段的完成回调来放（见 sub_orphan） */
-             struct post *p; int n, cap; uint64_t t_commit; struct occ_ev *oe; int noe, oecap; uint64_t fence; struct gw_ev *gw; int ngw, gwcap;
+             struct post *p; int n, cap, nfx; /* nfx：p 里时间戳报告以外的条数 */ uint64_t t_commit; struct occ_ev *oe; int noe, oecap; uint64_t fence; struct gw_ev *gw; int ngw, gwcap;
     uint64_t *oc; uint32_t noc, occ_base; };   // oc：中途交过段的提交，各段的遮挡槽结果按整次提交的槽号攒在这里（没拆过为 NULL）；occ_base：最后一段的第一个槽号
 // 分时读数（上屏那边每 5 秒取走一次清零）：一次队列提交里回放花的、交给后端花的、游戏等围栏花的、段从提交到完成隔了多久
 static uint64_t now_ns(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec; }
@@ -60,6 +60,7 @@ uint64_t rp_sub_serial(void) { return g_sub_serial; }
 static uint64_t g_seg_serial;  // 第几个后端段（一次提交中途交过段就不止一个）。段里的暂存内容随段回收，按它判能不能复用
 uint64_t rp_seg_serial(void) { return g_seg_serial; }
 static uint64_t g_fence;       // 最近一次提交的栅栏值
+static uint64_t g_effect_fence, g_finish_prev;   // 见 nvn_be_finish_publish
 enum { SUB_STEP = 64 };       // 一次提交在时间线上占 64 个值：最后一段（带回写）取 g_fence + 64，它前面的前置段 / 中途先交的段依次取 +1、+2…
 static uint32_t g_mid;         // 这次提交已经用掉几个中间值
 static uint64_t g_split_base;  // 上次中途交段时的累计绘制笔数
@@ -268,6 +269,8 @@ uint64_t nvn_be_sub_commit(void) {
     nvn_gpu_cmd c = g_cmd; g_cmd = NULL;
     // 契约：无论成败 done 恰好调一次（失败以 FAILED 调），所以 s 一定由 sub_done 释放
     uint64_t t0 = now_ns(); if (s) { s->t_commit = t0; s->fence = f; s->occ_base = g_occ_base; }
+    if (s && (s->nfx || s->noe || s->ngw)) g_effect_fence = f;   // 这次提交做完时有东西要写回游戏内存（事件、时间戳以外的计数器报告、遮挡结果、GPU 写的缓冲）
+    if (s && (s->n || s->noe || s->ngw)) { pf_add(RP_PERF_FX_SUBS, 1); pf_add(RP_PERF_FX_OCC, (uint64_t)s->noe); pf_add(RP_PERF_FX_GW, (uint64_t)s->ngw); }   // 这次提交做完时有东西要写回游戏内存（事件、计数器报告、遮挡结果、GPU 写的缓冲）
     rc_commit(f);
     if (!nvn_gpu_ok(nvn_gpu_cmd_commit(c, f, sub_done, s, &err))) red("提交失败：%s", err.why);
     pf_add(RP_PERF_COMMIT_NS, now_ns() - t0); pf_add(RP_PERF_SUBS, 1);
@@ -277,7 +280,27 @@ uint64_t nvn_be_sub_commit(void) {
 }
 
 uint64_t nvn_be_last_fence(void) { return g_fence; }
-int rp_prev_subs_done(void) { return __atomic_load_n(&g_done_fence, __ATOMIC_ACQUIRE) >= g_fence; }   // 此前交出去的提交是否都做完了（g_fence 在本次提交交出最后一段时才前进）
+uint64_t rp_sub_fence(void) { return g_fence + SUB_STEP; }   // 正在回放的这次提交最后一段的栅栏值（它中途先交的段取的值都比这个小）
+int rp_fence_done(uint64_t f) { return __atomic_load_n(&g_done_fence, __ATOMIC_ACQUIRE) >= f; }
+// 游戏调 QueueFinish 时要等到哪个栅栏值（前端在提交锁里取值，出了锁再等）。
+// 真机上 Finish 等的是「显卡把已提交的都做完」。游戏能观察到的只有两样：做完时写回它内存的东西，和它之后再提交的活排在后面。
+// 有的游戏每帧呈现前都调一次：回放完一帧之后在这里再等显卡把这一帧做完，显卡这一帧的活和下一帧的回放完全串着。
+// 开关 nvk_finish_lag（缺省 0，照旧等到最后一次提交）：
+//   1 = 只等到「上一次 Finish 时的最后一次提交」和「最近一次有东西要写回的提交」里靠后的那个，显卡上最多压着一帧的活，
+//       下一帧的回放与这一帧的显卡工作重叠。「有东西要写回」不算时间戳报告：它是测量值，游戏 Finish 之后读到的是上一帧的时间戳
+//       （用它调动态分辨率的游戏晚一帧得到反馈）；事件、遮挡结果、别的计数器、显卡写的缓冲照等，一样不少；
+//   2 = 诊断档：什么回写都不等。回写照常在提交做完时落地，游戏最多晚一帧看到。只用来量上限，不是产品行为。
+// 配套在 rp_buf.c：每次这样放行一帧，池镜像换到另一份（rp_buf_frame_flip），这一帧直接写的那份显卡已经不读了。
+void rp_buf_frame_flip(void);
+uint64_t nvn_be_finish_publish(void) {
+    uint64_t last = g_fence; int lag = nvn_plat_flag("nvk_finish_lag", 0);
+    if (!lag) { g_finish_prev = last; return last; }
+    uint64_t t = lag == 2 || g_finish_prev > g_effect_fence ? g_finish_prev : g_effect_fence;
+    g_finish_prev = last;
+    if (t < last) { rp_buf_frame_flip(); pf_add(RP_PERF_FIN_SKIP, (last - t) / SUB_STEP); }   // 有提交没等：它可能还在读当前这份镜像
+    return t;
+}
+void nvn_be_finish_wait(uint64_t fence) { if (fence) nvn_be_wait(fence, 5000000000ull); }
 
 int nvn_be_wait(uint64_t fence, uint64_t timeout_ns) {
     if (!fence) return 1;
@@ -288,10 +311,12 @@ int nvn_be_wait(uint64_t fence, uint64_t timeout_ns) {
     return nvn_gpu_ok(r) || r.code == NVN_GPU_E_FAILED || r.code == NVN_GPU_E_DEVICE;
 }
 
+static uint64_t g_fx_types;
+uint64_t rp_fx_report_types(void) { return __atomic_exchange_n(&g_fx_types, 0, __ATOMIC_RELAXED); }
 static void post_event(volatile uint32_t *val, uint32_t mode, uint32_t v) {
     struct sub *s = g_sub; if (!s || !val) return;
     if (s->n == s->cap) { int cap = s->cap ? s->cap * 2 : 8; struct post *np = realloc(s->p, (size_t)cap * sizeof *np); if (!np) { red("%s", "回写表扩不了，这条事件 / 计数器回写丢了"); return; } s->p = np; s->cap = cap; }
-    s->p[s->n++] = (struct post){val, mode, v, 0, 0};
+    s->p[s->n++] = (struct post){val, mode, v, 0, 0}; s->nfx++; pf_add(RP_PERF_FX_EVENT, 1);
 }
 // 一笔读回可有多行与多个层：先全登记，再交给后端；失败撤销本笔全部登记。
 // 仅登记真正写到的行，不把行间 / 片间填充覆盖回游戏内存。
@@ -323,7 +348,7 @@ int rp_post_gpu_write(uint64_t addr, uint64_t len) { return rp_post_gpu_write_ro
 static void post_report(uint64_t addr, uint32_t type) {
     struct sub *s = g_sub; if (!s || !addr) return;
     if (s->n == s->cap) { int cap = s->cap ? s->cap * 2 : 8; struct post *np = realloc(s->p, (size_t)cap * sizeof *np); if (!np) { red("%s", "回写表扩不了，这条事件 / 计数器回写丢了"); return; } s->p = np; s->cap = cap; }
-    s->p[s->n++] = (struct post){NULL, 0, 0, addr, type};
+    s->p[s->n++] = (struct post){NULL, 0, 0, addr, type}; if (type != NVN_COUNTER_TYPE_TIMESTAMP && type != NVN_COUNTER_TYPE_TIMESTAMP_TOP) s->nfx++; pf_add(RP_PERF_FX_REPORT, 1); __atomic_fetch_or(&g_fx_types, 1ull << (type & 63), __ATOMIC_RELAXED);
 }
 
 void nvn_be_sub_index(const uint64_t *h, int n) { (void)h; (void)n; }     // 存储前瞻索引：通道规划接上时再建

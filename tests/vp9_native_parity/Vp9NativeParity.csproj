@@ -6,6 +6,9 @@
     <!-- Vp9NativeFrame.cs 自 11-10 起要用 Vp9CompressedHeader（Nvdec 程序集内部类型，从引用里看不见）：同样直接编；它只依赖 System / System.Numerics -->
     <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Nvdec/Vp9CompressedHeader.cs" />
     <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Nvdec/Types/Vp9/EntropyProbs.cs" />
+    <!-- vt 腿（对拍程序的 vt 硬解模式）：苹果 VideoToolbox 硬解后端（自包含互操作，只依赖 System / Ryujinx.Graphics.Video /
+         Ryujinx.Common 日志，经 Nvdec 的引用传递可用），直接编进对拍程序，不用引用整个 S2A.Apple -->
+    <Compile Include="../../platform/apple/cs/video/VideoToolboxVp9Backend.cs" />
     <ProjectReference Include="../../compat/tree/src/Ryujinx.Graphics.Nvdec/Ryujinx.Graphics.Nvdec.csproj" />
     <ProjectReference Include="../../compat/tree/src/Ryujinx.Graphics.Nvdec.Vp9/Ryujinx.Graphics.Nvdec.Vp9.csproj" />
   </ItemGroup>

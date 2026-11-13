@@ -119,7 +119,7 @@ int main(int argc, char **argv) {
             } else {
                 groupItems++;
                 if (spec[@"Key"] && footers[spec[@"Key"]]) gfxGroup = YES;
-                if ([spec[@"Type"] isEqual:@"PSMultiValueSpecifier"]) {
+                if ([spec[@"Type"] isEqual:@"PSMultiValueSpecifier"] && footers[spec[@"Key"]]) {
                     specs[spec[@"Key"]] = spec;
                     check([group[@"FooterText"] hasPrefix:footers[spec[@"Key"]]], [spec[@"Key"] stringByAppendingString:@" 的组说明对应当前选项"]);
                     if ([spec[@"Key"] isEqual:keys[0]]) {
@@ -313,12 +313,12 @@ int main(int argc, char **argv) {
                 s2a_ios_publish_bundle_info(cases[name], suite);
                 NSString *mode = [suite objectForKey:@"S2AGraphicsModeText"];
                 if ([name isEqual:@"直连成功"]) {
-                    check([mode isEqual:@"直连"], @"直连局显示「直连」（与 Mac 启动器同一句）");
+                    check([mode isEqual:[NSBundle.mainBundle localizedStringForKey:@"about.mode.direct" value:nil table:@"S2ArmHost"]], @"直连局显示当前语言的直连说明");
                     check([[suite objectForKey:@"S2ADirectLibVersionText"] isEqual:@"b-0a7dae3c1e7b"], @"直连库版本照原样显示");
                     check([[suite objectForKey:@"S2ABuildIDText"] isEqual:@"abc123"], @"包号照原样显示");
                 } else {
-                    check([mode hasPrefix:@"未知"], [name stringByAppendingString:@"：画面模式不是 direct 时显示未知，不许当直连"]);
-                    check([[suite objectForKey:@"S2ADirectLibVersionText"] hasPrefix:@"无"], [name stringByAppendingString:@"：缺直连库版本时说明这一包没带"]);
+                    check([mode isEqual:[NSBundle.mainBundle localizedStringForKey:@"about.mode.unrecorded" value:nil table:@"S2ArmHost"]], [name stringByAppendingString:@"：画面模式不是 direct 时显示未知，不许当直连"]);
+                    check([[suite objectForKey:@"S2ADirectLibVersionText"] isEqual:[NSBundle.mainBundle localizedStringForKey:@"about.directLib.none" value:nil table:@"S2ArmHost"]], [name stringByAppendingString:@"：缺直连库版本时说明这一包没带"]);
                 }
                 check([[suite objectForKey:@"S2APackTimeText"] length] > 0, [name stringByAppendingString:@" 出包时间总有值（缺则未知）"]);
             }

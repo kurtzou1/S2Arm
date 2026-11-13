@@ -224,6 +224,13 @@ nonisolated(unsafe) private var lastPlayed = ""
     var s = S2ArmGameSettings.sections(for: "G1", stores: stores, state: .init(selected: "default", hasMine: false))
     #expect(row(s, "fps60")?.value == "on" && row(s, "widenForce")?.value == "off" && row(s, "vpadOpacity")?.value == "100")
     #expect(row(s, "vpadHoldLock")?.value == "on")
+    #expect(row(s, "splitScreen")?.value == "auto" && row(s, "screenOrientation")?.value == "auto")
+    S2ArmGameSettings.apply(id: "G1", setting: "splitScreen", value: "on", stores: stores)
+    S2ArmGameSettings.apply(id: "G1", setting: "screenOrientation", value: "portrait", stores: stores)
+    let sharedScreen = S2ArmGameSettings.sections(for: "G2", stores: stores, state: .init(selected: "default", hasMine: false))
+    #expect(row(sharedScreen, "splitScreen")?.value == "on" && row(sharedScreen, "screenOrientation")?.value == "portrait")
+    S2ArmGameSettings.apply(id: "G1", setting: "splitScreen", value: "invalid", stores: stores)
+    #expect(app.string(forKey: "splitScreen") == "on")
     #expect(row(S2ArmGameSettings.sections(for: "G1", stores: stores, state: .init(selected: "default", hasMine: false, holdLock: false)), "vpadHoldLock")?.value == "off")
     if case .choice(let o) = row(s, "vpadLayout")?.kind { #expect(o.map(\.id) == ["default", "edit"]) } else { Issue.record("布局行应是多选") }
     // 改：G1 关 60 帧、开宽屏强制、透明度 40 → G1 两项变了、G2 不变；透明度全局 0.4
@@ -467,4 +474,40 @@ nonisolated(unsafe) private var lastPlayed = ""
     let state = model.games.first?.game.state
     #expect(state == .installing(InstallStage(.failed, reason: why)))
     #expect(state?.explanation.hasPrefix(why + "\n") == true)
+}
+
+// 共享表 app scope 的规范 id，与原生 / 设置 App 共用；旧键只迁移一次。
+@MainActor @Test func playSettingsCanonicalMigration() throws {
+    let suite = "s2a.test.play." + UUID().uuidString
+    let app = try #require(UserDefaults(suiteName: suite))
+    defer { app.removePersistentDomain(forName: suite) }
+    let stores = S2ArmGameSettings.Stores(game: { _ in nil }, app: app)
+    func value(_ key: String, game: String = "G1") -> String? {
+        S2ArmGameSettings.sections(for: game, stores: stores, state: .init(selected: "default", hasMine: false)).flatMap(\.rows).first { $0.id == key }?.value
+    }
+    #expect(value("splitScreen") == "auto" && value("screenOrientation") == "auto")
+    #expect((app.persistentDomain(forName: suite) ?? [:]).isEmpty)
+    app.set("on", forKey: "S2ASplitScreen"); app.set("portrait", forKey: "S2AScreenOrientation")
+    #expect(value("splitScreen") == "on" && value("screenOrientation") == "portrait")
+    #expect(app.string(forKey: "splitScreen") == "on" && app.string(forKey: "screenOrientation") == "portrait")
+    #expect(app.object(forKey: "S2ASplitScreen") == nil && app.object(forKey: "S2AScreenOrientation") == nil)
+    app.set("off", forKey: "splitScreen"); app.set("landscape", forKey: "screenOrientation")
+    app.set("on", forKey: "S2ASplitScreen"); app.set("portrait", forKey: "S2AScreenOrientation")
+    #expect(value("splitScreen", game: "G2") == "off" && value("screenOrientation", game: "G2") == "landscape")
+    #expect(app.object(forKey: "S2ASplitScreen") == nil && app.object(forKey: "S2AScreenOrientation") == nil)
+    app.register(defaults: ["splitScreen": "auto", "screenOrientation": "auto"])
+    #expect(value("splitScreen") == "off" && value("screenOrientation") == "landscape")
+    app.set(42, forKey: "splitScreen"); app.set([], forKey: "screenOrientation")
+    app.set("on", forKey: "S2ASplitScreen"); app.set("portrait", forKey: "S2AScreenOrientation")
+    #expect(value("splitScreen") == "auto" && value("screenOrientation") == "auto")
+    #expect((app.persistentDomain(forName: suite) ?? [:]).isEmpty)
+    for (key, values) in [("splitScreen", ["auto", "on", "off"]), ("screenOrientation", ["auto", "landscape", "portrait"])] {
+        for selected in values {
+            S2ArmGameSettings.apply(id: "G1", setting: key, value: selected, stores: stores)
+            #expect(app.string(forKey: key) == selected && value(key, game: "G2") == selected)
+        }
+        S2ArmGameSettings.apply(id: "G1", setting: key, value: "invalid", stores: stores)
+        #expect(app.string(forKey: key) == values.last)
+    }
+    #expect(app.object(forKey: "S2ASplitScreen") == nil && app.object(forKey: "S2AScreenOrientation") == nil)
 }

@@ -123,8 +123,10 @@ import S2ArmAppleAdapter
         case ("POST", "/install"):
             guard let g = game() else { return .bad("没有这个 gameId") }
             if let b = busy() { return b }
-            // 往设备上装东西一律要说明装到哪台（11-11：作业层不替玩家挑，控制口也不拿界面上选中的那台顶替）；s2armctl targets 列设备号
-            guard let device = str("device") else { return .bad(Self.deviceRequired) }
+            // 往设备上装东西一律要说明装到哪台（11-11：作业层不替玩家挑，控制口也不拿界面上选中的那台顶替）；s2armctl targets 列设备号。
+            //   装法是「导出，自己签名安装」时不连手机、出到文件夹，不要 device（同界面按钮、同 Windows 控制口）
+            let device = str("device")
+            if device == nil, model.installMode.mode != "export" { return .bad(Self.deviceRequired) }
             model.install(g, teamId: str("teamId"), device: device, acceptDropped: a["acceptDropped"] as? Bool ?? false,
                           accept: Set(["acceptNoBackup", "acceptStale"].filter { a[$0] as? Bool == true }), ask: false); return .ok()
         case ("POST", "/signingProject"):
@@ -241,7 +243,10 @@ import S2ArmAppleAdapter
                 guard let g = game() else { return .bad("没有这个 gameId") }
                 model.showEnvironment = false; model.exportFor = g.id
             case "library": model.showEnvironment = false; model.exportFor = nil
-            default: return .bad("page 只认 environment / export / library")
+            case "install":   // 装机窗（进度 / 完成页）：同点顶栏「查看结果」
+                guard let g = game() else { return .bad("没有这个 gameId") }
+                model.showEnvironment = false; model.showInstallFor = g.id
+            default: return .bad("page 只认 environment / export / library / install")
             }
             return .ok()
         case ("POST", "/refresh"):

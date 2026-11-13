@@ -34,9 +34,18 @@ def have_real(have, sid):
     return nonempty_dir(os.path.join(have, sid)) and not os.path.exists(os.path.join(have, sid + '.synth'))
 
 
+# 系统自动生成的文件（exFAT / FAT 上 macOS 的 ._<名>、访达 .DS_Store、Windows desktop.ini / Thumbs.db）不是系统数据：不算「有内容」、不进内容身份。
+#   同 pack/jobs/layout.py OS_JUNK / OS_JUNK_PREFIX（tests/os_junk_sync_test.sh 核一致）；不 import 作业层：本脚本单独跑，sys.path 里没有 pack/jobs
+OS_JUNK = frozenset({".DS_Store", "desktop.ini", "Thumbs.db"})
+
+
+def os_junk(name):
+    return name in OS_JUNK or name.startswith("._")
+
+
 def nonempty_dir(p):
     try:
-        return os.path.isdir(p) and any(os.scandir(p))
+        return os.path.isdir(p) and any(not os_junk(e.name) for e in os.scandir(p))
     except OSError:
         return False
 
@@ -45,7 +54,7 @@ def tree_digest(d):
     # 目录内容身份：普通文件按相对路径排序，逐个「路径 + 整份内容」喂 sha256（0802 / 0823 只有几 MB，整读；读不了 → None，按不同处理）
     h = hashlib.sha256()
     try:
-        files = sorted(os.path.relpath(os.path.join(a, f), d).replace(os.sep, '/') for a, _, fs in os.walk(d) for f in fs)
+        files = sorted(os.path.relpath(os.path.join(a, f), d).replace(os.sep, '/') for a, _, fs in os.walk(d) for f in fs if not os_junk(f))
         for rel in files:
             h.update(rel.encode() + b'\0')
             with open(os.path.join(d, rel), 'rb') as f:

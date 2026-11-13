@@ -908,6 +908,8 @@ def power_tsv(status="Discharging", currents=(-800000,), boots=None, powered="fa
 class RunGameTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="s2a-rungame-"))
+        # 建目录的这一刻就登记清理：用例通过、失败、或下面某一步出错都会走到；放进 tearDown 则 setUp 出错时不会走。
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         (self.tmp / "shot.png").write_bytes(self._png())
         # dump 里混一个别进程（9999）的完整帧日志块：比主块还长，不绑定 PID 就会被它顶进帧表
         stray = frame_log_text(400, base_ts=10_050_000, pid=9999)

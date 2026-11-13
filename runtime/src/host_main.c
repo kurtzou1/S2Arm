@@ -139,6 +139,7 @@ static void load_session_modules(void *unused) {
     (void)unused;
     switch_program_modules();
 #if defined(__APPLE__)
+    { void s2a_test_ballast_commit(void); s2a_test_ballast_commit(); }   // 测试压舱（S2A_TEST_BALLAST_MB，vawin.c）：布局排完、装模块前才真占
     { int s2a_guest_file_retry(void); s2a_guest_file_retry(); }   // 起局时空间不够没接上文件后备的，解包完、装模块前再试一次（vawin.c，#483）
 #endif
     load_modules(g_module_dir, (const char **)g_module_names, g_module_count);

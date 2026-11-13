@@ -43,6 +43,9 @@
             android:excludeFromRecents="true" android:screenOrientation="sensorLandscape"
             tools:ignore="DiscouragedApi"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|density|uiMode" />
+        <!-- #528 item 15: the diagnostic bundle reaches the chosen app only through the share intent's one-off grant -->
+        <provider android:name=".DiagnosticShareProvider" android:authorities="${applicationId}.diag"
+            android:exported="false" android:grantUriPermissions="true" />
     </application>
 </manifest>
 

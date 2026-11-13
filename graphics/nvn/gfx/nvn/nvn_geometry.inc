@@ -113,6 +113,36 @@ typedef struct { pso_key k; const void *ts; uint32_t pad; } mtk_key;   // pso_ke
 static nvn_hmap g_pso_mtk = {.klen = sizeof(mtk_key)}; static os_unfair_lock g_pso_mtk_lock = OS_UNFAIR_LOCK_INIT;
 static NSObject *g_pso_mtk_building; static dispatch_queue_t g_mtk_q; static dispatch_group_t g_mtk_group;
 static uint64_t g_mtk_n, g_mtk_ind_n, g_mtk_wait, g_mtk_skip;   // drawn (of them indirect), skipped while the pipeline was built, skipped as not drawable (red)
+// #770 实验开关 S2A_MESH_PACE（缺省 0 = 关，照旧建好即交付）：M1 Max（没有硬件网格着色，驱动走软件网格）换图时 GPU 挂死，都紧跟某条网格管线交付、
+//   且发生在多条网格管线排队待交付时；跳过网格绘制不挂；清掉系统缓存全部现编照样挂（作者 11-12 反例，所以不是缓存）。两档各验一个假设：
+//   1 = 建好的先攒着，后台一条都不在编了才一起交付（假设：新管线首次上 GPU 时编译服务还在编下一条软件网格管线 → 挂）；
+//   2 = 每帧最多交付一条（假设：同一帧里几条新管线首次上 GPU → 挂）。交付和每条管线第一次被画都记帧号与还在编的条数，挂死前最后几行能对上是哪种
+static int mtk_pace(void) {
+    static int v = -1; if (v >= 0) return v;
+    const char *e = getenv("S2A_MESH_PACE"); v = e && (*e == '1' || *e == '2') && !e[1] ? *e - '0' : 0;
+    if (v) MLOG("task / mesh pipelines: pace %d (S2A_MESH_PACE: %s)", v, v == 1 ? "deliver only when no mesh pipeline is still building" : "deliver at most one per frame");
+    return v;
+}
+static _Atomic int g_mtk_inflight;   // mesh pipelines queued or building in the background
+static NSMutableArray *g_mtk_ready;   // pace on: built, not delivered yet (each @[NSData key, pipeline or NSNull]); under g_pso_mtk_lock
+static uint64_t g_mtk_pub_frame = UINT64_MAX;
+static NSMutableSet *g_mtk_drawn;   // pipelines already drawn once (first-draw log)
+static NSMapTable *g_mtk_names;   // pipeline → "task … mesh … fragment …" for the #770 logs (not the pipeline's label: -label is also a Metal 4 encoder selector, t_nvn_rec_cover); under g_pso_mtk_lock
+static const char *mtk_name(id p) { if (!p || p == NSNull.null) return "(refused)"; os_unfair_lock_lock(&g_pso_mtk_lock); NSString *n = [g_mtk_names objectForKey:p]; os_unfair_lock_unlock(&g_pso_mtk_lock); return n ? n.UTF8String : "?"; }
+static void mtk_publish(void) {   // pace on, submit thread, before a mesh draw looks its pipeline up
+    int pace = mtk_pace(); if (!pace || !g_mtk_ready.count) return;
+    uint64_t f = atomic_load_explicit(&g_cur_frame, memory_order_relaxed); int fly = atomic_load(&g_mtk_inflight);
+    if (pace == 1 && fly) return;
+    if (pace == 2 && f == g_mtk_pub_frame) return;
+    os_unfair_lock_lock(&g_pso_mtk_lock);
+    NSUInteger n = pace == 2 ? 1 : g_mtk_ready.count;
+    for (NSUInteger i = 0; i < n; i++) { NSArray *r = g_mtk_ready[i]; mtk_key kk; [(NSData *)r[0] getBytes:&kk length:sizeof kk]; hm_put_id(&g_pso_mtk, &kk, r[1]); }
+    NSArray *done = [g_mtk_ready subarrayWithRange:NSMakeRange(0, n)]; [g_mtk_ready removeObjectsInRange:NSMakeRange(0, n)]; NSUInteger left = g_mtk_ready.count;
+    os_unfair_lock_unlock(&g_pso_mtk_lock);
+    g_mtk_pub_frame = f;
+    for (NSArray *r in done) MLOG("task / mesh pipeline delivered (pace %d) at frame %llu: %s; still building %d, built and held %lu", pace, (unsigned long long)f,
+                                  mtk_name(r[1]), fly, (unsigned long)left);
+}
 static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
     NvShader *ts = g_mtk.ts, *ms = g_mtk.ms, *fs = raster->sh[1]; int merged = g_pso_lmap != NULL;
     mtk_key mk; memset(&mk, 0, sizeof mk); pso_key *k = &mk.k;
@@ -131,6 +161,12 @@ static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
     if (!ps) { if (!g_pso_mtk_building) g_pso_mtk_building = [NSObject new]; hm_put_id(&g_pso_mtk, &mk, g_pso_mtk_building); }
     os_unfair_lock_unlock(&g_pso_mtk_lock);
     if (ps == NSNull.null && !mk.pad && want) vp_ask(S.prog, ms, want);   // refused unpadded: ask for the padded variant (once; a variant that cannot be made stays failed)
+    if (ps && ps != NSNull.null && ps != g_pso_mtk_building) {   // #770: the first draw of each pipeline, with the frame and how many are still building
+        if (!g_mtk_drawn) g_mtk_drawn = [NSMutableSet set];
+        if (![g_mtk_drawn containsObject:ps]) { [g_mtk_drawn addObject:ps];
+            MLOG("task / mesh pipeline first drawn at frame %llu: %s; still building %d", (unsigned long long)atomic_load_explicit(&g_cur_frame, memory_order_relaxed),
+                 mtk_name(ps), atomic_load(&g_mtk_inflight)); }
+    }
     if (ps) return ps == NSNull.null || ps == g_pso_mtk_building ? nil : ps;
     MTLRenderPipelineDescriptor *d = pso_desc(k, nil, fs, g_pso_fsfn, merged);   // the fragment function variant and the attachments, as a vertex draw's (no vertex stage)
     MTLMeshRenderPipelineDescriptor *m = [MTLMeshRenderPipelineDescriptor new];
@@ -140,13 +176,20 @@ static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
     for (int i = 0; i < 8; i++) m.colorAttachments[i] = d.colorAttachments[i];
     m.depthAttachmentPixelFormat = d.depthAttachmentPixelFormat; m.stencilAttachmentPixelFormat = d.stencilAttachmentPixelFormat;
     NSString *names = [NSString stringWithFormat:@"task %s mesh %s%s fragment %s", ts ? ts->key : "-", ms->key, pf ? " (padded)" : "", fs ? fs->key : "-"]; mtk_key kk = mk;
+    atomic_fetch_add(&g_mtk_inflight, 1);
     if (!g_mtk_q) { g_mtk_q = dispatch_queue_create("dm.nvn.mesh", s2a_qos_queue_attr(DISPATCH_QUEUE_SERIAL, S2A_QOS_SHADER_VARIANT)); g_mtk_group = dispatch_group_create(); }
     dispatch_group_async(g_mtk_group, g_mtk_q, ^{ @autoreleasepool {
         NSError *e = nil; uint64_t t0 = bp_now();
         id<MTLRenderPipelineState> p = [g_dev newRenderPipelineStateWithMeshDescriptor:m options:MTLPipelineOptionNone reflection:nil error:&e];
-        if (p) MLOG("task / mesh pipeline: %s, %.1f ms in the background", names.UTF8String, (bp_now() - t0) / 1e6);
+        int left = atomic_fetch_sub(&g_mtk_inflight, 1) - 1;
+        if (p) MLOG("task / mesh pipeline: %s, %.1f ms in the background (frame %llu, still building %d)", names.UTF8String, (bp_now() - t0) / 1e6,
+                    (unsigned long long)atomic_load_explicit(&g_cur_frame, memory_order_relaxed), left);
         else MLOG("【红】 task / mesh pipeline refused (%s): %s; its draws are skipped", names.UTF8String, e.localizedDescription.UTF8String);
-        os_unfair_lock_lock(&g_pso_mtk_lock); hm_put_id(&g_pso_mtk, &kk, p ?: NSNull.null); os_unfair_lock_unlock(&g_pso_mtk_lock);
+        os_unfair_lock_lock(&g_pso_mtk_lock);
+        if (p) { if (!g_mtk_names) g_mtk_names = [NSMapTable strongToStrongObjectsMapTable]; [g_mtk_names setObject:names forKey:p]; }
+        if (mtk_pace()) { if (!g_mtk_ready) g_mtk_ready = [NSMutableArray array]; [g_mtk_ready addObject:@[[NSData dataWithBytes:&kk length:sizeof kk], p ? (id)p : NSNull.null]]; }   // held: mtk_publish delivers
+        else hm_put_id(&g_pso_mtk, &kk, p ?: NSNull.null);
+        os_unfair_lock_unlock(&g_pso_mtk_lock);
     } });
     return nil;
 }
@@ -194,6 +237,7 @@ static void mesh_tasks_draw(const p_draw *dw) {
     }
     NvProg *raster = pr->geo_raster;   // the pixel stage alone (geo_draw keeps its reader program here; a mesh program has no geometry stage)
     if (!raster || raster->sh[0] || raster->sh[1] != pr->sh[1]) { raster = [NvProg new]; raster->sh[1] = pr->sh[1]; raster->gp = pr->gp; pr->geo_raster = raster; }
+    mtk_publish();   // #770 S2A_MESH_PACE: deliver held pipelines first
     g_mtk.on = 1; g_mtk.miss = 0; g_mtk.ts = ts; g_mtk.ms = ms; g_mtk.first = (uint32_t)dw->first; g_mtk.count = (uint32_t)dw->count; g_mtk.ind = ind;
     g_geo_program = raster;
     p_draw triangle = {.prim = 4, .count = 3, .instances = 1};

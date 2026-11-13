@@ -26,7 +26,7 @@
 | `导航卡住（离收局只剩 N 秒，不再问驾驶员）` | 局时快到了，等模型太久把局时吃光 | ③ 4 |
 | 「模型说可操控但读数未到场景量级」反复出现 | 模型认为进局了，宿主读数不认：低绘制场景或模型误判 | ③ 5 |
 | 「模型说可操控却答了 + / -」 | 暂停页 / 过场被模型当成可操控，被拦下（正确行为） | ③ 6 |
-| `导航卡住（没有视觉驾驶员，也没有学过的路线）` | 本机没有 OpenRouter 密钥、也没学过这款 | ② 驾驶员在不在 |
+| `导航卡住（没有视觉驾驶员，也没有学过的路线）` / `导航卡住（看屏驾驶员不可用：…）` | 本机没有 claude 命令行或没登录（`or` 后端：没有 OpenRouter 密钥）、也没学过这款 | ② 驾驶员在不在 |
 | 出图停 60 秒 | 不是自动玩家的问题 | [原生层 ② 进不去与 Break](原生层_进不去与Break.md) |
 
 ## ② 用哪个工具、看哪几行
@@ -62,8 +62,9 @@
 
 ### 驾驶员在不在
 
-- 后端由 `S2A_VISION_SH` 指的脚本决定，缺省 `tests/autoplay/vision.sh`。密钥只从仓库外 `~/.s2arm/.secrets/openrouter.key` 读；没有密钥时日志报视觉测试员不可用，只能回放学过的路线。
-- 升级后端（`vision_or.py`）唯一顺序：OpenRouter 第一个模型（缺省 sonnet）→ 维护者 中转站（钥匙 `~/.s2arm/.secrets/relay.key`）→ OpenRouter 其余模型（`S2A_VISION_OR_MODELS` 逗号分隔，缺省其余是 kimi）。任何一档报错 / 超时 / 空回答落下一档。
+- 后端由 `S2A_VISION_SH` 指的脚本决定，缺省 `tests/autoplay/vision.sh`；脚本里 `S2A_VISION_BACKEND` 缺省 `cli` = 本机 `claude` 命令行直连（用这台机器上 CLI 自己的登录），`or` = OpenRouter（钥匙只从仓库外 `~/.s2arm/.secrets/openrouter.key` 读），`jev` = 先问 Jev 再问 CLI。中转站档 11-12 起删除（中转站停用）。
+- 后端不可用（PATH 上没有 `claude` / CLI 没登录 / `or` 没钥匙或回过 402）：起步或第一问就报【红】「看屏驾驶员不可用：<原因>」并收局，`ap_summary.json` 的 `why` 写同一句；不再当成「这一问没答」连问 3 次。学过这款路线的，不可用时仍可回放。
+- `or` 后端（`vision_or.py`）顺序：OpenRouter 各模型（`S2A_VISION_OR_MODELS` 逗号分隔），一档失败落下一档，都失败退出 1；没钥匙 / 402 标记在 = 不可用、退出 3。
 - 回过 HTTP 403 的档记在 `~/.cache/s2a/vision_or_403`（走代理的记 `_px`），一小时内跳过、过后自动作废；网络变了（如 Spare-host 开 VPN）不用人清。11-01 Spare-host 开 VPN 直连：sonnet 单问 3.1–3.6 秒、0 次 403。
 - 单测用假驾驶员 `tests/autoplay/fake_vision.sh`，不联网。
 
@@ -82,7 +83,7 @@
 | `S2A_AP_LEARN_DIR` | `~/.s2arm/run/s2arm/ap_learn` | 学路线目录；单测指到临时目录 |
 | `S2A_JEV_FLOOR` | 0.3 | Jev 把握低于 0.6 但不低于它时照用，更低才升级 |
 | `S2A_VISION_PROXY` | 空 | 只给 OpenRouter 档用的代理（Spare-host 上是 ssh 反向隧道出口）；连不上退回直连 |
-| `S2A_VISION_RELAY_MODEL` | `claude-sonnet-5-5` | 中转站那一档的模型 |
+| `S2A_VISION_BACKEND` | `cli` | 驾驶员后端：`cli` 本机 claude 命令行 / `or` OpenRouter / `jev` 先 Jev 再 CLI |
 | `S2A_AP_LIVE` | 空 | 实时通道文件，人往里追加 `REC:<名>` / `PASS:<名>` |
 
 ## ③ 常见根因（现象 → 根因 → 怎么认出来 → 修在哪）

@@ -14,7 +14,7 @@ with the rewritten modules inside the APK.
       Default out: build/android-game/<title id>.
       Build it with  S2ARM_ANDROID_GAME_DIR=<out, relative to the repo> bash android/docker/build.sh.
 
-  game_apk.py --resources <package dir> <signed apk> <out dir> [--refresh-existing]
+  game_apk.py --resources [--reuse-from <earlier resource package>] <package dir> <signed apk> <out dir> [--refresh-existing]
       The resource package that app installs (A0, android/contracts): the package
       without modules/, and a game-build-artifact.json whose modules are source "apk-asset"
       under apk.assetRoot game/modules, with the APK's identity: package name, versionCode, the
@@ -25,11 +25,19 @@ with the rewritten modules inside the APK.
       --refresh-existing emits only manifest/index/artifact and control.nacp for the
       installer's existing-content refresh transaction. It requires the same resource
       content root already active on device; it is not a standalone resource package.
+      --reuse-from hard-links a file out of an earlier resource package of this tool instead of
+      copying it, when that package's own index lists the same path with the same size and
+      SHA-256, the file there is regular, of that size and read-only (a sealed copy of RomFS
+      data that nothing writes in place), and the link is allowed (same filesystem, link count
+      not full). Every file is still checked against this package's index; a link whose bytes
+      differ is dropped and copied. ext4 has no reflink, so without it each release keeps its own
+      full copy of the RomFS. Links only ever come from the earlier package: a link into the
+      RomFS store would change the store files' ctime, which resource_input_key.py caches on.
 
 Only modules go into the APK; the resource package is deployed separately. The output is
 derived from the player's own game: it stays under build/ and never goes into the repository or
 a PR."""
-import hashlib, json, os, re, shutil, struct, subprocess, sys, zipfile, zlib
+import hashlib, json, os, re, shutil, stat, struct, subprocess, sys, zipfile, zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, '..', '..'))
@@ -222,7 +230,42 @@ def write_shader_zip(pack_dir, destination):
                 shutil.copyfileobj(stream, member)
 
 
-def resources(pack, apk, out, refresh_existing=False):
+def previous_package(path, out, pack):
+    """(directory, {path: (size, sha256)}) of an earlier resource package to link files from, or None.
+    Only an optimisation: whatever makes it unusable is reported and the package is built with plain copies."""
+    if not path:
+        return None
+    path = os.path.abspath(path)
+    try:
+        if any(os.path.commonpath([path, other]) in (path, other) for other in (out, pack)):
+            raise ValueError('it overlaps the output or the input package')
+        return path, read_index(path)
+    except (OSError, ValueError, SystemExit) as error:
+        print(f'not reusing {path}: {error}')
+        return None
+
+
+def link_previous(previous, rel, row, dst):
+    """Hard-link dst to rel of the earlier package when, by that package's own index, it is the same
+    (size, sha256) as row and the file there is regular, of that size and read-only. False: nothing linked.
+    Read-only is the point: the RomFS copies are 0444 (copied from the store, which pack/roots.sh seals), so
+    neither package can change the shared bytes without a chmod first; writable files are always copied."""
+    root, rows = previous
+    if rows.get(rel) != row:
+        return False
+    source = os.path.join(root, rel)
+    try:
+        info = os.lstat(source)
+        if not stat.S_ISREG(info.st_mode) or info.st_size != row[0] or info.st_mode & 0o222:
+            return False
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        os.link(source, dst)
+    except OSError:
+        return False
+    return True
+
+
+def resources(pack, apk, out, refresh_existing=False, reuse_from=None):
     pack, apk, out = os.path.abspath(pack), os.path.abspath(apk), os.path.abspath(out)
     if any(os.path.commonpath([out, source]) in (out, source) for source in (pack, apk)):
         sys.exit('resource output must not overlap the input package or APK')
@@ -260,6 +303,7 @@ def resources(pack, apk, out, refresh_existing=False):
     validate_apk_package(title_id, package, debug)
     if version_code != int(props.get('versionCode', '1')):
         raise ValueError('APK manifest versionCode differs from game.properties')
+    previous = previous_package(reuse_from, out, pack)   # 在下面 rmtree(out) 之前读：被替换的 out 不能当上一版
     if os.path.lexists(out):
         if not os.path.isfile(os.path.join(out, 'manifest.json')):
             sys.exit(f'{out} exists and is not a package; pick another directory')
@@ -267,12 +311,23 @@ def resources(pack, apk, out, refresh_existing=False):
     kept = [p for p in sorted(rows) if not p.startswith('modules/')]
     os.makedirs(out)
     index = ''
+    reused = 0
     for p in kept:
         if not refresh_existing or p == nacp:
-            copy_file(os.path.join(pack, p), os.path.join(out, p))   # CoW：同盘不复制数据块
-            if sha256(os.path.join(out, p)) != rows[p][1]:
-                sys.exit(f'{p} does not match index.tsv')
+            dst = os.path.join(out, p)
+            linked = previous is not None and link_previous(previous, p, rows[p], dst)
+            if linked and sha256(dst) != rows[p][1]:
+                os.remove(dst)   # 上一版的这个文件已不是它 index 里的字节：只丢本包的名字，改为复制，不动上一版
+                linked = False
+            if not linked:
+                copy_file(os.path.join(pack, p), dst)   # CoW：同盘不复制数据块
+                if sha256(dst) != rows[p][1]:
+                    sys.exit(f'{p} does not match index.tsv')
+            if linked:
+                reused += 1
         index += f'{p}\t{rows[p][0]}\t{rows[p][1]}\n'
+    if previous is not None and not refresh_existing:
+        print(f'reused {reused} of {len(kept)} files from {previous[0]} (hard links)')
     with open(os.path.join(out, 'index.tsv'), 'w', newline='\n') as f:
         f.write(index)
     index_sha = hashlib.sha256(index.encode()).hexdigest()
@@ -304,9 +359,14 @@ def main():
         refresh = '--refresh-existing' in args
         if refresh:
             args.remove('--refresh-existing')
+        reuse = None
+        if '--reuse-from' in args:
+            i = args.index('--reuse-from')
+            reuse = args[i + 1] if i + 1 < len(args) else sys.exit('--reuse-from needs a directory')
+            del args[i:i + 2]
         if len(args) != 4:
             sys.exit(__doc__)
-        return resources(*args[1:], refresh_existing=refresh)
+        return resources(*args[1:], refresh_existing=refresh, reuse_from=reuse)
     version_code = 1
     if '--version-code' in args:
         i = args.index('--version-code')

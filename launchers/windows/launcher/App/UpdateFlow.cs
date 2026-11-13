@@ -46,13 +46,171 @@ public sealed partial class EnvironmentWindow
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or KeyNotFoundException) { }
     }
 
-    private async Task CheckForUpdateAsync()
+    // ── 打开时给玩家看什么（11-13 维护者定稿草图，判定在 pack/jobs/updater.py inbox，两端共用「永远只给最新一期」）：
+    //    最多一个弹窗（这版更新了什么 / 有新版）、横幅（最新一条没看过的重要公告）、「消息」列表与未读数（只算最新那条公告）
+    private JsonElement? updatePopup;   // {kind: update | afterUpdate, version, notes?}
+    private JsonElement? availableUpdate;   // 有新版那一版 {version, notes?}：顶栏「有新版 vX」点开回到弹窗
+    private JsonElement[] messages = [];
+    private int unreadMessages;
+    private bool messagesOpen;
+    private string updateGate = "";   // 点「现在更新并重启」时有任务在跑：先拦下说明（草图④前置检查）
+
+    private async Task LoadInboxAsync()
     {
         var current = UpdateClient.CurrentVersion(InstallDir);
         if (current.Length == 0 || EnvironmentProbe.BundleIncomplete(paths)) return;
-        var result = await UpdateClient.RunAsync(paths, ["check", "--platform", "windows", "--current", current], null, TimeSpan.FromSeconds(20));
-        if (result is { } value && value.TryGetProperty("available", out var available) && available.GetBoolean())
-            await DownloadUpdateAsync();   // 后台下好，不打断玩家
+        var result = await UpdateClient.RunAsync(paths, ["inbox", "--private-root", privateRoot, "--platform", "windows", "--current", current], null, TimeSpan.FromSeconds(30));
+        if (result is not { ValueKind: JsonValueKind.Object } value || !value.TryGetProperty("messages", out var list) || list.ValueKind != JsonValueKind.Array) return;
+        notice = value.TryGetProperty("banner", out var banner) && banner.ValueKind == JsonValueKind.Object ? banner : null;
+        messages = list.EnumerateArray().ToArray();
+        unreadMessages = value.TryGetProperty("unread", out var unread) && unread.ValueKind == JsonValueKind.Number ? unread.GetInt32() : 0;
+        if (value.TryGetProperty("update", out var update) && update.ValueKind == JsonValueKind.Object && update.TryGetProperty("available", out var available) && available.ValueKind == JsonValueKind.True)
+            availableUpdate = update;
+        updatePopup = value.TryGetProperty("popup", out var popup) && popup.ValueKind == JsonValueKind.Object ? popup : null;
+        Render();
+        if (availableUpdate is not null) await DownloadUpdateAsync();   // 后台下好，不打断玩家
+    }
+
+    private void Seen(params string[] args) => _ = UpdateClient.RunAsync(paths, new[] { "inbox-seen", "--private-root", privateRoot }.Concat(args), null, TimeSpan.FromSeconds(20));
+
+    /// <summary>关掉弹窗（以后再说 / 知道了 / Esc）：这一版不再弹</summary>
+    private void CloseUpdatePopup()
+    {
+        updateGate = "";
+        if (updatePopup is not { } popup) return;
+        updatePopup = null;
+        var version = popup.TryGetProperty("version", out var v) ? v.GetString() ?? "" : "";
+        var after = popup.TryGetProperty("kind", out var k) && k.GetString() == "afterUpdate";
+        if (version.Length > 0) Seen(after ? "--after" : "--update", version);
+        Render();
+    }
+
+    private void ShowUpdatePopup()
+    {
+        if (availableUpdate is not { } update) return;
+        var version = update.GetProperty("version").GetString() ?? "";
+        var notes = update.TryGetProperty("notes", out var n) ? n.GetRawText() : "null";
+        using var doc = JsonDocument.Parse($"{{\"kind\":\"update\",\"version\":{JsonSerializer.Serialize(version)},\"notes\":{notes}}}");
+        updatePopup = doc.RootElement.Clone(); Render();
+    }
+
+    private void OpenMessages()
+    {
+        messagesOpen = true; unreadMessages = 0;
+        var latest = messages.FirstOrDefault(m => m.TryGetProperty("kind", out var k) && k.GetString() == "notice");
+        if (latest.ValueKind == JsonValueKind.Object && latest.GetProperty("id").GetString() is { Length: > 0 } id) Seen("--notice", id);
+        Render();
+    }
+
+    private string NoteText(JsonElement item) =>
+        (language == "en" && item.TryGetProperty("en", out var en) ? en.GetString() : null) ?? (item.TryGetProperty("zh-Hans", out var zh) ? zh.GetString() ?? "" : "");
+
+    private static IEnumerable<JsonElement> Items(JsonElement owner, string key) =>
+        owner.ValueKind == JsonValueKind.Object && owner.TryGetProperty(key, out var list) && list.ValueKind == JsonValueKind.Array ? list.EnumerateArray() : [];
+
+    private static Uri ReleasePage(string version) => new("https://github.com/jhaizhou-ops/S2Arm/releases/tag/v" + version);
+
+    private void AddBullets(StackPanel panel, IEnumerable<JsonElement> items, double size = 14)
+    {
+        foreach (var item in items)
+            panel.Children.Add(new SelectableTextBlock { Text = "• " + NoteText(item), FontSize = size, Foreground = Ink, TextWrapping = TextWrapping.Wrap });
+    }
+
+    /// <summary>更新弹窗（整页，同添加游戏弹窗的做法）：① 有新版 + 这版说明；② 更新后第一次打开「已更新到 vX」+ 亮点</summary>
+    private void RenderUpdatePopup(StackPanel body)
+    {
+        var popup = updatePopup!.Value;
+        var version = popup.TryGetProperty("version", out var v) ? v.GetString() ?? "" : "";
+        var notes = popup.TryGetProperty("notes", out var n) ? n : default;
+        var after = popup.TryGetProperty("kind", out var k) && k.GetString() == "afterUpdate";
+        var panel = new StackPanel { Spacing = 14, MaxWidth = 680, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center };
+        if (after)
+        {
+            panel.Children.Add(Label("✓ " + T("update.after.title").Replace("{0}", version), 26));
+            panel.Children.Add(Muted(T("update.after.lead"), 14));
+            AddBullets(panel, Items(notes, "highlights"));
+        }
+        else
+        {
+            panel.Children.Add(Muted(T("update.popup.kicker"), 13));
+            panel.Children.Add(Label("S2Arm v" + version, 28));
+            panel.Children.Add(Muted(T("update.popup.meta"), 13));
+            var sections = Items(notes, "sections").ToArray();
+            if (sections.Length == 0) panel.Children.Add(Muted(T("update.popup.noNotes"), 14));
+            foreach (var section in sections)
+            {
+                var title = Label(section.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "", 14); title.Foreground = Accent;
+                panel.Children.Add(title);
+                AddBullets(panel, Items(section, "items"));
+            }
+            if (updateProgress.Length > 0) panel.Children.Add(Muted(T("update.popup.downloading"), 12.5));
+            if (updateGate.Length > 0)
+            {
+                var gate = new StackPanel { Spacing = 4 };
+                gate.Children.Add(Label(T(updateGate), 14));
+                gate.Children.Add(Muted(T(updateGate + ".body"), 13));
+                var box = new Border { Child = gate, Padding = new Thickness(14), CornerRadius = new CornerRadius(12), Background = new SolidColorBrush(Color.Parse("#FFC857"), 0.14) };
+                AutomationId(box, "update.gate");
+                panel.Children.Add(box);
+            }
+        }
+        var buttons = new StackPanel { Orientation = Avalonia.Layout.Orientation.Horizontal, Spacing = 12, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right };
+        buttons.Children.Add(Action("update.popup.fullLog", () => _ = OpenOfficialAsync(ReleasePage(version))));
+        if (after) buttons.Children.Add(Action("update.after.ok", CloseUpdatePopup));
+        else
+        {
+            buttons.Children.Add(Action("update.popup.later", CloseUpdatePopup));
+            buttons.Children.Add(Action("update.popup.now", RestartToUpdate, updateReady is not null));
+        }
+        panel.Children.Add(buttons);
+        body.Children.Add(Card(panel, 32));
+    }
+
+    /// <summary>「消息」页：公告（最新在前）+ 更新说明；旧的只在这里、不弹不算未读</summary>
+    private void RenderMessages(StackPanel body)
+    {
+        var panel = new StackPanel { Spacing = 10, MaxWidth = 560, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center };
+        panel.Children.Add(Label(T("messages.title"), 22));
+        if (messages.Length == 0) panel.Children.Add(Muted(T("messages.empty"), 13));
+        foreach (var m in messages)
+        {
+            var row = new StackPanel { Spacing = 6 };
+            if (m.TryGetProperty("kind", out var kind) && kind.GetString() == "update")
+            {
+                var version = m.GetProperty("version").GetString() ?? "";
+                var installed = m.TryGetProperty("installed", out var i) && i.ValueKind == JsonValueKind.True;
+                row.Children.Add(Muted(T("messages.kind.update").Replace("{0}", version) + " · " + T(installed ? "messages.installed" : "messages.available"), 12));
+                var notes = m.TryGetProperty("notes", out var n) ? n : default;
+                var items = Items(notes, "highlights").ToArray();
+                if (items.Length == 0) items = Items(notes, "sections").SelectMany(s => Items(s, "items")).ToArray();
+                AddBullets(row, items.Take(3), 13.5);
+                row.Children.Add(Action("update.popup.fullLog", () => _ = OpenOfficialAsync(ReleasePage(version))));
+            }
+            else
+            {
+                var important = m.TryGetProperty("level", out var level) && level.GetString() == "important";
+                var unread = m.TryGetProperty("unread", out var u) && u.ValueKind == JsonValueKind.True;
+                row.Children.Add(Muted((unread ? "● " : "") + T(important ? "messages.kind.important" : "messages.kind.notice"), 12));
+                var texts = m.TryGetProperty("text", out var tx) ? tx : default;
+                if (texts.ValueKind == JsonValueKind.Object && texts.TryGetProperty(language == "en" ? "en" : "zh-Hans", out var said))
+                    row.Children.Add(new SelectableTextBlock { Text = said.GetString() ?? "", FontSize = 13.5, Foreground = Ink, TextWrapping = TextWrapping.Wrap });
+                if (m.TryGetProperty("url", out var url) && Uri.TryCreate(url.GetString(), UriKind.Absolute, out var link))
+                    row.Children.Add(Action("notice.details", () => _ = OpenOfficialAsync(link)));
+            }
+            panel.Children.Add(Card(row, 14));
+        }
+        panel.Children.Add(Action("update.after.ok", () => { messagesOpen = false; Render(); }));
+        body.Children.Add(panel);
+    }
+
+    /// <summary>顶栏「消息」：未读只算最新那条公告</summary>
+    private Button MessagesButton()
+    {
+        var button = new Button { Content = T("messages.button") + (unreadMessages > 0 ? $"  ● {unreadMessages}" : ""), Padding = new Thickness(14, 8),
+            CornerRadius = new CornerRadius(8), Background = Brush.Parse("#29292D"), Foreground = Ink };
+        AutomationId(button, "top.messages");
+        button.Click += (_, _) => OpenMessages();
+        return button;
     }
 
     private async Task DownloadUpdateAsync()
@@ -86,7 +244,9 @@ public sealed partial class EnvironmentWindow
 
     private void RestartToUpdate()
     {
-        if (updateReady is not { } ready || UpdateBlocked) return;
+        // 草图④：有任务在跑先拦下说明，弹窗不关（update_app_busy 是换版时旧 S2Arm 没退出，另说）
+        if (UpdateBlocked) { updateGate = "update.gate.busy"; if (updatePopup is null) ShowUpdatePopup(); Render(); return; }
+        if (updateReady is not { } ready) return;
         try
         {
             UpdateClient.Apply(ready, InstallDir, privateRoot, Environment.GetCommandLineArgs().Skip(1));
@@ -96,23 +256,18 @@ public sealed partial class EnvironmentWindow
         { updateFailure = "update_failed"; updateFailureMessage = ""; updateReady = null; Render(); }
     }
 
-    // ── 顶部公告条（v0.2.3，同 Mac LauncherView.noticeBar）：内容是数据（官方下载页上的 notice.json，取不到用随包那份，pack/jobs/updater.py notice），
-    //    代码里不写公告内容；× 关掉后同一条不再出现，换了新号的公告照常出现。取不到、起不来都不显示、不报错
+    // ── 顶部公告条（v0.2.3，同 Mac LauncherView.noticeBar）：只放最新一条没看过的重要公告（inbox banner）；内容是数据（notice.json），代码里不写公告内容。
+    //    × 关掉 = 看过它和更旧的，不再出现；取不到、起不来都不显示、不报错
     private JsonElement? notice;
-
-    private async Task LoadNoticeAsync()
-    {
-        var result = await UpdateClient.RunAsync(paths, ["notice", "--private-root", privateRoot], null, TimeSpan.FromSeconds(20));
-        if (result is { } value && value.ValueKind == JsonValueKind.Object && value.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String)
-        { notice = value; Render(); }
-    }
 
     private void DismissNotice()
     {
         if (notice is not { } value) return;
         var id = value.GetProperty("id").GetString() ?? "";
-        notice = null; Render();   // 当场收起，再记下这条的号
-        _ = UpdateClient.RunAsync(paths, ["notice-dismiss", "--private-root", privateRoot, "--id", id], null, TimeSpan.FromSeconds(20));
+        notice = null;   // 当场收起，再记下
+        if (messages.FirstOrDefault().ValueKind == JsonValueKind.Object && messages[0].TryGetProperty("id", out var first) && first.GetString() == id) unreadMessages = 0;
+        Render();
+        Seen("--notice", id);
     }
 
     private void AddNoticeBar(StackPanel body)
@@ -151,8 +306,14 @@ public sealed partial class EnvironmentWindow
         var bar = new StackPanel { Orientation = Avalonia.Layout.Orientation.Horizontal, Spacing = 10, VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center };
         if (updateProgress.Length > 0)
             bar.Children.Add(new TextBlock { Text = updateProgress, FontSize = 12, Foreground = Brush.Parse("#A8A6A1"), VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center });
-        else if (updateReady is not null)   // 只有玩家点了才重启；作业进行中置灰并说明
-            bar.Children.Add(Action(UpdateBlocked ? "update.restart.busy" : "update.restart", RestartToUpdate, !UpdateBlocked));
+        else if (updateReady is not null && availableUpdate is { } update)   // 草图：「以后再说」后顶栏留「有新版 vX」，点开回到弹窗；重启只在弹窗里点
+        {
+            var available = new Button { Content = T("update.top.available").Replace("{0}", update.GetProperty("version").GetString() ?? ""), Padding = new Thickness(14, 8),
+                CornerRadius = new CornerRadius(8), Background = Accent, Foreground = Canvas };
+            AutomationId(available, "top.update");
+            available.Click += (_, _) => ShowUpdatePopup();
+            bar.Children.Add(available);
+        }
         else if (updateFailure.Length > 0)
         {
             // 失败原因直接写在按钮旁（人话 + 错误码），并给「打开下载页」：自动更新连不上 GitHub 时玩家能自己下（不再只藏在悬停提示里）

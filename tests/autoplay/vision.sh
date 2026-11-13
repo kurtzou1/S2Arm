@@ -1,7 +1,10 @@
 #!/bin/bash
-# 门禁手动：要联网：把截图发 OpenRouter / 本机 claude CLI 视觉模型（要仓库外密钥），开发期自动玩家用
+# 门禁手动：要联网：把截图发本机 claude CLI（缺省）/ OpenRouter 视觉模型，开发期自动玩家用
 # 视觉驾驶员（只在 Mac 开发测试里用，产品包不带）：bash tests/autoplay/vision.sh <截图.png> <回答.json>
-# 后端 S2A_VISION_BACKEND：relay（缺省：中转站快档 → 升级后端）/ jev（只问 vision_jev.py，OpenRouter Decisions API，要显式指定）/ claude（直接问升级后端，下面 ask()：中转站 sonnet → OpenRouter，没有中转站钥匙时退本机 claude CLI）
+# 后端 S2A_VISION_BACKEND：cli（缺省：本机 claude CLI 直连，用这台机器上 CLI 自己的登录）/ or（vision_or.py，OpenRouter，要仓库外钥匙）/ jev（先问 vision_jev.py，不够再问 cli）。
+#   11-12 起不再有中转站档（中转站已停用：原缺省档每问 0.3 秒就退出 1、自动玩家判「驾驶员连续 3 次没给出回答」，所有要走进游戏场景的复现都卡住，#788）。
+#   后端不可用（本机没有 claude CLI / CLI 没登录 / OpenRouter 没钥匙或额度用完）= 打【红】、答案 JSON 带 "unavailable":true 与原因、退出 3：
+#   自动玩家（本机与远程信箱两条路）见到就按「驾驶员不可用」红停收局，不当成「这一问没答」静默重试
 # 自动玩家每一步导航都调（10-31 AI 看屏驾驶）：截图交给视觉模型，像人类测试员读屏幕文字与布局，回按键序列 + 现在是否已在游戏场景里可操控。
 #   维护者 10-20 拍板：「反正这个事情仅在咱们开发中使用」。playable 只是进局双证之一，MARK 还要宿主读数（每帧绘制 / 渲染遍数）到场景量级。
 # 输出（<回答.json>）：{"keys":["A","DOWN","A:2","TOUCH:640,360"],"playable":false,"why":"…"}；按键只能取自允许集合，其余一律丢弃（自动玩家侧再校验一次）。
@@ -23,7 +26,13 @@ t0=$(date +%s)
 #   11-01 去掉「不够就再问一次」：普查 + 体验线 439 次第二问里答案只变了 39 次，合计多花 922 秒
 # S2A_VISION_ESCALATE=1（自动玩家：回到问过的同一页还卡着）：跳过 Jev 直接问升级后端，题面说明前面的答案没走出这一页
 # OpenRouter 回过 402（额度用完；11-02 维护者：不再充值，中转站做主力）：永久标记（or402.py，直到删标记或换钥匙）→ 显式选了 Jev 也跳过，不白撞 402
-BACKEND=${S2A_VISION_BACKEND:-relay}
+BACKEND=${S2A_VISION_BACKEND:-cli}
+# 后端不可用：答案 JSON 带 unavailable + 原因（远程信箱经桥原样推回手机）、日志与标准错误各一行【红】、退出 3
+unavail() {
+  echo "【红】看屏驾驶员不可用：$1" >> "$OUT.log"; echo "【红】看屏驾驶员不可用：$1" >&2
+  python3 -c 'import json, sys; print(json.dumps({"keys": [], "playable": False, "why": sys.argv[1], "unavailable": True}, ensure_ascii=False))' "$1" > "$OUT"
+  exit 3; }
+case $BACKEND in cli|or|jev) ;; *) unavail "S2A_VISION_BACKEND=${BACKEND} 不认（只有 cli / or / jev；中转站档 relay 已停用）";; esac
 if [ "$BACKEND" = jev ] && python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import or402; sys.exit(0 if or402.blocked() else 1)' "$(dirname "$0")" 2> /dev/null; then SKIP_JEV=1; echo "OpenRouter 回过 402（永久标记，删标记或换钥匙才恢复），跳过 Jev" >> "$OUT.log"; fi
 if [ "$BACKEND" = jev ] && [ -z "${S2A_VISION_ESCALATE:-}" ] && [ -z "${SKIP_JEV:-}" ]; then
   rm -f "$OUT.conf"; python3 "$(dirname "$0")/vision_jev.py" "$PNG" "$OUT"; jr=$?
@@ -50,14 +59,13 @@ ${RULES}
 ${S2A_VISION_ESCALATE:+这一页之前已经问过、照答案按了还是回到这页：别再重复同样的键；改按图例上还没按过的键，或用方向键挪光标后按 A。}${TOUCH_HINT:+另一个模型判断这页要点触（按键在这页上没用）：这次 keys 只答一个 \"TOUCH:x,y\"，点你要选的那一项（开始游戏 / 第一个存档 / 确定这类）。}${S2A_VISION_TRIED:+这一页已经按过 ${S2A_VISION_TRIED}、页面没变，不要再答这些键（试过的是 A 就说明当前高亮项确认不了，先把选择移到别的项上）。}
 只输出一行 JSON，不要别的文字：{\"keys\":[…],\"playable\":true 或 false,\"why\":\"一句中文说明画面是什么、为什么这样按（why 里不要用引号）\"}。已可操控时 keys 给一个推左摇杆的键即可。
 keys 每项只能是：A B X Y L R ZL ZR PLUS MINUS SL SR UP DOWN LEFT RIGHT LS_UP LS_DOWN LS_LEFT LS_RIGHT RS_UP RS_DOWN RS_LEFT RS_RIGHT TOUCH:x,y，或前加 2: 的按键（只按二号手柄，不能点触）；要长按写成 \"A:2\"（秒，≤3）；画面要两键同按（如「按下 L+R」「press ZL + ZR」）写成一项 \"L|R\" / \"ZL|ZR\"，别拆成两项。最多 8 个。"
-ask() {   # 问一次升级后端：R = 原始回答、rc、J = 解析后的 JSON（滤掉试过的键；滤空 = 空）
-# 先问 vision_or.py（中转站主力，OpenRouter 没 402 时在后面）：只发截图 + 题面，中转站 claude-sonnet-5 每问约 5 秒；
-#   没有中转站钥匙时才退 claude CLI（每问带 CLI 自身系统提示；11-02 关工具 / 短系统提示 / 不读 MCP / 不存会话后 10–13 秒，缺省参数 15–106 秒）
-R=$(python3 "$(dirname "$0")/vision_or.py" "$P" "$Q" 2>> "$OUT.err"); rc=$?; SHOW="直连接口（$(grep -a "^模型 " "$OUT.err" | tail -1 | cut -c8-)）"
-# 有中转站钥匙就不退 claude CLI（11-02 维护者：本机 / Spare-host / gate-host 的 CLI 配的也是这个中转站，退过去还是同一个上游、只多 10–100 秒 CLI 开销）；
-#   CLI 只给没有中转站钥匙的机器用（外部贡献者用自己的 Claude 登录）
-if { [ $rc != 0 ] || [ -z "$R" ]; } && [ -f "${S2A_VISION_RELAY_KEY:-$HOME/.s2arm/.secrets/relay.key}" ]; then echo "中转站 / OpenRouter 都没给出回答，不退 CLI（本机 CLI 走同一个中转站）" >> "$OUT.log"
-elif [ $rc != 0 ] || [ -z "$R" ]; then
+ask() {   # 问一次后端：R = 原始回答、rc、J = 解析后的 JSON（滤掉试过的键；滤空 = 空）；后端不可用直接 unavail（退出 3）
+if [ "$BACKEND" = or ]; then
+R=$(python3 "$(dirname "$0")/vision_or.py" "$P" "$Q" 2>> "$OUT.err"); rc=$?; SHOW="OpenRouter（$(grep -a "^模型 " "$OUT.err" | tail -1 | cut -c8-)）"
+[ $rc = 3 ] && unavail "$(grep -a '不可用' "$OUT.err" | tail -1)"
+else
+# 本机 claude CLI 直连：截图内联进第一条消息，用 CLI 自己的登录（去掉当前会话注入的 ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL）
+command -v claude > /dev/null || unavail "本机没有 claude CLI（PATH 上找不到 claude）：装 Claude Code 并登录一次，或设 S2A_VISION_BACKEND=or 用 OpenRouter"
 R=$(python3 -c 'import base64, json, sys
 print(json.dumps({"type": "user", "message": {"role": "user", "content": [
   {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": base64.b64encode(open(sys.argv[1], "rb").read()).decode()}},
@@ -72,7 +80,7 @@ for l in sys.stdin:
 # 退出码取 claude 那一段（11-02 gpuclk5：管道末段 python 总是 0，CLI 超时 124 被记成「升级后端失败 rc=0」）；没有结果行也算失败
 rc=$(cat "$OUT.clirc" 2> /dev/null || echo 1); rm -f "$OUT.clirc"; [ "$rc" = 0 ] && [ -z "$R" ] && rc=1; [ "$rc" = 124 ] && echo "claude CLI 超时（${S2A_VISION_TIMEOUT:-90} 秒）" >> "$OUT.log"
 SHOW="claude CLI（${MODEL}）"
-printf '%s' "$R" | grep -q "Not logged in" && rc=1
+grep -aq 'Not logged in\|Invalid API key\|Please run /login' "$OUT.err" 2> /dev/null || printf '%s' "$R" | grep -q 'Not logged in' && unavail "本机 claude CLI 没登录（终端里跑一次 claude 登录；日志 $OUT.err）"
 fi
 dt=$(( $(date +%s) - t0 ))
 parse
@@ -108,19 +116,6 @@ c = re.search(r"\"conf\"\s*:\s*([0-9.]+)", t)   # 只有快档的题面要这个
 if c: e["conf"] = float(c.group(1))
 print(json.dumps({"keys": keys, "playable": bool(pl and pl.group(1) == "true"), "why": w.group(1) if w else "", **e}, ensure_ascii=False))' "$IW" "$IH" "${S2A_VISION_TRIED:-}" "$P.rect" 2> /dev/null)
 }
-FASTM=${S2A_VISION_FAST_MODEL-claude-haiku-4-5-20251001}
-if [ "$BACKEND" = relay ] && [ -z "${S2A_VISION_ESCALATE:-}" ] && [ -z "${TOUCH_HINT:-}" ] && [ -n "$FASTM" ] && [ -f "${S2A_VISION_RELAY_KEY:-$HOME/.s2arm/.secrets/relay.key}" ]; then
-  R=$(S2A_VISION_RELAY_ONLY=1 S2A_VISION_RELAY_MODEL=$FASTM S2A_VISION_RELAY_TRIES=1 S2A_VISION_RELAY_HEDGE=${S2A_VISION_FAST_HEDGE:-8} S2A_VISION_TIMEOUT=${S2A_VISION_FAST_TIMEOUT:-20} python3 "$(dirname "$0")/vision_or.py" "$P" "$Q
-JSON 里再加一个字段 \"conf\"：0 到 1 的小数，你对 keys 第一项就是正确下一步的把握。" 2>> "$OUT.err"); rc=$?; parse
-  ft=$(( $(date +%s) - t0 ))
-  no=$(printf '%s' "$J" | python3 -c 'import json, sys
-try: d = json.load(sys.stdin)
-except Exception: print("没答出"); sys.exit()
-f = float(sys.argv[1]); c = d.get("conf")
-print("答的全是试过的键" if d.get("empty") == "tried" else "说可操控（进局判据之一，交 sonnet）" if d.get("playable") else "答点触（坐标交 sonnet）" if any(k.startswith("TOUCH") for k in d["keys"]) else f"没给把握" if c is None else f"把握 {c} < {f}" if c < f else "")' "${S2A_VISION_FAST_FLOOR:-0.60}" 2> /dev/null)
-  if [ $rc = 0 ] && [ -z "$no" ]; then printf '%s\n' "$J" > "$OUT"; echo "快档 中转站/${FASTM} ${ft} 秒" >> "$OUT.log"; exit 0; fi
-  echo "快档 中转站/${FASTM} 没用上（rc=${rc}，${no:-没答出}，${ft} 秒），升级" >> "$OUT.log"
-fi
 ask
 # 答案里的键全是这页试过没用的（被滤空）：带上「刚才答的都试过」当场再问一次（10-26 银河 2「要创建游戏文件吗」框：claude CLI 认定 OK 已高亮、仍答 A，那框要点触）
 if [ $rc = 0 ] && printf '%s' "$J" | grep -q '"empty": "tried"'; then

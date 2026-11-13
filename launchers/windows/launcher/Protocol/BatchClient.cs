@@ -155,6 +155,18 @@ public static class ImportOutcome
         return ids;
     }
 
+    /// <summary>#797：这次放进来、但游戏库里只有更新 / DLC 没有本体的游戏号（导入结果 imports[].missingBase，按整批加完后的库判）。</summary>
+    public static IReadOnlyList<string> MissingBase(JsonElement result)
+    {
+        var ids = new List<string>();
+        if (result.ValueKind == JsonValueKind.Object && result.TryGetProperty("imports", out var imports) && imports.ValueKind == JsonValueKind.Array)
+            foreach (var row in imports.EnumerateArray())
+                if (row.ValueKind == JsonValueKind.Object && row.TryGetProperty("missingBase", out var m) && m.ValueKind == JsonValueKind.True
+                    && row.TryGetProperty("id", out var id) && id.GetString() is { Length: > 0 } gid && !ids.Contains(gid, StringComparer.OrdinalIgnoreCase))
+                    ids.Add(gid);
+        return ids;
+    }
+
     public static IReadOnlyList<Unrecognized> Failed(JsonElement result)
     {
         var rows = new List<Unrecognized>();

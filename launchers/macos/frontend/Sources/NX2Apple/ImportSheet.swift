@@ -253,6 +253,11 @@ struct ImportSheet: View {
                 Text(BackendText.launcherText("welcome.keys.unusable", language: loc.lang == .zh ? "zh-Hans" : "en")).font(.manrope(13)).foregroundStyle(LauncherPalette.danger)
                     .fixedSize(horizontal: false, vertical: true).padding(.top, 12)
             }
+            if page == .selection, job == nil, !model.importNoBase.isEmpty {   // #797：刚添加的款缺本体
+                Text(model.importNoBase.map { BackendText.launcherText("import.noBase", language: loc.lang == .zh ? "zh-Hans" : "en").replacingOccurrences(of: "{0}", with: $0) }.joined(separator: "\n"))
+                    .font(.manrope(13)).foregroundStyle(LauncherPalette.building)
+                    .fixedSize(horizontal: false, vertical: true).padding(.top, 12).accessibilityIdentifier("import.noBase")
+            }
             if let dropHint, job == nil {
                 Text(dropHint).font(.manrope(13)).foregroundStyle(LauncherPalette.danger)
                     .fixedSize(horizontal: false, vertical: true).padding(.top, 12)
