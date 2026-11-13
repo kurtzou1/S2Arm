@@ -36,8 +36,8 @@ typedef struct { int32_t x,y,z; } VkOffset3D;
 typedef struct { uint32_t width,height,depth; } VkExtent3D;
 typedef struct { uint32_t aspectMask,mipLevel,baseArrayLayer,layerCount; } VkImageSubresourceLayers;
 typedef struct { uint64_t bufferOffset; uint32_t bufferRowLength,bufferImageHeight; VkImageSubresourceLayers imageSubresource; VkOffset3D imageOffset; VkExtent3D imageExtent; } VkBufferImageCopy;
-typedef struct { int expand; } nvn_fmt_info;
-struct nvn_gpu_tex_s { uint32_t w,h,depth,levels,target,layers,format,nvn_format,aspect; int image; };
+typedef struct { uint8_t channels, bytes, bw, bh, kind, srgb, depth, stencil; uint8_t expand; } nvn_fmt_info;   /* 同 graphics/nvn/gfx/nvn/nvn_fmt_info.h */
+struct nvn_gpu_tex_s { uint32_t w,h,depth,levels,target,layers,format,nvn_format,aspect; int image; int bc_decoded; };   /* bc_decoded：压缩贴图现解；本测试的贴图都不是 */
 struct nvn_gpu_buf_s { int buffer; uint64_t size; };
 struct nvn_gpu_cmd_s { int sticky,in_pass,cb; };
 typedef struct nvn_gpu_tex_s *nvn_gpu_tex;
@@ -50,6 +50,7 @@ static int rc_is(int got, int expected) { return got == expected; }
 static void set_sticky(struct nvn_gpu_cmd_s *c, int rc, const char *why, ...) { (void)why; c->sticky = rc; }
 static uint32_t fmt_bpp(uint32_t fmt) { (void)fmt; return 4; }
 static int nvn_fmt_info_of(uint32_t fmt, nvn_fmt_info *out) { (void)fmt; (void)out; return 0; }
+static int nvn_fmt_expand_target(uint32_t f, uint32_t *target, int *bpp) { (void)f; (void)target; (void)bpp; return 0; }
 static int buf_range(struct nvn_gpu_buf_s *b, uint64_t off, uint64_t n) { return off <= b->size && n <= b->size-off; }
 static void full_barrier(struct nvn_gpu_cmd_s *c) { (void)c; }
 static void image_barrier(struct nvn_gpu_cmd_s *c, struct nvn_gpu_tex_s *t, int l) { (void)c; (void)t; (void)l; }

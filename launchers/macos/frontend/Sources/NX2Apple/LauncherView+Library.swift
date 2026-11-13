@@ -284,7 +284,7 @@ extension LauncherView {
             moreRow(txt("game.display"), "slider.horizontal.3") { displayFor = game.id }
             moreRow(txt("game.saves"), "tray.full") { saveFor = game.id }
             moreRow(txt("game.input"), "gamecontroller") { inputFor = game.id }
-            moreRow(txt("game.diag"), "doc.zipper") { exportDiagnostics() }
+            moreRow(txt("game.diag"), "paperplane") { model.diagUploadFor = game.id }   // 上传给开发者；上传没成在弹窗里退回导出
             Divider().opacity(0.3).padding(.vertical, 4)
             moreRow(txt("game.delete"), "trash", danger: true) { deleteFor = game }
         }
@@ -332,14 +332,6 @@ extension LauncherView {
         panel.canChooseDirectories = true; panel.canChooseFiles = false
         panel.message = txt("library.missing.pick")
         if panel.runModal() == .OK, let url = panel.url { model.relinkGame(game, folder: url) }
-    }
-
-    private func exportDiagnostics() {
-        let panel = NSSavePanel()
-        // 短名：S2Arm-诊断-月日-时分（英文界面 S2Arm-diag-…），与 iOS / Windows 一致；版本、系统、提交号都在包里，不进文件名（11-11 维护者）
-        let stamp = DateFormatter(); stamp.locale = Locale(identifier: "en_US_POSIX"); stamp.dateFormat = "MMdd-HHmm"
-        panel.nameFieldStringValue = "S2Arm-\(uiLanguage == "en" ? "diag" : "诊断")-\(stamp.string(from: Date())).zip"
-        if panel.runModal() == .OK, let url = panel.url { model.diagnostics(exportTo: url) }
     }
 
     /// 卡片和大图上的状态：两端都算（原作者只看 Mac 版）。

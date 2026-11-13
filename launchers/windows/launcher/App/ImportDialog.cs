@@ -94,6 +94,7 @@ public sealed partial class EnvironmentWindow
             var copyError = CopyReportButton(null, ["import", "keys", "setup"], () => importError);
             copyError.Margin = new Thickness(0, 10, 0, 0); copyError.HorizontalAlignment = HorizontalAlignment.Left;
             panel.Children.Add(copyError);
+            panel.Children.Add(ReportHintText());
             if (LibraryDrivePicker() is { } drives) panel.Children.Add(drives);   // 游戏库盘格式不对：列出能放的盘，点了就建（v0.3.1）
         }
         // 游戏库没连上（也没在连）：给两条路——按原位置重试、换一个文件夹（换了会记住）

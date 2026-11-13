@@ -3,12 +3,13 @@
 # Copyright 2026 S2Arm contributors
 """从共用体验规格生成 iOS .strings 片段：错误码的「标题 + 下一步」，只留一个来源（launchers/shared/experience.v1.json）。
 
-用法：python3 launchers/shared/experience_strings.py --lang zh-Hans|en [--prefix ios_install_ --prefix ios_import_] [--spec <experience.v1.json>]
+用法：python3 launchers/shared/experience_strings.py --lang zh-Hans|zh-Hant|en [--prefix ios_install_ --prefix ios_import_] [--spec <experience.v1.json>]
 缺省前缀只取手机端装机 / 导入的码（ios_platform_* 是电脑端 Xcode iOS 平台组件的码，不进 App）。
 输出（标准输出，UTF-8）：每个码两行 .strings 键值
     "error.<码>.title" = "…";
     "error.<码>.next" = "…";
-标题取规格 errors.items[].title；下一步按规格约定取 pack/jobs/errors.py RECOVERY（中文），英文取 Mac 端 Localizable.json 里同一句的译文。
+标题取规格 errors.items[].title；下一步按规格约定取 pack/jobs/errors.py RECOVERY（中文），英文取 Mac 端 Localizable.json 里同一句的译文；
+繁中（iOS 宿主 zh-Hant 界面，11-13）按简中原句查 launchers/shared/experience_zh_hant.json（台港用语，手写，不是简繁直转）。
 iOS 出包时（runtime/build.mk 拷 ios/l10n/*.lproj 之后）把输出追加进包里的 S2ArmHost.strings；仓库里的 .strings 不放生成内容。
 缺英文译文、缺标题即退出 1 并点名，不出半套。"""
 import argparse
@@ -21,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SPEC = ROOT / "launchers/shared/experience.v1.json"
 ERRORS_PY = ROOT / "pack/jobs/errors.py"
 LOCALIZABLE = ROOT / "launchers/macos/adapter/Sources/S2ArmAppleAdapter/Resources/Localizable.json"
+ZH_HANT = ROOT / "launchers/shared/experience_zh_hant.json"
 
 
 def recovery():
@@ -41,6 +43,13 @@ DEFAULT_PREFIXES = ("ios_install_", "ios_import_")
 
 def entries(lang, prefixes=DEFAULT_PREFIXES, spec_path=SPEC):
     """→ [(键, 文案)]，按码排序；缺东西抛 ValueError 点名"""
+    if lang == "zh-Hant":   # 繁中：简中整套逐句查对照表，缺一句就点名、不出半套
+        hant = json.loads(ZH_HANT.read_text(encoding="utf-8"))
+        rows = entries("zh-Hans", prefixes, spec_path)
+        miss = sorted({t for _, t in rows if t not in hant})
+        if miss:
+            raise ValueError("experience_zh_hant.json 缺这些句子的繁中：" + " | ".join(miss))
+        return [(k, hant[t]) for k, t in rows]
     items = json.loads(Path(spec_path).read_text(encoding="utf-8"))["errors"]["items"]
     rec = recovery()
     en = {i["source"]: i.get("en", "") for i in json.loads(LOCALIZABLE.read_text(encoding="utf-8"))}
@@ -61,7 +70,7 @@ def entries(lang, prefixes=DEFAULT_PREFIXES, spec_path=SPEC):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--lang", required=True, choices=("zh-Hans", "en"))
+    ap.add_argument("--lang", required=True, choices=("zh-Hans", "zh-Hant", "en"))
     ap.add_argument("--prefix", action="append", help="只出这些前缀的码（可重复）；缺省 ios_install_ 与 ios_import_")
     ap.add_argument("--spec", default=str(SPEC))
     a = ap.parse_args(argv)

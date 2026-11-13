@@ -499,6 +499,45 @@ def usable_kit(c, gid, sid, failed=()):
     return kit.resolve() if want and have == want and sid not in failed else None
 
 
+CONTAINER_DIGEST_KEY = "S2AContainerDigest"   # Info.plist：这份容器 App 的内容摘要（#845 装机跳过签名安装：install.same_app 经 s2a-devpush app-attr 读手机上的同一个键）
+
+
+def stamp_container(app):
+    """容器 App 的内容摘要写进它的 Info.plist（键 S2AContainerDigest）并返回。摘要按路径 + 内容算全部文件，不算签名（_CodeSignature/、embedded.mobileprovision：
+    装机时按玩家团队 / 证书重签，Windows 由 plumesign 签）与 Info.plist 里的这个键本身。同样的壳、各款程序、显示名封面、版本组出的摘要相同：
+    手机上 App 的这个键等于这次的，就是同一个 App，装机可以只推资源（install.same_app）。写入后组装时的临时签名失效，装机前必然重签"""
+    import hashlib, plistlib
+    app = Path(app); h = hashlib.sha256()
+    if not (app / "Info.plist").is_file():   # 没有 Info.plist（只有组装替身会这样）：不写摘要 → 装机永远照常签名安装
+        return ""
+    for p in sorted(app.rglob("*")):
+        rel = p.relative_to(app).as_posix()
+        if rel.startswith("_CodeSignature/") or rel == "embedded.mobileprovision" or p.is_dir() and not p.is_symlink():
+            continue
+        if p.is_symlink():
+            h.update(b"L" + rel.encode() + b"\0" + os.readlink(p).encode() + b"\0"); continue
+        data = p.read_bytes()
+        if rel == "Info.plist":
+            info = plistlib.loads(data); info.pop(CONTAINER_DIGEST_KEY, None); data = plistlib.dumps(info, sort_keys=True)
+        h.update(b"F" + rel.encode() + b"\0" + hashlib.sha256(data).digest())
+    digest = h.hexdigest()[:24]
+    raw = (app / "Info.plist").read_bytes(); fmt = plistlib.FMT_BINARY if raw.startswith(b"bplist") else plistlib.FMT_XML
+    info = plistlib.loads(raw); info[CONTAINER_DIGEST_KEY] = digest
+    (app / "Info.plist").write_bytes(plistlib.dumps(info, fmt=fmt))
+    return digest
+
+
+def ipa_digest(ipa):
+    """装机产物里容器 App 的内容摘要（stamp_container 写的 Info.plist 键）；读不了 / 没有 → """""
+    import plistlib
+    try:
+        with zipfile.ZipFile(ipa) as z:
+            name = next(n for n in z.namelist() if re.fullmatch(r"Payload/[^/]+\.app/Info\.plist", n))
+            return str(plistlib.loads(z.read(name)).get(CONTAINER_DIGEST_KEY) or "")
+    except (OSError, StopIteration, ValueError, KeyError, zipfile.BadZipFile, plistlib.InvalidFileException):
+        return ""
+
+
 def write_container_ipa(c, app, ipa, log):
     c.run([os.sys.executable, "-X", "utf8", "-B", c.engine / "pack/app_bundle.py", "write_ipa", app, ipa], log, c.env())
 
@@ -570,7 +609,7 @@ def assemble(c, gid, others=(), *, failed=(), root=None, dest=None):
     banner_args = [x for g, b in banners.items() if b.is_file() for x in ("--banner", f"{g}={b}")]
     try:
         c.run([os.sys.executable, "-X", "utf8", "-B", c.engine / "pack/ship_ext.py", "container", "--shell", shell, "--out", app, "--bundle-id", CONTAINER_BUNDLE,
-               "--icon", icon, "--sign", "none" if os.name == "nt" else "adhoc", "--custom", out / "custom.json", "--host-abi", str(host_update.HOST_ABI),
+               "--icon", icon, "--sign", "none", "--custom", out / "custom.json", "--host-abi", str(host_update.HOST_ABI),
                "--version", release_version(c.engine), "--display-version", display_version(c.engine),
                *[x for r in roots.values() for x in ("--game", r)], *banner_args], log, c.env())
     except Failure as e:
@@ -578,6 +617,7 @@ def assemble(c, gid, others=(), *, failed=(), root=None, dest=None):
         if e.code == "tool_exit" and "地址空间类型不一致" in text:
             raise Failure("这款和手机上已有的游戏地址空间类型不同，放不进同一个 App。", code="container_incompatible") from e
         raise
+    finish_container(c, app, log)
     write_container_ipa(c, app, ipa, log)
     games = [g["title_id"] for g in json.loads((app / "s2a_catalogue.json").read_text(encoding="utf-8"))["games"]]
     if gid and gid not in games:
@@ -600,6 +640,20 @@ def ipa_games(ipa):
         return [], ""
 
 
+def finish_container(c, app, log):
+    """组好 / 改过的容器 App 收尾：先写内容摘要（#845，装机据此判手机上的 App 是不是同一个：install.same_app），再签名。
+    签名放在写摘要之后（v0.3.6 候选 ⑥：先签再改 Info.plist，codesign --verify 判「plist or signature have been modified」）；
+    Mac ad-hoc，Windows 不签（侧载工具重签），同原口径。assemble 与 drop_from_ipa 都经这里：摘掉一款后内容变了，摘要必须重算，
+    否则 Info.plist 里还是整套的旧值，之后再装回整套时 same_app 误判相同、跳过重装，摘掉的那款回不到手机上"""
+    stamp_container(app)
+    sign_container(c, app, log)
+
+
+def sign_container(c, app, log):
+    if os.name != "nt":
+        c.run([os.sys.executable, "-X", "utf8", "-B", c.engine / "pack/ship_ext.py", "sign", "--app", app, "--sign", "adhoc", "--bundle-id", CONTAINER_BUNDLE], log, c.env())
+
+
 def drop_from_ipa(c, ipa, gid):
     """从装机产物里摘掉一款（其余各款逐字节不变、不换壳：升级后还没重出的款也能删）→ (临时 ipa, 剩下的款, 壳号)"""
     tmp = Path(tempfile.mkdtemp(prefix=".container-", dir=c.library))
@@ -611,6 +665,7 @@ def drop_from_ipa(c, ipa, gid):
         shutil.rmtree(tmp, ignore_errors=True)
         raise Failure("手机上的 S2Arm 在游戏库里的那份读不了：先给手机上的游戏各「打 iPhone 包」一次，再删。", code="container_stale")
     c.run([os.sys.executable, "-X", "utf8", "-B", c.engine / "pack/ship_ext.py", "container-drop", "--base", base, "--game", gid, "--out", tmp / "S2Arm.app"], log, c.env())
+    finish_container(c, tmp / "S2Arm.app", log)
     write_container_ipa(c, tmp / "S2Arm.app", tmp / "S2Arm.ipa", log)
     cat = json.loads((tmp / "S2Arm.app/s2a_catalogue.json").read_text(encoding="utf-8"))
     return tmp / "S2Arm.ipa", [g["title_id"] for g in cat["games"]], cat.get("shell_id") or ""

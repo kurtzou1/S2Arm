@@ -49,11 +49,11 @@
 ~/.s2arm/S2Arm	测试出包（列车）	主仓库（列车在这里取分支、推 main）	只有列车推 main；各线在自己的工作树里改
 run	测试出包	记分板 / 全绿 / 里程碑 tsv	只追加单行（< 4 KB 原子）；里程碑只在变化时追加
 ~/.s2arm/run/s2arm/locks	测试出包	Mac 局槽 mac_slot/（tools/mac_slot.sh）、刷新锁 refresh_<款>（pack/refresh.sh）	mkdir 锁 + 持有者 pid 存活检查
-~/.s2arm/run/devq2	测试出包	测试设备2 设备锁与电量标记	devlock.sh：内核文件锁（<锁目录>.flock，常驻不删）+ 锁目录作持有者提示与旧版兼容 + 看门狗
-~/sw-work	测试出包（沿用旧库）	测试设备1 设备锁、锁历史、电量标记（与旧库共用同一台手机）	devlock.sh：同上；与旧库共用是有意的（同一台设备只能一个持有者）
+~/.s2arm/run/devq2	测试出包	测试设备2 设备锁与设备状态	devlock.sh：内核文件锁（<锁目录>.flock，常驻不删）+ 锁目录作持有者提示与旧版兼容 + 看门狗
+~/sw-work	测试出包（沿用旧库）	测试设备1 设备锁、锁历史、设备状态（与旧库共用同一台手机）	devlock.sh：同上；与旧库共用是有意的（同一台设备只能一个持有者）
 ~/sw-work/run/ios	测试出包（沿用旧库）	同上	同上
 ~/.s2arm/work	各线（安卓 oneclick 验收等的出包输出目录）	一键出包 --out 的落点；tools/disk_guard.sh 只读 du -s 列体积（10-29 #693 验收在此留 11 GB）	只读量体积，不写不删
-~/.s2arm/devices	基础设施线（10-29）	贡献者自己的 iPhone（tools/devices.sh S2A_DEVICE_OWN=1）的设备锁与电量标记，按硬件 UDID 分目录：<UDID>/device.lock、<UDID>/battery	devlock.sh：同上；一台设备一个目录，同一时刻一个持有者
+~/.s2arm/devices	基础设施线（10-29）	贡献者自己的 iPhone（tools/devices.sh S2A_DEVICE_OWN=1）的设备锁与设备状态，按硬件 UDID 分目录：<UDID>/device.lock、<UDID>/battery	devlock.sh：同上；一台设备一个目录，同一时刻一个持有者
 ~/.s2arm/run_int	合入运维线（11-06）	内置盘溢出工作根（tools/disk_admit.py 按卷记账，内置盘保底 60 GB）：S2A_2T 放不下时各线批目录 / 冷出包放这里；tools/dev_prune.sh 只读其中作业目录找装机记录	写方各管各的子目录（census/<批>、ns2_zelda/<版>），准入走内置盘那本账；读方只读
 ~/.s2arm/devpick	合入运维线（11-06）	三台测试设备选机互斥（tools/devices.sh s2a_device_pick：any / iphone / duo 挑最闲的那台并在 <锁>.claim/ 记占位）	mkdir 原子互斥，目录里记持有 pid；持有者已死下一家直接收回；整段只有几十毫秒
 ~/.s2arm/run/s2arm/gate-host	测试出包	gate-host 同步镜像（工具 / 资源包缓存）	gate_host_sync.sh 按款单写；作业目录每局独立
@@ -86,6 +86,7 @@ run	测试出包	记分板 / 全绿 / 里程碑 tsv	只追加单行（< 4 KB 原
 ~/.s2arm/run/s2arm/vision_cache	服务接入线	视觉测试员回答缓存（tests/autoplay/vision.sh：按截图 sha256 一张一个 <哈希>.json）	内容寻址：同一截图同一答案；写入是先写局目录再 cp 成整文件，读到的要么没有要么完整；并发写同哈希等价
 ~/.s2arm/.secrets/openrouter.key	服务接入线（维护者 提供）	OpenRouter 密钥（视觉测试员 Jev 后端，tests/autoplay/vision_jev.py）	只读：600 权限、仓库外；不打印、不写日志 / 局目录 / 命令行
 ~/.s2arm/.secrets/relay.key	运维线（维护者 提供，同 ~/.codex-relay/relay.key）	中转站密钥（视觉测试员优先后端，tests/autoplay/vision_or.py；本机与 Spare-host 各一份）	只读：600 权限、仓库外；不打印、不写日志 / 局目录 / 命令行
+~/.s2arm/.secrets/relay.url	合入运维线（11-13）	中转站地址（视觉测试员缺省后端，tests/autoplay/vision_or.py、tools/dev_run.sh；没设 S2A_VISION_RELAY_URL 时读第一行；第三方地址不进公开仓）	只读：600 权限、仓库外；一行地址
 ~/.s2arm/run/s2arm/icons	测试出包	各款 App 图标（tools/game_icons.sh 从游戏原始包重抽，中文优先；pack/ipa.sh 读）	单写者 game_icons.sh，写临时文件再改名；读方只读
 ~/Downloads	测试出包	游戏原始包（xci / nsp）所在目录，tools/game_icons.sh 只读（S2A_GAME_SRC 可改）	只读，不写
 ~/.s2arm/run/s2arm/cache/csclosure	测试出包	着色器阶段键：C# 编译闭包文件清单缓存 <粗键>.files（tools/csproj_closure.py）	同粗键并发只求值一份（<粗键>.files.lock，pid 存活检查）；写临时名再原子改名

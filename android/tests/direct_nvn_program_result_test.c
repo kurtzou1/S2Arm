@@ -25,6 +25,17 @@ static int parse_json(const char *bindings, struct fd_program *p, char *why, siz
     return nvn_vk_program_parse_graphics((const uint8_t *)json, (size_t)n, p, why, cap);
 }
 
+static int parse_v2(const char *bindings, struct fd_program *p, char *why, size_t cap) {
+    char json[4096];
+    int n = snprintf(json, sizeof json,
+        "{\"schema\":\"s2a-direct-program-v2\",\"content\":{\"contract\":\"s2a-direct-program-content-v2\","
+        "\"stages\":[{\"stage\":\"vs\",\"spirv\":\"%s\"},{\"stage\":\"fs\",\"spirv\":\"%s\"}],"
+        "\"bindings\":[%s]}}", k_spirv, k_spirv, bindings);
+    if (n <= 0 || (size_t)n >= sizeof json) return -2;
+    memset(p, 0, sizeof *p);
+    return nvn_vk_program_parse_graphics((const uint8_t *)json, (size_t)n, p, why, cap);
+}
+
 int main(void) {
     char why[192] = "";
     struct fd_program p;
@@ -76,6 +87,32 @@ int main(void) {
               "zero count is not silently treated as one");
         nvn_vk_program_free(&p);
     }
+
+    // 分离贴图槽 128 与采样器槽 3：生产 parser 必须接受 v2 且保持宽槽位。
+    why[0] = 0;
+    int separate_rc = parse_v2("{\"stage\":\"fs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":90,\"samp_slot\":3,\"count\":1}", &p, why, sizeof why);
+    CHECK(separate_rc == 0, "v2 separate texture and sampler parse");
+    if (!separate_rc) CHECK(p.binding_count == 1 && p.bindings[0].tex_slot == 128 && p.bindings[0].samp_slot == 3, "separate sources preserved");
+    nvn_vk_program_free(&p);
+    why[0] = 0;
+    CHECK(parse_v2("{\"stage\":\"fs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":90,\"samp_slot\":128,\"count\":1}", &p, why, sizeof why) != 0, "out of range sampler slot is rejected");
+    nvn_vk_program_free(&p);
+    why[0] = 0;
+    CHECK(parse_v2("{\"stage\":\"fs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":90,\"samp_slot\":3,\"count\":2}", &p, why, sizeof why) != 0, "separate source array is rejected");
+    nvn_vk_program_free(&p);
+
+    why[0] = 0;
+    CHECK(parse_v2("{\"stage\":\"fs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":90,\"samp_slot\":3,\"samp_slot\":4,\"count\":1}", &p, why, sizeof why) != 0, "duplicate sampler field rejected");
+    nvn_vk_program_free(&p);
+    why[0] = 0;
+    CHECK(parse_json("{\"stage\":\"fs\",\"kind\":\"bogus\",\"set\":2,\"binding\":0}", &p, why, sizeof why) != 0, "unknown binding kind rejected");
+    nvn_vk_program_free(&p);
+    why[0] = 0;
+    CHECK(parse_json("{\"stage\":\"fs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":8},{\"stage\":\"fs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":10}", &p, why, sizeof why) != 0, "duplicate descriptor rejected");
+    nvn_vk_program_free(&p);
+    why[0] = 0;
+    CHECK(parse_json("{\"stage\":\"fs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":8}", &p, why, sizeof why) == 0 && p.bindings[0].samp_slot == -1, "v1 keeps combined sampler sentinel");
+    nvn_vk_program_free(&p);
 
     // 负控 1：NVN 槽位越界必须拒绝，不能截断成 0 绑到别的缓冲。
     why[0] = 0;

@@ -6,6 +6,7 @@ using Ryujinx.Common.Memory;
 using Ryujinx.HLE.HOS.Services.Account.Acc;
 using Ryujinx.HLE.HOS.Services.Am.AppletAE;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 
@@ -62,14 +63,9 @@ namespace Ryujinx.HLE.HOS.Applets
             }
             if (mode == UiModeUserCreator)
             {
-                AccountManager accounts = _system.AccountManager;
-                // count + 1 candidates against count existing names: one is always free
-                string name = Enumerable.Range(accounts.GetUserCount() + 1, accounts.GetUserCount() + 1)
-                    .Select(n => $"Player{n}").First(n => accounts.GetAllUsers().All(u => u.Name != n));
-                UserId created = new(Guid.NewGuid().ToString("N"));
-                accounts.AddUser(name, EmbeddedResources.Read("Ryujinx.HLE/HOS/Services/Account/Acc/DefaultUserImage.jpg"), created);
-                Logger.Info?.Print(LogClass.ServiceAm, $"User creator applet created user {created} \"{name}\" (no nickname / icon UI on the host)");
-                _normalSession.Push(BuildResponse(created));
+                UserProfile created = CreatePlayerUser();
+                Logger.Info?.Print(LogClass.ServiceAm, $"User creator applet created user {created.UserId} \"{created.Name}\" (no nickname / icon UI on the host)");
+                _normalSession.Push(BuildResponse(created.UserId));
                 AppletStateChanged?.Invoke(this, null);
                 _system.ReturnFocus();
 
@@ -77,6 +73,26 @@ namespace Ryujinx.HLE.HOS.Applets
             }
 
             UserProfile selected = _system.Device.UIHandler.ShowPlayerSelectDialog();
+            // S2Arm (#662 local multiplayer): UiSettings carries invalid_uid_list (8 Uids from offset 8), the users already playing.
+            // When player 2 joins, the game opens this applet with player 1 in that list. The host UI answers the last opened user,
+            // the game rejects it and opens the applet again (20+ times in 2 s, the second pad seems dead). On the console player 2
+            // picks or creates another user: answer an existing user not in the list, else create one as UserCreator does.
+            if (selected != null && uiSettings != null && uiSettings.Length >= InvalidUidListOffset + InvalidUidListCount * 16)
+            {
+                HashSet<UserId> invalid = new();
+                for (int i = 0; i < InvalidUidListCount; i++)
+                {
+                    int at = InvalidUidListOffset + 16 * i;
+                    UserId id = new(uiSettings[at..(at + 16)]);
+                    if (!id.IsNull) invalid.Add(id);
+                }
+                if (invalid.Contains(selected.UserId))
+                {
+                    UserProfile other = _system.AccountManager.GetAllUsers().FirstOrDefault(u => !invalid.Contains(u.UserId)) ?? CreatePlayerUser();
+                    Logger.Info?.Print(LogClass.ServiceAm, $"Player select applet mode {mode}: user {selected.UserId} is in the game's invalid list ({invalid.Count}), answered {other.UserId} \"{other.Name}\"");
+                    selected = other;
+                }
+            }
             if (selected == null)
             {
                 _normalSession.Push(BuildResponse());
@@ -95,6 +111,19 @@ namespace Ryujinx.HLE.HOS.Applets
             _system.ReturnFocus();
 
             return ResultCode.Success;
+        }
+
+        // Adds a user the way the console's user creator would, with the default icon and a free PlayerN nickname (the host has
+        // no nickname / icon UI).
+        private UserProfile CreatePlayerUser()
+        {
+            AccountManager accounts = _system.AccountManager;
+            // count + 1 candidates against count existing names: one is always free
+            string name = Enumerable.Range(accounts.GetUserCount() + 1, accounts.GetUserCount() + 1)
+                .Select(n => $"Player{n}").First(n => accounts.GetAllUsers().All(u => u.Name != n));
+            UserId created = new(Guid.NewGuid().ToString("N"));
+            accounts.AddUser(name, EmbeddedResources.Read("Ryujinx.HLE/HOS/Services/Account/Acc/DefaultUserImage.jpg"), created);
+            return accounts.GetAllUsers().First(u => u.UserId == created);
         }
 
         private static byte[] BuildResponse(UserProfile selectedUser)
@@ -133,6 +162,9 @@ namespace Ryujinx.HLE.HOS.Applets
 
         // nn::account::UiMode (libnx PselUiMode)
         private const uint UiModeUserCreator = 1;
+        // nn::account::UiSettings (libnx PselUiSettings): u32 mode, u32 dialog type, then AccountUid invalid_uid_list[8]
+        private const int InvalidUidListOffset = 8;
+        private const int InvalidUidListCount = 8;
         private const uint UiModeEnsureNetworkServiceAccountAvailable = 2;
         private const uint UiModeLicenseRequirementsForNetworkService = 10;
         private const uint UiModeLicenseRequirementsForNetworkServiceWithUserContext = 11;

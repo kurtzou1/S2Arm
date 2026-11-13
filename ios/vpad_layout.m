@@ -509,7 +509,7 @@ static S2AVPadKeyStyle key_style_snapped(S2AVPadKeyStyle s) {
     return s;
 }
 static BOOL key_style_valid(S2AVPadKeyStyle s) {
-    return isfinite(s.scale) && isfinite(s.opacity) && s.scale >= 0.6 && s.scale <= 1.6 && s.opacity >= 0.2 && s.opacity <= 1;
+    return isfinite(s.scale) && isfinite(s.opacity) && s.scale >= S2A_VPAD_SCALE_MIN && s.scale <= S2A_VPAD_SCALE_MAX && s.opacity >= 0.2 && s.opacity <= 1;
 }
 - (NSURL *)keyStyleFile { return [_directory URLByAppendingPathComponent:@".key_style.json"]; }
 - (void)loadKeyStyles {
@@ -517,11 +517,11 @@ static BOOL key_style_valid(S2AVPadKeyStyle s) {
     NSData *data = [NSData dataWithContentsOfURL:self.keyStyleFile];
     id doc = data.length && data.length <= 65536 ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
     if (!doc) return;
-    if (!fields(doc, @[@"schemaVersion", @"theme", @"keys", @"globalScale", @"globalOpacity"]) || !number(doc[@"schemaVersion"], 1, 1) || !number(doc[@"theme"], 0, kS2AVPadKeyThemeCount - 1) || !number(doc[@"globalScale"], 0.6, 1.6) || !number(doc[@"globalOpacity"], 0.2, 1) || ![doc[@"keys"] isKindOfClass:NSDictionary.class]) {
+    if (!fields(doc, @[@"schemaVersion", @"theme", @"keys", @"globalScale", @"globalOpacity"]) || !number(doc[@"schemaVersion"], 1, 1) || !number(doc[@"theme"], 0, kS2AVPadKeyThemeCount - 1) || !number(doc[@"globalScale"], S2A_VPAD_SCALE_MIN, S2A_VPAD_SCALE_MAX) || !number(doc[@"globalOpacity"], 0.2, 1) || ![doc[@"keys"] isKindOfClass:NSDictionary.class]) {
         _keyStyleProblem = [NSString stringWithFormat:S2AL(@"vpad.layout.error"), @"F01.keyStyle", S2AL(@"vpad.layout.problem.keyStyle")]; return; }
     for (NSString *key in doc[@"keys"]) {
         NSDictionary *v = doc[@"keys"][key];
-        if (!fields(v, @[@"scale", @"opacity", @"hidden"]) || !number(v[@"scale"], 0.6, 1.6) || !number(v[@"opacity"], 0.2, 1) || ![v[@"hidden"] isKindOfClass:NSNumber.class]) {
+        if (!fields(v, @[@"scale", @"opacity", @"hidden"]) || !number(v[@"scale"], S2A_VPAD_SCALE_MIN, S2A_VPAD_SCALE_MAX) || !number(v[@"opacity"], 0.2, 1) || ![v[@"hidden"] isKindOfClass:NSNumber.class]) {
             _keyStyles = [NSMutableDictionary dictionary]; _keyStyleProblem = [NSString stringWithFormat:S2AL(@"vpad.layout.error"), @"F01.keyStyle", S2AL(@"vpad.layout.problem.keyStyle")]; return; }
         _keyStyles[key] = v;
     }

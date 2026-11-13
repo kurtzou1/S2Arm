@@ -1,0 +1,3 @@
+/* Info.plist 權限說明的繁體中文譯文（#316）：Info.plist 主值英文（runtime/build.mk），繁體中文系統讀 zh-Hant。出包寫本地化顯示名時只換 / 補 CFBundleDisplayName 一行（pack/app_bundle.py），這裡的鍵原樣保留；與 zh-Hans 表鍵一致 */
+"NSLocalNetworkUsageDescription" = "區域網路連線：與同一個 Wi-Fi 下的其他裝置互相尋找、進入同一個房間。";
+"NSBluetoothAlwaysUsageDescription" = "在設定中開啟後，用來連接 Switch 2 Pro 手把。";

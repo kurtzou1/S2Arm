@@ -134,8 +134,10 @@
 入	ios
 入	runtime/ns2pro/LICENSE
 入	runtime/ns2pro/NS2Accessories.c
+入	runtime/ns2pro/NS2Bond.c
 入	runtime/ns2pro/NS2Input.c
 入	runtime/ns2pro/NS2JoyCon.c
+入	runtime/ns2pro/NS2Keep.c
 入	runtime/ns2pro/NS2Module.m
 入	runtime/ns2pro/NS2Motion.c
 入	runtime/ns2pro/NS2Rumble.c
@@ -170,6 +172,7 @@
 入	launchers/macos/build.mk
 入	launchers/shared/experience.v1.json
 入	launchers/shared/experience_strings.py
+入	launchers/shared/experience_zh_hant.json
 入	platform/plat.h
 入	platform/plat_asm.h
 入	compat

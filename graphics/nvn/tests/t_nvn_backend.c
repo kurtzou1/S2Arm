@@ -13,7 +13,7 @@
 #define SIG(fn, T) _Static_assert(__builtin_types_compatible_p(__typeof__(&fn), T), #fn " 签名与契约表不符")
 #define DISTINCT(A, B) _Static_assert(!__builtin_types_compatible_p(A, B), #A " 与 " #B " 必须是不同的句柄类型")
 
-_Static_assert(NVN_GPU_CONTRACT_VERSION == 7, "契约版本变了：同批更新本签名表");
+_Static_assert(NVN_GPU_CONTRACT_VERSION == 8, "契约版本变了：同批更新本签名表");
 
 // 句柄：指针大小、两两不同
 _Static_assert(sizeof(nvn_gpu_buf) == sizeof(void *), "句柄应为指针");
@@ -52,7 +52,7 @@ _Static_assert((int)NVN_GPU_E_BASE - (int)NVN_GPU_E_LAST == 14, "错误码 14 �
 // 返回值类型不是整数：不能与 int 互相赋值 / cast（.mk 另有两条编译失败探针实测这一点）
 _Static_assert(!__builtin_types_compatible_p(nvn_gpu_rc, int) && sizeof(nvn_gpu_rc) == sizeof(int32_t), "nvn_gpu_rc 必须是包一层的结构体");
 // 布局项：set / binding / 来源与 Metal aid 同在一项（定稿 A1）
-_Static_assert(sizeof(nvn_gpu_layout_ent) == 20, "布局项 20 字节（set cls access src_kind binding src_reg src_off count aid stages；契约 v7 加 src_off）");
+_Static_assert(sizeof(nvn_gpu_layout_ent) == 24, "布局项含独立采样器来源槽");
 _Static_assert(NVN_GPU_RES_N == 9, "资源类别 9 种：增删时同批改 caps.max_stage_res 的来源注释");
 
 // 签名表（按头文件顺序）

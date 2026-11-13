@@ -808,8 +808,9 @@ def validate_result(raw, what, request=None, descriptor=None, expected_profile=N
     for key in ('schema', 'transport', 'contentHash', 'content'):
         if key not in doc:
             _fail(f'{what}: missing {key!r}')
-    if _string(doc['schema'], f'{what}.schema') != RESULT_SCHEMA:
-        _fail(f'{what}.schema is not {RESULT_SCHEMA}')
+    schema = _string(doc['schema'], f'{what}.schema')
+    if schema not in (RESULT_SCHEMA, 's2a-direct-program-v2'):
+        _fail(f'{what}.schema is unknown')
     transport = _object(doc['transport'], f'{what}.transport')
     request_id = _string(transport.get('requestId'), f'{what}.transport.requestId', 128)
     if request is not None and request_id != request['_requestId']:
@@ -822,8 +823,9 @@ def validate_result(raw, what, request=None, descriptor=None, expected_profile=N
         _fail(f'{what}.contentHash does not match the embedded content bytes')
 
     content = _object(doc['content'], f'{what}.content')
-    if _string(content.get('contract'), f'{what}.content.contract') != CONTENT_CONTRACT:
-        _fail(f'{what}.content.contract is not {CONTENT_CONTRACT}')
+    contract = CONTENT_CONTRACT if schema == RESULT_SCHEMA else 's2a-direct-program-content-v2'
+    if _string(content.get('contract'), f'{what}.content.contract') != contract:
+        _fail(f'{what}.content.contract does not match schema')
     identity = _object(content.get('identity'), f'{what}.content.identity')
     content_abi = _integer(identity.get('directABI'), f'{what}.content.identity.directABI', 1)
     content_closure = _string(identity.get('translatorClosure'),
@@ -864,7 +866,17 @@ def validate_result(raw, what, request=None, descriptor=None, expected_profile=N
         _fail(f'{what}: content.stages is {names}, expected {list(expected)} for kind={kind}')
     support = _object(content.get('supportLayout'), f'{what}.content.supportLayout')
     support_hash = _content_root(support.get('hash'), f'{what}.content.supportLayout.hash')
-    _array(content.get('bindings'), f'{what}.content.bindings')
+    bindings = _array(content.get('bindings'), f'{what}.content.bindings')
+    for index, binding in enumerate(bindings):
+        where = f'{what}.content.bindings[{index}]'
+        binding = _object(binding, where)
+        if 'samp_slot' in binding:
+            if schema == RESULT_SCHEMA or binding.get('kind') != 'texture':
+                _fail(f'{where}: separate sampler source requires v2 texture')
+            _integer(binding['samp_slot'], f'{where}.samp_slot', 0, 127)
+            texword = _integer(binding.get('slot'), f'{where}.slot', 90, 345)
+            if texword % 2 or binding.get('count') != 1:
+                _fail(f'{where}: invalid separate texture slot or array')
     _array(content.get('dependencies'), f'{what}.content.dependencies')
 
     if descriptor is not None:

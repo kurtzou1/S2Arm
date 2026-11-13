@@ -25,6 +25,8 @@
 #      反证：原样 main0 + 不带偏置的采样器（改写前本机不吃采样器偏置时）对不上手算
 #   ③' 比较采样 LOD 偏置 GPU 对拍（t_red_run.m --cmp，缺口族 31）：同 ③，贴图换 Depth32Float（第 L 级深度 0.1 + 0.25 L）、采样器比较 LESS，每项 = 参考值 0.2 / 0.45 / 0.7 三次比较之和
 #      （= 所采级号，mip 线性 → 实际 LOD），期望手算同 ③
+#   ④ #529 定点深度比较（t_red_run.m --dc）：比较采样参考值改写成 (s2a_lb[192 + id] != 0.0 ? saturate(r) : (r))；GPU 上深度 1.0、LessEqual、参考值 1.1 / 0.5：
+#      表标志 0 → 0 / 1、标志 1 → 1 / 1；反证：原样 main0 → 0 / 1（Metal 的 Depth32Float 不替定点格式限制参考值）
 # 用法：python3 graphics/nvn/tests/t_red.py（末行「t_red：N 项，失败 F」）；--emit / --emit-fs <主体> <归约变体>：给 t_nvn_red.m 写端到端核
 import glob, os, re, subprocess, sys, tempfile
 
@@ -97,6 +99,8 @@ def unlb_arg(a):   # fs_lb 改过的一个采样参数 → 原样；None = 这�
     if m: return f'{m.group(1)}({m.group(2)})'
     m = re.fullmatch(rf'(gradient2d|gradient3d|gradientcube)\(\((.*)\) \* precise::exp2\({LBR}\), \((.*)\) \* precise::exp2\({LBR}\)\)', a, re.S)
     if m and R.balanced(m.group(2)) and R.balanced(m.group(3)): return f'{m.group(1)}({m.group(2)}, {m.group(3)})'
+    m = re.fullmatch(rf'\({LBR} != 0\.0 \? saturate\((.*)\) : \((.*)\)\)', a, re.S)   # #529 比较采样的参考值：按表后半段 saturate
+    if m and m.group(1) == m.group(2) and R.balanced(m.group(1)): return m.group(1)
     return a
 def strip_lb(t):
     """fs_lb 输出 → 输入：去掉 s2a_lb 成员行；每处带 s2a_lb 的采样逐个参数还原（从后往前）"""
@@ -317,6 +321,7 @@ ck(strip_lb(bcs) == BCS and strip_lb(bfs) == BFS, '③ 守卫：两支按形态�
 # ③' 比较采样（缺口族 31）：同 ③ 的 16 项，每项 = 参考值 0.2 / 0.45 / 0.7 三次 sample_compare 之和；LOD 参数在参考值之后（数组：层号、参考值之后）
 CHEAD = BHEAD.replace('texture2d<float> t8', 'depth2d<float> t8').replace('texture2d_array<float> tA', 'depth2d_array<float> tA').replace('texturecube<float> tC', 'depthcube<float> tC')
 def SMC(t, a, ref, post=''): return f'spvDescriptorSet0.{t}.sample_compare(spvDescriptorSet0.{t}Smplr, {a}, {ref}' + (f', {post}' if post else '') + ')'
+def RC(ref, i): return f'(spvDescriptorSet0.s2a_lb[{192 + i}] != 0.0 ? saturate({ref}) : ({ref}))'   # #529：fs_lb 改过的参考值（表后半段 = 192 + 采样器成员 id，手写）
 def C3(t, a, post=''): return '(' + ' + '.join(SMC(t, a, r, post) for r in ('0.2', '0.45', '0.7')) + ')'
 GR = 'gradient2d(float2(0.25, 0.0), float2(0.0, 0.25))'
 CCS = (CHEAD + '    device float4* cs_s0 [[id(6)]];\n};\n\nkernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]])\n{\n    float2 _9 = float2(0.3, 0.6);\n'
@@ -329,15 +334,22 @@ CFS = (CHEAD + '};\n\nstruct main0_out\n{\n    float4 m_0 [[color(0)]];\n    flo
        f'    out.m_1 = float4({C3("t8", "_9", "int2(1, 0)")}, {C3("tA", "_9, uint(rint(1.0))")}, {C3("tA", "_9, uint(rint(1.0))", "bias(0.5)")}, {C3("t8", "_9", "min_lod_clamp(0.0)")});\n'
        '    return out;\n}\n')
 ccs, cfs = R.fs_lb(CCS), R.fs_lb(CFS)
-for nm, t, want in (('计算比较隐式 → 参考值后插 level(b)', ccs, SMC('t8', '_9', '0.45', f'level({L1})')), ('计算比较 level(1) → level((1.0) + b)', ccs, SMC('t8', '_9', '0.7', f'level((1.0) + {L1})')),
-                    ('计算比较 gradient → 导数 × precise::exp2(b)', ccs, SMC('t8', '_9', '0.2', f'gradient2d((float2(0.25, 0.0)) * precise::exp2({L1}), (float2(0.0, 0.25)) * precise::exp2({L1}))')),
-                    ('计算比较只带 min_lod_clamp(m) → level(max(b, m))', ccs, SMC('t8', '_9', '0.2', f'level(max({L1}, 0.0))')),
-                    ('计算比较数组隐式 → 层号、参考值后插 level(b)', ccs, SMC('tA', '_9, uint(rint(1.0))', '0.2', f'level({L3})')),
-                    ('片元比较隐式 → 参考值后插 bias(b)', cfs, SMC('t8', '_9', '0.2', f'bias({L1})')), ('片元比较 bias(0.5) → bias((0.5) + b)', cfs, SMC('t8', '_9', '0.45', f'bias((0.5) + {L1})')),
-                    ('片元比较带偏移 → 偏移前插 bias(b)', cfs, SMC('t8', '_9', '0.7', f'bias({L1}), int2(1, 0)')), ('片元比较参数块加 s2a_lb [[id(6)]]', cfs, 'constant float* s2a_lb [[id(6)]];')):
+for nm, t, want in (('计算比较隐式 → 参考值后插 level(b)', ccs, SMC('t8', '_9', RC('0.45', 1), f'level({L1})')), ('计算比较 level(1) → level((1.0) + b)', ccs, SMC('t8', '_9', RC('0.7', 1), f'level((1.0) + {L1})')),
+                    ('计算比较 gradient → 导数 × precise::exp2(b)', ccs, SMC('t8', '_9', RC('0.2', 1), f'gradient2d((float2(0.25, 0.0)) * precise::exp2({L1}), (float2(0.0, 0.25)) * precise::exp2({L1}))')),
+                    ('计算比较只带 min_lod_clamp(m) → level(max(b, m))', ccs, SMC('t8', '_9', RC('0.2', 1), f'level(max({L1}, 0.0))')),
+                    ('计算比较数组隐式 → 层号、参考值后插 level(b)', ccs, SMC('tA', '_9, uint(rint(1.0))', RC('0.2', 3), f'level({L3})')),
+                    ('片元比较隐式 → 参考值后插 bias(b)', cfs, SMC('t8', '_9', RC('0.2', 1), f'bias({L1})')), ('片元比较 bias(0.5) → bias((0.5) + b)', cfs, SMC('t8', '_9', RC('0.45', 1), f'bias((0.5) + {L1})')),
+                    ('片元比较带偏移 → 偏移前插 bias(b)', cfs, SMC('t8', '_9', RC('0.7', 1), f'bias({L1}), int2(1, 0)')), ('片元比较参数块加 s2a_lb [[id(6)]]', cfs, 'constant float* s2a_lb [[id(6)]];')):
     ck(want in t, f"③' 改写：{nm}")
 ck(strip_lb(ccs) == CCS and strip_lb(cfs) == CFS, "③' 守卫：两支按形态还原 = 原样逐字节")
 ck(R.fs_rd(cfs) == cfs, "③' fs_rd：只有比较采样 → 不出变体（比较采样不进边界色混合：比较对边界深度不是线性）")
+# ④ #529 定点深度比较：比较采样的参考值按表后半段 s2a_lb[192 + 采样器成员 id] saturate（宿主按客体格式写：D16 / D24 / D24S8 写 1、D32F 写 0）。
+#   计算核：深度全 1.0 的 depth2d、LessEqual 采样器，参考值 1.1 与 0.5 各比一次（显式 level(0.0)）；期望见 t_red_run.m dc_run（标志 0 → 0 / 1，标志 1 → 1 / 1，原样 → 0 / 1）
+DCS = (CHEAD + '    device float4* cs_s0 [[id(6)]];\n};\n\nkernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]])\n{\n'
+       f'    spvDescriptorSet0.cs_s0[0] = float4({SMC("t8", "float2(0.5)", "1.1", "level(0.0)")}, {SMC("t8", "float2(0.5)", "0.5", "level(0.0)")}, 0.0, 0.0);\n}}\n')
+dcs = R.fs_lb(DCS)
+ck(SMC('t8', 'float2(0.5)', RC('1.1', 1), f'level((0.0) + {L1})') in dcs, '④ 改写：比较采样参考值 → (s2a_lb[192 + 1] != 0.0 ? saturate(r) : (r))')
+ck(strip_lb(dcs) == DCS, '④ 守卫：按形态还原 = 原样逐字节')
 with tempfile.TemporaryDirectory() as tmp:
     exe = os.path.join(tmp, 't_red_run')
     r = subprocess.run(['xcrun', 'clang', '-O1', '-fobjc-arc', '-Wall', '-I', os.path.join(ROOT, 'graphics/nvn/gfx/nvn'), '-o', exe, os.path.join(HERE, 't_red_run.m'),
@@ -363,5 +375,11 @@ with tempfile.TemporaryDirectory() as tmp:
         lines = [l for l in r.stdout.splitlines() if l[:1] in ('✓', '✗')]
         for l in lines: ck(l.startswith('✓'), l[2:])
         if r.returncode and not any(l.startswith('✗') for l in lines) or not lines: ck(False, f'比较偏置执行器退出 {r.returncode}：{(r.stdout + r.stderr).strip()[-300:]}')
+        fd = [os.path.join(tmp, f) for f in ('dc.metal', 'dc_lb.metal')]
+        for p, t in zip(fd, (DCS, dcs)): open(p, 'w').write(t)
+        r = subprocess.run([exe, '--dc', *fd], capture_output=True, text=True, timeout=150)
+        lines = [l for l in r.stdout.splitlines() if l[:1] in ('✓', '✗')]
+        for l in lines: ck(l.startswith('✓'), l[2:])
+        if r.returncode and not any(l.startswith('✗') for l in lines) or not lines: ck(False, f'定点深度比较执行器退出 {r.returncode}：{(r.stdout + r.stderr).strip()[-300:]}')
 print(f't_red：{n} 项，失败 {bad}（GPU 每项 {len(pts)} 个位置）')
 sys.exit(1 if bad else 0)

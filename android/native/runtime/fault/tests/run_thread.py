@@ -60,6 +60,7 @@ def main():
     run([exe,'diag'],'diagnostic-on',contains='Android-branch diagnostic checks',extra_env={'S2A_WAIT_DIAG':'1'})
     variants=[('pause-context-clobbered',Path('runtime/src/thread.c'),'    if (!already) atomic_store(&t->pause, 1);','    if (!already) { t->pmach = 0; atomic_store(&t->pause, 1); }','FAIL rapid resume/pause keeps async context'),
       ('offguest-false-ack',FAULT/'thread_android.inc','thread->exited || thread->vm_wait_safe','thread->exited || atomic_load(&thread->off_guest) || thread->vm_wait_safe','FAIL off_guest is not quiescence'),
+      ('host-safepoint-missing',FAULT/'thread_android.inc','    android_vm_barrier(pthread_getspecific(g_keythr));\n}','    /* deliberately omitted host safepoint park */\n}','FAIL host safepoint quiesces'),
       ('wake-barrier-missing',FAULT/'thread_android.inc','    android_vm_barrier_poll(thread, condition!=&g_pause_cv && android_wait_pause_on()\n                           ? android_wait_pause_poll : NULL);\n    glock();','    /* deliberately omitted wait-return barrier */\n    glock();','FAIL woken waiter cannot escape'),
       ('entry-barrier-missing',Path('runtime/src/thread.c'),'    android_vm_barrier(t);\n#endif\n    { char nm','    /* deliberately omitted entry barrier */\n#endif\n    { char nm','FAIL new entry stopped'),
       ('vm-pause-poll-missing',FAULT/'thread_android.inc','? android_wait_pause_poll : NULL','? NULL : NULL',

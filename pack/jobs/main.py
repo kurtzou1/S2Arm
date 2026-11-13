@@ -30,6 +30,7 @@ import awake
 import community
 import devcert
 import diag
+import diag_upload
 import downstream
 import embedded
 import export_plan
@@ -91,7 +92,7 @@ def run_request(request_path, *, context_class=Context, operation_overrides=None
                   "setup": library.setup, "keys": library.keys, "import": library.import_games,
                   "catalog": library.catalog, "customize": library.customize, "remove": library.remove, "delete": library.delete, "clean": library.clean,
                   "spaceSurvey": library.space_survey, "spaceFree": library.space_free, "storageOverview": sizes.overview,
-                  "diagnostics": library.diagnostics, "saveInput": library.save_input,
+                  "diagnostics": library.diagnostics, "diagnosticsUpload": diag_upload.upload, "saveInput": library.save_input,
                   "locations": library.list_locations, "moveGame": library.move_game, "relinkGame": library.relink_game, "forgetGame": library.forget_game,
                   "build": build.prepare, "launch": build.launch, "pullDiagnostics": diag.pull, "ipa": ipa.build, "downstreamChoice": downstream.set_choice, "install": install.install, "installRemove": install.remove_from_phone, "installRestore": install.restore_previous, "installUpdate": install.update_phone, "installMode": install.install_mode_job, "installCheck": install.readiness, "signingProject": install.signing_project, "installDotnet": toolchain.install_dotnet, "targetDevice": target.probe,
                   "saveStatus": saves.status, "saveBackup": saves.backup, "saveInspect": saves.inspect, "saveRestore": saves.restore,

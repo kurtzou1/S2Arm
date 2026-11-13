@@ -454,8 +454,12 @@ def main():
     c.add_argument("--host-abi", type=int, required=True)    # 宿主读产物约定号（pack/jobs/host_update.py HOST_ABI），写进每款条目
     c.add_argument("--display-name", default=PLACEHOLDER_NAME); c.add_argument("--sign", choices=("none", "adhoc", "dev"), default="none"); c.add_argument("--team", default="")
     d = sub.add_parser("container-drop"); d.add_argument("--base", required=True); d.add_argument("--game", required=True); d.add_argument("--out", required=True)
+    # sign：只签名（组好的 App 再改 Info.plist 之后统一签，如 #845 容器摘要；签完再改会破坏签名，v0.3.6 候选 ⑥ codesign 不过）
+    g = sub.add_parser("sign"); g.add_argument("--app", required=True); g.add_argument("--sign", choices=("none", "adhoc", "dev"), required=True)
+    g.add_argument("--bundle-id", default=""); g.add_argument("--team", default="")
     a = ap.parse_args()
-    {"shell": cmd_shell, "build": cmd_build, "container": cmd_container, "container-drop": cmd_container_drop}[a.cmd](a)
+    {"shell": cmd_shell, "build": cmd_build, "container": cmd_container, "container-drop": cmd_container_drop,
+     "sign": lambda a: sign_app(Path(a.app), a.sign, a.bundle_id, a.team)}[a.cmd](a)
 
 
 if __name__ == "__main__":

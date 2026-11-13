@@ -9,6 +9,7 @@
 //   ④ 画第 1 级、LOD 2..2 但没有 mip 过滤（minf 1）→ 同 ③
 //   ⑤ 画第 0 级、钉第 1 级 → 一个视图，只含第 1 级
 //   ⑥ 画第 0 级、不钉 → 不换视图
+//   ⑦ 同 ⑤，但贴图绑在 128 号槽（槽表 0–255 都是贴图；#839 一款动作游戏的 FXAA 从 128 号槽读自己正在写的场景图）→ 同样换成只含第 1 级的视图（修前 128 号以上不查，原地边读边写）
 #ifndef NVN_PIN_SOURCE
 #define NVN_PIN_SOURCE "../gfx/nvn/nvn_mtl.m"
 #endif
@@ -56,6 +57,17 @@ int main(void) {
             id<MTLTexture> use = g_fb_n ? g_fb_use[0] : nil;
             CHECK(g_fb_n == c[i].want_n && (!c[i].want_n || (use.parentTexture == original && (int)use.parentRelativeLevel == c[i].want_level && (int)use.mipmapLevelCount == c[i].want_levels)),
                   "%s（换了 %d 个视图，第 %lu 级起 %lu 级）", c[i].label, g_fb_n, (unsigned long)use.parentRelativeLevel, (unsigned long)use.mipmapLevelCount);
+            if (g_enc) rp_end();
+        }
+        {   // ⑦ 128 号槽
+            fs->rf.b[0].reg = 128; fs->rf.b[1].reg = 128; state_reset(); S.tex[1][128] = TID | (uint64_t)SID << 20;
+            samp_par sp = {.minf = 5, .magf = 1, .ws = 2, .wt = 2, .wr = 2, .lod_min = 1, .lod_max = 1, .aniso = 1}; nvn_be_reg_samp(SID, &sp);
+            memset(&R.rt, 0, sizeof R.rt); R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &chain; R.rt.has_cview[0] = 1;
+            R.rt.cview[0] = (view_t){.set_levels = 1, .base_level = 0, .nlevels = 1};
+            fb_prepare(pr);
+            id<MTLTexture> use = g_fb_n ? g_fb_use[0] : nil;
+            CHECK(g_fb_n == 1 && use.parentTexture == original && (int)use.parentRelativeLevel == 1 && (int)use.mipmapLevelCount == 1,
+                  "⑦ 贴图在 128 号槽、画第 0 级、钉第 1 级：只含第 1 级（换了 %d 个视图）", g_fb_n);
             if (g_enc) rp_end();
         }
         uint64_t f = nvn_be_sub_commit(); REQUIRE(nvn_be_wait(f, 10000000000ull));

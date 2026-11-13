@@ -58,10 +58,21 @@
 
 不包含任何游戏专用的 UI 移动、硬编码游戏地址或游戏专用配置。
 
+## 镜面背景与折痕视觉
+
+`ios/play_reflection.*` 在宿主层复用实时游戏出图层，通过系统 `CAReplicatorLayer` 上下镜像，下区叠加原生模糊与渐暗背景；折痕保留区单独作渐变过渡。直连和通用出图通过同一个可选宿主入口挂层，仍各自管理原有画面矩形、drawable 尺寸和呈现节拍。旧宿主未提供入口时保持原挂层方式；Mac 路径不接入本效果。
+
+镜像轴取上区下沿与下区上沿的中点，包含真实横向折痕宽度；没有横向折痕时沿上下分屏线。系统镜像变换相对图层中心，须先转换坐标。按键、加载页与诊断视图保持在背景上方，不进入镜像；背景不接收触摸。不做 CPU 截图或第二次游戏场景渲染，不改宽屏补丁和游戏内 UI。
+
+分屏关闭或进入后台时只保留原画面实例，隐藏模糊和折痕效果，回到前台按当前布局恢复。模糊层及其父视图保持 alpha 为 1，渐隐通过独立黑色渐变层完成，遵循 [Apple 的视觉效果视图约束](https://developer.apple.com/documentation/uikit/uivisualeffectview)。系统合成器的实际 GPU / 能耗成本仍需真机测量，不沿用参考项目下采样着色器的性能读数。
+
+交付分四份：`ios/duo-layout-policy` 区域与策略 → `ios/duo-output-area` 出图区域与比例保护 → `ios/duo-touch-layout` 窗口、按键与编辑存储 → `ios/duo-reflection` 倒影与折痕视觉。区域避让仍归第一 / 三份，视觉层只消费其结果。
+
 ## 验证入口与边界
 
 ```sh
 make native-test-play_layout native-test-vpad_split native-test-phone_axes
+make native-test-play_reflection
 make native-test-vpad_shell native-test-vpad_custom native-test-vpad_toggle
 make native-test-vpad_2d native-test-vpad_key_style
 make native-test-ios_settings native-test-widen_ios_screen
@@ -86,6 +97,8 @@ cd shell && swift test
 Mac 启动器继续按共享表的平台字段过滤展示；不能把登记这两个 iOS 项解释为 Mac 宿主已有分屏。
 
 独立输入工作台 `ios/lab/` 复用生产窗口、设置和按键代码，可用于无游戏资源的界面验证。模拟器不提供真实铰链，不能替代 Duo 半折检测、游戏内触屏坐标、宽屏画面及真实组合操作验收。完整贡献者自检的本机缺项、实际执行结果与负对照随交付记录单列。
+
+倒影另有独立合成图案工作台：用 `xcodegen generate --spec ios/lab/reflection.yml --project-root . --project build/reflection-lab` 生成工程，选择本机模拟器编译运行。它使用 `framebufferOnly=YES` 的真实 Metal drawable，提供图案切换、模拟折痕、画面留边、分屏 / 方向切换及下区按钮；24 点折痕只属于合成夹具，不是生产常量。`S2A_REFLECTION_BASELINE=1` 可令夹具按旧宿主方式直接挂层作对照。运行状态写入 App Documents 的 `reflection-lab.json`，包含实例数、模糊可见性、前后台状态和已提交帧数。它不启动游戏，不构成 Duo 真机或能耗验收。
 
 2026-11-09 rebase 前（`f76bb5f`）的专项验证：区域 21/21、分屏按键与存储 103/103、方向六轴 9/9、宽屏 18/18 断言通过，Swift 宿主测试 8 项通过，iOS 游戏库 Release 编译通过。把分屏开关改成恒开后区域检查失败 4 项；去掉装载期宽屏保护后宽屏检查失败 2 项，负对照均能拦住错误。rebase 后的读数随各步 PR 单独记录，不沿用这些旧读数。
 

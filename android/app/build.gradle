@@ -214,7 +214,7 @@ android {
             // S2ARM_ANDROID_VK_ENGINE=1 打开）。名字是历史遗留，旧 d2r 引擎已删除。
             arguments "-DS2A_ANDROID_VK_ENGINE=${System.getenv('S2ARM_ANDROID_VK_ENGINE') == '1' ? 'ON' : 'OFF'}"
             // 前端 mtl_* 的后端只剩 nvn_vk（S2Arm 自己的 Vulkan 后端 + mtl_vk_shim.c）
-            arguments "-DS2ARM_ANDROID_VK_BACKEND=${System.getenv('S2ARM_ANDROID_VK_BACKEND') ?: 'nvn_vk'}"
+            arguments "-DS2ARM_ANDROID_VK_BACKEND=${System.getenv('S2ARM_ANDROID_VK_BACKEND') ?: 'nvk'}"
         } }
     }
     externalNativeBuild {

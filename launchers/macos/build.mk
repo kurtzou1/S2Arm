@@ -10,7 +10,7 @@ HOST_LIBS += -framework AppKit -framework CoreGraphics -framework GameController
 NS2_HELPER := $(BUILD)/S2ArmNS2Connection
 NS2_HELPER_SRCS := macos/ns2_connection_helper.m macos/ns2_parent_watch.c runtime/ns2pro/NS2Transport.m $(wildcard runtime/ns2pro/*.c)
 $(NS2_HELPER): $(NS2_HELPER_SRCS) $(wildcard runtime/ns2pro/include/*.h) macos/ns2_relay.h macos/ns2_parent_watch.h
-	$(CC) $(CFLAGS) -Iruntime/ns2pro/include -DNS2_SCAN_SECONDS=60 $(NS2_HELPER_SRCS) -framework Foundation -framework CoreBluetooth -o $@
+	$(CC) $(CFLAGS) -Iruntime/ns2pro/include -DNS2_SCAN_SECONDS=60 $(NS2_HELPER_SRCS) -framework Foundation -framework CoreBluetooth -framework IOBluetooth -o $@
 host: $(NS2_HELPER)
 $(BUILD)/s2arm-host: launchers/macos/build.mk
 endif

@@ -89,5 +89,12 @@ static void cancel_input(int64_t id) {
     });
 }
 
+// 游戏窗口判失焦用（#279，macos/front_mac.m，规则在 runtime/include/s2a_mac_focus.h）：w 是不是登记中、还没答复的系统输入框。只在主线程调
+int s2a_text_input_mac_is_input_window(NSWindow *w) {
+    if (!w) return 0;
+    for (S2ATextInputMac *in in g_inputs.allValues) if (!in.answered && in.alert.window == w) return 1;
+    return 0;
+}
+
 // 启动即登记到公用分发（runtime/src/text_input.c）
 __attribute__((constructor)) static void provide_text_input(void) { s2a_text_input_provide(begin_input, cancel_input); }

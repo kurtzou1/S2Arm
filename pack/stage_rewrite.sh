@@ -186,31 +186,7 @@ if [ -n "$CK" ]; then   # 社区补丁：先按不带补丁的改写点预筛出
   echo "  $G 社区补丁：$(grep -c . "$W/cpatch.tsv" | awk '{print $1 - 1}') 份进包（双路 $(grep -c '^p' "$W/cpatch_rows.tsv") 字、常写 $(grep -c '^w' "$W/cpatch_rows.tsv") 字），不收 $(grep -c '^不收' "$W/cpatch_plan.log") 份（$W/cpatch_plan.log）"
 fi
 # 降级汇总（v0.3.1）：缺口按类别、兼容写法按处数，写 degrade.rewrite.tsv（出包作业收尾读它给玩家提示、诊断包收它）；没有降级就删掉旧表
-"$PY" - "$W" "$G" <<'PYEOF' || { echo "【红】$G 写降级汇总失败"; root_abort "$G" "$TAG"; exit 1; }
-import collections, glob, os, re, sys
-w, g = sys.argv[1:3]; kinds = collections.Counter(); mods = collections.defaultdict(set); compat = 0
-for log in sorted(glob.glob(os.path.join(w, '*.rewrite.log'))):
-    m = os.path.basename(log)[:-len('.rewrite.log')]
-    for line in open(log, encoding='utf-8', errors='replace'):
-        c = re.search(r"'x18_compat': (\d+)", line)
-        if c: compat += int(c[1])
-    gp = os.path.join(w, m + '.gaps.tsv')
-    if os.path.isfile(gp):
-        for line in open(gp, encoding='utf-8', errors='replace'):
-            if line.startswith('#') or '\t' not in line: continue
-            k = line.split('\t')[1]; kinds[k] += 1; mods[k].add(m)
-out = os.path.join(w, 'degrade.rewrite.tsv'); n = sum(kinds.values())
-if not n and not compat:
-    if os.path.exists(out): os.remove(out)
-    sys.exit(0)
-with open(out, 'w', encoding='utf-8') as f:
-    f.write('# 阶段\t类别\t处数\t玩家提示\t说明\n')
-    if compat: f.write(f'rewrite\tx18_compat\t{compat}\t这款有 {compat} 处用了兼容写法，个别场景可能不稳定，遇到请反馈\t恢复 sp 后挑不出已死的临时寄存器，这几处退回压栈写法\n')
-    if n: f.write(f'rewrite\tgap\t{n}\t这款有 {n} 处程序代码暂时没法改写、保持原样，玩到用到它们的地方可能出错，遇到请反馈\t缺口点保持原指令，逐条见 <模块>.gaps.tsv\n')
-    for k, c in sorted(kinds.items()): f.write(f'rewrite\tgap:{k}\t{c}\t\t模块 {" ".join(sorted(mods[k]))}\n')
-parts = ([f'兼容写法 {compat} 处'] if compat else []) + ([f'没改写的缺口 {n} 处（{"、".join(f"{k} {c}" for k, c in sorted(kinds.items()))}）'] if n else [])
-print(f'【黄】{g} 改写降级继续：{"；".join(parts)}（{out}）')
-PYEOF
+"$PY" "$R/pack/rewrite_degrade.py" "$W" "$G" || { echo "【红】$G 写降级汇总失败"; root_abort "$G" "$TAG"; exit 1; }   # 与 Windows pack/orch/stages.py 共用（#893）
 cp "$W/exefs/main.npdm" "$W/" || { root_abort "$G" "$TAG"; echo "【红】缺 main.npdm"; exit 1; }
 [ -z "$AN" ] || cp "$AN" "$W/addr_need.tsv" || { root_abort "$G" "$TAG"; exit 1; }
 cp "$AD/log" "$W/addr_need.log" || { root_abort "$G" "$TAG"; exit 1; }

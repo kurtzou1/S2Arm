@@ -140,7 +140,6 @@ static void load_session_modules(void *unused) {
     switch_program_modules();
 #if defined(__APPLE__)
     { void s2a_test_ballast_commit(void); s2a_test_ballast_commit(); }   // 测试压舱（S2A_TEST_BALLAST_MB，vawin.c）：布局排完、装模块前才真占
-    { int s2a_guest_file_retry(void); s2a_guest_file_retry(); }   // 起局时空间不够没接上文件后备的，解包完、装模块前再试一次（vawin.c，#483）
 #endif
     load_modules(g_module_dir, (const char **)g_module_names, g_module_count);
     if (g_program_switched >= 0) {   // 多程序合集：模块（含 main.npdm 程序号）换好后，直连图形层的着色器库 / 映射表 / 每款参数换到该序号（graphics/nvn/host_adapt.m）；
@@ -183,7 +182,7 @@ static int start_guest_thread(void) {
 
 // 初启失败的唯一出口。契约（审计 #1534 P1-4，见 runtime/include/s2a_init_fail.h）：初启失败 = 本进程终局——先发布终局（会话 EXITING、门表终局 park），
 //   不回收半建资源、不在同一进程再起第二局（托管层 / 图形装配 / session.c 三层都按此设计，生命周期代码不为失败改）。
-//   之后只分「怎么告诉人」：iOS 人手局停在提示页（按错误码的玩家话术 +「复制诊断」+ 划掉重开；内部摘要只进诊断），Mac 与自动化局照旧失败退出码 1。
+//   之后只分「怎么告诉人」：iOS 人手局停在提示页（按错误码的玩家话术 +「上传给开发者」+ 划掉重开；内部摘要只进诊断），Mac 与自动化局照旧失败退出码 1。
 //   code = S2A_INIT_FAIL_E_*（调用点一处一个，码表在 s2a_init_fail.h）
 static void failed_session(int code) {
     const char *why = s2a_init_fail_summary(code), *cid = s2a_init_fail_code_id(code);
@@ -195,7 +194,7 @@ static void failed_session(int code) {
         snprintf(lp, sizeof lp, "%s/host.log", s2a_launch_ctx_get()->log_dir);   // main 开头已核上下文可用
         s2a_init_fail_diag_file(diag, sizeof diag, code, s2a_main_build_id(), DMSH_CHAIN, lp);
         s2a_init_fail_screen(body, sizeof body, code);
-        LOG("初启失败诊断（「复制诊断」放进剪贴板的同一份）：\n%s", diag);
+        LOG("初启失败诊断（随「上传给开发者」的诊断包带走）：\n%s", diag);
         s2a_logcon_flush();
         void s2a_ios_init_failed(const char *body, const char *diag); s2a_ios_init_failed(body, diag);
         s2a_front_run(NULL);   // iOS 一律延后启动，UIKit 已在主线程：立即返回；宿主线程停在这里直到玩家划掉
@@ -389,7 +388,7 @@ static int host_run(int argc, char **argv) {
     else if (S2A_Init) die("【红】C# 服务层只导出了 S2A_Init、没有 S2A_InitSession：初始化失败报不出来，不起游戏（宿主与服务层版本不配套，重新出包）");
     else LOG("S2A_Init：没链 C#（原生层单独构建），进 C# 的系统调用一律报红");
     // 只有直连（11-07 拆通用模式）：包里没有本宿主口径的直连库（没导完、旧版本出的包、设备跑不了直连）就停在这里报「游戏文件缺失」，
-    //   iOS 提示页带「复制诊断」反馈入口；原先这里静默退成通用模式（11-02 / 11-05 普查两款这样起局，一款崩、一款卡死，直连问题藏在后面）
+    //   iOS 提示页带「上传给开发者」反馈入口；原先这里静默退成通用模式（11-02 / 11-05 普查两款这样起局，一款崩、一款卡死，直连问题藏在后面）
     if (s2a_gfx_mode() != S2A_GFX_DIRECT) failed_session(S2A_INIT_FAIL_E_DIRECT_LIB);
     s2a_boot_mark("S2A_Init 返回（C# 运行时 + 服务登记）");
     s2a_window_probe("C# 初始化后");

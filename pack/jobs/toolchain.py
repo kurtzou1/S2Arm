@@ -365,9 +365,9 @@ def download_metal(c):
     # 一键下载 Xcode 的 Metal 编译组件（xcodebuild -downloadComponent MetalToolchain，Xcode 26 起；不需要管理员密码）
     c.begin("下载 Metal 编译组件")
     def line(text):
-        m = re.search(r"(\d+(?:\.\d+)?)\s*%", text)
+        m = DOWNLOAD_PERCENT.search(text)
         if m:
-            c.emit(done=float(m.group(1)), total=100.0, unit="%")
+            c.emit(done=float(m.group(1).replace(",", ".")), total=100.0, unit="%")
     c.run(["xcodebuild", "-downloadComponent", "MetalToolchain"], on_line=line)
     return {}
 
@@ -379,7 +379,10 @@ EXFAT_NOTE = "游戏库在 exFAT 格式的磁盘上：可以出包，但这种�
 PYTHON_MINIMUM = (3, 11)   # 作业层要的 Python 最低版本：预检（preflight）与 Windows 环境检查（winenv 直接读这个常量）同一份
 
 
-DOWNLOAD_BYTES = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*\(([\d.]+)\s*([kmgt]?b)\s+of\s+([\d.]+)\s*([kmgt]?b)\)", re.I)
+# xcodebuild 按系统区域输出小数点或小数逗号；不能把 46,2% 的后半截读成 2%。
+DOWNLOAD_NUMBER = r"\d+(?:[.,]\d+)?"
+DOWNLOAD_PERCENT = re.compile(rf"(?<![\d.,])({DOWNLOAD_NUMBER})\s*%")
+DOWNLOAD_BYTES = re.compile(rf"(?<![\d.,])({DOWNLOAD_NUMBER})\s*%\s*\(({DOWNLOAD_NUMBER})\s*([kmgt]?b)\s+of\s+({DOWNLOAD_NUMBER})\s*([kmgt]?b)\)", re.I)
 IOS_PLATFORM_TIMEOUT = 6 * 3600    # 只防挂死：8.32 GB 在 400 KB/s 下约 6 小时，正常远快于这个上限
 IOS_PLATFORM_REGISTER_WAIT = 180   # 传输完后等 CoreSimulator 注册的上限（秒）
 
@@ -491,11 +494,11 @@ def download_ios_platform(c):
         m = DOWNLOAD_BYTES.search(text)
         if m:
             unit = lambda u: BYTE_SCALE[u.lower()]
-            c.emit(done=float(m.group(2)) * unit(m.group(3)), total=float(m.group(4)) * unit(m.group(5)), unit="B")
+            c.emit(done=float(m.group(2).replace(",", ".")) * unit(m.group(3)), total=float(m.group(4).replace(",", ".")) * unit(m.group(5)), unit="B")
             return
-        found_pct = re.findall(r"(\d+(?:\.\d+)?)\s*%", text)
+        found_pct = DOWNLOAD_PERCENT.findall(text)
         if found_pct:
-            c.emit(done=float(found_pct[-1]), total=100.0, unit="%")
+            c.emit(done=float(found_pct[-1].replace(",", ".")), total=100.0, unit="%")
     # 退出码 64 = xcodebuild 不认参数（只打用法）：-architectureVariant 是新版才有的，老版本去掉它重试（下的是通用包，大一点）
     variants = (["-architectureVariant", "arm64"], [])
     try:

@@ -109,6 +109,9 @@ struct LauncherView: View {
         .sheet(item: Binding(get: { inputFor.map(OptionsTarget.init) }, set: { inputFor = $0?.id })) { target in
             InputSettingsSheet(model: model, gameID: target.id).environmentObject(loc)
         }
+        .sheet(item: Binding(get: { model.diagUploadFor.map(OptionsTarget.init) }, set: { model.diagUploadFor = $0?.id })) { target in   // 上传给开发者（游戏库菜单 / 控制口）
+            UploadDiagnosticsSheet(model: model, gameID: target.id.isEmpty ? nil : target.id, operations: nil, fallback: "") { model.diagUploadFor = nil }.environmentObject(loc)
+        }
         .background(DownstreamPromptHost(model: model))   // 下游深度方案确认页（DownstreamConfirmSheet.swift）
         .alert(txt("game.delete.title").replacingOccurrences(of: "{0}", with: deleteFor?.name ?? ""), isPresented: Binding(get: { deleteFor != nil }, set: { if !$0 { deleteFor = nil } })) {
             Button(txt("game.cancel"), role: .cancel) { deleteFor = nil }
@@ -218,6 +221,13 @@ struct LauncherView: View {
                     }
                 }
                 .buttonStyle(LauncherSecondaryButtonStyle())
+                // 故障报修（11-13）：任何页面同一位置（顶栏最右，Windows 同位），点开就是全局「上传给开发者」弹窗（不针对某款，
+                //   作业层自动附最近一次失败的错误摘要）；报错页的指引 ReportHint 指的就是它
+                Button { model.diagUploadFor = "" } label: {
+                    Label(BackendText.launcherText("report.button", language: uiLanguage), systemImage: "exclamationmark.bubble").font(.manrope(12.5, .semibold))
+                }
+                .buttonStyle(LauncherSecondaryButtonStyle())
+                .accessibilityIdentifier("top.report")
         }
         .padding(.trailing, 8)
         .fixedSize()   // 放在标题栏里没有宽度约束，不固定的话按钮文字会被压成省略号

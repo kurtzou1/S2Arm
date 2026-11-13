@@ -118,6 +118,7 @@ public static class PackJobClient
                 throw new ArgumentException("An absolute folder is required: " + key, nameof(request));
         if (request.Operation == "clean" && (payload.TryGetValue("kind", out var kind) ? kind as string : null) != "cache")
             throw new ArgumentException("Only the cache can be cleared here.", nameof(request));
+        JobLanguage.Stamp(payload);   // 界面语言（自签导出的文件夹名 / 说明按它出）
         return payload;
     }
 

@@ -334,6 +334,7 @@ public sealed partial class EnvironmentWindow
             again.Children.Add(Action("action.recheck", () => _ = CheckAsync(), !busy));
             again.Children.Add(CopyReportButton(null, null, EnvironmentSummary));
             panel.Children.Add(again);
+            panel.Children.Add(ReportHintText());
             return panel;
         }
         if (report is null)
@@ -367,6 +368,7 @@ public sealed partial class EnvironmentWindow
         pcButtons.Children.Add(Action("action.recheck", () => _ = CheckAsync(), !busy));
         pcButtons.Children.Add(CopyReportButton(null, null, EnvironmentSummary));
         panel.Children.Add(pcButtons);
+        panel.Children.Add(ReportHintText());
         return panel;
     }
 

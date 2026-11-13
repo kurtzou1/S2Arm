@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """iOS 宿主界面本地化（#316）单测：宿主玩家看得到的文字走 S2AL(@"键")（ios/s2a_l10n.h），
-字符串表 ios/l10n/{en,zh-Hans}.lproj/S2ArmHost.strings；与游戏进程 / Mac 共用的 C 宏文案（runtime/include 四个头文件）走 S2APICK 取 <宏>_EN；
+字符串表 ios/l10n/<语言>.lproj/S2ArmHost.strings（en / zh-Hans / zh-Hant，按目录自动认）；与游戏进程 / Mac 共用的 C 宏文案（runtime/include 四个头文件）走 S2APICK 取 <宏>_EN；
 iOS「设置」App 的 S2Arm 页 Root.plist 原文英文、zh-Hans.lproj/Root.strings 译中文；Info.plist 权限说明主值英文、<语言>.lproj/InfoPlist.strings 译文。
 期望按规则手写，不跑被测代码：
   ① SRCS 里的 .m，除注释与日志调用（NSLog / LOG / s2a_log / fprintf / printf）外，不再有含中文的 @"…" 字面量；
      不上屏的串（与别的代码比对的标识串、只进诊断包 / 日志 / 崩溃原因的串、真实路径名）列在 IDENT 里，逐条写明理由，且必须真的还在
-  ② 代码里每个 S2AL 的参数都是 @"键" 字面量；每个键在 en / zh-Hans 两表都有；两表键集合相同、无重复键；表里没有代码不用的孤儿键
+  ② 代码里每个 S2AL 的参数都是 @"键" 字面量；每个键在各语言表都有；每种语言与 en 键集合相同（任何一种缺键即红）、无重复键；表里没有代码不用的孤儿键
   ③ 同一个键两表的格式占位符（%@ %d %.1f %1$@ …，按位置归一）一致
   ④ Root.plist 显示文字（Title / FooterText / Titles）无中文；含字母的每条在 Root.strings 里都有翻译，Root.strings 没有多余键
   ⑤ 两张 S2ArmHost.strings、两张 InfoPlist.strings 与 Root.strings（连同 Root.plist）过 plutil -lint
@@ -28,16 +28,21 @@ iOS「设置」App 的 S2Arm 页 Root.plist 原文英文、zh-Hans.lproj/Root.st
 import json, os, pathlib, plistlib, re, shutil, subprocess, sys
 
 H = pathlib.Path(__file__).resolve().parents[1]
-SRCS = ['ios/vpad.m', 'ios/vpad_settings.m', 'ios/vpad_layout.m', 'ios/vpad_cheats.m', 'ios/cheats_parse.m', 'ios/vpad_shell.m', 'ios/cpatch_settings.m', 'ios/cpatch_model.m',
+SRCS = ['ios/diagzip.m', 'ios/ea_rumble.m', 'ios/extdisplay.m', 'ios/input_config.m', 'ios/play_layout.m', 'ios/prov_expiry.m', 'ios/root_ready.m',   # 11-13 补登：原先没扫，扫过无中文显示串
+        'ios/vpad.m', 'ios/vpad_settings.m', 'ios/vpad_layout.m', 'ios/vpad_cheats.m', 'ios/cheats_parse.m', 'ios/vpad_shell.m', 'ios/cpatch_settings.m', 'ios/cpatch_model.m',
         'ios/app.m', 'ios/app_settings.m', 'ios/controller.m', 'ios/diag.m', 'ios/diagredact.m', 'ios/dprompt.m', 'ios/hud.m', 'ios/iml_probe.m',
         'ios/lan_permission.m', 'ios/ldn_lan.m', 'ios/loadpage.m', 'ios/notice.m', 'ios/phone_motion.m', 'ios/save_transfer.m', 'ios/settings.m',
         'ios/textinput.m', 'ios/touch_config.m']
-TABLES = {'en': 'ios/l10n/en.lproj/S2ArmHost.strings', 'zh-Hans': 'ios/l10n/zh-Hans.lproj/S2ArmHost.strings'}
-INFOPLIST = {'en': 'ios/l10n/en.lproj/InfoPlist.strings', 'zh-Hans': 'ios/l10n/zh-Hans.lproj/InfoPlist.strings'}
+# 语言按目录自己找（11-13 加繁中 zh-Hant，维护者「任何一种语言缺键就报红」）：ios/l10n/<语言>.lproj 每一种都要有两张表；en 是基准（开发区域），别的语言逐项与 en 比
+LANGS = sorted(d.name[:-len('.lproj')] for d in (H / 'ios/l10n').glob('*.lproj'))
+TABLES = {l: f'ios/l10n/{l}.lproj/S2ArmHost.strings' for l in LANGS}
+INFOPLIST = {l: f'ios/l10n/{l}.lproj/InfoPlist.strings' for l in LANGS}
+ZH_LANGS = [l for l in LANGS if l.startswith('zh')]   # 中文表：值要是中文译文
 BUILD_MK = 'runtime/build.mk'
 MACRO_HEADERS = ['runtime/include/s2a_direct_prompt.h', 'runtime/include/s2a_init_fail.h', 'runtime/include/s2a_selfcheck_page.h', 'runtime/include/s2a_dguard.h']
 HOST_TEXT_FILE = 'ios/app.m'   # host_text：C 层递上来的规格文案按 App 语言换 <宏>_EN 的对照表
-ROOT_PLIST, ROOT_STRINGS = 'ios/Settings.bundle/Root.plist', 'ios/Settings.bundle/zh-Hans.lproj/Root.strings'
+ROOT_PLIST = 'ios/Settings.bundle/Root.plist'
+ROOT_STRINGS_ALL = {l: f'ios/Settings.bundle/{l}.lproj/Root.strings' for l in LANGS if l != 'en'}   # en 就是 Root.plist 原文，别的语言每种一张译文
 LOG_CALLS = {'NSLog', 'LOG', 's2a_log', 'fprintf', 'printf'}
 CHEATS_CS = '与服务层 Cheats.cs 约定的串（status.txt 状态值 / 条目名，比对与开关键照原样用），显示经 cheat_status_text / cheats.unnamed 换语言'
 REDACT = '诊断包脱敏（diag.m redact / diagredact.m）的匹配式与替换占位，只进诊断包给开发者看，不上屏'
@@ -187,17 +192,25 @@ for lang, rel in TABLES.items():
 for lang, t in tables.items():
     miss = sorted(used - t.keys())
     ck(f'② 代码用到的键在 {lang} 表都有', not miss, ' '.join(miss[:10]))
-en, zh = tables['en'], tables['zh-Hans']
-ck('② en / zh-Hans 两表键集合相同', en.keys() == zh.keys(), f'只在 en：{sorted(en.keys() - zh.keys())[:5]} 只在 zh-Hans：{sorted(zh.keys() - en.keys())[:5]}')
-orphan = sorted((en.keys() | zh.keys()) - used)
+ck(f'② 语言表齐全：{" / ".join(LANGS)}（至少 en 与 zh-Hans）', {'en', 'zh-Hans'} <= set(LANGS), '')
+en = tables['en']
+for lang, t in tables.items():
+    if lang == 'en': continue
+    ck(f'② en / {lang} 两表键集合相同（缺键即红）', en.keys() == t.keys(), f'{lang} 缺：{sorted(en.keys() - t.keys())[:5]} {lang} 多：{sorted(t.keys() - en.keys())[:5]}')
+orphan = sorted(set().union(*(t.keys() for t in tables.values())) - used)
 ck('② 表里没有代码不用的孤儿键', not orphan, ' '.join(orphan[:10]))
 empty = sorted(k for t in tables.values() for k, v in t.items() if not v.strip())
-ck('② 两表没有空值', not empty, ' '.join(empty[:10]))
+ck('② 各表没有空值', not empty, ' '.join(empty[:10]))
 
 # ③ 占位符一致
-diff = [f'{k}: en {placeholders(en[k])} / zh {placeholders(zh[k])}' for k in sorted(en.keys() & zh.keys()) if placeholders(en[k]) != placeholders(zh[k])]
-nfmt = sum(1 for k in en.keys() & zh.keys() if placeholders(en[k]))
-ck(f'③ 两表同键格式占位符一致（{len(en.keys() & zh.keys())} 个键，其中 {nfmt} 个含占位符）', not diff, '；'.join(diff[:5]))
+for lang, t in tables.items():
+    if lang == 'en': continue
+    diff = [f'{k}: en {placeholders(en[k])} / {lang} {placeholders(t[k])}' for k in sorted(en.keys() & t.keys()) if placeholders(en[k]) != placeholders(t[k])]
+    nfmt = sum(1 for k in en.keys() & t.keys() if placeholders(en[k]))
+    ck(f'③ en / {lang} 同键格式占位符一致（{len(en.keys() & t.keys())} 个键，其中 {nfmt} 个含占位符）', not diff, '；'.join(diff[:5]))
+for lang in ZH_LANGS:
+    notzh = sorted(k for k, v in tables[lang].items() if not CJK.search(v) and CJK.search(tables['zh-Hans'].get(k, '')))
+    ck(f'③ {lang} 表在简中是中文的条目也都是中文译文', not notzh, ' '.join(notzh[:8]))
 
 # ④ Settings.bundle
 specs = plistlib.loads((H / ROOT_PLIST).read_bytes())['PreferenceSpecifiers']
@@ -206,14 +219,15 @@ for s in specs:
     texts += [s[f] for f in ('Title', 'FooterText') if f in s] + list(s.get('Titles', []))
 cjk = [t[:20] for t in texts if CJK.search(t)]
 ck(f'④ Root.plist 显示文字 {len(texts)} 条无中文（原文英文）', not cjk, '；'.join(cjk[:5]))
-rpairs, rerr = parse_strings(H / ROOT_STRINGS); root = dict(rpairs)
 need = {t for t in texts if re.search('[A-Za-z]', t)}
-miss, extra = sorted(need - root.keys()), sorted(root.keys() - set(texts))
-ck(f'④ Root.plist 含字母的 {len(need)} 条在 Root.strings 都有翻译', rerr is None and not miss, rerr or '；'.join(m[:30] for m in miss[:5]))
-ck(f'④ Root.strings {len(root)} 条没有多余键、无重复', rerr is None and not extra and len(rpairs) == len(root), '；'.join(e[:30] for e in extra[:5]) or ('有重复键' if len(rpairs) != len(root) else ''))
+for lang, rel in ROOT_STRINGS_ALL.items():
+    rpairs, rerr = parse_strings(H / rel); root = dict(rpairs)
+    miss, extra = sorted(need - root.keys()), sorted(root.keys() - set(texts))
+    ck(f'④ Root.plist 含字母的 {len(need)} 条在 {lang} Root.strings 都有翻译', rerr is None and not miss, rerr or '；'.join(m[:30] for m in miss[:5]))
+    ck(f'④ {lang} Root.strings {len(root)} 条没有多余键、无重复', rerr is None and not extra and len(rpairs) == len(root), '；'.join(e[:30] for e in extra[:5]) or ('有重复键' if len(rpairs) != len(root) else ''))
 
 # ⑤ plutil -lint
-lint = [TABLES['en'], TABLES['zh-Hans'], INFOPLIST['en'], INFOPLIST['zh-Hans'], ROOT_STRINGS, ROOT_PLIST]
+lint = [*TABLES.values(), *INFOPLIST.values(), *ROOT_STRINGS_ALL.values(), ROOT_PLIST]
 if shutil.which('plutil') and sys.platform == 'darwin':
     r = subprocess.run(['plutil', '-lint', *lint], cwd=H, capture_output=True, text=True)
     ck(f'⑤ plutil -lint {len(lint)} 个文件', r.returncode == 0, (r.stdout + r.stderr).strip().replace('\n', '；') if r.returncode else '')
@@ -270,15 +284,18 @@ for lang, rel in INFOPLIST.items():
     pairs, err = parse_strings(H / rel)
     ck(f'⑨ {lang} InfoPlist.strings 可解析、非空、无重复（{len(pairs)} 条）', err is None and pairs and len(pairs) == len(dict(pairs)), err or '空或有重复键')
     ip[lang] = dict(pairs)
-ck('⑨ InfoPlist.strings 两表键集合相同', ip['en'].keys() == ip['zh-Hans'].keys(), f"只在 en：{sorted(ip['en'].keys() - ip['zh-Hans'].keys())} 只在 zh-Hans：{sorted(ip['zh-Hans'].keys() - ip['en'].keys())}")
+for lang in LANGS:
+    if lang == 'en': continue
+    ck(f'⑨ InfoPlist.strings en / {lang} 键集合相同', ip['en'].keys() == ip[lang].keys(), f"只在 en：{sorted(ip['en'].keys() - ip[lang].keys())} 只在 {lang}：{sorted(ip[lang].keys() - ip['en'].keys())}")
 mk = (H / BUILD_MK).read_text(encoding='utf-8')
 main = dict(re.findall(r'plutil -insert (NS\w+UsageDescription) -string "([^"]*)"', mk))
 ck(f'⑨ InfoPlist.strings 的键都是 build.mk 写进 Info.plist 的权限说明（{len(main)} 个）', set(ip['en']) == set(main),
    f"表多：{sorted(set(ip['en']) - set(main))} build.mk 多：{sorted(set(main) - set(ip['en']))}")
 ck('⑨ Info.plist 权限说明主值英文、与 en 表逐字一致', all(not CJK.search(v) and ip['en'].get(k) == v for k, v in main.items()),
    '；'.join(f'{k}={v[:30]}' for k, v in main.items() if CJK.search(v) or ip['en'].get(k) != v))
-cjk_ip = sorted(k for k, v in ip['zh-Hans'].items() if not CJK.search(v))
-ck('⑨ zh-Hans InfoPlist.strings 每条都是中文译文', not cjk_ip, ' '.join(cjk_ip))
+for lang in ZH_LANGS:
+    cjk_ip = sorted(k for k, v in ip[lang].items() if not CJK.search(v))
+    ck(f'⑨ {lang} InfoPlist.strings 每条都是中文译文', not cjk_ip, ' '.join(cjk_ip))
 
 # ⑩ C 层显示文字：s2a_ui_text.h 中英配对、只经 S2A_UI 取、显示路径无中文字面量
 uih = (H / UI_TEXT_H).read_text(encoding='utf-8')
@@ -294,7 +311,7 @@ uses, ubad = {}, []
 for rel in UI_USERS + [f for f in SRCS]:
     src = strip_c((H / rel).read_text(encoding='utf-8'))
     for m in re.finditer(r'\b(S2A_UI_[A-Z0-9_]+?)(_EN)?\b', src):
-        if m.group(2): continue
+        if m.group(2) or m.group(1) not in ui: continue   # 只认 s2a_ui_text.h 定义的文案宏（环境变量名 S2A_UI_LANGUAGE 这类同前缀的字串不算）
         uses[m.group(1)] = uses.get(m.group(1), 0) + 1
         if not re.search(r'S2A_UI\($', src[max(0, m.start() - 7):m.start()]): ubad.append(f'{rel}:{src.count(chr(10), 0, m.start()) + 1} {m.group(1)}')
 ck(f'⑩ 文案宏 {len(ui_text)} 个都被用到', set(ui_text) <= set(uses), ' '.join(sorted(set(ui_text) - set(uses))))

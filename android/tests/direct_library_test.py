@@ -441,6 +441,28 @@ class LibraryTest(unittest.TestCase):
         with self.assertRaises(direct_library.LibraryError):
             direct_library.validate_request(json.dumps(too_big).encode(), 'request')
 
+    def test_v2_separate_source_contract(self):
+        request = make_request()
+        result = json.loads(make_result(request))
+        result['schema'] = 's2a-direct-program-v2'
+        result['content']['contract'] = 's2a-direct-program-content-v2'
+        result['content']['bindings'] = [{'stage': 'fs', 'kind': 'texture', 'set': 2,
+                                           'binding': 0, 'slot': 90, 'samp_slot': 3, 'count': 1}]
+        def raw():
+            body = json.dumps(result['content'], separators=(',', ':')).encode()
+            result['contentHash'] = 'sha256-' + sha256(body)
+            return json.dumps(result, separators=(',', ':')).encode()
+        direct_library.validate_result(raw(), 'v2')
+        result['content']['bindings'][0]['samp_slot'] = 128
+        with self.assertRaises(direct_library.LibraryError): direct_library.validate_result(raw(), 'bad slot')
+        result['content']['bindings'][0]['samp_slot'] = 3
+        result['content']['bindings'][0]['count'] = 2
+        with self.assertRaises(direct_library.LibraryError): direct_library.validate_result(raw(), 'bad array')
+        result['content']['bindings'][0]['count'] = 1
+        result['schema'] = 's2a-direct-program-v1'
+        result['content']['contract'] = 's2a-direct-program-content-v1'
+        with self.assertRaises(direct_library.LibraryError): direct_library.validate_result(raw(), 'v1 extra source')
+
     # -- build / layout -------------------------------------------------------------
     def test_descriptor_never_omits_a_scanned_vertex_write(self):
         request = make_request()

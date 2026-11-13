@@ -238,6 +238,7 @@ typedef struct {
     const Elf64_Dyn *dyn; const Elf64_Sym *symtab; const char *strtab; unsigned nsym;
     uint32_t *symh; unsigned symh_mask;
     uint64_t init;
+    uint64_t plt_stub, pltgot;   // rtld 懒绑定：JUMP_SLOT 槽的原值（PLT 表头）+ 基址、DT_PLTGOT 偏移（relocate 记，ro_handoff 交给游戏的 nn::ro；0 = 本模块没有）
 } module_t;
 extern module_t *g_mod;
 extern int g_nmod, g_mod_cap;

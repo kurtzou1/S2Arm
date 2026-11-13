@@ -24,6 +24,9 @@ if (flickerProbe) args = args[1..];
 // --settings-probe <目录>：全新窗口在几种引导状态下点顶栏设置键，任何异常都算不通（玩家反馈：引导页点设置闪退，SettingsProbe.cs）
 var settingsProbe = args.Length > 0 && args[0] == "--settings-probe";
 if (settingsProbe) args = args[1..];
+// --report-probe <目录>：各页 / 各引导状态下顶栏最右都有「故障报修」键（11-13，ReportProbe.cs），每页存帧图
+var reportProbe = args.Length > 0 && args[0] == "--report-probe";
+if (reportProbe) args = args[1..];
 var outDir = args.Length > 0 ? args[0] : Path.Combine(
     Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
     ".s2arm/run/s2arm/cmdr/evidence/launcher/win");
@@ -37,6 +40,7 @@ AppBuilder.Configure<SnapshotApp>()
 if (scrollProbe) { Environment.Exit(ScrollProbe.Run(outDir)); }
 if (flickerProbe) { Environment.Exit(FlickerProbe.Run(outDir)); }
 if (settingsProbe) { Environment.Exit(SettingsProbe.Run(outDir)); }
+if (reportProbe) { Environment.Exit(ReportProbe.Run(outDir)); }
 
 // ── 统一夹具游戏（不用固定游戏名字符串以外的占位）────────────────────
 static LibraryGame MockGame(bool keysReady = true) => new(

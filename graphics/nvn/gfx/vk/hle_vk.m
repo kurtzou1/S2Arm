@@ -247,7 +247,7 @@ struct VkDeviceMemory_T { VkDeviceSize size; uint32_t type; __strong id<MTLBuffe
 struct VkBuffer_T { VkDeviceSize size; VkBufferUsageFlags usage; VkDeviceMemory mem; VkDeviceSize off; };
 struct VkBufferView_T { VkBuffer buf; const fmt_t *f; VkDeviceSize off, range; __strong id<MTLTexture> tex; };
 struct VkImage_T { __strong id<MTLTexture> tex; const fmt_t *f; VkFormat fmt; VkImageType type; uint32_t w, h, d, mips, layers, samples; VkDeviceSize size; uint64_t serial; uint32_t wid; int swap; uint32_t ext_w, ext_h;   // wid：宽屏核心的贴图号（vk_widen.inc）；w 是游戏的宽，贴图可能被放宽
-                  VkImageUsageFlags usage; uint32_t pitch; uint32_t bc;   // bc：显卡不认 BC 时这张图建成了解压格式，这里记原来的 BC 格式号（nvn_bcdec 的编号；0 = 不是这种图）；pitch: row pitch of a linear image (its texture is made over the bound memory), 0 otherwise
+                  VkImageUsageFlags usage; uint32_t pitch; uint32_t bc; uint64_t mem, bc_orig;   // mem：贴图实际分配字节（Metal allocatedSize，记账用）；bc_orig：解压图按原 BC 格式本该占的字节   // bc：显卡不认 BC 时这张图建成了解压格式，这里记原来的 BC 格式号（nvn_bcdec 的编号；0 = 不是这种图）；pitch: row pitch of a linear image (its texture is made over the bound memory), 0 otherwise
                   VkImageView views; };   // 本图像的视图链（宽屏按内容判画布后重建存储时按原参数重派生，vk_widen.inc wd_promote）
 struct VkImageView_T { __strong id<MTLTexture> tex; VkImage img; uint32_t wid, gw, gh;   // wid / gw / gh：宽屏核心的视图号与游戏看到的宽高
                       VkImageView vnext; MTLPixelFormat pf; MTLTextureType tt; uint32_t lv0, lvn, ly0, lyn; MTLTextureSwizzleChannels sw; int whole; };   // 派生参数（whole = 就是图像本身的贴图）
@@ -679,6 +679,22 @@ static int vk_no_bc(void) {
         if (v) LOG("[vk] 显卡不认 BC 压缩格式%s：BC 图像建成解压格式，上传时解码", t ? "（测试开关 DM_TEST_NO_BC）" : ""); }
     return v;
 }
+// 贴图内存账（#542：A16 标题画面进程足迹顶到单进程上限 ~4.1 GB 被系统结束，Vulkan 层原先没有贴图占用读数）：
+//   全部私有贴图的实际分配字节，其中「显卡不认 BC、建成解压格式」那部分，以及它们按原 BC 格式本该占多少。出图时总量变化满 64 MB 打一行
+static _Atomic uint64_t g_tex_mem, g_tex_n, g_bc_mem, g_bc_n, g_bc_orig;
+static uint64_t g_frames;   // 已上屏帧数（定义在 frame_end 旁）
+static void tex_mem_note(VkImage im, int add) {
+    if (!im->mem) return; int64_t sg = add ? 1 : -1;
+    atomic_fetch_add(&g_tex_mem, (uint64_t)(sg * (int64_t)im->mem)); atomic_fetch_add(&g_tex_n, (uint64_t)sg);
+    if (im->bc) { atomic_fetch_add(&g_bc_mem, (uint64_t)(sg * (int64_t)im->mem)); atomic_fetch_add(&g_bc_n, (uint64_t)sg); atomic_fetch_add(&g_bc_orig, (uint64_t)(sg * (int64_t)im->bc_orig)); }
+}
+static void tex_mem_report(void) {
+    static uint64_t last; uint64_t t = atomic_load(&g_tex_mem);
+    if ((t > last ? t - last : last - t) < (64ull << 20)) return; last = t;
+    LOG("[vk] 贴图内存：%llu 张共 %llu MB；其中 BC 解压建图 %llu 张 %llu MB（原 BC 格式本该 %llu MB）；Metal 设备已分配 %llu MB（第 %llu 帧）",
+        (unsigned long long)atomic_load(&g_tex_n), (unsigned long long)(t >> 20), (unsigned long long)atomic_load(&g_bc_n), (unsigned long long)(atomic_load(&g_bc_mem) >> 20),
+        (unsigned long long)(atomic_load(&g_bc_orig) >> 20), (unsigned long long)(g_dev.currentAllocatedSize >> 20), (unsigned long long)g_frames);
+}
 // BC 的 VkFormat → nvn_bcdec 的格式号与解压后的 VkFormat；不是 BC 回 0
 static uint32_t vk_bc_map(VkFormat f, VkFormat *plain) {
     switch (f) {
@@ -706,6 +722,7 @@ VKB(vkCreateImage, VkResult, VkDevice d, const VkImageCreateInfo *ci, const VkAl
     const fmt_t *f = fmt_of(ci->format);
     if (!f || f->pf == MTLPixelFormatInvalid) { LOG("[vk] 【红】 image format %d not mapped", ci->format); return VK_ERROR_FORMAT_NOT_SUPPORTED; }
     uint32_t bc = 0;   // 显卡不认 BC：这张图用解压后的格式建（表项整个换掉：之后图像的尺寸 / 视图 / 图像间拷贝都按不压缩的算），im->bc 记原格式供上传时解码
+    const fmt_t *f_orig = f;
     if (f->kind == K_BLOCK && vk_no_bc()) { VkFormat plain = VK_FORMAT_UNDEFINED; uint32_t n = vk_bc_map(ci->format, &plain); const fmt_t *pf2 = n ? fmt_of(plain) : NULL;
         if (pf2 && pf2->pf != MTLPixelFormatInvalid) { bc = n; f = pf2; } }
     // Linear 2D images with one level and layer alias their memory, as on the Switch: the texture is made over the bound buffer at vkBindImageMemory, with rows at
@@ -753,12 +770,13 @@ VKB(vkCreateImage, VkResult, VkDevice d, const VkImageCreateInfo *ci, const VkAl
         im->tex = t; im->f = f; im->bc = bc; im->fmt = ci->format; im->type = ci->imageType; im->w = ci->extent.width; im->h = umax(1, ci->extent.height); im->d = (uint32_t)td.depth; im->wid = wid;   // 游戏的宽高（存储可能被放宽 / 加高）
         im->mips = (uint32_t)td.mipmapLevelCount; im->layers = layers; im->samples = samples; im->size = img_bytes(f, im->w, im->h, im->d, im->mips, layers, samples);
         OLOG("CreateImage %p %ux%ux%u format %d levels %u layers %u usage %#x", (void *)im, im->w, im->h, im->d, ci->format, im->mips, layers, ci->usage);
+        im->mem = t.allocatedSize; if (bc) im->bc_orig = img_bytes(f_orig, im->w, im->h, im->d, im->mips, layers, samples); tex_mem_note(im, 1);
         wd_track(im, 1);   // 本层存储可重建：宽屏核心按内容判成画布时按贴图号找回它（vk_widen.inc）
         *out = im;
     }
     return VK_SUCCESS;
 }
-VKB(vkDestroyImage, void, VkDevice d, VkImage im, const VkAllocationCallbacks *a) { (void)d; (void)a; if (im) { wd_track(im, 0); wd_release(im->wid); im->tex = nil; obj_free(im); } }
+VKB(vkDestroyImage, void, VkDevice d, VkImage im, const VkAllocationCallbacks *a) { (void)d; (void)a; if (im) { tex_mem_note(im, 0); wd_track(im, 0); wd_release(im->wid); im->tex = nil; obj_free(im); } }
 VK(vkGetImageMemoryRequirements, void, VkDevice d, VkImage im, VkMemoryRequirements *r) {
     (void)d; r->alignment = 4096; r->size = (im->size + 4095) & ~4095ull; r->memoryTypeBits = 7;
 }
@@ -2501,6 +2519,7 @@ VKB(vkQueuePresentKHR, VkResult, VkQueue q, const VkPresentInfoKHR *pi) {
         if (pi->pResults) pi->pResults[i] = VK_SUCCESS;
     }
     dm_gfx_leave();
+    tex_mem_report();
     frame_end();
     return VK_SUCCESS;
 }

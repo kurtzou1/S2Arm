@@ -272,21 +272,22 @@ static void s2a_ios_suspend_enqueue(int on, const char *why) {
 }
 // 提示 / 出错页（notice.m 画；11-02 维护者：满屏、一句人话 + 下一步、和加载页同一套样子、技术细节进诊断包不上屏）。窗口还没建时只记下，建窗口时显示
 static NSString *g_msg;   // 正在屏上（或待显示）的提示，s2a_ios_clear_message 按它认
-static NSArray *g_note;   // 待显示 / 正显示的提示页参数：@[符号, 标题, 正文, 进度, 进度小字, 是否给「导出诊断包」]
+static NSArray *g_note;   // 待显示 / 正显示的提示页参数：@[符号, 标题, 正文, 进度, 进度小字, 是否给「上传给开发者」, (可选) 它是否主按钮]
 static NSArray *g_note_alt;   // 第二个按钮：@[按钮字, 点了调的块]（GPU 卡住页的「退出」；别的提示页清掉）
 static NSArray *g_note_go;   // 提示页上的「仍要启动」这类继续按钮：@[按钮字, 点了调的块]（s2a_ios_ask_continue 设，别的提示页清掉）
 static UIView *g_note_view;
 static UIView *g_help; static NSArray *g_help_args; static void (*g_help_recheck)(void);   // 缺资源包说明页（见 s2a_ios_show_pack_help）
-void s2a_diag_export(void);
+void s2a_diag_upload(void);
 static void note_build(void) {
     [g_note_view removeFromSuperview]; g_note_view = nil;
     if (!g_root || !g_note) return;
     NSMutableArray *bs = [NSMutableArray array];
     if (g_note_go) { void (^go)(void) = g_note_go[1]; [bs addObject:s2a_notice_button(g_note_go[0], YES, ^(UIButton *b) { b.enabled = NO; go(); })]; }
     if (g_note_alt) { void (^alt)(void) = g_note_alt[1]; [bs addObject:s2a_notice_button(g_note_alt[0], NO, ^(UIButton *b) { b.enabled = NO; alt(); })]; }
-    if (g_note.count > 6) { NSString *text = g_note[6];   // 「复制诊断」（初启失败页）：诊断文本放进剪贴板，玩家直接粘贴发给我们
-        [bs addObject:s2a_notice_button(S2APICK(S2A_INIT_FAIL_COPY), YES, ^(UIButton *b) { UIPasteboard.generalPasteboard.string = text; [b setTitle:S2APICK(S2A_INIT_FAIL_COPIED) forState:UIControlStateNormal]; LOG("初启失败页：诊断已复制到剪贴板"); })]; }
-    if ([g_note[5] boolValue]) [bs addObject:s2a_notice_button(S2AL(@"diag.export"), NO, ^(UIButton *b) { (void)b; s2a_diag_export(); })];
+    // 「上传给开发者」（诊断一键上传，11-13：取代原「复制诊断」「导出诊断包」两个按钮；上传失败时弹窗里退回导出）。
+    //   初启失败页（g_note[6] 为真）它是主按钮：那页的诊断文字 host_main.c 已写进 host.log，随诊断包一起传
+    if ([g_note[5] boolValue]) { BOOL primary = g_note.count > 6 && [g_note[6] boolValue];
+        [bs addObject:s2a_notice_button(S2AL(@"diag.upload"), primary, ^(UIButton *b) { (void)b; s2a_diag_upload(); })]; }
     g_note_view = s2a_notice_page(g_root.bounds, g_note[0], g_note[1], g_note[2], [g_note[3] floatValue], [g_note[4] length] ? g_note[4] : nil, bs);
     [g_root addSubview:g_note_view];
 }
@@ -414,7 +415,7 @@ static S2ADguardTarget *g_dguard_target;
 // 提示页（主线程，g_root 已建）
 static void dguard_build(S2ADguardTarget *t) {
     __weak S2ADguardTarget *w = t;
-    UIButton *diag = s2a_notice_button(S2APICK(S2A_DGUARD_DIAG), NO, ^(UIButton *b) { (void)b; s2a_diag_export(); });
+    UIButton *diag = s2a_notice_button(S2APICK(S2A_DGUARD_DIAG), NO, ^(UIButton *b) { (void)b; s2a_diag_upload(); });
     UIButton *go = s2a_notice_button(S2APICK(S2A_DGUARD_GO), YES, ^(UIButton *b) { (void)b; S2ADguardTarget *x = w; if (!x) return; [x->page removeFromSuperview]; x->page = nil; dispatch_semaphore_signal(x->go); });
     UIView *page = s2a_notice_page(g_root.bounds, @"exclamationmark.triangle.fill", S2APICK(S2A_DGUARD_TITLE), S2APICK(S2A_DGUARD_MSG), -1, nil, @[diag, go]);
     t->page = page; [g_root addSubview:page]; [g_root bringSubviewToFront:page];
@@ -495,7 +496,7 @@ void s2a_ios_gpu_stopped(const char *why) {
     s2a_logcon_flush();
 }
 // 初启失败页（host_main.c failed_session，宿主线程；审计 #1534 P1-4）：初启失败 = 本进程终局，不在本进程重试。
-//   原先直接 _exit，玩家只看到 App 自己消失；现在停在提示页：玩家话术一句 +「复制诊断」（剪贴板）+「导出诊断包」，请玩家从后台划掉再打开（新进程是唯一干净的重置）。
+//   原先直接 _exit，玩家只看到 App 自己消失；现在停在提示页：玩家话术一句 +「上传给开发者」，请玩家从后台划掉再打开（新进程是唯一干净的重置）。
 //   body 由 s2a_init_fail_screen 按错误码给（只含玩家话术），这里只负责显示；内部摘要只在 diag 里（11-02 维护者：内部词不上屏）。
 //   复用渲染失败的终局标记：回前台不恢复游戏、不再碰服务层焦点 / GPU 闸门（s2a_ios_suspend）
 void s2a_ios_init_failed(const char *body, const char *diag) {
@@ -503,11 +504,12 @@ void s2a_ios_init_failed(const char *body, const char *diag) {
     NSMutableArray *lines = [NSMutableArray array];
     for (NSString *s in [@(body ?: S2APICKC(S2A_INIT_FAIL_MSG_GENERIC)) componentsSeparatedByString:@"\n"]) [lines addObject:@(host_text(s.UTF8String))];
     NSString *t = S2APICK(S2A_INIT_FAIL_TITLE), *b = [lines componentsJoinedByString:@"\n"];
-    NSString *d = @(diag ?: ""), *key = [NSString stringWithFormat:@"%@\n\n%@", t, b];
+    (void)diag;   // 诊断文字 host_main.c 已写进 host.log，随「上传给开发者」的诊断包一起传，不上屏
+    NSString *key = [NSString stringWithFormat:@"%@\n\n%@", t, b];
     dispatch_async(dispatch_get_main_queue(), ^{
         atomic_store(&g_render_failed, 1);
         s2a_controller_set_foreground(0); s2a_guest_freeze(1);
-        g_msg = key; g_note = @[@"exclamationmark.triangle.fill", t, b, @(-1.0f), @"", @YES, d];
+        g_msg = key; g_note = @[@"exclamationmark.triangle.fill", t, b, @(-1.0f), @"", @YES, @YES];
         [g_help removeFromSuperview]; g_help = nil; g_help_args = nil; note_build();
         if (g_note_view) [g_root bringSubviewToFront:g_note_view];
         LOG("初启失败页：%s", g_note_view ? "已显示" : "窗口还没建，建好窗口再画");
@@ -641,7 +643,7 @@ static void audio_category_apply(void) {
     // iOS 27 场景生命周期（27.1 SDK 对链接新 SDK 的 App 强制 UIScene；没有场景代理 UIKit 会在
     // _UIApplicationEvaluateRuntimeIssueForNoSceneLifecycleAdoption 启动即崩）：窗口 / 根视图 / 虚拟手柄挪到
     // S2ASceneDelegate 的 scene:willConnectToSession 里建（见下）。这里只留 App 级的电量 / 前后台 / 心跳 / 热。
-    // 测试层契约第 4 节：每分钟一行「[电] 电量 <N>%，<充电中|已充满|未充电>」（拔电时电量闸 / 局中停局用）
+    // 测试层契约第 4 节：每分钟一行「[电] 电量 <N>%，<充电中|已充满|未充电>」（只是读数：能耗记录用；11-13 起不再据此挡局）
     audio_category_apply();
     { void s2a_diag_boot(void); s2a_diag_boot(); }   // 导出诊断包（diag.m）：订阅 MetricKit、设置页开关回前台时检查
     UIDevice.currentDevice.batteryMonitoringEnabled = YES;
@@ -1207,4 +1209,7 @@ double dm_brightness_now(void) { return g_brightness; }
 int dm_thermal_now(void) { return (int)NSProcessInfo.processInfo.thermalState; }
 // 界面语言（runtime/include/s2a_ui_text.h，#316）：C 层递上来的提示 / 横幅按它取中文原宏或 _EN；判据同 S2AL 字符串表（ios/s2a_l10n.h）。盖过各 .c 的弱缺省
 int s2a_ui_zh(void) { return s2a_l10n_zh(); }
+// 游戏语言缺省跟宿主界面语言（维护者 11-13）：进程一起来就把界面实际显示的语言（zh-Hans / zh-Hant / en）交给服务层（S2A_UI_LANGUAGE → Host.cs PickLanguage →
+//   SystemLocale.FromUi）。构造期写：此时只有主线程、服务层还没读环境；已给的（开发 / 判定局）不覆盖。玩家在启动设置里单独指定的语言走 S2A_SYSTEM_LANGUAGE，优先于它
+__attribute__((constructor)) static void s2a_ui_language_env(void) { @autoreleasepool { setenv("S2A_UI_LANGUAGE", s2a_l10n_lang().UTF8String, 0); } }
 int dm_low_power_now(void) { return NSProcessInfo.processInfo.lowPowerModeEnabled ? 1 : 0; }

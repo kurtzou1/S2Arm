@@ -17,6 +17,8 @@ public struct JobEnvironment: Equatable {
     public var pythonPath: String?
     /// 旧启动器导出页记住的平台勾选（preferences.exportTargets）：新前端还没存过自己的勾选时接着用它。
     public var exportTargets: [String]?
+    /// 启动器界面语言（zh-Hans / en）：每个作业请求带上 uiLanguage，作业层据此出玩家看得到的文件名 / 说明（自签导出的文件夹与安装说明等）；前端随界面语言写
+    public var uiLanguage: String?
 
     public init(privateRoot: URL, resources: URL, engineDir: String? = nil, library: String = "", libraryId: String = "",
                 developerDir: String = "", fontsDir: String? = nil, devHud: Bool = false, metalHud: Bool = false,
@@ -193,6 +195,7 @@ public final class JobClient {
             "devHud": env.devHud, "metalHud": env.metalHud, "buildId": env.buildId,
             "parentPid": Int(pid),
         ]
+        if let lang = env.uiLanguage, ["zh-Hans", "en"].contains(lang) { req["uiLanguage"] = lang }   // extra 带了（起局）照 extra
         extra.forEach { req[$0] = $1 }
         if let bundle = env.engineBundle { req["engineBundle"] = bundle.path; req["engineDir"] = bundle.path }
         // 环境准备不依赖游戏库：旧游戏库所在盘没插着时也要能跑

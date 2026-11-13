@@ -180,6 +180,7 @@ static CGRect game_rect(UIView *v) {
     if (s2a_ios_game_area && s2a_ios_root_view && v == s2a_ios_root_view()) { CGRect r = s2a_ios_game_area(); if (!CGRectIsEmpty(r)) return r; }
     return v.bounds;
 }
+void s2a_ios_attach_game_layer(UIView *root, CALayer *game) __attribute__((weak_import));
 int s2a_screen_w(void); int s2a_screen_h(void); int s2a_widen_game(void); int s2a_widen_full(void); int s2a_screen_reaspect(void);   // runtime/src/widen.c
 int s2a_nvn_reaspect_ok(void);   // graphics/nvn/widen_glue.inc：NVN 直连的宽屏核心在跑（能运行中换屏；Vulkan / GL 层的贴图建时定宽，换不了）
 static int out_wide(void) {   // 出的是宽图：第二层，或直连第三层整套放宽（屏幕比 16:9 宽时核心才放宽，s2a_widen_init 回 OFF 时出的仍是 16:9）
@@ -225,10 +226,14 @@ static int g_relayout_due;   // 主线程：后台期间出图层挪回了根视
 void s2a_direct_relayout(void) {   // App 壳视图控制器 viewDidLayoutSubviews、外接屏接上 / 断开（ios/extdisplay.m）调（主线程）；没挂出图层（通用模式 / 还没起）不做
     UIView *v = g_layer ? present_view() : nil; if (!v) return;
     // 外接显示器接上 / 断开：出图层跟着换到外接屏窗口的视图 / 回根视图，照旧垫在最底层；比例与可画尺寸由下面同一条重摆路按新视图算
-    int ext = s2a_ios_root_view && v != s2a_ios_root_view(), moved = g_layer.superlayer != v.layer;
+    // 挪没挪看层在不在这个视图的层子树里：挂层入口（ios/play_reflection.m，Duo 分屏倒影）把出图层放进视图下的复制层，直接父层不是 v.layer；
+    //   原先比直接父层，每次重摆都判成「挪了」，把层从复制层里拽回根视图，倒影一出就没
+    int ext = s2a_ios_root_view && v != s2a_ios_root_view(), moved = 1;
+    for (CALayer *q = g_layer.superlayer; q; q = q.superlayer) if (q == v.layer) { moved = 0; break; }
     if (moved) {
         [CATransaction begin]; [CATransaction setDisableActions:YES];
-        [g_layer removeFromSuperlayer]; [v.layer insertSublayer:g_layer atIndex:0];
+        if (s2a_ios_attach_game_layer) s2a_ios_attach_game_layer(v, g_layer);   // 同建层时：经挂层入口（外接屏视图也一样，那边不分屏、不复制）
+        else { [g_layer removeFromSuperlayer]; [v.layer insertSublayer:g_layer atIndex:0]; }
         [CATransaction commit];
         LOG("直连：出图层挪到%s（App 状态 %ld，视图所在场景状态 %ld）", ext ? "外接屏" : "手机屏",
             (long)UIApplication.sharedApplication.applicationState, (long)v.window.windowScene.activationState);
@@ -262,8 +267,13 @@ void *front_metal_layer(void) {
             layout_layer(v, l);
             // 挂在最底层（11-02）：原先 addSublayer 压在根视图所有子视图之上，加载页 / 提示页（没设 zPosition）全被黑色出图层盖住——
             //   怪猎测试设备1 冷首启预热 64 秒，屏上只有手柄（手柄与开发浮层靠 zPosition 压过它），玩家对着黑屏点中了看不见的「先开始玩」
-            [v.layer insertSublayer:l atIndex:0];
+            if (s2a_ios_attach_game_layer) s2a_ios_attach_game_layer(v,l);
+            else [v.layer insertSublayer:l atIndex:0];
             g_layer = l;
+            // Metal 性能浮层（#153）：MTL_HUD_ENABLED 只在进程启动、系统建 Metal 设备时读一次；App 设置里的开关是进程起来后才落成环境变量（ios/settings.m），
+            //   已经晚了，只有启动前从外面传入才显示。iOS 16 起可按层在运行中打开：开关开着（环境变量来自设置或外面传入都算）就对出图层打开
+            { const char *hud = getenv("MTL_HUD_ENABLED");
+              if (hud && !strcmp(hud, "1")) { if (@available(iOS 16.0, *)) { l.developerHUDProperties = @{@"mode": @"default"}; LOG("直连：Metal 性能浮层按出图层打开（MTL_HUD_ENABLED=1）"); } } }
             if (v != s2a_ios_root_view()) LOG("直连：出图层挂在外接屏（下一行的「根视图」尺寸是外接屏窗口的视图）");
             [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue
                 usingBlock:^(NSNotification *n) { (void)n; if (g_relayout_due) { g_relayout_due = 0; s2a_direct_relayout(); } }];   // 补后台期间欠的重摆

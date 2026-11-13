@@ -87,6 +87,7 @@ struct JobSessionView: View {
             if finished == nil, session.kind != .play { progress }
             if case .finished(let state) = session.phase, state == .failed || state == .interrupted {
                 CopyReportButton(model: model, gameID: session.gameID, operations: [], fallback: session.message)
+                ReportHint()
             }
             ScrollViewReader { proxy in
                 ScrollView {

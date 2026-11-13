@@ -20,6 +20,8 @@
 #define ALIAS_FIRST_STACK (128 * MB)
 #define VAMM_SHARED (96 * MB)   // 共享内存 / 传输内存随机映射的余量（可随机区 = 栈 + 堆 + 余量）
 #define MIN_HEAP (32 * MB)
+#define COMPACT_TLSIO (64 * MB)    // 丙（紧凑堆模式，#620）的 TLS/IO 区
+#define COMPACT_STACK (256 * MB)   // 丙的栈区
 #define ALIAS_FIRST_HEAP (192 * MB)   // 别名优先的乙布局：堆 64 MiB + 远端影子余量 128 MiB（影子与堆共用堆区）
 // 窗口里留给宿主自己的地址（Metal 大缓冲、窗口尾部统一分配）：现行包里 63.25 GiB 的款在 64 GiB 空洞里留下的就是这么多（vawin.c TL_SMALL 注释：766 MB），
 //   甲里堆先让出它（甲的窗口尾在别名区之外）。乙不在窗口里留：别名区伸出窗口，窗口尾还给宿主就和远端承诺段重叠——
@@ -130,6 +132,17 @@ int s2a_layout_compute(uint32_t as_type, uint64_t sys_resource_size, uint64_t mo
     // 乙：模块在前，各区整体后移到下一个 GiB；堆区之前的部分（TLS/IO、栈）与至少 32 MiB 堆必须有宿主地址
     uint64_t b = AGB(W + mod);
     heapmode(o, b);
+    if (o->heap_base + MIN_HEAP <= W + S) { *mod_base = W; o->win_size = S; return 0; }
+    // 丙（#620：老 iPad / iPhone 给 App 的地址窗口只有 2 GiB，模块段 616 MB 的小游戏也被「乙」挡下）：乙按满尺寸排 TLS/IO 1 GiB、栈区 2 GiB，
+    //   堆要从窗口起点往后 3 GiB 以上才开始。这两区只是线程栈 / TLR / TLS 块的地址范围（svc_mem.c 按 L.* 取，不写死尺寸），小游戏用不到：
+    //   模块后按 2 MiB 对齐，TLS/IO 64 MiB、栈区 256 MiB，堆区 / 别名 / 可随机区尺寸同乙、起点前移；仍要至少 32 MiB 堆有宿主地址。
+    //   游戏要的线程栈或堆超出时，照常在 MapMemory / SetHeapSize 那里回资源不足（日志可查），不在起局一律拒
+    heapmode(o, A2M(W + mod));
+    uint64_t hs = o->heap_size, h0 = o->tlsio_base + COMPACT_TLSIO + COMPACT_STACK;
+    o->tlsio_size = COMPACT_TLSIO;
+    o->stack_base = o->tlsio_base + COMPACT_TLSIO; o->stack_size = COMPACT_STACK;
+    o->heap_base = h0; o->heap_size = hs;
+    o->alias_base = h0 + hs;
     if (o->heap_base + MIN_HEAP > W + S) { memset(o, 0, sizeof *o); return -2; }
     *mod_base = W; o->win_size = S;
     return 0;

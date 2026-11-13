@@ -94,7 +94,9 @@ namespace S2Arm.GameDec
                 Console.Error.WriteLine("用法：gamedec <产物根>（DM_OODLE_SERVE=1）| gamedec --verify <产物根> <对照目录>");
                 return 2;
             }
-            catch (Exception e) { Console.Error.WriteLine("【红】gamedec：" + e.Message); return 1; }
+            // 出错立即结束进程（#854）：客体执行到未定义指令 / 断点后执行线程停住、翻译器收不掉，它的线程会把进程拖着不退——
+            //   调用方（translator/uepak.py OodleHost）一直等这个请求的回话，Windows 出包停在「抽取 0/4」三个多小时。退出后调用方读到文件尾即报错，带出这里的原因
+            catch (Exception e) { Console.Error.WriteLine("【红】gamedec：" + e.Message); Console.Error.Flush(); Environment.Exit(1); return 1; }
         }
 
         static bool ReadAll(Stream s, Span<byte> b) { while (b.Length > 0) { int k = s.Read(b); if (k <= 0) return false; b = b[k..]; } return true; }

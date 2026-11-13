@@ -5,9 +5,10 @@
 #   往 romfs 写 / 删 / 建一律失败且存储不变；中止回滚干净；钉住的旧版本完整可读；要改 RomFS 的阶段（ROOT_OWN_ROMFS=1）拿到自己的真目录、提交成新身份；
 #   旧身份在还有版本指向时保留、没有版本指向后删；romfs 软链指向别处 → 拒绝开工；整根快照（tools/clonedir.py）拿到真目录；
 #   资源内容键（pack/resource_input_key.py）对存储软链与同内容真目录相同，指向别处的软链报错；并发重放声明 romfs 时以本阶段内容为准
+#   以上按开发 / 门禁机（S2A_ROMFS_SEAL=1）；玩家机（不设）：存储里没有不可写的项（原件只读也加回写位），普通 rm -rf 整根删得掉
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); bad=0
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
-export S2A_ROOTS=$T/roots S2A_ROOTS_SHARED=$T/shared S2A_ROOTS_PRIV=$T/priv; source "$H/pack/roots.sh"
+export S2A_ROOTS=$T/roots S2A_ROOTS_SHARED=$T/shared S2A_ROOTS_PRIV=$T/priv S2A_ROMFS_SEAL=1; source "$H/pack/roots.sh"   # 下面到「玩家机」一节前按开发 / 门禁机（设只读）
 ino() { stat -f %i "$1" 2> /dev/null || stat -c %i "$1"; }
 mode() { stat -f %Lp "$1" 2> /dev/null || stat -c %a "$1"; }
 # 原件：两层目录 + 三个文件（含点开头的真文件）
@@ -67,4 +68,13 @@ ck "旧格式根：下一阶段提交后现行 romfs 换成存储软链、内容
 # 只出程序（pack/ipa.sh）逐项 cp -cRH：临时目录里 romfs 是真目录、内容相同
 mkdir -p $T/ao && for e in $(ls -A "$C"); do cp -cRH "$C/$e" $T/ao/ 2> /dev/null || cp -RH "$C/$e" $T/ao/; done
 ck "只出程序逐项复制（-H）：romfs 是真目录、内容相同" '[ -d $T/ao/romfs ] && [ ! -L $T/ao/romfs ] && diff -r $O/romfs $T/ao/romfs > /dev/null'
+# 玩家机（S2A_ROMFS_SEAL 不设）：存储在玩家看得见的游戏库里，不许留只读（玩家在访达里删不掉旧产物）。
+#   原件故意整棵只读（模拟旧版本留下 / 克隆带来的只读）：播种提交后存储里一个没写位的项都没有，界面布局新身份也一样；普通 rm -rf 整根删干净
+export S2A_ROOTS=$T/proots S2A_ROMFS_SEAL=; P=$T/porig; cp -R $O $P; chmod -R a-w $P/romfs
+W=$(root_begin p s0) && cp -R $P/romfs $P/exefs $W/ && root_commit p s0
+PL=$(readlink $(root_cur p)/romfs); PS=$T/proots/.romfs_store/p/${PL##*/}
+ck "玩家机播种：存储里没有不可写的项、内容与原件相同" '[ -z "$(find $PS ! -type l ! -perm -u+w -print -quit)" ] && diff -r $O/romfs $PS > /dev/null'
+W=$(ROOT_OWN_ROMFS=1 root_begin p ui1) && echo wide > $W/romfs/Layout/x.bflyt && ROOT_REPLAY='romfs' root_commit p ui1
+ck "玩家机布局新身份：同样没有不可写的项" '[ -z "$(find $T/proots/.romfs_store/p ! -type l ! -perm -u+w -print -quit)" ]'
+rm -rf $T/proots 2> /dev/null; ck "玩家机：普通 rm -rf 整根删干净（不先改权限）" '[ ! -e $T/proots ]'
 chmod -R u+w $T 2> /dev/null; rm -rf $T; [ $bad = 0 ] && echo "RomFS 共享存储单测全过" || { echo "RomFS 共享存储单测有不通"; exit 1; }

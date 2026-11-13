@@ -18,4 +18,3 @@ tests/test_cache_test.sh	存量（11-01 建表）
 tests/visual/diff_rec.sh	存量（11-01 建表）
 tests/visual/diff_store.sh	存量（11-01 建表）
 tests/widen_auto_infra_test.sh	存量（11-01 建表）
-tools/devbattery.sh	存量（11-01 建表）

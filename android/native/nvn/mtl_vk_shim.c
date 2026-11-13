@@ -105,7 +105,7 @@ static uint64_t g_lost_from_fence;
 // 已经拿到完成证明的提交上界（guest fence 号）。只按调用方传入的 fence 推进，不拿 g_fence 反推：
 // 多线程下别的线程可能已经发布了更大的 fence 号但作业还没回放。
 static _Atomic uint64_t g_completed_fence;
-static uint64_t g_present_n;
+static _Atomic uint64_t g_present_n;
 static double g_present_at[256];
 static uint64_t g_submits, g_commands, g_draws_skipped;
 static int g_depth_zero, g_origin_lower_left, g_tex_pool_n, g_frame_set;
@@ -418,7 +418,7 @@ static int exec_chain(const uint8_t *pc, int depth) {
             // 只有打开 debug.s2a.timeline 才会走到这里：关闭时每条命令都不取墙钟。
             extern void nvn_vk_frame_stats_tl_mark(uint64_t, int, double) __attribute__((weak));
             if (nvn_vk_frame_stats_tl_mark) {
-                uint64_t fid = g_present_n + 1;
+                uint64_t fid = atomic_load_explicit(&g_present_n, memory_order_relaxed) + 1;
                 double now = shim_now_ns() / 1e9;
                 if (g_frame_cmds == 0) nvn_vk_frame_stats_tl_mark(fid, 0 /* FIRST_CMD */, now);
                 if (shim_is_draw_op(h.op) && !g_frame_first_draw_marked) {
@@ -476,7 +476,8 @@ void mtl_finish(void) {
         return;
     }
     info("mtl_finish: submits=%llu commands=%llu presents=%llu (queue finish, session kept)",
-         (unsigned long long)g_submits, (unsigned long long)g_commands, (unsigned long long)g_present_n);
+         (unsigned long long)g_submits, (unsigned long long)g_commands,
+         (unsigned long long)atomic_load_explicit(&g_present_n, memory_order_relaxed));
     if (s2a_vk_adapter_finish()) red("mtl_finish: queue did not complete; resources retained");
     else shim_note_completed(atomic_load(&g_replayed_fence));
 }
@@ -749,7 +750,8 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
         // 时间线：本帧命令执行结束（进入上屏调用之前）。这一打点与是否延迟 present 无关。
         extern void nvn_vk_frame_stats_tl_mark(uint64_t, int, double) __attribute__((weak));
         if (nvn_vk_frame_stats_tl_mark)
-            nvn_vk_frame_stats_tl_mark(g_present_n + 1, 2 /* EXEC_END */, (double)t_present / 1e9);
+            nvn_vk_frame_stats_tl_mark(atomic_load_explicit(&g_present_n, memory_order_relaxed) + 1,
+                                       2 /* EXEC_END */, (double)t_present / 1e9);
     }
     const uint64_t replayed_before_present = atomic_load(&g_replayed_fence);
     int prc = s2a_vk_adapter_present_tex(t, crop, why, sizeof why);
@@ -788,7 +790,7 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
         shim_note_completed(replayed_before_present);
     }
     uint64_t present_ns = shim_now_ns() - t_present;
-    uint64_t n = ++g_present_n;
+    uint64_t n = atomic_fetch_add_explicit(&g_present_n, 1, memory_order_relaxed) + 1;
     // 每上一帧调一次共用 ap_host 的上屏出口：内部一次带上 dguard 帧证据、停住看门、HUD
     // 与帧计数全套（同 iOS dm_guest_frame_tick 的口径）。ap_host.c 只在游戏目标里，
     // 独立直连探针没链就跳过。
@@ -1118,13 +1120,15 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
 }
 
 void mtl_present_wait(uint64_t ticket) {
-    if (ticket > g_present_n) red("mtl_present_wait: ticket %llu was never issued", (unsigned long long)ticket);
+    if (ticket > atomic_load_explicit(&g_present_n, memory_order_relaxed))
+        red("mtl_present_wait: ticket %llu was never issued", (unsigned long long)ticket);
 }
 
 void mtl_present_flush(void) { nvk_require(); }
 void mtl_present_test_stall(uint64_t ns) { (void)ns; }
 double mtl_presented_time(uint64_t n) {
-    if (!n || n > g_present_n || g_present_n - n >= 256) return 0;
+    uint64_t count = atomic_load_explicit(&g_present_n, memory_order_relaxed);
+    if (!n || n > count || count - n >= 256) return 0;
     // B2：display_timing 计量中 → 只报实际上屏时刻，取不到就是 UNKNOWN（0），
     // 不拿 CPU present 返回时刻冒充（定稿 A6）；扩展缺席的设备维持原口径。
     extern int nvn_vk_dt_active(void) __attribute__((weak));
@@ -1133,7 +1137,7 @@ double mtl_presented_time(uint64_t n) {
         return nvn_vk_dt_shown(n);
     return g_present_at[n % 256];
 }
-uint64_t mtl_present_count(void) { return g_present_n; }
+uint64_t mtl_present_count(void) { return atomic_load_explicit(&g_present_n, memory_order_relaxed); }
 
 void *mtl_device(void) { return NULL; }   // 没有共享 Metal device：本后端是 Vulkan
 uint64_t mtl_ext_tex(void *tex) { (void)tex; return 0; }
@@ -1188,7 +1192,8 @@ void mtl_vbuf_stats(uint64_t *resolve, uint64_t *reuse, uint64_t *set, uint64_t 
 void mtl_res_counts(uint32_t tick, const char *why) {
     info("资源 拍 %u（%s）：提交 %llu，命令 %llu，present %llu，上游 draw 未接 %llu",
          tick, why ? why : "", (unsigned long long)g_submits, (unsigned long long)g_commands,
-         (unsigned long long)g_present_n, (unsigned long long)g_draws_skipped);
+         (unsigned long long)atomic_load_explicit(&g_present_n, memory_order_relaxed),
+         (unsigned long long)g_draws_skipped);
 }
 void mtl_res_snapshot(mtl_res_count *out) { if (out) memset(out, 0, sizeof *out); }
 double mtl_gpu_ms(uint64_t f) { (void)f; return 0; }

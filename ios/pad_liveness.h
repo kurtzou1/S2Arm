@@ -41,4 +41,10 @@ static inline s2a_sys_action s2a_system_action(s2a_sys_state s) {
     return s.may_clear ? S2A_SYS_CLEAR : S2A_SYS_DEFER;
 }
 
+// 系统手柄走了以后要不要接回 NS2 手柄：系统手柄接入时 controller.m 停掉 NS2 链路（selectSystem），
+//   以前只有切前后台才会再连。现在系统手柄从在到不在、App 在前台、开着适配、玩家要连（连上过 / 没取消）、链路没在跑，就接回
+static inline bool s2a_ble_resume_after_system(bool had_system, bool has_system, bool foreground, bool adapter, bool wanted, bool started) {
+    return had_system && !has_system && foreground && adapter && wanted && !started;
+}
+
 #endif

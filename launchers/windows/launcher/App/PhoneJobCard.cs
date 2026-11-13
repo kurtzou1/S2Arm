@@ -234,6 +234,7 @@ public sealed partial class EnvironmentWindow
             }
             actions.Children.Add(CopyReportButton(gameId, [tr.Kind], () => message + "\n" + diagnostics));
             panel.Children.Add(actions);
+            panel.Children.Add(ReportHintText());
         }
         var log = string.Join("\n", tr.Log.Select(B)) + (diagnostics.Length > 0 && state is not ("running" or "succeeded") ? "\n\n" + diagnostics : "");
         if (log.Trim().Length > 0) panel.Children.Add(DetailsToggle(T("phone.details"), log.Trim()));

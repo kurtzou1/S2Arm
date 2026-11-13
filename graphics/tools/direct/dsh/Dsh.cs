@@ -946,6 +946,9 @@ namespace S2A.Dsh
         const int RED_SLOT = 26;   // 它的 Metal 缓冲槽（片元与计算同号，nvn_mtl.m RED_SLOT）
         const string LB = "s2a_lb";   // 偏置表：参数块成员，每个采样器成员一个 float，按该成员的 [[id]] 取（= dmsh_red.py LB）
         const long LB_MAXID = 191;   // = dmsh_red.py LB_MAXID（NVN_REFL_MAXARG - 1）
+        // #529 定点深度比较：同一张 s2a_lb 表的后半段 [LB_DC + 成员 id] = 1 → 该采样器成员这次配的贴图客体是定点深度（D16 / D24 / D24S8，宿主 nvn_mtl.m lb_fill 按客体格式写），
+        //   sample_compare 的参考值先 saturate 到 [0,1] 再比（NVN 定点深度格式的比较语义；Metal 用 Depth32Float 承载它们、不会自己限制）；浮点深度（D32F 系）写 0、参考值原样
+        internal const long LB_DC = LB_MAXID + 1;
         internal const string RED_BEGIN = "// s2a:samp-emu 4 (S2A.Dsh FsRd)\n";   // 变体格式版本 4（11-03 加折行贴图 s2a_fx：超 Metal 2D 上限的高线性贴图）；3（11-01 表项改 S2ASe、加任意边界色 / 全过滤组合归约），宿主 nvn_mtl.m SE_VERSION 认它：旧版 2 的兜底文件重出
         static readonly Regex s_redCall = R(@"spvDescriptorSet0\.(\w+)\.sample\(");
         static readonly Regex s_lbCall = R(@"spvDescriptorSet0\.(\w+)\.(?:sample|sample_compare)\(");   // FsLb：比较采样同样加偏置（缺口族 31）
@@ -1004,7 +1007,8 @@ namespace S2A.Dsh
         }
         /// <summary>= fs_lb：片元 / 计算着色器 main0 里经单个采样器成员的每次采样加该采样器的偏置 b = spvDescriptorSet0.s2a_lb[成员 id]：level(l) → level((l) + b)、bias(x) → bias((x) + b)、
         /// gradient → 两个导数 × precise::exp2(b)、没写 LOD → 片元插 bias(b) / 计算插 level(b)（计算只带 min_lod_clamp(m) 的 → level(max(b, m))）；参数块末尾加 constant float* s2a_lb。没有可改的采样原样返回。
-        /// 深度比较采样 sample_compare 同样改（缺口族 31：本机不吃采样器偏置时比较采样的偏置原来丢掉），LOD 参数排在参考值之后</summary>
+        /// 深度比较采样 sample_compare 同样改（缺口族 31：本机不吃采样器偏置时比较采样的偏置原来丢掉），LOD 参数排在参考值之后；
+        /// 它的参考值另按表后半段 s2a_lb[LB_DC + 成员 id] 决定要不要 saturate 到 [0,1]（#529 定点深度比较语义）</summary>
         internal static string FsLb(string src)
         {
             var ms = Members(src); var ent = s_redEntry.Match(src);
@@ -1032,6 +1036,7 @@ namespace S2A.Dsh
                 if (lods.Any(x => !Balanced(x.M.Groups[2].Value))) continue;
                 var lod = lods.Where(x => x.M.Groups[1].Value != "min_lod_clamp").ToList();
                 var na = new List<string>(args);
+                if (cmp) na[k - 1] = "(spvDescriptorSet0." + LB + "[" + (LB_DC + smp[sm.Groups[1].Value]) + "] != 0.0 ? saturate(" + na[k - 1] + ") : (" + na[k - 1] + "))";   // #529
                 if (lod.Count > 0)
                 {
                     var (j, lm) = lod[0]; string nm = lm.Groups[1].Value, inner = lm.Groups[2].Value;

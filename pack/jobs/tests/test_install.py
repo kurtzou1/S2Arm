@@ -1,5 +1,5 @@
 """装到 iPhone（pack/jobs/install.py，10-26）：选团队、包名、报错分类、整条流程（签名 / 装机 / 拷资源包打桩，IPA 夹具用 ditto 真解）。期望按规则手写"""
-import json, os, plistlib, shutil, subprocess, sys, tempfile, types, unittest, zipfile
+import json, os, plistlib, shutil, subprocess, sys, tempfile, time, types, unittest, zipfile
 import unittest.mock as um
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -221,7 +221,8 @@ class FlowTests(unittest.TestCase):
                     for d, k in ((0, 0), (1 << 20, 1), (3 << 20, 2)): on_line(f"S2A_PUSH_PROGRESS {d} {3 << 20} {k} 2")
                 if locked:   # #333：推之前写探针就写不进（探针在推送之前，和带不带 --apply 无关）
                     Path(log).parent.mkdir(parents=True, exist_ok=True)
-                    Path(log).write_text("【红】iPhone 写不进资源包：多半是手机锁屏了或数据线松了。解锁手机、保持亮屏，插稳数据线后再点一次。\n", encoding="utf-8")
+                    Path(log).write_text("【红】" + ("iPhone 写不进资源包（Operation timed out; abandoned）。手机没有锁屏，是电脑和手机的连接出了问题：拔下数据线重新插好，再点一次。"
+                                                    if locked == "conn" else "iPhone 写不进资源包：手机锁屏了。解锁手机、保持亮屏，再点一次。") + "\n", encoding="utf-8")
                     raise install.Failure("tool", code="tool_exit")
                 on_line(f"[12:00:00] 资源包：推 {pushed} 个文件 3 MB，分 1 批 + 索引 + 清单（1 秒）")
                 if "--apply" in args and not (pushed == 0 and state["applied"] == "cafe01"):
@@ -273,6 +274,14 @@ class FlowTests(unittest.TestCase):
             self._install(gid, pushed=2, applied_before="", locked=True)
         self.assertEqual(e.exception.code, "device_locked")
         self.assertIn("锁屏", str(e.exception))
+
+    def test_probe_write_failure_unlocked_is_not_device_locked(self):   # 11-13：手机没锁、探针写不进（devicectl 超时）→ 连接问题带原文，不报 device_locked
+        gid = "0100535012974000"; self._fixture(gid); self.c.r.update(gameId=gid)
+        with self.assertRaises(install.Failure) as e:
+            self._install(gid, pushed=2, applied_before="", locked="conn")
+        self.assertEqual(e.exception.code, "resource_transfer_failed")
+        self.assertIn("Operation timed out", str(e.exception))
+        self.assertNotIn("锁屏了", str(e.exception))
 
     def test_img_pack_is_done_once_transferred(self):   # 11-11：单一 IMG 形态传完并核过长度即装好，不带 --apply、不起 App 等机上解开，结果带 openToFinish
         gid = "0100535012974000"; out, pack = self._fixture(gid); self.c.r.update(gameId=gid)
@@ -360,7 +369,13 @@ class FlowTests(unittest.TestCase):
             self.assertEqual(cmd[cmd.index("--host-abi") + 1], str(host_update.HOST_ABI))
             self.assertEqual(cmd[cmd.index("--version") + 1], "9.8.7")   # 三端同号：电脑上 S2Arm 的发版号写进容器
             self.assertEqual(cmd[cmd.index("--display-version") + 1], "v9.8.7-dev+abc1234")   # 界面版本字同一来源
-            self.assertEqual((cmd[cmd.index("--sign") + 1], cmd[cmd.index("--shell") + 1]), ("adhoc", str(shell)))
+            # 组装时不签，写完容器摘要（#845，改 Info.plist）再统一 ad-hoc 签：签完再改会破坏签名（v0.3.6 候选 ⑥ codesign 不过）
+            self.assertEqual((cmd[cmd.index("--sign") + 1], cmd[cmd.index("--shell") + 1]), ("none", str(shell)))
+        signs = [i for i, a in enumerate(runs) if len(a) > 5 and a[5] == "sign"]
+        conts = [i for i, a in enumerate(runs) if len(a) > 5 and a[5] == "container"]
+        self.assertEqual(len(signs), 2)   # 每次组装签一次，排在各自的 container 之后
+        for ci, si in zip(conts, signs):
+            self.assertLess(ci, si); self.assertEqual(runs[si][runs[si].index("--sign") + 1], "adhoc")
         self.assertEqual([c1[i + 1] for i, x in enumerate(c1) if x == "--game"], [str(kits[A].resolve())])
         self.assertEqual([c2[i + 1] for i, x in enumerate(c2) if x == "--game"], [str(kits[A].resolve()), str(kits[B].resolve())])
         self.assertEqual((games1, games2, sid1, sid2), ([A], [A, B], "SID1", "SID1"))
@@ -1187,6 +1202,73 @@ class AssembleTests(unittest.TestCase):
             ph.install("x.ipa", ["0100A"])
         self.assertEqual((e.exception.code, installed), ("app_id_taken", []))
 
+    def test_stamp_container_digest(self):
+        """#845 S2AContainerDigest：内容相同 → 摘要相同；只差 _CodeSignature/ 或 Info.plist 里摘要键本身 → 相同；改一个文件 / Info.plist 别的键 → 不同；
+        写进 Info.plist（保留原格式）、打成 ipa 后 ipa_digest 读回同一个值"""
+        import ipa as packer
+        def app(root, extra=b"", sig=b"s1", key=None, ver="1"):
+            a = Path(root) / "S2Arm.app"; (a / "Games/X").mkdir(parents=True); (a / "_CodeSignature").mkdir()
+            (a / "Games/X/kit.bin").write_bytes(b"kit" + extra); (a / "_CodeSignature/CodeResources").write_bytes(sig)
+            info = {"CFBundleIdentifier": "io.s2arm.games", "CFBundleVersion": ver}
+            if key: info[packer.CONTAINER_DIGEST_KEY] = key
+            (a / "Info.plist").write_bytes(plistlib.dumps(info, fmt=plistlib.FMT_BINARY)); return a
+        with tempfile.TemporaryDirectory() as t:
+            d = [packer.stamp_container(app(Path(t) / n, **kw)) for n, kw in (("a", {}), ("b", dict(sig=b"other", key="old")), ("c", dict(extra=b"!")), ("d", dict(ver="2")))]
+            self.assertEqual(len(d[0]), 24)
+            self.assertEqual(d[0], d[1], "只差签名与摘要键本身：相同")
+            self.assertNotEqual(d[0], d[2], "改了一个文件：不同"); self.assertNotEqual(d[0], d[3], "Info.plist 别的键变了：不同")
+            raw = (Path(t) / "a/S2Arm.app/Info.plist").read_bytes(); self.assertTrue(raw.startswith(b"bplist"), "保留二进制格式")
+            self.assertEqual(plistlib.loads(raw)[packer.CONTAINER_DIGEST_KEY], d[0])
+            ipa = Path(t) / "x.ipa"
+            with zipfile.ZipFile(ipa, "w") as z: z.writestr("Payload/S2Arm.app/Info.plist", raw)
+            self.assertEqual(packer.ipa_digest(ipa), d[0])
+
+    def test_put_game_skips_signing_when_phone_has_same_app(self):
+        """#845：手机上的 S2Arm 的 S2AContainerDigest = 这次组出的、两天前签过（免费账号，3 天内）→ 不调 ph.install，资源照推（这款照推、变了的推），
+        签名时间不刷新；同样条件但签名是 4 天前 → 照常装；手机上的摘要不同（别的电脑装过）→ 照常装"""
+        A, B = self.A, self.B
+        self._library((A, "甲"), (B, "乙"))
+        ios_fixture(self.c, A, pack="pa"); ios_fixture(self.c, B, pack="pb")
+        import ipa as packer, host_update
+        self.sid = "SID1"
+        shell = self.c.private / "shell"; shell.mkdir(exist_ok=True); (shell / "manifest.json").write_text("{}")
+        base = self._run([])
+        def run(args, log=None, env=None, cwd=None, on_line=None):   # 替身组的容器另带一份 Info.plist（真壳都有），stamp_container 才写摘要
+            args = [str(a) for a in args]
+            if any(a.endswith("ship_ext.py") for a in args) and "container" in args:
+                o = Path(args[args.index("--out") + 1]); o.mkdir(parents=True, exist_ok=True)
+                (o / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "x"}))
+            r = base(args, log, env, cwd, on_line)
+            if "write_ipa" in args:   # 真 write_ipa 整目录打包：把 App 里 stamp_container 写过摘要的 Info.plist 换进替身 zip
+                z0 = Path(args[-1]); items = {n: zipfile.ZipFile(z0).read(n) for n in zipfile.ZipFile(z0).namelist()}
+                items["Payload/S2Arm.app/Info.plist"] = (Path(args[-2]) / "Info.plist").read_bytes()
+                with zipfile.ZipFile(z0, "w") as z:
+                    for n, b in items.items(): z.writestr(n, b)
+            return r
+        for age, phone_same, want_install in ((2 * 86400, True, False), (4 * 86400, True, True), (2 * 86400, False, True)):
+            at = time.time() - age
+            layout.save_device(self.c, "dev1", dict(games={A: dict(pack="pa"), B: dict(pack="pb")}, shellId="SID1", bundleId="io.s2arm.games.team1",
+                                                     signed=dict(at=at, free=True, device="d")))
+            ph, pushed, signed = self._phone(); ph.udid = "UDID1"
+            seen = {}
+            class Cl:
+                def call(self_, *a):
+                    seen["args"] = a; return 0, (seen["want"] if phone_same else "aaaaaaaaaaaaaaaaaaaaaaaa") + "\n"
+            orig_digest = packer.ipa_digest
+            def digest(ipa):
+                d = orig_digest(ipa); seen["want"] = d; return d
+            with um.patch.object(packer, "current_shell_id", return_value="SID1"), um.patch.object(packer, "container_shell", return_value=shell), \
+                 um.patch.object(host_update, "engine_compat", return_value=dict(self.COMPAT)), um.patch.object(self.c, "run", run), \
+                 um.patch.object(packer, "ipa_digest", digest), um.patch.object(install, "devpush_client", lambda *a: Cl()):
+                install.put_game(self.c, A, ph)
+            self.assertEqual(len(seen["want"]), 24, "组出的容器带 24 位摘要")
+            self.assertEqual(seen.get("args"), ("app-attr", "S2AContainerDigest") if age < 3 * 86400 else None)   # 签名过了 3 天：不必问手机，直接照常装
+            self.assertEqual(bool(signed), want_install, (age, phone_same))
+            self.assertEqual(pushed, [A])   # 乙资源包号没变：两种情况都不推
+            rec = layout.load_device(self.c, "dev1")
+            if want_install: self.assertGreater(rec["signed"]["at"], at)
+            else: self.assertEqual(rec["signed"]["at"], at)   # 没重签：到期时间照旧
+
     def test_put_game_pushes_all_when_bundle_changed(self):
         """装上的包名和记录里的不同（换过包名 / 签名方式）= 手机上是另一个 App：资源包号没变的款也推"""
         A, B = self.A, self.B
@@ -1410,9 +1492,9 @@ class ExportPhoneTests(unittest.TestCase):
         self._img(A, b"S2AIMG01-a"); self._img(B, b"S2AIMG01-b"); ios_fixture(self.c, C)
         (self.c.private / "install.json").write_text(json.dumps({"mode": "export"}))
         r = self._export(dict(gameId=A))
-        out = self.c.library / install.EXPORT_DIR
+        out = self.c.library / install.EXPORT_DIRS["zh"]
         self.assertEqual((r["exported"], r["outputPath"], r["games"], r["skipped"]), (True, str(out), [A, B], ["丙"]))
-        self.assertEqual(sorted(p.name for p in out.iterdir()), sorted(["S2Arm.ipa", "甲.img", "乙.img", install.EXPORT_README]))
+        self.assertEqual(sorted(p.name for p in out.iterdir()), sorted(["S2Arm.ipa", "甲.img", "乙.img", install.EXPORT_READMES["zh"]]))
         # 一款一个文件：原资源包的其余文件段 + 着色器库进了目录表（手机认领后照常解出来）；原 game.img 不动
         img = img_module()
         for f, gid, data in (("甲.img", A, b"S2AIMG01-a"), ("乙.img", B, b"S2AIMG01-b")):
@@ -1422,7 +1504,7 @@ class ExportPhoneTests(unittest.TestCase):
                 self.assertEqual((rd("exefs/main"), rd("shaders/direct/lib.bin"), img.header(str(out / f))["gid"]), (data, b"LIB" + gid.encode(), gid))
             self.assertNotIn("shaders/direct/lib.bin", {p for p, _, _ in img.entries(str(library_pack(self.c, gid) / "game.img"))})
         self.assertEqual(install_ipa_games(out / "S2Arm.ipa"), ([A, B], "SID1"))
-        readme = (out / install.EXPORT_README).read_text(encoding="utf-8-sig")
+        readme = (out / install.EXPORT_READMES["zh"]).read_text(encoding="utf-8-sig")
         self.assertIn("甲.img（甲）", readme); self.assertIn("乙.img（乙）", readme); self.assertIn("放这里导入", readme)
         self.assertEqual(r["exportBytes"], sum(p.stat().st_size for p in out.iterdir()))
         self.assertEqual([p.name for p in self.c.library.iterdir() if p.name.startswith(".export-")], [])   # 临时目录收干净
@@ -1430,10 +1512,26 @@ class ExportPhoneTests(unittest.TestCase):
     def test_export_replaces_whole_folder(self):
         """再导出一次：文件夹整个换新（上次的、玩家放进去的别的文件都不在了）"""
         self._library((self.A, "甲")); self._img(self.A, b"S2AIMG01-a")
-        out = self.c.library / install.EXPORT_DIR; out.mkdir(); (out / "旧.img").write_bytes(b"old")
+        out = self.c.library / install.EXPORT_DIRS["zh"]; out.mkdir(); (out / "旧.img").write_bytes(b"old")
         self._export(dict(gameId=self.A, mode="export"))
         self.assertFalse((out / "旧.img").exists())
         self.assertTrue((out / "甲.img").is_file())
+
+    def test_export_names_follow_ui_language(self):
+        """i18n：英文界面（uiLanguage = en）→ 文件夹「S2Arm Self-Sign Export」、说明「How to install on iPhone.txt」（英文正文：Import Here、
+        Settings → General → VPN & Device Management）；之后换回中文再导出 → 「S2Arm 自签导出」+「怎么装到 iPhone.txt」，英文名的旧导出删掉，只留一份"""
+        self._library((self.A, "甲")); self._img(self.A, b"S2AIMG01-a")
+        en, zh = self.c.library / "S2Arm Self-Sign Export", self.c.library / "S2Arm 自签导出"
+        r = self._export(dict(gameId=self.A, mode="export", uiLanguage="en"))
+        self.assertEqual(sorted(p.name for p in en.iterdir()), sorted(["S2Arm.ipa", "甲.img", "How to install on iPhone.txt"]))
+        self.assertEqual((r["outputPath"], r["readme"]), (str(en), str(en / "How to install on iPhone.txt")))
+        text = (en / "How to install on iPhone.txt").read_text(encoding="utf-8-sig")
+        for want in ("甲.img (甲)", "Import Here", "Settings → General → VPN & Device Management"): self.assertIn(want, text)
+        self.assertNotIn("放这里导入", text); self.assertFalse(zh.exists())
+        self._export(dict(gameId=self.A, mode="export", uiLanguage="zh-Hans"))
+        self.assertEqual(sorted(p.name for p in zh.iterdir()), sorted(["S2Arm.ipa", "甲.img", "怎么装到 iPhone.txt"]))
+        self.assertFalse(en.exists(), "换回中文：英文名的旧导出删掉")
+        self.assertEqual([p.name for p in self.c.library.iterdir() if p.name.startswith(".export-")], [])
 
     def test_export_requested_old_format_is_named(self):
         """点的这款还是旧格式资源包：导出不了单个 game.img，报 pack_missing 说要重新打 iPhone 包"""
@@ -1469,6 +1567,40 @@ class ExportPhoneTests(unittest.TestCase):
 def install_ipa_games(ipa):
     import ipa as packer
     return packer.ipa_games(ipa)
+
+
+class DropRestampTests(unittest.TestCase):
+    """#845 摘掉一款后重算容器摘要（ipa.finish_container）：摘之前整套的摘要写在 Info.plist 里；摘掉一款后内容变了，
+    新 ipa 里的摘要必须非空、且不等于整套的旧值——否则之后再装回整套时 same_app 误判相同、跳过重装，摘掉的那款回不到手机上"""
+
+    def test_drop_restamps_digest(self):
+        import ipa as packer
+        t = Path(tempfile.mkdtemp()); self.addCleanup(lambda: shutil.rmtree(t, ignore_errors=True))
+        app = t / "build" / "Payload" / "S2Arm.app"
+        A, B = "0100000000010000", "0100000000020000"
+        for g in (A, B):
+            (app / "Games" / g).mkdir(parents=True); (app / "Games" / g / "main.npdm").write_bytes(g.encode() + bytes(16))
+            (app / "Frameworks").mkdir(exist_ok=True); (app / f"Frameworks/S2AImages-{g}.dylib").write_bytes(g.encode())
+        (app / "s2a_catalogue.json").write_text(json.dumps({"schema": 1, "shell_id": "SID1", "games": [{"title_id": A}, {"title_id": B}]}))
+        (app / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "io.s2arm.games"}))
+        full = packer.stamp_container(app)
+        ipa = t / "S2Arm.ipa"
+        with zipfile.ZipFile(ipa, "w") as z:
+            for f in sorted((t / "build").rglob("*")):
+                if f.is_file(): z.write(f, f.relative_to(t / "build").as_posix())
+        self.assertEqual(packer.ipa_digest(ipa), full)
+        lib = t / "lib"; lib.mkdir()
+        c = types.SimpleNamespace(library=lib, logs=t, task="drop", engine=Path(packer.__file__).resolve().parents[2],
+                                  env=lambda: dict(os.environ), run=lambda args, log, env, **kw: subprocess.run([str(a) for a in args], check=True, capture_output=True))
+        def zip_app(c, a, out, log):   # 写 ipa 的完整校验（app_bundle write_ipa）不在这里核：照原样打包
+            with zipfile.ZipFile(out, "w") as z:
+                for f in sorted(Path(a).rglob("*")):
+                    if f.is_file(): z.write(f, "Payload/S2Arm.app/" + f.relative_to(a).as_posix())
+        with um.patch.object(packer, "sign_container", lambda *a, **k: None), um.patch.object(packer, "write_container_ipa", zip_app):   # 签名要 codesign，这里只核摘要
+            new, left, _ = packer.drop_from_ipa(c, ipa, A)
+        self.assertEqual(left, [B])
+        got = packer.ipa_digest(new)
+        self.assertTrue(got); self.assertNotEqual(got, full)
 
 
 class ShipExtContainerDropTests(unittest.TestCase):

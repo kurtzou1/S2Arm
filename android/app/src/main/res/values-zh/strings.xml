@@ -4,6 +4,8 @@
     <string name="preview_description">安卓宿主调试构建，尚未接入游戏运行。</string>
     <string name="native_unavailable">原生宿主无法启动，详情见 S2Arm 日志。</string>
     <string name="import_game">导入游戏包…</string>
+    <string name="fps_overlay_show">显示 FPS（成功提交速率）</string>
+    <string name="fps_overlay_description">游戏帧成功提交速率，每秒更新；不是屏幕刷新率</string>
 
     <!-- 触屏菜单（四指长按）与编辑条；术语对齐 iOS 的 zh-Hans 文案 -->
     <string name="touch_menu_title">触屏布局</string>

@@ -31,7 +31,7 @@ final class FrameRateOverlay extends TextView {
         setPadding(pad * 2, pad, pad * 2, pad);
         setClickable(false);
         setFocusable(false);
-        setContentDescription("游戏帧成功提交速率，每秒更新；不是屏幕刷新率");
+        setContentDescription(context.getString(R.string.fps_overlay_description));
         setVisibility(GONE);
     }
 

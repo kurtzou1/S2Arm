@@ -12,6 +12,7 @@
 //   两套方案互斥：按键方案不发触点（否则按 A / 推摇杆都会被游戏当成点按，误触），直通方案不发手柄。
 // 布局格式、文件管理与方案切换：vpad_layout / vpad_settings；拖拽编辑与吸附另行设计。
 // 弱链接[ios,lab,touchtest]：s2a_ap_snapshot（自动玩家（C#）提供；链接行按这行放行未定义，runtime/build.mk 自动收）
+// 弱链接[lab,touchtest]：s2a_dev_on（runtime/src/os.c 开发设施开关；App 里总有，只有触屏对照单测只编本文件一段、没链 os.c；输入工作台同样）
 // 弱链接[lab]：nxgal_present_frame（渲染层提供；输入工作台不链渲染层，ios/lab/build.sh 生成工程时注入）
 // 弱链接[lab]：s2a_widen_game（runtime/src/widen.c：游戏自己出宽图 = 第二层；输入工作台不编宽屏模块，取不到按游戏不知道宽屏处理）
 // 弱链接[lab]：s2a_game_canvas（runtime/src/widen.c：游戏画布 = 触点坐标空间，审计 P1-92；输入工作台取不到按 1280×720）
@@ -52,16 +53,18 @@ double s2a_direct_out_aspect(void) __attribute__((weak_import));
 CGRect s2a_direct_out_rect(void) __attribute__((weak_import));
 
 // ---- 录手柄（10-21 维护者 拍板：录 维护者 实机玩的虚拟手柄按键，正式局 MARK 后回放）----
-// 人玩时缺省就录：按键 / 摇杆状态每变一次写一行「上屏帧号 \t 按键位 \t 左 x \t 左 y \t 右 x \t 右 y \t 录制起毫秒」到 Documents/padrec/<款>_<时刻>.tsv；
+// 开发包人玩时缺省就录（玩家包 Info.plist S2ADevFacilities=0 不录，#845：每次存档整份拷存档 + 截图进 Documents/padrec，玩家「文件」App 里越积越多）：按键 / 摇杆状态每变一次写一行「上屏帧号 \t 按键位 \t 左 x \t 左 y \t 右 x \t 右 y \t 录制起毫秒」到 Documents/padrec/<款>_<时刻>.tsv；
 // 游戏每次存档提交（C# IFileSystem.Commit → s2a_padrec_mark）写一行「帧号 \t 存档 \t 第 N 次 \t 毫秒」、截 <同名>.save<N>.png，
 // 返回 <同名>.save<N> 给 C# 把当时的存档整份拷进这个目录（services Saves.Snapshot）。每个存档点各留一份：退出时的自动存档不再盖掉玩家要的那次，
 // 选哪个存档点回放由 tools/padrec_cut.py 定（之后有 ≥60 秒输入的最后一个）。自动玩家在跑时不录
 static pthread_mutex_t g_rmu = PTHREAD_MUTEX_INITIALIZER; static FILE *g_rec; static char g_rpath[1024]; static int g_roff;
 static uint32_t g_rb = ~0u; static uint64_t g_rs, g_rflush, g_rt0; static int g_nsave; static char g_rsave[1100];
 static uint64_t rec_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000 + (uint64_t)t.tv_nsec / 1000000; }
+int s2a_dev_on(void) __attribute__((weak_import));   // runtime/src/os.c：开发设施总开关，玩家包 = 0
 static int rec_open(void) {   // 持 g_rmu
     if (g_rec || g_roff) return g_rec != NULL;
     if (s2a_autoplay_on && s2a_autoplay_on()) { g_roff = 1; return 0; }
+    if (s2a_dev_on && !s2a_dev_on()) { g_roff = 1; return 0; }   // 玩家包不录（#845）：录手柄与存档点副本是给自动玩家 / 回放用的开发设施
     NSString *bid = NSBundle.mainBundle.bundleIdentifier ?: @"s2arm"; NSString *g = [bid componentsSeparatedByString:@"."].lastObject;
 #if TARGET_OS_IPHONE
     char dir[900]; s2a_container_docs(dir, sizeof dir); strlcat(dir, "/padrec", sizeof dir); mkdir(dir, 0755);
@@ -614,7 +617,7 @@ static NSString *const kSlideSwitchKey = @"S2AVPadSlideSwitch";   // 滑动切�
     UIStackView *rows = vp_column(@[
         vp_text_label(S2AL(@"vpad.edit.hint"), 11, YES),
         [self sliderRow:S2AL(@"vpad.edit.globalOpacity") low:0.2 high:1 value:_layoutStore.globalOpacity id:@"vpad.edit.globalAlpha" changed:@selector(globalChanged:) commit:@selector(globalCommit) slider:&_gAlpha valueLabel:&v0],
-        [self sliderRow:S2AL(@"vpad.edit.globalSize") low:0.6 high:1.6 value:_layoutStore.globalScale id:@"vpad.edit.globalSize" changed:@selector(globalChanged:) commit:@selector(globalCommit) slider:&_gSize valueLabel:&v1],
+        [self sliderRow:S2AL(@"vpad.edit.globalSize") low:S2A_VPAD_SCALE_MIN high:S2A_VPAD_SCALE_MAX value:_layoutStore.globalScale id:@"vpad.edit.globalSize" changed:@selector(globalChanged:) commit:@selector(globalCommit) slider:&_gSize valueLabel:&v1],
         [self sliderRow:S2AL(@"vpad.idleOpacity") low:0 high:1 value:_layoutStore.idleKeyOpacity id:@"vpad.edit.idle" changed:@selector(idleChanged:) commit:@selector(idleCommit) slider:&_gIdle valueLabel:&v2],
         [self swatchRow],
         [self switchRow:S2AL(@"vpad.edit.slide") note:S2AL(@"vpad.edit.slide.note") on:[NSUserDefaults.standardUserDefaults boolForKey:kSlideSwitchKey] id:@"vpad.edit.slide" action:@selector(slideChanged:) control:NULL]]);
@@ -652,7 +655,7 @@ static NSString *const kSlideSwitchKey = @"S2AVPadSlideSwitch";   // 滑动切�
 - (void)buildKeyPanel {
     UIVisualEffectView *g = vp_glass(14); g.hidden = YES; g.accessibilityIdentifier = @"vpad.edit.key"; _keyPanel = g; UILabel *v0, *v1;
     _keyTitle = vp_text_label(@"", 14, NO); _keyTitle.font = [UIFont boldSystemFontOfSize:14];
-    UIStackView *size = [self sliderRow:S2AL(@"vpad.edit.size") low:0.6 high:1.6 value:1 id:@"vpad.edit.size" changed:@selector(panelChanged:) commit:@selector(panelCommit) slider:&_sizeSlider valueLabel:&v0];
+    UIStackView *size = [self sliderRow:S2AL(@"vpad.edit.size") low:S2A_VPAD_SCALE_MIN high:S2A_VPAD_SCALE_MAX value:1 id:@"vpad.edit.size" changed:@selector(panelChanged:) commit:@selector(panelCommit) slider:&_sizeSlider valueLabel:&v0];
     UIStackView *alpha = [self sliderRow:S2AL(@"vpad.edit.opacity") low:0.2 high:1 value:1 id:@"vpad.edit.alpha" changed:@selector(panelChanged:) commit:@selector(panelCommit) slider:&_alphaSlider valueLabel:&v1];
     _sizeValue = v0; _alphaValue = v1;
     UIStackView *hide = [self switchRow:S2AL(@"vpad.edit.hideKey") note:S2AL(@"vpad.edit.hideKey.note") on:NO id:@"vpad.edit.hide" action:@selector(hideChanged) control:&_hideSwitch];

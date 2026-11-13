@@ -479,6 +479,7 @@ struct ExportSessionView: View {
             Text(name).font(.manrope(14.5, .bold))
             Text(loc.backend(outcome.message.isEmpty ? JobOutcome.interruptedMessage : outcome.message)).font(.manrope(13.5)).fixedSize(horizontal: false, vertical: true)
             if !outcome.suggestion.isEmpty { Text(loc.backend(outcome.suggestion)).font(.manrope(13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
+            ReportHint()
             HStack(spacing: 8) {
                 if outcome.code == "disk_full" {
                     Button(x("fix.space")) { freeSpace(session.gameID ?? "") }.buttonStyle(LauncherSecondaryButtonStyle())

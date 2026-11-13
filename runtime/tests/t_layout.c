@@ -97,7 +97,18 @@ int main(void) {
     EQ(mb,W); EQ(sb,0); EQ(L.tlsio_base,W+GB); EQ(L.stack_base,W+2*GB); EQ(L.heap_base,W+4*GB); EQ(L.alias_base,W+10*GB); EQ(L.aslr_base,W+GB);
     EQ(L.win_size,16*GB); sane(&L,mb);
     EQ(s2a_layout_compute(3,0,MOD,0,W,4*GB+32*MB,&L,&mb,&sb),0);
-    EQ(s2a_layout_compute(3,0,MOD,0,W,4*GB+31*MB,&L,&mb,&sb),(uint64_t)-2);
+    // 堆模式丙（#620，紧凑）：乙放不下（4G+31M）时，模块后按 2 MiB 对齐，TLS/IO 64M、栈区 256M，堆紧随其后；堆区 / 别名 / 可随机区尺寸同乙
+    EQ(s2a_layout_compute(3,0,MOD,0,W,4*GB+31*MB,&L,&mb,&sb),0);
+    EQ(mb,W); EQ(sb,0); EQ(L.tlsio_base,W+300*MB); EQ(L.tlsio_size,64*MB); EQ(L.stack_base,W+364*MB); EQ(L.stack_size,256*MB);
+    EQ(L.heap_base,W+620*MB); EQ(L.heap_size,6*GB); EQ(L.alias_base,W+620*MB+6*GB); EQ(L.alias_size,8*GB); EQ(L.aslr_base,W+300*MB); EQ(L.aslr_size,32*GB);
+    EQ(L.win_size,4*GB+31*MB); sane(&L,mb);
+    // 丙下限：300M 模块 + 64M + 256M + 32M 堆 = 652M 放得下，651M 放不下
+    EQ(s2a_layout_compute(3,0,MOD,0,W,652*MB,&L,&mb,&sb),0); sane(&L,mb);
+    EQ(s2a_layout_compute(3,0,MOD,0,W,651*MB,&L,&mb,&sb),(uint64_t)-2);
+    // #620 真实情形：老 iPad 窗口 0x3c0000000 起 2048M，模块段 616M（不是 2 MiB 整数倍也按 2 MiB 对齐）→ 丙：TLS/IO 在 +616M，堆在 +936M，窗口里有 1112M 堆
+    { uint64_t w620 = 0x3c0000000ull, m620 = 615*MB + 512*1024;
+      EQ(s2a_layout_compute(3,0,m620,0,w620,2*GB,&L,&mb,&sb),0);
+      EQ(mb,w620); EQ(L.tlsio_base,w620+616*MB); EQ(L.stack_base,w620+680*MB); EQ(L.heap_base,w620+936*MB); EQ(L.win_size,2*GB); }
     // Switch 2 堆模式（应用池 9 GiB，Pokopia）：堆区放大到 9G、别名区顺延到 +12G，32G 跨度不变；测完复原 Switch 池
     s2a_app_pool_set(9*GB);
     EQ(s2a_layout_compute(3,0,MOD,0,W,32*GB+MOD,&L,&mb,&sb),0);

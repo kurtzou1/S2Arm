@@ -53,6 +53,11 @@ public enum BackendText {
         launcherItems[id]?[language] ?? "[\(id)]"
     }
 
+    /// 报错页统一的一句「故障报修」指引（11-13）：文字只在共享规格 report.hint 一处，{button} 换成顶栏按钮名 report.button（Windows SharedText.ReportHint 同一取法）
+    public static func reportHint(language: String) -> String {
+        launcherText("report.hint", language: language).replacingOccurrences(of: "{button}", with: launcherText("report.button", language: language))
+    }
+
     private static let errorTitles: [String: [String: String]] = {
         guard let data = try? Data(contentsOf: experienceURL()),
               let spec = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

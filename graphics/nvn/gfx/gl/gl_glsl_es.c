@@ -1,7 +1,8 @@
 // GLSL 源码改写层：游戏交给 glShaderSource 的 GLSL ES 1.00 / 3.00（及 NVIDIA 驱动多收的写法）→ glslang -V 收的 GLSL ES 3.10 文本。
 // 出包离线链（translator/gl_shaders.py，经本文件的命令行入口 S2A_GLSL_ES_MAIN）与宿主运行时兜底（gl_xlate.c，gl_prog.m 调）共用这一份实现，不写两遍。
 // 两步，与 gl_shaders.py translate() 的顺序一致：
-//   ① s2a_glsl_es_prefix（原文、预处理之前）：「#version 300 / 310 / 320」不带 profile → 补「 es」（NVIDIA 按 ES 读，glslang 照规范要求写 es；FINAL FANTASY VII 的 ff7/shaders/*.glsl）
+//   ① s2a_glsl_es_prefix（原文、预处理之前）：第一条「#version 300 / 310 / 320」没写 es → 补「 es」（NVIDIA 按 ES 读，glslang 照规范要求写 es；FINAL FANTASY VII 的 ff7/shaders/*.glsl）；
+//      后面跟注释的 es 插在注释前，跟 core / compatibility 的换成 es（#749）
 //   ② s2a_glsl_es_rewrite（glslang 预处理之后的文本）：
 //      · 版本：没有 #version 或 #version 100 = GLSL ES 1.00 → 去掉版本行，头上加「#version 310 es」+ float / int 缺省精度 highp（ES 1.00 片元常只在 #ifdef GL_ES 下设精度，
 //        预处理时 GL_ES 没定义）；#version 300 es → 310 es（3.10 是 3.00 的超集，语义不变）；
@@ -68,7 +69,10 @@ static size_t frag_data_at(const char *t, size_t n, size_t i, char k) {
 }
 
 char *s2a_glsl_es_prefix(const char *src, size_t n, size_t *out_n) {
-    // ^([ \t]*#[ \t]*version[ \t]+3[012]0)[ \t]*(\r?)$（多行，只改第一处）→ \1 es\2
+    // 第一条 #version 是 300 / 310 / 320、没写 es 时补成 es（NVIDIA 按 ES 读，glslang 照规范要求写 es）：
+    //   ^([ \t]*#[ \t]*version[ \t]+3[012]0)[ \t]*(\r?)$ → \1 es\2（原规则）；
+    //   #749：版本号后面跟注释（// 或 /*）→ es 插在注释前；跟桌面 GL 的 core / compatibility → 换成 es（这两个 profile 在 ES 下本来就编不过）。
+    //   已写 es、版本号不是这三个、后面是别的写法 → 原样（交 glslang 照常报）。只看第一条 #version：后面的版本行本来就是错的，不替它改
     for (size_t ls = 0; ls <= n; ) {
         size_t j = ls;
         while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
@@ -76,13 +80,26 @@ char *s2a_glsl_es_prefix(const char *src, size_t n, size_t *out_n) {
             j++; while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
             if (starts(src, n, j, "version")) {
                 j += 7; size_t k = j; while (k < n && (src[k] == ' ' || src[k] == '\t')) k++;
-                if (k > j && k + 3 <= n && src[k] == '3' && (src[k + 1] == '0' || src[k + 1] == '1' || src[k + 1] == '2') && src[k + 2] == '0') {
+                if (k > j && k + 3 <= n && src[k] == '3' && (src[k + 1] == '0' || src[k + 1] == '1' || src[k + 1] == '2') && src[k + 2] == '0'
+                    && (k + 3 == n || !(src[k + 3] >= '0' && src[k + 3] <= '9'))) {
                     size_t g1 = k + 3, m = g1; while (m < n && (src[m] == ' ' || src[m] == '\t')) m++;
                     int cr = m < n && src[m] == '\r'; size_t e = m + cr;
-                    if (e == n || src[e] == '\n') {
-                        sb o = {0}; sb_put(&o, src, g1); sb_str(&o, " es"); if (cr) sb_put(&o, "\r", 1); sb_put(&o, src + e, n - e); return sb_take(&o, out_n);
+                    size_t le = m; while (le < n && src[le] != '\n') le++;   // 版本行行尾
+                    #define WORD_AT(w) (starts(src, n, m, w) && (m + strlen(w) == le || !((src[m + strlen(w)] | 0x20) >= 'a' && (src[m + strlen(w)] | 0x20) <= 'z') && src[m + strlen(w)] != '_' && !(src[m + strlen(w)] >= '0' && src[m + strlen(w)] <= '9')))
+                    sb o = {0};
+                    if (e == n || src[e] == '\n') {   // 原规则：后面只有空白
+                        sb_put(&o, src, g1); sb_str(&o, " es"); if (cr) sb_put(&o, "\r", 1); sb_put(&o, src + e, n - e); return sb_take(&o, out_n);
                     }
+                    if (starts(src, n, m, "//") || starts(src, n, m, "/*")) {   // 跟注释：es 插在注释前
+                        sb_put(&o, src, g1); sb_str(&o, " es "); sb_put(&o, src + m, n - m); return sb_take(&o, out_n);
+                    }
+                    size_t wl = WORD_AT("core") ? 4 : WORD_AT("compatibility") ? 13 : 0;
+                    if (wl) {   // 桌面 profile：换成 es
+                        sb_put(&o, src, g1); sb_str(&o, " es"); sb_put(&o, src + m + wl, n - m - wl); return sb_take(&o, out_n);
+                    }
+                    #undef WORD_AT
                 }
+                break;   // 第一条 #version 已看过：不是要补的形态就原样
             }
         }
         const char *nl = memchr(src + ls, '\n', n - ls); if (!nl) break; ls = (size_t)(nl - src) + 1;

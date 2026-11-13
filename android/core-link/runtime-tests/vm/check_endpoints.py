@@ -40,6 +40,7 @@ SYSTEM_EXTERNALS = {
     "strtoull", "vsnprintf", "write", "fallocate", "getpid", "gettid",
     "sched_yield", "syscall", "usleep", "sysconf", "prctl", "sigaction",
     "sigemptyset", "sigprocmask", "dladdr",
+    "_exit",      # native.h 的 quiet fatal 路径：libc 进程退出，不是 core 端点
     "strcspn",   # 11-05 b273f2ef6 svc_mem.c 解析布局提示行（去掉行尾换行）
     # 工具链 / 运行库内部（GCC / clang / Mach-O 各自形态）
     "_GLOBAL_OFFSET_TABLE_", "__errno_location", "__error", "__getdelim",

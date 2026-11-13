@@ -10,7 +10,17 @@ int s2a_mac_ns2_connect(void);
 void s2a_mac_ns2_disconnect(void);
 void s2a_mac_ns2_detach(void);
 void s2a_mac_ns2_focus(int focused);
-int s2a_mac_ns2_read(ns2_state *state);
+// 读手柄状态；单只 Joy-Con 按游戏样式整形（s2a_mac_ns2_shape），side_keys 收 SL / SR（Ryujinx ControllerKeys 位 24–27，可 NULL）
+int s2a_mac_ns2_read(ns2_state *state, uint32_t *side_keys);
+// 游戏这一格的手柄样式（Ryujinx ControllerType 位；front_mac.m 的 s2a_vpad_set_style 转来）
+void s2a_mac_ns2_set_game_style(int style);
+// 现在是否在报原始方向（连着单只 Joy-Con、游戏用它那一侧的单只样式）
+int s2a_mac_ns2_raw_now(void);
+// 纯函数（#520 A）：游戏用这只那一侧的单只样式才报原始方向；单只 Joy-Con 对应的样式（Pro / 一对 / 没连为 0）；
+//   整形：原始方向时取出 SL / SR 换成 Ryujinx 键位返回，否则转横握视角、返回 0；不是单只 Joy-Con 不动
+int s2a_mac_ns2_raw_wanted(ns2_kind kind, int style);
+int s2a_mac_ns2_single_style(ns2_kind kind);
+uint32_t s2a_mac_ns2_shape(ns2_kind kind, int raw, ns2_state *state);
 void s2a_mac_ns2_set_back_buttons(uint16_t left, uint16_t right);
 ns2_status s2a_mac_ns2_status(void);
 // 通道模式下开局后还没接上过（IDLE）时要不要去连：通道文件在（S2Arm 的连接程序启动时建、退出时删）才连。

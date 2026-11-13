@@ -1,7 +1,8 @@
 #!/bin/bash
 # GLSL 改写层单测（graphics/nvn/gfx/gl/gl_glsl_es.c：出包离线链 gl_shaders.py 与宿主运行时兜底 gl_xlate.c 共用的一份实现）。约 1 秒，不要 GPU / glslang。
 # 编它的命令行入口（S2A_GLSL_ES_MAIN，同 gl_shaders.py 的用法），喂手写输入、比手写期望（期望按 GLSL ES 规范与改写规则逐字写出，不跑被测实现）：
-#   prefix ①「#version 320\r\n」→ 补「 es」、保留 \r；②「  #  version  300  」行尾空白去掉、补 es；③ 已带 es / 「310 core」/ 「3000」不动；④ 只改第一处
+#   prefix ①「#version 320\r\n」→ 补「 es」、保留 \r；②「  #  version  300  」行尾空白去掉、补 es；③ 第一条已带 es → 整份不动（后面的 310 core / 3000 不替它改）；④ 只改第一处
+#          ⑫ #749 版本号后跟 // 注释 → es 插在注释前；⑬ 跟 /* */ 注释同；⑭「310 core\r\n」→「310 es\r\n」；⑮「300 compatibility」→「300 es」；⑯「310 cores」「3100」不动
 #   rewrite ⑤ ES 1.00 顶点（无版本行）：头三行 + attribute → in、varying → out，「myattribute」「attributes」不动
 #           ⑥ ES 1.00 片元（#version 100 行去掉）：varying → in、gl_FragColor → s2a_FragColor 并声明 location 0、texture2D / textureCube / texture2DProj / texture2DLodEXT 改名、
 #              gl_FragData [ 1 ] → s2a_FragData1 并声明 location 1、gl_FragDepthEXT → gl_FragDepth；「texture2Dx(」不动
@@ -21,8 +22,14 @@ ck() {   # ck <名> <模式参数…> ：stdin 之外的输入在 $T/in，期望
 }
 printf '#version 320\r\nvoid main() {}\n' > "$T/in"; printf '#version 320 es\r\nvoid main() {}\n' > "$T/want"; ck "① 320 补 es、保留 \\r" prefix
 printf '  #  version  300  \nvoid main() {}\n' > "$T/in"; printf '  #  version  300 es\nvoid main() {}\n' > "$T/want"; ck "② 行首空白保留、行尾空白去掉" prefix
-printf '#version 300 es\n#version 310 core\n#version 3000\n' > "$T/in"; cp "$T/in" "$T/want"; ck "③ 已带 es / core / 3000 不动" prefix
+printf '#version 300 es\n#version 310 core\n#version 3000\n' > "$T/in"; cp "$T/in" "$T/want"; ck "③ 第一条已带 es：整份不动" prefix
 printf '// x\n#version 310\n#version 320\n' > "$T/in"; printf '// x\n#version 310 es\n#version 320\n' > "$T/want"; ck "④ 只改第一处" prefix
+printf '#version 310 // engine shader\nvoid main() {}\n' > "$T/in"; printf '#version 310 es // engine shader\nvoid main() {}\n' > "$T/want"; ck "⑫ 版本号后跟 // 注释：es 插在注释前" prefix
+printf '#version 300 /* a */\nvoid main() {}\n' > "$T/in"; printf '#version 300 es /* a */\nvoid main() {}\n' > "$T/want"; ck "⑬ 版本号后跟 /* */ 注释" prefix
+printf '#version 310 core\r\nvoid main() {}\n' > "$T/in"; printf '#version 310 es\r\nvoid main() {}\n' > "$T/want"; ck "⑭ core → es、保留 \\r" prefix
+printf '#version 300 compatibility\nvoid main() {}\n' > "$T/in"; printf '#version 300 es\nvoid main() {}\n' > "$T/want"; ck "⑮ compatibility → es" prefix
+printf '#version 310 cores\n' > "$T/in"; cp "$T/in" "$T/want"; ck "⑯a 310 cores（不是 core 这个词）不动" prefix
+printf '#version 3100\n' > "$T/in"; cp "$T/in" "$T/want"; ck "⑯b 3100 不动" prefix
 printf 'attribute vec4 a_pos;\nvarying vec2 v_uv;\nfloat myattribute; float attributes;\nvoid main() { v_uv = a_pos.xy; gl_Position = a_pos; }\n' > "$T/in"
 printf '#version 310 es\nprecision highp float;\nprecision highp int;\nin vec4 a_pos;\nout vec2 v_uv;\nfloat myattribute; float attributes;\nvoid main() { v_uv = a_pos.xy; gl_Position = a_pos; }\n' > "$T/want"
 ck "⑤ ES 1.00 顶点" rewrite vert

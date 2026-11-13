@@ -296,7 +296,7 @@ namespace S2A.Services
                 return l;
             }
 
-            SystemLanguage d = SystemLocale.FromPreferred(SystemLocale.Preferred(), out string why);
+            SystemLanguage d = SystemLocale.FromUi(Environment.GetEnvironmentVariable("S2A_UI_LANGUAGE"), SystemLocale.Preferred(), out string why);
             Console.Error.WriteLine($"[S2A 语言] 系统语言 {d}（依据：{why}）");
             return d;
         }
@@ -781,6 +781,8 @@ namespace S2A.Services
         public bool DisplayMessageDialog(ControllerAppletUIArgs args)
         {
             // 游戏声明至少 2 人（强制本地合作）：真机上要再连一个手柄，这里开出第二个虚拟手柄（InputPump.SetPads，镜像第一个的输入）
+            // 先按上限收回多的（#809：要 1 人、连着两个时原先照配两格，重验不过反复重开），再按下限补开
+            InputPump.CapPads(Host.Device, args.PlayerCountMax);
             if (args.PlayerCountMin > InputPump.Pads) InputPump.SetPads(Host.Device, args.PlayerCountMin);
             var players = new System.Collections.Generic.List<PlayerIndex>(args.SupportedPlayers);
             PlayerIndex player;

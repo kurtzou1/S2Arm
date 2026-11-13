@@ -511,7 +511,8 @@ static void pad_face_sync(void) {
         if (previous == self->_adapterEnabled) return;
         if (self->_adapterEnabled) [self reloadRecord];
         [self selectSystem];
-        if (self->_adapterEnabled && !self->_hasSystem && self->_bleWanted) [self resumeBLE];
+        // 玩家刚打开适配（设置页或齿轮菜单）：直接开始连接，不用再点一次连接按钮；记得手柄就直连它，否则扫描配对广播
+        if (self->_adapterEnabled && !self->_hasSystem) { if (self->_bleWanted) [self resumeBLE]; else [self startBLE]; }
         [self updateVisibility];
     });
 }
@@ -632,7 +633,7 @@ static void pad_face_sync(void) {
         dispatch_async(dispatch_get_main_queue(), ^{
             S2AController *inner = weakSelf;
             if (!inner) return;
-            inner->_hasSystem = hasSystem;
+            [inner systemPresence:hasSystem];
             [inner updateVisibility];
         });
     });
@@ -684,9 +685,19 @@ static void pad_face_sync(void) {
         [self selectSystemLocked:foreground mayClear:NO];
         hasSystem = self->_system != nil;
     });
-    _hasSystem = hasSystem;
+    [self systemPresence:hasSystem];
     if (_foreground && _hasSystem) [self stopBLE:"system controller selected"];
     [self updateVisibility];
+}
+// 系统手柄在不在（主线程）：系统手柄接入时 NS2 链路会停（selectSystem），它走了以后原来连着的 NS2 手柄要自己接回来——
+//   以前只有切前后台才会再连，玩家拔掉 / 关掉系统手柄后 NS2 手柄一直不出输入
+- (void)systemPresence:(BOOL)hasSystem {
+    BOOL resume = s2a_ble_resume_after_system(_hasSystem, hasSystem, _foreground, _adapterEnabled, _bleWanted, _bleStarted);
+    _hasSystem = hasSystem;
+    if (resume) {
+        LOG("NS2 Pro：系统手柄已断开，重新连接记住的 NS2 手柄");
+        [self resumeBLE];
+    }
 }
 // 诊断（#456）：列出 GameController 枚举到的全部设备与 profile。只有带 extendedGamepad 的才会被选成系统手柄并打「接入」，
 //   第三方手柄的 Switch 模式若被枚举成只有 micro / 没有标准 profile，或根本没被枚举，原先日志里一片空白，分不清卡在系统层还是 App 层
@@ -968,10 +979,32 @@ void s2a_rumble_apply_settings(void) {
 // 菜单里切震动档位 / 打开游戏震动时试震一下（11-09 维护者：「点击强弱机器是没有反应的……切换的时候手机震一下让玩家有感知」）：
 //   走游戏震动同一条出口（s2a_pad_rumble_session 选手机马达或手柄，s2a_pad_set_rumble_pair 按当前档位倍率缩放），震 0.3 秒，几档之间摸得出差别。
 //   基准振幅 0.06（游戏常见值；手机马达 / 系统手柄过 s2a_hp_feel 后约 0.5）：弱 0.18、较弱 0.36、标准 0.51、较强 0.72、强 0.92、震爆我 1（倍率见 s2a_rumble_apply_settings）
+//   #462：菜单多半是手指点的，这时生效来源是触屏，游戏路由选的是手机马达 / 只给体感（s2a_pad_rumble_session），已连接的手柄收不到试震。
+//   试震要让玩家摸到手里手柄的档位差别：有已连接、能震的系统手柄（含走配件协议的 G8+ 这类）或 NS2 Pro，就直接在它那一路播 0.3 秒，
+//   不走游戏路由、不碰选中 / 代次状态（游戏自己的震动照旧按生效来源走）；都没有才照旧走游戏那条出口
 void s2a_rumble_preview(void) {
     if (atomic_load(&g_rumble_gain) <= 0) return;
-    uint64_t session = s2a_pad_rumble_session(); if (!session) { LOG("游戏震动：试震跳过（现在没有可震的设备）"); return; }
     const s2a_pad_vibration v[2] = {{0.06f, 160, 0.06f, 320}, {0.06f, 160, 0.06f, 320}};
+    pthread_mutex_lock(&g_feedback_mu);
+    BOOL sys = g_system_present && g_system_supported && !g_system_transition && g_system_haptics_queue;
+    BOOL ns2 = !sys && atomic_load(&g_adapter_enabled) && atomic_load(&g_ble_ready);
+    pthread_mutex_unlock(&g_feedback_mu);
+    if (sys) {
+        s2a_pad_vibration scaled[2]; rumble_scale_pair(v, scaled, YES);
+        LOG("游戏震动：试震发给已连接的系统手柄（不看当前输入来源）");
+        s2a_pad_vibration l = scaled[0], r = scaled[1];   // 块捕获不了 C 数组，拆成两个值带进去
+        dispatch_async(g_system_haptics_queue, ^{ s2a_pad_vibration p[2] = {l, r}; system_play_on_queue(p); });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), g_system_haptics_queue, ^{ system_stop_on_queue(); });
+        return;
+    }
+    if (ns2) {
+        s2a_pad_vibration scaled[2]; rumble_scale_pair(v, scaled, NO);
+        ns2_vibration pair[2] = {{scaled[0].low_amp, scaled[0].low_hz, scaled[0].high_amp, scaled[0].high_hz}, {scaled[1].low_amp, scaled[1].low_hz, scaled[1].high_amp, scaled[1].high_hz}};
+        LOG("游戏震动：试震发给已连接的 NS2 手柄（不看当前输入来源）");
+        atomic_load(&g_ns2)->send_pair_lease(pair, 300);   // 租期 300 ms 到点自停
+        return;
+    }
+    uint64_t session = s2a_pad_rumble_session(); if (!session) { LOG("游戏震动：试震跳过（现在没有可震的设备）"); return; }
     s2a_pad_set_rumble_pair(session, v);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ s2a_pad_stop_rumble(session); });
 }

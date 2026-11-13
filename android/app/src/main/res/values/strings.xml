@@ -7,6 +7,8 @@
     <string name="native_unavailable">The native host could not start. See the S2Arm log for details.</string>
     <string name="capability_status" translatable="false">%1$s\n%2$s</string>
     <string name="import_game">Import game package…</string>
+    <string name="fps_overlay_show">Show FPS (successful frame submissions)</string>
+    <string name="fps_overlay_description">Successful game frame submissions per second; not the screen refresh rate</string>
     <!-- #528 item 15: player diagnostic bundle (library screen) -->
     <string name="export_diagnostics">Export diagnostics…</string>
     <string name="export_diagnostics_running">Exporting diagnostics…</string>

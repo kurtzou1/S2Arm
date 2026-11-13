@@ -14,7 +14,8 @@
 # 每款只留现行 + 上一版（10-19 维护者：磁盘；commit 与取现行时都修剪，#338）。根目录 S2A_ROOTS，缺省 ~/.s2arm/run/s2arm/roots。
 # RomFS 共享存储（11-03 维护者「火纹冷出包 30 分钟」：Switch 2 火纹 RomFS 27.4 万条目，每个阶段开工克隆整棵根、提交后删旧版，Spare-host 上各约 14 秒、7 个阶段累计 3–4 分钟）：
 #   RomFS 是不可变的游戏输入，只有播种与界面布局阶段换它的内容。各版本的 romfs 是指向 $S2A_ROOTS/.romfs_store/<款>/<身份>/ 的相对软链（../.romfs_store/<款>/<身份>），
-#   身份目录整棵只读（chmod a-w：阶段往 romfs 写 / 删 / 建都会 EACCES 响亮失败，改不到共享份）；root_begin 克隆时跳过 romfs、照抄这条软链（不再逐条目克隆），
+#   开发 / 门禁机（S2A_ROMFS_SEAL=1，tools/gate.sh 设）身份目录整棵只读（chmod a-w：阶段往 romfs 写 / 删 / 建都会 EACCES 响亮失败，改不到共享份）；
+#   玩家机缺省不设只读：存储在玩家看得见的游戏库里，只读会让玩家在访达 / 资源管理器里删不掉旧产物（11-12 维护者转玩家反馈：玩家可见目录不能用权限做保护）；root_begin 克隆时跳过 romfs、照抄这条软链（不再逐条目克隆），
 #   提交时 W 里的 romfs 若是真目录（播种、ROOT_OWN_ROMFS=1 开工的阶段、旧格式根克隆来的）就整棵搬进存储成新身份（rename，不拷）；
 #   修剪版本后删没有任何版本（含 .tmp / 重放中的 .tmp.rb）再指向的身份（root_romfs_sweep）。整根往别处复制的读方（tools/clonedir.py 的快照、私有根起步、
 #   ipa.sh 只出程序、rsync 推远端）跟随这条软链拿到真目录，内容与原先逐字节相同。要改 RomFS 的阶段用 ROOT_OWN_ROMFS=1 root_begin 拿一份自己的真目录。
@@ -138,12 +139,16 @@ _root_romfs_intern() {
   st=$(dirname "$w")/$_ROOT_STORE/$g; mkdir -p "$st" || return 1
   id=$(basename "$w"); id=${id#*@}; id=${id%%.tmp*}-$(date +%s); while [ -e "$st/$id" ] || [ -L "$st/$id" ]; do n=$((n + 1)); id=${id%~*}~$n; done
   # 跨目录 rename 一个目录要它自己可写（改 ..）：开工时已只读的（_root_romfs_seal）先只给顶层加回写位，搬完再整棵只读（同权限不动文件 ctime）
-  _root_rm "$w/.romfs.intern"; chmod u+w "$w/romfs" && mv "$w/romfs" "$w/.romfs.intern" && ln -s "../$_ROOT_STORE/$g/$id" "$w/romfs" && chmod u+w "$w/.romfs.intern" && mv "$w/.romfs.intern" "$st/$id" && chmod -R a-w "$st/$id" || return 1
+  _root_rm "$w/.romfs.intern"; chmod u+w "$w/romfs" && mv "$w/romfs" "$w/.romfs.intern" && ln -s "../$_ROOT_STORE/$g/$id" "$w/romfs" && chmod u+w "$w/.romfs.intern" && mv "$w/.romfs.intern" "$st/$id" && _root_romfs_lock "$st/$id" || return 1
+}
+# _root_romfs_lock <身份目录>：S2A_ROMFS_SEAL=1 整棵只读；否则把旧版本留下的只读项加回写位（只动没写位的，已可写的不碰、ctime 不变）
+_root_romfs_lock() {
+  if [ "${S2A_ROMFS_SEAL:-0}" = 1 ]; then chmod -R a-w "$1"; else find "$1" ! -type l ! -perm -u+w -exec chmod u+w {} + ; fi
 }
 # _root_romfs_seal <W.tmp>：从旧格式现行（romfs 是真目录）克隆来的 romfs 开工时就整棵只读（ROOT_OWN_ROMFS=1 的阶段除外）：
 #   阶段照样写不进 RomFS；放在资源键克隆交接之前，交接记下的 ctime 就是只读之后的，提交时收进存储只是 rename、不再改文件，资源键缓存不失效
 _root_romfs_seal() {
-  [ -z "${ROOT_OWN_ROMFS:-}" ] && [ -d "$1/romfs" ] && [ ! -L "$1/romfs" ] || return 0
+  [ "${S2A_ROMFS_SEAL:-0}" = 1 ] && [ -z "${ROOT_OWN_ROMFS:-}" ] && [ -d "$1/romfs" ] && [ ! -L "$1/romfs" ] || return 0   # 只在开发 / 门禁机（见文件头）
   chmod -R a-w "$1/romfs"
 }
 # root_romfs_sweep [款…]：删存储里没有任何版本（现行、旧版、.tmp、重放中的 .tmp.rb）再指向的身份；不给款 = 存储里全部款。

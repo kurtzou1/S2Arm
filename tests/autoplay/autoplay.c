@@ -778,7 +778,8 @@ static int on_path(const char *name) {
         if (!e) break; p = e + 1; }
     return 0;
 }
-// 可用 = 远程信箱，或脚本在、且缺省脚本的后端在本机起得来：cli（缺省）要 PATH 上有 claude；jev / or 要 OpenRouter 钥匙（单测的假脚本不查）
+// 可用 = 远程信箱，或脚本在、且缺省脚本的后端在本机起得来：不设后端 = 自动选（中转站钥匙 + 地址齐了走中转站，否则要 PATH 上有 claude）；relay 要中转站钥匙 + 地址；
+//   cli 要 PATH 上有 claude；jev / or 要 OpenRouter 钥匙（单测的假脚本不查）
 static const char *vision_missing(void) {
     static char why[1200];
     if (g_vis_unavail[0]) { snprintf(why, sizeof why, "%s", g_vis_unavail); return why; }
@@ -786,8 +787,18 @@ static const char *vision_missing(void) {
     if (access(vision_sh(), R_OK) != 0) { snprintf(why, sizeof why, "没有 %s", vision_sh()); return why; }
     const char *vsh = getenv("S2A_VISION_SH"), *vbk = getenv("S2A_VISION_BACKEND");
     if (vsh && *vsh) return NULL;
-    if (!vbk || !*vbk || !strcmp(vbk, "cli")) { if (!on_path("claude")) { snprintf(why, sizeof why, "本机没有 claude CLI（看屏驾驶员缺省走本机 claude CLI 直连；装 Claude Code 并登录，或设 S2A_VISION_BACKEND=or）"); return why; } }
-    else { char k[1100]; snprintf(k, sizeof k, "%s/.s2arm/.secrets/openrouter.key", getenv("HOME") ? getenv("HOME") : ".");
+    const char *home = getenv("HOME") ? getenv("HOME") : ".";
+    char k[1100], u[1100]; const char *ue = getenv("S2A_VISION_RELAY_URL"), *ke = getenv("S2A_VISION_RELAY_KEY");
+    snprintf(k, sizeof k, "%s", ke && *ke ? ke : ""); if (!k[0]) snprintf(k, sizeof k, "%s/.s2arm/.secrets/relay.key", home);
+    snprintf(u, sizeof u, "%s/.s2arm/.secrets/relay.url", home);
+    int relay_ok = access(k, R_OK) == 0 && ((ue && *ue) || access(u, R_OK) == 0);
+    if (!vbk || !*vbk) {   // 不设 = 自动选（同 vision.sh）：有中转站钥匙和地址走中转站，没有退本机 claude CLI；两样都没有才红停
+        if (!relay_ok && !on_path("claude")) { snprintf(why, sizeof why, "没有中转站钥匙和地址（%s / S2A_VISION_RELAY_URL 或 %s），本机也没有 claude CLI（装 Claude Code 并登录）", k, u); return why; } }
+    else if (!strcmp(vbk, "relay")) {
+        if (access(k, R_OK) != 0) { snprintf(why, sizeof why, "S2A_VISION_BACKEND=relay 没有中转站钥匙 %s", k); return why; }
+        if (!relay_ok) { snprintf(why, sizeof why, "S2A_VISION_BACKEND=relay 没有中转站地址（设 S2A_VISION_RELAY_URL，或写进 %s）", u); return why; } }
+    else if (!strcmp(vbk, "cli")) { if (!on_path("claude")) { snprintf(why, sizeof why, "本机没有 claude CLI（S2A_VISION_BACKEND=cli 走本机 claude CLI 直连；装 Claude Code 并登录，或不设后端让它自动选）"); return why; } }
+    else { char k[1100]; snprintf(k, sizeof k, "%s/.s2arm/.secrets/openrouter.key", home);
         if (access(k, R_OK) != 0) { snprintf(why, sizeof why, "S2A_VISION_BACKEND=%s 要 OpenRouter 钥匙，没有 %s", vbk, k); return why; } }
     return NULL;
 }

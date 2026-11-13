@@ -8,6 +8,8 @@
 // Protocol layouts and calibration relations inform this independently implemented lifecycle and threading model.
 // S2Arm contributors 修改（2026）：扫描时长可由 NS2_SCAN_SECONDS 编译期设定；记住的手柄标识可经 S2A_NS2_DEFAULTS_SUITE 存到指定偏好域。
 // Modified by S2Arm contributors (2026): build-time NS2_SCAN_SECONDS scan length; remembered-controller identifier may use the S2A_NS2_DEFAULTS_SUITE defaults domain.
+// S2Arm contributors 修改（2026）：可选主机绑定（ns2_set_bond_host，NS2Bond.c），绑定过本机的手柄按键即可重连。
+// Modified by S2Arm contributors (2026): optional host bonding (ns2_set_bond_host, NS2Bond.c) so a bonded controller reconnects on a button press.
 /*
 MIT License
 Copyright (c) 2026 jhaizhou
@@ -34,6 +36,7 @@ THE SOFTWARE.
 */
 #import <CoreBluetooth/CoreBluetooth.h>
 #include "NS2Transport.h"
+#include <stdatomic.h>
 #include <math.h>
 #include <pthread.h>
 #include <errno.h>
@@ -71,6 +74,23 @@ static NSString *const joyconRightVibrationUUID = @"FA19B0FB-CD1F-46A7-84A1-BBB0
 static NSString *const lastReadyKindKey = @"S2ArmNS2ProLastReadyKind";
 // 拼对要重连两只：左右各记一个就绪过的标识。上面两项仍记「主只」（Pro / 单只就是那一台，拼上一对是左只），旧记录照样认
 static NSString *const lastReadyJoyConKeys[2] = {@"S2ArmNS2ProLastReadyJoyConLeftIdentifier", @"S2ArmNS2ProLastReadyJoyConRightIdentifier"};
+// 主机绑定（「记住这台设备」，#521；ns2_set_bond_host）：只在 BLE 队列读写。bondedKey 记写入绑定成功的外设标识 → 当时写的主机地址（十六进制），
+//   只有记录里的地址等于本机地址的手柄才按「等按键唤醒」直连不设期限；没绑定过的照旧 30 秒期限，免得等一台根本不会来找本机的手柄
+static BOOL bondEnabled;
+static uint8_t bondHost[6];
+static NSString *const bondedKey = @"S2ArmNS2BondedHosts";
+static NSString *bond_host_text(void) { return [NSString stringWithFormat:@"%02x%02x%02x%02x%02x%02x", bondHost[0], bondHost[1], bondHost[2], bondHost[3], bondHost[4], bondHost[5]]; }
+static BOOL bonded_here(NSUUID *identifier) {
+    if (!bondEnabled || !identifier) return NO;
+    NSDictionary *bonded = [controllerDefaults() dictionaryForKey:bondedKey];
+    return [bonded[identifier.UUIDString] isEqual:bond_host_text()];
+}
+static void remember_bonded(NSUUID *identifier) {
+    if (!identifier) return;
+    NSMutableDictionary *bonded = [[controllerDefaults() dictionaryForKey:bondedKey] mutableCopy] ?: [NSMutableDictionary new];
+    bonded[identifier.UUIDString] = bond_host_text();
+    [controllerDefaults() setObject:bonded forKey:bondedKey];
+}
 
 // 调用线程只更新固定 mailbox；CB 对象始终局限于串行队列，不逐请求创建 block。
 // Caller threads only update the fixed mailbox; CB objects stay on one serial queue, without a block per request.
@@ -91,6 +111,8 @@ static ns2_info deviceInfo;
 static ns2_motion latestMotion, latestMotionLeft;
 static ns2_mouse latestMouse[2];   // Joy-Con 2 光学鼠标最近一笔，[0] 左只、[1] 右只（拼成一对时两只各一份），只经 ns2_get_mouse_side 读   // latestMotionLeft：拼对时左只的六轴（latestMotion 是右只的），只经 ns2_get_motion_left 读
 static BOOL motionRequested;
+// 单只 Joy-Con 出原始方向还是横握视角（ns2_set_joycon_raw；缺省横握，同改前）
+static _Atomic int joyconRaw;
 static ns2_state_callback stateCallback;
 static ns2_status_callback statusCallback;
 static ns2_motion_callback motionCallback;
@@ -116,6 +138,8 @@ static void on_queue(dispatch_block_t block) {
     if (dispatch_get_specific(&queueKey)) block(); else dispatch_sync(bleQueue, block);
 }
 
+// 玩家 1 灯（09/07 bitmask）：握手第 7 步与运行中保活共用
+static const uint8_t ledPlayer1[16] = {9, 0x91, 1, 7, 0, 8, 0, 0, 1};
 typedef struct { unsigned center[2], above[2], below[2]; } ns2_calibration;
 static void unpack12(const uint8_t *p, unsigned out[2]) {
     out[0] = p[0] | (p[1] & 15u) << 8; out[1] = p[1] >> 4 | (unsigned)p[2] << 4;
@@ -258,12 +282,18 @@ static NS2Bridge *bridge;
     NSData *pendingCommand;
     BOOL awaitingAck, subscribedResponse, streamReady, sessionFailed, preferReport09, imuEnabled, motionCommand, shutdownSent, shutdownEntered;
     uint64_t deadline, linkStarted, lastRumble, reports, reports09, rumblePackets, effectivePackets, stopPackets;
+    // 连上就别自己断（NS2Keep.c）：lastWrite 最近一次写手柄（指令 / 震动 / 保活）；rumbleOff 这只不写震动；oddLengths 跳过的异常长度通知数
+    uint64_t lastWrite, oddLengths;
+    BOOL rumbleOff;
     const char *waitingFor;
     NS2SoftState softState;
     BOOL pauseWanted, pauseStopPending, resumeCounterKnown, powerSubscribePending;
     uint32_t resumeCounter;
     uint64_t pauseStarted, resumeStarted;
     uint8_t sequence;
+    // 主机绑定：bondWanted = 这次是配对广播连上、要在握手末尾写入绑定；waitsForWake = 绑定过的手柄，直连不设期限等玩家按键
+    BOOL bondWanted, waitsForWake;
+    uint8_t bondKeys[32];
 }
 - (NSUInteger)initializationSteps;
 - (void)tick;
@@ -286,6 +316,8 @@ static NS2Bridge *bridge;
     return owner && (owner->links[0] == self || owner->links[1] == self);
 }
 - (BOOL)canKeep { return streamReady && !sessionFailed && device.state == CBPeripheralStateConnected; }
+// 只是挂着等手柄回来（不设期限的直连，系统还没连上）：不占位——照样能扫描、能接别的手柄（ns2_link_idle）
+- (BOOL)idle { return ns2_link_idle(waitsForWake, streamReady, device.state == CBPeripheralStateConnected); }
 - (void)attach:(CBPeripheral *)peripheral name:(NSString *)name RSSI:(NSNumber *)rssi {
     // 断线后的异步 stop 可能晚于 resetLink；新连接握手前丢弃旧 mailbox。
     // A disconnect's asynchronous stop may follow resetLink; discard the old mailbox before a new handshake.
@@ -305,8 +337,10 @@ static NS2Bridge *bridge;
     device = peripheral; device.delegate = self; sessionFailed = NO;
     // 单独限制系统建立 BLE 链路的等待时间；GATT 发现与命令应答各自计时，不发起标准 SMP 配对。
     // Bound system BLE link establishment separately from GATT discovery and command replies, without initiating standard SMP pairing.
-    linkStarted = now_ns(); deadline = linkStarted + 30ull * NSEC_PER_SEC; waitingFor = "BLE link";
-    LOG("NS2 Pro BLE 连接 id=%s name=%s RSSI=%s state=%ld，链路期限30秒", peripheral.identifier.UUIDString.UTF8String, peripheral.name.UTF8String ?: "unknown", rssi ? rssi.stringValue.UTF8String : "unavailable", (long)peripheral.state);
+    // 绑定过本机的手柄（waitsForWake）：直连不设期限——系统一直挂着连接请求，玩家按任一键手柄唤醒本机就连上，不占扫描
+    linkStarted = now_ns(); deadline = waitsForWake ? 0 : linkStarted + 30ull * NSEC_PER_SEC; waitingFor = waitsForWake ? "controller wake" : "BLE link";
+    LOG("NS2 Pro BLE 连接 id=%s name=%s RSSI=%s state=%ld，%s", peripheral.identifier.UUIDString.UTF8String, peripheral.name.UTF8String ?: "unknown", rssi ? rssi.stringValue.UTF8String : "unavailable", (long)peripheral.state,
+        waitsForWake ? "已绑定本机：等手柄按键唤醒，不设期限" : "链路期限30秒");
     [central connectPeripheral:peripheral options:nil];
 }
 - (void)didConnect {
@@ -329,6 +363,7 @@ static NS2Bridge *bridge;
     softState = NS2SoftRunning; pauseWanted = pauseStopPending = resumeCounterKnown = powerSubscribePending = NO;
     pauseStarted = resumeStarted = 0;
     deadline = linkStarted = lastRumble = reports = reports09 = rumblePackets = effectivePackets = stopPackets = 0; waitingFor = NULL; step = 0; sequence = 0;
+    lastWrite = oddLengths = 0; rumbleOff = NO;
     memset(calibration, 0, sizeof calibration);
     if (affected) emit_state((ns2_state){0});
 }
@@ -447,14 +482,16 @@ static NS2Bridge *bridge;
         if (uuid_is(ch.UUID, commandUUID)) command = ch;
         if (uuid_is(ch.UUID, responseUUID)) response = ch;
     }
+    // 输入、指令、应答三个特征缺一个手柄就出不了输入，只能断开；震动特征缺失或单次写入放不下 42 字节只停震动，输入照常
     if (!input || !(input.properties & CBCharacteristicPropertyNotify) ||
         !response || !(response.properties & CBCharacteristicPropertyNotify) ||
-        !command || !(command.properties & CBCharacteristicPropertyWriteWithoutResponse) ||
-        !vibration || !(vibration.properties & CBCharacteristicPropertyWriteWithoutResponse)) {
-        [self fail:NS2Localized(@"The Pro rumble characteristic or required input/command properties are missing")]; return;
+        !command || !(command.properties & CBCharacteristicPropertyWriteWithoutResponse)) {
+        [self fail:NS2Localized(@"The controller's input or command characteristics are missing")]; return;
     }
-    if ([peripheral maximumWriteValueLengthForType:CBCharacteristicWriteWithoutResponse] < 42) {
-        [self fail:NS2Localized(@"BLE writes without response support fewer than 42 bytes. Rumble reports cannot be split.")]; return;
+    size_t maxWrite = [peripheral maximumWriteValueLengthForType:CBCharacteristicWriteWithoutResponse];
+    if (!ns2_rumble_writable(vibration && (vibration.properties & CBCharacteristicPropertyWriteWithoutResponse), maxWrite)) {
+        rumbleOff = YES;
+        LOG("【红】NS2 Pro BLE 这只手柄不震动（震动特征%s，单次写入 %zu 字节，震动包要 42 字节）；按键、摇杆、体感照常", vibration ? "在" : "缺失", maxWrite);
     }
     LOG("NS2 Pro BLE 特征发现完成，write MTU=%lu，订阅命令响应", (unsigned long)[peripheral maximumWriteValueLengthForType:CBCharacteristicWriteWithoutResponse]);
     deadline = now_ns() + 15ull * NSEC_PER_SEC; waitingFor = "response subscription";
@@ -462,7 +499,11 @@ static NS2Bridge *bridge;
 }
 - (NSString *)vibrationUUIDForKind { return kind == NS2_KIND_JOYCON_L ? joyconLeftVibrationUUID : kind == NS2_KIND_JOYCON_R ? joyconRightVibrationUUID : vibrationUUID; }
 - (BOOL)joycon { return is_joycon(kind); }
-- (NSUInteger)initializationSteps { return 9u; }
+// 握手 9 步；配对广播连上且开了「记住这台设备」时，后面再接 4 步绑定（NS2_BOND_STEPS）
+- (NSUInteger)initializationSteps { return 9u + (bondWanted ? NS2_BOND_STEPS : 0u); }
+- (BOOL)bondStep { return bondWanted && step >= 9u; }
+// 这次握手末尾写入绑定；钥匙主机自选，随机即可（之后用不到）
+- (void)wantBond { bondWanted = YES; arc4random_buf(bondKeys, sizeof bondKeys); }
 // 功能位：Pro 0x2b / 0x2f（带 IMU）；Joy-Con 2 去掉 Pro 才有的 0x08、加上 0x10 光学鼠标 = 0x33 / 0x37（同官方序列）
 - (uint8_t)featureBits:(BOOL)imu { return (uint8_t)(((imu ? 0x2f : 0x2b) & ([self joycon] ? ~0x08 : 0xff)) | ([self joycon] ? 0x10 : 0)); }
 - (NSData *)commandForStep {
@@ -485,11 +526,16 @@ static NS2Bridge *bridge;
             break;
         // 玩家1常亮；采用已公开且在冷启动有效的 09/07 bitmask 命令。
         // Player1 steady light, using the documented 09/07 bitmask command that works on cold start.
-        case 7: bytes[0] = 9; bytes[3] = 7; bytes[5] = 8; bytes[8] = 1; length = 16; break;
+        case 7: memcpy(bytes, ledPlayer1, sizeof ledPlayer1); length = sizeof ledPlayer1; break;
         // 固件内置的连接成功音型，只播放一次；不建立持续震动任务。
         // Play firmware connection sample 3 once, without starting a rumble loop.
         case 8: bytes[0] = 0x0a; bytes[3] = 2; bytes[5] = 4; bytes[8] = 3; length = 12; break;
-        default: return nil;
+        default: {
+            if (![self bondStep]) return nil;
+            uint8_t frame[NS2_BOND_COMMAND_MAX];
+            size_t n = ns2_bond_command((unsigned)(step - 9u), bondHost, bondKeys, bondKeys + 16, frame);
+            return n ? [NSData dataWithBytes:frame length:n] : nil;
+        }
     }
     return [NSData dataWithBytes:bytes length:length];
 }
@@ -561,8 +607,21 @@ static NS2Bridge *bridge;
 - (void)receiveAck:(NSData *)data {
     if (!awaitingAck || data.length < 8) return;
     const uint8_t *p = data.bytes, *request = pendingCommand.bytes;
-    if (p[0] != request[0] || p[3] != request[3]) return;
-    if (p[1] != 1 || p[2] != 1 || (p[5] & 0x7f) != 0x78) { [self fail:NS2Localized(@"Invalid command response direction, transport or acknowledgement")]; return; }
+    if (!motionCommand && [self bondStep]) {
+        // 绑定应答只认指令号（ns2_bond_reply），不按握手指令的方向 / 0x78 校验
+        if (!ns2_bond_reply(p, data.length)) return;
+        LOG("NS2 Pro BLE 绑定 %lu/%u：0x15/%02x 已应答 len=%lu", (unsigned long)(step - 8u), (unsigned)NS2_BOND_STEPS, request[3], (unsigned long)data.length);
+        step++; awaitingAck = NO; pendingCommand = nil; deadline = 0;
+        if (step == [self initializationSteps]) {
+            remember_bonded(device.identifier);
+            LOG("NS2 Pro BLE 已绑定本机：之后按手柄任一键即可重连（接回其他主机后要再长按 SYNC）");
+            [self subscribeInput];
+        } else [self tick];
+        return;
+    }
+    if (!ns2_ack_matches(p, data.length, request, pendingCommand.length)) return;
+    // 参考实现认应答只看指令号；方向 / 传输 / 第 5 字节不是常见值也照收，记一笔（以前这里直接断开）
+    if (!ns2_ack_usual(p, data.length)) LOG("NS2 Pro BLE 应答字节不常见 cmd=%02x/%02x b1=%02x b2=%02x b5=%02x，照常继续", p[0], p[3], p[1], p[2], p[5]);
     if (motionCommand) {
         imuEnabled = request[3] == 4;
         LOG("NS2 Pro BLE IMU %s：运行时命令已确认", imuEnabled ? "开启" : "关闭");
@@ -570,27 +629,46 @@ static NS2Bridge *bridge;
         [self tick]; return;
     }
     if (step == 1 || step == 2) {
+        // 长度 / 地址对不上：多半是上一次读取迟到的应答，不当成这次的，接着等（等不到由超时补缺省校准）
         if (data.length < 80 || le32(p + 8) != 0x40 || le32(p + 12) != le32(request + 12)) {
-            [self fail:NS2Localized(@"The factory calibration response length or read address does not match")]; return;
+            LOG("NS2 Pro BLE 校准应答对不上（len=%lu addr=%08x），忽略这条接着等", (unsigned long)data.length, data.length >= 16 ? le32(p + 12) : 0); return;
         }
         ns2_calibration *cal = &calibration[step - 1]; const uint8_t *record = p + 16 + 0x28;
         unpack12(record, cal->center); unpack12(record + 3, cal->above); unpack12(record + 6, cal->below);
-        for (unsigned axis = 0; axis < 2; axis++) if (!cal->center[axis] || !cal->above[axis] || !cal->below[axis] ||
-            cal->center[axis] + cal->above[axis] > 4095 || cal->below[axis] > cal->center[axis]) {
-            [self fail:NS2Localized(@"Factory stick calibration is invalid. Estimated centers and ranges are not used.")]; return;
-        }
-        LOG("NS2 Pro BLE calibration side=%lu center=%u,%u above=%u,%u below=%u,%u", (unsigned long)step - 1,
+        if (!ns2_calibration_valid(cal->center, cal->above, cal->below)) {
+            LOG("【红】NS2 Pro BLE 工厂摇杆校准不合格 side=%lu center=%u,%u above=%u,%u below=%u,%u：改用缺省中心 %u、行程 %u，照常连接", (unsigned long)step - 1,
+                cal->center[0], cal->center[1], cal->above[0], cal->above[1], cal->below[0], cal->below[1], NS2_CAL_DEFAULT_CENTER, NS2_CAL_DEFAULT_TRAVEL);
+            ns2_calibration_default(cal->center, cal->above, cal->below);
+        } else LOG("NS2 Pro BLE calibration side=%lu center=%u,%u above=%u,%u below=%u,%u", (unsigned long)step - 1,
             cal->center[0], cal->center[1], cal->above[0], cal->above[1], cal->below[0], cal->below[1]);
     }
     LOG("NS2 Pro BLE ACK step=%lu cmd=%02x/%02x len=%lu", (unsigned long)step, p[0], p[3], (unsigned long)data.length);
     if (step == 6) imuEnabled = (request[8] & 4) != 0;
+    [self nextStep];
+}
+- (void)nextStep {
     step++; awaitingAck = NO; pendingCommand = nil; deadline = 0;
     if (step == 2 && [self joycon]) { calibration[1] = calibration[0]; step = 3; }   // Joy-Con 2 左右都只有主校准（0x13080），不读 0x130C0（右只读它会校验失败）
-    if (step == [self initializationSteps]) {
-        deadline = now_ns() + 5ull * NSEC_PER_SEC; waitingFor = "input subscription";
-        [device setNotifyValue:YES forCharacteristic:input]; [bridge scheduleTimer];
-    }
+    if (step == [self initializationSteps]) [self subscribeInput];
     else [self tick];
+}
+// 握手这一步等不到应答：不是必需的步骤就跳过往下走（校准读取用缺省值），只记日志；参考实现不发这些也能用
+- (void)skipStep {
+    const uint8_t *cmd = pendingCommand.length >= 4 ? pendingCommand.bytes : (const uint8_t[4]){0};
+    LOG("【红】NS2 Pro BLE 握手第 %lu 步（%02x/%02x）没有应答：跳过，照常连接%s", (unsigned long)step, cmd[0], cmd[3],
+        step == 1 || step == 2 ? "（这根摇杆用缺省校准）" : "");
+    if (step == 1 || step == 2) ns2_calibration_default(calibration[step - 1].center, calibration[step - 1].above, calibration[step - 1].below);
+    [self nextStep];
+}
+- (void)subscribeInput {
+    deadline = now_ns() + 5ull * NSEC_PER_SEC; waitingFor = "input subscription";
+    [device setNotifyValue:YES forCharacteristic:input]; [bridge scheduleTimer];
+}
+// 绑定没做完（应答超时 / 没写出去）：只记日志，连接照常可用，下次长按 SYNC 再试（不拦玩家）
+- (void)skipBond:(const char *)why {
+    LOG("【红】NS2 Pro BLE 绑定未完成（%s，停在 %lu/%u）：这次照常使用，下次仍要长按 SYNC 才能连", why, (unsigned long)(step - 8u), (unsigned)NS2_BOND_STEPS);
+    bondWanted = NO; awaitingAck = NO; pendingCommand = nil;
+    [self subscribeInput];
 }
 - (void)peripheral:(CBPeripheral *)peripheral didUpdateValueForCharacteristic:(CBCharacteristic *)ch error:(NSError *)error {
     NS2Link *hold __attribute__((objc_precise_lifetime)) = self; (void)hold;
@@ -618,12 +696,16 @@ static NS2Bridge *bridge;
         if (streamReady) [self publishInput:powerData report:9];
         return;
     }
-    if (error) { [self fail:[NSString stringWithFormat:NS2Localized(@"Notification read failed: %@"), error.localizedDescription]]; return; }
+    // 单条通知读错 / 为空 / 长度不对只跳过这一条（更长的是同一特征上的音频包），不断开整只手柄
+    if (error) { LOG("NS2 Pro BLE 通知读取出错，跳过这一条：%s", error.localizedDescription.UTF8String ?: "unknown"); return; }
     NSData *data = ch.value;
-    if (!data) { [self fail:NS2Localized(@"Notification data is empty")]; return; }
+    if (!data) return;
     if (ch == response) { [self receiveAck:data]; return; }
     if (ch != input || !streamReady) return;
-    if (data.length < 63) { [self fail:[NSString stringWithFormat:NS2Localized(@"Report05 has %lu bytes; at least 63 are required"), (unsigned long)data.length]]; return; }
+    if (!ns2_input_length_ok(data.length)) {
+        if (oddLengths++ % 500 == 0) LOG("NS2 Pro BLE 跳过长度 %lu 的输入通知（只认 %u..%u 字节），累计 %llu 条", (unsigned long)data.length, NS2_INPUT_MIN, NS2_INPUT_MAX, (unsigned long long)oddLengths);
+        return;
+    }
     if (softState == NS2SoftFreshInput) {
         uint32_t counter = le32(data.bytes);
         if (!resumeCounterKnown) {
@@ -661,7 +743,7 @@ static NS2Bridge *bridge;
         // 部分固件的设备时钟不可靠；对外用接收时的单调时钟，设备值保留用于诊断。
         // Some firmware has unreliable device timestamps; export monotonic arrival time and retain the device value for diagnostics.
         motion.host_timestamp_us = now_ns() / 1000;
-        if (!paired) ns2_joycon_sideways_motion(kind, &motion);   // 单只 Joy-Con 2：换成横握视角；Pro 不动
+        if (!paired && !atomic_load(&joyconRaw)) ns2_joycon_sideways_motion(kind, &motion);   // 单只 Joy-Con 2：换成横握视角（原始方向时不转，宿主按游戏样式转）；Pro 不动
         latestMotion = motion;
     }
     // 拼对时左只的六轴另存（不经回调、不转向）：Mac 启动器通道 INPUT 包的 motion_left 带给宿主，游戏的左手传感器用它（手柄当车把左右一起倾斜时，左右两只坐标相反，
@@ -679,15 +761,14 @@ static NS2Bridge *bridge;
     if (headsetChanged) LOG("NS2 Pro BLE 耳机插入：%s（仅插入检测，未实现音频流）", headsetConnected ? "是" : "否");
     if (publishMotion && motion.known) motionCallback(&motion, callbackContext);
     if (![self live]) return;
-    if (!valid) {
-        [self fail:NS2Localized(@"Report05 battery fields could not be decoded")]; return;
-    }
+    if (!valid) LOG("NS2 Pro BLE report05 电量字段解不出，照常出输入");
     if (!preferReport09) [self publishInput:data report:5];
 }
 - (void)publishInput:(NSData *)data report:(unsigned)reportID {
     ns2_raw_input decoded;
     if (!ns2_decode_input_report(reportID, data.bytes, data.length, &decoded)) {
-        [self fail:[NSString stringWithFormat:NS2Localized(@"Report%02x input has %lu bytes; at least 63 are required"), reportID, (unsigned long)data.length]]; return;
+        if (oddLengths++ % 500 == 0) LOG("NS2 Pro BLE report%02x 解不出（%lu 字节），跳过这一条", reportID, (unsigned long)data.length);
+        return;
     }
     if (reportID == 9 && !preferReport09) {
         preferReport09 = YES;
@@ -715,8 +796,10 @@ static NS2Bridge *bridge;
         BOOL paired = pair_locked();
         ns2_state mine = state, other = linkShared[slot ^ 1].last;
         pthread_mutex_unlock(&stateMu);
+        int side = paired ? 0 : ns2_decode_side_buttons(data.bytes, data.length);
         if (paired) ns2_joycon_pair_state(kind == NS2_KIND_JOYCON_L ? &mine : &other, kind == NS2_KIND_JOYCON_L ? &other : &mine, &state);
-        else ns2_joycon_sideways(kind, ns2_decode_side_buttons(data.bytes, data.length), &state);
+        else if (atomic_load(&joyconRaw)) ns2_joycon_raw(kind, side, &state);
+        else ns2_joycon_sideways(kind, side, &state);
     }
     emit_state(state);
 }
@@ -724,6 +807,8 @@ static NS2Bridge *bridge;
 // 本链路对下次计时的贡献（调用方持有 stateMu）：握手期限之外，只有活动震动与停止 / 关闭零包需要定时。
 - (void)rumbleDueLocked:(uint64_t *)next now:(uint64_t)now {
     if (!streamReady || sessionFailed) return;
+    // 保活到点（条件同 processEvents，不可写 / 指令在途时不排，免得过期的到点时刻让计时器空转；可写回调与应答会再 tick）
+    if (softState == NS2SoftRunning && !terminal && !awaitingAck && !pendingCommand && device.canSendWriteWithoutResponse) { uint64_t keep = lastWrite + NS2_KEEPALIVE_NS; if (!*next || keep < *next) *next = keep; }
     unsigned owned = owned_sides_locked(slot);
     BOOL repeating = (wantedMask & owned) != 0;
     for (unsigned side = 0; side < 2; side++)
@@ -738,6 +823,9 @@ static NS2Bridge *bridge;
     if (![self live]) return;
     uint64_t now = now_ns();
     if (sessionFailed) return;
+    if (deadline && now >= deadline && !streamReady && [self bondStep] && !motionCommand) { [self skipBond:"手柄没有应答"]; return; }
+    BOOL handshaking = !streamReady && subscribedResponse && !motionCommand && step < [self initializationSteps] && pendingCommand;
+    if (deadline && now >= deadline && handshaking && !ns2_step_required((unsigned)step)) { [self skipStep]; return; }
     if (deadline && now >= deadline) {
         [self fail:[NSString stringWithFormat:@"Timed out waiting for %s (peripheral state %ld, command step %lu)", waitingFor ?: "initialization", (long)device.state, (unsigned long)step]];
         return;
@@ -746,10 +834,13 @@ static NS2Bridge *bridge;
     pthread_mutex_lock(&stateMu); BOOL stopped = terminal; pthread_mutex_unlock(&stateMu);
     if (!streamReady) {
         if (stopped || !subscribedResponse || awaitingAck || step >= [self initializationSteps]) return;
-        if (!pendingCommand) { pendingCommand = [self commandForStep]; deadline = now + NSEC_PER_SEC; waitingFor = "command write readiness"; }
+        // 每条握手指令等 2 秒（参考实现同为 2 秒；原来普通指令 1 秒、绑定指令 2 秒）
+        if (!pendingCommand) { pendingCommand = [self commandForStep]; deadline = now + 2 * NSEC_PER_SEC; waitingFor = "command write readiness"; }
+        if (!pendingCommand) { [self skipBond:"绑定指令没生成出来"]; return; }
         if (!device.canSendWriteWithoutResponse) return;
         [device writeValue:pendingCommand forCharacteristic:command type:CBCharacteristicWriteWithoutResponse];
-        awaitingAck = YES; deadline = now + NSEC_PER_SEC; waitingFor = "command acknowledgement"; return;
+        lastWrite = now;
+        awaitingAck = YES; deadline = now + 2 * NSEC_PER_SEC; waitingFor = "command acknowledgement"; return;
     }
     if (!stopped) [self advanceSoftState];
     if (![self live]) return;
@@ -765,8 +856,15 @@ static NS2Bridge *bridge;
         }
         if (device.canSendWriteWithoutResponse) {
             [device writeValue:pendingCommand forCharacteristic:command type:CBCharacteristicWriteWithoutResponse];
+            lastWrite = now;
             awaitingAck = YES; deadline = pauseWanted ? 0 : now + (softState == NS2SoftDraining ? 15ull * NSEC_PER_SEC : NSEC_PER_SEC); waitingFor = "IMU command acknowledgement";
         }
+    }
+    // 保活：运行中空闲 NS2_KEEPALIVE_NS 没写过手柄，就写一次玩家 1 灯（同握手第 7 步）。参考实现记录主机约 10 秒不写入链路就断，
+    //   它每秒写一次玩家灯；本传输不震动时原本完全不写。应答不占指令通道（awaitingAck 不置），迟到的应答按指令号对不上会被忽略
+    if (!stopped && softState == NS2SoftRunning && !awaitingAck && !pendingCommand && device.canSendWriteWithoutResponse && ns2_keepalive_due(lastWrite, now)) {
+        [device writeValue:[NSData dataWithBytes:ledPlayer1 length:sizeof ledPlayer1] forCharacteristic:command type:CBCharacteristicWriteWithoutResponse];
+        lastWrite = now;
     }
     pthread_mutex_lock(&stateMu);
     // 本链路只处理自己负责的侧（Pro / 单只是两侧，与改前相同）。
@@ -796,7 +894,8 @@ static NS2Bridge *bridge;
     for (unsigned side = 0; side < 2; side++)
         if ((stopping & (1u << side)) || !(owned & (1u << side)) || !active || terminal) values[side] = (ns2_vibration){0};
     uint8_t packet[42]; ns2_encode_rumble_for(kind, values, sequence, rumbleGain, packet);
-    [device writeValue:[NSData dataWithBytes:packet length:sizeof packet] forCharacteristic:vibration type:CBCharacteristicWriteWithoutResponse];
+    // rumbleOff：这只手柄写不了震动包，节奏、停止和关闭的记账照走（关闭等的零包按「已交出」销账），只是不写
+    if (!rumbleOff) { [device writeValue:[NSData dataWithBytes:packet length:sizeof packet] forCharacteristic:vibration type:CBCharacteristicWriteWithoutResponse]; lastWrite = now; }
     ns2_rumble_amplitudes left = ns2_rumble_amplitude_codes(values[0], rumbleGain);
     ns2_rumble_amplitudes right = ns2_rumble_amplitude_codes(values[1], rumbleGain);
     unsigned submitted = (left.low || left.high ? 1u : 0u) | (right.low || right.high ? 2u : 0u);
@@ -862,9 +961,13 @@ static NS2Bridge *bridge;
     return nil;
 }
 // 接下来还接不接设备：一台都没有时什么都接；只有一只 Joy-Con 时只接另一侧；Pro 连着或已凑齐两只就不再接（Pro 优先，一次只服务一台 Pro 或一对 / 一只 Joy-Con）。
+// 占位的链路：挂着等手柄回来的不算（见 NS2Link idle）
+- (NS2Link *)activeLink:(unsigned)i { NS2Link *link = links[i]; return link && ![link idle] ? link : nil; }
 - (BOOL)accepts:(ns2_kind)found peripheral:(CBPeripheral *)peripheral {
     if (found == NS2_KIND_NONE) return NO;
-    NS2Link *a = links[0], *b = links[1];
+    // 挂着等的就是这一台：交给那条直连，系统看到它可连的广播会自己连上
+    for (unsigned i = 0; i < 2; i++) if (links[i] && [links[i] idle] && [links[i]->device.identifier isEqual:peripheral.identifier]) return NO;
+    NS2Link *a = [self activeLink:0], *b = [self activeLink:1];
     if (!a && !b) return YES;
     if (a && b) return NO;
     NS2Link *only = a ?: b;
@@ -874,12 +977,25 @@ static NS2Bridge *bridge;
 // 能否（继续）扫描：没有链路，或只有一只 Joy-Con（已就绪或还在连）缺另一侧。
 //   还在连也要扫：重连记住的那只时它可能没开机（直连要等 30 秒才超时），这段时间另一侧照样能被找到；accepts 只收缺的那一侧
 - (BOOL)wantsAnotherDevice {
-    NS2Link *a = links[0], *b = links[1];
+    NS2Link *a = [self activeLink:0], *b = [self activeLink:1];
     if (!a && !b) return YES;
+    if ([self bondUpgradePending]) return YES;
     if (a && b) return NO;
     NS2Link *only = a ?: b;
     return ns2_scan_wants_other_side(only->kind, only->streamReady, only->sessionFailed);
 }
+// 开了绑定、还挂着一条直连记住的外设但它没绑定过本机：扫描照样开着，看到它长按 SYNC 的配对广播就给这条链路补上绑定
+//   （直连本身不知道这次是不是配对；不扫描就永远等不到绑定的机会）
+- (NS2Link *)bondUpgradeFor:(CBPeripheral *)peripheral {
+    if (!bondEnabled) return nil;
+    for (unsigned i = 0; i < 2; i++) {
+        NS2Link *link = links[i];
+        if (!link || link->streamReady || link->sessionFailed || link->bondWanted || link->step >= 9u) continue;
+        if (peripheral ? [link->device.identifier isEqual:peripheral.identifier] : !bonded_here(link->device.identifier)) return link;
+    }
+    return nil;
+}
+- (BOOL)bondUpgradePending { return [self bondUpgradeFor:nil] != nil; }
 // 对外状态：没有其他在用链路时原样转发（Pro / 单只 / 两只都还没就绪，与改前同一条路径）。
 // 另一只 Joy-Con 正在出输入时，非 READY 状态只记日志——iOS 按钮与 Mac 连接进程见到非 READY 会把整个手柄当成断开。
 // 扫描类状态（link 为 nil）在已有链路时同样只记日志：那是在给已连上的一只找另一侧。
@@ -944,7 +1060,13 @@ static NS2Bridge *bridge;
     ns2_kind kind = savedKind == NS2_KIND_JOYCON_L || savedKind == NS2_KIND_JOYCON_R ? (ns2_kind)savedKind : NS2_KIND_PRO;   // 旧版只记 Pro
     if (kind == NS2_KIND_PRO) {
         CBPeripheral *known = identifier ? [self knownPeripheral:identifier] : nil;
-        if (known) { [self connectPeripheral:known name:known.name RSSI:nil kind:kind]; return; }
+        if (known) {
+            [self connectPeripheral:known name:known.name RSSI:nil kind:kind];
+            if (self != bridge || ![self bondUpgradePending]) return;
+            LOG("NS2 Pro BLE 记住的手柄还没绑定本机：直连的同时扫描 %u 秒，长按 SYNC 即写入绑定", (unsigned)NS2_SCAN_SECONDS);
+            scanRequested = YES; [self scan];
+            return;
+        }
     } else {
         // Joy-Con 2：左右各记一个标识，两只都直连（一只连不上不影响另一只）；只有旧记录（一个标识 + 型号）时按那一只
         BOOL any = NO;
@@ -981,7 +1103,8 @@ static NS2Bridge *bridge;
 }
 - (int)rescan {
     pthread_mutex_lock(&stateMu); BOOL stopped = terminal; pthread_mutex_unlock(&stateMu);
-    if (self != bridge || stopped || links[0] || links[1]) return 0;
+    // 只剩挂着等手柄回来的链路时照样能重新扫描（换一台、或那台已改连别的主机要长按 SYNC），等着的直连不撤
+    if (self != bridge || stopped || [self activeLink:0] || [self activeLink:1]) return 0;
     if (central.state != CBManagerStatePoweredOn && central.state != CBManagerStateUnknown && central.state != CBManagerStateResetting) {
         emit_status(NS2_STATUS_UNAVAILABLE, [NSString stringWithFormat:NS2Localized(@"Bluetooth unavailable (state %ld). Check Bluetooth power and permission."), (long)central.state]);
         return 0;
@@ -1118,21 +1241,44 @@ static NS2Bridge *bridge;
     for (CBUUID *uuid in advertisement[CBAdvertisementDataServiceUUIDsKey]) if (found == NS2_KIND_NONE)
         found = uuid_is(uuid, vibrationUUID) ? NS2_KIND_PRO : uuid_is(uuid, joyconLeftVibrationUUID) ? NS2_KIND_JOYCON_L : uuid_is(uuid, joyconRightVibrationUUID) ? NS2_KIND_JOYCON_R : NS2_KIND_NONE;
     // 认得出型号的广播每台记一次：实机报「另一只连不上」时，看得出它有没有被扫到、为什么没接（accepts）
+    // 广播里手柄要唤醒的主机：长按 SYNC 是配对广播（主机全 0）；按键唤醒时是它记着的主机（#521）
+    ns2_wake wake = ns2_advert_wake(m, manufacturer.length, bondEnabled ? bondHost : NULL);
     if (found != NS2_KIND_NONE) {
         static NSMutableSet<NSUUID *> *seen;
         if (!seen) seen = [NSMutableSet new];
         if (![seen containsObject:peripheral.identifier]) {
             [seen addObject:peripheral.identifier];
-            LOG("NS2 扫到手柄广播 id=%s kind=%d RSSI=%d accepts=%d", peripheral.identifier.UUIDString.UTF8String, found, rssi.intValue, [self accepts:found peripheral:peripheral]);
+            static const char *const wakeNames[] = {"未知", "配对广播", "唤醒本机", "唤醒其他主机"};
+            LOG("NS2 扫到手柄广播 id=%s kind=%d RSSI=%d accepts=%d wake=%s", peripheral.identifier.UUIDString.UTF8String, found, rssi.intValue, [self accepts:found peripheral:peripheral], wakeNames[wake]);
         }
+    }
+    NS2Link *upgrade = wake == NS2_WAKE_PAIRING ? [self bondUpgradeFor:peripheral] : nil;
+    if (upgrade) {
+        [upgrade wantBond];
+        LOG("NS2 Pro BLE 记住的手柄正在长按 SYNC：这次握手末尾写入本机绑定");
+        if (![self wantsAnotherDevice]) [self stopScanning];
+        return;
     }
     if (![self accepts:found peripheral:peripheral]) return;   // 已有一只 Joy-Con 时只接另一侧
     NSNumber *connectable = advertisement[CBAdvertisementDataIsConnectable];
     if (connectable && !connectable.boolValue) return;
+    // 扫到要接的另一台：撤掉挂着等的直连、腾出槽位（玩家换了手柄）。Joy-Con 只撤同侧的，另一侧照样等
+    for (unsigned i = 0; i < 2; i++) {
+        NS2Link *waiting = links[i];
+        if (!waiting || ![waiting idle] || (is_joycon(found) && is_joycon(waiting->kind) && waiting->kind != found)) continue;
+        LOG("NS2 Pro BLE 扫到另一台手柄：不再等 id=%s", waiting->device.identifier.UUIDString.UTF8String);
+        [self dropLink:waiting];
+        if (self != bridge) return;
+    }
     [retryAfter removeObjectForKey:peripheral.identifier];
-    [self connectPeripheral:peripheral name:peripheral.name ?: advertisement[CBAdvertisementDataLocalNameKey] RSSI:rssi kind:found];
+    [self connectPeripheral:peripheral name:peripheral.name ?: advertisement[CBAdvertisementDataLocalNameKey] RSSI:rssi kind:found wake:wake];
 }
 - (void)connectPeripheral:(CBPeripheral *)peripheral name:(NSString *)name RSSI:(NSNumber *)rssi kind:(ns2_kind)found {
+    [self connectPeripheral:peripheral name:name RSSI:rssi kind:found wake:NS2_WAKE_UNKNOWN];
+}
+// wake：扫描到的广播里手柄要唤醒谁（ns2_advert_wake）；直连记住的外设时为 UNKNOWN。
+//   配对广播（PAIRING）+ 开了绑定 → 握手末尾写入绑定；直连绑定过本机的外设 → 不设期限等按键唤醒
+- (void)connectPeripheral:(CBPeripheral *)peripheral name:(NSString *)name RSSI:(NSNumber *)rssi kind:(ns2_kind)found wake:(ns2_wake)wake {
     if (self != bridge || ![self accepts:found peripheral:peripheral] || central.state != CBManagerStatePoweredOn) return;
     pthread_mutex_lock(&stateMu); BOOL stopped = terminal; pthread_mutex_unlock(&stateMu);
     if (stopped) return;
@@ -1148,6 +1294,8 @@ static NS2Bridge *bridge;
     }
     NS2Link *link = [[NS2Link alloc] initWithSlot:slot kind:found central:central];
     links[slot] = link;
+    if (bondEnabled && wake == NS2_WAKE_PAIRING) [link wantBond];
+    link->waitsForWake = wake == NS2_WAKE_UNKNOWN && bonded_here(peripheral.identifier);
     [link attach:peripheral name:name RSSI:rssi];
     [self scheduleTimer];
     [self report:NS2_STATUS_CONNECTING message:NS2Localized(@"Connecting to Switch 2 Pro") from:link];
@@ -1178,11 +1326,25 @@ static NS2Bridge *bridge;
     LOG("%sNS2 Pro BLE 断开 mono_ms=%.3f soft=%u pause_elapsed_ms=%.3f domain=%s code=%ld：%s；输入和震动状态已丢弃",
         error ? "【红】" : "", disconnectedAt / 1e6, link->softState, link->pauseStarted ? (disconnectedAt - link->pauseStarted) / 1e6 : 0,
         error.domain.UTF8String ?: "none", (long)error.code, error.localizedDescription.UTF8String ?: "连接结束");
+    // 用着的手柄断开（休眠、走远、关机、信号断）：重新挂上不设期限的直连，手柄回来（绑定过本机的按任一键）系统就连上，不用玩家再点连接。
+    //   没绑定过本机的也挂（以前只挂绑定过的）：链路掉了但手柄还开着、回到范围内就接回；挂着等不占位，玩家照样能重新扫描或换一台。
+    //   握手失败（fail 主动断开，sessionFailed）不重挂，免得反复连上又失败
+    ns2_kind lostKind = link->kind;
+    BOOL rearm = ns2_rearm_after_disconnect(link->streamReady, link->sessionFailed);
     BOOL wasPair = [self removeLink:link];
     if (self != bridge) return;
     [self report:NS2_STATUS_DISCONNECTED message:error.localizedDescription ?: NS2Localized(@"Controller disconnected") from:link];
     if (self != bridge) return;
     if (wasPair) { [self pairBroke]; if (self != bridge) return; }
+    pthread_mutex_lock(&stateMu); BOOL stopped = terminal; pthread_mutex_unlock(&stateMu);
+    if (rearm && !stopped && ![self linkForPeripheral:peripheral]) {
+        BOOL bonded = bonded_here(peripheral.identifier);
+        LOG("NS2 Pro BLE 用着的手柄断开：挂上直连等它回来%s", bonded ? "（已绑定本机：按任一键即接回）" : "（没绑定本机：回到范围内即接回；关机后要长按 SYNC）");
+        [self connectPeripheral:peripheral name:peripheral.name RSSI:nil kind:lostKind];
+        if (self != bridge) return;
+        NS2Link *again = [self linkForPeripheral:peripheral];
+        if (again && !again->waitsForWake) { again->waitsForWake = YES; again->deadline = 0; again->waitingFor = "controller return"; }
+    }
     [self scheduleTimer];
 }
 - (void)tick {
@@ -1274,6 +1436,14 @@ int ns2_start_with_motion(ns2_state_callback state, ns2_status_callback status, 
     });
     return accepted;
 }
+void ns2_set_bond_host(const uint8_t *host) {
+    on_queue(^{
+        bondEnabled = host != NULL;
+        if (host) memcpy(bondHost, host, sizeof bondHost); else memset(bondHost, 0, sizeof bondHost);
+        if (host) LOG("NS2 Pro BLE 记住这台设备：开（长按 SYNC 连上的手柄会写入本机地址）");
+    });
+}
+void ns2_set_joycon_raw(int raw) { atomic_store(&joyconRaw, raw ? 1 : 0); }
 void ns2_set_motion_enabled(int enabled) {
     pthread_mutex_lock(&stateMu);
     BOOL next = enabled && !terminal;

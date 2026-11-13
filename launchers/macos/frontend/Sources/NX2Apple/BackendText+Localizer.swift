@@ -4,6 +4,8 @@ import NXModel
 import S2ArmAppleAdapter
 
 extension Localizer {
+    /// 报错页的「故障报修」指引（BackendText.reportHint，按界面语言）
+    nonisolated var reportHint: String { BackendText.reportHint(language: lang == .zh ? "zh-Hans" : "en") }
     /// 一句作业层文字在当前界面语言下的显示。
     nonisolated func backend(_ text: String) -> String {
         BackendText.translate(text, language: lang == .zh ? "zh-Hans" : "en")

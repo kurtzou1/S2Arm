@@ -63,40 +63,34 @@ namespace S2A.Services
             return SystemLanguage.AmericanEnglish;
         }
 
-        // 游戏不支持系统语言时依次试的语言（交 Ryujinx GetDesiredLanguage，S2AHooks.TitleLanguageFallback）。只看宿主主语言 primary
-        //   （Host.Language：玩家显式指定的语言优先，否则宿主首选列表第一项；维护者 11-10「导出终端根据咱们宿主来识别语言种类」），不逐个走首选列表：
-        //   ① 主语言 → ② 它的同族变体（简中 ↔ 繁中、美式 ↔ 英式英语、法语 ↔ 加拿大法语、西班牙语 ↔ 拉美西语、葡语 ↔ 巴西葡语）→ ③ 美式 / 英式英语 → ④ 简中 / 繁中 → ⑤ 游戏支持表第一项（上游）。
-        //   ④ 留住 11-03 的修法（亚洲版只收韩 / 繁 / 简，上游取第一个 = 韩语）：玩家绝大多数是中文用户，宿主英语也多半是中文玩家设的英文系统，简 / 繁比韩语更可能看得懂。
-        //   同族紧跟是真机 ns 服务语言优先表的口径（逆向资料：简中表 = 简中、繁中、美式英语、英式英语、日语…）。
-        //   #445：游戏只声明美 / 日 / 韩 / 繁（0x3005），旧拼法「首选列表逐个 → 简中 → 繁中」让首选列表后面的日语 / 英语先于繁中命中，中文玩家看到日文 / 英文
+        // 游戏语言的缺省（维护者 11-13：「玩家没单独指定时，游戏语言跟宿主 App / 启动器的界面语言一致」）：界面语言标签（iOS 壳按实际显示的字符串表写、
+        //   Mac 启动器按自己的界面语言给，都经 S2A_UI_LANGUAGE）映射得出就用它；没给 / 认不出才退回系统首选语言（旧行为）。
+        //   显式指定（S2A_SYSTEM_LANGUAGE）在调用方先判，不经这里
+        public static SystemLanguage FromUi(string uiTag, string[] preferred, out string why)
+        {
+            if (Map(uiTag) is SystemLanguage ui)
+            {
+                why = $"界面语言 {uiTag}";
+                return ui;
+            }
+
+            SystemLanguage d = FromPreferred(preferred, out string w);
+            why = string.IsNullOrEmpty(uiTag) ? w : $"界面语言 {uiTag} 认不出，{w}";
+            return d;
+        }
+
+        // 游戏不支持主语言时依次试的语言（交 Ryujinx GetDesiredLanguage，S2AHooks.TitleLanguageFallback）。只看宿主主语言 primary（Host.Language）：
+        //   维护者 11-13：「这款游戏不支持该语言就落到英文；英文也没有才用游戏自己的默认」「繁体对繁体、简体对简体，不要互相落」。
+        //   ① 主语言 → ② 英语：美式、英式（主语言是英式时 ① 已试过） → ③ 都没有：游戏支持表第一项（上游，PickFallbackLanguage）。
+        //   取代 11-03 / #445 的「同族变体（简 ↔ 繁）→ 英语 → 简中 / 繁中」：简中玩家遇到只有繁中的游戏不再落繁中，落英语
         public static TitleLanguage[] TitleFallback(SystemLanguage primary)
         {
             var r = new System.Collections.Generic.List<TitleLanguage>();
             void Add(TitleLanguage t) { if (!r.Contains(t)) r.Add(t); }
-            if (Enum.TryParse(primary.ToString(), out TitleLanguage p))
-            {
-                Add(p);
-                if (Sibling(p) is TitleLanguage s) Add(s);
-            }
+            if (Enum.TryParse(primary.ToString(), out TitleLanguage p)) Add(p);
             Add(TitleLanguage.AmericanEnglish); Add(TitleLanguage.BritishEnglish);
-            Add(TitleLanguage.SimplifiedChinese); Add(TitleLanguage.TraditionalChinese);
             return r.ToArray();
         }
-
-        public static TitleLanguage? Sibling(TitleLanguage t) => t switch
-        {
-            TitleLanguage.SimplifiedChinese => TitleLanguage.TraditionalChinese,
-            TitleLanguage.TraditionalChinese => TitleLanguage.SimplifiedChinese,
-            TitleLanguage.AmericanEnglish => TitleLanguage.BritishEnglish,
-            TitleLanguage.BritishEnglish => TitleLanguage.AmericanEnglish,
-            TitleLanguage.French => TitleLanguage.CanadianFrench,
-            TitleLanguage.CanadianFrench => TitleLanguage.French,
-            TitleLanguage.Spanish => TitleLanguage.LatinAmericanSpanish,
-            TitleLanguage.LatinAmericanSpanish => TitleLanguage.Spanish,
-            TitleLanguage.Portuguese => TitleLanguage.BrazilianPortuguese,
-            TitleLanguage.BrazilianPortuguese => TitleLanguage.Portuguese,
-            _ => null,
-        };
 
         public static string[] Preferred()
         {

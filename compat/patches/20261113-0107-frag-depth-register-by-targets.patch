@@ -1,0 +1,27 @@
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+index 382b6c25d2dfad2a51dcc5ee733b02b33262a8a1..44114dfeb61faec95b74869572a364dc02bd6e35 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+@@ -165,7 +165,21 @@ namespace Ryujinx.Graphics.Shader.Translation
+         internal int GetDepthRegister()
+         {
+             // The depth register is always two registers after the last color output.
+-            return BitOperations.PopCount((uint)Definitions.OmapTargets) + 1;
++            // S2A #674：每个启用的颜色目标占满 4 个寄存器（哪怕只写其中一个分量，同 EmitterContext 里颜色输出的 regIndexBase += 4），
++            //   所以按启用的目标数算，不能按启用的分量数：两者只在每个目标都写满 4 个分量时相等。
++            //   例：某款游戏的深度缩小片元 OmapTargets = 0x10f（目标 0 四个分量 + 目标 2 一个分量）：按分量数取到 6 号（没人写、恒 0），实际在 9 号，
++            //   半分辨率深度被写成 0，粒子特效全被深度测试挡掉
++            int targets = 0;
++
++            for (int rtIndex = 0; rtIndex < 8; rtIndex++)
++            {
++                if ((Definitions.OmapTargets & (0xf << (rtIndex * 4))) != 0)
++                {
++                    targets++;
++                }
++            }
++
++            return targets * 4 + 1;
+         }
+ 
+         public void SetLayerOutputAttribute(int attr)

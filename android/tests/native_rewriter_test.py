@@ -151,7 +151,7 @@ def run(base):
     comparisons = {}
     for name, (source, spin, cut, wide, fps, status) in cases.items():
         actual = {p.name: p.read_bytes() for p in (raw_root / name / 'out').iterdir()}
-        if status:
+        if status == 1:
             if 'main.patched.bin' in actual:
                 raise RuntimeError('failed raw call emitted an image: ' + name)
             continue
@@ -161,10 +161,17 @@ def run(base):
         if fps: cli_env['S2A_FPS_TSV'] = str(fixture / 'fps.tsv')
         argv = [build / 'core/s2a-rewrite', fixture / (source + '.nso'), expected, 'main']
         if wide: argv.append(fixture / 'widen.tsv')
-        command(argv, cli_env)
+        command(argv, cli_env, expected=status)
         truth = {p.name: p.read_bytes() for p in expected.iterdir()}
         if actual != truth:
             raise RuntimeError('raw JNI/CLI complete output bytes differ: ' + name)
+        if status == 3:
+            rows = [line.split('\t') for line in actual['main.gaps.tsv'].decode().splitlines()
+                    if line and not line.startswith('#')]
+            if len(rows) != 1 or rows[0][:2] != ['0x100', 'sys'] or 'd4000022' not in rows[0][2]:
+                raise RuntimeError('gap: 缺口地址、类别或指令不符')
+            if struct.unpack_from('<I', actual['main.patched.bin'], 0x100)[0] != 0xd4000022:
+                raise RuntimeError('gap: 缺口处原指令被改写')
         comparisons[name] = {n: dict(bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
                              for n, data in actual.items()}
     if list((raw_root / 'bad-log/out').iterdir()):
@@ -193,18 +200,26 @@ def run(base):
         raise RuntimeError('window-sp: 补丁岛里还有未补 +16 的 ldr xR,[sp,#0xf0]')
     if not any(word in island for word in biased):
         raise RuntimeError('window-sp: 补丁岛里没有 ldr xR,[sp,#0x100]（窗口抬帧后的偏置）')
-    # 反例：ldr x18,[sp],#8 写回、SP 动了 → 平移不了。合流后的合同是准确记缺口（rc=3、不出 patched.bin /
-    # fixups），不是退回 below-sp 包，也不许静默按旧偏移发出去。
+    # 反例：ldr x18,[sp],#8 写回、SP 动了 → 平移不了。准确记缺口（rc=3），
+    # 降级产物保留缺口处原指令，不许退回 below-sp 包或静默按旧偏移改写。
     reject = base / 'window-sp-reject'; reject.mkdir(mode=0o700)
     rejected = command([build / 'core/s2a-rewrite', fixture / 'window-sp-reject.nso', reject, 'main'],
                        cli_env, expected=3)
     if '窗口内 sp 形态不可平移' not in rejected.stdout + rejected.stderr:
         raise RuntimeError('window-sp-reject: 缺口没指明 sp 形态不可平移：' + repr(rejected.stdout))
-    for produced in ('main.patched.bin', 'main.fixups.tsv'):
-        if (reject / produced).exists():
-            raise RuntimeError('window-sp-reject: 缺口路径不该产出 ' + produced)
+    for produced in ('main.patched.bin', 'main.fixups.tsv', 'main.gates.tsv', 'main.sites.tsv', 'main.gaps.tsv'):
+        if not (reject / produced).is_file():
+            raise RuntimeError('window-sp-reject: 缺口路径缺少 ' + produced)
+    gaps = (reject / 'main.gaps.tsv').read_text()
+    if '窗口内 sp 形态不可平移' not in gaps:
+        raise RuntimeError('window-sp-reject: 缺口表未记录不可平移原因')
+    if '# REWRITE_ABI\tandroid-sp-safe-v1' not in (reject / 'main.fixups.tsv').read_text():
+        raise RuntimeError('window-sp-reject: 降级产物 ABI 不符')
+    rejected_image = (reject / 'main.patched.bin').read_bytes()
+    if struct.unpack_from('<I', rejected_image, 0x118)[0] != 0xf84087f2:
+        raise RuntimeError('window-sp-reject: 缺口处写回指令未保留原字')
     print('窗口 sp 门控：正例 android-sp-safe-v1（below_sp 0、补丁岛抬帧偏置已核）；'
-          '反例（写回形态）准确记缺口 rc=3、不出包')
+          '反例（写回形态）准确记缺口 rc=3、保留原指令')
     result = command([jdk / 'bin/java', '-Xcheck:jni', '-Djava.library.path=' + str(build), '-cp', classes,
                       'org.s2arm.android.NativeRewriterTest', fixture, build / 'core/s2a-rewrite'], env)
     warning = 'Warning: Calling other JNI functions in the scope of Get/ReleasePrimitiveArrayCritical or Get/ReleaseStringCritical'
@@ -213,13 +228,16 @@ def run(base):
     if 'Warning:' in other or 'WARNING in native method' in other or 'FATAL ERROR' in other:
         raise RuntimeError('unexpected facade JNI diagnostics; see retained logs')
     print(result.stdout.strip().splitlines()[-1])
-    print(f'raw JNI: 17 statuses, 110 invalid-argument cases, {len(comparisons)} full CLI comparisons, zero CheckJNI warnings')
+    success_comparisons = sum(case[-1] == 0 for case in cases.values())
+    gap_comparisons = sum(case[-1] == 3 for case in cases.values())
+    print(f'raw JNI: 17 statuses, 110 invalid-argument cases, {success_comparisons} success + {gap_comparisons} gap full CLI comparisons, zero CheckJNI warnings')
     if facade_warnings:
         print(f'Java facade: {facade_warnings} Critical warnings retained; not a clean CheckJNI claim (see independent JDK Unicode Path control)')
     else:
         print('Java facade: zero CheckJNI warnings (host JVM only)')
     (base / 'result.json').write_text(json.dumps(dict(functional_passed=True, evidence='host JVM JNI only',
-        raw_checkjni_clean=True, raw_success_comparisons=len(comparisons), facade_checkjni_clean=not facade_warnings,
+        raw_checkjni_clean=True, raw_success_comparisons=success_comparisons, raw_gap_comparisons=gap_comparisons,
+        facade_checkjni_clean=not facade_warnings,
         facade_critical_warnings=facade_warnings, actual_jni=True, app_uid=False, device=False), indent=2) + '\n')
 
 

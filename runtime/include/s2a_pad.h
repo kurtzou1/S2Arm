@@ -6,6 +6,8 @@
 //   屏幕被碰（s2a_pad_prefer_touch）→ 触屏接管，实体手柄有按键 / 摇杆动作 → 切回手柄。
 typedef enum { S2A_PAD_TOUCH, S2A_PAD_BLE, S2A_PAD_SYSTEM, S2A_PAD_COUNT } s2a_pad_source;
 // buttons 仅用 Nintendo 标准位 0..15；axes 为左 x/y、右 x/y，±32767，上为正。
+// 进游戏的按键位：Nintendo 0..15 + SL / SR（Ryujinx ControllerKeys SlLeft / SrLeft / SlRight / SrRight = 24..27）；其余位截掉
+#define S2A_PAD_KEYS (0xffffu | 0xfu << 24)
 void s2a_pad_update(s2a_pad_source source, int connected, uint32_t buttons, const int32_t axes[4]);
 void s2a_pad_set_active(int active);
 // 进程内重启（runtime/src/host_main.c s2a_host_rebuild）：清掉上一局的按键 / 摇杆快照、换输入纪元；活跃状态不变（后台时不会被打开）
@@ -86,4 +88,12 @@ typedef struct {
 } s2a_pad_mouse;
 // 左右各一份。返回连着几侧（0 = 没有 Joy-Con 2）；out[0] 左只、out[1] 右只，没连的那侧 side = 0xff
 int s2a_pad_read_mouse_pair(s2a_pad_mouse out[2]);
+
+// R5：HID 键盘区原始键态（读键盘区的游戏原先只看得到 ActivateKeyboard 时的 17 条空条目，快捷键类游戏按什么都没反应）。
+//   keys 位图按 HID usage 码置位（A=0x04…Z=0x1D、F1=0x3A…、修饰键 LeftControl/LeftShift/LeftAlt=0xE0–0xE2，同 Ryujinx 键盘路径）；
+//   modifiers 位序同服务层 KeyboardModifier（Control=1、Shift=2、LeftAlt=4、CapsLock=0x100）。
+//   与手柄状态同一把锁：按键事件先 s2a_kb_update 落键态、再 s2a_pad_update 唤醒泵，泵醒来读到的就是同一拍键态；
+//   位图变化也会唤醒（不动延迟统计的时间戳），没映射进手柄按键的键不必等 16 ms 心跳。宿主不喂则恒为空，键盘区同改前。
+void s2a_kb_update(const uint64_t keys[4], uint32_t modifiers);
+void s2a_kb_read(uint64_t keys_out[4], uint32_t *modifiers);   // 服务层 InputPump 每次 HID 提交读一次
 #endif

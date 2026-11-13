@@ -85,6 +85,9 @@ int s2a_android_guest_writers_revoked(void);
 // Shutdown owner's bounded host wait before terminal phases; no-op off guest threads.
 void s2a_android_guest_host_wait_begin(void);
 void s2a_android_guest_host_wait_end(void);
+// 宿主侧长工作里的自愿安全点（图形回放循环每条命令过一次）：有停世界事务时在这里停驻到事务结束。
+// 调用时不得持 G / VM / tracker 锁。非客体线程、没有事务时是空操作。
+void s2a_android_guest_host_safepoint(void);
 
 #ifdef __cplusplus
 }

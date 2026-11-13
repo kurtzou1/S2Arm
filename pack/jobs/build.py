@@ -125,8 +125,8 @@ def require_automatic_memory(c):
 
 def runtime_env(c, game, runtime, input_ok=True):
     require_automatic_memory(c)
-    # 游戏语言跟本机系统首选语言（维护者 11-07：不给玩家选）：请求不带 gameLanguage 就不设 S2A_SYSTEM_LANGUAGE，
-    # 宿主 services/S2A.Services/Host.cs PickLanguage 读系统首选语言（游戏不支持的退简中 → 繁中 → 英语）。带了（开发 / 旧请求）照旧映射
+    # 游戏语言：请求带 gameLanguage（玩家在启动设置里单独指定）就设 S2A_SYSTEM_LANGUAGE；不带就跟启动器界面语言（下面的 S2A_UI_LANGUAGE，维护者 11-13），
+    # 宿主 services/S2A.Services/Host.cs PickLanguage → SystemLocale.FromUi；游戏不支持的落英语，英语也没有用游戏自己的缺省（SystemLocale.TitleFallback）
     language = c.r.get("gameLanguage")
     if language is not None and language not in LANGUAGES:
         raise Failure("游戏语言代码无效。")
@@ -193,7 +193,7 @@ def runtime_env(c, game, runtime, input_ok=True):
         env["S2A_INPUT_CONFIG"] = str(path)
     if c.r.get("inputGuideHandled") is True:
         env["S2A_INPUT_GUIDE_SHOWN"] = "1"
-    if c.r.get("uiLanguage") in ("zh-Hans", "en"):
+    if c.r.get("uiLanguage") in ("zh-Hans", "zh-Hant", "en"):   # 也是游戏语言的缺省（维护者 11-13：没单独指定就跟启动器界面语言，Host.cs PickLanguage）
         env["S2A_UI_LANGUAGE"] = c.r["uiLanguage"]
     return env
 

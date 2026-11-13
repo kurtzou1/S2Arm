@@ -8,6 +8,7 @@
 //   s2a-devpush - - tar-ok-local <本地文件>                       同上，本地文件
 //   s2a-devpush <udid> - install <ipa>               装已签名的 ipa（AFC 传到 PublicStaging + installation_proxy；测试台经转发的设备服务装机用，玩家装机走 Impactor）
 //   s2a-devpush <udid> <包名> uninstall -               卸 App（连容器）：免费账号一台手机最多 3 个 App，测试台腾位用
+//   s2a-devpush <udid> <包名> app-attr <键>              已装 App 的 Info.plist 一个键（installation_proxy）：打值；没装打 S2A_APP_MISSING；没有这个键打「-」
 //   s2a-devpush <udid> <包名> launch [变量=值…]     起 App（先结束在跑的同包进程），带环境变量；打印 pid。Windows 测试台起局 / 只解包用（Mac 用 devicectl）：
 //     经 lockdown 的 CoreDeviceProxy 建用户态隧道（不要管理员、不装驱动）→ RSD → CoreDevice app_service（同 Xcode / devicectl 的起 App 服务；iOS 17+，要开发者模式与已挂开发者镜像）
 // 退出码：0 成功；1 连不上 / 读写失败（错误打到标准错误）
@@ -286,6 +287,17 @@ async fn run(a: &[String]) -> Result<(), String> {
         let mut ip = idevice::installation_proxy::InstallationProxyClient::connect(&provider).await.map_err(|e| format!("installation_proxy 连不上：{e}"))?;
         ip.uninstall(bundle.clone(), None).await.map_err(|e| format!("卸 {bundle} 失败：{e}"))?;
         println!("uninstall {bundle} 完成");
+        return Ok(());
+    }
+    if op == "app-attr" {   // 已装 App 的 Info.plist 一个键（installation_proxy 查，不进容器）：打印值；没装打 S2A_APP_MISSING；没有这个键 / 不是字符串打「-」。
+        //   作业层装机判「手机上的 App 就是这次组出的」用（键 S2AContainerDigest，pack/jobs/ipa.py 组容器时写；install.py same_app）
+        let key = a.get(4).ok_or("app-attr 缺键名")?;
+        let mut ip = idevice::installation_proxy::InstallationProxyClient::connect(&provider).await.map_err(|e| format!("installation_proxy 连不上：{e}"))?;
+        let apps = ip.get_apps(Some("Any"), Some(vec![bundle.clone()])).await.map_err(|e| format!("查 {bundle} 失败：{e}"))?;
+        match apps.get(bundle.as_str()) {
+            None => println!("S2A_APP_MISSING"),
+            Some(v) => println!("{}", v.as_dictionary().and_then(|d| d.get(key.as_str())).and_then(|x| x.as_string()).unwrap_or("-")),
+        }
         return Ok(());
     }
     if op == "install" {

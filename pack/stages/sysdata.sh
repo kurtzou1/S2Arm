@@ -89,7 +89,7 @@ if ! mkdir -p "$W/systemdata/fonts" || ! clone_or_copy 字体 "$F"/*.bfttf "$W/s
 fi
 if [ "$tz_stale" = 1 ]; then _root_rm "$(tz "$W")"; fi
 if [ -z "$(tz "$W")" ]; then
-  bash "$R/services/systemdata/make_tzdata.sh" "$W/systemdata/010000000000080E" > "$W/tz.log" 2>&1 || { root_abort "$G" "$TAG"; echo "【红】生成时区数据失败（$(tail -1 "$W/tz.log")）"; exit 1; }
+  bash "$R/services/systemdata/make_tzdata.sh" "$W/systemdata/010000000000080E" > "$W/tz.log" 2>&1 || { e=$(tail -1 "$W/tz.log" 2> /dev/null); root_abort "$G" "$TAG"; echo "【红】生成时区数据失败（${e}）"; exit 1; }   # 先取原因再撤根（#816：撤根删了 tz.log，原先括号里总是空的）
   printf 's2a-tzdata-source %s\n' "$TZ_ID" >> "$W/tz.log"
   how=生成
 else

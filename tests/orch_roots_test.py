@@ -7,6 +7,7 @@ import contextlib
 import errno
 import io
 import os
+import stat
 from pathlib import Path
 import subprocess
 import sys
@@ -217,13 +218,52 @@ class RootsTest(unittest.TestCase):
         self.assertIsNone(self.store.cur('原创'))
 
     def test_romfs_is_physically_readonly(self):
-        first = self.seed()
+        # 开发 / 门禁机（S2A_ROMFS_SEAL=1）：共享存储物理只读，阶段误写当场失败
+        with patch.dict(os.environ, {'S2A_ROMFS_SEAL': '1'}):
+            first = self.seed()
         probe = 'from pathlib import Path; import sys; Path(sys.argv[1]).write_bytes(b"BAD")'
         result = subprocess.run([sys.executable, '-c', probe, str(first / 'romfs/data')], capture_output=True)
         if os.name != 'nt' and hasattr(os, 'geteuid') and os.geteuid() == 0:
             self.skipTest('root bypasses POSIX permission bits; normal-user check required')
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((first / 'romfs/data').read_bytes(), b'original resource\x00')
+
+    def test_romfs_player_writable(self):
+        # 玩家机（不设 S2A_ROMFS_SEAL）：存储在玩家看得见的游戏库里，不许只读——玩家手动删旧产物不能被挡
+        with patch.dict(os.environ, {'S2A_ROMFS_SEAL': ''}):
+            first = self.seed()
+        target = (first / 'romfs').resolve()
+        if os.name == 'nt':
+            probe = 'from pathlib import Path; import sys; Path(sys.argv[1]).write_bytes(Path(sys.argv[1]).read_bytes())'
+            self.assertEqual(subprocess.run([sys.executable, '-c', probe, str(target / 'data')]).returncode, 0)
+        else:
+            stuck = [p for p in [target, *target.rglob('*')] if not p.is_symlink() and not os.stat(p).st_mode & stat.S_IWUSR]
+            self.assertEqual(stuck, [])
+
+    def test_ntfs_romfs_hardlink(self):
+        # #291：Windows 同卷非 ReFS（NTFS）播种 RomFS 建硬链接、不逐文件实拷；别的目录（link_ok 不给）照旧实拷成独立的一份。
+        #   期望手写：link_ok → 目标与源同一个文件（同 inode、链接数 2）、不打「实拷」；不给 → 独立文件、字节相同、打「实拷」；
+        #   建链接失败（跨卷 / FAT）→ 退回实拷。在 Mac / Linux 上把平台看成 win32、ReFS 判否来走这条路（硬链接 posix 照样能建）
+        src = self.home / 'romfs-file'
+        src.write_bytes(bytes(range(256)) * 17)
+        def run(dst, **kw):
+            err = io.StringIO()
+            with patch.object(roots.sys, 'platform', 'win32'), patch.object(roots, 'refs_same_volume', return_value=False), \
+                 contextlib.redirect_stderr(err):
+                roots.copy_file(src, dst, **kw)
+            return err.getvalue()
+        out = run(self.home / 'linked', link_ok=True)
+        self.assertTrue(os.path.samefile(src, self.home / 'linked'))
+        self.assertEqual(os.stat(src).st_nlink, 2)
+        self.assertNotIn('实拷', out)
+        out = run(self.home / 'copied')
+        self.assertFalse(os.path.samefile(src, self.home / 'copied'))
+        self.assertEqual(src.read_bytes(), (self.home / 'copied').read_bytes())
+        self.assertIn('实拷', out)
+        with patch.object(roots.os, 'link', side_effect=OSError(errno.EXDEV, 'cross-device')):
+            out = run(self.home / 'fallback', link_ok=True)
+        self.assertFalse(os.path.samefile(src, self.home / 'fallback'))
+        self.assertIn('硬链接不可用', out)
 
     def test_realcopy_warns_and_bytes_match(self):
         src = self.home / 'source'

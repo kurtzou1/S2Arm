@@ -38,11 +38,15 @@ struct EnvironmentView: View {
                 VStack(alignment: .leading, spacing: 24) {
                     // 界面语言（原在顶栏，入口整理收进设置）：一键切到另一种，当场生效、记住选择
                     CardGroup(s("settings.language")) {
-                        CardRow(s("settings.language"), detail: loc.lang == .zh ? "简体中文" : "English") {
-                            Button { loc.choose(loc.lang == .zh ? Lang.en.code : Lang.zh.code) } label: {
-                                Label(loc.lang == .zh ? "English" : "简体中文", systemImage: "globe")
+                        // 跟随系统 / 简体中文 / English：选了某种就记住（以后不再跟系统），选「跟随系统」回到按系统首选语言（11-13）
+                        CardRow(s("settings.language"), detail: Lang.saved == nil ? loc.t("settings.language.system") + " · " + loc.lang.name : loc.lang.name) {
+                            Menu {
+                                Button(loc.t("settings.language.system")) { loc.choose("") }
+                                ForEach(Lang.all, id: \.self) { l in Button(l.name) { loc.choose(l.code) } }
+                            } label: {
+                                Label(loc.lang.name, systemImage: "globe")
                             }
-                            .buttonStyle(LauncherSecondaryButtonStyle()).accessibilityIdentifier("settings.language")
+                            .menuStyle(.borderlessButton).fixedSize().accessibilityIdentifier("settings.language")
                         }
                     }
                     // 存放位置（社区贡献者补丁 #10）：游戏库、iPhone 包、磁盘空间集中在这一处；单款游戏放在哪看出包页的「存放位置」
@@ -73,6 +77,7 @@ struct EnvironmentView: View {
                     if !failing.isEmpty || model.environmentError != nil {
                         CopyReportButton(model: model, gameID: nil, operations: nil,
                                          fallback: (["S2Arm 环境检查未通过", ProcessInfo.processInfo.operatingSystemVersionString, model.environmentError ?? ""] + failing.map { "\($0.name)：\($0.message)" }).joined(separator: "\n"))
+                        ReportHint()
                     }
                     ForEach(ordered(failing), id: \.self) { group in
                         let items = failing.filter { groupOf($0) == group }

@@ -316,10 +316,16 @@ s2a_gate_step "$PY" "$android_dir/tests/graphics_request_name_test.py"
 # 新回放层：真实图形/计算请求生产入口的贴图池容量、超限与调试读数。
 s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py" --withdraw
+# GS 脏位、阶段绑定、管线和原始图元拒绝的独立回退反证。
+s2a_gate_step "$PY" "$repo_dir/graphics/nvn/tests/gs_replay_mutation_test.py"
+# 原创 Maxwell 经生产请求、真实编译器与生产结果解析；GPU 像素由 Vulkan 门禁另验。
+s2a_gate_step "$PY" "$android_dir/tests/gs_compiler_chain_test.py"
 # W2 compute: real C components with synthetic input / Vulkan mocks, never GPU or device evidence.
 s2a_gate_step "$PY" "$android_dir/tests/direct_compute_identity_test.py"
 # P0-3：constantBufferUse 宽掩码的 S2AI1 v3/v4 分叉现由计算与图形共用——正例 + 两处撤改必红（纯宿主 C 编译，秒级）。
 s2a_gate_step "$PY" "$android_dir/tests/direct_input_identity_mutation_test.py"
+# GS 扩容前后 VS / VS+FS / CS 规范身份逐字节一致，96 条事实不截断。
+s2a_gate_step "$PY" "$android_dir/tests/direct_input_identity_compat_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/w2_compute_program_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/w2_compute_lookup_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/w2_compute_request_test.py"
@@ -455,6 +461,8 @@ s2a_gate_step "$PY" "$android_dir/tests/tex_identity_state_test.py" --withdraw
 # 默认全绿；--source-ref 旧源码必须红；--withdraw 的 5 条行为撤回变异必须各自转红。
 s2a_gate_step "$PY" "$android_dir/tests/record_flat_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/direct_replayed_fence_test.py"
+# 成功提交计数：真实 NVN present 边界、跨线程读取与错误路径负控。
+s2a_gate_step "$PY" "$android_dir/tests/nvn_present_count_test.py"
 # 回放状态只在第一次提交前复位（#539）：mtl_sub_begin 生产函数体，三次提交只入队一次复位作业。
 s2a_gate_step "$PY" "$android_dir/tests/replay_state_keep_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/record_flat_test.py" --withdraw

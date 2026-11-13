@@ -75,7 +75,7 @@ SCN=pflash  run pflash  FAKE_MAP='TITLE=PLUS/A;MENU=A;GAME=LS_RIGHT:play;PAUSE=P
 SCN=pmenu   run pmenu   FAKE_MAP='TITLE=PLUS/A;MENU=PLUS/A;GAME=LS_RIGHT:play' S2A_AP_MAX_STEPS=16 &
 SCN=cstay   run cstay   FAKE_MAP='TITLE=A;MENU=A;GAME=LS_RIGHT:play' FAKE_ESC_MAP='TITLE=X' S2A_AP_MAX_STEPS=12 &
 SCN=ok      run nokey   FAKE_MAP=$MAP_OK S2A_VISION_SH= S2A_VISION_BACKEND=or HOME=$T/nohome &
-# ⑨b 缺省后端 = 本机 claude CLI：PATH 上没有 claude（只放 timeout）→ 起步报红、不问；⑨c 驾驶员回「不可用」（退出 3 + unavailable）→ 红停、只问 1 次、收局理由带原因
+# ⑨b 显式 cli 后端（本机 claude CLI）：PATH 上没有 claude（只放 timeout）→ 起步报红、不问；⑨c 驾驶员回「不可用」（退出 3 + unavailable）→ 红停、只问 1 次、收局理由带原因
 mkdir -p $T/nocli_bin; ln -sf "$(command -v timeout)" $T/nocli_bin/timeout
 cat > $T/unavail_vision.sh << 'SHEOF'
 #!/bin/bash
@@ -83,7 +83,8 @@ echo 1 >> "$(dirname "$1")/../unavail_calls"
 echo '{"keys": [], "playable": false, "why": "本机 claude CLI 没登录（假）", "unavailable": true}' > "$2"
 exit 3
 SHEOF
-SCN=ok      run nocli   FAKE_MAP=$MAP_OK S2A_VISION_SH= PATH=$T/nocli_bin:/usr/bin:/bin HOME=$T/nohome_c &
+SCN=ok      run nocli   FAKE_MAP=$MAP_OK S2A_VISION_SH= S2A_VISION_BACKEND=cli PATH=$T/nocli_bin:/usr/bin:/bin HOME=$T/nohome_c &
+SCN=ok      run norelay FAKE_MAP=$MAP_OK S2A_VISION_SH= HOME=$T/nohome_d PATH=$T/nocli_bin:/usr/bin:/bin &
 SCN=ok      run unavail FAKE_MAP=$MAP_OK S2A_VISION_SH=$T/unavail_vision.sh &
 SCN=ok      run hold    FAKE_MAP=$MAP_OK S2A_AP_HOLD=A &
 # ㉟ 局内段回放真机 padrec（S2A_AP_PADREC=<录像>@<起始帧>）：起始帧前一行（B，开放时先按住）、存档行跳过；之后 5 行、长 52 帧，A 从第 0 帧按到第 40 帧
@@ -136,7 +137,8 @@ ck "⑦ 第二局回放：导航 0 问、进局页确认 1 问（实为 $(calls 
 ck "⑧ 回放对不上（学的是标题按 X，本局标题只认 A）：记「回放对不上」、交回 AI 问 1 次 + 进局页确认 1 次（实为 $(calls mism)）、打 MARK、路线重写成 A A MARK（实为 $(grep -v '^#' $T/learn_x/0100000000ab0002.tsv | cut -f2 | tr '\n' ' ')）" \
   'L mism | grep -q "回放对不上" && [ "$(calls mism)" = 2 ] && L mism | grep -q "S2A 标记 MARK" && [ "$(grep -v "^#" $T/learn_x/0100000000ab0002.tsv | cut -f2 | tr "\n" " ")" = "A A MARK " ]'
 ck "⑨ 显式 OpenRouter 后端没有密钥：报红「视觉测试员不可用」（判定脚本据此记未判）、没到 MARK、0 按键" 'L nokey | grep -q "【红】自动玩家：视觉测试员不可用（S2A_VISION_BACKEND=or 要 OpenRouter 钥匙，没有 .*openrouter.key）" && [ "$(J nokey marked)" = False ] && [ "$(J nokey presses)" = 0 ]'
-ck "⑨b 缺省后端（本机 claude CLI）PATH 上没有 claude：起步报红「本机没有 claude CLI」、没到 MARK、0 按键" 'L nocli | grep -q "【红】自动玩家：视觉测试员不可用（本机没有 claude CLI" && [ "$(J nocli marked)" = False ] && [ "$(J nocli presses)" = 0 ]'
+ck "⑨d 不设后端（自动选）：没有中转站钥匙和地址、PATH 上也没有 claude → 起步报红、没到 MARK、0 按键" 'L norelay | grep -q "【红】自动玩家：视觉测试员不可用（没有中转站钥匙和地址" && L norelay | grep -q "本机也没有 claude CLI" && [ "$(J norelay marked)" != true ]' 
+ck "⑨b 显式 cli 后端（本机 claude CLI）PATH 上没有 claude：起步报红「本机没有 claude CLI」、没到 MARK、0 按键" 'L nocli | grep -q "【红】自动玩家：视觉测试员不可用（本机没有 claude CLI" && [ "$(J nocli marked)" = False ] && [ "$(J nocli presses)" = 0 ]'
 ck "⑨c 驾驶员回「不可用」：红停（不当成没答连问 3 次；实问 $(wc -l < $T/unavail/unavail_calls 2> /dev/null | tr -d ' ') 次）、收局理由带原因（$(J unavail why | cut -c1-80)）" \
   'L unavail | grep -q "【红】自动玩家：驾驶员 #1 看屏驾驶员不可用：本机 claude CLI 没登录（假）" && [ "$(wc -l < $T/unavail/unavail_calls | tr -d " ")" = 1 ] && [ "$(J unavail marked)" = False ] && J unavail why | grep -q "导航卡住（看屏驾驶员不可用：本机 claude CLI 没登录（假））"'
 ck "⑩ 回到问过的页带上答过的键：菜单答 B 退回标题、再到菜单时 S2A_VISION_TRIED 含 B、改答 X 进局打 MARK（实为：$(grep '^MENU' $T/pp/vision_calls.log 2> /dev/null | tr '\n' '|')）" 'grep -q "^MENU X B" $T/pp/vision_calls.log && L pp | grep -q "S2A 标记 MARK"'
@@ -183,16 +185,25 @@ def fake_open(self, req, data=None, timeout=None):
     url = req.full_url if hasattr(req, "full_url") else req; body = json.loads(req.data) if getattr(req, "data", None) else {}
     open(os.environ["VO_LOG"], "a").write(f"{url.split('/')[2]} {body.get('model')}\n")
     if "openrouter" in url and body.get("model", "").startswith("anthropic/"): raise urllib.error.HTTPError(url, 403, "forbidden", {}, io.BytesIO(b""))
-    return io.BytesIO(json.dumps({"choices": [{"message": {"content": '{"keys":["A"],"playable":false,"why":"x"}'}}], "usage": {}}).encode())
+    auth = (req.headers.get("Authorization") or "") if hasattr(req, "headers") else ""
+    if "relay.test" in url: open(os.environ["VO_LOG"], "a").write(f"钥匙对 {auth == 'Bearer rk'}\n")
+    u = {"prompt_tokens": int(os.environ.get("VO_PT", "5000"))} if "relay.test" in url else {}   # 中转站：输入 token 少于带图估计 = 丢图
+    return io.BytesIO(json.dumps({"choices": [{"message": {"content": '{"keys":["A"],"playable":false,"why":"x"}'}}], "usage": u}).encode())
 urllib.request.OpenerDirector.open = fake_open
 _eu = os.path.expanduser   # 钥匙 / 缓存路径的「~」映射到临时家目录（不改 HOME：PIL 等装在用户 site-packages 里，换 HOME 就找不到）
 os.path.expanduser = lambda p: os.environ["VO_HOME"] + p[1:] if p.startswith("~/") else _eu(p)
 PYEOF2
 # 拦截写成普通模块、包装命令先导入再 runpy 跑 vision_or.py（不用 sitecustomize：本机 Python 靠自己的 sitecustomize 挂 PIL 等目录，同名会顶掉它）
-vo() { VO_HOME=$2 VO_LOG=$T/vo/$1.log python3 -c 'import sys, runpy; sys.path.insert(0, sys.argv[1]); import vo_fakenet; sys.argv = sys.argv[2:]; runpy.run_path(sys.argv[0], run_name="__main__")' $T/vo/site $H/autoplay/vision_or.py $T/vf/s.png 题 > $T/vo/$1.out 2> $T/vo/$1.err; echo $?; }
+vo() { S2A_VISION_BACKEND=${VOB:-or} VO_HOME=$2 VO_LOG=$T/vo/$1.log python3 -c 'import sys, runpy; sys.path.insert(0, sys.argv[1]); import vo_fakenet; sys.argv = sys.argv[2:]; runpy.run_path(sys.argv[0], run_name="__main__")' $T/vo/site $H/autoplay/vision_or.py $T/vf/s.png 题 > $T/vo/$1.out 2> $T/vo/$1.err; echo $?; }
 r1=$(vo r1 $T/vo/home); r2=$(vo r2 $T/vo/home); rn=$(vo rn $T/vo/nokey)
 ck "㉔ OpenRouter 后端：sonnet 403 记下 → kimi 答出（$(tr '\n' ' ' < $T/vo/r1.log)）；再一问跳过 sonnet（$(tr '\n' ' ' < $T/vo/r2.log)）；没钥匙 → 不可用、退出 3（${rn}）、不发请求" \
   '[ "$r1" = 0 ] && grep -q "\"A\"" $T/vo/r1.out && [ "$(tr "\n" " " < $T/vo/r1.log)" = "openrouter.ai anthropic/claude-sonnet-5.5 openrouter.ai moonshotai/kimi-k3 " ] && [ "$r2" = 0 ] && [ "$(tr "\n" " " < $T/vo/r2.log)" = "openrouter.ai moonshotai/kimi-k3 " ] && [ "$rn" = 3 ] && grep -q "不可用" $T/vo/rn.err && [ ! -s $T/vo/rn.log ]'
+# ㉔r 中转站（S2A_VISION_BACKEND=relay，11-13 起缺省）：钥匙 relay.key + 地址 relay.url 在临时家目录 → 只发中转站一次（模型 claude-sonnet-5、请求头带钥匙）答出 A，不碰 OpenRouter；
+#   回的输入 token 少于带图估计（丢图）→ 加请求号再问，2 次都丢图 → 这一问没答出、退出 1；没钥匙 / 没地址 → 「不可用」退出 3、不发请求
+mkdir -p $T/vr/home/.s2arm/.secrets $T/vr/nourl/.s2arm/.secrets $T/vr/nokey; echo rk > $T/vr/home/.s2arm/.secrets/relay.key; echo https://relay.test/v1/chat/completions > $T/vr/home/.s2arm/.secrets/relay.url; echo rk > $T/vr/nourl/.s2arm/.secrets/relay.key
+q1=$(VOB=relay vo q1 $T/vr/home); q2=$(VOB=relay VO_PT=10 vo q2 $T/vr/home); q3=$(VOB=relay vo q3 $T/vr/nokey); q4=$(VOB=relay vo q4 $T/vr/nourl)
+ck "㉔r 中转站后端：答出（$(tr '\n' ' ' < $T/vo/q1.log)）、退出 0（${q1}）；丢图 2 次 → 退出 1（${q2}；请求 $(grep -c relay.test $T/vo/q2.log) 次）；没钥匙 → 退出 3（${q3}）；没地址 → 退出 3（${q4}）、都不发请求" \
+  '[ "$q1" = 0 ] && grep -q "\"A\"" $T/vo/q1.out && [ "$(tr "\n" " " < $T/vo/q1.log)" = "relay.test claude-sonnet-5 钥匙对 True " ] && grep -q "模型 中转站/claude-sonnet-5" $T/vo/q1.err && [ "$q2" = 1 ] && [ "$(grep -c relay.test $T/vo/q2.log)" = 2 ] && grep -q "判丢图" $T/vo/q2.err && [ "$q3" = 3 ] && grep -q "中转站后端不可用：没有钥匙" $T/vo/q3.err && [ ! -s $T/vo/q3.log ] && [ "$q4" = 3 ] && grep -q "中转站后端不可用：没有地址" $T/vo/q4.err && [ ! -s $T/vo/q4.log ]'
 # ㉔c vision.sh：402 标记在 → 显式 Jev 后端也跳过 Jev；问 CLI，假 CLI 超时退出 124 → 日志记「超时」与 rc=124（修前管道末段 python 吞成 rc=0）、退出 1（偶发失败，不是不可用）
 mkdir -p $T/vc/bin; cp $H/autoplay/vision.sh $H/autoplay/nav_rules.txt $T/vc/; printf 'import sys; open(sys.argv[0] + ".called", "w").close(); sys.exit(1)\n' > $T/vc/vision_or.py; printf 'import sys; open(sys.argv[2] + ".jev", "w").close(); sys.exit(1)\n' > $T/vc/vision_jev.py
 printf '#!/bin/sh\ncat > /dev/null; exit 124\n' > $T/vc/bin/claude; chmod +x $T/vc/bin/claude; cp $H/autoplay/or402.py $T/vc/
@@ -201,7 +212,7 @@ printf 'fake-or-key\n' > $T/vc/ork; python3 -c 'import hashlib,sys; print(hashli
 PATH=$T/vc/bin:$PATH S2A_VISION_BACKEND=jev S2A_VISION_OR_KEY=$T/vc/ork S2A_OR_402_MARK=$T/vc/m402 bash $T/vc/vision.sh $T/vf/s.png $T/vc/o.json > /dev/null 2>&1; vcrc=$?
 ck "㉔c 402 标记新 → 跳过 Jev（Jev 调了：$([ -f $T/vc/o.json.jev ] && echo 是 || echo 否)）；CLI 超时 → 记超时、rc=124、退出 1（${vcrc}；日志：$(tr '\n' ' ' < $T/vc/o.json.log | cut -c1-160)）" \
   '[ ! -f $T/vc/o.json.jev ] && grep -q "跳过 Jev" $T/vc/o.json.log && grep -q "claude CLI 超时" $T/vc/o.json.log && grep -q "升级后端失败 rc=124" $T/vc/o.json.log && [ "$vcrc" = 1 ]'
-# ㉔d 缺省后端 = 本机 claude CLI 直连（11-12：中转站停用后原缺省档每问 0.3 秒退 1，#788）：
+# ㉔d 显式 cli 后端 = 本机 claude CLI 直连（#788）：
 #   假 CLI 按 stream-json 回结果行 → 用它的答案 A、退出 0、没碰 OpenRouter 脚本；
 #   PATH 上没有 claude / CLI 报没登录 → 【红】「看屏驾驶员不可用」、答案 JSON 带 unavailable、退出 3
 mkdir -p $T/vd/bin $T/vd/nocli; cp $H/autoplay/vision.sh $H/autoplay/nav_rules.txt $H/autoplay/or402.py $T/vd/; printf 'import sys; open(sys.argv[0] + ".called", "w").close(); sys.exit(1)\n' > $T/vd/vision_or.py
@@ -211,15 +222,34 @@ cat > /dev/null
 echo '{"type":"result","result":"{\"keys\":[\"A\"],\"playable\":false,\"why\":\"t\"}"}'
 SHEOF
 chmod +x $T/vd/bin/claude; ln -sf "$(command -v timeout)" $T/vd/nocli/timeout; PY3=$(command -v python3)
-PATH=$T/vd/bin:$PATH bash $T/vd/vision.sh $T/vf/s.png $T/vd/a.json > /dev/null 2>&1; vda=$?
-S2A_PY=$PY3 PATH=$T/vd/nocli:/usr/bin:/bin bash $T/vd/vision.sh $T/vf/s.png $T/vd/b.json > /dev/null 2> $T/vd/b.stderr; vdb=$?
+S2A_VISION_BACKEND=cli PATH=$T/vd/bin:$PATH bash $T/vd/vision.sh $T/vf/s.png $T/vd/a.json > /dev/null 2>&1; vda=$?
+S2A_VISION_BACKEND=cli S2A_PY=$PY3 PATH=$T/vd/nocli:/usr/bin:/bin bash $T/vd/vision.sh $T/vf/s.png $T/vd/b.json > /dev/null 2> $T/vd/b.stderr; vdb=$?
 printf '#!/bin/sh\ncat > /dev/null; echo "Not logged in · Please run /login" >&2; exit 1\n' > $T/vd/bin/claude
-PATH=$T/vd/bin:$PATH bash $T/vd/vision.sh $T/vf/s.png $T/vd/c.json > /dev/null 2>&1; vdc=$?
-ck "㉔d 缺省后端本机 CLI：答出 A、退出 0（${vda}；$(tr -d '\n' < $T/vd/a.json 2> /dev/null | cut -c1-50)）、没碰 OpenRouter（$([ -f $T/vd/vision_or.py.called ] && echo 碰了 || echo 没碰)）；没有 CLI → 退出 3（${vdb}）带 unavailable；没登录 → 退出 3（${vdc}）" \
+S2A_VISION_BACKEND=cli PATH=$T/vd/bin:$PATH bash $T/vd/vision.sh $T/vf/s.png $T/vd/c.json > /dev/null 2>&1; vdc=$?
+ck "㉔d 显式 cli 后端本机 CLI：答出 A、退出 0（${vda}；$(tr -d '\n' < $T/vd/a.json 2> /dev/null | cut -c1-50)）、没碰 OpenRouter（$([ -f $T/vd/vision_or.py.called ] && echo 碰了 || echo 没碰)）；没有 CLI → 退出 3（${vdb}）带 unavailable；没登录 → 退出 3（${vdc}）" \
   '[ "$vda" = 0 ] && grep -q "\"A\"" $T/vd/a.json && [ ! -f $T/vd/vision_or.py.called ] && grep -q "升级后端 claude CLI" $T/vd/a.json.log && [ "$vdb" = 3 ] && grep -q "\"unavailable\": true" $T/vd/b.json && grep -q "【红】看屏驾驶员不可用：本机没有 claude CLI" $T/vd/b.json.log && grep -q "【红】看屏驾驶员不可用" $T/vd/b.stderr && [ "$vdc" = 3 ] && grep -q "\"unavailable\": true" $T/vd/c.json && grep -q "没登录" $T/vd/c.json.log'
-# ㉔e 中转站档已删：显式 S2A_VISION_BACKEND=relay（旧配置）→ 不认、【红】不可用、退出 3，不静默落到别的后端
-S2A_VISION_BACKEND=relay PATH=$T/vd/bin:$PATH bash $T/vd/vision.sh $T/vf/s.png $T/vd/r.json > /dev/null 2>&1; vdr=$?
-ck "㉔e 旧配置 S2A_VISION_BACKEND=relay → 不可用、退出 3（${vdr}）" '[ "$vdr" = 3 ] && grep -q "relay 已停用" $T/vd/r.json.log && grep -q "\"unavailable\": true" $T/vd/r.json'
+# ㉔e 不设后端 = 自动选（11-13：外部贡献者没有中转站钥匙，缺省不该一上来就红停）：
+#   有中转站钥匙和地址 → 走中转站（问 vision_or.py 且带 S2A_VISION_BACKEND=relay、不碰 CLI），日志写「后端自动选：relay」；
+#   没有中转站钥匙 → 走本机 CLI（不碰 vision_or.py），日志写「后端自动选：cli」；选上中转站但 vision_or.py 报不可用（退出 3）→ 【红】不可用、退出 3，不静默落到 CLI
+mkdir -p $T/ve/bin; cp $H/autoplay/vision.sh $H/autoplay/nav_rules.txt $H/autoplay/or402.py $T/ve/; echo rk > $T/ve/rk
+cat > $T/ve/vision_or.py << 'PYEOF3'
+import os, sys
+open(sys.argv[0] + ".env", "w").write(os.environ.get("S2A_VISION_BACKEND", ""))
+print('{"keys":["B"],"playable":false,"why":"r"}'); print("模型 中转站/claude-sonnet-5", file=sys.stderr)
+PYEOF3
+cat > $T/ve/bin/claude << 'SHEOF'
+#!/bin/sh
+cat > /dev/null; touch "$0.called"
+echo '{"type":"result","result":"{\"keys\":[\"X\"],\"playable\":false,\"why\":\"c\"}"}'
+SHEOF
+chmod +x $T/ve/bin/claude
+env -u S2A_VISION_BACKEND S2A_VISION_RELAY_KEY=$T/ve/rk S2A_VISION_RELAY_URL=https://relay.test/x PATH=$T/ve/bin:$PATH bash $T/ve/vision.sh $T/vf/s.png $T/ve/a.json > /dev/null 2>&1; vea=$?
+vea_cli=$([ -f $T/ve/bin/claude.called ] && echo 碰了 || echo 没碰); vea_env=$(cat $T/ve/vision_or.py.env 2> /dev/null); rm -f $T/ve/vision_or.py.env
+env -u S2A_VISION_BACKEND S2A_VISION_RELAY_KEY=$T/ve/none S2A_VISION_RELAY_URL=https://relay.test/x PATH=$T/ve/bin:$PATH bash $T/ve/vision.sh $T/vf/s.png $T/ve/c.json > /dev/null 2>&1; vec=$?
+printf 'import sys; print("中转站后端不可用：没有钥匙（x）", file=sys.stderr); sys.exit(3)\n' > $T/ve/vision_or.py
+env -u S2A_VISION_BACKEND S2A_VISION_RELAY_KEY=$T/ve/rk S2A_VISION_RELAY_URL=https://relay.test/x PATH=$T/ve/bin:$PATH bash $T/ve/vision.sh $T/vf/s.png $T/ve/b.json > /dev/null 2>&1; veb=$?
+ck "㉔e 不设后端自动选：有中转站 → relay（后端变量 ${vea_env}）答出 B、退出 0（${vea}）、没碰 CLI（${vea_cli}）；没中转站钥匙 → cli 答出 X、退出 0（${vec}）、没碰 vision_or.py；中转站不可用 → 退出 3（${veb}）" \
+  '[ "$vea" = 0 ] && grep -q "\"B\"" $T/ve/a.json && [ "$vea_env" = relay ] && [ "$vea_cli" = 没碰 ] && grep -q "后端自动选：relay" $T/ve/a.json.log && grep -q "升级后端 中转站" $T/ve/a.json.log && [ "$vec" = 0 ] && grep -q "\"X\"" $T/ve/c.json && grep -q "后端自动选：cli" $T/ve/c.json.log && [ ! -f $T/ve/vision_or.py.env ] && [ "$veb" = 3 ] && grep -q "\"unavailable\": true" $T/ve/b.json && grep -q "【红】看屏驾驶员不可用：中转站后端不可用" $T/ve/b.json.log'
 # ㉔g 402 标记永久有效（11-04）：指纹对得上的标记过了 2 小时仍跳过 Jev；指纹对不上（换了钥匙）→ 不算，照问 Jev
 mkdir -p $T/vg; cp $H/autoplay/vision.sh $H/autoplay/nav_rules.txt $H/autoplay/or402.py $T/vg/; printf 'import sys; sys.exit(1)\n' > $T/vg/vision_or.py
 printf 'import sys; open(sys.argv[2] + ".jev", "w").close(); sys.exit(1)\n' > $T/vg/vision_jev.py; mkdir -p $T/vg/bin; printf '#!/bin/sh\ncat > /dev/null; exit 1\n' > $T/vg/bin/claude; chmod +x $T/vg/bin/claude

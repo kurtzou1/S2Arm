@@ -27,9 +27,21 @@ each band's game amplitude passes through `s2a_hp_feel`, then the launch
 setting **震动强度** (`S2A_RUMBLE_SCALE`) multiplies it, capped at 1.
 Frequencies, left/right channels, leases and stop commands are unchanged.
 
-The controller popover has two independent persisted settings:
-**开启 S2Arm 时自动连接手柄** and **关闭游戏后自动断开手柄**. Both default to
-off, so opening S2Arm does not start Bluetooth scanning or show a pairing prompt.
+The controller popover has three independent persisted settings:
+**开启 S2Arm 时自动连接手柄**, **关闭游戏后自动断开手柄** and **记住这台设备**. All
+default to off, so opening S2Arm does not start Bluetooth scanning or show a pairing prompt.
+
+**记住这台设备** (Pro controller and Joy-Con 2): with it on, a controller that
+connects in pairing mode (SYNC held until the player lights sweep) is given this
+Mac's Bluetooth address with the controller's own bonding commands. After that a
+press of any button wakes it toward this Mac and it reconnects without SYNC: the
+helper keeps a connection request open for a controller bonded here, also after
+it disconnects. A controller remembers one host at a time; after it is used with
+a console or another computer, hold SYNC again here. If the Mac's address cannot
+be read or the controller does not answer a bonding command, the helper logs it
+and the controller works as before for this session. Changing the setting
+restarts the helper unless a game is using the controller. iOS has no API for the
+device's own Bluetooth address, so this is Mac only.
 Manual **连接手柄** and **断开连接** controls are always available in the
 popover. Play remains available without a controller. With no relay socket, the
 launch request tells the game not to run its own background controller check.

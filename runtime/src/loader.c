@@ -453,6 +453,7 @@ static void relocate(module_t *m) {
     for (const Elf64_Dyn *d = m->dyn; d->d_tag; d++) switch (d->d_tag) {
         case DT_RELA: rela = d->d_un.d_ptr; break; case DT_RELASZ: relasz = d->d_un.d_val; break;
         case DT_JMPREL: jmprel = d->d_un.d_ptr; break; case DT_PLTRELSZ: pltsz = d->d_un.d_val; break;
+        case 3 /* DT_PLTGOT */: m->pltgot = d->d_un.d_ptr; break;
     }
     unsigned cnt[3] = {0}, nlibc = 0, nweak0 = 0, ntls = 0, nforeign = 0;
     const int rdbg = reloc_foreign_debug(); char foreign[160] = "";
@@ -464,6 +465,9 @@ static void relocate(module_t *m) {
             const Elf64_Rela *r = &tabs[t][i];
             uint64_t *where = (uint64_t *)(m->base + r->r_offset);
             unsigned type = ELF64_R_TYPE(r->r_info), si = ELF64_R_SYM(r->r_info);
+            // 同游戏 SDK nn::ro::detail::RoModule::Relocation：JUMP_SLOT 槽的原值（链接时填的 PLT 表头）+ 基址 = 懒绑定入口，
+            //   ro_handoff 写进本模块的 RoModule（游戏的 nn::ro 卸 NRO 时 RevertReference 把指向它的函数槽改回这个入口）
+            if (type == R_AARCH64_JUMP_SLOT && !m->plt_stub && *where) m->plt_stub = (uint64_t)m->base + *where;
             enum reloc_class rc = reloc_class(type);
             if (rc == RELOC_RELATIVE) { *where = (uint64_t)m->base + r->r_addend; cnt[0]++; continue; }
             if (rc == RELOC_TLS_LEFT) { ntls++; continue; }   // 同任天堂 rtld：TLS 重定位留给游戏 sdk 的 __nnmusl_init_dso（reloc_class.h）
@@ -891,6 +895,18 @@ static void *ro_local_init(void) {
     if (guest_sym("_ZN2nn2ro6detail15g_pAutoLoadListE")) LOG("nn::ro 交接：游戏 SDK 有自动装载表头却既不导出 RoModule::Initialize 也不导出 LoadModule，自动装载表留空（LookupSymbol 查不到符号）");
     return NULL;
 }
+// RoModule 里「懒绑定入口」字段的偏移（rtld 填、SDK 的 Initialize 清零）：从游戏 SDK 导出的 RoModule::RestoreFunctions 读——
+//   它把指向被卸模块的函数槽写回这个字段：ldr Xt, [x0, #偏移] 紧跟 str Xt, [Xn, Xm]。本机 11 份 SDK（10.x–20.x）都是 0xc8；读不出回 -1。
+//   老 SDK（11-13 一款第一方游戏）函数名是单数 RoModule::RestoreFunction、字段在 +0xb0，同样两条指令：两个名字都认
+static long ro_stub_off(void) {
+    const uint32_t *f = guest_sym("_ZN2nn2ro6detail8RoModule16RestoreFunctionsEPS2_");
+    if (!f) f = guest_sym("_ZN2nn2ro6detail8RoModule15RestoreFunctionEPS2_");
+    for (int i = 1; f && i < 0x100 && f[i - 1] != 0xd65f03c0; i++) {
+        uint32_t s = f[i], l = f[i - 1];
+        if ((s & 0xffe00c00) == 0xf8200800 && (l & 0xffc00000) == 0xf9400000 && ((l >> 5) & 31) == 0 && (l & 31) == (s & 31)) return (long)((l >> 10) & 0xfff) * 8;
+    }
+    return -1;
+}
 static void ro_handoff(void) {
     g_nauto = g_nmod;
     void *init5 = guest_sym("_ZN2nn2ro6detail8RoModule10InitializeEmmPKNS1_3Elf5Elf643DynEb");   // (基址, 大小, 动态段, 布尔)
@@ -899,7 +915,7 @@ static void ro_handoff(void) {
     if (!init5 && !init2 && !init6 && !guest_sym("_ZN2nn2ro6detail15g_pAutoLoadListE")) { LOG("nn::ro 交接：游戏 SDK 没有 RoModule::Initialize（不用 nn::ro），不建自动装载表"); return; }
     // 有交接全局却建不了模块对象（初始化内联进 LoadModule 的 SDK）：全局照写、自动装载表留空环——LookupSymbol 返回「找不到」而不是读空表头，nn::ro 装 NRO 照常挂手动装载表
     void *bad = init6 ? sw_xstack_wrap("nn::ro RoModule 初始化报错", (void *)ro_init_bad) : NULL;
-    unsigned n = 0;
+    unsigned n = 0, nlazy = 0; long stub_off = ro_stub_off(); void *bind = guest_sym("_ZN2nn2ro9BindEntryEv");
     for (int i = 0; (init5 || init2 || init6) && i < g_nmod; i++) {
         module_t *m = &g_mod[i];
         uint32_t mod0 = *(uint32_t *)(m->base + 4); int32_t rel = *(int32_t *)(m->base + mod0 + 0x18);
@@ -915,14 +931,19 @@ static void ro_handoff(void) {
             if (!hb || !hd) { LOG("【红】nn::ro 交接：%s 的模块对象里没有基址 / 动态段（%d / %d），找来的初始化参数不对，不进自动装载表", m->name, hb, hd); continue; }
         }
         o->prev = g_ro_auto.prev; o->next = &g_ro_auto; g_ro_auto.prev->next = o; g_ro_auto.prev = o; n++;
+        // rtld 的懒绑定交接（同 SDK RoModule::Relocation 末尾）：模块对象记 PLT 表头，GOT[1] = 模块对象、GOT[2] = nn::ro::BindEntry。
+        //   缺了它，游戏的 nn::ro 卸 NRO 时把本模块指向它的函数槽改回 0，重装后一调就跳 0（#858：换角色后 pc 0、lr 在 main）
+        if (m->plt_stub && stub_off >= 0) *(uint64_t *)((uint8_t *)o + stub_off) = m->plt_stub;
+        if (m->pltgot && bind) { uint64_t *got = (uint64_t *)(m->base + m->pltgot); got[1] = (uint64_t)o; got[2] = (uint64_t)bind; nlazy++; }
     }
+    if (n && (stub_off < 0 || !bind)) LOG("【红】nn::ro 交接：游戏 SDK 里认不出懒绑定交接（RestoreFunctions 偏移 %ld、BindEntry %s）：卸 NRO 后主程序调它的函数会跳 0", stub_off, bind ? "有" : "没有");
     void *look = sw_xstack_wrap("nn::ro LookupGlobalAuto", (void *)ro_lookup_auto);
     static const char *const k[4] = {"_ZN2nn2ro6detail15g_pAutoLoadListE", "_ZN2nn2ro6detail17g_pManualLoadListE",
                                      "_ZN2nn2ro6detail14g_pRoDebugFlagE", "_ZN2nn2ro6detail34g_pLookupGlobalAutoFunctionPointerE"};
     const uint64_t v[4] = {(uint64_t)&g_ro_auto, (uint64_t)&g_ro_manual, (uint64_t)&g_ro_debug, (uint64_t)look};
     unsigned w = 0;
     for (int i = 0; i < g_nmod; i++) for (int j = 0; j < 4; j++) { uint64_t *p = module_sym(&g_mod[i], k[j]); if (p) { *p = v[j]; w++; } }
-    LOG("nn::ro 交接：自动装载表 %u 个模块（RoModule::Initialize %s），交接全局写了 %u 处", n, init5 ? "导出四参" : init2 ? "导出二参" : init6 ? "LoadModule 里的五参" : "没有，表留空", w);
+    LOG("nn::ro 交接：自动装载表 %u 个模块（RoModule::Initialize %s），交接全局写了 %u 处；懒绑定交接 %u 个模块（入口字段 +%#lx）", n, init5 ? "导出四参" : init2 ? "导出二参" : init6 ? "LoadModule 里的五参" : "没有，表留空", w, nlazy, (unsigned long)stub_off);
 }
 static uint64_t g_rtld_lookup_manual_slot;
 static void finish_modules(void) {

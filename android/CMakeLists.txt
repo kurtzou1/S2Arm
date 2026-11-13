@@ -20,7 +20,7 @@ option(S2A_ANDROID_VK_ENGINE "Build the shared NVN frontend + direct provider + 
 # nvk = 新回放层（docs/设计_Vulkan回放层重搭.md）：回放核心 graphics/nvn/replay + nvn_gpu_* Vulkan 后端 + native/gfx_plat 平台件。
 # 这个取值下构建里不含旧回放与绘制源（mtl_vk_shim / mtl_vk_adapter / vk_record / nvn_vk_first_draw / nvn_vk_texcache …）。
 # 新层达标后删除 nvn_vk 取值与旧源，这个选项又回到只有一个取值。
-set(S2ARM_ANDROID_VK_BACKEND "nvn_vk" CACHE STRING "NVN backend behind the shared frontend: nvn_vk | nvk")
+set(S2ARM_ANDROID_VK_BACKEND "nvk" CACHE STRING "NVN backend behind the shared frontend: nvk (new replay layer, default) | nvn_vk (old layer, diagnosis only)")
 set_property(CACHE S2ARM_ANDROID_VK_BACKEND PROPERTY STRINGS nvn_vk nvk)
 if(NOT S2ARM_ANDROID_VK_BACKEND MATCHES "^(nvn_vk|nvk)$")
     message(FATAL_ERROR "S2ARM_ANDROID_VK_BACKEND=${S2ARM_ANDROID_VK_BACKEND}: the old 'engine' backend (d2r Vulkan replay engine) was deleted; use nvn_vk or nvk")

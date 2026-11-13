@@ -36,6 +36,11 @@ void ns2_get_motion(ns2_motion *out) { *out = sample; }
 void ns2_get_motion_left(ns2_motion *out) { *out = (ns2_motion){0}; }   // 没拼对：左只没有读数（拼对左右两路由 launchers/macos/Tests/input_test.m 经启动器通道测）
 void ns2_get_mouse_side(int side, ns2_mouse *out) { (void)side; *out = (ns2_mouse){0}; }   // Joy-Con 2 光学鼠标：这里没有读数（通道左右鼠标由 launchers/macos/Tests/input_test.m 测）
 ns2_kind ns2_get_output_kind(void) { return output_kind; }
+// #520 A：直连也开原始方向；单只 Joy-Con 在游戏不用单只样式时由宿主转横握（真实现在 NS2JoyCon.c，这里只记次数）
+static int joycon_raw, sideways_calls, sideways_motion_calls;
+void ns2_set_joycon_raw(int raw) { joycon_raw = raw; }
+void ns2_joycon_raw_to_sideways(ns2_kind kind, ns2_state *state) { sideways_calls++; }
+void ns2_joycon_sideways_motion(ns2_kind kind, ns2_motion *motion) { if (kind == NS2_KIND_JOYCON_L || kind == NS2_KIND_JOYCON_R) sideways_motion_calls++; }
 void ns2_send_pair_lease(const ns2_vibration pair[2], unsigned duration) {
     assert(duration == 1000); memcpy(sent, pair, sizeof sent); sends++;
 }
@@ -68,33 +73,41 @@ int main(void) {
     s2a_pad_motion motion;
     unsetenv("S2A_NS2_SOCKET");
     unsetenv("S2A_RUMBLE_SCALE");
-    assert(!s2a_mac_ns2_read(&input) && !starts);
+    assert(!s2a_mac_ns2_read(&input, NULL) && !starts);
     s2a_mac_ns2_set_motion_enabled(1); // A game can request sensors before connection.
     assert(s2a_mac_ns2_connect() && starts == 1 && imu);
     s2a_mac_ns2_focus(1);
     status_callback(NS2_STATUS_READY, "test connected", NULL);
     assert(s2a_mac_ns2_kind() == NS2_KIND_JOYCON_L);   // 直连模式：型号取传输层的对外输出形态
+    assert(joycon_raw);   // 直连同样让传输层报原始方向（#520 A）
+    // 单只左 Joy-Con、游戏还没告诉样式（扮 Pro）：读一次就转横握；游戏用 JoyconLeft 时不转
+    { ns2_state probe = {.buttons = 1}; input_callback(&probe, NULL); uint32_t side = 0;
+      assert(s2a_mac_ns2_read(&input, &side) && sideways_calls == 1 && !s2a_mac_ns2_raw_now());
+      s2a_mac_ns2_set_game_style(1 << 3);
+      assert(s2a_mac_ns2_read(&input, &side) && sideways_calls == 1 && s2a_mac_ns2_raw_now());
+      s2a_mac_ns2_set_game_style(0); }
+    output_kind = NS2_KIND_PRO;   // 以下按 Pro 手柄测原样直通（Pro 不整形）
     uint64_t session = s2a_mac_ns2_rumble_session();
     assert(session);
     // Physical Nintendo A, left stick up, and full independent right stick.
     ns2_state physical = {.buttons=1, .lx=-32767, .ly=32767, .rx=12345, .ry=-23456};
     input_callback(&physical, NULL);
-    assert(s2a_mac_ns2_read(&input) && !memcmp(&input, &physical, sizeof input));
+    assert(s2a_mac_ns2_read(&input, NULL) && !memcmp(&input, &physical, sizeof input));
     s2a_mac_ns2_set_back_buttons(1u << 6, 1u << 7); // GL -> L; GR -> R.
     physical.buttons = (1ull << NS2_TEST_BUTTON_GL) | (1ull << NS2_TEST_BUTTON_GR) | 1;
     input_callback(&physical, NULL);
-    assert(s2a_mac_ns2_read(&input));
+    assert(s2a_mac_ns2_read(&input, NULL));
     assert((input.buttons & 0xffff) == ((1u << 6) | (1u << 7) | 1));
     physical.buttons = 1; input_callback(&physical, NULL);
-    assert(s2a_mac_ns2_read(&input) && (input.buttons & 0xffff) == 1);
+    assert(s2a_mac_ns2_read(&input, NULL) && (input.buttons & 0xffff) == 1);
     physical.buttons = 1ull << NS2_TEST_BUTTON_GL; input_callback(&physical, NULL);
     s2a_mac_ns2_set_back_buttons(1, 0); // Remapping a held paddle takes effect immediately.
-    assert(s2a_mac_ns2_read(&input) && (input.buttons & 0xffff) == 1);
+    assert(s2a_mac_ns2_read(&input, NULL) && (input.buttons & 0xffff) == 1);
     s2a_mac_ns2_set_back_buttons(0, 0);
-    assert(s2a_mac_ns2_read(&input) && !(input.buttons & 0xffff));
+    assert(s2a_mac_ns2_read(&input, NULL) && !(input.buttons & 0xffff));
     physical.buttons = (1ull << 16) | (1ull << 17) | (1ull << 18);
     input_callback(&physical, NULL);
-    assert(s2a_mac_ns2_read(&input) && !(input.buttons & 0xffff));
+    assert(s2a_mac_ns2_read(&input, NULL) && !(input.buttons & 0xffff));
     sample = (ns2_motion){.known=1, .host_timestamp_us=123456,
         .acceleration_x=.1f, .acceleration_y=.2f, .acceleration_z=1,
         .gyro_x=90, .gyro_y=-45, .gyro_z=180};
@@ -105,7 +118,7 @@ int main(void) {
     s2a_mac_ns2_set_rumble_pair(session, pair);
     assert(sends == 1 && sent[0].low_amp == s2a_hp_feel(.2f) && sent[1].high_freq == 640);
     s2a_mac_ns2_focus(0);
-    assert(stops && !imu && !s2a_mac_ns2_rumble_session() && !s2a_mac_ns2_read(&input));
+    assert(stops && !imu && !s2a_mac_ns2_rumble_session() && !s2a_mac_ns2_read(&input, NULL));
     assert(!s2a_mac_ns2_read_motion(&motion));
     s2a_mac_ns2_set_rumble_pair(session, pair); assert(sends == 1);
     s2a_mac_ns2_focus(1);
@@ -113,7 +126,7 @@ int main(void) {
     assert(s2a_mac_ns2_rumble_session() != session);
     s2a_mac_ns2_set_rumble_pair(session, pair); assert(sends == 1);
     status_callback(NS2_STATUS_DISCONNECTED, "test disconnect", NULL);
-    assert(!s2a_mac_ns2_read(&input) && !s2a_mac_ns2_rumble_session());
+    assert(!s2a_mac_ns2_read(&input, NULL) && !s2a_mac_ns2_rumble_session());
     assert(s2a_mac_ns2_connect() && scans == 1 && starts == 1);
     status_callback(NS2_STATUS_READY, "test reconnect", NULL);
     assert(s2a_mac_ns2_rumble_session() != session);
@@ -139,7 +152,7 @@ int main(void) {
         .motion_known = 1,
     };
     assert(send(relay, &packet, sizeof packet, 0) == sizeof packet);
-    for (int i = 0; i < 100 && !s2a_mac_ns2_read(&input); i++) usleep(1000);
+    for (int i = 0; i < 100 && !s2a_mac_ns2_read(&input, NULL); i++) usleep(1000);
     assert(input.buttons == 1 && input.lx == -123 && input.ly == 456);
     assert(s2a_mac_ns2_status() == NS2_STATUS_READY);
 
@@ -200,7 +213,7 @@ int main(void) {
         .epoch = 10, .state = {.buttons = 2}, .ready = 1, .status = NS2_STATUS_READY,
     };
     assert(send(relay, &packet, sizeof packet, 0) == sizeof packet);
-    for (int i = 0; i < 100 && !(s2a_mac_ns2_read(&input) && input.buttons == 2); i++) usleep(1000);
+    for (int i = 0; i < 100 && !(s2a_mac_ns2_read(&input, NULL) && input.buttons == 2); i++) usleep(1000);
     assert(input.buttons == 2);
     s2a_mac_ns2_disconnect();
     memset(&packet, 0, sizeof packet);

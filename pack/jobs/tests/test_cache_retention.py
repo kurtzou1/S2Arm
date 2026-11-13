@@ -71,7 +71,11 @@ class CompilerRetentionTests(unittest.TestCase):
             def stat(path, *args, **kwargs):
                 info = real_stat(path, *args, **kwargs)
                 if path == c.library:
-                    return SimpleNamespace(st_dev=info.st_dev + 1)
+                    # 只把设备号换成另一个卷，其余照真的：Python 3.12 的 Path.is_dir() 还经 Path.stat() 读 st_mode
+                    # （3.13 起不经过），只给 st_dev 的替身在 3.12 上报 AttributeError: no attribute 'st_mode'
+                    fields = list(info)
+                    fields[2] = info.st_dev + 1   # os.stat_result 次序：st_mode, st_ino, st_dev, …
+                    return os.stat_result(fields)
                 return info
             budget = {'volumes': [{'role': 'library', 'needBytes': 18 << 30,
                                    'freeBytes': 12 << 30, 'enough': False}]}

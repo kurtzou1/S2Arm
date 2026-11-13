@@ -1077,6 +1077,28 @@ class Context:
             out.write(f"[s2a] 收掉本阶段工具会话里的残留进程 {len(left)} 个：{'、'.join(left[:8])}\n")
             out.flush()
 
+    def stop_child(self, process, out, term_wait):
+        """停本阶段工具：TERM 等 term_wait 秒，没退再 KILL 等 5 秒。KILL 之后还在 = 进程卡在系统内核里（等换页的磁盘读、等显卡驱动），
+        信号要等它从内核回来才生效：记一条诊断、不抛异常。原先第二次等待超时直接抛 TimeoutExpired，盖掉了正在处理的取消 / 失败，
+        这一局的诊断也没记上（#837：8 GB Mac 上客体内存文件后备换页卡死，玩家点停止后只看到一串 TimeoutExpired）"""
+        self.signal_child(process, "TERM")
+        try:
+            process.wait(timeout=term_wait)
+            return True
+        except subprocess.TimeoutExpired:
+            pass
+        self.signal_child(process, "KILL")
+        try:
+            process.wait(timeout=5)
+            return True
+        except subprocess.TimeoutExpired:
+            message = (f"{self.stage or '这一步'}的进程收到结束信号后 {term_wait + 5} 秒仍未退出：卡在系统内核里"
+                       "（常见于内存不够时等换页的磁盘读，或等显卡驱动），系统处理完后会自行结束。")
+            out.write(f"[s2a] 【红】{message}\n")
+            out.flush()
+            self.diagnostic(message, "child_unkillable")
+            return False
+
     def signal_child(self, process, sig):
         if os.name == "nt":
             return winproc.signal_child(process)
@@ -1188,12 +1210,7 @@ class Context:
                     time.sleep(.1)
                 if satisfied:
                     # 产物已就绪，工具只是收尾挂住：收掉进程组，退出码不作判据（调用方已用 until 的读数确认）
-                    self.signal_child(p, "TERM")
-                    try:
-                        p.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        self.signal_child(p, "KILL")
-                        p.wait(timeout=5)
+                    self.stop_child(p, out, term_wait=10)
                     self.reap(p, out)
                     if pf: ppos = self.stage_progress(pf, ppos, final=True)   # 收完进程组再补读一次：退出前写的最后几行也发出去（同下）
                     reader.join(timeout=5)
@@ -1227,12 +1244,7 @@ class Context:
                     raise Failure(message, code="tool_exit")
             finally:
                 if p.poll() is None:
-                    self.signal_child(p, "TERM")
-                    try:
-                        p.wait(timeout=4)
-                    except subprocess.TimeoutExpired:
-                        self.signal_child(p, "KILL")
-                        p.wait(timeout=5)
+                    self.stop_child(p, out, term_wait=4)
                 self.reap(p, out)   # 异常 / 取消 / 超时路径（正常路径上面已收过，这里收不到东西）
                 p.stdout.close()
                 self.children.discard(p)

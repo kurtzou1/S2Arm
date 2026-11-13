@@ -1069,6 +1069,7 @@ public sealed partial class EnvironmentWindow
                 buttons.Children.Add(copy);
             }
             result.Children.Add(buttons);
+            if (packState == "failed") result.Children.Add(ReportHintText());
             var feedback = new WrapPanel { Orientation = Orientation.Horizontal };
             feedback.Children.Add(Muted(T("export.fail.feedback"), 12));
             var gh = new Button { Content = T("export.fail.github"), Background = Transparent,
@@ -1089,26 +1090,6 @@ public sealed partial class EnvironmentWindow
         return result;
     }
 
-    /// 「复制错误摘要」：正文由作业层 report.py 生成（Mac / Windows 同一份）；没有作业记录才用 fallback。
-    /// operations 为 null：这种失败没有作业记录（环境检查），直接用 fallback。
-    private Button CopyReportButton(string? gameId, string[]? operations, Func<string> fallback)
-    {
-        var copy = new Button { Content = T("export.fail.copy"), Padding = new Thickness(16, 9),
-            Background = Brush.Parse("#29292D"), Foreground = Ink, CornerRadius = new CornerRadius(8) };
-        copy.Click += async (_, _) =>
-        {
-            var extra = System.Text.Json.JsonSerializer.Serialize(new Dictionary<string, object?>
-            {
-                ["app"] = AppVersion,
-                ["checks"] = (report?.Checks ?? []).Where(c => c.Status != "ok")
-                    .Select(c => new Dictionary<string, string> { ["name"] = c.Name, ["message"] = c.Message }).ToList()
-            });
-            var text = (operations is null ? null : await JobReportClient.RunAsync(paths, privateRoot, gameId, operations, extra)) ?? fallback();
-            if (TopLevel.GetTopLevel(this)?.Clipboard is { } clipboard) await clipboard.SetTextAsync(text);
-            copy.Content = T("export.fail.copied");
-        };
-        return copy;
-    }
 
     // ---- error summary for clipboard (only when the job left no record) ----
 

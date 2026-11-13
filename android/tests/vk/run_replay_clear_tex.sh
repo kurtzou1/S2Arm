@@ -27,7 +27,10 @@ cc -std=c11 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter -DS2A_ANDROID_VK_
     "$repo/android/tests/vk/t_replay_clear_tex.c" "$repo/graphics/nvn/replay/rp_clear_tex.c" \
     "$repo/android/native/nvn/backend_vulkan.c" "$repo/android/native/direct/vk_device.c" "$repo/android/native/direct/gs_path.c" \
     "$repo/android/native/nvn/nvn_vk_format.c" "$repo/graphics/nvn/gfx/nvn/nvn_fmt_expand.c" "$repo/android/native/nvn/nvn_vk_bcdec.c" \
-    -Wl,--wrap=vkAllocateDescriptorSets -Wl,--wrap=vkGetPhysicalDeviceFormatProperties -lvulkan -lpthread -lm -o "$out/test"
+    "$repo/android/native/nvn/nvn_vk_driver_cache.c" "$repo/android/native/direct/sha256.c" \
+    -Wl,--wrap=vkAllocateDescriptorSets -Wl,--wrap=vkGetPhysicalDeviceFormatProperties \
+    -Wl,--wrap=vkCreatePipelineCache -Wl,--wrap=vkGetPipelineCacheData \
+    -Wl,--wrap=vkCreateGraphicsPipelines -Wl,--wrap=vkCreateComputePipelines -lvulkan -lpthread -lm -o "$out/test"
 export VK_DRIVER_FILES=$icd VK_LAYER_PATH=$layer VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation VK_LAYER_VALIDATE_SYNC=1
 set +e
 timeout 180 "$out/test" 2>&1 | tee "$out/log"

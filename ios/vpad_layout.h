@@ -77,7 +77,10 @@ CGPoint S2AVPadStickResponse(CGPoint input, CGFloat deadzone, CGFloat saturation
 // 灵敏度：先把手指相对半径的位移乘 sensitivity，再钳到单位圆内。sensitivity = 1 与不调用相同
 CGPoint S2AVPadStickSensitivity(CGPoint input, CGFloat sensitivity);
 
-// 每键外观：大小倍率 0.6–1.6、不透明度 0.2–1、是否隐藏；与布局几何分开存，布局文件格式不变
+// 大小倍率范围（每键与整体同一范围）：上限原 1.6，#372 连打类游戏要更大的键，放到 4（文件格式不变，旧存档照读）
+#define S2A_VPAD_SCALE_MIN 0.6
+#define S2A_VPAD_SCALE_MAX 4.0
+// 每键外观：大小倍率 S2A_VPAD_SCALE_MIN–MAX、不透明度 0.2–1、是否隐藏；与布局几何分开存，布局文件格式不变
 typedef struct { CGFloat scale, opacity; BOOL hidden; } S2AVPadKeyStyle;
 static const NSInteger kS2AVPadKeyThemeCount = 5;   // 0 = 默认描线，1–4 = 配色
 
@@ -111,7 +114,7 @@ static const NSInteger kS2AVPadKeyThemeCount = 5;   // 0 = 默认描线，1–4 
 - (S2AVPadKeyStyle)keyStyle:(NSString *)identifier;
 - (BOOL)setKeyStyle:(S2AVPadKeyStyle)style forKey:(NSString *)identifier persist:(BOOL)persist error:(NSError **)error;
 @property(nonatomic, readonly) NSInteger keyTheme;
-// 整体大小 0.6–1.6、整体不透明度 0.2–1：乘在每键值之上，也作用于摇杆；persist 同上
+// 整体大小 S2A_VPAD_SCALE_MIN–MAX、整体不透明度 0.2–1：乘在每键值之上，也作用于摇杆；persist 同上
 @property(nonatomic, readonly) CGFloat globalScale, globalOpacity;
 - (BOOL)setGlobalScale:(CGFloat)scale opacity:(CGFloat)opacity persist:(BOOL)persist error:(NSError **)error;
 - (BOOL)setKeyTheme:(NSInteger)theme error:(NSError **)error;

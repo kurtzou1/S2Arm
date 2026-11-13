@@ -7208,7 +7208,15 @@
   "en": "Check this computer's network (that s2arm.com opens) and click again; a partial download is never used as a good one."
  },
  {
+  "source": "导出诊断包，手动发到 GitHub 帖子或群里；网络恢复后也可以再点一次「上传给开发者」。",
+  "en": "Export the diagnostics package and post it to the GitHub issue or group yourself; once the network is back you can also click \"Upload to developers\" again."
+ },
+ {
   "source": "用原版游戏文件重新导入这款：先在游戏库里移除它，再把原版文件拖进来。",
   "en": "Re-import this game from the original game files: remove it from the library first, then drag the original files in."
+ },
+ {
+  "source": "进程卡在系统内核里还没退出（多为内存不够时等换页）；等它自行结束后再开，关掉其他占内存的程序可减少再次卡住。",
+  "en": "The process is stuck in the system kernel and has not exited yet (usually waiting on paging when memory is short). Wait for it to end on its own before starting again; closing other memory-heavy apps makes it less likely to happen again."
  }
 ]

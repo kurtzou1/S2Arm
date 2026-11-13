@@ -8,6 +8,7 @@
 #import <CoreHaptics/CoreHaptics.h>
 #import <QuartzCore/CAMetalLayer.h>
 #include "../runtime/include/s2a_pad.h"
+#include "../runtime/include/s2a_qos.h"
 #include "../runtime/include/phone_axes.h"
 #include "joycon_imu.h"
 #import "input_guide.h"
@@ -26,6 +27,7 @@
 #include "../runtime/include/s2a_gfx_mode.h"
 #include "../runtime/include/s2a_hud.h"
 #include "../runtime/include/s2a_home_quit.h"
+#include "../runtime/include/s2a_mac_focus.h"
 #include "../runtime/include/s2a_ui_text.h"
 // 界面语言（runtime/include/s2a_ui_text.h，#316），盖过 runtime/src 各 .c 返回 1 的弱缺省。Mac 宿主程序不带 .lproj、主 bundle 首选本地化
 //   总是开发区域，判不出玩家语言，所以按系统首选语言以 zh 开头判（目前 Mac 上没有显示路径用到它）
@@ -57,6 +59,12 @@ static void display_focus_publish_ex(BOOL active, BOOL may_freeze) {
     else if ((active || !may_freeze) && focus_frozen) { focus_frozen = NO; s2a_guest_freeze(0); guest_clock_freeze_for(3, 0); fprintf(stderr, "[s2a] Mac 回到焦点 / 收尾：放开客机\n"); }
 }
 static void display_focus_publish(BOOL active) { display_focus_publish_ex(active, YES); }
+// 游戏窗口对游戏算不算前台（#279）：我们自己挂在游戏窗口上的系统输入框是 key window 时照旧算前台，否则游戏收到失焦会把输入当取消
+int s2a_text_input_mac_is_input_window(NSWindow *w);   // macos/textinput_mac.m
+static BOOL game_window_focused(NSWindow *game) {
+    NSWindow *key = NSApp.keyWindow;
+    return s2a_mac_game_focused(NSApp.isActive, game && game.isKeyWindow, s2a_text_input_mac_is_input_window(key), game && key.sheetParent == game);
+}
 static _Atomic uint32_t input_seq, input_buttons;
 static _Atomic int32_t input_sticks[4];
 static NSMutableSet<NSNumber *> *keys, *mouse;
@@ -67,6 +75,41 @@ static NSUInteger system_mouse_buttons(void) { return NSEvent.pressedMouseButton
 // 系统当前按下的鼠标键（第 n 位 = 按钮 n），单测可替换（审计 P2-34）
 static NSUInteger (*read_mouse_buttons)(void) = system_mouse_buttons;
 static NSUInteger modifiers;
+// R5：HID 键盘区的原始键态（游戏读键盘区原先只有 ActivateKeyboard 时的 17 条空条目，读键盘区的游戏按什么都没反应）。
+//   Mac 键码（HIToolbox kVK_*）→ HID usage：键码与 usage 都是物理键身份，与键盘布局无关。0 = 不进键盘区
+//   （Command 组合键 keyDown: 已交系统、音量 / 亮度键系统消费、fn 无 usage、英数 / 假名只切输入法）。
+//   右修饰键在 flagsChanged 已并成左键码（键位编辑器同款约定），表里的右侧值只是备用
+static const uint8_t mac_key_hid[128] = {
+    [0x00] = 0x04, [0x01] = 0x16, [0x02] = 0x07, [0x03] = 0x09,   // A S D F
+    [0x04] = 0x0B, [0x05] = 0x0A, [0x06] = 0x1D, [0x07] = 0x1B,   // H G Z X
+    [0x08] = 0x06, [0x09] = 0x19, [0x0B] = 0x05, [0x0C] = 0x14,   // C V B Q
+    [0x0D] = 0x1A, [0x0E] = 0x08, [0x0F] = 0x15, [0x10] = 0x1C,   // W E R Y
+    [0x11] = 0x17, [0x12] = 0x1E, [0x13] = 0x1F, [0x14] = 0x20,   // T 1 2 3
+    [0x15] = 0x21, [0x16] = 0x23, [0x17] = 0x22, [0x18] = 0x2E,   // 4 6 5 =
+    [0x19] = 0x26, [0x1A] = 0x24, [0x1B] = 0x2D, [0x1C] = 0x25,   // 9 7 - 8
+    [0x1D] = 0x27, [0x1E] = 0x30, [0x1F] = 0x12, [0x20] = 0x18,   // 0 ] O U
+    [0x21] = 0x2F, [0x22] = 0x0C, [0x23] = 0x13, [0x24] = 0x28,   // [ I P Return
+    [0x25] = 0x0F, [0x26] = 0x0D, [0x27] = 0x34, [0x28] = 0x0E,   // L J ' K
+    [0x29] = 0x33, [0x2A] = 0x31, [0x2B] = 0x36, [0x2C] = 0x38,   // ; \ , /
+    [0x2D] = 0x11, [0x2E] = 0x10, [0x2F] = 0x37, [0x30] = 0x2B,   // N M . Tab
+    [0x31] = 0x2C, [0x32] = 0x35, [0x33] = 0x2A, [0x35] = 0x29,   // Space ` 退格 Esc
+    [0x36] = 0xE7, [0x37] = 0xE3, [0x38] = 0xE1, [0x3A] = 0xE0,   // 右⌘ 左⌘（组合键 keyDown: 已交系统，备用）⇧ ⌃
+    [0x3B] = 0xE2, [0x3C] = 0xE5, [0x3D] = 0xE6, [0x3E] = 0xE4,   // ⌥ 右⇧ 右⌥ 右⌃
+    [0x40] = 0x6C, [0x41] = 0x63, [0x43] = 0x55, [0x45] = 0x57,   // F17 小键盘. 小键盘* 小键盘+
+    [0x47] = 0x53, [0x4B] = 0x54, [0x4C] = 0x58, [0x4E] = 0x56,   // 小键盘Clear 小键盘/ 小键盘Enter 小键盘-
+    [0x4F] = 0x6D, [0x50] = 0x6E, [0x51] = 0x67, [0x52] = 0x62,   // F18 F19 小键盘= 小键盘0
+    [0x53] = 0x59, [0x54] = 0x5A, [0x55] = 0x5B, [0x56] = 0x5C,   // 小键盘1 2 3 4
+    [0x57] = 0x5D, [0x58] = 0x5E, [0x59] = 0x5F, [0x5A] = 0x6F,   // 小键盘5 6 7 F20
+    [0x5B] = 0x60, [0x5C] = 0x61, [0x5D] = 0x89, [0x5F] = 0x85,   // 小键盘8 9 JIS円 JIS小键盘,
+    [0x60] = 0x3E, [0x61] = 0x3F, [0x62] = 0x40, [0x63] = 0x3C,   // F5 F6 F7 F3
+    [0x64] = 0x41, [0x65] = 0x42, [0x67] = 0x44, [0x69] = 0x68,   // F8 F9 F11 F13
+    [0x6A] = 0x6B, [0x6B] = 0x69, [0x6D] = 0x43, [0x6F] = 0x45,   // F16 F14 F10 F12
+    [0x71] = 0x6A, [0x72] = 0x49, [0x73] = 0x4A, [0x74] = 0x4B,   // F15 Help(=Insert) Home PageUp
+    [0x75] = 0x4C, [0x76] = 0x3D, [0x77] = 0x4D, [0x78] = 0x3B,   // ForwardDelete F4 End F2
+    [0x79] = 0x4E, [0x7A] = 0x3A, [0x7B] = 0x50, [0x7C] = 0x4F,   // PageDown F1 ← →
+    [0x7D] = 0x51, [0x7E] = 0x52,                                  // ↓ ↑
+};
+static BOOL caps_locked;   // CapsLock 只走 flagsChanged（NSEventModifierFlagCapsLock），不进 keys
 // Main thread collects relative motion; only the HID reader consumes it.
 // Frontend timer/keyboard publications must not erase mouse packets between HID reads.
 static _Atomic int64_t mouse_dx, mouse_dy;
@@ -129,6 +172,7 @@ static void publish(uint32_t buttons, const int32_t sticks[4]) {
     atomic_fetch_add_explicit(&input_seq, 1, memory_order_seq_cst);
 }
 static GCExtendedGamepad *active_pad(NSArray *controllers);
+static BOOL ble_raw_source;   // 这一拍的输入来自报原始方向的单只 Joy-Con（sample_input 设，publish_pad_state 读；只在主线程）
 // 事件驱动输入（A2）：同一份前端状态同时写进 runtime/src/pad.c，InputPump 找到 s2a_vpad_read_ex 后就等
 //   s2a_pad_wait 的序号通知，不再 Thread.Sleep(16)。有扩展手柄时按系统手柄源发布（键盘 / 鼠标仍并进同一份状态），
 //   没有手柄时按触屏源发布；两个源互斥的语义由 pad.c 管，Mac 不另造第三份选源状态。
@@ -137,6 +181,10 @@ static void publish_pad_state(int has_pad, uint32_t buttons, const int32_t stick
     // 没手柄时必须先补一次 SYSTEM 断开：pad.c 的 selected() 只看 connected，不发就仍选 SYSTEM 并丢掉 TOUCH 更新，
     //   手柄断开瞬间按住的键会卡住、键盘也失灵（维护方 11-09 用 pad.c 最小程序复现：0x1，期望 0x2）。
     s2a_pad_update(S2A_PAD_SYSTEM, 0, 0, sticks);
+    // 单只 Joy-Con 报原始方向时按 BLE 源发布（#520 A）：InputPump 把 BLE / 系统手柄当实体手柄、不再按横握转一次（触屏源会转，
+    //   原始方向的物理键就被转两次）；其余（键盘、扮 Pro 的手柄）照旧按触屏源，BLE 源先报断开（同上 selected() 只看 connected）
+    if (ble_raw_source) { s2a_pad_update(S2A_PAD_BLE, focused ? 1 : 0, buttons, sticks); return; }
+    s2a_pad_update(S2A_PAD_BLE, 0, 0, sticks);
     s2a_pad_update(S2A_PAD_TOUCH, focused ? 1 : 0, buttons, sticks);
 }
 static void publish_pad(uint32_t buttons, const int32_t sticks[4]) {
@@ -187,6 +235,15 @@ static NSMutableSet<NSNumber *> *stale_keys;
 // 鼠标键的同一套记录（审计 P2-34，见 release_stale_mouse）
 static NSMutableDictionary<NSNumber *, NSNumber *> *mouse_up_polls;
 static NSMutableSet<NSNumber *> *stale_mouse;
+// —— 手柄快速路径（valueChangedHandler 专用队列上的回调，见 sample_input 之后的 pad_event_fast）的共享状态 ——
+//   键盘 / 鼠标位快照与静音标记由主线程每次采样刷新，槽位镜像（见 S2A_MAX_PADS 那段）照 pad_owner 抄一份；
+//   全部在 g_compose_mu 下交接，谁拿到锁谁重读要合的那份再发布，两条线交错也不丢键
+static _Atomic uint32_t kbd_buttons_snap;
+static _Atomic int32_t kbd_sticks_snap[4];
+static _Atomic int input_muted;   // 失焦 / 退出确认条开着（同 sample_input 的 muted 判据）：快速路径照它发零
+static pthread_mutex_t g_compose_mu = PTHREAD_MUTEX_INITIALIZER;   // 主线程的采样发布段与手柄快速路径互斥；publish 的序号快照也只允许一个写者在锁内
+static dispatch_queue_t pad_input_queue(void);
+static void pad_event_fast(GCController *controller);
 static void touch_end(void);   // 鼠标左键当触屏（见下）：抬起 / 复位补一帧 End
 static void reset_input(void) {
     [keys removeAllObjects]; [mouse removeAllObjects]; modifiers = 0; [key_up_polls removeAllObjects]; [stale_keys removeAllObjects];
@@ -194,7 +251,11 @@ static void reset_input(void) {
     atomic_store_explicit(&mouse_dx, 0, memory_order_relaxed);
     atomic_store_explicit(&mouse_dy, 0, memory_order_relaxed);
     atomic_store(&hold_x, 0); atomic_store(&hold_y, 0);
-    int32_t sticks[4] = {0}; publish_input(0, sticks);
+    int32_t sticks[4] = {0};
+    pthread_mutex_lock(&g_compose_mu);   // publish 的序号快照只有一个写者：reset 也走同一把锁（另一路是手柄快速路径）
+    publish_input(0, sticks);
+    pthread_mutex_unlock(&g_compose_mu);
+    uint64_t kb_none[4] = {0}; s2a_kb_update(kb_none, 0);   // R5：键盘区一并复位（失焦 / 关窗，按着的键全清）
     touch_end();   // 失焦 / 关窗：按着的触点补一帧 End（定义在下面鼠标触屏段）
 }
 static void sample_input(void);
@@ -251,6 +312,11 @@ static BOOL touch_start_pending; // 按下后还没发出 Start（快点：两�
 static BOOL touch_owner;         // 主线程：当前这次左键按下是触屏
 static _Atomic int touch_declared = -1;   // 游戏声明的触屏模式（TouchScreenModeForNx），-1 = 没声明
 // 服务层 InputPump 按符号查（同 iOS 壳 ios/touch_config.m 的同名导出）：游戏调了 SetTouchScreenConfiguration 后递一次模式，返回 1 = 收下（之后不再递）
+// 单只 Joy-Con（#520 A）：InputPump 按符号查这两个（services/S2A.Services/InputPump.cs FollowJoyconStyle）——
+//   s2a_vpad_joycon_style：连着的单只 Joy-Con 对应的样式（Ryujinx ControllerType：JoyconLeft / JoyconRight；不是单只为 0），
+//     游戏收这个样式就改成它；s2a_vpad_set_style：每次改配告诉宿主这一格现在的样式，宿主据此定原始方向还是转横握
+__attribute__((visibility("default"), used)) int s2a_vpad_joycon_style(void) { return s2a_mac_ns2_single_style(s2a_mac_ns2_kind()); }
+__attribute__((visibility("default"), used)) void s2a_vpad_set_style(int style) { s2a_mac_ns2_set_game_style(style); }
 __attribute__((visibility("default"), used)) int s2a_vpad_touch_configured(int mode) {
     if (atomic_exchange(&touch_declared, mode) < 0) fprintf(stderr, "[s2a] Mac：游戏声明了触屏配置（模式 %d）；键位没改过时左键点画面当触屏\n", mode);
     return 1;
@@ -351,8 +417,11 @@ static GCExtendedGamepad *active_pad(NSArray *controllers) {
     }
     return best;
 }
-// 手柄事件驱动（A2）：valueChangedHandler 走 GameController 的回调队列，切到主队列后与 AppKit 键盘 / 鼠标事件串行，
-//   sample_input 可以直接读 keys / mouse / config。120Hz 定时器仍保留给键盘 / 鼠标的粘键核对，并顺手补装新连接的手柄。
+// 手柄事件驱动（A2）：valueChangedHandler 走 GameController 的回调队列。队列不再挂主队列——原先为让 sample_input
+//   直接读 keys / mouse / config（与 AppKit 键盘 / 鼠标事件串行）的权衡，代价是主线程被菜单动画 / 提示条 / 系统弹窗占住时
+//   手柄事件跟着排队（延迟管线调研：列为权衡而非缺陷）。改挂专用串行队列（对齐 iOS ios/controller.m 的 s2arm.controller.input），
+//   回调只走 pad_event_fast 快速路径：照槽位采样这一只、合键盘 / 鼠标快照发布，不碰主线程的 keys / mouse / config。
+//   120Hz 主线程定时器仍保留：键盘 / 鼠标的粘键核对、补装新连接的手柄、槽位重排、六轴 / 震动 / Home 退出都在那一轮。
 // 没有扩展手柄描述、但通用物理描述里有按键的手柄（部分第三方手柄的某些模式、只给简易描述的手柄）：原先整只被忽略、游戏里没反应也没有提示。
 //   按标准键名从 physicalInputProfile 读（参照维护者提供的前端实现 Gamepad.swift 的读法）。六轴 / 震动 / Home 退出仍只认扩展手柄
 static BOOL pad_has_profile_buttons(GCController *c) { return !c.extendedGamepad && c.physicalInputProfile.buttons.count > 0; }
@@ -360,18 +429,22 @@ static void install_pad_handler(GCController *controller) {
     GCExtendedGamepad *pad = controller.extendedGamepad;
     if (pad) {
         if (pad.valueChangedHandler) return;
-        controller.handlerQueue = dispatch_get_main_queue();
+        controller.handlerQueue = pad_input_queue();
+        __weak GCController *wc = controller;   // 断开的手柄会被系统释放：弱引用防悬空（同 iOS attachSystem 的写法）
         pad.valueChangedHandler = ^(GCExtendedGamepad *profile, GCControllerElement *element) {
             (void)profile; (void)element;
-            sample_input();
+            GCController *c = wc;
+            if (c) pad_event_fast(c);
         };
         return;
     }
     if (!pad_has_profile_buttons(controller) || controller.physicalInputProfile.valueDidChangeHandler) return;
-    controller.handlerQueue = dispatch_get_main_queue();
+    controller.handlerQueue = pad_input_queue();
+    __weak GCController *wc = controller;
     controller.physicalInputProfile.valueDidChangeHandler = ^(GCPhysicalInputProfile *profile, GCControllerElement *element) {
         (void)profile; (void)element;
-        sample_input();
+        GCController *c = wc;
+        if (c) pad_event_fast(c);
     };
 }
 // 诊断：GameController 枚举到的全部手柄与描述（格式同 iOS ios/controller.m log_controllers，#456）：名称 | 类型 | extended / micro / none。
@@ -474,6 +547,8 @@ __attribute__((visibility("default"), used)) int s2a_pad_read_mouse_pair(s2a_pad
 }
 // 实体手柄退出游戏（#276）：决策在 runtime/include/s2a_home_quit.h，界面（提示条、失焦、退出）在 S2AMacDelegate 后面的 home_quit_ui
 static s2a_hq_state g_hq;
+// 静音标记跟随 focused / 退出确认条就地刷新（都在主线程）：失焦 / 开条那一拍就生效，不等下一轮 120Hz 定时采样
+static void input_mute_refresh(void) { atomic_store(&input_muted, !focused || g_hq.open); }
 static void home_quit_ui(s2a_hq_action action);
 static void sample_home_quit(GCExtendedGamepad *pad) {
     if (!pad) return;
@@ -654,6 +729,9 @@ static _Atomic int pad_live = 1;   // 本次采样占到的最高槽位 + 1（�
 static const void *pad_id[S2A_MAX_PADS];
 static GCController *pad_owner[S2A_MAX_PADS];
 static const char ns2_slot_id = 0;
+// 槽位镜像（g_compose_mu 下）：主线程整表重建后照 pad_owner 抄一份（含强引用），手柄快速路径按它认「这只手柄占哪个槽」；
+//   NS2 那路没有 GCController 对象，留空。快速路径的其余共享状态（键鼠快照 / 静音标记 / 合成锁）在前面的前置段
+static GCController *pad_slot_owner[S2A_MAX_PADS];
 // 按配置表把一只手柄的键名 / 轴名映射成 Switch 按键位 + 摇杆（不含键盘 / 鼠标；调用方负责叠加）
 static void map_pad_inputs(NSDictionary *all, NSDictionary *axes, uint32_t *out_buttons, int32_t sticks[4]) {
     uint32_t buttons = 0;
@@ -714,6 +792,23 @@ static void sample_profile_state(GCController *c, uint32_t *out_buttons, int32_t
     map_pad_inputs(all, @{@"leftX": @(ls.xAxis.value), @"leftY": @(ls.yAxis.value), @"rightX": @(rs.xAxis.value), @"rightY": @(rs.yAxis.value)}, out_buttons, sticks);
 }
 // 槽位计划 s2a_slot_plan 在 runtime/src/pad.c（iOS ios/controller.m 共用同一份规则）
+// R5：原始键态 → HID 键盘区（s2a_kb_update，键码表 mac_key_hid）。位图是 (keys, modifiers, caps_locked, muted) 的
+//   纯函数、每次全量重排：粘键核对删键 / 恢复、失焦复位、keyUp 被别的响应者吃掉都自然跟着对，不会漂。
+//   muted（失焦 / 退出确认条）发全零，同手柄口径。修饰键也按 usage 进位图（0xE0–0xE2），同 Ryujinx 键盘路径
+static void publish_keyboard(BOOL muted) {
+    uint64_t bits[4] = {0, 0, 0, 0}; uint32_t mods = 0;
+    if (!muted) {
+        for (NSNumber *code in keys) {
+            unsigned usage = code.unsignedIntValue < 128 ? mac_key_hid[code.unsignedIntValue] : 0;
+            if (usage) bits[usage >> 6] |= 1ULL << (usage & 63);
+        }
+        if (caps_locked) { bits[0x39 >> 6] |= 1ULL << (0x39 & 63); mods |= 1u << 8; }   // CapsLock：位图 0x39 + 字段 bit8（真机 HID 键盘两处都报）
+        if (modifiers & 1) mods |= 1u << 1;    // Shift → KeyboardModifier.Shift
+        if (modifiers & 2) mods |= 1u << 0;    // Control
+        if (modifiers & 4) mods |= 1u << 2;    // Option → LeftAlt
+    }
+    s2a_kb_update(bits, mods);
+}
 static void sample_input(void) {
     int32_t kbd_sticks[4] = {0}; uint32_t kbd_buttons = 0;
     uint32_t slot_buttons[S2A_MAX_PADS] = {0};
@@ -742,9 +837,17 @@ static void sample_input(void) {
         }
         for (NSString *name in config[@"mouse"]) if ([mouse containsObject:config[@"mouse"][name]]) action(name, &kbd_buttons, kbd_sticks);
     }
+    // —— 与手柄快速路径共用 g_compose_mu 的采样发布段：键鼠 / 静音快照、槽位镜像、槽位原子量、发布都在锁内交接，
+    //    两条线谁拿到锁谁重读要合的那份再发布，交错也不会丢键 ——
+    pthread_mutex_lock(&g_compose_mu);
+    // 键盘 / 鼠标快照：快速路径合槽 0 时读的就是这两份（失焦 / 开退出确认条时 kbd_buttons 本来就是 0）
+    atomic_store(&kbd_buttons_snap, kbd_buttons);
+    for (int i = 0; i < 4; i++) atomic_store(&kbd_sticks_snap[i], kbd_sticks[i]);
+    atomic_store(&input_muted, muted);
     // 在线的手柄（顺序 = 连接顺序）：Switch 2 Pro 一只 + 系统报上来的扩展手柄；数组留得比槽位多，超出的交给 s2a_slot_plan 判 -1 丢弃
-    ns2_state ble;
-    BOOL hasBLE = s2a_mac_ns2_read(&ble);
+    ns2_state ble; uint32_t bleSide = 0;
+    BOOL hasBLE = s2a_mac_ns2_read(&ble, &bleSide);   // 单只 Joy-Con 已按游戏样式整形；SL / SR 不在键位配置里，直接并进它那一槽（#520 A）
+    ble_raw_source = hasBLE && s2a_mac_ns2_raw_now();
     const void *live_ids[9]; GCExtendedGamepad *live_pads[9]; GCController *live_ctrls[9] = {nil}; int n = 0;
     if (hasBLE) { live_ids[n] = &ns2_slot_id; live_pads[n] = nil; n++; }
     // Switch 2 Pro 是输入来源时系统手柄那一路不读（同改前；同一只手柄也可能出现在系统手柄列表里，两路都读会变成两个玩家）
@@ -757,14 +860,14 @@ static void sample_input(void) {
     int slot_of[9];
     int live = s2a_slot_plan(pad_id, live_ids, n, S2A_MAX_PADS, slot_of);
     // 断开清槽：整表重建，只有本轮还在的才写回（强引用随之释放，不会留悬空指针）
-    for (int i = 0; i < S2A_MAX_PADS; i++) { pad_id[i] = NULL; pad_owner[i] = nil; }
+    for (int i = 0; i < S2A_MAX_PADS; i++) { pad_id[i] = NULL; pad_owner[i] = nil; pad_slot_owner[i] = nil; }
     for (int j = 0; j < n; j++) {
         int s = slot_of[j];
         if (s < 0) continue;   // 超过 S2A_MAX_PADS 只：多出来的不参与
         pad_id[s] = live_ids[j];
-        if (live_ids[j] == &ns2_slot_id) sample_ns2_state(&ble, &slot_buttons[s], slot_sticks[s]);
-        else if (live_pads[j]) { pad_owner[s] = live_ctrls[j]; sample_pad_state(live_pads[j], &slot_buttons[s], slot_sticks[s]); }
-        else { pad_owner[s] = live_ctrls[j]; sample_profile_state(live_ctrls[j], &slot_buttons[s], slot_sticks[s]); }
+        if (live_ids[j] == &ns2_slot_id) { sample_ns2_state(&ble, &slot_buttons[s], slot_sticks[s]); slot_buttons[s] |= bleSide; }
+        else if (live_pads[j]) { pad_owner[s] = live_ctrls[j]; pad_slot_owner[s] = live_ctrls[j]; sample_pad_state(live_pads[j], &slot_buttons[s], slot_sticks[s]); }
+        else { pad_owner[s] = live_ctrls[j]; pad_slot_owner[s] = live_ctrls[j]; sample_profile_state(live_ctrls[j], &slot_buttons[s], slot_sticks[s]); }
     }
     if (muted) {
         memset(slot_buttons, 0, sizeof slot_buttons); memset(slot_sticks, 0, sizeof slot_sticks);
@@ -782,6 +885,8 @@ static void sample_input(void) {
         for (int i = 0; i < 4; i++) atomic_store(&pad_sticks[s][i], slot_sticks[s][i]);
     }
     publish_input(slot_buttons[0], slot_sticks[0]);   // 玩家 1：旧 ABI + 事件驱动 ABI（含鼠标视角）
+    publish_keyboard(muted);   // R5：键盘区原始键态（先落键态再唤醒，泵醒来读到同一拍）
+    pthread_mutex_unlock(&g_compose_mu);
 }
 // 多手柄槽位（服务层 InputPump 按符号查；没导出时退回旧的单手柄 ABI）
 __attribute__((visibility("default"), used)) int s2a_vpad_pad_count(void) { return atomic_load(&pad_live); }
@@ -790,6 +895,49 @@ __attribute__((visibility("default"), used)) uint32_t s2a_vpad_read_pad(int inde
     uint32_t buttons = atomic_load_explicit(&pad_buttons[index], memory_order_seq_cst);
     for (int i = 0; i < 4; i++) sticks[i] = atomic_load_explicit(&pad_sticks[index][i], memory_order_seq_cst);
     return buttons;
+}
+// 手柄事件的专用串行队列（对齐 iOS ios/controller.m 的 s2arm.controller.input）：valueChangedHandler 全在这条队列上跑，
+//   主线程被菜单动画 / 提示条 / 系统弹窗占住时手柄事件不再排在后面。交互优先级对齐主队列，输入不排低优先后面
+static dispatch_queue_t pad_input_queue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        queue = dispatch_queue_create("dev.s2arm.mac-pad-input", s2a_qos_queue_attr(DISPATCH_QUEUE_SERIAL, S2A_QOS_INPUT));
+    });
+    return queue;
+}
+// 手柄快速路径（pad_input_queue 上跑，valueChangedHandler 的回调体）：只采样这一只手柄并立即发布。
+//   槽 0（玩家 1）合主线程刚刷新的键盘 / 鼠标快照走发布（旧 ABI 快照 + pad.c 事件唤醒 HID 泵，pad.c 自带锁）；
+//   槽 1–3（玩家 2–4）只写自己的槽位原子量，再 s2a_pad_wake 叫泵立刻重读（原先玩家 2–4 只能等 16ms 心跳）。
+//   没占到槽（刚接上、还没被 120Hz 定时器排进槽位表）就交给定时器那一轮，下一事件起走这里——采样读的是当前整份状态，
+//   长按 / 持续推摇杆时快速路径与定时器采样任一份都完整，与 A2 的「只发变化不丢按住」负对照同一性质。
+//   静音（失焦 / 开退出确认条）照发零；失焦那一拍 pad.c 也已 inactive（s2a_pad_set_active(0)）双兜底。
+//   全程 g_compose_mu 与主线程的采样发布段互斥，不碰 keys / mouse 这些只在主线程安全的东西（config 启动后不变，
+//   键位布局 / 槽位身份 / 强引用走原子量与锁内镜像）。
+static void pad_event_fast(GCController *controller) {
+    pthread_mutex_lock(&g_compose_mu);
+    int slot = -1;
+    for (int i = 0; i < S2A_MAX_PADS; i++) if (pad_slot_owner[i] == controller) { slot = i; break; }
+    if (slot < 0) { pthread_mutex_unlock(&g_compose_mu); return; }
+    uint32_t buttons = 0; int32_t sticks[4] = {0};
+    if (controller.extendedGamepad) sample_pad_state(controller.extendedGamepad, &buttons, sticks);
+    else sample_profile_state(controller, &buttons, sticks);
+    if (atomic_load(&input_muted)) {
+        buttons = 0; memset(sticks, 0, sizeof sticks);
+    } else if (slot == 0) {
+        buttons |= atomic_load(&kbd_buttons_snap);   // 槽 0 = 键盘 / 鼠标 / 触屏 + 第一只手柄（快照由主线程每次采样刷新）
+        for (int i = 0; i < 4; i++) sticks[i] += atomic_load(&kbd_sticks_snap[i]);
+    }
+    for (int i = 0; i < 4; i++) sticks[i] = MAX(-32767, MIN(32767, sticks[i]));
+    atomic_store(&pad_buttons[slot], buttons);
+    for (int i = 0; i < 4; i++) atomic_store(&pad_sticks[slot][i], sticks[i]);
+    if (slot == 0) {
+        publish(buttons, sticks);   // 旧 ABI 快照：与主线程同一个 publish（序号锁不允许多写者并写，g_compose_mu 兜住）
+        s2a_pad_update(S2A_PAD_SYSTEM, 1, buttons, sticks);   // 占到槽即在线；不读主线程的 focused（静音发零、失焦时 pad.c inactive 已兜底）
+    } else {
+        s2a_pad_wake();   // 槽 0 那份没变也要叫醒泵：玩家 2–4 的槽位原子量变了，泵重读就拿到
+    }
+    pthread_mutex_unlock(&g_compose_mu);
 }
 
 // keyUp 可能在菜单或其他响应者处被消费。定时采样只核对本窗口已经接收的键，
@@ -866,11 +1014,28 @@ static void screen_fps_note(NSWindow *w) {
 - (BOOL)acceptsFirstResponder { return YES; }
 - (BOOL)acceptsFirstMouse:(NSEvent *)event { (void)event; return YES; }
 - (BOOL)isFlipped { return YES; }
+// 出图层可画尺寸（#575）：缺省跟「视图尺寸 × backingScaleFactor」走。
+//   S2A_OUT_W / S2A_OUT_H（两个都给、各 64–8192 像素）：可画尺寸钉在这个值，层内容在窗口里等比居中、余边留黑，拖窗口 / 全屏 / 系统恢复 frame 都不改渲染尺寸；
+//   S2A_OUT_SCALE（0.5–1.0，同 iOS graphics/nvn/host_adapt.m layout_layer）：可画尺寸按倍数缩，交系统合成器放大。两者都给时固定尺寸优先
+static int g_out_w = -1, g_out_h; static double g_out_k = 1;
+static void out_cfg(void) {
+    if (g_out_w >= 0) return;
+    const char *w = getenv("S2A_OUT_W"), *h = getenv("S2A_OUT_H"), *k = getenv("S2A_OUT_SCALE");
+    long ww = w ? atol(w) : 0, hh = h ? atol(h) : 0; double kk = k ? atof(k) : 1;
+    g_out_w = 0; g_out_h = 0; g_out_k = kk >= 0.5 && kk <= 1.0 ? kk : 1.0;
+    if (ww >= 64 && ww <= 8192 && hh >= 64 && hh <= 8192) { g_out_w = (int)ww; g_out_h = (int)hh; fprintf(stderr, "[s2a] 出图层可画尺寸固定 %dx%d（S2A_OUT_W / S2A_OUT_H），窗口里等比居中、余边留黑\n", g_out_w, g_out_h); }
+    else if (w || h) fprintf(stderr, "[s2a] S2A_OUT_W / S2A_OUT_H 要两个都给、各 64–8192（读到 %s / %s），出图层照旧跟窗口\n", w ? w : "-", h ? h : "-");
+    if (!g_out_w && g_out_k != 1.0) fprintf(stderr, "[s2a] 出图层可画尺寸按 %.2f 倍（S2A_OUT_SCALE），交系统合成器放大\n", g_out_k);
+    else if (k && g_out_k == 1.0 && kk != 1.0) fprintf(stderr, "[s2a] S2A_OUT_SCALE 要 0.5–1.0（读到 %s），按 1\n", k);
+}
 - (void)layout {
     [super layout];
     CAMetalLayer *metal = (CAMetalLayer *)self.layer;
     metal.contentsScale = self.window.backingScaleFactor ?: 1;
     CGSize size = CGSizeMake(self.bounds.size.width * metal.contentsScale, self.bounds.size.height * metal.contentsScale);
+    out_cfg();
+    if (g_out_w) { size = CGSizeMake(g_out_w, g_out_h); metal.contentsGravity = kCAGravityResizeAspect; }
+    else if (g_out_k != 1.0) size = CGSizeMake(floor(size.width * g_out_k), floor(size.height * g_out_k));
     if (size.width >= 1 && size.height >= 1) metal.drawableSize = size;   // 直连模式没有 NxGal 跟窗口尺寸，层的可画尺寸在这里跟上
     nxgal_window_set_size((int32_t)size.width, (int32_t)size.height);
     // 宽屏跟窗口比例（审计 P1-83：原先从不换屏幕宽，拉宽 / 全屏后逻辑分辨率仍 1920×1080、两侧黑；维护者 任何比例都满屏）：同 iOS 口径换屏，
@@ -922,6 +1087,7 @@ static void esc_hold_start(NSWindow *window) {
 }
 - (void)keyUp:(NSEvent *)e { if (e.keyCode == 53) esc_hold_cancel(); [keys removeObject:@(e.keyCode)]; [stale_keys removeObject:@(e.keyCode)]; [key_up_polls removeObjectForKey:@(e.keyCode)]; sample_input(); }
 - (void)flagsChanged:(NSEvent *)e {
+    caps_locked = (e.modifierFlags & NSEventModifierFlagCapsLock) != 0;   // R5：键盘区随 modifiers 一并由 sample_input 发布
     modifiers = ((e.modifierFlags & NSEventModifierFlagShift) ? 1 : 0) |
                 ((e.modifierFlags & NSEventModifierFlagControl) ? 2 : 0) |
                 ((e.modifierFlags & NSEventModifierFlagOption) ? 4 : 0);
@@ -1098,7 +1264,7 @@ static __weak S2AMacDelegate *g_delegate;
 }
 - (void)shutdown {
     display_focus_publish_ex(NO, NO);
-    set_mouse_capture(NO); focused = NO; s2a_pad_set_active(0); reset_input();
+    set_mouse_capture(NO); focused = NO; input_mute_refresh(); s2a_pad_set_active(0); reset_input();
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ s2a_mac_ns2_detach(); s2a_host_shutdown("Mac 窗口关闭"); });
 }
 // 菜单栏「切换游戏」：先留标记（S2A_RETURN_MARKER，开局作业给的路径），再走关窗同一条收尾（等存档写完）；作业见到标记，启动器回到游戏库并切到前台。
@@ -1120,10 +1286,11 @@ static __weak S2AMacDelegate *g_delegate;
 - (void)windowWillEnterFullScreen:(NSNotification *)note { (void)note; self.windowedFrame = self.window.frame; }
 - (void)windowDidExitFullScreen:(NSNotification *)note { (void)note; esc_hold_cancel(); if (!NSIsEmptyRect(self.windowedFrame)) [self.window setFrame:self.windowedFrame display:YES]; }
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender { (void)sender; [self shutdown]; return NSTerminateCancel; }
-- (void)windowDidBecomeKey:(NSNotification *)note { (void)note; display_focus_publish(NSApp.isActive && self.window.isKeyWindow); if (mouse_release_pending) set_mouse_capture(NO); focused = YES; s2a_pad_set_active(1); reset_input(); }
-- (void)windowDidResignKey:(NSNotification *)note { (void)note; display_focus_publish(NO); set_mouse_capture(NO); focused = NO; s2a_pad_set_active(0); reset_input(); }
-- (void)applicationDidResignActive:(NSNotification *)note { (void)note; display_focus_publish(NO); set_mouse_capture(NO); focused = NO; s2a_pad_set_active(0); reset_input(); }
-- (void)applicationDidBecomeActive:(NSNotification *)note { (void)note; display_focus_publish(NSApp.isActive && self.window.isKeyWindow); focused = self.window.isKeyWindow; }
+- (void)windowDidBecomeKey:(NSNotification *)note { (void)note; display_focus_publish(game_window_focused(self.window)); if (mouse_release_pending) set_mouse_capture(NO); focused = YES; input_mute_refresh(); s2a_pad_set_active(1); reset_input(); }
+// 失去 key：本机键鼠照旧停喂、复位；报给游戏的焦点看 key window 落到哪（AppKit 发这条通知时 NSApp.keyWindow 已是新窗口，sheet 也一样）
+- (void)windowDidResignKey:(NSNotification *)note { (void)note; display_focus_publish(game_window_focused(self.window)); set_mouse_capture(NO); focused = NO; input_mute_refresh(); s2a_pad_set_active(0); reset_input(); }
+- (void)applicationDidResignActive:(NSNotification *)note { (void)note; display_focus_publish(NO); set_mouse_capture(NO); focused = NO; input_mute_refresh(); s2a_pad_set_active(0); reset_input(); }
+- (void)applicationDidBecomeActive:(NSNotification *)note { (void)note; display_focus_publish(game_window_focused(self.window)); focused = self.window.isKeyWindow; input_mute_refresh(); }
 @end
 
 // 确认条：打开时游戏失焦（同 Switch 的 HOME 菜单）、不收手柄输入；A / 点「退出」走关窗同一条收尾（等存档写完），B / Home / 点「回到游戏」/ 30 秒没理会收起
@@ -1134,11 +1301,11 @@ static void home_quit_ui(s2a_hq_action action) {
         case S2A_HQ_OPEN:
             fprintf(stderr, "[s2a] 手柄按住 Home：弹出退出确认\n");
             display_focus_publish(NO);
-            d.banner.onAnswer = ^(BOOL accept) { s2a_hq_close(&g_hq); if (accept) [g_delegate shutdown]; else display_focus_publish(NSApp.isActive && g_delegate.window.isKeyWindow); };
+            d.banner.onAnswer = ^(BOOL accept) { s2a_hq_close(&g_hq); input_mute_refresh(); if (accept) [g_delegate shutdown]; else display_focus_publish(game_window_focused(g_delegate.window)); };
             [d.banner showTitle:@S2A_DPROMPT_HOME_QUIT_TITLE body:@S2A_DPROMPT_HOME_QUIT_BODY accept:@S2A_DPROMPT_HOME_QUIT_ACCEPT decline:@S2A_DPROMPT_HOME_QUIT_DECLINE seconds:30];
             break;
         case S2A_HQ_QUIT: [g_delegate shutdown]; d.banner.onAnswer = nil; d.banner.hidden = YES; fprintf(stderr, "[s2a] 手柄按 A：退出游戏\n"); break;
-        case S2A_HQ_CANCEL: d.banner.onAnswer = nil; d.banner.hidden = YES; display_focus_publish(NSApp.isActive && d.window.isKeyWindow); break;
+        case S2A_HQ_CANCEL: d.banner.onAnswer = nil; d.banner.hidden = YES; display_focus_publish(game_window_focused(d.window)); break;
         default: break;
     }
 }
@@ -1223,7 +1390,7 @@ void s2a_front_run(void (*guest_main)(void)) {
         window.title = gameIdentity[@"name"];
         window.contentMinSize = NSMakeSize(640, 360); window.delegate = delegate; window.collectionBehavior |= NSWindowCollectionBehaviorFullScreenPrimary;
         S2AMetalView *view = [[S2AMetalView alloc] initWithFrame:NSMakeRect(0, 0, 1280, 720)];
-        view.wantsLayer = YES; CAMetalLayer *layer = [CAMetalLayer layer]; layer.opaque = YES;
+        view.wantsLayer = YES; CAMetalLayer *layer = [CAMetalLayer layer]; layer.opaque = YES; layer.backgroundColor = NSColor.blackColor.CGColor;   // 固定出图尺寸时等比居中的余边（#575）
         view.layer = layer; window.contentView = view; window.acceptsMouseMovedEvents = YES;
         delegate.window = window;
         screen_fps_note(window);
@@ -1258,10 +1425,12 @@ void s2a_front_run(void (*guest_main)(void)) {
             tick(); [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *t) { (void)t; tick(); }];
         }
         [view setNeedsLayout:YES]; [window center]; [window makeKeyAndOrderFront:nil]; [window makeFirstResponder:view];
-        [app activateIgnoringOtherApps:YES]; focused = YES;
+        // 启动即全屏（#575，S2A_FULLSCREEN=1）：窗口出来后走系统原生全屏，同菜单「进入全屏幕」，退出后回到窗口
+        { const char *fs = getenv("S2A_FULLSCREEN"); if (fs && !strcmp(fs, "1")) { fprintf(stderr, "[s2a] 启动即全屏（S2A_FULLSCREEN=1）\n"); dispatch_async(dispatch_get_main_queue(), ^{ if (!window_fullscreen(window)) window_fullscreen_toggle(window); }); } }
+        [app activateIgnoringOtherApps:YES]; focused = YES; input_mute_refresh();
         s2a_pad_set_active(1);
         install_pad_handlers();
-        display_focus_publish(app.isActive && window.isKeyWindow);
+        display_focus_publish(game_window_focused(window));
         delegate.inputGuide = [[S2AMacInputGuide alloc] initWithName:window.title gameID:gameIdentity[@"gameId"] mapping:config gameWindow:window];
         controls.target = delegate.inputGuide;
         delegate.timer = [NSTimer scheduledTimerWithTimeInterval:1.0/120 repeats:YES block:^(NSTimer *t) { (void)t; poll_input(); }];
@@ -1278,7 +1447,7 @@ void s2a_front_run(void (*guest_main)(void)) {
         [app run];
         s2a_pad_set_active(0);
         display_focus_publish_ex(NO, NO);
-        set_mouse_capture(NO); focused = NO; reset_input(); s2a_mac_ns2_detach(); front_layer_detach();
+        set_mouse_capture(NO); focused = NO; input_mute_refresh(); reset_input(); s2a_mac_ns2_detach(); front_layer_detach();
     }
 }
 // GPU 卡住暂停（11-13；graphics/nvn/host_adapt.m s2a_gpu_stuck 经 dlsym 调，Metal 完成回调线程）：连续 3 帧各过 3 秒。冻游戏线程（不再往 GPU 送新活，已交的跑完），

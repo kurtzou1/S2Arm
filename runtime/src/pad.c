@@ -74,7 +74,8 @@ void s2a_pad_update(s2a_pad_source source, int connected, uint32_t buttons, cons
     }
     if (!connected) memset(p, 0, sizeof *p);
     else {
-        buttons &= 0xffffu; // NS2 Home/Capture/C/GL/GR 不可误当成 Ryujinx 的摇杆方向位。
+        // NS2 Home/Capture/C/GL/GR（16..20）不可误当成 Ryujinx 的摇杆方向位；SL / SR（Ryujinx 24..27，单只 Joy-Con 原始方向时 Mac 前端给，#520 A）放行
+        buttons &= S2A_PAD_KEYS;
         p->latch |= buttons & ~p->buttons;
         p->buttons = buttons; p->connected = 1;
         memcpy(p->axes, axes, sizeof p->axes);
@@ -180,6 +181,21 @@ PAD_EXPORT void s2a_pad_record_commit(const s2a_pad_snapshot *snapshot) {
 PAD_EXPORT void s2a_pad_get_latency(s2a_pad_latency *out, int reset) {
     lock(); *out = latency;
     if (reset) memset(&latency, 0, sizeof latency);
+    pthread_mutex_unlock(&pad_mu);
+}
+// HID 键盘区原始键态（R5，见 s2a_pad.h）：宿主前端全量替换、服务层每次 HID 提交读一次。
+//   与手柄共用一把锁、一个通知序号：变化才换新并唤醒（notify(0) 不动延迟统计的时间戳），没映射进手柄按键的键也不等心跳
+static uint64_t kb_keys[4]; static uint32_t kb_mods;
+void s2a_kb_update(const uint64_t keys[4], uint32_t modifiers) {
+    lock();
+    if (memcmp(kb_keys, keys, sizeof kb_keys) || kb_mods != modifiers) {
+        memcpy(kb_keys, keys, sizeof kb_keys); kb_mods = modifiers; notify(0);
+    }
+    pthread_mutex_unlock(&pad_mu);
+}
+PAD_EXPORT void s2a_kb_read(uint64_t keys_out[4], uint32_t *modifiers) {
+    lock();
+    memcpy(keys_out, kb_keys, sizeof kb_keys); *modifiers = kb_mods;
     pthread_mutex_unlock(&pad_mu);
 }
 // 手柄分类只认系统给的类别（productCategory 由苹果驱动按设备类型填，不是设备自报的名字）与手柄类型（宿主判 GCXboxGamepad / GCDualShockGamepad /

@@ -10,6 +10,7 @@ targets:
       - ios/lab/Lab.m
       - ios/vpad.m
       - ios/play_layout.m
+      - ios/play_reflection.m
       - ios/vpad_layout.m
       - ios/vpad_settings.m
       - ios/vpad_cheats.m
@@ -40,6 +41,7 @@ targets:
       - sdk: ExternalAccessory.framework
       - sdk: UniformTypeIdentifiers.framework
       - sdk: MetricKit.framework
+      - sdk: CoreTelephony.framework
       - sdk: Metal.framework
       - sdk: libz.tbd
     info:

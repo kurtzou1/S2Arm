@@ -2168,7 +2168,7 @@ static p_bind_handles *bind_handles(NVNcommandBuffer *c, int op, int st, int fir
         int tb = CB(c)->tex_base, sb = CB(c)->samp_base;
         for (int i = 0; i < n && (tb || sb); i++) {
             uint64_t v = r->h[i], tid = v & 0xfffff, sid = v >> 20;
-            if (op == OP_BIND_SAMP) { if (sid) r->h[i] = (sid + (uint64_t)sb) << 20; }
+            if (op == OP_BIND_SAMP) { r->h[i] = (sid + (uint64_t)sb) << 20; }
             else { tid += (uint64_t)tb; if (sid && op == OP_BIND_TEX) sid += (uint64_t)sb; r->h[i] = tid | sid << 20; }   // texture ID 0 is that pool's first entry, moved like any other
         }
     }

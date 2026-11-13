@@ -219,6 +219,7 @@ struct WelcomeView: View {
                     if let job = downloading(tool) { InlineProgress(session: job).padding(.top, 8) }
                     if let failed = failure(of: tool) {
                         Text(loc.backend(failed)).font(.manrope(12.5)).foregroundStyle(LauncherPalette.danger).fixedSize(horizontal: false, vertical: true).padding(.top, 4)
+                        ReportHint()
                     }
                 }
             }

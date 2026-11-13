@@ -5,6 +5,7 @@
 #include "ns2_relay.h"
 #include "../ios/haptic_retry.h"
 #include <errno.h>
+#include <stdatomic.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -32,6 +33,8 @@ static int relayThreadStarted;
 static uint64_t epoch = 1;
 static uint16_t back_buttons[2];
 static float rumble_scale = 1;
+// 游戏这一格现在的手柄样式（Ryujinx ControllerType 位；InputPump 改配后经 s2a_vpad_set_style 告诉这里；0 = 还不知道）
+static _Atomic int gameStyle;
 
 static float rumble_amplitude(float amplitude) {
     return fminf(1, s2a_hp_feel(amplitude) * rumble_scale);
@@ -233,6 +236,7 @@ int s2a_mac_ns2_connect(void) {
         return 1;
     }
 
+    ns2_set_joycon_raw(1);   // 单只 Joy-Con 报原始方向，转不转由 s2a_mac_ns2_read 按游戏样式定（同通道那头的连接程序）
     int started = ns2_start_with_motion(receive_input, receive_status, receive_motion, NULL);
     if (started) {
         pthread_mutex_lock(&lock);
@@ -292,13 +296,42 @@ void s2a_mac_ns2_focus(int focused) {
     }
 }
 
-int s2a_mac_ns2_read(ns2_state *state) {
+// 单只 Joy-Con（#520 A）：传输层报原始方向（ns2_set_joycon_raw），这里按游戏这一格的样式定——
+//   游戏用的是这只那一侧的单只样式（JoyLeft / JoyRight）就原样给，由游戏按 NpadJoyHoldType 自己转竖 / 横（同真机）；
+//   双 Joy-Con（InputPump 只在游戏不收 Pro 时报它，ReportedStyle）也原样给：真机是双手模式只接一侧、直握（11-11 实机：一款体育游戏的球类项目）；
+//   否则（游戏收 Pro、宿主扮 Pro / 掌机）转成横握视角，同改前
+enum { STYLE_JOYCON_PAIR = 1 << 2, STYLE_JOYCON_LEFT = 1 << 3, STYLE_JOYCON_RIGHT = 1 << 4 };   // Ryujinx ControllerType
+enum { KEY_SL_LEFT = 1u << 24, KEY_SR_LEFT = 1u << 25, KEY_SL_RIGHT = 1u << 26, KEY_SR_RIGHT = 1u << 27 };   // Ryujinx ControllerKeys
+int s2a_mac_ns2_raw_wanted(ns2_kind kind, int style) {
+    return (kind == NS2_KIND_JOYCON_L && (style == STYLE_JOYCON_LEFT || style == STYLE_JOYCON_PAIR)) ||
+           (kind == NS2_KIND_JOYCON_R && (style == STYLE_JOYCON_RIGHT || style == STYLE_JOYCON_PAIR));
+}
+int s2a_mac_ns2_single_style(ns2_kind kind) {
+    return kind == NS2_KIND_JOYCON_L ? STYLE_JOYCON_LEFT : kind == NS2_KIND_JOYCON_R ? STYLE_JOYCON_RIGHT : 0;
+}
+uint32_t s2a_mac_ns2_shape(ns2_kind kind, int raw, ns2_state *s) {
+    if (kind != NS2_KIND_JOYCON_L && kind != NS2_KIND_JOYCON_R) return 0;
+    if (!raw) { ns2_joycon_raw_to_sideways(kind, s); return 0; }
+    int left = kind == NS2_KIND_JOYCON_L;
+    uint32_t keys = (s->buttons >> NS2_BUTTON_SL & 1 ? (left ? KEY_SL_LEFT : KEY_SL_RIGHT) : 0) |
+                    (s->buttons >> NS2_BUTTON_SR & 1 ? (left ? KEY_SR_LEFT : KEY_SR_RIGHT) : 0);
+    s->buttons &= ~((1ull << NS2_BUTTON_SL) | (1ull << NS2_BUTTON_SR));
+    return keys;
+}
+void s2a_mac_ns2_set_game_style(int style) { atomic_store(&gameStyle, style); }
+static ns2_kind kind_locked(void) { return !ready ? NS2_KIND_NONE : relayFD >= 0 ? relayKind : ns2_get_output_kind(); }
+int s2a_mac_ns2_raw_now(void) { return s2a_mac_ns2_raw_wanted(s2a_mac_ns2_kind(), atomic_load(&gameStyle)); }
+
+int s2a_mac_ns2_read(ns2_state *state, uint32_t *side_keys) {
     pthread_mutex_lock(&lock);
     int available = ready && foreground;
     *state = available ? input : (ns2_state){0};
+    ns2_kind kind = available ? kind_locked() : NS2_KIND_NONE;
     if (state->buttons & (1ull << 19)) state->buttons |= back_buttons[0];
     if (state->buttons & (1ull << 20)) state->buttons |= back_buttons[1];
     pthread_mutex_unlock(&lock);
+    uint32_t keys = s2a_mac_ns2_shape(kind, s2a_mac_ns2_raw_wanted(kind, atomic_load(&gameStyle)), state);
+    if (side_keys) *side_keys = keys;
     return available;
 }
 
@@ -315,7 +348,7 @@ int s2a_mac_ns2_relay_due(ns2_status status, const char *relay) {
 
 ns2_kind s2a_mac_ns2_kind(void) {
     pthread_mutex_lock(&lock);
-    ns2_kind kind = !ready ? NS2_KIND_NONE : relayFD >= 0 ? relayKind : ns2_get_output_kind();
+    ns2_kind kind = kind_locked();
     pthread_mutex_unlock(&lock);
     return kind;
 }
@@ -444,12 +477,16 @@ EXPORT int s2a_mac_ns2_read_mouse_pair(s2a_pad_mouse out[2]) {
 
 EXPORT int s2a_mac_ns2_read_motion(s2a_pad_motion *out) {
     ns2_motion sample = {0};
+    ns2_kind kind = NS2_KIND_NONE;
     pthread_mutex_lock(&lock);
     if (ready && foreground && motion_requested) {
         if (relayFD >= 0) sample = relayMotion;
         else ns2_get_motion(&sample);
+        kind = kind_locked();
     }
     pthread_mutex_unlock(&lock);
+    // 单只 Joy-Con 的六轴同按键：游戏用单只样式就原样给，否则换成横握视角（传输层原始方向时不转）
+    if (!s2a_mac_ns2_raw_wanted(kind, atomic_load(&gameStyle))) ns2_joycon_sideways_motion(kind, &sample);
     *out = (s2a_pad_motion){0};
     if (!sample.known) return 0;
     *out = pad_motion(&sample);

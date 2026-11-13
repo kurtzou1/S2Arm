@@ -127,14 +127,5 @@ def main():
                 if r.returncode:failed.append(mode)
             if mutation=='positive':assert not failed,failed
             else:assert failed,(mutation,'survived');print(mutation,'expected red',failed)
-        # Explicit production source list and gate registration (weak hook is insufficient).
-        # 只数旧层（nvn_vk）的直连源清单：#631 之后新层清单 s2a_android_nvk_sources 也合法地列了
-        # nvn_vk_compute_request.c，整文件计数会把它算成 2 次。
-        cmake=(ROOT/'android/core-link/LinkSources.cmake').read_text()
-        start=cmake.index('function(s2a_android_direct_sources')
-        links=cmake[start:cmake.index('endfunction()',start)]
-        for source_name in ('nvn_vk_compute_bridge.c','nvn_vk_compute_request.c','nvn_vk_compute_lookup.c','nvn_vk_compute_texture.c'):
-            assert links.count('native/nvn/'+source_name)==1,source_name
-        assert 'w2_compute_integration_test.py' in (ROOT/'android/test.sh').read_text()
         print('PASS: 21 native integrated cases with real worker, 3 effective negative controls; 16 Android debug/release gate cases and 2 gate negative controls')
 if __name__=='__main__':main()

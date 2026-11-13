@@ -9,7 +9,9 @@
   ② DM_OODLE_SERVE=1 服务模式：2 个请求各回 u64 原长 + 原样字节；stdin 关掉后进程 10 秒内自己退出、退 0（11-05 Windows 出包机：解完进程不退）
   ③ RELR 夹具（11-05 普查 c1105_r4 轩辕剑柒 main 用 DT_RELR，gamedec 原先抛「还没实现」）：malloc / free 不再直接 bl，改经数据段两个函数指针槽 ldr + blr，
      槽里原值 = 函数在模块里的偏移，只由 DT_RELR 重定位（一个地址项改 FREE 槽、一个位图项第 1 位改紧跟的 MALLOC 槽）：装载基址 0x0800_0000 加上去才跳得对，
-     没展开或没加基址就跳到未映射的低地址 → 执行失败；期望同 ①（3 块逐字节相同、退 0）"""
+     没展开或没加基址就跳到未映射的低地址 → 执行失败；期望同 ①（3 块逐字节相同、退 0）
+  ④ 指针认证夹具（#854）：pacibsp / paciza / autiza / blraaz / retab，按不开密钥的 CPU 执行，期望同 ①
+  ⑤ 未定义指令夹具（#854）：服务模式第一个请求 10 秒内回 0 或退出、stdin 关掉后 15 秒内退出（不许挂着不回）"""
 import os, struct, subprocess, sys, tempfile
 from pathlib import Path
 
@@ -23,34 +25,38 @@ def chk(name, want, got):
 LZ5, MALLOC, FREE, GOT = 0x100, 0x200, 0x210, 0x1800
 FREE_P, MALLOC_P, RELR = 0x1808, 0x1810, 0x1320   # RELR 夹具：两个函数指针槽（数据段）、RELR 表（只读段，JMPREL 之后）
 def bl(pc, to): return 0x94000000 | ((to - pc) // 4 & 0x3ffffff)
-def code(relr=False):
+def code(relr=False, pac=False, udf=False):
     w = {}; pc = LZ5
     def emit(x):
         nonlocal pc; w[pc] = x; pc += 4
     def call(fn, slot):   # 直接 bl，或（RELR 夹具）ldr x16, <槽>；blr x16
         if not relr: emit(bl(pc, fn)); return
         emit(0x58000000 | ((slot - pc) // 4 & 0x7ffff) << 5 | 16); emit(0xD63F0200)
+    RET = 0xD65F0FFF if pac else 0xD65F03C0   # ④ 指针认证夹具：retab，否则 ret
+    if udf: emit(0x00000000)          # ⑤ 未定义指令夹具：udf #0，入口第一条就执行不下去
+    if pac: emit(0xD503237F)          # pacibsp（提示空间，原本就当空操作）
     emit(0xF81F0FFE)                  # str x30, [sp, #-16]!
     emit(0xAA0003E9); emit(0xAA0103EA); emit(0x2A0203EB)   # mov x9, x0；mov x10, x1；mov w11, w2
+    if pac: emit(0xDAC123E9); emit(0xDAC133E9)   # paciza x9；autiza x9（不开密钥时指针原样：x9 = src 不变）
     emit(0xD2A00100)                  # movz x0, #0x8, lsl #16（0x80000）
     call(MALLOC, MALLOC_P)
     fail_at = pc; emit(0)             # cbz x0, fail（下面回填）
     call(FREE, FREE_P)
     emit(0xAA0A03E0); emit(0xAA0903E1); emit(0x2A0B03E2)   # mov x0, x10；mov x1, x9；mov w2, w11
     emit(0x58000000 | ((GOT - pc) // 4 & 0x7ffff) << 5 | 16)   # ldr x16, GOT（memcpy）
-    emit(0xD63F0200)                  # blr x16
+    emit(0xD63F0A1F if pac else 0xD63F0200)   # blraaz x16 / blr x16
     emit(0x2A0B03E0)                  # mov w0, w11
-    emit(0xF84107FE); emit(0xD65F03C0)                     # ldr x30, [sp], #16；ret
+    emit(0xF84107FE); emit(RET)                            # ldr x30, [sp], #16；ret / retab
     w[fail_at] = 0xB4000000 | ((pc - fail_at) // 4 & 0x7ffff) << 5   # cbz x0 → fail
     emit(0x12800000)                  # fail: movn w0, #0（-1）
-    emit(0xF84107FE); emit(0xD65F03C0)
+    emit(0xF84107FE); emit(RET)
     w[MALLOC], w[MALLOC + 4] = 0xD2800000, 0xD65F03C0      # malloc：mov x0, #0；ret
     w[FREE] = 0xD65F03C0                                   # free：ret
     return w
 
-def nso(relr=False):
+def nso(relr=False, pac=False, udf=False):
     img = bytearray(0x1820)
-    for a, x in code(relr).items(): struct.pack_into('<I', img, a, x)
+    for a, x in code(relr, pac, udf).items(): struct.pack_into('<I', img, a, x)
     struct.pack_into('<I', img, 4, 0x1000)                 # 映像 +4：MOD0 偏移
     img[0x1000:0x1004] = b'MOD0'; struct.pack_into('<6i', img, 0x1004, 0x40, 0x810, 0x810, 0, 0, 0)   # 动态段在 MOD0+0x40；bss / eh_frame_hdr 不用
     names = [b'', b'LZ5_decompress_safe', b'malloc', b'free', b'memcpy']
@@ -106,6 +112,31 @@ with tempfile.TemporaryDirectory() as t:
     except subprocess.TimeoutExpired: v, got = None, ('60 秒没退出（槽没按基址改，跳进了别处）', False)
     chk('③ RELR 夹具 --verify：3 块逐字节相同、退 0', (0, True), got)
     if v is not None and v.returncode: print((v.stdout + v.stderr)[-1500:])
+
+    # ④ 指针认证夹具（#854 Windows 出包：游戏 main 用 ARMv8.3 指针认证编，gamedec 执行到 retab d65f0fff 报未定义指令）：
+    #   入口 pacibsp、paciza / autiza x9、经导入 blraaz x16 调 memcpy、retab 返回。本工具按「不开密钥」的 CPU 执行：
+    #   签名 / 认证不改指针、带认证的跳转 / 返回同普通跳转 / 返回 → 期望同 ①（3 块逐字节相同、退 0）
+    (t / 'pac/exefs').mkdir(parents=True); (t / 'pac/exefs/main').write_bytes(nso(pac=True))
+    try: v = subprocess.run([*tool, '--verify', str(t / 'pac'), str(ref)], capture_output=True, text=True, timeout=60); got = (v.returncode, '3 块逐字节相同、0 块不同' in v.stdout)
+    except subprocess.TimeoutExpired: v, got = None, ('60 秒没退出', False)
+    chk('④ 指针认证夹具 --verify：3 块逐字节相同、退 0', (0, True), got)
+    if v is not None and v.returncode: print((v.stdout + v.stderr)[-1500:])
+    # ⑤ 解码器执行到未定义指令（udf #0）的服务模式：第一个请求就失败。期望 10 秒内回话——回 0（这块解不了）或进程退出（读到文件尾）都算，
+    #   进程不能挂着不回（#854：调用方 ue_pak 一直等这 8 个字节，出包界面停在「抽取 0/4」三个多小时）
+    (t / 'udf/exefs').mkdir(parents=True); (t / 'udf/exefs/main').write_bytes(nso(udf=True))
+    p = subprocess.Popen([*tool, str(t / 'udf')], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=dict(os.environ, DM_OODLE_SERVE='1'))
+    import threading
+    box = []; th = threading.Thread(target=lambda: box.append(p.stdout.read(8)), daemon=True)
+    p.stdin.write(struct.pack('<QQ', 5, 5) + b'hello'); p.stdin.flush(); th.start(); th.join(10)
+    ans = '10 秒没回话' if th.is_alive() else ('回 0' if box[0] == bytes(8) else '读到文件尾' if box[0] == b'' else f'回 {box[0].hex()}')
+    chk('⑤ 未定义指令：10 秒内回 0 或退出', True, ans in ('回 0', '读到文件尾'))
+    if ans not in ('回 0', '读到文件尾'): print(f'   实际：{ans}')
+    try: p.stdin.close()
+    except OSError: pass
+    try: rc = p.wait(timeout=15)
+    except subprocess.TimeoutExpired: p.kill(); p.wait(); rc = '15 秒没退出'
+    err = p.stderr.read().decode(errors='replace')
+    chk('⑤ 未定义指令：stdin 关掉后 15 秒内退出、报错带出未定义指令', (True, True), (rc != '15 秒没退出', '未定义指令' in err))
 
 print(f'{"✓" if not bad else "✗"} gamedec：{bad} 不通')
 sys.exit(1 if bad else 0)

@@ -66,6 +66,12 @@ def main():
                        "--settings-probe", str(Path(temporary) / "out"), "--data-root=" + str(Path(temporary) / "data")], env)
             if "✓ 引导状态下点设置键" not in out.stdout:
                 raise RuntimeError("settings probe did not report success")
+        # 顶栏「故障报修」（11-13）：各页 / 各引导状态下顶栏最右都有这个键（UI.Snapshots/ReportProbe.cs）
+        with tempfile.TemporaryDirectory(prefix="s2arm-report-probe-") as temporary:
+            out = run([dotnet, "run", "--project", str(probe), "--no-build", "--configuration", "Release", "--",
+                       "--report-probe", str(Path(temporary) / "out"), "--data-root=" + str(Path(temporary) / "data")], env)
+            if "✓ 各页顶栏故障报修键" not in out.stdout:
+                raise RuntimeError("report probe did not report success")
         if args.negative_controls:
             with tempfile.TemporaryDirectory(prefix="s2arm-ui-negative-") as temporary:
                 target = Path(temporary).resolve()

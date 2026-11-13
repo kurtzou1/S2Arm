@@ -26,6 +26,9 @@ public sealed class SharedText
     /// <summary>规格里有没有这个键（没有时 Get 返回「[键]」原样，界面不该显示它）。</summary>
     public bool Has(string key) => texts.ContainsKey(key);
 
+    /// 报错页统一的「故障报修」指引（11-13）：report.hint 里的 {button} 换成顶栏按钮名 report.button（Mac BackendText.reportHint 同一取法）
+    public string ReportHint(string language) => Get("report.hint", language).Replace("{button}", Get("report.button", language));
+
     public string Get(string key, string language) =>
         texts.TryGetValue(key, out var value) && value.TryGetValue(language, out var text) ? text : $"[{key}]";
 

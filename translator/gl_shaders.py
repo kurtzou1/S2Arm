@@ -131,14 +131,36 @@ ES_SRC = Path(__file__).resolve().parents[1] / "graphics/nvn/gfx/gl" / "gl_glsl_
 _es_lock, _es_bin = threading.Lock(), None
 
 
+def es_name():
+    """改写工具的文件名（按 gl_glsl_es.c 源码哈希）：现编与启动器预编件同名，源码一改就对不上、不会用旧件"""
+    h = hashlib.sha1(ES_SRC.read_bytes()).hexdigest()[:12]
+    return f"glsl_es-{h}" + (".exe" if os.name == "nt" else "")   # Windows：不带 .exe 起不来
+
+
+def es_prebuilt():
+    """启动器随发版预编的改写工具（S2A_PREBUILT_TOOLS/codecs/<es_name>，launchers/windows/bundle_prepare_win.py）：在就用，不现编、不要编译器。
+    #852：Windows 玩家机没有 C 编译器，原先每支都现编失败、离线库只剩表头，OpenGL 款全部落到运行时现编"""
+    tools = os.environ.get("S2A_PREBUILT_TOOLS")
+    p = Path(tools) / "codecs" / es_name() if tools else None
+    return p if p and p.is_file() else None
+
+
 def es_tool():
     global _es_bin
     with _es_lock:
         if _es_bin is None:
+            pre = es_prebuilt()
+            if pre:
+                _es_bin = pre
+                return _es_bin
             d = tempfile.mkdtemp(prefix="glsl-es-")
             atexit.register(shutil.rmtree, d, True)
-            exe = Path(d) / ("glsl_es.exe" if os.name == "nt" else "glsl_es")   # Windows：不带 .exe 起不来
-            run([os.environ.get("CC", "cc"), "-O2", "-DS2A_GLSL_ES_MAIN", ES_SRC, "-o", exe])
+            exe = Path(d) / es_name()
+            cc = os.environ.get("CC") or shutil.which("cc") or shutil.which("clang") or "cc"   # 同 nxfmt：Windows 发版机只有 clang
+            try:
+                run([cc, "-O2", "-DS2A_GLSL_ES_MAIN", ES_SRC, "-o", exe])
+            except OSError as e:   # 找不到编译器：说清缺什么（原先只有一句 FileNotFoundError，逐支报红）
+                raise ValueError(f"GLSL 改写工具编不出：没有 C 编译器 {cc}（{e.strerror}），也没有启动器预编件 S2A_PREBUILT_TOOLS/codecs/{es_name()}") from e
             _es_bin = exe
     return _es_bin
 

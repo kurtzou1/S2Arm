@@ -29,6 +29,7 @@
 #   本机那份与 gate-host 那份（GATE_PLAN）各用各机器上的缓存。GATE_TEST_CACHE=0 关；算键失败 / 读不到一律当没命中照跑（宁可多跑）
 set -u
 R=$(git rev-parse --show-toplevel) || exit 1; cd "$R"
+export S2A_ROMFS_SEAL=1   # 门禁出包把 RomFS 共享存储设只读：阶段误写共享份当场 EACCES（玩家机不设，pack/roots.sh 文件头）
 # 停门禁只停本树（11-09：一条线 pkill -f "tools/gate.sh" 停自己的预跑，连别的会话的门禁和列车本机步骤一起杀了）：
 #   本份门禁的 pid 写本工作树自己的 git 目录（git rev-parse --git-dir，每棵工作树一份、不算改动不进提交），退出删掉；
 #   要停用 tools/gate_stop.sh <工作树>（核对 pid 确是这棵树的门禁、只收它的后代）。不许按进程名 pkill / killall 门禁（规矩：关进程按完整路径，别按进程名）

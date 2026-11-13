@@ -52,6 +52,22 @@ void ns2_joycon_sideways(ns2_kind kind, int side_buttons, ns2_state *s) {
     s->buttons = out; s->lx = x; s->ly = y; s->rx = 0; s->ry = 0;
 }
 
+void ns2_joycon_raw(ns2_kind kind, int side_buttons, ns2_state *s) {
+    if (!s || (kind != NS2_KIND_JOYCON_L && kind != NS2_KIND_JOYCON_R)) return;
+    int left = kind == NS2_KIND_JOYCON_L;
+    s->buttons &= ~(BIT(NS2_BUTTON_SL) | BIT(NS2_BUTTON_SR));
+    s->buttons |= side_buttons & (left ? NS2_SIDE_SL_L : NS2_SIDE_SL_R) ? BIT(NS2_BUTTON_SL) : 0;
+    s->buttons |= side_buttons & (left ? NS2_SIDE_SR_L : NS2_SIDE_SR_R) ? BIT(NS2_BUTTON_SR) : 0;
+}
+
+void ns2_joycon_raw_to_sideways(ns2_kind kind, ns2_state *s) {
+    if (!s || (kind != NS2_KIND_JOYCON_L && kind != NS2_KIND_JOYCON_R)) return;
+    int left = kind == NS2_KIND_JOYCON_L;
+    int side = (HAS(s->buttons, NS2_BUTTON_SL) ? (left ? NS2_SIDE_SL_L : NS2_SIDE_SL_R) : 0) |
+               (HAS(s->buttons, NS2_BUTTON_SR) ? (left ? NS2_SIDE_SR_L : NS2_SIDE_SR_R) : 0);
+    ns2_joycon_sideways(kind, side, s);
+}
+
 void ns2_joycon_sideways_motion(ns2_kind kind, ns2_motion *m) {
     if (!m || (kind != NS2_KIND_JOYCON_L && kind != NS2_KIND_JOYCON_R)) return;
     float ax = m->acceleration_x, az = m->acceleration_z, gx = m->gyro_x, gz = m->gyro_z;

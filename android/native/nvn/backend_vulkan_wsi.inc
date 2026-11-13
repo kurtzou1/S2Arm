@@ -307,12 +307,12 @@ nvn_gpu_rc nvn_gpu_present(nvn_gpu_surface s, const nvn_gpu_drawable *dr, const 
         // 后端现存对象（显存涨在哪）。悬着 = 上层已放、还被引用着没销毁
         { uint64_t nt = 0, ntd = 0, tb = 0, tdb = 0, nb = 0, nbd = 0, bb = 0, nvw = 0, nq = 0;
           pthread_mutex_lock(&g_mu);
-          for (struct nvn_gpu_tex_s *t = g.texs; t; t = t->all_next) { uint64_t sz = (uint64_t)t->w * t->h * (t->depth ? t->depth : 1) * (t->layers ? t->layers : 1) * 4; nt++; tb += sz; if (t->released) { ntd++; tdb += sz; } }
+          for (struct nvn_gpu_tex_s *t = g.texs; t; t = t->all_next) { uint64_t sz = t->mem_size; nt++; tb += sz; if (t->released) { ntd++; tdb += sz; } }   // 按向驱动要的显存大小算（原先按 宽×高×深×层×4 估：数组贴图的层数乘了两遍、压缩格式也按每像素 4 字节，外部一台机器上读出 60 GB）
           for (struct nvn_gpu_buf_s *x = g.bufs; x; x = x->all_next) { nb++; bb += x->bytes; if (x->released) nbd++; }
           for (struct nvn_gpu_view_s *x = g.views; x; x = x->all_next) nvw++;
           for (struct vk_segment *q = g.qhead; q; q = q->next) nq++;
           pthread_mutex_unlock(&g_mu);
-          snprintf(b, sizeof b, "现存对象：贴图 %llu 张约 %llu MB（其中悬着 %llu 张约 %llu MB）；缓冲 %llu 个 %llu MB（悬着 %llu 个）；视图 %llu 个；在途段 %llu 个",
+          snprintf(b, sizeof b, "现存对象：贴图 %llu 张 %llu MB（其中悬着 %llu 张 %llu MB）；缓冲 %llu 个 %llu MB（悬着 %llu 个）；视图 %llu 个；在途段 %llu 个",
               (unsigned long long)nt, (unsigned long long)(tb >> 20), (unsigned long long)ntd, (unsigned long long)(tdb >> 20), (unsigned long long)nb, (unsigned long long)(bb >> 20), (unsigned long long)nbd, (unsigned long long)nvw, (unsigned long long)nq);
           nvn_plat_log(NVN_PLAT_LOG_INFO, "gpu", b); } } }
     if (!s || !dr || !d || !d->src || !d->src->tex) { out = fail(err, NVN_GPU_E_ARG, "present 参数为空"); goto done; }

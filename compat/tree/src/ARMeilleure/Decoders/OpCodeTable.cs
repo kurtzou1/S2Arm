@@ -158,6 +158,15 @@ namespace ARMeilleure.Decoders
             SetA64("11111000101xxxxxxxxx10xxxxxxxxxx", InstName.Prfm,            InstEmit.Prfm,            OpCodeMemReg.Create); // register
             SetA64("x101101011000000000000xxxxxxxxxx", InstName.Rbit,            InstEmit.Rbit,            OpCodeAlu.Create);
             SetA64("1101011001011111000000xxxxx00000", InstName.Ret,             InstEmit.Ret,             OpCodeBReg.Create);
+            // S2Arm（#854）：ARMv8.3 指针认证。游戏 main 用 -mbranch-protection 编时函数尾是 retab / retaa（Windows 出包 gamedec 跑游戏自带解码器碰到 d65f0fff）。
+            //   提示空间的 pacibsp / autiasp 等上面已按空操作；这里同一口径按「不开密钥」的 CPU：签名 / 认证 / 去签名不改寄存器，带认证的跳转 / 调用 / 返回同普通的
+            SetA64("110101100101111100001x1111111111", InstName.Ret,             InstEmit.RetPac,          OpCodeBReg.CreatePac); // retaa / retab（隐含 x30）
+            SetA64("1101011000011111000010xxxxx11111", InstName.Br,              InstEmit.Br,              OpCodeBReg.CreatePac); // braaz / brabz
+            SetA64("1101011100011111000010xxxxxxxxxx", InstName.Br,              InstEmit.Br,              OpCodeBReg.CreatePac); // braa / brab
+            SetA64("1101011000111111000010xxxxx11111", InstName.Blr,             InstEmit.Blr,             OpCodeBReg.CreatePac); // blraaz / blrabz
+            SetA64("1101011100111111000010xxxxxxxxxx", InstName.Blr,             InstEmit.Blr,             OpCodeBReg.CreatePac); // blraa / blrab
+            SetA64("110110101100000100xxxxxxxxxxxxxx", InstName.Hint,            InstEmit.Nop,             OpCodeAlu.Create);  // pacia…autdb、paciza…autdzb
+            SetA64("110110101100000101000x11111xxxxx", InstName.Hint,            InstEmit.Nop,             OpCodeAlu.Create);  // xpaci / xpacd
             SetA64("x101101011000000000001xxxxxxxxxx", InstName.Rev16,           InstEmit.Rev16,           OpCodeAlu.Create);
             SetA64("x101101011000000000010xxxxxxxxxx", InstName.Rev32,           InstEmit.Rev32,           OpCodeAlu.Create);
             SetA64("1101101011000000000011xxxxxxxxxx", InstName.Rev64,           InstEmit.Rev64,           OpCodeAlu.Create);

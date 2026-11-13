@@ -48,8 +48,12 @@ package struct Lang: Hashable, Sendable {
     /// this app in (a Chinese Windows display language on hardware bought abroad, a Mac kept in
     /// English by habit). "Follow the system" stays the default; the states are stored as
     /// "" (follow) or a language code ("zh", "en", "sv", "de", "fr", or any other file in `frontend/l10n`).
-    package static func initial() -> Lang {
-        find(UserDefaults.standard.string(forKey: "appLanguage") ?? "") ?? device()
+    package static func initial() -> Lang { initial(preferred: Locale.preferredLanguages) }
+
+    /// 同上，系统首选语言由调用方给（单测模拟不同系统语言与重启）：设置里选过的优先，没选过 / 选了「跟随系统」按 preferred 认。
+    /// 规则（11-13，与 Windows LauncherLanguage、iOS 同口径）：系统是中文（简繁都算，繁中先落简中）→ 简中，其余 → 英文
+    package static func initial(preferred: [String]) -> Lang {
+        find(UserDefaults.standard.string(forKey: "appLanguage") ?? "") ?? detect(preferred: preferred, among: infos)
     }
 
     /// The stored choice, or nil when following the system.

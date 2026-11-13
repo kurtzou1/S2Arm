@@ -36,6 +36,7 @@ namespace S2A.Android.Aot
         [DllImport("s2a_native")] private static extern int s2a_android_vk_set_layer_query(delegate* unmanaged<long> query);
         [DllImport("s2a_native")] private static extern int s2a_android_vk_session_stop();
         [DllImport("s2a_native")] private static extern ulong s2a_android_vk_present_count();
+        [DllImport("s2a_native")] private static extern ulong s2a_android_nvn_present_count();
         // t-direct-frametimes：逐帧帧时间局末转储（generic 经此触发；direct 已由 adapter shutdown 转过，空记录无输出）。
         [DllImport("s2a_native")] private static extern void s2a_frame_log_dump();
 
@@ -59,7 +60,11 @@ namespace S2A.Android.Aot
         }
 
         [UnmanagedCallersOnly(EntryPoint = "s2a_android_services_present_count")]
-        public static long GetPresentCount() => _direct ? unchecked((long)s2a_android_vk_present_count()) : PresentCounter.Count;
+        public static long GetPresentCount()
+        {
+            if (_directSession != null) return unchecked((long)s2a_android_nvn_present_count());
+            return _direct ? unchecked((long)s2a_android_vk_present_count()) : PresentCounter.Count;
+        }
         [UnmanagedCallersOnly(EntryPoint = "s2a_android_services_request_applet_exit")]
         public static int RequestAppletExit(ulong session)
         {

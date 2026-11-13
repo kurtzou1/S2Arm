@@ -248,6 +248,15 @@ namespace Ryujinx.Horizon.Sdk.Codec.Detail
             return GetWorkBufferSizeForMultiStreamExImpl(out size, in parameter, fromDsp: true);
         }
 
+        // S2Arm：Switch 2 的硬件音频编解码客户端会话（sdk nn::codec::hwacod::shim::GetClientHipcSession 取的就是这条）
+        [CmifCommand(100)]
+        public Result GetHardwareAudioCodecClientSession(out IHardwareAudioCodecClientSession session)
+        {
+            session = new HardwareAudioCodecClientSession();
+
+            return Result.Success;
+        }
+
         private static Result GetWorkBufferSizeExImpl(out int size, in HardwareOpusDecoderParameterInternalEx parameter, bool fromDsp)
         {
             size = 0;

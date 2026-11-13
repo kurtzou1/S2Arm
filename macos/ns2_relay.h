@@ -8,7 +8,9 @@
 
 #define NS2_RELAY_MAGIC 0x534E3252u
 // 2：加 kind（对外输出型号，ns2_get_output_kind；#520）。两端版本不同时各自记一行日志并断开，不猜字段
-#define NS2_RELAY_VERSION 2u
+//   同在 v2（#520 A，v2 发版前一起进，不另升）：单只 Joy-Con 的 state / motion 报原始方向、SL / SR 在扩展位 21 / 22
+//   （ns2_set_joycon_raw；游戏宿主按游戏样式转）。v2 已随 v0.3.0–v0.3.5 发版，单只 Joy-Con 语义改动按上条规则升 3（#619 合入时）
+#define NS2_RELAY_VERSION 3u
 
 typedef enum {
     NS2_RELAY_INPUT = 1,

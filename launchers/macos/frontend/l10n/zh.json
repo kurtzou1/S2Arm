@@ -1,6 +1,6 @@
 {
   "_language": {
-    "name": "中文",
+    "name": "简体中文",
     "order": 0,
     "locales": [
       "zh",
@@ -1352,6 +1352,19 @@
   "s2arm.export.basis": "按本机最近 %d 次记录",
   "s2arm.export.basisReuse": "其余步骤复用缓存",
   "s2arm.export.block.busy": "正在做别的任务，做完再出包。",
+  "s2arm.diagUpload.button": "上传给开发者",
+  "s2arm.diagUpload.title": "上传给开发者",
+  "s2arm.diagUpload.what": "会上传：最近几次运行和出包的日志、崩溃记录、这台电脑与 S2Arm 的版本信息。文件名和路径里的个人信息会先换掉。",
+  "s2arm.diagUpload.github": "去 GitHub 发帖",
+  "s2arm.diagUpload.repo": "仓库地址：{0}",
+  "s2arm.diagUpload.not": "不会上传：存档、密钥、游戏文件。上传后最多保存 7 天，开发者看完即删。",
+  "s2arm.diagUpload.cancel": "取消",
+  "s2arm.diagUpload.send": "上传",
+  "s2arm.diagUpload.sending": "正在上传…",
+  "s2arm.diagUpload.done": "已上传。把下面这个码贴到 GitHub 帖子或群里，开发者凭它找到你的诊断：",
+  "s2arm.diagUpload.copy": "复制",
+  "s2arm.diagUpload.close": "完成",
+  "s2arm.diagUpload.noCode": "上传服务没给回短码。可以先导出诊断包，手动发给我们。",
   "s2arm.export.block.alreadyQueued": "这款已在出包或排队，出完再点。",
   "s2arm.export.block.keys": "还没放入 prod.keys（解密游戏用的密钥），放入后才能出包。",
   "s2arm.export.block.noPlatform": "先勾选要出包的平台。",

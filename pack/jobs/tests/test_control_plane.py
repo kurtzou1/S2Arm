@@ -620,6 +620,23 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(record["diagnostics"][-1]["code"], "stage_timeout")
         self.assertIn("导出 2/3", record["diagnostics"][-1]["summary"])
 
+    def test_unkillable_stage_keeps_original_failure_and_records_why(self):
+        # #837：进程卡在系统内核里（换页）时 KILL 也要等它回来才生效；原先第二次等待超时抛 TimeoutExpired，盖掉超时 / 取消本身，也不记诊断
+        from core import Failure
+        from unittest.mock import patch
+        c = self.context()
+        c.stage = "运行游戏"
+        sent, procs = [], []
+        with patch.object(type(c), "signal_child", lambda self, p, sig: (sent.append(sig), procs.append(p))):   # 信号「发了却不生效」
+            with self.assertRaises(Failure) as caught:
+                c.run([sys.executable, str(self.group), str(self.pidfile)], timeout=1)
+        self.assertEqual(caught.exception.code, "stage_timeout")
+        self.assertEqual(sent, ["TERM", "KILL"])
+        codes = [d["code"] for d in self.journal()["diagnostics"]]
+        self.assertEqual(codes, ["stage_timeout", "child_unkillable"])
+        procs[0].kill(); procs[0].wait(timeout=10)   # 收尾：测试自己结束这个「收不掉」的阶段工具
+        self.assert_dead(self.grandchild())
+
     def test_cancel_stops_the_whole_process_group(self):
         from core import Cancelled, Failure
         c = self.context()

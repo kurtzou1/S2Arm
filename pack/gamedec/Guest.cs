@@ -132,7 +132,8 @@ namespace S2Arm.GameDec
         void Stop(IExecutionContext ctx, string why) { _fault ??= why; ctx.SetX(30, _loop); ctx.SetX(0, 0); }
         void OnBreak(IExecutionContext ctx, ulong address, int imm) => Fatal($"客体执行到断点 brk #{imm}（main+{address - Img:x}）");
         void OnUndefined(IExecutionContext ctx, ulong address, int opcode) => Fatal($"客体执行到未定义指令 {opcode:x8}（main+{address - Img:x}）");
-        void Fatal(string why) { _fault ??= why; _done.Release(); System.Threading.Thread.Sleep(System.Threading.Timeout.Infinite); }   // 断点 / 未定义指令后没法安全接着跑：交回失败，执行线程就此停住
+        bool _wedged;   // 执行线程停在 Fatal 里了：收尾不再等它（#854）
+        void Fatal(string why) { _fault ??= why; _wedged = true; _done.Release(); System.Threading.Thread.Sleep(System.Threading.Timeout.Infinite); }   // 断点 / 未定义指令后没法安全接着跑：交回失败，执行线程就此停住
 
         void OnSvc(IExecutionContext ctx, ulong address, int imm)
         {
@@ -169,7 +170,7 @@ namespace S2Arm.GameDec
         //   不收的话 Windows 上进程解完不退（11-05 Windows 出包机：LZ5 对照 0.8 秒解完，进程挂到被杀；后台线程停在客体里，翻译器的线程还在）
         public void Dispose()
         {
-            if (_worker == null) return;
+            if (_worker == null || _wedged) return;   // 停住的执行线程等不回来：不白等 10 秒，翻译器交给进程退出（Program.Main 出错即 Environment.Exit）
             _quit = true; _go.Release();
             if (!_worker.Join(10_000)) return;   // 客体卡在别处退不出来：不释放仍在用的翻译器，交给进程退出
             _cpu.Dispose(); _backing.Dispose();

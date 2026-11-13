@@ -20,7 +20,7 @@ gv=$(sed -n '/^@implementation S2AGameVC/,/^@end/p' $A)
 ck "② S2AGameVC viewDidLoad 登记并持有" 'echo "$gv" | grep -q "viewDidLoad.*self.extDisplay = s2a_ios_ext_register(self)"'
 ck "② 登记只在 S2AGameVC 里调（app.m 共 1 处调用）" '[ "$(grep -c "= s2a_ios_ext_register(" $A)" = 1 ]'
 ck "③ 出图层建时挂到出图视图" 'sed -n "/^void \*front_metal_layer/,/^}/p" $G | grep -q "UIView \*v = present_view();"'
-ck "③ 重摆取出图视图、层不在该视图上就挪" 'sed -n "/^void s2a_direct_relayout/,/^}/p" $G | grep -q "UIView \*v = g_layer ? present_view() : nil" && sed -n "/^void s2a_direct_relayout/,/^}/p" $G | grep -q "g_layer.superlayer != v.layer"'
+ck "③ 重摆取出图视图、层不在该视图的层子树里就挪（Duo 倒影把层包进容器层，只比直接父层会每次误挪）" 'sed -n "/^void s2a_direct_relayout/,/^}/p" $G | grep -q "UIView \*v = g_layer ? present_view() : nil" && sed -n "/^void s2a_direct_relayout/,/^}/p" $G | grep -qF "for (CALayer *q = g_layer.superlayer; q; q = q.superlayer) if (q == v.layer) { moved = 0; break; }"'
 ck "③ 重摆的后台判据走 pf_relayout_wait" 'sed -n "/^void s2a_direct_relayout/,/^}/p" $G | grep -q "if (pf_relayout_wait(ext, app_bg, moved, scene_fg))"'
 for f in ios/lan_permission.m ios/textinput.m ios/phone_motion.m; do
   ck "④ $f 枚举场景跳过外接屏场景" 'grep -q "session.role isEqualToString:$ROLE" $f'

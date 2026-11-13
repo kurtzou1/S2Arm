@@ -572,3 +572,8 @@
 20261112-2051-apple-audio-callback-slot-map.patch
 20261111-2123-audio-dsp-arm-fast-on.patch
 20261111-2225-vp9-native-backend-neutral.patch
+20261112-2225-armeilleure-pointer-auth.patch
+20261113-0945-gs-actual-next.patch
+20261112-2251-hwopus-hwacod-session.patch
+20261113-0107-frag-depth-register-by-targets.patch
+20261112-1859-psel-invalid-uid-list.patch

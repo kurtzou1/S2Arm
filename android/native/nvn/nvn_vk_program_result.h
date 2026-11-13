@@ -7,8 +7,8 @@
 /* 结果 bindings 条数的合同上限——按 producer 合同推导，不是拍出来的常量：
  * DirectAllocator/DirectProfile 每阶段至多 18 uniform（NVN/Maxwell cbuf 槽）+
  * 16 storage（存储描述符表项）+ 64 texture（执行层组合纹理上限）+ 16 image；
- * DirectShaderCompiler 的图形程序固定 vs+fs 两阶段，再加 1 条全程序共享的
- * support binding：1 + 2×(18+16+64+16) = 229。compute 程序仅 cs 一阶段
+ * DirectShaderCompiler 的图形程序固定 vs+fs+gs 三阶段，再加 1 条全程序共享的
+ * support binding：1 + 3×(18+16+64+16) = 343。compute 程序仅 cs 一阶段
  * （1+18+16=35），同一上限同样覆盖。
  * 超过此数的结果已违反 s2a-direct-program-v1 合同或已损坏——照旧准确失败，
  * 绝不静默截断。设备端能否容纳另由 maxDescriptorSet* / maxPerStageDescriptor*
@@ -23,7 +23,7 @@
 #define FD_MAX_ARRAY_ELEMENTS 64
 /* Parsed layout needs more descriptors than the replay layer can bind per array. */
 #define NVK_PROGRAM_ARRAY_UNSUPPORTED (-2)
-#define FD_GRAPHICS_STAGE_COUNT 2
+#define FD_GRAPHICS_STAGE_COUNT 3
 #define FD_MAX_BINDINGS (1 + FD_GRAPHICS_STAGE_COUNT * \
     (FD_STAGE_MAX_UNIFORMS + FD_STAGE_MAX_STORAGE + FD_STAGE_MAX_TEXTURES + FD_STAGE_MAX_IMAGES))
 #define FD_MAX_STAGES 6
@@ -43,7 +43,8 @@ struct fd_binding {
     char stage[16];
     // 下面这些只由 program 内容决定，加载时算一次；逐笔 draw 不再做 strcmp / 除法。
     int8_t stage_idx;         // 0=vs 1=fs 2=gs 3=tcs 4=tes 5=cs，-1 = 其它/未知
-    int8_t tex_slot;          // kind==2 的组合纹理槽（<0 = 该 handleIndex 不合法）
+    int16_t tex_slot;         // 组合槽 0..31 或分离贴图槽 128..255；-1 = 未解析
+    int16_t samp_slot;        // -1 = 组合句柄；0..127 = 分离采样器来源槽
     int16_t ubo_slot;         // kind==0 的 NVN 用户槽（cbuf - 3，clamp 到 0）
     uint8_t is_support;       // kind==0 且 stage=="program"（SupportBuffer）
     // kind==1 的地址来源（编译期从 ShaderProgramInfo.SBuffers 解析）：

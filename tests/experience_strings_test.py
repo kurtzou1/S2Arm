@@ -17,12 +17,28 @@ class ExperienceStrings(unittest.TestCase):
     def test_both_languages_cover_every_ios_code(self):
         codes = sorted(i["code"] for i in json.loads((ROOT / "launchers/shared/experience.v1.json").read_text(encoding="utf-8"))["errors"]["items"] if i["code"].startswith(("ios_install_", "ios_import_")))
         self.assertEqual(len(codes), 10)
-        for lang in ("zh-Hans", "en"):
+        for lang in ("zh-Hans", "zh-Hant", "en"):
             with self.subTest(lang=lang):
                 p = run("--lang", lang)
                 self.assertEqual(p.returncode, 0, p.stderr)
                 keys = [l.split('"')[1] for l in p.stdout.splitlines() if l.startswith('"')]
                 self.assertEqual(keys, [f"error.{c}.{k}" for c in codes for k in ("title", "next")])
+
+    def test_zh_hant_from_table_and_missing_sentence_is_red(self):
+        # 繁中按简中原句查 experience_zh_hant.json（手写台港用语）；对照表少一句 → 退出 1 并点名那句，不出半套
+        out = run("--lang", "zh-Hant").stdout
+        self.assertIn('"error.ios_install_no_space.title" = "手機空間不足";', out)
+        self.assertIn('"error.ios_install_unknown.next" = "匯出診斷包傳給我們。";', out)
+        table = ROOT / "launchers/shared/experience_zh_hant.json"
+        saved = table.read_text(encoding="utf-8")
+        try:
+            t = json.loads(saved); del t["手机空间不够"]
+            table.write_text(json.dumps(t, ensure_ascii=False), encoding="utf-8")
+            p = run("--lang", "zh-Hant")
+            self.assertEqual(p.returncode, 1)
+            self.assertIn("手机空间不够", p.stderr)
+        finally:
+            table.write_text(saved, encoding="utf-8")
 
     def test_known_values(self):
         self.assertIn('"error.ios_install_unknown.title" = "未知原因";', run("--lang", "zh-Hans").stdout)

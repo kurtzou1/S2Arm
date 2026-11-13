@@ -299,7 +299,7 @@ class AndroidDeliveryTest(unittest.TestCase):
         self.assertEqual(describe[describe.index('--identity') + 1],
                          str(exported[0] / 'build/android-direct/identity.json'))
         self.assertEqual(pack_calls[1][1]['S2ARM_ANDROID_VK_ENGINE'], '1')
-        self.assertEqual(pack_calls[1][1]['S2ARM_ANDROID_VK_BACKEND'], 'nvn_vk')
+        self.assertEqual(pack_calls[1][1]['S2ARM_ANDROID_VK_BACKEND'], 'nvk')   # 缺省出新回放层
         self.assertEqual(next(env['S2A_REWRITE_SPIN'] for cmd, env in calls if cmd[1].endswith('make_pack.py')), '0')
         make_env = next(env for cmd, env in calls if cmd[1].endswith('make_pack.py'))
         self.assertEqual(ledger['details']['buildEnvironment']['variables'], dict(sorted(make_env.items())))

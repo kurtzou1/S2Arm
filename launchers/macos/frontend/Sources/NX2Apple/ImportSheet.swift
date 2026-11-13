@@ -266,6 +266,7 @@ struct ImportSheet: View {
                 Text(loc.backend(failure)).font(.manrope(13)).foregroundStyle(LauncherPalette.danger)
                     .fixedSize(horizontal: false, vertical: true).padding(.top, 12)
                 CopyReportButton(model: model, gameID: nil, operations: ["import", "keys", "setup"], fallback: failure).padding(.top, 8)
+                ReportHint().padding(.top, 4)
             }
         }
     }
@@ -369,24 +370,116 @@ struct InlineProgress: View {
     }
 }
 
-/// 「复制错误摘要」：正文由作业层生成（Mac / Windows 同一份）。operations 为 nil：这种失败没有作业记录（环境检查），直接用 fallback。
+/// 「上传给开发者」（11-13 诊断一键上传，取代原来的「复制错误摘要 / 导出诊断包」两个入口）：点了先说清传什么、不传什么，玩家确认才传。
+///   作业层打一份和「导出诊断包」相同的脱敏包，带上这次失败的错误摘要（operations 为 nil = 没有作业记录的失败，如环境检查，带 fallback 正文），
+///   传完只给一个短码、只复制码。上传没成（服务没开通 / 没网 / 被拒收）就说明原因、退回「导出诊断包」，玩家照旧手动发
+/// 报错页统一的一句指引（11-13 全局「故障报修」）：凡有「上传给开发者」/ 失败下一步的地方都挂它（tests/report_hint_test.py 核）
+struct ReportHint: View {
+    @EnvironmentObject var loc: Localizer
+    var body: some View {
+        Text(loc.reportHint).font(.manrope(12.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            .accessibilityIdentifier("report.hint")
+    }
+}
+
 struct CopyReportButton: View {
     @ObservedObject var model: S2ArmLauncherModel
     @EnvironmentObject var loc: Localizer
     let gameID: String?
     let operations: [String]?
     let fallback: String
+    @State private var showing = false
+
+    var body: some View {
+        Button(loc.t("s2arm.diagUpload.button")) { showing = true }
+            .buttonStyle(LauncherSecondaryButtonStyle()).accessibilityIdentifier("diag.upload")
+            .sheet(isPresented: $showing) {
+                UploadDiagnosticsSheet(model: model, gameID: gameID, operations: operations, fallback: fallback) { showing = false }
+                    .environmentObject(loc)
+            }
+    }
+}
+
+struct UploadDiagnosticsSheet: View {
+    @ObservedObject var model: S2ArmLauncherModel
+    @EnvironmentObject var loc: Localizer
+    let gameID: String?
+    let operations: [String]?
+    let fallback: String
+    let close: () -> Void
+    enum Phase: Equatable { case confirm, uploading, done(S2ArmLauncherModel.DiagUploadReceipt), failed(String) }
+    @State private var phase = Phase.confirm
     @State private var copied = false
 
     var body: some View {
-        Button(copied ? loc.t("s2arm.export.copied") : loc.t("s2arm.export.copyError")) {
-            Task {
-                await model.copyErrorReport(platform: nil, gameID: gameID, operations: operations, fallback: fallback)
-                copied = true
-                try? await Task.sleep(for: .seconds(2))
-                copied = false
+        VStack(alignment: .leading, spacing: 14) {
+            Text(loc.t("s2arm.diagUpload.title")).font(.manrope(17, .semibold))
+            switch phase {
+            case .confirm:
+                Text(loc.t("s2arm.diagUpload.what")).font(.manrope(13)).fixedSize(horizontal: false, vertical: true)
+                Text(loc.t("s2arm.diagUpload.not")).font(.manrope(13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Spacer()
+                    Button(loc.t("s2arm.diagUpload.cancel")) { close() }.buttonStyle(LauncherSecondaryButtonStyle()).keyboardShortcut(.cancelAction)
+                    Button(loc.t("s2arm.diagUpload.send")) { send() }.buttonStyle(LauncherSecondaryButtonStyle()).keyboardShortcut(.defaultAction)
+                        .accessibilityIdentifier("diag.upload.send")
+                }
+            case .uploading:
+                HStack(spacing: 10) { ProgressView().controlSize(.small); Text(loc.t("s2arm.diagUpload.sending")).font(.manrope(13)) }
+            case .done(let receipt):
+                Text(loc.t("s2arm.diagUpload.done")).font(.manrope(13)).fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 12) {
+                    Text(receipt.code).font(.system(size: 26, weight: .semibold, design: .monospaced)).textSelection(.enabled).accessibilityIdentifier("diag.upload.code")
+                    Button(copied ? loc.t("s2arm.export.copied") : loc.t("s2arm.diagUpload.copy")) { copy(receipt.code) }.buttonStyle(LauncherSecondaryButtonStyle()).accessibilityIdentifier("diag.upload.copy")
+                }
+                Text(loc.t("s2arm.diagUpload.repo").replacingOccurrences(of: "{0}", with: receipt.repo)).font(.manrope(12.5)).foregroundStyle(.secondary).textSelection(.enabled)
+                HStack {
+                    Spacer()
+                    Button(loc.t("s2arm.diagUpload.close")) { close() }.buttonStyle(LauncherSecondaryButtonStyle()).keyboardShortcut(.cancelAction)
+                    if let url = receipt.issueURL {   // 主按钮：系统浏览器打开预填好诊断码 / 版本 / 平台的新帖页
+                        Button(loc.t("s2arm.diagUpload.github")) { NSWorkspace.shared.open(url) }.buttonStyle(LauncherSecondaryButtonStyle()).keyboardShortcut(.defaultAction)
+                            .accessibilityIdentifier("diag.upload.github")
+                    }
+                }
+            case .failed(let why):
+                Label(why, systemImage: "exclamationmark.triangle").font(.manrope(13)).foregroundStyle(LauncherPalette.danger).fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("diag.upload.failed")
+                HStack {
+                    Spacer()
+                    Button(loc.t("s2arm.diagUpload.close")) { close() }.buttonStyle(LauncherSecondaryButtonStyle()).keyboardShortcut(.cancelAction)
+                    Button(loc.t("s2arm.play.diagnostics")) { exportInstead() }.buttonStyle(LauncherSecondaryButtonStyle()).keyboardShortcut(.defaultAction)
+                        .accessibilityIdentifier("diag.upload.export")
+                }
             }
         }
-        .buttonStyle(LauncherSecondaryButtonStyle())
+        .padding(22).frame(width: 440)
+        .onReceive(model.$diagUploadCommand) { command in   // 控制口替玩家点（只认当前这一步有的按钮）
+            guard let command else { return }
+            model.diagUploadCommand = nil
+            switch (command.action, phase) {
+            case ("send", .confirm): send()
+            case ("copy", .done(let receipt)): copy(receipt.code)
+            case ("close", _): close()
+            default: break
+            }
+        }
+    }
+
+    private func copy(_ code: String) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(code, forType: .string); copied = true }
+
+    private func send() {
+        phase = .uploading
+        Task {
+            do { phase = .done(try await model.uploadDiagnostics(gameID: gameID, operations: operations, fallback: fallback)) }
+            catch { phase = .failed(error.localizedDescription) }
+        }
+    }
+
+    /// 退回导出：同游戏库「更多」里的导出（文件名、脱敏规则一样）
+    private func exportInstead() {
+        let panel = NSSavePanel()
+        let stamp = DateFormatter(); stamp.locale = Locale(identifier: "en_US_POSIX"); stamp.dateFormat = "MMdd-HHmm"
+        panel.nameFieldStringValue = "S2Arm-\(loc.lang == .zh ? "诊断" : "diag")-\(stamp.string(from: Date())).zip"
+        if panel.runModal() == .OK, let url = panel.url { close(); model.diagnostics(exportTo: url) }
     }
 }

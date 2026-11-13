@@ -285,7 +285,9 @@ int rp_fence_done(uint64_t f) { return __atomic_load_n(&g_done_fence, __ATOMIC_A
 // 游戏调 QueueFinish 时要等到哪个栅栏值（前端在提交锁里取值，出了锁再等）。
 // 真机上 Finish 等的是「显卡把已提交的都做完」。游戏能观察到的只有两样：做完时写回它内存的东西，和它之后再提交的活排在后面。
 // 有的游戏每帧呈现前都调一次：回放完一帧之后在这里再等显卡把这一帧做完，显卡这一帧的活和下一帧的回放完全串着。
-// 开关 nvk_finish_lag（缺省 0，照旧等到最后一次提交）：
+// 开关 nvk_finish_lag（缺省 1；0 = 照旧等到最后一次提交）：
+//   缺省开的依据：一款每帧都调 Finish 的 3D 游戏真机同局对照，稳定场景 28.2 → 29.2–29.6 帧，画面一致、别的回写一样不少；
+//   项目定的顺序是先把目标帧率做到、再压能耗。哪一款因为时间戳晚一帧出问题，用这个开关关掉来确认。
 //   1 = 只等到「上一次 Finish 时的最后一次提交」和「最近一次有东西要写回的提交」里靠后的那个，显卡上最多压着一帧的活，
 //       下一帧的回放与这一帧的显卡工作重叠。「有东西要写回」不算时间戳报告：它是测量值，游戏 Finish 之后读到的是上一帧的时间戳
 //       （用它调动态分辨率的游戏晚一帧得到反馈）；事件、遮挡结果、别的计数器、显卡写的缓冲照等，一样不少；
@@ -293,7 +295,7 @@ int rp_fence_done(uint64_t f) { return __atomic_load_n(&g_done_fence, __ATOMIC_A
 // 配套在 rp_buf.c：每次这样放行一帧，池镜像换到另一份（rp_buf_frame_flip），这一帧直接写的那份显卡已经不读了。
 void rp_buf_frame_flip(void);
 uint64_t nvn_be_finish_publish(void) {
-    uint64_t last = g_fence; int lag = nvn_plat_flag("nvk_finish_lag", 0);
+    uint64_t last = g_fence; int lag = nvn_plat_flag("nvk_finish_lag", 1);
     if (!lag) { g_finish_prev = last; return last; }
     uint64_t t = lag == 2 || g_finish_prev > g_effect_fence ? g_finish_prev : g_effect_fence;
     g_finish_prev = last;
@@ -361,6 +363,7 @@ void nvn_be_exec(const uint8_t *p) {
     static int inited; if (!inited) { inited = 1; rp_state_reset(); }
     if (!p) return;
     for (;;) {
+        nvn_plat_safepoint();   // 一次提交可连续回放数秒：让平台的停世界事务在命令之间越过本线程（nvn_plat.h）
         op_hdr h; memcpy(&h, p, sizeof h);
         if (rec_bad(h)) { nvn_unimpl("rec", "bad_record", p); return; }   // 按这条列表的 END 处理
         const void *a = p + 8;

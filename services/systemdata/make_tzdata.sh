@@ -24,8 +24,12 @@ verify_tree() {
 "${S2A_PYTHON:-/usr/bin/python3}" - "$1" "$TZ_OUTPUT_SHA256" <<'PY'
 import hashlib, json, os, sys
 root, expected = sys.argv[1:]
+# 系统自动生成的附属文件不算内容（#816：库在 exFAT 上时 macOS 给每个新文件旁边生成 ._<名>，拷过去的 599 个文件变成 1219 个、哈希必不符）。
+#   名单同作业层 pack/jobs/layout.py OS_JUNK / OS_JUNK_PREFIX（tests/os_junk_sync_test.sh 核一致）
+OS_JUNK = {".DS_Store", "desktop.ini", "Thumbs.db"}
 rows = []
 for directory, dirs, files in os.walk(root):
+    files = [name for name in files if name not in OS_JUNK and not name.startswith("._")]
     if any(os.path.islink(os.path.join(directory, name)) for name in dirs + files):
         sys.exit('【红】时区目录不得含软链')
     dirs.sort()
@@ -115,7 +119,7 @@ for z in open(lst).read().split():
     open(os.path.join(dst, z), 'wb').write(v2)
 PY
 # binaryList 只留真拷进去的
-(cd "$OUT.tmp/zoneinfo" && find . -type f | sed 's|^\./||' | LC_ALL=C sort) > "$OUT.tmp/binaryList.txt"
+(cd "$OUT.tmp/zoneinfo" && find . -type f ! -name '._*' ! -name .DS_Store ! -name desktop.ini ! -name Thumbs.db | sed 's|^\./||' | LC_ALL=C sort) > "$OUT.tmp/binaryList.txt"   # 系统附属文件不进区名表（同 verify_tree）
 cat "$SRC/+VERSION" 2>/dev/null > "$OUT.tmp/version.txt" || true
 verify_tree "$OUT.tmp"
 rm -rf "$OUT"; mv "$OUT.tmp" "$OUT"

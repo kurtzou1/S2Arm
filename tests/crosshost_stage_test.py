@@ -72,7 +72,7 @@ cur=$(root_cur fixture)
     def test_clone_commit_replay_and_source_isolation(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = os.path.realpath(tmp)
-            env = dict(os.environ, S2A_ROOTS=tmp + "/roots", S2A_ROOTS_SHARED=tmp + "/unused")
+            env = dict(os.environ, S2A_ROOTS=tmp + "/roots", S2A_ROOTS_SHARED=tmp + "/unused", S2A_ROMFS_SEAL="1")   # 下面断言 RomFS 只读：那是开发 / 门禁机语义（bd70d1f4 起玩家机缺省不封，同 roots_romfs_store_test）
             subprocess.run(["bash", "-eu", "-c", r'''source "$1/pack/roots.sh"
 mkdir -p "$S2A_ROOTS/fixture@seed/romfs/sub"
 printf original > "$S2A_ROOTS/fixture@seed/romfs/sub/data"

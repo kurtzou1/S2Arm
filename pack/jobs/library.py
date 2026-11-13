@@ -1814,6 +1814,7 @@ def catalog(c):
     if startup:
         sweep_residue(c)   # 崩溃 / 断电 / 被杀留下的解包与中间产物：启动时扫一次（剃刀 H14：原先每次刷新都扫两遍；正常失败与取消由 clean_after_stop 当场清）
         sweep_trash(c)   # 删除时挪进 .s2a-trash 而当时没删干净的：同在启动时清一次（玩家反馈 11-11 删除先挪再删）
+        unseal_builds(c)   # 旧版本留下的只读 RomFS 共享存储：每款一次加回写权限，玩家手动删旧产物不再被挡
     cat = c.catalog()
     input_supported, input_reason = toolchain.input_interface(c)
     for game in cat["games"]:
@@ -2186,6 +2187,52 @@ def _residue(c):
         if stale or partials:
             found.append((gid, stale, partials))
     return found
+
+
+UNSEALED = ".unsealed-v1"   # 产物目录里的标记：只读修复做过了
+
+
+def unseal_builds(c):
+    """旧版本把产物根里的 RomFS 共享存储（build/<键>/roots/.romfs_store）整棵设成只读（Windows 是拒写的访问控制项），
+    玩家在访达 / 资源管理器里手动删旧产物删不掉（11-12 维护者转玩家反馈）。新版玩家机不再设只读（pack/roots.sh 文件头）；
+    这里把存量一次性加回写权限：每款产物目录做完写标记，以后启动只看一眼标记。外接盘没插着的款下次插上再做。出错不影响读游戏库"""
+    for game in c.catalog().get("games", []):
+        try:
+            d = layout.build_dir(c, game["id"], create=False)
+            if not d.is_dir() or (d / UNSEALED).exists():
+                continue
+            unseal_tree(d)
+            (d / UNSEALED).write_text("")
+        except (OSError, ValueError, KeyError):
+            continue
+
+
+def unseal_tree(top):
+    """top 下（含自己）每个没写位的目录 / 文件加回写权限；Windows 另去掉拒写项与只读属性。链接 / 联接只看本身、不跟进去"""
+    top = Path(top)
+    if os.name == "nt":
+        engine = str(Path(__file__).resolve().parents[2])
+        if engine not in sys.path:
+            sys.path.insert(0, engine)
+        from pack.orch import roots
+    def fix(p):
+        st = os.lstat(p)
+        if stat.S_ISLNK(st.st_mode):
+            return
+        if os.name == "nt":
+            if roots.is_link(p):
+                return
+            roots._win_acl(Path(p), False)
+            if st.st_file_attributes & stat.FILE_ATTRIBUTE_READONLY:
+                os.chmod(p, stat.S_IWRITE)
+        elif not st.st_mode & stat.S_IWUSR:
+            os.chmod(p, stat.S_IMODE(st.st_mode) | stat.S_IWUSR)
+    fix(top)
+    for dirpath, dirs, files in os.walk(top):
+        for name in dirs + files:
+            fix(os.path.join(dirpath, name))
+        if os.name == "nt":
+            dirs[:] = [n for n in dirs if not roots.is_link(os.path.join(dirpath, n))]
 
 
 def sweep_residue(c):
@@ -2823,7 +2870,8 @@ def diagnostics(c):
                             continue
                         archive.writestr(f"diagrun/{g['id']}_{f.name}", f.read_bytes())
                         used += n
-                manifest = dict(launcher_version=launcher_version(),
+                manifest = dict(schema=1,   # 诊断上传服务收件要它（维护方方案「上传协议」：没有 schema 判 not_diag 拒收）；iOS ios/diag.m 同字段
+                                launcher_version=launcher_version(),
                                 macos_version=platform.mac_ver()[0] or {"error": "macOS 版本不可用"},
                                 xcode_version=probe(["/usr/bin/xcodebuild", "-version"]),
                                 mac_model=probe(["/usr/sbin/sysctl", "-n", "hw.model"]),

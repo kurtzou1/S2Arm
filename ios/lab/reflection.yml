@@ -1,0 +1,37 @@
+name: S2ArmReflectionLab
+options:
+  deploymentTarget:
+    iOS: "18.0"
+targets:
+  S2ArmReflectionLab:
+    type: application
+    platform: iOS
+    sources:
+      - ios/lab/ReflectionLab.m
+      - ios/play_layout.m
+      - ios/play_reflection.m
+    dependencies:
+      - sdk: UIKit.framework
+      - sdk: QuartzCore.framework
+      - sdk: Metal.framework
+    info:
+      path: build/reflection-lab/Info.plist
+      properties:
+        CFBundleDisplayName: Duo Reflection Lab
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        UIRequiresFullScreen: true
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+          UISceneConfigurations:
+            UIWindowSceneSessionRoleApplication:
+              - UISceneConfigurationName: ReflectionLab
+                UISceneDelegateClassName: ReflectionScene
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: local.s2arm.reflectionlab
+      TARGETED_DEVICE_FAMILY: "1,2"
+      CODE_SIGN_STYLE: Automatic
+      ENABLE_DEBUG_DYLIB: NO
+      CLANG_ENABLE_OBJC_ARC: YES
+      INFOPLIST_FILE: "$(SRCROOT)/Info.plist"
+      HEADER_SEARCH_PATHS: ["$(SRCROOT)/../../ios"]

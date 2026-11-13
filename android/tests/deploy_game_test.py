@@ -39,9 +39,10 @@ class _FakeProc:
 class FakeAdb:
     serial = 'test-device'
 
-    def __init__(self, wrong_hash=False, refused=False, stale_start=False):
+    def __init__(self, wrong_hash=False, refused=False, stale_start=False, slow_import=False):
         self.calls = []
         self.wrong_hash, self.refused, self.stale_start = wrong_hash, refused, stale_start
+        self.slow_import = slow_import   # 导入一直没做完：logcat 里没有成功行
         self.started = False
         self.receipt = None   # (contentRoot, artifactSha256)：App 导入成功时在 logcat 打的回执（正式包读不了 current.json）
 
@@ -74,6 +75,8 @@ class FakeAdb:
             accepted = f'Game startup accepted: {TITLE} session 1'
             if self.refused:
                 return f'Game import of import/{self.name} refused: missing resource'
+            if self.slow_import:
+                return ''
             imported = f'Game build artifact updated (same files): test [{TITLE}] from import/{self.name}'
             if self.receipt:
                 imported += f'\nGame import receipt: {TITLE} contentRoot={self.receipt[0]} artifactSha256={self.receipt[1]} from import/{self.name}'
@@ -224,6 +227,29 @@ class DeployTest(unittest.TestCase):
                 patch.object(deploy_game, 'push_tree') as pt:
             adb = FakeAdb(); self.deploy(adb, push_timeout=50)
             self.assertEqual(pt.call_args[0][3], 50)
+
+    def test_import_wait_scales_with_resource_size(self):
+        # 期望手算，同推送：17 GB → 17e9 / 30e6 × 2 = 1133.3 → 1134 秒；小包取 --timeout（180）；--timeout 更大时照用
+        for size, timeout, want in ((17_000_000_000, 180, 1134), (1_000_000, 180, 180), (1_000_000, 3600, 3600)):
+            with self.subTest(size=size, timeout=timeout), patch.object(deploy_game, 'tree_bytes', return_value=size), \
+                    patch.object(deploy_game, 'tree_files', return_value=1):
+                self.assertEqual(deploy_game.import_wait_for(self.pack, timeout), want)
+
+    def test_import_timeout_leaves_running_import_alone(self):
+        # 等回执超时：不强停应用、不删 import/ 下正在导入的目录（只清推送用的临时目录），报错里说清楚
+        adb = FakeAdb(slow_import=True)
+        with patch.object(deploy_game, 'import_wait_for', return_value=1), \
+                patch.object(deploy_game.time, 'monotonic', side_effect=[0] * 8 + [5] * 50), \
+                patch.object(deploy_game.time, 'sleep'):
+            with self.assertRaisesRegex(RuntimeError, '等待导入超时.*没有强停应用.*没有删正在导入的目录'):
+                self.deploy(adb)
+        started = max(i for i, x in enumerate(adb.calls) if x[:3] == ('am', 'start', '-W') and 'IMPORT_STAGING' in ' '.join(map(str, x)))
+        after = adb.calls[started + 1:]
+        self.assertFalse(any(x[:2] == ('am', 'force-stop') for x in after))
+        cleans = [x for x in after if x[:2] == ('rm', '-rf')]
+        self.assertEqual(len(cleans), 1)
+        self.assertEqual(len(cleans[0]), 3)
+        self.assertIn('/.deploy-', cleans[0][2])
 
     def test_failed_or_interrupted_push_cleans_own_paths(self):
         for failure in (RuntimeError('push failed'), InterruptedError('cancelled')):

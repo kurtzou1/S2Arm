@@ -260,7 +260,13 @@ import S2ArmAppleAdapter
             case "export":
                 guard let p = str("path") else { return .bad("缺 path") }
                 model.diagnostics(exportTo: URL(fileURLWithPath: p)); return .ok()
-            default: return .bad("action 只认 pull / export")
+            case "upload":   // 打开「上传给开发者」弹窗（同游戏库「更多」菜单）；gameId 可省
+                if str("gameId") != nil, game() == nil { return .bad("没有这个 gameId") }
+                model.diagUploadFor = game()?.id ?? ""; return .ok()
+            case "uploadSend", "uploadCopy", "uploadClose":   // 替玩家点弹窗里的「上传 / 复制 / 完成」；结果看 GET /snapshot
+                guard model.diagUploadFor != nil else { return .bad("上传弹窗没开") }
+                model.diagUploadCommand = .init(action: String(str("action")!.dropFirst("upload".count)).lowercased()); return .ok()
+            default: return .bad("action 只认 pull / export / upload / uploadSend / uploadCopy / uploadClose")
             }
         case ("POST", "/fonts"):
             return .bad("新界面用应用自带的开源字体，不能换", code: 409)
@@ -292,7 +298,7 @@ import S2ArmAppleAdapter
         ["POST /launch {gameId}", "在 Mac 上启动游戏"],
         ["POST /cancel {taskId} | /retry {taskId}", "停掉在跑的作业 / 重试出包、装机任务"],
         ["POST /environment", "重新检查环境"], ["POST /refresh", "刷新游戏库"],
-        ["POST /diagnostics {action:pull} | {action:export, path}", "拉回 iPhone 诊断 / 导出 Mac 诊断包"],
+        ["POST /diagnostics {action:pull} | {action:export, path} | {action:upload, gameId?} | {action:uploadSend|uploadCopy|uploadClose}", "拉回 iPhone 诊断 / 导出 Mac 诊断包 / 打开「上传给开发者」并替玩家点里面的按钮"],
         ["POST /update {action:restart|retry}", "更新：restart = 重启并换上已下载好的新版，retry = 重试下载；进度看 GET /state 的 update"],
         ["POST /library {path}", "换游戏库位置（外接盘也行，换后要重新放游戏）"],
         ["POST /dismiss", "关掉提示"], ["POST /select {gameId}", "选中一款"],

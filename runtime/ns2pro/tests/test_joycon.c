@@ -69,6 +69,25 @@ int main(void) {
     CK(ns2_output_kind(NS2_KIND_PRO, 1, NS2_KIND_NONE, 0) == NS2_KIND_PRO && ns2_output_kind(NS2_KIND_NONE, 0, NS2_KIND_NONE, 0) == NS2_KIND_NONE &&
        ns2_output_kind(NS2_KIND_JOYCON_L, 1, NS2_KIND_JOYCON_L, 1) == NS2_KIND_JOYCON_L,
        "⑱ Pro 照报 Pro；都没有报 NONE；两只同侧不算一对");
+    // 单只原始方向（#520 A）：期望按「照真机，按键 / 摇杆不动、只把这只的 SL / SR 放进扩展位 21 / 22」手算
+    ns2_state rr = {BIT(X) | BIT(RS) | BIT(PLUS), 5, 6, 300, -400};
+    ns2_joycon_raw(NS2_KIND_JOYCON_R, NS2_SIDE_SL_R | NS2_SIDE_SR_L, &rr);
+    CK(rr.buttons == (BIT(X) | BIT(RS) | BIT(PLUS) | BIT(NS2_BUTTON_SL)) && rr.lx == 5 && rr.ly == 6 && rr.rx == 300 && rr.ry == -400,
+       "⑲ 右只原始方向：键 / 摇杆原样，只收自己的 SL（左只的 SR 不算）（实 %llx）", (unsigned long long)rr.buttons);
+    ns2_state lr = {BIT(UP) | BIT(MINUS), 100, 200, 0, 0};
+    ns2_joycon_raw(NS2_KIND_JOYCON_L, NS2_SIDE_SR_L, &lr);
+    CK(lr.buttons == (BIT(UP) | BIT(MINUS) | BIT(NS2_BUTTON_SR)) && lr.lx == 100 && lr.ly == 200, "⑳ 左只原始方向：SR → 扩展位 22");
+    ns2_state pro2 = {BIT(A), 1, 2, 3, 4}; ns2_joycon_raw(NS2_KIND_PRO, NS2_SIDE_SL_L, &pro2);
+    CK(pro2.buttons == BIT(A) && pro2.lx == 1, "㉑ Pro：原始方向不动");
+    // 原始方向再转横握 = 直接横握（宿主退回 Pro 时用；同 ④ / ⑤ 的输入）
+    ns2_state a1 = {BIT(UP) | BIT(MINUS) | BIT(CAPTURE) | BIT(L) | BIT(ZL), 100, 200, 7, 8}, a2 = a1;
+    ns2_joycon_raw(NS2_KIND_JOYCON_L, NS2_SIDE_SL_L, &a1); ns2_joycon_raw_to_sideways(NS2_KIND_JOYCON_L, &a1);
+    ns2_joycon_sideways(NS2_KIND_JOYCON_L, NS2_SIDE_SL_L, &a2);
+    ns2_state b1 = {BIT(X) | BIT(RS) | BIT(HOME) | BIT(R) | BIT(ZR), 5, 6, 300, -400}, b2 = b1;
+    ns2_joycon_raw(NS2_KIND_JOYCON_R, NS2_SIDE_SR_R, &b1); ns2_joycon_raw_to_sideways(NS2_KIND_JOYCON_R, &b1);
+    ns2_joycon_sideways(NS2_KIND_JOYCON_R, NS2_SIDE_SR_R, &b2);
+    CK(!memcmp(&a1, &a2, sizeof a1) && !memcmp(&b1, &b2, sizeof b1) && a1.buttons == (BIT(Y) | BIT(PLUS) | BIT(HOME) | BIT(L)),
+       "㉒ 原始方向再转横握：与传输层直接横握一致（左只 SL → L、右只 SR → R），扩展位不留");
     printf("%s test_joycon：%d 项不符\n", bad ? "✗" : "✓", bad);
     return bad ? 1 : 0;
 }

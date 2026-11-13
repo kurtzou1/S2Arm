@@ -18,6 +18,8 @@ let package = Package(
                 dependencies: ["NXLauncher", "NXModel", "NXCore", .product(name: "S2ArmAppleAdapter", package: "adapter"),
                                .product(name: "SaveSync", package: "SaveSync")],
                 path: "Sources/NX2Apple"),
+        // 界面语言跟随系统 / 记住选择的单测（tests/launcher_language_test.sh 跑；NXCore 是 package 访问级别，只能在本包里测）
+        .testTarget(name: "NXCoreTests", dependencies: ["NXCore"], path: "Tests/NXCoreTests"),
     ],
     swiftLanguageModes: [.v5]
 )

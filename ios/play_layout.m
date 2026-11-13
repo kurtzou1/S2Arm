@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 S2Arm contributors
 #import "play_layout.h"
+#import "play_reflection.h"
 #include <math.h>
 #include <stdatomic.h>
 
@@ -202,6 +203,7 @@ CGRect S2APlayDivision(UIView *view) {
     BOOL changed=!CGRectEqualToRect(l.game,g_layout.game) || !CGRectEqualToRect(l.controls,g_layout.controls) || !CGRectEqualToRect(l.division,g_layout.division) || l.split!=g_layout.split;
     g_layout=l;
     S2APlayPublishSplit(l.split);
+    S2APlayReflectionLayout(s,l);
     BOOL portrait=s.bounds.size.height>s.bounds.size.width;
     BOOL expectedPortrait=s2a_ios_play_orientations()==UIInterfaceOrientationMaskPortrait;
     if (l.game.size.width>0 && l.game.size.height>0 && (portrait==expectedPortrait || self.resizable || _orientationRefused)) atomic_store(&g_view_ratio,l.game.size.width/l.game.size.height);

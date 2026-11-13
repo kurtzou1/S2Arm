@@ -52,8 +52,8 @@ class DispatchSnapshot(unittest.TestCase):
                     'vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,',
                     'if (0) vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,'),
                 'negative_host_access':source.replace(
-                    '.dstAccessMask = VK_ACCESS_HOST_READ_BIT,\n                        };',
-                    '.dstAccessMask = VK_ACCESS_SHADER_READ_BIT,\n                        };'),
+                    '.dstAccessMask = VK_ACCESS_HOST_READ_BIT,',
+                    '.dstAccessMask = VK_ACCESS_SHADER_READ_BIT,'),
                 'negative_pool_narrowing':source.replace(
                     'if (n > 0 && n <= 1048576) capacity = (uint32_t)n;',
                     'if (n > 0 && n <= 65536) capacity = (uint32_t)n;'),

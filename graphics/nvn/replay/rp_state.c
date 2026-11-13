@@ -5,6 +5,7 @@
 #include <string.h>
 
 struct rp_state rp_S;
+uint64_t rp_tex_sep_gen[6];
 struct rp_target rp_R;
 uint8_t rp_pso_dirty, rp_dss_dirty, rp_args_dirty[6];
 static uint64_t g_push_seq;
@@ -27,7 +28,7 @@ int rp_shader_stage_key(unsigned st, uint8_t key[8]) {
 }
 
 void rp_state_reset(void) {
-    memset(&rp_S, 0, sizeof rp_S); memset(&rp_R, 0, sizeof rp_R);
+    memset(&rp_S, 0, sizeof rp_S); memset(&rp_R, 0, sizeof rp_R); for (int i = 0; i < 6; i++) rp_tex_sep_gen[i]++;
     for (int i = 0; i < 8; i++) rp_S.blend[i] = (blend_st){.target = (unsigned)i, .src_rgb = NVN_BLEND_FUNC_ONE, .dst_rgb = NVN_BLEND_FUNC_ZERO, .src_a = NVN_BLEND_FUNC_ONE, .dst_a = NVN_BLEND_FUNC_ZERO, .eq_rgb = NVN_BLEND_EQUATION_ADD, .eq_a = NVN_BLEND_EQUATION_ADD};
     rp_S.color = (color_st){0, NVN_LOGIC_OP_COPY, NVN_ALPHA_FUNC_ALWAYS}; rp_S.chmask.mask = 0xffffffffu;
     rp_S.ms.enable = 1;
@@ -44,14 +45,14 @@ static const p_bind_buf *bb_fresh(const void *a, p_bind_buf *t) {
     const NVNbufferRange *r = (const NVNbufferRange *)(uintptr_t)b->addr;
     *t = (p_bind_buf){b->stage & ~BIND_BUF_DEFER, b->index, r ? nvn_ga2ca(r->address) : 0, r ? r->size : 0}; return t;
 }
-static void bh_fresh(const p_bind_handles *b) {
+static void bh_fresh(const p_bind_handles *b, int is_samp) {
     if (b->defer && b->src && b->n > 0 && b->n <= 32) {
         p_bind_pool_bases bases; memcpy(&bases, b->h + b->n, sizeof bases);
         uint64_t *h = (uint64_t *)b->h;
         memcpy(h, (const void *)(uintptr_t)b->src, 8 * (size_t)b->n);
         for (int i = 0; i < b->n; i++) {
             uint64_t tid = h[i] & 0xfffff, sid = h[i] >> 20;
-            h[i] = (tid + (uint64_t)bases.tbase) | (sid ? sid + (uint64_t)bases.sbase : 0) << 20;
+            h[i] = (tid + (uint64_t)bases.tbase) | ((sid || is_samp) ? sid + (uint64_t)bases.sbase : 0) << 20;
         }
     }
 }
@@ -148,15 +149,21 @@ int rp_state_op(uint32_t op, const void *a, uint32_t size) {
             return 1; }
         case OP_BIND_TEX: case OP_BIND_TEX1: { p_bind_handles t1; const p_bind_handles *b = bind_rec(op, a, &t1);
             if (b->n < 0 || b->n > 32) { nvn_unimpl("rec", "bind_tex_count_overwritten", a); return 1; }
-            bh_fresh(b);
+            bh_fresh(b, op == OP_BIND_SAMP);
             if (b->stage >= 0 && b->stage < 6 && b->first >= 0 && b->first + b->n <= RP_NTEX && memcmp(&rp_S.tex[b->stage][b->first], b->h, 8 * (size_t)b->n)) {
-                memcpy(&rp_S.tex[b->stage][b->first], b->h, 8 * (size_t)b->n); rp_args_dirty[b->stage] = 1; }
+                memcpy(&rp_S.tex[b->stage][b->first], b->h, 8 * (size_t)b->n); rp_args_dirty[b->stage] = 1;
+                if (b->first + b->n > 128) rp_tex_sep_gen[b->stage]++; }   // 分离贴图槽（128 起）变了
             return 1; }
-        case OP_BIND_SAMP: { const p_bind_handles *b = a; if (b->n < 0 || b->n > 32) return 1; bh_fresh(b);
-            if (b->stage >= 0 && b->stage < 6 && b->first >= 0 && b->first + b->n <= 128 && memcmp(&rp_S.samp[b->stage][b->first], b->h, 8 * (size_t)b->n)) {
-                memcpy(&rp_S.samp[b->stage][b->first], b->h, 8 * (size_t)b->n); rp_args_dirty[b->stage] = 1; }
+        case OP_BIND_SAMP: { const p_bind_handles *b = a; if (b->n < 0 || b->n > 32) return 1; bh_fresh(b, 1);
+            if (b->stage >= 0 && b->stage < 6 && b->first >= 0 && b->first + b->n <= 128) {
+                for (int i = 0; i < b->n; ++i) {
+                    int slot = b->first + i;
+                    if (!rp_S.samp_bound[b->stage][slot] || rp_S.samp[b->stage][slot] != b->h[i]) rp_args_dirty[b->stage] = 1;
+                    rp_S.samp_bound[b->stage][slot] = 1; rp_S.samp[b->stage][slot] = b->h[i];
+                }
+            }
             return 1; }
-        case OP_BIND_IMG: { const p_bind_handles *b = a; if (b->n < 0 || b->n > 32) return 1; bh_fresh(b);
+        case OP_BIND_IMG: { const p_bind_handles *b = a; if (b->n < 0 || b->n > 32) return 1; bh_fresh(b, op == OP_BIND_SAMP);
             if (b->stage >= 0 && b->stage < 6 && b->first >= 0 && b->first + b->n <= 32) {
                 if (memcmp(&rp_S.img[b->stage][b->first], b->h, 8 * (size_t)b->n)) { memcpy(&rp_S.img[b->stage][b->first], b->h, 8 * (size_t)b->n); rp_args_dirty[b->stage] = 1; }
             } else nvn_unimpl("rec", "bind_img_out_of_range", a);

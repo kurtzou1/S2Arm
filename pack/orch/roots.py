@@ -210,7 +210,11 @@ def links_supported(path):
     return fs.value.upper() in ('NTFS', 'REFS')
 
 
-def copy_file(source, dest):
+def copy_file(source, dest, link_ok=False):
+    """克隆优先（Mac clonefile / Linux FICLONE / Windows ReFS 块克隆，写时复制）；都没有时实拷。
+    link_ok（#291，只给播种 RomFS 用）：Windows 上同卷非 ReFS（NTFS）先建硬链接，不逐文件实拷——RomFS 按设计不可变（没有阶段原地改它，
+    门禁机上还封成拒写），写单一 IMG 时边写边腾删的是产物根里的这个名字，共用解包目录里的那份数据不受影响。
+    11-13 Windows NTFS 读数：18 万个文件的 RomFS 逐个实拷播种 1042 秒，8 万个的 433 秒。建不了（跨卷、FAT 类卷）照旧实拷"""
     source, dest = Path(source), Path(dest)
     if is_link(source) or not source.is_file():
         raise UnsafeRoot(f'不复制链接/特殊文件：{source}')
@@ -247,7 +251,14 @@ def copy_file(source, dest):
             raise OSError(rc, 'ReFS CopyFile2 失败；不悄悄转实拷')
         _win_acl(dest, False)
     elif not cloned:
-        print(f'【黄】非 ReFS 同卷克隆：实拷 {source.name}', file=sys.stderr)
+        if link_ok and sys.platform == 'win32':
+            try:
+                os.link(long_path(str(source)), long_path(str(dest)))
+                return   # 同一份数据：不改属性（copystat / 可写位会连带改到解包目录里那份）
+            except OSError as error:
+                print(f'【黄】硬链接不可用（{error.strerror or error}）：实拷 {source.name}', file=sys.stderr)
+        else:
+            print(f'【黄】非 ReFS 同卷克隆：实拷 {source.name}', file=sys.stderr)
         with source.open('rb') as src, dest.open('xb') as dst:
             shutil.copyfileobj(src, dst, 1024 * 1024)
     shutil.copystat(source, dest, follow_symlinks=False)
@@ -288,6 +299,12 @@ def _win_acl(path, sealed):
     setsecurity = _ACL_SD.get('set') or _ACL_SD.setdefault('set', _api('advapi32', 'SetFileSecurityW', W.BOOL, W.LPCWSTR, W.DWORD, C.c_void_p))
     if not setsecurity(long_path(str(path)), 0x80000004, sd):
         raise C.WinError(C.get_last_error())
+
+
+def sealing():
+    """RomFS 共享存储设不设只读：只在开发 / 门禁机（S2A_ROMFS_SEAL=1，tools/gate.sh 设）。玩家机上存储在玩家看得见的游戏库里，
+    只读（Windows 是拒写的访问控制项）会让玩家在资源管理器里删不掉旧产物——玩家可见目录不能用权限做保护（同 pack/roots.sh）"""
+    return os.environ.get('S2A_ROMFS_SEAL') == '1'
 
 
 def seal(path, readonly=True):
@@ -612,12 +629,12 @@ class Roots:
                 self._copy_tree(p, dest / p.name)
             else:
                 copy_file(p, dest / p.name)
-        if not own_romfs and (dest / 'romfs').is_dir() and not target:
+        if not own_romfs and (dest / 'romfs').is_dir() and not target and sealing():
             seal(dest / 'romfs')
         self._resource('--root-clone', source, dest, env=env)
         self._shards(dest, '克隆现行(root_begin)', env=env)
 
-    def _copy_tree(self, source, dest, tick=None):
+    def _copy_tree(self, source, dest, tick=None, link_ok=False):
         if is_link(source):
             raise UnsafeRoot('克隆拒绝未批准的链接')
         dest.mkdir(parents=True)
@@ -626,7 +643,7 @@ class Roots:
             if p.is_dir():
                 output.mkdir(parents=True, exist_ok=True)
             else:
-                copy_file(p, output)
+                copy_file(p, output, link_ok=link_ok)
                 if tick:
                     tick()
 
@@ -704,6 +721,8 @@ class Roots:
                 e.add_note(f'（撤回也失败：{undo!r}；以上面的原错误为准）')
                 raise e
             print(f'【黄】RomFS 没收进共享存储（{e!r}），已撤回、留在本版本里照常出包', file=sys.stderr)
+            return
+        if not sealing():   # 玩家机：存储在玩家看得见的游戏库里，不设只读（同 pack/roots.sh _root_romfs_lock）
             return
         try:
             seal(store / identity)

@@ -248,6 +248,71 @@ static NSEvent *right_mouse_event(CGEventType type) {
     NSEvent *e = [NSEvent eventWithCGEvent:cg]; CFRelease(cg); return e;
 }
 static NSUInteger mouse_buttons_state(void) { return fake_mouse_buttons; }
+// R5：键盘区原始键态（HID usage 位图 + 修饰键字段；服务层 InputPump 照 s2a_kb_read 这份写键盘区共享内存）。
+//   键码表对拍：W=13→0x1A、F5=96→0x3E、Esc=53→0x29、小键盘Enter=76→0x58、Z=6→0x1D；修饰键 shift 56→0xE1、
+//   ctrl 59→0xE0、option 58→0xE2（0xE0–0xE2 落在位图第 4 个 64 位段）+ 字段位（Shift=2、Control=1、LeftAlt=4）；
+//   CapsLock 只走 flagsChanged（位图 0x39 + 字段 bit8）；失焦发全零、按住的键不丢；keyUp 清位；粘键核对删键跟着清；复位全清
+static void test_keyboard_hid(void) {
+    config = default_config(); reset_input(); focused = YES;
+    read_key_state = key_state; memset(physical_keys, 0, sizeof physical_keys);
+    uint64_t k[4]; uint32_t m;
+    s2a_kb_read(k, &m);
+    expect(k[0] == 0 && k[1] == 0 && k[2] == 0 && k[3] == 0 && m == 0, "keyboard bitmap starts empty");
+    S2AMetalView *view = [[S2AMetalView alloc] initWithFrame:NSZeroRect];
+    [view keyDown:key_event(NSEventTypeKeyDown, 13, NO)];   // W
+    s2a_kb_read(k, &m);
+    expect(k[0] == (1UL << 0x1A) && !k[1] && !k[2] && !k[3] && m == 0, "W lands on its HID usage bit");
+    [view keyDown:key_event(NSEventTypeKeyDown, 96, NO)];   // F5
+    s2a_kb_read(k, &m);
+    expect((k[0] & (1UL << 0x3E)) && (k[0] & (1UL << 0x1A)), "F5 lands beside W");
+    [view keyDown:key_event(NSEventTypeKeyDown, 76, NO)];   // 小键盘 Enter
+    s2a_kb_read(k, &m);
+    expect((k[1] & (1UL << (0x58 - 64))) && (k[0] & (1UL << 0x3E)), "keypad Enter lands on usage 0x58");
+    [view keyUp:key_event(NSEventTypeKeyUp, 13, NO)];
+    s2a_kb_read(k, &m);
+    expect(!(k[0] & (1UL << 0x1A)) && (k[0] & (1UL << 0x3E)), "keyUp clears only its own bit");
+    [view keyDown:key_event(NSEventTypeKeyDown, 53, NO)];   // Esc（窗口非全屏、没锁鼠标：照常进键盘区）
+    s2a_kb_read(k, &m);
+    expect((k[0] & (1UL << 0x29)) != 0, "Esc lands on usage 0x29");   // 位号 ≥ 32 的单项判空要显式 != 0：int 截断会把高位清零
+    [view flagsChanged:flags_event(56, NSEventModifierFlagShift)];
+    s2a_kb_read(k, &m);
+    expect((k[3] & (1UL << (0xE1 & 63))) && m == (1u << 1), "shift lands on usage 0xE1 and the Shift field bit");
+    // flagsChanged 的 modifierFlags 反映全量状态（与真机一致），合成事件按累积传
+    [view flagsChanged:flags_event(59, NSEventModifierFlagShift | NSEventModifierFlagControl)];
+    [view flagsChanged:flags_event(58, NSEventModifierFlagShift | NSEventModifierFlagControl | NSEventModifierFlagOption)];
+    s2a_kb_read(k, &m);
+    expect((k[3] & (1UL << (0xE0 & 63))) && (k[3] & (1UL << (0xE2 & 63))) && m == ((1u << 1) | 1u | (1u << 2)),
+           "control and option land with their usages and field bits");
+    [view flagsChanged:flags_event(56, NSEventModifierFlagControl | NSEventModifierFlagOption)];   // 松 shift：其余还在
+    [view flagsChanged:flags_event(59, NSEventModifierFlagOption)];
+    [view flagsChanged:flags_event(58, 0)];
+    s2a_kb_read(k, &m);
+    expect(!(k[3] & (7UL << 32)) && m == 0, "releasing modifiers clears bitmap and field");
+    [view flagsChanged:flags_event(57, NSEventModifierFlagCapsLock)];
+    s2a_kb_read(k, &m);
+    expect((k[0] & (1UL << 0x39)) && m == (1u << 8), "CapsLock lands on usage 0x39 and the CapsLock field bit");
+    [view flagsChanged:flags_event(57, 0)];
+    s2a_kb_read(k, &m);
+    expect(!(k[0] & (1UL << 0x39)) && m == 0, "CapsLock release clears both");
+    focused = NO; sample_input();
+    s2a_kb_read(k, &m);
+    expect(!k[0] && !k[1] && !k[2] && !k[3] && m == 0, "unfocused publishes an all-zero bitmap");
+    focused = YES; sample_input();
+    s2a_kb_read(k, &m);
+    expect((k[0] & (1UL << 0x29)) && (k[1] & (1UL << (0x58 - 64))), "refocus re-publishes held keys, like pads");
+    [view keyDown:key_event(NSEventTypeKeyDown, 6, NO)];   // Z
+    physical_keys[6] = YES;   // 粘键核对的 is_down 桩：Z 还按着，先不清
+    poll_stale();
+    s2a_kb_read(k, &m);
+    expect((k[0] & (1UL << 0x1D)), "Z lands on usage 0x1D while the system still reports it held");
+    physical_keys[6] = NO; poll_stale();   // 系统报松开满防抖次数 → 删键（keyUp 被别的响应者吃掉的兜底），位图跟着清
+    s2a_kb_read(k, &m);
+    expect(!(k[0] & (1UL << 0x1D)), "stale-key reconciliation clears the bitmap without a keyUp");
+    reset_input();
+    s2a_kb_read(k, &m);
+    expect(!k[0] && !k[1] && !k[2] && !k[3] && m == 0, "reset clears the keyboard bitmap");
+    puts("Mac keyboard: HID usage bitmap, modifiers, caps, focus and reconciliation passed");
+}
 static void test_mouse_lost_release(void) {
     config = default_config(); reset_input(); focused = YES;
     read_key_state = key_state; read_mouse_buttons = mouse_buttons_state;
@@ -592,7 +657,7 @@ static void test_profile_only_pad(void) {
     GCController *c = [GCController controllerWithMicroGamepad];
     expect(c.extendedGamepad == nil && pad_has_profile_buttons(c), "micro-only controller counts as a profile-only pad");
     install_pad_handler(c);
-    expect(c.physicalInputProfile.valueDidChangeHandler != nil && c.handlerQueue == dispatch_get_main_queue(), "profile handler installed on the main queue");
+    expect(c.physicalInputProfile.valueDidChangeHandler != nil && c.handlerQueue != nil && c.handlerQueue != dispatch_get_main_queue(), "profile handler installed on the dedicated pad queue");
     uint32_t buttons = 99; int32_t sticks[4];
     sample_profile_state(c, &buttons, sticks);
     expect(buttons == 0, "nothing pressed: no buttons");
@@ -631,29 +696,170 @@ static void test_pad_layout(void) {
     puts("Mac pad layout: automatic / Switch / Xbox take effect on the next read passed");
 }
 
-// 手柄事件回调（A2）：handlerQueue 必须切到主队列（与 AppKit 事件串行），回调直接发布整份当前状态；
-//   没有新事件时 120Hz 定时器仍是回退采样，长按不会因为「只发变化」而丢。
+// 手柄事件回调（A2）：handlerQueue 挂专用串行队列、不再挂主队列（主线程被菜单动画 / 提示条占住时手柄事件不再排队，见 test_pad_fast_path）；
+//   没占到槽的回调直接跳过（快速路径不碰没排进槽位表的手柄），没有新事件时 120Hz 定时器仍是回退采样，长按不会因为「只发变化」而丢。
 static void test_pad_handler_install(void) {
     FakePad *pad = [FakePad new];
     FakeController *controller = fake_controller(pad);
     install_pad_handler((GCController *)controller);
-    expect(controller.handlerQueue == dispatch_get_main_queue(), "pad handler runs on the main queue");
+    expect(controller.handlerQueue != nil && controller.handlerQueue != dispatch_get_main_queue(), "pad handler runs on a dedicated serial queue, not the main queue");
     expect(pad.valueChangedHandler != nil, "gamepad valueChangedHandler installed");
     config = default_config(); keys = [NSMutableSet set]; mouse = [NSMutableSet set]; focused = YES;
     read_key_state = key_state; memset(physical_keys, 0, sizeof physical_keys); physical_keys[14] = YES;
-    [keys addObject:@14];   // 不先 sample_input：必须由回调把整份状态发出来
-    pad.valueChangedHandler((GCExtendedGamepad *)pad, nil);
     int32_t sticks[4];
-    expect(s2a_vpad_read(sticks) == 1, "callback publishes the full current state, not only the changed element");
+    [keys addObject:@14]; sample_input();
+    expect(s2a_vpad_read(sticks) == 1, "120Hz fallback publishes a held state without a callback");
+    pad.valueChangedHandler((GCExtendedGamepad *)pad, nil);   // 没占到槽（FakeController 不在系统列表里）：快速路径跳过，不发布也不崩
+    expect(s2a_vpad_read(sticks) == 1, "unslotted callback is a no-op");
     [keys removeObject:@14]; sample_input();
     expect(s2a_vpad_read(sticks) == 0, "release is visible after a sample");
     [keys addObject:@14]; poll_input();
     expect(s2a_vpad_read(sticks) == 1, "120Hz fallback publishes a held state without a callback");
     for (int i = 0; i < 120; i++) { poll_input(); pad.valueChangedHandler((GCExtendedGamepad *)pad, nil); }
-    expect(s2a_vpad_read(sticks) == 1, "held state persists across callbacks and the 120Hz fallback");
+    expect(s2a_vpad_read(sticks) == 1, "held state persists across the 120Hz fallback and no-op callbacks");
     physical_keys[14] = NO;
     reset_input();
-    puts("Mac pad: handler installs on main queue and publishes held state passed");
+    puts("Mac pad: handler installs on a dedicated queue and 120Hz fallback keeps held state passed");
+}
+
+// 手柄快速路径（延迟管线调研·输入：GCController 权衡解除）。期望手算（缺省映射：手柄 A=东=位 0、B=南=位 1；键盘 Shift=B 位 1；E=A 位 0）：
+//   ① 回调队列离开主队列（改前：主队列，红）；
+//   ② 快速路径合成槽 0：键盘快照（位 1）+ 手柄 A（位 0）一起发布 = 3；松手后只剩键盘位（回调读当前整份状态，不是只发变化）；
+//   ③ 主线程忙 300ms 不进 runloop（等效菜单动画 / 提示条占住主线程），事件经 handlerQueue 投递，
+//      后台 s2a_pad_wait 截止 200ms 必须被唤醒（改前：回调排主队列、等主线程空下来才发 → 超时，红）；
+//   ④ 玩家 2（槽 1）事件只写自己的槽位原子量并唤醒泵（改前：sample_input 采不到不在系统列表里的虚拟手柄 → 槽 1 恒 0，红）；
+//   ⑤ 失焦静音：快速路径发零。
+//   系统虚拟手柄（controllerWithExtendedGamepad）不在 GCController.controllers 里，槽位镜像由测试照 sample_input
+//   写回同构放进去（同 test_pad_slots 的 apply_slots 注释）；setValue 只改读数不触发回调（本机实测，改前改后同一测法），
+//   事件 = 照 GameController 的投递方式经 handlerQueue 调回调块本身。
+static void slot_fake_pad(int slot, GCController *c) {
+    pthread_mutex_lock(&g_compose_mu); pad_slot_owner[slot] = c; pthread_mutex_unlock(&g_compose_mu);
+}
+static void test_pad_fast_path(void) {
+    typedef void (*read_ex_fn)(s2a_pad_snapshot *);
+    read_ex_fn read_ex = (read_ex_fn)dlsym(RTLD_DEFAULT, "s2a_vpad_read_ex");
+    expect(read_ex != NULL, "Mac exports s2a_vpad_read_ex");
+    config = default_config(); keys = [NSMutableSet set]; mouse = [NSMutableSet set]; focused = YES;
+    read_key_state = key_state; memset(physical_keys, 0, sizeof physical_keys);
+    s2a_pad_set_active(0); s2a_pad_set_active(1);   // 清上一局留下的源选择
+    reset_input();
+
+    // ① 回调队列离开主队列
+    GCController *pad0 = [GCController controllerWithExtendedGamepad];
+    install_pad_handler(pad0);
+    expect(pad0.handlerQueue != nil && pad0.handlerQueue != dispatch_get_main_queue(), "pad handler leaves the main queue");
+    sample_input();   // 刷新键盘 / 鼠标快照与静音标记（此刻全零）
+    slot_fake_pad(0, pad0);
+
+    // ② 快速路径合键盘快照：Shift（位 1）+ 手柄 A（位 0）
+    [keys addObject:@56]; modifiers = 1; physical_keys[60] = YES;
+    sample_input(); slot_fake_pad(0, pad0);   // sample_input 整表重建镜像（虚拟手柄不在列表里会被清掉）：重放回去
+    s2a_pad_snapshot snap; read_ex(&snap);
+    expect(snap.buttons == 2, "keyboard shift alone maps to B");
+    [pad0.extendedGamepad.buttonA setValue:1];
+    pad0.extendedGamepad.valueChangedHandler(pad0.extendedGamepad, pad0.extendedGamepad.buttonA);
+    read_ex(&snap);
+    expect(snap.buttons == 3, "fast path composes the keyboard snapshot with the pad: B|A");
+    [pad0.extendedGamepad.buttonA setValue:0];
+    pad0.extendedGamepad.valueChangedHandler(pad0.extendedGamepad, pad0.extendedGamepad.buttonA);
+    read_ex(&snap);
+    expect(snap.buttons == 2, "release clears the pad bit and keeps the keyboard bit");
+    [keys removeObject:@56]; modifiers = 0; physical_keys[60] = NO; sample_input(); slot_fake_pad(0, pad0);
+    read_ex(&snap);
+    expect(snap.buttons == 0, "keyboard release is visible after a sample");
+
+    // ③ 主线程忙 300ms：事件经 handlerQueue 投递，200ms 截止内必须发布（改前排主队列，红）
+    [pad0.extendedGamepad.buttonA setValue:1];
+    read_ex(&snap); uint64_t observed = snap.notification_seq;
+    dispatch_async(pad0.handlerQueue, ^{ pad0.extendedGamepad.valueChangedHandler(pad0.extendedGamepad, pad0.extendedGamepad.buttonA); });
+    __block int woke = -1;
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        woke = s2a_pad_wait(observed, s2a_pad_now_us() + 200000);   // 截止 200ms < 主线程忙 300ms：判「排不排队」，不受机器快慢影响
+        dispatch_semaphore_signal(done);
+    });
+    usleep(20000);   // 让等待线程先进入条件变量；即使没进，序号变化也会让它立即返回
+    uint64_t spin = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + 300000000ull;
+    while (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < spin) {}   // 主线程忙转：不进 runloop、不排主队列
+    expect(dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)) == 0, "pad wait settles");
+    expect(woke == 1, "controller event publishes while the main thread is busy (deadline 200ms < busy 300ms)");
+    run_loop_for(0.05);   // 改前实现：让仍排在主队列的那份回调在断言之后补跑，不泄给后面的用例
+    read_ex(&snap);
+    expect(snap.buttons == 1, "pad bit visible after the queued event");
+    [pad0.extendedGamepad.buttonA setValue:0];
+    pad0.extendedGamepad.valueChangedHandler(pad0.extendedGamepad, pad0.extendedGamepad.buttonA);
+
+    // ④ 玩家 2（槽 1）：事件只写自己的槽位原子量并唤醒泵
+    GCController *pad1 = [GCController controllerWithExtendedGamepad];
+    install_pad_handler(pad1);
+    slot_fake_pad(1, pad1);
+    [pad1.extendedGamepad.buttonB setValue:1];
+    read_ex(&snap); uint64_t seq1 = snap.notification_seq;
+    dispatch_async(pad1.handlerQueue, ^{ pad1.extendedGamepad.valueChangedHandler(pad1.extendedGamepad, pad1.extendedGamepad.buttonB); });
+    run_loop_for(0.05);   // 改前排主队列：跑 runloop 才执行（红）；改后排专用队列：早执行完
+    read_ex(&snap);
+    expect(snap.buttons == 0, "player 2 events do not leak into the player 1 snapshot");
+    int32_t ps[4];
+    expect(s2a_vpad_read_pad(1, ps) == 2, "player 2 slot atomics carry the pad B bit");
+    expect(snap.notification_seq != seq1, "player 2 event wakes the HID pump");
+    [pad1.extendedGamepad.buttonB setValue:0];
+    dispatch_async(pad1.handlerQueue, ^{ pad1.extendedGamepad.valueChangedHandler(pad1.extendedGamepad, pad1.extendedGamepad.buttonB); });
+    run_loop_for(0.05);
+
+    // ⑤ 失焦静音：快速路径发零
+    focused = NO; input_mute_refresh(); sample_input(); slot_fake_pad(0, pad0);
+    [pad0.extendedGamepad.buttonA setValue:1];
+    pad0.extendedGamepad.valueChangedHandler(pad0.extendedGamepad, pad0.extendedGamepad.buttonA);
+    read_ex(&snap);
+    expect(snap.buttons == 0, "muted fast path publishes zeros");
+    focused = YES; input_mute_refresh(); sample_input();
+    read_ex(&snap);
+    expect(snap.buttons == 0, "refocus keeps input neutral until the next event");
+    [pad0.extendedGamepad.buttonA setValue:0];
+    reset_input();
+    puts("Mac pad: dedicated-queue fast path, busy-main publish, player 2 slot and mute passed");
+}
+
+// 延迟读数（--pad-latency-probe 手动跑，不进门禁）：事件投递 → 回调执行 → pad.c 发布的毫秒读数，
+//   同一测法改前改后各跑一遍（改前 = 负对照构建）。设备无关的判据在 test_pad_fast_path（截止 200ms < 忙 300ms），
+//   这里只报数：主线程忙 0 / 100 / 300 / 1000ms 各 3 轮，dispatch→回调执行的耗时（排主队列的改前 ≈ 忙的时长）、
+//   回调体自身耗时（快速路径采样 + 发布）与发布后的按键位。
+static void pad_latency_probe(void) {
+    typedef void (*read_ex_fn)(s2a_pad_snapshot *);
+    read_ex_fn read_ex = (read_ex_fn)dlsym(RTLD_DEFAULT, "s2a_vpad_read_ex");
+    expect(read_ex != NULL, "Mac exports s2a_vpad_read_ex");
+    config = default_config(); keys = [NSMutableSet set]; mouse = [NSMutableSet set]; focused = YES;
+    read_key_state = key_state; memset(physical_keys, 0, sizeof physical_keys);
+    s2a_pad_set_active(0); s2a_pad_set_active(1); reset_input();
+    GCController *pad = [GCController controllerWithExtendedGamepad];
+    install_pad_handler(pad);
+    __block uint64_t exec_us = 0, exec_end_us = 0;
+    int cases[] = {0, 100, 300, 1000};
+    for (int round = 0; round < 3; round++)
+        for (unsigned i = 0; i < sizeof cases / sizeof *cases; i++) {
+            [pad.extendedGamepad.buttonA setValue:0];
+            pad.extendedGamepad.valueChangedHandler(pad.extendedGamepad, pad.extendedGamepad.buttonA);
+            focused = YES; input_mute_refresh(); sample_input();
+            slot_fake_pad(0, pad);
+            s2a_pad_snapshot snap; read_ex(&snap);   // 清 pending 时间戳
+            [pad.extendedGamepad.buttonA setValue:1];
+            exec_us = exec_end_us = 0;
+            uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000;
+            dispatch_async(pad.handlerQueue, ^{
+                exec_us = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000;
+                pad.extendedGamepad.valueChangedHandler(pad.extendedGamepad, pad.extendedGamepad.buttonA);
+                exec_end_us = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000;
+            });
+            uint64_t spin = t0 + (uint64_t)cases[i] * 1000;
+            while (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000 < spin) {}   // 主线程忙转：不进 runloop、不排主队列
+            run_loop_for(0.2);   // 改前排主队列：等 runloop 才执行；改后排专用队列：早执行完
+            for (int n = 0; n < 1000 && !exec_end_us; n++) usleep(1000);
+            s2a_pad_snapshot after; read_ex(&after);
+            printf("pad-latency busy=%4dms round=%d dispatch→exec %.2fms exec-body %.3fms buttons=%u\n",
+                   cases[i], round, (exec_us - t0) / 1000.0, (exec_end_us - exec_us) / 1000.0, after.buttons);
+        }
+    [pad.extendedGamepad.buttonA setValue:0];
+    reset_input();
 }
 
 // 11-04 维护者定：鼠标左键点画面 = 触屏（对齐 Ryujinx TouchScreenManager）。期望手写：窗口 1600×720 点、无窗口缩放 1；
@@ -873,6 +1079,7 @@ int main(int argc, const char **argv) {
     expect(s2a_mac_ns2_connect(), "Switch 2 Pro motion relay connects");
     int relayClient = accept(relayListener, NULL, NULL);
     s2a_pad_set_motion_enabled(1);
+    s2a_mac_ns2_set_game_style(1 << 4);   // 游戏用 JoyconRight：单只右 Joy-Con 的六轴原样给（#520 A）
     ns2_relay_packet motionPacket = {
         .magic = NS2_RELAY_MAGIC, .version = NS2_RELAY_VERSION, .type = NS2_RELAY_INPUT,
         .ready = 1, .status = NS2_STATUS_READY, .motion_known = 1, .kind = NS2_KIND_JOYCON_R,
@@ -883,6 +1090,35 @@ int main(int argc, const char **argv) {
     for (int attempt = 0; attempt < 100 && !s2a_pad_read_motion(&ns2Motion); attempt++) usleep(1000);
     expect(ns2Motion.host_timestamp_us == 1234 && ns2Motion.gyro_x == 90 && ns2Motion.acceleration_z == 1,
            "Switch 2 Pro motion reaches shared Mac six-axis entry");
+    // #520 A：游戏不用单只样式（扮 Pro）时，单只右 Joy-Con 的六轴在游戏端转成横握视角：(ax, az) → (−az, ax)、(gx, gz) → (−gz, gx)
+    s2a_mac_ns2_set_game_style(1 << 0);
+    expect(s2a_pad_read_motion(&ns2Motion) && ns2Motion.gyro_x == 0 && ns2Motion.gyro_z == 90 && ns2Motion.acceleration_x == -1 && ns2Motion.acceleration_z == 0,
+           "single right Joy-Con motion turns sideways when the game uses a Pro controller");
+    // 按键 / 摇杆同理：通道收原始方向（SL 在扩展位 21）；游戏用 JoyconRight 原样给、SL 换成 Ryujinx SlRight，扮 Pro 时转横握、SL 当 L
+    ns2_relay_packet rawPacket = motionPacket; rawPacket.state = (ns2_state){(1ull << 2) | (1ull << NS2_BUTTON_SL), 0, 0, 300, -400};
+    expect(send(relayClient, &rawPacket, sizeof rawPacket, 0) == sizeof rawPacket, "raw single Joy-Con packet sent");
+    ns2_state shaped; uint32_t side = 0;
+    for (int attempt = 0; attempt < 100 && !(s2a_mac_ns2_read(&shaped, &side), shaped.buttons); attempt++) usleep(1000);
+    expect(shaped.buttons == ((1ull << 0) | (1ull << 6)) && side == 0 && shaped.lx == -400 && shaped.ly == -300 && !s2a_mac_ns2_raw_now(),
+           "game uses Pro: raw right Joy-Con becomes sideways (X -> A, SL -> L, stick (300,-400) -> (-400,-300))");
+    s2a_mac_ns2_set_game_style(1 << 4);
+    s2a_mac_ns2_read(&shaped, &side);
+    expect(shaped.buttons == (1ull << 2) && side == (1u << 26) && shaped.rx == 300 && shaped.ry == -400 && s2a_mac_ns2_raw_now(),
+           "game uses JoyconRight: raw keys and right stick pass through, SL becomes Ryujinx SlRight");
+    s2a_mac_ns2_set_game_style(1 << 3);
+    s2a_mac_ns2_read(&shaped, &side);
+    expect(side == 0 && shaped.buttons == ((1ull << 0) | (1ull << 6)) && !s2a_mac_ns2_raw_now(), "game uses JoyconLeft with a right Joy-Con: not raw (sideways)");
+    // 游戏不收 Pro、只收双 Joy-Con（InputPump 报 JoyconPair）：单只右 Joy-Con 照原始方向（真机双手模式只接一侧、直握；11-11 一款体育游戏的球类项目实机）
+    s2a_mac_ns2_set_game_style(1 << 2);
+    s2a_mac_ns2_read(&shaped, &side);
+    expect(shaped.buttons == (1ull << 2) && side == (1u << 26) && s2a_mac_ns2_raw_now(), "game uses JoyconPair only: single Joy-Con stays raw (vertical)");
+    expect(s2a_mac_ns2_single_style(NS2_KIND_JOYCON_L) == (1 << 3) && s2a_mac_ns2_single_style(NS2_KIND_JOYCON_R) == (1 << 4) &&
+           !s2a_mac_ns2_single_style(NS2_KIND_PRO) && !s2a_mac_ns2_single_style(NS2_KIND_JOYCON_PAIR) && !s2a_mac_ns2_single_style(NS2_KIND_NONE),
+           "single Joy-Con style hint: only one Joy-Con maps to JoyconLeft / JoyconRight");
+    ns2_state pro = {(1ull << 6) | (1ull << NS2_BUTTON_SL), 1, 2, 3, 4};
+    expect(s2a_mac_ns2_shape(NS2_KIND_PRO, 0, &pro) == 0 && pro.buttons == ((1ull << 6) | (1ull << NS2_BUTTON_SL)) && pro.lx == 1,
+           "shape leaves the Pro controller untouched");
+    s2a_mac_ns2_set_game_style(1 << 4);
     // 通道 v2 带型号（#520）：游戏端照收；菜单显示名跟着型号
     expect(s2a_mac_ns2_kind() == NS2_KIND_JOYCON_R && !strcmp(s2a_mac_ns2_kind_name(s2a_mac_ns2_kind()), "Joy-Con 2 (R)"),
            "relay v2 carries the controller kind to the game");
@@ -940,6 +1176,7 @@ int main(int argc, const char **argv) {
     unsetenv("S2A_NS2_SOCKET");
     @autoreleasepool {
         if (argc == 2 && !strcmp(argv[1], "--input-config-only")) { test_shared_input_config(); return 0; }
+        if (argc == 2 && !strcmp(argv[1], "--pad-latency-probe")) { pad_latency_probe(); return 0; }
         if (argc >= 3 && !strcmp(argv[1], "--guide-render")) {
             [NSApplication sharedApplication];
             NSApp.appearance=[NSAppearance appearanceNamed:NSAppearanceNameAqua];
@@ -983,6 +1220,7 @@ int main(int argc, const char **argv) {
         test_event_input();
         test_pad_disconnect();
         test_pad_handler_install();
+        test_pad_fast_path();
         test_profile_only_pad();
     test_pad_layout();
         test_save_atomic_warning();
@@ -990,6 +1228,7 @@ int main(int argc, const char **argv) {
         test_focus_suspend();
         test_untrusted_key_state();
         test_modifier_false_release();
+        test_keyboard_hid();
         test_mouse_lost_release();
         test_mouse_touch();
         test_mouse_touch_declared();
@@ -1097,7 +1336,12 @@ int main(int argc, const char **argv) {
         expect(s2a_vpad_read(sticks) == 1, "chord consumes standalone modifier binding");
         reset_input();
         pthread_t thread; expect(!pthread_create(&thread, NULL, read_snapshots, NULL), "create HID reader");
-        for (int i = 0; i < 100000; i++) { int32_t v = i % 32768, s[4] = {v, v, v, v}; publish((uint32_t)v, s); }
+        for (int i = 0; i < 100000; i++) {   // publish 的序号快照只允许一个写者在 g_compose_mu 内：同生产代码的两条写线
+            int32_t v = i % 32768, s[4] = {v, v, v, v};
+            pthread_mutex_lock(&g_compose_mu);
+            publish((uint32_t)v, s);
+            pthread_mutex_unlock(&g_compose_mu);
+        }
         void *result; pthread_join(thread, &result); expect(result == NULL, "HID reads coherent snapshots");
         S2AMetalView *view = [[S2AMetalView alloc] initWithFrame:NSMakeRect(0, 0, 640, 360)];
         view.wantsLayer = YES; view.layer = [CAMetalLayer layer]; [view layout];

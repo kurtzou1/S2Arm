@@ -140,6 +140,23 @@ namespace Ryujinx.Horizon.Sdk.Codec.Detail
             _decoder = new NativeDecoder(sampleRate, channelsCount, streams, coupledStreams, mapping);
         }
 
+        // hwacod（Switch 2 硬件音频编解码会话，HardwareAudioCodec.cs）的实例借这里的 libopus 解码：实例数由管理会话定，不占 MaxLive 名额，没有工作缓冲句柄
+        internal static HardwareOpusDecoder CreateForAudioCodec(int sampleRate, int channelsCount, int streams, int coupledStreams, byte[] mapping)
+        {
+            return mapping == null
+                ? new HardwareOpusDecoder(sampleRate, channelsCount, workBufferHandle: 0)
+                : new HardwareOpusDecoder(sampleRate, channelsCount, streams, coupledStreams, mapping, workBufferHandle: 0);
+        }
+
+        // 调用方已核过包头长度（input = 8 字节包头 + 包）。坏包先在这里如实回错：DecodeInterleaved 取样本数失败时回 Success、0 样本（上游原样，旧 hwopus 入口仍是）
+        internal Result DecodeForAudioCodec(ReadOnlySpan<byte> input, Span<byte> output, bool reset, out int outSamples)
+        {
+            outSamples = 0;
+            Result result = GetPacketNumSamples(_decoder, out _, input.Slice(8, (int)BinaryPrimitives.ReadUInt32BigEndian(input)));
+
+            return result.IsFailure ? result : DecodeInterleavedInternal(out _, out outSamples, out _, output, input, reset, withPerf: false);
+        }
+
         [CmifCommand(0)]
         public Result DecodeInterleavedOld(
             out int outConsumed,

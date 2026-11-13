@@ -165,6 +165,45 @@ class IosPlatform(JobCase):
         self.assertAlmostEqual(got[0]["done"], 1.02e9); self.assertAlmostEqual(got[0]["total"], 8.32e9)
         self.assertAlmostEqual(got[-1]["done"], 8.32e9)
 
+    def _progress_events(self, lines, download=toolchain.download_ios_platform):
+        events = []
+
+        def run(args, on_line=None, **kw):
+            for text in lines:
+                on_line(text)
+
+        with patch.object(self.c, "run", run), patch.object(self.c, "emit", lambda *a, **k: events.append(k)), \
+             patch.object(toolchain, "_sdk_platform", return_value=(False, "", "")), \
+             patch.object(toolchain, "_wait_runtime_ready", return_value=True):
+            download(self.c)
+        return [e for e in events if "done" in e]
+
+    def test_download_progress_decimal_comma_reports_bytes(self):
+        for separator in (".", ","):
+            for space in (" ", "\u00a0", "\u202f"):
+                with self.subTest(separator=separator, space=space):
+                    lines = [f"Downloading iOS Simulator: 46{separator}2{space}% (3{separator}63 GB of 7{separator}85 GB)",
+                             f"Downloading iOS Simulator: 47{separator}1{space}% (3{separator}7 GB of 7{separator}85 GB)"]
+                    got = self._progress_events(lines)
+                    self.assertEqual(len(got), 2)
+                    self.assertEqual([e["unit"] for e in got], ["B", "B"])
+                    self.assertAlmostEqual(got[0]["done"], 3.63e9)
+                    self.assertAlmostEqual(got[1]["done"], 3.7e9)
+                    self.assertAlmostEqual(got[0]["total"], 7.85e9)
+                    self.assertAlmostEqual(got[1]["total"], 7.85e9)
+
+    def test_download_progress_decimal_comma_percentage_only(self):
+        got = self._progress_events(["Downloading: 46,2%", "Downloading: 47,1\u00a0%", "Downloading: 100%"])
+        self.assertEqual([e["done"] for e in got], [46.2, 47.1, 100.0])
+        self.assertEqual([e["total"] for e in got], [100.0] * 3)
+        self.assertEqual([e["unit"] for e in got], ["%"] * 3)
+
+    def test_metal_download_progress_decimal_comma(self):
+        got = self._progress_events(["Downloading: 46,2%", "Downloading: 47,1\u00a0%", "Downloading: 100%"],
+                                    toolchain.download_metal)
+        self.assertEqual([e["done"] for e in got], [46.2, 47.1, 100.0])
+        self.assertEqual([e["unit"] for e in got], ["%"] * 3)
+
     def test_registration_error_does_not_redo_transfer_when_runtime_ready(self):
         def run(args, on_line=None, until=None, **kw):
             raise Failure("S2Arm 工具退出，当前阶段未完成。", code="tool_exit")

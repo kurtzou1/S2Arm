@@ -1,4 +1,4 @@
-// S2Arm（不是上游文件）：顶栏 Switch 2 Pro 按钮与弹窗：连接状态、手动连接 / 断开、两个持久化开关。
+// S2Arm（不是上游文件）：顶栏手柄按钮与弹窗：连接状态、手动连接 / 断开、三个持久化开关。
 import SwiftUI
 import NXCore
 import NXModel
@@ -82,6 +82,24 @@ struct Switch2ProConnectionPopover: View {
                     .toggleStyle(LauncherSwitchStyle())
                     .labelsHidden()
                     .accessibilityLabel(zh ? "关闭游戏后自动断开手柄" : "Disconnect controller after closing the game")
+            }
+
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(zh ? "记住这台设备" : "Remember this device")
+                        .font(.manrope(13.5, .semibold))
+                    Text(zh ? "打开后长按 SYNC 连一次，之后按任一键重连；连过其他设备需重按 SYNC。"
+                            : "Turn on, then connect once with SYNC; afterwards any button reconnects. After using another device, press SYNC again.")
+                        .font(.manrope(11.5))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                Toggle("", isOn: Binding(get: { controller.rememberDevice },
+                                         set: { controller.setRememberDevice($0) }))
+                    .toggleStyle(LauncherSwitchStyle())
+                    .labelsHidden()
+                    .accessibilityLabel(zh ? "记住这台设备" : "Remember this device")
             }
 
             Text(controller.autoConnectOnOpen

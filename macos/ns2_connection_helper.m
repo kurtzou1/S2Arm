@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 S2Arm contributors
 #import <Foundation/Foundation.h>
+#import <IOBluetooth/IOBluetooth.h>
 #include "ns2_relay.h"
 #include "ns2_parent_watch.h"
 #include <errno.h>
@@ -246,6 +247,22 @@ static void start_relay(const char *path) {
     dispatch_resume(relayTimer);
 }
 
+// 启动器「记住这台设备」（#521）：S2A_NS2_REMEMBER_DEVICE=1 时取本机蓝牙地址交给传输层，长按 SYNC 连上的手柄会记住这台 Mac。
+//   绑定写在真正持有 BLE 连接的这个进程里。读不到地址就跳过绑定、照旧可用，记一行日志
+static void configure_bonding(void) {
+    const char *wanted = getenv("S2A_NS2_REMEMBER_DEVICE");
+    if (!wanted || strcmp(wanted, "1")) return;
+    uint64_t started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    NSString *text = IOBluetoothHostController.defaultController.addressAsString;   // "aa-bb-cc-dd-ee-ff"
+    uint8_t host[6];
+    if (!ns2_parse_bt_address(text.UTF8String, host)) {
+        fprintf(stderr, "[NS2 Relay] 记住这台设备：读不到本机蓝牙地址（%s），这次不写入绑定，手柄照常可用\n", text.UTF8String ?: "空");
+        return;
+    }
+    fprintf(stderr, "[NS2 Relay] 记住这台设备：本机蓝牙地址已取得（%.0f ms）\n", (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - started) / 1e6);
+    ns2_set_bond_host(host);
+}
+
 static dispatch_source_t install_shutdown_signal(int signo) {
     dispatch_source_t source = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL, signo, 0, dispatch_get_main_queue());
     dispatch_source_set_event_handler(source, ^{
@@ -280,6 +297,8 @@ int main(void) {
         if (!pthread_create(&parentWatch, NULL, parent_watch_main, (void *)(intptr_t)getppid()))
             pthread_detach(parentWatch);
         start_relay(socketPath);
+        configure_bonding();
+        ns2_set_joycon_raw(1);   // 单只 Joy-Con 报原始方向（通道 v2），游戏宿主按游戏样式决定转不转（macos/ns2_controller.c，#520 A）
         if (!ns2_start_with_motion(receive_input, emit_status, receive_motion, NULL)) {
             emit_status(NS2_STATUS_ERROR, "Could not start the controller connection", NULL);
             close(listenFD);

@@ -29,6 +29,11 @@ int nvn_plat_flag(const char *name, int dflt) {
     return atoi(v);
 }
 
+// 回放循环的安全点（nvn_plat.h）：运行时改内存映射要所有游戏线程停下，回放所在的游戏线程一次提交可连续跑数秒，
+// 在命令之间让它停到事务结束（android/native/runtime/fault/thread_android.inc）。诊断目标不链运行时：弱符号。
+extern void s2a_android_guest_host_safepoint(void) __attribute__((weak));
+void nvn_plat_safepoint(void) { if (s2a_android_guest_host_safepoint) s2a_android_guest_host_safepoint(); }
+
 const char *nvn_plat_dir(int which) {
     if (which == NVN_PLAT_DIR_CACHE) return nvk_session_cache_dir();
     if (which == NVN_PLAT_DIR_DIAG) return getenv("S2A_DIRECT_DIAG_DIR");

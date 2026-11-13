@@ -85,7 +85,7 @@ static int child(int metal3) {
     MTL4RenderPassDescriptor *pass = pass_desc(); pass.renderTargetWidth = 1; pass.renderTargetHeight = 1; pass.defaultRasterSampleCount = 1;
     id<MTL4RenderCommandEncoder> encoder = enc_r_begin(pass);
     REQUIRE(encoder);
-    enc_r_pso(encoder, ps); bind_vbufs(encoder);
+    enc_r_pso(encoder, ps); bind_vbufs(encoder, vs);
     vconv_bind(encoder, vs, 0, &direct_vconv, NULL);
     uint64_t vconv_gpu = 0; void *vconv_buf = NULL; uint64_t vconv_off = 0;
     uint64_t vconv_target = (uint64_t)(uintptr_t)(output + VCONV_PREFIX / sizeof(uint32_t));

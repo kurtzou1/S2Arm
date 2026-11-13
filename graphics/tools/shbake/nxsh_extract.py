@@ -541,8 +541,10 @@ def _scan_blob(path, data, rows, blobs, stat):
     if data[:4] == b'BAHS' and len(data) > 0x20: owned |= scan_bahs(path, data, rows, blobs, stat)
     if data[:4] == b'SDF\0': owned |= scan_sdf(path, data, rows, blobs, stat)
     owned |= scan_offhdr(path, data, rows, blobs, stat)
-    if b'HCPS' in data: owned |= scan_spch(path, data, rows, blobs, stat)
-    if RAW and (b'BNSH\0\0\0\0' not in data or path.startswith('nso:')): scan_raw(path, data, rows, blobs, stat)
+    # SPCH 不先判 `b'HCPS' in data`：大文件按 mmap 传进来（work 的 big_split），mmap 不支持子串 in（逐个取单字节和整串比），永远判不中，
+    #   4.7 GB 的 0100F43008C44000 arc/data.trpfs 上还白走 30 秒；scan_spch 自己就按魔数 finditer，没有就是一遍扫描。RAW 的判断同理改 find
+    owned |= scan_spch(path, data, rows, blobs, stat)
+    if RAW and (data.find(b'BNSH\0\0\0\0') < 0 or path.startswith('nso:')): scan_raw(path, data, rows, blobs, stat)
     for k, m in enumerate(re.finditer(b'BNSH\0\0\0\0', data)):
         # 按头里的长度只切这一支（#711：原先先切到文件尾再截短，几 GB 的容器 mmap 每遇一处 BNSH 就拷一份到文件尾，Windows 提交上限下 MemoryError）
         o = m.start(); size = struct.unpack_from('<I', data, o + 0x1c)[0]; b = data[o:o + size] if 0 < size <= len(data) - o else data[o:]

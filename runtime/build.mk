@@ -77,7 +77,7 @@ ifeq ($(shell uname -s),Darwin)
 .PHONY: native-test-input_config_apple
 native-test-input_config_apple:
 	@mkdir -p $(BUILD)/tests
-	$(CC) $(CFLAGS) $(NATIVE_INC) -Iios -fobjc-arc -o $(BUILD)/tests/t_input_config_apple -Iruntime/ns2pro/include runtime/tests/t_input_config_apple.m runtime/src/input_config.c runtime/src/pad.c ios/input_config.m macos/ns2_controller.c macos/joycon_imu.m $(wildcard runtime/ns2pro/*.c) runtime/ns2pro/NS2Transport.m -framework AppKit -framework CoreGraphics -framework GameController -framework CoreHaptics -framework QuartzCore -framework CoreBluetooth -framework IOKit
+	$(CC) $(CFLAGS) $(NATIVE_INC) -Iios -fobjc-arc -o $(BUILD)/tests/t_input_config_apple -Iruntime/ns2pro/include runtime/tests/t_input_config_apple.m runtime/src/input_config.c runtime/src/pad.c ios/input_config.m macos/ns2_controller.c macos/joycon_imu.m macos/textinput_mac.m runtime/src/text_input.c $(wildcard runtime/ns2pro/*.c) runtime/ns2pro/NS2Transport.m -framework AppKit -framework CoreGraphics -framework GameController -framework CoreHaptics -framework QuartzCore -framework CoreBluetooth -framework IOKit
 	$(BUILD)/tests/t_input_config_apple
 TEST_TARGETS += native-test-input_config_apple
 endif
@@ -97,7 +97,7 @@ IOS_LIBS   += -framework GameController -framework UniformTypeIdentifiers
 # 手机自身当掌机（ios/phone_motion.m）：陀螺仪 / 加速度当六轴、Core Haptics 当震动马达
 IOS_LIBS   += -framework CoreMotion -framework CoreHaptics -framework ExternalAccessory   # ExternalAccessory：GameSir G8+ MFi 有线的马达走配件协议（ios/ea_rumble.m，#462）
 # 诊断包（ios/diag.m）：MetricKit 收崩溃 / 卡顿诊断
-IOS_LIBS   += -framework MetricKit
+IOS_LIBS   += -framework MetricKit -framework CoreTelephony   # CoreTelephony：上传断网时认「无线数据」授权被拒（CTCellularData）
 # 静音键下照样出声（ios/app.m audio_category_apply，#789）：AVAudioSession
 IOS_LIBS   += -framework AVFAudio
 # 诊断包自己写 zip（文件放根目录、文件名带 UTF-8 标记；系统「为上传而读」会多套一层文件夹、中文名按 cp437 解成乱码）：deflate 用系统 zlib
@@ -172,7 +172,7 @@ ios: ios-ns2pro
 	@mkdir -p $(IOS_APP)/Frameworks && cp -R $(NS2_FRAMEWORK) $(IOS_APP)/Frameworks/
 	@cp -R ios/Settings.bundle $(IOS_APP)/Settings.bundle
 	@cp -R ios/l10n/*.lproj $(IOS_APP)/   # 宿主界面字符串表（ios/s2a_l10n.h S2AL）：<语言>.lproj/S2ArmHost.strings 放主 bundle；同目录 InfoPlist.strings 是权限说明的译文（#316）
-	@for l in zh-Hans en; do python3 launchers/shared/experience_strings.py --lang $$l > $(BUILD)/ios/error_$$l.strings || { echo "🔴 装机 / 导入失败文案生成失败（launchers/shared/experience_strings.py --lang $$l）"; exit 1; }; cat $(BUILD)/ios/error_$$l.strings >> $(IOS_APP)/$$l.lproj/S2ArmHost.strings; done   # 失败按码说人话（app.m install_error_text）：码表单一来源 experience.v1.json，生成的键只进包、不进仓库表
+	@for l in zh-Hans zh-Hant en; do python3 launchers/shared/experience_strings.py --lang $$l > $(BUILD)/ios/error_$$l.strings || { echo "🔴 装机 / 导入失败文案生成失败（launchers/shared/experience_strings.py --lang $$l）"; exit 1; }; cat $(BUILD)/ios/error_$$l.strings >> $(IOS_APP)/$$l.lproj/S2ArmHost.strings; done   # 失败按码说人话（app.m install_error_text）：码表单一来源 experience.v1.json，生成的键只进包、不进仓库表
 	@$(call ios_objs_cached,$(BUILD)/ios/obj_app,-fobjc-arc $(NATIVE_INC) -Iruntime/src -Iruntime/ns2pro/include,$(IOS_SRCS))
 	$(IOS_LD_REPRO) $(IOS_CC) -fobjc-arc $(IOS_LD_DET) -Wl,-oso_prefix,$(IOS_BUILD_ABS)/ -o $(IOS_APP)/S2Arm $(call ios_objlist,$(BUILD)/ios/obj_app,$(IOS_SRCS)) $(IOS_LIBS) \
 	  -framework UIKit -framework Foundation -framework CoreGraphics $(IOS_SHELLUI_LINK) $(call S2A_WEAK_U,ios) -Wl,-S

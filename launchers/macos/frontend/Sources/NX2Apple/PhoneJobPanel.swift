@@ -196,6 +196,7 @@ struct PhoneJobPanel: View {
             if !session.suggestion.isEmpty {
                 PhoneJobFact(label: t("phone.next"), text: loc.backend(session.suggestion))
             }
+            ReportHint()
             HStack(spacing: 12) {
                 if session.kind == .installUpdate {
                     Button { model.retryPhoneUpdate() } label: { LauncherHeroActionLabel(title: t("phone.retry"), symbol: "arrow.clockwise") }

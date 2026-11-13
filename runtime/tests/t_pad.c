@@ -213,6 +213,13 @@ int main(void) {
         s2a_pad_update(S2A_PAD_TOUCH, 1, 0, zero);
         s2a_pad_set_active(0); s2a_pad_set_active(1); expect(0, 0, 0); }
 
+    // #520 A：单只 Joy-Con 原始方向的 SL / SR（Ryujinx 24..27）进游戏；Home / Capture / C / GL / GR（16..20）与 21..23、28 起照旧截掉
+    {   const uint32_t sl_sr = 0xfu << 24;
+        s2a_pad_update(S2A_PAD_BLE, 1, sl_sr | 1u, zero); expect(sl_sr | 1u, 0, 0);
+        s2a_pad_update(S2A_PAD_BLE, 1, (0x1fu << 16) | (0x7u << 21) | (1u << 28), zero); expect(0, 0, 0);
+        s2a_pad_update(S2A_PAD_BLE, 0, 0, NULL);
+        s2a_pad_set_active(0); s2a_pad_set_active(1); expect(0, 0, 0); }
+
     s2a_pad_snapshot snapshot, next;
     s2a_pad_read_ex(&snapshot);
     assert(sizeof snapshot == 56 && snapshot.read_timestamp_us > 0);

@@ -387,7 +387,7 @@ class StageTest(unittest.TestCase):
             calls.append(dict(kwargs['env']))
             return '', 0
         with patch.object(deps, 'python', python), patch.object(stages, 'run', binary):
-            stages.Stages(self.store)._rewrite(type('Tx', (), {'path': output})(), deps, plan, 'boundary')
+            stages.Stages(self.store)._rewrite(type('Tx', (), {'path': output})(), deps, plan, 'boundary', 'probe')
         self.assertEqual(len(calls), 2 if present and kind == 'community' else 1)
         for call in calls:
             if present and kind == 'code':
@@ -414,6 +414,44 @@ class StageTest(unittest.TestCase):
             self.assertEqual(Path(calls[1]['S2A_CPATCH_TSV']).read_bytes(), b'original rows\n')
         else:
             self.assertEqual(rounds, [])
+
+    def test_rewrite_gap_degrades_like_shell(self):
+        """#893：改写器退出码 3（有缺口、产物照出）→ 降级继续、写 degrade.rewrite.tsv，与 pack/stage_rewrite.sh 同口径；
+        退出码 3 却没出 patched.bin（改写空间超上限）→ 停。期望按规则手写：main 2 处 ldr、1 处 svc 缺口 → gap 3、gap:ldr 2、gap:svc 1"""
+        import importlib
+        degrade = importlib.import_module('pack.rewrite_degrade')
+        for produced in (True, False):
+            output = self.home / ('gap-' + str(produced))
+            (output / 'exefs').mkdir(parents=True); (output / 'romfs').mkdir()
+            (output / 'exefs/main').write_bytes(b'x'); (output / 'exefs/main.npdm').write_bytes(b'n')
+            (output / 'addr.tsv').write_bytes(b''); (output / 'addr.log').write_bytes(b'')
+            plan = dict(tables=[], verified='', fps=None, patch=None, community=False, bid='B',
+                        addr=output / 'addr.tsv', addr_log=output / 'addr.log')
+            def python(relative, *args, **kwargs):
+                if relative == 'pack/rewrite_degrade.py':
+                    return (degrade.summarize(str(args[0]), args[1]) or '') + '\n', 0
+                if relative.endswith('wide_scan.py'):
+                    (output / 'widen_sites.tsv').write_bytes(b'')
+                return '', 0
+            def binary(args, **kwargs):   # 仿 stages.run：退出码不在 allowed 里就报 StageError
+                Path(kwargs['log']).write_bytes(b'PFRW mod=main need=9 gaps=3 fatal=0\n')   # stages.run 照写日志
+                if produced:
+                    (output / 'main.patched.bin').write_bytes(b'p')
+                    (output / 'main.gaps.tsv').write_text('# BUILD_ID\tB\n0x10\tldr\tno slot\n0x20\tldr\tno slot\n0x30\tsvc\tno slot\n', encoding='utf-8')   # 同 rewriter.c：地址 / 类别 / 原因
+                if 3 not in kwargs.get('allowed', (0,)):
+                    raise stages.StageError('rewriter 退出 3', 3)
+                return '', 3
+            with patch.object(stages, 'run', binary):
+                deps = type('Deps', (), {'env': {}, 'python': staticmethod(python)})()
+                if produced:
+                    stages.Stages(self.store)._rewrite(type('Tx', (), {'path': output})(), deps, plan, 'boundary', 'probe')
+                    rows = [l.split('\t')[:3] for l in (output / 'degrade.rewrite.tsv').read_text(encoding='utf-8').splitlines()[1:]]
+                    self.assertEqual(rows, [['rewrite', 'gap', '3'], ['rewrite', 'gap:ldr', '2'], ['rewrite', 'gap:svc', '1']])
+                else:
+                    with self.assertRaises(stages.StageError) as raised:
+                        stages.Stages(self.store)._rewrite(type('Tx', (), {'path': output})(), deps, plan, 'boundary', 'probe')
+                    self.assertIn('改写空间超过了能放下的上限', str(raised.exception))
+        self.assertIn('degrade.rewrite.tsv', stages.REWRITE_OUTPUTS)   # 降级表随改写产物进产物根（出包作业收尾读它给玩家提示）
 
     def test_code_patch_present_absent_key_and_forwarding(self):
         self._optional_input_pair('code')

@@ -116,7 +116,7 @@ static int slc_get(nvn_gpu_cmd c, uint64_t k0, uint64_t k1, const void *src, nvn
     g_slc[i].c = c; g_slc[i].seg = sg; g_slc[i].gen = rp_cpu_write_gen; g_slc[i].k0 = k0; g_slc[i].k1 = k1; g_slc[i].sl = *sl;
     return 1;
 }
-static struct { nvn_gpu_cmd c; uint64_t seg, gen; const struct rp_prog *pg; uint32_t base_instance, n; int ok; nvn_gpu_binding b[RP_PROG_ENT_MAX]; } g_lb[RP_PROG_STAGES];
+static struct { nvn_gpu_cmd c; uint64_t seg, gen, reg_gen; const struct rp_prog *pg; uint32_t base_instance, n; int ok; nvn_gpu_binding b[RP_PROG_ENT_MAX]; } g_lb[RP_PROG_STAGES];
 static int g_bind_keep[RP_PROG_STAGES], g_pipe_set;   // 这一笔：阶段的绑定状态没变（rp_draw 在换管线之前取）；这一笔重设过管线
 
 // 调试读回用的绘制历史（见文件后部 dump_chain）
@@ -137,14 +137,17 @@ void rp_draw_log_arm(int lines) { g_log_left = lines; }
 // 一个阶段的全部绑定。0 = 有取不到的资源（已记账），这笔不画
 // pi：程序里的阶段下标（0 顶点 / 计算，1 片元）；st：NVN 阶段号（回放状态按它取：0 顶点、1 片元、5 计算）
 static nvn_gpu_buf g_disp_ind; static uint64_t g_disp_ind_off;
+// 本笔绘制在开通道之前解析好的图形阶段存储缓冲（[阶段][布局项]）；只在 rp_draw 里填、在同一笔的发绑定里用
+static nvn_gpu_buf g_sb_buf[RP_PROG_STAGES][RP_PROG_ENT_MAX]; static uint64_t g_sb_off[RP_PROG_STAGES][RP_PROG_ENT_MAX];
+static uint8_t g_sb_ok[RP_PROG_STAGES][RP_PROG_ENT_MAX];
 static uint32_t g_disp_dim[3];   // 这次派发的组数（计算阶段的驱动段 c0 里要有）
 static int bind_stage_at(nvn_gpu_cmd c, const struct rp_prog *pg, int pi, int st, uint32_t base_instance, const nvn_gpu_view *tv, const nvn_gpu_samp *ts, const void *rec);
 static int bind_stage(nvn_gpu_cmd c, const struct rp_prog *pg, int st, uint32_t base_instance, const nvn_gpu_view *tv, const nvn_gpu_samp *ts, const void *rec) { return bind_stage_at(c, pg, st, st, base_instance, tv, ts, rec); }
 static int bind_stage_at(nvn_gpu_cmd c, const struct rp_prog *pg, int pi, int st, uint32_t base_instance, const nvn_gpu_view *tv, const nvn_gpu_samp *ts, const void *rec) {
     nvn_gpu_binding b[RP_PROG_ENT_MAX]; uint32_t n = 0;
     // 沿用上一笔：只限图形两个阶段；存储缓冲（要同步镜像、登记 GPU 写）和贴图（视图会轮转）每笔照取
-    const int keep = st < 2 && g_bind_keep[pi] && g_lb[pi].ok && g_lb[pi].c == c && g_lb[pi].seg == rp_seg_serial() && g_lb[pi].gen == rp_cpu_write_gen && g_lb[pi].pg == pg && g_lb[pi].base_instance == base_instance;
-    if (st < 2) g_lb[pi].ok = 0;
+    const int keep = st < RP_PROG_STAGES && g_bind_keep[pi] && g_lb[pi].ok && g_lb[pi].c == c && g_lb[pi].seg == rp_seg_serial() && g_lb[pi].gen == rp_cpu_write_gen && g_lb[pi].reg_gen == rp_tex_reg_gen() && g_lb[pi].pg == pg && g_lb[pi].base_instance == base_instance;
+    if (st < RP_PROG_STAGES) g_lb[pi].ok = 0;
     for (uint32_t i = 0; i < pg->nent[pi]; i++) {
         const nvn_gpu_layout_ent *e = &pg->ent[pi][i];
         nvn_gpu_binding *o = &b[n]; memset(o, 0, sizeof *o); o->ent = (uint16_t)i; o->cls = e->cls;
@@ -156,7 +159,8 @@ static int bind_stage_at(nvn_gpu_cmd c, const struct rp_prog *pg, int pi, int st
                 const p_bind_buf *sb = e->src_reg < 16 ? (e->src_kind == NVN_RB_UBOP ? &rp_S.ubo[st][e->src_reg] : &rp_S.ssbo[st][e->src_reg]) : NULL;
                 if (!sb || !sb->addr || !sb->size) return skip("storage_buffer_unbound", rec);
                 nvn_gpu_buf gb; uint64_t go;
-                if (!rp_buf_resolve(c, sb->addr, sb->size, &gb, &go)) return skip("storage_buffer_unresolved", rec);
+                if (st < RP_PROG_STAGES && i < RP_PROG_ENT_MAX && g_sb_ok[st][i]) { gb = g_sb_buf[st][i]; go = g_sb_off[st][i]; }   // 开通道前已同步（见 rp_draw 开头）
+                else if (!rp_buf_resolve(c, sb->addr, sb->size, &gb, &go)) return skip("storage_buffer_unresolved", rec);
                 if (e->access & NVN_GPU_ACC_W) rp_post_gpu_write(sb->addr, sb->size);
                 o->u.b.buf = gb; o->u.b.off = go; o->u.b.len = sb->size; break; }
             case NVN_RB_UBOA: {   // 计算存储缓冲来自「用户 UBO 槽 r 内 src_off 处的 8 字节 guest 裸指针」（map 3，NVK_STORAGE_UBO_ADDRESS）：
@@ -252,14 +256,14 @@ static int bind_stage_at(nvn_gpu_cmd c, const struct rp_prog *pg, int pi, int st
         }
         n++;
     }
-    if (st < 2) {
+    if (st < RP_PROG_STAGES) {
         // 和上一笔逐项相同、管线也没重设：后端手里的就是这一组，不用再发
         const int same = keep && !g_pipe_set && g_lb[pi].n == n && !memcmp(g_lb[pi].b, b, (size_t)n * sizeof *b);
-        g_lb[pi].c = c; g_lb[pi].seg = rp_seg_serial(); g_lb[pi].gen = rp_cpu_write_gen; g_lb[pi].pg = pg; g_lb[pi].base_instance = base_instance; g_lb[pi].n = n; g_lb[pi].ok = 1;
+        g_lb[pi].c = c; g_lb[pi].seg = rp_seg_serial(); g_lb[pi].gen = rp_cpu_write_gen; g_lb[pi].reg_gen = rp_tex_reg_gen(); g_lb[pi].pg = pg; g_lb[pi].base_instance = base_instance; g_lb[pi].n = n; g_lb[pi].ok = 1;
         if (same) { rp_perf_add(RP_PERF_BIND_SKIP, 1); return 1; }
         memcpy(g_lb[pi].b, b, (size_t)n * sizeof *b);
     }
-    nvn_gpu_bind(c, st == 5 ? NVN_GPU_SH_CS : st ? NVN_GPU_SH_FS : NVN_GPU_SH_VS, b, n);
+    nvn_gpu_bind(c, st == 5 ? NVN_GPU_SH_CS : (nvn_gpu_stage)st, b, n);
     return 1;
 }
 
@@ -301,6 +305,10 @@ void rp_draw(nvn_gpu_cmd c, const p_draw *dr, const p_draw_idx *di, const void *
     if (dr && dr->tfc) { skip("transform_feedback_count", rec); return; }
     if (rp_S.tf_on) { skip("transform_feedback_active", rec); return; }
     if (!(prim <= 9)) { char nm[24]; snprintf(nm, sizeof nm, "prim_%u", prim); skip(nm, rec); return; }
+    // 必须在图元展开前判原始输入，避免 GS 看到不同数量或顺序的图元。
+    if ((rp_shader_graphics_stages() & 4u) && prim != 0 && prim != 1 && prim != 4) {
+        skip("geometry_topology_unimplemented", rec); return;
+    }
     uint32_t count = (uint32_t)(di ? di->count : dr->count);
     if (!count) return;
     // 没有原生对应的图元：换成能画的图元号，要展开索引的记下展开方式（quads），索引在取资源那一步展开
@@ -319,7 +327,7 @@ void rp_draw(nvn_gpu_cmd c, const p_draw *dr, const p_draw_idx *di, const void *
     if (prim != g_prim || quads != g_quads) { g_prim = prim; g_quads = quads; rp_pso_dirty = 1; }
     { int face = (rp_origin_lower_left() != 0) | (s2a_nvn_rast_flip != 0) << 1;   // 窗口原点与光栅翻转位不在状态块里，但进管线描述（正面绕序）：变了就是换管线
       if (face != g_face) { g_face = face; rp_pso_dirty = 1; } }   // 图元在绘制记录里，不在状态块里：换了图元就是换管线
-    int args_dirty = rp_args_dirty[0] || rp_args_dirty[1];
+    int args_dirty = rp_args_dirty[0] || rp_args_dirty[1] || rp_args_dirty[2];
     if (!g_prog || rp_pso_dirty || args_dirty) {
         struct rp_shader_req q; memset(&q, 0, sizeof q); q.prim = prim; q.rt_count = rt->n;
         for (int i = 0; i < rt->n && i < 8; i++) if (rt->color[i]) q.rt_format[i] = (uint32_t)(rt->has_cview[i] && rt->cview[i].set_format ? rt->cview[i].format : rt->color[i]->d.format);
@@ -336,6 +344,18 @@ void rp_draw(nvn_gpu_cmd c, const p_draw *dr, const p_draw_idx *di, const void *
         uint64_t va = nvn_ga2ca(rp_S.vbuf[i].address), vn = rp_S.vbuf[i].size;   // 记录里的顶点缓冲地址是 GPU 地址
         if (!va || !vn) { skip("vertex_stream_unbound", rec); return; }
         if (!rp_buf_resolve(c, va, vn, &vb_buf[i], &vb_off[i])) { skip("vertex_buffer_unresolved", rec); return; }
+    }
+    // 存储缓冲同样要在开通道之前同步：同一次提交里第二次同步这块池页时要录成传输、结束通道（rp_xfer_cmd），
+    // 放到发绑定时才做，通道会在设了管线之后被结束，这一笔的绑定与绘制落在通道外，后端置粘滞、整段作废
+    // （#697 Mali 真机：「bind 在通道外（非计算管线）」）。这里先同步一遍，发绑定时同一段已同步过，走快路径、不再结束通道。
+    // 解析失败不在这里报：发绑定时同样的解析会按原来的名字记未接。
+    // 结果留给发绑定直接用（g_sb_pre），发绑定时不再解析：即使这块页在开通道之后又被别的游戏线程写脏，也不会在通道里再同步一次。
+    memset(g_sb_ok, 0, sizeof g_sb_ok);
+    for (int st = 0; st < RP_PROG_STAGES; st++) for (uint32_t i = 0; i < g_prog->nent[st] && i < RP_PROG_ENT_MAX; i++) {
+        const nvn_gpu_layout_ent *e = &g_prog->ent[st][i];
+        if (e->src_kind != NVN_RB_SBUFP && e->src_kind != NVN_RB_UBOP) continue;
+        const p_bind_buf *sb = e->src_reg < 16 ? (e->src_kind == NVN_RB_UBOP ? &rp_S.ubo[st][e->src_reg] : &rp_S.ssbo[st][e->src_reg]) : NULL;
+        if (sb && sb->addr && sb->size && rp_buf_resolve(c, sb->addr, sb->size, &g_sb_buf[st][i], &g_sb_off[st][i])) g_sb_ok[st][i] = 1;
     }
     nvn_gpu_draw_args a; memset(&a, 0, sizeof a);
     if (di && (di->itype < 0 || di->itype > 2)) { skip("index_type_invalid", rec); return; }
@@ -358,12 +378,15 @@ void rp_draw(nvn_gpu_cmd c, const p_draw *dr, const p_draw_idx *di, const void *
     } else a.first = (uint32_t)dr->first;
     static nvn_gpu_view tv[RP_PROG_STAGES][RP_PROG_ENT_MAX]; static nvn_gpu_samp ts[RP_PROG_STAGES][RP_PROG_ENT_MAX];
     char tl[520]; size_t tn = 0; tl[0] = 0;   // 逐笔日志用：这笔采样的贴图
-    int narr[RP_PROG_STAGES] = {0, 0};
+    int narr[RP_PROG_STAGES] = {0};
     DT(RP_PERF_D_PREP);
     rp_view_pin_begin();
-    for (int st = 0; st < 2; st++) for (uint32_t i = 0; i < g_prog->nent[st]; i++) {
+    for (int st = 0; st < RP_PROG_STAGES; st++) for (uint32_t i = 0; i < g_prog->nent[st]; i++) {
         const nvn_gpu_layout_ent *e = &g_prog->ent[st][i]; tv[st][i] = NULL; ts[st][i] = NULL;
         if (e->src_kind != NVN_RB_TEX) continue;
+        if (e->src_reg >= RP_NTEX || (e->src_reg2 != UINT16_MAX && (e->count != 1 || e->src_reg2 >= 128))) {
+            skip("separate_texture_shape", rec); goto draw_done;
+        }
         if (e->count > 1) {
             if (e->count > RP_TEXARR_MAX || narr[st]++) { skip("texture_array_unsupported_shape", rec); goto draw_done; }
             for (uint32_t k = 0; k < e->count; k++) {
@@ -387,15 +410,21 @@ void rp_draw(nvn_gpu_cmd c, const p_draw *dr, const p_draw_idx *di, const void *
                                          tt->mem && tt->L.size >= 8 ? (unsigned)((const uint32_t *)(const void *)tt->mem)[0] : 0u, tt->mem && tt->L.size >= 8 ? (unsigned)((const uint32_t *)(const void *)tt->mem)[1] : 0u, (unsigned)tt->d.flags, tt->pool ? (unsigned)tt->pool->flags : 0xffffu, (int)tt->has_layout);
             else tn += (size_t)snprintf(tl + tn, sizeof tl - tn, " t%d.%u=#%d(无)", st, (unsigned)e->src_reg, id);
         }
-        ts[st][i] = rp_samp_by_id(h ? (int)(h >> 20) : rp_S.samp_base);
+        if (e->src_reg2 != UINT16_MAX) {
+            if (!rp_S.samp_bound[st][e->src_reg2]) { skip("separate_sampler_unbound", rec); goto draw_done; }
+            uint64_t sh = rp_S.samp[st][e->src_reg2];
+            ts[st][i] = rp_samp_by_id((int)(sh >> 20));
+            if (!ts[st][i]) { skip("separate_sampler_unresolved", rec); goto draw_done; }
+        } else ts[st][i] = rp_samp_by_id(h ? (int)(h >> 20) : rp_S.samp_base);
     }
     DT(RP_PERF_D_TEX);
     if (!rp_pass_begin(c)) { skip("pass_begin_failed", rec); goto draw_done; }
     DT(RP_PERF_D_PASS);   // 开通道单独记；打印时与取管线合成原来那一项，另出一行细分
-    g_bind_keep[0] = !rp_args_dirty[0]; g_bind_keep[1] = !rp_args_dirty[1]; g_pipe_set = 0;   // 换管线会把两个阶段都立脏，绑定状态变没变要在那之前取
+    for (int st = 0; st < RP_PROG_STAGES; st++) g_bind_keep[st] = !rp_args_dirty[st];
+    g_pipe_set = 0;   // 换管线会把两个阶段都立脏，绑定状态变没变要在那之前取
     if (rp_pso_dirty || !g_pipe || g_pipe_cmd != c) {
         nvn_gpu_pipe_desc pd; memset(&pd, 0, sizeof pd);
-        pd.st[0].sh = g_prog->sh[0]; pd.st[1].sh = g_prog->sh[1];
+        for (int st = 0; st < RP_PROG_STAGES; st++) pd.st[st].sh = g_prog->sh[st];
         for (int i = 0; i < rt->n && i < 8; i++) { pd.cfmt[i] = rt->color[i] && rp_pass_slot_attached(i) ? (uint32_t)(rt->has_cview[i] && rt->cview[i].set_format ? rt->cview[i].format : rt->color[i]->d.format) : 0; pd.lmap[i] = (uint8_t)i; }
         if (rt->depth) { nvn_fmt_info fi; uint32_t f = (uint32_t)rt->depth->d.format; int ok = nvn_fmt_info_of(f, &fi); if (!ok || fi.depth) pd.dfmt = f; if (ok && fi.stencil) pd.sfmt = f; }
         const tex_t *c0 = NULL; for (int i = 0; i < rt->n && i < 8 && !c0; i++) c0 = rt->color[i];   // 第一个有图的颜色槽
@@ -428,11 +457,20 @@ void rp_draw(nvn_gpu_cmd c, const p_draw *dr, const p_draw_idx *di, const void *
             pd.poly.mode = NVN_POLYGON_MODE_FILL; memset(&err, 0, sizeof err);
             r = nvn_gpu_pipe_get(&pd, NVN_GPU_PIPE_SYNC, &np, &err);
         }
-        if (!nvn_gpu_ok(r)) { if (nvn_unimpl("gpu", "pipe_get", rec) == 1) nvn_plat_log(NVN_PLAT_LOG_RED, "gpu", err.why); g_skips++; g_pipe = NULL; goto draw_done; }
+        if (!nvn_gpu_ok(r)) {
+            char logic_name[32];
+            const char *name = "pipe_get";
+            if (r.code == NVN_GPU_E_UNSUPPORTED && rp_S.color.logic_op != NVN_LOGIC_OP_COPY) {
+                snprintf(logic_name, sizeof logic_name, "logic_op_%u", (unsigned)rp_S.color.logic_op);
+                name = logic_name;
+            }
+            if (nvn_unimpl("gpu", name, rec) == 1) nvn_plat_log(NVN_PLAT_LOG_RED, "gpu", err.why);
+            g_skips++; g_pipe = NULL; goto draw_done;
+        }
         g_pipe = np; g_pipe_cmd = c;
         nvn_gpu_set_pipe(c, g_pipe); g_pipe_set = 1;
         rp_perf_add(RP_PERF_D_PGET, dt_now() - pg0_);   // 后端取管线 + 设管线（含在取管线那一项里）
-        rp_args_dirty[0] = rp_args_dirty[1] = 1;   // 换了管线：两个阶段的绑定都重发
+        for (int st = 0; st < RP_PROG_STAGES; st++) rp_args_dirty[st] = 1;   // 换了管线：两个阶段的绑定都重发
     }
     uint32_t tw = 1, th = 1;
     { int fi = -1; for (int i = 0; i < rt->n && i < 8 && fi < 0; i++) if (rt->color[i]) fi = i;   // 缺省视口的尺寸：第一个有图的颜色槽，没有就取深度目标
@@ -446,7 +484,9 @@ void rp_draw(nvn_gpu_cmd c, const p_draw *dr, const p_draw_idx *di, const void *
     for (int i = 0; i < 16; i++) if (streams >> i & 1) nvn_gpu_set_vbuf(c, (uint32_t)i, vb_buf[i], vb_off[i]);
     uint32_t base_instance = (uint32_t)(di ? di->base_instance : dr->base_instance);
     DT(RP_PERF_D_DYN);
-    for (int st = 0; st < 2; st++) if (!bind_stage(c, g_prog, st, base_instance, tv[st], ts[st], rec)) goto draw_done;
+    // 每个阶段都要发，程序里没有的阶段发零条：后端按阶段留着上一笔的绑定，不清掉的话「上一笔有片元、这一笔只有顶点」
+    // 会带着旧的片元绑定去配没有片元布局的管线，后端报布局错、整段作废
+    for (int st = 0; st < RP_PROG_STAGES; st++) if (!bind_stage(c, g_prog, st, base_instance, tv[st], ts[st], rec)) goto draw_done;
     DT(RP_PERF_D_BIND);   // 首版每笔都整组重发（support / c0 每笔在暂存区里新建）；按脏位省重发是后面的事
     a.prim = prim; a.count = count; a.instances = (uint32_t)(di ? di->instances : dr->instances); if (!a.instances) a.instances = 1; a.base_instance = base_instance;
     rp_occl_draw(c);
@@ -473,7 +513,7 @@ void rp_draw(nvn_gpu_cmd c, const p_draw *dr, const p_draw_idx *di, const void *
             nvn_plat_log(NVN_PLAT_LOG_INFO, "draw", b); } }
     }
     { uint64_t ts4[HIST_TEX]; int nt = 0;
-      for (int st = 0; st < 2; st++) for (uint32_t i = 0; i < g_prog->nent[st] && nt < HIST_TEX; i++) { const nvn_gpu_layout_ent *e = &g_prog->ent[st][i];
+      for (int st = 0; st < RP_PROG_STAGES; st++) for (uint32_t i = 0; i < g_prog->nent[st] && nt < HIST_TEX; i++) { const nvn_gpu_layout_ent *e = &g_prog->ent[st][i];
           if (e->src_kind != NVN_RB_TEX || e->count > 1) continue;
           uint64_t h = rp_S.tex[st][e->src_reg]; tex_t snap; view_t sv; int hv;
           if (rp_tex_snap_by_id(h ? (int)(h & 0xFFFFF) : rp_S.tex_base, &snap, &sv, &hv)) ts4[nt++] = snap.serial; }
@@ -568,9 +608,14 @@ void rp_dispatch(nvn_gpu_cmd c, const p_dispatch *dp, const void *rec) {
             continue;
         }
         if (e->src_kind != NVN_RB_TEX) continue;
-        if (e->count > 1) { skip("compute_texture_array", rec); goto done; }
+        if (e->count > 1 || e->src_reg >= RP_NTEX || (e->src_reg2 != UINT16_MAX && (e->count != 1 || e->src_reg2 >= 128))) { skip("compute_texture_array", rec); goto done; }
         uint64_t h = rp_S.tex[5][e->src_reg];
-        tv[i] = rp_view_by_id_decl(h ? (int)(h & 0xFFFFF) : rp_S.tex_base, pg->dtt[0][i], pg->dcls[0][i], 0, c, NULL); ts[i] = rp_samp_by_id(h ? (int)(h >> 20) : rp_S.samp_base);
+        tv[i] = rp_view_by_id_decl(h ? (int)(h & 0xFFFFF) : rp_S.tex_base, pg->dtt[0][i], pg->dcls[0][i], 0, c, NULL);
+        if (e->src_reg2 != UINT16_MAX) {
+            if (!rp_S.samp_bound[5][e->src_reg2]) { skip("separate_sampler_unbound", rec); goto done; }
+            ts[i] = rp_samp_by_id((int)(rp_S.samp[5][e->src_reg2] >> 20));
+            if (!ts[i]) { skip("separate_sampler_unresolved", rec); goto done; }
+        } else ts[i] = rp_samp_by_id(h ? (int)(h >> 20) : rp_S.samp_base);
     }
     rp_pass_flush(c);
     g_disp_ind = NULL; g_disp_ind_off = 0;

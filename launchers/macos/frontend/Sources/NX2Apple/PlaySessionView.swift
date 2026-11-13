@@ -1,7 +1,7 @@
 // S2Arm（不是上游文件）：启动游戏页（11-11 维护者：原来的跳转页「太丑、太不 S2Arm」——红点 + 大标题 + 一大块黑框铺英文原始日志）。
 // 版式同出包页（ExportSessionView）：左边这款游戏的封面卡（GameInfoPanel），右边状态与两个阶段（验证运行文件 → 游戏运行中，作业层 build.launch 的 c.begin），
 //   结束后一张结果卡。失败只写一句人话（按作业层错误码取共享规格 errors.items 的标题）+ 下一步（errors.py RECOVERY，诊断里的 suggestion），
-//   原始日志不上屏：进「复制错误摘要」和「导出诊断包」。底栏：在跑 = 停止游戏；结束 = 回到游戏库。
+//   原始日志不上屏：进「上传给开发者」（上传没成退回导出诊断包）。底栏：在跑 = 停止游戏；结束 = 回到游戏库。
 import AppKit
 import SwiftUI
 import NXCore
@@ -130,6 +130,7 @@ struct PlaySessionView: View {
                 Text(loc.backend(session.suggestion)).font(.manrope(14)).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true).accessibilityIdentifier("play.next")
             }
+            ReportHint()
             HStack(spacing: 10) {
                 if let game {
                     Button { model.play(game, uiLanguage: uiLanguage) } label: {
@@ -138,11 +139,6 @@ struct PlaySessionView: View {
                     .buttonStyle(LauncherSecondaryButtonStyle()).disabled(model.busy)
                     .accessibilityIdentifier("play.again")
                 }
-                Button(loc.t("s2arm.play.diagnostics")) {
-                    let panel = NSSavePanel(); panel.nameFieldStringValue = "S2Arm-diagnostics.zip"
-                    if panel.runModal() == .OK, let url = panel.url { model.diagnostics(exportTo: url) }
-                }
-                .buttonStyle(LauncherSecondaryButtonStyle()).accessibilityIdentifier("play.diagnostics")
                 CopyReportButton(model: model, gameID: session.gameID, operations: ["launch"], fallback: session.message)
             }
             .padding(.top, 4)

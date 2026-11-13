@@ -18,7 +18,7 @@
 # 出错即停：起局 30 秒 host.log 仍空；60 秒没有「S2A 就绪」；60 秒没出帧；出帧后 10 秒不前进；电量开局 < 60% 或局中 < 30%（未充电）。
 # 结果：<作业目录>/out_<时刻>/（run.log timing.tsv host.log frames.tsv gate.txt …），最后一行 RESULT=done|red|suspect|skip|lock|install|push|deployed|smoke-ok|smoke out=… reason=…
 #   suspect = 局中测试设备前台失焦（系统弹框挡着 App）：不给绿也不记红，记分格按局无效（tools/score_cells.py infra）
-#   skip = 前置条件没满足、没真跑（电量闸、设备不可用）：不是游戏 / 包的红，调度不打分、不进记分板、不计补位次数（10-23 两台拔电，电量闸停的局被记成能玩红、误判掉 M2）
+#   skip = 前置条件没满足、没真跑（设备不可用）：不是游戏 / 包的红，调度不打分、不进记分板、不计补位次数（10-23 两台拔电，电量闸停的局被记成能玩红、误判掉 M2）
 set -u
 J=$(cd "${1:?作业目录}" && pwd -P); TOOLS=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 # 工作盘准入（11-06 维护者：真机局拉回截图 / 录像 / 日志落作业目录，排同一本账；单测给 S2A_DISK_HELD=1 跳过）
@@ -45,7 +45,7 @@ source "$TOOLS/gpu_hang.sh"   # GPU 卡死签名（局中判红即停；各线�
 source "$TOOLS/devwatch.sh"   # 硬上限看门狗 arm / disarm（到点 TERM，宽限后仍在就按管道强杀，11-04）
 s2a_device "${DEV:?job.env 缺 DEV}" 2> >(tee -a "$O/run.log" >&2) || fin skip "设备 $DEV 不可用（见 run.log）"
 case $DEV in any|iphone|duo) t "选机：DEV=${DEV} → 测试设备 ${DEVNUM}（${DEVNAME}，负载均衡）"; DEV=$DEVNUM;; esac   # 后面的现装登记 / 记录名按具体机号
-D=$SW_DEVICE; UD=$SW_IOS_UDID; B=${BUNDLE:?job.env 缺 BUNDLE}; BD=$DEVBATTERY_DIR; mkdir -p "$BD"
+D=$SW_DEVICE; UD=$SW_IOS_UDID; B=${BUNDLE:?job.env 缺 BUNDLE}; BD=$DEVBATTERY_DIR; mkdir -p "$BD"   # 每台设备的状态目录（起局登记、host.log 哈希；变量名是历史名，电量闸 11-13 已删）
 # 设备通道挂起：devicectl 拷完不退出（10-20 测试设备2：18 字节 app.id 写完挂 14.5 分钟；拉 host.log 挂满 206 秒）。拷贝幂等 → 超时按大小定、超时重试一次
 cpto() {   # 超时 = S2A_CP_T0（缺省 60）秒 + 每 10 MB 1 秒（实测推送约 33 MB/s，留 3 倍余量）
   local c0=$SECONDS r i T=$(( ${S2A_CP_T0:-60} + $(du -sk "$1" 2>/dev/null | cut -f1) / 10240 ))
@@ -124,7 +124,6 @@ jget() { python3 -c "import json,sys;d=json.load(open(sys.argv[1]))
 for k in sys.argv[2].split('.'): d=d[int(k)] if isinstance(d,list) else d[k]
 print(d)" "$1" "$2" 2>/dev/null; }
 
-export SW_DEVBATTERY_INRUN=1   # 拔电走网络时电量闸交局内判
 devlock_acquire() { :; }; devlock_release() { :; }; devlock_extend() { :; }; [ -z "${S2A_PRIVATE_TOOLS:-}" ] || source "$S2A_PRIVATE_TOOLS/devlock.sh"   # 设备锁是维护方多线共用设施：贡献者单人单机不上锁
 DCAP=900; CAP=${CAP_S:-300}; case $CAP in 300|600) ;; *) CAP=300;; esac; T_REQ=$(date +%s)   # CAP_S 调度按款填（只有 010074F013262000 600，见 维护方工具），别的值一律按 300
 devlock_acquire "真机局 $(basename "$J")（${DEVNAME}，部署 ≤ ${DCAP} 秒 + 测试 ≤ ${CAP} 秒）" $((DCAP + CAP)) || { t "等不到设备锁"; fin lock "等不到设备锁"; }
@@ -358,11 +357,12 @@ T_PUSH=$(date +%s); disarm; PH=测试; CAPN=$CAP; W0=$T_PUSH; arm $CAP
 ACT_S=${ACT_S:-60}; SEC=$(( CAP - 15 ))   # 留 15 秒收局拉回
 # 真机驾驶员（11-01 维护者：iOS 上没有视觉脚本也没有密钥，真机自动玩家到不了 MARK）：App 带 S2A_VISION_REMOTE=1 把每一问写进 Documents/vision/ 信箱，
 #   Mac 侧 tools/vision_bridge.sh 经 devicectl 拉走、跑同一个 vision.sh、把答案推回。S2A_VISION_BRIDGE=auto（缺省）= Mac 上驾驶员可用才开：脚本在，且
-#   缺省后端（本机 claude CLI 直连，11-12 起；中转站已停用）PATH 上有 claude、或显式 S2A_VISION_BACKEND=or / jev 时有 OpenRouter 钥匙；1 / 0 强制。
+#   不设后端 = 自动选：有中转站钥匙 ~/.s2arm/.secrets/relay.key 和地址（S2A_VISION_RELAY_URL 或 ~/.s2arm/.secrets/relay.url）或 PATH 上有 claude；=relay 要钥匙和地址、=cli 要 PATH 上有 claude、
+#   =or / jev 时有 OpenRouter 钥匙；1 / 0 强制。
 #   驾驶员不可用（没 CLI / 没登录 / 没钥匙）由 vision.sh 退出 3、答案带 unavailable，经桥推回手机，自动玩家红停
 VSH=${S2A_VISION_SH:-$TOOLS/../tests/autoplay/vision.sh}; VBR=${S2A_VISION_BRIDGE:-auto}
-[ "$VBR" = auto ] && { VBR=0; [ -r "$VSH" ] && { [ -n "${S2A_VISION_SH:-}" ] || case ${S2A_VISION_BACKEND:-cli} in (cli) command -v claude > /dev/null;; (*) [ -r "$HOME/.s2arm/.secrets/openrouter.key" ];; esac; } && VBR=1; }
-[ "$VBR" = 0 ] && [ "${S2A_VISION_BRIDGE:-auto}" = auto ] && echo "【红】真机驾驶员不开：Mac 上看屏驾驶员不可用（缺省走本机 claude CLI：PATH 上没有 claude；或 S2A_VISION_BACKEND=${S2A_VISION_BACKEND:-cli} 缺 OpenRouter 钥匙），自动玩家到不了 MARK" >&2
+[ "$VBR" = auto ] && { VBR=0; [ -r "$VSH" ] && { [ -n "${S2A_VISION_SH:-}" ] || case ${S2A_VISION_BACKEND:-auto} in (auto) { [ -r "$HOME/.s2arm/.secrets/relay.key" ] && { [ -n "${S2A_VISION_RELAY_URL:-}" ] || [ -r "$HOME/.s2arm/.secrets/relay.url" ]; }; } || command -v claude > /dev/null;; (relay) [ -r "$HOME/.s2arm/.secrets/relay.key" ] && { [ -n "${S2A_VISION_RELAY_URL:-}" ] || [ -r "$HOME/.s2arm/.secrets/relay.url" ]; };; (cli) command -v claude > /dev/null;; (*) [ -r "$HOME/.s2arm/.secrets/openrouter.key" ];; esac; } && VBR=1; }
+[ "$VBR" = 0 ] && [ "${S2A_VISION_BRIDGE:-auto}" = auto ] && echo "【红】真机驾驶员不开：Mac 上看屏驾驶员不可用（S2A_VISION_BACKEND=${S2A_VISION_BACKEND:-自动}：中转站缺钥匙 ~/.s2arm/.secrets/relay.key 或地址 ~/.s2arm/.secrets/relay.url / cli 时 PATH 上没有 claude / or、jev 时缺 OpenRouter 钥匙），自动玩家到不了 MARK" >&2
 ENV=$(python3 - "${ENVJSON:-}" <<PY
 import json, sys
 e = {"S2A_FRAMES_TSV": "frames.tsv", "S2A_AUTOPLAY": "1"}   # iPhone 上自动玩家缺省关（人手动打开 App 不带环境变量），执行器起局显式开
@@ -504,8 +504,6 @@ while :; do
   # 停顿秒数每轮只取一次：两个判停分支各调 date 会跨秒（10-23 门禁偶发红：「再等」分支算出 1 秒跳过、下一分支算出 2 秒判红，slowgpu 没被问到）
   stl=$(( $(date +%s) - tch ))
   [ "${hs// /}" -gt 0 ] && SEEN=1; [ $n -gt 0 ] && { FSEEN=1; T_FF=${T_FF:-$(date +%s)}; }
-  BL=$(LC_ALL=C /usr/bin/grep -a '\[电\] 电量 [0-9]' "$O/live/host.log" 2>/dev/null | tail -1 | sed 's/.*\[电\] 电量 \([0-9]*\)%，\(.*\)$/\1 \2/')
-  [ -n "$BL" ] && echo "$BL" > "$BD/app_battery_$UD.txt"
   CEND=; [ "$CONS" = 1 ] && ! kill -0 "$CPID" 2> /dev/null && { con2log; CEND=1; }
   # GPU 卡死即停（11-07 维护者：测试设备2 hang 之后局还跑了几分钟，整机卡死要人重启）：一见签名就收局、跳过收局前截屏、立刻结束 App
   if GHL=$(s2a_gpu_hang "$O/live/host.log"); then RED=1; GPUHANG=1; WHY="GPU 卡死即停：${GHL}"
@@ -513,10 +511,6 @@ while :; do
   elif [ -n "$CEND" ]; then RED=1; WHY="App 提前退出（控制台流结束，$(texit)）"
   elif [ -z "${SEEN:-}" ] && [ $el -ge 30 ]; then RED=1; WHY="起局 ${el} 秒 host.log 仍为空"
   elif [ $el -ge 60 ] && ! hasl 'S2A 就绪'; then RED=1; WHY="起局 ${el} 秒没有「S2A 就绪」"
-  elif [ -n "$BL" ] && read -r bp bs <<< "$BL" && [ "$bs" != 充电中 ] && [ "$bs" != 已充满 ] && { { [ -z "${BS0:-}" ] && BS0=$bp && [ "$bp" -lt 60 ]; } || [ "$bp" -lt 30 ]; }; then
-    RED=1; SKIP=1   # 电量闸是测试环境的前置条件，不是游戏的红：收成 skip（未跑）
-    if [ "$bp" -lt 30 ]; then WHY="电量 $bp% 低于 30%（未充电），停局并暂停真机局"; echo "$(date '+%m-%d %H:%M:%S') 电量 ${bp}%（App 读数，执行器局中）" > "$BD/device_low_battery"
-    else WHY="开局电量 $bp% 低于 60%（未充电），本局不跑"; fi
   elif [ -z "${FSEEN:-}" ] && [ $el -ge 60 ]; then RED=1; WHY="起局 ${el} 秒还没出帧"
   elif [ $n -gt 0 ] && [ "$stl" -ge "$STL" ] && slowgpu; then t "出图停在第 $n 帧，但宿主最近报「GPU 慢…继续等」：再等（渲染器自己 20 秒判卡死）"
   elif [ $n -gt 0 ] && [ "$stl" -ge "$STL" ]; then
@@ -646,7 +640,7 @@ uf=$(LC_ALL=C /usr/bin/grep -a '【红】出图未满屏' "$O/host.log" 2>/dev/n
 [ -n "$uf" ] && t "【红】${uf}（只进画面格，不停局）"
 # 判据缺席不当通过（10-26 维护者：直连上屏 nvn_mtl.m 不打「[画] 满屏判据 已开」/「【红】出图未满屏」，没红行不等于满屏）：直连局一条满屏判据行都没有 → 记未验（画面格由 score_cells.fs_unverified 判未测）
 if LC_ALL=C /usr/bin/grep -aq '图形模式：直连' "$O/host.log" 2>/dev/null && ! LC_ALL=C /usr/bin/grep -aq '\[画\] 满屏判据 已开' "$O/host.log" 2>/dev/null; then t "满屏：未验（直连无判据：host.log 没有「[画] 满屏判据 已开」，没红行不算满屏）"; fi
-[ -n "${SKIP:-}" ] && fin skip "$WHY"   # 前置条件没满足（电量闸）：未跑，不带宿主红行、不改写成「没到 MARK」
+[ -n "${SKIP:-}" ] && fin skip "$WHY"   # 前置条件没满足：未跑，不带宿主红行、不改写成「没到 MARK」
 # 自动玩家自己收的局（200 秒没进可玩 → 优雅退出）：出图停住 / 没出帧是它停的，不是游戏卡死，按「没到 MARK」报（10-21 原生层线：01007EF00011E000 卡 DLC 介绍页被报成「出图停在第 5723 帧」）
 if [ -n "$RED" ] && [ -z "$MK" ] && LC_ALL=C /usr/bin/grep -aq '自动玩家结束：优雅退出' "$O/host.log" 2>/dev/null; then WHY="没到 MARK：自动玩家没进可玩、已结束并优雅退出（执行器原判：${WHY}）"; t "【红】$WHY"; fi
 # 屏上有系统浮层（心跳「前台失焦」：UIApplication 失焦但仍在前台，如更新提示 / 控制中心）：写进结论，红不一定是游戏的（10-21 测试设备2 00:20 起浮层挡着 App）

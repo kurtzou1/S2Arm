@@ -15,5 +15,6 @@ namespace Ryujinx.Horizon.Sdk.Codec.Detail
         Result GetWorkBufferSizeForMultiStreamEx(out int size, in HardwareOpusMultiStreamDecoderParameterInternalEx parameter);
         Result GetWorkBufferSizeExEx(out int size, HardwareOpusDecoderParameterInternalEx parameter);
         Result GetWorkBufferSizeForMultiStreamExEx(out int size, in HardwareOpusMultiStreamDecoderParameterInternalEx parameter);
+        Result GetHardwareAudioCodecClientSession(out IHardwareAudioCodecClientSession session);
     }
 }

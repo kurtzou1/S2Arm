@@ -12,6 +12,7 @@
   gamedec/gamedec.exe + .src_digest     游戏自带解码器工具模式（oneclick_win.gamedec，身份 = gamedec_id）
   codecs/yaz0enc-<哈希>.exe             Yaz0 编码器（graphics/widen/scan/ui_lyt.py；名字即源码身份，同现编缓存名）
   codecs/libyaz0dec_<摘要>.dll          Yaz0 解码库（graphics/tools/nxfmt.py；同上）
+  codecs/glsl_es-<哈希>.exe             GLSL 改写工具（translator/gl_shaders.py es_tool；名字即源码身份，同现编名）
   spvc/libspvc_cli.dll、spvc/cli/bin/spirv-cross.exe + cli/versions.json、spvc/.src_digest
                                         spirv-cross 进程内库与命令行（translator/spvc_inproc.py，身份 = prebuilt_id）
   rewriter/s2a-rewrite.exe + .source    C 改写器（pack/rewriter.py bundled，.source = 源码指纹，同 Mac Runtime/bin 那份的规矩）
@@ -130,6 +131,13 @@ def bundle(target):
     import nxsh_extract
     lib = nxsh_extract.cri_compile()   # 编不出 CalledProcessError / FileNotFoundError 当场红（玩家机器没有编译器）
     shutil.copy2(lib, tools / "codecs" / os.path.basename(lib))
+    # GLSL 改写工具（graphics/nvn/gfx/gl/gl_glsl_es.c 命令行入口；translator/gl_shaders.py es_tool 现编同一命令行、同一名字）：
+    #   #852 玩家机没有 C 编译器时 OpenGL 款离线库只剩表头、全部落到运行时现编；编不出就红
+    import gl_shaders
+    try:
+        shutil.copy2(gl_shaders.es_tool(), tools / "codecs" / gl_shaders.es_name())
+    except (ValueError, OSError) as e:
+        raise SystemExit(f"【红】GLSL 改写工具编不出（graphics/nvn/gfx/gl/gl_glsl_es.c，要 cc / clang 或 CC）：{e}")
 
     import spvc_inproc
     (tools / "spvc/cli/bin").mkdir(parents=True)

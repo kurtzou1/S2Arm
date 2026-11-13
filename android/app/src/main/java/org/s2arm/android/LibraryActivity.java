@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.content.Intent;
 import android.os.Bundle;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import java.util.HashSet;
@@ -14,6 +15,7 @@ public final class LibraryActivity extends Activity {
     private GameLibrary library;
     private TextView status;
     private LinearLayout rows;
+    private CheckBox fpsOverlay;
     private final Set<String> listed = new HashSet<>();
     private static final int PICK_PACKAGE = 1;
     // A caller opts in to consuming one direct child of files/import/.
@@ -28,6 +30,15 @@ public final class LibraryActivity extends Activity {
         Button importButton = new Button(this); importButton.setText(R.string.import_game);
         importButton.setOnClickListener(v -> startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), PICK_PACKAGE));
         rows.addView(importButton);
+        android.content.SharedPreferences display = getSharedPreferences("display", MODE_PRIVATE);
+        fpsOverlay = new CheckBox(this);
+        fpsOverlay.setText(R.string.fps_overlay_show);
+        fpsOverlay.setChecked(display.getBoolean("fps", false));
+        fpsOverlay.setOnCheckedChangeListener((button, checked) -> {
+            if (display.getBoolean("fps", false) != checked)
+                display.edit().putBoolean("fps", checked).apply();
+        });
+        rows.addView(fpsOverlay);
         // #528 item 15: works without any game; the bundle goes to whatever app the player picks.
         Button exportButton = new Button(this); exportButton.setText(R.string.export_diagnostics);
         exportButton.setOnClickListener(v -> exportDiagnostics(exportButton));
@@ -90,6 +101,7 @@ public final class LibraryActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        fpsOverlay.setChecked(getSharedPreferences("display", MODE_PRIVATE).getBoolean("fps", false));
         if (library != null) {
             String staging = getIntent().getStringExtra(EXTRA_IMPORT_STAGING);
             getIntent().removeExtra(EXTRA_IMPORT_STAGING); // do not repeat on later resumes

@@ -52,6 +52,7 @@ Java_org_s2arm_android_NativeBridge_configureDebugEnvironment(JNIEnv *env, jclas
 #include "loader.h"
 extern "C" void s2a_host_shutdown(const char *why);
 extern "C" int64_t s2a_android_services_present_count(void);
+extern "C" uint64_t s2a_android_nvn_present_count(void);   // native/direct_session.c：新回放层 / 旧层的上屏计数
 extern "C" int s2a_android_readonly_configure_bounded(int enabled);
 extern "C" int s2a_android_services_request_applet_exit(uint64_t session);
 extern "C" int s2a_gfx_mode(void);
@@ -142,6 +143,9 @@ Java_org_s2arm_android_NativeBridge_gamePresentCount(JNIEnv *, jclass) {
     // UI diagnostics must not initialize NativeAOT before the native loader/memory startup.
     struct s2a_android_runtime_status status{};
     if (s2a_android_runtime_status(1, &status) != 0 || status.last_phase < S2A_RUNTIME_GUEST_RUNNING) return 0;
+    // 原生的上屏计数有值就用它：新回放层（安卓缺省）起局不经过托管侧的 DirectSession，托管侧
+    // GetPresentCount 会落到没人递增的计数器上、浮层一直是 0。两层原生计数都没有时照旧问托管侧。
+    if (uint64_t native = s2a_android_nvn_present_count()) return static_cast<jlong>(native);
     return static_cast<jlong>(s2a_android_services_present_count());
 #else
     return -1;

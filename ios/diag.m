@@ -8,11 +8,13 @@
 //       shaders/*（现编着色器的输入：编到一半进程没了留下的 .inflight.*、翻译器报错留下的 .fail.*，有就放）、
 //       diagrun/*.png（诊断局的出图与颜色目标，总量 ≤ 20 MB）。
 //   脱敏：App 数据目录 / 安装目录换成 <APP> / <BUNDLE>，设备名、UDID 去掉；存档（bis/user/save）、资源包、密钥都不放。
-//   交出：系统分享面板（AirDrop / 存到文件 / 微信）；包同时留在 Documents/diag/（只留最近 3 个，Mac 前端「拉回诊断」能拉到）。
+//   交出（11-13 起）：入口②③④是「上传给开发者」——传到 diag.s2arm.com，玩家拿到短码、只复制短码；上传失败退回系统分享面板（AirDrop / 存到文件 / 微信）。
+//         入口①仍直接弹分享面板。包同时留在 Documents/diag/（只留最近 3 个，Mac 前端「拉回诊断」能拉到）。
 #import <UIKit/UIKit.h>
 #import "s2a_l10n.h"
 #import <MetricKit/MetricKit.h>
 #import <Metal/Metal.h>
+#import <CoreTelephony/CTCellularData.h>   // 上传断网时认「无线数据」授权被拒（国行 iPhone）
 #import "vpad.h"
 #import "app_settings.h"
 #include <sys/sysctl.h>
@@ -22,6 +24,7 @@
 #include "s2a_pad.h"   // s2a_pad_plus_press：手柄长按「+」开菜单
 #include "s2a_launch_ctx.h"
 #include "s2a_sesdiag.h"
+#include "diag_upload.h"   // 上传给开发者：结果判断（纯 C，单测 t_diag_upload）
 
 static NSString *docs(void) { return NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject; }
 // 资源包根：启动上下文给了本款资源包就读它（上下文文件 / 多款容器选了游戏：v0.3.0 起在 Library 下，s2a_docs.h s2a_pack_root）；
@@ -281,7 +284,7 @@ static NSURL *build_zip(NSUInteger cap, BOOL slim, NSString **err) {
     return zip;
 }
 
-// 导出并弹系统分享面板（主线程调）。打包在后台线程做，不卡画面
+// 打包 / 上传在后台线程做，不卡画面；进行中为真（设置页据此停用「完成」）
 BOOL s2a_diag_is_exporting(void) { return g_exporting; }
 // 弹分享面板的地方：游戏里用游戏界面（g_vc）；多款容器还停在游戏库时 g_vc 为空——原先直接返回，快捷菜单「导出诊断包」
 //   在库里点了什么也不发生（11-11 宿主梳理）。这时取前台窗口的根控制器（游戏库）
@@ -294,14 +297,12 @@ static UIViewController *diag_host(void) {
     }
     return nil;
 }
-void s2a_diag_export(void) {
-    UIViewController *host = diag_host();
-    if (g_exporting || !host) return; g_exporting = YES;
+// 后台打包（主线程调，done 回主线程）：≤ 30 MB，先按每份 8 MB；超了退到 4 MB + 精简，再超退到 1 MB
+static void build_async(void (^done)(NSURL *zip, NSString *err)) {
+    g_exporting = YES;
     [NSNotificationCenter.defaultCenter postNotificationName:@"S2ADiagExportChanged" object:nil];
-    LOG("诊断包：开始导出");
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSString *err = nil; NSURL *zip = nil; unsigned long long sz = 0;
-        // ≤ 30 MB：先按每份 8 MB；超了退到 4 MB + 精简，再超退到 1 MB
         struct { NSUInteger cap; BOOL slim; } tiers[] = {{8u << 20, NO}, {4u << 20, YES}, {1u << 20, YES}};
         for (int i = 0; i < 3; i++) {
             zip = build_zip(tiers[i].cap, tiers[i].slim, &err); if (!zip) break;
@@ -309,24 +310,122 @@ void s2a_diag_export(void) {
             if (sz <= (30ull << 20)) break;
         }
         LOG("诊断包：%s %s（%.1f MB）", zip ? "已生成" : "失败", zip ? zip.lastPathComponent.UTF8String : (err ?: @"").UTF8String, sz / 1048576.0);
-        dispatch_async(dispatch_get_main_queue(), ^{
-            g_exporting = NO;
-            [NSNotificationCenter.defaultCenter postNotificationName:@"S2ADiagExportChanged" object:nil];
-            UIViewController *presenter = host;
-            while (presenter.presentedViewController) presenter = presenter.presentedViewController;
-            if ([presenter isKindOfClass:UINavigationController.class]) presenter = ((UINavigationController *)presenter).topViewController;
-            if (!zip) { UIAlertController *a = [UIAlertController alertControllerWithTitle:S2AL(@"diag.error.title") message:err preferredStyle:UIAlertControllerStyleAlert];
-                [a addAction:[UIAlertAction actionWithTitle:S2AL(@"common.gotIt") style:UIAlertActionStyleCancel handler:nil]]; [presenter presentViewController:a animated:YES completion:nil]; return; }
-            UIActivityViewController *av = [[UIActivityViewController alloc] initWithActivityItems:@[zip] applicationActivities:nil];
-            av.popoverPresentationController.sourceView = host.view;   // iPad 要锚点
-            av.popoverPresentationController.sourceRect = CGRectMake(CGRectGetMidX(host.view.bounds), CGRectGetMidY(host.view.bounds), 1, 1);
-            void (^show)(void) = ^{ UIViewController *top = host; while (top.presentedViewController) top = top.presentedViewController;
-                [top presentViewController:av animated:YES completion:nil]; };
-            // 导出就是对「要不要发」的回答：询问弹窗还开着（比如自动导出和异常退出后的询问同时触发）就先关掉它，关完再弹分享面板
-            UIAlertController *q = g_promptAlert;
-            if (q.presentingViewController) [q dismissViewControllerAnimated:YES completion:show]; else show();
-        });
+        dispatch_async(dispatch_get_main_queue(), ^{ done(zip, err); });
     });
+}
+static void busy_done(void) { g_exporting = NO; [NSNotificationCenter.defaultCenter postNotificationName:@"S2ADiagExportChanged" object:nil]; }
+static UIViewController *top_of(UIViewController *host) {
+    UIViewController *top = host; while (top.presentedViewController) top = top.presentedViewController;
+    if ([top isKindOfClass:UINavigationController.class]) top = ((UINavigationController *)top).topViewController;
+    return top;
+}
+// 询问弹窗（「把上次的诊断发给我们？」）还开着就先关掉，关完再弹下一个（导出 / 上传就是对它的回答）
+static void present_over(UIViewController *host, UIViewController *vc) {
+    void (^show)(void) = ^{ UIViewController *top = host; while (top.presentedViewController) top = top.presentedViewController; [top presentViewController:vc animated:YES completion:nil]; };
+    UIAlertController *q = g_promptAlert;
+    if (q.presentingViewController) [q dismissViewControllerAnimated:YES completion:show]; else show();
+}
+static void build_failed(UIViewController *host, NSString *err) {
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:S2AL(@"diag.error.title") message:err preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:S2AL(@"common.gotIt") style:UIAlertActionStyleCancel handler:nil]]; [top_of(host) presentViewController:a animated:YES completion:nil];
+}
+static void share_zip(UIViewController *host, NSURL *zip) {
+    UIActivityViewController *av = [[UIActivityViewController alloc] initWithActivityItems:@[zip] applicationActivities:nil];
+    av.popoverPresentationController.sourceView = host.view;   // iPad 要锚点
+    av.popoverPresentationController.sourceRect = CGRectMake(CGRectGetMidX(host.view.bounds), CGRectGetMidY(host.view.bounds), 1, 1);
+    present_over(host, av);
+}
+// 导出并弹系统分享面板（主线程调）：上传失败时的退路，和系统设置里「打开 App 时导出诊断包」开关
+void s2a_diag_export(void) {
+    UIViewController *host = diag_host();
+    if (g_exporting || !host) return;
+    LOG("诊断包：开始导出");
+    build_async(^(NSURL *zip, NSString *err) { busy_done(); if (!zip) build_failed(host, err); else share_zip(host, zip); });
+}
+
+// ---------- 上传给开发者（诊断一键上传，11-13）：传完给玩家一个短码，玩家只要把码贴到帖子里 ----------
+//   服务端 diag.s2arm.com（只用这个域名，*.workers.dev 国内不通）收件后 7 天自动删；不合规的包服务端直接拒收不落盘。
+//   失败（没网、服务不可达、包被拒、限频）一律说清原因并退回「导出诊断包」，玩家照旧能手动发
+// 预填好诊断码的 GitHub 新帖页（格式见 diag_upload.h；各值按 URL 查询值编码：只留字母数字和 -._~）
+static NSURL *issue_url(NSString *code) {
+    NSMutableCharacterSet *ok = [NSMutableCharacterSet alphanumericCharacterSet]; [ok addCharactersInString:@"-._~"];
+    NSString *(^enc)(NSString *) = ^(NSString *v) { return [v stringByAddingPercentEncodingWithAllowedCharacters:ok] ?: @""; };
+    NSString *ver = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+    NSString *plat = @(s2a_diag_issue_platform(UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad));
+    NSMutableString *u = [NSMutableString stringWithFormat:@"%s?template=%@&logs=%@", S2A_DIAG_ISSUE_NEW, enc(@S2A_DIAG_ISSUE_TEMPLATE), enc(code)];
+    if (ver.length) [u appendFormat:@"&version=%@", enc(ver)];   // 拿不到版本就省掉
+    [u appendFormat:@"&platform=%@&title=%@", enc(plat), enc(@S2A_DIAG_ISSUE_TITLE)];
+    return [NSURL URLWithString:u];
+}
+static void post_zip(NSURL *zip, int attempt, void (^done)(NSString *code, NSString *fail)) {
+    NSMutableURLRequest *rq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@"https://diag.s2arm.com/v1/upload"]];
+    rq.HTTPMethod = @"POST"; rq.timeoutInterval = 120;
+    [rq setValue:@"application/zip" forHTTPHeaderField:@"Content-Type"];
+    [rq setValue:[@"ios/" stringByAppendingString:[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"0"] forHTTPHeaderField:@"X-S2Arm-Client"];
+    [[NSURLSession.sharedSession uploadTaskWithRequest:rq fromFile:zip completionHandler:^(NSData *data, NSURLResponse *resp, NSError *e) {
+        int status = [resp isKindOfClass:NSHTTPURLResponse.class] ? (int)((NSHTTPURLResponse *)resp).statusCode : 0;
+        id j = data.length ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+        NSDictionary *d = [j isKindOfClass:NSDictionary.class] ? j : nil;
+        NSString *code = [d[@"code"] isKindOfClass:NSString.class] ? d[@"code"] : nil, *why = [d[@"error"] isKindOfClass:NSString.class] ? d[@"error"] : @"";
+        s2a_up_verdict v = s2a_diag_up_verdict(status, e != nil, attempt, code.UTF8String);
+        if (v == S2A_UP_OK) {
+            LOG("诊断包：已上传，短码 %s（第 %d 次），发帖页 %s", code.UTF8String, attempt + 1, issue_url(code).absoluteString.UTF8String);
+            dispatch_async(dispatch_get_main_queue(), ^{ done(code, nil); }); return;
+        }
+        if (v == S2A_UP_RETRY) {
+            LOG("诊断包：上传第 %d 次没成（HTTP %d %s），2 秒后再试一次", attempt + 1, status, e ? e.localizedDescription.UTF8String : "");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ post_zip(zip, attempt + 1, done); }); return;
+        }
+        // 给玩家的原因：服务端 message 是中文一句、可直接给玩家看（中文界面用它），英文界面按错误种类给本地一句
+        NSString *msg = [d[@"message"] isKindOfClass:NSString.class] ? d[@"message"] : nil, *fail;
+        static CTCellularData *cell; static dispatch_once_t once; dispatch_once(&once, ^{ cell = [CTCellularData new]; });
+        if (e && s2a_diag_net_denied((int)e.code, (int)cell.restrictedState)) fail = S2AL(@"diag.upload.fail.denied");
+        else if (e) fail = [NSString stringWithFormat:S2AL(@"diag.upload.fail.network"), e.localizedDescription];
+        else if (status == 429) fail = S2AL(@"diag.upload.fail.busy");
+        else if (status == 400 || status == 413) fail = s2a_l10n_zh() && msg.length ? msg : [NSString stringWithFormat:S2AL(@"diag.upload.fail.rejected"), why];
+        else fail = [NSString stringWithFormat:S2AL(@"diag.upload.fail.server"), status];
+        LOG("【红】诊断包：上传失败（HTTP %d %s %s），退回导出", status, why.UTF8String, e ? e.localizedDescription.UTF8String : "");
+        dispatch_async(dispatch_get_main_queue(), ^{ done(nil, fail); });
+    }] resume];
+}
+// 传一份已打好的包并给结果（主线程调）：成功显示短码 +「复制短码」；失败说原因，给「再试一次」和「导出诊断包」两条路
+//   （国行 iPhone 第一次联网时系统先弹「允许使用无线数据」，弹着时请求一律报断网——玩家点了允许，再试一次就能传）
+static void upload_zip(UIViewController *host, NSURL *zip) {
+    if (g_exporting) return;
+    g_exporting = YES; [NSNotificationCenter.defaultCenter postNotificationName:@"S2ADiagExportChanged" object:nil];
+    post_zip(zip, 0, ^(NSString *code, NSString *fail) {
+        busy_done();
+        UIAlertController *a;
+        if (code) {
+            a = [UIAlertController alertControllerWithTitle:S2AL(@"diag.upload.done.title") message:[NSString stringWithFormat:S2AL(@"diag.upload.done.message"), code, @S2A_DIAG_REPO] preferredStyle:UIAlertControllerStyleAlert];
+            UIAlertAction *post = [UIAlertAction actionWithTitle:S2AL(@"diag.upload.post") style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) { (void)x;
+                LOG("诊断包：打开 GitHub 发帖页（短码 %s）", code.UTF8String); [UIApplication.sharedApplication openURL:issue_url(code) options:@{} completionHandler:nil]; }];
+            [a addAction:post]; a.preferredAction = post;   // 主按钮
+            [a addAction:[UIAlertAction actionWithTitle:S2AL(@"diag.upload.copy") style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) { (void)x; UIPasteboard.generalPasteboard.string = code; LOG("诊断包：短码已复制"); }]];
+            [a addAction:[UIAlertAction actionWithTitle:S2AL(@"common.gotIt") style:UIAlertActionStyleCancel handler:nil]];
+        } else {
+            a = [UIAlertController alertControllerWithTitle:S2AL(@"diag.upload.fail.title") message:fail preferredStyle:UIAlertControllerStyleAlert];
+            [a addAction:[UIAlertAction actionWithTitle:S2AL(@"diag.upload.retry") style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) { (void)x; upload_zip(host, zip); }]];
+            [a addAction:[UIAlertAction actionWithTitle:S2AL(@"diag.export") style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) { (void)x; share_zip(host, zip); }]];
+            [a addAction:[UIAlertAction actionWithTitle:S2AL(@"common.gotIt") style:UIAlertActionStyleCancel handler:nil]];
+        }
+        present_over(host, a);
+    });
+}
+static void upload_now(void) {
+    UIViewController *host = diag_host();
+    if (g_exporting || !host) return;
+    LOG("诊断包：开始打包上传");
+    build_async(^(NSURL *zip, NSString *err) { busy_done(); if (!zip) build_failed(host, err); else upload_zip(host, zip); });
+}
+// 「上传给开发者」（四指菜单 / 提示页按钮，主线程调）：先说清会传什么、不传什么，玩家点了才传
+void s2a_diag_upload(void) {
+    UIViewController *host = diag_host();
+    if (g_exporting || !host) return;
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:S2AL(@"diag.upload.confirm.title") message:S2AL(@"diag.upload.confirm.message") preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:S2AL(@"common.cancel") style:UIAlertActionStyleCancel handler:nil]];
+    [a addAction:[UIAlertAction actionWithTitle:S2AL(@"diag.upload.go") style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) { (void)x; upload_now(); }]];
+    present_over(host, a);
 }
 
 // ---------- MetricKit：崩溃 / 卡顿诊断与退出原因计数（系统在下次启动或之后交来）原样存 Documents/metrickit/ ----------
@@ -394,7 +493,7 @@ void s2a_diag_prompt(NSString *why) {
     UIAlertController *a = [UIAlertController alertControllerWithTitle:S2AL(@"diag.prompt.title")
         message:[NSString stringWithFormat:S2AL(@"diag.prompt.message"), why] preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:S2AL(@"diag.prompt.no") style:UIAlertActionStyleCancel handler:nil]];
-    [a addAction:[UIAlertAction actionWithTitle:S2AL(@"diag.prompt.send") style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) { (void)x; s2a_diag_export(); }]];
+    [a addAction:[UIAlertAction actionWithTitle:S2AL(@"diag.prompt.send") style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) { (void)x; upload_now(); }]];
     UIViewController *top = g_vc; while (top.presentedViewController) top = top.presentedViewController;
     g_promptAlert = a; [top presentViewController:a animated:YES completion:nil];
 }
@@ -403,7 +502,9 @@ void s2a_diag_prompt(NSString *why) {
 static void check_toggle(void) {
     NSUserDefaults *u = NSUserDefaults.standardUserDefaults;
     static BOOL env_done;   // 真机验证用：devicectl 起局带 S2A_DIAG_EXPORT_NOW=1 → 启动就导出一次（包落 Documents/diag/，执行器拉回核对），不用人点
-    if (!env_done) { env_done = YES; const char *e = getenv("S2A_DIAG_EXPORT_NOW"); if (e && *e == '1') { s2a_diag_export(); return; } }
+    if (!env_done) { env_done = YES; const char *e = getenv("S2A_DIAG_EXPORT_NOW"); if (e && *e == '1') { s2a_diag_export(); return; }
+        // 同理 S2A_DIAG_UPLOAD_NOW=1 → 启动就上传一次（不弹确认，短码 / 失败原因进 host.log，执行器拉回核对）
+        e = getenv("S2A_DIAG_UPLOAD_NOW"); if (e && *e == '1') { upload_now(); return; } }
     if (![u boolForKey:kOpenToggle]) return;
     [u setBool:NO forKey:kOpenToggle]; s2a_diag_export();
 }

@@ -281,6 +281,9 @@ const char *s2a_pack_apply_code(void) { return g_apply_code; }
 // 返回进程退出码（0 成功）；docs = Documents 目录
 int s2a_pack_apply(const char *docs) {
     char root[2048], inc[2100], logp[2100]; s2a_pack_root(root, sizeof root, docs); snprintf(inc, sizeof inc, "%s/.incoming", root); snprintf(logp, sizeof logp, "%s/unpack.log", docs);
+    // 多款容器第一次装一款时本款文档根 Documents/games/<游戏号>/ 还不在（资源包在 Library 下）：先建出来，解包日志才写得下。
+    //   原先建不了日志、解开了也没有完成行，电脑端（tools/push_pack.py 只认日志完成行）白等 180 秒后误报「解包没有开始」。建不了时 mkdirs 记的现场由下一行清掉，失败照旧走下面「unpack.log 建不了」那句
+    mkdirs(logp);
     uint64_t t0 = now_ns(); unsigned ntar = 0, nf = 0; uint64_t nb = 0; int rc = 0, from_img = 0; char what[2300] = ""; g_fail_errno = 0; g_untar_trunc = 0; g_untar_err[0] = 0;
     // 本款目录 / 资源包 / 待解包目录 App 写不进（#569：玩家机上这一串归 root、0755，App 是 501）：一个包都不解，先把真实原因说清楚，
     //   不再去解包、报一句含糊的「解 xxx.tar」。迁到 App 自己的新目录在 s2a_games_repair（游戏库挂上时做）

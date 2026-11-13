@@ -654,9 +654,12 @@ def push_pack(c, ident, bid, pack, udid=None, docs=None, ctx=None, pack_root=Non
         m = re.search(r"^S2A_PUSH_CODE (device_space_low|ios_install_no_space)\t([^\n]+)", text, re.M)   # tools/push_pack.py：估算空间不够（玩家可确认继续）/ 真写满了
         if m:
             raise Failure(m.group(2), code=m.group(1)) from e
-        m = re.search(r"iPhone 写不进资源包：[^\n]*", text)   # tools/push_pack.py probe：推之前写探针就失败 = 锁屏 / 断开（#333）
+        m = re.search(r"iPhone 写不进资源包：[^\n]*", text)   # tools/push_pack.py probe：推之前写探针失败、手机确实锁着（#333）
         if m:
             raise Failure(m.group(0), code="device_locked") from e
+        m = re.search(r"iPhone 写不进资源包（[^\n]*", text)   # probe：写不进但手机没锁 / 判不了 = 连接问题（带原文），不冒充锁屏（11-13）
+        if m:
+            raise Failure(m.group(0), code="resource_transfer_failed") from e
         from errors import tool_reason
         raise Failure("资源包推不进 iPhone：" + tool_reason(log), code="resource_transfer_failed") from e
     return got.get("files", 0), got.get("mb", 0) << 20
@@ -827,13 +830,20 @@ def install_mode_job(c):
 
 # 导出给自签玩家（v0.3.1，维护者 11-12「导出，自己签名安装」）：游戏库根下这个文件夹放未签名 S2Arm.ipa + 各款 <游戏名>.img + 一份说明。
 #   每次导出整个换新（先在同盘临时目录写好再对调），里面只有这次导出的东西
-EXPORT_DIR = "S2Arm 自签导出"
-EXPORT_README = "怎么装到 iPhone.txt"
+#   文件夹名与说明跟启动器界面语言（请求 uiLanguage，两端每个作业都带；11-13 维护者「i18n 要做好」）：中文 / 英文各一个定名（iOS 端文案同步用这两个名字）。
+#   换了语言再导出：新名字的写好后把另一种语言名字的旧导出删掉，游戏库根只留一份
+EXPORT_DIRS = {"zh": "S2Arm 自签导出", "en": "S2Arm Self-Sign Export"}
+EXPORT_READMES = {"zh": "怎么装到 iPhone.txt", "en": "How to install on iPhone.txt"}
 _BAD_NAME = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
 
+def ui_lang(c):
+    """玩家看得到的文件名 / 说明用哪种语言：请求 uiLanguage = en 用英文，其余（zh-Hans、没带）用中文"""
+    return "en" if c.r.get("uiLanguage") == "en" else "zh"
+
+
 def export_dir(c):
-    return c.library / EXPORT_DIR
+    return c.library / EXPORT_DIRS[ui_lang(c)]
 
 
 def wants_export(c):
@@ -865,7 +875,7 @@ def _export_img(c, pack, dst):
         raise Failure("写导出用的游戏文件失败：" + (tool_reason(log) or str(e)), code="package_failed") from e
 
 
-def export_readme(games):
+def _readme_zh(games):
     names = "\n".join(f"  · {g['file']}（{g['name']}）" for g in games)
     return f"""S2Arm 自签安装说明
 
@@ -891,9 +901,39 @@ def export_readme(games):
 """
 
 
+def _readme_en(games):
+    names = "\n".join(f"  · {g['file']} ({g['name']})" for g in games)
+    return f"""S2Arm self-sign install guide
+
+This folder contains:
+  · S2Arm.ipa: S2Arm, unsigned (it carries the programs of the games below)
+  · One .img file per game:
+{names}
+
+1. Install S2Arm
+  Sign and install S2Arm.ipa with the sideloading tool you use (for example Sideloadly or AltStore).
+  If S2Arm is already installed, install over it: the games, .img files and saves on the iPhone are kept.
+  After the first install, trust your developer account in Settings → General → VPN & Device Management, then open S2Arm once.
+
+2. Add the games
+  In the Files app on the iPhone, open On My iPhone → S2Arm → Import Here and copy the .img files into it.
+  You can get them onto the phone with AirDrop, a cable (file sharing in the Mac Finder or a Windows tool) or a cloud drive, then move them into this folder in the Files app.
+  The file names do not matter: S2Arm recognises each game by its contents. Games already on the phone that you have not rebuilt for iPhone do not need to be added again.
+
+3. Play
+  Go back to S2Arm: the games appear in the library, tap one to play. If an .img is still being copied, S2Arm waits for it to finish before importing.
+
+This folder is replaced as a whole on every export.
+"""
+
+
+def export_readme(games, lang="zh"):
+    return _readme_en(games) if lang == "en" else _readme_zh(games)
+
+
 def export_phone(c, gid=None):
     """导出，自己签名安装：本版壳 + 游戏库里能放进本壳、已出成单一 IMG 的各款组一个容器（ipa.assemble，同一键装），
-    出未签名 S2Arm.ipa + 各款 game.img + 说明到游戏库根「S2Arm 自签导出」。不连手机、不签名。
+    出未签名 S2Arm.ipa + 每款一个 <游戏名>.img + 说明到游戏库根「S2Arm 自签导出」（英文界面「S2Arm Self-Sign Export」）。不连手机、不签名。
     gid：这次点的那款（必须带上，放不进就报真实原因）；None = 「导出新版 S2Arm」（只换壳，带上能带的各款）。
     放不进本壳（要按新版重新出包）/ 还不是单一 IMG 形态的别的款不带，结果 skipped 点名"""
     import ipa as packer
@@ -902,7 +942,7 @@ def export_phone(c, gid=None):
     sid = packer.current_shell_id(c)
     if gid:
         if not img_pack(ios_pack(c, gid)):
-            raise Failure("这款的 iPhone 包是旧格式，导出不了单个 game.img：请重新「打 iPhone 包」后再导出。", code="pack_missing")
+            raise Failure("这款的 iPhone 包是旧格式，导出不了这款的 .img 文件：请重新「打 iPhone 包」后再导出。", code="pack_missing")
     names = {g["id"].upper(): g.get("name") or g["id"] for g in c.catalog()["games"]}
     others, skipped = [], []
     for g in sorted(names):
@@ -934,18 +974,22 @@ def export_phone(c, gid=None):
             _export_img(c, layout.ios_pack(c, g), out / f)
             listed.append(dict(gameId=g, name=names.get(g, g), file=f))
         c.begin("写安装说明", 4, 4)
-        (out / EXPORT_README).write_text(export_readme(listed), encoding="utf-8-sig" if os.name == "nt" else "utf-8")
+        lang = ui_lang(c); readme = EXPORT_READMES[lang]
+        (out / readme).write_text(export_readme(listed, lang), encoding="utf-8-sig" if os.name == "nt" else "utf-8")
         dest = export_dir(c)
         old = work / "old"
         if dest.exists():
             os.replace(dest, old)
         os.replace(out, dest)
+        for other, name in EXPORT_DIRS.items():   # 换过界面语言：另一种语言名字的旧导出挪进临时目录随它删，游戏库根只留这一份
+            if other != lang and (c.library / name).exists():
+                os.replace(c.library / name, work / ("old-" + other))
     finally:
         shutil.rmtree(work, ignore_errors=True)
     size = sum(p.stat().st_size for p in dest.iterdir() if p.is_file())
     if skipped:
         c.diagnostic("这几款没放进这次导出（要按新版重新「打 iPhone 包」）：" + "、".join(skipped), code="container_stale", severity="warning")
-    return dict(exported=True, outputPath=str(dest), ipa=str(dest / "S2Arm.ipa"), readme=str(dest / EXPORT_README),
+    return dict(exported=True, outputPath=str(dest), ipa=str(dest / "S2Arm.ipa"), readme=str(dest / readme),
                 games=[x["gameId"] for x in listed], files=listed, skipped=skipped, exportBytes=size)
 
 
@@ -1522,7 +1566,12 @@ def put_game(c, gid, ph, steps=True, others=None):
     refresh_ios(c, [g for g in ([gid] if gid else []) + list(others) if g])
     ipa, games, sid = packer.assemble(c, gid, others, failed=rec.get("failedShells", []))
     packs = {g: ios_pack(c, g) for g in games}   # 每款都要有资源包，缺一款就不装（不装半套）
-    ph.install(ipa, games, steps=steps)
+    skipped = same_app(c, ph, rec, packer.ipa_digest(ipa))
+    if skipped:   # #845：手机上的 S2Arm 就是这次组出的这一个、签名离到期还早 → 不重签不重装，直接推资源（数据和存档本来就不动）
+        if steps: c.begin("手机上的 S2Arm 已是这一版，跳过签名和安装", 5, 6)
+        note(c, "手机上的 S2Arm 和这次组出的内容一样（S2AContainerDigest 相同），签名离到期还早：跳过签名和安装，只推变了的资源")
+    else:
+        ph.install(ipa, games, steps=steps)
     # 装上的包名和记录里的不同（换了签名方式 / 包名被占自动换过）= 手机上是另一个 App，资源包都不在里面：每款都推
     moved = bool(rec.get("bundleId")) and bool(ph.bid) and rec["bundleId"] != ph.bid
     stale = [g for g in games if moved or g == gid or pack_id(packs[g]) != (rec["games"].get(g) or {}).get("pack")]
@@ -1540,13 +1589,40 @@ def put_game(c, gid, ph, steps=True, others=None):
     finally:   # 推到一半失败：已推好的记下，没推的下次照推
         rec = layout.load_device(c, ph.key)
         # signed：这次签名（游戏库页的「还有几天到期 / 续签」读 layout.install_record）：免费账号的描述文件 7 天到期，容器里每款同一次签名
-        signed = dict(signed=dict(at=time.time(), free=bool(ph.info["free"]), device=ph.info["device"])) if "free" in ph.info else {}
+        signed = dict(signed=dict(at=time.time(), free=bool(ph.info["free"]), device=ph.info["device"])) if "free" in ph.info and not skipped else {}   # 跳过安装 = 没重签：到期时间照旧
         layout.save_device(c, ph.key, dict(rec, games={g: dict(pack=pushed[g]) for g in games}, shellId=sid, bundleId=ph.bid or rec.get("bundleId", ""), at=time.time(), **signed))
     packer.commit_phone_ipa(c, ipa, sid)
     # 资源传完但电脑没拉起 App 解开（manual_unpack_required，11-09 #336）：不算「已装好」，结果带上还差的一步，两端前端据此显示「还差最后一步」而不是「已装到 iPhone」
     extra = dict(unpackPending=ph.pending) if ph.pending else {}
     if img: extra["openToFinish"] = True   # 两端成功页写「已传到 iPhone，打开 S2Arm 会自动完成安装」（机上解开由 App 打开时游戏库完成）
     return dict(outputPath=str(layout.phone_ipa(c)), bundleId=ph.bid, games=games, packFiles=files, packBytes=size, **ph.info, **extra)
+
+
+SAME_APP_FRESH = (3 * 86400, 30 * 86400)   # 跳过重签的签名新鲜度：免费账号描述文件 7 天到期，签了不到 3 天才跳过（照常装机就顺手续签）；付费 / 证书 30 天
+
+
+def same_app(c, ph, rec, digest):
+    """#845「每次装到 iPhone 都要重新签名打包」：手机上的 S2Arm 就是这次组出的这一个时，不再重签重装，只推资源。三条都满足才跳过：
+    ① 手机上这个包名的 App 的 Info.plist S2AContainerDigest（s2a-devpush app-attr，installation_proxy 读，不进容器）= 这次组出的（ipa.stamp_container）——
+       真相在手机上：别的电脑（含没有这个键的旧版 S2Arm）重装过就对不上，照常装；② 这台电脑记的上次签名离现在不到 SAME_APP_FRESH（免费账号 / 付费）；
+    ③ 请求没要求强制重装（forceInstall）。读不到（工具缺、断开、锁屏）一律当不同：照原来的流程装，最坏只是多装一次"""
+    if not digest or c.r.get("forceInstall") or not getattr(ph, "bid", None) or not getattr(ph, "udid", None):
+        return False
+    signed = rec.get("signed") or {}
+    if not isinstance(signed.get("at"), (int, float)) or time.time() - signed["at"] >= SAME_APP_FRESH[0 if signed.get("free", True) else 1]:
+        return False
+    try:
+        with tempfile.TemporaryDirectory(dir=c.private) as w:
+            rc, out = devpush_client(c, ph.udid, ph.bid, w).call("app-attr", ipa_key())
+    except (Failure, OSError) as e:
+        note(c, f"读不出手机上 S2Arm 的内容摘要，照常签名安装（{e}）")
+        return False
+    return not rc and out.strip().splitlines()[-1:] == [digest] if out else False
+
+
+def ipa_key():
+    import ipa as packer
+    return packer.CONTAINER_DIGEST_KEY
 
 
 def shell_outdated(c, rec, sid, games=None):

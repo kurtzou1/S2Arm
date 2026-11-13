@@ -27,6 +27,7 @@ namespace S2A.DirectCompiler
         // 池槽位/句柄索引：翻译期拿不到（CreateTextureBinding 早于 RegisterTexture），
         // 编译结束后按反射到的 TextureDescriptor.HandleIndex 回填；-1 表示还没定。
         public int Slot;
+        public int SamplerSlot = -1;
         // Storage address provenance, resolved from ShaderProgram.Info.SBuffers.
         // Translator guestIndex is deliberately NOT a runtime NVN slot.
         public int CbSlot = -1, CbOffset = -1;
@@ -276,7 +277,33 @@ namespace S2A.DirectCompiler
             DirectTextureFact fact = FindTexture(handle, cbufSlot);
             if (fact == null && cbufSlot >= 0)
                 fact = FindTexture(handle, -1);
+            if (fact == null && cbufSlot >= 0)
+            {
+                if (TrySeparateC2(handle, cbufSlot, out int texWord, out _))
+                    fact = FindTexture(texWord, 2);
+            }
             return fact ?? throw Missing(method, $"stage={_stage.Stage},handle={handle},cbufSlot={cbufSlot}");
+        }
+
+        // The packed operands can occur in either order; require one from each c2 table
+        // and the same stage-specific separate texture fact used by translation.
+        public bool TrySeparateC2(int handle, int cbufSlot, out int texWord, out int samplerSlot)
+        {
+            texWord = samplerSlot = -1;
+            (int texBuffer, int sampBuffer) = TextureHandle.UnpackSlots(cbufSlot, -1);
+            (int a, int b, TextureHandleType type) = TextureHandle.UnpackOffsets(handle);
+            const int textureStart = 0x168 / 4, samplerStart = 0x568 / 4, samplerEnd = 0x968 / 4;
+            bool IsTextureWord(int w) => w >= textureStart && w < samplerStart && (w & 1) == 0;
+            bool IsSamplerWord(int w) => w >= samplerStart && w < samplerEnd && (w & 1) == 0;
+            if (texBuffer != 2 || sampBuffer != 2 || type != TextureHandleType.SeparateSamplerHandle) return false;
+            int t, s;
+            if (IsTextureWord(a) && IsSamplerWord(b)) { t = a; s = b; }
+            else if (IsSamplerWord(a) && IsTextureWord(b)) { t = b; s = a; }
+            else return false;
+            DirectTextureFact fact = FindTexture(t, 2);
+            if (fact == null || !fact.Separate) return false;
+            texWord = t; samplerSlot = (s - samplerStart) / 2;
+            return true;
         }
 
         public bool HasDirectTextureFact(int handle) =>

@@ -111,7 +111,7 @@ void s2a_log_session_start(void) {
 // 开发设施总开关（11-07 质量线，维护者：壳里为开发测试集成的设施是能耗来源；方案见 cmdr/壳内开发设施盘点.md）。
 //   判定只此一处：环境变量 S2A_DEV_FACILITIES（0 / 1，排查玩家问题时强制打开）> Info.plist 的 S2ADevFacilities（启动器给玩家出包 S2A_PACK_PURPOSE=user 时
 //   pack/ipa_tail.py 写 "0"）> 缺省开（开发包 / Mac 开发局 / 普查都没有这个键）。管：停住现场看门（ap_host.c）、地址走势（vawin.c va_watch）、
-//   C# 的 MemDiag 周期账与 AudioDiag。不管安全网：崩溃现场、直连异常看门、低区腾退、GPU 看门狗、帧率表写入照起
+//   C# 的 MemDiag 周期账与 AudioDiag、iOS 录手柄（ios/vpad.m padrec，#845）。不管安全网：崩溃现场、直连异常看门、低区腾退、GPU 看门狗、帧率表写入照起
 int s2a_dev_on(void) {
     static _Atomic int v = -1; int r = atomic_load(&v); if (r >= 0) return r;
     const char *e = getenv("S2A_DEV_FACILITIES"); int on = 1, has = 0;

@@ -69,6 +69,12 @@ namespace ARMeilleure.Instructions
             EmitReturn(context, GetIntOrZR(context, op.Rn));
         }
 
+        // retaa / retab（S2Arm #854）：编码里 Rn 位是 11111，返回地址隐含在 x30；不开密钥，认证不改地址
+        public static void RetPac(ArmEmitterContext context)
+        {
+            EmitReturn(context, GetIntOrZR(context, RegisterAlias.Lr));
+        }
+
         public static void Tbnz(ArmEmitterContext context) => EmitTb(context, onNotZero: true);
         public static void Tbz(ArmEmitterContext context) => EmitTb(context, onNotZero: false);
 

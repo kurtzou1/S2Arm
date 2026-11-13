@@ -14,5 +14,12 @@ static inline BOOL s2a_l10n_zh(void) {
     dispatch_once(&once, ^{ zh = [NSBundle.mainBundle.preferredLocalizations.firstObject hasPrefix:@"zh"]; });
     return zh;
 }
+// 宿主界面实际显示的语言（字符串表 ios/l10n/<语言>.lproj 里有的那几种，按系统首选语言挑）：zh-Hans / zh-Hant / en。
+//   不用 preferredLocalizations：Info.plist 的 CFBundleLocalizations 列了 19 种（给游戏名本地化用），日语系统会回 ja，界面却显示英文表
+static inline NSString *s2a_l10n_lang(void) {
+    static NSString *l; static dispatch_once_t once;
+    dispatch_once(&once, ^{ l = [NSBundle preferredLocalizationsFromArray:@[@"en", @"zh-Hans", @"zh-Hant"] forPreferences:NSLocale.preferredLanguages].firstObject ?: @"en"; });
+    return l;
+}
 #define S2APICK(macro) (s2a_l10n_zh() ? @macro : @macro##_EN)     // NSString *
 #define S2APICKC(macro) (s2a_l10n_zh() ? macro : macro##_EN)      // const char *

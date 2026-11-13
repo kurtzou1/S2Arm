@@ -7,6 +7,16 @@
 S2A_CAPPROBE_RUNTIME_LOST_WEAK_REF;   // 宿主链接单元无 bridge.cpp 时解析为 NULL
 #include <errno.h>
 #include <stdatomic.h>
+// 浮层的「成功交给呈现」计数：新回放层（缺省）取 rp_present_stats 的已上屏数，旧层（对照诊断用）取 mtl_present_count。
+// 两个都是弱引用：哪一层链进来就读哪一层，都没有时返回 0。
+extern void rp_present_stats(uint64_t *shown, uint64_t *dropped) __attribute__((weak));
+extern uint64_t mtl_present_count(void) __attribute__((weak));
+
+uint64_t s2a_android_nvn_present_count(void) {
+    if (rp_present_stats) { uint64_t shown = 0; rp_present_stats(&shown, NULL); return shown; }
+    return mtl_present_count ? mtl_present_count() : 0;
+}
+
 
 #if defined(S2A_ANDROID_GAME_RUNTIME)
 #include "s2a_hostapi.h"

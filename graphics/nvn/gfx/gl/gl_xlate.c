@@ -289,7 +289,16 @@ int s2a_gl_xlate(const char *src, size_t n, int frag, const char *key, char **ms
     glslang_stage_t st = frag ? GLSLANG_STAGE_FRAGMENT : GLSLANG_STAGE_VERTEX; char stc = frag ? 'f' : 'v';
     size_t pn, rn, nw = 0; int rc = 1; char *pre = NULL, *glsl = NULL; uint32_t *w = NULL;
     char *fixed = s2a_glsl_es_prefix(src, n, &pn); if (!fixed) { snprintf(err, errcap, "out of memory"); return 1; }
-    if (!(pre = glsl_preprocess(fixed, st, err, errcap))) goto out;
+    if (!(pre = glsl_preprocess(fixed, st, err, errcap))) {
+        // #749：还报「要写 es」= 补 es 没认出这种版本行写法。把原文第一条 #version 行带进报错（只这一行、至多 80 字节、不可打印的换成 ?），下一份诊断包就能对症
+        if (strstr(err, "'es' profile")) {
+            const char *v = NULL; for (size_t i = 0; i + 8 <= n; i++) if (!memcmp(src + i, "#version", 8)) { v = src + i; break; }
+            char line[81]; size_t k = 0; for (; v && k < 80 && v + k < src + n && v[k] != '\n'; k++) line[k] = v[k] >= 0x20 && v[k] < 0x7f ? v[k] : '?'; line[k] = 0;
+            size_t el = strlen(err); while (el && (err[el - 1] == '\n' || err[el - 1] == ' ')) err[--el] = 0;
+            snprintf(err + el, errcap > el ? errcap - el : 0, "（原文版本行「%s」）", v ? line : "没有 #version");
+        }
+        goto out;
+    }
     if (!(glsl = s2a_glsl_es_rewrite(pre, strlen(pre), stc, &rn, err, errcap))) { if (!err[0]) snprintf(err, errcap, "out of memory"); goto out; }
     if (!(w = glsl_spirv(glsl, st, &nw, err, errcap))) goto out;
     rc = spv_to_msl(w, nw, frag, key, glsl, msl, fields, err, errcap);

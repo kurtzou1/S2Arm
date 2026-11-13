@@ -9,6 +9,10 @@
 // ④ #309 复发（v0.2.2 仍闪）：同样不对齐、但 4 MiB（1,052,640 个 R32UI）且本次提交里由 GPU 拷贝写入（游戏的计算遍写光照列表即如此）。期望（按语义手写）：
 //   tba_copy 在 GPU 上拷 1 次；视图不在池缓冲上、缓冲偏移是 64 的倍数；提交后视图背后的字节 = GPU 写进去的源数据（第 i 个 = 7000000 + i）
 //   反证：同一用例编修前源码（tba_copy 桩成「不拷」）→ CPU 副本（ubp_get）因 > 64 KiB / GPU 写过拒绝，视图为 nil
+// ⑤ #798：按纹素缓冲（1D）读、池内偏移不对齐。Metal 在不对齐偏移上建的纹素缓冲视图从「向下取整到对齐」处读（M5 Max 实测 R32F 偏移 4 / 8 / 12 整体错后 1 / 2 / 3 个元素），
+//   某款游戏每帧新建的粒子数据（261,370 个 R32F）落在 ≡ 8 (mod 16) 的偏移上的那些帧，粒子四边形被拉长。期望（按语义手写）：偏移 0x30008 的 261,370 个 R32F（第 i 个 = 3000 + i）
+//   tba_copy(…, -1) 在 GPU 上拷 1 次；绑定得到的视图不在池缓冲上、缓冲偏移是 64 的倍数、宽 261,370；GPU 核按下标 i 从视图读到的正是 3000 + i（全部元素）
+//   反证：同一用例编修前源码 → tba_copy 对 1D 不拷（made 0）、绑定拿到的是池缓冲上的原地视图，GPU 读出整体错后 2 个元素
 #include "../gfx/nvn/nvn_mtl.m"
 
 static unsigned checks, fails;
@@ -67,6 +71,29 @@ int main(void) { @autoreleasepool {
         if (vg) { const uint32_t *gv = (const uint32_t *)((const uint8_t *)vg.buffer.contents + vg.bufferOffset); got0 = gv[0]; for (uint32_t i = 0; i < BIG; i++) if (gv[i] != 7000000u + i) { bad = i; break; } }
         VERIFY(vg && bad < 0, "④ 副本逐元素 = GPU 写入的源数据（%u 个；第一处不符 %ld，第 0 个 %u）", BIG, bad, got0);
     }
-    printf("%s t_nvn_tbuf_align：%u 项，%u 项失败（不对齐池偏移的缓冲纹理按 2D 行读取对齐副本，#309）\n", fails ? "✗" : "✓", checks, fails);
+    {   // ⑤ #798：按 1D 读、不对齐
+        enum { P = 261370 }; const size_t off = 0x30008;
+        float *pv = (float *)(memory + off); for (int i = 0; i < P; i++) pv[i] = 3000.0f + (float)i;
+        static tex_t q; memset(&q, 0, sizeof q); q.magic = MAGIC('T', 'E', 'X', 0); q.serial = nvn_new_serial();
+        q.d = (nvn_texdesc){.target = NVN_TEXTURE_TARGET_BUFFER, .format = NVN_FORMAT_R32F, .width = P, .height = 1, .depth = 1, .levels = 1};
+        q.pool = pool; q.off = off; q.mem = pool->mem + off; nvn_tex_layout(&q.d, &q.L); nvn_be_tex_init(&q); nvn_be_reg_tex(10, &q, NULL);
+        nvn_be_sub_begin();
+        id<MTLTexture> tq = tex_mtl(&q); REQUIRE(tq && tq.textureType == MTLTextureTypeTextureBuffer && tq.bufferOffset % 64);
+        uint64_t c0 = g_tba_copies; int made = tba_copy(10, -1); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+        uint64_t rq = 0; id<MTLTexture> vq = tbuf_bind_aligned(10, tq, &rq);
+        VERIFY(made == 1 && g_tba_copies - c0 == 1, "⑤ 1D 读、偏移 0x30008 的 261,370 个 R32F：GPU 上拷 1 次（made %d，拷贝 %llu 次）", made, (unsigned long long)(g_tba_copies - c0));
+        VERIFY(vq && vq != tq && vq.buffer != tq.buffer && vq.bufferOffset % 64 == 0 && vq.width == P && vq.textureType == MTLTextureTypeTextureBuffer,
+               "⑤ 绑定的视图%s、不在池缓冲上、缓冲偏移 %lu 是 64 的倍数、宽 %lu（期望 %d）", vq ? "非空" : "为空", vq ? (unsigned long)vq.bufferOffset : 0ul, vq ? (unsigned long)vq.width : 0ul, P);
+        id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nkernel void k(texture_buffer<float> t [[texture(0)]], device float *o [[buffer(0)]], uint i [[thread_position_in_grid]]) { if (i < t.get_width()) o[i] = t.read(i).x; }\n" options:nil error:NULL];
+        id<MTLComputePipelineState> cp = lib ? [g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"k"] error:NULL] : nil; REQUIRE(cp);
+        id<MTLBuffer> out = [g_dev newBufferWithLength:(size_t)P * 4 options:MTLResourceStorageModeShared]; memset(out.contents, 0xff, (size_t)P * 4);
+        uint64_t f = nvn_be_sub_commit(); REQUIRE(nvn_be_wait(f, 10000000000ull)); REQUIRE(!mtl_last_commit_error());   // 拷贝做完，副本里是源数据
+        id<MTLCommandBuffer> cb = [[g_dev newCommandQueue] commandBuffer]; id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
+        [ce setComputePipelineState:cp]; [ce setTexture:(vq ? vq : tq) atIndex:0]; [ce setBuffer:out offset:0 atIndex:0];
+        [ce dispatchThreads:MTLSizeMake(P, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)]; [ce endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        const float *r = (const float *)out.contents; long bad = -1; for (int i = 0; i < P; i++) if (r[i] != 3000.0f + (float)i) { bad = i; break; }
+        VERIFY(vq && bad < 0, "⑤ GPU 按下标从视图读 = 源数据（%d 个；第一处不符 %ld：读到 %g，期望 %g）", P, bad, bad >= 0 ? r[bad] : 0.0, bad >= 0 ? 3000.0 + bad : 0.0);
+    }
+    printf("%s t_nvn_tbuf_align：%u 项，%u 项失败（不对齐池偏移的缓冲纹理按 2D 行 / 1D 读取对齐副本，#309 / #798）\n", fails ? "✗" : "✓", checks, fails);
     return fails != 0;
 } }

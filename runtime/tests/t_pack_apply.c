@@ -491,15 +491,29 @@ int main(void) {
       snprintf(c2, sizeof c2, "cd '%s/资源包' && rm -f .incoming/*.tar .applied && printf img > game.img && printf 'exefs/main.npdm\t1\tx\ngame.img\t3\tx\n' > index.tsv && printf '' > manifest.json", D);
       CHECK(sh(c2) == 0, "造 IMG 清单置空夹具失败");
       int st2 = s2a_import_state(D); CHECK(st2 != 0, "剃刀 #29：有 game.img、清单被置空 → 闸门不判就绪（实际 %d）", st2); }
-    // #540：游戏目录（多款容器 Documents/games/<游戏号>/）根本不在 → unpack.log 也建不了；失败原因仍要填上，并说明日志建不了。
-    //   先跑一次成功的同名目录，核成功后原因清空（不留上一次的失败原因）
+    // 多款容器第一次装一款：本款文档根 <容器>/Documents/games/<游戏号>/ 还不在，资源包在 <容器>/Library/Application Support/S2Arm/games/<游戏号>/资源包。
+    //   期望解开成功且 unpack.log 建在文档根、带完成行「.applied = <清单 sha>」（电脑端 tools/push_pack.py 只认这一行；旧代码日志建不了，电脑端白等 180 秒误报）
+    { char cdocs[1100], croot[1300]; snprintf(cdocs, sizeof cdocs, "%s/ctr/Documents/games/0100000000000002", T);
+      snprintf(croot, sizeof croot, "%s/ctr/Library/Application Support/S2Arm/games/0100000000000002/资源包", T);
+      snprintf(c, sizeof c, "mkdir -p '%s' && printf '{\"index_sha256\":\"cc02\"}' > '%s/manifest.json' && : > '%s/index.tsv'", croot, croot, croot);
+      CHECK(sh(c) == 0, "造多款容器夹具失败");
+      CHECK(s2a_pack_apply(cdocs) == 0, "多款容器文档根不在：资源包应照样解开（%s）", s2a_pack_apply_failure());
+      snprintf(c, sizeof c, "grep -q '\\.applied = cc02' '%s/unpack.log'", cdocs); CHECK(sh(c) == 0, "多款容器文档根不在：期望建出文档根、unpack.log 有完成行 .applied = cc02"); }
+    // #540：游戏目录（多款容器 Documents/games/<游戏号>/）根本不在：解包先把它建出来，失败行照样写进 unpack.log、失败原因照样填上。
+    //   日志真建不了（文档根挡在一个普通文件下面）时原因注明「unpack.log 建不了」。先跑一次成功的同名目录，核成功后原因清空（不留上一次的失败原因）
     { char gone[1100]; snprintf(gone, sizeof gone, "%s/games/0100000000000000", T); struct stat gs;
       CHECK(stat(gone, &gs) != 0, "夹具：游戏目录应不在");
-      CHECK(s2a_pack_apply(gone) != 0, "游戏目录不在应判失败");
+      CHECK(s2a_pack_apply(gone) != 0, "游戏目录不在（资源包也不在）应判失败");
       const char *why = s2a_pack_apply_failure();
       CHECK(why && strstr(why, "index.tsv 打不开") && strstr(why, "返回 -8"), "目录不在：期望原因含「index.tsv 打不开」「返回 -8」→ 「%s」", why ? why : "(null)");
-      CHECK(why && strstr(why, "unpack.log 建不了") && strstr(why, "No such file"), "目录不在：期望原因注明 unpack.log 建不了（No such file）→ 「%s」", why ? why : "(null)");
+      CHECK(why && !strstr(why, "建不了"), "目录不在：日志应建得出来，原因不该再说建不了 → 「%s」", why ? why : "(null)");
+      snprintf(c, sizeof c, "tail -1 '%s/unpack.log' | grep -q '返回 -8'", gone); CHECK(sh(c) == 0, "目录不在：期望建出游戏目录、unpack.log 末行是「返回 -8」的失败行");
       CHECK(!strcmp(s2a_pack_apply_code(), "ios_install_files_missing"), "核对缺文件（返回 -8）给码 ios_install_files_missing（实际 %s）", s2a_pack_apply_code());
+      char blocked[1100]; snprintf(blocked, sizeof blocked, "%s/plainfile/games/0100000000000000", T); snprintf(c, sizeof c, ": > '%s/plainfile'", T);
+      CHECK(sh(c) == 0, "造挡路文件夹具失败");
+      CHECK(s2a_pack_apply(blocked) != 0, "文档根挡在普通文件下应判失败");
+      why = s2a_pack_apply_failure();
+      CHECK(why && strstr(why, "unpack.log 建不了") && strstr(why, "Not a directory"), "日志建不了：期望原因注明 unpack.log 建不了（Not a directory）→ 「%s」", why ? why : "(null)");
       char ok[1100]; snprintf(ok, sizeof ok, "%s/ok", T); snprintf(c, sizeof c, "mkdir -p %s/资源包 && printf '{\"index_sha256\":\"aa\"}' > %s/资源包/manifest.json && : > %s/资源包/index.tsv", ok, ok, ok);
       CHECK(sh(c) == 0, "造空包夹具失败");
       CHECK(s2a_pack_apply(ok) == 0, "空索引的包应解开");

@@ -3,6 +3,7 @@
 //     真结果 = 不带归约的采样器 + 着色器 s2a_rs（表项由 nvn_red_entry 填）。过滤组合含最近点 / 混合 / mip 近邻（11-01 起）
 //   任意边界色：期望 = CPU 按过滤定义手算（界内纹素加权 + 界外权重 × 自定义色）；真结果 = 着色器 s2a_bs（表里透明黑 / 不透明白两个采样器各采一次再混）
 // 用法：t_red_run <核 MSL> <位置文件>（k2 / ka / kb* 由 t_red.py 写：S2A.Dsh RED_HELP + 对拍核）。每个（采样器配置 × 贴图）一行 ✓ / ✗，退出 0 = 全过
+//   t_red_run --dc <原样核> <改写主体>：#529 定点深度比较参考值限制（见 dc_run）
 //   t_red_run --bias|--cmp <计算 MSL> <片元 MSL> <计算主体> <片元主体>：LOD 偏置对拍（#800；--cmp 是深度比较采样，缺口族 31），前两份是原样翻译（main0），后两份是 S2A.Dsh FsLb
 //   改写后的主体（偏置从参数块成员 s2a_lb 读；片元那几份另带 vs_main），见 bias_run
 #import <Metal/Metal.h>
@@ -165,7 +166,7 @@ static int bias_run(const char *csp, const char *fsp, const char *csl, const cha
     MTLTextureDescriptor *od = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float width:W height:W mipmapped:NO]; od.usage = MTLTextureUsageRenderTarget; od.storageMode = MTLStorageModeShared;
     id<MTLTexture> rt[NV][2]; for (int v = 0; v < NV; v++) for (int a = 0; a < 2; a++) rt[v][a] = [dev newTextureWithDescriptor:od];
     id<MTLBuffer> cout = [dev newBufferWithLength:NV * 2 * 16 options:MTLResourceStorageModeShared];
-    id<MTLBuffer> tz = [dev newBufferWithLength:64 options:MTLResourceStorageModeShared], tb = [dev newBufferWithLength:64 options:MTLResourceStorageModeShared];   // s2a_lb 表：零表 / 采样器成员 1、3、5 写 b
+    id<MTLBuffer> tz = [dev newBufferWithLength:1024 options:MTLResourceStorageModeShared], tb = [dev newBufferWithLength:1024 options:MTLResourceStorageModeShared];   // 1024：比较采样另读表后半段 [192 + id]（#529），表要覆盖到那里   // s2a_lb 表：零表 / 采样器成员 1、3、5 写 b
     id<MTLBuffer> cab[NV], fab[NV];
     for (int v = 0; v < NV; v++) { cab[v] = [dev newBufferWithLength:ace[v].encodedLength options:MTLResourceStorageModeShared]; fab[v] = [dev newBufferWithLength:afe[v].encodedLength options:MTLResourceStorageModeShared]; }
     static const float B[] = {0, 1, -0.5f, 1.25f, 2.5f, -1, 0.75f};
@@ -229,8 +230,46 @@ static int bias_run(const char *csp, const char *fsp, const char *csl, const cha
     return fail;
 }
 
+// ---- #529 定点深度比较：计算核读 depth2d（Depth32Float 8×8 一级，深度全 1.0）、采样器 LessEqual，sample_compare 参考值 1.1 与 0.5 各一次 → cs_s0[0].xy ----
+//   主体（fs_lb 改写过，参考值 = (s2a_lb[192 + 采样器 id] != 0 ? saturate(r) : (r))）跑两遍：表后半段写 0（浮点深度客体）/ 写 1（定点深度客体）；原样 main0 跑一遍。
+//   期望（手算，LessEqual：参考值 ≤ 深度 → 1）：标志 0 → (0, 1)；标志 1 → 1.1 限制成 1.0 → (1, 1)；原样 → (0, 1)（反证：Metal 的 Depth32Float 比较不会自己限制参考值）
+static int dc_run(const char *orig, const char *body) {
+    id<MTLDevice> dev = MTLCreateSystemDefaultDevice(); id<MTLCommandQueue> cq = [dev newCommandQueue]; NSError *e = nil; int lbid = -1, bad = 0;
+    id<MTLLibrary> lo = lib_of(dev, orig, "原样核", NULL), lb = lib_of(dev, body, "改写主体", &lbid);
+    if (!lo || !lb) return 1;
+    if (lbid < 0) { printf("✗ 改写主体里没有 s2a_lb 成员\n"); return 1; }
+    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:W height:W mipmapped:NO];
+    d.storageMode = MTLStorageModePrivate; d.usage = MTLTextureUsageShaderRead; id<MTLTexture> tx = [dev newTextureWithDescriptor:d];
+    id<MTLBuffer> up = [dev newBufferWithLength:W * W * 4 options:MTLResourceStorageModeShared]; for (int i = 0; i < W * W; i++) ((float *)up.contents)[i] = 1.0f;
+    { id<MTLCommandBuffer> cb = [cq commandBuffer]; id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
+      [be copyFromBuffer:up sourceOffset:0 sourceBytesPerRow:W * 4 sourceBytesPerImage:W * W * 4 sourceSize:MTLSizeMake(W, W, 1) toTexture:tx destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+      [be endEncoding]; [cb commit]; [cb waitUntilCompleted]; }
+    MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sd.compareFunction = MTLCompareFunctionLessEqual; sd.supportArgumentBuffers = YES; id<MTLSamplerState> ss = [dev newSamplerStateWithDescriptor:sd];
+    id<MTLBuffer> out = [dev newBufferWithLength:3 * 16 options:MTLResourceStorageModeShared], tab[2];
+    for (int f = 0; f < 2; f++) { tab[f] = [dev newBufferWithLength:1024 options:MTLResourceStorageModeShared]; memset(tab[f].contents, 0, 1024); ((float *)tab[f].contents)[192 + 1] = (float)f; }   // = nvn_mtl.m lb_fill：[LB_DC + 采样器成员 id]
+    id<MTLLibrary> ls[3] = {lb, lb, lo};
+    for (int r = 0; r < 3; r++) {
+        id<MTLFunction> fn = [ls[r] newFunctionWithName:@"main0"]; id<MTLComputePipelineState> ps = fn ? [dev newComputePipelineStateWithFunction:fn error:&e] : nil;
+        if (!ps) { printf("✗ 建管线失败（第 %d 路）：%s\n", r, e.localizedDescription.UTF8String); return 1; }
+        id<MTLArgumentEncoder> ae = [fn newArgumentEncoderWithBufferIndex:0]; id<MTLBuffer> ab = [dev newBufferWithLength:ae.encodedLength options:MTLResourceStorageModeShared];
+        [ae setArgumentBuffer:ab offset:0]; [ae setTexture:tx atIndex:0]; [ae setSamplerState:ss atIndex:1];
+        *(uint64_t *)[ae constantDataAtIndex:6] = out.gpuAddress + 16 * (uint64_t)r;
+        if (r < 2) *(uint64_t *)[ae constantDataAtIndex:(NSUInteger)lbid] = tab[r].gpuAddress;
+        id<MTLCommandBuffer> cb = [cq commandBuffer]; id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder]; [ce setComputePipelineState:ps]; [ce setBuffer:ab offset:0 atIndex:0];
+        [ce useResource:tx usage:MTLResourceUsageRead]; [ce useResource:out usage:MTLResourceUsageWrite]; if (r < 2) [ce useResource:tab[r] usage:MTLResourceUsageRead];
+        [ce dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)]; [ce endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        if (cb.error) { printf("✗ 命令缓冲出错（第 %d 路）：%s\n", r, cb.error.localizedDescription.UTF8String); return 1; }
+    }
+    const float *o = (const float *)out.contents; static const float want[3][2] = {{0, 1}, {1, 1}, {0, 1}};
+    static const char *nm[3] = {"改写主体 + 表标志 0（浮点深度客体）", "改写主体 + 表标志 1（定点深度客体）", "原样 main0（反证：Metal 不限制参考值）"};
+    for (int r = 0; r < 3; r++) { int ok = o[4 * r] == want[r][0] && o[4 * r + 1] == want[r][1]; bad |= !ok;
+        printf("%s 定点深度比较 %s：参考值 1.1 / 0.5 比深度 1.0（LessEqual）期望 %g / %g 实得 %g / %g\n", ok ? "✓" : "✗", nm[r], want[r][0], want[r][1], o[4 * r], o[4 * r + 1]); }
+    return bad;
+}
+
 int main(int argc, char **argv) { @autoreleasepool {
     if (argc == 6 && (!strcmp(argv[1], "--bias") || !strcmp(argv[1], "--cmp"))) return bias_run(argv[2], argv[3], argv[4], argv[5], !strcmp(argv[1], "--cmp"));
+    if (argc == 4 && !strcmp(argv[1], "--dc")) return dc_run(argv[2], argv[3]);   // #529
     if (argc < 3) { fprintf(stderr, "用法：t_red_run <核 MSL> <位置文件> | --bias|--cmp <计算 MSL> <片元 MSL> <计算主体> <片元主体>\n"); return 2; }
     if (@available(macOS 26.0, *)) {} else { printf("✗ t_red_run：要 macOS 26（原生 reductionMode / lodBias 属性）\n"); return 1; }
     id<MTLDevice> dev = MTLCreateSystemDefaultDevice(); id<MTLCommandQueue> cq = [dev newCommandQueue];

@@ -56,7 +56,8 @@ def seed(roots, game, source, *, move_romfs=False):
                     rename_dir(src, w / 'romfs'); moved = src
                     tick.step(sum(1 for e in plain_entries(w / 'romfs') if not e.is_dir()))
                 else:
-                    roots._copy_tree(src.resolve(), w / name, tick=tick.step)
+                    # RomFS 不可变：Windows NTFS 同卷建硬链接代替逐文件实拷（#291，copy_file link_ok）；别的目录（exefs 等产物要可写）照旧
+                    roots._copy_tree(src.resolve(), w / name, tick=tick.step, link_ok=name == 'romfs')
         remove_patterns(w, (*REWRITE_OUTPUTS, '.stage_uilayout', '.stage_romfsidx', '.stage_romfsidx.deps',
                             '.stage_pkg', 'ui_overlay.tsv', 'romfs.s2aidx', 'unpack.tsv'))
         extras = ['unpack.tsv', 'icon.jpg', 'ctl/control.nacp']

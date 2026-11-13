@@ -15,7 +15,7 @@
 # ④ 补丁点 0x118 改 ret → nop 但它同时是 x18 改写点？不用：另测「p 点原字不符」→ 缺口 cpatch、该点不改
 # ⑥ 每执行一条指令前往当前 sp 以下 256 字节灌乱码（模拟信号帧压在客体栈上）：两路结果与 x16 照旧——跳板先下移 sp 再存，存的在新 sp 之上
 # ⑤ 好行 / 坏行 / 远跳三份补丁表：输出目录的文件名与每个文件 SHA-256 = 金样（GOLD；10-31 由 Python 改写器与 C 改写器同产物时生成，两边逐字节相同、两次运行一致；
-#    有意改变改写产物时在提交里写明并更新金样）
+#    有意改变改写产物时在提交里写明并更新金样；坏行 11-13 随 0e53ad8b「缺口降级继续」更新，另直接核那条没写、原字保持）
 # ⑦ 补丁点搬进补丁区后跳转超 ±128 MB（往回跳 128 MB 的 b，近布局补丁区够不着）：10-30 起整轮按双补丁岛重做，前岛（基址前 1 MB）接住——
 #    退出码 0、无缺口、表头 PATCH2_OFF = −(FRONT 0x100000 + LOAD_BIAS 0x2000) = −0x102000（data 0x2000 与 text 末同在第一个 16 KB 页）（两岛都够不着的缺口 / brk 见 tests/rewrite_islands_test.sh）
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
@@ -88,7 +88,9 @@ E0 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'   # 空�
 GOLD = {
     '好': {'main.fixups.tsv': '45cd4e5c7a8b4ffe2720a069e7232f93adb8f2dac012a667566f5725e8675f94', 'main.gaps.tsv': 'fbba2a91f6dfe794d7c09a3149a98d0de87d3c8564b5520b3c27690d6f096c82',
            'main.gates.tsv': E0, 'main.patched.bin': 'e3af535b5bacd2d70eef43a3917631e54fd7bb1d89fa6d838019fed230d0a500', 'main.sites.tsv': E0},
-    '坏': {'main.gaps.tsv': '51953caa18ffa10b638e63c8fc5a17422f0c6bc032a24f095a14fe986115bc2b'},
+    # 坏行：0e53ad8b（v0.3.1 改写缺口降级继续）起缺口不再中止改写，照常出全部产物、这条不写（原先只出 gaps.tsv）；gaps.tsv 与旧金样相同
+    '坏': {'main.fixups.tsv': '45cd4e5c7a8b4ffe2720a069e7232f93adb8f2dac012a667566f5725e8675f94', 'main.gaps.tsv': '51953caa18ffa10b638e63c8fc5a17422f0c6bc032a24f095a14fe986115bc2b',
+           'main.gates.tsv': E0, 'main.patched.bin': '4e3a095bc6f3da55170146a5eb749df6ca51a2bddd69429dac136427a24a7624', 'main.sites.tsv': E0},
     '远': {'main.fixups.tsv': 'a00d579c6414a0bf3d3c3090a3abf2ae169361988a3828eb92c2569a0f03c558', 'main.gaps.tsv': 'fbba2a91f6dfe794d7c09a3149a98d0de87d3c8564b5520b3c27690d6f096c82',
            'main.gates.tsv': E0, 'main.patched.bin': 'e5c369ea4733d7045a988720b247f64e346164b2e53d7f3cd9f8479e0a5a3f6a', 'main.sites.tsv': E0},
 }
@@ -99,6 +101,9 @@ for tag, rows_ in (('好', rows), ('坏', [('p', 0x108, 0xDEADBEEF, 0, 5)]), ('�
     if tag == '远':
         p2 = next((l.split('\t')[1].strip() for l in open(out + '/main.fixups.tsv') if l.startswith('# PATCH2_OFF\t')), None) if os.path.exists(out + '/main.fixups.tsv') else None
         ck(f'⑦ 远跳补丁由前岛接住：退出码 0、无缺口、PATCH2_OFF −0x102000（实得 {rc_} {p2}）', rc_ == 0 and 'cpatch' not in g_ and p2 == '-0x102000')
+    if tag == '坏':   # 降级继续的语义：原字不符的这条不写，0x108 仍是原字（金样之外直接核，金样变了也能看出是不是写坏了）
+        w108 = struct.unpack_from('<I', open(out + '/main.patched.bin', 'rb').read(), 0x108)[0]
+        ck(f'⑤ 坏行退出码 3、缺口记 0x108、0x108 保持原字 {words[0x108]:#x}（实得 {rc_} {w108:#x}）', rc_ == 3 and 'cpatch' in g_ and w108 == words[0x108])
     got = {n: hashlib.sha256(open(f'{out}/{n}', 'rb').read()).hexdigest() for n in sorted(os.listdir(out))}
     diff = sorted(n for n in set(got) | set(GOLD[tag]) if got.get(n) != GOLD[tag].get(n))
     ck(f'⑤ {tag}行输出 {len(got)} 个文件 SHA-256 = 金样（不同 {diff}）', not diff)

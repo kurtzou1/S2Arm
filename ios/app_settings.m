@@ -10,7 +10,7 @@ int s2a_fps_cap_reason(void) __attribute__((weak_import));
 #include "s2a_direct_prompt.h"   // 「切换游戏」文案（与 launchers/shared/experience.v1.json prompts 逐字一致；按 App 语言只显示一种，S2APICK）
 #include <math.h>
 
-void s2a_diag_export(void);
+void s2a_diag_upload(void);
 // 弱链接[lab]：s2a_console_mode_set（runtime/src/os.c 接口 v2.15 提供；输入工作台不链原生核，取不到就不切）
 void s2a_console_mode_set(int docked) __attribute__((weak_import));
 BOOL s2a_diag_is_exporting(void);
@@ -323,7 +323,7 @@ static UILabel *textLabel(UIFontTextStyle style) {
         cell.userInteractionEnabled = s2a_vpad_has_layouts(); if (!cell.userInteractionEnabled) cell.textLabel.textColor = UIColor.secondaryLabelColor;
         return cell;
     }
-    if (group == 2 && row == 0) { UITableViewCell *cell = [self baseCell:S2AL(@"diag.export")]; cell.textLabel.textColor = self.view.tintColor; cell.accessibilityIdentifier = @"settings.export"; return cell; }
+    if (group == 2 && row == 0) { UITableViewCell *cell = [self baseCell:S2AL(@"diag.upload")]; cell.textLabel.textColor = self.view.tintColor; cell.accessibilityIdentifier = @"settings.export"; return cell; }
     if (group == 2 && row == 2) return [self toggleCell:8];
     if (group == 2 && row == 3) return [self toggleCell:10];
     return [self toggleCell:group == 1 ? row - 1 : group == 2 ? 3 : row + 4];
@@ -341,7 +341,7 @@ static UILabel *textLabel(UIFontTextStyle style) {
             layouts.navigationItem.rightBarButtonItem = self.navigationItem.rightBarButtonItem;
             [self.navigationController pushViewController:layouts animated:YES];
         }
-    } else if (group == 2 && row == 0) s2a_diag_export();
+    } else if (group == 2 && row == 0) s2a_diag_upload();
     else if (group == 4 && row == 0) _runtime.manageSaves(self.navigationController.topViewController);
     else if (group == 5 && row == 0 && _runtime.switchGame) _runtime.switchGame(self.navigationController.topViewController);
 }

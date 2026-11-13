@@ -53,6 +53,7 @@ int nvn_vk_program_graphics_stage_index(const char *name) {
     return -1;
 }
 
+static int compute_unique_fields(struct s2a_jv object);
 static int parse_graphics(const uint8_t *bytes, size_t length, struct fd_program *out, int allow_vs_only, char *why, size_t why_size);
 int nvn_vk_program_parse_graphics(const uint8_t *bytes, size_t length, struct fd_program *out, char *why, size_t why_size) {
     return parse_graphics(bytes, length, out, 0, why, why_size);
@@ -66,11 +67,19 @@ static int parse_graphics(const uint8_t *bytes, size_t length, struct fd_program
     struct s2a_jv schema;
     if (s2a_jv_obj_find(top, "schema", &schema)) return fail(why, why_size, "result has no schema");
     char schema_text[32];
-    if (s2a_jv_str(schema, schema_text, sizeof schema_text) || strcmp(schema_text, "s2a-direct-program-v1"))
-        return fail(why, why_size, "not a s2a-direct-program-v1 result");
+    if (compute_unique_fields(top) || s2a_jv_str(schema, schema_text, sizeof schema_text))
+        return fail(why, why_size, "invalid result schema");
+    int v2 = !strcmp(schema_text, "s2a-direct-program-v2");
+    if (!v2 && strcmp(schema_text, "s2a-direct-program-v1"))
+        return fail(why, why_size, "unknown result schema");
     struct s2a_jv content;
-    if (s2a_jv_obj_find(top, "content", &content) || !s2a_jv_is_object(content))
-        return fail(why, why_size, "result has no content object");
+    if (s2a_jv_obj_find(top, "content", &content) || compute_unique_fields(content))
+        return fail(why, why_size, "result content invalid or duplicate");
+    if (v2) {
+        struct s2a_jv contract; char text[40];
+        if (s2a_jv_obj_find(content, "contract", &contract) || s2a_jv_str(contract, text, sizeof text) ||
+            strcmp(text, "s2a-direct-program-content-v2")) return fail(why, why_size, "v2 content contract mismatch");
+    }
 
     struct s2a_jv stages;
     if (s2a_jv_obj_find(content, "stages", &stages) || !s2a_jv_is_array(stages))
@@ -79,13 +88,14 @@ static int parse_graphics(const uint8_t *bytes, size_t length, struct fd_program
     if (count <= 0 || count > FD_MAX_STAGES) return fail(why, why_size, "result stage count outside 1..2");
     for (int i = 0; i < count; i++) {
         struct s2a_jv st;
-        if (s2a_jv_arr_item(stages, i, &st)) return fail(why, why_size, "stage element span failed");
+        if (s2a_jv_arr_item(stages, i, &st) || compute_unique_fields(st)) return fail(why, why_size, "stage fields invalid or duplicate");
         struct s2a_jv name, spirv;
         char name_text[8];
         if (s2a_jv_obj_find(st, "stage", &name) || s2a_jv_str(name, name_text, sizeof name_text))
             return fail(why, why_size, "stage has no name");
         int idx = nvn_vk_program_graphics_stage_index(name_text);
         if (idx < 0) return fail(why, why_size, "stage name is not a supported NVN stage");
+        if (out->stage[idx].present) return fail(why, why_size, "duplicate result stage");
         if (s2a_jv_obj_find(st, "spirv", &spirv) || !s2a_jv_is_string(spirv))
             return fail(why, why_size, "stage has no spirv");
         uint8_t *words = NULL; size_t word_bytes = 0;
@@ -114,22 +124,22 @@ static int parse_graphics(const uint8_t *bytes, size_t length, struct fd_program
         int n = s2a_jv_arr_count(bindings);
         for (int i = 0; i < n; i++) {
             struct s2a_jv b;
-            if (s2a_jv_arr_item(bindings, i, &b)) return fail(why, why_size, "binding element span failed");
+            if (s2a_jv_arr_item(bindings, i, &b) || compute_unique_fields(b)) return fail(why, why_size, "binding fields invalid or duplicate");
             // 所有跨度先初始化：查找失败时绝不读未初始化的 p/n（旧代码对 "slot" 忽略了 s2a_jv_obj_find
             // 的结果，没 slot 的 support binding 会拿栈垃圾当跨度，是可疑的 SIGSEGV 来源）。
             struct s2a_jv kind = { NULL, 0 }, stage = { NULL, 0 }, set = { NULL, 0 }, binding = { NULL, 0 },
                       slot = { NULL, 0 };
             char kind_text[16], stage_text[8];
-            if (s2a_jv_obj_find(b, "kind", &kind) || s2a_jv_str(kind, kind_text, sizeof kind_text)) continue;
+            if (s2a_jv_obj_find(b, "kind", &kind) || s2a_jv_str(kind, kind_text, sizeof kind_text)) return fail(why, why_size, "binding kind missing");
             uint32_t set_v = 0, binding_v = 0, slot_v = 0;
-            if (s2a_jv_obj_find(b, "set", &set) || s2a_jv_u32(set, &set_v)) return fail(why, why_size, "binding without set");
-            if (s2a_jv_obj_find(b, "binding", &binding) || s2a_jv_u32(binding, &binding_v))
+            if (s2a_jv_obj_find(b, "set", &set) || s2a_jv_u32(set, &set_v) || set_v > 3) return fail(why, why_size, "binding set outside 0..3");
+            if (s2a_jv_obj_find(b, "binding", &binding) || s2a_jv_u32(binding, &binding_v) || binding_v > UINT16_MAX)
                 return fail(why, why_size, "binding without binding");
             // slot 可以合法省略（support/storage 等没有 guest 槽位）；省略是“没有”，不是槽 0。
             // 写了但不是无符号整数则明确拒绝，不静默当省略。
             int has_slot = 0;
             if (!s2a_jv_obj_find(b, "slot", &slot)) {
-                if (s2a_jv_u32(slot, &slot_v)) return fail(why, why_size, "binding slot is not an unsigned integer");
+                if (s2a_jv_u32(slot, &slot_v) || slot_v > INT32_MAX) return fail(why, why_size, "binding slot is not an unsigned integer");
                 has_slot = 1;
             }
             if (out->binding_count >= FD_MAX_BINDINGS) {
@@ -138,12 +148,12 @@ static int parse_graphics(const uint8_t *bytes, size_t length, struct fd_program
                 // 少绑一个资源（错阴影 / 缺贴图），没有红行，是这类问题里最难查的一种。
                 // 守卫必须放在取 dst 之前——`dst = &out->bindings[count]` 在 count==cap 时已经越界，
                 // 紧随其后的 memset 会改写结构体里 binding_count 本身（复现过：17 条 → count 变 1）。
-                // FD_MAX_BINDINGS 现在是 producer 合同上限（support 1 + vs/fs 各 18+16+64+16 = 229）：
+                // FD_MAX_BINDINGS 现在是 producer 合同上限（support 1 + vs/fs/gs 各 18+16+64+16 = 343）：
                 // 越过它就是结果损坏/合同被违反，不是“再把数组调大”能掩盖的事。
                 char msg[224];
                 snprintf(msg, sizeof msg,
                          "program declares %d bindings, cap is %d: refusing to drop bindings "
-                         "(cap is the contract maximum: support 1 + 2x(18+16+64+16); more means a corrupt result)",
+                         "(cap is the contract maximum: support 1 + 3x(18+16+64+16); more means a corrupt result)",
                          n, FD_MAX_BINDINGS);
                 return fail(why, why_size, msg);
             }
@@ -156,7 +166,10 @@ static int parse_graphics(const uint8_t *bytes, size_t length, struct fd_program
             else if (!strcmp(kind_text, "storage")) dst->kind = 1;
             else if (!strcmp(kind_text, "texture")) dst->kind = 2;
             else if (!strcmp(kind_text, "image")) dst->kind = 3;
-            else continue;
+            else return fail(why, why_size, "unknown binding kind");
+            for (int j = 0; j < out->binding_count; ++j)
+                if (out->bindings[j].set == dst->set && out->bindings[j].binding == dst->binding)
+                    return fail(why, why_size, "duplicate descriptor binding");
             if (!s2a_jv_obj_find(b, "stage", &stage) && !s2a_jv_str(stage, stage_text, sizeof stage_text))
                 snprintf(dst->stage, sizeof dst->stage, "%s", stage_text);
             dst->count = 1;
@@ -173,12 +186,19 @@ static int parse_graphics(const uint8_t *bytes, size_t length, struct fd_program
             dst->stage_idx = (int8_t)nvn_vk_program_graphics_stage_index(dst->stage);
             dst->is_support = (uint8_t)(dst->kind == 0 && !strcmp(dst->stage, "program"));
             dst->ubo_slot = (int16_t)(dst->slot >= 3 ? dst->slot - 3 : 0);
-            dst->tex_slot = -1;
-            if (dst->kind == 2 && dst->slot >= 0) {
-                int byte_off = dst->slot * 4;
-                if (byte_off >= 0x20 && byte_off < 0x120) dst->tex_slot = (int8_t)((byte_off - 0x20) / 8);
-                else if (byte_off >= 0x168 && byte_off < 0x568) dst->tex_slot = (int8_t)(128 + (byte_off - 0x168) / 8);
-                if (dst->tex_slot >= 32) dst->tex_slot = -1;
+            dst->tex_slot = -1; dst->samp_slot = -1;
+            struct s2a_jv samp = { NULL, 0 }; uint32_t samp_v = 0;
+            int has_samp = !s2a_jv_obj_find(b, "samp_slot", &samp);
+            if (has_samp) {
+                if (!v2 || dst->kind != 2 || s2a_jv_u32(samp, &samp_v) || samp_v >= 128 ||
+                    dst->count != 1 || dst->slot < 90 || dst->slot >= 346 || (dst->slot & 1))
+                    return fail(why, why_size, "invalid separate sampler source");
+                dst->tex_slot = (int16_t)(128 + (dst->slot - 90) / 2);
+                dst->samp_slot = (int16_t)samp_v;
+            } else if (dst->kind == 2 && dst->slot >= 8 && dst->slot < 72 && !(dst->slot & 1)) {
+                dst->tex_slot = (int16_t)((dst->slot - 8) / 2);
+            } else if (v2 && dst->kind == 2 && !(dst->count > 1 && dst->slot == 0)) {
+                return fail(why, why_size, "invalid texture source");
             }
             if (dst->kind == 1) {
                 // Storage buffer address provenance. These fields are optional for
@@ -362,9 +382,10 @@ int nvn_vk_program_parse_compute(const uint8_t *bytes, size_t length,
     if (rc) return -1;
     struct s2a_jv top = {(const char *)bytes, length}, content, stages, st, spirv, bindings, support;
 #define CS_FAIL(text) do { nvn_vk_program_free_compute(out); return fail(why, why_size, text); } while (0)
-    if (!compute_string_is(top, "schema", "s2a-direct-program-v1")) CS_FAIL("compute result schema mismatch");
+    int v2 = compute_string_is(top, "schema", "s2a-direct-program-v2");
+    if (!v2 && !compute_string_is(top, "schema", "s2a-direct-program-v1")) CS_FAIL("compute result schema mismatch");
     if (s2a_jv_obj_find(top, "content", &content) || compute_unique_fields(content)) CS_FAIL("compute content fields invalid");
-    if (!compute_string_is(content, "contract", "s2a-direct-program-content-v1") ||
+    if (!compute_string_is(content, "contract", v2 ? "s2a-direct-program-content-v2" : "s2a-direct-program-content-v1") ||
         !compute_string_is(content, "kind", "compute")) CS_FAIL("result is not compute content");
     struct s2a_jv alignment;
     if (s2a_jv_obj_find(content, "hasUnalignedStorageBuffer", &alignment)) CS_FAIL("compute storage alignment fact missing");
@@ -467,7 +488,15 @@ int nvn_vk_program_parse_compute(const uint8_t *bytes, size_t length,
             CS_FAIL(message);
         }
         dst->ubo_slot = -1;
-        dst->tex_slot = -1;
+        dst->tex_slot = -1; dst->samp_slot = -1;
+        struct s2a_jv samp;
+        int has_samp = !s2a_jv_obj_find(b, "samp_slot", &samp);
+        if (has_samp) {
+            uint32_t sv;
+            if (!v2 || dst->kind != 2 || compute_u32(samp, &sv) || sv >= 128 ||
+                dst->slot < 90 || dst->slot >= 346 || (dst->slot & 1)) CS_FAIL("compute separate sampler source invalid");
+            dst->samp_slot = (int16_t)sv;
+        }
         if (dst->kind == 0 && !dst->is_support) {
             // NVN cbuf 语义（与图形侧 nvn_vk_first_draw.c 同一套）：0 = c0/support、1 = c1 常量段、
             // 2 = 纹理句柄表（还没实现）、3..18 = 用户 uniform（NVN 槽 = cbuf−3）。
@@ -491,8 +520,11 @@ int nvn_vk_program_parse_compute(const uint8_t *bytes, size_t length,
         if (dst->kind == 1 && (dst->slot != -1 || compute_storage(b, &out->storage[i])))
             CS_FAIL("compute storage source mapping is unknown or inconsistent");
         if (dst->kind == 2) {
-            if (dst->slot < 8 || dst->slot >= 72 || (dst->slot & 1)) CS_FAIL("compute texture slot outside recorded range");
-            dst->tex_slot = (int8_t)((dst->slot - 8) / 2);
+            if (has_samp) dst->tex_slot = (int16_t)(128 + (dst->slot - 90) / 2);
+            else {
+                if (dst->slot < 8 || dst->slot >= 72 || (dst->slot & 1)) CS_FAIL("compute texture slot outside recorded range");
+                dst->tex_slot = (int16_t)((dst->slot - 8) / 2);
+            }
         }
         out->binding_count++;
     }

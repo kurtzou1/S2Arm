@@ -1,8 +1,8 @@
 # 共享 Linux Vulkan 测试环境
 
 `tests/shader_cases_test.sh` 与 `android/tests/vk/run.sh` 共用这一份镜像。
-Linux 仍直接使用本机工具；macOS 两入口都通过已运行的 Docker `colima` context
-进入同一环境。不安装、不启动虚拟机，不在门禁里下载、构建或拉镜像。
+Linux 仍直接使用本机工具（`android/tests/vk/run.sh` 缺原生工具时同 macOS 进容器，见下）；
+macOS 两入口都通过已运行的 Docker `colima` context 进入同一环境。不安装、不启动虚拟机，不在门禁里下载、构建或拉镜像。
 
 ## 显式准备（联网，门禁之外）
 
@@ -36,6 +36,14 @@ bash android/tests/vk/run.sh
 bash tests/vulkan/run.sh tests/shader_cases_test.sh
 bash tests/vulkan/run.sh android/tests/vk/run.sh
 ```
+
+`android/tests/vk/run.sh` 默认档先在**宿主**上跑真编译器链（`android/tests/gs_compiler_chain_test.py`，产物
+`build/696-real-compiler`），再跑后端用例。链的前置条件：`dotnet`（.NET 10 SDK）在 PATH 上；固定的
+NDK 29.0.14206865（设 `ANDROID_NDK_HOME`，或放在 `$ANDROID_HOME/ndk/`、`~/Android/Sdk/ndk/` 下，其他版本不认）；
+首次要联网还原 NuGet 包。容器是离线的，链在容器里跑不了：macOS 每次先在宿主出链再进容器；Linux 宿主缺原生
+lavapipe / validation / glslc 时同 macOS，宿主出链后自动进容器（容器也没准备好才退出码 2）；直接运行
+`bash tests/vulkan/run.sh android/tests/vk/run.sh` 而 `build/696-real-compiler` 不在时，容器内明报缺什么并返回 2，
+先在宿主出链即可。
 
 容器采用 `--pull=never --network=none`、宿主 UID/GID，只挂载本仓库，不传
 Docker socket、不用 privileged、不读取用户登录配置。linked worktree 的 HEAD 由宿主 git 读取并作为专用标量传入，manifest 注明该来源；不挂仓外 gitdir，仍逐文件散列测试源码。临时 HOME 和缓存留在

@@ -20,7 +20,7 @@ args=(--rm --user "$(id -u):$(id -g)"
     --env "S2ARM_ANDROID_CS_SERVICES=${S2ARM_ANDROID_CS_SERVICES:-0}"
     --env "S2ARM_ANDROID_GAME_DIR=${S2ARM_ANDROID_GAME_DIR:-}"   # per-game APK: tools/game_apk.py output, repo-relative
     --env "S2ARM_ANDROID_VK_ENGINE=${S2ARM_ANDROID_VK_ENGINE:-0}"
-    --env "S2ARM_ANDROID_VK_BACKEND=${S2ARM_ANDROID_VK_BACKEND:-nvn_vk}"
+    --env "S2ARM_ANDROID_VK_BACKEND=${S2ARM_ANDROID_VK_BACKEND:-nvk}"
     --workdir /src/android --entrypoint bash)
 if [ "${1:-}" = --direct-identity ]; then   # 只出 build/android-direct/identity.json（安卓出包器用）
     # shellcheck disable=SC2016

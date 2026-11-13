@@ -672,6 +672,15 @@ class GameImgResume(Base):
         self.dev = Fake({}); push.plan(self.dev, self.pk, self.w, full=True, say=self.log.append)
         self.assertEqual((self.w / "direct_img.tsv").read_text().split("\t")[0], "game.img")
 
+    def test_v3_applied_on_phone_pushes_nothing(self):   # 11-13：机上已解开同一个 v3 包（manifest v3、index.applied.tsv 全对、.applied 非空）→ 一个文件都不推（原先只信 v2 的已应用索引，整批重推）
+        (self.pk / "manifest.json").write_text('{"version": 3, "format": "img", "imgFile": "game.img", "index_sha256": "x"}')
+        rows = (self.pk / "index.tsv").read_text()
+        files = {f"{RP}/manifest.json": '{"version": 3, "format": "img"}', f"{RP}/index.applied.tsv": rows, f"{RP}/.applied": "x"}
+        files.update({f"{RP}/{l.split(chr(9))[0]}": (self.pk / l.split(chr(9))[0]).read_bytes() for l in rows.splitlines()})
+        self.dev = Fake(files)
+        self.assertEqual(push.plan(self.dev, self.pk, self.w, say=self.log.append), (0, 0, 0))
+        self.assertEqual((self.w / "direct_img.tsv").read_text(), "")
+
     def test_full_write_checks_length_on_phone(self):   # 整份写完也核机上总长（11-11「传完并校验即成功」）：短一个字节不记账、说清长度
         dev = self.device()
         def short_write(src, rel): dev.big.append(rel); dev.files[rel] = Path(src).read_bytes()[:-1]
@@ -815,16 +824,64 @@ class SendProgress(Base):
 
 
 class LockedProbe(Base):
-    """#333：推之前先写几字节探针；写不进（锁屏 / 断开）立刻报 DeviceLocked（code device_locked），不核账、不推一个文件"""
-    def test_locked_phone_stops_before_any_push(self):
-        dev = Fake(self.on_phone("a"))
-        def put(src, rel): raise push.Fail("写不进")
+    """#333：推之前先写几字节探针；写不进就停，不核账、不推一个文件。
+    11-13：写不进不等于锁屏——手机说锁着（lock_state True）才报 DeviceLocked；没锁 / 判不了先隔一会儿重写一次，
+    还不行报连接问题（普通 Fail，带原文），判不了锁屏状态时报错原文带锁屏字样才认锁屏"""
+    def failing(self, fails, lock=None, text="Operation timed out; abandoned"):   # 前 fails 次写探针失败（原文 text）；lock_state 回 lock
+        dev = Fake(self.on_phone("a")); n = [0]; real = dev.put
+        def put(src, rel):
+            if rel.endswith(push.PROBE):
+                n[0] += 1
+                if n[0] <= fails: raise push.Fail(f"资源包写进 iPhone 时中断（{text}）")
+            real(src, rel)
         dev.put = put
+        if lock is not None: dev.lock_state = lambda: lock
+        dev.writes = n   # 写探针的次数
+        return dev
+
+    def run_probe(self, dev):
+        with mock.patch.object(push.time, "sleep"):
+            return push.run(dev, self.pk, self.w, False, say=self.log.append)
+
+    def test_locked_phone_stops_before_any_push(self):
+        dev = self.failing(9, lock=True)
         dev.put_tar = lambda *a: self.fail("锁屏时不该推资源")
         with self.assertRaises(push.DeviceLocked) as e:
-            push.run(dev, self.pk, self.w, False, say=self.log.append)
+            self.run_probe(dev)
         self.assertEqual(e.exception.code, "device_locked")
         self.assertIn("锁屏", str(e.exception))
+        self.assertEqual(dev.writes[0], 1)   # 手机说锁着：不再白写第二次
+
+    def test_unlocked_transient_stall_retries_and_pushes(self):   # 11-13 实测形态：没锁，写探针挂一次 → 再写一次成了，照推
+        dev = self.failing(1, lock=False)
+        self.run_probe(dev)
+        self.assertEqual(dev.writes[0], 2)
+        self.assertIn(f"{RP}/index.tsv", dev.files)
+
+    def test_unlocked_persistent_failure_is_connection_not_locked(self):
+        dev = self.failing(9, lock=False)
+        dev.put_tar = lambda *a: self.fail("写不进时不该推资源")
+        with self.assertRaises(push.Fail) as e:
+            self.run_probe(dev)
+        self.assertNotIsInstance(e.exception, push.DeviceLocked)
+        self.assertIsNone(getattr(e.exception, "code", None))
+        self.assertIn("Operation timed out", str(e.exception))
+        self.assertIn("没有锁屏", str(e.exception))
+        self.assertNotIn("锁屏了", str(e.exception))
+
+    def test_unknown_lock_state_uses_error_text(self):   # Windows / 判不了：原文带锁屏字样才认锁屏
+        with self.assertRaises(push.DeviceLocked):
+            self.run_probe(self.failing(9, text="unexpected response from device: XPC response missing CoreDevice.output"))
+        with self.assertRaises(push.Fail) as e:
+            self.run_probe(self.failing(9, text="AFC 连接被重置"))
+        self.assertNotIsInstance(e.exception, push.DeviceLocked)
+        self.assertIn("AFC 连接被重置", str(e.exception))
+
+    def test_retry_prefers_stream_channel(self):   # Mac：devicectl 写挂了，第二次走推包本身用的 s2a-devpush 通道
+        dev = self.failing(9, lock=False); side = Fake({})
+        dev.dp = side
+        self.run_probe(dev)
+        self.assertEqual(side.puts, [f"{RP}/{push.PROBE}"])
 
     def test_probe_goes_into_the_pack_folder_and_push_continues(self):
         self.go({})

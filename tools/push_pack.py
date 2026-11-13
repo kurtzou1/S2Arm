@@ -371,6 +371,15 @@ class Devicectl:
         rc, out = self.dcp(120, "device", "process", "launch", "--device", self.device, "--terminate-existing", *envs, self.bid)
         if rc: raise Fail(f"起 App 失败：{launch_reason(out, rc)}")
 
+    def lock_state(self):   # 手机此刻锁着没有（devicectl device info lockState：passcodeRequired）→ True / False；问不到 None
+        js = self.work / "lockstate.json"; js.unlink(missing_ok=True)
+        rc, _ = self.dcp(30, "device", "info", "lockState", "--device", self.device, "--json-output", js)
+        try:
+            v = json.loads(js.read_text())["result"]["passcodeRequired"] if rc == 0 else None
+        except (OSError, ValueError, KeyError, TypeError):
+            v = None
+        return v if isinstance(v, bool) else None
+
     def nospc(self):   # 刚失败的那次拷贝是不是空间满（cp.log 末尾有 POSIX 28）
         try:
             tail = (self.work / "cp.log").read_text(errors="replace").splitlines()[-40:]
@@ -451,7 +460,8 @@ def plan(dev, pack, work, full=False, say=print):
         if cut and not bad: say(f"上次收推送撞到截短包（{(unpack or '').strip().splitlines()[-1][:60]}…）：不信 .pushed，按已应用索引补推")
         idx = None
         mf = read(dev, f"{rp(dev)}/manifest.json", work, "r.manifest")
-        if jver(mf) == 2 or (mf is not None and not mf.strip()):   # 空清单 = v2 推送开头置空、没推完（send），已应用索引照信，只补推缺的（不整包重推）
+        # v3（单一 IMG）机上同样有 index.applied.tsv：原先只认 v2，IMG 款每次装机都把镜像外的文件整批重推、game.img 再核一遍、App 再解一次包（11-13 实测：同一个包第二次装仍推 37 个文件）
+        if jver(mf) in (2, 3) or (mf is not None and not mf.strip()):   # 空清单 = 推送开头置空、没推完（send），已应用索引照信，只补推缺的（不整包重推）
             idx = read(dev, f"{rp(dev)}/index.applied.tsv", work, "r.index")
             if not idx and not cut: idx = read(dev, f"{rp(dev)}/index.tsv", work, "r.index")
         have = rows(idx, 3)
@@ -756,14 +766,34 @@ def apply(dev, pack, work, nb, say=print, sleep=time.sleep, now=time.time, stall
 PROBE = ".s2a-write-probe"   # 推之前写的几字节探针（资源包目录下，下次覆盖）
 
 
-def probe(dev, work):
-    """推之前先往机上写一个几字节的文件：锁屏 / 断开时这里就写不进，立刻停（原先要等核账、推到几分钟后才失败，前面推的全作废，#333）"""
+LOCKED_MSG = "iPhone 写不进资源包：手机锁屏了。解锁手机、保持亮屏，再点一次。"
+
+
+def probe(dev, work, sleep=None):
+    """推之前先往机上写一个几字节的文件：断开时这里就写不进，立刻停（原先要等核账、推到几分钟后才失败，前面推的全作废，#333）。
+    写不进不等于锁屏（11-13 测试设备实测：手机亮着、没锁，devicectl 写这几字节连挂两次超时，被报成锁屏；随后同一路径 1 秒写成；
+    11-09 实测锁屏时写文件照样成功）。所以：先问手机是不是真锁着（Mac devicectl lockState）→ 锁着才报锁屏 device_locked；
+    没锁 / 判不了 → 隔 2 秒再写一次（优先走推包本身用的 s2a-devpush 通道）→ 还不行按原文报连接问题，不冒充锁屏"""
     src = Path(work) / PROBE
     src.write_bytes(b"ok\n")
+    rel = f"{rp(dev)}/{PROBE}"
     try:
-        dev.put(str(src), f"{rp(dev)}/{PROBE}")
+        return dev.put(str(src), rel)
     except Fail as e:
-        raise DeviceLocked("iPhone 写不进资源包：多半是手机锁屏了或数据线松了。解锁手机、保持亮屏，插稳数据线后再点一次。") from e
+        first = e
+    locked = getattr(dev, "lock_state", lambda: None)()   # True 锁着 / False 没锁 / None 判不了（Windows、假设备）
+    if locked:
+        raise DeviceLocked(LOCKED_MSG) from first
+    (sleep or time.sleep)(2)
+    try:
+        return (getattr(dev, "dp", None) or dev).put(str(src), rel)
+    except Fail as e:
+        second = e
+    why = str(second).splitlines()[-1][:200] if str(second) else type(second).__name__
+    if locked is None and any(k in str(first) + str(second) for k in LOCKED_SIGNS):   # 判不了锁屏状态时按报错原文认
+        raise DeviceLocked(LOCKED_MSG) from second
+    raise Fail(f"iPhone 写不进资源包（{why}）。" + ("手机没有锁屏，是电脑和手机的连接出了问题：" if locked is False else "")
+               + "拔下数据线重新插好（无线连接的换成数据线），保持手机亮屏，再点一次。") from second
 
 
 def run(dev, pack, work, full=False, say=print, env=None, on_plan=None, progress=None, stage=None, accept_low_space=False):

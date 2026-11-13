@@ -34,10 +34,6 @@ enum { S2A_INIT_FAIL_EXIT = 1, S2A_INIT_FAIL_PAGE = 2 };
 #define S2A_INIT_FAIL_MSG_FILES_EN "Game files are missing. Import them again: in S2Arm on your computer, choose \"Install on iPhone\" for this game again."
 #define S2A_INIT_FAIL_MSG_DEVICE  "这台设备的内存和地址空间不够运行这款游戏，换一台内存更大的 iPhone / iPad 再试；诊断里有它要多少、这台设备有多少。"
 #define S2A_INIT_FAIL_MSG_DEVICE_EN "This device doesn't have enough memory and address space to run this game. Try an iPhone or iPad with more memory; the diagnostics show how much it needs and how much this device has."
-#define S2A_INIT_FAIL_COPY        "复制诊断"
-#define S2A_INIT_FAIL_COPY_EN     "Copy diagnostics"
-#define S2A_INIT_FAIL_COPIED      "已复制"
-#define S2A_INIT_FAIL_COPIED_EN   "Copied"
 // 错误码：由失败出口显式指定（host_main.c failed_session 的调用点一处一个），不从摘要文本猜。
 //   X(枚举名, 码 id, 内部摘要（只进诊断）, 玩家话术宏)；码 id 与话术归类同样登记在 experience.v1.json 的 init_fail_page.codes。
 //   码表外的值按 S2A_INIT_FAIL_E_UNKNOWN（码 id unknown、通用句）处理

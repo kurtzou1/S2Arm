@@ -1,9 +1,10 @@
 #!/bin/bash
-# 门禁手动：要联网：把截图发本机 claude CLI（缺省）/ OpenRouter 视觉模型，开发期自动玩家用
+# 门禁手动：要联网：把截图发中转站（缺省）/ 本机 claude CLI / OpenRouter 视觉模型，开发期自动玩家用
 # 视觉驾驶员（只在 Mac 开发测试里用，产品包不带）：bash tests/autoplay/vision.sh <截图.png> <回答.json>
-# 后端 S2A_VISION_BACKEND：cli（缺省：本机 claude CLI 直连，用这台机器上 CLI 自己的登录）/ or（vision_or.py，OpenRouter，要仓库外钥匙）/ jev（先问 vision_jev.py，不够再问 cli）。
-#   11-12 起不再有中转站档（中转站已停用：原缺省档每问 0.3 秒就退出 1、自动玩家判「驾驶员连续 3 次没给出回答」，所有要走进游戏场景的复现都卡住，#788）。
-#   后端不可用（本机没有 claude CLI / CLI 没登录 / OpenRouter 没钥匙或额度用完）= 打【红】、答案 JSON 带 "unavailable":true 与原因、退出 3：
+# 后端 S2A_VISION_BACKEND：不设 = 自动选（有中转站钥匙和地址走 relay，没有走 cli）/ relay（中转站，11-13 维护者：自动玩家一律走中转站；vision_or.py，钥匙 ~/.s2arm/.secrets/relay.key、地址 S2A_VISION_RELAY_URL 或 ~/.s2arm/.secrets/relay.url）
+#   / cli（本机 claude CLI 直连，用这台机器上 CLI 自己的登录）/ or（vision_or.py，OpenRouter，要仓库外钥匙）/ jev（先问 vision_jev.py，不够再问 cli）。
+#   11-12 曾因中转站停用改缺省 cli（#788：没设地址时每问 0.3 秒退 1、自动玩家当「没答」连问 3 次收局）；恢复后缺地址 / 钥匙一律按「不可用」红停，不再静默退。
+#   后端不可用（中转站没钥匙或没地址 / 本机没有 claude CLI / CLI 没登录 / OpenRouter 没钥匙或额度用完）= 打【红】、答案 JSON 带 "unavailable":true 与原因、退出 3：
 #   自动玩家（本机与远程信箱两条路）见到就按「驾驶员不可用」红停收局，不当成「这一问没答」静默重试
 # 自动玩家每一步导航都调（10-31 AI 看屏驾驶）：截图交给视觉模型，像人类测试员读屏幕文字与布局，回按键序列 + 现在是否已在游戏场景里可操控。
 #   维护者 10-20 拍板：「反正这个事情仅在咱们开发中使用」。playable 只是进局双证之一，MARK 还要宿主读数（每帧绘制 / 渲染遍数）到场景量级。
@@ -26,13 +27,20 @@ t0=$(date +%s)
 #   11-01 去掉「不够就再问一次」：普查 + 体验线 439 次第二问里答案只变了 39 次，合计多花 922 秒
 # S2A_VISION_ESCALATE=1（自动玩家：回到问过的同一页还卡着）：跳过 Jev 直接问升级后端，题面说明前面的答案没走出这一页
 # OpenRouter 回过 402（额度用完；11-02 维护者：不再充值，中转站做主力）：永久标记（or402.py，直到删标记或换钥匙）→ 显式选了 Jev 也跳过，不白撞 402
-BACKEND=${S2A_VISION_BACKEND:-cli}
+# 没设 S2A_VISION_BACKEND = 自动选（11-13：外部贡献者没有中转站钥匙，缺省不该一上来就红停）：有中转站钥匙和地址走 relay（维护方机器都有，照样走中转站），没有走本机 cli；
+#   日志写一行走的是哪个。显式设了就照设的走（不认的名字照旧不可用红停）
+BACKEND=${S2A_VISION_BACKEND:-}
+if [ -z "$BACKEND" ]; then
+  if [ -r "${S2A_VISION_RELAY_KEY:-$HOME/.s2arm/.secrets/relay.key}" ] && { [ -n "${S2A_VISION_RELAY_URL:-}" ] || [ -r "$HOME/.s2arm/.secrets/relay.url" ]; }; then BACKEND=relay; echo "后端自动选：relay（有中转站钥匙和地址）" >> "$OUT.log"
+  else BACKEND=cli; echo "后端自动选：cli（没有中转站钥匙或地址，走本机 claude CLI）" >> "$OUT.log"; fi
+fi
+export S2A_VISION_BACKEND=$BACKEND   # vision_or.py 按它选中转站 / OpenRouter
 # 后端不可用：答案 JSON 带 unavailable + 原因（远程信箱经桥原样推回手机）、日志与标准错误各一行【红】、退出 3
 unavail() {
   echo "【红】看屏驾驶员不可用：$1" >> "$OUT.log"; echo "【红】看屏驾驶员不可用：$1" >&2
   python3 -c 'import json, sys; print(json.dumps({"keys": [], "playable": False, "why": sys.argv[1], "unavailable": True}, ensure_ascii=False))' "$1" > "$OUT"
   exit 3; }
-case $BACKEND in cli|or|jev) ;; *) unavail "S2A_VISION_BACKEND=${BACKEND} 不认（只有 cli / or / jev；中转站档 relay 已停用）";; esac
+case $BACKEND in relay|cli|or|jev) ;; *) unavail "S2A_VISION_BACKEND=${BACKEND} 不认（只有 relay / cli / or / jev）";; esac
 if [ "$BACKEND" = jev ] && python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import or402; sys.exit(0 if or402.blocked() else 1)' "$(dirname "$0")" 2> /dev/null; then SKIP_JEV=1; echo "OpenRouter 回过 402（永久标记，删标记或换钥匙才恢复），跳过 Jev" >> "$OUT.log"; fi
 if [ "$BACKEND" = jev ] && [ -z "${S2A_VISION_ESCALATE:-}" ] && [ -z "${SKIP_JEV:-}" ]; then
   rm -f "$OUT.conf"; python3 "$(dirname "$0")/vision_jev.py" "$PNG" "$OUT"; jr=$?
@@ -60,12 +68,12 @@ ${S2A_VISION_ESCALATE:+这一页之前已经问过、照答案按了还是回到
 只输出一行 JSON，不要别的文字：{\"keys\":[…],\"playable\":true 或 false,\"why\":\"一句中文说明画面是什么、为什么这样按（why 里不要用引号）\"}。已可操控时 keys 给一个推左摇杆的键即可。
 keys 每项只能是：A B X Y L R ZL ZR PLUS MINUS SL SR UP DOWN LEFT RIGHT LS_UP LS_DOWN LS_LEFT LS_RIGHT RS_UP RS_DOWN RS_LEFT RS_RIGHT TOUCH:x,y，或前加 2: 的按键（只按二号手柄，不能点触）；要长按写成 \"A:2\"（秒，≤3）；画面要两键同按（如「按下 L+R」「press ZL + ZR」）写成一项 \"L|R\" / \"ZL|ZR\"，别拆成两项。最多 8 个。"
 ask() {   # 问一次后端：R = 原始回答、rc、J = 解析后的 JSON（滤掉试过的键；滤空 = 空）；后端不可用直接 unavail（退出 3）
-if [ "$BACKEND" = or ]; then
-R=$(python3 "$(dirname "$0")/vision_or.py" "$P" "$Q" 2>> "$OUT.err"); rc=$?; SHOW="OpenRouter（$(grep -a "^模型 " "$OUT.err" | tail -1 | cut -c8-)）"
+if [ "$BACKEND" = or ] || [ "$BACKEND" = relay ]; then
+R=$(python3 "$(dirname "$0")/vision_or.py" "$P" "$Q" 2>> "$OUT.err"); rc=$?; SHOW="$([ "$BACKEND" = relay ] && echo 中转站 || echo OpenRouter)（$(grep -a "^模型 " "$OUT.err" | tail -1 | cut -c8-)）"
 [ $rc = 3 ] && unavail "$(grep -a '不可用' "$OUT.err" | tail -1)"
 else
 # 本机 claude CLI 直连：截图内联进第一条消息，用 CLI 自己的登录（去掉当前会话注入的 ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL）
-command -v claude > /dev/null || unavail "本机没有 claude CLI（PATH 上找不到 claude）：装 Claude Code 并登录一次，或设 S2A_VISION_BACKEND=or 用 OpenRouter"
+command -v claude > /dev/null || unavail "本机没有 claude CLI（PATH 上找不到 claude）：装 Claude Code 并登录一次，或用缺省的中转站（S2A_VISION_BACKEND=relay）"
 R=$(python3 -c 'import base64, json, sys
 print(json.dumps({"type": "user", "message": {"role": "user", "content": [
   {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": base64.b64encode(open(sys.argv[1], "rb").read()).decode()}},

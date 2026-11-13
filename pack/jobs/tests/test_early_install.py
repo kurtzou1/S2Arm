@@ -51,6 +51,8 @@ class EarlyInstallCase(JobCase):
                 o = Path(args[args.index('--out') + 1]); o.mkdir(parents=True, exist_ok=True)
                 (o / 's2a_catalogue.json').write_text(json.dumps({"schema": 1, "shell_id": "SID1", "games": [{"title_id": GID}]}))
                 return
+            if any(a.endswith('ship_ext.py') for a in args) and 'sign' in args:   # assemble 写完容器摘要后的统一签名
+                return
             if 'write_ipa' in args:   # assemble 的 ipa 打包命令
                 Path(args[-1]).write_bytes(b'early' if early_rc == 0 else b'final')
                 return

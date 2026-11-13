@@ -165,7 +165,21 @@ namespace Ryujinx.Graphics.Shader.Translation
         internal int GetDepthRegister()
         {
             // The depth register is always two registers after the last color output.
-            return BitOperations.PopCount((uint)Definitions.OmapTargets) + 1;
+            // S2A #674：每个启用的颜色目标占满 4 个寄存器（哪怕只写其中一个分量，同 EmitterContext 里颜色输出的 regIndexBase += 4），
+            //   所以按启用的目标数算，不能按启用的分量数：两者只在每个目标都写满 4 个分量时相等。
+            //   例：某款游戏的深度缩小片元 OmapTargets = 0x10f（目标 0 四个分量 + 目标 2 一个分量）：按分量数取到 6 号（没人写、恒 0），实际在 9 号，
+            //   半分辨率深度被写成 0，粒子特效全被深度测试挡掉
+            int targets = 0;
+
+            for (int rtIndex = 0; rtIndex < 8; rtIndex++)
+            {
+                if ((Definitions.OmapTargets & (0xf << (rtIndex * 4))) != 0)
+                {
+                    targets++;
+                }
+            }
+
+            return targets * 4 + 1;
         }
 
         public void SetLayerOutputAttribute(int attr)
@@ -234,7 +248,13 @@ namespace Ryujinx.Graphics.Shader.Translation
         /// 这时记录里有本体算出的值或多出的图元，抓顶点读取器给不出，不能走快路（不出 _bgs / _bgc）</summary>
         public bool S2APassthroughBodyOutputs { get; private set; }
 
-        public void SetNextStage(TranslatorContext nextStage)
+        public void SetNextStage(TranslatorContext nextStage) => SetNextStage(nextStage, false);
+
+        // 配对编译已持有真实下游阶段时，可按其实际输入建立输出接口，
+        // 避免独立缓存策略把原生 GS 输出扩到全部 32 个 location。
+        public void S2ASetNextStageActual(TranslatorContext nextStage) => SetNextStage(nextStage, true);
+
+        private void SetNextStage(TranslatorContext nextStage, bool actualNextStage)
         {
             bool linked = AttributeUsage.RequiresLinkedVaryingInterface;
             if (linked != nextStage.AttributeUsage.RequiresLinkedVaryingInterface)
@@ -242,7 +262,7 @@ namespace Ryujinx.Graphics.Shader.Translation
                 throw new InvalidOperationException("Linked shader stages must use the same effective varying policy.");
             }
 
-            if (!linked && S2AStageIndep && nextStage.Definitions.Stage == ShaderStage.Fragment && !nextStage._program.UsedFeatures.HasFlag(FeatureFlags.FixedFuncAttr))
+            if (!actualNextStage && !linked && S2AStageIndep && nextStage.Definitions.Stage == ShaderStage.Fragment && !nextStage._program.UsedFeatures.HasFlag(FeatureFlags.FixedFuncAttr))
             {
                 AttributeUsage.MergeAllGenericInputsForFragment(Definitions.GpPassthrough);   // S2A：顶点输出接口不看片元实际读哪些（见 AttributeUsage）
             }

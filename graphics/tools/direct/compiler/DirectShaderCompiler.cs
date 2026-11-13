@@ -105,7 +105,11 @@ namespace S2A.DirectCompiler
                         accessors.Add(accessor);
                         contexts.Add((stage, accessor, ShaderCache.DecodeGraphicsShader(accessor, TargetApi.Vulkan, ShaderCache.DefaultFlags, 0)));
                     }
-                    for (int i = contexts.Count - 2; i >= 0; i--) contexts[i].context.SetNextStage(contexts[i + 1].context);
+                    for (int i = contexts.Count - 2; i >= 0; i--)
+                    {
+                        if (contexts[i].stage.Stage == "gs") contexts[i].context.S2ASetNextStageActual(contexts[i + 1].context);
+                        else contexts[i].context.SetNextStage(contexts[i + 1].context);
+                    }
                     foreach (var item in contexts) translated.Add((item.stage, item.context.Translate(), item.accessor));
                 }
             }
@@ -125,9 +129,10 @@ namespace S2A.DirectCompiler
             ResolvePoolSlots(translated, allocator);
             ResolveStorageSlots(translated, allocator);
 
-            byte[] content = WriteContent(program, profile, translated, allocator, queries);
+            bool v2 = allocator.Bindings.Any(b => b.SamplerSlot >= 0);
+            byte[] content = WriteContent(program, profile, translated, allocator, queries, v2);
             string contentHash = "sha256-" + Convert.ToHexStringLower(Sha256.HashData(content));
-            return WriteEnvelope(session, generation, requestId, content, contentHash);
+            return WriteEnvelope(session, generation, requestId, content, contentHash, v2);
         }
 
         // 与 runtime/direct/control.c、merge_extract.py:cs_facts 同口径：+0x748 三组、+0x754 shared，
@@ -252,6 +257,15 @@ namespace S2A.DirectCompiler
                     throw new DirectCompileException("SPIRV_INVALID",
                         binding.Stage + ": " + binding.Kind + " binding " + binding.Set + ":" + binding.Binding + " has no reflected descriptor");
                 TextureDescriptor resolved = found.Value;
+                if (binding.Kind == "texture" && !resolved.Separate &&
+                    entry.accessor.TrySeparateC2(resolved.HandleIndex, resolved.CbufSlot, out int texWord, out int samplerSlot))
+                {
+                    if (binding.Count != 1 || resolved.ArrayLength > 1)
+                        throw new DirectCompileException("UNSUPPORTED_PROGRAM", binding.Stage + ": separate sampler arrays are not implemented");
+                    binding.Slot = texWord;
+                    binding.SamplerSlot = samplerSlot;
+                    continue;
+                }
                 if (resolved.CbufSlot >= 0)
                 {
                     // NVN 的 c2 句柄与直连组合纹理槽一一对应：native 侧按 handleIndex
@@ -346,13 +360,13 @@ namespace S2A.DirectCompiler
 
         private static byte[] WriteContent(DirectProgram program, DirectProfile profile,
             List<(DirectStage stage, ShaderProgram shader, DirectGpuAccessor accessor)> translated,
-            DirectAllocator allocator, List<DirectQuery> queries)
+            DirectAllocator allocator, List<DirectQuery> queries, bool v2)
         {
             using var stream = new MemoryStream();
             using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Indented = false }))
             {
                 writer.WriteStartObject();
-                writer.WriteString("contract", ContentContract);
+                writer.WriteString("contract", v2 ? "s2a-direct-program-content-v2" : ContentContract);
                 writer.WriteStartObject("identity");
                 writer.WriteNumber("directABI", profile.DirectAbi);
                 writer.WriteString("translatorClosure", profile.TranslatorClosure);
@@ -443,6 +457,7 @@ namespace S2A.DirectCompiler
                     writer.WriteNumber("binding", binding.Binding);
                     writer.WriteNumber("count", binding.Count);
                     if (binding.Slot >= 0) writer.WriteNumber("slot", binding.Slot);
+                    if (binding.SamplerSlot >= 0) writer.WriteNumber("samp_slot", binding.SamplerSlot);
                     if (binding.Kind == "storage")
                     {
                         // Resolved and uniqueness-checked by ResolveStorageSlots above.
@@ -559,13 +574,13 @@ namespace S2A.DirectCompiler
         };
 
         private static byte[] WriteEnvelope(ulong session, ulong generation, string requestId,
-            byte[] content, string contentHash)
+            byte[] content, string contentHash, bool v2)
         {
             using var stream = new MemoryStream();
             using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Indented = false }))
             {
                 writer.WriteStartObject();
-                writer.WriteString("schema", ResultSchema);
+                writer.WriteString("schema", v2 ? "s2a-direct-program-v2" : ResultSchema);
                 writer.WriteStartObject("transport");
                 writer.WriteNumber("session", session);
                 writer.WriteNumber("generation", generation);

@@ -123,6 +123,12 @@ def push_timeout_for(resources):
     return max(PUSH_FLOOR_S, int(est * PUSH_MARGIN) + 1)
 
 
+def import_wait_for(resources, timeout):
+    """等导入回执的秒数：App 把资源逐个拷进私有目录（不能硬链接时整份复制），耗时和推送同一量级，
+    按推送同一套估算；命令行 --timeout 当下限。固定 180 秒对十几 GB 的款不够（#573：17 GB 导入要 3 分钟以上）。"""
+    return max(timeout, push_timeout_for(resources))
+
+
 def dev_tree_stat(adb, dev_dir):
     """设备端目录的 (文件数, 字节)：find + du。取不到按 (0,0)，进度条容错。"""
     files = adb.shell('find', dev_dir, '-type', 'f').splitlines()
@@ -226,6 +232,7 @@ def deploy_resources(apk, resources, adb, work, mode='auto', timeout=180, push_t
     pending, imported = external + '/.' + name, external + '/import/' + name
     library = package + '/org.s2arm.android.LibraryActivity'
     library_active = False
+    import_pending = False   # 等回执超时：App 可能还在导入，不强停、不删正在导入的目录
     try:
         # LibraryActivity creates its own import parent; no extra means no import.
         library_active = True
@@ -250,7 +257,8 @@ def deploy_resources(apk, resources, adb, work, mode='auto', timeout=180, push_t
         since = adb.shell('date', '+%m-%d %H:%M:%S.000')
         library_active = True
         start_activity(adb, '-n', library, '--es', IMPORT_EXTRA, imported)
-        deadline = time.monotonic() + timeout
+        import_wait = import_wait_for(resources, timeout)
+        deadline = time.monotonic() + import_wait
         while time.monotonic() < deadline:
             logs = adb.shell('logcat', '-d', '-v', 'brief', '-T', since, '-s', 'S2Arm:I')
             (work / 'deploy.log').write_text(logs + '\n')
@@ -271,13 +279,19 @@ def deploy_resources(apk, resources, adb, work, mode='auto', timeout=180, push_t
                 break
             time.sleep(1)
         else:
-            raise RuntimeError('等待导入超时；未生成成功回执')
+            import_pending = True
+            raise RuntimeError(f'等待导入超时（{import_wait} 秒内没有成功回执）：导入可能还在进行，'
+                               f'没有强停应用，也没有删正在导入的目录 {imported}；等它做完后用同一命令加 --refresh-existing 重跑核对')
     finally:
         original = sys.exc_info()[1]
         try:
-            if library_active:
-                adb.shell('am', 'force-stop', package)
-            adb.shell('rm', '-rf', pending, imported)
+            if import_pending:
+                # 强停 + 删目录会把做了一半的导入打断：首次部署的款连 current.json 都没有，起局直接失败（#573）
+                adb.shell('rm', '-rf', pending)
+            else:
+                if library_active:
+                    adb.shell('am', 'force-stop', package)
+                adb.shell('rm', '-rf', pending, imported)
         except (OSError, RuntimeError, subprocess.SubprocessError) as error:
             raise RuntimeError((f'导入失败：{original}；' if original else '') +
                                f'设备临时副本清理失败：{error}；路径 {pending} {imported}') from error

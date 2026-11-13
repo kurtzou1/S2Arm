@@ -663,6 +663,15 @@ void s2a_android_guest_host_wait_end(void) {
     android_host_wait_core = 0;
 }
 
+// 宿主侧长工作里的自愿安全点：客体线程在一次原生调用里连续跑很久（图形回放一次提交可达数秒），
+// 这期间它在宿主 PC 上，SIGURG 不应答，停世界只能等到它返回客体，2 秒预算会到期。
+// 调用方保证此刻不持 G / VM / tracker 锁，且两次调用之间对客体内存的访问已经成对结束；
+// 有 epoch 时在这里按当前 epoch 停驻（同正常返回屏障），没有 epoch 只是一次原子读。非客体线程是空操作。
+void s2a_android_guest_host_safepoint(void) {
+    if (!atomic_load_explicit(&android_vm_epoch, memory_order_acquire)) return;
+    android_vm_barrier(pthread_getspecific(g_keythr));
+}
+
 // Called only by gate.c's terminal shutdown park, never by a live native
 // callback. Once published this pthread may not access guest memory again.
 _Noreturn void s2a_android_guest_park_forever(void) {

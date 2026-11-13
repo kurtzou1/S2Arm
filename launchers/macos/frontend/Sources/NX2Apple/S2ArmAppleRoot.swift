@@ -21,6 +21,8 @@ public struct S2ArmAppleRootView: View {
     public var body: some View {
         LauncherView(model: model, brand: brand)
             .environmentObject(loc)
+            .onAppear { model.setUILanguage(loc.lang == .zh ? "zh-Hans" : "en") }   // 作业请求带界面语言（JobEnvironment.uiLanguage）：导出文件夹 / 说明等按它出
+            .onReceive(loc.objectWillChange.receive(on: RunLoop.main)) { _ in model.setUILanguage(loc.lang == .zh ? "zh-Hans" : "en") }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
                 model.shutdownControllerConnection()
             }

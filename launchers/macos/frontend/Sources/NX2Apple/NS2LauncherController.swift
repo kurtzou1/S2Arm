@@ -1,5 +1,5 @@
 // S2Arm（不是上游文件）：Switch 2 Pro 连接状态。启动并监看启动器旁的 S2ArmNS2Connection 进程（独占蓝牙连接，游戏经本机通道读输入），
-//   持久化「开启 S2Arm 时自动连接」「关闭游戏后自动断开」两个开关（docs/mac-switch2-pro.md）。
+//   持久化「开启 S2Arm 时自动连接」「关闭游戏后自动断开」「记住这台设备」三个开关（docs/mac-switch2-pro.md）。
 import AppKit
 import Combine
 import Foundation
@@ -12,6 +12,8 @@ final class NS2LauncherController: ObservableObject {
 
     @Published private(set) var autoConnectOnOpen: Bool
     @Published private(set) var disconnectAfterGame: Bool
+    /// 记住这台设备（#521）：长按 SYNC 连上的手柄写入本机地址，之后按任一键即可重连。缺省关；下次启动连接程序时生效
+    @Published private(set) var rememberDevice: Bool
     @Published private(set) var phase: Phase = .off
     @Published private(set) var detail = ""
     @Published private(set) var deviceName = "Switch 2 Pro"
@@ -46,6 +48,7 @@ final class NS2LauncherController: ObservableObject {
         defaults = UserDefaults(suiteName: "org.s2arm.macos.game") ?? .standard
         autoConnectOnOpen = defaults.object(forKey: "S2AMacNS2AutoConnectOnOpen") as? Bool ?? false
         disconnectAfterGame = defaults.object(forKey: "S2AMacNS2DisconnectAfterGame") as? Bool ?? false
+        rememberDevice = defaults.object(forKey: "S2AMacNS2RememberDevice") as? Bool ?? false
     }
 
     var buttonStatus: String {
@@ -88,6 +91,28 @@ final class NS2LauncherController: ObservableObject {
     func setDisconnectAfterGame(_ value: Bool) {
         disconnectAfterGame = value
         defaults.set(value, forKey: "S2AMacNS2DisconnectAfterGame")
+    }
+
+    func setRememberDevice(_ value: Bool) {
+        guard value != rememberDevice else { return }
+        rememberDevice = value
+        defaults.set(value, forKey: "S2AMacNS2RememberDevice")
+        // 设置交给连接程序的环境变量，要重启它才生效；游戏正用着手柄时不打断，下次连接生效
+        if process != nil && phase != .handedOff { retry() }
+    }
+
+    /// 交给连接程序的环境变量：偏好域、通道路径；开了「记住这台设备」再加 S2A_NS2_REMEMBER_DEVICE=1（macos/ns2_connection_helper.m）
+    nonisolated static func helperEnvironment(base: [String: String], socketPath: String, rememberDevice: Bool) -> [String: String] {
+        var environment = base
+        environment["S2A_NS2_DEFAULTS_SUITE"] = "org.s2arm.macos.game"
+        environment["S2A_NS2_SOCKET"] = socketPath
+        if rememberDevice { environment["S2A_NS2_REMEMBER_DEVICE"] = "1" } else { environment.removeValue(forKey: "S2A_NS2_REMEMBER_DEVICE") }
+        return environment
+    }
+
+    /// 连接中（状态 2）的说明：开了「记住这台设备」时，连接程序可能正挂着直连等绑定过的手柄按键唤醒
+    nonisolated static func connectingDetail(rememberDevice: Bool) -> String {
+        rememberDevice ? "正在等手柄。按手柄任一键即可连上；没反应时长按顶部 SYNC。" : "已找到手柄，正在连接。"
     }
 
     func connectManually() {
@@ -153,11 +178,8 @@ final class NS2LauncherController: ObservableObject {
 
         let task = Process()
         let pipe = Pipe()
-        var environment = ProcessInfo.processInfo.environment
-        environment["S2A_NS2_DEFAULTS_SUITE"] = "org.s2arm.macos.game"
-        environment["S2A_NS2_SOCKET"] = socketURL.path
         task.executableURL = helper
-        task.environment = environment
+        task.environment = Self.helperEnvironment(base: ProcessInfo.processInfo.environment, socketPath: socketURL.path, rememberDevice: rememberDevice)
         task.standardOutput = pipe
         task.standardError = pipe
         process = task
@@ -243,7 +265,7 @@ final class NS2LauncherController: ObservableObject {
             detail = "正在搜索手柄。请按一下手柄；未出现时长按顶部 SYNC。"
         case 2:
             phase = .connecting
-            detail = "已找到手柄，正在连接。"
+            detail = Self.connectingDetail(rememberDevice: rememberDevice)
         case 3:
             phase = .initializing
             detail = "已连接，正在读取校准资料。"
