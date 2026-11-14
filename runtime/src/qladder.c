@@ -4,7 +4,8 @@
 //     11-13 维护者「不设自己挡自己的闸」——原先热状态 3（危急）强降一档、升档要热状态 ≤ 1，都删了；真热到系统降频，帧率掉下来照常按帧率降。
 //   升档：GPU 忙占比 × 2（升一档的负载按翻倍估：30 → 60 帧、掌机 → 主机分辨率）< 70%，这样的窗口连续攒满 2 分钟；离上次换档至少 5 分钟。
 //   稳定：进一档后连续 2 分钟局内画面没触发降档 = 这一档稳了（调用方记成最后稳定档，下次从这起）。
-//   上限（s2a_ql_top）：玩家选的运行模式，升档到它为止（#352）。
+//   上限（s2a_ql_top）：玩家选的运行模式，升档到它为止（#352）。三档款（60 帧开关开着、靠 60 帧补丁）例外：掌机也从 60 帧起——
+//     60 帧是玩家开的，掌机不再先压回 30 帧（维护者 11-13），跑不动 / 危急热降照旧按上面的判据降。
 #include "s2a_qladder.h"
 #include <stdlib.h>
 #include <string.h>
@@ -28,7 +29,7 @@ void s2a_ql_setup(int kind, int tier) {
     q.tier = tier < 0 ? 0 : tier >= q.n ? q.n - 1 : tier; q.gpu0 = -1;
 }
 void s2a_ql_top(int top) { q.top = top < 0 ? 0 : top >= q.n ? q.n - 1 : top; if (q.tier < q.top) q.tier = q.top; }
-int s2a_ql_top_tier(int kind, int docked) { return docked ? 0 : kind == S2A_QL_FPS ? 2 : 1; }
+int s2a_ql_top_tier(int kind, int docked) { return kind == S2A_QL_FPS || docked ? 0 : 1; }
 int s2a_ql_tiers(void) { return q.n; }
 int s2a_ql_tier(void) { return q.tier; }
 int s2a_ql_docked(int tier) { return q.kind == S2A_QL_FPS ? tier < 2 : tier == 0; }

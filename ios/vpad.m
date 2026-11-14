@@ -20,6 +20,8 @@
 // 弱链接[lab]：s2a_direct_out_aspect（graphics/nvn/host_adapt.m：直连出图层当前的出图宽高比，触点矩形与上屏同一口径；输入工作台不链渲染层）
 // 弱链接[lab]：s2a_dprompt_notice（dprompt.m 提供的提示条；输入工作台不编 dprompt.m，取不到就不提示）
 // 弱链接[lab]：s2a_dprompt_ask（dprompt.m 提供的带两个按钮的提示条；输入工作台不编 dprompt.m，取不到就退回 s2a_dprompt_notice 或不提示）
+#import "sgrade_style.h"
+#import "cpatch_settings.h"
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import "controller.h"
@@ -427,21 +429,35 @@ typedef BOOL (^VPFlag)(void);
                      [self live:@"vp.pad.face.xbox" title:S2AL(@"vpad.menu.face.xbox") note:S2AL(@"vpad.menu.face.xbox.note")
                             on:^BOOL{ return s2a_pad_layout_parse([d stringForKey:@"padFace"].UTF8String) == S2A_PAD_LAYOUT_XBOX; }
                       disabled:nil run:^{ [d setObject:@"xbox" forKey:@"padFace"]; }]])])];
-    // 画面：宽屏 / 60 帧 / 主机模式 / 补丁要按本款能力判可不可开、改完要重启，逻辑全在整页设置（app_settings.m），这里直接去那一页，不另抄一份
-    UIAction *pic = vp_act(S2AL(@"vpad.menu.picture"), @"rectangle", NO, ^{ [ws afterMenu:^{ [ws openFullSettings]; }]; }); pic.subtitle = S2AL(@"vpad.menu.picture.note");
-    [items addObject:pic];
     // 性能浮层（hud.m 简版：右上角「帧率 · 内存」），改完立即显示 / 收起
     [items addObject:[self live:@"vp.hud.brief" title:S2AL(@"vpad.menu.hud") note:S2AL(@"vpad.menu.hud.note") on:^BOOL{ return [d boolForKey:@"S2APerfHUD"]; } disabled:nil
                             run:^{ BOOL on = ![d boolForKey:@"S2APerfHUD"]; [d setBool:on forKey:@"S2APerfHUD"]; if (s2a_hud_brief_show) s2a_hud_brief_show(ws.superview, on); }]];
-    // 金手指（vpad_cheats.m）：导入 txt、逐条开关，执行在服务层 Cheats.cs；面板开着时虚拟手柄不收触控
-    [items addObject:vp_act(S2AL(@"cheats.title"), @"wand.and.stars", NO, ^{ [ws afterMenu:^{
-        UIViewController *c = ws.window.rootViewController; if (!c) return;
-        [ws setSettingsOpen:YES]; s2a_cheats_present(s2a_top_presenter(c), ^{ [ws setSettingsOpen:NO]; }); }]; })];
+    // S 级优化（11-13 统一入口：同整页设置的「S 级优化」组、游戏库设置、启动器）：金色 S 子菜单，里面「社区补丁…」（这款有才列）与「金手指…」，
+    //   打开的页与整页设置里点进去的是同一页（cpatch_settings.m / vpad_cheats.m）；页开着时虚拟手柄不收触控
+    {
+        NSMutableArray<UIMenuElement *> *sg = [NSMutableArray array];
+        NSArray<S2ACPatchGroup *> *pg = s2a_cpatch_bundled_groups();
+        if (pg.count) [sg addObject:vp_act([S2AL(@"cpatch.title") stringByAppendingString:@"…"], @"square.stack.3d.up.fill", NO, ^{ [ws afterMenu:^{
+            UIViewController *c = ws.window.rootViewController; if (!c || c.presentedViewController) return;
+            UIViewController *page = s2a_cpatch_settings_controller(pg); if (!page) return;
+            UINavigationController *n = [[UINavigationController alloc] initWithRootViewController:page];
+            page.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone primaryAction:
+                [UIAction actionWithTitle:@"" image:nil identifier:nil handler:^(__unused UIAction *x) { [n dismissViewControllerAnimated:YES completion:^{ [ws setSettingsOpen:NO]; }]; }]];
+            [ws setSettingsOpen:YES]; [c presentViewController:n animated:YES completion:nil]; }]; })];
+        [sg addObject:vp_act([S2AL(@"cheats.title") stringByAppendingString:@"…"], @"wand.and.stars", NO, ^{ [ws afterMenu:^{
+            UIViewController *c = ws.window.rootViewController; if (!c || c.presentedViewController) return;
+            [ws setSettingsOpen:YES]; s2a_cheats_present(s2a_top_presenter(c), ^{ [ws setSettingsOpen:NO]; }); }]; })];
+        UIImage *gold = [s2a_sgrade_image() imageByPreparingThumbnailOfSize:CGSizeMake(26, 26)] ?: s2a_sgrade_image();
+        [items addObject:[UIMenu menuWithTitle:S2AL(@"sgrade.title") image:[gold imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal] identifier:nil options:0 children:sg]];
+    }
     S2ASettingsRuntime *rt = s2a_settings_runtime();
     // 切换游戏（只多款容器有）：确认框与收尾在 app.m，与整页设置「切换游戏」同一个回调
     if (rt.switchGame) [items addObject:vp_act(S2APICK(S2A_DPROMPT_SWITCH_GAME_TITLE), @"square.stack", NO, ^{ [ws afterMenu:^{ UIViewController *c = ws.window.rootViewController; if (c && !c.presentedViewController) rt.switchGame(c); }]; })];
     if (rt.manageSaves) [items addObject:vp_act(S2AL(@"vpad.menu.saves"), @"tray.full", NO, ^{ [ws afterMenu:^{ UIViewController *c = ws.window.rootViewController; if (c && !c.presentedViewController) rt.manageSaves(c); }]; })];
-    [items addObject:vp_act(S2AL(@"vpad.menu.more"), @"ellipsis.circle", NO, ^{ [ws afterMenu:^{ [ws openFullSettings]; }]; })];
+    // 整页设置（画面 / 宽屏 / 60 帧 / 主机模式 / 补丁 / 操作 / 诊断；按本款能力判可不可开、改完要重启的逻辑全在 app_settings.m）：
+    //   原先「画面…」与「更多设置」两项打开的是同一页，11-13 合成一项
+    UIAction *full = vp_act(S2AL(@"vpad.menu.settings"), @"gearshape", NO, ^{ [ws afterMenu:^{ [ws openFullSettings]; }]; }); full.subtitle = S2AL(@"vpad.menu.settings.note");
+    [items addObject:full];
     // 故障报修（11-13 维护者定：各页面齿轮菜单最下面）：写一句发生了什么（可不填）→ 打包上传、给短码（diag.m s2a_diag_report）
     [items addObject:vp_act(S2AL(@"diag.report.title"), @"exclamationmark.bubble", NO, ^{ [ws afterMenu:^{ void s2a_diag_report(void); s2a_diag_report(); }]; })];
     return items;

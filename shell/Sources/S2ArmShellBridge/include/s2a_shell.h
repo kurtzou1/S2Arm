@@ -70,6 +70,14 @@ char *s2a_shell_vpad_preview(const char *game_id, void *view, int split);
 // ZL / ZR 按住锁定开关（按游戏，与游戏内设置同一份数据），返回 1 成功 / 0 失败
 int s2a_shell_vpad_set_hold_lock(const char *game_id, int enabled);
 
+// 单款画面补丁与金手指（11-13 维护者：游戏库按住游戏的设置里也有帧率 / 满屏 / 金手指，记住选择）。实现在宿主 ios/game_options.m，
+//   与游戏内设置页、社区补丁页、金手指面板同一份存储。本包 s2a_shell.c 是弱定义缺省（读 NULL、写 0）。
+// {"fps":{"on","enabled","note"},"fullscreen":{"on","enabled","note"},"patches":[{"id","title","note","on"}],"cheats":[{"key","name","note","on"}]}，
+//   note 已按当前语言；malloc 出的 UTF-8，调用方 free。游戏号不合规返回 NULL
+char *s2a_shell_game_options_json(const char *game_id);
+// kind = "fps" / "fullscreen" / "patch" / "cheat"，key = 补丁编号 / 「文件名/条目名」（前两种不看），返回 1 存成 / 0 没存成
+int s2a_shell_game_option_set(const char *game_id, const char *kind, const char *key, int on);
+
 // iCloud 存档同步（新功能线 11-09；方案见 launchers/shared/SaveSync）：
 //   s2a_shell_save_context：本款存档作业的公共字段 {"game":<存档身份>,"dataRoot":…,"workRoot":…}，malloc 出的 UTF-8、调用方 free；
 //     没选游戏 / 没有存档身份 / 没链服务层回 NULL（不同步）。实现在宿主 ios/save_transfer.m；本包弱定义缺省 NULL

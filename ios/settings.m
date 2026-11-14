@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import "settings.h"
+#import "cpatch_model.h"
 #import "s2a_l10n.h"
 #include "caps.h"
 #include "s2a_launch_ctx.h"
@@ -54,7 +55,7 @@ void s2a_ios_apply_overlay_settings(NSUserDefaults *defaults) {
 //   以及撑不住就问玩家的「问过」与「本款原生 60 帧」记号——原先全在 App 级，一款游戏自动退回 16:9、关 60 帧会串到所有游戏
 NSArray *s2a_ios_per_game_keys(void) {
     return @[@"S2AResolutionScale", @"S2AAntiAliasing", @"S2AScalingFilter", @"S2AFrameRateLimit", @"S2AWidescreen", @"S2AFps60",
-             @"S2AFps60Manual", @"S2ADockedMode", @"S2ACommunityPatches", @"S2AWidescreenAsked", @"S2AFps60Asked", @"S2AFpsNative60", @"S2AWidenForce", S2AGameLanguageKey];
+             @"S2AFps60Manual", @"S2ADockedMode", @"S2ACommunityPatches", @"S2AWidescreenAsked", @"S2AFps60Asked", @"S2AFpsNative60", @"S2AFpsPick", S2AGameLanguageKey];
 }
 NSArray<NSString *> *s2a_ios_game_languages(void) {
     return @[@"system", @"SimplifiedChinese", @"TraditionalChinese", @"AmericanEnglish", @"BritishEnglish", @"Japanese", @"Korean", @"French", @"CanadianFrench", @"German",
@@ -86,29 +87,103 @@ NSArray<NSString *> *s2a_ios_game_languages(void) {
 - (void)setFloat:(float)value forKey:(NSString *)key { [self setObject:@(value) forKey:key]; }
 - (void)setDouble:(double)value forKey:(NSString *)key { [self setObject:@(value) forKey:key]; }
 @end
-NSUserDefaults *s2a_ios_settings_defaults(void) {
-    const char *gid = getenv("S2A_LAUNCH_GAME_ID");
-    if (!gid || !*gid) return NSUserDefaults.standardUserDefaults;
+NSUserDefaults *s2a_ios_settings_defaults_for(NSString *gid) {
+    if (!gid.length) return NSUserDefaults.standardUserDefaults;
     static NSString *cachedID; static NSUserDefaults *cached;   // 进程内同一款反复取（设置页每行都取）：复用一个对象
     @synchronized(NSUserDefaults.class) {
-        if (!cached || ![cachedID isEqualToString:@(gid)]) {
-            cachedID = @(gid);
+        if (!cached || ![cachedID isEqualToString:gid]) {
+            cachedID = [gid copy];
             cached = [[S2AGameLayeredDefaults alloc] initWithGame:[[NSUserDefaults alloc] initWithSuiteName:[@"S2AGame." stringByAppendingString:cachedID]]
                                                               app:NSUserDefaults.standardUserDefaults keys:[NSSet setWithArray:s2a_ios_per_game_keys()]];
         }
         return cached;
     }
 }
+static NSString *current_gid(void) { const char *g = getenv("S2A_LAUNCH_GAME_ID"); return g && *g ? @(g) : nil; }
+NSUserDefaults *s2a_ios_settings_defaults(void) { return s2a_ios_settings_defaults_for(current_gid()); }
 
-// 包内能力清单（App 包顶层 s2a_caps.tsv，runtime/src/caps.c 同一份）里某项能力（fps60 / widen）的值：1 / 0；没有清单或没有这行 = -1。每次现读（设置页与起局都调，文件很小）
-int s2a_ios_caps_value(const char *cap) {
-    NSString *text = [NSString stringWithContentsOfFile:[caps_dir() stringByAppendingPathComponent:@"s2a_caps.tsv"] encoding:NSUTF8StringEncoding error:nil];
+// 某款的随行目录（s2a_caps.tsv / widen_verified.tsv / cpatch.tsv 所在）：正在跑的这款 = 启动上下文的 caps_dir；
+//   游戏库里还没进游戏的那款 = 多款容器 <App 包>/Games/<游戏号>（runtime/src/launchctx.c 同一约定）
+NSString *s2a_ios_game_dir(NSString *gid) {
+    if (!gid.length || [gid isEqualToString:current_gid() ?: @""]) return caps_dir();
+    return [[NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"Games"] stringByAppendingPathComponent:gid];
+}
+static int caps_value_in(NSString *dir, const char *cap) {
+    NSString *text = [NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:@"s2a_caps.tsv"] encoding:NSUTF8StringEncoding error:nil];
     for (NSString *line in [text componentsSeparatedByString:@"\n"]) {
         NSArray<NSString *> *f = [[line componentsSeparatedByString:@"#"].firstObject componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
         f = [f filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"length > 0"]];
         if (f.count >= 2 && [f[0] isEqual:@(cap)]) return [f[1] isEqual:@"1"] ? 1 : [f[1] isEqual:@"0"] ? 0 : -1;
     }
     return -1;
+}
+// 包内能力清单（App 包顶层 s2a_caps.tsv，runtime/src/caps.c 同一份）里某项能力（fps60 / widen）的值：1 / 0；没有清单或没有这行 = -1。每次现读（设置页与起局都调，文件很小）
+int s2a_ios_caps_value(const char *cap) { return caps_value_in(caps_dir(), cap); }
+
+// 60 帧玩家明确的选择：@"1" 开 / @"0" 关 / nil 没选过（起局与设置页显示同一口径）。game = 这款的游戏库偏好（单款壳 nil），defaults = 按游戏分层的设置
+static NSString *fps60_pick(NSUserDefaults *game, NSUserDefaults *defaults) {
+    if (game && [game objectForKey:@"S2AFps60"]) return [game boolForKey:@"S2AFps60"] ? @"1" : @"0";
+    // App 级老键 S2AFps60：老口径缺省开，存着 YES 只代表「沿用缺省」，不算玩家明确开（不然强信号判红、已知会变速的款也被开成 60 帧）；只认 NO = 关
+    if ([defaults objectForKey:@"S2AFps60"] && ![defaults boolForKey:@"S2AFps60"]) return @"0";
+    // 玩家明确开：60 帧开关打开时都会写 S2AFps60Manual（s2a_ios_set_fps60），与老键是不是 YES 无关
+    if ([defaults boolForKey:@"S2AFps60Manual"]) return @"1";
+    return nil;
+}
+// 包内清单 fps60 那一行的原因是不是「速度已验证」（runtime/src/caps.c 同一判法：验证过的款没选过也默认开）
+static BOOL caps_fps60_verified(NSString *dir) {
+    NSString *text = [NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:@"s2a_caps.tsv"] encoding:NSUTF8StringEncoding error:nil];
+    for (NSString *line in [text componentsSeparatedByString:@"\n"]) {
+        NSArray<NSString *> *f = [line componentsSeparatedByString:@"\t"];
+        if (f.count >= 2 && [f[0] isEqual:@"fps60"]) {
+            NSRange r = [line rangeOfString:@"#"];
+            return s2a_caps_fps60_verified(f[1].UTF8String, r.location == NSNotFound ? "" : [line substringFromIndex:r.location + 1].UTF8String);
+        }
+    }
+    return NO;
+}
+static NSUserDefaults *game_suite(NSString *gid) { return gid.length ? [[NSUserDefaults alloc] initWithSuiteName:[@"S2AGame." stringByAppendingString:gid]] : nil; }
+BOOL s2a_ios_fps60_on_for(NSString *gid) {
+    NSString *pick = fps60_pick(game_suite(gid), s2a_ios_settings_defaults_for(gid));
+    return pick ? [pick isEqual:@"1"] : caps_fps60_verified(s2a_ios_game_dir(gid));
+}
+void s2a_ios_set_fps60_for(NSString *gid, BOOL on) {
+    NSUserDefaults *d = s2a_ios_settings_defaults_for(gid);
+    [d setBool:on forKey:@"S2AFps60"]; [d setBool:on forKey:@"S2AFps60Manual"];
+}
+BOOL s2a_ios_fps60_on(void) { return s2a_ios_fps60_on_for(current_gid()); }
+void s2a_ios_set_fps60(BOOL on) { s2a_ios_set_fps60_for(current_gid(), on); }
+
+// 满屏（自适应：按这台设备的屏幕比例铺满，11-13 合并原「宽屏」与「宽屏强制启用」两个开关）：
+//   这款明确选了开 = 没进已验证名单也铺满（满屏自检照样兜底：拉伸 / 收窄连续两窗自动退回 16:9）；明确选了关 = 16:9；
+//   没选过 = 已验证的款开、其余 16:9（App 级「所有游戏的默认」选了关的，没选过的款也关）。包内清单判满屏坏（caps widen=0）= 改不动、如实显示关
+// 这款的自适应满屏补丁一族（cpatch.tsv 编号 wsauto:，pack/cpatch.py adapt_families）：有就由满屏开关一并开关（游戏自己按屏幕比例画宽，S2Arm 的满屏让开）
+static NSArray<S2ACPatchItem *> *adaptive_items(NSString *dir, NSArray<S2ACPatchGroup *> **groups) {
+    NSString *text = [NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:@"cpatch.tsv"] encoding:NSUTF8StringEncoding error:nil];
+    NSArray<S2ACPatchGroup *> *g = text ? S2ACPatchGroupsFromTSV(text) : @[]; if (groups) *groups = g;
+    NSMutableArray *out = [NSMutableArray array];
+    for (S2ACPatchGroup *x in g) for (S2ACPatchItem *it in x.items) if (it.followsFullscreen) [out addObject:it];
+    return out;
+}
+int s2a_ios_fullscreen_state(NSString *gid, BOOL *on) {
+    if (!gid.length) gid = current_gid();
+    NSString *dir = s2a_ios_game_dir(gid);
+    // 改不动只认强信号（tools/caps_policy.py 原因写「强信号：宽屏画面坏 / 崩溃归因」）；「发布缺省关」只是没验证过，玩家可以明确开
+    NSString *caps = [NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:@"s2a_caps.tsv"] encoding:NSUTF8StringEncoding error:nil];
+    for (NSString *l in [caps componentsSeparatedByString:@"\n"]) if ([l hasPrefix:@"widen\t0"] && [l containsString:@"强信号"]) { *on = NO; return 1; }
+    NSUserDefaults *g = game_suite(gid), *app = NSUserDefaults.standardUserDefaults;
+    if (g && [g objectForKey:@"S2AWidescreen"]) { *on = [g boolForKey:@"S2AWidescreen"]; return 0; }
+    if (!g && [app objectForKey:@"S2AWidescreen"]) { *on = [app boolForKey:@"S2AWidescreen"]; return 0; }   // 单款壳：App 级就是这款
+    if ([app objectForKey:@"S2AWidescreen"] && ![app boolForKey:@"S2AWidescreen"]) { *on = NO; return 0; }
+    *on = caps_value_in(dir, "widen") == 1 || [NSFileManager.defaultManager fileExistsAtPath:[dir stringByAppendingPathComponent:@"widen_verified.tsv"]]
+        || adaptive_items(dir, NULL).count > 0;   // 有自适应满屏补丁（11-13 起命中就默认开）
+    return 0;
+}
+void s2a_ios_set_fullscreen(NSString *gid, BOOL on) {
+    if (!gid.length) gid = current_gid();
+    NSUserDefaults *g = game_suite(gid) ?: NSUserDefaults.standardUserDefaults;
+    [g setBool:on forKey:@"S2AWidescreen"]; [g removeObjectForKey:@"S2AWidenForce"];
+    NSArray<S2ACPatchGroup *> *groups = nil;   // 自适应满屏补丁跟着开关（写进这款的社区补丁选择 S2ACommunityPatches）
+    for (S2ACPatchItem *it in adaptive_items(s2a_ios_game_dir(gid), &groups)) S2ACPatchSetEnabled(groups, s2a_ios_settings_defaults_for(gid), it.ident, on);
 }
 
 NSArray<NSDictionary *> *s2a_ios_graphics_options(void) {
@@ -182,6 +257,11 @@ void s2a_ios_apply_graphics_settings(NSUserDefaults *defaults) {
         apply_environment("S2A_DOCKED", @(docked));
         fprintf(stderr, "[S2A 画面设置] S2A_DOCKED=%s（本 App 设置）\n", docked);
     }
+    // 帧率档位（11-13 维护者：60 / 120 帧补丁都带进去，玩家自己选）：存 S2AFpsPick（0 = 自动：不超过屏幕刷新率的最高一档），运行时 runtime/src/cpatch.c fps_pick 读
+    if (!getenv("S2A_FPS_PICK")) {
+        NSInteger pick = [defaults integerForKey:@"S2AFpsPick"];
+        if (pick > 0) { apply_environment("S2A_FPS_PICK", [NSString stringWithFormat:@"%ld", (long)pick]); fprintf(stderr, "[S2A 画面设置] S2A_FPS_PICK=%ld（本 App 设置）\n", (long)pick); }
+    }
     // 游戏语言（按款，11-13）：选了哪种就交宿主枚举名给 S2A_SYSTEM_LANGUAGE（Host.cs PickLanguage 优先用它）；跟随系统不设，服务层读本 App 首选语言。
     //   游戏按语言整套换字体，从 Switch 导入的存档里玩家起的名字要和当时 Switch 的语言对上才显示得出来
     const char *gameLanguage = getenv("S2A_SYSTEM_LANGUAGE");
@@ -205,13 +285,16 @@ void s2a_ios_apply_graphics_settings(NSUserDefaults *defaults) {
         // 60 帧不在这里单独读：defaults 是按游戏分层的（s2a_ios_settings_defaults），下面 60 帧那段读到的就是「这款 → 所有游戏的默认」。
         //   原先这里只在这款「关」时写，这款「开」压不过 App 级的「关」（11-11 宿主梳理：库里按款开 60 帧不生效）
         // 宽屏强制启用 = 这款按已验证开满屏（没进宽屏已验证名单也开），并压过 App 级的宽屏关；满屏自检照样兜底（拉伸 / 收窄连续两窗自动退回）
-    }
-    // 宽屏强制启用也认游戏里设置页写的（11-13 维护者「不许堵门」：包里满屏标了已知问题，设置页原先锁灰不让开；现在提示后照开，记同一个键）。
-    //   按游戏分层：这款 → 所有游戏的默认；单款壳没有游戏号，就是 App 级
-    if ([s2a_ios_settings_defaults() boolForKey:@"S2AWidenForce"]) {
-        if (!getenv("S2A_WIDEN_VERIFIED")) apply_environment("S2A_WIDEN_VERIFIED", @"1");
-        if (!getenv("S2A_WIDESCREEN")) apply_environment("S2A_WIDESCREEN", @"1");
-        fprintf(stderr, "[S2A 画面设置] 宽屏强制启用（%s）\n", game && [game objectForKey:@"S2AWidenForce"] ? "这款" : "所有游戏的默认");
+        // 旧键 S2AWidenForce（「宽屏强制启用」，11-13 并进满屏开关）：开着的一次性转成这款满屏明确开
+        if ([game boolForKey:@"S2AWidenForce"]) [game setBool:YES forKey:@"S2AWidescreen"];
+        [game removeObjectForKey:@"S2AWidenForce"];
+        BOOL fs = NO;
+        // 有自适应满屏补丁的款由补丁铺满（下面社区补丁那段让 S2Arm 满屏让开），这里不强开 S2Arm 满屏，免得拉宽两次
+        if ([game objectForKey:@"S2AWidescreen"] && [game boolForKey:@"S2AWidescreen"] && s2a_ios_fullscreen_state(@(gid), &fs) == 0 && fs && !adaptive_items(s2a_ios_game_dir(@(gid)), NULL).count) {
+            if (!getenv("S2A_WIDEN_VERIFIED")) apply_environment("S2A_WIDEN_VERIFIED", @"1");
+            if (!getenv("S2A_WIDESCREEN")) apply_environment("S2A_WIDESCREEN", @"1");
+            fprintf(stderr, "[S2A 画面设置] 满屏：这款明确开（没进已验证名单也铺满，自检兜底）\n");
+        }
     }
     // 宽屏（runtime/src/widen.c widen_setting_on）：设置关了 = S2A_WIDESCREEN=0，下次启动整局 16:9；没设过 / 开着不设（缺省开）；启动环境显式给的优先
     // 一次性清记忆（11-06 满屏自检改「两次启动都触发才记住」）：之前单次触发就写下的「宽屏关 + 问过」清掉，下次起局重新试满屏、重新自检。
@@ -250,12 +333,7 @@ void s2a_ios_apply_graphics_settings(NSUserDefaults *defaults) {
     //   先后：启动环境显式给的 > 这款在游戏库的选择 > App 级开关关 > 玩家在设置页手动开（S2AFps60Manual，只有设置页开关会写）；
     //   与 Mac 启动器（pack/jobs/community.py launch_env）同口径。按款的游戏库键开 / 关都认；App 级老键只认关（见下）
     if (!getenv("S2A_FPS60")) {
-        NSString *pick = nil;
-        if (game && [game objectForKey:@"S2AFps60"]) pick = [game boolForKey:@"S2AFps60"] ? @"1" : @"0";
-        // App 级老键 S2AFps60：老口径缺省开，存着 YES 只代表「沿用缺省」，不算玩家明确开（不然强信号判红、已知会变速的款也被开成 60 帧）；只认 NO = 关
-        else if ([defaults objectForKey:@"S2AFps60"] && ![defaults boolForKey:@"S2AFps60"]) pick = @"0";
-        // 玩家明确开：设置页 60 帧开关打开时都会写 S2AFps60Manual（强信号款看过提示后开、普通款直接开），与老键是不是 YES 无关
-        else if ([defaults boolForKey:@"S2AFps60Manual"]) pick = @"1";
+        NSString *pick = fps60_pick(game, defaults);
         if (pick) {
             apply_environment("S2A_FPS60", pick);
             fprintf(stderr, "[S2A 画面设置] S2A_FPS60=%s（玩家选了 60 帧%s）\n", pick.UTF8String, [pick isEqualToString:@"1"] ? "开" : "关");
@@ -270,6 +348,13 @@ void s2a_ios_apply_graphics_settings(NSUserDefaults *defaults) {
         id v = [defaults objectForKey:@"S2ACommunityPatches"];
         NSString *on = [v isKindOfClass:NSArray.class] ? ([(NSArray *)v count] ? [(NSArray *)v componentsJoinedByString:@","] : @"none") : [v isKindOfClass:NSString.class] ? v : nil;
         if (on) { apply_environment("S2A_CPATCH_ON", on); fprintf(stderr, "[S2A 画面设置] S2A_CPATCH_ON=%s（本 App 设置：社区补丁）\n", on.UTF8String); }
+    }
+    // 开着社区宽屏 / 自适应满屏补丁（编号 widescreen: / wsauto:）：游戏自己按屏幕比例画宽画面，S2Arm 的满屏让开、不拉宽两次（同 Mac pack/jobs/community.py launch_env）；
+    //   启动环境显式给了 S2A_WIDESCREEN 的照它
+    const char *cp = getenv("S2A_CPATCH_ON");
+    if (cp && (strstr(cp, "widescreen:") || strstr(cp, "wsauto:")) && !getenv("S2A_WIDESCREEN")) {
+        apply_environment("S2A_WIDESCREEN", @"0");
+        fprintf(stderr, "[S2A 画面设置] S2A_WIDESCREEN=0（开着社区宽屏补丁，S2Arm 满屏让开）\n");
     }
 }
 

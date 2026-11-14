@@ -76,6 +76,9 @@ public static class BatchCases
         check(items[1].GetProperty("platforms").EnumerateArray().Select(p => p.GetString()).SequenceEqual(["iphone", "mac"]), "create: platforms in order");
         check(created.GetProperty("location").GetString() == "D:\\Games", "create: shared location");
         check(Json(BatchClient.CreateJson([new("G1", "G1", ["iphone"])], "")).GetProperty("location").ValueKind == JsonValueKind.Null, "create: empty location is null");
+        // 出包页取消过「出包时打入」的款：条目带 sgrade = false；没取消的不带这个字段（pack/jobs/batch.py create 只认显式 false）
+        var sg = Json(BatchClient.CreateJson([new("G1", "G1", ["iphone"], SGradeOff: true), new("G2", "G2", ["iphone"])], "")).GetProperty("items").EnumerateArray().ToArray();
+        check(sg[0].TryGetProperty("sgrade", out var off) && off.ValueKind == JsonValueKind.False && !sg[1].TryGetProperty("sgrade", out _), "create: sgrade off only on that game");
 
         // ---- 导入结果（partialResults）----
         var import = Json("""

@@ -15,6 +15,7 @@
 #   ⑦ 改写后的反射：贴图池 kind tex_pool、elem texture2d<float>、arg_id 2；采样器池 kind samp_pool、arg_id 3；普通贴图 arg_id 36
 #   ⑧ 改写后的 MSL 交 Metal 编译器（xcrun metal，macOS）能编过（证明形状是合法 MSL，宿主 t_nvn_pool_tex 用同一形状真跑）
 #   ⑨ 早测的池片元，FsAlphaMs 不再加函数常量里的 alpha 丢弃（深度已先写，丢弃改不回来；宿主要 alpha 测试时报红 134）；没早测的照加
+#   ⑩ 置位函数测位用普通读（device uint*，不用 atomic_load_explicit），只有没置位才原子或（11-13 照 nxnative 04811a63：原子读走共享缓存，同字像素排队）
 # 旧代码反证：PoolArrays 不存在（dsh_cmp --fn 报未知函数），① ~ ⑨ 全不通；负对照（把改写里的 dm_pool_mark 去掉）→ ③ 不通。
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); PY=${S2A_PY:-$HOME/.s2arm/venv/bin/python3}
 [ -x "$PY" ] || PY=$(command -v python3) || { echo "dmsh_pool_arrays_test：缺 Python 解释器，环境未就绪（退出 75）"; exit 75; }
@@ -91,6 +92,8 @@ if ok:
     print('8', c.returncode == 0, (c.stderr.strip().splitlines() or [''])[0][:200])
 else: print('8', False, r[0])
 fa = dshfn.batch([('fs_alpha_ms', [o if ok else '']), ('fs_alpha_ms', [od if isinstance(od, str) else ''])])
+mk = o[o.index('dm_pool_mark(constant P* p'):o.index('struct spvPool_')] if ok else ''
+print('10', 'atomic_load_explicit' not in mk and 'if (!(*w & b)) atomic_fetch_or_explicit(reinterpret_cast<device atomic_uint*>(w), b, memory_order_relaxed);' in mk)
 print('9', isinstance(fa[0].get('ok'), str) and 'S2A_AT_ON' not in fa[0]['ok'], isinstance(fa[1].get('ok'), str) and 'S2A_AT_ON' in fa[1]['ok'])
 PYEOF
 )
@@ -106,5 +109,6 @@ ck "⑥ 整个池数组当参数：报 pool rewrite failed" "$(g 6)" "True"
 ck "⑦ 反射：tex_pool / samp_pool、参数号 2 / 3、普通贴图 36" "$(g 7)" "[('tex_pool', 'texture2d<float>', 2), ('samp_pool', 'sampler', 3), ('tex', None, 36)]"
 ck "⑧ 改写后的 MSL 交 Metal 编译器编过" "$(g 8 | cut -d' ' -f1)" "True"
 ck "⑨ 早测的池片元不加 alpha 丢弃、没早测的照加" "$(g 9)" "True True"
-[ $bad = 0 ] && { echo "✓ dmsh_pool_arrays_test：9 项全通"; exit 0; }
-echo "$out" | head -30; echo "✗ dmsh_pool_arrays_test：9 项有不通"; exit 1
+ck "⑩ 置位测位用普通读、没置位才原子或" "$(g 10)" "True"
+[ $bad = 0 ] && { echo "✓ dmsh_pool_arrays_test：10 项全通"; exit 0; }
+echo "$out" | head -30; echo "✗ dmsh_pool_arrays_test：10 项有不通"; exit 1

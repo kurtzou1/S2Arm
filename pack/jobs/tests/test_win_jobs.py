@@ -215,6 +215,41 @@ class WinOneclick(unittest.TestCase):
         self.assertEqual(e.exception.code, "tool_missing")
 
 
+class ShellEngineMatch(unittest.TestCase):
+    """#1043：应用内更新回滚不完整，Engine/engine.json 新壳号、Shell/manifest.json 旧壳号 → 出包开头就报「没装完整、覆盖安装」（engine_incomplete），
+    不等到 ship_ext 核壳编号才挂。期望手写（壳号取自玩家原报）：对得上 → 照常返回 Shell 目录；对不上 → engine_incomplete、内部原文带两个壳号；
+    任一边没写壳号（开发树 / 旧格式）→ 不拦"""
+    def setUp(self):
+        import ipa
+        self.ipa = ipa
+        self.t = Path(tempfile.mkdtemp()); self.addCleanup(lambda: __import__("shutil").rmtree(self.t, ignore_errors=True))
+        (self.t / "Shell").mkdir(); (self.t / "Engine").mkdir()
+        self.c = types.SimpleNamespace(r={"resources": str(self.t)}, private=self.t, engine=self.t / "Engine")
+
+    def put(self, engine, shell):
+        import json
+        (self.t / "Engine/engine.json").write_text(json.dumps({"shellId": engine} if engine else {}))
+        (self.t / "Shell/manifest.json").write_text(json.dumps({"details": {"shellId": shell}} if shell else {}))
+
+    def test_same_shell_ok(self):
+        self.put("e0c983c072e29416", "e0c983c072e29416")
+        self.assertEqual(self.ipa.bundled_shell(self.c), self.t / "Shell")
+
+    def test_half_updated_app_is_named(self):
+        self.put("e0c983c072e29416", "b96e9b50fef413c0")
+        with self.assertRaises(core.Failure) as e:
+            self.ipa.bundled_shell(self.c)
+        self.assertEqual(e.exception.code, "engine_incomplete")
+        self.assertIn("覆盖安装", str(e.exception))
+        self.assertIn("e0c983c072e29416", e.exception.internal); self.assertIn("b96e9b50fef413c0", e.exception.internal)
+
+    def test_missing_ids_do_not_block(self):
+        for engine, shell in ((None, "b96e9b50fef413c0"), ("e0c983c072e29416", None), (None, None)):
+            with self.subTest(engine=engine, shell=shell):
+                self.put(engine, shell)
+                self.assertEqual(self.ipa.bundled_shell(self.c), self.t / "Shell")
+
+
 class FakeW:
     """pack/orch/install_win.py 的替身：设备服务列表、签名装机推包结果由用例给"""
     class Fail(Exception):

@@ -65,6 +65,9 @@ R-02	runtime/src/det.c	<os/lock.h>	存量：共用文件直接包含苹果系统
 R-02	runtime/src/diag_brk.c	<libkern/OSCacheControl.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
 R-02	runtime/src/diag_brk.c	<mach/mach.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
 R-02	runtime/src/diag_brk.c	<mach/mach_time.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/nvos_trace.c	<libkern/OSCacheControl.h>	Mac 专用诊断（S2A_NVOS_TRACE，同 diag_brk.c：改道代码页、读陷入现场），iOS / 安卓编成空函数；清零条件：诊断收进平台实现后同笔删本行
+R-02	runtime/src/nvos_trace.c	<mach/mach.h>	Mac 专用诊断（S2A_NVOS_TRACE，同 diag_brk.c：改道代码页、读陷入现场），iOS / 安卓编成空函数；清零条件：诊断收进平台实现后同笔删本行
+R-02	runtime/src/nvos_trace.c	<mach/mach_vm.h>	Mac 专用诊断（S2A_NVOS_TRACE，同 diag_brk.c：改道代码页、读陷入现场），iOS / 安卓编成空函数；清零条件：诊断收进平台实现后同笔删本行
 R-02	runtime/src/diag_brk.c	<mach/mach_vm.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
 R-02	runtime/src/energy.c	<mach/mach.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
 R-02	runtime/src/energy.c	<mach/mach_time.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行

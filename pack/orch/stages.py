@@ -42,7 +42,7 @@ ROOT_HELPERS = ('pack/resource_input_key.py', 'tools/direct_shards.py', 'tools/c
 ORCH = ('pack/orch/__init__.py', 'pack/orch/roots.py', 'pack/orch/stages.py', 'pack/orch/refresh.py')
 REWRITE_OUTPUTS = tuple(('*.code_patch.tsv *.patched.bin *.fixups.tsv *.gates.tsv '
     'degrade.rewrite.tsv *.sites.tsv *.gaps.tsv *.npdm *.widen.tsv widen_sites.tsv cpatch.tsv cpatch_rows.tsv '
-    'cpatch_plan.log cpatch_excluded.tsv widen_enable*.tsv widen_verified.tsv fps.tsv '
+    'cpatch_plan.log cpatch_excluded.tsv cheat-src.*.txt fpslocker.json widen_enable*.tsv widen_verified.tsv fps.tsv '
     'nro_modules.tsv nro_to_nso.log widen_full*.tsv addr_need.tsv addr_need.log nro_exports.tsv '
     'nro_exports.log gpu_drivers.tsv widen_scan.log fps_generic.log *.rewrite.log '
     '.stage_rewrite .stage_rewrite.deps').split())
@@ -271,7 +271,7 @@ def community(env):
 def community_selection(env, pid, bid):
     """社区补丁这一款打不打、打哪些（苹果改写阶段 rewrite_plan 与安卓 android/tools/make_pack.py 共用这一份，#48 D2）：
     (索引目录, 缺省开的编号, 打不打)。缺省开 = graphics/cpatch/verified.tsv 本款「程序号 + main 构建号」的行 + S2A_CPATCH + 启动器玩家选择（同 stage_rewrite.sh CSEL）；
-    打 = S2A_COMMUNITY_PATCHES=1（10-30 维护者：玩家包缺省不带上游补丁字节）且有索引目录且 S2A_CPATCH 不是 none"""
+    打 = 有索引目录且 S2A_CPATCH 不是 none（11-12 维护者：查到的全部进包、缺省关；10-30 的 S2A_COMMUNITY_PATCHES=1 门槛作废）"""
     dirs, selection, cv = community(env)
     verified_selection = ','.join(line.split('\t')[2] for line in read(cv).splitlines()
                                   if not line.startswith('#') and len(line.split('\t')) >= 3
@@ -287,7 +287,7 @@ def community_selection(env, pid, bid):
         extra = ','.join(sorted(k for k, v in (selection_json.get('enabled') or {}).items() if v is True and k != 'ws:verified'))
         if extra:
             selection = selection + ',' + extra if selection and selection != 'none' else extra
-    on = env.get('S2A_COMMUNITY_PATCHES', '0') == '1' and bool(dirs) and env.get('S2A_CPATCH') != 'none'
+    on = bool(dirs) and env.get('S2A_CPATCH') != 'none'   # 11-12：查到的补丁全部进包、缺省关（10-30 S2A_COMMUNITY_PATCHES=1 门槛作废）
     return dirs, selection, on
 
 
@@ -311,9 +311,14 @@ def rewrite_plan(game, current, deps):
     if env.get('S2A_COMMUNITY_SELECT'):
         deps.record(env['S2A_COMMUNITY_SELECT'])
     ck = ''
-    if on:
+    # 金手指（11-12，同 stage_rewrite.sh CI / CK）：S2A_CHEATS_DIRS 里改代码的条目编进包；社区补丁没开时不带补丁索引目录
+    cheats = [Path(p) for p in env.get('S2A_CHEATS_DIRS', '').split(os.pathsep) if p]   # Windows 路径带盘符冒号：按系统分隔符
+    dirs = dirs if on else []
+    if (on or cheats) and env.get('S2A_CPATCH') != 'none':
         b = (selection + '\n').encode() + (REPO / 'pack/cpatch.py').read_bytes()
         b += b''.join((d / 'INDEX.tsv').read_bytes() for d in dirs if (d / 'INDEX.tsv').is_file())
+        b += b''.join(f.name.encode() + b'\n' + f.read_bytes() for d in cheats for f in (sorted(d.glob('*.txt')) if d.is_dir() else [])
+                   if f.is_file() and f.name not in ('enabled.txt', 'status.txt'))   # 开关与状态不进键：玩家开关不重跑改写
         ck = ' cpatch=' + digest(b)
     ad = deps.work / 'addr'
     ad.mkdir()

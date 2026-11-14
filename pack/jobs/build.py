@@ -153,7 +153,9 @@ def runtime_env(c, game, runtime, input_ok=True):
                S2A_MACRO_DUMP=str(cache / "macros"),
                S2A_DOCKED="0" if c.r.get("docked") is False else "1",   # Mac 缺省主机模式（维护者 11-07）；只有请求明说 false 才掌机
                S2A_AUTOPLAY="0", S2A_GAME_NAME=game["name"], S2A_GAME_ID=game["id"],
-               S2A_INPUT_GUIDE_PREFS=str(c.private / "input-guides" / (game["id"] + ".json")))
+               S2A_INPUT_GUIDE_PREFS=str(c.private / "input-guides" / (game["id"] + ".json")),
+               # 金手指（11-12）：这款游戏文件夹的 cheats/（玩家导入 + 启动器从公开库取的 txt、开关 enabled.txt），Mac 宿主 Cheats.cs 读它
+               S2A_CHEATS_DIR=str(contained(layout.root_of(c, game["id"]), layout.path(c, game["id"], "cheats"))))
     if player:
         env["S2A_PLAYER_USER"] = player["user"]
         if player.get("name"):
@@ -273,6 +275,8 @@ def launch(c):
                 if trial:   # 新宿主试玩：TRIAL_OK_SECONDS 内异常退出 = 不认这款，下次退回原来的；玩过这么久才崩不怪宿主
                     host_update.settle(c, game["id"], host, ok=time.monotonic() - started >= host_update.TRIAL_OK_SECONDS)
                 if f.code == "tool_exit":   # 游戏进程自己非 0 退出（多为崩溃，139 = 段错误）：给启动页一个说人话的码，原文与退出码随错误摘要带走
+                    import cheats   # 开着金手指 / 画面补丁时退出：记下，下次开始前启动器问要不要先关掉（不自动关）
+                    cheats.note_crash(c, game)
                     broken = missing_after_crash(c, runtime, manifest)
                     if broken:   # 起局前没逐个核（v0.3.1）：退出后再核，运行文件缺 / 坏了就直说，别让玩家以为是游戏崩了
                         raise Failure(f"这款游戏的 Mac 运行文件缺了或坏了（例：{broken}），游戏读到它时退出了。重新出一次 Mac 版就能修好；存档不受影响。",
@@ -714,6 +718,8 @@ def prepare(c):
         env.update(S2A_ROOTS=str(root / "roots"), S2A_ROOTS_SHARED=str(root / "never-shared"),
                    S2A_ROOTS_PRIV=str(root / "roots-private"), S2A_FONTS=str(fonts))
         extraction = ensure_extract(c, game, packages, env, logs, valid=unpack_ok)
+        import patches   # 金手指 / 社区补丁（11-12）：解包后按真构建号查库，交改写阶段（S2A_CHEATS_DIRS / S2A_CPATCH_DIRS）
+        patches.prepare(c, game, extraction, env)
         # The memory table is collected from the repository table and the recent run logs only; the previously
         # installed table is not fed back (its values would never age out once the host stops needing them)
         if not (root / "roots" / (game["id"] + "@现行")).exists() and not seed_from_sibling(c, game, root / "roots", game["id"]):
@@ -795,4 +801,4 @@ def prepare(c):
         import sizes
         host_update.tidy(c, "刷新游戏占用大小", sizes.refresh, c, game["id"])   # 每款各部分大小写回 game.json（游戏库只读不量）
         return dict(gameId=game["id"], outputPath=str(image), outputBytes=_part_bytes([image]), target="macos-arm64", compatibility="unverified",
-                    **({"notes": notes} if notes else {}))
+                    boost=patches.boost(c, game, image), **({"notes": notes} if notes else {}))

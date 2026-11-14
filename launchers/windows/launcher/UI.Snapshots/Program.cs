@@ -127,6 +127,15 @@ void SaveP(string name, Action setup)
 
 InjectMockGame(pack, ready: false);
 SaveP("win_01_export_select", () => Navigate(pack, "build"));
+// S 级优化卡片（Beta）三种状态：直接注入作业层 patchMatch 的结果（不起后端）——这个版本命中 / 只命中游戏的别的版本 / 都没有
+foreach (var (name, json) in new[] {
+    ("win_01b_export_sgrade_hit", "{\"build\":\"d95ec48ffe269b6e\",\"exact\":{\"widescreen\":1,\"fps\":1,\"cheat\":12},\"others\":[]}"),
+    ("win_01c_export_sgrade_others", "{\"build\":\"aa11bb22cc33dd44\",\"exact\":{},\"others\":[{\"version\":\"1.1.0\",\"cats\":[\"fps\",\"widescreen\"]},{\"version\":\"1.0.0\",\"cats\":[\"cheat\"]}]}"),
+    ("win_01d_export_sgrade_none", "{\"build\":\"aa11bb22cc33dd44\",\"exact\":{},\"others\":[]}") })
+{
+    SaveP(name, () => { Navigate(pack, "build"); SetW(pack, "sgradeFor", MockGame(false).Id); SetW(pack, "sgradeFailed", false);
+        SetW(pack, "sgrade", (JsonElement?)JsonDocument.Parse(json).RootElement); Navigate(pack, "build"); });
+}
 
 InjectMockProgress(pack, fraction: 0.05, stepIndex: 0, running: true);
 SaveP("win_02_export_progress_running", () => Navigate(pack, "progress"));

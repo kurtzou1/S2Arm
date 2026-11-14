@@ -313,9 +313,9 @@ static unsafe class DshCmp
             if (ok) good++;
             Console.WriteLine($"  {(ok ? "✓" : "✗")} {c.Name}：返回 {rc}，stderr「{line}」");
         }
-        // 缺配对表（10-24 直连线）：第一个键返回非 0 并打一行【红】，之后的键返回非 0、不再打（同一份缺的表只报一次）
-        string gd2 = Path.Combine(work, "gd_nopairs"), d2 = Path.Combine(gd2, "shaders", "direct"); Directory.CreateDirectory(d2);
-        File.Copy(Path.Combine(tables, "shader_facts.tsv"), Path.Combine(d2, "shader_facts.tsv"), true); File.Delete(Path.Combine(d2, "shader_pairs.tsv"));
+        // 配对表坏了（10-24 直连线；11-13 起缺表按空表，不再算失败，这里改用「表在但行格式坏」）：第一个键返回非 0 并打一行【红】，之后的键返回非 0、不再打（同一份坏表只报一次）
+        string gd2 = Path.Combine(work, "gd_badpairs"), d2 = Path.Combine(gd2, "shaders", "direct"); Directory.CreateDirectory(d2);
+        File.Copy(Path.Combine(tables, "shader_facts.tsv"), Path.Combine(d2, "shader_facts.tsv"), true); File.WriteAllText(Path.Combine(d2, "shader_pairs.tsv"), "only-one-column\n");
         setenv("S2A_GAME_DATA", gd2, 1);
         int good2 = 0;
         for (int i = 0; i < 2; i++)
@@ -325,12 +325,26 @@ static unsafe class DshCmp
             try { fixed (byte* kp = k8, cp = code, tp = ctl, op = o8) rc = DshCApi.CompileCore(kp, 1, cp, (nuint)code.Length, tp, (nuint)ctl.Length, op, xc); }
             finally { Console.SetError(old); }
             string line = cap.ToString().Trim();
-            bool ok = rc != 0 && (i == 0 ? line.StartsWith("【红】") && line.Contains("no pairs table") && !line.Contains('\n') : line.Length == 0);
+            bool ok = rc != 0 && (i == 0 ? line.StartsWith("【红】") && line.Contains("bad pairs table") && !line.Contains('\n') : line.Length == 0);
             if (ok) good2++;
-            Console.WriteLine($"  {(ok ? "✓" : "✗")} 缺配对表第 {i + 1} 个键：返回 {rc}，stderr「{line}」（期望{(i == 0 ? "一行【红】" : "不再打")}）");
+            Console.WriteLine($"  {(ok ? "✓" : "✗")} 坏配对表第 {i + 1} 个键：返回 {rc}，stderr「{line}」（期望{(i == 0 ? "一行【红】" : "不再打")}）");
         }
-        Console.WriteLine($"导出入口失败路径：{good + good2}/{cases.Length + 2} 例（返回非 0；缺表只报第一次）");
-        return good == cases.Length && good2 == 2 ? 0 : 1;
+        // 两张表都不在（11-13 D-QW2Q：玩家导入不带 shaders/ 的 game.img）：不报「no answer table / no pairs table」，按空表照常往下编
+        string gd3 = Path.Combine(work, "gd_notables"), d3 = Path.Combine(gd3, "shaders", "direct"); Directory.CreateDirectory(d3);
+        setenv("S2A_GAME_DATA", gd3, 1);
+        int good3 = 0;
+        {
+            var old = Console.Error; var cap = new StringWriter(); Console.SetError(cap);
+            int rc; byte[] k8 = Encoding.UTF8.GetBytes("00112233445566ff\0"), o8 = Encoding.UTF8.GetBytes(outDir + "\0");
+            try { fixed (byte* kp = k8, cp = code, tp = ctl, op = o8) rc = DshCApi.CompileCore(kp, 1, cp, (nuint)code.Length, tp, (nuint)ctl.Length, op, xc); }
+            finally { Console.SetError(old); }
+            string err = cap.ToString();
+            bool ok = !err.Contains("no answer table") && !err.Contains("no pairs table") && err.Contains("按空答案表");
+            if (ok) good3++;
+            Console.WriteLine($"  {(ok ? "✓" : "✗")} 两张表都不在：返回 {rc}，不报缺表、按空表现编（stderr「{err.Trim().Replace('\n', ' ')}」）");
+        }
+        Console.WriteLine($"导出入口失败路径：{good + good2 + good3}/{cases.Length + 3} 例（返回非 0；坏表只报第一次；缺表按空表）");
+        return good == cases.Length && good2 == 2 && good3 == 1 ? 0 : 1;
     }
     [DllImport("libc")] static extern int unsetenv(string name);
 

@@ -1,4 +1,5 @@
 #!/bin/bash
+export S2A_CAPS_OWN=1   # 本测的是我方 60 帧 / 满屏旧口径（11-13 起发布缺省只用社区补丁，见 tests/caps_patch_only_test.py）
 # F7 #1574 单测（安卓能力清单与实现哈希按平台独立，#996 防重演；合成根 + 合成仓库 / 合成实现集，不出真机 / 游戏文件，约 10 秒）：bash tests/android_caps_test.sh
 # 期望：
 #   ① 安卓（S2A_PACK_PLAT=android）不需要 .stage_rewrite 也出能力清单；首行 plat<TAB>android，发布 / --all-caps 两份同头

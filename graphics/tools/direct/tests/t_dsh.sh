@@ -5,6 +5,7 @@
 #   ③ 内置 SPIRV-Cross 后端（libdsx nxgal_dmsh_xc）抽 500 键：bindings 与入口名全一致；Metal 校验器 newLibraryWithSource 建库、按名取入口全过
 #   ④ 反证：答案表清空后，表里的键（期望数 = 表行数里在映射表中的）全部判不一致（判据不会绿着失效）
 #   ⑤ 导出入口失败路径 4 例：返回非 0、stderr 一行【红】
+#   ⑤b 缺答案表 shader_facts.tsv 按空表现编：40 键全部编出（11-13 D-QW2Q）
 #   ⑥ 逐函数对照（t_dsh_fn.py）：冻结金样 dsh_fn_golden.jsonl（删除前的离线链原函数一次算出，无游戏数据）vs C# 移植，补考卷没走到的分支
 #   ⑧ 宽屏外推尾段（t_push.py）：vs_push 插的那段在 GPU 上逐例跑，期望按规格手算，带反证
 #   ⑫ 片元早期深度照实传（t_early_z.py）：控制段 +0x718 位 0 → [[early_fragment_tests]]，期望脚本自己读包里的控制段字节，带反证
@@ -109,6 +110,11 @@ mkdir -p "$T/tab0"; cp "$TAB/shader_pairs.tsv" "$TAB/shader_map.tsv" "$TAB/shade
 ck "④ 反证：答案表清空，表里 $nf 键全判不一致（$(line "$T/4.log")）" '[ "$nf" -gt 0 ] && grep -q "比了 $nf 个键，一致 0，不一致 $nf" "$T/4.log"' "④反证${nf}/${nf}"
 "$DN" "$H/dsh_cmp/bin/Release/net10.0/dsh_cmp.dll" --neg --tables "$TAB" --out "$T/o5" > "$T/5.log" 2>&1; r5=$?
 ck "⑤ $(tail -1 "$T/5.log")" '[ $r5 = 0 ]' "⑤失败路径$(tail -1 "$T/5.log" | grep -o '[0-9]*/[0-9]*')"
+# ⑤b 没有答案表照样现编（11-13 D-QW2Q：玩家导入不带 shaders/ 的 game.img，缺 shader_facts.tsv 原先每键「no answer table」、整局黑屏）：
+#   表目录只给映射表与空配对表（对拍工具自己要读配对表），导出入口 40 键全部编出、不报缺表
+mkdir -p "$T/tabx"; cp "$TAB"/shader_map.tsv* "$T/tabx/"; echo '# empty' > "$T/tabx/shader_pairs.tsv"
+"$DN" "$H/dsh_cmp/bin/Release/net10.0/dsh_cmp.dll" --pkg "$PKG" --map "$MAP" --dsx "$R/build/dsx/libdsx.dylib" -j "$DSH_J" --tables "$T/tabx" --out "$T/o5b" --keys sample:40 --capi > "$T/5b.log" 2>&1; r5b=$?
+ck "⑤b 缺答案表按空表现编：$(grep -o '比了 [0-9]* 个键[^；]*' "$T/5b.log" | head -1)" '[ $r5b = 0 ] && grep -q "比了 40 个键，一致 40，" "$T/5b.log" && ! grep -q "no answer table" "$T/5b.log"' "⑤b缺表现编$(grep -o '一致 [0-9]*' "$T/5b.log" | head -1 | grep -o '[0-9]*')/40"
 python3 "$H/t_dsh_fn.py" "$H/dsh_cmp/bin/Release/net10.0/dsh_cmp.dll" "$R/build/dsx/libdsx.dylib" > "$T/6.log" 2>&1; r6=$?
 grep '✗' "$T/6.log" | head -5
 ck "⑥ $(tail -1 "$T/6.log")" '[ $r6 = 0 ]' "⑥逐函数$(tail -1 "$T/6.log" | sed -E 's/.* ([0-9]+) 例，一致 ([0-9]+)，.*/\2\/\1/')"

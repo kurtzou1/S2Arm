@@ -778,15 +778,15 @@ namespace S2A.Dsh
         internal const int POOL_MIN = 33;    // 至少这么长的数组是池：翻译器（Program.cs）把回退数组按池长出（纹理 2^20、采样器 2^12），贴图缓冲 / 图像与统一缓冲句柄数组仍是 32 项
         internal const int POOL_HEAD = 16;   // = nvn_refl.h DMSH_POOL_HEAD：池表头 = 上界 n（uint）、4 字节空、已读位图的 GPU 地址（ulong）；元素 0 从这里起，每项 8 字节资源号
         internal const string POOL_MARK = "template<typename P> static inline __attribute__((always_inline)) uint dm_pool_mark(constant P* p, uint i)\n{\n"
-            + "    device atomic_uint* w = reinterpret_cast<device atomic_uint*>(p->seen) + (i >> 5);\n    uint b = 1u << (i & 31u);\n"
-            + "    if (!(atomic_load_explicit(w, memory_order_relaxed) & b)) atomic_fetch_or_explicit(w, b, memory_order_relaxed);\n    return i;\n}\n\n";
+            + "    device uint* w = reinterpret_cast<device uint*>(p->seen) + (i >> 5);\n    uint b = 1u << (i & 31u);\n"
+            + "    if (!(*w & b)) atomic_fetch_or_explicit(reinterpret_cast<device atomic_uint*>(w), b, memory_order_relaxed);\n    return i;\n}\n\n";
         static readonly Regex s_poolArr = new(@"^(\s*)array<(.+), (\d+)> (\w+) \[\[\s*id\(", RegexOptions.Multiline | RegexOptions.CultureInvariant);
         static readonly Regex s_poolMember = new(@"^(\s*)(.+?)\s+(\w+)\s*\[\[\s*id\((\d+)\)\s*((?:,[^\]]*)?)\]\];", RegexOptions.Multiline | RegexOptions.CultureInvariant);
         static readonly Regex s_poolOwnSide = new(@"\bdiscard_fragment\b|\[\[\s*depth\(|\[\[\s*sample_mask\s*\]\]|\[\[\s*stencil\s*\]\]|\.write\(|\batomic_\w+_explicit\b|^\s*device\s", RegexOptions.Multiline | RegexOptions.CultureInvariant);
         /// <summary>Ryujinx 给追不到槽的句柄的回退数组（&lt;阶段&gt;_&lt;t|s&gt;_cb0_40000000，按句柄的纹理 / 采样器号下标，长度 = 整段编号，Program.cs）→ 指向宿主按元素类型建的池表
         /// （nvn_mtl.m pool_gpu）：struct spvPool_&lt;名&gt; { uint n; ulong seen; array&lt;元素, 1&gt; e; }，读成 (&amp;e[0])[min(下标, n)]，n = 宿主填到的最大编号。
         /// 贴图池的读还在 seen 处的位图里置这个编号的位（dm_pool_mark）：着色器读哪些编号只有 GPU 知道，宿主据此只建被读过的贴图，而不是池里全部（11-06 时之笛登记约 3.3 万、读约 300）。
-        /// 先读字再原子或：一个位只置一次，几乎每次读只多一次读。结构体只声明 1 个元素：Metal 的参数编码器会逐个走声明的数组元素（2^20 个时每个编码器 57 ms、66 MB，上游实测），
+        /// 先用普通读测位、没置才原子或：一个位只置一次，几乎每次读只多一次读。测位不用原子读（照 nxnative 04811a63，MIT）：原子读即使 relaxed 也走 GPU 共享缓存，一遍里的像素只读少数几个编号、挤在同一个位图字上排队（M6 上 1536x864 一遍每像素 16 次置位 2.60 → 0.34 ms，iPad Pro M5 上 0400486024DEC000 的颜色遍约 13.0 → 9.2 ms）；读到旧的 0 只多做一次不改值的或，位在一次提交内只会 0 → 1。结构体只声明 1 个元素：Metal 的参数编码器会逐个走声明的数组元素（2^20 个时每个编码器 57 ms、66 MB，上游实测），
         /// 元素是 8 字节资源号、经指针读到其余。参数号随后按成员次序重排（指针占 1 个、其余数组占其长度），同宿主排参数块的方式。
         /// 贴图池的置位是写内存，Metal 会把这支片元改成着色后再测深度（失去隐藏面剔除，且与预深度遍差一个 ulp 时 EQUAL 沿轮廓失败，上游实测）：置位是宿主自己加的，
         /// 不该改测试时机，所以改成早测——除非着色器自己丢弃 / 写深度 / 写样本掩码或模板 / 写内存（那时早测会错，保持晚测，只多付着色）。
@@ -854,6 +854,31 @@ namespace S2A.Dsh
         static readonly Regex s_gatherArr = new(@"\bconstant spvUnsafeArray<int2, 4> (\w+) = spvUnsafeArray<int2, 4>\(\{ (.*?) \}\);", RegexOptions.CultureInvariant);
         static readonly Regex s_int2 = new(@"int2\([^()]*\)", RegexOptions.CultureInvariant);
 
+        // 四个偏移恰好是 2x2 方块（b、b+(1,0)、b+(0,1)、b+(1,1)，次序不限）：改成在 b 处一次 gather 再换序（照 nxnative 0c8a3ac0，MIT）。每个偏移取的是自己足迹的
+        // (i0, j0) 角，整数偏移下这四个角正好是 b 处足迹的四个纹素，各自按包裹方式取，两种写法同值。Metal 的次序：x (i0, j1)、y (i1, j1)、z (i1, j0)、w (i0, j0)。
+        // agl 的 NDSR 放大网络用这种方块拼输入块（0400486024DEC000 的 32 支带偏移 gather 的着色器里 27 支，每支 3–15 处）；nxnative 读数：M4 Pro 最大一次分派 845 → 779 us
+        static readonly Regex s_int2Lit = new(@"\Aint2\(\s*(-?\d+)\s*(?:,\s*(-?\d+)\s*)?\)\z", RegexOptions.CultureInvariant);
+        internal static (string Corner, string Swz)? GatherQuad(List<string> off)
+        {
+            var xy = new List<(int X, int Y)>();
+            foreach (var o in off)
+            {
+                var m = s_int2Lit.Match(o); if (!m.Success) return null;
+                int x = int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
+                xy.Add((x, m.Groups[2].Success ? int.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture) : x));
+            }
+            int bx = xy.Min(p => p.X), by = xy.Min(p => p.Y);
+            var swz = new StringBuilder(); var seen = new HashSet<(int, int)>();
+            foreach (var (x, y) in xy)
+            {
+                (int, int) r = (x - bx, y - by);
+                char c = r switch { (0, 0) => 'w', (1, 0) => 'z', (0, 1) => 'x', (1, 1) => 'y', _ => '?' };
+                if (c == '?' || !seen.Add(r)) return null;
+                swz.Append(c);
+            }
+            return ($"int2({bx}, {by})", swz.ToString());
+        }
+
         internal static string GatherOffsets(string msl)
         {
             var calls = s_gatherCall.Matches(msl).Where(m => string.CompareOrdinal(msl, m.Index + m.Length, "const ", 0, 6) != 0).ToList();   // 去掉包装自己的定义（参数以 const 开头）
@@ -883,11 +908,14 @@ namespace S2A.Dsh
                 if (args.Count <= rest0 || !arrays.TryGetValue(args[2], out var offs))
                     throw new DshError("gather offsets rewrite failed", Sl("offsets not a constant int2 array: " + msl[m.Index..j], 0, 160));
                 string rest = string.Join(", ", args.Skip(rest0)), tail = cmp ? "" : ", " + args[3], fn = cmp ? "gather_compare" : "gather";
-                sb.Append(msl, pos, m.Index - pos).Append("s2a_gather4(").Append(string.Join(", ", offs.Select(o => $"{args[0]}.{fn}({args[1]}, {rest}, {o}{tail}).w"))).Append(')');
+                var quad = GatherQuad(offs);
+                if (quad != null) sb.Append(msl, pos, m.Index - pos).Append($"({args[0]}.{fn}({args[1]}, {rest}, {quad.Value.Corner}{tail}).{quad.Value.Swz})");
+                else sb.Append(msl, pos, m.Index - pos).Append("s2a_gather4(").Append(string.Join(", ", offs.Select(o => $"{args[0]}.{fn}({args[1]}, {rest}, {o}{tail}).w"))).Append(')');
                 pos = j;
             }
             sb.Append(msl, pos, msl.Length - pos);
             string s = sb.ToString();
+            if (!s.Contains("s2a_gather4(", StringComparison.Ordinal)) return s;
             int at = s.IndexOf("using namespace metal;", StringComparison.Ordinal);
             if (at < 0) throw new DshError("gather offsets rewrite failed", "no using namespace metal;");
             at = s.IndexOf('\n', at) + 1;
@@ -951,7 +979,9 @@ namespace S2A.Dsh
         internal const long LB_DC = LB_MAXID + 1;
         internal const string RED_BEGIN = "// s2a:samp-emu 4 (S2A.Dsh FsRd)\n";   // 变体格式版本 4（11-03 加折行贴图 s2a_fx：超 Metal 2D 上限的高线性贴图）；3（11-01 表项改 S2ASe、加任意边界色 / 全过滤组合归约），宿主 nvn_mtl.m SE_VERSION 认它：旧版 2 的兜底文件重出
         static readonly Regex s_redCall = R(@"spvDescriptorSet0\.(\w+)\.sample\(");
-        static readonly Regex s_lbCall = R(@"spvDescriptorSet0\.(\w+)\.(?:sample|sample_compare)\(");   // FsLb：比较采样同样加偏置（缺口族 31）
+        // FsLb：比较采样同样加偏置（缺口族 31）。#529 营地阴影：深度贴图按 texture2d 声明时 SPIRV-Cross 写成 spvDepthCast(spvDescriptorSet0.X).sample_compare(...)，
+        //   原先只认直接调用，这一形态的定点深度比较标志、偏置都没加上（玩家同存档实测：左下地面平均亮度 26.22 → 44.71）。贴图成员名在第 1 或第 2 组（Tx）
+        static readonly Regex s_lbCall = R(@"(?:spvDepthCast\(spvDescriptorSet0\.(\w+)\)|spvDescriptorSet0\.(\w+))\.(?:sample|sample_compare)\(");
         static readonly Regex s_redEntry = R(@"^((?:\[\[[^\]]*\]\]\s*)*)(fragment|kernel) (\S+) main0\((.*)\)\n\{\n", RegexOptions.Multiline);
         // 成员的 [[id(N)]] 后面可以还有别的属性（[[id(4), raster_order_group(0)]]，SPIRV-Cross 给片元同步的资源这样写；马力欧派对 超级巨星 10-30）：
         //   三处成员正则与反射（Reflect）同一种写法，只认 [[id(N)]] 会漏掉它们——下一个 id 撞车、带第二属性的贴图不加偏置（审计 1101 18:00 P1-18）
@@ -988,7 +1018,7 @@ namespace S2A.Dsh
         static List<int> Starts(string body, Dictionary<string, (string Kind, string Elem)> tex, Regex call = null)
         {
             var l = new List<int>();
-            foreach (Match m in (call ?? s_redCall).Matches(body)) if (tex.ContainsKey(m.Groups[1].Value)) l.Add(m.Index);
+            foreach (Match m in (call ?? s_redCall).Matches(body)) if (tex.ContainsKey(Tx(m))) l.Add(m.Index);
             l.Reverse(); return l;
         }
         /// <summary>= call_at：st 起的采样调用 → (结尾, 参数, 贴图成员)；括号不闭合返回 null</summary>
@@ -1003,8 +1033,10 @@ namespace S2A.Dsh
                 if ((c == ',' && depth == 1) || depth == 0) { args.Add(body[a0..i].Trim()); a0 = i + 1; }
                 i++;
             }
-            return depth != 0 ? null : (i, args, m.Groups[1].Value);
+            return depth != 0 ? null : (i, args, Tx(m));
         }
+        /// <summary>采样调用匹配里的贴图成员名：第一个匹配上的捕获组（s_lbCall 的两种形态各一组；别的调用正则只有第 1 组）</summary>
+        static string Tx(Match m) { for (int g = 1; g < m.Groups.Count; g++) if (m.Groups[g].Success) return m.Groups[g].Value; return ""; }
         /// <summary>= fs_lb：片元 / 计算着色器 main0 里经单个采样器成员的每次采样加该采样器的偏置 b = spvDescriptorSet0.s2a_lb[成员 id]：level(l) → level((l) + b)、bias(x) → bias((x) + b)、
         /// gradient → 两个导数 × precise::exp2(b)、没写 LOD → 片元插 bias(b) / 计算插 level(b)（计算只带 min_lod_clamp(m) 的 → level(max(b, m))）；参数块末尾加 constant float* s2a_lb。没有可改的采样原样返回。
         /// 深度比较采样 sample_compare 同样改（缺口族 31：本机不吃采样器偏置时比较采样的偏置原来丢掉），LOD 参数排在参考值之后；
@@ -1026,7 +1058,8 @@ namespace S2A.Dsh
                 var ca = CallAt(main, st, s_lbCall);
                 if (ca == null) continue;
                 var (i, args, t) = ca.Value;
-                bool cmp = string.CompareOrdinal(main, st + "spvDescriptorSet0.".Length + t.Length, ".sample_compare(", 0, ".sample_compare(".Length) == 0;
+                string head = s_lbCall.Match(main, st).Value;   // 调用头原样（含 spvDepthCast( … ) 包法与方法名、左括号）：改写时照抄
+                bool cmp = head.EndsWith(".sample_compare(", StringComparison.Ordinal);
                 string kind = tex[t].Kind; int k = (kind.EndsWith("_array", StringComparison.Ordinal) ? 3 : 2) + (cmp ? 1 : 0);   // 比较采样：参考值在 LOD 之前
                 var sm = args.Count > 0 ? Full(@"spvDescriptorSet0\.(\w+)", args[0]) : null;
                 if (sm == null || !sm.Success || !smp.ContainsKey(sm.Groups[1].Value) || args.Count < k) continue;
@@ -1050,7 +1083,7 @@ namespace S2A.Dsh
                 }
                 else if (!frag && lods.Count > 0) { var (j, lm) = lods[0]; na[j] = "level(max(" + b + ", " + lm.Groups[2].Value + "))"; }   // 计算、只带 min_lod_clamp(m)：level(max(b, m))
                 else na.Insert(k, frag ? "bias(" + b + ")" : "level(" + b + ")");
-                main = main[..st] + "spvDescriptorSet0." + t + (cmp ? ".sample_compare(" : ".sample(") + string.Join(", ", na) + ")" + main[i..]; n++;
+                main = main[..st] + head + string.Join(", ", na) + ")" + main[i..]; n++;
             }
             if (n == 0) return src;
             src = src[..b0] + main + src[(b1 + 1)..];

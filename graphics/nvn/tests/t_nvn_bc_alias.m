@@ -14,6 +14,7 @@
 //   B 增量：BC 贴图先被用过一次（存储全 0，读回全 0），之后 GPU 写 RG32UI，再用 → 应 = 已知块（第一次读回应全 0）
 //   C 负对照：关掉同步（g_bcal_off），按 A 的次序 → 读回不等于已知块（说明 A 的通过靠的是同步，不是巧合）
 //   E 写入者早已出了已释放贴图环：GPU 写 RG32UI 后 Finalize，再过 600 张贴图，BC 贴图才第一次用 → 应 = 已知块（#951 菜单缩略图）
+//   F 写入者 Finalize 后存储被另一张贴图 GPU 覆写 → 记账放掉留住的写入者贴图（不再延长它的寿命）；G 对照：没被覆写的仍留着
 //   D CPU 后写为准：GPU 写 RG32UI 之后，CPU 往同一段存储写进另外 4 个块（8x8 BC1 只占一个 GOB，块 (bx, by) 在 GOB 内偏移 8·(2·by + bx)），BC 贴图再第一次被用 → 应 = CPU 写的块
 #include "../gfx/nvn/nvn_mtl.m"
 #include "../gfx/nvn/nvn_protos.h"
@@ -123,6 +124,20 @@ int main(void) { @autoreleasepool {
       read_blocks(&bc, got);
       CHECK(!memcmp(got, want, 32), "E 写入者 Finalize 后又过了 600 张贴图、BC 贴图才用：读回的块 = 写进去的 4 个块");
       int bad = sample(&bc); CHECK(!bad, "E 64 个像素与手算一致（不符 %d）", bad); }
+    // F：写入者 Finalize 后，另一种描述的贴图在同一段存储上 GPU 写过（字节已不是写入者的）→ 记账放掉留住的写入者贴图（11-14 每帧换尺寸的渲染目标一张张被留住、
+    //   图形内存只涨不落）。对照：同样 Finalize、没被覆写的那一项（G）过同样多次提交仍留着（E 要的就是它）
+    { static NVNtexture rg, ow, rg2; int wk = 0, wk2 = 0; uint64_t k = (uint64_t)(uintptr_t)(mem + (13 << 20)), k2 = (uint64_t)(uintptr_t)(mem + (14 << 20));
+      @autoreleasepool {
+        tex(&rg, NVN_FORMAT_RG32UI, 2, 13 << 20); gpu_write(&rg); tex(&rg2, NVN_FORMAT_RG32UI, 2, 14 << 20); gpu_write(&rg2);
+        pthread_mutex_lock(&g_bcal_mu); bcal_e *e = nvn_hm_get(&g_bcal, &k), *e2 = nvn_hm_get(&g_bcal, &k2);
+        wk = e && e->wtex; wk2 = e2 && e2->wtex; pthread_mutex_unlock(&g_bcal_mu);   // 写完、Finalize 之前两项都留着写入者贴图
+        API(nvnTextureFinalize)(&rg); API(nvnTextureFinalize)(&rg2);
+        tex(&ow, NVN_FORMAT_R32UI, 2, 13 << 20); gpu_write(&ow);
+        for (int i = 0; i < 40; i++) run(^{});
+      }
+      pthread_mutex_lock(&g_bcal_mu); bcal_e *e = nvn_hm_get(&g_bcal, &k), *e2 = nvn_hm_get(&g_bcal, &k2); int held = e && e->wtex, held2 = e2 && e2->wtex; pthread_mutex_unlock(&g_bcal_mu);
+      CHECK(wk && !held, "F 写入者 Finalize 后存储被另一张贴图（R32UI，不是块大小的写入者）GPU 覆写：记账不再留着它（表里 %s）", held ? "还留着" : "已放");
+      CHECK(wk2 && held2, "G 对照：写入者 Finalize 后存储没被覆写，过同样 40 次提交记账仍留着它（表里 %s）", held2 ? "留着" : "已放"); }
     printf("%s t_nvn_bc_alias：%u 项，不符 %u（Metal %s）\n", failures ? "✗" : "✓", checks, failures, g_m3 ? "3" : "4");
     return failures != 0;
 } }

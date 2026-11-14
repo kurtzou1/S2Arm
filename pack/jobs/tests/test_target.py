@@ -148,6 +148,16 @@ class TargetTests(JobCase):
         with self.assertRaises(target.TargetError):
             target.check(dict(gpuArch="applegpu_g12p", os=18, model="iPhone 11"))
 
+    def test_unknown_os_is_not_too_old(self):
+        # 11-14 诊断#6472c1：devicectl 列不出、改问 ideviceinfo 时只拿到机型，os=0；原先报「系统是 iOS 0，请先升级系统」拦下出包。
+        #   期望：os=0（不知道）照常放行；读到真实的 17 照旧拒；芯片太老照旧拒
+        ok = target.check(dict(gpuArch="applegpu_g14p", os=0, model="iPhone14,3"))
+        self.assertEqual(ok["os"], 0)
+        with self.assertRaises(target.TargetError):
+            target.check(dict(gpuArch="applegpu_g13p", os=17, model="iPhone 12"))
+        with self.assertRaises(target.TargetError):
+            target.check(dict(gpuArch="applegpu_g12p", os=0, model="iPhone 11"))
+
     def test_os_choices_span_sdk_down_to_18(self):
         # 期望：所用 iOS SDK 27.1 → 可选系统 27、26 … 18 共 10 个（手算）
         with patch.object(target.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "27.1\n", "")):

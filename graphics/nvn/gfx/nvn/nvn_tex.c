@@ -55,6 +55,16 @@ static void samples_xy(int s, uint32_t *sx, uint32_t *sy) {
 // its 1024×1024 ASTC 6×6 textures (48 GOBs wide instead of 43, level 1 at 0x90000 instead of 0x81000) read 2,183 all-zero blocks in level 0 and 3,043 in level 1, which ASTC
 // decodes as its error colour (magenta clothes)
 enum { SPARSE_TILE = 0x10000 };
+// S2Arm（11-13 金手指堆偏移根修）：可压缩贴图（NVN_TEXTURE_FLAGS_COMPRESSIBLE 0x8、非线性）在有压缩种类的格式上，真驱动按大页给：对齐 64 KB、
+//   大小取整到 64 KB。实测（奥德赛 SDK 驱动，Mac 上跑游戏自带驱动逐格式对比 128×128 单级）：放大的是 32 / 64 / 128 位颜色格式
+//   （R32* 0x0a–0x0c、RG16* / RG32* 0x11–0x18、RGBA8* / RGBA16* / RGBA32* 0x25–0x30、RGBA8_SRGB 0x38、RGB10A2* 0x3d–0x3e、R11G11B10F 0x3f）与
+//   全部深度格式（0x32 D16、0x34 D32F、0x35 D24S8、0x36 D32FS8）；8 / 16 位颜色、块压缩、线性的不放大。0x33 D24、0x37 RGBX8_SRGB 没被探到，
+//   按同一规律（深度 / 32 位颜色）算进来。按 512 答会让游戏从自己堆里少分配，此后的堆对象整体前移（奥德赛差 0x10000，按真机偏移写的金手指写错地方）
+static int compress_big(const nvn_texdesc *d) {
+    if (!(d->flags & 0x8) || (d->flags & (0x10 | 0x40)) || d->target == 10) return 0;
+    int f = d->format;
+    return (f >= 0x0a && f <= 0x0c) || (f >= 0x11 && f <= 0x18) || (f >= 0x25 && f <= 0x30) || (f >= 0x32 && f <= 0x38) || (f >= 0x3d && f <= 0x3f);
+}
 static int sparse_of(const nvn_texdesc *d) { return (d->flags & 0x20) && !(d->flags & (0x10 | 0x40)) && d->target != 10; }
 // The shape of a sparse texture's 64 KB page, chosen by texel size (log2: GOB columns *x, block height *y in GOBs, block depth *z); 0 when the texture has no sparse pages.
 // A sparse texture without a packaged layout is laid out with this block height / depth, not the automatic one: Samurai Shodown's 512×512 ASTC 6×6 sparse textures
@@ -78,12 +88,15 @@ static int sparse_page(const nvn_texdesc *d, fmt_t t, unsigned *x, unsigned *y, 
 //   automatic block height. Samurai Shodown's 700×200 ASTC 6×6 sparse menu labels (34 block rows, page 384×384) come with the automatic 4-GOB block height; with the page's
 //   8 GOBs, block columns 60 on read as all-zero blocks, which ASTC decodes as its error colour (magenta blocks over the main menu labels, 10-27)
 static int sparse_levels(const nvn_texdesc *d) { uint32_t tl[4]; nvn_tex_sparse_layout(d, tl); return tl[0] != 0; }
+// Packaged layout byte 1, low nibble: log2 of the width alignment in GOBs (0 = none). Byte 0: low nibble log2 block height, high nibble log2 block depth (#676, after nxnative nvn_tex.c)
+static unsigned packaged_width_log2(const nvn_texdesc *d) { return d->pkg_layout ? ((unsigned)(d->pkg_layout - 1) >> 8) & 0xf : 0; }
 // Offset of level `level` from the start of its layer, and the GOB columns it is laid out with (*gobs, may be NULL)
 static uint64_t level_walk(const nvn_texdesc *d, unsigned level, unsigned dpl, uint32_t w, uint32_t h, uint32_t z,
                            unsigned tileH, unsigned tileD, fmt_t t, uint32_t *gobs) {
     uint32_t sx, sy; samples_xy(d->samples, &sx, &sy);
-    uint32_t tw = 128u >> (tileH + tileD); if (!tw) tw = 1;   // GOB columns of a 64 KB tile
-    int tiled = sparse_of(d) && sparse_levels(d);   // still in a sparse texture's tiled levels
+    unsigned pw = packaged_width_log2(d);
+    uint32_t tw = pw ? 1u << pw : 128u >> (tileH + tileD); if (!tw) tw = 1;   // GOB columns of a tile: the packaged width alignment, else those of a 64 KB tile
+    int tiled = (sparse_of(d) && sparse_levels(d)) || pw;   // still in the tiled levels (a sparse texture's, or a packaged layout's with width alignment)
     uint64_t off = 0;
     for (unsigned i = 0;; i++) {
         uint32_t lw = blk(mip(w * sx, i), t.bw);
@@ -94,9 +107,6 @@ static uint64_t level_walk(const nvn_texdesc *d, unsigned level, unsigned dpl, u
         uint32_t wg = (lwb + 63) / 64, hg = (lh + 7) / 8;
         tiled = tiled && lwb >= tw * 64 && lh >= 8u << tileH && ld >= 1u << tileD;
         if (tiled) wg = (wg + tw - 1) / tw * tw;
-        // Packaged layout byte 1: the row pitch of a level at least 2^n GOBs wide is aligned up to 2^n GOBs; narrower levels are not aligned.
-        // Packaged ASTC / BC textures in 01004A4010FEA000 need it; read unaligned, the padding (all zero) is sampled and ASTC decodes it as magenta
-        { unsigned pa = (unsigned)(d->pkg_block_h >> 8) & 0xff; if (!tiled && pa > 1) { unsigned a = 1u << (pa - 1); if (wg >= a) wg = (wg + a - 1) / a * a; } }
         if (i == level) { if (gobs) *gobs = wg; return off; }
         uint32_t ht = (hg + (1u << th) - 1) >> th, dt = (ld + (1u << td) - 1) >> td;
         off += (uint64_t)wg * ht * dt << (9 + th + td);
@@ -104,6 +114,20 @@ static uint64_t level_walk(const nvn_texdesc *d, unsigned level, unsigned dpl, u
 }
 static uint64_t level_offset(const nvn_texdesc *d, unsigned level, unsigned dpl, uint32_t w, uint32_t h, uint32_t z, unsigned tileH, unsigned tileD, fmt_t t) {
     return level_walk(d, level, dpl, w, h, z, tileH, tileD, t, 0);
+}
+// Bytes of one layer (all levels): a sparse texture's whole 64 KB tiles, a layered texture's layer aligned to its block (to its whole block times the width alignment of a packaged layout with one)
+static uint64_t layer_bytes(const nvn_texdesc *d, unsigned dpl, int layered, uint32_t w, uint32_t h, uint32_t z, unsigned tileH, unsigned tileD, fmt_t t) {
+    uint64_t ls = level_offset(d, d->levels ? d->levels : 1, dpl, w, h, z, tileH, tileD, t);
+    if (sparse_of(d)) ls = (ls + SPARSE_TILE - 1) & ~(uint64_t)(SPARSE_TILE - 1);
+    if (layered) {
+        uint32_t hh = blk(h, t.bh); unsigned th = tileH, td = tileD;
+        while (th && hh <= (8u << (th - 1))) th--;
+        while (td && z <= (1u << (td - 1))) td--;
+        unsigned pw = packaged_width_log2(d);
+        unsigned sh = pw ? pw + tileH + tileD + 9 : th + td + 9; uint64_t g = ls >> sh;
+        if (ls != g << sh) ls = (g + 1) << sh;
+    }
+    return ls;
 }
 
 void nvn_tex_layout(const nvn_texdesc *d, nvn_texlayout *o) {
@@ -126,22 +150,25 @@ void nvn_tex_layout(const nvn_texdesc *d, nvn_texlayout *o) {
     }
     unsigned tileH = 0, tileD = 0;
     unsigned px, py, pz;
-    if (dpl == 2) { uint32_t ah = blk(h * sy, t.bh); tileH = (d->pkg_block_h & 0xff) ? (unsigned)(d->pkg_block_h & 0xff) - 1 : sparse_page(d, t, &px, &py, &pz) && sparse_levels(d) ? py : pick_tile(ah * 3 / 16); }
-    else if (dpl == 3) { if (sparse_page(d, t, &px, &py, &pz)) { tileH = py; tileD = pz; } else tileD = pick_tile(z + z / 2); }
-    o->tileH = tileH; o->tileD = tileD;
-    unsigned levels = d->levels ? d->levels : 1;
-    uint64_t ls = level_offset(d, levels, dpl, w, h, z, tileH, tileD, t);
-    if (sparse_of(d)) ls = (ls + SPARSE_TILE - 1) & ~(uint64_t)(SPARSE_TILE - 1);
-    if (layered) {                                                    // Layer size is aligned to the block
-        uint32_t hh = blk(h, t.bh); unsigned th = tileH, td = tileD;
-        while (th && hh <= (8u << (th - 1))) th--;
-        while (td && z <= (1u << (td - 1))) td--;
-        unsigned sh = th + td + 9; uint64_t g = ls >> sh;
-        if (ls != g << sh) ls = (g + 1) << sh;
+    if (d->pkg_layout) {                                              // packaged byte 0: low nibble block height, high nibble block depth (#676)
+        unsigned pl = (unsigned)(d->pkg_layout - 1) & 0xff;
+        if (dpl >= 2) tileH = pl & 0xf;
+        if (dpl == 3) tileD = pl >> 4;
     }
+    else if (dpl == 2) { uint32_t ah = blk(h * sy, t.bh); tileH = sparse_page(d, t, &px, &py, &pz) && sparse_levels(d) ? py : pick_tile(ah * 3 / 16); }
+    else if (dpl == 3) { if (sparse_page(d, t, &px, &py, &pz)) { tileH = py; tileD = pz; } else tileD = pick_tile(z + z / 2); }
+    uint64_t ls = layer_bytes(d, dpl, layered, w, h, z, tileH, tileD, t);
+    // MINIMAL_LAYOUT (0x200): the driver keeps the automatic block height and depth only when the whole layer (every level, the layer alignment) is no larger than with 1-GOB blocks,
+    //   else it takes 1-GOB blocks (driver sweep, after nxnative nvn_tex.c). A packaged layout and a sparse texture's tiles keep their own
+    if ((d->flags & 0x200) && !d->pkg_layout && !sparse_of(d) && (tileH || tileD)) {
+        uint64_t one = layer_bytes(d, dpl, layered, w, h, z, 0, 0, t);
+        if (one != ls) { tileH = tileD = 0; ls = one; }
+    }
+    o->tileH = tileH; o->tileD = tileD;
     o->layer_size = ls;
     o->size = layered ? ls * z : ls;
     o->align = sparse_of(d) ? SPARSE_TILE : 512;
+    if (compress_big(d)) { o->align = 0x10000; o->size = (o->size + 0xffff) & ~(uint64_t)0xffff; }   // 见 compress_big：同真驱动大页
 }
 
 uint64_t nvn_tex_level_offset(const nvn_texdesc *d, unsigned level) {

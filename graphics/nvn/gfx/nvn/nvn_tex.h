@@ -5,7 +5,7 @@
 typedef struct {
     int target, format, flags, samples;   // NVNtextureTarget / NVNformat / NVNtextureFlags / sample count (0 or 1 = single-sampled)
     uint32_t width, height, depth, levels, stride;
-    int pkg_block_h;                      // Bits 0-7: byte 0 of the packaged texture layout parameters (log2 of block height) + 1; bits 8-15: byte 1 (log2 of the row-width alignment in GOBs) + 1; 0 = use the automatic algorithm
+    int pkg_layout;                       // Packaged layout byte 0 (low nibble log2 block height, high nibble log2 block depth) | byte 1's low nibble (log2 width alignment in GOBs) << 8, + 1; 0 = automatic
 } nvn_texdesc;
 
 typedef struct {

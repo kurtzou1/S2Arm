@@ -1906,7 +1906,8 @@ static int svc_mem_impl(int num, uint64_t *regs, uint64_t orig) {
             if (atomic_fetch_add(&said, 1) < 8) LOG("Break 通知（仅通知、不是错误，继续）原因 %#llx 位于 %s+%#llx", (unsigned long long)regs[0], m ? m->name : "?", (unsigned long long)(m ? orig - (uint64_t)m->base : orig));
             regs[0] = 0; return 1;
         }
-        LOG("【红】Break 原因 %#llx 载荷 %#llx+%#llx 位于 %s+%#llx", (unsigned long long)regs[0], (unsigned long long)regs[1], (unsigned long long)regs[2], m ? m->name : "?", (unsigned long long)(m ? orig - (uint64_t)m->base : orig));
+        { char at[256]; if (!s2a_guest_where(orig, at, sizeof at)) snprintf(at, sizeof at, "?+%#llx", (unsigned long long)orig);   // 带导出名（#806）
+          LOG("【红】Break 原因 %#llx 载荷 %#llx+%#llx 位于 %s", (unsigned long long)regs[0], (unsigned long long)regs[1], (unsigned long long)regs[2], at); }
         // SDK 的「结果不成功就中止」（原因 0、载荷 4 字节）载荷就是那个失败的 Result：读出来按 2xxx-yyyy 打，一眼看出是哪个服务回了什么
         //   （10-29 普查 Servonauts / Fit Boxing 3 同在 sdk+0x162868 中止，日志只有载荷地址、没有值，定不了是哪个服务）。载荷在游戏栈上，只读窗口内对齐的
         if (regs[2] == 4 && !(regs[1] & 3) && win_has(regs[1], 4)) {

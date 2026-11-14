@@ -58,7 +58,7 @@ for name, source in (("old", old), ("new", new)):
     command = ["xcrun", "--sdk", "macosx", "clang", "-O1", "-g", "-fobjc-arc",
                "-Wall", "-Wextra", "-Wno-unused-parameter", "-Iruntime/include", "-Iruntime/src", "-Iios",
                "-framework", "Foundation", *WEAK,
-               "-o", str(OUT / name), str(path), "runtime/src/pad.c", "ios/settings.m", "runtime/src/caps.c", "runtime/src/patch.c", "runtime/src/launchctx.c"]
+               "-o", str(OUT / name), str(path), "runtime/src/pad.c", "ios/settings.m", "ios/cpatch_model.m", "runtime/src/caps.c", "runtime/src/patch.c", "runtime/src/launchctx.c"]
     run(*command, env=environment)
     run(str(OUT / name), str(OUT / f"{name}.tsv"), stdout=(OUT / f"{name}.stdout").open("w"))
 

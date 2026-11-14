@@ -9,9 +9,9 @@ public sealed record LibraryJobOutput(LibraryJobResult Report, ProbeOutput Outpu
 public static class LibraryJobClient
 {
     public static async Task<LibraryJobOutput> RunAsync(LauncherPaths paths, string privateRoot, string library,
-        string? libraryId, string operation, IReadOnlyList<string>? selectedPaths, CancellationToken cancellationToken, string? moveFrom = null, bool partialResults = false, string? probe = null, string? jobId = null, bool startup = false, bool freeDefault = false, IReadOnlyCollection<string>? accept = null, IReadOnlyDictionary<string, object?>? fields = null)
+        string? libraryId, string operation, IReadOnlyList<string>? selectedPaths, CancellationToken cancellationToken, string? moveFrom = null, bool partialResults = false, string? probe = null, string? jobId = null, bool startup = false, bool freeDefault = false, IReadOnlyCollection<string>? accept = null, IReadOnlyDictionary<string, object?>? fields = null, string? gameId = null)
     {
-        if (operation is not ("setup" or "catalog" or "keys" or "import" or "diagnostics" or "diagnosticsUpload" or "exportPush" or "locations" or "storageOverview" or "spaceSurvey"))
+        if (operation is not ("setup" or "catalog" or "keys" or "import" or "diagnostics" or "diagnosticsUpload" or "exportPush" or "locations" or "storageOverview" or "spaceSurvey" or "patchMatch"))
             throw new ArgumentException("Unsupported library operation.", nameof(operation));
         cancellationToken.ThrowIfCancellationRequested();
         privateRoot = Path.GetFullPath(privateRoot);
@@ -44,6 +44,12 @@ public static class LibraryJobClient
         if (probe is not null && operation == "locations") payload["probe"] = Path.GetFullPath(probe);
         // 启动器这次打开后的第一次 catalog（剃刀 H14）：作业层只在这一次清残留、判一天一次的任务目录清理
         if (startup && operation == "catalog") payload["startup"] = true;
+        // 出包页 S 级优化（11-13，pack/jobs/patches.py match）：这款命中了哪些社区补丁；resources = 启动器目录（随包补丁快照 CommunityPatches/ 在这里）
+        if (operation == "patchMatch")
+        {
+            if (string.IsNullOrEmpty(gameId)) throw new ArgumentException("patchMatch needs a game.");
+            payload["gameId"] = gameId; payload["resources"] = Path.GetFullPath(AppContext.BaseDirectory);
+        }
         if (operation is "keys" or "diagnostics")
         {
             if (selectedPaths?.Count != 1) throw new ArgumentException("Choose exactly one file.");

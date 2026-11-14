@@ -38,7 +38,7 @@ static wmod_t *g_w;   // 按模块下标，g_mod_cap 项（本局第一次装宽
 static pthread_t g_scanner;
 static int g_scanner_started;
 static _Atomic int g_scanner_stop;
-static int g_full = -1, g_setting_on = -1, g_default_narrow;
+static int g_full = -1, g_setting_on = -1, g_default_narrow, g_ws_yield = -1;
 #if defined(__ANDROID__)
 static int g_android_widen_active;
 // Authenticated source tables are copied before the source lease is released.
@@ -134,7 +134,18 @@ static int widen_setting_on(void) {
     if (!on) LOG("宽屏：设置未启用，整局 16:9 原比例加黑边");
     return on;
 }
+// 补丁优先（11-13 维护者「补丁的优先级比咱们自己的高，满画幅是一样的」）：本款开着社区宽屏类补丁（runtime/src/cpatch.c s2a_cpatch_ws_enabled）→ 我方满屏整体让位
+//   （屏幕宽按 1920、各层宽屏不开，游戏按补丁画幅画、上屏按补丁画幅铺满），压过 S2A_WIDEN_VERIFIED / 满屏明确开，不拉宽两次。装载前不知道、不缓存
+__attribute__((weak)) int s2a_cpatch_ws_enabled(const char *dir) { (void)dir; return 0; }   // cpatch.c 强定义；只链 widen.c 的单测用这个
+static int ws_yield(void) {
+    if (g_ws_yield >= 0) return g_ws_yield;
+    const char *d = s2a_module_dir(); if (!d || !d[0]) return 0;
+    g_ws_yield = s2a_cpatch_ws_enabled(d);
+    if (g_ws_yield) LOG("宽屏：开着社区宽屏补丁，S2Arm 满屏让位（补丁优先），整局按补丁画幅铺满");
+    return g_ws_yield;
+}
 static int widen_verified(void) {
+    if (ws_yield()) return 0;
     const char *e = getenv("S2A_WIDEN_VERIFIED"); if (e) return !strcmp(e, "1");
     if (!widen_setting_on()) return 0;
     // 包内能力清单（runtime/src/caps.c：1 = 开、0 = 发布包能力卡未验按 16:9）：在用户设置之后、名单之前（审计 #854 F-caps-beats-settings）
@@ -148,6 +159,7 @@ static int widen_verified(void) {
 }
 // 放 / 不放的来源，按 widen_verified 的判定顺序（10-30 #996：原先能力清单开也写「本款在宽屏已验证名单」，读日志的人当成验证过，丝之歌没验证就被宽屏放开）
 static const char *widen_src(void) {
+    if (ws_yield()) return "开着社区宽屏补丁（补丁优先）";
     const char *e = getenv("S2A_WIDEN_VERIFIED"); if (e) return !strcmp(e, "1") ? "S2A_WIDEN_VERIFIED=1 覆盖" : "S2A_WIDEN_VERIFIED=0 覆盖";
     if (!widen_setting_on()) return "设置里宽屏关";
     const char *c = getenv("S2A_WIDEN_CAPS"); if (c) return !strcmp(c, "1") ? "包内能力清单开（发布缺省开，未必验证过）" : "包内能力清单关";
@@ -232,17 +244,25 @@ static _Atomic int g_force_native, g_force_w, g_force_h;   // s2a_widen_force_na
 // 按窗口像素尺寸跟屏（审计 P1-83：Mac 壳从不换屏幕宽，窗口拉宽 / 全屏后逻辑分辨率仍是 1920×1080、两侧黑边；维护者 任何比例都满屏，Mac 一样）：
 //   与 iOS 同一口径（ios/app.m s2a_ios_screen_w / h）：比 16:9 宽 → 宽 = 1080 × 宽高比（取偶）、高 1080；比 16:9 窄 → 宽 1920、高 = 1920 ÷ 宽高比（取偶）。
 //   经 s2a_screen_switch 热切（名单门、范围夹取同它）；玩家选了退回原生 16:9（钉住）或环境变量给定屏幕（判定局 / 模拟换屏）时不跟。变了返回 1
+__attribute__((weak)) void s2a_cpatch_aspect(double A) { (void)A; }   // runtime/src/cpatch.c 强定义：自适应画幅补丁按窗口 / 屏幕比例重选模板、重算值（不过宽屏名单门：社区补丁自己改画幅）；只链 widen.c 的单测用这个空的
 int s2a_screen_fit(int pw, int ph) {
+    if (pw > 0 && ph > 0 && !getenv("S2A_CPATCH_ASPECT")) s2a_cpatch_aspect((double)pw / ph);
     if (g_force_native || pw <= 0 || ph <= 0 || getenv("S2A_SCREEN_W") || getenv("S2A_SCREEN_H")) return 0;
     double r = (double)pw / ph;
     return s2a_screen_switch(((int)(1080.0 * r)) & ~1, r * 9 < 16 ? ((int)(1920.0 / r)) & ~1 : 1080);
 }
+#if TARGET_OS_IPHONE
+// iOS 当前屏的宽高比（自适应画幅补丁用，cpatch.c 装载时与下面换屏时同一口径）。s2a_ios_screen_w 是「1080 高对应的宽」、s2a_ios_screen_h 是
+//   「1920 宽对应的高」（比 16:9 宽时 1080），两者口径不同不能直接相除（Duo 内屏 1534 ÷ 1350 = 1.136，真屏 1.42）：窄屏按 1920 ÷ 高、宽屏按 宽 ÷ 1080
+double s2a_ios_screen_aspect(void) { int h = s2a_ios_screen_h(); return h > 1080 ? 1920.0 / h : s2a_ios_screen_w() / 1080.0; }
+#endif
 int s2a_screen_reaspect(void) {
     if (g_force_native) return 0;   // 玩家选了退回原生 16:9：App 壳布局回调不许把屏宽改回真屏
 #if TARGET_OS_IPHONE
     // 只保护跨分屏模式的变化；普通合上 / 展开沿用主线的满屏热切策略。
     // 对比装载时的模式，重复布局回调不能绕过；切回原模式后自然恢复跟屏。
     if (g_on > 0 && split_active() != g_split_at_load) return 0;
+    if (s2a_ios_screen_known() && s2a_ios_screen_h() > 0 && !getenv("S2A_CPATCH_ASPECT")) s2a_cpatch_aspect(s2a_ios_screen_aspect());
     if (getenv("S2A_SCREEN_W") || getenv("S2A_SCREEN_H") || !s2a_ios_screen_known()) return 0;   // 环境变量给定的（Mac 模拟 / 判定局）不跟屏
     return s2a_screen_switch(s2a_ios_screen_w(), s2a_ios_screen_h());   // 运行中换到窄屏（Duo 合上 / 展开）按新屏加高
 #else
@@ -655,7 +675,7 @@ int s2a_widen_session_reset(void) {
     free(g_w); g_w = NULL;
     g_W = 1920; g_H = 1080; g_any = g_on = g_lyt = g_size = g_hsize = 0; g_dir[0] = 0;
     atomic_store(&g_sw, 0); atomic_store(&g_sh, 0); atomic_fetch_add(&g_sgen, 1);
-    g_full = g_setting_on = -1;
+    g_full = g_setting_on = g_ws_yield = -1;
 #if defined(__ANDROID__)
     g_android_widen_active = 0;
     for (unsigned i = 0; i < 5; i++) { free(g_android_policy[i]); g_android_policy[i] = NULL; g_android_policy_len[i] = 0; }

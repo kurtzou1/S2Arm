@@ -8,6 +8,7 @@
   ⑥–⑫ 实测退回（10-29 维护者）：验证账同程序号 + 构建号 + fps60 内容哈希、60 帧开着的局，持续 < 57 帧或 > 4.8 W → fps60 0；
       哈希不同（实现 / 数据改了）、实测两列为 -（那局 60 帧关）、--all-caps → 照开；能耗线常量与 score_cells 一致"""
 import os, sys, tempfile
+os.environ['S2A_CAPS_OWN'] = '1'   # 本测的是我方 60 帧 / 满屏旧口径（11-13 起发布缺省只用社区补丁，见 tests/caps_patch_only_test.py）
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'tools'))
 import caps_policy as cp
 

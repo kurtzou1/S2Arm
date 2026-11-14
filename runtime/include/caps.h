@@ -14,8 +14,8 @@ void s2a_caps_apply(const char *dir);
 void s2a_caps_reset(void);
 // 本局放开出图间隔的来源（S2A_FPS60=1 且：清单 fps60_display 1，或这款不是速度已验证默认开的款）；开关不在这里套（graphics/nvn/host/game_profile.h DM_GAME_PRESENT_DISPLAY）
 int s2a_fps60_display_source(void);
-// 清单 fps60 行算不算「速度已验证正确、默认开」（11-11）：值 1 且原因含「fps.tsv」「逻辑速度同局 A/B 绿」「游戏原生 60 帧」之一。
-//   宿主（caps.c）与 iOS 设置页缺省显示值共用这一份规则；Mac 启动器（pack/jobs/community.py）照抄同三个字样，改字样要两边同步
+// 清单 fps60 行算不算「速度已验证正确、默认开」（11-11；11-13 加社区帧率补丁：版本精确命中才进得了包）：值 1 且原因含「fps.tsv」「逻辑速度同局 A/B 绿」「社区帧率补丁」「游戏原生 60 帧」之一。
+//   宿主（caps.c）与 iOS 设置页缺省显示值共用这一份规则；Mac 启动器（pack/jobs/community.py）照抄同三个字样，改字样要两边同步（现四个字样）
 int s2a_caps_fps60_verified(const char *val, const char *why);
 
 #endif

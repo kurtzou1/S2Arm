@@ -320,7 +320,8 @@ def check(target, sdk_top=None):
         raise TargetError(f"认不出 {label} 的 GPU：请把 Xcode 更新到最新版。", code="xcode_unavailable")
     if gen(arch) < MIN_GEN:
         raise TargetError(f"{label} 的芯片太老，S2Arm 暂时打不了这台设备的包（需要 A14 / M1 及更新的芯片）。", code="target_unsupported")
-    if osv < MIN_OS:
+    # os=0 = 读不到系统版本（devicectl 列不出、改问 ideviceinfo 只拿到机型）：不知道不等于太旧，不拦（11-14 诊断#6472c1：iPhone14,3 被报「系统是 iOS 0，请先升级系统」）
+    if osv and osv < MIN_OS:
         raise TargetError(f"{label} 的系统是 iOS {osv}，S2Arm 需要 iOS {MIN_OS} 或更新：请先升级系统。", code="target_unsupported")
     if sdk_top and osv > sdk_top:
         raise TargetError(f"{label} 的系统是 iOS {osv}，但所用 Xcode 只带 iOS {sdk_top} 的 SDK，出不了这个系统版本的着色器：请把 Xcode 更新到最新版。", code="xcode_sdk_too_old")

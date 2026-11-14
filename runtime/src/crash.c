@@ -18,6 +18,7 @@
 
 __attribute__((weak)) int s2a_trap_brk(void *ctx);   // traps.c；只编 crash.c 的单测 / 安卓测试壳里没有它
 static void where(uint64_t a, char *b, size_t n) {   // 地址 → 「模块+偏移」或宿主符号
+    if (s2a_guest_where(a, b, n)) return;   // 游戏模块：「模块+偏移（导出名+偏移）」（loader.c，#806：玩家那版 sdk 我们手里没有时也能读回溯）
     module_t *m = module_of((void *)a);
     if (m) {   // 补丁区：近端在映像尾（偏移 ≥ patch_off），FAR 在基址前（偏移为负，按有符号打，原先无符号相减打成 0xffff… 回绕值）
         int64_t off = (int64_t)(a - (uint64_t)m->base);

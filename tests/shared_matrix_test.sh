@@ -125,6 +125,19 @@ o=$(run --check); r=$?
 ck "新缺口登记例外后 → 绿（rc=${r}）" '[ $r = 0 ]'
 sed_edit '/^runtime\/src\/late.c/d' "$R/docs/安卓接入矩阵_例外.tsv"
 
+# 服务层 C# 只靠导出名对外（[UnmanagedCallersOnly(EntryPoint = "…")]）、由共用 C 代码按名字 dlsym 取：没人取 → 红；
+#   安卓链上的 C 文件 dlsym(RTLD_DEFAULT, "那个名字") → 算接线、绿（11-14：EntryPoint 导出名原先从去了字符串的源里取，永远取不到；dlsym 取的也不认）
+cat > "$R/services/S2A.Services/Exported.cs" <<'EOF2'
+using System.Runtime.InteropServices;
+static class Exported { [UnmanagedCallersOnly(EntryPoint = "S2A_TestExportOpen")] static uint Open() => 1; }
+EOF2
+o=$(run --check); r=$?
+ck "服务层只有导出名、没人取 → 红（rc=${r}）" '[ $r != 0 ] && echo "$o" | grep -q "【红】新增共用模块 services/S2A.Services/Exported.cs"'
+echo 'int y(void){ unsigned (*f)(void) = (unsigned (*)(void))dlsym(RTLD_DEFAULT, "S2A_TestExportOpen"); return f ? (int)f() : 0; }' >> "$R/android/native/caller.c"
+o=$(run --check); r=$?
+ck "安卓链上的 C 代码 dlsym 取导出名 → 算接线、不再红（前一场景的 late.c 还在，只看 Exported）" '! echo "$o" | grep "【红】" | grep -q Exported'
+rm "$R/services/S2A.Services/Exported.cs"; sed_edit '/S2A_TestExportOpen/d' "$R/android/native/caller.c"
+
 # 把 oldgap 接上：进 core 名单 + 安卓调用方 → 缺口收窄 → 基线条目变旧 → 【黄】但绿
 sed_edit 's/set(core alpha)/set(core alpha oldgap)/' "$R/android/CMakeLists.txt"
 echo 'extern int s2a_oldgap_kick(void); int a(void){ return s2a_oldgap_kick(); }' > "$R/android/native/oldgap_use.c"
@@ -143,6 +156,15 @@ p.write_text(t.replace(old, "def gap(m):\n    return set()  # 负对照桩\n    
 PYEOF
 o=$(cd "$R" && PYTHONPATH="$H/tools" python3 "$T/shared_matrix_mut.py" --root "$R" --check 2>&1); r=$?
 ck "负对照：阉割 gap() 后 --check 应变绿（rc=${r}）" '[ $r = 0 ]'
+
+# 只认提交内容（11-14：门禁机检出目录复用，未跟踪的生成文件曾让真仓 --check 时红时绿）：合成仓提交成 git 仓，
+#   再丢一份未跟踪的生成 cmake（把 newmod 接进安卓）→ --check 输出必须与丢之前逐字相同
+(cd "$R" && git init -q && git add -A && git -c user.name=t -c user.email=t@t commit -qm base) > /dev/null 2>&1
+o1=$(run --check); mkdir -p "$R/android/.cxx"
+printf 'set(core alpha oldgap newmod)\nforeach(x IN LISTS core)\n  list(APPEND SRCS runtime/src/${x}.c)\nendforeach()\n' > "$R/android/.cxx/gen.cmake"
+echo 'extern int s2a_newmod_ping(void); int g(void){ return s2a_newmod_ping(); }' > "$R/android/native/gen_use.c"
+o2=$(run --check)
+ck "未跟踪的生成文件不改变 --check 结果" '[ "$o1" = "$o2" ]'
 
 # ---------- 真仓门禁 ----------
 o=$(cd "$H" && python3 tools/shared_matrix.py --check 2>&1); r=$?

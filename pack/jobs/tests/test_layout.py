@@ -661,6 +661,20 @@ class StoreMetaTests(JobCase):
         self.assertEqual(sorted(self.calls), sorted([B, C, self.D]))
         self.assertFalse(any("storeChecked" in g for g in self.catalog().values() if g["id"] != A))
 
+    def test_settled_by_older_logic_rechecked(self):
+        # 11-14：旧取图逻辑（只查美区）把亚洲版程序号的 404 记成定论、锁 7 天（维护者库 3 款）；定论只在同一版取图逻辑下算数，旧的照查
+        import library, time
+        cat = json.loads((self.c.library / "catalog.json").read_text())
+        for g in cat["games"]:
+            g["storeSettled"] = int(time.time())          # 没有 storeLogic = 旧逻辑记的
+        atomic(self.c.library / "catalog.json", cat)
+        library.store_meta(self.fresh())
+        self.assertEqual(sorted(self.calls), sorted([B, C, self.D]))
+        self.assertEqual({g["storeLogic"] for g in self.catalog().values() if g.get("storeSettled") and g["id"] in (B, C)}, {library.STORE_LOGIC})
+        self.calls.clear()
+        library.store_meta(self.fresh())
+        self.assertEqual(self.calls, [self.D])               # 新逻辑记下的定论 7 天内不再查；断网那款照查
+
     def test_library_on_other_volume(self):
         # 游戏库在外置盘、临时目录在私有目录：跨卷时 os.replace 报 EXDEV（本机外置盘游戏库实测：五款一张横图都没进库、storeChecked 也没记上）
         import library

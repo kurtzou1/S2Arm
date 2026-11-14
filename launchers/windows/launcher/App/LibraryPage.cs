@@ -157,6 +157,21 @@ public sealed partial class EnvironmentWindow
             title.Children.Add(Label(T(selectedGame is null ? "library.title" : "library.selected")));
             title.Children.Add(Label(hero.Name, 28));
             title.Children.Add(Label(T("library.version") + " · " + hero.Version));
+            // 大卡的主操作（11-14 体验梳理，开发甲定：照 Mac 大卡，两端一套体验；Windows 没有「开始游戏」）：装到 iPhone（iPhone 版做好才有）+ 出包。
+            //   走和下面列表卡片同一套流程（Navigate("install") / OpenBuild），列表上的按钮留作次要入口
+            var heroActions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Margin = new Thickness(0, 6, 0, 0) };
+            var heroBusy = BusyFor(hero) || hero.LocationState is "missing" or "offline";
+            if (hero.IphoneReady)
+            {
+                var install = Primary(T(installMode == "export" ? "export.done.export" : "library.hero.install"),
+                    () => { libraryFolder = libraryFolderBox.Text ?? libraryFolder; selectedGame = hero.Id; readinessFor = null; Navigate("install"); }, !BusyFor(hero));
+                AutomationId(install, "library.hero.install");
+                heroActions.Children.Add(install);
+            }
+            var build = Action("nav.build", () => { libraryFolder = libraryFolderBox.Text ?? libraryFolder; selectedGame = hero.Id; OpenBuild(); }, !heroBusy);
+            build.VerticalAlignment = VerticalAlignment.Center;
+            heroActions.Children.Add(build);
+            title.Children.Add(heroActions);
             Grid.SetColumn(title, 1); banner.Children.Add(title); body.Children.Add(Card(banner, 20));
         }
 

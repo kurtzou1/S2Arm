@@ -73,6 +73,7 @@ CGRect S2APlayControlsRect(S2APlayLayout l, CGRect b) {
 static S2APlayLayout g_layout;
 static _Atomic BOOL g_half;
 static _Atomic double g_view_ratio;
+static _Atomic int g_max_fps;   // 屏幕最高刷新率（帧率补丁按档默认取不超过它的最高一档，runtime/src/cpatch.c fps_pick；布局时在主线程记）
 S2APlayLayout s2a_ios_play_layout(void) { return g_layout; }
 CGRect s2a_ios_game_area(void) { return g_layout.game; }
 UIInterfaceOrientationMask s2a_ios_play_orientations(void) {
@@ -95,6 +96,13 @@ static double screen_ratio(void) {
     return a.size.width>0 && a.size.height>0 ? a.size.width/a.size.height : 16.0/9;
 }
 int s2a_ios_screen_known(void) { return atomic_load(&g_view_ratio)>0; }
+// 屏幕最高刷新率（Hz；Info.plist 有 CADisableMinimumFrameDurationOnPhone，ProMotion 机回 120）：主线程布局时记下；还没记（游戏线程早问）等最多 5 秒，仍没有回 60
+int s2a_ios_screen_max_fps(void) {
+    int v=atomic_load(&g_max_fps);
+    if (!v && NSThread.isMainThread) { v=(int)UIScreen.mainScreen.maximumFramesPerSecond; atomic_store(&g_max_fps,v); }
+    for (int i=0;!v && i<500;i++) { usleep(10000); v=atomic_load(&g_max_fps); }
+    return v>0 ? v : 60;
+}
 int s2a_ios_screen_w(void) { return S2APlayTargetSize(CGSizeMake(screen_ratio(),1)).width; }
 int s2a_ios_screen_h(void) { return S2APlayTargetSize(CGSizeMake(screen_ratio(),1)).height; }
 
@@ -218,6 +226,7 @@ CGRect S2APlayDivision(UIView *view) {
         });
     }
     if (l.game.size.width>0 && l.game.size.height>0 && settled) atomic_store(&g_view_ratio,l.game.size.width/l.game.size.height);
+    { UIScreen *sc=s.window.windowScene.screen; if (sc) atomic_store(&g_max_fps,(int)sc.maximumFramesPerSecond); }
     if (changed) {
         fprintf(stderr,"[S2A 布局] 分屏 %s，游戏 %.1f,%.1f %.1fx%.1f，按键 %.1f,%.1f %.1fx%.1f\n",l.split?"开":"关",l.game.origin.x,l.game.origin.y,l.game.size.width,l.game.size.height,l.controls.origin.x,l.controls.origin.y,l.controls.size.width,l.controls.size.height);
         [NSNotificationCenter.defaultCenter postNotificationName:S2APlayLayoutChanged object:nil];

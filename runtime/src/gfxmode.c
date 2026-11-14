@@ -218,6 +218,7 @@ uint64_t s2a_direct_lookup(const char *name) {
         if (s2a_codec_entry) { void *f = s2a_codec_entry(name); if (f) return (uint64_t)sw_xstack_wrap(name, f); }
     }
     if (strcmp(name, "nvnBootstrapLoader")) return 0;
+    if (getenv("S2A_NVN_REAL")) { LOG("诊断：S2A_NVN_REAL 设了，nvnBootstrapLoader 不接管，跑游戏自带 NVN 驱动（只用于取分配参照，画面不保证）"); return 0; }
     if (!s2a_nvn_bootstrap_entry) die("图形模式是直连，但本宿主没链直连图形层（graphics/nvn）");
     return (uint64_t)sw_xstack_wrap(name, s2a_nvn_bootstrap_entry());
 }

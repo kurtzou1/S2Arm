@@ -93,7 +93,8 @@ def save(private_root, batch):
 
 
 def create(items, location=None):
-    """items: [{gameId, name, platforms}]（界面识别完、玩家勾好的；没勾平台的款不进批次）"""
+    """items: [{gameId, name, platforms, sgrade?}]（界面识别完、玩家勾好的；没勾平台的款不进批次）。
+    sgrade = false：这款在出包页取消了「S 级优化（Beta）· 出包时打入」（按款记住），批量出也不带社区补丁与金手指（export_plan 转给子作业）"""
     out = []
     seen = set()
     for raw in items:
@@ -102,7 +103,7 @@ def create(items, location=None):
             continue
         seen.add(gid)
         out.append({"gameId": gid, "name": str(raw.get("name") or gid), "platforms": platforms,
-                    "results": {p: {"state": "pending"} for p in platforms}})
+                    "results": {p: {"state": "pending"} for p in platforms}, **({"sgrade": False} if raw.get("sgrade") is False else {})})
     if not out:
         raise ValueError("这一批里没有勾了平台的游戏")
     return {"schema": 1, "created": int(time.time()), "location": location or None, "paused": None, "items": out}

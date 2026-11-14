@@ -19,12 +19,15 @@ namespace S2A.Services
     //   读 = 已映射才读，写 = 页权限可写才写（代码页在苹果上是签名只读页，硬写会崩，改代码类条目记「改代码，不支持」并停用该条）。
     // 文件名是 16 位十六进制时按 Atmosphere 惯例当主程序构建号前 16 位，和本包主程序不符整份跳过（版本不对的地址写进去会把游戏写坏）。
     // 主代码（{…} 段）只在同文件有任一条开着时随之执行。每轮结果写 status.txt（「文件名/条目名<TAB>状态」）给界面显示。
+    // 编进包的条目（11-12：出包时 pack/cpatch.py 把改代码的条目编成双路 + 槽，runtime/src/cpatch.c）：开关交原生层 s2a_cpatch_cheat，状态「生效中（编进游戏）」；
+    //   同一条里写可写内存的行（主代码清 bss 等）照旧每帧由 Tamper 执行，写只读代码页的行已由包里的改动接管，这里跳过不报「改代码」。
     public static unsafe class Cheats
     {
         private const int TickMs = 1000 / 12;   // Atmosphere 每轮间隔 83 ms（Ryujinx TamperMachine 同值）
         private const int ReloadEveryTicks = 12;
         private static long _keys;
         private static Thread _thread;
+        private static readonly HashSet<string> _native = new(StringComparer.Ordinal);   // 上次交原生层开着的编进包条目：文件删了 / 改名后要关掉
 
         public struct Entry
         {
@@ -176,6 +179,7 @@ namespace S2A.Services
             var files = new List<string>(Directory.EnumerateFiles(dir, "*.txt"));
             files.Sort(StringComparer.Ordinal);
             int nfiles = 0;
+            seenNative = new HashSet<string>(StringComparer.Ordinal);
             foreach (string path in files)
             {
                 string name = Path.GetFileName(path);
@@ -184,7 +188,7 @@ namespace S2A.Services
                 string stem = Path.GetFileNameWithoutExtension(path);
                 List<Entry> entries = Parse(name, File.ReadAllText(path));
                 if (entries == null) { programs.Add(new Item { Entry = new Entry { File = name, Name = "*" }, Status = "格式不对", Off = true }); continue; }
-                bool match = BuildMatches(stem, buildId);
+                bool match = BuildMatches(stem, buildId) && (entries.Count == 0 || HeaderMatches(File.ReadAllText(path), buildId));
                 bool fileOn = false;
                 foreach (Entry e in entries) if (!e.Master && enabled.Contains(e.Key)) fileOn = true;
                 entries = entries.FindAll(x => x.Master).Concat(entries.FindAll(x => !x.Master)).ToList();   // 主代码排在同文件普通条目之前执行（Atmosphere 约定），其余保持文件顺序
@@ -192,22 +196,48 @@ namespace S2A.Services
                 {
                     var p = new Item { Entry = e };
                     bool on = e.Master ? fileOn : enabled.Contains(e.Key);
+                    bool packed = match && exe != 0 && l != null && ToNative(e, on);
                     if (!match) { p.Status = "版本不符"; p.Off = true; }
                     else if (!on) p.Status = "关";
                     else if (exe == 0 || l == null) { p.Status = "游戏未装载"; p.Off = true; }
                     else
                     {
-                        var compiler = new AtmosphereCompiler(exe, l->HeapBase, l->AliasBase, l->AslrBase, process);
+                        var compiler = new AtmosphereCompiler(MainVirtual, l->HeapBase, l->AliasBase, l->AslrBase, packed ? new GameProcess { Packed = true } : process);
                         p.Code = compiler.Compile(e.Key, e.Lines);
                         if (p.Code == null) { p.Status = "指令有误"; p.Off = true; }
-                        else { p.Code.IsEnabled = true; p.Status = "生效中"; }
+                        else { p.Code.IsEnabled = true; p.Status = packed ? "生效中（编进游戏）" : "生效中"; }
                     }
                     programs.Add(p);
                 }
             }
+            foreach (string k in _native.Except(seenNative).ToList()) { int s = k.IndexOf('/'); ToNative(new Entry { File = k[..s], Name = k[(s + 1)..] }, false); }
             int n = 0; foreach (Item p in programs) if (p.Code != null) n++;
             Console.Error.WriteLine($"金手指：{nfiles} 份文件、{programs.Count} 条，开着 {n} 条（主程序构建号 {buildId}）");
             return programs;
+        }
+
+        private static HashSet<string> seenNative = new(StringComparer.Ordinal);
+
+        // 文件头 [… BID=<构建号>] 写了构建号的（公开库的文件多这样写）：与本包主程序不符就整份不判（文件名不是构建号时靠它）
+        public static bool HeaderMatches(string text, string buildId)
+        {
+            int nl = text.IndexOf('\n'); string head = nl < 0 ? text : text[..nl];
+            int i = head.IndexOf("BID=", StringComparison.OrdinalIgnoreCase);
+            if (i < 0) return true;
+            int j = i + 4; while (j < head.Length && Uri.IsHexDigit(head[j])) j++;
+            string bid = head[(i + 4)..j];
+            return bid.Length < 16 || (!string.IsNullOrEmpty(buildId) && buildId.StartsWith(bid[..16], StringComparison.OrdinalIgnoreCase));
+        }
+
+        // 交原生层开关这条（编进包的才认）→ 编进包了
+        private static bool ToNative(Entry e, bool on)
+        {
+            int r;
+            byte[] f = Encoding.UTF8.GetBytes(e.File + "\0"), n = Encoding.UTF8.GetBytes(e.Name + "\0");
+            try { fixed (byte* pf = f, pn = n) r = Imports.s2a_cpatch_cheat(pf, pn, on ? 1 : 0); }
+            catch (Exception x) when (x is DllNotFoundException or EntryPointNotFoundException) { return false; }
+            if (r == 1) { seenNative.Add(e.Key); if (on) _native.Add(e.Key); else _native.Remove(e.Key); }
+            return r == 1;
         }
 
         private static void WriteStatus(string dir, List<Item> programs)
@@ -220,39 +250,64 @@ namespace S2A.Services
             catch (IOException e) { Console.Error.WriteLine($"金手指：写 status.txt 失败 {e.Message}"); }
         }
 
+        // 「main」区（Atmosphere 区号 0）：偏移按 Horizon 排布算——main 后面首尾相接 subsdk0..N、sdk（各自映像尾 4 KB 对齐），超出 main 的落进后面的模块；
+        //   我们的模块按 2 MB 对齐各自摆放（runtime/src/loader.c），直接加 main 基址会写到别的模块的别处（11-13 实测：一款的帧率金手指写 main+0x24191F4，
+        //   是 sdk 里的变量，原先落到 sdk 另一处）。编译时 main 区基址交虚拟基址 MainVirtual，读写时经原生层 s2a_main_region_va 换成该模块的真实地址。
+        //   虚拟区间在 2^56 起，远高于任何真实用户态地址（< 2^47）；从游戏内存读出来的指针都是真实地址，不会落进虚拟区间被误换
+        internal const ulong MainVirtual = 1UL << 56, MainSpan = 1UL << 40;   // Atmosphere 偏移 40 位
+        internal static Func<ulong, ulong> MainVa = off => Imports.s2a_main_region_va(off);   // 单测换成假排布
+
         // 游戏内存适配：只读已映射页、只写可写页（MemoryPermission 位：1 读、2 写、4 执行）
         internal sealed class GameProcess : ITamperedProcess
         {
+            // main 区虚拟地址 → 真实地址；换不出（超出起局模块 / 前面有没装的模块）按没映射报，界面显示「地址未就绪」、不写别处
+            private static ulong Real(ulong va)
+            {
+                if (va - MainVirtual >= MainSpan) return va;
+                ulong r = MainVa(va - MainVirtual);
+                if (r == 0) throw new TamperExecutionException($"main 区偏移 0x{va - MainVirtual:X} 不在起局模块里");
+                return r;
+            }
+
             public ProcessState State => ProcessState.Started;
             public bool TamperedCodeMemory { get; set; }
+            public bool Packed;   // 这条编进了包：写只读代码页的行已由包里的改动接管，静默跳过
+
 
             // 写到不可写页（苹果上的代码页是签名只读页）：先置 TamperedCodeMemory 再抛——Run 里按它的异常过滤在 finally 之前求值，
             //   放在 finally 里置位，过滤看到的还是 false，会误判成「地址未就绪」（11-09 真机实测）
-            private void Check(ulong va, ulong size, bool write)
+            private bool Check(ulong va, ulong size, bool write)
             {
                 if (Native.MemMapped == null || Native.MemMapped(va, size) != 1)
                     throw new TamperExecutionException($"Unmapped memory access of {size} bytes at 0x{va:X16}");
-                if (!write) return;
+                if (!write) return true;
                 MemInfo a, b;
                 Native.MemQuery(va, &a); Native.MemQuery(va + size - 1, &b);
                 if ((a.Perm & 2) == 0 || (b.Perm & 2) == 0)
                 {
+                    if (Packed) return false;
                     TamperedCodeMemory = true;
                     throw new TamperExecutionException($"Write to non-writable memory at 0x{va:X16}");
                 }
+                return true;
             }
 
             public T ReadMemory<T>(ulong va) where T : unmanaged
             {
+                va = Real(va);
                 Check(va, (ulong)Unsafe.SizeOf<T>(), false);
                 return Dispatcher.Instance.Memory.Read<T>(va);
             }
 
             public void WriteMemory<T>(ulong va, T value) where T : unmanaged
             {
-                Check(va, (ulong)Unsafe.SizeOf<T>(), true);
+                va = Real(va);
+                if (!Check(va, (ulong)Unsafe.SizeOf<T>(), true)) return;
                 Dispatcher.Instance.Memory.Write(va, value);
+                // 每个写入地址首次写时记一行（至多 64 个，换算后的真实地址）：指针链金手指落到哪里只有运行时知道，排查「写成功但没效果」靠它对照宿主对象地址
+                lock (Written) if (Written.Count < 64 && Written.Add(va)) Console.Error.WriteLine($"金手指：写 0x{va:X} {Unsafe.SizeOf<T>()} 字节");
             }
+            private static readonly HashSet<ulong> Written = new HashSet<ulong>();
 
             public void PauseProcess() => Console.Error.WriteLine("金手指：暂停进程指令不支持，已忽略");
             public void ResumeProcess() { }
@@ -269,8 +324,10 @@ namespace S2A.Services
             private const string Lib = "s2a_native";
             [DllImport(Lib)] public static extern Layout* s2a_layout_get();
             [DllImport(Lib)] public static extern ulong s2a_main_base();
+            [DllImport(Lib)] public static extern ulong s2a_main_region_va(ulong off);
             [DllImport(Lib)] public static extern byte* s2a_main_build_id();
             [DllImport(Lib)] public static extern byte* s2a_cheats_dir();
+            [DllImport(Lib)] public static extern int s2a_cpatch_cheat(byte* file, byte* name, int on);
         }
     }
 }

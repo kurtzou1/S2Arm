@@ -78,8 +78,8 @@ static void run_cs(NvShader *cs) {
 // Dsh.cs PoolArrays 改写后的形状：贴图池读置位（dm_pool_mark）、采样器池不置位；句柄从存储缓冲第 0 个 uint4 取，结果写进第 1 个 float4
 static NSString *const POOL_SRC =
     @"template<typename P> static inline __attribute__((always_inline)) uint dm_pool_mark(constant P* p, uint i)\n{\n"
-     "    device atomic_uint* w = reinterpret_cast<device atomic_uint*>(p->seen) + (i >> 5);\n    uint b = 1u << (i & 31u);\n"
-     "    if (!(atomic_load_explicit(w, memory_order_relaxed) & b)) atomic_fetch_or_explicit(w, b, memory_order_relaxed);\n    return i;\n}\n\n"
+     "    device uint* w = reinterpret_cast<device uint*>(p->seen) + (i >> 5);\n    uint b = 1u << (i & 31u);\n"
+     "    if (!(*w & b)) atomic_fetch_or_explicit(reinterpret_cast<device atomic_uint*>(w), b, memory_order_relaxed);\n    return i;\n}\n\n"
      "struct spvPool_cp_t2d_cb0_40000000\n{\n    uint n;\n    ulong seen;\n    array<texture2d<float>, 1> e;\n};\n\n"
      "struct spvPool_cp_s_cb0_40000000\n{\n    uint n;\n    ulong seen;\n    array<sampler, 1> e;\n};\n\n"
      "struct spvDescriptorSetBuffer0\n{\n    device uint4* cp_s0 [[id(0)]];\n    constant spvPool_cp_t2d_cb0_40000000* cp_t2d_cb0_40000000 [[id(1)]];\n"

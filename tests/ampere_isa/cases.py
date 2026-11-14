@@ -318,8 +318,10 @@ for x0, dx, y0 in [(2, 3, 9), (11, 2, 4)]:
 #   u · 16 − 0.5 = x0 + 0.5 → i0 = x0、j0 = y0（最近点、边缘夹取，偏移后都在界内）
 TLD4P = lambda rd, ra, rb, comp: inst(0xb63, rd=(16, rd), ra=(24, ra), rb=(32, rb), h=(40, 0x28), bank=(54, 2), dim=(61, 1), mask=(72, 0xf), rc=(64, RZ), res=(81, PT), off=(76, 2), comp=(87, comp))
 def pack_off(a, b): return (a[0] & 63) | (a[1] & 63) << 8 | (b[0] & 63) << 16 | (b[1] & 63) << 24
-for x0, y0, offs in [(6, 7, [(-1, 2), (3, 0), (0, -2), (2, 1)]), (4, 10, [(0, 0), (1, 0), (0, 1), (-3, -4)])]:
-    case(f'TLD4.PTP 四个立即数偏移（{x0}, {y0}）{offs}', True, [f32((x0 + 1) / TW), f32((y0 + 1) / TW)],
+# 后两组是 2x2 方块（乱序、负角）：Dsh.cs GatherQuad 改成一次 gather + 换序（照 nxnative 0c8a3ac0），期望同四次 gather 的规格值；改前（四次 gather）也该对，不标新
+for x0, y0, offs in [(6, 7, [(-1, 2), (3, 0), (0, -2), (2, 1)]), (4, 10, [(0, 0), (1, 0), (0, 1), (-3, -4)]),
+                     (5, 8, [(1, 1), (0, 0), (1, 0), (0, 1)]), (9, 6, [(-2, 0), (-1, -1), (-2, -1), (-1, 0)])]:
+    case(f'TLD4.PTP 四个立即数偏移（{x0}, {y0}）{offs}', x0 in (6, 4), [f32((x0 + 1) / TW), f32((y0 + 1) / TW)],
          [MOVC(4, 0), MOVC(5, 1), MOVI(8, pack_off(offs[0], offs[1])), MOVI(9, pack_off(offs[2], offs[3])), TLD4P(0, 4, 8, 1)],
          [f32(float(texel(x0 + ox, y0 + oy)[1])) for ox, oy in offs], '纹素 (x0 + ox, y0 + oy).y = (y0 + oy)·16 + x0 + ox + 1，按偏移次序', ('tex2d', TW))
 
@@ -422,6 +424,15 @@ def gather_const(msl, j):
 refl('TLD4.PTP 立即数偏移：四次常量偏移 gather（时之笛 NDSR b106afba1a18faa9）', True,
      [MOVC(4, 0), MOVC(5, 1), MOVI(8, pack_off((-1, 2), (3, 0))), MOVI(9, pack_off((0, -2), (2, 1))), TLD4P(0, 4, 8, 1)], gather_const,
      'SPIR-V ConstOffsets 第 k 个分量取偏移 k 处的纹素；Metal gather 偏移只认常量表达式')
+
+# 四个偏移是 2x2 方块（11-13，照 nxnative 0c8a3ac0）：一次 gather 在方块角 b、按 Metal 次序 x (i0, j1)、y (i1, j1)、z (i1, j0)、w (i0, j0) 换成偏移次序，不再有 s2a_gather4
+def gather_quad(msl, j):
+    if 's2a_gather4(' in msl: return 'MSL 仍是四次 gather（s2a_gather4）'
+    got = re.findall(r'\.gather\([^;]*?, (int2\([^()]*\)), component::y\)\.(\w+)\)', msl)
+    return None if got == [('int2(-2, -1)', 'xywz')] else f'方块 gather {got}，应为一次 int2(-2, -1) 处 gather、换序 xywz'
+refl('TLD4.PTP 偏移是 2x2 方块：一次 gather + 换序（nxnative 0c8a3ac0）', True,
+     [MOVC(4, 0), MOVC(5, 1), MOVI(8, pack_off((-2, 0), (-1, 0))), MOVI(9, pack_off((-2, -1), (-1, -1))), TLD4P(0, 4, 8, 1)], gather_quad,
+     '整数偏移下每个偏移取的 (i0, j0) 角正好是方块角足迹的四个纹素')
 
 # SURED 的操作取 87..91（9507c221c）：原先只认 ADD。SURED [R4], R6（0x59f）：坐标 R4、R5，值 R6，句柄 c[2] 0x120（图像槽 0，字偏移 0x48 在 40..54、库 2 在 54..59），
 # 维度 61..64 = 3（SuDim 二维），字 2 = 0x0010e000 | 操作 << 23（MAX 2、OR 6，RedOp 同 SUATOM 的次序）

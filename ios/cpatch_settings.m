@@ -1,12 +1,14 @@
 // 社区补丁设置子页（统一设置的画面组进入；数据层 cpatch_model.m）：读包根 cpatch.tsv，按 宽屏 / 60 帧 / 画面 分组列开关。
-//   宽屏组、60 帧组的第一行是这两类的总开关，直接用设置里已有的 S2AWidescreen / S2AFps60（settings.m、Settings.bundle 同一个键，不另起）；
+//   「宽屏」「60 帧」两个总开关只在设置页画面组（app_settings.m：原生 60 帧置灰、已知问题提示、降档副标题都在那边），这里不再重复列（11-13 统一）；
 //   帧率类社区项（编号 fps:）跟 60 帧开关走（runtime/src/cpatch.c s2a_cpatch_fps_follow），这里只显示、不单独开关。主标题中文名（cpatch_model.m 对照表），
 //   副标题英文原名 + 「社区 · 我方已验 / 未经验证」。下次启动生效
 #import "cpatch_settings.h"
 #import "settings.h"   // s2a_ios_settings_defaults：社区补丁按游戏存（11-11）
 #import "s2a_l10n.h"
+NSDictionary<NSString *, NSArray<NSString *> *> *s2a_ios_cpatch_status_for(NSString *gid);   // ios/game_options.m
+NSString *s2a_ios_cpatch_result(NSArray<NSString *> *st);
+BOOL s2a_ios_cpatch_result_ok(NSArray<NSString *> *st);   // ios/game_options.m
 
-static BOOL default_on(NSString *key) { id v = [s2a_ios_settings_defaults() objectForKey:key]; return v ? [v boolValue] : YES; }   // 两个总开关缺省开
 
 @interface S2ACPatchSettings : UITableViewController
 @end
@@ -47,9 +49,8 @@ static BOOL default_on(NSString *key) { id v = [s2a_ios_settings_defaults() obje
     self.tableView.backgroundView = solid ? nil : [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
 }
 
-static NSString *master_key(S2ACPatchGroup *g) { return [g.kind isEqual:@"widescreen"] ? @"S2AWidescreen" : [g.kind isEqual:@"fps"] ? @"S2AFps60" : nil; }
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)t { (void)t; return (NSInteger)_groups.count; }
-- (NSInteger)tableView:(UITableView *)t numberOfRowsInSection:(NSInteger)s { (void)t; return (NSInteger)_groups[s].items.count + (master_key(_groups[s]) ? 1 : 0); }
+- (NSInteger)tableView:(UITableView *)t numberOfRowsInSection:(NSInteger)s { (void)t; return (NSInteger)_groups[s].items.count; }
 - (NSString *)tableView:(UITableView *)t titleForHeaderInSection:(NSInteger)s { (void)t; return _groups[s].title; }
 - (NSString *)tableView:(UITableView *)t titleForFooterInSection:(NSInteger)s {
     (void)t;
@@ -58,39 +59,42 @@ static NSString *master_key(S2ACPatchGroup *g) { return [g.kind isEqual:@"widesc
 }
 - (UITableViewCell *)tableView:(UITableView *)t cellForRowAtIndexPath:(NSIndexPath *)ip {
     (void)t;
-    S2ACPatchGroup *g = _groups[ip.section]; NSString *mk = master_key(g);
+    S2ACPatchGroup *g = _groups[ip.section];
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
     cell.textLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody]; cell.textLabel.adjustsFontForContentSizeCategory = YES;
     cell.detailTextLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote]; cell.detailTextLabel.adjustsFontForContentSizeCategory = YES;
     UISwitch *sw = [UISwitch new]; cell.accessoryView = sw;
     cell.textLabel.numberOfLines = 0; cell.detailTextLabel.numberOfLines = 0; cell.detailTextLabel.textColor = UIColor.secondaryLabelColor;
-    if (mk && ip.row == 0) {
-        cell.textLabel.text = [mk isEqual:@"S2AWidescreen"] ? S2AL(@"cpatch.group.widescreen") : S2AL(@"cpatch.group.fps");
-        cell.detailTextLabel.text = [mk isEqual:@"S2AWidescreen"] ? S2AL(@"cpatch.master.widescreen.note") : S2AL(@"cpatch.master.fps.note");
-        sw.on = default_on(mk); sw.accessibilityLabel = cell.textLabel.text; sw.accessibilityIdentifier = [@"cpatch.master." stringByAppendingString:g.kind];
-        [sw addTarget:self action:@selector(masterChanged:) forControlEvents:UIControlEventValueChanged];
-        sw.tag = ip.section;
-        return cell;
-    }
-    S2ACPatchItem *it = g.items[ip.row - (mk ? 1 : 0)];
+    S2ACPatchItem *it = g.items[ip.row];
     cell.textLabel.text = it.title;
     NSString *lic = it.license.length && ![it.license hasPrefix:@"none"] ? it.license : S2AL(@"cpatch.license.none");   // 出包表里「没声明」写作空或 none(未声明)
     // 缺省开 = 出包时在 graphics/cpatch/verified.tsv 里（我方验过本款这一份，pack/stage_rewrite.sh）；其余是社区未经验证、缺省关
     NSString *tag = it.defaultOn ? S2AL(@"cpatch.tag.verified") : S2AL(@"cpatch.tag.unverified");
-    cell.detailTextLabel.text = [NSString stringWithFormat:S2AL(@"cpatch.item.detail"), it.name, tag, lic, it.followsFps60 ? S2AL(@"cpatch.item.followsFps") : @""];
+    cell.detailTextLabel.text = [NSString stringWithFormat:S2AL(@"cpatch.item.detail"), it.name, tag, lic, it.followsFps60 ? S2AL(@"cpatch.item.followsFps") : it.followsFullscreen ? S2AL(@"cpatch.item.followsFullscreen") : @""];
+    NSArray<NSString *> *st = s2a_ios_cpatch_status_for(nil)[it.ident];
+    NSString *res = s2a_ios_cpatch_result(st);   // 这一局装载时的实际结果（runtime/src/cpatch.c）：没生效写原因、量到效果写实测；生效了写绿色（11-13 ç»´æ¤è）
+    if (res) {
+        NSMutableAttributedString *d = [[NSMutableAttributedString alloc] initWithString:[cell.detailTextLabel.text stringByAppendingString:@"\n"]
+                                                                               attributes:@{NSForegroundColorAttributeName: UIColor.secondaryLabelColor}];
+        [d appendAttributedString:[[NSAttributedString alloc] initWithString:res attributes:@{NSForegroundColorAttributeName: s2a_ios_cpatch_result_ok(st) ? UIColor.systemGreenColor : UIColor.secondaryLabelColor}]];
+        cell.detailTextLabel.attributedText = d;
+    }
     sw.accessibilityLabel = it.title; sw.accessibilityIdentifier = [@"cpatch.item." stringByAppendingString:it.ident];
-    if (it.followsFps60) { sw.on = default_on(@"S2AFps60"); sw.enabled = NO; }
+    // 跟随设置页「60 帧」/「满屏」开关的项（11-13 ç»´æ¤è「排版乱」：原来画成按不动的灰开关）：右边不放开关，写现在是开还是关
+    if (it.followsFps60 || it.followsFullscreen) {
+        BOOL on = it.followsFps60; if (on) on = s2a_ios_fps60_on(); else s2a_ios_fullscreen_state(nil, &on);
+        UILabel *state = [UILabel new]; state.text = on ? S2AL(@"cpatch.state.on") : S2AL(@"cpatch.state.off");
+        state.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline]; state.adjustsFontForContentSizeCategory = YES;
+        state.textColor = on ? UIColor.systemGreenColor : UIColor.secondaryLabelColor; [state sizeToFit];
+        state.accessibilityIdentifier = [@"cpatch.item." stringByAppendingString:it.ident];
+        cell.accessoryView = state;
+    }
     else {
         sw.on = [S2ACPatchEnabled(_groups, s2a_ios_settings_defaults()) containsObject:it.ident];
         [sw addTarget:self action:@selector(itemChanged:) forControlEvents:UIControlEventValueChanged];
     }
     return cell;
-}
-- (void)masterChanged:(UISwitch *)sw {
-    NSString *mk = master_key(_groups[sw.tag]); if (!mk) return;
-    [s2a_ios_settings_defaults() setBool:sw.on forKey:mk];
-    [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:(NSUInteger)sw.tag] withRowAnimation:UITableViewRowAnimationNone];   // 帧率类社区项跟着变
 }
 - (void)itemChanged:(UISwitch *)sw {
     NSString *ident = [sw.accessibilityIdentifier substringFromIndex:@"cpatch.item.".length];

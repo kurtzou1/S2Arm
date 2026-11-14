@@ -5,7 +5,7 @@ NATIVE_TEST_OWN += ios_settings
 .PHONY: native-test-ios_settings
 native-test-ios_settings:
 	@mkdir -p $(BUILD)/tests/ios_settings
-	$(CC) $(CFLAGS) $(NATIVE_INC) -fobjc-arc -framework Foundation -o $(BUILD)/tests/ios_settings/t_ios_settings runtime/tests/t_ios_settings.m ios/settings.m runtime/src/caps.c runtime/src/patch.c runtime/src/launchctx.c
+	$(CC) $(CFLAGS) $(NATIVE_INC) -fobjc-arc -framework Foundation -o $(BUILD)/tests/ios_settings/t_ios_settings runtime/tests/t_ios_settings.m ios/settings.m ios/cpatch_model.m runtime/src/caps.c runtime/src/patch.c runtime/src/launchctx.c
 	@rm -rf $(BUILD)/tests/ios_settings/zh-Hans.lproj && cp -R ios/l10n/zh-Hans.lproj $(BUILD)/tests/ios_settings/
 	$(BUILD)/tests/ios_settings/t_ios_settings ios/Settings.bundle/Root.plist
 TEST_TARGETS += native-test-ios_settings

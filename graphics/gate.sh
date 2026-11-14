@@ -528,6 +528,15 @@ else reg 0 "直连曲面阶段翻译 / 共享内存溢出 / 只出 iOS 与复用
 if need_dmsh_giant; then   # 前缀见 need_dmsh_giant
   timeout 300 python3 graphics/tools/direct/tests/t_dmsh_giant.py > "$LOG/dmsh_giant.log" 2>&1; dg_=$?; reg $dg_ "直连巨型着色器阶梯压平：$(tail -1 "$LOG/dmsh_giant.log")（退出 ${dg_}）" "$LOG/dmsh_giant.log"
 else reg 0 "直连巨型着色器阶梯压平：本批没改到压平 / 出库脚本，不跑"; fi
+if touched graphics/tools/direct/dsh/Outline.cs graphics/tools/direct/dsh/Flat.cs graphics/tools/direct/tests/t_compute_outline; then
+  timeout 180 python3 graphics/tools/direct/tests/t_compute_outline.py > "$LOG/compute_outline.log" 2>&1; co_=$?; reg $co_ "巨型计算入口拆分：$(tail -1 "$LOG/compute_outline.log")（退出 ${co_}）" "$LOG/compute_outline.log"
+else reg 0 "巨型计算入口拆分：本批没改到计算入口改形，不跑"; fi
+if touched graphics/tools/direct/repair_compute.py graphics/metal/tests/compute_probe.m graphics/tools/direct/tests/t_repair_compute.py; then
+  timeout 30 python3 graphics/tools/direct/tests/t_repair_compute.py > "$LOG/repair_compute.log" 2>&1; cr_=$?; reg $cr_ "计算库修复与回滚：$(tail -1 "$LOG/repair_compute.log")（退出 ${cr_}）" "$LOG/repair_compute.log"
+else reg 0 "计算库修复与回滚：本批没改到本地修复脚本，不跑"; fi
+if touched graphics/tools/direct/repair_compute.py graphics/tools/direct/tests/t_repair_loader graphics/nvn/gfx/nvn/nvn_mtl.m graphics/nvn/lib_pack; then
+  timeout 180 python3 graphics/tools/direct/tests/t_repair_loader.py > "$LOG/repair_loader.log" 2>&1; cl_=$?; reg $cl_ "计算库替换真实加载：$(tail -1 "$LOG/repair_loader.log")（退出 ${cl_}）" "$LOG/repair_loader.log"
+else reg 0 "计算库替换真实加载：本批没改到修复 / 加载边界，不跑"; fi
 timeout 120 python3 graphics/tools/direct/tests/t_dmsh_ushare.py > "$LOG/dmsh_ushare.log" 2>&1; du_=$?; reg $du_ "直连整数输出入口编译期共用函数体：$(tail -1 "$LOG/dmsh_ushare.log")（退出 ${du_}）" "$LOG/dmsh_ushare.log"   # C# Unity.Share（dsh_batch --unity share）
 # 双轨覆盖率 seen 记录（Ryujinx 补丁 direct-seen）：客体哈希查键表、一码多键全写、表外写 code:、跨局去重、坏表报错不记；编 S2A.SeenTest 约 20–60 秒
 if has "$RUNG" shbake_net; then timeout 400 bash graphics/tools/direct/tests/t_seen.sh > "$LOG/seen.log" 2>&1; r=$?; reg $r "seen 记录：$(tail -1 "$LOG/seen.log")（退出 ${r}）" "$LOG/seen.log"; fi

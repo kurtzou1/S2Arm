@@ -77,4 +77,12 @@ m0=$(stat -f %m "$T/c/build/.host_cfg" 2> /dev/null || stat -c %Y "$T/c/build/.h
 m1=$(stat -f %m "$T/c/build/.host_cfg" 2> /dev/null || stat -c %Y "$T/c/build/.host_cfg")
 ck "算构建清单不碰本树 build/：配置戳内容 / 修改时间不变、不起 C# 构建，路由照常（含 present_settings_test）" '[ "$(cat "$T/c/build/.host_cfg")" = "S2A_CS= sentinel" ] && [ "$m0" = "$m1" ] && [ ! -e "$T/c/build/cs" ] && grep -q present_settings_test "$T/o"'
 rm -rf "$T"
+# 覆盖面缓存（11-14：同内容只算一次，存 git 公共目录 s2a-gate-route/）：同树二次调用与关缓存结果逐字相同、且快；
+#   工作区里一份单测新点名 tools/l10n_merge.py → 下一次路由立刻带上它（指纹含工作区改动，不吃旧缓存）
+T=$(mktemp -d); git clone -q --shared "$H" "$T/c" 2> /dev/null && (cd "$T/c" && git checkout -q "$(git -C "$H" rev-parse HEAD)" 2> /dev/null); cp "$H/tools/gate_route.py" "$T/c/tools/"
+gr() { (cd "$T/c" && python3 tools/gate_route.py tests tools/l10n_merge.py 2> /dev/null | tr '\n' ' '); }
+c1=$(gr); t0=$SECONDS; c2=$(gr); dt=$((SECONDS - t0)); c0=$(cd "$T/c" && GATE_ROUTE_CACHE=0 python3 tools/gate_route.py tests tools/l10n_merge.py 2> /dev/null | tr '\n' ' ')
+echo 'python3 "$H/tools/l10n_merge.py" --help > /dev/null 2>&1 || :' >> "$T/c/tests/os_junk_sync_test.sh"; c3=$(gr)
+ck "覆盖面缓存：二次调用 ${dt} 秒、与关缓存逐字相同；单测新点名文件后立刻路由到它" '[ "$c1" = "$c2" ] && [ "$c2" = "$c0" ] && [ $dt -le 2 ] && ! grep -q os_junk_sync_test <<< "$c1" && grep -q os_junk_sync_test <<< "$c3"'
+rm -rf "$T"
 [ $bad = 0 ] && echo "gate_route 单测全过" || { echo "gate_route 单测有不通"; exit 1; }

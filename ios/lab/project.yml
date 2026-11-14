@@ -15,9 +15,11 @@ targets:
       - ios/vpad_settings.m
       - ios/vpad_cheats.m
       - ios/cheats_parse.m
+      - ios/game_options.m   # 单款补丁 / 金手指选项与崩溃询问（diag.m 调）
       - ios/app_settings.m
       - ios/cpatch_settings.m
       - ios/cpatch_model.m
+      - ios/sgrade_style.m   # S 级优化金色样式（s2a_sgrade_gold / header / image；设置页、齿轮菜单、金手指页都用）
       - ios/l10n   # 宿主界面字符串表（<语言>.lproj/S2ArmHost.strings，ios/s2a_l10n.h S2AL，#316）
       - ios/settings.m
       - ios/controller.m

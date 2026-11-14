@@ -123,10 +123,10 @@ int main(void) {
         for (unsigned l = 0; l < 3; l++) CHECK(nvn_tex_level_gobs(&d, l) == gobs[l], "S level %u laid out %u GOBs wide, expected %u", l, nvn_tex_level_gobs(&d, l), gobs[l]);
         CHECK(L.size == 0xE0000 && L.align == 0x10000, "S storage %#llx alignment %#x, expected 0xe0000 / 0x10000", (unsigned long long)L.size, L.align);
         printf("  S 1024×1024 ASTC 6×6 sparse: levels at 0, %#llx, %#llx …, storage %#llx (expected 0x90000, 0xd0000, 0xe0000)\n", (unsigned long long)nvn_tex_level_offset(&d, 1), (unsigned long long)nvn_tex_level_offset(&d, 2), (unsigned long long)L.size);
-        d.pkg_block_h = 0; nvn_tex_layout(&d, &L);   // without the packaged layout the sparse page's block height (8 GOBs at 16 bytes a block) gives the same layout
+        d.pkg_layout = 0; nvn_tex_layout(&d, &L);   // without the packaged layout the sparse page's block height (8 GOBs at 16 bytes a block) gives the same layout
         for (unsigned l = 0; l < 8; l++) CHECK(nvn_tex_level_offset(&d, l) == off[l], "S no packaged layout: level %u offset %#llx expected %#llx", l, (unsigned long long)nvn_tex_level_offset(&d, l), (unsigned long long)off[l]);
         CHECK(L.size == 0xE0000 && L.tileH == 3, "S no packaged layout: storage %#llx block height %u, expected 0xe0000 / 3", (unsigned long long)L.size, L.tileH);
-        d.pkg_block_h = 4;
+        d.pkg_layout = 4;
         d.flags = 0; nvn_tex_layout(&d, &L);   // the same texture not sparse keeps the packed layout
         CHECK(nvn_tex_level_offset(&d, 1) == 0x81000 && L.size == 0xBC400 && nvn_tex_level_gobs(&d, 0) == 43, "S not sparse: level 1 %#llx storage %#llx, expected 0x81000 / 0xbc400",
               (unsigned long long)nvn_tex_level_offset(&d, 1), (unsigned long long)L.size);
@@ -138,7 +138,7 @@ int main(void) {
     // equal S's. Read unaligned (level 1 at 0x81000), the padding's all-zero blocks are sampled and ASTC decodes them as magenta (01004A4010FEA000's character menu background)
     printf("P packaged row alignment (layout byte 1)\n");
     {
-        nvn_texdesc d = {1, 0x8B, 0, 0, 1024, 1024, 1, 8, 0, 4 | 5 << 8};
+        nvn_texdesc d = {1, 0x8B, 0, 0, 1024, 1024, 1, 8, 0, (3 | 4 << 8) + 1};   // pkg_layout: layout bytes 03 04 (#676 encoding)
         static const uint64_t off[8] = {0, 0x90000, 0xD0000, 0xDB000, 0xDE000, 0xDEC00, 0xDF000, 0xDF200};
         static const uint32_t gobs[3] = {48, 32, 11};
         for (unsigned l = 0; l < 8; l++) CHECK(nvn_tex_level_offset(&d, l) == off[l], "P level %u offset %#llx expected %#llx", l, (unsigned long long)nvn_tex_level_offset(&d, l), (unsigned long long)off[l]);

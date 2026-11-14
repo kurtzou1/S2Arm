@@ -65,7 +65,25 @@ def strip_comments(src):
     return "\n".join(out)
 
 
+_LS = {}
+
+
 def ls_files(root):
+    """仓库里已跟踪的文件（相对路径，排序）。11-14：只认提交内容——门禁机检出目录复用，别的分支 / 并行构建
+    留下的未跟踪文件（生成的 .cmake、obj 下的 .cs 等）曾让真仓 --check 时红时绿（两天害红二十多批）。同一 root 只问一次 git"""
+    key = str(Path(root).resolve())
+    if key not in _LS:
+        _LS[key] = _ls_files(root)
+    return _LS[key]
+
+
+def tracked_glob(root, pattern):
+    """在已跟踪文件里按通配找（代替 Path.glob 直接扫磁盘）→ 绝对 Path 列表，排序"""
+    d, base = os.path.split(pattern)
+    return [Path(root) / f for f in ls_files(root) if os.path.dirname(f) == d and fnmatch.fnmatchcase(os.path.basename(f), base)]
+
+
+def _ls_files(root):
     r = subprocess.run(["git", "-C", str(root), "ls-files", "-z"], capture_output=True)
     if r.returncode == 0:
         return sorted(f for f in r.stdout.decode("utf-8", "surrogateescape").split("\0") if f)
@@ -150,7 +168,8 @@ def cs_types(text):
     types = set(re.findall(
         r"\b(?:(?:public|internal|sealed|static|abstract|partial|unsafe|readonly|ref|new|file)\s+)*"
         r"(?:class|interface|struct|enum|record)\s+([A-Za-z_]\w*)", src))
-    eps = set(re.findall(r"\[UnmanagedCallersOnly\(EntryPoint\s*=\s*\"([A-Za-z_]\w*)\"", src))
+    # 导出名在字符串里：从原文取（src 已把字符串清空，原先这一条永远取不到任何 EntryPoint 导出）
+    eps = set(re.findall(r"\[UnmanagedCallersOnly\(EntryPoint\s*=\s*\"([A-Za-z_]\w*)\"", re.sub(r"/\*.*?\*/|//[^\n]*", " ", text, flags=re.S)))
     for m in re.finditer(
             r"\[UnmanagedCallersOnly\]\s*(?:\[[^\]\n]*\]\s*)*(?:public|internal|private|static|extern|unsafe|\s)+"
             r"[\w<>\[\],\. ]+?\s+(\w+)\s*\(", src):
@@ -171,7 +190,7 @@ def module_entries(root, mod):
         return types | eps, False
     if mod["kind"] == "gfx-csproj":
         syms = set()
-        for cs in sorted(Path(root).glob(os.path.dirname(mod["path"]) + "/*.cs")):
+        for cs in tracked_glob(root, os.path.dirname(mod["path"]) + "/*.cs"):
             t, e, _ = cs_types(read(cs))
             syms |= t | e
         return syms, False
@@ -203,11 +222,9 @@ def cmake_spans(lines):
 def android_cmake(root):
     """→ ({cmake 文件: 文本}, {文件: [core 名单]})；全部 android 的 CMakeLists.txt 与 *.cmake"""
     texts, sets = {}, {}
-    for d, _ds, fs in os.walk(Path(root) / "android"):
-        for f in fs:
-            if f == "CMakeLists.txt" or f.endswith(".cmake"):
-                p = Path(d) / f
-                texts[str(p.relative_to(root))] = read(p)
+    for f in ls_files(root):
+        if f.startswith("android/") and (f.endswith("/CMakeLists.txt") or f.endswith(".cmake")):
+            texts[f] = read(Path(root) / f)
     for f, t in texts.items():
         for m in re.finditer(r"foreach\((\w+)\s+IN\s+LISTS\s+(\w+)\)", t):
             end = t.find("endforeach", m.end())
@@ -422,12 +439,17 @@ def corpus(root, names, android=False):
         text = read(Path(root) / f)
         if android and Path(f).suffix in (".c", ".cc", ".cpp", ".h", ".hpp", ".m", ".mm"):
             text = android_known_inactive(text)
+        text = DLSYM_SRC.sub(lambda m: m.group(1) + "S2A_DLSYM__" + m.group(2), text)   # 去字符串之前把 dlsym 取的名字留成标记（DLSYM）
         result[f] = strip_comments(text)
     return result
 
 
 PROTO_TAIL = re.compile(r"\)\s*(?:;|\{)\s*$")
 CALL = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
+# 按名字取的入口：dlsym(句柄, "名字")。服务层 C# 的 [UnmanagedCallersOnly] 导出常由共用 C 代码这样取（nvn2.c 取 S2A_CameraSessionOpen）——
+#   那份 C 代码进了哪个平台的链，导出就在哪个平台接了线；原先只认 .cs 里的使用，这类导出一律被判「找不到调用方」
+DLSYM_SRC = re.compile(r'(\bdlsym\s*\([^,()]*,\s*)"([A-Za-z_]\w*)"')   # 原文里的形态（corpus 在去掉字符串之前换成标记）
+DLSYM = re.compile(r"\bS2A_DLSYM__([A-Za-z_]\w*)")
 USE = [re.compile(r"\bnew\s+([A-Za-z_]\w*)"),
        re.compile(r":\s*([A-Za-z_]\w*)\b"),
        re.compile(r"\b([A-Za-z_]\w*)\s*\."),
@@ -452,6 +474,8 @@ def scan_callers(corpus_map):
             for p in USE:
                 for m in p.finditer(l):
                     uses.setdefault(m.group(1), []).append((f, n))
+            for m in DLSYM.finditer(l):
+                calls.setdefault("dlsym:" + m.group(1), []).append((f, n))   # 单独的键：普通 C 调用形不受影响
     return calls, uses
 
 
@@ -471,6 +495,8 @@ def wired_of(mod, syms, has_main, linked, prod_calls, prod_uses, test_calls):
     for s in syms:
         hits += [f"{f}:{n}" for f, n in prod_calls.get(s, []) + (prod_uses.get(s, []) if mod["kind"] in ("service-cs", "gfx-csproj") else [])
                  if not_self(f) and (mod["kind"] not in ("service-cs", "gfx-csproj") or f.endswith(".cs"))]
+        if mod["kind"] in ("service-cs", "gfx-csproj"):   # C# 导出被平台可调到的 C 代码按名字 dlsym 取：算接线（不限 .cs）
+            hits += [f"{f}:{n}" for f, n in prod_calls.get("dlsym:" + s, []) if not_self(f)]
         thits += [f for f, _n in test_calls.get(s, []) if not_self(f)]
     hits = sorted(set(hits))
     if hits:
@@ -614,7 +640,7 @@ def build_matrix(root):
                 else:
                     a_prod_names.update(
                         os.path.relpath(str(cs), root)
-                        for cs in Path(root).glob(os.path.dirname(m["path"]) + "/*.cs"))
+                        for cs in tracked_glob(root, os.path.dirname(m["path"]) + "/*.cs"))
         elif m["kind"] == "pack-stage":
             sw = stage_linked_wired(m, wiring, tg_a, tg_i)
             for plat in ("apple", "android"):

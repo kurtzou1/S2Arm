@@ -1,5 +1,6 @@
 // NVN2（Switch 2）宿主侧：平台判别、nvnDeviceGetInteger 的 NVN2 答复、着色器键（nvn2.h）
 // 设备值表与驱动常量的读法移植自 参考实现（MIT）hle_nvn.c g_devinfo2 / loader.c dm_sdk_nvn2_item（c4b0618c、163a9905）
+#include <dlfcn.h>
 #include "nvn2.h"
 #include "../../host/dm.h"
 #include "../tex/nvn_deswizzle.h"
@@ -340,10 +341,15 @@ static uint64_t cam_destroy_alias(uint16_t handle) {
     if (!atomic_exchange(&said, 1)) LOG("nn::camera::sdk::DestroyAliasOutputBufferPool：宿主没有摄像头，空操作");
     return 0;
 }
-static uint64_t cam_create_ctx(void **out_handle) {
+// CreateCameraContext(UniqueNativeHandle*)：输出参数是 32 位会话句柄（同 nxnative hle_sf.c：SDK 22.2.0 sdk+0x2c42c0 只写 4 字节）。游戏之后经它发 HIPC：
+//   原先写 0 → 游戏对句柄 0 SendSyncRequest、会话不在会话表 → sdk 中止（诊断 #0148a6，0400C3F00006E000 在 iPad 上 5 局 Break 都在这一步后）。
+//   现在向服务层要一个「没插摄像头的主机」会话（services/S2A.Services/CameraNoDevice.cs S2A_CameraSessionOpen）；服务层没链（原生单测）时照旧写 0
+static uint64_t cam_create_ctx(uint32_t *out_handle) {
+    uint32_t (*open)(void) = (uint32_t (*)(void))dlsym(RTLD_DEFAULT, "S2A_CameraSessionOpen");
+    uint32_t h = open ? open() : 0;
     static _Atomic int said;
-    if (!atomic_exchange(&said, 1)) LOG("nn::camera::sdk::CreateCameraContext：宿主没有摄像头，输出参数写 NULL");
-    if (out_handle) *out_handle = NULL;
+    if (!atomic_exchange(&said, 1)) LOG("nn::camera::sdk::CreateCameraContext：宿主没有摄像头，给「没插摄像头」会话 %#x（0 = 服务层没起）", h);
+    if (out_handle) *out_handle = h;
     return 0;
 }
 static uint64_t cam_destroy_ctx(void) {

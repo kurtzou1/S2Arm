@@ -508,7 +508,7 @@ def record_sources(sources):
 # 只读探测（启动器剃刀 H4）：结果走标准输出，不落任务记录（request / journal / events 三个文件 + 起 ps 取进程起始时刻），作业开头也不收日志、
 #   不起后台商店查询、引擎副本有安装标记就直接用（逐文件复核留给真用引擎产物的作业，#304）。装机页每 5 秒一次的 installCheck、
 #   设备探测、刷新游戏库都在这里：原先每次都落三个文件，开一小时约 720 个作业记录
-PROBES = ("catalog", "installCheck", "targetDevice", "locations")
+PROBES = ("catalog", "installCheck", "targetDevice", "locations", "patchMatch")
 JOURNAL_PROGRESS_S = 5.0   # 进度事件最多隔这么久重写一次任务记录（剃刀 H5：原先每条事件都原子重写 + fsync）；阶段、诊断、终态每次都写并 fsync
 LOCK_WAIT_S = 30   # 短作业排队等游戏库锁的上限（秒）：出包这类长任务占着时，过了上限就如实报「在等谁」，不无限挂着
 OPERATION_NAMES = {"build": "出包", "ipa": "打 iPhone 包", "import": "导入游戏", "install": "装到 iPhone", "installUpdate": "更新 iPhone 上的 S2Arm",
@@ -516,7 +516,7 @@ OPERATION_NAMES = {"build": "出包", "ipa": "打 iPhone 包", "import": "导入
                    "remove": "移出游戏库", "delete": "删除游戏", "clean": "清理空间", "spaceFree": "释放空间", "launch": "开始游戏",
                    "moveGame": "移动游戏", "relinkGame": "重新关联原件", "forgetGame": "忘掉游戏", "setup": "设置游戏库", "keys": "导入密钥",
                    "saveBackup": "备份存档", "saveRestore": "恢复存档", "saveInspect": "查看存档", "saveStatus": "读存档状态",
-                   "communitySave": "保存补丁设置", "diagnostics": "导出诊断"}
+                   "communitySave": "保存补丁设置", "diagnostics": "导出诊断", "sgradeScan": "查找可升级 S 级优化的游戏", "sgradeMac": "给 Mac 游戏补上 S 级优化"}
 
 
 def describe_holder(info):

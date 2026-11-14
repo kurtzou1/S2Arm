@@ -222,6 +222,45 @@ class FetchFlowTest(unittest.TestCase):
         banner_fetch._run_cache.clear(); banner_fetch._fail_spent = 0.0
         self.assertFalse(banner_fetch.settled(TID), "没抓过")
 
+    def test_hk_fallback_when_us_404(self):
+        # 11-14：亚洲版程序号美区 404、港区有商品页（og:image 指 img-eshop.cdn.nintendo.net 的 1920×1080 主图）→ 取港区的；所有区都 404 才算定论
+        hk_img = "https://img-eshop.cdn.nintendo.net/i/" + "ab" * 32 + ".jpg"
+        hk_page = ('<html><head><meta property="og:image" content="' + hk_img + '"/></head></html>').encode()
+        calls = []
+        def fake(req, timeout=None):
+            calls.append(req.full_url)
+            if req.full_url.endswith("/US"):
+                raise urllib.error.HTTPError(req.full_url, 404, "x", {}, None)
+            if req.full_url.endswith("/HK"):
+                return Resp(hk_page, url="https://ec.nintendo.com/HK/zh/titles/70010000029013")
+            self.assertEqual(req.full_url, hk_img)
+            return Resp(jpeg(1920, 1080), url=hk_img)
+        with mock.patch.object(urllib.request, "urlopen", fake):
+            ok, why = banner_fetch.fetch_banner(TID, self.dest)
+        self.assertTrue(ok, why)
+        self.assertTrue(banner_fetch.settled(TID))
+        self.assertEqual(calls, [f"https://ec.nintendo.com/apps/{TID}/US", f"https://ec.nintendo.com/apps/{TID}/HK", hk_img])
+        self.assertEqual(self.dest.read_bytes(), jpeg(1920, 1080))
+        # 港区页上的图床只认任天堂自己的：别的域名的 og:image 不取
+        self.assertIsNone(banner_fetch._extract_image_url('<meta property="og:image" content="https://evil.example/i/ab.jpg"/>'))
+
+    def test_us_page_found_skips_hk(self):
+        calls = []
+        page = Resp(page_html(IMG_URL), url="https://www.nintendo.com/x")
+        with mock.patch.object(urllib.request, "urlopen", self.dispatcher(page, Resp(jpeg(1920, 1080), url=IMG_URL), calls)):
+            ok, _ = banner_fetch.fetch_banner(TID, self.dest)
+        self.assertTrue(ok)
+        self.assertFalse(any(u.endswith("/HK") for u in calls), "美区有就不再查港区")
+
+    def test_hk_server_error_not_settled(self):
+        def fake(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, 404 if req.full_url.endswith("/US") else 503, "x", {}, None)
+        with mock.patch.object(urllib.request, "urlopen", fake):
+            ok, why = banner_fetch.fetch_banner(TID, self.dest)
+        self.assertFalse(ok)
+        self.assertFalse(banner_fetch.settled(TID), "美区 404 但港区 503：不是定论，下次再查")
+        self.assertIn("HK", why)
+
     def test_fail_budget_skips_without_network(self):
         banner_fetch._fail_spent = 10_000.0   # 预算已用尽
         with mock.patch.object(urllib.request, "urlopen", side_effect=AssertionError("不许联网")):

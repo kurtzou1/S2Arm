@@ -164,6 +164,14 @@ def bundled_shell(c):
     d = Path(c.r.get("shellDir") or Path(c.r.get("resources") or c.private) / "Shell")
     if not (d / "manifest.json").is_file():
         raise Failure("应用自带的预编壳缺失，请重新安装完整的 S2Arm。", code="tool_missing")
+    # 壳和引擎必须是同一版（#1043：0.3.9 → 0.3.10 应用内更新回滚不完整，Engine/engine.json 是新壳号、Shell/manifest.json 还是旧的，
+    #   出包到 ship_ext 核壳编号才挂、原因看不懂）。两边都写了壳号且对不上 = 这份 S2Arm 只装了一半：开头就说清、给出路
+    want = (read(Path(c.engine) / "engine.json", {}) or {}).get("shellId")
+    have = ((read(d / "manifest.json", {}) or {}).get("details") or {}).get("shellId")
+    if want and have and want != have:
+        raise Failure("这份 S2Arm 没装完整：程序的两部分来自不同版本（多半是应用内更新中途失败、回滚没退干净）。"
+                      "请从发布页下载最新的安装包，覆盖安装一次（游戏库、存档、密钥都在别处，不受影响），再出包。",
+                      code="engine_incomplete", internal=f"引擎要的壳 {want}，应用自带的壳 {have}（{d}）")
     return d
 
 
@@ -253,6 +261,13 @@ def _build(c):
         logs = c.logs / c.task
         logs.mkdir(parents=True, exist_ok=True)
         extraction = ensure_extract(c, game, selected_packages(game), env, logs)
+        import patches   # 金手指 / 社区补丁（11-12）：解包后按真构建号查库，交改写阶段（同 build.prepare）
+        patches.prepare(c, game, extraction, env, target="ios")   # iPhone 包不带画面类补丁（patches.fetch）
+        try:   # 原始程序存一份到这款游戏文件夹（v0.4.0）：以后补丁库更新，「S 级优化升级」只读它、不用回原件（pack/jobs/sgrade.py）
+            import sgrade
+            sgrade.save_program(c, gid, Path(extraction) / "exefs")
+        except OSError as e:
+            c.emit("message", f"【黄】原始程序没存下（以后升级要回原件）：{e}")
         kuan = oneclick_kuan(c, gid)
         if os.name != "nt" and not (out / "roots" / (kuan + "@现行")).exists():   # Windows 机上没有 Mac 包可克隆
             seed_from_sibling(c, game, out / "roots", kuan)
@@ -363,7 +378,7 @@ def _build(c):
     from library import _part_bytes
     image = layout.image_ios(c, gid)
     result = dict(compilerCache=cache_result, outputPath=str(image), ipa="", ipaBytes=0, packBytes=_part_bytes([image / layout.IOS_PACK]), buildId=res.get("build_id") or "", target=tgt, graphicsMode=res.get("graphics_mode") or "unknown",
-                  **({"notes": notes} if notes else {}))
+                  boost=patches.boost(c, game, image), **({"notes": notes} if notes else {}))
     if early:   # 打完放进容器装到这台：早装推过的不再推，push_pack 按机上已解开的清单只补差量（着色器库 + 变了的小文件）
         import install as inst
         c.begin("装到 iPhone 并补推资源包（出包期间已先推 %d 个文件）" % pre.get("files", 0))

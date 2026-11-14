@@ -28,6 +28,8 @@ void s2a_brightness_hold_log(void);   // 亮度保持（S2A_BRIGHTNESS）：心�
 #include "s2a_launch_ctx.h"
 #include <sys/mount.h>   // statfs（free_note）
 #include "s2a_docs.h"   // s2a_container_docs：游戏库按款核资源包的进程级 Documents
+#include "s2a_sesdiag.h"   // 会话标记：上一局是不是死在前台（启动前崩溃询问）
+#include "s2a_unattended.h"   // 自动化局不弹崩溃询问
 #include "settings.h"   // 浮层开关要在建视图 / Metal 设备之前先落环境变量（#153）
 // 游戏库界面（shell 的 S2ArmShellHost，C 边界同 Sources/S2ArmShellBridge/include/s2a_shell.h）：make ios S2A_SHELLUI=1 才链进来，
 //   缺省壳不带、为空指针（多款容器包配了不带库界面的壳 = 报红提示，不起游戏）。这里本地声明、不 include 那个头：缺省出壳不读 frontend-ios（壳输入闭包）
@@ -821,8 +823,32 @@ static void top_alert(UIWindow *w, NSString *title, NSString *body) {
 @interface S2ASceneDelegate ()
 - (void)enterGame;
 @end
+static void library_play_go(const char *gid, S2ASceneDelegate *sd);
+// 崩了能恢复（11-13 维护者改定：补丁 / 金手指是玩家主动开的，开局前不再问；崩了下次进来自动关掉、告诉玩家关了什么，想用去设置里再开）：
+//   上一局死在前台、死的就是这一款（会话标记是整个 App 一份，runtime/src/sesdiag.c；靠上次点开始的那款 S2ALastGameId 认）、当时开着金手指 /
+//   玩家开的未验证社区补丁（ios/game_options.m）→ 启动这一局之前关掉它们（社区补丁要在装载前关才不再带进这一局），进游戏后横幅告诉玩家。
+//   记下已处理，进游戏后 diag.m 不再处理一遍（只问发诊断）
+NSArray<NSDictionary *> *s2a_ios_crash_suspects_for(NSString *gid);
+void s2a_ios_crash_turn_off_for(NSString *gid, NSArray<NSDictionary *> *items);
+extern int g_s2a_crash_asked;
+void s2a_dprompt_notice(NSString *title, NSString *body, double delay, double seconds);   // dprompt.m
+static void crash_auto_off(const char *gid) {
+    char d[1024]; if (s2a_container_docs(d, sizeof d) <= 0) return;
+    if (s2a_sesmark_prev(d) != S2A_SESMARK_FG || ![[NSUserDefaults.standardUserDefaults stringForKey:@"S2ALastGameId"] isEqualToString:@(gid)]) return;
+    g_s2a_crash_asked = 1;
+    NSString *g = @(gid); NSArray<NSDictionary *> *items = s2a_ios_crash_suspects_for(g);
+    if (!items.count) return;
+    s2a_ios_crash_turn_off_for(g, items);
+    NSString *names = [[items valueForKey:@"name"] componentsJoinedByString:S2AL(@"common.listSeparator")];
+    LOG("崩溃恢复：%s 上一局开着 %s 时死在前台，这一局启动前已关掉（玩家可在设置里再开）", gid, names.UTF8String);
+    { void s2a_diag_note_crash_off(NSString *); s2a_diag_note_crash_off(names); }   // 进游戏后诊断询问（diag.m，上次死在前台必问）一并说，不另弹横幅
+}
 static void library_play(const char *gid, void *ctx) {   // 主线程（s2a_shell.h 约定）
     S2ASceneDelegate *sd = (__bridge S2ASceneDelegate *)ctx;
+    if (!atomic_load(&g_game_picked)) crash_auto_off(gid);
+    library_play_go(gid, sd);
+}
+static void library_play_go(const char *gid, S2ASceneDelegate *sd) {
     if (atomic_load(&g_game_picked)) {
         LOG("游戏库：同一进程第二次 Play %s，拒绝（一进程一款）", gid);
         top_alert(sd.window, S2AL(@"app.library.reopen.title"), S2AL(@"app.library.reopen.message")); return;
@@ -1104,6 +1130,12 @@ static void cloud_sync_done(void *ctx) {
     self.window.rootViewController = (__bridge_transfer UIViewController *)s2a_shell_library_vc(cat.fileSystemRepresentation);
     LOG("游戏库：已挂库界面（清单 %s）%s", cat.UTF8String, s2a_process_prewarmed() ? "，预热进程只显示库、不起宿主" : "");
     img_scan_bg();
+    // 测试开关（真机自动化点不到库界面的「开始」，同 diag.m S2A_OPEN_SETTINGS）：S2A_LIBRARY_AUTOPLAY=<程序号> 库界面挂上 2 秒后替玩家点这款的开始，
+    //   走的就是玩家点开始那条路（library_play：崩溃恢复 → 起局前检查 → 起宿主），用来在多款容器里验证起局前的处理
+    { const char *e = getenv("S2A_LIBRARY_AUTOPLAY");
+      if (e && *e && !s2a_process_prewarmed()) { char *gid = strdup(e); S2ASceneDelegate *sd = self;
+          dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+              LOG("游戏库：测试开关 S2A_LIBRARY_AUTOPLAY=%s，替玩家点开始", gid); library_play(gid, (__bridge void *)sd); free(gid); }); } }
 }
 // Play 选上之后：换成游戏界面（同单款 willConnect 建的那套：加载页、提示页、安全网提示），再走同一条起宿主路（存档管理 → startHost）
 - (void)enterGame {

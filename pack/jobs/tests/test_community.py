@@ -32,10 +32,11 @@ class CommunityTests(unittest.TestCase):
             {"type": "base", "version": 0, "display": "1.0.0", "builds": {"main": "AAAA"}},
             {"type": "update", "version": 1 << 16, "display": "4.1.0", "builds": {}}]}]}))
         write(self.c.engine / "graphics/widen/tables/verified.tsv", "# 注释\n程序号\t构建号\t款\t登记日期\t依据\n" + GID + "\taaaa\tspl3\t2026-10-27\t实测\n")
-        write(self.c.engine / "graphics/community/other_gfx.tsv", "程序号\t版本\t编号\t名称\t互斥组\t已验证\t来源\n"
-              f"{GID}\t4.1.0\tres1080\t1080p\tres\t0\t社区A\n{GID}\t4.1.0\tres900\t900p\tres\t0\t社区A\n{GID}\t4.1.0\tnoblur\t关动态模糊\t\t1\t社区B\n{GID}\t3.0.0\tfov\tFOV 加大\t\t0\t社区C\n")
+        # 这款 Mac 包里编进去的补丁（产物 cpatch.tsv，11-12 出包时自动查库）：宽屏 / 画面各一份、帧率一份（跟 60 帧开关，不列）、金手指一条（金手指一栏，不列）
+        write(layout.image_mac(self.c, GID) / "cpatch.tsv", "编号\t模块\t位\t类别\t段名\t许可\t来源\t数据写入\t缺省开\n"
+              "widescreen:aa\tmain\t0\twidescreen\t21:9\tMIT\tx.pchtxt\t\t0\ngfx:bb\tmain\t1\tgfx\t关动态模糊\t\ty.pchtxt\t\t0\n"
+              "fps:cc\tmain\t2\tfps\t60 FPS\t\tz.pchtxt\t\t0\ncheat:dd:1\tmain\t-\tcheat\t无限血\t\tc.txt\t\t0\n")
         cd = self.t / "cp"; os.environ["S2A_COMMUNITY_DIR"] = str(cd)
-        os.environ["S2A_COMMUNITY_PATCHES"] = "1"   # 下面三例按内部开发 / 测试包口径（列画面补丁）；玩家包缺省见 test_player_pack_no_graphics
         write(cd / "fps/full/x/INDEX.tsv", "game\ttitle_id\tversion\tbuild_id\ttype\ttarget_fps\tsource\tin_pack\tsha256\n"
               f"Spl\t{GID}\t1.1.1\t\tpchtxt\t60\tfpsrepo\tyes\tabc\nSpl\t{GID}\t4.1.0\t\tpchtxt\t30\tother30\tyes\tdef\n")
         write(cd / "uw/full/y/INDEX.tsv", "game\ttitle_id\tversion\tbuild_id\taspect\tkind\tui_fix\tsource\tin_pack\tsha256\n"
@@ -46,17 +47,18 @@ class CommunityTests(unittest.TestCase):
         ws, fps = r["widescreen"], r["fps60"]
         self.assertEqual((ws["available"], ws["verified"], ws["enabled"], ws["sources"], ws["relocate"]), (True, True, True, ["uwrepo"], False))
         self.assertEqual((fps["available"], fps["verified"], fps["enabled"], fps["sources"], fps["relocate"]), (True, False, True, ["fpsrepo"], True))   # 1.1.1≠4.1.0：跨版本定位、不判死；30 帧那条不算
-        g = {it["id"]: it for it in r["graphics"]}
-        self.assertEqual((g["gfx:noblur"]["enabled"], g["gfx:res1080"]["enabled"], g["gfx:fov"]["relocate"]), (True, False, True))
+        self.assertEqual([(it["id"], it["enabled"], it["license"]) for it in r["graphics"]], [("widescreen:aa", True, "MIT"), ("gfx:bb", True, "")])   # 11-13 起没选过 = 默认开（Mac 画面类也开）；帧率 / 金手指不在这里
 
     def test_save_and_launch_env(self):
-        self.assertEqual(community.launch_env(self.c, GID), {})                             # 没选过都不设：宽屏缺省开、60 帧由宿主按清单原因定
-        self.c.r.update(settings={"widescreen": False, "fps60": False}, graphics={"gfx:res1080": True})
+        self.assertEqual(community.launch_env(self.c, GID), {"S2A_CPATCH_ON": "gfx:bb,widescreen:aa", "S2A_WIDESCREEN": "0"})   # 没选过：包里的补丁全开（11-13），开着宽屏补丁 S2Arm 满屏让开；60 帧由宿主定
+        self.c.r.update(settings={"widescreen": False, "fps60": False}, graphics={"gfx:bb": True})
         community.save(self.c)
-        self.assertEqual(community.launch_env(self.c, GID), {"S2A_WIDESCREEN": "0", "S2A_FPS60": "0"})   # 玩家明确关：写 0
-        self.c.r = {"gameId": GID, "graphics": {"gfx:res900": True}}
+        self.assertEqual(community.launch_env(self.c, GID), {"S2A_WIDESCREEN": "0", "S2A_FPS60": "0", "S2A_CPATCH_ON": "gfx:bb,widescreen:aa"})   # 玩家明确关：写 0；没关过的补丁照开
+        self.c.r = {"gameId": GID, "graphics": {"widescreen:aa": True}}
         r = community.save(self.c); g = {it["id"]: it for it in r["graphics"]}
-        self.assertEqual((g["gfx:res900"]["enabled"], g["gfx:res1080"]["enabled"]), (True, False))   # 互斥组单选
+        self.assertEqual((g["widescreen:aa"]["enabled"], g["gfx:bb"]["enabled"]), (True, True))
+        self.assertEqual({k: v for k, v in community.launch_env(self.c, GID).items() if k in ("S2A_CPATCH_ON", "S2A_WIDESCREEN")},
+                         {"S2A_CPATCH_ON": "gfx:bb,widescreen:aa", "S2A_WIDESCREEN": "0"})   # 开着宽屏补丁：S2Arm 满屏让开
         self.assertEqual((r["widescreen"]["enabled"], r["fps60"]["enabled"]), (False, False))       # 没带的项不变
         self.c.r = {"gameId": GID, "graphics": {"nope": True}}
         with self.assertRaises(Failure): community.save(self.c)
@@ -88,6 +90,7 @@ class CommunityTests(unittest.TestCase):
     def test_diag_run_is_one_session_only(self):
         # #438 诊断局：打开后下一次起局设定好的四个探针（帧号 3600 / 7200，图写这款文件夹 diagrun/），起局时就把这项从 launch.json 去掉，
         #   第二次起局不再开；上一次诊断局的图清掉。期望值按规格手写
+        (layout.image_mac(self.c, GID) / "cpatch.tsv").unlink()   # 只看诊断局变量：这款包里没补丁
         self.c.r.update(settings={"diagRun": True})
         community.save(self.c)
         old = layout.path(self.c, GID, "diagrun") / "shot_1.png"; old.parent.mkdir(parents=True, exist_ok=True); old.write_bytes(b"old")
@@ -99,17 +102,18 @@ class CommunityTests(unittest.TestCase):
         self.assertNotIn("diagRun", community.load_launch(self.c, GID)["settings"])
         self.assertEqual(community.launch_env(self.c, GID), {})
 
-    def test_player_pack_no_graphics(self):
-        # 10-30 维护者：玩家包不带上游补丁字节（S2A_COMMUNITY_PATCHES 没设）→ 画面补丁不列、不能存；宽屏 / 60 帧（我方能力）照常
-        os.environ.pop("S2A_COMMUNITY_PATCHES", None)
+    def test_pack_without_patches(self):
+        # 包里没编进补丁（没查到 / 还没出 Mac 版）→ 不列、不能存、不设 S2A_CPATCH_ON；宽屏 / 60 帧（我方能力）照常
+        (layout.image_mac(self.c, GID) / "cpatch.tsv").unlink()
         r = community.listing(self.c)
         self.assertEqual((r["graphics"], r["widescreen"]["available"], r["fps60"]["available"]), ([], True, True))
-        self.c.r = {"gameId": GID, "graphics": {"gfx:res1080": True}}
+        self.assertNotIn("S2A_CPATCH_ON", community.launch_env(self.c, GID))
+        self.c.r = {"gameId": GID, "graphics": {"gfx:bb": True}}
         with self.assertRaises(Failure): community.save(self.c)
 
     def test_no_data(self):
         os.environ["S2A_COMMUNITY_DIR"] = str(self.t / "none")
-        for f in ("graphics/community/other_gfx.tsv", "graphics/widen/tables/verified.tsv"): (self.c.engine / f).unlink()
+        (self.c.engine / "graphics/widen/tables/verified.tsv").unlink(); (layout.image_mac(self.c, GID) / "cpatch.tsv").unlink()
         r = community.listing(self.c)
         self.assertEqual((r["widescreen"]["available"], r["fps60"]["available"], r["widescreen"]["enabled"], r["graphics"]), (False, False, False, []))
 
@@ -139,30 +143,58 @@ class MacDisplayTests(unittest.TestCase):
         self.caps()
         m = self.mac()
         self.assertEqual((m["fps60"]["available"], m["fps60"]["value"]), (True, False))   # 清单 1 但原因不是已验证来源：缺省原帧率（同宿主）
-        self.assertEqual((m["widenForce"]["available"], m["widenForce"]["value"]), (True, False))
+        self.assertEqual((m["widescreen"]["available"], m["widescreen"]["value"]), (True, False))   # 清单 widen 0「缺省关」：没选过显示关、可以开
         self.assertEqual((m["enhance"]["available"], m["enhance"]["value"]), (True, False))
         self.assertEqual((m["docked"]["value"], m["rumble"]["value"], m["rumbleLevel"]["value"], m["motion"]["value"], m["hud"]["value"]),
                          ("docked", True, "2", True, False))   # 定义表缺省：Mac 主机模式、震动开标准档、体感开、浮层关
         self.assertEqual(community.launch_env(self.c, GID), {})
 
     def test_fps60_default_follows_the_verified_reason_like_the_host(self):
-        # 同宿主 runtime/src/caps.c：清单 fps60 1 且原因含「fps.tsv」「逻辑速度同局 A/B 绿」「游戏原生 60 帧」之一才缺省开；值 0 / 别的原因都是原帧率
+        # 同宿主 runtime/src/caps.c：清单 fps60 1 且原因含「fps.tsv」「逻辑速度同局 A/B 绿」「游戏原生 60 帧」「社区帧率补丁」之一才缺省开；值 0 / 别的原因都是原帧率
         for line, want in (("fps60\t1\t# fps.tsv 登记 60 帧\n", True), ("fps60\t1\t# 逻辑速度同局 A/B 绿\n", True),
-                           ("fps60\t1\t# 游戏原生 60 帧\n", True), ("fps60\t1\t# 全引擎档\n", False), ("fps60\t0\t# fps.tsv 判红\n", False)):
+                           ("fps60\t1\t# 游戏原生 60 帧\n", True), ("fps60\t1\t# 默认开：来源 社区帧率补丁\n", True), ("fps60\t1\t# 全引擎档\n", False), ("fps60\t0\t# fps.tsv 判红\n", False)):
             with self.subTest(line=line):
                 self.caps(line + "direct\t1\n")
                 self.assertEqual(self.mac()["fps60"]["value"], want)
                 self.assertEqual(community.launch_env(self.c, GID), {})   # 没选过：不写，宿主自己按同一条规则开 / 不开
 
+    def test_without_patches_fps60_and_widescreen_are_hidden(self):
+        # 只用社区补丁（11-13 维护者撤掉我方 60 帧与通用满屏）：清单读得到时，没有帧率补丁 → 「60 帧」hidden；包里 cpatch.tsv 没有宽屏 / 自适应满屏补丁 → 「满屏」hidden
+        self.caps("fps60\t1\t# fps.tsv 登记 60 帧\nwiden\t0\ndirect\t1\n")
+        m = self.mac()
+        self.assertEqual((m["fps60"].get("hidden"), m["widescreen"].get("hidden"), m["docked"].get("hidden")), (True, True, None))
+        self.caps("fps60\t1\t# 默认开：来源 社区帧率补丁\nwiden\t0\ndirect\t1\n")
+        write(layout.image_mac(self.c, GID) / "cpatch.tsv", "编号\t缺省开\nwidescreen:abc\t1\n")
+        m = self.mac()
+        self.assertEqual((m["fps60"].get("hidden"), m["widescreen"].get("hidden")), (None, None))
+        (layout.image_mac(self.c, GID) / "s2a_caps.tsv").unlink()   # 还没出 Mac 版（读不到清单）：照旧都列、先存偏好
+        self.assertEqual((self.mac()["fps60"].get("hidden"), self.mac()["widescreen"].get("hidden")), (None, None))
+
     def test_every_mac_item_of_the_table_is_on_the_page(self):
-        # 定义表里 platforms 含 mac 的 bool / choice 项 = enhance fps60 widescreen widenForce docked rumble rumbleLevel motion hud
+        # 定义表里 platforms 含 mac 的 bool / choice 项 = enhance fps60 widescreen docked rumble rumbleLevel motion hud（11-13 widenForce 并进 widescreen）
         self.caps()
-        self.assertEqual(sorted(self.mac()), sorted(["enhance", "fps60", "widescreen", "widenForce", "docked", "language", "rumble", "rumbleLevel", "motion", "padFace", "hud", "pauseUnfocused", "diagRun"]))
+        self.assertEqual(sorted(self.mac()), sorted(["enhance", "fps60", "fpsPick", "widescreen", "docked", "language", "rumble", "rumbleLevel", "motion", "padFace", "hud", "pauseUnfocused", "diagRun"]))
+
+    def test_fps_pick_level(self):
+        # 帧率档位（11-13）：包里帧率补丁（编号 fps:）目标帧率两档以上才出；选具体档 → S2A_FPS_PICK=档，选自动（"0"）不写；表外取值拒收
+        self.caps("fps60\t1\t# 默认开：来源 社区帧率补丁\nwiden\t0\ndirect\t1\n")
+        tsv = layout.image_mac(self.c, GID) / "cpatch.tsv"
+        write(tsv, "编号\t缺省开\t目标帧率\nfps:a\t1\t60\nfps:b\t1\t\nwidescreen:x\t1\t\n")   # 60 与没写（当 60）= 一档
+        self.assertEqual((community.fps_levels(self.c, GID), self.mac()["fpsPick"].get("hidden")), ([60], True))
+        write(tsv, "编号\t缺省开\t目标帧率\nfps:a\t1\t60\nfps:c\t1\t120\ngfx:d\t1\t30\n")       # gfx: 的目标帧率不算档
+        self.assertEqual((community.fps_levels(self.c, GID), self.mac()["fpsPick"].get("hidden"), self.mac()["fpsPick"]["value"]), ([60, 120], None, "0"))
+        self.assertNotIn("S2A_FPS_PICK", community.launch_env(self.c, GID))
+        self.c.r.update(settings={"fpsPick": "60"}); community.save(self.c)
+        self.assertEqual(community.launch_env(self.c, GID)["S2A_FPS_PICK"], "60")
+        self.c.r = {"gameId": GID, "settings": {"fpsPick": "0"}}; community.save(self.c)
+        self.assertNotIn("S2A_FPS_PICK", community.launch_env(self.c, GID))
+        self.c.r = {"gameId": GID, "settings": {"fpsPick": "90"}}
+        with self.assertRaises(Failure): community.save(self.c)
 
     def test_game_without_a_mac_build_can_still_pick(self):
         # v0.3.1：还没出 Mac 版也能先选、存成偏好（出好后生效）——原先整页置灰写「还没有做好 Mac 版」，玩家只能先去出包
         m = self.mac()
-        for key in ("fps60", "widenForce", "enhance", "docked", "hud"):
+        for key in ("fps60", "widescreen", "enhance", "docked", "hud"):
             self.assertTrue(m[key]["available"]); self.assertEqual(m[key]["reason"], "")
 
     def test_missing_capabilities_give_their_own_reason(self):
@@ -170,7 +202,9 @@ class MacDisplayTests(unittest.TestCase):
         m = self.mac()
         self.assertEqual(m["fps60"]["reason"], community.NO_FPS60)
         self.assertEqual(m["enhance"]["reason"], community.NO_DIRECT)
-        self.assertTrue(m["widenForce"]["available"])
+        self.assertTrue(m["widescreen"]["available"])   # 「缺省关」不是强信号：照样能开
+        self.caps("widen\t0\t# 强信号：宽屏画面坏\ndirect\t1\n")
+        self.assertEqual((self.mac()["widescreen"]["available"], self.mac()["widescreen"]["reason"]), (False, community.NO_WIDEN))
 
     def test_enhance_reaches_launch_and_turns_back_off(self):
         self.caps()
@@ -183,9 +217,64 @@ class MacDisplayTests(unittest.TestCase):
         self.caps("fps60\t1\ndirect\t0\n")
         self.assertEqual(community.launch_env(self.c, GID), {})
 
-    def test_force_widescreen_matches_iphone(self):
+    def test_full_screen_matches_iphone(self):
+        # 满屏明确开 = 没验证过也铺满（同 iPhone settings.m）；明确关 = 16:9；强信号判坏的款明确开也不开
         self.caps()
-        self.save(widenForce=True)
+        self.save(widescreen=True)
+        self.assertEqual(community.launch_env(self.c, GID), {"S2A_WIDEN_VERIFIED": "1", "S2A_WIDESCREEN": "1"})
+        self.save(widescreen=False)
+        self.assertEqual(community.launch_env(self.c, GID), {"S2A_WIDESCREEN": "0"})
+        self.caps("widen\t1\t# 默认开：widen_verified.tsv\ndirect\t1\n")
+        self.save(widescreen=None)
+        self.assertTrue(self.mac()["widescreen"]["value"])                           # 验过的款没选过：显示开
+        self.assertEqual(community.launch_env(self.c, GID), {})
+        self.caps("widen\t0\t# 强信号：崩溃归因\ndirect\t1\n")
+        write(community.launch_path(self.c, GID), json.dumps({"schema": 1, "settings": {"widescreen": True}, "patches": {}}))
+        self.assertEqual(community.launch_env(self.c, GID), {})
+
+    def test_full_screen_drives_the_adaptive_patch(self):
+        # 包里有自适应满屏补丁（wsauto:<族>:w / :n）：满屏开关一并开关它、不单列；开着时 S2Arm 满屏让开、不强开（同 iPhone）
+        tsv = "编号\t模块\t位\t类别\t段名\t许可\t来源\t数据写入\t缺省开\n"
+        for default in ("1", "0"):
+            with self.subTest(default=default):
+                self.caps()
+                write(layout.image_mac(self.c, GID) / "cpatch.tsv", tsv + "".join(f"wsauto:fam:{x}\tmain\t0\tultrawide\tAuto\t\tsrc\t\t{default}\n" for x in "wn")
+                      + "gfx:dof\tmain\t1\tother-gfx\tDisable DOF\t\tsrc\t\t0\n")
+                self.assertEqual([it["id"] for it in community.packed_patches(self.c, GID)], ["gfx:dof"])
+                self.save(widescreen=None)
+                self.assertTrue(self.mac()["widescreen"]["value"])                          # 11-13：有自适应满屏补丁就默认开（不看我方验过标签）
+                self.assertEqual(community.launch_env(self.c, GID), {"S2A_CPATCH_ON": "gfx:dof,wsauto:fam", "S2A_WIDESCREEN": "0"})   # 画面补丁没选过也开
+                self.save(widescreen=True)
+                self.assertEqual(community.launch_env(self.c, GID), {"S2A_CPATCH_ON": "gfx:dof,wsauto:fam", "S2A_WIDESCREEN": "0"})
+                self.save(widescreen=False)
+                self.assertEqual(community.launch_env(self.c, GID), {"S2A_CPATCH_ON": "gfx:dof", "S2A_WIDESCREEN": "0"})
+
+    def test_fixed_ratio_variants_are_one_item(self):
+        # 定画幅宽屏变体（表「画幅」列，11-13）：几份并成一项 widescreen:auto（宿主按窗口比例开最近一份）；开着时 S2Arm 满屏让开；没画幅的单列
+        self.caps()
+        tsv = "编号\t模块\t位\t类别\t段名\t许可\t来源\t数据写入\t缺省开\t目标帧率\t画幅\n" + \
+            "".join(f"widescreen:v{i}\tmain\t{i}\tultrawide\tHUD\t\tsrc\t\t0\t\t{a}\n" for i, a in enumerate(("1.6000", "2.3333")))
+        write(layout.image_mac(self.c, GID) / "cpatch.tsv", tsv + "gfx:dof\tmain\t5\tother-gfx\tDisable DOF\t\tsrc\t\t0\t\t\n")
+        got = community.packed_patches(self.c, GID)
+        self.assertEqual([(it["id"], it["label"], it.get("ratios")) for it in got],
+                         [("widescreen:auto", "满屏补丁（按屏幕比例自动选）", ["16:10", "21:9"]), ("gfx:dof", "Disable DOF", None)])
+        self.assertEqual(community.launch_env(self.c, GID), {"S2A_CPATCH_ON": "gfx:dof,widescreen:auto", "S2A_WIDESCREEN": "0"})
+
+    def test_packed_patch_shows_last_session_result(self):
+        # 上一局实际结果（runtime/src/cpatch.c 写 游戏库/temp/<程序号>/cpatch_status.tsv）：没生效写原因、开着量到效果写实测、其余空
+        self.caps()
+        tsv = "编号\t模块\t位\t类别\t段名\t许可\t来源\t数据写入\t缺省开\n" + "".join(f"gfx:{x}\tmain\t{i}\tother-gfx\t{x}\t\tsrc\t\t0\n" for i, x in enumerate("abcdef"))
+        write(layout.image_mac(self.c, GID) / "cpatch.tsv", tsv)
+        write(Path(self.c.library) / "temp" / GID / "cpatch_status.tsv", "gfx:a\t不配套\t\ngfx:b\t开\tfps=60\ngfx:c\t开\taspect=19.5:9\ngfx:d\t开\t\ngfx:e\t开\tfps=31\ngfx:f\t开\tunfilled\n")
+        got = {it["id"]: it["result"] for it in community.packed_patches(self.c, GID)}
+        self.assertEqual(got, {"gfx:a": "没生效：补丁与这个版本的游戏不配套", "gfx:b": "已生效：上一局实测 60 帧", "gfx:c": "已生效：上一局画面比例 19.5:9", "gfx:d": "",
+                               "gfx:e": "开着，但上一局实测只有 31 帧", "gfx:f": "开着，但上一局画面没铺满"})
+
+    def test_old_force_widescreen_choice_becomes_full_screen_on(self):
+        # 旧 launch.json 的 widenForce=真（「宽屏强制启用」）= 满屏明确开
+        self.caps()
+        write(community.launch_path(self.c, GID), json.dumps({"schema": 1, "settings": {"widenForce": True}, "patches": {}}))
+        self.assertTrue(self.mac()["widescreen"]["value"])
         self.assertEqual(community.launch_env(self.c, GID), {"S2A_WIDEN_VERIFIED": "1", "S2A_WIDESCREEN": "1"})
 
     def test_fps60_off_and_manual_on_over_a_red_game(self):
@@ -260,12 +349,12 @@ class MacDisplayTests(unittest.TestCase):
         self.assertEqual(self.launch_file()["settings"], {"hud": True})
 
     def test_old_community_file_is_moved_once(self):
-        # schema 3：widenForce / metalfx / fps60 都是玩家选的 → enhance / widenForce / fps60；补丁带过去；旧文件删掉
+        # schema 3：widenForce / metalfx / fps60 都是玩家选的 → widescreen（满屏明确开，11-13 并入）/ enhance / fps60；补丁带过去；旧文件删掉
         self.caps()
         old = layout.path(self.c, GID, "community.json")
         write(old, json.dumps({"schema": 3, "widescreen": False, "fps60": True, "widenForce": True, "metalfx": True, "enabled": {"gfx:a": True}}))
         self.assertTrue(self.mac()["enhance"]["value"])
-        self.assertEqual(self.launch_file(), {"schema": 1, "settings": {"widescreen": False, "widenForce": True, "enhance": True, "fps60": True}, "patches": {"gfx:a": True}})
+        self.assertEqual(self.launch_file(), {"schema": 1, "settings": {"widescreen": True, "enhance": True, "fps60": True}, "patches": {"gfx:a": True}})
         self.assertFalse(old.exists())
 
     def test_old_file_written_by_the_previous_panel_is_not_a_manual_choice(self):

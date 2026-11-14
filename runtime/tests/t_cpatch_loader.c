@@ -69,20 +69,38 @@ static void table(const char *dir, int test) {
     if (fclose(f)) die("test table fclose");
 }
 static int run(const char *dir, int test) {
-    unsetenv("S2A_FPS"); unsetenv("S2A_FPS_TABLE");
+    unsetenv("S2A_FPS"); unsetenv("S2A_FPS_TABLE"); setenv("S2A_DOCS", dir, 1);
     setenv("S2A_FPS60", test == 1 ? "1" : "0", 1);
     if (test == 1) setenv("S2A_CPATCH_ON", "none", 1); else unsetenv("S2A_CPATCH_ON");
     const char *names[] = {"main", "subsdk0"}; load_modules(dir, names, 2);
     CHECK(g_nmod == 2 && s2a_unresolved_count() == 0, "case%d real module load / relocations", test);
     CHECK(module_sym(&g_mod[0], "fps_probe") == g_mod[0].base + 0x100 &&
           module_sym(&g_mod[0], "patch_data") == g_mod[0].base + 0x8000, "case%d ELF symbols", test);
-    state("load", test, test == 0 ? 2 : 0); // 2：只有缺省开项已写入，其余仍保持原值。
+    state("load", test, 0); // 11-13 起帧率类装载时只登记、不写不开（几档改同一处，cpatch.c fps_pick），由 fps_start 跟随定；下面原注释说的「默认开」是跟随开时的状态 // 11-13 起没选过（不设 S2A_CPATCH_ON）= 合法项全部默认开（表里「缺省开」列只作我方验过的标签）；case1 选了 none、case2 全是非法项 = 都不开
     CHECK(s2a_cpatch_fps_count() == (test == 3 ? 65 : test == 2 ? 0 : 2), "case%d admitted count=%d", test, s2a_cpatch_fps_count());
     s2a_fps_start(dir); state(test == 1 ? "start-on" : "start-off", test, test == 1);
     s2a_fps_set_enabled(0); state("off-before-roundtrip", test, 0);
     for (int i = 0; i < 3; i++) {
         s2a_fps_set_enabled(1); state("on", test, 1);
         s2a_fps_set_enabled(0); state("off", test, 0);
+    }
+    if (test == 0) {   // 每条的实际结果（cpatch_status.tsv，11-13）：期望按夹具手写——原值对得上的跟 60 帧开关开 / 关，对不上的「不配套」；实测只写给开着的
+        void s2a_cpatch_effect(const char *kind, const char *text);
+        char p[1200], buf[1024]; snprintf(p, sizeof p, "%s/cpatch_status.tsv", dir);
+        s2a_fps_set_enabled(1); s2a_cpatch_effect("fps:", "fps=60");
+        FILE *f = fopen(p, "r"); size_t n = f ? fread(buf, 1, sizeof buf - 1, f) : 0; if (f) fclose(f); buf[n] = 0;
+        const char *want = "fps:good-on\t开\tfps=60\nfps:good-off\t开\tfps=60\nfps:bad-on\t不配套\t\nfps:bad-off\t不配套\t\nfps:late-bad\t不配套\t\n";
+        CHECK(!strcmp(buf, want), "case0 状态文件：\n%s期望：\n%s", buf, want);
+        s2a_fps_set_enabled(0);
+        f = fopen(p, "r"); n = f ? fread(buf, 1, sizeof buf - 1, f) : 0; if (f) fclose(f); buf[n] = 0;
+        CHECK(strstr(buf, "fps:good-on\t关\t\n") != NULL, "case0 关 60 帧后状态回关、实测清空：\n%s", buf);
+        // 运行中量效果（s2a_cpatch_frame）：开 60 帧后喂 31 秒、每帧 1/30 秒的局内帧 → 30 秒一窗出 fps=30；菜单帧（game=0）不算
+        void s2a_cpatch_frame(uint64_t now, int game, uint64_t dt);
+        s2a_fps_set_enabled(1);
+        uint64_t t = 1000000000ull, d = 1000000000ull / 30;
+        for (int i = 0; i < 31 * 30; i++) { t += d; s2a_cpatch_frame(t, 1, d); s2a_cpatch_frame(t, 0, d); }
+        f = fopen(p, "r"); n = f ? fread(buf, 1, sizeof buf - 1, f) : 0; if (f) fclose(f); buf[n] = 0;
+        CHECK(strstr(buf, "fps:good-on\t开\tfps=30\n") != NULL && strstr(buf, "fps:bad-on\t不配套\t\n") != NULL, "case0 实测帧率窗：\n%s", buf);
     }
     return bad ? 1 : 0;
 }

@@ -63,21 +63,25 @@ public sealed partial class EnvironmentWindow
         var imported = st is { } s0 && Flag(s0, "imported");
         var active = st is { } s1 && Flag(s1, "active");
         var panel = new StackPanel { Spacing = 10 };
-        var line = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"), ColumnSpacing = 8 };
+        var line = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 8 };
         var heading = Label(title ?? S("title"), 16); heading.VerticalAlignment = VerticalAlignment.Center;
         line.Children.Add(heading);
         Button Mode(string key, bool on, Action handler, string? text = null)
         {
-            var b = new Button { Content = text ?? S(key), Padding = new Thickness(14, 8), CornerRadius = new CornerRadius(8),
-                Background = on ? Accent : Brush.Parse("#29292D"), Foreground = on ? Canvas : Ink };
+            // 分段选择的一段（11-14 体验梳理，开发甲定）：选中的那段填色，另一段透明；外面一圈底色把两段收成一组，和旁边的动作按钮区分开
+            var b = new Button { Content = text ?? S(key), Padding = new Thickness(14, 7), CornerRadius = new CornerRadius(7),
+                Background = on ? Accent : Brushes.Transparent, Foreground = on ? Canvas : Ink, BorderThickness = new Thickness(0) };
             AutomationId(b, "export.sign." + key);
             b.Click += (_, _) => handler();
             return b;
         }
         var apple = Mode("appleId", !active, () => _ = SetDevCertAsync(false), appleIdTitle);
         var mine = Mode("devcert", active, () => { if (imported) _ = SetDevCertAsync(true); else _ = ImportDevCertAsync(); });
-        Grid.SetColumn(apple, 1); line.Children.Add(apple);
-        Grid.SetColumn(mine, 2); line.Children.Add(mine);
+        var segment = new Border { Background = Brush.Parse("#29292D"), CornerRadius = new CornerRadius(9), Padding = new Thickness(3),
+            VerticalAlignment = VerticalAlignment.Center,
+            Child = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2, Children = { apple, mine } } };
+        AutomationId(segment, "export.sign.segment");
+        Grid.SetColumn(segment, 1); line.Children.Add(segment);
         panel.Children.Add(line);
         if (active && st is { } s && s.TryGetProperty("cert", out var c) && c.ValueKind == JsonValueKind.Object)
         {

@@ -14,10 +14,12 @@ H=$(cd "$(dirname "$0")/.." && pwd)
 if [ -n "${S2A_ANDROID_VK_REMOTE:-}" ] && [ -z "${S2A_REMOTE_NAME:-}" ] && [ -f "${S2A_PRIVATE_TOOLS:-}/remote.sh" ] && [ -z "$(git -C "$H" status --porcelain 2> /dev/null)" ]; then
   cd "$H"
   # shellcheck disable=SC2086  # S2A_ANDROID_VK_ENV 是「K=V K=V」一串，按空格拆给 env
-  exec env S2A_REMOTE_PRIO=2 bash "$S2A_PRIVATE_TOOLS/remote.sh" --host "$S2A_ANDROID_VK_REMOTE" --name gate-android-vk --rev HEAD --timeout 2700 -- \
+  rc=0; env S2A_REMOTE_PRIO=2 bash "$S2A_PRIVATE_TOOLS/remote.sh" --host "$S2A_ANDROID_VK_REMOTE" --name gate-android-vk --rev HEAD --timeout 2700 -- \
     bash -c 'L=$1; shift; ( while sleep 60; do echo "安卓 Vulkan 用例在远端跑着 / 等锁（$(date +%T)）"; done ) & hb=$!; held=
       trap "kill $hb 2> /dev/null; [ -n \"\$held\" ] && rmdir \"$L\"" EXIT
       if [ -n "$L" ]; then for _ in $(seq 360); do mkdir "$L" 2> /dev/null && { held=1; break; }; sleep 5; done; [ -n "$held" ] || { echo "等不到安卓 Vulkan 用例锁 ${L}（30 分钟）"; exit 75; }; fi
-      env "$@" bash tests/android_vk_test.sh' _ "${S2A_ANDROID_VK_LOCK:-}" ${S2A_ANDROID_VK_ENV:-}
+      env "$@" bash tests/android_vk_test.sh' _ "${S2A_ANDROID_VK_LOCK:-}" ${S2A_ANDROID_VK_ENV:-} || rc=$?
+  # 远端自己没跑成（remote.sh 退 125：盘不足 / 连不上 / 排队超时）≠ 用例红：退 75 环境未就绪，列车等环境、不归责分支（11-14：远端机盘只剩 16G，contrib/pr1013 被当真红退回，同批 9 支逐支核、叠在上面的 10 支推测批作废，约 40 分钟）
+  [ $rc = 125 ] && { echo "安卓 Vulkan 用例：环境未就绪（远端没跑成：remote 退出 125，原因见上面的【红】行）"; exit 75; }; exit $rc
 fi
 exec bash "$H/android/tests/vk/run.sh"

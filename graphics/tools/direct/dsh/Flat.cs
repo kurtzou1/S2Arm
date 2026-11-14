@@ -166,10 +166,10 @@ namespace S2A.Dsh
         public static (string, int, int) GiantFix(string msl)
         {
             int n = EntryDepth(msl);
-            if (n < GiantDepth) return (msl, 0, 0);
+            if (n < GiantDepth) return (DshOutline.Compute(msl), 0, 0);
             msl = Flatten(msl).Item1; int d = EntryDepth(msl);
             if (d >= GiantDepth) msl = s_entry.Replace(msl, m => "[[clang::optnone]] " + m.Value);
-            return (msl, n, d);
+            return (DshOutline.Compute(msl), n, d);
         }
     }
 }

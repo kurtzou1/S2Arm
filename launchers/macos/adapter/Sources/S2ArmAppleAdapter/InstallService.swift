@@ -203,11 +203,14 @@ public final class InstallService {
     ///   有要重新出包的款且没 acceptStale → 作业以 container_stale 失败（界面先问玩家）
     ///   device：连着多台时装到哪台（同 install；不给 = 只连着一台）
     /// acceptDropped：同 install——玩家已确认手机上只在别的电脑装过的游戏这次带不上（作业层 container_would_drop）
-    public func updatePhone(acceptStale: Bool = false, acceptDropped: Bool = false, accept: Set<String> = [], device: String? = nil, events: EventSink = .discard) async throws -> [String: Any] {
+    /// mode：这次按「一键装到 iPhone」（install）/「导出自己签名安装」（export）走，nil = 按设置里的装法；sgradeUpgrade：「S 级优化升级」页发起，壳已是本版也重组装上
+    public func updatePhone(acceptStale: Bool = false, acceptDropped: Bool = false, accept: Set<String> = [], mode: String? = nil, sgradeUpgrade: Bool = false, device: String? = nil, events: EventSink = .discard) async throws -> [String: Any] {
         var extra: [String: Any] = acceptStale ? ["acceptStale": true] : [:]
         if acceptDropped { extra["acceptDropped"] = true }
         for key in accept { extra[key] = true }
         if let device { extra["device"] = device }
+        if let mode { extra["mode"] = mode }
+        if sgradeUpgrade { extra["sgradeUpgrade"] = true }
         return try await client.perform("installUpdate", extra: extra, events: events).result
     }
 

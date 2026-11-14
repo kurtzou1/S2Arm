@@ -16,7 +16,7 @@
   10-28 出包槽 / sched / remote 三支各被推到 124–128 个文件、几乎每批都跑；清单按执行追踪写，被测脚本新调用了别的脚本同笔补进来），
 「# 门禁闭包：[--table <表>] <入口…>」= 改动落在这些入口经 tools/stage_inputs.py 算出的依赖闭包里就跑（阶段键单测：新文件进了阶段闭包要核登记）。
 钩子与 iOS 编译按各钩子文件头「# 门禁路由：<前缀…>」（tools/gate_decl.py route）；哪个钩子都没声明到的代码目录 = 全跑（宁多勿漏）。"""
-import fnmatch, os, re, subprocess, sys, tempfile
+import fnmatch, json, os, re, subprocess, sys, tempfile
 
 TOK = re.compile(r'(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:sh|py|c|h|m|mm|cc|cpp|swift|cs|tsv|mk|json)\b')   # 带目录的写法整段取（graphics/tools/shbake/xc_key.sh），见 refs
 LOCAL = ('tools/', 'pack/', 'tests/')   # 本线目录：单测覆盖面只在这里面推
@@ -252,6 +252,50 @@ def cover_files(test, files, by_name, full=False):
     return set(seen) | {f for f in files for g in globs if fnmatch.fnmatch(f, g)}
 
 
+def tree_key():
+    """仓库内容指纹（cover_table 缓存键）：暂存区的树 + 工作区相对暂存区的改动 + 本文件版本；算不出（不是 git 仓 / 有未解决冲突）→ None 不缓存。
+    覆盖面只读已跟踪文件（FILESET 来自 git ls-files）、make 清单也只取已跟踪的，所以未跟踪文件不进键"""
+    import hashlib
+    try:
+        w = subprocess.run(['git', 'write-tree'], capture_output=True, text=True, check=True).stdout.strip()
+        d = subprocess.run(['git', 'diff', '--no-ext-diff', '--binary'], capture_output=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return hashlib.sha1(b'v1\0' + w.encode() + b'\0' + d).hexdigest()
+
+
+def cover_table(tests, files, by_name):
+    """全部单测的覆盖面（与改了什么无关）→ {单测: (覆盖文件集, 通配, 每次跑)}。11-14：一次 tests 路由 6–9 秒，几乎全花在逐个单测算闭包
+    （解析几百份脚本、起 make / stage_inputs 子进程）；同一份仓库内容的结果只算一次，存在 git 公共目录 s2a-gate-route/<指纹>.json，
+    之后同树的调用（预检、门禁规划、gate_route_test 里二十多次）直接读。GATE_ROUTE_CACHE=0 关；最多留 40 份，旧的删"""
+    key = None if os.environ.get('GATE_ROUTE_CACHE') == '0' else tree_key()
+    path = None
+    if key:
+        try:
+            gd = subprocess.run(['git', 'rev-parse', '--git-common-dir'], capture_output=True, text=True, check=True).stdout.strip()
+            path = os.path.join(gd, 's2a-gate-route', key + '.json')
+            with open(path, encoding='utf-8') as f:
+                raw = json.load(f)
+            if set(raw) == set(tests):
+                return {t: (set(v[0]), v[1], v[2]) for t, v in raw.items()}
+        except (OSError, ValueError, subprocess.CalledProcessError):
+            pass
+    table = {t: test_cover(t, files, by_name) for t in tests}
+    if path:
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = f'{path}.{os.getpid()}.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump({t: [sorted(c), list(g), bool(a)] for t, (c, g, a) in table.items()}, f, ensure_ascii=False)
+            os.replace(tmp, path)
+            old = sorted((os.path.getmtime(q), q) for q in (os.path.join(os.path.dirname(path), n) for n in os.listdir(os.path.dirname(path))) if q.endswith('.json'))
+            for _, q in old[:-40]:
+                os.unlink(q)
+        except OSError:
+            pass
+    return table
+
+
 def main():
     mode, changed = sys.argv[1], [f for f in sys.argv[2:] if f]
     if mode == 'nohook':   # 过渡的无钩子路径（tools/test_wired_lint.py 读：这些前缀下的单测暂无钩子接线，不报没接线）
@@ -274,8 +318,9 @@ def main():
     code = [f for f in changed if f.startswith('tests/visual/') or not (DOC.search(f) or f.startswith(LOCAL + ('scripts/',) + NOHOOK))]   # 代码改动（本线目录与文档以外）
     unknown = [f for f in code if not hit([f], known)]   # 表里没列到的代码路径 → 钩子全跑
     if mode == 'tests':
+        table = cover_table(tests, files, by_name)
         for t in tests:
-            cov, globs, always = test_cover(t, files, by_name)
+            cov, globs, always = table[t]
             if not changed or always or set(changed) & cov or any(fnmatch.fnmatch(c, g) for c in changed for g in globs): print(t)
     elif mode == 'claimed':   # 10-31 合入线：tool 档原先一个钩子都不跑，钩子明写路由的本线目录（pack/jobs/、tests/autoplay/ …）改了也不跑
         for k, ps in table:

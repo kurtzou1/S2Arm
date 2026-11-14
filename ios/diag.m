@@ -561,15 +561,25 @@ static NSString *mk_dir(void) {
 @end
 static S2ADiagMK *g_mk;
 
-// 问一句「把上次的诊断发给我们？」（每次启动最多问一次）
+// 崩溃恢复关掉了什么（金手指 / 补丁 / 60 帧的名字，app.m 游戏库容器或本文件单款壳记）：上次死在前台时和诊断询问并成一个提示说，不另弹横幅（11-13 维护者：两个弹层叠在一起）
+static NSString *g_crash_off;
+void s2a_dprompt_notice(NSString *title, NSString *body, double delay, double seconds);   // dprompt.m
+void s2a_diag_note_crash_off(NSString *names) { g_crash_off = [names copy]; }
+// 不弹询问时（已问过 / 自动化局 / 正在导出），关掉了什么仍要告诉玩家：退回只有「知道了」的提示条
+static void crash_off_notice_only(void) {
+    if (!g_crash_off) return;
+    s2a_dprompt_notice(S2AL(@"crash.off.title"), [NSString stringWithFormat:S2AL(@"crash.off.body"), g_crash_off], 0, 8); g_crash_off = nil;
+}
+// 问一句「把上次的诊断发给我们？」（每次启动最多问一次）；崩溃恢复刚关掉东西时，同一个提示先说关掉了什么
 void s2a_diag_prompt(NSString *why) {
     // 已经在导出（或分享面板开着）就不问了：玩家正在发，问了只会和分享面板叠在一起
-    if (g_prompted || !g_vc) return; g_prompted = YES;
+    if (g_prompted || !g_vc) { crash_off_notice_only(); return; } g_prompted = YES;
     // 自动化 / 开发工具起的局（s2a_unattended.h）不问：日志由工具拉回，弹窗只会挡住整局
-    if (s2a_unattended()) { LOG("诊断：%s；自动化局不问「把上次的诊断发给我们？」", why.UTF8String); return; }
-    if (g_exporting || [g_vc.presentedViewController isKindOfClass:UIActivityViewController.class]) return;
-    UIAlertController *a = [UIAlertController alertControllerWithTitle:S2AL(@"diag.prompt.title")
-        message:[NSString stringWithFormat:S2AL(@"diag.prompt.message"), why] preferredStyle:UIAlertControllerStyleAlert];
+    if (s2a_unattended()) { LOG("诊断：%s；自动化局不问「把上次的诊断发给我们？」", why.UTF8String); crash_off_notice_only(); return; }
+    if (g_exporting || [g_vc.presentedViewController isKindOfClass:UIActivityViewController.class]) { crash_off_notice_only(); return; }
+    NSString *off = g_crash_off; g_crash_off = nil;
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:off ? S2AL(@"crash.off.title") : S2AL(@"diag.prompt.title")
+        message:off ? [NSString stringWithFormat:S2AL(@"crash.off.prompt"), off] : [NSString stringWithFormat:S2AL(@"diag.prompt.message"), why] preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:S2AL(@"diag.prompt.no") style:UIAlertActionStyleCancel handler:nil]];
     [a addAction:[UIAlertAction actionWithTitle:S2AL(@"diag.prompt.send") style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) { (void)x; upload_now(); }]];
     UIViewController *top = g_vc; while (top.presentedViewController) top = top.presentedViewController;
@@ -623,6 +633,19 @@ void s2a_diag_menu_hold(uint64_t press) {
         if (s2a_pad_plus_press() == press) s2a_diag_open_menu();
     });
 }
+// 上局死在前台、当时开着金手指 / 玩家开的未验证社区补丁（ios/game_options.m s2a_ios_crash_suspects）：自动关掉、横幅告诉玩家（11-13 维护者改定：不问）。
+//   多款容器在游戏库点开始时已处理（app.m crash_auto_off，社区补丁要在装载前关），这里只剩单款壳：金手指关了马上生效（服务层每秒重载），补丁下次启动生效。
+//   关掉了什么不另弹横幅，交给紧接着的诊断询问一并说（s2a_diag_prompt）
+NSArray<NSDictionary *> *s2a_ios_crash_suspects(void);
+void s2a_ios_crash_turn_off(NSArray<NSDictionary *> *items);
+static void crash_auto_off(void) {
+    NSArray<NSDictionary *> *items = s2a_ios_crash_suspects();
+    if (!items.count) return;
+    s2a_ios_crash_turn_off(items);
+    NSString *names = [[items valueForKey:@"name"] componentsJoinedByString:S2AL(@"common.listSeparator")];
+    LOG("崩溃恢复：上一局开着 %s 时死在前台，已关掉（玩家可在设置里再开）", names.UTF8String);
+    s2a_diag_note_crash_off(names);   // 紧接着的诊断询问一并说
+}
 void s2a_diag_attach(UIViewController *vc) {
     g_vc = vc;
     // 四指长按 1.5 秒（原生层线 10-23：三指会误触——两拇指压摇杆 + 再按住一个键正好三指；四指玩游戏时不会出现）。
@@ -641,7 +664,7 @@ void s2a_diag_attach(UIViewController *vc) {
       LOG("诊断包：上次会话标记 %s（主线程 %.2f ms，不读日志）→ %s", prev == S2A_SESMARK_FG ? "前台未收尾" : prev == S2A_SESMARK_BG ? "后台" : "无（正常收尾）", (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1e6, prev == S2A_SESMARK_FG ? "提示导出" : "不提示");
       dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         check_toggle();
-        if (prev == S2A_SESMARK_FG) s2a_diag_prompt(S2AL(@"diag.prompt.abnormalExit"));
+        if (prev == S2A_SESMARK_FG) { crash_auto_off(); s2a_diag_prompt(S2AL(@"diag.prompt.abnormalExit")); }
       }); }
 }
 // 进后台 / 回前台（app.m 生命周期通知，主线程）：改写会话标记，在后台被划掉 / 被系统回收不算异常

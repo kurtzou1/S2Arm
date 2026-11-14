@@ -82,12 +82,18 @@ public sealed partial class EnvironmentWindow
         if (installMode == "device")
         {
             // 签名身份：开发者证书一栏照用出包页原来那套（导入 / 换 / 删、体检明细）；Apple ID 在随包 Impactor 里登录
-            var identity = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 12, Margin = new Thickness(28, 0, 0, 0) };
+            var identity = new StackPanel { Spacing = 4, Margin = new Thickness(28, 0, 0, 0) };
             identity.Children.Add(DevCertRow(T("install.mode.identity"), T("install.mode.identity_impactor"), card: false));
-            var impactor = Action("action.open_impactor", OpenBundledImpactor, File.Exists(BundledImpactor));
-            impactor.VerticalAlignment = VerticalAlignment.Top;
-            AutomationId(impactor, "env.installMode.open_impactor");
-            Grid.SetColumn(impactor, 1); identity.Children.Add(impactor);
+            // 「打开 Impactor」是动作不是选项：做成 Apple ID 那段下面的文字链接（11-14 体验梳理，开发甲定）；用开发者证书签时不需要它，不显示
+            if (!(devCert is { } dc && Flag(dc, "active")))
+            {
+                var impactor = new Button { Content = new TextBlock { Text = T("action.open_impactor"), TextDecorations = TextDecorations.Underline, Foreground = Accent, FontSize = 13 },
+                    Background = Brushes.Transparent, Padding = new Thickness(0, 2), HorizontalAlignment = HorizontalAlignment.Right,
+                    IsEnabled = File.Exists(BundledImpactor) };
+                impactor.Click += (_, _) => OpenBundledImpactor();
+                AutomationId(impactor, "env.installMode.open_impactor");
+                identity.Children.Add(impactor);
+            }
             panel.Children.Add(identity);
         }
         panel.Children.Add(InstallModeOption("export", T("install.mode.export"), T("install.mode.export_note"), true));   // 导出作业已合入，一直可选（11-14 删掉置灰与「下一版提供」）

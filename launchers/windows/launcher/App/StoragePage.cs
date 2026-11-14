@@ -29,11 +29,12 @@ public sealed partial class EnvironmentWindow
         "imageIos" => s.ImageIos, "saves" => s.Saves, "cache" => s.Cache, "sources" => s.Sources, _ => s.ImageMac
     };
 
-    /// <summary>卡片上的一行：「iPhone 版 2 GB · 存档 3 MB · 缓存 … · 原件 …」；没量过只有原件有数，其余显示 -。</summary>
+    /// <summary>卡片上的一行：「iPhone 版 2 GB · 存档 3 MB · 缓存 … · 原件 …」；没量过只有原件有数，只显示原件那项。</summary>
     private Control GameSizesLine(GameSizes? sizes)
     {
         var s = sizes ?? new GameSizes(0, 0, 0, 0, 0, false);
-        var parts = SizeParts.Select(p => T("library.sizes." + p) + " " + (s.Measured || p == "sources" ? FormatBytes(SizeOf(s, p)) : "-"));
+        // 没量过的项不显示（原先写「-」，一行「iPhone 版 - · 存档 - · 缓存 -」看着像坏了；11-14 体验梳理）：没量过只剩有数的原件那项，悬停说明照旧
+        var parts = SizeParts.Where(p => s.Measured || p == "sources").Select(p => T("library.sizes." + p) + " " + FormatBytes(SizeOf(s, p)));
         var line = Muted(string.Join(" · ", parts), 12);
         ToolTip.SetTip(line, s.Measured ? T("library.sizes.sourcesNote") : T("library.sizes.unmeasured"));
         return line;

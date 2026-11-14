@@ -31,6 +31,7 @@
 #include <mach/mach.h>
 #include <TargetConditionals.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/mman.h>
 #include <errno.h>
 #include <pthread.h>
@@ -82,6 +83,20 @@ void *nvn_big_real[NVN_NFUNC];            // the real implementation of function
 void *nvn_real[NVN_NFUNC];               // DM_NVN_PROF: the real implementation called by the timing wrapper
 _Atomic uint64_t nvn_prof_ticks[NVN_NFUNC]; // DM_NVN_PROF: cumulative time of each function (cntvct counts)
 static uint8_t g_unimpl_seen[NVN_NFUNC];
+// S2Arm 诊断（11-13 金手指堆偏移）：DM_NVN_PROF=1 + S2A_NVN_QLOG=<文件>：计时包装在调用后记每次「尺寸 / 对齐 / 整数」类查询的
+//   名字、游戏返回地址、返回值与入参（GetInteger 记写回的值），与 Mac 上跑游戏自带驱动时同一调用点的答复对比（runtime/src/nvos_trace.c 调用点陷入）
+int g_nvn_qlog; static int g_qlog_fd = -1;
+void s2a_where(uint64_t a, char *out, size_t n) __attribute__((weak));   // runtime/src/crash.c：地址 → 模块+偏移；弱声明：安卓新层诊断链接不带 crash.c，取不到就写原始地址
+void nvn_qlog_c(uint64_t i, uint64_t lr, uint64_t ret, uint64_t in1, uint64_t in2) {
+    if (i >= NVN_NFUNC || g_qlog_fd < 0) return;
+    const char *n = nvn_names[i];
+    int integer = strstr(n, "GetInteger") != NULL;
+    if (!strstr(n, "Size") && !strstr(n, "Alignment") && !strstr(n, "Granularity") && !integer && !strstr(n, "GetMemory")) return;
+    char w[64], line[256]; if (s2a_where) s2a_where(lr, w, sizeof w); else snprintf(w, sizeof w, "%llx", (unsigned long long)lr);
+    long long v = integer && in2 ? (long long)*(const int *)in2 : (long long)ret;
+    int k = snprintf(line, sizeof line, "%s\t%s\t%llx\t%llx\t%lld\n", n, w, (unsigned long long)in1, (unsigned long long)in2, v);
+    if (k > 0) (void)!write(g_qlog_fd, line, (size_t)k);
+}
 
 static const char *nvn2_red_why(const char *name);   // 「NVN2 入口全量」段：仍是未实现桩的 NVN2 入口为什么做不了（没有就是 NULL）
 uint64_t nvn_unimpl_c(nvn_slot_t *slot, uint64_t x0, uint64_t x1, uint64_t x2) {
@@ -188,7 +203,7 @@ NVN(nvnDeviceInitialize, NVNboolean, NVNdevice *d, const NVNdeviceBuilder *b) {
     if (!dev_ok(cur) || cur == d) { atomic_store(&g_cur_dev, d); dev_apply(o); }
     else LOG("[nvn] another NVN device %p initialized while %p is current: it keeps its own window origin / depth mode, the backend switches when its queue submits", (void *)d, (void *)cur);
     nvn2_device_init();   // Switch 2: NVN2's GOB order and log line (nvn2.c); nothing on Switch 1
-    OLOG("DeviceInitialize %p flags=%#x", (void *)d, o->flags);
+    LOG("[nvn] DeviceInitialize %p flags=%#x", (void *)d, o->flags);   // 地址常打（一局一两行）：金手指指针链落点对照用
     return 1;
 }
 NVN(nvnDeviceFinalize, void, NVNdevice *d) { ((dev_t_ *)d)->magic = 0; NVNdevice *e = d; atomic_compare_exchange_strong(&g_cur_dev, &e, NULL); }
@@ -529,8 +544,8 @@ NVN(nvnTextureBuilderSetStride, void, NVNtextureBuilder *b, ptrdiff_t s) { TB(b)
 NVN(nvnTextureBuilderSetStorage, void, NVNtextureBuilder *b, NVNmemoryPool *p, ptrdiff_t off) { TB(b)->pool = (pool_t *)p; TB(b)->off = off; }
 NVN(nvnTextureBuilderSetPackagedTextureLayout, void, NVNtextureBuilder *b, const NVNpackagedTextureLayout *l) {
     TB(b)->has_layout = l != NULL; if (l) memcpy(TB(b)->layout, l->layout, 8);
-    // byte 0 = block height (log2 GOBs) + 1 in bits 0-7; byte 1 = row-width alignment (log2 GOBs) + 1 in bits 8-15 (kept in the same int: tex_t must stay <= 0x80)
-    TB(b)->d.pkg_block_h = l ? (l->layout[0] + 1) | (l->layout[1] + 1) << 8 : 0;
+    // byte 0 (low nibble block height, high nibble block depth, log2 GOBs) | byte 1's low nibble (width alignment, log2 GOBs) << 8, + 1 (one int: tex_t must stay <= 0x80; #676)
+    TB(b)->d.pkg_layout = l ? (l->layout[0] | (l->layout[1] & 0xf) << 8) + 1 : 0;
 }
 NVN(nvnTextureBuilderGetFlags, NVNtextureFlags, const NVNtextureBuilder *b) { return (NVNtextureFlags)((const tex_builder_t *)b)->d.flags; }
 NVN(nvnTextureBuilderGetDevice, const NVNdevice *, const NVNtextureBuilder *b) { return ((const tex_builder_t *)b)->dev; }
@@ -605,6 +620,13 @@ NVN(nvnTextureBuilderGetRawStorageClass, uint32_t, const NVNtextureBuilder *b) {
     return texture_raw_storage_class(&((const tex_builder_t *)b)->d);
 }
 static uint64_t g_layout_logged;
+// S2Arm 诊断（S2A_NVN_QLOG 开着时）：贴图尺寸 / 对齐查询记下描述（目标、格式、标志、宽高深、级数、采样数）与我方答复，与 nvn_qlog_c 的行按顺序对上
+static void qlog_tex(const char *what, const nvn_texdesc *d, size_t v) {
+    if (!g_nvn_qlog || g_qlog_fd < 0) return;
+    char line[200]; int k = snprintf(line, sizeof line, "#tex\t%s\ttarget %d\tformat %#x\tflags %#x\t%ux%ux%u\tlevels %u\tsamples %d\t%zu\n",
+                                     what, d->target, d->format, d->flags, d->width, d->height, d->depth, d->levels, d->samples, v);
+    if (k > 0) (void)!write(g_qlog_fd, line, (size_t)k);
+}
 static void log_layout(const tex_builder_t *b, const nvn_texlayout *L) {
     if (b->has_layout && g_layout_logged++ < 16)
         LOG("[nvn] packaged texture %ux%ux%u levels %u format %#x target %d layout bytes %02x%02x%02x%02x%02x%02x%02x%02x → block height log2=%u (from layout byte 0) size %#llx",
@@ -615,10 +637,13 @@ NVN(nvnTextureBuilderGetStorageSize, size_t, const NVNtextureBuilder *b) {
     nvn_texlayout L; nvn_tex_layout(&((const tex_builder_t *)b)->d, &L);
     if (!L.bpb) LOG("【红】 TextureBuilderGetStorageSize unknown format %#x", ((const tex_builder_t *)b)->d.format);
     log_layout((const tex_builder_t *)b, &L);
+    qlog_tex("size", &((const tex_builder_t *)b)->d, L.size);
     return L.size;
 }
 NVN(nvnTextureBuilderGetStorageAlignment, size_t, const NVNtextureBuilder *b) {
-    nvn_texlayout L; nvn_tex_layout(&((const tex_builder_t *)b)->d, &L); return L.align;
+    nvn_texlayout L; nvn_tex_layout(&((const tex_builder_t *)b)->d, &L);
+    qlog_tex("align", &((const tex_builder_t *)b)->d, L.align);
+    return L.align;
 }
 #define TX(t) ((tex_t *)(t))
 #define CTX(t) ((const tex_t *)(t))
@@ -1505,7 +1530,17 @@ NVN(nvnQueueBuilderGetQueuePriority, int, const NVNqueueBuilder *b) { return ((c
 NVN(nvnQueueBuilderGetQueueMemorySize, size_t, const NVNqueueBuilder *b) {
     const queue_builder_t *o = (const queue_builder_t *)b;
     size_t cmd = o->set_cmd ? o->cmd_sz : 65536, comp = o->set_comp ? o->comp_sz : 262144, ctl = o->set_ctl ? o->ctl_sz : 16384;
-    return (cmd + comp + ctl + 4095) & ~(size_t)4095;
+    // S2Arm（11-13 金手指堆偏移根修）：照真驱动算（奥德赛 SDK 驱动 sdk+0x412f60 反汇编、Mac 上跑真驱动核过 0xA9000）：命令 + 控制原样，
+    //   计算内存不原样加，按每 0x800 一个记录（0x600 + 0x200）折算；另加设备常数部分：片段互锁（标志位 0 没设：(0x80×2×4 + (0xff | 1<<10)) & ~0xff = 0x800）、
+    //   固定 0x7b00（非调试设备）、zcull（标志位 1 没设：先按 0x1000 取整再加 0x1000）。设备字段取自 Tegra X1 真驱动（+0x70 = 0x80、+0x78 = 2、
+    //   +0x7c = 1、zcull 大小 1 / 对齐 0x1000）。原先 命令 + 计算 + 控制 少 0x9000，游戏从自己堆里少分配，此后对象整体前移
+    size_t w = (o->flags & 1) ? 0 : ((0x80u * 2u * 4u + (0xffu | (1u << 10))) & ~(size_t)0xff);
+    w += 0x7b00;
+    if (!(o->flags & 2)) w = ((w + 0xfff) & ~(size_t)0xfff) + 0x1000;
+    size_t n = comp / 0x800;
+    w = ((w + 0xff) & ~(size_t)0xff) + n * 0x800;
+    w = (w + 0xfff) & ~(size_t)0xfff;
+    return cmd + ctl + w;
 }
 NVN(nvnQueueBuilderSetQueueMemory, void, NVNqueueBuilder *b, void *m, size_t n) { QB(b)->mem = m; QB(b)->mem_sz = n; }
 // 队列内存记账：NVN 的三个 GetTotal*MemoryUsed 报的是「这个队列当前被放进来的内存」，
@@ -2922,6 +2957,7 @@ __attribute__((constructor)) static void nvn_nops_register(void) {
             nvn_big_real[i] = nvn_slot[i].fn; nvn_slot[i].fn = (void *)nvn_big_entry; nbig++;
         }
     // DM_NVN_PROF=1: implemented functions (except unimplemented stubs and present: present includes the display-link wait and is counted separately) get a timing wrapper, used to break down the time spent in the "translation layer recording phase"
+    { const char *q = getenv("S2A_NVN_QLOG"); if (q && *q && getenv("DM_NVN_PROF")) { g_qlog_fd = open(q, O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0644); g_nvn_qlog = g_qlog_fd >= 0; } }
     if (getenv("DM_NVN_PROF"))
         for (unsigned i = 0; i < NVN_NFUNC; i++)
             if (nvn_slot[i].fn != (void *)nvn_unimpl_entry && strcmp(nvn_names[i], "nvnQueuePresentTexture") && !nvn_stack_args(nvn_names[i])) { nvn_real[i] = nvn_slot[i].fn; nvn_slot[i].fn = (void *)nvn_prof_entry; }
@@ -2958,6 +2994,8 @@ void s2a_nvn_set_xwrap(void *(*w)(const char *, void *)) {
 // ---------- Window / present ----------
 #define WB(b) ((win_builder_t *)(b))
 static void nvn2_win_builder_defaults(NVNwindowBuilder *b);   // 「NVN2 入口全量」段
+#define NAT_ITV_OFF 0xf14   // 原生窗口对象里的交换间隔（见 nat_itv）
+#define NAT_MAGIC 0x5f776e64u   // 原生窗口对象头「dnw_」
 NVN(nvnWindowBuilderSetDefaults, void, NVNwindowBuilder *b) { NVNdevice *dev = WB(b)->dev; memset(b, 0, sizeof(win_builder_t)); WB(b)->dev = dev; WB(b)->interval = 1;
     if (nvn2_on()) nvn2_win_builder_defaults(b); }   // NVN2 字段在 0x40 之后：只有 Switch 2 的构建器有那么大
 NVN(nvnWindowBuilderSetDevice, void, NVNwindowBuilder *b, NVNdevice *d) { WB(b)->dev = d; }
@@ -2986,13 +3024,26 @@ NVN(nvnWindowInitialize, NVNboolean, NVNwindow *w, const NVNwindowBuilder *b) {
     if (o->ntex > 0 && o->tex[0]) { o->crop[2] = (int)CTX(o->tex[0])->d.width; o->crop[3] = (int)CTX(o->tex[0])->d.height; }
     for (int i = 0; i < o->ntex; i++) if (o->tex[i]) nvn_be_xv_window_tex(CTX(o->tex[i])->serial);
     if (nvn2_on()) nvn2_win_init(w, b);   // NVN2：获取超时、色彩空间、HDR 元数据从构建器带过来（「NVN2 入口全量」段）
-    LOG("[nvn] WindowInitialize swap chain %d textures, interval %d, first %dx%d format %#x", o->ntex, o->interval,
+    // 先认对象头标记「dnw_」（系统原生窗口对象开头 4 字节，11-13 一款游戏实测），认得出再读 +0xF14：单测 / 别的写法给的原生窗口指针不碰
+    int dnw = o->native && *(const volatile uint32_t *)o->native == NAT_MAGIC, nat0 = dnw ? *(volatile int32_t *)((char *)o->native + NAT_ITV_OFF) : -1;
+    o->nat = nat0 == 1; if (o->nat) *(volatile int32_t *)((char *)o->native + NAT_ITV_OFF) = o->interval;   // 同真机驱动：建窗口时把间隔写进原生窗口（见 nat_itv）
+    LOG("[nvn] WindowInitialize %p native %p（%s交换间隔同步%s，原值 %d） swap chain %d textures, interval %d, first %dx%d format %#x", (void *)w, o->native, dnw ? "" : "对象头不认、", o->nat ? "开" : "关", nat0, o->ntex, o->interval,
         o->ntex ? (int)CTX(o->tex[0])->d.width : 0, o->ntex ? (int)CTX(o->tex[0])->d.height : 0, o->ntex ? CTX(o->tex[0])->d.format : 0);
     return 1;
 }
 NVN(nvnWindowGetNativeWindow, NVNnativeWindow, const NVNwindow *w) { return ((const win_t *)w)->native; }
-NVN(nvnWindowGetPresentInterval, int, const NVNwindow *w) { return ((const win_t *)w)->interval; }   // Link's Awakening reads it back every frame
-NVN(nvnWindowSetPresentInterval, void, NVNwindow *w, int v) { if (((win_t *)w)->interval != v) LOG("[nvn] the game sets present interval %d → %d", ((win_t *)w)->interval, v); ((win_t *)w)->interval = v; }
+// 原生窗口的交换间隔（11-13）：真机驱动 nvnWindowSetPresentInterval / 建窗口时把间隔写进系统原生窗口对象（构建器 SetNativeWindow 给的那个，+0xF14，
+//   sdk 里的显示层代码就读写这一处），出图时按它走。直连层不走系统显示层，原先只记在自己的 win_t 里：公开库常见的帧率金手指（指针链落到原生窗口 +0xF14 写 1）
+//   写成功却不生效（一款游戏开着仍 30 帧）。这里照驱动的做法双向同步：设间隔时写进去，每次出图读回来，被别人改了（金手指）就跟着改。
+//   只在建窗口时这一处是系统缺省值 1 时才开（别的 SDK 版本这里若不是交换间隔，不写它）
+static volatile int32_t *nat_itv(const win_t *o) { return o->nat && o->native ? (volatile int32_t *)((char *)o->native + NAT_ITV_OFF) : NULL; }
+static void nat_itv_sync(win_t *o) {
+    volatile int32_t *p = nat_itv(o); if (!p) return;
+    int v = *p;
+    if (v != o->interval && v >= 0 && v <= 4) { LOG("[nvn] 原生窗口交换间隔被改成 %d（游戏设的 %d；金手指等直接写系统窗口），出图跟它", v, o->interval); o->interval = v; }
+}
+NVN(nvnWindowGetPresentInterval, int, const NVNwindow *w) { nat_itv_sync((win_t *)w); return ((const win_t *)w)->interval; }   // 原生窗口被改过（金手指）先读回来，同驱动   // Link's Awakening reads it back every frame
+NVN(nvnWindowSetPresentInterval, void, NVNwindow *w, int v) { win_t *o = (win_t *)w; if (o->interval != v) LOG("[nvn] the game sets present interval %d → %d", o->interval, v); o->interval = v; volatile int32_t *p = nat_itv(o); if (p) *p = v; }
 // 显示层裁切（nn::vi::SetLayerCrop，说明见 graphics/nvn/host_adapt.m s2a_vi_entry）：上屏取窗口贴图的区域。nvnWindowSetCrop 写的是同一个系统窗口裁切，谁最后写算谁
 static pthread_mutex_t g_vi_mu = PTHREAD_MUTEX_INITIALIZER; static int g_vi_crop[4];
 int32_t h_vi_set_layer_crop(void *layer, int32_t x, int32_t y, int32_t w, int32_t h) {
@@ -3026,6 +3077,7 @@ static void sleep_until_ns(uint64_t dl);
 static uint64_t present_period(const win_t *o);
 static uint64_t rt_period_ns(const win_t *o, uint64_t period);
 static int present_itv(const win_t *o);
+static int link_vsyncs(const win_t *o);
 __attribute__((weak)) void dm_main_yield_stats(uint64_t *n, uint64_t *ns) { *n = 0; *ns = 0; }   // The host's hle_thread.c provides the ground truth; 0 in graphics unit tests
 __attribute__((weak)) uint32_t dm_guest_work_qos(unsigned *count) { if (count) *count = 0; return QOS_CLASS_UNSPECIFIED; }
 __attribute__((weak)) void dm_thread_lv_stats(uint64_t out[2][2][2]) { memset(out, 0, 8 * sizeof(uint64_t)); }   // nvn_rec.h：编码 / 上屏线程按性能档；没有 Metal 后端（单测 / 安卓）为 0
@@ -3080,7 +3132,7 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
         if (rtp && rt_period != rtp) { rt_period = rtp; set_time_constraint(rtp); }
         rt_comp_tick(rtp);
         uint64_t p0 = now_ns();
-        if (nvn_be_link_active()) { if (!nvn_be_link_wait_tick(present_itv(o), period ? 2 * period : 33333333ull) && wait) sleep_until_ns(at); }   // DM_PRESENT_LINK: pacing fully follows the display link (wait for the present interval's display-link ticks when running fast, go immediately when behind); our own 60 Hz clock is only the fallback when no display-link tick arrives
+        if (nvn_be_link_active()) { if (!nvn_be_link_wait_tick(link_vsyncs(o), period ? 2 * period : 33333333ull) && wait) sleep_until_ns(at); }   // DM_PRESENT_LINK: pacing fully follows the display link (wait for the present interval's display-link ticks when running fast, go immediately when behind); our own 60 Hz clock is only the fallback when no display-link tick arrives
         else if (wait) sleep_until_ns(at);
         pace_ns = now_ns() - p0;
     } else {   // DM_DETCLOCK_PACE=1 (used by the screenshot gate): while the guest clock advances per frame, each frame's wall clock is no shorter than one step -- frame count and in-game time are deterministic, and the background loading thread has at least one step of wall clock available per frame;
@@ -3403,6 +3455,8 @@ __attribute__((weak)) void nvn_be_rt_window(uint32_t *w, uint32_t *h, uint32_t *
 static int g_hz = -1, g_display_mode;
 static _Atomic int g_game_itv = 1;   // when pacing by the game's interval, the interval the game currently sets (in game mode 2 = 30 fps; nvn_game_fps reports it to the graphics layer, which sets the display link from it)
 void nvn_present_config(int hz, int display_mode) { g_hz = hz; g_display_mode = display_mode; }
+// 社区帧率补丁跟随（runtime/src/cpatch.c fps_link，11-13 补丁优先）：局中开 / 关目标 > 60 帧的补丁时改出图节拍；还没定节拍（g_hz < 0）时不动，起局读 DM_PRESENT_HZ
+void nvn_present_hz(int hz) { if (hz > 0 && g_hz > 0 && hz != g_hz) { LOG("[nvn] present tick %d Hz → %d Hz（社区帧率补丁）", g_hz, hz); g_hz = hz; } }
 static _Atomic uint64_t g_itv2_since;   // start of the game's current run of intervals >= 2 (now_ns; 0 = it is 1 now)
 // The frame rate the game itself asks for: 30 in game mode when the present interval has been >= 2 for a full second (the display link follows at 30 Hz, nvn_be_fps_target), otherwise 60; back to 60 at once when the interval returns to 1. Intervals of 3 or more (20 fps or less) have no matching display-link mode and run at 30.
 // The one-second hold: Mario 1.2.1 picks the interval from the previous frame's time (main+0xcfd24), setting 2 for the frame after a slow one and then 1 again (123 times in two minutes on an iPhone). Following that frame by frame would flap the display-link mode;
@@ -3467,6 +3521,13 @@ static int present_itv(const win_t *o) {   // vsyncs per frame that presentation
     if (c) return k && fstep_on() ? k : 60 / c;
     int itv = g_display_mode && !atomic_load(&g_fps_game_itv) ? 1 : o->interval > 0 ? o->interval : 1;
     return itv < 2 && g_hz > 0 && video_cap() ? 2 : itv;   // 放 ≤ 30 帧视频：至少隔 2 拍（60 Hz 节拍下 30 帧）
+}
+// 显示链等几个 60 Hz vsync（nvn_be_link_wait_tick 的口径；0 = 一个真实链接拍）：出图节拍被放开到 60 Hz 以上（g_hz，社区帧率补丁经 DM_PRESENT_HZ / nvn_present_hz）时，
+//   游戏间隔按 g_hz 折算，与 present_period 同一口径。原先直接传游戏间隔，链路永远按 60 Hz 等：节拍 120 Hz、间隔 1 仍只出 60 帧（11-13 实机：每 600 拍只交 300 帧，
+//   GPU 只忙 54% 也一样）。补丁在机器上做的是把交换间隔改成 0（不等垂直同步），这里间隔 1 在 120 Hz 下即等一个真实 120 Hz 拍。宿主帧步（fps_step_cap）自有 60 Hz 口径，不折算
+static int link_vsyncs(const win_t *o) {
+    int itv = present_itv(o);
+    return g_hz > 60 && !fps_step_cap() ? itv * 60 / g_hz : itv;
 }
 // S2Arm 标称帧率（自动玩家折算路线帧数；host_adapt.m 每次上屏报给原生层 s2a_nominal_fps_set）：出图实际跟的节拍 = 节拍频率 / present_itv，任意线程可调。
 //   与 nvn_game_fps（显示链接的频率）只差在 display 模式这一帧退回游戏间隔时（帧率表运行中关 / 过热封顶，g_fps_game_itv）：显示链接仍 60 Hz、出图却隔 interval 拍一帧，这里按游戏间隔给。
@@ -3601,7 +3662,7 @@ static void fstep_tick(const win_t *o) {
 }
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     if (dm_gfx_session_stopping()) return;
-    win_t *o = (win_t *)w; o->presents++;
+    win_t *o = (win_t *)w; o->presents++; nat_itv_sync(o);
     if (q) { pthread_mutex_lock(&g_sub_mu); nvn_be_xq_flush(q, "a present on it"); pthread_mutex_unlock(&g_sub_mu); }   // 上屏排在这条队列的工作后面：停在跨队列等待上的部分先放行（nvn_xqueue.inc）
     if (q && dev_ok(((queue_t *)q)->dev) && atomic_load(&g_cur_dev) != ((queue_t *)q)->dev) { pthread_mutex_lock(&g_sub_mu); dev_follow(((queue_t *)q)->dev); pthread_mutex_unlock(&g_sub_mu); }   // 上屏翻转跟上屏队列的设备
     {   // 节拍主人：被上屏这张的取图线程（取图线程未知 = 上屏线程自己）；连续 PACE_SWITCH 次同一个才换

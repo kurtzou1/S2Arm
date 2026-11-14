@@ -1,4 +1,5 @@
 #!/bin/bash
+export S2A_CAPS_OWN=1   # 本测的是我方 60 帧 / 满屏旧口径（11-13 起发布缺省只用社区补丁，见 tests/caps_patch_only_test.py）
 # 包内能力清单生成单测（pack/gen_caps.sh → tools/caps_policy.py，临时产物根 + 合成登记表仓库，约 1 秒）：bash tests/gen_caps_test.sh
 #   全能力出包口径（维护者 10-29 07:0x「默认开、强信号才关」）：
 #   ① 发布：有宽屏表 + 帧率表、没有强信号 → fps60 1、原因「默认开：来源 …」；widen 0「发布缺省关」（维护者 11-02 19:0x：满屏默认关，真机验过 / 有补丁才开）；带 widen_verified.tsv → widen 1

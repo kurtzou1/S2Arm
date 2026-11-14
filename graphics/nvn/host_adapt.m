@@ -195,7 +195,8 @@ static int out_tall(void) {   // 出的是加高图：直连第三层整套放�
 }
 // 出图宽高比：宽图 / 加高图都按 屏宽 ÷ 屏高（宽屏屏高 1080、窄屏屏宽 1920，一个式子两头都对）。
 //   11-03 维护者 Duo 智慧的再现 v4：窄屏启用高度点后游戏自出加高图（s2a_widen_game 为真）走进宽图分支，旧式 屏宽 ÷ 1080 给 1.778，1280×900 的画面被塞进 16:9 层、上下大黑、界面落进黑区
-static double out_aspect(void) { return pf_out_aspect(out_wide() || out_tall(), s2a_screen_w(), s2a_screen_h()); }
+double s2a_cpatch_present_aspect(void);   // runtime/src/cpatch.c：自适应画幅社区补丁开着时的当前画幅（游戏按它画世界、出 16:9 尺寸的图，层按它铺满）；没开 0
+static double out_aspect(void) { double ca = s2a_cpatch_present_aspect(); if (ca > 0) return ca; return pf_out_aspect(out_wide() || out_tall(), s2a_screen_w(), s2a_screen_h()); }
 static CAMetalLayer *g_layer;
 static double g_out_a;   // 出图宽高比（起局定，游戏内部按它渲染；NVN 直连换屏时跟着换，见 s2a_direct_relayout）
 // 触屏（ios/vpad.m gameRect）按这同一个比例算画面矩形（审计 P1-79：原先触点一律按屏幕宽 : 1080，宽屏没生效 / 窄屏加高时出图是 16:9 / 1920:屏高，手指落点偏）。0 = 还没挂层

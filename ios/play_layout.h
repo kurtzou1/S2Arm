@@ -30,6 +30,7 @@ CGRect s2a_ios_game_area(void);
 int s2a_ios_screen_known(void);
 int s2a_ios_screen_w(void);
 int s2a_ios_screen_h(void);
+int s2a_ios_screen_max_fps(void);   // 屏幕最高刷新率（Hz），帧率补丁档位默认值用
 UIInterfaceOrientationMask s2a_ios_play_orientations(void);
 CGRect S2APlayDivision(UIView *view);
 // 游戏壳和无商业资源的输入工作台共用铰链、方向和区域生命周期。

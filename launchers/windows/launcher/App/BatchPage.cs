@@ -274,8 +274,8 @@ public sealed partial class EnvironmentWindow
         batchInstallAfter = installAfter;   // 每批自己定：界面 / 控制口建的批不接着装
         var control = batchControlPlatforms; batchControlPlatforms = null;
         var entries = control is null
-            ? batchDraft.Where(r => r.Iphone).Select(r => new BatchClient.Entry(r.Id, r.Name, ["iphone"])).ToList()
-            : batchDraft.Where(r => control.ContainsKey(r.Id)).Select(r => new BatchClient.Entry(r.Id, r.Name, control[r.Id])).ToList();
+            ? batchDraft.Where(r => r.Iphone).Select(r => new BatchClient.Entry(r.Id, r.Name, ["iphone"], SGradeOff().Contains(r.Id))).ToList()
+            : batchDraft.Where(r => control.ContainsKey(r.Id)).Select(r => new BatchClient.Entry(r.Id, r.Name, control[r.Id], SGradeOff().Contains(r.Id))).ToList();   // 出包页取消过「出包时打入」的款按款带上
         if (entries.Count == 0) return;
         var location = locationsFor == batchDraft[0].Id && exportLocation.Length > 0 ? exportLocation : null;
         if (!await BatchRunAsync("create", ["--json", BatchClient.CreateJson(entries, location)]) || batchState is null) { Render(); return; }

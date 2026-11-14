@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import sys
+import subprocess
 import tempfile
 import threading
 import time
@@ -536,3 +537,36 @@ class LegacyCleanupTests(unittest.TestCase):
             self.assertTrue(updater.clear_stale_pending(d, "0.3.10"))
             self.assertEqual(sorted(p.name for p in u.iterdir()), ["notes", "seen.json"])
             self.assertFalse(updater.clear_stale_pending(d, "0.3.10"))   # 再来一次没东西可清
+
+    def test_answers_old_updater_handshake_and_leaves_its_files_while_it_runs(self):
+        """11-14 本机复现：0.3.9 自写更新器换上 0.3.10、拉起后等 updates/health.ok 90 秒，0.3.10 不写还删它的 runner/ → 回滚删掉正在跑的新版。
+        期望手写：替换进程（子进程持 .update.lock 的内核锁）还在时，新版启动清理写 health.ok、一个文件不删（runner/ / pending.json / 版本目录原样）、
+        返回 False；替换进程退出后再清，照旧只剩 notes/ 与 seen.json"""
+        with tempfile.TemporaryDirectory() as d:
+            u = Path(d) / "updates"
+            for name in ("pending.json", ".update.lock", "seen.json"):
+                (u / name).parent.mkdir(parents=True, exist_ok=True); (u / name).write_text("x")
+            for folder in ("runner/python", "0.3.10/unpack/S2Arm.app", "notes"):
+                (u / folder).mkdir(parents=True, exist_ok=True)
+            holder = subprocess.Popen([sys.executable, "-c", "import fcntl, sys, time; f = open(sys.argv[1], 'r+'); fcntl.flock(f, fcntl.LOCK_EX); print('locked', flush=True); time.sleep(60)",
+                                       str(u / ".update.lock")], stdout=subprocess.PIPE, text=True)
+            self.addCleanup(holder.kill)
+            self.assertEqual(holder.stdout.readline().strip(), "locked")
+            before = sorted(str(p.relative_to(u)) for p in u.rglob("*"))
+            self.assertTrue(updater.legacy_apply_running(u))
+            self.assertFalse(updater.clear_stale_pending(d, "0.3.10"))
+            self.assertEqual((u / "health.ok").read_text(), "ok")
+            self.assertEqual(sorted(str(p.relative_to(u)) for p in u.rglob("*") if p.name != "health.ok"), before)
+            holder.kill(); holder.wait()
+            self.assertFalse(updater.legacy_apply_running(u))
+            self.assertTrue(updater.clear_stale_pending(d, "0.3.10"))
+            self.assertEqual(sorted(p.name for p in u.iterdir()), ["notes", "seen.json"])
+
+    def test_pending_without_running_updater_is_cleared(self):
+        """准备好了没换（旧版下载完、玩家改用 DMG 装了新版）：没有替换进程，照常全清。期望手写：只剩 notes/ 与 seen.json"""
+        with tempfile.TemporaryDirectory() as d:
+            u = Path(d) / "updates"; (u / "runner").mkdir(parents=True); (u / "notes").mkdir()
+            for name in ("pending.json", ".update.lock", "seen.json"):
+                (u / name).write_text("x")
+            self.assertTrue(updater.clear_stale_pending(d, "0.3.10"))
+            self.assertEqual(sorted(p.name for p in u.iterdir()), ["notes", "seen.json"])

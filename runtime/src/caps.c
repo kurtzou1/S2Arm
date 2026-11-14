@@ -39,7 +39,7 @@ void s2a_caps_reset(void) {
 }
 
 int s2a_caps_fps60_verified(const char *val, const char *why) {
-    return val && val[0] == '1' && why && (strstr(why, "fps.tsv") || strstr(why, "逻辑速度同局 A/B 绿") || strstr(why, "游戏原生 60 帧"));
+    return val && val[0] == '1' && why && (strstr(why, "fps.tsv") || strstr(why, "逻辑速度同局 A/B 绿") || strstr(why, "游戏原生 60 帧") || strstr(why, "社区帧率补丁"));
 }
 
 // 一行能力：src = "能力清单" / "补丁" / "补丁例外"
@@ -56,7 +56,8 @@ static void apply_cap(const char *cap, const char *v, const char *why, const cha
         else if (!strcmp(cap, "fps60")) {
             // 11-11 维护者：出包默认游戏原本的帧率、60 帧玩家手动开；例外是速度已验证正确的款保留默认 60：清单原因来自我方帧率表（fps.tsv，正确帧步）、
             //   普查同局 A/B 逻辑速度绿、或游戏原生 60 帧（放开出图间隔不会变快）。老包的清单原因里就写着来源，所以新壳认得出、不用重出包。
-            //   全引擎档 / Unity·UE 推导 / 社区帧率补丁（分类前）不算：清单写 1 也不替玩家开
+            //   全引擎档 / Unity·UE 推导不算：清单写 1 也不替玩家开。
+            //   社区帧率补丁算（11-13 维护者「版本精确命中的默认打上」）：补丁要逐字节核对上这个构建的原字节才编得进包，进了包就是精确命中，自带速度修正
             int verified = s2a_caps_fps60_verified(v, why);
             g_caps_fps60 = verified;
             if (verified && !getenv("S2A_FPS60")) caps_setenv("S2A_FPS60", "1");

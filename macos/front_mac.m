@@ -12,6 +12,10 @@
 #include "../runtime/include/phone_axes.h"
 #include "joycon_imu.h"
 #import "input_guide.h"
+// 金手指（11-12）：Mac 宿主也起服务层金手指线程（services/S2A.Services/Cheats.cs）；目录由起局方 S2A_CHEATS_DIR 给（这款游戏文件夹的 cheats/，
+//   启动器「游戏设置 → 金手指」写开关），与 iOS ios/vpad_cheats.m 同一份代码、同一个登记点（runtime/src/loader.c s2a_cheats_host_enable）
+//   运行时按名字取（同 runtime/src/lifecycle.c 取 s2a_sesmark_clear_home）：输入工作台 launchers/macos/Tests/input_test.m 把本文件编进去但不链原生核，取不到就不登记
+__attribute__((constructor)) static void cheats_register_host(void) { void (*f)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "s2a_cheats_host_enable"); if (f) f(); }
 #include "ns2_controller.h"
 #include "hid_pad.h"
 #include "ns2_relay.h"

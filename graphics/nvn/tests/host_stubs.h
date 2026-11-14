@@ -14,6 +14,7 @@ void *g_mod; int g_nmod;   // 真表是 module_t *g_mod（指针，native.h）�
 void *module_of(void *p) { (void)p; return NULL; }
 #endif
 void s2a_backtrace(uint64_t fp) { (void)fp; }
+void s2a_where(uint64_t a, char *b, size_t n) { snprintf(b, n, "%llx", (unsigned long long)a); }   // 真宿主是 runtime/src/crash.c（hle_nvn.c nvn_qlog_c 用）
 // 「核」的两个入口：默认空实现；要真跑的核 / 锁序判据（t_nvn_abba.m）自己定义 S2A_TEST_OWN_CORE 后提供
 #ifndef S2A_TEST_OWN_CORE
 void s2a_core_block_begin(void) {} void s2a_core_block_end(void) {}

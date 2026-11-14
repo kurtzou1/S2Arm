@@ -103,7 +103,7 @@ preamble = r'''
 #include <string.h>
 
 /* 共享记录布局的最小替身：只放被测函数读到的字段，字段名与 nvn_obj.h 同形（改名会让本测试编译失败）。 */
-typedef struct { int target, format, flags, samples; uint32_t width, height, depth, levels, stride; int pkg_block_h; } nvn_texdesc;
+typedef struct { int target, format, flags, samples; uint32_t width, height, depth, levels, stride; int pkg_layout; } nvn_texdesc;
 typedef struct { uint64_t size, layer_size; uint32_t align, layers, bpb; unsigned tileH, tileD; } nvn_texlayout;
 typedef struct { uint32_t magic, flags; uint8_t *mem; uint64_t size; int32_t nvmap; uint64_t gva; } pool_t;
 typedef struct {

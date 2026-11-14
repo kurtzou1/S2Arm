@@ -15,7 +15,7 @@ void s2a_ql_setup(int kind, int tier);   // 换局：种类与起始档（0 = �
 // 最高可到的档（setup 之后调）：玩家选的运行模式是上限（#352，维护者 11-09：手机缺省掌机、玩家可自己开主机），梯子只在它之下降档、回升也不越过它；
 //   当前档高于上限的拉到上限。setup 缺省上限 0（最高档）
 void s2a_ql_top(int top);
-int s2a_ql_top_tier(int kind, int docked);   // 这种梯子里「主机 / 掌机」上限对应的档：主机 0；掌机 = 最高的掌机档（三档款 2，两档款 1）
+int s2a_ql_top_tier(int kind, int docked);   // 这种梯子里「主机 / 掌机」上限对应的档：主机 0；掌机 两档款 1，三档款 0（60 帧不受掌机限，跑不动再降）
 int s2a_ql_tiers(void);                  // 这把梯子几档（3 / 2）
 int s2a_ql_tier(void);                   // 当前档
 int s2a_ql_docked(int tier);             // 这一档是不是主机档

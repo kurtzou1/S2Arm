@@ -1,0 +1,35 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs b/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs
+index cae8ec2d261c81c5d8280a32fb77c32046281b9e..3d2ffdd5ceba8ee167437f21163e26532f90c43d 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs
+@@ -170,6 +170,18 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.Applicati
+                 return ResultCode.Success;
+             }
+ 
++            // 合成件（显示版本 ? 标记，synth_nacp 写入）且玩家显式指定了游戏语言：支持表是导入时合成的占位（缺省只声明美式英语，#401），不代表游戏真实支持范围，照玩家的来。
++            //   01 开头的 Switch 2 本体 + 升级包进不了上面 Switch2LanguagesUnknown 的 04 开头判定（#617：程序号 010015100B514000 的占位表 0x0001 把玩家显式指定的语言盖成英语）；
++            //   没显式指定时照旧走五步退路（Switch 1 合成件游戏不支持宿主语言会黑屏，#401 不能一律放行）；真 NACP（显示版本不会是 ?）即使显式指定也不放行，支持表可信
++            if (SynthTableHonorsExplicitLanguage(process.ApplicationControlProperties.DisplayVersionString.ToString(), S2AHooks.ExplicitSystemLanguage))
++            {
++                Logger.Info?.Print(LogClass.ServiceAm, $"[S2A 语言] 控制数据是合成件（支持表 0x{supportedLanguages:X4}），玩家显式指定了游戏语言，按宿主主语言 {context.Device.System.State.DesiredTitleLanguage}");
++
++                context.ResponseData.Write(desiredLanguageCode);
++
++                return ResultCode.Success;
++            }
++
+             // If desired language is not supported by application, use first supported language from TitleLanguage.
+             // TODO: In the future, a GUI could enable user-specified search priority
+             // S2Arm: 退路由宿主给（S2AHooks.TitleLanguageFallback = 主语言、同族变体、美式 / 英式英语、简 / 繁中，services SystemLocale.TitleFallback），都不中才取支持表第一项；
+@@ -203,6 +215,11 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.Applicati
+         internal static long ZeroSupportedLanguageCode(long systemLanguageCode, bool explicitSystemLanguage) =>
+             explicitSystemLanguage ? systemLanguageCode : SystemStateMgr.GetLanguageCode((int)SystemLanguage.AmericanEnglish);
+ 
++        // S2Arm: 合成件控制数据（显示版本 ? 标记，synth_nacp 写入）且玩家显式指定了游戏语言 → 占位支持表不作数，按宿主主语言回（#617）；
++        //   真 NACP 显示版本不会是 ?，即使显式指定也照常走五步（支持表可信）；没显式指定照旧五步（#401：Switch 1 合成件游戏不支持宿主语言会黑屏）
++        internal static bool SynthTableHonorsExplicitLanguage(string displayVersion, bool explicitSystemLanguage) =>
++            displayVersion == "?" && explicitSystemLanguage;
++
+         // S2Arm: 主语言游戏支持就用它，否则按退路选（PickFallbackLanguage）
+         internal static int PickDesiredLanguage(TitleLanguage hostLanguage, int supportedLanguages, TitleLanguage[] fallback) =>
+             ((1 << (int)hostLanguage) & supportedLanguages) != 0 ? (int)hostLanguage : PickFallbackLanguage(supportedLanguages, fallback);

@@ -18,6 +18,10 @@
 #    有意改变改写产物时在提交里写明并更新金样；坏行 11-13 随 0e53ad8b「缺口降级继续」更新，另直接核那条没写、原字保持）
 # ⑦ 补丁点搬进补丁区后跳转超 ±128 MB（往回跳 128 MB 的 b，近布局补丁区够不着）：10-30 起整轮按双补丁岛重做，前岛（基址前 1 MB）接住——
 #    退出码 0、无缺口、表头 PATCH2_OFF = −(FRONT 0x100000 + LOAD_BIAS 0x2000) = −0x102000（data 0x2000 与 text 末同在第一个 16 KB 页）（两岛都够不着的缺口 / brk 见 tests/rewrite_islands_test.sh）
+# ⑧ 同点多变体 + 键页取值（11-12 自适应画幅）：0x100 两行 p——位 0「@k」ldr w0,[x16,#0x1fc0]（键页槽 1016，单测写 0x12345678）、位 1 mov w0,#2：
+#    掩码 0 → w0=1；0x1 → 0x12345678；0x2 → 2；三次 x16 / sp 进出不变；取值指令基址不是 x16 的行（ldr w0,[x1,#0x1fc0] @k）记缺口 cpatch
+# ⑨ w 行「@k」：填充区 0x1a0 新字 adrp x5,0（占位）→ 改写器改成 adrp x5,<键页>；0x1a4 ldr w4,[x5,#0x1fc0]；0x1a8 b 0x118；p 位 0 把 0x114 换成 b 0x1a0：
+#    掩码 1 → w4 = 键页槽 1016 的值（0x0badf00d）
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 PY=${S2A_PY:-$HOME/.s2arm/venv/bin/python3}
 REW=${REW:-$(python3 "$H/pack/rewriter.py" c-path 2>/dev/null | tail -1)}; [ -x "$REW" ] || { echo "🔴 取不到 C 改写器（python3 pack/rewriter.py c-path）"; exit 1; }
@@ -64,9 +68,10 @@ key = next(int(l.split('\t')[1], 16) for l in open(T + '/out/main.fixups.tsv') i
 from unicorn import Uc, UC_ARCH_ARM64, UC_MODE_ARM
 from unicorn.arm64_const import UC_ARM64_REG_X0, UC_ARM64_REG_X1, UC_ARM64_REG_X2, UC_ARM64_REG_X3, UC_ARM64_REG_X4, UC_ARM64_REG_X16, UC_ARM64_REG_SP, UC_ARM64_REG_LR, UC_ARM64_REG_NZCV, UC_ARM64_REG_PC
 BASE, STK, END = 0x10000000, 0x20000000, 0x30000000
-def run(mask, clobber=False):
+def run(mask, clobber=False, img=img, key=key, poke=()):
     u = Uc(UC_ARCH_ARM64, UC_MODE_ARM); size = (len(img) + key + 0x10000 + 0xFFFF) & ~0xFFFF
     u.mem_map(BASE, size); u.mem_write(BASE, img); u.mem_write(BASE + key + 2046 * 8, struct.pack('<Q', mask))
+    for o, v in poke: u.mem_write(BASE + o, v)
     u.mem_map(STK, 0x10000); u.mem_map(END, 0x1000); u.mem_write(END, struct.pack('<I', 0xD503201F))
     for rg in (UC_ARM64_REG_X0, UC_ARM64_REG_X1, UC_ARM64_REG_X2, UC_ARM64_REG_X3, UC_ARM64_REG_X4): u.reg_write(rg, 0)
     u.reg_write(UC_ARM64_REG_X16, 0xdead); u.reg_write(UC_ARM64_REG_SP, STK + 0x8000); u.reg_write(UC_ARM64_REG_LR, END); u.reg_write(UC_ARM64_REG_NZCV, 0)
@@ -107,6 +112,19 @@ for tag, rows_ in (('好', rows), ('坏', [('p', 0x108, 0xDEADBEEF, 0, 5)]), ('�
     got = {n: hashlib.sha256(open(f'{out}/{n}', 'rb').read()).hexdigest() for n in sorted(os.listdir(out))}
     diff = sorted(n for n in set(got) | set(GOLD[tag]) if got.get(n) != GOLD[tag].get(n))
     ck(f'⑤ {tag}行输出 {len(got)} 个文件 SHA-256 = 金样（不同 {diff}）', not diff)
+var = [('p', 0x100, words[0x100], 0xB95FC200, '0\t@k'), ('p', 0x100, words[0x100], 0x52800040, 1)]
+rc8, g8 = rew(var, T + '/var')
+img8 = open(T + '/var/main.patched.bin', 'rb').read(); key8 = next(int(l.split('\t')[1], 16) for l in open(T + '/var/main.fixups.tsv') if l.startswith('# KEY_PAGE_OFF\t'))
+r8 = [run(m, img=img8, key=key8, poke=((key8 + 1016 * 8, struct.pack('<I', 0x12345678)),)) for m in (0, 1, 2)]
+ck(f'⑧ 同点两变体 + 取值页：rc=0 无缺口、w0 = 1 / 0x12345678 / 2、x16 sp 不变（实得 rc={rc8} {[hex(x[0]) for x in r8]} {[(hex(x[5]), hex(x[6])) for x in r8]}）',
+   rc8 == 0 and 'cpatch' not in g8 and [x[0] for x in r8] == [1, 0x12345678, 2] and all(x[5] == 0xdead and x[6] == 0x8000 and x[8] == END for x in r8))
+rc9, g9 = rew([('p', 0x100, words[0x100], 0xB95FC020, '0\t@k')], T + '/var_bad')
+ck(f'⑧ 取值指令基址不是 x16 → 缺口 cpatch（rc={rc9}）', rc9 != 0 and 'cpatch' in g9 and 'x16' in g9)
+wk = [('p', 0x114, words[0x114], b(0x114, 0x1a0), 0), ('w', 0x1a0, 0, 0x90000005, '@k'), ('w', 0x1a4, 0, 0xB95FC0A4, None), ('w', 0x1a8, 0, b(0x1a8, 0x118), None)]
+rcA, gA = rew(wk, T + '/wk')
+imgA = open(T + '/wk/main.patched.bin', 'rb').read(); keyA = next(int(l.split('\t')[1], 16) for l in open(T + '/wk/main.fixups.tsv') if l.startswith('# KEY_PAGE_OFF\t'))
+rA = run(1, img=imgA, key=keyA, poke=((keyA + 1016 * 8, struct.pack('<I', 0x0BADF00D)),))
+ck(f'⑨ w 行 @k：adrp 改指键页、读到槽 1016 的值（实得 rc={rcA} w4={rA[4]:#x}）', rcA == 0 and 'cpatch' not in gA and rA[4] == 0x0BADF00D)
 sys.exit(bad)
 EOF
 rc=$?; [ $rc = 0 ] && echo "✅ cpatch_twopath_test 全过" || { echo "🔴 cpatch_twopath_test 有不通项"; exit 1; }

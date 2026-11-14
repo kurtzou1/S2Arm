@@ -20,7 +20,7 @@ def rec(code, ctl):
 def cs_ctl(n, fill, code_len, tg, shared):   # 计算着色器控制段：+0x748 起 3 个 u32 线程组、+0x754 共享字节数
     c = bytearray(ctl_of(n, fill, code_len)); struct.pack_into('<4I', c, 0x748, *tg, shared); return bytes(c)
 
-def run(case, tamper=False, tg=(8, 4, 1)):
+def run(case, tamper=False, tg=(8, 4, 1), missing=False):
     t = tempfile.mkdtemp(prefix='t_merge_'); atexit.register(shutil.rmtree, t, True)
     nxp = os.path.join(t, 'nxpkg'); s2 = os.path.join(t, 's2'); os.makedirs(nxp); os.makedirs(os.path.join(s2, 'src'))
     # 直连抽取：A（顶点，0x880）、B（像素，0x880）
@@ -38,6 +38,7 @@ def run(case, tamper=False, tg=(8, 4, 1)):
     for k, st, c, l in ((kA, 'vs', cA, kA_ctl), (kC, 'vs', cC, ctlC), (kD_s2, 'cs', cD, ctlD)):
         sw.put(k, c, l); idx.append(f'{k}\t{st}\tsrc/{k}\t0')
     sw.flush()
+    if missing: idx.append('000084a91b9e57a2\tvs\tsrc/000084a91b9e57a2\t0')   # #1009：表里有、字节没写进 .pk
     open(os.path.join(s2, 'index.tsv'), 'w').write('\n'.join(idx) + '\n')
     # 配置档答案表（与 map.tsv 同目录）：B 一行（原样照抄）、D 一行只有 tex（补线程组后 tex 保留）
     open(os.path.join(t, 'shader_facts.tsv'), 'w').write(f'# 测试答案表\n{kB}\t{{"x":1}}\n{kD}\t{{"tex":{{"0":"float"}}}}\n')
@@ -87,5 +88,11 @@ check(json.load(open(os.path.join(out, 'merge.json')))['控制段读不出线程
 print('· 直连抽取表里的键与记录重算不符')
 p, out, k = run('bad', tamper=True)
 check(p.returncode != 0 and '【红】' in p.stdout, f'报红、退出码非 0（实得 {p.returncode}）')
-print(f'{"失败" if fails else "通过"}：{20 - len(fails)} / 20 项')
+print('· 表里有、.pk 里没有字节的键（#1009）')
+p, out, k = run('missing', missing=True)
+check(p.returncode == 0, f'不整次失败：退出码 0（实得 {p.returncode}；{p.stdout.strip()[-160:]}）')
+check(sum('【黄】' in l and '000084a91b9e57a2' in l for l in p.stdout.splitlines()) == 1, '记一行【黄】点名这支键')
+st = json.load(open(os.path.join(out, 'merge.json')))
+check((st['direct'], st['s2arm'], st['交集'], st['s2arm独有'], st['并集']) == (2, 3, 1, 2, 4), f'其余计数与正常合并相同（实得 {st}）')
+print(f'{"失败" if fails else "通过"}：{23 - len(fails)} / 23 项')
 sys.exit(1 if fails else 0)

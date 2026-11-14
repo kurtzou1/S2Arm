@@ -20,6 +20,12 @@ public struct GameDetailView: View {
         VStack(alignment: .leading, spacing: 30) {
             if showsHeader || showsPrimaryAction { header }
             ForEach(detail.sections) { section in
+              // 社区补丁与金手指合成一块 S 级优化专区（SGradeGroup.swift），出现在两组里第一组的位置
+              if SGradeGroup.ids.contains(section.id) {
+                if section.id == detail.sections.first(where: { SGradeGroup.ids.contains($0.id) })?.id {
+                    SGradeGroup(gameID: detail.id, sections: detail.sections.filter { SGradeGroup.ids.contains($0.id) }) { actions.onChange(detail.id, $0, $1) }
+                }
+              } else {
                 group(section.title) {
                     // The button mapping is one row here and opens a card of its own, as a long choice list does.
                     if section.id == PadMappingRows.sectionID {
@@ -32,6 +38,7 @@ public struct GameDetailView: View {
                         }
                     }
                 }
+              }
             }
             group(ShellStrings.text("Game data")) {
                 SourceRow(symbol: "folder",

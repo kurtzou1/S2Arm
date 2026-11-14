@@ -40,7 +40,7 @@ struct nvn_vk_tex {
     uint32_t nvn_target;    // NVNtextureTarget（8/9 = CUBEMAP/CUBEMAP_ARRAY；5/6/MS 与 10/BUFFER 未建图）
     uint32_t nvn_flags;     // NVNtextureFlags（0x10 LINEAR / 0x20 SPARSE 等）
     uint32_t nvn_stride;    // TextureBuilderSetStride（线性纹理行距）
-    int32_t nvn_pkg_block_h;// 打包布局的 block height（0 = 自动算法）
+    int32_t nvn_pkg_layout;// 打包布局参数（编码见 nvn_tex.h pkg_layout；0 = 自动算法）
     uint8_t stencil_mode;   // TextureBuilderSetDepthStencilMode(STENCIL)：采样 stencil 面而不是深度面
     uint16_t swz;          // NVN TextureBuilderSetSwizzle：r | g<<3 | b<<6 | a<<9
     uint8_t set_swz;

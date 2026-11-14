@@ -1,8 +1,9 @@
 """出包期横版封面抓取（照 GC 落地版 LCFetchedCover.swift 的已验链搬运；Tiao 定出包期抓、不走设备端懒抓）。
 
-按程序号直达 ec.nintendo.com/apps/<程序号>/US → 跳转后的商品页 __NEXT_DATA__ 里
-schema.org linkedData 的 image（图床 assets.nintendo.com）为首选、整页正则兜底 →
-下载 → 门槛校验：host = assets.nintendo.com、宽 ≥ 1280、宽 > 高（三款实测均为 1920×1080 JPEG）。
+按程序号直达 ec.nintendo.com/apps/<程序号>/<区> → 跳转后的商品页取主图 → 下载 → 门槛校验：宽 ≥ 1280、宽 > 高（实测均为 1920×1080 JPEG）。
+区按 STORE_REGIONS 依次试：美区页（__NEXT_DATA__ 里 schema.org linkedData 的 image，图床 assets.nintendo.com；整页正则兜底）；
+美区 404 再试港区页（og:image，图床 img-eshop.cdn.nintendo.net）——11-14 维护者库里 3 款亚洲版程序号美区 404、港区有 1920×1080 主图，
+原先只查美区，404 当定论锁 7 天。所有区都 404 才是「商店没有这一款」的定论。
 
 纪律（红线）：抓图是锦上添花——任何失败只回 (False, 原因)，绝不抛、绝不让出包失败；
 调用方（pack/ship_ext.py container 组装）记一行黄字、该款退回只有 icon 的现状。
@@ -36,6 +37,9 @@ _IMG_TIMEOUT = 8
 _PAGE_MAX = 8 << 20
 _IMG_MAX = 16 << 20
 
+STORE_REGIONS = ("US", "HK")   # 依次试；日区商品页会先跳排队页（store-jp-wr），脚本取不到，不列
+_IMG_HOSTS = ("assets.nintendo.com", "img-eshop.cdn.nintendo.net")
+_OG_IMAGE = re.compile(r'<meta[^>]+property="og:image"[^>]+content="(https://img-eshop\.cdn\.nintendo\.net/i/[0-9a-f]+\.(?:jpg|png|webp))"')
 _NEXT_DATA = re.compile(r'id="__NEXT_DATA__"[^>]*>(.*?)</script>', re.S)
 _FALLBACK = re.compile(r'"image"\s*:\s*"(https://assets\.nintendo\.com/image/upload/[^"]*/store/software/switch/[0-9]+/[^"]+)"')
 
@@ -58,7 +62,7 @@ def _host_ok(host, img: bool) -> bool:
     if not host:
         return False
     if img:
-        return host == "assets.nintendo.com"
+        return host in _IMG_HOSTS
     return host == "nintendo.com" or host.endswith(".nintendo.com")
 
 
@@ -93,7 +97,7 @@ def _extract_image_url(html: str):
                         return img
         except (ValueError, KeyError, TypeError):
             pass
-    m = _FALLBACK.search(html)
+    m = _FALLBACK.search(html) or _OG_IMAGE.search(html)   # 港区页：og:image 是商品主图（1920×1080）
     return m.group(1) if m else None
 
 
@@ -169,18 +173,26 @@ def _image_size(data: bytes):
 
 def _fetch_banner_once(tid: str, dest: Path):
     """真正联网抓一次（缓存/预算在 fetch_banner 里管）：→ (True, "1920x1080 jpeg", True) / (False, 原因, 是否定论)。"""
-    try:
-        html = _get(f"https://ec.nintendo.com/apps/{tid}/US", _PAGE_TIMEOUT, _PAGE_MAX, img=False).decode("utf-8", "replace")
-    except urllib.error.HTTPError as e:
-        return False, f"商品页拉取失败：{e}", e.code in (404, 410)   # 商店没有这一款：定论；5xx / 限流不是
-    except Exception as e:
-        return False, f"商品页拉取失败：{e}", False
-    title = _extract_title(html)
-    if title:
-        _names[tid] = title
-    url = _extract_image_url(html)
+    url, missing = None, []
+    for region in STORE_REGIONS:
+        try:
+            html = _get(f"https://ec.nintendo.com/apps/{tid}/{region}", _PAGE_TIMEOUT, _PAGE_MAX, img=False).decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            if e.code in (404, 410):   # 这一区没有这一款：试下一区
+                missing.append(f"{region} {e.code}")
+                continue
+            return False, f"商品页拉取失败（{region}）：{e}", False   # 5xx / 限流不是定论
+        except Exception as e:
+            return False, f"商品页拉取失败（{region}）：{e}", False
+        title = _extract_title(html)
+        if title and not _names.get(tid):
+            _names[tid] = title
+        url = _extract_image_url(html)
+        if url:
+            break
+        missing.append(f"{region} 页上没有主图")
     if not url:
-        return False, "商品页没找到 assets.nintendo.com 主图", True
+        return False, "各区商店都没取到主图：" + "、".join(missing), True
     try:
         data = _get(url, _IMG_TIMEOUT, _IMG_MAX, img=True)
     except Exception as e:

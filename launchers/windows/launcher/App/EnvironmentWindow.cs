@@ -474,8 +474,10 @@ public sealed partial class EnvironmentWindow : Window
         settings.Children.Add(Label(T("settings.runtime"))); settings.Children.Add(runtime);
         settings.Children.Add(Label(T("settings.shell"))); settings.Children.Add(shell);
         settings.Children.Add(Action("action.save_settings", CapturePaths, !busy));
-        body.Children.Add(new Expander { Header = T("settings.title"), Content = settings,
-            HorizontalAlignment = HorizontalAlignment.Stretch });
+        // 只在开发版（没有版本号 = 不是装出来的发版包）显示：发版包玩家用不上，包不完整时后端提示的是重新安装（11-14 体验梳理）
+        if (AppVersion == "-")
+            body.Children.Add(new Expander { Header = T("settings.title"), Content = settings,
+                HorizontalAlignment = HorizontalAlignment.Stretch });
 
         if (diagnostics.Length != 0)
         {

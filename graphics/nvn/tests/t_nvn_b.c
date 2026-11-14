@@ -107,6 +107,24 @@ int main(int argc, char **argv) {
     CHECK(CROP, b.pre == guard && b.post == guard);
     CHECK(NATIVE, b.pre == guard && b.post == guard);
 
+    // 原生窗口交换间隔同步（11-13，hle_nvn.c nat_itv；帧率金手指直接写系统原生窗口 +0xF14）：对象头「dnw_」且 +0xF14 是系统缺省 1 时，
+    //   建窗口写进游戏要的间隔、游戏改间隔跟着写、外部改了 GetPresentInterval 读回来；对象头不认就一处都不碰。期望手写
+    {
+        static uint8_t nat[0x1000], raw[0x1000];
+        memcpy(nat, "dnw_", 4); memcpy(nat + 0xf14, &(int32_t){1}, 4); memcpy(raw + 0xf14, &(int32_t){1}, 4);
+        window_box c, d; memset(&c, 0, sizeof c); memset(&d, 0, sizeof d);
+        int32_t v;
+        API(nvnWindowBuilderSetDefaults)(&b.value); API(nvnWindowBuilderSetTextures)(&b.value, 2, first);
+        API(nvnWindowBuilderSetNativeWindow)(&b.value, nat); API(nvnWindowBuilderSetPresentInterval)(&b.value, 2);
+        if (!API(nvnWindowInitialize)(&c.value, &b.value)) return 2;
+        memcpy(&v, nat + 0xf14, 4); CHECK(NATIVE, v == 2);
+        API(nvnWindowSetPresentInterval)(&c.value, 3); memcpy(&v, nat + 0xf14, 4); CHECK(NATIVE, v == 3);
+        memcpy(nat + 0xf14, &(int32_t){1}, 4); CHECK(NATIVE, API(nvnWindowGetPresentInterval)(&c.value) == 1);
+        API(nvnWindowBuilderSetNativeWindow)(&b.value, raw);
+        if (!API(nvnWindowInitialize)(&d.value, &b.value)) return 2;
+        memcpy(&v, raw + 0xf14, 4); CHECK(NATIVE, v == 1); CHECK(NATIVE, API(nvnWindowGetPresentInterval)(&d.value) == 2);
+    }
+
     for (int i = 0; i < 4; i++) API(nvnTextureFinalize)(&textures[i]);
     printf("%s t_nvn_b %s: %u assertions, %u mismatches\n", bad ? "✗" : "✓", query ? query : "window queries", checks, bad);
     return bad != 0;

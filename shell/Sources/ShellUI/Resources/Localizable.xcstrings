@@ -1,118 +1,6 @@
 {
   "sourceLanguage": "en",
   "strings": {
-    "Couldn’t read this picture: %@": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Couldn’t read this picture: %@"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "读不了这张图：%@"
-          }
-        }
-      }
-    },
-    "Photos didn’t hand over this picture. Try another one.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Photos didn’t hand over this picture. Try another one."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "照片没有把这张图交过来，换一张试试。"
-          }
-        }
-      }
-    },
-    "Sound": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sound"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "声音"
-          }
-        }
-      }
-    },
-    "Play Sound in Silent Mode": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Play Sound in Silent Mode"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "静音模式下也播放声音"
-          }
-        }
-      }
-    },
-    "This file isn’t a picture the cover can use. Try another one.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "This file isn’t a picture the cover can use. Try another one."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "这个文件不是封面能用的图片，换一张试试。"
-          }
-        }
-      }
-    },
-    "This picture couldn’t be converted for the cover. Try another one.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "This picture couldn’t be converted for the cover. Try another one."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "这张图转不成封面，换一张试试。"
-          }
-        }
-      }
-    },
-    "When on, game sound keeps playing while the device is in Silent Mode. When off, S2Arm follows Silent Mode like other games.": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "When on, game sound keeps playing while the device is in Silent Mode. When off, S2Arm follows Silent Mode like other games."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "开启后，设备处于静音模式时游戏照样出声；关闭时和其他游戏一样跟随静音模式。"
-          }
-        }
-      }
-    },
     "Reorder": {
       "localizations": {
         "en": {
@@ -11695,54 +11583,6 @@
         }
       }
     },
-    "Off returns to the game’s own frame rate (usually 30 FPS) and saves power": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Off returns to the game’s own frame rate (usually 30 FPS) and saves power"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "关掉回到游戏自己的帧率（多为 30 帧），更省电"
-          }
-        }
-      }
-    },
-    "Force widescreen": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Force widescreen"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "宽屏强制启用"
-          }
-        }
-      }
-    },
-    "Fills the screen even for unverified games; falls back to 16:9 if the picture stretches": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Fills the screen even for unverified games; falls back to 16:9 if the picture stretches"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "没验证过的游戏也铺满全屏；画面若被拉伸会自动退回 16:9"
-          }
-        }
-      }
-    },
     "Virtual controller": {
       "localizations": {
         "en": {
@@ -13479,6 +13319,230 @@
           "stringUnit": {
             "state": "translated",
             "value": "恢复默认未完成，请重试"
+          }
+        }
+      }
+    },
+    "Full screen": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Full screen"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "满屏"
+          }
+        }
+      }
+    },
+    "Community patches": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Community patches"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "社区补丁"
+          }
+        }
+      }
+    },
+    "Cheats": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cheats"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "金手指"
+          }
+        }
+      }
+    },
+    "S-grade enhancements": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "S-grade enhancements"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "S 级优化"
+          }
+        }
+      }
+    },
+    "If a patch is incompatible and makes the game crash, it is turned off automatically the next time you launch, so you can keep playing.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "If a patch is incompatible and makes the game crash, it is turned off automatically the next time you launch, so you can keep playing."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "开着补丁如遇到不兼容导致游戏崩溃，下次启动会自动将崩溃补丁关掉以确保您正常游戏。"
+          }
+        }
+      }
+    },
+    "%lld on · %lld in all": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld on · %lld in all"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已开 %lld 条 · 共 %lld 条"
+          }
+        }
+      }
+    },
+    "Search cheats": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Search cheats"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "搜索金手指"
+          }
+        }
+      }
+    },
+    "Couldn’t read this picture: %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn’t read this picture: %@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "读不了这张图：%@"
+          }
+        }
+      }
+    },
+    "Photos didn’t hand over this picture. Try another one.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Photos didn’t hand over this picture. Try another one."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "照片没有把这张图交过来，换一张试试。"
+          }
+        }
+      }
+    },
+    "Sound": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sound"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "声音"
+          }
+        }
+      }
+    },
+    "Play Sound in Silent Mode": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Play Sound in Silent Mode"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "静音模式下也播放声音"
+          }
+        }
+      }
+    },
+    "This file isn’t a picture the cover can use. Try another one.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This file isn’t a picture the cover can use. Try another one."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这个文件不是封面能用的图片，换一张试试。"
+          }
+        }
+      }
+    },
+    "This picture couldn’t be converted for the cover. Try another one.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This picture couldn’t be converted for the cover. Try another one."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这张图转不成封面，换一张试试。"
+          }
+        }
+      }
+    },
+    "When on, game sound keeps playing while the device is in Silent Mode. When off, S2Arm follows Silent Mode like other games.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "When on, game sound keeps playing while the device is in Silent Mode. When off, S2Arm follows Silent Mode like other games."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "开启后，设备处于静音模式时游戏照样出声；关闭时和其他游戏一样跟随静音模式。"
           }
         }
       }

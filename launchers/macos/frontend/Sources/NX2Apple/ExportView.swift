@@ -19,6 +19,8 @@ struct ExportView: View {
     @State private var location = ""
     /// 「选择其他文件夹…」选过、还不在位置表里的
     @State private var pickedLocation: String?
+    /// S 级优化卡片报了「这款什么都没有」的游戏号（整张卡不出）
+    @State private var sgradeNothing: String?
     let game: GameSummary
     /// 打开装机页（已出过 iPhone 包的款直接装）。
     let install: () -> Void
@@ -28,6 +30,9 @@ struct ExportView: View {
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 34) {
                     header
+                    if sgradeNothing != game.id {   // 都没有（这个版本没命中、别的版本也没有）就整张不出（11-13 维护者「没匹配就什么都不显示」），换一款再出
+                        SGradeCard(model: model, gameID: game.id, nothing: { sgradeNothing = game.id })   // S 级优化（Beta，11-13）：这款这个版本命中了哪些社区补丁，命中的出包时自动打入
+                    }
                     Text(BackendText.launcherText("batch.hint", language: loc.lang == .zh ? "zh-Hans" : "en")).font(.manrope(12.5)).foregroundStyle(.secondary)
                     platforms
                 }

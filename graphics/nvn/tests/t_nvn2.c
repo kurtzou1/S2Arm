@@ -276,10 +276,10 @@ int main(void) {
         // camera CreateAliasOutputBufferPool(UserImageHandle, unsigned)：句柄按值。按客人约定传句柄 1：不当地址写（原先写地址 1 → 信号 11，审计 P1-145），回 0
         uint64_t (*cam_alias)(uint16_t, uint32_t) = (uint64_t (*)(uint16_t, uint32_t))s2a_nv_entry("_ZN2nn6camera3sdk27CreateAliasOutputBufferPoolENS_3gsv15UserImageHandleEj");
         CHECK(cam_alias && !nvn2_red_of(cam_alias)); CHECK(!dies_alias(cam_alias)); CHECK(cam_alias(1, 4) == 0);
-        // camera CreateCameraContext：输出参数写 NULL
-        void (*cam_ctx)(void **) = (void (*)(void **))s2a_nv_entry("_ZN2nn6camera3sdk19CreateCameraContextEPNS_5gsdrv18UniqueNativeHandleE");
+        // camera CreateCameraContext：输出参数是 32 位句柄，只写 4 字节；服务层没链（本单测）时句柄 0
+        void (*cam_ctx)(uint32_t *) = (void (*)(uint32_t *))s2a_nv_entry("_ZN2nn6camera3sdk19CreateCameraContextEPNS_5gsdrv18UniqueNativeHandleE");
         CHECK(cam_ctx && !nvn2_red_of(cam_ctx));
-        void *p = (void *)0x5a5a; cam_ctx(&p); CHECK(p == NULL);
+        uint32_t ch[2] = {0x5a5a, 0xa5a5}; cam_ctx(ch); CHECK(ch[0] == 0 && ch[1] == 0xa5a5);
         // 其他 chat / camera 接口仍是红桩
         void *cg = s2a_nv_entry("_ZN2nn4chat3gsv10InitializeEv");
         CHECK(cg && nvn2_red_of(cg) && strstr(nvn2_red_of(cg), "GameChat"));

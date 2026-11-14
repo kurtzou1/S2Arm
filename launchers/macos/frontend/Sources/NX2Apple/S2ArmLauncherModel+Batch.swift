@@ -70,7 +70,11 @@ extension S2ArmLauncherModel {
 
     /// 建批次并开始出 → nil；没建成 → 原因（控制口 POST /batch 据此回 409，不先回成功，审计 P1-166）
     func createBatch() async -> String? {
-        let items = batchDraft.filter { !$0.platforms.isEmpty }.map { ["gameId": $0.id, "name": $0.name, "platforms": $0.platforms] as [String: Any] }
+        // 出包页取消过「S 级优化（Beta）· 出包时打入」的款（按款记住）：批量出也不带社区补丁与金手指（pack/jobs/batch.py create → export_plan）
+        let items = batchDraft.filter { !$0.platforms.isEmpty }.map { d -> [String: Any] in
+            var item: [String: Any] = ["gameId": d.id, "name": d.name, "platforms": d.platforms]
+            if !sgradeOn(d.id) { item["sgrade"] = false }
+            return item }
         guard !items.isEmpty else { return "没有能出的游戏" }
         guard !busy, !batchRunning else { return "正在出包" }
         guard let data = try? JSONSerialization.data(withJSONObject: ["items": items, "location": batchLocation.isEmpty ? NSNull() : batchLocation] as [String: Any]),

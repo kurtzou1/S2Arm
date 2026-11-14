@@ -699,6 +699,23 @@ def push_pack(c, ident, bid, pack, udid=None, docs=None, ctx=None, pack_root=Non
     return got.get("files", 0), got.get("mb", 0) << 20
 
 
+def push_cheats(c, device, bid, gid, docs):
+    """金手指（11-12）：这款文件夹 cheats/ 里的 txt（出包时从公开库取的 + 玩家导入的）拷到机上本款文档根 cheats/，
+    游戏内金手指菜单（ios/vpad_cheats.m）与服务层 Cheats.cs 读那里；改代码的条目出包时已编进包。开关 enabled.txt / 状态 status.txt 不推（不盖玩家在手机上的选择）。
+    拷不进只记黄、不挡装机"""
+    import cheats
+    d = cheats.cheats_dir(c, gid.upper(), create=False)
+    files = [f for f in sorted(d.glob("*.txt")) if f.name not in cheats.SKIP] if d.is_dir() else []
+    bad = 0
+    for f in files:
+        r = subprocess.run(["xcrun", "devicectl", "device", "copy", "to", "--device", device, "--domain-type", "appDataContainer",
+                            "--domain-identifier", bid, "--source", str(f), "--destination", f"{docs}/cheats/{f.name}"],
+                           capture_output=True, text=True, timeout=120)
+        bad += r.returncode != 0
+    if files:
+        print(f"[装机] 金手指文件 {len(files) - bad}/{len(files)} 份拷进手机{'（有拷不进的，游戏内菜单里会缺几份）' if bad else ''}", file=sys.stderr, flush=True)
+
+
 APPLY_FAILED = re.compile(r"资源包推进去了，但手机上解开失败：([^\n]+)")   # tools/push_pack.py apply 读到解包日志「解包失败：…」时报的那句
 
 
@@ -1524,6 +1541,7 @@ class MacPhone:
     def push(self, g, pack):
         n0 = len(self.c.job["diagnostics"])
         r = push_pack(self.c, self.dev["id"], self.bid, pack, udid=self.udid, docs=game_docs(g), ctx=game_ctx(g), pack_root=pick_pack_root(self.c, self, g))
+        push_cheats(self.c, self.dev["id"], self.bid, g, game_docs(g))
         hit = [d for d in self.c.job["diagnostics"][n0:] if d.get("code") == "manual_unpack_required"]   # push_pack 按「需要玩家操作」收尾时记的那条
         if hit: self.pending = hit[-1].get("summary") or ""
         return r
@@ -1972,6 +1990,8 @@ def update_phone(c):
     others = container_others(c, ph, rec)
     sid = packer.current_shell_id(c)
     st = shell_outdated(c, rec, sid, others)
+    if st is None and c.r.get("sgradeUpgrade") is True:   # 「S 级优化升级」页（v0.4.0）：壳已是本版也重组容器——游戏程序要补上 S 级优化（refresh_ios），资源包照旧不推
+        st = dict(stale=[], fromShell=sid)
     if st is None:
         return dict(updated=False, bundleId=ph.bid, games=others, **ph.info)
     stale = [s["gameId"] for s in st["stale"]]

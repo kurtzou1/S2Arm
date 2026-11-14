@@ -26,6 +26,7 @@ _nvn_prof_entry:
     stp x29, x30, [sp]
     mov x29, sp
     stp x0, x1, [sp, #16]
+    stp x1, x2, [sp, #224]           // S2Arm 诊断（g_nvn_qlog）：入参 x1 / x2 留给调用后的记录（[16,32) 调用后被返回值盖掉）
     stp x2, x3, [sp, #32]
     stp x4, x5, [sp, #48]
     stp x6, x7, [sp, #64]
@@ -68,7 +69,15 @@ _nvn_prof_entry:
     add x10, x10, _nvn_prof_ticks@PAGEOFF
     add x10, x10, x16, lsl #3
     stadd x9, [x10]
-    ldp x0, x1, [sp, #16]
+    adrp x9, _g_nvn_qlog@PAGE        // S2Arm 诊断：S2A_NVN_QLOG 开着时记「槽号、游戏返回地址、返回值、入参 x1 / x2」（hle_nvn.c nvn_qlog_c 按名字筛）
+    ldr w9, [x9, _g_nvn_qlog@PAGEOFF]
+    cbz w9, 1f
+    ldr x0, [sp, #80]
+    ldr x1, [sp, #8]
+    ldr x2, [sp, #16]
+    ldp x3, x4, [sp, #224]
+    bl _nvn_qlog_c
+1:  ldp x0, x1, [sp, #16]
     ldp q0, q1, [sp, #96]
     ldp q2, q3, [sp, #128]
     ldp x29, x30, [sp]

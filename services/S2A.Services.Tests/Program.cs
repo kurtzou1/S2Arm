@@ -3104,6 +3104,11 @@ namespace S2A.Services.Tests
                     $"{noLang(0)} / {noLang(1 << 16)} / {noLang(1 << 17)} / {noLang(1 << 18)} / {s2u(0x0400486024DEC000, 1 << 16, "1.0.0")}");
                 // 01 款合成件 + 宿主简中：不进 Switch 2 那条，按五步走 → 只声明英语 → 美式英语（不回退 #401）
                 Check("Switch 1 合成件（只声明英语）+ 宿主简中 → 美式英语（#401 不回退）", "AmericanEnglish（第 3 步：英语）", Sel(SL, 1));
+                // #617：01 开头（Switch 2 本体 + 升级包）的合成件 + 玩家显式指定游戏语言 → 占位支持表（缺省只声明美式英语）不作数，按宿主主语言回；
+                //   没显式指定时占位表照旧作数（上面那条 #401 护栏不动）；真 NACP（显示版本不会是 ?）与旧版无 ? 标记的合成件即使显式指定也不放行
+                var synthEx = Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.ApplicationProxy.IApplicationFunctions.SynthTableHonorsExplicitLanguage;
+                Check("合成件 + 显式语言放行判定：合成件 + 显式 / 合成件 + 没显式 / 真 NACP + 显式 / 无 ? 标记 + 显式", "True / False / False / False",
+                    $"{synthEx("?", true)} / {synthEx("?", false)} / {synthEx("1.0.2", true)} / {synthEx("", true)}");
                 // 支持语言位为 0（合成的 control.nacp）：缺省回美式英语（#401）；玩家显式指定系统语言时回它。语言码 = ASCII 小端："ja" = 0x616A、"en-US" = 0x53552D6E65
                 var zero = Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.ApplicationProxy.IApplicationFunctions.ZeroSupportedLanguageCode;
                 Check("支持语言位为 0：系统日语、没显式指定 → en-US；显式指定日语 → ja", "0x53552D6E65 / 0x616A", $"0x{zero(0x616A, false):X} / 0x{zero(0x616A, true):X}");

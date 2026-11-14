@@ -85,7 +85,7 @@ static void fd_tex_diag_once(const char *request_id, uint32_t tid, const struct 
            "tex=(flags=0x%x stride=%u blk_h=%d set_swz=%d swz=0x%x) "
            "view=(%s) samp=(min=%u mag=%u wrap=%u/%u/%u cmp=%u/%u lod=%.2f..%.2f/%.2f aniso=%.1f)",
            rid, tid, set, binding, slot, target, fmt, w, h, levels, layers,
-           tex ? tex->nvn_flags : 0u, tex ? tex->nvn_stride : 0u, tex ? tex->nvn_pkg_block_h : 0,
+           tex ? tex->nvn_flags : 0u, tex ? tex->nvn_stride : 0u, tex ? tex->nvn_pkg_layout : 0,
            tex ? tex->set_swz : 0, tex ? tex->swz : 0u, view_txt,
            par ? par->minf : 0, par ? par->magf : 0, par ? par->ws : 0, par ? par->wt : 0, par ? par->wr : 0,
            par ? par->cmp_mode : 0, par ? par->cmp_func : 0,

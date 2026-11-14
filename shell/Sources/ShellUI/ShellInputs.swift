@@ -54,8 +54,10 @@ public struct GameTile: Identifiable, Equatable, Sendable {
     public var recentlyPlayed: String?
     /// Installed (or updated) and not opened since: a blue dot before its name, as iOS marks a new app.
     public var isNew: Bool
+    /// S-grade enhancements are built into this game (community patches / cheats in its cpatch.tsv): the cover lights a gold S (v0.4.0).
+    public var sgrade: Bool
     public init(id: String, title: String, subtitle: String = "", banner: Artwork? = nil, icon: Artwork? = nil,
-                state: GameState = .playable, recentlyPlayed: String? = nil, isNew: Bool = false) {
+                state: GameState = .playable, recentlyPlayed: String? = nil, isNew: Bool = false, sgrade: Bool = false) {
         self.id = id
         self.title = title
         self.subtitle = subtitle
@@ -64,6 +66,7 @@ public struct GameTile: Identifiable, Equatable, Sendable {
         self.state = state
         self.recentlyPlayed = recentlyPlayed
         self.isNew = isNew
+        self.sgrade = sgrade
     }
 }
 

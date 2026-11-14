@@ -213,9 +213,13 @@ int main(void) {
           const struct { op_hdr set; p_set_rt_c rt; const tex_t *color0; uint8_t snap[sizeof(tex_t)]; op_hdr end; } c = {
               .set = {OP_SET_RT, sizeof(op_hdr) + sizeof(p_set_rt_c) + 8 + sizeof(tex_t)}, .rt = {.n = 1, .cmask = 1}, .color0 = &rt2, .end = {OP_END, sizeof(op_hdr)} };
           nvn_be_exec((const uint8_t *)&c);
+          // 后台编译先挂住（占满后台并发名额 g_mtk_sem）：这笔管线在检查时一定还没编好，期望不靠编译快慢。
+          //   原先不挂：门禁机编得快（0.1 ms 编好），检查时已能画、没走「跳过」，超预算 +0 / 跳过 +0（main c3708ffdb 已知红）
+          REQUIRE(g_mtk_sem); int held = mtk_width(); for (int i = 0; i < held; i++) dispatch_semaphore_wait(g_mtk_sem, DISPATCH_TIME_FOREVER);
           int b0 = g_mtk_budget; g_mtk_budget = 0; S.prog = &gp4d; uint64_t ov0 = g_mtk_wait_over, w0 = g_mtk_wait;
           o = capture(^{ draw(&d4, NULL); });
-          g_mtk_budget = b0; dispatch_group_wait(g_mtk_group, DISPATCH_TIME_FOREVER);
+          g_mtk_budget = b0; for (int i = 0; i < held; i++) dispatch_semaphore_signal(g_mtk_sem);
+          dispatch_group_wait(g_mtk_group, DISPATCH_TIME_FOREVER);
           rp_flush(); uint64_t fence = nvn_be_sub_commit(); REQUIRE(nvn_be_wait(fence, 10000000000ull));
           VERIFY(g_mtk_wait_over == ov0 + 1 && g_mtk_wait == w0 + 1 && [o containsString:@"past the 0 ms frame budget"] && [o containsString:@"not ready: skipped this frame"] && red_lines(o, nil) == 0,
                  "④d 预算 0：丢不起的那笔（新目标）不等、照旧跳过并计数、写明超预算（超预算 +%llu，跳过 +%llu；stderr：%s）", (unsigned long long)(g_mtk_wait_over - ov0), (unsigned long long)(g_mtk_wait - w0), o.UTF8String);

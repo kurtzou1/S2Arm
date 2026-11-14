@@ -22,6 +22,21 @@ import S2ArmShellBridge
     #expect(c.problems.count == 2)           // 重复 1 + 非法 id 1
 }
 
+// 封面金色 S（v0.4.0）：多款容器 Games/<游戏号>/cpatch.tsv 有表头以外的条目才亮；只有表头 / 没有表不亮；单款 App 读根目录的表。期望手写
+@Test func catalogueSGradeBadge() throws {
+    let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: base) }
+    for (id, text) in [("0100000000010000", "编号\nwsauto:a:w\n"), ("0100000000020000", "编号\n")] {
+        let d = base.appendingPathComponent("Games").appendingPathComponent(id)
+        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        try text.write(to: d.appendingPathComponent("cpatch.tsv"), atomically: true, encoding: .utf8)
+    }
+    let json = #"{"schema":1,"games":[{"title_id":"0100000000010000","name":"A"},{"title_id":"0100000000020000","name":"B"},{"title_id":"0100000000030000","name":"C"}]}"#
+    #expect(Catalogue.parse(Data(json.utf8), baseDirectory: base).tiles.map(\.sgrade) == [true, false, false])
+    try "编号\nfps:x\n".write(to: base.appendingPathComponent("cpatch.tsv"), atomically: true, encoding: .utf8)
+    #expect(Catalogue.parse(Data(#"{"schema":1,"games":[{"title_id":"0100000000030000","name":"C"}]}"#.utf8), baseDirectory: base).tiles.map(\.sgrade) == [true])
+}
+
 @Test func catalogueBadInputs() {
     let base = URL(fileURLWithPath: "/")
     #expect(Catalogue.parse(Data("not json".utf8), baseDirectory: base).tiles.isEmpty)
@@ -210,20 +225,37 @@ nonisolated(unsafe) private var lastPlayed = ""
     s2a_shell_set_play_handler(nil, nil)
 }
 
-// 每款游戏的设置行（S2ArmGameSettings，11-07 维护者）：临时偏好，期望值手算
+// 每款游戏的设置行（S2ArmGameSettings，11-07 维护者；11-13 画面 / 社区补丁 / 金手指改由宿主给）：临时偏好 + 宿主桩，期望值手算
 @MainActor @Test func gameSettingsRows() throws {
     let tag = UUID().uuidString
     let app = try #require(UserDefaults(suiteName: "s2a.test.app." + tag))
     var games: [String: UserDefaults] = [:]
+    // 宿主桩：G1 有一条社区补丁、两条金手指（一条写死地址）；G2 没有补丁和金手指、满屏改不动；G3 宿主读不到
+    typealias O = S2ArmGameSettings.Options
+    var opts: [String: O] = [
+        "G1": O(fps: .init(on: true, note: "fps note"), fullscreen: .init(on: false, note: "fs note"),
+                patches: [.init(id: "wsauto:1", title: "Adaptive", note: "Widescreen · verified", on: false)],
+                cheats: [.init(id: "a.txt/Coins", title: "Coins", note: "fixed", on: false), .init(id: "a.txt/Jump", title: "Jump", on: true)]),
+        "G2": O(fps: .init(on: false), fullscreen: .init(on: false, enabled: false, note: "blocked")),
+        "G4": O(fps: .init(on: false, hidden: true), fullscreen: .init(on: false, hidden: true)),   // 没有帧率 / 宽屏补丁（11-13 只用补丁）：两行都不出
+        // 帧率补丁带 60 / 120 两档（11-13）：帧率开关下多一行档位；宿主记的档不在列表里按「自动」显示
+        "G5": O(fps: .init(on: true, levels: [.init(value: "0", label: "Auto"), .init(value: "60", label: "60 fps"), .init(value: "120", label: "120 fps")], pick: "120", levelsTitle: "Level"), fullscreen: .init(on: false, hidden: true)),
+        "G6": O(fps: .init(on: true, levels: [.init(value: "0", label: "Auto"), .init(value: "60", label: "60 fps")], pick: "90"), fullscreen: .init(on: false, hidden: true)),
+    ]
+    var sets: [String] = []
     let stores = S2ArmGameSettings.Stores(game: { id in
         if let d = games[id] { return d }
-        let d = UserDefaults(suiteName: "s2a.test.game.\(tag).\(id)"); games[id] = d; return d }, app: app)
+        let d = UserDefaults(suiteName: "s2a.test.game.\(tag).\(id)"); games[id] = d; return d }, app: app,
+        options: { opts[$0] },
+        setOption: { id, kind, key, on in sets.append("\(id) \(kind) \(key) \(on)"); return true })
     defer { app.removePersistentDomain(forName: "s2a.test.app." + tag); for (id, _) in games { UserDefaults().removePersistentDomain(forName: "s2a.test.game.\(tag).\(id)") } }
     func row(_ s: [SettingSection], _ id: String) -> SettingRow? { s.flatMap(\.rows).first { $0.id == id } }
-    // 缺省：60 帧开、宽屏强制关、透明度 100、布局默认，没有「我的布局」时选项 = 默认 + 调整位置
+    // G1：分组顺序 显示 → 画面 → 社区补丁 → 金手指 → 虚拟手柄；值与说明照宿主给的
     var s = S2ArmGameSettings.sections(for: "G1", stores: stores, state: .init(selected: "default", hasMine: false))
-    #expect(row(s, "fps60")?.value == "on" && row(s, "widenForce")?.value == "off" && row(s, "vpadOpacity")?.value == "100")
-    #expect(row(s, "vpadHoldLock")?.value == "on")
+    #expect(s.map(\.id) == ["s2a.identity", "s2a.picture", "s2a.patches", "s2a.cheats", "s2a.vpad"])
+    #expect(row(s, "fps60")?.value == "on" && row(s, "fps60")?.note == "fps note" && row(s, "fullscreen")?.value == "off" && row(s, "fullscreen")?.enabled == true)
+    #expect(row(s, "patch.wsauto:1")?.value == "off" && row(s, "cheat.a.txt/Coins")?.note == "fixed" && row(s, "cheat.a.txt/Jump")?.value == "on")
+    #expect(row(s, "vpadOpacity")?.value == "100" && row(s, "vpadHoldLock")?.value == "on")
     #expect(row(s, "splitScreen")?.value == "auto" && row(s, "screenOrientation")?.value == "auto")
     S2ArmGameSettings.apply(id: "G1", setting: "splitScreen", value: "on", stores: stores)
     S2ArmGameSettings.apply(id: "G1", setting: "screenOrientation", value: "portrait", stores: stores)
@@ -233,23 +265,45 @@ nonisolated(unsafe) private var lastPlayed = ""
     #expect(app.string(forKey: "splitScreen") == "on")
     #expect(row(S2ArmGameSettings.sections(for: "G1", stores: stores, state: .init(selected: "default", hasMine: false, holdLock: false)), "vpadHoldLock")?.value == "off")
     if case .choice(let o) = row(s, "vpadLayout")?.kind { #expect(o.map(\.id) == ["default", "edit"]) } else { Issue.record("布局行应是多选") }
-    // 改：G1 关 60 帧、开宽屏强制、透明度 40 → G1 两项变了、G2 不变；透明度全局 0.4
-    #expect(!S2ArmGameSettings.apply(id: "G1", setting: "fps60", value: "off", stores: stores))
-    S2ArmGameSettings.apply(id: "G1", setting: "widenForce", value: "on", stores: stores)
-    S2ArmGameSettings.apply(id: "G1", setting: "vpadOpacity", value: "40.0", stores: stores)
-    s = S2ArmGameSettings.sections(for: "G1", stores: stores, state: .init(selected: "mine", hasMine: true))
-    #expect(row(s, "fps60")?.value == "off" && row(s, "widenForce")?.value == "on" && row(s, "vpadOpacity")?.value == "40")
-    #expect(games["G1"]?.object(forKey: "S2AFps60") as? Bool == false && games["G1"]?.bool(forKey: "S2AWidenForce") == true)
-    #expect(abs((app.object(forKey: "S2AVPadOpacity") as? Double ?? 0) - 0.4) < 1e-9)
-    if case .choice(let o) = row(s, "vpadLayout")?.kind { #expect(o.map(\.id) == ["default", "mine", "edit"]) }
-    #expect(row(s, "vpadLayout")?.value == "mine")
+    // G2：没有补丁和金手指就不出那两组；满屏改不动 = 行置灰
     let s2 = S2ArmGameSettings.sections(for: "G2", stores: stores, state: .init(selected: "default", hasMine: false))
-    #expect(row(s2, "fps60")?.value == "on" && row(s2, "widenForce")?.value == "off" && row(s2, "vpadOpacity")?.value == "40")
-    // 透明度钳在 10–100：给 5 存成 0.1
+    #expect(s2.map(\.id) == ["s2a.identity", "s2a.picture", "s2a.vpad"] && row(s2, "fullscreen")?.enabled == false)
+    // G3：宿主读不到 = 画面组只有所有游戏共用的分屏 / 朝向，不出 60 帧 / 满屏（不拿猜的缺省冒充实际状态）
+    let s3 = S2ArmGameSettings.sections(for: "G3", stores: stores, state: .init(selected: "default", hasMine: false))
+    #expect(s3.map(\.id) == ["s2a.identity", "s2a.picture", "s2a.vpad"] && row(s3, "fps60") == nil && row(s3, "fullscreen") == nil && row(s3, "splitScreen") != nil)
+    // G4：宿主标了 hidden = 这款没有对应补丁，画面组只剩共用的分屏 / 朝向
+    let s4 = S2ArmGameSettings.sections(for: "G4", stores: stores, state: .init(selected: "default", hasMine: false))
+    #expect(row(s4, "fps60") == nil && row(s4, "fullscreen") == nil && row(s4, "splitScreen") != nil)
+    #expect(S2ArmGameSettings.Options.parse(#"{"fps":{"on":false,"hidden":true},"fullscreen":{"on":false}}"#)?.fps.hidden == true)
+    // G5：档位行在帧率开关后、值是宿主记的档、选项照宿主给的；G1（没给档位）不出这行；G6 两项（自动 + 一档）也出、记的档不在列表按自动
+    let s5 = S2ArmGameSettings.sections(for: "G5", stores: stores, state: .init(selected: "default", hasMine: false))
+    #expect(s5.first { $0.id == "s2a.picture" }?.rows.map(\.id).suffix(2) == ["fps60", "fpsPick"] && row(s5, "fpsPick")?.value == "120" && row(s5, "fpsPick")?.label == "Level")
+    if case .choice(let o) = row(s5, "fpsPick")?.kind { #expect(o.map(\.id) == ["0", "60", "120"]) } else { Issue.record("档位行应是多选") }
+    #expect(row(S2ArmGameSettings.sections(for: "G1", stores: stores, state: .init(selected: "default", hasMine: false)), "fpsPick") == nil)
+    #expect(row(S2ArmGameSettings.sections(for: "G6", stores: stores, state: .init(selected: "default", hasMine: false)), "fpsPick")?.value == "0")
+    let pj = S2ArmGameSettings.Options.parse(#"{"fps":{"on":true,"levels":[{"value":"0","label":"A"},{"value":"120","label":"B"}],"pick":"120","levelsTitle":"T"},"fullscreen":{"on":false}}"#)?.fps
+    #expect(pj?.levels.map(\.value) == ["0", "120"] && pj?.pick == "120" && pj?.levelsTitle == "T")
+    // 改：四类都原样交宿主（种类、编号、开关），不返回「打开编辑页」
+    #expect(!S2ArmGameSettings.apply(id: "G1", setting: "fps60", value: "off", stores: stores))
+    S2ArmGameSettings.apply(id: "G1", setting: "fullscreen", value: "on", stores: stores)
+    S2ArmGameSettings.apply(id: "G1", setting: "patch.wsauto:1", value: "on", stores: stores)
+    S2ArmGameSettings.apply(id: "G1", setting: "cheat.a.txt/Coins", value: "on", stores: stores)
+    S2ArmGameSettings.apply(id: "G5", setting: "fpsPick", value: "60", stores: stores)
+    #expect(sets == ["G1 fps  false", "G1 fullscreen  true", "G1 patch wsauto:1 true", "G1 cheat a.txt/Coins true", "G5 fpspick 60 true"])
+    // 透明度全局：40 → 0.4，钳在 10–100：给 5 存成 0.1
+    S2ArmGameSettings.apply(id: "G1", setting: "vpadOpacity", value: "40.0", stores: stores)
+    #expect(abs((app.object(forKey: "S2AVPadOpacity") as? Double ?? 0) - 0.4) < 1e-9)
+    s = S2ArmGameSettings.sections(for: "G2", stores: stores, state: .init(selected: "mine", hasMine: true))
+    #expect(row(s, "vpadOpacity")?.value == "40" && row(s, "vpadLayout")?.value == "mine")
     S2ArmGameSettings.apply(id: "G1", setting: "vpadOpacity", value: "5", stores: stores)
     #expect(abs((app.object(forKey: "S2AVPadOpacity") as? Double ?? 0) - 0.1) < 1e-9)
+    // 宿主 JSON 解析：缺字段按关 / 可改 / 空说明
+    let parsed = S2ArmGameSettings.Options.parse(#"{"fps":{"on":true},"fullscreen":{"on":false,"enabled":false,"note":"x"},"patches":[{"id":"p","title":"T","on":true}],"cheats":[{"key":"f/n","name":"N","note":"fixed","on":false}]}"#)
+    #expect(parsed == O(fps: .init(on: true), fullscreen: .init(on: false, enabled: false, note: "x"),
+                        patches: [.init(id: "p", title: "T", on: true)], cheats: [.init(id: "f/n", title: "N", note: "fixed", on: false)]))
     // 选「调整位置…」= 打开编辑页，不存值
     #expect(S2ArmGameSettings.apply(id: "G1", setting: "vpadLayout", value: "edit", stores: stores))
+    _ = opts
 }
 
 // 这台 iPhone 上的名字和封面：叠在清单上、可恢复默认，不影响别的款。期望值手写

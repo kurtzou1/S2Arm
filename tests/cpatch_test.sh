@@ -11,7 +11,7 @@
 #      D 0x100 → mov w0,#9（与 A 同处不同值）→ 不收；E 0x104（产物根 main.sites.tsv 登记的改写点）→ 不收
 #   ⑤ prune：main.gaps.tsv 有一条 0x100 cpatch 缺口 → 退出码 10、A 进 cpatch_excluded.tsv；重跑 plan → A 不在、D2 轮上（p 行 0x100 新字 0x52800120、位 2：A 出局后 B 0、C2 1、D2 2）
 #   ⑥ 多 @nsobid 块各自绑定构建号与 offset_shift；真实 scan 只匹配目标块、缺构建号及非法段不收
-#   ⑧ 抢同一处按目标选（11-01）：60 帧优先于 120 帧 / 取不到帧数；同 60 帧不缺 romfs 参数表优先；IPS 与写入相同的 pchtxt 共用参数表结论；平手按原顺序（细节见 ⑧ 段）
+#   ⑧ 抢同一处按目标选（11-01）：60 / 120 帧两档都收（11-13）、60 帧优先于取不到帧数；同 60 帧不缺 romfs 参数表优先；IPS 与写入相同的 pchtxt 共用参数表结论；平手按原顺序（细节见 ⑧ 段）
 #   ⑦ 数据流旁路（11-01 动森 fps:370eb70 定因）：补丁设又读的寄存器，原版有 cbz / 跳转表从区间外跳进两者之间 → 不收；跳到用之后、读原代码设的寄存器、表项在区间外 → 收（细节见 ⑦ 段）
 # 旧代码反证：本单测随 pack/cpatch.py 首次加入（之前没有补丁应用层，pack/cpatch.py 不存在 → 全红）；④⑤ 的 plan / prune 在 10-27 双路改版时替换「叠加安全」check / apply
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); trap 'rm -rf "$T"' EXIT; bad=0
@@ -251,7 +251,7 @@ for tag, cbz, use, entry, want, *w in (
     got = flow_case(tag, cbz, use, entry, *w)
     ck(f'⑦ {tag}：期望 {want}（实得 {got}）', got == want)
 # ⑧ 抢同一处按目标选（11-01）：合成 main 同 ④（0x100 原字 mov w0,#1），帧率索引（有 target_fps 列 → fps 类），各份都改 0x100、值各不同（内容不同 → 编号不同）
-#    a 120 帧在前、b 60 帧在后 → 收 b、a 落选（旧代码先到先得收 a → 红）
+#    a 120 帧在前、b 60 帧在后 → 两份都收（11-13 起：目标不同的帧率补丁是兄弟，同处多路、运行时按玩家选的档只开一份），按目标排序 b 在前
 #    c 60 帧、模组目录下有 romfs 行（缺参数表）在前，d 60 帧、无 romfs 行在后 → 收 d（旧代码收 c → 红）
 #    e、f 都 60 帧都不缺 → 平手按原顺序收 e
 #    g target_fps 空、路径里也没写帧数（取不到）在前，h 60 帧在后 → 收 h
@@ -271,7 +271,7 @@ def pick_case(tag, items):
     return [names[l.split('\t')[1]] for l in open(r8 + '/cpatch_plan.log').read().splitlines() if l.startswith('收\t')]
 IPSN = 'm/exefs_patches/N/' + BID + '.ips'
 for tag, items, want in (
-    ('1', [('a', 'a/exefs/m.pchtxt', '120', '40008052', 0), ('b', 'b/exefs/m.pchtxt', '60', '60008052', 0)], ['b']),
+    ('1', [('a', 'a/exefs/m.pchtxt', '120', '40008052', 0), ('b', 'b/exefs/m.pchtxt', '60', '60008052', 0)], ['b', 'a']),
     ('2', [('c', 'c/exefs/m.pchtxt', '60', '40008052', 1), ('d', 'd/exefs/m.pchtxt', '60', '60008052', 0)], ['d']),
     ('3', [('e', 'e/exefs/m.pchtxt', '60', '40008052', 0), ('f', 'f/exefs/m.pchtxt', '60', '60008052', 0)], ['e']),
     ('4', [('g', 'g/exefs/m.pchtxt', '', '40008052', 0), ('h', 'h/exefs/m.pchtxt', '60', '60008052', 0)], ['h']),

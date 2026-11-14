@@ -78,7 +78,7 @@ def read_map(path):
 
 def main(a):
     s2x, nxpkg, nxmap, out = a
-    red = []
+    red, yellow = [], []
     os.makedirs(out, exist_ok=True)
     # 直连抽取侧：表里的键 + 包文件里的记录
     head, rows = read_map(nxmap)
@@ -100,6 +100,8 @@ def main(a):
         if len(c) >= 3: stage_of[c[0]] = c[1]; src_of[c[0]] = c[2]
     s2 = {}; src = srcpack.Src(s2x)   # S2Arm 抽取的着色器字节在 src/*.pk（graphics/tools/shbake/srcpack.py）
     for k, st in stage_of.items():
+        if k not in src:   # 表里有、src/*.pk 里没有字节（#1009：抽取写到一半 / 记录坏了，读端在坏记录处停）：这支跳过、运行时首遇现编，不让整次出包失败（不许堵门）
+            yellow.append(f'S2Arm 键 {k} 在 index.tsv 里、src/*.pk 里没有字节：这支不进离线库，运行时首遇现编'); continue
         code, ctl = src.get(k)
         if st not in STAGE_WORD: red.append(f'S2Arm 键 {k} 阶段 {st} 不认识'); continue
         nk = nx_key(ctl, code)
@@ -163,6 +165,8 @@ def main(a):
           '新增行按阶段': {n: len(r) for n, r in sorted(per.items())}, '反向补进 S2Arm': len(nx_only_rows), '任务 / 网格不反向补': no_s2a, '计算着色器': len(cs_ctl), '答案表补线程组': filled, '控制段读不出线程组': no_tg, '红': red}
     json.dump(st, open(os.path.join(out, 'merge.json'), 'w', newline='\n'), ensure_ascii=False, indent=1)
     for r in red: print('【红】' + r)
+    for r in yellow[:20]: print('【黄】' + r)
+    if len(yellow) > 20: print(f'【黄】……共 {len(yellow)} 支没有字节、跳过')
     print(f"{'🔴' if red else '🟢'} 合并抽取：直连抽取 {st['direct']}、S2Arm {st['s2arm']}、交集 {st['交集']}、S2Arm 独有 {st['s2arm独有']}（已补进包目录与表）、直连抽取独有 {st['direct独有']}（已按 S2Arm 格式补 {st['反向补进 S2Arm']} 个）、并集 {st['并集']}；计算着色器 {st['计算着色器']} 个、答案表按控制段补线程组 {filled} 个{f"；{len(no_tg)} 个控制段读不出线程组（不补，运行时这些派发会跳过）" if no_tg else ""}")
     return 1 if red else 0
 

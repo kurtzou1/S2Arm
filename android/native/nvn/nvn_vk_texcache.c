@@ -2457,7 +2457,7 @@ struct nvn_vk_tex *nvn_vk_texcache_get_tex(struct nvn_vk_texcache *c, const tex_
                 levels, layers, depth, c->d->has_2d_array_compatible);
     }
     o->nvn_target = target; o->nvn_flags = (uint32_t)t->d.flags; o->nvn_stride = t->d.stride;
-    o->nvn_pkg_block_h = t->d.pkg_block_h; o->view_type = vt; o->stencil_mode = (uint8_t)stencil_mode; o->valid = 1;
+    o->nvn_pkg_layout = t->d.pkg_layout; o->view_type = vt; o->stencil_mode = (uint8_t)stencil_mode; o->valid = 1;
     o->set_swz = t->set_swz; o->swz = (uint16_t)t->swz;
     o->generation = ++c->next_generation;
     o->dsize = t->L.size;   // 批 A：内容账本/脏页查询都以存储字节数为准（未跟踪存储也保留）

@@ -68,6 +68,7 @@ __attribute__((weak)) int s2a_ios_qp_asked(int kind) { (void)kind; return 0; }  
 __attribute__((weak)) void s2a_ios_qprompt(int kind, int secs) { (void)kind; (void)secs; }   // app.m：弹提示（secs = 文案里「过去 XX 秒」）；Mac 宿主没有界面
 __attribute__((weak)) void s2a_ios_fps_native60(int on) { (void)on; }   // app.m：记住本款是不是原生 60 帧（设置页 60 帧那行据此显示「本款原生 60 帧」、开关置灰）
 void s2a_ql_host_frame(uint64_t now, int game, uint64_t dt, int game_itv); int s2a_ql_host_on(void);   // 档位梯子（runtime/src/qladder_host.c）
+void s2a_cpatch_frame(uint64_t now, int game, uint64_t dt);   // 社区补丁量效果（runtime/src/cpatch.c）
 void s2a_qp_frame(uint32_t draws, int video, int cutscene, int game_itv) {
     static int cfg, quiet, native = -1; static uint64_t prev;
     if (!cfg) { cfg = 1; quiet = s2a_unattended();
@@ -81,7 +82,7 @@ void s2a_qp_frame(uint32_t draws, int video, int cutscene, int game_itv) {
     // 帧率：只有真来源（表里 w / slot / speed / 改指令行、社区补丁）或游戏自设间隔 ≥ 2 时 60 帧才改得动；只有 present display 而游戏自己就设间隔 1 = 原生 60 帧，切了也一样，不问
     int real = s2a_fps_real_source();
     int r = s2a_qp_present(t, draws, video, cutscene, unfit, s2a_fps_effective() && (real || game_itv >= 2), fit_live(), game_itv);
-    { uint64_t dt = prev ? t - prev : 0; stretch_window(s2a_qp_game(), dt); s2a_ql_host_frame(t, s2a_qp_game(), dt, game_itv); prev = t; }
+    { uint64_t dt = prev ? t - prev : 0; stretch_window(s2a_qp_game(), dt); s2a_ql_host_frame(t, s2a_qp_game(), dt, game_itv); s2a_cpatch_frame(t, s2a_qp_game(), dt); prev = t; }   // 社区补丁量效果（runtime/src/cpatch.c）
     int n = s2a_qp_native60();
     if (n >= 0 && n != native) { native = n; int v = n == 1 && !real;
         LOG("原生 60 帧判定：%s（游戏画面里%s；%s）", v ? "是，设置页 60 帧那行显示「本款原生 60 帧」" : "否",

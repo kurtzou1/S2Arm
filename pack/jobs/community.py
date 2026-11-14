@@ -1,12 +1,12 @@
-"""社区资源（10-30 维护者 拍板：社区补丁一律学成我方通用能力，公开发布的包不带上游补丁字节）：宽屏 / 60 帧是我方能力，在宿主层运行时开关（缺省开、可关，下次启动生效）；
-画面类社区补丁（other-gfx）只在内部开发 / 测试包里列出（S2A_COMMUNITY_PATCHES=1，同 pack/stage_rewrite.sh 打补丁字节的开关），玩家包缺省不列、不打。
+"""社区资源：宽屏 / 60 帧是我方能力，在宿主层运行时开关（缺省开、可关，下次启动生效）；
+社区补丁（11-12 维护者：出包时自动对接公开库，查到的全部进包、缺省关、玩家自己开；10-30「玩家包不带上游补丁字节」作废）按这款包里的 cpatch.tsv 逐条列出（packed_patches）。
 面板显示这款有没有宽屏表 / 60 帧表、来自哪（已验证名单 / 社区包；版本对不上的由直连线打包时跨版本定位，不判不可用），
 画面类（other-gfx）逐项开关，着色器缓存命中就自动并入（只显示并入数，导入入口留给玩家导自己的缓存）。
 
 数据来源（只读，读不到就当没有，不报错）：
   宽屏已验证：引擎 graphics/widen/tables/verified.tsv（程序号 + main 构建号）
   社区包：S2A_COMMUNITY_DIR（没设 = 没有社区包；11-07 起不再缺省读开发机数据盘，启动器进程也不读 tools/machine.local）下 */full/*/INDEX.tsv（第一轮）与 */*/INDEX.tsv（第二轮，按类分目录），-lite 子集包不收——有 aspect 列的是宽屏包，有 target_fps 列的是帧率包
-  画面：补丁应用层（直连线）出的 graphics/community/other_gfx.tsv：程序号 版本 编号 名称 互斥组 已验证(0/1) 来源
+  社区补丁：这款 Mac 包的 cpatch.tsv（出包时 pack/jobs/patches.py 查库、pack/cpatch.py 编进包）
 玩家的选择（启动设置，11-09）存在这款游戏文件夹的 launch.json：{"schema":1,"settings":{设置项:值},"patches":{画面编号:真/假}}，
   设置项的定义（id、类型、取值、缺省、平台）只在 launchers/shared/game_settings.v1.json，Mac 启动设置页与 iOS 游戏内菜单共用；
   只存玩家明确选过的，没选的按定义表缺省（"caps" = 按这款能力清单；60 帧是清单值 1 且原因属于速度已验证正确的来源才算开，同宿主 runtime/src/caps.c）。Mac 启动时由 build.launch 经 launch_env 转成宿主环境变量。
@@ -86,9 +86,14 @@ def launch_path(c, gid, create=True):
 def _from_community(old):
     """旧 community.json → launch.json：只带玩家明确选过的（schema 2 存盘总带 fps60=真，不算玩家选的）"""
     settings = {}
-    for key, new in (("widescreen", "widescreen"), ("widenForce", "widenForce"), ("metalfx", "enhance")):
-        if isinstance(old.get(key), bool):
-            settings[new] = old[key]
+    if isinstance(old.get("metalfx"), bool):
+        settings["enhance"] = old["metalfx"]
+    # 满屏（11-13 并入「宽屏强制启用」，明确开 = 没验证过也铺满）：旧文件的 widescreen=真是旧面板存盘带的缺省（同 fps60），只带关；
+    #   widenForce=真才是玩家明确要铺满
+    if old.get("widescreen") is False:
+        settings["widescreen"] = False
+    if old.get("widenForce") is True:
+        settings["widescreen"] = True
     if old.get("fps60") is False or (old.get("schema") == 3 and old.get("fps60") is True):
         settings["fps60"] = old["fps60"]
     patches = old.get("enabled") if isinstance(old.get("enabled"), dict) else {}
@@ -151,7 +156,10 @@ def chosen(c, gid, table=None):
     """玩家明确选过、且仍合定义表的设置：{id: 值}——按款的从 launch.json、全游戏共用的从 game-settings.json，各认各的 scope
     （定义表改了、旧值不合法的当没选）"""
     table = table or settings_table(c)
-    picked = {k: v for k, v in load_launch(c, gid)["settings"].items() if k in table and table[k].get("scope") == "game" and _valid(table[k], v)}
+    mine = dict(load_launch(c, gid)["settings"])
+    if mine.pop("widenForce", None) is True:   # 旧 launch.json 的「宽屏强制启用」（11-13 并进满屏）：开着的 = 满屏明确开
+        mine["widescreen"] = True
+    picked = {k: v for k, v in mine.items() if k in table and table[k].get("scope") == "game" and _valid(table[k], v)}
     picked.update({k: v for k, v in load_app(c)["settings"].items() if k in table and table[k].get("scope") == "app" and _valid(table[k], v)})
     return picked
 
@@ -174,7 +182,7 @@ def runtime_caps(c, gid):
 
 # 60 帧缺省开的来源（11-11 维护者：出包默认游戏原本帧率、玩家手动开；速度已验证正确的款保留默认 60）。
 #   与宿主 runtime/src/caps.c apply_cap 同一条规则、同一组字样：清单 fps60 值 1 且原因含其一，宿主没收到玩家选择时自己开 60 帧
-FPS60_VERIFIED = ("fps.tsv", "逻辑速度同局 A/B 绿", "游戏原生 60 帧")
+FPS60_VERIFIED = ("fps.tsv", "逻辑速度同局 A/B 绿", "游戏原生 60 帧", "社区帧率补丁")   # 社区帧率补丁：版本精确命中才进得了包，默认开（11-13）
 
 
 def fps60_default(rows):
@@ -184,13 +192,16 @@ def fps60_default(rows):
 
 NO_FPS60 = "这款游戏没有可用的 60 帧方案。"
 NO_DIRECT = "这款游戏没有走直连渲染，用不了 MetalFX 放大。"
+NO_WIDEN = "本款满屏有已知问题，暂不可开。"
 
 
 def _default(item, caps, platform="mac", rows=None):
     d = item.get("default")
     if isinstance(d, dict):
         d = d.get(platform)
-    if d == "caps":   # 按能力清单：现在只有 60 帧，看值和原因（fps60_default，同宿主），没给原因按值
+    if d == "caps":   # 按能力清单：60 帧看值和原因（fps60_default，同宿主）；满屏看 widen（发布包只有真机验过的款是 1，同 iPhone），没给原因按值
+        if item["id"] == "widescreen":
+            return caps.get("widen") == "1"
         return fps60_default(rows) if item["id"] == "fps60" and rows is not None else caps.get(item["id"]) == "1"
     return d
 
@@ -201,7 +212,9 @@ def mac_settings(c, gid):
     rows, table = runtime_caps_rows(c, gid), settings_table(c)
     caps = {k: v for k, (v, _) in rows.items()}
     picked = chosen(c, gid, table)
-    need = {"fps60": ("fps60" in caps, NO_FPS60), "enhance": (caps.get("direct") == "1", NO_DIRECT)}
+    # 满屏改不动只认强信号（tools/caps_policy.py 原因写「强信号：…」）；「发布缺省关」只是没验证过，玩家可以明确开（同 iPhone settings.m s2a_ios_fullscreen_state）
+    strong = caps.get("widen") == "0" and "强信号" in rows.get("widen", ("", ""))[1]
+    need = {"fps60": ("fps60" in caps, NO_FPS60), "enhance": (caps.get("direct") == "1", NO_DIRECT), "widescreen": (not strong, NO_WIDEN)}
     out = {}
     for key, item in table.items():
         if "mac" not in item.get("platforms", []) or item["type"] not in ("bool", "choice"):
@@ -210,8 +223,24 @@ def mac_settings(c, gid):
         #   清单明说没有 60 帧方案 / 没走直连的，才是物理上用不了
         ok, why = need.get(key, (True, "")) if caps else (True, "")
         value = picked.get(key, _default(item, caps, rows=rows))
+        if key == "widescreen" and key not in picked and adaptive_patches(c, gid)[0]:
+            value = True   # 没选过、包里有自适应满屏补丁：显示开（11-13 命中就默认开，同 iPhone）
         out[key] = dict(available=ok, value=value if ok else _default(item, caps, rows=rows), reason="" if ok else why)
+    # 只用社区补丁（11-13 维护者撤掉我方 60 帧与通用满屏，tools/caps_policy.py patch_only）：没有帧率补丁的款不出「60 帧」，没有宽屏补丁的款不出「满屏」
+    #   （读到了能力清单才判：还没出 Mac 版时照旧都列、先存偏好）
+    if caps:
+        fps_p = "社区帧率补丁" in rows.get("fps60", ("", ""))[1]
+        ws_p = any((r.get("编号") or "").startswith(("widescreen:", "wsauto:")) for r in _rows(layout.image_mac(c, gid, create=False) / "cpatch.tsv"))
+        for key, has in (("fps60", fps_p), ("widescreen", ws_p), ("fpsPick", len(fps_levels(c, gid)) > 1)):
+            if key in out and not has:
+                out[key]["hidden"] = True
     return out
+
+
+def fps_levels(c, gid):
+    """这款 Mac 包里帧率补丁（编号 fps:）的目标帧率档，去重升序；没写目标的当 60（同 iPhone app_settings.m fpsLevels）。两档以上才出「帧率档位」"""
+    return sorted({int(r.get("目标帧率") or 0) or 60 for r in _rows(layout.image_mac(c, gid, create=False) / "cpatch.tsv")
+                   if (r.get("编号") or "").startswith("fps:") and (r.get("目标帧率") or "0").isdigit()})
 
 
 def selection(c, gid):
@@ -241,15 +270,79 @@ def available(c, game):
                 kind["sources"].append(r["source"])
             if r.get("version") and _norm(r["version"]) != _norm(version):
                 kind["relocate"] = True   # 版本对不上：打包时由直连线按特征跨版本定位（定不到就不打，不影响出包）
-    gfx = []
-    for r in _rows(c.engine / "graphics/community/other_gfx.tsv") if os.environ.get("S2A_COMMUNITY_PATCHES") == "1" else []:   # 画面补丁只能靠补丁字节生效：玩家包不带字节，就不列
-        if (r.get("程序号") or "").upper() != gid:
+    return dict(widescreen=ws, fps60=fps, graphics=packed_patches(c, gid))
+
+
+def adaptive_patches(c, gid):
+    """这款 Mac 包里的自适应满屏补丁一族（编号 wsauto:<族>:w / :n → 族编号）与「表里有缺省开的」：满屏开关一并开关它们（11-13，同 iPhone settings.m），不在补丁列表单列"""
+    fams, default_on = [], False
+    for r in _rows(layout.image_mac(c, gid, create=False) / "cpatch.tsv"):
+        uid = r.get("编号") or ""
+        if uid.startswith("wsauto:"):
+            fam = uid.rsplit(":", 1)[0]
+            if fam not in fams:
+                fams.append(fam)
+            default_on = default_on or (r.get("缺省开") or "") == "1"
+    return fams, default_on
+
+
+def patch_status(c, gid):
+    """上一局每条社区补丁的实际结果（runtime/src/cpatch.c 写 <起局文档根>/cpatch_status.tsv；Mac 起局文档根 = 游戏库/temp/<程序号>，build.py）：
+    {编号: (状态 开 | 关 | 不配套 | 表不认, 实测 fps=<n> | aspect=<w>:<h> | 空)}；没跑过 = {}"""
+    try:
+        text = (Path(c.library) / "temp" / gid / "cpatch_status.tsv").read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    return {f[0]: (f[1], f[2]) for f in (l.split("\t") for l in text.splitlines()) if len(f) >= 3}
+
+
+def patch_result(st):
+    """给玩家看的一句（同 iPhone ios/game_options.m s2a_ios_cpatch_result）：没生效写原因、开着且量到效果写实测、其余空"""
+    if not st:
+        return ""
+    if st[0] in ("不配套", "表不认"):
+        return "没生效：补丁与这个版本的游戏不配套"
+    if st[0] != "开":
+        return ""
+    if st[1].startswith("fps="):   # 达到 55 帧（60 帧补丁目标留 5 帧余量）才算生效，达不到如实写实测
+        n = st[1][4:]
+        return f"已生效：上一局实测 {n} 帧" if n.isdigit() and int(n) >= 55 else f"开着，但上一局实测只有 {n} 帧"
+    if st[1].startswith("aspect="):
+        return f"已生效：上一局画面比例 {st[1][7:]}"
+    return {"fill=ok": "已生效：上一局画面铺满", "unfilled": "开着，但上一局画面没铺满"}.get(st[1], "")
+
+
+def ratio_text(a):
+    """画幅数 → 常见写法（1.6 → 16:10、2.3333 → 21:9；同 ios/cpatch_model.m S2ACPatchRatioText），对不上的写两位小数"""
+    for w, h in ((16, 10), (21, 9), (32, 9), (3, 2), (4, 3), (16, 9), (5, 4), (18, 9), (19, 9), (20, 9), (24, 10), (48, 9), (1, 1)):
+        if abs(a - w / h) < 0.005: return f"{w}:{h}"
+    return f"{a:.2f}:1"
+
+
+def packed_patches(c, gid):
+    """这款 Mac 包里编进去的社区补丁（产物 cpatch.tsv；11-12 出包时自动查库，pack/jobs/patches.py）：全部列出、11-13 起缺省开、玩家可逐条关（下次启动生效，
+    launch_env 转 S2A_CPATCH_ON）。帧率类（编号 fps:）跟「60 帧」开关走、金手指（cheat:）在金手指一栏，都不在这里列。每条带来源库与许可"""
+    out, seen, st = [], set(), patch_status(c, gid)
+    fixed = None   # 定画幅宽屏变体（表「画幅」列 > 0，pack/cpatch.py）并成一项 widescreen:auto，宿主按窗口比例开最近的一份（runtime/src/cpatch.c）
+    for r in _rows(layout.image_mac(c, gid, create=False) / "cpatch.tsv"):
+        uid = r.get("编号") or ""
+        label = r.get("段名") or uid
+        if not uid or uid in seen or uid.startswith(("fps:", "cheat:", "wsauto:")):   # 自适应满屏一族跟满屏开关（adaptive_patches），不单列
             continue
-        gfx.append(dict(id="gfx:" + (r.get("编号") or ""), label=r.get("名称") or r.get("编号") or "",
-                        exclusive=r.get("互斥组") or "", source=r.get("来源") or "",
-                        state="verified" if r.get("已验证") == "1" else "community",
-                        relocate=bool(r.get("版本")) and _norm(r.get("版本")) != _norm(version)))
-    return dict(widescreen=ws, fps60=fps, graphics=gfx)
+        try: fa = float(r.get("画幅") or 0) if uid.startswith("widescreen:") else 0
+        except ValueError: fa = 0
+        if fa > 0:
+            if fixed is None:
+                fixed = dict(id="widescreen:auto", label="", exclusive="", source=r.get("来源") or "", license=r.get("许可") or "",
+                             kind="widescreen", state="community", relocate=False, result=patch_result(st.get("widescreen:auto")), ratios=[])
+                out.append(fixed)
+            fixed["ratios"].append(ratio_text(fa)); fixed["label"] = "满屏补丁（按屏幕比例自动选）"   # 界面 L() 按原文查译文，标题写死、画幅在 ratios
+            continue
+        seen.add(uid)
+        out.append(dict(id=uid, label=label, exclusive="", source=r.get("来源") or "", license=r.get("许可") or "",
+                        kind="widescreen" if uid.startswith(("widescreen:", "wsauto:")) else "gfx", state="community", relocate=False,
+                        result=patch_result(st.get(uid))))
+    return out
 
 
 def describe_game(c, game):
@@ -258,8 +351,10 @@ def describe_game(c, game):
         a[key]["available"] = a[key]["verified"] or bool(a[key]["sources"])
         a[key]["enabled"] = a[key]["available"] and s[key]
     for it in a["graphics"]:
-        it["enabled"] = bool(s["enabled"].get(it["id"], it["state"] == "verified"))
-    return dict(gameId=game["id"], version=_version(game), mac=mac_settings(c, game["id"]), **a)
+        it["enabled"] = s["enabled"].get(it["id"]) is not False   # 11-13：没选过 = 默认开（S 级优化命中的打入并默认开）
+    import cheats   # 金手指（11-12）：同一页「游戏设置 → 金手指」列出与开关
+    return dict(gameId=game["id"], version=_version(game), mac=mac_settings(c, game["id"]), cheats=cheats.listing(c, game),
+                crashed=cheats.crashed(c, game), **a)
 
 
 def listing(c):
@@ -269,7 +364,8 @@ def listing(c):
 
 
 def save(c):
-    """请求可带 settings {设置项: 值 / null（回缺省）}（键与取值按定义表，只认 scope=game 的项）与 graphics {画面编号: 真/假}（同互斥组至多开一个）"""
+    """请求可带 settings {设置项: 值 / null（回缺省）}（键与取值按定义表，只认 scope=game 的项）、graphics {画面编号: 真/假}（同互斥组至多开一个）、
+    cheatsImport [金手指 txt 路径]（导入进这款 cheats/）与 cheats {「文件名/条目名」: 真/假}（金手指开关）"""
     game = game_of(c, c.r.get("gameId") or "")
     table = settings_table(c)
     data = load_launch(c, game["id"])
@@ -288,11 +384,22 @@ def save(c):
             target["settings"][key] = value
         else:
             raise Failure("启动设置 %s 的取值不对。" % key, code="job_failed")
+    if c.r.get("cheatsImport") or c.r.get("cheats") is not None:   # 金手指（pack/jobs/cheats.py）：导入 [文件路径] / 开关 {「文件名/条目名」: 真 / 假}
+        import cheats
+        if c.r.get("cheatsImport"):
+            if not isinstance(c.r["cheatsImport"], list):
+                raise Failure("金手指导入格式不对。", code="job_failed")
+            cheats.import_files(c, game, c.r["cheatsImport"])
+        if c.r.get("cheats") is not None:
+            cheats.save(c, game, c.r["cheats"])
+    if c.r.get("crashAnswer") is not None:   # 上次开着金手指 / 补丁时异常退出、已当场关掉，玩家看过通知 ack（pack/jobs/cheats.py answer_crash）
+        import cheats
+        cheats.answer_crash(c, game, c.r["crashAnswer"])
     graphics = c.r.get("graphics") or {}
     if not isinstance(graphics, dict):
         raise Failure("社区资源选择格式不对。", code="job_failed")
     if graphics:
-        every = {it["id"]: it for it in available(c, game)["graphics"]}
+        every = {it["id"]: it for it in packed_patches(c, game["id"])}
         for key, on in graphics.items():
             it = every.get(key)
             if it is None:
@@ -318,11 +425,28 @@ def launch_env(c, gid):
         env["S2A_FPS60"] = "1"
     elif s.get("fps60") is False:
         env["S2A_FPS60"] = "0"
-    if s.get("widenForce") is True:       # 同 iPhone「宽屏强制启用」：没验证过的也铺满，画面被拉伸会自动退回 16:9
+    # 帧率档位（11-13 维护者：60 / 120 帧补丁都带进去，玩家自己选）：选了具体档才写，宿主（runtime/src/cpatch.c fps_pick）取不超过它的最高一档；没选 / 自动不写，宿主按屏幕最高刷新率挑
+    if str(s.get("fpsPick") or "0") not in ("", "0"):
+        env["S2A_FPS_PICK"] = str(s["fpsPick"])
+    # 满屏（11-13 合并「宽屏」与「宽屏强制启用」，同 iPhone settings.m）：明确开 = 没验证过也铺满（画面被拉伸会自动退回 16:9）；明确关 = 16:9；
+    #   没选过 = 清单 widen 1 或包里有我方验过的自适应满屏补丁才开。有自适应满屏补丁的款由补丁铺满（下面写进 S2A_CPATCH_ON，S2Arm 满屏让开）；
+    #   清单原因「强信号」= 判过坏，一律不开
+    strong = caps.get("widen") == "0" and "强信号" in runtime_caps_rows(c, gid).get("widen", ("", ""))[1]
+    fams, fam_default = adaptive_patches(c, gid)
+    full = False if strong else s["widescreen"] if isinstance(s.get("widescreen"), bool) else (caps.get("widen") == "1" or bool(fams))   # 有自适应满屏补丁 = 默认开（11-13）
+    if s.get("widescreen") is True and not strong and not fams:
         env["S2A_WIDEN_VERIFIED"] = "1"
         env["S2A_WIDESCREEN"] = "1"
     elif s.get("widescreen") is False:
-        env["S2A_WIDESCREEN"] = "0"       # 宽屏关：宿主宽屏开关（不用判定局专用的 S2A_WIDEN_VERIFIED，它会盖掉名单门）
+        env["S2A_WIDESCREEN"] = "0"       # 满屏关：宿主满屏开关（不用判定局专用的 S2A_WIDEN_VERIFIED，它会盖掉名单门）
+    # 社区补丁（11-12，全部缺省关）：包里有才设；只开玩家开着的（自适应满屏一族跟满屏开关），一条都没开写 none，盖掉表里的「缺省开」列（runtime/src/cpatch.c；帧率类另跟 60 帧开关）
+    packed = {it["id"] for it in packed_patches(c, gid)}
+    if packed or fams:
+        chosen_p = load_launch(c, gid)["patches"]
+        on = sorted([k for k in packed if chosen_p.get(k) is not False] + (fams if full else []))   # 没选过 = 开（11-13）；玩家关过的不开
+        env["S2A_CPATCH_ON"] = ",".join(on) or "none"
+        if any(k.startswith(("widescreen:", "wsauto:")) for k in on):
+            env["S2A_WIDESCREEN"] = "0"   # 开着社区宽屏 / 画幅补丁：游戏自己画宽画面，S2Arm 的满屏（图形层加宽渲染目标）让开，不拉宽两次；关掉补丁恢复
     if s.get("enhance") is True and caps.get("direct") == "1":
         env["S2A_SCALING_FILTER"] = "MetalFX"   # 画面增强模式 = 直连上屏 MetalFX 空间放大（graphics/nvn/gfx/nvn/nvn_present_fx.inc）
     if "docked" in s:

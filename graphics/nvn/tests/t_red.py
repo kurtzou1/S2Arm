@@ -43,7 +43,7 @@ class R:   # 被测：C# S2A.Dsh（dsh_cmp --fn）。本测要的形态常量在
     helper_samples = staticmethod(lambda s: _call('helper_samples', s))
     RED_BEGIN = '// s2a:samp-emu 4 (S2A.Dsh FsRd)\n'
     RED_PARAM = ', constant S2ASe* s2a_red [[buffer(26)]]'   # 模拟表参数：宿主 nvn_mtl.m RED_SLOT = 26（下面核）
-    RED_CALL = re.compile(r'spvDescriptorSet0\.(\w+)\.(sample|sample_compare)\(')   # fs_lb 改的两种采样
+    RED_CALL = re.compile(r'(?:spvDepthCast\(spvDescriptorSet0\.(\w+)\)|spvDescriptorSet0\.(\w+))\.(sample|sample_compare)\(')   # fs_lb 改的两种采样；深度贴图按 texture2d 声明时外面包 spvDepthCast(…)（#529 营地阴影）
     RED_ENTRY = re.compile(r'^((?:\[\[[^\]]*\]\]\s*)*)(fragment|kernel) (\S+) main0\((.*)\)\n\{\n', re.M)
     RED_HELP = ''   # 见下面 FS 之后
     @staticmethod
@@ -113,7 +113,7 @@ def strip_lb(t):
             i += 1
         if 's2a_lb[' not in t[st:i]: continue
         na = [x for x in (unlb_arg(a) for a in args) if x is not None]
-        t = t[:st] + f'spvDescriptorSet0.{m.group(1)}.{m.group(2)}({", ".join(na)})' + t[i:]
+        t = t[:st] + m.group(0) + ', '.join(na) + ')' + t[i:]   # 调用头原样（含 spvDepthCast 包法）
     return t
 def top_args(t, a):   # t[a] == '(' → (该括号组顶层逗号分开的参数, 配对 ')' 之后的下标)
     b = grp(t, a); args = []; d = 0; c0 = a + 1
@@ -350,6 +350,13 @@ DCS = (CHEAD + '    device float4* cs_s0 [[id(6)]];\n};\n\nkernel void main0(con
 dcs = R.fs_lb(DCS)
 ck(SMC('t8', 'float2(0.5)', RC('1.1', 1), f'level((0.0) + {L1})') in dcs, '④ 改写：比较采样参考值 → (s2a_lb[192 + 1] != 0.0 ? saturate(r) : (r))')
 ck(strip_lb(dcs) == DCS, '④ 守卫：按形态还原 = 原样逐字节')
+# ④' 同一核、深度贴图按 texture2d 声明、比较采样外包 spvDepthCast(…)（SPIRV-Cross 的另一种形态；#529 营地阴影就是这种，第一次修复只认直接调用）：
+#   改写后参考值同样按表后半段 saturate、偏置同样加，包法原样留着；守卫还原 = 原样逐字节
+DCW = DCS.replace('spvDescriptorSet0.t8.sample_compare(', 'spvDepthCast(spvDescriptorSet0.t8).sample_compare(')
+dcw = R.fs_lb(DCW)
+ck(DCW != DCS and SMC('t8', 'float2(0.5)', RC('1.1', 1), f'level((0.0) + {L1})').replace('spvDescriptorSet0.t8.sample_compare(', 'spvDepthCast(spvDescriptorSet0.t8).sample_compare(') in dcw,
+   "④' 改写：spvDepthCast 包法的比较采样参考值 → (s2a_lb[192 + 1] != 0.0 ? saturate(r) : (r))，偏置 level((0.0) + b)，包法照留")
+ck(strip_lb(dcw) == DCW, "④' 守卫：按形态还原 = 原样逐字节")
 with tempfile.TemporaryDirectory() as tmp:
     exe = os.path.join(tmp, 't_red_run')
     r = subprocess.run(['xcrun', 'clang', '-O1', '-fobjc-arc', '-Wall', '-I', os.path.join(ROOT, 'graphics/nvn/gfx/nvn'), '-o', exe, os.path.join(HERE, 't_red_run.m'),

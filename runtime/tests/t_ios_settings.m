@@ -88,6 +88,17 @@ int main(int argc, char **argv) {
         if (argc == 3 && (!strcmp(argv[2], "--reload-owned") || !strcmp(argv[2], "--reload-explicit")))
             return reload_checks(!strcmp(argv[2], "--reload-explicit"));
         if (argc != 2) return 2;
+        {   // 开着社区宽屏 / 自适应满屏补丁（11-12）：S2Arm 满屏让开（S2A_WIDESCREEN=0）；只开别类补丁不动；显式给了 S2A_WIDESCREEN 的照它
+            NSString *suite = [@"local.s2arm.settings-cpws." stringByAppendingString:NSUUID.UUID.UUIDString];
+            NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:suite];
+            clear_environment(); [d setObject:@[@"gfx:a", @"wsauto:fam"] forKey:@"S2ACommunityPatches"]; s2a_ios_apply_graphics_settings(d);
+            check(getenv("S2A_WIDESCREEN") && !strcmp(getenv("S2A_WIDESCREEN"), "0"), @"开着自适应满屏 → S2A_WIDESCREEN=0");
+            s2a_ios_reapply_graphics_settings(d); clear_environment(); [d setObject:@[@"gfx:a"] forKey:@"S2ACommunityPatches"]; s2a_ios_apply_graphics_settings(d);
+            check(!getenv("S2A_WIDESCREEN"), @"只开画面类补丁 → 不动 S2A_WIDESCREEN");
+            s2a_ios_reapply_graphics_settings(d); clear_environment(); setenv("S2A_WIDESCREEN", "1", 1); [d setObject:@[@"widescreen:x"] forKey:@"S2ACommunityPatches"]; s2a_ios_apply_graphics_settings(d);
+            check(getenv("S2A_WIDESCREEN") && !strcmp(getenv("S2A_WIDESCREEN"), "1"), @"显式 S2A_WIDESCREEN=1 照它");
+            clear_environment(); [d removePersistentDomainForName:suite];
+        }
         {   // Metal 性能浮层系统键（11-13 维护者实机：iPadOS 27.2 的 Metal 读 MetalForceHudEnabled）：开关开 → 写系统键；关 → 删；本来就对的不动
             void s2a_ios_apply_overlay_settings(NSUserDefaults *); NSString *suite = [NSString stringWithFormat:@"t_ios_settings.hud.%d", getpid()];
             NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:suite];
@@ -383,6 +394,28 @@ int main(int argc, char **argv) {
             [NSFileManager.defaultManager removeItemAtPath:caps error:nil]; clear_environment(); unsetenv("DM_PRESENT_INTERVAL");
             check(s2a_ios_caps_value("fps60") == -1, @"没有清单读到 -1");
         }
+        // 60 帧开关如实显示（11-13：清单写 1 但来源没验证速度时，开关原先缺省显示开、起局却按原帧率，玩家以为开了）。期望按 settings.m 口径手写：
+        //   ① 清单原因「社区帧率补丁」、没选过 → 显示开（11-13 起：补丁要逐字节对上这个构建才进包，进了包就默认开）；①b 原因「引擎通用」、没选过 → 显示关；② 原因「fps.tsv」（速度已验证）、没选过 → 显示开；
+        //   ③ 社区来源、玩家拨开（s2a_ios_set_fps60）→ 显示开、起局 S2A_FPS60=1；④ 再拨关 → 显示关、起局 S2A_FPS60=0
+        {
+            NSString *caps = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"s2a_caps.tsv"];
+            NSUserDefaults *std = NSUserDefaults.standardUserDefaults;
+            NSString *(^val)(void) = ^{ const char *e = getenv("S2A_FPS60"); return e ? @(e) : @"未设"; };
+            [@"fps60\t1\t# 默认开：来源 社区帧率补丁\n" writeToFile:caps atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            [std removeObjectForKey:@"S2AFps60"]; [std removeObjectForKey:@"S2AFps60Manual"];
+            check(s2a_ios_fps60_on(), @"60 帧显示①社区帧率补丁没选过（11-13：版本精确命中才进得了包，默认开）：期望开");
+            [@"fps60\t1\t# 默认开：来源 引擎通用第一层（Unity / UE4 放开交换间隔）\n" writeToFile:caps atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            check(!s2a_ios_fps60_on(), @"60 帧显示①b 引擎通用来源没选过（速度没验证）：期望关");
+            [@"fps60\t1\t# 默认开：来源 fps.tsv\n" writeToFile:caps atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            check(s2a_ios_fps60_on(), @"60 帧显示②速度已验证来源没选过：期望开");
+            [@"fps60\t1\t# 默认开：来源 社区帧率补丁\n" writeToFile:caps atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            s2a_ios_set_fps60(YES); clear_environment(); s2a_ios_load_graphics_settings();
+            check(s2a_ios_fps60_on() && [val() isEqual:@"1"], [@"60 帧显示③玩家拨开：期望 显示开、S2A_FPS60=1 → 真结果 " stringByAppendingString:val()]);
+            s2a_ios_set_fps60(NO); clear_environment(); s2a_ios_load_graphics_settings();
+            check(!s2a_ios_fps60_on() && [val() isEqual:@"0"], [@"60 帧显示④再拨关：期望 显示关、S2A_FPS60=0 → 真结果 " stringByAppendingString:val()]);
+            [std removeObjectForKey:@"S2AFps60"]; [std removeObjectForKey:@"S2AFps60Manual"];
+            [NSFileManager.defaultManager removeItemAtPath:caps error:nil]; clear_environment();
+        }
         // 审计 P1-80：清单 fps60_display 1 只记来源、不写进程环境（原先 setenv DM_PRESENT_INTERVAL=display 压过 60 帧开关，关了再进程内重启照样 60）
         {
             NSString *caps = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"s2a_caps.tsv"];
@@ -525,6 +558,53 @@ int main(int argc, char **argv) {
             [app removeObjectForKey:@"S2ADevHUD"]; [app removeObjectForKey:@"S2APerGameMigrated1111"];
             [game removePersistentDomainForName:[@"S2AGame." stringByAppendingString:gid]];
             unsetenv("S2A_LAUNCH_GAME_ID"); clear_environment();
+        }
+        // 满屏（11-13 合并「宽屏」与「宽屏强制启用」；自适应满屏补丁跟开关）：期望按规则手写——
+        //   没选过：清单 widen 1 / 验证名单 / 表里缺省开的 wsauto: 补丁 → 开，否则关；明确开 = 没验证过也铺满；清单原因「强信号」= 改不动
+        {
+            NSString *bundle = NSBundle.mainBundle.bundlePath, *gdir = [bundle stringByAppendingPathComponent:@"Games/G9"];
+            [NSFileManager.defaultManager createDirectoryAtPath:gdir withIntermediateDirectories:YES attributes:nil error:nil];
+            NSUserDefaults *g9 = [[NSUserDefaults alloc] initWithSuiteName:@"S2AGame.G9"]; [g9 removePersistentDomainForName:@"S2AGame.G9"];
+            NSString *plain = @"widen\t0\t# 发布缺省关\n", *strong = @"widen\t0\t# 强信号：宽屏画面坏\n";
+            NSString *tsv = @"编号\t模块\t位\t类别\t段名\t许可\t来源\t数据写入\t缺省开\nwsauto:fam:w\tmain\t0\tultrawide\tAuto aspect\t\tsrc\t\t1\nwsauto:fam:n\tmain\t0\tultrawide\tAuto aspect\t\tsrc\t\t1\ngfx:dof\tmain\t1\tother-gfx\tDisable DOF\t\tsrc\t\t0\n";
+            BOOL on = YES; int r;
+            [plain writeToFile:[gdir stringByAppendingPathComponent:@"s2a_caps.tsv"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            r = s2a_ios_fullscreen_state(@"G9", &on); check(r == 0 && !on, @"满屏（库里的款）：清单发布缺省关、没选过 → 关、可改");
+            s2a_ios_set_fullscreen(@"G9", YES); r = s2a_ios_fullscreen_state(@"G9", &on);
+            check(r == 0 && on && [g9 boolForKey:@"S2AWidescreen"], @"满屏：明确开 → 开（写这款的 S2AWidescreen）");
+            [strong writeToFile:[gdir stringByAppendingPathComponent:@"s2a_caps.tsv"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            r = s2a_ios_fullscreen_state(@"G9", &on); check(r == 1 && !on, @"满屏：清单原因强信号 → 改不动、显示关");
+            [plain writeToFile:[gdir stringByAppendingPathComponent:@"s2a_caps.tsv"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            [tsv writeToFile:[gdir stringByAppendingPathComponent:@"cpatch.tsv"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            [g9 removeObjectForKey:@"S2AWidescreen"];
+            r = s2a_ios_fullscreen_state(@"G9", &on); check(r == 0 && on, @"满屏：有表里缺省开的自适应满屏补丁、没选过 → 开");
+            s2a_ios_set_fullscreen(@"G9", NO); r = s2a_ios_fullscreen_state(@"G9", &on);
+            NSArray *cp = [g9 arrayForKey:@"S2ACommunityPatches"];
+            check(!on && cp && ![cp containsObject:@"wsauto:fam"], [NSString stringWithFormat:@"满屏关 → 自适应满屏补丁一起关（社区补丁选择 %@）", cp]);
+            s2a_ios_set_fullscreen(@"G9", YES); cp = [g9 arrayForKey:@"S2ACommunityPatches"];
+            check([cp containsObject:@"wsauto:fam"] && ![cp containsObject:@"gfx:dof"], [NSString stringWithFormat:@"满屏开 → 自适应满屏补丁一起开、别的补丁不动（%@）", cp]);
+            [g9 removePersistentDomainForName:@"S2AGame.G9"];
+            [NSFileManager.defaultManager removeItemAtPath:[bundle stringByAppendingPathComponent:@"Games"] error:nil];
+
+            // 起局（这款正在跑：随行目录 = 包顶层）：旧键「宽屏强制启用」开着 → 转成满屏明确开并强开（没验证过也铺满）；有自适应满屏补丁时不强开（补丁铺满、S2Arm 让开）
+            NSString *caps = [bundle stringByAppendingPathComponent:@"s2a_caps.tsv"], *ctsv = [bundle stringByAppendingPathComponent:@"cpatch.tsv"];
+            [plain writeToFile:caps atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            setenv("S2A_LAUNCH_GAME_ID", "G9", 1);
+            for (int k = 0; k < 2; k++) {
+                [g9 removePersistentDomainForName:@"S2AGame.G9"];
+                if (k) { [tsv writeToFile:ctsv atomically:YES encoding:NSUTF8StringEncoding error:nil]; s2a_ios_set_fullscreen(nil, YES); }
+                else [g9 setBool:YES forKey:@"S2AWidenForce"];
+                clear_environment(); unsetenv("S2A_WIDEN_VERIFIED"); unsetenv("S2A_WIDEN_CAPS");
+                s2a_ios_load_graphics_settings();
+                const char *v = getenv("S2A_WIDEN_VERIFIED"), *ws = getenv("S2A_WIDESCREEN"), *cpo = getenv("S2A_CPATCH_ON");
+                NSString *(^val)(const char *) = ^(const char *e) { return e ? @(e) : @"未设"; };
+                NSString *got = [NSString stringWithFormat:@"VERIFIED=%@ WIDESCREEN=%@ CPATCH_ON=%@", val(v), val(ws), val(cpo)];
+                NSString *want = k ? @"VERIFIED=未设 WIDESCREEN=0 CPATCH_ON=wsauto:fam" : @"VERIFIED=1 WIDESCREEN=1 CPATCH_ON=未设";
+                check([got isEqual:want] && (k || ([g9 boolForKey:@"S2AWidescreen"] && ![g9 objectForKey:@"S2AWidenForce"])),
+                      [NSString stringWithFormat:@"起局满屏%@：期望 %@ → 真结果 %@", k ? @"（有自适应满屏补丁）" : @"（旧键宽屏强制启用）", want, got]);
+            }
+            [g9 removePersistentDomainForName:@"S2AGame.G9"]; unsetenv("S2A_LAUNCH_GAME_ID"); unsetenv("S2A_WIDEN_VERIFIED"); unsetenv("S2A_WIDEN_CAPS");
+            [NSFileManager.defaultManager removeItemAtPath:caps error:nil]; [NSFileManager.defaultManager removeItemAtPath:ctsv error:nil];
         }
         clear_environment();
         [a removePersistentDomainForName:suiteA];

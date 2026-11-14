@@ -110,7 +110,7 @@ def _run(c, plan):
             where = dict(gameId=gid, platform=platform, task=child, index=index, count=total)
             c.emit("step", f"出 {item['name']}（{platform}）", step=where)
             outcome = dict(state="failed", message=UNSUPPORTED_MESSAGE) if platform not in SUPPORTED else \
-                _run_step(c, child, gid, platform, plan, location, followUp=platform == "iphone" and bool(rest))
+                _run_step(c, child, gid, platform, dict(plan, sgrade=False) if item.get("sgrade") is False else plan, location, followUp=platform == "iphone" and bool(rest))
         except Cancelled:
             if not getattr(c, "parent_gone", False):
                 with book.edit() as b:   # 玩家取消：正在出的和没开始的记「已取消」，已出好的保留
@@ -158,6 +158,8 @@ def _run_step(c, child, gid, platform, plan, location, followUp):
         request["spaceOverride"] = True
     if platform == "iphone" and plan.get("deviceTarget"):
         request["target"] = plan["deviceTarget"]
+    if plan.get("sgrade") is False:   # 出包页取消「S 级优化（Beta）」（单款：计划顶层；批量：条目 sgrade，按款记住）：各平台都不带社区补丁与金手指（pack/jobs/patches.py prepare）
+        request["sgrade"] = False
     if followUp:
         request["followUp"] = True
     path = c.logs / "jobs" / (child + ".request.json")
@@ -190,7 +192,7 @@ def _outcome(c, child, last):
         out = dict(state=state if state in ("completed", "failed", "cancelled") else "failed", message=last.get("message") or "")
         if out["state"] == "failed" and error.get("code"):
             out["code"] = error["code"]
-        for key in ("outputPath", "ipa", "ipaBytes", "packBytes", "outputBytes", "notes"):   # notes：降级继续的玩家提示（完成卡逐条显示）
+        for key in ("outputPath", "ipa", "ipaBytes", "packBytes", "outputBytes", "notes", "boost"):   # notes：降级继续的玩家提示（完成卡逐条显示）；boost：自动配好的金手指 / 补丁（完成页动效）
             if result.get(key) not in (None, ""):
                 out[key] = result[key]
         if result.get("outputPath") or result.get("ipa"):

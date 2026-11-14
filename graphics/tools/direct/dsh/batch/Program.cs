@@ -20,6 +20,12 @@ static class DshBatch
         Console.SetOut(new StreamWriter(Console.OpenStandardOutput(), new System.Text.UTF8Encoding(false)) { AutoFlush = true });
         Console.SetError(new StreamWriter(Console.OpenStandardError(), new System.Text.UTF8Encoding(false)) { AutoFlush = true });
         if (argv.Length == 1 && argv[0] == "--xfp") { Console.WriteLine(DshCompiler.Xfp); return 0; }
+        if (argv.Length == 3 && argv[0] == "--outline-file")
+        {
+            string source = File.ReadAllText(argv[1]), output = DshOutline.Compute(source);
+            File.WriteAllText(argv[2], output, new System.Text.UTF8Encoding(false));
+            Console.WriteLine(output == source ? "outlined 0" : "outlined 1"); return 0;
+        }
         if (argv.Length >= 1 && argv[0] == "--tool-fp") { Console.WriteLine(Build.ToolFpCli(argv[1..])); return 0; }   // 验收：整份工具指纹（翻译键里那一项）
         if (argv.Length == 2 && argv[0] == "--lib-fp") { Console.WriteLine(Build.LibFp(argv[1])); return 0; }   // 单测：直连库 libdsx 进翻译键的功能身份（tests/nxgal_fp_test.sh）
         if (argv.Length >= 1 && argv[0] == "build") return Build.Entry(argv[1..]);

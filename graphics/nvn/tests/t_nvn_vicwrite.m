@@ -55,7 +55,8 @@ static size_t make(NVNtexture *t, NVNmemoryPool *p, size_t off, int flags, int s
     NVNtextureBuilder b; API(nvnTextureBuilderSetDefaults)(&b); API(nvnTextureBuilderSetDevice)(&b,&device); API(nvnTextureBuilderSetTarget)(&b,NVN_TEXTURE_TARGET_2D);
     API(nvnTextureBuilderSetSize2D)(&b,SIDE,SIDE); API(nvnTextureBuilderSetLevels)(&b,1); API(nvnTextureBuilderSetFormat)(&b,NVN_FORMAT_RGBA8); API(nvnTextureBuilderSetFlags)(&b,flags);
     if (stride) API(nvnTextureBuilderSetStride)(&b,stride);
-    size_t bytes=API(nvnTextureBuilderGetStorageSize)(&b); REQUIRE(bytes && bytes<=4096 && off+bytes<=READ_OFFSET);
+    // 存储不超过 64 KiB：真驱动对可压缩的 32 位色贴图按 64 KiB 对齐、取整（8 × 8 的 B 例答 0x10000，见 nvn_tex.c），各例偏移相隔 0x10000，不重叠
+    size_t bytes=API(nvnTextureBuilderGetStorageSize)(&b); REQUIRE(bytes && bytes<=0x10000 && off+bytes<=READ_OFFSET);
     API(nvnTextureBuilderSetStorage)(&b,p,(ptrdiff_t)off); REQUIRE(API(nvnTextureInitialize)(t,&b)); return bytes;
 }
 // 宿主写游戏内存（VIC 的写、或 CPU 写）：先经写跟踪入口，再写

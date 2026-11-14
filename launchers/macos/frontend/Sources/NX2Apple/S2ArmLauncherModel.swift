@@ -30,6 +30,8 @@ struct ExportRun: Equatable {
         var failureSummary: String?
         /// 出成了、但有阶段降级继续（v0.3.1，产物根 degrade.*.tsv 的「玩家提示」）：完成卡逐条显示
         var notes: [String] = []
+        /// 出包时自动配好的金手指 / 社区补丁（作业层 pack/jobs/patches.py boost：cheats / fps / widescreen / gfx 的条数）：完成页的 S 级加强动效
+        var boost: [String: Int] = [:]
     }
     let platforms: [ExportPlatform]
     /// 正在做的那个平台（platforms 的下标）。
@@ -154,6 +156,8 @@ public final class S2ArmLauncherModel: ObservableObject {
     @Published var exportFor: String?
     /// 下游深度方案确认页（DownstreamConfirmSheet）：导出 iPhone 前弹，选完记下（downstreamChoice 作业）再接着导出这一单
     @Published var downstreamPromptFor: String?
+    /// 上次开着金手指 / 画面补丁时这款异常退出、已被关掉（作业层 pack/jobs/cheats.py note_crash / crashed）：开始游戏时通知一句（LaunchSettingsSheet.swift CrashPromptHost）
+    @Published var crashPrompt: CrashPrompt?
     var downstreamPending: (platforms: [ExportPlatform]?, deviceTarget: [String: Any]?, spaceOverride: Bool, location: String?)?
     /// 存放位置（游戏库结构 v3）：出包页下拉框的各项、上次用的位置号
     @Published var locations: [StorageLocation] = []
@@ -178,6 +182,8 @@ public final class S2ArmLauncherModel: ObservableObject {
     @Published var phoneUpdates: [PhoneUpdate] = []
     /// 点了更新、有要重新出包的款：三选一弹框；选「更新并重新出这几款」时更新完把它们排进批量出包（只出 iPhone），批次出完逐款装上
     @Published var updateConfirm: PhoneUpdate?
+    /// 「S 级优化升级」页开着（v0.4.0；SGradeUpgradeView）
+    @Published var sgradeUpgradeOpen = false
     var updateRepack: [String] = []
     var batchInstallAfter = false
     var installAfterQueue: [String] = []
@@ -340,6 +346,20 @@ public final class S2ArmLauncherModel: ObservableObject {
     }
 
     /// done：这次列完（成功或失败）后调；已经在列时不再起新作业，等那一次列完再调
+    /// 启动器打开后第一次读完游戏库：后台给有 Mac 版的游戏逐款补上 S 级优化（v0.4.0 维护者：Mac 玩家不用做任何事、开游戏也不用多等）。
+    ///   作业层按补丁记号跳过补过的（pack/jobs/sgrade.py mac_all）；补完重读一次，封面金色 S 跟着亮。失败只记日志：开游戏时那一次照样会补
+    func sgradeMacInBackground() {
+        guard !sgradeMacFlag, games.contains(where: { $0.ready }) else { return }
+        sgradeMacFlag = true
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let r = try await self.saveJob("sgradeMac", gameID: "")
+                if !((r["updated"] as? [Any]) ?? []).isEmpty { self.refresh() }
+            } catch { NSLog("S2Arm：后台给 Mac 游戏补 S 级优化没成：%@", error.localizedDescription) }
+        }
+    }
+
     public func refresh(_ done: (() -> Void)? = nil) {
         guard !loading else { refreshAgain = (refreshAgain ?? []) + (done.map { [$0] } ?? []); return }
         if let done { refreshWaiters.append(done) }
@@ -361,6 +381,7 @@ public final class S2ArmLauncherModel: ObservableObject {
             case .success(let games):
                 self.games = games; self.libraryError = nil; self.showingSnapshot = false
                 self.phoneUpdates = self.provider.library.phoneUpdates
+                if startup { self.sgradeMacInBackground() }
                 if self.selectedID == nil || !games.contains(where: { $0.id == self.selectedID }) { self.selectedID = games.first?.id }
             case .failure(let error):
                 self.libraryError = error.message
@@ -710,6 +731,10 @@ public final class S2ArmLauncherModel: ObservableObject {
 
     /// 出一款：起一个出包编排作业（剃刀 H13，pack/jobs/export_plan.py），计划只有这一款的这几个平台、不写批次文件。
     /// 平台顺序、iPhone 之后还有平台时先不清解包（followUp）、这台电脑出不了的平台都在作业层；这里只按它的事件画每个平台的进度与结局。
+    /// 出包页「S 级优化（Beta）· 出包时打入」（v0.4.0 维护者：默认勾上，玩家可取消）：按款记住；没记过 = 勾上
+    func sgradeOn(_ gameID: String) -> Bool { !UserDefaults.standard.bool(forKey: "S2ASGradeOff." + gameID) }
+    func setSgrade(_ gameID: String, _ on: Bool) { objectWillChange.send(); UserDefaults.standard.set(!on, forKey: "S2ASGradeOff." + gameID) }
+
     func runExport(_ item: QueuedExport) {
         failAction(nil, game: nil)
         let game = item.game, platforms = item.platforms
@@ -719,6 +744,7 @@ public final class S2ArmLauncherModel: ObservableObject {
         if let location = item.location { plan["location"] = location }
         if let target = item.target { plan["deviceTarget"] = target }
         if item.spaceOverride { plan["spaceOverride"] = true }
+        if !sgradeOn(game.id) { plan["sgrade"] = false }   // 出包页取消「S 级优化（Beta）」：这次不带社区补丁与金手指（pack/jobs/patches.py prepare）
         start(session) { [weak self] sink in
             guard let self else { return nil }
             do { _ = try await self.provider.export(plan: plan, hasIPhone: platforms.contains(.ios), events: self.exportSink(sink)) }
@@ -752,7 +778,8 @@ public final class S2ArmLauncherModel: ObservableObject {
                                                              appBytes: ((o["ipaBytes"] ?? o["outputBytes"]) as? NSNumber)?.int64Value,
                                                              packBytes: (o["packBytes"] as? NSNumber)?.int64Value,
                                                              suggestion: failure["suggestion"] as? String ?? "", failureSummary: failure["failureSummary"] as? String,
-                                                             notes: o["notes"] as? [String] ?? []))
+                                                             notes: o["notes"] as? [String] ?? [],
+                                                             boost: (o["boost"] as? [String: Any] ?? [:]).compactMapValues { ($0 as? NSNumber)?.intValue }))
                 // 装法是「导出，自己签名安装」：iPhone 包出好就接着导出（D-9ZF9，维护者实测：原先出完包停在完成页，导出要再点一次，文件夹里什么都没有）。
                 //   导出不连手机、不签名，没有副作用；排进 installAfterQueue，这次出包会话结束后由 pumpQueue 接着跑
                 if platform == .ios, state == .completed, self.installMode.mode == "export", !self.batchRunning, let gid = self.session?.gameID,
@@ -944,7 +971,8 @@ public final class S2ArmLauncherModel: ObservableObject {
     /// 装机 / 删除会让手机上别的电脑装的游戏暂时不能玩（作业层 container_would_drop）：界面弹确认，确认了带 acceptDropped 重跑。
     /// ask = false（控制口发起）不弹，原样失败，由调用方带 acceptDropped 再发。
     /// 更新手机上的 S2Arm 也会撞上（v0.3.0 只换壳验收：原先这条路没接确认，界面说「确认继续再点一次」却永远过不去）：update 记着当时的参数，确认后原样带 acceptDropped 重跑
-    struct UpdateArgs { let acceptStale: Bool; let repack: [String]; let language: String; let device: String?; var accept: Set<String> = [] }
+    struct UpdateArgs { let acceptStale: Bool; let repack: [String]; let language: String; let device: String?; var accept: Set<String> = []
+        var mode: String? = nil; var sgradeUpgrade = false }   // 「S 级优化升级」页发起的：重发时照带装法与升级标记
     /// 作业层可确认继续的停装码 → 玩家点「仍然继续」后重发时带的参数（维护者 11-11 装机原则：认得出的风险让玩家确认，确认了就装）。
     ///   结局页（PhoneJobPanel）按码在页内问「仍然继续 / 先不」，不弹散的对话框；参数累积（先确认挤掉、再撞上备份失败，第二次重发两个都带）
     static let confirmCodes: [String: String] = ["container_would_drop": "acceptDropped", "save_backup_failed": "acceptNoBackup", "container_stale": "acceptStale",
@@ -956,9 +984,10 @@ public final class S2ArmLauncherModel: ObservableObject {
     @Published var dropConfirm: DropConfirm?
     /// 上一次「更新手机上的 S2Arm」的参数：失败页「重试」按它再来
     var lastUpdateArgs: UpdateArgs?
+    var sgradeMacFlag = false
     func retryPhoneUpdate() {
         guard let a = lastUpdateArgs else { return }
-        updatePhone(acceptStale: a.acceptStale, repack: a.repack, language: a.language, device: a.device, accept: a.accept)   // 已确认过的照带
+        updatePhone(acceptStale: a.acceptStale, repack: a.repack, language: a.language, device: a.device, accept: a.accept, mode: a.mode, sgradeUpgrade: a.sgradeUpgrade)   // 已确认过的照带
     }
 
     /// 环境检查「装到 iPhone 的方式」里手填的 Xcode 团队号（10 位）：一键装、不用证书时每次装机都带上（原先只在装机页点「用这个团队」那一次带）
@@ -1002,7 +1031,8 @@ public final class S2ArmLauncherModel: ObservableObject {
     /// 确认框点了「仍然继续」
     func confirmDrop(_ d: DropConfirm) {
         dropConfirm = nil; clearInlineFailure()
-        if let u = d.update { updatePhone(acceptStale: u.acceptStale || d.accept.contains("acceptStale"), repack: u.repack, language: u.language, device: u.device, accept: d.accept); return }
+        if let u = d.update { updatePhone(acceptStale: u.acceptStale || d.accept.contains("acceptStale"), repack: u.repack, language: u.language, device: u.device, accept: d.accept,
+                                          mode: u.mode, sgradeUpgrade: u.sgradeUpgrade); return }
         guard let game = d.game else { return }
         if d.kind == .installRemove { removeFromPhone(game, device: d.device, accept: d.accept) } else { install(game, device: d.device, accept: d.accept) }
     }
@@ -1046,6 +1076,25 @@ public final class S2ArmLauncherModel: ObservableObject {
     func play(_ game: GameSummary, uiLanguage: String?) {
         guard !busy, !cloudSyncing else { return }
         failAction(nil, game: nil)
+        // 崩了能恢复（11-13 维护者改定：开局前不问）：上次开着某几条时异常退出，作业层已当场关掉（pack/jobs/cheats.py note_crash）→
+        //   这次照常开局，同时弹一条通知说关了什么、想用去设置里再开；读不到记录照常开局
+        Task {
+            let names = (try? await crashedBeforePlay(game.id)) ?? []
+            if !names.isEmpty {
+                crashPrompt = CrashPrompt(game: game, uiLanguage: uiLanguage, names: names)
+                _ = try? await saveJob("communitySave", gameID: game.id, extra: ["crashAnswer": "ack"])
+            }
+            playChecked(game, uiLanguage: uiLanguage)
+        }
+    }
+
+    private func crashedBeforePlay(_ gameID: String) async throws -> [String] {
+        let result = try await saveJob("community", gameID: gameID, extra: [:])
+        return (result["crashed"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }
+    }
+
+    private func playChecked(_ game: GameSummary, uiLanguage: String?) {
+        guard !busy, !cloudSyncing else { return }
         // 不按前端的环境检查结果拦（剃刀 M4）：launch 作业自己校验运行文件与环境，缺什么回真实原因
         // 开了 iCloud 存档：先取回 / 处理冲突再开局（S2ArmLauncherModel+CloudSaves）；同步失败本地存档没动，照常开局、错误行写原因
         if cloudFolder != nil {

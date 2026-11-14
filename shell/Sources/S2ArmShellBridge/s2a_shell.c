@@ -26,6 +26,8 @@ __attribute__((weak)) int s2a_shell_vpad_save(const char *game_id, const char *c
 __attribute__((weak)) int s2a_shell_vpad_select(const char *game_id, const char *layout_id, int split) { (void)game_id; (void)layout_id; (void)split; return 0; }
 __attribute__((weak)) char *s2a_shell_vpad_preview(const char *game_id, void *view, int split) { (void)game_id; (void)view; (void)split; return NULL; }
 __attribute__((weak)) int s2a_shell_vpad_set_hold_lock(const char *game_id, int enabled) { (void)game_id; (void)enabled; return 0; }
+__attribute__((weak)) char *s2a_shell_game_options_json(const char *game_id) { (void)game_id; return NULL; }
+__attribute__((weak)) int s2a_shell_game_option_set(const char *game_id, const char *kind, const char *key, int on) { (void)game_id; (void)kind; (void)key; (void)on; return 0; }
 
 static s2a_shell_refresh_fn g_refresh;
 static void *g_refresh_ctx;

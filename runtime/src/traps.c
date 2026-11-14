@@ -58,9 +58,11 @@ static int far_jump(ucontext_t *uc, uint64_t pc) {   // → 1 认领；0 是这�
     return -1;
 }
 
+__attribute__((weak)) int s2a_nvos_trace_trap(void *ctx) { (void)ctx; return 0; }   // nvos_trace.c 强定义：诊断记录 NvOs 分配的两个 brk（没开记录恒 0）；只链 traps.c 的单测用这个
 int s2a_trap_brk(void *ctx) {
     ucontext_t *uc = ctx;
     uint64_t pc = PC(uc);
+    if (s2a_nvos_trace_trap(ctx)) return 1;
     int fj = far_jump(uc, pc);
     if (fj >= 0) return fj;
     module_t *m = module_of((void *)pc);

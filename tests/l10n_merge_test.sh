@@ -8,7 +8,7 @@
 #   ④ 一支删了一条、另一支没动它 → 删掉
 #   ⑤ .xcstrings（Xcode「" : "」格式）两支各在 strings 下加一个键 → 不冲突，两个键都在，仍是 Xcode 格式
 #   ⑥ .strings 两支各在不同位置加一条（k1 后 / k2 后）、一支改 k3 → 不冲突，顺序 k1 a k2 b k3、k3 是改后的
-#   ⑦ .strings 同一个键两边改成不同 → 仍冲突；⑧ .strings 注释两边都改 → 冲突
+#   ⑦ .strings 同一个键两边改成不同 → 仍冲突；⑧ .strings 注释两边都改 → 冲突；⑧b 只对侧加空行 → 不冲突、两侧新键都在
 #   ⑩ experience 表（手排格式：顶层多行、对象数组一条一行，同真表）：两支各加一个码、各把 revision 5→6 → 不冲突、都在、revision 7
 #   ⑮ 合并后格式保持本侧原样（11-11：旧驱动合完 json.dumps(indent=2) 把 1330 行的表展开成 6549 行，发版带入检查按行判 v0.2.9 两个热修「缺行」）
 #   ⑫ 同一个码两边改成不同值 → 冲突；⑯ 冲突时本侧文件不被重排；⑬ 只一边加 revision → 取那边
@@ -55,6 +55,13 @@ git checkout -q -b z1 main; st 甲 k1=1 k2=2 k3=3 > S.strings; git commit -qam z
 git checkout -q -b z2 main; st 乙 k1=1 k2=2 k3=3 k4=4 > S.strings; git commit -qam z2
 git checkout -q main; git merge -q --no-edit z1 > /dev/null 2>&1; git merge -q --no-edit z2 > /dev/null 2>&1; m8=$?; git merge --abort 2> /dev/null
 ck "⑧ .strings 注释两边都改 → 冲突（rc ${m8}）" '[ $m8 != 0 ]'
+# ⑧b 只对侧改了非条目行（加空行 + 新键）、本侧只加键 → 不冲突；空行留着、两个新键都在（11-14 sgrade-2 zh-Hant 被误判冲突）
+git checkout -q -f main; git checkout -q -b w0 main; st 一 k1=1 k2=2 k3=3 > S.strings; git commit -qam w0
+git checkout -q -b w1 w0; st 一 k1=1 k2=2 a=A k3=3 > S.strings; git commit -qam w1
+git checkout -q -b w2 w0; { st 一 k1=1 k2=2 k3=3; echo; printf '"b" = "B";\n'; } > S.strings; git commit -qam w2
+git checkout -q w1; git merge -q --no-edit w2 > /dev/null 2>&1; m9=$?
+ck "⑧b 只对侧加空行：不冲突（rc ${m9}），空行在、键 k1 k2 a k3 b" '[ $m9 = 0 ] && [ "$(grep -c "^$" S.strings)" -ge 1 ] && [ "$(grep -o "^\"[^\"]*\"" S.strings | tr -d "\"" | tr "\n" " ")" = "k1 k2 a k3 b " ]'
+git merge --abort 2> /dev/null; git checkout -q -f main
 XP=launchers/shared/experience.v1.json; git checkout -q -f main; mkdir -p launchers/shared
 # 手排格式（同真表）：顶层多行、对象数组一条一行。xe <revision> <errors 条目…（code=zh）>；items 固定 a b
 xe() { python3 - "$XP" "$@" <<'XPY'

@@ -172,9 +172,11 @@
       "paths": [
         "launchers/macos/Branding/AppIcon-1024.png",
         "launchers/macos/Branding/AppIcon-iOS.png",
-        "launchers/macos/Branding/wordmark-transparent.png"
+        "launchers/macos/Branding/wordmark-transparent.png",
+        "launchers/macos/Branding/s-gold.png",
+        "shell/Sources/ShellUI/Resources/s-gold.png"
       ],
-      "reason": "自家 S2Arm 应用图标（同目录 AppIcon.svg 为源稿）和透明底字标。"
+      "reason": "自家 S2Arm 应用图标（同目录 AppIcon.svg 为源稿）、透明底字标，和由应用图标生成的金色 S（毛玻璃双色：香槟金 + 玫瑰金，make_s_gold.py）。"
     },
     {
       "id": "own_installer_ui",

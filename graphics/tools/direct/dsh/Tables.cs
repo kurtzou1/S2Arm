@@ -43,7 +43,7 @@ namespace S2A.Dsh
         /// <summary>空表：运行时补编没有离线答案表时用（翻译查询按缺省，与离线链缺表时一致）。</summary>
         public static DshTables Empty() => new DshTables();
 
-        /// <summary>目录 dir 下的表（缓存）；答案表 / 配对表缺失时抛错（离线链此时也退出）</summary>
+        /// <summary>目录 dir 下的表（缓存）；答案表 / 配对表缺失按空表（11-13），表坏了才抛错</summary>
         public static DshTables Get(string dir)
         {
             lock (s_lock)
@@ -64,10 +64,13 @@ namespace S2A.Dsh
         {
             var t = new DshTables();
             string facts = Path.Combine(dir, "shader_facts.tsv"), pairs = Path.Combine(dir, "shader_pairs.tsv"), map = Path.Combine(dir, "shader_map.tsv");
-            if (!File.Exists(facts)) throw new DshError("no answer table", facts + " 不存在（随资源包走；空表 = 全部按缺省答）");
-            if (!File.Exists(pairs)) throw new DshError("no pairs table", pairs + " 不存在");
+            // 两张表不在 = 空表（全部按缺省答、没有配对）：表只是加速 / 校准，缺了照样编得出（11-13 D-QW2Q：玩家导入不带 shaders/ 的 game.img，
+            //   缺 shader_facts.tsv 时原先每个键都报「no answer table」，一局现编 0 成 453 败、整局黑屏；同 11-06 疯狂兔子，当时只在出包端补空表）。
+            //   表在但坏（行格式不对）仍报错：那是产物坏了，不能按缺省悄悄跑
+            if (!File.Exists(facts)) Console.Error.WriteLine("[dsh] " + facts + " 不存在：按空答案表（全部缺省）现编");
+            if (!File.Exists(pairs)) Console.Error.WriteLine("[dsh] " + pairs + " 不存在：按空配对表现编");
             // dmsh_facts.load：key<TAB>JSON，空行与 # 行跳过，后出现的覆盖先出现的
-            foreach (var raw in File.ReadLines(facts))
+            foreach (var raw in File.Exists(facts) ? File.ReadLines(facts) : Array.Empty<string>())
             {
                 if (raw.Trim().Length == 0 || raw.StartsWith('#')) continue;
                 int tab = raw.IndexOf('\t');
@@ -76,7 +79,7 @@ namespace S2A.Dsh
                 t.Facts[raw[..tab]] = js;
             }
             // PAIRS：顶点键 → 配对的片元键；空行与 # 行跳过，每行恰两列（空白分隔）
-            foreach (var raw in File.ReadLines(pairs))
+            foreach (var raw in File.Exists(pairs) ? File.ReadLines(pairs) : Array.Empty<string>())
             {
                 if (raw.Trim().Length == 0 || raw.StartsWith('#')) continue;
                 var c = raw.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);

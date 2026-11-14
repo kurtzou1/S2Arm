@@ -260,6 +260,45 @@ static inline int s2a_in_patch(const module_t *m, uint64_t a) {
     if (m->patch_off < 0 ? off >= m->patch_off && off < m->patch_off + (int64_t)m->patch_len : off >= m->patch_off && (uint64_t)off < m->size) return 1;
     return m->patch2_len && off >= m->patch2_off && off < m->patch2_off + (int64_t)m->patch2_len;
 }
+// 模块内偏移 off 落在哪个导出函数（或最近的前一个）：取 st_value 非 0 的函数符号里地址 ≤ off 的最大者（同址取长的、再取名字大的，同 tools/nso_sym.py sym）。
+//   *delta = off − 函数地址，*inside = off 在函数长度之内。没有符号表 / 在第一个导出函数之前 → NULL。
+//   符号表是装载器从模块动态段取的（loader.c parse_dynamic），游戏自带、已在内存里：不读文件、不分配，信号处理里可调；线性扫描，只在出事时用（#806）。
+//   写成内联：只用 module_t 字段，各单测 / 安卓测试宿主给 module_of 打的桩照旧够用，不引入新的链接符号
+static inline const char *module_func_at(const module_t *m, uint64_t off, uint64_t *delta, int *inside) {
+    if (!m || !m->symtab || !m->strtab || !m->nsym) return NULL;
+    const Elf64_Sym *best = NULL;
+    for (unsigned i = 1; i < m->nsym; i++) {
+        const Elf64_Sym *s = &m->symtab[i];
+        if (!s->st_value || (s->st_info & 0xF) != 2 || s->st_value > off) continue;   // 2 = STT_FUNC
+        if (best && (s->st_value < best->st_value || (s->st_value == best->st_value && (s->st_size < best->st_size
+            || (s->st_size == best->st_size && strcmp(m->strtab + s->st_name, m->strtab + best->st_name) <= 0))))) continue;
+        best = s;
+    }
+    if (!best) return NULL;
+    if (delta) *delta = off - best->st_value;
+    if (inside) *inside = off < best->st_value + best->st_size;
+    return m->strtab + best->st_name;
+}
+// 截断时去掉末尾不完整的 UTF-8 字符（日志里不留半个汉字 / 全角括号）
+static inline void s2a_utf8_trim(char *b, size_t n) {
+    size_t l = strnlen(b, n); if (!l) return;
+    size_t i = l; while (i > 0 && ((uint8_t)b[i - 1] & 0xC0) == 0x80) i--;   // 退到最后一个字符的首字节
+    if (!i) return;
+    uint8_t c = (uint8_t)b[i - 1]; size_t need = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1;
+    if (l - (i - 1) < need) b[i - 1] = 0;
+}
+// 客体地址 → 「模块+偏移（导出名+偏移）」写进 b，返回 1；不在游戏模块内返回 0、不写。补丁区标「（补丁区）」不翻名；没有可翻的名字只打「模块+偏移」（老包 / 无符号同旧格式）
+static inline int s2a_guest_where(uint64_t a, char *b, size_t n) {
+    module_t *m = module_of((void *)(uintptr_t)a);
+    if (!m) return 0;
+    int64_t off = (int64_t)(a - (uint64_t)(uintptr_t)m->base);
+    if (off < 0 || s2a_in_patch(m, a)) { snprintf(b, n, "%s%s%#llx（补丁区）", m->name, off < 0 ? "-" : "+", (unsigned long long)(off < 0 ? -off : off)); return 1; }
+    uint64_t d = 0; int in = 0; const char *f = module_func_at(m, (uint64_t)off, &d, &in);
+    int w = f ? snprintf(b, n, "%s+%#llx（%.120s+0x%llx%s）", m->name, (unsigned long long)off, f, (unsigned long long)d, in ? "" : "，外")
+              : snprintf(b, n, "%s+%#llx", m->name, (unsigned long long)off);
+    if (w >= (int)n) s2a_utf8_trim(b, n);
+    return 1;
+}
 // brk 兜底点（改写器双岛模式下两岛都够不着的必改点）：种类与序号见 traps.c
 enum { S2A_TRAP_TPIDR_R, S2A_TRAP_TPIDRRO_R, S2A_TRAP_TPIDR_W, S2A_TRAP_CTR };
 struct s2a_trap { uint64_t off, hits; uint32_t orig; uint8_t kind, reg; };

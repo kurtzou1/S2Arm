@@ -105,7 +105,7 @@ class ExportPlanTests(JobCase):
     # ① 单款就地出、全成功
     def test_inline_runs_mac_then_iphone_per_game_and_passes_request_fields(self):
         task, path = self.new_request({"source": "inline", "items": self.two(), "location": str(self.root / "loc"),
-                                   "deviceTarget": {"productType": "iPhone18,2"}})
+                                   "deviceTarget": {"productType": "iPhone18,2"}, "sgrade": False})
         self.assertEqual(self.run_inline(path), 0)
         self.assertEqual(self.steps(task), [(A, "mac"), (A, "iphone"), (B, "mac"), (B, "iphone")])   # 页面上 iPhone 在前也照 Mac 先（batch.PLATFORMS）
         record = journal(self.c.private, task)
@@ -117,6 +117,7 @@ class ExportPlanTests(JobCase):
         self.assertNotIn("target", mac); self.assertEqual(iphone["target"], {"productType": "iPhone18,2"})
         self.assertNotIn("followUp", iphone)   # iPhone 是这一款最后一个平台
         self.assertNotIn("plan", mac)
+        self.assertEqual((mac["sgrade"], iphone["sgrade"]), (False, False))   # 出包页取消 S 级优化：各平台请求都带上（patches.prepare 据此不带社区补丁）
         ended = [e for e in read_events(self.c.private, task) if e["type"] == "stepEnded"]
         self.assertEqual([e["outcome"]["state"] for e in ended], ["completed"] * 4)
         self.assertEqual(ended[1]["outcome"]["ipa"], f"/out/{A}.ipa")
@@ -138,6 +139,15 @@ class ExportPlanTests(JobCase):
         self.assertEqual(journal(self.c.private, task)["state"], "paused")   # 不是 completed
         result = [e for e in read_events(self.c.private, task) if e["type"] == "result"][-1]
         self.assertEqual((result["state"], result["result"]["pausedReason"], result["result"]["stoppedAt"]), ("paused", "disk_full", 1))
+
+    # 批量出包按款认「出包时打入」（v0.4.0：出包页取消过的款记在条目 sgrade = false）：只有那一款的子作业带 sgrade = false，别的款照旧不带
+    def test_batch_passes_per_game_sgrade_off(self):
+        items = self.two(); items[1]["sgrade"] = False
+        batch.save(self.c.private, batch.create(items))
+        task, path = self.new_request({"source": "batch"})
+        self.assertEqual(self.run_inline(path), 0)
+        seen = [self.seen(f"{task}-{i}") for i in range(1, 5)]
+        self.assertEqual([(r["gameId"], r.get("sgrade")) for r in seen], [(A, None), (A, None), (B, False), (B, False)])
 
     # 一款失败（非磁盘满）不挡后面
     def test_batch_other_failure_does_not_stop_the_rest(self):

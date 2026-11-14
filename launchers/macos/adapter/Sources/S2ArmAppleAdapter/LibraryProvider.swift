@@ -81,6 +81,8 @@ public struct GameSummary: Identifiable, Equatable {
     public var iphoneInstallDevice: String? = nil
     /// 设备记录里装在某台手机上（catalog onPhone）：删除确认框多写一句「下次往这台手机装游戏时，手机上的这款会打不开」
     public var onPhone: Bool = false
+    /// 游戏库封面左上角的金色 S（v0.4.0，pack/jobs/library.py sgrade_badge）：这款有 S 级优化（已打进补丁，或补丁库里有、下次起局 / 更新 iPhone 补上）
+    public var sgrade: Bool = false
     /// 下游深度方案（pack/jobs/downstream.py describe）：这款有下游项目的专门移植时，导出 iPhone 前问玩家一次用哪套
     public var downstream: DownstreamOffer? = nil
     /// 只换宿主（pack/jobs/host_update.py）：none / current / swap / incompatible（要重新准备才能用上新版修复）/ failed
@@ -117,6 +119,7 @@ public struct GameSummary: Identifiable, Equatable {
                   sizes: GameSizes(catalog: g["sizes"] as? [String: Any] ?? [:]))
         self.iphoneInstallDevice = (g["iphoneInstall"] as? [String: Any])?["deviceKey"] as? String
         self.onPhone = g["onPhone"] as? Bool ?? false
+        self.sgrade = g["sgrade"] as? Bool ?? false
         self.banner = (g["banner"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         self.downstream = (g["downstream"] as? [String: Any]).flatMap(DownstreamOffer.init(catalog:))
     }

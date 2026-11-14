@@ -352,10 +352,15 @@ struct CoverView: View {
             .clipShape(RoundedRectangle(cornerRadius: radius))
             .overlay(RoundedRectangle(cornerRadius: radius).strokeBorder(.white.opacity(0.10)))
             .overlay(alignment: .topLeading) {
-                if showsState {
+                if showsState || game.sgrade {
                     GeometryReader { geometry in
                         let size = max(8, min(14, geometry.size.width * 0.034))
-                        StateDot(state: game.state, size: size).padding(size * 0.9)
+                        // 金色 S（v0.4.0）：这款打进了 S 级优化，放左上角；状态点跟在它右边
+                        HStack(alignment: .center, spacing: size * 0.6) {
+                            if game.sgrade { SGradeBadge(size: max(16, geometry.size.width * 0.085)) }
+                            if showsState { StateDot(state: game.state, size: size) }
+                        }
+                        .padding(size * 0.9)
                     }
                 }
             }

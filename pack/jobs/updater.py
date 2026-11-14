@@ -479,12 +479,50 @@ VERSION_DIR = re.compile(r"\d+(?:\.\d+)+")
 LEGACY = ("pending.json", "health.ok", "last_failure.json", "apply.log", ".update.lock", "runner")
 
 
+def legacy_apply_running(updates):
+    """旧自写换版（v0.3.9 及以前）的替换进程还在：它换版全程持着 updates/.update.lock（内核文件锁，进程没了自动放）"""
+    lock = Path(updates) / ".update.lock"
+    try:
+        fd = os.open(lock, os.O_RDWR)
+    except OSError:
+        return False
+    try:
+        if os.name == "nt":
+            import msvcrt
+            try:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            except OSError:
+                return True
+            os.lseek(fd, 0, 0); msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return True
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
+
+
 def clear_stale_pending(private_root, current):
     """启动时清掉旧自写换版的残留（pending.json、health.ok、runner/、按版本号命名的整份新版……，可达几百 MB）；
-    updates/notes/（换上新版后弹「这版更新了什么」用，启动器开始下载时写）和 seen.json 不动。返回是否清了东西"""
+    updates/notes/（换上新版后弹「这版更新了什么」用，启动器开始下载时写）和 seen.json 不动。返回是否清了东西。
+    旧版（v0.3.9 及以前）用自写更新器升上来时，它的替换进程换完版、拉起新版后会等 updates/health.ok（HEALTH_SECONDS 秒）证明新版起来了，
+    等不到就当「新版没能启动」把正在跑的新版目录挪走删掉、装回旧版（11-14 本机复现：0.3.9 → 0.3.10 换上 90 秒后回滚，新版进程脚下
+    的 App 变回 0.3.9、又拉起一个 0.3.9；中途读到半份 App 就是「内置 Python 缺失」、新旧件混装、封存坏）。所以这里先回它这一声；
+    它还持着锁（还在换版）就什么都不删——runner/ 是它正在跑的 Python，删了它会中途崩出半新半旧；它确认后自己删备份，下次启动再清残留"""
     updates = Path(private_root) / "updates"
     if not updates.is_dir():
         return False
+    if (updates / "pending.json").exists() or legacy_apply_running(updates):
+        try:
+            (updates / "health.ok").write_text("ok", encoding="utf-8")
+        except OSError:
+            pass
+        if legacy_apply_running(updates):
+            return False
     gone = False
     for item in list(updates.iterdir()):
         if item.name in LEGACY or (item.is_dir() and VERSION_DIR.fullmatch(item.name)):

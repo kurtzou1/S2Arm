@@ -23,6 +23,8 @@ int s2a_ios_screen_w(void) { return g_ios_w; }
 int s2a_ios_screen_h(void) { return g_ios_h; }
 int s2a_screen_w(void);
 int s2a_screen_h(void);
+static double g_cp_A = -1; void s2a_cpatch_aspect(double A) { g_cp_A = A; }   // 记下 widen.c 交给自适应画幅补丁的画幅（压过 widen.c 的弱定义）
+int s2a_screen_reaspect(void);
 static int bad;
 #define CHECK(c, ...) do { if (!(c)) { printf("✗ " __VA_ARGS__); printf("\n"); bad++; } } while (0)
 static int run_child(void (*fn)(void)) { pid_t c = fork(); if (c == 0) { fn(); _exit(0); } int st = 0; waitpid(c, &st, 0); return WIFEXITED(st) ? WEXITSTATUS(st) : -1; }
@@ -120,6 +122,14 @@ static void returned_split(int aspect_only) {
 }
 static void c20(void) { returned_split(0); }
 static void c21(void) { returned_split(1); }
+// ㉑ 自适应画幅补丁拿到的画幅 = 真屏宽高比（11-13 Duo 实测：窄屏把「1080 高的宽」除以「1920 宽的高」得 1534 ÷ 1350 = 1.136）。
+//    期望手算：Duo 内屏（宿主发布 宽 1534、高 1350）→ 1920 ÷ 1350 = 1.4222；iPhone 宽屏（2346、1080）→ 2346 ÷ 1080 = 2.1722
+static void c20a(void) {
+    g_known = 1; g_ios_w = 1534; g_ios_h = 1350; s2a_screen_reaspect(); double a = g_cp_A;
+    g_ios_w = 2346; g_ios_h = 1080; s2a_screen_reaspect(); double b = g_cp_A;
+    double s2a_ios_screen_aspect(void); double c = s2a_ios_screen_aspect();   // 装载时 cpatch.c 取的同一个函数（宽屏状态下）
+    _exit((a > 1.4212 && a < 1.4232 ? 0 : 1) | (b > 2.1712 && b < 2.1732 ? 0 : 2) | (c > 2.1712 && c < 2.1732 ? 0 : 4));
+}
 int main(void) {
     char T[] = "/tmp/s2a_t_widen_ios_screen_XXXXXX"; if (!mkdtemp(T)) return 1;
     snprintf(g_tmd, sizeof g_tmd, "%s", T);

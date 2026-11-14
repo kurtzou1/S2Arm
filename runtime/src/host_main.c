@@ -261,6 +261,13 @@ static int host_run(int argc, char **argv) {
 #if TARGET_OS_IPHONE
     s2a_ios_load_graphics_settings();
 #endif
+    // 开着只改主机档渲染尺寸的社区宽屏补丁 → 主机模式（11-13 实机：宽屏补丁是给模拟器写的、只改主机档渲染宽高；掌机档下渲染目标按掌机 1280×720 分配、
+    //   视口却按补丁的主机宽高算成 2064×864，每遍只画进左上一块，整局画面放大错位）。出包已把另一档补齐的自适应满屏（模式 both）不切，运行模式归玩家；
+    //   要在档位梯子、服务层、宽屏装表读 S2A_DOCKED 之前
+    { int s2a_cpatch_ws_needs_docked(const char *dir);
+      const char *dk = getenv("S2A_DOCKED");
+      if (lc->module_dir[0] && !(dk && !strcmp(dk, "1")) && s2a_cpatch_ws_needs_docked(lc->module_dir)) {
+          setenv("S2A_DOCKED", "1", 1); LOG("运行模式：开着社区宽屏补丁，按主机模式跑（补丁只改主机档渲染宽高；原 S2A_DOCKED=%s）", dk ? dk : "未设"); } }
     // 档位梯子（runtime/src/qladder_host.c）：要在 iOS 画面设置注入之后（玩家选的运行模式是梯子的上限，#352），服务层 / 宽屏装表读 S2A_DOCKED 之前
     { void s2a_ql_boot(void); s2a_ql_boot(); }
 #if TARGET_OS_OSX

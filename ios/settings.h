@@ -9,6 +9,22 @@ void s2a_ios_apply_diag_run(NSUserDefaults *defaults);
 #endif
 // 包内能力清单 s2a_caps.tsv 里某项能力（fps60 / widen）的值：1 / 0；没有清单或没有这行 = -1（设置页据此如实显示开关、起局据此认 60 帧手动开）
 int s2a_ios_caps_value(const char *cap);
+#ifdef __OBJC__
+// 60 帧此刻实际开没开（设置页 / 社区补丁页开关如实显示用，与起局同一口径：玩家选过照选的，没选过 = 包里清单原因是否速度已验证）；
+//   s2a_ios_set_fps60：玩家拨开关（写 S2AFps60 + S2AFps60Manual，起局只认后者算「开」）
+BOOL s2a_ios_fps60_on(void);
+void s2a_ios_set_fps60(BOOL on);
+@class NSString;
+// 同上，指定哪一款（游戏库里还没进游戏的款；nil = 正在跑的这款 / 单款壳）
+BOOL s2a_ios_fps60_on_for(NSString *gid);
+void s2a_ios_set_fps60_for(NSString *gid, BOOL on);
+// 满屏（自适应）此刻生效没有：*on = 实际开关；返回 1 = 包内清单判这款满屏坏、改不动（如实显示关、置灰），0 = 可改
+int s2a_ios_fullscreen_state(NSString *gid, BOOL *on);
+void s2a_ios_set_fullscreen(NSString *gid, BOOL on);
+// 某款的随行目录（能力清单 / 补丁表所在）；nil 或正在跑的这款 = 启动上下文的
+NSString *s2a_ios_game_dir(NSString *gid);
+NSUserDefaults *s2a_ios_settings_defaults_for(NSString *gid);
+#endif
 // 串行会话启动阶段使用：旧客体停止后，撤销本模块注入的值并读取新偏好。
 // 启动时显式给出的环境值始终优先；后来已改为不同内容的值不撤销。
 // Returns 0 on success, -1 on failure; the caller must leave the session stopped.

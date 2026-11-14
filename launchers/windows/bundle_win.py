@@ -132,6 +132,10 @@ def bundle(target, shell, tzdata, fonts):
     for f in bft:
         shutil.copy2(f, target / "Fonts" / f.name)
     say("[组装] 随包 Impactor"); bundle_impactor(target / impactor.BUNDLE_DIR)
+    # 社区补丁与金手指本地库（11-13，同 Mac build_app.py）：完整快照放 <启动器目录>/CommunityPatches/patches-v2.tar（启动器把本目录作 resources 交作业层）
+    sys.path.insert(0, str(ROOT / "tools")); import patch_pack
+    why = patch_pack.stage_snapshot(str(target / "CommunityPatches"))
+    say("[组装] 社区补丁快照：" + ("已放进 CommunityPatches" if not why else f"🟡 {why}，本版启动器不带本地补丁库"))
     # 覆盖更新读这个版本号：最近的发版 tag（同 Mac build_app 的 CFBundleShortVersionString）
     tag = subprocess.check_output(["git", "-C", str(ROOT), "describe", "--tags", "--abbrev=0"], text=True).strip()
     match = re.fullmatch(r"v?(\d+\.\d+\.\d+)", tag)

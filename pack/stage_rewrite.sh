@@ -42,8 +42,8 @@ VT="${S2A_WIDEN_DIR:-$R/graphics/widen/tables}/verified.tsv"; VR=$([ -f "$VT" ] 
 # 帧率表（10-26，体系提升方案 D）：仓库 runtime/fps/<main 构建号前 16 位>.tsv 有就拷进产物根作 fps.tsv（runtime/src/fps.c 装载后读），按「文件名 + 内容」进键；没有 = 原生帧率
 FT="$R/runtime/fps/${BID:0:16}.tsv"; [ -f "${FT}" ] || FT=
 # 社区画面补丁（pack/cpatch.py）：匹配上的补丁编成「双路 + 槽」进包，开关在运行时。
-#   10-30 维护者 拍板：社区补丁一律学成我方通用能力（60 帧 / 满屏），公开发布的包不带上游补丁字节 ⇒ 缺省不打；内部开发 / 测试包要对照时显式设 S2A_COMMUNITY_PATCHES=1
-#   （依据：依赖许可核查 N1 / U3——上游补丁多数没有声明许可）。补丁索引目录照常认出（tools/fps_warehouse.py 从里面学帧率地址这类事实层，不带补丁字节）
+#   11-12 维护者拍板：出包时自动对接公开库（pack/jobs/patches.py 按真构建号查索引、取文件，交 S2A_CPATCH_DIRS），查到的全部进包、缺省关、玩家在启动设置里开；
+#   10-30「公开发布的包不带上游补丁字节」作废。我方不托管补丁字节，只在玩家本机按需下载
 #   缺省开 = 仓库 graphics/cpatch/verified.tsv 里本款「程序号 + main 构建号」的行（我方验过）
 #   + S2A_CPATCH（逗号分隔的编号；none = 这次不进社区补丁）+ 启动器玩家选择；补丁数据目录没有 = 不进，产物与原先逐字节相同。
 #   缺省开的编号、补丁索引与 pack/cpatch.py 进改写键
@@ -57,10 +57,16 @@ fi
 # 补丁索引目录：S2A_CPATCH_DIRS（冒号分隔）没给就同启动器（pack/jobs/community.py _indexes），S2A_COMMUNITY_DIR（环境 → tools/machine.local；都没有 = 没有社区补丁，不再缺省读开发机数据盘）下 INDEX.tsv 所在目录：
 #   第一轮布局 <包>/full/<名>/INDEX.tsv、第二轮布局 <包>/<类>/INDEX.tsv（10-27 gfxpatches：60fps / ultrawide / other-gfx，之前只认第一轮、整包没进）；名字以 -lite 结尾的包是同轮子集，不收
 CDIR=${S2A_COMMUNITY_DIR:-$(bash "$R/tools/machine.sh" get S2A_COMMUNITY_DIR 2> /dev/null)}
-[ -n "${S2A_CPATCH_DIRS:-}" ] || [ -z "$CDIR" ] || S2A_CPATCH_DIRS=$(for f in "$CDIR"/*/full/*/INDEX.tsv "$CDIR"/*/*/INDEX.tsv; do
+# S2A_CPATCH=none（出包页取消 S 级优化，pack/jobs/patches.py prepare）：不从本机补丁库目录兜底，帧率仓库条目（下面 fps_warehouse）也不读
+[ "${S2A_CPATCH:-}" = none ] || [ -n "${S2A_CPATCH_DIRS:-}" ] || [ -z "$CDIR" ] || S2A_CPATCH_DIRS=$(for f in "$CDIR"/*/full/*/INDEX.tsv "$CDIR"/*/*/INDEX.tsv; do
   [ -f "$f" ] || continue; [[ $f == */*-lite/* ]] && continue; dirname "$f"; done | paste -sd: -)
-CK=; if [ "${S2A_COMMUNITY_PATCHES:-0}" = 1 ] && [ -n "${S2A_CPATCH_DIRS:-}" ] && [ "${S2A_CPATCH:-}" != none ]; then
-  CK=" cpatch=$( { printf '%s\n' "$CSEL"; cat "$R/pack/cpatch.py"; IFS=:; for d in $S2A_CPATCH_DIRS; do cat "$d/INDEX.tsv" 2> /dev/null; done; } | shasum -a 256 | cut -c1-16)"
+# 金手指（11-12 维护者：出包时把能编进包的金手指带上）：S2A_CHEATS_DIRS（冒号分隔，玩家导入的 + 启动器从公开库取的 Atmosphere txt）里改代码的条目
+#   走同一条双路 + 槽（pack/cpatch.py scan_cheats），缺省全关、局内逐条开关；只写可写内存的条目不进包，照旧由运行时 Tamper 执行。
+#   金手指文件内容进改写键（开关 enabled.txt / 状态 status.txt 不进：玩家开关不重跑改写）
+CI=(); [ -n "${S2A_CPATCH_DIRS:-}" ] && IFS=: read -r -a CI <<< "$S2A_CPATCH_DIRS"   # 11-12 维护者：查到的补丁全部进包、缺省关、玩家自己开（10-30「玩家包不带上游补丁字节」作废）
+CK=; if { [ ${#CI[@]} -gt 0 ] || [ -n "${S2A_CHEATS_DIRS:-}" ]; } && [ "${S2A_CPATCH:-}" != none ]; then
+  CK=" cpatch=$( { printf '%s\n' "$CSEL"; cat "$R/pack/cpatch.py"; for d in ${CI[@]+"${CI[@]}"}; do cat "$d/INDEX.tsv" 2> /dev/null; done
+    IFS=:; for d in ${S2A_CHEATS_DIRS:-}; do for f in "$d"/*.txt; do case ${f##*/} in enabled.txt | status.txt) continue ;; esac; [ -f "$f" ] && { printf '%s\n' "${f##*/}"; cat "$f"; }; done; done; } | shasum -a 256 | cut -c1-16)"
 fi
 AN=$AD/addr_need.tsv
 # 程序号取 exefs/main.npdm 的 ACI0（真身份，每个根都有）；unpack.tsv 只有解包 / 直连播种才带（#459：只出通用的根没有它，出包停在这里）
@@ -134,7 +140,7 @@ C=$("$PY" "$H/rewriter.py" c-path) || exit 1
 REWRITE=("$C")
 TAG=$(root_tag "$G" "$TAG")
 W=$(root_begin "$G" "$TAG") || exit 1
-rm -f "$W"/*.code_patch.tsv "$W"/*.patched.bin "$W"/*.fixups.tsv "$W"/*.gates.tsv "$W"/*.sites.tsv "$W"/*.gaps.tsv "$W"/*.npdm "$W"/*.widen.tsv "$W"/widen_sites.tsv "$W"/cpatch.tsv "$W"/cpatch_rows.tsv "$W"/cpatch_plan.log "$W"/cpatch_excluded.tsv "$W"/widen_enable*.tsv "$W"/widen_verified.tsv "$W"/widen_full*.tsv "$W"/addr_need.tsv "$W"/nro_exports.tsv "$W"/fps.tsv "$W"/patch.tsv   # 上一版改写产物不带进新版
+rm -f "$W"/*.code_patch.tsv "$W"/*.patched.bin "$W"/*.fixups.tsv "$W"/*.gates.tsv "$W"/*.sites.tsv "$W"/*.gaps.tsv "$W"/*.npdm "$W"/*.widen.tsv "$W"/widen_sites.tsv "$W"/cpatch.tsv "$W"/cpatch_rows.tsv "$W"/cpatch_plan.log "$W"/cpatch_excluded.tsv "$W"/cheat-src.*.txt "$W"/fpslocker.json "$W"/widen_enable*.tsv "$W"/widen_verified.tsv "$W"/widen_full*.tsv "$W"/addr_need.tsv "$W"/nro_exports.tsv "$W"/fps.tsv "$W"/patch.tsv   # 上一版改写产物不带进新版
 t0=$SECONDS; n=0
 # romfs 里的 NRO（10-29 普查 c1029c：大航海4 HD / 魔界战记6 / 忍者龟用 nn::ro 装，我方 LoadNro 映射未支持 → 游戏 Break）：
 #   转成 NSO 放 nroexe/、与 exefs 模块一样改写（模块名 nro0…），运行时 ro LoadNro 按 NRO 文件 SHA-256 查 nro_modules.tsv 映射改写好的映像（runtime/src/loader.c s2a_nro_map）。
@@ -173,9 +179,9 @@ done; rm -rf "$RC"
 }
 rw_all 0
 if [ -n "$CK" ]; then   # 社区补丁：先按不带补丁的改写点预筛出表，再带补丁行改写；补丁造成的缺口剔掉那份重来，别的缺口照旧报红
-  IFS=: read -r -a CD <<< "$S2A_CPATCH_DIRS"; : > "$W/cpatch_excluded.tsv"; : > "$W/cpatch_plan.log"
+  : > "$W/cpatch_excluded.tsv"; : > "$W/cpatch_plan.log"
   for cr in 1 2 3 4 5 6; do
-    "$PY" "$R/pack/cpatch.py" plan "$W" "${CSEL#none}" "${CD[@]}" 2>> "$W/cpatch_plan.log" || { echo "【红】$G 社区补丁出表出错（$(tail -1 "$W/cpatch_plan.log")）"; root_abort "$G" "$TAG"; exit 1; }
+    "$PY" "$R/pack/cpatch.py" plan "$W" "${CSEL#none}" ${CI[@]+"${CI[@]}"} 2>> "$W/cpatch_plan.log" || { echo "【红】$G 社区补丁出表出错（$(tail -1 "$W/cpatch_plan.log")）"; root_abort "$G" "$TAG"; exit 1; }
     [ -s "$W/cpatch_rows.tsv" ] || break   # 没有要改代码的补丁（只有数据补丁或一份都没匹配上）：不带补丁那一轮的产物就是终稿
     S2A_CPATCH_TSV="$W/cpatch_rows.tsv" rw_all 1
     "$PY" "$R/pack/cpatch.py" prune "$W" 2>> "$W/cpatch_plan.log"; prc=$?
@@ -207,7 +213,7 @@ if [ -z "${FT}" ] && [ "$fw" != 0 ]; then "$PY" "$R/tools/fps_generic.py" "$W" "
 rm -rf "$W/nroexe"   # NRO 转出的中间 NSO（nro_to_nso.py），改写完删；要在收集阶段依赖之前删，免得进依赖表
 K=$(stage_deps_save "$W" rewrite "$KB" "$H/stage_rewrite.sh") || { root_abort "$G" "$TAG"; exit 1; }
 echo "$K" > "$W/.stage_rewrite"
-ROOT_REPLAY='degrade.rewrite.tsv *.code_patch.tsv *.patched.bin *.fixups.tsv *.gates.tsv *.sites.tsv *.gaps.tsv *.npdm *.widen.tsv widen_sites.tsv cpatch.tsv cpatch_rows.tsv cpatch_plan.log cpatch_excluded.tsv widen_enable*.tsv widen_verified.tsv fps.tsv nro_modules.tsv nro_to_nso.log widen_full*.tsv patch.tsv addr_need.tsv addr_need.log nro_exports.tsv nro_exports.log gpu_drivers.tsv widen_scan.log fps_generic.log *.rewrite.log .stage_rewrite .stage_rewrite.deps' root_commit "$G" "$TAG" || exit 1   # 与系统数据 / 界面布局并行（pack/refresh.sh）：本阶段只写这些
+ROOT_REPLAY='degrade.rewrite.tsv *.code_patch.tsv *.patched.bin *.fixups.tsv *.gates.tsv *.sites.tsv *.gaps.tsv *.npdm *.widen.tsv widen_sites.tsv cpatch.tsv cpatch_rows.tsv cpatch_plan.log cpatch_excluded.tsv cheat-src.*.txt fpslocker.json widen_enable*.tsv widen_verified.tsv fps.tsv nro_modules.tsv nro_to_nso.log widen_full*.tsv patch.tsv addr_need.tsv addr_need.log nro_exports.tsv nro_exports.log gpu_drivers.tsv widen_scan.log fps_generic.log *.rewrite.log .stage_rewrite .stage_rewrite.deps' root_commit "$G" "$TAG" || exit 1   # 与系统数据 / 界面布局并行（pack/refresh.sh）：本阶段只写这些
 # 帧率表命中（情报 10-28：构建号对不上时增强静默失效）：没有本构建号的表要响亮；本款别的构建号有表（docs/名单_60帧/ 有登记、runtime/fps/ 有文件）就列出来——
 #   换了版本一眼看出。原生就 60 帧的款（0100152000022000）没有表、也不列
 FV=$(awk -F'\t' -v p="$PID" '!/^#/ && toupper($1) == p { print substr($2, 1, 16) }' "$R/docs/名单_60帧/"*.tsv 2> /dev/null | while read -r b; do [ -f "$R/runtime/fps/$b.tsv" ] && printf '%s ' "$b"; done)

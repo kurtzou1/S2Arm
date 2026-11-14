@@ -80,21 +80,20 @@ public sealed partial class EnvironmentWindow
         steps.Children.Add(WelcomeStepRow(WelcomeStep.Keys,
             T(KeysSettled ? "welcome.step.keys.done" : welcomeGameId != null ? "welcome.step.keys.notNeeded" : "welcome.step.keys.title"),
             true, KeysContent()));
-        Grid.SetColumn(steps, 1); outer.Children.Add(steps);
-        body.Children.Add(outer);
-
-        // 右下角「一键出包」
+        // 「一键出包」放在三步清单下面、和清单左对齐（原先浮在页面右侧中间，不挨着任何一步；11-14 体验梳理）
         if (PcReady && welcomeGameId != null)
         {
             var oneclick = new Button
             {
                 Content = T("welcome.oneclick"), Background = Accent, Foreground = Canvas,
-                Padding = new Thickness(28, 12), CornerRadius = new CornerRadius(24),
-                FontSize = 16, FontWeight = FontWeight.SemiBold, HorizontalAlignment = HorizontalAlignment.Right
+                Padding = new Thickness(28, 12), CornerRadius = new CornerRadius(24), Margin = new Thickness(44, 28, 0, 0),
+                FontSize = 16, FontWeight = FontWeight.SemiBold, HorizontalAlignment = HorizontalAlignment.Left
             };
             oneclick.Click += (_, _) => StartOneClick(WelcomeGame!);
-            body.Children.Add(oneclick);
+            steps.Children.Add(oneclick);
         }
+        Grid.SetColumn(steps, 1); outer.Children.Add(steps);
+        body.Children.Add(outer);
     }
 
     private string? metalPickError;
@@ -284,7 +283,7 @@ public sealed partial class EnvironmentWindow
     private Control WelcomeStepRow(WelcomeStep step, string title, bool last, Control content)
     {
         var done = WelcomeDone(step);
-        var active = step == WelcomeCurrent;
+        var active = step == WelcomeCurrent && !done;   // 三步都做完时最后一步不算「当前」：原先它按当前步放大成 22 号，和前两步不一样（11-14 体验梳理）
         var leftCol = new Grid { RowDefinitions = new RowDefinitions("Auto,*") };
         var circle = new Border
         {

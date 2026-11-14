@@ -1,1 +1,23 @@
-{"schema": 1}
+{
+ "schema": 1,
+ "id": "mac-old-updater-1114",
+ "text": {
+  "zh-Hans": "Mac 版 0.3.9 及更早：请到 s2arm.com 下载 dmg 覆盖安装，先不要用应用内更新——旧更新器可能更新到一半，留下新旧混装。0.3.10 起应用内更新已换新，可以正常用。",
+  "en": "Mac 0.3.9 or earlier: download the dmg from s2arm.com and install it over the old app. Don't use in-app update on these versions; the old updater can stop halfway and leave a mixed install. From 0.3.10 on, in-app update works normally."
+ },
+ "url": "https://s2arm.com/",
+ "messages": [
+  {
+   "id": "mac-old-updater-1114",
+   "level": "important",
+   "platforms": [
+    "mac"
+   ],
+   "text": {
+    "zh-Hans": "Mac 版 0.3.9 及更早：请到 s2arm.com 下载 dmg 覆盖安装，先不要用应用内更新——旧更新器可能更新到一半，留下新旧混装。0.3.10 起应用内更新已换新，可以正常用。",
+    "en": "Mac 0.3.9 or earlier: download the dmg from s2arm.com and install it over the old app. Don't use in-app update on these versions; the old updater can stop halfway and leave a mixed install. From 0.3.10 on, in-app update works normally."
+   },
+   "url": "https://s2arm.com/"
+  }
+ ]
+}

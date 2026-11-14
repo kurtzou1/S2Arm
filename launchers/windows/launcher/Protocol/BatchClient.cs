@@ -92,7 +92,8 @@ public sealed record BatchOutcome(BatchState? State, string? Error);
 public static class BatchClient
 {
     /// <summary>出包前清单里勾好的一款（没勾平台的款不进批次）。</summary>
-    public sealed record Entry(string GameId, string Name, IReadOnlyList<string> Platforms);
+    /// <param name="SGradeOff">这款在出包页取消了「S 级优化（Beta）· 出包时打入」（按款记住）：批量出也不带社区补丁与金手指（pack/jobs/batch.py create）</param>
+    public sealed record Entry(string GameId, string Name, IReadOnlyList<string> Platforms, bool SGradeOff = false);
 
     /// <summary>控制口 POST /batch 的 games（同 Mac S2ArmControl）：[{gameId, platforms:[mac|iphone]}]，platforms 缺省 iphone、ios 认作 iphone；
     /// 同一款给两次按第一次。形状不对给错误句（控制口回 400）。</summary>
@@ -117,7 +118,12 @@ public static class BatchClient
     /// <summary>create --json 的内容：{items:[{gameId,name,platforms}], location}；location 空 = 不传，后端按每款现在的位置。</summary>
     public static string CreateJson(IEnumerable<Entry> entries, string? location) => JsonSerializer.Serialize(new Dictionary<string, object?>
     {
-        ["items"] = entries.Select(e => new Dictionary<string, object?> { ["gameId"] = e.GameId, ["name"] = e.Name, ["platforms"] = e.Platforms }).ToList(),
+        ["items"] = entries.Select(e =>
+        {
+            var item = new Dictionary<string, object?> { ["gameId"] = e.GameId, ["name"] = e.Name, ["platforms"] = e.Platforms };
+            if (e.SGradeOff) item["sgrade"] = false;
+            return item;
+        }).ToList(),
         ["location"] = string.IsNullOrEmpty(location) ? null : location
     });
 

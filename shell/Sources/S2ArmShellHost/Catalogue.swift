@@ -72,10 +72,21 @@ public struct Catalogue: Equatable, Sendable {
             tiles.append(GameTile(id: e.titleID, title: e.name, subtitle: e.displayVersion ?? "",
                                   banner: artwork(e.banner, id: e.titleID + ".banner", base: baseDirectory),
                                   icon: artwork(e.icon, id: e.titleID + ".icon", base: baseDirectory),
-                                  state: state))
+                                  state: state, sgrade: sgradeBuilt(e.titleID, base: baseDirectory, single: file.games.count == 1)))
         }
         var c = Catalogue(tiles: tiles, problems: problems); c.bannerURLs = banners
         return c
+    }
+
+    /// 封面金色 S（v0.4.0）：这款的补丁表（多款容器 Games/<游戏号>/cpatch.tsv；单款 App 根 cpatch.tsv）有表头以外的条目 = 打进了 S 级优化
+    static func sgradeBuilt(_ id: String, base: URL, single: Bool) -> Bool {
+        let candidates = [base.appendingPathComponent("Games").appendingPathComponent(id).appendingPathComponent("cpatch.tsv")] + (single ? [base.appendingPathComponent("cpatch.tsv")] : [])
+        for url in candidates {
+            if let text = try? String(contentsOf: url, encoding: .utf8) {
+                return text.split(whereSeparator: \.isNewline).filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }.count > 1
+            }
+        }
+        return false
     }
 
     static func gameState(_ e: CatalogueEntry) -> GameState {

@@ -86,6 +86,20 @@ with open(os.path.join(dst, 'aoc.tsv'), 'w', encoding='utf-8') as f:
     f.write(head + ''.join(rows[k] + '\n' for k in sorted(rows)))
 PY
 }
+# 单个文件进 / 出追加内容缓存：先按宿主惯例克隆（_root_cp），克隆不了就在 Mac 上普通复制一次、打【黄】带克隆的原话（同 pack/stages/sysdata.sh clone_or_copy）。
+#   缓存在游戏库 tool-cache、现行在这款游戏的存放位置，两边可能不在同一卷（诊断 D-GHJC：游戏刚换存放位置，cp -c 报「clonefile failed: Cross-device link」整单停）。
+#   只用于文件（不递归），不会留下半份目录；普通复制也失败才算失败，报两次的原话
+aoc_cp() {
+  local clone_err copy_err
+  clone_err=$(_root_cp "$@" 2>&1) && return 0
+  [ "$(uname -s)" = Darwin ] || { printf '%s\n' "$clone_err" >&2; return 1; }
+  if copy_err=$(cp -X "$@" 2>&1 || exit $?); then
+    echo "【黄】${G:-?} 追加内容：克隆复制失败，已改用普通复制：$(printf '%s' "$clone_err" | tr '\n' ' ')"
+    return 0
+  fi
+  printf '%s / 普通复制：%s\n' "$clone_err" "$copy_err" >&2
+  return 1
+}
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then return 0; fi
 
 set -u
@@ -110,7 +124,7 @@ C=${S2A_AOC_CACHE:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/cache/aoc}/$G-$K
 MISS=(); FROM=$C; KEEP=0   # MISS：「文件名<TAB>原因」；FROM：克隆来源（全部解出 = 共享缓存）；KEEP=1：一份都没解出，aoc/ 与 aoc.tsv 沿用现行
 miss() { MISS+=("$(basename "$1")	$(printf '%s' "$2" | tr '\t\n' '  ' | cut -c1-160)"); echo "🟡 ${G} 追加内容 $(basename "$1") 未能解出（$(printf '%s' "$2" | cut -c1-160)），跳过"; }
 if [ ! -f "$C/aoc.tsv" ]; then   # 缓存没有：解到 C.tmp.<pid>（带一份 main 供版本核对，解完删），再改名；并发时后到的丢弃自己那份
-  S=$C.tmp.$$; rm -rf "$S"; mkdir -p "$S/exefs" && _root_cp "$CUR/exefs/main" "$S/exefs/main" || { echo "【红】$G 建追加内容缓存失败"; exit 1; }
+  S=$C.tmp.$$; rm -rf "$S"; mkdir -p "$S/exefs" && aoc_cp "$CUR/exefs/main" "$S/exefs/main" || { echo "【红】$G 建追加内容缓存失败"; exit 1; }
   # 解不出（原始包与产物根程序版本不符、密钥缺等）只跳过不拦出包：DLC 是附加内容，拦住会让整款出不了包（10-20 01006F8002326000：产物根 exefs 与本机 3.0.3 卡带版本不符，刷新全红）
   if ! ${S2A_HDD_READ:-} "$SRC_N" "$SRC_K" "$S" --aoc-only --title-id="$TID" "${fs[@]}" > "$S/aoc.log" 2>&1; then   # S2A_HDD_READ：读原件锁前缀（见 pack/stages/unpack.sh）
     # 整份解不出时逐份兜底（审计 P2-30：原先一份解不出连带其余能解的全部跳过）。--aoc-only 要本体 + 更新做版本核对，所以每次给「上下文 + 一份纯 DLC 包」：
@@ -123,7 +137,7 @@ if [ ! -f "$C/aoc.tsv" ]; then   # 缓存没有：解到 C.tmp.<pid>（带一份
     done <<< "$L"
     if [ ${#dl[@]} = 0 ]; then for f in "${ctx[@]}"; do miss "$f" "$WHY"; done   # 没有单独的 DLC 包：DLC 在上下文包里，整份失败就是它们失败
     else ok=(); i=0
-      for f in "${dl[@]}"; do i=$((i + 1)); P=$S/part$i; mkdir -p "$P/exefs" && _root_cp "$S/exefs/main" "$P/exefs/main" || { echo "【红】$G 建追加内容分份目录失败"; exit 1; }
+      for f in "${dl[@]}"; do i=$((i + 1)); P=$S/part$i; mkdir -p "$P/exefs" && aoc_cp "$S/exefs/main" "$P/exefs/main" || { echo "【红】$G 建追加内容分份目录失败"; exit 1; }
         if ${S2A_HDD_READ:-} "$SRC_N" "$SRC_K" "$P" --aoc-only --title-id="$TID" "${ctx[@]}" "$f" > "$P/aoc.log" 2>&1; then ok+=("$P"); else miss "$f" "$(tail -1 "$P/aoc.log")"; fi
       done
       [ ${#ok[@]} = 0 ] || aoc_merge_parts "$S" "${ok[@]}" || { echo "【红】$G 合并逐份解出的追加内容失败"; exit 1; }
@@ -139,12 +153,12 @@ fi
 TAG=$(root_tag "$G" "aoc-${K:0:8}"); W=$(root_begin "$G" "$TAG") || exit 1
 if [ $KEEP = 1 ]; then   # 一份都没解出：aoc/ 与 aoc.tsv 沿用现行（与原先「现行不动」一致，键不记，下次刷新再试），只换 aoc.log 让出包收尾点名缺的包
   if cmp -s <(grep -a '^追加内容缺	' "$CUR/aoc.log" 2> /dev/null) <(grep -a '^追加内容缺	' "$FROM/aoc.log"); then root_abort "$G" "$TAG"
-  else _root_cp "$FROM/aoc.log" "$W/" || { echo "【红】$G 写追加内容日志失败"; root_abort "$G" "$TAG"; exit 1; }
+  else aoc_cp "$FROM/aoc.log" "$W/" || { echo "【红】$G 写追加内容日志失败"; root_abort "$G" "$TAG"; exit 1; }
     ROOT_REPLAY='aoc.log' root_commit "$G" "$TAG" || exit 1; fi
   echo "🟡 $G 追加内容 ${#MISS[@]} 份都没解出（$(printf '%s\n' "${MISS[@]}" | cut -f1 | tr '\n' ' ')），本体照常出包、现行追加内容不动"; exit 0
 fi
 _root_rm "$W/aoc"; rm -f "$W/aoc.tsv" "$W/aoc.log"
-{ [ ! -d "$FROM/aoc" ] || python3 "$R/tools/clonedir.py" "$FROM/aoc" "$W/aoc"; } && _root_cp "$FROM/aoc.tsv" "$FROM/aoc.log" "$W/" || { echo "【红】$G 从追加内容缓存克隆失败"; root_abort "$G" "$TAG"; exit 1; }
+{ [ ! -d "$FROM/aoc" ] || python3 "$R/tools/clonedir.py" "$FROM/aoc" "$W/aoc"; } && aoc_cp "$FROM/aoc.tsv" "$FROM/aoc.log" "$W/" || { echo "【红】$G 从追加内容缓存克隆失败"; root_abort "$G" "$TAG"; exit 1; }
 K=$(stage_deps_save "$W" aoc "$KB" "$SELF") || { root_abort "$G" "$TAG"; exit 1; }
 echo "$K" > "$W/.stage_aoc"
 ROOT_REPLAY='aoc aoc.tsv aoc.log .stage_aoc .stage_aoc.deps' root_commit "$G" "$TAG" || exit 1   # 与改写 / 系统数据 / 界面布局并行：本阶段只写这些

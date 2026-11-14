@@ -8,6 +8,7 @@ using Avalonia.Controls.Primitives;
 using Avalonia.Input.Platform;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Media.Imaging;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using S2Arm.Launcher.Protocol;
@@ -338,6 +339,7 @@ public sealed partial class EnvironmentWindow
             return;
         }
         body.Children.Add(GameHeader(game));
+        body.Children.Add(SGradeCard(game));   // S 级优化（Beta，11-13，同 Mac SGradeCard.swift）：这款这个版本命中了哪些社区补丁，命中的出包时自动打入
         body.Children.Add(Muted(T("batch.hint")));   // 批量出包（v0.2.4）：添加游戏一次放进多款，导入完列成清单连续出包
 
         // platforms
@@ -441,6 +443,138 @@ public sealed partial class EnvironmentWindow
 
     private LocationSlack? SlackFor(string path) =>
         locations?.Rows.FirstOrDefault(r => SameFolder(r.Path, path)) is { } row ? row.Slack : probedSlack.TryGetValue(path, out var slack) ? slack : null;
+
+    // ---- S 级优化（Beta，11-13 维护者：根据游戏和版本自动匹配社区补丁并展示，命中的默认打上；同 Mac launchers/macos/frontend/Sources/NX2Apple/SGradeCard.swift）----
+    private string? sgradeFor; private JsonElement? sgrade; private bool sgradeFailed;
+    private static readonly string[] SGradeCats = ["widescreen", "fps", "gfx", "cheat"];
+
+    // 金色（11-13 维护者：这个功能很牛，做得精致高级、显眼一点，用金色版 logo 的 S）：金色毛玻璃双色 S（上半香槟金、下半玫瑰金，
+    //   launchers/macos/Branding/make_s_gold.py 由应用图标生成），卡片的标题 / 描边 / 图标钮同一套配色；命中时整张亮起来（同 Mac SGradeCard.swift）
+    private static readonly Color SGoldHi = Color.FromRgb(255, 235, 179), SGold = Color.FromRgb(237, 196, 107), SRose = Color.FromRgb(237, 158, 133);
+    private Bitmap? sGoldBitmap;
+    private Bitmap SGoldImage()
+    {
+        if (sGoldBitmap is not null) return sGoldBitmap;
+        using var stream = Avalonia.Platform.AssetLoader.Open(new Uri("avares://S2Arm/Assets/SGold.png"));
+        return sGoldBitmap = Bitmap.DecodeToWidth(stream, 192);
+    }
+    private static Color A(Color c, double alpha) => Color.FromArgb((byte)Math.Round(alpha * 255), c.R, c.G, c.B);
+    private static LinearGradientBrush Diag(params (Color c, double at)[] stops)
+    {
+        var g = new LinearGradientBrush { StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative), EndPoint = new RelativePoint(1, 1, RelativeUnit.Relative) };
+        foreach (var (c, at) in stops) g.GradientStops.Add(new GradientStop(c, at));
+        return g;
+    }
+
+    private static readonly Dictionary<string, string> SGradeGlyph = new() { ["widescreen"] = "⤢", ["fps"] = "≫", ["gfx"] = "✦", ["cheat"] = "◆" };
+
+    private Control SGradeCard(LibraryGame game)
+    {
+        if (sgradeFor != game.Id) { sgradeFor = game.Id; sgrade = null; sgradeFailed = false; _ = LoadSGradeAsync(game); }
+        var stack = new StackPanel { Spacing = 12 };
+        var title = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 9 };
+        title.Children.Add(new TextBlock { Text = T("export.sgrade.title"), FontSize = 18, FontWeight = FontWeight.Bold, VerticalAlignment = VerticalAlignment.Center,
+            Foreground = new LinearGradientBrush { StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative), EndPoint = new RelativePoint(1, 0, RelativeUnit.Relative),
+                GradientStops = { new GradientStop(SGoldHi, 0), new GradientStop(SGold, 0.5), new GradientStop(SRose, 1) } } });
+        title.Children.Add(new Border { BorderBrush = new SolidColorBrush(A(SGold, 0.55)), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(999),
+            Padding = new Thickness(7, 1.5), VerticalAlignment = VerticalAlignment.Center,
+            Child = new TextBlock { Text = "BETA", FontSize = 9.5, FontWeight = FontWeight.Bold, LetterSpacing = 1.4, Foreground = new SolidColorBrush(SGold) } });
+        // 出包时打入（v0.4.0 维护者：Beta 功能出包页默认勾上，玩家可取消；取消 = 这次出包不带社区补丁与金手指，同 Mac SGradeCard.swift）
+        var on = !SGradeOff().Contains(game.Id);
+        var check = new CheckBox { Content = T("export.sgrade.toggle"), IsChecked = on, VerticalAlignment = VerticalAlignment.Center, FontSize = 12.5 };
+        check.Click += (_, _) => SetSGrade(game.Id, check.IsChecked == true);
+        var head = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
+        head.Children.Add(title); Grid.SetColumn(check, 1); head.Children.Add(check);
+        stack.Children.Add(head);
+        var lit = false;
+        if (sgradeFailed) stack.Children.Add(Muted(T("export.sgrade.unknown"), 12));
+        else if (sgrade is not { } r) stack.Children.Add(Muted(T("export.sgrade.loading"), 12.5));
+        else
+        {
+            var exact = r.TryGetProperty("exact", out var e) ? e : default;
+            int total = 0;
+            var rows = new StackPanel { Spacing = 9 };
+            foreach (var cat in SGradeCats)
+                if (exact.ValueKind == JsonValueKind.Object && exact.TryGetProperty(cat, out var n) && n.GetInt32() > 0)
+                {
+                    total += n.GetInt32();
+                    var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 11 };
+                    row.Children.Add(new Border { Width = 26, Height = 26, CornerRadius = new CornerRadius(13), BorderThickness = new Thickness(0.8),
+                        Background = Diag((A(SGold, 0.30), 0), (A(SRose, 0.22), 1)), BorderBrush = Diag((A(SGoldHi, 0.6), 0), (A(SRose, 0.45), 1)),
+                        Child = new TextBlock { Text = SGradeGlyph.GetValueOrDefault(cat, "✓"), FontSize = 12, Foreground = new SolidColorBrush(SGoldHi),
+                            HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center } });
+                    row.Children.Add(new TextBlock { Text = T("export.sgrade.hit." + cat).Replace("{0}", n.GetInt32().ToString()), FontSize = 13.5, FontWeight = FontWeight.Medium,
+                        Foreground = Ink, VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap });
+                    rows.Children.Add(row);
+                }
+            var build = r.TryGetProperty("build", out var b) ? b.GetString() ?? "" : "";
+            // 都没有（这个版本没命中、游戏的别的版本也没有）：整张卡不出（11-13 维护者「没匹配就什么都不显示」）
+            if (total == 0 && build.Length > 0 && !(r.TryGetProperty("others", out var oo) && oo.ValueKind == JsonValueKind.Array && oo.GetArrayLength() > 0))
+                return new Panel { IsVisible = false };
+            if (total > 0) { lit = true; stack.Children.Add(rows); stack.Children.Add(Muted(T("export.sgrade.hit.note"), 12)); }
+            else
+            {
+                stack.Children.Add(Muted(T(build.Length == 0 ? "export.sgrade.later" : "export.sgrade.none"), 12));
+                if (r.TryGetProperty("others", out var others) && others.ValueKind == JsonValueKind.Array && others.GetArrayLength() > 0)
+                {
+                    var sep = language == "en" ? ", " : "、";
+                    var (open, close) = language == "en" ? (" (", ")") : ("（", "）");
+                    var parts = others.EnumerateArray().Take(6).Select(o => o.GetProperty("version").GetString() + open +
+                        string.Join(sep, o.GetProperty("cats").EnumerateArray().Select(c => T("export.sgrade.cat." + c.GetString()))) + close);
+                    stack.Children.Add(Muted(T("export.sgrade.others") + string.Join(language == "en" ? "; " : "；", parts), 12));
+                }
+            }
+        }
+        if (!on) { while (stack.Children.Count > 1) stack.Children.RemoveAt(1); stack.Children.Add(Muted(T("export.sgrade.off"), 12)); lit = false; }
+        var size = lit ? 56 : 44;
+        var s = new Image { Source = SGoldImage(), Width = size, Height = size, VerticalAlignment = VerticalAlignment.Top, Opacity = lit || sgrade is null ? 1 : 0.7,
+            Effect = new DropShadowEffect { Color = SGold, BlurRadius = lit ? 22 : 8, OffsetX = 0, OffsetY = 0, Opacity = lit ? 0.55 : 0.18 } };
+        var row0 = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*"), ColumnSpacing = 18 };
+        row0.Children.Add(s); Grid.SetColumn(stack, 1); row0.Children.Add(stack);
+        var glow = new RadialGradientBrush { Center = new RelativePoint(0, 0, RelativeUnit.Relative), GradientOrigin = new RelativePoint(0, 0, RelativeUnit.Relative),
+            RadiusX = new RelativeScalar(0.9, RelativeUnit.Relative), RadiusY = new RelativeScalar(1.6, RelativeUnit.Relative),
+            GradientStops = { new GradientStop(A(SGold, lit ? 0.18 : 0.06), 0), new GradientStop(A(SGold, 0), 1) } };
+        return new Border
+        {
+            CornerRadius = new CornerRadius(16), BorderThickness = new Thickness(1), Background = new SolidColorBrush(Color.FromRgb(26, 26, 28)),
+            BorderBrush = Diag((A(SGoldHi, lit ? 0.75 : 0.30), 0), (A(SGold, 0.12), 0.5), (A(SRose, lit ? 0.55 : 0.18), 1)),
+            BoxShadow = lit ? BoxShadows.Parse("0 6 22 0 #24EDC46B") : default,
+            Child = new Border { CornerRadius = new CornerRadius(16), Background = glow, Padding = new Thickness(22, 20), Child = row0 },
+        };
+    }
+
+    // 「出包时打入」取消过的款（按程序号记在私有目录 sgrade-off.json；没记过 = 勾上）
+    private HashSet<string>? sgradeOff;
+    private string SGradeOffPath => Path.Combine(privateRoot, "sgrade-off.json");
+    private HashSet<string> SGradeOff()
+    {
+        if (sgradeOff is not null) return sgradeOff;
+        try { sgradeOff = JsonSerializer.Deserialize<HashSet<string>>(File.ReadAllText(SGradeOffPath)) ?? []; }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException) { sgradeOff = []; }
+        return sgradeOff;
+    }
+    private void SetSGrade(string gameId, bool on)
+    {
+        var set = SGradeOff();
+        if (on) set.Remove(gameId); else set.Add(gameId);
+        try { Directory.CreateDirectory(privateRoot); File.WriteAllText(SGradeOffPath, JsonSerializer.Serialize(set)); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }   // 记不住只影响下次进页面的初值；这次出包照当前勾选
+        Render();
+    }
+
+    private async Task LoadSGradeAsync(LibraryGame game)
+    {
+        if (connectedFolder is null || libraryId is null) return;
+        try
+        {
+            var job = await LibraryJobClient.RunAsync(paths, privateRoot, connectedFolder, libraryId, "patchMatch", null, CancellationToken.None, gameId: game.Id);
+            if (sgradeFor != game.Id) return;
+            if (job.Report.Succeeded && job.Report.Result.ValueKind == JsonValueKind.Object) sgrade = job.Report.Result.Clone(); else sgradeFailed = true;
+        }
+        catch (Exception error) when (error is LibraryProtocolException or IOException or UnauthorizedAccessException or ArgumentException or
+            InvalidOperationException or System.ComponentModel.Win32Exception or KeyNotFoundException) { sgradeFailed = true; }
+        if (page is "build" or "batch") Render();
+    }
 
     private async Task LoadLocationsAsync(LibraryGame game, string? probe = null)
     {
@@ -574,8 +708,12 @@ public sealed partial class EnvironmentWindow
     }
 
     /// <summary>出包页单款：同批量出包走出包编排作业（剃刀 H13），计划只有这一款的 iPhone、不写批次文件</summary>
-    private Task RunPackAsync(LibraryGame game, bool spaceOverride) =>
-        RunExportAsync(ExportStream.InlinePlan(game.Id, game.Name, ["iphone"], packLocation, spaceOverride), batch: false);
+    private Task RunPackAsync(LibraryGame game, bool spaceOverride)
+    {
+        var plan = ExportStream.InlinePlan(game.Id, game.Name, ["iphone"], packLocation, spaceOverride);
+        if (SGradeOff().Contains(game.Id)) plan["sgrade"] = false;   // 出包页取消「S 级优化（Beta）」：这次不带社区补丁与金手指（pack/jobs/patches.py prepare）
+        return RunExportAsync(plan, batch: false);
+    }
 
     // 这一步收到 stepEnded 没有（没收到 = 编排作业在第一步前就结束了：被拒、已有一个在出、取消）；子作业的终态（失败页的原因 / 建议从这里读）
     private bool exportStepEnded;
@@ -716,7 +854,7 @@ public sealed partial class EnvironmentWindow
         // ---- LEFT: game info panel + disk space ----
         var leftCol = new StackPanel { Spacing = 16 };
         leftCol.Children.Add(GameInfoPanel(game));
-        leftCol.Children.Add(LiveSlot(() => packSpace is { } sp ? SpaceCard(sp) : null));   // 空间事件随时到：每秒刷新这一格
+        leftCol.Children.Add(LiveSlot(() => packSpace is { } sp && packState != "succeeded" ? SpaceCard(sp) : null));   // 空间事件随时到：每秒刷新这一格；只在出包成功后收起（11-14 体验梳理：成功页还挂着出包前的「预计占用」）；在出、失败照显示——磁盘满失败时「要多少 / 剩多少」正是点「释放空间」要看的（开发甲核）
         twoCol.Children.Add(leftCol);
 
         // ---- RIGHT: heading + overall + steps / results ----

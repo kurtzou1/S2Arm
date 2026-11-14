@@ -81,7 +81,8 @@ static NvPresentFX *present_fx_prepare(int slot, NSUInteger iw, NSUInteger ih, N
 static NvPresentFX *present_fx_for(int slot, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], BOOL m4) {
     if (!g_present_fx) return nil;
     double cw = crop && (crop[2] || crop[3]) ? crop[2] : (double)src.width, ch = crop && (crop[2] || crop[3]) ? crop[3] : (double)src.height;
-    pf_vp pv = pf_viewport(dst.width, dst.height, cw, ch);
+    double ca = s2a_cpatch_present_aspect();   // 自适应画幅补丁开着：视口按当前画幅拉满（同 nvn_mtl.m present_blit）
+    pf_vp pv = ca > 0 ? pf_viewport(dst.width, dst.height, ca, 1) : pf_viewport(dst.width, dst.height, cw, ch);
     NSUInteger ow = (NSUInteger)pv.w, oh = (NSUInteger)pv.h;
     if (ow <= (NSUInteger)cw + 1 && oh <= (NSUInteger)ch + 1) return nil;
     return present_fx_prepare(slot, (NSUInteger)cw, (NSUInteger)ch, ow, oh, m4);

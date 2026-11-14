@@ -316,6 +316,15 @@ static partial class P {
             return patId == null ? b.OpenStorage(NcaSectionType.Data, level)
                                  : b.OpenStorageWithPatch(new Nca(Ks, Where[patId]()), NcaSectionType.Data, level);
         };
+        // 诊断（11-13 金手指堆偏移）：S2A_NXUNPACK_ROMFS_HEADER=1 只打叠加更新后资源分区的 RomFS 头（10 个 u64：头长、目录哈希表 偏移/长、目录元数据 偏移/长、
+        //   文件哈希表 偏移/长、文件元数据 偏移/长、数据偏移）就退出，不写任何文件。用来与 S2Arm 用 LibHac 重建的镜像头（romfs.s2aidx）对比：
+        //   游戏 nn::fs 按这四张表的长度算挂载缓存、从自己的堆里分配，长度不同 = 之后的堆对象整体错位
+        if (Environment.GetEnvironmentVariable("S2A_NXUNPACK_ROMFS_HEADER") == "1") {
+            using IStorage hs = RomfsOpener(IntegrityCheckLevel.ErrorOnInvalid);
+            var hb = new byte[0x50]; hs.Read(0, hb).ThrowIfFailure();
+            Console.WriteLine("romfs_header " + string.Join(" ", Enumerable.Range(0, 10).Select(k => "0x" + BitConverter.ToUInt64(hb, k * 8).ToString("x"))));
+            return 0;
+        }
 
         // ---- 控制数据：名称、显示版本、图标 ----
         Directory.CreateDirectory(D); string name = "", nameZh = "", dver = "";

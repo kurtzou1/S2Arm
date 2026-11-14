@@ -76,15 +76,17 @@ int main(void) {
       int ws = 0; waitpid(p, &ws, 0);
       expect("⑥ 启动环境 S2A_FPS60=1 时清单的 0 不覆盖", "0", WIFEXITED(ws) ? (WEXITSTATUS(ws) ? "1" : "0") : "崩"); }
     // ⑥b 11-11 速度已验证正确的款保留默认 60（清单原因认来源）：期望手算——fps.tsv / A/B 绿 / 原生 60 → 玩家没设时设 1；
-    //   全引擎档 / Unity·UE 推导 → 不设；玩家显式 0 → 照旧 0
+    //   全引擎档 / Unity·UE 推导 → 不设；玩家显式 0 → 照旧 0；社区帧率补丁（11-13）→ 设 1、玩家显式 0 照旧 0
     { static const struct { const char *why, *env, *want; } vc[] = {
           {"默认开：来源 fps.tsv", NULL, "1"},
           {"默认开：来源 逻辑速度同局 A/B 绿（ρ 1.01、q 0.99，放开出图间隔）", NULL, "1"},
           {"默认开：来源 游戏原生 60 帧", NULL, "1"},
           {"默认开：来源 引擎通用：放开出图间隔（全引擎，同局 A/B 判红才关）", NULL, NULL},
           {"默认开：来源 引擎通用第一层（Unity / UE4 放开交换间隔）", NULL, NULL},
-          {"默认开：来源 fps.tsv", "0", "0"}};
-      for (int i = 0; i < 6; i++) {
+          {"默认开：来源 fps.tsv", "0", "0"},
+          {"默认开：来源 社区帧率补丁", NULL, "1"},          // 11-13：社区帧率补丁版本精确命中才进得了包，默认开
+          {"默认开：来源 社区帧率补丁", "0", "0"}};          // 玩家关了照旧关
+      for (int i = 0; i < 8; i++) {
           f = fopen(path, "w"); fprintf(f, "fps60\t1\t# %s\n", vc[i].why); fclose(f);
           fflush(stdout); pid_t p = fork(); if (p < 0) return 1;
           if (!p) { if (vc[i].env) setenv("S2A_FPS60", vc[i].env, 1); else unsetenv("S2A_FPS60");

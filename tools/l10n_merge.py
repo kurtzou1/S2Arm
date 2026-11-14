@@ -112,8 +112,13 @@ def main_strings(o, a, b):
         return 1
     (lo, eo), (la, ea), (lb, eb) = po, pa, pb
     rest = lambda ls: [l for l in ls if not ENTRY.match(l)]
-    if rest(lb) != rest(lo) and rest(lb) != rest(la):   # 注释等非条目行两边都改了 → 留给人
+    if rest(la) != rest(lo) and rest(lb) != rest(lo) and rest(la) != rest(lb):   # 注释等非条目行两边都改了、改得不一样 → 留给人
         return 1
+    # 骨架（非条目行 + 条目顺序）取改过非条目行的那一侧，另一侧新增的键插进去。11-14：原先只认本侧骨架，
+    # 对侧单方面加个空行 / 改注释也判冲突退回（sgrade-2 的 zh-Hant 冲突）
+    swap = rest(la) == rest(lo) and rest(lb) != rest(lo)
+    if swap:
+        (la, ea), (lb, eb) = (lb, eb), (la, ea)
     val = {}
     for k in list(ea) + [k for k in eb if k not in ea] + [k for k in eo if k not in ea and k not in eb]:
         v = m3(eo.get(k, GONE), ea.get(k, GONE), eb.get(k, GONE))

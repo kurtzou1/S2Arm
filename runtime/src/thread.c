@@ -3016,16 +3016,16 @@ void s2a_thread_dump(void) {
                     pc = arm_thread_state64_get_pc(st); lr = arm_thread_state64_get_lr(st); fp = arm_thread_state64_get_fp(st); }
                 thread_resume(t->mport);
             }
-            char bt[720]; int bn = 0;
+            char bt[2048], w[256]; int bn = 0;   // 每帧带导出名（s2a_guest_where，#806）：一帧至多约 200 字节
             uint64_t at[2] = {pc, lr};
             for (int k = 0; k < 2; k++) { module_t *rm = at[k] ? module_of((void *)at[k]) : NULL;   // 宿主代码里（门、桩）的 pc / lr 不在游戏模块内，略过
-                if (rm) bn += snprintf(bt + bn, sizeof bt - bn, " %s%s+%#llx", k ? "lr " : "pc ", rm->name, (unsigned long long)(at[k] - (uint64_t)rm->base)); }
+                if (rm && s2a_guest_where(at[k], w, sizeof w)) bn += snprintf(bt + bn, sizeof bt - bn, " %s%s", k ? "lr " : "pc ", w); }
             for (int d = 0; d < 8 && fp && !(fp & 0xF); d++) {
                 uint64_t fr[2]; vm_size_t got = 0;
                 if (vm_read_overwrite(mach_task_self(), (vm_address_t)fp, sizeof fr, (vm_address_t)fr, &got) != KERN_SUCCESS || got != sizeof fr) break;
-                module_t *rm = module_of((void *)fr[1]); if (!rm) break;
-                bn += snprintf(bt + bn, sizeof bt - bn, " ← %s+%#llx", rm->name, (unsigned long long)(fr[1] - (uint64_t)rm->base));
-                if (fr[0] <= fp || bn >= (int)sizeof bt - 48) break;
+                if (!s2a_guest_where(fr[1], w, sizeof w)) break;
+                bn += snprintf(bt + bn, sizeof bt - bn, " ← %s", w);
+                if (fr[0] <= fp || bn >= (int)sizeof bt - 256) break;
                 fp = fr[0];
             }
             if (bn) LOG("    客体回溯%s%s", run ? "（在跑，采样）" : "", bt);

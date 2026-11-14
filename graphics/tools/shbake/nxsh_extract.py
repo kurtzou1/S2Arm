@@ -547,7 +547,11 @@ def _scan_blob(path, data, rows, blobs, stat):
     if RAW and (data.find(b'BNSH\0\0\0\0') < 0 or path.startswith('nso:')): scan_raw(path, data, rows, blobs, stat)
     for k, m in enumerate(re.finditer(b'BNSH\0\0\0\0', data)):
         # 按头里的长度只切这一支（#711：原先先切到文件尾再截短，几 GB 的容器 mmap 每遇一处 BNSH 就拷一份到文件尾，Windows 提交上限下 MemoryError）
-        o = m.start(); size = struct.unpack_from('<I', data, o + 0x1c)[0]; b = data[o:o + size] if 0 < size <= len(data) - o else data[o:]
+        o = m.start(); size = struct.unpack_from('<I', data, o + 0x1c)[0]; end = o + size if 0 < size <= len(data) - o else len(data)
+        # 切之前先在原数据上看 +0x60 是不是 grsc（bnsh_codes 头一步就判它，判不中返回 None，结果同「无 grsc」）：大容器里碰巧是 BNSH 魔数的字节，
+        #   头里的长度也是乱的，0100F43008C44000 arc/data.trpfs（4.7 GB）里 148 处、长度最大 4.17 GB，原先每处照长度切一份、合计拷 168 GB，最后全是无 grsc
+        if end - o < 0x64 or data[o + 0x60:o + 0x64] != b'grsc': stat['BNSH 无 grsc'] += 1; continue
+        b = data[o:end]
         try: codes = bnsh_codes(b)
         except Exception: stat['BNSH 解析失败'] += 1; continue
         if codes is None: stat['BNSH 无 grsc'] += 1; continue
