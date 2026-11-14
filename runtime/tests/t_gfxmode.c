@@ -35,6 +35,10 @@ static void put(const char *path, const char *text) {
 }
 static int fails;
 
+// 电源档替身（gfxmode.c s2a_mac_on_battery 的弱缺省在这里被这份强定义盖掉）：1 = 电池（缺省，照旧 interactive），0 = 插电 / 无电池
+static int g_battery = 1;
+int s2a_mac_on_battery(void) { return g_battery; }
+
 #include "../../graphics/nvn/gfx/nvn/dmsh_chain.h"
 int main(void) {
     snprintf(g_dir, sizeof g_dir, "/tmp/t_gfxmode.%d", (int)getpid());
@@ -87,6 +91,20 @@ int main(void) {
       }
       int st = 0; waitpid(c, &st, 0);
       if (!WIFEXITED(st) || WEXITSTATUS(st)) fails++; else printf("  ✓ S2A_GFX=generic 不认：打【红】、照包判\n"); }
+    // 直连音频调度缺省按电源档分（11-14 卡顿诊断）：插电 / 无电池（桌面）的 Mac 不再补 interactive——不设时 C# S2ARealtime 走 time-constraint 实时（老缺省），
+    //   且日志写明；电池 Mac 照旧补 interactive（下一例）。模式每进程只定一次：本进程留给下一例（电池档），这里 fork 子进程里判
+    { fflush(stdout); pid_t c = fork();
+      if (!c) {
+          char lf[600], buf[4096] = ""; snprintf(lf, sizeof lf, "%s/log_ac.txt", g_dir); int fd = open(lf, O_RDWR | O_CREAT | O_TRUNC, 0644); g_s2a_logfd = fd;
+          g_battery = 0; setenv("S2A_GFX", "direct", 1); unsetenv("S2A_AUDIO_SCHED");
+          int m = s2a_gfx_mode(); ssize_t n = pread(fd, buf, sizeof buf - 1, 0); if (n > 0) buf[n] = 0;
+          const char *as = getenv("S2A_AUDIO_SCHED");
+          int ok = m == S2A_GFX_DIRECT && !as && strstr(buf, "音频调度缺省：实时");
+          if (!ok) printf("✗ 插电 / 桌面 Mac：期望不补 S2A_AUDIO_SCHED（C# 走实时）且日志写明，实际模式 %d、AUDIO=%s；日志「%s」\n", m, as ? as : "(无)", buf);
+          fflush(stdout); _exit(ok ? 0 : 1);
+      }
+      int st = 0; waitpid(c, &st, 0);
+      if (!WIFEXITED(st) || WEXITSTATUS(st)) fails++; else printf("  ✓ 插电 / 无电池的 Mac 直连局：不补 S2A_AUDIO_SCHED（实时缺省），日志写明\n"); }
     // 直连缺省省电组合：没设的补 S2A_AUDIO_SCHED=interactive（10-30 起不再补 DM_RT=0：出图线程照常声明实时）；游戏线程 QoS 不再补（10-26 起主线程不设 = thread.c 缺省 interactive），显式给的（S2A_GUEST_QOS=interactive）照用。模式每进程只定一次，故放在最前
     setenv("S2A_GFX", "direct", 1); unsetenv("DM_RT"); unsetenv("S2A_GAME_MAIN_QOS"); unsetenv("S2A_AUDIO_SCHED"); setenv("S2A_GUEST_QOS", "interactive", 1);
     { int m = s2a_gfx_mode(); const char *rt = getenv("DM_RT"), *mq = getenv("S2A_GAME_MAIN_QOS"), *gq = getenv("S2A_GUEST_QOS"), *as = getenv("S2A_AUDIO_SCHED");
@@ -145,6 +163,6 @@ int main(void) {
       put(sm, NULL); put(li, NULL); rmdir(d); rmdir(o); }
 
     if (fails) { printf("✗ t_gfxmode：%d 例不符\n", fails); return 1; }
-    printf("✓ t_gfxmode：18 例全符\n");
+    printf("✓ t_gfxmode：19 例全符\n");
     return 0;
 }

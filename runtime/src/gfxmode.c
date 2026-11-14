@@ -100,6 +100,9 @@ static char g_brief[48];         // 判定依据短写（开发浮层一眼能�
 static pthread_mutex_t g_mode_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic int g_decided;
 static int g_default_audio_sched;
+// 电源档（Mac 宿主 hud.c s2a_mac_on_battery 强定义：AppleSmartBattery 的 ExternalConnected，按名取同 sys_power；11-14 卡顿诊断手柄项）。
+//   单测 / 没链 hud.c 的构建用这份弱缺省 = 电池档：音频调度照旧 interactive，行为不变
+__attribute__((weak)) int s2a_mac_on_battery(void) { return 1; }
 static void decide(void) {
     // 只有直连一种模式（11-07 拆通用）：包里没带本宿主口径的直连库也照样直连，着色器首次遇到时现编（dsh_miss / dm_shader_miss）——
     //   直连库只是提速件，不是起局的门（11-13 维护者「不许堵门」：原先没库就收局报 direct_lib_missing，玩家导入了不带库的 game.img 就整局起不来）
@@ -143,8 +146,19 @@ static void decide(void) {
     // 出图线程实时声明不再缺省关（10-30 帧率能耗线）：DM_RT=0 让帧关键线程没有截止时间，轮询退避一长，系统就把它们当闲线程挪能效核降频——
     //   丝之歌测试设备短睡退避 250 µs 局整机 1.72 W 但慢帧 2.5%：主线程 nx-81 只 19% 在性能核，提交线程 1.74 GHz、每帧 1.6 ms（性能核上 0.42 ms）。
     //   维护者 10-30：稳定 60 帧前提下功耗最低，不靠让关键线程空转留在大核；声明按每帧实测 CPU 自动定（hle_nvn.c rt_comp_tick）
-    if (mode == S2A_GFX_DIRECT && !getenv("S2A_AUDIO_SCHED") &&
-        !setenv("S2A_AUDIO_SCHED", "interactive", 0)) g_default_audio_sched = 1;
+    // 直连音频调度缺省按电源档分（11-14 卡顿诊断 §10.1 形态 A）：插电 / 无电池（桌面机）的 Mac 不再补 interactive——不设时
+    //   C# S2ARealtime 走 time-constraint 实时（10-24 能耗线之前的老缺省）；电池 Mac 与掌机（iOS）/ 安卓照旧补 interactive——省电缺省只该管电池场景。
+    //   原缺省不分电源档：声音渲染线程（每 5 ms 一拍、游戏线程每帧同步等它的更新事件）在 interactive 档没有截止期限，系统侧偶发抢占把它拖晚，
+    //   等事件的游戏线程整帧被拖长（11-14 报告：安静环境 44 个慢帧 93% 为游戏线程离 CPU 等事件；基线环境 1227 次 interval 翻转 / 26.7 分钟）。
+    //   显式给的 S2A_AUDIO_SCHED 照用
+    if (mode == S2A_GFX_DIRECT && !getenv("S2A_AUDIO_SCHED")) {
+        int on_battery = 1;   // 掌机 / 安卓 / 读不到电源：照旧 interactive
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
+        on_battery = s2a_mac_on_battery();
+#endif
+        if (!on_battery) LOG("音频调度缺省：实时（插电 / 无电池的 Mac）");
+        else if (!setenv("S2A_AUDIO_SCHED", "interactive", 0)) g_default_audio_sched = 1;
+    }
     atomic_store(&g_mode, mode);
 }
 // iOS：资源包闸门放行之前不落定模式（10-26 测试设备2：资源包说明页等「重新检查」时，直连提示轮询先问了模式，
