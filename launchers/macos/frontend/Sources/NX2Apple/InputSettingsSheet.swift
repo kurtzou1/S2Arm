@@ -1,8 +1,9 @@
 // S2Arm（不是上游文件）：手柄 / 键位设置弹窗（同旧启动器 InputEditor：看键位、改键、恢复默认、保存）。
 // 左边是 Joy-Con 按键图（自旧启动器 ControllerMap 搬来），点一个键在右边改它的键盘 / 鼠标 / 手柄绑定；下面是鼠标与摇杆选项。
 // 键位按玩家保存（本地最多 4 位玩家）：上面选玩家 1–4，各自一份键位、各自保存（玩家 1 = 这款的 input.json，玩家 2–4 = input-pN.json）；
-//   切玩家不丢没保存的改动（留在弹窗里，保存才写盘）。保存走 saveInput 作业（S2ArmLauncherModel+Input），成了留着弹窗继续改别的玩家；
-//   没成的原因留在弹窗里。改键下次开始游戏时生效（起局时玩家 2–4 的交给宿主，槽位各照各的映射采样）。
+//   玩家 2–4 没单独存过的显示玩家 1 的键位（与起局一致，保存后单独生效）；切玩家不丢没保存的改动（留在弹窗里，保存才写盘）。
+//   保存走 saveInput 作业（S2ArmLauncherModel+Input），成了给一句「已保存」、留着弹窗继续改别的玩家；没成的原因留在弹窗里。
+//   改键下次开始游戏时生效（起局时玩家 2–4 的交给宿主，槽位各照各的映射采样；鼠标选项与背键始终照玩家 1）。
 import AppKit
 import SwiftUI
 import NXCore
@@ -18,16 +19,20 @@ struct InputSettingsSheet: View {
     @State private var player = 1
     @State private var config = InputConfig.standard
     @State private var baseline = InputConfig.standard
-    /// 每位玩家的工作副本（切玩家时不丢未保存的改动）与各自的基线（上次保存 / 读出的）
+    /// 每位玩家的工作副本（切玩家时不丢未保存的改动）与各自的基线（上次保存 / 读出）、沿用标记与读数问题
     @State private var configs: [Int: InputConfig] = [:]
     @State private var baselines: [Int: InputConfig] = [:]
+    @State private var inheritedFlags: [Int: Bool] = [:]
     @State private var problems: [Int: Bool] = [:]
     @State private var loaded = false
     @State private var loadProblem = false
+    @State private var inherited = false
     @State private var selected = "A"
     @State private var recording: String?
     @State private var saving = false
     @State private var failure: String?
+    /// 刚保存成功（给一句「已保存」反馈；再改任何键就收掉）
+    @State private var savedNow = false
 
     init(model: S2ArmLauncherModel, gameID: String) {
         self.model = model
@@ -109,17 +114,19 @@ struct InputSettingsSheet: View {
             guard !loaded else { return }
             for p in 1...4 {
                 let input = model.loadInput(gameID: gameID, player: p)
-                configs[p] = input.config; baselines[p] = input.config; problems[p] = input.problem
+                configs[p] = input.config; baselines[p] = input.config; inheritedFlags[p] = input.inherited; problems[p] = input.problem
             }
             config = configs[player] ?? .standard; baseline = baselines[player] ?? .standard
             loadProblem = problems[player] ?? false
+            inherited = inheritedFlags[player] ?? false
             loaded = true
         }
-        .onChange(of: config) { configs[player] = $0 }   // 改动实时记到当前玩家的工作副本上（切玩家不丢）
+        .onChange(of: config) { configs[player] = $0; savedNow = false }   // 改动实时记到当前玩家的工作副本上（切玩家不丢）；改了就不是「已保存」状态
         .onChange(of: player) { p in
             config = configs[p] ?? .standard; baseline = baselines[p] ?? .standard
             loadProblem = problems[p] ?? false
-            selected = "A"; recording = nil; failure = nil; rebind = nil
+            inherited = inheritedFlags[p] ?? false
+            selected = "A"; recording = nil; failure = nil; rebind = nil; savedNow = false
         }
         .frame(width: 640, height: 720)
         .background(LauncherPalette.background)
@@ -149,6 +156,10 @@ struct InputSettingsSheet: View {
             }
             .padding(.top, 6)
             Text(t("player.note")).font(.manrope(11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            // 这位还没单独保存过：显示的就是玩家 1 的键位（与起局一致），保存后单独生效
+            if inherited {
+                Text(t("player.inherit")).font(.manrope(11.5)).foregroundStyle(LauncherPalette.building).fixedSize(horizontal: false, vertical: true)
+            }
             if loadProblem {
                 Text(t("loadProblem")).font(.manrope(12.5)).foregroundStyle(LauncherPalette.building)
                     .fixedSize(horizontal: false, vertical: true).padding(.top, 4)
@@ -330,6 +341,8 @@ struct InputSettingsSheet: View {
                 Spacer(minLength: 8)
                 if saving {
                     Text(t("saving")).font(.manrope(12)).foregroundStyle(.secondary)
+                } else if savedNow && config == baseline {
+                    Text(t("saved")).font(.manrope(12)).foregroundStyle(.secondary)
                 } else if config != baseline {
                     Text(t("unsaved")).font(.manrope(12)).foregroundStyle(.secondary)
                 }
@@ -350,12 +363,18 @@ struct InputSettingsSheet: View {
         guard canSave else { return }
         saving = true; failure = nil
         let config = config
-        let player = player
+        let savedFor = player
         Task {
             do {
-                try await model.saveInput(config, gameID: gameID, player: player)
-                baselines[player] = config; configs[player] = config; saving = false
-                // 成了不关弹窗：键位按玩家分开保存，留着继续给别的玩家改（切玩家用上面的选择器）
+                try await model.saveInput(config, gameID: gameID, player: savedFor)
+                baselines[savedFor] = config; configs[savedFor] = config; saving = false
+                // 还停在这一位的话当前基线跟着跟上（不然「未保存」提示一直在、恢复这个键回的是保存前的旧值）；
+                //   给一句「已保存」反馈。成了不关弹窗：键位按玩家分开保存，留着继续给别的玩家改（切玩家用上面的选择器）
+                if player == savedFor {
+                    baseline = config
+                    inheritedFlags[savedFor] = false; inherited = false   // 存了就是自己的一份，「沿用玩家 1」的提示收掉
+                    savedNow = true
+                }
             } catch {
                 failure = names.saveFailure(error.localizedDescription, backend: loc.backend)
                 saving = false

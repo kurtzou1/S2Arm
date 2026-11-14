@@ -94,12 +94,14 @@ struct InputConfig: Codable, Equatable {
     }
 }
 
-/// 读到的键位与出处：读不懂已存的文件时 problem 为真（先显示默认键位，保存会覆盖它）。
-struct LoadedInput { let config: InputConfig; let problem: Bool }
+/// 读到的键位与出处：读不懂已存的文件时 problem 为真（先显示默认键位，保存会覆盖它）；
+///   inherited 为真是玩家 2–4 没存过自己的键位、沿用玩家 1 的那份（与起局一致，保存后单独生效）。
+struct LoadedInput { let config: InputConfig; let problem: Bool; var inherited = false }
 
 extension S2ArmLauncherModel {
     /// 这款现在的键位：玩家 1 = 这款文件夹里的 input.json，没有就用私有目录的 default-input.json，再没有用标准键位（同起局 build.py 的取法）；
-    ///   玩家 2–4 = 这款文件夹里的 input-pN.json（键位设置按玩家保存），没有就用标准键位——不落回玩家 1 的键位，每位玩家自己的一份。
+    ///   玩家 2–4 = 这款文件夹里的 input-pN.json（键位设置按玩家保存），没存过 / 存坏了就沿用玩家 1 的键位——
+    ///   起局时这几位没存就是照玩家 1 的那份进游戏（build.py 不带、宿主落回全局映射），弹窗显示要跟实际玩的一致。
     /// 游戏库结构 v3 起键位在每款自己的文件夹（作业层 layout 把旧的 mappings/<号>.json 搬进去了）；原先还读 mappings/ 永远读不到，存过的键位重开显示成默认
     func loadInput(gameID: String, player: Int = 1) -> LoadedInput {
         let env = provider.client.environment
@@ -111,7 +113,8 @@ extension S2ArmLauncherModel {
                 problem = true
             }
         }
-        if player == 1, let data = try? Data(contentsOf: env.privateRoot.appendingPathComponent("default-input.json")),
+        if player > 1 { return LoadedInput(config: loadInput(gameID: gameID, player: 1).config, problem: problem, inherited: true) }
+        if let data = try? Data(contentsOf: env.privateRoot.appendingPathComponent("default-input.json")),
            let config = try? JSONDecoder().decode(InputConfig.self, from: data) { return LoadedInput(config: config, problem: problem) }
         return LoadedInput(config: .standard, problem: problem)
     }
