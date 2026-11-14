@@ -1345,7 +1345,7 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
 #endif
     for (int i = 0; i < n; i++) {
         dm_shader_mesh_hold(sd[i].data, sd[i].control);   // NVN2 keys are deferred, but control + code are valid here; retain only mesh inputs
-        if (keys_hash(&sd[i], 1, k->key[i])) { k->ok |= (uint8_t)(1u << i); dm_shader_miss(k->key[i], sd[i].data, sd[i].control); nvn_be_shader_prefetch(k->key[i]); }   // S2Arm: a key missing from the map is translated on the device now (graphics/nvn/host_adapt.m)
+        if (keys_hash(&sd[i], 1, k->key[i])) { k->ok |= (uint8_t)(1u << i); dm_shader_miss(k->key[i], sd[i].data, sd[i].control); dm_shader_vs_hold_key(k->key[i], sd[i].data, sd[i].control); nvn_be_shader_prefetch(k->key[i]); }   // S2Arm: a key missing from the map is translated on the device now (graphics/nvn/host_adapt.m)
         else { uint8_t early[8]; if (keys_hash_early(&sd[i], early)) nvn_be_shader_prefetch(early); }   // S2Arm #674: Switch 2 stages, keyed at first use
 #if defined(__ANDROID__)   // Android 直连的阶段 / 源快照 / 按 serial 记 key；Apple 回放不读这些，保持 main 原行为
         // 阶段只在 control 仍有效、code 已映射的本次调用内读定；code 未映射时留给 Bind

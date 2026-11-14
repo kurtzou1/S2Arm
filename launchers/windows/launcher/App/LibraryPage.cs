@@ -32,6 +32,8 @@ public sealed partial class EnvironmentWindow
         CapturePaths();
         if (page == "library") libraryFolder = libraryFolderBox.Text ?? "";
         messagesOpen = false;   // 顶栏导航离开「消息」页
+        sgradeOpen = false;     // 也离开「S 级优化升级」页
+        cheatsFor = null;       // 和「金手指」页
         page = destination;
         if (destination != "library") welcomeHome = false;   // 品牌名带去的欢迎页只管这一次回首页，去了别的页就回到平常
         // 环境检查页每次打开读一次装到 iPhone 的方式和开发者证书（InstallModePage.cs / DevCertPage.cs）
@@ -81,7 +83,39 @@ public sealed partial class EnvironmentWindow
         Background = Surface, CornerRadius = new CornerRadius(12), Padding = new Thickness(padding), Child = content
     };
 
+    /// <summary>顶部大图：只认这款文件夹里的商店横图（LibraryGame.BannerFile），按 1600 宽解码（铺满整条也不糊）；读不出就 null、退回封面卡片</summary>
+    private Bitmap? HeroBanner(LibraryGame game)
+    {
+        if (connectedFolder is null || game.BannerFile() is not { } path) return null;
+        try
+        {
+            if (new FileInfo(path).Length > 16 * 1024 * 1024) return null;
+            // 缓存键另起：没有自带图标的款 cover 也指向 banner.jpg，封面卡片按 240 宽解码的那份不能拿来铺大图
+            if (!covers.TryGetValue(path + "#hero", out var image))
+            {
+                using var file = File.OpenRead(path);
+                image = Bitmap.DecodeToWidth(file, 1600);
+                covers.Add(path + "#hero", image);
+            }
+            return image;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { return null; }
+    }
+
+    /// <summary>封面 + 已打上 S 级优化的左上角金色 S（同 Mac LauncherView+Library SGradeBadge：只有 S、没有框和底色，叠三层更实、加投影）</summary>
     private Control GameCover(LibraryGame game, int size)
+    {
+        var cover = GameCoverImage(game, size);
+        if (!game.SGrade) return cover;
+        var s = Math.Max(20, size / 3.2);
+        var badge = new Panel { Width = s, Height = s, Margin = new Thickness(3), HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top,
+            Effect = new DropShadowEffect { Color = Color.FromArgb(115, 0, 0, 0), BlurRadius = s * 0.24, OffsetX = 0, OffsetY = s * 0.04 } };
+        for (var k = 0; k < 3; k++) badge.Children.Add(new Image { Source = SGoldImage(), Stretch = Stretch.Uniform });
+        Avalonia.Automation.AutomationProperties.SetAutomationId(badge, "card.sgrade");
+        return new Panel { Width = size, Height = size, Children = { cover, badge } };
+    }
+
+    private Control GameCoverImage(LibraryGame game, int size)
     {
         // Only a backend-provided local cover in this library is considered; never load a remote URL.
         try
@@ -149,7 +183,21 @@ public sealed partial class EnvironmentWindow
 
         var games = catalog?.Games.Where(g => !g.Hidden).ToArray() ?? [];
         var hero = games.FirstOrDefault(g => g.Id == selectedGame) ?? games.FirstOrDefault();
-        if (hero is not null)
+        if (hero is not null && HeroBanner(hero) is { } heroBanner)
+        {
+            // 顶部大图（11-14 维护者：「换成用 banner」）：商店横图 1920×1080 铺满整条，标题压在底部渐变上；没有横图的款退回下面的封面卡片
+            var art = new Grid { Height = 280 };
+            art.Children.Add(new Image { Source = heroBanner, Stretch = Stretch.UniformToFill, HorizontalAlignment = HorizontalAlignment.Stretch, VerticalAlignment = VerticalAlignment.Center });
+            art.Children.Add(new Border { Background = new LinearGradientBrush { StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative), EndPoint = new RelativePoint(0, 1, RelativeUnit.Relative),
+                GradientStops = { new GradientStop(Color.Parse("#000E0E10"), 0.35), new GradientStop(Color.Parse("#E60E0E10"), 1) } } });
+            var overlay = new StackPanel { Spacing = 6, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(28, 0, 28, 22) };
+            overlay.Children.Add(Muted(T(selectedGame is null ? "library.title" : "library.selected"), 14));
+            overlay.Children.Add(Label(hero.Name, 32));
+            overlay.Children.Add(Muted(T("library.version") + " · " + hero.Version, 14));
+            art.Children.Add(overlay);
+            body.Children.Add(new Border { CornerRadius = new CornerRadius(16), ClipToBounds = true, Child = art });
+        }
+        else if (hero is not null)
         {
             var banner = new Grid { ColumnDefinitions = new ColumnDefinitions("100,*"), ColumnSpacing = 24 };
             banner.Children.Add(GameCover(hero, 100));
@@ -205,6 +253,8 @@ public sealed partial class EnvironmentWindow
         if (catalog is null || libraryBusy || librarySummary is "library.failed" or "library.invalid_result" or "library.interrupted")
             body.Children.Add(Card(status));
 
+        if (catalog is not null && games.Length > 0)   // 「S 级优化升级」入口（同 Mac 游戏库标题行，v0.4.0）
+            body.Children.Add(new StackPanel { HorizontalAlignment = HorizontalAlignment.Right, Children = { SGradeUpgradeEntry() } });
         foreach (var game in games)
         {
             var line = new Grid { ColumnDefinitions = new ColumnDefinitions("72,*,Auto"), ColumnSpacing = 18 };
@@ -334,6 +384,7 @@ public sealed partial class EnvironmentWindow
             menu.Items.Add(item);
         }
         Add(T("nav.build"), "export", () => { libraryFolder = libraryFolderBox.Text ?? ""; selectedGame = game.Id; OpenBuild(); }, idle && game.Reachable);
+        Add(T("cheats.page.menu"), "cheats", () => OpenCheats(game), idle);   // 金手指：看 / 导入（CheatsPage.cs，同 Mac 启动设置里的金手指）
         menu.Items.Add(new Separator());
         Add(T("library.menu.revealWindows"), "reveal", () => RevealGame(game), (game.Location?.Path ?? "").Length > 0 && game.LocationState != "offline");
         Add(T("library.menu.move"), "move", () => BeginPicker(() => MoveGameAsync(game)), idle && game.Reachable && game.LocationState != "none");

@@ -226,6 +226,8 @@ def mac_settings(c, gid):
         if key == "widescreen" and key not in picked and adaptive_patches(c, gid)[0]:
             value = True   # 没选过、包里有自适应满屏补丁：显示开（11-13 命中就默认开，同 iPhone）
         out[key] = dict(available=ok, value=value if ok else _default(item, caps, rows=rows), reason="" if ok else why)
+        if key == "language":
+            out[key].update(language_state(c, gid, item, out[key]["value"]))
     # 只用社区补丁（11-13 维护者撤掉我方 60 帧与通用满屏，tools/caps_policy.py patch_only）：没有帧率补丁的款不出「60 帧」，没有宽屏补丁的款不出「满屏」
     #   （读到了能力清单才判：还没出 Mac 版时照旧都列、先存偏好）
     if caps:
@@ -234,6 +236,108 @@ def mac_settings(c, gid):
         for key, has in (("fps60", fps_p), ("widescreen", ws_p), ("fpsPick", len(fps_levels(c, gid)) > 1)):
             if key in out and not has:
                 out[key]["hidden"] = True
+    return out
+
+
+# ---- 游戏语言（11-14 维护者：「按照你的建议加上」，推翻 11-07「不给玩家选」）----
+# 只列这款实际支持的语言：读包里保留的 control.nacp 的支持语言标志（SupportedLanguageFlag，偏移 0x302C，u32），位序 = 宿主 TitleLanguage 枚举
+#   （compat/tree/.../TitleLanguage.cs；定义表 language 的选项值就是这些名字）。还没出包 / 标志为 0（合成的 nacp）→ 不知道，照旧列全部
+NACP_LANGUAGES = ("AmericanEnglish", "BritishEnglish", "Japanese", "French", "German", "LatinAmericanSpanish", "Spanish", "Italian", "Dutch",
+                  "CanadianFrench", "Portuguese", "Russian", "Korean", "TraditionalChinese", "SimplifiedChinese", "BrazilianPortuguese", "Polish", "Thai")
+
+
+def nacp_languages(nacp_bytes):
+    """control.nacp 原文 → 支持的语言（NACP_LANGUAGES 的名字，按位序）；读不到 / 标志为 0 → []"""
+    if len(nacp_bytes) < 0x3030:
+        return []
+    flag = int.from_bytes(nacp_bytes[0x302C:0x3030], "little")
+    return [n for i, n in enumerate(NACP_LANGUAGES) if flag >> i & 1]
+
+
+def game_languages(c, gid):
+    """这款支持的游戏语言：Mac 包、iPhone 资源包里任一份 ctl/control.nacp（同一份游戏数据）；都没有 → []（还没出包，不知道）"""
+    for root in (layout.image_mac(c, gid, create=False), layout.image_ios(c, gid, create=False) / layout.IOS_PACK):
+        try:
+            got = nacp_languages((root / "ctl" / "control.nacp").read_bytes())
+        except OSError:
+            continue
+        if got:
+            return got
+    return []
+
+
+def system_title_language(tags):
+    """系统首选语言标签（BCP 47）→ 游戏语言名：照搬宿主 services/S2A.Services/SystemLocale.cs Map / FromPreferred（第一个认得的；都不认得 = 美式英语）"""
+    for tag in tags:
+        p = str(tag).replace("_", "-").lower().split("-")
+        has = lambda s: s in p[1:]
+        lang = {"ja": "Japanese", "ko": "Korean", "de": "German", "it": "Italian", "nl": "Dutch", "ru": "Russian", "pl": "Polish", "th": "Thai"}.get(p[0])
+        if p[0] == "zh":
+            lang = "TraditionalChinese" if has("hant") else "SimplifiedChinese" if has("hans") else \
+                "TraditionalChinese" if has("tw") or has("hk") or has("mo") else "SimplifiedChinese"
+        elif p[0] == "en":
+            lang = "BritishEnglish" if any(has(x) for x in ("gb", "au", "nz", "ie", "in", "za")) else "AmericanEnglish"
+        elif p[0] == "fr":
+            lang = "CanadianFrench" if has("ca") else "French"
+        elif p[0] == "es":
+            lang = "Spanish" if len(p) == 1 or has("es") else "LatinAmericanSpanish"
+        elif p[0] == "pt":
+            lang = "BrazilianPortuguese" if has("br") else "Portuguese"
+        if lang:
+            return lang
+    return "AmericanEnglish"
+
+
+def effective_language(want, supported):
+    """起局实际用的语言：同宿主 SystemLocale.TitleFallback + 上游 PickFallbackLanguage——想要的 → 美式 / 英式英语 → 支持表第一项；不知道支持表就是想要的"""
+    if not supported:
+        return want
+    for lang in (want, "AmericanEnglish", "BritishEnglish"):
+        if lang in supported:
+            return lang
+    return supported[0]
+
+
+def preferred_tags():
+    """本机系统首选语言（同宿主 CFLocaleCopyPreferredLanguages）；取不到 → []（S2A_TEST_PREFERRED_LANGUAGES 单测用，逗号分隔）"""
+    test = os.environ.get("S2A_TEST_PREFERRED_LANGUAGES")
+    if test is not None:
+        return [t for t in test.split(",") if t]
+    try:
+        import ctypes, ctypes.util
+        cf = ctypes.CDLL(ctypes.util.find_library("CoreFoundation"))
+        cf.CFLocaleCopyPreferredLanguages.restype = ctypes.c_void_p
+        cf.CFArrayGetCount.restype = ctypes.c_long; cf.CFArrayGetCount.argtypes = [ctypes.c_void_p]
+        cf.CFArrayGetValueAtIndex.restype = ctypes.c_void_p; cf.CFArrayGetValueAtIndex.argtypes = [ctypes.c_void_p, ctypes.c_long]
+        cf.CFStringGetCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint32]
+        cf.CFRelease.argtypes = [ctypes.c_void_p]
+        arr = cf.CFLocaleCopyPreferredLanguages()
+        if not arr:
+            return []
+        out, buf = [], ctypes.create_string_buffer(128)
+        for i in range(cf.CFArrayGetCount(arr)):
+            if cf.CFStringGetCString(cf.CFArrayGetValueAtIndex(arr, i), buf, 128, 0x08000100):
+                out.append(buf.value.decode())
+        cf.CFRelease(arr)
+        return out
+    except (OSError, AttributeError):
+        return []
+
+
+def language_state(c, gid, item, value):
+    """启动设置「游戏语言」一行的补充：choices = 跟随系统 + 这款支持的（不知道就不给，界面列全部）；
+    选的语言（跟随系统 = 系统语言）这款不支持时给 note {zh-Hans, en}：写明起局实际用哪种（不弹窗，11-14 维护者）"""
+    supported = game_languages(c, gid)
+    if not supported:
+        return {}
+    out = {"choices": ["system"] + supported}
+    want = system_title_language(preferred_tags()) if value in (None, "system") else value
+    got = effective_language(want, supported)
+    if got != want:
+        label = {o["value"]: o["label"] for o in item.get("options", [])}
+        name = lambda v, lang: label.get(v, {}).get(lang, v)
+        out["note"] = {"zh-Hans": f"这款不支持{name(want, 'zh-Hans')}，起局用{name(got, 'zh-Hans')}。",
+                       "en": f"This game doesn't have {name(want, 'en')}; it starts in {name(got, 'en')}."}
     return out
 
 
@@ -463,6 +567,11 @@ def launch_env(c, gid):
         env["S2A_PAD_FACE"] = s["padFace"]  # 手柄按键布局：玩家手动选的 Switch / Xbox 布局（缺省自动不设；宿主 runtime/src/pad.c s2a_pad_layout）
     if s.get("motion") is False:
         env["S2A_MOTION"] = "0"           # 体感关：不开手柄六轴（macos/front_mac.m）
+    # 声音延迟（11-14 维护者，PR #1066 收进启动设置）：低 / 最低 = 请求输出设备 IO 缓冲 128 / 32 帧（Ryujinx.Audio.Backends.Apple
+    #   AppleDeviceBufferFrames，S2A_AUDIO_BUFFER_FRAMES）；标准不写 = 不请求、跟设备默认（内置扬声器 512 帧 ≈ 10.7 ms）
+    frames = next((o.get("frames", 0) for o in table["audioLatency"]["options"] if o["value"] == s.get("audioLatency")), 0) if "audioLatency" in table else 0
+    if frames:
+        env["S2A_AUDIO_BUFFER_FRAMES"] = str(frames)
     if s.get("pauseUnfocused") is False:
         env["S2A_FOCUS_PAUSE"] = "0"      # 切到别的窗口不暂停：游戏要求失焦暂停时也照常跑（macos/front_mac.m，#989）
     if s.get("diagRun") is True:

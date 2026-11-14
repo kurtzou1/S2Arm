@@ -253,7 +253,7 @@ PROFILE_GLOBS = ("~/Library/MobileDevice/Provisioning Profiles/*.mobileprovision
 def profile_udids(paths=()):
     """开发描述文件里登记的设备 UDID（大写）：连着多台时用它缩小到「这个包能装的机器」。没给路径就扫本机两处缺省目录"""
     out = set()
-    files = [Path(p).expanduser() for p in paths if p] or [Path(p) for pat in PROFILE_GLOBS for p in glob.glob(os.path.expanduser(pat))]
+    files = [Path(p).expanduser() for p in paths if p] or [Path(p) for pat in PROFILE_GLOBS for p in glob.glob(os.path.join(glob.escape(os.path.expanduser(os.path.dirname(pat))), os.path.basename(pat)))]
     for f in files:
         try:
             r = subprocess.run(["security", "cms", "-D", "-i", str(f)], capture_output=True, timeout=60)

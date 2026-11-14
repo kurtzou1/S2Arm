@@ -92,6 +92,11 @@ int s2a_android_host_stop_requested(void);
 // 不持锁调用 guest / 托管代码，也不声称成功准入后的线程已因停止而静止。
 int s2a_android_host_try_enter_guest(void);
 
+// 主 guest 运行态发布（#961）与 request_stop 在同一 stop_lock 上线性化。停止先被接受则不调
+// publish、返回 1；否则锁内调一次 publish 并返回其结果。publish 只能做原子状态转换：不调
+// guest / 托管代码、不阻塞。发布之后的停止属于运行中会话，由退出 owner 处理。
+int s2a_android_host_publish_running(int (*publish)(void));
+
 int s2a_android_host_stop_fd(void);
 int s2a_android_host_take_stop(uint32_t *reason, char *detail, size_t n);
 

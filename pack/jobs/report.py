@@ -13,7 +13,7 @@ import sys
 import time
 from pathlib import Path
 
-from core import Failure, _job_dirs, journal, logs_root, read, request_path, shared_redact
+from core import Failure, _job_dirs, journal, logs_root, read, request_path, resolve_path, shared_redact
 
 FAILED_STATES = ("failed", "interrupted")
 LOG_CHARS = 12000
@@ -136,7 +136,7 @@ def disk_lines(label, path):
     while path and not Path(path).exists() and Path(path).parent != Path(path):
         path = Path(path).parent
     try:
-        return [f"{label}可用：{bytes_text(shutil.disk_usage(path).free)}（{volume_format(Path(path).resolve())}）"]
+        return [f"{label}可用：{bytes_text(shutil.disk_usage(path).free)}（{volume_format(resolve_path(path))}）"]
     except OSError:
         return [f"{label}可用：-"]
 

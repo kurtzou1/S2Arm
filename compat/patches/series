@@ -587,3 +587,9 @@
 20261113-1957-nim-shop-family-events.patch
 20261113-2115-swkbd-native-config.patch
 20261114-1733-am-language-synth-explicit.patch
+20261114-0943-audio-device-buffer-frames.patch
+20261114-0418-system-data-synth-fallback.patch
+20261114-0312-audio-depth-pace.patch
+20261114-0125-audio-cb-nonblocking.patch
+20261114-1030-audio-buffer-platform-note.patch
+20261112-2019-audsmx-pump-realtime.patch

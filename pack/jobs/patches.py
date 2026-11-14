@@ -102,7 +102,7 @@ def bundle(c, key, cloud, snap, snap_get):
     """这一款的一个包 → 条目列表。本地优先、云端兜底（11-13 维护者）：
       云端取得到：以云端清单为准——本地（之前增量下过的 / 随启动器装的快照）有同 sha256 的直接用，没有才下这一个包（增量），下好存进私有缓存；
                   云端清单里已经没有这个包（上游删了）= 不用；
-      云端取不到：用本地已有的（增量下过的优先，其次快照）。核不过 sha256 的一律不用"""
+      云端取不到 / 云端有更新但这个包没下下来：用本地已有的（增量下过的优先，其次快照）。核不过 sha256 的一律不用"""
     cache = Path(c.private) / "community-cache" / "v2"
     p = cache / (key + ".json.gz")
     have = p.read_bytes() if p.is_file() else None
@@ -126,17 +126,27 @@ def bundle(c, key, cloud, snap, snap_get):
                 print(f"补丁：{key} 云端有更新，已增量下载（{len(got)} 字节）", file=sys.stderr)
             elif got is not None:
                 print(f"补丁：{key} 内容与云端清单不符，不收", file=sys.stderr)
+        if data is None:   # 云端有更新却没下下来（断网 / 下载站不通 / 内容不符）：退回本地已有的（增量下过的 > 随启动器装的快照），不因为下不到更新就一条都不打（11-14 维护者：内置补丁库优先）
+            data = _local(have, snap, snap_get, key)
         if data is None:
             return []
     else:
-        sw = (snap.get(key) or {}).get("sha256")
-        data = have if have is not None else (snap_get(key) if snap_get and sw else None)
-        if data is None or (data is not have and hashlib.sha256(data).hexdigest() != sw):
+        data = _local(have, snap, snap_get, key)
+        if data is None:
             return []
     try:
         return json.loads(gzip.decompress(data)).get("items", [])
     except (OSError, ValueError):
         return []
+
+
+def _local(have, snap, snap_get, key):
+    """本地已有的这个包：增量下过的（私有缓存）> 随启动器装的快照（核过快照清单里的 sha256）；都没有 = None"""
+    if have is not None:
+        return have
+    sw = (snap.get(key) or {}).get("sha256")
+    data = snap_get(key) if snap_get and sw else None
+    return data if data is not None and hashlib.sha256(data).hexdigest() == sw else None
 
 
 _MANIFEST = {}
@@ -290,9 +300,111 @@ def prepare(c, game, extraction, env, target="mac"):
         env["S2A_CPATCH_DIRS"] = os.pathsep.join([x for x in env.get("S2A_CPATCH_DIRS", "").split(os.pathsep) if x] + dirs)   # Windows 路径带盘符冒号：按系统分隔符
 
 
-def boost(c, game, image):
+# 补丁打入结果（11-14 维护者：哪些打上了、哪些没打上和为什么，出包 / 升级的结果页都要列；不影响出包成败）。
+#   读产物根里编译器自己的记录（pack/cpatch.py plan / prune）：cpatch.tsv = 最终打进去的；cpatch_plan.log 的「收 / 不收 / 移植不了」行与
+#   cpatch_excluded.tsv（改写器缺口剔掉的）= 没打上的及原因。原因翻成玩家看得懂的话；本来就不该打的（版本不对、同画幅已收另一份、本款有我方帧率表）不算失败、不列
+_WHY = (   # (原因里出现的字样, 给玩家的话)；None = 不算失败
+    (("版本不对", "同画幅", "我方帧率表"), None),
+    (("与 ", "改同一处"), "result.why.conflict"),
+    (("超出模块映像", "不在可写数据区", "代码段末页", "原值不符", "数据格式", "不配套", "位表", "不认"), "result.why.mismatch"),
+    (("改写器", "我方改写点", "填充区", "不翻译", "跳转", "解不出", "落点"), "result.why.translate"),
+    (("挂满", "64 份", "用尽"), "result.why.full"),
+    (("移植不了",), "result.why.port"),
+)
+
+
+def _why(text):
+    for keys, say in _WHY:
+        if say is None and any(k in text for k in keys):
+            return None
+        if say == "result.why.conflict" and "改同一处" in text:
+            return say
+        if say not in (None, "result.why.conflict") and any(k in text for k in keys):
+            return say
+    return "result.why.mismatch"
+
+
+def _cat_of(uid, cat=""):
+    k = uid.split(":", 1)[0]
+    return {"wsauto": "widescreen", "widescreen": "widescreen", "fps": "fps", "gfx": "gfx", "cheat": "cheat"}.get(k) or (cat if cat in CATS else "gfx")
+
+
+def outcome(root):
+    """产物根（出包工作目录 / 升级时的改写工作目录）→ {applied: [{id, cat, name}], failed: [{id, cat, name, why, detail}], cheats: 随包金手指条数}；
+    金手指不逐条进 applied（一款几十条，结果页只写「金手指 N 条，默认关」）：条数按随包原文 cheat-src.*（大多数只改内存、不进补丁表）数；
+    why 是文案键（launchers/shared/experience.v1.json result.why.*），detail 是编译器原话（诊断用）。没出过补丁表 = 两张空表"""
+    root = Path(root)
+    applied, fam = [], set()
+    tsv = root / "cpatch.tsv"
+    for line in (tsv.read_text(encoding="utf-8", errors="replace").splitlines()[1:] if tsv.is_file() else []):
+        col = line.split("\t")
+        if len(col) < 5:
+            continue
+        uid = col[0]
+        key = uid.rsplit(":", 1)[0] if uid.startswith("wsauto:") else uid   # 自适应画幅一族的宽 / 窄两份算一份
+        if key not in fam and not uid.startswith("cheat:"):
+            fam.add(key); applied.append(dict(id=key, cat=_cat_of(uid, col[3]), name=col[4]))
+        fam.add(key)
+    names, failed = {}, {}
+    log = root / "cpatch_plan.log"
+    lines = log.read_text(encoding="utf-8", errors="replace").splitlines() if log.is_file() else []
+    ex = root / "cpatch_excluded.tsv"
+    lines += [f"不收\t{l}" for l in (ex.read_text(encoding="utf-8", errors="replace").splitlines() if ex.is_file() else []) if "\t" in l]
+    for line in lines:
+        col = line.split("\t")
+        if col[0] == "收" and len(col) >= 4:
+            names[col[1]] = col[3]
+    for line in lines:
+        col = line.split("\t")
+        if col[0] == "不收" and len(col) >= 5:
+            uid, name, text = col[1], col[3], col[4]
+        elif col[0] == "不收" and len(col) == 3:   # 改写器缺口（prune / cpatch_excluded.tsv）：名字取它当初「收」的那一行
+            uid, text = col[1], col[2]; name = names.get(uid, uid)
+        elif col[0] == "移植不了" and len(col) >= 5:
+            uid, name, text = col[1], col[3], "移植不了：" + col[4]
+        else:
+            continue
+        say = _why(text)
+        if say is not None:
+            failed[uid] = dict(id=uid, cat=_cat_of(uid), name=name, why=say, detail=text[:200])
+    got = {a["id"] for a in applied}
+    has_ws = any(a["cat"] == "widescreen" for a in applied)
+    out = [f for u, f in failed.items() if u not in got and (u.rsplit(":", 1)[0] if u.startswith("wsauto:") else u) not in got
+           and not (has_ws and f["why"] == "result.why.port")]   # 别的满屏已打上：移植不了的那几份不算没打上
+    import cheats as cheat_lib
+    cheats = 0
+    for f in sorted(root.glob("cheat-src.*")):   # Atmosphere 原文：同 pack/jobs/cheats.py parse 的切段口径（文件头标题行没有代码、不算；{主代码} 不算）
+        cheats += sum(1 for _, master, _, _ in cheat_lib.parse(f.read_text(encoding="utf-8", errors="replace"))[1] if not master)
+    return dict(applied=applied, failed=out, cheats=cheats)
+
+
+def record(c, gid, target, root, error=""):
+    """这一端（mac / ios）这次补丁打入的结果记进 game.json sgradeResult（出包 / 升级结果页、之后的游戏库都读它）；
+    error = 整款没打成（改写器在这款上出错等），给玩家说「不匹配，补丁打入失败」"""
+    import layout
+    res = dict(outcome(root) if root else dict(applied=[], failed=[], cheats=0), at=int(time.time()))
+    if error:
+        res["error"] = error[:300]
+    info = layout.game_info(c, gid)
+    allr = dict(info.get("sgradeResult") or {}, **{target: res})
+    layout.update_info(c, gid, sgradeResult=allr)
+    return res
+
+
+def remember(c, gid, res):
+    """这次作业里各款的补丁打入结果（升级 / 装机作业收尾放进结果，前端结果页列）"""
+    c.__dict__.setdefault("sgrade_results", {})[gid.upper()] = res
+    return res
+
+
+def results(c):
+    return dict(getattr(c, "sgrade_results", {}) or {})
+
+
+def boost(c, game, image, result=None):
     """出包结果里「这次自动配好了什么」（完成页的 S 级加强动效与清单，11-12 维护者：「补丁自动打入，玩家开不开是玩家的事，咱都给配置好」）：
-    → {cheats: 这个版本能开的金手指条数, fps / widescreen / gfx: 编进包的社区补丁份数}；全是 0 = 没配到，不播"""
+    → {cheats: 这个版本能开的金手指条数, fps / widescreen / gfx: 编进包的社区补丁份数}；全是 0 = 没配到，不播。
+    result（record 记的这次打入结果）给了：再带 applied / failed（逐条名字；没打上的带原因文案键），完成页列「没打上」（11-14）"""
     import cheats
     out = dict(cheats=sum(1 for it in cheats.listing(c, game)["items"] if it["ok"]), fps=0, widescreen=0, gfx=0)
     tsv = next((p for p in (Path(image) / "cpatch.tsv", Path(image) / "kit" / "cpatch.tsv") if p.is_file()), None)   # Mac 运行版本根 / iPhone kit（ship_ext 拷进去的）
@@ -304,6 +416,8 @@ def boost(c, game, image):
             kind, uid = "widescreen", uid.rsplit(":", 1)[0]
         if kind in ("fps", "widescreen", "gfx") and uid not in seen:
             seen.add(uid); out[kind] += 1
+    if result:
+        out.update(applied=result.get("applied", []), failed=result.get("failed", []), **({"error": result["error"]} if result.get("error") else {}))
     return out
 
 
@@ -329,7 +443,8 @@ def match(c):
     game = community.game_of(c, gid)
     import cheats
     build = cheats.main_build(c, game)
-    exact, others = {k: 0 for k in CATS}, {}
+    version = display_version(c, game) if build else ""
+    exact, others, foreign_ws = {k: 0 for k in CATS}, {}, False
     for it, _ in items_for(c, gid, build):
         if it.get("kind") == "pso":   # 管线种子不是玩家可选的补丁，不列
             continue
@@ -338,11 +453,34 @@ def match(c):
         if build and any(bid_hit(build, b) for b in bids):
             exact[cat] += 1
         else:
+            foreign_ws |= cat == "widescreen"
             v = _version_label(it)   # 看不出版本号的不列（构建号对玩家没意义）
             if v:
                 others.setdefault(v, set()).add(cat)
-    return dict(build=build, exact=exact, total=sum(exact.values()),
-                others=[dict(version=v, cats=[k for k in CATS if k in cs]) for v, cs in sorted(others.items(), key=lambda kv: [int(x) if x.isdigit() else 0 for x in re.split(r"[.]", kv[0])])])
+    # 满屏跨版本（11-13 维护者「画幅补丁扩大泛化性」，pack/cpatch.py scan 末尾 port_writes）：这份主程序没有同版本的满屏补丁时，出包会把同款别的版本的满屏补丁
+    #   按原指令移植过来，移植成的打入。所以别的版本的满屏补丁不算「不会打入」：单列 port（出包时尝试移植的那几版），others 里去掉满屏这一类（帧率 / 画面 / 金手指才要版本对上）
+    port = foreign_ws and not exact["widescreen"]
+    key = lambda kv: [int(x) if x.isdigit() else 0 for x in re.split(r"[.]", kv[0])]
+    port_versions = [v for v, cs in sorted(others.items(), key=key) if "widescreen" in cs] if port else []
+    if port:
+        others = {v: cs - {"widescreen"} for v, cs in others.items() if cs - {"widescreen"}}
+    return dict(build=build, version=version, exact=exact, total=sum(exact.values()), port=port, portVersions=port_versions,
+                others=[dict(version=v, cats=[k for k in CATS if k in cs]) for v, cs in sorted(others.items(), key=key)])
+
+
+def display_version(c, game):
+    """这款解过包的显示版本号（共用解包目录 unpack.tsv 的 display_version，带更新的款是更新后的版本）；读不到 = ''。
+    出包页「S 级优化」写明补丁对应哪个版本用（11-14 维护者：让玩家知道版本对上才打入）"""
+    from core import Failure
+    try:
+        from build import shared_dir
+        for line in (shared_dir(c, game) / "extract/unpack.tsv").read_text(encoding="utf-8").splitlines():
+            k, _, v = line.partition("\t")
+            if k == "display_version":
+                return v.strip()
+    except (OSError, ImportError, UnicodeDecodeError, Failure):
+        pass
+    return ""
 
 
 def bid_hit(build16, theirs):

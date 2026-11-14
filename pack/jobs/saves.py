@@ -21,7 +21,7 @@ import uuid
 import zipfile
 from pathlib import Path, PurePosixPath
 
-from core import Failure, atomic, contained
+from core import Failure, atomic, contained, resolve_path
 from library import input_identity, selected_packages
 import save_formats
 import layout
@@ -729,12 +729,13 @@ def backup(c):
     with stopped(c, tolerate=True) as (game, _, _):
         root, _, _ = locations(c, game)
         destination = Path(c.r["path"]).expanduser()
-        destination = destination.parent.resolve() / destination.name
-        home = layout.root_of(c, game["id"]).resolve()   # 这款所在存放位置（可以不是默认游戏库）也不许放
+        destination = resolve_path(destination.parent) / destination.name
+        home = resolve_path(layout.root_of(c, game["id"]))   # 这款所在存放位置（可以不是默认游戏库）也不许放
+        library = resolve_path(c.library)   # 玩家写的样子（映射盘保留盘符）→ 和解析过的 destination 同一写法再比
         if (
             not destination.parent.is_dir()
-            or destination == c.library
-            or c.library in destination.parents
+            or destination == library
+            or library in destination.parents
             or destination == home
             or home in destination.parents
             or destination == c.private
@@ -988,7 +989,7 @@ def checked_archive(c, game, root):
     if external:
         source, notice = external_archive(c, game, root, source)
     try:
-        if source.stat().st_size > MAX_BYTES + (64 << 20) or root in source.resolve().parents:
+        if source.stat().st_size > MAX_BYTES + (64 << 20) or root in resolve_path(source).parents:
             raise ValueError("invalid backup location or size")
         before = hash_file(c, source)
         with open_archive(c, source) as (_, manifest):

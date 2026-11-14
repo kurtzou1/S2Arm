@@ -1,0 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 S2Arm contributors
+#version 450
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) buffer Data { uint w[]; } data;
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    data.w[64u + i] = data.w[i] * 2u;   // 读前 64 个字（传输写进去的），2 倍写到后 64 个字
+}

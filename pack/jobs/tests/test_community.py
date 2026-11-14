@@ -72,6 +72,47 @@ class CommunityTests(unittest.TestCase):
         self.c.r = {"gameId": GID, "settings": {"language": "Klingon"}}
         with self.assertRaises(Failure): community.save(self.c)
 
+    def test_audio_latency(self):
+        # 声音延迟（11-14 维护者收 PR #1066 进启动设置）：标准不设变量（设备默认）；低 / 最低 = 请求设备 IO 缓冲 128 / 32 帧；不在表里的值拒收
+        self.assertNotIn("S2A_AUDIO_BUFFER_FRAMES", community.launch_env(self.c, GID))
+        for v, frames in (("low", "128"), ("lowest", "32")):
+            self.c.r = {"gameId": GID, "settings": {"audioLatency": v}}; community.save(self.c)
+            self.assertEqual(community.launch_env(self.c, GID)["S2A_AUDIO_BUFFER_FRAMES"], frames)
+        self.c.r = {"gameId": GID, "settings": {"audioLatency": "standard"}}; community.save(self.c)
+        self.assertNotIn("S2A_AUDIO_BUFFER_FRAMES", community.launch_env(self.c, GID))
+        self.c.r = {"gameId": GID, "settings": {"audioLatency": "16"}}
+        with self.assertRaises(Failure): community.save(self.c)
+    def test_game_language_only_supported(self):
+        # 11-14 维护者「按你的建议加上」：只列这款 control.nacp 支持的语言；系统语言不支持时在设置里写明起局用哪种（不弹窗）。期望按 NACP 位序手算
+        def nacp(*bits):
+            raw = bytearray(0x4000); raw[0x302C:0x3030] = sum(1 << b for b in bits).to_bytes(4, "little"); return bytes(raw)
+        self.assertEqual(community.nacp_languages(nacp(0, 2, 13, 14)), ["AmericanEnglish", "Japanese", "TraditionalChinese", "SimplifiedChinese"])
+        self.assertEqual(community.nacp_languages(nacp()), [])            # 合成的 nacp 不声明：不知道
+        self.assertEqual(community.nacp_languages(b"short"), [])
+        ctl = layout.image_mac(self.c, GID) / "ctl" / "control.nacp"
+        self.assertNotIn("choices", community.mac_settings(self.c, GID)["language"])   # 还没出包（没有 nacp）：照旧列全部
+        write(ctl, ""); ctl.write_bytes(nacp(0, 2, 14))                      # 美英、日、简中
+        os.environ["S2A_TEST_PREFERRED_LANGUAGES"] = "zh-Hans-CN,en-US"
+        try:
+            lang = community.mac_settings(self.c, GID)["language"]
+            self.assertEqual(lang["choices"], ["system", "AmericanEnglish", "Japanese", "SimplifiedChinese"])
+            self.assertNotIn("note", lang)                                    # 系统简中、这款有：不标
+            os.environ["S2A_TEST_PREFERRED_LANGUAGES"] = "ko-KR"
+            self.assertEqual(community.mac_settings(self.c, GID)["language"]["note"],
+                             {"zh-Hans": "这款不支持한국어，起局用English (US)。", "en": "This game doesn't have 한국어; it starts in English (US)."})
+            ctl.write_bytes(nacp(2, 13))                                       # 没有英语：落支持表第一项（日语）
+            self.assertEqual(community.mac_settings(self.c, GID)["language"]["note"]["zh-Hans"], "这款不支持한국어，起局用日本語。")
+            self.c.r = {"gameId": GID, "settings": {"language": "German"}}; community.save(self.c)
+            self.assertEqual(community.mac_settings(self.c, GID)["language"]["note"]["zh-Hans"], "这款不支持Deutsch，起局用日本語。")   # 选过的语言这款没有也标
+        finally:
+            del os.environ["S2A_TEST_PREFERRED_LANGUAGES"]
+        # 系统语言映射照宿主 SystemLocale.Map；实际语言照 TitleFallback：想要的 → 美式 / 英式英语 → 支持表第一项
+        for tags, want in ((["zh-Hant-HK"], "TraditionalChinese"), (["zh-HK"], "TraditionalChinese"), (["zh-CN"], "SimplifiedChinese"), (["en-GB"], "BritishEnglish"),
+                           (["es-MX"], "LatinAmericanSpanish"), (["es"], "Spanish"), (["pt-BR"], "BrazilianPortuguese"), (["fr-CA"], "CanadianFrench"), (["xx", "ja-JP"], "Japanese"), ([], "AmericanEnglish")):
+            self.assertEqual(community.system_title_language(tags), want, tags)
+        self.assertEqual(community.effective_language("Korean", ["BritishEnglish", "Japanese"]), "BritishEnglish")
+        self.assertEqual(community.effective_language("Korean", []), "Korean")
+
     def test_game_language_ios_same_as_table(self):
         # 游戏语言 iOS 下拉（ios/settings.m s2a_ios_game_languages、ios/app_settings.m 的标签）与定义表 language 的 options 同值同序、条数相同；
         #   每个值都是宿主 SystemLanguage 枚举名（compat/tree/.../SystemLanguage.cs）、iOS 平台在表里声明了
@@ -173,7 +214,7 @@ class MacDisplayTests(unittest.TestCase):
     def test_every_mac_item_of_the_table_is_on_the_page(self):
         # 定义表里 platforms 含 mac 的 bool / choice 项 = enhance fps60 widescreen docked rumble rumbleLevel motion hud（11-13 widenForce 并进 widescreen）
         self.caps()
-        self.assertEqual(sorted(self.mac()), sorted(["enhance", "fps60", "fpsPick", "widescreen", "docked", "language", "rumble", "rumbleLevel", "motion", "padFace", "hud", "pauseUnfocused", "diagRun"]))
+        self.assertEqual(sorted(self.mac()), sorted(["enhance", "fps60", "fpsPick", "widescreen", "docked", "language", "rumble", "rumbleLevel", "motion", "padFace", "hud", "pauseUnfocused", "audioLatency", "diagRun"]))
 
     def test_fps_pick_level(self):
         # 帧率档位（11-13）：包里帧率补丁（编号 fps:）目标帧率两档以上才出；选具体档 → S2A_FPS_PICK=档，选自动（"0"）不写；表外取值拒收

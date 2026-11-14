@@ -80,13 +80,28 @@ static int32_t compiled_result(uint64_t session, uint64_t generation, s2a_direct
     if (session != 4 || generation != 6 || req.bytes != request_len || memcmp(req.data, request_data, request_len)) {
         fprintf(stderr, "FAIL: core production request differs from real compiler input\n"); return -1;
     }
-    char req_path[1024], out_dir[1024], result_path[1024];
+    char req_path[1024], out_dir[1024], result_path[1024], cli_dll[1280];
     snprintf(req_path, sizeof req_path, "%s/core-request.json", case_dir);
     snprintf(out_dir, sizeof out_dir, "%s/core-compiler", case_dir);
     snprintf(result_path, sizeof result_path, "%s/core-compiler/program.json", case_dir);
     FILE *f = fopen(req_path, "wb"); if (!f) return -1;
     if (fwrite(req.data, 1, (size_t)req.bytes, f) != (size_t)req.bytes || fclose(f)) return -1;
-    char *const argv[] = {"dotnet", "/src/graphics/tools/direct/compiler/cli/bin/Release/net10.0/S2A.DirectCompiler.Cli.dll",
+    // CLI 产物路径不写死（原来写死 /src/... 只在原作者的容器里成立，CI / 别的检出位置必失败）：
+    // 优先环境变量 S2A_DIRECT_COMPILER_CLI；默认按 run.sh 的约定 case_dir=<repo>/build/696-real-compiler
+    // 上溯两级定位仓库根，再拼出 gs_compiler_chain_test.py 落产物的固定相对路径。
+    const char *cli_env = getenv("S2A_DIRECT_COMPILER_CLI");
+    if (cli_env && *cli_env) {
+        snprintf(cli_dll, sizeof cli_dll, "%s", cli_env);
+    } else {
+        char repo_dir[1024]; snprintf(repo_dir, sizeof repo_dir, "%s", case_dir);
+        for (int i = 0; i < 2; i++) { char *slash = strrchr(repo_dir, '/'); if (slash) *slash = 0; }
+        snprintf(cli_dll, sizeof cli_dll, "%s/graphics/tools/direct/compiler/cli/bin/Release/net10.0/S2A.DirectCompiler.Cli.dll", repo_dir);
+    }
+    if (access(cli_dll, R_OK) != 0) {
+        fprintf(stderr, "FAIL: 找不到编译器 CLI 产物 %s（先跑 python3 android/tests/gs_compiler_chain_test.py 出产物，或用环境变量 S2A_DIRECT_COMPILER_CLI 指路）\n", cli_dll);
+        return -1;
+    }
+    char *const argv[] = {"dotnet", cli_dll,
                           "compile", "--request", req_path, "--output", out_dir, NULL};
     pid_t pid; int status = 0;
     if (posix_spawnp(&pid, "dotnet", NULL, NULL, argv, environ) || waitpid(pid, &status, 0) != pid ||

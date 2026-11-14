@@ -227,13 +227,13 @@ static int g_relayout_due;   // 主线程：后台期间出图层挪回了根视
 void s2a_direct_relayout(void) {   // App 壳视图控制器 viewDidLayoutSubviews、外接屏接上 / 断开（ios/extdisplay.m）调（主线程）；没挂出图层（通用模式 / 还没起）不做
     UIView *v = g_layer ? present_view() : nil; if (!v) return;
     // 外接显示器接上 / 断开：出图层跟着换到外接屏窗口的视图 / 回根视图，照旧垫在最底层；比例与可画尺寸由下面同一条重摆路按新视图算
-    // 挪没挪看层在不在这个视图的层子树里：挂层入口（ios/play_reflection.m，Duo 分屏倒影）把出图层放进视图下的复制层，直接父层不是 v.layer；
-    //   原先比直接父层，每次重摆都判成「挪了」，把层从复制层里拽回根视图，倒影一出就没
+    // 挪没挪看层在不在这个视图的层子树里：挂层入口（ios/play_reflection.m，Duo 分屏倒影）把出图层放进视图下的容器层，直接父层不是 v.layer；
+    //   原先比直接父层，每次重摆都判成「挪了」，把层从容器层里拽回根视图
     int ext = s2a_ios_root_view && v != s2a_ios_root_view(), moved = 1;
     for (CALayer *q = g_layer.superlayer; q; q = q.superlayer) if (q == v.layer) { moved = 0; break; }
     if (moved) {
         [CATransaction begin]; [CATransaction setDisableActions:YES];
-        if (s2a_ios_attach_game_layer) s2a_ios_attach_game_layer(v, g_layer);   // 同建层时：经挂层入口（外接屏视图也一样，那边不分屏、不复制）
+        if (s2a_ios_attach_game_layer) s2a_ios_attach_game_layer(v, g_layer);   // 同建层时：经挂层入口（外接屏视图也一样，那边不分屏、没有倒影）
         else { [g_layer removeFromSuperlayer]; [v.layer insertSublayer:g_layer atIndex:0]; }
         [CATransaction commit];
         LOG("直连：出图层挪到%s（App 状态 %ld，视图所在场景状态 %ld）", ext ? "外接屏" : "手机屏",

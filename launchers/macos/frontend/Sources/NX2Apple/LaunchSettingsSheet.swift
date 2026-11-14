@@ -17,6 +17,10 @@ struct LaunchOption {
     let reason: String
     /// 这款没有对应的社区补丁（11-13 起只用补丁，60 帧 / 满屏没补丁就是原生游戏）：这一行不出
     let hidden: Bool
+    /// 游戏语言（11-14）：这款 control.nacp 支持的选项值（含「跟随系统」）；没有 = 不知道，列定义表全部
+    let choices: [String]?
+    /// 游戏语言：选的 / 系统语言这款不支持时，作业层写明起局实际用哪种（中英两份，不弹窗）
+    let note: [String: String]
 
     init(_ raw: Any?) {
         let row = raw as? [String: Any] ?? [:]
@@ -24,6 +28,8 @@ struct LaunchOption {
         hidden = row["hidden"] as? Bool ?? false
         value = row["value"]
         reason = row["reason"] as? String ?? ""
+        choices = row["choices"] as? [String]
+        note = row["note"] as? [String: String] ?? [:]
     }
 }
 
@@ -213,9 +219,11 @@ struct LaunchSettingsSheet: View {
             }
         case "choice":
             let option = options[item.id]
-            CardRow(title, detail: option?.available == false ? loc.backend(option?.reason ?? "") : item.detail(lang)) {
+            CardRow(title, detail: option?.available == false ? loc.backend(option?.reason ?? "") : option?.note[lang] ?? item.detail(lang)) {
                 Picker("", selection: Binding(get: { option?.value as? String ?? "" }, set: { v in Task { await load([item.id: v]) } })) {
-                    ForEach(item.options, id: \.value) { o in Text(o.label[lang] ?? o.value).tag(o.value) }
+                    // 游戏语言只列这款支持的（作业层 choices）；当前值不在里面（旧版选过、这款没有）也留着，不让选择框空掉
+                    ForEach(item.options.filter { o in option?.choices.map { $0.contains(o.value) || o.value == option?.value as? String } ?? true }, id: \.value) { o in
+                        Text(o.label[lang] ?? o.value).tag(o.value) }
                 }
                 .labelsHidden().pickerStyle(.menu).frame(width: 150).accessibilityLabel(title)
                 .accessibilityIdentifier("launch." + item.id)

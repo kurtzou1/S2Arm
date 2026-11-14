@@ -266,6 +266,12 @@ int s2a_android_host_try_enter_guest(void) {
     return enter;
 }
 
+int s2a_android_host_publish_running(int (*publish)(void)) {
+    pthread_mutex_lock(&g.stop_lock);
+    int rc = g.stop_requested ? 1 : publish();
+    pthread_mutex_unlock(&g.stop_lock);
+    return rc;
+}
 
 int s2a_android_host_take_stop(uint32_t *reason, char *detail, size_t n) {
     uint64_t count;

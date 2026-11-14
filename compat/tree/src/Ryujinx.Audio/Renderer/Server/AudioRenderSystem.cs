@@ -427,9 +427,35 @@ namespace Ryujinx.Audio.Renderer.Server
             }
         }
 
+        // S2Arm (11-13 断音): the render loop and the game's RequestUpdate share _lock. Longest hold by Update since the render loop last
+        //   read it, and how long the render loop waited for the lock (AudioRendererManager logs both when a period runs long)
+        public static long S2AUpdateHoldMaxTicks;
+        public static long S2ARenderLockWaitTicks;
+
         public ResultCode Update(Memory<byte> output, Memory<byte> performanceOutput, ReadOnlySequence<byte> input)
         {
             lock (_lock)
+            {
+                long s2aHeld = System.Diagnostics.Stopwatch.GetTimestamp();
+
+                try
+                {
+                    return S2AUpdateLocked(output, performanceOutput, input);
+                }
+                finally
+                {
+                    s2aHeld = System.Diagnostics.Stopwatch.GetTimestamp() - s2aHeld;
+
+                    if (s2aHeld > Volatile.Read(ref S2AUpdateHoldMaxTicks))
+                    {
+                        Volatile.Write(ref S2AUpdateHoldMaxTicks, s2aHeld);
+                    }
+                }
+            }
+        }
+
+        private ResultCode S2AUpdateLocked(Memory<byte> output, Memory<byte> performanceOutput, ReadOnlySequence<byte> input)
+        {
             {
                 ulong updateStartTicks = GetSystemTicks();
 
@@ -719,8 +745,12 @@ namespace Ryujinx.Audio.Renderer.Server
 
         public void SendCommands()
         {
+            long s2aWait = System.Diagnostics.Stopwatch.GetTimestamp();
+
             lock (_lock)
             {
+                S2ARenderLockWaitTicks += System.Diagnostics.Stopwatch.GetTimestamp() - s2aWait;   // render loop thread only
+
                 if (_isActive)
                 {
                     if (!_manager.Processor.HasRemainingCommands(_sessionId))

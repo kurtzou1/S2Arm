@@ -8,7 +8,9 @@ reviewable JSON table. A finding is a candidate, never a claim of ownership.
 Exit 0: no blocking candidates/boundaries; 1: candidates or unapproved full-scan
 boundaries; 2: invalid/incomplete changed scan. Full scan never treats unread
 content as scanned: only the existing reasoned allowlist can acknowledge an
-ordinary boundary, and never credentials, payloads or non-regular Git entries.
+ordinary boundary. A separate exact-path, pinned-SHA rule may verify reviewed
+third-party ZIP bytes without scanning their contents; credentials, game paths
+and non-regular Git entries remain protected.
 --base gates content findings on added
 lines and metadata findings on new/renamed files; old findings do not block.
 """
@@ -16,6 +18,7 @@ import argparse
 import codecs
 from collections import Counter
 import fnmatch
+import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import re
@@ -59,6 +62,19 @@ def load_rules():
                 row['compiled'] = re.compile(row['regex'])
             if 'line_regex' in row:
                 row['line_compiled'] = re.compile(row['line_regex'])
+        archive_paths = set()
+        for row in rules.get('reviewed_archives', []):
+            if not isinstance(row, dict) or any(
+                    not isinstance(row.get(key), str) or not row[key]
+                    for key in ('id', 'path', 'sha256', 'reason')):
+                raise ValueError
+            path = row['path']
+            if (not row['id'] or not row['reason'] or not path or path.startswith('/') or
+                    '..' in PurePosixPath(path).parts or str(PurePosixPath(path)) != path or
+                    any(c in path for c in '*?[]') or path in archive_paths or
+                    not re.fullmatch(r'[0-9a-f]{64}', row['sha256'])):
+                raise ValueError
+            archive_paths.add(path)
         return rules
     except (OSError, ValueError, KeyError, TypeError, re.error):
         raise ScanError('invalid_rules_table') from None
@@ -174,6 +190,19 @@ def classify(path, mode, kind, size, rules, read_blob=None):
                 return 'unreviewed_type', []
             return 'text', []
     return 'unreviewed_type', []
+
+
+def reviewed_archive(path, mode, kind, rules):
+    """Exact metadata eligibility only. Never probe protected data for its hash."""
+    boundary = rules['boundaries']
+    protected = (boundary['credential_directories'] + boundary['protected_directories'] +
+                 boundary['payload_directories'])
+    if (mode not in ('100644', '100755') or kind != 'blob' or
+            PurePosixPath(path).suffix.lower() != '.zip' or
+            matches(path.lower(), boundary['credential_globs']) or
+            any(p.lower() in protected for p in PurePosixPath(path).parts)):
+        return None
+    return next((row for row in rules.get('reviewed_archives', []) if row['path'] == path), None)
 
 
 class Blobs:
@@ -359,8 +388,17 @@ def scan(repo, ref, paths, list_only=False, base=None):
             counts[decision] += 1
             if decision not in ('text', 'binary_ascii', 'metadata_only'):
                 item = {**location, 'reason': decision}
+                archive = reviewed_archive(path, mode, kind, rules) if decision == 'excluded_payload' else None
+                verified = archive is not None and size <= MAX_BYTES and \
+                    hashlib.sha256(reader.read(oid, size)).hexdigest() == archive['sha256']
+                if verified:
+                    item['reviewed_archive'] = archive['id']
                 uncovered.append(item)
-                if base is None:
+                if archive is not None:
+                    # Hash verification is not content coverage. A changed pinned
+                    # archive must fail too, rather than becoming a delta warning.
+                    (uncovered_allowed if verified else uncovered_blocking).append(item)
+                elif base is None:
                     # Reuse the one reviewed policy table, without opening the
                     # blob or changing its coverage classification. Protected
                     # material cannot be waived by even a matching rule.
@@ -458,6 +496,10 @@ def main():
             print('【黄】{}:uncovered: {}'.format(json.dumps(f['path'], ensure_ascii=True), f['reason']))
         for f in report['uncovered_blocking']:
             print('{}:uncovered: {}'.format(json.dumps(f['path'], ensure_ascii=True), f['reason']))
+        for f in report['uncovered_allowed']:
+            if 'reviewed_archive' in f:
+                print('{}:reviewed_archive: SHA-256 已核对（仍未扫描正文）'.format(
+                    json.dumps(f['path'], ensure_ascii=True)))
         if args.base is None:
             print('全量公开仓扫描：候选 {}，未读阻挡 {}，有理由保留未读 {}（仍未扫描正文）'.format(
                 report['blocking_count'], len(report['uncovered_blocking']), len(report['uncovered_allowed'])))

@@ -40,7 +40,7 @@ class Src:
     """读端：扫 <抽取目录>/src/*.pk 建表；get(key) → (code, ctl)，没有 → KeyError；keys() 全部键"""
     def __init__(self, xdir):
         self.loc = {}; self.files = []
-        for i, p in enumerate(sorted(glob.glob(os.path.join(xdir, 'src', '*.pk')))):
+        for i, p in enumerate(sorted(glob.glob(os.path.join(glob.escape(xdir), 'src', '*.pk')))):   # 目录名按字面量（#1009：游戏库在「[2]NS…」下，[2] 被当成字符类 → 一份 .pk 都找不到）
             self.files.append(open(p, 'rb')); f = self.files[-1]; size = os.fstat(f.fileno()).st_size; off = 0
             while off + HEAD.size <= size:
                 f.seek(off); (kl,) = HEAD.unpack(f.read(HEAD.size)); h = f.read(kl + LENS.size)

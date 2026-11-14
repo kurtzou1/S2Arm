@@ -1,37 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 S2Arm contributors
-// Hand-calculated mirror coordinates; no game assets or UIKit.
+// Hand-calculated reflection frames; no game assets or UIKit.
 #import "../../ios/play_reflection.h"
 #include <math.h>
 #include <stdio.h>
 static int bad, checks;
 #define CK(c, msg) do { checks++; if (!(c)) { bad++; printf("✗ %s\n", msg); } } while (0)
-static BOOL point(CGAffineTransform t, CGRect bounds, CGPoint p, CGFloat x, CGFloat y) {
-    p.y-=CGRectGetMidY(bounds);
-    CGPoint q=CGPointApplyAffineTransform(p,t); q.y+=CGRectGetMidY(bounds);
-    return fabs(q.x-x)<.001 && fabs(q.y-y)<.001;
+static BOOL same(CGRect a, CGFloat x, CGFloat y, CGFloat w, CGFloat h) {
+    return fabs(a.origin.x-x)<.001 && fabs(a.origin.y-y)<.001 && fabs(a.size.width-w)<.001 && fabs(a.size.height-h)<.001;
 }
 int main(void) { @autoreleasepool {
     CGRect b=CGRectMake(0,0,600,800);
+    // 居中折痕 380–420：上区 0–380、按键区 420–800；倒影 = 上区大小、从按键区上沿起（上区下沿 380 ↔ 倒影上沿 420）
     S2APlayLayout l=S2APlayLayoutMake(b,b,S2APlaySplitOn,NO,CGRectMake(0,380,600,40));
-    CGAffineTransform t=S2APlayReflectionTransform(l,b);
-    CK(point(t,b,CGPointMake(70,380),70,420),"上区下沿跨过折痕映射到下区上沿");
-    CK(point(t,b,CGPointMake(70,0),70,800),"上区上沿映射到下区底部");
-    CK(point(t,b,CGPointMake(10,100),10,700) && point(t,b,CGPointMake(590,100),590,700),"只上下镜像，不左右翻转");
-    CK(point(t,b,CGPointMake(300,400),300,400),"折痕中心是镜像轴");
-    CK(fabs(t.ty)<.001,"居中折痕的原生变换不额外平移一屏");
-    b=CGRectMake(10,30,800,400);
-    l=S2APlayLayoutMake(b,CGRectMake(30,40,760,360),S2APlaySplitOn,NO,CGRectNull);
-    t=S2APlayReflectionTransform(l,b);
-    CK(point(t,b,CGPointMake(50,40),50,420),"横屏非零原点沿实际分屏线镜像");
-    CK(point(t,b,CGPointMake(50,200),50,260),"实际画面留边随原位置镜像，不拉伸填满下区");
-    b=CGRectMake(0,0,600,800);
-    l=S2APlayLayoutMake(b,CGRectMake(0,20,600,760),S2APlaySplitOn,NO,CGRectMake(290,0,20,800));
-    t=S2APlayReflectionTransform(l,b);
-    CK(point(t,b,CGPointMake(100,100),100,700),"竖向折痕不改变上下镜像轴");
+    CK(same(S2APlayReflectionFrame(l),0,420,600,380),"居中折痕：倒影从下区上沿起，与上区同大");
+    // 非居中折痕 330–370：上区 0–330，倒影 370 起高 330（镜像轴是保留区中心 350，不是窗口中线）
     l=S2APlayLayoutMake(b,b,S2APlaySplitOn,NO,CGRectMake(0,330,600,40));
-    t=S2APlayReflectionTransform(l,b);
-    CK(fabs(t.ty+100)<.001 && point(t,b,CGPointMake(70,330),70,370),"非居中折痕使用保留区中心，不硬编码窗口中线");
+    CK(same(S2APlayReflectionFrame(l),0,370,600,330),"非居中折痕：按保留区中心镜像，不硬编码窗口中线");
+    CK(CGRectIsNull(S2APlayReflectionFrame(S2APlayLayoutMake(b,b,S2APlaySplitOff,NO,CGRectNull))),"不分屏：没有倒影");
     CK(S2APlayReflectionWanted(S2APlayLayoutMake(b,b,S2APlaySplitOn,NO,CGRectMake(0,380,600,40))),"有横向折痕的分屏：出倒影");
     CK(S2APlayReflectionWanted(S2APlayLayoutMake(b,b,S2APlaySplitOn,NO,CGRectMake(290,0,20,800))),"有竖向折痕的分屏：出倒影");
     CK(!S2APlayReflectionWanted(S2APlayLayoutMake(b,b,S2APlaySplitOn,NO,CGRectNull)),"没有折痕（普通 iPhone 强制分屏，#979）：不出倒影");

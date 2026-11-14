@@ -272,7 +272,7 @@ spec = importlib.util.spec_from_file_location('android_package', sys.argv[2])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 module.android_sdk_home = lambda _: '/sdk'
-source = {'S2A_MAX_INDEX_BYTES': '123456', 'S2A_VULKAN_PROFILE': '/profile.json',
+source = {'S2A_VULKAN_PROFILE': '/profile.json',
           'S2A_VULKAN_REFS': '/ref', 'UNRELATED_SECRET': 'not-forwarded'}
 print(json.dumps(module.build_environment(source)))
 """
@@ -280,7 +280,6 @@ print(json.dumps(module.build_environment(source)))
                                  str(REPO / 'pack/targets/android/package.py')],
                                 check=True, capture_output=True, text=True)
         env = json.loads(result.stdout)
-        self.assertEqual(env['S2A_MAX_INDEX_BYTES'], '123456')
         self.assertEqual(env['S2A_VULKAN_PROFILE'], '/profile.json')
         self.assertEqual(env['S2A_VULKAN_REFS'], '/ref')
         self.assertNotIn('UNRELATED_SECRET', env)

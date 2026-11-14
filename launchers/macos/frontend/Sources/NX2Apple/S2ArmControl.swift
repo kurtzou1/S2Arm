@@ -215,7 +215,11 @@ import S2ArmAppleAdapter
             let change = a["settings"] as? [String: Any] ?? [:]
             do {
                 let (options, _) = try await model.launchSettings(id, change: change.isEmpty ? nil : change)
-                return .object(options.mapValues { ["available": $0.available, "value": $0.value ?? NSNull(), "reason": $0.reason] })
+                return .object(options.mapValues { o -> [String: Any] in   // 游戏语言另带 choices（这款支持的）/ note（不支持时起局用哪种），同启动设置页
+                    var r: [String: Any] = ["available": o.available, "value": o.value ?? NSNull(), "reason": o.reason]
+                    if let c = o.choices { r["choices"] = c }
+                    if !o.note.isEmpty { r["note"] = o.note }
+                    return r })
             } catch { return .bad(error.localizedDescription) }
         case ("POST", "/cloudFolder"):
             // iCloud 存档同步的云盘文件夹（同环境页「选择文件夹…」）：path 为空 = 关闭

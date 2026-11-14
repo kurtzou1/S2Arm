@@ -37,12 +37,14 @@ internal sealed class PhoneJobTrack
     public List<string> Pushed = [];
     public string PushNote = "";
     public bool Pushing;
+    /// <summary>这次补进 S 级优化的各款：(游戏名, {applied, failed, error})（作业结果 sgrade，pack/jobs/install.py；完成页列打上 / 没打上，11-14）</summary>
+    public List<(string Name, JsonElement Res)> SGrade = [];
 
     public void Begin(string kind, string device)
     {
         Kind = kind; Device = device; Stages.Clear(); Log.Clear(); Overall = null; Step = Steps = null;
         Started = DateTime.UtcNow; Ended = null; Suggestion = ""; PackBytes = null; PackFiles = null; Skipped = []; Version = "";
-        ExportFolder = ""; ExportGames = 0; ExportBytes = null; Pushed = []; PushNote = ""; Pushing = false;
+        ExportFolder = ""; ExportGames = 0; ExportBytes = null; Pushed = []; PushNote = ""; Pushing = false; SGrade = [];
     }
 
     /// <summary>作业事件：阶段进步骤列表、整体进度只认作业层 overall（只增不减）、说明行进过程记录</summary>
@@ -73,6 +75,8 @@ internal sealed class PhoneJobTrack
         if (r.TryGetProperty("packFiles", out var pf) && pf.ValueKind == JsonValueKind.Number) PackFiles = pf.GetInt32();
         if (r.TryGetProperty("skipped", out var sk) && sk.ValueKind == JsonValueKind.Array)
             Skipped = sk.EnumerateArray().Select(x => gameName(x.GetString() ?? "")).ToList();
+        if (r.TryGetProperty("sgrade", out var sg2) && sg2.ValueKind == JsonValueKind.Object)
+            SGrade = sg2.EnumerateObject().OrderBy(p => p.Name, StringComparer.Ordinal).Select(p => (gameName(p.Name), p.Value.Clone())).ToList();
         if (r.TryGetProperty("exported", out var ex) && ex.ValueKind == JsonValueKind.True && r.TryGetProperty("outputPath", out var op) && op.ValueKind == JsonValueKind.String)
         {
             ExportFolder = op.GetString() ?? "";
@@ -209,6 +213,7 @@ public sealed partial class EnvironmentWindow
                 actions.Children.Add(push);
             }
             panel.Children.Add(actions);
+            if (SGradeResultPanel(tr.SGrade) is { } sgr) panel.Children.Add(sgr);   // 补进 S 级优化的各款：打上 / 没打上（11-14）
         }
         else if (state is "succeeded" or "needsPlayer")
         {
@@ -240,6 +245,7 @@ public sealed partial class EnvironmentWindow
                     if (tr.Skipped.Count > 0) lines.Add(T("phone.fact.skipped").Replace("{0}", string.Join("、", tr.Skipped)));
                 }
                 foreach (var line in lines.Concat(notes ?? [])) panel.Children.Add(WrappedMuted(line, 14));
+                if (SGradeResultPanel(tr.SGrade) is { } sgr) panel.Children.Add(sgr);   // 补进 S 级优化的各款：打上 / 没打上（11-14）
             }
             else if (message.Length > 0) panel.Children.Add(WrappedMuted(B(message), 16));
         }
@@ -278,7 +284,8 @@ public sealed partial class EnvironmentWindow
         return panel;
     }
 
-    /// <summary>「详细过程」：自己画的折叠头，箭头是矢量路径（Expander 的箭头是字体字形，部分 Windows 字体里没有，显示成一个「厂」字）</summary>
+    /// <summary>「详细过程」：自己画的折叠头，箭头是矢量路径。原注释说「Expander 的箭头是字体字形、显示成厂字」是误判：
+    /// Fluent Expander 的箭头本来就是矢量路径，那次看到的怪形是截图截在箭头旋转动画中途（11-14 体验梳理查实）。自绘这一个保留：样式与本卡片一致、没有动画</summary>
     private Control DetailsToggle(string header, string text)
     {
         var body = new TextBox { Text = text, IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MaxHeight = 260, IsVisible = false };

@@ -65,6 +65,7 @@ namespace S2A.Services
 
         static void ApplyAudioPause(int frozen)
         {
+            Ryujinx.Audio.Integration.S2AGuestFreeze.Set(frozen != 0);   // 声音诊断按它扣掉冻结窗（11-13 失焦误报「回调 0 次」）
             var pause = Host.Device?.AudioDeviceDriver?.GetPauseEvent();
             if (pause == null) return;
             if (frozen != 0) pause.Reset(); else pause.Set();

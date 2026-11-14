@@ -7,14 +7,16 @@
 #include <stdio.h>
 #include <string.h>
 static const char *mode;
-static int init, xstack, ready, entered, ordinal, registered, modules, glslc, finished, shutdown;
+static int init, xstack, ready, entered, ordinal, registered, modules, glslc, finished, shutdown, published;
 int s2a_android_fault_thread_init(void) { assert(registered==1 && !init && !xstack && !entered); init=1; return !strcmp(mode,"init-fail") ? ENOMEM : 0; }
 int s2a_android_fault_thread_ready(void) { assert(init && xstack && !entered); ready=1; return strcmp(mode,"ready-fail")!=0; }
 int s2a_android_runtime_enter_guest_thread(void) { assert(init && xstack && ready); return 0; }
 void sw_xstack_thread_init(uint64_t host,uint64_t guest) { assert(init && !xstack && host && guest==0x10000); xstack=1; }
 void s2a_det_set_ord(int n) { assert(ready && !n); ordinal=1; }
 void s2a_det_acquire(void) { assert(ordinal); }
-void sw_call_on_stack(void (*fn)(void),uint64_t sp) { assert(init && xstack && ready && ordinal && sp==0x10000); entered=1; puts("SDK_ENTRY"); fflush(stdout); fn(); }
+// 主 guest 发布运行态：逐线程准入之后、进 SDK 之前恰好一次（#961）。
+int s2a_android_runtime_publish_running(void) { assert(ready && ordinal && !entered && !published); published=1; return 0; }
+void sw_call_on_stack(void (*fn)(void),uint64_t sp) { assert(init && xstack && ready && ordinal && published && sp==0x10000); entered=1; puts("SDK_ENTRY"); fflush(stdout); fn(); }
 uint32_t s2a_thread_main_init(void) { assert(!registered && !init && !entered); registered++; return 71; }
 uint32_t s2a_thread_current(void) { assert(registered==1 && entered); return 71; }
 void s2a_boot_mark(const char *why) { assert(why); }

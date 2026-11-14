@@ -71,7 +71,7 @@ void SaveW(string name, Action<EnvironmentWindow> setup)
     setup(welcome);
     SetW(welcome, "page", "library");
     CallW(welcome, "Render");
-    Dispatcher.UIThread.RunJobs();
+    Settle();
     var bmp = welcome.CaptureRenderedFrame();
     if (bmp is not null) { using var s = File.OpenWrite(Path.Combine(outDir, name + ".png")); bmp.Save(s); Console.WriteLine("  saved: " + name); }
     else Console.WriteLine("  WARN no frame: " + name);
@@ -106,6 +106,28 @@ var noticeJson = File.ReadAllText(Path.Combine(noticeDir?.FullName ?? throw new 
 SaveW("06_notice_zh", w => { SetW(w, "notice", (JsonElement?)JsonDocument.Parse(noticeJson).RootElement); SetW(w, "language", "zh-Hans"); });
 SaveW("07_notice_en", w => { SetW(w, "language", "en"); });
 SetW(welcome, "notice", null); SetW(welcome, "language", "zh-Hans");
+// 新功能大窗（大版本首次打开）：内容取仓库里那份 docs/site/feature.json（随包那份），图换成绝对路径（同 updater.py feature_spotlight 给的），每页一张
+var site = Path.Combine(noticeDir!.FullName, "docs/site");
+var featureNode = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(Path.Combine(site, "feature.json")))!.AsObject();
+featureNode["kind"] = "feature";
+foreach (var pageNode in featureNode["pages"]!.AsArray())
+{
+    // 同 updater.py feature_spotlight：image 给成 {zh-Hans, en} 绝对路径，英文缺了用中文
+    var raw = pageNode!["image"]!;
+    string Abs(string rel) => Path.Combine(site, rel);
+    var zhImg = raw is System.Text.Json.Nodes.JsonObject o1 ? Abs(o1["zh-Hans"]!.GetValue<string>()) : Abs(raw.GetValue<string>());
+    var enRel = raw is System.Text.Json.Nodes.JsonObject o2 && o2["en"] is { } e ? Abs(e.GetValue<string>()) : null;
+    pageNode["image"] = new System.Text.Json.Nodes.JsonObject { ["zh-Hans"] = zhImg, ["en"] = enRel is not null && File.Exists(enRel) ? enRel : zhImg };
+    pageNode["layout"] = pageNode["title"] is null ? "poster" : "detail";   // 同 updater.py feature_spotlight：只有图 = 海报页
+}
+var featurePopup = JsonDocument.Parse(featureNode.ToJsonString()).RootElement.Clone();
+for (var i = 0; i < featureNode["pages"]!.AsArray().Count; i++)
+{
+    var at = i;
+    SaveW($"08_feature_zh_{at + 1}", w => { SetW(w, "updatePopup", (JsonElement?)featurePopup); SetW(w, "featureIndex", at); });
+}
+SaveW("09_feature_en_1", w => { SetW(w, "language", "en"); SetW(w, "featureIndex", 0); });
+SetW(welcome, "updatePopup", null); SetW(welcome, "language", "zh-Hans");
 
 welcome.Close();
 Dispatcher.UIThread.RunJobs();
@@ -116,10 +138,18 @@ pack.Width = 1280; pack.Height = 900;
 pack.Show();
 Dispatcher.UIThread.RunJobs();
 
+// 让过渡动画（如折叠箭头 0→180° 旋转）走完再截，否则截到半转的箭头像个「厂」字
+void Settle()
+{
+    Dispatcher.UIThread.RunJobs();
+    var until = DateTime.UtcNow.AddMilliseconds(600);
+    while (DateTime.UtcNow < until) { AvaloniaHeadlessPlatform.ForceRenderTimerTick(); Dispatcher.UIThread.RunJobs(); Thread.Sleep(20); }
+}
+
 void SaveP(string name, Action setup)
 {
     setup();
-    Dispatcher.UIThread.RunJobs();
+    Settle();
     var bmp = pack.CaptureRenderedFrame();
     if (bmp is not null) { using var s = File.OpenWrite(Path.Combine(outDir, name + ".png")); bmp.Save(s); Console.WriteLine("  saved: " + name); }
     else Console.WriteLine("  WARN no frame: " + name);
@@ -149,6 +179,10 @@ SaveP("win_04_export_success", () => Navigate(pack, "progress"));
 // 降级继续（v0.3.1）：出成了，完成卡下方逐条列作业层给的玩家提示
 SetW(pack, "packNotes", (object?)new List<string> { "这款有 27 处用了兼容写法，个别场景可能不稳定，遇到请反馈", "3 支着色器首次遇到时现编，开头可能稍卡" });
 SaveP("win_04b_export_success_notes", () => Navigate(pack, "progress"));
+// S 级加强横幅 + 补丁打入结果（v0.4.0，同 Mac）：注入作业层 boost（条数 + applied / failed）
+SetW(pack, "packBoost", (JsonElement?)JsonDocument.Parse("""{"cheats":12,"fps":1,"widescreen":1,"applied":[{"cat":"widescreen","name":"满屏 21:9"},{"cat":"fps","name":"60 FPS"}],"failed":[{"cat":"gfx","name":"阴影质量","why":"result.why.mismatch"}]}""").RootElement.Clone());
+SaveP("win_04c_export_success_sgrade", () => Navigate(pack, "progress"));
+SetW(pack, "packBoost", null);
 SetW(pack, "packNotes", (object?)new List<string>());
 
 // 两路（维护者 11-13：出包页起分两路）：导出模式的进度页最后一步是「整理 iPhone 版程序与资源包」、完成页主按钮与说明照导出写
@@ -285,6 +319,16 @@ SetW(pack, "libraryDiagnostics", "");
 SetW(pack, "report", FakeReport(true));
 SetW(pack, "summaryKey", "environment.ready");
 SaveP("tidy_01_library_connected", () => Navigate(pack, "library"));
+// 顶部大图用商店横图（11-14）：S2A_SNAP_BANNER=<一张 1920×1080 的 jpg>（仓库里不放商店图）时拷进这款文件夹，再截一张看清晰度
+if (Environment.GetEnvironmentVariable("S2A_SNAP_BANNER") is { Length: > 0 } snapBanner && File.Exists(snapBanner))
+{
+    Directory.CreateDirectory(atDefault.Location!.Folder);
+    var bannerPath = Path.Combine(atDefault.Location.Folder, "banner.jpg");
+    File.Copy(snapBanner, bannerPath, true);
+    SetW(pack, "catalog", new LibraryCatalog([atDefault with { Banner = bannerPath }, elsewhere], true, "密钥已就绪"));
+    SaveP("tidy_01b_library_banner", () => Navigate(pack, "library"));
+    SetW(pack, "catalog", new LibraryCatalog([atDefault, elsewhere], true, "密钥已就绪"));
+}
 // 游戏库选到 exFAT 盘（setup 报 library_bad_format，v0.3.1）：原因下面列出能放游戏库的 NTFS / ReFS 盘和剩余空间，点「放到这里」就建
 SetW(pack, "catalog", null); SetW(pack, "connectedFolder", null); SetW(pack, "libraryId", null);
 SetW(pack, "librarySummary", "library.failed");
@@ -300,6 +344,35 @@ SetW(pack, "catalog", new LibraryCatalog([atDefault, elsewhere], true, "密钥�
 SetW(pack, "librarySummary", "library.completed"); SetW(pack, "libraryDiagnostics", "");
 pack.Height = 2100;   // 设置页最长：装机方式 + 环境检查 + 运行路径都要在一张图里
 SaveP("tidy_02_settings", () => Navigate(pack, "settings"));
+// S 级优化（v0.4.0，同 Mac）：封面左上角金色 S、游戏库「S 级优化升级」入口、升级页三态（有可升级 / 都没找到原始程序 / 查找中）
+pack.Height = 1100;
+SetW(pack, "catalog", new LibraryCatalog([atDefault with { SGrade = true }, elsewhere], true, "密钥已就绪"));
+SaveP("sgrade_01_library_badge", () => Navigate(pack, "library"));
+static JsonElement SG(string json) => JsonDocument.Parse(json).RootElement.Clone();
+SetW(pack, "sgradeOpen", true); SetW(pack, "sgradeScanning", true);
+SetW(pack, "sgradeScan", SG("""
+{"games":[
+ {"id":"0100A","name":"暗黑破坏神 III","program":"saved","total":15,"patches":{"widescreen":9,"fps":1,"gfx":3,"cheat":2},"iphone":true,"off":false},
+ {"id":"0100B","name":"空洞骑士：丝之歌","program":"source","total":0,"patches":{},"iphone":true,"off":false},
+ {"id":"0100C","name":"哈迪斯","program":"mac","total":4,"patches":{"gfx":3,"cheat":1},"iphone":false,"off":true},
+ {"id":"0100D","name":"我的世界","program":"none","total":0,"patches":{},"iphone":true,"off":false}],"found":3,"upgradable":1,"noPatch":1,"missing":1}
+"""));
+SaveP("sgrade_02_upgrade_page", () => { SetW(pack, "page", "library"); InvokeW(pack, "Render"); });
+SetW(pack, "sgradeScan", SG("""{"games":[{"id":"0100D","name":"我的世界","program":"none","total":0,"patches":{},"iphone":true,"off":false}]}"""));
+SaveP("sgrade_03_upgrade_nothing", () => InvokeW(pack, "Render"));
+SetW(pack, "sgradeScan", null);
+SaveP("sgrade_04_upgrade_scanning", () => InvokeW(pack, "Render"));
+SetW(pack, "sgradeOpen", false); SetW(pack, "sgradeScanning", false);
+// 金手指页（Windows 对齐 Mac，11-14）：一份公开库的、一份玩家导入的（其中一条版本不对）
+SetW(pack, "cheatsFor", atDefault);
+SetW(pack, "cheatsList", (JsonElement?)SG("""
+{"items":[
+ {"key":"9B9E.txt/无限血","file":"9B9E182991F3F5B5.txt","name":"无限血","from":"library","repo":"bad1dea/NXCheats","author":"Eiffel2018","ok":true,"fixed":false,"reason":""},
+ {"key":"9B9E.txt/秘境进度 1000x","file":"9B9E182991F3F5B5.txt","name":"秘境进度 1000x","from":"library","repo":"bad1dea/NXCheats","author":"Eiffel2018","ok":true,"fixed":true,"reason":""},
+ {"key":"mine.txt/金币锁定","file":"mine.txt","name":"金币锁定","from":"player","repo":"","author":"","ok":false,"fixed":false,"reason":"版本不对：金手指是 2607A74F5DF7754C，这份游戏是 9B9E182991F3F5B5。"}],"reason":""}
+"""));
+SaveP("sgrade_05_cheats_page", () => { SetW(pack, "page", "library"); InvokeW(pack, "Render"); });
+SetW(pack, "cheatsFor", null); SetW(pack, "cheatsList", null);
 pack.Height = 900;
 
 pack.Close();
@@ -307,6 +380,8 @@ Dispatcher.UIThread.RunJobs();
 Console.WriteLine("done.");
 
 // ── 辅助函数 ─────────────────────────────────────────────────────────────
+static void InvokeW(object obj, string method) =>
+    obj.GetType().GetMethod(method, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public, null, Type.EmptyTypes, null)!.Invoke(obj, null);
 static void SetW(object obj, string field, object? value)
 {
     var fi = obj.GetType().GetField(field, BindingFlags.NonPublic | BindingFlags.Instance);

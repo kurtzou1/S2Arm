@@ -35,8 +35,8 @@ public struct LaunchSettingRow: Codable, Identifiable, Equatable {
 }
 
 /// 本适配层自己记的前端选择（<数据目录>/apple-frontend/launch-settings.json）：现在只有出包页的平台勾选。
-/// 没有每款的游戏选项（11-07 维护者）：游戏语言跟设备系统语言，Mac 主机模式，60 帧缺省开、起不来自动降级，满屏缺省通用 + 补丁包——
-/// 都由作业层 / 宿主定（pack/jobs/build.py runtime_env、fps.tsv / community 缺省），界面不给开关。旧文件里的 games（语言 / 底座）读时丢掉。
+/// 这里没有每款的游戏选项：游戏语言、主机模式、帧率、满屏等逐款选项都在启动设置（LaunchSettingsSheet，共享定义表 + 作业层 community 存 launch.json；
+/// 游戏语言 11-14 维护者确认玩家可选，推翻 11-07「不给玩家选」）。旧文件里的 games（语言 / 底座）读时丢掉。
 public final class SettingsProvider {
     private let client: JobClient
     private let store: URL

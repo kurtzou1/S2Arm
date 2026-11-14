@@ -277,13 +277,15 @@ class NativeProbe:
             path = Path(options["path"]).absolute()
             while not path.exists() and path != path.parent:
                 path = path.parent
-            fmt = ""
+            fmt, remote = "", False
             if os.name == "nt":
                 root, fs = ctypes.create_unicode_buffer(1024), ctypes.create_unicode_buffer(64)
                 k32 = ctypes.windll.kernel32
-                if k32.GetVolumePathNameW(ctypes.c_wchar_p(_long_path()(str(path))), root, 1024) and k32.GetVolumeInformationW(root, None, 0, None, None, None, fs, 64):
-                    fmt = fs.value.strip().lower()
-            return {"format": fmt, "home": str(Path.home()), "env": {v: os.environ[v] for _, v in libloc.WIN_CLOUD_ENV if os.environ.get(v)}}
+                if k32.GetVolumePathNameW(ctypes.c_wchar_p(_long_path()(str(path))), root, 1024):
+                    remote = k32.GetDriveTypeW(root) == 4   # DRIVE_REMOTE：映射网络驱动器和 UNC 路径都是它（NAS 游戏库，只用来提示出包慢）
+                    if k32.GetVolumeInformationW(root, None, 0, None, None, None, fs, 64):
+                        fmt = fs.value.strip().lower()
+            return {"format": fmt, "remote": remote, "home": str(Path.home()), "env": {v: os.environ[v] for _, v in libloc.WIN_CLOUD_ENV if os.environ.get(v)}}
         if kind == "disk":
             path = Path(options["path"]).absolute()
             while not path.exists() and path != path.parent:
@@ -827,6 +829,9 @@ def _disk(request, probe):
         return _failure("disk", "目标卷空间", exc, source)
 
 
+NETWORK_LIBRARY_MESSAGE = "游戏库在网络盘上，出包会比较慢。"
+
+
 def _library(request, probe):
     """游戏库位置（11-07 启动器，libloc 与 Mac 同一套判法）：不在云盘同步目录里、所在卷是 NTFS / ReFS。不合格给「换游戏库」（错误码 → 恢复动作）"""
     libloc = _libloc()
@@ -842,7 +847,8 @@ def _library(request, probe):
                      source, {"cloud": cloud}),
                # exFAT / FAT32 玩家确认过（游戏库标识 formatAccepted，v0.3.1）：照提示、不算要处理
                _item("library_format", "游戏库所在磁盘", "ok" if libloc.format_ok(fmt, system="Windows") or libloc.format_accepted(path) else "mismatch",
-                     "游戏库所在磁盘格式可用。" if libloc.format_ok(fmt, system="Windows") else
+                     # 网络盘（NAS：映射盘 / UNC）能用，只提示一句会慢，不拦（11-14 维护者：游戏库放 NAS）
+                     (NETWORK_LIBRARY_MESSAGE if v.get("remote") else "游戏库所在磁盘格式可用。") if libloc.format_ok(fmt, system="Windows") else
                      libloc.WIN_FORMAT_ACCEPTED_MESSAGE.format(fmt=fmt.upper()) if libloc.format_accepted(path) else libloc.win_format_message(fmt),
                      source, {"format": fmt})]
         return out

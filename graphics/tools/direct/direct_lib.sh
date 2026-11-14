@@ -234,10 +234,10 @@ else X=$W/x; prog "抽取着色器（${J} 路）"; bash "$R/graphics/tools/direc
   [ "$xrc" = 0 ] || { say "🔴 抽取失败（${X}）"; exit 1; }; fi
 # 翻译编译开工前复核盘（pack/jobs/space_rule.py，#265：预检放过、编到一半写满，十几分钟白编；Mac / Windows 两条链都过这里）：与出包预检同一规则，
 #   按产物根里的游戏内容大小（原件那一档）记、扣掉已有的同款缓存。玩家点过「仍然继续」（S2A_SPACE_OVERRIDE=1）只打黄。原话「磁盘空间不足」pack/jobs/errors.py 归 disk_full
-"$PY" "$R/pack/jobs/space_rule.py" direct-check "$ROOT" "$C" "$OUT"; src=$?   # 退 1 = 空间不够；别的非 0 = 复核本身没跑成（缺脚本 / Python 出错），不冒充空间问题
-[ "$src" = 1 ] && { say "🔴 直连库开工前空间不足，没开始编"; exit 1; }   # 估不够：玩家点过「仍然继续」会带 S2A_SPACE_OVERRIDE 过这一关（space_rule.py）
-# 复核本身没跑成（缺脚本 / Python 出错）：拿不准就不停（v0.3.1 ⑫），打黄照编；真写满时写盘报 ENOSPC，那才是物理停（disk_full）
-[ "$src" = 0 ] || [ "$src" = 1 ] || say "🟡 直连库开工前的空间复核没跑成（pack/jobs/space_rule.py 退 ${src}），照常开编；真写满时会按盘满停"
+# 预估不够只打黄、照常开编（space_rule.py 恒退 0，不许堵门：预估偏保守，诊断 D-QDK9 按预估停下、玩家没出路）；真写满时写盘报 ENOSPC，那才是物理停（disk_full）
+"$PY" "$R/pack/jobs/space_rule.py" direct-check "$ROOT" "$C" "$OUT"; src=$?
+# 复核本身没跑成（缺脚本 / Python 出错）：照编，记一行
+[ "$src" = 0 ] || say "🟡 直连库开工前的空间复核没跑成（pack/jobs/space_rule.py 退 ${src}），照常开编；真写满时会按盘满停"
 CPC=-c; [ "$(uname -s)" = Darwin ] || CPC=   # macOS cp -c = APFS 克隆；Linux（安卓出包机）的 GNU cp 没有 -c，普通拷贝
 rm -rf "$W/pkg" && cp $CPC -R "$X/pkg" "$X/split" "$X/s2x" "$W/" && cp $CPC "$X/split.log" "$X/s2x.log" "$W/" || { say "🔴 抽取结果克隆进工作目录失败（${X} → ${W}）"; exit 1; }
 PROF_ONLY=$("$PY" - "$W/split" "$W/profile/$TID" <<'PYEOF'
@@ -378,13 +378,20 @@ rc127_note() {   # rc127_note <rc> <build.log> <目录>… → 追加在报红�
   elif [ -n "$low" ]; then echo "；127 多半是盘满（STATUS_DISK_FULL 0xC000007F 低 8 位）：${gs%、}"
   else echo "；rc=127 不是盘满（${gs%、}）：出库程序异常退出，看下面 build.log 末尾"; fi
 }
+# 出库失败的一句原因（诊断#3d03f4：玩家诊断只收到「出库失败 rc=134（<build.log>）」，异常原文只在 build.log 末尾、上报的红行里没有）：
+#   .NET 未处理异常 / 断言 / 致命错误取第一行，否则取最后一行非缩进、非本脚本进度的输出；放在路径前面——脱敏把路径一直抹到行尾，原因在前才留得下
+fail_why() {
+  local l; l=$(grep -a -m1 -E 'Unhandled exception|Assertion failed|[Ff]atal error' "$1" 2> /dev/null) \
+    || l=$(grep -av -e '^[[:space:]]' -e '^\[直连库\]' "$1" 2> /dev/null | grep -a . | tail -1)
+  printf '%s' "$l" | tr -d '\r' | cut -c1-160
+}
 BTX=; case "${TMPDIR:-}" in ''|/var/folders/*|/private/var/folders/*|/tmp|/tmp/*|/private/tmp|/private/tmp/*|*/AppData/Local/Temp|*/AppData/Local/Temp/*|*'\AppData\Local\Temp'*) BT=$W/tmp;;
   *) BT=${TMPDIR%/}/dsh_batch.$$; BTX=$BT;; esac
 mkdir -p "$BT"
 TMPDIR="$BT" "$PY" "$R/tools/nostall.py" --watch "$MS" --watch "$OUT" "${S2A_NOSTALL_S:-600}" -- "$PY" "$NX/../../translator/dsh_batch.py" build "${BA[@]}" > "$W/build.log" 2>&1
 brc=$?
 DF=$(rc127_note "$brc" "$W/build.log" "$BT" "$C")
-[ "$brc" = 0 ] || { [ "$brc" = 1 ] && gap "$W/build.log" "NVN 着色器"; say "🔴 出库失败 rc=${brc}（$W/build.log）${DF}"; tail -"$([ -n "$DF" ] && echo 20 || echo 5)" "$W/build.log"; exit 1; }
+[ "$brc" = 0 ] || { [ "$brc" = 1 ] && gap "$W/build.log" "NVN 着色器"; WHY=$(fail_why "$W/build.log"); say "🔴 出库失败 rc=${brc}${WHY:+：$WHY}${DF}（$W/build.log）"; tail -"$([ -n "$DF" ] && echo 20 || echo 5)" "$W/build.log"; exit 1; }
 # 核产物出自本树的翻译器（11-06 时之笛第 49 版：DSH_BATCH_CMD 指到Windows 出包机上按旧树编的 dsh_batch.exe，它键里的翻译器指纹是旧的，41971 支全命中旧缓存，
 #   2ce17db8c 的翻译器改动没进包、出库照报绿）：dsh_batch 把自己的翻译器指纹 xfp 与 --lock 文件摘要写进库印章 inputs.tsv（Build.cs WriteStamp），
 #   这里拿本树算的 dmsh_chain.xlate_fp()（与 C# 编译期 Xfp 同一份清单、同一算法）与本树锁文件摘要逐项比，不等 / 印章没这两行（旧程序）报红。只核产物，不管出库命令经谁转手

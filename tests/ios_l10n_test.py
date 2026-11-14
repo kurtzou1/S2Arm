@@ -54,7 +54,7 @@ IDENT = {   # 文件 → {字面量（源码里的原样，含转义）: 不改�
                    '<设备名>': REDACT, '\\n…截掉 %lu 字节…\\n': '诊断包里大日志截断处的标记行，只进诊断包'},
     'ios/diagredact.m': {'/Users/<用户>': REDACT, r'[^\\s\"' + "'" + r'<>:=,;{}\\[\\]，。]+的(iPhone|iPad)': REDACT, '[DEVICE_NAME]的$1': REDACT},
     'ios/loadpage.m': {'Documents/资源包': '单款包资源目录的真实路径（读 ctl/control.nacp 取游戏名）'},
-    'ios/settings.m': {**{s: 'NSException 原因串（启动环境写不进去即抛，进崩溃报告 / 日志），不是界面文字' for s in ('读取画面设置 %s 失败：%s', '重读画面设置 %@ 失败：%s')},
+    'ios/settings.m': {'Documents/资源包': '单款包资源目录的真实路径（读 ctl/control.nacp 的支持语言标志，同 loadpage.m）', **{s: 'NSException 原因串（启动环境写不进去即抛，进崩溃报告 / 日志），不是界面文字' for s in ('读取画面设置 %s 失败：%s', '重读画面设置 %@ 失败：%s')},
                        '强信号': '能力清单 s2a_caps.tsv 原因列的匹配字样（tools/caps_policy.py 写的「强信号：…」），判满屏改不改得动，不上屏'},
     'ios/game_options.m': {'未命名': CHEATS_CS, **{s: '社区补丁实际结果表 cpatch_status.tsv 的状态值（runtime/src/cpatch.c 写，比对用，显示走 S2AL）' for s in ('不配套', '表不认', '开')}},
 }

@@ -24,6 +24,7 @@ namespace Ryujinx.HLE
             S2AHooks.TickSource = null;
             S2AHooks.GuestView = null;
             S2AHooks.OpenSystemDataStorage = null;
+            S2AHooks.SystemDataFallback = null;
             S2AHooks.OpenAocDataStorage = null;
             S2AHooks.TimeZoneDataDir = null;
             S2AHooks.SharedFontDir = null;

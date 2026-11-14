@@ -18,7 +18,7 @@ import subprocess
 import tempfile
 import zipfile
 from pathlib import Path
-from core import Failure, contained, display_version, read, release_version
+from core import Failure, contained, display_version, read, release_version, resolve_path
 import layout
 
 
@@ -344,7 +344,7 @@ def _build(c):
     if res.get("ok") is False:
         raise oneclick_failure(events, getattr(c, "milestone", None) if getattr(c, "milestone", None) != before_milestone else None, ipa_log, refresh_log=refresh_log, refresh_before=refresh_before)
     ipa = Path(res.get("ipa") or "")
-    if not res.get("ok") or not res.get("ipa") or not ipa.is_file() or ipa.resolve().parent != out.resolve():
+    if not res.get("ok") or not res.get("ipa") or not ipa.is_file() or resolve_path(ipa).parent != resolve_path(out):
         raise Failure("一键出包结束了，但没报告本轮交付的 IPA（或文件不在输出目录），请查看日志。", code="package_failed")
     ms.record(c, size_gb, gameId=gid)
     # 追加内容没解出（pack/stages/aoc.sh 记产物根 aoc.log，oneclick 结果事件 aoc_missing）：本体照常出、不挡，但走同一条警告，完成页画「完成（有警告）」（审计 P1-74）
@@ -362,6 +362,7 @@ def _build(c):
     # Q15：成功清一次性中间产物，编库缓存跨次保留并按预算裁剪；失败留现场。
     c.begin("清理出包中间产物")
     pack_dir = out / (ipa.stem + "资源包")   # 同 pack/oneclick/oneclick.sh 的交付布局
+    patches.record(c, gid, "ios", product_root(c, gid))   # 补丁打入结果（打上 / 没打上，完成页列；deliver 之前产物根还在，11-14）
     deliver(c, gid, product_root(c, gid), pack_dir, ipa)
     prune_unless_follow_up(c, gid)
     cache_result = trim(c.work_root, current_gid=gid, **compiler_policy)
@@ -378,7 +379,7 @@ def _build(c):
     from library import _part_bytes
     image = layout.image_ios(c, gid)
     result = dict(compilerCache=cache_result, outputPath=str(image), ipa="", ipaBytes=0, packBytes=_part_bytes([image / layout.IOS_PACK]), buildId=res.get("build_id") or "", target=tgt, graphicsMode=res.get("graphics_mode") or "unknown",
-                  boost=patches.boost(c, game, image), **({"notes": notes} if notes else {}))
+                  boost=patches.boost(c, game, image, layout.game_info(c, gid).get("sgradeResult", {}).get("ios")), **({"notes": notes} if notes else {}))
     if early:   # 打完放进容器装到这台：早装推过的不再推，push_pack 按机上已解开的清单只补差量（着色器库 + 变了的小文件）
         import install as inst
         c.begin("装到 iPhone 并补推资源包（出包期间已先推 %d 个文件）" % pre.get("files", 0))
@@ -528,7 +529,7 @@ def product_root(c, gid):
     from build import oneclick_kuan
     out = layout.ios_work(c, gid, create=False)
     r = out / "work/pkg/product" if os.name == "nt" else out / "roots" / (oneclick_kuan(c, gid) + "@现行")   # Windows：win_oneclick 的工作根（现行各项联接 + 直连库，oneclick_win.product）
-    return r.resolve() if (r / "main.npdm").is_file() else None
+    return resolve_path(r) if (r / "main.npdm").is_file() else None
 
 
 def usable_kit(c, gid, sid, failed=()):
@@ -540,10 +541,10 @@ def usable_kit(c, gid, sid, failed=()):
         return None
     ios = layout.game_info(c, gid).get("ios") or {}
     if ios.get("shellId") == sid:
-        return kit.resolve()
+        return resolve_path(kit)
     want = host_update.engine_compat(c)
     have = dict(hostAbi=ios.get("hostAbi", 1), dmshChain=ios.get("dmshChain", host_update.LEGACY_CHAIN))
-    return kit.resolve() if want and have == want and sid not in failed else None
+    return resolve_path(kit) if want and have == want and sid not in failed else None
 
 
 CONTAINER_DIGEST_KEY = "S2AContainerDigest"   # Info.plist：这份容器 App 的内容摘要（#845 装机跳过签名安装：install.same_app 经 s2a-devpush app-attr 读手机上的同一个键）

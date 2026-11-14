@@ -124,12 +124,9 @@ PCACHE_MAX_PAYLOAD = 64 * 1024 * 1024
 
 MAX_DESCRIPTOR = 1 << 20
 MAX_REQUEST = 256 << 20
-MAX_INDEX = 32 << 20
-# index.tsv 的读取上限默认就是 MAX_INDEX（打包契约，所有游戏同一口径）。文件数十万的超大型 RomFS
-# （0100F2C0115B6000 304243 个 RomFS 文件 → index.tsv 41,884,008 B）按这个上限永远出不了包，所以留一个
-# 显式开关：S2A_MAX_INDEX_BYTES=<字节数> 只抬高这一处读取上限；不设时行为逐字节不变。
-# 运行时侧没有这个上限（GamePack.java 的 read() 不带 max），这是出包工具的自设限额。
-INDEX_ENV = 'S2A_MAX_INDEX_BYTES'
+# index.tsv 不设读取上限：它就是这款游戏的文件清单，大小由 RomFS 文件数决定（0100F2C0115B6000 304243 个文件 → 41,884,008 B）。
+#   原先默认 32 MiB 上限、要设环境变量才放开：超大型 RomFS 不设变量就永远出不了包，属于自设的拦截；
+#   运行时侧本来就不设上限（GamePack.java 的 read() 不带 max）。11-14 去掉，两边同口径
 MAX_CAPTURE_MANIFEST = 1 << 20
 MAX_LIBRARY_INDEX = 16 << 20
 
@@ -165,12 +162,13 @@ def sha256_bytes(data):
 
 
 def _read_file(path, what, limit, hint=''):
+    """limit=None：整份读，不设上限"""
     try:
         with open(path, 'rb') as stream:
-            data = stream.read(limit + 1)
+            data = stream.read() if limit is None else stream.read(limit + 1)
     except OSError as error:
         _fail(f'{what}: {path}: {error.strerror or error}')
-    if len(data) > limit:
+    if limit is not None and len(data) > limit:
         _fail(f'{what}: {path}: larger than {limit} bytes{hint}')
     return data
 
@@ -560,35 +558,9 @@ def verify_descriptor_files(direct_dir, files, label):
 # Pack index / content identities
 # ---------------------------------------------------------------------------------------
 
-def index_limit():
-    """index.tsv 的读取上限（字节）：默认 MAX_INDEX；S2A_MAX_INDEX_BYTES 显式放开，未设置时与改动前一致。"""
-    raw = os.environ.get(INDEX_ENV, '').strip()
-    if not raw:
-        return MAX_INDEX
-    try:
-        value = int(raw, 0)
-    except ValueError:
-        _fail(f'{INDEX_ENV}={raw!r} is not an integer byte count')
-    if value <= 0:
-        _fail(f'{INDEX_ENV}={raw!r} must be a positive byte count')
-    return value
-
-
 def _index_bytes(path):
-    """index.tsv 的原始字节：三处读取点（read_index / describe_pack / verify_pack）只走这一个入口。
-
-    上限一律取 index_limit()（默认 MAX_INDEX）；超限时的报错必须自解释：当前上限 / 本包需要多少 /
-    用哪个变量放开到多少。默认值不变，未设变量时行为与改动前一致。"""
-    limit = index_limit()
-    try:
-        need = os.path.getsize(path)
-    except OSError:
-        need = 0
-    hint = '' if need <= limit else (
-        f' (index limit {limit} bytes; this index.tsv needs {need} bytes;'
-        f' a RomFS with hundreds of thousands of files can raise this one limit explicitly with'
-        f' {INDEX_ENV}={need} or a larger byte count; unset keeps {MAX_INDEX})')
-    return _read_file(path, 'index.tsv', limit, hint)
+    """index.tsv 的原始字节：三处读取点（read_index / describe_pack / verify_pack）只走这一个入口；不设上限（见文件头 index.tsv 说明）。"""
+    return _read_file(path, 'index.tsv', None)
 
 
 def read_index(path):

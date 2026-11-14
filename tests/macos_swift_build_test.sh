@@ -11,6 +11,7 @@ source "$R/tools/toolchain.sh" > /dev/null
 export CLANG_MODULE_CACHE_PATH="$R/build/macos/clang-cache"
 export SWIFTPM_MODULECACHE_OVERRIDE="$R/build/macos/swift-cache"
 mkdir -p build/macos/tests
+python3 launchers/macos/sparkle_vendor.py > /dev/null   # Sparkle 二进制包不随仓库，按校验值备到 frontend/Vendor/
 t0=$SECONDS; rc=0
 swift build --build-tests --disable-sandbox --disable-keychain --cache-path "$R/build/macos/spm-cache" --package-path launchers/macos --scratch-path build/macos/spm > build/macos/tests/swift-build.log 2>&1 || rc=$?
 if [ $rc != 0 ]; then grep -a -E 'error:' build/macos/tests/swift-build.log | head -20; echo "macos_swift_build：主目标 / 测试目标编译不过（$((SECONDS - t0)) 秒，日志 build/macos/tests/swift-build.log）"; exit 1; fi

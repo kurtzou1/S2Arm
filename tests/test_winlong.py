@@ -99,8 +99,18 @@ class LongPathTest(unittest.TestCase):
         local = r"R:\lib\iPhone\g\work"
         unc = r"\\server\share\lib\cache\g\extract"
         self.assertEqual(sorted(sr.junction_targets([local, unc])), [r"R:\lib\iPhone\g\work"])
-        self.assertTrue(sr.is_unc_path(unc))
-        self.assertFalse(sr.is_unc_path(local))
+        self.assertTrue(sr.is_network_path(unc))
+        self.assertFalse(sr.is_network_path(local))
+
+    def test_mapped_network_drive_is_not_used_as_junction_target(self):
+        # NAS 映射成盘符（11-14 Windows 实机实测：联接建得出、一访问 WinError 123）：和 UNC 一样不建联接；本地盘照建
+        from unittest.mock import patch
+        from pack.orch import shortroot as sr
+        mapped, local = r"Q:\lib\games\g\build\ios", r"R:\lib\iPhone\g\work"
+        with patch.object(sr, "_remote_drive", lambda d: d.upper() == "Q:"):
+            self.assertTrue(sr.is_network_path(mapped))
+            self.assertFalse(sr.is_network_path(local))
+            self.assertEqual(sr.junction_targets([local, mapped]), [local])
 
     def test_enter_keeps_unc_paths_unchanged_without_junction(self):
         import types

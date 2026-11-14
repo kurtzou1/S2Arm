@@ -6,7 +6,7 @@ import Foundation
 /// |---|---|
 /// | inspect | import（读原件、登记进游戏库）+ catalog（读回这几款） |
 /// | build | Mac：build（作业层的 prepare，出运行文件）；iPhone：ipa（缺 .NET SDK 先 installDotnet） |
-/// | settingsSchema | 空表：没有每款的游戏选项（11-07 维护者：语言跟系统、Mac 主机模式、60 帧 / 满屏缺省开 + 自动降级，作业层定） |
+/// | settingsSchema | 空表：每款的游戏选项不走这里，在启动设置（共享定义表 game_settings.v1.json + 作业层 community；游戏语言 11-14 维护者确认玩家可选） |
 /// | run | launch（作业层校验运行文件、恢复存档、起 s2arm-host 并等它退出） |
 /// | control | stop = 请 launch 作业停（SIGTERM） |
 ///

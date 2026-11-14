@@ -181,7 +181,7 @@ final class EngineProviderBuildTests: XCTestCase {
 
 final class EngineProviderSettingsAndRunTests: XCTestCase {
     func testSettingsSchemaIsEmpty() throws {
-        // 11-07 维护者 删游戏选项：语言跟系统、Mac 主机模式、60 帧 / 满屏缺省开 + 自动降级，都由作业层定，没有可选的行，也不起作业
+        // 这一层没有可选的行、也不起作业：逐款选项（游戏语言、主机模式等）在启动设置，走作业层 community
         let box = try Sandbox(); defer { box.remove() }
         let runner = FakeRunner()
         let provider = S2ArmEngineProvider(client: client(box, runner), xcodeLocator: { nil })

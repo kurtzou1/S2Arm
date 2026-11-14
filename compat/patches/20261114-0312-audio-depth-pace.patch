@@ -1,0 +1,428 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+index c6d03aee1115329c8c916e0ce0f1a88a9216bf8f..604961e65986e704776fc7c742d9dfa4c6867313 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+@@ -15,7 +15,7 @@ namespace Ryujinx.Audio.Backends.Apple
+ {
+     [SupportedOSPlatform("macos")]
+     [SupportedOSPlatform("ios")]
+-    class AppleHardwareDeviceSession : HardwareDeviceSessionOutputBase
++    class AppleHardwareDeviceSession : HardwareDeviceSessionOutputBase, Ryujinx.Audio.Integration.IS2AOutputDepth   // 平台例外：苹果会话自己实现中性的在途深度接口，共享代码只认接口、不引用苹果类型
+     {
+         // S2Arm: a pool of 32 device buffers of up to 50 ms each, filled as soon as samples are queued (DeviceBufferPump), instead of
+         // 3 buffers of 10 ms refilled only from the device callback. 50 ms holds a whole game buffer (witcher3 audout: 1024 frames =
+@@ -318,7 +318,10 @@ namespace Ryujinx.Audio.Backends.Apple
+                 return;
+             }
+ 
+-            if (_timeline.Tick(zero, returned, elapsed) && now - _lastHealTicks >= (long)HealBackoffMs * Stopwatch.Frequency / 1000)
++            // S2Arm (11-13 断音): iOS only. A macOS queue recovers by itself (QueueTimelineWatch), and its criterion cannot tell a timeline
++            //   ahead from a queue playing at zero margin: 0400486024DEC000 Mac 局第 26 秒 a 30 ms render stall left zero margin, this fired, and the
++            //   synchronous stop / restart only cut the audio once more (zero-in-flight hand-backs 24 → 39 in the next window)
++            if (OperatingSystem.IsIOS() && _timeline.Tick(zero, returned, elapsed) && now - _lastHealTicks >= (long)HealBackoffMs * Stopwatch.Frequency / 1000)   // 平台例外：苹果后端内部，iOS 队列跑前要重启、macOS 队列自己恢复
+             {
+                 S2ARecover($"队列时间轴跑到声音前面（这 {elapsed * 1000 / Stopwatch.Frequency} ms 交还 {returned / _bytesPerFrame} 帧、{zero} 次交还后在途为 0：欠载后交的缓冲排在已过去的时刻，没播就交还）",
+                            false, now, false);
+@@ -919,6 +922,12 @@ namespace Ryujinx.Audio.Backends.Apple
+             }
+         }
+ 
++        // S2Arm (11-13 断音): what the renderer paces by (AudioProcessor.S2ADepthWait): queued + submitted, not handed back yet.
++        //   Only while the device plays: in pre-roll the queue must fill to the prime floor on the wall clock
++        public long S2ABufferedFrames => Volatile.Read(ref _queueRunning) && !Volatile.Read(ref _disposed)
++            ? (_pump.InFlightBytes + _samples.Length) / _bytesPerFrame
++            : -1;
++
+         public override void PrepareToClose() { }
+         // S2Arm: the buffer goes back to the game (Stop / FlushBuffers / Dispose) possibly before it was played: keep what it held
+         public override void UnregisterBuffer(AudioBuffer buffer) => _samples.Release(buffer);
+diff --git a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+index d579e4b4fa2b2ea37ec78a68ae60a76f41dd46c9..68c2e3fc0f7a16e7e2e69a749da5dcbfa0e21eb3 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+@@ -93,6 +93,7 @@ namespace Ryujinx.Audio.Backends.Apple
+         private static readonly S2AOutputDiag[] _all = new S2AOutputDiag[MaxSessions];
+         private static int _nextIndex = -1;
+         private static int _reporterStarted;
++        private static long _repFreezeSeq;
+         private static readonly string _wavBase = DocPath(Environment.GetEnvironmentVariable("S2A_AUDIO_WAV"));
+         private readonly ManualResetEventSlim _closed = new(false);
+         private Thread _writer;
+@@ -529,6 +530,11 @@ namespace Ryujinx.Audio.Backends.Apple
+                 Ryujinx.Common.S2AThreadAlloc.Tick("声音诊断"); // S2Arm: per-thread allocation accounting
+                 Thread.Sleep(10_000);
+ 
++                // S2Arm (11-13 失焦误报): frozen now, or frozen at any time in this window: the renderer was paused on purpose
++                long freezeSeq = Interlocked.Read(ref Ryujinx.Audio.Integration.S2AGuestFreeze.Seq);
++                bool frozenWindow = Ryujinx.Audio.Integration.S2AGuestFreeze.Frozen != 0 || freezeSeq != _repFreezeSeq;
++                _repFreezeSeq = freezeSeq;
++
+                 long skipped = Interlocked.Exchange(ref AudioProcessor.S2ASkippedPeriods, 0);
+                 long lateNs = Interlocked.Exchange(ref AudioProcessor.S2AMaxLateNs, 0);
+                 HudAudio(-1, 0, skipped);   // 渲染丢周期是整个渲染器的，不分会话：单报一次
+@@ -563,7 +569,11 @@ namespace Ryujinx.Audio.Backends.Apple
+                     {
+                         // S2Arm (10-23): 播过声、开着播，却 10 秒零回调零交设备 = 设备停了 / 没声音。之前这里直接跳过，「完全没声」在日志里一行都不留。
+                         //   只对播过声的会话报（cb > 0）：游戏开着却从没送过声音的会话（动森 #1）不算
+-                        if (d._started && cb > 0)
++                        if (d._started && cb > 0 && frozenWindow)
++                        {
++                            Console.Error.WriteLine($"[声] 输出 #{d.Index} 10 秒：客机冻结中（失焦 / 后台，渲染按设计暂停），回调 0 次不算停播");
++                        }
++                        else if (d._started && cb > 0)
+                         {
+                             Console.Error.WriteLine($"[声] 【红】输出 #{d.Index} 10 秒：播过声、开着播，这 10 秒回调 0 次、交设备 0 帧（设备停了或游戏不再送声音）");
+                         }
+diff --git a/src/Ryujinx.Audio/Backends/CompatLayer/CompatLayerHardwareDeviceSession.cs b/src/Ryujinx.Audio/Backends/CompatLayer/CompatLayerHardwareDeviceSession.cs
+index b124a5ada4fffee39a34ab5a35a2c6bbf06716e3..0bd7a62b010caecd0eb1fe94628571111bd8405d 100644
+--- a/src/Ryujinx.Audio/Backends/CompatLayer/CompatLayerHardwareDeviceSession.cs
++++ b/src/Ryujinx.Audio/Backends/CompatLayer/CompatLayerHardwareDeviceSession.cs
+@@ -6,8 +6,12 @@ using System.Runtime.InteropServices;
+ 
+ namespace Ryujinx.Audio.Backends.CompatLayer
+ {
+-    class CompatLayerHardwareDeviceSession : HardwareDeviceSessionOutputBase
++    class CompatLayerHardwareDeviceSession : HardwareDeviceSessionOutputBase, Ryujinx.Audio.Integration.IS2AOutputDepth
+     {
++        // S2Arm (11-13 断音): the renderer's output always comes through this wrapper; pass the real session's depth through (frames:
++        //   downmixing keeps the frame count, the rate is the real session's)
++        public long S2ABufferedFrames => _realSession is Ryujinx.Audio.Integration.IS2AOutputDepth d ? d.S2ABufferedFrames : -1;
++
+         private readonly HardwareDeviceSessionOutputBase _realSession;
+         private readonly SampleFormat _userSampleFormat;
+         private readonly uint _userChannelCount;
+diff --git a/src/Ryujinx.Audio/Integration/HardwareDeviceImpl.cs b/src/Ryujinx.Audio/Integration/HardwareDeviceImpl.cs
+index 7bbbe946e494b5b0d9fcbf6e5a234ef5dee0052e..8c270857df8e55c9b5e92755aefece9f47680cfb 100644
+--- a/src/Ryujinx.Audio/Integration/HardwareDeviceImpl.cs
++++ b/src/Ryujinx.Audio/Integration/HardwareDeviceImpl.cs
+@@ -11,6 +11,12 @@ namespace Ryujinx.Audio.Integration
+         private readonly uint _sampleRate;
+         private uint _currentBufferTag;
+ 
++        // S2Arm (11-13 断音): renders appended so far; the processor paces by the depth of the devices this counter shows being fed
++        public long S2AAppends;
++
++        /// <summary>S2Arm: frames given to the output and not handed back by it yet; -1 when the backend cannot tell (or is not playing).</summary>
++        public long S2ABufferedFrames => _session is IS2AOutputDepth d ? d.S2ABufferedFrames : -1;
++
+         private readonly byte[] _buffer;
+ 
+         // S2Arm: one AudioBuffer per tag, reused every 4 rounds (was a new one per round); all fields are re-set before queueing
+@@ -41,6 +47,7 @@ namespace Ryujinx.Audio.Integration
+             audioBuffer.PlayedTimestamp = 0;
+ 
+             _session.QueueBuffer(audioBuffer);
++            S2AAppends++;
+ 
+             _currentBufferTag %= 4;
+         }
+@@ -79,4 +86,33 @@ namespace Ryujinx.Audio.Integration
+             }
+         }
+     }
++
++    /// <summary>
++    /// S2Arm (11-13 断音): an output session that can tell how much it holds: frames queued or submitted to the device and not
++    /// handed back yet; -1 while the device is not playing (pre-roll, stopped) or the backend cannot tell.
++    /// </summary>
++    public interface IS2AOutputDepth
++    {
++        long S2ABufferedFrames { get; }
++    }
++
++    /// <summary>
++    /// S2Arm (11-13 失焦误报): the host froze the guest (rendering paused through the driver's pause event). Set by the host's
++    /// lifecycle; diagnostics skip windows that were frozen at any point instead of reporting a silent output.
++    /// </summary>
++    public static class S2AGuestFreeze
++    {
++        public static volatile int Frozen;
++        public static long Seq;   // freezes so far (Interlocked)
++
++        public static void Set(bool frozen)
++        {
++            if (frozen)
++            {
++                System.Threading.Interlocked.Increment(ref Seq);
++            }
++
++            Frozen = frozen ? 1 : 0;
++        }
++    }
+ }
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs b/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs
+index 3b8075ffd9deece90b9430721ab5c35917cedc3b..20d70bf3ac3b85359de37d5a624b68de059ea03b 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs
+@@ -169,6 +169,12 @@ namespace Ryujinx.Audio.Renderer.Dsp
+ 
+             long timeNow = PerformanceCounter.ElapsedNanoseconds;
+ 
++            // S2Arm (11-13 断音): pace by what the output still holds when it can tell (see S2ADepthWait); the wall clock below otherwise
++            if (S2ADepthFrames > 0 && S2ADepthWait(increment, timeNow))
++            {
++                return;
++            }
++
+             if (timeNow > _playbackEnds)
+             {
+                 // Playback has restarted.
+@@ -209,6 +215,138 @@ namespace Ryujinx.Audio.Renderer.Dsp
+             _lastTime += increment;
+         }
+ 
++        // S2Arm (11-13 断音，0400486024DEC000 Mac 局第 26 秒): upstream paces rendering by the wall clock and, once more than 5 periods behind,
++        //   throws the excess periods away (keeps 3). The output then holds only what it held before: about 480 frames (10 ms) plus
++        //   the device's own ~2.5 ms. A render thread late by ~30 ms (with a 68 ms game frame) dropped 4 periods = 20.1 ms of real gap,
++        //   and the lost depth never came back (the queue played at zero margin, 24–39 zero-in-flight hand-backs per window after).
++        //   Eden paces its renderer by the sink instead (ring of 4 × 5 ms, WaitFreeSpace): render whenever the output holds less than
++        //   the target, back to back after a stall, nothing dropped. Same here: below S2ADepthFrames render at once; at or above it,
++        //   sleep until the output drains to it. Bounds: with the output near the target, the wall-clock due time still renders (a
++        //   device slightly slower than the clock); a device that stops draining holds the loop at most 4 periods past due (the game
++        //   waits on this loop's event; never block it on a dead device). S2A_AUDIO_DEPTH_MS=0: upstream wall clock.
++        private static readonly long S2ADepthFrames = S2ADepthMs() * Constants.TargetSampleRate / 1000;
++        private readonly long[] _s2aSeenAppends = new long[Constants.AudioRendererSessionCountMax];
++
++        private static long S2ADepthMs()
++        {
++            string v = Environment.GetEnvironmentVariable("S2A_AUDIO_DEPTH_MS");
++
++            return long.TryParse(v, out long ms) && ms >= 0 ? ms : 30;
++        }
++
++        // Frames held by the least-filled output fed by the last render; -1 when none was fed or none can tell
++        private long S2AFedBufferedFrames(bool update)
++        {
++            long min = -1;
++
++            for (int i = 0; i < OutputDevices.Length; i++)
++            {
++                if (OutputDevices[i] is not HardwareDeviceImpl d)
++                {
++                    continue;
++                }
++
++                long appends = d.S2AAppends;
++
++                if (appends == _s2aSeenAppends[i])
++                {
++                    continue;
++                }
++
++                if (update)
++                {
++                    _s2aSeenAppends[i] = appends;
++                }
++
++                long b = d.S2ABufferedFrames;
++
++                if (b >= 0 && (min < 0 || b < min))
++                {
++                    min = b;
++                }
++            }
++
++            return min;
++        }
++
++        // Rendered audio's position on the wall clock (ns): advances one period per render. Caps rendering at the depth ahead of the
++        //   wall clock: an output that hands buffers back unplayed (iOS queue timeline ahead, QueueTimelineWatch) never fills, and must
++        //   not make this loop render as fast as it can until the watchdog restarts the queue
++        private long _s2aVirt;
++
++        // True: paced by depth (the next render may start now). False: no fed output can tell its depth: use the wall clock
++        private bool S2ADepthWait(long increment, long timeNow)
++        {
++            long buffered = S2AFedBufferedFrames(false);
++
++            if (buffered < 0)
++            {
++                S2AFedBufferedFrames(true);
++                _s2aVirt = 0;
++
++                return false;
++            }
++
++            // Lateness = how far past one period after the last render start the loop got here (a stalled thread)
++            if (timeNow - (_lastTime + increment) > Volatile.Read(ref S2AMaxLateNs))
++            {
++                Volatile.Write(ref S2AMaxLateNs, timeNow - (_lastTime + increment));
++            }
++
++            long period = Constants.TargetSampleCount;
++            long depthNs = S2ADepthFrames * 1_000_000_000L / Constants.TargetSampleRate;
++
++            // What a long stall left unrendered is a gap already heard: owe at most 8 periods, never more
++            _s2aVirt = Math.Max(_s2aVirt, timeNow - 8 * increment);
++
++            while (true)
++            {
++                bool below = buffered < S2ADepthFrames;
++                long capAt = _s2aVirt - depthNs - increment;   // rendering earlier than this runs ahead of the wall clock by more than the depth
++
++                if (below && timeNow >= capAt)
++                {
++                    break;
++                }
++
++                // Wall clock: the output is near the target (a device a little slower than the clock), or it stopped draining (bounded wait)
++                if ((timeNow >= _s2aVirt && buffered < S2ADepthFrames + 2 * period) || timeNow >= _s2aVirt + 4 * increment)
++                {
++                    break;
++                }
++
++                long wake = _s2aVirt + 4 * increment;
++
++                if (below)
++                {
++                    wake = Math.Min(wake, capAt);
++                }
++                else
++                {
++                    wake = Math.Min(wake, timeNow + (buffered - S2ADepthFrames + 1) * 1_000_000_000L / Constants.TargetSampleRate);
++                }
++
++                if (buffered < S2ADepthFrames + 2 * period)
++                {
++                    wake = Math.Min(wake, _s2aVirt);
++                }
++
++                Ryujinx.Common.PreciseSleep.PreciseSleepHelper.SleepUntilTimePointSingleWake(
++                    PerformanceCounter.ElapsedTicks + Math.Max(0, wake - timeNow) * PerformanceCounter.TicksPerMillisecond / 1_000_000);
++
++                timeNow = PerformanceCounter.ElapsedNanoseconds;
++                buffered = Math.Max(0, S2AFedBufferedFrames(false));
++            }
++
++            S2AFedBufferedFrames(true);
++
++            _s2aVirt += increment;
++            _lastTime = timeNow;
++            _playbackEnds = timeNow;
++
++            return true;
++        }
++
+         private void StartThread()
+         {
+             _workerThread = new Thread(Work)
+diff --git a/src/Ryujinx.Audio/Renderer/Server/AudioRenderSystem.cs b/src/Ryujinx.Audio/Renderer/Server/AudioRenderSystem.cs
+index 054994eccb3ee90a522895616c6b9103825d1103..729db9037390bf55989897c46f35978161cf124f 100644
+--- a/src/Ryujinx.Audio/Renderer/Server/AudioRenderSystem.cs
++++ b/src/Ryujinx.Audio/Renderer/Server/AudioRenderSystem.cs
+@@ -427,9 +427,35 @@ namespace Ryujinx.Audio.Renderer.Server
+             }
+         }
+ 
++        // S2Arm (11-13 断音): the render loop and the game's RequestUpdate share _lock. Longest hold by Update since the render loop last
++        //   read it, and how long the render loop waited for the lock (AudioRendererManager logs both when a period runs long)
++        public static long S2AUpdateHoldMaxTicks;
++        public static long S2ARenderLockWaitTicks;
++
+         public ResultCode Update(Memory<byte> output, Memory<byte> performanceOutput, ReadOnlySequence<byte> input)
+         {
+             lock (_lock)
++            {
++                long s2aHeld = System.Diagnostics.Stopwatch.GetTimestamp();
++
++                try
++                {
++                    return S2AUpdateLocked(output, performanceOutput, input);
++                }
++                finally
++                {
++                    s2aHeld = System.Diagnostics.Stopwatch.GetTimestamp() - s2aHeld;
++
++                    if (s2aHeld > Volatile.Read(ref S2AUpdateHoldMaxTicks))
++                    {
++                        Volatile.Write(ref S2AUpdateHoldMaxTicks, s2aHeld);
++                    }
++                }
++            }
++        }
++
++        private ResultCode S2AUpdateLocked(Memory<byte> output, Memory<byte> performanceOutput, ReadOnlySequence<byte> input)
++        {
+             {
+                 ulong updateStartTicks = GetSystemTicks();
+ 
+@@ -719,8 +745,12 @@ namespace Ryujinx.Audio.Renderer.Server
+ 
+         public void SendCommands()
+         {
++            long s2aWait = System.Diagnostics.Stopwatch.GetTimestamp();
++
+             lock (_lock)
+             {
++                S2ARenderLockWaitTicks += System.Diagnostics.Stopwatch.GetTimestamp() - s2aWait;   // render loop thread only
++
+                 if (_isActive)
+                 {
+                     if (!_manager.Processor.HasRemainingCommands(_sessionId))
+diff --git a/src/Ryujinx.Audio/Renderer/Server/AudioRendererManager.cs b/src/Ryujinx.Audio/Renderer/Server/AudioRendererManager.cs
+index 3b32470ddd98c19d613c0c70fd5066b45d0a7b5a..d121d17878c1209cbf387f0b7d7482e34f8cafe0 100644
+--- a/src/Ryujinx.Audio/Renderer/Server/AudioRendererManager.cs
++++ b/src/Ryujinx.Audio/Renderer/Server/AudioRendererManager.cs
+@@ -241,23 +241,62 @@ namespace Ryujinx.Audio.Renderer.Server
+ 
+             Processor.Wait();
+ 
++            long s2aCmd = 0;
++
+             while (_isRunning)
+             {
+                 Ryujinx.Common.S2AThreadAlloc.Tick("声音渲染调度"); // S2Arm: per-thread allocation accounting
+ 
++                long s2aT0 = System.Diagnostics.Stopwatch.GetTimestamp();
++                AudioRenderSystem.S2ARenderLockWaitTicks = 0;
++                Volatile.Write(ref AudioRenderSystem.S2AUpdateHoldMaxTicks, 0);
++
+                 lock (_sessionLock)
+                 {
++                    long s2aT1 = System.Diagnostics.Stopwatch.GetTimestamp();
++
+                     foreach (AudioRenderSystem renderer in _sessions)
+                     {
+                         renderer?.SendCommands();
+                     }
++
++                    s2aT0 = s2aT1 - s2aT0;   // session lock wait
++                    s2aCmd = System.Diagnostics.Stopwatch.GetTimestamp() - s2aT1;
+                 }
+ 
++                long s2aT2 = System.Diagnostics.Stopwatch.GetTimestamp();
+                 Processor.Signal();
++                S2ALogSlowPeriod(s2aT0, s2aCmd, System.Diagnostics.Stopwatch.GetTimestamp() - s2aT2);
+                 Processor.Wait();
+             }
+         }
+ 
++        // S2Arm (11-13 断音): a period that took > 10 ms on this thread (the output holds ~30 ms): where it went. Session lock, building
++        //   the command lists (of which: waiting for a renderer lock the game's RequestUpdate holds; longest Update hold that ended in the
++        //   period), the DSP itself. At most 40 lines a run
++        private static int s_s2aSlowLines;
++
++        private static void S2ALogSlowPeriod(long sessionWait, long cmd, long dsp)
++        {
++            long f = System.Diagnostics.Stopwatch.Frequency;
++            long total = sessionWait + cmd + dsp;
++
++            if (total * 1000 < 10 * f)
++            {
++                return;
++            }
++
++            long hold = Interlocked.Exchange(ref AudioRenderSystem.S2AUpdateHoldMaxTicks, 0);
++
++            if (Interlocked.Increment(ref s_s2aSlowLines) > 40)
++            {
++                return;
++            }
++
++            Console.Error.WriteLine($"[声] 渲染一拍用了 {total * 1000.0 / f:F1} ms：等会话锁 {sessionWait * 1000.0 / f:F1} ms、生成命令 {cmd * 1000.0 / f:F1} ms" +
++                                    $"（其中等游戏 Update 占着的锁 {AudioRenderSystem.S2ARenderLockWaitTicks * 1000.0 / f:F1} ms；这一拍里游戏 Update 最长持锁 {hold * 1000.0 / f:F1} ms）、DSP {dsp * 1000.0 / f:F1} ms");
++        }
++
+         /// <summary>
+         /// Register a new <see cref="AudioRenderSystem"/>.
+         /// </summary>

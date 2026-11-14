@@ -57,7 +57,9 @@ extension S2ArmLauncherModel {
                                                   skipped: (r["skipped"] as? [String] ?? []).map { names[$0.uppercased()] ?? $0 },
                                                   version: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "",
                                                   exportFolder: r["exported"] as? Bool == true ? r["outputPath"] as? String ?? "" : "",
-                                                  exportGames: (r["games"] as? [Any])?.count ?? 0, exportBytes: (r["exportBytes"] as? NSNumber)?.int64Value)
+                                                  exportGames: (r["games"] as? [Any])?.count ?? 0, exportBytes: (r["exportBytes"] as? NSNumber)?.int64Value,
+                                                  sgrade: (r["sgrade"] as? [String: Any] ?? [:]).sorted { $0.key < $1.key }
+                                                      .map { SGradeGameResult(name: names[$0.key.uppercased()] ?? $0.key, outcome: SGradeOutcome($0.value as? [String: Any] ?? [:])) })
                 if r["exported"] as? Bool == true, let folder = r["outputPath"] as? String { NSWorkspace.shared.open(URL(fileURLWithPath: folder)) }
             }
             catch let f as JobFailure where ask && Self.confirmCodes[f.code ?? ""] != nil {

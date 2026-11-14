@@ -10,7 +10,10 @@ import XCTest
 @MainActor final class SGradeCardTests: XCTestCase {
     static let texts = ["title": "S 级优化", "loading": "正在匹配社区补丁…", "hit.widescreen": "{0} 个满屏补丁，已打入并默认开启", "hit.fps": "{0} 个帧率补丁，已打入并默认开启",
                         "hit.cheat": "{0} 条金手指，已打入、默认关闭，进游戏后按需打开", "hit.note": "开着补丁如遇到不兼容导致游戏崩溃，下次启动会自动将崩溃补丁关掉以确保您正常游戏。",
-                        "none": "这个版本暂无社区补丁", "others": "游戏的其他版本有社区支持：", "cat.fps": "帧率", "cat.widescreen": "满屏", "cat.cheat": "金手指",
+                        "none": "你这份游戏是 {0} 版，补丁库里没有这个版本的补丁，这次不会打入。", "others": "补丁库里有补丁的其他版本（帧率、画面、金手指要版本一致，和你这份不同的不会打入）：",
+                        "listed": "补丁库里有补丁的版本：", "later": "帧率补丁和金手指按游戏版本生效：出包时核对你这份游戏的版本，对得上的才打入。满屏补丁版本不同也会尝试移植。",
+                        "port": "满屏：补丁库里是 {0} 版的，出包时尝试移植到你这份游戏，移植成功就打入并默认开启", "port.any": "其他",
+                        "hit.version": "以上补丁对应你这份游戏的版本 {0}，打入前逐处核对原字节，对不上的那条不打入。", "cat.fps": "帧率", "cat.widescreen": "满屏", "cat.cheat": "金手指",
                         "toggle": "出包时打入", "off": "这次出包不带社区补丁和金手指，游戏按原生画面与帧率运行。重新勾上，下次出包再打入。"]
     func render(_ m: PatchMatch?, _ name: String, on: Binding<Bool>? = nil) throws -> NSBitmapImageRep {
         _ = NSApplication.shared
@@ -32,8 +35,15 @@ import XCTest
         return n
     }
     func testThreeStatesRenderAndHitIsBrightest() throws {
-        var hit = PatchMatch(); hit.build = "d95ec48ffe269b6e"; hit.exact = ["widescreen": 1, "fps": 1, "cheat": 12]
-        var others = PatchMatch(); others.build = "aa11bb22cc33dd44"; others.others = [("1.1.0", ["fps", "widescreen"]), ("1.0.0", ["cheat"])]
+        var hit = PatchMatch(); hit.build = "d95ec48ffe269b6e"; hit.version = "2.7.6"; hit.exact = ["widescreen": 1, "fps": 1, "cheat": 12]
+        var others = PatchMatch(); others.build = "aa11bb22cc33dd44"; others.version = "2.7.4"; others.others = [("1.1.0", ["fps", "widescreen"]), ("1.0.0", ["cheat"])]
+        var later = PatchMatch(); later.others = others.others   // 没解过包：不知道玩家是哪一版，只列补丁库里有补丁的版本
+        _ = try render(later, "later")
+        // 满屏跨版本：这份没有同版本的满屏，2.7.4 版的出包时尝试移植（单列一行、卡片点亮）；帧率在别的版本 → 列进「不会打入」
+        var port = PatchMatch(); port.build = "aa11bb22cc33dd44"; port.version = "2.7.6"; port.port = true; port.portVersions = ["2.7.4"]; port.others = [("2.7.4", ["fps"])]
+        var portLater = PatchMatch(); portLater.port = true; portLater.portVersions = ["2.7.4"]; portLater.others = [("2.7.4", ["fps", "cheat"])]
+        XCTAssertGreaterThan(goldPixels(try render(port, "port")), goldPixels(try render(portLater.others.isEmpty ? nil : others, "others_cmp")), "可移植满屏的卡片应点亮（比没命中的亮）")
+        _ = try render(portLater, "port_later")
         let h = goldPixels(try render(hit, "hit")), o = goldPixels(try render(others, "others")), l = goldPixels(try render(nil, "loading"))
         XCTAssertGreaterThan(h, 0); XCTAssertGreaterThan(h, o, "命中态应比只命中别的版本更亮（金色像素 \(h) 对 \(o)）"); XCTAssertGreaterThan(o, 0); XCTAssertGreaterThan(l, 0)
     }

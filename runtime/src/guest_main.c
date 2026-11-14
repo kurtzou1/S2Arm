@@ -91,6 +91,11 @@ void *s2a_guest_main(void *a) {
     if (entry_error) die("Android 主线程最终准入失败 error=%d", entry_error);
 #endif
     { void s2a_det_set_ord(int), s2a_det_acquire(void); s2a_det_set_ord(0); s2a_det_acquire(); }
+#ifdef __ANDROID__
+    // 只主 guest 发布共用会话 RUNNING（子线程经 thread.c 只走上面的逐线程准入），之后存档原子态等才问服务层
+    int publish_error = s2a_android_runtime_publish_running();
+    if (publish_error) die("Android 主线程运行态发布被拒绝（停止先到或会话已失败）error=%d", publish_error);
+#endif
 #if defined(__APPLE__) && !defined(__ANDROID__)
     atomic_store(&((struct s2a_guest_main_args *)a)->entered, 1);
 #endif

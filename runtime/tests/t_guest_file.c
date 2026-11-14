@@ -39,6 +39,34 @@ int main(void) {
         if (x != MAP_FAILED) { long long g0 = fp(); for (size_t i = 0; i < (64u << 20); i += 64) x[i] = 3; long long dg = fp() - g0;
             CHECK(dg < (8ll << 20) && x[12345 * 64] == 3, "⑤ 写满 64 MB：实占 +%lld KB（期望 < 8192 KB）", dg >> 10); }
     }
+    {   // ⑥' 挖不挖（s2a_guest_carve_wanted，11-14）：期望按规则手写——显式设的照办；内存不够那档挖；剩余 ≥ 门槛挖；剩余未知（0）/ 不够不挖
+        int s2a_guest_carve_wanted(const char *, int, uint64_t, uint64_t); const uint64_t G = 1ull << 30, MIN = 7 * G;
+        CHECK(s2a_guest_carve_wanted("0", 1, 8 * G, MIN) == 0, "⑥' S2A_GUEST_FILE_CARVE=0：不挖（哪怕内存不够那档、剩余够）");
+        CHECK(s2a_guest_carve_wanted("1", 0, 0, MIN) == 1, "⑥' S2A_GUEST_FILE_CARVE=1：挖（哪怕剩余未知）");
+        CHECK(s2a_guest_carve_wanted(NULL, 1, 1 * G, MIN) == 1, "⑥' 内存不够那档：挖");
+        CHECK(s2a_guest_carve_wanted(NULL, 0, 8189ull << 20, MIN) == 1, "⑥' Duo 档剩余 8189 MB ≥ 7168：挖");
+        CHECK(s2a_guest_carve_wanted(NULL, 0, 6141ull << 20, MIN) == 0, "⑥' 17 Pro Max 档剩余 6141 MB < 7168：不挖（挖了实占峰约 6.1 GB，贴着上限）");
+        CHECK(s2a_guest_carve_wanted(NULL, 0, 3000ull << 20, MIN) == 0, "⑥' 剩余 3000 MB < 7168：不挖");
+        CHECK(s2a_guest_carve_wanted(NULL, 0, 0, MIN) == 0, "⑥' 剩余未知（0，Mac）：不挖");
+    }
+    {   // ⑥ 物理映射区挖回匿名（#964 a，s2a_guest_file_carve）：从没放开过的一段换成匿名占位后，这段「不在文件里」（懒清零 / 还页走匿名），
+        //   写进去的计实占、不进文件（文件同偏移读回 0）；段外照旧在文件里。已放开过的段（① 那 256 MB）拒挖、照旧在文件里
+        void s2a_guest_file_carve(uint64_t, uint64_t); const uint64_t C = b + (8ull << 30), CN = 256ull << 20;
+        s2a_guest_file_carve((uint64_t)(uintptr_t)q, 16u << 20);
+        CHECK(s2a_guest_in_file((uint64_t)(uintptr_t)q, 0x4000) == 1, "⑥ 已放开过的段拒挖：照旧在文件里");
+        s2a_guest_file_carve(C, CN);
+        CHECK(s2a_guest_in_file(C, 0x4000) == 1, "⑥ 缺省（不是「物理内存也装不下」那档）不挖：照旧在文件里");
+        setenv("S2A_GUEST_FILE_CARVE", "1", 1); s2a_guest_file_carve(C, CN);
+        CHECK(s2a_guest_in_file(C, 0x4000) == 0 && s2a_guest_in_file(C + CN - 0x4000, 0x4000) == 0, "⑥ S2A_GUEST_FILE_CARVE=1 强制挖：挖回的段首尾都不在文件里");
+        CHECK(s2a_guest_in_file(C - 0x4000, 0x4000) == 1 && s2a_guest_in_file(C + CN, 0x4000) == 1, "⑥ 紧挨着的段外照旧在文件里");
+        CHECK(s2a_guest_zero(C, 0x4000) == 0, "⑥ 挖回的段还页不打洞（回 0，调用方换匿名占位）");
+        uint8_t *c = (uint8_t *)(uintptr_t)C; size_t M = 64u << 20;
+        if (mprotect(c, M, PROT_READ | PROT_WRITE)) CHECK(0, "⑥ 放开挖回的段失败");
+        else { long long g0 = fp(); for (size_t i = 0; i < M; i += 64) c[i] = 7; long long dg = fp() - g0;
+            uint8_t buf[4096]; ssize_t r = pread(s2a_guest_fd(), buf, sizeof buf, (off_t)(C - b)); size_t nz = 0; for (ssize_t i = 0; i < r; i++) nz += buf[i] != 0;
+            CHECK(dg > (48ll << 20), "⑥ 挖回的段写 64 MB：实占 +%lld KB（匿名计实占，期望 > 49152 KB）", dg >> 10);
+            CHECK(r == (ssize_t)sizeof buf && nz == 0 && c[64] == 7, "⑥ 后备文件同偏移读回全 0（数据没进文件，非 0 %zu 处，读 %zd 字节）", nz, r); }
+    }
     printf("%s t_guest_file：%d 项不符\n", bad ? "✗" : "✓", bad);
     return bad != 0;
 }

@@ -15,4 +15,8 @@
     <ProjectReference Include="../../compat/tree/src/Ryujinx.HLE/Ryujinx.HLE.csproj" />
     <ProjectReference Include="../../compat/tree/src/Ryujinx.Input/Ryujinx.Input.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- 可合成的系统数据（0802 / 0806 / 0823 / 0849）：tools/make_sysdata_synth_tar.py 由 pack/sysdata_synth.py 生成，游戏资源包里缺时运行时解出（Host.SynthSystemData） -->
+    <EmbeddedResource Include="systemdata_synth.tar" LogicalName="systemdata_synth.tar" />
+  </ItemGroup>
 </Project>

@@ -50,8 +50,7 @@ static NSString *redact_assignments(NSString *s) {
     return result;
 }
 
-char *s2a_diag_redact(const char *text) {
-    if (!text) return NULL;
+static char *redact_one(const char *text) {
     @autoreleasepool {
         NSString *s = [[NSString alloc] initWithUTF8String:text];
         if (!s) return NULL;
@@ -90,4 +89,41 @@ char *s2a_diag_redact(const char *text) {
         const char *utf8 = s.UTF8String;
         return utf8 ? strdup(utf8) : NULL;
     }
+}
+
+// 按行边界分块逐块脱敏（11-14 诊断 D-GT8W：几 MB 的日志整份变成 NSString 后每条规则整份拷贝一遍，
+//   iPad 上导出诊断时 stringByReplacingMatchesInString 内部分配失败——NSMallocException / appendString: nil——App 崩掉，最需要诊断的玩家导不出包）。
+//   规则全在一行之内（redact_assignments 遇换行停、各正则的字符类都排除换行），按换行切块与整份处理结果逐字节相同；
+//   一块失败整份返回 NULL（调用方拒绝写出原文，不漏敏感信息）
+#define REDACT_CHUNK (256u << 10)
+char *s2a_diag_redact(const char *text) {
+    if (!text) return NULL;
+    size_t n = strlen(text);
+    if (n <= REDACT_CHUNK) return redact_one(text);
+    size_t cap = n + n / 8 + 64, len = 0; char *out = malloc(cap);
+    if (!out) return NULL;
+    for (size_t at = 0; at < n; ) {
+        size_t end = at + REDACT_CHUNK < n ? at + REDACT_CHUNK : n;
+        if (end < n) {   // 切在这一块里最后一个换行之后；整块没有换行（超长单行）就整行带上
+            const char *nl = NULL;
+            for (const char *q = text + end - 1; q >= text + at; q--) if (*q == '\n') { nl = q; break; }
+            if (nl) end = (size_t)(nl - text) + 1;
+            else { const char *f = strchr(text + end, '\n'); end = f ? (size_t)(f - text) + 1 : n; }
+        }
+        char *piece = malloc(end - at + 1);
+        if (!piece) { free(out); return NULL; }
+        memcpy(piece, text + at, end - at); piece[end - at] = 0;
+        char *clean = redact_one(piece); free(piece);
+        if (!clean) { free(out); return NULL; }
+        size_t m = strlen(clean);
+        if (len + m + 1 > cap) {
+            size_t nc = (len + m + 1) * 2; char *grown = realloc(out, nc);
+            if (!grown) { free(clean); free(out); return NULL; }
+            out = grown; cap = nc;
+        }
+        memcpy(out + len, clean, m); len += m; free(clean);
+        at = end;
+    }
+    out[len] = 0;
+    return out;
 }

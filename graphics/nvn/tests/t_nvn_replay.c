@@ -164,7 +164,9 @@ static nvn_gpu_pass_desc g_pd[8]; static int g_npd, g_pass_ends; static uint32_t
 void nvn_gpu_pass_begin(nvn_gpu_cmd c, const nvn_gpu_pass_desc *d) { (void)c; if (g_npd < 8) g_pd[g_npd] = *d; g_npd++; g_pass_open = 1; }
 void nvn_gpu_pass_end(nvn_gpu_cmd c) { (void)c; g_pass_ends++; g_pass_open = 0; }
 static int g_npd_now(void) { return g_npd; } static int g_ends_now(void) { return g_pass_ends; }
-void nvn_gpu_barrier(nvn_gpu_cmd c, uint32_t bits) { (void)c; g_barrier_bits |= bits; g_barrier_at = g_npd; }
+static int g_ndisp_now(void);
+static struct { uint32_t bits; int ndisp; } g_bar[8]; static int g_nbar;   // 每次屏障：交了哪些位、当时已派发几次
+void nvn_gpu_barrier(nvn_gpu_cmd c, uint32_t bits) { (void)c; g_barrier_bits |= bits; g_barrier_at = g_npd; if (g_nbar < 8) { g_bar[g_nbar].bits = bits; g_bar[g_nbar].ndisp = g_ndisp_now(); } g_nbar++; }
 static struct { nvn_gpu_clear d; int npd, ends; } g_cr[8]; static int g_ncr;   // 矩形清：记描述，以及收到时已开 / 已关过几个通道
 void nvn_gpu_clear_rect(nvn_gpu_cmd c, const nvn_gpu_clear *d) { (void)c; if (g_ncr < 8) { g_cr[g_ncr].d = *d; g_cr[g_ncr].npd = g_npd; g_cr[g_ncr].ends = g_pass_ends; } g_ncr++; }
 static uint64_t g_tick;   // 游戏时钟替身
@@ -191,6 +193,7 @@ int rp_shader_resolve(const struct rp_shader_req *q, const struct rp_prog **out)
 // 计算：程序、管线、派发的替身
 static struct rp_prog g_cprog; static int g_cresolves, g_cresolve_rc, g_cpipe_gets, g_ndisp; static uint32_t g_disp[3]; static struct nvn_gpu_pipe_s *g_disp_pipe; static nvn_gpu_shader g_cpipe_sh;
 static nvn_gpu_buf g_disp_ind; static uint64_t g_disp_off;
+static int g_ndisp_now(void) { return g_ndisp; }
 static nvn_gpu_binding g_cb[16]; static uint32_t g_ncb; static int g_cbinds;
 int rp_shader_resolve_compute(const struct rp_prog **out) { g_cresolves++; *out = g_cresolve_rc ? NULL : &g_cprog; return g_cresolve_rc; }
 void rp_shader_reset(void) {}
@@ -1156,7 +1159,7 @@ static void put_set_rt(stream *s, const tex_t *color, const tex_t *depth) {   //
     if (color) { snap[k] = *color; pt[k] = &snap[k]; k++; }
     if (depth) { snap[k] = *depth; pt[k] = &snap[k]; }
 }
-static void pass_fresh(void) { nvn_be_shutdown_session(); res_fresh(); nvn_unimpl_reset(); g_npd = g_pass_ends = g_ncr = 0; g_barrier_bits = 0; g_barrier_at = -1; }
+static void pass_fresh(void) { nvn_be_shutdown_session(); res_fresh(); nvn_unimpl_reset(); g_npd = g_pass_ends = g_ncr = 0; g_barrier_bits = 0; g_barrier_at = -1; g_nbar = 0; }
 
 static void t_pass_clear_fold(void) {   // 整屏清除不单独编码：折进通道的 load；没有绘制时提交末为它开一个只清除的通道
     pass_fresh();
@@ -1993,6 +1996,36 @@ static void t_dispatch(void) {
     g_cresolve_rc = 0; g_buf_cpu_fake = NULL; nvn_be_pool_del(g_pmem); pass_fresh();
 }
 
+// 游戏屏障对通道外的计算派发也生效（#978；iOS 在下一个编码器开头消费游戏屏障，计算编码器也算）：
+// 派发 A → 屏障 → 派发 B：屏障在 A 之后、B 之前交给后端，只交一次（之后开的绘制通道不再重发）；
+// 间接派发自带的那道屏障和待发位合成一次；负控：没有游戏屏障就一道都不插。
+static void t_dispatch_barrier(void) {
+    const int32_t bits = NVN_BARRIER_ORDER_PRIMITIVES_BIT | NVN_BARRIER_INVALIDATE_SHADER_BIT;
+    for (int mode = 0; mode < 3; mode++) {   // 0 有屏障；1 有屏障、B 是间接派发；2 负控：没有屏障
+        pass_fresh(); memset(g_pg_gen, 0, sizeof g_pg_gen); g_pg_tracked = 1; g_dirty_now = 100; g_arena_used = 0; g_nbw = 0;
+        g_cresolve_rc = 0; g_ndisp = 0;
+        uint64_t base = (uint64_t)(uintptr_t)g_pmem; nvn_be_pool_add(g_pmem, sizeof g_pmem); memset(g_pmem, 0, sizeof g_pmem);
+        uint32_t ind[3] = {1, 1, 1}; memcpy(g_pmem + 2 * PG, ind, 12);
+        memset(&g_cprog, 0, sizeof g_cprog); g_cprog.is_compute = 1; g_cprog.sh[0] = &g_fsh[0]; g_cprog.nent[0] = 1;
+        g_cprog.ent[0][0].cls = NVN_GPU_RES_SSBO; g_cprog.ent[0][0].src_kind = NVN_RB_SBUFP; g_cprog.ent[0][0].src_reg = 0; g_cprog.ent[0][0].access = NVN_GPU_ACC_RW;
+        stream s = {0};
+        p_bind_buf *sb = put(&s, OP_BIND_SSBO, sizeof *sb); sb->stage = 5; sb->index = 0; sb->addr = base + PG; sb->size = 256;
+        p_dispatch *dp = put(&s, OP_DISPATCH, sizeof *dp); dp->x = 4; dp->y = 1; dp->z = 1;   // A：写
+        if (mode != 2) { uint8_t *b = put(&s, OP_BARRIER, 8); memcpy(b, &bits, 4); }
+        dp = put(&s, OP_DISPATCH, sizeof *dp);                                                 // B：读 A 写的内容
+        if (mode == 1) dp->ind = base + 2 * PG; else { dp->x = 4; dp->y = 1; dp->z = 1; }
+        q_env(&s); q_draw(&s);   // 派发之后开一个绘制通道：已经交过的屏障不在它开头重发
+        end(&s);
+        submit1(&s); fake_complete(NVN_GPU_DONE_OK);
+        CHECK(g_ndisp == 2 && g_npd == 1 && nvn_unimpl_kinds() == 0);
+        if (mode == 0) CHECK(g_nbar == 1 && g_bar[0].ndisp == 1 && g_bar[0].bits == (uint32_t)bits);
+        if (mode == 1) CHECK(g_nbar == 1 && g_bar[0].ndisp == 1 && g_bar[0].bits == ((uint32_t)bits | NVN_BARRIER_ORDER_INDIRECT_DATA_BIT));
+        if (mode == 2) CHECK(g_nbar == 0);
+        nvn_be_pool_del(g_pmem);
+    }
+    pass_fresh();
+}
+
 // 着色器来源快路径用的两个代号（分离贴图槽摘要的缓存靠它们判失效）：
 // 分离槽（128 起）被改写才动 rp_tex_sep_gen[阶段]，组合槽不动；贴图登记 / 注销各动一次 rp_tex_reg_gen。
 uint64_t rp_tex_reg_gen(void); extern uint64_t rp_tex_sep_gen[6];
@@ -2785,7 +2818,56 @@ static void t_separate_sampler(void) {
     nvn_be_tex_release(&t); pass_fresh();
 }
 
+// Registered views must obey the same encode-window lifetime as cached attachment
+// views and samplers, including re-registration and nested windows.
+static void t_registered_view_pin(void) {
+    res_fresh();
+    tex_t a = mk_tex(81001, 0, NVN_FORMAT_RGBA8, 16, 16, 1, 0);
+    tex_t b = mk_tex(81002, 4096, NVN_FORMAT_RGBA8, 16, 16, 1, 0);
+    nvn_be_tex_init(&a); nvn_be_tex_init(&b);
+    nvn_be_reg_tex(3, &a, NULL);
+    rp_view_pin_begin();
+    nvn_gpu_view first = rp_view_by_id(3, &g_fake_cmd, NULL);
+    CHECK(first != NULL); int first_id = first ? first->rid : 0;
+    rp_view_pin_begin();
+    nvn_be_reg_tex(3, &b, NULL);
+    CHECK(!was_view_released(first_id));
+    nvn_gpu_view second = rp_view_by_id(3, &g_fake_cmd, NULL);
+    CHECK(second != NULL); int second_id = second ? second->rid : 0;
+    nvn_be_unreg_tex_range(3, 1);
+    CHECK(rp_view_by_id(3, &g_fake_cmd, NULL) == NULL);
+    CHECK(!was_view_released(second_id));
+    rp_view_pin_end();
+    CHECK(!was_view_released(first_id) && !was_view_released(second_id));
+    rp_view_pin_end();
+    CHECK(was_view_released(first_id) && was_view_released(second_id));
+    res_fresh();
+}
+
+static void t_invalidated_attachment_pin(void) {
+    res_fresh();
+    tex_t t = mk_tex(82001, 0, NVN_FORMAT_RGBA8, 16, 16, 1, 0);
+    nvn_be_tex_init(&t);
+    rp_view_pin_begin();
+    nvn_gpu_view v = rp_view_for(&t, NULL, &g_fake_cmd);
+    CHECK(v != NULL); int id = v ? v->rid : 0;
+    rp_view_pin_begin();
+    nvn_be_tex_release(&t);
+    CHECK(!was_view_released(id));
+    rp_view_pin_end();
+    CHECK(!was_view_released(id));
+    rp_view_pin_end();
+    CHECK(was_view_released(id));
+    v = rp_view_for(&t, NULL, &g_fake_cmd);
+    CHECK(v != NULL); id = v ? v->rid : 0;
+    nvn_be_tex_release(&t);
+    CHECK(was_view_released(id));
+    res_fresh();
+}
+
 int main(int argc, char **argv) {
+    t_invalidated_attachment_pin();
+    t_registered_view_pin();
     t_state_persists();
     t_unimpl_names();
     t_one_commit_per_submit();
@@ -2833,6 +2915,7 @@ int main(int argc, char **argv) {
     t_occlusion();
     t_render_cond();
     t_dispatch();
+    t_dispatch_barrier();
     t_dispatch_indirect_gpu();
     t_dispatch_ubop_rw();
     t_dispatch_ubop_ro_skip();

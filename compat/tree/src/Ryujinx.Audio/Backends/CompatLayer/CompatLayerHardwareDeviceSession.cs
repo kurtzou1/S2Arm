@@ -6,8 +6,12 @@ using System.Runtime.InteropServices;
 
 namespace Ryujinx.Audio.Backends.CompatLayer
 {
-    class CompatLayerHardwareDeviceSession : HardwareDeviceSessionOutputBase
+    class CompatLayerHardwareDeviceSession : HardwareDeviceSessionOutputBase, Ryujinx.Audio.Integration.IS2AOutputDepth
     {
+        // S2Arm (11-13 断音): the renderer's output always comes through this wrapper; pass the real session's depth through (frames:
+        //   downmixing keeps the frame count, the rate is the real session's)
+        public long S2ABufferedFrames => _realSession is Ryujinx.Audio.Integration.IS2AOutputDepth d ? d.S2ABufferedFrames : -1;
+
         private readonly HardwareDeviceSessionOutputBase _realSession;
         private readonly SampleFormat _userSampleFormat;
         private readonly uint _userChannelCount;

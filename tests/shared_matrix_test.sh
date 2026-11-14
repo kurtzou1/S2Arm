@@ -136,6 +136,11 @@ ck "服务层只有导出名、没人取 → 红（rc=${r}）" '[ $r != 0 ] && e
 echo 'int y(void){ unsigned (*f)(void) = (unsigned (*)(void))dlsym(RTLD_DEFAULT, "S2A_TestExportOpen"); return f ? (int)f() : 0; }' >> "$R/android/native/caller.c"
 o=$(run --check); r=$?
 ck "安卓链上的 C 代码 dlsym 取导出名 → 算接线、不再红（前一场景的 late.c 还在，只看 Exported）" '! echo "$o" | grep "【红】" | grep -q Exported'
+sed_edit '/S2A_TestExportOpen/d' "$R/android/native/caller.c"
+# 同库链接期弱引用（安卓服务层静态并入、dlsym 取不到隐藏导出时的正确写法）→ 同样算接线
+echo 'extern unsigned S2A_TestExportOpen(void) __attribute__((weak)); int z(void){ return S2A_TestExportOpen ? (int)S2A_TestExportOpen() : 0; }' >> "$R/android/native/caller.c"
+o=$(run --check); r=$?
+ck "安卓链上的 C 代码链接期弱引用导出名 → 算接线、不红" '! echo "$o" | grep "【红】" | grep -q Exported'
 rm "$R/services/S2A.Services/Exported.cs"; sed_edit '/S2A_TestExportOpen/d' "$R/android/native/caller.c"
 
 # 把 oldgap 接上：进 core 名单 + 安卓调用方 → 缺口收窄 → 基线条目变旧 → 【黄】但绿

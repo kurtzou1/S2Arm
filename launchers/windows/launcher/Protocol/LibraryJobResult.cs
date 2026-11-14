@@ -51,7 +51,7 @@ public sealed record LibraryGame(string Id, string Name, string Version, string 
     IReadOnlyList<string> Missing, bool IphoneReady = false, double? IphoneInstalledAt = null,
     bool IphoneFree = false, IReadOnlyList<GamePackage>? Packages = null, bool CustomName = false, bool CustomCover = false,
     GameLocation? Location = null, bool IphoneRestorable = false, GameSizes? Sizes = null, bool NeedsKeys = false, string IphoneInstallDevice = "",
-    bool OnPhone = false)
+    bool OnPhone = false, string Banner = "", bool SGrade = false)   // SGrade：已打上 S 级优化（catalog sgrade，pack/jobs/library.py sgrade_badge）→ 封面左上角金色 S（同 Mac）
 {
     /// <summary>Storage state (library layout v3): ok / offline / missing / none; older catalogues without the field read as none.</summary>
     public string LocationState => Location?.State ?? "none";
@@ -59,12 +59,15 @@ public sealed record LibraryGame(string Id, string Name, string Version, string 
     /// <summary>可以显示的本地封面路径：只认作业层给的、就在这款自己文件夹里（catalog location.folder，按英文名或游戏号命名都行）的
     /// cover.jpg（游戏包自带图标）、玩家换的 cover.custom.&lt;8 位十六进制&gt;.jpg（作业层 _CUSTOM_COVER），或没有自带图标时的商店横图 banner.jpg；其它一律 null。
     /// 不按游戏号拼 games\&lt;号&gt;\：v0.2.0 起文件夹按英文名命名（#330）。</summary>
-    public string? CoverFile()
+    public string? CoverFile() => FolderImage(Cover);
+    /// <summary>游戏库顶部大图用的商店横图（作业层 game.banner = 这款文件夹里的 banner.jpg，1920×1080）；没有就 null，界面退回封面卡片。同 CoverFile 只认这款自己文件夹里的。</summary>
+    public string? BannerFile() => FolderImage(Banner) is { } path && System.IO.Path.GetFileName(path) == "banner.jpg" ? path : null;
+    private string? FolderImage(string file)
     {
-        if (Cover.Length == 0 || Location is not { State: "ok", Folder.Length: > 0 } location) return null;
+        if (file.Length == 0 || Location is not { State: "ok", Folder.Length: > 0 } location) return null;
         try
         {
-            var path = System.IO.Path.GetFullPath(Cover);
+            var path = System.IO.Path.GetFullPath(file);
             var folder = System.IO.Path.TrimEndingDirectorySeparator(System.IO.Path.GetFullPath(location.Folder));
             var parent = System.IO.Path.GetDirectoryName(path);
             var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
@@ -167,7 +170,9 @@ public sealed record LibraryCatalog(IReadOnlyList<LibraryGame> Games, bool KeysR
                     game.TryGetProperty("iphoneRestorable", out var restorable) && restorable.ValueKind == JsonValueKind.True,
                     game.TryGetProperty("sizes", out var sizes) && sizes.ValueKind == JsonValueKind.Object ? GameSizes.Parse(sizes) : null,
                     game.TryGetProperty("needsKeys", out var needsKeys) && needsKeys.ValueKind == JsonValueKind.True, iphoneDevice,
-                    game.TryGetProperty("onPhone", out var onPhone) && onPhone.ValueKind == JsonValueKind.True));   // 设备记录里装在手机上：删除确认多写一句
+                    game.TryGetProperty("onPhone", out var onPhone) && onPhone.ValueKind == JsonValueKind.True,
+                    game.TryGetProperty("banner", out var banner) && banner.ValueKind == JsonValueKind.String ? banner.GetString() ?? "" : "",   // 设备记录里装在手机上：删除确认多写一句
+                    game.TryGetProperty("sgrade", out var sgr) && sgr.ValueKind == JsonValueKind.True));
             }
             var keys = result.GetProperty("keys");
             return new(games.AsReadOnly(), keys.GetProperty("ready").GetBoolean(),

@@ -85,6 +85,24 @@ int main(void) {
             checks++; if (g_up_keep_bytes != 0) { fails++; printf("FAIL 提交后批内暂存计数 %llu，期望 0\n", (unsigned long long)g_up_keep_bytes); }
             if (g_up_cap_flushes - cf0 == 1 && early == 8 && left == 4ull * K_BLK) puts("✓ 批内暂存封顶：12 块 32 MB 在第 9 次 up_begin 提前提交 1 次，批内留 128 MB，提交后清零");
         }
+        // 解排布参数块（nvn_mtl.m up_param_alloc / g_up_slot_pblk）：参数格只被录它的那个上传批读，寿命要跟着那批走。旧实现所有批共用一块、写满就 defer_obj_release
+        //   （挂在下一次回放提交的栅栏上，与还在读它的上传批没有先后保证，释放时还移出驻留集）——Mac / iPad 两份玩家诊断都是首传贴图后 GPU 缺页。
+        //   期望（按 64 KB / 64 字节 = 1024 格手算）：同一批切 1100 格 → 第 1025 格换块，换下的是槽自己的块、留着；新块到批末交给本批的保留表，
+        //   不进延后释放队列（旧实现：进）；上传做完 2 秒内新块移出驻留集，槽块仍在；下一批换槽，用的是另一块槽块
+        {
+            up_begin(); unsigned s0 = g_up_cur_slot; size_t off; id<MTLBuffer> first = up_param_alloc(&off), cur = first; int swaps = 0; __weak id<MTLBuffer> over = nil;
+            for (int i = 1; i < 1100; i++) { id<MTLBuffer> b = up_param_alloc(&off); if (b != cur) { swaps++; over = b; cur = b; } }
+            int indef = 0; pthread_mutex_lock(&g_deferred_mu); for (NvDeferredRelease *d in g_deferred) indef += d->object == first || (over && d->object == over); pthread_mutex_unlock(&g_deferred_mu);
+            checks++; if (first != g_up_slot_pblk[s0] || swaps != 1 || off != (1100 - 1024 - 1) * 64) { fails++; printf("FAIL 参数块：首块是槽块 %d、换块 %d 次（期望 1）、末格偏移 %zu（期望 %d）\n", first == g_up_slot_pblk[s0], swaps, off, (1100 - 1024 - 1) * 64); }
+            checks++; if (indef) { fails++; printf("FAIL 参数块：写满换下后进了延后释放队列 %d 块（期望 0：跟着本批上传完成退，不挂在回放提交的栅栏上）\n", indef); }
+            up_flush(); API(nvnQueueFinish)(&queue);
+            int inres = 1; for (int t = 0; t < 200 && inres; t++) { usleep(10000); pthread_mutex_lock(&g_res_mu); id<MTLBuffer> x = over; inres = x && [g_res_objects containsObject:x]; pthread_mutex_unlock(&g_res_mu); }
+            pthread_mutex_lock(&g_res_mu); int slot_in = [g_res_objects containsObject:g_up_slot_pblk[s0]]; pthread_mutex_unlock(&g_res_mu);
+            checks++; if (inres || !slot_in) { fails++; printf("FAIL 参数块：上传做完 2 秒后换下的块还在驻留集 %d（期望 0）、槽块在驻留集 %d（期望 1）\n", inres, slot_in); }
+            up_begin(); unsigned s1 = g_up_cur_slot; id<MTLBuffer> second = up_param_alloc(&off); up_flush(); API(nvnQueueFinish)(&queue);
+            checks++; if (s1 == s0 || second != g_up_slot_pblk[s1] || second == first || off != 0) { fails++; printf("FAIL 参数块：下一批槽 %u→%u、用的是本槽槽块 %d、与上一槽同一块 %d、首格偏移 %zu（期望 换槽、1、0、0）\n", s0, s1, second == g_up_slot_pblk[s1], second == first, off); }
+            if (!indef && !inres && slot_in && swaps == 1 && s1 != s0) puts("✓ 解排布参数块跟着上传批走：写满换下的不进延后释放、上传做完移出驻留集，每槽一块");
+        }
         // ReadTexels can resolve a fresh host texture outside a replay.  With
         // deferred encoding already active, its initial upload is recorded but
         // not published.  Finishing the GPU must publish it before waiting.

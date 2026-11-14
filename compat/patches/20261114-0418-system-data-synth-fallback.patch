@@ -1,0 +1,45 @@
+diff --git a/src/Ryujinx.HLE/S2AHooks.cs b/src/Ryujinx.HLE/S2AHooks.cs
+index d58cac1a8a68aa1845282e2a90d7a07c77c028fe..0c9ad8c03f0913ac661cce2a5e7a180cdc5153ef 100644
+--- a/src/Ryujinx.HLE/S2AHooks.cs
++++ b/src/Ryujinx.HLE/S2AHooks.cs
+@@ -107,16 +107,23 @@ namespace Ryujinx.HLE
+         // Upstream's fixed LanPlayPort; tests point it at a free port so they never meet a real relay on 30456
+         public static int LdnPort = Ryujinx.Common.SharedConstants.LanPlayPort;
+ 
++        // System data the game's own pack lacks but S2A can synthesize (empty-but-valid archives such as 0806 / 0823 NgWord, 0802 Mii):
++        // directory of the synthesized archive, null when it cannot. Consulted only after the game's own systemdata/<id>/, so real data wins
++        public static System.Func<ulong, string> SystemDataFallback;
++
+         public static string SystemDataDir(ulong id)
+         {
+-            if (SystemDataRoot == null)
++            if (SystemDataRoot != null)
+             {
+-                return null;
+-            }
++                string dir = System.IO.Path.Combine(SystemDataRoot, id.ToString("X16"));
+ 
+-            string dir = System.IO.Path.Combine(SystemDataRoot, id.ToString("X16"));
++                if (System.IO.Directory.Exists(dir))
++                {
++                    return dir;
++                }
++            }
+ 
+-            return System.IO.Directory.Exists(dir) ? dir : null;
++            return SystemDataFallback?.Invoke(id);
+         }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/S2ASessionState.cs b/src/Ryujinx.HLE/S2ASessionState.cs
+index 5191dea04ce11ee7cc501f18e53f15f9ac3d9899..49685c0ab815cf451bab6bea6b45d1540a5aa3f5 100644
+--- a/src/Ryujinx.HLE/S2ASessionState.cs
++++ b/src/Ryujinx.HLE/S2ASessionState.cs
+@@ -24,6 +24,7 @@ namespace Ryujinx.HLE
+             S2AHooks.TickSource = null;
+             S2AHooks.GuestView = null;
+             S2AHooks.OpenSystemDataStorage = null;
++            S2AHooks.SystemDataFallback = null;
+             S2AHooks.OpenAocDataStorage = null;
+             S2AHooks.TimeZoneDataDir = null;
+             S2AHooks.SharedFontDir = null;

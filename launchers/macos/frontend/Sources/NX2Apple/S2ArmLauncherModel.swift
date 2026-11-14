@@ -32,6 +32,8 @@ struct ExportRun: Equatable {
         var notes: [String] = []
         /// 出包时自动配好的金手指 / 社区补丁（作业层 pack/jobs/patches.py boost：cheats / fps / widescreen / gfx 的条数）：完成页的 S 级加强动效
         var boost: [String: Int] = [:]
+        /// 补丁打入结果（boost 里的 applied / failed / error，pack/jobs/patches.py record；完成页列打上 / 没打上，11-14）
+        var sgrade = SGradeOutcome()
     }
     let platforms: [ExportPlatform]
     /// 正在做的那个平台（platforms 的下标）。
@@ -110,6 +112,8 @@ struct PhoneOutcome: Equatable {
     /// 完成页「推到手机」（11-13）：推进手机上自签 S2Arm 的 .img 文件名（空 = 还没推）；推不成时作业给的一句「缺什么、怎么做」
     var pushed: [String] = []
     var pushNote = ""
+    /// 这次补进 S 级优化的各款：打上 / 没打上（作业层结果 sgrade，pack/jobs/install.py；升级 / 装机 / 导出完成页列，11-14）
+    var sgrade: [SGradeGameResult] = []
 }
 
 /// 排队的一次出包。
@@ -779,7 +783,8 @@ public final class S2ArmLauncherModel: ObservableObject {
                                                              packBytes: (o["packBytes"] as? NSNumber)?.int64Value,
                                                              suggestion: failure["suggestion"] as? String ?? "", failureSummary: failure["failureSummary"] as? String,
                                                              notes: o["notes"] as? [String] ?? [],
-                                                             boost: (o["boost"] as? [String: Any] ?? [:]).compactMapValues { ($0 as? NSNumber)?.intValue }))
+                                                             boost: (o["boost"] as? [String: Any] ?? [:]).compactMapValues { ($0 as? NSNumber)?.intValue },
+                                                             sgrade: SGradeOutcome(o["boost"] as? [String: Any] ?? [:])))
                 // 装法是「导出，自己签名安装」：iPhone 包出好就接着导出（D-9ZF9，维护者实测：原先出完包停在完成页，导出要再点一次，文件夹里什么都没有）。
                 //   导出不连手机、不签名，没有副作用；排进 installAfterQueue，这次出包会话结束后由 pumpQueue 接着跑
                 if platform == .ios, state == .completed, self.installMode.mode == "export", !self.batchRunning, let gid = self.session?.gameID,
@@ -1286,9 +1291,23 @@ public final class S2ArmLauncherModel: ObservableObject {
         let alert = NSAlert()
         alert.messageText = Localizer().t(titleKey)
         alert.informativeText = error.localizedDescription
-        alert.runModal()
+        if Self.bundleIncomplete(error) { offerFullDownload(alert) } else { alert.runModal() }
     }
     func readOK(_ titleKey: String) { failingReads.remove(titleKey) }
+
+    /// 最新完整安装包（GitHub「latest」固定链接，跳到当前最新版的 DMG）
+    static let fullDownloadURL = URL(string: "https://github.com/jhaizhou-ops/S2Arm/releases/latest/download/S2Arm-mac-arm64.dmg")!
+
+    static func bundleIncomplete(_ error: Error) -> Bool { (error as? JobClientError)?.code == JobClientError.bundleIncomplete }
+
+    /// App 包不完整（内置 Python 缺失等）：不只说一句「请重新安装」，直接给「下载完整安装包」按钮，点了用浏览器下载最新 DMG
+    func offerFullDownload(_ alert: NSAlert = NSAlert(), message: String? = nil) {
+        if let message { alert.messageText = Localizer().t("s2arm.bundleIncomplete.title"); alert.informativeText = message }
+        alert.informativeText += "\n\n" + Localizer().t("s2arm.bundleIncomplete.howto")
+        alert.addButton(withTitle: Localizer().t("s2arm.bundleIncomplete.download"))
+        alert.addButton(withTitle: Localizer().t("s2arm.bundleIncomplete.later"))
+        if alert.runModal() == .alertFirstButtonReturn { NSWorkspace.shared.open(Self.fullDownloadURL) }
+    }
 
     private func explainMissing(_ key: String) {
         let alert = NSAlert()
@@ -1400,6 +1419,7 @@ public final class S2ArmLauncherModel: ObservableObject {
                 self?.finish(.failed, message: "")
             } catch {
                 self?.finish(.failed, message: error.localizedDescription)
+                if Self.bundleIncomplete(error) { self?.offerFullDownload(message: error.localizedDescription) }
             }
         }
     }

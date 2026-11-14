@@ -16,7 +16,7 @@
     UIStackView *_bar;
     UIButton *_key;
     BOOL _fold, _letterbox, _pattern;
-    NSUInteger _frames, _presses;
+    NSUInteger _frames, _mirrorFrames, _presses;
 }
 - (void)viewDidLoad {
     [super viewDidLoad]; self.view.backgroundColor=UIColor.blackColor; _fold=YES;
@@ -90,16 +90,26 @@
     [e setRenderPipelineState:_pipeline]; uint32_t alternate=_pattern;
     [e setFragmentBytes:&alternate length:sizeof alternate atIndex:0];
     [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-    [e endEncoding]; [cb presentDrawable:d]; [cb commit]; _frames++;
+    [e endEncoding];
+#if !S2A_REFLECTION_BASELINE
+    id<CAMetalDrawable> m=s2a_ios_reflection_drawable(_game);   // Same picture into the reflection, as the renderers do
+    if (m) {
+        pass.colorAttachments[0].texture=m.texture;
+        e=[cb renderCommandEncoderWithDescriptor:pass];
+        [e setRenderPipelineState:_pipeline]; [e setFragmentBytes:&alternate length:sizeof alternate atIndex:0];
+        [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [e endEncoding]; [cb presentDrawable:m]; _mirrorFrames++;
+    }
+#endif
+    [cb presentDrawable:d]; [cb commit]; _frames++;
     [self recordReport];
 }
 - (void)recordState:(NSNotification *)note { dispatch_async(dispatch_get_main_queue(),^{ [self recordReport]; }); }
 - (void)recordReport {
-    CAReplicatorLayer *copies=nil;
-    BOOL blurVisible=NO;
-    for (UIView *v in self.view.subviews) for (CALayer *layer in v.layer.sublayers) if ([layer isKindOfClass:CAReplicatorLayer.class]) copies=(id)layer;
+    BOOL blurVisible=NO, mirrorVisible=NO;
+    for (UIView *v in self.view.subviews) for (CALayer *layer in v.layer.sublayers) if ([layer isKindOfClass:CAMetalLayer.class]) mirrorVisible=!layer.hidden;
     for (UIView *v in self.view.subviews) for (UIView *sub in v.subviews) if ([sub isKindOfClass:UIVisualEffectView.class]) blurVisible=!sub.hidden;
-    NSDictionary *report=@{@"frames":@(_frames),@"presses":@(_presses),@"split":@(s2a_ios_play_layout().split),@"syntheticFold":@(_fold),@"letterbox":@(_letterbox),@"pattern":@(_pattern),@"replicas":@(copies.instanceCount),@"blurVisible":@(blurVisible),@"applicationState":@(UIApplication.sharedApplication.applicationState),@"framebufferOnly":@(_game.framebufferOnly),@"view":NSStringFromCGRect(self.view.bounds),@"game":NSStringFromCGRect(_game.frame)};
+    NSDictionary *report=@{@"frames":@(_frames),@"presses":@(_presses),@"split":@(s2a_ios_play_layout().split),@"syntheticFold":@(_fold),@"letterbox":@(_letterbox),@"pattern":@(_pattern),@"mirrorFrames":@(_mirrorFrames),@"mirrorVisible":@(mirrorVisible),@"blurVisible":@(blurVisible),@"applicationState":@(UIApplication.sharedApplication.applicationState),@"framebufferOnly":@(_game.framebufferOnly),@"view":NSStringFromCGRect(self.view.bounds),@"game":NSStringFromCGRect(_game.frame)};
     NSURL *docs=[NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
     [[NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingPrettyPrinted error:nil] writeToURL:[docs URLByAppendingPathComponent:@"reflection-lab.json"] atomically:YES];
 }

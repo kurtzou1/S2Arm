@@ -597,6 +597,8 @@ void rp_pass_clear_ds(nvn_gpu_cmd c, const p_clear_ds *cd, const void *rec) {
 
 // 游戏的屏障：不拆通道，记下位，下一个通道前交给后端（nvn_mtl.m:14646 的缺省路径；通道内着色器写图像后要求片元顺序的拆通道随图像绑定一起接）
 void rp_pass_barrier(uint32_t bits) { P.barrier_bits |= bits; }
+// 通道外的计算派发开工前取走待发的游戏屏障位（#978）：调用方交给后端，之后的通道开头不再重发
+uint32_t rp_pass_take_barrier(void) { uint32_t b = P.barrier_bits; P.barrier_bits = 0; return b; }
 
 // 现在挂着几条待折清除。绘制路径拿它做快路的门：0 时不必为「读之前落地」收集这一笔的贴图（稳态下几乎总是 0）。
 int rp_pass_parked(void) {

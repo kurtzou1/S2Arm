@@ -1,6 +1,7 @@
 using Ryujinx.Audio;
 using Ryujinx.Audio.Common;
 using Ryujinx.Audio.Output;
+using Ryujinx.Common;
 using Ryujinx.Horizon.Common;
 using Ryujinx.Horizon.Sdk.Applet;
 using Ryujinx.Horizon.Sdk.Sf;
@@ -214,10 +215,36 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
 
         private void PumpLoop()
         {
+            // S2Arm：与 audren 驱动线程同一套（AudioRendererManager.SendCommands、AudioProcessor.Work）：本线程每 5 ms 交一次样本、
+            //   收一次交还，实时调度（超计算预算被内核降级；S2A_AUDIO_SCHED=utility / interactive 只设 QoS）；
+            //   周期尾睡到绝对时限（Apple 上一次内核唤醒，mach_wait_until）替代 Thread.Sleep。原先普通线程（QoS 缺省）
+            //   负载下几十 ms 才被调度一次（10-22 audren 实测：交接等调度每周期超期 27–34 ms、整批丢周期出杂音，见 S2ARealtime）；
+            //   5 ms 网格只需平均守住：个别超期由游戏环（打开时须长于设备延迟 = 2 周期）+ 会话在途深度吸收
+            long periodNs = PumpPeriodMs * 1_000_000L;
+            Ryujinx.Common.S2ARealtime.Promote("audsmx 搬运线程", periodNs, periodNs / 2, periodNs);
+
+            long next = PerformanceCounter.ElapsedNanoseconds;
+
             while (!_stopPump)
             {
+                Ryujinx.Common.S2AThreadAlloc.Tick("audsmx 搬运"); // S2Arm: per-thread allocation accounting
+
                 Pump();
-                Thread.Sleep(PumpPeriodMs);
+
+                // 睡到本周期结束（绝对时限：网格不随每圈搬运工作量与调度延迟漂移）；错过周期就重锚网格——
+                //   下一圈 Pump 本就把环里积攒的样本收拢成块一次交出，不连发补泵
+                next += periodNs;
+                long now = PerformanceCounter.ElapsedNanoseconds;
+
+                if (now < next)
+                {
+                    Ryujinx.Common.PreciseSleep.PreciseSleepHelper.SleepUntilTimePointSingleWake(
+                        PerformanceCounter.ElapsedTicks + (next - now) * PerformanceCounter.TicksPerMillisecond / 1_000_000);
+                }
+                else
+                {
+                    next = now;
+                }
             }
         }
 

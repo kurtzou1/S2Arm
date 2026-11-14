@@ -32,6 +32,17 @@ Mac / Windows 启动器读 [notice.json](notice.json)：启动时从 <https://jh
 - 撤掉全部公告：把文件改成 `{"schema": 1}`。
 - `url` 可选：「详情」打开的链接，只认 `https` 的 github.com / jhaizhou-ops.github.io / s2arm.com。纯文本，不支持格式。
 
+## 新功能大窗（feature.json）
+
+大版本的新功能在启动器（Mac / Windows，iOS 不做）**首次打开时弹一个大窗**：几页轮播，每页一张大图 + 「是什么 / 怎么用 / 在哪用」三格，最后一页「去出包」。
+内容是 [feature.json](feature.json) + [feature/](feature/) 里的图，**随包带**（`launchers/macos/bundle_engine.py` INPUTS），不联网。判定在 `pack/jobs/updater.py feature_spotlight / inbox`：
+
+- 本机没看过这一期（`updates/seen.json` 的 `featureSeen` ≠ `id`）就弹，新装和更新上来都算，**每期只弹一次**；排在「有新版 / 这版更新了什么」前面，那两个留到下次打开。
+- `minVersion`：本机版本低于它不弹（功能还没进这一版时，热修不能先把大窗带出去）。`platforms` 同公告。
+- 每页 `image` 是相对本目录的路径，`kicker / title / what / how / where` 都要中英两份，缺一或图不在这页就不要；`**…**` 是加粗。
+- 发出去后要撤：在 notice.json 写 `"featureWithdrawn": ["<id>"]`。换下一期：换新 `id`、换图和文字。
+- `url` 是大窗里「了解更多」打开的页面（同公告，只认官方 https 地址）；本期是 [s-grade.html](s-grade.html)。
+
 ## 更新说明（签名清单里的 notes）
 
 启动器打开时的「有新版」弹窗和更新后第一次打开的「这版更新了什么」，读签名清单（`update-manifest.json` / 官网 `latest.json`）里的 `notes`，

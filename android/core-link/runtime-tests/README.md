@@ -36,3 +36,7 @@ Shell 的单一 boot worker 调 `s2a_android_runtime_run`，并把已有冻结 B
 私有runtime status仍24字节，offset20的`last_phase`只记录Loading/MemoryReady/ServicesReady/GuestRunning；错误或停止不覆盖。它让外壳避免与loader并发清场，不表示quiesced。runtime在loader前消费真实selfcheck；mem_init后依次消费真实writers_init、tracker_prepare和VM hooks准备，任何失败不启动服务。
 
 Linux ARM64的`vm/run.py`链接真实shared svc_mem、tracker、registry与plat_vm_alias，13个进程覆盖真实别名、部分宿主页、ControlCodeMemory/TransferMemory、内核失败回滚、poison终止、hook冲突和栈复制的GPU回写重入VM锁。仅handle/NPDM及writers端点为合成；测试明确断言VM ready仍为0，不把fixture当完整线程安全点验收。Android的MapMemory/UnmapMemory在实际writers安全点内解锁g_mu后同步GPU/复制；源页沿既有跟踪写预备通道保守报脏，不用untracked读绕过GPU最新值。
+
+## 主 guest 运行态发布（#961）
+
+`run_save_running.py --out <新目录> --ndk-include <NDK 29 sysroot/usr/include>`（只能 Linux：GNU ld `--wrap`、`host_android.c` 的 eventfd）。真实 HostApi / stop owner、Android `runtime.c`、共用 `guest_main.c` / `session.c` / `direct_prompt.c` 一起编链；managed 服务、fault、tracking、SDK 与 `S2A_SaveAtomicState` 是合成端点。9 个独立进程覆盖：正常启动进 SDK 时已 RUNNING 且首次轮询拿到服务层原因位、安全值 0、子线程准入不发布、状态已不是 STARTING 时报红照常进、发布后停止、发布前停止 / 会话已失败 / attach 或 tracking 失败都不进 SDK。致命退出经 `--wrap=_exit` 在退出那一刻判定。不带 `--source-root` 时另跑 5 个回退负对照；`--source-root <修前树>` 用那棵树的生产源配本树夹具，得修前红。夹具只经既有接口观测，不引用新接缝。不证明设备、NativeAOT、存储故障或 Java 提示。

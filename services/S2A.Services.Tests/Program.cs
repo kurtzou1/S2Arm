@@ -603,6 +603,7 @@ namespace S2A.Services.Tests
         private static void Run()
         {
             TimeZoneBinaryTest.Run(Check);
+            SystemDataSynthTest.Run(Check);
             CheatsTest.Run(Check);
             TouchGestureTest.Run(Check);
             GuestBufferAllocatorTest.Run(Check);

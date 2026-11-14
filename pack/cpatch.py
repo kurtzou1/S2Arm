@@ -1426,7 +1426,7 @@ def plan(root, default_on, index_dirs):
             if os.path.exists(sp): t |= {int(l.split('\t')[0], 16) for l in open(sp) if l.startswith('0x')}
             # 宽屏候选点只在本款有我方宽屏表（启用表 / 整套放宽 / 已验证名单，stage_rewrite.sh 拷进产物根）时才算占用：没表 = 我方宽屏在这款不开，
             #   候选点让给社区补丁（改写器 widen() 跳过补丁表里有的点），社区宽屏补丁才进得来（荒野大镖客一类：补丁改的正是我方扫出的 asp 点）
-            if widen and os.path.exists(wp) and glob.glob(os.path.join(root, 'widen_enable*.tsv')) + glob.glob(os.path.join(root, 'widen_full*.tsv')) + glob.glob(os.path.join(root, 'widen_verified.tsv')):
+            if widen and os.path.exists(wp) and glob.glob(os.path.join(glob.escape(root), 'widen_enable*.tsv')) + glob.glob(os.path.join(glob.escape(root), 'widen_full*.tsv')) + glob.glob(os.path.join(glob.escape(root), 'widen_verified.tsv')):
                 for l in open(wp):
                     c = l.rstrip('\n').split('\t')
                     if len(c) >= 3 and c[0] == mod and c[1].startswith('0x'): o = int(c[1], 16); t.add(o); t.add(o + 4) if c[2] in ('asp', 'aspcap', 'aspcaps') else None

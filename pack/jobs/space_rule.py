@@ -6,7 +6,7 @@
   （romfs/ exefs/ aoc/）代替——即预检 pack_input_bytes 取的 contentBytes 那一项。已在盘上的同款直连缓存（重出包复用）从中扣掉。
 11-10 去掉原先「按着色器抽取量 × 系数」（缓存 9× + 库 3×）：抽取字节数不是直连占用的驱动量，抽取产物有的是压缩过的着色器档案、有的是原文——
   0100559011740000 抽取 0.48 GiB、01008FC00D964000 抽取 1.66 GiB，两款直连缓存峰值却差不多（6.3 / 7.0 GiB），乘系数注定一款多估一款少估。
-CLI：space_rule.py direct-check <产物根> <直连缓存目录> <输出目录> → 够：退 0；不够：打「磁盘空间不足」原话、退 1（S2A_SPACE_OVERRIDE=1 时只打黄、退 0）；复核自己没跑成退 2"""
+CLI：space_rule.py direct-check <产物根> <直连缓存目录> <输出目录> → 恒退 0（复核自己没跑成退 2）：预估不够只打一行【黄】提示、不拦（不许堵门，11-14）"""
 import os, shutil, sys
 
 CONTENT_DIRS = ("romfs", "exefs", "aoc")
@@ -135,10 +135,17 @@ def direct_check(root, cache_dir, out_dir, free=_free):
     return None
 
 
+def cli(argv, check=None):
+    """direct-check 命令行 → 退出码。预估只当提示、不拦（不许堵门，11-14：预估偏保守，玩家盘可能其实够；诊断 D-QDK9 按预估停下、玩家没出路）：
+    够 / 不够都退 0，不够只打一行【黄】；真写满时写盘报 ENOSPC，那才停，归 disk_full。复核自己没跑成（如缺 library.py）退 2"""
+    if len(argv) != 4 or argv[0] != "direct-check":
+        print("用法：space_rule.py direct-check <产物根> <直连缓存目录> <输出目录>"); return 2
+    try: why = (check or direct_check)(*argv[1:])
+    except Exception as e:
+        print(f"【红】直连库开工前空间复核没跑成：{type(e).__name__}: {e}"); return 2
+    if why: print(f"【黄】{why}：这是预估，照常开编；真写满时会按盘满停，释放空间后重试即可")
+    return 0
+
+
 if __name__ == "__main__":
-    if len(sys.argv) != 5 or sys.argv[1] != "direct-check": sys.exit("用法：space_rule.py direct-check <产物根> <直连缓存目录> <输出目录>")
-    try: why = direct_check(*sys.argv[2:])
-    except Exception as e:   # 复核自己没跑成（如缺 library.py）退 2：Python 未接住的异常退 1，会被 direct_lib.sh 当成「空间不足」
-        print(f"【红】直连库开工前空间复核没跑成：{type(e).__name__}: {e}"); sys.exit(2)
-    if why and os.environ.get("S2A_SPACE_OVERRIDE") == "1": print(f"【黄】{why}；已按你的选择仍然继续"); sys.exit(0)
-    if why: print(f"【红】{why}"); sys.exit(1)
+    sys.exit(cli(sys.argv[1:]))

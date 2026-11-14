@@ -20,7 +20,7 @@ import shutil
 import time
 from pathlib import Path
 
-from core import Failure, atomic, contained, read
+from core import Failure, atomic, contained, read, resolve_path
 
 VERSION = 4   # 2：每款进 games/<英文名>/；3：iPhone 产物进每款 image/ios、装机产物与设备记录进默认位置根（_upgrade_3）；4：库外的工具缓存 / 日志搬进默认位置（_upgrade_4）
 GAME_JSON = "game.json"
@@ -226,9 +226,9 @@ def indexed_dir(c, gid):
 
 def require_in_location(c, p):
     """路径必须在某个已登记存放位置的 games/ 下（运行镜像校验用，挡住指到库外的路径）"""
-    p = Path(p).resolve()
+    p = resolve_path(p)
     for _, root, ok in locations(c):
-        if ok and p.is_relative_to(games_root(c, root).resolve()):
+        if ok and p.is_relative_to(resolve_path(games_root(c, root))):
             return p
     raise Failure("运行文件不在任何存放位置里。", code="runtime_invalid")
 
@@ -541,8 +541,12 @@ def _split_release(c, gid, d):
     link, releases = d / "current", d / "releases"
     image = d / "image" / "mac"
     if os.path.lexists(link) and not image.exists():
-        cur = link.resolve()
-        if cur.parent == releases.resolve() and cur.is_dir():
+        if link.is_symlink() or getattr(os.path, "isjunction", lambda _: False)(link):
+            target = Path(os.readlink(link))
+            cur = resolve_path(target if target.is_absolute() else link.parent / target)
+        else:
+            cur = resolve_path(link)
+        if cur.parent == resolve_path(releases) and cur.is_dir():
             app = cur / "S2ArmGame.app"
             if app.is_dir():
                 sha = _host_digest(app)
@@ -1061,7 +1065,7 @@ def _finish_relocate(private, old, new):
 
 def _same_path(text, path):
     try:
-        return Path(str(text)).expanduser().resolve() == Path(path).resolve() or str(text) == str(path)
+        return resolve_path(Path(str(text)).expanduser()) == resolve_path(path) or str(text) == str(path)
     except (OSError, ValueError):
         return False
 

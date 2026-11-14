@@ -8,7 +8,8 @@ check       查最新版本（官网签名清单，取不到回退 GitHub Releas
 inbox       启动器打开时要给玩家看什么：查版本 + 取公告（notice.json，取不到用随包那份），按「永远只给最新一期」算出
             最多一个弹窗（这版更新了什么 / 有新版）、横幅（最新一条重要公告）、消息列表与未读数；打印一行 JSON。只读。
             顺带清掉旧自写换版在 updates/ 下留的残留（clear_stale_pending）。
-inbox-seen  玩家关掉了：记进数据目录 updates/seen.json（--update 版本 / --after 版本 / --notice 最新看过的公告号）。
+            新功能大窗（docs/site/feature.json，随包）：本机没看过这一期就弹（新装、更新上来都弹一次），排在更新弹窗前面。
+inbox-seen  玩家关掉了：记进数据目录 updates/seen.json（--update 版本 / --after 版本 / --notice 最新看过的公告号 / --feature 新功能期号）。
 """
 import argparse
 import json
@@ -19,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 from pathlib import Path
 
 
@@ -262,9 +264,19 @@ NOTICE_URL = "https://jhaizhou-ops.github.io/S2Arm/notice.json"   # docs/site/no
 NOTICE_LINK_HOSTS = ("github.com", "jhaizhou-ops.github.io", "s2arm.com")   # 11-10 起 s2arm.com 是官方网站
 
 
+def site_dir(jobs=None):
+    """随包的 docs/site（引擎快照里，launchers/macos/bundle_engine.py INPUTS）。源码树和 Windows（Engine/pack/jobs）是作业目录往上两级；
+    Mac App 的作业目录是 Contents/Resources/Jobs，引擎快照在旁边的 Resources/Engine——原先只认往上两级，Mac 上随包公告兜底一直找不到（11-13 体验梳理线查出）"""
+    jobs = Path(jobs) if jobs else Path(__file__).resolve().parent
+    for root in (jobs.parents[1], jobs.parent / "Engine"):
+        if (root / "docs" / "site").is_dir():
+            return root / "docs" / "site"
+    return jobs.parents[1] / "docs" / "site"
+
+
 def notice_file():
-    """随包那份：引擎快照里的 docs/site/notice.json（launchers/macos/bundle_engine.py INPUTS）"""
-    return Path(__file__).resolve().parents[2] / "docs" / "site" / "notice.json"
+    """随包那份：引擎快照里的 docs/site/notice.json"""
+    return site_dir() / "notice.json"
 
 
 def notice_valid(data):
@@ -279,6 +291,77 @@ def notice_valid(data):
     if not (isinstance(zh, str) and isinstance(en, str) and zh.strip() and en.strip() and len(zh) <= 600 and len(en) <= 1200):
         return None
     out = {"id": ident, "text": {"zh-Hans": zh.strip(), "en": en.strip()}}
+    url = data.get("url")
+    if isinstance(url, str):
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme == "https" and parts.hostname in NOTICE_LINK_HOSTS:
+            out["url"] = url
+    return out
+
+
+FEATURE_TEXTS = ("kicker", "title", "what", "how", "where")
+
+
+def feature_file():
+    """随包那份新功能大窗：引擎快照里的 docs/site/feature.json，图片路径相对 docs/site/"""
+    return notice_file().with_name("feature.json")
+
+
+def _bilingual(value):
+    if not isinstance(value, dict):
+        return None
+    zh, en = value.get("zh-Hans"), value.get("en")
+    return {"zh-Hans": zh.strip(), "en": en.strip()} if isinstance(zh, str) and zh.strip() and isinstance(en, str) and en.strip() else None
+
+
+def feature_spotlight(platform, current, path=None, withdrawn=()):
+    """docs/site/feature.json → 这一期新功能大窗 {id, badge, url?, pages:[…]}，每页 image = {zh-Hans, en} 绝对路径；不弹 → None。每页两种版式（通用多页轮播，两端照 layout 画）：
+      poster = 只写 image：一张图铺满大窗（首页海报）；detail = image + kicker / title / what / how / where（各中英两份）：上大图、下说明。
+    不弹的情形：文件没有 / 格式不对 / 不给本平台 / 本机版本低于 minVersion（功能还没进这一版，热修不能先把大窗带出去）/ 官网 notice.json 的 featureWithdrawn 列了这一期。
+    图不在、或说明页的文字缺一项 / 中英缺一，这一页不要；一页都不剩就不弹。"""
+    import urllib.parse
+    path = Path(path) if path else feature_file()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("schema") != 1:
+        return None
+    ident = data.get("id")
+    if not (isinstance(ident, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,80}", ident)) or ident in withdrawn:
+        return None
+    platforms = data.get("platforms")
+    if isinstance(platforms, list) and platform not in platforms:
+        return None
+    floor = version_tuple(data.get("minVersion") or "0.0.0")
+    mine = re.match(r"v?(\d+)\.(\d+)\.(\d+)", (current or "").strip())
+    if floor is None or not mine or tuple(int(n) for n in mine.groups()) < floor:
+        return None
+    def picture(rel):   # 相对 docs/site 的图 → 绝对路径；不在 docs/site 里或文件不在 → None
+        if not isinstance(rel, str):
+            return None
+        image = (path.parent / rel).resolve()
+        return str(image) if path.parent.resolve() in image.parents and image.is_file() else None
+    pages = []
+    for row in data.get("pages") or []:
+        if not isinstance(row, dict):
+            continue
+        # 图跟界面语言走（11-14 维护者：海报和启动器语言要一致）：image 写一个路径 = 两种语言同图；写 {zh-Hans, en} = 各用各的，英文缺了用中文
+        raw = row.get("image")
+        raw = raw if isinstance(raw, dict) else {"zh-Hans": raw}
+        zh = picture(raw.get("zh-Hans"))
+        if not zh:
+            continue
+        image = {"zh-Hans": zh, "en": picture(raw.get("en")) or zh}
+        if not any(key in row for key in FEATURE_TEXTS):   # 海报页：只有一张图，铺满大窗
+            pages.append({"layout": "poster", "image": image})
+            continue
+        texts = {key: _bilingual(row.get(key)) for key in FEATURE_TEXTS}
+        if None not in texts.values():   # 说明页：大图 + 标题 + 是什么 / 怎么用 / 在哪用
+            pages.append(dict(texts, layout="detail", image=image))
+    if not pages:
+        return None
+    out = {"kind": "feature", "id": ident, "badge": _bilingual(data.get("badge")) or {"zh-Hans": "新功能", "en": "New"}, "pages": pages}
     url = data.get("url")
     if isinstance(url, str):
         parts = urllib.parse.urlsplit(url)
@@ -424,14 +507,16 @@ def installed_notes(private_root, version):
         return None
 
 
-def inbox(platform, current, private_root, check=None, notices=None):
+def inbox(platform, current, private_root, check=None, notices=None, feature=None):
     """启动器打开时要给玩家看什么（两端共用，11-13 维护者定：永远只给最新一期，不叠加、不补弹）→
       popup：最多一个。「这版更新了什么」（刚换上新版、这版说明里有「亮点」、没关过）优先，其次「有新版」（这一版没提示过）；
              跳过的版本不补弹——只看当前版本和最新那一版。
       banner：本平台最新一条「重要」公告，玩家没看过才给；更旧的重要公告不再出横幅。
       messages：公告（最新在前）+ 更新说明（最新版 / 当前版），只在「消息」里列着；unread 只算最新那条公告没看过。
     「看过」按最新一条公告的号记（seen.json noticeSeen）：列表里排在它后面（更旧）的都算看过，跳过的几期自然不补。
-    check：本次查版本的结果（latest()）；notices：本平台公告列表（notice_messages）。只读，不改 seen.json（玩家关掉时 inbox_seen 才记）"""
+    check：本次查版本的结果（latest()）；notices：本平台公告列表（notice_messages）；feature：这一期新功能大窗（feature_spotlight）。
+    新功能大窗排在最前：本机没看过这一期（seen.json featureSeen）就弹，新装（没有 seen.json）和更新上来都算；更新弹窗留到下次打开。
+    只读，不改 seen.json（玩家关掉时 inbox_seen 才记）"""
     seen = seen_state(private_root)
     check = check if isinstance(check, dict) else {"available": False}
     notices = notices or []
@@ -443,7 +528,9 @@ def inbox(platform, current, private_root, check=None, notices=None):
     popup = None
     # 这版的说明只在「从旧版里点更新、换上这一版」时记在本机（启动器开始下载新版时写 updates/notes/<版本>.json），有它就说明是刚更新上来的；手动装的新版没有，不弹
     mine = installed_notes(private_root, current)
-    if mine and mine.get("highlights") and seen.get("afterShown") != current:
+    if feature and seen.get("featureSeen") != feature["id"]:
+        popup = feature
+    elif mine and mine.get("highlights") and seen.get("afterShown") != current:
         popup = {"kind": "afterUpdate", "version": current, "notes": mine}
     elif check.get("available") and check.get("version") and seen.get("updatePrompted") != check["version"]:
         popup = {"kind": "update", "version": check["version"], "notes": check.get("notes")}
@@ -457,11 +544,12 @@ def inbox(platform, current, private_root, check=None, notices=None):
     return {"popup": popup, "banner": banner, "messages": messages, "unread": sum(1 for n in notices if n["unread"]), "update": check}
 
 
-def inbox_seen(private_root, update=None, after=None, notice=None):
-    """玩家关掉了：update = 「有新版」那一版（以后再说）；after = 「这版更新了什么」那一版；notice = 看过的最新一条公告号（关横幅 / 打开消息）"""
+def inbox_seen(private_root, update=None, after=None, notice=None, feature=None):
+    """玩家关掉了：update = 「有新版」那一版（以后再说）；after = 「这版更新了什么」那一版；notice = 看过的最新一条公告号（关横幅 / 打开消息）；
+    feature = 看过的新功能大窗期号（关掉 / 看完都算）"""
     seen = seen_state(private_root)
     for key, value, pattern in (("updatePrompted", update, r"\d+\.\d+\.\d+"), ("afterShown", after, r"\d+\.\d+\.\d+"),
-                                ("noticeSeen", notice, r"[A-Za-z0-9._-]{1,80}")):
+                                ("noticeSeen", notice, r"[A-Za-z0-9._-]{1,80}"), ("featureSeen", feature, r"[A-Za-z0-9._-]{1,80}")):
         if value is not None:
             if not re.fullmatch(pattern, value):
                 raise ValueError(f"{key} 不对")
@@ -534,6 +622,90 @@ def clear_stale_pending(private_root, current):
     return gone
 
 
+LEFTOVER_SUFFIXES = (".s2arm-old", ".s2arm-new", ".s2arm-bad")   # 旧自写换版（≤0.3.9 apply / swap）在安装目录旁边起的名字
+
+
+def install_dir(here=None):
+    """本文件所在的安装目录：Mac S2Arm.app/Contents/Resources/Jobs/updater.py、Windows <安装目录>/Engine/pack/jobs/updater.py，往上三层。
+    认不出（源码树里跑）→ None"""
+    root = Path(here or __file__).resolve().parents[3]
+    if root.name.endswith(".app") and (root / "Contents" / "Info.plist").is_file():
+        return root
+    if (root / "S2Arm.exe").is_file() and (root / "Engine").is_dir():
+        return root
+    return None
+
+
+def running_executables():
+    """当前所有进程的可执行文件路径（看不了进程表 → None，调用方当「在用」不删）。
+    Windows 不能靠「改名失败 = 在用」：11-14 Windows 实测，目录里的 python.exe 正在跑，整目录改名照样成功"""
+    try:
+        if os.name == "nt":
+            cmd = ["powershell", "-NoProfile", "-Command", "Get-CimInstance Win32_Process | ForEach-Object { $_.ExecutablePath }"]
+        else:
+            cmd = ["/bin/ps", "-axww", "-o", "command="]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace")
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    return [line.strip() for line in r.stdout.splitlines() if line.strip()]
+
+
+def in_use_by(executables):
+    """→ folder 判定函数：有进程的可执行文件在这个目录里（启动器、内置 Python、游戏宿主……）；进程表拿不到一律算在用"""
+    def check(folder):
+        if executables is None:
+            return True
+        prefix = os.path.normcase(str(folder)) + os.sep
+        return any(os.path.normcase(line).startswith(prefix) for line in executables)
+    return check
+
+
+def sweep_install_leftovers(private_root, install=None, *, in_use=None):
+    """旧自写换版留在安装目录旁的残骸（11-14 Windows 实测：0.3.9 → 0.3.10 回滚没成，旁边留下完整的 S2Arm.s2arm-old 约 680 MB 和空的 .s2arm-bad；
+    Mac 半途换版也会留 .s2arm-new / .s2arm-old）启动时清掉。只认「安装目录名 + 这三个后缀」，不碰别的；旧替换进程还持着更新锁（还在换版）就不动；
+    有进程在用的不删——Mac 看进程表；Windows 先整目录改名到临时名，文件被占用改名就失败、照样跳过。清掉的每一个记进 update.log。返回清掉的目录名"""
+    install = Path(install) if install else install_dir()
+    if install is None or legacy_apply_running(Path(private_root) / "updates"):
+        return []
+    candidates = [install.with_name(install.name + suffix) for suffix in LEFTOVER_SUFFIXES] + list(install.parent.glob(install.name + ".s2arm-*.deleting"))
+    if not any(c.is_dir() for c in candidates):
+        return []   # 绝大多数启动走这里：不起进程表
+    if in_use is None:
+        in_use = in_use_by(running_executables())
+    log = lambda what: record_failure(types.SimpleNamespace(private_root=str(private_root)), "update_leftover_removed", what)
+    gone = []
+    for suffix in LEFTOVER_SUFFIXES:
+        leftover = install.with_name(install.name + suffix)
+        if not leftover.is_dir() or leftover.is_symlink() or in_use(leftover):
+            continue
+        try:
+            size = sum(f.stat().st_size for f in leftover.rglob("*") if f.is_file() and not f.is_symlink())
+        except OSError:
+            size = 0
+        doomed = leftover.with_name(leftover.name + ".deleting")
+        try:
+            if doomed.exists():
+                shutil.rmtree(doomed, ignore_errors=True)
+            os.rename(leftover, doomed)   # 先改名再删：删到一半断电 / 被杀，下次认 .deleting 接着删，不留半个像样的旧版
+        except OSError:
+            continue
+        shutil.rmtree(doomed, ignore_errors=True)
+        if doomed.exists():
+            continue   # 只删掉一部分：留着 .deleting，下次启动接着删
+        gone.append(leftover.name)
+        log(f"清掉了旧版应用内更新留下的 {leftover}（{size / 1048576:.0f} MB）")
+    for left in install.parent.glob(install.name + ".s2arm-*.deleting"):   # 上次删到一半的
+        if not left.is_dir() or left.is_symlink() or in_use(left):
+            continue
+        shutil.rmtree(left, ignore_errors=True)
+        if not left.exists():
+            gone.append(left.name)
+            log(f"清掉了上次没删完的 {left}")
+    return gone
+
+
 def record_failure(args, code, message, detail=""):
     """失败原因写进诊断包会收的日志（core.logs_root：默认位置的 logs/，库没建好时私有目录/logs）：界面只有一句话，玩家反馈时靠这里定位"""
     root = getattr(args, "private_root", None)
@@ -561,7 +733,7 @@ def main(argv=None):
     p = sub.add_parser("inbox"); p.add_argument("--private-root", required=True); p.add_argument("--platform", required=True, choices=sorted(ASSETS))
     p.add_argument("--current", required=True)
     p = sub.add_parser("inbox-seen"); p.add_argument("--private-root", required=True)
-    p.add_argument("--update"); p.add_argument("--after"); p.add_argument("--notice")
+    p.add_argument("--update"); p.add_argument("--after"); p.add_argument("--notice"); p.add_argument("--feature")
     a = ap.parse_args(argv)
     # 打开时要看什么（inbox）：查版本、取公告都可能失败，失败不走下面的更新失败记录（不写 update.log），查不到就当没有新版、没有公告，界面照常
     if a.command == "inbox":
@@ -570,14 +742,21 @@ def main(argv=None):
         except OSError:
             pass
         try:
+            sweep_install_leftovers(a.private_root)
+        except OSError:
+            pass
+        try:
             check = latest(a.platform, a.current)
         except (UpdateError, OSError, ValueError, KeyError, __import__("http.client").client.HTTPException) as error:
             check = {"available": False, "error": getattr(error, "code", type(error).__name__)}
-        print(json.dumps(inbox(a.platform, a.current, a.private_root, check, notice_messages(notice_data(), a.platform)), ensure_ascii=False))
+        data = notice_data()
+        withdrawn = [i for i in data.get("featureWithdrawn") or [] if isinstance(i, str)] if isinstance(data.get("featureWithdrawn"), list) else []
+        feature = feature_spotlight(a.platform, a.current, withdrawn=withdrawn)
+        print(json.dumps(inbox(a.platform, a.current, a.private_root, check, notice_messages(data, a.platform), feature), ensure_ascii=False))
         return 0
     if a.command == "inbox-seen":
         try:
-            inbox_seen(a.private_root, a.update, a.after, a.notice)
+            inbox_seen(a.private_root, a.update, a.after, a.notice, a.feature)
         except (OSError, ValueError) as error:
             print(json.dumps({"error": str(error)}, ensure_ascii=False))
             return 1

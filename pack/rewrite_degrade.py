@@ -12,7 +12,7 @@ import sys
 
 def summarize(w, g):
     kinds = collections.Counter(); mods = collections.defaultdict(set); compat = 0
-    for log in sorted(glob.glob(os.path.join(w, '*.rewrite.log'))):
+    for log in sorted(glob.glob(os.path.join(glob.escape(w), '*.rewrite.log'))):
         m = os.path.basename(log)[:-len('.rewrite.log')]
         for line in open(log, encoding='utf-8', errors='replace'):
             c = re.search(r"'x18_compat': (\d+)", line)

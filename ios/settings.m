@@ -61,6 +61,50 @@ NSArray<NSString *> *s2a_ios_game_languages(void) {
     return @[@"system", @"SimplifiedChinese", @"TraditionalChinese", @"AmericanEnglish", @"BritishEnglish", @"Japanese", @"Korean", @"French", @"CanadianFrench", @"German",
              @"Spanish", @"LatinAmericanSpanish", @"Italian", @"Dutch", @"Portuguese", @"BrazilianPortuguese", @"Russian", @"Polish", @"Thai"];
 }
+// ---- 游戏语言只列这款支持的（11-14 维护者「按照你的建议加上」，推翻 11-07「不给玩家选」）----
+//   同 pack/jobs/community.py game_languages / system_title_language / effective_language；系统语言映射照搬宿主 services/S2A.Services/SystemLocale.cs
+static NSArray<NSString *> *nacp_language_names(void) {
+    return @[@"AmericanEnglish", @"BritishEnglish", @"Japanese", @"French", @"German", @"LatinAmericanSpanish", @"Spanish", @"Italian", @"Dutch",
+             @"CanadianFrench", @"Portuguese", @"Russian", @"Korean", @"TraditionalChinese", @"SimplifiedChinese", @"BrazilianPortuguese", @"Polish", @"Thai"];
+}
+NSArray<NSString *> *s2a_ios_game_supported_languages(void) {
+    const char *gd = getenv("S2A_GAME_DATA");   // 同 loadpage.m：多款容器给 S2A_GAME_DATA，单款在 Documents/资源包
+    NSString *dir = gd && *gd ? @(gd) : [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/资源包"];
+    NSData *d = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:@"ctl/control.nacp"]];
+    if (d.length < 0x3030) return @[];
+    uint32_t flag; memcpy(&flag, (const uint8_t *)d.bytes + 0x302C, 4);
+    NSMutableArray *out = [NSMutableArray array]; NSArray *names = nacp_language_names();
+    for (NSUInteger i = 0; i < names.count; i++) if (flag >> i & 1) [out addObject:names[i]];
+    return out;
+}
+static NSString *system_title_language(void) {
+    for (NSString *tag in NSLocale.preferredLanguages) {
+        NSArray<NSString *> *p = [[tag stringByReplacingOccurrencesOfString:@"_" withString:@"-"].lowercaseString componentsSeparatedByString:@"-"];
+        BOOL (^has)(NSString *) = ^BOOL(NSString *s) { return [[p subarrayWithRange:NSMakeRange(1, p.count - 1)] containsObject:s]; };
+        NSString *l = p[0];
+        if ([l isEqual:@"zh"]) return has(@"hant") ? @"TraditionalChinese" : has(@"hans") ? @"SimplifiedChinese" : (has(@"tw") || has(@"hk") || has(@"mo")) ? @"TraditionalChinese" : @"SimplifiedChinese";
+        if ([l isEqual:@"en"]) { for (NSString *r in @[@"gb", @"au", @"nz", @"ie", @"in", @"za"]) if (has(r)) return @"BritishEnglish"; return @"AmericanEnglish"; }
+        if ([l isEqual:@"fr"]) return has(@"ca") ? @"CanadianFrench" : @"French";
+        if ([l isEqual:@"es"]) return p.count == 1 || has(@"es") ? @"Spanish" : @"LatinAmericanSpanish";
+        if ([l isEqual:@"pt"]) return has(@"br") ? @"BrazilianPortuguese" : @"Portuguese";
+        NSString *m = @{@"ja": @"Japanese", @"ko": @"Korean", @"de": @"German", @"it": @"Italian", @"nl": @"Dutch", @"ru": @"Russian", @"pl": @"Polish", @"th": @"Thai"}[l];
+        if (m) return m;
+    }
+    return @"AmericanEnglish";
+}
+NSString *s2a_ios_game_language_note(void) {
+    NSArray<NSString *> *supported = s2a_ios_game_supported_languages();
+    if (supported.count == 0) return nil;
+    NSString *want = [s2a_ios_settings_defaults() stringForKey:S2AGameLanguageKey] ?: system_title_language(), *got = nil;
+    for (NSString *l in @[want, @"AmericanEnglish", @"BritishEnglish"]) if ([supported containsObject:l]) { got = l; break; }
+    if (!got) got = supported.firstObject;   // 想要的、英语都没有：宿主落支持表第一项（上游 PickFallbackLanguage）
+    if ([got isEqualToString:want]) return nil;
+    NSDictionary *names = @{@"SimplifiedChinese": S2AL(@"settings.language.zhHans"), @"TraditionalChinese": S2AL(@"settings.language.zhHant"), @"AmericanEnglish": @"English (US)",
+        @"BritishEnglish": @"English (UK)", @"Japanese": S2AL(@"settings.gameLanguage.ja"), @"Korean": @"한국어", @"French": @"Français", @"CanadianFrench": @"Français (Canada)",
+        @"German": @"Deutsch", @"Spanish": @"Español", @"LatinAmericanSpanish": @"Español (Latinoamérica)", @"Italian": @"Italiano", @"Dutch": @"Nederlands",
+        @"Portuguese": @"Português", @"BrazilianPortuguese": @"Português (Brasil)", @"Russian": @"Русский", @"Polish": @"Polski", @"Thai": @"ไทย"};
+    return [NSString stringWithFormat:S2AL(@"settings.gameLanguage.fallback"), names[want] ?: want, names[got] ?: got];
+}
 @interface S2AGameLayeredDefaults : NSUserDefaults
 - (instancetype)initWithGame:(NSUserDefaults *)game app:(NSUserDefaults *)app keys:(NSSet<NSString *> *)keys;
 @end

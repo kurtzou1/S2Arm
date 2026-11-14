@@ -55,13 +55,25 @@ extension S2ArmLauncherModel {
         Task { await provider.client.inboxSeen(notice: id) }
     }
 
-    /// 关掉弹窗（以后再说 / 知道了）：这一版不再弹
+    /// 关掉弹窗（以后再说 / 知道了 / 新功能大窗的关闭、跳过、去出包）：这一版 / 这一期不再弹
     func closeUpdatePopup() {
         updateGate = nil
+        if updatePopup?["kind"] as? String == "feature", let id = updatePopup?["id"] as? String {
+            updatePopup = nil
+            Task { await provider.client.inboxSeen(feature: id) }
+            return
+        }
         guard let popup = updatePopup, let version = popup["version"] as? String else { updatePopup = nil; return }
         updatePopup = nil
         let after = popup["kind"] as? String == "afterUpdate"
         Task { await provider.client.inboxSeen(update: after ? nil : version, after: after ? version : nil) }
+    }
+
+    /// 新功能大窗最后一页「去出包」：记看过、回游戏库；库里还没有游戏就直接打开「添加游戏」
+    func closeFeatureAndExport() {
+        closeUpdatePopup()
+        showEnvironment = false; exportFor = nil
+        if games.isEmpty { showAddGames = true }
     }
 
     /// 顶栏「有新版 vX」：回到弹窗①

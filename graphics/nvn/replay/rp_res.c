@@ -39,7 +39,10 @@ enum { ALIAS_USE_FLAGS = NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_COMPRESSIBL
 enum { SWZ_IDENTITY = 2 | 3 << 3 | 4 << 6 | 5 << 9 };   // tex_builder_t.swz 打包法下的 R G B A：等于没设
 static void alias_key_of(alias_key *k, const tex_t *t) { memset(k, 0, sizeof *k); k->pool = (uint64_t)(uintptr_t)t->pool; k->off = t->off; k->d = t->d; k->d.flags &= ~(int)ALIAS_USE_FLAGS; }
 
-typedef struct { tex_t t; view_t v; uint8_t ok, has_v; nvn_gpu_view view; struct rp_tex *of; uint64_t gen; } treg_t;
+// Reserve the retirement node when creating a registered view, not when it is
+// invalidated: pinning an already borrowed handle must never require allocation.
+struct registered_view { nvn_gpu_view view; struct registered_view *next; };
+typedef struct { tex_t t; view_t v; uint8_t ok, has_v; nvn_gpu_view view; struct registered_view *owned; struct rp_tex *of; uint64_t gen; } treg_t;
 typedef struct { samp_par p; uint8_t ok; nvn_gpu_samp s; } sreg_t;
 
 static pthread_mutex_t g_rmu = PTHREAD_MUTEX_INITIALIZER;
@@ -48,6 +51,7 @@ static uint64_t g_treg_gen;   // 登记表里「编译事实看得到的内容�
 uint64_t rp_tex_reg_gen(void) { return __atomic_load_n(&g_treg_gen, __ATOMIC_ACQUIRE); }
 static sreg_t *g_sreg; static int g_nsreg;
 static uint32_t g_pin_depth;
+static struct registered_view *g_pinned_registered_views;
 struct pinned_samp { nvn_gpu_samp samp; struct pinned_samp *next; };
 static struct pinned_samp *g_pinned_samps;
 static int g_tpool_n;
@@ -63,7 +67,14 @@ static struct { nvn_gpu_tex tex; nvn_gpu_view view; } g_zero[NVN_TEXTURE_TARGET_
 static int g_zero_cube_logged;
 
 // ---------- 登记 ----------
-static void treg_drop_view(treg_t *r) { if (r->view) { nvn_gpu_view_release(r->view); r->view = NULL; } r->of = NULL; }
+static void treg_drop_view(treg_t *r) {
+    if (r->owned) {
+        if (g_pin_depth) { r->owned->next = g_pinned_registered_views; g_pinned_registered_views = r->owned; }
+        else { nvn_gpu_view_release(r->owned->view); free(r->owned); }
+        r->owned = NULL;
+    }
+    r->view = NULL; r->of = NULL;
+}
 void nvn_be_set_tex_pool_n(int n) { pthread_mutex_lock(&g_rmu); g_tpool_n = n; pthread_mutex_unlock(&g_rmu); }
 void nvn_be_reg_tex(int id, const tex_t *t, const view_t *v) {
     if (id < 0 || id >= (1 << 20) || !t) return;
@@ -433,7 +444,7 @@ static uint32_t vf_base(uint64_t serial, const view_t *v) {
     if (v) { const uint8_t *p = (const uint8_t *)v; for (size_t i = 0; i < sizeof *v; i++) h = (h ^ p[i]) * 0x100000001B3ull; }
     return (uint32_t)((h >> 20) % (VF_N / VF_WAYS)) * VF_WAYS;
 }
-static struct { uint64_t serial; view_t v; uint8_t has_v; nvn_gpu_view view; struct rp_tex *of; } g_vf[VF_N];
+static struct { uint64_t serial; view_t v; uint8_t has_v; nvn_gpu_view view; struct registered_view *owned; struct rp_tex *of; } g_vf[VF_N];
 static int g_vf_next;
 static uint32_t g_vf_seen[VF_N];       // 本轮取用记号：等于 g_pin_token 的项已交给调用方，轮转不能放
 static uint32_t g_pin_token;
@@ -448,6 +459,11 @@ void rp_view_pin_end(void) {
         g_pin_token++;
         for (int i = 0; i < g_npin_tmp; i++) if (g_pin_tmp[i].view) nvn_gpu_view_release(g_pin_tmp[i].view);
         g_npin_tmp = 0;
+        while (g_pinned_registered_views) {
+            struct registered_view *pin = g_pinned_registered_views;
+            g_pinned_registered_views = pin->next;
+            nvn_gpu_view_release(pin->view); free(pin);
+        }
         while (g_pinned_samps) {
             struct pinned_samp *pin = g_pinned_samps; g_pinned_samps = pin->next;
             nvn_gpu_samp_release(pin->samp); free(pin);
@@ -455,9 +471,18 @@ void rp_view_pin_end(void) {
     }
     pthread_mutex_unlock(&g_rmu);
 }
-static void vf_drop_of(const struct rp_tex *x) { for (int i = 0; i < VF_N; i++) if (g_vf[i].view && g_vf[i].of == x) { nvn_gpu_view_release(g_vf[i].view); memset(&g_vf[i], 0, sizeof g_vf[i]); } }   // 持 g_rmu
+static void vf_drop(int i) {   // Hold g_rmu; invalidation must preserve handed-out views too.
+    if (g_vf[i].view) {
+        if (g_pin_depth && g_vf_seen[i] == g_pin_token) {
+            g_vf[i].owned->next = g_pinned_registered_views;
+            g_pinned_registered_views = g_vf[i].owned;
+        } else { nvn_gpu_view_release(g_vf[i].view); free(g_vf[i].owned); }
+    }
+    memset(&g_vf[i], 0, sizeof g_vf[i]);
+}
+static void vf_drop_of(const struct rp_tex *x) { for (int i = 0; i < VF_N; i++) if (g_vf[i].view && g_vf[i].of == x) vf_drop(i); }   // 持 g_rmu
 static void vf_drop_serial(uint64_t serial) {   // 持 g_rmu
-    for (int i = 0; i < VF_N; i++) if (g_vf[i].view && (!serial || g_vf[i].serial == serial)) { nvn_gpu_view_release(g_vf[i].view); memset(&g_vf[i], 0, sizeof g_vf[i]); }
+    for (int i = 0; i < VF_N; i++) if (g_vf[i].view && (!serial || g_vf[i].serial == serial)) vf_drop(i);
 }
 nvn_gpu_view rp_view_for_attach(const tex_t *t, const view_t *v, nvn_gpu_cmd c) { g_attach_intent = 1; nvn_gpu_view o = rp_view_for(t, v, c); g_attach_intent = 0; return o; }
 int rp_tex_take_zero(const tex_t *t) {
@@ -497,11 +522,15 @@ nvn_gpu_view rp_view_for(const tex_t *t, const view_t *v, nvn_gpu_cmd c) {
             if (nvn_gpu_ok(nvn_gpu_view_create(x->g, v, &tv, &err)) && g_npin_tmp < (int)(sizeof g_pin_tmp / sizeof g_pin_tmp[0])) { g_pin_tmp[g_npin_tmp++].view = tv; out = tv; }
             else { if (tv) nvn_gpu_view_release(tv); if (nvn_unimpl("gpu", "view_pin_overflow", t) == 1) nvn_plat_log(NVN_PLAT_LOG_RED, "gpu", err.why); }
         } else {
-        if (g_vf[slot].view) nvn_gpu_view_release(g_vf[slot].view);
-        memset(&g_vf[slot], 0, sizeof g_vf[slot]);
+        vf_drop(slot);
+        struct registered_view *owned = calloc(1, sizeof *owned);
+        if (!owned) {
+            nvn_unimpl("gpu", "attachment_view_allocation", t);
+            pthread_mutex_unlock(&g_rmu); return NULL;
+        }
         rp_perf_add(RP_PERF_RES_VIEWMAKE, 1);
-        if (nvn_gpu_ok(nvn_gpu_view_create(x->g, v, &g_vf[slot].view, &err))) { g_vf[slot].serial = t->serial; g_vf[slot].has_v = v != NULL; if (v) g_vf[slot].v = *v; g_vf[slot].of = x; out = g_vf[slot].view; if (g_pin_depth > 0) g_vf_seen[slot] = g_pin_token; }
-        else { g_vf[slot].view = NULL; if (nvn_unimpl("gpu", "view_create", t) == 1) nvn_plat_log(NVN_PLAT_LOG_RED, "gpu", err.why); }
+        if (nvn_gpu_ok(nvn_gpu_view_create(x->g, v, &g_vf[slot].view, &err))) { owned->view = g_vf[slot].view; g_vf[slot].owned = owned; g_vf[slot].serial = t->serial; g_vf[slot].has_v = v != NULL; if (v) g_vf[slot].v = *v; g_vf[slot].of = x; out = g_vf[slot].view; if (g_pin_depth > 0) g_vf_seen[slot] = g_pin_token; }
+        else { free(owned); g_vf[slot].view = NULL; if (nvn_unimpl("gpu", "view_create", t) == 1) nvn_plat_log(NVN_PLAT_LOG_RED, "gpu", err.why); }
         }
     }
     pthread_mutex_unlock(&g_rmu);
@@ -559,8 +588,11 @@ nvn_gpu_view rp_view_by_id(int id, nvn_gpu_cmd c, const tex_t **t_out) {
         if (r->view && (r->gen != g_ser_gen) && r->of != x) treg_drop_view(r);   // 序号换了存储：旧视图作废
         if (!r->view && x) {
             nvn_gpu_err err = {0};
-            if (nvn_gpu_ok(nvn_gpu_view_create(x->g, has_v ? &v : NULL, &r->view, &err))) r->of = x;
-            else { r->view = NULL; nvn_unimpl("gpu", "view_create", r); }
+            struct registered_view *owned = calloc(1, sizeof *owned);
+            if (!owned) nvn_unimpl("gpu", "registered_view_allocation", r);
+            else if (nvn_gpu_ok(nvn_gpu_view_create(x->g, has_v ? &v : NULL, &owned->view, &err))) {
+                r->owned = owned; r->view = owned->view; r->of = x;
+            } else { free(owned); nvn_unimpl("gpu", "view_create", r); }
         }
         r->gen = g_ser_gen; out = r->view;
         if (t_out) *t_out = &r->t;

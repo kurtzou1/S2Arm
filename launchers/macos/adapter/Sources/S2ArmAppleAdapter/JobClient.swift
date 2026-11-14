@@ -77,8 +77,12 @@ public struct JobEnvironment: Equatable {
 
 public struct JobClientError: Error, Equatable, LocalizedError {
     public let message: String
-    public init(_ message: String) { self.message = message }
+    /// 界面据此给出动作（bundle_incomplete：App 包不完整 → 「下载完整安装包」按钮）；没有动作的错误为 nil
+    public let code: String?
+    public init(_ message: String, code: String? = nil) { self.message = message; self.code = code }
     public var errorDescription: String? { message }
+    /// App 包里缺了随包的东西（内置 Python 等）：多半是旧版应用内更新回滚把正在跑的包换掉了一半，只有重装完整包能好
+    public static let bundleIncomplete = "bundle_incomplete"
 }
 
 /// 作业层的一行事件（pack/jobs/core.py emit）。schema 不是 1 的行不认。
@@ -163,7 +167,7 @@ public final class JobClient {
     public func pythonExecutable() throws -> URL {
         let bundled = environment.resources.appendingPathComponent("Runtime/python/bin/python3")
         if fileManager.isExecutableFile(atPath: bundled.path) { return bundled }
-        if environment.engineBundle != nil { throw JobClientError("应用内置 Python 缺失，请重新安装完整应用。") }
+        if environment.engineBundle != nil { throw JobClientError("应用内置 Python 缺失，请重新安装完整应用。", code: JobClientError.bundleIncomplete) }
         if let selected = environment.pythonPath, !selected.isEmpty {
             guard fileManager.isExecutableFile(atPath: selected) else { throw JobClientError("设置中的 Python 不可执行，请重新选择。") }
             return URL(fileURLWithPath: selected)
@@ -183,8 +187,8 @@ public final class JobClient {
         return checkout
     }
 
-    /// 请求体（schema 1）：字段与旧 Store.worker 一一对应；extra 覆盖同名字段。不带 gameLanguage / docked（11-07 维护者 删游戏选项）：
-    /// 作业层起局跟 Mac 系统首选语言、主机模式（pack/jobs/build.py runtime_env）。
+    /// 请求体（schema 1）：字段与旧 Store.worker 一一对应；extra 覆盖同名字段。不带 gameLanguage / docked：
+    /// 逐款的游戏语言 / 主机模式在启动设置里选（作业层 community 存这款的 launch.json、起局 launch_env 转成宿主变量；11-14 维护者确认玩家可选，推翻 11-07 的「不给玩家选」）；没选过 = 跟 Mac 系统首选语言、主机模式。
     public func request(id: String, operation: String, extra: [String: Any] = [:]) -> [String: Any] {
         let env = environment
         var req: [String: Any] = [
@@ -251,12 +255,13 @@ public final class JobClient {
         return result?["messages"] is [Any] ? result : nil
     }
 
-    /// 玩家关掉了：update = 「有新版」那版（以后再说），after = 「这版更新了什么」那版，notice = 看过的最新一条公告号
-    public func inboxSeen(update: String? = nil, after: String? = nil, notice: String? = nil) async {
+    /// 玩家关掉了：update = 「有新版」那版（以后再说），after = 「这版更新了什么」那版，notice = 看过的最新一条公告号，feature = 看过的新功能大窗期号
+    public func inboxSeen(update: String? = nil, after: String? = nil, notice: String? = nil, feature: String? = nil) async {
         var command = ["inbox-seen", "--private-root", environment.privateRoot.path]
         if let update { command += ["--update", update] }
         if let after { command += ["--after", after] }
         if let notice { command += ["--notice", notice] }
+        if let feature { command += ["--feature", feature] }
         _ = await runUpdater(command)
     }
 

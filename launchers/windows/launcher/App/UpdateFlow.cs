@@ -37,7 +37,7 @@ public sealed partial class EnvironmentWindow
 
     // ── 打开时给玩家看什么（11-13 维护者定稿草图，判定在 pack/jobs/updater.py inbox，两端共用「永远只给最新一期」）：
     //    最多一个弹窗（这版更新了什么 / 有新版）、横幅（最新一条没看过的重要公告）、「消息」列表与未读数（只算最新那条公告）
-    private JsonElement? updatePopup;   // {kind: update | afterUpdate, version, notes?}
+    private JsonElement? updatePopup;   // {kind: update | afterUpdate, version, notes?}；kind = feature 是新功能大窗（FeatureSpotlight.cs）
     private JsonElement? availableUpdate;   // 有新版那一版 {version, notes?}：顶栏「有新版 vX」点开回到弹窗
     private JsonElement[] messages = [];
     private int unreadMessages;
@@ -65,6 +65,7 @@ public sealed partial class EnvironmentWindow
     /// <summary>关掉弹窗（以后再说 / 知道了 / Esc）：这一版不再弹</summary>
     private void CloseUpdatePopup()
     {
+        if (FeatureOpen) { CloseFeature(); return; }
         updateGate = "";
         if (updatePopup is not { } popup) return;
         updatePopup = null;

@@ -863,7 +863,7 @@ def materialize_images(pack, work, say=print, stage=None):
     if not todo: return []
     sys.path.insert(0, str(R / "pack"))
     import romfs_image
-    need = sum(int(w[1]) for w in todo) + (256 << 20)
+    need = sum(int(w[1]) for w in todo)   # 只按要写的确切字节判（不加估的余量）：确实放不下才停，免得写到一半（不许堵门：估出来的余量不当门）
     free = shutil.disk_usage(pack).free
     if free < need:
         say(f"【红】本机盘放不下现拼的镜像：要 {need / 1e9:.1f} GB，可用 {free / 1e9:.1f} GB（{pack}）；腾出空间再装")

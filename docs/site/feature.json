@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "id": "v0.4.0-sgrade",
+  "minVersion": "0.4.0",
+  "platforms": ["mac", "windows"],
+  "url": "https://jhaizhou-ops.github.io/S2Arm/s-grade.html",
+  "badge": {"zh-Hans": "v0.4.0 新功能", "en": "New in v0.4.0"},
+  "pages": [
+    {"image": {"zh-Hans": "feature/sgrade-0.jpg", "en": "feature/sgrade-0-en.jpg"}},
+    {
+      "image": {"zh-Hans": "feature/sgrade-1.jpg", "en": "feature/sgrade-1-en.jpg"},
+      "kicker": {"zh-Hans": "S 级优化 · 自动配好", "en": "S-grade · Set up for you"},
+      "title": {"zh-Hans": "出包时，自动带上社区补丁和金手指", "en": "Community patches and cheats, built in automatically"},
+      "what": {"zh-Hans": "S2Arm 按你的游戏版本，从社区补丁库里找能用的**满屏补丁、帧率补丁和金手指**，出包时一起打进去。", "en": "S2Arm looks up **full-screen patches, frame-rate patches and cheats** that match your game's version and builds them in when you export."},
+      "how": {"zh-Hans": "不用自己找、自己装。照常点「开始出包」就行，命中的会自动打进包。", "en": "Nothing to find or install. Just click Start export as usual; matches are built in for you."},
+      "where": {"zh-Hans": "选一款去出包：出包页上金色的「**S 级优化**」卡片列出命中的每一项和作者，右边的「**出包时打入**」默认勾着，不要可以取消。", "en": "Pick a game and go to export: the gold **S-grade** card lists every match and its author; **Build in when exporting** on its right is checked by default, and you can uncheck it."}
+    },
+    {
+      "image": {"zh-Hans": "feature/sgrade-4.jpg", "en": "feature/sgrade-4-en.jpg"},
+      "kicker": {"zh-Hans": "S 级优化 · 老游戏也能用", "en": "S-grade · Games you already have"},
+      "title": {"zh-Hans": "已经导出的游戏，不用重新出包", "en": "No need to export your games again"},
+      "what": {"zh-Hans": "已经导出到 Mac 和 iPhone 上的游戏，**更新 S2Arm 后自动补上** S 级优化：满屏、帧率、金手指。", "en": "Games already on your Mac or iPhone **pick up S-grade after you update S2Arm**: full screen, frame rate and cheats."},
+      "how": {"zh-Hans": "Mac / Windows：游戏库顶部点**S 级优化升级**，电脑和 iPhone 上的老游戏都在这升级。只换程序，存档不动。", "en": "Mac / Windows: click **S-grade upgrade** at the top of the library to upgrade games on the computer and on iPhone. Only the app is replaced; saves stay."},
+      "where": {"zh-Hans": "Mac、Windows 和 iPhone 的游戏库里，封面左上角**亮起金色 S** 的就是已带上的；出包时取消了「出包时打入」的不亮。", "en": "In the Mac, Windows and iPhone libraries, a **gold S** at the top left of a cover means it has S-grade. Games exported with \"Build in when exporting\" unchecked don't light up."}
+    },
+    {
+      "image": {"zh-Hans": "feature/sgrade-2.jpg", "en": "feature/sgrade-2-en.jpg"},
+      "kicker": {"zh-Hans": "S 级优化 · 满屏与帧率", "en": "S-grade · Full screen and frame rate"},
+      "title": {"zh-Hans": "画面铺满，帧率翻倍", "en": "Fill the screen, double the frame rate"},
+      "what": {"zh-Hans": "**满屏补丁**按你的屏幕比例铺满，不留黑边、人物不变形；**帧率补丁**让 30 帧的游戏跑 60，高刷屏能到 120。", "en": "**Full-screen patches** fill any screen at its own aspect ratio on iPhone, iPad and Mac, without stretching; **frame-rate patches** take 30 fps games to 60, and up to 120 on high-refresh screens."},
+      "how": {"zh-Hans": "命中的满屏、帧率补丁默认开着（没有同版本满屏补丁会从别的版本移植），帧率自动挑最高一档。闪退了，下次启动先关掉当时开着的补丁和金手指，并告诉你关了哪些。", "en": "Matched patches are **on by default**, at the highest frame rate your screen supports. After a crash, the next launch turns off the patches and cheats that were on and tells you."},
+      "where": {"zh-Hans": "想关掉：iPhone / iPad 在游戏里点**左上角齿轮 → S 级优化 → 社区补丁**；调帧率档位在**齿轮 → 设置… → 画面**。Mac 在游戏库选中这款，点齿轮「**启动设置**」。", "en": "To turn one off on iPhone / iPad: **top-left gear → S-grade enhancements → Community patches**; frame rate level is under **gear → Settings… → Graphics**. On Mac: select the game and click the gear, **Launch settings**."}
+    },
+    {
+      "image": {"zh-Hans": "feature/sgrade-3.jpg", "en": "feature/sgrade-3-en.jpg"},
+      "kicker": {"zh-Hans": "S 级优化 · 金手指", "en": "S-grade · Cheats"},
+      "title": {"zh-Hans": "金手指，进游戏逐条打开", "en": "Cheats, one switch at a time"},
+      "what": {"zh-Hans": "社区整理好的**金手指**，按你的游戏版本自动配好，出包时一起打进去。", "en": "Community **cheats** matched to your game's version are built in when you export."},
+      "how": {"zh-Hans": "打进去后**默认关**。想用哪条就打开哪条，约 1 秒生效，不用重启游戏。", "en": "They start **off**. Turn on the ones you want; each takes effect in about a second, no restart."},
+      "where": {"zh-Hans": "iPhone / iPad：游戏里点**左上角齿轮 → S 级优化 → 金手指**。Mac：游戏库选中这款，点齿轮「**启动设置**」。Windows：这款游戏菜单里的「**金手指…**」。", "en": "iPhone / iPad: in the game, **top-left gear → S-grade enhancements → Cheats**. Mac: select the game in the library and click the gear, **Launch settings**. Windows: **Cheats…** in the game's menu."}
+    }
+  ]
+}

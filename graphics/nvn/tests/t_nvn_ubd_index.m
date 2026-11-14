@@ -59,12 +59,16 @@ static void add(uint64_t lo, uint64_t hi) {
 }
 static void reset(void) { g_nubd = 0; ubd_flush(); nref = 0; ring_off = 0; }
 static int ref_hits(uint64_t lo, uint64_t hi) { for (int i = 0; i < nref; i++) if (lo < ref[i].hi && ref[i].lo < hi) return 1; return 0; }
+// 参照按定义逐字节判 / 取，只是先和查询区间求交、再在交集里逐字节标记 / 拷贝（11-14：原先每个查询字节扫一遍全部条目、每条条目扫它全部字节，
+//   单测四遍共约 30 秒几乎全花在参照上；结果逐字节相同：盖满 = 交集并起来覆盖 [lo, hi) 每个字节，读出 = 按插入次序后写覆盖先写）
 static int ref_covers(uint64_t lo, uint64_t hi) {
-    for (uint64_t x = lo; x < hi; x++) { int c = 0; for (int i = 0; i < nref && !c; i++) c = ref[i].lo <= x && x < ref[i].hi; if (!c) return 0; }   // 逐字节
+    uint8_t m[2048] = {0}; if (hi - lo > sizeof m) return 0;
+    for (int i = 0; i < nref; i++) { uint64_t a = ref[i].lo > lo ? ref[i].lo : lo, b = ref[i].hi < hi ? ref[i].hi : hi; if (a < b) memset(m + (a - lo), 1, b - a); }
+    for (uint64_t x = 0; x < hi - lo; x++) if (!m[x]) return 0;   // 逐字节
     return 1;
 }
 static void ref_read(uint64_t lo, uint64_t hi, uint8_t *d) {
-    for (int i = 0; i < nref; i++) for (uint64_t x = ref[i].lo; x < ref[i].hi; x++) if (x >= lo && x < hi) d[x - lo] = ring[ref[i].off + (x - ref[i].lo)];
+    for (int i = 0; i < nref; i++) { uint64_t a = ref[i].lo > lo ? ref[i].lo : lo, b = ref[i].hi < hi ? ref[i].hi : hi; if (a < b) memcpy(d + (a - lo), ring + ref[i].off + (a - ref[i].lo), b - a); }
 }
 
 

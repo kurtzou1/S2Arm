@@ -20,6 +20,12 @@ internal static class LibraryJobCases
         check(Game("01006F8002326000", Path.Combine(english, "icon.jpg"), english).CoverFile() is null, "cover: other file names are refused");
         check(Game("01006F8002326000", Path.Combine(english, "sub", "cover.jpg"), english).CoverFile() is null, "cover: nested paths are refused");
         check(Game("01006F8002326000", Path.Combine(english, "cover.jpg"), english, "offline").CoverFile() is null, "cover: offline location shows no cover");
+        // 顶部大图只认这款文件夹里的 banner.jpg（11-14：原先拿 256 的 cover 放大，糊）
+        LibraryGame WithBanner(string banner, string folder) => Game("01006F8002326000", Path.Combine(folder, "cover.jpg"), folder) with { Banner = banner };
+        check(WithBanner(Path.Combine(english, "banner.jpg"), english).BannerFile() == Path.Combine(english, "banner.jpg"), "banner: store banner in the game folder is used for the hero");
+        check(WithBanner("", english).BannerFile() is null, "banner: no banner falls back to the cover card");
+        check(WithBanner(Path.Combine(english, "cover.jpg"), english).BannerFile() is null, "banner: only banner.jpg counts");
+        check(WithBanner(Path.Combine(byId, "banner.jpg"), english).BannerFile() is null, "banner: another game's folder is refused");
 
         // 导入失败的去向：只有读取器确认通用密钥版本不足（keys_outdated）才引导换密钥；
         // 无法读取、缺票据、内容截断都不是换 prod.keys 能解决的。
@@ -30,7 +36,7 @@ internal static class LibraryJobCases
             check(ImportFailureRoute.For(code, true) == ImportFailureRoute.ShowMessage, "no key prompt for " + (code ?? "no code"));
         const string sample = """
         {"schema":1,"jobId":"catalog-test","taskId":"catalog-test","seq":1,"type":"stage","operation":"catalog","state":"running","message":"读取游戏库"}
-        {"schema":1,"jobId":"catalog-test","taskId":"catalog-test","seq":2,"type":"result","operation":"catalog","state":"succeeded","message":"操作完成","result":{"games":[{"id":"0100000000000001","name":"Synthetic game","display":"1.2","cover":"","hidden":false,"missing":["Need base"],"ready":false}],"keys":{"ready":false,"verified":false,"message":"尚未导入"}}}
+        {"schema":1,"jobId":"catalog-test","taskId":"catalog-test","seq":2,"type":"result","operation":"catalog","state":"succeeded","message":"操作完成","result":{"games":[{"id":"0100000000000001","name":"Synthetic game","display":"1.2","cover":"","banner":"D:\\lib\\banner.jpg","hidden":false,"missing":["Need base"],"ready":false}],"keys":{"ready":false,"verified":false,"message":"尚未导入"}}}
         """;
         var report = LibraryJobResult.Parse(sample, 0, "catalog-test", "catalog");
         check(report.Succeeded && report.Message == "操作完成", "jobs terminal result and exit agree");
@@ -38,6 +44,7 @@ internal static class LibraryJobCases
         check(catalog.Games.Count == 1 && catalog.Games[0].Name == "Synthetic game" &&
             catalog.Games[0].Version == "1.2" && !catalog.KeysReady, "handwritten catalog values preserved");
         check(catalog.Games[0].Missing.Single() == "Need base", "backend requirements preserved without UI inference");
+        check(catalog.Games[0].Banner == @"D:\lib\banner.jpg", "catalog banner field is read");
         // #141：本体 + 2 个 DLC 同一个原件（sha256 相同，size 都是整个原件）：合计按原件算一次，每项自己的字节用 contentBytes；单项原件照旧用 size
         const string bundle = """
         {"schema":1,"jobId":"catalog-test","taskId":"catalog-test","seq":1,"type":"result","operation":"catalog","state":"succeeded","message":"操作完成","result":{"games":[{"id":"0100000000000002","name":"Bundle","display":"","cover":"","hidden":false,"missing":[],"packages":[{"type":"base","titleId":"0100000000000002","version":0,"display":"","size":15032385536,"format":"","sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","contentBytes":15032180736},{"type":"dlc","titleId":"0100000000001003","version":0,"display":"","size":15032385536,"format":"","sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","contentBytes":102400},{"type":"dlc","titleId":"0100000000001004","version":0,"display":"","size":15032385536,"format":"","sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","contentBytes":102400},{"type":"dlc","titleId":"0100000000001005","version":0,"display":"","size":3145728,"format":"","sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","contentBytes":5242880}]}],"keys":{"ready":true,"verified":true,"message":""}}}

@@ -50,7 +50,7 @@ static int compiler_(const char *key, int stage, const char *out) {
             if (stage == 5) fputs("struct dm_vertex_t {\n    float4 position [[position]];\n};\nstruct dm_prim_t {\n};\nvoid main0() {\n        dm_vertex_t v;\n}\n", f);
             fclose(f);
         }
-        snprintf(p, sizeof p, "%s/%s_b.json", out, key); if ((f = fopen(p, "w"))) { fprintf(f, "{\n \"chain\": \"%s\",\n \"xfp\": \"" XFP "\",\n \"stage\": \"%s\"\n}\n", chain_name(), stage == 5 ? "ms" : "cs"); fclose(f); }
+        snprintf(p, sizeof p, "%s/%s_b.json", out, key); if ((f = fopen(p, "w"))) { fprintf(f, "{\n \"chain\": \"%s\",\n \"xfp\": \"" XFP "\",\n \"stage\": \"%s\"\n}\n", chain_name(), stage == 5 ? "ms" : stage == 0 ? "vs" : "cs"); fclose(f); }   // 0 顶点 = "vs"（同 S2A.Dsh；47 核顶点补齐按它认阶段）
     }
     return compile_rc;
 }
@@ -229,7 +229,7 @@ static void scenario(int n) {
         snprintf(p, sizeof p, "%s/0000000000000000_b.metal", d); FILE *f = fopen(p, "w"); check(f != NULL); fwrite(mesh, 1, sizeof mesh - 1, f); fclose(f);
         snprintf(p, sizeof p, "%s/0000000000000000_b.json", d); f = fopen(p, "w"); check(f != NULL);
         fprintf(f, "{\n \"chain\": \"%s\",\n \"xfp\": \"" XFP "\",\n \"stage\": \"ms\"\n}\n", DMSH_CHAIN); fclose(f);
-        int rc = dm_shader_vpad_cached_mesh(key, 1u << 5, path, sizeof path); f = fopen(path, "r"); check(rc == 0 && f != NULL);
+        int rc = dm_shader_vpad_cached(key, 5, 1u << 5, path, sizeof path); f = fopen(path, "r"); check(rc == 0 && f != NULL);
         char result[2048] = {0}; if (f) { size_t z = fread(result, 1, sizeof result - 1, f); result[z] = 0; fclose(f); }
         check(strstr(result, "dm_pad5 [[user(locn5)]]") && strstr(result, "v.dm_pad5 = float4(0.0, 0.0, 0.0, 1.0)"));
         unlink(path); snprintf(p, sizeof p, "%s/0000000000000000_b.json", d); unlink(p);
@@ -244,10 +244,24 @@ static void scenario(int n) {
         dm_shader_miss(key, (uint64_t)(uintptr_t)code, ctl); dm_shader_mesh_hold((uint64_t)(uintptr_t)code, ctl);
         check(atomic_load(&compiler_calls) == 0);   // ProgramSetShaders 路径不编
         nvn2 = 0; memset(ctl, 0, sizeof ctl); memset(code, 0, sizeof code);   // 模拟游戏释放 / 复用 guest 输入
-        int rc = dm_shader_vpad_cached_mesh(mesh_key, 1u << 5, path, sizeof path); FILE *f = fopen(path, "r"); check(rc == 0 && f != NULL);
+        int rc = dm_shader_vpad_cached(mesh_key, 5, 1u << 5, path, sizeof path); FILE *f = fopen(path, "r"); check(rc == 0 && f != NULL);
         char result[2048] = {0}; if (f) { size_t z = fread(result, 1, sizeof result - 1, f); result[z] = 0; fclose(f); }
         check(atomic_load(&compiler_calls) == 1 && compiled_stage == 5 && strstr(result, "dm_pad5 [[user(locn5)]]"));
         unlink(path); snprintf(p, sizeof p, "%s/0000000000000000_b.json", d); unlink(p); snprintf(p, sizeof p, "%s/0000000000000000_b.metal", d); unlink(p); rmdir(d);
+    }
+    if (n == 47 || n == 48) {   // 11-14 D-R4CP（Switch 1 顶点着色器，人物与地形缺失）：包内顶点着色器只在 SetShaders 时留输入快照（47）；游戏复用控制段之后，
+        //   首次配对缺 user(locn) 时从快照现编基础源码再出补齐变体（编译器 1 次、阶段 0、补齐桩 1 次、掩码原样、路径 <键>_vp8.metal）。48 负对照：没留快照 → 做不了、两个桩都不调
+        uint32_t st = 1 << 10; const uint8_t magic[] = {0x78,0x56,0x34,0x12}; memcpy(code, magic, 4); memcpy(code + 0x30, &st, 4);
+        char d[] = "/tmp/t_dsh_vssnap.XXXXXX", p[256], path[256] = ""; check(mkdtemp(d) != NULL); setenv("DM_MSL_FALLBACK", d, 1);
+        write_out = 1; inlib = 1; known = 1;
+        dm_shader_miss(key, (uint64_t)(uintptr_t)code, ctl); if (n == 47) dm_shader_vs_hold_key(key, (uint64_t)(uintptr_t)code, ctl);
+        check(atomic_load(&compiler_calls) == 0);   // SetShaders 路径不编
+        memset(ctl, 0, sizeof ctl); memset(code, 0, sizeof code);   // 模拟游戏释放 / 复用 guest 输入
+        int rc = dm_shader_vpad_cached(key, 0, 0x8, path, sizeof path);
+        char want[256]; snprintf(want, sizeof want, "%s/0000000000000000_vp8.metal", d);
+        if (n == 47) check(rc == 0 && !strcmp(path, want) && atomic_load(&compiler_calls) == 1 && compiled_stage == 0 && atomic_load(&vp_calls) == 1 && vp_mask == 0x8);
+        else check(rc == 1 && atomic_load(&compiler_calls) == 0 && atomic_load(&vp_calls) == 0);
+        snprintf(p, sizeof p, "%s/0000000000000000_b.json", d); unlink(p); snprintf(p, sizeof p, "%s/0000000000000000_b.metal", d); unlink(p); rmdir(d);
     }
     if (n == 42) {   // 审计 #1646 P1-123：后台预编在编片元 0 时来一支输出类型变体（同键）：变体要的源码走同一把锁、锁里复查，不并发进 C# 现编入口、不重编
         //   修前（三处直接调 comp）反证：overlap 1、compiler_calls 2
@@ -301,10 +315,12 @@ int main(void) {
         "成功 0、失败 1、跳过 0、复用上局 0、输出类型变体 0（正常收局）",   // 43 见下行
         "成功 1、失败 0、跳过 0、复用上局 0、输出类型变体 0（正常收局）",   // 44 编的时候输入落盘成 .inflight.*、返回后删掉；43 翻译器报错：输入自动存进兜底目录；42 后台在编同键时来输出类型变体：同锁、不并发、不重编（后台编好、没有首遇来取：不计成功）
         "成功 0、失败 0、跳过 0、复用上局 0、输出类型变体 0（正常收局）",   // 45 guest 控制段过期时，从同链同指纹的本机 mesh MSL 缓存补齐
-        "成功 0、失败 0、跳过 0、复用上局 0、输出类型变体 0（正常收局）"    // 46 包内 mesh：仅在 Metal 拒绝时从 SetShaders 快照按需现编 MSL
+        "成功 0、失败 0、跳过 0、复用上局 0、输出类型变体 0（正常收局）",   // 46 包内 mesh：仅在 Metal 拒绝时从 SetShaders 快照按需现编 MSL
+        "成功 0、失败 0、跳过 0、复用上局 0、输出类型变体 0（正常收局）",   // 47 包内 Switch 1 顶点：SetShaders 快照 → 控制段过期后照样出补齐变体
+        "成功 0、失败 0、跳过 0、复用上局 0、输出类型变体 0（正常收局）"    // 48 负对照：没留快照 → 做不了
     };
     int bad = 0;
-    for (int n = 0; n < 47; n++) {
+    for (int n = 0; n < 49; n++) {
         int fd[2]; pipe(fd); pid_t p = fork();
         if (!p) { close(fd[0]); dup2(fd[1], 1); close(fd[1]); scenario(n); }
         close(fd[1]); char buf[1024]; size_t at = 0; ssize_t got;
@@ -315,5 +331,5 @@ int main(void) {
         printf("%s 现编汇总场景 %d\n", ok ? "✓" : "✗", n);
         if (!ok) { bad++; puts(buf); }
     }
-    printf("%s t_dsh_stats：47 场景，%d 处不符\n", bad ? "✗" : "✓", bad); return bad != 0;
+    printf("%s t_dsh_stats：49 场景，%d 处不符\n", bad ? "✗" : "✓", bad); return bad != 0;
 }

@@ -95,7 +95,7 @@ struct SGradeUpgradeBody: View {
                 if yes.contains(where: \.iphone) {
                     Text(x("iphoneNote")).font(.manrope(12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     HStack(spacing: 10) {
-                        Button(x("install")) { upgrade("install") }.buttonStyle(.borderedProminent).accessibilityIdentifier("sgrade.upgrade.install")
+                        Button(x("install")) { upgrade("device") }   // 装法取值同作业层 install.INSTALL_MODES（device / export）.buttonStyle(.borderedProminent).accessibilityIdentifier("sgrade.upgrade.install")
                         Button(x("export")) { upgrade("export") }.buttonStyle(.bordered).accessibilityIdentifier("sgrade.upgrade.export")
                         Spacer()
                         Button(x("close")) { close() }.buttonStyle(.plain).foregroundStyle(.secondary)

@@ -1043,53 +1043,25 @@ class LibraryTest(unittest.TestCase):
         with self.assertRaises(direct_library.LibraryError):
             direct_library.verify_pack(str(pack))
 
-    def test_index_read_limit_is_opt_in_for_huge_romfs(self):
-        """index.tsv 读取上限 32 MiB 是打包契约；文件数十万的超大型 RomFS 只能显式放开。
+    def test_index_has_no_read_limit(self):
+        """index.tsv 不设读取上限（原先 32 MiB、要设变量才放开，超大型 RomFS 不设就出不了包）。
 
-        三处 index.tsv 读取点（read_index / describe_pack / verify_pack）必须同口径：不设
-        S2A_MAX_INDEX_BYTES 时都拒绝，设了开关都能通过——本次的坑就是「只接了一处」。
-        运行时侧没有这个上限（GamePack.java 的 read() 不带 max），所以这是出包工具的自设限额。
-        """
-        # 一个 index.tsv 超过上限的完整直连包：深路径 romfs 文件（各 1 字节），只为把 index 撑过限额。
-        # 库身份（gameContentRoot）从 index 推，所以这些行必须先进 base pack，再 build 库。
-        # 上限按调用时的 MAX_INDEX 取（index_limit()），这里把它压到 256 KiB 验同一套 opt-in 逻辑：
-        # 真撑过 32 MiB 要么造数万文件、要么单路径 ~3.8 KB——后者超过 macOS PATH_MAX（1024）在本机建不出来。
-        limit = patch.object(direct_library, 'MAX_INDEX', 256 << 10)
-        limit.start(); self.addCleanup(limit.stop)
+        三处读取点（read_index / describe_pack / verify_pack）同口径：不设任何环境变量，大 index 都能读。
+        用 400 条深路径把 index 撑到数百 KiB（真撑过 32 MiB 要数万文件或超长路径）：谁把一个小于它的上限加回来就红。"""
         payload = self.base / 'one-byte.bin'
         payload.write_bytes(b'x')
         deep = '/'.join('d' * 200 for _ in range(4))   # 约 800 字节，各平台 PATH_MAX 之内
         extra = [(f'romfs/{deep}/n{index:05d}.bin', str(payload)) for index in range(400)]
         big_pack, entries = self.write_base_pack(name='big-base-pack', extra_entries=extra)
         self.base_pack, self.entries = big_pack, entries
-        with patch.dict(os.environ, {direct_library.INDEX_ENV: str(64 << 20)}):
-            self.build()   # 库身份从这份超大 index 推，所以建库本身也要带开关
+        self.build()
         pack = self.write_direct_pack(self.base / 'huge-index-pack')
         index = pack / 'index.tsv'
-        size = index.stat().st_size
-        self.assertGreater(size, direct_library.MAX_INDEX)
+        self.assertGreater(index.stat().st_size, 256 << 10)
         derived = self.base / 'derived-huge.json'
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop(direct_library.INDEX_ENV, None)
-            for name, call in (
-                    ('read_index', lambda: direct_library.read_index(index)),
-                    ('describe_pack',
-                     lambda: direct_library.describe_pack(str(pack), str(derived), str(self.identity))),
-                    ('verify_pack', lambda: direct_library.verify_pack(str(pack)))):
-                with self.assertRaises(direct_library.LibraryError) as caught:
-                    call()
-                message = str(caught.exception)
-                self.assertIn(str(direct_library.MAX_INDEX), message, name)   # 当前上限
-                self.assertIn(str(size), message, name)                        # 本包需要多少
-                self.assertIn(direct_library.INDEX_ENV, message, name)         # 怎么放开
-        self.assertFalse(derived.exists())
-        with patch.dict(os.environ, {direct_library.INDEX_ENV: 'not-a-number'}):
-            with self.assertRaises(direct_library.LibraryError):
-                direct_library.read_index(index)
-        with patch.dict(os.environ, {direct_library.INDEX_ENV: str(size)}):
-            self.assertGreater(len(direct_library.read_index(index)), len(extra))
-            direct_library.describe_pack(str(pack), str(derived), str(self.identity))
-            direct_library.verify_pack(str(pack))
+        self.assertGreater(len(direct_library.read_index(index)), len(extra))
+        direct_library.describe_pack(str(pack), str(derived), str(self.identity))
+        direct_library.verify_pack(str(pack))
         self.assertTrue(derived.is_file())
 
     def pack_from(self, output, library, descriptor):

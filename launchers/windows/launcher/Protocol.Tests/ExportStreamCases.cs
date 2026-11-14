@@ -30,6 +30,13 @@ public static class ExportStreamCases
  "outcome":{"state":"completed","message":"","notes":["这款有 27 处用了兼容写法",3,""]}}
 """));
         check(noted is ExportStream.Ended { Outcome.Notes: ["这款有 27 处用了兼容写法"] }, "export: degrade notes kept, non-strings and blanks dropped");
+        check(ended is ExportStream.Ended { Outcome.Boost: null }, "export: no boost → null");
+        var boosted = ExportStream.Read(Json("""
+{"type":"stepEnded","state":"running","step":{"gameId":"G1","platform":"iphone","task":"exp-1-2","index":2,"count":3},
+ "outcome":{"state":"completed","message":"","boost":{"fps":1,"applied":[{"cat":"fps","name":"60 FPS"}],"failed":[{"cat":"gfx","name":"阴影","why":"result.why.mismatch"}]}}}
+"""));
+        check(boosted is ExportStream.Ended { Outcome.Boost: { } b } && b.GetProperty("failed")[0].GetProperty("why").GetString() == "result.why.mismatch"
+              && b.GetProperty("applied")[0].GetProperty("name").GetString() == "60 FPS", "export: boost with patch results passed through（补丁打入结果，11-14）");
         check(ExportStream.Read(Json("""{"type":"heartbeat","state":"running"}""")) is null && ExportStream.Read(Json("""{"type":"stage","state":"running"}""")) is null, "export: own events ignored");
         Rejects(() => ExportStream.Read(Json("""{"type":"stepEnded","step":{"gameId":"G1","platform":"iphone"},"outcome":{"state":"queued"}}""")), "export: unknown outcome state rejected", check);
         Rejects(() => ExportStream.Read(Json("""{"type":"step","step":{"platform":"iphone"}}""")), "export: step without game rejected", check);

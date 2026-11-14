@@ -121,6 +121,46 @@ final class NS2LauncherControllerTests: XCTestCase {
         let took = Date().timeIntervalSince(t0)
         XCTAssertFalse(stubborn.isRunning); XCTAssertGreaterThanOrEqual(took, 0.5); XCTAssertLessThan(took, 2.5)
     }
+
+    @MainActor
+    func testConnectNotificationShowsBeforeInputProfileIsReady() async {
+        // #934：蓝牙手柄刚接上那一下输入描述（physicalInputProfile）可能还没就绪——连接通知是本次事件的真值，照常显示「已连接」，
+        //   不等描述就绪（系统蓝牙已连上、面板却一直「未连接」）；断开通知照旧清掉
+        let notifications = NotificationCenter()
+        let controller = NS2LauncherController(socketURL: URL(fileURLWithPath: "/tmp/s2arm-controller-test.sock"),
+                                              systemControllers: { [] }, notifications: notifications)
+        let pad = BareSystemController("Bare pad (test)")
+        notifications.post(name: .GCControllerDidConnect, object: pad)
+        await Task.yield()
+        await Task.yield()
+        XCTAssertTrue(controller.hasSystemController)
+        XCTAssertEqual(controller.title(simplifiedChinese: true), "Bare pad (test)")
+        XCTAssertEqual(controller.buttonStatus, "已连接")
+        XCTAssertEqual(controller.buttonColor, .systemGreen)
+        notifications.post(name: .GCControllerDidDisconnect, object: pad)
+        await Task.yield()
+        await Task.yield()
+        XCTAssertFalse(controller.hasSystemController)
+        XCTAssertEqual(controller.buttonStatus, "未连接")
+    }
+
+    @MainActor
+    func testSystemControllersRefreshListsNotifiedControllerBeforeProfileIsReady() {
+        // #934：枚举快照还没更新时，连接通知里的那只就是真值；输入描述没就绪也照列（晚一拍补）——
+        //   系统已连上的手柄不能因为快照滞后 / 描述未就绪就一直不出现
+        let systems = SystemControllers(observe: false)
+        let pad = BareSystemController("Bare pad (refresh)")
+        systems.refresh(connected: pad)
+        XCTAssertTrue(systems.pads.contains { $0.name == "Bare pad (refresh)" })
+        systems.refresh(connected: nil)
+        XCTAssertFalse(systems.pads.contains { $0.name == "Bare pad (refresh)" }, "通知没带上它时照枚举快照，不残留")
+    }
+}
+
+private final class BareSystemController: GCController {
+    private let name: String
+    init(_ name: String) { self.name = name; super.init() }
+    override var vendorName: String? { name }
 }
 
 private final class NamedSystemController: GCController {

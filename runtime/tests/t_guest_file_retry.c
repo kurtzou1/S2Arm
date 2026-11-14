@@ -13,13 +13,21 @@
 #include <stdlib.h>
 #include <unistd.h>
 __attribute__((constructor(100))) static void need(void) { setenv("S2A_WIN_NEED_MB", "63488", 1); setenv("S2A_GUEST_FILE", "0", 1); }   // 先于 vawin.c 的构造函数
-int s2a_guest_file_retry(void); void s2a_guest_file_test_pending(void);
+int s2a_guest_file_retry(void); void s2a_guest_file_test_pending(void), s2a_guest_file_test_late(void);
+#include <sys/stat.h>
 static long long fp(void) { task_vm_info_data_t i; mach_msg_type_number_t c = TASK_VM_INFO_COUNT; task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&i, &c); return (long long)i.phys_footprint; }
 static int bad;
 #define CHECK(c, ...) do { if (c) { printf("✓ "); } else { printf("✗ "); bad++; } printf(__VA_ARGS__); putchar('\n'); fflush(stdout); } while (0)
 int main(void) {
     if (!s2a_window_ok()) { printf("✗ t_guest_file_retry：窗口没占到\n"); return 1; }
     CHECK(s2a_guest_fd() == -1 && s2a_guest_file_retry() == 0, "① 起局时显式关：没接文件（fd %d，期望 -1）、没标「要换」补接回 0", s2a_guest_fd());
+    {   // ④ 多款容器选定游戏后按本款再判（诊断 D-4PMS）：再判这一刻要补写「本局在跑」标记（到前台时程序号还是 0、没写成），下一局才认得出「上局在前台死掉」。
+        //   Mac 上起局剩余为 0、再判照旧判关、不接文件；期望：再判回 0、没接文件、记录目录里出现 running。反证：去掉补写 → 没有 running
+        char d[] = "/tmp/t_gfr_markXXXXXX", pk[300], mk[300]; struct stat st;
+        if (mkdtemp(d)) { snprintf(pk, sizeof pk, "%s/mem_peak_anon", d); snprintf(mk, sizeof mk, "%s/running", d); setenv("S2A_GUEST_MEM_PEAK", pk, 1);
+            s2a_guest_file_test_late(); int r = s2a_guest_file_retry(), has = !stat(mk, &st);
+            CHECK(r == 0 && has && s2a_guest_fd() == -1, "④ 多款容器选定游戏后再判：补写了「本局在跑」标记（%s）、判关不接文件（回 %d）", has ? "有" : "没有", r);
+            unlink(mk); rmdir(d); unsetenv("S2A_GUEST_MEM_PEAK"); } }
     uint64_t b, n; s2a_window_get(&b, &n); uint8_t *q = (uint8_t *)(uintptr_t)(b + (4ull << 30)); size_t N = 64u << 20;
     s2a_guest_file_test_pending();
     pid_t c = fork();

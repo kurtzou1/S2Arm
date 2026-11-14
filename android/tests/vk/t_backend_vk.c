@@ -5297,6 +5297,63 @@ static void c87_resolve(const char *dir) {
     nvn_gpu_shader_release(vs); nvn_gpu_shader_release(fs); free(vsm); free(fsm);
 }
 
+// C977a（#977）：透明度转覆盖率。4 倍采样目标清成黑，整屏画 (1,0,0,0.5)，解析后读红分量：
+// 关 a2c 时 4 个样本全覆盖，红 = 255；开 a2c 时 alpha 0.5 只覆盖部分样本，16 个像素的红分量均值必须在 (0,255) 之间。
+static void c977_a2c(const char *dir) {
+    void *vsm = NULL, *fsm = NULL; nvn_gpu_shader vs = NULL, fs = NULL; nvn_gpu_err e;
+    CHECK(load_shader_pair(dir, "quad.vert", "quad.frag", NULL, NULL, &vs, &fs, &vsm, &fsm), "C977a shader");
+    nvn_gpu_tex_desc td = {0}; td.d.target = NVN_TEXTURE_TARGET_2D_MULTISAMPLE;
+    td.d.format = NVN_FORMAT_RGBA8; td.d.width = td.d.height = 4;
+    td.d.depth = td.d.levels = 1; td.d.samples = 4; td.usage = NVN_GPU_TEX_RENDER;
+    nvn_gpu_tex a = NULL;
+    CHECK(OK(nvn_gpu_tex_create(&td, &a, &e)), "C977a 4 倍采样目标：%s", e.why);
+    float verts[4][8] = {{-1,-1,0,1,1,0,0,0.5f},{-1,1,0,1,1,0,0,0.5f},{1,-1,0,1,1,0,0,0.5f},{1,1,0,1,1,0,0,0.5f}};
+    nvn_gpu_buf vb = make_buf(sizeof verts, NVN_GPU_MEM_SHARED, verts);
+    nvn_gpu_tex b = make_tex(4, 4, NVN_FORMAT_RGBA8, NVN_GPU_TEX_RENDER);
+    nvn_gpu_buf rb = make_buf(64, NVN_GPU_MEM_SHARED, NULL);
+    if (!a || !vs || !fs || !vb || !b || !rb) goto out;
+    nvn_gpu_view av = make_view(a), bv = make_view(b);
+    double mean[2] = {0, 0};
+    for (int on = 0; on < 2; on++) {
+        nvn_gpu_pipe_desc pd = {0}; pd.poly.mode = NVN_POLYGON_MODE_FILL; pd.origin_ll = (uint8_t)!g_tri_origin_ul;
+        pd.st[NVN_GPU_SH_VS].sh = vs; pd.st[NVN_GPU_SH_FS].sh = fs; pd.cfmt[0] = NVN_FORMAT_RGBA8;
+        pd.samples = 4; pd.prim = 5; pd.chmask.mask = 0xf; pd.color.logic_op = 3;
+        pd.ms.enable = 1; pd.ms.samples = 4; pd.ms.a2c = (uint8_t)on;
+        pd.attr[0].fmt = pd.attr[1].fmt = NVN_FORMAT_RGBA32F; pd.attr[1].offset = 16; pd.stream[0].stride = 32;
+        nvn_gpu_pipe pipe = NULL;
+        CHECK(OK(nvn_gpu_pipe_get(&pd, NVN_GPU_PIPE_SYNC, &pipe, &e)), "C977a 管线 a2c=%d：%s", on, e.why);
+        if (!pipe) continue;
+        nvn_gpu_cmd c = begin_cmd(); nvn_gpu_pass_desc p = {0}; p.ncolor = 1; p.w = p.h = 4; p.layers = 1;
+        p.color[0].view = av; p.color[0].load = NVN_GPU_LOAD_CLEAR; p.color[0].store = NVN_GPU_STORE_STORE;
+        p.color[0].clear.f[3] = 1;
+        nvn_gpu_pass_begin(c, &p); nvn_gpu_set_pipe(c, pipe);
+        nvn_gpu_dyn dyn = {0}; dyn.origin_ll = pd.origin_ll; dyn.nvp = 1; dyn.vp[0][2] = 4; dyn.vp[0][3] = 4; dyn.vp[0][5] = 1;
+        dyn.has_sc = 1; dyn.sc[2] = dyn.sc[3] = 4; nvn_gpu_set_dyn(c, &dyn); nvn_gpu_set_vbuf(c, 0, vb, 0);
+        nvn_gpu_draw_args da = {0}; da.prim = 5; da.count = 4; da.instances = 1; nvn_gpu_draw(c, &da); nvn_gpu_pass_end(c);
+        NVNcopyRegion rr = {0, 0, 0, 4, 4, 1}; nvn_gpu_blit(c, av, &rr, bv, &rr, 0);
+        nvn_gpu_copy_tex_buf(c, b, 0, 0, NULL, rb, 0, 16, 64);
+        nvn_gpu_rc rc = nvn_gpu_cmd_commit(c, (uint64_t)(1 + on), on_done, NULL, &e);
+        CHECK(OK(rc), "C977a commit a2c=%d：%d %s", on, rc.code, e.why);
+        if (!OK(rc)) continue;
+        CHECK(OK(nvn_gpu_fence_wait((uint64_t)(1 + on), 5000000000ull, &e)), "C977a wait：%s", e.why);
+        const uint8_t *px = buf_cpu(rb); int sum = 0;
+        for (int i = 0; i < 16; i++) sum += px[i * 4];
+        mean[on] = sum / 16.0;
+        printf("C977a a2c=%d：解析后红分量均值 %.1f（首像素 %u,%u,%u,%u）\n", on, mean[on], px[0], px[1], px[2], px[3]);
+    }
+    CHECK(mean[0] == 255.0, "C977a 关 a2c：期望红均值 255，真结果 %.1f", mean[0]);
+    CHECK(mean[1] > 0.0 && mean[1] < 255.0, "C977a 开 a2c：期望红均值在 (0,255)，真结果 %.1f（覆盖率没随 alpha 变）", mean[1]);
+    nvn_gpu_view_release(av); nvn_gpu_view_release(bv);
+out:
+    if (a) nvn_gpu_tex_release(a);
+    if (b) nvn_gpu_tex_release(b);
+    if (rb) nvn_gpu_buf_release(rb, NULL, NULL);
+    if (vb) nvn_gpu_buf_release(vb, NULL, NULL);
+    if (vs) nvn_gpu_shader_release(vs);
+    if (fs) nvn_gpu_shader_release(fs);
+    free(vsm); free(fsm);
+}
+
 // 每个拒绝用例独占会话；必须在发 Vulkan 命令前拒绝。
 static void c87_resolve_reject(int k) {
     nvn_gpu_tex_desc td = {0}; td.d.target = NVN_TEXTURE_TARGET_2D;
@@ -7245,6 +7302,9 @@ int main(int argc, char **argv) {
         c87_resolve_reject(k);
         CHECK(OK(nvn_gpu_close(5000000000ull, &e18)), "C87 拒绝 close：%s", e18.why);
     }
+    if (!open_backend()) return 1;
+    c977_a2c(argv[1]);
+    CHECK(OK(nvn_gpu_close(5000000000ull, &e18)), "C977a close：%s", e18.why);
     if (!open_backend()) return 1;
     c74b_clear_rect_oob();
     CHECK(OK(nvn_gpu_close(5000000000ull, &e18)), "C74b close：%d %s", e18.rc.code, e18.why);

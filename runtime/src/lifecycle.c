@@ -43,6 +43,13 @@ static int android_shutdown_writers_begin(void) {
 #endif
 void s2a_host_shutdown(const char *why) {
     static _Atomic int once; if (atomic_exchange(&once, 1)) return;
+#if !defined(__ANDROID__)
+    // 兜底先开（11-14 iPhone 实机 第 17515 帧卡死）：原先排在统计汇总之后，游戏卡死时收尾停在更早一步（日志只到「收到 自动玩家结束：优雅退出」，
+    //   一行收局阶段都没有），兜底从没开，进程挂到设备锁收割 SIGKILL。带着音频会话被强杀之后，手机系统声音服务一直坏到重启。
+    //   1.5 秒：照旧打汇总、冲日志再退；汇总或冲日志本身也可能等卡住线程持有的锁，2.5 秒再无条件 _exit
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1500 * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{ LOG("【红】优雅退出 1.5 秒未完成，直接退出"); s2a_direct_summary(0); s2a_logcon_flush(); _exit(0); });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2500 * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{ _exit(0); });
+#endif
     // Native process exit seals the host even between managed session owners.
     // Generation zero is reserved for this unconditional terminal publication.
     void (*session_exit)(unsigned) = (void (*)(unsigned))dlsym(RTLD_DEFAULT, "s2a_session_process_exit");
@@ -105,9 +112,6 @@ void s2a_host_shutdown(const char *why) {
 #endif
     s2a_lowva_peak_report("收局");
     S2A_SHUTDOWN_STAGE("统计与诊断汇总", t0);
-#if !defined(__ANDROID__)
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1500 * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{ LOG("【红】优雅退出 1.5 秒未完成，直接退出"); s2a_direct_summary(0); s2a_logcon_flush(); _exit(0); });
-#endif
     // 先让阻塞在服务等待里的调用立刻返回（C# 导出 S2A_CancelWaits，按名字取：不带 C# 的宿主构建里没有），再停游戏线程的系统调用、等在 C# 里的走完
 #if defined(__ANDROID__)
     // NativeAOT 与 core 静态并入同一 DSO；隐藏归档符号不会进入 dlsym 的动态表。

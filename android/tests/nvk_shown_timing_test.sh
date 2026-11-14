@@ -28,3 +28,18 @@ cc -std=c11 -Wall -Wextra -Werror -I "$out/ndk" -I "$out" "$repo/android/tests/n
 if "$out/mutant" > "$out/mutant.log" 2>&1; then echo 'FAIL: negative control escaped' >&2; exit 1; fi
 if ! grep -q 'FAIL: VK_INCOMPLETE consumes partial records exactly once before next batch' "$out/mutant.log"; then cat "$out/mutant.log" >&2; exit 1; fi
 echo 'PASS: negative control detects discarded VK_INCOMPLETE records'
+# Negative controls for the over-100 ms count: threshold off by one (>=), and counting over all submitted frames instead of returned samples.
+mut() {   # $1 name, $2 from, $3 to, $4 expected FAIL text
+  python3 - "$repo/android/native/nvn/backend_vulkan_timing.h" "$out/backend_vulkan_timing.h" "$2" "$3" <<'PY'
+import pathlib, sys
+s = pathlib.Path(sys.argv[1]).read_text(); a, b = sys.argv[3], sys.argv[4]
+assert s.count(a) == 1, a
+pathlib.Path(sys.argv[2]).write_text(s.replace(a, b))
+PY
+  cc -std=c11 -Wall -Wextra -Werror -I "$out/ndk" -I "$out" "$repo/android/tests/nvk_shown_timing_test.c" -o "$out/mutant"
+  if "$out/mutant" > "$out/mutant.log" 2>&1; then echo "FAIL: negative control escaped ($1)" >&2; exit 1; fi
+  if ! grep -q "$4" "$out/mutant.log"; then cat "$out/mutant.log" >&2; exit 1; fi
+  echo "PASS: negative control detects $1"
+}
+mut 'threshold >= 100 ms' 'over += gaps[i] > 100000000ull;' 'over += gaps[i] >= 100000000ull;' 'FAIL: two gaps strictly over 100 ms'
+mut 'missing field when empty' '间隔最大= 间隔>100ms=；原因=%s' '间隔最大=；原因=%s' 'FAIL: disabled log has an empty over-100ms field'

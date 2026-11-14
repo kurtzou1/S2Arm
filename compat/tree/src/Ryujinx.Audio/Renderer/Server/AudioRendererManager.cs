@@ -241,21 +241,60 @@ namespace Ryujinx.Audio.Renderer.Server
 
             Processor.Wait();
 
+            long s2aCmd = 0;
+
             while (_isRunning)
             {
                 Ryujinx.Common.S2AThreadAlloc.Tick("声音渲染调度"); // S2Arm: per-thread allocation accounting
 
+                long s2aT0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                AudioRenderSystem.S2ARenderLockWaitTicks = 0;
+                Volatile.Write(ref AudioRenderSystem.S2AUpdateHoldMaxTicks, 0);
+
                 lock (_sessionLock)
                 {
+                    long s2aT1 = System.Diagnostics.Stopwatch.GetTimestamp();
+
                     foreach (AudioRenderSystem renderer in _sessions)
                     {
                         renderer?.SendCommands();
                     }
+
+                    s2aT0 = s2aT1 - s2aT0;   // session lock wait
+                    s2aCmd = System.Diagnostics.Stopwatch.GetTimestamp() - s2aT1;
                 }
 
+                long s2aT2 = System.Diagnostics.Stopwatch.GetTimestamp();
                 Processor.Signal();
+                S2ALogSlowPeriod(s2aT0, s2aCmd, System.Diagnostics.Stopwatch.GetTimestamp() - s2aT2);
                 Processor.Wait();
             }
+        }
+
+        // S2Arm (11-13 断音): a period that took > 10 ms on this thread (the output holds ~30 ms): where it went. Session lock, building
+        //   the command lists (of which: waiting for a renderer lock the game's RequestUpdate holds; longest Update hold that ended in the
+        //   period), the DSP itself. At most 40 lines a run
+        private static int s_s2aSlowLines;
+
+        private static void S2ALogSlowPeriod(long sessionWait, long cmd, long dsp)
+        {
+            long f = System.Diagnostics.Stopwatch.Frequency;
+            long total = sessionWait + cmd + dsp;
+
+            if (total * 1000 < 10 * f)
+            {
+                return;
+            }
+
+            long hold = Interlocked.Exchange(ref AudioRenderSystem.S2AUpdateHoldMaxTicks, 0);
+
+            if (Interlocked.Increment(ref s_s2aSlowLines) > 40)
+            {
+                return;
+            }
+
+            Console.Error.WriteLine($"[声] 渲染一拍用了 {total * 1000.0 / f:F1} ms：等会话锁 {sessionWait * 1000.0 / f:F1} ms、生成命令 {cmd * 1000.0 / f:F1} ms" +
+                                    $"（其中等游戏 Update 占着的锁 {AudioRenderSystem.S2ARenderLockWaitTicks * 1000.0 / f:F1} ms；这一拍里游戏 Update 最长持锁 {hold * 1000.0 / f:F1} ms）、DSP {dsp * 1000.0 / f:F1} ms");
         }
 
         /// <summary>

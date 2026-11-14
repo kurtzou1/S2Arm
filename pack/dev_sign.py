@@ -14,7 +14,7 @@ def cms(f):
     try: return plistlib.loads(r.stdout)
     except Exception: return None
 best, unread = None, []
-for f in glob.glob(os.path.expanduser('~/Library/MobileDevice/Provisioning Profiles/*.mobileprovision')) + glob.glob(os.path.expanduser('~/Library/Developer/Xcode/UserData/Provisioning Profiles/*.mobileprovision')):
+for f in glob.glob(os.path.join(glob.escape(os.path.expanduser('~/Library/MobileDevice/Provisioning Profiles')), '*.mobileprovision')) + glob.glob(os.path.join(glob.escape(os.path.expanduser('~/Library/Developer/Xcode/UserData/Provisioning Profiles')), '*.mobileprovision')):
     p = cms(f)
     if not p: unread.append(os.path.basename(f)); continue
     e = p.get('Entitlements', {})
@@ -44,7 +44,7 @@ tf = tempfile.NamedTemporaryFile(suffix='.plist', delete=False); plistlib.dump(e
 def sign(path, extra=()):
     r = subprocess.run(['codesign', '--force', '--sign', ident, '--timestamp=none', *extra, path], capture_output=True, text=True)
     if r.returncode: print(f'签名失败 {path}：{r.stderr.strip()[:300]}'); sys.exit(1)
-nested = sorted({p for p in glob.glob(os.path.join(app, '**', '*.dylib'), recursive=True)} | {p for p in glob.glob(os.path.join(app, '**', '*.framework'), recursive=True)}, key=len, reverse=True)
+nested = sorted({p for p in glob.glob(os.path.join(glob.escape(app), '**', '*.dylib'), recursive=True)} | {p for p in glob.glob(os.path.join(glob.escape(app), '**', '*.framework'), recursive=True)}, key=len, reverse=True)
 for p in nested: sign(p)
 sign(app, ('--entitlements', tf.name)); os.unlink(tf.name)
 got = subprocess.run(['codesign', '-d', '--entitlements', '-', '--xml', app], capture_output=True).stdout

@@ -93,6 +93,7 @@ namespace Ryujinx.Audio.Backends.Apple
         private static readonly S2AOutputDiag[] _all = new S2AOutputDiag[MaxSessions];
         private static int _nextIndex = -1;
         private static int _reporterStarted;
+        private static long _repFreezeSeq;
         private static readonly string _wavBase = DocPath(Environment.GetEnvironmentVariable("S2A_AUDIO_WAV"));
         private readonly ManualResetEventSlim _closed = new(false);
         private Thread _writer;
@@ -529,6 +530,11 @@ namespace Ryujinx.Audio.Backends.Apple
                 Ryujinx.Common.S2AThreadAlloc.Tick("声音诊断"); // S2Arm: per-thread allocation accounting
                 Thread.Sleep(10_000);
 
+                // S2Arm (11-13 失焦误报): frozen now, or frozen at any time in this window: the renderer was paused on purpose
+                long freezeSeq = Interlocked.Read(ref Ryujinx.Audio.Integration.S2AGuestFreeze.Seq);
+                bool frozenWindow = Ryujinx.Audio.Integration.S2AGuestFreeze.Frozen != 0 || freezeSeq != _repFreezeSeq;
+                _repFreezeSeq = freezeSeq;
+
                 long skipped = Interlocked.Exchange(ref AudioProcessor.S2ASkippedPeriods, 0);
                 long lateNs = Interlocked.Exchange(ref AudioProcessor.S2AMaxLateNs, 0);
                 HudAudio(-1, 0, skipped);   // 渲染丢周期是整个渲染器的，不分会话：单报一次
@@ -563,7 +569,11 @@ namespace Ryujinx.Audio.Backends.Apple
                     {
                         // S2Arm (10-23): 播过声、开着播，却 10 秒零回调零交设备 = 设备停了 / 没声音。之前这里直接跳过，「完全没声」在日志里一行都不留。
                         //   只对播过声的会话报（cb > 0）：游戏开着却从没送过声音的会话（动森 #1）不算
-                        if (d._started && cb > 0)
+                        if (d._started && cb > 0 && frozenWindow)
+                        {
+                            Console.Error.WriteLine($"[声] 输出 #{d.Index} 10 秒：客机冻结中（失焦 / 后台，渲染按设计暂停），回调 0 次不算停播");
+                        }
+                        else if (d._started && cb > 0)
                         {
                             Console.Error.WriteLine($"[声] 【红】输出 #{d.Index} 10 秒：播过声、开着播，这 10 秒回调 0 次、交设备 0 帧（设备停了或游戏不再送声音）");
                         }

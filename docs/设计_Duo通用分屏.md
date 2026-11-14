@@ -98,7 +98,9 @@ Mac 启动器继续按共享表的平台字段过滤展示；不能把登记这�
 
 独立输入工作台 `ios/lab/` 复用生产窗口、设置和按键代码，可用于无游戏资源的界面验证。模拟器不提供真实铰链，不能替代 Duo 半折检测、游戏内触屏坐标、宽屏画面及真实组合操作验收。完整贡献者自检的本机缺项、实际执行结果与负对照随交付记录单列。
 
-倒影另有独立合成图案工作台：用 `xcodegen generate --spec ios/lab/reflection.yml --project-root . --project build/reflection-lab` 生成工程，选择本机模拟器编译运行。它使用 `framebufferOnly=YES` 的真实 Metal drawable，提供图案切换、模拟折痕、画面留边、分屏 / 方向切换及下区按钮；24 点折痕只属于合成夹具，不是生产常量。`S2A_REFLECTION_BASELINE=1` 可令夹具按旧宿主方式直接挂层作对照。运行状态写入 App Documents 的 `reflection-lab.json`，包含实例数、模糊可见性、前后台状态和已提交帧数。它不启动游戏，不构成 Duo 真机或能耗验收。
+倒影另有独立合成图案工作台：用 `xcodegen generate --spec ios/lab/reflection.yml --project-root . --project build/reflection-lab` 生成工程，选择本机模拟器编译运行。它使用 `framebufferOnly=YES` 的真实 Metal drawable，提供图案切换、模拟折痕、画面留边、分屏 / 方向切换及下区按钮；24 点折痕只属于合成夹具，不是生产常量。`S2A_REFLECTION_BASELINE=1` 可令夹具按旧宿主方式直接挂层作对照。运行状态写入 App Documents 的 `reflection-lab.json`，包含倒影层可见性与已画帧数、模糊可见性、前后台状态和已提交帧数。它不启动游戏，不构成 Duo 真机或能耗验收。
+
+倒影的实现（2026-11-13 改）：出图层单独挂在普通容器层里；倒影是另一张小 CAMetalLayer（游戏区四分之一像素，层变换上下翻转），摆在「游戏区按折痕保留区中心镜像」的位置（`S2APlayReflectionFrame`），上面照旧盖模糊、渐隐与折痕。两条出图路（直连 `nvn_mtl.m present_now`、通用 `gal_present.m present_one`）每次上屏经 `s2a_ios_reflection_drawable` 取倒影画布，在同一个上屏命令缓冲里用同一套上屏绘制把本帧画面再画一遍、随本帧一起上屏；不分屏、进后台或已有两帧倒影在途时取到空，不挡上屏。不再用 CAReplicatorLayer 复制 CAMetalLayer：复制层只画得出其中一份，Duo 前台上半黑屏、多任务卡片（复制数回 1）反而正常。
 
 2026-11-09 rebase 前（`f76bb5f`）的专项验证：区域 21/21、分屏按键与存储 103/103、方向六轴 9/9、宽屏 18/18 断言通过，Swift 宿主测试 8 项通过，iOS 游戏库 Release 编译通过。把分屏开关改成恒开后区域检查失败 4 项；去掉装载期宽屏保护后宽屏检查失败 2 项，负对照均能拦住错误。rebase 后的读数随各步 PR 单独记录，不沿用这些旧读数。
 

@@ -83,6 +83,114 @@ class JobsTests(unittest.TestCase):
         self.redirect.__exit__(None, None, None)
         self.tmp.cleanup()
 
+    def test_context_accepts_readable_windows_volume_when_final_path_query_is_unsupported(self):
+        import core
+        # 用真实路径起步：Mac 临时目录在 /var（指向 /private/var 的符号链接）下，退回分支逐级查到它会按「路上有链接」照样报错
+        mounted = Path(os.path.realpath(self.root)) / "mounted-library"
+        child = mounted / "games" / "one"
+        child.mkdir(parents=True)
+        (mounted / ".s2arm-library.json").write_text(json.dumps({"schema": 1, "id": "test-library"}), encoding="utf-8")
+        (child / "payload.bin").write_bytes(b"DATA")
+        request = dict(self.request, taskId=str(uuid.uuid4()), privateRoot=str(self.root / "private-mounted"), library=str(mounted), libraryId="test-library")
+        resolve = Path.resolve
+
+        def resolve_with_volume_error(path, *args, **kwargs):
+            if path == mounted or mounted in path.parents:
+                error = OSError(22, "filesystem final-path query unsupported")
+                error.winerror = 1005
+                raise error
+            return resolve(path, *args, **kwargs)
+
+        with patch.object(core, "_windows", lambda: True), patch.object(Path, "resolve", resolve_with_volume_error):
+            context = Context(request)
+            context.require_library()
+            contained = core.contained(mounted, child)
+            self.assertEqual(core.default_home(context.private, context.library), Path(os.path.abspath(mounted)))
+            self.assertEqual(layout.require_in_location(context, child), Path(os.path.abspath(child)))
+            build.validate_files(context, mounted, {"games/one/payload.bin": [4, ""]})
+        self.assertEqual(context.library, Path(os.path.abspath(mounted)))
+        self.assertEqual(contained, Path(os.path.abspath(child)))
+        self.assertTrue((context.logs / "jobs" / (context.task + ".json")).is_file())
+
+    def test_context_does_not_hide_other_library_path_resolution_errors(self):
+        import core
+        mounted = self.root / "denied-library"
+        mounted.mkdir()
+        request = dict(self.request, taskId=str(uuid.uuid4()), privateRoot=str(self.root / "private-denied"), library=str(mounted))
+        resolve = Path.resolve
+
+        def resolve_with_access_error(path, *args, **kwargs):
+            if path == mounted:
+                error = OSError(5, "access denied")
+                error.winerror = 5
+                raise error
+            return resolve(path, *args, **kwargs)
+
+        with patch.object(core, "_windows", lambda: True), patch.object(Path, "resolve", resolve_with_access_error):
+            with self.assertRaises(OSError) as caught:
+                Context(request)
+        self.assertEqual(caught.exception.winerror, 5)
+
+    def test_resolve_path_does_not_fall_back_across_reparse_points(self):
+        import core
+        mounted = Path(os.path.realpath(self.root)) / "reparse-library"   # 同上：只让被测的这一级是重解析点
+        mounted.mkdir()
+        resolve = Path.resolve
+        lstat = Path.lstat
+
+        def resolve_with_volume_error(path, *args, **kwargs):
+            if path == mounted:
+                error = OSError(22, "filesystem final-path query unsupported")
+                error.winerror = 1005
+                raise error
+            return resolve(path, *args, **kwargs)
+
+        def lstat_with_reparse(path, *args, **kwargs):
+            if path == mounted:
+                return type("Stat", (), {"st_mode": stat.S_IFDIR, "st_file_attributes": 0x400})()
+            return lstat(path, *args, **kwargs)
+
+        with patch.object(core, "_windows", lambda: True), patch.object(Path, "resolve", resolve_with_volume_error), patch.object(Path, "lstat", lstat_with_reparse):
+            with self.assertRaises(OSError) as caught:
+                core.resolve_path(mounted)
+        self.assertEqual(caught.exception.winerror, 1005)
+
+    def test_resolve_path_does_not_fall_back_off_windows(self):
+        import core
+        error = OSError(22, "filesystem final-path query unsupported")
+        error.winerror = 1005
+        with patch.object(core, "_windows", lambda: False), patch.object(Path, "resolve", side_effect=error):
+            with self.assertRaises(OSError) as caught:
+                core.resolve_path(self.root / "library")
+        self.assertIs(caught.exception, error)
+
+    @unittest.skipUnless(os.name == "nt", "盘符 / UNC 只有 Windows 有（Windows 实机上跑）")
+    def test_library_keeps_mapped_drive_letter(self):
+        # 映射网络驱动器（Z: → \\NAS\share）：Path.resolve 换成内网地址。库根保留玩家选的盘符写法（存、显示、拼路径），
+        #   判越界照样按解析结果比；路上有 junction 时不保留（没法确认它指哪）
+        import core
+        real = Path(os.path.realpath(self.root)) / "nas-library"
+        (real / "games").mkdir(parents=True)
+        unc = Path(r"\\nas\share\nas-library")
+        resolve = Path.resolve
+
+        def as_unc(path, *args, **kwargs):
+            path = Path(os.path.abspath(path))
+            if path == real or real in path.parents:
+                return unc / path.relative_to(real)
+            return resolve(path, *args, **kwargs)
+
+        with patch.object(Path, "resolve", as_unc):
+            self.assertEqual(core.resolve_library_path(real), real)
+            self.assertEqual(core.resolve_path(real), unc)
+            self.assertEqual(core.contained(real, real / "games"), unc / "games")
+            context = Context(dict(self.request, taskId=str(uuid.uuid4()), privateRoot=str(self.root / "private-nas"), library=str(real)))
+            self.assertEqual(context.library, real)
+            target = real / "elsewhere"
+            target.mkdir()
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(real / "junction"), str(target)], check=True, capture_output=True)
+            self.assertEqual(core.resolve_library_path(real / "junction"), unc / "junction")
+
     def catalogue(self, games):
         atomic(self.c.library / "catalog.json", dict(schema=1, games=games))
 
@@ -809,9 +917,11 @@ class JobsTests(unittest.TestCase):
         du = collections.namedtuple("du", "total used free")
         with um.patch("shutil.disk_usage", return_value=du(0, 0, need)):
             library.check_pack_space(self.c, game)
-        with um.patch("shutil.disk_usage", return_value=du(0, 0, need - 1)):
-            with self.assertRaises(Failure) as e: library.check_pack_space(self.c, game)
-        self.assertIn(f"要 {need / 1e9:.0f} GB", str(e.exception)); self.assertIn(f"只剩 {(need - 1) / 1e9:.0f} GB", str(e.exception))
+        with um.patch("shutil.disk_usage", return_value=du(0, 0, need - 1)), um.patch.object(self.c, "diagnostic") as diag:
+            library.check_pack_space(self.c, game)   # 11-14 不许堵门：差 1 字节也不拦，只提示
+        msg = diag.call_args.args[0]
+        self.assertEqual((diag.call_args.kwargs.get("code"), diag.call_args.kwargs.get("severity")), ("disk_full", "warning"))
+        self.assertIn(f"要 {need / 1e9:.0f} GB", msg); self.assertIn(f"只剩 {(need - 1) / 1e9:.0f} GB", msg)
 
     def test_stage_sources_links_originals_in_place(self):
         # 原件原地只读（11-02）：出包原件目录里是指向原件的软链（按内容哈希命名、整合版同一文件列两次只链一次），不复制、不改原件；
@@ -994,6 +1104,19 @@ class JobsTests(unittest.TestCase):
         with zipfile.ZipFile(destination) as archive:
             self.assertIn("manifest.json", archive.namelist())
 
+    def test_direct_check_cli_never_blocks(self):
+        # 不许堵门（11-14，诊断 D-QDK9）：开工前空间预估不够只提示、不拦。期望手写：预估不够 → 退 0、打一行【黄】带原句与「照常开编」；
+        #   够 → 退 0、不打字；复核自己抛异常 → 退 2（direct_lib.sh 记黄照编）
+        import space_rule, contextlib, io
+        for why, rc, want in (("磁盘空间不足：直连库预计还要 15.0 GB", 0, "【黄】磁盘空间不足：直连库预计还要 15.0 GB：这是预估，照常开编"), (None, 0, "")):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                got = space_rule.cli(["direct-check", "r", "c", "o"], check=lambda *a, w=why: w)
+            self.assertEqual(got, rc); self.assertTrue(out.getvalue().startswith(want) if want else out.getvalue() == "", out.getvalue())
+        def boom(*a): raise OSError("x")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(space_rule.cli(["direct-check", "r", "c", "o"], check=boom), 2)
+
     def test_direct_check_counts_existing_cache_and_volume(self):
         # 直连阶段开工前复核（pack/jobs/space_rule.py direct_check）与出包预检同一规则：游戏内容（romfs + exefs + aoc）≥ 3e9 → 15e9、小于 → 5e9；
         #   已有的同款直连缓存扣掉；期望按 library.py 的两档常量手算
@@ -1096,17 +1219,17 @@ class JobsTests(unittest.TestCase):
                 self.assertIn("未量化", budget["unknown"][0]["note"])
                 self.assertEqual(len(budget["volumes"]), 1)
 
-    def test_space_rejection_emits_budget_and_persists_in_job(self):
-        # 游戏库不够：先发 space 事件（enough=false）再报 disk_full；后续阶段事件不冲掉任务文件里的 space
+    def test_space_shortfall_emits_budget_warns_and_persists_in_job(self):
+        # 游戏库不够：发 space 事件（enough=false）并记一条 disk_full 警告、不拦（11-14 不许堵门）；后续阶段事件不冲掉任务文件里的 space
         import collections
         import unittest.mock as um
         base = dict(self.package("base"), size=1 << 30)
         game = self.game(packages=[base])
         du = collections.namedtuple("du", "total used free")
         with um.patch("shutil.disk_usage", return_value=du(0, 0, 5 << 30)):
-            with self.assertRaises(Failure) as e: library.check_pack_space(self.c, game)
-        self.assertEqual(e.exception.code, "disk_full")
-        self.assertIn("磁盘空间不够", str(e.exception))
+            library.check_pack_space(self.c, game)
+        [d] = [d for d in self.c.job["diagnostics"] if d["code"] == "disk_full"]
+        self.assertEqual(d["severity"], "warning"); self.assertIn("磁盘空间不够", d["summary"])
         event = self.space_events()[-1]
         self.assertFalse(event["space"]["volumes"][0]["enough"])
         self.assertEqual(event["space"]["volumes"][0]["needBytes"], (1 << 30) * 11 // 10 + 5_000_000_000)
@@ -1114,8 +1237,8 @@ class JobsTests(unittest.TestCase):
         job = json.loads(self.c.jobpath.read_text())
         self.assertEqual(job["space"], event["space"]); self.assertEqual(job["message"], "下一阶段")
 
-    def test_mac_prepare_space_rejection_keeps_previous_runtime(self):
-        # Mac 打包：空间不够在建缓存 / 解包之前就拦；上次成功的运行版本与 current 链接原样保留，也不发计划
+    def test_mac_prepare_space_estimate_does_not_stop(self):
+        # 11-14 不许堵门：Mac 打包预估空间不够不再在开头拦，记一条盘满警告、照常往下走（这里让往下第一步抛个记号，证明走到了）
         self.player_keys()   # 加密原件出包开头要 prod.keys（library.require_game，v0.3.1）
         import collections
         import unittest.mock as um
@@ -1126,15 +1249,15 @@ class JobsTests(unittest.TestCase):
         image.mkdir(parents=True); (image / "runtime").write_text("keep")
         self.c.r.update(gameId=game["id"])
         du = collections.namedtuple("du", "total used free")
-        with um.patch("shutil.disk_usage", return_value=du(0, 0, 1)), um.patch.object(self.c, "run") as run, \
-             um.patch.object(build, "digest") as dig:
-            with self.assertRaises(Failure) as e: build.prepare(self.c)
-        self.assertEqual(e.exception.code, "disk_full")
-        run.assert_not_called(); dig.assert_not_called()
-        self.assertFalse((layout.build_dir(self.c, game["id"])).exists())
-        self.assertEqual((image / "runtime").read_text(), "keep")   # 出包没开始，现有镜像不动
+        class Reached(Exception): pass
+        with um.patch("shutil.disk_usage", return_value=du(0, 0, 1)), um.patch.object(self.c, "run"), \
+             um.patch.object(self.c, "fonts_dir", side_effect=Reached):   # 空间预检之后的下一步就是取共享字体
+            with self.assertRaises(Reached): build.prepare(self.c)   # 过了空间预检，走到了下一步
+        warn = [d for d in self.c.job["diagnostics"] if d["code"] == "disk_full"]
+        self.assertEqual([d["severity"] for d in warn], ["warning"]); self.assertIn("这是预估，照常开工", warn[0]["summary"])
+        self.assertEqual((image / "runtime").read_text(), "keep")   # 现有镜像不动
         types = [json.loads(l)["type"] for l in self.c.events.read_text().splitlines()]
-        self.assertIn("space", types); self.assertNotIn("plan", types)
+        self.assertIn("space", types)
 
     def test_library_on_unplugged_disk_says_plug_it_in(self):
         # 游戏库在没插的外接盘上：报「磁盘没连上」并写出盘名；本机磁盘上标识不符仍是原提示
@@ -1342,7 +1465,7 @@ class JobsTests(unittest.TestCase):
         self.assertEqual(env["S2A_RYU_DATA"], str(layout.path(self.c, game["id"], "saves")))
 
     def test_runtime_environment_follows_system_language_and_docks_by_default(self):
-        # 维护者 11-07：不给玩家选游戏语言 / 主机掌机——请求不带 gameLanguage 就不设 S2A_SYSTEM_LANGUAGE（继承来的也不带，c.env 去掉 S2A_*；宿主跟系统首选语言）；
+        # 请求不带 gameLanguage 就不设 S2A_SYSTEM_LANGUAGE（继承来的也不带，c.env 去掉 S2A_*；宿主跟系统首选语言）；玩家在启动设置选的游戏语言走 community launch_env（11-14 维护者确认可选）；
         # 不带 docked 是主机模式，只有明说 false 才掌机
         os.environ["S2A_SYSTEM_LANGUAGE"] = "Japanese"
         try:
@@ -1954,17 +2077,19 @@ class JobsTests(unittest.TestCase):
                 core.direct_space_recheck(self.c, {name: dict(done=done, total=99084)}, now=now)
         step(0, 10.5, 45, 100.0)                         # 记起点
         step(3000, 11.5, 44, 111.0)                      # 不到 5%：不判
-        with self.assertRaises(Failure) as stop:
+        with patch.object(self.c, "diagnostic") as diag:   # 11-14 不许堵门：外推不够只提示、不停
             step(20000, 19.5, 36, 122.0)
-        self.assertEqual(stop.exception.code, "disk_full")
-        self.assertIn("还要再占约 39 GB", str(stop.exception)); self.assertIn("只剩 36 GB", str(stop.exception))
-        # 同卷别的作业写盘：卷从 45 GB 掉到 30 GB，但本款只多占 1 GB → 还需 1 ÷ 20000 × 79084 × 1.1 ≈ 4.3 GB < 30 GB，不误判
-        self.c._direct_space_marks = {}
-        step(0, 10.5, 45, 200.0); step(20000, 11.5, 30, 211.0)
-        self.c._direct_space_marks = {}
-        self.c.r["spaceOverride"] = True
+        [call] = diag.call_args_list
+        self.assertEqual((call.args[1], call.kwargs.get("severity")), ("disk_full", "warning"))
+        self.assertIn("还要再占约 39 GB", call.args[0]); self.assertIn("只剩 36 GB", call.args[0])
+        # 同卷别的作业写盘：卷从 45 GB 掉到 30 GB，但本款只多占 1 GB → 还需 1 ÷ 20000 × 79084 × 1.1 ≈ 4.3 GB < 30 GB，不误报
+        self.c._direct_space_marks = {}; self.c._direct_space_warned = False
         with patch.object(self.c, "diagnostic") as diag:
-            step(0, 10.5, 45, 300.0); step(20000, 19.5, 36, 311.0); step(30000, 24, 31, 322.0)   # 点过「仍然继续」：不停，只打一次黄
+            step(0, 10.5, 45, 200.0); step(20000, 11.5, 30, 211.0)
+        diag.assert_not_called()
+        self.c._direct_space_marks = {}; self.c._direct_space_warned = False
+        with patch.object(self.c, "diagnostic") as diag:
+            step(0, 10.5, 45, 300.0); step(20000, 19.5, 36, 311.0); step(30000, 24, 31, 322.0)   # 连着几次都不够：每单只打一次黄
         self.assertEqual([call.kwargs.get("severity") for call in diag.call_args_list], ["warning"])
 
     def test_direct_space_recheck_per_volume(self):
@@ -1982,9 +2107,10 @@ class JobsTests(unittest.TestCase):
                     patch.object(core.shutil, "disk_usage", side_effect=lambda path: DU(0, 0, free[path])):
                 core.direct_space_recheck(self.c, {name: dict(done=done, total=99084)}, now=now)
         step(0, 10.5, 5, 100.0)
-        with self.assertRaises(Failure) as stop:
+        with patch.object(self.c, "diagnostic") as diag:   # 11-14 不许堵门：只提示、不停
             step(20000, 10.5, 14, 111.0)
-        self.assertIn("工具缓存所在的盘只剩 30 GB", str(stop.exception)); self.assertIn("还要再占约 39 GB", str(stop.exception))
+        msg = diag.call_args.args[0]
+        self.assertIn("工具缓存所在的盘只剩 30 GB", msg); self.assertIn("还要再占约 39 GB", msg)
 
     def test_stage_progress_feeds_direct_space_recheck(self):
         import core

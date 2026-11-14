@@ -453,6 +453,59 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads((self.jobs_dir() / (self.task + ".json")).read_text())["state"], "completed")
 
+    # ---- 取消把工具一起停掉、工具因此报错：照取消收尾，不在写错误摘要时再抛 Cancelled 带着回溯退出（11-12 Mac 设备探测「工作进程已退出」） ----
+    def terminal_event(self):
+        events = (self.jobs_dir() / (self.task + ".events.jsonl")).read_text().splitlines()
+        return json.loads(events[-1])
+
+    def test_a_failure_caused_by_the_cancel_ends_as_cancelled(self):
+        import main as worker
+        from core import Failure
+        def stub(c):
+            c.stop()   # SIGTERM 到了：作业标志已置，xcrun 也被同一信号停掉、退出码 -15
+            raise Failure("读取 iOS SDK 失败；命令：xcrun --sdk iphoneos --show-sdk-version；退出码：-15", code="tool_exit")
+        code = worker.run_request(self.stub_request(), operation_overrides={"stub": stub})
+        self.assertEqual(code, 130, "取消后工具报的错把作业变成了失败或回溯退出")
+        self.assertEqual(self.journal()["state"], "cancelled")
+        self.assertEqual(self.terminal_event()["state"], "cancelled")
+
+    def test_an_unexpected_error_after_the_cancel_also_ends_as_cancelled(self):
+        import main as worker
+        def stub(c):
+            c.stop()
+            raise RuntimeError("工具输出被截断")
+        code = worker.run_request(self.stub_request(), operation_overrides={"stub": stub})
+        self.assertEqual(code, 130)
+        self.assertEqual(self.journal()["state"], "cancelled")
+        self.assertTrue((self.private / "logs" / (self.task + "-exception.log")).is_file(), "原错误没留进日志")
+
+    def test_a_cancel_that_lands_while_the_failure_is_reported_ends_as_cancelled(self):
+        from unittest.mock import patch
+        import core
+        import main as worker
+        from core import Failure
+        describe = core.Context.describe_failure
+        def cancel_then_describe(self, *args, **kwargs):
+            self.stop()   # 取消正好落在写错误摘要的当口：下一步 emit 查标志
+            return describe(self, *args, **kwargs)
+        def stub(c):
+            raise Failure("这一步失败（退出码 1）", code="tool_exit")
+        with patch.object(core.Context, "describe_failure", cancel_then_describe):
+            code = worker.run_request(self.stub_request(), operation_overrides={"stub": stub})
+        self.assertEqual(code, 130)
+        self.assertEqual(self.journal()["state"], "cancelled")
+        self.assertEqual(self.journal()["diagnostics"], [], "没发出去的错误摘要被带进了取消的终态")
+
+    def test_a_failure_without_a_cancel_still_fails(self):
+        import main as worker
+        from core import Failure
+        def stub(c):
+            raise Failure("这一步失败（退出码 1）", code="tool_exit")
+        code = worker.run_request(self.stub_request(), operation_overrides={"stub": stub})
+        self.assertEqual(code, 1)
+        self.assertEqual(self.journal()["state"], "failed")
+        self.assertEqual(self.terminal_event()["state"], "failed")
+
     def test_a_stage_that_cannot_write_its_events_fails_with_a_named_code(self):
         import errno
         from unittest.mock import patch

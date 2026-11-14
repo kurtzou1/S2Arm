@@ -6416,6 +6416,10 @@
   "en": "The library drive format is supported."
  },
  {
+  "source": "游戏库在网络盘上，出包会比较慢。",
+  "en": "The library is on a network drive, so exporting will be slower."
+ },
+ {
   "source": "读出游戏程序和资源，合并更新与 DLC。",
   "en": "Reads the game's program and resources, merging updates and DLC."
  },

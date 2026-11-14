@@ -16,7 +16,8 @@ class CompilerRetentionTests(unittest.TestCase):
     def _preflight_fixture(self, root):
         import os
         import time
-        c = SimpleNamespace(private=root / 'private', work_root=root / 'private', library=root / 'library', emit=lambda *a, **k: None)
+        c = SimpleNamespace(private=root / 'private', work_root=root / 'private', library=root / 'library', emit=lambda *a, **k: None, warnings=[])
+        c.diagnostic = lambda *a, **k: c.warnings.append((a, k))
         c.library.mkdir()
         paths = []
         for i in range(4):
@@ -54,10 +55,10 @@ class CompilerRetentionTests(unittest.TestCase):
             c, paths, game = self._preflight_fixture(Path(directory))
             with patch.object(library, 'selected_packages', return_value=[{'sha256': 'synthetic', 'size': 4 << 30}]), \
                  patch('shutil.disk_usage', return_value=SimpleNamespace(free=12 << 30)):
-                with self.assertRaises(Failure) as error:
-                    library.check_pack_space(c, game, compiler_policy=cache_retention.retention_policy())
-            self.assertEqual(error.exception.code, 'disk_full')
-            self.assertNotIn('逻辑字节', str(error.exception))   # 玩家提示不露内部词
+                library.check_pack_space(c, game, compiler_policy=cache_retention.retention_policy())   # 11-14 不许堵门：不拦，只记警告
+            [(args, kw)] = c.warnings
+            self.assertEqual((kw.get('code'), kw.get('severity')), ('disk_full', 'warning'))
+            self.assertNotIn('逻辑字节', args[0])   # 玩家提示不露内部词
             self.assertTrue(all(p.exists() for p in paths[:3]))
             self.assertFalse(paths[3].exists())
 
@@ -82,8 +83,7 @@ class CompilerRetentionTests(unittest.TestCase):
             with patch.object(library, 'space_budget', return_value=budget), \
                  patch.object(Path, 'stat', stat), \
                  patch('shutil.disk_usage', return_value=SimpleNamespace(free=1 << 30)):
-                with self.assertRaises(Failure):
-                    library.check_pack_space(c, game, compiler_policy=cache_retention.retention_policy())
+                library.check_pack_space(c, game, compiler_policy=cache_retention.retention_policy())   # 不拦，只记警告
             self.assertTrue(all(p.exists() for p in paths), 'another volume cannot reclaim this cache volume')
 
     def test_success_cleanup_keeps_compiler_inputs(self):

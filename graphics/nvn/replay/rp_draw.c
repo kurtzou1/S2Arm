@@ -1034,7 +1034,9 @@ void rp_dispatch(nvn_gpu_cmd c, const p_dispatch *dp, const void *rec) {
     g_disp_dim[0] = dp->ind ? 0 : (uint32_t)dp->x; g_disp_dim[1] = dp->ind ? 0 : (uint32_t)dp->y; g_disp_dim[2] = dp->ind ? 0 : (uint32_t)dp->z;
     if (!bind_stage_at(c, pg, 0, 5, 0, tv, ts, rec)) goto done;
     for (uint32_t i = 0; i < pg->nent[0]; i++) if (images[i] && (pg->ent[0][i].access & NVN_GPU_ACC_W)) rp_tex_mark_gpu_written(images[i]);
-    if (g_disp_ind) nvn_gpu_barrier(c, NVN_BARRIER_ORDER_INDIRECT_DATA_BIT | NVN_BARRIER_INVALIDATE_SHADER_BIT);
+    // 游戏屏障（#978）：派发在通道外，等不到下一个通道开头，这里取走待发位交给后端；间接参数的那道合在同一次里
+    uint32_t bar = rp_pass_take_barrier() | (g_disp_ind ? NVN_BARRIER_ORDER_INDIRECT_DATA_BIT | NVN_BARRIER_INVALIDATE_SHADER_BIT : 0);
+    if (bar) nvn_gpu_barrier(c, bar);
     nvn_gpu_dispatch(c, cp, g_disp_dim[0], g_disp_dim[1], g_disp_dim[2], g_disp_ind, g_disp_ind_off);
     { struct timespec tse; clock_gettime(CLOCK_MONOTONIC, &tse); rp_perf_add(RP_PERF_DISP_BIND_NS, (uint64_t)tse.tv_sec * 1000000000ull + (uint64_t)tse.tv_nsec - b0); }
     g_dispatches++;

@@ -1286,8 +1286,16 @@ class AssembleTests(unittest.TestCase):
 
     def test_update_phone_same_shell_does_nothing(self):
         _, pushed, signed = self._update(sid="SID1")
-        r = install.update_phone(self.c)
+        with um.patch.object(install, "sgrade_pending", return_value=False):   # 壳是本版、也没有要补 S 级优化的款
+            r = install.update_phone(self.c)
         self.assertEqual((r["updated"], signed, pushed), (False, [], []))
+
+    def test_update_phone_same_shell_still_updates_when_sgrade_pending(self):
+        # 11-14：壳是本版、但有款要补 S 级优化（补丁库更新 / 电脑上导入了要改代码的金手指）→ 照样重组容器（Windows「更新 iPhone」也补得上）
+        _, pushed, signed = self._update(sid="SID1")
+        with um.patch.object(install, "sgrade_pending", return_value=True):
+            r = install.update_phone(self.c)
+        self.assertTrue(r["updated"]); self.assertTrue(signed)
 
     def test_phone_updates_from_device_records(self):
         """游戏库页检测：只读设备记录——壳旧了列出各款和要重新出包的乙；壳是本版 → 空"""

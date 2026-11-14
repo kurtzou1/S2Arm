@@ -257,7 +257,7 @@ def task_log(task_id):
     d = logs_root()
     # Mac 构建各阶段写 logs/<任务>/，起游戏等作业写 logs/<任务>-*.log；两种布局都查。
     prefix = os.path.join(glob.escape(d), glob.escape(task_id))
-    fs = glob.glob(prefix + '*.log') + glob.glob(os.path.join(prefix, '*.log'))
+    fs = glob.glob(glob.escape(prefix) + '*.log') + glob.glob(os.path.join(glob.escape(prefix), '*.log'))
     fs = [f for f in fs if os.path.isfile(f)]
     return max(fs, key=os.path.getmtime) if fs else None
 

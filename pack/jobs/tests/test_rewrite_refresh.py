@@ -46,6 +46,8 @@ class RewriteRefreshTests(unittest.TestCase):
     def fake_sgrade(self, mods=("main", "sdk", "subsdk0")):
         """假的「带社区补丁改写」：产物目录里每个模块 sg-<模块>、补丁表与一份金手指原文"""
         def run(c, game, base, exefs, target, work):
+            if game["id"] in getattr(self, "sg_fail", ()):
+                raise Failure("fixture rewriter crashed on this game")
             root = Path(work) / "root"; root.mkdir()
             for m in mods:
                 (root / f"{m}.patched.bin").write_bytes(b"sg-" + m.encode()); (root / f"{m}.fixups.tsv").write_bytes(b"sgfx")
@@ -103,7 +105,17 @@ class RewriteRefreshTests(unittest.TestCase):
         self.assertNotIn("0100A", updated)
         self.assertEqual((kits["0100A"] / "main.patched.bin").read_bytes(), b"old-main", "核不了的款保留原产物")
         self.assertNotIn("rewriterId", self.info.get("0100A", {}).get("ios", {}), "核不了不记指纹：下次再核")
-        self.assertTrue(any("【黄】0100A" in e for e in self.events))
+        self.assertTrue(any("【黄】0100A" in e for e in self.events), "出包时取消过 S 级优化（sgrade=None）：不涉及补丁，照旧黄字")
+        self.assertNotIn("sgradeResult", self.info.get("0100A", {}))
+
+    def test_rewriter_error_on_sgrade_game_is_reported_as_patch_failure(self):
+        # 11-14 维护者：改写器在这款上出错 = 「不匹配，补丁打入失败」——红字点名、记进结果（升级 / 装机结果页列），这款保留原来的程序
+        self.sg_fail = ("0100A",)
+        updated, kits = self.run_refresh(["0100A", "0100B"], hits=["main"], sgrade="rid-new:plan:k1")
+        self.assertNotIn("0100A", updated)
+        self.assertTrue(any(e.startswith("【红】0100A：S 级优化补丁打入失败") for e in self.events))
+        self.assertIn("error", self.info["0100A"]["sgradeResult"]["ios"])
+        self.assertEqual(self.info["0100A"]["sgradeResult"]["ios"]["applied"], [])
 
 
     def test_mac_runtime_updates_files_and_manifest(self):
@@ -156,8 +168,11 @@ class RewriteRefreshTests(unittest.TestCase):
         files = {"main.patched.bin": [3, ""], "sdk.patched.bin": [3, ""], "cheat-src.old.txt": [3, ""]}
         (rt / "manifest.json").write_text(json.dumps({"schema": 1, "files": files, "gameId": "0100A", "rewriterId": "rid-new"}))
         with patch.object(rr, "rewriter_id", return_value="rid-new"), patch.object(rr, "sgrade_off", return_value=False), \
-             patch.object(rr, "sgrade_key", return_value="k1"), patch.object(rr, "sgrade_rewrite", side_effect=self.fake_sgrade(("main", "sdk"))):
+             patch.object(rr, "sgrade_key", return_value="k1"), patch.object(rr, "sgrade_rewrite", side_effect=self.fake_sgrade(("main", "sdk"))), \
+             patch.object(rr.layout, "game_info", side_effect=lambda c, g: self.info.get(g, {})), \
+             patch.object(rr.layout, "update_info", side_effect=lambda c, g, **f: self.info.setdefault(g, {}).update(f)):
             self.assertTrue(rr.refresh_mac(self.c, "0100A", rt))
+            self.assertIn("mac", self.info["0100A"]["sgradeResult"], "补完记下这一端的打入结果")
             m = json.loads((rt / "manifest.json").read_text())
             self.assertEqual((rt / "main.patched.bin").read_bytes(), b"sg-main")
             self.assertEqual(m["files"]["sdk.patched.bin"], [len(b"sg-sdk"), ""])
@@ -181,10 +196,12 @@ class RewriteRefreshTests(unittest.TestCase):
         self.c.catalog = lambda: {"games": [{"id": "0100A", "name": "甲游戏"}, {"id": "0100B", "name": "乙游戏"}]}
         with patch.object(rr, "rewriter_id", return_value="rid-new"), patch.object(rr, "sgrade_off", return_value=False), \
              patch.object(rr, "sgrade_key", return_value="k"), patch.object(rr.layout, "game_info", return_value={}), \
+             patch.object(rr.layout, "update_info", side_effect=lambda c, g, **f: self.info.setdefault(g, {}).update(f)), \
              patch.object(rr.layout, "ios_kit", return_value=self.tmp), \
              patch.object(rr, "check_and_update", side_effect=lambda c, g, *a: "unavailable" if g == "0100A" else "updated"):
             self.assertEqual(rr.refresh_ios(self.c, ["0100A", "0100B"]), ["0100B"])
         self.assertTrue(any("甲游戏" in e and "没补上 S 级优化" in e and "乙游戏" not in e for e in self.events), self.events)
+        self.assertEqual(self.info["0100A"]["ios"]["sgradeMissing"], "k", "缺原件补不上：记下这一版记号，「更新 iPhone」不再因它重装（install.sgrade_pending）")
 
 if __name__ == "__main__":
     unittest.main()

@@ -34,7 +34,9 @@ INPUTS = ["runtime", "ios", "graphics", "translator", "services", "compat", "pac
           #   把这些编译产物当成改动、拒绝出包——玩家导出 iPhone 版必死在最后一步
           ".gitignore",
           # 启动器公告的随包兜底（pack/jobs/updater.py inbox：官方下载页上的同一份取不到时用它）
-          "docs/site/notice.json"]
+          "docs/site/notice.json",
+          # 新功能大窗的随包内容（updater.py feature_spotlight：文字在 feature.json，图在 feature/）
+          "docs/site/feature.json", "docs/site/feature"]
 
 
 def include_source(relative):
@@ -222,7 +224,34 @@ def bundle(destination, developer_dir):
     strip_debug_maps(destination / "Binaries", developer_dir)
     if source_fingerprint(ROOT) != fingerprint:
         raise RuntimeError("Engine sources changed during packaging; retry with stable inputs")
+    precompile(destination, destination.parent / RUNTIME_PYTHON)   # 先于清单：.pyc 和源码一起进 engine.json、一起签
     return write_manifest(destination, fingerprint)
+
+
+# 签名封存的 App 包运行时一个字节都不能多（多了 codesign --verify 报「a sealed resource is missing or invalid」、Gatekeeper 拒开）。
+#   只靠各调用点带 -B 守不住：-I 忽略 PYTHONDONTWRITEBYTECODE、子进程不继承 -B、encodings 等在 site 之前导入（sitecustomize 管不到）。
+#   出包时就把包里所有 .py 用内置 Python 编成 checked-hash 的 .pyc 一起签进去：导入时按源码哈希核对、对得上直接用，没有可写的；
+#   再在内置 Python 的 site-packages 放 sitecustomize 关掉写字节码，兜住没预编到的（如运行时现生成的模块）
+RUNTIME_PYTHON = "Runtime/python/bin/python3"
+SITECUSTOMIZE = "# S2Arm：App 包签名封存，运行时不写 .pyc（launchers/macos/bundle_engine.py seal_runtime）\nimport sys\nsys.dont_write_bytecode = True\n"
+
+
+def precompile(root, python):
+    """root 下所有 .py 用 python（必须是包里那份内置 Python：.pyc 带解释器版本号）编成 checked-hash .pyc；有编不过的就停（随包源码编不过本身是错）"""
+    python = Path(python)
+    if not python.is_file():
+        raise RuntimeError(f"预编 .pyc 要用 App 自带的 Python，没找到：{python}")
+    subprocess.run([str(python), "-I", "-m", "compileall", "-q", "-j", "0", "--invalidation-mode", "checked-hash", str(root)],
+                   stdout=subprocess.DEVNULL, check=True)
+
+
+def seal_runtime(resources):
+    """内置 Python 放 sitecustomize（关写字节码）并预编标准库与第三方包；Jobs / GUIJobs 这些随包的 Python 源码一并预编"""
+    resources = Path(resources)
+    lib = next((resources / "Runtime/python/lib").glob("python3.*"))
+    (lib / "site-packages/sitecustomize.py").write_text(SITECUSTOMIZE)
+    for d in (lib, *(resources / name for name in ("Jobs", "GUIJobs") if (resources / name).is_dir())):
+        precompile(d, resources / RUNTIME_PYTHON)
 
 
 def write_manifest(destination, fingerprint):

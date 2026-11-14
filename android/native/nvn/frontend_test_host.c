@@ -22,6 +22,7 @@ void dm_guest_write_prep_register(void (*fn)(void *, size_t)) { (void)fn; }
 void dm_shader_miss(const uint8_t key[8], uint64_t code, const void *control) { (void)key; (void)code; (void)control; }
 void dm_shader_mesh_hold(uint64_t code, const void *control) { (void)code; (void)control; }
 void dm_shader_mesh_hold_key(const uint8_t key[8], uint64_t code, const void *control) { (void)key; (void)code; (void)control; }
+void dm_shader_vs_hold_key(const uint8_t key[8], uint64_t code, const void *control) { (void)key; (void)code; (void)control; }
 void s2a_core_block_begin(void) {}
 void s2a_core_block_end(void) {}
 void s2a_direct_fail(const char *why) { if (why) fprintf(stderr, "[nvn-test] direct fail: %s\n", why); }

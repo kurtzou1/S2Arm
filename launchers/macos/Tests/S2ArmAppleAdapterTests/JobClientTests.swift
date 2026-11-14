@@ -131,6 +131,7 @@ final class JobClientTests: XCTestCase {
         let broken = try Sandbox(bundledPython: false, engine: true); defer { broken.remove() }
         XCTAssertThrowsError(try client(broken, FakeRunner()).pythonExecutable()) {
             XCTAssertEqual(($0 as? JobClientError)?.message, "应用内置 Python 缺失，请重新安装完整应用。")
+            XCTAssertEqual(($0 as? JobClientError)?.code, JobClientError.bundleIncomplete)   // 界面据此给「下载完整安装包」按钮
         }
         // 源码树：设置里指定的 Python；入口退到 <engineDir>/pack/jobs/main.py
         let dev = try Sandbox(bundledPython: false, jobs: false); defer { dev.remove() }

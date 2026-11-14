@@ -229,9 +229,12 @@ namespace S2A.Services
         // 继承 HardwareDeviceSessionOutputBase：Ryujinx 兼容层（声道降混 / 格式转换）包在本驱动外，要求真实会话是这个基类，
         // 原先只实现接口的包装让它抛「Real driver session class type isn't based on …」（暗黑2 FailFast、巫师3 音频异常）。
         // 兼容层转换后才交到这里，峰值按实际送硬件的格式算
-        private sealed class Session : HardwareDeviceSessionOutputBase
+        private sealed class Session : HardwareDeviceSessionOutputBase, Ryujinx.Audio.Integration.IS2AOutputDepth
         {
             private readonly HardwareDeviceSessionOutputBase _s;
+
+            // 渲染按输出在途深度定节拍（11-13 断音）：把真实会话的深度透传上去
+            public long S2ABufferedFrames => _s is Ryujinx.Audio.Integration.IS2AOutputDepth d ? d.S2ABufferedFrames : -1;
 
             public Session(HardwareDeviceSessionOutputBase s) : base(s.MemoryManager, s.RequestedSampleFormat, s.RequestedSampleRate, s.RequestedChannelCount)
             {

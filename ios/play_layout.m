@@ -89,7 +89,11 @@ static double screen_ratio(void) {
     double r=atomic_load(&g_view_ratio);
     if (!(r>0) && !NSThread.isMainThread) for (int i=0;i<500 && !((r=atomic_load(&g_view_ratio))>0);i++) usleep(10000);
     if (r>0) return r;
-    CGSize s=UIScreen.mainScreen.nativeBounds.size;
+    // 还没排过版：按当前前台场景所在的那块屏算。不用 UIScreen.mainScreen——iPhone Duo 内屏亮着时它仍报外屏 1398×2034（11-13 真机读数）
+    CGSize s=CGSizeZero;
+    if (NSThread.isMainThread) for (UIScene *sc in UIApplication.sharedApplication.connectedScenes)
+        if ([sc isKindOfClass:UIWindowScene.class] && sc.activationState==UISceneActivationStateForegroundActive) { s=((UIWindowScene *)sc).coordinateSpace.bounds.size; break; }
+    if (!(s.width>0 && s.height>0)) s=UIScreen.mainScreen.nativeBounds.size;
     BOOL portrait=s2a_ios_play_orientations()==UIInterfaceOrientationMaskPortrait;
     CGRect b=CGRectMake(0,0,portrait?fmin(s.width,s.height):fmax(s.width,s.height),portrait?fmax(s.width,s.height):fmin(s.width,s.height));
     CGRect a=S2APlayLayoutMake(b,b,S2APlayReadSplit(NSUserDefaults.standardUserDefaults),g_half,CGRectNull).game;

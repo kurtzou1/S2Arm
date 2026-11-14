@@ -98,6 +98,8 @@ s2a_gate_step bash "$android_dir/tools/nvn_vk_frame_log_test.sh"
 s2a_gate_step bash "$android_dir/tools/nvn_vk_dt_test.sh"
 # WSI actual-present diagnostics: NDK declarations, partial batches and generation isolation.
 s2a_gate_step bash "$android_dir/tests/nvk_shown_timing_test.sh"
+# 设备 / 实例扩展查询：枚举失败（能力未知、报红）与确实不支持分开；VK_INCOMPLETE 重取。
+s2a_gate_step bash "$android_dir/tests/vk_dev_ext_test.sh"
 # 调试开关读数的线程内缓存（宿主，确定性）：命中 / 过期 / 缺省 / 名字比较 / 名字上限，7 个负对照。
 s2a_gate_step bash "$android_dir/tests/nvk_flag_cache_test.sh"
 # 直连逐帧 TSV（宿主，确定性）：列掩码/差分/gpuq 账/开关与目录门。
@@ -538,6 +540,14 @@ fi
 s2a_gate_step "$PY" "$android_dir/core-link/runtime-tests/readonly-copy/texture_read_test.py"
 # 共享 guest 入口的主线程 fault 状态准入顺序（真实 guest_main.c；fault/SDK 端点为合成夹具；11-01 #1309 接线）。
 s2a_gate_step "$PY" "$android_dir/core-link/runtime-tests/run_guest_entry.py" --out "$out/guest-entry"
+# 主 guest 运行态发布（#961）：真实 HostApi / runtime / guest_main / session / direct_prompt 一起编链，带 5 个回退负对照。
+#   GNU ld --wrap 与 host_android.c 的 eventfd 只在 Linux；Android 日志头取固定 NDK 29 的真头。
+if [ "$(uname -s)" = Linux ]; then
+    s2a_gate_step "$PY" "$android_dir/core-link/runtime-tests/run_save_running.py" --out "$out/save-running" \
+        --ndk-include "${ndk_cc%/bin/*}/sysroot/usr/include"
+else
+    s2a_gate_note "未测：run_save_running.py（主 guest 运行态发布）需 Linux（GNU ld --wrap、eventfd）"
+fi
 # Q19/#530：C# 绑定入口 vs Android 单库实际链接定义（fixture + 当前树正例）。
 s2a_gate_step python3 "$android_dir/core-link/link_symbols.py"
 s2a_gate_step "$PY" "$android_dir/core-link/tests/t_link_symbols.py"

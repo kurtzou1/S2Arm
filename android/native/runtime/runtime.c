@@ -17,6 +17,7 @@
 #include "guest_main.h"
 #include "guest_signal.h"
 #include "s2a_native.h"
+#include "s2a_session.h"
 #include "s2a_gfx_mode.h"   // 冻结的图形模式（direct_session.c）：与选择器提交的 NVN 直连表对账
 #include "direct/provider_vk.h"   // 弱符号：没有 provider 的构建里为 NULL
 #include <errno.h>
@@ -461,6 +462,19 @@ int s2a_android_runtime_enter_guest_thread(void) {
     }
     if (!s2a_track_runtime_ready()) return failed(S2A_RUNTIME_TRACKING, 0, "guest thread final tracking admission failed");
     if (stop_requested()) return failed(S2A_RUNTIME_STOP, 0, "stop after guest thread self-probe");
+    return 0;
+}
+
+static int publish_current(void) { return s2a_session_running(s2a_session_generation()); }
+int s2a_android_runtime_publish_running(void) {
+    int rc = s2a_android_host_publish_running(publish_current);
+    if (rc > 0) return failed(S2A_RUNTIME_STOP, 0, "stop before session RUNNING publication");
+    if (!rc) return 0;
+    int state = s2a_host_session_state();
+    if (state == S2A_SESSION_FAILED) return failed(S2A_RUNTIME_SERVICES, 0, "session failed before RUNNING publication");
+    if (s2a_session_stop_requested()) return failed(S2A_RUNTIME_STOP, 0, "session exiting before RUNNING publication");
+    fprintf(stderr, "[s2a] 【红】共用会话运行态没发布：代 %u 状态 %d（期望本代 STARTING=%d），没有停止或失败，照常进 SDK\n",
+            s2a_session_generation(), state, S2A_SESSION_STARTING);
     return 0;
 }
 

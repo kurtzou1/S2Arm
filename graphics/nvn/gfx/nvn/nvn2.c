@@ -345,7 +345,15 @@ static uint64_t cam_destroy_alias(uint16_t handle) {
 //   原先写 0 → 游戏对句柄 0 SendSyncRequest、会话不在会话表 → sdk 中止（诊断 #0148a6，0400C3F00006E000 在 iPad 上 5 局 Break 都在这一步后）。
 //   现在向服务层要一个「没插摄像头的主机」会话（services/S2A.Services/CameraNoDevice.cs S2A_CameraSessionOpen）；服务层没链（原生单测）时照旧写 0
 static uint64_t cam_create_ctx(uint32_t *out_handle) {
+#if defined(__ANDROID__)
+    // 安卓：服务层 NativeAOT 与本文件静态并入同一个 libs2arm_android.so，链接带 --exclude-libs,ALL，导出不进动态表，
+    //   dlsym(RTLD_DEFAULT) 恒为 NULL（core-link 审计因此判红、安卓构建失败）。改链接期弱引用（同 hle_nvn.c S2A_NvMapFromGuest）：
+    //   出包的单库里由归档解析；不带服务层的链接里为空，照旧写 0
+    extern uint32_t S2A_CameraSessionOpen(void) __attribute__((weak));
+    uint32_t (*open)(void) = S2A_CameraSessionOpen;
+#else
     uint32_t (*open)(void) = (uint32_t (*)(void))dlsym(RTLD_DEFAULT, "S2A_CameraSessionOpen");
+#endif
     uint32_t h = open ? open() : 0;
     static _Atomic int said;
     if (!atomic_exchange(&said, 1)) LOG("nn::camera::sdk::CreateCameraContext：宿主没有摄像头，给「没插摄像头」会话 %#x（0 = 服务层没起）", h);

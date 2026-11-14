@@ -148,6 +148,7 @@ struct PhoneJobPanel: View {
                     }
                 }
             }
+            if let o { SGradeResultView(results: o.sgrade, text: { t($0) }) }   // 补进 S 级优化的各款：打上 / 没打上（11-14）
         }
         .accessibilityIdentifier("phone.done")
     }
@@ -204,6 +205,7 @@ struct PhoneJobPanel: View {
                     .buttonStyle(.plain).disabled(model.exportPushing).accessibilityIdentifier("phone.export.push")
                 }
             }
+            SGradeResultView(results: o.sgrade, text: { t($0) })   // 补进 S 级优化的各款：打上 / 没打上（11-14）
         }
         .accessibilityIdentifier("phone.done")
     }

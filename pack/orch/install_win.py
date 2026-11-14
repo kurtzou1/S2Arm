@@ -28,7 +28,7 @@ def plumesign_path(given=None):
     exe = 'plumesign.exe' if os.name == 'nt' else 'plumesign'
     cands = [given, os.environ.get('S2A_PLUMESIGN'), shutil.which('plumesign')]
     st = impactor.status()
-    if st.get('path'): cands += glob.glob(os.path.join(os.path.dirname(st['path']), 'plumesign*'))
+    if st.get('path'): cands += glob.glob(os.path.join(glob.escape(os.path.dirname(st['path'])), 'plumesign*'))
     for c in cands:
         if c and os.path.isfile(c) and (os.name != 'nt' or c.lower().endswith('.exe')): return c
     return None

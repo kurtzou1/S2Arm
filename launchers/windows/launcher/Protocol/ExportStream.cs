@@ -14,7 +14,8 @@ public static class ExportStream
 
     /// <summary>一步的结局（stepEnded.outcome）：State = completed / failed / cancelled</summary>
     /// <param name="Notes">出成了、但有阶段降级继续（v0.3.1，产物根 degrade.*.tsv 的「玩家提示」）：完成卡逐条显示；没有为空</param>
-    public sealed record Outcome(string State, string Message, string? Code, string? Output, string? Ipa, long? IpaBytes, long? PackBytes, IReadOnlyList<string>? Notes = null);
+    /// <param name="Boost">出包时自动配好的补丁（作业层 pack/jobs/patches.py boost）：条数 + applied / failed / error（补丁打入结果，完成页列，11-14）；没有为 null</param>
+    public sealed record Outcome(string State, string Message, string? Code, string? Output, string? Ipa, long? IpaBytes, long? PackBytes, IReadOnlyList<string>? Notes = null, JsonElement? Boost = null);
 
     public abstract record Event(Step Where);
     public sealed record Started(Step Where) : Event(Where);
@@ -38,7 +39,8 @@ public static class ExportStream
             default:
                 if (!e.TryGetProperty("outcome", out var o) || o.ValueKind != JsonValueKind.Object || Text(o, "state") is not ("completed" or "failed" or "cancelled") || Text(o, "state") is not { } state)
                     throw new LibraryProtocolException("export stepEnded without a known outcome state");
-                return new Ended(where, new Outcome(state, Text(o, "message") ?? "", Text(o, "code"), Text(o, "output"), Text(o, "ipa"), Long(o, "ipaBytes"), Long(o, "packBytes"), Strings(o, "notes")));
+                return new Ended(where, new Outcome(state, Text(o, "message") ?? "", Text(o, "code"), Text(o, "output"), Text(o, "ipa"), Long(o, "ipaBytes"), Long(o, "packBytes"), Strings(o, "notes"),
+                    o.TryGetProperty("boost", out var bo) && bo.ValueKind == JsonValueKind.Object ? bo.Clone() : null));
         }
     }
 

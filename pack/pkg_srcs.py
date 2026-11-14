@@ -108,7 +108,7 @@ def app_tables():
     if os.environ.get('IPA_APP_TABLES') is not None: return os.environ['IPA_APP_TABLES'].split()   # 调用方已取过这份清单时直接给（单测逐项算键用）
     names = set()
     for pat in DECL_GLOBS:
-        for p in glob.glob(os.path.join(R, pat)):
+        for p in glob.glob(os.path.join(glob.escape(R), pat)):
             with open(p, encoding='utf-8', errors='surrogateescape') as f:
                 for line in f:
                     m = DECL.match(line.rstrip('\n'))

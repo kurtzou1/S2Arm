@@ -1,0 +1,231 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+index c6d03aee1115329c8c916e0ce0f1a88a9216bf8f..b5c66df1db84f21fe5fcf1456aa2162d4b3a1195 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+@@ -58,6 +58,14 @@ namespace Ryujinx.Audio.Backends.Apple
+         // S2Arm (11-02 Pokopia iPhone 杂音): releases each queued buffer when the credit's play head reaches its end, one per buffer
+         //   like a Switch (see PlaybackCredit), instead of a whole device pull at each hand-back. Woken by hand-backs and new buffers
+         private readonly AutoResetEvent _paceEvent = new(false);
++        // S2Arm (11-14 iPhone 实机 声音服务卡死): slots the device handed back, one bit each (NumBuffers = 32), set by OutputCallback and
++        //   drained by the pace thread (S2ADrainReturned). The AudioQueue callback thread belongs to the audio system: it must never
++        //   wait on our locks or read guest memory. It did both (pump lock, then Pump → AudioSampleQueue.Read → ReadSamples from the
++        //   game's audio-out buffers): a stalled game (iPhone 实机 第 17515 帧, guest memory file-backed) can block it for good, and a
++        //   process killed with the audio system's thread stuck in our code left the phone's audio service broken until a reboot
++        //   (every later launch: first enqueue 11 s, repeated media-services resets, session activation failing)
++        private int _returnedMask;
++        private bool _closedStuck;   // S2Arm (11-14): Dispose left the queue allocated (TrySuspend failed): a Pump returning later submits nothing
+         private const int CreditBurstGapMicroseconds = 2000;
+         private const int CreditMaxLeadMilliseconds = 100;
+         private readonly ManualResetEvent _updateRequiredEvent;
+@@ -189,7 +197,7 @@ namespace Ryujinx.Audio.Backends.Apple
+ 
+             SetupAudioQueue();
+             S2AWatch(this, true);
+-            new Thread(PaceLoop) { IsBackground = true, Name = "S2A.AudioPace" }.Start();
++            new Thread(PaceLoop) { IsBackground = true, Name = "S2A.AudioPace", Priority = ThreadPriority.Highest }.Start();
+         }
+ 
+         // S2Arm: 登记 / 注销看门狗（固定 8 槽，看门狗线程扫数组不分配）
+@@ -404,10 +412,18 @@ namespace Ryujinx.Audio.Backends.Apple
+ 
+                     if (!rebuild)
+                     {
++                        // S2Arm (11-14): hand-backs noted during the stop are reclaimed with the rest (Restart); a bit left over would
++                        //   recycle the slot again after it is resubmitted. A failed stop reclaims nothing: keep them
++                        if (stopRc == 0)
++                        {
++                            Interlocked.Exchange(ref _returnedMask, 0);
++                        }
++
+                         return stopRc;
+                     }
+ 
+                     AudioQueueDispose(_audioQueue, true);
++                    Interlocked.Exchange(ref _returnedMask, 0);
+                     newRc = CreateQueue();
+ 
+                     return 0;   // 旧队列连同它的缓冲已销毁：在途的槽全部收回
+@@ -556,6 +572,11 @@ namespace Ryujinx.Audio.Backends.Apple
+ 
+             protected override void Submit(int slot, int bytes)
+             {
++                if (Volatile.Read(ref _s._closedStuck))
++                {
++                    return;
++                }
++
+                 nint bufferPtr = _s._audioQueueBuffers[slot];
+                 AudioQueueBuffer* buffer = (AudioQueueBuffer*)bufferPtr;
+ 
+@@ -595,19 +616,37 @@ namespace Ryujinx.Audio.Backends.Apple
+             if (!Volatile.Read(ref _bufferSlots).TryGetValue(bufferPtr, out int bufferIndex))
+                 return;
+ 
+-            // S2Arm: recycle every returned device buffer, but advance guest progress only for its queued-sample bytes,
+-            //   one device pull ahead of the hand-backs (PlaybackCredit)
+-            int bytesPlayed = _pump.Returned(bufferIndex);
+-            _credit.Returned(bytesPlayed, Stopwatch.GetTimestamp());
++            // S2Arm (11-14): only note the slot and wake the pace thread, which recycles it and refills the device (see _returnedMask)
++            Interlocked.Or(ref _returnedMask, 1 << bufferIndex);
++            _paceEvent.Set();
++        }
++
++        // S2Arm (11-14): on the pace thread. Recycle every returned device buffer, but advance guest progress only for its queued-sample
++        //   bytes, one device pull ahead of the hand-backs (PlaybackCredit); then refill the device from what the game queued
++        private void S2ADrainReturned()
++        {
++            int mask = Interlocked.Exchange(ref _returnedMask, 0);
++
++            if (mask == 0)
++            {
++                return;
++            }
++
++            long now = Stopwatch.GetTimestamp();
++
++            while (mask != 0)
++            {
++                int slot = System.Numerics.BitOperations.TrailingZeroCount(mask);
++                mask &= mask - 1;
++                _credit.Returned(_pump.Returned(slot), now);
++            }
++
+             _diag.SetLead(_credit.LeadBytes / _bytesPerFrame);
+ 
+             if (_started)
+             {
+                 _pump.Pump();
+             }
+-
+-            S2ACredit();
+-            _paceEvent.Set();
+         }
+ 
+         // S2Arm (11-02): release what now counts as played (handed back, or submitted and passed by the credit's play head)
+@@ -627,6 +666,7 @@ namespace Ryujinx.Audio.Backends.Apple
+         {
+             while (!Volatile.Read(ref _disposed))
+             {
++                S2ADrainReturned();
+                 S2ACredit();
+ 
+                 long rest;
+@@ -936,20 +976,38 @@ namespace Ryujinx.Audio.Backends.Apple
+                     Stop();
+                     _queueRunning = false;
+ 
++                    bool leaked = false;
++
+                     if (_audioQueue != nint.Zero)
+                     {
+-                        AudioQueueStop(_audioQueue, true);
+-                        int result = AudioQueueDispose(_audioQueue, true);
+-                        if (result != 0)
+-                            throw new InvalidOperationException($"AudioQueueDispose failed: {result}; callback handle retained");
+-                        _audioQueue = nint.Zero;
++                        // S2Arm (11-14 iPhone 实机 声音服务卡死): the pace thread may be stuck inside a Pump reading a stalled guest buffer (the game
++                        //   hung; S2ADrainReturned). Disposing would free the buffers (and the downmix stage) it is writing through: stop the
++                        //   queue (its callbacks only set a bit) and leave both allocated instead. Bounded: closing never waits on the game
++                        if (_pump.TrySuspend(TimeSpan.FromMilliseconds(200)))
++                        {
++                            AudioQueueStop(_audioQueue, true);
++                            int result = AudioQueueDispose(_audioQueue, true);
++                            if (result != 0)
++                                throw new InvalidOperationException($"AudioQueueDispose failed: {result}; callback handle retained");
++                            _audioQueue = nint.Zero;
++                        }
++                        else
++                        {
++                            Volatile.Write(ref _closedStuck, true);
++                            AudioQueueStop(_audioQueue, true);
++                            leaked = true;
++                            Console.Error.WriteLine($"[声] 【红】输出 #{_diag.Index}：释放时送数线程卡在读游戏内存（等了 200 ms），队列已停、不释放（防止释放后它再往缓冲里写）");
++                        }
+                     }
+ 
+-                    _processor?.Dispose();   // S2Arm (#189): the explicit downmix stage (AudioConverter) goes with the queue
++                    if (!leaked)
++                    {
++                        _processor?.Dispose();   // S2Arm (#189): the explicit downmix stage (AudioConverter) goes with the queue
++                    }
+ 
+                     // Synchronous queue disposal completes callbacks before their
+-                    // handle is released. A repeated Dispose cannot free a reused slot.
+-                    if (_gcHandle.IsAllocated) _gcHandle.Free();
++                    // handle is released. A repeated Dispose cannot free a reused slot. A queue left allocated keeps its handle.
++                    if (_gcHandle.IsAllocated && !leaked) _gcHandle.Free();
+                     _diag.Dispose();
+                     _driver.Unregister(this);
+                     Volatile.Write(ref _disposed, true);
+diff --git a/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs b/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs
+index 6c65f2a654c2ec14860a7b96f0c8974da375511f..426ee6f5acdf0d8b4e7226481c65d3b01e176fea 100644
+--- a/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs
++++ b/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs
+@@ -151,7 +151,17 @@ namespace Ryujinx.Audio.Backends.Common
+         /// </summary>
+         public void ResetClock()
+         {
+-            lock (_lock)
++            // S2Arm (11-14 iPhone 实机 声音服务卡死): no lock here. Stop (the game pausing, or closing) called this under the pump lock and
++            //   waited for good behind a Pump stuck reading a stalled guest buffer; the pump applies the reset the next time it holds the lock
++            Volatile.Write(ref _clockResetPending, 1);
++        }
++
++        private int _clockResetPending;
++
++        // Under _lock
++        private void ApplyClockResetLocked()
++        {
++            if (Interlocked.Exchange(ref _clockResetPending, 0) != 0)
+             {
+                 _clockN = 0;
+                 _clockW = 0;
+@@ -162,6 +172,8 @@ namespace Ryujinx.Audio.Backends.Common
+         // when that buffer is handed back normally (≤ 0 = the device has not run dry); long.MinValue when there is no clock / no baseline yet
+         private long DeviceLateLocked()
+         {
++            ApplyClockResetLocked();
++
+             if (_clockN < ClockMinSamples)
+             {
+                 return long.MinValue;
+@@ -262,6 +274,30 @@ namespace Ryujinx.Audio.Backends.Common
+             Volatile.Write(ref _primed, 1);
+         }
+ 
++        /// <summary>
++        /// S2Arm (11-14 iPhone 实机 声音服务卡死): stop submitting for good, if the pump lock comes free within <paramref name="wait"/>.
++        /// False: a Pump is stuck inside (reading a stalled guest buffer, AudioSampleQueue.Read): the caller must not free the device's
++        /// buffers, which that Pump still writes into and submits when it returns.
++        /// </summary>
++        public bool TrySuspend(TimeSpan wait)
++        {
++            if (!_lock.TryEnter(wait))
++            {
++                return false;
++            }
++
++            try
++            {
++                _suspended = true;
++            }
++            finally
++            {
++                _lock.Exit();
++            }
++
++            return true;
++        }
++
+         /// <summary>
+         /// S2Arm (10-23 声音停了自愈；审计 P1-27 只留一个交缓冲的): stop (or rebuild) the device with no buffer submitted meanwhile.
+         /// <paramref name="stopDevice"/> stops the device synchronously; buffers it hands back while stopping come through
+@@ -344,6 +380,8 @@ namespace Ryujinx.Audio.Backends.Common
+                 _free[_freeCount++] = slot;
+                 long inFlight = Interlocked.Add(ref _inFlightBytes, -bytes);
+ 
++                ApplyClockResetLocked();
++
+                 if (bytes > 0 && !_suspended)
+                 {
+                     // S2Arm: 设备正常交还时的相位（播放时钟 − 这块末尾），判断断口的基线（停 / 重建设备期间不读：队列可能正在销毁，停完反正重学）

@@ -25,12 +25,22 @@ final class SystemControllers: ObservableObject {
         watcher.observe { [weak self] devices in Task { @MainActor in self?.gen1 = devices } }
         gen1Watcher = watcher
         let center = NotificationCenter.default
-        for name in [Notification.Name.GCControllerDidConnect, .GCControllerDidDisconnect] {
-            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.refresh() }
+        // 蓝牙手柄接上 / 断开、启动器回到前台（后台接上的、启动前就配对连着的那几只，框架要到活跃才补齐）都重对一次
+        for name in [Notification.Name.GCControllerDidConnect, .GCControllerDidDisconnect, NSApplication.didBecomeActiveNotification] {
+            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                let connected = note.name == .GCControllerDidConnect ? note.object as? GCController : nil
+                Task { @MainActor in self?.refresh(connected: connected) }
             })
         }
         refresh()
+        // 启动后稍等再对两次：GameController 的枚举快照在启动早期（窗口还没活跃）可能不全，
+        //   蓝牙手柄的输入描述（physicalInputProfile）也是连上后才就绪——就绪前会被下面的过滤丢掉，之后没有新事件就再也对不上（#934）
+        for delay in [0.5, 2.5] {
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                await MainActor.run { self?.refresh() }
+            }
+        }
     }
 
     /// 单测：直接给一组手柄（不碰 GameController）
@@ -41,9 +51,13 @@ final class SystemControllers: ObservableObject {
         gen1Watcher?.watchGestures(onGesture.map { handler in { id, side, g in Task { @MainActor in handler(id, side, g) } } })
     }
 
-    func refresh() {
-        pads = GCController.controllers().compactMap { c in
-            guard c.extendedGamepad != nil || !c.physicalInputProfile.buttons.isEmpty else { return nil }
+    /// 枚举系统手柄。connected（连接通知里的那一只）是本次事件的真值：枚举快照还没更新时也要把它列进来，
+    ///   不然这只手柄等不到下一次事件，面板就一直「没连接」（系统明明已连上，#934）；它的输入描述还没就绪也照列，晚点再补。
+    func refresh(connected: GCController? = nil) {
+        var controllers = GCController.controllers()
+        if let connected, !controllers.contains(where: { $0 === connected }) { controllers.append(connected) }
+        pads = controllers.compactMap { c in
+            guard c.extendedGamepad != nil || !c.physicalInputProfile.buttons.isEmpty || c === connected else { return nil }
             let category = c.productCategory
             guard let family = Self.family(category: category, vendor: c.vendorName,
                                            xbox: c.extendedGamepad is GCXboxGamepad,

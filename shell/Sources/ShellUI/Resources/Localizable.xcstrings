@@ -13738,6 +13738,342 @@
           }
         }
       }
+    },
+    "Where to find the settings": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Where to find the settings"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "设置在哪"
+          }
+        }
+      }
+    },
+    "Turn cheats on one by one": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Turn cheats on one by one"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "金手指，进游戏逐条打开"
+          }
+        }
+      }
+    },
+    "Stuck? Send us a report": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stuck? Send us a report"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "遇到问题，一键报修"
+          }
+        }
+      }
+    },
+    "**Gear at the top right**: settings for the whole app, such as interface, sound and reporting a problem.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "**Gear at the top right**: settings for the whole app, such as interface, sound and reporting a problem."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "**右上角齿轮**：整个 App 的设置，界面、声音、故障报修都在这里。"
+          }
+        }
+      }
+    },
+    "**Select a game, then the sliders button at the top (Game settings)**: this game's picture, controls, community patches and cheats.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "**Select a game, then the sliders button at the top (Game settings)**: this game's picture, controls, community patches and cheats."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "**选中一款游戏，点顶栏的调节图标（游戏设置）**：这款的画面、按键、社区补丁和金手指。"
+          }
+        }
+      }
+    },
+    "**In a game, the gear at the top left** opens the same game settings at any time.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "**In a game, the gear at the top left** opens the same game settings at any time."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "**游戏里左上角的齿轮**，随时打开这款的设置。"
+          }
+        }
+      }
+    },
+    "Cheats matched to your game's version come built in, and they start **off**.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cheats matched to your game's version come built in, and they start **off**."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "按你的游戏版本配好的金手指已经打进包里，**默认是关的**。"
+          }
+        }
+      }
+    },
+    "In a game: **top-left gear → S-grade enhancements → Cheats**, then switch on the ones you want. Each takes effect in about a second.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In a game: **top-left gear → S-grade enhancements → Cheats**, then switch on the ones you want. Each takes effect in about a second."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "游戏里：**左上角齿轮 → S 级优化 → 金手指**，想用哪条就打开哪条，约 1 秒生效。"
+          }
+        }
+      }
+    },
+    "Or set them up before playing: **select a game → sliders button at the top → Cheats**.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Or set them up before playing: **select a game → sliders button at the top → Cheats**."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "也可以开玩前先开好：**选中游戏 → 顶栏调节图标 → 金手指**。"
+          }
+        }
+      }
+    },
+    "**Gear at the top right → Report a problem** at the bottom.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "**Gear at the top right → Report a problem** at the bottom."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "**右上角齿轮 → 最下面的「故障报修」**。"
+          }
+        }
+      }
+    },
+    "Add a sentence about what happened (optional) and upload. You get a short code starting with **D-**; paste it in the group chat or a GitHub issue.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add a sentence about what happened (optional) and upload. You get a short code starting with **D-**; paste it in the group chat or a GitHub issue."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "写一句发生了什么（可以不写），点上传，会拿到一个 **D-** 开头的短码，贴到群里或 GitHub 帖子就行。"
+          }
+        }
+      }
+    },
+    "In a game: **top-left gear → Report a problem**.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In a game: **top-left gear → Report a problem**."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "游戏里：**左上角齿轮 → 故障报修**。"
+          }
+        }
+      }
+    },
+    "Skip": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Skip"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "跳过"
+          }
+        }
+      }
+    },
+    "Next": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Next"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "下一步"
+          }
+        }
+      }
+    },
+    "Start playing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Start playing"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "开始玩"
+          }
+        }
+      }
+    },
+    "Sticks": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sticks"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "摇杆"
+          }
+        }
+      }
+    },
+    "S-grade": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "S-grade"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "S 级优化"
+          }
+        }
+      }
+    },
+    "Settings…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Settings…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "设置…"
+          }
+        }
+      }
+    },
+    "Community patches…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Community patches…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "社区补丁…"
+          }
+        }
+      }
+    },
+    "Cheats…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cheats…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "金手指…"
+          }
+        }
+      }
+    },
+    "Paste this code in the group chat or a GitHub issue": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paste this code in the group chat or a GitHub issue"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "把这个码贴到群里或 GitHub 帖子"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

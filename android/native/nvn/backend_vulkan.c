@@ -2777,6 +2777,8 @@ nvn_gpu_rc nvn_gpu_pipe_get(const nvn_gpu_pipe_desc *d, int mode, nvn_gpu_pipe *
     memset(&ms, 0, sizeof ms);
     ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
     ms.rasterizationSamples = (VkSampleCountFlagBits)(d->samples > 1 ? d->samples : 1);
+    // #977：NVN 透明度转覆盖率（核心字段，不用扩展；同 iOS alphaToCoverageEnabled）。a2c_dither 的抖动样式由实现自定，Vulkan 不给开关。
+    ms.alphaToCoverageEnable = d->ms.a2c ? VK_TRUE : VK_FALSE;
 
     VkPipelineDepthStencilStateCreateInfo ds;
     memset(&ds, 0, sizeof ds);

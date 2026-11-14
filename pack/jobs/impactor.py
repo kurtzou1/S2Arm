@@ -155,12 +155,12 @@ def candidates():
                     for name in ('DisplayIcon', 'InstallLocation'):
                         try:
                             val = str(winreg.QueryValueEx(s, name)[0]).split(',')[0].strip('"')
-                            yield from (glob.glob(os.path.join(val, '*.exe')) if os.path.isdir(val) else [val])
+                            yield from (glob.glob(os.path.join(glob.escape(val), '*.exe')) if os.path.isdir(val) else [val])
                         except OSError: pass
                 except OSError: continue
     home = os.path.expanduser('~')
     for d in ('Desktop', 'Downloads', os.path.join('OneDrive', 'Desktop')):
-        yield from sorted(glob.glob(os.path.join(home, d, '*mpactor*.exe')), reverse=True)
+        yield from sorted(glob.glob(os.path.join(glob.escape(os.path.join(home, d)), '*mpactor*.exe')), reverse=True)
 
 
 def status(online=False, resources=None):

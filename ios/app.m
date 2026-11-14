@@ -277,22 +277,22 @@ static void s2a_ios_suspend_enqueue(int on, const char *why) {
 }
 // 提示 / 出错页（notice.m 画；11-02 维护者：满屏、一句人话 + 下一步、和加载页同一套样子、技术细节进诊断包不上屏）。窗口还没建时只记下，建窗口时显示
 static NSString *g_msg;   // 正在屏上（或待显示）的提示，s2a_ios_clear_message 按它认
-static NSArray *g_note;   // 待显示 / 正显示的提示页参数：@[符号, 标题, 正文, 进度, 进度小字, 是否给「上传给开发者」, (可选) 它是否主按钮]
+static NSArray *g_note;   // 待显示 / 正显示的提示页参数：@[符号, 标题, 正文, 进度, 进度小字, 是否给「故障报修」, (可选) 它是否主按钮]
 static NSArray *g_note_alt;   // 第二个按钮：@[按钮字, 点了调的块]（GPU 卡住页的「退出」；别的提示页清掉）
 static NSArray *g_note_go;   // 提示页上的「仍要启动」这类继续按钮：@[按钮字, 点了调的块]（s2a_ios_ask_continue 设，别的提示页清掉）
 static UIView *g_note_view;
 static UIView *g_help; static NSArray *g_help_args; static void (*g_help_recheck)(void);   // 缺资源包说明页（见 s2a_ios_show_pack_help）
-void s2a_diag_upload(void);
+void s2a_diag_report(void);
 static void note_build(void) {
     [g_note_view removeFromSuperview]; g_note_view = nil;
     if (!g_root || !g_note) return;
     NSMutableArray *bs = [NSMutableArray array];
     if (g_note_go) { void (^go)(void) = g_note_go[1]; [bs addObject:s2a_notice_button(g_note_go[0], YES, ^(UIButton *b) { b.enabled = NO; go(); })]; }
     if (g_note_alt) { void (^alt)(void) = g_note_alt[1]; [bs addObject:s2a_notice_button(g_note_alt[0], NO, ^(UIButton *b) { b.enabled = NO; alt(); })]; }
-    // 「上传给开发者」（诊断一键上传，11-13：取代原「复制诊断」「导出诊断包」两个按钮；上传失败时弹窗里退回导出）。
+    // 「故障报修」（诊断一键上传，11-13：取代原「复制诊断」「导出诊断包」两个按钮；上传失败时弹窗里退回导出）。
     //   初启失败页（g_note[6] 为真）它是主按钮：那页的诊断文字 host_main.c 已写进 host.log，随诊断包一起传
     if ([g_note[5] boolValue]) { BOOL primary = g_note.count > 6 && [g_note[6] boolValue];
-        [bs addObject:s2a_notice_button(S2AL(@"diag.upload"), primary, ^(UIButton *b) { (void)b; s2a_diag_upload(); })]; }
+        [bs addObject:s2a_notice_button(S2AL(@"diag.report.title"), primary, ^(UIButton *b) { (void)b; s2a_diag_report(); })]; }
     g_note_view = s2a_notice_page(g_root.bounds, g_note[0], g_note[1], g_note[2], [g_note[3] floatValue], [g_note[4] length] ? g_note[4] : nil, bs);
     [g_root addSubview:g_note_view];
     { void s2a_report_gear_attach(UIView *); s2a_report_gear_attach(g_note_view); }   // 左上角小齿轮：故障报修
@@ -423,7 +423,7 @@ static S2ADguardTarget *g_dguard_target;
 // 提示页（主线程，g_root 已建）
 static void dguard_build(S2ADguardTarget *t) {
     __weak S2ADguardTarget *w = t;
-    UIButton *diag = s2a_notice_button(S2APICK(S2A_DGUARD_DIAG), NO, ^(UIButton *b) { (void)b; s2a_diag_upload(); });
+    UIButton *diag = s2a_notice_button(S2APICK(S2A_DGUARD_DIAG), NO, ^(UIButton *b) { (void)b; s2a_diag_report(); });
     UIButton *go = s2a_notice_button(S2APICK(S2A_DGUARD_GO), YES, ^(UIButton *b) { (void)b; S2ADguardTarget *x = w; if (!x) return; [x->page removeFromSuperview]; x->page = nil; dispatch_semaphore_signal(x->go); });
     UIView *page = s2a_notice_page(g_root.bounds, @"exclamationmark.triangle.fill", S2APICK(S2A_DGUARD_TITLE), S2APICK(S2A_DGUARD_MSG), -1, nil, @[diag, go]);
     t->page = page; [g_root addSubview:page]; [g_root bringSubviewToFront:page];
@@ -504,7 +504,7 @@ void s2a_ios_gpu_stopped(const char *why) {
     s2a_logcon_flush();
 }
 // 初启失败页（host_main.c failed_session，宿主线程；审计 #1534 P1-4）：初启失败 = 本进程终局，不在本进程重试。
-//   原先直接 _exit，玩家只看到 App 自己消失；现在停在提示页：玩家话术一句 +「上传给开发者」，请玩家从后台划掉再打开（新进程是唯一干净的重置）。
+//   原先直接 _exit，玩家只看到 App 自己消失；现在停在提示页：玩家话术一句 +「故障报修」，请玩家从后台划掉再打开（新进程是唯一干净的重置）。
 //   body 由 s2a_init_fail_screen 按错误码给（只含玩家话术），这里只负责显示；内部摘要只在 diag 里（11-02 维护者：内部词不上屏）。
 //   复用渲染失败的终局标记：回前台不恢复游戏、不再碰服务层焦点 / GPU 闸门（s2a_ios_suspend）
 void s2a_ios_init_failed(const char *body, const char *diag) {
@@ -512,7 +512,7 @@ void s2a_ios_init_failed(const char *body, const char *diag) {
     NSMutableArray *lines = [NSMutableArray array];
     for (NSString *s in [@(body ?: S2APICKC(S2A_INIT_FAIL_MSG_GENERIC)) componentsSeparatedByString:@"\n"]) [lines addObject:@(host_text(s.UTF8String))];
     NSString *t = S2APICK(S2A_INIT_FAIL_TITLE), *b = [lines componentsJoinedByString:@"\n"];
-    (void)diag;   // 诊断文字 host_main.c 已写进 host.log，随「上传给开发者」的诊断包一起传，不上屏
+    (void)diag;   // 诊断文字 host_main.c 已写进 host.log，随「故障报修」的诊断包一起传，不上屏
     NSString *key = [NSString stringWithFormat:@"%@\n\n%@", t, b];
     dispatch_async(dispatch_get_main_queue(), ^{
         atomic_store(&g_render_failed, 1);
@@ -618,7 +618,7 @@ id s2a_ios_ext_register(UIViewController *vc);   // extdisplay.m：登记外接�
     if (nxgal_window_relayout_ios) nxgal_window_relayout_ios();
 }
 - (void)viewSafeAreaInsetsDidChange {   // 方向与视图尺寸记进日志（真机验横屏用）
-    [super viewSafeAreaInsetsDidChange]; UIEdgeInsets i = self.view.safeAreaInsets; CGSize z = self.view.bounds.size; CGSize n = UIScreen.mainScreen.nativeBounds.size;
+    [super viewSafeAreaInsetsDidChange]; UIEdgeInsets i = self.view.safeAreaInsets; CGSize z = self.view.bounds.size; UIScreen *sc = self.view.window.windowScene.screen ?: UIScreen.mainScreen; CGSize n = sc.nativeBounds.size;   // 当前窗口所在的屏（Duo 内屏亮着时 mainScreen 仍报外屏）
     UIInterfaceOrientation o = self.view.window.windowScene.interfaceOrientation;
     LOG("iOS 壳：朝向 %s（%ld），视图 %.0fx%.0f 点，屏幕 %.0fx%.0f 像素，屏幕宽（1080 高对应）%d；安全区 上 %.1f 左 %.1f 下 %.1f 右 %.1f",
         UIInterfaceOrientationIsLandscape(o) ? "横屏" : UIInterfaceOrientationIsPortrait(o) ? "竖屏" : "未知", (long)o, z.width, z.height, fmax(n.width, n.height), fmin(n.width, n.height),

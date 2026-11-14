@@ -100,6 +100,10 @@ int s2a_android_runtime_request_stop(uint64_t session_id);
 // 同线程managed attach→fault self-probe→final tracking gate，任一失败禁止进入guest。
 uint64_t s2a_android_runtime_session(void);
 int s2a_android_runtime_enter_guest_thread(void);
+// 只由主 guest 在上面的逐线程准入成功之后、进 SDK 之前调一次：共用会话本代 STARTING→RUNNING（#961）。
+// 停止先被接受或会话已失败 / 终局：不发布，走既有 HostApi 停机并返回非 0，调用方不得进 SDK。
+// 其余没对上（状态不是本代 STARTING，但没人要求停、也没失败）：报红记下实际状态，返回 0 照常进 SDK。
+int s2a_android_runtime_publish_running(void);
 // shared lifecycle调用实际CsApi.Shutdown之后的结果核验；不是停止请求或guest停车证明。
 int s2a_android_runtime_shutdown_result(void);
 #ifdef __cplusplus

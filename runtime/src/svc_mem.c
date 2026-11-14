@@ -2,6 +2,7 @@
 // vawin.c + layout.c 持有宿主地址窗口；Apple 可用远端影子，Android 暂沿用窗口内布局。
 // 4 KB 游戏页按 16 KB 分组记账；Android 映射原语使用实际宿主页，Apple 共享内存保留 16 KB 对齐。
 // 随包表：addr_need.tsv（出包组装 pack/ship_ext.py 从产物根拷进 App，runtime/build.mk 按这行自动收清单）
+#include <dlfcn.h>
 #include "s2a_init_fail.h"
 #include "native.h"
 #include "as_type.h"
@@ -463,6 +464,9 @@ uint64_t s2a_mem_init(const char *npdm) {
     if (g_npdm_ounce) { void s2a_guest_tick_hz_set(uint64_t); s2a_guest_tick_hz_set(31250000); LOG("NPDM 是 Switch 2 布局：系统计数器按 31.25 MHz"); }
     LOG("布局：程序号 %016llx 类型 %u SystemResourceSize %#llx｜别名 %#llx+%#llx 堆 %#llx+%#llx 栈 %#llx+%#llx TLS/IO %#llx+%#llx 可随机 %#llx+%#llx",
         (unsigned long long)g_program_id, t, (unsigned long long)sr, (unsigned long long)L.alias_base, (unsigned long long)L.alias_size, (unsigned long long)L.heap_base, (unsigned long long)L.heap_size, (unsigned long long)L.stack_base, (unsigned long long)L.stack_size, (unsigned long long)L.tlsio_base, (unsigned long long)L.tlsio_size, (unsigned long long)L.aslr_base, (unsigned long long)L.aslr_size);
+#if !defined(__ANDROID__)
+    { void (*carve)(uint64_t, uint64_t) = (void (*)(uint64_t, uint64_t))dlsym(RTLD_DEFAULT, "s2a_guest_file_carve"); if (carve) carve(L.alias_base, L.alias_size); }   // 按名字取：只链本文件的单测没有 vawin.c   // 文件后备时物理映射区（GPU 每帧写的内存池）保持匿名（vawin.c，#964 a）
+#endif
     if (!ms) die("NPDM MainThreadStackSize 为 0");
     uint64_t len = ((uint64_t)ms + HPG - 1) & ~(HPG - 1), base = L.stack_base + L.stack_size - len;
     if (mprotect((void *)base, len, PROT_READ | PROT_WRITE)) die("主线程栈 mprotect errno=%d", errno);

@@ -1,0 +1,35 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+index 87d45a2ec0af9c182e3fea2dc3e9203b5e3d451e..42432e88e434ed6cc6a083a7bbe19848afd376f3 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+@@ -562,7 +562,7 @@ namespace Ryujinx.Audio.Backends.Apple
+         //   仅 macOS：iOS 没有 HAL 设备属性（IO 缓冲走 AVAudioSession 的 S2A_AUDIO_IO20 通道）。
+         private void S2AApplyDeviceBufferFrames()
+         {
+-            if (!OperatingSystem.IsMacOS())
++            if (!OperatingSystem.IsMacOS())   // 平台例外：设备 IO 缓冲是 macOS HAL 属性，iOS 走 AVAudioSession
+             {
+                 return;
+             }
+diff --git a/src/Ryujinx.Audio.Backends.Apple/Native/AudioToolbox.cs b/src/Ryujinx.Audio.Backends.Apple/Native/AudioToolbox.cs
+index 1eb34fd25b5fb3f8edcb5293e0aa9d3d99958d50..53339103a40d21a3079a971539e4b64466f7de14 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/Native/AudioToolbox.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/Native/AudioToolbox.cs
+@@ -55,7 +55,7 @@ namespace Ryujinx.Audio.Backends.Apple.Native
+ 
+         // S2Arm（11-14 设备缓冲）：CoreAudio HAL 属性读写（AudioObjectSetPropertyData / AudioObjectGetPropertyData）。
+         //   qualifier 空（设备级属性不用 qualifier）；dataSize 进出都是字节数
+-        [LibraryImport("/System/Library/Frameworks/CoreAudio.framework/CoreAudio")]
++        [LibraryImport("/System/Library/Frameworks/CoreAudio.framework/CoreAudio")]   // 平台例外：Apple 后端平台实现的 CoreAudio P/Invoke 声明（设备缓冲）
+         internal static partial int AudioObjectSetPropertyData(
+             uint objectID,
+             ref AudioObjectPropertyAddress address,
+@@ -64,7 +64,7 @@ namespace Ryujinx.Audio.Backends.Apple.Native
+             uint dataSize,
+             ref uint data);
+ 
+-        [LibraryImport("/System/Library/Frameworks/CoreAudio.framework/CoreAudio")]
++        [LibraryImport("/System/Library/Frameworks/CoreAudio.framework/CoreAudio")]   // 平台例外：Apple 后端平台实现的 CoreAudio P/Invoke 声明（设备缓冲）
+         internal static partial int AudioObjectGetPropertyData(
+             uint objectID,
+             ref AudioObjectPropertyAddress address,

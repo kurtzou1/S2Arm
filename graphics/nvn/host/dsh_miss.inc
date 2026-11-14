@@ -132,45 +132,58 @@ static int dsh_comp_src_locked(dsh_comp_fn comp, const char *k, int st, const vo
     if (!dsh_have(out, k)) { dsh_fly_set(out, k, ctl, nctl, cd, ncode); rc = comp(k, st, cd, ncode, ctl, nctl, out); dsh_fly_clear(); }
     pthread_mutex_unlock(&g_dsh_comp_mu); return rc;
 }
-// Library-resident NVN2 mesh shaders normally bypass fallback translation. Keep only their bounded
-// guest inputs under the final bind-time key: Metal may later reject a dynamically paired fragment interface.
-typedef struct dsh_mesh_src { struct dsh_mesh_src *next; uint8_t key[8]; uint32_t ncode, nctl; uint8_t bytes[]; } dsh_mesh_src;
-enum { DSH_MESH_SRC_BUCKETS = 1024, DSH_MESH_SRC_CAP = 32 * 1024 * 1024 };
-static dsh_mesh_src *g_mesh_src[DSH_MESH_SRC_BUCKETS]; static size_t g_mesh_src_bytes; static pthread_mutex_t g_mesh_src_mu = PTHREAD_MUTEX_INITIALIZER;
-static unsigned dsh_mesh_bucket(const uint8_t key[8]) { uint32_t h; memcpy(&h, key, 4); return h % DSH_MESH_SRC_BUCKETS; }
+// Guest inputs (control + code) of shaders whose translation is not on this device, kept under their final key for a later padded variant (vp_build): a library-resident
+//   shader is never translated here, and when the game pairs it with a fragment shader reading user(locn) outputs it does not write, Metal refuses the pair until a padded
+//   variant exists. The variant is made from the shader's own translation, which needs these inputs; by the pair's first draw the game may have reused its control section
+//   (#871 NVN2 mesh shaders; 11-14 diagnosis D-R4CP: a Switch 1 vertex shader, 15 pairs, 14624 draws skipped per 10 s, characters and terrain missing). Bounded: a key already
+//   translated here keeps only its entry (payload 0), and the table stops growing at DSH_SRC_SNAP_CAP
+typedef struct dsh_src_snap { struct dsh_src_snap *next; uint8_t key[8]; int st; uint32_t ncode, nctl; uint8_t bytes[]; } dsh_src_snap;
+enum { DSH_SRC_SNAP_BUCKETS = 1024, DSH_SRC_SNAP_CAP = 32 * 1024 * 1024 };
+static dsh_src_snap *g_src_snap[DSH_SRC_SNAP_BUCKETS]; static size_t g_src_snap_bytes; static pthread_mutex_t g_src_snap_mu = PTHREAD_MUTEX_INITIALIZER;
+static unsigned dsh_src_bucket(const uint8_t key[8]) { uint32_t h; memcpy(&h, key, 4); return h % DSH_SRC_SNAP_BUCKETS; }
+static void dsh_src_hold(const uint8_t key[8], int st, const uint8_t *ctl, uint32_t nctl, uint64_t code, uint32_t ncode) {
+    size_t total = (size_t)nctl + ncode; unsigned b = dsh_src_bucket(key);
+    pthread_mutex_lock(&g_src_snap_mu);
+    for (dsh_src_snap *e = g_src_snap[b]; e; e = e->next) if (!memcmp(e->key, key, 8)) { pthread_mutex_unlock(&g_src_snap_mu); return; }
+    pthread_mutex_unlock(&g_src_snap_mu);
+    const char *out = getenv("DM_MSL_FALLBACK"); char k[17];
+    int cached = 0;
+    if (out && *out) { for (int i = 0; i < 8; i++) snprintf(k + 2 * i, 3, "%02x", key[i]); cached = dsh_have(out, k); }
+    size_t payload = cached ? 0 : total;
+    dsh_src_snap *e = malloc(sizeof *e + payload); if (!e) return;
+    memcpy(e->key, key, 8); e->st = st; e->nctl = cached ? 0 : nctl; e->ncode = cached ? 0 : ncode;
+    if (!cached) { memcpy(e->bytes, ctl, nctl); memcpy(e->bytes + nctl, (const void *)(uintptr_t)code, ncode); }
+    pthread_mutex_lock(&g_src_snap_mu);
+    for (dsh_src_snap *old = g_src_snap[b]; old; old = old->next) if (!memcmp(old->key, key, 8)) { pthread_mutex_unlock(&g_src_snap_mu); free(e); return; }
+    size_t saved = sizeof *e + payload;
+    if (saved > DSH_SRC_SNAP_CAP - g_src_snap_bytes) { pthread_mutex_unlock(&g_src_snap_mu); free(e); static _Atomic int warned; if (!atomic_exchange(&warned, 1)) LOG("【红】直连着色器源快照达到 %u MiB 上限，后续未缓存键的补齐变体在控制段过期后做不了", DSH_SRC_SNAP_CAP >> 20); return; }
+    e->next = g_src_snap[b]; g_src_snap[b] = e; g_src_snap_bytes += saved;
+    pthread_mutex_unlock(&g_src_snap_mu);
+}
 void dm_shader_mesh_hold_key(const uint8_t key[8], uint64_t code, const void *control) {
     if (!nvn2_on() || !code || !control || (uintptr_t)control >= (1ull << 47)) return;
     const uint8_t *ctl = control; if (!nvn2_ctl(ctl) || ctl[0x56] != 7) return;
     uint32_t ncode = 0, nctl = 0; memcpy(&ncode, ctl + 0x44, 4); memcpy(&nctl, ctl + 0x30, 4);
     if (!ncode || ncode >= (1u << 24)) return;
     if (nctl < 0xd8 || nctl > NVN2_CTL_COPY) nctl = 0xd8;
-    size_t total = (size_t)nctl + ncode; unsigned b = dsh_mesh_bucket(key);
-    pthread_mutex_lock(&g_mesh_src_mu);
-    for (dsh_mesh_src *e = g_mesh_src[b]; e; e = e->next) if (!memcmp(e->key, key, 8)) { pthread_mutex_unlock(&g_mesh_src_mu); return; }
-    pthread_mutex_unlock(&g_mesh_src_mu);
-    const char *out = getenv("DM_MSL_FALLBACK"); char k[17];
-    int cached = 0;
-    if (out && *out) { for (int i = 0; i < 8; i++) snprintf(k + 2 * i, 3, "%02x", key[i]); cached = dsh_have(out, k); }
-    size_t payload = cached ? 0 : total;
-    dsh_mesh_src *e = malloc(sizeof *e + payload); if (!e) return;
-    memcpy(e->key, key, 8); e->nctl = cached ? 0 : nctl; e->ncode = cached ? 0 : ncode;
-    if (!cached) { memcpy(e->bytes, ctl, nctl); memcpy(e->bytes + nctl, (const void *)(uintptr_t)code, ncode); }
-    pthread_mutex_lock(&g_mesh_src_mu);
-    for (dsh_mesh_src *old = g_mesh_src[b]; old; old = old->next) if (!memcmp(old->key, key, 8)) { pthread_mutex_unlock(&g_mesh_src_mu); free(e); return; }
-    size_t saved = sizeof *e + payload;
-    if (saved > DSH_MESH_SRC_CAP - g_mesh_src_bytes) { pthread_mutex_unlock(&g_mesh_src_mu); free(e); static _Atomic int warned; if (!atomic_exchange(&warned, 1)) LOG("【红】直连 mesh 源快照达到 %u MiB 上限，后续未缓存键无法生成运行期补齐变体", DSH_MESH_SRC_CAP / (1024 * 1024)); return; }
-    e->next = g_mesh_src[b]; g_mesh_src[b] = e; g_mesh_src_bytes += saved;
-    pthread_mutex_unlock(&g_mesh_src_mu);
+    dsh_src_hold(key, 5, ctl, nctl, code, ncode);
 }
 void dm_shader_mesh_hold(uint64_t code, const void *control) {
     if (!nvn2_on() || !code || !control || (uintptr_t)control >= (1ull << 47)) return;
     const uint8_t *ctl = control; if (!nvn2_ctl(ctl) || ctl[0x56] != 7) return;
     uint8_t key[8]; if (nvn2_key(ctl, (const void *)(uintptr_t)code, key)) dm_shader_mesh_hold_key(key, code, control);
 }
-static dsh_mesh_src *dsh_mesh_src_get(const uint8_t key[8]) {
-    unsigned b = dsh_mesh_bucket(key); pthread_mutex_lock(&g_mesh_src_mu);
-    dsh_mesh_src *e = g_mesh_src[b]; while (e && memcmp(e->key, key, 8)) e = e->next;
-    pthread_mutex_unlock(&g_mesh_src_mu); return e && e->ncode ? e : NULL;
+// Switch 1 vertex shader at SetShaders, under the key keys_hash gave it (its final key: Switch 1 keys are not deferred). NVN2 stages are keyed at first use: not here
+void dm_shader_vs_hold_key(const uint8_t key[8], uint64_t code, const void *control) {
+    if (!code || !control || (uintptr_t)control >= (1ull << 47) || (nvn2_on() && nvn2_ctl(control))) return;
+    uint32_t ncode = 0, nctl = 0;
+    if (dsh_stage((const uint8_t *)(uintptr_t)code, control, &ncode, &nctl) != 0) return;
+    dsh_src_hold(key, 0, control, nctl, code, ncode);
+}
+static dsh_src_snap *dsh_src_snap_get(const uint8_t key[8], int st) {
+    unsigned b = dsh_src_bucket(key); pthread_mutex_lock(&g_src_snap_mu);
+    dsh_src_snap *e = g_src_snap[b]; while (e && memcmp(e->key, key, 8)) e = e->next;
+    pthread_mutex_unlock(&g_src_snap_mu); return e && e->ncode && e->st == st ? e : NULL;
 }
 static void dsh_eager_start(const uint8_t key[8], int st, const uint8_t *cd, uint32_t ncode, const uint8_t *ctl, uint32_t nctl, const char *out) {
     if (atomic_fetch_add(&g_dsh_eager_n, 1) >= (uint64_t)dsh_eager_max()) { atomic_fetch_sub(&g_dsh_eager_n, 1); return; }
@@ -408,28 +421,35 @@ int dm_shader_vpad(const uint8_t key[8], uint64_t code, const void *control, uin
     LOG("直连%s补齐变体：%s 补 user(locn) 掩码 %#x", st == 5 ? "网格" : "顶点", k, mask);
     return 0;
 }
-// Mesh shader whose guest control/code has expired can still be padded from this device's
-// chain- and translator-matched translation. The caller must establish mesh_kind == 2.
-int dm_shader_vpad_cached_mesh(const uint8_t key[8], uint32_t mask, char *path, size_t n) {
+// A vertex (st 0) or NVN2 mesh (st 5) shader whose guest control / code has expired can still be padded from this device's chain- and translator-matched translation,
+//   made now from the SetShaders / Bind snapshot when it is not here yet (dsh_src_hold). 0 = path is the variant, 3 = nothing to add, 1 = cannot (no snapshot, no translation)
+int dm_shader_vpad_cached(const uint8_t key[8], int st, uint32_t mask, char *path, size_t n) {
+    static const char *const js[6] = {"vs", "ps", "cs", "gs", "ts", "ms"};
+    if (st != 0 && st != 5) return 1;
     char k[17], base[1200]; for (int i = 0; i < 8; i++) snprintf(k + 2 * i, 3, "%02x", key[i]);
     const char *out = getenv("DM_MSL_FALLBACK");
     if (!out || !*out) return 1;
+    static int (*fv)(const char *, uint32_t, const char *); static dispatch_once_t once;
+    dispatch_once(&once, ^{ fv = (int (*)(const char *, uint32_t, const char *))dlsym(RTLD_DEFAULT, "s2a_dsh_vs_pad"); });
+    if (st == 0 && !fv) return 1;
     if (!dsh_have(out, k)) {
-        dsh_mesh_src *src = dsh_mesh_src_get(key); dsh_comp_fn comp = dsh_comp();
-        if (!src || !comp) { static _Atomic int missing; if (!atomic_exchange(&missing, 1)) LOG("【红】直连 mesh 补齐：%s 没有 SetShaders 时同键源码快照（NVN2 首遇键可能与 SetShaders 时不同）", k); return 1; }
-        if (dsh_comp_src_locked(comp, k, 5, src->bytes + src->nctl, src->ncode, src->bytes, src->nctl, out)) return 1;
-        LOG("直连网格基础源码：%s 首次配对失败时按需翻译", k);
+        dsh_src_snap *src = dsh_src_snap_get(key, st); dsh_comp_fn comp = dsh_comp();
+        if (!src || !comp) { static _Atomic int missing; if (!atomic_exchange(&missing, 1)) LOG("【红】直连%s补齐：%s 没有 SetShaders / Bind 时的同键源快照，做不了（只报第一例）", st == 5 ? "网格" : "顶点", k); return 1; }
+        if (dsh_comp_src_locked(comp, k, st, src->bytes + src->nctl, src->ncode, src->bytes, src->nctl, out)) return 1;
+        LOG("直连%s基础源码：%s 首次配对缺输出时按源快照翻译", st == 5 ? "网格" : "顶点", k);
     }
     if (!dsh_have(out, k)) return 1;
     snprintf(base, sizeof base, "%s/%s_b.metal", out, k);
     char meta[1200], b[8192]; snprintf(meta, sizeof meta, "%s/%s_b.json", out, k);
     FILE *f = fopen(meta, "r"); if (!f) return 1;
     size_t z = fread(b, 1, sizeof b - 1, f); fclose(f); b[z] = 0;
-    if (!dsh_json_eq(b, "stage", "ms")) return 1;
+    if (!dsh_json_eq(b, "stage", js[st])) return 1;
     snprintf(path, n, "%s/%s_vp%x.metal", out, k, mask);
     if (dsh_variant_newer(path, base)) return 0;
-    int rc = mesh_pad_file(base, mask, path); if (rc) return rc;
-    LOG("直连网格补齐变体：%s 从本机同链同指纹源码缓存补 user(locn) 掩码 %#x", k, mask);
+    int rc = st == 5 ? mesh_pad_file(base, mask, path) : fv(base, mask, path);
+    if (rc == 3) return 3;
+    if (rc) { atomic_fetch_add_explicit(&g_dsh_failed, 1, memory_order_relaxed); return 1; }
+    LOG("直连%s补齐变体：%s 从本机同链同指纹源码补 user(locn) 掩码 %#x（控制段已过期）", st == 5 ? "网格" : "顶点", k, mask);
     return 0;
 }
 // 后台出归约变体用的拷贝（nvn_mtl.m se_kick）：控制段只在 SetShaders 里保证有效、代码区游戏也可能另用，提交线程上先整份拷下（控制段在前、代码区在后），

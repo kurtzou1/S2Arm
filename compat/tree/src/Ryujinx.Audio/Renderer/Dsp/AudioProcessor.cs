@@ -169,6 +169,12 @@ namespace Ryujinx.Audio.Renderer.Dsp
 
             long timeNow = PerformanceCounter.ElapsedNanoseconds;
 
+            // S2Arm (11-13 断音): pace by what the output still holds when it can tell (see S2ADepthWait); the wall clock below otherwise
+            if (S2ADepthFrames > 0 && S2ADepthWait(increment, timeNow))
+            {
+                return;
+            }
+
             if (timeNow > _playbackEnds)
             {
                 // Playback has restarted.
@@ -207,6 +213,138 @@ namespace Ryujinx.Audio.Renderer.Dsp
             }
 
             _lastTime += increment;
+        }
+
+        // S2Arm (11-13 断音，0400486024DEC000 Mac 局第 26 秒): upstream paces rendering by the wall clock and, once more than 5 periods behind,
+        //   throws the excess periods away (keeps 3). The output then holds only what it held before: about 480 frames (10 ms) plus
+        //   the device's own ~2.5 ms. A render thread late by ~30 ms (with a 68 ms game frame) dropped 4 periods = 20.1 ms of real gap,
+        //   and the lost depth never came back (the queue played at zero margin, 24–39 zero-in-flight hand-backs per window after).
+        //   Eden paces its renderer by the sink instead (ring of 4 × 5 ms, WaitFreeSpace): render whenever the output holds less than
+        //   the target, back to back after a stall, nothing dropped. Same here: below S2ADepthFrames render at once; at or above it,
+        //   sleep until the output drains to it. Bounds: with the output near the target, the wall-clock due time still renders (a
+        //   device slightly slower than the clock); a device that stops draining holds the loop at most 4 periods past due (the game
+        //   waits on this loop's event; never block it on a dead device). S2A_AUDIO_DEPTH_MS=0: upstream wall clock.
+        private static readonly long S2ADepthFrames = S2ADepthMs() * Constants.TargetSampleRate / 1000;
+        private readonly long[] _s2aSeenAppends = new long[Constants.AudioRendererSessionCountMax];
+
+        private static long S2ADepthMs()
+        {
+            string v = Environment.GetEnvironmentVariable("S2A_AUDIO_DEPTH_MS");
+
+            return long.TryParse(v, out long ms) && ms >= 0 ? ms : 30;
+        }
+
+        // Frames held by the least-filled output fed by the last render; -1 when none was fed or none can tell
+        private long S2AFedBufferedFrames(bool update)
+        {
+            long min = -1;
+
+            for (int i = 0; i < OutputDevices.Length; i++)
+            {
+                if (OutputDevices[i] is not HardwareDeviceImpl d)
+                {
+                    continue;
+                }
+
+                long appends = d.S2AAppends;
+
+                if (appends == _s2aSeenAppends[i])
+                {
+                    continue;
+                }
+
+                if (update)
+                {
+                    _s2aSeenAppends[i] = appends;
+                }
+
+                long b = d.S2ABufferedFrames;
+
+                if (b >= 0 && (min < 0 || b < min))
+                {
+                    min = b;
+                }
+            }
+
+            return min;
+        }
+
+        // Rendered audio's position on the wall clock (ns): advances one period per render. Caps rendering at the depth ahead of the
+        //   wall clock: an output that hands buffers back unplayed (iOS queue timeline ahead, QueueTimelineWatch) never fills, and must
+        //   not make this loop render as fast as it can until the watchdog restarts the queue
+        private long _s2aVirt;
+
+        // True: paced by depth (the next render may start now). False: no fed output can tell its depth: use the wall clock
+        private bool S2ADepthWait(long increment, long timeNow)
+        {
+            long buffered = S2AFedBufferedFrames(false);
+
+            if (buffered < 0)
+            {
+                S2AFedBufferedFrames(true);
+                _s2aVirt = 0;
+
+                return false;
+            }
+
+            // Lateness = how far past one period after the last render start the loop got here (a stalled thread)
+            if (timeNow - (_lastTime + increment) > Volatile.Read(ref S2AMaxLateNs))
+            {
+                Volatile.Write(ref S2AMaxLateNs, timeNow - (_lastTime + increment));
+            }
+
+            long period = Constants.TargetSampleCount;
+            long depthNs = S2ADepthFrames * 1_000_000_000L / Constants.TargetSampleRate;
+
+            // What a long stall left unrendered is a gap already heard: owe at most 8 periods, never more
+            _s2aVirt = Math.Max(_s2aVirt, timeNow - 8 * increment);
+
+            while (true)
+            {
+                bool below = buffered < S2ADepthFrames;
+                long capAt = _s2aVirt - depthNs - increment;   // rendering earlier than this runs ahead of the wall clock by more than the depth
+
+                if (below && timeNow >= capAt)
+                {
+                    break;
+                }
+
+                // Wall clock: the output is near the target (a device a little slower than the clock), or it stopped draining (bounded wait)
+                if ((timeNow >= _s2aVirt && buffered < S2ADepthFrames + 2 * period) || timeNow >= _s2aVirt + 4 * increment)
+                {
+                    break;
+                }
+
+                long wake = _s2aVirt + 4 * increment;
+
+                if (below)
+                {
+                    wake = Math.Min(wake, capAt);
+                }
+                else
+                {
+                    wake = Math.Min(wake, timeNow + (buffered - S2ADepthFrames + 1) * 1_000_000_000L / Constants.TargetSampleRate);
+                }
+
+                if (buffered < S2ADepthFrames + 2 * period)
+                {
+                    wake = Math.Min(wake, _s2aVirt);
+                }
+
+                Ryujinx.Common.PreciseSleep.PreciseSleepHelper.SleepUntilTimePointSingleWake(
+                    PerformanceCounter.ElapsedTicks + Math.Max(0, wake - timeNow) * PerformanceCounter.TicksPerMillisecond / 1_000_000);
+
+                timeNow = PerformanceCounter.ElapsedNanoseconds;
+                buffered = Math.Max(0, S2AFedBufferedFrames(false));
+            }
+
+            S2AFedBufferedFrames(true);
+
+            _s2aVirt += increment;
+            _lastTime = timeNow;
+            _playbackEnds = timeNow;
+
+            return true;
         }
 
         private void StartThread()

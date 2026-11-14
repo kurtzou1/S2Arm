@@ -69,6 +69,10 @@ public final class S2ArmShellHostModel {
     public private(set) var players: [LocalPlayer]
     public private(set) var currentPlayer: LocalPlayer
     public private(set) var playersOpen = false
+    /// 首次进入引导（S2ArmGuideView）：这台设备没看过就开；看过记在 App 偏好，不再弹。自动化起局 / 开编辑页时不开（不挡脚本）
+    public static let guideSeenKey = "S2AGuideSeen.v1"
+    public private(set) var guideOpen = false
+    public var guidePage = 0
 
     /// play 缺省走 C 出口；单测可换
     public init(catalogue: Catalogue, play: ((String) -> Void)? = nil, stores: S2ArmGameSettings.Stores = .live,
@@ -120,6 +124,8 @@ public final class S2ArmShellHostModel {
         //   S2A_SHELL_OPEN_LAYOUT_EDITOR=<游戏号> 起来直接盖上这款的「调整位置」编辑页
         //   S2A_SHELL_PLAY=<游戏号> 起来 2 秒后替人点这款的 Play（走同一条 requestPlay → C 出口；截图局别带 S2A_AUTOPLAY=1：没有视觉驾驶员时自动玩家判卡住、优雅退出）
         let env = ProcessInfo.processInfo.environment
+        guideOpen = !stores.app.bool(forKey: Self.guideSeenKey) && env["S2A_SHELL_PLAY"] == nil && env["S2A_SHELL_OPEN_LAYOUT_EDITOR"] == nil
+        if env["S2A_SHELL_GUIDE"] == "1" { guideOpen = true }   // 测试开关：看过也强制弹一次（真机截图验证排版用；同上，只有 devicectl / Xcode 起 App 能给）
         if let id = env["S2A_SHELL_OPEN_LAYOUT_EDITOR"], allGames.contains(where: { $0.id == id }) {
             editingLayout = id; NSLog("S2Arm 游戏库：S2A_SHELL_OPEN_LAYOUT_EDITOR 直接开 %@ 的调整位置页", id)
         }
@@ -542,6 +548,23 @@ public final class S2ArmShellHostModel {
     // MARK: 本地玩家（#623）
 
     /// 游戏库顶部玩家按钮：开切换页。开着时停手柄监听（页只用触屏），不然按 A 会落到背后库界面的 Play 上
+    /// 关掉引导（×、跳过、开始玩、手柄 B）：记看过
+    public func closeGuide() {
+        guard guideOpen else { return }
+        guideOpen = false; stores.app.set(true, forKey: Self.guideSeenKey)
+        NSLog("S2Arm 游戏库：首次引导看过（停在第 %d 页关）", guidePage + 1)
+    }
+    /// 引导开着时手柄输入走这里：左右翻页，A 下一页 / 最后一页完成，B 关
+    func guideInput(_ action: ShellInput.Action) {
+        switch action {
+        case .right: guidePage = min(guidePage + 1, S2ArmGuideView.pages - 1)
+        case .left: guidePage = max(guidePage - 1, 0)
+        case .activate: if guidePage >= S2ArmGuideView.pages - 1 { closeGuide() } else { guidePage += 1 }
+        case .back: closeGuide()
+        default: break
+        }
+    }
+
     public func openPlayers() { playersOpen = true; stopControllers() }
     public func closePlayers() { guard playersOpen else { return }; playersOpen = false; startControllers() }
     /// 换玩家：下一局按这个玩家起（宿主 ios/settings.m 起局时读），关页
@@ -572,8 +595,15 @@ public final class S2ArmShellHostModel {
     }
 
     public func startControllers() {
-        adapter.onInput = { [weak self] action, device in self?.input.append(action, device: device) }
-        adapter.onRelease = { [weak self] action, device in self?.input.append(action, device: device, released: true) }
+        adapter.onInput = { [weak self] action, device in
+            guard let self else { return }
+            if self.guideOpen { self.guideInput(action); return }   // 引导盖着库界面：手柄只管引导
+            self.input.append(action, device: device)
+        }
+        adapter.onRelease = { [weak self] action, device in
+            guard let self, !self.guideOpen else { return }
+            self.input.append(action, device: device, released: true)
+        }
         adapter.onControllersChange = { [weak self] connected in
             self?.controllers = connected.map {
                 ControllerInfo(id: $0.id, name: $0.name, player: "P\($0.player)", batteryPercent: $0.batteryPercent, charging: $0.charging)

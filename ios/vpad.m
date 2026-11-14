@@ -411,7 +411,11 @@ typedef BOOL (^VPFlag)(void);
                             disabled:^BOOL{ return !rumbleOn(); } run:^{ [d setInteger:i forKey:@"S2ARumbleLevel"]; s2a_rumble_apply_settings(); s2a_rumble_preview(); }]];
     UIAction *tap = [self live:@"vp.haptic.keys" title:S2AL(@"vpad.haptic.keys") note:S2AL(@"vpad.menu.haptic.note") on:^BOOL{ return st.hapticFeedbackEnabled; } disabled:nil run:^{ NSError *e;
         if (![st setHapticFeedbackEnabled:!st.hapticFeedbackEnabled error:&e]) [ws menuError:S2AL(@"vpad.error.hapticNotSaved") error:e]; }];
-    [items addObject:vp_sub(S2AL(@"vpad.menu.rumble"), @"iphone.radiowaves.left.and.right", @[game, vp_inline(levels), tap])];
+    // 手机马达（phone_motion.m S2APhoneHaptics，缺省开）：关掉后只在手柄上震；11-14 从整页设置挪来，震动相关都在这一处
+    VPFlag phoneMotor = ^BOOL{ id o = [d objectForKey:@"S2APhoneHaptics"]; return o ? [o boolValue] : YES; };
+    UIAction *motor = [self live:@"vp.rumble.phone" title:S2AL(@"settings.toggle.phoneHaptics") note:nil on:phoneMotor disabled:^BOOL{ return !rumbleOn(); }
+                             run:^{ [d setBool:!phoneMotor() forKey:@"S2APhoneHaptics"]; }];
+    [items addObject:vp_sub(S2AL(@"vpad.menu.rumble"), @"iphone.radiowaves.left.and.right", @[game, vp_inline(levels), motor, tap])];
     // 手柄与体感（controller.m / phone_motion.m 监听偏好变化，改完即生效）
     VPFlag gyro = ^BOOL{ id o = [d objectForKey:@"S2APhoneGyro"]; return o ? [o boolValue] : YES; };
     [items addObject:vp_sub(S2AL(@"vpad.menu.pad"), @"scope", @[

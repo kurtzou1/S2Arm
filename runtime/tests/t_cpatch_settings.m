@@ -32,10 +32,10 @@ int main(int argc, char **argv) {
         ck(S2ACPatchEnabled(g, d).count == 0, @"① xc3 没设过：开着 0 项（帧率项不算）");
 
         // ⑤ mk8d（名字与类别交叉的真表：5 份都在 ultrawide 目录、编号都是 widescreen:，内容却是分辨率 / 分屏 60 帧 / 景深 / 动态分辨率 / LOD）：
-        //   按名字分 → 宽屏 1（2208x1204 Docked）、60 帧 1（split screen 60FPS）、画面 3；缺省开 widescreen:c55265572777508a
+        //   按名字分 → 满屏 1（2208x1204 Docked）、60 帧 1（split screen 60FPS）、画面 3；缺省开 widescreen:c55265572777508a
         [d removeObjectForKey:S2ACPatchDefaultsKey];
         g = S2ACPatchGroupsFromTSV(mk8d);
-        ck([titles(g) isEqual:@"宽屏×1 帧率×1 画面×3"], [@"⑤ mk8d 分组 期望 宽屏×1 帧率×1 画面×3 → " stringByAppendingString:titles(g)]);
+        ck([titles(g) isEqual:@"满屏×1 帧率×1 画面×3"], [@"⑤ mk8d 分组 期望 满屏×1 帧率×1 画面×3 → " stringByAppendingString:titles(g)]);
         ck(g.count == 3 && !g[1].items[0].followsFps60, @"⑤ mk8d 分屏 60 帧显示在 60 帧组，但编号 widescreen: 不跟 60 帧开关（可单独开关）");
         NSMutableArray *all = [NSMutableArray new]; for (S2ACPatchGroup *x in g) for (S2ACPatchItem *it in x.items) [all addObject:it.ident];
         ck(all.count == 5 && [sorted(S2ACPatchEnabled(g, d)) isEqual:sorted(all)], @"⑤ mk8d 没设过：5 项全开（11-13 起没选过 = 默认开）");
@@ -59,15 +59,15 @@ int main(int argc, char **argv) {
         S2ACPatchSetEnabled(g, d, @"fps:5ccba382ea81b769", YES);
         ck(![d objectForKey:S2ACPatchDefaultsKey] && S2ACPatchEnabled(g, d).count == 0, @"⑦ acnh 帧率项改动不写键、开着 0 项");
 
-        // ⑧ 组序：mk8d + xc3 两张表拼一起 → 宽屏 → 60 帧 → 画面
+        // ⑧ 组序：mk8d + xc3 两张表拼一起 → 满屏 → 60 帧 → 画面
         NSString *body = [xc3 substringFromIndex:[xc3 rangeOfString:@"\n"].location + 1];   // 去掉 xc3 的表头
         g = S2ACPatchGroupsFromTSV([mk8d stringByAppendingString:body]);
-        ck([titles(g) isEqual:@"宽屏×1 帧率×2 画面×3"], [@"⑧ 两表合并组序（xc3 画面类 gfx: 不列）期望 宽屏×1 帧率×2 画面×3 → " stringByAppendingString:titles(g)]);
+        ck([titles(g) isEqual:@"满屏×1 帧率×2 画面×3"], [@"⑧ 两表合并组序（xc3 画面类 gfx: 不列）期望 满屏×1 帧率×2 画面×3 → " stringByAppendingString:titles(g)]);
 
         // ⑨ 同一编号跨模块多行并成一项（plan 按「编号 × 模块」出行）：mk8d 的 widescreen:c552… 在 sdk 模块再出一行 → 仍 5 项
         NSString *dup = [mk8d stringByAppendingString:@"widescreen:c55265572777508a\tsdk\t0\tultrawide\t2208x1204 Docked\t\t-\t\t0\n"];
         g = S2ACPatchGroupsFromTSV(dup);
-        ck([titles(g) isEqual:@"宽屏×1 帧率×1 画面×3"], @"⑨ 同编号两模块：仍 5 项");
+        ck([titles(g) isEqual:@"满屏×1 帧率×1 画面×3"], @"⑨ 同编号两模块：仍 5 项");
 
         // ⑩ 中文名（对照表，逐条手对表里段名）
         NSDictionary<NSString *, NSString *> *zh = @{

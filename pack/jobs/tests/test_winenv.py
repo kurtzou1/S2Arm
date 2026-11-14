@@ -992,6 +992,12 @@ class RecoveryMappingTests(unittest.TestCase):
         self.probe.values["volume"] = {"format": "ntfs", "home": "C:\\Users\\player", "env": {"OneDrive": "C:\\Users\\player\\OneDrive"}}
         report = self.report(library="D:\\S2Arm\\游戏库")
         self.assertTrue(self.item(report, "library_cloud")["ok"]); self.assertTrue(self.item(report, "library_format")["ok"])
+        self.assertEqual(self.item(report, "library_format")["message"], "游戏库所在磁盘格式可用。")
+        # NAS 游戏库（映射盘 / UNC，DRIVE_REMOTE）：照样 ok，只多一句会慢，不拦
+        self.probe.values["volume"] = {"format": "ntfs", "remote": True, "home": "C:\\Users\\player", "env": {}}
+        report = self.report(library="\\\\nas\\share\\S2Arm")
+        self.assertTrue(self.item(report, "library_format")["ok"])
+        self.assertEqual(self.item(report, "library_format")["message"], "游戏库在网络盘上，出包会比较慢。")
 
     def test_recovery_host_mismatch(self):
         self.probe.values["host"] = {"system": "Linux", "bits": 64}

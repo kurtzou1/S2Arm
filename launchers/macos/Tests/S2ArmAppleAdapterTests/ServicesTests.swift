@@ -64,7 +64,7 @@ final class LibraryProviderTests: XCTestCase {
 }
 
 final class SettingsProviderTests: XCTestCase {
-    /// 11-07 维护者 删游戏选项：设置表一行都没有；本地文件只记出包平台勾选，旧文件里的 games（语言 / 底座）读时丢、写时不再带。
+    /// 这一层设置表一行都没有（逐款选项在启动设置，走作业层 community）；本地文件只记出包平台勾选，旧文件里的 games（语言 / 底座）读时丢、写时不再带。
     func testNoGameOptionsAndOldLocalChoicesAreDropped() throws {
         let box = try Sandbox(); defer { box.remove() }
         let c = client(box, FakeRunner())
@@ -117,7 +117,7 @@ final class PlayServiceTests: XCTestCase {
         XCTAssertEqual(runner.starts.count, 1)
         XCTAssertEqual(req["operation"] as? String, "launch")
         XCTAssertEqual(req["gameId"] as? String, "0100A")
-        XCTAssertNil(req["gameLanguage"])   // 11-07 删游戏选项：游戏语言跟 Mac 系统、主机模式，都由作业层定，请求不带
+        XCTAssertNil(req["gameLanguage"])   // 游戏语言 / 主机模式不走请求字段：启动设置存 launch.json、作业层 launch_env 转
         XCTAssertNil(req["docked"])
         XCTAssertEqual(req["uiLanguage"] as? String, "en")
         XCTAssertNil(req["S2A_SAVE_DIR"])

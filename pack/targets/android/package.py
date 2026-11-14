@@ -311,7 +311,6 @@ BUILD_ENV_ALLOWED = frozenset({
     'ANDROID_USER_HOME', 'GRADLE_USER_HOME', 'NUGET_PACKAGES',
     'S2A_ANDROID_DOTNET', 'S2A_JAVAC', 'S2A_REWRITER_DEPS', 'S2A_RUN_ROOT',
     'S2A_BUILD_CACHE', 'S2ARM_ANDROID_IMAGE', 'S2ARM_ANDROID_CACHE',
-    'S2A_MAX_INDEX_BYTES',   # 只抬高 direct_library 的 index.tsv 读取上限（超大型 RomFS 显式放开，见 direct_library.py）
     'S2A_VULKAN_PROFILE', 'S2A_VULKAN_REFS',
 })
 

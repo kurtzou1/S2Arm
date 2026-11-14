@@ -346,6 +346,80 @@ namespace S2A.Services
 
         // 已打过「[S2A 系统数据]」行的（号, 入口）：每号每入口只打一次
         private static readonly System.Collections.Generic.HashSet<(ulong, string)> SystemDataSeen = new();
+        private static readonly object SynthLock = new();
+
+        // 资源包里没有、但能合成的系统数据（0802 Mii、0806 旧版屏蔽词、0823 屏蔽词、0849 Switch 2 Mii：「空但格式合法」，不含任天堂数据）：
+        //   构建时由 pack/sysdata_synth.py 生成、打成 systemdata_synth.tar 嵌进本程序集；第一次要时解到 <baseDir>/systemdata-synth/<号>/ 再挂上。
+        //   诊断#3d2d3e / #5a5ee9：#886（0806 合成）之前出的资源包没有 0806，招募新人物一确认就 Break；随壳更新就补上，不要求重出资源包。
+        //   游戏自己资源包里的 systemdata/<号>/ 照旧优先（S2AHooks.SystemDataDir 先看它）。不认识的号 / 没嵌进来 → null（照旧报缺）
+        internal static string SynthSystemData(ulong id, string baseDir)
+        {
+            string name = id.ToString("X16");
+            string dir = Path.Combine(baseDir, "systemdata-synth", name), done = dir + ".ok";
+            lock (SynthLock)
+            {
+                if (File.Exists(done) && Directory.Exists(dir))
+                {
+                    return dir;
+                }
+
+                using Stream tar = typeof(Host).Assembly.GetManifestResourceStream("systemdata_synth.tar");
+                if (tar == null)
+                {
+                    return null;
+                }
+
+                string tmp = dir + ".tmp", root = Path.GetFullPath(tmp) + Path.DirectorySeparatorChar;
+                if (Directory.Exists(tmp))
+                {
+                    Directory.Delete(tmp, true);
+                }
+
+                int files = 0;
+                using (var reader = new System.Formats.Tar.TarReader(tar))
+                {
+                    for (var e = reader.GetNextEntry(); e != null; e = reader.GetNextEntry())
+                    {
+                        if (e.EntryType is not (System.Formats.Tar.TarEntryType.RegularFile or System.Formats.Tar.TarEntryType.V7RegularFile)
+                            || !e.Name.StartsWith(name + "/", StringComparison.OrdinalIgnoreCase))
+                        {
+                            continue;
+                        }
+
+                        string path = Path.GetFullPath(Path.Combine(tmp, e.Name[(name.Length + 1)..]));
+                        if (!path.StartsWith(root, StringComparison.Ordinal))
+                        {
+                            continue;   // 不越出这一号的目录
+                        }
+
+                        Directory.CreateDirectory(Path.GetDirectoryName(path));
+                        using FileStream f = File.Create(path);
+                        e.DataStream?.CopyTo(f);
+                        files++;
+                    }
+                }
+
+                if (files == 0)
+                {
+                    if (Directory.Exists(tmp))
+                    {
+                        Directory.Delete(tmp, true);
+                    }
+
+                    return null;
+                }
+
+                if (Directory.Exists(dir))
+                {
+                    Directory.Delete(dir, true);
+                }
+
+                Directory.Move(tmp, dir);
+                File.WriteAllText(done, "");
+                Console.Error.WriteLine($"[S2A 系统数据] {name} 资源包里没有，用内置合成件补上（{files} 个文件）");
+                return dir;
+            }
+        }
 
         // baseDir：Ryujinx 系统数据根（系统存档、bis、账号等）。iOS 为 App 沙盒内目录，Mac 由起局方给。
         // 找不到时区数据目录时，从宿主自带的 IANA 时区库一次性生成（与 systemdata/make_tzdata.sh 同一转换：取 TZif2 的 64 位段）
@@ -616,6 +690,8 @@ namespace S2A.Services
             HookIpcAddr39();
             // nn::ro 装 NRO（ldr:ro LoadNro / UnloadNro）：映射出包时改写好、编进 App 的 NRO 映像（runtime/src/loader.c s2a_nro_map）；上游路径要 Ryujinx 内核进程对象，S2Arm 没有，一律走原生
             HookNro();
+            string synthBase = baseDir;
+            Ryujinx.HLE.S2AHooks.SystemDataFallback = id => SynthSystemData(id, synthBase);
             Ryujinx.HLE.S2AHooks.OpenSystemDataStorage = static id =>
                 Ryujinx.HLE.S2AHooks.SystemDataDir(id) is string dir ? Application.RomFsFromDirectory(dir) : null;
             // 游戏 / 系统服务要了哪个系统数据号：每号每入口打一行（出包期核对表 pack/sysdata_need.tsv 按这行普查；缺的号随后由上游路径报红）

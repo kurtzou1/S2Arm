@@ -94,7 +94,7 @@ import AppKit
         XCTAssertEqual(milestone.estimateSource,L("估时来源未知"))
     }
 
-    func testRealWorkerDiskRefusalAndCatalogueReloadKeepBudget() async throws {
+    func testRealWorkerSpaceWarningAndCatalogueReloadKeepBudget() async throws {
         let root=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer {try? FileManager.default.removeItem(at:root)}
         let library=root.appendingPathComponent("library"), privateRoot=root.appendingPathComponent("private")
@@ -118,7 +118,8 @@ import AppKit
             "packages":[["titleId":gid,"baseId":gid,"version":0,"type":"base","name":"Fixture","display":"1.0",
                          "path":"sources/fixture.bin","size":size,"sha256":String(repeating:"a",count:64),"builds":[:],"guestIsa":"aarch64"]]]
         try JSONSerialization.data(withJSONObject:["schema":1,"games":[game]]).write(to:library.appendingPathComponent("catalog.json"))
-        let id=store.worker("build",extra:["gameId":gid]) { _ in XCTFail("Disk refusal must not succeed") }
+        // 11-14 不许堵门：预估不够只记一条警告、照常开工（作业层 library.check_pack_space）；这份假原件开工后照样失败（解不开），用来看失败页口径
+        let id=store.worker("build",extra:["gameId":gid]) { _ in XCTFail("Synthetic fixture must not build") }
         for _ in 0..<400 {
             if store.tasks.first(where:{$0.id==id})?.state == "failed" { break }
             try await Task.sleep(for:.milliseconds(25))
@@ -127,9 +128,9 @@ import AppKit
         XCTAssertEqual(task.state,"failed")
         XCTAssertEqual(task.space?.gameBytes,size)
         XCTAssertEqual(task.space?.volumes.first?.status,.insufficient)
-        XCTAssertEqual(task.diagnostics?.last?.code,"disk_full")
-        XCTAssertTrue(task.spacePreflightBlocked)   // 真 worker 的空间预检拦下：失败页给「仍然继续」
-        XCTAssertFalse(FileManager.default.fileExists(atPath:library.appendingPathComponent("cache/\(gid)").path))
+        XCTAssertTrue(task.diagnostics?.contains { $0.isWarning && $0.code == "disk_full" } ?? false)   // 预估不够：一条警告
+        XCTAssertNotEqual(task.diagnostics?.last(where:{ !$0.isWarning })?.code,"disk_full")   // 失败的是后面真出的错，不是预检
+        XCTAssertFalse(task.spacePreflightBlocked)   // 没被预检拦：失败页不给「仍然继续」
         // Reopen and read the actual worker catalogue, rather than reusing the live Store.
         store.savePreferences()
         let reopened=Store(privateRoot:privateRoot)

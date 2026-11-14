@@ -450,6 +450,9 @@ CALL = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
 #   那份 C 代码进了哪个平台的链，导出就在哪个平台接了线；原先只认 .cs 里的使用，这类导出一律被判「找不到调用方」
 DLSYM_SRC = re.compile(r'(\bdlsym\s*\([^,()]*,\s*)"([A-Za-z_]\w*)"')   # 原文里的形态（corpus 在去掉字符串之前换成标记）
 DLSYM = re.compile(r"\bS2A_DLSYM__([A-Za-z_]\w*)")
+# 链接期弱引用：extern … 名字(…) __attribute__((weak))。安卓上服务层与 C 代码静态并进同一个库（--exclude-libs,ALL），
+#   dlsym 取不到隐藏导出，同库取服务层导出要这样写（hle_nvn.c S2A_NvMapFromGuest、nvn2.c S2A_CameraSessionOpen）——算接线，同 dlsym
+WEAKREF = re.compile(r"\bextern\b[^;{}]*?\b([A-Za-z_]\w*)\s*\([^;{}]*\)\s*__attribute__\s*\(\(\s*weak\s*\)\)")
 USE = [re.compile(r"\bnew\s+([A-Za-z_]\w*)"),
        re.compile(r":\s*([A-Za-z_]\w*)\b"),
        re.compile(r"\b([A-Za-z_]\w*)\s*\."),
@@ -476,6 +479,8 @@ def scan_callers(corpus_map):
                     uses.setdefault(m.group(1), []).append((f, n))
             for m in DLSYM.finditer(l):
                 calls.setdefault("dlsym:" + m.group(1), []).append((f, n))   # 单独的键：普通 C 调用形不受影响
+            for m in WEAKREF.finditer(l):
+                calls.setdefault("weak:" + m.group(1), []).append((f, n))    # 同上：链接期弱引用单独记
     return calls, uses
 
 
@@ -495,8 +500,8 @@ def wired_of(mod, syms, has_main, linked, prod_calls, prod_uses, test_calls):
     for s in syms:
         hits += [f"{f}:{n}" for f, n in prod_calls.get(s, []) + (prod_uses.get(s, []) if mod["kind"] in ("service-cs", "gfx-csproj") else [])
                  if not_self(f) and (mod["kind"] not in ("service-cs", "gfx-csproj") or f.endswith(".cs"))]
-        if mod["kind"] in ("service-cs", "gfx-csproj"):   # C# 导出被平台可调到的 C 代码按名字 dlsym 取：算接线（不限 .cs）
-            hits += [f"{f}:{n}" for f, n in prod_calls.get("dlsym:" + s, []) if not_self(f)]
+        if mod["kind"] in ("service-cs", "gfx-csproj"):   # C# 导出被平台可调到的 C 代码按名字 dlsym 取、或链接期弱引用：算接线（不限 .cs）
+            hits += [f"{f}:{n}" for f, n in prod_calls.get("dlsym:" + s, []) + prod_calls.get("weak:" + s, []) if not_self(f)]
         thits += [f for f, _n in test_calls.get(s, []) if not_self(f)]
     hits = sorted(set(hits))
     if hits:

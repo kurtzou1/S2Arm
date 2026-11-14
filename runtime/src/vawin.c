@@ -96,7 +96,9 @@ static const char *tier_why(int on, int low, uint64_t seen, int died) {
          : low ? "池大于剩余、物理内存也装不下池 + 宿主估计：照样开（能玩下去优先），提示玩家内存可能不够"
          : on ? "池大于剩余、物理内存装得下：开" : "池不大于剩余：装得下、保持匿名内存";
 }
+static int g_low_tier;   // 这一局判在「物理内存也装不下」那档（s2a_guest_file_carve 只在这档挖物理映射区）
 static void low_ram_notice(uint64_t phys, uint64_t need) {
+    g_low_tier = 1;
     LOG("【黄】客体内存：这台设备物理内存 %llu MB，装不下这款要的约 %llu MB（池 + 宿主估计），照样开局；可能卡顿或被系统结束", (unsigned long long)(phys >> 20), (unsigned long long)(need >> 20));
     void (*f)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "s2a_ios_low_ram_notice"); if (f) f();   // ios/app.m：游戏内提示条；单测 / 安卓没有
 }
@@ -241,6 +243,7 @@ static void guest_file_map(void);
 static int g_gfile_pending;
 // 多款容器起局时还没选游戏（程序号 0，读不到本款实测 / 「在跑」标记）：先用匿名内存、记下起局时的剩余，装游戏模块前按本款再判一次（s2a_guest_file_retry，#783）
 static int g_gfile_late; static uint64_t g_gfile_room0;
+static uint64_t g_gfile_room;   // 文件后备判定时离单进程上限的剩余（s2a_guest_file_carve 按它决定挖不挖物理映射区）
 static void guest_file_attach_(void);
 static void guest_file_attach(void) { g_attach_phase = 1; guest_file_attach_(); g_attach_phase = 0; }
 // 测试开关 S2A_TEST_BALLAST_MB=<N>（11-12，小内存机型问题在大内存设备上复现用；缺省不设 = 不占）：模拟给 App 少 N MB 内存的机型（#807 6 GB 机型约 4 GB）。
@@ -287,6 +290,7 @@ static void guest_file_attach_(void) {
         (unsigned long long)(pool >> 20), (unsigned long long)(room >> 20), room ? "" : "（0 = 未知）", (unsigned long long)(phys >> 20), (unsigned long long)(host >> 20),
         (unsigned long long)(seen == UINT64_MAX ? 0 : seen >> 20), s2a_process_prewarmed() ? "；预热进程" : "");
     if (low && !late) low_ram_notice(phys, pool + host);
+    g_gfile_room = room;
     if (late) { g_gfile_late = 1; g_gfile_room0 = room; return; }
     if (!on) return;
     guest_file_map();
@@ -340,7 +344,8 @@ static void guest_file_map(void) {
 //   只在窗口还原封不动（整段一块 PROT_NONE 的匿名保留）时才换：换成文件是整段 MAP_FIXED，窗口里已经有东西就会被抹掉，那种情形不换、照旧匿名。
 //   还是不够：报红，并在屏幕上告诉玩家差多少空间（不然这款几分钟后涨到单进程上限被系统收掉，没有崩溃报告，玩家只看到闪退）
 #ifdef S2A_UNIT_TEST
-void s2a_guest_file_test_pending(void) { g_gfile_pending = 1; }   // 单测（t_guest_file_retry）：造「装游戏前要换成文件」的状态（真机只由多款容器按本款再判置位，Mac 上 room 0 走不到）
+void s2a_guest_file_test_pending(void) { g_gfile_pending = 1; }
+void s2a_guest_file_test_late(void) { g_gfile_late = 1; }   // 单测（t_guest_file_retry ④）：造「多款容器、已选定游戏、要按本款再判」的状态   // 单测（t_guest_file_retry）：造「装游戏前要换成文件」的状态（真机只由多款容器按本款再判置位，Mac 上 room 0 走不到）
 #endif
 int s2a_guest_file_retry(void) {
     if (g_gfile_late && g_gfd < 0 && g_ok) {   // 多款容器：此刻已选定游戏，按本款实测 / 「在跑」标记再判（剩余用起局时那一刻的，和单款同口径）
@@ -357,6 +362,10 @@ int s2a_guest_file_retry(void) {
             on ? "开" : "关", tier_why(on, low, seen, died), (unsigned long long)(pool >> 20), (unsigned long long)(g_gfile_room0 >> 20), (unsigned long long)(phys >> 20),
             (unsigned long long)(host >> 20), (unsigned long long)(seen == UINT64_MAX ? 0 : seen >> 20));
         if (low) low_ram_notice(phys, pool + host);
+        // 补写「本局在跑」标记（died 已在上面读过，不会读到自己）：标记按程序号放目录，App 到前台时（ios/app.m）多款容器还没选游戏、程序号是 0，
+        //   路径取不到就没写——诊断 D-4PMS（6 GB iPhone，多款容器）一款 Switch 2 大款连着 5 局都在前台被内存上限杀，每局再判仍是「实测峰值装得下、关」，
+        //   安全阀一次没触发。此刻已选定游戏、程序号确定，在这里补；进后台 / 将终止时删照旧（那时也认得程序号）
+        s2a_guest_run_mark(1);
         if (!on) return 0;
         g_gfile_pending = 1;   // 下面整段换成文件：窗口原封不动才换
     }
@@ -408,16 +417,61 @@ int s2a_guest_map_fixed(uint64_t a, uint64_t len) {
     gextra_undo(off, len);
     return -1;
 }
-// [a, a + n) 在文件后备的窗口里：打洞（还文件块，再读是 0）并按原偏移重新映射成不可访问，返回 1；不在 / 没开文件后备返回 0（调用方照旧换匿名占位）
+// 文件后备窗口里挖回匿名的一段（#964 a）：物理映射区（MapPhysicalMemory 的别名区）是游戏 NVN 内存池所在，GPU 每帧写的零拷贝缓冲都在这里——
+//   11-13 Duo 正式游戏实测窗口脏页约 1.3 GB，最脏的 4 段里两段在别名区（各 130–185 MB）。放在文件里，物理内存小的机器（iPad 7.5 GB）脏页超回写阈值后
+//   这些每帧都被改写的页会被反复刷盘（那台 iPad 文件后备局每 10 秒写 2–3 GB）。别名区保持匿名：热页不进文件，只有游戏堆走文件后备。
+//   代价是这段的常驻页计进进程实占（Duo 正式游戏约 1.0–1.7 GB），iPad 档单进程上限 8 GB 装得下。下面两个口子按它分段：在这段里一律当「不在文件里」
+//   （svc_mem.c 的懒清零与还页就走匿名那套）。S2A_GUEST_FILE_CARVE=0 不挖、=1 强制挖（对照用）；缺省只在「物理内存也装不下」那档挖
+static uint64_t g_anon_lo, g_anon_hi;
+static int in_anon(uint64_t a, uint64_t n) { return g_anon_hi > g_anon_lo && a < g_anon_hi && a + n > g_anon_lo; }
+// 布局定下别名区后调（svc_mem.c，那时这段还没放开过）：与窗口的交集按宿主页向内取整，逐块确认仍是不可访问的保留（没有内容）才换成匿名占位
+// 挖不挖（纯函数，单测直接测）：S2A_GUEST_FILE_CARVE=0 / 1 按设的；「物理内存也装不下」那档挖；离单进程上限剩余 ≥ S2A_GUEST_FILE_CARVE_ROOM_MB（缺省 7168）也挖——
+//   11-14 实测：写盘几乎全来自物理映射区，而且写回的大多是游戏已经释放、内容作废的页（释放不打洞、重新给出时 memset 清零，内存一紧整段写回）：每次起局加载时一次写 7–17 GB
+//   （一台测试 iPhone 两局 16.7 / 6.7 GB；Duo 挖 0 写 9.4 GB、挖 1 写 33 MB）。挖的代价是这段常驻计实占（Duo 15 分钟：实占峰 3370 → 6101 MB，离上限最少还剩 2122 MB）。挖了的实占峰是绝对量（约 6.1 GB = 文件后备峰约 3.4 GB + 挖区约 2.7 GB），门槛再留约 1 GB：起局剩余 ≥ 7 GB 才挖——
+//   17 Pro Max 那档剩余约 6.1 GB，挖了会贴着上限，不挖（曾按 4 GB 定，算错）。剩余未知（0，Mac）不挖
+int s2a_guest_carve_wanted(const char *e, int low, uint64_t room, uint64_t room_min) {
+    if (e && *e) return *e != '0';
+    if (low) return 1;
+    return room && room >= room_min;
+}
+void s2a_guest_file_carve(uint64_t a, uint64_t n) {
+    if (g_gfd < 0 || !n) return;
+    const char *e = getenv("S2A_GUEST_FILE_CARVE");
+    if (e && *e == '0') { LOG("客体内存文件后备：物理映射区照旧进文件（S2A_GUEST_FILE_CARVE=0，对照用）"); return; }
+    // 挖不挖按 s2a_guest_carve_wanted（上面）：「物理内存也装不下」那档挖；起局时离单进程上限剩余 ≥ S2A_GUEST_FILE_CARVE_ROOM_MB（缺省 7168）也挖；
+    //   S2A_GUEST_FILE_CARVE=1 / 0 强制。挖与不挖都写一行带剩余与原因（看玩家单用）
+    uint64_t room_min = env_mb("S2A_GUEST_FILE_CARVE_ROOM_MB", 7168);
+    if (!s2a_guest_carve_wanted(e, g_low_tier, g_gfile_room, room_min)) { LOG("客体内存文件后备：物理映射区照旧进文件（不是内存不够那档，离单进程上限剩余 %llu MB < %llu MB：挖了常驻会贴近上限）", (unsigned long long)(g_gfile_room >> 20), (unsigned long long)(room_min >> 20)); return; }
+    const uint64_t pg = 0x4000;
+    uint64_t lo = a > g_base ? a : g_base, hi = a + n < g_base + g_size ? a + n : g_base + g_size;
+    lo = (lo + pg - 1) & ~(pg - 1); hi &= ~(pg - 1);
+    if (lo >= hi) return;
+    for (vm_address_t r = (vm_address_t)lo; r < hi; ) {
+        vm_address_t ra = r; vm_size_t sz = 0; vm_region_basic_info_data_64_t bi; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj = MACH_PORT_NULL;
+        if (vm_region_64(mach_task_self(), &ra, &sz, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&bi, &cnt, &obj) != KERN_SUCCESS || ra >= hi) break;
+        if (bi.protection != VM_PROT_NONE) { LOG("【黄】客体内存文件后备：物理映射区 %#llx 起已有放开过的映射（权限 %d），不挖，整段照旧进文件", (unsigned long long)ra, bi.protection); return; }
+        r = ra + sz;
+    }
+    if (mmap((void *)(uintptr_t)lo, hi - lo, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0) != (void *)(uintptr_t)lo) {
+        LOG("【红】客体内存文件后备：物理映射区换匿名占位失败（errno=%d），这段照旧进文件", errno);
+        if (mmap((void *)(uintptr_t)lo, hi - lo, PROT_NONE, MAP_FIXED | MAP_SHARED, g_gfd, (off_t)(lo - g_base)) != (void *)(uintptr_t)lo) die("物理映射区换回文件映射也失败 errno=%d", errno);
+        return;
+    }
+    g_anon_lo = lo; g_anon_hi = hi;
+    LOG("客体内存文件后备：物理映射区 %#llx +%llu MB 保持匿名内存（%s；游戏反复映射 / 释放的就是这段，进文件的话作废页也要写回闪存；游戏堆照旧走文件）", (unsigned long long)lo, (unsigned long long)((hi - lo) >> 20),
+        e && *e ? "S2A_GUEST_FILE_CARVE=1 强制" : g_low_tier ? "物理内存也装不下那档" : "离单进程上限剩余够");
+    if (!(e && *e) && !g_low_tier) LOG("客体内存文件后备：挖区判据 离单进程上限剩余 %llu MB ≥ %llu MB", (unsigned long long)(g_gfile_room >> 20), (unsigned long long)(room_min >> 20));
+}
+// [a, a + n) 在文件后备的窗口里：打洞（还文件块，再读是 0）并按原偏移重新映射成不可访问，返回 1；不在 / 没开文件后备 / 落在挖回匿名的那段返回 0（调用方照旧换匿名占位）
 int s2a_guest_zero(uint64_t a, uint64_t n) {
-    if (g_gfd < 0 || a < g_base || a + n > g_base + g_size || !n) return 0;
+    if (g_gfd < 0 || a < g_base || a + n > g_base + g_size || !n || in_anon(a, n)) return 0;
     fpunchhole_t ph; memset(&ph, 0, sizeof ph); ph.fp_offset = (off_t)(a - g_base); ph.fp_length = (off_t)n;
     if (fcntl(g_gfd, F_PUNCHHOLE, &ph)) { static int once; if (!once++) LOG("【红】客体内存文件后备：打洞失败（errno=%d，%#llx +%#llx），这段改回匿名占位", errno, (unsigned long long)a, (unsigned long long)n); return 0; }
     if (mmap((void *)(uintptr_t)a, n, PROT_NONE, MAP_FIXED | MAP_SHARED, g_gfd, (off_t)(a - g_base)) != (void *)(uintptr_t)a) return 0;
     return 1;
 }
 // [a, a + n) 全在文件后备的窗口里返回 1（没开 / 不在 / n 为 0 返回 0）。svc_mem.c 的懒清零（#258）按它判走不走
-int s2a_guest_in_file(uint64_t a, uint64_t n) { return g_gfd >= 0 && n && a >= g_base && a + n <= g_base + g_size; }
+int s2a_guest_in_file(uint64_t a, uint64_t n) { return g_gfd >= 0 && n && a >= g_base && a + n <= g_base + g_size && !in_anon(a, n); }
 int s2a_window_ok(void) { return g_ok; }
 void s2a_window_get(uint64_t *base, uint64_t *size) { *base = g_base; *size = g_size; }
 int s2a_window_session_reset(void) {

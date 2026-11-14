@@ -34,6 +34,14 @@ public struct S2ArmShellHostView: View {
                 }
             }
             .animation(.smooth(duration: 0.25), value: model.deleteNotice)
+            // 首次进入引导（三页横滑：设置 / 金手指 / 故障报修），盖在最上面；看过一次就不再弹
+            .overlay {
+                if model.guideOpen {
+                    S2ArmGuideView(page: Binding(get: { model.guidePage }, set: { model.guidePage = $0 }), close: { model.closeGuide() })
+                        .transition(.opacity)
+                }
+            }
+            .animation(.smooth(duration: 0.25), value: model.guideOpen)
         #if canImport(UIKit)
             // 回前台重判资源包：玩家去「文件」/ 访达拷完资源包回来，不用重开 App
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in model.refreshGameData() }
@@ -86,13 +94,18 @@ struct DeleteNoticeBar: View {
 #if canImport(UIKit)
 import UIKit
 
+@MainActor private var g_refreshModel: S2ArmShellHostModel?   // 刷新回调指向的模型（见 s2a_shell_library_vc）
+
 /// app.m 用的 C 入口（声明在 S2ArmShellBridge/include/s2a_shell.h）：返回 +1 的 UIHostingController。
 /// 只在主线程调（头文件约定）；@MainActor 让 Swift 侧按主线程隔离编译。
 @MainActor @_cdecl("s2a_shell_library_vc")
 public func s2a_shell_library_vc(_ cataloguePath: UnsafePointer<CChar>?) -> UnsafeMutableRawPointer {
     let path = cataloguePath.map { String(cString: $0) } ?? ""
     let model = S2ArmShellHostModel(catalogue: Catalogue.load(path: path))
-    // 宿主「重新检查」→ 重判资源包；模型随 vc 活着，登记的是不持有的指针（vc 由 app.m 持有到进程结束）
+    // 宿主「重新检查」/ 后台解包完成 → 重判资源包。登记给 C 的是不持有的指针，所以由 g_refreshModel 强持有当前这份模型：
+    //   原先假定「vc 由 app.m 持有到进程结束」，可开游戏时 window.rootViewController 换成游戏页，库的 vc 与模型随之释放，
+    //   游戏里后台解包完成再回调就是用已释放的模型（11-14 诊断#7f30f6：refreshGameData+0x9c 读 0x10）。再建库页时换成新的那份，只留一个
+    g_refreshModel = model
     s2a_shell_set_refresh_handler({ ctx in
         guard let ctx else { return }
         MainActor.assumeIsolated { Unmanaged<S2ArmShellHostModel>.fromOpaque(ctx).takeUnretainedValue().refreshGameData() }

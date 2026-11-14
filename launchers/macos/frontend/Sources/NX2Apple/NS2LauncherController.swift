@@ -140,9 +140,10 @@ final class NS2LauncherController: ObservableObject {
     }
     private func refreshSystemControllers(connected: GCController? = nil, disconnected: GCController? = nil) {
         var controllers = systemControllers().filter { $0 !== disconnected }
-        // 通知里的设备是本次事件的真值；枚举快照尚未更新时也要及时显示连接 / 断开
-        if let connected { controllers.insert(connected, at: 0) }
-        let controller = controllers.first { $0.extendedGamepad != nil || !$0.physicalInputProfile.buttons.isEmpty }
+        // 通知里的设备是本次事件的真值；枚举快照尚未更新时也要及时显示连接 / 断开。
+        //   蓝牙手柄刚接上那一下输入描述（physicalInputProfile）可能还没就绪——这时也照常显示连接（#934：
+        //   系统蓝牙已连上、面板却一直「未连接」），晚一拍描述就绪后照常读
+        let controller = connected ?? controllers.first { $0.extendedGamepad != nil || !$0.physicalInputProfile.buttons.isEmpty }
         systemControllerName = controller.map { $0.vendorName.flatMap { $0.isEmpty ? nil : $0 } ?? "Game Controller" }
     }
 

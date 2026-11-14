@@ -151,7 +151,17 @@ namespace Ryujinx.Audio.Backends.Common
         /// </summary>
         public void ResetClock()
         {
-            lock (_lock)
+            // S2Arm (11-14 iPhone 实机 声音服务卡死): no lock here. Stop (the game pausing, or closing) called this under the pump lock and
+            //   waited for good behind a Pump stuck reading a stalled guest buffer; the pump applies the reset the next time it holds the lock
+            Volatile.Write(ref _clockResetPending, 1);
+        }
+
+        private int _clockResetPending;
+
+        // Under _lock
+        private void ApplyClockResetLocked()
+        {
+            if (Interlocked.Exchange(ref _clockResetPending, 0) != 0)
             {
                 _clockN = 0;
                 _clockW = 0;
@@ -162,6 +172,8 @@ namespace Ryujinx.Audio.Backends.Common
         // when that buffer is handed back normally (≤ 0 = the device has not run dry); long.MinValue when there is no clock / no baseline yet
         private long DeviceLateLocked()
         {
+            ApplyClockResetLocked();
+
             if (_clockN < ClockMinSamples)
             {
                 return long.MinValue;
@@ -263,6 +275,30 @@ namespace Ryujinx.Audio.Backends.Common
         }
 
         /// <summary>
+        /// S2Arm (11-14 iPhone 实机 声音服务卡死): stop submitting for good, if the pump lock comes free within <paramref name="wait"/>.
+        /// False: a Pump is stuck inside (reading a stalled guest buffer, AudioSampleQueue.Read): the caller must not free the device's
+        /// buffers, which that Pump still writes into and submits when it returns.
+        /// </summary>
+        public bool TrySuspend(TimeSpan wait)
+        {
+            if (!_lock.TryEnter(wait))
+            {
+                return false;
+            }
+
+            try
+            {
+                _suspended = true;
+            }
+            finally
+            {
+                _lock.Exit();
+            }
+
+            return true;
+        }
+
+        /// <summary>
         /// S2Arm (10-23 声音停了自愈；审计 P1-27 只留一个交缓冲的): stop (or rebuild) the device with no buffer submitted meanwhile.
         /// <paramref name="stopDevice"/> stops the device synchronously; buffers it hands back while stopping come through
         /// <see cref="Returned"/>, and a Pump from the callback or the queueing thread submits nothing until it returns (a buffer
@@ -343,6 +379,8 @@ namespace Ryujinx.Audio.Backends.Common
                 _filled[slot] = 0;
                 _free[_freeCount++] = slot;
                 long inFlight = Interlocked.Add(ref _inFlightBytes, -bytes);
+
+                ApplyClockResetLocked();
 
                 if (bytes > 0 && !_suspended)
                 {

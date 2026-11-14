@@ -17,7 +17,7 @@ import uuid
 import community
 import host_update
 import layout
-from core import Cancelled, Failure, atomic, clone, contained, digest, read, tree_hash
+from core import Cancelled, Failure, atomic, clone, contained, digest, read, resolve_path, tree_hash
 from library import input_identity, require_game, selected_packages, source_path, stage_sources, validate_input
 import milestones as ms
 import toolchain
@@ -57,7 +57,7 @@ def validate_files(c, root, files, full=False):
         raise Failure("运行产物校验清单缺失。", code="runtime_invalid")
     # 判据同逐个 contained()：解析后在 root 里、本身是普通文件（不是软链）、大小对。所在目录只解析一次（11-07：运行包 6 万多个文件，
     #   逐个 realpath 要一百多万次 lstat，catalog 一次 9–15 秒）；文件本身 lstat 一次，不跟软链。
-    root = Path(root).resolve()
+    root = resolve_path(root)
     dirs = {}
     for name, expected in files.items():
         c.check()
@@ -84,7 +84,7 @@ def validate_runtime(c, runtime, full=False, files=True):
     """files=False：只看清单和入口（游戏库列表用），不逐文件读状态，只核主程序 / main.npdm 在且大小对（QUICK_FILES，审计 P2-212：
     原先清单没变、主程序被删也报就绪，点开始才报错）。起局也用它（v0.3.1：原先每次起局逐个核约 6 万个文件，又慢、任何一个不对就不让玩）；
     其余文件真坏了，游戏会非正常退出，launch 那时再完整核一遍、说清缺了什么（missing_after_crash）"""
-    root = runtime.resolve()
+    root = resolve_path(runtime)
     layout.require_in_location(c, root)
     manifest = read(root / "manifest.json", {})
     if manifest.get("schema") != 1 or manifest.get("engine") != "S2Arm" or manifest.get("target") != "macos-arm64":
@@ -112,7 +112,7 @@ def missing_after_crash(c, runtime, manifest):
     if not isinstance(files, dict) or not files:
         return None
     try:
-        validate_files(c, runtime.resolve(), files, full=False)
+        validate_files(c, resolve_path(runtime), files, full=False)
     except Failure as e:
         return str(e).split("：", 1)[-1][:120] or str(e)[:120]
     return None
@@ -401,8 +401,8 @@ def clone_tree(c, source, destination, *, materialize_romfs=False):
             identity = link.removeprefix(prefix)
             if not link.startswith(prefix) or not identity or identity.startswith(".") or "/" in identity:
                 raise Failure("RomFS 链接不属于本款共享存储。")
-            expected = source.parent.resolve() / ".romfs_store" / game / identity
-            if not expected.is_dir() or expected.resolve() != expected.absolute():
+            expected = resolve_path(source.parent) / ".romfs_store" / game / identity
+            if not expected.is_dir() or resolve_path(expected) != expected.absolute():
                 raise Failure("RomFS 共享存储缺失或包含符号链接。")
             romfs = expected
         else:
@@ -607,7 +607,8 @@ def sibling_roots(c, game):
     found = []
     for link in [*layout.ios_work(c, game["id"], create=False).glob("roots/*@现行"), *(p for p in layout.build_dir(c, game["id"], create=False).glob("*/roots/*@现行") if p.parent.parent.name != "ios")]:
         try:
-            cur = contained(c.library, link.resolve())
+            target = Path(os.readlink(link)) if _path_is_link(link) else link
+            cur = contained(c.library, resolve_path(target if target.is_absolute() else link.parent / target))
         except (Failure, OSError):
             continue
         if cur.is_dir():
@@ -615,11 +616,15 @@ def sibling_roots(c, game):
     return [p for _, p in sorted(found, reverse=True)]
 
 
+def _path_is_link(path):
+    return path.is_symlink() or getattr(os.path, "isjunction", lambda _: False)(path)
+
+
 def seed_from_sibling(c, game, roots, kuan):
     """本平台还没有现行根、别的平台有：克隆它的现行根起步（不从解包目录重新播种）。平台无关阶段的键按内容算，与本树一致就跳过、不一致照常重做
     （兄弟根是旧提交出的、键不同 → 重做）。克隆走 tools/clonedir.py：同一 APFS 卷 clonefile，跨卷 / exFAT 等退回普通拷贝（目标不存在才改名发布），--report 打出走了哪条路。
     → 用了兄弟根 True；没有可用的兄弟根 False（调用方照常从解包目录播种）"""
-    mine = roots.resolve() if roots.exists() else roots
+    mine = resolve_path(roots) if roots.exists() else roots
     for cur in sibling_roots(c, game):
         if cur.parent == mine:
             continue
@@ -744,7 +749,7 @@ def prepare(c):
                 c.run(["bash", c.engine / "pack/refresh.sh", game["id"]], logs / "refresh.log", env)
         finally:
             shutil.rmtree(src, ignore_errors=True)
-        current = (root / "roots" / (game["id"] + "@现行")).resolve()
+        current = resolve_path(root / "roots" / (game["id"] + "@现行"))
         contained(root, current)
         if not (current / "shaders/direct/keys.tsv").is_file():   # 只有直连：refresh.sh 退 0 却没有直连库就是出包出错（11-07 拆通用模式）
             raise Failure("直连着色器库不完整。")
@@ -762,6 +767,7 @@ def prepare(c):
         temporary.mkdir()
         try:
             all_cloned = clone_tree(c, current, temporary, materialize_romfs=True)
+            patches.record(c, game["id"], "mac", current)   # 补丁打入结果（打上 / 没打上，完成页列，11-14）：产物根里编译器的记录
             # Transient stage logs, the packaging workspace and source paths are not runtime dependencies.
             prune_runtime_extras(temporary)
             if not c.r.get("engineBundle") and fingerprint != source_fingerprint(c):   # 只有源码树开发会在出包中途改源码；发版引擎冻结
@@ -801,4 +807,4 @@ def prepare(c):
         import sizes
         host_update.tidy(c, "刷新游戏占用大小", sizes.refresh, c, game["id"])   # 每款各部分大小写回 game.json（游戏库只读不量）
         return dict(gameId=game["id"], outputPath=str(image), outputBytes=_part_bytes([image]), target="macos-arm64", compatibility="unverified",
-                    boost=patches.boost(c, game, image), **({"notes": notes} if notes else {}))
+                    boost=patches.boost(c, game, image, layout.game_info(c, game["id"]).get("sgradeResult", {}).get("mac")), **({"notes": notes} if notes else {}))

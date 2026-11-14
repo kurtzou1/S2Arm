@@ -16,7 +16,7 @@ struct InputGuidePresentation: Identifiable {
 
 extension Store {
     func launchOptions(for gameID: String) -> [String: Any] {
-        // 不带 gameLanguage / docked（11-07 维护者 删游戏选项）：作业层起局跟 Mac 系统首选语言、主机模式（pack/jobs/build.py runtime_env）
+        // 不带 gameLanguage / docked：逐款的游戏语言 / 主机模式在启动设置里选（作业层 community 存这款的 launch.json、起局 launch_env 转成宿主变量；11-14 维护者确认玩家可选，推翻 11-07 的「不给玩家选」）；没选过 = 跟 Mac 系统首选语言、主机模式
         var options: [String: Any] = ["uiLanguage": language.resolved()]
         if recoveryOverride == gameID { options["overrideRecovery"] = true }
         return options

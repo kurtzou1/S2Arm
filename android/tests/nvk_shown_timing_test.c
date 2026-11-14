@@ -39,6 +39,7 @@ int main(void) {
     CHECK(!wsi_timing_id(&t), "disabled sends no ID");
     t.start = 1; wsi_timing_report(&t, 5000000001ull);
     CHECK(strstr(logline, "帧率= ") && strstr(logline, "开关未启用"), "disabled log has empty values and reason");
+    CHECK(strstr(logline, "间隔>100ms=；"), "disabled log has an empty over-100ms field");
     wsi_timing_init(&t, VK_NULL_HANDLE, 1, 0);
     CHECK(!wsi_timing_id(&t), "unsupported sends no ID");
     t.start = 1; wsi_timing_report(&t, 5000000001ull);
@@ -53,6 +54,7 @@ int main(void) {
           "VK_INCOMPLETE consumes partial records exactly once before next batch");
     wsi_timing_report(&t, 6000000000ull);
     CHECK(strstr(logline, "帧率=100.00") && strstr(logline, "间隔P99=10.00ms") && strstr(logline, "样本=20"), "actual sample statistics");
+    CHECK(strstr(logline, "间隔>100ms=0；"), "no gap over 100 ms in an even 10 ms window");
     // 上一窗口末尾那帧的记录在本窗口才回收（真机每窗都有）：只计迟到，本窗口照常出数
     t.start = 6000000000ull;
     uint32_t prev = wsi_timing_id(&t); wsi_timing_submitted(&t, prev); queue_record(VK_NULL_HANDLE, prev, 5990000000ull);
@@ -82,6 +84,19 @@ int main(void) {
     fake_now = 3; wsi_timing_poll(&t, VK_NULL_HANDLE, VK_NULL_HANDLE);
     wsi_timing_report(&t, 5000000001ull);
     CHECK(strstr(logline, "帧率= ") && strstr(logline, "样本不足"), "one sample stays empty");
+    CHECK(strstr(logline, "间隔>100ms=；"), "too few samples leaves the over-100ms field empty with the reason");
+    // 间隔 >100ms 次数：按已回收样本。10 帧间隔依次 10、150、100（恰好 100 不算）、250、10……ms → 2 次
+    available = 0;
+    wsi_timing_init(&t, VK_NULL_HANDLE, 1, 1); t.start = 20000000000ull;
+    static const uint64_t gap_ms[] = {10, 150, 100, 250, 10, 10, 10, 10, 10};
+    uint64_t at = 20000000000ull + 1000000ull;
+    for (uint32_t i = 0; i <= sizeof gap_ms / sizeof *gap_ms; i++) {
+        uint32_t idg = wsi_timing_id(&t); wsi_timing_submitted(&t, idg); queue_record(VK_NULL_HANDLE, idg, at);
+        if (i < sizeof gap_ms / sizeof *gap_ms) at += gap_ms[i] * 1000000ull;
+    }
+    fake_now = at + 1; wsi_timing_poll(&t, VK_NULL_HANDLE, VK_NULL_HANDLE);
+    wsi_timing_report(&t, 26000000000ull);
+    CHECK(strstr(logline, "样本=10") && strstr(logline, "间隔>100ms=2；"), "two gaps strictly over 100 ms (150 / 250; 100 itself not counted)");
     printf("shown timing: failures=%u\n", nfail);
     return nfail ? 1 : 0;
 }

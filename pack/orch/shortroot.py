@@ -43,18 +43,30 @@ def group_targets(paths):
     return [ntpath.commonpath(g) if len(g) > 1 else g[0] for g in by_drive.values()]
 
 
-def is_unc_path(path):
-    """Windows directory junctions cannot target UNC shares; callers must keep or copy the real path."""
+def is_network_path(path):
+    """网络位置：UNC 共享，或映射成盘符的网络驱动器（NAS 游戏库，11-14）。目录联接指不过去——UNC 本来就不接受；
+    映射盘的联接建得出来、一访问就 WinError 123（Windows 实机实测：游戏库在 Q:（映射 \\\\localhost\\share）上出包，短入口指向 Q:\\… 的联接里建目录失败）。
+    调用方保留原路径或整份拷。只按盘符类型判（GetDriveTypeW = DRIVE_REMOTE），不碰网络"""
     try:
         drive, _ = ntpath.splitdrive(os.fspath(path))
     except TypeError:
         return False
-    return drive.startswith("\\\\")
+    if drive.startswith("\\\\"):
+        return True
+    return len(drive) == 2 and _remote_drive(drive)
+
+
+def _remote_drive(drive):
+    """盘符是不是网络驱动器（单测只换它，不改 os.name）"""
+    if os.name != "nt":
+        return False
+    import ctypes
+    return ctypes.windll.kernel32.GetDriveTypeW(drive + "\\") == 4   # DRIVE_REMOTE
 
 
 def junction_targets(paths):
-    """目录联接只支持本地卷；UNC 网络共享保留原路径，不能映射到坏掉的联接。"""
-    return [target for target in group_targets(paths) if not is_unc_path(target)]
+    """目录联接只支持本地卷；网络位置（UNC / 映射盘）保留原路径，不能映射到坏掉的联接。"""
+    return [target for target in group_targets(paths) if not is_network_path(target)]
 
 
 def to_long(path, table):

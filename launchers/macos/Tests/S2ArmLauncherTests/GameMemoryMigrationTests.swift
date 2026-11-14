@@ -15,7 +15,7 @@ import XCTest
         let store = Store(privateRoot: root)
         XCTAssertEqual(store.preferences.appearance, "dark")
         XCTAssertEqual(store.preferences.devHud, true)
-        XCTAssertNil(store.launchOptions(for: "first")["gameLanguage"])   // 11-07 删游戏选项：起局不带游戏语言（跟系统）
+        XCTAssertNil(store.launchOptions(for: "first")["gameLanguage"])   // 请求不带游戏语言：玩家选的语言走启动设置 launch.json（作业层 community）
         XCTAssertNil(store.launchOptions(for: "first")["vammLayout"])
         XCTAssertNil(store.launchOptions(for: "second")["vammLayout"])
         store.savePreferences()

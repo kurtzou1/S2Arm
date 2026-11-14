@@ -242,13 +242,14 @@ class SpaceMeasured(JobCase):
         self.assertEqual((v["basis"], v["needBytes"]), ("rule", 17_600_000_000 + 15_000_000_000))   # 解包 17.6 + 直连 15（IMG 边写边腾解包）
 
     def test_rejection_names_need_and_free(self):
+        c = self.context("ipa")
         with patch("shutil.disk_usage", return_value=DU(0, 0, 20 * 10**9)):
-            with self.assertRaises(Failure) as e:
-                library.check_pack_space(self.context("ipa"), self.game(16 * 10**9))
-        self.assertEqual(e.exception.code, "disk_full")
-        self.assertIn("要 33 GB", str(e.exception));   # 16 × 1.1 + 直连 15 = 32.6 → 33 GB（IMG 边写边腾解包，#746）
-        self.assertIn("解包 18 GB", str(e.exception)); self.assertIn("直连着色器上限 15 GB", str(e.exception))   # 分项（#746）
-        self.assertIn("只剩 20 GB", str(e.exception)); self.assertIn("「仍然继续」", str(e.exception))
+            library.check_pack_space(c, self.game(16 * 10**9))   # 11-14 不许堵门：不拦，只记一条盘满警告
+        [d] = c.job["diagnostics"]; msg = d["summary"]
+        self.assertEqual((d["code"], d["severity"]), ("disk_full", "warning"))
+        self.assertIn("要 33 GB", msg);   # 16 × 1.1 + 直连 15 = 32.6 → 33 GB（IMG 边写边腾解包，#746）
+        self.assertIn("解包 18 GB", msg); self.assertIn("直连着色器上限 15 GB", msg)   # 分项（#746）
+        self.assertIn("只剩 20 GB", msg); self.assertIn("这是预估，照常开工", msg)
 
     def test_mac_build_has_no_image_and_ocarina_peak_is_covered(self):
         # 单一 IMG 只在打 iPhone 包时写（Mac 打包不写）。#746：写 IMG 时边写边腾解包，iPhone 包和 Mac 打包一样多；
@@ -275,10 +276,9 @@ class SpaceMeasured(JobCase):
         self.assertGreaterEqual(v["reclaimBytes"], 1 << 20)
         self.assertEqual(self.budget(self.context("build"), self.game(16 * 10**9))["reclaimBytes"], 0)
         with patch("shutil.disk_usage", return_value=DU(0, 0, 20 * 10**9)):
-            with self.assertRaises(Failure) as e:
-                library.check_pack_space(c, self.game(16 * 10**9))
-        self.assertIn("点「仍然继续」会先删掉这款上一次的 iPhone 包，腾出", str(e.exception))
-        self.assertTrue(old.is_dir())   # 只问，不删
+            library.check_pack_space(c, self.game(16 * 10**9))   # 11-14 不许堵门：不拦，警告里说旧包出完会被换掉
+        self.assertIn("这款上一次的 iPhone 包", c.job["diagnostics"][0]["summary"])
+        self.assertTrue(old.is_dir())   # 没点过「仍然继续」：不删
         c = self.context("ipa", spaceOverride=True)
         with patch("shutil.disk_usage", return_value=DU(0, 0, 20 * 10**9)):
             library.check_pack_space(c, self.game(16 * 10**9))
@@ -299,10 +299,9 @@ class SpaceMeasured(JobCase):
             v = library.space_budget(c, nup)["volumes"][0]
             self.assertEqual((v["needBytes"], v["reclaimBytes"]), (62_806_000_000, 29 * 10**9))
             self.assertLessEqual(v["needBytes"], v["freeBytes"] + v["reclaimBytes"])
-            with self.assertRaises(Failure) as e:
-                library.check_pack_space(c, nup)
-        msg = str(e.exception)
-        for want in ("要 63 GB", "解包 48 GB", "直连着色器上限 15 GB", "只剩 37 GB", "点「仍然继续」会先删掉这款上一次的 iPhone 包，腾出 29 GB"):
+            library.check_pack_space(c, nup)   # 11-14 不许堵门：不拦
+        msg = c.job["diagnostics"][0]["summary"]
+        for want in ("要 63 GB", "解包 48 GB", "直连着色器上限 15 GB", "只剩 37 GB", "这款上一次的 iPhone 包（29 GB）出完会被新包换掉"):
             self.assertIn(want, msg)
 
     def test_space_override_passes_with_warning(self):
