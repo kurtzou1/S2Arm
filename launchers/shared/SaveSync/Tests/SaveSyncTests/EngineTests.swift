@@ -163,3 +163,27 @@ private func files(_ root: URL) -> [String] { ((try? FileManager.default.content
 }
 
 final class Box<T>: @unchecked Sendable { var value: T; init(_ v: T) { value = v } }
+
+// 切后台只上传（uploadIfAhead）：本机领先 → 上传、另一台随后下载到同样进度；云端更新 / 冲突 → 回 nil，本机存档、云端文件、基线都不动
+@Test func backgroundUploadOnlyWhenAhead() async throws {
+    let root = try scratch(), work = try scratch()
+    let mac = FakeDevice("mac", save: ["a": "1"], work: work), phone = FakeDevice("phone", save: nil, work: work)
+    #expect(try await mac.engine(root, clock: 1).sync { _ in nil } == .uploaded)
+    #expect(try await phone.engine(root, clock: 2).sync { _ in nil } == .downloaded(from: "mac"))
+    // 手机游戏中存了一档、切后台 → 上传；Mac 随后同步拿到它
+    phone.save = ["a": "2"]
+    #expect(try await phone.engine(root, clock: 3).uploadIfAhead() == .uploaded)
+    #expect(try await phone.engine(root, clock: 4).uploadIfAhead() == .upToDate)
+    #expect(try await mac.engine(root, clock: 5).sync { _ in nil } == .downloaded(from: "phone"))
+    #expect(mac.save == ["a": "2"])
+    // Mac 又玩了并上传；手机没动、切后台：云端更新 → 不下载、不恢复，回 nil
+    mac.save = ["a": "3"]
+    #expect(try await mac.engine(root, clock: 6).sync { _ in nil } == .uploaded)
+    let restores = phone.restores, before = files(root), baseBefore = phone.base
+    #expect(try await phone.engine(root, clock: 7).uploadIfAhead() == nil)
+    #expect(phone.save == ["a": "2"] && phone.restores == restores && files(root) == before && phone.base == baseBefore)
+    // 两边都改了（冲突）：切后台也不动
+    phone.save = ["a": "4"]
+    #expect(try await phone.engine(root, clock: 8).uploadIfAhead() == nil)
+    #expect(phone.save == ["a": "4"] && files(root) == before && phone.base == baseBefore)
+}

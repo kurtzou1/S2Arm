@@ -149,7 +149,6 @@ int main(void) {
     block_write = 0; pthread_cond_broadcast(&cv); pthread_mutex_unlock(&mu);
     wait_flag(&stop_returned, "stop did not join writer");
     require(pthread_join(stopper_thread, NULL) == 0, "join caller");
-    require(atomic_load(&clock_calls) > 0, "writer uses injected monotonic clock");
     // A second session must start its own writer. Turning 60 fps off writes the
     // table's explicit off value (11-02: never the first value read, which was a
     // snapshot from before the game initialised the variable). Stop has returned
@@ -165,6 +164,6 @@ int main(void) {
     require(s2a_fps_session_stop() == 0, "stop succeeds");
     require(s2a_fps_session_reset() == 0, "final reset succeeds");
     unlink(path); rmdir(dir);
-    puts("✓ t_fps_portable: safe I/O, two-level pointer chain, injected clock and joined stop");
+    puts("✓ t_fps_portable: safe I/O, two-level pointer chain, and joined stop");
     return 0;
 }

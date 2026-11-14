@@ -215,6 +215,14 @@ int s2a_pad_kind(const char *category, int is_xbox, int is_playstation) {
         if (contains_nocase(category, nintendo[n])) return S2A_PAD_KIND_NINTENDO;
     return S2A_PAD_KIND_OTHER;
 }
+// 系统手柄列表里的这只是不是 NS2 手柄（s2a_pad.h s2a_pad_is_ns2）：同 s2a_pad_kind 只看系统填的类别。
+//   苹果给 NS2 手柄的类别字样未知（11-13 还没实机看到），按二代型号字样的片段找（下表）；认不出就当别的手柄照读（宁可多一位玩家，不丢手柄）
+int s2a_pad_is_ns2(const char *category) {
+    static const char *const ns2[] = {"switch 2", "joy-con 2", "joycon 2"};
+    for (size_t n = 0; category && n < sizeof ns2 / sizeof *ns2; n++)
+        if (contains_nocase(category, ns2[n])) return 1;
+    return 0;
+}
 // 按键布局（s2a_pad.h）。宿主起局按 S2A_PAD_FACE，游戏内菜单改了经 s2a_pad_layout_set 即时生效
 static _Atomic int g_layout = -1;
 int s2a_pad_layout_parse(const char *v) {
@@ -250,6 +258,18 @@ void s2a_pad_stick(float x, float y, int32_t axes[2]) {
 //   prev 是上一轮的槽位身份（max 项，NULL = 空槽），live 是本次在线的手柄（顺序 = 连接顺序）。
 //   slot_of[j] 写第 j 只该占的槽（-1 = 超过 max 只，不参与）；返回占用到的最高槽位 + 1（至少 1：槽 0 总留给键盘 / 鼠标）。
 //   断开的手柄下一轮不在 live 里 → 槽空出来；重连时按「最小空槽」占回去（中间没插别的就回到原槽）。
+static int order_match(const s2a_pad_order_entry *e, int ns2_player, const char *name, int index) {
+    if (ns2_player == S2A_PAD_ORDER_GEN1 || ns2_player == S2A_PAD_ORDER_GEN1_PAIR)   // 一代单只 / 按设备的一对：照设备 id 比
+        return e->ns2_player == ns2_player && name && !strcmp(e->name, name);
+    if (ns2_player != -1) return e->ns2_player == ns2_player;   // 通道玩家号、键盘：照号比
+    return e->ns2_player == -1 && e->index == index && name && !strcmp(e->name, name);   // 系统手柄：-1（键盘是 -2，不能混）
+}
+int s2a_pad_order_rank(const s2a_pad_order *order, int ns2_player, const char *name, int index) {
+    if (!order) return S2A_PAD_ORDER_UNLISTED;
+    for (int i = 0; i < order->count && i < S2A_PAD_ORDER_MAX; i++) if (order_match(&order->entry[i], ns2_player, name, index)) return i;
+    for (int i = 0; i < order->dropped_count && i < S2A_PAD_ORDER_MAX; i++) if (order_match(&order->dropped[i], ns2_player, name, index)) return S2A_PAD_ORDER_DROPPED;
+    return S2A_PAD_ORDER_UNLISTED;
+}
 int s2a_slot_plan(const void *const *prev, const void *const *live, int count, int max, int *slot_of) {
     for (int j = 0; j < count; j++) {
         slot_of[j] = -1;
@@ -273,3 +293,92 @@ int s2a_slot_plan(const void *const *prev, const void *const *live, int count, i
     for (int j = 0; j < count; j++) if (slot_of[j] + 1 > top) top = slot_of[j] + 1;
     return top;
 }
+
+static uint8_t jc1_amp(float amp) {
+    if (!(amp > 0)) return 0;
+    if (amp > 1) amp = 1;
+    float e = amp > 0.23f ? log2f(amp * 8.7f) * 32.f : amp > 0.12f ? log2f(amp * 17.f) * 16.f : ((log2f(amp) * 32.f) - 96.f) / (4.f - 2.f * amp);
+    return e < 0 ? 0 : e > 100 ? 100 : (uint8_t)lroundf(e);
+}
+void s2a_joycon1_rumble_encode(s2a_pad_vibration v, uint8_t out[4]) {
+    float hi_hz = v.high_hz > 81.75f ? (v.high_hz < 1252.f ? v.high_hz : 1252.f) : 320.f, lo_hz = v.low_hz > 40.875f ? (v.low_hz < 626.f ? v.low_hz : 626.f) : 160.f;
+    if (!(v.high_hz > 0)) hi_hz = 320.f;
+    if (!(v.low_hz > 0)) lo_hz = 160.f;
+    uint16_t hf = (uint16_t)((lroundf(log2f(hi_hz / 10.f) * 32.f) - 0x60) * 4);
+    uint8_t lf = (uint8_t)(lroundf(log2f(lo_hz / 10.f) * 32.f) - 0x40);
+    uint8_t hf_amp = (uint8_t)(jc1_amp(v.high_amp) * 2);
+    uint16_t lf_amp = (uint16_t)(jc1_amp(v.low_amp) / 2 + 64);
+    out[0] = (uint8_t)(hf & 0xff);
+    out[1] = (uint8_t)(hf_amp + ((hf >> 8) & 0xff));
+    out[2] = (uint8_t)(lf + ((lf_amp >> 8) & 0xff));
+    out[3] = (uint8_t)(lf_amp & 0xff);
+}
+
+// 一代 Joy-Con / Pro HID 报告解析（s2a_pad.h s2a_joycon1_decode；按键对应照 #592 decode_pad，Co-authored-by lucaAce1024）
+enum { JC1_E = 1u << 0, JC1_S = 1u << 1, JC1_N = 1u << 2, JC1_W = 1u << 3, JC1_LS = 1u << 4, JC1_RS = 1u << 5, JC1_L = 1u << 6, JC1_R = 1u << 7,
+       JC1_ZL = 1u << 8, JC1_ZR = 1u << 9, JC1_PLUS = 1u << 10, JC1_MINUS = 1u << 11, JC1_DL = 1u << 12, JC1_DU = 1u << 13, JC1_DR = 1u << 14, JC1_DD = 1u << 15 };
+static int32_t jc1_axis(unsigned raw) { int v = ((int)raw - 2048) * 16; return v > 32767 ? 32767 : v < -32767 ? -32767 : v; }
+int s2a_joycon1_decode(int pid, const uint8_t *report, size_t length, uint32_t *buttons, int32_t sticks[4], int *side) {
+    if (!report || !buttons || !sticks || !side) return 0;
+    *buttons = 0; *side = 0; for (int i = 0; i < 4; i++) sticks[i] = 0;
+    size_t off = length && (report[0] == 0x30 || report[0] == 0x3f) ? 1 : 0;   // IOHID 有时把报告号放在第一个字节
+    int full = off ? report[0] == 0x30 : length >= 48;
+    if (!full) {   // 简单报告 0x3F：byte1 = 四个方向 / 面键 + SL（bit4）SR（bit5），byte2 = − + LS RS Home Capture L/R ZL/ZR；摇杆是八方向帽，不读
+        if (length < off + 2) return 0;
+        uint8_t b1 = report[off], b2 = report[off + 1];
+        uint32_t out = 0;
+        if (pid == 0x2006) { if (b1 & 0x01) out |= JC1_E; if (b1 & 0x02) out |= JC1_N; if (b1 & 0x04) out |= JC1_S; if (b1 & 0x08) out |= JC1_W; }   // 横握：下 A、右 X、左 B、上 Y
+        else { if (b1 & 0x01) out |= JC1_E; if (b1 & 0x02) out |= JC1_N; if (b1 & 0x04) out |= JC1_S; if (b1 & 0x08) out |= JC1_W; }
+        if (b1 & 0x10) { out |= JC1_L; *side |= S2A_JC1_SIDE_SL; }
+        if (b1 & 0x20) { out |= JC1_R; *side |= S2A_JC1_SIDE_SR; }
+        if (b2 & 0x01) out |= JC1_MINUS;
+        if (b2 & 0x02) out |= JC1_PLUS;
+        if (b2 & 0x04) out |= JC1_LS;
+        if (b2 & 0x08) out |= JC1_RS;
+        if (b2 & 0x40) { out |= pid == 0x2007 ? JC1_R : JC1_L; *side |= S2A_JC1_SIDE_SHOULDER; }
+        if (b2 & 0x80) out |= pid == 0x2007 ? JC1_ZR : JC1_ZL;
+        *buttons = out;
+        return 1;
+    }
+    if (length < off + 11) return 0;
+    const uint8_t *b = report + off + 2, *ls = report + off + 5, *rs = report + off + 8;   // timer、电量之后：按键 3 字节、左右摇杆各 3 字节
+    unsigned lx = ls[0] | (ls[1] & 0x0f) << 8, ly = ls[1] >> 4 | ls[2] << 4, rx = rs[0] | (rs[1] & 0x0f) << 8, ry = rs[1] >> 4 | rs[2] << 4;
+    uint32_t out = 0;
+    if (pid == 0x2009) {
+        if (b[0] & 0x01) out |= JC1_W; if (b[0] & 0x02) out |= JC1_N; if (b[0] & 0x04) out |= JC1_S; if (b[0] & 0x08) out |= JC1_E;
+        if (b[0] & 0x40) out |= JC1_R; if (b[0] & 0x80) out |= JC1_ZR;
+        if (b[1] & 0x01) out |= JC1_MINUS; if (b[1] & 0x02) out |= JC1_PLUS; if (b[1] & 0x04) out |= JC1_RS; if (b[1] & 0x08) out |= JC1_LS;
+        if (b[2] & 0x01) out |= JC1_DD; if (b[2] & 0x02) out |= JC1_DU; if (b[2] & 0x04) out |= JC1_DR; if (b[2] & 0x08) out |= JC1_DL;
+        if (b[2] & 0x40) out |= JC1_L; if (b[2] & 0x80) out |= JC1_ZL;
+        if ((b[0] & 0x40) && (b[2] & 0x40)) *side |= S2A_JC1_SIDE_SHOULDER;
+        sticks[0] = jc1_axis(lx); sticks[1] = jc1_axis(ly); sticks[2] = jc1_axis(rx); sticks[3] = jc1_axis(ry);   // 原始值往上变大，s2a_pad.h 约定上为正：不取反（同 NS2Transport.m calibrated_axis）
+    } else if (pid == 0x2006) {   // 左只横握：十字键当 ABXY（下 A、右 B、上 X、左 Y），SL / SR 当 L / R
+        if (b[2] & 0x01) out |= JC1_E; if (b[2] & 0x04) out |= JC1_S; if (b[2] & 0x02) out |= JC1_N; if (b[2] & 0x08) out |= JC1_W;
+        if (b[2] & 0x40) { out |= JC1_L; *side |= S2A_JC1_SIDE_SHOULDER; }
+        if (b[2] & 0x80) out |= JC1_ZL;
+        if (b[2] & 0x20) { out |= JC1_L; *side |= S2A_JC1_SIDE_SL; }
+        if (b[2] & 0x10) { out |= JC1_R; *side |= S2A_JC1_SIDE_SR; }
+        if (b[1] & 0x01) out |= JC1_MINUS; if (b[1] & 0x08) out |= JC1_LS; if (b[1] & 0x20) out |= JC1_PLUS;   // Capture 当 +（单只没有 +）
+        sticks[0] = jc1_axis(lx); sticks[1] = jc1_axis(ly);
+    } else if (pid == 0x2007) {   // 右只：面键照原样（横握由游戏 HoldType 解释），SL / SR 当 L / R
+        if (b[0] & 0x08) out |= JC1_E; if (b[0] & 0x04) out |= JC1_S; if (b[0] & 0x02) out |= JC1_N; if (b[0] & 0x01) out |= JC1_W;
+        if (b[0] & 0x40) { out |= JC1_R; *side |= S2A_JC1_SIDE_SHOULDER; }
+        if (b[0] & 0x80) out |= JC1_ZR;
+        if (b[0] & 0x20) { out |= JC1_L; *side |= S2A_JC1_SIDE_SL; }
+        if (b[0] & 0x10) { out |= JC1_R; *side |= S2A_JC1_SIDE_SR; }
+        if (b[1] & 0x02) out |= JC1_PLUS; if (b[1] & 0x04) out |= JC1_RS; if (b[1] & 0x10) out |= JC1_MINUS;   // Home 当 −（单只没有 −）
+        sticks[2] = jc1_axis(rx); sticks[3] = jc1_axis(ry);
+    } else return 0;
+    *buttons = out;
+    return 1;
+}
+void s2a_joycon1_pair_decode(const uint8_t *left, const uint8_t *right, uint32_t *buttons, int32_t sticks[4]) {
+    static const uint8_t idle[S2A_JC1_RAW] = {0, 0, 0, 0, 0, 0x00, 0x08, 0x80, 0x00, 0x08, 0x80};   // 没按、两个摇杆居中（2048）
+    if (!left) left = idle;
+    if (!right) right = idle;
+    uint8_t report[49] = {0x30, right[0], right[1], right[2], (uint8_t)(left[3] | right[3]), left[4],
+                          left[5], left[6], left[7], right[8], right[9], right[10]};
+    int side;
+    if (!s2a_joycon1_decode(0x2009, report, sizeof report, buttons, sticks, &side)) { *buttons = 0; for (int i = 0; i < 4; i++) sticks[i] = 0; }
+}
+

@@ -15,6 +15,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <ctype.h>
 #include <signal.h>
 #include <sys/file.h>
 #include <sys/wait.h>
@@ -45,6 +47,24 @@ int main(int argc, char **argv) {
     static const char *verbs[] = { "build", "publish", "restore", "pack", "msbuild", "test", "clean", NULL };
     int build = 0;
     for (int i = 0; argc > 1 && verbs[i]; i++) if (!strcmp(argv[1], verbs[i])) build = 1;
+    // 编译并发封顶（11-13 维护者机器风扇狂转：dotnet build 不带 -m 时 dotnet 自己补「-maxcpucount」= 全部核，编一个 romfs_index 拉起 17 个 MSBuild 节点、瞬时约 11 核；
+    //   根目录 Directory.Build.rsp 压不住——命令行里的 -maxcpucount 优先）：编译类子命令没自己给 -m 的，紧跟子命令补 -m:<S2A_DOTNET_M，缺省 4>（0 = 不补）。
+    //   实测 romfs_index 全量编：节点 17 → 3，用时 11 → 8 秒（节点多反而慢）。调用方显式给了 -m / -maxcpucount 的（如 t_dsh.sh 按 DSH_J）原样不动
+    static char mopt[32]; const char *mn = getenv("S2A_DOTNET_M"); if (!mn || !*mn) mn = "4";
+    if (build && strcmp(argv[1], "restore") && strcmp(mn, "0")) {
+        int has = 0;
+        for (int i = 2; i < argc && !has; i++) {
+            const char *a = argv[i];
+            if (!strcmp(a, "--")) break;
+            if (*a == '-' || *a == '/') { a += (a[0] == '-' && a[1] == '-') ? 2 : 1;
+                if (!strncasecmp(a, "maxcpucount", 11) || (tolower((unsigned char)a[0]) == 'm' && (a[1] == 0 || a[1] == ':'))) has = 1; }
+        }
+        if (!has) {
+            snprintf(mopt, sizeof mopt, "-m:%s", mn);
+            char **nv = calloc((size_t)argc + 2, sizeof *nv);
+            if (nv) { nv[0] = argv[0]; nv[1] = argv[1]; nv[2] = mopt; for (int i = 2; i < argc; i++) nv[i + 1] = argv[i]; nv[argc + 1] = NULL; argv = nv; argc++; }
+        }
+    }
     int locked = 0;
     if (build && lk && *lk) {
         int fd = open(lk, O_RDWR | O_CREAT | O_CLOEXEC, 0644);   // 子进程（真 dotnet 及它拉起的常驻编译服务）不继承

@@ -4576,6 +4576,14 @@
   "en": "Rewrite & prepare"
  },
  {
+  "source": "整理 iPhone 版程序与资源包",
+  "en": "Prepare the iPhone app and resources"
+ },
+ {
+  "source": "编出 iPhone / iPad 版程序、打好资源包；出完接着导出成未签名的 S2Arm.ipa 和这款的 .img，你用自签工具安装。",
+  "en": "Builds the iPhone / iPad app and packs the resources, then exports an unsigned S2Arm.ipa and this game's .img for you to install with your signing tool."
+ },
+ {
   "source": "编 App 与签名",
   "en": "Build app & sign"
  },
@@ -4962,6 +4970,14 @@
  {
   "source": "缺少 Metal 组件：编着色器要用的 Metal 组件没装上。",
   "en": "Metal not available. The Metal component needed for shader compilation is not installed."
+ },
+ {
+  "source": "下不了 Metal 组件：连不上苹果的组件服务器，Metal 编译组件下载不下来。",
+  "en": "Can't download Metal. Apple's component server can't be reached, so the Metal compiler component can't be downloaded."
+ },
+ {
+  "source": "连不上苹果的组件服务器：检查网络，关掉或换个代理后在设置里再点「一键下载」；还不行就从苹果开发者网站下载与你的 Xcode 配套的 Metal Toolchain（.dmg），在「终端」运行 xcodebuild -importComponent MetalToolchain -importPath <下载的 .dmg>，回来点「重新检查」。",
+  "en": "Can't reach Apple's component server: check your network, turn off or switch your proxy, then click Download in Settings again. If it still fails, download the Metal Toolchain (.dmg) matching your Xcode from Apple's developer website, run xcodebuild -importComponent MetalToolchain -importPath <the .dmg> in Terminal, then click Recheck."
  },
  {
   "source": "在设置里点「iOS 平台组件」的「一键下载」（苹果官方，约 8 GB），下完自动重新检查后重试；也可以打开 Xcode → 设置 → Components 装上与 Xcode 配套的 iOS 平台。",
@@ -6192,6 +6208,10 @@
   "en": "Sign with your Apple ID"
  },
  {
+  "source": "把游戏资源推进 iPhone（只推变了的文件；第一次要几分钟）",
+  "en": "Sending game resources to iPhone (only changed files; the first time takes a few minutes)"
+ },
+ {
   "source": "把资源包推进 iPhone 并解开（只推变了的文件；第一次大游戏要几分钟）",
   "en": "Push the resource pack to the iPhone and unpack it (only changed files; a big game takes a few minutes the first time)"
  },
@@ -6948,6 +6968,14 @@
   "en": "{0} “{1}” is offline: plug it in with a cable, or unlock it on the same Wi-Fi as this computer, then try again."
  },
  {
+  "source": "要装的那台设备（编号末尾 {0}）这次没列出来，这台电脑现在连着 {1} 台：在装机页选其中一台再装。",
+  "en": "The chosen device (ID ending {0}) isn't listed right now; this computer is connected to {1} devices. Pick one of them on the install page and install again."
+ },
+ {
+  "source": "这台电脑的设备服务里没看到 iPhone / iPad：插上数据线并解锁手机，在手机上点「信任」，再试一次。",
+  "en": "This computer's device service doesn't see an iPhone or iPad: plug it in with a cable, unlock it, tap Trust on the device, then try again."
+ },
+ {
   "source": "要装的那台设备（编号末尾 {0}）现在不在线：插上数据线并解锁，或让它和这台电脑连同一个 Wi-Fi，再试一次。",
   "en": "The chosen device (ID ending {0}) is offline: plug it in and unlock it, or put it on the same Wi-Fi as this computer, then try again."
  },
@@ -7002,6 +7030,10 @@
  {
   "source": "等正在用游戏库的那个任务结束（或在任务列表里取消它）再重试；什么都没有改动。",
   "en": "Wait for the task that is using the library to finish (or cancel it in the task list), then try again. Nothing was changed."
+ },
+ {
+  "source": "这台电脑连不上 Impactor 签名要用的登录辅助服务器（mac-ani.jkcoxson.com，Impactor 内置、改不了），已自动重试过一次。检查这台电脑的网络：浏览器能打开这个地址就再点一次「装到 iPhone」；打不开就换个 DNS（如 223.5.5.5 或 1.1.1.1）或开 / 关代理后再装。手机、已装的 App 和存档都不受影响。",
+  "en": "This computer cannot reach the sign-in helper server Impactor needs for signing (mac-ani.jkcoxson.com, built into Impactor and not configurable); S2Arm already retried once. Check this computer's network: if a browser can open that address, click Install to iPhone again; if not, switch DNS (for example 223.5.5.5 or 1.1.1.1) or turn a proxy on or off, then install again. The iPhone, installed apps and saves are not affected."
  },
  {
   "source": "Apple ID 登录已过期，请重新登录后再装：在装机页点「打开 Impactor」→「设置」，选中你的 Apple ID 点「移除账号」，再点「添加账号」用同一个 Apple ID 重新登录（邮箱、密码、手机上的验证码，输入前切到英文输入法），然后回来再点一次「装到 iPhone」。密码只在 Impactor 里输，S2Arm 不经手。",
@@ -7064,6 +7096,10 @@
   "en": "Try starting it again. If it happens again, export a diagnostics package from Environment Check and attach it to a GitHub issue so we can fix the crash."
  },
  {
+  "source": "要装的那台（{0}）这次没列出来；这台电脑现在看得到：{1}——在装机页选其中一台再装。",
+  "en": "The chosen device ({0}) isn't listed right now. This computer can see: {1}. Pick one of them on the install page and install again."
+ },
+ {
   "source": "没找到要装的那台设备（{0}）：它还没和这台电脑配对过——插上数据线并解锁，在设备上点「信任」（配对过以后也可以连同一个 Wi-Fi 装）。",
   "en": "The chosen device ({0}) hasn't been paired with this computer yet: plug it in, unlock it and tap Trust on the device (after that it can also install over the same Wi-Fi)."
  },
@@ -7094,6 +7130,15 @@
  {
   "source": "重新打开 S2Arm 后点「重试」；还不行就导出诊断包发给我们。",
   "en": "Reopen S2Arm and tap Retry. If it still fails, export a diagnostics package and send it to us."
+ },
+
+ {
+  "source": "先把导出文件夹里这款的完整 .img（不带「着色器更新包」字样的那个）放进「放这里导入」，导好后再放更新包。",
+  "en": "Put this game's full .img from the export folder (the one without \"shader update\" in its name) into Import Here first, then add the update."
+ },
+ {
+  "source": "把电脑上这次导出的完整 .img 放进「放这里导入」重新导一遍（游戏版本换过，只换着色器套不上）。",
+  "en": "Put the full .img from this export on your computer into Import Here and import it again (the game version changed, so a shader-only update can't be applied)."
  },
  {
   "source": "检查文件是否拷完整，再打开 S2Arm。",
@@ -7130,6 +7175,22 @@
  {
   "source": "游戏库在 Mac OS 扩展（HFS+）格式的磁盘上：可以出包，但这种盘不能克隆，出包会多占一份资源包的空间。",
   "en": "The library is on a Mac OS Extended (HFS+) drive. Exporting works, but this drive can't clone files, so exports take an extra copy of the resources' space."
+ },
+ {
+  "source": "手机上有几款游戏这次放不进同一个 App。",
+  "en": "Some games on the phone can't go into the same app this time."
+ },
+ {
+  "source": "这台电脑上没有它们的 iPhone 版：{0}",
+  "en": "This computer has no iPhone build of: {0}"
+ },
+ {
+  "source": "它们是旧版 S2Arm 出的 iPhone 版，新版认不得，要重新「打 iPhone 包」：{0}",
+  "en": "Built for iPhone by an older S2Arm, which this version can't use. Run \"Build for iPhone\" again for: {0}"
+ },
+ {
+  "source": "确认继续的话，这次先不带它们照装，它们的存档和资源都留在手机上，之后给它们「打 iPhone 包」再装一次就回来。同意一次后，这台手机在这一版 S2Arm 上不再为它们问。",
+  "en": "Confirm to install without them this time. Their saves and resources stay on the phone, and they come back once you build them for iPhone and install again. After you agree once, this phone won't ask about them again on this S2Arm version."
  },
  {
   "source": "先给点名的游戏各「打 iPhone 包」一次，再装到 iPhone；也可以确认后这次先不带它们照装，它们的存档和资源留在手机上，重新出包再装就回来。",
@@ -7208,8 +7269,8 @@
   "en": "Check this computer's network (that s2arm.com opens) and click again; a partial download is never used as a good one."
  },
  {
-  "source": "导出诊断包，手动发到 GitHub 帖子或群里；网络恢复后也可以再点一次「上传给开发者」。",
-  "en": "Export the diagnostics package and post it to the GitHub issue or group yourself; once the network is back you can also click \"Upload to developers\" again."
+  "source": "导出诊断包，手动发到 GitHub 帖子或群里；网络恢复后也可以再点一次「故障报修」。",
+  "en": "Export the diagnostics package and post it to the GitHub issue or group yourself; once the network is back you can also click \"Report a problem\" again."
  },
  {
   "source": "用原版游戏文件重新导入这款：先在游戏库里移除它，再把原版文件拖进来。",
@@ -7218,5 +7279,61 @@
  {
   "source": "进程卡在系统内核里还没退出（多为内存不够时等换页）；等它自行结束后再开，关掉其他占内存的程序可减少再次卡住。",
   "en": "The process is stuck in the system kernel and has not exited yet (usually waiting on paging when memory is short). Wait for it to end on its own before starting again; closing other memory-heavy apps makes it less likely to happen again."
+ },
+ {
+  "source": "免费个人开发者团队签不了这个 App 申请的某项权限（例如「扩展虚拟寻址」）；更新 S2Arm 后重新安装（新版对免费团队只申请能签的权限），或在 Xcode 改用付费开发者团队。",
+  "en": "A free personal development team cannot sign a capability this app requests (such as Extended Virtual Addressing). Update S2Arm and install again (the new version requests only what a free team can sign), or switch to a paid development team in Xcode."
+ },
+ {
+  "source": "直接再出一次包：对不上的文件会重新读、重新算，不用重新导入游戏。还是这样就检查一下游戏库所在的磁盘（Windows：磁盘属性 →「工具」→「检查」），并关掉对游戏库文件夹的杀毒实时扫描或云同步，或把游戏库换到另一块盘。",
+  "en": "Package again: the files that didn't match will be read and computed again, and you don't need to import the game again. If it still happens, check the disk the game library is on (Windows: disk Properties → Tools → Check), turn off antivirus real-time scanning or cloud sync for the game library folder, or move the game library to another disk."
+ },
+ {
+  "source": "资源包核对没通过：出包最后核对资源包时，有文件前后两次读出的内容对不上。多见于磁盘或内存读写不稳定，或有杀毒、云同步软件在改游戏库里的文件。",
+  "en": "Resource pack check failed: When checking the resource pack at the end of packaging, some files read back differently from before. This usually means unstable disk or memory reads, or antivirus or cloud sync software changing files in the game library."
+ },
+ {
+  "source": "这次装完，手机上这几款游戏会打不开（存档和资源包都还在手机上）。",
+  "en": "After this install, these games on the phone won't open (their saves and resources stay on the phone)."
+ },
+ {
+  "source": "它们是在别的电脑上装的，到那台电脑上再「装到 iPhone」一次就回来：{0}",
+  "en": "Installed from another computer; they come back once you \"Install on iPhone\" again from that computer: {0}"
+ },
+ {
+  "source": "它们已从这台电脑的游戏库删除，重新加回游戏库、「打 iPhone 包」再装一次就回来：{0}",
+  "en": "Deleted from this computer's library; they come back once you add them again, \"Build for iPhone\" and install: {0}"
+ },
+ {
+  "source": "确认继续再点一次。",
+  "en": "Confirm and try again to continue."
+ },
+ {
+  "source": "确认后再点一次：点名的游戏会暂时打不开（存档和资源包留在手机上）。别的电脑装的，到那台电脑上再「装到 iPhone」一次就回来；已从游戏库删除的，重新加回、「打 iPhone 包」再装就回来。不想这样就先别装。",
+  "en": "Confirm and try again: the games named won't open for now (their saves and resources stay on the phone). Ones installed from another computer come back once you \"Install on iPhone\" again from that computer; ones deleted from the library come back once you add them again, \"Build for iPhone\" and install. If you don't want that, don't install yet."
+ },
+ {
+  "source": "关掉打开着这个文件夹的资源管理器窗口和自签工具（如 Sideloadly），稍等杀毒软件扫完再重试；若开了「受控文件夹访问」（Windows 安全中心 → 病毒和威胁防护 → 勒索软件防护），把 S2Arm 加进「允许的应用」。",
+  "en": "Close any File Explorer window and sideloading tool (such as Sideloadly) that has this folder open, wait for your antivirus to finish scanning, then try again. If Controlled folder access is on (Windows Security → Virus & threat protection → Ransomware protection), add S2Arm to the allowed apps."
+ },
+ {
+  "source": "关掉正在使用这个游戏文件的程序再重试；若开了「受控文件夹访问」（Windows 安全中心 → 病毒和威胁防护 → 勒索软件防护），把 S2Arm 加进「允许的应用」，或把游戏文件拷到别的文件夹后重新导入。",
+  "en": "Close any program using this game file and try again. If Controlled folder access is on (Windows Security → Virus & threat protection → Ransomware protection), add S2Arm to the allowed apps, or copy the game file to another folder and import it again."
+ },
+ {
+  "source": "原来的导出文件夹正被别的程序占用，这次导出到新文件夹：{0}",
+  "en": "The old export folder is in use by another program, so this export went to a new folder: {0}"
+ },
+ {
+  "source": "用新文件夹里的 S2Arm.ipa 和 .img 自签安装；关掉占用旧文件夹的程序后，可以把旧的那个删掉。",
+  "en": "Sideload with the S2Arm.ipa and .img files in the new folder. After closing the program using the old folder, you can delete the old one."
+ },
+ {
+  "source": "系统不让 S2Arm 往游戏库所在的磁盘写（{0}）",
+  "en": "The system did not let S2Arm write to the drive holding the library ({0})"
+ },
+ {
+  "source": "选的是游戏文件，不是密钥：这里要的是 prod.keys 文本文件（通常几十 KB）；游戏请从「添加游戏」导入。",
+  "en": "That's a game file, not your keys. This needs the prod.keys text file (usually a few dozen KB); add games with \"Add games\" instead."
  }
 ]

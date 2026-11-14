@@ -23,13 +23,45 @@ static uint64_t g_n_shown, g_n_dropped;
 // 诊断读数：相邻两次交上屏隔了多久，按显示节拍分桶（30 帧的游戏在 120 Hz 屏上应当全落在 29–37.5 毫秒那一桶；
 // 落到 37.5–46 毫秒 = 这一帧晚了一个刷新周期）。平均帧率看不出「多数帧准点、少数帧晚一拍」和「每帧都慢一点」的区别。
 static uint64_t g_gap_last, g_gap_bucket[5];
+// 帧间隔直方图（1 毫秒一格，最后一格 = 255 毫秒及以上）：窗口末尾算 p50 / p99 / 最长 / >33 毫秒帧数。
+// 验收要「平均帧、p99、>33 ms 帧数」，分桶只能看个大概，直方图能直接出这三个数。
+static uint32_t g_gap_hist[256];
+static uint64_t g_gap_over33;   // 超过 33 毫秒的帧数（精确按纳秒判，不走直方图取整）
 static void frame_gap_note(void) {
     uint64_t now = plat_now_ns(), d = g_gap_last ? now - g_gap_last : 0; g_gap_last = now;
     if (!d) return;
     int k = d < 29000000ull ? 0 : d < 37500000ull ? 1 : d < 46000000ull ? 2 : d < 54000000ull ? 3 : 4;
     __atomic_fetch_add(&g_gap_bucket[k], 1, __ATOMIC_RELAXED);
+    uint32_t ms = (uint32_t)(d / 1000000ull); if (ms > 255) ms = 255;
+    __atomic_fetch_add(&g_gap_hist[ms], 1, __ATOMIC_RELAXED);
+    if (d > 33333333ull) __atomic_fetch_add(&g_gap_over33, 1, __ATOMIC_RELAXED);
+    // 长帧日志（debug.s2a.nvk_hitch_log=1 才打，扫坑用）：一次超过 80 毫秒就把上一帧的账打出来——回放花了多久、画了多少笔、提交几次。
+    // 回放接近这个间隔说明卡在我们这边；回放很小则说明卡在游戏线程 / present / 等窗口（不归回放层管）。
+    static int hl = -1; if (hl < 0) hl = nvn_plat_flag("nvk_hitch_log", 0) != 0;   // 缺省关：排查顿卡时开
+    uint64_t ex = 0, dr = 0, sb = 0; rp_frame_take(&ex, &dr, &sb);   // 每帧都取（不清账时相邻两帧会累加，读数会虚高）
+    if (hl && d > 80000000ull) {
+        char lb[220];
+        snprintf(lb, sizeof lb, "长帧 %.1f 毫秒（上一帧：回放 %.1f 毫秒、绘制 %llu 笔、提交 %llu 次）",
+                 (double)d / 1e6, (double)ex / 1e6, (unsigned long long)dr, (unsigned long long)sb);
+        nvn_plat_log(NVN_PLAT_LOG_INFO, "present", lb);
+    }
 }
 static void rp_frame_gap_take(uint64_t out[5]) { for (int i = 0; i < 5; i++) out[i] = __atomic_exchange_n(&g_gap_bucket[i], 0, __ATOMIC_RELAXED); }
+// 取走直方图并算 p50 / p99 / 最长 / >33 毫秒帧数（毫秒；空窗口返回 0）
+static void rp_frame_hist_take(double *p50, double *p99, double *mx, uint64_t *over33) {
+    uint64_t h[256], tot = 0; *p50 = *p99 = *mx = 0;
+    *over33 = __atomic_exchange_n(&g_gap_over33, 0, __ATOMIC_RELAXED);
+    for (int i = 0; i < 256; i++) { h[i] = __atomic_exchange_n(&g_gap_hist[i], 0, __ATOMIC_RELAXED); tot += h[i]; }
+    if (!tot) return;
+    uint64_t acc = 0, n50 = (tot + 1) / 2, n99 = (tot * 99 + 99) / 100;
+    for (int i = 0; i < 256; i++) {
+        if (!h[i]) continue;
+        acc += h[i];
+        if (!*p50 && acc >= n50) *p50 = (double)i;
+        if (!*p99 && acc >= n99) *p99 = (double)i;
+        if (h[i]) *mx = (double)i;
+    }
+}
 
 // 平台件在窗口挂上 / 摘下时调。摘下时保证返回后核心不再用旧的面。
 void rp_present_set_surface(nvn_gpu_surface s, int display_hz) {
@@ -90,31 +122,66 @@ uint64_t nvn_be_present(const tex_t *t, double period_s, const int crop[4]) {
             if (now - t_last >= 5000000000ull) {
                 uint64_t pf[RP_PERF_N], nd = 0, nsk = 0; rp_perf_take(pf); rp_draw_stats(&nd, &nsk);
                 uint64_t fr = g_n_shown + 1 - n_last; double sec = (double)(now - t_last) / 1e9, f = fr ? (double)fr : 1.0;
-                char b[640]; snprintf(b, sizeof b, "分时：%.1f 秒上屏 %llu 帧（每秒 %.1f）；每帧：绘制 %.0f 笔、队列提交 %.1f 次共 %.1f 毫秒（其中交后端 %.1f）、等围栏 %.1f 次共 %.1f 毫秒；段从提交到完成平均 %.1f 毫秒；通道 %.1f 个、交上屏 %.1f 毫秒",
+                char b[640]; snprintf(b, sizeof b, "分时：%.1f 秒上屏 %llu 帧（每秒 %.1f）；每帧：绘制 %.0f 笔、队列提交 %.1f 次共 %.1f 毫秒（其中交后端 %.1f）、等围栏 %.1f 次共 %.1f 毫秒（其中等同步 %.1f 次 %.1f 毫秒、Finish %.1f 次 %.1f 毫秒）；段从提交到完成平均 %.1f 毫秒；回放分三段：开段 %.1f / 回放 %.1f / 收尾 %.1f 毫秒、等已完成 %.1f 次、没真等 %.1f 次；GPU 忙 %.1f 毫秒；通道 %.1f 个、交上屏 %.1f 毫秒",
                                       sec, (unsigned long long)fr, (double)fr / sec, (double)(nd - d_last) / f, (double)pf[RP_PERF_SUBS] / f, (double)pf[RP_PERF_SUBMIT_NS] / 1e6 / f, (double)pf[RP_PERF_COMMIT_NS] / 1e6 / f,
-                                      (double)pf[RP_PERF_WAIT_N] / f, (double)pf[RP_PERF_WAIT_NS] / 1e6 / f, pf[RP_PERF_DONE_N] ? (double)pf[RP_PERF_DONE_NS] / 1e6 / (double)pf[RP_PERF_DONE_N] : 0.0, (double)pf[RP_PERF_PASSES] / f, (double)pf[RP_PERF_PRESENT_NS] / 1e6 / f);
+                                      (double)(pf[RP_PERF_WAIT_N] + pf[RP_PERF_WAIT_FIN_N]) / f, (double)(pf[RP_PERF_WAIT_NS] + pf[RP_PERF_WAIT_FIN_NS]) / 1e6 / f,
+                                      (double)pf[RP_PERF_WAIT_N] / f, (double)pf[RP_PERF_WAIT_NS] / 1e6 / f,
+                                      (double)pf[RP_PERF_WAIT_FIN_N] / f, (double)pf[RP_PERF_WAIT_FIN_NS] / 1e6 / f,
+                                      pf[RP_PERF_DONE_N] ? (double)pf[RP_PERF_DONE_NS] / 1e6 / (double)pf[RP_PERF_DONE_N] : 0.0,
+                                      (double)pf[RP_PERF_SUB_PRE_NS] / 1e6 / f, (double)pf[RP_PERF_SUB_EXEC_NS] / 1e6 / f, (double)pf[RP_PERF_SUB_POST_NS] / 1e6 / f,
+                                      (double)pf[RP_PERF_WAIT_ALREADY_N] / f, (double)pf[RP_PERF_WAIT_FAKED_N] / f, (double)pf[RP_PERF_GPU_BUSY_NS] / 1e6 / f,
+                                      (double)pf[RP_PERF_PASSES] / f, (double)pf[RP_PERF_PRESENT_NS] / 1e6 / f);
                 nvn_plat_log(NVN_PLAT_LOG_INFO, "present", b);
-                snprintf(b, sizeof b, "分时（绘制各步，每帧毫秒）：取程序 %.1f、顶点流与索引 %.1f、取贴图视图 %.1f、开通道与取管线 %.1f、动态状态与顶点缓冲 %.1f、绑定 %.1f、后端绘制 %.1f、收尾 %.1f",
-                         (double)pf[RP_PERF_D_PROG] / 1e6 / f, (double)pf[RP_PERF_D_PREP] / 1e6 / f, (double)pf[RP_PERF_D_TEX] / 1e6 / f, (double)(pf[RP_PERF_D_PASS] + pf[RP_PERF_D_PIPE]) / 1e6 / f, (double)pf[RP_PERF_D_DYN] / 1e6 / f, (double)pf[RP_PERF_D_BIND] / 1e6 / f, (double)pf[RP_PERF_D_DRAW] / 1e6 / f, (double)pf[RP_PERF_D_TAIL] / 1e6 / f);
+                snprintf(b, sizeof b, "分时（绘制各步，每帧毫秒）：取程序 %.1f、顶点流与索引 %.1f、取贴图视图 %.1f、开通道与取管线 %.1f、动态状态与顶点缓冲 %.1f、绑定 %.1f、后端绘制 %.1f、收尾 %.1f；回放按命令分：绘制类 %.1f、其余 %.1f",
+                         (double)pf[RP_PERF_D_PROG] / 1e6 / f, (double)pf[RP_PERF_D_PREP] / 1e6 / f, (double)pf[RP_PERF_D_TEX] / 1e6 / f, (double)(pf[RP_PERF_D_PASS] + pf[RP_PERF_D_PIPE]) / 1e6 / f, (double)pf[RP_PERF_D_DYN] / 1e6 / f, (double)pf[RP_PERF_D_BIND] / 1e6 / f, (double)pf[RP_PERF_D_DRAW] / 1e6 / f, (double)pf[RP_PERF_D_TAIL] / 1e6 / f,
+                          (double)pf[RP_PERF_EXEC_DRAW_NS] / 1e6 / f, (double)pf[RP_PERF_EXEC_OTHER_NS] / 1e6 / f);
+                nvn_plat_log(NVN_PLAT_LOG_INFO, "present", b);
+                { char ops[420]; rp_exec_dump_ops(ops, sizeof ops); char lb[1200];
+                  snprintf(lb, sizeof lb, "分时（其余命令里最费时的）：%s；派发 %.1f 次共 %.1f 毫秒（取程序 %.1f、取资源 %.1f、间接携程 %.1f、收通道 %.1f、取管线与绑定与交后端 %.1f；每次扫 %.1f 项）、换目标 %.1f 次（其中收通道共 %.1f 毫秒）、收通道 %.1f 次",
+                           ops[0] ? ops : "（开关 nvk_exec_tm 关着）", (double)pf[RP_PERF_DISP_N] / f, (double)pf[RP_PERF_DISP_TOT_NS] / 1e6 / f, (double)pf[RP_PERF_DISP_SHADER_NS] / 1e6 / f, (double)pf[RP_PERF_DISP_RESOLVE_NS] / 1e6 / f, (double)pf[RP_PERF_DISP_IND_NS] / 1e6 / f, (double)pf[RP_PERF_DISP_FLUSH_NS] / 1e6 / f, (double)pf[RP_PERF_DISP_BIND_NS] / 1e6 / f,
+                           pf[RP_PERF_DISP_N] ? (double)pf[RP_PERF_DISP_ENTS] / (double)pf[RP_PERF_DISP_N] : 0.0, (double)pf[RP_PERF_SETRT_N] / f,
+                           (double)pf[RP_PERF_SETRT_END_NS] / 1e6 / f, (double)pf[RP_PERF_PASSEND_N] / f);
+                  nvn_plat_log(NVN_PLAT_LOG_INFO, "present", lb); }
                 nvn_plat_log(NVN_PLAT_LOG_INFO, "present", b);
                 snprintf(b, sizeof b, "分时（开通道与取管线细分，每帧毫秒）：开通道 %.2f、取管线 %.2f（其中后端取与设 %.2f）；全部通道开始：取附件视图 %.2f、屏障 %.2f、后端开通道 %.2f、记写过 %.2f",
                          (double)pf[RP_PERF_D_PASS] / 1e6 / f, (double)pf[RP_PERF_D_PIPE] / 1e6 / f, (double)pf[RP_PERF_D_PGET] / 1e6 / f,
                          (double)pf[RP_PERF_PB_VIEW] / 1e6 / f, (double)pf[RP_PERF_PB_BAR] / 1e6 / f, (double)pf[RP_PERF_PB_BE] / 1e6 / f, (double)pf[RP_PERF_PB_MARK] / 1e6 / f);
                 nvn_plat_log(NVN_PLAT_LOG_INFO, "present", b);
-                snprintf(b, sizeof b, "分时（贴图解析，每帧）：等锁 %.2f 毫秒、持锁 %.2f 毫秒、没见过的序号 %.1f 个、新建视图 %.1f 个；影子附件 %.2f 毫秒；新贴图：后端建 %.2f 毫秒、扫存储 %.2f 毫秒、上传 %.1f 张 %.2f 毫秒、填零 %.1f 张 %.2f 毫秒、改由通道清零 %.1f 张",
-                         (double)pf[RP_PERF_RES_LOCK] / 1e6 / f, (double)pf[RP_PERF_RES_INIT] / 1e6 / f, (double)pf[RP_PERF_RES_NEW] / f, (double)pf[RP_PERF_RES_VIEWMAKE] / f, (double)pf[RP_PERF_PB_SHADOW] / 1e6 / f,
+                snprintf(b, sizeof b, "分时（贴图解析，每帧）：等锁 %.2f 毫秒、持锁 %.2f 毫秒、没见过的序号 %.1f 个、新建视图 %.1f 个、内容检查按纪元跳过 %.0f 次；影子附件 %.2f 毫秒；新贴图：后端建 %.2f 毫秒、扫存储 %.2f 毫秒、上传 %.1f 张 %.2f 毫秒、填零 %.1f 张 %.2f 毫秒、改由通道清零 %.1f 张",
+                         (double)pf[RP_PERF_RES_LOCK] / 1e6 / f, (double)pf[RP_PERF_RES_INIT] / 1e6 / f, (double)pf[RP_PERF_RES_NEW] / f, (double)pf[RP_PERF_RES_VIEWMAKE] / f, (double)pf[RP_PERF_TEX_EPOCH] / f, (double)pf[RP_PERF_PB_SHADOW] / 1e6 / f,
                          (double)pf[RP_PERF_RES_MAKE] / 1e6 / f, (double)pf[RP_PERF_RES_SCAN] / 1e6 / f, (double)pf[RP_PERF_RES_UPN] / f, (double)pf[RP_PERF_RES_UP] / 1e6 / f, (double)pf[RP_PERF_RES_ZERON] / f, (double)pf[RP_PERF_RES_ZERO] / 1e6 / f, (double)pf[RP_PERF_RES_ZDEFER] / f);
                 nvn_plat_log(NVN_PLAT_LOG_INFO, "present", b);
-                snprintf(b, sizeof b, "分时（通道，每帧）：%.1f 个，共 %.1f 百万像素；颜色附件载入 %.1f 个；挂深度模板的 %.1f 个，其中整个通道没用到它的 %.1f 个；只有 0–1 笔绘制的 %.1f 个；开着的通道被结束的原因：换目标 %.1f、通道中途的整屏清除 %.1f、同一提交里第二次同步 %.1f",
-                         (double)pf[RP_PERF_PASSES] / f, (double)pf[RP_PERF_P_KPIX] / 1e3 / f, (double)pf[RP_PERF_P_LOADC] / f, (double)pf[RP_PERF_P_DS] / f, (double)pf[RP_PERF_P_DS_IDLE] / f, (double)pf[RP_PERF_P_ONE] / f, (double)pf[RP_PERF_P_CUT_RT] / f, (double)pf[RP_PERF_P_CUT_CLEAR] / f, (double)pf[RP_PERF_P_CUT_XFER] / f);
+                snprintf(b, sizeof b, "分时（通道，每帧）：%.1f 个，共 %.1f 百万像素；颜色附件载入 %.1f 个；挂深度模板的 %.1f 个，其中整个通道没用到它的 %.1f 个；只有 0–1 笔绘制的 %.1f 个（挂深度模板 %.1f / 不挂 %.1f，共 %.1f 百万像素；一笔都没画的 %.1f 个）；同目标续接 %.1f 次、挂起清除 %.1f 条、缩小区域 %.1f 个（共 %.1f 百万像素）、影子附件 %.1f 个；开着的通道被结束的原因：换目标 %.1f、通道中途的整屏清除 %.1f、同一提交里第二次同步 %.1f",
+                         (double)pf[RP_PERF_PASSES] / f, (double)pf[RP_PERF_P_KPIX] / 1e3 / f, (double)pf[RP_PERF_P_LOADC] / f, (double)pf[RP_PERF_P_DS] / f, (double)pf[RP_PERF_P_DS_IDLE] / f, (double)pf[RP_PERF_P_ONE] / f, (double)pf[RP_PERF_P_TINY_DS] / f, (double)pf[RP_PERF_P_TINY_NODS] / f, (double)pf[RP_PERF_P_TINY_KPIX] / 1e3 / f, (double)pf[RP_PERF_P_CLEARONLY] / f, (double)pf[RP_PERF_P_CONT] / f, (double)pf[RP_PERF_P_PARK] / f, (double)pf[RP_PERF_P_AREA] / f, (double)pf[RP_PERF_P_AREA_KPIX] / 1e3 / f, (double)pf[RP_PERF_P_SHADOW] / f, (double)pf[RP_PERF_P_CUT_RT] / f, (double)pf[RP_PERF_P_CUT_CLEAR] / f, (double)pf[RP_PERF_P_CUT_XFER] / f);
                 nvn_plat_log(NVN_PLAT_LOG_INFO, "present", b);
-                snprintf(b, sizeof b, "分时（绑定，每帧）：整组沿用没发的阶段 %.0f 个、段内切片表命中 %.0f 块", (double)pf[RP_PERF_BIND_SKIP] / f, (double)pf[RP_PERF_BIND_SLICE_HIT] / f);
+                snprintf(b, sizeof b, "分时（绑定，每帧）：整组没重建直接沿用 %.0f 个、整组重建后没发的阶段 %.0f 个、段内切片表命中 %.0f 块；可沿用却没用成：命令变 %.0f、段变 %.0f、全局写代号变 %.0f、贴图登记代号变 %.0f、程序变 %.0f、base_instance 变 %.0f、换过管线 %.0f、逐项校验不过 %.0f", (double)pf[RP_PERF_BIND_FAST] / f, (double)pf[RP_PERF_BIND_SKIP] / f, (double)pf[RP_PERF_BIND_SLICE_HIT] / f,
+                         (double)pf[RP_PERF_KEEP_F_CMD] / f, (double)pf[RP_PERF_KEEP_F_SEG] / f, (double)pf[RP_PERF_KEEP_F_GEN] / f, (double)pf[RP_PERF_KEEP_F_REG] / f,
+                         (double)pf[RP_PERF_KEEP_F_PG] / f, (double)pf[RP_PERF_KEEP_F_BI] / f, (double)pf[RP_PERF_KEEP_F_PIPESET] / f, (double)pf[RP_PERF_KEEP_F_ITEMS] / f);
                 nvn_plat_log(NVN_PLAT_LOG_INFO, "present", b);
+                { uint64_t bt_tot = 0, bt_be = 0, bt_n = 0; rp_bind_tm_take(&bt_tot, &bt_be, &bt_n);
+                  uint64_t bt_drv = 0, bt_buf = 0, bt_rest = 0; rp_bind_tm_take2(&bt_drv, &bt_buf, &bt_rest);
+                  uint64_t bt_alloc = 0, bt_copy = 0; rp_bind_tm_take3(&bt_alloc, &bt_copy);
+                  snprintf(b, sizeof b, "分时（绑定重建，每帧）：重建 %.0f 次共 %.2f 毫秒（交后端 %.2f；暂存与构造 %.2f，其中驱动段 %.2f、常量缓冲与支持块 %.2f、其它 %.2f；暂存里申请 %.2f、拷贝 %.2f）；常量缓冲暂存 %.0f 次共 %.0f KB（其中程序自带常量段 %.0f 次）、段内切片表命中 %.0f 块",
+                           (double)bt_n / f, (double)bt_tot / 1e6 / f, (double)bt_be / 1e6 / f, (double)(bt_tot - bt_be) / 1e6 / f,
+                           (double)bt_drv / 1e6 / f, (double)bt_buf / 1e6 / f, (double)bt_rest / 1e6 / f,
+                           (double)bt_alloc / 1e6 / f, (double)bt_copy / 1e6 / f,
+                           (double)pf[RP_PERF_UBO_N] / f, (double)pf[RP_PERF_UBO_KB] / f, (double)pf[RP_PERF_UBO_C1_N] / f, (double)pf[RP_PERF_BIND_SLICE_HIT] / f);
+                  nvn_plat_log(NVN_PLAT_LOG_INFO, "present", b); }
                 { uint64_t hb[5]; rp_frame_gap_take(hb); uint64_t ht = hb[0] + hb[1] + hb[2] + hb[3] + hb[4]; if (!ht) ht = 1;
                   snprintf(b, sizeof b, "分时（上屏间隔分布）：不到 29 毫秒 %.0f%%、29–37.5 毫秒 %.0f%%、37.5–46 毫秒 %.0f%%、46–54 毫秒 %.0f%%、更长 %.0f%%",
                            100.0 * (double)hb[0] / (double)ht, 100.0 * (double)hb[1] / (double)ht, 100.0 * (double)hb[2] / (double)ht, 100.0 * (double)hb[3] / (double)ht, 100.0 * (double)hb[4] / (double)ht);
                   nvn_plat_log(NVN_PLAT_LOG_INFO, "present", b); }
-                snprintf(b, sizeof b, "分时（上传，每帧）：贴图整张上传 %.1f 次共 %.0f KB；池镜像同步 %.0f KB（其中直接写 %.0f KB）", (double)pf[RP_PERF_TEX_UP_N] / f, (double)pf[RP_PERF_TEX_UP_KB] / f, (double)pf[RP_PERF_BUF_SYNC_KB] / f, (double)pf[RP_PERF_BUF_SYNC_DIRECT_KB] / f);
+                {   // 验收口径：平均帧（上面的每秒帧数）、p50 / p99 / 最长、>33 毫秒帧数
+                    double p50 = 0, p99 = 0, mx = 0; uint64_t ov = 0; rp_frame_hist_take(&p50, &p99, &mx, &ov);
+                    snprintf(b, sizeof b, "分时（帧间隔）：p50 %.1f 毫秒、p99 %.1f 毫秒、最长 %.1f 毫秒、超过 33 毫秒 %.0f 帧（占 %.0f%%）",
+                             p50, p99, mx, (double)ov, 100.0 * (double)ov / (double)f);
+                    nvn_plat_log(NVN_PLAT_LOG_INFO, "present", b); }
+                snprintf(b, sizeof b, "分时（上传，每帧）：贴图整张上传 %.1f 次共 %.0f KB；池镜像同步 %.0f KB（其中直接写 %.0f KB）；缓冲解析：快路 %.0f 次、逐页慢路 %.0f 次（共查 %.0f 页）、不受写跟踪 %.0f 次", (double)pf[RP_PERF_TEX_UP_N] / f, (double)pf[RP_PERF_TEX_UP_KB] / f, (double)pf[RP_PERF_BUF_SYNC_KB] / f, (double)pf[RP_PERF_BUF_SYNC_DIRECT_KB] / f,
+                         (double)pf[RP_PERF_BUF_FAST_N] / f, (double)pf[RP_PERF_BUF_SLOW_N] / f, (double)pf[RP_PERF_BUF_PAGES_N] / f, (double)pf[RP_PERF_BUF_NOSPAN_N] / f);
+                if (pf[RP_PERF_RES_N])
+                    snprintf(b + strlen(b), sizeof b - strlen(b), "；解析分段：取镜像与快检 %.1f、锁等待 %.1f、慢路尾 %.1f 毫秒（%.0f 段/帧）；落地 %.0f 次共 %.0f KB、新建镜像 %.0f 次",
+                             (double)pf[RP_PERF_RES_FIND_NS] / 1e6 / f, (double)pf[RP_PERF_RES_LW_NS] / 1e6 / f, (double)pf[RP_PERF_RES_LA_NS] / 1e6 / f, (double)pf[RP_PERF_RES_N] / f,
+                             (double)pf[RP_PERF_LAND_N] / f, (double)pf[RP_PERF_LAND_KB] / f, (double)pf[RP_PERF_MIRROR_N] / f);
                 nvn_plat_log(NVN_PLAT_LOG_INFO, "present", b);
                 snprintf(b, sizeof b, "分时（回写，每帧）：Finish 没等的提交 %.1f 次；做完要写回的提交 %.1f 次；事件 %.1f、计数器报告 %.1f（类型位图 %#llx）、遮挡事件 %.1f、显卡写缓冲 %.1f；这一窗口新建贴图的宽高 %d 种", (double)pf[RP_PERF_FIN_SKIP] / f, (double)pf[RP_PERF_FX_SUBS] / f, (double)pf[RP_PERF_FX_EVENT] / f, (double)pf[RP_PERF_FX_REPORT] / f, (unsigned long long)rp_fx_report_types(), (double)pf[RP_PERF_FX_OCC] / f, (double)pf[RP_PERF_FX_GW] / f, rp_res_new_sizes_take());
                 nvn_plat_log(NVN_PLAT_LOG_INFO, "present", b);
@@ -126,6 +193,7 @@ uint64_t nvn_be_present(const tex_t *t, double period_s, const int crop[4]) {
                 t_last = now; n_last = g_n_shown + 1; d_last = nd;
             }
         }
+        rp_sync_lag_present();   // 开关 nvk_sync_lag=3：补一次「本帧只放行一次同步等待」的额度
         frame_gap_note();
         if (!g_n_shown++ || g_n_shown % 600 == 0) {   // 首帧一行，之后每 600 帧一行
             uint64_t nd = 0, ns = 0; rp_draw_stats(&nd, &ns);

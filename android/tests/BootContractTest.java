@@ -366,7 +366,8 @@ public final class BootContractTest {
         replaceArtifact(graphicsNoFeature, artifact(BootContract.REWRITE_ABI, "modules/main.patched.bin", "modules/main.fixups.tsv")
             .replaceFirst("\\{", "{\"extensions\": {\"org.s2arm.graphics.v1\": {\"manifest\": \"shaders/vulkan/direct/graphics.v1.json\", "
                 + "\"sha256\": \"" + graphicsHash + "\", \"bytes\": " + descriptor.length + "}}, "));
-        expectBad(graphicsNoFeature, "graphics extension without required feature");
+        BootContract.Game noFeature = BootContract.open(graphicsNoFeature);   // 扩展在、只是没登记：照常接受并用上（不堵门）
+        check(noFeature.graphics != null && noFeature.graphics.sha256.equals(graphicsHash), "graphics extension without required feature still used");
 
         File graphicsWrongHash = valid();
         write(graphicsWrongHash, graphicsPath, descriptor);
@@ -465,19 +466,24 @@ public final class BootContractTest {
         writeModule(wrongOrder, "subsdk0");
         writeModule(wrongOrder, "sdk");
         replaceArtifact(wrongOrder, artifactWithModules("main", "sdk", "subsdk0"));
-        expectBad(wrongOrder, "old alphabetical order sdk before subsdk0");
+        BootContract.Game reordered = BootContract.open(wrongOrder);   // 旧字母序包不拒收：按 Horizon 装载序排好（不堵门）
+        check(reordered.modules.size() == 3 && reordered.modules.get(0).name.equals("main")
+            && reordered.modules.get(1).name.equals("subsdk0") && reordered.modules.get(2).name.equals("sdk"),
+            "old alphabetical order reordered to main/subsdk0/sdk");
 
         File badNumeric = valid();
         writeModule(badNumeric, "subsdk2");
         writeModule(badNumeric, "subsdk10");
         writeModule(badNumeric, "sdk");
         replaceArtifact(badNumeric, artifactWithModules("main", "subsdk10", "subsdk2", "sdk"));
-        expectBad(badNumeric, "subsdk numeric order violated");
+        BootContract.Game numeric = BootContract.open(badNumeric);   // subsdk 数字序错：排好（不堵门）
+        check(numeric.modules.get(1).name.equals("subsdk2") && numeric.modules.get(2).name.equals("subsdk10"), "subsdk numeric order restored");
 
         File mainNotFirst = valid();
         writeModule(mainNotFirst, "subsdk0");
         replaceArtifact(mainNotFirst, artifactWithModules("subsdk0", "main"));
-        expectBad(mainNotFirst, "main not first");
+        BootContract.Game mainFirst = BootContract.open(mainNotFirst);   // main 不在第一：排到第一（不堵门）
+        check(mainFirst.modules.get(0).name.equals("main") && mainFirst.modules.get(1).name.equals("subsdk0"), "main moved first");
 
         System.out.println(failures == 0 ? "BootContract: ok" : "BootContract: " + failures + " FAILED");
         if (failures != 0) System.exit(1);

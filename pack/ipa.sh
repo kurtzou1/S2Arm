@@ -110,7 +110,9 @@ errline() { LC_ALL=C /usr/bin/grep -a -m1 -E 'error:|fatal error' "$1" 2> /dev/n
 #   10-21 查实：原先整个 pkg/ 先删，九款每版都把 3.5 万–13.8 万个文件（10–34 GB）全部重克隆、重算 SHA、再逐字节核对，资源包 + 核对 1–2 分钟
 t0=$SECONDS; for e in "$W/pkg"/*; do case "${e##*/}" in pack|pack.files|pack.image.key|pack.files.state.tsv|pack.files.verify.tsv) ;; *) _root_rm "$e";; esac; done; _root_rm "$W/build"; mkdir -p "$W/pkg"
 TL=$W/pkg/timing.tsv; { printf '步\t墙钟秒\tuser秒\tsys秒\t退出码\n'; cat "$TL0"; } > "$TL"; rm -f "$TL0"   # 出包子步拆账（10-20 维护者：有缓存时出包 476 秒，要分清是哪一步）
-PN=5; PD=0   # 出包步数：组装（预编壳）、签名、打 ipa、资源包、资源包核对（本提交第一次出包另加一步出壳）
+# 出包步数：收尾各步由 pack/ipa_tail.py plan_steps 按签名方式 / 只出程序定（不在这里手写常数，原先写死 5 显示过「出包 6/5」）；本提交第一次出包另加一步出壳
+TAILN=$("${S2A_PY:-python3}" "$H/ipa_tail.py" --count-steps --work - --game - --shell - --bundle-id - --key - --title - --sign "$SIGN" ${AO:+--app-only}) || fail "算不出出包步数"
+PN=$TAILN; PD=0
 tmk() { TM "$@"; local r=$?; PD=$((PD + 1)); prog_tick 出包 "$PD" "$PN"; return $r; }   # 计时（tools/tm.py）+ 记一步进度
 # 包内能力清单 s2a_caps.tsv（组装时 pack/ship_ext.py 拷进包、宿主 caps.c 读）：改写阶段已在各平台共用的产物根里出好两份（pack/stage_rewrite.sh → pack/gen_caps.sh），这里不再另生成：
 #   缺省 = 发布包（默认开、强信号才关）；--all-caps = 测试包（有来源即开），用 s2a_caps.all.tsv 顶替
@@ -138,7 +140,7 @@ if [ -z "$SHELL_DIR" ]; then
   fi
   if [ ! -f "$SHELL_DIR/manifest.json" ] || [ -n "$STALE" ]; then mkdir -p "$SC" || fail "建不了壳缓存目录 $SC"
     [ "$(uname -s)" = Darwin ] || fail "本机没有壳 ${SID}，也没给发布源 S2A_SHELL_SOURCE（只有 Mac 能现出壳）"
-    ST=$SC/.tmp.$SID.$$; tmk "出壳（本提交第一次）" "$TL" -- bash "$H/shell_build.sh" "$ST" >> "$W/pkg/build.log" 2>&1 || { rm -rf "${ST:?}"; fail "出壳失败（$(grep -a '【红】' "$W/pkg/build.log" | tail -1)）"; }
+    ST=$SC/.tmp.$SID.$$; PN=$((TAILN + 1)); tmk "出壳（本提交第一次）" "$TL" -- bash "$H/shell_build.sh" "$ST" >> "$W/pkg/build.log" 2>&1 || { rm -rf "${ST:?}"; fail "出壳失败（$(grep -a '【红】' "$W/pkg/build.log" | tail -1)）"; }
     if [ -n "$STALE" ] && ! mv "$SHELL_DIR" "$SC/.tmp.stale.$SID.$$" 2> /dev/null; then   # 旧编译器出的那份挪开（.tmp.* 两小时后可清：维护方内部清扫器定期删，手动清要确认无出包在跑）
       [ ! -e "$SHELL_DIR" ] || fail "旧编译器出的壳 $SHELL_DIR 挪不开（不挪开新壳会被套进它里面）"; fi   # 别的单已先挪走 = 不在了，照常
     if ! mv "$ST" "$SHELL_DIR" 2> /dev/null; then rm -rf "${ST:?}"; fi   # 两单同时出同一提交的壳：先到的发布，后到的丢自己那份（内容相同）
@@ -150,7 +152,7 @@ touch "$SHELL_DIR" 2> /dev/null   # 目录时间 = 最近使用（维护方内�
 # 出包收尾（组装 → 存档身份 → 图标 → Info.plist → 签名 → 提高内存上限权限核实 → 打 ipa → 进包核对 → 资源包 → 资源包核对）：唯一实现在 pack/ipa_tail.py，
 #   Windows 的 Python 编排调同一份（#1100，11-04）。包号 / 着色器目标 / 画面模式 / 资源包要件的判法都在那里
 . "$H/build_id.sh"; PKID=$(s2a_build_id "$PK")
-S2A_PKG_PROG_DONE=$PD S2A_PKG_PROG_TOTAL=$PN "${S2A_PY:-python3}" "$H/ipa_tail.py" --work "$W" --game "$G" --shell "$SHELL_DIR" --bundle-id "$BID" --suffix "$DSUF" \
+S2A_PKG_PROG_DONE=$PD "${S2A_PY:-python3}" "$H/ipa_tail.py" --work "$W" --game "$G" --shell "$SHELL_DIR" --bundle-id "$BID" --suffix "$DSUF" \
   --key "$PK" --title "$DT" --sign "$SIGN" --team "$TEAM" ${SIKEY:+--save-identity "$SI"} ${AO:+--app-only} > "$W/pkg/tail.out" 2>&1; trc=$?
 grep -av "^【红】" "$W/pkg/tail.out"; [ $trc = 0 ] || fail "$(grep -a "^【红】" "$W/pkg/tail.out" | tail -1 | sed "s/^【红】//")"
 if [ -n "$AO" ]; then mkdir -p "${S2A_APP_ONLY_OUT:?只出程序要 S2A_APP_ONLY_OUT}" && cp "$W/pkg/$G.ipa" "$W/pkg/timing.tsv" "$W/pkg/build.log" "$S2A_APP_ONLY_OUT/" || fail "拷出 ipa 失败"

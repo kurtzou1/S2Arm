@@ -18,7 +18,7 @@ namespace S2Arm.Launcher;
 public sealed partial class EnvironmentWindow
 {
     private string installMode = "device";      // installMode 作业读回的 mode：device / export（没读到按一键装）
-    private bool exportAvailable;                // 导出作业合入前恒为 false：导出一项置灰
+    private bool exportAvailable;                // 作业层读回的 exportAvailable：只报给控制口（ControlInstallMode），界面不再据它置灰
     private bool installModeTried, installModeLoading;
     // 更新作业：正在跑 / 计数；结果没看过时顶栏留一个可点掉的提示（"" = 成功，否则失败原因）
     private bool phoneUpdating;
@@ -90,8 +90,7 @@ public sealed partial class EnvironmentWindow
             Grid.SetColumn(impactor, 1); identity.Children.Add(impactor);
             panel.Children.Add(identity);
         }
-        panel.Children.Add(InstallModeOption("export", T("install.mode.export"),
-            T("install.mode.export_note") + (exportAvailable ? "" : "\n" + T("install.mode.export_soon")), exportAvailable));
+        panel.Children.Add(InstallModeOption("export", T("install.mode.export"), T("install.mode.export_note"), true));   // 导出作业已合入，一直可选（11-14 删掉置灰与「下一版提供」）
         var card = Card(panel);
         AutomationId(card, "env.installMode");
         return card;

@@ -1,6 +1,7 @@
 // Standalone input workbench. Links the production UIKit/layout/controller/pad code;
 // no guest, game resources, emulator memory window or renderer is started here.
 #import <UIKit/UIKit.h>
+#import "s2a_l10n.h"
 #import "controller.h"
 #import "vpad.h"
 #import "play_layout.h"
@@ -114,5 +115,6 @@ int s2a_screen_w_after_load(void) { return s2a_screen_w(); }
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)options { return YES; }
 @end
 int main(int argc, char **argv) {
+    @autoreleasepool { s2a_l10n_apply_choice(); }   // 同正式 App（ios/app.m 构造期）：设置里选过界面语言就按选的，跟随系统清覆盖
     @autoreleasepool { return UIApplicationMain(argc, argv, NSStringFromClass(S2AInputLabApplication.class), NSStringFromClass(S2AInputLabApp.class)); }
 }

@@ -17,7 +17,7 @@ import uuid
 import community
 import host_update
 import layout
-from core import Failure, atomic, clone, contained, digest, read, tree_hash
+from core import Cancelled, Failure, atomic, clone, contained, digest, read, tree_hash
 from library import input_identity, require_game, selected_packages, source_path, stage_sources, validate_input
 import milestones as ms
 import toolchain
@@ -125,8 +125,8 @@ def require_automatic_memory(c):
 
 def runtime_env(c, game, runtime, input_ok=True):
     require_automatic_memory(c)
-    # 游戏语言：请求带 gameLanguage（玩家在启动设置里单独指定）就设 S2A_SYSTEM_LANGUAGE；不带就跟启动器界面语言（下面的 S2A_UI_LANGUAGE，维护者 11-13），
-    # 宿主 services/S2A.Services/Host.cs PickLanguage → SystemLocale.FromUi；游戏不支持的落英语，英语也没有用游戏自己的缺省（SystemLocale.TitleFallback）
+    # 游戏语言：请求带 gameLanguage（玩家在启动设置里逐款选）就设 S2A_SYSTEM_LANGUAGE；不带就跟 Mac 系统首选语言（宿主 services/S2A.Services/Host.cs PickLanguage
+    #   → SystemLocale.FromPreferred；11-13 起不跟启动器界面语言：界面只有中英，日 / 韩语玩家的 Switch 存档名字会乱码）；游戏不支持的落英语，英语也没有用游戏自己的缺省
     language = c.r.get("gameLanguage")
     if language is not None and language not in LANGUAGES:
         raise Failure("游戏语言代码无效。")
@@ -193,9 +193,34 @@ def runtime_env(c, game, runtime, input_ok=True):
         env["S2A_INPUT_CONFIG"] = str(path)
     if c.r.get("inputGuideHandled") is True:
         env["S2A_INPUT_GUIDE_SHOWN"] = "1"
-    if c.r.get("uiLanguage") in ("zh-Hans", "zh-Hant", "en"):   # 也是游戏语言的缺省（维护者 11-13：没单独指定就跟启动器界面语言，Host.cs PickLanguage）
+    if c.r.get("uiLanguage") in ("zh-Hans", "zh-Hant", "en"):   # 宿主自己的界面文案（按键引导等）跟启动器界面语言；不再决定游戏语言（见上 gameLanguage）
         env["S2A_UI_LANGUAGE"] = c.r["uiLanguage"]
     return env
+
+
+def collect_pipeline_seed(c, game_id, docs):
+    """把 GUI Mac 局见过的管线并进下一次出包读取的不可变来源；失败不改变本局结果。"""
+    game_id = game_id.upper()
+    source = Path(docs) / "wire" / game_id / "pso_user.tsv"
+    if not source.is_file() or source.is_symlink():
+        return
+    script = c.engine / "tools" / "pso_seed_keep.sh"
+    message = ""
+    try:
+        result = subprocess.run(["/bin/bash", str(script), "--one", game_id, str(source)],
+                                env=c.env(), capture_output=True, text=True, timeout=30)
+        output = (result.stdout if result.returncode == 0 else result.stderr or result.stdout).strip()
+        if result.returncode:
+            message = f"管线种子来源：本局记录未能收纳（退出 {result.returncode}：{output[-300:]}）"
+        elif output:
+            message = output.splitlines()[-1]
+    except (OSError, subprocess.TimeoutExpired) as error:
+        message = f"管线种子来源：本局记录未能收纳（{error}）"
+    if message:
+        try:
+            c.emit("message", message)
+        except Cancelled:
+            pass
 
 
 def launch(c):
@@ -261,6 +286,7 @@ def launch(c):
             marker.unlink(missing_ok=True)
             if seed:
                 finish_seed(c, game["id"], log)
+            collect_pipeline_seed(c, game["id"], env["S2A_DOCS"])
             # Context.run waits for the host, including failure/cancellation.
             # Do not accumulate per-run snapshots after the process exits.
             if env.get("S2A_INPUT_CONFIG"):

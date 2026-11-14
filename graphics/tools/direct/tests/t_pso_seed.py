@@ -45,5 +45,12 @@ with tempfile.TemporaryDirectory() as t:
     r = run(p('lib.tsv'))
     ck(f'只装库的 S d / S f 挪到末尾、保持原相对顺序；S a、几何 S d_bg3、R、C 原序（得 {rows()}；{r.stdout.strip()[:80]}）',
        r.returncode == 0 and rows() == [f'S\t{A}_b\t0', f'S\t{D}_bg3\t2', f'R\t{RAB}', f'C\t{C}_b', f'S\t{D}_b\t0', f'S\t{F}_b\t1'] and '只装库的 S 行 2 挪到末尾' in r.stdout)
+    # 网格管线 M 行（11-13 开局发白根修②）：顶点位置是网格键，第 2 列任务键（「-」= 无），第 3 列补齐掩码。期望（按规则手写）：M(a 网格, b 片元, 无任务) 与 M(d, b, 任务 f) 收；
+    #   任务键 x 不在库里的、网格键 x 不在库里的、长度不对的不收；收下的 M 行用到的键 a、d、b 算「建管线用到」，S a 不挪到末尾；统计行带 M 2
+    MAB, MDB = rkey(A, B), rkey(D, B, tag=3)
+    open(p('mesh.tsv'), 'w').write(f'S\t{A}_b\t0\nM\t{MAB}\t-\t0\nM\t{MDB}\t{F}_b\t0\nM\t{MAB}\t{X}_b\t0\nM\t{rkey(X, B)}\t-\t0\nM\t{MAB}00\t-\t0\n')
+    r = run(p('mesh.tsv'))
+    ck(f'M 行：键都在库里的两行收、S a 不挪到末尾；任务键 / 网格键不在库里、长度不对的不收（得 {rows()}；{r.stdout.strip()[:80]}）',
+       r.returncode == 0 and rows() == [f'S\t{A}_b\t0', f'M\t{MAB}\t-\t0', f'M\t{MDB}\t{F}_b\t0'] and '/ M 2' in r.stdout)
 print(f't_pso_seed：{n} 项，失败 {bad}')
 sys.exit(1 if bad else 0)

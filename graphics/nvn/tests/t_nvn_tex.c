@@ -1,8 +1,10 @@
 // Texture 组（#270 N12）三条语义，走生产 bootstrap、不初始化 GPU：
 //   · GL 互操作名字：Set 之后 Get 原样返回（Metal 路径不消费，只保查询）；
-//   · 稀疏贴图布局：本项目不支持 sparse tiling，GetSparseTileLayout 必须把输出清零并点名一次（不返回假布局）；
+//   · 稀疏贴图布局（#962）：贴图的 GetSparseTileLayout 与构造器的同一口径（按贴图建时的描述 tex_t.d）——稀疏描述给出页的 4 个字段（期望照 t_nvn_a 手算那一行），
+//     非稀疏描述 / 全零对象给 0；原先一律填零，一款游戏按 0 字节的页算 MapVirtual 请求、全被拒后崩；
 //   · 调试 ID：NVN 没有 SetDebugID，本层用对象初始化序号 → 非零、且同一对象多次查询稳定。
 #include "nvn_protos.h"
+#include "nvn_obj.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -24,6 +26,7 @@ int main(void) {
     API(NVNT_nvnTextureBuilderSetSize2D, bsz, nvnTextureBuilderSetSize2D);
     API(NVNT_nvnTextureBuilderSetFlags, bflg, nvnTextureBuilderSetFlags);
     API(NVNT_nvnTextureBuilderSetStride, bstr, nvnTextureBuilderSetStride);
+    API(NVNT_nvnTextureBuilderSetLevels, blev, nvnTextureBuilderSetLevels);
     API(NVNT_nvnTextureBuilderGetStorageSize, bsize, nvnTextureBuilderGetStorageSize);
     if (bad) return 1;
 
@@ -37,16 +40,26 @@ int main(void) {
     setName(&builder.b, 0);
     CHECK(getName(&builder.b) == 0, "Set 0 后 Get=%u（应 0）", getName(&builder.b));
 
-    // ② 稀疏布局：输出必须被清零（先填满垃圾再查）
+    // ② 稀疏布局：全零对象（非稀疏）→ 4 个字段都写 0（先填满垃圾再查）；
+    //    稀疏描述 RGBA8 256×256、1 级、标志 0x20 → 1 级平铺、页 128×128×1（同 t_nvn_a 手算那一行：64 KiB 页 / 4 字节 = 128×128）；同描述去掉稀疏标志 → 0
     NVNtextureSparseTileLayout lay;
     memset(&lay, 0xAB, sizeof lay);
     NVNtexture tex;
     memset(&tex, 0, sizeof tex);
     sparse(&tex, &lay);
-    unsigned char *p = (unsigned char *)&lay;
-    int dirty = 0;
-    for (size_t i = 0; i < sizeof lay; i++) dirty += p[i] != 0;
-    CHECK(dirty == 0, "GetSparseTileLayout 没清零输出（%d 个非零字节）", dirty);
+    CHECK(lay.numTiledLevels == 0 && lay.tileWidth == 0 && lay.tileHeight == 0 && lay.tileDepth == 0, "全零对象：GetSparseTileLayout = %d / %d×%d×%d（应全 0）", lay.numTiledLevels, lay.tileWidth, lay.tileHeight, lay.tileDepth);
+    {
+        union { NVNtextureBuilder b; char raw[0x80]; } sb; memset(&sb, 0, sizeof sb);
+        bdef(&sb.b); btgt(&sb.b, (NVNtextureTarget)1); bfmt(&sb.b, NVN_FORMAT_RGBA8); bsz(&sb.b, 256, 256); blev(&sb.b, 1); bflg(&sb.b, 0x20);
+        ((tex_t *)&tex)->d = ((const tex_builder_t *)&sb.b)->d;   // 贴图按这个构造器建时记下的描述
+        memset(&lay, 0xAB, sizeof lay); sparse(&tex, &lay);
+        CHECK(lay.numTiledLevels == 1 && lay.tileWidth == 128 && lay.tileHeight == 128 && lay.tileDepth == 1,
+              "稀疏 RGBA8 256×256：GetSparseTileLayout = %d / %d×%d×%d（应 1 / 128×128×1）", lay.numTiledLevels, lay.tileWidth, lay.tileHeight, lay.tileDepth);
+        bflg(&sb.b, 0); ((tex_t *)&tex)->d = ((const tex_builder_t *)&sb.b)->d;
+        memset(&lay, 0xAB, sizeof lay); sparse(&tex, &lay);
+        CHECK(lay.numTiledLevels == 0 && lay.tileWidth == 0, "非稀疏 RGBA8 256×256：GetSparseTileLayout = %d / %d（应 0 / 0）", lay.numTiledLevels, lay.tileWidth);
+        memset(&tex, 0, sizeof tex);
+    }
 
     // ③ 调试 ID：同一对象稳定（本层用初始化序号；这里对象未初始化，要求两次查询一致即可）
     uint64_t a = dbg(&tex), b = dbg(&tex);
@@ -61,6 +74,6 @@ int main(void) {
     bflg(&lb.b, 0); size_t blk = bsize(&lb.b);   // 负对照：不带线性标志仍按块线性，比线性大
     CHECK(blk > (size_t)1920 * 1080, "块线性 1920×1080 R8：存储 %zu（应大于线性的 %d）", blk, 1920 * 1080);
 
-    printf("%s t_nvn_tex：GL 名字往返、稀疏布局清零、调试 ID 稳定、线性渲染目标存储 → %s\n", bad ? "✗" : "✓", bad ? "有不符合项" : "通过");
+    printf("%s t_nvn_tex：GL 名字往返、稀疏布局同构造器口径、调试 ID 稳定、线性渲染目标存储 → %s\n", bad ? "✗" : "✓", bad ? "有不符合项" : "通过");
     return bad != 0;
 }

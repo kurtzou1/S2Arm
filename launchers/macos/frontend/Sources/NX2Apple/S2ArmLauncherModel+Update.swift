@@ -1,4 +1,5 @@
-// S2Arm（不是上游文件）：覆盖更新（11-08 维护者）。下载、校验、替换、回滚都在共用的 pack/jobs/updater.py，这里只管状态和按钮。
+// S2Arm（不是上游文件）：覆盖更新（11-08 维护者）。v0.3.10 起下载、验签、替换、回滚、重启都交给 Sparkle 2（SparkleUpdate.swift），这里只管状态和按钮；
+// 有没有新版、更新说明、公告仍由 pack/jobs/updater.py inbox 给。
 // 玩家的数据不在 App 里；出包等作业进行中不提示、不替换。
 import AppKit
 import Foundation
@@ -20,25 +21,16 @@ extension S2ArmLauncherModel {
         switch updateState {
         case .idle: return ["state": "idle"]
         case .working(let id, let percent): return ["state": "working", "detail": id, "percent": percent ?? NSNull()]
-        case .ready: return ["state": "ready", "detail": updateReady?["version"] ?? "", "via": updateReady?["via"] ?? ""]
-        case .failed(let code): return ["state": "failed", "detail": code]
+        case .ready: return ["state": "ready", "detail": sparkleUpdate.foundVersion ?? "", "via": "sparkle"]
+        case .failed(let code): return ["state": "failed", "detail": code, "reason": updateFailure ?? ""]
         }
     }
 
     private var currentVersion: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "" }
-    private var updatesFolder: URL { provider.client.environment.privateRoot.appendingPathComponent("updates") }
 
-    /// 启动时：告诉替换进程新版起来了；上一次更新失败要告诉玩家。
+    /// 启动时：把 Sparkle 起起来（上一次替换的收尾、换好后的确认都在它里面）
     func finishPendingUpdate() {
-        let fm = FileManager.default
-        if fm.fileExists(atPath: updatesFolder.appendingPathComponent("pending.json").path) {
-            try? Data("ok".utf8).write(to: updatesFolder.appendingPathComponent("health.ok"))
-        }
-        let failure = updatesFolder.appendingPathComponent("last_failure.json")
-        if let data = try? Data(contentsOf: failure), let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
-            if let code = json["code"] as? String { updateState = .failed(code) }
-            try? fm.removeItem(at: failure)
-        }
+        _ = sparkleUpdate
     }
 
     /// 启动时一次：查版本 + 取公告，按「永远只给最新一期」算出弹窗 / 横幅 / 消息（pack/jobs/updater.py inbox）。有新版照旧在后台下好，不打断玩家；
@@ -86,41 +78,47 @@ extension S2ArmLauncherModel {
         }
     }
 
+    /// 下载新版：交给 Sparkle（SparkleUpdate）查 appcast、下载、验签；进度映射到 updateState
     func downloadUpdate() {
         switch updateState { case .idle, .failed: break; default: return }
+        updateFailure = nil
         updateState = .working("update.downloading", 0)
-        let install = Bundle.main.bundlePath
-        Task {
-            let result = await provider.client.updatePrepare(current: currentVersion, install: install) { [weak self] event in
-                let state = event["state"] as? String, done = event["done"] as? Double ?? (event["done"] as? Int).map(Double.init), total = event["total"] as? Double ?? (event["total"] as? Int).map(Double.init)
-                Task { @MainActor in
-                    switch state {
-                    case "downloading": self?.updateState = .working("update.downloading", (done != nil && (total ?? 0) > 0) ? Int(done! * 100 / total!) : nil)
-                    case "verifying": self?.updateState = .working("update.verifying", nil)
-                    case "unpacking": self?.updateState = .working("update.unpacking", nil)
-                    default: break
-                    }
-                }
-            }
-            guard let result, result["state"] as? String == "ready" else {
-                updateState = .failed(result?["code"] as? String ?? "update_failed")
-                return
-            }
-            updateReady = result
-            updateState = .ready
-        }
+        saveUpdateNotes()
+        sparkleUpdate.checkAndDownload()
     }
 
-    /// 只有玩家点了才重启。有局 / 任务在跑：先拦下说清（草图④：前置检查，不进换版；update_app_busy 是换版时旧 S2Arm 没退出，另说）
+    /// 换上新版后第一次打开要弹「这版更新了什么」（updater.py inbox 读 updates/notes/<版本>.json）：说明随查到的新版记在本机，换完不再联网
+    private func saveUpdateNotes() {
+        guard let update = availableUpdate, let version = update["version"] as? String, let notes = update["notes"], !(notes is NSNull),
+              JSONSerialization.isValidJSONObject(notes), let data = try? JSONSerialization.data(withJSONObject: notes) else { return }
+        let folder = provider.client.environment.privateRoot.appendingPathComponent("updates/notes")
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try? data.write(to: folder.appendingPathComponent("\(version).json"))
+    }
+
+    /// 只有玩家点了才重启。有局 / 任务在跑：先拦下说清（草图④：前置检查，不进换版）。替换、回滚、重启都由 Sparkle 做
     func restartToUpdate() {
         if busy { updateGate = session?.kind == .play ? "update.gate.playing" : "update.gate.busy"; return }
-        guard let ready = updateReady else { return }
+        guard sparkleUpdate.readyToInstall else { return }
         updatePopup = nil
-        do {
-            try provider.client.updateApply(ready: ready, install: Bundle.main.bundlePath, arguments: Array(CommandLine.arguments.dropFirst()))
-            NSApp.terminate(nil)
-        } catch {
-            updateState = .failed("update_failed")
+        sparkleUpdate.installNow()
+    }
+}
+
+/// 退出 App，先等窗口上的 sheet 摘掉。窗口挂着 sheet 时 `NSApp.terminate` 被 AppKit 忽略、不报错（macOS 27.0.1 实测）：
+/// 更新弹窗里点「现在更新」，替换进程起来了、S2Arm 没退，等满 120 秒记 update_app_busy，界面上什么都没发生。
+/// 每 `pollSeconds` 看一次：没有 sheet 了就退；到 `forcePolls` 次还挂着就主动摘；到 `maxPolls` 次照旧调一次退出、不再等。
+@MainActor enum QuitAfterSheets {
+    static let pollSeconds = 0.05, forcePolls = 20, maxPolls = 100
+
+    static func run(windows: @escaping @MainActor () -> [NSWindow] = { NSApp.windows }, polls: Int = 0,
+                    terminate: @escaping @MainActor () -> Void = { NSApp.terminate(nil) }) {
+        let attached = windows().filter { $0.attachedSheet != nil }
+        if attached.isEmpty || polls >= maxPolls { terminate(); return }
+        if polls >= forcePolls { for window in attached { if let sheet = window.attachedSheet { window.endSheet(sheet) } } }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(pollSeconds * 1_000_000_000))
+            run(windows: windows, polls: polls + 1, terminate: terminate)
         }
     }
 }

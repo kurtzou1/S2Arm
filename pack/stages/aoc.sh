@@ -24,6 +24,7 @@ import os
 from pathlib import Path
 import shutil
 import sys
+import time
 
 stage, cache = (Path(os.path.abspath(p)) for p in sys.argv[1:])
 try:
@@ -44,6 +45,22 @@ try:
 except (OSError, ValueError) as error:
     print('【红】追加内容缓存发布失败：' + str(error), file=sys.stderr)
     sys.exit(1)
+# 同款旧键回收（11-13 一台出包机系统盘：键随工具代码变，同款旧键从没人删，58 份 39 GB 把系统盘挤到 18 GB；玩家机器每次更新后出包同样只增不减）：
+#   新键发布后，同款（名字同前缀「<款>-」）别的完整缓存只留最新 1 份，其余 AOC_CACHE_KEEP_S（缺省 6 小时）内没动过的删掉——
+#   产物根是克隆出去的独立副本，删缓存不影响已出的包；6 小时内动过的可能有旧版工具的出包正在从它克隆，不碰。回收失败只记黄，不拦出包。
+keep_s = float(os.environ.get('AOC_CACHE_KEEP_S', '21600'))
+prefix = cache.name.rsplit('-', 1)[0] + '-'
+try:
+    old = sorted((p for p in cache.parent.iterdir()
+                  if p.name.startswith(prefix) and p.name != cache.name and '.tmp.' not in p.name
+                  and not p.is_symlink() and (p / 'aoc.tsv').is_file()),
+                 key=lambda p: p.stat().st_mtime, reverse=True)[1:]
+    now = time.time()
+    for p in old:
+        if now - p.stat().st_mtime > keep_s:
+            shutil.rmtree(p)
+except OSError as error:
+    print('🟡 追加内容旧缓存回收失败（不影响出包）：' + str(error), file=sys.stderr)
 PY
 }
 # 逐份兜底解出的各份结果并进 <目标>（审计 P2-30）：aoc_merge_parts <目标> <分份目录…>；各份 aoc.tsv 按序号去重（卡带里自带的 DLC 每份都会解出一遍，留第一份），

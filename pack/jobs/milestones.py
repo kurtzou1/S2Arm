@@ -30,6 +30,25 @@ MILESTONES = [
     ("install", "安装并校验", "把准备好的文件装进游戏库，并逐个校验。", True),
     ("ipa", "编 App 与签名", "编出 iPhone / iPad 版程序、签名，并打好要拷进手机的资源包。", False),
 ]
+# 装法是「导出，自己签名安装」时（维护者 11-13：出包页起分两路）：最后一步不叫「编 App 与签名」——这一路不签名、不连手机，
+#   出完接着导出成未签名 S2Arm.ipa + 每款 .img（install.export_phone）。作用说明照实写
+EXPORT_LABELS = {"ipa": ("整理 iPhone 版程序与资源包", "编出 iPhone / iPad 版程序、打好资源包；出完接着导出成未签名的 S2Arm.ipa 和这款的 .img，你用自签工具安装。")}
+
+
+def _export_mode(c):
+    """装法设置（install.json，install.install_mode 同一份）：导出模式 → True。读不到当一键装"""
+    try:
+        return json.loads((Path(c.private) / "install.json").read_text(encoding="utf-8")).get("mode") == "export"
+    except (OSError, ValueError, AttributeError, TypeError):
+        return False
+
+
+def label_of(c, mid):
+    """这一步给玩家看的（名称, 作用）：导出模式下换成自签路实际在做的"""
+    row = next((l, p) for m, l, p, _ in MILESTONES if m == mid)
+    return EXPORT_LABELS.get(mid, row) if _export_mode(c) else row
+
+
 # 各种任务的里程碑（与现行流程逐段对上）：
 # - build_dual：Mac 打包（pack/refresh.sh S2A_PACK_PLAT=macos，同一键出包 --target mac）
 # - ipa_dual：打 iPhone 包（pack/oneclick/oneclick.sh）
@@ -88,7 +107,7 @@ def plan(c, size_gb, kind="build_dual", reused=()):
 
 def _emit_plan(c):
     est = estimate_details(c, c.milestone_size, c.milestone_kind, c.milestone_reused)
-    rows = {m: (l, p) for m, l, p, _ in MILESTONES}
+    rows = {m: label_of(c, m) for m in c.milestone_ids}
     c.emit("plan", "准备计划", milestones=[dict(id=m, label=rows[m][0], purpose=rows[m][1],
                                             expected=None if est[m]["seconds"] is None else round(est[m]["seconds"], 1),
                                             source=est[m]["source"], samples=est[m]["samples"], basis=est[m]["basis"],
@@ -109,7 +128,7 @@ def reuse(c, mid, on=True):
 
 def enter(c, mid):
     """进入一个里程碑：发 stage 事件（带里程碑 id），并记开始时间（结束时间 = 下一个里程碑开始）"""
-    label = next(l for m, l, _, _ in MILESTONES if m == mid)
+    label = label_of(c, mid)[0]
     with c.guard:
         now = time.monotonic()
         for m, t in list(c.milestone_t.items()):

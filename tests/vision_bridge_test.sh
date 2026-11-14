@@ -35,4 +35,11 @@ echo s6 > $V6/session; echo png6 > $V6/v01.png; printf 'session=s6\ntried=\nesca
 FAKE_FAIL_TO=1 S2A_VISION_SH=$T/vis6.sh BRIDGE_PARENT=$$ bash $H/tools/vision_bridge.sh D6 com.x $T/l6 & BP6=$!
 waitf $V6/v01.done; touch $T/l6/stop; for _ in $(seq 1 50); do kill -0 $BP6 2> /dev/null || break; sleep 0.1; done
 ck "⑥ 推回失败一次：只重推不重问（驾驶员被调 $(grep -c . $T/calls6.log) 次、v01.done = $(cat $V6/v01.done 2> /dev/null)）" '[ "$(grep -c . $T/calls6.log)" = 1 ] && [ "$(cat $V6/v01.done 2> /dev/null)" = s6 ] && grep -q "推回失败" $T/l6/bridge.log'
+# ⑦ 多款容器包：自动玩家信箱在 Documents/games/<号>/vision（S2A_VISION_DIR，tools/dev_run.sh 按启动上下文传）——桥在那里答、不去 Documents/vision
+V7=$T/dev/D7/apps/com.x/Documents/games/0400486024DEC000/vision; mkdir -p $V7 $T/l7
+echo s7 > $V7/session; echo png7 > $V7/v01.png; printf 'session=s7\ntried=\nescalate=0\n' > $V7/v01.req
+S2A_VISION_DIR=Documents/games/0400486024DEC000/vision S2A_VISION_SH=$T/vis.sh BRIDGE_PARENT=$$ bash $H/tools/vision_bridge.sh D7 com.x $T/l7 & BP7=$!
+waitf $V7/v01.done
+ck "⑦ 多款容器信箱目录：v01.done = s7、答案推回同一目录" '[ "$(cat $V7/v01.done 2> /dev/null)" = s7 ] && [ -s $V7/v01.json ]'
+touch $T/l7/stop; wait $BP7 2> /dev/null
 [ $bad = 0 ] && echo "vision_bridge 单测全过" || { echo "vision_bridge 单测有不通"; exit 1; }

@@ -78,6 +78,12 @@ int s2a_shell_vpad_set_hold_lock(const char *game_id, int enabled);
 char *s2a_shell_save_context(void);
 char *s2a_shell_save_request(const char *json);
 void *s2a_shell_cloud_sync_vc(const char *game_id, void (*done)(void *ctx), void *ctx);
+//   s2a_shell_cloud_upload_background：实现在 S2ArmShellHost（Swift）。游戏进行中切后台时主线程调：开了云存档、本机比云端新才上传（要后台收尾时间、传完交还）；
+//     云端有更新 / 冲突不动，留给下次起局前的同步
+void s2a_shell_cloud_upload_background(const char *game_id);
+
+// 故障报修（游戏库设置页最下面）：实现在宿主 ios/diag.m（可不填的一句说明 → 打包上传、给短码）；本包弱定义缺省什么也不做
+void s2a_shell_report_problem(void);
 
 #ifdef __cplusplus
 }

@@ -268,3 +268,19 @@ class WatcherLifecycle(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExportModeLabelTests(unittest.TestCase):
+    def test_last_step_follows_install_mode(self):
+        """维护者 11-13：出包页起分两路。装法是导出时最后一步不叫「编 App 与签名」（这一路不签名、不连手机），
+        计划事件和进入这一步的 stage 事件都用自签路的名称；一键装 / 没设过装法照旧。期望手写"""
+        import milestones as m
+        with tempfile.TemporaryDirectory() as d:
+            c = types.SimpleNamespace(private=Path(d))
+            self.assertEqual(m.label_of(c, "ipa")[0], "编 App 与签名")                    # 没设过装法：按一键装
+            (Path(d) / "install.json").write_text(json.dumps({"mode": "export"}))
+            self.assertEqual(m.label_of(c, "ipa")[0], "整理 iPhone 版程序与资源包")
+            self.assertIn("未签名的 S2Arm.ipa", m.label_of(c, "ipa")[1])
+            self.assertEqual(m.label_of(c, "unpack")[0], "解包")                          # 别的步不变
+            (Path(d) / "install.json").write_text(json.dumps({"mode": "device"}))
+            self.assertEqual(m.label_of(c, "ipa")[0], "编 App 与签名")

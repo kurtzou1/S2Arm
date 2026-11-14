@@ -15,14 +15,20 @@
 @property(nonatomic, copy) void (^switchGame)(UIViewController *presenter);
 @end
 
+// 最上面那一层页面（主线程）：要弹新页面时从它弹，不因底下已有页面就静默不开（11-13 维护者「不许堵门」：
+//   原先「已经有页面弹着就 return」，玩家点了没任何反应）。正在关掉的那层不算
+static inline UIViewController *s2a_top_presenter(UIViewController *c) {
+    while (c.presentedViewController && !c.presentedViewController.isBeingDismissed) c = c.presentedViewController;
+    return c;
+}
 // Main thread only. A shell without a game may leave runtime capabilities nil.
 void s2a_settings_set_runtime(S2ASettingsRuntime *runtime);
 // 游戏内齿轮菜单（ios/vpad.m）用：存档管理 / 重启 / 是否多款容器；没登记时 nil
 S2ASettingsRuntime *s2a_settings_runtime(void);
 // Main thread only, after the visible shell presenter and its ordinary input /
 // diagnostic attachments are ready. Works before a game starts and during play;
-// missing game capabilities are disabled. A nil or already-presenting controller
-// is ignored, so callers should deliver pending actions after their modal closes.
+// missing game capabilities are disabled. Presents over whatever is already on
+// top of the presenter (s2a_top_presenter); only a nil presenter is ignored.
 // Input stays isolated through nested layout/file/share/confirmation flows until
 // the whole settings navigation closes. This entry never starts a game.
 void s2a_settings_present(UIViewController *presenter);

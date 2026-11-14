@@ -57,6 +57,40 @@ int main(void) {
     eq("② 第 3 帧在不可读页：打前 2 帧后停、不二次缺页", 2, frames_logged((uint64_t)&st[0], log, sizeof log));
     munmap(pg, 0x4000);
     eq("③ 第 1 帧就在已卸掉的地址：0 行", 0, frames_logged((uint64_t)pg + 0x200, log, sizeof log));
+    // ⑥ 指令原文（#368）：手写 5 个指令字，取中间那条前 2 后 2 → 原样 5 个、中间带 [ ]；地址在不可读页 → 「读不到」、不二次缺页
+    { void s2a_code_words(uint64_t, int, int, char *, size_t); static uint32_t code[5] = {0xd503201f, 0xaa0003e1, 0xf9000c1f, 0x94000002, 0xd65f03c0};
+      char w[256]; s2a_code_words((uint64_t)&code[2], 2, 2, w, sizeof w);
+      eq("⑥ 指令原文照写、中间那条带括号", 1, strcmp(w, "d503201f aa0003e1 [f9000c1f] 94000002 d65f03c0") == 0);
+      uint8_t *np = mmap(NULL, 0x4000, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+      s2a_code_words((uint64_t)np + 0x100, 2, 2, w, sizeof w); eq("⑥ 不可读页：读不到", 1, strcmp(w, "读不到") == 0); munmap(np, 0x4000); }
+    // ⑦ 调用点 → 被调的是谁（诊断#59429a：崩在刚调完的函数返回值上，要知道 bl 进的是哪个导入）：手搭一个模块——
+    //   site 处 bl 到 PLT 桩（adrp x16 / ldr x17, [x16, #o]），桩指向 GOT 槽，JMPREL 里一条 r_offset = 槽、符号名 nnTestImport。
+    //   槽放在桩前 4 页（adrp 页数为负）。期望按构造：目标 = 桩地址、槽 = 构造的槽地址、名字 = nnTestImport；不是 bl → 0；bl 进普通代码 → 槽 0、目标照算
+    { uint64_t s2a_call_target(uint64_t, uint64_t *); const char *s2a_import_name(uint64_t);
+      uint8_t *img = mmap(NULL, 0x8000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+      uint64_t site = (uint64_t)img + 0x100, stub = (uint64_t)img + 0x5000, slot = (uint64_t)img + 0x1008, plain = (uint64_t)img + 0x200;
+      int64_t pg = -4;   // (slot 页 − stub 页) / 4096：0x1000 − 0x5000
+      *(uint32_t *)site = 0x94000000u | (uint32_t)(((stub - site) / 4) & 0x3FFFFFF);
+      *(uint32_t *)(site + 4) = 0x94000000u | (uint32_t)(((plain - (site + 4)) / 4) & 0x3FFFFFF);
+      *(uint32_t *)(site + 8) = 0xf9400c00u;   // ldr x0, [x0, #0x18]：不是 bl
+      *(uint32_t *)stub = 0x90000010u | (uint32_t)((pg & 3) << 29) | (uint32_t)(((pg >> 2) & 0x7FFFF) << 5);
+      *(uint32_t *)(stub + 4) = 0xF9400000u | (uint32_t)((0x008 / 8) << 10) | (16u << 5) | 17u;
+      static Elf64_Sym sym[2]; static const char str[] = "\0nnTestImport";
+      sym[1].st_name = 1;
+      Elf64_Rela *rel = (Elf64_Rela *)(img + 0x6000); rel[0] = (Elf64_Rela){.r_offset = 0x1008, .r_info = ((uint64_t)1 << 32) | 1026, .r_addend = 0};
+      static Elf64_Dyn dyn[3]; dyn[0] = (Elf64_Dyn){23, {.d_ptr = 0x6000}}; dyn[1] = (Elf64_Dyn){2, {.d_val = sizeof(Elf64_Rela)}}; dyn[2] = (Elf64_Dyn){0, {0}};
+      memset(&g_mod[0], 0, sizeof g_mod[0]); memcpy(g_mod[0].name, "main", 5); g_mod[0].base = img; g_mod[0].size = 0x8000;
+      g_mod[0].dyn = dyn; g_mod[0].symtab = sym; g_mod[0].strtab = str; g_nmod = 1;
+      uint64_t got = 1, t = s2a_call_target(site, &got);
+      eq("⑦ bl 进 PLT 桩：目标 = 桩地址", (long long)stub, (long long)t);
+      eq("⑦ 桩的 GOT 槽（adrp 负页数）= 构造的槽", (long long)slot, (long long)got);
+      const char *nm = s2a_import_name(got);
+      eq("⑦ 槽 → 导入名 nnTestImport", 1, nm && strcmp(nm, "nnTestImport") == 0);
+      eq("⑦ 不在重定位表里的槽 → NULL", 1, s2a_import_name(slot + 8) == NULL);
+      t = s2a_call_target(site + 4, &got);
+      eq("⑦ bl 进普通代码：目标照算", (long long)plain, (long long)t); eq("⑦ bl 进普通代码：没有槽", 0, (long long)got);
+      eq("⑦ 不是 bl → 0", 0, (long long)s2a_call_target(site + 8, &got));
+      g_nmod = 0; munmap(img, 0x8000); }
     // ④ 两段式：子进程装崩溃处理后读空指针。期望第一段（只用 write）原始现场行（信号 0xb）、寄存器行、帧链行都在，
     //   且排在第二段完整报告（「CRASH 信号」行）之前
     { char path[] = "/tmp/t_crash_raw_XXXXXX"; int fd = mkstemp(path);
@@ -108,6 +142,6 @@ int main(void) {
       eq("⑥ 权限 当前 r-- / 最大 rwx", 1, strstr(out, "权限 当前 r-- / 最大 rwx") != NULL);
       munmap((void *)ro, 0x4000); }
     if (bad) { printf("✗ t_crash：%d/%d 项不符\n", bad, n); return 1; }
-    printf("✓ t_crash：%d 项崩溃现场全符（回溯好链、坏指针不二次缺页、未映射起点、两段式第一段先落盘、两线程同时崩两份现场都在）\n", n);
+    printf("✓ t_crash：%d 项崩溃现场全符（回溯好链、坏指针不二次缺页、未映射起点、两段式第一段先落盘、两线程同时崩两份现场都在、调用点反查导入名）\n", n);
     return 0;
 }

@@ -167,8 +167,12 @@ struct PhoneJobPanel: View {
                 SuccessSeal()
                 Text(t("phone.headline.export")).font(.manrope(44, .heavy)).tracking(-1.4).accessibilityIdentifier("phone.title")
             }
-            Text(t("phone.done.export").replacingOccurrences(of: "{0}", with: (o.exportFolder as NSString).abbreviatingWithTildeInPath))
-                .font(.manrope(16)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+            // 路径可点：点了在访达打开（维护者 11-11：界面上的路径一律可点打开）
+            Button { NSWorkspace.shared.open(URL(fileURLWithPath: o.exportFolder)) } label: {
+                Text(t("phone.done.export").replacingOccurrences(of: "{0}", with: (o.exportFolder as NSString).abbreviatingWithTildeInPath))
+                    .font(.manrope(16)).foregroundStyle(.secondary).underline().fixedSize(horizontal: false, vertical: true).multilineTextAlignment(.leading)
+            }
+            .buttonStyle(.plain).accessibilityIdentifier("phone.export.path")
             HStack(alignment: .top, spacing: 52) {
                 ForEach(Array(stats.enumerated()), id: \.offset) { _, s in
                     VStack(alignment: .leading, spacing: 6) {
@@ -182,8 +186,24 @@ struct PhoneJobPanel: View {
                     Text(line).font(.manrope(14)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }
-            Button { NSWorkspace.shared.open(URL(fileURLWithPath: o.exportFolder)) } label: { LauncherHeroActionLabel(title: t("phone.export.open"), symbol: "folder") }
-                .buttonStyle(.plain).accessibilityIdentifier("phone.export.open")
+            // 推到手机（11-13）：推进去了说一句；没推成写作业给的原因（缺线 / 没信任 / 没装 S2Arm…）+「推到手机」重试
+            if !o.pushed.isEmpty {
+                Label(t("phone.export.pushed").replacingOccurrences(of: "{0}", with: o.pushed.joined(separator: "、")), systemImage: "checkmark.circle")
+                    .font(.manrope(14)).fixedSize(horizontal: false, vertical: true).accessibilityIdentifier("phone.export.pushed")
+            } else {
+                Text(o.pushNote.isEmpty ? t("phone.export.push_hint") : loc.backend(o.pushNote))
+                    .font(.manrope(14)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).accessibilityIdentifier("phone.export.pushNote")
+            }
+            HStack(spacing: 12) {
+                Button { NSWorkspace.shared.open(URL(fileURLWithPath: o.exportFolder)) } label: { LauncherHeroActionLabel(title: t("phone.export.open"), symbol: "folder") }
+                    .buttonStyle(.plain).accessibilityIdentifier("phone.export.open")
+                if o.pushed.isEmpty {
+                    Button { model.pushExportToPhone(gameID: session.gameID) } label: {
+                        LauncherHeroActionLabel(title: model.exportPushing ? t("phone.export.pushing") : t("phone.export.push"), symbol: "iphone.and.arrow.forward")
+                    }
+                    .buttonStyle(.plain).disabled(model.exportPushing).accessibilityIdentifier("phone.export.push")
+                }
+            }
         }
         .accessibilityIdentifier("phone.done")
     }

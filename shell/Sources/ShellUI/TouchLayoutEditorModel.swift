@@ -157,7 +157,12 @@ enum TouchLayoutScreens {
         let home: CGFloat = insets.bottom > 0 ? 21 : 0
         let side = island > 30 ? island : 0
         let sideways = PadScreen(size: CGSize(width: long, height: short), insets: PadScreen.Insets(left: side, bottom: home, right: side))
-        guard long / short < 1.7 else { return (sideways, nil) }
+        // A phone upright (split screen works on every iPhone: the picture in the top half, the controls below, no fold). It used to have
+        //   no upright screen here, so split layouts could only be edited on a foldable or an iPad.
+        if long / short >= 1.7 {
+            let top = upright ? insets.top : max(insets.leading, insets.trailing)
+            return (sideways, PadScreen(size: CGSize(width: short, height: long), insets: PadScreen.Insets(top: top, bottom: insets.bottom > 0 ? 34 : 0)))
+        }
         // A foldable's inner display upright: the fold across the middle, the picture above it keeps only the top inset.
         let fold = CGRect(x: 0, y: long / 2 - 20, width: short, height: 40)
         let top = upright ? insets.top : max(insets.leading, insets.trailing)

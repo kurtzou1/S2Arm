@@ -116,6 +116,15 @@ static void remap(void) {
     tex_count(&t,40,31,"再读：头一块变成块 40，后一块仍是块 31");
     API(nvnTextureFinalize)(&t); API(nvnMemoryPoolFinalize)(&v); cases++;
 }
+// #962：0 字节的请求（游戏按页大小算出 0）照成功、什么都不挂也不撤：原先交给 vm_remap 回 KERN_INVALID_ARGUMENT，整次 MapVirtual 失败
+static void zero_size(void) {
+    phase="0 字节映射请求照成功、不影响已挂的页"; NVNmemoryPool v; vpool_init(&v,2*BLOCK);
+    CHECK(map(&v,0,50,2*BLOCK),"虚拟 [0, 2 块) ← 物理块 50–51");
+    CHECK(map(&v,0,60,0),"虚拟 0 起 0 字节 ← 物理块 60：成功");
+    map_req un={NULL,0,BLOCK,0,0,0}; CHECK(API(nvnMemoryPoolMapVirtual)(&v,1,(const NVNmappingRequest *)&un),"撤 0 字节：成功");
+    NVNtexture t; tex_init(&t,&v,0); tex_count(&t,50,51,"贴图仍读块 50 / 51");
+    API(nvnTextureFinalize)(&t); API(nvnMemoryPoolFinalize)(&v); cases++;
+}
 // Trine 5：96 MB 虚拟池还没映射就建整池缓冲；建成、地址 = 池地址 + 偏移；两个 Map 同真驱动给 NULL
 static void buffer_before_map(void) {
     phase="未映射的虚拟池上建缓冲（Trine 5）"; NVNmemoryPool v; vpool_init(&v,0x6000000);
@@ -218,7 +227,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     if (argc==4 && !strcmp(argv[1],"--replay-check")) return replay_check(strtoull(argv[2],NULL,0),strtoull(argv[3],NULL,0));
     if (argc==2 && !strcmp(argv[1],"--hole")) { setup(); hole_511(); printf("%s 子进程 hole_511：%u 项检查、%u 项不符\n",fails?"✗":"✓",checks,fails); return fails?1:0; }
     if (!getenv("S2A_CMD_ARENA")) { setenv("S2A_CMD_ARENA","1",1); setenv("T_NVN_VPOOL_SELF",argv[0],1); execv(argv[0],argv); perror("execv"); return 1; }   // 帧录区在构造期按环境变量占
-    static const struct { const char *name; void (*fn)(void); } all[]={{"two_runs",two_runs},{"negative_base",negative_base},{"remap",remap},{"buffer_before_map",buffer_before_map},{"beyond_reservation",beyond_reservation},{"many_pools",many_pools},{"fragmented",fragmented},{"frame_rec",frame_rec}};
+    static const struct { const char *name; void (*fn)(void); } all[]={{"two_runs",two_runs},{"negative_base",negative_base},{"remap",remap},{"buffer_before_map",buffer_before_map},{"beyond_reservation",beyond_reservation},{"many_pools",many_pools},{"fragmented",fragmented},{"frame_rec",frame_rec},{"zero_size",zero_size}};
     if (argc>2) { fprintf(stderr,"用法：%s [例名]\n",argv[0]); return 2; }
     setup();
     int ran=0; for (size_t i=0; i<sizeof all/sizeof *all; i++) if (argc==1 || !strcmp(argv[1],all[i].name)) { all[i].fn(); ran++; }

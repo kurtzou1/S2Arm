@@ -77,6 +77,7 @@ void s2a_rumble_apply_settings(void);
 //   手机马达和系统手柄先过 s2a_hp_feel 再乘倍率（同 Mac 宿主 macos/front_mac.m）：游戏的振幅是给 HD 线性马达的，常见值 0.06–0.19，
 //   按原值播几乎摸不到，之前「强」档最大一下也只有 0.19 × 1.8 ≈ 0.34。NS2 Pro 本身就是 HD 马达，振幅原样乘倍率
 static _Atomic float g_rumble_gain = 1;
+float s2a_ios_rumble_gain(void) { return atomic_load(&g_rumble_gain); }   // ios/slot_feedback.m：玩家 2–4 的震动走同一个开关与档位
 static float finite_clamp(float x, float lo, float hi);
 static float rumble_scaled(float amp, BOOL feel) {
     amp = finite_clamp(amp, 0, 1);
@@ -333,8 +334,10 @@ static void pad_face_sync(void);
 // 本地多手柄（双人同玩）：槽 0 = 玩家 1，仍走 pad.c（触屏 / NS2 Pro / 系统手柄三选一，服务层读 s2a_pad_read_ex）；
 //   槽 1–3 = 其余系统扩展手柄各一只，服务层读 s2a_vpad_read_pad（协议同 Mac macos/front_mac.m）。分槽规则共用 runtime/src/pad.c s2a_slot_plan。
 //   输入队列上写、服务层输入线程读：按槽原子量（同 front_mac.m）。
-// TODO(多手柄 + 震动 / 体感)：震动会话、Core Haptics 引擎与体感现在都只跟槽 0 那只（g_haptic_device / s2a_pad_rumble_session 单例），
-//   服务层 ControllerFeedback 也只有一个玩家号；玩家 2 的震动 / 体感要先有按槽的反馈导出与服务层按玩家分发，再接到这里的槽位手柄
+// 震动 / 体感：玩家 1 走这里的单例（g_haptic_device / s2a_pad_rumble_session）；玩家 2–4（槽 1–3）走 ios/slot_feedback.m 的按槽导出
+//   （s2a_pad_set_rumble_slot / s2a_pad_read_motion_slot，服务层 ControllerFeedback 按玩家分发，协议同 Mac），这里分槽后把每槽的手柄交过去
+void s2a_ios_slot_feedback_owner(int slot, GCController *c); void s2a_ios_slot_feedback_motion_wanted(int want);
+void s2a_ios_slot_feedback_active(int active); void s2a_ios_slot_feedback_stop(void);
 #define S2A_IOS_MAX_PADS 4
 static _Atomic uint32_t g_slot_buttons[S2A_IOS_MAX_PADS];
 static _Atomic int32_t g_slot_sticks[S2A_IOS_MAX_PADS][4];
@@ -586,6 +589,7 @@ static void pad_face_sync(void) {
         LOG("系统手柄：%s 接入玩家 %d", next.vendorName.UTF8String ?: "GameController", i + 1);
     }
     for (int i = 1; i < S2A_IOS_MAX_PADS; i++) [self publishSlot:i];   // 空槽清零；新接入的立即采一次
+    for (int i = 1; i < S2A_IOS_MAX_PADS; i++) s2a_ios_slot_feedback_owner(i, _slotOwner[i]);   // 玩家 2–4 的震动 / 体感跟着换手柄
     if (atomic_exchange(&g_slot_live, live) != live) LOG("系统手柄：槽位 %d 个（含触屏 / 玩家 1）", live);
     return _slotOwner[0];
 }
@@ -815,6 +819,7 @@ static void log_controllers(int why) {   // why：0 启动时、1 连接通知�
     pthread_mutex_unlock(&g_feedback_mu);
     s2a_pad_set_active(foreground);
     atomic_store(&g_slots_active, foreground);   // 槽 1–3：下面 selectSystem 分槽时按它采样或清零
+    s2a_ios_slot_feedback_active(foreground);   // 玩家 2–4 的震动 / 体感：后台不收
     if (foreground) { phone_refresh_availability(); [self reloadAdapterPreference]; if (_adapterEnabled) [self reloadRecord]; }
     if (!foreground && _bleStarted) {
         _bleResuming = NO;
@@ -970,6 +975,7 @@ void s2a_rumble_apply_settings(void) {
     int lv = level ? (int)[level integerValue] : 2; lv = lv < 0 ? 0 : lv > 5 ? 5 : lv;
     float gain = (on && ![on boolValue]) ? 0 : gains[lv];
     float old = atomic_exchange(&g_rumble_gain, gain);
+    if (gain == 0 && old != 0) s2a_ios_slot_feedback_stop();   // 玩家 2–4 也马上停
     if (gain == 0 && old != 0 && g_system_haptics_queue) {
         dispatch_async(g_system_haptics_queue, ^{ system_stop_on_queue(); s2a_phone_rumble_stop(); });
         if (atomic_load(&g_adapter_enabled) && atomic_load(&g_ble_ready)) atomic_load(&g_ns2)->stop_rumble();
@@ -1024,6 +1030,7 @@ __attribute__((visibility("default"), used)) void s2a_pad_set_motion_enabled(int
     pthread_mutex_lock(&g_motion_mu);
     int want = !!enabled;
     atomic_store(&g_phone_motion_wanted, want);
+    s2a_ios_slot_feedback_motion_wanted(want);   // 玩家 2–4 的手柄传感器跟着开关
     enabled = want && atomic_load(&g_adapter_enabled);
     const ns2_api *api = atomic_load(&g_ns2);
     if (atomic_exchange(&g_motion_requested, enabled) != enabled && api && atomic_load(&g_adapter_enabled)) api->set_motion_enabled(enabled);

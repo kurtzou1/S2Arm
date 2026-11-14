@@ -63,18 +63,19 @@ int main(void) {
       }
       int st = 0; waitpid(c, &st, 0);
       if (!WIFEXITED(st) || WEXITSTATUS(st)) fails++; else printf("  ✓ 旧 fail / fail_seen / mode=generic 在：起局仍选直连，三个文件都被删并打日志\n"); }
-    // 没有直连库、没有 S2A_GFX → 不能直连（host_main.c 据此报「游戏文件缺失」），日志「图形模式：没有直连库」；S2A_GFX=generic 不认：打【红】、照包判（有库 → 直连）
+    // 没有直连库、没有 S2A_GFX → 照样直连、着色器现编（11-13「不许堵门」，原先不能直连、起局收局），日志写明现编、短写「无直连库·现编」；
+    //   S2A_GFX=generic 不认：打【红】、照包判
     { fflush(stdout); pid_t c = fork();
       if (!c) {
           char lf[600], buf[4096] = ""; snprintf(lf, sizeof lf, "%s/log_nolib.txt", g_dir); int fd = open(lf, O_RDWR | O_CREAT | O_TRUNC, 0644); g_s2a_logfd = fd;
           unsetenv("S2A_GFX"); g_vk_lib = 0; g_gl_lib = 0;
           int m = s2a_gfx_mode(); ssize_t n = pread(fd, buf, sizeof buf - 1, 0); if (n > 0) buf[n] = 0;
-          int ok = m == S2A_GFX_GENERIC && strstr(buf, "图形模式：没有直连库") && !strcmp(s2a_gfx_mode_brief(), "无直连库");
-          if (!ok) printf("✗ 没有直连库：期望不能直连、日志「图形模式：没有直连库」、短写「无直连库」，实际模式 %d、短写「%s」；日志「%s」\n", m, s2a_gfx_mode_brief(), buf);
+          int ok = m == S2A_GFX_DIRECT && strstr(buf, "图形模式：直连") && strstr(buf, "现编") && !strcmp(s2a_gfx_mode_brief(), "无直连库·现编");
+          if (!ok) printf("✗ 没有直连库：期望照样直连、日志写「现编」、短写「无直连库·现编」，实际模式 %d、短写「%s」；日志「%s」\n", m, s2a_gfx_mode_brief(), buf);
           fflush(stdout); _exit(ok ? 0 : 1);
       }
       int st = 0; waitpid(c, &st, 0);
-      if (!WIFEXITED(st) || WEXITSTATUS(st)) fails++; else printf("  ✓ 没有直连库：不能直连，日志写明\n"); }
+      if (!WIFEXITED(st) || WEXITSTATUS(st)) fails++; else printf("  ✓ 没有直连库：照样直连、现编，日志写明\n"); }
     { fflush(stdout); pid_t c = fork();
       if (!c) {
           char lf[600], buf[4096] = ""; snprintf(lf, sizeof lf, "%s/log_generic.txt", g_dir); int fd = open(lf, O_RDWR | O_CREAT | O_TRUNC, 0644); g_s2a_logfd = fd;

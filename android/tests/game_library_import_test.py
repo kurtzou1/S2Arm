@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Actual library/activity/installer contracts; only Android boundaries have host stubs."""
+"""Actual library/activity/installer contracts; Android and unused export have strict host stubs."""
 from pathlib import Path
 import subprocess
 import tempfile
@@ -12,7 +12,13 @@ GAME_LIBRARY = JAVA / 'org/s2arm/android/GameLibrary.java'
 LIBRARY_ACTIVITY = JAVA / 'org/s2arm/android/LibraryActivity.java'
 
 STUBS = {
-'android/net/Uri.java': '''package android.net; public class Uri {}''',
+'android/os/Parcelable.java': '''package android.os; public interface Parcelable {}''',
+'android/net/Uri.java': '''package android.net; public class Uri implements android.os.Parcelable {}''',
+'android/content/ClipData.java': '''package android.content; import android.net.Uri; public class ClipData {
+ public static ClipData newRawUri(CharSequence label,Uri uri){throw new AssertionError("diagnostic share unexpectedly called");} }''',
+'android/content/SharedPreferences.java': '''package android.content; public interface SharedPreferences {
+ boolean getBoolean(String key,boolean fallback); Editor edit();
+ interface Editor { Editor putBoolean(String key,boolean value); void apply(); } }''',
 'android/database/Cursor.java': '''package android.database; public interface Cursor extends AutoCloseable {
  boolean moveToNext(); String getString(int i); void close(); }''',
 'android/content/ContentResolver.java': '''package android.content; import android.net.Uri; import android.database.Cursor;
@@ -23,7 +29,21 @@ STUBS = {
  public File getExternalFilesDir(String s){return new File(root,"external");} public File getFilesDir(){return new File(root,"internal");}
  public Context getApplicationContext(){return this;} public File getCacheDir(){return new File(root,"cache");}
  public ContentResolver getContentResolver(){return new ContentResolver();} public PackageManager getPackageManager(){return new PackageManager();}
- public String getPackageName(){return packageName;} public ApplicationInfo getApplicationInfo(){ApplicationInfo a=new ApplicationInfo();a.flags=flags;return a;} }''',
+ public String getPackageName(){return packageName;} public ApplicationInfo getApplicationInfo(){ApplicationInfo a=new ApplicationInfo();a.flags=flags;return a;}
+ public static final int MODE_PRIVATE=0; private static final java.util.Map<String,SharedPreferences> prefs=new java.util.HashMap<>();
+ public SharedPreferences getSharedPreferences(String name,int mode){if(mode!=MODE_PRIVATE)throw new AssertionError("unexpected preference mode");
+  String key=root.getAbsolutePath()+"/"+name; return prefs.computeIfAbsent(key,k->new MemoryPreferences());}
+ public final String getString(int id,Object... args){if(id>=7&&id<=15||id>=113&&id<=114)return "L"+id;   // 游戏库页面文案
+  if(id>=100&&id<113)return id==100?"PLAYER_ERR "+java.util.Arrays.toString(args):"E"+id;   // PlayerError 玩家文案
+  throw new AssertionError("diagnostic string unexpectedly requested");}
+ private static class MemoryPreferences implements SharedPreferences {
+  private final java.util.Map<String,Boolean> values=new java.util.HashMap<>();
+  public boolean getBoolean(String key,boolean fallback){return values.getOrDefault(key,fallback);}
+  public SharedPreferences.Editor edit(){return new SharedPreferences.Editor(){private final java.util.Map<String,Boolean> staged=new java.util.HashMap<>();
+   public SharedPreferences.Editor putBoolean(String key,boolean value){staged.put(key,value);return this;}
+   public void apply(){values.putAll(staged);}
+  };}
+ } }''',
 'android/content/pm/ApplicationInfo.java': '''package android.content.pm; public class ApplicationInfo {
  public static final int FLAG_DEBUGGABLE=2; public int flags; public String sourceDir="fixture"; public String[] splitSourceDirs; }''',
 'android/content/pm/PackageManager.java': '''package android.content.pm; public class PackageManager {
@@ -44,18 +64,38 @@ STUBS = {
 'android/content/res/Resources.java': '''package android.content.res; public class Resources { public android.util.DisplayMetrics getDisplayMetrics(){return new android.util.DisplayMetrics();} }''',
 'android/os/Bundle.java': '''package android.os; public class Bundle {}''',
 'android/content/Intent.java': '''package android.content; import android.net.Uri; import java.util.*; public class Intent {
- public static final String ACTION_OPEN_DOCUMENT_TREE="pick"; private final Map<String,String> values=new HashMap<>();
+ public static final String ACTION_OPEN_DOCUMENT_TREE="android.intent.action.OPEN_DOCUMENT_TREE", ACTION_SEND="android.intent.action.SEND", EXTRA_STREAM="android.intent.extra.STREAM";
+ public static final int FLAG_GRANT_READ_URI_PERMISSION=1; private final Map<String,String> values=new HashMap<>();
  public Intent(){} public Intent(String s){} public Intent(Intent i){values.putAll(i.values);}
  public Intent putExtra(String k,String v){values.put(k,v);return this;} public Intent putExtra(String k,boolean v){values.put(k,String.valueOf(v));return this;} public void removeExtra(String k){values.remove(k);}
- public String getStringExtra(String k){return values.get(k);} public Uri getData(){return null;} }''',
-'android/view/View.java': '''package android.view; public class View { public interface OnClickListener {void onClick(View v);} }''',
+ public String getStringExtra(String k){return values.get(k);} public Uri getData(){return null;}
+ public Intent setType(String type){throw new AssertionError("diagnostic share unexpectedly called");}
+ public Intent putExtra(String key,android.os.Parcelable value){throw new AssertionError("diagnostic share unexpectedly called");}
+ public Intent addFlags(int flags){throw new AssertionError("diagnostic share unexpectedly called");}
+ public void setClipData(ClipData value){throw new AssertionError("diagnostic share unexpectedly called");}
+ public static Intent createChooser(Intent intent,CharSequence title){throw new AssertionError("diagnostic share unexpectedly called");} }''',
+'android/view/View.java': '''package android.view; public class View { public static final int VISIBLE=0, GONE=8; public void setBackgroundColor(int c){} public void setPadding(int a,int b,int c,int d){} private int vis; public void setVisibility(int v){vis=v;} public int getVisibility(){return vis;} public interface OnClickListener {void onClick(View v);} public void setEnabled(boolean enabled){throw new AssertionError("diagnostic export unexpectedly called");} }''',
 'android/widget/TextView.java': '''package android.widget; import android.view.View; import android.content.Context; import java.util.concurrent.*;
  public class TextView extends View { public static final BlockingQueue<String> messages=new LinkedBlockingQueue<>();
- public TextView(Context c){} public void setText(String s){messages.add(s);} public void setText(int i){} public void setTextColor(int c){} }''',
+ public TextView(Context c){} public void setText(String s){messages.add(s);} public void setText(int i){} public void setTextSize(float f){} public void setTextColor(int c){} }''',
 'android/widget/Button.java': '''package android.widget; import android.content.Context; import android.view.View;
  public class Button extends TextView { public Button(Context c){super(c);} public void setOnClickListener(View.OnClickListener l){} }''',
+'android/widget/CompoundButton.java': '''package android.widget; import android.content.Context;
+ public class CompoundButton extends Button { public interface OnCheckedChangeListener {void onCheckedChanged(CompoundButton button,boolean checked);}
+ private boolean checked; private OnCheckedChangeListener listener; public CompoundButton(Context c){super(c);}
+ public boolean isChecked(){return checked;} public void setChecked(boolean value){if(checked!=value){checked=value;if(listener!=null)listener.onCheckedChanged(this,value);}}
+ public void setOnCheckedChangeListener(OnCheckedChangeListener value){listener=value;} }''',
+'android/widget/CheckBox.java': '''package android.widget; import android.content.Context; public class CheckBox extends CompoundButton { public CheckBox(Context c){super(c);} }''',
 'android/widget/LinearLayout.java': '''package android.widget; import android.content.Context; import android.view.View; public class LinearLayout extends View {
  public static final int VERTICAL=1; public LinearLayout(Context c){} public void setOrientation(int x){} public void setPadding(int a,int b,int c,int d){} public void addView(View v){} }''',
+'android/view/Gravity.java': '''package android.view; public class Gravity { public static final int END=8388613, BOTTOM=80; }''',
+'android/widget/FrameLayout.java': '''package android.widget; import android.content.Context; import android.view.View; public class FrameLayout extends View {
+ public static class LayoutParams { public LayoutParams(int w,int h){} public LayoutParams(int w,int h,int g){} }
+ public FrameLayout(Context c){} public void addView(View v){} public void addView(View v,LayoutParams p){} }''',
+'org/s2arm/android/LibraryShelf.java': '''package org.s2arm.android; import android.content.Context; import android.view.View; import java.io.File;
+ final class LibraryShelf extends View { interface Listener { void play(String titleId); void openGameSettings(); void openControllers(); void openSettings(); }
+ static final java.util.List<String> added=new java.util.ArrayList<>();
+ LibraryShelf(Context c,Listener l){} void addGame(String titleId,String name,File art){added.add(titleId);} }''',
 'android/widget/ScrollView.java': '''package android.widget; import android.content.Context; import android.view.View; public class ScrollView extends View {
  public ScrollView(Context c){} public void addView(View v){} }''',
 'android/app/Activity.java': '''package android.app; import android.content.*; import android.os.Bundle; import android.content.res.Resources; import android.view.View; import java.io.File;
@@ -64,10 +104,24 @@ STUBS = {
  protected void onActivityResult(int a,int b,Intent i){} protected void onDestroy(){} public Intent getIntent(){return intent;} public void setIntent(Intent i){intent=i;}
  public Resources getResources(){return new Resources();} public void setContentView(View v){} public void startActivityForResult(Intent i,int n){}
  public void startActivity(Intent i){} public void runOnUiThread(Runnable r){r.run();} public boolean isDestroyed(){return false;} }''',
-'org/s2arm/android/R.java': '''package org.s2arm.android; public class R { public static class string { public static final int import_game=1; } }''',
-'org/s2arm/android/GameResume.java': '''package org.s2arm.android; import java.io.File; import java.io.IOException; public class GameResume {
+'android/os/Looper.java': '''package android.os; public class Looper { public static Looper getMainLooper(){return new Looper();} }''',
+'android/os/Handler.java': '''package android.os; public class Handler { public Handler(Looper l){} public boolean postDelayed(Runnable r,long ms){return true;} }''',
+'android/content/DialogInterface.java': '''package android.content; public interface DialogInterface { interface OnClickListener { void onClick(DialogInterface d,int which); } }''',
+'android/app/AlertDialog.java': '''package android.app; import android.content.*;
+ public class AlertDialog { public static class Builder { public Builder(Context c){}
+  public Builder setTitle(int id){return this;} public Builder setMessage(CharSequence m){return this;}
+  public Builder setPositiveButton(int id,DialogInterface.OnClickListener l){return this;} public Builder setNegativeButton(int id,DialogInterface.OnClickListener l){return this;}
+  public AlertDialog show(){return new AlertDialog();} } }''',
+'org/s2arm/android/R.java': '''package org.s2arm.android; public class R { public static class string { public static final int import_game=1, fps_overlay_show=2, export_diagnostics=3, export_diagnostics_running=4, export_diagnostics_failed=5, export_diagnostics_done=6,
+ library_game_starting=7, library_current_game=8, library_switch_title=9, library_switch_message=10, library_switch_confirm=11, library_switch_waiting=12, library_switch_timeout=13, library_launch_failed=14, library_switch_cancel=15, player_err_fmt=100, player_err_import=101, player_err_start=102, player_err_no_space=103, player_err_no_space_next=104, player_err_apk=105, player_err_apk_next=106, player_err_access=107, player_err_access_next=108, player_err_pack=109, player_err_pack_next=110, player_err_other=111, player_err_other_next=112, library_title=113, library_more=114; } }''',
+# These unrelated app boundaries must never be called in an import test.
+'org/s2arm/android/DiagnosticExport.java': '''package org.s2arm.android; import android.content.Context; import java.io.IOException; import java.nio.file.Path;
+ public class DiagnosticExport { public static Path run(Context context) throws IOException {throw new AssertionError("diagnostic export unexpectedly called");} }''',
+'org/s2arm/android/DiagnosticShareProvider.java': '''package org.s2arm.android; import android.content.Context; import android.net.Uri; import java.nio.file.Path;
+ public class DiagnosticShareProvider { public static Uri uri(Context context,Path path){throw new AssertionError("diagnostic share unexpectedly called");} }''',
+'org/s2arm/android/GameResume.java': '''package org.s2arm.android; import java.io.File; import java.io.IOException; public class GameResume { static String activeTitle(File c){return null;}
  public static final String EXTRA="resume"; public static String requireSame(File f,int p,String t,File g) throws IOException,BootContract.BadGame{return t;} }''',
-'org/s2arm/android/GameActivity.java': '''package org.s2arm.android; import android.content.*; public class GameActivity {
+'org/s2arm/android/GameActivity.java': '''package org.s2arm.android; import android.content.*; public class GameActivity { static final String SWITCH_EXTRA="org.s2arm.android.SWITCH_GAME";
  public static int runningPid(Context c){return 0;} public static Intent launch(Context c,Intent i,String t){return i;} }''',
 'org/s2arm/android/BootSpecSource.java': '''package org.s2arm.android; import java.io.*; import android.content.Context;
  public class BootSpecSource { public static BootSpec build(Context c,File f,BootContract.Game g) throws IOException {return new BootSpec();} }''',
@@ -88,12 +142,17 @@ import java.io.*; import java.nio.file.*; import java.lang.reflect.*; import jav
 public class ImportProbe {
  static int checks; static boolean refused;
  static void done(BlockingQueue<String> q) throws Exception { refused=false; long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(4);
-  while(System.nanoTime()<end){String s=q.poll(1,TimeUnit.SECONDS); if(s!=null && s.contains("refused:"))refused=true; if(s!=null && s.startsWith("Games:"))return;}
+  while(System.nanoTime()<end){String s=q.poll(1,TimeUnit.SECONDS); if(s!=null && s.startsWith("PLAYER_ERR [E101"))refused=true; if(s!=null && s.startsWith("Games:"))return;}
   throw new AssertionError("import did not finish"); }
  static void demand(boolean yes,String message){checks++;if(!yes)throw new AssertionError(message);}
  static void stage(Path p) throws Exception {Files.createDirectories(p.getParent()); Method m=GameInstallTest.class.getDeclaredMethod("pack",String.class);m.setAccessible(true);Files.move(((File)m.invoke(null,p.toString())).toPath(),p);}
  static boolean retained(Path p){return Files.exists(p.resolve("manifest.json"));}
  public static void main(String[] args) throws Exception {
+  // 选了上一级文件夹不挡：根上有包只取根；没有就取所有含 manifest.json 的子目录，嵌在别的包里的不算；一个都没有才是空
+  demand(GameLibrary.packageRoots(java.util.List.of("manifest.json","romfs/manifest.json")).equals(java.util.List.of("")),"package at the picked root");
+  demand(GameLibrary.packageRoots(java.util.List.of("x.txt","g1/manifest.json","g1/romfs/manifest.json","g2/sub/manifest.json"))
+      .equals(java.util.List.of("g1/","g2/sub/")),"packages found below the picked folder, nested ones skipped");
+  demand(GameLibrary.packageRoots(java.util.List.of("a/b.txt")).isEmpty(),"no package anywhere");
   Path root=Paths.get(args[0]); Path imports=root.resolve("external/import"),priv=root.resolve("internal/import");
   Path own=imports.resolve("same"),privateOwn=priv.resolve("same"),other=imports.resolve("other");
   stage(own);stage(privateOwn);stage(other);
@@ -145,11 +204,21 @@ public class ImportProbe {
    Path activityRoot=root.resolve("activity"),target=activityRoot.resolve("external/import/selected"),pending=activityRoot.resolve("external/import/pending");
    stage(target);stage(pending);
    android.app.Activity.testRoot=activityRoot.toFile(); LibraryActivity activity=new LibraryActivity();
+   android.content.SharedPreferences prefs=activity.getSharedPreferences("display",android.content.Context.MODE_PRIVATE);
+   prefs.edit().putBoolean("fps",true).apply();
    android.content.Intent intent=new android.content.Intent().putExtra(LibraryActivity.EXTRA_IMPORT_STAGING,target.toString());
-   activity.setIntent(intent);activity.onCreate(null);activity.onResume();done(android.widget.TextView.messages);
+   try {
+   activity.setIntent(intent);activity.onCreate(null);
+   java.lang.reflect.Field fpsField=LibraryActivity.class.getDeclaredField("fpsOverlay");fpsField.setAccessible(true);
+   android.widget.CheckBox fps=(android.widget.CheckBox)fpsField.get(activity);
+   demand(fps.isChecked(),"saved FPS preference did not populate checkbox");
+   fps.setChecked(false); demand(!prefs.getBoolean("fps",true),"checkbox change did not publish FPS preference");
+   prefs.edit().putBoolean("fps",true).apply(); activity.onResume();done(android.widget.TextView.messages);
+   demand(fps.isChecked(),"activity resume did not reread FPS preference");
    demand(!Files.exists(target),"activity did not import absolute target");demand(retained(pending),"activity consumed unrelated input");
    demand(intent.getStringExtra(LibraryActivity.EXTRA_IMPORT_STAGING)==null,"activity did not consume intent extra");
-   activity.onResume();done(android.widget.TextView.messages);demand(retained(pending),"repeated activity resume consumed input");activity.onDestroy();
+   activity.onResume();done(android.widget.TextView.messages);demand(retained(pending),"repeated activity resume consumed input");
+   } finally {activity.onDestroy();}
    Path failedReceiptRoot=root.resolve("receipt-failure"),receiptTarget=failedReceiptRoot.resolve("external/import/selected");stage(receiptTarget);
    BlockingQueue<String> receiptQueue=new LinkedBlockingQueue<>();
    GameLibrary receiptLibrary=new GameLibrary(new android.content.Context(failedReceiptRoot.toFile()),text -> {
@@ -230,7 +299,7 @@ public class W2ImportProbe {
     }
     checks++;
    } finally {if(library!=null)library.close();}
-   try(GameStorage lease=GameStorage.acquire(root.resolve("internal").toFile())) {checks++;}
+   try(GameStorage lease=GameStorage.acquire(root.resolve("internal").toFile(),"0100000000ABCDEF")) {checks++;}
   }
   System.out.println("PASS W2 explicit import: "+checks+" checks");
  }
@@ -238,11 +307,15 @@ public class W2ImportProbe {
 '''
 
 class GameLibraryImportTest(unittest.TestCase):
-    def run_contract(self, automatic_scan=False, missing_receipt=False, missing_fingerprint=False, w2=False, bypass_admission=False):
+    def run_contract(self, automatic_scan=False, missing_receipt=False, missing_fingerprint=False, w2=False, bypass_admission=False, preferences_not_published=False):
         with tempfile.TemporaryDirectory(prefix='s2a-library-import-') as temporary:
             base = Path(temporary)
             sources = []
             for relative, content in STUBS.items():
+                if preferences_not_published and relative == 'android/content/Context.java':
+                    before = 'public void apply(){values.putAll(staged);}'
+                    self.assertEqual(content.count(before), 1)
+                    content = content.replace(before, 'public void apply(){}')
                 path = base / 'src' / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(textwrap.dedent(content), encoding='utf-8')
@@ -291,6 +364,11 @@ class GameLibraryImportTest(unittest.TestCase):
                  'org.s2arm.android.W2ImportProbe' if w2 else 'org.s2arm.android.ImportProbe', str(base / 'data')],
                 capture_output=True, text=True, timeout=20)
 
+    def test_preference_apply_negative_control(self):
+        result = self.run_contract(preferences_not_published=True)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('saved FPS preference did not populate checkbox', result.stderr)
+
     def test_bypassed_w2_admission_negative_control(self):
         result = self.run_contract(w2=True, bypass_admission=True)
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -304,7 +382,7 @@ class GameLibraryImportTest(unittest.TestCase):
     def test_only_explicit_absolute_target_is_consumed(self):
         result = self.run_contract()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('PASS actual GameLibrary, LibraryActivity and GameInstall: 27 checks', result.stdout)
+        self.assertIn('PASS actual GameLibrary, LibraryActivity and GameInstall: 33 checks', result.stdout)
 
     def test_missing_fingerprint_negative_control(self):
         result = self.run_contract(missing_fingerprint=True)

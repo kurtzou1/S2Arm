@@ -1,0 +1,822 @@
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/AdpcmHelper.cs b/src/Ryujinx.Audio/Renderer/Dsp/AdpcmHelper.cs
+index 8b497fe2afe6bb5d5dc4eda9011520cb65f4d4bf..793c022073d04889a99e172eca7c78b3f792cc1a 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/AdpcmHelper.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/AdpcmHelper.cs
+@@ -3,6 +3,8 @@ using Ryujinx.Common.Logging;
+ using System;
+ using System.Diagnostics;
+ using System.Runtime.CompilerServices;
++using System.Runtime.Intrinsics;
++using System.Runtime.Intrinsics.Arm;
+ 
+ namespace Ryujinx.Audio.Renderer.Dsp
+ {
+@@ -180,35 +182,54 @@ namespace Ryujinx.Audio.Renderer.Dsp
+                 }
+                 else
+                 {
+-                    for (int i = 0; i < SamplesPerFrame / 2; i++)
++                    // S2Arm (ADPCM 拆解)：半字节拆包向量化（S2A_AUDIO_DSP_FAST=1 开，AdvSimd）。一帧 14 样本 = 7 字节，
++                    //   按 8 字节读入拆 16 条 nibble 车道（第 15、16 条是下一帧头，算完不用）：
++                    //   拆包 = 拉宽到 16 位车道后 (b << 8) >> 12 / (b << 12) >> 12 符号扩展高/低半 nibble，再 ZIP 成样本序，
++                    //   与标量 (value << 24) >> 28 / (value << 28) >> 28 同一比特结果；乘 scaleFixedPoint 后仍为 int32 回绕乘法，
++                    //   与标量逐位一致。预测链依赖上一饱和样本（非线性），保持标量逐样本，只吃拆好的车道。
++                    //   门槛：本轮起 8 字节可读（末帧差 1 字节时退回标量循环）。
++                    if (S2ADspFast.On && AdvSimd.IsSupported && inputIndex + BytesPerFrame <= targetInput.Length)
+                     {
+-                        int value = targetInput[inputIndex];
++                        DecodeFrameAdvSimd(targetInput, inputIndex, scaleFixedPoint, coefficient0, coefficient1, ref history0, ref history1, output.Slice(outputBufferIndex));
+ 
+-                        int sample0;
+-                        int sample1;
++                        inputIndex += BytesPerFrame - 1;
++                        nibbles += SamplesPerFrame;
++                        remaining -= SamplesPerFrame;
+ 
+-                        sample0 = (value << 24) >> 28;
+-                        sample1 = (value << 28) >> 28;
++                        outputBufferIndex += SamplesPerFrame;
++                    }
++                    else
++                    {
++                        for (int i = 0; i < SamplesPerFrame / 2; i++)
++                        {
++                            int value = targetInput[inputIndex];
+ 
+-                        inputIndex++;
++                            int sample0;
++                            int sample1;
+ 
+-                        int prediction0 = coefficient0 * history0 + coefficient1 * history1;
+-                        sample0 = FixedPointHelper.RoundUpAndToInt(sample0 * scaleFixedPoint + prediction0, FixedPointPrecision);
+-                        short saturatedSample0 = Saturate(sample0);
++                            sample0 = (value << 24) >> 28;
++                            sample1 = (value << 28) >> 28;
+ 
+-                        int prediction1 = coefficient0 * saturatedSample0 + coefficient1 * history0;
+-                        sample1 = FixedPointHelper.RoundUpAndToInt(sample1 * scaleFixedPoint + prediction1, FixedPointPrecision);
+-                        short saturatedSample1 = Saturate(sample1);
++                            inputIndex++;
+ 
+-                        history1 = saturatedSample0;
+-                        history0 = saturatedSample1;
++                            int prediction0 = coefficient0 * history0 + coefficient1 * history1;
++                            sample0 = FixedPointHelper.RoundUpAndToInt(sample0 * scaleFixedPoint + prediction0, FixedPointPrecision);
++                            short saturatedSample0 = Saturate(sample0);
+ 
+-                        output[outputBufferIndex++] = saturatedSample0;
+-                        output[outputBufferIndex++] = saturatedSample1;
+-                    }
++                            int prediction1 = coefficient0 * saturatedSample0 + coefficient1 * history0;
++                            sample1 = FixedPointHelper.RoundUpAndToInt(sample1 * scaleFixedPoint + prediction1, FixedPointPrecision);
++                            short saturatedSample1 = Saturate(sample1);
++
++                            history1 = saturatedSample0;
++                            history0 = saturatedSample1;
+ 
+-                    nibbles += SamplesPerFrame;
+-                    remaining -= SamplesPerFrame;
++                            output[outputBufferIndex++] = saturatedSample0;
++                            output[outputBufferIndex++] = saturatedSample1;
++                        }
++
++                        nibbles += SamplesPerFrame;
++                        remaining -= SamplesPerFrame;
++                    }
+                 }
+             }
+ 
+@@ -218,5 +239,53 @@ namespace Ryujinx.Audio.Renderer.Dsp
+ 
+             return decodedCount;
+         }
++
++        // S2Arm (ADPCM 拆解)：一帧（14 样本 = 7 字节）拆包 + 乘 scaleFixedPoint 用 AdvSimd，预测链保持标量逐样本
++        //   （链依赖上一饱和样本，非线性、不可跨样本并行；拆好的样本从车道顺序取出，链本身与标量同一运算序列）。
++        //   拆包：8 字节读入（第 8 字节是下一帧头，只读不用）→ 拉宽 16 位 → (b << 8) >> 12 / (b << 12) >> 12
++        //   符号扩展高/低半 nibble → ZIP 交织成样本序（与标量 (value << 24) >> 28 / (value << 28) >> 28 同一比特结果）
++        //   → 拉宽 int32、乘 scaleFixedPoint、加舍入半值 1024（int32 回绕加法，先加半值与标量先加预测再半值逐位一致）。
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        internal static unsafe void DecodeFrameAdvSimd(ReadOnlySpan<byte> input, int inputIndex, int scaleFixedPoint, short coefficient0, short coefficient1, ref short history0, ref short history1, Span<short> output)
++        {
++            Span<int> samples = stackalloc int[SamplesPerFrame + 2];
++
++            fixed (byte* pInput = input)
++            fixed (int* pSamples = samples)
++            {
++                // 字节 → 16 位（无符号拉宽后按位重解释，字节值 0-255 位型不变）
++                Vector128<short> bytes = Vector128.WidenLower(AdvSimd.LoadVector64(pInput + inputIndex).ToVector128()).AsInt16();
++
++                // 高半 nibble：(b << 8) >> 12；低半：(b << 12) >> 12（算术右移带符号扩展）
++                Vector128<short> high = AdvSimd.ShiftRightArithmetic(AdvSimd.ShiftLeftLogical(bytes, 8), 12);
++                Vector128<short> low = AdvSimd.ShiftRightArithmetic(AdvSimd.ShiftLeftLogical(bytes, 12), 12);
++
++                // 交织回样本序：前 4 字节 → 样本 0-7，后 4 字节 → 样本 8-15（第 15、16 条是下一帧头，算完不用）
++                Vector128<short> nibbles0 = AdvSimd.Arm64.ZipLow(high, low);
++                Vector128<short> nibbles1 = AdvSimd.Arm64.ZipHigh(high, low);
++
++                Vector128<int> half = Vector128.Create(1 << (FixedPointPrecision - 1));
++                Vector128<int> scale = Vector128.Create(scaleFixedPoint);
++
++                AdvSimd.Store(pSamples, AdvSimd.Add(AdvSimd.Multiply(Vector128.WidenLower(nibbles0), scale), half));
++                AdvSimd.Store(pSamples + 4, AdvSimd.Add(AdvSimd.Multiply(Vector128.WidenUpper(nibbles0), scale), half));
++                AdvSimd.Store(pSamples + 8, AdvSimd.Add(AdvSimd.Multiply(Vector128.WidenLower(nibbles1), scale), half));
++                AdvSimd.Store(pSamples + 12, AdvSimd.Add(AdvSimd.Multiply(Vector128.WidenUpper(nibbles1), scale), half));
++            }
++
++            for (int i = 0; i < SamplesPerFrame; i++)
++            {
++                int sample = samples[i] + coefficient0 * history0 + coefficient1 * history1;
++
++                sample >>= FixedPointPrecision;
++
++                short saturatedSample = Saturate(sample);
++
++                history1 = history0;
++                history0 = saturatedSample;
++
++                output[i] = saturatedSample;
++            }
++        }
+     }
+ }
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/Command/DeviceSinkCommand.cs b/src/Ryujinx.Audio/Renderer/Dsp/Command/DeviceSinkCommand.cs
+index 750dd74de6433270274e4ab983cea80ab664625a..a58eabbbfde6d9c3347f3ed4b8b22cd4f2cac8ab 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/Command/DeviceSinkCommand.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/Command/DeviceSinkCommand.cs
+@@ -72,6 +72,13 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
+             return Buffers.Span.Slice(index * sampleCount, sampleCount);
+         }
+ 
++        // S2Arm: 5.1 交织内核的声道取数——缓冲区数不足 6（上混）的声道没有数据，给空 span（内核查零向量），
++        //   与原循环先整块清零再只写前 bufferCount 个声道的行为一致。
++        private ReadOnlySpan<float> BufferOrEmpty(uint bufferCount, int index, int sampleCount)
++        {
++            return index < (int)bufferCount ? GetBuffer(InputBufferIndices[index], sampleCount) : default;
++        }
++
+         public void Process(CommandList context)
+         {
+             IHardwareDevice device = context.OutputDevice;
+@@ -99,7 +106,9 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
+                 Array.Fill(outputBuffer, (short)0, 0, (int)inputCount * SampleCount);
+ 
+                 // S2Arm: 立体声设备 + 双声道输入（最常见的设备形态）走 S2ADspMixHelper 的饱和窄化 + 交织内核；
+-                //   其余布局（5.1、混上混等）照原逐样本循环。两条路径逐样本一致（FCVTZS+SQXTN ≡ 夹取后截断）。
++                //   5.1（6 声道）设备走 6 声道交织内核（缓冲区数不足 6 的上混，静音声道传空 span 查零，
++                //   与原循环先整块清零再只写前面的声道一致）；其余布局照原逐样本循环。
++                //   各路径逐样本一致（FCVTZS+SQXTN ≡ 夹取后截断）。
+                 if (channelCount == 2 && bufferCount == 2)
+                 {
+                     S2ADspMixHelper.SaturateInterleaveStereo(
+@@ -108,6 +117,18 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
+                         GetBuffer(InputBufferIndices[1], SampleCount),
+                         (int)SampleCount);
+                 }
++                else if (channelCount == 6)
++                {
++                    S2ADspMixHelper.SaturateInterleave6(
++                        outputBuffer,
++                        BufferOrEmpty(bufferCount, 0, (int)SampleCount),
++                        BufferOrEmpty(bufferCount, 1, (int)SampleCount),
++                        BufferOrEmpty(bufferCount, 2, (int)SampleCount),
++                        BufferOrEmpty(bufferCount, 3, (int)SampleCount),
++                        BufferOrEmpty(bufferCount, 4, (int)SampleCount),
++                        BufferOrEmpty(bufferCount, 5, (int)SampleCount),
++                        (int)SampleCount);
++                }
+                 else
+                 {
+                     for (int i = 0; i < bufferCount; i++)
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/Command/MultiTapBiquadFilterCommand.cs b/src/Ryujinx.Audio/Renderer/Dsp/Command/MultiTapBiquadFilterCommand.cs
+index 38d92a432ce701b71cd8fa67e8c6b456257c06a1..dadd0adea26c10301101d7f7a0e8dabe5e3a4cc6 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/Command/MultiTapBiquadFilterCommand.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/Command/MultiTapBiquadFilterCommand.cs
+@@ -20,6 +20,13 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
+         public int OutputBufferIndex { get; private set; }
+         public bool[] IsInitialized { get; private set; }
+ 
++        // S2Arm: 双二阶跨声道打包——一条命令处理两声道（声道 0 用上面的下标与状态，声道 1 用下面的），
++        //   两声道入 Vector64 两条车道并行递推（S2ADspBiquadHelper.ProcessBiquadFilterStereo）。
++        public int ChannelCount { get; private set; }
++        public int InputBufferIndex2 { get; private set; }
++        public int OutputBufferIndex2 { get; private set; }
++        public Memory<BiquadFilterState> BiquadFilterStates2 { get; private set; }
++
+         public MultiTapBiquadFilterCommand()
+         {
+             
+@@ -42,6 +49,10 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
+             BiquadFilterStates = biquadFilterStateMemory;
+             InputBufferIndex = baseIndex + inputBufferOffset;
+             OutputBufferIndex = baseIndex + outputBufferOffset;
++            ChannelCount = 1;
++            InputBufferIndex2 = 0;
++            OutputBufferIndex2 = 0;
++            BiquadFilterStates2 = biquadFilterStateMemory;
+             IsInitialized = isInitialized.Length switch
+             {
+                 1 => _isInitialized1 ??= new bool[1],
+@@ -52,7 +63,28 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
+ 
+             Enabled = true;
+             NodeId = nodeId;
+-            
++
++            return this;
++        }
++
++        // S2Arm: 双二阶跨声道打包（两声道一条命令，原地滤波：两声道的输入输出缓冲区各自同一块）。见上方 ChannelCount 注释。
++        public MultiTapBiquadFilterCommand InitializeStereo(
++            int baseIndex,
++            ReadOnlySpan<BiquadFilterParameter2> filters,
++            Memory<BiquadFilterState> biquadFilterStateMemory0,
++            Memory<BiquadFilterState> biquadFilterStateMemory1,
++            int bufferOffset0,
++            int bufferOffset1,
++            ReadOnlySpan<bool> isInitialized,
++            int nodeId)
++        {
++            Initialize(baseIndex, filters, biquadFilterStateMemory0, bufferOffset0, bufferOffset0, isInitialized, nodeId);
++
++            ChannelCount = 2;
++            InputBufferIndex2 = baseIndex + bufferOffset1;
++            OutputBufferIndex2 = baseIndex + bufferOffset1;
++            BiquadFilterStates2 = biquadFilterStateMemory1;
++
+             return this;
+         }
+ 
+@@ -71,6 +103,31 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
+                 }
+             }
+ 
++            if (ChannelCount == 2)
++            {
++                Span<BiquadFilterState> states2 = BiquadFilterStates2.Span;
++
++                for (int i = 0; i < Parameters.Length; i++)
++                {
++                    if (!IsInitialized[i])
++                    {
++                        states2[i] = new BiquadFilterState();
++                    }
++                }
++
++                S2ADspBiquadHelper.ProcessBiquadFilterStereo(
++                    Parameters,
++                    states,
++                    states2,
++                    outputBuffer,
++                    context.GetBuffer(OutputBufferIndex2),
++                    inputBuffer,
++                    context.GetBuffer(InputBufferIndex2),
++                    context.SampleCount);
++
++                return;
++            }
++
+             // NOTE: Nintendo only implement single and double biquad filters but no generic path when the command definition suggests it could be done.
+             // As such we currently only implement a generic path for simplicity for double biquad.
+             if (Parameters.Length == 1)
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/S2ADspBiquadHelper.cs b/src/Ryujinx.Audio/Renderer/Dsp/S2ADspBiquadHelper.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..539067541a0a29959dba7e3ee76064ba68e75b1c
+--- /dev/null
++++ b/src/Ryujinx.Audio/Renderer/Dsp/S2ADspBiquadHelper.cs
+@@ -0,0 +1,193 @@
++using Ryujinx.Audio.Renderer.Dsp.State;
++using Ryujinx.Audio.Renderer.Parameter;
++using System;
++using System.Diagnostics;
++using System.Runtime.CompilerServices;
++using System.Runtime.Intrinsics;
++using System.Runtime.Intrinsics.Arm;
++
++namespace Ryujinx.Audio.Renderer.Dsp
++{
++    // S2Arm (双二阶跨声道打包)：多档双二阶滤波（MultiTapBiquadFilterCommand）的两声道打包内核（S2A_AUDIO_DSP_FAST=1 开）。
++    //   IIR 的递归依赖只在声道内：两声道入 Vector64<float> 两条车道，同一时间步并行递推即可向量化；命令层把两声道
++    //   交给同一条命令（GenerateMultiTapBiquadFilterStereo）。每车道运算与求和顺序同上游逐级循环（直接形式 1、
++    //   局部状态），两级融合（第二级直接吃第一级本步刚算出的车道结果，第 i 样本第二级的输入就是第一级的第 i 样本
++    //   输出，与逐级循环等价），输出与标量路径逐位一致。本体独立成方法（不依赖运行时开关），tests/audio_dsp_simd
++    //   直调两条路径逐位对拍。
++    internal static class S2ADspBiquadHelper
++    {
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        public static void ProcessBiquadFilterStereo(
++            ReadOnlySpan<BiquadFilterParameter2> parameters,
++            Span<BiquadFilterState> states0,
++            Span<BiquadFilterState> states1,
++            Span<float> outputBuffer0,
++            Span<float> outputBuffer1,
++            ReadOnlySpan<float> inputBuffer0,
++            ReadOnlySpan<float> inputBuffer1,
++            uint sampleCount)
++        {
++            if (S2ADspFast.On && AdvSimd.IsSupported)
++            {
++                ProcessBiquadFilterStereoAdvSimd(parameters, states0, states1, outputBuffer0, outputBuffer1, inputBuffer0, inputBuffer1, sampleCount);
++
++                return;
++            }
++
++            ProcessBiquadFilterStereoScalar(parameters, states0, states1, outputBuffer0, outputBuffer1, inputBuffer0, inputBuffer1, sampleCount);
++        }
++
++        // 标量路径 = 上游多级循环（直接形式 1、状态放局部变量逐样本推进、末尾写回）逐声道跑两遍的融合体：
++        //   级外层（两级）、声道按车道并排，每样本两级连续算完；运算与求和顺序同上游循环。
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        internal static void ProcessBiquadFilterStereoScalar(
++            ReadOnlySpan<BiquadFilterParameter2> parameters,
++            Span<BiquadFilterState> states0,
++            Span<BiquadFilterState> states1,
++            Span<float> outputBuffer0,
++            Span<float> outputBuffer1,
++            ReadOnlySpan<float> inputBuffer0,
++            ReadOnlySpan<float> inputBuffer1,
++            uint sampleCount)
++        {
++            Debug.Assert(parameters.Length == 2);
++
++            for (int stageIndex = 0; stageIndex < parameters.Length; stageIndex++)
++            {
++                Span<float> numeratorSpan = parameters[stageIndex].Numerator.AsSpan();
++                Span<float> denominatorSpan = parameters[stageIndex].Denominator.AsSpan();
++
++                float a0 = numeratorSpan[0];
++                float a1 = numeratorSpan[1];
++                float a2 = numeratorSpan[2];
++
++                float b1 = denominatorSpan[0];
++                float b2 = denominatorSpan[1];
++
++                ref BiquadFilterState state0 = ref states0[stageIndex];
++                ref BiquadFilterState state1 = ref states1[stageIndex];
++
++                float s00 = state0.State0, s01 = state0.State1, s02 = state0.State2, s03 = state0.State3;
++                float s10 = state1.State0, s11 = state1.State1, s12 = state1.State2, s13 = state1.State3;
++
++                ReadOnlySpan<float> src0 = stageIndex != 0 ? outputBuffer0 : inputBuffer0;
++                ReadOnlySpan<float> src1 = stageIndex != 0 ? outputBuffer1 : inputBuffer1;
++
++                for (int i = 0; i < sampleCount; i++)
++                {
++                    float x0 = src0[i];
++                    float y0 = x0 * a0 + s00 * a1 + s01 * a2 + s02 * b1 + s03 * b2;
++
++                    s01 = s00;
++                    s00 = x0;
++                    s03 = s02;
++                    s02 = y0;
++
++                    float x1 = src1[i];
++                    float y1 = x1 * a0 + s10 * a1 + s11 * a2 + s12 * b1 + s13 * b2;
++
++                    s11 = s10;
++                    s10 = x1;
++                    s13 = s12;
++                    s12 = y1;
++
++                    outputBuffer0[i] = y0;
++                    outputBuffer1[i] = y1;
++                }
++
++                state0.State0 = s00; state0.State1 = s01; state0.State2 = s02; state0.State3 = s03;
++                state1.State0 = s10; state1.State1 = s11; state1.State2 = s12; state1.State3 = s13;
++            }
++        }
++
++        // 两条车道 = 声道 0 / 声道 1；每步两级直接形式 1 递推，求和顺序与标量一致：((x*a0 + s0*a1) + s1*a2) + s2*b1) + s3*b2
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        internal static void ProcessBiquadFilterStereoAdvSimd(
++            ReadOnlySpan<BiquadFilterParameter2> parameters,
++            Span<BiquadFilterState> states0,
++            Span<BiquadFilterState> states1,
++            Span<float> outputBuffer0,
++            Span<float> outputBuffer1,
++            ReadOnlySpan<float> inputBuffer0,
++            ReadOnlySpan<float> inputBuffer1,
++            uint sampleCount)
++        {
++            Debug.Assert(parameters.Length == 2);
++
++            // 参数先整体拷到局部再取字段 span：Array2/Array3.AsSpan() 是对结构体字段取引用，
++            //   对「parameters[i] 这个临时副本」的字段取 span，Release 下 JIT 会把多个临时复用同一栈槽，
++            //   四个 span 全部别名到后取的那份参数（实测 stage 0 用了 stage 1 的系数）。局部拷贝活到方法尾，span 才有效。
++            BiquadFilterParameter2 parameter0 = parameters[0];
++            BiquadFilterParameter2 parameter1 = parameters[1];
++
++            Span<float> numerator0Span = parameter0.Numerator.AsSpan();
++            Span<float> denominator0Span = parameter0.Denominator.AsSpan();
++            Span<float> numerator1Span = parameter1.Numerator.AsSpan();
++            Span<float> denominator1Span = parameter1.Denominator.AsSpan();
++
++            Vector64<float> a00 = Vector64.Create(numerator0Span[0]);
++            Vector64<float> a10 = Vector64.Create(numerator0Span[1]);
++            Vector64<float> a20 = Vector64.Create(numerator0Span[2]);
++            Vector64<float> b10 = Vector64.Create(denominator0Span[0]);
++            Vector64<float> b20 = Vector64.Create(denominator0Span[1]);
++
++            Vector64<float> a01 = Vector64.Create(numerator1Span[0]);
++            Vector64<float> a11 = Vector64.Create(numerator1Span[1]);
++            Vector64<float> a21 = Vector64.Create(numerator1Span[2]);
++            Vector64<float> b11 = Vector64.Create(denominator1Span[0]);
++            Vector64<float> b21 = Vector64.Create(denominator1Span[1]);
++
++            Vector64<float> s00 = Vector64.Create(states0[0].State0, states1[0].State0);
++            Vector64<float> s01 = Vector64.Create(states0[0].State1, states1[0].State1);
++            Vector64<float> s02 = Vector64.Create(states0[0].State2, states1[0].State2);
++            Vector64<float> s03 = Vector64.Create(states0[0].State3, states1[0].State3);
++
++            Vector64<float> s10 = Vector64.Create(states0[1].State0, states1[1].State0);
++            Vector64<float> s11 = Vector64.Create(states0[1].State1, states1[1].State1);
++            Vector64<float> s12 = Vector64.Create(states0[1].State2, states1[1].State2);
++            Vector64<float> s13 = Vector64.Create(states0[1].State3, states1[1].State3);
++
++            for (int i = 0; i < sampleCount; i++)
++            {
++                Vector64<float> x = Vector64.Create(inputBuffer0[i], inputBuffer1[i]);
++
++                Vector64<float> y0 = AdvSimd.Add(AdvSimd.Add(AdvSimd.Add(
++                    AdvSimd.Multiply(x, a00),
++                    AdvSimd.Multiply(s00, a10)),
++                    AdvSimd.Multiply(s01, a20)),
++                    AdvSimd.Multiply(s02, b10));
++                y0 = AdvSimd.Add(y0, AdvSimd.Multiply(s03, b20));
++
++                s01 = s00;
++                s00 = x;
++                s03 = s02;
++                s02 = y0;
++
++                Vector64<float> y1 = AdvSimd.Add(AdvSimd.Add(AdvSimd.Add(
++                    AdvSimd.Multiply(y0, a01),
++                    AdvSimd.Multiply(s10, a11)),
++                    AdvSimd.Multiply(s11, a21)),
++                    AdvSimd.Multiply(s12, b11));
++                y1 = AdvSimd.Add(y1, AdvSimd.Multiply(s13, b21));
++
++                s11 = s10;
++                s10 = y0;
++                s13 = s12;
++                s12 = y1;
++
++                outputBuffer0[i] = y1.GetElement(0);
++                outputBuffer1[i] = y1.GetElement(1);
++            }
++
++            states0[0].State0 = s00.GetElement(0); states1[0].State0 = s00.GetElement(1);
++            states0[0].State1 = s01.GetElement(0); states1[0].State1 = s01.GetElement(1);
++            states0[0].State2 = s02.GetElement(0); states1[0].State2 = s02.GetElement(1);
++            states0[0].State3 = s03.GetElement(0); states1[0].State3 = s03.GetElement(1);
++
++            states0[1].State0 = s10.GetElement(0); states1[1].State0 = s10.GetElement(1);
++            states0[1].State1 = s11.GetElement(0); states1[1].State1 = s11.GetElement(1);
++            states0[1].State2 = s12.GetElement(0); states1[1].State2 = s12.GetElement(1);
++            states0[1].State3 = s13.GetElement(0); states1[1].State3 = s13.GetElement(1);
++        }
++    }
++}
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/S2ADspMixHelper.cs b/src/Ryujinx.Audio/Renderer/Dsp/S2ADspMixHelper.cs
+index f8cc7a07e92f60521e2cee8f6657458d3f2aa641..83c5495f06ee7f6da6f941925adcd56b923245b0 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/S2ADspMixHelper.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/S2ADspMixHelper.cs
+@@ -164,6 +164,138 @@ namespace Ryujinx.Audio.Renderer.Dsp
+             return state;
+         }
+ 
++        // 设备输出 5.1（6 声道）交织（output[6*j + c] = saturate(channel_c[j])）。
++        //   窄化同立体声内核（FCVTZS+SQXTN ≡ 夹取后截断）。交织用 TBL 字节表 gather：每 8 帧 6 个声道各窄化成
++        //   一个 8×int16 向量（96 字节表），每个 16 字节输出向量按静态字节下标查 3 次接力——TBL 覆盖字节 0-31，
++        //   TBLX 两次接力 32-63、64-95；接力下标减 32 / 64 按字节回绕，回绕后 ≥ 224 超表长 → TBLX 保默认车道
++        //   （即前一次查到的字节），三次查表互不串扰。TBL 是纯字节搬运，输出与标量循环逐位一致。
++        //   缓冲区数不足 6 的（上混）静音声道传空 span：查表用零向量，与原循环先整块清零再只写前面的声道一致。
++        //   约定：非空声道长度 ≥ sampleCount。
++        public static void SaturateInterleave6(
++            Span<short> outputBuffer,
++            ReadOnlySpan<float> channel0,
++            ReadOnlySpan<float> channel1,
++            ReadOnlySpan<float> channel2,
++            ReadOnlySpan<float> channel3,
++            ReadOnlySpan<float> channel4,
++            ReadOnlySpan<float> channel5,
++            int sampleCount)
++        {
++            if (S2ADspFast.On && AdvSimd.Arm64.IsSupported)
++            {
++                SaturateInterleave6AdvSimd(outputBuffer, channel0, channel1, channel2, channel3, channel4, channel5, sampleCount);
++
++                return;
++            }
++
++            SaturateInterleave6Scalar(outputBuffer, channel0, channel1, channel2, channel3, channel4, channel5, 0, sampleCount);
++        }
++
++        internal static void SaturateInterleave6Scalar(
++            Span<short> outputBuffer,
++            ReadOnlySpan<float> channel0,
++            ReadOnlySpan<float> channel1,
++            ReadOnlySpan<float> channel2,
++            ReadOnlySpan<float> channel3,
++            ReadOnlySpan<float> channel4,
++            ReadOnlySpan<float> channel5,
++            int start,
++            int sampleCount)
++        {
++            for (int j = start; j < sampleCount; j++)
++            {
++                outputBuffer[j * 6 + 0] = PcmHelper.Saturate(channel0.Length > j ? channel0[j] : 0f);
++                outputBuffer[j * 6 + 1] = PcmHelper.Saturate(channel1.Length > j ? channel1[j] : 0f);
++                outputBuffer[j * 6 + 2] = PcmHelper.Saturate(channel2.Length > j ? channel2[j] : 0f);
++                outputBuffer[j * 6 + 3] = PcmHelper.Saturate(channel3.Length > j ? channel3[j] : 0f);
++                outputBuffer[j * 6 + 4] = PcmHelper.Saturate(channel4.Length > j ? channel4[j] : 0f);
++                outputBuffer[j * 6 + 5] = PcmHelper.Saturate(channel5.Length > j ? channel5[j] : 0f);
++            }
++        }
++
++        // 静态查表下标：输出第 k 块（每块 16 字节 = 8 个短）第 t 字节属于输出短位置 p = 8k + (t >> 1)——
++        //   帧号 f = p / 6、声道 c = p % 6 → 源声道向量的第 f 样本（int16 小端）占表内字节 c * 16 + 2 * f 与 +1；
++        //   t 为偶数取低字节（+0）、奇数取高字节（+1）。最大下标 95（声道 5 第 7 样本高字节）< 表长 96。
++        //   shift 用于 TBLX 接力（减 32 / 减 64，按字节回绕）。
++        private static readonly Vector128<byte>[] Interleave6Indices = BuildInterleave6Indices(0);
++        private static readonly Vector128<byte>[] Interleave6IndicesMinus32 = BuildInterleave6Indices(32);
++        private static readonly Vector128<byte>[] Interleave6IndicesMinus64 = BuildInterleave6Indices(64);
++
++        private static Vector128<byte>[] BuildInterleave6Indices(int shift)
++        {
++            var result = new Vector128<byte>[6];
++            Span<byte> indices = stackalloc byte[16];
++
++            for (int k = 0; k < 6; k++)
++            {
++                for (int t = 0; t < 16; t++)
++                {
++                    int position = 8 * k + (t >> 1);
++
++                    indices[t] = (byte)((position % 6) * 16 + 2 * (position / 6) + (t & 1) - shift);
++                }
++
++                result[k] = Vector128.Create(indices);
++            }
++
++            return result;
++        }
++
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        private static unsafe Vector128<short> NarrowSaturate8(ReadOnlySpan<float> channel, int j)
++        {
++            if (channel.IsEmpty)
++            {
++                return Vector128<short>.Zero;
++            }
++
++            fixed (float* pChannel = channel)
++            {
++                Vector128<float> f0 = AdvSimd.LoadVector128(pChannel + j);
++                Vector128<float> f1 = AdvSimd.LoadVector128(pChannel + j + 4);
++
++                return AdvSimd.ExtractNarrowingSaturateUpper(AdvSimd.ExtractNarrowingSaturateLower(AdvSimd.ConvertToInt32RoundToZero(f0)), AdvSimd.ConvertToInt32RoundToZero(f1));
++            }
++        }
++
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        internal static unsafe void SaturateInterleave6AdvSimd(
++            Span<short> outputBuffer,
++            ReadOnlySpan<float> channel0,
++            ReadOnlySpan<float> channel1,
++            ReadOnlySpan<float> channel2,
++            ReadOnlySpan<float> channel3,
++            ReadOnlySpan<float> channel4,
++            ReadOnlySpan<float> channel5,
++            int sampleCount)
++        {
++            fixed (short* pOutput = outputBuffer)
++            {
++                for (int j = 0; j < (sampleCount & ~7); j += 8)
++                {
++                    Vector128<short> n0 = NarrowSaturate8(channel0, j);
++                    Vector128<short> n1 = NarrowSaturate8(channel1, j);
++                    Vector128<short> n2 = NarrowSaturate8(channel2, j);
++                    Vector128<short> n3 = NarrowSaturate8(channel3, j);
++                    Vector128<short> n4 = NarrowSaturate8(channel4, j);
++                    Vector128<short> n5 = NarrowSaturate8(channel5, j);
++
++                    byte* p = (byte*)(pOutput + j * 6);
++
++                    for (int k = 0; k < 6; k++)
++                    {
++                        Vector128<byte> gathered = AdvSimd.Arm64.VectorTableLookup((n0.AsByte(), n1.AsByte()), Interleave6Indices[k]);
++                        gathered = AdvSimd.Arm64.VectorTableLookupExtension(gathered, (n2.AsByte(), n3.AsByte()), Interleave6IndicesMinus32[k]);
++                        gathered = AdvSimd.Arm64.VectorTableLookupExtension(gathered, (n4.AsByte(), n5.AsByte()), Interleave6IndicesMinus64[k]);
++
++                        AdvSimd.Store(p + 16 * k, gathered);
++                    }
++                }
++            }
++
++            SaturateInterleave6Scalar(outputBuffer, channel0, channel1, channel2, channel3, channel4, channel5, sampleCount & ~7, sampleCount);
++        }
++
+         // 坡道音量（output[i] = round(input[i] * volume)，覆盖写；与 VolumeRampCommand 原循环一致）。
+         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+         public static void VolumeRamp(Span<float> outputBuffer, ReadOnlySpan<float> inputBuffer, float volume, float ramp, int sampleCount)
+diff --git a/src/Ryujinx.Audio/Renderer/Server/CommandBuffer.cs b/src/Ryujinx.Audio/Renderer/Server/CommandBuffer.cs
+index e7f085aa369b57def8e57f9c3c4e101f1f77ec05..05465c49bfc11797ab8561f46b0dc758506ea7a6 100644
+--- a/src/Ryujinx.Audio/Renderer/Server/CommandBuffer.cs
++++ b/src/Ryujinx.Audio/Renderer/Server/CommandBuffer.cs
+@@ -387,6 +387,31 @@ namespace Ryujinx.Audio.Renderer.Server
+             AddCommand(command);
+         }
+ 
++        /// <summary>
++        /// Generate a new <see cref="MultiTapBiquadFilterCommand"/> covering two channels packed in vector lanes.
++        /// </summary>
++        /// <remarks>
++        /// S2Arm (双二阶跨声道打包)：两声道一条命令（原地滤波），见 <see cref="MultiTapBiquadFilterCommand.InitializeStereo"/>。
++        /// 估时按单条命令口径是两声道的活，按两倍记。
++        /// </remarks>
++        public void GenerateMultiTapBiquadFilterStereo(
++            int baseIndex,
++            ReadOnlySpan<BiquadFilterParameter2> filters,
++            Memory<BiquadFilterState> biquadFilterStateMemory0,
++            Memory<BiquadFilterState> biquadFilterStateMemory1,
++            int bufferOffset0,
++            int bufferOffset1,
++            ReadOnlySpan<bool> isInitialized,
++            int nodeId)
++        {
++            MultiTapBiquadFilterCommand command = _multiTapBiquadFilterCommandPool.Allocate().InitializeStereo(
++                baseIndex, filters, biquadFilterStateMemory0, biquadFilterStateMemory1, bufferOffset0, bufferOffset1, isInitialized, nodeId);
++
++            command.EstimatedProcessingTime = _commandProcessingTimeEstimator.Estimate(command) * 2;
++
++            AddCommand(command);
++        }
++
+         /// <summary>
+         /// Generate a new <see cref="MixRampGroupedCommand"/>.
+         /// </summary>
+diff --git a/src/Ryujinx.Audio/Renderer/Server/CommandGenerator.cs b/src/Ryujinx.Audio/Renderer/Server/CommandGenerator.cs
+index b4b5d16548273e3c0eca03979de332d0fd219534..b1cf20af455c7245e9ff86bebe4b5fcbe3a370eb 100644
+--- a/src/Ryujinx.Audio/Renderer/Server/CommandGenerator.cs
++++ b/src/Ryujinx.Audio/Renderer/Server/CommandGenerator.cs
+@@ -148,7 +148,10 @@ namespace Ryujinx.Audio.Renderer.Server
+             }
+         }
+ 
+-        private void GenerateBiquadFilterForVoice(ref VoiceInfo voiceInfo, Memory<BiquadFilterState> stateMemory, int baseIndex, int bufferOffset, int nodeId)
++        // S2Arm (双二阶跨声道打包)：本方法改为一次生成整条嗓音所有声道的双二阶命令——
++        //   多档路径两声道一条命令（Vector64 两条车道并行递推，见 S2ADspBiquadHelper.ProcessBiquadFilterStereo），
++        //   奇数声道的尾声道照单声道命令；单档路径逐声道逐滤波器，行为与原先一致。
++        private void GenerateBiquadFilterForVoice(ref VoiceInfo voiceInfo, Span<int> channelResourceIds, int baseIndex, int nodeId)
+         {
+             bool supportsOptimizedPath = _rendererContext.BehaviourInfo.UseMultiTapBiquadFilterProcessing();
+ 
+@@ -156,24 +159,54 @@ namespace Ryujinx.Audio.Renderer.Server
+ 
+             if (supportsOptimizedPath && biquadFiltersSpan[0].Enable && biquadFiltersSpan[1].Enable)
+             {
+-                _commandBuffer.GenerateMultiTapBiquadFilter(baseIndex, biquadFiltersSpan, stateMemory, bufferOffset, bufferOffset, voiceInfo.BiquadFilterNeedInitialization, nodeId);
++                int channelIndex = 0;
++
++                for (; channelIndex + 1 < voiceInfo.ChannelsCount; channelIndex += 2)
++                {
++                    _commandBuffer.GenerateMultiTapBiquadFilterStereo(
++                        baseIndex,
++                        biquadFiltersSpan,
++                        _voiceContext.GetBiquadFilterStatesForDsp(channelResourceIds[channelIndex]),
++                        _voiceContext.GetBiquadFilterStatesForDsp(channelResourceIds[channelIndex + 1]),
++                        channelIndex,
++                        channelIndex + 1,
++                        voiceInfo.BiquadFilterNeedInitialization,
++                        nodeId);
++                }
++
++                if (channelIndex < voiceInfo.ChannelsCount)
++                {
++                    _commandBuffer.GenerateMultiTapBiquadFilter(
++                        baseIndex,
++                        biquadFiltersSpan,
++                        _voiceContext.GetBiquadFilterStatesForDsp(channelResourceIds[channelIndex]),
++                        channelIndex,
++                        channelIndex,
++                        voiceInfo.BiquadFilterNeedInitialization,
++                        nodeId);
++                }
+             }
+             else
+             {
+-                for (int i = 0; i < biquadFiltersSpan.Length; i++)
++                for (int channelIndex = 0; channelIndex < voiceInfo.ChannelsCount; channelIndex++)
+                 {
+-                    ref BiquadFilterParameter2 filter = ref biquadFiltersSpan[i];
++                    Memory<BiquadFilterState> stateMemory = _voiceContext.GetBiquadFilterStatesForDsp(channelResourceIds[channelIndex]);
+ 
+-                    if (filter.Enable)
++                    for (int i = 0; i < biquadFiltersSpan.Length; i++)
+                     {
+-                        _commandBuffer.GenerateBiquadFilter(
+-                            baseIndex,
+-                            ref filter,
+-                            stateMemory.Slice(i, 1),
+-                            bufferOffset,
+-                            bufferOffset,
+-                            !voiceInfo.BiquadFilterNeedInitialization[i],
+-                            nodeId);
++                        ref BiquadFilterParameter2 filter = ref biquadFiltersSpan[i];
++
++                        if (filter.Enable)
++                        {
++                            _commandBuffer.GenerateBiquadFilter(
++                                baseIndex,
++                                ref filter,
++                                stateMemory.Slice(i, 1),
++                                channelIndex,
++                                channelIndex,
++                                !voiceInfo.BiquadFilterNeedInitialization[i],
++                                nodeId);
++                        }
+                     }
+                 }
+             }
+@@ -314,11 +347,16 @@ namespace Ryujinx.Audio.Renderer.Server
+             }
+         }
+ 
++        // S2Arm (双二阶跨声道打包)：命令发射顺序从「每声道 数据源→双二阶→坡道→混音」拆成三段——
++        //   全部数据源 → 全部双二阶（两声道一条命令）→ 逐声道 坡道→混音。
++        //   每声道自身管线顺序不变；双二阶只写自己声道的缓冲区（数据源先于它生成、坡道/混音后于它发射）；
++        //   混音缓冲区的跨声道累加次序不变（混音仍按声道顺序发射），输出逐位一致。
++        //   性能条目：双二阶由每声道一条 Start/End 变为整嗓音一条。
+         private void GenerateVoice(ref VoiceInfo voiceInfo)
+         {
+             int nodeId = voiceInfo.NodeId;
+             uint channelsCount = voiceInfo.ChannelsCount;
+-            
++
+             Span<int> channelResourceIdsSpan = voiceInfo.ChannelResourceIds.AsSpan();
+             Span<BiquadFilterParameter2> biquadFiltersSpan = voiceInfo.BiquadFilters.AsSpan();
+ 
+@@ -326,8 +364,6 @@ namespace Ryujinx.Audio.Renderer.Server
+             {
+                 Memory<VoiceState> dspStateMemory = _voiceContext.GetUpdateStateForDsp(channelResourceIdsSpan[channelIndex]);
+ 
+-                ref VoiceChannelResource channelResource = ref _voiceContext.GetChannelResource(channelResourceIdsSpan[channelIndex]);
+-
+                 PerformanceDetailType dataSourceDetailType = PerformanceDetailType.Adpcm;
+ 
+                 if (voiceInfo.SampleFormat == SampleFormat.PcmInt16)
+@@ -356,28 +392,37 @@ namespace Ryujinx.Audio.Renderer.Server
+                 {
+                     GeneratePerformance(ref performanceEntry, PerformanceCommand.Type.End, nodeId);
+                 }
++            }
++
++            if (voiceInfo.WasPlaying)
++            {
++                voiceInfo.PreviousVolume = 0.0f;
++            }
++            else if (voiceInfo.HasAnyDestination())
++            {
++                bool performanceInitialized = false;
+ 
+-                if (voiceInfo.WasPlaying)
++                PerformanceEntryAddresses performanceEntry = null;
++
++                if (_performanceManager != null && _performanceManager.IsTargetNodeId(nodeId) && _performanceManager.GetNextEntry(out performanceEntry, PerformanceDetailType.BiquadFilter, PerformanceEntryType.Voice, nodeId))
+                 {
+-                    voiceInfo.PreviousVolume = 0.0f;
++                    performanceInitialized = true;
++
++                    GeneratePerformance(ref performanceEntry, PerformanceCommand.Type.Start, nodeId);
+                 }
+-                else if (voiceInfo.HasAnyDestination())
+-                {
+-                    performanceInitialized = false;
+ 
+-                    if (_performanceManager != null && _performanceManager.IsTargetNodeId(nodeId) && _performanceManager.GetNextEntry(out performanceEntry, PerformanceDetailType.BiquadFilter, PerformanceEntryType.Voice, nodeId))
+-                    {
+-                        performanceInitialized = true;
++                GenerateBiquadFilterForVoice(ref voiceInfo, channelResourceIdsSpan, (int)_rendererContext.MixBufferCount, nodeId);
+ 
+-                        GeneratePerformance(ref performanceEntry, PerformanceCommand.Type.Start, nodeId);
+-                    }
++                if (performanceInitialized)
++                {
++                    GeneratePerformance(ref performanceEntry, PerformanceCommand.Type.End, nodeId);
++                }
+ 
+-                    GenerateBiquadFilterForVoice(ref voiceInfo, _voiceContext.GetBiquadFilterStatesForDsp(channelResourceIdsSpan[channelIndex]), (int)_rendererContext.MixBufferCount, channelIndex, nodeId);
++                for (int channelIndex = 0; channelIndex < channelsCount; channelIndex++)
++                {
++                    Memory<VoiceState> dspStateMemory = _voiceContext.GetUpdateStateForDsp(channelResourceIdsSpan[channelIndex]);
+ 
+-                    if (performanceInitialized)
+-                    {
+-                        GeneratePerformance(ref performanceEntry, PerformanceCommand.Type.End, nodeId);
+-                    }
++                    ref VoiceChannelResource channelResource = ref _voiceContext.GetChannelResource(channelResourceIdsSpan[channelIndex]);
+ 
+                     performanceInitialized = false;
+ 

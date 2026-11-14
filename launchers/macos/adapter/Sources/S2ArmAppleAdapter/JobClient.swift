@@ -214,7 +214,6 @@ public final class JobClient {
         return env
     }
 
-    private func updaterEntry() throws -> URL { try jobEntry().deletingLastPathComponent().appendingPathComponent("updater.py") }
 
     /// 跑 updater.py 的一条命令，逐行交 JSON；结束时返回最后一行。
     private func runUpdater(_ command: [String], onEvent: @escaping @Sendable ([String: Any]) -> Void = { _ in }) async -> [String: Any]? {
@@ -262,26 +261,6 @@ public final class JobClient {
     }
 
     /// 下载、校验、解开新版（不碰正在用的安装目录）。最后一行 state = ready 或 failed。
-    public func updatePrepare(current: String, install: String, onEvent: @escaping @Sendable ([String: Any]) -> Void) async -> [String: Any]? {
-        var command = ["prepare", "--platform", "mac", "--current", current, "--private-root", environment.privateRoot.path, "--install", install]
-        if !environment.library.isEmpty { command += ["--protect", environment.library] }
-        return await runUpdater(command, onEvent: onEvent)
-    }
-
-    /// 起独立的替换进程：它等本进程退出后换掉 App 并重启，用的是 updates/ 里的 Python，不依赖安装目录。
-    public func updateApply(ready: [String: Any], install: String, arguments: [String]) throws {
-        guard let python = ready["python"] as? String, let updater = ready["updater"] as? String, let staged = ready["staged"] as? String else {
-            throw JobClientError("更新数据不完整。")
-        }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: python)
-        process.arguments = ["-B", "-I", updater, "apply", "--staged", staged, "--install", install, "--pid", String(ProcessInfo.processInfo.processIdentifier),
-                             "--private-root", environment.privateRoot.path] + arguments.map { "--arg=" + $0 }
-        process.environment = processEnvironment()
-        process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice; process.standardInput = FileHandle.nullDevice
-        try process.run()
-    }
-
     /// 最近一次失败作业的错误摘要（作业层 report.py，Mac / Windows 共用）。没有作业记录时返回 nil，由界面退回基本信息。
     public func errorReport(gameID: String?, operations: [String], extra: [String: Any]) async -> String? {
         guard let python = try? pythonExecutable(), let entry = try? jobEntry() else { return nil }

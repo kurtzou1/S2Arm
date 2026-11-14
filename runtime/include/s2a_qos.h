@@ -33,6 +33,7 @@ typedef enum {
     S2A_QOS_SHADER_URGENT,     // 着色器紧急加载道 dm.nvn.sh-urg（前瞻：同一提交里后面的绘制要用）：USER_INITIATED，提交线程到时共享它的加载并借出自己的档
     S2A_QOS_SHADER_VARIANT,    // 首遇变体现编 dm.nvn.se / dm.nvn.vp / dm.nvn.mesh：USER_INITIATED，编好前那几笔跳过
     S2A_QOS_SHADER_PREFETCH,   // 着色器预取道 dm.nvn.sh-pre：DEFAULT（原 UTILITY；依据 ②，预取越早做完首遇现编越少）
+    S2A_QOS_UPLOAD_HASH,       // 打包贴图首次上传的逐页哈希 dm.nvn.ph（nvn_mtl.m ph_queue）：USER_INITIATED，该贴图下一次查脏页会等它（#674）
     // （后台预热工人不在本表取值：唯一设置点是 nvn_mtl.m 的 WARM_BG_QOS（卡顿线 perf/warm-bg-qos-default ca6a6bc99，utility → default，转后台 / 配置全后台两支共用），
     //   以 main 上那个常量为准；这里不再设第二处）
     S2A_QOS_IO_BG,             // 管线归档写盘、映射释放、满屏判据截图、旧构建目录清理：UTILITY（纯 I/O / 诊断，不在帧路径）
@@ -49,7 +50,7 @@ static inline qos_class_t s2a_qos(s2a_qos_role r) {
     case S2A_QOS_MTL_FEEDBACK: case S2A_QOS_PREEMPT_WATCHDOG: case S2A_QOS_INPUT:
         return QOS_CLASS_USER_INTERACTIVE;
     case S2A_QOS_GAME_OTHER: return s2a_qos_perf_cores() >= 4 ? QOS_CLASS_USER_INTERACTIVE : QOS_CLASS_USER_INITIATED;
-    case S2A_QOS_SHADER_URGENT: case S2A_QOS_SHADER_VARIANT: case S2A_QOS_HOST_AUX:
+    case S2A_QOS_SHADER_URGENT: case S2A_QOS_SHADER_VARIANT: case S2A_QOS_UPLOAD_HASH: case S2A_QOS_HOST_AUX:
         return QOS_CLASS_USER_INITIATED;
     case S2A_QOS_SHADER_PREFETCH:
         return QOS_CLASS_DEFAULT;

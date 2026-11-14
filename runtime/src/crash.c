@@ -45,6 +45,93 @@ static int s2a_frames(uint64_t fp, uint64_t *lr, int max) {
     while (k < max && fp && !(fp & 7) && frame_read(fp, rec) && rec[1]) { lr[k++] = rec[1]; if (rec[0] <= fp) break; fp = rec[0]; }   // 返回地址 0 = 链尾（不可读页经内核读出全 0 也落在这里）
     return k;
 }
+// 指令原文（#368：没有原件的款崩在游戏代码里，日志只有地址，定不了空指针是哪次调用的返回值、写的哪个字段）：
+//   a 前 before 条、后 after 条 32 位指令字（内存里的，即改写后真正跑的那份），a 那条用 [ ] 标出；经内核读（同 frame_read），不可读写「读不到」。
+//   离线用任意 AArch64 反汇编器就能读，不需要游戏原件；每处几十字节，不是游戏内容。信号里可调（不分配、不取锁）
+void s2a_code_words(uint64_t a, int before, int after, char *b, size_t n) {
+    uint32_t w[32]; int k = before + after + 1; size_t o = 0; b[0] = 0;
+    if (before < 0 || after < 0 || k > 32 || (a & 3)) { snprintf(b, n, "（参数不对）"); return; }
+    uint64_t from = a - 4ull * (uint64_t)before;
+#if defined(__APPLE__)
+    vm_size_t got = 0;
+    int ok = vm_read_overwrite(mach_task_self(), (vm_address_t)from, 4 * (vm_size_t)k, (vm_address_t)w, &got) == KERN_SUCCESS && got == 4 * (vm_size_t)k;
+#else
+    struct iovec l = {w, 4 * (size_t)k}, r = {(void *)(uintptr_t)from, 4 * (size_t)k};
+    int ok = process_vm_readv(getpid(), &l, 1, &r, 1, 0) == (ssize_t)(4 * k);
+#endif
+    if (!ok) { snprintf(b, n, "读不到"); return; }
+    for (int i = 0; i < k && o + 12 < n; i++)
+        o += (size_t)snprintf(b + o, n - o, i == before ? "%s[%08x]" : "%s%08x", i ? " " : "", w[i]);
+}
+// 调用点 → 被调的是谁（11-13 诊断#59429a：游戏刚调完一个函数就拿返回值读 +0x18 崩了，原先只列帧链里的调用点、漏了 lr 那一次，
+//   而且只有指令字，看不出 bl 进的 PLT 是哪个导入、绑到宿主接管还是 sdk）。site 那条是 bl：目标是 PLT 桩（adrp x16 / ldr x17, [x16, #o]）时
+//   回 GOT 槽地址（*slot）；目标本身也回。不是 bl 回 0。只经内核读，不二次缺页；信号里可调
+static int mem_read(uint64_t a, void *out, size_t n) {
+#if defined(__APPLE__)
+    vm_size_t got = 0;
+    return vm_read_overwrite(mach_task_self(), (vm_address_t)a, (vm_size_t)n, (vm_address_t)out, &got) == KERN_SUCCESS && got == n;
+#else
+    struct iovec l = {out, n}, r = {(void *)(uintptr_t)a, n};
+    return process_vm_readv(getpid(), &l, 1, &r, 1, 0) == (ssize_t)n;
+#endif
+}
+uint64_t s2a_call_target(uint64_t site, uint64_t *slot) {
+    uint32_t w, st[2]; *slot = 0;
+    if ((site & 3) || !mem_read(site, &w, 4) || (w & 0xFC000000u) != 0x94000000u) return 0;
+    uint64_t t = site + (uint64_t)((int64_t)((int32_t)(w << 6) >> 6) * 4);
+    if (mem_read(t, st, 8) && (st[0] & 0x9F00001Fu) == 0x90000010u && (st[1] & 0xFFC003FFu) == 0xF9400211u) {
+        int64_t pg = (int64_t)((((uint64_t)(st[0] >> 5) & 0x7FFFF) << 2) | ((st[0] >> 29) & 3));
+        pg = (pg << 43) >> 43;   // 21 位有符号页数
+        *slot = (t & ~0xFFFull) + (uint64_t)(pg * 4096) + ((st[1] >> 10) & 0xFFF) * 8;
+    }
+    return t;
+}
+// GOT 槽 → 导入名：在含它的游戏模块的 RELA / JMPREL 里找 r_offset 落在这个槽的那条（装载器 relocate 同一张表，装完一直留在模块里）。找不到回 NULL
+const char *s2a_import_name(uint64_t slot) {
+    for (int i = 0; i < g_nmod; i++) {
+        const module_t *m = &g_mod[i];
+        if (!m->dyn || !m->symtab || !m->strtab || slot < (uint64_t)m->base || slot >= (uint64_t)m->base + m->size) continue;
+        uint64_t tab[2] = {0}, sz[2] = {0};
+        for (const Elf64_Dyn *d = m->dyn; d->d_tag; d++) switch (d->d_tag) {
+            case 7: tab[0] = d->d_un.d_ptr; break; case 8: sz[0] = d->d_un.d_val; break;     // DT_RELA / DT_RELASZ
+            case 23: tab[1] = d->d_un.d_ptr; break; case 2: sz[1] = d->d_un.d_val; break;    // DT_JMPREL / DT_PLTRELSZ
+        }
+        for (int t = 0; t < 2; t++) {
+            const Elf64_Rela *r = (const Elf64_Rela *)(m->base + tab[t]);
+            for (uint64_t k = 0; tab[t] && k < sz[t] / sizeof *r; k++)
+                if ((uint64_t)m->base + r[k].r_offset == slot) { uint32_t si = (uint32_t)(r[k].r_info >> 32); return si ? m->strtab + m->symtab[si].st_name : NULL; }
+        }
+        return NULL;
+    }
+    return NULL;
+}
+#if defined(__APPLE__)
+// 一处调用点的「被调的是谁」：「 → 导入 <名>，绑到 <宿主符号 / 模块+偏移>」或「 → 调 <模块+偏移>」；不是 bl 写空串
+static void callee_text(uint64_t site, char *b, size_t n) {
+    uint64_t slot, t = s2a_call_target(site, &slot), v = 0; char at[160]; b[0] = 0;
+    if (!t) return;
+    if (slot && mem_read(slot, &v, 8)) {
+        const char *nm = s2a_import_name(slot); where(v, at, sizeof at);
+        snprintf(b, n, " → 导入 %s，绑到 %s", nm ? nm : "（槽不在重定位表里）", at);
+    } else { where(t, at, sizeof at); snprintf(b, n, " → 调 %s", at); }
+}
+// 崩溃完整报告里的指令原文（只 Mac / iOS 的完整报告调；安卓走 crash_android_fatal.inc）：pc 前 8 条后 2 条；
+//   lr 那次调用（崩溃函数里最近一次调用，帧链里没有它：返回值是空的多半就是它）、帧链里落在游戏模块的前 8 个返回地址，各取调用那条（返回地址 −4）前 3 条到它本身，并写被调的是谁
+static void code_note(uint64_t pc, uint64_t lr0, uint64_t fp) {
+    char b[400], at[160], ce[400];
+    where(pc, at, sizeof at); s2a_code_words(pc & ~3ull, 8, 2, b, sizeof b); LOG("指令 pc %s：%s", at, b);
+    uint64_t lr[32]; int k = s2a_frames(fp, lr, 32), shown = 0;
+    if (module_of((void *)(uintptr_t)lr0) && (k == 0 || lr[0] != lr0)) {
+        where(lr0 - 4, at, sizeof at); s2a_code_words((lr0 - 4) & ~3ull, 3, 0, b, sizeof b); callee_text((lr0 - 4) & ~3ull, ce, sizeof ce);
+        LOG("指令 lr 调用点 %s：%s%s", at, b, ce);
+    }
+    for (int i = 0; i < k && shown < 8; i++) {
+        if (!module_of((void *)(uintptr_t)lr[i])) continue;
+        where(lr[i] - 4, at, sizeof at); s2a_code_words((lr[i] - 4) & ~3ull, 3, 0, b, sizeof b); callee_text((lr[i] - 4) & ~3ull, ce, sizeof ce);
+        LOG("指令 #%d 调用点 %s：%s%s", i, at, b, ce); shown++;
+    }
+}
+#endif
 void s2a_backtrace(uint64_t fp) {
     uint64_t lr[32]; int k = s2a_frames(fp, lr, 32);
     for (int i = 0; i < k; i++) { char b[160]; where(lr[i], b, sizeof b); LOG("  #%d %s", i, b); }
@@ -88,10 +175,25 @@ static void android_crash_fatal(int sig, siginfo_t *si, const ucontext_t *contex
     if (sig == SIGABRT) android_sigabrt_ctx(context);
     s2a_android_fatal(sig, si, context->uc_mcontext.pc, context->uc_mcontext.sp, (void *)context);
 }
+static _Atomic uint64_t g_sp_unaligned;   // 替游戏模拟的「栈指针未对齐」读写条数（收局汇总报，s2a_sp_unaligned_count；同苹果段）
+uint64_t s2a_sp_unaligned_count(void) { return atomic_load(&g_sp_unaligned); }
 static void on_crash(int sig, siginfo_t *si, void *context) {
     ucontext_t *u = context;
     // 双补丁岛 brk 兜底点（traps.c）：两岛都够不着的必改点，按原语义模拟后 pc += 4
     if (sig == SIGTRAP && s2a_trap_brk && s2a_trap_brk(context)) return;
+    // 栈指针未对齐（ESR 类别 0x26）：Switch 不查、安卓内核查，替游戏做这一条读写（emul_sp.c 安卓段）。范围同苹果：
+    //   游戏代码（含补丁区）+ 系统调用门进出两头（entry.S [sw_gate, sw_gate_end) 用客体 sp 借 32 字节）
+    if (sig == SIGBUS) {
+        unsigned ec;
+        if (s2a_android_fault_ec(context, &ec) && ec == 0x26) {
+            int s2a_emul_sp_unaligned(void *); extern void sw_gate(void); extern char sw_gate_end[];
+            uint64_t pc0 = (uint64_t)u->uc_mcontext.pc;
+            int gate = pc0 >= (uint64_t)(uintptr_t)sw_gate && pc0 < (uint64_t)(uintptr_t)sw_gate_end;
+            if ((gate || module_of((void *)(uintptr_t)pc0)) && s2a_emul_sp_unaligned(context)) {
+                atomic_fetch_add_explicit(&g_sp_unaligned, 1, memory_order_relaxed); return;
+            }
+        }
+    }
     if (sig == SIGBUS || sig == SIGSEGV) {
         int write;
         if (s2a_android_fault_esr(context, &write)) {
@@ -137,9 +239,14 @@ void s2a_emul_store_bench(void) { LOG("Android 使用完整读回；未运行 Ma
 #include <sys/mman.h>
 #include <stdatomic.h>
 #include "s2a_emul_ld.h"
+// 门的起止（entry.S）：弱引用放文件级——只链 crash.c 的单测没有 entry.S，强引用会让程序一加载就找不到符号；生产里两个符号都在
+__attribute__((weak_import)) extern void sw_gate(void);
+__attribute__((weak_import)) extern char sw_gate_end[];
 // 拦写模拟自测（帧率能耗线 10-24，拦写模拟开着时（缺省开，S2A_TRACK_EMUL_STORE=0 关）起局跑一次）：一张只读测试页上连写 N 次，每次都「缺页 → 信号里经可写别名模拟 → 返回」，
 // 总时长 / N = 每次缺页 + 模拟的全部成本（含内核投递信号与返回；写跟踪计数里的每次耗时不含这一段）。测试页的缺页在信号处理最前面认领，不进写跟踪
 static _Atomic uint64_t g_esb_page;
+static _Atomic uint64_t g_sp_unaligned;   // 替游戏模拟的「栈指针未对齐」读写条数（收局汇总报，s2a_sp_unaligned_count）
+uint64_t s2a_sp_unaligned_count(void) { return atomic_load(&g_sp_unaligned); }
 void s2a_emul_store_bench(void) {
     const char *e = getenv("S2A_TRACK_EMUL_STORE"); if (e && *e == '0') return;
     uint8_t *p = mmap(NULL, 0x4000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0); if (p == MAP_FAILED) return;
@@ -237,6 +344,12 @@ static void on_crash(int sig, siginfo_t *si, void *ctx) {
     if (sig == SIGTRAP && s2a_trap_brk && s2a_trap_brk(ctx)) return;
     if (sig == SIGBUS || sig == SIGSEGV) {
         uint32_t esr = ((ucontext_t *)ctx)->uc_mcontext->__es.__esr, ec = esr >> 26;
+        // 栈指针未对齐（EC 0x26）：Switch 不查、苹果查，替游戏做这一条读写（emul_sp.c）。范围 = 游戏代码（含补丁区）+ 系统调用门进出两头
+        //   （门用客体 sp 借 32 字节，entry.S [sw_gate, sw_gate_end)）；宿主自己的代码不会让 sp 不对齐，不在此列
+        { int s2a_emul_sp_unaligned(void *);
+          uint64_t pc0 = ((ucontext_t *)ctx)->uc_mcontext->__ss.__pc;
+          int gate = pc0 >= (uint64_t)(uintptr_t)sw_gate && pc0 < (uint64_t)(uintptr_t)sw_gate_end;
+          if (ec == 0x26 && (gate || module_of((void *)pc0)) && s2a_emul_sp_unaligned(ctx)) { atomic_fetch_add_explicit(&g_sp_unaligned, 1, memory_order_relaxed); return; } }
         if (ec == 0x24 || ec == 0x25) {
             int w = (int)(esr >> 6 & 1); uint64_t pc = ((ucontext_t *)ctx)->uc_mcontext->__ss.__pc;
             { uint64_t bp = atomic_load(&g_esb_page), fa0 = (uint64_t)si->si_addr;   // 拦写模拟自测页（见 s2a_emul_store_bench）
@@ -292,6 +405,7 @@ static void on_crash(int sig, siginfo_t *si, void *ctx) {
     LOG("【红】CRASH 信号 %d 地址 %p pc %s lr %s sp %#llx", sig, si->si_addr, bp, bl, (unsigned long long)uc->uc_mcontext->__ss.__sp);
     for (int i = 0; i < 29; i += 4) LOG("  x%-2d %016llx %016llx %016llx %016llx", i, uc->uc_mcontext->__ss.__x[i], uc->uc_mcontext->__ss.__x[i + 1], i + 2 < 29 ? uc->uc_mcontext->__ss.__x[i + 2] : 0, i + 3 < 29 ? uc->uc_mcontext->__ss.__x[i + 3] : 0);
     s2a_backtrace(fp);
+    code_note(pc, lr, fp);
     fault_region_note(sig, si, uc);
     { uint64_t ht, hl, fs, fh; int fn; s2a_low_holes(&ht, &hl); s2a_fd_usage(&fn, &fs, &fh);   // 资源耗尽类崩溃先看这两样：低区地址 / 文件句柄
       LOG("崩溃时余量：低区空洞合计 %llu MB、最大一块 %llu MB；文件句柄已开 %d 个，软上限 %llu、硬上限 %llu", (unsigned long long)(ht >> 20), (unsigned long long)(hl >> 20), fn, (unsigned long long)fs, (unsigned long long)fh); }

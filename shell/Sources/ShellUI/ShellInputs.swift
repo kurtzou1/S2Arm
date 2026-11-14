@@ -267,6 +267,8 @@ public struct ShellActions {
     public var onUseShellCloud: ((String) -> Void)?
     public var onClearShellData: (() -> Void)?
     public var onClearShellCloud: (() -> Void)?
+    /// S2Arm: settings → "Report a problem" (the host packs the logs, uploads them and shows a short code). Nil hides the row.
+    public var onReportProblem: (() -> Void)?
     public var onGlobalPadMapChange: ((String, String) -> Void)?
     public var onGlobalPadMapReset: (() -> Void)?
     /// The button test opened (true) or closed: the host sends `PadSnapshot`s only in between.

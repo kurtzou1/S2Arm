@@ -41,15 +41,15 @@ class TargetError(Exception):
         self.code = code
 
 
-def traits_db(developer_dir):
-    db = Path(developer_dir) / "Platforms/iPhoneOS.platform/usr/standalone/device_traits.db"
+def traits_db(developer_dir, platform="iPhoneOS"):
+    db = Path(developer_dir) / f"Platforms/{platform}.platform/usr/standalone/device_traits.db"
     if not db.is_file():
         raise TargetError("所用 Xcode 里没有设备特征库（device_traits.db），认不出机型的 GPU：请装完整的 Xcode。", code="xcode_unavailable")
     return db
 
 
-def _query(developer_dir, sql, args=()):
-    con = sqlite3.connect(f"file:{traits_db(developer_dir)}?mode=ro", uri=True)
+def _query(developer_dir, sql, args=(), platform="iPhoneOS"):
+    con = sqlite3.connect(f"file:{traits_db(developer_dir, platform)}?mode=ro", uri=True)
     try:
         return con.execute(sql, args).fetchall()
     finally:
@@ -62,8 +62,11 @@ def gen(arch):
 
 
 def gpu_arch(product_type, developer_dir):
+    # Apple Vision Pro（RealityDevice*，按 iPad 兼容装）只登记在 visionOS 平台的设备特征库（XROS.platform），iPhone 平台库里只有一条
+    #   「Apple Vision」家族占位（RealityFamily*），按机型号查不到——原先报「认不出机型的 GPU」挡住出包。理论支持、未真机验证
+    platform = "XROS" if product_type.startswith("RealityDevice") else "iPhoneOS"
     rows = _query(developer_dir, "select distinct t.GPUArchName " + JOIN +
-                  "where (d.ProductType = ? or d.ProductType like ? || '-%') and t.GPUArchName like 'applegpu_%'", (product_type, product_type))
+                  "where (d.ProductType = ? or d.ProductType like ? || '-%') and t.GPUArchName like 'applegpu_%'", (product_type, product_type), platform)
     archs = sorted({r[0] for r in rows})
     if len(archs) != 1:
         raise TargetError(f"这个 Xcode 认不出机型 {product_type} 的 GPU（{'查到多个：' + '、'.join(archs) if archs else '没有记录'}）：请把 Xcode 更新到最新版。", code="xcode_unavailable")
@@ -83,6 +86,12 @@ def models(developer_dir):
         out.append(dict(name=name, productType=pt, gpuArch=arch))
     key = lambda m: (0 if m["productType"].startswith("iPhone") else 1, -int(re.search(r"(\d+),", m["productType"]).group(1)), m["name"])
     return sorted(out, key=key)
+
+
+def ios_equivalent(product_type, major):
+    """系统大版本按 iOS 口径：Apple Vision Pro 上 iPad 兼容 App 跑同年的 iOS 框架，visionOS 1 / 2 对应 iOS 17 / 18，26 起与 iOS 同号；
+    原样拿 visionOS 2 和 iOS 下限 18 比会判「系统太旧」。其余机型原样"""
+    return major + 16 if product_type.startswith("RealityDevice") and 0 < major < 26 else major
 
 
 def os_choices(env):
@@ -119,10 +128,11 @@ def os_choices(env):
 
 
 def _keep_device(d):
-    """连着的 iOS / iPadOS 真机：physical + 隧道通或有线已配对（与 connected() 同一判据，10-28 按维护方 A3 第 5 条抽出来共用）"""
-    from diag import reachable
-    h = d.get("hardwareProperties", {})
-    return h.get("reality") == "physical" and h.get("platform") in ("iOS", "iPadOS") and reachable(d)
+    """启动器列给玩家选的设备（connected() 用）"""
+    # 同装机选机（diag.is_candidate）：带硬件 UDID 的就列出来给玩家选，不按 reality / 配对 / 是否在线筛掉（11-13 维护者：插着手机硬说识别不了）。
+    #   在不在线、能不能装由各行的连接状态显示和装的那一步说
+    from diag import is_candidate
+    return is_candidate(d)
 
 
 def _row(d, dev_dir, with_link=False):
@@ -136,7 +146,7 @@ def _row(d, dev_dir, with_link=False):
         arch = ""
     row = dict(id=d.get("identifier", ""), udid=h.get("udid", ""), name=(p.get("name") or "").strip(),
                model=h.get("marketingName") or pt, productType=pt, gpuArch=arch,
-               os=int((p.get("osVersionNumber") or "0").split(".")[0]))
+               os=ios_equivalent(pt, int((p.get("osVersionNumber") or "0").split(".")[0])))
     if with_link:
         row.update(tunnel=cp.get("tunnelState") == "connected",
                    wired=cp.get("transportType") == "wired" and cp.get("pairingState") == "paired")

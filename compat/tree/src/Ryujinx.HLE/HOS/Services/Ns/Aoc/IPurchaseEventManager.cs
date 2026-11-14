@@ -34,6 +34,15 @@ namespace Ryujinx.HLE.HOS.Services.Ns.Aoc
             return ResultCode.Success;
         }
 
+        [CommandCmif(1)]
+        // SetDeliveryTarget(u64 application id, buffer<bytes, 5>): no eShop purchases are delivered here
+        public ResultCode SetDeliveryTarget(ServiceCtx context)
+        {
+            Logger.Stub?.PrintStub(LogClass.ServiceNs);
+
+            return ResultCode.Success;
+        }
+
         [CommandCmif(2)]
         // GetPurchasedEventReadableHandle() -> handle<copy, event>
         public ResultCode GetPurchasedEventReadableHandle(ServiceCtx context)
@@ -61,6 +70,15 @@ namespace Ryujinx.HLE.HOS.Services.Ns.Aoc
             //       Since we don't support purchase from eShop, we can stub it.
 
             Logger.Debug?.PrintStub(LogClass.ServiceNs); // NOTE: Uses Debug to avoid spamming.
+
+            return ResultCode.NoPurchasedProductInfoAvailable;
+        }
+
+        [CommandCmif(4)]
+        // PopPurchasedProductInfoWithUid(nn::account::Uid) -> nn::ec::detail::PurchasedProductInfo: nothing was purchased, same answer as 3
+        public ResultCode PopPurchasedProductInfoWithUid(ServiceCtx context)
+        {
+            context.ResponseData.Write(new byte[0x80]);
 
             return ResultCode.NoPurchasedProductInfoAvailable;
         }

@@ -106,7 +106,7 @@ int main(void) {
       FILE *sf = fopen(sp, "r"); char spec[200000] = ""; size_t sk = sf ? fread(spec, 1, sizeof spec - 1, sf) : 0; if (sf) fclose(sf); spec[sk] = 0;
       CHECK(sk > 0, "读共用规格 %s", sp);
       const char *codes[] = {"ios_install_dir_unwritable", "ios_install_no_space", "ios_install_pack_truncated", "ios_install_img_format", "ios_install_img_corrupt",
-          "ios_install_files_missing", "ios_install_manifest_bad", "ios_install_write_failed", "ios_install_unknown", "ios_import_img_failed"};
+          "ios_install_files_missing", "ios_install_manifest_bad", "ios_install_write_failed", "ios_install_unknown", "ios_import_img_failed", "ios_import_update_no_base", "ios_import_update_mismatch"};
       for (size_t i = 0; i < sizeof codes / sizeof *codes; i++) { char q[80]; snprintf(q, sizeof q, "\"code\": \"%s\"", codes[i]); CHECK(strstr(spec, q) != NULL, "规格里应有码 %s", codes[i]); } }
     char c[8192];
     snprintf(c, sizeof c, "cd %s && mkdir -p src/romfs/很长的中文目录名用来超过一百个字节的老式头部限制很长的中文目录名用来超过一百个字节/子 docs/资源包/.incoming && "
@@ -454,9 +454,12 @@ int main(void) {
       // ⑭ 玩家把 IMG 放进「文件」里 S2Arm 的「放这里导入」文件夹：s2a_img_scan 挪进 games/<头里的游戏号>/资源包/game.img、写 manifest（资源包号同头）与 index.tsv；
       //   拷到一半的（长度不等于头里的整个文件长）不动；导入文件夹以外的（Documents/下载）不扫、不动（v0.3.0）；挪好后应用成功
       char D3[1300]; snprintf(D3, sizeof D3, "%s/scan_docs", T);   // 小文件清单借 ⑬ 的夹具（exefs/main.npdm = 随机 5000 字节、ctl = NACP）
-      snprintf(c, sizeof c, "mkdir -p '%s/放这里导入/x' '%s/下载' && python3 '%s/pack/img.py' build - '%s/src/others.tsv' '%s/放这里导入/x/某游戏.img' --gid 0100abcd00000002 --pack-id img789 > /dev/null"
+      // 带着色器库（目录表里有 shaders/，= 导出文件夹里的 <游戏名>.img）：不带的认领时不收，见 ⑭b
+      snprintf(c, sizeof c, "printf 'x' > '%s/src/sh.bin' && cp '%s/src/others.tsv' '%s/src/others_sh.tsv' && printf 'shaders/a.metallib\t%s/src/sh.bin\n' >> '%s/src/others_sh.tsv'", D, D, D, D, D);
+      CHECK(sh(c) == 0, "⑭ 造带 shaders/ 的清单");
+      snprintf(c, sizeof c, "mkdir -p '%s/放这里导入/x' '%s/下载' && python3 '%s/pack/img.py' build - '%s/src/others_sh.tsv' '%s/放这里导入/x/某游戏.img' --gid 0100abcd00000002 --pack-id img789 > /dev/null"
                " && head -c 20000 '%s/放这里导入/x/某游戏.img' > '%s/放这里导入/半个.img'"
-               " && python3 '%s/pack/img.py' build - '%s/src/others.tsv' '%s/下载/别处.img' --gid 0100abcd00000003 --pack-id img790 > /dev/null", D3, D3, R, D, D3, D3, D3, R, D, D3);
+               " && python3 '%s/pack/img.py' build - '%s/src/others_sh.tsv' '%s/下载/别处.img' --gid 0100abcd00000003 --pack-id img790 > /dev/null", D3, D3, R, D, D3, D3, D3, R, D, D3);
       CHECK(sh(c) == 0, "⑭ 造夹具（导入文件夹第二层一个完整 IMG、导入文件夹下一个拷到一半的、导入文件夹外一个完整 IMG）");
       CHECK(s2a_img_scan(D3) == 1, "⑭ 扫到并挪好 1 个");
       snprintf(c, sizeof c, "g='%s/games/0100ABCD00000002/资源包'; test -s \"$g/game.img\" && test ! -e '%s/放这里导入/x/某游戏.img' && test -e '%s/放这里导入/半个.img' && test -e '%s/下载/别处.img' && test ! -e '%s/games/0100ABCD00000003' && grep -q '\"index_sha256\": \"img789\"' \"$g/manifest.json\" && test \"$(cut -f1 \"$g/index.tsv\")\" = game.img", D3, D3, D3, D3, D3);
@@ -466,20 +469,73 @@ int main(void) {
         s2a_pack_apply_phase = phase; memset(g_ph, 0, sizeof g_ph); memset(g_phn, 0, sizeof g_phn);
         CHECK(s2a_pack_apply(g3) == 0, "⑭ 应用成功");
         s2a_pack_apply_phase = NULL;
-        // 分段进度（游戏库「安装中」蒙版）：② 从 game.img 解小文件按字节报到满（exefs/main.npdm 5000 + ctl/control.nacp 4）；③ 核对机上文件报到满；没有推送包不报 ①
-        CHECK(g_phn[2] > 0 && g_ph[2][0] == g_ph[2][1] && g_ph[2][1] == 5004, "⑭ 分段进度 ② 解小文件 %llu / %llu（期望 5004 / 5004）", (unsigned long long)g_ph[2][0], (unsigned long long)g_ph[2][1]);
+        // 分段进度（游戏库「安装中」蒙版）：② 从 game.img 解小文件按字节报到满（exefs/main.npdm 5000 + ctl/control.nacp 4 + shaders/a.metallib 1）；③ 核对机上文件报到满；没有推送包不报 ①
+        CHECK(g_phn[2] > 0 && g_ph[2][0] == g_ph[2][1] && g_ph[2][1] == 5005, "⑭ 分段进度 ② 解小文件 %llu / %llu（期望 5005 / 5005）", (unsigned long long)g_ph[2][0], (unsigned long long)g_ph[2][1]);
         CHECK(g_phn[3] > 0 && g_ph[3][0] == g_ph[3][1] && g_ph[3][1] >= 1, "⑭ 分段进度 ③ 核对 %llu / %llu", (unsigned long long)g_ph[3][0], (unsigned long long)g_ph[3][1]);
         CHECK(g_phn[1] == 0, "⑭ 没有推送包不报 ①（报了 %d 次）", g_phn[1]);
         snprintf(c, sizeof c, "cmp -s '%s/src/npdm' '%s/资源包/exefs/main.npdm'", D, g3); CHECK(sh(c) == 0, "⑭ 小文件逐字节解出"); }
       CHECK(s2a_img_scan(D3) == 0, "⑭ 再扫一次：没有新的（拷到一半的仍不动）");
       CHECK(!*s2a_img_scan_code(), "⑭ 认领没失败：码为空（实际 %s）", s2a_img_scan_code());
-      // 格式号 2（更新版 S2Arm 做的）：不认、原样留着，给码 ios_install_img_format
+      // ⑭b 认领时有没有着色器库（诊断 D-9864 / D-F6W7 / D-9ZF9：自签玩家把电脑资源包文件夹里的 game.img 直接放进来）。物理上做得下去（现编），
+      //   一律认领、不拦（不许堵门）；不带着色器库的只记一行【黄】（换完整包的提示由游戏库那边弹）。期望手写：三个都认领；
+      //   只对不带 shaders/、机上也没有这款着色器库的 game.img 记一行【黄】；机上已有着色器库的那款，原有着色器库行保留在 index.tsv
+      { char D5[1300], lg[1400]; snprintf(D5, sizeof D5, "%s/img_docs5", T); snprintf(lg, sizeof lg, "%s/scan5.log", T);
+        snprintf(c, sizeof c, "mkdir -p '%s/放这里导入' '%s/games/0100ABCD00000007/资源包'"
+                 " && python3 '%s/pack/img.py' build - '%s/src/others.tsv' '%s/放这里导入/game.img' --gid 0100abcd00000005 --pack-id img501 > /dev/null"
+                 " && python3 '%s/pack/img.py' build - '%s/src/others_sh.tsv' '%s/放这里导入/某游戏.img' --gid 0100abcd00000006 --pack-id img601 > /dev/null"
+                 " && python3 '%s/pack/img.py' build - '%s/src/others.tsv' '%s/放这里导入/重拷.img' --gid 0100abcd00000007 --pack-id img701 > /dev/null"
+                 " && printf 'game.img\t1\t-\nshaders/a.metallib\t1\tx\n' > '%s/games/0100ABCD00000007/资源包/index.tsv'",
+                 D5, D5, R, D, D5, R, D, D5, R, D, D5, D5);
+        CHECK(sh(c) == 0, "⑭b 造夹具（不带 shaders/、带 shaders/、不带但机上已有着色器库的 IMG 各一个）");
+        int lfd = open(lg, O_WRONLY | O_CREAT | O_TRUNC, 0644), keep = g_s2a_logfd; g_s2a_logfd = lfd;
+        int placed = s2a_img_scan(D5); g_s2a_logfd = keep; close(lfd);
+        CHECK(placed == 3, "⑭b 三个都认领（实际 %d）", placed);
+        CHECK(!*s2a_img_scan_code(), "⑭b 认领没失败：码为空（实际 %s）", s2a_img_scan_code());
+        snprintf(c, sizeof c, "grep '没有着色器库' '%s' | grep -q 'game.img 里' && test \"$(grep -c '没有着色器库' '%s')\" = 1", lg, lg);
+        CHECK(sh(c) == 0, "⑭b 只对不带 shaders/、机上也没有的 game.img 记一行【黄】");
+        snprintf(c, sizeof c, "grep -q 'shaders/a.metallib' '%s/games/0100ABCD00000007/资源包/index.tsv'", D5);
+        CHECK(sh(c) == 0, "⑭b 机上已有的着色器库行保留在 index.tsv");
+        { const char *s2a_img_scan_noshaders(void); CHECK(!strcmp(s2a_img_scan_noshaders(), "game.img"), "⑭b 不带着色器的文件名给界面 = game.img（实际「%s」）", s2a_img_scan_noshaders()); } }
+      // 格式号 9（更新版 S2Arm 做的；2 是着色器更新包，见 ⑭c）：不认、原样留着，给码 ios_install_img_format
       char D4[1300], f4[1400]; snprintf(D4, sizeof D4, "%s/img_docs4", T); mkdir(D4, 0755); snprintf(f4, sizeof f4, "%s/Import Here", D4); mkdir(f4, 0755);
       snprintf(f4, sizeof f4, "%s/Import Here/新格式.img", D4);   // 英文界面建的导入文件夹名也认
-      FILE *o4 = fopen(f4, "wb"); uint8_t h4[8192] = {0}; memcpy(h4, "S2AIMG01", 8); h4[8] = 2; memcpy(h4 + 16, "0100ABCD00000000", 16); uint64_t tot = sizeof h4; memcpy(h4 + 128, &tot, 8);
-      CHECK(o4 && fwrite(h4, 1, sizeof h4, o4) == sizeof h4 && !fclose(o4), "造格式号 2 的 IMG");
+      FILE *o4 = fopen(f4, "wb"); uint8_t h4[8192] = {0}; memcpy(h4, "S2AIMG01", 8); h4[8] = 9; memcpy(h4 + 16, "0100ABCD00000000", 16); uint64_t tot = sizeof h4; memcpy(h4 + 128, &tot, 8);
+      CHECK(o4 && fwrite(h4, 1, sizeof h4, o4) == sizeof h4 && !fclose(o4), "造格式号 9 的 IMG");
       CHECK(s2a_img_scan(D4) == 0 && !access(f4, F_OK) && !strcmp(s2a_img_scan_code(), "ios_install_img_format"),
-            "格式号 2：不挪、给码 ios_install_img_format（实际 %s「%s」）", s2a_img_scan_code(), s2a_img_scan_failure()); }
+            "格式号 9：不挪、给码 ios_install_img_format（实际 %s「%s」）", s2a_img_scan_code(), s2a_img_scan_failure());
+      // ⑭c 着色器更新包（格式号 2，维护者 11-13）：先导完整包（带 shaders/a.metallib = 'x'）并解开；再导更新包（同游戏号同资源包号，a.metallib = 'y'——
+      //   同长度：旧的若还在本体目录表里，下次解包会按「长度对就跳过 / 照目录表回写」把它弄回 'x'）。期望手写：
+      //   认领 1 个、更新包从导入文件夹删掉、a.metallib = 'y'、本体目录表里不再有 shaders/ 条目、本体头里整长 = 文件长、再次应用后仍是 'y'；
+      //   资源包号不同的更新包 → 不收、给码 ios_import_update_mismatch；本机没这款本体的更新包 → 不收、给码 ios_import_update_no_base
+      { char D6[1300]; snprintf(D6, sizeof D6, "%s/img_docs6", T);
+        snprintf(c, sizeof c, "mkdir -p '%s/放这里导入' && printf 'y' > '%s/src/sh2.bin' && printf 'shaders/a.metallib\t%s/src/sh2.bin\n' > '%s/src/upd.tsv'"
+                 " && python3 '%s/pack/img.py' build - '%s/src/others_sh.tsv' '%s/放这里导入/完整.img' --gid 0100abcd00000008 --pack-id img801 > /dev/null", D6, D, D, D, R, D, D6);
+        CHECK(sh(c) == 0, "⑭c 造完整包");
+        CHECK(s2a_img_scan(D6) == 1, "⑭c 完整包认领");
+        char g6[1500]; snprintf(g6, sizeof g6, "%s/games/0100ABCD00000008", D6);
+        CHECK(s2a_pack_apply(g6) == 0, "⑭c 完整包解开");
+        snprintf(c, sizeof c, "test \"$(cat '%s/资源包/shaders/a.metallib')\" = x", g6); CHECK(sh(c) == 0, "⑭c 完整包解出 a.metallib = x");
+        snprintf(c, sizeof c, "python3 '%s/pack/img.py' build - '%s/src/upd.tsv' '%s/放这里导入/某游戏 着色器更新包.img' --gid 0100abcd00000008 --pack-id img801 > /dev/null"
+                 " && printf '\002' | dd of='%s/放这里导入/某游戏 着色器更新包.img' bs=1 seek=8 conv=notrunc 2>/dev/null", R, D, D6, D6);
+        CHECK(sh(c) == 0, "⑭c 造更新包（格式号 2）");
+        CHECK(s2a_img_scan(D6) == 1, "⑭c 更新包认领（%s「%s」）", s2a_img_scan_code(), s2a_img_scan_failure());
+        snprintf(c, sizeof c, "g='%s/资源包'; test ! -e '%s/放这里导入/某游戏 着色器更新包.img' && test \"$(cat \"$g/shaders/a.metallib\")\" = y"
+                 " && ! python3 '%s/pack/img.py' ls \"$g/game.img\" | grep -q '^shaders/'"
+                 " && python3 -c \"import sys,struct;b=open(sys.argv[1],'rb').read();t=struct.unpack_from('<Q',b,128)[0];sys.exit(0 if t==len(b) else 1)\" \"$g/game.img\""
+                 " && grep -q '^shaders/a.metallib\t1\t-' \"$g/index.tsv\"", g6, D6, R);
+        CHECK(sh(c) == 0, "⑭c 更新包删掉、a.metallib = y、本体目录表没有 shaders/、本体整长 = 文件长、index.tsv 记新派生件");
+        CHECK(s2a_pack_apply(g6) == 0, "⑭c 套更新包后解包成功");
+        snprintf(c, sizeof c, "test \"$(cat '%s/资源包/shaders/a.metallib')\" = y", g6); CHECK(sh(c) == 0, "⑭c 再次应用后 a.metallib 仍是 y（旧的没回写）");
+        snprintf(c, sizeof c, "python3 '%s/pack/img.py' build - '%s/src/upd.tsv' '%s/放这里导入/错版.img' --gid 0100abcd00000008 --pack-id img999 > /dev/null"
+                 " && printf '\002' | dd of='%s/放这里导入/错版.img' bs=1 seek=8 conv=notrunc 2>/dev/null", R, D, D6, D6);
+        CHECK(sh(c) == 0, "⑭c 造资源包号不同的更新包");
+        CHECK(s2a_img_scan(D6) == 0 && !strcmp(s2a_img_scan_code(), "ios_import_update_mismatch"), "⑭c 资源包号不同：不收、给码（实际 %s）", s2a_img_scan_code());
+        snprintf(c, sizeof c, "test -e '%s/放这里导入/错版.img' && rm '%s/放这里导入/错版.img'"
+                 " && python3 '%s/pack/img.py' build - '%s/src/upd.tsv' '%s/放这里导入/没本体.img' --gid 0100abcd00000009 --pack-id img901 > /dev/null"
+                 " && printf '\002' | dd of='%s/放这里导入/没本体.img' bs=1 seek=8 conv=notrunc 2>/dev/null", D6, D6, R, D, D6, D6);
+        CHECK(sh(c) == 0, "⑭c 错版原样留着；造本机没本体的更新包");
+        CHECK(s2a_img_scan(D6) == 0 && !strcmp(s2a_img_scan_code(), "ios_import_update_no_base") && strstr(s2a_img_scan_failure(), "完整"),
+              "⑭c 没本体：不收、给码、原因说先导完整包（实际 %s「%s」）", s2a_img_scan_code(), s2a_img_scan_failure()); } }
     // iOS 装机剃刀 #27 / #38：闸门与游戏库同一条快判。夹具：.applied = 清单、程序描述在、.incoming 里还留着一个写完的包（推送端盖残批的空包）。
     //   期望 s2a_import_state 判就绪 0（旧闸门先看 .incoming 判待导入 1，库却说能玩）。
     // 剃刀 #29：有 game.img、清单被推送开头置空、index.tsv 里的文件都在 → 期望不判就绪（旧代码清单读不出时当「不用解」→ 就绪 0）
@@ -574,6 +630,9 @@ int main(void) {
         char old[900]; snprintf(old, sizeof old, "%s/games/%s/资源包/romfs.img", sup, gid); struct stat so;
         CHECK(r == 1 && s2a_games_repair_files() == 1 && !strcmp(root, want) && !strcmp(buf, "hello") && !access(want, W_OK) && !stat(old, &so),
               "主位置整条写不进 → 搬到 Library/S2Arm：返回 1、1 个文件、资源包根换到备用位置、内容一致、可写、旧的还在（实际 %d / %u /「%s」/「%s」）", r, s2a_games_repair_files(), root, buf);
+        // #074d88（三台设备推 game.img 报 AFC「Permission denied」，都在搬家后的 Library/S2Arm 里）：旧树里的文件本身也没有写位（夹具 a-w，romfs.img 0444），
+        //   clonefile 原样照抄权限位，搬过来的文件归 App 却仍是 0444，之后电脑端经 AFC 打开写入被拒。期望：搬过来的文件 App 可写（同逐字节拷的退路 | 0600）
+        CHECK(!access(fp, W_OK), "搬过来的文件 App 可写（源文件 0444；实际 access W_OK = %d）", access(fp, W_OK));
         CHECK(s2a_games_repair(pd) == 0, "搬过之后再查：不再动（返回 0）");
         snprintf(c, sizeof c, "chmod -R u+w '%s' 2>/dev/null; rm -rf '%s'", base, base); sh(c);
     }

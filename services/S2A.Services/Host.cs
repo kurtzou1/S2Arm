@@ -281,7 +281,7 @@ namespace S2A.Services
             }
         }
 
-        // 系统语言：显式 S2A_SYSTEM_LANGUAGE 优先，否则跟设备系统首选语言（维护者 10-20：装上默认中文版，系统本身是中文）；地区不随语言变（缺省 USA，S2A_REGION 可改）
+        // 系统语言：显式 S2A_SYSTEM_LANGUAGE（玩家逐款选的游戏语言 / 开发局）优先，否则跟设备系统首选语言（维护者 10-20：装上默认中文版，系统本身是中文；11-13 起不再跟界面语言，见 SystemLocale）；地区不随语言变（缺省 USA，S2A_REGION 可改）
         // 带配置的会话（平台装配）：平台给了系统语言标签就按它映射，映射不了退回装配显式给的 Language；不碰 CoreFoundation（#1073）
         public static SystemLanguage Language => Configuration == null ? LegacyLanguage.Value
             : Configuration.SystemLanguageTag is Func<string> tag && SystemLocale.Map(tag()) is SystemLanguage mapped ? mapped
@@ -296,7 +296,7 @@ namespace S2A.Services
                 return l;
             }
 
-            SystemLanguage d = SystemLocale.FromUi(Environment.GetEnvironmentVariable("S2A_UI_LANGUAGE"), SystemLocale.Preferred(), out string why);
+            SystemLanguage d = SystemLocale.FromPreferred(SystemLocale.Preferred(), out string why);
             Console.Error.WriteLine($"[S2A 语言] 系统语言 {d}（依据：{why}）");
             return d;
         }
@@ -783,12 +783,24 @@ namespace S2A.Services
             // 游戏声明至少 2 人（强制本地合作）：真机上要再连一个手柄，这里开出第二个虚拟手柄（InputPump.SetPads，镜像第一个的输入）
             // 先按上限收回多的（#809：要 1 人、连着两个时原先照配两格，重验不过反复重开），再按下限补开
             InputPump.CapPads(Host.Device, args.PlayerCountMax);
+            // 先交给 S2Arm 面板的「分配玩家」（#520 E：面板与游戏同步）：玩家在面板上按键登记，登记了几位就开几格（不超过游戏的上限）；
+            //   启动器没开 / 没人接 / 取消回 0，照下面原来的自动应答
+            int assigned = InputPump.AssignViaLauncher(args.PlayerCountMin, args.PlayerCountMax, args.SupportedStyles);
+            if (assigned > 0)
+            {
+                int want = Math.Min(assigned, args.PlayerCountMax > 0 ? args.PlayerCountMax : InputPump.MaxPads);
+                if (want > InputPump.Pads) InputPump.SetPads(Host.Device, want);
+            }
             if (args.PlayerCountMin > InputPump.Pads) InputPump.SetPads(Host.Device, args.PlayerCountMin);
             var players = new System.Collections.Generic.List<PlayerIndex>(args.SupportedPlayers);
             PlayerIndex player;
             ControllerType type;
-            ControllerType externalType = (args.SupportedStyles & ControllerType.ProController) != 0 ? ControllerType.ProController
-                                        : (args.SupportedStyles & ControllerType.JoyconPair) != 0 ? ControllerType.JoyconPair : ControllerType.None;
+            // 连着 Joy-Con 2 时游戏可能只声明 Joy-Con 2 的样式位（bit 12 / 13 / 14 = 一对 / 左只 / 右只，例：两人各横握一只的项目）：
+            //   照 NpadDevices.StyleSupported 认，同游戏内的样式判断（#747）；改前只认一代位 → 判成没有可配的样式、游戏提示要 Joy-Con 2
+            var npads = Host.Device.Hid.Npads;
+            bool takes(ControllerType t) => npads.StyleSupported(t, args.SupportedStyles);
+            ControllerType externalType = takes(ControllerType.ProController) ? ControllerType.ProController
+                                        : takes(ControllerType.JoyconPair) ? ControllerType.JoyconPair : ControllerType.None;
 
             if ((InputPump.ExternalController || InputPump.Pads > 1) && players.Exists(p => p != PlayerIndex.Handheld) && externalType != ControllerType.None)
             {
@@ -803,8 +815,8 @@ namespace S2A.Services
                 player = players.Find(p => p != PlayerIndex.Handheld);
                 // 游戏只收单只 Joy-Con（如 Zumba：样式 JoyconLeft / JoyconRight）：真机上小程序让玩家横握一只确认，HID 照报这只的物理键、
                 //   方向由游戏按样式自己解释（Ryujinx 同样不旋转）。唯一的虚拟手柄改配成单只：优先右只（有 + 和 ABXY），不收再左只
-                ControllerType single = (args.SupportedStyles & ControllerType.JoyconRight) != 0 ? ControllerType.JoyconRight
-                                      : (args.SupportedStyles & ControllerType.JoyconLeft) != 0 ? ControllerType.JoyconLeft : ControllerType.None;
+                ControllerType single = takes(ControllerType.JoyconRight) ? ControllerType.JoyconRight
+                                      : takes(ControllerType.JoyconLeft) ? ControllerType.JoyconLeft : ControllerType.None;
                 type = externalType != ControllerType.None ? externalType : single;
 
                 if (!players.Exists(p => p != PlayerIndex.Handheld) || type == ControllerType.None)
@@ -816,7 +828,8 @@ namespace S2A.Services
 
             // 这里可选的 Pro / Handheld / JoyconPair / JoyconLeft / JoyconRight 与共享内存 FullKey / Handheld / JoyDual / JoyLeft / JoyRight 位值相同。
             uint expectedStyle = (uint)type;
-            if (InputPump.Player == player && (uint)Host.Device.Hid.SharedMemory.Npads[(int)player].InternalState.StyleSet == expectedStyle)
+            const uint Joycon2Bits = 0x7000;   // 共享内存里的样式值另带 Joy-Con 2 位（NpadDevices.Joycon2StyleFor）：比一代那部分
+            if (InputPump.Player == player && ((uint)Host.Device.Hid.SharedMemory.Npads[(int)player].InternalState.StyleSet & ~Joycon2Bits) == expectedStyle)
             {
                 if (++_controllerStuck >= 3)
                 {
@@ -832,7 +845,7 @@ namespace S2A.Services
             }
 
             // 等采样泵（约 16 ms 一拍）把新样式写进共享内存，小程序的重验读的是那里
-            for (int i = 0; i < 20 && (uint)Host.Device.Hid.SharedMemory.Npads[(int)player].InternalState.StyleSet != expectedStyle; i++)
+            for (int i = 0; i < 20 && ((uint)Host.Device.Hid.SharedMemory.Npads[(int)player].InternalState.StyleSet & ~Joycon2Bits) != expectedStyle; i++)
             {
                 System.Threading.Thread.Sleep(10);
             }

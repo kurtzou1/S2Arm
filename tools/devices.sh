@@ -65,6 +65,9 @@ s2a_device_pick() {
   local dcl=; [ "${S2A_DEVICE_NO_USB_CHECK:-0}" != 1 ] && dcl=$(_s2a_dc_list)
   for n in $(s2a_device_ids "$spec"); do
     [ -f "$sd/pause/$n" ] && continue
+    # 设备独占名单（11-13：某台测试设备归某条线独占、维护者的日常手机永不选）：自动选机一律跳过，点名机号不受影响。
+    #   表 S2A_DEVICE_EXCLUSIVE（缺省 ~/.s2arm/devices/exclusive.tsv，# 开头为注释），第一列硬件 UDID；没有这个文件 = 不跳过
+    grep -v '^#' "${S2A_DEVICE_EXCLUSIVE:-$HOME/.s2arm/devices/exclusive.tsv}" 2> /dev/null | cut -f1 | grep -qxF "$(s2a_device_field "$n" udid)" && continue
     if [ "${S2A_DEVICE_NO_USB_CHECK:-0}" != 1 ]; then u=$(s2a_device_field "$n" udid); _s2a_dc_seen "$dcl" "$u" || continue; fi
     ld=$(s2a_device_load "$n"); k=$(printf '%04d%d%02d' "$ld" "$([ -n "$b" ] && [ -f "$sd/installed/${n}_$b" ] && echo 0 || echo 1)" "$n")
     { [ -z "$bk" ] || [ "$k" \< "$bk" ]; } && { bk=$k; best=$n; }

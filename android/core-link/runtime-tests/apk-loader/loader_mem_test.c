@@ -40,6 +40,7 @@ static int read_asset(void *context,const char *filename,struct s2a_loader_blob 
     if (!strcmp(test_mode,"missing-sidecar") && !strcmp(filename,"main.gates.tsv")) return ENOENT;
     if (!strcmp(test_mode,"hash-rejected")) return EBADMSG;
     if (!strcmp(test_mode,"widen-rejected") && !strcmp(filename,"main.widen.tsv")) return EIO;
+    if (!strcmp(test_mode,"cpatch-rejected") && !strcmp(filename,"cpatch.tsv")) return EIO;
     for(int i=0;i<asset_count;i++) if(!strcmp(assets[i].filename,filename)) {
         struct asset *a=&assets[i]; assert(a->reads++==0 && a->releases==0);
         *out=(struct s2a_loader_blob){.bytes=a->bytes,.length=a->size,.lease=a};return 0;
@@ -99,6 +100,13 @@ int main(int argc,char **argv) {
 
         }
     }
+    if (!strncmp(mode,"cpatch",6)) {   // #48 D2：整包一张社区补丁表，两个模块各一行；main 的那份带数据写入 0x9000：00 → 7f
+        const char *table="编号\t模块\t位\t类别\t段名\t许可\t来源\t数据写入\t缺省开\n"
+            "gfx:A\tmain\t0\tother-gfx\tA\t\ta.pchtxt\t9000:00:7f\t0\ngfx:S\tsdk\t1\tother-gfx\tS\t\ts.pchtxt\t\t0\n";
+        save(dir,"cpatch","tsv",table,strlen(table));
+        if (!strcmp(mode,"cpatch-nul")) assets[asset_count-1].bytes[20]=0;
+        setenv("S2A_CPATCH_ON","gfx:A,gfx:S",1);   // 两份表里都是缺省关，显式开
+    }
     if (!strcmp(mode,"nul-fixups")) assets[1].bytes[3]=0;
     if (!strcmp(mode,"long-fixups")) {free(assets[1].bytes);assets[1].size=300;assets[1].bytes=malloc(300);memset(assets[1].bytes,'a',300);}
     const char *names[]={"main",!strcmp(mode,"duplicate-name")?"main":"sdk"};
@@ -110,6 +118,11 @@ int main(int argc,char **argv) {
         page[1024] = 1;            // rewritten guest hit counter must remain writable
         assert(page[1024] == 1);
         if (!strcmp(mode,"widen-policy")) { int s2a_widen_full(void); assert(s2a_widen_full() == 0); }
+    }
+    if (!strcmp(mode,"cpatch")) {   // 每个模块按同一张表各写自己的掩码槽 2046，数据写入在统一重定位前落到映射副本
+        assert(((uint64_t *)(g_mod[0].base+g_mod[0].key_page_off))[2046]==1);
+        assert(((uint64_t *)(g_mod[1].base+g_mod[1].key_page_off))[2046]==2);
+        assert(g_mod[0].base[0x9000]==0x7f && g_mod[1].base[0x9000]==0);
     }
     for(int i=0;i<asset_count;i++) assert(assets[i].reads==1 && assets[i].releases==1 && !assets[i].bytes);
     assert(!strcmp(s2a_main_build_id(),""));

@@ -49,6 +49,7 @@ struct ExportSessionView: View {
         }
     }
 
+    private var exportMode: Bool { model.installMode.mode == "export" }
     private func x(_ id: String) -> String { BackendText.launcherText("export." + id, language: uiLanguage) }
 
     var body: some View {
@@ -403,7 +404,8 @@ struct ExportSessionView: View {
             }
             HStack(spacing: 14) {
                 if platform == .ios {
-                    Button { install(session.gameID ?? "") } label: { LauncherHeroActionLabel(title: x("done.install"), symbol: "iphone") }
+                    // 装法是「导出，自己签名安装」时（D-9ZF9 / 维护者实测）：按钮和说明照导出写，不再写「一键装到 iPhone / 连上数据线」；出完包会自动接着导出
+                    Button { install(session.gameID ?? "") } label: { LauncherHeroActionLabel(title: x(exportMode ? "done.export" : "done.install"), symbol: exportMode ? "square.and.arrow.up" : "iphone") }
                         .buttonStyle(.plain).keyboardShortcut(.defaultAction).accessibilityIdentifier("result.ios.install")
                     // 出包这步没有 IPA（装机时才组装、整库共用一份）：给「打开游戏文件夹」；真有 IPA 才给「显示 .ipa」
                     if let ipa = o.ipa, !ipa.isEmpty { finderButton(loc.t("s2arm.export.revealIpa")) { model.revealIpa(ipa) } }
@@ -417,7 +419,7 @@ struct ExportSessionView: View {
                 }
             }
             if platform == .ios {
-                Text(x("done.installNote")).font(.manrope(13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text(x(exportMode ? "done.exportNote" : "done.installNote")).font(.manrope(13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
         }
     }

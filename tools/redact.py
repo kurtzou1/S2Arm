@@ -80,7 +80,9 @@ IDENTITY_RULES = (
 )
 DEVICE_CONTEXT = re.compile(r'(?i)\b(?:udid|device|serial)\b')
 LEGACY_UDID = re.compile(r'(?i)(?<![A-Z0-9])[A-F0-9]{40}(?![A-Z0-9])')
-DEVICE_NAME = re.compile(r'''[^\s"'<>:=,;{}\[\]，。]+的(iPhone|iPad)''')
+# 只在一串非分隔字符的开头试（前面不是同类字符）：原写法从串里每个位置起都往后吞到底再回退，长串（长 JSON 值、零字节）上是平方级——
+#   4 MiB 的任务记录脱敏要几分钟（#917）。结果不变：最左匹配本来就从串首开始
+DEVICE_NAME = re.compile(r'''(?<![^\s"'<>:=,;{}\[\]，。])[^\s"'<>:=,;{}\[\]，。]+的(iPhone|iPad)''')
 
 
 def redact_identity(text):

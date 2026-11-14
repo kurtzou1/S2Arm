@@ -87,6 +87,9 @@ o=$($PK); ck "重打只重算 1 个" 'grep -q "克隆 / 重算 1 个" <<< "$o" &
 rm $S/sub/b.bin; $PK > /dev/null; ck "删源文件 → 包里也删、核对绿" '[ ! -e $T/pack/romfs/sub/b.bin ] && $VF > /dev/null'
 python3 -c "f=open('$T/pack/romfs/a.bin','r+b'); f.write(b'X'); f.close()"; $VF > "$T/flip.log" 2>&1; flip=$?
 ck "包里改一个字节（同长）→ 核对红、点名 SHA 与 index 不符、源没被改（克隆独立）" '[ "$flip" = 1 ] && grep -q "romfs/a.bin（SHA 与 index 不符）" "$T/flip.log" && [ "$(cat $S/a.bin)" = a2 ]'
+# 核对红时已把不符的那行从状态表去掉（11-13 玩家 Windows：状态表照留时源没变，pack.py 沿用记下的 SHA、重试永远红）：不删状态表直接重打就绿
+ck "SHA 不符 → 红行写明已让这个文件下次重算、状态表里没有它了" 'grep -q "已让这 1 个文件下次出包重读重算" "$T/flip.log" && ! grep -q "^romfs/a.bin	" $T/pack.state.tsv && grep -q "^romfs/" $T/pack.state.tsv'
+$PK > /dev/null; ck "不删状态表直接重打 → 核对绿" '$VF > /dev/null'
 $PK > /dev/null; rm -f $T/pack.state.tsv; $PK > /dev/null; ck "丢状态表后重打 → 核对绿" '$VF > /dev/null'
 # 核对只读包里那份（11-06 维护者「少读一遍」）：普通源文件设成不可读（stat 仍可取）→ 核对照绿（不读源内容）；按全内容进包键的源不可读 → 红（照旧逐字节比源）
 rm -f "$T/pack.verify.tsv"; chmod 000 $S/a.bin; $VF > "$T/oneread.log" 2>&1; oneread=$?; chmod 644 $S/a.bin

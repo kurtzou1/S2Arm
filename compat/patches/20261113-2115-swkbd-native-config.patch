@@ -1,0 +1,60 @@
+diff --git a/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardApplet.cs b/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardApplet.cs
+index 686422489a5f793106273333f441fd35b4253453..75a4ca6c3dd456b21588097685233c4ac042b6a5 100644
+--- a/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardApplet.cs
++++ b/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardApplet.cs
+@@ -8,6 +8,7 @@ using Ryujinx.HLE.UI;
+ using Ryujinx.HLE.UI.Input;
+ using Ryujinx.Memory;
+ using System;
++using System.Buffers.Binary;
+ using System.Diagnostics;
+ using System.Diagnostics.CodeAnalysis;
+ using System.IO;
+@@ -143,8 +144,17 @@ namespace Ryujinx.HLE.HOS.Applets
+                     else
+                     {
+                         _keyboardForegroundConfig = ReadStruct<SoftwareKeyboardConfig>(keyboardConfig);
++
++                        // S2Arm: games on the 20.0.0+ keyboard (applet version 0x140010, all Switch 2 games) pass the native config, 0x530 bytes
++                        if (keyboardConfig.Length == NativeConfigSize)
++                        {
++                            ApplyNativeConfig(ref _keyboardForegroundConfig, keyboardConfig);
++                        }
+                     }
+ 
++                    Logger.Info?.Print(LogClass.ServiceAm, $"S2A 软键盘：独立键盘配置 {keyboardConfig.Length:x} 字节（{(keyboardConfig.Length == NativeConfigSize ? "20.0.0 起新布局" : "旧布局")}），" +
++                        $"长度 {_keyboardForegroundConfig.StringLengthMin}–{_keyboardForegroundConfig.StringLengthMax}，UTF-8 {_keyboardForegroundConfig.UseUtf8}，游戏自己校验 {_keyboardForegroundConfig.CheckText}");
++
+                     if (!_normalSession.TryPop(out _transferMemory))
+                     {
+                         Logger.Error?.Print(LogClass.ServiceAm, "SwKbd Transfer Memory is null");
+@@ -164,6 +174,29 @@ namespace Ryujinx.HLE.HOS.Applets
+             }
+         }
+ 
++        // S2Arm: the 20.0.0+ native keyboard config (protocol facts from public emulator sources; the 0x3AA-byte text prefix keeps the old layout,
++        //   the fields after it moved). Read with the old layout, a Switch 2 game's "validate the text myself" flag (0x48D) was taken from 0x3D0
++        //   (almost always 0): the name went straight back as final while the game waited for its own check — the keyboard looked stuck.
++        //   UTF-8 and the initial text's position were misread the same way
++        internal const int NativeConfigSize = 0x530;
++
++        internal static void ApplyNativeConfig(ref SoftwareKeyboardConfig c, byte[] b)
++        {
++            int I(int o) => BinaryPrimitives.ReadInt32LittleEndian(b.AsSpan(o, 4));
++            c.UseNewLine = b[0x1B] != 0;
++            c.UseUtf8 = b[0x3AA] != 0;
++            c.UseBlurBackground = b[0x3AB] != 0;
++            c.StringLengthMax = I(0x3AC);
++            c.StringLengthMin = I(0x3B0);
++            c.PasswordMode = (PasswordMode)I(0x3B4);
++            c.InputFormMode = (InputFormMode)I(0x3B8);
++            c.InitialStringOffset = I(0x3BC);
++            c.InitialStringLength = I(0x3C0);
++            c.CustomDictionaryOffset = I(0x3C4);
++            c.CustomDictionaryCount = I(0x3C8);
++            c.CheckText = b[0x48D] != 0;
++        }
++
+         private bool IsKeyboardActive()
+         {
+             return _backgroundState is >= InlineKeyboardState.Appearing and < InlineKeyboardState.Disappearing;

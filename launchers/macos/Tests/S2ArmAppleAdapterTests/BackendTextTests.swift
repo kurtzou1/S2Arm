@@ -44,6 +44,16 @@ final class BackendTextTests: XCTestCase {
                        "Reused the sibling platform's build root 0100535012974000@rx-9f61ea4e (commit 8607b717c; clone route: APFS clone, 77 items): platform-independent stages are checked by key, skipped when equal and redone when different")
         // 占位里的值原样带过去（花括号、$ 不当模板）
         XCTAssertEqual(BackendText.translate("构建工具不可用：{x}$1", language: "en"), "Build tool unavailable: {x}$1")
+        // #479：装机遇到带不进的款，作业层按行给固定句式（pack/jobs/ipa.py assemble），英文界面逐行翻、游戏名原样
+        XCTAssertEqual(BackendText.translate("手机上有几款游戏这次放不进同一个 App。\n这台电脑上没有它们的 iPhone 版：「丙款」\n它们是旧版 S2Arm 出的 iPhone 版，新版认不得，要重新「打 iPhone 包」：「乙款」\n"
+                                             + "确认继续的话，这次先不带它们照装，它们的存档和资源都留在手机上，之后给它们「打 iPhone 包」再装一次就回来。同意一次后，这台手机在这一版 S2Arm 上不再为它们问。", language: "en"),
+                       "Some games on the phone can't go into the same app this time.\nThis computer has no iPhone build of: 「丙款」\nBuilt for iPhone by an older S2Arm, which this version can't use. Run \"Build for iPhone\" again for: 「乙款」\n"
+                       + "Confirm to install without them this time. Their saves and resources stay on the phone, and they come back once you build them for iPhone and install again. "
+                       + "After you agree once, this phone won't ask about them again on this S2Arm version.")
+        // 装机遇到库里已删 / 别的电脑装的款（pack/jobs/install.py container_others）：同样按行给固定句式，英文界面逐行翻
+        XCTAssertEqual(BackendText.translate("这次装完，手机上这几款游戏会打不开（存档和资源包都还在手机上）。\n它们已从这台电脑的游戏库删除，重新加回游戏库、「打 iPhone 包」再装一次就回来：「乙款」\n确认继续再点一次。", language: "en"),
+                       "After this install, these games on the phone won't open (their saves and resources stay on the phone).\n"
+                       + "Deleted from this computer's library; they come back once you add them again, \"Build for iPhone\" and install: 「乙款」\nConfirm and try again to continue.")
     }
 
     func testSharedEntriesComeFromTheSpecification() throws {

@@ -46,6 +46,13 @@ void ns2_joycon_raw_to_sideways(ns2_kind kind, ns2_state *state);
 void ns2_set_joycon_raw(int raw);
 // Joy-Con 2 左右拼成一对（竖握）：输入是两只各自已校准、未转横握的状态；按键取并集，左摇杆取左只、右摇杆取右只，不转向；NULL 当全 0
 void ns2_joycon_pair_state(const ns2_state *left, const ns2_state *right, ns2_state *out);
+// 两只拼着时要不要拆成各一位玩家（#520 D，纯函数）：这一只（kind 左 / 右）同时按着自己的 SL 和 SR（side_buttons 同 ns2_decode_side_buttons）
+int ns2_joycon_split_wanted(ns2_kind kind, int side_buttons);
+// 分配玩家的登记手势（#520 E，同原机「更改握法 / 顺序」；纯函数）：buttons 是这一条链路已校准、未转向的状态（单只 Joy-Con 照原始方向），
+//   side_buttons 同 ns2_decode_side_buttons。整只（Pro / 已拼成的一对）同按 L + R → WHOLE；单只 Joy-Con 同按自己的 SL + SR → SINGLE；
+//   左只按 L / 右只按 R → HALF（两只同时各按一边 = 合成一对，由调用方配）。都没有 → NONE
+typedef enum { NS2_ASSIGN_NONE, NS2_ASSIGN_WHOLE, NS2_ASSIGN_SINGLE, NS2_ASSIGN_HALF } ns2_assign_gesture;
+ns2_assign_gesture ns2_assign_gesture_of(ns2_kind kind, uint64_t buttons, int side_buttons);
 // 扫描策略（纯函数，NS2Transport.m 的 NS2Bridge 调）：
 //   只有一条链路时还要不要扫另一侧——那一只是 Joy-Con 且没失败就要（还在连也算：重连记住的那只时它可能没开机，直连要等 30 秒超时）
 int ns2_scan_wants_other_side(ns2_kind only, int only_ready, int only_failed);
@@ -155,6 +162,28 @@ enum { NS2_CAP_LEFT = 1, NS2_CAP_RIGHT = 2, NS2_STICK_MAX = 32767 };
 // 回调在串行 BLE 队列调用；指针仅本次有效。context 必须存活到 shutdown 返回。
 // Callbacks run on the serial BLE queue; pointers are valid only during the call. Keep context alive until shutdown returns.
 typedef void (*ns2_state_callback)(const ns2_state *state, void *context);
+// 两只 Joy-Con 各一位玩家（#520 D）：玩家 2 起的按键 / 摇杆走这个回调（player 从 0 起，现在只有 1；kind 是那只的型号；
+//   state 为 NULL = 这位玩家不在了）。玩家 1 照旧走 ns2_state_callback。不设就不出玩家 2
+typedef void (*ns2_player_state_callback)(int player, ns2_kind kind, const ns2_state *state, void *context);
+void ns2_set_player_callback(ns2_player_state_callback callback);
+// 两只 Joy-Con 怎么用的面板设定：0 = 拼成一对、1 位玩家（缺省）；1 = 各一位玩家。拼着时同按一只的 SL + SR 也会拆开，一对拆散后回到这个设定
+void ns2_set_joycon_split(int split);
+int ns2_get_joycon_split(void);   // 现在是不是两只各一位玩家
+// 分配玩家（#520 E）：开着时每条链路的登记手势一变就回调（link 是链路槽 0 / 1、identifier 是 CoreBluetooth 设备 id），
+//   拼着时 SL + SR 不再自动拆（完成时调用方照分配 ns2_set_joycon_split / ns2_set_player_order / ns2_disconnect_device）
+typedef void (*ns2_assign_callback)(int link, ns2_kind kind, ns2_assign_gesture gesture, const char *identifier, void *context);
+void ns2_set_assign_callback(ns2_assign_callback callback);
+void ns2_set_assign_mode(int on);
+void ns2_set_player_order(int first_link);   // 两只拆开时哪条链路是玩家 1（缺省 0）
+typedef struct { int link; ns2_kind kind; char identifier[64]; } ns2_device;
+int ns2_get_devices(ns2_device out[2]);   // 已就绪的链路（最多 2），返回几条
+int ns2_disconnect_device(const char *identifier);   // 断开这一只（分配时没登记的，同原机）；找到返回 1
+// 可选的「收不收这台」（#520 E 最多 4 只：Mac 上第二个连接程序管第二组，两边别抢同一台）：扫到 NS2 手柄时问一次，回 0 就不连。
+//   不设（iOS / 只有一个连接程序时）= 同改前
+typedef int (*ns2_accept_filter)(ns2_kind kind, const char *identifier, void *context);
+void ns2_set_accept_filter(ns2_accept_filter filter);
+// 两只 Joy-Con 拆开时玩家 2 那只的六轴（原始方向；#520 每位玩家都有体感）；没拆 / 没开 / 太旧全 0
+void ns2_get_partner_motion(ns2_motion *out);
 typedef void (*ns2_status_callback)(ns2_status status, const char *message, void *context);
 typedef void (*ns2_motion_callback)(const ns2_motion *motion, void *context);
 

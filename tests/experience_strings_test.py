@@ -16,7 +16,7 @@ def run(*args):
 class ExperienceStrings(unittest.TestCase):
     def test_both_languages_cover_every_ios_code(self):
         codes = sorted(i["code"] for i in json.loads((ROOT / "launchers/shared/experience.v1.json").read_text(encoding="utf-8"))["errors"]["items"] if i["code"].startswith(("ios_install_", "ios_import_")))
-        self.assertEqual(len(codes), 10)
+        self.assertEqual(len(codes), 12)   # 11-13 加着色器更新包两个码
         for lang in ("zh-Hans", "zh-Hant", "en"):
             with self.subTest(lang=lang):
                 p = run("--lang", lang)

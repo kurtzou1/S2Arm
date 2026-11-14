@@ -9,11 +9,14 @@ using S2Arm.Launcher.Protocol;
 
 namespace S2Arm.Launcher;
 
-// 覆盖更新：下载、校验、替换、回滚都在共用的 pack/jobs/updater.py，这里只管状态和按钮。出包等作业进行中不提示、不替换。
+// 覆盖更新：v0.3.10 起下载、Ed25519 验签、静默运行安装程序替换、重启都交给 NetSparkle（维护者拍板换业界标准组件，不再自写换版）。
+// 这里只管状态和按钮；有没有新版、更新说明、公告仍由 pack/jobs/updater.py inbox 给。出包等作业进行中不提示、不替换。
 public sealed partial class EnvironmentWindow
 {
     private string updateProgress = "";
-    private JsonElement? updateReady;
+    private NetSparkleUpdater.AppCastItem? updateReady;   // 下载并验签好的那一版（NetSparkle 条目）
+    private string updateReadyPath = "";                    // 它下载到的安装程序
+    private NetSparkleUpdater.SparkleUpdater? sparkle;
     private string updateFailure = "";   // 错误码
     private string updateFailureMessage = "";   // 后端给的那句（updater.py 每个失败都带 message）：文案表没有这个码时显示它（剃刀 W11）
     private static readonly Uri DownloadPage = new("https://jhaizhou-ops.github.io/S2Arm/");   // 自动更新失败时「打开下载页」，系统浏览器打开
@@ -25,26 +28,12 @@ public sealed partial class EnvironmentWindow
 
     private Dictionary<string, object?> UpdateStatus => updateProgress.Length > 0
         ? new() { ["state"] = "working", ["detail"] = updateProgress }
-        : updateReady is { } ready ? new() { ["state"] = "ready", ["detail"] = ready.GetProperty("version").GetString(), ["via"] = ready.GetProperty("via").GetString() }
-        : updateFailure.Length > 0 ? new() { ["state"] = "failed", ["detail"] = updateFailure }
+        : updateReady is { } ready ? new() { ["state"] = "ready", ["detail"] = ready.Version, ["via"] = "netsparkle" }
+        : updateFailure.Length > 0 ? new() { ["state"] = "failed", ["detail"] = updateFailure, ["reason"] = updateFailureMessage }
         : new() { ["state"] = "idle" };
 
-    private void FinishPendingUpdate()
-    {
-        try
-        {
-            if (File.Exists(Path.Combine(UpdatesFolder, "pending.json"))) File.WriteAllText(Path.Combine(UpdatesFolder, "health.ok"), "ok");
-            var failure = Path.Combine(UpdatesFolder, "last_failure.json");
-            if (File.Exists(failure))
-            {
-                using var document = JsonDocument.Parse(File.ReadAllText(failure));
-                updateFailure = document.RootElement.GetProperty("code").GetString() ?? "update_failed";
-                updateFailureMessage = document.RootElement.TryGetProperty("message", out var said) ? said.GetString() ?? "" : "";
-                File.Delete(failure);
-            }
-        }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or KeyNotFoundException) { }
-    }
+    /// <summary>上一版换版留下的东西（旧自写更新器的 updates/ 下的标记）不再有人读：NetSparkle 的状态在它自己的配置文件里</summary>
+    private void FinishPendingUpdate() { }
 
     // ── 打开时给玩家看什么（11-13 维护者定稿草图，判定在 pack/jobs/updater.py inbox，两端共用「永远只给最新一期」）：
     //    最多一个弹窗（这版更新了什么 / 有新版）、横幅（最新一条没看过的重要公告）、「消息」列表与未读数（只算最新那条公告）
@@ -213,47 +202,82 @@ public sealed partial class EnvironmentWindow
         return button;
     }
 
+    /// <summary>NetSparkle：appcast（缺省 dl.s2arm.com/appcast/windows.xml；验收 / 联调用 S2A_UPDATE_FEED 指本机假 appcast）+ Ed25519 严格验签
+    /// （appcast 本身与安装程序都要签名，公钥同 Mac 的 SUPublicEDKey，私钥只在发版机）。版本按 version.txt 比</summary>
+    private NetSparkleUpdater.SparkleUpdater Sparkle()
+    {
+        if (sparkle is not null) return sparkle;
+        var feed = Environment.GetEnvironmentVariable("S2A_UPDATE_FEED") is { Length: > 0 } f ? f : UpdateFeed;
+        var updater = new NetSparkleUpdater.SparkleUpdater(feed, new NetSparkleUpdater.SignatureVerifiers.Ed25519Checker(NetSparkleUpdater.Enums.SecurityMode.Strict, UpdatePublicKey))
+        {
+            UIFactory = null,
+            UserInteractionMode = NetSparkleUpdater.Enums.UserInteractionMode.DownloadNoInstall,
+            Configuration = new NetSparkleUpdater.Configurations.JSONConfiguration(new VersionAccessor(AppVersion), Path.Combine(UpdatesFolder, "netsparkle.json")),
+            RelaunchAfterUpdate = true,
+            // 静默装进现在这个目录（便携版也原地更新，不另装一份）；数据不在程序目录里（私有目录、游戏库），装新版不碰
+            CustomInstallerArguments = $"/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /DIR=\"{InstallDir}\"",
+            RelaunchAfterUpdateCommandSuffix = string.Join(" ", Environment.GetCommandLineArgs().Skip(1).Select(a => "\"" + a.Replace("\"", "") + "\"")),
+            LogWriter = new UpdateLog(Path.Combine(privateRoot, "logs", "update.log")),
+        };
+        updater.CloseApplicationAsync += () => { Dispatcher.UIThread.Post(Close); return Task.CompletedTask; };
+        updater.DownloadMadeProgress += (_, item, e) => Dispatcher.UIThread.Post(() =>
+        { updateProgress = T("update.downloading").Replace("{0}", e.ProgressPercentage.ToString()); RefreshLive(); });
+        updater.DownloadFinished += (item, path) => Dispatcher.UIThread.Post(() =>
+        { updateProgress = ""; updateReady = item; updateReadyPath = path; Render(); });
+        updater.DownloadHadError += (item, path, error) => Dispatcher.UIThread.Post(() => Fail("update_failed", error.Message));
+        updater.InstallUpdateFailed += (reason, path) => { Dispatcher.UIThread.Post(() => Fail("update_failed", reason.ToString())); return true; };
+        return sparkle = updater;
+    }
+
+    private const string UpdateFeed = "https://dl.s2arm.com/appcast/windows.xml";
+    private const string UpdatePublicKey = "WoZkGLOTuLU2zl0gsPX+4sTKRsIN9ahBEfj0ulkqOqc=";
+
+    private void Fail(string code, string why)
+    {
+        updateProgress = ""; updateReady = null; updateFailure = code; updateFailureMessage = why;
+        UpdateLog.Write(Path.Combine(privateRoot, "logs", "update.log"), $"更新失败（{code}）：{why}");
+        Render();
+    }
+
     private async Task DownloadUpdateAsync()
     {
         if (updateProgress.Length > 0) return;
         updateFailure = ""; updateFailureMessage = ""; updateProgress = T("update.downloading").Replace("{0}", "0"); Render();
-        var command = new List<string> { "prepare", "--platform", "windows", "--current", UpdateClient.CurrentVersion(InstallDir), "--private-root", privateRoot, "--install", InstallDir };
-        if (connectedFolder is not null) { command.Add("--protect"); command.Add(connectedFolder); }
-        var result = await UpdateClient.RunAsync(paths, command, e => Dispatcher.UIThread.Post(() =>
+        SaveUpdateNotes();
+        try
         {
-            switch (e.GetProperty("state").GetString())
+            var info = await Sparkle().CheckForUpdatesQuietly(true);
+            if (info.Status != NetSparkleUpdater.Enums.UpdateStatus.UpdateAvailable || info.Updates is not { Count: > 0 } updates)
             {
-                case "downloading":
-                    var total = e.GetProperty("total").GetInt64();
-                    updateProgress = T("update.downloading").Replace("{0}", total > 0 ? (e.GetProperty("done").GetInt64() * 100 / total).ToString() : "0");
-                    RefreshLive(); break;   // 只刷新顶栏那一格（UpdateControls），不整页重画
-                case "verifying": updateProgress = T("update.verifying"); RefreshLive(); break;
-                case "unpacking": updateProgress = T("update.unpacking"); RefreshLive(); break;
+                updateProgress = "";
+                if (info.Status == NetSparkleUpdater.Enums.UpdateStatus.UpdateNotAvailable) { Render(); return; }
+                Fail("update_failed", $"查新版没成（{info.Status}）"); return;
             }
-        }), TimeSpan.FromHours(2));
-        updateProgress = "";
-        if (result is { } ready && ready.GetProperty("state").GetString() == "ready")
-            updateReady = ready;
-        else
-        {
-            updateFailure = (result is { } failed && failed.TryGetProperty("code", out var code) ? code.GetString() : null) ?? "update_failed";
-            updateFailureMessage = result is { } said && said.TryGetProperty("message", out var message) ? message.GetString() ?? "" : "";
+            await Sparkle().InitAndBeginDownload(updates[0]);   // 下载、验签完成走 DownloadFinished，失败走 DownloadHadError
         }
-        Render();
+        catch (Exception error) { Fail("update_failed", error.Message); }
+    }
+
+    /// <summary>换上新版后第一次打开要弹「这版更新了什么」（updater.py inbox 读 updates/notes/&lt;版本&gt;.json）：说明随查到的新版记在本机</summary>
+    private void SaveUpdateNotes()
+    {
+        if (availableUpdate is not { } update || !update.TryGetProperty("version", out var v) || !update.TryGetProperty("notes", out var notes)
+            || notes.ValueKind != JsonValueKind.Object) return;
+        try
+        {
+            var folder = Path.Combine(UpdatesFolder, "notes"); Directory.CreateDirectory(folder);
+            File.WriteAllText(Path.Combine(folder, v.GetString() + ".json"), notes.GetRawText());
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
     }
 
     private void RestartToUpdate()
     {
-        // 草图④：有任务在跑先拦下说明，弹窗不关（update_app_busy 是换版时旧 S2Arm 没退出，另说）
+        // 草图④：有任务在跑先拦下说明，弹窗不关
         if (UpdateBlocked) { updateGate = "update.gate.busy"; if (updatePopup is null) ShowUpdatePopup(); Render(); return; }
-        if (updateReady is not { } ready) return;
-        try
-        {
-            UpdateClient.Apply(ready, InstallDir, privateRoot, Environment.GetCommandLineArgs().Skip(1));
-            Close();
-        }
-        catch (Exception error) when (error is IOException or InvalidOperationException or System.ComponentModel.Win32Exception or KeyNotFoundException)
-        { updateFailure = "update_failed"; updateFailureMessage = ""; updateReady = null; Render(); }
+        if (updateReady is not { } ready || sparkle is null) return;
+        UpdateLog.Write(Path.Combine(privateRoot, "logs", "update.log"), $"玩家点了更新并重启：交给 NetSparkle 运行安装程序 {ready.Version}");
+        _ = sparkle.InstallUpdate(ready, updateReadyPath);   // 写好等本程序退出再跑安装程序、装完拉起的脚本，再经 CloseApplicationAsync 关掉本程序
     }
 
     // ── 顶部公告条（v0.2.3，同 Mac LauncherView.noticeBar）：只放最新一条没看过的重要公告（inbox banner）；内容是数据（notice.json），代码里不写公告内容。

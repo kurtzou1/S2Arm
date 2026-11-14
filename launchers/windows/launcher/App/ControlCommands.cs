@@ -385,7 +385,7 @@ public sealed partial class EnvironmentWindow
             ["checks"] = (report?.Checks ?? []).Select(c => new Dictionary<string, object?>
                 { ["name"] = c.Name, ["ok"] = c.Status == "ok" || !c.Blocking, ["message"] = c.Message, ["group"] = "", ["action"] = c.Action }).ToList(),
             ["library"] = connectedFolder, ["games"] = games, ["session"] = session, ["busy"] = ControlBusy,
-            ["tasks"] = ControlJournal.Tasks(privateRoot), ["queue"] = Array.Empty<string>(), ["notice"] = null,
+            ["tasks"] = ControlJournal.Tasks(privateRoot), ["queue"] = exportQueue.Select(q => q.Game.Id).ToList(), ["notice"] = null,
             ["error"] = importError.Length > 0 ? importError : aiControlError.Length > 0 ? aiControlError : null,
             ["installReadiness"] = install, ["installMode"] = ControlInstallMode(), ["phoneUpdates"] = ControlPhoneUpdates(), ["update"] = UpdateStatus, ["batch"] = ControlBatch(), ["cachedAt"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0,
             ["lastSnapshotPath"] = "", ["windows"] = Array.Empty<object>(),

@@ -1,0 +1,16 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 S2Arm contributors
+#version 450
+layout(local_size_x = 1) in;
+layout(set = 0, binding = 0, std430) buffer Args { uint w[]; } data;
+void main() {
+    data.w[4] = data.w[0]; // Actual GPU count at non-zero byte offset 16.
+    for (uint i = 0; i < 5; ++i) {
+        uint b = 8 + i * 8; // Non-zero byte offset 32, padded stride 32.
+        data.w[b] = 6;
+        data.w[b+1] = 1;
+        data.w[b+2] = 6 * min(i, 3u);
+        data.w[b+3] = 0; // firstInstance (nonindexed) or vertexOffset (indexed)
+        data.w[b+4] = 0; // indexed firstInstance
+    }
+}

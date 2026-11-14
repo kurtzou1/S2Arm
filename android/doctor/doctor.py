@@ -86,7 +86,6 @@ def requirements(repo):
     ssl = read('android/openssl/build.sh')
     codecs = read('android/codecs/build.sh')
     build = read('android/docker/build.sh')
-    gate = read('android/gate.sh')
     toolchain = read('android/tools/ndk_toolchain.sh')
     hostbuild = read('android/host/build.sh')
     hostenv = read('android/host/hostenv.sh')
@@ -260,19 +259,17 @@ def requirements(repo):
         raise ValueError('unsupported NuGet pin table')
     if 'nuget_verify.py' not in cs or 'contentHash' not in verify:
         raise ValueError('unsupported NuGet verify wiring')
-    if 'tools/jdk17.sh' in gate:
-        if (len(re.findall(r'(?<![\w])JAVAC\s*=', gate)) != 1
-                or not re.fullmatch(r'\$\(bash (?:"\$android_dir"|android)/tools/jdk17\.sh \|\| true\)',
-                                    one(gate, r'^JAVAC=([^\n]+)$'))):
-            raise ValueError('unsupported gate JDK helper invocation')
-        if re.search(r'case\s+"\$jv"', gate):
-            raise ValueError('ambiguous gate JDK version sources')
-        jdk = read('android/tools/jdk17.sh')
-        gate_jdk = one(jdk, r"grep -q ' (\d+)\\\.'")
-    else:
-        gate_jdk = one(gate, r'case \"\$jv\" in \*\" (\d+)\.')
-    if gate_jdk != want['jdk']:
-        raise ValueError('gate JDK differs from Dockerfile')
+    # Host build, prepare and APK gate use this shared environment and helper.
+    if (len(re.findall(r'(?<![\w])JAVAC\s*=', hostenv)) != 1
+            or not re.fullmatch(r'\$\(bash "\$hostenv_android_dir/tools/jdk17\.sh" \|\| true\)',
+                                one(hostenv, r'^JAVAC=([^\n]+)$'))):
+        raise ValueError('unsupported hostenv JDK helper invocation')
+    if re.search(r'case\s+"\$jv"', hostenv):
+        raise ValueError('ambiguous hostenv JDK version sources')
+    jdk = read('android/tools/jdk17.sh')
+    host_jdk = one(jdk, r"grep -q ' (\d+)\\\.'")
+    if host_jdk != want['jdk']:
+        raise ValueError('host JDK differs from Dockerfile')
     for name in ('opus', 'vpx'):
         pin = read(f'services/{name}/build.sh')
         ver, sha = one(pin, r'^VER=([\d.]+); SHA=([0-9a-f]{64})$')

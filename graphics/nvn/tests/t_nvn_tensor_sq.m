@@ -88,6 +88,23 @@ int main(void) { @autoreleasepool {
     VERIFY(near(w[0], 0.5f, 0.08f) && near(w[1], 0.25f, 0.08f) && near(w[2], 2.0f, 0.08f), "② 读写同域：输出 (%g, %g, %g)（期望 ≈ 0.5, 0.25, 2）", w[0], w[1], w[2]);
     VERIFY(w[0] > 0 && w[1] > 0 && w[2] > 0 && near(v[0] / w[0], 0.5f, 0.04f) && near(v[1] / w[1], 0.25f, 0.04f) && near(v[2] / w[2], 2.0f, 0.04f),
            "①/② 逐分量 (%g, %g, %g)（期望 = 输入 0.5, 0.25, 2；不平方时为 1）", v[0] / w[0], v[1] / w[1], v[2] / w[2]);
+    // ⑦ sRGB 域出口层（11-14 一款体育游戏画面发白，nvn_tensor.inc 文件头「输出域之二」）：tensor_srgb = 48、tensor_sq = 0 → 输入逐分量 sRGB 解码后放大：
+    //   期望 ≈ g·(0.2140, 0.0509, 4.954)（((x + 0.055) / 1.055)^2.4，手算）。g 随像素最亮分量变（11-14 M 系实测：最亮 2 → 0.97、4 → 0.95、4.95 → 0.91），
+    //   所以绝对值容差 12%，与 g 无关的那条看同一像素的分量比：R/B = 0.04321、G/B = 0.01027（不解码时 0.25 / 0.125），容差 5%（R11G11B10 量化）。
+    //   负对照（11-14 手工）：tensor_standin 里 dom 恒取 0（= 改前）→ ⑦ 计数与两项数值都红（输出 ≈ ② 本身、R/B 0.25）
+    cs->tensor_srgb = 48; cs->tensor_log = 0; up0 = g_tensor_up; sq0 = g_tensor_sq_runs; uint64_t sr0 = g_tensor_srgb_runs; float x7[3];
+    standin(cs); standin(cs); read_at(tex_mtl(&to), OW / 2, OH / 2, x7);
+    VERIFY(g_tensor_up == up0 + 2 && g_tensor_srgb_runs == sr0 + 2 && g_tensor_sq_runs == sq0, "⑦ 放大 2 次（实 %llu）、sRGB 解码 2 次（实 %llu）、平方 0 次（实 %llu）",
+           (unsigned long long)(g_tensor_up - up0), (unsigned long long)(g_tensor_srgb_runs - sr0), (unsigned long long)(g_tensor_sq_runs - sq0));
+    VERIFY(near(x7[0], 0.2140f, 0.12f) && near(x7[1], 0.0509f, 0.12f) && near(x7[2], 4.954f, 0.12f), "⑦ 出口层 sRGB 域：输出 (%g, %g, %g)（期望 ≈ 0.214, 0.0509, 4.95）", x7[0], x7[1], x7[2]);
+    VERIFY(x7[2] > 0 && near(x7[0] / x7[2], 0.04321f, 0.05f) && near(x7[1] / x7[2], 0.01027f, 0.05f),
+           "⑦ 同像素分量比 R/B %g、G/B %g（期望 0.0432、0.0103；不解码时 0.25、0.125）", x7[0] / x7[2], x7[1] / x7[2]);
+    {   // 平方域优先：两种计数都有时照平方（tensor_sq 先判）
+        cs->tensor_sq = 32; cs->tensor_log = 0; sq0 = g_tensor_sq_runs; sr0 = g_tensor_srgb_runs;
+        standin(cs);
+        VERIFY(g_tensor_sq_runs == sq0 + 1 && g_tensor_srgb_runs == sr0, "⑦ 平方与 sRGB 都有：平方 %llu 次、解码 %llu 次（期望 1 / 0）", (unsigned long long)(g_tensor_sq_runs - sq0), (unsigned long long)(g_tensor_srgb_runs - sr0));
+        cs->tensor_sq = 0; cs->tensor_srgb = 0; cs->tensor_log = 0;
+    }
     {   // ③ ④ 的输入：左上 32x32 = A、其余 = B（测试自己填）
         id<MTLBuffer> src = [g_dev newBufferWithLength:CW * CH * 4 options:MTLResourceStorageModeShared];
         for (int y = 0; y < CH; y++) for (int x = 0; x < CW; x++) ((uint32_t *)src.contents)[y * CW + x] = x < 32 && y < 32 ? 0x8C004040u : 0x8C020100u;
@@ -134,6 +151,6 @@ int main(void) { @autoreleasepool {
         standin(cs);
         VERIFY(g_tensor_up == up2 + 1, "⑥ 撤掉后照旧顶替：放大 %llu 次（期望 1）", (unsigned long long)(g_tensor_up - up2));
     }
-    printf("%s t_nvn_tensor_sq：%u 项，%u 项不过（张量核网络顶替：平方域出口层先平方输入、同域照原样；按推常量取输入有效区域与输出区域；诊断开关关掉不顶替）\n", fails ? "✗" : "✓", checks, fails);
+    printf("%s t_nvn_tensor_sq：%u 项，%u 项不过（张量核网络顶替：平方域出口层先平方输入、sRGB 域先解码输入、同域照原样；按推常量取输入有效区域与输出区域；诊断开关关掉不顶替）\n", fails ? "✗" : "✓", checks, fails);
     return fails ? 1 : 0;
 } }

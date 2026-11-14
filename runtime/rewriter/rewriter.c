@@ -2853,7 +2853,8 @@ static int classify(const IV* l, int j, Pair f, Jump* out, char* why, size_t n) 
     PUSH(out->span, l->v[q].at);
   return 1;
 }
-static int jt_targets(const IV* l, int j, AV* out) {
+static int reg_const(const IV* l, int k, int r, A* tbl, char** why);
+static int jt_targets(const IV* l, int j, AV* out, int follow_copy) {
   int lo = MAX(0, j - 16), add = -1, ld = -1, B = -1, I = -1;
   for (int q = j - 1; q >= lo; q--) {
     int r = rno(l->v + q, 2);
@@ -2927,8 +2928,18 @@ static int jt_targets(const IV* l, int j, AV* out) {
       break;
   }
   A tbl;
-  if (!n || !chain(l, ld, B, 256, &tbl, NULL))
+  if (!n)
     return 0;
+  /* follow_copy：基址经寄存器拷贝（#716：adrp x18 + add x18 / mov x0,x18 / ldrsw x18,[x0,…]）——线性 chain 只认同一寄存器的 adrp+add，
+   * 认不出再按到达定义跟拷贝（reg_const，同 jt_open），项数仍取界检查。只在 jt_open 也认不出之后用（jt_open 不设界、表后紧挨着别的表时
+   * 读满 1024 项放弃，就是 #716 两处的缺口）；排在 jt_open 之后，jt_open 已认得的款产物不变 */
+  if (!chain(l, ld, B, 256, &tbl, NULL)) {
+    char* why = NULL;
+    int ok = follow_copy && reg_const(l, ld, B, &tbl, &why);
+    release(why);
+    if (!ok)
+      return 0;
+  }
   REQUIRE(n > 0 && n < INT_MAX / 4);
   for (int i = 0; i < n; i++) {
     A t = tbl + si(tbl + 4LL * i);
@@ -3242,12 +3253,16 @@ static void analyze(void) {
           jump.at = l.v[j].at;
           AV t = {0};
           char* jtwhy = NULL;
-          int ok = jt_targets(&l, j, &t), op = 0;
+          int ok = jt_targets(&l, j, &t, 0), op = 0;
           if (!ok) {
             t = (AV){0};
             ok = jt_open(&l, j, f, &t, &jtwhy);
             if (ok)
               op = 1;
+          }
+          if (!ok) {   /* #716：基址经拷贝、且不设界读不到头的表，按界检查取项 */
+            t = (AV){0};
+            ok = jt_targets(&l, j, &t, 1);
           }
           if (!ok) {
             t = (AV){0};

@@ -43,6 +43,20 @@ def group_targets(paths):
     return [ntpath.commonpath(g) if len(g) > 1 else g[0] for g in by_drive.values()]
 
 
+def is_unc_path(path):
+    """Windows directory junctions cannot target UNC shares; callers must keep or copy the real path."""
+    try:
+        drive, _ = ntpath.splitdrive(os.fspath(path))
+    except TypeError:
+        return False
+    return drive.startswith("\\\\")
+
+
+def junction_targets(paths):
+    """目录联接只支持本地卷；UNC 网络共享保留原路径，不能映射到坏掉的联接。"""
+    return [target for target in group_targets(paths) if not is_unc_path(target)]
+
+
 def to_long(path, table):
     """短路径 → 玩家路径（界面、日志、产物里的联接目标都用它）"""
     text = str(path)
@@ -171,7 +185,7 @@ def enter(*paths):
         rows, mapping = [], {}
         for p in full:
             os.makedirs(p, exist_ok=True)
-        for target in group_targets(full):
+        for target in junction_targets(full):
             for code in codes(target):
                 link = ntpath.join(root, code)
                 if os.path.lexists(link):

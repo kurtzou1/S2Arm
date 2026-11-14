@@ -10,6 +10,8 @@ public final class GameSessionAdmissionTest {
     static int checks;
     static final String TITLE = "0100000000ABCDEF";
     static final byte[] IMAGE = {1, 2, 3, 4};
+    static final byte[] CPATCH = "编号\t模块\t位\t类别\t段名\t许可\t来源\t数据写入\t缺省开\ngfx:A\tmain\t0\tother-gfx\tA\t\ta.pchtxt\t\t0\n"
+        .getBytes(java.nio.charset.StandardCharsets.UTF_8);
     static void check(boolean ok, String why) { checks++; if (!ok) throw new AssertionError(why); }
     static Path fixture(Path app) throws Exception { return fixture(app, true); }
     static Path fixture(Path app, boolean addressNeeds) throws Exception {
@@ -68,7 +70,7 @@ public final class GameSessionAdmissionTest {
         try (GameSession ignored = GameSession.load(spec(app, game), app.toFile(), null, true)) {
             throw new AssertionError("admission accepted " + name);
         } catch (IOException | BootContract.BadGame | GamePack.BadPack expected) { checks++; }
-        try (GameStorage ignored = GameStorage.acquire(app.toFile())) { checks++; }
+        try (GameStorage ignored = GameStorage.acquire(app.toFile(), game.getFileName().toString())) { checks++; }
     }
 
     static GameSession.InstalledApk apk(Path app, Path game) throws Exception {
@@ -76,7 +78,8 @@ public final class GameSessionAdmissionTest {
         try (var zip = new java.util.zip.ZipOutputStream(Files.newOutputStream(path))) {
             for (var entry : Map.of("main.patched.bin", IMAGE, "main.fixups.tsv",
                     "# TARGET\tandroid\n# REWRITE_ABI\tandroid-sp-safe-v1\n".getBytes(StandardCharsets.UTF_8),
-                    "main.gates.tsv", new byte[]{10}, "widen_enable.handheld.tsv", "main\t0x10\tmovz\t1\n".getBytes(StandardCharsets.UTF_8)).entrySet()) {
+                    "main.gates.tsv", new byte[]{10}, "widen_enable.handheld.tsv", "main\t0x10\tmovz\t1\n".getBytes(StandardCharsets.UTF_8),
+                    "cpatch.tsv", CPATCH).entrySet()) {
                 zip.putNextEntry(new java.util.zip.ZipEntry("assets/game/modules/" + entry.getKey()));
                 zip.write(entry.getValue()); zip.closeEntry();
             }
@@ -89,7 +92,7 @@ public final class GameSessionAdmissionTest {
     }
     public static void main(String[] args) throws Exception {
         if (args.length == 2 && args[0].equals("lock-probe")) {
-            try (GameStorage ignored = GameStorage.acquire(new File(args[1]))) { System.out.println("ACQUIRED"); }
+            try (GameStorage ignored = GameStorage.acquire(new File(args[1]), TITLE)) { System.out.println("ACQUIRED"); }
             catch (IOException expected) { System.out.println("BUSY"); System.exit(2); }
             return;
         }
@@ -103,8 +106,11 @@ public final class GameSessionAdmissionTest {
                 check(start != null && start.assetRoot.isEmpty(), "revision is admitted without APK binding");
                 check("9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a".equals(start.moduleSha256.get("main")),
                     "revision executable hash has an independent known value");
-                try (GameStorage ignored = GameStorage.acquire(app.toFile())) { throw new AssertionError("live revision not pinned"); }
+                try (GameStorage ignored = GameStorage.acquire(app.toFile(), TITLE)) { throw new AssertionError("live revision not pinned"); }
                 catch (IOException expected) { checks++; }
+                // 锁按游戏分（不堵门）：这一款在跑时，别的游戏照样能取到自己的锁（导入 / 清扫不被挡）
+                try (GameStorage other = GameStorage.acquire(app.toFile(), "0100000000ABCDEE")) { checks++; }
+                catch (IOException wrong) { throw new AssertionError("another game's lock blocked by a live session", wrong); }
                 Process child = new ProcessBuilder(Path.of(System.getProperty("java.home"),"bin/java").toString(),
                     "-cp",System.getProperty("java.class.path"),GameSessionAdmissionTest.class.getName(),"lock-probe",app.toString())
                     .redirectErrorStream(true).start();
@@ -133,9 +139,17 @@ public final class GameSessionAdmissionTest {
                 artifact(g,s->s.replace("\"indexSha256\":\""+hash+"\"", "\"indexSha256\":\""+"00".repeat(32)+"\""));
             });
             refuses(app,"bad-abi",(a,g)->artifact(g,s->s.replace("\"rewriteAbi\":\"android-sp-safe-v1\"", "\"rewriteAbi\":\"wrong-abi\"")));
-            refuses(app,"bad-rewriter",(a,g)->artifact(g,s->s.replace("runtime/rewriter@android-sp-safe-v1", "other/rewriter@android-sp-safe-v1")));
+            {   // 工具链标签不同、ABI 相同：照常准入（不堵门；ABI 不同见上面 bad-abi，照旧拒）
+                Path other = Files.createDirectories(app.resolve("other-rewriter-label")); Path otherGame = fixture(other, true);
+                artifact(otherGame, s -> s.replace("runtime/rewriter@android-sp-safe-v1", "other/rewriter@android-sp-safe-v1"));
+                try (GameSession ignored = GameSession.load(spec(other, otherGame), other.toFile(), null, true)) { checks++; }
+            }
             refuses(app,"missing-rewriter",(a,g)->artifact(g,s->s.replace("\"toolchain\":{\"rewriter\":\"runtime/rewriter@android-sp-safe-v1\"},", "")));
-            refuses(app,"bad-runtime",(a,g)->artifact(g,s->s.replace("0.1.0", "99.0.0")));
+            {   // 运行时版本号只是标签（ABI 另有核对）：不同照常准入（不堵门）
+                Path other = Files.createDirectories(app.resolve("other-runtime-version")); Path otherGame = fixture(other, true);
+                artifact(otherGame, s -> s.replace("0.1.0", "99.0.0"));
+                try (GameSession ignored = GameSession.load(spec(other, otherGame), other.toFile(), null, true)) { checks++; }
+            }
             refuses(app,"unindexed-module",(a,g)-> {
                 Path revision = g.resolve(BootContract.readCurrent(g.toFile()).revisionDir);
                 Files.createDirectory(revision.resolve("outside"));
@@ -143,6 +157,12 @@ public final class GameSessionAdmissionTest {
                     Files.copy(revision.resolve("modules/main."+suffix),revision.resolve("outside/main."+suffix));
                 artifact(g,s->s.replace("modules/main.","outside/main."));
             });
+            {   // 版本目录根上留着换 artifact 时没删掉的旧 artifact：游戏读不到它，照常准入（不堵门）
+                Path stale = Files.createDirectories(app.resolve("stale-root-artifact")); Path staleGame = fixture(stale, true);
+                Path staleRev = staleGame.resolve(BootContract.readCurrent(staleGame.toFile()).revisionDir);
+                Files.writeString(staleRev.resolve("game-build-artifact.0000000000000000.json"), "{}");
+                try (GameSession ignored = GameSession.load(spec(stale, staleGame), stale.toFile(), null, true)) { checks++; }
+            }
             refuses(app,"unindexed-romfs",(a,g)-> {
                 Path revision = g.resolve(BootContract.readCurrent(g.toFile()).revisionDir);
                 Files.writeString(revision.resolve("romfs/extra"),"outside content root");
@@ -256,6 +276,14 @@ public final class GameSessionAdmissionTest {
                 policy[0] ^= 1;
                 check(!GameSession.verifyNativeBytes("game/modules/widen_enable.handheld.tsv", java.nio.ByteBuffer.wrap(policy)),
                     "changed widening policy is rejected");
+                // #48 D2：社区补丁表与宽屏表同口径进准入名单，原生读面按同一份哈希验
+                check(GameSession.nativeFileAdmission("game/modules/cpatch.tsv") == 1, "APK community patch table is admitted");
+                byte[] table = CPATCH.clone();
+                check(GameSession.verifyNativeBytes("game/modules/cpatch.tsv", java.nio.ByteBuffer.wrap(table)),
+                    "APK community patch table admitted for native authenticated reads");
+                table[table.length - 2] ^= 1;
+                check(!GameSession.verifyNativeBytes("game/modules/cpatch.tsv", java.nio.ByteBuffer.wrap(table)),
+                    "changed community patch table is rejected");
             }
             // The persisted (size, dev, ino, mtime) stamp lets a later boot skip re-hashing the APK.
             Map<String,Object> doc = Json.object(Json.parse(Files.readString(assetGame.resolve("current.json"))),"current");

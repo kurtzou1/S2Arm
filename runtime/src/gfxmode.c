@@ -101,9 +101,12 @@ static pthread_mutex_t g_mode_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic int g_decided;
 static int g_default_audio_sched;
 static void decide(void) {
-    int mode = S2A_GFX_GENERIC;   // = 不能直连（包里没有本宿主口径的直连库）：真起局时 host_main.c 报「游戏文件缺失」收局，不再退通用
+    // 只有直连一种模式（11-07 拆通用）：包里没带本宿主口径的直连库也照样直连，着色器首次遇到时现编（dsh_miss / dm_shader_miss）——
+    //   直连库只是提速件，不是起局的门（11-13 维护者「不许堵门」：原先没库就收局报 direct_lib_missing，玩家导入了不带库的 game.img 就整局起不来）
+    // 只有「设备本身跑不了直连」（无 Metal 4 / Metal 3 路径）是物理做不下去：那时才不直连，host_main.c 照旧停下说明
+    int mode = s2a_nvn_bootstrap_entry && s2a_direct_device_ok && s2a_direct_device_ok() ? S2A_GFX_DIRECT : S2A_GFX_GENERIC;
     g_pid = npdm_read();
-    const char *e = getenv("S2A_GFX"), *why = "包里没有本宿主口径的直连库";
+    const char *e = getenv("S2A_GFX"), *why = "包里没有本宿主口径的直连库：着色器首次遇到时现编，前几分钟会卡";
     char p[1200];
     // 旧版本留在机上的模式文件（wire/<程序号>/fail、fail_seen：10-26 前运行中出错写的；mode：11-07 前「切回通用模式」菜单写的）：
     //   只有直连了，都不再作依据；删掉、打一行
@@ -113,16 +116,17 @@ static void decide(void) {
         if (!unlink(p)) LOG("图形模式：删掉旧的 %s（只有直连，不再按它选模式）", p);
     }
     if (e && *e && strcmp(e, "direct")) LOG("【红】图形模式：S2A_GFX=%s 不认（只有 direct：开发 / 单测强制直连用），按包判", e);
+    int packaged = s2a_direct_packaged();
     if (e && !strcmp(e, "direct")) { mode = S2A_GFX_DIRECT; why = "环境变量 S2A_GFX=direct"; }
-    else if (s2a_direct_packaged()) {   // 包里带直连库就直连（10-25 维护者 拍板）
-        mode = S2A_GFX_DIRECT; why = "包里带本宿主口径的直连库（NVN b-" DMSH_CHAIN " 或 Vulkan vk/）";
-    }
+    else if (mode != S2A_GFX_DIRECT) why = "这台设备跑不了直连（没有 Metal 4 / Metal 3 路径）";
+    else if (packaged) why = "包里带本宿主口径的直连库（NVN b-" DMSH_CHAIN " 或 Vulkan vk/）";
     g_why = why;
-    if (mode != S2A_GFX_DIRECT) snprintf(g_brief, sizeof g_brief, "无直连库");
+    if (mode != S2A_GFX_DIRECT) snprintf(g_brief, sizeof g_brief, "设备不支持直连");
+    else if (!packaged && !(e && !strcmp(e, "direct"))) snprintf(g_brief, sizeof g_brief, "无直连库·现编");
     else if (!strncmp(why, "环境变量", strlen("环境变量"))) snprintf(g_brief, sizeof g_brief, "S2A_GFX 指定");
     else if (!strcmp(g_lib, "NVN")) snprintf(g_brief, sizeof g_brief, "NVN b-%.6s", DMSH_CHAIN);
     else snprintf(g_brief, sizeof g_brief, "%s", g_lib);
-    LOG("图形模式：%s（依据 %s；程序号 %016llx）", mode == S2A_GFX_DIRECT ? "直连" : "没有直连库", why, (unsigned long long)g_pid);
+    LOG("图形模式：%s（依据 %s；程序号 %016llx）", mode == S2A_GFX_DIRECT ? "直连" : "不能直连", why, (unsigned long long)g_pid);
 #if defined(__APPLE__)
     {   // 机器：系统版本与芯片（11-01 异度3：同一份着色器 M3 / macOS 27 编译器内部错误、M5 / macOS 26 正常；普查「系统版本」列按这行归因）
         char os[32] = "?", cpu[64] = "?"; size_t n = sizeof os; sysctlbyname("kern.osproductversion", os, &n, NULL, 0); n = sizeof cpu; sysctlbyname("machdep.cpu.brand_string", cpu, &n, NULL, 0);

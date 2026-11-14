@@ -1059,6 +1059,18 @@ static void test_shared_input_config(void) {
 #undef CONFIG_EXPECT
 }
 int main(int argc, const char **argv) {
+    setenv("S2A_PAD_ORDER_FILE", "/nonexistent/s2arm-pad-order.json", 1);   // 不读本机分配过的顺序表（#520 E）
+    // 兜底手柄（macos/hid_pad.m，#934）：Switch 简易 HID 键号 1 = B（南）、2 = A（东）、3 = Y（西）、4 = X（北）、9 = −、10 = +；13 Home 不进键位
+    expect(s2a_hid_pad_switch_button_bit(1) == (1u << 1) && s2a_hid_pad_switch_button_bit(2) == (1u << 0) &&
+           s2a_hid_pad_switch_button_bit(3) == (1u << 3) && s2a_hid_pad_switch_button_bit(4) == (1u << 2), "HID pad face buttons follow Switch labels");
+    expect(s2a_hid_pad_switch_button_bit(9) == (1u << 11) && s2a_hid_pad_switch_button_bit(10) == (1u << 10) &&
+           s2a_hid_pad_switch_button_bit(13) == 0 && s2a_hid_pad_switch_button_bit(0) == 0, "HID pad minus / plus, Home and out of range");
+    // 十字键 hat 0..7（0 = 上，顺时针），8 = 松开；位：左 12、上 13、右 14、下 15
+    expect(s2a_hid_pad_hat_bits(0, 0, 7) == (1u << 13) && s2a_hid_pad_hat_bits(3, 0, 7) == ((1u << 15) | (1u << 14)) &&
+           s2a_hid_pad_hat_bits(8, 0, 7) == 0 && s2a_hid_pad_hat_bits(1, 1, 8) == (1u << 13), "HID pad hat switch to d-pad bits");
+    // 轴：0..65535 中点约 0；Y 反向（HID 向下为正）
+    expect(s2a_hid_pad_axis(0, 0, 65535, 0) == -32767 && s2a_hid_pad_axis(65535, 0, 65535, 0) == 32767 &&
+           s2a_hid_pad_axis(0, 0, 65535, 1) == 32767 && abs(s2a_hid_pad_axis(32768, 0, 65535, 0)) <= 1, "HID pad axis normalisation");
     char relayPath[96];
     snprintf(relayPath, sizeof relayPath, "/tmp/s2arm-motion-%d.sock", getpid());
     struct sockaddr_un relayAddress = {.sun_family = AF_UNIX};
@@ -1162,6 +1174,55 @@ int main(int argc, const char **argv) {
     expect(send(relayClient, &proPacket, sizeof proPacket, 0) == sizeof proPacket, "Pro relay packet sent");
     for (int attempt = 0; attempt < 100 && s2a_pad_read_mouse_pair(jcMouse); attempt++) usleep(1000);
     expect(!s2a_pad_read_mouse_pair(jcMouse) && !jcMouse[0].known && !jcMouse[1].known, "Pro controller: no Joy-Con 2 mouse");
+    // 多手柄（#520 C）：通道包头 player 分玩家，玩家 0 = 上面的 Pro、玩家 1 = 另一只手柄；各占一个槽位、各读各的（与系统手柄共用 s2a_slot_plan）
+    ns2_relay_packet second = proPacket; second.player = 1; second.state = (ns2_state){.buttons = 1ull << 0, .lx = 1000};
+    expect(send(relayClient, &second, sizeof second, 0) == sizeof second, "player 2 relay packet sent");
+    ns2_state p2 = {0}; ns2_kind p2kind = NS2_KIND_NONE;
+    for (int attempt = 0; attempt < 100 && !s2a_mac_ns2_read_player(1, &p2, NULL, &p2kind); attempt++) usleep(1000);
+    ns2_state p1 = {0}; s2a_mac_ns2_read_player(0, &p1, NULL, NULL);
+    expect(p2.buttons == 1 && p2.lx == 1000 && p2kind == NS2_KIND_PRO && p1.buttons == 0, "player 2 packet lands in player 2 only, player 1 untouched");
+    config = default_config(); reset_input(); focused = YES; sample_input();   // 缺省键位：east = A
+    int32_t padSticks[4] = {0};
+    uint32_t slot1 = s2a_vpad_read_pad(1, padSticks), slot0 = s2a_vpad_read_pad(0, padSticks);
+    expect(s2a_vpad_pad_count() == 2 && slot1 != 0 && slot0 == 0, "two NS2 players: two slots, player 2's button only in slot 2");
+    // 失焦：读数清零但两位玩家仍占槽（否则服务层每次切窗口都拆掉玩家 2 的格子）
+    focused = NO; s2a_mac_ns2_focus(0); sample_input();
+    expect(s2a_vpad_pad_count() == 2 && s2a_vpad_read_pad(1, padSticks) == 0, "unfocused: both players keep their slots, inputs zeroed");
+    focused = YES; s2a_mac_ns2_focus(1);
+    // 玩家 2 起照它那一格的样式（#520，s2a_mac_ns2_set_player_style；宿主照槽位转）：没报 → 单只 Joy-Con 转横握、SL / SR 不单独给；
+    //   那一格是 JoyconLeft → 原样给、SL 单独给（同玩家 1）。游戏样式（玩家 1 那一格）不影响玩家 2
+    ns2_relay_packet secondJc = second; secondJc.kind = NS2_KIND_JOYCON_L; secondJc.state = (ns2_state){.buttons = 1ull << NS2_BUTTON_SL};
+    s2a_mac_ns2_set_game_style(1 << 3);
+    expect(send(relayClient, &secondJc, sizeof secondJc, 0) == sizeof secondJc, "player 2 single Joy-Con packet sent");
+    uint32_t p2side = 0;
+    for (int attempt = 0; attempt < 100 && !(s2a_mac_ns2_read_player(1, &p2, &p2side, &p2kind) && p2kind == NS2_KIND_JOYCON_L); attempt++) usleep(1000);
+    expect(p2kind == NS2_KIND_JOYCON_L && p2side == 0, "player 2 single Joy-Con, no slot style reported: sideways (the game style is player 1's slot only)");
+    s2a_mac_ns2_set_player_style(1, 1 << 3);
+    expect(s2a_mac_ns2_read_player(1, &p2, &p2side, &p2kind) && p2side == (1u << 24) && s2a_mac_ns2_player_raw(1),
+           "player 2 single Joy-Con in a JoyconLeft slot: raw like player 1, SL reported on its own");
+    s2a_mac_ns2_set_player_style(1, 1 << 0);
+    expect(s2a_mac_ns2_read_player(1, &p2, &p2side, &p2kind) && p2side == 0 && !s2a_mac_ns2_player_raw(1), "negative: player 2 in a Pro slot is still sideways");
+    s2a_mac_ns2_set_player_style(1, 0);
+    // 拆开后 P1 是通道玩家 2（分配成 P1 的是另一只）：游戏靠鼠标那一路认 Joy-Con 2，照这只的型号报左侧在；负对照：没这位玩家、超范围
+    s2a_pad_mouse leadMouse[2] = {{0}};
+    expect(s2a_mac_ns2_read_mouse_player(1, leadMouse) == 1 && leadMouse[0].side == 0 && leadMouse[1].side == 0xff, "player 2 as P1: Joy-Con 2 left side reported to the game");
+    expect(!s2a_mac_ns2_read_mouse_player(5, leadMouse) && !s2a_mac_ns2_read_mouse_player(NS2_RELAY_PLAYERS, leadMouse), "negative: absent / out-of-range player has no Joy-Con 2");
+    // 负对照：玩家号超出 NS2_RELAY_PLAYERS 的包丢掉、通道不断；之后的包照收
+    ns2_relay_packet bogus = second; bogus.player = NS2_RELAY_PLAYERS + 3; bogus.state = (ns2_state){.buttons = 1ull << 5};
+    expect(send(relayClient, &bogus, sizeof bogus, 0) == sizeof bogus, "out-of-range player packet sent");
+    second.state = (ns2_state){.buttons = 1ull << 1};
+    expect(send(relayClient, &second, sizeof second, 0) == sizeof second, "player 2 packet after the bogus one sent");
+    for (int attempt = 0; attempt < 100 && !(s2a_mac_ns2_read_player(1, &p2, NULL, NULL) && p2.buttons == (1ull << 1)); attempt++) usleep(1000);
+    ns2_state none = {0};
+    expect(p2.buttons == (1ull << 1) && s2a_mac_ns2_status() == NS2_STATUS_READY && !s2a_mac_ns2_read_player(NS2_RELAY_PLAYERS + 3, &none, NULL, NULL),
+           "out-of-range player dropped without closing the relay");
+    // 玩家 2 断开（ready 0）：只剩玩家 1 一格
+    second.ready = 0;
+    expect(send(relayClient, &second, sizeof second, 0) == sizeof second, "player 2 disconnect packet sent");
+    for (int attempt = 0; attempt < 100 && s2a_mac_ns2_player_present(1); attempt++) usleep(1000);
+    sample_input();
+    expect(!s2a_mac_ns2_player_present(1) && s2a_mac_ns2_player_present(0) && s2a_vpad_pad_count() == 1, "player 2 leaves: back to one slot");
+    s2a_mac_ns2_set_game_style(1 << 4);
     // 旧版启动器（通道 v1）：游戏端断开、不猜字段，型号回到 NONE
     ns2_relay_packet oldPacket = motionPacket; oldPacket.version = 1;
     expect(send(relayClient, &oldPacket, sizeof oldPacket, 0) == sizeof oldPacket, "relay v1 packet sent");

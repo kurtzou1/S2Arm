@@ -368,7 +368,20 @@ def download_metal(c):
         m = DOWNLOAD_PERCENT.search(text)
         if m:
             c.emit(done=float(m.group(1).replace(",", ".")), total=100.0, unit="%")
-    c.run(["xcodebuild", "-downloadComponent", "MetalToolchain"], on_line=line)
+    try:
+        c.run(["xcodebuild", "-downloadComponent", "MetalToolchain"], on_line=line)
+    except Failure as e:
+        # 苹果原文有确凿根因字样就换成对应的码和人话（诊断#f5eae9：原先上屏只剩 xcodebuild 输出的最后一行「})」）；没有就照原样报
+        from errors import log_cause, PLAYER_REASON
+        log = getattr(c, "last_log", None)
+        try:
+            text = Path(log).read_text(encoding="utf-8", errors="replace")[-16000:] if log else ""
+        except OSError:
+            text = ""
+        code = log_cause([("下载日志", text)], log)[0]
+        if code:
+            raise Failure(PLAYER_REASON.get(code) or str(e), code=code) from e
+        raise
     return {}
 
 

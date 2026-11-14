@@ -45,4 +45,5 @@ __attribute__((weak)) void s2a_shell_pick_game_data(const char *game_id) { fprin
 
 // iCloud 存档同步：宿主（ios/save_transfer.m）有强定义时用它；本包单独编时不同步
 __attribute__((weak)) char *s2a_shell_save_context(void) { return NULL; }
+__attribute__((weak)) void s2a_shell_report_problem(void) {}
 __attribute__((weak)) char *s2a_shell_save_request(const char *json) { (void)json; return NULL; }

@@ -13,7 +13,7 @@ iOS「设置」App 的 S2Arm 页 Root.plist 原文英文、zh-Hans.lproj/Root.st
      或逐条登记在 IDENT_C；其余一律算漏翻（例如直接递给 s2a_ios_show_notice 的中文）
   ⑦ runtime/include 四个头文件（横幅 / 初启失败页 / 自检提示页 / 直连安全网）的每个文案宏都有 <宏>_EN；SRCS 里用到这些宏的地方只许经 S2APICK / S2APICKC
      或 app.m host_text 的 {宏, 宏_EN} 对照表；C 层递字符串上来的那几组（自检提示页全部、初启失败页的原因句与下一步）必须都在对照表里
-  ⑧ en 表的值不含中文，除了 EN_CJK 登记的键（照写真实的「<游戏名>资源包」文件夹名）
+  ⑧ en 表的值不含中文，除了 EN_CJK 登记的键（照写真实的「<游戏名>资源包」文件夹名）与 ENDONYM（界面语言选项里的语言自称，各表同值）
   ⑨ InfoPlist.strings 两表键集合相同、都非空，且每个键都是 runtime/build.mk 写进 Info.plist 的键（主值英文、不含中文）
   ⑩ 跨平台 C 层递给宿主显示的文字（runtime/include/s2a_ui_text.h）：每个 S2A_UI_* 文案宏都有 _EN、_EN 不含中文（照写的「资源包」除外）、
      都被用到；用到的地方只许经 S2A_UI(…)；用 S2A_UI 的 .c 各带一份 s2a_ui_zh 弱缺省，iOS / Mac 各有一份强定义；
@@ -88,6 +88,7 @@ SAVESYNC_DIR = 'launchers/shared/SaveSync/Sources/SaveSync'
 MAC_L10N = {'zh': 'launchers/macos/frontend/l10n/zh.json', 'en': 'launchers/macos/frontend/l10n/en.json'}
 MAC_CLOUD_SRC = 'launchers/macos/frontend/Sources/NX2Apple/S2ArmLauncherModel+CloudSaves.swift'
 EN_CJK = {}   # 原先「<游戏名>资源包」文件夹名照写的三条已随访达拷文件夹那条路删掉（iOS 装机剃刀 #28，11-11）
+ENDONYM = {'settings.language.zhHans', 'settings.language.zhHant', 'settings.gameLanguage.ja'}   # 界面语言 / 游戏语言选项里语言的自称（简体中文 / 繁體中文 / 日本語）：每种语言表里都照写同一个自称，玩家不认识当前界面语言也认得出自己的语言
 CJK = re.compile('[㐀-䶿一-鿿　-〿！（），：；？]')
 PH = re.compile(r"%%|%(?:(\d+)\$)?([-+ #0']*(?:\d+|\*)?(?:\.(?:\d+|\*))?(?:hh|h|ll|l|q|L|z|j|t)?[@dDuUxXoOfeEgGcCsSpaAF])")
 
@@ -273,9 +274,11 @@ need_ht = {n for n in texts_m if n.startswith('S2A_SELFCHECK_') or n.startswith(
 ck(f'⑦ C 层递上来的 {len(need_ht)} 句（自检提示页、初启失败页原因与下一步）都在 host_text 对照表', need_ht <= pairs_ht, ' '.join(sorted(need_ht - pairs_ht)))
 
 # ⑧ en 表不含中文（真实文件夹名除外）
-encjk = sorted(k for k, v in en.items() if CJK.search(v.replace('资源包', '') if k in EN_CJK else v))
+encjk = sorted(k for k, v in en.items() if k not in ENDONYM and CJK.search(v.replace('资源包', '') if k in EN_CJK else v))
 ck(f'⑧ en 表 {len(en)} 条不含中文（{len(EN_CJK)} 条照写「…资源包」文件夹名）', not encjk, ' '.join(encjk[:10]))
 stale_en = sorted(k for k in EN_CJK if k not in en or '资源包' not in en[k])
+endo = sorted(k for k in ENDONYM if len({t.get(k) for t in tables.values()}) != 1 or k not in en)
+ck(f'⑧ 语言自称 {len(ENDONYM)} 条在各语言表照写同一个值', not endo, ' '.join(endo))
 ck('⑧ 文件夹名豁免键都还在、且确实含「资源包」', not stale_en, ' '.join(stale_en))
 
 # ⑨ InfoPlist.strings：两表同键、键都是 build.mk 写进 Info.plist 的、主值英文

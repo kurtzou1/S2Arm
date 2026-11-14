@@ -176,3 +176,15 @@ import SwiftUI
     }
 }
 #endif
+
+#if canImport(SwiftUI)
+@Test func phoneUprightGetsASplitScreenForTheEditor() {
+    // 11-13 不许堵门：普通 iPhone 也能开上下分屏，编辑器原先只给折叠屏 / iPad 竖屏，iPhone 改不了分屏布局。
+    //   手算：440×956 点竖屏、上安全区 62、下有主屏指示条 → 竖屏画布 440×956、上 62 下 34；无折痕按中线 478 分：上区 (0,62,440,416)、按键区从 478 起
+    let s = TouchLayoutScreens.device(window: CGSize(width: 440, height: 956), insets: EdgeInsets(top: 62, leading: 0, bottom: 34, trailing: 0), isPad: false)
+    #expect(s.upright?.size == CGSize(width: 440, height: 956))
+    #expect(s.upright?.insets.top == 62 && s.upright?.insets.bottom == 34 && s.upright?.division == nil)
+    let r = PadGeo.region(s.upright!)
+    #expect(r.separated && r.controls.minY == 478 && r.game.width == 440)
+}
+#endif

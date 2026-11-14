@@ -76,7 +76,7 @@ class StageBudgetEnv(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             env = self.gui_env(root)
-            context = SimpleNamespace(engine=ROOT, run=Mock())
+            context = SimpleNamespace(engine=ROOT, run=Mock(), keys=root / 'keys/prod.keys')
             with patch.object(ipa, 'bundled_shell', return_value=root / 'shell'):
                 ipa.win_oneclick(context, None, root / 'extract', root / 'fonts', root / 'out',
                                  root / 'events', root / 'log', env, None)
@@ -89,9 +89,11 @@ class StageBudgetEnv(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             run = SimpleNamespace(out=root, step=lambda label, action: action(), sh=Mock(), say=Mock())
+            (root / 'metal').mkdir(); (root / 'metal' / 'metal.exe').write_bytes(b'')
             with patch.object(oneclick_win, 'WIN', True), \
                  patch.object(oneclick_win, 'prebuilt', return_value=root / 'prebuilt'), \
                  patch.object(oneclick_win, 'metal_bin', return_value=root / 'metal'), \
+                 patch.object(oneclick_win, 'metal_exe', return_value=root / 'metal' / 'metal.exe'), \
                  patch.object(oneclick_win, 'pso_sources', return_value=None), \
                  patch.object(oneclick_win, 'bash_exe', return_value='/bin/bash'), \
                  patch.dict(os.environ, {'S2A_MEM_TOTAL_GB': '16'}, clear=True):
@@ -102,6 +104,21 @@ class StageBudgetEnv(unittest.TestCase):
                         actual = run.sh.call_args.kwargs['env']
                         self.assertEqual(actual['J'], str(j))
                         self.assertEqual(actual['S2A_CPU_BAKE'], str(bake))
+
+    def test_windows_without_metal_packs_without_shader_library(self):
+        # 诊断#9478d5（11-14）：Windows 没找到 Metal 开发工具时原先整单退 75、什么都不出。物理上做得下去（product 收 dlib=None，游戏里现编），
+        #   期望手写：direct 返回 None、直连库脚本一次都没跑、说一行【黄】（带没找到的目录和「装好后重新出包」）、事件记 direct_skipped
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            run = SimpleNamespace(out=root, step=lambda label, action: action(), sh=Mock(), say=Mock(), ev=Mock())
+            with patch.object(oneclick_win, 'WIN', True), \
+                 patch.object(oneclick_win, 'metal_exe', return_value=root / 'nometal' / 'metal.exe'):
+                self.assertIsNone(oneclick_win.direct(run, root / 'input', 'ios', 4))
+            run.sh.assert_not_called()
+            said = [c.args[0] for c in run.say.call_args_list]
+            self.assertEqual(len(said), 1)
+            self.assertTrue(said[0].startswith('【黄】') and str(root / 'nometal') in said[0] and '重新出包' in said[0], said[0])
+            run.ev.assert_called_once_with('direct_skipped', reason='metal_missing')
 
 
 if __name__ == '__main__':

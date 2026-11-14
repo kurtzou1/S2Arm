@@ -27,7 +27,7 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     sources = [ROOT / "runtime/src/loader.c", ROOT / "android/native/module.c",
-               ROOT / "runtime/src/gate.c", ROOT / "runtime/src/widen.c", HERE / "loader_mem_test.c", ROOT / "runtime/src/nrodefer.c", ROOT / "platform/apple/plat_apple.c"]
+               ROOT / "runtime/src/gate.c", ROOT / "runtime/src/widen.c", ROOT / "runtime/src/cpatch.c", HERE / "loader_mem_test.c", ROOT / "runtime/src/nrodefer.c", ROOT / "platform/apple/plat_apple.c"]
     inputs = sources + [ROOT / "runtime/src/native.h", ROOT / "runtime/src/loader.h",
                         ROOT / "runtime/include/s2a_native.h", ROOT / "platform/plat.h",
                         ROOT / "android/native/module.h", HOST_ANDROID_COMPAT,
@@ -67,8 +67,8 @@ def main():
         objects.append(obj)
     binary = out / "loader-memory"
     run([args.cc, *objects, "-Wl,-dead_strip", "-pthread", "-o", binary], "link")
-    passing = ("widen", "widen-policy", "valid", "missing", "weak", "empty-gates", "zero-bias")
-    rejected = ("widen-overlap", "widen-malformed", "widen-rejected", "nonzero-bias", "apple", "wrong", "missing-abi", "bad-abi", "duplicate-abi", "bad-gates",
+    passing = ("widen", "widen-policy", "cpatch", "valid", "missing", "weak", "empty-gates", "zero-bias")
+    rejected = ("cpatch-rejected", "cpatch-nul", "widen-overlap", "widen-malformed", "widen-rejected", "nonzero-bias", "apple", "wrong", "missing-abi", "bad-abi", "duplicate-abi", "bad-gates",
                 "outside-gate", "trailing-gate", "missing-sidecar", "hash-rejected", "nul-fixups",
                 "long-fixups", "duplicate-name", "load-twice", "duplicate-gate")
     for name in passing + rejected:

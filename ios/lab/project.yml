@@ -21,6 +21,7 @@ targets:
       - ios/l10n   # 宿主界面字符串表（<语言>.lproj/S2ArmHost.strings，ios/s2a_l10n.h S2AL，#316）
       - ios/settings.m
       - ios/controller.m
+      - ios/slot_feedback.m
       - ios/ea_rumble.m
       - ios/phone_motion.m
       - ios/diag.m

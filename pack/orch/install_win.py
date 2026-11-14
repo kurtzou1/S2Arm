@@ -10,7 +10,7 @@
   ③ tools/push_pack.py 按实际包名推资源包（同 Mac 启动器、dev_run 一份规则）。
 退出码：0 装好并推完；1 失败（最后一行【红】带共用错误码，见 pack/jobs/errors.py）；2 用法；75 缺 plumesign / 设备服务里没这台手机。
 实测（11-06 Windows 出包机 + 测试设备2，Wi-Fi）：金刚 c3 ipa 46 MB 签名 + 装机 48 秒。"""
-import argparse, glob, os, plistlib, re, shutil, socket, struct, subprocess, sys, tempfile, zipfile
+import argparse, glob, os, plistlib, re, shutil, socket, struct, subprocess, sys, tempfile, time, zipfile
 from pathlib import Path
 
 R = Path(__file__).resolve().parents[2]
@@ -120,6 +120,7 @@ def sign_install(exe, ipa, dev_id, name, log, out_ipa, bundle=None, register=Tru
 #   苹果那边存的是带横线的 25 位，永远对不上 → 每次都去登记 → 苹果回 35「already exists on this team」，签名装机整个中止（Mac 的设备号带横线，不中招）。
 #   设备其实已经在团队里了，这次签出的描述文件会带上它：认出这句就改成「只签名不登记」再用 device --install 装签好的包
 ALREADY_REGISTERED = re.compile(r'already exists on this team', re.I)
+RETRY_WAIT = 3   # 连不上签名服务器时重试前等几秒（单测置 0）
 
 
 def install_signed(exe, app, udid, log):
@@ -167,7 +168,18 @@ def install_app(a, say=lambda m: print(m, flush=True)):
         bundle = getattr(a, 'bundle', None)
         try:
             try:
-                sign_install(exe, a.ipa, dev, a.name, log, out, bundle)
+                try:
+                    sign_install(exe, a.ipa, dev, a.name, log, out, bundle)
+                except Fail as e:
+                    # 连不上签名用的 anisette 服务器（#3fc02b，DNS / 连接失败）多是一时的：等 3 秒原样再签一次，两次的输出都留在日志里
+                    if e.err != 'signing_server_unreachable': raise
+                    first = Path(log).read_text(encoding='utf-8', errors='replace') if Path(log).is_file() else ''
+                    say('连不上 Impactor 签名要用的服务器，3 秒后重试一次')
+                    time.sleep(RETRY_WAIT)
+                    try:
+                        sign_install(exe, a.ipa, dev, a.name, log, out, bundle)
+                    finally:
+                        Path(log).write_text(first + '\n--- 连不上签名服务器：重试 ---\n' + Path(log).read_text(encoding='utf-8', errors='replace'), encoding='utf-8')
             except Fail:
                 first = Path(log).read_text(encoding='utf-8', errors='replace') if Path(log).is_file() else ''
                 if not ALREADY_REGISTERED.search(first): raise

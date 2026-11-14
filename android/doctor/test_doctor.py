@@ -664,6 +664,15 @@ class DoctorTest(unittest.TestCase):
             self.assertEqual(d.run(['docker','version']),(-1,''))
 
 
+class LiveRequirementsTest(unittest.TestCase):
+    def test_requirements_follow_current_host_jdk_source(self):
+        pins = d.requirements(d.REPO)
+        self.assertEqual(pins['jdk'], '17')
+        self.assertIn('android/host/hostenv.sh', pins['sources'])
+        self.assertIn('android/tools/jdk17.sh', pins['sources'])
+        self.assertNotIn('android/gate.sh', pins['sources'])
+
+
 class LayoutTest(unittest.TestCase):
     """Exercise the production parser on real sources and bounded synthetic mutations."""
 
@@ -676,7 +685,7 @@ class LayoutTest(unittest.TestCase):
                      'cs/nuget-pins.tsv', 'cs/nuget_verify.py',
                      'openssl/build.sh', 'codecs/build.sh', 'codecs/opus-build.sh',
                      'codecs/vpx-build.sh', 'codecs/cache.sh', 'codecs/avc-build.sh',
-                     'docker/build.sh', 'docker/gate-apk.sh', 'gate.sh', 'tools/jdk17.sh',
+                     'docker/build.sh', 'docker/gate-apk.sh', 'tools/jdk17.sh',
                      'tools/ndk_toolchain.sh', 'tools/versions.sh', 'tools/compare_apks.py',
                      'tools/compare_backends.sh', 'host/build.sh', 'host/hostenv.sh',
                      'host/prepare.sh', 'host/gate-apk.sh'):
@@ -703,10 +712,6 @@ class LayoutTest(unittest.TestCase):
             self.change('openssl/build.sh', 'cache_root=${S2A_BUILD_CACHE:-$HOME/.cache/s2arm-build}\n', '')
             self.change('openssl/build.sh', '$cache_root/', '/cache/')
 
-    def legacy_jdk(self):
-        # A minimal old case statement is enough; the parser must not execute shell.
-        (self.repo / 'android/gate.sh').write_text('case "$jv" in *" 17."*) ;; esac\n')
-
     def assert_pins(self):
         try:
             p = d.requirements(self.repo)
@@ -726,16 +731,15 @@ class LayoutTest(unittest.TestCase):
         helper = 'android/tools/jdk17.sh'
         self.assertEqual(pins['sources'][helper], hashlib.sha256((self.repo / helper).read_bytes()).hexdigest())
 
-    def test_old_and_mixed_roots_with_old_and_new_jdk(self):
+    def test_old_and_mixed_roots(self):
         import itertools
-        for flags in itertools.product((False, True), repeat=3):
-            with self.subTest(old_cs_ssl_jdk=flags):
+        for flags in itertools.product((False, True), repeat=2):
+            with self.subTest(old_cs_ssl=flags):
                 # Independent mutations: restore the real producer text each time.
-                for name in ('cs/build.sh', 'openssl/build.sh', 'gate.sh'):
+                for name in ('cs/build.sh', 'openssl/build.sh'):
                     shutil.copyfile(d.REPO / 'android' / name,
                                     self.repo / 'android' / name)
-                self.roots(*flags[:2])
-                if flags[2]: self.legacy_jdk()
+                self.roots(*flags)
                 self.assert_pins()
 
     def test_braced_and_quoted_cache_references(self):
@@ -761,7 +765,6 @@ class LayoutTest(unittest.TestCase):
 
     def test_legacy_multiassignment_dotnet_root(self):
         self.roots(True, True)
-        self.legacy_jdk()
         self.change('cs/build.sh', '    DOTNET_ROOT=/cache/dotnet/$sdk_version',
                     'export DOTNET_ROOT=/cache/dotnet/$sdk_version NUGET_PACKAGES=/cache/nuget')
         self.assert_pins()
@@ -836,19 +839,13 @@ class LayoutTest(unittest.TestCase):
         with self.assertRaises((OSError, ValueError)): d.requirements(self.repo)
 
     def test_unknown_or_ambiguous_jdk_dispatch_rejected(self):
-        p = self.repo / 'android/gate.sh'
+        p = self.repo / 'android/host/hostenv.sh'
         original = p.read_text()
-        for text in (original.replace('bash android/tools/jdk17.sh', 'bash "$other/tools/jdk17.sh"'),
+        for text in (original.replace('bash "$hostenv_android_dir/tools/jdk17.sh"', 'bash "$other/tools/jdk17.sh"'),
                      original + '\nJAVAC=/other/javac\n',
                      original + '\ncase "$jv" in *" 17."*) ;; esac\n'):
             p.write_text(text)
             with self.assertRaises(ValueError): d.requirements(self.repo)
-
-    def test_legacy_source_does_not_read_unused_helper(self):
-        self.roots(True, True)
-        self.legacy_jdk()
-        (self.repo / 'android/tools/jdk17.sh').unlink()
-        self.assertNotIn('android/tools/jdk17.sh', self.assert_pins()['sources'])
 
     def test_host_prepare_or_gate_layout_drift_rejected(self):
         for name, before in (('host/prepare.sh', '--slot'),

@@ -125,7 +125,7 @@ class EarlyInstallCase(JobCase):
         self.assertEqual(early_steps[0], ('早装件', 'tfake'))
         self.assertEqual(early_steps[2], ('推资源包', '.early/pack'))
         self.assertEqual([s[0] for s in [x[1:] for x in calls][-2:]], ['装 App', '推资源包'])
-        self.assertEqual(calls[-1][2:], ('ios/pack',), what)   # 正式资源包已搬进这款的 image/ios
+        self.assertEqual(calls[-1][2:], ('ios/.pack',), what)   # 正式资源包已搬进这款的 image/ios
         self.assertEqual(r['packFiles'], 3 + 2)   # 早推 3 + 补推 2
         self.assertTrue(r['outputPath'].endswith(os.path.join('image', 'ios')))   # 出包页「打开位置」指这款的 image/ios
 
@@ -136,7 +136,7 @@ class EarlyInstallCase(JobCase):
         what = [x[1:] for x in calls]
         self.assertNotIn(('推资源包', '.early/pack'), what)
         self.assertEqual([s[0] for s in what[-2:]], ['装 App', '推资源包'], what)
-        self.assertEqual(what[-1], ('推资源包', 'ios/pack'), what)
+        self.assertEqual(what[-1], ('推资源包', 'ios/.pack'), what)
         msgs = [json.loads(l).get('message', '') for l in c.events.read_text().splitlines()]
         self.assertTrue(any('先装 App、先推资源没成' in m for m in msgs), msgs[-5:])
 

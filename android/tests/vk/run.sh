@@ -18,6 +18,33 @@ set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../../.." && pwd)
 mode=${1:-}
+if [ "$mode" = "--shown-only" ] && [ -z "${S2A_VULKAN_IMAGE_ID:-}" ]; then
+    . "$repo/android/tools/ndk_toolchain.sh"
+    ndk=$(s2a_ndk_resolve) || { echo 'NDK 29 missing' >&2; exit 2; }
+    grep -q '^Pkg.Revision = 29\.0\.14206865$' "$ndk/source.properties" || { echo 'NDK 29.0.14206865 required' >&2; exit 2; }
+    tag=$(s2a_ndk_prebuilt_tag "$ndk") || exit 2
+    header_dir="$ndk/toolchains/llvm/prebuilt/$tag/sysroot/usr/include/vulkan"
+    [ -f "$header_dir/vulkan_core.h" ] || { echo 'NDK 29 Vulkan headers missing' >&2; exit 2; }
+    mkdir -p "$repo/build/c883-ndk"
+    cp -R "$header_dir" "$repo/build/c883-ndk/"
+    cp -R "$(dirname "$header_dir")/vk_video" "$repo/build/c883-ndk/"
+fi
+# Isolated production replay indirect test. Exit before every legacy test path.
+if [ "$mode" = "--indirect-core" ]; then
+    out="$repo/build/vk-indirect-core"; mkdir -p "$out/shaders"
+    glslc_bin=${GLSLC:-glslc}
+    : "${S2A_LAVAPIPE_ICD:?set S2A_LAVAPIPE_ICD for isolated replay test}"
+    : "${S2A_VK_LAYER_DIR:?set S2A_VK_LAYER_DIR for isolated replay test}"
+    for shader in quad.vert quad.frag count_args.comp replay_drv0.vert replay_drv0.frag replay_drv0_args.comp; do
+        "$glslc_bin" --target-env=vulkan1.1 "$repo/android/tests/vk/shaders/$shader" -o "$out/shaders/$shader.spv"
+    done
+    inc=(); for d in android/tests/vkhost graphics/nvn/third_party/vulkan-headers/include graphics/nvn graphics/nvn/replay graphics/nvn/gfx/nvn graphics/nvn/gfx/nvn/include android/native android/native/nvn android/native/direct runtime/include; do inc+=(-I "$repo/$d"); done
+    src=("$repo/android/tests/vk/t_replay_indirect.c")
+    for f in graphics/nvn/replay/rp_draw.c graphics/nvn/replay/rp_buf.c graphics/nvn/replay/rp_state.c graphics/nvn/replay/nvn_unimpl.c android/native/nvn/backend_vulkan.c android/native/direct/vk_device.c android/native/direct/gs_path.c android/native/capprobe/capprobe_host.c android/native/nvn/nvn_vk_format.c graphics/nvn/gfx/nvn/nvn_fmt_expand.c android/native/nvn/nvn_vk_bcdec.c android/native/nvn/nvn_vk_driver_cache.c android/native/direct/sha256.c; do src+=("$repo/$f"); done
+    cc -D_POSIX_C_SOURCE=200809L -std=c11 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter -ffunction-sections -fdata-sections -DS2A_ANDROID_VK_BACKEND_NVN_VK=1 "${inc[@]}" "${src[@]}" -Wl,--gc-sections -Wl,--wrap=nvn_gpu_draw -lvulkan -lpthread -lm -o "$out/replay-indirect"
+    export VK_ICD_FILENAMES="$S2A_LAVAPIPE_ICD" VK_LAYER_PATH="$S2A_VK_LAYER_DIR" VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation
+    exec "$out/replay-indirect" "$out/shaders"
+fi
 if [ "$(uname -s)" = Darwin ]; then
     export S2A_VULKAN_CACHE="$repo/build/vulkan-cache"
     if [ -z "$mode" ]; then python3 "$repo/android/tests/gs_compiler_chain_test.py"; fi
@@ -91,7 +118,7 @@ export TMPDIR="$repo/build/vk-tests"
 out=$(mktemp -d "$TMPDIR/s2a-nvn-vk.XXXXXX")
 trap 'rm -rf "$out"' EXIT
 mkdir -p "$out/shaders"
-for s in logic_float.frag logic_uint.frag logic_float_mrt.frag logic_uint_mrt.frag gs_probe.vert gs_probe.geom gs_probe.frag tri.vert tri.frag tri_combined.frag tri3.vert tri_solid.frag tri_invert.frag solid_green.frag solid_blue.frag out1_green.frag tex_u.frag quad.vert quad.frag inst.vert point.vert quad2.frag arr.frag cube.frag cubearr.frag tex3d.frag comp.comp pushc.frag pushc.comp tbuf.comp itbuf.comp itbuf_unknown.comp itbuf_unknown_read.comp img.comp tsamp.comp arr2.frag separate.vert separate.frag; do
+for s in count_args.comp logic_float.frag logic_uint.frag logic_float_mrt.frag logic_uint_mrt.frag gs_probe.vert gs_probe.geom gs_probe.frag tri.vert tri.frag tri_combined.frag tri3.vert tri_solid.frag tri_invert.frag solid_green.frag solid_blue.frag out1_green.frag tex_u.frag quad.vert quad.frag inst.vert point.vert quad2.frag arr.frag cube.frag cubearr.frag tex3d.frag comp.comp pushc.frag pushc.comp tbuf.comp itbuf.comp itbuf_unknown.comp itbuf_unknown_read.comp img.comp tsamp.comp arr2.frag separate.vert separate.frag; do
     "$glslc" --target-env=vulkan1.1 "$repo/android/tests/vk/shaders/$s" -o "$out/shaders/$s.spv"
 done
 
@@ -105,6 +132,10 @@ inc=(-I "$repo/android/tests/vkhost"
      -I "$repo/android/native/nvn"
      -I "$repo/android/native/direct"
      -I "$repo/runtime/include")
+if [ "$mode" = "--shown-only" ]; then
+    [ -f "$repo/build/c883-ndk/vulkan/vulkan_core.h" ] || { echo 'NDK 29 Vulkan headers not staged' >&2; exit 2; }
+    inc=(-I "$repo/build/c883-ndk" "${inc[@]}")
+fi
 src=("$repo/android/tests/vk/t_backend_vk.c"
      "$repo/android/native/nvn/backend_vulkan.c"
      "$repo/android/native/direct/vk_device.c"
@@ -125,6 +156,7 @@ cflags=(-D_POSIX_C_SOURCE=200809L -std=c11 -O1 -g -Wall -Wextra -Werror -Wno-unu
 case "$mode" in
     --tsan) cflags+=(-fsanitize=thread) ;;
     --asan) cflags+=(-fsanitize=address,undefined -fno-omit-frame-pointer) ;;
+    --shown-only) cflags+=(-DS2A_C883_TEST=1) ;;
     ""|--separate-core|--separate-neg-sampler|--gs-only|--gs-compiler|--gs-core|--gs-no-cap|--gs-neg-stage|--gs-neg-flags|--gs-neg-cap) ;;
     *) echo "未知参数：${mode}（可用 --tsan / --asan）" >&2; exit 64 ;;
 esac
@@ -183,6 +215,7 @@ pc_wrap=(-Wl,--wrap=vkCreatePipelineCache -Wl,--wrap=vkGetPipelineCacheData
          -Wl,--wrap=vkCreateGraphicsPipelines -Wl,--wrap=vkCreateComputePipelines)
 # --gs-core / --separate-* 档的测试源没有这四个 __wrap 定义（只有默认档的 t_backend_vk.c 有），带上会链接失败
 case "$mode" in --gs-core|--separate-core|--separate-neg-sampler) pc_wrap=() ;; esac
+if [ "$mode" = "--shown-only" ]; then pc_wrap+=(-Wl,--wrap=vkGetDeviceProcAddr); fi
 cc "${cflags[@]}" "${inc[@]}" "${src[@]}" -Wl,--wrap=vkAllocateDescriptorSets -Wl,--wrap=vkGetPhysicalDeviceFormatProperties \
     ${pc_wrap[@]+"${pc_wrap[@]}"} -Wl,--gc-sections -lvulkan -lpthread -lm -o "$out/t_backend_vk"
 
@@ -245,6 +278,17 @@ if [ "$mode" = "--separate-core" ]; then
     fi
     echo '【绿】分离来源回放采样：repeat 红、clamp 绿，validation 0 条'; exit 0
 fi
+if [ "$mode" = "--shown-only" ]; then
+    for shown_mode in --shown-only --shown-unsupported; do
+        set +e
+        timeout 90 "$out/t_backend_vk" "$out/shaders" "$shown_mode" 2>&1 | tee "$out/shown-log"
+        rc=${PIPESTATUS[0]}
+        set -e
+        if [ "$rc" -ne 0 ] || grep -qE 'Validation Error|VUID-|SYNC-HAZARD-' "$out/shown-log"; then exit 1; fi
+    done
+    echo 'C883 WSI validation 0 条'; exit 0
+fi
+
 if [ "$mode" = "--gs-core" ]; then
     rm -rf "$repo/build/696-real-compiler/core-compiler"
     set +e
@@ -300,7 +344,9 @@ if [ "$mode" = "" ]; then bash "$repo/android/tests/vk/run_replay_copy_t2b.sh"; 
 if [ "$mode" = "" ]; then bash "$repo/android/tests/vk/run_replay_clear_tex.sh"; fi
 
 set +e
-timeout 180 "$out/t_backend_vk" "$out/shaders" 2>&1 | tee "$out/log"
+# 整套三遍的超时只用来发现卡死，不量性能：负载高的机器（列车机同时跑多份同类用例，软件渲染）上单遍已接近原先的 180 / 240 秒，
+# 主线自己也会被误判超时。放到 600 秒。
+timeout 600 "$out/t_backend_vk" "$out/shaders" 2>&1 | tee "$out/log"
 rc=${PIPESTATUS[0]}
 set -e
 
@@ -313,6 +359,18 @@ if ! grep -q "llvmpipe" "$out/log"; then
     grep '^device:' "$out/log" >&2 || true
     exit 1
 fi
+if [ "$(grep -c "C697e 小 mip 整块区域：已核对" "$out/log")" -lt 2 ]; then
+    echo "【红】C697e（小 mip 整块区域，原生 / 现解两条路径）没跑全" >&2
+    exit 1
+fi
+if ! grep -q "C697f 3D BC 按切片号上传：已核对" "$out/log"; then
+    echo "【红】没跑到 C697f（缓冲 → 3D BC 现解贴图按切片号上传）" >&2
+    exit 1
+fi
+if ! grep -q "C907 保留路径管线缓存落盘：已核对" "$out/log"; then
+    echo "【红】没跑到 C907（停局保留会话时的管线缓存落盘）" >&2
+    exit 1
+fi
 bad=$(grep -cE "Validation Error|VUID-" "$out/log" || true)
 if [ "$bad" -ne 0 ]; then
     echo "【红】validation 报错 $bad 条：" >&2
@@ -322,7 +380,7 @@ fi
 
 # 同一套用例在「两级回放开」（vkCmd* 调用交给录制线程）下再跑一遍：像素期望和校验层判据不变。
 set +e
-S2A_TEST_NVK_DQ=1 timeout 240 "$out/t_backend_vk" "$out/shaders" 2>&1 | tee "$out/log_dq"
+S2A_TEST_NVK_DQ=1 timeout 600 "$out/t_backend_vk" "$out/shaders" 2>&1 | tee "$out/log_dq"
 rc=${PIPESTATUS[0]}
 set -e
 if [ "$rc" -ne 0 ]; then
@@ -338,7 +396,7 @@ fi
 
 # 描述符组备忘开着（开关 nvk_desc_memo）再跑一遍：像素期望不变、校验层 0 条。
 set +e
-S2A_TEST_DESC_MEMO=1 timeout 240 "$out/t_backend_vk" "$out/shaders" 2>&1 | tee "$out/log_memo"
+S2A_TEST_DESC_MEMO=1 timeout 600 "$out/t_backend_vk" "$out/shaders" 2>&1 | tee "$out/log_memo"
 rc=${PIPESTATUS[0]}
 set -e
 bad=$(grep -cE "Validation Error|VUID-" "$out/log_memo" || true)
@@ -347,6 +405,32 @@ if [ "$rc" -ne 0 ] || [ "$bad" -ne 0 ]; then
     grep -E "Validation Error|VUID-" "$out/log_memo" | head -20 >&2
     exit 1
 fi
+
+# 提交失败的首因（#889）：同步返回与回调给出同一首错原因；独立会话单跑。
+set +e
+S2A_TEST_ERROR697_ONLY=1 timeout 120 "$out/t_backend_vk" "$out/shaders" 2>&1 | tee "$out/log_e697"
+rc=${PIPESTATUS[0]}
+set -e
+bad=$(grep -cE "Validation Error|VUID-" "$out/log_e697" || true)
+if [ "$rc" -ne 0 ] || [ "$bad" -ne 0 ] || ! grep -q "E697 isolated failures=0" "$out/log_e697"; then
+    echo "【红】提交失败首因那一遍（#889）：rc=${rc}，validation 报错 $bad 条" >&2
+    exit 1
+fi
+
+# 生产回放的普通间接绘制与单次 DRV0（#941）：隔离用例（真 rp_draw / rp_buf + 真后端），同一容器里两级回放关 / 开各跑一遍
+for dq in 0 1; do
+    set +e
+    if [ "$dq" = 1 ]; then export S2A_REPLAY_INDIRECT_DQ=1 S2A_TEST_NVK_DQ=1; else unset S2A_REPLAY_INDIRECT_DQ S2A_TEST_NVK_DQ; fi
+    S2A_LAVAPIPE_ICD="$icd" S2A_VK_LAYER_DIR="$layer" GLSLC="$glslc" timeout 300 bash "$repo/android/tests/vk/run.sh" --indirect-core 2>&1 | tee "$out/log_indirect_$dq"
+    rc=${PIPESTATUS[0]}
+    set -e
+    unset S2A_REPLAY_INDIRECT_DQ S2A_TEST_NVK_DQ
+    bad=$(grep -cE "Validation Error|VUID-" "$out/log_indirect_$dq" || true)
+    if [ "$rc" -ne 0 ] || [ "$bad" -ne 0 ] || ! grep -q "pixel-failures0" "$out/log_indirect_$dq"; then
+        echo "【红】间接绘制隔离用例（#941，两级回放 ${dq}）：rc=${rc}，validation 报错 $bad 条" >&2
+        exit 1
+    fi
+done
 
 # BC1–BC7 compute 解码逐像素用例（#1199）：16 格式 × 2 尺寸 + 反证；同一 validation 环境。
 # S2A_BCDEC_HOST_TEST 使 S2A_VK_BC_DECODE=force 在主机用例里生效（等同 debug 构建门）。

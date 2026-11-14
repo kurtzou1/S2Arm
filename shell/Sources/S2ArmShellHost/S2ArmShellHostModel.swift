@@ -315,6 +315,7 @@ public final class S2ArmShellHostModel {
                      onDeleteGame: { [weak self] id, saves in self?.deleteGame(id, saves: saves) },
                      onManageSaves: { [weak self] id in self?.manageSaves(id) })
         actions.onReorderGames = { [weak self] sources, before in self?.reorderGames(sources, before: before) ?? false }
+        actions.onReportProblem = { s2a_shell_report_problem() }   // 故障报修（宿主 ios/diag.m：可不填的一句说明 + 打包上传、给短码）
         return actions
     }
 
@@ -566,7 +567,6 @@ public final class S2ArmShellHostModel {
     static func reason(_ error: LocalPlayers.NameError) -> String {
         switch error {
         case .empty: shellText("Enter a name.")
-        case .tooLong: shellText("Use \(String(LocalPlayers.nameLimit)) characters or fewer.")
         case .taken: shellText("That name is already taken.")
         }
     }

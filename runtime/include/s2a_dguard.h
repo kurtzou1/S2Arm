@@ -18,9 +18,9 @@ extern "C" {
 #define S2A_DGUARD_TITLE "这款游戏最近几次都没能启动"
 #define S2A_DGUARD_TITLE_EN "This game hasn't started the last few times"
 #define S2A_DGUARD_MSG "请先把 电脑上的 S2Arm 更新到最新版，再对这款游戏点「装到 iPhone」重新装一次；还是不行，请点「上传给开发者」，把显示的短码发给我们。"
-#define S2A_DGUARD_MSG_EN "Update S2Arm on your computer to the latest version, then choose \"Install on iPhone\" for this game to reinstall it. If it still doesn't work, tap \"Send to developers\" and send us the code it shows."
+#define S2A_DGUARD_MSG_EN "Update S2Arm on your computer to the latest version, then choose \"Install on iPhone\" for this game to reinstall it. If it still doesn't work, tap \"Upload to developers\" and send us the code it shows."
 #define S2A_DGUARD_DIAG "上传给开发者"
-#define S2A_DGUARD_DIAG_EN "Send to developers"
+#define S2A_DGUARD_DIAG_EN "Upload to developers"
 #define S2A_DGUARD_GO "仍然启动"
 #define S2A_DGUARD_GO_EN "Start anyway"
 // 起局前要不要先起界面（main 里判，还不知道程序号）：记录里已连续失败 ≥ S2A_DGUARD_LIMIT 次 = 1；自动化 / 开发工具起的局（s2a_unattended.h）恒 0，

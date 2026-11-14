@@ -265,7 +265,7 @@
     BOOL scoped = [url startAccessingSecurityScopedResource];
     NSError *error; NSDictionary *attributes = [NSFileManager.defaultManager attributesOfItemAtPath:url.path error:&error];
     NSData *data;
-    if ([attributes[NSFileType] isEqualToString:NSFileTypeRegular] && [attributes[NSFileSize] unsignedLongLongValue] <= 65536)
+    if ([attributes[NSFileType] isEqualToString:NSFileTypeRegular])
         data = [NSData dataWithContentsOfURL:url options:0 error:&error];
     else if (attributes) error = [NSError errorWithDomain:@"S2Arm.VPadLayout" code:1 userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:S2AL(@"vpad.layout.error"), @"F01.file", S2AL(@"vpad.layout.err.pickFile")]}];
     if (scoped) [url stopAccessingSecurityScopedResource];

@@ -330,6 +330,18 @@ namespace Ryujinx.HLE.HOS.Services.Vi.RootService
             return ResultCode.Success;
         }
 
+        [CommandCmif(2103)] // 21.0.0+
+        // Cmd2103() -> bytes<0x18>：无入参、出 0x18 字节原始数据；没有公开名字与语义（switchbrew 只记 21.0.0+；另一实现回成功、出参全 0）。
+        //   新 SDK 的游戏起局就调（节奏类一款每局 2–6 次），原先报未实现。照回成功、出参全 0
+        public ResultCode Cmd2103(ServiceCtx context)
+        {
+            context.ResponseData.Write(new byte[0x18]);
+
+            Logger.Stub?.PrintStub(LogClass.ServiceVi);
+
+            return ResultCode.Success;
+        }
+
         [CommandCmif(2102)] // 5.0.0+
         // ConvertScalingMode(u32 source_scaling_mode) -> u64 destination_scaling_mode
         public ResultCode ConvertScalingMode(ServiceCtx context)

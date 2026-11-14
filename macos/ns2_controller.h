@@ -12,8 +12,12 @@ void s2a_mac_ns2_detach(void);
 void s2a_mac_ns2_focus(int focused);
 // 读手柄状态；单只 Joy-Con 按游戏样式整形（s2a_mac_ns2_shape），side_keys 收 SL / SR（Ryujinx ControllerKeys 位 24–27，可 NULL）
 int s2a_mac_ns2_read(ns2_state *state, uint32_t *side_keys);
+// 多手柄：玩家 player（0 起，< NS2_RELAY_PLAYERS）的状态；玩家 0 同 s2a_mac_ns2_read，玩家 1 起只来自通道、单只 Joy-Con 转横握。kind 可 NULL
+int s2a_mac_ns2_read_player(int player, ns2_state *state, uint32_t *side_keys, ns2_kind *kind);
+int s2a_mac_ns2_player_present(int player);   // 连着没有（不看前后台；分槽用）
 // 游戏这一格的手柄样式（Ryujinx ControllerType 位；front_mac.m 的 s2a_vpad_set_style 转来）
 void s2a_mac_ns2_set_game_style(int style);
+void s2a_mac_ns2_set_player_style(int player, int style);   // 玩家 1 起那一格的样式（同 set_game_style 的规则，单只 Joy-Con 定原始方向 / 横握）
 // 现在是否在报原始方向（连着单只 Joy-Con、游戏用它那一侧的单只样式）
 int s2a_mac_ns2_raw_now(void);
 // 纯函数（#520 A）：游戏用这只那一侧的单只样式才报原始方向；单只 Joy-Con 对应的样式（Pro / 一对 / 没连为 0）；
@@ -33,8 +37,13 @@ void s2a_mac_ns2_set_motion_enabled(int enabled);
 // 震动（游戏的 s2a_pad_rumble_* 导出在 macos/front_mac.m，Switch 2 Pro 连着时交到这里；会话号与系统手柄那路不重叠）
 uint64_t s2a_mac_ns2_rumble_session(void);
 void s2a_mac_ns2_set_rumble_pair(uint64_t session, const s2a_pad_vibration values[2]);
+void s2a_mac_ns2_set_rumble_player(int player, const s2a_pad_vibration values[2]);   // P1 以外的玩家（槽位震动，#520 E）
 void s2a_mac_ns2_stop_rumble(uint64_t session);
 int s2a_mac_ns2_read_motion(s2a_pad_motion *out);
 int s2a_mac_ns2_read_motion_pair(s2a_pad_motion out[2]);   // Joy-Con 2 拼对：[左, 右] 返回 2；一路返回 1
+int s2a_mac_ns2_read_motion_player(int player, s2a_pad_motion *out);   // 玩家 1 起的六轴（#520）
 int s2a_mac_ns2_read_mouse_pair(s2a_pad_mouse out[2]);   // 左右各一份（s2a_pad.h s2a_pad_read_mouse_pair）
+int s2a_mac_ns2_read_mouse_player(int player, s2a_pad_mouse out[2]);   // 玩家 1 起是 P1 时（分配成 P1 的是拆开的另一只）：照它这只的型号报有哪一侧
+ns2_kind s2a_mac_ns2_player_kind(int player);   // 不看前后台；没连 NONE
+int s2a_mac_ns2_player_raw(int player);   // 这位玩家的单只 Joy-Con 现在报不报原始方向（玩家 0 照游戏样式、1 起照它那一格）
 #endif

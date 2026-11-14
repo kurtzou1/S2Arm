@@ -12,8 +12,11 @@
    （python traceback 的末行 = 异常本身），日志缺失给空串——调用方据此把原因写进红行与错误摘要
 ⑧ 资源包要件（check_pack_inputs）认「抽取缺口的空直连库」（runtime_only.txt + b-<链>/{lib.idx,inputs.tsv,shader_map.tsv}）：
    空 keys.tsv / shader_map.tsv 是它的正常形态，不判「直连库不全」；真残缺（无 runtime_only.txt，或 b-<链>/ 缺件）照旧判红
+⑨ 出包进度「出包 n/m」（维护者截图「出包 6/5」）：各分支（签名 adhoc / dev / none × 只出程序与否 × 调用方先出壳与否）真跑 assemble（外部命令打桩），
+   数写进 S2A_PROGRESS 的进度行：每行步号 ≤ 总数，最后一行步号 = 总数；总数按手数的分支步数写期望（组装 + 签名? + 打 ipa + 资源包三步?）
 """
-import contextlib, hashlib, io, os, plistlib, subprocess, sys, tempfile, unittest
+import contextlib, hashlib, io, os, plistlib, subprocess, sys, tempfile, unittest, zipfile
+from unittest import mock
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "pack"))
@@ -116,6 +119,49 @@ class Tail(unittest.TestCase):
         if sys.platform != "darwin":
             r = subprocess.run(base + ["--sign", "adhoc"], capture_output=True, text=True)
             self.assertEqual(r.returncode, 1); self.assertIn("只能在 Mac", r.stdout)
+
+
+class ProgressTotal(unittest.TestCase):
+    """⑨ 期望按分支手数：组装 1 + 签名（adhoc / dev 才有）1 + 打 ipa 1 + 资源包 / 核对 / 单文件镜像（不是只出程序才有）3，再加调用方已走的出壳步"""
+    def run_tail(self, sign, app_only, done):
+        t = Path(tempfile.mkdtemp()); w = t / "work"; shell = t / "shell"
+        (shell / "root/gal_helpers/m3").mkdir(parents=True); (shell / "root/gal_helpers/m3/a.metallib").write_bytes(b"m")
+        prog = t / "progress.tsv"
+        def step(tl, name, cmd, log=None, mode="a", env=None):
+            ipa_tail.tick()
+            if name == "组装（预编壳）": (w / "build/ios/S2Arm.app").mkdir(parents=True, exist_ok=True)
+            if name == "打ipa":
+                with zipfile.ZipFile(cmd[-1], "w") as z: z.writestr("Payload/S2Arm.app/gal_helpers/m3/a.metallib", b"m")
+            return 0
+        a = mock.Mock(work=str(w), game="g", shell=str(shell), bundle_id="b", suffix="", key="k", title="t", sign=sign, team="T",
+                      save_identity="", app_only=app_only)
+        argv = ["ipa_tail.py", "--work", str(w), "--game", "g", "--shell", str(shell), "--bundle-id", "b", "--key", "k", "--title", "t", "--sign", sign, "--team", "T"] + (["--app-only"] if app_only else [])
+        with mock.patch.dict(os.environ, {"S2A_PROGRESS": str(prog), "S2A_PKG_PROG_DONE": str(done)}), \
+             mock.patch.object(ipa_tail, "PROG", [done, 0]), mock.patch.object(ipa_tail, "step", step), mock.patch.object(ipa_tail, "run", lambda *x, **k: 0), \
+             mock.patch.object(ipa_tail, "build_id", lambda k: "id"), mock.patch.object(ipa_tail, "pso_target", lambda w: ""), \
+             mock.patch.object(ipa_tail, "direct_lib_version", lambda w: ""), mock.patch.object(ipa_tail, "check_pack_inputs", lambda w, g: None), \
+             mock.patch.object(ipa_tail.pkg_srcs, "srcs", lambda w: []), mock.patch.object(ipa_tail.sys, "platform", "darwin"), \
+             mock.patch.object(ipa_tail, "test_udids", lambda: ""), mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ipa_tail.main(), 0)
+        return [tuple(int(x) for x in l.split("\t")[2:4]) for l in prog.read_text(encoding="utf-8").splitlines() if l.split("\t")[1] == "出包"]
+
+    def test_every_branch_ends_exactly_at_total(self):
+        for sign in ("adhoc", "dev", "none"):
+            for app_only in (False, True):
+                for done in (0, 1):   # 1 = 调用方本提交第一次出壳、已记过一步
+                    want = done + 1 + (sign != "none") + 1 + (0 if app_only else 3)
+                    with self.subTest(sign=sign, app_only=app_only, done=done):
+                        rows = self.run_tail(sign, app_only, done)
+                        self.assertEqual(rows[-1], (want, want))
+                        self.assertTrue(all(n <= total == want for n, total in rows), rows)
+
+    def test_count_steps_matches_plan(self):   # pack/ipa.sh 用它定出壳那步的总数
+        for sign, app_only, want in (("dev", False, 6), ("none", False, 5), ("adhoc", True, 3), ("none", True, 2)):
+            argv = ["ipa_tail.py", "--count-steps", "--work", "-", "--game", "-", "--shell", "-", "--bundle-id", "-", "--key", "-", "--title", "-", "--sign", sign] + (["--app-only"] if app_only else [])
+            out = io.StringIO()
+            with mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(out):
+                self.assertEqual(ipa_tail.main(), 0)
+            self.assertEqual(out.getvalue().strip(), str(want))
 
 
 class DevFacilities(unittest.TestCase):

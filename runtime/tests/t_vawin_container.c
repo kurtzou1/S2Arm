@@ -114,6 +114,23 @@ int main(int argc, char **argv) {
     r = ctr(b, tmp);
     ck(r == 0 && strstr(g_log, "地址空间类型不一致") && strstr(g_log, "类型 3") && strstr(g_log, "类型 1"), "④ 容器 {A 类型 3, C 类型 1}：0、红行「地址空间类型不一致」并列出两款类型");
     if (bad) printf("  日志：%s\n", g_log);
+    // ⑦ 学到的跨度在各款自己的文档根下（选游戏后 S2A_DOCS = Documents/games/<游戏号>，心跳写在那里）：构造期（S2A_DOCS 没设）要能读到。
+    //   11-13 0400486024DEC000：原先按 Documents/wire/... 读、永远读不到，多款容器窗口下方一直只留 3 GB。期望按写进去的值手写
+    { uint64_t s2a_window_span_learned(void); char home[1300], f[1500], *oh = getenv("HOME") ? strdup(getenv("HOME")) : NULL; unsetenv("S2A_DOCS");
+      snprintf(home, sizeof home, "%s/home", tmp); mkdir(home, 0755); setenv("HOME", home, 1);
+      snprintf(f, sizeof f, "%s/Documents", home); mkdir(f, 0755); snprintf(f, sizeof f, "%s/Documents/games", home); mkdir(f, 0755);
+      snprintf(f, sizeof f, "%s/Documents/games/%s", home, B); mkdir(f, 0755); snprintf(f, sizeof f, "%s/Documents/games/%s/wire", home, B); mkdir(f, 0755);
+      snprintf(f, sizeof f, "%s/Documents/games/%s/wire/%s", home, B, B); mkdir(f, 0755);
+      snprintf(f, sizeof f, "%s/Documents/games/%s/wire/%s/span_peak", home, B, B); put(f, "18446744073\n", 12);
+      snprintf(b, sizeof b, "%s/b", tmp); ctr(b, tmp);
+      ck(s2a_window_span_learned() == 18446744073ull, "⑦ 容器 {B}：读到 Documents/games/B/wire/B/span_peak 里的跨度 18446744073");
+      snprintf(b, sizeof b, "%s/ab", tmp); ctr(b, tmp);
+      ck(s2a_window_span_learned() == 32770ull << 20, "⑦ 容器 {A, B}：A 没玩过、没有记录 → 按 A 自己的布局需求 32770 MB 算，与 B 的 18446744073 取大 = 34361835520（原先整容器取 0）");
+      snprintf(f, sizeof f, "%s/Documents/wire", home); mkdir(f, 0755); snprintf(f, sizeof f, "%s/Documents/wire/%s", home, A); mkdir(f, 0755);
+      snprintf(f, sizeof f, "%s/Documents/wire/%s/span_peak", home, A); put(f, "2000000000\n", 11);
+      ctr(b, tmp);
+      ck(s2a_window_span_learned() == 18446744073ull, "⑦ A 只有旧位置（单款包时代）的记录 2000000000 也认（不再按需求 32770 MB 算）：{A, B} 取最大 18446744073");
+      if (oh) { setenv("HOME", oh, 1); free(oh); } }
     snprintf(b, sizeof b, "%s/empty", tmp); bundle(b, NULL, NULL, 0);
     ck(ctr(b, tmp) == 0 && strstr(g_log, "下没有游戏"), "④ 空 Games/：0、红行「下没有游戏」");
     snprintf(b, sizeof b, "%s/miss", tmp); bundle(b, (const char *[]){A, B}, (const int[]){0, 4}, 2);

@@ -103,8 +103,10 @@ final class GamePack {
             }
             pos = end + 1;
         }
+        // index.tsv 已按 manifest 里的哈希核过，文件清单以它为准；manifest 里的两个汇总数对不上只记日志（不堵门）
         if (!String.valueOf(entries.size()).equals(m.get("files")) || !String.valueOf(total).equals(m.get("total")))
-            throw new BadPack("manifest.json file count / total does not match index.tsv");
+            System.err.println("S2Arm: manifest.json file count / total (" + m.get("files") + " / " + m.get("total")
+                + ") differs from index.tsv (" + entries.size() + " / " + total + "); index.tsv is authoritative");
         requireLayout(seen);
         return entries;
     }
@@ -204,13 +206,18 @@ final class GamePack {
             }
         }
         boolean legacyCandidate = candidate && names == nacp;
-        for (int i = 0; i < count && info.name.isEmpty(); i++)
-            info.name = cString(names, i * 0x300, 0x200, legacyCandidate);
+        // 名字和版本号只用来显示：解不出（不是 UTF-8、带控制字符、压缩格式认不出）不挡导入，名字退回程序号、版本留空，记日志（不堵门）
+        for (int i = 0; i < count && info.name.isEmpty(); i++) {
+            try { info.name = cString(names, i * 0x300, 0x200, legacyCandidate); }
+            catch (BadPack unreadable) { System.err.println("S2Arm: NACP name " + i + " unreadable, skipped: " + unreadable.getMessage()); }
+        }
         long id = 0;
         for (int i = 7; i >= 0; i--) id = (id << 8) | (nacp[0x3038 + i] & 0xff);
         info.titleId = String.format(Locale.ROOT, "%016X", id);
-        info.version = cString(nacp, 0x3060, 0x10, false);
+        try { info.version = cString(nacp, 0x3060, 0x10, false); }
+        catch (BadPack unreadable) { info.version = ""; System.err.println("S2Arm: NACP version unreadable: " + unreadable.getMessage()); }
         if (id == 0) throw new BadPack("ctl/control.nacp has no application id");
+        if (info.name.isEmpty()) info.name = info.titleId;
     }
 
     private static String cString(byte[] b, int off, int max, boolean padded) throws BadPack {

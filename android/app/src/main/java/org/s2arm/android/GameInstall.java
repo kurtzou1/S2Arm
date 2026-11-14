@@ -108,7 +108,7 @@ final class GameInstall {
     static void importDirectory(File privateRoot, File[] inboxes, String target,
             ImportSourceCheck sourceCheck, Progress progress, ImportListener listener) throws IOException {
         if (target == null) return;
-        try (GameStorage storage = GameStorage.acquire(privateRoot)) {
+        {   // 不再取整库锁：install 拿到程序号后只锁那一款
             File dir = new File(target);
             try {
                 Path path = dir.toPath();
@@ -207,6 +207,15 @@ final class GameInstall {
         // The title id names the directory, so read control.nacp first (checked against the index like every file).
         GamePack.Info info = new GamePack.Info();
         GamePack.describe(info, verified(source, entry(entries, "ctl/control.nacp")));
+        // 只锁这一款（不堵门）：别的游戏在跑不挡本款导入；本款正在跑 / 正在装才报忙
+        try (GameStorage lease = GameStorage.acquireIn(gamesDir, info.titleId)) {
+            return installLocked(gamesDir, source, progress, linker, manifest, index, artifact, entries, contentRoot, info);
+        }
+    }
+
+    private static Result installLocked(File gamesDir, Source source, Progress progress, Linker linker, byte[] manifest, byte[] index,
+            byte[] artifact, List<GamePack.Entry> entries, String contentRoot, GamePack.Info info)
+            throws GamePack.BadPack, BootContract.BadGame, IOException {
         File gameRoot = new File(gamesDir, info.titleId);
         File revisions = new File(gameRoot, "revisions");
         File active = new File(revisions, contentRoot), staging = new File(revisions, contentRoot + ".staging");
@@ -339,10 +348,15 @@ final class GameInstall {
         int removed = 0;
         File[] games = gamesDir.listFiles(File::isDirectory);
         if (games != null) for (File g : games) {
-            File[] staged = new File(g, "revisions").listFiles(f -> f.getName().endsWith(".staging"));
-            if (staged != null) for (File s : staged) { deleteTree(s); removed++; }
-            new File(g, "current.json.tmp").delete();
-            collect(g);
+            // 逐款取锁：这一款正在跑 / 正在装就跳过（下次再清），不碰它的半成品
+            try (GameStorage lease = GameStorage.acquireIn(gamesDir, g.getName())) {
+                File[] staged = new File(g, "revisions").listFiles(f -> f.getName().endsWith(".staging"));
+                if (staged != null) for (File s : staged) { deleteTree(s); removed++; }
+                new File(g, "current.json.tmp").delete();
+                collect(g);
+            } catch (IOException busyOrForeign) {
+                System.err.println("S2Arm: library cleanup skipped " + g.getName() + ": " + busyOrForeign.getMessage());
+            }
         }
         return removed;
     }

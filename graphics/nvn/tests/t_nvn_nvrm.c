@@ -36,7 +36,28 @@ __attribute__((visibility("default"), used)) int S2A_NvMapFromGuest(uint64_t add
     CHECK(nmk < 4); mk_addr[nmk] = address; mk_size[nmk] = size; return 41 + (int)++nmk;
 }
 
+typedef void (*nvx_fn_fwd)(const NVNtexture *, const void *, void *);
 typedef struct { NVNmemoryPool pool; uint8_t *bytes; size_t size; } pool_box;
+// 无存储 / 虚拟池（存储是物理池的页、没有单一 nvmap 句柄）：mem 为 NULL 的池，flags 由例子给
+static void pool_make_bare(pool_box *p, size_t size, NVNmemoryPoolFlags flags) {
+    p->size = size; p->bytes = NULL;
+    NVNmemoryPoolBuilder b = {{0}};
+    API(nvnMemoryPoolBuilderSetDefaults)(&b); API(nvnMemoryPoolBuilderSetDevice)(&b, &device);
+    API(nvnMemoryPoolBuilderSetFlags)(&b, flags);
+    API(nvnMemoryPoolBuilderSetStorage)(&b, NULL, size);
+    CHECK(API(nvnMemoryPoolInitialize)(&p->pool, &b));
+}
+// 截 LOG（g_s2a_logfd，runtime/src/native.h 的弱定义、链接后同一个）：调用期间写到临时文件，回读成字符串
+extern int g_s2a_logfd;
+static char logbuf[8192];
+static const char *log_of(nvx_fn_fwd nvx, const NVNtexture *t, uint8_t *out) {
+    char path[] = "/tmp/t_nvn_nvrm_log.XXXXXX"; int fd = mkstemp(path); CHECK(fd >= 0); unlink(path);
+    int old = g_s2a_logfd; g_s2a_logfd = fd;
+    nvx(t, NULL, out);
+    g_s2a_logfd = old;
+    ssize_t n = pread(fd, logbuf, sizeof logbuf - 1, 0); close(fd); CHECK(n >= 0); logbuf[n] = 0;
+    return logbuf;
+}
 static void pool_make(pool_box *p, size_t size) {
     p->size = size; CHECK(posix_memalign((void **)&p->bytes, 65536, size) == 0); memset(p->bytes, 0, size);
     NVNmemoryPoolBuilder b = {{0}};
@@ -98,6 +119,32 @@ int main(void) {
     check_surf(nvx, &f16, &(surf_want){64, 64, 0, 3, 0, 43, 0x40000, 0xFE, 3, 0});   // 64 行 = 8 个 GOB → 块高 8（log2 3）
     printf("%s：通过\n", phase);
 
+    // 句柄 0 的三支按铁律报红（010045B018EC2000 普查：句柄 0 进 nvgr_import_nvrmsurface → NvMap GetId / FromId 失败 → 导入缓冲被释放、播放器照样 NvBlit，sdk 内 SIGSEGV；
+    //   原先这三支不出声）。返回语义不变：句柄仍是 0、其余字段照填，不另开 nvmap 句柄。期望按语义手算：报红行含「【红】 nvnTextureGetNvRmSurfaceNVX」与原因。
+    //   反证：main 上这三支 return 0 不写日志，strstr 红
+    phase = "虚拟池里的纹理：句柄 0 且报红（原因：虚拟池）";
+    { pool_box v; pool_make_bare(&v, 1 << 20, NVN_MEMORY_POOL_FLAGS_VIRTUAL | NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_GPU_CACHED);
+      NVNtexture vt; tex_make(&vt, &v, 0x10000, NVN_FORMAT_R8, 256, 64, 0, 0);
+      unsigned before = nmk; uint8_t s[88]; memset(s, 0xcd, sizeof s);
+      const char *l = log_of(nvx, &vt, s); uint32_t hm; memcpy(&hm, s + 24, 4);
+      CHECK(hm == 0); CHECK(nmk == before);
+      CHECK(strstr(l, "【红】 nvnTextureGetNvRmSurfaceNVX") != NULL); CHECK(strstr(l, "虚拟池") != NULL);
+      printf("%s：通过\n", phase); }
+
+    phase = "池没有存储（非虚拟、存储为空）：句柄 0 且报红（原因：池没有存储）";
+    { pool_box e; pool_make_bare(&e, 1 << 20, NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED);
+      NVNtexture et; tex_make(&et, &e, 0, NVN_FORMAT_R8, 256, 64, 0, 0);
+      unsigned before = nmk; uint8_t s[88]; memset(s, 0xcd, sizeof s);
+      const char *l = log_of(nvx, &et, s); uint32_t hm; memcpy(&hm, s + 24, 4);
+      CHECK(hm == 0); CHECK(nmk == before);
+      CHECK(strstr(l, "【红】 nvnTextureGetNvRmSurfaceNVX") != NULL); CHECK(strstr(l, "池没有存储") != NULL);
+      printf("%s：通过\n", phase); }
+
+    phase = "有句柄的池不报红（负控：正常路径不多出红行）";
+    { uint8_t s[88]; const char *l = log_of(nvx, &y, s); uint32_t hm; memcpy(&hm, s + 24, 4);
+      CHECK(hm == 42); CHECK(strstr(l, "【红】") == NULL);
+      printf("%s：通过\n", phase); }
+
     // nvnSyncInitializeFromNvRmSyncNVX（10-30 Metroid Dread 按名查不到、拿空指针崩在 subsdk0）：按名查得到；初始化成功，等待（超时 0）即返回「已发出信号」
     //   （视频解码等引擎在服务层的 CPU 上做完才交出 fence，同步对象一开始就是已完成）。反证：旧代码查这个名字得空指针（load 的 CHECK 红）
     phase = "nvnSyncInitializeFromNvRmSyncNVX：按名可查、一开始就已发出信号";
@@ -131,6 +178,6 @@ int main(void) {
       CHECK(out[0] == 0x5A5A5A5Au && out[1] == 0x5A5A5A5Au);               // 不写「无效同步点 = 已触发」
       printf("%s：通过（等了 %.2f 秒）\n", phase, el); }
 
-    printf("✓ t_nvn_nvrm：%u 条断言（7 例，句柄开 %u 次）\n", checks, nmk);
+    printf("✓ t_nvn_nvrm：%u 条断言（10 例，句柄开 %u 次）\n", checks, nmk);
     return 0;
 }

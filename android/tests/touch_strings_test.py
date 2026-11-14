@@ -8,9 +8,23 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 KEYS = [
+    "touch_menu_import",
+    "touch_menu_export",
+    "touch_layout_imported",
+    "touch_layout_exported",
+    "touch_layout_import_failed",
+    "touch_layout_export_failed",
+    "touch_layout_document_unavailable",
+    "touch_layout_err_size",
+    "touch_layout_err_invalid",
+    "touch_layout_err_read",
+    "touch_layout_err_write",
+
     "touch_menu_title",
     "touch_menu_edit_positions",
     "touch_menu_restore_default",
+    "touch_menu_show_pad",
+    "touch_menu_hide_pad",
     "touch_passthrough_on",
     "touch_passthrough_off",
     "touch_edit_save",

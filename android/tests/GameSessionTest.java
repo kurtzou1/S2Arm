@@ -64,8 +64,9 @@ public final class GameSessionTest {
         restored.stop(); check(restored.begin(true,true,1280,720,320,60,BootSpec.ConsoleMode.HANDHELD) == null, "stop prevents admission");
         Path legacy = Files.createDirectory(root.resolve("legacy")); BootSpec ls=spec(legacy);
         Files.createDirectories(Path.of(ls.saveRoot)); Files.writeString(Path.of(ls.saveRoot,"save.bin"),"keep");
-        rejects(()->new GameSession(ls,legacy.toFile()),"legacy layout must fail closed");
-        check(Files.readString(Path.of(ls.saveRoot,"save.bin")).equals("keep"), "legacy untouched");
+        new GameSession(ls,legacy.toFile());   // 存档根目录里的旧文件不挡起局（不堵门）
+        check(Files.readString(Path.of(ls.saveRoot,"save.bin")).equals("keep")
+            && Files.isDirectory(Path.of(ls.saveRoot,"ryujinx-android")), "legacy kept untouched; session state beside it");
         Path linked = Files.createDirectory(root.resolve("linked")); Files.createSymbolicLink(linked.resolve("user"),root.resolve("user"));
         rejects(()->new GameSession(spec(linked),linked.toFile()),"child symlink rejected");
         Path aliases = Files.createDirectory(root.resolve("aliases")); Files.createSymbolicLink(aliases.resolve("app"), root);
@@ -132,9 +133,9 @@ public final class GameSessionTest {
         Path legacyAlias = link.resolve("legacy-app");
         Path legacySave = Files.createDirectories(Path.of(spec(legacyApp).saveRoot));
         Path old = legacySave.resolve("save.bin"); Files.write(old, contents);
-        rejects(() -> new GameSession(spec(legacyAlias), legacyAlias.toFile()), "legacy layout under trusted alias rejected");
+        new GameSession(spec(legacyAlias), legacyAlias.toFile());   // 旧文件不挡起局（不堵门）
         check(Arrays.equals(contents, Files.readAllBytes(old))
-            && !Files.exists(legacySave.resolve("ryujinx-android")), "legacy content untouched without migration");
+            && Files.isDirectory(legacySave.resolve("ryujinx-android")), "legacy content kept untouched; session state created beside it");
     }
 
     private static void frozenCases(Path root) throws Exception {

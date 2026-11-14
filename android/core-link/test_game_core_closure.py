@@ -95,17 +95,18 @@ def main():
             objects.append(obj)
         linked = temp / 'core.o'
         run([ndk / 'ld.lld', '-r', *objects, '-o', linked])
-        rows = [x.split() for x in run([ndk / 'llvm-nm', '--format=posix', linked]).splitlines()
-                if x.split() and x.split()[0] == 's2a_cpatch_load']
-        if len(rows) != 1 or rows[0][1] not in ('T', 't'):
-            raise RuntimeError(f'game core link has no unique strong s2a_cpatch_load: {rows}')
-        print('game core loader/cpatch: NDK real objects resolve one strong s2a_cpatch_load')
-        for android_default in (False, True):
-            exe = temp / ('android-default' if android_default else 'apple-default')
-            flag = ['-DS2A_CPATCH_ANDROID_DEFAULT'] if android_default else []
-            run([*host_cc, '-std=gnu11', *flag, '-I', ROOT / 'runtime/include',
-                 ROOT / 'runtime/tests/t_cpatch.c', ROOT / 'runtime/src/cpatch.c', '-o', exe])
-            print(run([exe]).strip())
+        symbols = run([ndk / 'llvm-nm', '--format=posix', linked]).splitlines()
+        # s2a_cpatch_load：目录装载；s2a_cpatch_load_source：APK 起局（#48 D2，loader.c load_modules_from_source 调）
+        for name in ('s2a_cpatch_load', 's2a_cpatch_load_source'):
+            rows = [x.split() for x in symbols if x.split() and x.split()[0] == name]
+            if len(rows) != 1 or rows[0][1] not in ('T', 't'):
+                raise RuntimeError(f'game core link has no unique strong {name}: {rows}')
+            print(f'game core loader/cpatch: NDK real objects resolve one strong {name}')
+        # 开关口径 Apple / Android 相同（#48 D2：不设 S2A_CPATCH_ON 按表缺省开），一份宿主单测覆盖目录与 APK 内存表两条装载路
+        exe = temp / 't_cpatch'
+        run([*host_cc, '-std=gnu11', '-I', ROOT / 'runtime/include',
+             ROOT / 'runtime/tests/t_cpatch.c', ROOT / 'runtime/src/cpatch.c', '-o', exe])
+        print(run([exe]).strip())
     return 0
 
 

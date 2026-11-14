@@ -34,11 +34,22 @@ namespace S2A.Services
         private readonly NpadDevices _npads;
         private readonly delegate* unmanaged<MouseSample*, int> _readMousePair;   // 可选（Mac）：Joy-Con 2 光学鼠标，左右各一份
         private bool _mouseConnected, _mouseLogged;
+        // 可选（Mac 宿主 s2a_pad_read_mouse_slot，#520）：P1 以外的玩家各自的 Joy-Con 2（游戏靠 Jcms 已连接认，两人的项目每格都查）；没导出照旧只有 P1
+        private readonly delegate* unmanaged<int, MouseSample*, int> _readMouseSlot;
+        private readonly List<NpadJcms.Entry> _mouseEntries = new(InputPump.MaxPads);
         private readonly delegate* unmanaged<ulong, VibrationValue*, void> _setRumblePair;
+        // 按槽位震动（Mac 宿主 s2a_pad_set_rumble_slot，#520 E）：P1 以外的玩家各震各的手柄；没导出的宿主照旧只震 P1
+        private readonly delegate* unmanaged<int, VibrationValue*, void> _setRumbleSlot;
+        private readonly Dictionary<int, (VibrationValue Left, VibrationValue Right, long RenewAt)> _slotRumble = new();
         private readonly delegate* unmanaged<ulong, void> _stopRumble;
         private readonly delegate* unmanaged<ulong> _rumbleSession;
         private readonly delegate* unmanaged<MotionSample*, int> _readMotion;
         private readonly delegate* unmanaged<MotionSample*, int> _readMotionPair;   // 可选：左右两路（Mac Joy-Con HID）
+        // 可选（Mac 宿主 s2a_pad_read_motion_slot，#520）：P1 以外的玩家各自的体感；没导出照旧只有 P1
+        private readonly delegate* unmanaged<int, MotionSample*, int> _readMotionSlot;
+        private sealed class SlotMotion { public MotionInput Left, Right; public readonly float[] Orientation = new float[9], OrientationRight = new float[9]; public ulong Timestamp; public readonly List<SixAxisInput> Last = new(2); }
+        private readonly Dictionary<int, SlotMotion> _slotMotion = new();
+        private readonly List<SixAxisInput> _p1States = new(2);   // P1 最近一次的六轴（P1 没新样本、别人有时照样带上）
         private readonly delegate* unmanaged<int, void> _setMotionEnabled;
         private readonly List<SixAxisInput> _motionStates = new(2);
         private readonly float[] _orientation = new float[9];
@@ -68,6 +79,8 @@ namespace S2A.Services
                 _setRumblePair = (delegate* unmanaged<ulong, VibrationValue*, void>)NativeLibrary.GetExport(program, "s2a_pad_set_rumble_pair");
                 _stopRumble = (delegate* unmanaged<ulong, void>)NativeLibrary.GetExport(program, "s2a_pad_stop_rumble");
                 _rumbleSession = (delegate* unmanaged<ulong>)rumbleSession;
+                if (NativeLibrary.TryGetExport(program, "s2a_pad_set_rumble_slot", out nint rumbleSlot))   // 平台例外：Mac / iOS 宿主（macos/front_mac.m、ios/slot_feedback.m）的可选导出
+                    _setRumbleSlot = (delegate* unmanaged<int, VibrationValue*, void>)rumbleSlot;
                 lock (_npads.RumbleSyncRoot)
                 {
                     _rumblePermitted = _npads.VibrationPermitted;
@@ -82,11 +95,15 @@ namespace S2A.Services
             {
                 _readMotion = (delegate* unmanaged<MotionSample*, int>)motion;
                 _setMotionEnabled = (delegate* unmanaged<int, void>)NativeLibrary.GetExport(program, "s2a_pad_set_motion_enabled");
+                if (NativeLibrary.TryGetExport(program, "s2a_pad_read_motion_slot", out nint slotMotion))   // 平台例外：Mac / iOS 宿主（macos/front_mac.m、ios/slot_feedback.m）的可选导出
+                    _readMotionSlot = (delegate* unmanaged<int, MotionSample*, int>)slotMotion;
                 if (NativeLibrary.TryGetExport(program, "s2a_pad_read_motion_pair", out nint pair))   // 平台例外：Mac 宿主（macos/front_mac.m，Joy-Con HID 左右两路体感）专有的可选导出，同 s2a_pad_read_motion；iOS / 安卓宿主没有
                     _readMotionPair = (delegate* unmanaged<MotionSample*, int>)pair;
             }
             if (NativeLibrary.TryGetExport(program, "s2a_pad_read_mouse_pair", out nint mousePair))   // 平台例外：Mac 宿主（macos/front_mac.m，Joy-Con 2 光学鼠标）专有的可选导出
                 _readMousePair = (delegate* unmanaged<MouseSample*, int>)mousePair;
+            if (NativeLibrary.TryGetExport(program, "s2a_pad_read_mouse_slot", out nint mouseSlot))   // 平台例外：同 s2a_pad_read_mouse_pair（Mac 宿主专有）
+                _readMouseSlot = (delegate* unmanaged<int, MouseSample*, int>)mouseSlot;
             Console.Error.WriteLine($"[输入反馈] hooks rumble_pair={_setRumblePair != null} stop={_stopRumble != null} session={_rumbleSession != null} motion={_readMotion != null} motion_pair={_readMotionPair != null} motion_enable={_setMotionEnabled != null} mouse={_readMousePair != null} player={(int)player} session={_session} permit={_rumblePermitted}");
         }
 
@@ -105,6 +122,7 @@ namespace S2A.Services
                 Console.Error.WriteLine($"[输入反馈] state player={(int)_rumblePlayer} session={_session}->{session} permit={_rumblePermitted}");
                 _session = session;
                 _left = _right = default;
+                _slotRumble.Clear();
                 _rumbleLogged = false;
                 // A new session clears local state without truncating its connection cue.
                 for (int i = 0; i < NpadDevices.MaxControllers; i++) _npads.ResetRumble((PlayerIndex)i);
@@ -119,6 +137,7 @@ namespace S2A.Services
                 if (_stopRumble != null) _stopRumble(_session);
                 _rumblePlayer = player;
                 _left = _right = default;
+                _slotRumble.Clear();
                 _rumbleLogged = false;
                 for (int i = 0; i < NpadDevices.MaxControllers; i++) _npads.ResetRumble((PlayerIndex)i);
                 if (_rumbleSession != null) ObserveSession();
@@ -144,7 +163,12 @@ namespace S2A.Services
                 _rumbleLogged = true;
                 Console.Error.WriteLine($"[输入反馈] first game rumble slot={(int)player} player={(int)_rumblePlayer} session={_session} permit={_rumblePermitted} L={left.AmplitudeLow}@{left.FrequencyLow}/{left.AmplitudeHigh}@{left.FrequencyHigh} R={right.AmplitudeLow}@{right.FrequencyLow}/{right.AmplitudeHigh}@{right.FrequencyHigh}");
             }
-            if (player != _rumblePlayer || _session == 0 || !_rumblePermitted) return;
+            if (player != _rumblePlayer)
+            {
+                SlotRumble(player, left, right);
+                return;
+            }
+            if (_session == 0 || !_rumblePermitted) return;
             if ((left != _left || right != _right) &&
                 (Vibrating(left) || Vibrating(right) || Vibrating(_left) || Vibrating(_right)))
             {
@@ -155,11 +179,42 @@ namespace S2A.Services
             }
         }
 
+        // P1 以外的玩家：按槽位交给宿主（宿主 1 秒租约，同 P1 每 250 ms 续一次）；变了才发，停也发一次
+        private void SlotRumble(PlayerIndex player, VibrationValue left, VibrationValue right)
+        {
+            if (_setRumbleSlot == null || !_rumblePermitted) return;
+            int slot = InputPump.SlotOf(player);
+            if (slot <= 0) return;
+            _slotRumble.TryGetValue(slot, out var last);
+            if (left == last.Left && right == last.Right) return;
+            if (!Vibrating(left) && !Vibrating(right) && !Vibrating(last.Left) && !Vibrating(last.Right)) return;
+            SendSlot(slot, left, right);
+            _slotRumble[slot] = (left, right, Stopwatch.GetTimestamp() + Stopwatch.Frequency / 4);
+        }
+        private void SendSlot(int slot, VibrationValue left, VibrationValue right)
+        {
+            VibrationValue* values = stackalloc VibrationValue[2];
+            values[0] = left;
+            values[1] = right;
+            _setRumbleSlot(slot, values);
+        }
+
         private void UpdateRumble()
         {
             lock (_npads.RumbleSyncRoot)
             {
                 if (_stopped) return;
+                if (_setRumbleSlot != null && _rumblePermitted)
+                {
+                    long at = Stopwatch.GetTimestamp();
+                    foreach (int slot in new List<int>(_slotRumble.Keys))
+                    {
+                        var r = _slotRumble[slot];
+                        if (at < r.RenewAt || (!Vibrating(r.Left) && !Vibrating(r.Right))) continue;
+                        SendSlot(slot, r.Left, r.Right);
+                        _slotRumble[slot] = (r.Left, r.Right, at + Stopwatch.Frequency / 4);
+                    }
+                }
                 // SetPrimary supplies the authoritative player under this lock; an older HID snapshot cannot undo it.
                 ObserveSession();
                 long now = Stopwatch.GetTimestamp();
@@ -221,10 +276,11 @@ namespace S2A.Services
                 }
                 else known = _readMotion(&sample);
             }
-            if (!enabled || known == 0)
+            if (!enabled)
             {
                 _motion = _motionRight = null;
                 _motionTimestamp = 0;
+                _slotMotion.Clear(); _p1States.Clear();
                 if (_motionPublished)
                 {
                     _npads.UpdateSixAxis(_motionStates);
@@ -232,19 +288,57 @@ namespace S2A.Services
                 }
                 return;
             }
-            if (sample.TimestampUs == _motionTimestamp && nPair < 2) return;
-            _motionTimestamp = sample.TimestampUs;
-            if (!_motionLogged)
+            // P1：有新样本才重算（同改前），没新样本但别的玩家有时照带上一份
+            bool fresh = false;
+            if (known == 0) { _motion = _motionRight = null; _motionTimestamp = 0; _p1States.Clear(); }
+            else if (sample.TimestampUs != _motionTimestamp || nPair >= 2)
             {
-                _motionLogged = true;
-                Console.Error.WriteLine($"[输入反馈] first motion known={known} pair={nPair} player={(int)player} timestamp_us={sample.TimestampUs} accel_g=({sample.AccelerationX},{sample.AccelerationY},{sample.AccelerationZ}) gyro_deg_s=({sample.GyroX},{sample.GyroY},{sample.GyroZ})");
+                _motionTimestamp = sample.TimestampUs;
+                if (!_motionLogged)
+                {
+                    _motionLogged = true;
+                    Console.Error.WriteLine($"[输入反馈] first motion known={known} pair={nPair} player={(int)player} timestamp_us={sample.TimestampUs} accel_g=({sample.AccelerationX},{sample.AccelerationY},{sample.AccelerationZ}) gyro_deg_s=({sample.GyroX},{sample.GyroY},{sample.GyroZ})");
+                }
+                // 左右 Joy-Con 各一路：同一 PlayerId 连续两份，UpdateSixAxis 把第二份写入右手六轴；Npad IMU 左只写传感器 0、右只写传感器 1（单路时 -1：左右同一份）
+                AddMotionState(player, sample, ref _motion, _orientation, imuSensor: nPair >= 2 ? 0 : -1);
+                if (nPair >= 2)
+                    AddMotionState(player, sampleR, ref _motionRight, _orientationRight, imuSensor: 1);
+                _p1States.Clear(); _p1States.AddRange(_motionStates);
+                fresh = true;
             }
-            // 左右 Joy-Con 各一路：同一 PlayerId 连续两份，UpdateSixAxis 把第二份写入右手六轴；Npad IMU 左只写传感器 0、右只写传感器 1（单路时 -1：左右同一份）
-            AddMotionState(player, sample, ref _motion, _orientation, imuSensor: nPair >= 2 ? 0 : -1);
-            if (nPair >= 2)
-                AddMotionState(player, sampleR, ref _motionRight, _orientationRight, imuSensor: 1);
+            else _motionStates.AddRange(_p1States);
+            // P2 起：每位玩家自己的体感（#520）
+            fresh |= AddSlotMotion();
+            if (!fresh)
+            {
+                if (_motionStates.Count == 0 && _motionPublished) { _npads.UpdateSixAxis(_motionStates); _motionPublished = false; }
+                return;
+            }
             _npads.UpdateSixAxis(_motionStates);
             _motionPublished = true;
+        }
+
+        // P1 以外的玩家按槽位读体感（宿主 s2a_pad_read_motion_slot），加进这一拍的六轴列表；有新样本回 true
+        private bool AddSlotMotion()
+        {
+            if (_readMotionSlot == null) return false;
+            bool fresh = false;
+            MotionSample* buf = stackalloc MotionSample[2];
+            for (int slot = 1; slot < InputPump.Pads; slot++)
+            {
+                PlayerIndex who = InputPump.PlayerAt(slot);
+                int n = who == PlayerIndex.Unknown ? 0 : _readMotionSlot(slot, buf);
+                if (n == 0) { _slotMotion.Remove(slot); continue; }
+                if (!_slotMotion.TryGetValue(slot, out SlotMotion state)) _slotMotion[slot] = state = new SlotMotion();
+                if (buf[0].TimestampUs == state.Timestamp && n < 2) { _motionStates.AddRange(state.Last); continue; }
+                state.Timestamp = buf[0].TimestampUs;
+                int before = _motionStates.Count;
+                AddMotionState(who, buf[0], ref state.Left, state.Orientation, imuSensor: n >= 2 ? 0 : -1);
+                if (n >= 2) AddMotionState(who, buf[1], ref state.Right, state.OrientationRight, imuSensor: 1);
+                state.Last.Clear(); state.Last.AddRange(_motionStates.GetRange(before, _motionStates.Count - before));
+                fresh = true;
+            }
+            return fresh;
         }
 
         // Joy-Con 2 光学鼠标 → 游戏的 Jcms 缓冲（hid 3110，NpadJcms）：游戏靠「已连接」位认 Joy-Con 2，靠位移玩鼠标操作的项目。
@@ -253,9 +347,25 @@ namespace S2A.Services
         {
             if (_readMousePair == null || _stopped) return;
             MouseSample* m = stackalloc MouseSample[2];
-            int sides = _readMousePair(m);
+            _mouseEntries.Clear();
             int npadId = player >= PlayerIndex.Player1 && player <= PlayerIndex.Player8 ? (int)player : 0;
-            if (sides == 0)
+            if (_readMousePair(m) > 0)
+            {
+                if (!_mouseLogged && (m[0].Known != 0 || m[1].Known != 0))
+                {
+                    _mouseLogged = true;
+                    Console.Error.WriteLine($"[输入反馈] first mouse npad={npadId} L=({(m[0].Side == 0 ? $"{m[0].X},{m[0].Y} d{m[0].Distance} k{m[0].Known}" : "-")}) R=({(m[1].Side == 1 ? $"{m[1].X},{m[1].Y} d{m[1].Distance} k{m[1].Known}" : "-")})");
+                }
+                _mouseEntries.Add(MouseEntry(npadId, player, m));
+            }
+            // P2 起：各自的 Joy-Con 2 写在各自的手柄号上（改前只写 P1，两人横握各一只的项目游戏认不出 P2 的 Joy-Con 2、一直提示要连）
+            for (int slot = 1; _readMouseSlot != null && slot < InputPump.Pads; slot++)
+            {
+                PlayerIndex who = InputPump.PlayerAt(slot);
+                if (who < PlayerIndex.Player1 || who > PlayerIndex.Player8 || _readMouseSlot(slot, m) == 0) continue;
+                _mouseEntries.Add(MouseEntry((int)who, who, m));
+            }
+            if (_mouseEntries.Count == 0)
             {
                 if (_mouseConnected) _npads.Jcms.Disconnect();
                 _mouseConnected = false;
@@ -264,16 +374,16 @@ namespace S2A.Services
             }
             _mouseConnected = true;
             _npads.SetJoycon2(true);   // 样式加 Joy-Con 2 位（NpadDevices.Joycon2Style）：只收 Joy-Con 2 的场景游戏才认
-            if (!_mouseLogged && (m[0].Known != 0 || m[1].Known != 0))
-            {
-                _mouseLogged = true;
-                Console.Error.WriteLine($"[输入反馈] first mouse npad={npadId} sides={sides} L=({(m[0].Side == 0 ? $"{m[0].X},{m[0].Y} d{m[0].Distance} k{m[0].Known}" : "-")}) R=({(m[1].Side == 1 ? $"{m[1].X},{m[1].Y} d{m[1].Distance} k{m[1].Known}" : "-")})");
-            }
-            NpadJcms.Side left = new() { Present = m[0].Side == 0, Known = m[0].Known != 0, X = m[0].X, Y = m[0].Y, OnSurface = m[0].Distance == 0 };
-            NpadJcms.Side right = new() { Present = m[1].Side == 1, Known = m[1].Known != 0, X = m[1].X, Y = m[1].Y, OnSurface = m[1].Distance == 0 };
-            bool pair = player <= PlayerIndex.Handheld && NpadDevices.Base(_npads.StyleOf(player)) == NpadStyleTag.JoyDual;   // 一对：游戏左右两侧都查
-            if (_npads.Jcms.Active) _npads.Jcms.Push(npadId, left, right, m[0].Side == 0 ? m[0].TimestampUs : m[1].TimestampUs, pair);
+            if (_npads.Jcms.Active) _npads.Jcms.PushMany(_mouseEntries);
         }
+        private NpadJcms.Entry MouseEntry(int npadId, PlayerIndex player, MouseSample* m) => new()
+        {
+            NpadId = npadId,
+            Left = new() { Present = m[0].Side == 0, Known = m[0].Known != 0, X = m[0].X, Y = m[0].Y, OnSurface = m[0].Distance == 0 },
+            Right = new() { Present = m[1].Side == 1, Known = m[1].Known != 0, X = m[1].X, Y = m[1].Y, OnSurface = m[1].Distance == 0 },
+            TimestampUs = m[0].Side == 0 ? m[0].TimestampUs : m[1].TimestampUs,
+            Pair = player <= PlayerIndex.Handheld && NpadDevices.Base(_npads.StyleOf(player)) == NpadStyleTag.JoyDual,   // 一对：游戏左右两侧都查
+        };
 
         private void AddMotionState(PlayerIndex player, MotionSample sample, ref MotionInput motion, float[] orientation, int imuSensor)
         {

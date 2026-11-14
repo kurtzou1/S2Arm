@@ -57,13 +57,23 @@ void s2a_mem_lockorder_vp_enter(void);
 //   max(原周期, 33.3 ms)；登记最终周期给 Surface.setFrameRate 刷新率投票。
 uint64_t s2a_android_limit_frame_period(uint64_t period_ns);
 void s2a_android_present_note(uint64_t period_ns);
+// android/native/cpu_floor.c：每帧一次的上屏计数（一次原子加），安卓侧据此量实际出图帧率。
+void s2a_android_frame_note(void);
 #endif
 
 // ---------- Slot table, thunks, unimplemented stubs ----------
 typedef struct { _Atomic uint64_t cnt; void *fn; } nvn_slot_t;
 nvn_slot_t nvn_slot[NVN_NFUNC];                 // The thunk accesses it by i*16; the layout must not change
 _Static_assert(sizeof(nvn_slot_t) == 16, "the trampolines are addressed in 16-byte steps");
-extern void *nvn_thunk[NVN_NFUNC];
+extern void *nvn_thunk[NVN_NFUNC], *nvn_thunk_fast[NVN_NFUNC];
+// Call counts (the counting trampolines nvn_thunk, nvn_thunks.S) only when asked for: DM_NVN_COUNT=1, or the per-frame table DM_NVN_TSV with its call rows (DM_NVN_TSV_CALLS=0 writes only
+// timing). Each count is an atomic add on a cache line every recording thread shares; otherwise the game gets the uncounted trampolines nvn_thunk_fast and the per-frame call lines are
+// not written (ported from nxnative e250bb8b, MIT: there the trampolines of nvnBufferGetAddress / BindUniformBuffer took about 25 times the time of the functions they lead to)
+static int nvn_counting(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_NVN_COUNT"), *c = getenv("DM_NVN_TSV_CALLS"); v = (e && atoi(e)) || (getenv("DM_NVN_TSV") && !(c && !atoi(c))); }
+    return v;
+}
 extern const char *nvn_names[NVN_NFUNC];
 extern void nvn_unimpl_entry(void);
 extern void nvn_prof_entry(void);
@@ -131,7 +141,7 @@ static void *nvn_lookup(const char *name) {
 #if defined(__ANDROID__)
             return nvn_slot[i].fn;   // Android 直接返回强类型实现，避免 Apple 汇编 thunk
 #else
-            return nvn_thunk[i];
+            return nvn_counting() ? nvn_thunk[i] : nvn_thunk_fast[i];
 #endif
         }
     LOG("【红】 NVN address lookup of an unknown name: %s", name ? name : "(null)");
@@ -468,9 +478,23 @@ NVN(nvnTexturePoolRegisterTexture, void, const NVNtexturePool *tp, int id, const
 NVN(nvnTexturePoolRegisterImage, void, const NVNtexturePool *tp, int id, const NVNtexture *t, const NVNtextureView *v) {
     nvn_be_reg_tex(dpool_base(g_tpb, g_ntpb, tp) + id, (const tex_t *)t, (const view_t *)v);
 }
+// 采样器的缺省参数（nvnSamplerBuilderSetDefaults 与下面池初始化的保留项共用；与游戏自带驱动 SetDefaults 写的逐项一致）
+static void samp_defaults(samp_par *o) {
+    memset(o, 0, sizeof *o);
+    o->minf = NVN_MIN_FILTER_LINEAR; o->magf = NVN_MAG_FILTER_LINEAR;
+    o->ws = o->wt = o->wr = NVN_WRAP_MODE_REPEAT; o->cmp_func = NVN_COMPARE_FUNC_LESS;
+    o->lod_max = 1000.f; o->aniso = 1.f;
+}
+// 池的第 0、1 号：游戏自带的 NVN 驱动在 SamplerPoolInitialize 里自己往池内存写两个采样器描述符（本机 6 款 sdk 反汇编一致，SDK 最老到最新）：
+//   缺省参数、寻址 S / T / R 改 CLAMP_TO_EDGE，第 0 项各向异性 1.0、第 1 项 2.0；TexturePoolInitialize 不写任何描述符。游戏会直接拿采样器号 0 采样
+//   （11-14 安卓 8E 010045B018EC2000：句柄 贴图 2127 | 采样器 0，片元 OpImageSampleImplicitLod；不登记时一局跳过 5315 笔）。
+//   HLE 替换了驱动，就在这里照样登记；游戏之后自己登记这两个号照常覆盖（同真机上改写池内存）。容量不到的池只登记放得下的
 NVN(nvnSamplerPoolInitialize, NVNboolean, NVNsamplerPool *sp, const NVNmemoryPool *p, ptrdiff_t off, int n) {
     *(dpool_t *)sp = (dpool_t){(const pool_t *)p, off, n}; OLOG("SamplerPool n=%d", n);
     if (dpool_add(&g_spb, &g_cap_spb, &g_nspb, &g_snext, sp, n, "sampler") < 0) return 0;
+    int base = dpool_base(g_spb, g_nspb, sp);
+    samp_par r; samp_defaults(&r); r.ws = r.wt = r.wr = NVN_WRAP_MODE_CLAMP_TO_EDGE;
+    for (int id = 0; id < 2 && id < n; id++) { r.aniso = id ? 2.f : 1.f; nvn_be_reg_samp(base + id, &r); }
     return 1;
 }
 NVN(nvnSamplerPoolFinalize, void, NVNsamplerPool *sp) { dpool_finalize(g_spb, g_nspb, sp, 0); }
@@ -734,9 +758,11 @@ NVN(nvnTextureBuilderSetGLTextureName, void, NVNtextureBuilder *b, uint32_t name
 NVN(nvnTextureBuilderGetGLTextureName, uint32_t, const NVNtextureBuilder *b) { return ((const tex_builder_t *)b)->gl_name; }
 // ---- 稀疏贴图：本项目不支持 sparse tiling（Builder 的 sparse 布局一律按普通纹理建），查询时把输出结构清零并点名一次，
 //      不返回「看起来像成功」的假布局 ----
+// 同 nvnTextureBuilderGetSparseTileLayout，按贴图建时的描述（tex_t.d）算：4 个 32 位字段（平铺 mip 数、页宽、页高、页深，graphics/nvn/docs/builder_queries.md）。
+//   #962：原先填零报红，一款 Switch 2 游戏按这里的页大小算 MapVirtual 的请求长度，9 个 0 字节请求全被 vm_remap 拒（KERN_INVALID_ARGUMENT），随后在 main 里读空指针
 NVN(nvnTextureGetSparseTileLayout, void, const NVNtexture *t, NVNtextureSparseTileLayout *layout) {
-    (void)t; if (layout) memset(layout, 0, sizeof *layout);
-    static int once; if (!once++) LOG("【红】 nvnTextureGetSparseTileLayout: sparse tiled textures are not supported, the layout is reported empty");
+    uint32_t tile[4]; nvn_tex_sparse_layout(&CTX(t)->d, tile);
+    memcpy(layout, tile, sizeof tile);
 }
 // ---- 调试 ID：NVN 没有 SetDebugID，驱动侧自行给。本层用对象的初始化序号（tex_t.serial，单调、每对象唯一、跨拷贝稳定）当调试 ID ----
 NVN(nvnTextureGetDebugID, uint64_t, const NVNtexture *t) { return CTX(t)->serial; }
@@ -782,11 +808,22 @@ static uint64_t nvrm_color_game(int f) {
     return nvn_drv_nvrm_recode(nvrm_color(f), drv);
 }
 static int32_t pool_nvmap(pool_t *p) {
-    if (!p || !p->mem || (p->flags & 0x200)) return 0;   // a virtual pool's storage belongs to a physical pool
+    // 句柄 0：NvRmSurface 的 hMem 为 0，游戏的 nvgr_import_nvrmsurface 随后 NvMap GetId / FromId 失败、导入失败（010045B018EC2000 的影片播放器不查返回值，照样 NvBlit 那块已释放的缓冲：sdk 内 SIGSEGV）。
+    //   三支都还没有实现（虚拟池的存储是物理池的页、没有单一 nvmap 句柄），按铁律报红；仍回 0，不另开句柄
+    if (!p) { LOG("【红】 nvnTextureGetNvRmSurfaceNVX: 纹理没有内存池，NvRmSurface 的 nvmap 句柄给 0（游戏导入会失败）"); return 0; }
+    if (p->flags & 0x200) { LOG("【红】 nvnTextureGetNvRmSurfaceNVX: 池 %p 是虚拟池（flags %#x 尺寸 %#llx），存储是物理池的页、本层不给虚拟池开 nvmap 句柄，句柄给 0（游戏导入会失败）", (void *)p, p->flags, (unsigned long long)p->size); return 0; }
+    if (!p->mem) { LOG("【红】 nvnTextureGetNvRmSurfaceNVX: 池 %p 池没有存储（flags %#x 尺寸 %#llx），句柄给 0（游戏导入会失败）", (void *)p, p->flags, (unsigned long long)p->size); return 0; }
     int32_t h = __atomic_load_n(&p->nvmap, __ATOMIC_ACQUIRE);
     if (h) return h;
     static int (*mk)(uint64_t, uint32_t); static int looked;
+#if defined(__ANDROID__)
+    // 安卓：服务层 NativeAOT 与本文件静态并入同一个 libs2arm_android.so，链接带 --exclude-libs,ALL，导出不进动态表，
+    //   dlsym(RTLD_DEFAULT) 恒为 NULL（010045B018EC2000：每局句柄 0，影片播放器 NvBlit 已释放的缓冲崩在 sdk 内）。
+    //   改成链接期弱引用：出包的单库里由归档解析（core-link 审计：归档定义的导出在库里仍未解析就失败）；不带服务层的门禁链接（gfx_plat/gate.sh，-z defs）里为空，走下面的报红
+    { extern int S2A_NvMapFromGuest(uint64_t address, uint32_t size) __attribute__((weak)); if (!looked) { mk = S2A_NvMapFromGuest; looked = 1; } }
+#else
     if (!looked) { mk = (int (*)(uint64_t, uint32_t))dlsym(RTLD_DEFAULT, "S2A_NvMapFromGuest"); looked = 1; }
+#endif
     if (!mk || p->size > UINT32_MAX) { static int once; if (!once++) LOG("【红】 nvnTextureGetNvRmSurfaceNVX: no nvmap handle for pool %p size %#llx (%s)", (void *)p, (unsigned long long)p->size, mk ? "pool over 4 GB" : "no service layer: S2A_NvMapFromGuest missing"); return 0; }
     h = mk((uint64_t)(uintptr_t)p->mem, (uint32_t)p->size);
     int32_t z = 0;
@@ -878,10 +915,7 @@ NVN(nvnTextureInvalidateTexels, void, const NVNtexture *t, const NVNtextureView 
 #define SB(b) (&((samp_builder_t *)(b))->p)
 NVN(nvnSamplerBuilderSetDefaults, void, NVNsamplerBuilder *b) {
     NVNdevice *dev = ((samp_builder_t *)b)->dev; memset(b, 0, sizeof(samp_builder_t)); ((samp_builder_t *)b)->dev = dev;
-    samp_par *o = SB(b);
-    o->minf = NVN_MIN_FILTER_LINEAR; o->magf = NVN_MAG_FILTER_LINEAR;
-    o->ws = o->wt = o->wr = NVN_WRAP_MODE_REPEAT; o->cmp_func = NVN_COMPARE_FUNC_LESS;
-    o->lod_max = 1000.f; o->aniso = 1.f;
+    samp_defaults(SB(b));
 }
 NVN(nvnSamplerBuilderSetDevice, void, NVNsamplerBuilder *b, NVNdevice *d) { ((samp_builder_t *)b)->dev = d; }
 NVN(nvnSamplerBuilderSetMinMagFilter, void, NVNsamplerBuilder *b, NVNminFilter mi, NVNmagFilter ma) { SB(b)->minf = mi; SB(b)->magf = ma; }
@@ -1248,6 +1282,16 @@ static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
     CC_SHA256_Final(md, &hc); memcpy(out, md, 8);
     return 1;
 }
+// S2Arm #674: the key a Switch 2 stage would have with the code in place at SetShaders, only to start its library loading early. keys_hash leaves NVN2 stages unkeyed there
+//   (the code can still change before the first draw, which keys them), and with no key at SetShaders the prefetch was never asked: every library of a Switch 2 game was loaded on the
+//   submit thread at its first draw. A key computed from code that changes later is not in the package's map, so the prefetch drops it (nvn_be_shader_prefetch: no stage)
+static int keys_hash_early(const NVNshaderData *sd, uint8_t out[8]) {
+    void *mb; uint64_t mo;
+    if (!sd->control || (uint64_t)(uintptr_t)sd->control >= (1ull << 47) || !nvn2_on() || !nvn2_ctl(sd->control)) return 0;
+    uint32_t n2 = nvn2_code_len(sd->control);
+    if (!sd->data || !n2 || n2 >= (1u << 24) || !nvn_be_addr(sd->data, n2, &mb, &mo)) return 0;
+    return nvn2_key(sd->control, (const void *)(uintptr_t)sd->data, out);
+}
 int prog_key(const prog_t *p, unsigned st, uint8_t key[8]) {
     if (st >= p->nstage) return 0;
     prog_keys_t *k = pk_get(p, 1);
@@ -1275,7 +1319,9 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
     int npin = 0;
 #endif
     for (int i = 0; i < n; i++) {
+        dm_shader_mesh_hold(sd[i].data, sd[i].control);   // NVN2 keys are deferred, but control + code are valid here; retain only mesh inputs
         if (keys_hash(&sd[i], 1, k->key[i])) { k->ok |= (uint8_t)(1u << i); dm_shader_miss(k->key[i], sd[i].data, sd[i].control); nvn_be_shader_prefetch(k->key[i]); }   // S2Arm: a key missing from the map is translated on the device now (graphics/nvn/host_adapt.m)
+        else { uint8_t early[8]; if (keys_hash_early(&sd[i], early)) nvn_be_shader_prefetch(early); }   // S2Arm #674: Switch 2 stages, keyed at first use
 #if defined(__ANDROID__)   // Android 直连的阶段 / 源快照 / 按 serial 记 key；Apple 回放不读这些，保持 main 原行为
         // 阶段只在 control 仍有效、code 已映射的本次调用内读定；code 未映射时留给 Bind
         // 用自持 control + 当时的 code 补算，Bind 不碰 guest control。
@@ -2051,6 +2097,13 @@ NVN(nvnCommandBufferBindProgram, void, NVNcommandBuffer *c, const NVNprogram *p,
     stages = nvn2_stage_bits(stages);   // NVN2 任务 / 网格位 0x40 / 0x80 → 宿主阶段 3 / 4 的位（nvn2_cmd.h）
     *REC(c, OP_BIND_PROGRAM, p_bind_program_id) = (p_bind_program_id){o, o ? o->serial : 0, stages, 0};
     if (!o) return;
+    // NVN2's code bytes can change after SetShaders, so its key is deliberately first computed here.
+    // Snapshot only mesh inputs under that final key; SetShaders' mapped=1 key path intentionally skips NVN2.
+    if (nvn2_on()) for (unsigned i = 0; i < o->nstage && i < 6; i++) {
+        const void *ctl = o->sd[i].control; uint8_t md[8];
+        if (ctl && (uintptr_t)ctl < (1ull << 47) && nvn2_ctl(ctl) && ((const uint8_t *)ctl)[0x56] == 7 &&
+            prog_key(o, i, md)) dm_shader_mesh_hold_key(md, o->sd[i].data, ctl);
+    }
     prog_t snap; memcpy(&snap, o, sizeof snap);
     uint8_t keys[6][8], kok = 0, stage[6]; memset(keys, 0, sizeof keys); memset(stage, 0xff, sizeof stage);
     prog_keys_t *k = pk_get(p, 0);
@@ -2423,10 +2476,12 @@ void dm_gfx_enter(void) { gfx_enter(); }   // the same gate for the Vulkan layer
 void dm_gfx_leave(void) { gfx_leave(); }
 __attribute__((weak)) void dm_vk_drain(void) {}   // dm/gfx/vk/hle_vk.m: wait for the Vulkan layer's queue (the graphics unit tests do not link it)
 __attribute__((weak)) void dm_gl_drain(void) {}   // dm/gfx/gl/hle_gl.m: the same for the GL layer
+__attribute__((weak)) void nvn_be_background_purge(int bg) { (void)bg; }   // nvn_mtl.m 切后台瘦身（图形单测不链）
 void (*dm_gfx_test_drain)(void);   // t_nvn_suspend: exercise the real gate / wait without acquiring a Metal device slot
 void dm_gfx_suspend(int on) {
     pthread_mutex_lock(&g_susp_mu);
     g_susp = on != 0;
+    if (!on) nvn_be_background_purge(0);   // 回前台：放开闸门前先把后台标成可清除的贴图标回来（被清掉的登记重新上传）
     if (!on) pthread_cond_broadcast(&g_susp_cv);
     pthread_mutex_unlock(&g_susp_mu);
     if (!on) LOG("[nvn] graphics resumed");
@@ -2440,6 +2495,7 @@ void dm_gfx_suspend_drain(void) {
     if (dm_gfx_test_drain) dm_gfx_test_drain();
     else { dm_vk_drain(); dm_gl_drain(); nvn_be_drain(); }   // Vulkan and GL first: presents on the NVN queue wait for their frames
     LOG("[nvn] graphics suspended: in-flight GPU work drained");
+    if (!dm_gfx_test_drain) nvn_be_background_purge(1);   // 切后台瘦身：GPU 已排空，把可重建的私有贴图标成可清除（nvn_mtl.m）
 }
 int dm_gfx_guest_start_hold(void) {
     pthread_mutex_lock(&g_susp_mu);
@@ -3059,19 +3115,21 @@ static void dump_frame(void) {
         static char tp[1024]; const char *t = nvn_diag_path(getenv("DM_NVN_TSV"), tp, sizeof tp); if (t && !(g_tsv = fopen(t, "w"))) LOG("【红】 cannot open %s", t);   // iOS: relative path under Documents
         if (g_tsv) fprintf(g_tsv, "# kind: nvn-per-frame  value = call count when name is an NVN function name; names starting with @ are timing probes (ms / count)\nframe\tname\tvalue\n");
     }
-    uint64_t total = 0; unsigned nfn = 0;
-    char line[8192]; size_t o = 0; line[0] = 0;
-    for (unsigned i = 0; i < NVN_NFUNC; i++) {
-        uint64_t c = atomic_load(&nvn_slot[i].cnt), d = c - g_prev[i];
-        g_prev[i] = c;
-        if (!d) continue;
-        total += d; nfn++;
-        if (g_tsv && calls) fprintf(g_tsv, "%llu\t%s\t%llu\n", g_frame, nvn_names[i], d);
-        if (g_frame <= (uint64_t)nframes && o < sizeof line - 96) o += snprintf(line + o, sizeof line - o, " %s=%llu", nvn_names[i] + 3, d);
-    }
-    if (g_tsv) fflush(g_tsv);
-    if (g_frame <= (uint64_t)nframes) LOG("[nvn] %s %llu: %u functions %llu calls |%s", g_frame ? "frame" : "init", g_frame, nfn, total, line);
-    else if (g_frame % 300 == 0) LOG("[nvn] frame %llu: %u functions %llu calls", g_frame, nfn, total);
+    if (nvn_counting()) {   // the call counts exist only with the counting trampolines (nvn_counting)
+        uint64_t total = 0; unsigned nfn = 0;
+        char line[8192]; size_t o = 0; line[0] = 0;
+        for (unsigned i = 0; i < NVN_NFUNC; i++) {
+            uint64_t c = atomic_load(&nvn_slot[i].cnt), d = c - g_prev[i];
+            g_prev[i] = c;
+            if (!d) continue;
+            total += d; nfn++;
+            if (g_tsv && calls) fprintf(g_tsv, "%llu\t%s\t%llu\n", g_frame, nvn_names[i], d);
+            if (g_frame <= (uint64_t)nframes && o < sizeof line - 96) o += snprintf(line + o, sizeof line - o, " %s=%llu", nvn_names[i] + 3, d);
+        }
+        if (g_frame <= (uint64_t)nframes) LOG("[nvn] %s %llu: %u functions %llu calls |%s", g_frame ? "frame" : "init", g_frame, nfn, total, line);
+        else if (g_frame % 300 == 0) LOG("[nvn] frame %llu: %u functions %llu calls", g_frame, nfn, total);
+    } else if (!g_frame) LOG("[nvn] call counts off (DM_NVN_COUNT=1 turns them on)");
+    if (g_tsv) fflush(g_tsv);   // the @ timing rows too, with or without call counts
     if (g_frame && g_frame % 300 == 0) {   // 审计 #1534 P1-23 采样：累计值，0 也打；首次、变了、或满 3000 帧打一行
         static uint64_t lf, l0, l1; static int any; uint64_t n0 = __atomic_load_n(&g_nvn_qws_n, __ATOMIC_RELAXED), n1 = __atomic_load_n(&g_nvn_qws_unfenced, __ATOMIC_RELAXED);
         if (!any || n0 != l0 || n1 != l1 || g_frame - lf >= 3000) { any = 1; lf = g_frame; l0 = n0; l1 = n1;
@@ -3342,7 +3400,6 @@ __attribute__((weak)) int s2a_fps_cap_reason(void) { return 0; }
 // runtime/src/fps.c：帧率表键页槽的当前值（每 300 帧那行带出）；Metal 后端 nvn_mtl.m：本窗口最大渲染目标。别的后端 / 单测替身没有就报空 / 0
 __attribute__((weak)) void s2a_fps_slots_note(char *buf, size_t n) { (void)n; buf[0] = 0; }
 __attribute__((weak)) void nvn_be_rt_window(uint32_t *w, uint32_t *h, uint32_t *fmt) { *w = *h = *fmt = 0; }
-__attribute__((weak)) void s2a_fps_cap_watch(void) {}
 static int g_hz = -1, g_display_mode;
 static _Atomic int g_game_itv = 1;   // when pacing by the game's interval, the interval the game currently sets (in game mode 2 = 30 fps; nvn_game_fps reports it to the graphics layer, which sets the display link from it)
 void nvn_present_config(int hz, int display_mode) { g_hz = hz; g_display_mode = display_mode; }
@@ -3396,7 +3453,6 @@ static void present_cfg(const win_t *o) {
     // with the same save and the same input, the UI message streams of the two modes match message by message. Proof (before character select): r9 game / display 60 ×3 / display 120 ×2, 6 groups in total, uicmp consistent
     // (the save indicator is exempted as a timing race), and the timing differences of key messages are within game mode's own noise band; proof after entering a run is still missing, pending action script coverage
     const char *m = getenv("DM_PRESENT_INTERVAL"); g_display_mode = m ? !strcmp(m, "display") : DM_GAME_PRESENT_DISPLAY;
-    if (g_display_mode) s2a_fps_cap_watch();   // display 模式跑在游戏自己的帧率之上：热 / 低电量时退回游戏间隔，降档判定统一在帧率表（runtime/src/fps.c s2a_fps_cap_tick）
     const char *src = m ? "DM_PRESENT_INTERVAL 环境变量" : DM_GAME_PRESENT_DISPLAY ? "推导（引擎标记 + L3 判定）或显式 game.tsv" : "缺省（game）";
     LOG("[nvn] present tick %d Hz, interval mode %s（依据：%s；游戏设 interval %d；%s）", g_hz, g_display_mode ? "display（每个显示节拍一帧）" : "game（按游戏设的间隔）",
         src, o->interval, scr > 0 ? "window, fixed 60 Hz" : "no window, fixed 60 Hz");
@@ -3674,6 +3730,9 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     dump_frame();
     if (g_frame % TWIN == 0) tsummary(g_frame);
     nvn_be_set_frame(g_frame);
+#if defined(__ANDROID__)
+    s2a_android_frame_note();   // 每帧一次（与上一行同点）：安卓侧量实际出图帧率，慢于目标才托 CPU 频率（android/native/cpu_floor.c）
+#endif
     atomic_store(&g_fps_game_itv, s2a_fps_present_hook() | (g_display_mode && s2a_fps_cap_reason() != 0));   // | 不用 ||：钩子每帧都要调（动态步长）。 S2Arm 帧率表：每帧只在这里调一次（present_period 一帧被调 3 次：取图 / 入队 / 节拍器，直连线 10-26 审出），present_itv 只读结果
     // Real-device semantics: present only enqueues and returns immediately; this frame's display time is scheduled by the pacer, and the texture can be acquired again only at "display time + one period" (blocking in AcquireTexture)
     uint64_t period = present_period(o), now = dm_detclock_enabled() ? guest_ns() : now_ns();
@@ -4063,6 +4122,8 @@ int nvn_sparse_shadow(uint64_t a, uint64_t n, uint64_t want) {   // Metal backen
     vp_unlock(); return ok;
 }
 static int vpool_map(struct vpool *v, const map_req *r) {   // caller holds g_vp_mu; → 0 on failure
+    // 0 字节：没有页要挂也没有页要撤，照成功（#962：原先交给 vm_remap，回 KERN_INVALID_ARGUMENT，整次 MapVirtual 判失败，游戏随后读空指针）
+    if (!r->size) return 1;
     uint64_t pg = (uint64_t)getpagesize();
     if (r->voff < 0 || (uint64_t)r->voff + r->size > v->size) { LOG("【红】 virtual pool %p: request at %#llx+%#llx is beyond the pool's %#llx", (const void *)v->pool, (unsigned long long)r->voff, (unsigned long long)r->size, (unsigned long long)v->size); return 0; }
     if (((uint64_t)r->voff | r->size | (uint64_t)r->poff) & 0xFFF) { LOG("【红】 virtual pool %p: request %#llx+%#llx (physical offset %#llx) is not 4 KB aligned", (const void *)v->pool, (unsigned long long)r->voff, (unsigned long long)r->size, (unsigned long long)r->poff); return 0; }

@@ -72,6 +72,16 @@ struct EnvironmentView: View {
                                 .buttonStyle(LauncherSecondaryButtonStyle()).disabled(model.games.isEmpty)
                         }
                     }
+                    // 密钥：状态 + 导入（同 Windows 设置页；11-14 体验梳理：原先密钥就绪后 Mac 上没有地方换一份）
+                    CardGroup(s("settings.keys")) {
+                        CardRow(s("settings.keys"), detail: model.keysReady == true ? s("welcome.step.keys.done") : s("welcome.step.keys.title")) {
+                            Button(s("library.import_keys")) {   // 设置页本身是弹层：先收起，等动画走完再开导入（同时开第二个弹层会被吞掉）
+                                model.showEnvironment = false
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { model.showKeys = true }
+                            }
+                                .buttonStyle(LauncherSecondaryButtonStyle()).disabled(model.busy)
+                        }
+                    }
                     InstallModeCard(model: model)   // 装到 iPhone 的方式（v0.3.0：签名 / 安装入口收在这一处）
                     let failing = model.checks.filter { !$0.ok }
                     if !failing.isEmpty || model.environmentError != nil {

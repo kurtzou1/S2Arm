@@ -148,7 +148,10 @@ namespace Ryujinx.Audio.Renderer.Server
             }
         }
 
-        private void GenerateBiquadFilterForVoice(ref VoiceInfo voiceInfo, Memory<BiquadFilterState> stateMemory, int baseIndex, int bufferOffset, int nodeId)
+        // S2Arm (双二阶跨声道打包)：本方法改为一次生成整条嗓音所有声道的双二阶命令——
+        //   多档路径两声道一条命令（Vector64 两条车道并行递推，见 S2ADspBiquadHelper.ProcessBiquadFilterStereo），
+        //   奇数声道的尾声道照单声道命令；单档路径逐声道逐滤波器，行为与原先一致。
+        private void GenerateBiquadFilterForVoice(ref VoiceInfo voiceInfo, Span<int> channelResourceIds, int baseIndex, int nodeId)
         {
             bool supportsOptimizedPath = _rendererContext.BehaviourInfo.UseMultiTapBiquadFilterProcessing();
 
@@ -156,24 +159,54 @@ namespace Ryujinx.Audio.Renderer.Server
 
             if (supportsOptimizedPath && biquadFiltersSpan[0].Enable && biquadFiltersSpan[1].Enable)
             {
-                _commandBuffer.GenerateMultiTapBiquadFilter(baseIndex, biquadFiltersSpan, stateMemory, bufferOffset, bufferOffset, voiceInfo.BiquadFilterNeedInitialization, nodeId);
+                int channelIndex = 0;
+
+                for (; channelIndex + 1 < voiceInfo.ChannelsCount; channelIndex += 2)
+                {
+                    _commandBuffer.GenerateMultiTapBiquadFilterStereo(
+                        baseIndex,
+                        biquadFiltersSpan,
+                        _voiceContext.GetBiquadFilterStatesForDsp(channelResourceIds[channelIndex]),
+                        _voiceContext.GetBiquadFilterStatesForDsp(channelResourceIds[channelIndex + 1]),
+                        channelIndex,
+                        channelIndex + 1,
+                        voiceInfo.BiquadFilterNeedInitialization,
+                        nodeId);
+                }
+
+                if (channelIndex < voiceInfo.ChannelsCount)
+                {
+                    _commandBuffer.GenerateMultiTapBiquadFilter(
+                        baseIndex,
+                        biquadFiltersSpan,
+                        _voiceContext.GetBiquadFilterStatesForDsp(channelResourceIds[channelIndex]),
+                        channelIndex,
+                        channelIndex,
+                        voiceInfo.BiquadFilterNeedInitialization,
+                        nodeId);
+                }
             }
             else
             {
-                for (int i = 0; i < biquadFiltersSpan.Length; i++)
+                for (int channelIndex = 0; channelIndex < voiceInfo.ChannelsCount; channelIndex++)
                 {
-                    ref BiquadFilterParameter2 filter = ref biquadFiltersSpan[i];
+                    Memory<BiquadFilterState> stateMemory = _voiceContext.GetBiquadFilterStatesForDsp(channelResourceIds[channelIndex]);
 
-                    if (filter.Enable)
+                    for (int i = 0; i < biquadFiltersSpan.Length; i++)
                     {
-                        _commandBuffer.GenerateBiquadFilter(
-                            baseIndex,
-                            ref filter,
-                            stateMemory.Slice(i, 1),
-                            bufferOffset,
-                            bufferOffset,
-                            !voiceInfo.BiquadFilterNeedInitialization[i],
-                            nodeId);
+                        ref BiquadFilterParameter2 filter = ref biquadFiltersSpan[i];
+
+                        if (filter.Enable)
+                        {
+                            _commandBuffer.GenerateBiquadFilter(
+                                baseIndex,
+                                ref filter,
+                                stateMemory.Slice(i, 1),
+                                channelIndex,
+                                channelIndex,
+                                !voiceInfo.BiquadFilterNeedInitialization[i],
+                                nodeId);
+                        }
                     }
                 }
             }
@@ -314,19 +347,22 @@ namespace Ryujinx.Audio.Renderer.Server
             }
         }
 
+        // S2Arm (双二阶跨声道打包)：命令发射顺序从「每声道 数据源→双二阶→坡道→混音」拆成三段——
+        //   全部数据源 → 全部双二阶（两声道一条命令）→ 逐声道 坡道→混音。
+        //   每声道自身管线顺序不变；双二阶只写自己声道的缓冲区（数据源先于它生成、坡道/混音后于它发射）；
+        //   混音缓冲区的跨声道累加次序不变（混音仍按声道顺序发射），输出逐位一致。
+        //   性能条目：双二阶由每声道一条 Start/End 变为整嗓音一条。
         private void GenerateVoice(ref VoiceInfo voiceInfo)
         {
             int nodeId = voiceInfo.NodeId;
             uint channelsCount = voiceInfo.ChannelsCount;
-            
+
             Span<int> channelResourceIdsSpan = voiceInfo.ChannelResourceIds.AsSpan();
             Span<BiquadFilterParameter2> biquadFiltersSpan = voiceInfo.BiquadFilters.AsSpan();
 
             for (int channelIndex = 0; channelIndex < channelsCount; channelIndex++)
             {
                 Memory<VoiceState> dspStateMemory = _voiceContext.GetUpdateStateForDsp(channelResourceIdsSpan[channelIndex]);
-
-                ref VoiceChannelResource channelResource = ref _voiceContext.GetChannelResource(channelResourceIdsSpan[channelIndex]);
 
                 PerformanceDetailType dataSourceDetailType = PerformanceDetailType.Adpcm;
 
@@ -356,28 +392,37 @@ namespace Ryujinx.Audio.Renderer.Server
                 {
                     GeneratePerformance(ref performanceEntry, PerformanceCommand.Type.End, nodeId);
                 }
+            }
 
-                if (voiceInfo.WasPlaying)
+            if (voiceInfo.WasPlaying)
+            {
+                voiceInfo.PreviousVolume = 0.0f;
+            }
+            else if (voiceInfo.HasAnyDestination())
+            {
+                bool performanceInitialized = false;
+
+                PerformanceEntryAddresses performanceEntry = null;
+
+                if (_performanceManager != null && _performanceManager.IsTargetNodeId(nodeId) && _performanceManager.GetNextEntry(out performanceEntry, PerformanceDetailType.BiquadFilter, PerformanceEntryType.Voice, nodeId))
                 {
-                    voiceInfo.PreviousVolume = 0.0f;
+                    performanceInitialized = true;
+
+                    GeneratePerformance(ref performanceEntry, PerformanceCommand.Type.Start, nodeId);
                 }
-                else if (voiceInfo.HasAnyDestination())
+
+                GenerateBiquadFilterForVoice(ref voiceInfo, channelResourceIdsSpan, (int)_rendererContext.MixBufferCount, nodeId);
+
+                if (performanceInitialized)
                 {
-                    performanceInitialized = false;
+                    GeneratePerformance(ref performanceEntry, PerformanceCommand.Type.End, nodeId);
+                }
 
-                    if (_performanceManager != null && _performanceManager.IsTargetNodeId(nodeId) && _performanceManager.GetNextEntry(out performanceEntry, PerformanceDetailType.BiquadFilter, PerformanceEntryType.Voice, nodeId))
-                    {
-                        performanceInitialized = true;
+                for (int channelIndex = 0; channelIndex < channelsCount; channelIndex++)
+                {
+                    Memory<VoiceState> dspStateMemory = _voiceContext.GetUpdateStateForDsp(channelResourceIdsSpan[channelIndex]);
 
-                        GeneratePerformance(ref performanceEntry, PerformanceCommand.Type.Start, nodeId);
-                    }
-
-                    GenerateBiquadFilterForVoice(ref voiceInfo, _voiceContext.GetBiquadFilterStatesForDsp(channelResourceIdsSpan[channelIndex]), (int)_rendererContext.MixBufferCount, channelIndex, nodeId);
-
-                    if (performanceInitialized)
-                    {
-                        GeneratePerformance(ref performanceEntry, PerformanceCommand.Type.End, nodeId);
-                    }
+                    ref VoiceChannelResource channelResource = ref _voiceContext.GetChannelResource(channelResourceIdsSpan[channelIndex]);
 
                     performanceInitialized = false;
 

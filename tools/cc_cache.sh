@@ -19,7 +19,11 @@ s2a_ccache_on() {
   # 入口名（cc / c++ / clang / clang++ / xcrun）现建在被忽略的 build/ 下，指向 tools/ccshim/shim（10-30 出包线：仓库里提交软链，
   #   启动器打引擎时 bundle_engine 拒收软链，build_app 打不出 App）
   local d=$root/build/ccshim n; mkdir -p "$d" || return 0
-  for n in cc c++ clang clang++ xcrun; do ln -sfn "$root/tools/ccshim/shim" "$d/$n"; done
+  # 已指对就不重建、要改也先建临时链接再 mv -fh 原子覆盖（11-14：同一棵树门禁并行几步都 source 本文件，ln -sfn 先删后建，
+  #   那一瞬别的步正经 build/ccshim/clang 编译会「command not found」；同类坑见 remote.sh 共享链接）
+  for n in cc c++ clang clang++ xcrun; do
+    [ "$(readlink "$d/$n" 2> /dev/null)" = "$root/tools/ccshim/shim" ] && continue
+    ln -sfn "$root/tools/ccshim/shim" "$d/.$n.tmp.$$" && { mv -fh "$d/.$n.tmp.$$" "$d/$n" 2> /dev/null || mv -fT "$d/.$n.tmp.$$" "$d/$n"; }; done   # -h：macOS / BSD；-T：GNU
   case ":$PATH:" in *":$d:"*) ;; *) export PATH="$d:$PATH" ;; esac
 }
 # s2a_ccache_sum <stats_log>…：「命中 a / 共 b」（只数真正进了缓存判断的编译；链接等直通的不算）

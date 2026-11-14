@@ -120,6 +120,20 @@ namespace S2A.Services.Tests
             Check("NpadJcms ⑥e 一对两只都有鼠标：左右各自的位移", "左 位移 (-10, 7)、属性 3；右 位移 (20, 0)、属性 3",
                 $"左 位移 ({S32(Latest(Slot(3, 0)) + 0x10)}, {S32(Latest(Slot(3, 0)) + 0x14)})、属性 {U32(Latest(Slot(3, 0)) + 0x18)}；右 位移 ({S32(Latest(Slot(3, 1)) + 0x10)}, {S32(Latest(Slot(3, 1)) + 0x14)})、属性 {U32(Latest(Slot(3, 1)) + 0x18)}");
 
+            // ⑥g 好几位玩家一拍一起写（PushMany，#520：两人各横握一只 Joy-Con 2 的项目游戏两格都查）：P1 右只、P2 左只都已连接；
+            //   负对照：下一拍只剩 P1 → P2 那格写未连接，P1 照旧（改前单人 Push 会把别人那格清掉）
+            var two = new System.Collections.Generic.List<NpadJcms.Entry>
+            {
+                new() { NpadId = 4, Right = L(1, 1), TimestampUs = 600000 },
+                new() { NpadId = 5, Left = L(2, 2), TimestampUs = 600000 },
+            };
+            jcms.PushMany(two);
+            string both = $"P1 右 属性 {U32(Latest(Slot(4, 1)) + 0x18)}、P2 左 属性 {U32(Latest(Slot(5, 0)) + 0x18)}";
+            jcms.PushMany(new[] { new NpadJcms.Entry { NpadId = 4, Right = L(3, 1), TimestampUs = 608000 } });
+            Check("NpadJcms ⑥g 两位玩家各自的 Joy-Con 2 同时已连接；只剩 P1 时 P2 那格未连接",
+                "P1 右 属性 3、P2 左 属性 3 → P1 右 属性 3、P2 左 属性 0",
+                $"{both} → P1 右 属性 {U32(Latest(Slot(4, 1)) + 0x18)}、P2 左 属性 {U32(Latest(Slot(5, 0)) + 0x18)}");
+
             // ⑥d Joy-Con 2 样式位：游戏只收「掌机 | bit 12」（Joy-Con 2 一对）时，一代双 Joy-Con 不连；宿主报 Joy-Con 2 后连上、样式 = JoyDual | bit 12，
             //   输入照常写进 JoyDual 的 LIFO（内部按一代位走）；报回不是 Joy-Con 2 → 又断开
             NpadDevices npads = Host.Device.Hid.Npads;

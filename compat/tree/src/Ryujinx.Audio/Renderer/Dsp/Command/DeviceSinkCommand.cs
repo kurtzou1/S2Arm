@@ -72,6 +72,13 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
             return Buffers.Span.Slice(index * sampleCount, sampleCount);
         }
 
+        // S2Arm: 5.1 交织内核的声道取数——缓冲区数不足 6（上混）的声道没有数据，给空 span（内核查零向量），
+        //   与原循环先整块清零再只写前 bufferCount 个声道的行为一致。
+        private ReadOnlySpan<float> BufferOrEmpty(uint bufferCount, int index, int sampleCount)
+        {
+            return index < (int)bufferCount ? GetBuffer(InputBufferIndices[index], sampleCount) : default;
+        }
+
         public void Process(CommandList context)
         {
             IHardwareDevice device = context.OutputDevice;
@@ -99,13 +106,27 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
                 Array.Fill(outputBuffer, (short)0, 0, (int)inputCount * SampleCount);
 
                 // S2Arm: 立体声设备 + 双声道输入（最常见的设备形态）走 S2ADspMixHelper 的饱和窄化 + 交织内核；
-                //   其余布局（5.1、混上混等）照原逐样本循环。两条路径逐样本一致（FCVTZS+SQXTN ≡ 夹取后截断）。
+                //   5.1（6 声道）设备走 6 声道交织内核（缓冲区数不足 6 的上混，静音声道传空 span 查零，
+                //   与原循环先整块清零再只写前面的声道一致）；其余布局照原逐样本循环。
+                //   各路径逐样本一致（FCVTZS+SQXTN ≡ 夹取后截断）。
                 if (channelCount == 2 && bufferCount == 2)
                 {
                     S2ADspMixHelper.SaturateInterleaveStereo(
                         outputBuffer,
                         GetBuffer(InputBufferIndices[0], SampleCount),
                         GetBuffer(InputBufferIndices[1], SampleCount),
+                        (int)SampleCount);
+                }
+                else if (channelCount == 6)
+                {
+                    S2ADspMixHelper.SaturateInterleave6(
+                        outputBuffer,
+                        BufferOrEmpty(bufferCount, 0, (int)SampleCount),
+                        BufferOrEmpty(bufferCount, 1, (int)SampleCount),
+                        BufferOrEmpty(bufferCount, 2, (int)SampleCount),
+                        BufferOrEmpty(bufferCount, 3, (int)SampleCount),
+                        BufferOrEmpty(bufferCount, 4, (int)SampleCount),
+                        BufferOrEmpty(bufferCount, 5, (int)SampleCount),
                         (int)SampleCount);
                 }
                 else

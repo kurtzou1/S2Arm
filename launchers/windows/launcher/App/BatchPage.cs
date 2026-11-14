@@ -303,6 +303,7 @@ public sealed partial class EnvironmentWindow
         else if (report is { State: "failed" }) batchError = report.Message;   // 编排作业自己失败（批次记录写不进、已有一个在出）：原因写在清单页
         Render();
         if (batchState is { Summary.Done: true }) _ = BatchFinishedAsync();
+        PumpExportQueue();   // 一批出着时点了单款「开始出包」的：这批收尾后接着出（同 Mac）
     }
 
     /// <summary>底栏「取消」：取消编排作业，它把正在出的那步停下，正在出的和没开始的记已取消（已出好的保留）</summary>

@@ -12,6 +12,9 @@ extern "C" int s2a_android_runtime_status(uint64_t, struct s2a_android_runtime_s
     output->last_phase = phase; return available ? 0 : -100;
 }
 static uint64_t s2a_android_services_present_count() { calls++; return 42; }
+// 原生上屏计数（native/direct_session.c；新回放层不经过托管侧，见 bridge.cpp）：有值就用它，不问托管侧
+static int native_calls; static uint64_t native_count;
+static uint64_t s2a_android_nvn_present_count() { native_calls++; return native_count; }
 PRODUCTION_METHODS
 int main() {
     assert(Java_org_s2arm_android_NativeBridge_gamePresentCount(nullptr,nullptr)==0 && calls==0);
@@ -19,6 +22,9 @@ int main() {
     for (phase=S2A_RUNTIME_CREATED;phase<S2A_RUNTIME_GUEST_RUNNING;phase++)
         assert(Java_org_s2arm_android_NativeBridge_gamePresentCount(nullptr,nullptr)==0 && calls==0);
     phase=S2A_RUNTIME_GUEST_RUNNING;
-    assert(Java_org_s2arm_android_NativeBridge_gamePresentCount(nullptr,nullptr)==42 && calls==1);
+    assert(Java_org_s2arm_android_NativeBridge_gamePresentCount(nullptr,nullptr)==42 && calls==1);   // 原生计数为 0：问托管侧
+    assert(native_calls==1);   // 起局前不读原生计数（上面那一串 0 都在阶段检查处返回）
+    native_count=7;
+    assert(Java_org_s2arm_android_NativeBridge_gamePresentCount(nullptr,nullptr)==7 && calls==1);    // 原生计数有值：直接用，不再问托管侧
     puts("PASS native present counter cannot initialize NativeAOT before guest admission");
 }

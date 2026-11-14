@@ -274,6 +274,86 @@ int main(void) {
     } while (!atomic_load(&finished));
     assert(!pthread_join(thread, NULL));
 
+    // 系统手柄列表里的 NS2 手柄（s2a_pad_is_ns2，#520 C 去重）：认二代型号字样的片段、不分大小写；
+    //   负对照：一代 Pro / 一代 Joy-Con / 其他手柄 / 空类别都不算（照常当一位玩家读）
+    assert(s2a_pad_is_ns2("Nintendo Switch 2 Pro Controller") && s2a_pad_is_ns2("Joy-Con 2 (L)") && s2a_pad_is_ns2("JOYCON 2 (R)"));
+    assert(!s2a_pad_is_ns2("Switch Pro Controller") && !s2a_pad_is_ns2("Nintendo Switch Joy-Con (L/R)") && !s2a_pad_is_ns2("DualSense Wireless Controller"));
+    assert(!s2a_pad_is_ns2("Xbox Wireless Controller") && !s2a_pad_is_ns2(NULL) && !s2a_pad_is_ns2(""));
+
+    // 分配玩家顺序表（s2a_pad_order_rank，#520 E）：表里的照表排；没列的排后面；分配时没登记的系统手柄不进槽位（负对照：同名不同只不误伤）
+    {
+        s2a_pad_order o = {.count = 2, .dropped_count = 1};
+        o.entry[0] = (s2a_pad_order_entry){.ns2_player = -1, .name = "DualSense", .index = 0};
+        o.entry[1] = (s2a_pad_order_entry){.ns2_player = 0};
+        o.dropped[0] = (s2a_pad_order_entry){.ns2_player = -1, .name = "Xbox Wireless Controller", .index = 0};
+        assert(s2a_pad_order_rank(&o, -1, "DualSense", 0) == 0 && s2a_pad_order_rank(&o, 0, NULL, 0) == 1);
+        assert(s2a_pad_order_rank(&o, -1, "Xbox Wireless Controller", 0) == S2A_PAD_ORDER_DROPPED);
+        assert(s2a_pad_order_rank(&o, -1, "Xbox Wireless Controller", 1) == S2A_PAD_ORDER_UNLISTED);   // 第二只 Xbox 是后来连的：照常排后面
+        assert(s2a_pad_order_rank(&o, 1, NULL, 0) == S2A_PAD_ORDER_UNLISTED && s2a_pad_order_rank(&o, -1, "DualSense", 1) == S2A_PAD_ORDER_UNLISTED);   // 通道玩家 1 还没列
+        assert(s2a_pad_order_rank(NULL, -1, "DualSense", 0) == S2A_PAD_ORDER_UNLISTED);   // 没分配过：全部照连接顺序
+        o.dropped[o.dropped_count++] = (s2a_pad_order_entry){.ns2_player = 1};
+        assert(s2a_pad_order_rank(&o, 1, NULL, 0) == S2A_PAD_ORDER_DROPPED && s2a_pad_order_rank(&o, 0, NULL, 0) == 1);   // 没分配的 NS2 手柄：连着但不给玩家位
+        assert(s2a_pad_order_rank(&o, S2A_PAD_ORDER_KEYBOARD, NULL, 0) == S2A_PAD_ORDER_UNLISTED);   // 键盘没分配：不在表里
+        o.entry[o.count++] = (s2a_pad_order_entry){.ns2_player = S2A_PAD_ORDER_KEYBOARD};
+        assert(s2a_pad_order_rank(&o, S2A_PAD_ORDER_KEYBOARD, NULL, 0) == 2);   // 分配了：排第 3 位
+        assert(s2a_pad_order_rank(&o, -1, "", 0) == S2A_PAD_ORDER_UNLISTED);   // 负对照：系统手柄不会被当成键盘
+        o.entry[o.count++] = (s2a_pad_order_entry){.ns2_player = S2A_PAD_ORDER_GEN1, .name = "aa-bb"};
+        o.entry[o.count++] = (s2a_pad_order_entry){.ns2_player = S2A_PAD_ORDER_GEN1_PAIR, .name = "cc-dd|ee-ff"};
+        o.dropped[o.dropped_count++] = (s2a_pad_order_entry){.ns2_player = S2A_PAD_ORDER_GEN1, .name = "11-22"};
+        assert(s2a_pad_order_rank(&o, S2A_PAD_ORDER_GEN1, "aa-bb", 0) == 3 && s2a_pad_order_rank(&o, S2A_PAD_ORDER_GEN1_PAIR, "cc-dd|ee-ff", 0) == 4);   // 一代按设备 id：单只第 4、一对第 5
+        assert(s2a_pad_order_rank(&o, S2A_PAD_ORDER_GEN1, "33-44", 0) == S2A_PAD_ORDER_UNLISTED);   // 第二套里没分配的那只：照常排后面，不顶掉别人
+        assert(s2a_pad_order_rank(&o, S2A_PAD_ORDER_GEN1, "11-22", 0) == S2A_PAD_ORDER_DROPPED);
+        assert(s2a_pad_order_rank(&o, S2A_PAD_ORDER_GEN1, "cc-dd|ee-ff", 0) == S2A_PAD_ORDER_UNLISTED && s2a_pad_order_rank(&o, S2A_PAD_ORDER_GEN1, NULL, 0) == S2A_PAD_ORDER_UNLISTED);   // 负对照：单只不认一对的条目、没 id 不认
+    }
+
+    // 一代 Joy-Con / Pro 的 HID 震动编码（s2a_joycon1_rumble_encode）：振幅 0 = 中性 00 01 40 40（同各开源实现的 rumble neutral）；
+    //   有振幅时高频振幅进 byte1、低频振幅进 byte3，越强越大；负对照：频率乱填 / 振幅超 1 不出界
+    {
+        uint8_t b[4];
+        s2a_joycon1_rumble_encode((s2a_pad_vibration){0, 160, 0, 320}, b);
+        assert(b[0] == 0x00 && b[1] == 0x01 && b[2] == 0x40 && b[3] == 0x40);
+        uint8_t weak[4], strong[4];
+        s2a_joycon1_rumble_encode((s2a_pad_vibration){.3f, 160, .3f, 320}, weak);
+        s2a_joycon1_rumble_encode((s2a_pad_vibration){1, 160, 1, 320}, strong);
+        assert(weak[1] > 0x01 && strong[1] > weak[1] && strong[3] > weak[3] && weak[3] > 0x40);
+        s2a_joycon1_rumble_encode((s2a_pad_vibration){5, -3, 9, 99999}, b);
+        assert(b[1] >= 0x01 && b[3] >= 0x40 && b[3] <= 0x72);
+    }
+
+    // 一代 Joy-Con / Pro HID 报告（s2a_joycon1_decode，#520 D2）：手算的 0x30 / 0x3F 报告——
+    //   左只 0x30：SL + SR 同按 → side 两位、横握当 L + R；下键 → A；摇杆中位 2048 → 0；右只 0x30 A + SR；简单报告 0x3F 的 SL / SR；
+    //   负对照：太短 / 认不出的产品号回 0
+    {
+        uint32_t b; int32_t st[4]; int side;
+        uint8_t l30[49] = {0x30, 0x00, 0x8e, 0x00, 0x00, 0x30 | 0x01, 0x00, 0x08, 0x80, 0x00, 0x08, 0x80};   // 左只：SL(0x20)+SR(0x10)+下(0x01)；左摇杆 x=2048 y=2048
+        assert(s2a_joycon1_decode(0x2006, l30, sizeof l30, &b, st, &side));
+        assert(side == (S2A_JC1_SIDE_SL | S2A_JC1_SIDE_SR) && (b & (1u << 6)) && (b & (1u << 7)) && (b & 1u) && st[0] == 0 && st[1] == 0);
+        uint8_t r30[49] = {0x30, 0x00, 0x8e, 0x08 | 0x10, 0x00, 0x00, 0x00, 0x08, 0x80, 0xff, 0x0f, 0x80};   // 右只：A + SR；右摇杆 x 满
+        assert(s2a_joycon1_decode(0x2007, r30, sizeof r30, &b, st, &side));
+        assert(side == S2A_JC1_SIDE_SR && (b & 1u) && (b & (1u << 7)) && st[2] > 30000);
+        // 摇杆方向（s2a_pad.h 上为正；一代原始值往上变大）：左只 / Pro / 右只把 y 推满 0xfff → 正；负对照 y = 0 → 负
+        uint8_t lup[49] = {0x30, 0x00, 0x8e, 0x00, 0x00, 0x00, 0x00, 0xf8, 0xff, 0x00, 0x08, 0x80};   // 左摇杆 x 居中、y 满
+        assert(s2a_joycon1_decode(0x2006, lup, sizeof lup, &b, st, &side) && st[1] > 30000);
+        assert(s2a_joycon1_decode(0x2009, lup, sizeof lup, &b, st, &side) && st[1] > 30000);
+        uint8_t rup[49] = {0x30, 0x00, 0x8e, 0x00, 0x00, 0x00, 0x00, 0x08, 0x80, 0x00, 0xf8, 0xff};   // 右摇杆 x 居中、y 满
+        assert(s2a_joycon1_decode(0x2007, rup, sizeof rup, &b, st, &side) && st[3] > 30000);
+        uint8_t ldn[49] = {0x30, 0x00, 0x8e, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x08, 0x80};   // 左摇杆 y = 0
+        assert(s2a_joycon1_decode(0x2006, ldn, sizeof ldn, &b, st, &side) && st[1] < -30000);
+        uint8_t l3f[12] = {0x3f, 0x30, 0x00};   // 简单报告：SL + SR
+        assert(s2a_joycon1_decode(0x2006, l3f, sizeof l3f, &b, st, &side) && side == (S2A_JC1_SIDE_SL | S2A_JC1_SIDE_SR));
+        uint8_t pro[49] = {0x30, 0x00, 0x8e, 0x40, 0x00, 0x40};   // Pro：L + R 同按
+        assert(s2a_joycon1_decode(0x2009, pro, sizeof pro, &b, st, &side) && side == S2A_JC1_SIDE_SHOULDER);
+        assert(!s2a_joycon1_decode(0x2006, l30, 5, &b, st, &side) && !s2a_joycon1_decode(0x1234, l30, sizeof l30, &b, st, &side));
+        // 按设备读的一对（s2a_joycon1_pair_decode）：左只按上键 + L、左摇杆 x 满；右只按 A + ZR、右摇杆居中 → 竖握的上键 / L / A / ZR、左摇杆 x 满；
+        //   负对照：没有左只（NULL）→ 只剩右只的键、左摇杆居中
+        uint8_t lraw[S2A_JC1_RAW] = {0, 0x8e, 0x00, 0x00, 0x02 | 0x40, 0xff, 0x0f, 0x80, 0x00, 0x08, 0x80};
+        uint8_t rraw[S2A_JC1_RAW] = {0, 0x8e, 0x08 | 0x80, 0x00, 0x00, 0x00, 0x08, 0x80, 0x00, 0x08, 0x80};
+        s2a_joycon1_pair_decode(lraw, rraw, &b, st);
+        assert(b == ((1u << 13) | (1u << 6) | (1u << 0) | (1u << 9)) && st[0] > 30000 && st[1] == 0 && st[2] == 0 && st[3] == 0);
+        s2a_joycon1_pair_decode(NULL, rraw, &b, st);
+        assert(b == ((1u << 0) | (1u << 9)) && st[0] == 0 && st[1] == 0);
+    }
+
     // 本地多手柄槽位（s2a_slot_plan，Mac / iOS 共用）：期望值按「还在线留原槽、新来的占最小空槽、超 4 只丢弃」手算
     {
         static const char A, B, C, D, E;

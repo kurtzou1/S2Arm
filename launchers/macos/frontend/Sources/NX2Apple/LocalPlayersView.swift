@@ -84,7 +84,6 @@ struct PlayerToolbarButton: View {
         catch {
             switch error as? LocalPlayers.NameError ?? .empty {
             case .empty: self.error = loc.t("s2arm.players.error.empty")
-            case .tooLong: self.error = loc.t("s2arm.players.error.long").replacingOccurrences(of: "{0}", with: String(LocalPlayers.nameLimit))
             case .taken: self.error = loc.t("s2arm.players.error.taken")
             }
         }

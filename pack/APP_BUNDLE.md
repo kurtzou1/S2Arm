@@ -15,7 +15,7 @@
 | 模式 | 显示名 | 包名 | 图标 |
 | --- | --- | --- | --- |
 | 单款 | 游戏名称 | 调用者显式提供 | 游戏自己的图标 |
-| S2Arm | `S2Arm` | 调用者显式提供，不能拿模板占位包名代替 | `launchers/macos/Branding/AppIcon-1024.png` |
+| S2Arm | `S2Arm` | 调用者显式提供，不能拿模板占位包名代替 | `launchers/macos/Branding/AppIcon-iOS.png` |
 
 两种模式输出目录名都为 `S2Arm.app`。此处不放游戏 dylib、不定义多游戏目录、不推设备、不签名；这些分别由游戏镜像、安装、签名接口接续。
 

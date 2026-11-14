@@ -66,6 +66,39 @@ class MoveTests(unittest.TestCase):
         self.assertTrue((old / "iPhone" / GID / "t.ipa").is_file()); self.assertTrue((old / ".s2arm-library.json").is_file())
         self.assertFalse((new / ".s2arm-library.json").exists()); self.assertFalse((new / ".s2arm-moving").exists())
 
+    def _cross_setup(self, new, check):
+        """跨盘搬库，作业的取消检查换成 check（#924）"""
+        ctx = self.ctx(new, moveFrom=str(self.root / "old")); ctx.check = check
+        with um.patch.object(library, "require_apfs"), um.patch.object(library, "require_local"), \
+             um.patch.object(library, "_same_volume", return_value=False):
+            return library.setup(ctx)
+
+    def test_cancel_takes_effect_inside_a_big_directory(self):
+        """#924：拷一个大目录时也逐项看取消——原先整个目录拷完才看一次，玩家取消后还要等几分钟。期望手写：第 20 次检查时取消（旧代码只在顶层项之间看，这份夹具整次搬库共 12 次，到不了第 20 次；新代码逐个目录 / 文件看，共 26 次）→ 立刻停、原库不动、临时目录收掉"""
+        old, new = self.old(), self.root / "new"
+        calls = []
+        def check():
+            calls.append(1)
+            if len(calls) == 20: raise core.Cancelled()
+        with self.assertRaises(core.Cancelled):
+            self._cross_setup(new, check)
+        self.assertEqual(len(calls), 20)
+        self.assert_untouched(old, new)
+
+    def test_stage_deleted_mid_copy_says_so_and_rolls_back(self):
+        """#924：拷到一半有人删了新位置的 .s2arm-moving → 报「临时文件夹被删掉了、游戏库还在原位置」（library_move_failed），不是原始 FileNotFoundError；原库不动"""
+        old, new = self.old(), self.root / "new"
+        calls = []
+        def check():
+            calls.append(1)
+            if len(calls) == 6 and (new / ".s2arm-moving").is_dir():
+                import shutil; shutil.rmtree(new / ".s2arm-moving")
+        with self.assertRaises(Failure) as caught:
+            self._cross_setup(new, check)
+        self.assertEqual(caught.exception.code, "library_move_failed")
+        self.assertIn("临时文件夹（.s2arm-moving）被删掉了", str(caught.exception)); self.assertIn("游戏库还在原来的位置", str(caught.exception))
+        self.assert_untouched(old, new)
+
     # ---- 库路径规则只在 setup（剃刀 W19）：期望按规则手写，临时目录里真建文件夹 ----
     def test_library_inside_or_containing_install_dir_refused(self):
         install = self.root / "work" / "S2Arm-windows-x64"; install.mkdir(parents=True)

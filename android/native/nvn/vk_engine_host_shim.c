@@ -31,6 +31,10 @@ S2A_HOST_WEAK int dm_detclock_enabled(void) { return 0; }
 S2A_HOST_WEAK void dm_guest_write_prepare(void *addr, size_t len) { (void)addr; (void)len; }
 S2A_HOST_WEAK void dm_fault_hook_register(int (*fn)(void *, int, void *)) { (void)fn; }
 S2A_HOST_WEAK void dm_guest_write_prep_register(void (*fn)(void *, size_t)) { (void)fn; }
+// b9ae197d6 在共用 hle_nvn.c 里新调的两个（保留 NVN2 mesh 着色器源，供苹果宿主的现编补接口用，定义在 graphics/nvn/host/dsh_miss.inc）：
+//   安卓直连走编译请求、不用这份缓存，空实现；没有它 APK 链接不过（未定义符号）
+S2A_HOST_WEAK void dm_shader_mesh_hold(uint64_t code, const void *control) { (void)code; (void)control; }
+S2A_HOST_WEAK void dm_shader_mesh_hold_key(const uint8_t key[8], uint64_t code, const void *control) { (void)key; (void)code; (void)control; }
 S2A_HOST_WEAK void dm_shader_miss(const uint8_t key[8], uint64_t code, const void *control) {
     (void)code; (void)control;
     // 开局 SetShaders 会连续上报一千多个缺失键（实测 1662 条/3 秒）。逐条打 INFO 是纯启动期

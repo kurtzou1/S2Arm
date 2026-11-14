@@ -7,6 +7,10 @@ CGAffineTransform S2APlayReflectionTransform(S2APlayLayout l, CGRect bounds) {
     return CGAffineTransformMake(1,0,0,-1,0,CGRectGetMaxY(l.game)+CGRectGetMinY(l.controls)-2*CGRectGetMidY(bounds));
 }
 
+// 倒影只给有真折痕的设备（Duo 半折，layout.division 来自铰链保留区）。#979：普通 iPhone 强制上下分屏时复制层出两份，
+//   真机屏上上半的游戏画面没了、只剩下半的模糊倒影（截屏 / 划后台时合成又是对的）。倒影本来就是给折痕做过渡的，没折痕不复制
+BOOL S2APlayReflectionWanted(S2APlayLayout l) { return l.split && !CGRectIsNull(l.division) && !CGRectIsEmpty(l.division); }
+
 #if TARGET_OS_IPHONE
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
@@ -49,7 +53,7 @@ CGAffineTransform S2APlayReflectionTransform(S2APlayLayout l, CGRect bounds) {
 - (void)applicationChanged:(NSNotification *)note { [self update:_layout]; }
 - (void)update:(S2APlayLayout)layout {
     _layout=layout;
-    BOOL active=layout.split && self.game && !CGRectIsEmpty(layout.game) && !CGRectIsEmpty(layout.controls) && UIApplication.sharedApplication.applicationState!=UIApplicationStateBackground;
+    BOOL active=S2APlayReflectionWanted(layout) && self.game && !CGRectIsEmpty(layout.game) && !CGRectIsEmpty(layout.controls) && UIApplication.sharedApplication.applicationState!=UIApplicationStateBackground;
     [CATransaction begin]; [CATransaction setDisableActions:YES];
     _copies.frame=self.bounds; _copies.bounds=self.bounds;
     _copies.instanceCount=active?2:1;

@@ -13,7 +13,7 @@ namespace S2A.Services.Tests
     //     会话 200：in u32 功能 @0；A 缓冲 = 设备名，长度 = 字符串长（不带 0）；只回结果码
     //     会话 500：in u32 功能 @0、u64 凭据 @8；A 缓冲设备名；回复制句柄；600 同入参、只回结果码
     //   期望不跑实现即可写出：宿主只有一个声音输出，名字与 audout:u ListAudioOuts 同一来源（本用例现场从 audout:u 取，再对字面 "DeviceOut"）；
-    //   功能 1 = 输出；状态变化事件不触发。负例：功能 2（输入）、未知设备名、未实现的 900 号 → 未知命令结果码（模块 10 描述 221）且各报红 1 次
+    //   功能 1 = 输出；状态变化事件不触发。列输入设备（0 功能 2）回 0 个；负例：其余带功能 2（输入）的命令、未知设备名、未实现的 900 号 → 未知命令结果码（模块 10 描述 221）且各报红 1 次
     public static unsafe partial class Program
     {
         [SvcCase]
@@ -68,6 +68,15 @@ namespace S2A.Services.Tests
                 string first = Encoding.ASCII.GetString(new ReadOnlySpan<byte>(buf, 0x100)).Split('\0')[0];
                 Check("auddmg 0 ListVirtualDeviceNames（输出）", $"结果 0、1 个、{audoutName}、名字后补 0", $"结果 {lr.Result}、{*(int*)lr.Data} 个、{first}、名字后{(buf[first.Length] == 0 ? "补 0" : "没补 0")}");
 
+                // 0：同 SDK ListVirtualInputDevices（bool 0、功能 2）：宿主不收音，没有虚拟输入设备 → 0 个、缓冲不碰、不报红（原先报红「功能 2」）
+                new Span<byte>(buf, 0x100).Fill(0xCC);
+                byte[] li = new byte[8];
+                BitConverter.TryWriteBytes(li.AsSpan(4), 2u);
+                Msg lin = Msg.Cmif(0, li); lin.B.Add(((ulong)buf, 8 * 0x100));
+                long redIn = Red.Total;
+                Reply lir = Call(us, lin);
+                Check("auddmg 0 ListVirtualDeviceNames（输入，功能 2）", "结果 0、0 个、缓冲不碰、红 +0", $"结果 {lir.Result}、{*(int*)lir.Data} 个、缓冲{(buf[0] == 0xCC ? "不碰" : "被写")}、红 +{Red.Total - redIn}");
+
                 // 100：缺省输出设备
                 new Span<byte>(buf, 0x100).Fill(0xCC);
                 Msg d = Msg.Cmif(100, Fn(1)); d.B.Add(((ulong)buf, 0x100));
@@ -97,7 +106,7 @@ namespace S2A.Services.Tests
                 // 负例：语义不明的取值与未实现命令一律报红、回未知命令
                 (string Name, Msg M)[] reds =
                 [
-                    ("0 功能 2（输入）", WithB(Msg.Cmif(0, [0, 0, 0, 0, 2, 0, 0, 0]), buf, 8 * 0x100)),
+                    ("100 功能 2（缺省输入设备：列输入设备已回 0 个，取缺省仍报红）", WithB(Msg.Cmif(100, Fn(2)), buf, 0x100)),
                     ("200 未知设备名", WithA(Msg.Cmif(200, Fn(1)), buf, Encoding.ASCII.GetBytes("Nope", new Span<byte>(buf, 0x100)))),
                     ("900 GetPhysicalDeviceName（未实现）", WithA(WithB(Msg.Cmif(900, Fn(1)), buf + 0x400, 0x100), buf, n)),
                 ];

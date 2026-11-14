@@ -97,7 +97,7 @@ class ComputeProgram(unittest.TestCase):
         texbad('texture_handle_out_of_range',lambda c:c['bindings'][1].update(slot=72))
         texbad('texture_missing_slot',lambda c:c['bindings'][1].pop('slot'))
         texbad('texture_with_storage_fields',lambda c:c['bindings'][1].update(nvnSlot=7))
-        obj=fixture();obj['content']['bindings'][1]={'stage':'cs','kind':'image','set':3,'binding':0,'slot':72,'count':1};cases.append(('unsupported_image',obj,1))
+        obj=fixture();obj['content']['bindings'][1]={'stage':'cs','kind':'image','set':3,'binding':0,'slot':88,'count':1};cases.append(('image_slot_out_of_range',obj,1))   # 72..86 偶数是 c2 图像槽（已接），88 越界照拒
         bad('unknown_kind',lambda c:c['bindings'][1].update(kind='future'))
         bad('wrong_binding_stage',lambda c:c['bindings'][1].update(stage='vs'))
         bad('duplicate_binding',lambda c:c['bindings'][1].update(set=0))
@@ -140,7 +140,7 @@ class ComputeProgram(unittest.TestCase):
             td=Path(directory);h=td/'h.c';h.write_text(HARNESS)
             source=(NATIVE/'nvn/nvn_vk_program_result.c').read_text()
             variants={'positive':source,
-                'negative_accept_image':source.replace('if (dst->kind == 3) {', 'if (0) {'),
+                'negative_image_range':source.replace('dst->slot < 72 || dst->slot >= 88 || (dst->slot & 1)', '0'),
                 'negative_texture_range':source.replace('dst->slot < 8 || dst->slot >= 72 || (dst->slot & 1)', '0'),
                 'negative_texture_storage_fields':source.replace('if (dst->kind != 1) {', 'if (0) {'),
                 'negative_support_padding':source.replace('r->size <= scale->element_bytes - delta % scale->stride','r->size <= scale->stride - delta % scale->stride'),

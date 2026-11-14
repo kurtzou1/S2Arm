@@ -88,6 +88,24 @@ int main(void) {
     ns2_joycon_sideways(NS2_KIND_JOYCON_R, NS2_SIDE_SR_R, &b2);
     CK(!memcmp(&a1, &a2, sizeof a1) && !memcmp(&b1, &b2, sizeof b1) && a1.buttons == (BIT(Y) | BIT(PLUS) | BIT(HOME) | BIT(L)),
        "㉒ 原始方向再转横握：与传输层直接横握一致（左只 SL → L、右只 SR → R），扩展位不留");
+    // 两只拼着时拆成各一位玩家（#520 D）：只有这一只自己的 SL 和 SR 同时按着才拆；
+    //   负对照：只按一个、按的是另一只的 SL / SR（位不属于这一只）、Pro / 没型号都不拆
+    CK(ns2_joycon_split_wanted(NS2_KIND_JOYCON_L, NS2_SIDE_SL_L | NS2_SIDE_SR_L) && ns2_joycon_split_wanted(NS2_KIND_JOYCON_R, NS2_SIDE_SL_R | NS2_SIDE_SR_R),
+       "㉓ 拼着时同按这一只的 SL + SR：拆成各一位玩家");
+    CK(!ns2_joycon_split_wanted(NS2_KIND_JOYCON_L, NS2_SIDE_SL_L) && !ns2_joycon_split_wanted(NS2_KIND_JOYCON_L, NS2_SIDE_SL_R | NS2_SIDE_SR_R) &&
+       !ns2_joycon_split_wanted(NS2_KIND_JOYCON_R, NS2_SIDE_SR_R) && !ns2_joycon_split_wanted(NS2_KIND_PRO, 15) && !ns2_joycon_split_wanted(NS2_KIND_NONE, 15),
+       "㉔ 负对照：只按一个 / 按的不是自己那侧 / Pro / 没型号都不拆");
+    // 分配玩家的登记手势（#520 E）：手算真机规则——整只 L + R、单只 SL + SR、左只 L / 右只 R 是「半边」（两只同时各按一边才合成一对）
+    CK(ns2_assign_gesture_of(NS2_KIND_PRO, BIT(L) | BIT(R), 0) == NS2_ASSIGN_WHOLE && ns2_assign_gesture_of(NS2_KIND_JOYCON_PAIR, BIT(L) | BIT(R) | BIT(A), 0) == NS2_ASSIGN_WHOLE,
+       "㉕ Pro / 一对同按 L + R：整只登记");
+    CK(ns2_assign_gesture_of(NS2_KIND_JOYCON_L, 0, NS2_SIDE_SL_L | NS2_SIDE_SR_L) == NS2_ASSIGN_SINGLE &&
+       ns2_assign_gesture_of(NS2_KIND_JOYCON_R, BIT(R), NS2_SIDE_SL_R | NS2_SIDE_SR_R) == NS2_ASSIGN_SINGLE,
+       "㉖ 单只同按自己的 SL + SR：单只登记（顺带压到 R 也算单只）");
+    CK(ns2_assign_gesture_of(NS2_KIND_JOYCON_L, BIT(L), 0) == NS2_ASSIGN_HALF && ns2_assign_gesture_of(NS2_KIND_JOYCON_R, BIT(R), 0) == NS2_ASSIGN_HALF,
+       "㉗ 左只按 L / 右只按 R：半边（等另一只配成一对）");
+    CK(ns2_assign_gesture_of(NS2_KIND_PRO, BIT(L), 0) == NS2_ASSIGN_NONE && ns2_assign_gesture_of(NS2_KIND_JOYCON_L, BIT(R), 0) == NS2_ASSIGN_NONE &&
+       ns2_assign_gesture_of(NS2_KIND_JOYCON_R, BIT(L), NS2_SIDE_SL_L | NS2_SIDE_SR_L) == NS2_ASSIGN_NONE && ns2_assign_gesture_of(NS2_KIND_NONE, ~0ull, 15) == NS2_ASSIGN_NONE,
+       "㉘ 负对照：Pro 只按 L / 左只按 R / 右只按左边的 SL + SR / 没型号都不算");
     printf("%s test_joycon：%d 项不符\n", bad ? "✗" : "✓", bad);
     return bad ? 1 : 0;
 }

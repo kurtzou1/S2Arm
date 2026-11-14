@@ -38,6 +38,8 @@ final class GameLibrary {
         void onStatus(String text);
         default void onGameReady(GameSession session) { }
         default void onGameAvailable(String titleId, String name) { }
+        /** 游戏库界面用：名字不带版本号；art 是这款的封面（商店横图 banner.jpg 优先，其次游戏图标 icon.jpg），都没有为 null。 */
+        default void onGameAvailable(String titleId, String name, File art) { onGameAvailable(titleId, name); }
     }
 
     private final Context context;
@@ -62,16 +64,20 @@ final class GameLibrary {
         for (File inbox : importDirs) inbox.mkdirs();
         gamesDir.mkdirs();
         if (selectedTitle == null) worker.execute(() -> {
-            try (GameStorage storage = GameStorage.acquire(context.getFilesDir())) {
-                int swept = GameInstall.sweep(gamesDir);
-                if (swept > 0) Log.i("S2Arm", "Removed " + swept + " unfinished game install(s)");
-            } catch (IOException e) { status("Library cleanup deferred: " + e.getMessage()); }
+            int swept = GameInstall.sweep(gamesDir);   // 逐款取锁，忙的那款跳过
+            if (swept > 0) Log.i("S2Arm", "Removed " + swept + " unfinished game install(s)");
         });
     }
 
     private void status(String text) {
         Log.i("S2Arm", text);
         listener.onStatus(text);
+    }
+
+    /** 失败：日志照旧记原始英文串（工具按它认），界面给玩家文案（原因 + 下一步 + 细节）。 */
+    private void failure(String logText, int what, Throwable error) {
+        Log.i("S2Arm", logText);
+        listener.onStatus(PlayerError.text(context, what, error));
     }
 
     /** Resume without an import target only reports the library. */
@@ -109,7 +115,7 @@ final class GameLibrary {
                     listener.onGameReady(session);
                 } catch (BootContract.BadGame | GamePack.BadPack | IOException | RuntimeException error) {
                     if (timing != null) for (String line : timing.lines()) Log.d("S2ArmBootTiming", line);
-                    status("Game admission failed: " + error.getMessage());
+                    failure("Game admission failed: " + error.getMessage(), R.string.player_err_start, error);
                 }
             });
             return;
@@ -134,14 +140,14 @@ final class GameLibrary {
                             }
                         }
                         @Override public void refused(File source, Exception error) {
-                            status("Game import of requested directory refused: " + error.getMessage());
+                            failure("Game import of requested directory refused: " + error.getMessage(), R.string.player_err_import, error);
                         }
                         @Override public void cleanupDeferred(File source, IOException error) {
                             status("Imported staging cleanup deferred: " + error.getMessage());
                         }
                     });
             } catch (IOException error) {
-                status("Game import deferred: " + error.getMessage());
+                failure("Game import deferred: " + error.getMessage(), R.string.player_err_import, error);
             }
             status(describe());
         });
@@ -150,24 +156,50 @@ final class GameLibrary {
     /** Copy a package folder chosen with ACTION_OPEN_DOCUMENT_TREE. */
     void importTree(Uri tree) {
         worker.execute(() -> {
-            try (GameStorage storage = GameStorage.acquire(context.getFilesDir())) {
+            try {   // 不取整库锁：每个包装进去时只锁它那一款
                 ContentResolver cr = context.getContentResolver();
                 Map<String, String> ids = new HashMap<>();
                 walk(cr, tree, ids);
-                if (!ids.containsKey("manifest.json"))
-                    throw new GamePack.BadPack("the picked folder has no manifest.json (pick the package folder itself)");
-                GameInstall.Result r = GameInstall.install(gamesDir, checkedImportSource(path -> {
-                    String id = ids.get(path);
-                    return id == null ? null : cr.openInputStream(DocumentsContract.buildDocumentUriUsingTree(tree, id));
-                }, context.getPackageName(),
-                    (context.getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0,
-                    DebugGate.open()), progress());
-                status("Game " + outcome(r));
-            } catch (GamePack.BadPack | BootContract.BadGame | IOException | RuntimeException e) {
-                status("Game import refused: " + e.getMessage());
+                // 选了包所在的上一级（或放着几款游戏的文件夹）不挡：在里面找出所有游戏包逐个导入，一个失败不影响其他（不堵门）
+                List<String> roots = packageRoots(ids.keySet());
+                if (roots.isEmpty())
+                    throw new GamePack.BadPack("no game package (a folder with manifest.json) anywhere in the picked folder;"
+                        + " pick the folder you copied the package into");
+                for (String root : roots) {
+                    try {
+                        GameInstall.Result r = GameInstall.install(gamesDir, checkedImportSource(path -> {
+                            String id = ids.get(root + path);
+                            return id == null ? null : cr.openInputStream(DocumentsContract.buildDocumentUriUsingTree(tree, id));
+                        }, context.getPackageName(),
+                            (context.getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0,
+                            DebugGate.open()), progress());
+                        status("Game " + outcome(r));
+                    } catch (GamePack.BadPack | BootContract.BadGame | IOException | RuntimeException e) {
+                        failure("Game import refused" + (root.isEmpty() ? "" : " (" + root.substring(0, root.length() - 1) + ")") + ": " + e.getMessage(),
+                            R.string.player_err_import, e);
+                    }
+                }
+            } catch (GamePack.BadPack | IOException | RuntimeException e) {
+                failure("Game import refused: " + e.getMessage(), R.string.player_err_import, e);
             }
             status(describe());
         });
+    }
+
+    /** Package roots under a picked tree ("" = the tree itself, else "dir/…/"): every folder holding manifest.json,
+     *  except one nested inside another package (a game's own files may carry that name). */
+    static List<String> packageRoots(java.util.Collection<String> paths) {
+        if (paths.contains("manifest.json")) return java.util.Collections.singletonList("");
+        List<String> found = new ArrayList<>();
+        for (String p : paths) if (p.endsWith("/manifest.json")) found.add(p.substring(0, p.length() - "manifest.json".length()));
+        java.util.Collections.sort(found);
+        List<String> roots = new ArrayList<>();
+        for (String r : found) {
+            boolean nested = false;
+            for (String outer : roots) if (r.startsWith(outer)) { nested = true; break; }
+            if (!nested) roots.add(r);
+        }
+        return roots;
     }
 
     static GameInstall.Source checkedImportSource(GameInstall.Source source, String installedPackage,
@@ -241,7 +273,8 @@ final class GameLibrary {
                 state = boot.summary() + "; refused: " + mismatch;
             } else {
                 state = boot.summary() + "; launch requires session admission";
-                listener.onGameAvailable(boot.titleId, info.name + " " + info.version);
+                File revision = new File(g, boot.revisionDir), banner = new File(revision, "banner.jpg"), icon = new File(revision, "icon.jpg");
+                listener.onGameAvailable(boot.titleId, info.name, banner.isFile() ? banner : icon.isFile() ? icon : null);
             }
             sb.append(String.format(Locale.ROOT, "\n%s %s [%s]: %d files, %.1f MiB; %s", info.name, info.version, info.titleId,
                 boot.packageFiles, boot.packageBytes / 1048576.0, state));

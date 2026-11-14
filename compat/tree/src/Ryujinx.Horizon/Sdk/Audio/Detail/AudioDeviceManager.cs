@@ -44,8 +44,9 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
     partial class AudioDeviceManagerUserSession : IServiceObject, IDisposable
     {
         // nn::audio::devmgr::DeviceFunctionality：1 = 输出（GetDefaultVirtualOutputDevice / ListVirtualOutputDevices 发 1），
-        //   2 = 输入（输入 / 注入设备发 2）。宿主声音后端不接收音（AppleHardwareDeviceDriver 只支持输出），输入一律报红
+        //   2 = 输入（输入 / 注入设备发 2）。宿主声音后端不接收音（AppleHardwareDeviceDriver 只支持输出）：列输入设备回 0 个，其余带输入功能的命令报红
         private const uint FunctionalityOutput = 1;
+        private const uint FunctionalityInput = 2;
 
         // 虚拟输出设备档案（401）+0x220 的 u32：OutputStreamImpl::Open 原样交给 sysmix CreateStream 当设备参数。
         //   真机的取值语义不知道；它只在本机 devmgr 与本机 audsmx:u 之间往返，取值是我方定的（同设备名 "DeviceOut"）
@@ -70,12 +71,20 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
         [CmifCommand(0)]
         public Result ListVirtualDeviceNames(out int count, [Buffer(HipcBufferFlags.Out | HipcBufferFlags.MapAlias)] Span<DeviceName> names, bool flag, uint functionality)
         {
-            RequireOutput(0, functionality);
-
             if (flag)
             {
                 throw new NotImplementedException("auddmg:u IUserSession 0：bool 参数为 true（SDK 公开入口只发 false，true 的语义不明）");
             }
+
+            // 列输入设备（功能 2）：宿主不收音，没有虚拟输入设备，回 0 个。SDK ListVirtualInputDevices 拿到 0 个，游戏不再开输入流（麦克风这一路直接返回）
+            if (functionality == FunctionalityInput)
+            {
+                count = 0;
+
+                return Result.Success;
+            }
+
+            RequireOutput(0, functionality);
 
             count = 0;
 

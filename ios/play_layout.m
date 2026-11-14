@@ -145,7 +145,7 @@ CGRect S2APlayDivision(UIView *view) {
 
 @implementation S2APlayViewController {
     UIInterfaceOrientationMask _requested;
-    BOOL _transitioning, _orientationRefused;
+    BOOL _transitioning, _orientationRefused, _waitingOrientation;
     S2APlaySplitMode _lastSplit;
     S2APlayOrientation _lastOrientation;
 }
@@ -206,7 +206,18 @@ CGRect S2APlayDivision(UIView *view) {
     S2APlayReflectionLayout(s,l);
     BOOL portrait=s.bounds.size.height>s.bounds.size.width;
     BOOL expectedPortrait=s2a_ios_play_orientations()==UIInterfaceOrientationMaskPortrait;
-    if (l.game.size.width>0 && l.game.size.height>0 && (portrait==expectedPortrait || self.resizable || _orientationRefused)) atomic_store(&g_view_ratio,l.game.size.width/l.game.size.height);
+    // 屏幕比例（宽屏静态改写装载时按它写死，起局后跟不上）只认玩家选的方向：可自由缩放的窗口（Duo 内屏 / iPad，尺寸类 regular/regular）也先等系统转到位。
+    //   11-13 Duo 内屏：原先 resizable 时不等，起局那一刻手机横着就按横屏比例 2.84 定了屏幕宽 3070，随后转成竖屏分屏，静态表还按 3070 画、画面右侧和上下被裁。
+    //   只管第一次：系统拒绝方向请求，或 1 秒内没转过来（iPad 自由窗口接受请求却转不了），按实际窗口记
+    BOOL settled=portrait==expectedPortrait || _orientationRefused || (self.resizable && atomic_load(&g_view_ratio)>0);   // 起局后自由窗口照旧跟实际窗口（运行中换屏）
+    if (!settled && self.resizable && !_waitingOrientation) {
+        _waitingOrientation=YES;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC),dispatch_get_main_queue(),^{
+            self->_waitingOrientation=NO;
+            if (!(atomic_load(&g_view_ratio)>0)) { self->_orientationRefused=YES; [self.view setNeedsLayout]; }
+        });
+    }
+    if (l.game.size.width>0 && l.game.size.height>0 && settled) atomic_store(&g_view_ratio,l.game.size.width/l.game.size.height);
     if (changed) {
         fprintf(stderr,"[S2A 布局] 分屏 %s，游戏 %.1f,%.1f %.1fx%.1f，按键 %.1f,%.1f %.1fx%.1f\n",l.split?"开":"关",l.game.origin.x,l.game.origin.y,l.game.size.width,l.game.size.height,l.controls.origin.x,l.controls.origin.y,l.controls.size.width,l.controls.size.height);
         [NSNotificationCenter.defaultCenter postNotificationName:S2APlayLayoutChanged object:nil];

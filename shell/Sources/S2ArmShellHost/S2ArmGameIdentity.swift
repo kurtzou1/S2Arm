@@ -49,7 +49,7 @@ public struct GameIdentityStore {
     public func save(_ id: String, name: String, cover: Data?) throws {
         let fm = FileManager.default
         try fm.createDirectory(at: folder(id), withIntermediateDirectories: true)
-        let trimmed = String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(64))
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)   // 不截长度（11-13 不许堵门：原先悄悄截到 64 字）
         let old = coverName(id, saved(id))
         var record: [String: Any] = ["name": trimmed]
         var staged: URL?
@@ -89,6 +89,8 @@ struct S2ArmGameIdentityView: View {
     @State private var item: PhotosPickerItem?
     @State private var cover: Data?
     @State private var preview: UIImage?
+    /// 选的图用不了（读不出 / 不是图片 / 转不成 JPEG）：原先静默不换，现在说清楚（11-13 真失败报真实原因）
+    @State private var coverProblem: String?
 
     var body: some View {
         ZStack {
@@ -102,6 +104,10 @@ struct S2ArmGameIdentityView: View {
                     }
                     PhotosPicker(selection: $item, matching: .images) { Text(shellText("Choose Cover from Photos")) }
                         .buttonStyle(.bordered).accessibilityIdentifier("identity.cover")
+                }
+                if let coverProblem {
+                    Text(coverProblem).font(.footnote).foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true).accessibilityIdentifier("identity.coverError")
                 }
                 if let error {
                     Text(shellText("Couldn’t save; the name and cover weren’t changed: \(error)")).font(.footnote).foregroundStyle(.red)
@@ -122,9 +128,20 @@ struct S2ArmGameIdentityView: View {
         .onChange(of: item) { _, picked in
             guard let picked else { return }
             Task {
-                guard let data = try? await picked.loadTransferable(type: Data.self), let image = UIImage(data: data),
-                      let jpeg = Self.coverJPEG(image) else { return }
-                await MainActor.run { cover = jpeg; preview = UIImage(data: jpeg) }
+                let problem: String?
+                var jpeg: Data?
+                do {
+                    if let data = try await picked.loadTransferable(type: Data.self) {
+                        if let image = UIImage(data: data) {
+                            jpeg = Self.coverJPEG(image)
+                            problem = jpeg == nil ? shellText("This picture couldn’t be converted for the cover. Try another one.") : nil
+                        } else { problem = shellText("This file isn’t a picture the cover can use. Try another one.") }
+                    } else { problem = shellText("Photos didn’t hand over this picture. Try another one.") }
+                } catch { problem = shellText("Couldn’t read this picture: \(error.localizedDescription)") }
+                await MainActor.run {
+                    coverProblem = problem
+                    if let jpeg { cover = jpeg; preview = UIImage(data: jpeg) }
+                }
             }
         }
     }

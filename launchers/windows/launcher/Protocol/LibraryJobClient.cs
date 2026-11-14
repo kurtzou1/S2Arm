@@ -11,7 +11,7 @@ public static class LibraryJobClient
     public static async Task<LibraryJobOutput> RunAsync(LauncherPaths paths, string privateRoot, string library,
         string? libraryId, string operation, IReadOnlyList<string>? selectedPaths, CancellationToken cancellationToken, string? moveFrom = null, bool partialResults = false, string? probe = null, string? jobId = null, bool startup = false, bool freeDefault = false, IReadOnlyCollection<string>? accept = null, IReadOnlyDictionary<string, object?>? fields = null)
     {
-        if (operation is not ("setup" or "catalog" or "keys" or "import" or "diagnostics" or "diagnosticsUpload" or "locations" or "storageOverview" or "spaceSurvey"))
+        if (operation is not ("setup" or "catalog" or "keys" or "import" or "diagnostics" or "diagnosticsUpload" or "exportPush" or "locations" or "storageOverview" or "spaceSurvey"))
             throw new ArgumentException("Unsupported library operation.", nameof(operation));
         cancellationToken.ThrowIfCancellationRequested();
         privateRoot = Path.GetFullPath(privateRoot);
@@ -25,7 +25,8 @@ public static class LibraryJobClient
         };
         if (selectedPaths is not null) payload["paths"] = selectedPaths;
         // diagnosticsUpload（pack/jobs/diag_upload.py）：gameId / operations / summary / extra 原样进请求
-        if (operation == "diagnosticsUpload") foreach (var (key, value) in fields ?? new Dictionary<string, object?>()) payload[key] = value;
+        // exportPush（pack/jobs/install.py push_export_job，11-13 自签导出推到手机）：gameId / device 原样进请求
+        if (operation is "diagnosticsUpload" or "exportPush") foreach (var (key, value) in fields ?? new Dictionary<string, object?>()) payload[key] = value;
         JobLanguage.Stamp(payload);
         if (moveFrom is not null) payload["moveFrom"] = Path.GetFullPath(moveFrom);
         // 库路径规则只在作业层 setup（剃刀 W19）：带上启动器安装目录（库不能放在它里面或包含它），

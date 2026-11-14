@@ -3,7 +3,7 @@ ifeq ($(S2A_MAC_FRONTEND),1)
 CFLAGS += -fobjc-arc
 # 玩家入口：自动玩家缺省关（tests/autoplay/ap_default.h）
 CFLAGS += -DS2A_MAC_FRONTEND=1
-HOST_SRCS += macos/front_mac.m macos/joycon_imu.m macos/input_guide.m macos/controller_view.m macos/textinput_mac.m
+HOST_SRCS += macos/front_mac.m macos/joycon_imu.m macos/hid_pad.m macos/input_guide.m macos/controller_view.m macos/textinput_mac.m
 HOST_SRCS += macos/ns2_controller.c $(wildcard runtime/ns2pro/*.c) runtime/ns2pro/NS2Transport.m
 CFLAGS += -Iruntime/ns2pro/include -DNS2_SCAN_SECONDS=60
 HOST_LIBS += -framework AppKit -framework CoreGraphics -framework GameController -framework CoreHaptics -framework CoreBluetooth -framework IOKit

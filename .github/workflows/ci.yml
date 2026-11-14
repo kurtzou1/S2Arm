@@ -53,6 +53,9 @@ jobs:
           # GITHUB_PATH 后写的排在前面：python3 仍是 setup-python 那份，否则装的包和自检用的不是同一个解释器
           echo "$pythonLocation/bin" >> "$GITHUB_PATH"
           python3 -m pip install -r tools/rewriter-requirements.txt -r pack/fonts/requirements.txt
+          # 未定义名称门禁与本机检查共用 Ruff 版本登记，不依赖托管镜像预装。
+          RUFF_VERSION=$(python3 -c 'import json; print(json.load(open("tools/style-tools.json"))["python_packages"]["ruff"])')
+          python3 -m pip install "ruff==$RUFF_VERSION"
       - name: 改写器固定依赖（钉版 Capstone / LZ4 源码；构建本身不下载）
         run: python3 runtime/rewriter/prepare_deps.py build/rewriter-deps
       - name: Windows 启动器离线门禁要的 NuGet 包

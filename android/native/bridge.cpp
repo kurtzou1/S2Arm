@@ -12,6 +12,7 @@
 #include "system_tuning.h"
 #include "capacity_affinity.h"
 #include "adpf_hint.h"
+#include "cpu_floor.h"
 #include "aaudio_sink.h"
 #include "wsi_qa.h"
 #include "redlog.h"
@@ -482,6 +483,7 @@ Java_org_s2arm_android_NativeBridge_offerSurface(JNIEnv *env, jclass, jlong hand
     if (!handle) return text(env, "Native host unavailable");
     ANativeWindow *window = surface ? ANativeWindow_fromSurface(env, surface) : nullptr;
     s2a_adpf_set_surface(window != nullptr);
+    s2a_cpu_floor_set_surface(window != nullptr);
     return text(env, get(handle)->window.offer(window));
 }
 extern "C" JNIEXPORT jstring JNICALL
@@ -617,9 +619,11 @@ static int missing_policy_error(const std::string &path) {
     return status == 0 ? ENOENT : EIO;
 }
 
-static bool optional_widen_policy(const char *name) {
-    static const char *const names[] = {"widen_enable.handheld.tsv", "widen_enable.docked.tsv", "widen_full.handheld.tsv", "widen_full.docked.tsv", "widen_verified.tsv"};
-    for (const char *candidate : names) if (!strcmp(name, candidate)) return true;
+// 整包一份、放在 modules/ 的可选表（main 旁边）：宽屏策略表 + 社区补丁表（#48 D2）。与 GameSession.java 准入名单一致
+static const char *const k_optional_tables[] = {"widen_enable.handheld.tsv", "widen_enable.docked.tsv", "widen_full.handheld.tsv",
+                                                "widen_full.docked.tsv", "widen_verified.tsv", "cpatch.tsv"};
+static bool optional_table(const char *name) {
+    for (const char *candidate : k_optional_tables) if (!strcmp(name, candidate)) return true;
     return false;
 }
 
@@ -635,7 +639,7 @@ static int read_game_asset(void *context, const char *filename, s2a_loader_blob 
         FILE *file = fopen(found->second.c_str(), "rb");
         if (!file) {
             if (errno != ENOENT) return errno;
-            return optional_widen_policy(filename) ? missing_policy_error(found->second) : EIO;
+            return optional_table(filename) ? missing_policy_error(found->second) : EIO;
         }
         if (fseeko(file, 0, SEEK_END) != 0) { fclose(file); return EIO; }
         off_t length = ftello(file);
@@ -651,7 +655,7 @@ static int read_game_asset(void *context, const char *filename, s2a_loader_blob 
         return 0;
     }
     AAsset *asset = AAssetManager_open(host->assets, found->second.c_str(), AASSET_MODE_BUFFER);
-    if (!asset) return optional_widen_policy(filename) ? missing_policy_error(found->second) : EIO;
+    if (!asset) return optional_table(filename) ? missing_policy_error(found->second) : EIO;
     off64_t length = AAsset_getLength64(asset);
     const void *bytes = AAsset_getBuffer(asset);
     if (length < 0 || (length && !bytes) || !verify_game_bytes(found->second, bytes, static_cast<size_t>(length))) {
@@ -1019,7 +1023,7 @@ Java_org_s2arm_android_NativeBridge_startGame(JNIEnv *env, jclass, jlong handle,
             const std::string &root = host->asset_root.empty() ? host->game_data : host->asset_root;
             std::string directory = image.substr(0, image.size() - base.size());
             if (i == 0) {
-                for (const char *policy : {"widen_enable.handheld.tsv", "widen_enable.docked.tsv", "widen_full.handheld.tsv", "widen_full.docked.tsv", "widen_verified.tsv"})
+                for (const char *policy : k_optional_tables)
                     host->asset_paths.emplace(policy, root + "/" + directory + policy);
             }
             if (!host->asset_paths.emplace(name + ".patched.bin", root + "/" + image).second) return EINVAL;
@@ -1162,14 +1166,11 @@ extern "C" __attribute__((visibility("default"))) long long s2a_android_copy_ass
 #endif
 }
 
-// 接口 v2.15（缺口扫描族 1，#1228）：前后台转给服务层。平台壳写焦点 / 睡眠（onPause → 失焦 + 睡眠，
-//   onResume → 唤醒 + 焦点，与 iOS s2a_ios_suspend 同一时机）；安卓不像 iOS 整体冻结客机——失焦且游戏
-//   开着「失焦就暂停」（s2a_focus_suspend，缺省开）时按 Mac display_focus_publish_ex 冻客机与游戏时钟，
+// 接口 v2.15（缺口扫描族 1，#1228）：前后台转给服务层。平台壳写焦点（onPause → 失焦，onResume → 焦点；不发睡眠，
+//   见 setForeground）；退后台一律冻客机与游戏时钟（同 iOS 后台整体冻结，#855），
 //   时钟原因位 4 是安卓专属（1=后台会话、2=系统键盘、3=Mac 失焦），回前台放开；停机路径不冻、冻着先放开，
 //   stopGame 之后迟到的 onPause 也不再冻结（stop_started；收尾要等客机应答，冻回去会卡到硬预算）。
 extern "C" void s2a_host_focus_set(int focused);                   // runtime/src/os.c
-extern "C" int  s2a_focus_suspend(void);                           // runtime/src/os.c
-extern "C" void s2a_host_sleep_set(int sleeping);                  // runtime/src/os.c
 extern "C" void guest_clock_freeze_for(int reason, int on);        // runtime/src/os.c
 extern "C" void s2a_guest_freeze(int on) __attribute__((weak));    // runtime/src/thread.c：诊断目标不链它
 extern "C" void s2a_android_link_stop(void) __attribute__((weak)); // nvn/nvn_vsync_android.c：只在直连源里，诊断目标不链
@@ -1187,6 +1188,7 @@ Java_org_s2arm_android_NativeBridge_stopGame(JNIEnv *env, jclass, jlong handle, 
     if (!host || host != g_game_host || !host->game_runtime || host->stop_started.exchange(true)) return;
     s2a_capacity_stop();
     s2a_adpf_stop();
+    s2a_cpu_floor_stop();
     host->stop_reason = jstring_or(env, why, "game stop requested");
     host->stop_normal.store(normal == JNI_TRUE);
     // 后台冻着的客机先放开（同 Mac display_focus_publish_ex(NO, NO) 的「收尾只报不冻」）：
@@ -1298,19 +1300,20 @@ Java_org_s2arm_android_NativeBridge_setForeground(JNIEnv *, jclass, jlong handle
     s2a_aaudio_set_foreground(foreground != JNI_FALSE);
     s2a_capacity_foreground(foreground != JNI_FALSE);
     s2a_adpf_set_foreground(foreground != JNI_FALSE);
+    s2a_cpu_floor_set_foreground(foreground != JNI_FALSE);
     // 退后台停显示节拍源（直连 vsync 拍；前台回时由 acquire 路径按需懒重启）
     if (!foreground && s2a_android_link_stop) s2a_android_link_stop();
     host->window.set_foreground(foreground);
-    if (foreground) { s2a_host_sleep_set(0); s2a_host_focus_set(1); }
-    else            { s2a_host_focus_set(0); s2a_host_sleep_set(1); }
+    // 退后台只算失焦、不算睡眠（同 Mac 切窗口；Switch 按 HOME 也只是失焦）：系统选文件框、通知栏、切应用都会走到这里，
+    // 不是熄屏休眠。客机由下面的冻结停住（#855）。
+    s2a_host_focus_set(foreground ? 1 : 0);
     // 停机已开始的迟到 onPause 只报焦点 / 睡眠，不再冻结：stopGame 已经放开过，收尾线程要等客机
     // 应答与客机线程退出，再冻回去只能卡到硬预算（Home 路径 finishAndRemoveTask 还有 10 秒延迟）。
     bool stop_started = false;
 #ifdef S2A_ANDROID_GAME_RUNTIME
     stop_started = host->stop_started.load();
 #endif
-    switch (s2a_android_foreground_action(foreground != JNI_FALSE, stop_started, s_foreground_frozen,
-                                          s2a_focus_suspend())) {
+    switch (s2a_android_foreground_action(foreground != JNI_FALSE, stop_started, s_foreground_frozen)) {
     case S2A_ANDROID_FOREGROUND_FREEZE:
         if (s2a_guest_freeze) {
             s_foreground_frozen = true; guest_clock_freeze_for(4, 1); s2a_guest_freeze(1);
@@ -1330,7 +1333,7 @@ Java_org_s2arm_android_NativeBridge_setForeground(JNIEnv *, jclass, jlong handle
 // 直连安全网 JNI 出口（dguard_android.c 包装共用 dguard.c，未武装 / 已清零时空转）：
 // onTrimMemory 前台内存告警记失败证据；setHostBuild 在起局前传一次宿主版本号
 // （BuildConfig.VERSION_NAME，dguard 用它区分「另一个包」）；pollSaveAtomic 由 Java 侧
-// 每秒轮询，服务层报出不能原子提交的原因位时提示一次（判定在共用 direct_prompt.c）。
+// 每秒轮询，服务层报出不能原子提交的原因位时提示一次；负数是状态未知（服务层缺导出），不提示（判定在共用 direct_prompt.c）。
 extern "C" JNIEXPORT void JNICALL
 Java_org_s2arm_android_NativeBridge_memoryWarning(JNIEnv *, jclass) {
     s2a_android_dguard_memory_warning();
@@ -1400,7 +1403,7 @@ Java_org_s2arm_android_NativeBridge_presentPeriodNs(JNIEnv *, jclass) {
 }
 extern "C" JNIEXPORT jstring JNICALL
 Java_org_s2arm_android_NativeBridge_releaseSurface(JNIEnv *env, jclass, jlong handle) {
-    if (handle) s2a_adpf_set_surface(0);
+    if (handle) { s2a_adpf_set_surface(0); s2a_cpu_floor_set_surface(0); }
     return text(env, handle ? get(handle)->window.release() : "Native host unavailable");
 }
 extern "C" JNIEXPORT void JNICALL

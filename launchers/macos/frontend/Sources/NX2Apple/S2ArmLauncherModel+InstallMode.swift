@@ -85,7 +85,7 @@ extension S2ArmLauncherModel {
 
     /// 批次出完（没有下一个了）：由更新发起的那批，出好的 iPhone 包逐款装上（暂停 / 取消的不装）
     func batchFinished() {
-        guard batchInstallAfter else { return }
+        guard batchInstallAfter || installMode.mode == "export" else { return }   // 导出模式：批量出完也接着导出（D-9ZF9）
         batchInstallAfter = false
         guard batchPaused == nil else { return }
         installAfterQueue = batchItems.compactMap { item in

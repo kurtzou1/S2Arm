@@ -415,6 +415,26 @@ def export(pack_dir, out_path):
     return out_path
 
 
+UPDATE_FORMAT = 2   # 着色器更新包（只含派生件）：手机按格式号 2 走「套到本机已有本体」（runtime/src/pack_apply.c img_update）；只认 1 的旧版 S2Arm 会说「请更新 S2Arm」
+
+
+def update_pack(pack_dir, out_path):
+    """自签导出的「着色器更新包」（维护者 11-13：几百 MB，不用重拷 5 GB 本体）：IMG 形态资源包里照旧按文件放的派生件（KEEP：着色器库、界面覆盖层、
+    romfs.s2aidx）+ game.imgmap 写成一个格式号 2 的 IMG，头里的游戏号 / 资源包号照抄本体 game.img（资源包号只随游戏原始资源变，同款同构建才相同），
+    没有 RomFS 段。手机认领时核本体资源包号一致才套。→ 输出路径"""
+    src = os.path.join(pack_dir, 'game.img'); h = header(src)
+    others = [(rel, os.path.join(pack_dir, rel)) for rel, _ in pack_rows(pack_dir) if rel.startswith(KEEP)]
+    for rel, p in others:
+        if not os.path.isfile(p): raise Red(f'资源包清单里的 {rel} 不在 {pack_dir}')
+    mp = os.path.join(pack_dir, MAP)
+    if os.path.isfile(mp): others.append((MAP, mp))
+    if not others: raise Red('这款资源包没有派生件（着色器库 / 覆盖层），出不了更新包')
+    build(None, others, out_path, h['gid'], h['pack_id'], say=lambda *_: None)
+    with open(out_path, 'r+b') as f:   # 格式号改成 2（build 写的是完整 IMG 的 1）
+        f.seek(8); f.write(struct.pack('<I', UPDATE_FORMAT))
+    return out_path
+
+
 def is_img(path):
     try:
         with open(path, 'rb') as f: return f.read(8) == MAGIC
@@ -461,6 +481,7 @@ def main(argv=None):
     v.add_argument('--consume', action='store_true', help='边写边删解包出来的 RomFS（#746：出包收尾本来就清，提前到写 IMG 时；写到一半失败要重新解包）')
     v.add_argument('--work', help='这款的出包工作目录：--consume 只删它里面的（玩家原件、外面的解包目录不碰）')
     x = sp.add_parser('export', help='自签导出：game.img + 着色器库等派生件写成一个文件'); x.add_argument('pack_dir'); x.add_argument('out')
+    u = sp.add_parser('update', help='自签导出的着色器更新包：只含派生件，配同款同构建的本体'); u.add_argument('pack_dir'); u.add_argument('out')
     l = sp.add_parser('ls'); l.add_argument('img')
     a = ap.parse_args(argv)
     try:
@@ -469,6 +490,8 @@ def main(argv=None):
             build(None if a.romfs == '-' else a.romfs, others, a.out, a.gid, a.pack_id, a.romfs_index)
         elif a.cmd == 'export':
             print(export(a.pack_dir, a.out))
+        elif a.cmd == 'update':
+            print(update_pack(a.pack_dir, a.out))
         elif a.cmd == 'convert':
             print(convert(a.root, a.pack_dir, gid=a.gid, consume=a.consume, work=a.work) or '多程序合集：照旧旧形态')
         else:

@@ -19,6 +19,17 @@ native-test-nvn_replay:
 	@echo '✓ t_nvn_replay：回放核心状态继承 / 未接命令报名 / 一次提交一段 / 完成后回写 / 接线表与名字表一致 / 分层扫描'
 TEST_TARGETS += native-test-nvn_replay
 
+# native-test-nvn_res：资源池与绑定构造的省重（贴图内容纪元 / 整组绑定沿用 / 驱动段暂存按内容命中 / 换管线按布局立脏）。
+# 与 t_nvn_replay 共用同一份替身（重命名它的 main 后 include）。
+.PHONY: native-test-nvn_res
+native-test-nvn_res:
+	@mkdir -p $(BUILD)/tests
+	$(CC) $(CFLAGS) -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror -I. -Igraphics/nvn/gfx/nvn -Igraphics/nvn/gfx/nvn/include -Igraphics/nvn/gfx/tex -I$(NVN_REPLAY_DIR) \
+	  -o $(BUILD)/tests/t_nvn_res graphics/nvn/tests/t_nvn_res.c graphics/nvn/tests/nvn_clear_view_unused.c $(NVN_REPLAY_CORE) -lm
+	timeout 30 $(BUILD)/tests/t_nvn_res
+	@echo '✓ t_nvn_res：贴图内容按纪元只查一次（换段重查 / 写后重传 / WriteTexels 强制作废）/ 连续同参数绘制第二笔整组沿用 / 驱动段暂存按内容命中 / 换管线按布局立脏'
+TEST_TARGETS += native-test-nvn_res
+
 .PHONY: native-test-nvn_wait_sync
 native-test-nvn_wait_sync:
 	@mkdir -p $(BUILD)/tests

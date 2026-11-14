@@ -9,7 +9,9 @@
   ④ 包超过 30 MB 上限 → 不传，diag_upload_failed
   ⑤ 没有作业记录的失败（环境检查）：界面交来的 summary 正文脱敏后放进 logs/error-summary.log（家目录换成 ~）
   ⑧ 顶栏全局「故障报修」（不带 gameId / operations / summary）：有失败的作业 → 自动附最近一次失败的错误摘要；没有就不附、照传
-  ⑨ 没选游戏库（库路径是还没建的目录、不带 libraryId）、库里一款游戏都没有：走真 worker 照样传成、拿到短码"""
+  ⑨ 没选游戏库（库路径是还没建的目录、不带 libraryId）、库里一款游戏都没有：走真 worker 照样传成、拿到短码
+  ⑩ 总时限（11-13 玩家卡在「正在上传…」）：服务收下请求后一直不回 / 打包这步一直不完 → 总时限一到就 diag_upload_failed（原因写明超过多少秒），
+     不等单次收发超时、不再重试；临时包不留在机器上"""
 import http.server
 import io
 import json
@@ -17,6 +19,7 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+import time
 from unittest import mock
 import zipfile
 
@@ -189,3 +192,35 @@ class DiagUploadTests(JobCase):
         self.assertEqual(terminal["state"], "succeeded", terminal)
         self.assertEqual(terminal["result"]["code"], "D-7K3Q")
         self.assertEqual(len(svc.got), 1)
+
+    def test_total_deadline(self):   # ⑩
+        import library
+        stall = threading.Event()
+
+        class Slow(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                stall.wait(10)   # 收下就不回
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Slow)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        before = self.leftovers()
+        try:
+            with mock.patch.dict(os.environ, {"S2A_DIAG_UPLOAD_URL": f"http://127.0.0.1:{srv.server_port}/diag"}), \
+                    mock.patch.object(diag_upload, "TOTAL_S", 1.5), self.assertRaises(Failure) as e:
+                t0 = time.monotonic(); diag_upload.upload(self.c)
+            took = time.monotonic() - t0
+        finally:
+            stall.set(); srv.shutdown(); srv.server_close()
+        self.assertEqual(e.exception.code, "diag_upload_failed")
+        self.assertIn("上传诊断超过", str(e.exception)); self.assertIn("导出诊断包", str(e.exception))
+        self.assertLess(took, 4.0)
+        self.assertEqual(self.leftovers(), before)
+        # 打包这步一直不完：同样按时限收尾，不去连上传服务
+        real = library.diagnostics
+        with mock.patch.object(diag_upload, "TOTAL_S", 1.0), mock.patch.object(library, "diagnostics", lambda c: (time.sleep(3), real(c))), \
+                mock.patch.object(diag_upload, "send", side_effect=AssertionError("不该上传")), self.assertRaises(Failure) as e:
+            t0 = time.monotonic(); diag_upload.upload(self.c)
+        self.assertIn("打包诊断超过", str(e.exception)); self.assertLess(time.monotonic() - t0, 2.5)

@@ -7,7 +7,9 @@
 #        和文件，以及本命令的标准输出 / 标准错误（调用方重定向到日志文件时，日志在长就是在干活）
 #     ② 命令及其全部子孙进程的 CPU 时间合计在涨
 #     ③ 进程树里有编译子进程活着（xcrun / metal / metallib / clang / air-* / spirv-* / glslc …）
-#     ④ 树里任一进程的磁盘读 / 写字节数在涨（macOS：libproc proc_pid_rusage 的 ri_diskio_bytesread / byteswritten；Linux：/proc/<pid>/io 的 read_bytes / write_bytes；取不到就只看 ①②③）
+#     ④ 树里任一进程的磁盘读 / 写字节数在涨（macOS：libproc proc_pid_rusage 的 ri_diskio_bytesread / byteswritten；Linux：/proc/<pid>/io 的 read_bytes / write_bytes；
+#        Windows：GetProcessIoCounters 的读 / 写 / 其他传输字节 + GetProcessMemoryInfo 的缺页次数（#680：原先 Windows 取不到、只看 ①②③，
+#        11 GB 内存的笔记本上直连库「两张表收尾」等换页 615 秒、CPU 几乎不涨也不出声，被当挂死停掉，10 小时出包白跑）；取不到就只看 ①②③）
 #   ④ 的来由（11-04 巫师3 c1104_w3astc 抽取被误杀：本机负载 100–200、多个出包同读工作盘，两个工作进程整 600 秒停在 mmap 切片的缺页读上，
 #     缺页等盘几乎不涨 CPU、也还没写输出，旧版判挂死）。实测 mmap 缺页读计入 ri_diskio_bytesread（一款第一方游戏网球 xci 随机页读 5 秒：+452 MB，ri_pageins +26766）
 #   ③ 的来由（10-31 mhrise-formal-f285 02:03 被误杀、01007EF00011E000 rc=124 同类）：Metal 编译真正在算的是系统的 MTLCompilerService，
@@ -45,6 +47,16 @@ def win_procs():   # Windows（#1100 W6）：没有 ps；Toolhelp 快照取 进�
     k.CloseHandle(snap)
     return out
 
+def win_fd_path(fd):
+    """Windows：文件描述符 → 它打开的文件路径（GetFinalPathNameByHandleW）；取不到 → None"""
+    import msvcrt
+    from ctypes import wintypes as w
+    buf = ctypes.create_unicode_buffer(32768)
+    n = ctypes.windll.kernel32.GetFinalPathNameByHandleW(w.HANDLE(msvcrt.get_osfhandle(fd)), buf, len(buf), 0)
+    if not n or n >= len(buf): return None
+    p = buf.value
+    return p[4:] if p.startswith('\\\\?\\') else p
+
 def tree(root):   # → {pid: (CPU 秒, 命令名)}，root 和它的全部子孙（ps 的 TIME 列：[[dd-]hh:]mm:ss.ss）
     if WIN:
         kids, info = {}, {}
@@ -79,9 +91,35 @@ class _RI(ctypes.Structure):   # struct rusage_info_v2（<sys/resource.h>，RUSA
 try: _libproc = ctypes.CDLL('/usr/lib/libproc.dylib')
 except OSError: _libproc = None
 
+def _win_io(pid):
+    """Windows 一个进程的「在干活」读数：IO_COUNTERS 的读 / 写 / 其他传输字节 + 缺页次数 × 4096（等换页的进程 CPU 不涨、也不一定走 ReadFile，
+    但缺页次数一定涨）；打不开（已退出 / 无权限）→ None"""
+    from ctypes import wintypes as w
+    class IO(ctypes.Structure):
+        _fields_ = [(n, ctypes.c_ulonglong) for n in ('ReadOps', 'WriteOps', 'OtherOps', 'ReadBytes', 'WriteBytes', 'OtherBytes')]
+    class MEM(ctypes.Structure):
+        _fields_ = [('cb', w.DWORD), ('PageFaultCount', w.DWORD)] + [(n, ctypes.c_size_t) for n in (
+            'PeakWorkingSetSize', 'WorkingSetSize', 'QuotaPeakPagedPoolUsage', 'QuotaPagedPoolUsage', 'QuotaPeakNonPagedPoolUsage',
+            'QuotaNonPagedPoolUsage', 'PagefileUsage', 'PeakPagefileUsage')]
+    k = ctypes.windll.kernel32; k.OpenProcess.restype = w.HANDLE
+    h = k.OpenProcess(0x1000, False, pid)   # PROCESS_QUERY_LIMITED_INFORMATION：两个读数都够用
+    if not h: return None
+    try:
+        io, mem = IO(), MEM(); mem.cb = ctypes.sizeof(MEM)
+        got = 0
+        if k.GetProcessIoCounters(h, ctypes.byref(io)): got += io.ReadBytes + io.WriteBytes + io.OtherBytes
+        if k.K32GetProcessMemoryInfo(h, ctypes.byref(mem), mem.cb): got += mem.PageFaultCount * 4096
+        return got
+    finally:
+        k.CloseHandle(h)
+
 def diskio(pids):   # → {pid: 磁盘读 + 写字节数}；取不到的进程（已退出、无权限、平台不支持）不出现
     out = {}
     for pid in pids:
+        if WIN:
+            v = _win_io(pid)
+            if v is not None: out[pid] = v
+            continue
         if _libproc:
             r = _RI()
             if _libproc.proc_pid_rusage(pid, 2, ctypes.byref(r)) == 0: out[pid] = r.diskio_bytesread + r.diskio_byteswritten
@@ -139,7 +177,9 @@ def main():
     poll = float(os.environ.get('S2A_NOSTALL_POLL', '30'))
     for fd in (1, 2):   # 标准输出 / 错误是日志文件就一并盯
         try:
-            if stat.S_ISREG(os.fstat(fd).st_mode) and not WIN: watch.append(f'/dev/fd/{fd}')   # Windows 没有 /dev/fd：靠 ② CPU 与 --watch 目录
+            if stat.S_ISREG(os.fstat(fd).st_mode):
+                if not WIN: watch.append(f'/dev/fd/{fd}')
+                elif (path := win_fd_path(fd)): watch.append(path)   # Windows 没有 /dev/fd：按句柄取日志文件的真实路径（#680）
         except OSError: pass
     p = subprocess.Popen(cmd)
     def fwd(sig, _):

@@ -24,6 +24,10 @@ int s2a_ios_reload_graphics_settings(void);
 //   起局读取、游戏内设置页、撑不住就问玩家、社区补丁都用它，不再直接用 standardUserDefaults 读写画面键。
 NSUserDefaults *s2a_ios_settings_defaults(void);
 NSArray *s2a_ios_per_game_keys(void);
+// 游戏语言（定义表 launchers/shared/game_settings.v1.json 的 language，11-13）：按款存（per_game_keys），值是宿主枚举名；没存 / "system" = 跟随系统
+//   （服务层读本 App 首选语言）。起局时 s2a_ios_apply_graphics_settings 落成 S2A_SYSTEM_LANGUAGE。列表与定义表 options 同序（pack/jobs/tests/test_community.py test_game_language_ios_same_as_table 核）
+#define S2AGameLanguageKey @"S2AGameLanguage"
+NSArray<NSString *> *s2a_ios_game_languages(void);
 // Discrete values compatible with Settings.bundle and normalized in-app values.
 NSArray<NSDictionary *> *s2a_ios_graphics_options(void);
 NSDictionary *s2a_ios_graphics_snapshot(NSUserDefaults *defaults);

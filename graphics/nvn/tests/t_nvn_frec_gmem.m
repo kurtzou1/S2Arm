@@ -3,7 +3,7 @@
 //   录 → 把三个池删掉、地址范围表清空（相当于新进程）→ 放。期望手写：
 //   ① 放回后地址范围表恰好盖住 A、B，不盖 C
 //   ② B 为池表驻留（gm = 1、在驻留集里），A、C 不是
-//   ③ 旧格式文件（把末尾两节截掉）照样放得回，两张表都是空的
+//   ③ 旧格式文件（把末尾两节截掉 / 只截掉最后一节）不放：fr_restore_state 回 0（报红「11-12 之前的旧录像」），地址范围表仍是空的
 //   修前（录帧不存这两张表）①② 红：带原始全局内存的款回放时池表 0 段或全是冷项，着色器读回 0
 #include "../gfx/nvn/nvn_mtl.m"
 #include <sys/mman.h>
@@ -41,12 +41,16 @@ int main(void) { @autoreleasepool {
     struct stat st; REQUIRE(stat(path, &st) == 0);
     { FILE *a = fopen(path, "rb"), *b = fopen(old, "wb"); REQUIRE(a && b); size_t n = (size_t)st.st_size - (size_t)(4 + na * 16 + 4 + 16); char *buf = malloc(n); REQUIRE(buf && fread(buf, 1, n, a) == n && fwrite(buf, 1, n, b) == n); free(buf); fclose(a); fclose(b); }
     drop(m);
-    VERIFY(fr_restore_state(old, &ntex), "③ 旧格式文件放得回");
+    VERIFY(!fr_restore_state(old, &ntex), "③ 旧格式（两节都没有）：不放（回 0）");
     pthread_mutex_lock(&g_mu);
     VERIFY(g_naddr == 0, "③ 旧格式：地址范围表空（%d 段，期望 0）", g_naddr);
     VERIFY(pe(m[1]) && pe(m[1])->gm == 0, "③ 旧格式：B 不为池表驻留");
     pthread_mutex_unlock(&g_mu);
+    // ③' 只截掉最后一节（驻留池）：同样不放
+    { FILE *a = fopen(path, "rb"), *b = fopen(old, "wb"); REQUIRE(a && b); size_t n = (size_t)st.st_size - (size_t)(4 + 16); char *buf = malloc(n); REQUIRE(buf && fread(buf, 1, n, a) == n && fwrite(buf, 1, n, b) == n); free(buf); fclose(a); fclose(b); }
+    drop(m);
+    VERIFY(!fr_restore_state(old, &ntex), "③' 只缺驻留池一节：不放（回 0）");
     unlink(path); unlink(old);
     if (failures) { printf("✗ t_nvn_frec_gmem：%u 项里 %u 项不符\n", checks, failures); return 1; }
-    printf("✓ t_nvn_frec_gmem：%u 项全过（帧录状态：有 GPU 地址的池范围 / 为池表驻留的池 存放还原，旧格式照放）\n", checks); return 0;
+    printf("✓ t_nvn_frec_gmem：%u 项全过（帧录状态：有 GPU 地址的池范围 / 为池表驻留的池 存放还原，旧格式不放）\n", checks); return 0;
 } }

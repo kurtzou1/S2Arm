@@ -851,14 +851,18 @@ static void cv_decode(cvdec *d, const cv_in *in, int gen) {
         }
         if (d->vt) {
             // 去掉时间分隔 OBU（ISOBMFF / Matroska 的 AV1 样本约定不带它）
-            uint8_t *s = malloc(in->n); size_t sn = 0; uint64_t t0 = now_ns();
+            // 同时看包里有没有帧数据（帧头 3、分块组 4、帧 6、冗余帧头 7）：只有时间分隔 / 填充 / 元数据的包本来就没有画面，
+            //   原先照样送 VideoToolbox，回 -12903（数据坏）并报红（诊断 #4ddff2：3 字节的包）。这种包直接跳过、不报红；解析不了的尾巴按有帧数据送去
+            uint8_t *s = malloc(in->n); size_t sn = 0; uint64_t t0 = now_ns(); int frame = 0;
             for (size_t o = 0; o < in->n;) {
-                uint8_t h = in->p[o]; size_t hl = 1 + (h >> 2 & 1); uint64_t sz = in->n - o - hl; int ll = 0;
+                uint8_t h = in->p[o]; size_t hl = 1 + (h >> 2 & 1); uint64_t sz = in->n - o - hl; int ll = 0, ty = h >> 3 & 15;
                 if (h >> 1 & 1) ll = leb128(in->p + o + hl, in->n - o - hl, &sz);
-                size_t e = o + hl + (size_t)ll + (size_t)sz; if (e > in->n || o + hl > in->n) { memcpy(s + sn, in->p + o, in->n - o); sn += in->n - o; break; }
-                if ((h >> 3 & 15) != 2) { memcpy(s + sn, in->p + o, e - o); sn += e - o; }
+                size_t e = o + hl + (size_t)ll + (size_t)sz; if (e > in->n || o + hl > in->n) { memcpy(s + sn, in->p + o, in->n - o); sn += in->n - o; frame = 1; break; }
+                if (ty != 2) { memcpy(s + sn, in->p + o, e - o); sn += e - o; }
+                if (ty == 3 || ty == 4 || ty == 6 || ty == 7) frame = 1;
                 o = e;
             }
+            if (!frame) { free(s); static _Atomic int said; if (!atomic_exchange(&said, 1)) LOG("Switch 2 视频：AV1 包里没有帧数据（%zu 字节，只有时间分隔 / 填充之类），跳过（本来就没有画面）", in->n); return; }
             CMBlockBufferRef bb = NULL; CMSampleBufferRef sb = NULL;
             OSStatus st = CMBlockBufferCreateWithMemoryBlock(NULL, s, sn, kCFAllocatorMalloc, NULL, 0, sn, 0, &bb);
             if (!st) { size_t ss = sn; CMSampleTimingInfo ti = { kCMTimeInvalid, CMTimeMake(in->pts_ns / 1000, 1000000), kCMTimeInvalid }; st = CMSampleBufferCreateReady(NULL, bb, d->vtfmt, 1, 1, &ti, 1, &ss, &sb); }
@@ -1051,6 +1055,13 @@ static Result cv_props(uint16_t *w, uint16_t *h, uint16_t *w2, uint16_t *h2, int
     pthread_mutex_unlock(&d->mu);
     return RES_OK;
 }
+// SDK 19 的取输出缓冲属性（#955：大金刚新版本导入它；nxnative 同名实现，MIT）：时间前多一个 nn::movie::ColorSpace*，9 个参数、序号在第一个栈槽
+//   （游戏 AAPCS64 每个栈参数占 8 字节，苹果 arm64 按自然宽度紧排：声明成 u64）。颜色空间是服务按 32 位填的值，宿主写 0（nxnative 核过一款游戏两处调用附近都不读它、
+//   NV12 自己转）。没接它时：初始化走宿主、取属性走回 sdk 原路径，sdk 读它从没建过的解码器状态 → 空指针（#955 每局都在宿主接管 VP9 后一帧崩在 sdk 里）
+static Result cv_props19(uint16_t *w, uint16_t *h, uint16_t *w2, uint16_t *h2, uint32_t *cs, int64_t *pts, uint8_t *eos, void *t, uint64_t i) {
+    if (cs) *cs = 0;
+    return cv_props(w, h, w2, h2, pts, eos, t, (uint32_t)i);
+}
 
 // SDK 入口（每种编解码一套；解码器对象 +8 是「可提交」SystemEvent）。栈上传的 32 位参数（输出格式 / 输出模式）声明成 u64：Switch 每个栈参数占 8 字节
 static Result h_fini(void *t) { cv_fini(t); return RES_OK; }
@@ -1062,7 +1073,9 @@ static void h_stop(void *t) { cv_flush(t, 1); }
 static Result h_flushr(void *t) { return cv_flush(t, 0); }
 #define CV_INITS(C, K) \
     static Result h_init_tm_##C(void *t, void *work, uint64_t wn, uint64_t a, uint32_t w, uint32_t h, uint32_t rate, uint32_t in, uint64_t out, uint64_t mode) { (void)work; (void)wn; (void)a; (void)rate; (void)in; (void)out; (void)mode; return cv_init(t, K, w, h); } \
-    static Result h_init_rm_##C(void *t, uint64_t a, uint32_t w, uint32_t h, uint32_t rate, uint32_t in, uint32_t out, uint32_t mode) { (void)a; (void)rate; (void)in; (void)out; (void)mode; return cv_init(t, K, w, h); }
+    static Result h_init_rm_##C(void *t, uint64_t a, uint32_t w, uint32_t h, uint32_t rate, uint32_t in, uint32_t out, uint32_t mode) { (void)a; (void)rate; (void)in; (void)out; (void)mode; return cv_init(t, K, w, h); } \
+    /* SDK 19 的按远程内存初始化（`mmttj`，nxnative 同名实现）：图像尺寸前两个大小参数，8 个都在寄存器里 */ \
+    static Result h_init_mm_##C(void *t, uint64_t a, uint64_t b, uint32_t w, uint32_t h, uint32_t rate, uint32_t in, uint32_t out) { (void)a; (void)b; (void)rate; (void)in; (void)out; return cv_init(t, K, w, h); }
 CV_INITS(vp9, CV_VP9)
 CV_INITS(vp8, CV_VP8)
 CV_INITS(av1, CV_AV1)
@@ -1104,6 +1117,15 @@ static const struct { const char *n; void *f; } g_cv_names[] = {
     CV_SET_OLD("Vp9", vp9)
     CV_SET_OLD("Vp8", vp8)
     CV_SET_OLD("Av1", av1)
+    // SDK 19 的两种形式（#955；名字照游戏导入表原样抄）：初始化 `mmttj`（H.264 另带参数集在栈上，宿主不用）、取属性带 ColorSpace*
+    { "_ZN2nn5codec20InitializeVp9DecoderEPNS0_14Vp9DecoderTypeEmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatE", (void *)h_init_mm_vp9 },
+    { "_ZN2nn5codec35GetVp9DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_5movie10ColorSpaceEPNS_8TimeSpanEPbPNS0_14Vp9DecoderTypeEj", (void *)cv_props19 },
+    { "_ZN2nn5codec20InitializeVp8DecoderEPNS0_14Vp8DecoderTypeEmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatE", (void *)h_init_mm_vp8 },
+    { "_ZN2nn5codec35GetVp8DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_5movie10ColorSpaceEPNS_8TimeSpanEPbPNS0_14Vp8DecoderTypeEj", (void *)cv_props19 },
+    { "_ZN2nn5codec20InitializeAv1DecoderEPNS0_14Av1DecoderTypeEmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatE", (void *)h_init_mm_av1 },
+    { "_ZN2nn5codec35GetAv1DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_5movie10ColorSpaceEPNS_8TimeSpanEPbPNS0_14Av1DecoderTypeEj", (void *)cv_props19 },
+    { "_ZN2nn5codec21InitializeH264DecoderEPNS0_15H264DecoderTypeEmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatEPKvm", (void *)h_init_mm_h264 },
+    { "_ZN2nn5codec36GetH264DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_5movie10ColorSpaceEPNS_8TimeSpanEPbPNS0_15H264DecoderTypeEj", (void *)cv_props19 },
     { "_ZN2nn5codec21InitializeH264DecoderEPNS0_15H264DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatEPKvm", (void *)h_init_tm_h264 },
     { "_ZN2nn5codec21InitializeH264DecoderEPNS0_15H264DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatEPKvm", (void *)h_init_rm_h264 },
     { "_ZN2nn5codec26InitializeDecoderImagePoolEPNS0_25VideoDecoderImagePoolTypeEPvmRKNS0_27VideoDecoderImagePreferenceEjNS0_9CodecModeE", (void *)cv_pool_init },
@@ -1240,6 +1262,7 @@ static Result cv_lib_ok(void) { return RES_OK; }
 static int ns2_pure(const char *n) {
     static const char *const pre[] = {
         "_ZN2nn5codec25MakeDecodeImagePreference", "_ZN2nn5codec25MakeEncodeImagePreference",   // 只查表（火纹 sdk+0x330fd0）
+        "_ZN2nn5codec3sdk34MakeDecodeImagePreferenceForCompat",   // SDK 19：同 MakeDecodeImagePreference、输出格式少几种（nxnative 核过 sdk+0x2c6040），布局一样，照样留给 SDK
         // 编码器里只算尺寸 / 取对象内地址的（模拟执行正常返回、调用图不达 gsv；GetH264EncoderOutputReadyEvent = 对象 + 8，火纹 sdk+0x333e80）：
         //   Pokopia subsdk0 导入它们，可能只问尺寸不真编码——做成红桩会把原本能过的路堵死
         "_ZN2nn5codec30CalculateH264EncoderWorkBuffer", "_ZN2nn5codec30GetH264EncoderOutputReadyEvent", "_ZN2nn5codec36GetEncoderImagePoolNativeImageHandle",

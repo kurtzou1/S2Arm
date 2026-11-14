@@ -36,6 +36,7 @@
 #include "nvn_refl.h"
 #include "nvn_fmt_info.h"   // #529 lb_fill：客体格式是不是定点深度
 #include "nvn_red.h"   // sampler reduction / LOD bias where the GPU has none: the variant's function constants and table entries (se_need / se_bind)
+#include "vp_prog_pick.h"   // #674: find the guest program that still holds a shader's code / control (vp_ask)
 #include "../../../metal/gal_samp_caps.h"   // whether this GPU reduces / biases natively (#800; the generic path's same test)
 #include "nvn_cover.h"
 #include "dmsh_chain.h"   // DMSH_CHAIN: the translation chain version of the B shader library expected by this source tree, one for every game (beside this file, tools/dmsh_chain.py --header)
@@ -84,6 +85,7 @@ static uint64_t c2_handle(int stage, unsigned b);   // the handle c2 holds at by
 #include <errno.h>
 #include <execinfo.h>
 #include <os/lock.h>
+#include "../../host/addr_wait.h"   // the uniform copy hand-off (nvn_rec.h ubc_wait)
 // Function parameters in this file are never retained again in the callee (the caller / global tables already hold them, and lifetime is guaranteed by defer_obj_release): saves a retain / release pair per call on the hot path
 #pragma clang attribute push(__attribute__((objc_externally_retained)), apply_to = function)
 
@@ -130,6 +132,9 @@ static id<MTLFence> g_fence3;   // Metal 3: orders the encoders of g_q3, across 
 static dispatch_queue_t g_feedback_q;
 static _Atomic uint32_t g_present_qos;
 #define ALLOC_MAX 8
+enum { ALLOC_SHARE = 64 };   // submissions one allocator serves before the next takes another (see g_alloc_frame)
+// The most submissions nvn_be_sub_begin lets stand uncompleted: ALLOC_MAX allocators of ALLOC_SHARE submissions each. It sizes what is held per submission in flight (VIS_RING)
+enum { SUB_FLIGHT_MAX = ALLOC_MAX * ALLOC_SHARE };
 static id<MTL4CommandAllocator> g_alloc4[ALLOC_MAX]; static int g_alloc_n, g_alloc_cur;   // Command allocator pool of the main submission: at start pick one the GPU has finished with, create a new one if there is none (wait only at the cap)
 static id<MTL4CommandAllocator> g_up_alloc4[3];
 static id<MTL4CommandAllocator> g_present_alloc4[3];
@@ -584,6 +589,8 @@ static void udc_selftest(void) {
         MLOG("UDC self-check %s %s %lux%lu first value %08x, values differing from it %lu / %lu", g_dev.name.UTF8String, depth ? "Depth32F_S8" : "RGBA8", (unsigned long)w, (unsigned long)h, px[0], (unsigned long)bad, (unsigned long)(w * h));
     }
 }
+static void bcd_prewarm(void);   // no BC: start building the decompression pipeline (defined with bcd_pso)
+static void ixc_prewarm(void); static void tensor_sq_prewarm(void);   // Switch 2: start building the indirect conversion / tensor stand-in kernels (defined with ixc_run / tensor_sq_pass)
 void mtl_init(void) {
     if (g_dev) return;
     const char *vbc = getenv("DM_NVN_VBUF_CACHE"); g_vbuf_cache = !(vbc && !strcmp(vbc, "0"));
@@ -685,6 +692,8 @@ void mtl_init(void) {
     MLOG("Metal device %s", g_dev.name.UTF8String);
     udc_selftest();
     warm_announce();
+    bcd_prewarm();   // S2Arm #582: no BC, the decompression pipeline is built in the background (see bcd_ready)
+    ixc_prewarm(); tensor_sq_prewarm();   // S2Arm #674: Switch 2, the two kernels compiled from source are built in the background (see ixc_ready / tensor_sq_ready)
 }
 
 
@@ -814,9 +823,11 @@ static void nvn_be_pool_add_body(const void *mem, uint64_t size) {
     pthread_mutex_unlock(&g_mu);
 }
 
+static dispatch_queue_t ph_queue(void);   // first-upload page hashes (see NvPkg ph)
 static void nvn_be_pool_del_body(const void *mem);
 void nvn_be_pool_del(const void *mem) { @autoreleasepool { nvn_be_pool_del_body(mem); } }
 static void nvn_be_pool_del_body(const void *mem) {
+    dispatch_sync(ph_queue(), ^{});   // first-upload hashes still reading guest memory (see NvPkg ph): the game frees the pool's memory once this returns
     g_reg_gen++;
     pthread_mutex_lock(&g_mu);
     // The no-copy buffer goes through deferred release (out of the residency set and unreferenced after submitted commands complete). It used to be removed only from g_keep while the residency set still held a strong reference: after the pool was freed the buffer stayed alive wrapping that guest memory,
@@ -995,8 +1006,11 @@ typedef struct { void *buf; uint32_t slot; uint64_t fence; } vis_slot;
 typedef struct { int n; uint64_t base; vis_slot s[]; } vis_list;
 #define VIS_SLOTS 8192
 typedef struct { __strong id<MTLBuffer> buf; uint64_t fence; } vis_buf;
-// One visibility buffer per submission in flight, as many as command allocators: with 4, Age of Calamity (about twelve submissions a frame) waited in nvn_be_sub_begin for the previous frame's GPU work; its first battle went from 18.0 to 16.9 ms a frame on the Mac
-enum { VIS_RING = ALLOC_MAX };
+// One visibility buffer per counting submission in flight. It was one per allocator, taken at every submission's start: with 4, Age of Calamity (about twelve submissions a frame) waited in nvn_be_sub_begin for the previous frame's GPU work; its first battle went from 18.0 to 16.9 ms a frame on the Mac
+// Since a frame's submissions share a command allocator (g_alloc_frame), more submissions are in flight than allocators, so the ring holds one for every submission that can be
+// in flight and a submission takes one only at its first pass that counts samples (vis_take): most count none (a compute piece, a copy, a piece between two waits). It grows on
+// demand, each buffer kept resident and reused once its submission's fence passes (SUB_FLIGHT_MAX x 64 KiB = 32 MiB at most). Ported from nxnative (MIT)
+enum { VIS_RING = SUB_FLIGHT_MAX };
 static vis_buf g_vis_ring[VIS_RING]; static int g_vis_ring_n, g_vis_ring_i = -1;
 static id<MTLBuffer> g_vis; static uint32_t g_vis_n;   // This submission's visibility buffer and number of slots used
 static int vis_in_ring(id<MTLBuffer> b) { for (int i = 0; i < g_vis_ring_n; i++) if (g_vis_ring[i].buf == b) return 1; return 0; }
@@ -1007,6 +1021,20 @@ static uint64_t g_cnt_report[32], g_cnt_reset[32];       // Report / reset count
 static void vis_clear(void) { for (int i = 0; i < g_nvs; i++) CFRelease(g_vs[i].buf); g_nvs = 0; g_vis_base = 0; g_vis_cur = -1; }
 // Fold the slots whose submission has completed into g_vis_base (encode thread; g_done read without the lock as elsewhere: a stale value only folds less).
 // Called before a report snapshots the table and before a ring visibility buffer is reused (sub begin), so a slot is never read after its buffer was handed to a new submission.
+static void vis_fold(void);
+// A submission's visibility buffer, taken from the ring at its first pass that counts samples. The ring holds one for every submission that can be in flight (VIS_RING), so one is
+// always free; were none, the pass takes a buffer of its own (rp_begin), retired after the submission as an overflow buffer is, rather than wait for the GPU inside it
+static void vis_take(void) {
+    if (g_vis_ring_i >= 0) return;
+    int pick = -1;
+    for (int i = 0; i < g_vis_ring_n; i++) if (g_vis_ring[i].fence <= g_done) { pick = i; break; }
+    if (pick < 0 && g_vis_ring_n < VIS_RING) pick = g_vis_ring_n++;
+    if (pick < 0) return;
+    vis_fold();   // the picked buffer's submission has completed: its slots still in the table are read now, before this submission overwrites them
+    g_vis_ring_i = pick; g_vis_ring[pick].fence = UINT64_MAX;
+    if (!g_vis_ring[pick].buf) { g_vis_ring[pick].buf = [g_dev newBufferWithLength:VIS_SLOTS * 8 options:MTLResourceStorageModeShared]; res_add(g_vis_ring[pick].buf); }
+    g_vis = g_vis_ring[pick].buf; g_vis_n = 0;
+}
 static void vis_fold(void) {
     uint64_t done = g_done; int j = 0;
     for (int i = 0; i < g_nvs; i++) {
@@ -1193,6 +1221,11 @@ enum { GSR_N = 16384 };
 static struct { uint64_t fence, lo, hi; } g_gsr[GSR_N]; static uint64_t g_gsr_n; static int g_gml_on;
 static pthread_mutex_t g_gsr_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_alloc_fence[ALLOC_MAX]; static uint64_t g_alloc_waits, g_alloc_grown;
+// The submissions of one frame share an allocator: Metal lets an allocator serve command buffers one after another and asks only that all of them are complete before its reset,
+// which is what its fence, the last one's, says. So the pool holds an allocator per frame in flight, not per submission. The queue replays a guest submission in pieces, so a game
+// makes many small ones a frame (Ocarina of Time 28-37): the pool's 8 ran out about once a frame and the submit thread waited for the GPU (real device: 1,600-7,500 waits a run).
+// ALLOC_SHARE bounds an allocator's memory while no frame ends (a loading screen): after that many submissions the next takes another. Ported from nxnative (MIT)
+static uint64_t g_alloc_frame, g_alloc_shared, g_alloc_shares; static int g_alloc_used;   // the current allocator: the frame it was taken in, the submissions it has served since its reset; submissions that shared one so far
 int nvn_be_wait(uint64_t fence, uint64_t timeout_ns);
 static void up_flush(void);
 // The upload batch belongs only to the submit thread (the thread that called nvn_be_sub_begin): the batch's encoder cannot be used across threads. Every entry point asserts current thread == submit thread,
@@ -1254,14 +1287,17 @@ void nvn_be_sub_begin(void) {
     // pick an allocator the GPU has finished with; if all are in use create a new one; only at the cap wait for the oldest one. How far ahead it runs is bounded by the wait where the game acquires the swapchain texture, same as the old interface.
     // Metal 3 has no allocators: every submission takes a fresh command buffer (m3_cb)
     if (!g_m3) {
-        int alloc_i = -1; uint64_t done = g_done;
-        for (int i = 0; i < g_alloc_n; i++) if (g_alloc_fence[i] <= done) { alloc_i = i; break; }
+        int alloc_i = -1; uint64_t done = g_done, alloc_frame = atomic_load(&g_cur_frame);
+        int alloc_share = g_alloc_used && g_alloc_frame == alloc_frame && g_alloc_shared < ALLOC_SHARE;
+        if (alloc_share) alloc_i = g_alloc_cur;
+        for (int i = 0; alloc_i < 0 && i < g_alloc_n; i++) if (g_alloc_fence[i] <= done) { alloc_i = i; break; }
         if (alloc_i < 0 && g_alloc_n < ALLOC_MAX) { NSError *ae = nil; MTL4CommandAllocatorDescriptor *ad = [MTL4CommandAllocatorDescriptor new];
             g_alloc4[g_alloc_n] = [g_dev newCommandAllocatorWithDescriptor:ad error:&ae]; if (!g_alloc4[g_alloc_n]) MDIE("failed to create a new MTL4CommandAllocator: %s", ae.localizedDescription.UTF8String);
             alloc_i = g_alloc_n++; g_alloc_grown++; }
         if (alloc_i < 0) { alloc_i = 0; for (int i = 1; i < g_alloc_n; i++) if (g_alloc_fence[i] < g_alloc_fence[alloc_i]) alloc_i = i; g_alloc_waits++; nvn_be_wait(g_alloc_fence[alloc_i], UINT64_MAX); }
         g_alloc_cur = alloc_i;
-        [g_alloc4[alloc_i] reset];
+        if (alloc_share) { g_alloc_shared++; g_alloc_shares++; }
+        else { [g_alloc4[alloc_i] reset]; g_alloc_frame = alloc_frame; g_alloc_shared = 1; g_alloc_used = 1; }
         [g_cb beginCommandBufferWithAllocator:g_alloc4[alloc_i]];
     }
     ts_sub_begin(); sub_cut_begin();
@@ -1270,14 +1306,7 @@ void nvn_be_sub_begin(void) {
     if (g_vis && !vis_in_ring(g_vis)) defer_obj_release(g_vis);
     g_npost = 0; g_vis = nil; g_vis_n = 0; g_vis_cur = -1; pend_reset();
     zskip_clear(); g_zskip_count = 0;
-    int pick = -1;
-    for (int i = 0; i < g_vis_ring_n; i++) if (g_vis_ring[i].fence <= g_done) { pick = i; break; }
-    if (pick < 0 && g_vis_ring_n < VIS_RING) pick = g_vis_ring_n++;
-    if (pick < 0) { uint64_t oldest = UINT64_MAX; for (int i = 0; i < VIS_RING; i++) if (g_vis_ring[i].fence < oldest) { oldest = g_vis_ring[i].fence; pick = i; } if (oldest > g_done) nvn_be_wait(oldest, UINT64_MAX); }
-    vis_fold();   // the picked buffer's submission has completed: its slots still in the table are read now, before the new submission overwrites them
-    g_vis_ring_i = pick; g_vis_ring[pick].fence = UINT64_MAX;
-    if (!g_vis_ring[pick].buf) { g_vis_ring[pick].buf = [g_dev newBufferWithLength:VIS_SLOTS * 8 options:MTLResourceStorageModeShared]; res_add(g_vis_ring[pick].buf); }
-    g_vis = g_vis_ring[pick].buf;
+    g_vis_ring_i = -1;   // its visibility buffer is taken by its first pass that counts samples (vis_take)
     void arena_begin(void); arena_begin();
 }
 
@@ -2536,7 +2565,7 @@ void nvn_be_drain(void) { if (mtl_gpu_halted()) { MLOG("GPU 安全停中：后�
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[187];   // RED_ONCE keys 0..186 (186: a packaged texture's storage runs past the end of its memory pool, pkg_upload_ (#819); 183 / 184 / 185: an incompatible Metal texture format view fell back to the base format in rt_view_fmt / attach / clear_tex; 182: a block-compressed texture whose GPU writer resolved to its own Metal format, bcal_copy; 181: a texture view whose target and layer range Metal cannot express (#199), tex_by_id; 179 / 180: a pass's own depth attachment sampled in it could not be copied / viewed (#387); 178: a slot read on-chip by the first draw of a pass was not opened loaded; 177: a compute dispatch's binding ended the shared encoder again on the retry; 175 / 176: a block-compressed texture's GPU-written bytes not taken: no host texture of the uncompressed writer / no staging buffer, bcal_sync; 174: a converted vertex attribute stream address in no memory pool, vconv_bind; 172 / 173: a pool table for handles traced to no slot could not be allocated / grown, pool_tab_new / pool_tab_put_n; 171: a first-invocation store skipped, dispatch; 170: an sRGB / linear view not made again on its upgraded parent, tex_upgrade; 169: unused since 11-07 (a not-loaded color attachment written: g_noload_wrong, first 8 lines); 167 / 168: a storage buffer address the pools do not hold, slot / handle in a uniform buffer; 166: a texture turning packaged whose old host texture has another shape, its GPU-written texels not carried over, carry_gpu) (162: a vertex buffer address the pools do not hold, bind_vbufs) (160 / 161 / 163–165: tensor-core network stand-in, nvn_tensor.inc; 147–159 left for the NVN2 task / mesh branch) (143–146: NVN2 DLSS → MetalFX, nvn_dlss.inc) (139–142: folded linear textures: tex_linear, se_want, se_bind, copies / clears into one) (137 / 138: a GL texture an NVN texture is built from has no usable storage / no matching NVN format) (136: a draw's binding ended its pass twice) (134 / 135: alpha test / multisampling off the fragment shader cannot take); same-pass feedback snapshot too large 127, native image atomics use 128/129, same-pass feedback view narrowing 133
+static int g_red_once[188];   // RED_ONCE keys 0..187 (187: a multisample count the GPU does not support, stepped down, mtl_samples_supported (#903); 186: a packaged texture's storage runs past the end of its memory pool, pkg_upload_ (#819); 183 / 184 / 185: an incompatible Metal texture format view fell back to the base format in rt_view_fmt / attach / clear_tex; 182: a block-compressed texture whose GPU writer resolved to its own Metal format, bcal_copy; 181: a texture view whose target and layer range Metal cannot express (#199), tex_by_id; 179 / 180: a pass's own depth attachment sampled in it could not be copied / viewed (#387); 178: a slot read on-chip by the first draw of a pass was not opened loaded; 177: a compute dispatch's binding ended the shared encoder again on the retry; 175 / 176: a block-compressed texture's GPU-written bytes not taken: no host texture of the uncompressed writer / no staging buffer, bcal_sync; 174: a converted vertex attribute stream address in no memory pool, vconv_bind; 172 / 173: a pool table for handles traced to no slot could not be allocated / grown, pool_tab_new / pool_tab_put_n; 171: a first-invocation store skipped, dispatch; 170: an sRGB / linear view not made again on its upgraded parent, tex_upgrade; 169: unused since 11-07 (a not-loaded color attachment written: g_noload_wrong, first 8 lines); 167 / 168: a storage buffer address the pools do not hold, slot / handle in a uniform buffer; 166: a texture turning packaged whose old host texture has another shape, its GPU-written texels not carried over, carry_gpu) (162: a vertex buffer address the pools do not hold, bind_vbufs) (160 / 161 / 163–165: tensor-core network stand-in, nvn_tensor.inc; 147–159 left for the NVN2 task / mesh branch) (143–146: NVN2 DLSS → MetalFX, nvn_dlss.inc) (139–142: folded linear textures: tex_linear, se_want, se_bind, copies / clears into one) (137 / 138: a GL texture an NVN texture is built from has no usable storage / no matching NVN format) (136: a draw's binding ended its pass twice) (134 / 135: alpha test / multisampling off the fragment shader cannot take); same-pass feedback snapshot too large 127, native image atomics use 128/129, same-pass feedback view narrowing 133
 // The key must be a constant inside the table: a key past the end wrote into the statics next to it (11-05: nvn_tensor.inc used 160 / 161 with 147 slots)
 #define RED_ONCE(k, ...) do { _Static_assert((k) >= 0 && (k) < (int)(sizeof g_red_once / sizeof g_red_once[0]), "RED_ONCE key outside g_red_once"); if (!g_red_once[k]++) MLOG("【红】 " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
@@ -2865,10 +2894,11 @@ int nvn_be_tex_from_gl(tex_t *t, uint32_t gl_name) { @autoreleasepool {
 // Host record of a packaged texture: the current MTLTexture, the upload stamp, and the global write generation at the last check
 // spare: the texture the last re-upload replaced, kept resident and written by the next re-upload once the GPU has passed spare_fence (a texture the CPU rewrites every frame, a movie frame,
 // alternates between two textures instead of allocating one per frame: Link's Awakening's title movie made and freed an 8 MB texture a frame)
+static void ph_free(uint64_t *ph, uint32_t n);
 @interface NvPkg : NSObject { @public id<MTLTexture> tex, spare, view; uint64_t stamp, seen, hash, spare_fence, vgen, vseen, check_epoch; const void *span; int sparse, vbase; uint64_t *ph, *pgpu; uint32_t nph; } @end   // hash: full hash of the uploaded content under DM_NVN_DIRTYCHECK; span: its tracked range (nvn_dirty_span, NULL = untracked);
 // sparse: in a sparse virtual pool, read through its page table (hle_nvn.c nvn_sparse_*), vgen the page table's generation at the upload and vseen at the last look; view: what it is bound as (sparse_view)
 @implementation NvPkg
-- (void)dealloc { res_remove(tex); if (spare) res_remove(spare); free(ph); free(pgpu); }
+- (void)dealloc { res_remove(tex); if (spare) res_remove(spare); ph_free(ph, nph); free(pgpu); }
 @end
 static uint64_t g_pkg_uploads, g_pkg_reuploads, g_pkg_miss, g_pkg_same, g_pkg_gpu_writes, g_pkg_gpu_kept, g_pkg_partial;
 // pgpu (S2Arm 10-25): per host page, the dirty-page generation when the GPU last wrote the texture's bytes there (a copy or clear into it; nvn_dirty_now at encoding, which is the game's submission).
@@ -2878,6 +2908,28 @@ static uint64_t g_pkg_uploads, g_pkg_reuploads, g_pkg_miss, g_pkg_same, g_pkg_gp
 // host pages are 16 KB on Apple systems and NVN resources only 4 KB aligned, so a page holds the edge of a texture and other data the CPU rewrites every frame. Mario Kart 8 Deluxe re-uploaded
 // whole textures on such pages (a 2048x2048 one of 32 MB among them) about 72,000 times in a run, 2,000 of 2,000 with the same bytes (DM_NVN_DIRTYCHECK), and the phone ran at 4.4 W instead of
 // 2.4 - 3.4. Before a re-upload tex_mtl_ hashes the texture's bytes in the written pages only and keeps the upload when they all match
+// #674: the first upload's hashes are taken on a background queue (ph_queue), not on the submit thread. The first CPU read of a texture's storage at the host's address faults once per
+//   host page: the game filled it through another mapping (an alias of the same pages, or a GPU copy), so this address has no page table entries yet. 0400486024DEC000 loading a scene
+//   uploads 643 textures (332 MB, 21,900 pages) in one frame and their hashes took 124 ms there, 22,000 page faults and 83 ms of it in the kernel; the same pages hashed again took 24 ms.
+//   The faults serialise in the kernel (hashing on several cores at once took longer, 150 ms), so the work is moved off the submit thread, not split.
+//   ph then holds nph + 1 words: the last is the state (PH_PEND / PH_OK / PH_BAD). The background hash runs after the stamp, but possibly after the GPU already read the texture: a page
+//   written in between would put the new bytes in the hash and a later check would keep the old upload. So when it is done it asks the dirty-page tracking whether any page was
+//   written since the stamp, and if so the hashes are PH_BAD (the next check re-uploads the whole texture, as without hashes). Re-uploads still hash on the submit thread: a texture
+//   sharing a page with data the CPU rewrites every frame (the Mario Kart case above) would otherwise often see its background hash spoiled and never get the same-bytes skip.
+//   Everything that reads or frees ph waits for its hash first (ph_usable / ph_free); a pool waits for all of them before it goes (nvn_be_pool_del: the hash reads its memory)
+enum { PH_OK = 0, PH_PEND = 1, PH_BAD = 2 };
+static dispatch_queue_t ph_queue(void) {
+    static dispatch_queue_t q; static dispatch_once_t once;
+    dispatch_once(&once, ^{ q = dispatch_queue_create("dm.nvn.ph", s2a_qos_queue_attr(DISPATCH_QUEUE_SERIAL, S2A_QOS_UPLOAD_HASH)); });
+    return q;
+}
+static _Atomic uint64_t *ph_state(uint64_t *ph, uint32_t n) { return (_Atomic uint64_t *)&ph[n]; }
+static int ph_usable(uint64_t *ph, uint32_t n) {   // waits for a background hash still running; 0 = no usable hashes (none taken, or spoiled by a write)
+    if (!ph) return 0;
+    if (atomic_load_explicit(ph_state(ph, n), memory_order_acquire) == PH_PEND) dispatch_sync(ph_queue(), ^{});   // serial queue: everything queued before is done
+    return atomic_load_explicit(ph_state(ph, n), memory_order_acquire) == PH_OK;
+}
+static void ph_free(uint64_t *ph, uint32_t n) { if (ph) { (void)ph_usable(ph, n); free(ph); } }
 static uint64_t g_pfv_upgrades;
 // DM_NVN_DIRTYCHECK=1 (diagnostic, compared against ground truth): fully hash the pool content on every use; changed but not detected by dirty-page tracking = a missed detection
 static int dirtycheck(void) { static int v = -1; if (v < 0) v = getenv("DM_NVN_DIRTYCHECK") != NULL; return v; }
@@ -2917,11 +2969,29 @@ static id<MTLComputePipelineState> bcd_pso(void) {
         if (!ps) { failed = 1; MLOG("【红】 no BC: the GPU decompression pipeline cannot be built (%s); BC1–7 fall back to the CPU", e.localizedDescription.UTF8String); } else MLOG("no BC: BC1–7 are decompressed on the GPU"); }
     return ps;
 }
+// S2Arm #582: bcd_pso compiles k_bcd_msl from source (newLibraryWithSource, about 230 ms on an M4 each launch, the system shader cache does not keep it); built at first use it sat on the
+//   upload of the first BC texture. On a GPU without BC mtl_init starts the build in the background (bcd_prewarm); a use waits for it (bcd_ready), so ps / failed are only written on that queue
+//   and only read after the wait. With BC (or before mtl_init) nothing is started and bcd_ready is bcd_pso
+static dispatch_group_t g_bcd_pre;   // the background build, NULL = not started
+static void bcd_prewarm(void) { if (!no_bc() || g_bcd_pre) return; g_bcd_pre = dispatch_group_create(); dispatch_group_async(g_bcd_pre, s2a_qos_global(S2A_QOS_SHADER_PREFETCH), ^{ (void)bcd_pso(); }); }
+static id<MTLComputePipelineState> bcd_ready(void) { if (g_bcd_pre) dispatch_group_wait(g_bcd_pre, DISPATCH_TIME_FOREVER); return bcd_pso(); }
 // GPU decompression applies (the texture is made shader-writable with format views; the upload still needs pool-backed storage, otherwise it decodes on the CPU)
-static int bc_gpu_dec(const tex_t *t) { uint32_t upf; int ubpp; return fmt_unpack(t->d.format, &upf, &ubpp) && t->d.target != 2 && bcd_fmt(t->d.format) && bcd_pso(); }
+static int bc_gpu_dec(const tex_t *t) { uint32_t upf; int ubpp; return fmt_unpack(t->d.format, &upf, &ubpp) && t->d.target != 2 && bcd_fmt(t->d.format) && bcd_ready(); }
 typedef struct { __unsafe_unretained id<MTLBuffer> src, params; size_t poff; uint32_t bw, bh; __unsafe_unretained id<MTLTexture> view, base; } up_dec;   // view / base: held by g_up_texs within the batch, the view afterwards by defer_obj_unref until the GPU finishes
 static up_dec *g_up_decs; static int g_nup_decs, g_up_deccap;
 #include "nvn_rscale.inc"   // S2Arm internal resolution (S2A_RES_SCALE): state, eligibility, canvas sizes
+// Multisample count the GPU can make: NVN games ask for 8x (a novel game's render targets on an iPhone 13 Pro Max, #903), which Apple's A15 and earlier iPhone GPUs do not
+//   support (they take 1 / 2 / 4); an unsupported count is a Metal validation assertion that aborts the process. Step down to the largest supported count not above the
+//   request. Render passes, pipelines and resolves already take the count from the Metal texture (g_pass.samples), so they follow; a shader reading sample index >= the
+//   new count reads an undefined sample (logged once)
+static NSUInteger mtl_samples_supported(const tex_t *t) {
+    NSUInteger want = t->d.samples ? t->d.samples : 1, n = want;
+    while (n > 1 && ![g_dev supportsTextureSampleCount:n]) n >>= 1;
+    if (n != want) RED_ONCE(187, "multisample count %lu not supported by this GPU: created with %lu samples (first case ser=%llu %u×%u)", (unsigned long)want, (unsigned long)n,
+                            (unsigned long long)t->serial, t->d.width, t->d.height);
+    return n;
+}
+
 #include "../../texture_extent.inc"
 static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
     uint32_t pf = 0; uint8_t swz[4];
@@ -2941,8 +3011,8 @@ static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
         case 2: d.textureType = MTLTextureType3D; d.depth = t->d.depth; break;
         case 3: d.textureType = MTLTextureType2DArray; d.arrayLength = t->d.height; d.height = 1; break;
         case 4: d.textureType = MTLTextureType2DArray; d.arrayLength = t->d.depth; break;
-        case 5: d.textureType = MTLTextureType2DMultisample; d.sampleCount = t->d.samples; d.mipmapLevelCount = 1; break;
-        case 6: d.textureType = MTLTextureType2DMultisampleArray; d.sampleCount = t->d.samples; d.arrayLength = t->d.depth; d.mipmapLevelCount = 1; break;
+        case 5: d.textureType = MTLTextureType2DMultisample; d.sampleCount = mtl_samples_supported(t); d.mipmapLevelCount = 1; break;
+        case 6: d.textureType = MTLTextureType2DMultisampleArray; d.sampleCount = mtl_samples_supported(t); d.arrayLength = t->d.depth; d.mipmapLevelCount = 1; break;
         // Cube textures are created as 6-layer 2D arrays and sampled through cube / cube array views made by tex_fit: Metal only allows cube array views of a 2D array base texture (not of a cube base).
         // The Legend of Zelda: Breath of the Wild has 1512 shaders that sample the environment light probes as a cube array while a single cube texture is bound (texture ID 1064 onwards): with mismatched types the reads are undefined, and every lit surface came out black
         case 8: d.textureType = MTLTextureType2DArray; d.arrayLength = 6; break;
@@ -3131,7 +3201,7 @@ static void up_flush(void) {
     if (g_nup_decs) {   // no BC, GPU decompression (up_dec): after the deswizzles that wrote the blocks; the decoded textures take no copy, so this runs before the copies' encoder
         id e = [g_up_cb computeCommandEncoder]; g_up_ce = e;
         if (g_m3) m3_wait(e, 0, 0); else { enc_full_barrier_begin(e); [e setArgumentTable:g_up_ct]; }
-        [e setComputePipelineState:bcd_pso()];
+        [e setComputePipelineState:bcd_ready()];
         for (int i = 0; i < g_nup_decs; i++) { up_dec *x = &g_up_decs[i];
             if (g_m3) { [(id<MTLComputeCommandEncoder>)e setBuffer:x->src offset:0 atIndex:0]; [(id<MTLComputeCommandEncoder>)e setBuffer:x->params offset:x->poff atIndex:1]; [(id<MTLComputeCommandEncoder>)e setTexture:x->view atIndex:0]; }
             else { [g_up_ct setAddress:x->src.gpuAddress atIndex:0]; [g_up_ct setAddress:x->params.gpuAddress + x->poff atIndex:1]; [(id<MTL4ArgumentTable>)g_up_ct setTexture:x->view.gpuResourceID atIndex:0]; }
@@ -3301,12 +3371,26 @@ static uint64_t span_hash(const uint8_t *m, size_t n) {
 //   unmapped — reading it directly faults once per load into the far-fault emulation, or stops the game where an access cannot be emulated. Read the shadow instead (s2a_far_g2h, the
 //   one address map). Valid for a span inside one host page (a GOB, a page_span piece): the shadow's 2 MiB blocks are page-aligned. Outside the far region the guest address is the host's
 static const uint8_t *host_rd(const uint8_t *g) { const uint8_t *h = s2a_far_g2h((uint64_t)(uintptr_t)g); return h ? h : g; }
-static uint64_t gob_hash(uint64_t g) { return span_hash(host_rd((const uint8_t *)(uintptr_t)(g << 9)), 512); }
+// 宿主能读的存储字节数（#819）：普通池里的贴图截到池尾。按稀疏规则排布的贴图（SPARSE 标志、整页对齐）放进比它小的普通池时，算出的存储（64 KB）越过池尾，
+//   越过的那段是补齐、游戏从不放数据，真机 GPU 也只读贴图真用到的地址；按全长读（逐页哈希 / 写保护 / GPU 去混排源）会读进池后没映射的内存，iPad 上 SIGBUS
+//   （贴图 64×64 ASTC 4×4 7 级、存储 +65536、池 8192）。稀疏池（按页表取）与不在池里的照旧
+int nvn_sparse_pool(const void *pool);
+static uint64_t tex_rd_size(const tex_t *t) {
+    if (!t->pool || !t->pool->mem || nvn_sparse_pool(t->pool)) return t->L.size;
+    const uint8_t *end = t->pool->mem + t->pool->size;
+    if ((const uint8_t *)t->mem < t->pool->mem || (const uint8_t *)t->mem >= end) return t->L.size;
+    return MIN(t->L.size, (uint64_t)(end - (const uint8_t *)t->mem));
+}
 static void page_span(const tex_t *t, size_t k, const uint8_t **lo, size_t *n) {   // the texture's bytes in host page k of its storage (pages counted from the one holding t->mem)
-    uintptr_t pg = nvn_dirty_page_size(), a = (uintptr_t)t->mem, e = a + t->L.size, p0 = a & ~(pg - 1);
+    uintptr_t pg = nvn_dirty_page_size(), a = (uintptr_t)t->mem, e = a + tex_rd_size(t), p0 = a & ~(pg - 1);
     uintptr_t b = MAX(a, p0 + k * pg), c = MIN(e, p0 + (k + 1) * pg); *lo = (const uint8_t *)b; *n = c > b ? c - b : 0;
 }
-static uint32_t page_count(const tex_t *t) { uintptr_t pg = nvn_dirty_page_size(), a = (uintptr_t)t->mem; return t->L.size ? (uint32_t)(((a + t->L.size - 1) & ~(pg - 1)) - (a & ~(pg - 1))) / (uint32_t)pg + 1 : 0; }
+static uint32_t page_count(const tex_t *t) { uintptr_t pg = nvn_dirty_page_size(), a = (uintptr_t)t->mem; uint64_t n = tex_rd_size(t); return n ? (uint32_t)(((a + n - 1) & ~(pg - 1)) - (a & ~(pg - 1))) / (uint32_t)pg + 1 : 0; }
+// 存储 [mem, mem + size) 逐宿主页哈希进 h[0..n)（后台首次上传哈希用，#956）：size 由调用方给（tex_rd_size，已截到池尾），这里不再看池
+static void ph_hash_pages(const uint8_t *mem, uint64_t size, uint32_t n, uint64_t *h) {
+    tex_t pt = {0}; pt.mem = (uint8_t *)mem; pt.L.size = size;   // page_span reads only these two (no pool: tex_rd_size returns size as given)
+    for (uint32_t k = 0; k < n; k++) { const uint8_t *lo; size_t m; page_span(&pt, k, &lo, &m); h[k] = span_hash(host_rd(lo), m); }
+}
 static unsigned tex_layers(const tex_t *t) { return (t->d.target == 4 || t->d.target == 9) ? t->d.depth : t->d.target == 8 ? 6 : t->d.target == 3 ? t->d.height : 1; }   // as pkg_upload_ (a cube array's depth counts layer-faces)
 // Block-linear storage (Tegra X1): each layer holds its levels one after another; a level is rows of blocks, a block 2^tileH GOBs tall and one GOB (64 bytes x 8 rows of format blocks) wide,
 // laid out GOB column after GOB column. So a byte range of one block row is a run of GOB columns: a texel rectangle. fn gets (level, layer, x, y, w, h) in texels for every rectangle [lo, hi)
@@ -3346,13 +3430,13 @@ static void gw_mark(void *u, uint64_t lo, uint64_t hi) {   // pages of storage [
 }
 // A copy or clear wrote texel rectangle (x, y, w, h) of layers [layer0, layer0 + nlayers) of level `level` (w / h 0 = the whole level): note the generation on its pages (see NvPkg pgpu)
 static void pkg_gpu_wrote(const tex_t *t, unsigned level, unsigned layer0, unsigned nlayers, uint32_t x, uint32_t y, uint32_t w, uint32_t h);
-static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture> reuse, uint64_t **ph, uint32_t *nph);
+static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture> reuse, uint64_t **ph, uint32_t *nph, int bg_hash);
 int nvn_host_readable(uint64_t a, uint64_t n);   // hle_nvn.c: guest memory and sparse pools
 int nvn_sparse_pool(const void *pool); uint64_t nvn_sparse_gen(void); uint64_t nvn_sparse_copy(const void *pool, void *dst, uint64_t a, uint64_t n);
 int nvn_sparse_since(const void *pool, uint64_t a, uint64_t n, uint64_t gen, uint64_t stamp); void nvn_sparse_protect(const void *pool, uint64_t a, uint64_t n); int nvn_sparse_mapped(const void *pool, uint64_t a, uint64_t n);
-static id<MTLTexture> pkg_upload(const tex_t *t, uint64_t *stamp, id<MTLTexture> reuse, uint64_t **ph, uint32_t *nph) {   // reuse: a texture of the same description, idle on the GPU, to upload into instead of a new one; ph / nph: per-page hashes (NvPkg), or NULL
+static id<MTLTexture> pkg_upload(const tex_t *t, uint64_t *stamp, id<MTLTexture> reuse, uint64_t **ph, uint32_t *nph, int bg_hash) {   // reuse: a texture of the same description, idle on the GPU, to upload into instead of a new one; ph / nph: per-page hashes (NvPkg), or NULL
     struct timespec a, b; clock_gettime(CLOCK_MONOTONIC, &a);
-    id<MTLTexture> r = pkg_upload_(t, stamp, reuse, ph, nph);
+    id<MTLTexture> r = pkg_upload_(t, stamp, reuse, ph, nph, bg_hash);
     clock_gettime(CLOCK_MONOTONIC, &b); uint64_t d_ = (uint64_t)((b.tv_sec - a.tv_sec) * 1000000000ll + b.tv_nsec - a.tv_nsec);
     atomic_fetch_add(&g_upload_ns, d_); g_up_total_ns += d_;
     return r;
@@ -3408,7 +3492,7 @@ static id<MTLBuffer> up_tex_src(uint64_t addr, uint64_t len, uint64_t *off) {
     g_up_src_n++; g_up_src_bytes += b - a;
     return buf;
 }
-static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture> reuse, uint64_t **ph, uint32_t *nph) {
+static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture> reuse, uint64_t **ph, uint32_t *nph, int bg_hash) {   // bg_hash: take ph on ph_queue (the first upload, see NvPkg ph)
     MTLTextureDescriptor *d = tex_desc(t, 1);
     if (!d) return nil;
     id<MTLTexture> mt = reuse && reuse.pixelFormat == d.pixelFormat && reuse.width == d.width && reuse.height == d.height && reuse.mipmapLevelCount == d.mipmapLevelCount && reuse.textureType == d.textureType
@@ -3417,18 +3501,29 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     if (g_allocprof > 0) { static int n; if (n++ < 30 || n % 500 == 0) MLOG("new texture (%s) #%d ser=%llu %ux%ux%u format %#x target %d levels %u storage %p", __func__, n, (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->d.target, t->d.levels, (void *)t->mem); }
     res_add(mt);   // Both first upload and re-upload register residency here (Metal 4 does not make resources resident automatically; a missed registration = GPU address page fault)
     int sparse = t->pool && nvn_sparse_pool(t->pool);
-    // #819：iPad 上玩 20–40 分钟后在这里读贴图存储时 SIGBUS，四次地址都落在 2 MB 边界（读进了没映射的一段）。存储越过所属池的末尾时记一行（只记一次），
-    //   分清「贴图存储越过池尾」还是「池已释放、贴图还被引用」；只记、不改行为
+    // #819：存储越过所属池的末尾时记一行（只记一次）。读的长度截到池尾（tex_rd_size），不再读进池后没映射的内存
     if (t->pool && !sparse && t->pool->mem && (const uint8_t *)t->mem + t->L.size > t->pool->mem + t->pool->size)
         RED_ONCE(186, "packaged texture ser=%llu %ux%u format %#x levels %u: its storage %#llx +%llu runs %llu bytes past the end of its memory pool %#llx +%llu (read on upload)",
                  (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format, t->d.levels, (unsigned long long)(uintptr_t)t->mem, (unsigned long long)t->L.size,
                  (unsigned long long)((const uint8_t *)t->mem + t->L.size - (t->pool->mem + t->pool->size)), (unsigned long long)(uintptr_t)t->pool->mem, (unsigned long long)t->pool->size);
     if (stamp) {   // no stamp: a one-time upload of content the CPU will not change (tex_init_fill), with no write tracking
-        if (sparse) nvn_sparse_protect(t->pool, (uint64_t)(uintptr_t)t->mem, t->L.size); else nvn_dirty_protect(t->mem, t->L.size);
+        if (sparse) nvn_sparse_protect(t->pool, (uint64_t)(uintptr_t)t->mem, t->L.size); else nvn_dirty_protect(t->mem, tex_rd_size(t));
         *stamp = nvn_dirty_now();
         if (ph && !sparse) {   // after the stamp, before the read: a write in between is after the stamp too, so the next check sees its page (and the hash may hold it, the upload does)
-            uint32_t n = page_count(t); uint64_t *h = realloc(*ph, (size_t)MAX(n, 1u) * sizeof *h);
-            if (h) { for (uint32_t k = 0; k < n; k++) { const uint8_t *lo; size_t m; page_span(t, k, &lo, &m); h[k] = span_hash(host_rd(lo), m); } *ph = h; *nph = n; } else { free(*ph); *ph = NULL; *nph = 0; } } }
+            uint32_t n = page_count(t); uint64_t *h = malloc(((size_t)n + 1) * sizeof *h);   // + 1: the state word (see NvPkg ph); *ph comes in NULL (a new record or a re-upload's own array)
+            if (h && bg_hash) {   // the first upload: hashed on ph_queue (see NvPkg ph)
+                atomic_store_explicit(ph_state(h, n), PH_PEND, memory_order_relaxed);
+                // 长度用 tex_rd_size（截到池尾，#819）：后台块里没有池，按 L.size 全长读会读进池后没映射的内存，iPad 上 SIGBUS（与写保护、页数同一个长度）
+                const uint8_t *mem = t->mem; uint64_t size = tex_rd_size(t), st = *stamp; const void *span = nvn_dirty_span(mem, size);
+                dispatch_async(ph_queue(), ^{
+                    ph_hash_pages(mem, size, n, h);
+                    atomic_thread_fence(memory_order_seq_cst);   // the bytes read above, then the generations: a write the hash saw has its page's generation raised before it
+                    atomic_store_explicit(ph_state(h, n), nvn_dirty_since_span(span, mem, size, st) ? PH_BAD : PH_OK, memory_order_release);
+                });
+                *ph = h; *nph = n;
+            } else if (h) { for (uint32_t k = 0; k < n; k++) { const uint8_t *lo; size_t m; page_span(t, k, &lo, &m); h[k] = span_hash(host_rd(lo), m); }
+                atomic_store_explicit(ph_state(h, n), PH_OK, memory_order_relaxed); *ph = h; *nph = n; }
+            else { *ph = NULL; *nph = 0; } } }
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     unsigned layers = (t->d.target == 4 || t->d.target == 9) ? t->d.depth : t->d.target == 8 ? 6 : t->d.target == 3 ? t->d.height : 1;   // a cube array's depth counts layer-faces (tex_desc)
     uint32_t upf; int ubpp = 0, unp = fmt_unpack(t->d.format, &upf, &ubpp);   // stored in another format (fmt_unpack: BC on a GPU without BC, or expanded): deswizzle, then convert on the CPU; the staging area is sized for the converted data
@@ -3441,9 +3536,9 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     }
     g_bp_up_bytes += total;
     void *mb; uint64_t mo; id<MTLBuffer> upsrc = nil;
-    if ((!unp || gdec) && !sparse && g_nvn_deswz_gpu) { up_begin(); upsrc = up_tex_src((uint64_t)t->mem, t->L.size, &mo); if (upsrc) mb = (__bridge void *)upsrc; }   // a pool that holds only textures stays out of the residency set (up_tex_src)
+    if ((!unp || gdec) && !sparse && g_nvn_deswz_gpu) { up_begin(); upsrc = up_tex_src((uint64_t)t->mem, tex_rd_size(t), &mo); if (upsrc) mb = (__bridge void *)upsrc; }   // a pool that holds only textures stays out of the residency set (up_tex_src)
     int lin = (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) != 0;   // 线性排布（tex_linear_needs_upload）只有 CPU 逐行拷，GPU 去混排不认
-    int use_gpu = (!unp || gdec) && !sparse && g_nvn_deswz_gpu && !lin && (upsrc || nvn_be_addr((uint64_t)t->mem, t->L.size, &mb, &mo));   // 线性排布（tex_linear_needs_upload）只有 CPU 逐行拷，GPU 去混排不认   // a sparse pool's texture is gathered through its page table on the CPU
+    int use_gpu = (!unp || gdec) && !sparse && g_nvn_deswz_gpu && !lin && (upsrc || nvn_be_addr((uint64_t)t->mem, tex_rd_size(t), &mb, &mo));   // 线性排布（tex_linear_needs_upload）只有 CPU 逐行拷，GPU 去混排不认   // a sparse pool's texture is gathered through its page table on the CPU
     if (g_nvn_deswz_gpu && !use_gpu && !sparse && !lin && (!unp || gdec)) RED_ONCE(40, "swizzled texture storage is not in a memory pool; falling back to the CPU");
     if (use_gpu) {
         // The GPU reads the memory pool at execution time, which is closer to a real Switch than a snapshot at CPU upload time; the dirty-page stamp is still taken before encoding, and later writes still trigger a re-upload.
@@ -3633,13 +3728,36 @@ typedef struct { uint64_t bits[8]; uint64_t h[512]; } gpw_blk;   // 256 KB of gu
 typedef struct { uint64_t gen; uint32_t n; uint64_t bits[]; } gpw_dd;   // a texture's subresources (level × layer) already marked whole since generation gen
 static nvn_hmap g_gpw = {.klen = 8}, g_gpw_ser = {.klen = 8};   // guest address >> 18 → gpw_blk *; serial → gpw_dd *
 static pthread_mutex_t g_gpw_mu = PTHREAD_MUTEX_INITIALIZER; static uint64_t g_gpw_skips, g_gpw_gen = 1; static _Atomic uint64_t g_gpw_nblk;
+// 记账和核对时取 GOB 的哈希，不读游戏从没碰过的页（同 mem_any_touched 的判据：匿名页 mincore 两位都是 0 = 没写过，内容一定是 0，哈希就是 512 个 0 的哈希）。
+//   11-13 0400486024DEC000 Mac 读档进场景：新建的渲染目标存储游戏没写过，标记时逐 GOB 读一遍：一帧 553 次标记读 154 MB、在提交线程上 52 ms，
+//   另一帧 63 次标记读 320 MB；两帧的页 9,602 / 9,997 和 20,478 / 20,482 没碰过，每页缺页一次，读过的零页还都计进进程实占。
+//   mincore 按段查（gob_win 缓存一段的结果，GOB 顺着走），查不了的页照读；客体内存文件后备时一律照读（写回文件后丢掉的页两位也是 0，内容在文件里）
+typedef struct { uint64_t a, n; int off; unsigned char v[256]; } gob_win;   // 宿主页 [a, a + n 页) 的 mincore 结果；off = 不查、一律照读
+static uint64_t g_gob_untouched, g_gob_untouched_n;   // 没读的未触碰 GOB 数、有这种 GOB 的记账次数（under g_gpw_mu；诊断行，首 4 次后按 2 的幂）
+static uint64_t gob_zero_hash(void) { static uint64_t h; static dispatch_once_t o; dispatch_once(&o, ^{ static const uint8_t z[512]; h = span_hash(z, sizeof z); }); return h; }
+static gob_win gob_win_new(void) { return (gob_win){.off = s2a_guest_fd() >= 0}; }
+static uint64_t gob_hash_w(gob_win *w, uint64_t g, uint64_t ge) {   // = gob_hash(g)；ge：调用方这一趟走到哪个 GOB 为止（决定往前查多少页）
+    const uint8_t *h = host_rd((const uint8_t *)(uintptr_t)(g << 9));
+    if (w->off) return span_hash(h, 512);
+    uint64_t pg = (uint64_t)getpagesize(), p = (uint64_t)(uintptr_t)h & ~(pg - 1);
+    if (p < w->a || p >= w->a + w->n * pg) {
+        uint64_t n = MIN(((ge - g) * 512 + pg - 1) / pg + 1, (uint64_t)sizeof w->v);
+        if (mincore((void *)(uintptr_t)p, (size_t)(n * pg), (char *)w->v) && (n = 1, mincore((void *)(uintptr_t)p, (size_t)pg, (char *)w->v))) w->v[0] = MINCORE_INCORE;   // 查不了：当碰过、照读
+        w->a = p; w->n = n;
+    }
+    if (!(w->v[(p - w->a) / pg] & (MINCORE_INCORE | MINCORE_PAGED_OUT))) { g_gob_untouched++; return gob_zero_hash(); }
+    return span_hash(h, 512);
+}
 static void gpw_add(void *u, uint64_t lo, uint64_t hi) {   // under g_gpw_mu; u = the texture's storage base: [lo, hi) are offsets from it
-    uint64_t base = (uint64_t)(uintptr_t)u;
+    uint64_t base = (uint64_t)(uintptr_t)u, u0 = g_gob_untouched; gob_win w = gob_win_new();
     for (uint64_t g = (base + lo) >> 9, ge = (base + hi + 511) >> 9; g < ge; g++) {
         uint64_t k = g >> 9; gpw_blk *b = nvn_hm_get(&g_gpw, &k);
         if (!b) { if (!(b = calloc(1, sizeof *b))) MDIE("stale-byte table allocation failed"); nvn_hm_put(&g_gpw, &k, b); atomic_fetch_add(&g_gpw_nblk, 1); }
-        unsigned i = (unsigned)(g & 511); b->bits[i >> 6] |= 1ull << (i & 63); b->h[i] = gob_hash(g);
+        unsigned i = (unsigned)(g & 511); b->bits[i >> 6] |= 1ull << (i & 63); b->h[i] = gob_hash_w(&w, g, ge);
     }
+    if (g_gob_untouched != u0) { uint64_t k = ++g_gob_untouched_n;
+        if (k <= 4 || !(k & (k - 1))) MLOG("stale-byte ledger: GPU write over %p+%#llx, %llu KB of it never touched by the game and not read (%llu marks, %llu MB so far)", (void *)u, (unsigned long long)lo,
+                                         (unsigned long long)((g_gob_untouched - u0) >> 1), (unsigned long long)k, (unsigned long long)(g_gob_untouched >> 11)); }
 }
 static void gpw_unmark(uint64_t g) {   // under g_gpw_mu: GOB g is current again
     uint64_t k = g >> 9; gpw_blk *b = nvn_hm_get(&g_gpw, &k); unsigned i = (unsigned)(g & 511);
@@ -3722,6 +3840,8 @@ typedef struct bcal_e {
     _Atomic uint64_t wser, lgen[16], maxgen;          // 各层最近一次写的代数（0 = 没写过）、其中最大的
     _Atomic int seen;                    // 这段存储上解析过 BC 贴图：再写时 g_ser_gen 前进（③）
     _Atomic uint64_t s_ser, s_gen; const void *_Atomic s_r;   // 最近一次同步：哪张 BC 贴图、同步到的代数、它当时解析成的 Metal 贴图（无锁的「已是最新」判定）
+    void *wtex;                          // 写入者的 Metal 贴图（CFBridgingRetain，g_bcal_mu 下换）：游戏画完就把那张未压缩贴图 Finalize 了，字节只在 GPU 上，按序号 / 共享表都取不到时从这里拷
+                                         //   （11-13 #951：菜单缩略图 320×270 写完即释放，BC 贴图读成全黑）
     struct bcal_e *next_free;
 } bcal_e;
 typedef struct { const void *dst; uint64_t lgen[16]; } bcal_s;   // 一张 BC 贴图已同步到的各层代数：目标 Metal 贴图变了（整张重新上传）就从头来
@@ -3736,6 +3856,7 @@ static int bcal_writer(const tex_t *t) {
     int bw = 1, bh = 1, b = t->mem && !fmt_compressed(t->d.format) ? nvn_fmt_bpb(t->d.format, &bw, &bh) : 0;
     return (b == 8 || b == 16) && bw == 1 && bh == 1 && t->d.target == NVN_TEXTURE_TARGET_2D && t->d.samples <= 1 && t->d.levels <= 16;
 }
+static id<MTLTexture> bcal_src(const tex_t *w);
 static void bcal_note(const tex_t *t, unsigned level) {
     if (g_bcal_off || level >= 16 || !bcal_writer(t)) return;
     uint64_t k = (uint64_t)(uintptr_t)t->mem, sh = bcal_shape(t); unsigned h = bcal_h(k);
@@ -3749,6 +3870,7 @@ static void bcal_note(const tex_t *t, unsigned level) {
         }
         if (e->wser && (e->wpool != t->pool || e->wshape != sh)) { for (int l = 0; l < 16; l++) atomic_store(&e->lgen[l], 0); }   // 另一种形状占了这段存储：之前各层的写不再按它的形状算
         atomic_fetch_add(&e->seq, 1); e->w = *t; e->wpool = t->pool; e->wshape = sh; atomic_store(&e->wser, t->serial); atomic_fetch_add(&e->seq, 1);
+        { id<MTLTexture> m = bcal_src(t); void *old = e->wtex; e->wtex = m ? (void *)CFBridgingRetain(m) : NULL; if (old) CFRelease(old); }   // 换写入者：留住新的那张
         atomic_store_explicit(&g_bcal_wc[h], e, memory_order_release);
         pthread_mutex_unlock(&g_bcal_mu);
     }
@@ -3780,7 +3902,7 @@ static int bcal_has(const tex_t *t) {
 static void bcal_drop_pool(const void *pool) {   // 内存池 Finalize：这段存储上的记账作废（记账进空闲表复用，不释放：无锁读者手里的指针按 key 核对）
     pthread_mutex_lock(&g_bcal_mu);
     for (uint32_t i = 0; i < g_bcal.cap;) { bcal_e *e = g_bcal.vals[i]; uint64_t k; memcpy(&k, g_bcal.keys + (size_t)i * 8, 8);
-        if (e && (const void *)e->wpool == pool) { nvn_hm_del(&g_bcal, &k); e->key = 0; e->next_free = g_bcal_free; g_bcal_free = e; atomic_fetch_sub(&g_bcal_n, 1); } else i++; }
+        if (e && (const void *)e->wpool == pool) { nvn_hm_del(&g_bcal, &k); if (e->wtex) { CFRelease(e->wtex); e->wtex = NULL; } e->key = 0; e->next_free = g_bcal_free; g_bcal_free = e; atomic_fetch_sub(&g_bcal_n, 1); } else i++; }
     for (uint32_t i = 0; i < g_bcal_seen.cap;) { uint64_t k; memcpy(&k, g_bcal_seen.keys + (size_t)i * 8, 8);
         if (g_bcal_seen.vals[i] == pool) nvn_hm_del(&g_bcal_seen, &k); else i++; }
     for (unsigned h = 0; h < BCAL_C; h++) { atomic_store(&g_bcal_wc[h], NULL); atomic_store(&g_bcal_neg[h], 0); atomic_store(&g_bcal_seen_c[h], 0); }
@@ -3829,11 +3951,11 @@ static void gpw_forget(uint64_t serial) {   // the texture is gone: its bytes st
 static int gpw_stale(const uint8_t *mem, uint64_t size, uint64_t **runs, uint64_t *bytes) {
     uint64_t a = (uint64_t)(uintptr_t)mem, e = a + size, *r = NULL; int n = 0, cap = 0; *runs = NULL; *bytes = 0;
     if (!atomic_load_explicit(&g_gpw_nblk, memory_order_relaxed)) return 0;
-    pthread_mutex_lock(&g_gpw_mu);
+    pthread_mutex_lock(&g_gpw_mu); gob_win w = gob_win_new();
     for (uint64_t g = a >> 9, ge = (e + 511) >> 9; g < ge; g++) {
         uint64_t k = g >> 9; gpw_blk *b = nvn_hm_get(&g_gpw, &k); if (!b) { g = (k << 9) + 511; continue; }
         unsigned i = (unsigned)(g & 511); if (!(b->bits[i >> 6] >> (i & 63) & 1)) continue;
-        if (gob_hash(g) != b->h[i]) { gpw_unmark(g); continue; }   // rewritten since (by the CPU or anything else that writes guest memory)
+        if (gob_hash_w(&w, g, ge) != b->h[i]) { gpw_unmark(g); continue; }   // rewritten since (by the CPU or anything else that writes guest memory)
         uint64_t lo = MAX(g << 9, a) - a, hi = MIN((g + 1) << 9, e) - a;
         if (n && r[2 * n - 1] == lo) r[2 * n - 1] = hi;
         else { if (n == cap) { cap = cap ? cap * 2 : 16; if (!(r = realloc(r, (size_t)cap * 2 * sizeof *r))) MDIE("stale run list allocation failed"); } r[2 * n] = lo; r[2 * n + 1] = hi; n++; }
@@ -3908,7 +4030,7 @@ static int tex_init_fill(const tex_t *t, id<MTLTexture> mt) {
                                                                                             (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, (unsigned long long)k); return 0; } }
     free(masked);
     uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-    if (pkg_upload(t, NULL, mt, NULL, NULL) != mt) { free(runs); return 0; }
+    if (pkg_upload(t, NULL, mt, NULL, NULL, 0) != mt) { free(runs); return 0; }
     if (nr) {   // after the fill's copies: pass 1 sizes the zero buffer once (a bigger one replaces it), pass 2 records the copies
         for (int i = 0; i < nr; i++) tex_bytes_gobs(t, runs[2 * i], runs[2 * i + 1], gpw_zero_rect, &z);
         if (!(z.zb = zero_buf(MAX(z.need, (size_t)16)))) MDIE("zero buffer of %zu bytes for stale texels failed", z.need);
@@ -4252,8 +4374,12 @@ static bcal_e *bcal_find(uint64_t k) {   // 这段存储的记账：正向缓存
     pthread_mutex_unlock(&g_bcal_mu); return e;
 }
 // 按层「未压缩贴图 → 缓冲 → BC 贴图」：todo 里的 n 层，拷过的记进 s（g_bcal_mu 下）
-static void bcal_copy(const tex_t *t, id<MTLTexture> dst, NvPkg *pk, const tex_t *ew, const uint64_t elg[16], const unsigned *todo, unsigned n, bcal_s *s) {
+static void bcal_copy(const tex_t *t, id<MTLTexture> dst, NvPkg *pk, const tex_t *ew, const uint64_t elg[16], const unsigned *todo, unsigned n, bcal_s *s, id<MTLTexture> kept) {
     id<MTLTexture> src = bcal_src(ew);
+    // 写入者的贴图对象已经 Finalize（按序号 / 共享表取不到）：用记账时留住的那张。它已移出驻留集：本次提交里重新常驻，提交做完再移出（引用仍由记账留着）
+    if (!src && kept) { src = kept; res_add(src); defer_obj_release(src);
+        static uint64_t nk; if (!nk++) MLOG("block-compressed texture ser=%llu: the uncompressed texture ser=%llu the GPU wrote its storage through is already finalized; its bytes are taken from the Metal texture kept since that write (first case)",
+                                           (unsigned long long)t->serial, (unsigned long long)ew->serial); }
     // 两种取不到分开报，带写入者的格式与尺寸（#472 DQ7 重制光源贴图错：日志只有一句，分不清是哪种，本机按「写入贴图先释放」复现不出）
     if (!src) { RED_ONCE(175, "block-compressed texture ser=%llu: the uncompressed texture ser=%llu (format %#x %ux%u) the GPU wrote its storage through has no host texture, its bytes are not taken", (unsigned long long)t->serial, (unsigned long long)ew->serial, ew->d.format, ew->d.width, ew->d.height); return; }
     if (src.pixelFormat == dst.pixelFormat) { RED_ONCE(182, "block-compressed texture ser=%llu (format %#x %ux%u): the texture ser=%llu (format %#x %ux%u) the GPU wrote its storage through resolved to the same Metal format %lu, not a byte copy; its bytes are not taken", (unsigned long long)t->serial, t->d.format, t->d.width, t->d.height, (unsigned long long)ew->serial, ew->d.format, ew->d.width, ew->d.height, (unsigned long)src.pixelFormat); return; }
@@ -4295,8 +4421,9 @@ static void bcal_sync(const tex_t *t, id<MTLTexture> r) {
     if (!(s = nvn_hm_get(&g_bcal_sync, &t->serial))) { if (!(s = calloc(1, sizeof *s))) MDIE("block-compressed alias table allocation failed"); nvn_hm_put(&g_bcal_sync, &t->serial, s); }
     if (s->dst != (__bridge const void *)dst) { memset(s->lgen, 0, sizeof s->lgen); s->dst = (__bridge const void *)dst; }
     for (unsigned l = 0; l < 16; l++) if (elg[l] > s->lgen[l] && bcal_level_ok(&ew, t, l)) todo[n++] = l;
+    id<MTLTexture> kept = n && pe->wtex && atomic_load(&pe->wser) == ew.serial ? (__bridge id<MTLTexture>)pe->wtex : nil;   // 锁下取强引用（换写入者也在锁下释放旧的）
     pthread_mutex_unlock(&g_bcal_mu);
-    if (n) bcal_copy(t, dst, pk, &ew, elg, todo, n, s);   // 拷不成（没有来源贴图 / 暂存缓冲）也记成已看过：不在每次解析时重试
+    if (n) bcal_copy(t, dst, pk, &ew, elg, todo, n, s, kept);   // 拷不成（没有来源贴图 / 暂存缓冲）也记成已看过：不在每次解析时重试
     atomic_store(&pe->s_ser, t->serial); atomic_store(&pe->s_r, (__bridge const void *)r); atomic_store(&pe->s_gen, mg);   // mg 取在拷之前：其间的新写下次再看
 }
 static id<MTLTexture> tex_mtl(const tex_t *ct) { AP_B; g_tex_mtl_n++; id<MTLTexture> r = tex_mtl_(ct); if (r && ct && fmt_compressed(ct->d.format)) bcal_sync(ct, r); AP_E(4); return r; }
@@ -4367,15 +4494,15 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
             pk->check_epoch = g_pkg_epoch;
             uint64_t now = nvn_dirty_now();
             int tracked = pk->span != NULL;   // kept from the upload: a texture's pool stays registered while the texture lives
-            int clean = tracked && (now == pk->seen || !nvn_dirty_since_span(pk->span, t->mem, t->L.size, pk->stamp));
+            int clean = tracked && (now == pk->seen || !nvn_dirty_since_span(pk->span, t->mem, tex_rd_size(t), pk->stamp));
             if (pk->sparse) { uint64_t g = nvn_sparse_gen(); clean = (now == pk->seen && g == pk->vseen) || !nvn_sparse_since(t->pool, (uint64_t)(uintptr_t)t->mem, t->L.size, pk->vgen, pk->stamp); pk->vseen = g; }
             pk->seen = now;
-            if (!clean && tracked && !pk->sparse && pk->ph) {   // pages written since the upload: the texture's own bytes in them decide (see NvPkg ph)
+            if (!clean && tracked && !pk->sparse && ph_usable(pk->ph, pk->nph)) {   // pages written since the upload: the texture's own bytes in them decide (see NvPkg ph)
                 static uint64_t *bits; static size_t cap;   // submit thread only (up_owner_check)
                 size_t need = (pk->nph + 63) / 64; if (need > cap) { uint64_t *nb = realloc(bits, need * sizeof *bits); if (nb) { bits = nb; cap = need; } }
-                long np = need <= cap ? nvn_dirty_written_pages(pk->span, t->mem, t->L.size, pk->stamp, bits, cap * 64) : -1;
+                long np = need <= cap ? nvn_dirty_written_pages(pk->span, t->mem, tex_rd_size(t), pk->stamp, bits, cap * 64) : -1;   // 页数同 page_count（tex_rd_size）
                 if (np == (long)pk->nph) {
-                    nvn_dirty_protect(t->mem, t->L.size); uint64_t st = nvn_dirty_now();   // protect, stamp, then read (as pkg_upload_): a write after the stamp shows at the next check
+                    nvn_dirty_protect(t->mem, tex_rd_size(t)); uint64_t st = nvn_dirty_now();   // protect, stamp, then read (as pkg_upload_): a write after the stamp shows at the next check
                     static uint64_t *nh, *gens; static size_t ncap;   // the new hashes of the written pages, and every page's write generation (submit thread only)
                     if (pk->nph > ncap) { uint64_t *a = realloc(nh, pk->nph * sizeof *a), *b = a ? realloc(gens, pk->nph * sizeof *b) : NULL; if (a) nh = a; if (b) { gens = b; ncap = pk->nph; } }
                     int changed = 0, gpu = pk->pgpu != NULL;   // the texture holds GPU-written content (pgpu goes with a whole re-upload)
@@ -4414,9 +4541,9 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
                 if (n % 2000 == 0) MLOG("[diag] packaged texture re-uploads: %llu, of which bytes unchanged since the last upload %llu (%.1f MB); largest unchanged ser=%llu %ux%u %.1f MB",
                                         (unsigned long long)n, (unsigned long long)same, same_b / 1048576.0, (unsigned long long)big_ser, big_w, big_h, big_b / 1048576.0);
             }
-            uint64_t st, vg = nvn_sparse_gen(), *nh = NULL; uint32_t nn = 0; id<MTLTexture> nt = pkg_upload(t, &st, reuse, &nh, &nn);
-            if (!nt) free(nh);   // the hashes stay those of the content still uploaded
-            if (nt) { id<MTLTexture> old = pk->tex; pk->tex = nt; free(pk->ph); pk->ph = nh; pk->nph = nn; free(pk->pgpu); pk->pgpu = NULL;   // the new texture holds guest memory only
+            uint64_t st, vg = nvn_sparse_gen(), *nh = NULL; uint32_t nn = 0; id<MTLTexture> nt = pkg_upload(t, &st, reuse, &nh, &nn, 0);
+            if (!nt) ph_free(nh, nn);   // the hashes stay those of the content still uploaded
+            if (nt) { id<MTLTexture> old = pk->tex; pk->tex = nt; ph_free(pk->ph, pk->nph); pk->ph = nh; pk->nph = nn; free(pk->pgpu); pk->pgpu = NULL;   // the new texture holds guest memory only
                 if (pk->spare && pk->spare != nt) defer_obj_release(pk->spare);   // still in use, or of another shape: retired as before
                 if (pk->sparse) sparse_view(pk, t);
                 zb_report(t, pk->sparse ? (unsigned)pk->vbase : 0, "re-upload");
@@ -4428,7 +4555,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
         pk->sparse = t->pool && nvn_sparse_pool(t->pool); pk->vgen = pk->vseen = nvn_sparse_gen();
         uint64_t *gr = NULL, gb = 0; int gn = 0; id<MTLTexture> gfrom = nil;   // turning packaged from a GPU-only texture: its texels a GPU write left stale in guest memory (carry_gpu)
         if (have && !pk->sparse && [have conformsToProtocol:@protocol(MTLTexture)]) { gfrom = have; gn = gpw_stale(t->mem, t->L.size, &gr, &gb); }
-        pk->tex = pkg_upload(t, &pk->stamp, nil, &pk->ph, &pk->nph);
+        pk->tex = pkg_upload(t, &pk->stamp, nil, &pk->ph, &pk->nph, 1);
         if (!pk->tex) { free(gr); return nil; }
         pk->span = nvn_dirty_span(t->mem, t->L.size);
         pk->seen = nvn_dirty_now(); g_pkg_uploads++; if (dirtycheck() && !pk->sparse) pk->hash = full_hash(t->mem, t->L.size);
@@ -4541,6 +4668,53 @@ static void audit_probe_report(uint64_t frame);   // audit #1534 passive probes 
 // 我方按种类的字节（S2A_MEM_SPLIT 跳变行，ios/app.m 的 100 ms 采样线程调；任意线程可调）：驻留集里的对象逐个分类——
 //   私有贴图（游戏贴图的 Metal 副本、渲染目标）、私有缓冲（上传暂存块为主）、游戏内存池的零拷贝缓冲（按池表认，记虚拟长度和其中常驻 / 压缩页，含被驻留集钉住的未写页）、其它共享缓冲（每帧块、常量块等）。
 //   锁序同 pool_res（g_mu → g_res_mu）：先在 g_mu 里拷池缓冲与范围，放锁后再取 g_res_mu 拍驻留集快照（强引用），分类在锁外做
+// 切后台瘦身（11-13 维护者定，降低在后台被系统杀的概率）：进后台、GPU 排空后（hle_nvn.c dm_gfx_suspend_drain），把驻留集里我们自己分配的私有根贴图
+//   （打包贴图副本 + 渲染目标等，正式游戏约 1.7 GB）标成可清除（MTLPurgeableStateVolatile）：可清除内存不计进 phys_footprint
+//   （11-13 Duo 实测 1024 MB 共享缓冲：实占 1089 → 65 MB，标回 1089 MB、内容还在），系统缺内存时直接清掉这些、不用杀我们。
+//   回前台、放开闸门之前（dm_gfx_suspend(0)）标回不可清除：没被清的原样接着用；被清的登记进 g_up_lost——打包贴图下次取用整张从客体内存重新上传（同上传被丢的
+//   处理），渲染目标内容丢了、游戏下一帧重画（跨帧保留的花一两帧，好过进度没了）。不碰：零拷贝池缓冲（就是客体内存）、视图、缓冲背着的贴图、MTLHeap 分出来的（可清除按整堆算）、
+//   各种缓冲（参数表、转换缓存等跨帧保留，被清了会错）。S2A_BG_PURGE=0 关
+static NSMutableArray<id<MTLTexture>> *g_bg_purged;   // 只在挂起 / 恢复的那一刻碰（闸门关着，提交线程停在闸门外）
+static uint64_t bg_fp_mb(void) { task_vm_info_data_t v; mach_msg_type_number_t n = TASK_VM_INFO_COUNT; return task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&v, &n) == KERN_SUCCESS ? v.phys_footprint >> 20 : 0; }
+void nvn_be_background_purge(int bg) {
+    static int off = -1; if (off < 0) { const char *e = getenv("S2A_BG_PURGE"); off = e && *e == '0'; }
+    if (!g_dev) return;
+    // 后台期间的实占：标完那一刻读不出差别（系统挂起进程时才结算可清除页），进程挂起后定时器也不跑，所以在回前台、标回之前读一次——
+    //   挂起期间实占不再变（除了被清），这个读数就是系统在后台看到的值；瘦身关（S2A_BG_PURGE=0）的局也记，好对照
+    static uint64_t bg_in;
+    if (bg) bg_in = bg_fp_mb();
+    else if (bg_in) { LOG("[nvn] 回前台那刻实占 %llu MB（进后台时 %llu MB，切后台瘦身%s）", (unsigned long long)bg_fp_mb(), (unsigned long long)bg_in, off ? "关" : "开"); bg_in = 0; }   // 起局时的放闸不算
+    if (off) return;
+    @autoreleasepool {
+        if (bg) {
+            uint64_t f0 = bg_fp_mb(), bytes = 0;
+            pthread_mutex_lock(&g_res_mu); NSArray *all = g_res_objects ? g_res_objects.allObjects : @[]; pthread_mutex_unlock(&g_res_mu);
+            NSMutableArray<id<MTLTexture>> *marked = [NSMutableArray array];
+            for (id o in all) {
+                if (![o conformsToProtocol:@protocol(MTLTexture)]) continue;
+                id<MTLTexture> t = o;
+                if (t.buffer || t.parentTexture || t.heap || t.storageMode != MTLStorageModePrivate) continue;
+                if ([t setPurgeableState:MTLPurgeableStateVolatile] != MTLPurgeableStateNonVolatile) continue;   // 已经可清除 / 已被清：不是这次标的
+                [marked addObject:t]; bytes += t.allocatedSize;
+            }
+            g_bg_purged = marked;
+            LOG("[nvn] 切后台瘦身：%lu 张贴图 %llu MB 标成可清除（系统缺内存时直接清掉、不计实占），实占 %llu → %llu MB",
+                (unsigned long)marked.count, (unsigned long long)(bytes >> 20), (unsigned long long)f0, (unsigned long long)bg_fp_mb());
+        } else if (g_bg_purged) {
+            uint64_t f0 = bg_fp_mb(), lost = 0, lost_b = 0;
+            NSMutableArray<id<MTLTexture>> *emptied = [NSMutableArray array];
+            for (id<MTLTexture> t in g_bg_purged) if ([t setPurgeableState:MTLPurgeableStateNonVolatile] == MTLPurgeableStateEmpty) { [emptied addObject:t]; lost++; lost_b += t.allocatedSize; }
+            if (lost) {
+                os_unfair_lock_lock(&g_up_lost_lk); if (!g_up_lost) g_up_lost = [NSHashTable weakObjectsHashTable];
+                for (id t in emptied) [g_up_lost addObject:t];
+                atomic_store(&g_up_lost_n, (int)g_up_lost.allObjects.count); os_unfair_lock_unlock(&g_up_lost_lk);
+            }
+            LOG("[nvn] 回前台：%lu 张贴图标回不可清除，其中 %llu 张 %llu MB 在后台被系统清掉（打包贴图下次取用整张重新上传、渲染目标下一帧重画），实占 %llu → %llu MB",
+                (unsigned long)g_bg_purged.count, (unsigned long long)lost, (unsigned long long)(lost_b >> 20), (unsigned long long)f0, (unsigned long long)bg_fp_mb());
+            g_bg_purged = nil;
+        }
+    }
+}
 void nvn_be_mem_kinds(uint64_t *priv_tex, uint64_t *priv_buf, uint64_t *pool_len, uint64_t *pool_touched, uint64_t *shared_other, uint64_t *objects) {
     *priv_tex = *priv_buf = *pool_len = *pool_touched = *shared_other = *objects = 0;
     if (!g_dev) return;
@@ -5139,7 +5313,14 @@ static void attach(MTLRenderPassAttachmentDescriptor *a, const tex_t *t, const v
 // clear_only: a pass opened only to land pending clears, attaching only the attachments that have clears - the other attachments are not touched by this pass, and attaching them costs a pointless load and store on TBDR
 // (Mac character select screen: the color-clear pass drags along a 400x225 depth load and store)
 static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only);
-static id<MTL4RenderCommandEncoder> rp_begin(void) { return rp_begin_ex(0); }
+// The render area of the open pass (0: its whole attachments; ported from nxnative c8521eeb, MIT). A draw pass on a very large target that loads what it keeps stops at the far corner of its scissor:
+// the GPU then does not load and store what lies beyond, which keeps its contents (Metal keeps what lies outside the area). Only from targets of 16 M pixels, only when the area is at most half of it,
+// only the draw path opens such a pass; a draw whose scissor leaves the area, and anything else that needs the pass (rp_begin, DrawTexture), ends it first. A 6400x6400 ink map stamped one
+// scissored draw a pass: upstream measured about 0.95 → 0.32 ms a pass. DM_NVN_RP_AREA=0 turns it off
+static NSUInteger g_rp_aw, g_rp_ah; static int g_rp_whole;   // g_rp_whole: the pass about to open must cover the whole target
+static int rpa_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_RP_AREA"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_RP_AREA=0: passes on very large targets cover the whole target"); } return v; }
+static void rt_dims(NSUInteger *tw, NSUInteger *th);
+static id<MTL4RenderCommandEncoder> rp_begin(void) { if (g_enc && g_rp_aw) rp_end(); g_rp_whole = 1; id<MTL4RenderCommandEncoder> e = rp_begin_ex(0); g_rp_whole = 0; return e; }   // the callers draw anywhere in the target
 static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only);
 static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) { AP_B; id<MTL4RenderCommandEncoder> e = rp_begin_ex_(clear_only); AP_E(1); return e; }
 static void bare_dims(NSUInteger *w, NSUInteger *h);
@@ -5354,6 +5535,15 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
         }
         return nil;
     }
+    g_rp_aw = g_rp_ah = 0;   // the render area (see g_rp_aw): no clears in this pass (a clear covers the whole target), no layered pass, not the TBDR modes
+    if (rpa_on() && !g_rp_whole && !clear_only && R.has_sc && !g_rp_layered && !tbdr_on() && !R.clear_d && !R.clear_s) {
+        int cl = 0; for (int i = 0; i < 8; i++) cl |= R.clear_c[i];
+        NSUInteger tw = 0, th = 0; if (!cl) rt_dims(&tw, &th);
+        if (tw * th >= (1u << 24)) { NSUInteger w = MIN(tw, (NSUInteger)MAX((long)R.sc.x + R.sc.w, 1)), h = MIN(th, (NSUInteger)MAX((long)R.sc.y + R.sc.h, 1));
+            if (w * h * 2 <= tw * th) { pd.renderTargetWidth = w; pd.renderTargetHeight = h; g_rp_aw = w; g_rp_ah = h;
+                static int once; if (!once++) MLOG("render area: a pass on a %lux%lu target opened at %lux%lu, its scissor's far corner (first case pass %llu; DM_NVN_RP_AREA=0 turns it off)",
+                                                   (unsigned long)tw, (unsigned long)th, (unsigned long)w, (unsigned long)h, g_stat_pass + 1);
+                PD("A %llu render area %lux%lu of %lux%lu", g_stat_pass + 1, (unsigned long)w, (unsigned long)h, (unsigned long)tw, (unsigned long)th); } } }
     for (int i = 0; i < R.rt.n && i < 8; i++) if (R.rt.color[i] && zskip_zero_clear(i) && !bcrt_is(pd.colorAttachments[i].texture)) {
         g_zskip_cand_ok[i] = 1; g_zskip_cand[i] = (zskip_zero){R.rt.color[i]->serial, (uint16_t)(R.rt.has_cview[i] && R.rt.cview[i].set_levels ? R.rt.cview[i].base_level : 0), (uint16_t)(R.rt.has_cview[i] && R.rt.cview[i].set_layers ? R.rt.cview[i].min_layer : 0)};
     }
@@ -5417,6 +5607,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
     }
     if (g_vis_on) {
         // Slots used up (one submission exceeds VIS_SLOTS counting passes): continue in a new overflow buffer. A ring buffer must not be retired (it is still used in rotation, and retiring removes it from the residency set); only a previous overflow buffer is
+        if (!g_vis) vis_take();
         if (!g_vis || g_vis_n >= VIS_SLOTS) { if (g_vis && !vis_in_ring(g_vis)) defer_obj_release(g_vis); g_vis = [g_dev newBufferWithLength:VIS_SLOTS * 8 options:MTLResourceStorageModeShared]; res_add(g_vis); g_vis_n = 0; }
         pd.visibilityResultBuffer = g_vis;
     }
@@ -5565,6 +5756,7 @@ static void shmap_load_once(void) {
     uint8_t gmem_use;   // 0 未判 / 1 不绑原始内存池表 / 2 绑（gmem_uses：动态占比计数用）
     uint8_t tensor, tensor_log;   // HMMA: 1 = spatial stand-in, 2 = none, 3 = native SIMD-group matrix ABI 1; 0 = not checked
     uint16_t tensor_sq;   // S2Arm 11-05: such a shader's HMUL2 Rd, Ra, |Ra| (nvn2_hsq_count): its output is the signed square of what it reads plus the network's residual, the stand-in squares its input (nvn_tensor.inc)
+    uint16_t tensor_srgb;   // HSETP2 Rd, Ra, 0.04045 (nvn2_srgb_count): its output is the sRGB decode (to linear) of what it reads plus the network's residual, the stand-in decodes its input (nvn_tensor.inc)
     id<MTLLibrary> at_lib; NSString *at_main, *at_u; NSMutableDictionary<NSNumber *, id<MTLFunction>> *at_fns; uint8_t has_atms;   // gap families 34 / 37: a fragment main0 declaring S2A_AT / S2A_MSOFF (Dsh.cs FsAlphaMs): its library and entry names, specialized per (u, at, msoff) on demand (fs_atms_fn)
     int load_depth_zero;   // captured with the identity, also used by its layer variant
     uint8_t u_mask;   // S2Arm gap 2 A: the colour outputs fn_u returns as uint, bit n = color(n) (json u_mask; dmsh_build.py fs_uint turns only the integer-bit writers)
@@ -5615,7 +5807,7 @@ static void shmap_load_once(void) {
 } @end   // gp (S2Arm): the guest program, for its fragment shader's code / control at a typed-output variant (pso_fout_variant)   // geo_raster: GS output reader paired with this program's fragment stage
 @implementation NvProg @end
 // Warm-up entry: built in the background, waiting to be taken by the submit thread. vs / fs retain the actual shared shader objects (pso holds only raw pointers).
-@interface WarmItem : NSObject { @public int kind, fc; NSString *key, *vs_key, *fs_key; NvShader *shader, *vs, *fs; pso_key pso; id<MTLFunction> fsfn; id object; } @end   // fc: a compute pipeline of the sampler-emulation variant (#800)
+@interface WarmItem : NSObject { @public int kind, fc; NSString *key, *vs_key, *fs_key; NvShader *shader, *vs, *fs; pso_key pso; id<MTLFunction> fsfn; id object; NSData *mkey; } @end   // fc: a compute pipeline of the sampler-emulation variant (#800); mkey: a task / mesh pipeline's key (kind 4, nvn_geometry.inc mtk_warm)
 @implementation WarmItem @end
 static NSMutableDictionary<NSString *, NvShader *> *g_shcache;
 #define NVN_SHADER_FLIGHT_IMPL 1
@@ -5769,17 +5961,24 @@ static FILE *pso_user_file(void) {
     if (path) g_pso_user = fopen(path.fileSystemRepresentation, "a");
     return g_pso_user;
 }
+// The lines already recorded (the seed manifest beside the shader map, then this machine's pso_user.tsv): read once. warm_start reads them on a background queue,
+//   so the first pipeline the submit thread records no longer reads them there (1 MB / 2280 lines took 5 ms on an M5 Max, 10 MB 43 ms; 11-13). A record before
+//   that read is done waits for it in dispatch_once, as it read them itself before
+static dispatch_once_t g_pso_user_seen_once;
+static void pso_user_seen_load(void) {
+    dispatch_once(&g_pso_user_seen_once, ^{ @autoreleasepool {
+        NSMutableSet<NSString *> *seen = [NSMutableSet set];
+        NSString *seed = g_shmap_path ? [g_shmap_path.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"pso_manifest.tsv"] : nil;
+        NSMutableArray<NSString *> *paths = [NSMutableArray array]; if (seed) [paths addObject:seed]; NSString *user = pso_user_path(); if (user) [paths addObject:user];
+        for (NSString *path in paths) { NSString *txt = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+            for (NSString *old in [txt componentsSeparatedByString:@"\n"]) if (old.length && ![old hasPrefix:@"#"]) [seen addObject:old]; }
+        g_pso_user_seen = seen; } });
+}
 static void pso_user_record(const char *fmt, ...) {
     FILE *f = pso_user_file();
     if (!f) return;
     char line[8192]; va_list ap; va_start(ap, fmt); vsnprintf(line, sizeof line, fmt, ap); va_end(ap);
-    if (!g_pso_user_seen) {
-        g_pso_user_seen = [NSMutableSet set];
-        NSString *seed = g_shmap_path ? [g_shmap_path.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"pso_manifest.tsv"] : nil;
-        NSMutableArray<NSString *> *paths = [NSMutableArray array]; if (seed) [paths addObject:seed]; NSString *user = pso_user_path(); if (user) [paths addObject:user];
-        for (NSString *path in paths) { NSString *txt = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
-            for (NSString *old in [txt componentsSeparatedByString:@"\n"]) if (old.length && ![old hasPrefix:@"#"]) [g_pso_user_seen addObject:old]; }
-    }
+    pso_user_seen_load();
     size_t ll = strlen(line); NSString *s = [[NSString alloc] initWithBytes:line length:ll && line[ll - 1] == '\n' ? ll - 1 : ll encoding:NSUTF8StringEncoding];   // Compared with the manifest file line by line (without the newline)
     if (!s || [g_pso_user_seen containsObject:s]) return;
     [g_pso_user_seen addObject:s]; fputs(line, f); fflush(f);
@@ -6351,17 +6550,17 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only
         if (st >= 0) o->smask |= 1u << st; else o->unres = 1;
         // S2Arm 11-05: a Switch 2 compute shader with tensor-core matrix multiplies (the game's own upscaling network): not dispatched, stood in by nvn_tensor.inc. The guest code is
         //   read here, while the program is in use (as the fallback paths above do), before the shader is loaded: such a shader is built from its reflection alone (t_refl_only)
-        unsigned nh = 0, nsq = 0;
+        unsigned nh = 0, nsq = 0, nsrgb = 0;
         if (st == 5) {
             const void *ctl = p->sd[i].control; uint32_t ncode = 0;
             if (ctl && (uintptr_t)ctl < (1ull << 47) && nvn2_on() && nvn2_ctl(ctl)) { memcpy(&ncode, (const uint8_t *)ctl + 0x44, 4); if (p->sd[i].data && ncode && ncode < (1u << 24)) nh = nvn2_hmma_count((const void *)(uintptr_t)p->sd[i].data, ncode); }
-            if (nh) nsq = nvn2_hsq_count((const void *)(uintptr_t)p->sd[i].data, ncode);   // the network's output domain (nvn_tensor.inc)
+            if (nh) { nsq = nvn2_hsq_count((const void *)(uintptr_t)p->sd[i].data, ncode); nsrgb = nvn2_srgb_count((const void *)(uintptr_t)p->sd[i].data, ncode); }   // the network's output domain (nvn_tensor.inc)
         }
         t_refl_only = nh > 0;
         NvShader *sh = st >= 0 ? shader_get([k stringByAppendingString:@"_b"], st) : nil;
         t_refl_only = 0;
         if (sh) o->sh[st] = sh; else MLOG("【红】 shader %s (%s) failed to load: build the shaders with dm/gfx/tools/dmsh_build.py first", k.UTF8String, stage.UTF8String);
-        if (sh && st == 5 && nh) sh->tensor_sq = (uint16_t)MIN(nsq, 0xffffu);
+        if (sh && st == 5 && nh) { sh->tensor_sq = (uint16_t)MIN(nsq, 0xffffu); sh->tensor_srgb = (uint16_t)MIN(nsrgb, 0xffffu); }
         if (sh && st == 5 && sh->tensor != 1 && sh->tensor != 3) {
             if (nh) MLOG("compute shader %s: %u tensor-core matrix multiplies (HMMA): the game's own upscaling network, stood in (nvn_tensor.inc)", sh->key, nh);
             if (!sh->tensor || nh) sh->tensor = nh ? 1 : 2;   // a full build of the same key (an earlier prewarm) is still never dispatched
@@ -8026,8 +8225,10 @@ static id<MTLFunction> vp_fn(NvShader *vs, uint32_t miss) {   // the padded vari
 }
 // Make the variant and load it: S2A.Dsh writes it from the guest code / control (code 0: none to make it from). → the shader's entry point in it, nil with why
 static id<MTLFunction> vp_build(NvShader *vs, const uint8_t md[8], uint64_t code, const void *ctl, uint32_t mask, char *why, size_t n) {
-    if (!code) { snprintf(why, n, "the game no longer holds its control section to translate it"); return nil; }
-    char path[1200]; int rc = dm_shader_vpad(md, code, ctl, mask, path, sizeof path);
+    char path[1200]; int rc;
+    if (!code && vs->mesh_kind == 2) rc = dm_shader_vpad_cached_mesh(md, mask, path, sizeof path);
+    else if (!code) { snprintf(why, n, "the game no longer holds its control section to translate it"); return nil; }
+    else rc = dm_shader_vpad(md, code, ctl, mask, path, sizeof path);
     if (rc) { snprintf(why, n, "%s", rc == 3 ? "its translation already writes those outputs (or has no main0_out to add them to)" : "the device could not make it"); return nil; }
     NSString *src = [NSString stringWithContentsOfFile:@(path) encoding:NSUTF8StringEncoding error:nil];
     if (!src || ![src hasPrefix:@"// s2a:vs-pad 1 "]) { snprintf(why, n, "%s %s", path, src ? "is of another format" : "is unreadable"); return nil; }
@@ -8044,6 +8245,14 @@ static void vp_done(NvShader *vs, id<MTLFunction> f, uint32_t mask, const char *
     fprintf(stderr, "[s2a] 顶点补齐变体：程序号 %s 顶点 %.16s 补 user(locn) 掩码 %#x %s%s %.1f ms%s%s\n", s2a_nvn_game_id(), vs->key, mask, how, f ? "完成" : "失败", (bp_now() - t0) / 1e6, f ? "" : "：", f ? "" : why);
     if (!f) MLOG("【红】 vertex shader %s has no padded variant for user(locn) mask %#x: %s; draws pairing it with such a fragment shader stay skipped", vs->key, mask, why);
 }
+// #674 (11-12): the program a draw passes to vp_ask is not always the one the shader to pad was bound from.
+//   bind_stages makes a host stand-in carrying only a serial (no stages); a mesh draw's S.prog is the fragment
+//   stage's program while its mesh shader was bound at stage 4. prog_stage_of then found nothing, vp_build saw
+//   code = 0 and reported "the game no longer holds its control section" — a misread: the stages were never in
+//   that program. vp_done pinned the variant to SE_FAIL and the caller put the pair on the failed list for the
+//   whole run. Fall back to the per-stage binds (vp_prog_pick.h, tested by t_vp_prog_pick.c).
+static int vp_stage_of_at(const void *prog, const char *key, uint8_t md[8], void *ctx) { (void)ctx; return prog_stage_of((const prog_t *)prog, key, md); }
+static const void *vp_bst_at(unsigned st, void *ctx) { (void)ctx; return st < 5 ? (const void *)S.bst[st] : NULL; }
 // A pair needs outputs the vertex shader does not write (miss): ask for the variant (submit thread). 1 = being made or just made (the caller skips this draw, nothing is recorded as
 //   failed), 0 = it cannot be made (the caller records the pair as failed, as before)
 static int vp_ask(const prog_t *p, NvShader *vs, uint32_t miss) {
@@ -8051,9 +8260,14 @@ static int vp_ask(const prog_t *p, NvShader *vs, uint32_t miss) {
     int st = vs->vp_st; uint32_t want = (st == SE_READY ? vs->vp_mask : 0) | miss;
     if (st == SE_BUSY || st == SE_FAIL || (st == SE_READY && (vs->vp_mask & miss) == miss)) { pthread_mutex_unlock(&g_vp_mu); return st != SE_FAIL; }
     vs->vp_st = SE_BUSY; pthread_mutex_unlock(&g_vp_mu);
-    uint8_t md[8] = {0}; int at = p ? prog_stage_of(p, vs->key, md) : -1; uint64_t t0 = bp_now();
-    if (se_sync()) { char why[300] = ""; id<MTLFunction> f = vp_build(vs, md, at < 0 ? 0 : p->sd[at].data, at < 0 ? NULL : p->sd[at].control, want, why, sizeof why); vp_done(vs, f, want, why, t0, "同步现编"); return f != nil; }
-    uint64_t code = 0; const void *ctl = NULL; void *snap = at < 0 ? NULL : dm_shader_snap(p->sd[at].data, p->sd[at].control, &code, &ctl); uint64_t key; memcpy(&key, md, 8);
+    // The library shader's key stays valid after the guest reuses its program / control section: md always comes from vs->key
+    //   (the cached mesh source is looked up by it); vp_pick_prog only supplies live guest inputs and leaves its own key copy at zero on a miss.
+    uint8_t md[8] = {0}, live[8]; int at = -1; uint64_t t0 = bp_now();
+    for (int i = 0; i < 8; i++) { unsigned b = 0; if (sscanf(vs->key + 2 * i, "%2x", &b) != 1) break; md[i] = (uint8_t)b; }
+    const prog_t *gp = (const prog_t *)vp_pick_prog(p, vp_bst_at, 5, vs->key, live, vp_stage_of_at, NULL, &at);
+    if (at < 0) { static unsigned n; if (!n++ || !(n & (n - 1))) MLOG("顶点补齐变体：%s 在绘制 program 与 5 个按阶段绑定的 program 里都没有有效控制段（%u 次）", vs->key, n); }
+    if (se_sync()) { char why[300] = ""; id<MTLFunction> f = vp_build(vs, md, at < 0 ? 0 : gp->sd[at].data, at < 0 ? NULL : gp->sd[at].control, want, why, sizeof why); vp_done(vs, f, want, why, t0, "同步现编"); return f != nil; }
+    uint64_t code = 0; const void *ctl = NULL; void *snap = at < 0 ? NULL : dm_shader_snap(gp->sd[at].data, gp->sd[at].control, &code, &ctl); uint64_t key; memcpy(&key, md, 8);
     fprintf(stderr, "[s2a] 顶点补齐变体：程序号 %s 顶点 %.16s 首遇缺 user(locn) 掩码 %#x，后台编，编好前这对的绘制照旧跳过\n", s2a_nvn_game_id(), vs->key, want);
     static dispatch_queue_t q; static dispatch_once_t once;
     dispatch_once(&once, ^{ q = dispatch_queue_create("dm.nvn.vp", s2a_qos_queue_attr(DISPATCH_QUEUE_SERIAL, S2A_QOS_SHADER_VARIANT)); });
@@ -8519,7 +8733,7 @@ static NSString *warm_key(const char *s, size_t n) {
 // The prewarm runs the lines of its lists as tasks: a shader (S), a compute pipeline (C), or every render pipeline (R) of one shader pair (the pipelines of a pair share their
 // shaders, so one worker builds them one after the other). The tasks keep the lists' order (a pair at its first line). shader_load shares successful objects and in-flight loads
 // with prefetch and runtime, without negatively caching failures. After the upstream reference implementation (MIT) warm_parse / warm_task
-@interface WarmTask : NSObject { @public int kind, stage, fc; NSString *key, *vkey, *fkey; NSMutableArray<NSData *> *rs; } @end   // fc: a C line's sampler-emulation bits this GPU runs (#800, warm_parse)
+@interface WarmTask : NSObject { @public int kind, stage, fc; uint32_t pad; NSString *key, *vkey, *fkey, *tkey; NSMutableArray<NSData *> *rs; } @end   // fc: a C line's sampler-emulation bits this GPU runs (#800, warm_parse)
 @implementation WarmTask @end
 static _Atomic long g_warm_done;   // lines done (the prepare step's progress)
 static _Atomic int g_wp_phase, g_wp_why, g_wp_play; static _Atomic long g_wp_total; static _Atomic uint64_t g_wp_t0;
@@ -8685,6 +8899,12 @@ static NSArray<WarmTask *> *warm_parse(NSArray<NSString *> *paths, long *lines) 
                 //   worker; its list has a pair with 73 lines, so the prepare step's last lines ran on one core while the rest idled and the first frame waited the whole 15 s cap with
                 //   12497 of 12523 lines done. The shaders' loads are shared anyway (shader_load_depth: one load per key, waiters join the one in flight), so the pair bought nothing
                 t = [WarmTask new]; t->kind = 1; t->vkey = vkey; t->fkey = fkey; t->rs = [NSMutableArray arrayWithObject:[NSData dataWithBytes:&sk length:sizeof sk]]; [tasks addObject:t];
+            } else if ([c[0] isEqualToString:@"M"] && c.count >= 4) {   // a task / mesh pipeline (nvn_geometry.inc mtk_record): the mesh shader in the vertex place, then the task shader key ("-": none) and the padded variant's mask
+                pso_skey sk; if (pso_skey_parse(c[1].UTF8String, &sk)) continue;
+                NSString *mkey = warm_key(sk.vs, sizeof sk.vs), *fkey = warm_key(sk.fs, sizeof sk.fs), *tkey = [c[2] isEqualToString:@"-"] ? @"" : c[2];
+                if (!mkey.length || warm_stale(mkey, stale) || (fkey.length && warm_stale(fkey, stale)) || (tkey.length && warm_stale(tkey, stale))) continue;
+                t = [WarmTask new]; t->kind = 4; t->vkey = mkey; t->fkey = fkey; t->tkey = tkey; t->pad = (uint32_t)strtoul(c[3].UTF8String, NULL, 16);
+                t->rs = [NSMutableArray arrayWithObject:[NSData dataWithBytes:&sk length:sizeof sk]]; [tasks addObject:t];
             } else continue;
             n++;
         }
@@ -8735,6 +8955,9 @@ static void warm_bump(const char *vk, const char *fk) {
         if (!((n - added) & (n - added - 1)) || n == added) MLOG("pipeline prewarm: the game registered a program whose pipelines were still queued: %llu lines moved to the front so far (%llu taken from the front)", (unsigned long long)n, (unsigned long long)atomic_load(&g_wu_taken)); }
 }
 static void warm_task_(WarmTask *t);
+static uint64_t g_warm_mps;   // task / mesh pipelines the prewarm built (M lines)
+static id mtk_warm(const pso_skey *sk, NSString *mkey, NSString *fkey, NSString *tkey, uint32_t pad, NSData **key);   // nvn_geometry.inc
+static void mtk_warm_claim(NSData *key, id ps);
 static void warm_task(WarmTask *t) { atomic_fetch_add(&g_warm_busy, 1); par_write_in_place = 1; warm_task_(t); par_write_in_place = 0; atomic_fetch_sub(&g_warm_busy, 1); }   // the prewarm writes what it compiles into the archive (pso_archive.h)
 static void warm_task_(WarmTask *t) {
     @autoreleasepool {
@@ -8751,6 +8974,12 @@ static void warm_task_(WarmTask *t) {
             id ps = fn ? par_compute(fn, par_ckey(cs, t->fc), &e) : nil;
             if (cs && !ps) MLOG("【红】 background compute pipeline creation failed: %s", e.localizedDescription.UTF8String);
             if (ps) { WarmItem *item = [WarmItem new]; item->kind = 2; item->fc = t->fc; item->key = t->key; item->shader = cs; item->object = ps; warm_enqueue(item); g_warm_cps++; }
+            g_warm_done++; return;
+        }
+        if (t->kind == 4) {   // a task / mesh pipeline: built here and handed to the mesh draws' table (nvn_geometry.inc), so the scene's first mesh draw neither waits nor is skipped
+            pso_skey sk; [t->rs[0] getBytes:&sk length:sizeof sk]; NSData *mk = nil;
+            id ps = mtk_warm(&sk, t->vkey, t->fkey, t->tkey, t->pad, &mk);
+            if (ps) { WarmItem *item = [WarmItem new]; item->kind = 4; item->object = ps; item->mkey = mk; warm_enqueue(item); g_warm_mps++; }
             g_warm_done++; return;
         }
         pso_skey sk; [t->rs[0] getBytes:&sk length:sizeof sk];
@@ -8778,6 +9007,7 @@ static void warm_task_(WarmTask *t) {
 }
 static void warm_finish(void) {
     shader_load_stats();
+    if (g_warm_mps) MLOG("pipeline prewarm: %llu task / mesh pipelines built (M lines)", (unsigned long long)g_warm_mps);
     MLOG("pipeline prewarm done: shaders %llu / render pipelines %llu (specialized fragment skipped %llu) / compute pipelines %llu, background time %.1f ms; shader keys not in the shader map (another game version) %llu; not in the library yet (compiled at their first use) %llu",
          (unsigned long long)g_warm_shaders, (unsigned long long)g_warm_rps, (unsigned long long)g_warm_skip_fz, (unsigned long long)g_warm_cps, (bp_now() - g_warm_t0) / 1e6, (unsigned long long)g_warm_skip_stale, (unsigned long long)atomic_load(&g_cold_skips));
     if (g_par_on) MLOG("pipeline archive after the prewarm: %llu builds from the archive, %llu compiled (written beside it, in the background), %llu stale files dropped",
@@ -8930,6 +9160,7 @@ static void warm_announce(void) {
 }
 static void warm_start(void) {
     if (g_warm_started++) return;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ pso_user_seen_load(); });   // the record's dedupe set, off the submit thread (pso_user_seen_load)
     NSArray<NSString *> *paths = warm_paths(1);
     if (!paths) return;
     if (!g_warm_items) g_warm_items = [NSMutableArray array];
@@ -9851,6 +10082,8 @@ static __attribute__((noinline, cold)) void p20_note(NvShader *sh, int st, const
          sh->key, st, b->kind == NVN_RB_IMG ? "image" : b->kind == NVN_RB_TEXU ? "texture handle in uniform" : "texture", (int)b->reg, (unsigned)b->dtt, (unsigned)b->dpf, d2d ? " (type unknown offline, taken as 2D)" : "",
          tt, pf, mtl_fmt_depth((MTLPixelFormat)pf) ? (unsigned)NVN_DPF_DEPTH : (unsigned)mtl_pf_dpf((MTLPixelFormat)pf), tm ? "; type differs" : "", cm ? "; class differs" : "");
 }
+static long g_td_frame;   // DM_NVN_TEXDUMP selected frame (defined with the TEXDUMP code below; < 0 = off): the bind site checks it before noting 3D textures
+static void td_note_3d(id<MTLTexture> t, uint64_t ser);
 static inline void p20_check(NvShader *sh, int st, const nvn_rbind *b, int tid, void *tv) {
     g_p20_checked++;
     unsigned tt, pf;
@@ -10050,6 +10283,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             __unsafe_unretained id<MTLTexture> size_view = t;
             if (t && g_fb_n && g_fb_seq == g_draw_seq && nvn_stage == 1) for (int q = 0; q < g_fb_n; q++) if (t == g_fb_src[q]) { t = g_fb_use[q]; trid = g_fb_rid[q]; break; }   // same-pass feedback sampling: read the snapshot instead (see fb_prepare)
             if (t && passdump() && tid < g_ntreg) PD("R %llu st%d ser=%llu", g_stat_pass, nvn_stage, g_treg[tid].t.serial);
+            if (__builtin_expect(g_td_frame >= 0, 0) && t && tid < g_ntreg && t.textureType == MTLTextureType3D) td_note_3d(t, g_treg[tid].t.serial);   // TEXDUMP: 3D textures the frame samples (td_dump saves them as slice atlases)
             if (bl) PD("B %llu st%d tex reg%d tid=%d %s ser=%llu fmt=%lu %lux%lux%lu view_lv=%lu+%lu view_sl=%lu array=%lu target=%lu swz=%d%d%d%d mtl=%p", g_stat_pass, nvn_stage, reg, tid, t ? "real" : "dummy", t && tid < g_ntreg ? g_treg[tid].t.serial : 0ull,
                        (unsigned long)t.pixelFormat, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.depth,
                        (unsigned long)(t.parentTexture ? t.parentRelativeLevel : 0), (unsigned long)t.mipmapLevelCount,
@@ -12552,12 +12786,24 @@ static const ixc_ent *ixc_find(const p_draw *dw, const p_draw_idx *di) {
 static void ixc_take(const p_draw *dw, const p_draw_idx *di) {
     if (g_ixc_n < IXC_MAX && !ixc_find(dw, di)) g_ixc[g_ixc_n++] = (ixc_ent){dw ? dw->ind : di->ind, dw ? 0 : di->ibuf, dw ? dw->prim : di->prim, dw ? -1 : di->itype, 0, 0, 0};
 }
+// S2Arm #674: k_ixc_msl is compiled from source (newLibraryWithSource). Built at the first such draw (a Switch 2 game's indirect task / mesh draws, in its first 3D scene) it held the
+//   submit thread 24-160 ms whenever the system's compile cache missed (the first launch of a new build, or the entry evicted), under 1 ms when it hit. On Switch 2 mtl_init starts the
+//   build in the background (ixc_prewarm); the first use waits for it (ixc_ready), so g_ixc_ps / g_ixc_err are written on that queue only and read after the wait. Elsewhere (or before
+//   mtl_init) nothing is started and the first use builds as before
+static id<MTLComputePipelineState> g_ixc_ps[2]; static NSError *g_ixc_err;
+static dispatch_group_t g_ixc_pre;   // the background build, NULL = not started
+static void ixc_build(void) {
+    NSError *e = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(k_ixc_msl) options:nil error:&e];
+    for (int k = 0; k < 2 && lib; k++) { id<MTLFunction> f = [lib newFunctionWithName:k ? @"ixc_expand" : @"ixc_arrays"]; g_ixc_ps[k] = f ? [g_dev newComputePipelineStateWithFunction:f error:&e] : nil; }
+    g_ixc_err = e;
+}
+static void ixc_prewarm(void) { if (!nvn2_on() || g_ixc_pre) return; g_ixc_pre = dispatch_group_create(); dispatch_group_async(g_ixc_pre, s2a_qos_global(S2A_QOS_SHADER_PREFETCH), ^{ @autoreleasepool { ixc_build(); } }); }
+static int ixc_ready(void) { if (g_ixc_pre) dispatch_group_wait(g_ixc_pre, DISPATCH_TIME_FOREVER); else ixc_build(); return g_ixc_ps[0] && g_ixc_ps[1]; }   // once: ixc_run keeps the table
 static void ixc_run(const p_draw *dw, const p_draw_idx *di) {
-    static id<MTLComputePipelineState> ps[2]; static id at; static int failed;
+    static id at; static int failed;
     if (failed) return;
-    if (!at) { NSError *e = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(k_ixc_msl) options:nil error:&e];
-        for (int k = 0; k < 2 && lib; k++) { id<MTLFunction> f = [lib newFunctionWithName:k ? @"ixc_expand" : @"ixc_arrays"]; ps[k] = f ? [g_dev newComputePipelineStateWithFunction:f error:&e] : nil; }
-        at = ps[0] && ps[1] ? rec_table(tab_new(1, 0, 0, &e)) : nil;
+    if (!at) { NSError *e = nil;
+        if (ixc_ready()) at = rec_table(tab_new(1, 0, 0, &e)); else e = g_ixc_err;
         if (!at) { failed = 1; MLOG("【红】 indirect draw conversion: cannot create the compute pipeline %s (indirect draws of quads / fans / 8-bit indices are skipped)", e.localizedDescription.UTF8String); return; } }
     if (g_ixc_epoch != g_wr_epoch || g_ixc_sub != g_arena_gen || g_ixc_n > IXC_MAX - 8) { g_ixc_n = 0; g_ixc_epoch = g_wr_epoch; g_ixc_sub = g_arena_gen; }
     int n0 = g_ixc_n; ixc_take(dw, di);
@@ -12594,13 +12840,13 @@ static void ixc_run(const p_draw *dw, const p_draw_idx *di) {
             id<MTLBuffer> ob; size_t oo = arena_alloc(IXC_CAP * 4 + sizeof(ejob), &ob);
             ejob *j = (ejob *)((uint8_t *)ob.contents + oo + IXC_CAP * 4);
             *j = (ejob){rec, ib, ob.gpuAddress + oo, ag + 32 * (uint64_t)i, (uint32_t)e->prim, e->itype == 0 ? 1u : e->itype == 1 ? 2u : 4u, (uint32_t)MIN(((__bridge id<MTLBuffer>)mb).length - mo, 0xffffffffull), IXC_CAP};
-            tab_buf(at, ob, oo + IXC_CAP * 4, 0); [ce setComputePipelineState:ps[1]];
+            tab_buf(at, ob, oo + IXC_CAP * 4, 0); [ce setComputePipelineState:g_ixc_ps[1]];
             enc_c_dispatch(ce, MTLSizeMake(IXC_CAP / 64, 1, 1), MTLSizeMake(64, 1, 1));
             e->ixb = ob.gpuAddress + oo; e->ixlen = IXC_CAP * 4; e->args = ag + 32 * (uint64_t)i;
             { static int once; if (!once++) MLOG("indirect indexed draw (primitive %d, %d-byte indices) expanded to 32-bit indices on the GPU, at most %d", e->prim, e->itype == 0 ? 1 : e->itype == 1 ? 2 : 4, IXC_CAP); }
         }
     }
-    if (na) { tab_addr(at, ag + (uint64_t)n * 32, 0); [ce setComputePipelineState:ps[0]]; enc_c_dispatch(ce, MTLSizeMake((NSUInteger)na, 1, 1), MTLSizeMake(1, 1, 1)); }
+    if (na) { tab_addr(at, ag + (uint64_t)n * 32, 0); [ce setComputePipelineState:g_ixc_ps[0]]; enc_c_dispatch(ce, MTLSizeMake((NSUInteger)na, 1, 1), MTLSizeMake(1, 1, 1)); }
     enc_c_end(ce);
     args_dirty_all();
     if (!g_ixc_runs++) MLOG("indirect draw conversion: first time, %d draws (records for quads / fans / 8-bit indices become indexed indirect arguments in a compute pass before the render pass)", n);
@@ -13435,8 +13681,8 @@ static void draw_tex(const p_draw_tex *t) {
     float r[4] = {t->src[0] / gw, t->src[2] / gw, t->src[1] / gh, t->src[3] / gh};
     if (x1 < x0) { float q = r[0]; r[0] = r[1]; r[1] = q; }   // a mirrored destination walks the source the other way (Ryujinx)
     if (y1 < y0) { float q = r[2]; r[2] = r[3]; r[3] = q; }
-    if (g_enc && g_pass.layered) rp_end();
-    id en = rp_begin_ex(0);   // plain id as in draw(): the encoder is a Metal 3 one on NXGAL_BE=mtl3 (mtl4_count ratchet)
+    if (g_enc && (g_pass.layered || g_rp_aw)) rp_end();   // DrawTexture opens a whole-target pass (see g_rp_aw)
+    g_rp_whole = 1; id en = rp_begin_ex(0); g_rp_whole = 0;   // plain id as in draw(): the encoder is a Metal 3 one on NXGAL_BE=mtl3 (mtl4_count ratchet)
     if (!en) return;   // rp_begin_ex said why
     if (pf_int_kind((MTLPixelFormat)g_pass.cfmt[0]) || !g_pass.cfmt[0]) {
         if (!once[2]++) MLOG("【红】 DrawTexture: target 0 is %s (format %u): not drawn (first case)", g_pass.cfmt[0] ? "an integer target" : "not bound", g_pass.cfmt[0]);
@@ -13574,6 +13820,7 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
         static int once3; if (!once3++) MLOG("readable-tile pass merge: a draw of the later pass is not provable; back to separate passes (first case pass %llu)", g_stat_pass);
         g_fz_fallback++; rp_end(); }
 
+    if (g_enc && g_rp_aw && (!R.has_sc || (long)R.sc.x + R.sc.w > (long)g_rp_aw || (long)R.sc.y + R.sc.h > (long)g_rp_ah)) rp_end();   // leaves the pass's render area (see g_rp_aw)
 
     fb_prepare(pr);   // same-pass feedback sampling: copy the snapshot first (see fb_prepare)
     if (R.has_sc && !g_enc) {
@@ -13838,6 +14085,8 @@ static void warm_claim(void) {
             if (!item->shader->warm_claimed) { item->shader->warm_claimed = 1; g_warm_claim_shaders++; }
         } else if (item->kind == 3) {   // S2Arm: prefetched at ProgramSetShaders; its S line waits for its first use (shader_used)
             // Already published by shader_load, including its complete identity.
+        } else if (item->kind == 4) {
+            mtk_warm_claim(item->mkey, item->object);
         } else if (item->kind == 1) {
             if (!hm_get_id(&g_pso, &item->pso)) { hm_put_id(&g_pso, &item->pso, item->object); g_warm_claim_rps++; }
         } else {
@@ -13951,8 +14200,14 @@ static void dispatch(const p_dispatch *dp) {
     id<MTLComputePipelineState> ps = hm_get_id(cps, ck);
     if ((id)ps == (id)NSNull.null) return;   // its pipeline failed before: built once, reported once (see below)
     if (!ps) {
-        NSError *e = nil; uint64_t bt = bp_now(); ps = par_compute(fc ? se_fn(cs, fc) : cs->fn, par_ckey(cs, fc), &e);
+        // #884：Metal 编译服务对一条计算管线现编一直不返回，提交线程跟着卡死（开场剧情固定定格）。至多等 DM_NVN_CPSO_WAIT_MS（缺省 10000，0 = 不限，
+        //   同渲染「不能跳过的绘制」上限 DM_NVN_PSO_UNSAFE_WAIT_MS）：等不到就跳过这一次派发、不记失败，后台编完下一次派发直接用（pso_archive.h par_compute_wait）
+        static int64_t cwait = -2; if (cwait == -2) { const char *v = getenv("DM_NVN_CPSO_WAIT_MS"); long ms = v && *v ? strtol(v, NULL, 10) : 10000; cwait = ms > 0 ? (int64_t)ms * 1000000 : -1; }
+        NSError *e = nil; uint64_t bt = bp_now(); int gave_up = 0;
+        ps = par_compute_wait(fc ? se_fn(cs, fc) : cs->fn, par_ckey(cs, fc), &e, cwait, &gave_up);
         { uint64_t d_ = bp_now() - bt; g_bp_pso_n++; g_bp_pso_ns += d_; fe_sync_note(d_); }
+        if (gave_up) { if (!(cs->logged & (1ull << 40))) { cs->logged |= 1ull << 40; MLOG("【红】 compute pipeline %s%s still compiling after %lld ms: this dispatch skipped (not recorded as failed; used once the background build returns)",
+                                                    cs->key, fc ? " (sampler-emulation variant)" : "", (long long)(cwait / 1000000)); } return; }
         // A failure is remembered like a success: it was rebuilt at every dispatch (Monster Hunter Rise's 36,880-byte threadgroup memory, over Apple's 32,768: 2,472–6,450 builds in one
         // Mac run; on the test device the compiles kept the frame from ending for 45 s, 10-26 cold run, frame 1150)
         if (!ps) { MLOG("【红】 failed to create compute pipeline %s%s: %s", cs->key, fc ? " (sampler-emulation variant)" : "", e.localizedDescription.UTF8String); hm_put_id(cps, ck, NSNull.null); return; }
@@ -14331,7 +14586,7 @@ static void copy_t2t_(const p_copy_t2t *c);
 static void dlss_eval(const p_dlss *d, uint32_t size);   // nvn_dlss.inc
 static void copy_t2t(const p_copy_t2t *c) {
     // GPU 写出的贴图拷到别处，目标也是 GPU 内容，不当 16:9 原比例页的来源（核心按 src 判：CPU 供图拷来拷去仍是图片；10-26 八方2 场景图）
-    if (g_wd > 0 && c->src && c->dst) { pthread_mutex_lock(&g_wd_mu); s2a_widen_gpu_wrote((uint32_t)c->dst->serial, (uint32_t)c->src->serial); pthread_mutex_unlock(&g_wd_mu); }
+    if (g_wd > 0 && c->src && c->dst) { pthread_mutex_lock(&g_wd_mu); s2a_widen_gpu_wrote((uint32_t)c->dst->serial, (uint32_t)c->src->serial); wd_s3d_copied(c->dst->serial, c->src->serial); pthread_mutex_unlock(&g_wd_mu); }
     if (rs_on() && c->dst && (c->flags & DM_COPY_RESOLVE) && rs_state(tex_mtl(c->dst)) == RS_SCALED) rs_rescale(tex_mtl(c->dst), 0, "多重采样解析的目标");   // S2Arm internal resolution: a resolve needs equal sizes (multisample storages are never scaled)
     if ((c->flags & DM_COPY_RESOLVE) && c->src && c->dst) wd_widen_resolve_dst(c->src, c->dst);   // S2Arm widen: a widened multisample target resolves into a destination widened the same
     // S2Arm widen: the same copied the same way between two textures of one game size (11-02 Mario & Sonic Tokyo 2020: each frame copies its widened 1920x1080 canvas, drawn in the
@@ -15034,7 +15289,7 @@ void nvn_be_exec(const uint8_t *p) {
             case OP_CLEAR_COLOR: {
                 const p_clear_color *c = a;
                 if (g_rc_skip) { PD("c %llu color clear skipped by conditional rendering slot%d", g_stat_pass, c->index); break; }
-                if (g_wd > 0 && c->index >= 0 && c->index < R.rt.n && R.rt.color[c->index]) s2a_widen_target_cleared((uint32_t)R.rt.color[c->index]->serial);   // S2Arm widen: the target's screen-copy origin is void (WidenRenderer.Clear → Frame.OnTargetCleared)
+                if (g_wd > 0 && c->index >= 0 && c->index < R.rt.n && R.rt.color[c->index]) { s2a_widen_target_cleared((uint32_t)R.rt.color[c->index]->serial); if (!R.has_sc) { pthread_mutex_lock(&g_wd_mu); wd_s3d_cleared(R.rt.color[c->index]->serial); pthread_mutex_unlock(&g_wd_mu); } }   // S2Arm widen: the target's screen-copy origin is void (WidenRenderer.Clear → Frame.OnTargetCleared)
                 // A scissored clear to 0 outside a pass with all channels (SMBW clears pyramid levels as sub-rectangles of 480×272 and other targets): copy from the zero buffer into the scissor rectangle in the replay stream
                 int p2w = g_wd > 0 && c->index >= 0 && c->index < R.rt.n && R.rt.color[c->index] && wd_p2_is_world(R.rt.color[c->index]->serial);   // S2Arm widen: per-path clear counts on the fallback world target (status line, widen_glue.inc)
                 if (!g_enc && c->mask == 0xf && !c->rgba[0] && !c->rgba[1] && !c->rgba[2] && !c->rgba[3] && R.has_sc && c->index >= 0 && c->index < R.rt.n && R.rt.color[c->index]
@@ -15530,6 +15785,14 @@ static void shot(id<MTLTexture> src, const char *path, int screen, const int cro
 static long g_td_frame = -2; static const char *g_td_path; static NSMutableArray *g_td_list; static int g_td_done;
 static char *g_td_owned_path;
 static NSIndexSet *g_td_frames;   // only the explicit comma-list mode; sorted and deduplicated
+static NSMutableArray *g_td_3d;   // 3D textures sampled in the selected frame: @[texture, serial] (at most 16; saved by td_dump as slice atlases)
+static void td_note_3d(id<MTLTexture> t, uint64_t ser) {
+    if (g_td_done || (long)atomic_load(&g_cur_frame) != g_td_frame) return;
+    if (!g_td_3d) g_td_3d = [NSMutableArray array];
+    if (g_td_3d.count >= 16) return;
+    for (NSArray *e in g_td_3d) if ([e[1] unsignedLongLongValue] == ser) return;
+    [g_td_3d addObject:@[t.parentTexture && t.parentTexture.textureType == MTLTextureType3D ? t.parentTexture : t, @(ser)]];
+}
 static void td_dump(void);
 static void td_path(char *path, size_t n, int index) {
     if (!g_td_frames) { snprintf(path, n, g_td_path, index); return; }   // legacy single-frame / size filenames
@@ -15543,6 +15806,7 @@ static void td_clear(int pending_gpu) {
     // Only entries with a pass index own a diagnostic copy. Game attachments stay resident.
     for (NSArray *e in g_td_list) if (e.count > 4) { if (pending_gpu) defer_obj_release(e[0]); else res_remove(e[0]); }
     [g_td_list removeAllObjects];
+    [g_td_3d removeAllObjects];   // 3D textures are the game's own (no copy): just forget them
 }
 // DM_NVN_TEXDUMP=size=WxH:path instead picks the frame by content: the first frame that opens a render pass whose first color attachment level is WxH (for one-off work whose frame differs between runs)
 static unsigned g_td_w, g_td_h;
@@ -15591,7 +15855,7 @@ static void td_dump(void) {
     g_td_done = 1;
     rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     mtl_finish_gpu();
-    static id<MTLRenderPipelineState> ps; static id<MTLSamplerState> sp;
+    static id<MTLRenderPipelineState> ps, ps_i[2], ps_3d[3]; static id<MTLSamplerState> sp;
     if (!ps) {
         static const char *src_msl =
             "#include <metal_stdlib>\nusing namespace metal;\n"
@@ -15605,6 +15869,28 @@ static void td_dump(void) {
         ps = [g_dev newRenderPipelineStateWithDescriptor:d error:&e];
         MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sp = [g_dev newSamplerStateWithDescriptor:sd];
         if (!ps) { MLOG("【红】 TEXDUMP pipeline failed %s", e.localizedDescription.UTF8String); td_clear(0); return; }
+        // Integer targets (G-buffer normals / material IDs): a float view reads them as undefined (shows black); read the integer and show 0-255 per channel (signed: +128)
+        // 3D textures: every slice side by side (16 per row), RGB and alpha as separate images (alpha is often the transmittance of a fog / light volume)
+        static const char *int_msl =
+            "#include <metal_stdlib>\nusing namespace metal;\n"
+            "struct V { float4 p [[position]]; float2 uv; };\n"
+            "vertex V vs(uint id [[vertex_id]]) { float2 uv = float2((id << 1) & 2, id & 2); V o; o.p = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); o.uv = uv; return o; }\n"
+            "fragment float4 fu(V in [[stage_in]], texture2d<uint> t [[texture(0)]]) { uint4 c = t.read(uint2(in.p.xy)); return float4(float3(min(c.rgb, 255u)) / 255.0, 1); }\n"
+            "fragment float4 fi(V in [[stage_in]], texture2d<int> t [[texture(0)]]) { int4 c = t.read(uint2(in.p.xy)); return float4(float3(clamp(c.rgb + 128, 0, 255)) / 255.0, 1); }\n"
+            "static bool cell(float2 p, uint4 k, thread uint3 &c) {   // k: slice width, height, depth, slices per row\n"
+            "    uint2 q = uint2(p); uint z = (q.y / k.y) * k.w + q.x / k.x; c = uint3(q.x % k.x, q.y % k.y, z); return z < k.z; }\n"
+            "#define PICK(c) (a ? float4(c.aaa, 1) : float4(c.rgb, 1))\n"
+            "fragment float4 f3(V in [[stage_in]], texture3d<float> t [[texture(0)]], constant uint4 &k [[buffer(0)]], constant uint &a [[buffer(1)]]) { uint3 q; if (!cell(in.p.xy, k, q)) return float4(0.25, 0, 0.25, 1); float4 c = t.read(q); return PICK(c); }\n"
+            "fragment float4 f3u(V in [[stage_in]], texture3d<uint> t [[texture(0)]], constant uint4 &k [[buffer(0)]], constant uint &a [[buffer(1)]]) { uint3 q; if (!cell(in.p.xy, k, q)) return float4(0.25, 0, 0.25, 1); float4 c = float4(min(t.read(q), 255u)) / 255.0; return PICK(c); }\n"
+            "fragment float4 f3i(V in [[stage_in]], texture3d<int> t [[texture(0)]], constant uint4 &k [[buffer(0)]], constant uint &a [[buffer(1)]]) { uint3 q; if (!cell(in.p.xy, k, q)) return float4(0.25, 0, 0.25, 1); float4 c = float4(clamp(t.read(q) + 128, 0, 255)) / 255.0; return PICK(c); }\n";
+        id<MTLLibrary> il = [g_dev newLibraryWithSource:@(int_msl) options:nil error:&e];
+        const char *fn[5] = {"fu", "fi", "f3", "f3u", "f3i"};
+        for (int k = 0; il && k < 5; k++) {
+            d.vertexFunction = [il newFunctionWithName:@"vs"]; d.fragmentFunction = [il newFunctionWithName:@(fn[k])];
+            id<MTLRenderPipelineState> p = [g_dev newRenderPipelineStateWithDescriptor:d error:&e];
+            if (k < 2) ps_i[k] = p; else ps_3d[k - 2] = p;
+        }
+        if (!il || !ps_i[0] || !ps_i[1] || !ps_3d[0] || !ps_3d[1] || !ps_3d[2]) MLOG("【红】 TEXDUMP integer / 3D pipelines failed %s (those targets are dumped as float)", e.localizedDescription.UTF8String);
     }
     MLOG("[texdump] frame %ld: %lu color targets", g_td_frame, (unsigned long)g_td_list.count);
     // DM_NVN_TEXRAW=index,...: save raw bytes by texture index (including 3D; file: %d in the path is replaced with the index, suffix .raw, first-line text header: width height depth format bytes-per-row)
@@ -15653,13 +15939,40 @@ static void td_dump(void) {
         MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
         rp.colorAttachments[0].texture = o; rp.colorAttachments[0].loadAction = MTLLoadActionDontCare; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
         id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
-        [en setRenderPipelineState:ps]; [en setFragmentTexture:v atIndex:0]; [en setFragmentSamplerState:sp atIndex:0];
+        int cls = mtl_fmt_depth(t.pixelFormat) ? NVN_DPF_DEPTH : mtl_pf_dpf(t.pixelFormat);
+        id<MTLRenderPipelineState> use = cls == NVN_DPF_UINT && ps_i[0] ? ps_i[0] : cls == NVN_DPF_SINT && ps_i[1] ? ps_i[1] : ps;
+        [en setRenderPipelineState:use]; [en setFragmentTexture:v atIndex:0]; [en setFragmentSamplerState:sp atIndex:0];
         [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [en endEncoding]; if (!cb_run(cb)) continue;
         char path[1024]; td_path(path, sizeof path, (int)(ser * 100 + sl * 10 + lv));
         if (e.count > 4) { td_path(path, sizeof path, 0); char *dot = strrchr(path, '.'), *slash = strrchr(path, '/'); char ext[16] = ""; if (dot && slash && dot < slash) dot = NULL; if (dot) { strlcpy(ext, dot, sizeof ext); *dot = 0; }
             char tail[64]; snprintf(tail, sizeof tail, "_s%03d_%llu_%lu%s", [e[4] intValue], (unsigned long long)ser, (unsigned long)lv, ext); strlcat(path, tail, sizeof path); }   // TEXSNAP copy
         MLOG("[texdump] ser=%llu lv=%lu layer %lu format %lu %lux%lu", ser, (unsigned long)lv, (unsigned long)sl, (unsigned long)t.pixelFormat, (unsigned long)w, (unsigned long)h);
         shot(o, path, 0, NULL);
+    }
+    // 3D textures the frame sampled (td_note_3d): level 0, every slice in a grid of 16 per row; <TEXDUMP path with %d = 0>_v3d_<serial>_rgb.png / _a.png
+    for (NSArray *e in g_td_3d) {
+        id<MTLTexture> t = e[0]; uint64_t ser = [e[1] unsignedLongLongValue];
+        int cls = mtl_pf_dpf(t.pixelFormat); id<MTLRenderPipelineState> use = ps_3d[cls == NVN_DPF_UINT ? 1 : cls == NVN_DPF_SINT ? 2 : 0];
+        NSUInteger W = t.width, H = t.height, D = t.depth, cols = MIN(D, (NSUInteger)16), rows = (D + cols - 1) / cols;
+        if (!use || W * cols > 8192 || H * rows > 8192) { MLOG("[texdump] 3D ser=%llu %lux%lux%lu format %lu: not saved (%s)", ser, (unsigned long)W, (unsigned long)H, (unsigned long)D, (unsigned long)t.pixelFormat, use ? "atlas too large" : "no pipeline"); continue; }
+        for (uint32_t a = 0; a < 2; a++) {
+            MTLTextureDescriptor *od = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:W * cols height:H * rows mipmapped:NO];
+            od.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; od.storageMode = MTLStorageModePrivate;
+            id<MTLTexture> o = [g_dev newTextureWithDescriptor:od];
+            id<MTLCommandBuffer> cb = q_cb();
+            MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            rp.colorAttachments[0].texture = o; rp.colorAttachments[0].loadAction = MTLLoadActionDontCare; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
+            uint32_t k[4] = {(uint32_t)W, (uint32_t)H, (uint32_t)D, (uint32_t)cols};
+            [en setRenderPipelineState:use]; [en setFragmentTexture:t atIndex:0]; [en setFragmentBytes:k length:sizeof k atIndex:0]; [en setFragmentBytes:&a length:sizeof a atIndex:1];
+            [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [en endEncoding]; if (!cb_run(cb)) continue;
+            char path[1024]; td_path(path, sizeof path, 0); char *dot = strrchr(path, '.'), *slash = strrchr(path, '/'); char ext[16] = "";
+            if (dot && slash && dot < slash) dot = NULL;
+            if (dot) { strlcpy(ext, dot, sizeof ext); *dot = 0; }
+            char tail[64]; snprintf(tail, sizeof tail, "_v3d_%llu_%s%s", (unsigned long long)ser, a ? "a" : "rgb", ext); strlcat(path, tail, sizeof path);
+            MLOG("[texdump] 3D ser=%llu %lux%lux%lu format %lu (%s) → %lu slices per row", ser, (unsigned long)W, (unsigned long)H, (unsigned long)D, (unsigned long)t.pixelFormat, a ? "alpha" : "rgb", (unsigned long)cols);
+            shot(o, path, 0, NULL);
+        }
     }
     td_clear(0);
 }

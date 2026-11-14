@@ -347,6 +347,9 @@ static void dq_poll(void) {
 static void vk_dq_init(VkDevice dev) {
 #define DQ_GET(f) r_##f = (PFN_##f)vkGetDeviceProcAddr(dev, #f);
     DQ_CMDS(DQ_GET)
+    // The instance requests Vulkan 1.1: use the explicitly enabled KHR aliases.
+    r_vkCmdDrawIndirectCount = (PFN_vkCmdDrawIndirectCount)vkGetDeviceProcAddr(dev, "vkCmdDrawIndirectCountKHR");
+    r_vkCmdDrawIndexedIndirectCount = (PFN_vkCmdDrawIndexedIndirectCount)vkGetDeviceProcAddr(dev, "vkCmdDrawIndexedIndirectCountKHR");
     if (g_dq_ring) return;   // 会话重开：队列和线程沿用
     pthread_spin_init(&g_dq_pl, PTHREAD_PROCESS_PRIVATE);
     uint8_t *ring = malloc(dq_RING);
@@ -403,6 +406,8 @@ uint64_t nvn_vk_dbg_dq_recs(void) { return g_dq_recs; }   // 用例读：至今�
 #define vkCmdBindPipeline w_vkCmdBindPipeline
 #define vkCmdResetQueryPool w_vkCmdResetQueryPool
 #define vkCmdEndQuery w_vkCmdEndQuery
+#define vkCmdDrawIndirectCount w_vkCmdDrawIndirectCount
+#define vkCmdDrawIndexedIndirectCount w_vkCmdDrawIndexedIndirectCount
 #define vkCmdDrawIndirect w_vkCmdDrawIndirect
 #define vkCmdDrawIndexedIndirect w_vkCmdDrawIndexedIndirect
 #define vkCmdDispatch w_vkCmdDispatch

@@ -62,15 +62,4 @@ public static class UpdateClient
             process?.Dispose();
         }
     }
-
-    /// <summary>起独立的替换进程：它等本进程退出后换掉安装目录并重启，用的是 updates 里的 Python，不占安装目录。</summary>
-    public static void Apply(JsonElement ready, string installDir, string privateRoot, IEnumerable<string> relaunchArguments)
-    {
-        var info = new ProcessStartInfo(ready.GetProperty("python").GetString()!) { UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = Path.GetTempPath() };
-        foreach (var argument in new[] { "-X", "utf8", "-B", "-I", ready.GetProperty("updater").GetString()!, "apply",
-                     "--staged", ready.GetProperty("staged").GetString()!, "--install", installDir, "--pid", Environment.ProcessId.ToString(), "--private-root", privateRoot })
-            info.ArgumentList.Add(argument);
-        foreach (var argument in relaunchArguments) info.ArgumentList.Add("--arg=" + argument);
-        Process.Start(info)?.Dispose();
-    }
 }

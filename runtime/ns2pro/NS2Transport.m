@@ -113,6 +113,16 @@ static ns2_mouse latestMouse[2];   // Joy-Con 2 光学鼠标最近一笔，[0] �
 static BOOL motionRequested;
 // 单只 Joy-Con 出原始方向还是横握视角（ns2_set_joycon_raw；缺省横握，同改前）
 static _Atomic int joyconRaw;
+// 两只 Joy-Con 怎么用（#520 D）：0 = 拼成一对、1 位玩家（缺省，同改前）；1 = 各一位玩家（链路槽 0 = 玩家 1、槽 1 = 玩家 2）。
+//   splitDefault 是面板设定（ns2_set_joycon_split）；splitNow 是这一对现在的样子：拼着时任一只同按自己的 SL + SR 就拆开（同真机横握各拿一只），
+//   一对拆散（任一只断开）后回到面板设定
+static _Atomic int splitDefault, splitNow;
+// 分配玩家（#520 E）：开着时每条链路的登记手势一变就报（assignCallback）；firstLink = 拆开时哪条链路是玩家 1（分配顺序）
+static _Atomic int assignMode, firstLink;
+static ns2_assign_callback assignCallback;
+static ns2_assign_gesture lastGesture[2];
+static ns2_accept_filter acceptFilter;   // 可选：收不收这台（Mac 第二个连接程序用，见 ns2_set_accept_filter）；不设 = 同改前
+static ns2_player_state_callback playerCallback;   // 玩家 2 起的按键 / 摇杆（拆开时槽 1 那只）；state 为 NULL = 这位玩家不在了
 static ns2_state_callback stateCallback;
 static ns2_status_callback statusCallback;
 static ns2_motion_callback motionCallback;
@@ -153,6 +163,11 @@ static BOOL value_effective(ns2_vibration value) {
 static BOOL is_joycon(ns2_kind kind) { return kind == NS2_KIND_JOYCON_L || kind == NS2_KIND_JOYCON_R; }
 // 以下 *_locked 由调用方持有 stateMu。
 // 两条链路都 present 且一左一右才算拼成一对。
+static BOOL pair_locked(void);
+// 两只都在、而且合成一位玩家（拆开时各出各的，见 splitNow）
+static BOOL merged_locked(void) { return pair_locked() && !atomic_load(&splitNow); }
+static BOOL split_locked(void) { return pair_locked() && atomic_load(&splitNow) && playerCallback; }
+static void emit_player_gone(void) { if (playerCallback) playerCallback(1, NS2_KIND_NONE, NULL, callbackContext); }
 static BOOL pair_locked(void) {
     return linkShared[0].present && linkShared[1].present && is_joycon(linkShared[0].kind) && is_joycon(linkShared[1].kind) &&
         linkShared[0].kind != linkShared[1].kind;
@@ -219,6 +234,7 @@ static BOOL reset_link_state_locked(unsigned slot) {
     memset(&linkShared[slot].last, 0, sizeof linkShared[slot].last);
     ns2_decode_report09_accessories(NULL, 0, &linkShared[slot].info);
     BOOL otherPresent = linkShared[slot ^ 1].present;
+    if (wasPresent && otherPresent) atomic_store(&splitNow, atomic_load(&splitDefault));   // 一对拆散：下次拼上照面板设定
     if (!otherPresent) reset_global_locked();
     else if (wasPresent) reroute_locked();
     refresh_locked();
@@ -582,7 +598,7 @@ static NS2Bridge *bridge;
         linkShared[slot].present = YES; linkShared[slot].ready = YES; linkShared[slot].info.ready = 1;
         if (formsPair) reroute_locked();
         refresh_locked();
-        BOOL paired = pair_locked();
+        BOOL paired = merged_locked(), split = split_locked();
         pthread_mutex_unlock(&stateMu);
         if (formsPair) emit_state((ns2_state){0});
         if (![self live]) return;
@@ -590,8 +606,9 @@ static NS2Bridge *bridge;
         // Remember the device only after calibration, command ACKs and input subscription succeed, never on discovery or connection alone.
         [bridge rememberReady:self];
         LOG("NS2 Pro BLE ready：工厂摇杆校准；report05%s；玩家1灯与固件反馈命令ACK；双侧双频42-byte震动，仅活动时调度；gain=%.3g（命令ACK不代表电机动作）%s", motionCallback ? " IMU" : "", rumbleGain,
-            paired ? "；Joy-Con 2 左右已拼成一对（竖握）" : "");
+            paired ? "；Joy-Con 2 左右已拼成一对（竖握）" : split ? "；Joy-Con 2 两只各一位玩家" : "");
         [bridge report:NS2_STATUS_READY message:paired ? NS2Localized(@"Connected: Joy-Con 2 pair (left + right)") :
+            split ? NS2Localized(@"Connected: two Joy-Con 2, one player each") :
             NS2Localized(@"Connected: factory calibration and player 1 light initialization complete") from:self];
         if (![self live]) return;
         if (softState != NS2SoftRunning) { [self tick]; return; }
@@ -734,11 +751,12 @@ static NS2Bridge *bridge;
     BOOL headsetChanged = !headsetWasKnown || headsetWasConnected != info->headset_connected;
     BOOL headsetConnected = info->headset_connected;
     refresh_locked();
-    // 拼对时单路六轴只用右只的、不转向；否则（Pro / 单只）同改前
-    BOOL paired = pair_locked();
+    // 拼对时单路六轴只用右只的、不转向；拆开时只出玩家 1（槽 0）那只的、按单只处理；否则（Pro / 单只）同改前
+    BOOL paired = merged_locked();
+    BOOL splitOther = split_locked() && (slot ^ (unsigned)atomic_load(&firstLink)) != 0;   // 拆开后玩家 2 那只的六轴不走玩家 1 的回调，另存一格（ns2_get_partner_motion）
     ns2_motion motion = {0};
     BOOL motionOn = motionRequested && imuEnabled && !motionCommand && active && linkShared[slot].ready && !terminal;
-    BOOL publishMotion = motionCallback && motionOn && (!paired || kind == NS2_KIND_JOYCON_R);
+    BOOL publishMotion = motionCallback && motionOn && !splitOther && (!paired || kind == NS2_KIND_JOYCON_R);
     if (publishMotion && ns2_decode_report05_motion(data.bytes, data.length, &motion)) {
         // 部分固件的设备时钟不可靠；对外用接收时的单调时钟，设备值保留用于诊断。
         // Some firmware has unreliable device timestamps; export monotonic arrival time and retain the device value for diagnostics.
@@ -751,6 +769,11 @@ static NS2Bridge *bridge;
     else if (paired && kind == NS2_KIND_JOYCON_L && motionOn) {
         ns2_motion left = {0};
         if (ns2_decode_report05_motion(data.bytes, data.length, &left)) { left.host_timestamp_us = now_ns() / 1000; latestMotionLeft = left; }
+    }
+    // 拆开时玩家 2 那只（不是玩家 1 的链路）的六轴也存进这一格（ns2_get_partner_motion，#520：每位玩家都有体感），照原始方向、不转向
+    else if (splitOther && motionOn) {
+        ns2_motion other = {0};
+        if (ns2_decode_report05_motion(data.bytes, data.length, &other)) { other.host_timestamp_us = now_ns() / 1000; latestMotionLeft = other; }
     }
     // Joy-Con 2 光学鼠标：左右两只各存一份（拼成一对时游戏左右两侧都读；只存右只的话玩家拿左只玩鼠标操作没反应）；与体感开不开无关
     if ((kind == NS2_KIND_JOYCON_L || kind == NS2_KIND_JOYCON_R) && active && linkShared[slot].ready && !terminal) {
@@ -790,16 +813,36 @@ static NS2Bridge *bridge;
         calibrated_axis(decoded.rx, calibration[1], 0), calibrated_axis(decoded.ry, calibration[1], 1)};
     // Joy-Con 2（只走 report05）：右只的摇杆在第二个摇杆字段、用主校准（握手时已把 calibration[1] 设成主校准）。
     // 拼成一对就与另一只最近的状态合成竖握手柄；只有一只就换成横握视角。
+    // 分配玩家：照这一只自己的原始状态认手势（拼成一对时也按各自那只认，两只同时各按 L / R 由调用方配成一对）
+    if (atomic_load(&assignMode) && assignCallback) {
+        ns2_assign_gesture gesture = ns2_assign_gesture_of(kind, state.buttons, [self joycon] ? ns2_decode_side_buttons(data.bytes, data.length) : 0);
+        if (gesture != lastGesture[slot]) {
+            lastGesture[slot] = gesture;
+            char identifier[sizeof linkShared[slot].info.identifier];
+            pthread_mutex_lock(&stateMu); memcpy(identifier, linkShared[slot].info.identifier, sizeof identifier); pthread_mutex_unlock(&stateMu);
+            assignCallback((int)slot, kind, gesture, identifier, callbackContext);
+        }
+    } else lastGesture[slot] = NS2_ASSIGN_NONE;
     if ([self joycon]) {
         pthread_mutex_lock(&stateMu);
         linkShared[slot].last = state;
-        BOOL paired = pair_locked();
+        BOOL paired = merged_locked();
         ns2_state mine = state, other = linkShared[slot ^ 1].last;
+        int side = ns2_decode_side_buttons(data.bytes, data.length);
+        // 拼着时同按这一只的 SL + SR：拆成各一位玩家（同真机：横握各拿一只时按 SL + SR 登记）
+        BOOL splitting = paired && playerCallback && !atomic_load(&assignMode) && ns2_joycon_split_wanted(kind, side);   // 分配中 SL + SR 是登记，完成时再照分配拆   // 没人收玩家 2（iPhone / iPad）就不拆，免得第二只没处去
+        if (splitting) { atomic_store(&splitNow, 1); paired = NO; }
+        BOOL split = split_locked();
         pthread_mutex_unlock(&stateMu);
-        int side = paired ? 0 : ns2_decode_side_buttons(data.bytes, data.length);
+        if (splitting) {
+            LOG("NS2 Pro BLE：Joy-Con 2 %s 按了 SL + SR，两只拆成各一位玩家（槽 0 = 玩家 1）", kind == NS2_KIND_JOYCON_L ? "左只" : "右只");
+            emit_state((ns2_state){0});   // 合成的那份清零，下一包起各出各的
+        }
         if (paired) ns2_joycon_pair_state(kind == NS2_KIND_JOYCON_L ? &mine : &other, kind == NS2_KIND_JOYCON_L ? &other : &mine, &state);
         else if (atomic_load(&joyconRaw)) ns2_joycon_raw(kind, side, &state);
         else ns2_joycon_sideways(kind, side, &state);
+        // 拆开时槽 1 那只是玩家 2：走玩家回调，不进玩家 1 那一路
+        if (split && (slot ^ (unsigned)atomic_load(&firstLink)) != 0) { if (playerCallback) playerCallback(1, kind, &state, callbackContext); return; }
     }
     emit_state(state);
 }
@@ -965,6 +1008,7 @@ static NS2Bridge *bridge;
 - (NS2Link *)activeLink:(unsigned)i { NS2Link *link = links[i]; return link && ![link idle] ? link : nil; }
 - (BOOL)accepts:(ns2_kind)found peripheral:(CBPeripheral *)peripheral {
     if (found == NS2_KIND_NONE) return NO;
+    if (acceptFilter && !acceptFilter(found, peripheral.identifier.UUIDString.UTF8String, callbackContext)) return NO;   // 另一个连接程序已占 / 还在等的那台
     // 挂着等的就是这一台：交给那条直连，系统看到它可连的广播会自己连上
     for (unsigned i = 0; i < 2; i++) if (links[i] && [links[i] idle] && [links[i]->device.identifier isEqual:peripheral.identifier]) return NO;
     NS2Link *a = [self activeLink:0], *b = [self activeLink:1];
@@ -1387,9 +1431,61 @@ int ns2_start(ns2_state_callback state, ns2_status_callback status, void *contex
 }
 ns2_kind ns2_get_output_kind(void) {
     pthread_mutex_lock(&stateMu);
-    ns2_kind kind = ns2_output_kind(linkShared[0].kind, linkShared[0].present, linkShared[1].kind, linkShared[1].present);
+    // 拆开时玩家 1 是槽 0 那只（单只型号）；玩家 2 的型号随玩家回调给
+    ns2_kind kind = split_locked() ? linkShared[atomic_load(&firstLink) & 1].kind
+        : ns2_output_kind(linkShared[0].kind, linkShared[0].present, linkShared[1].kind, linkShared[1].present);
     pthread_mutex_unlock(&stateMu);
     return kind;
+}
+void ns2_set_player_callback(ns2_player_state_callback callback) { playerCallback = callback; }
+void ns2_set_assign_callback(ns2_assign_callback callback) { assignCallback = callback; }
+void ns2_set_accept_filter(ns2_accept_filter filter) { acceptFilter = filter; }
+void ns2_set_assign_mode(int on) {
+    atomic_store(&assignMode, on ? 1 : 0);
+    memset(lastGesture, 0, sizeof lastGesture);
+    if (on) LOG("NS2 Pro BLE：分配玩家开始（L + R / SL + SR 登记）");
+}
+void ns2_set_player_order(int first_link) { atomic_store(&firstLink, first_link ? 1 : 0); }
+int ns2_get_devices(ns2_device out[2]) {
+    int n = 0;
+    pthread_mutex_lock(&stateMu);
+    for (int i = 0; i < 2; i++) {
+        if (!linkShared[i].present) continue;
+        out[n] = (ns2_device){.link = i, .kind = linkShared[i].kind};
+        memcpy(out[n].identifier, linkShared[i].info.identifier, sizeof out[n].identifier);
+        n++;
+    }
+    pthread_mutex_unlock(&stateMu);
+    return n;
+}
+int ns2_disconnect_device(const char *identifier) {
+    if (!identifier || !*identifier) return 0;
+    __block int found = 0;
+    on_queue(^{
+        for (unsigned i = 0; i < 2 && !found; i++) {
+            NS2Link *link = bridge ? bridge->links[i] : nil;
+            if (!link || !link->device || ![link->device.identifier.UUIDString isEqualToString:@(identifier)]) continue;
+            LOG("NS2 Pro BLE：分配玩家没登记，断开 %s", identifier);
+            [bridge dropLink:link];
+            found = 1;
+        }
+    });
+    return found;
+}
+void ns2_set_joycon_split(int split) {
+    atomic_store(&splitDefault, split ? 1 : 0);
+    pthread_mutex_lock(&stateMu);
+    BOOL was = split_locked();
+    atomic_store(&splitNow, split ? 1 : 0);
+    BOOL now = split_locked();
+    pthread_mutex_unlock(&stateMu);
+    if (was && !now) { emit_player_gone(); emit_state((ns2_state){0}); }
+}
+int ns2_get_joycon_split(void) {
+    pthread_mutex_lock(&stateMu);
+    int split = split_locked();
+    pthread_mutex_unlock(&stateMu);
+    return split;
 }
 int ns2_rescan(void) {
     __block int accepted = 0;
@@ -1556,7 +1652,16 @@ void ns2_get_motion_left(ns2_motion *out) {   // 拼对时左只的六轴；没�
     if (!out) return;
     pthread_mutex_lock(&stateMu);
     *out = latestMotionLeft;
-    if (!ready || !active || !motionRequested || terminal || !pair_locked() || now_ns() / 1000 - out->host_timestamp_us > 250000)
+    if (!ready || !active || !motionRequested || terminal || !merged_locked() || now_ns() / 1000 - out->host_timestamp_us > 250000)
+        memset(out, 0, sizeof *out);
+    pthread_mutex_unlock(&stateMu);
+}
+// 拆开时玩家 2 那只的六轴（同 ns2_get_motion_left 的那一格，拆开时存的是不是玩家 1 的那只）；没拆、没开、超过 250 毫秒没更新 → 全 0
+void ns2_get_partner_motion(ns2_motion *out) {
+    if (!out) return;
+    pthread_mutex_lock(&stateMu);
+    *out = latestMotionLeft;
+    if (!ready || !active || !motionRequested || terminal || !split_locked() || now_ns() / 1000 - out->host_timestamp_us > 250000)
         memset(out, 0, sizeof *out);
     pthread_mutex_unlock(&stateMu);
 }

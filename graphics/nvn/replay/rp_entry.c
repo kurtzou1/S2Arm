@@ -32,32 +32,82 @@ void mtl_init(void) {}
 enum { RP_NPOOL = 4096 };
 static struct { const uint8_t *mem; uint64_t size; } g_pool[RP_NPOOL];
 static int g_npool;
+// 池表按起点升序（插入时挪位）。查找走二分 + 「上次命中的池」快路：
+// 原来三条查找都是「抢全局锁 + 线性扫 4096 项」，而每笔绘制的顶点流解析要调两次；真机（重叠档）读到
+// 「找池取镜像」每帧 20.6–23.0 毫秒 / 5619 次调用（≈4 微秒一次），就是这把锁与这张线性表。
+// 快路只在「池表代际没变」时生效：加池 / 删池都会推进代际，之后重新走锁内二分，不会读到销毁的池。
+static volatile uint64_t g_pool_epoch = 1;
+// 上次命中的池（无锁读）：用奇偶序号做 seqlock，读侧看到序号变化就放弃快路——
+// 只靠「代际 + 两个字段」会被撕裂读（新起点配旧长度）误判成命中，进而把地址解析到错的池上。
+static volatile uint64_t g_pool_lh_seq;
+static struct { uint64_t a, n, epoch; } g_pool_lh;
+static int pool_find_locked(uint64_t addr, uint64_t len, const uint8_t **mem, uint64_t *size) {
+    int lo = 0, hi = g_npool - 1, cand = -1;
+    while (lo <= hi) { int mid = (lo + hi) / 2; if ((uint64_t)(uintptr_t)g_pool[mid].mem <= addr) { cand = mid; lo = mid + 1; } else hi = mid - 1; }
+    if (cand < 0) return 0;
+    uint64_t b = (uint64_t)(uintptr_t)g_pool[cand].mem, sz = g_pool[cand].size;
+    if (addr - b > sz || len > sz - (addr - b)) return 0;
+    if (mem) *mem = g_pool[cand].mem;
+    if (size) *size = sz;
+    const uint64_t ep = __atomic_load_n(&g_pool_epoch, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&g_pool_lh_seq, 1, __ATOMIC_RELEASE);   // 奇数：正在写
+    g_pool_lh.a = b; g_pool_lh.n = sz; g_pool_lh.epoch = ep;
+    __atomic_add_fetch(&g_pool_lh_seq, 1, __ATOMIC_RELEASE);   // 偶数：写完
+    return 1;
+}
+static int pool_find_fast(uint64_t addr, uint64_t len, const uint8_t **mem, uint64_t *size) {   // 快路：不抢锁；代际一致才认
+    const uint64_t ep = __atomic_load_n(&g_pool_epoch, __ATOMIC_ACQUIRE);
+    const uint64_t s1 = __atomic_load_n(&g_pool_lh_seq, __ATOMIC_ACQUIRE);
+    if (s1 & 1) return 0;                                   // 正在写：这一笔走锁内二分
+    uint64_t a = g_pool_lh.a, n = g_pool_lh.n, cep = g_pool_lh.epoch;
+    const uint64_t s2 = __atomic_load_n(&g_pool_lh_seq, __ATOMIC_ACQUIRE);
+    if (s1 != s2 || cep != ep) return 0;
+    if (!a) return 0;
+    if (addr < a || addr - a > n || len > n - (addr - a)) return 0;
+    if (mem) *mem = (const uint8_t *)(uintptr_t)a;
+    if (size) *size = n;
+    return 1;
+}
 void nvn_be_pool_add(const void *mem, uint64_t size) {
     if (!mem || !size) return;
     pthread_mutex_lock(&g_mu);
-    if (g_npool < RP_NPOOL) g_pool[g_npool++] = (__typeof__(g_pool[0])){mem, size};
+    if (g_npool < RP_NPOOL) {
+        uint64_t b = (uint64_t)(uintptr_t)mem;
+        int at = g_npool;
+        for (int i = 0; i < g_npool; i++) if ((uint64_t)(uintptr_t)g_pool[i].mem > b) { at = i; break; }
+        if (at != g_npool) memmove(&g_pool[at + 1], &g_pool[at], (size_t)(g_npool - at) * sizeof g_pool[0]);
+        g_pool[at] = (__typeof__(g_pool[0])){mem, size};
+        g_npool++;
+        __atomic_add_fetch(&g_pool_epoch, 1, __ATOMIC_RELEASE);
+    }
     else { pthread_mutex_unlock(&g_mu); nvn_unimpl("limit", "pool_table_full_4096", mem); return; }
     pthread_mutex_unlock(&g_mu);
 }
 void nvn_be_pool_del(const void *mem) {
     pthread_mutex_lock(&g_mu);
-    for (int i = 0; i < g_npool; i++) if (g_pool[i].mem == mem) { g_pool[i] = g_pool[--g_npool]; break; }
+    for (int i = 0; i < g_npool; i++) if (g_pool[i].mem == mem) {
+        memmove(&g_pool[i], &g_pool[i + 1], (size_t)(g_npool - i - 1) * sizeof g_pool[0]);
+        g_npool--;
+        __atomic_add_fetch(&g_pool_epoch, 1, __ATOMIC_RELEASE);
+        break; }
     pthread_mutex_unlock(&g_mu);
     rp_buf_pool_gone(mem);
 }
 int nvn_be_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
-    int hit = 0;
-    pthread_mutex_lock(&g_mu);
-    for (int i = 0; i < g_npool; i++) { uint64_t b = (uint64_t)(uintptr_t)g_pool[i].mem;
-        if (addr >= b && addr - b <= g_pool[i].size && len <= g_pool[i].size - (addr - b)) { if (buf) *buf = (void *)g_pool[i].mem; if (off) *off = addr - b; hit = 1; break; } }
-    pthread_mutex_unlock(&g_mu);
+    const uint8_t *mem = NULL; uint64_t size = 0;
+    int hit = pool_find_fast(addr, len, &mem, &size);
+    if (!hit) {
+        pthread_mutex_lock(&g_mu);
+        hit = pool_find_locked(addr, len, &mem, &size);
+        pthread_mutex_unlock(&g_mu);
+    }
+    if (hit) { if (buf) *buf = (void *)(uintptr_t)mem; if (off) *off = addr - (uint64_t)(uintptr_t)mem; }
     return hit;
 }
 int rp_pool_find(uint64_t addr, uint64_t len, const uint8_t **mem, uint64_t *size) {
-    int hit = 0;
+    if (pool_find_fast(addr, len, mem, size)) return 1;
     pthread_mutex_lock(&g_mu);
-    for (int i = 0; i < g_npool; i++) { uint64_t b = (uint64_t)(uintptr_t)g_pool[i].mem;
-        if (addr >= b && addr - b <= g_pool[i].size && len <= g_pool[i].size - (addr - b)) { if (mem) *mem = g_pool[i].mem; if (size) *size = g_pool[i].size; hit = 1; break; } }
+    int hit = pool_find_locked(addr, len, mem, size);
     pthread_mutex_unlock(&g_mu);
     return hit;
 }
@@ -143,7 +193,8 @@ void nvn_be_read_texels(const tex_t *t, unsigned level, unsigned layer0, const N
 // ---------- 程序（描述符池登记、贴图内容归属在 rp_res.c）----------
 void nvn_be_prog_release(prog_t *p) { (void)p; }               // 还没有按程序的管线缓存：没有东西要释放
 void nvn_be_shader_prefetch(const uint8_t key[8]) { (void)key; }   // 预取是提速手段，不影响正确性；着色器链接上后再接
-int nvn_be_multi_draw_range(void) { return 0; }                // 0 = 前端逐条录间接计数多绘；OP_MULTI_DRAW 接上后改 1
+// 1 = 超过 1,024 条的间接计数多绘整段录一条 OP_MULTI_DRAW（rp_multi_draw 一次交后端）；设备没开 drawIndirectCount 时仍逐条录（rp_draw 报名跳过）
+int nvn_be_multi_draw_range(void) { nvn_gpu_caps caps; nvn_gpu_caps_get(&caps); return (caps.caps & NVN_GPU_CAP_INDIRECT_COUNT) != 0; }
 int nvn_be_buf_extent_consumer(void) { return 1; }             // Vulkan 上 size = 0 的存储绑定要按地址求活缓冲长度：让前端登记
 
 // ---------- 全局状态 ----------

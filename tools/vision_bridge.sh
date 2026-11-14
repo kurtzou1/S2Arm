@@ -13,12 +13,13 @@ H=$(cd "$(dirname "$0")/.." && pwd)
 DC=${S2A_DEVICECTL:-xcrun devicectl}
 VSH=${S2A_VISION_SH:-$H/tests/autoplay/vision.sh}
 POLL=${BRIDGE_POLL:-1}
+VD=${S2A_VISION_DIR:-Documents/vision}   # 设备上的信箱目录 = 自动玩家的 <文档根>/vision：单款 App 是 Documents/vision，多款容器包是 Documents/games/<号>/vision（tools/dev_run.sh 按启动上下文传；空串 = 缺省）
 PARENT=${BRIDGE_PARENT:-$PPID}
 log() { echo "[$(date +%T)] $*" >> "$L/bridge.log"; }
 # devicectl 一律带它自带的 --timeout（同 tools/dev_run.sh dcp：外层 timeout 只兜 devicectl 自己卡死）
 dcp() { local T=$1; shift; timeout $((T + ${S2A_DC_MARGIN:-30})) $DC "$@" --timeout "$T" > /dev/null 2>&1; }
-pull() { rm -f "$2"; dcp 20 device copy from --device "$DEV" --domain-type appDataContainer --domain-identifier "$B" --source "Documents/vision/$1" --destination "$2" && [ -s "$2" ]; }
-push() { dcp 20 device copy to --device "$DEV" --domain-type appDataContainer --domain-identifier "$B" --source "$1" --destination "Documents/vision/$2"; }
+pull() { rm -f "$2"; dcp 20 device copy from --device "$DEV" --domain-type appDataContainer --domain-identifier "$B" --source "$VD/$1" --destination "$2" && [ -s "$2" ]; }
+push() { dcp 20 device copy to --device "$DEV" --domain-type appDataContainer --domain-identifier "$B" --source "$1" --destination "$VD/$2"; }
 log "桥起：设备 $DEV 包 $B 驾驶员 $VSH"
 S= n=1
 while [ ! -e "$L/stop" ] && kill -0 "$PARENT" 2> /dev/null; do

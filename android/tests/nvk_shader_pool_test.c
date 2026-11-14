@@ -18,17 +18,25 @@
 #include "direct/s2a_direct.h"
 #include "../../runtime/include/s2a_direct_host.h"
 #include "direct/jv.h"
+#include "tbuf_spirv_fixtures.h"
+
+// 实现在 nvk_shader.c，声明在 nvk_session.h。这里不包 nvk_session.h：nvk_compile_stop_test.py 拿本文件当夹具，
+// 会在同一个翻译单元里把 nvk_session_request_stop 等会话函数定义成 static，包了头就是「static 声明跟在非 static 声明后面」，编不过。
+uint64_t nvk_shader_cs_fast_hits(void);
 
 static int checks, failures, compiler_calls, diag_enabled, diag_lines, diag_queries;
 static unsigned fake_array_count;
 static int separate_fixture;
 static int fake_gs_success, fake_gs_result_mode, gs_loads[6], fake_geometry_enabled = 1;
+static int fake_cs_success, cs_loads;   // 1：编译器替身对计算请求回一份合法的计算程序（走「编成功之后进快路」的正向路径）
 int g_s2a_logfd = 2;
 static const char *fake_compile_error;
+static const char *fake_compile_file;
 static char captured[262144], last_red[512], last_diag[512], last_stats[512], last_reason[512], last_request_reason[512];
 static char reason_history[8192];
 static const char profile[] = "{\"schema\":\"s2a-direct-profile-v1\",\"profileHash\":\"sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"capabilities\":{\"storageBufferOffsetAlignment\":16}}";
 static char external_profile[65536], external_closure[128];
+static char external_profile_hash[80];
 static const char *capture_output;
 static const char phash[] = "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 static prog_t gs_program;
@@ -68,9 +76,11 @@ const prog_t *nvn_prog_snap_get(uint64_t serial, uint8_t keys[6][8], uint8_t *ok
 }
 void nvn_gpu_caps_get(nvn_gpu_caps *out) { memset(out, 0, sizeof *out); out->caps = fake_geometry_enabled ? NVN_GPU_CAP_GEOMETRY : 0; }
 int rp_tex_snap_by_id(int id, tex_t *t, view_t *v, int *h) {
-    if (!separate_fixture || (id != 77 && id != 78 && !(separate_fixture == 2 && id == 0))) return 0;
+    // 77：带视图（改目标为 RECTANGLE）；78 / 79：同一组格式 / 目标 / 深度的两个不同句柄（快路按事实认，不按句柄认）。
+    if (!separate_fixture || (id != 77 && id != 78 && id != 79 && !(separate_fixture == 2 && id == 0))) return 0;
     memset(t, 0, sizeof *t); memset(v, 0, sizeof *v); t->d.format = NVN_FORMAT_RGBA8; t->d.target = NVN_TEXTURE_TARGET_2D; t->d.depth = 1;
-    *h = id == 77; if (*h) { v->set_target = 1; v->target = NVN_TEXTURE_TARGET_RECTANGLE; } return 1;
+    if (separate_fixture == 3) t->d.target = NVN_TEXTURE_TARGET_BUFFER;
+    *h = id == 77 && separate_fixture != 3; if (*h) { v->set_target = 1; v->target = NVN_TEXTURE_TARGET_RECTANGLE; } return 1;
 }
 static uint64_t fake_reg_generation;
 static int fake_reg_changes = 1, gs_sep_hash_calls;
@@ -91,7 +101,7 @@ uint64_t rp_tex_fact_sig(const uint64_t *h, int n, int b, int count) {
 }
 int s2a_direct_provider_compile_context(struct s2a_direct_compile_context *c) {
     memset(c, 0, sizeof *c); c->session = 4; c->generation = 6; c->direct_abi = 1;
-    c->profile_json = external_profile[0] ? external_profile : profile; c->profile_bytes = strlen(c->profile_json); c->profile_hash = phash;
+    c->profile_json = external_profile[0] ? external_profile : profile; c->profile_bytes = strlen(c->profile_json); c->profile_hash = external_profile_hash[0] ? external_profile_hash : phash;
     c->translator_closure = external_closure[0] ? external_closure : "closure-test"; c->storage_buffer_offset_alignment = 16; return 0;
 }
 static int32_t fake_compile(uint64_t session, uint64_t gen, s2a_direct_bytes req, s2a_direct_emit_fn emit, void *sink) {
@@ -105,6 +115,17 @@ static int32_t fake_compile(uint64_t session, uint64_t gen, s2a_direct_bytes req
         if (f) { CHECK(fwrite(captured, 1, (size_t)req.bytes, f) == (size_t)req.bytes, "real compiler request output complete"); fclose(f); }
         return -27;
     }
+    if (fake_compile_file) {
+        FILE *f = fopen(fake_compile_file, "rb");
+        if (!f || fseek(f, 0, SEEK_END)) return -1;
+        long n = ftell(f);
+        if (n <= 0 || fseek(f, 0, SEEK_SET)) { fclose(f); return -1; }
+        uint8_t *bytes = malloc((size_t)n);
+        if (!bytes || fread(bytes, 1, (size_t)n, f) != (size_t)n) { free(bytes); fclose(f); return -1; }
+        fclose(f);
+        s2a_direct_bytes payload = {bytes, (uint64_t)n};
+        int32_t rc = emit(sink, payload); free(bytes); return rc;
+    }
     if (fake_gs_success) {
         char result[1024];
         const char *extra = fake_gs_result_mode == 1 ? "" :
@@ -116,15 +137,24 @@ static int32_t fake_compile(uint64_t session, uint64_t gen, s2a_direct_bytes req
         s2a_direct_bytes payload = {(const uint8_t *)result, (uint64_t)n};
         return emit(sink, payload);
     }
+    if (fake_cs_success && strstr(captured, "\"program\":{\"kind\":\"compute\"")) {
+        // 合法的计算程序结果（形状同 nvn_vk_program_binding_cap_test.c 的 build_compute）：一个 cs 阶段、零个绑定。
+        static const char result[] = "{\"schema\":\"s2a-direct-program-v1\",\"content\":{"
+            "\"contract\":\"s2a-direct-program-content-v1\",\"kind\":\"compute\",\"hasUnalignedStorageBuffer\":false,\"c0Reads\":[],"
+            "\"stages\":[{\"stage\":\"cs\",\"spirv\":\"AwIjBwABAwAAAAAAAQAAAAAAAAA=\"}],\"bindings\":[],"
+            "\"supportLayout\":{\"requiredSize\":2608},\"supportReads\":[]}}";
+        s2a_direct_bytes payload = {(const uint8_t *)result, (uint64_t)(sizeof result - 1)};
+        return emit(sink, payload);
+    }
     if (fake_compile_error) {
         s2a_direct_bytes payload = {(const uint8_t *)fake_compile_error, (uint64_t)strlen(fake_compile_error)};
         (void)emit(sink, payload); return -1;
     }
     if (fake_array_count) {
-        char result[1024];
+        char result[4096];
         int n = snprintf(result, sizeof result,
-            "{\"schema\":\"s2a-direct-program-v1\",\"content\":{\"stages\":[{\"stage\":\"vs\",\"spirv\":\"AwIjBwABAwAAAAAAAQAAAAAAAAA=\"}],"
-            "\"bindings\":[{\"stage\":\"vs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":0,\"count\":%u}]}}", fake_array_count);
+            "{\"schema\":\"s2a-direct-program-v1\",\"content\":{\"stages\":[{\"stage\":\"vs\",\"spirv\":\"%s\"}],"
+            "\"bindings\":[{\"stage\":\"vs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":0,\"count\":%u}]}}", S2A_TEST_VERT_64, fake_array_count);
         s2a_direct_bytes payload = {(const uint8_t *)result, (uint64_t)n};
         return emit(sink, payload);
     }
@@ -137,6 +167,7 @@ nvn_gpu_rc nvn_gpu_shader_load(const nvn_gpu_shader_src *s, nvn_gpu_shader *o, n
         gs_loads[s->stage]++; *o = (nvn_gpu_shader)(uintptr_t)(s->stage + 1); return (nvn_gpu_rc){NVN_GPU_OK};
     }
     if (fake_array_count) { *o = (nvn_gpu_shader)(uintptr_t)1; return (nvn_gpu_rc){NVN_GPU_OK}; }
+    if (fake_cs_success && s->stage == NVN_GPU_SH_CS) { cs_loads++; *o = (nvn_gpu_shader)(uintptr_t)7; return (nvn_gpu_rc){NVN_GPU_OK}; }
     CHECK(0, "unexpected shader load"); return (nvn_gpu_rc){NVN_GPU_E_UNSUPPORTED};
 }
 void nvn_gpu_shader_release(nvn_gpu_shader s) { (void)s; }
@@ -311,11 +342,83 @@ static void run_case(int compute, int pool, int want_called, const char *expecte
         }
     }
 }
-static int emit_real_request(const char *profile_path, const char *closure, const char *dir, const char *output) {
+// 计算程序快路：正向路径 + 负对照。夹具让编译器替身对计算请求回一份合法程序（零绑定），第一次派发编成，
+// 之后看「不再走完整请求」——两个证据：编译器没再被调用，且 nvk_shader_cs_fast_hits() 加一（只有快路命中才加）。
+// reg_changes=1 模拟真机：贴图登记代号每次读都推进（贴图每帧都在登记）；=0 登记表不动，事实摘要的缓存有效。两种都要对。
+static void cs_variant_source(unsigned variant, uint8_t digest[32]) {
+    uint8_t ctl[0x760] = {0}, code[16] = {1,2,3,4};
+    wr(ctl+0x20,0x760); wr(ctl+0x748,8); wr(ctl+0x74c,2); wr(ctl+0x750,1);
+    wr(ctl+0x754,17); wr(ctl+0x758,32); wr(ctl+0x700,4); wr(ctl+0x704,8); ctl[0x100] = (uint8_t)variant;
+    s2a_sha256 h; s2a_sha256_init(&h); s2a_sha256_update(&h,ctl,sizeof ctl); s2a_sha256_update(&h,code,sizeof code); s2a_sha256_final(&h,digest);
+    CHECK(!s2a_source_keep(digest, 0, code, sizeof code, ctl, sizeof ctl), "CS fixture source variant=%u", variant);
+}
+static void compute_fast_path_test(void) {
+    for (int rc_mode = 1; rc_mode >= 0; rc_mode--) {
+        const struct rp_prog *a = NULL, *b = NULL; uint8_t dig2[32];
+        rp_shader_reset(); s2a_source_clear(); rp_state_reset(); nvn_unimpl_reset(); source(); cs_variant_source(1, dig2);
+        fake_cs_success = 1; separate_fixture = 1; fake_reg_changes = rc_mode; compiler_calls = cs_loads = 0; captured[0] = last_red[0] = 0;
+        bind_pools(100);
+        rp_S.ubo[5][0].addr = 0x1000; rp_S.ubo[5][0].size = 64; rp_S.ssbo[5][0].addr = 0x10000; rp_S.ssbo[5][0].size = 256; rp_S.tex[5][0] = 78;
+        CHECK(rp_shader_resolve_compute(&a) == 0 && a && a->is_compute && compiler_calls == 1 && cs_loads == 1,
+              "CS first dispatch compiles and loads (reg_changes=%d) calls=%d loads=%d red=%s", rc_mode, compiler_calls, cs_loads, last_red);
+        if (!a) continue;
+        int calls = compiler_calls; uint64_t hits = nvk_shader_cs_fast_hits();
+        CHECK(hits == 0, "CS first dispatch is not a fast-path hit (reg_changes=%d)", rc_mode);
+        // 地址 / 长度 / 句柄变了，编译请求读的输入没变：请求与身份逐字节不变，必须直接复用。
+        rp_S.ubo[5][0].addr = 0x2000; rp_S.ubo[5][0].size = 128;      // 「有没有」不变
+        rp_S.ssbo[5][0].addr = 0x30000; rp_S.ssbo[5][0].size = 1024;  // 仍按 16 对齐
+        rp_S.ssbo[5][1].addr = 0x50000; rp_S.ssbo[5][1].size = 64;    // 多绑一个对齐的存储缓冲：不进请求
+        rp_S.tex[5][0] = 79;                                          // 另一个句柄，格式 / 目标 / 深度同 78
+        CHECK(rp_shader_resolve_compute(&b) == 0 && b == a && compiler_calls == calls && nvk_shader_cs_fast_hits() == hits + 1,
+              "CS new addresses and same-fact handles reuse the program without a request (reg_changes=%d)", rc_mode);
+        hits = nvk_shader_cs_fast_hits();
+#define CS_MISS(msg, setup, undo) do { \
+            setup; \
+            CHECK(rp_shader_resolve_compute(&b) == 0 && b && b != a && compiler_calls == calls + 1 && nvk_shader_cs_fast_hits() == hits, \
+                  msg " (reg_changes=%d) calls=%d expected=%d hits=%llu/%llu", rc_mode, compiler_calls, calls + 1, \
+                  (unsigned long long)nvk_shader_cs_fast_hits(), (unsigned long long)hits); \
+            calls = compiler_calls; \
+            undo; \
+            CHECK(rp_shader_resolve_compute(&b) == 0 && b == a && compiler_calls == calls && nvk_shader_cs_fast_hits() == hits + 1, \
+                  "CS restored input hits the first entry again after: " msg " (reg_changes=%d)", rc_mode); \
+            hits = nvk_shader_cs_fast_hits(); \
+        } while (0)
+        // 编译请求读的输入，每一项变了都必须重新走请求（编译器被调用、拿到新程序、不算命中）。
+        CS_MISS("changed CS source key recompiles", memcpy(rp_S.skey[5], dig2, 8), memcpy(rp_S.skey[5], rp_S.skey[0], 8));
+        CS_MISS("changed CS constant-buffer use recompiles", (rp_S.ubo[5][1].addr = 0x6000, rp_S.ubo[5][1].size = 32), (rp_S.ubo[5][1].addr = 0, rp_S.ubo[5][1].size = 0));
+        CS_MISS("unaligned CS storage address recompiles", (rp_S.ssbo[5][2].addr = 0x70001, rp_S.ssbo[5][2].size = 16), (rp_S.ssbo[5][2].addr = 0, rp_S.ssbo[5][2].size = 0));
+        CS_MISS("CS pool size update recompiles", bind_pools(101), bind_pools(100));
+        CS_MISS("changed CS texture fact recompiles", rp_S.tex[5][3] = 77, rp_S.tex[5][3] = 0);
+        // 分离槽 100 的下标是 228：旧键只拷了 rp_S.tex[5] 的前 160 项，覆盖不到。
+        CS_MISS("changed CS separate texture fact recompiles", bind_separate(5, 100, 1, 78), bind_separate(5, 100, 1, 0));
+#undef CS_MISS
+        // 来源登记冲突会毒化短键并推进代际：同一份状态不能再命中推进之前存下的快路表项（慢路仍给同一个程序、不重编）。
+        { uint8_t wrong_code[16] = {9}, wrong_control[0x760] = {0};
+          CHECK(s2a_source_keep(dig2, 0, wrong_code, sizeof wrong_code, wrong_control, sizeof wrong_control) != 0,
+                "conflicting CS source rejected and key poisoned"); }
+        calls = compiler_calls; hits = nvk_shader_cs_fast_hits();
+        CHECK(rp_shader_resolve_compute(&b) == 0 && b == a && compiler_calls == calls && nvk_shader_cs_fast_hits() == hits,
+              "CS source poison advances the epoch so the cached entry is not reused (reg_changes=%d)", rc_mode);
+        CHECK(rp_shader_resolve_compute(&b) == 0 && b == a && compiler_calls == calls && nvk_shader_cs_fast_hits() == hits + 1,
+              "CS entry is stored again under the new epoch (reg_changes=%d)", rc_mode);
+        // 会话清空：快表与读数一并清掉，同样的状态必须重新编译（里面存的是 rp_prog*，不能跨会话留着）。
+        rp_shader_reset();
+        CHECK(nvk_shader_cs_fast_hits() == 0, "session reset clears the CS fast-path counter (reg_changes=%d)", rc_mode);
+        calls = compiler_calls;
+        CHECK(rp_shader_resolve_compute(&b) == 0 && b && compiler_calls == calls + 1 && nvk_shader_cs_fast_hits() == 0,
+              "after session reset the same CS state compiles again (reg_changes=%d)", rc_mode);
+    }
+    fake_cs_success = 0; separate_fixture = 0; fake_reg_changes = 1;
+    bind_separate(5, 100, 1, 0); memset(rp_S.ubo[5], 0, sizeof rp_S.ubo[5]); memset(rp_S.ssbo[5], 0, sizeof rp_S.ssbo[5]); memset(rp_S.tex[5], 0, sizeof rp_S.tex[5]);
+    rp_shader_reset();
+}
+static int emit_real_request(const char *profile_path, const char *closure, const char *dir, const char *output, int tbuf) {
     FILE *pf = fopen(profile_path, "rb"); if (!pf) return 1;
     size_t pn = fread(external_profile, 1, sizeof external_profile - 1, pf);
     int extra = fgetc(pf); fclose(pf); if (!pn || extra != EOF || strlen(closure) >= sizeof external_closure) return 1;
     external_profile[pn] = 0; snprintf(external_closure, sizeof external_closure, "%s", closure);
+    struct s2a_jv profile_obj = {external_profile, pn}, hash_field;
+    if (s2a_jv_obj_find(profile_obj, "profileHash", &hash_field) || s2a_jv_str(hash_field, external_profile_hash, sizeof external_profile_hash)) return 1;
     rp_state_reset(); rp_shader_reset(); s2a_source_clear();
     uint8_t keys[3][8];
     for (unsigned st = 0; st < 3; st++) {
@@ -333,10 +436,52 @@ static int emit_real_request(const char *profile_path, const char *closure, cons
     for (unsigned st = 0; st < 3; st++) { gs_stages[st] = (uint8_t)st; memcpy(gs_keys[st], keys[st], 8); }
     gs_keys_ok = 7; p_bind_program_id bind = {&gs_program, gs_program.serial, 0x1f, 0};
     if (!rp_state_op(OP_BIND_PROGRAM, &bind, sizeof bind + 8)) return 1;
-    bind_pools(7); capture_output = output; compiler_calls = 0;
+    bind_pools(tbuf ? 100 : 7);
+    if (tbuf) { separate_fixture = 3; bind_separate(1, 0, 1, 77); }
+    if (tbuf == 2) { fake_compile_file = output; fake_gs_success = 1; nvn_unimpl_reset(); memset(gs_loads, 0, sizeof gs_loads); }
+    else capture_output = output;
+    compiler_calls = 0;
     struct rp_shader_req q = {0}; q.prim = 0; q.rt_count = 1; q.rt_format[0] = NVN_FORMAT_RGBA8;
     const struct rp_prog *prog = NULL; int rc = rp_shader_resolve(&q, &prog);
+    if (tbuf == 2) {
+        int rejected = rc == -1 && !prog && compiler_calls == 1 &&
+            nvn_unimpl_count("shader", "texture_buffer_replay_unsupported") == 1 && gs_loads[1] == 0;
+        fprintf(stderr, "%s: real BUFFER result refuses unsupported replay before FS shader load\n", rejected ? "PASS" : "FAIL");
+        return !rejected;
+    }
     printf("production Maxwell request: rc=%d captured=%d failures=%d\n", rc, compiler_calls, failures);
+    return !(rc == -1 && compiler_calls == 1 && failures == 0);
+}
+
+static int emit_compute_request(const char *profile_path, const char *closure, const char *dir, const char *output, int replay) {
+    FILE *pf = fopen(profile_path, "rb"); if (!pf) return 1;
+    size_t pn = fread(external_profile, 1, sizeof external_profile - 1, pf);
+    int extra = fgetc(pf); fclose(pf); if (!pn || extra != EOF || strlen(closure) >= sizeof external_closure) return 1;
+    external_profile[pn] = 0; snprintf(external_closure, sizeof external_closure, "%s", closure);
+    struct s2a_jv profile_obj = {external_profile, pn}, hash_field;
+    if (s2a_jv_obj_find(profile_obj, "profileHash", &hash_field) || s2a_jv_str(hash_field, external_profile_hash, sizeof external_profile_hash)) return 1;
+    rp_state_reset(); rp_shader_reset(); s2a_source_clear();
+    char path[1024]; snprintf(path, sizeof path, "%s/cs.bin", dir);
+    FILE *f = fopen(path, "rb"); if (!f) return 1;
+    uint8_t code[4096], ctl[0x760] = {0}, digest[32]; size_t n = fread(code, 1, sizeof code, f);
+    extra = fgetc(f); fclose(f); if (!n || extra != EOF) return 1;
+    wr(ctl + 0x20, sizeof ctl); wr(ctl + 0x748, 1); wr(ctl + 0x74c, 1); wr(ctl + 0x750, 1);
+    s2a_sha256 h; s2a_sha256_init(&h); s2a_sha256_update(&h, ctl, sizeof ctl); s2a_sha256_update(&h, code, n); s2a_sha256_final(&h, digest);
+    if (s2a_source_keep(digest, 0, code, (uint32_t)n, ctl, sizeof ctl)) return 1;
+    memcpy(rp_S.skey[5], digest, 8); rp_S.skey_ok = 1 << 5;
+    bind_pools(100); separate_fixture = 3;
+    p_bind_handles handle = {0}; handle.stage = 5; handle.first = 0; handle.n = 1; handle.h[0] = 77;
+    if (!rp_state_op(OP_BIND_TEX, &handle, sizeof handle)) return 1;
+    if (replay) { fake_compile_file = output; fake_gs_success = 1; nvn_unimpl_reset(); memset(gs_loads, 0, sizeof gs_loads); }
+    else capture_output = output;
+    compiler_calls = 0; const struct rp_prog *prog = NULL; int rc = rp_shader_resolve_compute(&prog);
+    if (replay) {
+        int rejected = rc == -1 && !prog && compiler_calls == 1 &&
+            nvn_unimpl_count("shader", "texture_buffer_replay_unsupported") == 1 && gs_loads[NVN_GPU_SH_CS] == 0;
+        fprintf(stderr, "%s: real compute BUFFER result refuses unsupported replay before CS shader load\n", rejected ? "PASS" : "FAIL");
+        return !rejected;
+    }
+    printf("production compute Maxwell request: rc=%d captured=%d failures=%d red=%s\n", rc, compiler_calls, failures, last_red);
     return !(rc == -1 && compiler_calls == 1 && failures == 0);
 }
 
@@ -357,7 +502,10 @@ int main(int argc, char **argv) {
         for (size_t i = 0; i < n; i++) printf("%02x", bytes[i]);
         putchar('\n'); return 0;
     }
-    if (argc == 6 && !strcmp(argv[1], "--emit-real")) return emit_real_request(argv[2], argv[3], argv[4], argv[5]);
+    if (argc == 6 && (!strcmp(argv[1], "--emit-real") || !strcmp(argv[1], "--emit-real-tbuf") || !strcmp(argv[1], "--execute-tbuf")))
+        return emit_real_request(argv[2], argv[3], argv[4], argv[5], !strcmp(argv[1], "--execute-tbuf") ? 2 : !strcmp(argv[1], "--emit-real-tbuf"));
+    if (argc == 6 && (!strcmp(argv[1], "--emit-compute-tbuf") || !strcmp(argv[1], "--execute-compute-tbuf")))
+        return emit_compute_request(argv[2], argv[3], argv[4], argv[5], !strcmp(argv[1], "--execute-compute-tbuf"));
     if (argc != 1) return 2;
     unsetenv("S2A_SHADER_REVISION_ROOT"); unsetenv("S2A_DIRECT_CACHE_DIR"); rp_state_reset(); source();
     for (int cs = 0; cs < 2; cs++) {
@@ -496,6 +644,7 @@ int main(int argc, char **argv) {
         separate_fixture = 0;
     }
     fake_array_count = 0; fake_compile_error = NULL;
+    compute_fast_path_test();
     gs_request_test();
     rp_shader_reset(); s2a_source_clear();
     fprintf(stderr, "nvk shader pool: %d checks, %d failures\n", checks, failures);

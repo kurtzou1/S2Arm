@@ -339,14 +339,24 @@ class _FileInfo(C.Structure):
                 ('size_low', W.DWORD), ('links', W.DWORD), ('index_high', W.DWORD), ('index_low', W.DWORD)]
 
 
+EPOCH_AS_FILETIME = 116444736000000000   # 1970-01-01 距 1601-01-01 的 100 纳秒数（FILETIME 的起点）
+
+
+def _unix_time(ft):
+    """FILETIME（1601 起的 100 纳秒数）→ Unix 秒（浮点，同 os.stat 的 st_mtime）"""
+    return (((ft.dwHighDateTime << 32) | ft.dwLowDateTime) - EPOCH_AS_FILETIME) / 1e7
+
+
 def _info(handle):
     info = _FileInfo()
     _checked(_api('kernel32', 'GetFileInformationByHandle', W.BOOL, W.HANDLE, C.c_void_p)(handle, C.byref(info)))
     mode = stat.S_IFDIR if info.attributes & 0x10 else stat.S_IFREG
     if info.attributes & 0x400:
         mode = stat.S_IFLNK
+    # st_mtime：诊断包按任务记录改动时间挑最近 50 个（library.diagnostics）要用；原先没给，Windows 上「故障报修」打包即 AttributeError（#854）
     return SimpleNamespace(st_mode=mode, st_dev=info.volume, st_ino=(info.index_high << 32) | info.index_low,
-                           st_size=(info.size_high << 32) | info.size_low, attributes=info.attributes)
+                           st_size=(info.size_high << 32) | info.size_low, attributes=info.attributes,
+                           st_mtime=_unix_time(info.written))
 
 
 def _sid_bytes(sid):

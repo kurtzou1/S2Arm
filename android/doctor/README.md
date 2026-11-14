@@ -41,7 +41,7 @@ bash android/doctor.sh --format json --plan \
 
 - Dockerfile：JDK、SDK / Build Tools、NDK、CMake、Gradle、固定基础镜像；
 - app/build.gradle、settings.gradle：compileSdk、Java、NDK、CMake、minSdk、AGP；
-- gate.sh：旧内联 case 或当前明确调用的 tools/jdk17.sh 中的严格 JDK 主版本，helper 也记录源码 SHA256；cs/build.sh 与 global.json：普通 SDK 滚动策略和容器**精确** SDK、目标/宿主架构；
+- host/hostenv.sh 与其调用的 tools/jdk17.sh：严格 JDK 主版本，helper 也记录源码 SHA256；cs/build.sh 与 global.json：普通 SDK 滚动策略和容器**精确** SDK、目标/宿主架构；
 - openssl/build.sh、codecs/build.sh：API、NDK、缓存表达式与脚本哈希；
 - services/opus/build.sh、services/vpx/build.sh：沿用跨平台版本/源码 SHA256 正本。
 

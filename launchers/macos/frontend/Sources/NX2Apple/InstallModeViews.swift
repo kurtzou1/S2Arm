@@ -1,6 +1,6 @@
 // S2Arm（不是上游文件）：「装到 iPhone 的方式」（v0.3.0，维护者 11-11 定「怎么签、怎么装收成一套」，不加顶层入口）。
 //   InstallModeCard：环境检查里的一张卡——一键装到 iPhone（签名身份：Xcode 账号 / 我的开发者证书；Xcode 团队号手填与引导项目从装机页挪来）
-//     或导出、自己签名安装（导出作业合入前置灰写「下一版提供」）。
+//     或导出、自己签名安装（导出作业已合入，一直可选；11-14 删掉原先的置灰与「下一版提供」）。
 //   InstallModeLine：出包页原来的「签名方式」二选一换成这一行只读 + 「更改」（打开环境检查）。
 //   PhoneUpdateButton：游戏库右上角「更新 iPhone 上的 S2Arm」（壳比本版旧才出现），有要重新出包的款先三选一。
 import AppKit
@@ -23,9 +23,7 @@ struct InstallModeCard: View {
             VStack(alignment: .leading, spacing: 10) {
                 option("device", ix(loc, "install.mode.device"), ix(loc, "install.mode.device_note"), enabled: true)
                 if model.installMode.mode == "device" { identity.padding(.leading, 28) }
-                option("export", ix(loc, "install.mode.export"),
-                       ix(loc, "install.mode.export_note") + (model.installMode.exportAvailable ? "" : "\n" + ix(loc, "install.mode.export_soon")),
-                       enabled: model.installMode.exportAvailable)
+                option("export", ix(loc, "install.mode.export"), ix(loc, "install.mode.export_note"), enabled: true)
             }
             .padding(14)
         }

@@ -121,6 +121,18 @@ namespace S2A.Services.Tests
             Check("手柄小程序：只收单只 Joy-Con 左 → Player1 配左只", $"True / {(uint)ControllerType.JoyconLeft}",
                 $"{ui.DisplayMessageDialog(joyLeft)} / {Style((int)PlayerIndex.Player1)}");
 
+            // 只声明 Joy-Con 2 左 / 右只位（例：两人各横握一只 Joy-Con 2 的项目，样式 掌机 | bit 13 | bit 14）：连着 Joy-Con 2 时照 StyleSupported 认、配单只；
+            //   负对照：没连 Joy-Con 2（只认一代位）→ 照旧报红回 false
+            var j2Single = Args(1, ControllerType.Handheld | (ControllerType)((1 << 13) | (1 << 14)), true, all);
+            Host.Device.Hid.Npads.SetJoycon2(true);
+            bool j2ok = ui.DisplayMessageDialog(j2Single);
+            Settle(() => (Style((int)PlayerIndex.Player1) & 0xfff) == (uint)ControllerType.JoyconRight);
+            Check("手柄小程序：只收 Joy-Con 2 单只位、连着 Joy-Con 2 → Player1 配右只", $"True / {(uint)ControllerType.JoyconRight}",
+                $"{j2ok} / {Style((int)PlayerIndex.Player1) & 0xfff}");
+            Host.Device.Hid.Npads.SetJoycon2(false);
+            red0 = Red.Total;
+            Check("手柄小程序：负对照：没连 Joy-Con 2 → 报红、false", "False / +1红", $"{ui.DisplayMessageDialog(j2Single)} / +{Red.Total - red0}红");
+
             // 选用户：只有一个用户 = AccountManager.LastOpenedUser（01006F8002326000岛民按建档用户号认人）
             Check("选用户小程序：回 LastOpenedUser",
                 Host.Device.System.AccountManager.LastOpenedUser.UserId.ToString(),

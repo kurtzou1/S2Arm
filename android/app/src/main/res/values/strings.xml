@@ -23,6 +23,8 @@
     <string name="touch_menu_title">Touch controls</string>
     <string name="touch_menu_edit_positions">Edit button positions</string>
     <string name="touch_menu_restore_default">Restore default layout</string>
+    <string name="touch_menu_show_pad">Show on-screen controller</string>
+    <string name="touch_menu_hide_pad">Hide on-screen controller</string>
     <string name="touch_passthrough_on">Touch passthrough: on (tap to turn off)</string>
     <string name="touch_passthrough_off">Touch passthrough: off (tap to turn on)</string>
     <string name="touch_edit_save">Save</string>
@@ -30,5 +32,43 @@
     <string name="touch_edit_cancel">Cancel</string>
     <string name="touch_layout_load_failed">Saved touch layout could not be read; using the default</string>
     <string name="touch_layout_save_failed">Layout not saved: %1$s</string>
+    <string name="touch_menu_import">Import layout…</string>
+    <string name="touch_menu_export">Export layout…</string>
+    <string name="touch_layout_imported">Layout imported</string>
+    <string name="touch_layout_exported">Layout exported</string>
+    <string name="touch_layout_import_failed">Layout not imported: %1$s</string>
+    <string name="touch_layout_export_failed">Layout not exported: %1$s</string>
+    <string name="touch_layout_err_size">the file is larger than 64 KiB, so it is not a touch layout. Choose a layout file exported from S2Arm (.json).</string>
+    <string name="touch_layout_err_invalid">the file is not a valid touch layout. Choose a layout file exported from S2Arm (.json).</string>
+    <string name="touch_layout_err_read">the file could not be read. Save it to this device first, or choose it from another location.</string>
+    <string name="touch_layout_err_write">the chosen location could not be written. Choose another location.</string>
+    <string name="touch_layout_document_unavailable">Document could not be opened</string>
+    <!-- 玩家看到的失败文案（PlayerError）：做什么没成功 + 原因 + 下一步，最后一行是原始细节 -->
+    <string name="player_err_fmt">%1$s: %2$s %3$s\nDetails: %4$s</string>
+    <string name="player_err_import">Import didn\'t work</string>
+    <string name="player_err_start">The game couldn\'t start</string>
+    <string name="player_err_no_space">There isn\'t enough free storage on this phone.</string>
+    <string name="player_err_no_space_next">Free up some space, then try again.</string>
+    <string name="player_err_apk">This game package was built for a different version of the app.</string>
+    <string name="player_err_apk_next">Import the game package made together with this app build.</string>
+    <string name="player_err_access">The files couldn\'t be read.</string>
+    <string name="player_err_access_next">Pick the folder again and allow access.</string>
+    <string name="player_err_pack">The game package is incomplete or damaged.</string>
+    <string name="player_err_pack_next">Copy the game package from your computer again, then import it.</string>
+    <string name="player_err_other">Something unexpected went wrong.</string>
+    <string name="player_err_other_next">Tap Export diagnostics… on the library screen and send us the file.</string>
+    <string name="library_game_starting">The game is still starting; it opens in a moment…</string>
+    <string name="library_current_game">the game that is running</string>
+    <string name="library_switch_title">Switch game</string>
+    <string name="library_switch_message">%1$s is running. Close it (it saves as usual) and start %2$s?</string>
+    <string name="library_switch_confirm">Close and start</string>
+    <string name="library_switch_waiting">Closing %1$s…</string>
+    <string name="library_switch_timeout">The running game did not close within 20 seconds. Wait a moment and tap again.</string>
+    <string name="library_launch_failed">Could not start the game: %1$s</string>
+    <string name="library_switch_cancel">Cancel</string>
+    <string name="library_your_games">YOUR GAMES</string>
+    <string name="library_position">%1$d of %2$d</string>
+    <string name="library_empty">No games yet</string>
+    <string name="library_empty_hint">Install a game with S2Arm on your computer.</string>
 </resources>
 

@@ -65,6 +65,9 @@ int dm_shader_fout_fresh(const char *key16, uint32_t umask, uint32_t smask);   /
 //   _snap = 提交线程上把控制段 + 代码区整份拷下给后台用（*code / *control 指进返回的那块，调用方 free；NULL = 认不出）
 int dm_shader_se(const uint8_t key[8], uint64_t code, const void *control, char *path, size_t n);
 int dm_shader_vpad(const uint8_t key[8], uint64_t code, const void *control, uint32_t mask, char *path, size_t n);   // 顶点补齐变体（dsh_miss.inc）
+int dm_shader_vpad_cached_mesh(const uint8_t key[8], uint32_t mask, char *path, size_t n);   // 网格着色器控制段过期时复用本机同链源码缓存（dsh_miss.inc）
+void dm_shader_mesh_hold(uint64_t code, const void *control);   // SetShaders 时保存 NVN2 mesh 输入，按当时键索引
+void dm_shader_mesh_hold_key(const uint8_t key[8], uint64_t code, const void *control);   // Bind 时按已算出的最终键保存
 int dm_shader_se_fresh(const char *key16);
 void *dm_shader_snap(uint64_t code, const void *control, uint64_t *code_out, const void **control_out);
 void mtl_se_stats(uint64_t out[2]);   // S2Arm（#800，nvn_mtl.m se_done）：采样器归约变体 [0] 本局在设备上编好的着色器数、[1] 编不出的（收局汇总行）

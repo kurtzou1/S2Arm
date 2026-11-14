@@ -142,6 +142,15 @@ SetW(pack, "packNotes", (object?)new List<string> { "这款有 27 处用了兼�
 SaveP("win_04b_export_success_notes", () => Navigate(pack, "progress"));
 SetW(pack, "packNotes", (object?)new List<string>());
 
+// 两路（维护者 11-13：出包页起分两路）：导出模式的进度页最后一步是「整理 iPhone 版程序与资源包」、完成页主按钮与说明照导出写
+SetW(pack, "installMode", "export");
+InjectMockProgress(pack, fraction: 0.85, stepIndex: 2, running: true, exportMode: true);
+SaveP("win_04c_export_selfsign_progress", () => Navigate(pack, "progress"));
+InjectMockProgress(pack, fraction: 1.0, stepIndex: -1, running: false, state: "succeeded",
+    ipaBytes: 1_200_000_000L, packBytes: 3_400_000_000L, elapsed: 247, exportMode: true);
+SaveP("win_04d_export_selfsign_success", () => Navigate(pack, "progress"));
+SetW(pack, "installMode", "device");
+
 InjectMockProgress(pack, fraction: 0.12, stepIndex: 0, running: false, state: "failed",
     summary: "磁盘空间不足，无法继续出包。");
 SaveP("win_05_export_failed", () => Navigate(pack, "progress"));
@@ -329,7 +338,7 @@ static void InjectMockGame(EnvironmentWindow w, bool ready)
 
 static void InjectMockProgress(EnvironmentWindow w, double fraction, int stepIndex, bool running,
     string state = "running", string? summary = null, long? ipaBytes = null, long? packBytes = null,
-    double elapsed = 0)
+    double elapsed = 0, bool exportMode = false)
 {
     var game = MockGame(false);
     SetW(w, "packGame", game);
@@ -348,6 +357,9 @@ static void InjectMockProgress(EnvironmentWindow w, double fraction, int stepInd
  {"id":"prepare","label":"准备资源","purpose":"整理 DLC 和宽屏界面布局，同时在后台把游戏代码改写成苹果设备能直接运行的形式。","expected":80,"source":"history","samples":3,"reuse":false},
  {"id":"ipa","label":"编 App 与签名","purpose":"编出 iPhone / iPad 版程序、签名，并打好要推进手机的资源包。","expected":40,"source":"history","samples":3,"reuse":false}]
 """;
+    // 装法「导出，自己签名安装」：作业层把最后一步换成自签路的名称与说明（pack/jobs/milestones.py EXPORT_LABELS）
+    if (exportMode) planJson = planJson.Replace("编 App 与签名", "整理 iPhone 版程序与资源包")
+        .Replace("编出 iPhone / iPad 版程序、签名，并打好要推进手机的资源包。", "编出 iPhone / iPad 版程序、打好资源包；出完接着导出成未签名的 S2Arm.ipa 和这款的 .img，你用自签工具安装。");
     var planEvent = JsonDocument.Parse($$"""{"type":"plan","milestone":null,"milestones":{{planJson}}}""");
     track.Ingest(planEvent.RootElement, 0);
     // 用真实 Clock 基准注入步骤开始时间，避免 StepElapsed 溢出

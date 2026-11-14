@@ -84,6 +84,24 @@ class FakeAdb:
         return ''
 
 
+class OwnLinesTest(unittest.TestCase):
+    """导入结论只认目标包自己的进程：别的 S2Arm App 同标签的 refused 不算（11-13 误判）。期望按日志行手算。"""
+    class Adb:
+        def __init__(self, pids): self.pids = pids
+        def shell(self, *args): return self.pids if args[0] == 'pidof' else ''
+
+    LOGS = ('I/S2Arm   (  999): Game import of requested directory refused: package has no index.tsv\n'
+            'I/S2Arm   ( 4242): Game installed: test [0100000000ABCDEF] from import/deploy-x')
+
+    def test_other_app_refusal_is_ignored(self):
+        kept = deploy_game.own_lines(self.Adb('4242'), 'org.s2arm.game.t0100000000abcdef', self.LOGS)
+        self.assertNotIn('refused', kept)
+        self.assertIn('Game installed', kept)
+
+    def test_no_pid_keeps_everything(self):
+        self.assertEqual(deploy_game.own_lines(self.Adb(''), 'p', self.LOGS), self.LOGS)
+
+
 class DeployTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

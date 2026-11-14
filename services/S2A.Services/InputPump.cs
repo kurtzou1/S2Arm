@@ -50,14 +50,36 @@ namespace S2A.Services
         private static readonly int EnvPads = Environment.GetEnvironmentVariable("S2A_AP_PADS") == "2" ? 2 : 1;
         private static volatile int _pads = EnvPads;
         private static volatile PlayerIndex _second = PlayerIndex.Unknown;
-        // 手柄设置小程序最近一次给的人数上限（缺省 4）：真机上多连的手柄不分给游戏，直到下次小程序放宽或这局结束。
+        // 手柄设置小程序最近一次给的人数上限（缺省 MaxPads）：真机上多连的手柄不分给游戏，直到下次小程序放宽或这局结束。
         //   #809：游戏要 1 人、连着两个手柄时原先仍配两格，小程序重验「已连 2 > 上限 1」不过、反复重开（一局 2780 次）
-        private static volatile int _padCap = 4;
+        private static volatile int _padCap = MaxPads;
+        public const int MaxPads = 8;   // 同原机最多 8 位玩家（#520；Mac 宿主 S2A_MAX_PADS）
 
         public static PlayerIndex Player => _player;
         public static PlayerIndex SecondPlayer => _second;
         public static ControllerType Type => _type;
         public static int Pads => _pads;
+        // 游戏的这个手柄号对应宿主第几个槽位（多手柄时 SetPrimary 从主手柄号起依次配满 n 格，见 macos/front_mac.m s2a_vpad_read_pad）；不是多手柄里的一格回 -1
+        // 宿主第 slot 个槽位对应游戏的哪个手柄号（SlotOf 的反向）；不是多手柄里的一格回 Unknown
+        public static PlayerIndex PlayerAt(int slot)
+        {
+            PlayerIndex next = _player;
+            if (slot < 0 || slot >= _pads || next == PlayerIndex.Handheld) return slot == 0 ? next : PlayerIndex.Unknown;
+            for (int i = 0; i < slot; i++) next = next == PlayerIndex.Player8 ? PlayerIndex.Player1 : next + 1;
+            return next;
+        }
+        public static int SlotOf(PlayerIndex player)
+        {
+            int pads = _pads;
+            PlayerIndex next = _player;
+            if (pads <= 1 || next == PlayerIndex.Handheld) return -1;
+            for (int i = 0; i < pads; i++)
+            {
+                if (next == player) return i;
+                next = next == PlayerIndex.Player8 ? PlayerIndex.Player1 : next + 1;
+            }
+            return -1;
+        }
         public static bool ExternalController => _externalController;
 
         public static void Start(Switch device) => SetPrimary(device, Host.Docked ? PlayerIndex.Player1 : PlayerIndex.Handheld, Host.Docked ? ControllerType.ProController : ControllerType.Handheld);
@@ -111,6 +133,22 @@ namespace S2A.Services
         private static PlayerIndex _joyconPlayerBefore;
         private static delegate* unmanaged<int> _joyconStyle;
         private static delegate* unmanaged<int, void> _setStyle;
+        private static delegate* unmanaged<int, int, void> _setSlotStyle;   // 每一格的样式（#520：玩家 2 起的单只 Joy-Con 也照它那一格定原始方向 / 横握，同玩家 1）
+        private static readonly ControllerType[] _slotTypes = new ControllerType[MaxPads];
+        private static delegate* unmanaged<int, int> _slotStyle;   // 每一格的实体手柄样式（Mac 宿主 s2a_vpad_slot_style，#520）：多手柄时照它配格
+        // 多手柄时这一格配什么样式（同原机：手柄号的样式由连着的那只手柄定）：实体是单只 Joy-Con（左 / 右只）、游戏收这一侧 → 就用它
+        //   （改前一律「一号右只、二号左只」交替或同一种，拆开的左只当 P1 时游戏以为是右只：按 A 确认不了、震动给错侧）；
+        //   别的（Pro / 一对 / 系统手柄 / 游戏不收这一侧）照原来的配法 fallback。纯函数，单测 --joycon-style
+        internal static ControllerType SlotPick(ControllerType physical, ControllerType fallback, Func<ControllerType, bool> supported) =>
+            physical is ControllerType.JoyconLeft or ControllerType.JoyconRight && supported(physical) ? physical : fallback;
+        private static delegate* unmanaged<int, int, int, int> _assign;   // 游戏的手柄设置画面交给启动器分配玩家（macos/front_mac.m s2a_vpad_assign，#520 E）
+        // 手柄设置画面：Mac 宿主有这个导出就先请启动器面板分配（玩家按 L + R / SL + SR 登记），回登记了几位；没有 / 没人接 / 取消回 0（调用方照旧自动应答）
+        public static int AssignViaLauncher(int min, int max, ControllerType styles)
+        {
+            if (_assign == null && NativeLibrary.TryGetExport(NativeLibrary.GetMainProgramHandle(), "s2a_vpad_assign", out nint va))   // 平台例外：Mac 游戏窗口专有导出，同 s2a_vpad_set_style
+                _assign = (delegate* unmanaged<int, int, int, int>)va;
+            return _assign != null ? _assign(min, max, (int)styles) : 0;   // styles：游戏要的样式，启动器先照它自动拆 / 拼，够就不弹面板
+        }
         private static bool FollowJoyconStyle(Switch device, ControllerType styles)
         {
             ControllerType single = _joyconStyle != null ? (ControllerType)_joyconStyle() : ControllerType.None;
@@ -140,7 +178,22 @@ namespace S2A.Services
         }
         private static void ReportStyle(Switch device)
         {
-            if (_setStyle != null) _setStyle((int)ReportedStyle(device.Hid.Npads.SupportedStyleSets, _type));
+            ControllerType styles = device.Hid.Npads.SupportedStyleSets;
+            if (_setStyle != null) _setStyle((int)ReportedStyle(styles, _type));
+            if (_setSlotStyle != null)
+                for (int i = 0; i < MaxPads; i++) _setSlotStyle(i, (int)ReportedStyle(styles, i < Math.Max(_pads, 1) ? _slotTypes[i] : ControllerType.None));
+        }
+        private static bool SlotStylesChanged(Switch device, ControllerType styles)
+        {
+            if (_slotStyle == null || _pads <= 1 || _type == ControllerType.Handheld) return false;
+            // 不用 SlotPick 的委托：lambda 捕获参数时方法一进来就分配闭包（每 250 ms 一次，空闲底噪单测零分配那项红），这里展开成同一判断
+            for (int i = 0; i < _pads; i++)
+            {
+                ControllerType physical = (ControllerType)_slotStyle(i);
+                if (physical is not (ControllerType.JoyconLeft or ControllerType.JoyconRight)) continue;
+                if (physical != _slotTypes[i] && device.Hid.Npads.StyleSupported(physical, styles)) return true;
+            }
+            return false;
         }
         internal static void FollowSupportedStyles(Switch device)
         {
@@ -148,6 +201,12 @@ namespace S2A.Services
             if (styles == ControllerType.None) return;
             ReportStyle(device);   // 游戏改了声明、样式没变时也要更新（改配时 SetPrimary 另报）
             if (FollowJoyconStyle(device, styles)) return;
+            if (SlotStylesChanged(device, styles))   // 多手柄：哪一格换了一只（左只 ↔ 右只）就照实体重配
+            {
+                Console.Error.WriteLine("S2A 虚拟手柄：有一格换了单只 Joy-Con（左 / 右只），照连着的那只重配");
+                SetPrimary(device, _player, _type);
+                return;
+            }
             if (_styleBefore != ControllerType.None && _type != _styleBefore && Accepts(device, styles, _styleBefore))
             {
                 Console.Error.WriteLine($"S2A 虚拟手柄：游戏又收 {_styleBefore}，换回去");
@@ -170,11 +229,11 @@ namespace S2A.Services
             SetPrimary(device, pick.player, pick.type);
         }
 
-        // 开到 n 个虚拟手柄（最多 4，只增不减；收局 Stop 回到 S2A_AP_PADS 给的个数），按当前主手柄重配
+        // 开到 n 个虚拟手柄（最多 MaxPads，只增不减；收局 Stop 回到 S2A_AP_PADS 给的个数），按当前主手柄重配
         public static void SetPads(Switch device, int n)
         {
-            if (n > 4) Red.Report($"游戏要 {n} 个手柄，虚拟手柄最多 4 个");
-            n = Math.Min(n, Math.Min(4, _padCap));   // 小程序给过的人数上限也不超（多连的手柄 / 自动玩家要的二号都不分给游戏）
+            if (n > MaxPads) Red.Report($"游戏要 {n} 个手柄，虚拟手柄最多 {MaxPads} 个");
+            n = Math.Min(n, Math.Min(MaxPads, _padCap));   // 小程序给过的人数上限也不超（多连的手柄 / 自动玩家要的二号都不分给游戏）
             if (n <= _pads) return;
             _pads = n;
             Console.Error.WriteLine($"S2A 虚拟手柄：开到 {n} 个（Mac 前端按连接顺序各给一只，二号起不再镜像一号）");
@@ -184,7 +243,7 @@ namespace S2A.Services
         // 手柄设置小程序给的人数上限（PlayerCountMax；≤ 0 当不限）：记下，已开的格数超了就收回到上限、按当前主手柄重配（同真机：只留选中的那几只）
         public static void CapPads(Switch device, int max)
         {
-            _padCap = max <= 0 ? 4 : Math.Min(max, 4);
+            _padCap = max <= 0 ? MaxPads : Math.Min(max, MaxPads);
             if (_pads <= _padCap) return;
             Console.Error.WriteLine($"S2A 虚拟手柄：游戏这次最多收 {_padCap} 人，从 {_pads} 个收回到 {_padCap} 个（多连的手柄不分给游戏）");
             _pads = _padCap;
@@ -209,21 +268,27 @@ namespace S2A.Services
                     //   游戏同时收左、右单只 Joy-Con（派对类横握多人）而主手柄是单只：各格左右交替（一号右只、二号左只……），
                     //   不配成同一种——同种两格时另一只的六轴会被盖掉（#592 lucaAce1024 实机）
                     ControllerType styles = device.Hid.Npads.SupportedStyleSets;
-                    bool alternate = (type == ControllerType.JoyconLeft || type == ControllerType.JoyconRight)
-                                     && (styles & ControllerType.JoyconLeft) != 0 && (styles & ControllerType.JoyconRight) != 0;
+                    bool alternate = (type == ControllerType.JoyconLeft || type == ControllerType.JoyconRight)   // 只声明 Joy-Con 2 左 / 右只位的也算（StyleSupported，#747）
+                                     && device.Hid.Npads.StyleSupported(ControllerType.JoyconLeft, styles) && device.Hid.Npads.StyleSupported(ControllerType.JoyconRight, styles);
                     if (alternate) type = ControllerType.JoyconRight;
                     var many = new ControllerConfig[_pads];
                     PlayerIndex next = player;
                     for (int i = 0; i < _pads; i++)
                     {
-                        many[i] = new ControllerConfig { Player = next, Type = alternate && i % 2 == 1 ? ControllerType.JoyconLeft : type };
+                        ControllerType fallback = alternate && i % 2 == 1 ? ControllerType.JoyconLeft : type;
+                        ControllerType physical = _slotStyle != null ? (ControllerType)_slotStyle(i) : ControllerType.None;
+                        many[i] = new ControllerConfig { Player = next, Type = SlotPick(physical, fallback, t => device.Hid.Npads.StyleSupported(t, styles)) };
+                        _slotTypes[i] = many[i].Type;
                         next = next == PlayerIndex.Player8 ? PlayerIndex.Player1 : next + 1;
                     }
                     device.Hid.Npads.Configure(many);
                     if (alternate) Console.Error.WriteLine($"S2A 虚拟手柄：左右单只交替配 {_pads} 格（一号右只、二号左只）");
                 }
                 else
+                {
                     device.Hid.Npads.Configure(new ControllerConfig { Player = player, Type = type });
+                    _slotTypes[0] = type;
+                }
                 _device = device;
                 _player = type == ControllerType.Handheld ? PlayerIndex.Handheld : player;
                 _type = type;
@@ -310,6 +375,10 @@ namespace S2A.Services
                 {
                     _joyconStyle = (delegate* unmanaged<int>)vjoycon;
                     _setStyle = (delegate* unmanaged<int, void>)vstyle;
+                    if (NativeLibrary.TryGetExport(NativeLibrary.GetMainProgramHandle(), "s2a_vpad_set_slot_style", out nint vslot))   // 平台例外：同上（Mac 游戏窗口专有）
+                        _setSlotStyle = (delegate* unmanaged<int, int, void>)vslot;
+                    if (NativeLibrary.TryGetExport(NativeLibrary.GetMainProgramHandle(), "s2a_vpad_slot_style", out nint vphys))   // 平台例外：同上（Mac 游戏窗口专有）
+                        _slotStyle = (delegate* unmanaged<int, int>)vphys;
                     ReportStyle(device);
                 }
                 if (NativeLibrary.TryGetExport(NativeLibrary.GetMainProgramHandle(), "s2a_vpad_read_ex", out nint extended))
@@ -348,7 +417,7 @@ namespace S2A.Services
             _player = PlayerIndex.Handheld;
             _type = ControllerType.Handheld;
             _pads = EnvPads;
-            _padCap = 4;   // 上一局小程序给的上限不带进下一局
+            _padCap = MaxPads;   // 上一局小程序给的上限不带进下一局
             _second = PlayerIndex.Unknown;
             _lastSticks = default;
             _movedOffHandheld = false;   // 审计 P1-94：上一局「挪出掌机格」不带进下一局（同进程重启）
@@ -706,7 +775,7 @@ namespace S2A.Services
 
         private static void Loop(Switch device)
         {
-            List<GamepadInput> states = new(4) { default };   // 最多 4 格（本地四人分屏），一次分配好，不在每帧扩容
+            List<GamepadInput> states = new(MaxPads) { default };   // 最多 MaxPads 格（本地多人），一次分配好，不在每帧扩容
             // 每键在第一次 HID 提交后保持 20 ms，让正常 60 Hz 轮询能看到短按。
             // 同键快速连点仍可能合并；不承诺卡帧或低频采样游戏一定读到。
             ButtonVisibility visibility = new();
@@ -721,9 +790,9 @@ namespace S2A.Services
                 Ryujinx.Common.S2AThreadAlloc.Tick("输入");
                 Lifecycle.Tick(Host.Device?.System);   // 焦点 / 底座变化转给游戏（接口 v2.15）
                 if (AutoplayPads != null && AutoplayPads() > _pads) SetPads(device, AutoplayPads());   // 先改配再取主手柄号：两人时主手柄离开掌机格
-                // 本地多手柄：Mac 前端报告接了几只手柄就开到几格（最多 4），接上第二只手柄即成为玩家 2
+                // 本地多手柄：Mac 前端报告接了几只手柄就开到几格（最多 MaxPads），接上第二只手柄即成为玩家 2
                 int livePads = _vpadPadCount != null ? _vpadPadCount() : 0;
-                if (livePads > _pads && livePads <= 4) SetPads(device, livePads);
+                if (livePads > _pads && livePads <= MaxPads) SetPads(device, livePads);
                 if (Environment.TickCount64 >= nextFollow) { FollowSupportedPlayers(device); FollowSupportedStyles(device); nextFollow = Environment.TickCount64 + 250; }
 
                 GamepadInput input = new() { PlayerId = _player };

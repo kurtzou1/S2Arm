@@ -14,3 +14,9 @@ tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "fs"] } 
 
 [profile.release]
 strip = true
+
+# proc-macro（serde_derive、tokio-macros 等编译期加载的动态库）不 strip：macOS 27.2 起系统加载器拒绝被 strip 过的这类库
+#   （dlopen 报 mis-aligned LINKEDIT string pool → rustc「can't find crate for `serde_derive`」），整个工具编不出来、启动器打包失败。
+#   只影响编译期，最终可执行文件照样 strip
+[profile.release.build-override]
+strip = false

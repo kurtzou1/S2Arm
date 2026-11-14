@@ -48,4 +48,12 @@ pkill -f "$T/fake" 2> /dev/null
 ck "⑦ 真 dotnet 留下常驻子进程后，下一份 build 3 秒内跑完（${dt} 秒，rc=${r7}）" '[ $r7 = 0 ] && [ $dt -le 3 ]'
 RC=3 NAP=0 "$D" build; r8=$?
 ck "⑧ 包装退出码 = 真 dotnet 退出码（${r8}，应 3）" '[ $r8 = 3 ]'
+# ⑨ 编译并发封顶（11-13）：没自己给 -m 的编译类子命令紧跟子命令补 -m:4；显式 -m / -maxcpucount、S2A_DOTNET_M=0、restore、dotnet x.dll 都不补；S2A_DOTNET_M=6 补 -m:6
+printf '#!/bin/bash\necho "$*" >> "$ARGF"\n' > $T/argv.sh; chmod +x $T/argv.sh; export ARGF=$T/argf
+m9() { : > $T/argf; env S2A_DOTNET_REAL=$T/argv.sh S2A_DOTNET_LOCK= "$@" > /dev/null 2>&1; cat $T/argf; }
+ck "⑨a build 无 -m → 补 -m:4（$(m9 "$D" build p.csproj -c Release)）" '[ "$(m9 "$D" build p.csproj -c Release)" = "build -m:4 p.csproj -c Release" ]'
+ck "⑨b 显式 -m:2 不动" '[ "$(m9 "$D" build -m:2 p.csproj)" = "build -m:2 p.csproj" ]'
+ck "⑨c 显式 -maxcpucount:8 / /m 不动" '[ "$(m9 "$D" publish p.csproj -maxcpucount:8)" = "publish p.csproj -maxcpucount:8" ] && [ "$(m9 "$D" msbuild /m p.proj)" = "msbuild /m p.proj" ]'
+ck "⑨d S2A_DOTNET_M=0 不补、=6 补 -m:6" '[ "$(m9 env S2A_DOTNET_M=0 "$D" build p)" = "build p" ] && [ "$(m9 env S2A_DOTNET_M=6 "$D" test p)" = "test -m:6 p" ]'
+ck "⑨e restore / x.dll 不补；-- 之后的 -m 不算" '[ "$(m9 "$D" restore p)" = "restore p" ] && [ "$(m9 "$D" x.dll -m)" = "x.dll -m" ] && [ "$(m9 "$D" test p -- -m)" = "test -m:4 p -- -m" ]'
 [ $bad = 0 ] && echo "C# 构建锁单测全过" || { echo "C# 构建锁单测有不通"; cat $T/log; exit 1; }

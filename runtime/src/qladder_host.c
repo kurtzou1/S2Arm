@@ -84,7 +84,7 @@ void s2a_ql_host_frame(uint64_t now, int game, uint64_t dt, int game_itv) {
     if (t < 0) return;
     double fps, slow, gpu; int th; s2a_ql_last(&fps, &slow, &gpu, &th); int why = s2a_ql_why();
     LOG("档位梯子：换到 %s（%s；上个窗口 %.1f 帧/秒、慢帧 %.1f%%、GPU 忙 %.0f%%、热状态 %d）", tier_name(t),
-        why == S2A_QL_WHY_HOT ? "热状态危急，安全阀强降" : why == S2A_QL_WHY_FPS ? "局内帧率达不到本档目标" : "余量够、凉下来 2 分钟，升一档", fps, slow, gpu, th);
+        why == S2A_QL_WHY_FPS ? "局内帧率达不到本档目标" : "GPU 余量够 2 分钟，升一档", fps, slow, gpu, th);
     if (why != S2A_QL_WHY_UP) save(S2A_QL_FPS, t);   // 降档立刻记（上一档不稳）；升档等稳住 2 分钟再记
     apply(t, 0);
 }

@@ -48,8 +48,65 @@ class TargetTests(JobCase):
              patch.object(target, "gpu_arch", return_value="applegpu_g18p") as arch:
             rows = target.connected(self.c)
         probe.assert_called_once_with(self.c, "list", "devices", timeout=60)
-        self.assertEqual([row["id"] for row in rows], ["synthetic-iOS", "synthetic-iPadOS"])
-        self.assertEqual(arch.call_count, 2)
+        # 11-13：只排除物理上装不了的 Mac / 电视 / 手表；平台没写的照收（不按元数据猜着筛掉，装不装得上让装的那一步说）
+        self.assertEqual([row["id"] for row in rows], ["synthetic-iOS", "synthetic-iPadOS", "synthetic-"])
+        self.assertEqual(arch.call_count, 3)
+
+    def test_vision_pro_kept_as_ipad_with_ios_equivalent_os(self):
+        """Apple Vision Pro 按 iPad 兼容装（理论支持、未真机验证）：devicectl 报的 platform 没有公开资料，visionOS / xrOS / 没见过的写法
+        只要机型号是 RealityDevice* 都收下；系统大版本按 iOS 口径（visionOS 2 → 18，26 原样），否则 visionOS 2 会被判低于下限 18"""
+        import diag, install
+        self.c.r["developerDir"] = str(self.root / "synthetic-developer")
+        devices = [dict(identifier="vp-" + plat, hardwareProperties=dict(reality="physical", platform=plat, productType="RealityDevice14,1"),
+                        deviceProperties=dict(name="我的 Vision Pro", osVersionNumber=ver), connectionProperties=dict(tunnelState="connected"))
+                   for plat, ver in (("xrOS", "2.4"), ("visionOS", "26.1"), ("realityOS-unknown", "26.0"))]
+        with patch.object(diag, "devicectl", return_value=(0, {"result": {"devices": devices}}, "")), \
+             patch.object(target, "gpu_arch", return_value="applegpu_g14g"):
+            rows = target.connected(self.c)
+        self.assertEqual([(r["id"], r["os"]) for r in rows], [("vp-xrOS", 18), ("vp-visionOS", 26), ("vp-realityOS-unknown", 26)])
+        self.assertEqual(install.device_kind(devices[0]), "iPad")
+        self.assertTrue(diag.is_vision(rows[0]) and diag.is_mobile(rows[0]))
+
+    def test_vision_pro_gpu_from_xros_traits(self):
+        """GPU 架构：Vision Pro 的机型号只在 XROS.platform 的设备特征库（iPhone 平台库里只有「Apple Vision」家族占位 RealityFamily*）。
+        合成两份库按 target.JOIN 的表结构，期望手写：RealityDevice14,1 → applegpu_g14g；iPhone 机型照旧查 iPhone 库"""
+        import sqlite3
+        dev = self.root / "synthetic-developer"
+        def db(platform, rows):
+            p = dev / f"Platforms/{platform}.platform/usr/standalone/device_traits.db"; p.parent.mkdir(parents=True, exist_ok=True)
+            con = sqlite3.connect(p)
+            con.executescript("create table Devices(ProductType, ProductDescription, Target); create table DeploymentVariant(DeviceTarget, DeviceTraitSet);"
+                              "create table DeviceTraits(DeviceTraitSetID, GPUArchName);")
+            for i, (pt, name, arch) in enumerate(rows):
+                con.execute("insert into Devices values (?,?,?)", (pt, name, f"t{i}"))
+                con.execute("insert into DeploymentVariant values (?,?)", (f"t{i}", i)); con.execute("insert into DeviceTraits values (?,?)", (i, arch))
+            con.commit(); con.close()
+        db("iPhoneOS", [("RealityFamily22,1", "Apple Vision", "applegpu_g14g"), ("iPhone18,2", "iPhone 17 Pro Max", "applegpu_g18p")])
+        db("XROS", [("RealityDevice14,1", "Apple Vision Pro", "applegpu_g14g"), ("RealityDevice17,1", "Apple Vision Pro (M5)", "applegpu_g17g")])
+        self.assertEqual(target.gpu_arch("RealityDevice14,1", str(dev)), "applegpu_g14g")
+        self.assertEqual(target.gpu_arch("RealityDevice17,1", str(dev)), "applegpu_g17g")
+        self.assertEqual(target.gpu_arch("iPhone18,2", str(dev)), "applegpu_g18p")
+
+    def test_missing_reality_field_falls_back_to_physical_traits(self):
+        """devicectl 缺 reality 字段（据报有 Xcode 测试版不再输出）：有硬件 UDID 且有配对 / 连接方式的照收，模拟器样（无 UDID、无配对）不收；
+        有 reality 字段的照旧按它（simulated 不收）"""
+        import diag
+        self.c.r["developerDir"] = str(self.root / "synthetic-developer")
+        devices = [
+            dict(identifier="real-no-reality", hardwareProperties=dict(platform="iOS", productType="iPhone18,2", udid="U1"),
+                 deviceProperties=dict(name="a", osVersionNumber="27.1"), connectionProperties=dict(pairingState="paired", transportType="wired", tunnelState="connected")),
+            dict(identifier="sim-no-reality", hardwareProperties=dict(platform="iOS", productType="iPhone18,2"),
+                 deviceProperties=dict(name="b", osVersionNumber="27.1"), connectionProperties=dict(tunnelState="connected")),
+            # 诊断#091bcf：键在、值为 null（报告里只见 reality=None）——同缺键，按真机特征认
+            dict(identifier="real-null-reality", hardwareProperties=dict(reality=None, platform="iOS", productType="iPhone18,2", udid="U4"),
+                 deviceProperties=dict(name="d", osVersionNumber="27.1"), connectionProperties=dict(pairingState="paired", transportType="wired", tunnelState="disconnected")),
+            dict(identifier="sim-with-reality", hardwareProperties=dict(reality="simulated", platform="iOS", productType="iPhone18,2", udid="U3"),
+                 deviceProperties=dict(name="c", osVersionNumber="27.1"), connectionProperties=dict(pairingState="paired", tunnelState="connected")),
+        ]
+        with patch.object(diag, "devicectl", return_value=(0, {"result": {"devices": devices}}, "")), \
+             patch.object(target, "gpu_arch", return_value="applegpu_g18p"):
+            rows = target.connected(self.c)
+        self.assertEqual([r["id"] for r in rows], ["real-no-reality", "real-null-reality"])
 
     def test_target_probe_preserves_error_code(self):
         with patch.object(target, "device_list", return_value=([], "", None, None)), \

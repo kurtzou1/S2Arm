@@ -70,11 +70,15 @@ struct StorageOverviewSection: View {
                 }
                 CardGroup(t("games"), footnote: BackendText.launcherText("library.sizes.sourcesNote", language: loc.lang == .zh ? "zh-Hans" : "en")) {
                     ForEach(o.games) { g in
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(g.name).font(.manrope(13.5, .semibold))
-                            GameSizesList(sizes: g.sizes, compact: true)
+                        // 与 CardRow 同一套边距（18 + 圆点位 7 + 间距 12），游戏名和上面两张卡的行标题、分隔线对齐。
+                        HStack(alignment: .top, spacing: 12) {
+                            Color.clear.frame(width: 7, height: 7)
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(g.name).font(.manrope(14, .semibold)).fixedSize(horizontal: false, vertical: true)
+                                GameSizesList(sizes: g.sizes, compact: true)
+                            }
                         }
-                        .padding(.horizontal, 16).padding(.vertical, 10)
+                        .padding(.horizontal, 18).padding(.vertical, 13)
                         if g.id != o.games.last?.id { CardDivider() }
                     }
                 }

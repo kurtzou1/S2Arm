@@ -213,7 +213,7 @@ class PruneJobsTests(unittest.TestCase):
         self.assertEqual(set(self.prune(keep_count=100)["removed"]), {"old"})
 
     def test_default_constants_are_the_documented_ones(self):
-        self.assertEqual((core.KEEP_TOTAL, core.KEEP_DAYS, core.KEEP_PER_OPERATION, core.KEEP_FAILED_PER_OPERATION), (2000, 14, 20, 50))
+        self.assertEqual((core.KEEP_TOTAL, core.KEEP_DAYS, core.KEEP_PER_OPERATION, core.KEEP_FAILED_PER_OPERATION), (300, 14, 20, 50))
 
 
 class RelocateDefaultTests(unittest.TestCase):

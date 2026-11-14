@@ -90,6 +90,21 @@ def validate(apk, resources):
     return artifact, digest(artifact_path)
 
 
+def own_lines(adb, package, logs):
+    """只留这个包自己的进程打的行（brief 格式「I/S2Arm   ( pid): …」）：手机上别的 S2Arm App（通用包、别款的独立包）
+    同标签的 refused / installed 不算这次导入的结论（11-13：另一个 App 的导入探针打了 refused，正在部署的一款被误判被拒）。
+    取不到进程号（App 还没起来）时原样返回，不吞日志。"""
+    pids = set(adb.shell('pidof', package).split())
+    if not pids:
+        return logs
+    keep = []
+    for line in logs.splitlines():
+        m = re.search(r'\(\s*(\d+)\)', line)
+        if m is None or m.group(1) in pids:
+            keep.append(line)
+    return '\n'.join(keep)
+
+
 def start_activity(adb, *args):
     output = adb.shell('am', 'start', '-W', *args)
     if 'Error:' in output or 'Exception' in output:
@@ -260,7 +275,7 @@ def deploy_resources(apk, resources, adb, work, mode='auto', timeout=180, push_t
         import_wait = import_wait_for(resources, timeout)
         deadline = time.monotonic() + import_wait
         while time.monotonic() < deadline:
-            logs = adb.shell('logcat', '-d', '-v', 'brief', '-T', since, '-s', 'S2Arm:I')
+            logs = own_lines(adb, package, adb.shell('logcat', '-d', '-v', 'brief', '-T', since, '-s', 'S2Arm:I'))
             (work / 'deploy.log').write_text(logs + '\n')
             if 'Game import of requested directory refused:' in logs or f'Game import of import/{name} refused:' in logs:
                 raise RuntimeError('资源导入被拒绝' + ('；资源变化或首次部署请去掉 --refresh-existing' if refresh_existing else ''))
@@ -305,7 +320,7 @@ def deploy_resources(apk, resources, adb, work, mode='auto', timeout=180, push_t
         start_activity(adb, *launch)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            logs = adb.shell('logcat', '-d', '-v', 'brief', '-T', since, '-s', 'S2Arm:I')
+            logs = own_lines(adb, package, adb.shell('logcat', '-d', '-v', 'brief', '-T', since, '-s', 'S2Arm:I'))
             (work / 'deploy.log').write_text(logs + '\n')
             if 'refused: this installed APK does not match artifact.apk.sha256' in logs:
                 raise RuntimeError('导入后 APK 身份不匹配，停止部署')

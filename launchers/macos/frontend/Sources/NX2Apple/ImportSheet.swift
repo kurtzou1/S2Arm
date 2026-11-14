@@ -410,6 +410,10 @@ struct UploadDiagnosticsSheet: View {
     enum Phase: Equatable { case confirm, uploading, done(S2ArmLauncherModel.DiagUploadReceipt), failed(String) }
     @State private var phase = Phase.confirm
     @State private var copied = false
+    /// 玩家写的一句「发生了什么」（选填，11-13 维护者）：随包进 manifest.json 的 note，取件放在定位卡最上面；不填照样能传
+    @State private var note = ""
+    /// 正在打包 / 上传的那一次：「取消」把它停掉（外层 Task 取消 = 请作业停，JobClient.perform），退回导出
+    @State private var work: Task<Void, Never>?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -418,6 +422,12 @@ struct UploadDiagnosticsSheet: View {
             case .confirm:
                 Text(loc.t("s2arm.diagUpload.what")).font(.manrope(13)).fixedSize(horizontal: false, vertical: true)
                 Text(loc.t("s2arm.diagUpload.not")).font(.manrope(13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(loc.t("s2arm.diagUpload.noteLabel")).font(.manrope(13, .semibold))
+                    TextField(loc.t("s2arm.diagUpload.notePlaceholder"), text: $note, axis: .vertical)
+                        .lineLimit(3...6).textFieldStyle(.roundedBorder).font(.manrope(13))
+                        .accessibilityIdentifier("diag.upload.note")
+                }
                 HStack {
                     Spacer()
                     Button(loc.t("s2arm.diagUpload.cancel")) { close() }.buttonStyle(LauncherSecondaryButtonStyle()).keyboardShortcut(.cancelAction)
@@ -426,6 +436,12 @@ struct UploadDiagnosticsSheet: View {
                 }
             case .uploading:
                 HStack(spacing: 10) { ProgressView().controlSize(.small); Text(loc.t("s2arm.diagUpload.sending")).font(.manrope(13)) }
+                // 11-13：卡在这一步（网慢 / 代理半通）原先没有任何出口；作业层另有 90 秒总时限兜底
+                HStack {
+                    Spacer()
+                    Button(loc.t("s2arm.diagUpload.cancel")) { cancelUpload() }.buttonStyle(LauncherSecondaryButtonStyle()).keyboardShortcut(.cancelAction)
+                        .accessibilityIdentifier("diag.upload.cancelSending")
+                }
             case .done(let receipt):
                 Text(loc.t("s2arm.diagUpload.done")).font(.manrope(13)).fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 12) {
@@ -459,6 +475,7 @@ struct UploadDiagnosticsSheet: View {
             switch (command.action, phase) {
             case ("send", .confirm): send()
             case ("copy", .done(let receipt)): copy(receipt.code)
+            case ("cancel", .uploading): cancelUpload()
             case ("close", _): close()
             default: break
             }
@@ -469,10 +486,20 @@ struct UploadDiagnosticsSheet: View {
 
     private func send() {
         phase = .uploading
-        Task {
-            do { phase = .done(try await model.uploadDiagnostics(gameID: gameID, operations: operations, fallback: fallback)) }
-            catch { phase = .failed(error.localizedDescription) }
+        work = Task {
+            do {
+                let receipt = try await model.uploadDiagnostics(gameID: gameID, operations: operations, fallback: fallback, note: note)
+                if !Task.isCancelled { phase = .done(receipt) }
+            } catch {
+                if !Task.isCancelled { phase = .failed(error.localizedDescription) }
+            }
         }
+    }
+
+    /// 停掉正在进行的打包 / 上传（作业收到停止请求就收尾，临时包随之删掉），给玩家导出这条路
+    private func cancelUpload() {
+        work?.cancel(); work = nil
+        phase = .failed(loc.t("s2arm.diagUpload.cancelled"))
     }
 
     /// 退回导出：同游戏库「更多」里的导出（文件名、脱敏规则一样）

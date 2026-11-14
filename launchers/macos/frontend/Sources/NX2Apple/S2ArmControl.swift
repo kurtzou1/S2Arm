@@ -263,10 +263,10 @@ import S2ArmAppleAdapter
             case "upload":   // 打开「上传给开发者」弹窗（同游戏库「更多」菜单）；gameId 可省
                 if str("gameId") != nil, game() == nil { return .bad("没有这个 gameId") }
                 model.diagUploadFor = game()?.id ?? ""; return .ok()
-            case "uploadSend", "uploadCopy", "uploadClose":   // 替玩家点弹窗里的「上传 / 复制 / 完成」；结果看 GET /snapshot
+            case "uploadSend", "uploadCopy", "uploadClose", "uploadCancel":   // 替玩家点弹窗里的「上传 / 复制 / 完成 / 上传中取消」；结果看 GET /snapshot
                 guard model.diagUploadFor != nil else { return .bad("上传弹窗没开") }
                 model.diagUploadCommand = .init(action: String(str("action")!.dropFirst("upload".count)).lowercased()); return .ok()
-            default: return .bad("action 只认 pull / export / upload / uploadSend / uploadCopy / uploadClose")
+            default: return .bad("action 只认 pull / export / upload / uploadSend / uploadCopy / uploadClose / uploadCancel")
             }
         case ("POST", "/fonts"):
             return .bad("新界面用应用自带的开源字体，不能换", code: 409)

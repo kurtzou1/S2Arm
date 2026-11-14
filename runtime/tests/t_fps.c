@@ -8,7 +8,7 @@
 S2A_TEST_MOD_TABLE(64); int g_nmod;
 const char *s2a_main_build_id(void) { return "1234abcd5678ef00aaaa"; }
 void s2a_fps_start(const char *dir); int s2a_fps_present_at(uint64_t now); void s2a_fps_set_enabled(int on); int s2a_fps_enabled(void); int s2a_fps_available(void); int s2a_fps_hot_revert_ok(void);
-int s2a_fps_cap_tick(uint64_t now, int thermal, int low_power); int s2a_fps_cap_reason(void); void s2a_fps_ab_set(int phase);
+int s2a_fps_cap_reason(void); void s2a_fps_ab_set(int phase);
 static int g_capped_n, g_capped_last = -9;   // 降档 / 恢复提示替身（ios/app.m s2a_ios_fps_capped，审计 P1-80）
 void s2a_ios_fps_capped(int reason) { g_capped_n++; g_capped_last = reason; }
 extern uint8_t *dm_fps_state;   // 宿主帧步状态页（fps.c 强定义；本单测不链 hle_nvn，+0x20 步长由测试手写，模拟 fstep_tick）
@@ -140,7 +140,6 @@ int main(void) {
         expect("短构建号子进程：不符项数", 0, WIFEXITED(ws) ? WEXITSTATUS(ws) : -1);
     }
     unsetenv("DM_PRESENT_INTERVAL"); unsetenv("S2A_FPS"); setenv("S2A_FPS60", "1", 1); unsetenv("S2A_FPS_TABLE");   /* 玩家开了 */
-    setenv("S2A_FPS_CAP", "0", 1);   // 写入线程不按真实时间判降档：下面直接喂 s2a_fps_cap_tick 模拟时间
     s2a_fps_start(dir);
     usleep(250000);
     int32_t v; memcpy(&v, img + 0x1000, 4); expect("无条件写 main+0x1000", 60, v);
@@ -203,36 +202,12 @@ int main(void) {
         if (!p) { dm_fps_state = NULL; setenv("S2A_FSTEP", "0", 1); s2a_fps_start(dir); _exit(dm_fps_state != NULL); }
         int ws = 0; waitpid(p, &ws, 0); expect("帧步：S2A_FSTEP=0 不接状态页", 0, WIFEXITED(ws) ? WEXITSTATUS(ws) : -1);
     }
-    // 降档原因位（情报 10-28：热状态 ≥ 严重或低电量 → 按关生效，用户开关不变）。期望手算：
-    //   热 2 → 原因 1、slot 2041 写关时值 100、cpatch 跟随 0、钩子退回游戏间隔、用户开关仍 1；热回 1 后 20 秒仍 1、32 秒 → 0 并恢复；
-    //   低电量开 → 2、关 → 立即 0；热 2 时低电量也开 → 1，热回 0 后防抖 30 秒内仍 1、到点 → 2（低电量还开着）；降档中用户关 60 帧，原因去掉后仍关
-    {   uint64_t c = 5000000000ull, s = 1000000000ull; int fn = g_follow_n;
-        expect("降档：无原因", 0, s2a_fps_cap_tick(c, 0, 0));
-        expect("降档：热状态 2（严重）不降（11-06：热机稳 60 是目标，只有危急才降）", 0, s2a_fps_cap_tick(c += s, 2, 0));
-        expect("降档：热状态 3 → 原因 1（热）", 1, s2a_fps_cap_tick(c += s, 3, 0));
-        usleep(250000); memcpy(&v, img + 0x1000, 4); expect("降档热：w 行写关值 30", 30, v);
-        memcpy(&fv, img + 0x4000 + 2041 * 8, 4); expect("降档热：slot 2041 关时值 100（×1000）", 100000, (long)(fv * 1000));
-        expect("降档热：cpatch 跟随 0（多通知 1 次）", (fn + 1) * 10, g_follow_n * 10 + g_follow_last);
-        expect("降档热：钩子退回游戏间隔", 1, s2a_fps_present_at(t += 16666667));
-        expect("降档热：帧步目标帧率 0", 0, lroundf(fs_f32(0)));
-        expect("降档热：用户开关不变", 1, s2a_fps_enabled());
-        expect("降档热：回到 1，刚开始稳", 1, s2a_fps_cap_tick(c += s, 1, 0));
-        expect("降档热：稳 20 秒仍降", 1, s2a_fps_cap_tick(c += 20 * s, 1, 0));
-        expect("降档热：稳满 30 秒 → 恢复", 0, s2a_fps_cap_tick(c += 11 * s, 1, 0));
-        usleep(250000); memcpy(&v, img + 0x1000, 4); expect("恢复：w 行回 60", 60, v);
-        memcpy(&fv, img + 0x4000 + 2041 * 8, 4); expect("恢复：slot 2041 回 200（×1000）", 200000, (long)(fv * 1000));
-        expect("降档：低电量开 → 原因 2", 2, s2a_fps_cap_tick(c += s, 0, 1));
-        expect("降档：低电量关 → 立即恢复", 0, s2a_fps_cap_tick(c += s, 0, 0));
-        expect("降档：热 3 且低电量 → 1", 1, s2a_fps_cap_tick(c += s, 3, 1));
-        expect("降档：热回 0、低电量开，防抖中仍 1", 1, s2a_fps_cap_tick(c += s, 0, 1));
-        expect("降档：防抖满 30 秒、低电量仍开 → 2", 2, s2a_fps_cap_tick(c += 31 * s, 0, 1));
-        s2a_fps_set_enabled(0);
-        expect("降档中用户关，原因去掉 → 原因 0", 0, s2a_fps_cap_tick(c += s, 0, 0));
-        //   提示：60 帧开着时每次原因变化说一次（热 0→1、恢复 1→0、低电量 0→2、2→0、0→1、1→2 = 6 次，最后一次是 2）；用户关了之后那次变化不说
-        expect("降档提示：开着时 6 次、最后一次原因 2、用户关后不说", 62, g_capped_n * 10 + g_capped_last);
-        usleep(250000); memcpy(&v, img + 0x1000, 4); expect("用户关着：原因去掉后 w 行仍是关值 30", 30, v);
+    // 11-13 起不按热状态 / 低电量自动降档（维护者：不读电量、不设自己挡自己的闸），原降档用例随之删；玩家自己关 60 帧照旧按关生效：
+    {   s2a_fps_set_enabled(0);
+        usleep(250000); memcpy(&v, img + 0x1000, 4); expect("用户关着：w 行是关值 30", 30, v);
         expect("用户关着：s2a_fps_enabled 0、钩子退回", 10 + 0, s2a_fps_present_at(t += 16666667) * 10 + s2a_fps_enabled());
-        expect("原因位读数", 0, s2a_fps_cap_reason());
+        expect("原因位读数：玩家关不是降档原因", 0, s2a_fps_cap_reason());
+        expect("没有任何降档提示", 0, g_capped_n);
         // 同局 A/B（自动玩家 speed_ab）：阶段 1 = 原因 3、2 / 0 = 照常；普查 A/B 模式（S2A_FPS_AB=1）下 60 帧没开（S2A_FPS60=0）的款平时原因 3，阶段 2 才放开
         s2a_fps_set_enabled(1); s2a_fps_ab_set(1); expect("A/B 阶段 1：原因 3", 3, s2a_fps_cap_reason());
         usleep(250000); memcpy(&v, img + 0x1000, 4); expect("A/B 阶段 1：w 行写关值 30（同关 60 帧）", 30, v);
@@ -244,6 +219,6 @@ int main(void) {
         s2a_fps_ab_set(2); expect("普查 A/B 模式、60 帧没开：阶段 2 放开 → 原因 0", 0, s2a_fps_cap_reason());
         s2a_fps_ab_set(0); expect("普查 A/B 模式、60 帧没开：测完回原因 3", 3, s2a_fps_cap_reason());
         setenv("S2A_FPS60", "1", 1); expect("普查 A/B 模式、60 帧开着：原因 0（不受影响）", 0, s2a_fps_cap_reason()); unsetenv("S2A_FPS_AB"); }
-    if (fails) printf("✗ t_fps：%d 项不符\n", fails); else printf("✓ t_fps：帧率表写入 / 条件 / 键页只读改可写 / 动态步长 / 宿主帧步 / 退回游戏间隔 / 热与低电量降档全过\n");
+    if (fails) printf("✗ t_fps：%d 项不符\n", fails); else printf("✓ t_fps：帧率表写入 / 条件 / 键页只读改可写 / 动态步长 / 宿主帧步 / 退回游戏间隔全过\n");
     return fails != 0;
 }

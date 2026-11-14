@@ -10,8 +10,12 @@ validation for each final build and device.
 
 This README records the implemented bring-up and its verification scope.
 
-Android community patches default to off; an explicitly configured `S2A_CPATCH_ON`
-may enable them. This source-level policy has not been verified on a device.
+Android community patches follow the same policy as Apple: only internal packs
+built with `S2A_COMMUNITY_PATCHES=1` carry `modules/cpatch.tsv`; without
+`S2A_CPATCH_ON` each patch uses the table's default, `S2A_CPATCH_ON=<ids>` enables
+only those ids and `none` disables all. The Android app has no settings page for
+this yet; set `S2A_CPATCH_ON` through the debug environment channel. This
+source-level policy has not been verified on a device.
 
 Shared shader-cache location, reset, write and periodic counter diagnostics are
 off by default on every platform. Set `S2A_SHADER_CACHE_DIAG=1` in the host

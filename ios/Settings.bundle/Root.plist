@@ -5,53 +5,10 @@
     <key>PreferenceSpecifiers</key>
     <array>
         <dict>
-            <key>Type</key><string>PSGroupSpecifier</string>
-            <key>Title</key><string>Screen Layout</string>
-            <key>FooterText</key><string>Applies to every game. Automatic split screen enables only when partially folded; without hinge status it stays off. Automatic orientation uses portrait for split screen and landscape otherwise. Some games need a restart to apply widescreen to the new area.</string>
-        </dict>
-        <dict>
-            <key>Type</key><string>PSMultiValueSpecifier</string>
-            <key>Title</key><string>Split Screen</string>
-            <key>Key</key><string>splitScreen</string>
-            <key>DefaultValue</key><string>auto</string>
-            <key>Titles</key><array><string>Automatic</string><string>On</string><string>Off</string></array>
-            <key>Values</key><array><string>auto</string><string>on</string><string>off</string></array>
-        </dict>
-        <dict>
-            <key>Type</key><string>PSMultiValueSpecifier</string>
-            <key>Title</key><string>Screen Orientation</string>
-            <key>Key</key><string>screenOrientation</string>
-            <key>DefaultValue</key><string>auto</string>
-            <key>Titles</key><array><string>Automatic</string><string>Landscape</string><string>Portrait</string></array>
-            <key>Values</key><array><string>auto</string><string>landscape</string><string>portrait</string></array>
-        </dict>
-        <dict>
             <key>Type</key>
             <string>PSGroupSpecifier</string>
-            <key>Title</key>
-            <string>Phone as Controller (When No Controller Is Connected)</string>
             <key>FooterText</key>
-            <string>Gyro: tilt the phone for Switch handheld motion controls (such as tilt aiming in Splatoon); the sensor only runs when the game needs motion. Rumble: game rumble plays through the phone’s motor. A connected controller takes over automatically.</string>
-        </dict>
-        <dict>
-            <key>Type</key>
-            <string>PSToggleSwitchSpecifier</string>
-            <key>Title</key>
-            <string>Phone Gyro</string>
-            <key>Key</key>
-            <string>S2APhoneGyro</string>
-            <key>DefaultValue</key>
-            <true/>
-        </dict>
-        <dict>
-            <key>Type</key>
-            <string>PSToggleSwitchSpecifier</string>
-            <key>Title</key>
-            <string>Phone Haptics</string>
-            <key>Key</key>
-            <string>S2APhoneHaptics</string>
-            <key>DefaultValue</key>
-            <true/>
+            <string>Other settings are inside S2Arm: the gear at the top right of the library, or the gear at the top left in a game. Only what you may need when the app won’t open is kept here.</string>
         </dict>
         <dict>
             <key>Type</key>
@@ -157,42 +114,6 @@
             <key>Type</key>
             <string>PSGroupSpecifier</string>
             <key>Title</key>
-            <string>Controller</string>
-            <key>FooterText</key>
-            <string>When on, you can connect a Switch 2 Pro Controller in game and use its buttons, HD rumble and motion controls. Hold the SYNC button on top of the controller to connect. This setting applies only to this app.</string>
-        </dict>
-        <dict>
-            <key>Type</key>
-            <string>PSToggleSwitchSpecifier</string>
-            <key>Title</key>
-            <string>Enable Switch 2 Pro Controller Support</string>
-            <key>Key</key>
-            <string>S2ANS2ProAdapterEnabled</string>
-            <key>DefaultValue</key>
-            <false/>
-        </dict>
-        <dict>
-            <key>Type</key>
-            <string>PSGroupSpecifier</string>
-            <key>Title</key>
-            <string>Sound</string>
-            <key>FooterText</key>
-            <string>When on, game sound keeps playing while the iPhone is in Silent Mode. When off, S2Arm follows Silent Mode like other games. Takes effect when you switch back to the app.</string>
-        </dict>
-        <dict>
-            <key>Type</key>
-            <string>PSToggleSwitchSpecifier</string>
-            <key>Title</key>
-            <string>Play Sound in Silent Mode</string>
-            <key>Key</key>
-            <string>S2APlayInSilentMode</string>
-            <key>DefaultValue</key>
-            <false/>
-        </dict>
-        <dict>
-            <key>Type</key>
-            <string>PSGroupSpecifier</string>
-            <key>Title</key>
             <string>Saves</string>
             <key>FooterText</key>
             <string>Save in the game first, then close and reopen the app. Save management opens before the game starts, where you can export a backup or import a .s2asave file from a Mac. Your current save is kept before restoring. The switch turns off once the game starts.</string>
@@ -222,34 +143,6 @@
             <string>Export Diagnostics When the App Opens</string>
             <key>Key</key>
             <string>S2ADiagExportOnOpen</string>
-            <key>DefaultValue</key>
-            <false/>
-        </dict>
-        <dict>
-            <key>Type</key>
-            <string>PSGroupSpecifier</string>
-            <key>Title</key>
-            <string>Development</string>
-            <key>FooterText</key>
-            <string>The S2Arm diagnostics overlay shows the target frame rate, slow-frame ratio, graphics path, first-use compilation, audio and build ID. Metal HUD shows the frame rate, GPU time and a frame-interval graph, for manual viewing only; while it’s on, screenshots, frame capture, autoplay and full-screen checks are unavailable. Takes effect the next time the app starts. Metal HUD is for apps you build and install on a development device yourself.</string>
-        </dict>
-        <dict>
-            <key>Type</key>
-            <string>PSToggleSwitchSpecifier</string>
-            <key>Title</key>
-            <string>S2Arm Diagnostics Overlay</string>
-            <key>Key</key>
-            <string>S2ADevHUD</string>
-            <key>DefaultValue</key>
-            <false/>
-        </dict>
-        <dict>
-            <key>Type</key>
-            <string>PSToggleSwitchSpecifier</string>
-            <key>Title</key>
-            <string>Metal HUD</string>
-            <key>Key</key>
-            <string>MetalHUDForceEnabled</string>
             <key>DefaultValue</key>
             <false/>
         </dict>

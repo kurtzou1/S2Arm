@@ -90,6 +90,8 @@ int s2a_dump_threads(const char *why) {
         out("线程 %u/%u tid %llu「%s」%s 优先级 %d QoS %s 用户态 %.2f s%s", i + 1, n, (unsigned long long)tid, have && ei.pth_name[0] ? ei.pth_name : "无名",
             have ? run_name(ei.pth_run_state) : "?", have ? ei.pth_curpri : -1, qos_name(q), have ? ei.pth_user_time / 1e9 : 0.0, th[i] == self ? "（本线程，发起现场）" : "");
         if (th[i] == self) { walk((uint64_t)__builtin_return_address(0), 0, (uint64_t)__builtin_frame_address(0)); continue; }
+        // 内核里不可中断等待的线程不取寄存器：thread_get_state 要等它走到可停的点，出不来就把发起现场的线程一起卡死（同 thread.c s2a_thread_dump，11-14）
+        if (have && ei.pth_run_state == TH_STATE_UNINTERRUPTIBLE) { out("    在内核里不可中断等待，不取寄存器（取了会卡住本线程）"); continue; }
         arm_thread_state64_t st; mach_msg_type_number_t sc = ARM_THREAD_STATE64_COUNT;
         if (thread_get_state(th[i], ARM_THREAD_STATE64, (thread_state_t)&st, &sc) != KERN_SUCCESS) { out("    取寄存器失败"); continue; }
         walk(arm_thread_state64_get_pc(st), arm_thread_state64_get_lr(st), arm_thread_state64_get_fp(st));

@@ -313,7 +313,7 @@ class InstallFailures(JobCase):
             z.writestr("Payload/Test.app/S2Arm", b"bin")
         self.c.r.update(gameId=gid)
         import ipa as packer
-        def fake_assemble(c, g, others=(), failed=(), root=None, dest=None):
+        def fake_assemble(c, g, others=(), failed=(), root=None, dest=None, agreed=()):
             return archive, [gid], "SID1"
         def unpack(args, **kw):
             with zipfile.ZipFile(archive) as z: z.extractall(args[-1])
@@ -435,6 +435,15 @@ class FreeAccountLimits(unittest.TestCase):
         self.assertIn("移除账号", RECOVERY["apple_session_expired"]); self.assertIn("添加账号", RECOVERY["apple_session_expired"])
         self.assertTrue(loc.get(RECOVERY["apple_session_expired"]) and spec["apple_session_expired"]["title"]["en"] and "apple_session_expired" in guide)
         self.assertEqual(ctl.AI_NEXT["apple_session_expired"][0], "human")
+        # signing_server_unreachable（#3fc02b 玩家原文，Windows 0.3.7）：认成连不上签名服务器、给查网络的办法，各处都登记；
+        #   同是 anisette 但不是网络的报错（-80046）仍归原码
+        raw = ("Error: Anisette error: Request Error error sending request for url (https://mac-ani.jkcoxson.com/v3/client_info)\n\nCaused by:\n"
+               "    2: client error (Connect)\n    3: dns error\n    4: 不知道这样的主机。 (os error 11001)")
+        self.assertEqual(impactor.explain(raw), "signing_server_unreachable")
+        self.assertIn("mac-ani.jkcoxson.com", RECOVERY["signing_server_unreachable"]); self.assertIn("DNS", RECOVERY["signing_server_unreachable"])
+        self.assertTrue(loc.get(RECOVERY["signing_server_unreachable"]) and spec["signing_server_unreachable"]["title"]["en"] and "signing_server_unreachable" in guide)
+        self.assertEqual(ctl.AI_NEXT["signing_server_unreachable"][0], "human")
+        self.assertEqual(impactor.explain("Anisette error: -80046 Apple rejected"), "login_identity_rejected")
         for other, code in (("Developer API error 9401: An App ID with Identifier 'x' is not available.", "app_id_taken"),
                             ("-21669 verification code", "two_factor_wrong"), ("-20101 entered incorrectly", "apple_id_wrong")):
             self.assertEqual(impactor.explain(other), code)
@@ -654,6 +663,11 @@ class LogCauses(JobCase):
     def test_metal_none_built_is_metal_unavailable(self):
         error, d = self.mac_refresh(["[RED] mac Metal 库一份都没出（编不过 12 支、编成 0、复用 0）：编译器在这台机器上用不了，不发布没有着色器库的包", "【红】fixture 刷新停在 direct 阶段（rc=1），现行 = fixture@ex-1"])
         self.assertEqual(error.code, "metal_unavailable", d)
+
+    def test_pack_verify_sha_mismatch_is_package_verify_mismatch(self):
+        # 11-13 玩家 Windows 报错原文：ipa 收尾里资源包核对一批 romfs 文件 SHA 与 index 不符，原先落成未归类 package_failed
+        error, d = self.mac_refresh(["【红】ipa_tail.log：rc=1；🔴 资源包核对 pkg/pack.files：7 个文件不对：['romfs/Env/a.zs（SHA 与 index 不符）']；已让这 7 个文件下次出包重读重算"])
+        self.assertEqual(error.code, "package_verify_mismatch", d)
 
     def test_native_library_missing_is_tool_missing(self):
         error, d = self.mac_refresh(["[RED] 原生库缺件（出包机环境，不是游戏内容）：DllNotFoundException（abc）", "【红】fixture 刷新停在 direct 阶段（rc=1），现行 = fixture@ex-1"])

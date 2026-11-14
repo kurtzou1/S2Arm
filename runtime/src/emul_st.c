@@ -151,7 +151,7 @@ int s2a_emul_store_regs(uint32_t insn, s2a_regs *r, uint64_t delta, uint64_t lo,
     return 1;
 }
 
-#if defined(__aarch64__) || defined(__arm64__)
+#if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))   // 苹果 ucontext 版；安卓的信号上下文拷贝在 emul_sp.c
 #include <sys/ucontext.h>
 int s2a_emul_store(void *ucv, uint64_t fault_addr, uint8_t *dst, s2a_emul_ok_fn ok, uint64_t *ea_out, uint64_t *len_out) {
     ucontext_t *uc = ucv; _STRUCT_ARM_THREAD_STATE64 *ss = &uc->uc_mcontext->__ss; _STRUCT_ARM_NEON_STATE64 *ns = &uc->uc_mcontext->__ns;

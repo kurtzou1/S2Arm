@@ -29,7 +29,7 @@ INPUTS = ["runtime", "ios", "graphics", "translator", "services", "compat", "pac
           # 游戏设置定义表（pack/jobs/community.py 按它读写 launch.json、转宿主开关；11-09 启动设置）
           "launchers/shared/game_settings.v1.json",
           # iPhone 宿主包的图标（pack/ipa_tail.py、pack/jobs/ipa.py）：引擎快照里没有它，容器就退回用游戏图标（11-08 维护者）
-          "launchers/macos/Branding/AppIcon-1024.png",
+          "launchers/macos/Branding/AppIcon-iOS.png",
           # 根 .gitignore（11-02 beta.3 走查）：出包会在快照副本里编出 bin/ obj/，没有忽略规则时 pack/ipa.sh「构建相关目录有未提交改动」
           #   把这些编译产物当成改动、拒绝出包——玩家导出 iPhone 版必死在最后一步
           ".gitignore",

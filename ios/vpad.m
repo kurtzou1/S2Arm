@@ -335,7 +335,8 @@ void s2a_rumble_preview(void);          // controller.m：按当前档位试震 
 }
 - (void)menuError:(NSString *)title error:(NSError *)error {
     LOG("【红】齿轮菜单：%s：%s", title.UTF8String, error.localizedDescription.UTF8String);
-    UIViewController *c = self.window.rootViewController; if (!c || c.presentedViewController) return;
+    UIViewController *c = self.window.rootViewController; if (!c) return;   // 报错不因已有页面就吞掉，弹在最上层
+    c = s2a_top_presenter(c);
     UIAlertController *a = [UIAlertController alertControllerWithTitle:title message:error.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:S2AL(@"common.ok") style:UIAlertActionStyleDefault handler:nil]]; [c presentViewController:a animated:YES completion:nil];
 }
@@ -434,13 +435,15 @@ typedef BOOL (^VPFlag)(void);
                             run:^{ BOOL on = ![d boolForKey:@"S2APerfHUD"]; [d setBool:on forKey:@"S2APerfHUD"]; if (s2a_hud_brief_show) s2a_hud_brief_show(ws.superview, on); }]];
     // 金手指（vpad_cheats.m）：导入 txt、逐条开关，执行在服务层 Cheats.cs；面板开着时虚拟手柄不收触控
     [items addObject:vp_act(S2AL(@"cheats.title"), @"wand.and.stars", NO, ^{ [ws afterMenu:^{
-        UIViewController *c = ws.window.rootViewController; if (!c || c.presentedViewController) return;
-        [ws setSettingsOpen:YES]; s2a_cheats_present(c, ^{ [ws setSettingsOpen:NO]; }); }]; })];
+        UIViewController *c = ws.window.rootViewController; if (!c) return;
+        [ws setSettingsOpen:YES]; s2a_cheats_present(s2a_top_presenter(c), ^{ [ws setSettingsOpen:NO]; }); }]; })];
     S2ASettingsRuntime *rt = s2a_settings_runtime();
     // 切换游戏（只多款容器有）：确认框与收尾在 app.m，与整页设置「切换游戏」同一个回调
     if (rt.switchGame) [items addObject:vp_act(S2APICK(S2A_DPROMPT_SWITCH_GAME_TITLE), @"square.stack", NO, ^{ [ws afterMenu:^{ UIViewController *c = ws.window.rootViewController; if (c && !c.presentedViewController) rt.switchGame(c); }]; })];
     if (rt.manageSaves) [items addObject:vp_act(S2AL(@"vpad.menu.saves"), @"tray.full", NO, ^{ [ws afterMenu:^{ UIViewController *c = ws.window.rootViewController; if (c && !c.presentedViewController) rt.manageSaves(c); }]; })];
     [items addObject:vp_act(S2AL(@"vpad.menu.more"), @"ellipsis.circle", NO, ^{ [ws afterMenu:^{ [ws openFullSettings]; }]; })];
+    // 故障报修（11-13 维护者定：各页面齿轮菜单最下面）：写一句发生了什么（可不填）→ 打包上传、给短码（diag.m s2a_diag_report）
+    [items addObject:vp_act(S2AL(@"diag.report.title"), @"exclamationmark.bubble", NO, ^{ [ws afterMenu:^{ void s2a_diag_report(void); s2a_diag_report(); }]; })];
     return items;
 }
 - (void)openFullSettings { void s2a_diag_open_menu(void); s2a_diag_open_menu(); }   // 同四指长按：整页设置，游戏不退出，开着时触屏输入停住
@@ -800,7 +803,8 @@ static NSString *const kSlideSwitchKey = @"S2AVPadSlideSwitch";   // 滑动切�
 }
 - (void)openLayouts {
     UIViewController *controller = self.window.rootViewController;
-    if (!controller || controller.presentedViewController || _settingsOpen) return;
+    if (!controller || _settingsOpen) return;
+    controller = s2a_top_presenter(controller);
     _settingsOpen = YES; [self clearTouches];
     __weak S2AVPadView *weakSelf = self;
     S2AVPadSettings *settings = [[S2AVPadSettings alloc] initWithStore:_layoutStore current:_layout changed:^{

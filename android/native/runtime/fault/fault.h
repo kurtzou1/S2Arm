@@ -50,6 +50,7 @@ int s2a_android_fault_redirect_call(void *context, void (*callback)(void *), voi
 // Android full readback always passes skip=0: an address-only skip cannot prove
 // that a later GPU write to the same page belongs to the just-completed callback.
 int s2a_android_fault_handle(int signal, void *address, void *context, int is_guest_pc);
+int s2a_android_fault_ec(const void *context, unsigned *ec);   // ESR 异常类别（esr_context 记录在才返回 1）
 
 // Run on each actual guest pthread after managed signal installation/attachment,
 // with its host xstack and alternate stack ready, BEFORE executing guest code.

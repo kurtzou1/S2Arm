@@ -144,6 +144,39 @@ with tempfile.TemporaryDirectory(prefix='s2arm-aoc-publish-') as tmp:
     check(proc.returncode != 0 and link.is_symlink(), 'symlink input rejected and retained')
     check(snapshot(base / 'other').get('aoc.tsv') == b'other\n', 'symlink target unchanged')
 
+    # 同款旧键回收：发布新键后同款别的完整缓存只留最新 1 份，6 小时内动过的不碰；别的款、临时目录、不完整目录不碰。
+    import os
+    base = root / 'prune'
+    base.mkdir()
+    now = time.time()
+    def aged(name, hours, complete=True):
+        p = base / name
+        if complete:
+            make_stage(p, name)
+        else:
+            (p / 'aoc').mkdir(parents=True)
+        for q in [p, *p.rglob('*')]:
+            os.utime(q, (now - hours * 3600, now - hours * 3600))
+        return p
+    olds = {n: aged(n, h) for n, h in (('t01-aaaa~d', 10), ('t01-bbbb~d', 8), ('t01-cccc~d', 1), ('t02-aaaa~d', 10),
+                                       ('t03-aaaa~d', 10), ('t03-bbbb~d', 9))}
+    tmp = aged('t01-dddd~d.tmp.9', 10)
+    partial = aged('t01-eeee~d', 10, complete=False)
+    stage = base / 't01-ffff~d.tmp.own'
+    make_stage(stage, 'new')
+    proc = publish(stage, base / 't01-ffff~d')
+    check(proc.returncode == 0, 'prune publish rc0: ' + proc.stderr)
+    check((base / 't01-ffff~d' / 'aoc.tsv').is_file(), 'prune: new key published')
+    check(olds['t01-cccc~d'].is_dir(), 'prune: newest other key (1 h) kept')
+    check(not olds['t01-aaaa~d'].exists() and not olds['t01-bbbb~d'].exists(), 'prune: older keys (>6 h) removed')
+    check(olds['t02-aaaa~d'].is_dir(), 'prune: other game untouched')
+    check(tmp.is_dir() and partial.is_dir(), 'prune: tmp / incomplete dirs untouched')
+    stage = base / 't03-cccc~d.tmp.own'
+    make_stage(stage, 'new3')
+    proc = publish(stage, base / 't03-cccc~d')
+    check(proc.returncode == 0, 'prune all-old publish rc0: ' + proc.stderr)
+    check(olds['t03-bbbb~d'].is_dir() and not olds['t03-aaaa~d'].exists(), 'prune: all old → keep newest 1 other, drop rest')
+
 print('aoc_cache_publish: %d checks, %d failures' % (checks, len(failures)))
 for failure in failures:
     print('FAIL:', failure)

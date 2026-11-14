@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 import zipfile
 from unittest.mock import Mock, patch
 
@@ -211,6 +212,20 @@ raise SystemExit(main.main())
         self.assertEqual(explain(Failure("No space left on device")).code, "job_failed")
         self.assertEqual(explain(ValueError("Check keys")).code, "job_failed")
 
+    def test_non_os_error_keeps_type_message_and_location(self):
+        # #372 / #854（Windows 0.3.9 报修打包 AttributeError）：不是 OSError 的异常原先连原文一起丢，玩家复制的摘要里只剩「本地任务失败」。
+        #   期望手写：上屏原句不变、码 job_failed；internal 带「AttributeError: <原文>」和抛出处（本测试文件:那一行 in 函数名）
+        def boom():
+            return SimpleNamespace().st_mtime
+        try:
+            boom()
+        except AttributeError as e:
+            got = explain(e)
+        line = boom.__code__.co_firstlineno + 1
+        self.assertEqual((str(got), got.code), ("本地任务失败，请检查日志和输入。", "job_failed"))
+        self.assertIn("AttributeError: 'types.SimpleNamespace' object has no attribute 'st_mtime'", got.internal)
+        self.assertIn(f"（test_error_recovery.py:{line} in boom）", got.internal)
+
     def test_pack_space_failure_then_recovery_preserves_old_runtime(self):
         game = dict(packages=[])
         old = self.c.library / "games/working/keep"; old.parent.mkdir(parents=True); old.write_text("working")
@@ -327,11 +342,11 @@ raise SystemExit(main.main())
                                     ("applegpu_g17p", 17, 27, "target_unsupported")):   # 系统下限 iOS 18（10-26）：17 拒
             with self.subTest(code=code, arch=arch, os=osv):
                 self.c.r["target"] = dict(model="fixture", gpuArch=arch, os=osv)
-                with patch.object(target, "os_choices", return_value=[sdk]):
-                    with self.assertRaises(Failure) as raised:
-                        ipa.resolve_target(self.c)
-                self.assertEqual(raised.exception.code, code)
-                self.assertTrue(self.c.describe_failure(raised.exception)["suggestion"])
+                # 预检清单 #40 #41（11-13）：目标那台跑不了也照出包（一包通用），只记一条带码的提醒；码的处理建议照旧有
+                with patch.object(target, "os_choices", return_value=[sdk]), patch.object(self.c, "diagnostic") as warn:
+                    self.assertEqual(ipa.resolve_target(self.c)["gpuArch"], arch)
+                self.assertEqual((warn.call_args.kwargs["code"], warn.call_args.kwargs["severity"]), (code, "warning"))
+                self.assertTrue(self.c.describe_failure(Failure(warn.call_args.args[0], code=code))["suggestion"])
         self.c.r["target"]["os"] = 26
         with patch.object(target, "os_choices", return_value=[26]):
             self.assertEqual(ipa.resolve_target(self.c)["os"], 26)

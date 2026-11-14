@@ -1,0 +1,140 @@
+// SPDX-License-Identifier: Apache-2.0
+// Independent production rp_draw/rp_buf GPU test; never includes legacy tests.
+#include "rp_exec.h"
+#include "rp_state.h"
+#include "rp_res.h"
+#include "rp_shader.h"
+#include "nvn_unimpl.h"
+#include "nvn_dirty.h"
+#include "nvn_refl.h"
+#include "vk_device.h"
+#include "nvn_plat_vk.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdatomic.h>
+#include <stdalign.h>
+#include <time.h>
+extern uint64_t nvn_vk_dbg_dq_recs(void);
+static nvn_gpu_err err;
+static atomic_int retired;
+static unsigned failures;
+#define REQUIRE(x) do { if(!(x)){fprintf(stderr,"assertion failed line %d: %s rc=%d why=%s\n",__LINE__,#x,err.rc.code,err.why);exit(2);} } while(0)
+#define GPU(x) REQUIRE(nvn_gpu_ok(x))
+const char *const *nvn_plat_vk_instance_exts(uint32_t *n){*n=0;return NULL;}
+VkResult nvn_plat_vk_surface_create(VkInstance i,void *w,VkSurfaceKHR *s){(void)i;(void)w;*s=VK_NULL_HANDLE;return VK_ERROR_EXTENSION_NOT_PRESENT;}
+int nvn_plat_window_size(void *w,uint32_t *x,uint32_t *y){(void)w;(void)x;(void)y;return 0;}
+void nvn_plat_safepoint(void){}
+int nvn_plat_flag(const char *n,int d){return !strcmp(n,"nvk_dq")?!!getenv("S2A_REPLAY_INDIRECT_DQ"):d;}
+void nvn_plat_log(int l,const char *c,const char *s){(void)l;fprintf(stderr,"[%s] %s\n",c?c:"",s?s:"");}
+static void done(void *u,const nvn_gpu_done *d){(void)u;(void)d;}
+static void retirement(void *u){(void)u;atomic_fetch_add(&retired,1);}
+void rp_buf_reset(void);
+static nvn_gpu_buf buffer(uint64_t bytes,const void *data){nvn_gpu_buf b=NULL;GPU(nvn_gpu_buf_create(bytes,NVN_GPU_MEM_SHARED,data,&b,&err));return b;}
+static nvn_gpu_shader shader(const char *dir,const char *name,nvn_gpu_stage stage,const nvn_gpu_layout *layout){
+ char path[1024];REQUIRE(snprintf(path,sizeof path,"%s/%s.spv",dir,name)<(int)sizeof path);
+ FILE *f=fopen(path,"rb");REQUIRE(f);REQUIRE(!fseek(f,0,SEEK_END));long n=ftell(f);REQUIRE(n>0);rewind(f);
+ void *data=malloc((size_t)n);REQUIRE(data);REQUIRE(fread(data,1,(size_t)n,f)==(size_t)n);fclose(f);
+ nvn_gpu_shader_src s={0};s.stage=stage;s.kind=NVN_GPU_BLOB_SPIRV;s.entry="main";s.blob=data;s.bytes=(size_t)n;s.layout=layout;
+ nvn_gpu_shader h=NULL;GPU(nvn_gpu_shader_load(&s,&h,&err));free(data);return h;
+}
+// Shader/pass/pool registration are controlled fixtures. The mirror allocator,
+// sync_write GPU exclusion, address resolver, draw implementation and Vulkan are real.
+int g_s2a_logfd=2,s2a_nvn_rast_flip;
+static alignas(4096) unsigned char guest[4096];
+static struct rp_prog prog;static p_set_rt target;static tex_t target_tex;
+static nvn_gpu_view target_view;static nvn_gpu_cmd active;
+static uint64_t serial=1;static unsigned emitted;static int pass_open,expect_no_draw;
+void __real_nvn_gpu_draw(nvn_gpu_cmd c,const nvn_gpu_draw_args *a);
+void __wrap_nvn_gpu_draw(nvn_gpu_cmd c,const nvn_gpu_draw_args *a){REQUIRE(!expect_no_draw);emitted++;__real_nvn_gpu_draw(c,a);}
+uint64_t nvn_ga2ca(uint64_t a){return a;}
+int nvn_dpool_base(const void *p,int t){(void)p;(void)t;return 0;}
+const prog_t *nvn_prog_snap_get(uint64_t s,uint8_t k[6][8],uint8_t *o,uint8_t t[6]){(void)s;(void)k;(void)o;(void)t;return NULL;}
+int rp_shader_resolve(const struct rp_shader_req *q,const struct rp_prog **o){(void)q;*o=&prog;return 0;}
+int rp_depth_zero(void){return 0;}int rp_origin_lower_left(void){return 1;}
+void rp_perf_add(int i,uint64_t n){(void)i;(void)n;}uint64_t rp_seg_serial(void){return serial;}
+uint64_t rp_sub_serial(void){return serial;}uint64_t rp_sub_fence(void){return 1;}
+int rp_fence_done(uint64_t f){(void)f;return 1;}
+nvn_gpu_cmd rp_xfer_cmd(uint64_t *last){rp_pass_flush(active);*last=serial;return active;}
+void rp_occl_draw(nvn_gpu_cmd c){(void)c;}
+int rp_post_gpu_write(uint64_t a,uint64_t n){(void)a;(void)n;return 0;}
+int rp_pool_find(uint64_t a,uint64_t n,const uint8_t **m,uint64_t *s){uint64_t base=(uint64_t)(uintptr_t)guest;if(a<base||n>sizeof guest||a-base>sizeof guest-n)return 0;if(m)*m=guest;if(s)*s=sizeof guest;return 1;}
+// Deliberately untracked pool: every resolve resynchronizes CPU pages, so real
+// rp_buf pending-GPU-write exclusion must protect the poisoned parameter bytes.
+size_t nvn_dirty_page_size(void){return 4096;}uint64_t nvn_dirty_now(void){return 1;}
+uint64_t nvn_dirty_mapping_generation(void){return 1;}int nvn_dirty_tracking_unreliable(void){return 1;}
+const void *nvn_dirty_span(const void *a,size_t n){(void)a;(void)n;return NULL;}
+long nvn_dirty_page_gens(const void *s,const void *a,size_t l,uint64_t *g,size_t n){(void)s;(void)a;(void)l;(void)g;(void)n;return -1;}
+void nvn_dirty_protect(const void *a,size_t n){(void)a;(void)n;}
+void rp_view_pin_begin(void){}void rp_view_pin_end(void){}
+nvn_gpu_view rp_view_by_id(int i,nvn_gpu_cmd c,const tex_t **t){(void)i;(void)c;(void)t;return NULL;}
+nvn_gpu_view rp_view_by_id_decl(int i,uint8_t t,uint8_t k,int e,nvn_gpu_cmd c,const tex_t **o){(void)i;(void)t;(void)k;(void)e;(void)c;(void)o;return NULL;}
+nvn_gpu_samp rp_samp_by_id(int i){(void)i;return NULL;}
+int rp_tex_snap_by_id(int i,tex_t *t,view_t *v,int *h){(void)i;(void)t;(void)v;(void)h;return 0;}
+uint64_t rp_tex_reg_gen(void){return 1;}uint64_t rp_tex_fact_sig(const uint64_t *h,int n,int b,int c){(void)h;(void)n;(void)b;(void)c;return 0;}
+void rp_tex_mark_gpu_written(const tex_t *t){(void)t;}int rp_tex_debug_state(uint64_t s){(void)s;return 0;}
+nvn_gpu_tex rp_tex_backend_by_serial(uint64_t s){(void)s;return NULL;}
+const p_set_rt *rp_pass_target(void){return &target;}int rp_pass_slot_attached(int i){return i==0;}
+void rp_pass_slot_size(int i,uint32_t *w,uint32_t *h){(void)i;*w=*h=64;}void rp_pass_note_draw(int d){(void)d;}
+// #950 给 rp_draw.c 新加的通道依赖：中性替身（没有待折清除、不缩渲染区域）
+int rp_pass_parked(void){return 0;}void rp_pass_prepare_draw(nvn_gpu_cmd c){(void)c;}void rp_pass_land_reads(nvn_gpu_cmd c,const tex_t *const *ts,int n){(void)c;(void)ts;(void)n;}
+static void pass(nvn_gpu_cmd c,int clear){nvn_gpu_pass_desc p={0};p.ncolor=1;p.color[0].view=target_view;p.color[0].load=clear?NVN_GPU_LOAD_CLEAR:NVN_GPU_LOAD_LOAD;p.color[0].store=NVN_GPU_STORE_STORE;p.color[0].clear.f[3]=1;p.w=p.h=64;p.layers=1;nvn_gpu_pass_begin(c,&p);pass_open=1;}
+int rp_pass_begin(nvn_gpu_cmd c){if(!pass_open)pass(c,0);return 1;}void rp_pass_flush(nvn_gpu_cmd c){if(pass_open){nvn_gpu_pass_end(c);pass_open=0;}}
+static void pixels(const uint8_t *p,int drew){for(unsigned y=2;y<62;y++)for(unsigned r=0;r<4;r++)for(unsigned x=2;x<14;x++){const uint8_t *v=p+(y*64+r*16+x)*4;int red=drew&&r==0;if(v[0]!=(red?255:0)||v[1]||v[2]||v[3]!=255)failures++;}}
+static void run_case(struct s2a_vk_device *d,const char *dir,int index,int mdi){
+ nvn_gpu_open_desc od={0};od.host_device=d;od.app_label="real-replay-indirect";GPU(nvn_gpu_open(&od,&err));
+ const int neg=mdi>=10;const char *reason=NULL;
+ const int drv=mdi==3;memset(&prog,0,sizeof prog);nvn_gpu_layout graphics_layout[2]={{0}};
+ if(drv)for(int st=0;st<2;st++){prog.nent[st]=1;nvn_gpu_layout_ent *e=&prog.ent[st][0];e->set=0;e->binding=(uint16_t)st;e->cls=NVN_GPU_RES_UBO;e->src_kind=NVN_RB_DRV0;e->count=1;e->access=NVN_GPU_ACC_R;e->stages=1u<<(st?NVN_GPU_SH_FS:NVN_GPU_SH_VS);graphics_layout[st].ent=e;graphics_layout[st].nent=1;}
+ prog.sh[0]=shader(dir,drv?"replay_drv0.vert":"quad.vert",NVN_GPU_SH_VS,drv?&graphics_layout[0]:NULL);prog.sh[1]=shader(dir,drv?"replay_drv0.frag":"quad.frag",NVN_GPU_SH_FS,drv?&graphics_layout[1]:NULL);prog.attr_mask=drv?1:3;prog.color_out_mask=15;
+ nvn_gpu_layout_ent ent={0};ent.cls=NVN_GPU_RES_SSBO;ent.access=NVN_GPU_ACC_RW;ent.count=1;ent.stages=1u<<NVN_GPU_SH_CS;
+ nvn_gpu_layout lay={0};lay.ent=&ent;lay.nent=1;lay.push_bytes=drv?8:0;nvn_gpu_shader cs=shader(dir,drv?"replay_drv0_args.comp":"count_args.comp",NVN_GPU_SH_CS,&lay);nvn_gpu_stage_desc sd={0};sd.sh=cs;nvn_gpu_pipe cp=NULL;GPU(nvn_gpu_cpipe_get(&sd,NVN_GPU_PIPE_SYNC,&cp,&err));nvn_gpu_shader_release(cs);
+ memset(guest,0xa5,sizeof guest);uint32_t *args=(uint32_t*)(void*)guest;args[0]=1;args[4]=0;
+ for(unsigned i=0;i<5;i++){unsigned b=8+i*8;args[b]=6;args[b+1]=1;args[b+2]=18;args[b+3]=args[b+4]=0;}
+ float (*v)[8]=(float(*)[8])(void*)(guest+256);const unsigned corners[6]={0,1,2,2,1,3};
+ for(unsigned r=0;r<4;r++)for(unsigned j=0;j<6;j++){unsigned k=corners[j];float *w=v[r*6+j];memset(w,0,32);w[0]=-1+r*.5f+((k&2)?.5f:0);w[1]=(k&1)?1:-1;w[3]=w[7]=1;w[4+(r<3?r:2)]=1;}
+ for(unsigned i=0;i<24;i++){if(index==1)((uint16_t*)(void*)(guest+2052))[i]=(uint16_t)i;else ((uint32_t*)(void*)(guest+2052))[i]=i;}
+ nvn_gpu_tex_desc td={0};td.d.target=NVN_TEXTURE_TARGET_2D;td.d.format=NVN_FORMAT_RGBA8;td.d.width=td.d.height=64;td.d.depth=td.d.levels=1;td.usage=NVN_GPU_TEX_RENDER;nvn_gpu_tex tex=NULL;GPU(nvn_gpu_tex_create(&td,&tex,&err));GPU(nvn_gpu_view_create(tex,NULL,&target_view,&err));nvn_gpu_buf rb=buffer(16384,NULL);
+ memset(&target_tex,0,sizeof target_tex);target_tex.d=td.d;target_tex.serial=1;memset(&target,0,sizeof target);target.n=1;target.color[0]=&target_tex;
+ rp_state_reset();rp_draw_reset();nvn_unimpl_reset();rp_S.nattr=2;rp_S.nstream=1;rp_S.attr[0].fmt=rp_S.attr[1].fmt=NVN_FORMAT_RGBA32F;rp_S.attr[1].offset=16;rp_S.stream[0].stride=32;rp_S.vbuf[0].address=(uint64_t)(uintptr_t)(guest+256);rp_S.vbuf[0].size=768;rp_S.color.logic_op=3;rp_S.chmask.mask=15;rp_S.poly.mode=NVN_POLYGON_MODE_FILL;
+ GPU(nvn_gpu_cmd_begin(NULL,&active,&err));serial++;nvn_gpu_buf mirror=NULL;uint64_t off=0;REQUIRE(rp_buf_resolve(active,(uint64_t)(uintptr_t)guest,192,&mirror,&off));uint64_t key=0,id=rp_buf_gpu_write_note((uint64_t)(uintptr_t)guest,192,&key);REQUIRE(id);
+ nvn_gpu_binding ssbo={0};ssbo.cls=NVN_GPU_RES_SSBO;ssbo.u.b.buf=mirror;ssbo.u.b.off=off;ssbo.u.b.len=192;nvn_gpu_set_pipe(active,cp);nvn_gpu_bind(active,NVN_GPU_SH_CS,&ssbo,1);uint32_t pc[2]={3,index!=0};if(drv)nvn_gpu_push(active,NVN_GPU_SH_CS,0,pc,8);if(!getenv("S2A_REPLAY_INDIRECT_SKIP_PRODUCER"))nvn_gpu_dispatch(active,cp,1,1,1,NULL,0);nvn_gpu_barrier(active,NVN_BARRIER_ORDER_INDIRECT_DATA_BIT|NVN_BARRIER_INVALIDATE_SHADER_BIT);
+ pass(active,1);rp_pass_flush(active);unsigned before=emitted;
+ for(int round=0;round<(drv?3:1);round++){
+  if(drv){rp_R.has_sc=1;rp_R.sc.x=round==0?0:round==1?21:42;rp_R.sc.y=0;rp_R.sc.w=round==2?22:21;rp_R.sc.h=64;}
+  if(drv&&round==1){rp_pass_flush(active);pc[0]=7;nvn_gpu_set_pipe(active,cp);nvn_gpu_bind(active,NVN_GPU_SH_CS,&ssbo,1);nvn_gpu_push(active,NVN_GPU_SH_CS,0,pc,8);if(!getenv("S2A_REPLAY_INDIRECT_SKIP_PRODUCER"))nvn_gpu_dispatch(active,cp,1,1,1,NULL,0);nvn_gpu_barrier(active,NVN_BARRIER_ORDER_INDIRECT_DATA_BIT|NVN_BARRIER_INVALIDATE_SHADER_BIT);rp_dirty_all();}
+  int direct=drv&&round==2;
+  if(direct){
+   unsigned saved=emitted;expect_no_draw=1;
+   if(index){p_draw_idx bad={0};bad.prim=4;bad.itype=index;bad.ibuf=(uint64_t)(uintptr_t)(guest+2052);bad.ind=(uint64_t)(uintptr_t)(guest+4096);rp_draw(active,NULL,&bad,&bad);}
+   else{p_draw bad={0};bad.prim=4;bad.ind=(uint64_t)(uintptr_t)(guest+4096);rp_draw(active,&bad,NULL,&bad);}
+   expect_no_draw=0;REQUIRE(emitted==saved);REQUIRE(nvn_unimpl_count("draw","indirect_buffer_unresolved")==1);
+  }
+
+  uint64_t badind=0,badidx=0;int badtype=index,badprim=4;
+  if(neg){
+   reason="indirect_buffer_unresolved";
+   if(mdi==10)badind=(uint64_t)(uintptr_t)(guest+4096);
+   if(mdi==11)badind=(uint64_t)(uintptr_t)(guest+4084);
+   if(mdi==12)badind=(uint64_t)(uintptr_t)(guest+33);
+   if(mdi==13||mdi==14){badtype=mdi==13?-1:3;reason="index_type_invalid";}
+   if(mdi==15){badtype=0;reason="indirect_topology_or_index_conversion";}
+   if(mdi>=16&&mdi<=19){const int ps[]={2,7,8,9};badprim=ps[mdi-16];reason="indirect_topology_or_index_conversion";}
+   if(mdi>=20){reason="index_buffer_unresolved";badidx=(uint64_t)(uintptr_t)(guest+(mdi==20?4096:mdi==21?4095:2053));}
+   expect_no_draw=1;
+  }
+
+  if(index){p_draw_idx a={0};a.prim=4;a.itype=index;a.ibuf=(uint64_t)(uintptr_t)(guest+2052);a.ind=direct?0:(uint64_t)(uintptr_t)(guest+32);a.count=direct?6:0;a.instances=direct?1:0;a.base_vertex=direct?0:INT32_MAX;a.base_instance=direct?0:INT32_MAX;if(mdi==2){a.mdi_cnt=(uint64_t)(uintptr_t)(guest+16);a.mdi_i=mdi;}if(neg){a.prim=badprim;a.itype=badtype;if(badind)a.ind=badind;if(badidx)a.ibuf=badidx;}rp_draw(active,NULL,&a,&a);}
+  else{p_draw a={0};a.prim=4;a.ind=direct?0:(uint64_t)(uintptr_t)(guest+32);a.count=direct?6:0;a.first=direct?0:INT32_MAX;a.instances=direct?1:0;a.base_instance=direct?0:INT32_MAX;if(mdi==2){a.mdi_cnt=(uint64_t)(uintptr_t)(guest+16);a.mdi_i=mdi;}if(neg){a.prim=badprim;if(badind)a.ind=badind;}rp_draw(active,&a,NULL,&a);}
+  if(neg){expect_no_draw=0;REQUIRE(emitted==before);REQUIRE(nvn_unimpl_count("draw",reason)==1);REQUIRE(nvn_unimpl_count("buf","address_outside_pools")== (unsigned)(mdi==10||mdi==11));REQUIRE(nvn_unimpl_kinds()==((mdi==10||mdi==11)?2:1));}
+ }
+ rp_pass_flush(active);nvn_gpu_copy_tex_buf(active,tex,0,0,NULL,rb,0,256,16384);GPU(nvn_gpu_cmd_commit(active,1,done,NULL,&err));GPU(nvn_gpu_fence_wait(1,5000000000ull,&err));
+ if(drv){const uint8_t *out=nvn_gpu_buf_cpu(rb);const uint8_t expected[3][4]={{255,0,255,255},{0,255,0,255},{255,255,255,255}};for(unsigned y=2;y<62;y++)for(unsigned x=2;x<62;x++){if(x==20||x==21||x==41||x==42)continue;unsigned k=x<21?0:x<42?1:2;if(memcmp(out+(y*64+x)*4,expected[k],4))failures++;}}
+ else if(neg){const uint8_t *q=nvn_gpu_buf_cpu(rb);for(unsigned i=0;i<4096;i++)if(q[i*4]||q[i*4+1]||q[i*4+2]||q[i*4+3]!=255)failures++;}
+ else pixels(nvn_gpu_buf_cpu(rb),!mdi);
+ REQUIRE(emitted-before==(unsigned)(drv?3:!mdi));
+ if(neg)printf("boundary index=%d mode=%d reason=%s no-draw clear-unchanged\n",index,mdi,reason);
+ if(mdi==2){REQUIRE(nvn_unimpl_count("draw","indirect_count_group_unavailable")==1);}rp_buf_gpu_write_land(key,id,0);rp_draw_reset();rp_buf_reset();nvn_gpu_shader_release(prog.sh[0]);nvn_gpu_shader_release(prog.sh[1]);nvn_gpu_view_release(target_view);nvn_gpu_tex_release(tex);int t=atomic_load(&retired)+1;nvn_gpu_buf_release(rb,retirement,NULL);struct timespec pause={0,1000000};for(int i=0;i<5000&&atomic_load(&retired)<t;i++)nanosleep(&pause,NULL);GPU(nvn_gpu_close(5000000000ull,&err));
+}
+int main(int argc,char **argv){if(argc!=2)return 2;struct s2a_vk_device d;char why[256];if(s2a_vk_device_create(&d,why,sizeof why)){fprintf(stderr,"%s\n",why);return 2;}for(int index=0;index<3;index++){run_case(&d,argv[1],index,0);run_case(&d,argv[1],index,2);run_case(&d,argv[1],index,3);}for(int index=0;index<3;index++)for(int mode=10;mode<=22;mode++){if(!index&&((mode>=13&&mode<=15)||mode>=20))continue;run_case(&d,argv[1],index,mode);}
+uint64_t dq=nvn_vk_dbg_dq_recs();REQUIRE(getenv("S2A_REPLAY_INDIRECT_DQ")?dq>0:dq==0);printf("DQ records=%llu\n",(unsigned long long)dq);REQUIRE(!s2a_vk_device_destroy(&d,1));printf("real rp_draw/rp_buf ordinary-indirect+DRV0 cases9 plus-boundaries33 pixel-failures%u\n",failures);return failures?1:0;}

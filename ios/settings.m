@@ -27,7 +27,18 @@ static void apply_environment(const char *name, NSString *value) {
 // 浮层偏好要在建视图之前落到环境变量：多款容器与单款都是先建视图（app.m prepareGameView → s2a_hud_attach），
 // host_run 里才调 s2a_ios_apply_graphics_settings；晚读会让 s2a_hud_on() 把还没设的 S2A_HUD 缓存成 0（#153）。
 // 启动环境显式给的优先；开关语义仍是「下次启动生效」。
+// Metal 性能浮层的系统键（11-13 维护者实机：iPad mini / iPadOS 27.2 上 Metal 框架初始化时读 MetalForceHudEnabled，只多存这个键 = 冷启动出面板，
+//   删掉就没有；我们的开关键 MetalHUDForceEnabled（Settings.bundle / 设置页）它不认，MTL_HUD_ENABLED 是进程起来后才设、对系统建设备太晚）。
+//   开关打开就往 App 自己的偏好里写系统键、关掉就删（两种拼法都在：我们的键作界面状态照旧），下次冷启动 Metal 读到。只在值不同时写，免得自己触发变更通知再写
+static void metal_hud_mirror(NSUserDefaults *d) {
+    BOOL on = [d boolForKey:@"MetalHUDForceEnabled"];
+    if (on && ![d boolForKey:@"MetalForceHudEnabled"]) { [d setBool:YES forKey:@"MetalForceHudEnabled"]; fprintf(stderr, "[S2A 画面设置] Metal 性能浮层：写系统键 MetalForceHudEnabled（下次冷启动生效）\n"); }
+    else if (!on && [d objectForKey:@"MetalForceHudEnabled"]) { [d removeObjectForKey:@"MetalForceHudEnabled"]; fprintf(stderr, "[S2A 画面设置] Metal 性能浮层：删系统键 MetalForceHudEnabled（下次冷启动生效）\n"); }
+}
 void s2a_ios_apply_overlay_settings(NSUserDefaults *defaults) {
+    metal_hud_mirror(defaults);
+    { static id obs; if (!obs) obs = [NSNotificationCenter.defaultCenter addObserverForName:NSUserDefaultsDidChangeNotification object:nil queue:nil
+          usingBlock:^(NSNotification *n) { (void)n; metal_hud_mirror(NSUserDefaults.standardUserDefaults); }]; }   // App 设置页 / 系统「设置」里切开关时跟着改
     if (!getenv("S2A_HUD") && [defaults boolForKey:@"S2ADevHUD"]) {
         apply_environment("S2A_HUD", @"1");
         fprintf(stderr, "[S2A 画面设置] S2A_HUD=1（本 App 设置：开发浮层）\n");
@@ -43,7 +54,11 @@ void s2a_ios_apply_overlay_settings(NSUserDefaults *defaults) {
 //   以及撑不住就问玩家的「问过」与「本款原生 60 帧」记号——原先全在 App 级，一款游戏自动退回 16:9、关 60 帧会串到所有游戏
 NSArray *s2a_ios_per_game_keys(void) {
     return @[@"S2AResolutionScale", @"S2AAntiAliasing", @"S2AScalingFilter", @"S2AFrameRateLimit", @"S2AWidescreen", @"S2AFps60",
-             @"S2AFps60Manual", @"S2ADockedMode", @"S2ACommunityPatches", @"S2AWidescreenAsked", @"S2AFps60Asked", @"S2AFpsNative60"];
+             @"S2AFps60Manual", @"S2ADockedMode", @"S2ACommunityPatches", @"S2AWidescreenAsked", @"S2AFps60Asked", @"S2AFpsNative60", @"S2AWidenForce", S2AGameLanguageKey];
+}
+NSArray<NSString *> *s2a_ios_game_languages(void) {
+    return @[@"system", @"SimplifiedChinese", @"TraditionalChinese", @"AmericanEnglish", @"BritishEnglish", @"Japanese", @"Korean", @"French", @"CanadianFrench", @"German",
+             @"Spanish", @"LatinAmericanSpanish", @"Italian", @"Dutch", @"Portuguese", @"BrazilianPortuguese", @"Russian", @"Polish", @"Thai"];
 }
 @interface S2AGameLayeredDefaults : NSUserDefaults
 - (instancetype)initWithGame:(NSUserDefaults *)game app:(NSUserDefaults *)app keys:(NSSet<NSString *> *)keys;
@@ -167,6 +182,20 @@ void s2a_ios_apply_graphics_settings(NSUserDefaults *defaults) {
         apply_environment("S2A_DOCKED", @(docked));
         fprintf(stderr, "[S2A 画面设置] S2A_DOCKED=%s（本 App 设置）\n", docked);
     }
+    // 游戏语言（按款，11-13）：选了哪种就交宿主枚举名给 S2A_SYSTEM_LANGUAGE（Host.cs PickLanguage 优先用它）；跟随系统不设，服务层读本 App 首选语言。
+    //   游戏按语言整套换字体，从 Switch 导入的存档里玩家起的名字要和当时 Switch 的语言对上才显示得出来
+    const char *gameLanguage = getenv("S2A_SYSTEM_LANGUAGE");
+    if (gameLanguage) fprintf(stderr, "[S2A 画面设置] S2A_SYSTEM_LANGUAGE=%s（启动环境）\n", gameLanguage);
+    else {
+        NSString *v = [defaults stringForKey:S2AGameLanguageKey];
+        if (v && ![s2a_ios_game_languages() containsObject:v]) {
+            fprintf(stderr, "[S2A 画面设置] 【红】%s=%s 无效，清除保存值、跟随系统\n", S2AGameLanguageKey.UTF8String, v.UTF8String);
+            [defaults removeObjectForKey:S2AGameLanguageKey];
+        } else if (v && ![v isEqualToString:@"system"]) {
+            apply_environment("S2A_SYSTEM_LANGUAGE", v);
+            fprintf(stderr, "[S2A 画面设置] S2A_SYSTEM_LANGUAGE=%s（本款设置）\n", v.UTF8String);
+        }
+    }
     // 按游戏的设置（11-07 维护者：游戏库里按住游戏 / 点设置，60 帧、宽屏强制启用点一下就切）：多款容器选了游戏后 S2A_LAUNCH_GAME_ID 有值，
     //   游戏库把这款的选择写在独立偏好 S2AGame.<游戏号>（shell S2ArmShellHost）；排在 App 级设置前面（两边都只在环境变量未设时写，先写的赢）。
     //   单款壳没有游戏号，不走这段
@@ -176,11 +205,13 @@ void s2a_ios_apply_graphics_settings(NSUserDefaults *defaults) {
         // 60 帧不在这里单独读：defaults 是按游戏分层的（s2a_ios_settings_defaults），下面 60 帧那段读到的就是「这款 → 所有游戏的默认」。
         //   原先这里只在这款「关」时写，这款「开」压不过 App 级的「关」（11-11 宿主梳理：库里按款开 60 帧不生效）
         // 宽屏强制启用 = 这款按已验证开满屏（没进宽屏已验证名单也开），并压过 App 级的宽屏关；满屏自检照样兜底（拉伸 / 收窄连续两窗自动退回）
-        if ([game boolForKey:@"S2AWidenForce"]) {
-            if (!getenv("S2A_WIDEN_VERIFIED")) apply_environment("S2A_WIDEN_VERIFIED", @"1");
-            if (!getenv("S2A_WIDESCREEN")) apply_environment("S2A_WIDESCREEN", @"1");
-            fprintf(stderr, "[S2A 画面设置] 宽屏强制启用（游戏库：这款）\n");
-        }
+    }
+    // 宽屏强制启用也认游戏里设置页写的（11-13 维护者「不许堵门」：包里满屏标了已知问题，设置页原先锁灰不让开；现在提示后照开，记同一个键）。
+    //   按游戏分层：这款 → 所有游戏的默认；单款壳没有游戏号，就是 App 级
+    if ([s2a_ios_settings_defaults() boolForKey:@"S2AWidenForce"]) {
+        if (!getenv("S2A_WIDEN_VERIFIED")) apply_environment("S2A_WIDEN_VERIFIED", @"1");
+        if (!getenv("S2A_WIDESCREEN")) apply_environment("S2A_WIDESCREEN", @"1");
+        fprintf(stderr, "[S2A 画面设置] 宽屏强制启用（%s）\n", game && [game objectForKey:@"S2AWidenForce"] ? "这款" : "所有游戏的默认");
     }
     // 宽屏（runtime/src/widen.c widen_setting_on）：设置关了 = S2A_WIDESCREEN=0，下次启动整局 16:9；没设过 / 开着不设（缺省开）；启动环境显式给的优先
     // 一次性清记忆（11-06 满屏自检改「两次启动都触发才记住」）：之前单次触发就写下的「宽屏关 + 问过」清掉，下次起局重新试满屏、重新自检。
@@ -291,6 +322,7 @@ float s2a_ios_res_scale(NSUserDefaults *defaults) {
 // 诊断局（#438，设置「诊断」组的开关 S2ADiagRunNext）：只管下一局。起局时读到开着就设上逐通道读数的环境变量、立刻关掉开关；
 //   读数写本款文档根下的 diagrun/（出图 PNG 与颜色目标 PNG；逐通道记录 [pass] 行走 stderr → host.log），导出诊断包时带上（diag.m）。
 //   帧号：第 3600 / 7200 次出图（60 帧游戏约 1 / 2 分钟）。这些是重探针、会拖慢帧率，所以只开一局。启动环境显式给的优先
+//   帧内快照到第 60 个渲染 pass（延迟光照这类合成 pass 常在 30 以后）；整数格式的目标按整数值出图，这一帧采样到的 3D 纹理逐层拼成一张图（RGB / alpha 各一张）
 void s2a_ios_apply_diag_run(NSUserDefaults *defaults) {
     if (![defaults boolForKey:@"S2ADiagRunNext"]) return;
     [defaults setBool:NO forKey:@"S2ADiagRunNext"];
@@ -304,7 +336,7 @@ void s2a_ios_apply_diag_run(NSUserDefaults *defaults) {
     }
     NSString *td = [NSString stringWithFormat:@"3600,7200:%@/td_%%d.png", dir], *shot = [NSString stringWithFormat:@"3600,7200:%@/shot_%%d.png", dir];
     struct { const char *name; NSString *value; } vars[] = {
-        {"DM_NVN_PASSDUMP", @"3600-3601"}, {"DM_NVN_TEXDUMP", td}, {"DM_NVN_TEXSNAP", @"0,4,8,12,16,20,24,28"}, {"DM_NVN_SHOT", shot}};
+        {"DM_NVN_PASSDUMP", @"3600-3601"}, {"DM_NVN_TEXDUMP", td}, {"DM_NVN_TEXSNAP", @"0,5,10,15,20,25,30,35,40,45,50,55,60"}, {"DM_NVN_SHOT", shot}};
     for (size_t i = 0; i < sizeof vars / sizeof vars[0]; i++)
         if (!getenv(vars[i].name)) setenv(vars[i].name, vars[i].value.UTF8String, 1);
     fprintf(stderr, "[S2A 诊断局] 本局开逐通道读数（第 3600 / 7200 次出图），读数写 %s，下一局自动关\n", dir.fileSystemRepresentation);

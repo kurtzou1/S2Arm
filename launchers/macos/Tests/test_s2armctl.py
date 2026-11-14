@@ -597,6 +597,23 @@ class DeviceBundleTests(unittest.TestCase):
         self.assertNotIn("没装", buf.getvalue())
 
 
+    def test_device_recognises_downstream_app_renamed_at_install(self):
+        """下游深度方案的独立 App：包里是下游自己的包名，装机时改成 io.s2arm.ds.<方案>.<团队>。原先按包里的包名查，免费团队装好了也报「没装」"""
+        dev = {"hardwareProperties": {"udid": "U1"}, "deviceProperties": {"name": "玩家的手机"}}
+        apps = {"result": {"apps": [{"bundleIdentifier": "io.s2arm.ds.d2r-mobile.z6563uvhkk"}, {"bundleIdentifier": "io.s2arm.ds.other.z6563uvhkk"}]}}
+        def fake_dctl(args):
+            Path(args[args.index("--json-output") + 1]).write_text(json.dumps(apps))
+            return subprocess.CompletedProcess(args, 0, "", "")
+        ipa = os.path.join("lib", "games", "a", "downstream", "d2r-mobile", "D2RMobile.ipa")
+        buf = io.StringIO()
+        with mock.patch.object(ctl, "game_bundle", return_value=(ipa, "org.example.downstream")), \
+             mock.patch.object(ctl, "iphone", return_value=[dev]), mock.patch.object(ctl, "dctl", side_effect=fake_dctl), \
+             contextlib.redirect_stdout(buf), self.assertRaises(SystemExit):
+            ctl.device("0100000000000000")
+        self.assertIn("已装 io.s2arm.ds.d2r-mobile.z6563uvhkk", buf.getvalue())
+        self.assertNotIn("other", buf.getvalue()); self.assertNotIn("没装", buf.getvalue())
+
+
 class DeviceChoiceTests(unittest.TestCase):
     """设备号贯穿（11-11 真机验收测出）：install-check 能带 --device；targets 列出设备名、设备号与连接方式（两台同型号时只看机型分不出）"""
     def test_install_check_sends_device(self):
@@ -637,20 +654,49 @@ class DeviceChoiceTests(unittest.TestCase):
 class DiagCommandTests(unittest.TestCase):
     """#94：只敲 s2armctl diag 原先 IndexError；现在不给路径 = 导出到桌面，认不出的写法打用法退出 2"""
 
-    def _main(self, *argv):
-        posted = []
-        err = io.StringIO()
-        with mock.patch.object(ctl, "call", side_effect=lambda m, p, b=None, **kw: posted.append((m, p, b)) or {"ok": True}), \
+    def _main(self, *argv, state="completed", write=True):
+        """假控制口：POST /diagnostics 之后 /state 出一个新任务（state），导出时按 write 决定作业是否真写出文件"""
+        posted, tasks = [], []
+        err, out = io.StringIO(), io.StringIO()
+        def call(m, p, b=None, **kw):
+            if m == "POST":
+                posted.append((m, p, b))
+                op = "diagnostics" if b["action"] == "export" else "pullDiagnostics"
+                tasks.append({"id": "t1", "operation": op, "state": state, "message": "导出失败：磁盘写不进" if state == "failed" else "", "started": 1})
+                if write and b["action"] == "export" and state == "completed":
+                    Path(b["path"]).write_bytes(b"PK" + b"x" * 2048)
+                return {"ok": True}
+            return {"tasks": list(tasks), "games": [], "busy": False}
+        with mock.patch.object(ctl, "call", side_effect=call), mock.patch.object(ctl.time, "sleep", lambda s: None), \
+             mock.patch.object(ctl, "brief", lambda s: ""), mock.patch.object(ctl, "errors", lambda *a, **k: print("错误：导出失败：磁盘写不进")), \
              mock.patch.object(sys, "argv", ["s2armctl", "diag", *argv]), \
-             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             try:
                 ctl.main(); code = 0
             except SystemExit as e:
                 code = e.code
-        return code, posted, err.getvalue()
+        return code, posted, err.getvalue() + out.getvalue()
+
+    def test_export_waits_for_the_job_and_prints_path_and_size(self):
+        # #917：原先 POST 回 ok 就退 0、作业失败 / 没写出文件调用方看不到。期望按假任务手写：完成 + 文件在 → 退 0、打绝对路径与大小
+        with tempfile.TemporaryDirectory() as d:
+            target = os.path.join(d, "包.zip")
+            code, _, text = self._main("export", target)
+            self.assertEqual(code, 0, text); self.assertIn(f"诊断包：{target}（0.0 MB）", text)
+
+    def test_export_job_failed_or_file_missing_exits_nonzero(self):
+        with tempfile.TemporaryDirectory() as d:
+            code, _, text = self._main("export", os.path.join(d, "a.zip"), state="failed")
+            self.assertEqual(code, 1); self.assertIn("磁盘写不进", text)
+            code, _, text = self._main("export", os.path.join(d, "b.zip"), write=False)
+            self.assertNotIn(code, (0, None)); self.assertIn("诊断包不在", str(code) + text)
 
     def test_bare_diag_exports_with_a_default_path(self):
-        code, posted, _ = self._main()
+        with tempfile.TemporaryDirectory() as home:   # 假家目录带桌面：缺省路径落在这里，不写进仓库或真桌面
+            os.mkdir(os.path.join(home, "Desktop"))
+            with mock.patch.dict(os.environ, {"HOME": home}):
+                code, posted, _ = self._main()
+            self.assertTrue(posted[0][2]["path"].startswith(os.path.join(home, "Desktop")), posted)
         self.assertEqual(code, 0)
         self.assertEqual(len(posted), 1)
         method, path, body = posted[0]

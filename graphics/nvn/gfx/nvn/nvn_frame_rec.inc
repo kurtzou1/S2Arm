@@ -458,10 +458,19 @@ static int fr_restore_state(const char *path, int *ntex) {
     for (uint32_t i = 0; ok && i < hd.nxv; i++) { uint64_t s; ok = fr_r(f, &s, 8); if (ok) nvn_be_xv_window_tex(s); }
     uint32_t ng = 0;   // 末尾的 GPU 地址表（见 fr_dump_state）；旧文件读不到就是 0 段
     if (ok && fr_r(f, &ng, 4) && ng) { uint64_t *gt = malloc((size_t)ng * 24); if (gt && fr_r(f, gt, (size_t)ng * 24)) nvn_gva_restore(gt, (int)ng); else ok = 0; free(gt); }
-    uint32_t na = 0;   // 有 GPU 地址的池范围（见 fr_dump_state）；旧文件读不到就是 0 段
-    if (ok && fr_r(f, &na, 4)) for (uint32_t i = 0; ok && i < na; i++) { uintptr_t r[2]; ok = fr_r(f, r, sizeof r); if (ok) nvn_be_pool_addressed((const void *)r[0], r[1] - r[0]); }
-    uint32_t nm = 0, nmr = 0;   // 录时为池表驻留着的池（见 fr_dump_state）；旧文件读不到就是 0 个
-    if (ok && fr_r(f, &nm, 4) && nm) { pthread_mutex_lock(&g_mu);
+    // 有 GPU 地址的池范围、录时为池表驻留着的池（见 fr_dump_state）：11-12 起才录。旧录像没有这两节就不放：回放的原始内存池表会是 0 段 / 全冷，
+    //   读全局内存的着色器读回 0，用读到的值当循环次数的着色器跑飞、整队列挂死——11-13 一款直连 3D 游戏 11-06 的录像在两台 Mac 上都第 7 遍稳定「卡死」，
+    //   追了一整轮才发现是录像缺表的假象（docs/坑记录.md）。报红说清楚、不放，免得下一个人再拿它找游戏的毛病；用当前宿主重录
+    uint32_t na = 0, nm = 0, nmr = 0;
+    int has_na = ok && fr_r(f, &na, 4);
+    for (uint32_t i = 0; ok && has_na && i < na; i++) { uintptr_t r[2]; ok = fr_r(f, r, sizeof r); if (ok) nvn_be_pool_addressed((const void *)r[0], r[1] - r[0]); }
+    int has_nm = ok && has_na && fr_r(f, &nm, 4);
+    if (ok && !has_nm) {
+        MLOG("【红】 回放：录像 %s 没有「有 GPU 地址的池范围 / 为池表驻留的池」两节（11-12 之前的旧录像）：放了原始内存池表是 0 段，"
+             "读全局内存的着色器读回 0、可能整帧跑飞挂死 GPU（不是游戏的问题）。不放，请用当前宿主重录", path);
+        fclose(f); return 0;
+    }
+    if (ok && nm) { pthread_mutex_lock(&g_mu);
         for (uint32_t i = 0; ok && i < nm; i++) { uintptr_t r[2]; ok = fr_r(f, r, sizeof r); int k = ok ? pool_find(r[0], 1) : -1; if (k < 0 || g_pools[k].reg || g_pools[k].gm) continue;
             pool_ent *p = &g_pools[k]; if (!p->res) { res_add(p->buf); p->res = 1; g_pool_res_n++; } p->gm = 1; p->gseen = mtl_present_count(); nmr++; }
         if (nmr) { res_commit(); g_gmem_rgen++; }

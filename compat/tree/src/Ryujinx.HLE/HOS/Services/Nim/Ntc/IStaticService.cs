@@ -20,5 +20,13 @@ namespace Ryujinx.HLE.HOS.Services.Nim.Ntc
 
             return ResultCode.Success;
         }
+
+        [CommandCmif(100)]
+        // SuspendAutonomicTimeCorrection(): there is no autonomic time correction here, nothing to suspend
+        public ResultCode SuspendAutonomicTimeCorrection(ServiceCtx context) => ResultCode.Success;
+
+        [CommandCmif(101)]
+        // ResumeAutonomicTimeCorrection()
+        public ResultCode ResumeAutonomicTimeCorrection(ServiceCtx context) => ResultCode.Success;
     }
 }

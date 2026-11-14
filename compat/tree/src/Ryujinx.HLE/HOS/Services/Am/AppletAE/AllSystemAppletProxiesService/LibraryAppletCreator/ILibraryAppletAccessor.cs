@@ -28,7 +28,8 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Lib
 
         private int _indirectLayerHandle;
 
-        private bool _cmd170Logged;
+        private readonly KEvent _cmd170Event;
+        private int _cmd170EventHandle;
 
         public ILibraryAppletAccessor(AppletId appletId, Horizon system)
         {
@@ -37,6 +38,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Lib
             _stateChangedEvent = new KEvent(system.KernelContext);
             _normalOutDataEvent = new KEvent(system.KernelContext);
             _interactiveOutDataEvent = new KEvent(system.KernelContext);
+            _cmd170Event = new KEvent(system.KernelContext);
 
             _applet = AppletManager.Create(appletId, system);
 
@@ -254,18 +256,23 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Lib
             return ResultCode.Success;
         }
 
-        [CommandCmif(170)] // Switch 2（S2Arm）
-        // 火纹 Fortune's Weave 建软键盘小程序后、启动前调它；未实现时回 ResultSfUnknownMethodId，sdk 视为致命 Break（2010-0221）。
-        // 同期 sdk 新增 nn::applet::SetStreamPlayShareEnabled(handle, bool, bool)：只把两个开关存进句柄、启动时才下发，判断本命令是这类串流 / 分享设置。
-        // 宿主没有串流 / 分享功能：收下回成功、不生效；首次把请求原始参数打进日志，留作以后对照语义
-        public ResultCode SwitchTwoAppletSetting170(ServiceCtx context)
+        [CommandCmif(170)] // 22.0.0+
+        // Cmd170() -> handle<copy>：无入参、回一个复制句柄（23.0.1 系统接口转储：inbytes 0、outhandles [copy]；另一实现同样回本小程序的一个可读事件）。
+        //   事件语义没有公开资料；本机没有能让它触发的状态，事件从不 signal（与 GetAppletStateChangedEvent 同法建句柄、同一句柄重复回）。
+        //   原先只回成功、不带句柄：客户端按协议取句柄会拿到 0
+        public ResultCode Cmd170(ServiceCtx context)
         {
-            if (!_cmd170Logged)
+            if (_cmd170EventHandle == 0)
             {
-                _cmd170Logged = true;
-                byte[] raw = context.RequestData.ReadBytes((int)System.Math.Min(16, context.RequestData.BaseStream.Length - context.RequestData.BaseStream.Position));
-                Logger.Info?.Print(LogClass.ServiceAm, $"ILibraryAppletAccessor 命令 170（Switch 2）：收下回成功、不生效；请求参数 {System.Convert.ToHexString(raw)}");
+                if (context.Process.HandleTable.GenerateHandle(_cmd170Event.ReadableEvent, out _cmd170EventHandle) != Result.Success)
+                {
+                    throw new InvalidOperationException("Out of handles!");
+                }
             }
+
+            context.Response.HandleDesc = IpcHandleDesc.MakeCopy(_cmd170EventHandle);
+
+            Logger.Stub?.PrintStub(LogClass.ServiceAm);
 
             return ResultCode.Success;
         }
@@ -287,6 +294,11 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Lib
                 if (_interactiveOutDataEventHandle != 0)
                 {
                     _kernelContext.Syscall.CloseHandle(_interactiveOutDataEventHandle);
+                }
+
+                if (_cmd170EventHandle != 0)
+                {
+                    _kernelContext.Syscall.CloseHandle(_cmd170EventHandle);
                 }
             }
 

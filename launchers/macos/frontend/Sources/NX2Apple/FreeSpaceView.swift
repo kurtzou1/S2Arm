@@ -26,19 +26,27 @@ struct FreeSpaceView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(loc.t("s2arm.space.title")).font(.manrope(26, .heavy)).tracking(-0.6)
-                    Text(game?.name ?? space?.name ?? gameID).font(.manrope(14)).foregroundStyle(.secondary)
+                    // 标题跟着所在的页走；游戏名只在这一款的页显示，一行，太长截尾（总览不是某一款的）。
+                    Text(overviewMode ? storage("title") : loc.t("s2arm.space.title")).font(.manrope(26, .heavy)).tracking(-0.6)
+                        .lineLimit(1).fixedSize()
+                    if !overviewMode {
+                        Text(game?.name ?? space?.name ?? gameID).font(.manrope(14)).foregroundStyle(.secondary)
+                            .lineLimit(1).truncationMode(.tail)
+                    }
                 }
-                Spacer()
+                Spacer(minLength: 12)
                 if model.spaceFreeing, let note = model.lockWaitNote { Text(loc.backend(note)).font(.manrope(12)).foregroundStyle(.secondary) }
                 if model.spaceLoading || model.spaceFreeing || model.overviewLoading { ProgressView().controlSize(.small) }
-                Picker("", selection: $overviewMode) {
-                    Text(game?.name ?? space?.name ?? gameID).tag(false)
-                    Text(storage("title")).tag(true)
-                }
-                .pickerStyle(.segmented).labelsHidden().fixedSize().accessibilityIdentifier("space.mode")
             }
-            .padding(.horizontal, 30).padding(.top, 28).padding(.bottom, 20)
+            .padding(.horizontal, 30).padding(.top, 28).padding(.bottom, 16)
+            // 切换单独一行、水平居中，夹在页头与内容之间。两段都是固定的短词，不放游戏名。
+            Picker("", selection: $overviewMode) {
+                Text(loc.t("s2arm.space.title")).tag(false)
+                Text(storage("title")).tag(true)
+            }
+            .pickerStyle(.segmented).labelsHidden().fixedSize().accessibilityIdentifier("space.mode")
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.horizontal, 30).padding(.bottom, 20)
             if let error = model.spaceError {
                 Text(loc.backend(error)).font(.manrope(12)).foregroundStyle(LauncherPalette.danger)
                     .fixedSize(horizontal: false, vertical: true)
@@ -82,10 +90,13 @@ struct FreeSpaceView: View {
             }
             Divider().opacity(0.3)
             HStack(spacing: 14) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(String(format: loc.t("s2arm.space.total"), Self.size(total))).font(.manrope(14, .bold)).monospacedDigit()
-                    Text(loc.t("s2arm.space.direct")).font(.manrope(12)).foregroundStyle(LauncherPalette.danger)
-                    if model.busy { Text(loc.t("s2arm.space.busy")).font(.manrope(12)).foregroundStyle(.secondary) }
+                // 总览页没有可删的东西：不显示「已选」与「直接删除」。
+                if !overviewMode {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(String(format: loc.t("s2arm.space.total"), Self.size(total))).font(.manrope(14, .bold)).monospacedDigit()
+                        Text(loc.t("s2arm.space.direct")).font(.manrope(12)).foregroundStyle(LauncherPalette.danger)
+                        if model.busy { Text(loc.t("s2arm.space.busy")).font(.manrope(12)).foregroundStyle(.secondary) }
+                    }
                 }
                 Spacer(minLength: 8)
                 if overviewMode {

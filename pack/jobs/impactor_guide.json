@@ -49,6 +49,7 @@
   "errors_title": {"zh-Hans": "常见报错", "en": "Common errors"},
   "errors": [
     {"match": "Developer API error 1100 / Your session has expired", "code": "apple_session_expired", "means": {"zh-Hans": "保存的 Apple ID 登录过期了：Impactor「设置」里移除账号再添加账号重新登录", "en": "The saved Apple ID sign-in expired: in Impactor Settings remove the account and add it again"}},
+    {"match": "Anisette error … dns error / os error 11001", "code": "signing_server_unreachable", "means": {"zh-Hans": "这台电脑连不上 Impactor 签名要用的服务器 mac-ani.jkcoxson.com：检查网络、换 DNS 或开关代理后再装", "en": "This computer cannot reach mac-ani.jkcoxson.com, the server Impactor needs for signing: check the network, switch DNS or toggle a proxy, then install again"}},
     {"match": "-80046", "code": "login_identity_rejected", "means": {"zh-Hans": "苹果拒绝了这台电脑的登录身份（密码其实对了）", "en": "Apple rejected this computer's sign-in identity (the password was accepted)"}},
     {"match": "-20970 / -20101", "code": "apple_id_wrong", "means": {"zh-Hans": "Apple ID 或密码不对（含全角字符）", "en": "Wrong Apple ID or password (including full-width characters)"}},
     {"match": "verification code", "code": "two_factor_wrong", "means": {"zh-Hans": "两步验证码不对或过期", "en": "Two-factor code wrong or expired"}},

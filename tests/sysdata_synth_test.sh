@@ -63,4 +63,13 @@ ow="NXTextureLowLinear.dat NXTextureLowSRGB.dat NXTextureMidLinear.dat NXTexture
 ck "0849：合成 12 个固定文件、两次逐字节同（${rc}）" '[ $rc = 0 ] && [ "$(ls $T/o1 | LC_ALL=C sort | tr "\n" " ")" = "$ow" ] && diff -r $T/o1 $T/o2 > /dev/null'
 ck "0849：解析器读形状 / NX 贴图通过，Ounce 贴图与 NX 贴图同一份" 'python3 $H/pack/sysdata_mii.py check $T/o1 > /dev/null && for f in $T/o1/OunceTexture*.dat; do cmp -s "$f" $T/o1/NXTextureLowLinear.dat || exit 1; done'
 ck "--ids 列出 0849" '$SY --ids | grep -qx 0400000000000849'
+# 0100000000000806 旧版屏蔽词表（期望手写：0.txt–15.txt + common.txt + version.dat 共 18 个；每份 txt = FE FF BOM + UTF-16 大端的一行
+#   「^s2arm0no0banned0words0placeholder$\n」；version.dat = 00 00 00 20；两次合成逐字节同；--ids 列出 0806）
+$SY 0100000000000806 $T/n1 > /dev/null && $SY 0100000000000806 $T/n2 > /dev/null; rc=$?
+nw="$(for i in $(seq 0 15); do printf '%s.txt ' $i; done)common.txt version.dat"
+nw=$(echo $nw | tr ' ' '\n' | LC_ALL=C sort | tr '\n' ' ')
+ck "0806：合成 18 个固定文件、两次逐字节同（${rc}）" '[ $rc = 0 ] && [ "$(ls $T/n1 | LC_ALL=C sort | tr "\n" " ")" = "$nw" ] && diff -r $T/n1 $T/n2 > /dev/null'
+want=$(python3 -c 'import sys; sys.stdout.write((b"\xfe\xff" + "^s2arm0no0banned0words0placeholder$\n".encode("utf-16-be")).hex())')   # 期望手写成十六进制：shell 取值会丢 UTF-16 里的 0 字节
+ck "0806：每份 txt 是 BOM + UTF-16BE 的那一行，version.dat = 00000020" 'for f in $T/n1/*.txt; do [ "$(xxd -p "$f" | tr -d "\n")" = "$want" ] || exit 1; done; [ "$(xxd -p $T/n1/version.dat)" = 00000020 ]'
+ck "--ids 列出 0806" '$SY --ids | grep -qx 0100000000000806'
 [ $bad = 0 ] && echo "✓ sysdata_synth 单测全过" || { echo "sysdata_synth 单测有不通"; exit 1; }

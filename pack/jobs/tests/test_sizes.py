@@ -162,6 +162,44 @@ class Sizes(JobCase):
         self.assertFalse(rows[str(gone)]["connected"])
         self.assertNotIn("freeBytes", rows[str(gone)])
 
+    def test_overview_drops_previous_library_roots(self):
+        """换过游戏库后存储总览「存放位置」不再列没用的旧库根（玩家反馈：设置里改了游戏库位置，总览第二行一直是换之前的 C 盘路径）。
+        索引在私有目录、各库共用：① 整库搬家后旧路径那行和本库同号 → 去掉；② 换到别的库后旧库根还在（有 .s2arm-library.json）、
+        下面没有游戏记录 → 去掉；③ #946：旧库根下还记着游戏（0.2.x 换库没搬文件的玩家，游戏全在那里）→ 留着、降成普通存放位置，
+        游戏照样认得到（原先整行连同游戏记录去掉，升级后库里所有游戏变「未出包」）；真的另一个存放位置（外接盘）照留。期望手写"""
+        L = self.c.library
+        here = layout.default_id(self.c)
+        idx = layout.load_index(self.c)
+        moved = self.root / "搬走前的库"                                  # ① 同号的旧路径（搬完已删掉）
+        empty = self.root / "空的旧库"; empty.mkdir()                      # ② 旧库还在、没有游戏记录
+        (empty / ".s2arm-library.json").write_text('{"schema": 1, "id": "lib-empty"}')
+        old = self.root / "上一个库"; old.mkdir()                          # ③ 旧库还在，下面记着游戏
+        (old / ".s2arm-library.json").write_text('{"schema": 1, "id": "lib-old"}')
+        (old / layout.LOCATION_JSON).write_text('{"schema": 1, "id": "loc-old"}')
+        d = old / "games" / "Old"; d.mkdir(parents=True); (d / layout.GAME_JSON).write_text('{"schema": 1, "id": "%s"}' % OTHER)
+        idx["locations"] += [dict(id=here, path=str(moved)), dict(id="loc-empty", path=str(empty), library=True), dict(id="loc-old", path=str(old), library=True)]
+        idx["games"][OTHER] = dict(location="loc-old", folder="Old")
+        layout.save_index(self.c)
+        disk = self.root / "外接盘"
+        layout.register_location(self.c, disk)
+        self.c._layout_idx = None                                          # 下一个作业：从盘上重读索引
+        rows = [r["path"] for r in sizes.overview(self.context("storageOverview"))["locations"]]
+        self.assertEqual(rows, [str(L), str(old), str(disk)])
+        c = self.context("catalog")
+        self.assertEqual(layout.load_index(c)["games"][OTHER]["location"], "loc-old")   # 旧库根下的游戏照样认得到
+        self.assertNotIn("library", next(l for l in layout.load_index(c)["locations"] if l["id"] == "loc-old"))   # 降成普通存放位置
+
+    def test_location_rows_last_only_points_to_connected(self):
+        """#922：last 指着已不存在的位置（换库后常见）→ 位置表的 last 给默认位置；指着连着的外接盘 → 照给"""
+        disk = self.root / "外接盘"; lid = layout.register_location(self.c, disk)
+        idx = layout.load_index(self.c); idx["last"] = "gone-location"; layout.save_index(self.c)
+        self.assertEqual(library.location_rows(self.c)["last"], layout.default_id(self.c))
+        idx["last"] = lid; layout.save_index(self.c)
+        self.assertEqual(library.location_rows(self.c)["last"], lid)
+        import shutil; shutil.rmtree(disk)   # 外接盘拔了：不再给它
+        self.c._layout_idx = None
+        self.assertEqual(library.location_rows(self.context("locations"))["last"], layout.default_id(self.c))
+
     def test_catalog_job_returns_sizes(self):
         sizes.refresh(self.c, GID)
         result, event = self.worker("catalog")

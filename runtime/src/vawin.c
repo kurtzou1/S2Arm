@@ -66,12 +66,45 @@ int s2a_guest_file_wanted(const char *e, uint64_t pool, uint64_t room) { return 
 //   Switch 1 15 款 792–1545 MB 的 13 款、2348 / 2573 各 1 款、GRID 4125 MB；GRID 这类首局判关时由 ④ 在下一局纠正）
 // ⑥ 安全阀（11-07 维护者）：上一局在前台时死掉（died：「在跑」标记还在，见 s2a_guest_run_mark）→ 这一局强制开。按估计 / 实测判了不开、实际超上限被系统杀的那一局，
 //   峰值可能来不及记进 mem_peak（心跳 10 秒一次），不兜住就会每局判关、每局被杀；强制开的这一局记下真实峰值（含文件里的客体字节），下一局再按实测判
-int s2a_guest_file_wanted4(const char *e, uint64_t pool, uint64_t room, uint64_t seen, uint64_t host, uint64_t margin, int died) {
+// 11-13 #783 改按实测：池（Switch 2 9 GiB）是客体能要的上界，不是实占。时之笛 iPad Pro M2（剩余 8189 MB）：判开的两局 30 分钟往闪存写 189 / 223 GB、
+//   掉到 17 帧后卡死重启；碰巧没开的一局稳 30 帧、实占峰值 2118 MB。整段 MAP_SHARED 文件不是换页、是强制写回（坑记录 #306），只在真装不下时才开：
+//   设了按设的；room 0（Mac 另判）关；上一局在前台死掉 / 坏记录 → 开；有实测（只记匿名内存局的实占，s2a_guest_mem_note）→ 实测 + 余量 > 剩余才开；
+//   没实测 → 关：先用匿名内存，心跳记实占；真装不下被系统收掉的那一局留下「在跑」标记，下一局由 died 开
+// 11-13 #964 三档（取代 wanted5 的「没实测就先匿名、死一次再开」：每台设备第一次玩 Switch 2 大款必先被系统杀一次）：
+//   #783 的反例拿错了款——iPad 那局「稳 30 帧、匿名 2118 MB」是另一款 Switch 1 游戏；一款 Switch 2 大款（0400486024DEC000） 在那台 iPad（物理内存 7.5 GB）上 8 局全开文件后备、
+//   每局写闪存 82–223 GB：游戏碰过的约 4.4 GB + 宿主约 3 GB 超过物理内存，系统边刷边逐出、再被写脏（换页抖动）。同一款在 Duo（物理 11.5 GB）上强制文件后备：
+//   正式游戏每 10 秒写盘 0–8 MB、后备文件落盘 4.4 GB 不再涨。所以文件后备能不能用看物理内存，开不开看单进程上限，都不依赖历史：
+//   设了按设的；room 0（Mac 另判）关；上局在前台死掉 / 坏记录 开；有实测按实测；没实测时池 ≤ 剩余 关（Switch 1 款，#783 ㊹ 的小内存机型不误开）；
+//   池 > 剩余且物理内存 ≥ 池 + 宿主估计 开；物理内存也装不下 → 照样开并 *low = 1（起局提示玩家这台设备内存可能不够这款）。
+//     两种都可能坏时按「能玩下去」选：那台 iPad（7.5 GB）上文件后备 8 局每局都玩到约 30 分钟（27000–41000 帧）才掉帧卡死；匿名内存这款要约 7.9 GB、
+//     比它的物理内存还大，没有实测，按 iPhone 首局约 8 分钟就被系统结束看更早出局（11-13 维护者定：都装不下时提示 + 照样开文件后备）
+int s2a_guest_file_wanted6(const char *e, uint64_t pool, uint64_t room, uint64_t phys, uint64_t seen, uint64_t host, uint64_t margin, int died, int *low) {
+    *low = 0;
     if (e && *e) return strcmp(e, "0") != 0;
     if (!room) return 0;
-    if (pool > room || died || seen == UINT64_MAX) return 1;   // UINT64_MAX：坏记录（s2a_guest_mem_seen），保守开
+    if (died || seen == UINT64_MAX) return 1;
     if (seen) return seen + margin > room;
-    return pool + host + margin > room;
+    if (pool <= room) return 0;
+    if (phys && phys >= pool + host) return 1;
+    *low = 1; return 1;
+}
+static uint64_t phys_mem(void) { uint64_t ph = 0; size_t n = sizeof ph; return sysctlbyname("hw.memsize", &ph, &n, NULL, 0) ? 0 : ph; }
+// 三档判定的一句理由（日志用）
+static const char *tier_why(int on, int low, uint64_t seen, int died) {
+    return died ? "上一局在前台时死掉，这一局开" : seen == UINT64_MAX ? "实测记录读不出（坏记录），保守开"
+         : seen ? (on ? "实测峰值 + 余量大于剩余，装不下" : "实测峰值 + 余量不大于剩余，装得下、保持匿名内存")
+         : low ? "池大于剩余、物理内存也装不下池 + 宿主估计：照样开（能玩下去优先），提示玩家内存可能不够"
+         : on ? "池大于剩余、物理内存装得下：开" : "池不大于剩余：装得下、保持匿名内存";
+}
+static void low_ram_notice(uint64_t phys, uint64_t need) {
+    LOG("【黄】客体内存：这台设备物理内存 %llu MB，装不下这款要的约 %llu MB（池 + 宿主估计），照样开局；可能卡顿或被系统结束", (unsigned long long)(phys >> 20), (unsigned long long)(need >> 20));
+    void (*f)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "s2a_ios_low_ram_notice"); if (f) f();   // ios/app.m：游戏内提示条；单测 / 安卓没有
+}
+int s2a_guest_file_wanted5(const char *e, uint64_t room, uint64_t seen, uint64_t margin, int died) {
+    if (e && *e) return strcmp(e, "0") != 0;
+    if (!room) return 0;
+    if (died || seen == UINT64_MAX) return 1;   // UINT64_MAX：坏记录（s2a_guest_mem_seen），保守开
+    return seen && seen + margin > room;
 }
 int s2a_guest_file_wanted3(const char *e, uint64_t pool, uint64_t room, uint64_t seen, uint64_t host, uint64_t margin) {
     if (e && *e) return strcmp(e, "0") != 0;
@@ -80,7 +113,8 @@ int s2a_guest_file_wanted3(const char *e, uint64_t pool, uint64_t room, uint64_t
     if (seen) return seen + margin > room;
     return pool + host + margin > room;
 }
-// 本款本机实测峰值的记录：$HOME/Documents/wire/<程序号大写 16 位>/mem_peak（同 pso_user.tsv 的目录），一行十进制字节数。程序号按名字取（单测只链 vawin.c）
+// 本款本机实测峰值的记录：$HOME/Documents/wire/<程序号大写 16 位>/mem_peak_anon（同 pso_user.tsv 的目录），一行十进制字节数 = 没开文件后备那几局的进程实占峰值。
+//   旧记录 mem_peak 记的是「实占 + 文件里已落块的客体字节」，文件块只涨不降（懒清零后不打洞），开过一次就一直判开（#783），换名不再读它。程序号按名字取（单测只链 vawin.c）
 static int mem_peak_path(char *out, size_t n);
 // 「本局在跑」标记（同目录 running）：App 到前台时写、进后台 / 将终止时删（ios/app.m 调 s2a_guest_run_mark）。iOS 上玩家划掉 / 系统在后台回收都不走正常退出，
 //   所以「干净」= 进了后台；标记还在 = 上一局在前台时死掉（被内存上限杀、崩溃）。预热进程没到前台不写，被系统回收不误判。崩溃也会留标记：多开一局文件后备，可接受
@@ -104,7 +138,7 @@ static int mem_peak_path(char *out, size_t n) {
     if (ov && *ov) { snprintf(out, n, "%s", ov); return 1; }   // 单测 / 诊断指定
     uint64_t pid = g_attach_phase ? g_ctor_pid : pidf ? pidf() : 0;   // 构造期只认 npdm 直读的；局中（心跳记峰值）照旧按当前程序号
     if (!pid) return 0;
-    s2a_docs_path(out, n, "wire/%016llX/mem_peak", (unsigned long long)pid); return 1;
+    s2a_docs_path(out, n, "wire/%016llX/mem_peak_anon", (unsigned long long)pid); return 1;
 }
 // 读本款实测峰值：没有记录 → 0（按估计判）；记录在但读不出 / 为 0 → S2A_GUEST_SEEN_BAD（坏记录，按装不下判，保守开；性能线 A 审：不能因读坏文件判关）
 #define S2A_GUEST_SEEN_BAD UINT64_MAX
@@ -113,12 +147,13 @@ uint64_t s2a_guest_mem_seen(void) {
     FILE *f = fopen(p, "r"); if (!f) return errno == ENOENT ? 0 : S2A_GUEST_SEEN_BAD;
     unsigned long long v = 0; int ok = fscanf(f, "%llu", &v) == 1 && v; fclose(f); return ok ? v : S2A_GUEST_SEEN_BAD;
 }
-// 心跳调（每 10 秒，后台串行队列）：footprint = 进程实占字节；开着文件后备时加上文件里已落块的客体字节（脏页不计实占，换成匿名就都算）。比记录大才写（tmp + rename）
+// 心跳调（每 10 秒，后台串行队列）：footprint = 进程实占字节。只记没开文件后备的局：开着时客体脏页不计实占，加文件块又只涨不降（#783），都不是「匿名内存要多少」。
+//   比记录大才写（tmp + rename）
 static void span_note(void);
 void s2a_guest_mem_note(uint64_t footprint) {
     span_note();   // 心跳顺带记本局跨度（#783）
-    uint64_t total = footprint; struct stat st;
-    if (g_gfd >= 0 && !fstat(g_gfd, &st)) total += (uint64_t)st.st_blocks * 512ull;
+    if (g_gfd >= 0) return;
+    uint64_t total = footprint;
     static uint64_t rec; static int loaded; if (!loaded) { rec = s2a_guest_mem_seen(); if (rec == UINT64_MAX) rec = 0; loaded = 1; }   // 坏记录：本局的实测覆盖它
     if (total <= rec) return;
     char p[1024], t[1100]; if (!mem_peak_path(p, sizeof p)) return;
@@ -138,6 +173,7 @@ static int span_path(char *out, size_t n, uint64_t pid) {   // pid = 0：按局�
 }
 uint64_t s2a_window_span_seen(uint64_t pid) { char p[1024]; return pid && span_path(p, sizeof p, pid) ? read_u64(p) : 0; }
 static uint64_t g_span_learned;   // 本款（多款容器 = 各款最大，有一款没记录就 0）学到的跨度
+uint64_t s2a_window_span_learned(void) { return g_span_learned; }   // 单测 t_vawin_container 读
 // 自愈：窗口按学到的跨度收窄后布局仍放不下（svc_mem.c 起局判「连模块段、栈、堆前段都放不下」那一刻）——这份记录不可信，删掉，下一局退回缺省给法
 void s2a_window_span_forget(void) {
     if (!g_span_learned) return;
@@ -201,6 +237,10 @@ static void guest_pressure_watch(void) {
 }
 #endif
 static void guest_file_map(void);
+// 装游戏前要整段换成文件（s2a_guest_file_retry）：只由下面多款容器「装游戏前按本款再判」判开时置位（剩余空间不再拦，见 guest_file_map）
+static int g_gfile_pending;
+// 多款容器起局时还没选游戏（程序号 0，读不到本款实测 / 「在跑」标记）：先用匿名内存、记下起局时的剩余，装游戏模块前按本款再判一次（s2a_guest_file_retry，#783）
+static int g_gfile_late; static uint64_t g_gfile_room0;
 static void guest_file_attach_(void);
 static void guest_file_attach(void) { g_attach_phase = 1; guest_file_attach_(); g_attach_phase = 0; }
 // 测试开关 S2A_TEST_BALLAST_MB=<N>（11-12，小内存机型问题在大内存设备上复现用；缺省不设 = 不占）：模拟给 App 少 N MB 内存的机型（#807 6 GB 机型约 4 GB）。
@@ -231,20 +271,23 @@ static void guest_file_attach_(void) {
     if (g_ctr && g_ctr_pool > pool) pool = g_ctr_pool;   // 多款容器：不按缺省池判，否则 Switch 2 款进局后内存超单进程上限被杀（#103）
 #ifdef __IPHONE_OS_VERSION_MIN_REQUIRED
     uint64_t room = os_proc_available_memory(), ballast = test_ballast_bytes();   // 预热进程（ActivePrewarm）此刻的上限可能是后台档，偏小只会多开、不会漏开
-    // 宿主开销估计缺省 2560 MB（DOOM Eternal 实测约 2258 MB，往上取整）、余量 512 MB；S2A_GUEST_FILE_HOST_MB / S2A_GUEST_FILE_MARGIN_MB 可改
-    // 宿主开销估计缺省 2048 MB（11-07 真机实测分布，见 s2a_guest_file_wanted3）、余量 512 MB；S2A_GUEST_FILE_HOST_MB / S2A_GUEST_FILE_MARGIN_MB 可改
+    // 余量缺省 512 MB（S2A_GUEST_FILE_MARGIN_MB）；池只作日志里的上界，不作判据（#783，见 s2a_guest_file_wanted5）
     if (ballast) { room = room > ballast ? room - ballast : 1; LOG("【黄】测试压舱：文件后备判定按余量少 %llu MB 算（S2A_TEST_BALLAST_MB，装模块前才真占）", (unsigned long long)(ballast >> 20)); }
-    uint64_t host = env_mb("S2A_GUEST_FILE_HOST_MB", 2048), margin = env_mb("S2A_GUEST_FILE_MARGIN_MB", 512), seen = s2a_guest_mem_seen();
-    int died = room && s2a_guest_run_died();
-    int on = s2a_guest_file_wanted4(e, pool, room, seen, host, margin, died);
+    uint64_t margin = env_mb("S2A_GUEST_FILE_MARGIN_MB", 512), seen = s2a_guest_mem_seen(), host = env_mb("S2A_GUEST_FILE_HOST_MB", 2048), phys = phys_mem();
+    int died = room && s2a_guest_run_died(), low = 0;
+    char pp0[1024]; int known = mem_peak_path(pp0, sizeof pp0);   // 多款容器还没选游戏：池是容器缺省、读不到本款记录，先不判（装游戏前按本款再判）
+    int on = s2a_guest_file_wanted6(e, known || (e && *e) ? pool : 0, room, phys, seen, host, margin, died, &low);
+    char pp[1024]; int late = !on && !(e && *e) && room && !mem_peak_path(pp, sizeof pp);   // 多款容器还没选游戏：装游戏前按本款再判
     const char *why = e && *e ? "按 S2A_GUEST_FILE 显式设定" : !room ? "自动：不知道单进程上限（Mac 会换页），缺省关"
-                    : pool > room ? "自动：池本身大于剩余，装不下"
-                    : died ? "自动：上一局在前台时死掉（「在跑」标记还在：被内存上限杀 / 崩溃 / 测试局在前台被 devicectl 结束），这一局强制开、记下真实峰值"
+                    : late ? "自动：还没选游戏（多款容器），先用匿名内存，装游戏前按本款实测再判"
+                    : died ? "自动：上一局在前台时死掉（「在跑」标记还在：被内存上限杀 / 崩溃 / 测试局在前台被 devicectl 结束），这一局开"
                     : seen == UINT64_MAX ? "自动：本款实测峰值记录读不出（坏记录），保守开"
-                    : seen ? (on ? "自动：本机本款实测峰值 + 余量大于剩余，装不下" : "自动：本机本款实测峰值 + 余量不大于剩余，装得下、保持匿名内存")
-                    : (on ? "自动：没有本款实测，池 + 宿主开销估计 + 余量大于剩余，装不下" : "自动：没有本款实测，池 + 宿主开销估计 + 余量不大于剩余，装得下、保持匿名内存");
-    LOG("客体内存文件后备：%s——%s；本款应用内存池 %llu MB、离单进程内存上限还剩 %llu MB%s、本机本款实测峰值 %llu MB（0 = 没有）、宿主开销估计 %llu MB%s", on ? "开" : "关", why,
-        (unsigned long long)(pool >> 20), (unsigned long long)(room >> 20), room ? "" : "（0 = 未知）", (unsigned long long)(seen == UINT64_MAX ? 0 : seen >> 20), (unsigned long long)(host >> 20), s2a_process_prewarmed() ? "；预热进程" : "");
+                    : tier_why(on, low, seen, died);
+    LOG("客体内存文件后备：%s——%s；本款应用内存池 %llu MB、离单进程内存上限还剩 %llu MB%s、物理内存 %llu MB、宿主估计 %llu MB、本机本款实测峰值 %llu MB（0 = 没有）%s", on ? "开" : "关", why,
+        (unsigned long long)(pool >> 20), (unsigned long long)(room >> 20), room ? "" : "（0 = 未知）", (unsigned long long)(phys >> 20), (unsigned long long)(host >> 20),
+        (unsigned long long)(seen == UINT64_MAX ? 0 : seen >> 20), s2a_process_prewarmed() ? "；预热进程" : "");
+    if (low && !late) low_ram_notice(phys, pool + host);
+    if (late) { g_gfile_late = 1; g_gfile_room0 = room; return; }
     if (!on) return;
     guest_file_map();
 #else
@@ -270,9 +313,8 @@ static void guest_file_attach_(void) {
 static void guest_file_map(void) {
     const char *td = getenv("TMPDIR"); char path[1024]; snprintf(path, sizeof path, "%s/s2a_guest_%d.bin", td && *td ? td : "/tmp", (int)getpid());
     // 闪存剩余空间只记、不拦（11-13 #894：门槛原是 12 GB「游戏写满整个池」的最坏情况，iPhone 15 Pro Max 剩 9 GB 就退回匿名内存——
-    //   走到这里都是判了「匿名装不下 / 显式要 / 上一局死了」，匿名内存必定涨过单进程上限被系统收掉（一款 Switch 2 游戏开场过场后闪退、无崩溃报告）；
-    //   接文件只有真把剩余空间写满才出事。文件稀疏，只占内核写回的块，最多涨到游戏弄脏的客体内存总量。
-    //   剩余低于 S2A_GUEST_FILE_MIN_FREE_MB（缺省 12288）只打一行黄、照样接
+    //   走到这里都是判了要接文件（实测装不下 / 上一局在前台死掉 / 显式要），匿名内存必定涨过单进程上限被系统收掉（一款 Switch 2 游戏开场过场后闪退、无崩溃报告）；
+    //   接文件只有真把剩余空间写满才出事。文件稀疏，只占内核写回的块，最多涨到游戏弄脏的客体内存总量。剩余低于 S2A_GUEST_FILE_MIN_FREE_MB（缺省 12288）只打一行黄
     { const char *m = getenv("S2A_GUEST_FILE_MIN_FREE_MB"); uint64_t need = (m && *m ? strtoull(m, NULL, 10) : 12288ull) << 20; struct statfs sf;
       if (statfs(td && *td ? td : "/tmp", &sf)) LOG("【黄】客体内存文件后备：查不了临时目录剩余空间（errno=%d），照样接文件", errno);
       else {
@@ -293,6 +335,45 @@ static void guest_file_map(void) {
         LOG("【红】客体内存文件后备：窗口 %#llx +%llu MB 映射成文件失败（errno=%d），照旧用匿名内存", (unsigned long long)g_base, (unsigned long long)(g_size >> 20), er); return; }
     g_gfd = fd;
     LOG("客体内存文件后备：窗口 %#llx +%llu MB 映射到临时文件（已 unlink，稀疏），脏页不计进程实占（S2A_GUEST_FILE）", (unsigned long long)g_base, (unsigned long long)(g_size >> 20));
+}
+// 开局装模块前（host_main.c load_session_modules）：起局时判了要接文件、但空间不够的，此刻（解包已完）再查一次、够了就接上。
+//   只在窗口还原封不动（整段一块 PROT_NONE 的匿名保留）时才换：换成文件是整段 MAP_FIXED，窗口里已经有东西就会被抹掉，那种情形不换、照旧匿名。
+//   还是不够：报红，并在屏幕上告诉玩家差多少空间（不然这款几分钟后涨到单进程上限被系统收掉，没有崩溃报告，玩家只看到闪退）
+#ifdef S2A_UNIT_TEST
+void s2a_guest_file_test_pending(void) { g_gfile_pending = 1; }   // 单测（t_guest_file_retry）：造「装游戏前要换成文件」的状态（真机只由多款容器按本款再判置位，Mac 上 room 0 走不到）
+#endif
+int s2a_guest_file_retry(void) {
+    if (g_gfile_late && g_gfd < 0 && g_ok) {   // 多款容器：此刻已选定游戏，按本款实测 / 「在跑」标记再判（剩余用起局时那一刻的，和单款同口径）
+        g_gfile_late = 0;
+        uint64_t margin = env_mb("S2A_GUEST_FILE_MARGIN_MB", 512), seen = s2a_guest_mem_seen(), host = env_mb("S2A_GUEST_FILE_HOST_MB", 2048), phys = phys_mem();
+        // 此刻已选定游戏、模块目录已是这一款，但布局还没按本款排（s2a_app_pool 仍是容器缺省）：按本款 main.npdm 取池（Switch 2 9 GiB），读不到退回 s2a_app_pool
+        uint64_t pool = 0;
+        { const char *(*dirf)(void) = (const char *(*)(void))dlsym(RTLD_DEFAULT, "s2a_module_dir"); uint64_t (*npf)(const char *) = (uint64_t (*)(const char *))dlsym(RTLD_DEFAULT, "s2a_npdm_app_pool");
+          if (dirf && npf && dirf()) { char np[1100]; snprintf(np, sizeof np, "%s/main.npdm", dirf()); pool = npf(np); }
+          if (!pool) { uint64_t (*poolf)(void) = (uint64_t (*)(void))dlsym(RTLD_DEFAULT, "s2a_app_pool"); pool = poolf ? poolf() : 0; } }
+        int died = s2a_guest_run_died(), low = 0;
+        int on = s2a_guest_file_wanted6(NULL, pool, g_gfile_room0, phys, seen, host, margin, died, &low);
+        LOG("客体内存文件后备（装游戏前按本款再判）：%s——%s；本款应用内存池 %llu MB、起局时离单进程内存上限还剩 %llu MB、物理内存 %llu MB、宿主估计 %llu MB、本机本款实测峰值 %llu MB（0 = 没有）",
+            on ? "开" : "关", tier_why(on, low, seen, died), (unsigned long long)(pool >> 20), (unsigned long long)(g_gfile_room0 >> 20), (unsigned long long)(phys >> 20),
+            (unsigned long long)(host >> 20), (unsigned long long)(seen == UINT64_MAX ? 0 : seen >> 20));
+        if (low) low_ram_notice(phys, pool + host);
+        if (!on) return 0;
+        g_gfile_pending = 1;   // 下面整段换成文件：窗口原封不动才换
+    }
+    if (!g_gfile_pending || g_gfd >= 0 || !g_ok) return 0;
+    // 窗口起局后分成几段保留（构造时就不止一段），逐段看：全部仍是 PROT_NONE、非共享 = 还没放开过、没有内容
+    for (vm_address_t a = (vm_address_t)g_base, end = (vm_address_t)(g_base + g_size); a < end; ) {
+        vm_address_t ra = a; vm_size_t sz = 0; vm_region_basic_info_data_64_t bi; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj = MACH_PORT_NULL;
+        if (vm_region_64(mach_task_self(), &ra, &sz, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&bi, &cnt, &obj) != KERN_SUCCESS || ra >= end) break;
+        if (bi.protection != VM_PROT_NONE || bi.shared) {
+            LOG("【黄】客体内存文件后备：装游戏前想补接文件，但窗口里已有放开过的映射（%#llx +%llu MB，权限 %d），不换，照旧匿名内存", (unsigned long long)ra, (unsigned long long)(sz >> 20), bi.protection);
+            g_gfile_pending = 0; return 0; }
+        a = ra + sz;
+    }
+    guest_file_map();
+    g_gfile_pending = 0;
+    if (g_gfd >= 0) { LOG("客体内存文件后备：装游戏前按本款判开，接上了"); return 1; }
+    return 0;
 }
 // 窗口外也要文件后备的一段（远端影子区堆区余量用完、改从宿主任意空闲地址分时，far.c）：文件往后接长，按新偏移映射到内核挑的地址（同匿名的落点规则，不多占窗口外地址）。
 //   没开文件后备返回 MAP_FAILED（调用方照旧匿名）。这些段还页时不打洞（s2a_guest_zero 只认窗口），换匿名占位：语义同样是零，只是那几页回到匿名记账
@@ -542,7 +623,7 @@ uint64_t s2a_window_container_need(const char *bundle) {
     int (*span)(const char *, char *, size_t) = (int (*)(const char *, char *, size_t))dlsym(RTLD_DEFAULT, "s2a_loader_span_images");
     uint64_t (*poolf)(void) = (uint64_t (*)(void))dlsym(RTLD_DEFAULT, "s2a_app_pool");
     void (*pools)(uint64_t) = (void (*)(uint64_t))dlsym(RTLD_DEFAULT, "s2a_app_pool_set");
-    uint64_t pool0 = poolf ? poolf() : 0, top = 0, span_max = 0; int n = 0, ast = -1, ok = 1, span_unknown = 0; char first[256] = ""; struct dirent *e;
+    uint64_t pool0 = poolf ? poolf() : 0, top = 0, span_max = 0; int n = 0, ast = -1, ok = 1; char first[256] = ""; struct dirent *e;
     while (ok && (e = readdir(d))) {
         char dir[1400], img[1400], why[400] = ""; struct stat st;
         if (e->d_name[0] == '.' || strlen(e->d_name) > 200) continue;
@@ -564,7 +645,16 @@ uint64_t s2a_window_container_need(const char *bundle) {
         if (pools && pool0) pools(pool0);
         if (!ni) { LOG("【红】地址窗口：多款容器里 %s 的跨度算不出（类型 %d（%s）；%s 读不到、模块段读不到或类型不支持），不占窗口", e->d_name, t, s2a_as_type_bits((uint32_t)t), g_npdm); ok = 0; break; }
         LOG("地址窗口：多款容器 %s 要 %llu MB（地址空间类型 %d）", e->d_name, (unsigned long long)(ni >> 20), t);
-        { uint64_t sl = s2a_window_span_seen(strtoull(e->d_name, NULL, 16)); if (!sl) span_unknown = 1; else if (sl > span_max) span_max = sl; }
+        // 学到的跨度在这款自己的文档根下（选了游戏后 S2A_DOCS = Documents/games/<游戏号>，心跳 span_note 写在那里）；构造期还没选游戏、S2A_DOCS 没设，
+        //   原先按 Documents/wire/... 读，永远读不到：多款容器从来学不到跨度，窗口下方一直只留 3 GB（11-13 0400486024DEC000 三台设备开局约 2–4 分钟宿主地址耗尽崩溃）。
+        //   这款文档根下没有时再看旧位置（单款包时代留下的记录）
+        { uint64_t pid = strtoull(e->d_name, NULL, 16), sl = 0; char sp[1400];
+          if (pid) { s2a_docs_path(sp, sizeof sp, "games/%s/wire/%016llX/span_peak", e->d_name, (unsigned long long)pid); sl = read_u64(sp); }
+          if (!sl) sl = s2a_window_span_seen(pid);
+          // 这款还没玩过、没有记录：它的跨度不会超过它自己的布局需求 ni，按 ni 算（原先整容器取 0，一款没玩过就把别款也打回 3 GB）。
+          //   ni 比空洞还大的（乙布局款）照旧落到 s2a_window_host_below 的 HOST_BELOW
+          if (!sl) sl = ni;
+          if (sl > span_max) span_max = sl; }
         if (ni > top) top = ni;
         n++;
     }
@@ -572,7 +662,7 @@ uint64_t s2a_window_container_need(const char *bundle) {
     if (ok && !n) LOG("【红】地址窗口：多款容器 %s 下没有游戏，不占窗口", gd);
     g_ctr_astype = ast;
     if (!ok || !n) return 0;
-    g_span_learned = span_unknown ? 0 : span_max;
+    g_span_learned = span_max;
     g_npdm[0] = 0;
     LOG("地址窗口：多款容器 %d 款取最大 %llu MB（地址空间类型 %d）", n, (unsigned long long)(top >> 20), ast);
     return top;
@@ -1027,25 +1117,37 @@ void s2a_low_files(const char *when) {
 
 // 低区全列（10-20 八方2 / 巫师3 iPhone 地址耗尽）：iPhone 上窗口外能用的只有 4 GB 起到 dyld 共享缓存区（标签 32，0x1_8000_0000 起约 57 GB）之间，
 // 再往上到窗口是内核保护区（标签 31）。把这段逐块列全（同标签同权限的相邻块合并，空洞也列），不截断，按块对上是谁的：GC 保留 / Ryujinx DRAM / 服务堆 / 游戏模块 / Metal / 线程栈
-void s2a_vm_low(const char *when) {
-    uint64_t lo = 0x100000000ull, hi = g_ok ? g_base : 1ull << 39, prev = lo;
-    uint64_t ca = 0, cn = 0; int cp = -1, cmp_ = -1; unsigned ctag = 0; int nb = 0, ns = 0; uint64_t used = 0, hole = 0, small = 0;
-    LOG("低区全列 [%s]：起 %#llx（同标签同权限相邻块合并，≥1 MB 逐块列、更小的只计数；p 当前/最大权限；空 = 未映射）", when, (unsigned long long)lo);
-    #define FLUSH() do { if (cn >= (1ull << 20)) { LOG("  低区 %#llx %6llu MB p%d/%d 标签 %u", (unsigned long long)ca, (unsigned long long)(cn >> 20), cp, cmp_, ctag); nb++; } else if (cn) { small += cn; ns++; } cn = 0; } while (0)
+// 逐块列 [lo, hi)（同标签同权限相邻块合并，≥1 MB 逐块列、更小的只计数，空洞也列）；stop_shared：遇到共享缓存区（标签 32）就停。返回已映射 / 空 / 末端
+static void vm_list(const char *name, const char *when, uint64_t lo, uint64_t hi, int stop_shared, uint64_t *used_out, uint64_t *hole_out, uint64_t *end_out, int *nb_out, int *ns_out, uint64_t *small_out) {
+    uint64_t prev = lo, ca = 0, cn = 0; int cp = -1, cmp_ = -1; unsigned ctag = 0; int nb = 0, ns = 0; uint64_t used = 0, hole = 0, small = 0;
+    #define FLUSH() do { if (cn >= (1ull << 20)) { LOG("  %s %#llx %6llu MB p%d/%d 标签 %u", name, (unsigned long long)ca, (unsigned long long)(cn >> 20), cp, cmp_, ctag); nb++; } else if (cn) { small += cn; ns++; } cn = 0; } while (0)
     vm_address_t a = lo;
     for (;;) {
         vm_size_t sz = 0; natural_t depth = 0; vm_region_submap_info_data_64_t info; mach_msg_type_number_t cnt = VM_REGION_SUBMAP_INFO_COUNT_64;
         int ok = vm_region_recurse_64(mach_task_self(), &a, &sz, &depth, (vm_region_recurse_info_t)&info, &cnt) == KERN_SUCCESS;
-        int stop = !ok || a >= hi || info.user_tag == 32;   // 到共享缓存区 / 窗口为止
+        int stop = !ok || a >= hi || (stop_shared && info.user_tag == 32);
         uint64_t ge = stop ? (ok && a < hi ? a : hi) : a;
-        if (ge > prev) { FLUSH(); if (ge - prev >= (1ull << 20)) LOG("  低区 %#llx %6llu MB 空", (unsigned long long)prev, (unsigned long long)((ge - prev) >> 20)); hole += ge - prev; }
+        if (ge > prev) { FLUSH(); if (ge - prev >= (1ull << 20)) LOG("  %s %#llx %6llu MB 空", name, (unsigned long long)prev, (unsigned long long)((ge - prev) >> 20)); hole += ge - prev; }
         if (stop) break;
+        if (a + sz > hi) sz = (vm_size_t)(hi - a);
         if (cn && ca + cn == a && cp == info.protection && cmp_ == info.max_protection && ctag == info.user_tag) cn += sz;
         else { FLUSH(); ca = a; cn = sz; cp = info.protection; cmp_ = info.max_protection; ctag = info.user_tag; }
         used += sz; prev = a + sz; a += sz;
     }
     FLUSH();
     #undef FLUSH
+    *used_out = used; *hole_out = hole; *end_out = prev; *nb_out = nb; *ns_out = ns; *small_out = small;
+}
+void s2a_vm_low(const char *when) {
+    uint64_t lo = 0x100000000ull, hi = g_ok ? g_base : 1ull << 39, prev, used, hole, small; int nb, ns;
+    LOG("低区全列 [%s]：起 %#llx（同标签同权限相邻块合并，≥1 MB 逐块列、更小的只计数；p 当前/最大权限；空 = 未映射）", when, (unsigned long long)lo);
+    vm_list("低区", when, lo, hi, 1, &used, &hole, &prev, &nb, &ns, &small);
+    // 乙布局窗口下方留给宿主的那段（[g_keep_lo, g_base)）：低区满了宿主映射按「从低往高第一个放得下」落到这里。原先上面那段遇到共享缓存区就停、这段从来不列，
+    //   11-13 时之笛（0400486024DEC000）三台设备开局约 2–4 分钟宿主地址耗尽崩溃（低区 + 这段合计从 3380 MB 跌到 74 MB，进程实占只有 1–4 GB），看不到是谁占了这段
+    if (g_ok && g_keep_lo && g_keep_lo < g_base) { uint64_t u2, h2, e2, s2; int nb2, ns2;
+        LOG("窗口下方宿主段全列 [%s]：%#llx +%llu MB", when, (unsigned long long)g_keep_lo, (unsigned long long)((g_base - g_keep_lo) >> 20));
+        vm_list("下方", when, g_keep_lo, g_base, 0, &u2, &h2, &e2, &nb2, &ns2, &s2);
+        LOG("窗口下方宿主段全列 [%s] 完：已映射 %llu MB（逐块列 %d 块；<1 MB 的 %d 块合计 %llu MB 未列）、空 %llu MB", when, (unsigned long long)(u2 >> 20), nb2, ns2, (unsigned long long)(s2 >> 20), (unsigned long long)(h2 >> 20)); }
     { void (*gn)(char *, size_t) = (void (*)(char *, size_t))dlsym(RTLD_DEFAULT, "nxgal_va_note"); if (gn) { char g[1400]; gn(g, sizeof g); LOG("渲染器地址账 [%s]：%s", when, g); } }
     // 窗口尾部（缩尾部后还给系统的那段）：低区满了宿主映射落进去，崩溃现场要看它还剩多少
     uint64_t tlo = g_ok && g_size < g_res ? g_base + g_size : 0, thi = tlo ? g_base + g_res : 0;
@@ -1054,6 +1156,7 @@ void s2a_vm_low(const char *when) {
             (unsigned long long)((thi - tlo - th) >> 20), (unsigned long long)(th >> 20), (unsigned long long)(tl >> 20)); }
     { char tb[900]; s2a_tail_note(tb, sizeof tb); LOG("%s [%s]", tb, when); }
     s2a_vm_low_files(when, lo, hi, tlo, thi);
+    if (g_ok && g_keep_lo && g_keep_lo < g_base) { LOG("（下面一组文件映射是窗口下方宿主段 %#llx 起的 [%s]）", (unsigned long long)g_keep_lo, when); s2a_vm_low_files(when, g_keep_lo, g_base, 0, 0); }
     { void (*mn)(const char *) = (void (*)(const char *))dlsym(RTLD_DEFAULT, "s2a_msample_note"); if (mn) mn(when); }   // malloc 按调用点采样（S2A_MALLOC_SAMPLE=1 才有，见 msample.c）
     LOG("低区全列 [%s] 完：止于 %#llx，已映射 %llu MB（逐块列 %d 块；<1 MB 的 %d 块合计 %llu MB 未列）、空 %llu MB", when, (unsigned long long)prev, (unsigned long long)(used >> 20), nb, ns, (unsigned long long)(small >> 20), (unsigned long long)(hole >> 20));
 }

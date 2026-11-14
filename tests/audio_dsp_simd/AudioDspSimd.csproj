@@ -5,13 +5,16 @@
     <Compile Include="../../compat/tree/src/Ryujinx.Audio/Renderer/Dsp/S2ADspFast.cs" />
     <Compile Include="../../compat/tree/src/Ryujinx.Audio/Renderer/Dsp/S2ADspMixHelper.cs" />
     <Compile Include="../../compat/tree/src/Ryujinx.Audio/Renderer/Dsp/ResamplerHelper.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Audio/Renderer/Dsp/S2ADspBiquadHelper.cs" />
     <Compile Include="../../compat/tree/src/Ryujinx.Audio/Renderer/Dsp/FloatingPointHelper.cs" />
     <Compile Include="../../compat/tree/src/Ryujinx.Audio/Renderer/Dsp/PcmHelper.cs" />
     <Compile Include="../../compat/tree/src/Ryujinx.Audio/Renderer/Dsp/FixedPointHelper.cs" />
     <Compile Include="../../compat/tree/src/Ryujinx.Audio/Renderer/Dsp/AdpcmHelper.cs" />
     <Compile Include="../../compat/tree/src/Ryujinx.Audio/Renderer/Dsp/State/AdpcmLoopContext.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Audio/Renderer/Dsp/State/BiquadFilterState.cs" />
     <Compile Include="../../compat/tree/src/Ryujinx.Audio/Renderer/Parameter/VoiceInParameter1.cs" />
     <Compile Include="../../compat/tree/src/Ryujinx.Audio/Renderer/Parameter/BiquadFilterParameter1.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Audio/Renderer/Parameter/BiquadFilterParameter2.cs" />
     <Compile Include="../../compat/tree/src/Ryujinx.Audio/Renderer/Common/WaveBuffer.cs" />
     <Compile Include="../../compat/tree/src/Ryujinx.Audio/Renderer/Common/PlayState.cs" />
     <Compile Include="../../compat/tree/src/Ryujinx.Audio/Common/SampleFormat.cs" />

@@ -13,19 +13,25 @@
 //   ⑧ 录制时已知 GPU 侧信号（11-05 时之笛第二十九版读档：事件第一次被等时写它的 SignalEvent 还没提交，只录在别的队列的命令缓冲里）：
 //      超时 3000 ms；先「录制」写 H 的 SignalEvent（nvn_be_event_gpu_recorded，不提交），再提交等 H「等于 1」→ 不登记、200 ms 内完成、强制放行 0 次；
 //      之后才提交那笔信号 → H = 1。对照：没录制过信号的事件 K 同样等待 → 登记 1 次（CPU 随后写 K 放行，免得等到超时）
+//   ⑨ 一帧的提交共用命令分配器（照 nxnative，MIT）：闸住 GPU（等一个 CPU 还没写的事件），同一帧再录 24 个提交（三倍于池）→ 都录完、等 GPU 换分配器 0 次、共用 ≥ 23 次、
+//      不计数的提交不取计数缓冲（环不变）；放开闸后全部完成。改前第 9 个提交在池满处等 GPU，而 GPU 停在闸上，单测被 alarm 杀掉
+//   ⑩ 计数缓冲环：24 个在途计数提交各取一个互不相同的环缓冲；它们完成后下一个复用，环不再长
 #include "../gfx/nvn/nvn_mtl.m"
 static unsigned checks, failures;
 #define REQUIRE(c) do { if (!(c)) { fprintf(stderr, "FAIL setup %s:%d: %s\n", __FILE__, __LINE__, #c); exit(1); } } while (0)
 #define VERIFY(c, ...) do { checks++; int ok_ = !!(c); if (!ok_) failures++; printf("%s ", ok_ ? "PASS" : "FAIL"); printf(__VA_ARGS__); putchar('\n'); fflush(stdout); } while (0)
 typedef struct { op_hdr h; volatile uint32_t *val; uint32_t mode, v; } ev_rec;
 static ev_rec rec(volatile uint32_t *val, uint32_t mode, uint32_t v) { return (ev_rec){{OP_SIGNAL_EVENT, 24}, val, mode, v}; }
-static uint64_t run(const ev_rec *r, int n) {   // 一个提交：n 条事件记录 + END，返回栅栏
+enum { N9 = 24 };   // ⑨ ⑩：三倍于分配器池（8）
+static uint64_t run_in(const ev_rec *r, int n, int same) {   // 一个提交：n 条事件记录 + END，返回栅栏
     struct { ev_rec r[4]; op_hdr end; } s; memset(&s, 0, sizeof s); REQUIRE(n <= 4);
     for (int i = 0; i < n; i++) s.r[i] = r[i];
     *(op_hdr *)&s.r[n] = (op_hdr){OP_END, sizeof(op_hdr)};
-    static uint64_t frame = 1; nvn_be_set_frame(++frame); nvn_be_sub_begin(); state_reset();
+    static uint64_t frame = 1; if (!same) nvn_be_set_frame(++frame); nvn_be_sub_begin(); state_reset();
     nvn_be_exec((const uint8_t *)&s); return nvn_be_sub_commit();
 }
+static uint64_t run(const ev_rec *r, int n) { return run_in(r, n, 0); }
+static uint64_t run_same(const ev_rec *r, int n) { return run_in(r, n, 1); }   // 不换帧：同一帧的又一个提交
 int main(void) { @autoreleasepool {
     setvbuf(stdout, NULL, _IOLBF, 0); alarm(60);
     setenv("DM_NVN_ENC_THREAD", "0", 0); setenv("DM_PRESENT_LINK", "0", 1);
@@ -83,6 +89,25 @@ int main(void) { @autoreleasepool {
     VERIFY(g_evw_waits == w8 + 1, "⑧ 对照：没录制过信号的事件照常登记 %llu 次（期望 1）", (unsigned long long)(g_evw_waits - w8));
     eK = 1; nvn_be_event_written(&eK); int dk = nvn_be_wait(fk, 5000000000ull);
     VERIFY(dk && m8[2] == 7 && g_evw_forced == fo8, "⑧ 对照：CPU 写后放行、完成 %d、强制放行 %llu 次（期望 0）", dk, (unsigned long long)(g_evw_forced - fo8));
+    // ⑨
+    g_evw_timeout_ms = 30000; static volatile uint32_t eW, m9[N9]; eW = 0; uint64_t aw9 = g_alloc_waits, sh9 = g_alloc_shares; int ring9 = g_vis_ring_n, pool9 = g_alloc_n;
+    ev_rec hw[] = {rec(&eW, 0 | NVN_EV_WAIT, 1)}; run(hw, 1);   // 闸：GPU 停在这个等待上，后面同队列的提交都不完成
+    uint64_t f9 = 0; for (int i = 0; i < N9; i++) { ev_rec r9[] = {rec(&m9[i], 0, 7)}; f9 = run_same(r9, 1); }
+    int none9 = 1; for (int i = 0; i < N9; i++) none9 &= m9[i] == 0;
+    VERIFY(none9 && g_alloc_waits == aw9, "⑨ 闸住 GPU 时同一帧 %d 个提交照常录完、等 GPU 换分配器 %llu 次（期望 0）", N9, (unsigned long long)(g_alloc_waits - aw9));
+    VERIFY(g_alloc_shares - sh9 >= N9 - 1 && g_alloc_n <= pool9 + 1, "⑨ 它们共用这一帧的分配器：共用 %llu 次（期望 ≥ %d）、池 %d → %d", (unsigned long long)(g_alloc_shares - sh9), N9 - 1, pool9, g_alloc_n);
+    VERIFY(g_vis_ring_n == ring9, "⑨ 不计数的提交不取计数缓冲：环 %d → %d（期望不变）", ring9, g_vis_ring_n);
+    eW = 1; nvn_be_event_written(&eW); int d9 = nvn_be_wait(f9, 5000000000ull); int all9 = 1; for (int i = 0; i < N9; i++) all9 &= m9[i] == 7;
+    VERIFY(d9 && all9, "⑨ 放开闸后全部完成：%d、标记全 7：%d", d9, all9);
+    // ⑩
+    { const uint64_t far = g_done + (1ull << 40); __strong id<MTLBuffer> taken[N9]; int took = 0;
+      for (int i = 0; i < N9; i++) { g_vis_ring_i = -1; g_vis = nil; vis_take(); taken[i] = g_vis; if (g_vis && g_vis_ring_i >= 0 && vis_in_ring(g_vis)) { took++; g_vis_ring[g_vis_ring_i].fence = far + (uint64_t)i; } }
+      int distinct = 1; for (int i = 0; i < N9; i++) for (int k = 0; k < i; k++) if (taken[i] == taken[k]) distinct = 0;
+      VERIFY(took == N9 && distinct, "⑩ %d 个在途计数提交各取环里一个不同的缓冲：取到 %d、互不相同 %d", N9, took, distinct);
+      const int grown = g_vis_ring_n; for (int i = 0; i < grown; i++) if (g_vis_ring[i].fence >= far) g_vis_ring[i].fence = 0;
+      g_vis_ring_i = -1; g_vis = nil; vis_take();
+      VERIFY(g_vis && g_vis_ring_n == grown && vis_in_ring(g_vis), "⑩ 它们完成后下一个复用环里的缓冲：环 %d → %d（期望不变）", grown, g_vis_ring_n);
+      if (g_vis_ring_i >= 0) g_vis_ring[g_vis_ring_i].fence = 0; g_vis_ring_i = -1; g_vis = nil; g_vis_n = 0; }
   }
     if (failures) { printf("✗ t_nvn_wait_event：%u 项里 %u 项不符\n", checks, failures); return 1; }
     printf("✓ t_nvn_wait_event：%u 项全过（GPU 等事件：已满足 / 同提交先信号不等；未满足在 GPU 上等到 CPU 写；超时强制放行并复查后票；跨队列信号录到即放、只 GPU 写的不等）\n", checks); return 0;

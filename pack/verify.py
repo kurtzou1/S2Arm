@@ -49,7 +49,7 @@ try:
 except (OSError, ValueError): prev = {}
 def sig(p, q, sha, a=None, b=None):   # a / b：调用方已取的 os.stat（Windows 上每次 stat 都要开文件，11-06 出包速度线：0100F2C0115B6000 30.5 万个文件核对 236 秒）
     a, b = a or os.stat(p), b or os.stat(q); return (str(a.st_size), str(a.st_mtime_ns), str(b.st_size), str(b.st_mtime_ns), sha)
-bad = []; rec = {}; todo = []
+bad = []; rec = {}; todo = []; UNSTABLE = set()
 for rel, p in src.items():
     q = f'{P}/{rel}'; sz, sha = packed[rel]
     if rel not in full and rel in prev and os.path.isfile(q) and prev[rel] == sig(p, q, sha): rec[rel] = prev[rel]; continue   # 没有上次记录（冷）就不取 stat
@@ -75,7 +75,14 @@ def check(t):   # 一个文件：字节数 → 逐字节比源 → SHA 对 index
                 if a != b: return rel, f'{rel}（内容与源不同）'
                 if not b: break
                 h.update(b)
-    if h.hexdigest() != sha: return rel, f'{rel}（SHA 与 index 不符）'
+    if h.hexdigest() != sha:
+        # 再读一遍（只在不符时，正常核对不多读）：两次读出的不一样 = 这台电脑读盘不稳定（盘 / 内存 / 有程序在改这个文件）；
+        #   一样 = index 记的值不对（pack.py 那次读到的内容和现在不同），重打时重算就好
+        h2 = sha256_fast.new()
+        with open(q, 'rb') as f:
+            for b in iter(lambda: f.read(1 << 22), b''): h2.update(b)
+        UNSTABLE.update([rel] if h2.hexdigest() != h.hexdigest() else [])
+        return rel, f'{rel}（SHA 与 index 不符）'
     return rel, sig(p, q, sha, sp, sq)
 # 逐文件互不依赖：按本机核数并行（S2A_JOBS，tools/cores.sh；10-25 维护者「要适配机器的核心数」——原先串行，01006F8002326000 11 万个文件核对 33 秒只用 0.47 核）；
 #   读文件、算哈希期间释放 GIL，线程即可。进度写 S2A_PROGRESS（tools/progress.py）
@@ -88,7 +95,19 @@ with ThreadPoolExecutor(max_workers=NJ) as ex:
             if isinstance(r, str): bad.append(r)
             else: rec[rel] = r
         tk.step(len(part))
-if bad: red(f'{len(bad)} 个文件不对：{sorted(bad)[:5]}')
+if bad:
+    # SHA 与 index 不符的：从资源包状态表（pack.py 的 <包目录>.state.tsv）去掉这几行，重打时重读重算——原先状态表照留，源没变时 pack.py
+    #   沿用记下的错 SHA，玩家重试多少次都在这里红（11-13 玩家 Windows 4 核 8 GB：ipa 收尾 4130 秒后一批 romfs 文件 SHA 与 index 不符）
+    sha_bad = {b.rsplit('（', 1)[0] for b in bad if b.endswith('（SHA 与 index 不符）')}
+    ST = P.rstrip('/') + '.state.tsv'
+    if sha_bad and os.path.isfile(ST):
+        with open(ST, encoding='utf-8') as f: rows = [l for l in f if l.split('\t', 1)[0] not in sha_bad]
+        with open(ST + '.tmp', 'w', encoding='utf-8', newline='\n') as f: f.writelines(rows)
+        os.replace(ST + '.tmp', ST)
+    why = ''
+    if sha_bad:
+        why = (f'；其中 {len(UNSTABLE)} 个同一文件两次读出的内容不同（读盘不稳定）' if UNSTABLE else '') + f'；已让这 {len(sha_bad)} 个文件下次出包重读重算'
+    red(f'{len(bad)} 个文件不对：{sorted(bad)[:5]}{why}')
 # 包目录这边也要跳过 macOS 自己留的垃圾（.DS_Store / ._*）：pack.py 复制时已经跳过它们，
 # 但 Finder / Spotlight 会在 pkg/pack 里重新生成，不过滤就会把「清单外文件」误报成出包失败。
 stray = [os.path.relpath(os.path.join(d, f), P).replace(os.sep, '/') for d, _, fs in os.walk(P) for f in fs

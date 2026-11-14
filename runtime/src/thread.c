@@ -3005,8 +3005,14 @@ void s2a_thread_dump(void) {
             uint64_t pc = 0, lr = 0, fp = 0; int run = !atomic_load(&t->in_svc);
             if (!run) fp = t->last_fp;
             else if (t->mport && thread_suspend(t->mport) == KERN_SUCCESS) {
+                // 停住后先看宿主线程的运行状态：在内核里不可中断等待（缺页读写文件、驱动调用之类）时 thread_get_state 要等它走到可停的点，
+                //   一直出不来就把看门线程也卡死（11-14 一台测试设备卡在第 17515 帧：线程表打到第 4 条就断，宿主栈和后两次现场都没出）。这种线程不取寄存器、标出来——
+                //   「客体代码里却卡在内核」正是要找的卡点
+                thread_basic_info_data_t bi; mach_msg_type_number_t bc = THREAD_BASIC_INFO_COUNT;
+                int unint = thread_info(t->mport, THREAD_BASIC_INFO, (thread_info_t)&bi, &bc) == KERN_SUCCESS && bi.run_state == TH_STATE_UNINTERRUPTIBLE;
                 arm_thread_state64_t st; mach_msg_type_number_t n = ARM_THREAD_STATE64_COUNT;
-                if (thread_get_state(t->mport, ARM_THREAD_STATE64, (thread_state_t)&st, &n) == KERN_SUCCESS) {
+                if (unint) LOG("    【红】这条线程不在系统调用里，宿主线程却在内核里不可中断等待（缺页读写文件 / 驱动调用之类），不取寄存器（取了会把看门线程一起卡住）");
+                else if (thread_get_state(t->mport, ARM_THREAD_STATE64, (thread_state_t)&st, &n) == KERN_SUCCESS) {
                     pc = arm_thread_state64_get_pc(st); lr = arm_thread_state64_get_lr(st); fp = arm_thread_state64_get_fp(st); }
                 thread_resume(t->mport);
             }

@@ -199,6 +199,29 @@ class FetchFlowTest(unittest.TestCase):
         self.assertEqual(len(calls), 1)   # 第二次直接回缓存，不再重试
         self.assertFalse(self.dest.exists())
 
+    def test_settled_only_for_store_facts(self):
+        # 定论（换个时候再查也一样）才算查过：抓到、商品页 404、页上没主图、图不合格；断网 / 5xx / 图下载断 / 预算用尽都不是
+        def http(code):
+            return urllib.error.HTTPError("https://ec.nintendo.com/apps/x/US", code, "x", {}, None)
+        page = lambda: Resp(page_html(IMG_URL), url="https://www.nintendo.com/x")
+        cases = (("抓到", page(), Resp(jpeg(1920, 1080), url=IMG_URL), True),
+                 ("商品页 404", http(404), None, True),
+                 ("页上没主图", Resp(b"<html></html>", url="https://www.nintendo.com/x"), None, True),
+                 ("图宽不够", page(), Resp(jpeg(800, 600), url=IMG_URL), True),
+                 ("断网", urllib.error.URLError("连不上"), None, False),
+                 ("商店 503", http(503), None, False),
+                 ("图下载断", page(), urllib.error.URLError("断了"), False))
+        for note, pr, ir, want in cases:
+            banner_fetch._run_cache.clear(); banner_fetch._fail_spent = 0.0
+            with mock.patch.object(urllib.request, "urlopen", self.dispatcher(pr, ir)):
+                banner_fetch.fetch_banner(TID, self.dest)
+            self.assertEqual(banner_fetch.settled(TID), want, note)
+        banner_fetch._run_cache.clear(); banner_fetch._fail_spent = 10_000.0
+        banner_fetch.fetch_banner(TID, self.dest)
+        self.assertFalse(banner_fetch.settled(TID), "预算用尽")
+        banner_fetch._run_cache.clear(); banner_fetch._fail_spent = 0.0
+        self.assertFalse(banner_fetch.settled(TID), "没抓过")
+
     def test_fail_budget_skips_without_network(self):
         banner_fetch._fail_spent = 10_000.0   # 预算已用尽
         with mock.patch.object(urllib.request, "urlopen", side_effect=AssertionError("不许联网")):

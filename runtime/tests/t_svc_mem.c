@@ -46,7 +46,7 @@ int s2a_thread_alive_count(void) { return 0; } void s2a_thread_set_npdm(int c, i
 int s2a_svc_check_perm(const uint64_t perm[3], char *out, size_t cap) { (void)perm; if (cap) out[0] = 0; return 0; } int s2a_svc_ryu_missing(int n) { (void)n; return 0; }   // gate.c：NPDM 许可比对（本测不链 gate.c）
 uint64_t guest_tick(void) { return 0; }
 static uint64_t g_t_hz = 19200000; void s2a_guest_tick_hz_set(uint64_t hz) { g_t_hz = hz; } uint64_t s2a_guest_tick_hz(void) { return g_t_hz; }   // os.c 替身（本测不链 os.c）
-uint64_t s2a_ns_to_tick(uint64_t ns) { return (uint64_t)((unsigned __int128)ns * g_t_hz / 1000000000u); } module_t *module_of(const void *p) { (void)p; return NULL; }
+uint64_t s2a_ns_to_tick(uint64_t ns) { return (uint64_t)((unsigned __int128)ns * g_t_hz / 1000000000u); } static module_t g_tmod; module_t *module_of(const void *p) { uint64_t x = (uint64_t)p; return g_tmod.base && x >= (uint64_t)g_tmod.base && x < (uint64_t)g_tmod.base + g_tmod.size ? &g_tmod : NULL; }
 void s2a_window_get(uint64_t *b, uint64_t *s) { *b = *s = 0; } void s2a_window_trim(uint64_t s) { (void)s; } int s2a_guest_zero(uint64_t a, uint64_t n) { (void)a; (void)n; return 0; }
 // #258 懒清零的桩：g_gfile=1 时把 [g_gfile_lo, g_gfile_hi) 当成文件后备窗口（没有文件后备时还页照旧换匿名占位）
 static int g_gfile; static uint64_t g_gfile_lo, g_gfile_hi;
@@ -315,6 +315,21 @@ int main(void) {
             uint64_t *xp = mmap(NULL, 0x4000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0); xp[0] = 0x5555; mprotect(xp, 0x4000, PROT_READ | PROT_EXEC);
             CHECK(s2a_loader_store64(xp, 0x6666) == -1 && xp[0] == 0x5555, "装载器不写可执行页（签名代码页同类）：回 -1、内容不变");
             munmap(xp, 0x4000);
+            memset(r, 0, sizeof r); r[0] = (uint64_t)(hz + 0x8000); r[1] = 0x4000; r[2] = 3; svc_mem(0x02, r, 0);
+            // #815（0100FA501AF90000，补丁 @rugal7699）：游戏把模块映像里的一段收紧成只读后，游戏 SDK 自己的 nn::ro 还往里写（不经装载器）→ SIGBUS。
+            //   期望（手写）：这段落在一个已载入模块的映像里 → 收紧回成功、游戏查到的权限是「读」，但宿主页仍可写（子进程直接写不被杀）；
+            //   不在任何模块映像里的同样请求照旧设宿主只读（直接写被杀）；放宽回读写照旧
+            strcpy(g_tmod.name, "main"); g_tmod.base = hz + 0x8000; g_tmod.size = 0x8000;
+            memset(r, 0, sizeof r); r[0] = (uint64_t)(hz + 0x8000); r[1] = 0x4000; r[2] = 1; svc_mem(0x02, r, 0); uint64_t mrc = r[0];
+            s2a_mem_query((uint64_t)slot, &mi);
+            int md = DIES_STORE(slot);
+            CHECK(mrc == 0 && mi.perm == 1 && !md, "模块映像内收紧只读：回 %#llx、游戏看到的权限 %u（应 1）、宿主直接写被杀 %d（应 0：宿主保持可写）",
+                  (unsigned long long)mrc, mi.perm, md);
+            memset(r, 0, sizeof r); r[0] = (uint64_t)(hz + 0x8000); r[1] = 0x4000; r[2] = 3; svc_mem(0x02, r, 0);
+            g_tmod.base = NULL; g_tmod.size = 0;
+            memset(r, 0, sizeof r); r[0] = (uint64_t)(hz + 0x8000); r[1] = 0x4000; r[2] = 1; svc_mem(0x02, r, 0);
+            int od = DIES_STORE(slot);
+            CHECK(r[0] == 0 && od, "不在模块映像里的收紧照旧设宿主只读：直接写被杀 %d（应 1）", od);
             memset(r, 0, sizeof r); r[0] = (uint64_t)(hz + 0x8000); r[1] = 0x4000; r[2] = 3; svc_mem(0x02, r, 0);
             #undef DIES_STORE
         }

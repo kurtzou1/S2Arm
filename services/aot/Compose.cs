@@ -155,6 +155,10 @@ namespace S2A.Aot
                     if (error != 0) throw new System.InvalidOperationException($"native 图形会话不可启动 ({error})");
                 }
                 if (S2A.Services.Native.GfxMode != null && S2A.Services.Native.GfxMode() == 1) { System.Console.Error.WriteLine("[gal] 直连模式：通用渲染循环不起（出图层归直连图形层 graphics/nvn）"); NxGal.NxFrames.StartDirect(); return; }
+                // 起局判定成「不能直连」（设备既无 Metal 4 也无 Metal 3 路径，runtime/src/gfxmode.c）：宿主随后停在初启失败页（host_main.c direct_lib_missing）。
+                //   通用渲染循环在这里起的话，它在自己线程上建 Metal 4 队列失败、抛未处理异常，把已经显示提示页的进程整个带崩
+                //   （#620 / 诊断 #3e75dc：A12X iPad 上提示页出来后 nxgal 初始化失败 → FailFast）。只有直连一种模式，不能直连就不起通用循环
+                if (S2A.Services.Native.GfxMode != null) { System.Console.Error.WriteLine("[gal] 不能直连：通用渲染循环不起（宿主停在初启失败页）"); return; }
                 S2A.Gfx.RenderLoop.Start(device, tracking);
             };
             S2A.Services.Exports.BeforeShutdown = static () =>

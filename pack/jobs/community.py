@@ -339,6 +339,8 @@ def launch_env(c, gid):
         env["S2A_PAD_FACE"] = s["padFace"]  # 手柄按键布局：玩家手动选的 Switch / Xbox 布局（缺省自动不设；宿主 runtime/src/pad.c s2a_pad_layout）
     if s.get("motion") is False:
         env["S2A_MOTION"] = "0"           # 体感关：不开手柄六轴（macos/front_mac.m）
+    if s.get("pauseUnfocused") is False:
+        env["S2A_FOCUS_PAUSE"] = "0"      # 切到别的窗口不暂停：游戏要求失焦暂停时也照常跑（macos/front_mac.m，#989）
     if s.get("diagRun") is True:
         env.update(diag_run_env(c, gid))  # 诊断局（#438）：只管这一局，用掉就关
     return env

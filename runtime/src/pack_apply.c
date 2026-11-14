@@ -116,8 +116,12 @@ typedef struct { char *rel; uint64_t off, len; } img_ent;
 //   phase 1 = 解开推送包（done / total = 包数）；2 = 从 game.img 解小文件（字节）；3 = 核对机上文件（文件数）。主调方设、本文件只调，NULL = 不报
 void (*s2a_pack_apply_phase)(int phase, uint64_t done, uint64_t total);
 #define PHASE(ph, d, t) do { if (s2a_pack_apply_phase) s2a_pack_apply_phase((ph), (d), (t)); } while (0)
+static int img_toc_file(const char *p, img_ent **out, size_t *n);
 static int img_toc(const char *root, img_ent **out, size_t *n) {   // 0 = 读到（*n 条）；1 = 没有 game.img；负数 = IMG 坏 / 格式号不认
-    char p[2200]; snprintf(p, sizeof p, "%s/game.img", root); *out = NULL; *n = 0;
+    char p[2200]; snprintf(p, sizeof p, "%s/game.img", root); return img_toc_file(p, out, n);
+}
+static int img_toc_file(const char *p, img_ent **out, size_t *n) {   // 同上，读任意路径的 IMG（导入时认领前先看它带不带着色器库）
+    *out = NULL; *n = 0;
     int fd = open(p, O_RDONLY); if (fd < 0) return 1;
     uint8_t h[136]; struct stat st; int rc = -10;
     if (pread(fd, h, sizeof h, 0) != (ssize_t)sizeof h || memcmp(h, "S2AIMG01", 8) || fstat(fd, &st)) goto out;
@@ -457,7 +461,10 @@ static int clone_tree(const char *from, const char *to, unsigned *files, uint64_
     }
     if (!S_ISREG(st.st_mode)) { clone_skip("搬", from, 0); return 0; }
 #if defined(__APPLE__)
-    if (clonefile(from, to, CLONE_NOOWNERCOPY))
+    // 克隆照抄权限位（CLONE_NOOWNERCOPY 只把属主换成 App）：旧树里没有写位的文件（玩家机上整条写不进的那棵）搬过来归 App 却仍只读，
+    //   之后电脑端经 AFC 打开写 game.img 被拒「Permission denied」（#074d88，三台设备都在搬家后的 Library/S2Arm 里）。同逐字节拷的退路：补上 App 自己的读写位
+    if (!clonefile(from, to, CLONE_NOOWNERCOPY)) { if (chmod(to, (st.st_mode & 0777) | 0600)) { snprintf(why, n, "改 %s 为可写：%s", to, strerror(errno)); return -1; } }
+    else
 #endif
     { int c = copy_file(from, to, st.st_mode, why, n); if (c < 0) return -1; if (c > 0) { clone_skip("读", from, errno); return 0; } }
     (*files)++; *bytes += (uint64_t)st.st_size; return 0;
@@ -613,16 +620,130 @@ int s2a_pack_migrate(const char *proc_docs, int *failed) {
 //   同卷改名挪到本款资源包根 Library/Application Support/S2Arm/games/<游戏号>/资源包/game.img（s2a_pack_root；文件夹不在就建，玩家不用知道程序号），写 index.tsv（game.img 一行 + 原有的直连库 / 覆盖层行）
 //   与清单 manifest.json（version 3、资源包号取头）、作废 .applied——之后就是「待导入」，游戏库 / 闸门照常解小文件（s2a_pack_apply）
 static char g_img_err[600], g_img_code[48];
+// 这次认领里不带着色器库的那个文件名（最近一个；空 = 没有）：游戏库上提示一句怎么换（ios/app.m img_scan_report；D-QW2Q / D-9ZF9：自签玩家放了资源包文件夹里的 game.img）
+static char g_img_noshaders[256];
+const char *s2a_img_scan_noshaders(void) { return g_img_noshaders; }
 const char *s2a_img_scan_failure(void) { return g_img_err; }
 // 认领失败给码（同 s2a_install_code）：格式号不认识 = ios_install_img_format，挪 / 写时空间满 = ios_install_no_space，其余 ios_import_img_failed
 const char *s2a_img_scan_code(void) { return g_img_code; }
+// ---- 着色器更新包（格式号 2，pack/img.py update_pack；导出文件夹里的「<游戏名> 着色器更新包.img」，几百 MB）：只含派生件（shaders/、romfs_overlay/、
+//   romfs.s2aidx、game.imgmap），头里的游戏号 + 资源包号指向它配的本体（同款同构建的完整 game.img）。认领：本机这款的 game.img 头里资源包号一致才收；
+//   把本体目录表里旧的派生件条目摘掉（不然以后解包会拿旧的盖新的），新派生件直接写成文件、记进 index.tsv，5 GB 本体一个字节不重写。
+//   本机没有本体 / 本体不是这一版：物理上套不上，不收，原样留在导入文件夹，当场说清（先导完整包 / 这个更新包配的不是手机上这版）
+static int upd_is_extra(const char *rel) { return !strncmp(rel, "shaders/", 8) || !strncmp(rel, "romfs_overlay/", 14) || !strcmp(rel, "romfs.s2aidx") || !strcmp(rel, "game.imgmap"); }
+static uint64_t upd_fnv(const char *s, size_t n) { uint64_t h = 1469598103934665603ULL; for (size_t i = 0; i < n; i++) { h ^= (uint8_t)s[i]; h *= 1099511628211ULL; } return h ? h : 1; }
+typedef struct { char *rel; uint64_t off, len; } upd_ent;
+static int upd_read_toc(int fd, uint64_t to, uint64_t tl, upd_ent **out, size_t *n) {   // 原样读目录表（含 romfs.list，img_toc 会跳过它）
+    *out = NULL; *n = 0; if (tl < 8 || tl > (64u << 20)) return -1;
+    uint8_t *t = malloc(tl); if (!t || pread(fd, t, tl, (off_t)to) != (ssize_t)tl) { free(t); return -1; }
+    uint32_t slots; memcpy(&slots, t, 4); size_t pb = 8 + (size_t)slots * 32; if (pb > tl) { free(t); return -1; }
+    upd_ent *e = calloc(slots ? slots : 1, sizeof *e); size_t k = 0;
+    for (uint32_t i = 0; i < slots; i++) { const uint8_t *q = t + 8 + (size_t)i * 32; uint64_t hh; memcpy(&hh, q, 8); if (!hh) continue;
+        uint32_t po, pl; memcpy(&e[k].off, q + 8, 8); memcpy(&e[k].len, q + 16, 8); memcpy(&po, q + 24, 4); memcpy(&pl, q + 28, 4);
+        if (pb + po + pl > tl) { for (size_t j = 0; j < k; j++) free(e[j].rel); free(e); free(t); return -1; }
+        e[k++].rel = strndup((const char *)t + pb + po, pl); }
+    free(t); *out = e; *n = k; return 0;
+}
+static void upd_free(upd_ent *e, size_t n) { for (size_t i = 0; i < n; i++) free(e[i].rel); free(e); }
+static uint8_t *upd_toc_bytes(upd_ent *e, size_t n, size_t *len) {   // 同 pack/img.py toc_bytes：槽数 = ≥ 2n 的 2 的幂，FNV-1a 开放寻址
+    uint32_t slots = 1; while (slots < (n ? n : 1) * 2) slots <<= 1;
+    size_t paths = 0; for (size_t i = 0; i < n; i++) paths += strlen(e[i].rel);
+    *len = 8 + (size_t)slots * 32 + paths; uint8_t *b = calloc(1, *len); if (!b) return NULL;
+    uint32_t cnt = (uint32_t)n; memcpy(b, &slots, 4); memcpy(b + 4, &cnt, 4); uint32_t po = 0;
+    for (size_t i = 0; i < n; i++) { size_t pl = strlen(e[i].rel); uint64_t h = upd_fnv(e[i].rel, pl); uint32_t k = (uint32_t)(h & (slots - 1));
+        for (;;) { uint8_t *q = b + 8 + (size_t)k * 32; uint64_t cur; memcpy(&cur, q, 8); if (!cur) { uint32_t l32 = (uint32_t)pl;
+            memcpy(q, &h, 8); memcpy(q + 8, &e[i].off, 8); memcpy(q + 16, &e[i].len, 8); memcpy(q + 24, &po, 4); memcpy(q + 28, &l32, 4); break; }
+            k = (k + 1) & (slots - 1); }
+        memcpy(b + 8 + (size_t)slots * 32 + po, e[i].rel, pl); po += (uint32_t)pl; }
+    return b;
+}
+// 摘掉本体 game.img 目录表里的派生件条目：新目录表先写在旧派生件占的那段里（和旧目录表不重叠），再一笔改头（目录表位置 / 长度 / 整长），最后截短。
+//   改头前断电：头还指着旧目录表、旧表完好；改头后断电：截短没做只是文件长一点，头里整长已对（读法按头）。→ 新整长；没有派生件条目时原样返回旧整长
+static int64_t upd_strip_base(const char *base) {
+    int fd = open(base, O_RDWR); if (fd < 0) return -1;
+    uint8_t h[136]; int64_t rc = -1; upd_ent *e = NULL; size_t n = 0;
+    if (pread(fd, h, sizeof h, 0) != (ssize_t)sizeof h) goto out;
+    uint64_t ro, rl, to, tl, total; memcpy(&ro, h + 96, 8); memcpy(&rl, h + 104, 8); memcpy(&to, h + 112, 8); memcpy(&tl, h + 120, 8); memcpy(&total, h + 128, 8);
+    if (upd_read_toc(fd, to, tl, &e, &n)) goto out;
+    size_t k = 0; uint64_t end = ro + rl; int removed = 0;
+    for (size_t i = 0; i < n; i++) { if (upd_is_extra(e[i].rel)) { free(e[i].rel); removed = 1; continue; } e[k++] = e[i]; if (e[i].off + e[i].len > end) end = e[i].off + e[i].len; }
+    n = k;
+    if (!removed) { rc = (int64_t)total; goto out; }
+    size_t nl; uint8_t *tb = upd_toc_bytes(e, n, &nl); if (!tb) goto out;
+    uint64_t nto = (end + 16383) / 16384 * 16384;
+    if (nto + nl > to) nto = (total + 16383) / 16384 * 16384;   // 放不进旧派生件那段：接在文件末尾，不截短（极少见：派生件比目录表还小）
+    uint64_t ntotal = nto + nl;
+    if (pwrite(fd, tb, nl, (off_t)nto) != (ssize_t)nl || fsync(fd)) { free(tb); goto out; }
+    free(tb);
+    uint8_t nh[24]; memcpy(nh, &nto, 8); uint64_t ntl = nl; memcpy(nh + 8, &ntl, 8); memcpy(nh + 16, &ntotal, 8);
+    if (pwrite(fd, nh, sizeof nh, 112) != (ssize_t)sizeof nh || fsync(fd)) goto out;
+    if (ntotal < total && ftruncate(fd, (off_t)ntotal)) goto out;
+    rc = (int64_t)ntotal;
+out:
+    if (e) upd_free(e, n); close(fd); return rc;
+}
+static int img_update(const char *proc_docs, const char *path, const uint8_t *h, uint64_t total) {
+    char gid[17], pid[65]; memcpy(gid, h + 16, 16); gid[16] = 0; memcpy(pid, h + 32, 64); pid[64] = 0;
+    const char *fn = strrchr(path, '/') ? strrchr(path, '/') + 1 : path;
+    char root[1400], base[1500], gdocs[1200]; snprintf(gdocs, sizeof gdocs, "%s/games/%s", proc_docs, gid); s2a_pack_root(root, sizeof root, gdocs);
+    snprintf(base, sizeof base, "%s/game.img", root);
+    uint8_t bh[136]; int bfd = open(base, O_RDONLY); int ok = bfd >= 0 && pread(bfd, bh, sizeof bh, 0) == (ssize_t)sizeof bh && !memcmp(bh, "S2AIMG01", 8); if (bfd >= 0) close(bfd);
+    if (!ok) { snprintf(g_img_err, sizeof g_img_err, "%s 是着色器更新包，手机上还没有这款游戏（%s）的本体：先放导出文件夹里这款的完整 .img", fn, gid); return -13; }
+    if (memcmp(bh + 32, h + 32, 64)) { char bp[65]; memcpy(bp, bh + 32, 64); bp[64] = 0;
+        snprintf(g_img_err, sizeof g_img_err, "%s 配的本体（资源包号 %.12s）不是手机上这一版（%.12s）：按电脑上同一次导出的完整 .img 和更新包一起用", fn, pid, bp); return -14; }
+    int ufd = open(path, O_RDONLY); if (ufd < 0) { snprintf(g_img_err, sizeof g_img_err, "读 %s 失败：%s", fn, strerror(errno)); return -4; }
+    uint64_t to, tl; memcpy(&to, h + 112, 8); memcpy(&tl, h + 120, 8); upd_ent *ue; size_t un;
+    if (upd_read_toc(ufd, to, tl, &ue, &un)) { close(ufd); snprintf(g_img_err, sizeof g_img_err, "%s 目录表坏了", fn); return -10; }
+    (void)total;
+    char old[2400]; snprintf(old, sizeof old, "%s/manifest.json", root); unlink(old); snprintf(old, sizeof old, "%s/.applied", root); unlink(old);   // 先作废：写到一半断了不会判成就绪
+    int64_t nt = upd_strip_base(base);
+    if (nt < 0) { upd_free(ue, un); close(ufd); snprintf(g_img_err, sizeof g_img_err, "整理本体 game.img 的目录表失败：%s", strerror(errno)); return -4; }
+    int rc = 0; uint64_t bytes = 0;
+    for (size_t i = 0; i < un && !rc; i++) {
+        if (!upd_is_extra(ue[i].rel) || strstr(ue[i].rel, "..") || ue[i].rel[0] == '/') continue;   // 只认派生件路径
+        char dst[2400], tmp[2500]; snprintf(dst, sizeof dst, "%s/%s", root, ue[i].rel); snprintf(tmp, sizeof tmp, "%s.upd.tmp", dst);
+        if (mkdirs(dst)) { rc = -4; snprintf(g_img_err, sizeof g_img_err, "建 %s 的目录失败", ue[i].rel); break; }
+        int o = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644); if (o < 0) { rc = -4; snprintf(g_img_err, sizeof g_img_err, "写 %s 失败：%s", ue[i].rel, strerror(errno)); break; }
+        uint8_t buf[1 << 16]; uint64_t left = ue[i].len, at = ue[i].off;
+        while (left && !rc) { size_t want = left < sizeof buf ? (size_t)left : sizeof buf; ssize_t r = pread(ufd, buf, want, (off_t)at);
+            if (r <= 0 || write(o, buf, (size_t)r) != r) { rc = -4; snprintf(g_img_err, sizeof g_img_err, "写 %s 失败：%s", ue[i].rel, strerror(errno ? errno : EIO)); break; }
+            left -= (uint64_t)r; at += (uint64_t)r; }
+        if (!rc && !strcmp(ue[i].rel, "game.imgmap") && ue[i].len >= 16) { int64_t t64 = nt; if (pwrite(o, &t64, 8, 8) != 8) rc = -4; }   // 偏移表头里记的是整个 game.img 的长度（RomFsIndex.OpenImg 核它）：换成本体现在的
+        if (close(o) || rc || rename(tmp, dst)) { if (!rc) { rc = -4; snprintf(g_img_err, sizeof g_img_err, "写 %s 失败：%s", ue[i].rel, strerror(errno)); } unlink(tmp); break; }
+        bytes += ue[i].len;
+    }
+    close(ufd);
+    if (!rc) {   // index.tsv：game.img 一行（新整长）+ 更新包里的派生件；原有的其余行照留，旧派生件行去掉
+        char ip[2400], tp[2500]; snprintf(ip, sizeof ip, "%s/index.tsv", root); snprintf(tp, sizeof tp, "%s.tmp", ip);
+        FILE *o = fopen(tp, "w"), *in = fopen(ip, "r");
+        if (!o) { if (in) fclose(in); rc = -4; snprintf(g_img_err, sizeof g_img_err, "写 index.tsv 失败：%s", strerror(errno)); }
+        else {
+            fprintf(o, "game.img\t%lld\t%s\n", (long long)nt, pid);
+            if (in) { char line[4600]; while (fgets(line, sizeof line, in)) { char rel[4600]; snprintf(rel, sizeof rel, "%s", line); rel[strcspn(rel, "\t\n")] = 0;
+                if (strcmp(rel, "game.img") && !upd_is_extra(rel)) fputs(line, o); } fclose(in); }
+            for (size_t i = 0; i < un; i++) if (upd_is_extra(ue[i].rel)) fprintf(o, "%s\t%llu\t-\n", ue[i].rel, (unsigned long long)ue[i].len);
+            if (fclose(o) || rename(tp, ip)) { rc = -4; snprintf(g_img_err, sizeof g_img_err, "写 index.tsv 失败：%s", strerror(errno)); }
+        }
+    }
+    upd_free(ue, un);
+    if (!rc) {
+        char mf[600], p[2400], tp[2500]; snprintf(mf, sizeof mf, "{\"version\": 3, \"format\": \"img\", \"imgFile\": \"game.img\", \"index_sha256\": \"%.40s-u%llx\"}\n", pid, (unsigned long long)bytes);
+        snprintf(p, sizeof p, "%s/manifest.json", root); snprintf(tp, sizeof tp, "%s.tmp", p);
+        FILE *m = fopen(tp, "w"); if (!m || fputs(mf, m) < 0 || fclose(m) || rename(tp, p)) { rc = -4; snprintf(g_img_err, sizeof g_img_err, "写 manifest.json 失败：%s", strerror(errno)); }
+    }
+    if (rc) return rc;
+    unlink(path);   // 已套上：导入文件夹里的更新包删掉（派生件已在资源包里）
+    LOG("资源导入：着色器更新包 %s 套到 %s（%llu MB 派生件，本体没动）", fn, gid, (unsigned long long)(bytes >> 20));
+    return 0;
+}
 static int img_place(const char *proc_docs, const char *path) {   // 0 = 挪好了；1 = 不是 IMG / 还在拷（不动）；负数 = 失败（原样留着）
     int fd = open(path, O_RDONLY); if (fd < 0) return 1;
     uint8_t h[136]; struct stat st; int ok = pread(fd, h, sizeof h, 0) == (ssize_t)sizeof h && !memcmp(h, "S2AIMG01", 8) && !fstat(fd, &st); close(fd);
     if (!ok) return 1;
     uint64_t total; memcpy(&total, h + 128, 8); if (total != (uint64_t)st.st_size) return 1;   // 还在拷
     uint32_t fmt; memcpy(&fmt, h + 8, 4);
-    if (fmt != 1) { snprintf(g_img_err, sizeof g_img_err, "%s 是格式号 %u 的资源包，这个 S2Arm 只认 1：请更新 S2Arm", path, fmt); return -11; }
+    if (fmt == 2) return img_update(proc_docs, path, h, total);   // 着色器更新包
+    if (fmt != 1) { snprintf(g_img_err, sizeof g_img_err, "%s 是格式号 %u 的资源包，这个 S2Arm 只认 1、2：请更新 S2Arm", path, fmt); return -11; }
     char gid[17], pid[65]; memcpy(gid, h + 16, 16); gid[16] = 0; memcpy(pid, h + 32, 64); pid[64] = 0;
     for (int i = 0; i < 16; i++) if (!((gid[i] >= '0' && gid[i] <= '9') || (gid[i] >= 'A' && gid[i] <= 'F'))) { snprintf(g_img_err, sizeof g_img_err, "%s 头里的游戏号不对", path); return -10; }
     if (!pid[0]) snprintf(pid, sizeof pid, "img-%llx", (unsigned long long)total);   // 没写资源包号的（老工具）：按长度给一个，至少换了文件能触发重新应用
@@ -634,7 +755,13 @@ static int img_place(const char *proc_docs, const char *path) {   // 0 = 挪好�
     char ip[2400], tp[2500]; snprintf(ip, sizeof ip, "%s/index.tsv", root); snprintf(tp, sizeof tp, "%s.tmp", ip);
     FILE *o = fopen(tp, "w"), *in = fopen(ip, "r"); if (!o) { if (in) fclose(in); snprintf(g_img_err, sizeof g_img_err, "写 index.tsv 失败：%s", strerror(errno)); return -4; }
     fprintf(o, "game.img\t%llu\t-\n", (unsigned long long)total);
-    if (in) { char line[4600]; while (fgets(line, sizeof line, in)) if (!strncmp(line, "shaders/", 8) || !strncmp(line, "romfs_overlay/", 14)) fputs(line, o); fclose(in); }
+    int shaders = 0;   // 着色器库从哪来：原有 index.tsv（电脑推过）或 IMG 目录表（导出文件夹里的「<游戏名>.img」带着，pack/img.py export）
+    if (in) { char line[4600]; while (fgets(line, sizeof line, in)) if (!strncmp(line, "shaders/", 8) || !strncmp(line, "romfs_overlay/", 14)) { fputs(line, o); shaders |= !strncmp(line, "shaders/", 8); } fclose(in); }
+    if (!shaders) { img_ent *te; size_t tn; if (!img_toc(root, &te, &tn)) { for (size_t i = 0; i < tn && !shaders; i++) shaders = !strncmp(te[i].rel, "shaders/", 8); img_free(te, tn); } }
+    // 两处都没有：多半是把资源包文件夹里的 game.img 直接放了进来（它按设计不带 shaders/），起局时着色器全靠现编（11-13 起不再收局；诊断 D-9864 / D-F6W7）
+    if (!shaders) { LOG("【黄】资源导入：%s 里没有着色器库（shaders/）：照样能玩，着色器首次遇到时现编、前几分钟会卡；要不卡就放「S2Arm 自签导出」文件夹里这款的 .img",
+                        strrchr(path, '/') ? strrchr(path, '/') + 1 : path);
+                    snprintf(g_img_noshaders, sizeof g_img_noshaders, "%s", strrchr(path, '/') ? strrchr(path, '/') + 1 : path); }
     if (fclose(o) || rename(tp, ip)) { snprintf(g_img_err, sizeof g_img_err, "写 index.tsv 失败：%s", strerror(errno)); return -4; }
     char mf[600]; snprintf(mf, sizeof mf, "{\"version\": 3, \"format\": \"img\", \"imgFile\": \"game.img\", \"index_sha256\": \"%s\"}\n", pid);
     snprintf(p, sizeof p, "%s/manifest.json", root); snprintf(tp, sizeof tp, "%s.tmp", p);
@@ -652,7 +779,7 @@ static int img_scan_dir(const char *proc_docs, const char *dir, int depth, int *
         if (!lstat(p, &st)) {
             if (S_ISDIR(st.st_mode) && depth < 2) img_scan_dir(proc_docs, p, depth + 1, placed);
             else if (S_ISREG(st.st_mode) && st.st_size >= 4096) { int r = img_place(proc_docs, p); if (!r) (*placed)++; else if (r < 0) { int e = errno;
-                snprintf(g_img_code, sizeof g_img_code, "%s", r == -11 ? "ios_install_img_format" : r == -4 && (e == ENOSPC || e == EDQUOT) ? "ios_install_no_space" : "ios_import_img_failed");
+                snprintf(g_img_code, sizeof g_img_code, "%s", r == -13 ? "ios_import_update_no_base" : r == -14 ? "ios_import_update_mismatch" : r == -11 ? "ios_install_img_format" : r == -4 && (e == ENOSPC || e == EDQUOT) ? "ios_install_no_space" : "ios_import_img_failed");
                 LOG("【红】资源导入（%s）：%s", g_img_code, g_img_err); } }
         }
         free(names[i]);
@@ -663,7 +790,7 @@ static int img_scan_dir(const char *proc_docs, const char *dir, int depth, int *
 const char *const s2a_img_import_dirs[2] = {"放这里导入", "Import Here"};
 int s2a_img_scan(const char *proc_docs) {   // 回前台 / 「重新检查」可能同时调：一把锁串起来，免得两边抢着挪同一个文件
     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
-    pthread_mutex_lock(&mu); int placed = 0; g_img_err[0] = 0; g_img_code[0] = 0;
+    pthread_mutex_lock(&mu); int placed = 0; g_img_err[0] = 0; g_img_code[0] = 0; g_img_noshaders[0] = 0;
     for (int i = 0; i < 2; i++) { char dir[2200]; snprintf(dir, sizeof dir, "%s/%s", proc_docs, s2a_img_import_dirs[i]); img_scan_dir(proc_docs, dir, 0, &placed); }
     pthread_mutex_unlock(&mu); return placed;
 }

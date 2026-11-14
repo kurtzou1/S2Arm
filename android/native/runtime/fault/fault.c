@@ -211,6 +211,14 @@ static int records(const ucontext_t *context, uint64_t *esr, int *has_esr) {
     }
     return EINVAL;
 }
+// 只取 ESR 的异常类别（不限 0x24 / 0x25）：栈指针未对齐是 0x26（crash.c 认它替游戏做那一条读写）
+int s2a_android_fault_ec(const void *pointer, unsigned *ec) {
+    if (!pointer || !ec) return 0;
+    uint64_t esr = 0; int found;
+    if (records(pointer, &esr, &found) || !found) return 0;
+    *ec = (unsigned)(esr >> 26) & 63;
+    return 1;
+}
 int s2a_android_fault_esr(const void *pointer, int *is_write) {
     if (!pointer || !is_write) return 0;
     uint64_t esr = 0; int found;

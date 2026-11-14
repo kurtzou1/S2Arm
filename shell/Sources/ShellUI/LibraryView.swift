@@ -509,6 +509,7 @@ public struct LibraryView: View {
         a.onUseShellCloud = o.onUseShellCloud.map { act in { if !echo() { act($0) } } }
         a.onClearShellData = o.onClearShellData.map { act in { if !echo() { act() } } }
         a.onClearShellCloud = o.onClearShellCloud.map { act in { if !echo() { act() } } }
+        a.onReportProblem = o.onReportProblem.map { act in { if !echo() { act() } } }
         a.onGlobalPadMapChange = o.onGlobalPadMapChange.map { act in { if !echo() { act($0, $1) } } }
         a.onGlobalPadMapReset = o.onGlobalPadMapReset.map { act in { if !echo() { act() } } }
         a.onDeleteGame = o.onDeleteGame.map { act in { if !echo() { act($0, $1) } } }

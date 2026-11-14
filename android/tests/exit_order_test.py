@@ -239,7 +239,7 @@ public class ExitOrderFixture extends ParentActivity {
         System.out.println("BOUNDARY: actual source methods, fake Android task/native boundaries; no Android scheduling or GPU/cleanup proof");
     }
 }
-class GameActivity extends ExitOrderFixture { static final String TITLE_EXTRA="title"; static final String ICON_RESUME_EXTRA="s2arm.icon_resume"; }
+class GameActivity extends ExitOrderFixture { static final String TITLE_EXTRA="title"; static final String ICON_RESUME_EXTRA="s2arm.icon_resume"; static final String SWITCH_EXTRA="org.s2arm.android.SWITCH_GAME"; }
 '''
 
 

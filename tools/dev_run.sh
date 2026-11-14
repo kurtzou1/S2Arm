@@ -404,7 +404,10 @@ else
   dcp 90 device process launch --device "$D" --terminate-existing --environment-variables "$ENV" --json-output "$O/launch.json" "$B" > "$O/launch.log" 2>&1 || t "起包失败：$(tail -1 "$O/launch.log" | cut -c1-160)"
 fi
 BR=; if [ "$(python3 -c 'import json,sys;print(json.loads(sys.argv[1]).get("S2A_VISION_REMOTE",""))' "$ENV")" = 1 ]; then
-  mkdir -p "$O/vision"; BRIDGE_PARENT=$$ S2A_VISION_SH="$VSH" S2A_DEVICECTL="$DC" bash "$TOOLS/vision_bridge.sh" "$D" "$B" "$O/vision" & BR=$!
+  # 信箱目录跟自动玩家的文档根走（tests/autoplay/autoplay.c：<文档根>/vision）：多款容器包按启动上下文的游戏号是 Documents/games/<号>/vision，
+  #   单款 App 是 Documents/vision。11-14：原先桥只认 Documents/vision，容器包带远程视觉的局一问都答不上、进不了游戏
+  VGID=$(python3 -c 'import json,re,sys;m=re.search(r"Games/([0-9A-Fa-f]{16})/",json.loads(sys.argv[1]).get("S2A_LAUNCH_CTX",""));print(m.group(1) if m else "")' "$ENV")
+  mkdir -p "$O/vision"; BRIDGE_PARENT=$$ S2A_VISION_SH="$VSH" S2A_DEVICECTL="$DC" S2A_VISION_DIR="${VGID:+Documents/games/$VGID/vision}" bash "$TOOLS/vision_bridge.sh" "$D" "$B" "$O/vision" & BR=$!
   t "驾驶员桥起（pid ${BR}）：Mac 侧答真机自动玩家每一问（驾驶员 ${VSH}；记 vision/bridge.log）"; fi
 PID=$(jget "$O/launch.json" result.process.processIdentifier); t "起局 $([ "$CONS" = 1 ] && echo "（控制台流，pid 收局后才知道）" || echo "pid=${PID:-无}")，环境 $ENV"
 # 同局交替开关（帧率能耗线 10-24，runtime/src/alt.c）：作业 --env 带 S2A_ALT=<秒> 时，每段里采两次整机功耗——段起点后 ALT_G1 秒（pwalt_<k>a.plist）、

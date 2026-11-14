@@ -12,6 +12,6 @@ export CLANG_MODULE_CACHE_PATH="$R/build/macos/clang-cache"
 export SWIFTPM_MODULECACHE_OVERRIDE="$R/build/macos/swift-cache"
 mkdir -p build/macos/tests
 t0=$SECONDS; rc=0
-swift build --build-tests --disable-sandbox --cache-path "$R/build/macos/spm-cache" --package-path launchers/macos --scratch-path build/macos/spm > build/macos/tests/swift-build.log 2>&1 || rc=$?
+swift build --build-tests --disable-sandbox --disable-keychain --cache-path "$R/build/macos/spm-cache" --package-path launchers/macos --scratch-path build/macos/spm > build/macos/tests/swift-build.log 2>&1 || rc=$?
 if [ $rc != 0 ]; then grep -a -E 'error:' build/macos/tests/swift-build.log | head -20; echo "macos_swift_build：主目标 / 测试目标编译不过（$((SECONDS - t0)) 秒，日志 build/macos/tests/swift-build.log）"; exit 1; fi
 echo "macos_swift_build：主目标 + 测试目标编译通过（$((SECONDS - t0)) 秒）"

@@ -46,6 +46,34 @@ def logged_in(appdata=None):
         with open(os.path.join(base, 'PlumeImpactor', 'accounts.json'), encoding='utf-8') as f: return bool(json.load(f).get('accounts'))
     except (OSError, ValueError, AttributeError): return False
 
+def _store(appdata=None):
+    base = appdata or os.environ.get('APPDATA') or os.path.join(os.path.expanduser('~'), '.config')
+    try:
+        with open(os.path.join(base, 'PlumeImpactor', 'accounts.json'), encoding='utf-8') as f: store = json.load(f)
+        return store if isinstance(store, dict) and isinstance(store.get('accounts') or {}, dict) else {}
+    except (OSError, ValueError): return {}
+
+
+def unselected_accounts(appdata=None):
+    """存了 Apple ID、却没有选中的那个（selected_account 空或指向已删的账号）→ 存着的邮箱列表；选中正常 / 没存账号 → []。
+    同版 v2.7.2 源码 plume_store AccountStore::accounts_remove：删掉的正是选中的那个时只把 selected_account 置空、不改选别的，
+    plumesign 签名就报「No account selected」（D-ZM37）。我们自己的过期处理也教玩家「移除账号再添加」，多账号时就会落到这里"""
+    store = _store(appdata)
+    accounts = store.get('accounts') or {}
+    return [] if not accounts or store.get('selected_account') in accounts else sorted(accounts)
+
+
+def select_only_account(exe, appdata=None):
+    """账号存档里只存了一个 Apple ID 却没选中：用官方 plumesign account switch <邮箱>（同版 v2.7.2 commands/account.rs）替玩家选上，
+    不自己改 Impactor 的存档。只有一个 = 没有歧义、选它就是玩家要的；存了多个不替玩家挑（装机前清单与失败原因让玩家在 Impactor 里选）。
+    → 选上的邮箱；不需要 / 选不上 → None（照旧往下签，plumesign 失败按原文归码）"""
+    left = unselected_accounts(appdata)
+    if len(left) != 1 or not exe: return None
+    try: subprocess.run([exe, 'account', 'switch', left[0]], capture_output=True, timeout=60, env=dict(os.environ, RUST_LOG='info'))
+    except (OSError, subprocess.SubprocessError): return None
+    return left[0] if not unselected_accounts(appdata) else None
+
+
 def selected_team(appdata=None):
     """账号存档里当前选中账号的团队号（accounts.json 的 selected_account → accounts[账号].team_id）；读不到 → None"""
     base = appdata or os.environ.get('APPDATA') or os.path.join(os.path.expanduser('~'), '.config')
@@ -58,9 +86,15 @@ def selected_team(appdata=None):
 # Impactor / 侧载工具界面上的报错原文 → 共用错误码（顺序即优先级；处理办法在 pack/jobs/errors.py RECOVERY）
 EXPLAIN = (
     (r'-80046', 'login_identity_rejected'),
+    # 连不上签名要用的 anisette 服务器（#3fc02b，Windows 玩家 3 次上传：「Anisette error … dns error … 不知道这样的主机。 (os error 11001)」）：
+    #   Impactor v2.7.2 的 omnisette 本机取不到就走远程 v3，地址写死 mac-ani.jkcoxson.com（3rdparty/omnisette/src/lib.rs DEFAULT_ANISETTE_URL_V3）。原先落到 device_install_failed，建议写「检查设备连接」，方向全错
+    (r'anisette error[\s\S]{0,600}?(?:dns error|os error 1100[1-4]|client error \(connect\)|error sending request|connection (?:refused|reset)|timed out)', 'signing_server_unreachable'),
     # 保存的 Apple ID 会话过期（Apple 开发者接口 1100「Your session has expired. Please log in.」，plumesign 恢复会话时报，玩家反馈 v0.2.7）：
     #   要在 Impactor 里重新登录；原先落到 device_install_failed，建议写「检查设备连接与包的有效性」，把玩家往错的方向引
     (r'developer api error 1100\b|\b1100\b[^\n]{0,40}session|session has expired|please log ?in again|not logged in', 'apple_session_expired'),
+    # 存了账号却没选中（D-ZM37 plumesign 原文「No account selected. Please login first」）：处理办法同过期——在 Impactor 里移除再添加，
+    #   添加即选中（v2.7.2 accounts_add 设 selected_account）；只存了一个的在签名前已替玩家选上（select_only_account），到这里的是存了多个
+    (r'no account selected', 'apple_session_expired'),
     (r'-2097\d|-20101|incorrect|entered incorrectly', 'apple_id_wrong'),
     (r'-21669|verification code|two.?factor|2fa', 'two_factor_wrong'),
     (r'unknown error occured while reading the file|unknown error occurred while reading the file|zip64', 'ipa_needs_repack'),

@@ -55,6 +55,14 @@ def main():
         host_link.run(base + [str(p) for p in src] + [strip, '-lm', '-o', str(exe)], check=True, timeout=60)
         return subprocess.run([str(exe), *args], capture_output=True, text=True, timeout=30)
 
+    if len(sys.argv) in (3, 4) and sys.argv[1] == '--tbuf-layout':
+        exe = out/'tbuf-layout'
+        src = [ROOT/'android/tests/tbuf_layout_test.c', *libs]
+        host_link.run(base + [str(p) for p in src] + [strip, '-lm', '-o', str(exe)], check=True, timeout=60)
+        result = subprocess.run([str(exe), *sys.argv[2:]], capture_output=True, text=True, timeout=30)
+        sys.stdout.write(result.stdout); sys.stderr.write(result.stderr)
+        return result.returncode
+
     if sys.argv[1:] == ['--legacy-compare']:
         # Compare actual unchanged legacy REQUEST and S2AI1 bytes against merge-base.
         base_sha = subprocess.check_output(['git', 'merge-base', 'HEAD', 'origin/main'], cwd=ROOT, text=True).strip()
@@ -76,15 +84,41 @@ def main():
         assert before_lines[1] == after_lines[1], 'legacy S2AI1 bytes changed'
         print(f'legacy request and canonical identity byte-for-byte unchanged versus {base_sha}')
         return 0
-    if len(sys.argv) == 6 and sys.argv[1] == '--emit-real':
+    if len(sys.argv) == 6 and sys.argv[1] in ('--emit-real', '--emit-real-tbuf', '--execute-tbuf', '--emit-compute-tbuf', '--execute-compute-tbuf'):
         result = run('emit-real', original, args=sys.argv[1:])
         sys.stdout.write(result.stdout); sys.stderr.write(result.stderr)
         return result.returncode
 
+    if len(sys.argv) == 7 and sys.argv[1] == '--tbuf-withdraw':
+        profile, closure, src_dir, gfx_result, cs_result = sys.argv[2:]
+        code = original.read_text(encoding='utf-8')
+        layout_anchor = 'if (b->kind == 2 && b->texel_buffer && b->count == 1 && b->tex_slot >= 0)'
+        assert code.count(layout_anchor) == 1
+        mutated = out/'tbuf-withdraw-layout.c'
+        mutated.write_text(code.replace(layout_anchor, layout_anchor.replace('&& b->texel_buffer', '&& 0 && b->texel_buffer')))
+        fixture = out/'tbuf-withdraw-layout-test.c'
+        fixture.write_text((ROOT/'android/tests/tbuf_layout_test.c').read_text().replace(
+            '#include "../native/gfx_plat/nvk_shader.c"', '#include "' + str(mutated) + '"'))
+        exe = out/'tbuf-withdraw-layout-test'
+        host_link.run(base + [str(p) for p in [fixture, *libs]] + [strip, '-lm', '-o', str(exe)], check=True, timeout=60)
+        for path, extra in [(gfx_result, ()), (cs_result, ('--compute',))]:
+            result = subprocess.run([str(exe), path, *extra], capture_output=True, text=True, timeout=30)
+            assert result.returncode == 1 and 'FAIL: BUFFER layout must be TBUF' in result.stderr, result.stderr
+        print('NEGATIVE CONTROL PASS: removing TBUF layout fails graphics and compute assertions')
+        guard = 'if (le->cls == NVN_GPU_RES_TBUF) { red1("texture_buffer_replay_unsupported",'
+        assert code.count(guard) == 2
+        mutated = out/'tbuf-withdraw-replay.c'
+        mutated.write_text(code.replace(guard, guard.replace('le->cls ==', '0 && le->cls ==')))
+        for mode, path in [('--execute-tbuf', gfx_result), ('--execute-compute-tbuf', cs_result)]:
+            result = run('tbuf-withdraw-replay', mutated, args=(mode, profile, closure, src_dir, path))
+            assert result.returncode == 1 and 'FAIL: real' in result.stderr and 'refuses unsupported replay' in result.stderr, result.stderr
+        print('NEGATIVE CONTROL PASS: removing TBUF replay guards fails graphics and compute assertions')
+        return 0
+
     if sys.argv[1:] == ['--withdraw']:
         text = original.read_text(encoding='utf-8')
         changes = [
-            ('gs-source-epoch', 'MIX(s2a_source_epoch());', '(void)s2a_source_epoch();', 1, 'poisoned GS source cannot hit fast cache'),
+            ('gs-source-epoch', 'MIX(s2a_source_epoch());\n    MIX(stages);', '(void)s2a_source_epoch();\n    MIX(stages);', 1, 'poisoned GS source cannot hit fast cache'),
             ('gs-slot', '(const char *const[]){"vs", "fs", "gs"}[st]',
              '(const char *const[]){"vs", "fs", "fs"}[st]', 3, 'GS production request reaches compiler'),
             ('gs-wrong-stage', 'src.stage = (nvn_gpu_stage)st;',
@@ -128,6 +162,24 @@ def main():
              'for (int slot = 0; slot < 0; slot++) {\n        uint64_t h = rp_S.tex[5][128 + slot];', 1, 'separate CS registered texture fact is sent'),
             ('drop-separate-fast-identity', 'MIX(sep_fact_sig(0));',
              '(void)rp_S.tex[0][128];', 1, 'separate texture rebind invalidates fast identity'),
+            # 计算程序快路：摘要里每一项各去掉一次，对应的负对照用例必须变红；快路本身关掉，「换地址仍复用」那条必须变红。
+            ('cs-fast-path-disabled', 'struct last_ent *le = fast ? last_find(key, pc.session, pc.generation) : NULL;',
+             'struct last_ent *le = (fast && 0) ? last_find(key, pc.session, pc.generation) : NULL;', 1,
+             'CS new addresses and same-fact handles reuse the program without a request'),
+            ('cs-epoch-omitted', 'MIX(0xC5C5C5C5C5C5C5C5ull); MIX(s2a_source_epoch());',
+             'MIX(0xC5C5C5C5C5C5C5C5ull); (void)s2a_source_epoch();', 1, 'CS source poison advances the epoch'),
+            ('cs-source-key-omitted', '{ uint64_t k; memcpy(&k, rp_S.skey[5], 8); MIX(k); }',
+             '{ (void)rp_S.skey[5]; }', 1, 'changed CS source key recompiles'),
+            ('cs-ubo-use-omitted', '{ uint32_t m = 0; for (int i = 0; i < 16; i++) if (rp_S.ubo[5][i].size) m |= 1u << i; MIX(m); }',
+             '{ (void)rp_S.ubo[5]; }', 1, 'changed CS constant-buffer use recompiles'),
+            ('cs-unaligned-omitted', 'rp_S.ssbo[5][i].addr % pc->storage_buffer_offset_alignment) un = 1; MIX(un);',
+             'rp_S.ssbo[5][i].addr % pc->storage_buffer_offset_alignment) un = 1; MIX(un & 0);', 1, 'unaligned CS storage address recompiles'),
+            ('cs-pool-omitted', 'MIX(rp_S.tex_pool_n); MIX(rp_S.samp_pool_n); MIX(rp_S.tex_base);',
+             'MIX(0);', 1, 'CS pool size update recompiles'),
+            ('cs-combined-omitted', 'MIX(combined_fact_sig(5));', '(void)0;', 1, 'changed CS texture fact recompiles'),
+            ('cs-separate-omitted', 'MIX(sep_fact_sig(5));', '(void)0;', 1, 'changed CS separate texture fact recompiles'),
+            ('cs-separate-generation-omitted', 'const uint64_t sg = rp_tex_sep_gen[st], rg = rp_tex_reg_gen();',
+             'const uint64_t sg = st == 5 ? 0 : rp_tex_sep_gen[st], rg = rp_tex_reg_gen();', 1, 'changed CS separate texture fact recompiles'),
         ]
         for name, before, after, count, expected in changes:
             assert text.count(before) == count, (name, 'mutation anchor')

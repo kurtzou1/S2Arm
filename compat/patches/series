@@ -577,3 +577,12 @@
 20261112-2251-hwopus-hwacod-session.patch
 20261113-0107-frag-depth-register-by-targets.patch
 20261112-1859-psel-invalid-uid-list.patch
+20261113-0410-nim-shop-async-commands.patch
+20261113-0515-svc-gaps-resolver13-applet170-auddmg-input.patch
+20261113-2332-audio-dsp-neon-biquad-adpcm-sink.patch
+20261113-0659-hle-host-junk-filter.patch
+20261113-1107-am-cache-storage-max.patch
+20261113-1027-vi-cmd2103.patch
+20261114-0021-jcms-push-many.patch
+20261113-1957-nim-shop-family-events.patch
+20261113-2115-swkbd-native-config.patch

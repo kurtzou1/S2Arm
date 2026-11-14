@@ -2,6 +2,7 @@
 // Copyright 2026 S2Arm contributors
 using Ryujinx.HLE.HOS.Applets.SoftwareKeyboard;
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -129,6 +130,95 @@ namespace S2A.Services.Tests
             Check("独立软键盘接系统输入框：只弹一次、玩家没答不自动交、确定后按最长 3 截断交回", "弹框 1 次；刚返回 False / 0x480；没答 False / 0x480；答后 True / 结果 0「123」", got[0]);
             Check("独立软键盘接系统输入框：玩家取消 → 结果 1", "弹框 1 次；刚返回 False / 0x480；没答 False / 0x480；答后 True / 结果 1「Ryuj」", got[1]);
             Check("交给宿主的弹框参数（数字模式、最短 2、最长 3）", true, json.Contains("\"mode\":\"numeric\"") && json.Contains("\"min\":2") && json.Contains("\"max\":3"));
+        }
+
+        // S2Arm 11-13：20.0.0 起的独立键盘配置（0x530 字节，Switch 2 款都用）——文字段同旧布局，0x3AA 之后的字段挪了位置。
+        //   按旧布局读，「游戏要自己校验名字」（新 0x48D）取成旧 0x3D0（几乎总是 0），名字直接当最终结果交回、游戏还在等自己的校验 → 输名字卡住。
+        //   期望值按协议手写：开了自己校验 → 玩家答后先把「长度 + 文字」推进交互通道、不发状态事件、普通通道没东西；游戏推回校验结果后才交最终结果
+        [SvcCase]
+        private static void SwkbdForegroundNativeConfig()
+        {
+            byte[] native = new byte[0x530];
+            BinaryPrimitives.WriteInt32LittleEndian(native.AsSpan(0x3AC), 6);    // 最长
+            BinaryPrimitives.WriteInt32LittleEndian(native.AsSpan(0x3B0), 1);    // 最短
+            BinaryPrimitives.WriteInt32LittleEndian(native.AsSpan(0x3BC), 0x40); // 初始文字偏移
+            BinaryPrimitives.WriteInt32LittleEndian(native.AsSpan(0x3C0), 3);    // 初始文字长度
+            native[0x3AA] = 1;                                                   // UTF-8
+            native[0x48D] = 1;                                                   // 游戏自己校验
+            var dc = new SoftwareKeyboardConfig { SubmitText = "", HeaderText = "", SubtitleText = "", GuideText = "" };
+            Ryujinx.HLE.HOS.Applets.SoftwareKeyboardApplet.ApplyNativeConfig(ref dc, native);
+            Check("20.0.0 新布局配置逐字段：最长 / 最短 / UTF-8 / 初始文字偏移与长度 / 游戏自己校验",
+                "6 / 1 / True / 64 / 3 / True", $"{dc.StringLengthMax} / {dc.StringLengthMin} / {dc.UseUtf8} / {dc.InitialStringOffset} / {dc.InitialStringLength} / {dc.CheckText}");
+
+            var begun = new List<(long Id, string Json)>();
+            TextInput.BeginHook = (id, json) => { lock (begun) begun.Add((id, json)); return 1; };
+            TextInput.CancelHook = _ => { };
+            Encoding.ASCII.GetBytes("sm:\0").CopyTo(new Span<byte>(_game, 4));
+            uint sm = (uint)Svc(0x1F, 0, 0, (ulong)_game).Item2[1];
+            Reply goe = Call(sm, Msg.Cmif(1, Name8("appletOE")));
+            uint oe = goe.Move.Count == 1 ? goe.Move[0] : 0;
+            Msg cd = Msg.Cmif(0); cd.Type = 5;
+            int root = *(int*)Call(oe, cd).Data;
+            byte* buf = FakeNative.Alloc(0x2000);
+            uint evh = 0;
+            string got;
+            Reply Domain(Msg m, int obj) { m.DomainObject = obj; m.Write(_tlr); Svc(0x21, FakeNative.CookieOf(oe)); return Reply.ParseDomain(_tlr); }
+            int OutObj(Reply r) => *(int*)r.Data;
+            try
+            {
+                Msg opx = Msg.Cmif(0, Bytes(0UL)); opx.SendPid = true;
+                int proxy = OutObj(Domain(opx, root));
+                int creator = OutObj(Domain(Msg.Cmif(11), proxy));
+                int accessor = OutObj(Domain(Msg.Cmif(0, Bytes(0x11, 0)), creator));
+                int Storage(byte[] data)
+                {
+                    int sto = OutObj(Domain(Msg.Cmif(10, Bytes((long)data.Length)), creator));
+                    int acc = OutObj(Domain(Msg.Cmif(0), sto));
+                    data.CopyTo(new Span<byte>(buf, data.Length));
+                    Msg w = Msg.Cmif(10, Bytes(0UL)); w.A.Add(((ulong)buf, (ulong)data.Length));
+                    Domain(w, acc);
+                    return sto;
+                }
+                void Push(uint cmd, byte[] data) { Msg p = Msg.Cmif(cmd); p.InObjects.Add(Storage(data)); Domain(p, accessor); }
+                byte[] Read(Reply pop)
+                {
+                    int acc = OutObj(Domain(Msg.Cmif(0), OutObj(pop)));
+                    long size = *(long*)Domain(Msg.Cmif(0), acc).Data;
+                    new Span<byte>(buf, 0x2000).Clear();
+                    Msg rd = Msg.Cmif(11, Bytes(0UL)); rd.B.Add(((ulong)buf, (ulong)Math.Min(size, 0x2000)));
+                    Domain(rd, acc);
+                    return new Span<byte>(buf, (int)Math.Min(size, 0x2000)).ToArray();
+                }
+                string PopNormal() { Reply r = Domain(Msg.Cmif(101), accessor); if (r.Result != 0) return $"0x{r.Result:X}"; byte[] b = Read(r); return $"结果 {BitConverter.ToUInt32(b, 0)}「{Encoding.UTF8.GetString(b, 4, Array.IndexOf(b, (byte)0, 4) - 4)}」"; }
+                string PopInteractive() { Reply r = Domain(Msg.Cmif(104), accessor); if (r.Result != 0) return $"0x{r.Result:X}"; byte[] b = Read(r); long n = BitConverter.ToInt64(b, 0); return $"长 {n}「{Encoding.UTF8.GetString(b, 8, (int)n - 8)}」"; }
+
+                byte[] work = new byte[0x1000];
+                Encoding.Unicode.GetBytes("Pik").CopyTo(work, 0x40);
+                Push(100, Bytes(1u, 0x20u, 0u, 0x140010u, 0UL, 0UL));
+                Push(100, native);
+                Push(100, work);
+                Reply ev = Domain(Msg.Cmif(0), accessor);
+                evh = ev.Copy.Count == 1 ? ev.Copy[0] : 0;
+                bool Signaled() => evh != 0 && FakeNative.Events[FakeNative.CookieOf(evh)];
+                Domain(Msg.Cmif(10), accessor);   // Start
+                Thread.Sleep(300);
+                (long id, string js) = begun[^1];
+                TextInput.Answer(id, true, "小火龙");
+                Thread.Sleep(1000);
+                string asked = $"{Signaled()} / 普通 {PopNormal()} / 交互 {PopInteractive()}";
+                Push(103, new byte[0x7D8]);   // 游戏校验通过（结果 0）
+                Thread.Sleep(300);
+                got = $"{asked}；校验后 {Signaled()} / 普通 {PopNormal()}；初始文字 {(js.Contains("\"initial\":\"Pik\"") ? "带上" : "没带")}";
+            }
+            catch (InvalidOperationException e) { got = $"应答解析失败：{e.Message}"; }
+            finally
+            {
+                TextInput.BeginHook = null; TextInput.CancelHook = null;
+                if (evh != 0) FakeNative.HandleClose(evh);
+                FakeNative.Free(buf); FakeNative.HandleClose(oe); FakeNative.HandleClose(sm);
+            }
+            Check("20.0.0 新布局独立键盘、游戏自己校验：答后先进交互通道（UTF-8、长度含 8 字节头）、不发事件；校验通过后才交最终结果；初始文字按新偏移读到",
+                "False / 普通 0x480 / 交互 长 17「小火龙」；校验后 True / 普通 结果 0「小火龙」；初始文字 带上", got);
         }
 
         [SvcCase]

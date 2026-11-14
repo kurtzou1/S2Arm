@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """顶栏「故障报修」与报错页指引（11-13）：Mac / Windows 两端同一位置一个全局按钮，报错页统一一句指引。只读源码与共享规格，标准库。
 期望（按需求手写）：
-  ① 共享规格 launcher.items 有 report.button / report.hint，zh-Hans / en 都有；指引里用 {button} 引用按钮名（两份不会写岔），中文写「右上角」、英文写 top right
+  ① 共享规格 launcher.items 有 report.button / report.hint，zh-Hans / en 都有；指引里用 {button} 引用按钮名（两份不会写岔）。
+     不写位置（11-14 体验梳理：Windows 出包 / 失败 / 手机更新页没有顶栏，「右上角」指向不存在的按钮；这些页面就地有同名按钮）
   ② 指引文字只在一处生成：两端各只有一个函数读 report.hint（Mac BackendText.reportHint、Windows SharedText.ReportHint），别处不手抄、不直接读
-  ③ 凡有「上传给开发者」按钮的报错页（Mac CopyReportButton(model:…)、Windows CopyReportButton(…) 调用）同一文件里挂了指引，且个数不少于按钮
+  ③ 凡有「故障报修」按钮（原叫「上传给开发者」）的报错页（Mac CopyReportButton(model:…)、Windows CopyReportButton(…) 调用）同一文件里挂了指引，且个数不少于按钮
   ④ 顶栏：Mac topActions 的最后一个按钮、Windows 顶栏右侧那一排最后加进去的按钮，都是标识 top.report、文字取 report.button 的那个
      （Windows 各页实际渲染的核对在 launchers/windows/launcher/UI.Snapshots/ReportProbe.cs，门禁 launchers/windows/launcher/tests/run.py 跑）"""
 import json
@@ -27,7 +28,8 @@ class ReportButton(unittest.TestCase):
             self.assertIn(k, items)
             self.assertTrue(items[k]["zh-Hans"].strip() and items[k]["en"].strip(), k)
         self.assertIn("{button}", items["report.hint"]["zh-Hans"]); self.assertIn("{button}", items["report.hint"]["en"])
-        self.assertIn("右上角", items["report.hint"]["zh-Hans"]); self.assertIn("top right", items["report.hint"]["en"])
+        self.assertNotIn("右上角", items["report.hint"]["zh-Hans"]); self.assertNotIn("top right", items["report.hint"]["en"])
+        self.assertEqual(items["diag.upload.button"]["zh-Hans"], items["report.button"]["zh-Hans"])   # 页内按钮与顶栏按钮同名，指引说的就是眼前那个
 
     def test_hint_generated_in_one_place(self):   # ②
         files = list(MAC.rglob("*.swift")) + list(MAC_ADAPTER.rglob("*.swift")) + [p for p in WIN.rglob("*.cs") if "/obj/" not in str(p) and "/bin/" not in str(p)]

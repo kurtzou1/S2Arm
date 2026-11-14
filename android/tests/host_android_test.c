@@ -147,22 +147,21 @@ int main(void) {
     CHECK(api->display->set_console_mode(api->host, 1) == 0 && s2a_android_host_console_mode() == 1);
     CHECK(s2a_console_mode() == 1);   // 运行中切主机转给服务层（接口 v2.15；改前 -1）
 
-    // 前后台冻结策略：退后台且游戏开着失焦暂停才冻结；停机已开始后迟到的 onPause 不再冻结，
+    // 前后台冻结策略：退后台一律冻结（不看游戏的失焦暂停开关，#855）；停机已开始后迟到的 onPause 不再冻结，
     // 否则收尾线程等客机线程退出会卡到硬预算超时。
-    CHECK(s2a_android_foreground_action(0, 0, 0, 1) == S2A_ANDROID_FOREGROUND_FREEZE);
-    CHECK(s2a_android_foreground_action(0, 0, 1, 1) == S2A_ANDROID_FOREGROUND_KEEP);
-    CHECK(s2a_android_foreground_action(0, 0, 0, 0) == S2A_ANDROID_FOREGROUND_KEEP);
-    CHECK(s2a_android_foreground_action(0, 1, 0, 1) == S2A_ANDROID_FOREGROUND_KEEP);
-    CHECK(s2a_android_foreground_action(0, 1, 1, 1) == S2A_ANDROID_FOREGROUND_KEEP);
-    CHECK(s2a_android_foreground_action(1, 0, 1, 1) == S2A_ANDROID_FOREGROUND_UNFREEZE);
-    CHECK(s2a_android_foreground_action(1, 0, 0, 1) == S2A_ANDROID_FOREGROUND_KEEP);
+    CHECK(s2a_android_foreground_action(0, 0, 0) == S2A_ANDROID_FOREGROUND_FREEZE);   // 退后台一律冻（#855：游戏关了失焦暂停也冻）
+    CHECK(s2a_android_foreground_action(0, 0, 1) == S2A_ANDROID_FOREGROUND_KEEP);
+    CHECK(s2a_android_foreground_action(0, 1, 0) == S2A_ANDROID_FOREGROUND_KEEP);
+    CHECK(s2a_android_foreground_action(0, 1, 1) == S2A_ANDROID_FOREGROUND_KEEP);
+    CHECK(s2a_android_foreground_action(1, 0, 1) == S2A_ANDROID_FOREGROUND_UNFREEZE);
+    CHECK(s2a_android_foreground_action(1, 0, 0) == S2A_ANDROID_FOREGROUND_KEEP);
     // 时序：onPause 冻结 → stopGame 放开 → 迟到的 onPause 不得再冻结。
     int frozen = 0, freezes = 0, unfreezes = 0, stop_started = 0;
-    int action = s2a_android_foreground_action(0, stop_started, frozen, 1);
+    int action = s2a_android_foreground_action(0, stop_started, frozen);
     if (action == S2A_ANDROID_FOREGROUND_FREEZE) { frozen = 1; freezes++; }
     stop_started = 1;
     if (frozen) { frozen = 0; unfreezes++; }   // stopGame 的 foreground_unfreeze()
-    action = s2a_android_foreground_action(0, stop_started, frozen, 1);
+    action = s2a_android_foreground_action(0, stop_started, frozen);
     if (action == S2A_ANDROID_FOREGROUND_FREEZE) { frozen = 1; freezes++; }
     CHECK(freezes == 1 && unfreezes == 1 && !frozen);
 

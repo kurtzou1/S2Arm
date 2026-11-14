@@ -11,6 +11,9 @@ public final class GameActivity extends MainActivity {
         判 mismatch stopGame；带它在 CONTROL_EXTRAS 里 → 控制 intent、不动会话（#1474）。 */
     static final String ICON_RESUME_EXTRA = "s2arm.icon_resume";
 
+    /** 玩家在库页确认「结束当前游戏、启动另一款」：正在跑的那局收到后走正常收局（不在调试参数名单里，正式包可用）。 */
+    static final String SWITCH_EXTRA = "org.s2arm.android.SWITCH_GAME";
+
     static Intent launch(Context context, Intent options, String titleId) {
         Intent intent = new Intent(context, GameActivity.class);
         if (options != null && options.getExtras() != null) intent.putExtras(options.getExtras());

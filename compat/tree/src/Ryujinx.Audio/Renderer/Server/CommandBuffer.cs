@@ -388,6 +388,31 @@ namespace Ryujinx.Audio.Renderer.Server
         }
 
         /// <summary>
+        /// Generate a new <see cref="MultiTapBiquadFilterCommand"/> covering two channels packed in vector lanes.
+        /// </summary>
+        /// <remarks>
+        /// S2Arm (双二阶跨声道打包)：两声道一条命令（原地滤波），见 <see cref="MultiTapBiquadFilterCommand.InitializeStereo"/>。
+        /// 估时按单条命令口径是两声道的活，按两倍记。
+        /// </remarks>
+        public void GenerateMultiTapBiquadFilterStereo(
+            int baseIndex,
+            ReadOnlySpan<BiquadFilterParameter2> filters,
+            Memory<BiquadFilterState> biquadFilterStateMemory0,
+            Memory<BiquadFilterState> biquadFilterStateMemory1,
+            int bufferOffset0,
+            int bufferOffset1,
+            ReadOnlySpan<bool> isInitialized,
+            int nodeId)
+        {
+            MultiTapBiquadFilterCommand command = _multiTapBiquadFilterCommandPool.Allocate().InitializeStereo(
+                baseIndex, filters, biquadFilterStateMemory0, biquadFilterStateMemory1, bufferOffset0, bufferOffset1, isInitialized, nodeId);
+
+            command.EstimatedProcessingTime = _commandProcessingTimeEstimator.Estimate(command) * 2;
+
+            AddCommand(command);
+        }
+
+        /// <summary>
         /// Generate a new <see cref="MixRampGroupedCommand"/>.
         /// </summary>
         /// <param name="mixBufferCount">The mix buffer count.</param>

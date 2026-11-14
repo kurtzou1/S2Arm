@@ -36,6 +36,7 @@ sys.exit({code})
         with patch.object(self.c, 'emit', wraps=self.c.emit) as emit:
             self.c.run(self.child(p), env=env, timeout=60)
         self.assertEqual(self.last_progress(emit), (N, N))
+        self.assertEqual([c.kwargs for c in emit.call_args_list if 'done' in c.kwargs][-1]['unit'], '项')   # 普通计数照旧「项」
         self.assertEqual(self.c._counters[STAGE]['done'], N)
 
     def test_failed_tool_still_reports_how_far_it_got(self):
@@ -65,6 +66,7 @@ with open(p,'a',encoding='utf-8') as f:
             self.c.run([sys.executable, '-c', script], env=env, timeout=60)
         last = [c.kwargs for c in emit.call_args_list if 'done' in c.kwargs][-1]
         self.assertEqual((last['done'], last['total']), (20, 100))
+        self.assertEqual(last['unit'], 'MB')   # #944：编批库计数是源码 MB，不写「项」
         self.assertNotIn('activity', last)
         self.assertIsNone(self.c._batch_activity.data)
 

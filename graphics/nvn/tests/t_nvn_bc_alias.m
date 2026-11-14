@@ -13,6 +13,7 @@
 //   A 无人深空次序：BC 贴图的存储里先有 CPU 留下的旧字节（0xA5），GPU 写 RG32UI 之后 BC 贴图才第一次被用 → 应 = 已知块
 //   B 增量：BC 贴图先被用过一次（存储全 0，读回全 0），之后 GPU 写 RG32UI，再用 → 应 = 已知块（第一次读回应全 0）
 //   C 负对照：关掉同步（g_bcal_off），按 A 的次序 → 读回不等于已知块（说明 A 的通过靠的是同步，不是巧合）
+//   E 写入者早已出了已释放贴图环：GPU 写 RG32UI 后 Finalize，再过 600 张贴图，BC 贴图才第一次用 → 应 = 已知块（#951 菜单缩略图）
 //   D CPU 后写为准：GPU 写 RG32UI 之后，CPU 往同一段存储写进另外 4 个块（8x8 BC1 只占一个 GOB，块 (bx, by) 在 GOB 内偏移 8·(2·by + bx)），BC 贴图再第一次被用 → 应 = CPU 写的块
 #include "../gfx/nvn/nvn_mtl.m"
 #include "../gfx/nvn/nvn_protos.h"
@@ -114,6 +115,14 @@ int main(void) { @autoreleasepool {
       tex(&bc, NVN_FORMAT_RGBA_DXT1, W, 7 << 20); tex(&rg, NVN_FORMAT_RG32UI, 2, 7 << 20);
       gpu_write(&rg); memcpy(mem + (7 << 20), cpu, 32); API(nvnMemoryPoolFlushMappedRange)(&pool, 7 << 20, 512);
       read_blocks(&bc, got); CHECK(!memcmp(got, cpu, 32), "D GPU 写之后 CPU 又改写了这段存储：BC 贴图读回的是 CPU 写的块（不被 GPU 那次写盖掉）"); }
+    // E：写入者早已出了「已释放贴图」环（11-13 #951 菜单缩略图）：GPU 写 RG32UI 后游戏 Finalize 它，之后又有 600 张贴图写过、Finalize（环只留最近 512 张），
+    //   BC 贴图这时才第一次用 → 仍应 = 已知块（原先按序号 / 共享表都取不到写入者，字节不拷、读成旧字节）
+    { static NVNtexture bc, rg, dummy; memset(mem + (8 << 20), 0xA5, 4096); tex(&bc, NVN_FORMAT_RGBA_DXT1, W, 8 << 20); tex(&rg, NVN_FORMAT_RG32UI, 2, 8 << 20);
+      gpu_write(&rg); API(nvnTextureFinalize)(&rg);
+      for (int i = 0; i < 600; i++) { tex(&dummy, NVN_FORMAT_RG32UI, 2, (9 << 20) + (ptrdiff_t)i * 4096); gpu_write(&dummy); API(nvnTextureFinalize)(&dummy); }
+      read_blocks(&bc, got);
+      CHECK(!memcmp(got, want, 32), "E 写入者 Finalize 后又过了 600 张贴图、BC 贴图才用：读回的块 = 写进去的 4 个块");
+      int bad = sample(&bc); CHECK(!bad, "E 64 个像素与手算一致（不符 %d）", bad); }
     printf("%s t_nvn_bc_alias：%u 项，不符 %u（Metal %s）\n", failures ? "✗" : "✓", checks, failures, g_m3 ? "3" : "4");
     return failures != 0;
 } }

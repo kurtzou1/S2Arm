@@ -11,7 +11,7 @@
 "cheats.import" = "Import .txt";
 "cheats.import.badItem" = "%@ (%@)";
 "cheats.import.failed" = "Some files weren’t imported";
-"cheats.import.failed.message" = "%@\n\nNot Atmosphere-format cheat text (needs an [entry name] and code lines).";
+"cheats.import.failed.message" = "%@";
 "cheats.status.active" = "Active";
 "cheats.status.addressNotReady" = "Address not ready";
 "cheats.status.badFormat" = "Invalid format";
@@ -121,7 +121,6 @@
 "vpad.layout.err.buttonCount" = "All 14 buttons are required; LS/RS may be added";
 "vpad.layout.err.buttonFields" = "Invalid button fields, ranges or IDs; IDs must be unique";
 "vpad.layout.err.buttonMissing" = "Required buttons are missing";
-"vpad.layout.err.exists" = "A layout with this id already exists. Change the id in the JSON first; the existing layout was not overwritten.";
 "vpad.layout.err.file" = "A layout must be a regular JSON file of 64 KiB or less";
 "vpad.layout.err.fileName" = "The file name must match the layout id";
 "vpad.layout.err.id" = "Invalid layout id";
@@ -130,11 +129,9 @@
 "vpad.layout.err.pickFile" = "Choose a regular JSON file of 64 KiB or less";
 "vpad.layout.err.schema" = "Invalid layout version or top-level fields (schemaVersion 1 required)";
 "vpad.layout.err.sensitivity" = "Sensitivity must be 0.5–2";
-"vpad.layout.err.size" = "Layout files can’t be larger than 64 KiB";
 "vpad.layout.err.stickCount" = "Both left and right floating sticks are required";
 "vpad.layout.err.stickFields" = "Invalid stick fields, area or radius";
 "vpad.layout.err.stickOffscreen" = "Stick position is off screen";
-"vpad.layout.err.stickOverlap" = "Left and right stick areas can’t overlap";
 "vpad.layout.err.stickValues" = "Dead zone must be 0–0.4, outer saturation 0.5–1, response exponent 0.5–3";
 "vpad.layout.err.theme" = "No such color";
 "vpad.layout.error" = "%@: %@";
@@ -227,9 +224,9 @@
 
 /* 宿主其余界面（#316 第二轮）：设置页、提示页 / 加载页、存档管理、手柄连接、诊断、联机、文字输入等 */
 "app.fpsCap.ladder" = "This device can't hold 60 FPS steadily right now, so the game is back at its native frame rate. It will try 60 FPS again automatically once things are stable.";
-"app.fpsCap.lowPower" = "Low Power Mode is on, so the game is temporarily back at its native frame rate. 60 FPS resumes automatically when you turn off Low Power Mode.";
 "app.fpsCap.restored" = "60 FPS is back.";
-"app.fpsCap.thermal" = "The phone is too hot (critical), so the game is temporarily back at its native frame rate. 60 FPS resumes automatically once it cools down.";
+"app.lowRam.title" = "This device may not have enough memory";
+"app.lowRam.body" = "This game needs more memory than this device has. It will still start, but it may stutter or be closed by the system.";
 "app.gpuStop.body" = "Swipe this app away in the app switcher and open the game again.";
 "app.gpuStop.title" = "Graphics error — stopped";
 "app.library.broken.title" = "Game files are incomplete";
@@ -289,6 +286,8 @@
 "error.sentence" = "%@. %@";
 "img.importFolder" = "Import Here";
 "img.scanFailed.title" = "Couldn't import the game file";
+"img.noShaders.title" = "This game file is incomplete";
+"img.noShaders.body" = "“%@” is incomplete. Replace it with the “<game name>.img” from the “S2Arm Self-Sign Export” folder on your computer, or connect your phone and click “Send to iPhone” in S2Arm on your computer.";
 "games.repair.done.title" = "Game folder repaired";
 "games.repair.done.body" = "The game folder belonged to a system account, so S2Arm could not write to it and installing never started. It has been moved to a new folder owned by S2Arm (%u files, sharing the original data, so no extra space). You can continue installing. S2Arm cannot delete the old folder; it is cleared the next time you connect to your computer.";
 "games.repair.failed.title" = "Couldn't repair the game folder";
@@ -301,13 +300,15 @@
 "diag.export" = "Export diagnostics";
 "diag.prompt.abnormalExit" = "S2Arm didn’t quit normally last time (it crashed, froze or was closed by the system)";
 "diag.prompt.crash" = "The system reported that S2Arm crashed or froze last time";
-"diag.prompt.message" = "%@. This uploads run logs and crash reports — no saves, keys or game files — and gives you a short code.";
+"diag.prompt.message" = "%@. This uploads run logs, crash reports and the list of graphics pipelines the games used (shader IDs only) — no saves, keys or game files — and gives you a short code.";
 "diag.prompt.no" = "No thanks";
-"diag.prompt.send" = "Send to developers";
+"diag.prompt.send" = "Upload to developers";
 "diag.prompt.title" = "Send us diagnostics from last time?";
-"diag.upload" = "Send to developers";
-"diag.upload.confirm.message" = "This uploads logs from the last few runs, crash reports, and device and version info — no saves, keys or game files. You’ll get a short code; post it in your GitHub issue or the group so we can find these diagnostics.";
-"diag.upload.confirm.title" = "Send to developers?";
+"diag.upload" = "Upload to developers";
+"diag.upload.confirm.message" = "This uploads logs from the last few runs, crash reports, device and version info, and the list of graphics pipelines the games used (shader IDs only) — no saves, keys or game files. You’ll get a short code; post it in your GitHub issue or the group so we can find these diagnostics.";
+"diag.upload.confirm.title" = "Upload to developers?";
+"diag.upload.cancelSending" = "Uploading… (tap to cancel)";
+"diag.upload.cancelled" = "Upload cancelled. You can export the diagnostics package and send it to us yourself.";
 "diag.upload.copy" = "Copy code";
 "diag.upload.done.message" = "Code: %@\nTap Post on GitHub and the code is filled in for you, or copy the code into your issue or the group. It’s valid for 7 days.\nRepository: %@";
 "diag.upload.done.title" = "Uploaded";
@@ -316,8 +317,12 @@
 "diag.upload.fail.network" = "Couldn’t reach the diagnostics server (%@). If you were just asked whether S2Arm may use wireless data, allow it and tap Try again — or export the diagnostics bundle and send it to us yourself.";
 "diag.upload.fail.rejected" = "The server didn’t accept the diagnostics bundle (%@). You can export it and send it to us yourself instead.";
 "diag.upload.fail.server" = "The diagnostics server had an error (HTTP %d). You can export the diagnostics bundle and send it to us yourself instead.";
+"diag.upload.fail.timeout" = "The upload didn't finish within %d seconds (the network is slow or the connection stalled), so it was stopped. You can try again or export the diagnostics package instead.";
 "diag.upload.fail.title" = "Upload didn’t work";
 "diag.upload.go" = "Upload";
+"diag.report.title" = "Report a Problem";
+"diag.report.message" = "We’ll upload this device’s logs, device info and the list of graphics pipelines the games used (shader IDs only) to help find the cause, then give you a short code. You can write a sentence about what happened (optional).";
+"diag.report.placeholder" = "What happened? (optional)";
 "diag.upload.post" = "Post on GitHub";
 "diag.upload.retry" = "Try again";
 "dprompt.expiry.body" = "Time left: %@. After it expires the game won’t open, but your saves are safe: connect the phone and click “Install on iPhone” again, or refresh in AltStore.";
@@ -449,7 +454,8 @@
 "settings.toggle.metalHud" = "Show Metal performance HUD";
 "settings.toggle.phoneHaptics" = "Phone haptics";
 "settings.toggle.touchHud" = "Touch diagnostics";
-"settings.widen.blocked" = "Full screen has known issues in this game and can’t be turned on yet";
+"settings.widen.blocked" = "Full screen has known issues in this game; you can still turn it on";
+"settings.widen.blocked.message" = "Takes effect the next time you start the game. If the picture stretches or gets cut off, the game falls back to 16:9 by itself, or turn this off again.";
 "textinput.header" = "Enter Text";
 "textinput.min" = "At least %ld characters";
 "textinput.ok" = "OK";
@@ -466,3 +472,15 @@
 /* Duo shared layout settings and split touch editor */
 "vpad.layouts.split.title" = "Split-screen touch layout";
 "vpad.layouts.split.footer" = "Edit the lower controls area. Positions are saved separately from the regular layout; touch mode and stick response are shared.";
+"settings.group.language" = "Language";
+"settings.footer.language" = "Interface language is the language of S2Arm's menus. “Same as system” follows your iPhone's language (Chinese stays Chinese, other languages show English). Game language follows your iPhone's system language by default (Japanese, Korean and others included), or the interface language if you picked one in the app. If names in a save imported from a Switch look garbled, set the game language to the one that Switch used.";
+"settings.language" = "Interface language";
+"settings.language.system" = "Same as system";
+"settings.language.zhHans" = "简体中文";
+"settings.language.zhHant" = "繁體中文";
+"settings.language.en" = "English";
+"settings.language.restart" = "Close and reopen S2Arm to use the new language.";
+"settings.gameLanguage" = "Game language";
+"settings.gameLanguage.system" = "Same as system";
+"settings.gameLanguage.restart" = "Takes effect the next time you open this game.";
+"settings.gameLanguage.ja" = "日本語";

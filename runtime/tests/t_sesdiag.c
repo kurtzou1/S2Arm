@@ -22,6 +22,12 @@ int main(void) {
     s2a_sesmark_set(dir, S2A_SESMARK_FG); CHECK(s2a_sesmark_prev(dir) == S2A_SESMARK_FG, "起局写 fg → 下次读到 fg（死在前台）");
     s2a_sesmark_set(dir, S2A_SESMARK_BG); CHECK(s2a_sesmark_prev(dir) == S2A_SESMARK_BG, "进后台写 bg → 读到 bg（后台被划掉不算异常）");
     s2a_sesmark_set(dir, S2A_SESMARK_NONE); CHECK(s2a_sesmark_prev(dir) == S2A_SESMARK_NONE, "优雅退出删掉 → 读到无");
+    // 只解包的起动不算一局：不写也不删，上一局留下的照原样留给下一次正式起局
+    setenv("S2A_PACK_APPLY_ONLY", "1", 1);
+    s2a_sesmark_set(dir, S2A_SESMARK_FG); CHECK(s2a_sesmark_prev(dir) == S2A_SESMARK_NONE, "只解包起动写 fg 不落盘 → 下次正式起局读到无（不误判上次死在前台）");
+    unsetenv("S2A_PACK_APPLY_ONLY"); s2a_sesmark_set(dir, S2A_SESMARK_FG); setenv("S2A_PACK_APPLY_ONLY", "1", 1);
+    s2a_sesmark_set(dir, S2A_SESMARK_NONE); CHECK(s2a_sesmark_prev(dir) == S2A_SESMARK_FG, "上一局真死在前台、中间夹一次只解包起动 → 标记仍是 fg（不被抹掉）");
+    unsetenv("S2A_PACK_APPLY_ONLY"); s2a_sesmark_set(dir, S2A_SESMARK_NONE);
 
     // 200 MB 假上一局日志：头一行标记 + 一次早心跳，中间全是挂死后的红行，尾部最后一次心跳与收尾
     char log[1200]; snprintf(log, sizeof log, "%s/host-20261107-081200.log", dir);

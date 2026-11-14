@@ -71,12 +71,17 @@ public sealed partial class EnvironmentWindow
                 return row;
             }
             var exported = false;
+            // 玩家写的一句「发生了什么」（选填，11-13 维护者，同 Mac UploadDiagnosticsSheet）：作业层写进 manifest.json 的 note，取件放在定位卡最上面；不填照样能传
+            var note = new TextBox { PlaceholderText = T("diag.upload.notePlaceholder"), AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = 64, MaxHeight = 140 };
+            AutomationId(note, "diag.upload.note");
             void Confirm()
             {
                 body.Children.Clear();
                 body.Children.Add(Label(T("diag.upload.button"), 20));
                 body.Children.Add(Muted(T("diag.upload.what"), 14));
                 body.Children.Add(Muted(T("diag.upload.not"), 14));
+                body.Children.Add(Label(T("diag.upload.noteLabel"), 14));
+                body.Children.Add(note);
                 var cancel = Action("diag.upload.cancel", "diag.upload.cancel"); cancel.Click += (_, _) => dialog.Close();
                 var send = Action("diag.upload.send", "diag.upload.send", true); send.Click += async (_, _) => await Send();
                 body.Children.Add(Row(cancel, send));
@@ -86,13 +91,20 @@ public sealed partial class EnvironmentWindow
                 body.Children.Clear();
                 body.Children.Add(Label(T("diag.upload.button"), 20));
                 body.Children.Add(Muted(T("diag.upload.sending"), 14));
+                // 11-13：卡在这一步（网慢 / 代理半通）原先没有任何出口；「取消」或关窗都停掉作业（RunAsync 取消即结束作业进程树），作业层另有 90 秒总时限
+                using var stop = new CancellationTokenSource();
+                var cancelSending = Action("diag.upload.cancel", "diag.upload.cancelSending"); cancelSending.Click += (_, _) => stop.Cancel();
+                body.Children.Add(Row(cancelSending));
+                EventHandler closed = (_, _) => stop.Cancel();
+                dialog.Closed += closed;
                 var fields = new Dictionary<string, object?> { ["extra"] = ReportExtra() };
                 if (gameId is not null) fields["gameId"] = gameId;
                 if (operations is not null) fields["operations"] = operations; else { var f = fallback(); if (!string.IsNullOrWhiteSpace(f)) fields["summary"] = f; }
+                if (!string.IsNullOrWhiteSpace(note.Text)) fields["note"] = note.Text.Trim();
                 string? code = null, why = null, issueUrl = null, repo = null;
                 try
                 {
-                    var job = await LibraryJobClient.RunAsync(paths, privateRoot, connectedFolder ?? Path.Combine(privateRoot, "unconfigured"), libraryId, "diagnosticsUpload", null, CancellationToken.None, fields: fields);
+                    var job = await LibraryJobClient.RunAsync(paths, privateRoot, connectedFolder ?? Path.Combine(privateRoot, "unconfigured"), libraryId, "diagnosticsUpload", null, stop.Token, fields: fields);
                     if (job.Report.Succeeded && job.Report.Result.ValueKind == JsonValueKind.Object && job.Report.Result.TryGetProperty("code", out var c) && c.ValueKind == JsonValueKind.String)
                     {
                         code = c.GetString();
@@ -104,7 +116,8 @@ public sealed partial class EnvironmentWindow
                 }
                 catch (Exception error) when (error is LibraryProtocolException or IOException or UnauthorizedAccessException or ArgumentException or
                     InvalidOperationException or OperationCanceledException or System.ComponentModel.Win32Exception)
-                { why = error.Message; }
+                { why = stop.IsCancellationRequested ? T("diag.upload.cancelled") : error.Message; }
+                dialog.Closed -= closed;
                 body.Children.Clear();
                 body.Children.Add(Label(T("diag.upload.button"), 20));
                 if (!string.IsNullOrEmpty(code))

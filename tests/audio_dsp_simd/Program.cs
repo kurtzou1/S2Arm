@@ -1,22 +1,30 @@
 // Audio DSP kernels (compat/tree/src/Ryujinx.Audio/Renderer/Dsp): the S2Arm AdvSimd fast paths (S2A_AUDIO_DSP_FAST,
 // default on) must be bit-identical to the upstream scalar loops for every kernel they gate:
 //   resample default quality (4 taps) and high quality (8 taps), 5.1 -> stereo downmix, mix ramp, volume ramp,
-//   and the device-sink float -> int16 saturate + stereo interleave.
+//   the device-sink float -> int16 saturate + stereo interleave, the 6-channel (5.1) device interleave (TBL gather),
+//   the two-channel packed multi-stage biquad (Vector64 lanes, stage 1 fused onto stage 0's lanes), and the
+//   ADPCM frame nibble unpack (vector unpack + scale, scalar prediction chain).
 // Expected values come from the scalar reference transcribed here from the upstream loops (independent of the
 // kernels under test) and, for the mix kernels, also from the tree's own scalar path (S2ADspMixHelper.*Scalar).
 // Adversarial inputs: rounding midpoints everywhere (Math.Round default = round-half-to-even: x.5 must round to
 // even, not away from zero), 0, +-short.MaxValue/MinValue, NaN and +-Inf (saturate must give 0 / +-32767/-32768),
 // ratios on all three LUT boundaries (1.0, 1.333313) and random, fractions spanning the 128 phase slots, sample
-// counts with scalar tails (n % 4 == 1..3 for 4-lane kernels, n % 8 == 1..7 for the interleave), ramps 0 / negative
-// / tiny / huge, volume 0.
-// The wiring check compares the public dispatchers (ResamplerHelper.Resample, S2ADspMixHelper.*) against the direct
-// kernel calls; it runs green under the default env (fast path on) and under S2A_AUDIO_DSP_FAST=0 (the test script
+// counts with scalar tails (n % 4 == 1..3 for 4-lane kernels, n % 8 == 1..7 for the interleaves), ramps 0 / negative
+// / tiny / huge, volume 0, biquad states/inputs with NaN and +-Inf (NaN compared as is-NaN only: the JIT may commute
+// scalar adds and pick the other NaN payload, same as upstream's audio_dsp_fast), ADPCM streams with mid-frame
+// resumes (odd nibble alignment), int32 overflow in the prediction chain, and the last frame's 7-byte tail that
+// falls back to the scalar loop (the 8-byte vector read needs one extra byte).
+// The wiring check compares the public dispatchers (ResamplerHelper.Resample, S2ADspMixHelper.*,
+// S2ADspBiquadHelper.ProcessBiquadFilterStereo, AdpcmHelper.Decode) against the direct kernel calls / transcribed
+// references; it runs green under the default env (fast path on) and under S2A_AUDIO_DSP_FAST=0 (the test script
 // runs the binary twice). On non-ARM64 there is no AdvSimd: prints off and returns 0.
 using System;
 using System.Diagnostics;
 using System.Runtime.Intrinsics.Arm;
 using Ryujinx.Audio.Renderer.Dsp;
+using Ryujinx.Audio.Renderer.Dsp.State;
 using Ryujinx.Audio.Renderer.Parameter;
+using Ryujinx.Common.Memory;
 
 static class P
 {
@@ -571,6 +579,593 @@ static class P
         if (S2ADspFast.On) S2ADspMixHelper.SaturateInterleaveStereoAdvSimd(wantOut, downIn, input, n2);
         else S2ADspMixHelper.SaturateInterleaveStereoScalar(wantOut, downIn, input, 0, n2);
         CheckShorts($"wiring saturate-interleave {mode}", wantOut, dispOut);
+
+        // Biquad stereo dispatcher (two channels packed in vector lanes; fallback = per-channel multi-stage loop)
+        BiquadFilterParameter2[] bqParams =
+        [
+            MakeBiquadParameter(0.9f, -0.4f, 0.2f, 0.3f, -0.1f),
+            MakeBiquadParameter(0.7f, 0.25f, -0.125f, -0.2f, 0.05f),
+        ];
+        var dispBqStates0 = new BiquadFilterState[2];
+        var dispBqStates1 = new BiquadFilterState[2];
+        foreach (var st in new[] { dispBqStates0, dispBqStates1 })
+        {
+            for (int i = 0; i < 2; i++)
+            {
+                st[i].State0 = 0.1f;
+                st[i].State1 = -0.2f;
+                st[i].State2 = 0.3f;
+                st[i].State3 = -0.4f;
+            }
+        }
+
+        float[] dispBq0 = new float[n2], dispBq1 = new float[n2];
+        var wantBqStates0 = (BiquadFilterState[])dispBqStates0.Clone();
+        var wantBqStates1 = (BiquadFilterState[])dispBqStates1.Clone();
+        S2ADspBiquadHelper.ProcessBiquadFilterStereo(bqParams, dispBqStates0, dispBqStates1, dispBq0, dispBq1, downIn, input, n2);
+        float[] wantBq0 = new float[n2], wantBq1 = new float[n2];
+        if (S2ADspFast.On)
+        {
+            S2ADspBiquadHelper.ProcessBiquadFilterStereoAdvSimd(bqParams, wantBqStates0, wantBqStates1, wantBq0, wantBq1, downIn, input, n2);
+        }
+        else
+        {
+            S2ADspBiquadHelper.ProcessBiquadFilterStereoScalar(bqParams, wantBqStates0, wantBqStates1, wantBq0, wantBq1, downIn, input, n2);
+        }
+        CheckFloats($"wiring biquad stereo {mode} out0", wantBq0, dispBq0);
+        CheckFloats($"wiring biquad stereo {mode} out1", wantBq1, dispBq1);
+        for (int i = 0; i < 2; i++)
+        {
+            CheckState($"wiring biquad stereo {mode} ch0 stage{i}", wantBqStates0[i], dispBqStates0[i], false);
+            CheckState($"wiring biquad stereo {mode} ch1 stage{i}", wantBqStates1[i], dispBqStates1[i], false);
+        }
+
+        // 6-channel device interleave dispatcher
+        short[] disp6 = new short[n2 * 6];
+        S2ADspMixHelper.SaturateInterleave6(disp6, downIn, input, downIn, input, downIn, input, n2);
+        short[] want6 = new short[n2 * 6];
+        if (S2ADspFast.On) S2ADspMixHelper.SaturateInterleave6AdvSimd(want6, downIn, input, downIn, input, downIn, input, n2);
+        else S2ADspMixHelper.SaturateInterleave6Scalar(want6, downIn, input, downIn, input, downIn, input, 0, n2);
+        CheckShorts($"wiring saturate-interleave6 {mode}", want6, disp6);
+    }
+
+    // ---- new kernels: biquad stereo packing / adpcm frame unpack / 6ch device interleave ------------
+
+    // NaN payload may differ between the scalar and vector paths (the JIT may commute scalar adds and pick the
+    // other NaN operand); compare NaN as is-NaN only, like upstream's audio_dsp_fast.
+    static void CheckFloatsAnyNan(string what, ReadOnlySpan<float> want, ReadOnlySpan<float> got)
+    {
+        cases++;
+        for (int i = 0; i < want.Length; i++)
+        {
+            bool wantNaN = float.IsNaN(want[i]);
+            if (wantNaN != float.IsNaN(got[i]) || (!wantNaN && BitConverter.SingleToInt32Bits(want[i]) != BitConverter.SingleToInt32Bits(got[i])))
+            {
+                Fail(what, i, $"{want[i]:R} (0x{BitConverter.SingleToInt32Bits(want[i]):X8})", $"{got[i]:R} (0x{BitConverter.SingleToInt32Bits(got[i]):X8})");
+                return;
+            }
+        }
+    }
+
+    static bool CheckState(string what, BiquadFilterState want, BiquadFilterState got, bool anyNaN)
+    {
+        cases++;
+        for (int f = 0; f < 4; f++)
+        {
+            float w = f switch { 0 => want.State0, 1 => want.State1, 2 => want.State2, _ => want.State3 };
+            float g = f switch { 0 => got.State0, 1 => got.State1, 2 => got.State2, _ => got.State3 };
+            bool bad = anyNaN ? float.IsNaN(w) != float.IsNaN(g) : BitConverter.SingleToInt32Bits(w) != BitConverter.SingleToInt32Bits(g);
+            if (bad)
+            {
+                Fail($"{what} state{f}", 0, $"{w:R}", $"{g:R}");
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // upstream multi-stage biquad loop, transcribed (two channels x two stages, stage k>0 reads the output buffer)
+    static void RefBiquadStereo(BiquadFilterParameter2[] parameters, BiquadFilterState[] states0, BiquadFilterState[] states1, float[] input0, float[] input1, float[] output0, float[] output1, int n)
+    {
+        for (int ch = 0; ch < 2; ch++)
+        {
+            float[] input = ch == 0 ? input0 : input1;
+            float[] output = ch == 0 ? output0 : output1;
+            BiquadFilterState[] states = ch == 0 ? states0 : states1;
+
+            for (int stageIndex = 0; stageIndex < 2; stageIndex++)
+            {
+                Span<float> numeratorSpan = parameters[stageIndex].Numerator.AsSpan();
+                Span<float> denominatorSpan = parameters[stageIndex].Denominator.AsSpan();
+
+                float a0 = numeratorSpan[0], a1 = numeratorSpan[1], a2 = numeratorSpan[2];
+                float b1 = denominatorSpan[0], b2 = denominatorSpan[1];
+                float s0 = states[stageIndex].State0, s1 = states[stageIndex].State1, s2 = states[stageIndex].State2, s3 = states[stageIndex].State3;
+                float[] src = stageIndex != 0 ? output : input;
+
+                for (int i = 0; i < n; i++)
+                {
+                    float x = src[i];
+                    float y = x * a0 + s0 * a1 + s1 * a2 + s2 * b1 + s3 * b2;
+
+                    s1 = s0; s0 = x; s3 = s2; s2 = y;
+
+                    output[i] = y;
+                }
+
+                states[stageIndex].State0 = s0;
+                states[stageIndex].State1 = s1;
+                states[stageIndex].State2 = s2;
+                states[stageIndex].State3 = s3;
+            }
+        }
+    }
+
+    static BiquadFilterParameter2 MakeBiquadParameter(float n0, float n1, float n2, float d0, float d1)
+    {
+        var parameter = new BiquadFilterParameter2 { Enable = true, Numerator = new Array3<float>(), Denominator = new Array2<float>() };
+        parameter.Numerator.AsSpan()[0] = n0;
+        parameter.Numerator.AsSpan()[1] = n1;
+        parameter.Numerator.AsSpan()[2] = n2;
+        parameter.Denominator.AsSpan()[0] = d0;
+        parameter.Denominator.AsSpan()[1] = d1;
+        return parameter;
+    }
+
+    static void TestBiquadStereo(Random rnd)
+    {
+        int[] counts = [0, 1, 2, 3, 4, 5, 7, 8, 15, 31, 239, 240, 241, 247];
+
+        // special parameter sets: unity passthrough, zero coefficients, huge/tiny/NaN coefficients
+        BiquadFilterParameter2[][] parameterSets =
+        [
+            [MakeBiquadParameter(1f, 0f, 0f, 0f, 0f), MakeBiquadParameter(1f, 0f, 0f, 0f, 0f)],
+            [MakeBiquadParameter(0f, 0f, 0f, 0f, 0f), MakeBiquadParameter(0.5f, 0.25f, 0.125f, -0.3f, 0.1f)],
+            [MakeBiquadParameter(float.NaN, 1e30f, -1e30f, 1e-30f, 2f), MakeBiquadParameter(1f, float.PositiveInfinity, 0f, float.NegativeInfinity, 1e38f)],
+        ];
+
+        for (int round = 0; round < 240; round++)
+        {
+            int n = counts[round % counts.Length];
+            bool anyNaN = round % 8 == 5;
+            bool inPlace = round % 5 == 4;
+
+            BiquadFilterParameter2[] parameters;
+            if (round % 3 == 2)
+            {
+                parameters =
+                [
+                    MakeBiquadParameter(rnd.NextSingle() * 4f - 2f, rnd.NextSingle() * 4f - 2f, rnd.NextSingle() * 4f - 2f, rnd.NextSingle() * 2f - 1f, rnd.NextSingle() * 2f - 1f),
+                    MakeBiquadParameter(rnd.NextSingle() * 4f - 2f, rnd.NextSingle() * 4f - 2f, rnd.NextSingle() * 4f - 2f, rnd.NextSingle() * 2f - 1f, rnd.NextSingle() * 2f - 1f),
+                ];
+            }
+            else
+            {
+                parameters = parameterSets[round % parameterSets.Length];
+            }
+
+            float[] in0 = new float[n], in1 = new float[n];
+            if (anyNaN)
+            {
+                for (int i = 0; i < n; i++)
+                {
+                    in0[i] = i % 5 == 0 ? float.NaN : (i % 5 == 1 ? float.PositiveInfinity : rnd.NextSingle() * 4f - 2f);
+                    in1[i] = i % 7 == 0 ? float.NegativeInfinity : (i % 7 == 3 ? float.NaN : rnd.NextSingle() * 4f - 2f);
+                }
+            }
+            else
+            {
+                for (int i = 0; i < n; i++)
+                {
+                    in0[i] = rnd.NextSingle() * 4f - 2f;
+                    in1[i] = rnd.NextSingle() * 4f - 2f;
+                }
+            }
+
+            // initial states snapshot: each path runs from the same states (the kernels write them back in place)
+            BiquadFilterState[] initStates0 = new BiquadFilterState[2], initStates1 = new BiquadFilterState[2];
+            foreach (var st in new[] { initStates0, initStates1 })
+            {
+                foreach (ref var s in st.AsSpan())
+                {
+                    s.State0 = rnd.NextSingle() * 4f - 2f;
+                    s.State1 = anyNaN && rnd.NextSingle() < 0.2f ? float.NaN : rnd.NextSingle() * 4f - 2f;
+                    s.State2 = rnd.NextSingle() * 4f - 2f;
+                    s.State3 = rnd.NextSingle() * 4f - 2f;
+                }
+            }
+
+            BiquadFilterState[] refStates0 = (BiquadFilterState[])initStates0.Clone(), refStates1 = (BiquadFilterState[])initStates1.Clone();
+            float[] refOut0, refOut1;
+            if (inPlace)
+            {
+                refOut0 = (float[])in0.Clone();
+                refOut1 = (float[])in1.Clone();
+                RefBiquadStereo(parameters, refStates0, refStates1, refOut0, refOut1, refOut0, refOut1, n);
+            }
+            else
+            {
+                refOut0 = new float[n];
+                refOut1 = new float[n];
+                RefBiquadStereo(parameters, refStates0, refStates1, in0, in1, refOut0, refOut1, n);
+            }
+
+            // tree scalar path (the dispatcher's fallback)
+            BiquadFilterState[] scalarStates0 = (BiquadFilterState[])initStates0.Clone(), scalarStates1 = (BiquadFilterState[])initStates1.Clone();
+            float[] scalarOut0 = (float[])in0.Clone(), scalarOut1 = (float[])in1.Clone();
+            S2ADspBiquadHelper.ProcessBiquadFilterStereoScalar(parameters, scalarStates0, scalarStates1, scalarOut0, scalarOut1, in0, in1, (uint)n);
+            if (anyNaN)
+            {
+                CheckFloatsAnyNan($"biquad stereo n={n} r={round} scalar vs ref out0", refOut0, scalarOut0);
+                CheckFloatsAnyNan($"biquad stereo n={n} r={round} scalar vs ref out1", refOut1, scalarOut1);
+            }
+            else
+            {
+                CheckFloats($"biquad stereo n={n} r={round} scalar vs ref out0", refOut0, scalarOut0);
+                CheckFloats($"biquad stereo n={n} r={round} scalar vs ref out1", refOut1, scalarOut1);
+            }
+
+            // vector kernel
+            BiquadFilterState[] vecStates0 = (BiquadFilterState[])initStates0.Clone(), vecStates1 = (BiquadFilterState[])initStates1.Clone();
+            float[] vecOut0 = (float[])in0.Clone(), vecOut1 = (float[])in1.Clone();
+            if (inPlace)
+            {
+                S2ADspBiquadHelper.ProcessBiquadFilterStereoAdvSimd(parameters, vecStates0, vecStates1, vecOut0, vecOut1, vecOut0, vecOut1, (uint)n);
+            }
+            else
+            {
+                S2ADspBiquadHelper.ProcessBiquadFilterStereoAdvSimd(parameters, vecStates0, vecStates1, vecOut0, vecOut1, in0, in1, (uint)n);
+            }
+
+            string what = $"biquad stereo n={n} r={round} inPlace={inPlace}";
+            if (anyNaN)
+            {
+                CheckFloatsAnyNan($"{what} vs ref out0", refOut0, vecOut0);
+                CheckFloatsAnyNan($"{what} vs ref out1", refOut1, vecOut1);
+            }
+            else
+            {
+                CheckFloats($"{what} vs ref out0", refOut0, vecOut0);
+                CheckFloats($"{what} vs ref out1", refOut1, vecOut1);
+            }
+            CheckState($"{what} ch0 stage0", refStates0[0], vecStates0[0], anyNaN);
+            CheckState($"{what} ch0 stage1", refStates0[1], vecStates0[1], anyNaN);
+            CheckState($"{what} ch1 stage0", refStates1[0], vecStates1[0], anyNaN);
+            CheckState($"{what} ch1 stage1", refStates1[1], vecStates1[1], anyNaN);
+        }
+    }
+
+    // ---- adpcm --------------------------------------------------------------------------------------
+
+    static short RefAdpcmSaturate(int value)
+    {
+        if (value > short.MaxValue)
+        {
+            value = short.MaxValue;
+        }
+
+        if (value < short.MinValue)
+        {
+            value = short.MinValue;
+        }
+
+        return (short)value;
+    }
+
+    static int RefAdpcmRoundUp(int value)
+    {
+        // FixedPointHelper.RoundUpAndToInt(value, 11), transcribed: half = 1 << 10, then arithmetic shift
+        return (int)((value + (1 << 10)) >> 11);
+    }
+
+    static short RefAdpcmCoefficient(ReadOnlySpan<short> coefficients, int index)
+    {
+        return (uint)index < (uint)coefficients.Length ? coefficients[index] : (short)0;
+    }
+
+    // upstream AdpcmHelper.Decode, transcribed (scalar only, independent of the kernel under test)
+    static int RefAdpcmDecode(Span<short> output, ReadOnlySpan<byte> input, int startSampleOffset, int endSampleOffset, int offset, int count, ReadOnlySpan<short> coefficients, ref AdpcmLoopContext loopContext)
+    {
+        if (input.IsEmpty || endSampleOffset < startSampleOffset)
+        {
+            return 0;
+        }
+
+        byte predScale = (byte)loopContext.PredScale;
+        byte scale = (byte)(predScale & 0xF);
+        byte coefficientIndex = (byte)((predScale >> 4) & 0xF);
+        short history0 = loopContext.History0;
+        short history1 = loopContext.History1;
+        short coefficient0 = RefAdpcmCoefficient(coefficients, coefficientIndex * 2);
+        short coefficient1 = RefAdpcmCoefficient(coefficients, coefficientIndex * 2 + 1);
+
+        int decodedCount = Math.Min(count, endSampleOffset - startSampleOffset - offset);
+        int nibbles = offset % 14 + 16 * (offset / 14) + (offset % 14 != 0 ? 2 : 0); // GetNibblesFromSampleCount(offset), transcribed
+        int remaining = decodedCount;
+        int outputBufferIndex = 0;
+        int inputIndex = 0;
+        ReadOnlySpan<byte> targetInput = input[(nibbles / 2)..];
+
+        while (remaining > 0)
+        {
+            int samplesCount;
+
+            if (((uint)nibbles % 16) == 0)
+            {
+                predScale = targetInput[inputIndex++];
+                scale = (byte)(predScale & 0xF);
+                coefficientIndex = (byte)((predScale >> 4) & 0xF);
+                coefficient0 = RefAdpcmCoefficient(coefficients, coefficientIndex * 2);
+                coefficient1 = RefAdpcmCoefficient(coefficients, coefficientIndex * 2 + 1);
+                nibbles += 2;
+                samplesCount = Math.Min(remaining, 14);
+            }
+            else
+            {
+                samplesCount = 1;
+            }
+
+            int scaleFixedPoint = 2048 << scale;
+
+            if (samplesCount < 14)
+            {
+                for (int i = 0; i < samplesCount; i++)
+                {
+                    int value = targetInput[inputIndex];
+                    int sample;
+
+                    if ((nibbles & 1) != 0)
+                    {
+                        sample = (value << 28) >> 28;
+                        inputIndex++;
+                    }
+                    else
+                    {
+                        sample = (value << 24) >> 28;
+                    }
+
+                    nibbles++;
+
+                    int prediction = coefficient0 * history0 + coefficient1 * history1;
+                    sample = RefAdpcmRoundUp(sample * scaleFixedPoint + prediction);
+                    short saturatedSample = RefAdpcmSaturate(sample);
+
+                    history1 = history0;
+                    history0 = saturatedSample;
+
+                    output[outputBufferIndex++] = saturatedSample;
+                    remaining--;
+                }
+            }
+            else
+            {
+                for (int i = 0; i < 7; i++)
+                {
+                    int value = targetInput[inputIndex];
+
+                    int sample0 = (value << 24) >> 28;
+                    int sample1 = (value << 28) >> 28;
+
+                    inputIndex++;
+
+                    int prediction0 = coefficient0 * history0 + coefficient1 * history1;
+                    sample0 = RefAdpcmRoundUp(sample0 * scaleFixedPoint + prediction0);
+                    short saturatedSample0 = RefAdpcmSaturate(sample0);
+
+                    int prediction1 = coefficient0 * saturatedSample0 + coefficient1 * history0;
+                    sample1 = RefAdpcmRoundUp(sample1 * scaleFixedPoint + prediction1);
+                    short saturatedSample1 = RefAdpcmSaturate(sample1);
+
+                    history1 = saturatedSample0;
+                    history0 = saturatedSample1;
+
+                    output[outputBufferIndex++] = saturatedSample0;
+                    output[outputBufferIndex++] = saturatedSample1;
+                }
+
+                nibbles += 14;
+                remaining -= 14;
+            }
+        }
+
+        loopContext.PredScale = predScale;
+        loopContext.History0 = history0;
+        loopContext.History1 = history1;
+
+        return decodedCount;
+    }
+
+    // one ADPCM stream: every 8th byte is the frame header (predScale: low nibble scale, high nibble coefficient index)
+    static byte[] MakeAdpcmStream(Random rnd, int frames, int partialNibbles, out int totalNibbles)
+    {
+        totalNibbles = 16 * frames + partialNibbles;
+        byte[] input = new byte[(totalNibbles + 1) / 2 + 8]; // +8 tail so the last whole frame also passes the 8-byte read guard
+
+        for (int i = 0; i < input.Length; i++)
+        {
+            input[i] = (byte)rnd.Next(0, 256);
+        }
+
+        for (int f = 0; f < frames; f++)
+        {
+            input[f * 8] = (byte)(rnd.Next(0, 16) | (rnd.Next(0, 16) << 4));
+        }
+
+        return input;
+    }
+
+    static void CheckLoopContext(string what, AdpcmLoopContext want, AdpcmLoopContext got)
+    {
+        cases++;
+        if (want.PredScale != got.PredScale || want.History0 != got.History0 || want.History1 != got.History1)
+        {
+            Fail(what, 0, $"predScale={want.PredScale} h0={want.History0} h1={want.History1}", $"predScale={got.PredScale} h0={got.History0} h1={got.History1}");
+        }
+    }
+
+    static void TestAdpcm(Random rnd)
+    {
+        int[] offsets = [0, 1, 7, 13, 14, 15, 21, 28, 35, 42];
+
+        // direct frame kernel vs transcribed per-sample chain (covers the nibble unpack and scale multiply alone)
+        for (int round = 0; round < 200; round++)
+        {
+            byte[] frame = new byte[8];
+            for (int i = 0; i < 8; i++) frame[i] = (byte)rnd.Next(0, 256);
+
+            byte scale = (byte)rnd.Next(0, 16);
+            short coefficient0 = (short)rnd.Next(short.MinValue, short.MaxValue);
+            short coefficient1 = (short)rnd.Next(short.MinValue, short.MaxValue);
+            int scaleFixedPoint = 2048 << scale;
+            short history0 = (short)rnd.Next(short.MinValue, short.MaxValue);
+            short history1 = (short)rnd.Next(short.MinValue, short.MaxValue);
+
+            short[] want = new short[14];
+            short wh0 = history0, wh1 = history1;
+            for (int i = 0; i < 14; i++)
+            {
+                int value = frame[i / 2];
+                int nibble = (i & 1) == 0 ? (value << 24) >> 28 : (value << 28) >> 28;
+                int prediction = coefficient0 * wh0 + coefficient1 * wh1;
+                short saturated = RefAdpcmSaturate(RefAdpcmRoundUp(nibble * scaleFixedPoint + prediction));
+                wh1 = wh0;
+                wh0 = saturated;
+                want[i] = saturated;
+            }
+
+            short[] got = new short[14];
+            short gh0 = history0, gh1 = history1;
+            AdpcmHelper.DecodeFrameAdvSimd(frame, 0, scaleFixedPoint, coefficient0, coefficient1, ref gh0, ref gh1, got);
+
+            CheckShorts($"adpcm frame r={round} scale={scale}", want, got);
+            cases++;
+            if (wh0 != gh0 || wh1 != gh1)
+            {
+                Fail($"adpcm frame r={round} history", 0, $"{wh0},{wh1}", $"{gh0},{gh1}");
+            }
+        }
+
+        // whole Decode (vector frames under fast-on, pure scalar under fast-off) vs the transcribed reference
+        for (int round = 0; round < 240; round++)
+        {
+            int frames = 1 + round % 5;
+            int partialNibbles = round % 3 == 0 ? 0 : 1 + round % 13;
+            byte[] input = MakeAdpcmStream(rnd, frames, partialNibbles, out int totalNibbles);
+
+            short[] coefficients = new short[32];
+            for (int i = 0; i < coefficients.Length; i++)
+            {
+                coefficients[i] = round % 4 == 3 ? (short)rnd.Next(-4096, 4096) : (short)rnd.Next(short.MinValue, short.MaxValue);
+            }
+
+            var ctxTemplate = new AdpcmLoopContext
+            {
+                PredScale = (short)rnd.Next(0, 256),
+                History0 = (short)rnd.Next(short.MinValue, short.MaxValue),
+                History1 = (short)rnd.Next(short.MinValue, short.MaxValue),
+            };
+
+            int startSampleOffset = 0;
+            int endSampleOffset = totalNibbles - 2; // upper bound; the decoder stops at count anyway
+            int offset = offsets[round % offsets.Length];
+            int count = endSampleOffset - offset - (round % 5 == 4 ? rnd.Next(0, 30) : 0);
+
+            if (count <= 0)
+            {
+                continue;
+            }
+
+            var ctxWant = ctxTemplate;
+            short[] want = new short[count + 16];
+            int wantCount = RefAdpcmDecode(want, input, startSampleOffset, endSampleOffset, offset, count, coefficients, ref ctxWant);
+
+            var ctxGot = ctxTemplate;
+            short[] got = new short[count + 16];
+            int gotCount = AdpcmHelper.Decode(got, input, startSampleOffset, endSampleOffset, offset, count, coefficients, ref ctxGot);
+
+            string what = $"adpcm r={round} frames={frames} partial={partialNibbles} off={offset} count={count}";
+            cases++;
+            if (wantCount != gotCount)
+            {
+                Fail($"{what} decodedCount", 0, $"{wantCount}", $"{gotCount}");
+                continue;
+            }
+
+            CheckShorts(what, want.AsSpan(0, wantCount), got.AsSpan(0, gotCount));
+            CheckLoopContext($"{what} loopContext", ctxWant, ctxGot);
+        }
+    }
+
+    // ---- 6-channel device interleave ----------------------------------------------------------------
+
+    static void RefSaturateInterleave6(Span<short> outputBuffer, ReadOnlySpan<float> c0, ReadOnlySpan<float> c1, ReadOnlySpan<float> c2, ReadOnlySpan<float> c3, ReadOnlySpan<float> c4, ReadOnlySpan<float> c5, int sampleCount)
+    {
+        for (int j = 0; j < sampleCount; j++)
+        {
+            outputBuffer[j * 6 + 0] = RefSaturate(c0.Length > j ? c0[j] : 0f);
+            outputBuffer[j * 6 + 1] = RefSaturate(c1.Length > j ? c1[j] : 0f);
+            outputBuffer[j * 6 + 2] = RefSaturate(c2.Length > j ? c2[j] : 0f);
+            outputBuffer[j * 6 + 3] = RefSaturate(c3.Length > j ? c3[j] : 0f);
+            outputBuffer[j * 6 + 4] = RefSaturate(c4.Length > j ? c4[j] : 0f);
+            outputBuffer[j * 6 + 5] = RefSaturate(c5.Length > j ? c5[j] : 0f);
+        }
+    }
+
+    static void TestSaturateInterleave6(Random rnd)
+    {
+        float[] specials =
+        [
+            0f, float.Epsilon, -float.Epsilon, 0.5f, 1.5f, 2.5f, 3.5f, -0.5f, -1.5f, -2.5f, -3.5f,
+            2.4999f, 32766.5f, 32766.9f, 32767f, 32767.4f, 32767.5f, 32767.9f, 32768f, 40000.9f, 3e38f, float.MaxValue,
+            -32767.5f, -32768f, -32768.5f, -40000.9f, -3e38f, float.MinValue, -0.4f,
+            float.NaN, float.PositiveInfinity, float.NegativeInfinity,
+        ];
+        int[] counts = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 240, 241, 242, 243, 244, 245, 246, 247];
+
+        for (int round = 0; round < 200; round++)
+        {
+            int n = counts[round % counts.Length];
+
+            // silent channels: full 5.1 / stereo-upmix-to-5.1 (tail silent) / interior gaps
+            int pattern = round % 4;
+            float[][] ch = new float[6][];
+            for (int c = 0; c < 6; c++)
+            {
+                bool silent = pattern == 1 && c >= 2;
+                silent |= pattern == 3 && (c % 2 == 1);
+                ch[c] = silent ? Array.Empty<float>() : new float[n];
+            }
+
+            for (int c = 0; c < 6; c++)
+            {
+                for (int j = 0; j < ch[c].Length; j++)
+                {
+                    if (round % 3 == 0)
+                    {
+                        ch[c][j] = specials[(j * 7 + c * 3 + round) % specials.Length];
+                    }
+                    else if (round % 3 == 1)
+                    {
+                        ch[c][j] = rnd.Next(-33000, 33000);
+                    }
+                    else
+                    {
+                        ch[c][j] = rnd.NextSingle() * 80000f - 40000f;
+                    }
+                }
+            }
+
+            short[] want = new short[Math.Max(n, 1) * 6];
+            RefSaturateInterleave6(want, ch[0], ch[1], ch[2], ch[3], ch[4], ch[5], n);
+
+            short[] got = new short[want.Length];
+            S2ADspMixHelper.SaturateInterleave6AdvSimd(got, ch[0], ch[1], ch[2], ch[3], ch[4], ch[5], n);
+            CheckShorts($"saturate-interleave6 n={n} r={round} pattern={pattern}", want, got);
+
+            short[] slow = new short[want.Length];
+            S2ADspMixHelper.SaturateInterleave6Scalar(slow, ch[0], ch[1], ch[2], ch[3], ch[4], ch[5], 0, n);
+            CheckShorts($"saturate-interleave6 n={n} r={round} pattern={pattern} vs scalar", want, slow);
+        }
     }
 
     // ---- optional kernel timing (not part of the green/red verdict) --------------------------------
@@ -604,6 +1199,7 @@ static class P
 
         float[] coefficients = [0.70710677f, 0.70710677f, 0.70710677f, 0.70710677f];
         short[] shorts = new short[N * 2];
+        short[] shorts6 = new short[N * 6];
 
         Console.WriteLine($"bench (JIT, N={N}): ns/call median of 7 x 5000");
 
@@ -633,6 +1229,37 @@ static class P
             () => S2ADspMixHelper.VolumeRampScalar(outA, chA, 0.75f, -0.001f, 0, N));
         Row("device sink saturate+interleave", () => S2ADspMixHelper.SaturateInterleaveStereoAdvSimd(shorts, chA, chB, N),
             () => S2ADspMixHelper.SaturateInterleaveStereoScalar(shorts, chA, chB, 0, N));
+        Row("device sink interleave 6ch", () => S2ADspMixHelper.SaturateInterleave6AdvSimd(shorts6, chA, chB, chC, chC, chA, chB, N),
+            () => S2ADspMixHelper.SaturateInterleave6Scalar(shorts6, chA, chB, chC, chC, chA, chB, 0, N));
+
+        BiquadFilterParameter2[] bqParams =
+        [
+            MakeBiquadParameter(0.9f, -0.4f, 0.2f, 0.3f, -0.1f),
+            MakeBiquadParameter(0.7f, 0.25f, -0.125f, -0.2f, 0.05f),
+        ];
+        BiquadFilterState[] bqStates0 = new BiquadFilterState[2], bqStates1 = new BiquadFilterState[2];
+        BiquadFilterState[] bqStates0b = new BiquadFilterState[2], bqStates1b = new BiquadFilterState[2];
+        foreach (var st in new[] { bqStates0, bqStates1, bqStates0b, bqStates1b })
+        {
+            for (int i = 0; i < 2; i++)
+            {
+                st[i].State0 = 0.1f;
+                st[i].State1 = -0.2f;
+                st[i].State2 = 0.3f;
+                st[i].State3 = -0.4f;
+            }
+        }
+        Row("biquad stereo packed (2ch x 2 stage)",
+            () => S2ADspBiquadHelper.ProcessBiquadFilterStereoAdvSimd(bqParams, bqStates0, bqStates1, outA, outB, chA, chB, N),
+            () => RefBiquadStereo(bqParams, bqStates0b, bqStates1b, chA, chB, outB, outA, N));
+
+        byte[] adpcmIn = MakeAdpcmStream(rnd, 18, 0, out int adpcmNibbles);
+        short[] adpcmCoeffs = new short[32];
+        for (int i = 0; i < 32; i++) adpcmCoeffs[i] = (short)((i * 2731) % 8192 - 4096);
+        short[] adpcmOut = new short[N + 16];
+        Row("adpcm decode 240 samples",
+            () => { var ctx = new AdpcmLoopContext(); AdpcmHelper.Decode(adpcmOut, adpcmIn, 0, adpcmNibbles - 2, 0, N, adpcmCoeffs, ref ctx); },
+            () => { var ctx = new AdpcmLoopContext(); RefAdpcmDecode(adpcmOut, adpcmIn, 0, adpcmNibbles - 2, 0, N, adpcmCoeffs, ref ctx); });
     }
 
     static int Main(string[] args)
@@ -653,6 +1280,9 @@ static class P
         TestDownMix(rnd);
         TestRamp(rnd);
         TestSaturateInterleave(rnd);
+        TestBiquadStereo(rnd);
+        TestAdpcm(rnd);
+        TestSaturateInterleave6(rnd);
         TestWiring(rnd);
 
         Console.WriteLine(fails == 0 ? $"audio_dsp_simd: all green ({cases} comparisons, S2ADspFast.On={S2ADspFast.On})" : $"audio_dsp_simd: {fails} red of {cases} (S2ADspFast.On={S2ADspFast.On})");

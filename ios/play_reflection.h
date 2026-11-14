@@ -5,6 +5,8 @@
 
 // CAReplicatorLayer's center-relative transform; layout and bounds use root-view coordinates.
 CGAffineTransform S2APlayReflectionTransform(S2APlayLayout layout, CGRect bounds);
+// Whether the lower half gets a mirrored copy: only on a device with a real fold (layout.division from the hinge).
+BOOL S2APlayReflectionWanted(S2APlayLayout layout);
 #if TARGET_OS_IPHONE
 @class CALayer;
 // Main thread; the host retains one game layer per root. Both renderers keep their own frame / drawable size.

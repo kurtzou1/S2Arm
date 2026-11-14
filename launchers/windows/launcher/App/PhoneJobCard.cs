@@ -33,12 +33,16 @@ internal sealed class PhoneJobTrack
     public string ExportFolder = "";
     public int ExportGames;
     public long? ExportBytes;
+    /// <summary>完成页「推到手机」（11-13）：推进手机上自签 S2Arm 的 .img 文件名（空 = 还没推）；推不成时作业给的一句「缺什么、怎么做」</summary>
+    public List<string> Pushed = [];
+    public string PushNote = "";
+    public bool Pushing;
 
     public void Begin(string kind, string device)
     {
         Kind = kind; Device = device; Stages.Clear(); Log.Clear(); Overall = null; Step = Steps = null;
         Started = DateTime.UtcNow; Ended = null; Suggestion = ""; PackBytes = null; PackFiles = null; Skipped = []; Version = "";
-        ExportFolder = ""; ExportGames = 0; ExportBytes = null;
+        ExportFolder = ""; ExportGames = 0; ExportBytes = null; Pushed = []; PushNote = ""; Pushing = false;
     }
 
     /// <summary>作业事件：阶段进步骤列表、整体进度只认作业层 overall（只增不减）、说明行进过程记录</summary>
@@ -84,6 +88,26 @@ public sealed partial class EnvironmentWindow
 
     /// <summary>手机作业卡片。state：running / succeeded / needsPlayer / failed / invalid / interrupted / cancelled / drop（会挤掉别处装的游戏，页内确认）。
     /// retry：失败时的「重试」；confirmDrop / cancelDrop：drop 态的「仍然继续」/「先不」（在这页里问，不弹散的对话框）</summary>
+    /// <summary>导出完成页「推到手机」：把「S2Arm 自签导出」里的完整 .img 推进手机上自签装好的 S2Arm（exportPush 作业，pack/jobs/install.py push_export）</summary>
+    private async Task PushExportAsync(PhoneJobTrack tr, string? gameId)
+    {
+        if (tr.Pushing || connectedFolder is null) return;
+        tr.Pushing = true; Render();
+        try
+        {
+            var fields = new Dictionary<string, object?>();
+            if (gameId is { Length: > 0 }) fields["gameId"] = gameId;
+            var job = await LibraryJobClient.RunAsync(paths, privateRoot, connectedFolder, libraryId, "exportPush", null, CancellationToken.None, fields: fields);
+            var r = job.Report.Result;
+            if (job.Report.Succeeded && r.ValueKind == JsonValueKind.Object && r.TryGetProperty("pushed", out var pu) && pu.ValueKind == JsonValueKind.Array)
+            { tr.Pushed = pu.EnumerateArray().Select(x => x.GetString() ?? "").ToList(); tr.PushNote = ""; }
+            else tr.PushNote = job.Report.Message;
+        }
+        catch (Exception error) when (error is LibraryProtocolException or IOException or UnauthorizedAccessException or InvalidOperationException or System.ComponentModel.Win32Exception)
+        { tr.PushNote = error.Message; }
+        finally { tr.Pushing = false; Render(); }
+    }
+
     private Control PhoneJobCard(PhoneJobTrack tr, string state, string message, string diagnostics, string? gameId, IReadOnlyList<string>? notes = null,
         Action? retry = null, Action? confirmDrop = null, Action? cancelDrop = null, string? dropTitle = null)
     {
@@ -168,10 +192,23 @@ public sealed partial class EnvironmentWindow
             panel.Children.Add(stats);
             panel.Children.Add(WrappedMuted(T("phone.fact.export"), 14));
             if (tr.Skipped.Count > 0) panel.Children.Add(WrappedMuted(T("phone.fact.export_skipped").Replace("{0}", string.Join("、", tr.Skipped)), 14));
+            // 推到手机（11-13，同 Mac）：推进去了说一句；没推成写作业给的原因（缺线 / 没信任 / 没装 S2Arm…）+「推到手机」重试
+            var pushLine = WrappedMuted(tr.Pushed.Count > 0 ? T("phone.export.pushed").Replace("{0}", string.Join("、", tr.Pushed)) : tr.PushNote.Length > 0 ? tr.PushNote : T("phone.export.push_hint"), 14);
+            AutomationId(pushLine, tr.Pushed.Count > 0 ? "phone.export.pushed" : "phone.export.pushNote");
+            panel.Children.Add(pushLine);
             var folder = tr.ExportFolder;
+            var actions = new WrapPanel { Orientation = Orientation.Horizontal };
             var open = Primary(T("phone.export.open"), () => OpenFolder(folder));
             AutomationId(open, "phone.export.open");
-            panel.Children.Add(open);
+            actions.Children.Add(open);
+            if (tr.Pushed.Count == 0)
+            {
+                var push = Primary(T(tr.Pushing ? "phone.export.pushing" : "phone.export.push"), () => _ = PushExportAsync(tr, gameId));
+                push.IsEnabled = !tr.Pushing; push.Margin = new Thickness(12, 0, 0, 0);
+                AutomationId(push, "phone.export.push");
+                actions.Children.Add(push);
+            }
+            panel.Children.Add(actions);
         }
         else if (state is "succeeded" or "needsPlayer")
         {

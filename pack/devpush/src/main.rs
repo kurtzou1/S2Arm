@@ -9,6 +9,9 @@
 //   s2a-devpush <udid> - install <ipa>               装已签名的 ipa（AFC 传到 PublicStaging + installation_proxy；测试台经转发的设备服务装机用，玩家装机走 Impactor）
 //   s2a-devpush <udid> <包名> uninstall -               卸 App（连容器）：免费账号一台手机最多 3 个 App，测试台腾位用
 //   s2a-devpush <udid> <包名> app-attr <键>              已装 App 的 Info.plist 一个键（installation_proxy）：打值；没装打 S2A_APP_MISSING；没有这个键打「-」
+//   s2a-devpush - - devices                              连着的设备（USB 在前）：每行一个 UDID
+//   s2a-devpush <udid> - find-s2arm                      手机上装着的 S2Arm（Info.plist 有 S2AContainerDigest）：每行「包名<TAB>版本<TAB>显示名」；没有不打印
+//   S2A_DEVPUSH_DOCUMENTS=1：进不了整个容器（不是开发签名）时退到只进 Documents（要 App 开了文件共享），自签导出「推到手机」用
 //   s2a-devpush <udid> <包名> launch [变量=值…]     起 App（先结束在跑的同包进程），带环境变量；打印 pid。Windows 测试台起局 / 只解包用（Mac 用 devicectl）：
 //     经 lockdown 的 CoreDeviceProxy 建用户态隧道（不要管理员、不装驱动）→ RSD → CoreDevice app_service（同 Xcode / devicectl 的起 App 服务；iOS 17+，要开发者模式与已挂开发者镜像）
 // 退出码：0 成功；1 连不上 / 读写失败（错误打到标准错误）
@@ -256,6 +259,13 @@ async fn run(a: &[String]) -> Result<(), String> {
     let addr = UsbmuxdAddr::from_env_var().map_err(|e| e.to_string())?;
     let sock = addr.to_socket().await.map_err(|e| format!("连不上 Apple 设备服务：{e}"))?;
     let mut mux = UsbmuxdConnection::new(sock, 0);
+    if op == "devices" {   // 连着的设备（USB 优先、同一台去重）：每行一个 UDID。自签导出「推到手机」只要手机信任了这台电脑，不要开发者模式 / Xcode 账号
+        let mut seen: Vec<String> = Vec::new();
+        let mut list = mux.get_devices().await.map_err(|e| format!("列设备失败：{e}"))?;
+        list.sort_by_key(|d| !matches!(d.connection_type, idevice::usbmuxd::Connection::Usb));
+        for d in list { if !seen.contains(&d.udid) { println!("{}", d.udid); seen.push(d.udid); } }
+        return Ok(());
+    }
     let dev = mux.get_device(udid).await.map_err(|e| format!("找不到设备 {udid}：{e}"))?;
     let provider = dev.to_provider(addr, "s2a-devpush");
     if op == "launch" {
@@ -300,6 +310,20 @@ async fn run(a: &[String]) -> Result<(), String> {
         }
         return Ok(());
     }
+    if op == "find-s2arm" {   // 手机上装着的 S2Arm（自签玩家用自己的工具签，包名由签名工具定，电脑事先不知道）：Info.plist 里有 S2AContainerDigest
+        //   （pack/jobs/ipa.py 组容器时写）的 App 逐行打印「包名<TAB>版本<TAB>显示名」；一个都没有就不打印（退出码仍 0）。包名参数不用，给「-」
+        let mut ip = idevice::installation_proxy::InstallationProxyClient::connect(&provider).await.map_err(|e| format!("installation_proxy 连不上：{e}"))?;
+        let apps = ip.get_apps(Some("User"), None).await.map_err(|e| format!("列 App 失败：{e}"))?;
+        let mut found: Vec<String> = apps.iter().filter_map(|(id, v)| {
+            let d = v.as_dictionary()?;
+            d.get("S2AContainerDigest")?;
+            let s = |k: &str| d.get(k).and_then(|x| x.as_string()).unwrap_or("-").replace(['\t', '\n'], " ");
+            Some(format!("{id}\t{}\t{}", s("CFBundleShortVersionString"), s("CFBundleDisplayName")))
+        }).collect();
+        found.sort();
+        for l in found { println!("{l}"); }
+        return Ok(());
+    }
     if op == "install" {
         idevice::utils::installation::install_package(&provider, &a[4], None).await.map_err(|e| format!("装 {} 失败：{e}", a[4]))?;
         println!("install {} 完成", a[4]);
@@ -308,6 +332,12 @@ async fn run(a: &[String]) -> Result<(), String> {
     let ha = HouseArrestClient::connect(&provider).await.map_err(|e| format!("house_arrest 连不上：{e}"))?;
     let mut afc = match ha.vend_container(bundle.clone()).await {
         Ok(afc) => afc,
+        // 不是开发签名的 App（自签玩家用发布证书签的）进不了整个容器，但打开了「文件共享」的 App 可以只进 Documents（VendDocuments）：
+        //   路径照样是 Documents/…，只是 Documents 以外的读写会被拒。自签导出「推到手机」只写 Documents/放这里导入，够用
+        Err(_) if std::env::var("S2A_DEVPUSH_DOCUMENTS").is_ok_and(|v| v == "1") => {
+            HouseArrestClient::connect(&provider).await.map_err(|e| format!("house_arrest 连不上：{e}"))?
+                .vend_documents(bundle.clone()).await.map_err(|e| format!("进不了 {bundle} 的 Documents（App 没打开文件共享或没装）：{e}"))?
+        }
         Err(e) => {
             // 进不了容器：App 没装、不是开发签名、锁屏 / 断开都只回同一类原文（11-11 手机删了 S2Arm 后实测只有「device socket io failed」）。
             //   再用 installation_proxy 按包名查一次：确实没装就打结构化标记 S2A_APP_MISSING（作业层 WinPhone.app_missing 认它），查得到装着或查不了都照原文报
@@ -426,6 +456,6 @@ async fn main() {
     let a: Vec<String> = std::env::args().collect();
     // launch 可以不带环境变量（多款容器推完拉起到游戏库，tools/push_pack.py Devpush.launch({})）：原先一律要 ≥ 5 个参数，这种调用只打用法、退 2，
     //   Windows 上「分开的文件」资源包推完永远拉不起 App（11-11 Windows 实机实测）
-    if a.len() < 5 && !(a.len() == 4 && a[3] == "launch") { eprintln!("用法：s2a-devpush <udid> <包名> put <本地> <远端> | put-at <本地> <远端> <偏移> | head <远端> <字节数> <本地> | get <远端> <本地> | ls <目录>"); std::process::exit(2); }
+    if a.len() < 5 && !(a.len() == 4 && (a[3] == "launch" || a[3] == "find-s2arm" || a[3] == "devices")) { eprintln!("用法：s2a-devpush <udid> <包名> put <本地> <远端> | put-at <本地> <远端> <偏移> | head <远端> <字节数> <本地> | get <远端> <本地> | ls <目录>"); std::process::exit(2); }
     if let Err(e) = run(&a).await { eprintln!("{e}"); std::process::exit(1); }
 }

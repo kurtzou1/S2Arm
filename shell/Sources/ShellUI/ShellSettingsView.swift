@@ -6,6 +6,8 @@ enum ShellSettingsRows {
     static let gameID = "shell"
     static let hud = "shell.hud"
     static let glass = "shell.glass"
+    static let silent = "shell.silent"
+    static let mix = "shell.mix"
     static let touchSize = "shell.touchSize"
     static let touchStick = "shell.touchStick"
     static let targetPrefix = "shs.row."
@@ -19,6 +21,20 @@ enum ShellSettingsRows {
     static func hudRow(_ store: ShellSettingsStore) -> SettingRow {
         SettingRow(id: hud, label: ShellStrings.text("Performance overlay"), note: ShellStrings.text("Shared by all games; you can also switch it in a game any time."),
                    kind: .toggle(on: "1", off: "0"), value: store.performanceHUD ? "1" : "0")
+    }
+
+    /// Game sound while the device is in Silent Mode, for every game (the same switch as the system Settings app's S2Arm page).
+    static func silentRow(_ store: ShellSettingsStore) -> SettingRow {
+        SettingRow(id: silent, label: ShellStrings.text("Play Sound in Silent Mode"),
+                   note: ShellStrings.text("When on, game sound keeps playing while the device is in Silent Mode. When off, S2Arm follows Silent Mode like other games."),
+                   kind: .toggle(on: "1", off: "0"), value: store.playInSilentMode ? "1" : "0")
+    }
+
+    /// S2Arm: other apps' audio keeps playing alongside the game (the system Settings app's S2Arm page had it; moved here 11-14).
+    static func mixRow(_ store: ShellSettingsStore) -> SettingRow {
+        SettingRow(id: mix, label: ShellStrings.text("Mix with Other Apps"),
+                   note: ShellStrings.text("When on, music or podcasts from other apps keep playing with the game, and the Silent switch only mutes the game."),
+                   kind: .toggle(on: "1", off: "0"), value: store.mixWithOthers ? "1" : "0")
     }
 
     /// The touch controls' size for every game. The preview above the row shows it.
@@ -45,6 +61,8 @@ enum ShellSettingsRows {
     static func apply(_ id: String, value: String, to store: ShellSettingsStore) {
         switch id {
         case hud: store.storePerformanceHUD(value == "1")
+        case silent: store.storePlayInSilentMode(value == "1")
+        case mix: store.storeMixWithOthers(value == "1")
         case glass: store.storeLiquidGlass(value == "1")
         case touchSize: store.storeTouchSize(value)
         case touchStick: store.storeTouchStick(value)
@@ -119,6 +137,24 @@ struct ShellSettingsView: View {
                                 SettingControl(gameID: ShellSettingsRows.gameID, row: row, targetPrefix: ShellSettingsRows.targetPrefix) {
                                     ShellSettingsRows.apply(row.id, value: $0, to: store)
                                 }.equatable()
+                            }
+                        }
+                        SettingsGroup(title: ShellStrings.text("Sound")) {
+                            ForEach([ShellSettingsRows.silentRow(store), ShellSettingsRows.mixRow(store)]) { row in
+                                SettingControl(gameID: ShellSettingsRows.gameID, row: row, targetPrefix: ShellSettingsRows.targetPrefix) {
+                                    ShellSettingsRows.apply(row.id, value: $0, to: store)
+                                }.equatable()
+                            }
+                        }
+                        // S2Arm: at the bottom, "Report a problem" (the host asks for an optional sentence, then uploads the logs and shows a short code)
+                        if let report = actions.onReportProblem {
+                            SettingsGroup(title: ShellStrings.text("Report a problem")) {
+                                SourceRow(symbol: "exclamationmark.bubble", title: ShellStrings.text("Report a problem"),
+                                          note: ShellStrings.text("Sends this device's logs to the developers and gives you a short code. You can add a sentence about what happened.")) {
+                                    Button(ShellStrings.text("Report…")) { report() }
+                                        .buttonStyle(ShellButtonStyle(fills: true)).accessibilityIdentifier("shellSettings.report")
+                                        .shellTarget("shs.report") { report() }
+                                }
                             }
                         }
                         // S2Arm: the version, the same text the computer's S2Arm shows (written when the computer installs the app; ShellVersion).

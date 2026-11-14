@@ -35,13 +35,13 @@ int main(int argc, char **argv) {
     check(raised, "(0, 1] 上不低于原值（只抬不压）");
 
     // ---- 接线 ----
-    check(count_in(source, "s2a_hp_feel(") == 1, "front_mac.m 只在 rumble_play_on_queue 里换算一次");
-    check(after(source, "static void rumble_play_on_queue", "s2a_hp_feel(amplitude) * rumble_scale()"), "先换算、再乘玩家的强度档倍率");
+    check(count_in(source, "s2a_hp_feel(") == 1, "front_mac.m 只在 rumbler_play 里换算一次（#520：每只手柄一个 S2ARumbler）");
+    check(after(source, "static void rumbler_play", "s2a_hp_feel(amplitude) * rumble_scale()"), "先换算、再乘玩家的强度档倍率");
     check(count_in(source, "createAdvancedPlayerWithPattern:") == 1 && count_in(source, "createPlayerWithPattern:") == 1, "循环播放器、普通播放器各建一处");
-    check(after(source, "createAdvancedPlayerWithPattern:", "g_rumble_plain_only = YES; rumble_reset_on_queue(); rumble_play_on_queue(pair); return;"),
+    check(after(source, "createAdvancedPlayerWithPattern:", "r->plainOnly = YES; rumbler_reset(r); rumbler_play(r, pair); return;"),
           "循环播放器建失败：记下、丢掉引擎、从头再来（失败过的引擎上再建普通播放器报 Client not registred）");
-    check(after(source, "static void rumble_select", "g_rumble_plain_only = NO;"), "换手柄后重新试循环播放器");
-    check(after(source, "!g_rumble_loops && now - g_rumble_started_ns > MAC_RUMBLE_RESTART_NS", "g_rumble_playing = NO;"), "普通播放器不能循环：连着震到期限就重起一轮");
+    check(after(source, "static void rumble_select", "[S2ARumbler new]"), "换手柄后重新试循环播放器（新的 S2ARumbler，plainOnly 从零开始）");
+    check(after(source, "!r->loops && now - r->startedNs > MAC_RUMBLE_RESTART_NS", "r->playing = NO;"), "普通播放器不能循环：连着震到期限就重起一轮");
     check(count_in(source, "loopEnabled = YES") == 1, "循环只对循环播放器开");
 
     if (failures) { fprintf(stderr, "t_mac_rumble：%d/%d 项不符\n", failures, checks); return 1; }

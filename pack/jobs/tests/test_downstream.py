@@ -44,6 +44,14 @@ def write_registry(d, schemes):
 
 
 class RegistryTest(unittest.TestCase):
+    def test_free_team_drops_paid_only_entitlements(self):
+        # #897：期望按规则手写——免费个人团队只申请提高内存上限，付费团队两项都带；不知道团队类型按免费（宁可少申请、装得上）
+        t = {"entitlements": ["com.apple.developer.kernel.increased-memory-limit", "com.apple.developer.kernel.extended-virtual-addressing"]}
+        self.assertEqual(ds.install_entitlements(t, {"free": True}), ["com.apple.developer.kernel.increased-memory-limit"])
+        self.assertEqual(ds.install_entitlements(t, {"free": False}), t["entitlements"])
+        self.assertEqual(ds.install_entitlements(t, {}), ["com.apple.developer.kernel.increased-memory-limit"])
+        self.assertEqual(ds.install_entitlements({}, {"free": False}), [])
+
     def test_real_registry_loads_and_matches_title(self):
         schemes = ds.load()
         s = ds.match(dict(id=TITLE.lower()), schemes)   # 程序号大小写不敏感

@@ -40,6 +40,8 @@ public class MainActivity extends Activity
     private String lastInputLog = "";
     private int loggedLayout;
     private static final int PICK_PACKAGE = 1;
+    private static final int PICK_TOUCH_LAYOUT = 2, EXPORT_TOUCH_LAYOUT = 3;
+    private byte[] touchExport;
     private GameLibrary library;   // installed game packages (import + verification)
     private HostKeyboard hostKeyboard;
     private LegacyTextInput legacyTextInput;
@@ -91,7 +93,10 @@ public class MainActivity extends Activity
     private final Runnable saveAtomicSample = new Runnable() {
         @Override public void run() {
             if (!gameMode || gameStopping || !runtimeLoaded) return;
-            if (NativeBridge.pollSaveAtomic() != 0)
+            int bits = NativeBridge.pollSaveAtomic();
+            // 负数 = 状态未知（服务层缺导出，native 已报红）：不当原因位、不提示，本局不再轮询
+            if (bits < 0) { Log.e("S2Arm", "存档原子提交状态未知（pollSaveAtomic=" + bits + "），本局不提示"); return; }
+            if (bits != 0)
                 android.widget.Toast.makeText(MainActivity.this, SAVE_ATOMIC_NOTICE, android.widget.Toast.LENGTH_LONG).show();
             saveAtomicProbe.postDelayed(this, 1000);
         }
@@ -105,6 +110,7 @@ public class MainActivity extends Activity
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         DebugGate.scrub(getIntent());   // 调试参数两道门（DebugGate）：门没开，后面一律读不到
+        if (state != null) touchExport = state.getByteArray("touchLayoutExport");
         gameMode = this instanceof GameActivity;
         if (gameMode) {
             if (GameActivity.libraryRoute(getIntent(), GameSession.running())) {
@@ -275,7 +281,7 @@ public class MainActivity extends Activity
             @Override public void onStatus(String text) { runOnUiThread(() -> {
                 if (isDestroyed()) return;
                 games.setText(text);
-                if (text.startsWith("Game admission failed:")) {
+                if (text.startsWith(getString(R.string.player_err_start))) {   // GameLibrary 起局失败（Game admission failed）
                     panel.setVisibility(android.view.View.VISIBLE);
                     games.setTextColor(0xFFFF5252);
                 }
@@ -286,7 +292,7 @@ public class MainActivity extends Activity
                     if (gameSession == null) {
                         gameSession = ready;
                         try { GameResume.publish(getCacheDir(), android.os.Process.myPid(), ready.spec); }
-                        catch (java.io.IOException error) { status.setText("Game startup failed: " + error.getMessage()); stopGame("session receipt failed", false); return; }
+                        catch (java.io.IOException error) { Log.e("S2Arm", "Game startup failed", error); status.setText(PlayerError.text(MainActivity.this, R.string.player_err_start, error)); stopGame("session receipt failed", false); return; }
                     }
                     tryStartGame();
                 });
@@ -592,7 +598,7 @@ public class MainActivity extends Activity
         } catch (java.io.IOException | RuntimeException | LinkageError error) {
             Log.e("S2Arm", "Game startup failed", error);
             panel.setVisibility(android.view.View.VISIBLE);
-            status.setText("Game startup failed: " + error.getMessage());
+            status.setText(PlayerError.text(this, R.string.player_err_start, error));
             stopGame("game startup failed", false);
         }
     }
@@ -735,9 +741,40 @@ public class MainActivity extends Activity
         super.onLowMemory();
         dguardMemoryWarning();   // 旧接口仍可能派到前台告警，同一条证据
     }
+    @Override protected void onSaveInstanceState(Bundle state) {
+        super.onSaveInstanceState(state);
+        if (touchExport != null) state.putByteArray("touchLayoutExport", touchExport);
+    }
+
     @Override protected void onActivityResult(int request, int result, android.content.Intent data) {
         super.onActivityResult(request, result, data);
-        if (runtimeLoaded && request == PICK_PACKAGE && result == RESULT_OK && data != null && data.getData() != null)
+        if (!runtimeLoaded) return;   // 运行库被拒的冷启动没有触屏层也没有库：两种结果都不处理
+        if (request == PICK_TOUCH_LAYOUT || request == EXPORT_TOUCH_LAYOUT) {
+            byte[] exported = touchExport;
+            touchExport = null;
+            if (result != RESULT_OK || data == null || data.getData() == null) return;
+            try {
+                if (request == PICK_TOUCH_LAYOUT) {
+                    byte[] bytes;
+                    try (java.io.InputStream input = getContentResolver().openInputStream(data.getData())) {
+                        bytes = TouchLayoutStore.readImport(input);
+                    }
+                    touchPad.setLayout(touchLayouts.importLayout(bytes));
+                } else {
+                    if (exported == null) exported = touchLayouts.exportBytes(touchPad.pad().layoutModel());
+                    try (java.io.OutputStream output = getContentResolver().openOutputStream(data.getData(), "wt")) {
+                        if (output == null) throw new java.io.IOException(getString(R.string.touch_layout_document_unavailable));
+                        output.write(exported);
+                    }
+                }
+                android.widget.Toast.makeText(this, request == PICK_TOUCH_LAYOUT
+                    ? R.string.touch_layout_imported : R.string.touch_layout_exported, android.widget.Toast.LENGTH_LONG).show();
+            } catch (java.io.IOException | IllegalArgumentException | SecurityException error) {
+                touchTransferFailed(request == PICK_TOUCH_LAYOUT, error);
+            }
+            return;
+        }
+        if (request == PICK_PACKAGE && result == RESULT_OK && data != null && data.getData() != null)
             library.importTree(data.getData());
     }
     @Override protected void onNewIntent(android.content.Intent intent) {
@@ -774,6 +811,11 @@ public class MainActivity extends Activity
         if (gameMode && intent != null && intent.hasExtra(GameActivity.TITLE_EXTRA)) {
             String incoming = intent.getStringExtra(GameActivity.TITLE_EXTRA);
             if (!java.util.Objects.equals(incoming, getIntent().getStringExtra(GameActivity.TITLE_EXTRA))) {
+                if (intent.getBooleanExtra(GameActivity.SWITCH_EXTRA, false)) {   // 玩家在库页确认过：正常收局（存档照常），库页等进程退出再起新款
+                    Log.i("S2Arm", "player switched to " + incoming + "; stopping the running game");
+                    stopGame("player switched game", true);
+                    return;
+                }
                 status.setTextColor(0xFFFF5252);
                 status.setText("Game launch refused: previous session still owns this process; exit it first");
                 panel.setVisibility(android.view.View.VISIBLE);
@@ -1093,9 +1135,13 @@ public class MainActivity extends Activity
         if (touchPad == null || touchPad.editing() || isFinishing()) return;
         java.util.List<String> labels = new java.util.ArrayList<>();
         java.util.List<Runnable> actions = new java.util.ArrayList<>();
-        if (touchPad.getVisibility() == android.view.View.VISIBLE) {
-            labels.add(getString(R.string.touch_menu_edit_positions)); actions.add(this::beginTouchEdit);
-        }
+        labels.add(getString(R.string.touch_menu_edit_positions)); actions.add(this::beginTouchEdit);
+        // 接了手柄时虚拟手柄自动收起；玩家随时能叫回来或收起（不替玩家决定，本局有效）
+        boolean padShown = touchPad.controlsVisible();
+        labels.add(getString(padShown ? R.string.touch_menu_hide_pad : R.string.touch_menu_show_pad));
+        actions.add(() -> { touchMode = padShown ? "off" : "on"; updateTouchPad(); });
+        labels.add(getString(R.string.touch_menu_import)); actions.add(() -> pickTouchLayout(true));
+        labels.add(getString(R.string.touch_menu_export)); actions.add(() -> pickTouchLayout(false));
         if (touchLayouts.file().isFile()) {
             labels.add(getString(R.string.touch_menu_restore_default)); actions.add(this::resetTouchLayout);
         }
@@ -1118,6 +1164,40 @@ public class MainActivity extends Activity
             .setItems(labels.toArray(new String[0]), (dialog, which) -> actions.get(which).run())
             .setNegativeButton(android.R.string.cancel, null)
             .show();
+    }
+
+    private void touchTransferFailed(boolean importing, Exception error) {
+        Log.e("S2Arm", "Touch layout transfer failed", error);
+        // 报真原因 + 下一步（中英各一份）；异常原文是内部英文，进日志
+        String message = error.getMessage() != null ? error.getMessage() : "";
+        int reason = error instanceof IllegalArgumentException
+            ? (message.contains("64 KiB") ? R.string.touch_layout_err_size : R.string.touch_layout_err_invalid)
+            : importing ? R.string.touch_layout_err_read : R.string.touch_layout_err_write;
+        android.widget.Toast.makeText(this, getString(importing ? R.string.touch_layout_import_failed
+            : R.string.touch_layout_export_failed, getString(reason)), android.widget.Toast.LENGTH_LONG).show();
+    }
+
+    private void pickTouchLayout(boolean importing) {
+        android.content.Intent intent = new android.content.Intent(importing
+            ? android.content.Intent.ACTION_OPEN_DOCUMENT : android.content.Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(android.content.Intent.CATEGORY_OPENABLE);
+        intent.setType("application/json");
+        try {
+            if (!importing) {
+                touchExport = touchLayouts.exportBytes(touchPad.pad().layoutModel());
+                intent.putExtra(android.content.Intent.EXTRA_TITLE, TouchLayoutStore.exportFilename(touchExport));
+            }
+            try {
+                startActivityForResult(intent, importing ? PICK_TOUCH_LAYOUT : EXPORT_TOUCH_LAYOUT);
+            } catch (android.content.ActivityNotFoundException missingJsonPicker) {
+                intent.setType("*/*");
+                startActivityForResult(intent, importing ? PICK_TOUCH_LAYOUT : EXPORT_TOUCH_LAYOUT);
+            }
+        } catch (java.io.IOException | IllegalArgumentException | SecurityException
+                | android.content.ActivityNotFoundException error) {
+            touchExport = null;
+            touchTransferFailed(importing, error);
+        }
     }
 
     private void beginTouchEdit() {
@@ -1200,7 +1280,9 @@ public class MainActivity extends Activity
         boolean show = "on".equals(touchMode) || ("auto".equals(touchMode) && !gamepadConnected())
             || touchPad.editing();
         touchPad.setControlsVisible(show);
-        touchPad.setVisibility(show || touchPad.gameTouchEnabled() ? android.view.View.VISIBLE : android.view.View.GONE);
+        // 触屏层始终在：按键收起时它只把触摸转给游戏或丢掉、不按键，但四指长按菜单要靠它收手势——
+        // 原先接了手柄就整层 GONE，菜单（编辑位置、显示虚拟手柄、运行模式）就再也叫不出来（不堵门）
+        touchPad.setVisibility(android.view.View.VISIBLE);
     }
     // Window lease (implementation plan §7.3): surfaceCreated offers a new window generation,
     // surfaceChanged and insets publish revisions of it, surfaceDestroyed revokes it. Hand-over

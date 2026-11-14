@@ -10,7 +10,7 @@ extern "C" {
 //   S2A_QL_MODE 没有可切的帧率来源（原生 60 帧，或原生 30 帧没补丁）：0 主机 → 1 掌机，帧率跟游戏自己
 enum { S2A_QL_FPS = 1, S2A_QL_MODE = 2 };
 // 换档原因
-enum { S2A_QL_WHY_NONE = 0, S2A_QL_WHY_FPS = 1, S2A_QL_WHY_HOT = 2, S2A_QL_WHY_UP = 3 };
+enum { S2A_QL_WHY_NONE = 0, S2A_QL_WHY_FPS = 1, S2A_QL_WHY_UP = 3 };   // 2（热状态危急强降）11-13 删：梯子只看实际帧率
 void s2a_ql_setup(int kind, int tier);   // 换局：种类与起始档（0 = 最高档）
 // 最高可到的档（setup 之后调）：玩家选的运行模式是上限（#352，维护者 11-09：手机缺省掌机、玩家可自己开主机），梯子只在它之下降档、回升也不越过它；
 //   当前档高于上限的拉到上限。setup 缺省上限 0（最高档）

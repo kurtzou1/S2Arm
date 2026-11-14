@@ -32,6 +32,10 @@ int main(void) { @autoreleasepool {
     l=S2APlayLayoutMake(b,b,S2APlaySplitOn,NO,CGRectMake(0,330,600,40));
     t=S2APlayReflectionTransform(l,b);
     CK(fabs(t.ty+100)<.001 && point(t,b,CGPointMake(70,330),70,370),"非居中折痕使用保留区中心，不硬编码窗口中线");
+    CK(S2APlayReflectionWanted(S2APlayLayoutMake(b,b,S2APlaySplitOn,NO,CGRectMake(0,380,600,40))),"有横向折痕的分屏：出倒影");
+    CK(S2APlayReflectionWanted(S2APlayLayoutMake(b,b,S2APlaySplitOn,NO,CGRectMake(290,0,20,800))),"有竖向折痕的分屏：出倒影");
+    CK(!S2APlayReflectionWanted(S2APlayLayoutMake(b,b,S2APlaySplitOn,NO,CGRectNull)),"没有折痕（普通 iPhone 强制分屏，#979）：不出倒影");
+    CK(!S2APlayReflectionWanted(S2APlayLayoutMake(b,b,S2APlaySplitOff,NO,CGRectMake(0,380,600,40))),"不分屏：不出倒影");
     printf("%s t_play_reflection：%d/%d 项符合\n",bad?"✗":"✓",checks-bad,checks);
     return bad?1:0;
 } }

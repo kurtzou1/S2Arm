@@ -37,6 +37,19 @@ class PinnablePath(unittest.TestCase):
                 w.pinnable_path(text)
 
 
+class FileTimes(unittest.TestCase):
+    """#854：Windows 句柄取的文件信息要带 st_mtime（诊断包按任务记录改动时间挑最近 50 个）。纯换算，各平台都跑。
+    期望按定义手写：FILETIME 是 1601-01-01 起的 100 纳秒数，Unix 零点 = 116444736000000000；
+    Unix 10 亿秒（2001-09-09 01:46:40 UTC）= 116444736000000000 + 10^9 × 10^7 = 126444736000000000；半秒 = 再加 5000000"""
+    def test_filetime_to_unix(self):
+        import winproc as w
+        def ft(n):
+            return W.FILETIME(n & 0xFFFFFFFF, n >> 32)
+        self.assertEqual(w._unix_time(ft(116444736000000000)), 0.0)
+        self.assertEqual(w._unix_time(ft(126444736000000000)), 1_000_000_000.0)
+        self.assertEqual(w._unix_time(ft(126444736005000000)), 1_000_000_000.5)
+
+
 class ReferencedNamesExist(unittest.TestCase):
     """全仓（pack/ tools/）代码里引用的 winproc.<名字> 都得在 winproc 里有，各平台都跑。
     11-11 删请求文件 ACL 复核时把 _current_sid 一起删了，pack/orch/roots.py _win_acl 还在调，Windows 播种 / 删目录全部 AttributeError，

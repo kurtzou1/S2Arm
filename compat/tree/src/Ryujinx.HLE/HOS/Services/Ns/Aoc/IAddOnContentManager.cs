@@ -202,6 +202,15 @@ namespace Ryujinx.HLE.HOS.Services.Ns.Aoc
             return ResultCode.Success;
         }
 
+        [CommandCmif(200)] // 15.0.0+
+        // SetRequiredAddOnContentsOnContentsAvailabilityTransition(pid, buffer): add-on contents here never become unavailable, nothing to record
+        public ResultCode SetRequiredAddOnContentsOnContentsAvailabilityTransition(ServiceCtx context)
+        {
+            Logger.Stub?.PrintStub(LogClass.ServiceNs);
+
+            return ResultCode.Success;
+        }
+
         [CommandCmif(100)] // 7.0.0+
         // CreateEcPurchasedEventManager() -> object<nn::ec::IPurchaseEventManager>
         public ResultCode CreateEcPurchasedEventManager(ServiceCtx context)

@@ -26,10 +26,10 @@ namespace Ryujinx.HLE.HOS.Services.Nim.Ntc.StaticService
         // StartTask()
         public ResultCode StartTask(ServiceCtx context)
         {
-            if (!context.Device.Configuration.EnableInternetAccess)
-            {
-                return (ResultCode)Time.ResultCode.NetworkTimeNotAvailable;
-            }
+            // S2Arm: the task always starts and finishes at once (its event lit), as the reference implementation answers it; without internet access the
+            // outcome comes from GetResult. Failing StartTask itself left the event dark, and a game that waits on it without checking StartTask hangs
+            // (the same wait-forever class as the shop request event, 11-13).
+            _taskResultCode = context.Device.Configuration.EnableInternetAccess ? ResultCode.Success : (ResultCode)Time.ResultCode.NetworkTimeNotAvailable;
 
             // NOTE: Since we don't support the Nintendo NTP server, we can signal the event now to confirm the update task is done.
             _finishNotificationEvent.ReadableEvent.Signal();
@@ -70,6 +70,24 @@ namespace Ryujinx.HLE.HOS.Services.Nim.Ntc.StaticService
             _taskResultCode = (ResultCode)Time.ResultCode.NetworkTimeTaskCanceled;
 
             Logger.Stub?.PrintStub(LogClass.ServiceNtc);
+
+            return ResultCode.Success;
+        }
+
+        [CommandCmif(4)]
+        // IsProcessing() -> bool (u32): the task is never running, it finishes inside StartTask
+        public ResultCode IsProcessing(ServiceCtx context)
+        {
+            context.ResponseData.Write(0u);
+
+            return ResultCode.Success;
+        }
+
+        [CommandCmif(5)]
+        // GetServerTime() -> s64 seconds since the Unix epoch (the host's clock: there is no time server here)
+        public ResultCode GetServerTime(ServiceCtx context)
+        {
+            context.ResponseData.Write(DateTimeOffset.UtcNow.ToUnixTimeSeconds());
 
             return ResultCode.Success;
         }

@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-"""S2Arm 启动器的覆盖更新（Mac / Windows 共用，只用标准库）。
+"""S2Arm 启动器打开时要给玩家看什么（Mac / Windows 共用，只用标准库）。
 
-check    查 GitHub 最新 Release，打印一行 JSON。
-prepare  验清单签名后后台下载官方包、核对清单里的校验值、解开并校验到数据目录下的 updates/，逐行打印进度。不碰正在用的安装目录。
-         有 from 当前版本的差分包就先试差分（按文件替换，整棵目录核对清单），任何一步失败退回整包。
-inbox    启动器打开时要给玩家看什么（两端共用）：查版本 + 取公告（notice.json，取不到用随包那份），按「永远只给最新一期」算出
-         最多一个弹窗（这版更新了什么 / 有新版）、横幅（最新一条重要公告）、消息列表与未读数；打印一行 JSON。只读。
+v0.3.10 起，下载、验签、替换、回滚、重启都交给业界标准组件：Mac 用 Sparkle 2，Windows 用 NetSparkle（appcast 在 dl.s2arm.com/appcast/，
+发版用 Ed25519 私钥签）。这里不再有任何换版代码，只剩：
+
+check       查最新版本（官网签名清单，取不到回退 GitHub Release），打印一行 JSON。
+inbox       启动器打开时要给玩家看什么：查版本 + 取公告（notice.json，取不到用随包那份），按「永远只给最新一期」算出
+            最多一个弹窗（这版更新了什么 / 有新版）、横幅（最新一条重要公告）、消息列表与未读数；打印一行 JSON。只读。
+            顺带清掉旧自写换版在 updates/ 下留的残留（clear_stale_pending）。
 inbox-seen  玩家关掉了：记进数据目录 updates/seen.json（--update 版本 / --after 版本 / --notice 最新看过的公告号）。
-apply    启动器退出后，由 prepare 备好的独立 Python 运行：原地替换安装目录、重启；新版起不来就回滚到旧版。
-
-玩家的数据（游戏库、密钥、存档备份、任务记录、缓存）都在安装目录之外；prepare 先核实这一点，
-被保护的目录落在安装目录里就拒绝更新。任何一步失败，旧版都原样不动。
 """
 import argparse
 import json
@@ -20,13 +18,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import traceback
-import types
 import time
 from pathlib import Path
 
-# apply 跑在 updates/runner 那份只含标准库的 Python 上，Mac 上它没有 ssl 依赖的动态库：
-# 只有 check / prepare 才用到的模块在这里按需导入，apply 走不到。
 
 API = "https://api.github.com/repos/jhaizhou-ops/S2Arm/releases/latest"
 # 官网静态文件：发版时和 Release 里的 update-manifest.json / .sig 同一份字节（发版流程写入）。走 CDN、不占 GitHub 匿名查询次数（每 IP 每小时 60 次，
@@ -43,8 +37,9 @@ SIGNATURE = "update-manifest.json.sig"
 # 发版清单的 Ed25519 公钥。私钥只在发版机上（tools/sign_update_manifest.py）：Release 或发布账号被改，也改不了这份清单。
 PUBLIC_KEY = "d553da82bad575ce87bf521a080c9d0997f97d189f0d517e97f80808bafc5225"
 TRUSTED_HOSTS = ("github.com", "api.github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com", "s2arm.com", "dl.s2arm.com")
-HEALTH_SECONDS = 90
-EXIT_SECONDS = 120
+# 旧版启动器交出替换进程后自己退出（Mac NSApp.terminate / Windows 退出）；#931：点了「现在更新并重启」旧版却一直没退，替换进程只被动等满两分钟报
+#   update_app_busy。等 EXIT_GRACE 秒还在 → 由替换进程主动结束它（先 TERM，再等 EXIT_TERM_SECONDS 秒还在就 KILL）；只结束确认是这个安装目录里的程序的进程
+EXIT_GRACE, EXIT_TERM_SECONDS = 15, 10
 CHUNK = 1 << 20
 
 
@@ -446,7 +441,7 @@ def inbox(platform, current, private_root, check=None, notices=None):
     for i, n in enumerate(notices):
         n["unread"] = not is_seen(i) and i == 0
     popup = None
-    # 这版的说明只在「从旧版里点更新、换上这一版」时记在本机（prepare 写 updates/notes/<版本>.json），有它就说明是刚更新上来的；手动装的新版没有，不弹
+    # 这版的说明只在「从旧版里点更新、换上这一版」时记在本机（启动器开始下载新版时写 updates/notes/<版本>.json），有它就说明是刚更新上来的；手动装的新版没有，不弹
     mine = installed_notes(private_root, current)
     if mine and mine.get("highlights") and seen.get("afterShown") != current:
         popup = {"kind": "afterUpdate", "version": current, "notes": mine}
@@ -475,614 +470,30 @@ def inbox_seen(private_root, update=None, after=None, notice=None):
     return seen
 
 
-def inside(child, parent):
-    child, parent = Path(child).resolve(), Path(parent).resolve()
-    return child == parent or parent in child.parents
-
-
 def emit(**fields):
     print(json.dumps(fields, ensure_ascii=False), flush=True)
 
 
-def check_paths(install, protect):
-    for path in protect:
-        if path and inside(path, install):
-            raise UpdateError("update_data_inside_install", "游戏库或数据目录放在了 S2Arm 安装目录里，更新会影响它们，已停止。请先把它们移出安装目录。")
-    parent = Path(install).resolve().parent
-    try:
-        with tempfile.TemporaryDirectory(prefix=".s2arm-update-", dir=parent):
-            pass
-    except OSError:
-        raise UpdateError("update_no_permission", "没有权限替换 S2Arm 所在的文件夹。请把 S2Arm 放到可写的位置，或手动下载新版。") from None
-
-
-def require_free(path, need):
-    if shutil.disk_usage(path).free < need:
-        raise UpdateError("update_disk_full", "磁盘空间不够下载和解开新版，已停止，旧版没有变化。")
-
-
-def require_unpack_space(updates, install, unpacked, package_size):
-    """解开前按解开后的确切大小要空间（剃刀 H17：原先下载前就要「更新目录 4 倍包大小、安装盘 3 倍」，盘紧的玩家被拒）。
-    解开要 unpacked（包还在、已占着）；替换时 swap 把解开的那份拷到安装目录旁（再 unpacked），这时包已删。
-    两处在同一块盘上：峰值 = max(unpacked, 2 × unpacked − 包大小)；不同盘：各要 unpacked"""
-    parent = Path(install).resolve().parent
-    if os.stat(updates).st_dev == os.stat(parent).st_dev:
-        require_free(updates, max(unpacked, 2 * unpacked - package_size))
-    else:
-        require_free(updates, unpacked)
-        require_free(parent, unpacked)
-
-
-def sha256(path):
-    import hashlib
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        while block := handle.read(CHUNK):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-DOWNLOAD_ATTEMPTS = 6   # 连续这么多次一点进展都没有才放弃；有进展就重新计数
-RETRY_SECONDS = 2
-PRIMARY_ATTEMPTS = 2   # 有退路时首选来源只试这么多次没进展就换退路（R2 整个不通时不让玩家干等几分钟）
-
-
-def download(url, target, size, attempts=None):
-    """断了接着下（Range），服务器不支持续传就从头来；下够清单写的长度才算完"""
-    import http.client
-    part = Path(str(target) + ".part")
-    # 上次（含上一个进程）没下完的 .part 接着下：长度超过清单的不是这份文件，扔掉重下；内容不对由下完后的 SHA-256 兜住
-    done, stalled = (part.stat().st_size if part.is_file() else 0), 0
-    if done > size:
-        part.unlink()
-        done = 0
-    while done < size:
-        before, failure = done, None
-        try:
-            with open_url(url, 30, start=done) as response:
-                if done and response.status != 206:
-                    done = 0
-                with open(part, "ab" if done else "wb") as out:
-                    while block := response.read(CHUNK):
-                        done += len(block)
-                        if done > size:   # 比签名清单写的大：不是官方文件，也防把磁盘写满
-                            raise UpdateError("update_checksum_mismatch", "下载的文件比官方清单大，已停止，旧版没有变化。")
-                        out.write(block)
-                        emit(state="downloading", done=done, total=size)
-        except (OSError, http.client.HTTPException) as error:
-            failure = error
-            done = part.stat().st_size if part.exists() else 0
-        if done >= size:
-            break
-        import urllib.error
-        if isinstance(failure, urllib.error.HTTPError) and failure.code != 416:   # 安装包地址本身出错（404 / 5xx / 限流）：重试也没用
-            raise network_error(failure, "下载新版") from failure
-        stalled = 0 if done > before else stalled + 1
-        if stalled >= (attempts or DOWNLOAD_ATTEMPTS):
-            why = network_error(failure, "下载新版").detail if failure else "连接提前结束"
-            raise UpdateError("update_download_failed", "下载一直断开，已停止，当前版本没有变化。请检查网络后重试，或打开下载页手动下载。", why)
-        time.sleep(RETRY_SECONDS * stalled)
-    # 已下完且文件句柄已关闭；Windows 扫描器可能仍短暂占用它，只重试落盘，不重新下载。
-    retry_rename(part, target, replace=True)
-
-
-def fetch_package(info, package, size):
-    """下整包并按签名清单核 sha256。先下 info["asset"]；下不下来（连不上、非 200、比清单大、一直断开）且有 assetFallback（官网清单命中时 = GitHub）
-    就扔掉半截、从退路重下。下够了 sha256 不对 = 内容被改：直接报错，不退回（换个来源不该让被改的文件变成能用）"""
-    try:
-        download(info["asset"], package, size, attempts=PRIMARY_ATTEMPTS if info.get("assetFallback") else None)
-    except UpdateError as error:
-        if not info.get("assetFallback"):
-            raise
-        emit(state="downloadFallback", reason=error.code)
-        Path(str(package) + ".part").unlink(missing_ok=True)
-        download(info["assetFallback"], package, size)
-    emit(state="verifying")
-    if sha256(package) != info["sha256"]:
-        package.unlink()
-        raise UpdateError("update_checksum_mismatch", "下载的安装包校验不符，已删除，旧版没有变化。请稍后重试。")
-
-
-def extract_windows(package, dest, before_unpack=None):
-    import zipfile
-    with zipfile.ZipFile(package) as archive:
-        root = dest.resolve()
-        for name in archive.namelist():
-            if not inside(root / name, root):
-                raise UpdateError("update_bad_package", "安装包内容不正常，已停止，旧版没有变化。")
-        if before_unpack:
-            before_unpack(sum(i.file_size for i in archive.infolist()))   # 解开后的确切大小：ZIP 目录里记着
-        archive.extractall(dest)
-    found = next((p.parent for p in sorted(dest.rglob("S2Arm.exe"), key=lambda p: len(p.parts))), None)
-    if not found or not (found / "Engine").is_dir() or not (found / "Runtime/python/python.exe").is_file():
-        raise UpdateError("update_bad_package", "安装包不完整，已停止，旧版没有变化。")
-    return found
-
-
-def extract_mac(package, dest, before_unpack=None):
-    # 挂载点放系统临时目录：放在数据目录下时，数据目录在外置盘上 hdiutil 会报 Permission denied
-    mount = Path(tempfile.mkdtemp(prefix="s2arm-update-mount-"))
-    attached = subprocess.run(["/usr/bin/hdiutil", "attach", "-nobrowse", "-readonly", "-mountpoint", str(mount), str(package)], capture_output=True, timeout=300)
-    if attached.returncode:
-        os.rmdir(mount)
-        raise UpdateError("update_unpack_failed", "打不开下载好的安装包，旧版没有变化。可以手动下载新版。", detail=attached.stderr.decode("utf-8", "replace"))
-    try:
-        app = mount / "S2Arm.app"
-        if not app.is_dir():
-            raise UpdateError("update_bad_package", "安装包不完整，已停止，旧版没有变化。")
-        target = dest / "S2Arm.app"
-        if before_unpack:
-            before_unpack(tree_size(app))   # 解开后的确切大小：挂载后量 App 本身
-        subprocess.run(["/usr/bin/ditto", str(app), str(target)], check=True, capture_output=True, timeout=1800)
-    finally:
-        subprocess.run(["/usr/bin/hdiutil", "detach", "-force", str(mount)], capture_output=True, timeout=120)
-        with __import__("contextlib").suppress(OSError):
-            os.rmdir(mount)
-    check = subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(target)], capture_output=True, timeout=600)
-    if check.returncode:
-        raise UpdateError("update_bad_package", "安装包的签名校验没通过，已停止，旧版没有变化。", detail=check.stderr.decode("utf-8", "replace"))
-    return target
-
-
-def file_manifest(root):
-    """整棵目录的清单：相对路径 → {sha256, x} 或 {link}。Mac 的 App 里有符号链接，只记不跟。"""
-    root, out = Path(root), {}
-    for folder, dirs, files in os.walk(root):
-        for name in sorted(files) + [d for d in dirs if (Path(folder) / d).is_symlink()]:
-            path = Path(folder) / name
-            if name == ".DS_Store":
-                continue
-            rel = path.relative_to(root).as_posix()
-            out[rel] = {"link": os.readlink(path)} if path.is_symlink() else {"sha256": sha256(path), "x": os.name != "nt" and os.access(path, os.X_OK)}
-    return out
-
-
-def build_delta(old, new, platform, source, target, out):
-    """发版工具用：old → new 只打包变了的文件，附完整目标清单。返回差分包路径。"""
-    import zipfile
-    base, wanted = file_manifest(old), file_manifest(new)
-    delta = Path(out) / DELTAS[platform].format(source)
-    with zipfile.ZipFile(delta, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
-        archive.writestr("delta.json", json.dumps({"schema": 1, "platform": platform, "from": source, "to": target, "target": wanted}))
-        for rel, entry in wanted.items():
-            if "sha256" in entry and base.get(rel) != entry:
-                archive.write(Path(new) / rel, "files/" + rel)
-    return delta
-
-
-def check_target(target):
-    """差分清单里的路径和符号链接都不能走出 App 目录。"""
-    root = "/app"
-    for rel, entry in target.items():
-        parts = rel.split("/")
-        escaped = rel.startswith("/") or "\\" in rel or ":" in rel or ".." in parts
-        if "link" in entry:
-            link = entry["link"]
-            parent = os.path.dirname(os.path.join(root, rel))
-            escaped = escaped or link.startswith("/") or "\\" in link or not os.path.normpath(os.path.join(parent, link)).startswith(root + "/")
-        if escaped:
-            raise UpdateError("update_bad_package", "差分包内容不正常。")
-
-
-def apply_delta(package, platform, current, version, install, dest):
-    """在 install 的副本上打差分，整棵核对目标清单；Mac 再核签名。不碰 install。任何不符都抛错，由调用方退回整包。"""
-    import zipfile
-    with zipfile.ZipFile(package) as archive:
-        manifest = json.loads(archive.read("delta.json"))
-        if manifest.get("schema") != 1 or manifest.get("platform") != platform or manifest.get("from") != current or manifest.get("to") != version:
-            raise UpdateError("update_bad_package", "差分包和当前版本对不上。")
-        target = manifest["target"]
-        check_target(target)
-        staged = dest / Path(install).name
-        shutil.copytree(install, staged, symlinks=True)
-        root = staged.resolve()
-        for member in archive.namelist():
-            if not member.startswith("files/") or member.endswith("/"):
-                continue
-            rel = member[len("files/"):]
-            path = root / rel
-            if rel not in target or not inside(path, root):
-                raise UpdateError("update_bad_package", "差分包内容不正常。")
-            if path.is_symlink() or path.is_file():
-                path.unlink()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with archive.open(member) as source, open(path, "wb") as out:
-                shutil.copyfileobj(source, out)
-    have = file_manifest(staged)
-    for rel in set(have) - set(target):
-        (staged / rel).unlink()
-    for rel, entry in target.items():
-        path = staged / rel
-        if "link" in entry and have.get(rel) != entry:
-            if path.is_symlink() or path.exists():
-                path.unlink()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            os.symlink(entry["link"], path)
-        elif entry.get("x") and os.name != "nt":
-            path.chmod(path.stat().st_mode | 0o111)
-    if file_manifest(staged) != target:
-        raise UpdateError("update_bad_package", "打完差分后文件和清单对不上。")
-    if platform == "mac":
-        check = subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(staged)], capture_output=True, timeout=600)
-        if check.returncode:
-            raise UpdateError("update_bad_package", "打完差分后签名校验没通过。")
-    return staged
-
-
-def stage_delta(info, platform, current, install, work):
-    emit(state="downloading", done=0, total=info["deltaSize"])
-    package = work / info["deltaName"]
-    require_free(work, tree_size(install) + info["deltaSize"] * 2)
-    download(info["delta"], package, info["deltaSize"])
-    emit(state="verifying")
-    if sha256(package) != info["deltaSha256"]:
-        raise UpdateError("update_checksum_mismatch", "差分包校验不符。")
-    emit(state="unpacking")
-    unpack = work / "delta"
-    unpack.mkdir()
-    staged = apply_delta(package, platform, current, info["version"], install, unpack)
-    package.unlink()
-    return staged
-
-
-def tree_size(root):
-    return sum(p.stat().st_size for p in Path(root).rglob("*") if p.is_file() and not p.is_symlink())
-
-
-def runner_python(platform, staged, runner):
-    """apply 要在替换安装目录时运行，不能用目录里的 Python：拷一份只含标准库的到 updates/runner。"""
-    if runner.exists():
-        shutil.rmtree(runner)
-    source = staged / ("Contents/Resources/Runtime/python" if platform == "mac" else "Runtime/python")
-    shutil.copytree(source, runner / "python", symlinks=True, ignore=shutil.ignore_patterns("site-packages", "__pycache__", "*.pyc"))
-    shutil.copy2(__file__, runner / "updater.py")
-    return runner / "python" / ("bin/python3" if platform == "mac" else "python.exe")
-
-
-def prepare(platform, current, private, install, protect):
-    updates = Path(private) / "updates"
-    updates.mkdir(parents=True, exist_ok=True)
-    check_paths(install, protect)
-    with UpdateLock(updates):
-        _prepare(platform, current, updates, install)
-
-
-def _prepare(platform, current, updates, install):
-    info = latest(platform, current, fresh=True)
-    if not info["available"]:
-        raise UpdateError("update_none", "已经是最新版本。")
-    # 同一版本上一次已经准备好（pending.json 记着解开的位置、替换进程的 Python 都还在）：直接交回，不重下、不重建 runner/
-    try:
-        done = json.loads((updates / "pending.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        done = {}
-    #   同一版本号重新发布过（签名清单里的整包校验值变了）不算准备好，照常重下重验
-    if done.get("version") == info["version"] and done.get("sha256") == info.get("sha256") and all(done.get(k) and Path(done[k]).exists() for k in ("staged", "python", "updater")):
-        emit(state="ready", via=done.get("via", "full"), version=info["version"], staged=done["staged"], python=done["python"], updater=done["updater"])
-        return
-    work = updates / info["version"]
-    if work.exists():
-        # 同一版本重试：只留整包没下完的 .part 接着下（download 续传），其余（解包、增量）清掉重来
-        keep = work / (info["assetName"] + ".part")
-        for item in list(work.iterdir()):
-            if item != keep:
-                remove_tree(item) if item.is_dir() and not item.is_symlink() else item.unlink()
-    work.mkdir(exist_ok=True)
-    staged = None
-    if info.get("delta"):
-        try:
-            staged = stage_delta(info, platform, current, install, work)
-            via = "delta"
-        except (UpdateError, OSError, ValueError, KeyError, shutil.Error, subprocess.SubprocessError, __import__("zipfile").BadZipFile) as error:
-            emit(state="deltaFailed", reason=type(error).__name__)
-            shutil.rmtree(work / "delta", ignore_errors=True)
-            (work / info["deltaName"]).unlink(missing_ok=True)
-    if staged is None:
-        via = "full"
-        size = info["size"]
-        require_free(updates, size)   # 先只要下载这一份；解开要多少在解开前按确切大小核（require_unpack_space）
-        package = work / info["assetName"]
-        emit(state="downloading", done=0, total=size)
-        fetch_package(info, package, size)
-        emit(state="unpacking")
-        unpack = work / "unpack"
-        unpack.mkdir()
-        room = lambda unpacked: require_unpack_space(updates, install, unpacked, size)
-        staged = extract_mac(package, unpack, room) if platform == "mac" else extract_windows(package, unpack, room)
-        package.unlink()
-    runner = updates / "runner"
-    python = runner_python(platform, staged, runner)
-    # 替换进程起不来的话，App 退出后什么都不会发生：先确认它能跑，不能跑就停在这里
-    check = subprocess.run([str(python), "-B", "-I", str(runner / "updater.py"), "selfcheck"], capture_output=True, timeout=120)
-    if check.returncode:
-        raise UpdateError("update_bad_package", "更新程序在这台电脑上起不来，已停止，旧版没有变化。")
-    if info.get("notes"):   # 换上新版后第一次打开要弹「这版更新了什么」：说明随下载记在本机，不再联网（updates/notes/ 不按版本号命名，drop_version_dirs 不删）
-        save_json(updates / "notes" / f"{info['version']}.json", info["notes"])
-    ready = {"via": via, "version": info["version"], "staged": str(staged), "python": str(python), "updater": str(runner / "updater.py")}
-    (updates / "pending.json").write_text(json.dumps(dict(ready, time=time.time(), sha256=info.get("sha256"))))
-    emit(state="ready", **ready)
-
-
-def pid_alive(pid):
-    if os.name == "nt":
-        import ctypes
-        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel.OpenProcess.restype = ctypes.c_void_p
-        handle = kernel.OpenProcess(0x00100000, False, int(pid))   # SYNCHRONIZE
-        if not handle:
-            return False
-        try:
-            kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
-            return kernel.WaitForSingleObject(handle, 0) == 0x102   # WAIT_TIMEOUT：还在跑
-        finally:
-            kernel.CloseHandle.argtypes = [ctypes.c_void_p]
-            kernel.CloseHandle(handle)
-    try:
-        os.kill(int(pid), 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
-def remove_tree(path):
-    """Windows 上只读文件（Engine 的 .git 对象）会让 rmtree 半途而废，每次更新留下一整份旧版。"""
-    def writable(function, target, _):
-        try:
-            os.chmod(target, 0o700)
-            function(target)
-        except OSError:
-            pass
-    shutil.rmtree(path, onerror=writable)
-
-
-def retry_rename(source, target, seconds=30, *, replace=False):
-    """Windows 上杀毒软件和索引服务会短暂占住文件 / 目录：重试几十秒再放弃。"""
-    deadline = time.monotonic() + seconds
-    while True:
-        try:
-            (os.replace if replace else os.rename)(source, target)
-            return
-        except OSError:
-            if time.monotonic() >= deadline:
-                raise
-            time.sleep(1)
-
-
-def move_dir(source, target):
-    """整目录 source → target。先限时重试整目录改名；仍被拒（#379：下载工具 / 资源管理器持有安装目录本身的句柄，目录里的文件却能改名）
-    且 target 不存在或是空目录 → 逐项把 source 里的东西搬进 target（玩家现场用 robocopy 覆盖验证过同一做法）。逐项中途失败就把已搬的搬回去再抛，
-    不留下一半在新、一半在旧。source 搬空后删不掉（句柄还在）就留着空目录"""
-    try:
-        retry_rename(source, target)
-        return
-    except OSError:
-        if target.exists() and (not target.is_dir() or any(target.iterdir())):
-            raise
-    target.mkdir(exist_ok=True)
-    moved = []
-    try:
-        for p in sorted(source.iterdir()):
-            retry_rename(p, target / p.name)
-            moved.append(p.name)
-    except OSError:
-        for name in reversed(moved):
-            retry_rename(target / name, source / name)
-        raise
-    try:
-        source.rmdir()
-    except OSError:
-        pass
-
-
-def holds_copy(path):
-    """这里真有一份安装：目录在且不空。move_dir 逐项搬空后删不掉的空目录（句柄还在）不算——把它当成「还有一份旧版」，
-    恢复时会把刚搬回安装目录的那份当坏的换掉删掉（审计 P1-157）"""
-    try:
-        return path.is_dir() and any(path.iterdir())
-    except OSError:
-        return False
-
-
 VERSION_DIR = re.compile(r"\d+(?:\.\d+)+")
-
-
-def drop_version_dirs(updates):
-    """新版确认起来以后：删掉 updates/ 下各版本的工作目录（解开的新版 unpack/、增量 delta/、下载的包）。
-    swap 是从 unpack 拷进安装目录的（copytree），拷完源一直留着，每次更新在系统盘多占一整份（#660）；早先版本留下的也一起清。
-    只删按版本号命名的目录：runner/（正在跑的就是它）、pending.json / health.ok / last_failure.json 不动。删不掉（被占用）就留到下次"""
-    for d in updates.iterdir():
-        if d.is_dir() and not d.is_symlink() and VERSION_DIR.fullmatch(d.name):
-            try:
-                remove_tree(d)
-            except OSError:
-                pass
-
-
-LOCK_NAME = ".update.lock"
-PREPARE_LOCK_WAIT = 600   # 另一个 prepare / apply 在跑时最多等这么久（下载大包要几分钟）
-
-
-class UpdateLock:
-    """prepare 与 apply 共用一把锁（updates/.update.lock，内核文件锁，进程没了自动放）。
-    11-13 #828：同一台机器上两个 prepare 同时跑（启动时自动下载 + 手动查更新 / s2armctl update），互相清对方的版本目录——
-      本机复现：一个报 FileExistsError（unpack 已在），另一个解到一半被删、验签不过；玩家 11-12 的「.part 改名时目标没了」同因。
-    等不到 = UpdateError update_busy（不是网络错）"""
-    def __init__(self, updates, wait=PREPARE_LOCK_WAIT):
-        self.path, self.wait, self.fd = Path(updates) / LOCK_NAME, wait, None
-
-    @staticmethod
-    def _try(fd):
-        try:
-            if os.name == "nt":
-                import msvcrt
-                os.lseek(fd, 0, 0); msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return True
-        except OSError:
-            return False
-
-    def __enter__(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
-        deadline = time.monotonic() + self.wait
-        while not self._try(self.fd):
-            if time.monotonic() >= deadline:
-                os.close(self.fd); self.fd = None
-                raise UpdateError("update_busy", "另一个更新正在进行，这次没有开始。请稍后再试。")
-            time.sleep(0.5)
-        return self
-
-    def __exit__(self, *exc):
-        if self.fd is not None:
-            if os.name == "nt":
-                import msvcrt
-                try:
-                    os.lseek(self.fd, 0, 0); msvcrt.locking(self.fd, msvcrt.LK_UNLCK, 1)
-                except OSError:
-                    pass
-            os.close(self.fd); self.fd = None   # posix：关掉即放锁
+# 旧自写换版（v0.3.9 及以前的 prepare / apply）在 updates/ 下留的东西：v0.3.10 起换版交给 Sparkle / NetSparkle，没人再读，启动时清掉
+LEGACY = ("pending.json", "health.ok", "last_failure.json", "apply.log", ".update.lock", "runner")
 
 
 def clear_stale_pending(private_root, current):
-    """启动时：pending.json 记的版本不比当前新（玩家手动装好了新版 / 换版早已完成），又没有更新在跑，就清掉它和各版本工作目录。
-    11-13 #828：手动覆盖安装后 pending.json 与解开的整份新版一直留着，下次还当成待换版。返回是否清了"""
+    """启动时清掉旧自写换版的残留（pending.json、health.ok、runner/、按版本号命名的整份新版……，可达几百 MB）；
+    updates/notes/（换上新版后弹「这版更新了什么」用，启动器开始下载时写）和 seen.json 不动。返回是否清了东西"""
     updates = Path(private_root) / "updates"
-    pending = updates / "pending.json"
-    try:
-        version = json.loads(pending.read_text(encoding="utf-8")).get("version")
-    except (OSError, ValueError, AttributeError):
+    if not updates.is_dir():
         return False
-    mine, theirs = version_tuple(current), version_tuple(version)
-    if not mine or (theirs and theirs > mine):
-        return False
-    try:
-        with UpdateLock(updates, wait=0):
-            pending.unlink(missing_ok=True)
-            (updates / "health.ok").unlink(missing_ok=True)
-            drop_version_dirs(updates)
-    except UpdateError:   # 有 prepare / apply 正在跑：不动
-        return False
-    return True
-
-
-def swap(staged, install, backup, new):
-    """staged → install；失败时安装目录保持或恢复旧版，异常往外抛。"""
-    if new.exists():
-        shutil.rmtree(new)
-    shutil.copytree(staged, new, symlinks=True)
-    move_dir(install, backup)
-    try:
-        move_dir(new, install)
-    except OSError:
-        move_dir(backup, install)
-        raise
-
-
-def default_launch(install, args):
-    if sys.platform == "darwin":
-        subprocess.run(["/usr/bin/open", "-n", str(install), "--args", *args], check=True, timeout=60)
-    else:
-        subprocess.Popen([str(install / "S2Arm.exe"), *args], cwd=install, creationflags=0x00000008 | 0x00000200, close_fds=True)
-
-
-def apply(staged, install, pid, private, args=(), launch=default_launch, health_seconds=HEALTH_SECONDS, exit_seconds=EXIT_SECONDS):
-    """返回 0 = 换上新版并确认起来了；1 = 已留在 / 回到旧版，原因写进 updates/last_failure.json。
-    持更新锁换版：换版期间别的 prepare 不会清掉解开的新版 / 替换进程用的 runner/（#828）"""
-    updates = Path(private) / "updates"
-    # 先在锁外等旧版退出：等待期间别的 prepare 能拿到锁、看到同版本已准备好就直接复用返回，不会陪着等两分钟；
-    #   等不到由 _apply 照旧报 update_app_busy
-    deadline = time.monotonic() + exit_seconds
-    while pid_alive(pid) and time.monotonic() < deadline:
-        time.sleep(0.5)
-    try:
-        with UpdateLock(updates):
-            return _apply(staged, install, pid, private, args, launch, health_seconds, max(0.0, deadline - time.monotonic()))
-    except UpdateError as error:   # 等不到锁（别的 prepare 一直占着）：旧版没动，照失败收尾——记原因、把旧版拉起来（启动器已经退了，不拉玩家就什么都看不到）
-        (updates / "last_failure.json").write_text(json.dumps({"code": error.code, "message": str(error), "time": time.time()}, ensure_ascii=False), encoding="utf-8")
-        record_failure(types.SimpleNamespace(private_root=str(private)), error.code, str(error))
-        while pid_alive(pid):
-            time.sleep(0.5)
-        try:
-            launch(Path(install), list(args))
-        except (OSError, subprocess.SubprocessError):
-            pass
-        return 1
-
-
-def _apply(staged, install, pid, private, args, launch, health_seconds, exit_seconds):
-    install, staged = Path(install), Path(staged)
-    updates = Path(private) / "updates"
-    backup, new = install.with_name(install.name + ".s2arm-old"), install.with_name(install.name + ".s2arm-new")
-
-    def fail(code, message, restart=True):
-        (updates / "last_failure.json").write_text(json.dumps({"code": code, "message": message, "time": time.time()}, ensure_ascii=False), encoding="utf-8")   # 不写 encoding 时 Windows 按系统代码页（中文机 GBK）写，两端启动器按 UTF-8 读
-        # 同时记进 update.log（诊断包会收）：last_failure.json 启动器下次启动读完就删，原先换版失败事后什么记录都没有（#379）
-        record_failure(types.SimpleNamespace(private_root=str(private)), code, message, traceback.format_exc() if sys.exc_info()[0] else "")
-        (updates / "pending.json").unlink(missing_ok=True)
-        if restart:
+    gone = False
+    for item in list(updates.iterdir()):
+        if item.name in LEGACY or (item.is_dir() and VERSION_DIR.fullmatch(item.name)):
             try:
-                launch(install, list(args))
-            except (OSError, subprocess.SubprocessError):
+                shutil.rmtree(item) if item.is_dir() and not item.is_symlink() else item.unlink()
+                gone = True
+            except OSError:
                 pass
-        return 1
-
-    deadline = time.monotonic() + exit_seconds
-    while pid_alive(pid):
-        if time.monotonic() >= deadline:
-            return fail("update_app_busy", "S2Arm 没有退出，这次没有更新。", restart=False)
-        time.sleep(0.5)
-    health = updates / "health.ok"
-    try:
-        # A previous apply may have stopped between swap()'s two renames.
-        # Restore the only old copy before treating any backup as disposable.
-        if holds_copy(backup) and not holds_copy(install):
-            move_dir(backup, install)
-        if holds_copy(backup):
-            if health.exists():
-                # 上次换上的版本后来起来过（写了 health.ok）：它已被确认，副本可以删
-                remove_tree(backup)
-            else:
-                # 上次换上的版本没被确认就中断了：副本才是最后一份确认能用的，先装回去再换，回滚目标始终是它
-                bad = install.with_name(install.name + ".s2arm-bad")
-                remove_tree(bad) if bad.exists() else None
-                move_dir(install, bad)
-                move_dir(backup, install)
-                remove_tree(bad)
-        # 换目录之前清掉确认标记：此后出现的 health.ok 只能来自换上去的这一版
-        health.unlink(missing_ok=True)
-        swap(staged, install, backup, new)
-    except (OSError, shutil.Error):
-        remove_tree(new) if new.exists() else None
-        if not holds_copy(install):   # 失败句和盘上一致：安装目录里读不到旧版就不说「已保留」（审计 P1-157）
-            return fail("update_rollback_failed", "替换安装目录失败，旧版也没能恢复。请重新下载 S2Arm。", restart=False)
-        return fail("update_swap_failed", "替换安装目录失败，已保留旧版。")
-    try:
-        launch(install, list(args))
-        deadline = time.monotonic() + health_seconds
-        while not health.exists() and time.monotonic() < deadline:
-            time.sleep(0.5)
-    except (OSError, subprocess.SubprocessError):
-        pass
-    if health.exists():
-        remove_tree(backup)
-        (updates / "pending.json").unlink(missing_ok=True)
-        drop_version_dirs(updates)
-        return 0
-    # 新版没能启动：装回旧版
-    try:
-        if install.exists():
-            move_dir(install, install.with_name(install.name + ".s2arm-bad"))
-        move_dir(backup, install)
-        remove_tree(install.with_name(install.name + ".s2arm-bad"))
-    except OSError:
-        return fail("update_rollback_failed", "新版没能启动，旧版也没能恢复。请重新下载 S2Arm。", restart=False)
-    if not holds_copy(install):
-        return fail("update_rollback_failed", "新版没能启动，旧版也没能恢复。请重新下载 S2Arm。", restart=False)
-    return fail("update_rolled_back", "新版没能启动，已回到旧版。")
+    return gone
 
 
 def record_failure(args, code, message, detail=""):
@@ -1106,31 +517,14 @@ def main(argv=None):
         sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="command", required=True)
-    for name in ("check", "prepare"):
-        p = sub.add_parser(name)
-        p.add_argument("--platform", required=True, choices=sorted(ASSETS))
-        p.add_argument("--current", required=True)
-        if name == "prepare":
-            p.add_argument("--private-root", required=True)
-            p.add_argument("--install", required=True)
-            p.add_argument("--protect", action="append", default=[])
-    sub.add_parser("selfcheck")
+    p = sub.add_parser("check")
+    p.add_argument("--platform", required=True, choices=sorted(ASSETS))
+    p.add_argument("--current", required=True)
     p = sub.add_parser("inbox"); p.add_argument("--private-root", required=True); p.add_argument("--platform", required=True, choices=sorted(ASSETS))
     p.add_argument("--current", required=True)
     p = sub.add_parser("inbox-seen"); p.add_argument("--private-root", required=True)
     p.add_argument("--update"); p.add_argument("--after"); p.add_argument("--notice")
-    p = sub.add_parser("apply")
-    p.add_argument("--staged", required=True); p.add_argument("--install", required=True); p.add_argument("--pid", required=True, type=int)
-    p.add_argument("--private-root", required=True); p.add_argument("--arg", action="append", default=[])
     a = ap.parse_args(argv)
-    if a.command == "apply":
-        # 启动器起替换进程时把标准输出 / 错误都接到了空设备（JobClient.updateApply）：没接住的异常、Python 自己的报错都留到这里（#828 换版失败零痕迹）
-        try:
-            (Path(a.private_root) / "updates").mkdir(parents=True, exist_ok=True)
-            sys.stderr = open(Path(a.private_root) / "updates" / "apply.log", "a", encoding="utf-8", buffering=1)
-            print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} apply 开始：{a.staged} → {a.install}（等 pid {a.pid} 退出）", file=sys.stderr)
-        except OSError:
-            pass
     # 打开时要看什么（inbox）：查版本、取公告都可能失败，失败不走下面的更新失败记录（不写 update.log），查不到就当没有新版、没有公告，界面照常
     if a.command == "inbox":
         try:
@@ -1152,14 +546,7 @@ def main(argv=None):
         print(json.dumps({"ok": True}))
         return 0
     try:
-        if a.command == "selfcheck":
-            return 0
-        if a.command == "check":
-            print(json.dumps(latest(a.platform, a.current), ensure_ascii=False))
-        elif a.command == "prepare":
-            prepare(a.platform, a.current, a.private_root, a.install, a.protect + [a.private_root])
-        else:
-            return apply(a.staged, a.install, a.pid, a.private_root, a.arg)
+        print(json.dumps(latest(a.platform, a.current), ensure_ascii=False))   # check
         return 0
     except UpdateError as error:
         record_failure(a, error.code, str(error), error.detail)

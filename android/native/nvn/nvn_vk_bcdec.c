@@ -342,3 +342,69 @@ cleanup:
     vkFreeMemory(d->device, mem, NULL);
     return 0;
 }
+
+void nvn_vk_bcdec_rec_free(struct s2a_vk_device *d, struct nvn_vk_bcdec_rec *rec) {
+    if (!rec) return;
+    if (rec->pool) vkDestroyDescriptorPool(d->device, rec->pool, NULL);   // 连带释放其中的描述符集
+    if (rec->out_view) vkDestroyImageView(d->device, rec->out_view, NULL);
+    if (rec->in_view) vkDestroyImageView(d->device, rec->in_view, NULL);
+    if (rec->in) vkDestroyImage(d->device, rec->in, NULL);
+    if (rec->in_mem) vkFreeMemory(d->device, rec->in_mem, NULL);
+    memset(rec, 0, sizeof *rec);
+}
+
+// 描述符池每次一个：段完成前集不能回收，模块共用的 8 个集的池会被同一段里的多次拷贝用光。
+int nvn_vk_bcdec_prepare(struct nvn_vk_bcdec *bc, struct s2a_vk_device *d, VkImage dst, uint32_t nvn_format,
+                         uint32_t w, uint32_t h, uint32_t mip, uint32_t layer, struct nvn_vk_bcdec_rec *rec, char *why, size_t why_size) {
+    memset(rec, 0, sizeof *rec);
+    VkFormat view_fmt; const char *family; int bb;
+    if (!bc || !nvn_vk_bcdec_route(nvn_format, &view_fmt, NULL, NULL, &family, &bb)) {
+        snprintf(why, why_size, "bcdec: no route for nvn format 0x%02x", nvn_format); return -1;
+    }
+    if (!w || !h) { snprintf(why, why_size, "bcdec: %s prepare: empty extent", family); return -1; }
+    int vi = variant_index(&ROUTES[nvn_format].v);
+    uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4;
+    VkFormat in_fmt = bb == 8 ? VK_FORMAT_R32G32_UINT : VK_FORMAT_R32G32B32A32_UINT;
+
+    VkImageCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ici.imageType = VK_IMAGE_TYPE_2D; ici.format = in_fmt; ici.extent = (VkExtent3D){bw, bh, 1};
+    ici.mipLevels = 1; ici.arrayLayers = 1; ici.samples = VK_SAMPLE_COUNT_1_BIT; ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    if (vkCreateImage(d->device, &ici, NULL, &rec->in) != VK_SUCCESS) goto fail;
+    VkMemoryRequirements imr; vkGetImageMemoryRequirements(d->device, rec->in, &imr);
+    VkMemoryAllocateInfo imai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    imai.allocationSize = imr.size;
+    imai.memoryTypeIndex = s2a_vk_memory_type(d, imr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, NULL);
+    if (imai.memoryTypeIndex == UINT32_MAX || vkAllocateMemory(d->device, &imai, NULL, &rec->in_mem) != VK_SUCCESS ||
+        vkBindImageMemory(d->device, rec->in, rec->in_mem, 0) != VK_SUCCESS) goto fail;
+    VkImageViewCreateInfo vci = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    vci.image = rec->in; vci.viewType = VK_IMAGE_VIEW_TYPE_2D; vci.format = in_fmt;
+    vci.subresourceRange = (VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    if (vkCreateImageView(d->device, &vci, NULL, &rec->in_view) != VK_SUCCESS) goto fail;
+    VkImageViewCreateInfo ovci = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    ovci.image = dst; ovci.viewType = VK_IMAGE_VIEW_TYPE_2D; ovci.format = view_fmt;
+    ovci.subresourceRange = (VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT, mip, 1, layer, 1};
+    if (vkCreateImageView(d->device, &ovci, NULL, &rec->out_view) != VK_SUCCESS) goto fail;
+    VkDescriptorPoolSize ps[2] = { { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1 }, { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1 } };
+    VkDescriptorPoolCreateInfo dpi = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+    dpi.maxSets = 1; dpi.poolSizeCount = 2; dpi.pPoolSizes = ps;
+    if (vkCreateDescriptorPool(d->device, &dpi, NULL, &rec->pool) != VK_SUCCESS) goto fail;
+    VkDescriptorSetAllocateInfo dai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+    dai.descriptorPool = rec->pool; dai.descriptorSetCount = 1; dai.pSetLayouts = &bc->dsl;
+    if (vkAllocateDescriptorSets(d->device, &dai, &rec->ds) != VK_SUCCESS) goto fail;
+    VkDescriptorImageInfo oi = { VK_NULL_HANDLE, rec->out_view, VK_IMAGE_LAYOUT_GENERAL };
+    VkDescriptorImageInfo ii = { VK_NULL_HANDLE, rec->in_view, VK_IMAGE_LAYOUT_GENERAL };
+    VkWriteDescriptorSet wr[2] = {0};
+    wr[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; wr[0].dstSet = rec->ds; wr[0].dstBinding = 0;
+    wr[0].descriptorCount = 1; wr[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; wr[0].pImageInfo = &oi;
+    wr[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; wr[1].dstSet = rec->ds; wr[1].dstBinding = 1;
+    wr[1].descriptorCount = 1; wr[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE; wr[1].pImageInfo = &ii;
+    vkUpdateDescriptorSets(d->device, 2, wr, 0, NULL);
+
+    rec->pipe = bc->pipe[vi]; rec->pl = bc->pl; rec->bw = bw; rec->bh = bh;
+    return 0;
+fail:
+    snprintf(why, why_size, "bcdec: %s prepare resource setup failed", family);
+    nvn_vk_bcdec_rec_free(d, rec);
+    return -1;
+}

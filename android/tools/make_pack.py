@@ -340,7 +340,8 @@ def entries_from_root(root, staging, sysdata=None, direct_vulkan=False):
     # s2a_caps.tsv: the per-game capability list (fullscreen / 60 fps on unless a strong signal; rewrite stage writes it into the
     # product root for every platform) -- runtime.c applies it from the game data dir before loading modules, like iOS / Mac
     # fps.tsv：60 帧表与改写器读的是同一份（rewrite()），fps.c 从游戏数据根读（#48 D2）
-    for name in ('romfs.s2aidx', 'systemdata', 'aoc.tsv', 'aoc', 's2a_caps.tsv', 'fps.tsv'):
+    # icon.jpg（解包时从控制分区 icon_*.dat 取）/ banner.jpg（电脑端商店横图）：游戏库封面，与 iOS 同一份来源（S2ArmShellHostModel / pack/jobs/library.py 封面三级）
+    for name in ('romfs.s2aidx', 'systemdata', 'aoc.tsv', 'aoc', 's2a_caps.tsv', 'fps.tsv', 'icon.jpg', 'banner.jpg'):
         if name == 'systemdata':
             if system_data:
                 out.append((name, system_data))

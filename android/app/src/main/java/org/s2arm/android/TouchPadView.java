@@ -43,6 +43,7 @@ final class TouchPadView extends View {
     void setTrace(boolean enabled) { trace = enabled; TouchInputBridge.touchTrace(enabled); }
 
     boolean gameTouchEnabled() { return gameTouch.enabled(); }
+    boolean controlsVisible() { return controlsVisible; }
     void setControlsVisible(boolean visible) {
         if (controlsVisible == visible) return;
         release();

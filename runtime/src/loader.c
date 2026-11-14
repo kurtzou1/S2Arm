@@ -136,6 +136,15 @@ void *module_sym(module_t *m, const char *name) {
     return NULL;
 }
 void *guest_sym(const char *name) { for (int i = 0; i < g_nmod; i++) { void *p = module_sym(&g_mod[i], name); if (p) return p; } return NULL; }
+// 同 guest_sym，另给符号表里记的函数长度（字节，0 = 没记）与所在模块
+static void *guest_sym_sized(const char *name, uint64_t *size, const module_t **mod) {
+    *size = 0; *mod = NULL;
+    for (int i = 0; i < g_nmod; i++) { module_t *m = &g_mod[i];
+        for (unsigned j = sym_hash(name) & m->symh_mask; m->symh[j]; j = (j + 1) & m->symh_mask) {
+            const Elf64_Sym *s = &m->symtab[m->symh[j]];
+            if (!strcmp(m->strtab + s->st_name, name)) { *size = s->st_size; *mod = m; return m->base + s->st_value; } } }
+    return NULL;
+}
 module_t *module_of(const void *p) {
     for (int i = 0; i < g_nmod; i++) {
         const uint8_t *b = g_mod[i].base;
@@ -897,15 +906,37 @@ static void *ro_local_init(void) {
 }
 // RoModule 里「懒绑定入口」字段的偏移（rtld 填、SDK 的 Initialize 清零）：从游戏 SDK 导出的 RoModule::RestoreFunctions 读——
 //   它把指向被卸模块的函数槽写回这个字段：ldr Xt, [x0, #偏移] 紧跟 str Xt, [Xn, Xm]。本机 11 份 SDK（10.x–20.x）都是 0xc8；读不出回 -1。
-//   老 SDK（11-13 一款第一方游戏）函数名是单数 RoModule::RestoreFunction、字段在 +0xb0，同样两条指令：两个名字都认
+//   老 SDK（11-13 一款第一方游戏）函数名是单数 RoModule::RestoreFunction、字段在 +0xb0，同样两条指令；
+//   更新的 SDK（11-13 两款 Switch 2 游戏）多一个回调参数 RestoreFunctions(RoModule*, void (*)(const char*))、开头先有一条 retab 早退，字段仍在 +0xc8：三个名字都认
+//   函数开头常有提前返回（表空就 ret；11-13 0100F7E00C70E000 的 SDK：第一个 ret 在 +0x24，那两条指令在 +0x90 / +0x94）：按符号表记的函数长度扫全身，
+//   不在第一个 ret 停；符号没记长度时照旧扫到 ret 为止（不越过模块映像末）。
+//   记的长度越出模块映像（符号表与映像对不上）、或范围内认出两个不同偏移：报红回 -1，不猜
 static long ro_stub_off(void) {
-    const uint32_t *f = guest_sym("_ZN2nn2ro6detail8RoModule16RestoreFunctionsEPS2_");
-    if (!f) f = guest_sym("_ZN2nn2ro6detail8RoModule15RestoreFunctionEPS2_");
-    for (int i = 1; f && i < 0x100 && f[i - 1] != 0xd65f03c0; i++) {
-        uint32_t s = f[i], l = f[i - 1];
-        if ((s & 0xffe00c00) == 0xf8200800 && (l & 0xffc00000) == 0xf9400000 && ((l >> 5) & 31) == 0 && (l & 31) == (s & 31)) return (long)((l >> 10) & 0xfff) * 8;
+    uint64_t size = 0; const module_t *m = NULL;
+    const uint32_t *f = guest_sym_sized("_ZN2nn2ro6detail8RoModule16RestoreFunctionsEPS2_", &size, &m);
+    if (!f) f = guest_sym_sized("_ZN2nn2ro6detail8RoModule16RestoreFunctionsEPS2_PFvPKcE", &size, &m);
+    if (!f) f = guest_sym_sized("_ZN2nn2ro6detail8RoModule15RestoreFunctionEPS2_", &size, &m);
+    if (!f) return -1;
+    uint64_t at = (uint64_t)((const uint8_t *)f - m->base), end = m->patch_off < 0 ? m->image_size : m->key_page_off;   // 映像末：同 ro_handoff 的模块对象边界
+    if (at >= end || size > end - at) {
+        LOG("【红】nn::ro 交接：%s 的 RestoreFunctions（+%#llx，记长 %#llx 字节）越出模块映像（%#llx），不读", m->name, (unsigned long long)at, (unsigned long long)size, (unsigned long long)end);
+        return -1;
     }
-    return -1;
+    uint64_t room = (end - at) / 4;
+    int n = size ? (int)(size / 4 < 0x400 ? size / 4 : 0x400) : (int)(room < 0x100 ? room : 0x100);
+    long found = -1;
+    for (int i = 1; i < n && (size || f[i - 1] != 0xd65f03c0); i++) {
+        uint32_t s = f[i], l = f[i - 1];
+        if ((s & 0xffe00c00) == 0xf8200800 && (l & 0xffc00000) == 0xf9400000 && ((l >> 5) & 31) == 0 && (l & 31) == (s & 31)) {
+            long off = (long)((l >> 10) & 0xfff) * 8;
+            if (found >= 0 && off != found) {
+                LOG("【红】nn::ro 交接：%s 的 RestoreFunctions 里认出两个懒绑定入口偏移（+%#lx / +%#lx），不猜", m->name, (unsigned long)found, (unsigned long)off);
+                return -1;
+            }
+            found = off;
+        }
+    }
+    return found;
 }
 static void ro_handoff(void) {
     g_nauto = g_nmod;
@@ -1057,6 +1088,11 @@ void load_modules_from_source(const struct s2a_loader_source *source, const char
         s2a_widen_source_policy(i, blob.bytes, blob.length);
         source->release(source->context, &blob);
     }
+    // 社区补丁表（#48 D2，make_pack 放在 modules/，与宽屏表同一读面验签）：整包一张表，读一次，每个模块各装一遍，全部装完再还
+    void s2a_cpatch_load_source(module_t *, const void *, size_t);
+    struct s2a_loader_blob cpatch = {0};
+    int cpatch_rc = source->read(source->context, "cpatch.tsv", &cpatch);
+    if (cpatch_rc != ENOENT && (cpatch_rc || (!cpatch.bytes && cpatch.length))) die("APK 读取 cpatch.tsv 失败 rc=%d", cpatch_rc);
     create_keys();
     if (plat_tsd_init()) die("TSD 初始化失败");
     for (int i = 0; i < n; i++) {
@@ -1086,9 +1122,11 @@ void load_modules_from_source(const struct s2a_loader_source *source, const char
             s2a_widen_load_source(m, widen.bytes, widen.length);
             source->release(source->context, &widen);
         }
+        if (cpatch_rc != ENOENT) s2a_cpatch_load_source(m, cpatch.bytes, cpatch.length);   // 同目录装载：宽屏之后、统一重定位之前
         LOG("%s: APK 基址 %p 大小 %#zx", names[i], m->base, m->size);
         g_nmod++;
     }
+    if (cpatch_rc != ENOENT) source->release(source->context, &cpatch);
     free(fixups);
     finish_modules();
 }

@@ -46,8 +46,11 @@ static int compiler_(const char *key, int stage, const char *out) {
     compiled_stage = stage; atomic_fetch_add(&compiler_calls, 1);   // 先计数再慢：41 据此知道键 0 已在编（键 1 还在队里）
     if (slow_first && !strcmp(key, "0000000000000000")) usleep(300000);
     if (write_out && !compile_rc && out && strcmp(out, "/dev/null")) {
-        char p[1200]; FILE *f; snprintf(p, sizeof p, "%s/%s_b.metal", out, key); if ((f = fopen(p, "w"))) fclose(f);
-        snprintf(p, sizeof p, "%s/%s_b.json", out, key); if ((f = fopen(p, "w"))) { fprintf(f, "{\n \"chain\": \"%s\",\n \"xfp\": \"" XFP "\"\n}\n", chain_name()); fclose(f); }
+        char p[1200]; FILE *f; snprintf(p, sizeof p, "%s/%s_b.metal", out, key); if ((f = fopen(p, "w"))) {
+            if (stage == 5) fputs("struct dm_vertex_t {\n    float4 position [[position]];\n};\nstruct dm_prim_t {\n};\nvoid main0() {\n        dm_vertex_t v;\n}\n", f);
+            fclose(f);
+        }
+        snprintf(p, sizeof p, "%s/%s_b.json", out, key); if ((f = fopen(p, "w"))) { fprintf(f, "{\n \"chain\": \"%s\",\n \"xfp\": \"" XFP "\",\n \"stage\": \"%s\"\n}\n", chain_name(), stage == 5 ? "ms" : "cs"); fclose(f); }
     }
     return compile_rc;
 }
@@ -66,6 +69,7 @@ static void fixture_log(const char *fmt, ...) {
 #include "../gfx/nvn/nvn2.h"   // dsh_miss.inc 认 Switch 2 控制段；34–37 是 Switch 2 场景（nvn2_on 桩返回 nvn2），其余 Switch 1
 static int nvn2;
 int nvn2_on(void) { return nvn2; }
+int nvn2_key(const void *control, const void *code, uint8_t out[8]) { (void)code; if (!control) return 0; memcpy(out, (const uint8_t *)control + 0x20, 8); return 1; }
 #include "../host/dsh_miss.inc"
 static const char *chain_name(void) { return DMSH_CHAIN; }
 #undef dlsym
@@ -219,6 +223,32 @@ static void scenario(int n) {
         unlink(p); snprintf(p, sizeof p, "%s/0000000000000000_b.metal", d); unlink(p); rmdir(d);
         check(got == 1 && !strcmp(rt_stage, "mesh") && atomic_load(&compiler_calls) == 0);
     }
+    if (n == 45) {   // 运行期 mesh 的 guest 控制段已失效：仅允许用本机同链 / 同指纹 / mesh 阶段缓存生成补齐 MSL
+        static const char mesh[] = "struct dm_vertex_t {\n    float4 position [[position]];\n};\nstruct dm_prim_t {\n};\nvoid main0() {\n        dm_vertex_t v;\n}\n";
+        char d[] = "/tmp/t_dsh_vpcache.XXXXXX", p[256], path[256]; check(mkdtemp(d) != NULL); setenv("DM_MSL_FALLBACK", d, 1);
+        snprintf(p, sizeof p, "%s/0000000000000000_b.metal", d); FILE *f = fopen(p, "w"); check(f != NULL); fwrite(mesh, 1, sizeof mesh - 1, f); fclose(f);
+        snprintf(p, sizeof p, "%s/0000000000000000_b.json", d); f = fopen(p, "w"); check(f != NULL);
+        fprintf(f, "{\n \"chain\": \"%s\",\n \"xfp\": \"" XFP "\",\n \"stage\": \"ms\"\n}\n", DMSH_CHAIN); fclose(f);
+        int rc = dm_shader_vpad_cached_mesh(key, 1u << 5, path, sizeof path); f = fopen(path, "r"); check(rc == 0 && f != NULL);
+        char result[2048] = {0}; if (f) { size_t z = fread(result, 1, sizeof result - 1, f); result[z] = 0; fclose(f); }
+        check(strstr(result, "dm_pad5 [[user(locn5)]]") && strstr(result, "v.dm_pad5 = float4(0.0, 0.0, 0.0, 1.0)"));
+        unlink(path); snprintf(p, sizeof p, "%s/0000000000000000_b.json", d); unlink(p);
+        snprintf(p, sizeof p, "%s/0000000000000000_b.metal", d); unlink(p); rmdir(d);
+    }
+    if (n == 46) {   // 包内 mesh shader：SetShaders 时只保留输入；Metal 首次拒绝后才现编基础 MSL 并补齐
+        char d[] = "/tmp/t_dsh_vpsnap.XXXXXX", p[256], path[256]; check(mkdtemp(d) != NULL); setenv("DM_MSL_FALLBACK", d, 1);
+        write_out = 1; nvn2 = 1; inlib = 1; known = 1;
+        uint32_t magic = NVN2_CTL_MAGIC, version = NVN2_CTL_VERSION, ncode = sizeof code, nctl = 0xe0; uint16_t mesh = 7;
+        memcpy(ctl, &magic, 4); memcpy(ctl + 4, &version, 4); memcpy(ctl + 0x30, &nctl, 4); memcpy(ctl + 0x44, &ncode, 4); memcpy(ctl + 0x56, &mesh, 2);
+        uint8_t mesh_key[8]; check(nvn2_key(ctl, code, mesh_key));
+        dm_shader_miss(key, (uint64_t)(uintptr_t)code, ctl); dm_shader_mesh_hold((uint64_t)(uintptr_t)code, ctl);
+        check(atomic_load(&compiler_calls) == 0);   // ProgramSetShaders 路径不编
+        nvn2 = 0; memset(ctl, 0, sizeof ctl); memset(code, 0, sizeof code);   // 模拟游戏释放 / 复用 guest 输入
+        int rc = dm_shader_vpad_cached_mesh(mesh_key, 1u << 5, path, sizeof path); FILE *f = fopen(path, "r"); check(rc == 0 && f != NULL);
+        char result[2048] = {0}; if (f) { size_t z = fread(result, 1, sizeof result - 1, f); result[z] = 0; fclose(f); }
+        check(atomic_load(&compiler_calls) == 1 && compiled_stage == 5 && strstr(result, "dm_pad5 [[user(locn5)]]"));
+        unlink(path); snprintf(p, sizeof p, "%s/0000000000000000_b.json", d); unlink(p); snprintf(p, sizeof p, "%s/0000000000000000_b.metal", d); unlink(p); rmdir(d);
+    }
     if (n == 42) {   // 审计 #1646 P1-123：后台预编在编片元 0 时来一支输出类型变体（同键）：变体要的源码走同一把锁、锁里复查，不并发进 C# 现编入口、不重编
         //   修前（三处直接调 comp）反证：overlap 1、compiler_calls 2
         const uint8_t magic[] = {0x78,0x56,0x34,0x12}; memcpy(code, magic, 4); uint32_t ps = 5 << 10; memcpy(code + 0x30, &ps, 4);
@@ -269,10 +299,12 @@ int main(void) {
         "成功 1、失败 0、跳过 0、复用上局 0、输出类型变体 0（正常收局）",   // 41 排在慢键后面的键：首遇取消后台、同步编
         "成功 0、失败 0、跳过 0、复用上局 0、输出类型变体 1（正常收局）",   // 42 原注释见下行
         "成功 0、失败 1、跳过 0、复用上局 0、输出类型变体 0（正常收局）",   // 43 见下行
-        "成功 1、失败 0、跳过 0、复用上局 0、输出类型变体 0（正常收局）"    // 44 编的时候输入落盘成 .inflight.*、返回后删掉；43 翻译器报错：输入自动存进兜底目录；42 后台在编同键时来输出类型变体：同锁、不并发、不重编（后台编好、没有首遇来取：不计成功）
+        "成功 1、失败 0、跳过 0、复用上局 0、输出类型变体 0（正常收局）",   // 44 编的时候输入落盘成 .inflight.*、返回后删掉；43 翻译器报错：输入自动存进兜底目录；42 后台在编同键时来输出类型变体：同锁、不并发、不重编（后台编好、没有首遇来取：不计成功）
+        "成功 0、失败 0、跳过 0、复用上局 0、输出类型变体 0（正常收局）",   // 45 guest 控制段过期时，从同链同指纹的本机 mesh MSL 缓存补齐
+        "成功 0、失败 0、跳过 0、复用上局 0、输出类型变体 0（正常收局）"    // 46 包内 mesh：仅在 Metal 拒绝时从 SetShaders 快照按需现编 MSL
     };
     int bad = 0;
-    for (int n = 0; n < 45; n++) {
+    for (int n = 0; n < 47; n++) {
         int fd[2]; pipe(fd); pid_t p = fork();
         if (!p) { close(fd[0]); dup2(fd[1], 1); close(fd[1]); scenario(n); }
         close(fd[1]); char buf[1024]; size_t at = 0; ssize_t got;
@@ -283,5 +315,5 @@ int main(void) {
         printf("%s 现编汇总场景 %d\n", ok ? "✓" : "✗", n);
         if (!ok) { bad++; puts(buf); }
     }
-    printf("%s t_dsh_stats：45 场景，%d 处不符\n", bad ? "✗" : "✓", bad); return bad != 0;
+    printf("%s t_dsh_stats：47 场景，%d 处不符\n", bad ? "✗" : "✓", bad); return bad != 0;
 }

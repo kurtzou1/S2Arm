@@ -1,0 +1,94 @@
+using LibHac;
+using LibHac.Common;
+using LibHac.Fs;
+using LibHac.Fs.Fsa;
+using System;
+using Path = LibHac.Fs.Path;
+
+namespace Ryujinx.HLE.FileSystem
+{
+    // 宿主系统自己生成的附属文件不给客体看（#914）：访达 / 系统往 exFAT、FAT 等非 APFS 盘写带扩展属性的文件时，会在旁边生成 ._<名> 附属文件，
+    //   宿主进程新建的文件也带扩展属性，所以存档一写就冒出来。LibHac 的目录存档把已提交目录 0/ 拷成工作目录 1/ 时把 ._x 当普通条目，
+    //   先拷 x 时系统已生成 1/._x，再建 1/._x 就 PathAlreadyExists（2002-0002），存档挂不上、游戏 Break。
+    //   目录枚举与条目数跳过这些名字（名单同 pack/jobs/layout.py OS_JUNK / OS_JUNK_PREFIX，tests/os_junk_sync_test.sh 核一致）；其余操作原样转给宿主文件系统
+    public sealed class S2AHostJunkFilterFileSystem : IFileSystem
+    {
+        private readonly IFileSystem _base;
+
+        public S2AHostJunkFilterFileSystem(IFileSystem baseFileSystem) { _base = baseFileSystem; }
+
+        internal static bool IsJunk(ReadOnlySpan<byte> name)
+        {
+            int n = name.IndexOf((byte)0); if (n >= 0) name = name[..n];
+            return name.StartsWith("._"u8) || name.SequenceEqual(".DS_Store"u8) || name.SequenceEqual("desktop.ini"u8) || name.SequenceEqual("Thumbs.db"u8);
+        }
+
+        protected override Result DoCreateFile(ref readonly Path path, long size, CreateFileOptions option) => _base.CreateFile(in path, size, option);
+        protected override Result DoDeleteFile(ref readonly Path path) => _base.DeleteFile(in path);
+        protected override Result DoCreateDirectory(ref readonly Path path) => _base.CreateDirectory(in path);
+        protected override Result DoDeleteDirectory(ref readonly Path path) => _base.DeleteDirectory(in path);
+        protected override Result DoDeleteDirectoryRecursively(ref readonly Path path) => _base.DeleteDirectoryRecursively(in path);
+        protected override Result DoCleanDirectoryRecursively(ref readonly Path path) => _base.CleanDirectoryRecursively(in path);
+        protected override Result DoRenameFile(ref readonly Path currentPath, ref readonly Path newPath) => _base.RenameFile(in currentPath, in newPath);
+        protected override Result DoRenameDirectory(ref readonly Path currentPath, ref readonly Path newPath) => _base.RenameDirectory(in currentPath, in newPath);
+        protected override Result DoGetEntryType(out DirectoryEntryType entryType, ref readonly Path path) => _base.GetEntryType(out entryType, in path);
+        protected override Result DoGetFreeSpaceSize(out long freeSpace, ref readonly Path path) => _base.GetFreeSpaceSize(out freeSpace, in path);
+        protected override Result DoGetTotalSpaceSize(out long totalSpace, ref readonly Path path) => _base.GetTotalSpaceSize(out totalSpace, in path);
+        protected override Result DoOpenFile(ref UniqueRef<IFile> outFile, ref readonly Path path, OpenMode mode) => _base.OpenFile(ref outFile, in path, mode);
+        protected override Result DoCommit() => _base.Commit();
+        protected override Result DoCommitProvisionally(long counter) => _base.CommitProvisionally(counter);
+        protected override Result DoRollback() => _base.Rollback();
+        protected override Result DoFlush() => _base.Flush();
+        protected override Result DoGetFileTimeStampRaw(out FileTimeStampRaw timeStamp, ref readonly Path path) => _base.GetFileTimeStampRaw(out timeStamp, in path);
+        protected override Result DoQueryEntry(Span<byte> outBuffer, ReadOnlySpan<byte> inBuffer, QueryId queryId, ref readonly Path path) => _base.QueryEntry(outBuffer, inBuffer, queryId, in path);
+        protected override Result DoGetFileSystemAttribute(out FileSystemAttribute outAttribute) => _base.GetFileSystemAttribute(out outAttribute);
+
+        protected override Result DoOpenDirectory(ref UniqueRef<IDirectory> outDirectory, ref readonly Path path, OpenDirectoryMode mode)
+        {
+            using var inner = new UniqueRef<IDirectory>();
+            Result r = _base.OpenDirectory(ref inner.Ref, in path, mode);
+            if (r.IsFailure()) return r;
+            using var counter = new UniqueRef<IDirectory>();   // 条目数另开一份枚举数：GetEntryCount 与 Read 不共用游标
+            r = _base.OpenDirectory(ref counter.Ref, in path, mode);
+            if (r.IsFailure()) return r;
+            outDirectory.Reset(new Directory(ref inner.Ref, ref counter.Ref));
+            return Result.Success;
+        }
+
+        private sealed class Directory : IDirectory
+        {
+            private UniqueRef<IDirectory> _inner, _counter;
+
+            public Directory(ref UniqueRef<IDirectory> inner, ref UniqueRef<IDirectory> counter) { _inner = new UniqueRef<IDirectory>(ref inner); _counter = new UniqueRef<IDirectory>(ref counter); }
+
+            protected override Result DoRead(out long entriesRead, Span<DirectoryEntry> entryBuffer)
+            {
+                entriesRead = 0;
+                var tmp = new DirectoryEntry[Math.Max(1, entryBuffer.Length)];
+                while (entriesRead < entryBuffer.Length)
+                {
+                    Result r = _inner.Get.Read(out long n, tmp.AsSpan(0, (int)(entryBuffer.Length - entriesRead)));
+                    if (r.IsFailure()) return r;
+                    if (n == 0) break;
+                    for (int i = 0; i < n; i++) if (!IsJunk(tmp[i].Name)) entryBuffer[(int)entriesRead++] = tmp[i];
+                }
+                return Result.Success;
+            }
+
+            protected override Result DoGetEntryCount(out long entryCount)
+            {
+                entryCount = 0;
+                Span<DirectoryEntry> one = new DirectoryEntry[16];
+                while (true)
+                {
+                    Result r = _counter.Get.Read(out long n, one);
+                    if (r.IsFailure()) return r;
+                    if (n == 0) return Result.Success;
+                    for (int i = 0; i < n; i++) if (!IsJunk(one[i].Name)) entryCount++;
+                }
+            }
+
+            public override void Dispose() { _inner.Destroy(); _counter.Destroy(); base.Dispose(); }
+        }
+    }
+}

@@ -41,6 +41,8 @@ void s2a_shell_set_play_handler(void (*fn)(const char *game_id, void *ctx), void
 void s2a_shell_refresh(void) __attribute__((weak_import));
 // 弱链接[ios]：s2a_shell_cloud_sync_vc
 void *s2a_shell_cloud_sync_vc(const char *game_id, void (*done)(void *ctx), void *ctx) __attribute__((weak_import));
+// 弱链接[ios]：s2a_shell_cloud_upload_background
+void s2a_shell_cloud_upload_background(const char *game_id) __attribute__((weak_import));
 void s2a_boot_rebase(const char *why);   // boot.c：起局计时起点改为此刻（多款容器点 Play；不进 native.h——它在抽取阶段键里，改它冷全库）
 const char *s2a_host_pre_ui_checks(void);   // host_main.c：起 UIKit 前读游戏相关值的检查（多款容器在选游戏之后调）
 #include <stdatomic.h>
@@ -77,7 +79,8 @@ static void settings_restart_result(int result, const char *detail, void *contex
 // 切换游戏（多款容器）：一个进程只跑一款，换游戏 = 照退出流程收尾（等存档写完）、结束进程，再点开 App 就是游戏库（willConnect 容器分支）。
 //   确认框同游戏内「存档管理」的退出确认（save_transfer.m s2a_ios_save_present）：先提醒在游戏里存档；收尾放后台队列，主线程不等
 static void switch_game_present(UIViewController *presenter) {
-    if (!presenter || presenter.presentedViewController) return;
+    if (!presenter) return;
+    presenter = s2a_top_presenter(presenter);
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:S2APICK(S2A_DPROMPT_SWITCH_GAME_TITLE) message:S2APICK(S2A_DPROMPT_SWITCH_GAME_BODY)
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:S2APICK(S2A_DPROMPT_HOME_QUIT_DECLINE) style:UIAlertActionStyleCancel handler:nil]];
@@ -290,6 +293,7 @@ static void note_build(void) {
         [bs addObject:s2a_notice_button(S2AL(@"diag.upload"), primary, ^(UIButton *b) { (void)b; s2a_diag_upload(); })]; }
     g_note_view = s2a_notice_page(g_root.bounds, g_note[0], g_note[1], g_note[2], [g_note[3] floatValue], [g_note[4] length] ? g_note[4] : nil, bs);
     [g_root addSubview:g_note_view];
+    { void s2a_report_gear_attach(UIView *); s2a_report_gear_attach(g_note_view); }   // 左上角小齿轮：故障报修
 }
 // C 层递来的规格文案（起局自检提示页 host_main.c → s2a_selfcheck_page、初启失败页正文 init_fail.c）是 runtime/include 里的中文原宏；
 //   英文 App 按逐字相等换成同名 <宏>_EN（#316）。不在表里的原样显示
@@ -304,6 +308,7 @@ static const char *host_text(const char *s) {
         {S2A_INIT_FAIL_MSG_GAME, S2A_INIT_FAIL_MSG_GAME_EN}, {S2A_INIT_FAIL_MSG_GENERIC, S2A_INIT_FAIL_MSG_GENERIC_EN},
         {S2A_INIT_FAIL_MSG_FILES, S2A_INIT_FAIL_MSG_FILES_EN}, {S2A_INIT_FAIL_NEXT, S2A_INIT_FAIL_NEXT_EN},
         {S2A_INIT_FAIL_MSG_DEVICE, S2A_INIT_FAIL_MSG_DEVICE_EN},   // #446 设备地址空间 / 内存不够
+        {S2A_INIT_FAIL_MSG_SHADERS, S2A_INIT_FAIL_MSG_SHADERS_EN},   // direct_lib_missing：电脑装 / 自签导入两条路各说一句
     };
     if (!s || s2a_l10n_zh()) return s;
     for (size_t i = 0; i < sizeof k / sizeof k[0]; i++) if (!strcmp(s, k[i][0])) return k[i][1];
@@ -384,6 +389,7 @@ static void help_build(NSString *title, NSString *detail, NSString *app) {
     UIButton *btn = s2a_notice_button(S2AL(@"app.packHelp.recheckPlaced"), YES, ^(UIButton *b) { b.enabled = NO; [b setTitle:S2AL(@"app.packHelp.checking") forState:UIControlStateDisabled];
         void (*f)(void) = g_help_recheck; if (f) f(); });
     g_help = s2a_notice_help_page(g_root.bounds, title, detail, app, btn); [g_root addSubview:g_help];
+    { void s2a_report_gear_attach(UIView *); s2a_report_gear_attach(g_help); }   // 左上角小齿轮：故障报修
     // 测试开关（真机验收没法点屏）：S2A_PACK_RECHECK_AUTO=<秒> 每隔这么久代按一次「重新检查」，说明页收起即停
     { static int armed; const char *e = getenv("S2A_PACK_RECHECK_AUTO"); double sec = e ? atof(e) : 0;
       if (sec > 0 && !armed) { armed = 1; LOG("说明页：测试开关 S2A_PACK_RECHECK_AUTO=%s，每 %.0f 秒代按「重新检查」", e, sec);
@@ -548,9 +554,14 @@ static void qp_fps_restart_ask(void) {
     UIViewController *p = g_root.window.rootViewController; while (p.presentedViewController) p = p.presentedViewController; [p presentViewController:r animated:YES completion:nil];
 }
 void s2a_dprompt_notice(NSString *title, NSString *body, double delay, double seconds);   // dprompt.m
-// 60 帧降档 / 恢复（runtime/src/fps.c s2a_fps_cap_tick，审计 P1-80）：降档时设置里的 60 帧开关仍显示玩家选的「开」，画面已回到原生帧率——横幅说清楚，原因去掉自动恢复
+// 档位梯子压回原生帧率 / 恢复（runtime/src/qladder_host.c，原因 4）：设置里的 60 帧开关仍显示玩家选的「开」，画面已回到原生帧率——横幅说清楚。
+//   热 / 低电量自动降档（原因 1 / 2）11-13 删了（维护者「不读电量、不设自己挡自己的闸」），这里不再有对应文案
+// 客体内存三档判定落到「物理内存也装不下」（runtime/src/vawin.c low_ram_notice，#964）：照样开局，游戏内提示一次（不拦）
+void s2a_ios_low_ram_notice(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{ s2a_dprompt_notice(S2AL(@"app.lowRam.title"), S2AL(@"app.lowRam.body"), 3, 10); });
+}
 void s2a_ios_fps_capped(int reason) {
-    NSString *body = reason == 1 ? S2AL(@"app.fpsCap.thermal") : reason == 2 ? S2AL(@"app.fpsCap.lowPower") : reason == 4 ? S2AL(@"app.fpsCap.ladder") : S2AL(@"app.fpsCap.restored");
+    NSString *body = reason == 4 ? S2AL(@"app.fpsCap.ladder") : S2AL(@"app.fpsCap.restored");
     dispatch_async(dispatch_get_main_queue(), ^{ s2a_dprompt_notice(S2AL(@"cpatch.group.fps"), body, 0, 6); });
 }
 // 满屏自检自动退回（runtime/src/qprompt_host.c widen_auto_revert，11-06 满屏泛化）：记进本 App 设置（宽屏关 = 下次起局 16:9，设置页可改回），横幅一行告诉玩家
@@ -621,14 +632,19 @@ id s2a_ios_ext_register(UIViewController *vc);   // extdisplay.m：登记外接�
 // 静音键下照样出声（#789，系统设置「静音模式下也播放声音」S2APlayInSilentMode，缺省关 = 跟随静音键）：音频会话类别开 = Playback（不跟静音键），
 //   关 = SoloAmbient（系统缺省，原先一直是它）。启动和每次回前台各设一次（玩家去「设置」改完切回来就生效）；放后台队列，
 //   不在主线程启动早期抢 AVAudioSession（phone_motion.m：真机首次抢会话卡约 2 秒）。类别没变不重设
+//   「与其他 App 混音」（#896，S2AMixWithOthers，缺省关）开 = Ambient：别的 App 的音乐 / 播客照放、和游戏混在一起，静音键只静音游戏；优先于「静音键下照样出声」
+//   游戏库设置页（S2ArmShellHost ShellSettingsView「声音」）也能改：库与游戏同一进程，改完不经过回前台，听偏好变更即设（只在这两个值真变了才设）
+static atomic_int g_audio_play = -1;   // 上次按哪组值设的（静音键下出声 | 混音 << 1；-1 = 还没设过）
+static int audio_choice(void) { NSUserDefaults *d = NSUserDefaults.standardUserDefaults; return [d boolForKey:@"S2APlayInSilentMode"] | [d boolForKey:@"S2AMixWithOthers"] << 1; }
 static void audio_category_apply(void) {
-    BOOL play = [NSUserDefaults.standardUserDefaults boolForKey:@"S2APlayInSilentMode"];
+    int choice = audio_choice(); BOOL play = choice & 1, mix = (choice >> 1) & 1;
+    atomic_store(&g_audio_play, choice);
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         AVAudioSession *s = AVAudioSession.sharedInstance;
-        NSString *want = play ? AVAudioSessionCategoryPlayback : AVAudioSessionCategorySoloAmbient;
+        NSString *want = mix ? AVAudioSessionCategoryAmbient : play ? AVAudioSessionCategoryPlayback : AVAudioSessionCategorySoloAmbient;
         if ([s.category isEqualToString:want]) return;
         NSError *e = nil; BOOL ok = [s setCategory:want error:&e];
-        LOG("[声] 音频会话类别 → %s（%s）%s%s", play ? "Playback" : "SoloAmbient", play ? "静音键下照样出声" : "跟随静音键",
+        LOG("[声] 音频会话类别 → %s（%s）%s%s", mix ? "Ambient" : play ? "Playback" : "SoloAmbient", mix ? "与其他 App 混音、静音键只静音游戏" : play ? "静音键下照样出声" : "跟随静音键",
             ok ? "" : "，设不上：", ok ? "" : e.localizedDescription.UTF8String ?: "?");
     });
 }
@@ -645,6 +661,8 @@ static void audio_category_apply(void) {
     // S2ASceneDelegate 的 scene:willConnectToSession 里建（见下）。这里只留 App 级的电量 / 前后台 / 心跳 / 热。
     // 测试层契约第 4 节：每分钟一行「[电] 电量 <N>%，<充电中|已充满|未充电>」（只是读数：能耗记录用；11-13 起不再据此挡局）
     audio_category_apply();
+    [NSNotificationCenter.defaultCenter addObserverForName:NSUserDefaultsDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n;
+        if (audio_choice() != atomic_load(&g_audio_play)) audio_category_apply(); }];   // 游戏库设置页里改的
     { void s2a_diag_boot(void); s2a_diag_boot(); }   // 导出诊断包（diag.m）：订阅 MetricKit、设置页开关回前台时检查
     UIDevice.currentDevice.batteryMonitoringEnabled = YES;
     void (^battery)(NSTimer *) = ^(NSTimer *t) { (void)t; UIDevice *d = UIDevice.currentDevice; UIDeviceBatteryState st = d.batteryState;
@@ -708,7 +726,7 @@ static void audio_category_apply(void) {
         LOG("[心跳] 帧 %llu，热状态 %ld（0 正常 1 一般 2 严重 3 危急），进程实占 %llu MB，%s，持续执行档 %d（1 = 系统按稳态功率限制本进程，要权限 sustained-execution），低电量模式 %d，低区空洞合计 %llu MB、最大一块 %llu MB，文件句柄 %d / 软上限 %llu%s", (unsigned long long)s2a_ap_frames(), (long)NSProcessInfo.processInfo.thermalState,
             s2a_footprint_mb(), (const char *[]){"前台", "前台失焦", "后台"}[app_state],
             (int)[NSProcessInfo.processInfo hasPerformanceProfile:NSProcessPerformanceProfileSustained], (int)NSProcessInfo.processInfo.lowPowerModeEnabled, (unsigned long long)(lt >> 20), (unsigned long long)(ll >> 20), fn, (unsigned long long)fs, wins);
-        // 本款本机实测峰值（vawin.c s2a_guest_mem_note：进程实占 + 文件后备里已落块的客体字节）：下一局起局按它判文件后备开不开（11-07 卡顿线）
+        // 本款本机实测峰值（vawin.c s2a_guest_mem_note：只记没开文件后备那几局的进程实占，#783）：下一局起局按它判文件后备开不开
         { void s2a_guest_mem_note(uint64_t footprint); s2a_guest_mem_note((uint64_t)s2a_footprint_mb() << 20); }
         int s2a_disk_written(uint64_t *bytes);   // energy.c（只此一处用，不进 native.h：那是出包抽取阶段的键）
         // 写盘量（11-05 能耗线，客体内存文件后备的代价）：本进程累计与近 10 秒，内存紧张时内核把文件脏页写回闪存的量在这里看
@@ -953,6 +971,7 @@ static void library_pack_help_show(NSString *gid, BOOL again, int st);
 //   冷启动挂库、回前台、库里「重新检查」时扫；已选游戏（起局后）不扫。挪好了让库重判
 int s2a_img_scan(const char *proc_docs);   // pack_apply.c
 const char *s2a_img_scan_failure(void); const char *s2a_img_scan_code(void);   // pack_apply.c：最近一次认领失败的原因 / 码（空串 = 没失败）
+const char *s2a_img_scan_noshaders(void);   // pack_apply.c：这次认领里不带着色器库的文件名（空串 = 没有）
 static int img_scan_now(void) {   // 后台线程
     if (atomic_load(&g_game_picked)) return 0;
     char d[1024]; s2a_container_docs(d, sizeof d); int n = s2a_img_scan(d);
@@ -961,6 +980,16 @@ static int img_scan_now(void) {   // 后台线程
 }
 // 认领失败（格式号不认识、挪不动等，pack_apply.c s2a_img_scan_failure）：在游戏库上弹一次原因。同一句只弹一次，回前台重扫不刷屏
 static void img_scan_report(void) {   // 主线程
+    // 认领的文件不带着色器库（资源包文件夹里的 game.img 按设计不带）：玩家该用导出的完整 .img，缺着色器能跑只是兜底——告诉他文件不完整、该换哪一份，不拦（同一个文件名只说一次）
+    { static char told[256]; const char *f = s2a_img_scan_noshaders();
+      if (f && *f && strcmp(f, told) && g_lib_window) {
+          strlcpy(told, f, sizeof told);
+          UIAlertController *a = [UIAlertController alertControllerWithTitle:S2AL(@"img.noShaders.title")
+              message:[NSString stringWithFormat:S2AL(@"img.noShaders.body"), @(f)] preferredStyle:UIAlertControllerStyleAlert];
+          [a addAction:[UIAlertAction actionWithTitle:S2AL(@"common.gotIt") style:UIAlertActionStyleCancel handler:nil]];
+          [lib_top() presentViewController:a animated:YES completion:nil];
+          return;   // 一次只弹一个；认领失败的那句下次回前台再说
+      } }
     static char shown[600]; const char *why = s2a_img_scan_failure();
     if (!why || !*why || !strcmp(why, shown) || !g_lib_window) return;
     strlcpy(shown, why, sizeof shown);
@@ -1134,6 +1163,14 @@ static void cloud_sync_done(void *ctx) {
     (void)windowScene; UIViewController *top = self.window.rootViewController; while (top.presentedViewController) top = top.presentedViewController;
     home_shortcut(item.type, NO, top); done(YES);
 }
+// 游戏进行中切到后台：开了云存档、本机进度比云端新就上传（S2ArmShellHost 要后台收尾时间、只上传不下载；云端更新 / 冲突留给下次起局前同步）。
+//   宿主还没起（游戏库 / 起局前同步页 / 存档管理页）不传：那时存档没动过
+- (void)sceneDidEnterBackground:(UIScene *)scene {
+    (void)scene;
+    if (s2a_host_boot_pending() || self.cloudSyncing || self.managingSaves || !s2a_shell_cloud_upload_background) return;
+    const s2a_launch_ctx *lc = s2a_launch_ctx_get();
+    s2a_shell_cloud_upload_background(lc && lc->game_id[0] ? lc->game_id : "");
+}
 - (void)sceneDidBecomeActive:(UIScene *)scene {
     (void)scene;
     if (!s2a_host_boot_pending()) return;
@@ -1209,7 +1246,8 @@ double dm_brightness_now(void) { return g_brightness; }
 int dm_thermal_now(void) { return (int)NSProcessInfo.processInfo.thermalState; }
 // 界面语言（runtime/include/s2a_ui_text.h，#316）：C 层递上来的提示 / 横幅按它取中文原宏或 _EN；判据同 S2AL 字符串表（ios/s2a_l10n.h）。盖过各 .c 的弱缺省
 int s2a_ui_zh(void) { return s2a_l10n_zh(); }
-// 游戏语言缺省跟宿主界面语言（维护者 11-13）：进程一起来就把界面实际显示的语言（zh-Hans / zh-Hant / en）交给服务层（S2A_UI_LANGUAGE → Host.cs PickLanguage →
-//   SystemLocale.FromUi）。构造期写：此时只有主线程、服务层还没读环境；已给的（开发 / 判定局）不覆盖。玩家在启动设置里单独指定的语言走 S2A_SYSTEM_LANGUAGE，优先于它
-__attribute__((constructor)) static void s2a_ui_language_env(void) { @autoreleasepool { setenv("S2A_UI_LANGUAGE", s2a_l10n_lang().UTF8String, 0); } }
+// 界面语言玩家选过（App 设置「界面语言」，S2AUILanguageKey）：进程一起来先把本 App 的 AppleLanguages 设成它（字符串表 / 游戏库 / 系统弹框随之），跟随系统就清掉覆盖。
+//   游戏语言不经界面语言传（11-13：界面只有简 / 繁 / 英，日 / 韩语设备会被落成英语、导入的 Switch 存档名字乱码）：服务层缺省读本 App 的首选语言列表
+//   （Host.cs PickLanguage → SystemLocale.FromPreferred），选过界面语言时列表第一项就是它，跟随系统时是设备系统语言；玩家逐款选的游戏语言走 S2A_SYSTEM_LANGUAGE（settings.m）
+__attribute__((constructor)) static void s2a_ui_language_env(void) { @autoreleasepool { (void)s2a_l10n_apply_choice(); } }
 int dm_low_power_now(void) { return NSProcessInfo.processInfo.lowPowerModeEnabled ? 1 : 0; }

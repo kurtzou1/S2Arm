@@ -23,7 +23,8 @@ struct InstallView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(loc.t(model.installKey("s2arm.install.title"))).font(.manrope(26, .heavy)).tracking(-0.6)
+                    // 装法是导出时标题照导出写（维护者 11-13：出包页起分两路），不写「装到 iPhone」
+                    Text(model.installMode.mode == "export" ? text("install.mode.export") : loc.t(model.installKey("s2arm.install.title"))).font(.manrope(26, .heavy)).tracking(-0.6)
                     if let game { Text(game.name).font(.manrope(14)).foregroundStyle(.secondary) }
                 }
                 Spacer()

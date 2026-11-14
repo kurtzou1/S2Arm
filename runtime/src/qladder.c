@@ -1,9 +1,8 @@
-// 档位梯子判定（优雅降级，维护者 11-06；维护者定判据）。纯状态机：时间、帧、GPU、热状态都由调用方喂，单测 runtime/tests/t_qladder.c。
+// 档位梯子判定（优雅降级，维护者 11-06；维护者定判据）。纯状态机：时间、帧、GPU、热状态都由调用方喂（热状态只记进日志，不参与判定），单测 runtime/tests/t_qladder.c。
 //   只看局内游戏画面帧（菜单、加载、视频、过场不算，也不打断窗口），每攒满 30 秒局内画面判一次：
-//   降档：实际帧率达不到本档目标（慢帧 > 5%，慢帧 = 帧间隔 > 目标 × 1.5；或帧间隔中位 > 目标 × 1.05）。热状态本身不降档（维护者 的目标就是热机稳 60），
-//     只有热状态 3（危急）当安全阀：随时强降一档（离上次换档至少 30 秒）。
-//   升档：热状态 ≤ 1、GPU 忙占比 × 2（升一档的负载按翻倍估：30 → 60 帧、掌机 → 主机分辨率）< 70%，这样的窗口连续攒满 2 分钟；
-//     离上次换档至少 5 分钟，上次是危急热降的至少 10 分钟。
+//   降档：实际帧率达不到本档目标（慢帧 > 5%，慢帧 = 帧间隔 > 目标 × 1.5；或帧间隔中位 > 目标 × 1.05）。只看实际帧率，不看热状态：
+//     11-13 维护者「不设自己挡自己的闸」——原先热状态 3（危急）强降一档、升档要热状态 ≤ 1，都删了；真热到系统降频，帧率掉下来照常按帧率降。
+//   升档：GPU 忙占比 × 2（升一档的负载按翻倍估：30 → 60 帧、掌机 → 主机分辨率）< 70%，这样的窗口连续攒满 2 分钟；离上次换档至少 5 分钟。
 //   稳定：进一档后连续 2 分钟局内画面没触发降档 = 这一档稳了（调用方记成最后稳定档，下次从这起）。
 //   上限（s2a_ql_top）：玩家选的运行模式，升档到它为止（#352）。
 #include "s2a_qladder.h"
@@ -14,13 +13,11 @@
 #define QL_UP_NS 120000000000ull        // 升档要攒满的达标时长 2 分钟
 #define QL_STABLE_NS 120000000000ull    // 稳定判定 2 分钟
 #define QL_UP_GAP_NS 300000000000ull    // 升档离上次换档至少 5 分钟
-#define QL_HOT_GAP_NS 600000000000ull   // 危急热降后升档至少 10 分钟
-#define QL_HOT_MIN_NS 30000000000ull    // 危急热降两次之间至少 30 秒
 #define QL_GAP_NS 1000000000ull         // 帧间隔 ≥ 1 秒不算（暂停 / 后台 / 断档）
 #define QL_RING 8192                    // 30 秒窗口最多帧数（≥ 120 帧/秒 × 30 秒 = 3600）
 
 static struct {
-    int kind, n, tier, why, hot_down, stable_said, top;
+    int kind, n, tier, why, stable_said, top;
     uint64_t win_ns, up_ns, stable_ns, last_change, gpu_t0; double gpu0;
     uint32_t dt_us[QL_RING]; int nd;
     double l_fps, l_slow, l_gpu; int l_th;
@@ -42,13 +39,12 @@ void s2a_ql_last(double *fps, double *slow, double *gpu, int *th) { *fps = q.l_f
 static int cmpu(const void *a, const void *b) { uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b; return x < y ? -1 : x > y; }
 // 换到 t（why 原因），清窗口与累计
 static int go(uint64_t now, int t, int why) {
-    q.tier = t; q.why = why; q.last_change = now; q.hot_down = why == S2A_QL_WHY_HOT;
+    q.tier = t; q.why = why; q.last_change = now;
     q.win_ns = q.up_ns = q.stable_ns = 0; q.nd = 0; q.stable_said = 0; q.gpu0 = -1;
     return t;
 }
 int s2a_ql_frame(uint64_t now, int game, uint64_t dt, double gpu_ms, int thermal, int game_itv) {
     if (!q.n) return -1;
-    if (thermal >= 3 && q.tier < q.n - 1 && (!q.last_change || now - q.last_change >= QL_HOT_MIN_NS)) return go(now, q.tier + 1, S2A_QL_WHY_HOT);
     if (!game || !dt || dt >= QL_GAP_NS) return -1;
     if (q.gpu0 < 0 && gpu_ms >= 0) { q.gpu0 = gpu_ms; q.gpu_t0 = now; }
     if (q.nd < QL_RING) q.dt_us[q.nd++] = (uint32_t)(dt / 1000);
@@ -64,8 +60,7 @@ int s2a_ql_frame(uint64_t now, int game, uint64_t dt, double gpu_ms, int thermal
     uint64_t win = q.win_ns; q.win_ns = 0; q.nd = 0; q.gpu0 = gpu_ms >= 0 ? gpu_ms : -1; q.gpu_t0 = now;
     if (slow_pct > 5.0 || med > target_us * 1.05) { q.stable_ns = 0; q.up_ns = 0; return q.tier < q.n - 1 ? go(now, q.tier + 1, S2A_QL_WHY_FPS) : -1; }
     q.stable_ns += win; if (q.stable_ns >= QL_STABLE_NS && !q.stable_said) q.stable_said = 1;
-    if (thermal >= 0 && thermal <= 1 && gpu_pct >= 0 && gpu_pct * 2 < 70.0) q.up_ns += win; else q.up_ns = 0;
-    uint64_t gap = q.hot_down ? QL_HOT_GAP_NS : QL_UP_GAP_NS;
-    if (q.tier > q.top && q.up_ns >= QL_UP_NS && (!q.last_change || now - q.last_change >= gap)) return go(now, q.tier - 1, S2A_QL_WHY_UP);
+    if (gpu_pct >= 0 && gpu_pct * 2 < 70.0) q.up_ns += win; else q.up_ns = 0;
+    if (q.tier > q.top && q.up_ns >= QL_UP_NS && (!q.last_change || now - q.last_change >= QL_UP_GAP_NS)) return go(now, q.tier - 1, S2A_QL_WHY_UP);
     return -1;
 }

@@ -188,6 +188,69 @@ int main(void) {
     assert(packet.vibration[0].low_amp == 1 && packet.vibration[0].low_freq == 160);
     unsetenv("S2A_RUMBLE_SCALE");
 
+    // 震动按玩家（#520 E）：两只 Joy-Con 拆开时，玩家 2（右只）的震动只到第 1 侧；玩家 1（左只）的照旧在第 0 侧，两份合在同一包、不互相盖掉
+    packet = (ns2_relay_packet){.magic = NS2_RELAY_MAGIC, .version = NS2_RELAY_VERSION, .type = NS2_RELAY_INPUT, .ready = 1, .status = NS2_STATUS_READY, .kind = NS2_KIND_JOYCON_L};
+    assert(send(relay, &packet, sizeof packet, 0) == sizeof packet);
+    packet.player = 1; packet.kind = NS2_KIND_JOYCON_R;
+    assert(send(relay, &packet, sizeof packet, 0) == sizeof packet);
+    for (int i = 0; i < 100 && !s2a_mac_ns2_player_present(1); i++) usleep(1000);
+    assert(s2a_mac_ns2_player_present(1));
+    for (int i = 0; i < 100 && s2a_mac_ns2_kind() != NS2_KIND_JOYCON_L; i++) usleep(1000);
+    // 玩家 2 起的单只 Joy-Con 照它那一格的样式（#520：拆开的两只握法一致，同玩家 1）：没报样式 → 转横握；那一格是双 Joy-Con → 原样给、不转；
+    //   负对照：那一格扮 Pro → 照旧转横握
+    {
+        ns2_state st; uint32_t sk; ns2_kind k;
+        int before = sideways_calls;
+        assert(s2a_mac_ns2_read_player(1, &st, &sk, &k) && k == NS2_KIND_JOYCON_R && sideways_calls == before + 1);
+        s2a_mac_ns2_set_player_style(1, 1 << 2);   // JoyconPair
+        assert(s2a_mac_ns2_read_player(1, &st, &sk, &k) && sideways_calls == before + 1);
+        s2a_mac_ns2_set_player_style(1, 1 << 0);   // ProController
+        assert(s2a_mac_ns2_read_player(1, &st, &sk, &k) && sideways_calls == before + 2);
+        s2a_mac_ns2_set_player_style(1, 0);
+    }
+    // 玩家 2 那包带的鼠标（#520：两人各拿一只，玩家 2 也要滑得动）：照它那只的那一侧给；负对照：没带鼠标的玩家只报在、没读数
+    {
+        ns2_relay_packet pm = (ns2_relay_packet){.magic = NS2_RELAY_MAGIC, .version = NS2_RELAY_VERSION, .type = NS2_RELAY_INPUT, .ready = 1, .status = NS2_STATUS_READY,
+            .kind = NS2_KIND_JOYCON_R, .player = 1, .mouse_kind = NS2_KIND_JOYCON_R, .mouse = {.x = 321, .y = -5}};
+        assert(send(relay, &pm, sizeof pm, 0) == sizeof pm);
+        s2a_pad_mouse ms[2] = {{0}};
+        for (int i = 0; i < 100 && !(s2a_mac_ns2_read_mouse_player(1, ms) && ms[1].known && ms[1].x == 321); i++) usleep(1000);
+        assert(ms[1].known && ms[1].x == 321 && ms[1].y == -5 && ms[0].side == 0xff);
+        pm.mouse_kind = 0;
+        assert(send(relay, &pm, sizeof pm, 0) == sizeof pm);
+    }
+    s2a_mac_ns2_stop_rumble(s2a_mac_ns2_rumble_session());   // 清掉前面几项留下的玩家 1 震动
+    memset(&packet, 0, sizeof packet);
+    assert(receive_all(relay, &packet, sizeof packet) && packet.type == NS2_RELAY_STOP_RUMBLE);
+    s2a_pad_vibration p2[2] = {{.low_amp = .4f, .low_hz = 160, .high_amp = .4f, .high_hz = 320}, {0}};
+    s2a_mac_ns2_set_rumble_player(1, p2);
+    memset(&packet, 0, sizeof packet);
+    assert(receive_all(relay, &packet, sizeof packet) && packet.type == NS2_RELAY_RUMBLE);
+    assert(packet.vibration[1].low_amp > 0 && packet.vibration[0].low_amp == 0);   // 只震右只那一侧
+    s2a_pad_vibration p1[2] = {{.low_amp = .3f, .low_hz = 160, .high_amp = 0, .high_hz = 320}, {.low_amp = .3f, .low_hz = 160}};
+    s2a_mac_ns2_set_rumble_pair(s2a_mac_ns2_rumble_session(), p1);
+    assert(receive_all(relay, &packet, sizeof packet) && packet.type == NS2_RELAY_RUMBLE);
+    assert(packet.vibration[0].low_amp > 0 && packet.vibration[1].low_amp > 0);   // 玩家 1 的左只 + 玩家 2 的右只一起
+    // 第二组（玩家 3）：单独一包、头部 player = 2，第一组的两侧不受影响
+    packet = (ns2_relay_packet){.magic = NS2_RELAY_MAGIC, .version = NS2_RELAY_VERSION, .type = NS2_RELAY_INPUT, .ready = 1, .status = NS2_STATUS_READY, .kind = NS2_KIND_PRO, .player = 2};
+    assert(send(relay, &packet, sizeof packet, 0) == sizeof packet);
+    for (int i = 0; i < 100 && !s2a_mac_ns2_player_present(2); i++) usleep(1000);
+    assert(s2a_mac_ns2_player_present(2));
+    s2a_mac_ns2_set_rumble_player(2, p2);
+    memset(&packet, 0, sizeof packet);
+    assert(receive_all(relay, &packet, sizeof packet) && packet.type == NS2_RELAY_RUMBLE && packet.player == 2);
+    assert(packet.vibration[0].low_amp > 0 && packet.vibration[1].low_amp == 0);   // Pro：两侧照游戏给的（这里只给了左侧）
+    s2a_mac_ns2_set_rumble_player(NS2_RELAY_PLAYERS + 3, p2);   // 负对照：超范围玩家号不发
+    // 体感按玩家（#520）：玩家 3 的六轴只出在玩家 3，玩家 1 的不被盖掉；负对照：没连的玩家 4、超范围、玩家 0 走原来的 read_motion
+    packet = (ns2_relay_packet){.magic = NS2_RELAY_MAGIC, .version = NS2_RELAY_VERSION, .type = NS2_RELAY_INPUT, .ready = 1, .status = NS2_STATUS_READY, .kind = NS2_KIND_PRO, .player = 2,
+        .motion = {.known = 1, .host_timestamp_us = 999, .gyro_x = 77, .acceleration_z = 1}, .motion_known = 1};
+    assert(send(relay, &packet, sizeof packet, 0) == sizeof packet);
+    s2a_pad_motion m3 = {0};
+    for (int i = 0; i < 100 && !(s2a_mac_ns2_read_motion_player(2, &m3) && m3.gyro_x == 77); i++) usleep(1000);
+    assert(m3.gyro_x == 77 && m3.acceleration_z == 1);
+    assert(!s2a_mac_ns2_read_motion_player(3, &m3) && !s2a_mac_ns2_read_motion_player(NS2_RELAY_PLAYERS, &m3) && !s2a_mac_ns2_read_motion_player(0, &m3));
+    assert(!s2a_mac_ns2_read_motion(&motion) || motion.gyro_x != 77);
+
     s2a_mac_ns2_detach();
     assert(shutdowns == 2); // Closing a game socket leaves the physical relay alive.
     shutdown(relay, SHUT_RDWR);

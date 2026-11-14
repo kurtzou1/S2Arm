@@ -11,7 +11,7 @@
 "cheats.import" = "匯入 txt";
 "cheats.import.badItem" = "%@（%@）";
 "cheats.import.failed" = "有檔案未匯入";
-"cheats.import.failed.message" = "%@\n\n不是 Atmosphere 格式的金手指文字（需要有 [項目名稱] 和指令行）。";
+"cheats.import.failed.message" = "%@";
 "cheats.status.active" = "生效中";
 "cheats.status.addressNotReady" = "位址尚未就緒";
 "cheats.status.badFormat" = "格式不正確";
@@ -121,7 +121,6 @@
 "vpad.layout.err.buttonCount" = "需要完整的 14 個按鍵，可另外提供 LS/RS";
 "vpad.layout.err.buttonFields" = "按鍵欄位、範圍或編號無效，且編號不可重複";
 "vpad.layout.err.buttonMissing" = "缺少必要按鍵";
-"vpad.layout.err.exists" = "已有相同 id 的配置，請先更換 JSON 中的 id；原方案未被覆寫";
 "vpad.layout.err.file" = "配置必須是 64 KiB 以內的一般 JSON 檔案";
 "vpad.layout.err.fileName" = "檔名必須與配置 id 一致";
 "vpad.layout.err.id" = "配置 id 無效";
@@ -130,11 +129,9 @@
 "vpad.layout.err.pickFile" = "請選擇 64 KiB 以內的一般 JSON 檔案";
 "vpad.layout.err.schema" = "配置版本或頂層欄位無效（需要 schemaVersion 1）";
 "vpad.layout.err.sensitivity" = "靈敏度須為 0.5–2";
-"vpad.layout.err.size" = "配置檔案不能超過 64 KiB";
 "vpad.layout.err.stickCount" = "需要 left 與 right 兩個浮動搖桿";
 "vpad.layout.err.stickFields" = "搖桿欄位、區域或半徑無效";
 "vpad.layout.err.stickOffscreen" = "搖桿位置超出螢幕";
-"vpad.layout.err.stickOverlap" = "左右搖桿的觸發區域不能重疊";
 "vpad.layout.err.stickValues" = "死區須為 0–0.4，外圈飽和須為 0.5–1，回應指數須為 0.5–3";
 "vpad.layout.err.theme" = "沒有這個配色";
 "vpad.layout.error" = "%@：%@";
@@ -227,9 +224,9 @@
 
 /* 宿主其余界面（#316 第二轮）：设置页、提示页 / 加载页、存档管理、手柄连接、诊断、联机、文字输入等 */
 "app.fpsCap.ladder" = "這台裝置目前無法穩定跑 60 幀，已回到原生幀率；穩定後會自動再嘗試 60 幀。";
-"app.fpsCap.lowPower" = "低耗電模式已開啟，已暫時回到原生幀率，關閉低耗電模式後會自動恢復。";
 "app.fpsCap.restored" = "60 幀已恢復。";
-"app.fpsCap.thermal" = "手機溫度過高（危急），已暫時回到原生幀率，降溫後會自動恢復。";
+"app.lowRam.title" = "這台裝置記憶體可能不夠";
+"app.lowRam.body" = "這款遊戲需要的記憶體比這台裝置多。照樣可以開始，但可能卡頓，或被系統關掉。";
 "app.gpuStop.body" = "請從背景滑掉本 App，再重新開啟遊戲。\nPlease reopen the game.";
 "app.gpuStop.title" = "畫面發生錯誤，已停止\nGraphics error — stopped";
 "app.library.broken.title" = "遊戲資源不完整";
@@ -289,6 +286,8 @@
 "error.sentence" = "%@。%@";
 "img.importFolder" = "放这里导入";
 "img.scanFailed.title" = "無法匯入遊戲檔案";
+"img.noShaders.title" = "這個遊戲檔案不完整";
+"img.noShaders.body" = "「%@」不完整。請換成電腦上「S2Arm 自簽匯出」資料夾裡的「<遊戲名>.img」，或者在電腦的 S2Arm 裡連著手機點「推到手機」。";
 "games.repair.done.title" = "遊戲資料夾已修復";
 "games.repair.done.body" = "遊戲資料夾先前屬於系統帳號，S2Arm 無法寫入，安裝一直無法開始。已自動移到 S2Arm 自己的新資料夾（%u 個檔案，與原檔案共用資料，不會多佔空間），可以繼續安裝。S2Arm 無法刪除舊資料夾，下次連接電腦時會清除。";
 "games.repair.failed.title" = "遊戲資料夾無法修復";
@@ -301,13 +300,15 @@
 "diag.export" = "匯出診斷包";
 "diag.prompt.abnormalExit" = "上次 S2Arm 沒有正常結束（當機、卡住或被系統關閉）";
 "diag.prompt.crash" = "系統回報上次 S2Arm 當機或卡住了";
-"diag.prompt.message" = "%@。會上傳執行紀錄和當機紀錄，不會上傳存檔、金鑰和遊戲檔案；上傳完成後會給你一組短碼。";
+"diag.prompt.message" = "%@。會上傳執行紀錄、當機紀錄和遊戲用過的圖形管線清單（只有著色器編號），不會上傳存檔、金鑰和遊戲檔案；上傳完成後會給你一組短碼。";
 "diag.prompt.no" = "不用了";
 "diag.prompt.send" = "上傳給開發者";
 "diag.prompt.title" = "要把上次的診斷資料傳給我們嗎？";
 "diag.upload" = "上傳給開發者";
-"diag.upload.confirm.message" = "會上傳最近幾次執行的紀錄、當機紀錄、裝置和版本資訊，不會上傳存檔、金鑰和遊戲檔案。上傳完成後會給你一組短碼，把它貼到 GitHub 討論串或群組裡，我們就能找到這份診斷資料。";
+"diag.upload.confirm.message" = "會上傳最近幾次執行的紀錄、當機紀錄、裝置和版本資訊，以及遊戲用過的圖形管線清單（只有著色器編號），不會上傳存檔、金鑰和遊戲檔案。上傳完成後會給你一組短碼，把它貼到 GitHub 討論串或群組裡，我們就能找到這份診斷資料。";
 "diag.upload.confirm.title" = "要上傳給開發者嗎？";
+"diag.upload.cancelSending" = "正在上傳…（點按取消）";
+"diag.upload.cancelled" = "上傳已取消。可以改用匯出診斷包，手動發給我們。";
 "diag.upload.copy" = "複製短碼";
 "diag.upload.done.message" = "短碼：%@\n點「前往 GitHub 發文」，診斷碼會自動填好；也可以複製短碼貼到討論串或群組裡，7 天內有效。\n儲存庫網址：%@";
 "diag.upload.done.title" = "已上傳";
@@ -316,8 +317,12 @@
 "diag.upload.fail.network" = "無法連上診斷伺服器（%@）。如果剛才跳出「允許使用無線資料」，請選擇允許後點「再試一次」；也可以匯出診斷包手動傳給我們。";
 "diag.upload.fail.rejected" = "診斷包未通過伺服器檢查（%@）。可以改為匯出診斷包，手動傳給我們。";
 "diag.upload.fail.server" = "診斷伺服器發生錯誤（HTTP %d）。可以改為匯出診斷包，手動傳給我們。";
+"diag.upload.fail.timeout" = "上傳超過 %d 秒還沒完成（網路太慢或連線卡住），已停止。可以再試一次，或改用匯出診斷包。";
 "diag.upload.fail.title" = "上傳失敗";
 "diag.upload.go" = "上傳";
+"diag.report.title" = "故障報修";
+"diag.report.message" = "會上傳這台裝置的日誌、裝置資訊和遊戲用過的圖形管線清單（只有著色器編號），幫我們找原因，然後給你一個短碼。可以寫一句發生了什麼（可不填）。";
+"diag.report.placeholder" = "發生了什麼（可不填）";
 "diag.upload.post" = "前往 GitHub 發文";
 "diag.upload.retry" = "再試一次";
 "dprompt.expiry.body" = "還剩%@。到期後遊戲將無法開啟，存檔不會遺失：連接手機後再點一次「裝到 iPhone」，或在 AltStore 裡重新整理。";
@@ -449,7 +454,8 @@
 "settings.toggle.metalHud" = "顯示 Metal 效能浮層";
 "settings.toggle.phoneHaptics" = "手機震動";
 "settings.toggle.touchHud" = "觸控診斷資訊";
-"settings.widen.blocked" = "本遊戲的全螢幕有已知問題，暫時無法開啟";
+"settings.widen.blocked" = "本遊戲的全螢幕有已知問題，仍可開啟";
+"settings.widen.blocked.message" = "下次啟動遊戲時生效。畫面拉伸或被裁切時會自動退回 16:9，也可以再關閉。";
 "textinput.header" = "輸入";
 "textinput.min" = "至少 %ld 個字";
 "textinput.ok" = "確定";
@@ -466,3 +472,15 @@
 /* Duo shared layout settings and split touch editor */
 "vpad.layouts.split.title" = "分割畫面觸控配置";
 "vpad.layouts.split.footer" = "編輯分割畫面的下半區；位置與一般配置分開儲存，按鍵 / 觸控模式和手感共用。";
+"settings.group.language" = "語言";
+"settings.footer.language" = "介面語言是 S2Arm 選單的語言。「跟隨系統」依手機的語言（中文系統用中文，其他語言顯示英文）。遊戲語言預設跟手機的系統語言（日語、韓語等也能對上），在 App 裡選過介面語言就跟它；從 Switch 匯入的存檔名字顯示亂碼時，把遊戲語言選成當時 Switch 用的語言。";
+"settings.language" = "介面語言";
+"settings.language.system" = "跟隨系統";
+"settings.language.zhHans" = "简体中文";
+"settings.language.zhHant" = "繁體中文";
+"settings.language.en" = "English";
+"settings.language.restart" = "關閉 S2Arm 再重新開啟後生效。";
+"settings.gameLanguage" = "遊戲語言";
+"settings.gameLanguage.system" = "跟隨系統";
+"settings.gameLanguage.restart" = "下次開啟這款遊戲時生效。";
+"settings.gameLanguage.ja" = "日本語";

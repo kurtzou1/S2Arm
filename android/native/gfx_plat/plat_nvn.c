@@ -9,7 +9,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/system_properties.h>
+#include <time.h>
 #include "debug_gate.h"
+#include "flag_cache.h"
 
 const char *nvk_session_cache_dir(void);
 
@@ -21,13 +23,28 @@ void nvn_plat_log(int level, const char *cls, const char *text) {
     if (s2a_debug_entries_open()) fprintf(stderr, "[s2a] %snvk %s: %s\n", level == NVN_PLAT_LOG_RED ? "【红】" : "", cls ? cls : "", text ? text : "");
 }
 
-int nvn_plat_flag(const char *name, int dflt) {
-    if (!name || !s2a_debug_entries_open()) return dflt;
+#if defined(S2A_ANDROID_DEBUG_ENV) && defined(__ANDROID__)   // 与 debug_gate.h 的第一道门同一个条件：玩家包里 s2a_debug_entries_open() 编译期恒假，下面整段不存在
+// 调试包：每个线程缓存开关读数 FLAG_TTL_NS（见 flag_cache.h：回放热路径上每次调用读两次系统属性 + 拼键名，占回放线程样本的 6–12%）；
+// 过期重读，adb setprop 改开关最迟一个 TTL 后生效。
+enum { FLAG_TTL_NS = 250 * 1000 * 1000 };
+static int plat_flag_read(const char *name, int *val, void *user) {
+    (void)user;
+    if (!s2a_debug_entries_open()) return 0;
     char key[PROP_NAME_MAX + 32], v[PROP_VALUE_MAX] = {0};
     snprintf(key, sizeof key, "debug.s2a.%s", name);
-    if (__system_property_get(key, v) <= 0 || !v[0]) return dflt;
-    return atoi(v);
+    if (__system_property_get(key, v) <= 0 || !v[0]) return 0;
+    *val = atoi(v);
+    return 1;
 }
+int nvn_plat_flag(const char *name, int dflt) {
+    static __thread struct fc_tab tab;
+    if (!name) return dflt;
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
+    return fc_get(&tab, name, dflt, (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec, FLAG_TTL_NS, plat_flag_read, NULL);
+}
+#else
+int nvn_plat_flag(const char *name, int dflt) { (void)name; return dflt; }   // 玩家包：开关一律取缺省（s2a_debug_entries_open() 编译期恒假）
+#endif
 
 // 回放循环的安全点（nvn_plat.h）：运行时改内存映射要所有游戏线程停下，回放所在的游戏线程一次提交可连续跑数秒，
 // 在命令之间让它停到事务结束（android/native/runtime/fault/thread_android.inc）。诊断目标不链运行时：弱符号。
@@ -55,20 +72,195 @@ int dm_opmode(void) { const char *d = getenv("S2A_DOCKED"); return d && d[0] == 
 // 帧时间的大头在图形调用之外时，要知道 CPU 花在哪个模块。系统的剖析器要先放开一个系统属性，这里不动系统设置：
 // 按进程 CPU 时间每毫秒来一个 SIGPROF，落在谁身上就记谁当时的指令地址（处理函数里只写一个环，不加锁、不分配）；
 // 另有一条线程每 5 秒把这段时间的样本按模块、按 4 KB 页归拢，各打一行。只回答「CPU 时间花在哪」，等待不算在内。
+#include <dirent.h>
 #include <dlfcn.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <link.h>
 #include <signal.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
-enum { PROF_RING = 1 << 16 };
-static uintptr_t g_prof_ring[PROF_RING]; static _Atomic uint64_t g_prof_w;
+// 开关值 = 2 时另外做「精确 pc 直方图」：每个样本再记线程号，全程累计（线程, pc）→ 次数，每 5 秒把前 8000 项整份重写到
+// 缓存目录 nvkprof_pcs.txt（线程号 线程名 模块 偏移 次数）。页粒度只能说「哪一页最热」，精确 pc 配上带符号 so 的 addr2line
+// 才能落到函数 / 内联展开 / 行，并且能把回放线程和别的线程分开。只在值 ≥ 2 时多做事；缺省关。
+// 开关值 ≥ 3 时再记「调用方」：落在 libc / 驱动 / 内存拷贝里的样本只能说「时间花在 memmove」，要知道是游戏代码的哪一处调的。
+// 每个样本另存 LR 和帧指针链上的前 3 个返回地址；5 秒一次归拢时取其中第一个落在主模块（本 so）里的地址，
+// 按（线程, pc, 调用方）累计，前 8000 项整份重写到缓存目录 nvkprof_callers.txt（线程号 线程名 pc 模块 pc 偏移 调用方偏移 次数）。
+// 帧指针链上的内存读取不能直接解引用（驱动里的优化代码把 x29 当通用寄存器用，链会指到任意地址）：用 write() 往管道里写这 16 字节，
+// 坏地址只返回 EFAULT、不会崩；回放线程以外的信号并发进来时拿不到探针（忙），那个样本只记 LR。
+enum { PROF_RING = 1 << 16, PCH_N = 1 << 17, PCH_TOP = 8000, PROF_CH = 3 };
+static uintptr_t g_prof_ring[PROF_RING]; static uint32_t g_prof_tid[PROF_RING]; static _Atomic uint64_t g_prof_w;
+static uintptr_t g_prof_lr[PROF_RING], g_prof_ch[PROF_RING][PROF_CH];
+static int g_prof_mode, g_prof_pipe[2] = {-1, -1};
+#if defined(__aarch64__) && !defined(__APPLE__)   // 只有下面信号处理函数的 aarch64 分支用到；宿主单测（x86 / 苹果芯片）也编本文件，不留未用的静态定义（-Werror）
+static atomic_flag g_prof_busy = ATOMIC_FLAG_INIT;
+static int prof_peek16(uintptr_t addr, uintptr_t out[2]) {   // 读 addr 处 16 字节（前一个是上一帧的帧指针，后一个是返回地址）
+    if ((addr & 7) || addr < 0x10000) return 0;
+    if (write(g_prof_pipe[1], (const void *)addr, 16) != 16) return 0;
+    return read(g_prof_pipe[0], out, 16) == 16;
+}
+#endif
 static void prof_sig(int sig, siginfo_t *si, void *uc) {
     (void)sig; (void)si;
+    uintptr_t lr = 0, ch[PROF_CH] = {0, 0, 0};
 #if defined(__aarch64__) && !defined(__APPLE__)   // 苹果芯片的宿主上也会编这个文件（宿主单测）：那边的信号上下文是另一种布局，取不到就记 0
-    uintptr_t pc = (uintptr_t)((ucontext_t *)uc)->uc_mcontext.pc;
+    const mcontext_t *mc = &((ucontext_t *)uc)->uc_mcontext;
+    uintptr_t pc = (uintptr_t)mc->pc; uint32_t tid = (uint32_t)gettid();
+    if (g_prof_mode >= 3) {
+        lr = (uintptr_t)mc->regs[30];
+        if (g_prof_pipe[1] >= 0 && !atomic_flag_test_and_set_explicit(&g_prof_busy, memory_order_acquire)) {
+            const int se = errno; uintptr_t fp = (uintptr_t)mc->regs[29], sp = (uintptr_t)mc->sp, fr[2];
+            for (int k = 0; k < PROF_CH && fp >= sp && fp - sp < ((uintptr_t)8 << 20); k++) {
+                if (!prof_peek16(fp, fr)) break;
+                ch[k] = fr[1];
+                if (fr[0] <= fp) break;
+                fp = fr[0];
+            }
+            errno = se; atomic_flag_clear_explicit(&g_prof_busy, memory_order_release);
+        }
+    }
 #else
-    uintptr_t pc = 0; (void)uc;
+    uintptr_t pc = 0; uint32_t tid = 0; (void)uc;
 #endif
-    g_prof_ring[atomic_fetch_add_explicit(&g_prof_w, 1, memory_order_relaxed) & (PROF_RING - 1)] = pc;
+    const uint64_t slot = atomic_fetch_add_explicit(&g_prof_w, 1, memory_order_relaxed) & (PROF_RING - 1);
+    g_prof_ring[slot] = pc; g_prof_tid[slot] = tid;
+    g_prof_lr[slot] = lr; for (int k = 0; k < PROF_CH; k++) g_prof_ch[slot][k] = ch[k];
+}
+static struct pch_ent { uintptr_t pc; uint32_t tid, n; } g_pch[PCH_N];
+static size_t g_pch_total, g_pch_lost;
+static void pch_add(uintptr_t pc, uint32_t tid) {
+    g_pch_total++;
+    const size_t h = (size_t)(((uint64_t)pc * 0x9E3779B97F4A7C15ull ^ ((uint64_t)tid << 32)) >> 20) & (PCH_N - 1);
+    for (size_t k = 0; k < 64; k++) {
+        struct pch_ent *e = &g_pch[(h + k) & (PCH_N - 1)];
+        if (!e->n) { e->pc = pc; e->tid = tid; e->n = 1; return; }
+        if (e->pc == pc && e->tid == tid) { e->n++; return; }
+    }
+    g_pch_lost++;
+}
+static int pch_cmp(const void *a, const void *b) { uint32_t x = ((const struct pch_ent *)a)->n, y = ((const struct pch_ent *)b)->n; return x < y ? 1 : x > y ? -1 : 0; }
+static void pch_dump(void) {
+    const char *dir = nvn_plat_dir(NVN_PLAT_DIR_CACHE); if (!dir) return;
+    static struct pch_ent *tmp; if (!tmp) tmp = (struct pch_ent *)malloc(sizeof g_pch); if (!tmp) return;
+    size_t m = 0; for (size_t i = 0; i < PCH_N; i++) if (g_pch[i].n) tmp[m++] = g_pch[i];
+    qsort(tmp, m, sizeof *tmp, pch_cmp);
+    char pth[320], pt2[336]; snprintf(pth, sizeof pth, "%s/nvkprof_pcs.txt", dir); snprintf(pt2, sizeof pt2, "%s.tmp", pth);
+    FILE *f = fopen(pt2, "w"); if (!f) return;
+    fprintf(f, "# total=%zu unique=%zu lost=%zu\n", g_pch_total, m, g_pch_lost);
+    struct { uint32_t tid; char name[24]; } tn[64]; int ntn = 0;
+    for (size_t i = 0; i < m && i < PCH_TOP; i++) {
+        int k = 0; for (; k < ntn; k++) if (tn[k].tid == tmp[i].tid) break;
+        if (k == ntn && ntn < 64) {
+            char p[64]; snprintf(p, sizeof p, "/proc/self/task/%u/comm", tmp[i].tid); tn[ntn].tid = tmp[i].tid; tn[ntn].name[0] = 0;
+            FILE *c = fopen(p, "r"); if (c) { if (fgets(tn[ntn].name, sizeof tn[ntn].name, c)) { size_t L = strlen(tn[ntn].name); if (L && tn[ntn].name[L - 1] == '\n') tn[ntn].name[L - 1] = 0; } fclose(c); }
+            ntn++;
+        }
+        const char *tname = k < ntn && tn[k].name[0] ? tn[k].name : "?";
+        const char *mod = "游戏"; unsigned long off = (unsigned long)tmp[i].pc; Dl_info di;
+        if (dladdr((void *)tmp[i].pc, &di) && di.dli_fname) { const char *sl = strrchr(di.dli_fname, '/'); mod = sl ? sl + 1 : di.dli_fname; off = (unsigned long)(tmp[i].pc - (uintptr_t)di.dli_fbase); }
+        fprintf(f, "%u\t%s\t%s\t%#lx\t%u\n", tmp[i].tid, tname, mod, off, tmp[i].n);
+    }
+    fclose(f); rename(pt2, pth);
+}
+// ---- nvk_prof ≥ 3：调用方直方图（说明见上面的枚举处）----
+static uintptr_t g_main_lo, g_main_hi;   // 本 so 的装载范围，开剖析时算一次
+static int main_range_cb(struct dl_phdr_info *info, size_t size, void *data) {
+    (void)size; const uintptr_t base = *(const uintptr_t *)data;
+    if ((uintptr_t)info->dlpi_addr != base) return 0;
+    uintptr_t hi = base;
+    for (int i = 0; i < info->dlpi_phnum; i++) if (info->dlpi_phdr[i].p_type == PT_LOAD) { uintptr_t e = base + (uintptr_t)info->dlpi_phdr[i].p_vaddr + (uintptr_t)info->dlpi_phdr[i].p_memsz; if (e > hi) hi = e; }
+    g_main_hi = hi; return 1;
+}
+static void main_range_init(void) {
+    Dl_info di; if (!dladdr((void *)&main_range_cb, &di) || !di.dli_fbase) return;
+    uintptr_t base = (uintptr_t)di.dli_fbase; g_main_lo = base; dl_iterate_phdr(main_range_cb, &base);
+}
+static uintptr_t prof_pick_caller(uintptr_t pc, uintptr_t lr, const uintptr_t *ch) {   // pc 不在本 so 里时，LR / 帧链上第一个落在本 so 里的返回地址
+    if (pc >= g_main_lo && pc < g_main_hi) return 0;
+    if (lr >= g_main_lo && lr < g_main_hi) return lr;
+    for (int k = 0; k < PROF_CH; k++) if (ch[k] >= g_main_lo && ch[k] < g_main_hi) return ch[k];
+    return 0;
+}
+static struct cch_ent { uintptr_t pc, caller; uint32_t tid, n; } g_cch[PCH_N];
+static size_t g_cch_total, g_cch_lost;
+static void cch_add(uintptr_t pc, uintptr_t caller, uint32_t tid) {
+    g_cch_total++;
+    const size_t h = (size_t)(((uint64_t)pc * 0x9E3779B97F4A7C15ull ^ ((uint64_t)caller * 0xC2B2AE3D27D4EB4Full) ^ ((uint64_t)tid << 32)) >> 20) & (PCH_N - 1);
+    for (size_t k = 0; k < 64; k++) {
+        struct cch_ent *e = &g_cch[(h + k) & (PCH_N - 1)];
+        if (!e->n) { e->pc = pc; e->caller = caller; e->tid = tid; e->n = 1; return; }
+        if (e->pc == pc && e->caller == caller && e->tid == tid) { e->n++; return; }
+    }
+    g_cch_lost++;
+}
+static int cch_cmp(const void *a, const void *b) { uint32_t x = ((const struct cch_ent *)a)->n, y = ((const struct cch_ent *)b)->n; return x < y ? 1 : x > y ? -1 : 0; }
+static void prof_tname(uint32_t tid, char *out, size_t cap) {
+    char p[64]; snprintf(p, sizeof p, "/proc/self/task/%u/comm", tid); out[0] = 0;
+    FILE *c = fopen(p, "r"); if (!c) { snprintf(out, cap, "?"); return; }
+    if (fgets(out, (int)cap, c)) { size_t L = strlen(out); if (L && out[L - 1] == '\n') out[L - 1] = 0; }
+    fclose(c); if (!out[0]) snprintf(out, cap, "?");
+}
+static void cch_dump(void) {
+    const char *dir = nvn_plat_dir(NVN_PLAT_DIR_CACHE); if (!dir) return;
+    static struct cch_ent *tmp; if (!tmp) tmp = (struct cch_ent *)malloc(sizeof g_cch); if (!tmp) return;
+    size_t m = 0; for (size_t i = 0; i < PCH_N; i++) if (g_cch[i].n) tmp[m++] = g_cch[i];
+    qsort(tmp, m, sizeof *tmp, cch_cmp);
+    char pth[320], pt2[336]; snprintf(pth, sizeof pth, "%s/nvkprof_callers.txt", dir); snprintf(pt2, sizeof pt2, "%s.tmp", pth);
+    FILE *f = fopen(pt2, "w"); if (!f) return;
+    fprintf(f, "# total=%zu unique=%zu lost=%zu main=%#lx-%#lx\n", g_cch_total, m, g_cch_lost, (unsigned long)g_main_lo, (unsigned long)g_main_hi);
+    struct { uint32_t tid; char name[24]; } tn[64]; int ntn = 0;
+    for (size_t i = 0; i < m && i < PCH_TOP; i++) {
+        int k = 0; for (; k < ntn; k++) if (tn[k].tid == tmp[i].tid) break;
+        if (k == ntn && ntn < 64) { tn[ntn].tid = tmp[i].tid; prof_tname(tmp[i].tid, tn[ntn].name, sizeof tn[ntn].name); ntn++; }
+        const char *tname = k < ntn ? tn[k].name : "?";
+        const char *mod = "游戏"; unsigned long off = (unsigned long)tmp[i].pc; Dl_info di;
+        if (dladdr((void *)tmp[i].pc, &di) && di.dli_fname) { const char *sl = strrchr(di.dli_fname, '/'); mod = sl ? sl + 1 : di.dli_fname; off = (unsigned long)(tmp[i].pc - (uintptr_t)di.dli_fbase); }
+        fprintf(f, "%u\t%s\t%s\t%#lx\t%#lx\t%u\n", tmp[i].tid, tname, mod, off, tmp[i].caller ? (unsigned long)(tmp[i].caller - g_main_lo) : 0ul, tmp[i].n);
+    }
+    fclose(f); rename(pt2, pth);
+}
+// 线程调度账（nvk_prof ≥ 1，每 5 秒一行）：各线程这 5 秒里「在核上跑」「排队等核」各占墙钟多少（其余 = 睡眠 / 阻塞在锁和 GPU 上），
+// 以及自愿切换（阻塞）/ 被抢占的次数。CPU 采样只说「花在哪」，看不见等待；回放线程是在跑、在等核、还是在等别人，看这一行。
+// 读 /proc/self/task/<tid>/schedstat（运行纳秒 / 排队纳秒 / 时间片数）和 status（名字、切换次数）；内核不给就静默。
+static void prof_sched_report(void) {
+    enum { MAXT = 512 };
+    struct thr { uint32_t tid; uint64_t run, wait, sl; long vol, invol; char name[20]; };
+    static struct thr prev[MAXT], cur[MAXT]; static int np; static uint64_t prev_ns;
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); const uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+    DIR *d = opendir("/proc/self/task"); if (!d) return;
+    int nc = 0; struct dirent *de;
+    while ((de = readdir(d)) && nc < MAXT) {
+        const uint32_t tid = (uint32_t)atoi(de->d_name); if (!tid) continue;
+        char p[64]; unsigned long long a = 0, b = 0, c = 0; snprintf(p, sizeof p, "/proc/self/task/%u/schedstat", tid);
+        FILE *f = fopen(p, "r"); if (!f) continue;
+        const int got = fscanf(f, "%llu %llu %llu", &a, &b, &c); fclose(f); if (got != 3) continue;
+        struct thr *t = &cur[nc]; t->tid = tid; t->run = a; t->wait = b; t->sl = c; t->vol = t->invol = -1; t->name[0] = 0;
+        snprintf(p, sizeof p, "/proc/self/task/%u/status", tid); f = fopen(p, "r");
+        if (f) { char ln[160]; while (fgets(ln, sizeof ln, f)) {
+                if (!strncmp(ln, "Name:", 5)) (void)sscanf(ln + 5, "%19s", t->name);
+                else if (!strncmp(ln, "voluntary_ctxt_switches:", 24)) t->vol = atol(ln + 24);
+                else if (!strncmp(ln, "nonvoluntary_ctxt_switches:", 27)) t->invol = atol(ln + 27); }
+            fclose(f); }
+        nc++;
+    }
+    closedir(d);
+    const double wall = prev_ns ? (double)(now - prev_ns) : 0.0;
+    if (wall > 0) {
+        struct { int i; double run; } order[MAXT]; int no = 0;
+        for (int i = 0; i < nc; i++) { for (int k = 0; k < np; k++) if (prev[k].tid == cur[i].tid) { order[no].i = i; order[no].run = (double)(cur[i].run - prev[k].run); no++; break; } }
+        for (int i = 0; i < no && i < 8; i++) { int bi = i; for (int j = i + 1; j < no; j++) if (order[j].run > order[bi].run) bi = j; if (bi != i) { __typeof__(order[0]) sw_ = order[i]; order[i] = order[bi]; order[bi] = sw_; } }
+        char line[900]; int o = snprintf(line, sizeof line, "线程调度（近 %.1f 秒墙钟，前 8 个线程）：", wall / 1e9);
+        for (int r = 0; r < no && r < 8 && o < (int)sizeof line - 120; r++) {
+            const struct thr *t = &cur[order[r].i], *q = NULL; for (int k = 0; k < np; k++) if (prev[k].tid == t->tid) { q = &prev[k]; break; }
+            if (!q) continue;
+            o += snprintf(line + o, sizeof line - (size_t)o, "%s%u %s 在核上 %.0f%% 等核 %.1f%% 自愿切换 %.0f/s 被抢占 %.0f/s", r ? "；" : "", t->tid, t->name[0] ? t->name : "?",
+                          100.0 * (double)(t->run - q->run) / wall, 100.0 * (double)(t->wait - q->wait) / wall,
+                          t->vol >= 0 && q->vol >= 0 ? (double)(t->vol - q->vol) * 1e9 / wall : -1.0, t->invol >= 0 && q->invol >= 0 ? (double)(t->invol - q->invol) * 1e9 / wall : -1.0);
+        }
+        __android_log_print(ANDROID_LOG_INFO, "S2Arm", "nvk prof: %s", line);
+    }
+    memcpy(prev, cur, (size_t)nc * sizeof cur[0]); np = nc; prev_ns = now;
 }
 static int prof_cmp(const void *a, const void *b) { uintptr_t x = *(const uintptr_t *)a, y = *(const uintptr_t *)b; return x < y ? -1 : x > y; }
 static void *prof_report(void *arg) {
@@ -78,6 +270,9 @@ static void *prof_report(void *arg) {
         uint64_t w = atomic_load_explicit(&g_prof_w, memory_order_relaxed); if (w - r > PROF_RING) r = w - PROF_RING;
         size_t n = (size_t)(w - r); if (!n) continue;
         for (size_t i = 0; i < n; i++) { raw[i] = g_prof_ring[(r + i) & (PROF_RING - 1)]; buf[i] = raw[i] & ~(uintptr_t)0xfff; }   // 按 4 KB 页
+        if (g_prof_mode >= 2) { for (size_t i = 0; i < n; i++) pch_add(raw[i], g_prof_tid[(r + i) & (PROF_RING - 1)]); pch_dump(); }
+        if (g_prof_mode >= 3) { for (size_t i = 0; i < n; i++) { const size_t s = (size_t)((r + i) & (PROF_RING - 1)); cch_add(raw[i], prof_pick_caller(raw[i], g_prof_lr[s], g_prof_ch[s]), g_prof_tid[s]); } cch_dump(); }
+        prof_sched_report();
         r = w; qsort(buf, n, sizeof *buf, prof_cmp);
         struct { uintptr_t page; size_t n; } top[12]; int nt = 0;
         struct { char name[40]; size_t n; } mod[16]; int nm = 0;
@@ -124,8 +319,9 @@ static void *prof_report(void *arg) {
     return NULL;
 }
 static void prof_start_once(void) {
-    static _Atomic int started; if (atomic_exchange(&started, 1) || !nvn_plat_flag("nvk_prof", 0)) return;
+    static _Atomic int started; if (atomic_exchange(&started, 1) || !(g_prof_mode = nvn_plat_flag("nvk_prof", 0))) return;
     struct sigaction sa; memset(&sa, 0, sizeof sa); sa.sa_sigaction = prof_sig; sa.sa_flags = SA_SIGINFO | SA_RESTART; sigemptyset(&sa.sa_mask);
+    if (g_prof_mode >= 3) { main_range_init(); if (pipe(g_prof_pipe)) g_prof_pipe[0] = g_prof_pipe[1] = -1; else for (int k = 0; k < 2; k++) { (void)fcntl(g_prof_pipe[k], F_SETFL, O_NONBLOCK); (void)fcntl(g_prof_pipe[k], F_SETFD, FD_CLOEXEC); } }
     if (sigaction(SIGPROF, &sa, NULL)) return;
     struct itimerval it = {{0, 1000}, {0, 1000}}; setitimer(ITIMER_PROF, &it, NULL);
     pthread_t t; if (!pthread_create(&t, NULL, prof_report, NULL)) pthread_detach(t);

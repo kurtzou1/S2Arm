@@ -9,6 +9,6 @@ $(BUILD)/tests/t_nvn_texdump: graphics/nvn/tests/t_nvn_texdump.m $(NVN_MTL_DEPS)
 	  -framework ImageIO -framework UniformTypeIdentifiers -lc++
 .PHONY: native-test-nvn_texdump
 native-test-nvn_texdump: $(BUILD)/tests/t_nvn_texdump
-	@for mode in off single size multi replace; do $(BUILD)/tests/t_nvn_texdump $$mode $(abspath $(BUILD)/tests) || exit $$?; done
+	@for mode in off single size multi replace classes; do $(BUILD)/tests/t_nvn_texdump $$mode $(abspath $(BUILD)/tests) || exit $$?; done
 TEST_TARGETS += native-test-nvn_texdump
 endif

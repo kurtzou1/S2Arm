@@ -499,6 +499,18 @@ else()
     target_compile_options(adpf_hint_test PRIVATE -Wall -Wextra -Werror)
     target_link_libraries(adpf_hint_test PRIVATE Threads::Threads)
     add_test(NAME android_adpf_hint COMMAND adpf_hint_test)
+    # CPU 频率托底：判定表是纯函数（模拟时间线）；运行体把生产的 cpu_floor.c / power_state.c / system_tuning.c
+    # 原样链入，只假系统属性、时钟、核拓扑与钉核 / 降优先级、「满载一片」本身。
+    add_executable(cpu_floor_policy_test tests/cpu_floor_policy_test.c)
+    target_include_directories(cpu_floor_policy_test PRIVATE native)
+    target_compile_options(cpu_floor_policy_test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME android_cpu_floor_policy COMMAND cpu_floor_policy_test)
+    add_executable(cpu_floor_test tests/cpu_floor_test.c native/cpu_floor.c native/power_state.c native/system_tuning.c)
+    target_include_directories(cpu_floor_test PRIVATE native)
+    target_compile_definitions(cpu_floor_test PRIVATE S2A_CPU_FLOOR_TEST)
+    target_compile_options(cpu_floor_test PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(cpu_floor_test PRIVATE Threads::Threads)
+    add_test(NAME android_cpu_floor COMMAND cpu_floor_test)
     # wsi_lease.c 用 pthread_condattr_setclock（Linux 专属）：同一门。
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         add_executable(wsi_lease_test tests/wsi_lease_test.c native/wsi_lease.c)

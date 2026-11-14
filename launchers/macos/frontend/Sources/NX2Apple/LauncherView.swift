@@ -116,7 +116,7 @@ struct LauncherView: View {
         .alert(txt("game.delete.title").replacingOccurrences(of: "{0}", with: deleteFor?.name ?? ""), isPresented: Binding(get: { deleteFor != nil }, set: { if !$0 { deleteFor = nil } })) {
             Button(txt("game.cancel"), role: .cancel) { deleteFor = nil }
             Button(txt("game.delete.confirm"), role: .destructive) { if let g = deleteFor { model.deleteGame(g) }; deleteFor = nil }
-        } message: { Text(txt("game.delete.body")) }
+        } message: { Text(txt("game.delete.body") + (deleteFor?.onPhone == true ? "\n\n" + txt("game.delete.onPhone") : "")) }
         .alert(txt("library.missing.title").replacingOccurrences(of: "{0}", with: missingFor?.name ?? ""), isPresented: Binding(get: { missingFor != nil }, set: { if !$0 { missingFor = nil } })) {
             Button(txt("library.missing.relink")) { if let g = missingFor { relinkGame(g) }; missingFor = nil }
             Button(txt("library.missing.forget"), role: .destructive) { if let g = missingFor { model.forgetGame(g) }; missingFor = nil }
@@ -428,9 +428,14 @@ struct LauncherView: View {
 
 private struct ControllerToolbarButton: View {
     @ObservedObject var controller: NS2LauncherController
+    @StateObject private var systems = SystemControllers()   // 系统手柄（PS5 / Xbox / 一代 Joy-Con…），面板「玩家」列表一起列（#520 F）
     @Binding var show: Bool
     let simplifiedChinese: Bool
 
+    private var toolbarStatus: String {
+        controller.hasSystemController ? (simplifiedChinese ? "已连接" : "Connected")
+            : NS2LauncherController.statusText(controller.status, simplifiedChinese: simplifiedChinese)
+    }
     var body: some View {
         Button { show.toggle() } label: {
             HStack(spacing: 7) {
@@ -439,11 +444,16 @@ private struct ControllerToolbarButton: View {
             }
         }
         .buttonStyle(LauncherSecondaryButtonStyle())
-        .help("Switch 2 Pro：" + controller.buttonStatus)
-        .accessibilityLabel("Switch 2 Pro：" + controller.buttonStatus)
+        .help(controller.title(simplifiedChinese: simplifiedChinese) + "：" + toolbarStatus)   // #901：顶栏提示写实际手柄名
+        .accessibilityLabel(controller.title(simplifiedChinese: simplifiedChinese) + "：" + toolbarStatus)
         .accessibilityIdentifier("top.controller")
         .popover(isPresented: $show, arrowEdge: .bottom) {
-            Switch2ProConnectionPopover(controller: controller, simplifiedChinese: simplifiedChinese)
+            Switch2ProConnectionPopover(controller: controller, systems: systems, simplifiedChinese: simplifiedChinese)
         }
+        // 蓝牙手柄接上 / 断开：分配跟着整理（新连上的自动排进玩家位，#520 E）
+        .onReceive(systems.$pads) { pads in controller.updateSystem(SystemControllers.keys(for: pads)) }
+        .onReceive(systems.$gen1) { controller.updateGen1($0) }   // 一代 Joy-Con 按设备（D2）   // 用送来的新值（@Published 在改之前就送，读属性还是旧的）
+        // 游戏打开了系统的手柄设置画面：面板自己弹出来（已进分配玩家）
+        .onChange(of: controller.panelRequested) { wanted in if wanted { show = true; controller.panelRequested = false } }
     }
 }

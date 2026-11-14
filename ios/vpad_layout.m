@@ -53,7 +53,6 @@ static CGRect normalized_rect(NSDictionary *value) {
 
 @implementation S2AVPadLayout
 + (instancetype)readData:(NSData *)data error:(NSError **)error {
-    if (data.length > 65536) { fail(error, @"F01.size", S2AL(@"vpad.layout.err.size")); return nil; }
     id doc = [NSJSONSerialization JSONObjectWithData:data options:0 error:error];
     if (!doc) return nil;
     if (!fields(doc, @[@"schemaVersion", @"id", @"name", @"buttons", @"sticks"]) ||
@@ -94,10 +93,7 @@ static CGRect normalized_rect(NSDictionary *value) {
         }
         [seen addObject:s[@"id"]];
     }
-    CGRect overlap = sticks.count == 2 ? CGRectIntersection(normalized_rect(sticks[0][@"activation"]), normalized_rect(sticks[1][@"activation"])) : CGRectNull;
-    if (!CGRectIsNull(overlap) && overlap.size.width > geometryTolerance && overlap.size.height > geometryTolerance) {
-        fail(error, @"F01.sticks", S2AL(@"vpad.layout.err.stickOverlap")); return nil;
-    }
+    // 11-13 维护者「不许堵门」：两个摇杆激活区重叠不再拒收（照样能用，重叠处归谁按触点就近决定），文件大小也不设上限
     S2AVPadLayout *layout = [self new];
     layout->_document = [doc copy]; layout->_identifier = [doc[@"id"] copy]; layout->_name = [doc[@"name"] copy];
     layout->_buttons = [buttons copy]; layout->_sticks = [sticks copy];
@@ -405,7 +401,7 @@ static int read_enabled(NSURL *file, BOOL *enabled) {
     NSURL *url = [self urlForIdentifier:identifier];
     NSDictionary *attributes = [NSFileManager.defaultManager attributesOfItemAtPath:url.path error:error];
     if (!attributes) return nil;
-    if (![attributes[NSFileType] isEqualToString:NSFileTypeRegular] || [attributes[NSFileSize] unsignedLongLongValue] > 65536) {
+    if (![attributes[NSFileType] isEqualToString:NSFileTypeRegular]) {
         fail(error, @"F01.file", S2AL(@"vpad.layout.err.file")); return nil;
     }
     NSData *data = [NSData dataWithContentsOfURL:url options:0 error:error];
@@ -515,7 +511,7 @@ static BOOL key_style_valid(S2AVPadKeyStyle s) {
 - (void)loadKeyStyles {
     _keyStyles = [NSMutableDictionary dictionary]; _keyTheme = 0; _globalScale = _globalOpacity = 1;
     NSData *data = [NSData dataWithContentsOfURL:self.keyStyleFile];
-    id doc = data.length && data.length <= 65536 ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    id doc = data.length ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
     if (!doc) return;
     if (!fields(doc, @[@"schemaVersion", @"theme", @"keys", @"globalScale", @"globalOpacity"]) || !number(doc[@"schemaVersion"], 1, 1) || !number(doc[@"theme"], 0, kS2AVPadKeyThemeCount - 1) || !number(doc[@"globalScale"], S2A_VPAD_SCALE_MIN, S2A_VPAD_SCALE_MAX) || !number(doc[@"globalOpacity"], 0.2, 1) || ![doc[@"keys"] isKindOfClass:NSDictionary.class]) {
         _keyStyleProblem = [NSString stringWithFormat:S2AL(@"vpad.layout.error"), @"F01.keyStyle", S2AL(@"vpad.layout.problem.keyStyle")]; return; }
@@ -582,7 +578,7 @@ static BOOL key_style_valid(S2AVPadKeyStyle s) {
     NSData *data = [layout JSONData:error];
     if (!data || ![S2AVPadLayout readData:data error:error] || ![self prepareDirectory:error]) return NO;
     NSURL *url = [self urlForIdentifier:layout.identifier];
-    if ([NSFileManager.defaultManager fileExistsAtPath:url.path]) return fail(error, @"F01.exists", S2AL(@"vpad.layout.err.exists"));
+    if ([NSFileManager.defaultManager fileExistsAtPath:url.path]) return [self replaceLayout:layout error:error];   // 同 id 已有：导入即更新这一份（原先拒收、要玩家去改 JSON 里的 id）
     NSURL *temporary = [_directory URLByAppendingPathComponent:[@".import-" stringByAppendingString:NSUUID.UUID.UUIDString]];
     if (![data writeToURL:temporary options:NSDataWritingAtomic error:error]) return NO;
     // moveItem refuses an existing destination; the visible file is always complete.

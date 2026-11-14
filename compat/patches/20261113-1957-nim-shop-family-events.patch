@@ -1,0 +1,208 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nim/IShopServiceAccessor.cs b/src/Ryujinx.HLE/HOS/Services/Nim/IShopServiceAccessor.cs
+index 42574ebbb559255f4c720aa2696183c03443503e..6524de13745f0742016f15cc891b791373576039 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nim/IShopServiceAccessor.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nim/IShopServiceAccessor.cs
+@@ -1,19 +1,37 @@
+ using Ryujinx.Common.Logging;
++using Ryujinx.HLE.HOS.Ipc;
+ using Ryujinx.HLE.HOS.Services.Nim.ShopServiceAccessServerInterface.ShopServiceAccessServer.ShopServiceAccessor;
++using Ryujinx.Horizon.Common;
++using System;
+ 
+ namespace Ryujinx.HLE.HOS.Services.Nim.ShopServiceAccessServerInterface.ShopServiceAccessServer
+ {
+     class IShopServiceAccessor : IpcService
+     {
+-        public IShopServiceAccessor(Horizon system) { }
++        private readonly Horizon _system;
++
++        public IShopServiceAccessor(Horizon system) { _system = system; }
+ 
+         [CommandCmif(0)]
+-        // CreateAsyncInterface(u64) -> object<nn::ec::IShopServiceAsync>
+-        // Only the object, as yuzu and Skyline both answer it. With the extra copy handle this reply carried before, Minecraft (0100D71004694000) crashed in its
+-        // sdk right after the reply, reading address 0, on every boot.
++        // CreateAsyncInterface(u64) -> (handle<copy>, object<nn::ec::IShopServiceAsync>)
++        // The copy handle is this request's own completion event, as the documented interface and Eden answer it: the game waits on it after Request.
++        // Answered with the object alone (9404c53e), one game (0100C3601518C000) waited on it forever right after Request and never drew a frame.
++        // The handle carried before 9404c53e was one event shared by every request and never signalled.
+         public ResultCode CreateAsyncInterface(ServiceCtx context)
+         {
+-            MakeObject(context, new IShopServiceAsync());
++            IShopServiceAsync async = new(_system);
++
++            MakeObject(context, async);
++
++            if (context.Process.HandleTable.GenerateHandle(async.Completion.ReadableEvent, out int handle) != Result.Success)
++            {
++                throw new InvalidOperationException("Out of handles!");
++            }
++
++            // Keep the object's move handle (a non-domain session hands the object out as a move handle in this same descriptor) and add the copy handle.
++            // The handle carried before 9404c53e replaced the whole descriptor with the copy handle, so the object never reached the game: that was
++            // the read of address 0 one game (0100D71004694000) hit right after this reply.
++            context.Response.HandleDesc = new IpcHandleDesc(new[] { handle }, context.Response.HandleDesc?.ToMove ?? Array.Empty<int>());
+ 
+             Logger.Stub?.PrintStub(LogClass.ServiceNim);
+ 
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nim/IShopServiceAsync.cs b/src/Ryujinx.HLE/HOS/Services/Nim/IShopServiceAsync.cs
+index 01b1c71ac2b151132d1402e533abc4a5b4a13fa5..a785e88a638eaecb1a45159af0197b8c03b10730 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nim/IShopServiceAsync.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nim/IShopServiceAsync.cs
+@@ -1,4 +1,5 @@
+ using Ryujinx.Common.Logging;
++using Ryujinx.HLE.HOS.Kernel.Threading;
+ using System;
+ using System.Text;
+ 
+@@ -8,18 +9,23 @@ namespace Ryujinx.HLE.HOS.Services.Nim.ShopServiceAccessServerInterface.ShopServ
+     // completes at once with an empty JSON object ("{}") and error code 0, as other implementations answer it (they found games fail on an empty body).
+     // Command numbers and arguments follow the protocol documented for this interface: 0 Cancel, 1 GetSize, 2 Read, 3 GetErrorCode, 4 Request, 5 Prepare.
+     // Before this, every command was unknown; Civilization VII calls Prepare once at boot and got the unknown-command failure.
++    // Completion is this request's own event (its handle goes out with the object, IShopServiceAccessor): Request clears it, finishes, then signals it;
++    // Cancel signals it too, so a waiter never hangs.
+     class IShopServiceAsync : IpcService
+     {
+         private static readonly byte[] EmptyBody = Encoding.ASCII.GetBytes("{}");
+         private byte[] _body = Array.Empty<byte>();
+ 
+-        public IShopServiceAsync() { }
++        public KEvent Completion { get; }
++
++        public IShopServiceAsync(Horizon system) { Completion = new KEvent(system.KernelContext); }
+ 
+         [CommandCmif(0)]
+         // Cancel()
+         public ResultCode Cancel(ServiceCtx context)
+         {
+             _body = Array.Empty<byte>();
++            Completion.ReadableEvent.Signal();
+             return ResultCode.Success;
+         }
+ 
+@@ -55,7 +61,9 @@ namespace Ryujinx.HLE.HOS.Services.Nim.ShopServiceAccessServerInterface.ShopServ
+         // Request(): starts the prepared request; it completes at once with an empty JSON body
+         public ResultCode Request(ServiceCtx context)
+         {
++            Completion.ReadableEvent.Clear();
+             _body = EmptyBody;
++            Completion.ReadableEvent.Signal();
+             Logger.Stub?.PrintStub(LogClass.ServiceNim, "no eShop: request completes with an empty JSON body");
+             return ResultCode.Success;
+         }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nim/Ntc/IStaticService.cs b/src/Ryujinx.HLE/HOS/Services/Nim/Ntc/IStaticService.cs
+index ed6e4472e7e209c36383466d9769c5ee72a11419..2056e91e0ee210aecda7f7e54571830a32736e88 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nim/Ntc/IStaticService.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nim/Ntc/IStaticService.cs
+@@ -20,5 +20,13 @@ namespace Ryujinx.HLE.HOS.Services.Nim.Ntc
+ 
+             return ResultCode.Success;
+         }
++
++        [CommandCmif(100)]
++        // SuspendAutonomicTimeCorrection(): there is no autonomic time correction here, nothing to suspend
++        public ResultCode SuspendAutonomicTimeCorrection(ServiceCtx context) => ResultCode.Success;
++
++        [CommandCmif(101)]
++        // ResumeAutonomicTimeCorrection()
++        public ResultCode ResumeAutonomicTimeCorrection(ServiceCtx context) => ResultCode.Success;
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nim/Ntc/StaticService/IEnsureNetworkClockAvailabilityService.cs b/src/Ryujinx.HLE/HOS/Services/Nim/Ntc/StaticService/IEnsureNetworkClockAvailabilityService.cs
+index 2bd6f4f0dae94ec2a90a38f8ff2aea3e30efb797..472c6f4e4ba045d23ae91199f2c69c1bb513341f 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nim/Ntc/StaticService/IEnsureNetworkClockAvailabilityService.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nim/Ntc/StaticService/IEnsureNetworkClockAvailabilityService.cs
+@@ -26,10 +26,10 @@ namespace Ryujinx.HLE.HOS.Services.Nim.Ntc.StaticService
+         // StartTask()
+         public ResultCode StartTask(ServiceCtx context)
+         {
+-            if (!context.Device.Configuration.EnableInternetAccess)
+-            {
+-                return (ResultCode)Time.ResultCode.NetworkTimeNotAvailable;
+-            }
++            // S2Arm: the task always starts and finishes at once (its event lit), as the reference implementation answers it; without internet access the
++            // outcome comes from GetResult. Failing StartTask itself left the event dark, and a game that waits on it without checking StartTask hangs
++            // (the same wait-forever class as the shop request event, 11-13).
++            _taskResultCode = context.Device.Configuration.EnableInternetAccess ? ResultCode.Success : (ResultCode)Time.ResultCode.NetworkTimeNotAvailable;
+ 
+             // NOTE: Since we don't support the Nintendo NTP server, we can signal the event now to confirm the update task is done.
+             _finishNotificationEvent.ReadableEvent.Signal();
+@@ -73,5 +73,23 @@ namespace Ryujinx.HLE.HOS.Services.Nim.Ntc.StaticService
+ 
+             return ResultCode.Success;
+         }
++
++        [CommandCmif(4)]
++        // IsProcessing() -> bool (u32): the task is never running, it finishes inside StartTask
++        public ResultCode IsProcessing(ServiceCtx context)
++        {
++            context.ResponseData.Write(0u);
++
++            return ResultCode.Success;
++        }
++
++        [CommandCmif(5)]
++        // GetServerTime() -> s64 seconds since the Unix epoch (the host's clock: there is no time server here)
++        public ResultCode GetServerTime(ServiceCtx context)
++        {
++            context.ResponseData.Write(DateTimeOffset.UtcNow.ToUnixTimeSeconds());
++
++            return ResultCode.Success;
++        }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ns/Aoc/IAddOnContentManager.cs b/src/Ryujinx.HLE/HOS/Services/Ns/Aoc/IAddOnContentManager.cs
+index 5aebbc3dfbc5f7539b4cb22c2269250c865e2744..d68b1ebd3e14c548d4c442415ee2626053ecbf34 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ns/Aoc/IAddOnContentManager.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ns/Aoc/IAddOnContentManager.cs
+@@ -202,6 +202,15 @@ namespace Ryujinx.HLE.HOS.Services.Ns.Aoc
+             return ResultCode.Success;
+         }
+ 
++        [CommandCmif(200)] // 15.0.0+
++        // SetRequiredAddOnContentsOnContentsAvailabilityTransition(pid, buffer): add-on contents here never become unavailable, nothing to record
++        public ResultCode SetRequiredAddOnContentsOnContentsAvailabilityTransition(ServiceCtx context)
++        {
++            Logger.Stub?.PrintStub(LogClass.ServiceNs);
++
++            return ResultCode.Success;
++        }
++
+         [CommandCmif(100)] // 7.0.0+
+         // CreateEcPurchasedEventManager() -> object<nn::ec::IPurchaseEventManager>
+         public ResultCode CreateEcPurchasedEventManager(ServiceCtx context)
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ns/Aoc/IPurchaseEventManager.cs b/src/Ryujinx.HLE/HOS/Services/Ns/Aoc/IPurchaseEventManager.cs
+index 8521adc6ebb77ac07c16e6debafda1c55b3c1ad9..fceab0749da216380730eaf902677fc855e916bf 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ns/Aoc/IPurchaseEventManager.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ns/Aoc/IPurchaseEventManager.cs
+@@ -34,6 +34,15 @@ namespace Ryujinx.HLE.HOS.Services.Ns.Aoc
+             return ResultCode.Success;
+         }
+ 
++        [CommandCmif(1)]
++        // SetDeliveryTarget(u64 application id, buffer<bytes, 5>): no eShop purchases are delivered here
++        public ResultCode SetDeliveryTarget(ServiceCtx context)
++        {
++            Logger.Stub?.PrintStub(LogClass.ServiceNs);
++
++            return ResultCode.Success;
++        }
++
+         [CommandCmif(2)]
+         // GetPurchasedEventReadableHandle() -> handle<copy, event>
+         public ResultCode GetPurchasedEventReadableHandle(ServiceCtx context)
+@@ -64,5 +73,14 @@ namespace Ryujinx.HLE.HOS.Services.Ns.Aoc
+ 
+             return ResultCode.NoPurchasedProductInfoAvailable;
+         }
++
++        [CommandCmif(4)]
++        // PopPurchasedProductInfoWithUid(nn::account::Uid) -> nn::ec::detail::PurchasedProductInfo: nothing was purchased, same answer as 3
++        public ResultCode PopPurchasedProductInfoWithUid(ServiceCtx context)
++        {
++            context.ResponseData.Write(new byte[0x80]);
++
++            return ResultCode.NoPurchasedProductInfoAvailable;
++        }
+     }
+ }

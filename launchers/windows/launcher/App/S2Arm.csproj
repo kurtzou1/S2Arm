@@ -53,6 +53,7 @@
   <ItemGroup>
     <PackageReference Include="Avalonia.Desktop" Version="12.1.5" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.5" />
+    <PackageReference Include="NetSparkleUpdater.SparkleUpdater" Version="3.1.0" />
     <ProjectReference Include="../Protocol/Protocol.csproj" />
     <EmbeddedResource Include="../../../shared/experience.v1.json" LogicalName="S2Arm.experience.v1.json" />
     <!-- 作业层文字的英文对照表：和 Mac 适配层同一份（BackendText），不在 Windows 存副本 -->

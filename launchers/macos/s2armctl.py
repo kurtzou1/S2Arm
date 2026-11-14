@@ -196,6 +196,7 @@ AI_NEXT = {
     'content_invalid': ('ask', '游戏文件损坏或被改过：请玩家换一份完整的原版文件，s2armctl games <文件夹>'),
     'guest_isa_unsupported': ('human', '这款游戏是 32 位程序，S2Arm 暂不支持：告诉玩家换一款游戏'),
     'library_not_apfs': ('confirm', '游戏库（导出时的工作数据）所在磁盘格式不支持（要 APFS 或 exFAT；FAT32 等不行）；游戏原件放哪都行、不用挪：征得玩家同意后请他在 S2Arm「设置 → 游戏库与玩家数据」改用这台 Mac 上的默认位置或一块 APFS / exFAT 外接盘，然后 s2armctl env'),
+    'package_verify_mismatch': ('ai', '资源包核对没通过（文件前后两次读出不一样）：s2armctl retry <任务号> 重试一次（对不上的文件会重算）；再红就请玩家检查磁盘、关掉对游戏库的杀毒实时扫描 / 云同步'),
     'disk_full': ('confirm', '磁盘不够：s2armctl state --json 看各游戏 bytes，征得玩家同意后 s2armctl delete <不要的游戏号> 腾空间，或请玩家清理磁盘，然后 s2armctl retry <任务号>'),
     'permission_denied': ('human', '系统不让读这个位置：请玩家在屏幕上的系统框里点「允许」，或把游戏文件挪到不受保护的文件夹（不要放在「下载」「桌面」「文稿」），然后重试'),
     'architecture_unsupported': ('human', '需要 Apple 芯片的 Mac：告诉玩家这台 Mac 跑不了'),
@@ -204,13 +205,14 @@ AI_NEXT = {
     'xcode_setup_required': ('human', 'Xcode 还没完成首次设置：请玩家打开 Xcode 同意许可（可能要输开机密码），然后 s2armctl env'),
     'xcode_sdk_too_old': ('human', 'Xcode 太旧：请玩家在 App Store 更新 Xcode，然后 s2armctl env'),
     'metal_unavailable': ('human', '缺 Metal 编译组件：请玩家在 S2Arm 环境检查里点「一键下载」，然后 s2armctl env'),
+    'metal_download_unreachable': ('human', '下不了 Metal 编译组件（连不上苹果的组件服务器）：请玩家检查网络 / 换代理后再点「一键下载」；不行就从苹果开发者网站下 Metal Toolchain 的 .dmg，终端 xcodebuild -importComponent MetalToolchain -importPath <dmg>，然后 s2armctl env'),
     'dotnet_sdk_missing': ('human', '缺 .NET SDK：请玩家在 S2Arm 环境检查里点安装，然后 s2armctl env'),
     'target_unsupported': ('human', '这台 iPhone 芯片太老或系统太旧（要 A14 及以上、iOS 18 及以上）：告诉玩家原因，升级系统或换设备'),
     'xcode_account_missing': ('human', 'Xcode 里没登录 Apple ID：请玩家打开 Xcode →「设置」→「账户」点「+」登录（免费的就行，要输 Apple ID 密码，AI 不代做），然后 s2armctl install <游戏号>；玩家不想登录 Xcode 就改用 AltStore（装机步骤页第二部分）'),
     'device_not_connected': ('ask', '要装的那台设备不在线：请玩家插上数据线，或让它和电脑连同一个 Wi-Fi 并解锁（第一次还要点「信任」、打开开发者模式），连好后 s2armctl install <游戏号> --device <那台的设备号>'),
     'device_required': ('ai', '没说装到哪台：先 s2armctl targets 看连着的设备和设备号，再 s2armctl install <游戏号> --device <设备号>（不替玩家挑）'),
     'device_locked': ('human', 'iPhone 锁屏了：请玩家解锁手机、停在主屏幕，然后重试 s2armctl install'),
-    'container_would_drop': ('ask', '手机上有几款是在别的电脑上装的，这次装会让它们暂时不能玩（存档和资源包留在手机上，回原来那台电脑再装一次就回来）：把报错里列的游戏名念给玩家，玩家同意了再 s2armctl install <游戏号> --accept-dropped（删除用 uninstall <游戏号> --accept-dropped，更新手机上的 S2Arm 用 update-phone --accept-dropped）'),
+    'container_would_drop': ('ask', '手机上有几款这次带不进去（别的电脑装的，或已从这台电脑的游戏库删除），这次装会让它们暂时打不开（存档和资源包留在手机上）：把报错里列的游戏名念给玩家，玩家同意了再 s2armctl install <游戏号> --accept-dropped（删除用 uninstall <游戏号> --accept-dropped，更新手机上的 S2Arm 用 update-phone --accept-dropped）'),
     'save_backup_failed': ('ask', '这次装机前没能先备份手机上的存档（存档没备份，万一覆盖出问题可能丢档）：先请玩家解锁手机、插稳数据线重试；玩家明确同意不备份照装，再 s2armctl install <游戏号> --accept-no-backup（更新手机上的 S2Arm 用 update-phone --accept-no-backup）'),
     'free_app_limit': ('human', '这台 iPhone 上免费签名的自签 App 已满 3 个：请玩家在 iPhone 上删掉一个不玩的自签 App 再试，或改用付费 Apple 开发者账号（AltStore 同样受这个上限）'),
     'free_appid_limit': ('human', '免费 Apple ID 7 天内最多注册 10 个包名，已用满（Apple 错误 9120），删 App 不会退额度、别让玩家删：请玩家等几天（最早那批满 7 天就恢复），或在 Xcode 里换一个 Apple ID 登录（要输密码，AI 不代做）后 s2armctl install <游戏号>，或改用付费 Apple 开发者账号'),
@@ -221,6 +223,7 @@ AI_NEXT = {
     'devcert_keychain': ('human', '证书密码存不进钥匙串：请玩家解锁登录钥匙串、允许 S2Arm 访问后在出包页重新导入'),
     'app_other_signer': ('human', '手机上已有用别的签名装的 S2Arm（包名相同）：请玩家二选一——继续用原签名工具更新它，或在 iPhone 上删掉它（先导出存档），然后 s2armctl install <游戏号>'),
     'bundle_id_switched': ('auto', '（警告）原包名被别的签名占用，已自动换新包名装好；告诉玩家手机上可能有两个 S2Arm，旧的不需要可删（先导出存档）'),
+    'signing_server_unreachable': ('human', '这台电脑连不上 Impactor 签名要用的服务器 mac-ani.jkcoxson.com（DNS / 连接失败，已自动重试一次）：请玩家检查网络、换 DNS 或开关代理（AI 不改玩家网络设置），然后 s2armctl install <游戏号>'),
     'apple_session_expired': ('human', 'Apple ID 登录过期（Apple 1100）：请玩家在 Impactor「设置」里移除账号、再添加账号重新登录（要输密码，AI 不代做），然后 s2armctl install <游戏号>'),
     'app_id_taken': ('human', '包名在苹果那边已被占用（Apple 错误 9401）：请玩家确认 Impactor / Xcode 里登录的是当初装 S2Arm 的 Apple ID（要输密码，AI 不代做），或付费账号到 developer.apple.com 删掉 io.s2arm.games 开头的旧包名，然后 s2armctl install <游戏号>'),
     'signing_failed': ('ai', 's2armctl logs <任务号> 看签名哪一步报错；偶发的 s2armctl retry <任务号> 一次，再不行请玩家改用 AltStore（装机步骤页第二部分）'),
@@ -404,7 +407,12 @@ def device(gid):
             try: apps = json.load(open(f.name))['result']['apps']
             except Exception: apps = []
         # 包里的 io.s2arm.games 只是组装时的占位名：装机时换成 io.s2arm.games.<团队>（开发用还可再带后缀），按前缀认手机上实际装的（#642）
-        got = sorted(a.get('bundleIdentifier', '') for a in apps if container_match(a.get('bundleIdentifier', ''), bid))
+        #   下游深度方案的独立 App（产物在这款的 downstream/<方案>/ 下）：装机时包名改成 io.s2arm.ds.<方案>.<团队>（downstream.bundle_id），
+        #   包里自带的包名（下游自己的）手机上不会有——按装机后的前缀认（原先按包里的包名查，免费团队装好了也报没装）
+        parts = os.path.normpath(ipa).split(os.sep)
+        ds = parts[parts.index('downstream') + 1] if 'downstream' in parts[:-1] else None
+        got = sorted(a.get('bundleIdentifier', '') for a in apps if container_match(a.get('bundleIdentifier', ''), bid)
+                     or ds and a.get('bundleIdentifier', '').lower().startswith(f'io.s2arm.ds.{ds}.'.lower()))
         print(f'iPhone「{name}」（{u}）：' + (f'已装 {"、".join(got)}' if got else f'没装 {bid}——请玩家用 AltStore 装（要登录 Apple ID，AI 不代做）'))
     sys.exit(0)
 
@@ -415,7 +423,7 @@ def engine_root():   # 引擎目录：App 里是 Contents/Resources/Engine（bun
 
 def push_pack(gid):
     """只推游戏资源（App 已由玩家装好、资源不全时）：调 Mac / Windows 共用的 tools/push_pack.py（同启动器装机、dev_run）——
-    按 sha256 只推机上没有 / 变了的文件、残留批按完整性处理、推完起一次 App 只解包并等解完（--apply）。原先这里整个资源包目录 devicectl 拷进 Documents，
+    按 sha256 只推机上没有 / 变了的文件、残留批按完整性处理；传完即好，不起 App——App 第一次打开时自己解开（同装机作业，11-13）。原先这里整个资源包目录 devicectl 拷进 Documents，
     每次全量、不认机上已有（11-06 第三条推包路径收编）"""
     ipa, bid = game_bundle(gid); pack = next((os.path.join(os.path.dirname(ipa), f) for f in os.listdir(os.path.dirname(ipa)) if f.endswith('资源包')), None)
     if not pack: sys.exit(f'{os.path.dirname(ipa)} 里没有「资源包」文件夹：重新出包 s2armctl ipa {gid}')
@@ -425,11 +433,11 @@ def push_pack(gid):
     if not os.path.isfile(tool): sys.exit(f'找不到推包工具 {tool}：App 不完整，请重新下载 S2Arm')
     env = dict(os.environ, S2A_DEVICECTL=DEVICECTL if os.path.exists(DEVICECTL) else 'xcrun devicectl', S2A_PUSH_UDID=u)
     if '/Contents/Resources/' in os.path.abspath(__file__): env.setdefault('S2A_PREBUILT_TOOLS', os.path.join(engine_root(), 'Binaries', 'Prepare'))   # App 内置 s2a-devpush → 流式写
-    print(f'推 {pack} → iPhone 上 {bid}：只推机上没有 / 变了的文件，推完起一次 App 解开（大包要几分钟）…', flush=True)
-    r = subprocess.run([sys.executable, '-B', tool, 'run', u, bid, pack, '--via', 'devicectl', '--udid', u, '--apply'], env=env)
+    print(f'推 {pack} → iPhone 上 {bid}：只推机上没有 / 变了的文件（大包要几分钟）…', flush=True)
+    r = subprocess.run([sys.executable, '-B', tool, 'run', u, bid, pack, '--via', 'devicectl', '--udid', u], env=env)
     if r.returncode:
         sys.exit('资源包没推完（上面最后一行【红】是原因）：手机要解锁、保持连接；App 还没装的话请玩家先用 AltStore / Impactor 装好再试')
-    print('🟢 资源包已推进 iPhone 并解开。请玩家打开这款游戏：第一次会先导入游戏资源（几分钟），保持前台别锁屏，导入完会自动进入游戏')
+    print('🟢 资源包已推进 iPhone。请玩家打开这款游戏（免费账号第一次打开前，先在「设置 → 通用 → VPN 与设备管理」里信任开发者）：第一次会先导入游戏资源（几分钟），保持前台别锁屏，导入完会自动进入游戏')
 
 # 作业记录（pack/jobs/core.py 写的 <数据目录>/logs/jobs/<任务>.json，固定在数据目录，见 logs_root：state / stage / milestone / done / total / pid / pidStart …）：
 #   控制口不应答或给的快照太旧时，wait 按它判。作业是独立进程，启动器卡住（内存吃紧、主线程忙）不等于作业停了
@@ -733,7 +741,15 @@ def main():
     if cmd == 'diag':
         body = diag_body(rest)
         if body is None: print('用法：s2armctl diag [export [输出.zip]] | diag pull', file=sys.stderr); sys.exit(2)
-        print(json.dumps(call('POST', '/diagnostics', body), ensure_ascii=False)); return
+        # #917：原先 POST 一回 {"ok":true} 就退 0——控制口只是把导出作业起在后台，作业随后失败（或文件没写出来）调用方看不到。
+        #   改为等这一次的作业结束：失败照 errors 打原因、退 1；导出成功再核文件真在，打绝对路径与大小
+        before = {t['id'] for t in call('GET', '/state')['tasks']}
+        call('POST', '/diagnostics', body)
+        wait_op('diagnostics' if body['action'] == 'export' else 'pullDiagnostics', before, limit=900)
+        if body['action'] == 'export':
+            if not os.path.isfile(body['path']): sys.exit(f'导出作业报完成，但诊断包不在 {body["path"]}')
+            print(f'诊断包：{body["path"]}（{os.path.getsize(body["path"]) / 1048576:.1f} MB）')
+        return
     if cmd == 'snapshot':
         out = rest[0]
         # 优先系统截图按主窗口区域截（与屏幕所见一致，含弹出层 / 毛玻璃；需要调用方有屏幕录制权限）；不行再让 App 自己画

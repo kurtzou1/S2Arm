@@ -58,32 +58,32 @@ public final class GamePackTest {
             check(later.name.equals(name), "compressed later name " + name);
         }
         for (int size : new int[] {0x5fff, 0x6001, 0x12000}) {
-            try { GamePack.describe(new GamePack.Info(), compressedNacp("Fixture", size)); check(false, "invalid inflate size " + size); }
-            catch (GamePack.BadPack expected) { }
+            GamePack.Info shown = new GamePack.Info(); GamePack.describe(shown, compressedNacp("Fixture", size));   // 名字解不出不挡导入（不堵门）
+            check(!shown.titleId.isEmpty() && !shown.name.isEmpty() && shown.name.chars().noneMatch(c -> c < 32), "invalid inflate size " + size + ": imported, name falls back");
         }
         byte[] corrupt = compressedNacp("Fixture", 0x6000);
         java.util.Arrays.fill(corrupt, 2, 6, (byte) 0xff);
-        try { GamePack.describe(new GamePack.Info(), corrupt); check(false, "invalid deflate accepted"); }
-        catch (GamePack.BadPack expected) { }
+        { GamePack.Info shown = new GamePack.Info(); GamePack.describe(shown, corrupt);   // 名字解不出不挡导入（不堵门）
+          check(!shown.titleId.isEmpty() && !shown.name.isEmpty() && shown.name.chars().noneMatch(c -> c < 32), "invalid deflate: imported, name falls back"); }
         byte[] truncated = compressedNacp("Fixture", 0x6000);
         int length = (truncated[0] & 0xff) | ((truncated[1] & 0xff) << 8);
         truncated[0] = (byte) (length - 1); truncated[1] = (byte) ((length - 1) >>> 8);
-        try { GamePack.describe(new GamePack.Info(), truncated); check(false, "truncated deflate accepted"); }
-        catch (GamePack.BadPack expected) { }
+        { GamePack.Info shown = new GamePack.Info(); GamePack.describe(shown, truncated);   // 名字解不出不挡导入（不堵门）
+          check(!shown.titleId.isEmpty() && !shown.name.isEmpty() && shown.name.chars().noneMatch(c -> c < 32), "truncated deflate: imported, name falls back"); }
         byte[] trailing = compressedNacp("Fixture", 0x6000);
         length = (trailing[0] & 0xff) | ((trailing[1] & 0xff) << 8);
         trailing[2 + length] = (byte) 0xff;
         trailing[0] = (byte) (length + 1); trailing[1] = (byte) ((length + 1) >>> 8);
-        try { GamePack.describe(new GamePack.Info(), trailing); check(false, "trailing deflate accepted"); }
-        catch (GamePack.BadPack expected) { }
+        { GamePack.Info shown = new GamePack.Info(); GamePack.describe(shown, trailing);   // 名字解不出不挡导入（不堵门）
+          check(!shown.titleId.isEmpty() && !shown.name.isEmpty() && shown.name.chars().noneMatch(c -> c < 32), "trailing deflate: imported, name falls back"); }
         byte[] oversized = nacp(); oversized[0] = (byte) 0xff; oversized[1] = 0x2f; oversized[2] = (byte) 0xff; oversized[3] = 0;
-        try { GamePack.describe(new GamePack.Info(), oversized); check(false, "oversized length accepted"); }
-        catch (GamePack.BadPack expected) { }
+        { GamePack.Info shown = new GamePack.Info(); GamePack.describe(shown, oversized);   // 名字解不出不挡导入（不堵门）
+          check(!shown.titleId.isEmpty() && !shown.name.isEmpty() && shown.name.chars().noneMatch(c -> c < 32), "oversized length: imported, name falls back"); }
         try { GamePack.describe(new GamePack.Info(), new byte[0x306f]); check(false, "short nacp accepted"); }
         catch (GamePack.BadPack expected) { }
-        byte[] invalid = nacp(); invalid[0] = 1; invalid[1] = 'A'; invalid[2] = 0;
-        try { GamePack.describe(new GamePack.Info(), invalid); check(false, "invalid controls accepted"); }
-        catch (GamePack.BadPack expected) { }
+        byte[] invalid = nacp(); invalid[0] = 1; invalid[1] = 'A'; invalid[2] = 0;   // 名字带控制字符：退回程序号
+        { GamePack.Info shown = new GamePack.Info(); GamePack.describe(shown, invalid);   // 名字解不出不挡导入（不堵门）
+          check(!shown.titleId.isEmpty() && !shown.name.isEmpty() && shown.name.chars().noneMatch(c -> c < 32), "invalid controls: imported, name falls back"); }
     }
 
     private static Map<String, byte[]> valid() {

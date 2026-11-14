@@ -59,6 +59,8 @@ android/native/nvn/	图形后端	直连Vulkan(暂居)	直连Vulkan
 android/native/direct/	图形后端	直连Vulkan(暂居)	直连Vulkan
 android/native/gfx_plat/	图形后端	直连Vulkan安卓平台件	直连Vulkan
 android/native/plat_android.c	平台接口	Linux族(暂居)	直连Vulkan
+ohos/	平台壳	鸿蒙	终端壳
+ohos/native/gfx_plat/	图形后端	直连Vulkan鸿蒙平台件	直连Vulkan
 macos/	平台壳	Mac原生	终端壳
 launchers/macos/	平台壳	Mac	终端壳
 launchers/linux/	平台壳	Linux启动器	终端壳

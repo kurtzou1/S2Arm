@@ -31,6 +31,14 @@ from core import Failure, atomic, contained, read
 REGISTRY = Path(__file__).resolve().parents[1] / "downstream" / "schemes.json"   # 源码树里作业代码就在 pack/jobs 下时的位置（单测 / 开发）
 
 
+# 只有付费开发者团队签得出的权限（#897；同 devcert.py WANT 的「付费账号才有」）
+PAID_ONLY_ENTITLEMENTS = ("com.apple.developer.kernel.extended-virtual-addressing",)
+
+
+def install_entitlements(target, team):
+    """装下游 App 要申请的权限：方案登记的那几项，免费个人团队去掉只有付费团队才有的（#897）"""
+    return [k for k in target.get("entitlements", []) if not (team.get("free", True) and k in PAID_ONLY_ENTITLEMENTS)]
+
 def registry(c=None):
     """登记表按引擎目录取（同其余作业模块读仓库数据的口径 c.engine / …）：发版 App 里作业代码单独拷在 Resources/Jobs，
     按本文件位置拼会落到 Resources/downstream（v0.3.3 候选导入即红：FileNotFoundError），引擎快照里是 Engine/pack/downstream/schemes.json"""
@@ -268,9 +276,7 @@ def build_ios(c, game, scheme):
     t = scheme["targets"].get("ios")
     if not t:
         raise Failure(f"{scheme['name']} 没登记 iPhone / iPad。", code="job_failed")
-    ok, why = eligibility(scheme, game)
-    if not ok:
-        raise Failure(why, code="downstream_ineligible")
+    # 不按导入更新的版本号预先拦（预检清单 #63）：解包后 _check_exefs 按程序字节核是不是那一版，真不对才停（界面上的 eligibility 只当提示）
     from build import ensure_extract
     import milestones as ms
     gid = game["id"].upper()
@@ -311,7 +317,7 @@ def bundle_id(scheme, team):
 
 def install_ios(c, game, scheme):
     """独立 App 装到 iPhone：改包名 → 按登记的权限申请描述文件、用玩家 Apple ID 签 → devicectl 覆盖装（存档在 App 里，不卸载）
-    → 资源包用 S2Arm 的推送推进去，App 按 S2A_PACK_APPLY_ONLY 解开"""
+    → 资源包用 S2Arm 的推送推进去，传完即装好（App 第一次打开时自己解开）"""
     import install as inst
     from diag import devicectl
     t = scheme["targets"]["ios"]
@@ -337,7 +343,9 @@ def install_ios(c, game, scheme):
             pl["CFBundleDisplayName"] = str(c.r["displayName"])[:30]
         info.write_bytes(plistlib.dumps(pl))
         ents = stage / "app.entitlements"
-        ents.write_bytes(plistlib.dumps({k: True for k in t.get("entitlements", [])}))
+        # #897：免费个人团队签不了「扩展虚拟寻址」，带上它 Xcode 直接拒建描述文件（「Personal development teams … do not support the Extended Virtual Addressing
+        #   capability」）。同 pack/dev_sign.py NEED / devcert.py WANT 的口径：免费团队只申请提高内存上限，付费团队才带扩展寻址（下游壳缺它只是地址窗口小一点，上游同样摘掉）
+        ents.write_bytes(plistlib.dumps({k: True for k in install_entitlements(t, team)}))
         c.begin("用你的 Apple ID 签名", 2, 4)
         try:
             c.run(["bash", c.engine / "pack/ensure_profile.sh", bid, team["id"], ents] + ([udid] if udid else []), log)
@@ -353,8 +361,9 @@ def install_ios(c, game, scheme):
             raise Failure("装不上 iPhone：" + (err.strip()[-2000:] or f"devicectl 退出 {rc}"), code=inst.classify(err, default="device_install_failed"))
     finally:
         shutil.rmtree(stage, ignore_errors=True)
-    c.begin("把游戏资源推进 iPhone 并解开（只推变了的文件；第一次要几分钟）", 4, 4)
-    files, size = inst.push_pack(c, dev["id"], bid, Path(rec["pack"]), udid=udid)   # 单款 App：文档根 Documents，App 按 S2A_PACK_APPLY_ONLY 解开
+    c.begin("把游戏资源推进 iPhone（只推变了的文件；第一次要几分钟）", 4, 4)
+    files, size = inst.push_pack(c, dev["id"], bid, Path(rec["pack"]), udid=udid)   # 单款 App：文档根 Documents；传完即装好，App 第一次打开时自己解开（不由电脑拉起）
     record = dict(rec, installed=dict(at=time.time(), device=dev["name"], bundleId=bid, team=team["name"], free=team["free"]))
     atomic(out_dir(c, gid, scheme) / "record.json", record)
-    return dict(bundleId=bid, device=dev["name"], team=team["name"], free=team["free"], packFiles=files, packBytes=size, downstream=record)
+    # openToFinish：两端完成页写「已传到 iPhone，打开会自动完成安装」，并照常提示第一次打开前信任开发者（免费账号）
+    return dict(bundleId=bid, device=dev["name"], team=team["name"], free=team["free"], packFiles=files, packBytes=size, downstream=record, openToFinish=True)

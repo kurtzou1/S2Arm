@@ -107,6 +107,8 @@ class JobCase(unittest.TestCase):
         # Keep all direct Context events out of test output (including fixtures).
         self.redirect.__enter__()
         self.addCleanup(self.redirect.__exit__, None, None, None)
+        # 诊断导出收本机崩溃报告（library.MAC_CRASH_DIR）：测试里一律指到空的临时目录，不读跑测试这台机器上真实的 ~/Library/Logs/DiagnosticReports
+        crash_dir = unittest.mock.patch.object(library, "MAC_CRASH_DIR", self.root / "no-crash-reports"); crash_dir.start(); self.addCleanup(crash_dir.stop)
         self.request = dict(schema=1, taskId="setup", operation="setup", engineDir=str(ROOT),
                             privateRoot=str(self.root / "private"), library=str(self.root / "library"))
         self.c = Context(self.request)
@@ -323,7 +325,7 @@ def ios_fixture(c, gid, *, shell="SID1", pack="cafe01", compat=None, fixups=True
     game.json 的 ios 记出它的壳号、资源包号（compat 给了再记 hostAbi / dmshChain）→ (kit, pack)"""
     import layout
     image = layout.image_ios(c, gid)
-    kit, pk = image / "kit", image / "pack"
+    kit, pk = image / "kit", image / ".pack"
     kit.mkdir(parents=True, exist_ok=True)
     (kit / "main.npdm").write_bytes(b"META")
     if fixups:

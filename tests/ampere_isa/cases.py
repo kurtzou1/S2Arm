@@ -680,18 +680,25 @@ def main():
         err = f'翻不过 {v[1:] if isinstance(v, list) else r}' if not isinstance(v, list) or v[0] == 'fail' else check(v[0], v[1])
         bad += err is not None
         print(f'{"✓" if err is None else "✗"} {name}：{"符合" if err is None else err}（{why}）')
+    # 全部 GPU 用例交给一个 frag_run 进程（--batch，一行一例）：每个用 Metal 的进程退出都会永久漏掉 1 个 IOSurface 名额（macOS 26.4.1 驱动），原先每例一个进程
     with tempfile.TemporaryDirectory() as t:
-        for (name, new, inputs, body, want, why, tex), r in zip(CASES, res):
+        lines, todo = [], []
+        for i, ((name, new, inputs, body, want, why, tex), r) in enumerate(zip(CASES, res)):
             v = r.get('ok')
             if not isinstance(v, list) or v[0] == 'fail':
                 bad += 1; print(f'✗ {name}：翻不过 {v[1:] if isinstance(v, list) else r}'); continue
-            mp = os.path.join(t, 'f.metal'); open(mp, 'w').write(v[0])
+            mp = os.path.join(t, f'f{i}.metal'); open(mp, 'w').write(v[0])
             pool = tex and tex[0] == 'pool'
-            texarg = ['-P', f'{tex[1]}:{tex[2]:x}:{tex[3]}' + ''.join(f':{x}' for x in tex[4:])] if pool else ['-T', f'{os.environ.get("TBUF_FORM", tex[0]) if tex[0] not in ("tex1d", "tex2d") else tex[0]}:{tex[1]}'] if tex else []   # TBUF_FORM=fixed：负对照，宿主按固定 16384 列的行绑
-            p = subprocess.run([run, mp, *arg_spec(v[0], v[1] if pool else None), *texarg, *[f'{w:08x}' for w in inputs]], capture_output=True, text=True, timeout=60)
-            got = [int(w, 16) for w in p.stdout.split()] if p.returncode == 0 else None
+            texarg = ['-P', f'{tex[1]}:{tex[2]:x}:{tex[3]}' + ''.join(f':{x}' for x in tex[4:])] if pool else ['-T', f'{os.environ.get("TBUF_FORM", tex[0]) if tex[0] not in ("tex1d", "tex2d") else tex[0]}:{tex[1]}'] if tex else []   # TBUF_FORM=fixed：负对照
+            lines.append('\t'.join([mp, *arg_spec(v[0], v[1] if pool else None), *texarg, *[f'{w:08x}' for w in inputs]])); todo.append((name, want, why))
+        p = subprocess.run([run, '--batch'], input='\n'.join(lines) + '\n', capture_output=True, text=True, timeout=60 + 5 * len(lines))
+        outs = p.stdout.splitlines()
+        if len(outs) != len(todo): bad += 1; print(f'✗ frag_run 批量只回了 {len(outs)} / {len(todo)} 行（退出 {p.returncode}）：{p.stderr.strip()[:300]}')
+        for (name, want, why), o in zip(todo, outs):
+            f = o.split('\t')
+            got = [int(w, 16) for w in f[1].split()] if f[0] == 'ok' else None
             ok = got == want; bad += not ok
-            print(f'{"✓" if ok else "✗"} {name}：期望 {" ".join(f"{w:08x}" for w in want)} → 真结果 {" ".join(f"{w:08x}" for w in got) if got else p.stderr.strip()[:200]}（{why}）')
+            print(f'{"✓" if ok else "✗"} {name}：期望 {" ".join(f"{w:08x}" for w in want)} → 真结果 {" ".join(f"{w:08x}" for w in got) if got else f[-1][:200]}（{why}）')
     n = len(CASES) + len(REFL)
     print(f'Ampere 指令单测：{n - bad}/{n} 例过（GPU 读回 {len(CASES)} 例 + 只看翻译结果 {len(REFL)} 例；标「新」的 {sum(c[1] for c in CASES) + sum(c[1] for c in REFL)} 例）')
     return 1 if bad or ir_bad else 0

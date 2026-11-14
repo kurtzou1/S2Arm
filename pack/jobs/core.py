@@ -831,7 +831,9 @@ class Context:
         if active:
             message += "（" + activity.describe(data) + "）"
             activity.sent()
-        self.emit(message=message, done=main["done"], total=main["total"], unit="项", counters=counters,
+        # 编批库的计数是源码 MB（Build.cs Ticker「直连库·编批库（MB）」）：单位照实写，原先一律「项」，界面显示「1894 / 64490 项」（#944）
+        unit = "MB" if main["name"].endswith("（MB）") else "项"
+        self.emit(message=message, done=main["done"], total=main["total"], unit=unit, counters=counters,
                   **({"activity": data} if active else {}))
 
     def stage_activity(self):
@@ -1417,16 +1419,29 @@ def _scan_job_record(path):
 #   - 每类操作（operation）至少留最近 KEEP_PER_OPERATION 条成功的、KEEP_FAILED_PER_OPERATION 条失败 / 取消的，不受上面两条限制：
 #     刷新类作业刷屏时，最近的出包 / 装机 / 存档记录不能被挤掉；失败的多留，「复制错误摘要」、s2armctl errors / report、反馈问题都要往回翻失败记录；
 #   - 没写终态的（作业可能还在写）一律不动。
-KEEP_TOTAL = 2000
+#   - 各任务在日志根下的文件（<任务>.log、<任务>-install.log、<任务>.progress.tsv、<任务>/ 等）跟着任务记录一起清，任务记录已不在的孤儿日志同样清
+#     （11-13 维护者机器：任务记录轮转正常、留 703 条，日志根却攒了 12296 个 <任务>.log、144 MB 从没清过；诊断包整目录打包超过上传服务 1000 个文件上限）。
+#   11-13 总量上限 2000 → 300：维护者机器 14 天内 703 条全在时间窗里、一条不清；300 条够看最近几天，诊断包另只带最近 DIAG_JOBS 条（library.diagnostics）
+KEEP_TOTAL = 300
 KEEP_DAYS = 14
 KEEP_PER_OPERATION = 20
 KEEP_FAILED_PER_OPERATION = 50
 
 
+TASK_LOG = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[.-].*)?", re.I)   # 日志根下属于某个任务的文件 / 目录名 → 任务号
+TASK_LOG_GRACE = 86400   # 任务号对不上记录的日志：改动超过一天才清（任务刚起、记录还没写的那一刻不误删）
+
+
+def task_of_log(name):
+    m = TASK_LOG.fullmatch(name)
+    return m.group(1).lower() if m else None
+
+
 def prune_jobs(private, keep_days=KEEP_DAYS, keep_count=KEEP_TOTAL, dry_run=False, *, per_operation=KEEP_PER_OPERATION,
-               failed_per_operation=KEEP_FAILED_PER_OPERATION, jobs=None):
+               failed_per_operation=KEEP_FAILED_PER_OPERATION, jobs=None, logs=None):
     """Keep the job store bounded (J10, rules above). Only the three files this module owns per task are removed; anything else in the
-    directory is left alone. `jobs` names the directory directly (layout.adopt_library_logs prunes the old location before moving it)."""
+    directory is left alone. `jobs` names the directory directly (layout.adopt_library_logs prunes the old location before moving it).
+    `logs`：日志根（缺省 jobs 的上一级）——各任务的日志跟着清：任务被清了、或任务记录早已不在（孤儿，改动超过 TASK_LOG_GRACE）的都删"""
     jobs = Path(jobs) if jobs is not None else jobs_dir(private)
     if not jobs.is_dir():
         return dict(removed=[], kept=0, skippedRunning=0, bytes=0, invalidRecords=[])
@@ -1485,8 +1500,33 @@ def prune_jobs(private, keep_days=KEEP_DAYS, keep_count=KEEP_TOTAL, dry_run=Fals
                 p.unlink(missing_ok=True)
         removed.append(task)
         freed += size
+    logs = Path(logs) if logs is not None else jobs.parent
+    keep_ids = {t.lower() for t in by_task} - {t.lower() for t in removed}
+    logs_removed = 0
+    try:
+        listed_logs = list(logs.iterdir()) if logs.is_dir() and logs != jobs else []
+    except FileNotFoundError:
+        listed_logs = []
+    for path in listed_logs:
+        owner = task_of_log(path.name)
+        if not owner or owner in keep_ids or path == jobs:
+            continue
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            continue
+        if owner not in {t.lower() for t in removed} and time.time() - info.st_mtime < TASK_LOG_GRACE:
+            continue   # 对不上记录、又是刚写的：任务可能刚起
+        size = info.st_size if not path.is_dir() or path.is_symlink() else sum(p.stat().st_size for p in path.rglob("*") if p.is_file() and not p.is_symlink())
+        if not dry_run:
+            try:
+                shutil.rmtree(path) if path.is_dir() and not path.is_symlink() else path.unlink(missing_ok=True)
+            except OSError:
+                continue
+        logs_removed += 1
+        freed += size
     return dict(removed=removed, kept=kept + len(running) + len(invalid), skippedRunning=len(running),
-                bytes=freed, invalidRecords=invalid)
+                bytes=freed, invalidRecords=invalid, logsRemoved=logs_removed)
 
 
 def status(private):

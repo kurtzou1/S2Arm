@@ -108,7 +108,9 @@ class Direct(Base):   # ② ③
     def direct_env(self, pre):
         if pre: os.environ['S2A_PREBUILT_TOOLS'] = str(pre)
         run, rec = self.run_obj(); cur = self.t / 'cur'; cur.mkdir(exist_ok=True)
-        with mock.patch.object(oneclick_win, 'WIN', True), mock.patch.object(oneclick_win, 'bash_exe', lambda: 'bash'):
+        metal = self.t / 'metal' / 'metal.exe'; metal.parent.mkdir(exist_ok=True); metal.write_bytes(b'')   # 装着 Metal（没装时整步跳过，见 test_stage_budget_env）
+        with mock.patch.object(oneclick_win, 'WIN', True), mock.patch.object(oneclick_win, 'bash_exe', lambda: 'bash'), \
+             mock.patch.object(oneclick_win, 'metal_exe', lambda *a: metal):
             oneclick_win.direct(run, cur, 'ios', 4)
         return rec.calls
 

@@ -4,7 +4,7 @@
 //   ② 两款游戏 A、B 共用 S：A 存了「我的布局」并选中，B 里没有布局文件、仍是默认；B 读到 A 设的透明度 0.40
 //   ③ layoutWithButtonCenters：安全区 (47, 0, 750×369)，A 键中心挪到 (422, 184.5) → x = (422 − 47) / 750 = 0.5、y = 184.5 / 369 = 0.5；
 //      越界的 B 键 (10, 500) → 钳到 x 0、y 1；没给中心的 X 键照旧
-//   ④ replaceLayout 第二次覆盖成功、读回的是第二次的位置；内置 id 拒绝；saveLayout（导入）对已存在的 mine 仍拒绝
+//   ④ replaceLayout 第二次覆盖成功、读回的是第二次的位置；内置 id 拒绝；saveLayout（导入）对已存在的 mine 直接覆盖、读回导入那份（11-13 不再拒收）
 //   ⑤ 重开 A：选中 mine，A 键 x 0.25（第二次覆盖：中心 47 + 0.25 × 750）
 #import <Foundation/Foundation.h>
 #import "../../ios/vpad_layout.h"
@@ -35,7 +35,10 @@ int main(void) {
         CK([sa replaceLayout:m2 error:&e], "④ 第二次覆盖成功");
         S2AVPadLayout *bad1 = [d layoutWithButtonCenters:@{} safeRect:safe identifier:@"default" name:@"x" error:&e];
         CK(bad1 && ![sa replaceLayout:bad1 error:&e], "④ 内置 id default 拒绝覆盖");
-        CK(![sa saveLayout:m2 error:&e], "④ 导入（saveLayout）对已存在的 mine 仍拒绝");
+        S2AVPadLayout *m3 = [d layoutWithButtonCenters:@{@"A": @[@(47 + 0.75 * 750), @184.5]} safeRect:safe identifier:S2AVPadLayoutMineIdentifier name:@"我的布局" error:&e];
+        S2AVPadLayout *got3 = [sa saveLayout:m3 error:&e] ? [[[S2AVPadLayoutStore alloc] initWithDirectory:A settingsDirectory:S] selectedLayout:&e] : nil;   // mine 已选中：重开读回的就是它
+        CK(got3 && near([btn(got3, @"A")[@"x"] doubleValue], 0.75), "④ 导入（saveLayout）同 id 的 mine：覆盖成功、读回 A 键 x 0.75（%s）", got3 ? "" : e.localizedDescription.UTF8String);
+        CK([sa replaceLayout:m2 error:&e], "④ 再覆盖回第二次的位置（供 ⑤）");
         S2AVPadLayoutStore *ra = [[S2AVPadLayoutStore alloc] initWithDirectory:A settingsDirectory:S];
         S2AVPadLayout *sel = [ra selectedLayout:&e];
         CK(sel && [sel.identifier isEqualToString:S2AVPadLayoutMineIdentifier] && near([btn(sel, @"A")[@"x"] doubleValue], 0.25), "⑤ 重开 A：选中 mine、A 键 x 0.25（第二次的位置）（实得 %s）", sel ? [[btn(sel, @"A")[@"x"] description] UTF8String] : "无");

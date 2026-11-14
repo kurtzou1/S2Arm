@@ -341,24 +341,31 @@ static void par_count(int hit) {
 //   原先各编各的：提交线程急用的那条若正被预热工人编着，它自己再编一遍，两份一起排编译服务（Switch2 线时之笛读数：与提交线程重复建同一条；
 //   斯普拉遁3 c1104_r2 第 232 帧单条首用等待 36.7 s）。现在后到的等先到的那份、把自己的 QoS 借给它（同 flight_wait_locked），拿同一个管线对象（Metal 管线对象线程安全）；
 //   先到的失败（nil）时后到的自己再编一次，取它自己的错误信息
-@interface ParFlight : NSObject { @public dispatch_group_t done; id result; pthread_t builder; } @end
+@interface ParFlight : NSObject { @public dispatch_group_t done; id result; pthread_t builder; _Atomic int gave_up; } @end
 @implementation ParFlight @end
 static NSMutableDictionary<NSString *, ParFlight *> *g_par_flights;
+// 调用方等不及先走了（par_compute_wait 超时）、之后才编完的管线：下一次同键请求直接取走（#884）
+static NSMutableDictionary<NSString *, id> *g_par_late;
 static os_unfair_lock g_par_fl_lock = OS_UNFAIR_LOCK_INIT;
-// 进：有人在编同一键 → 等它编完返回 1、*out = 它的结果；否则登记本线程为编者、*mine = 本次的在途记录，返回 0
-static int par_fl_enter(NSString *key, id *out, ParFlight **mine) {
-    *mine = nil; *out = nil;
+// 进：有人在编同一键 → 等它编完返回 1、*out = 它的结果；否则登记本线程为编者、*mine = 本次的在途记录，返回 0。
+//   wait_ns < 0 = 一直等（原行为）；≥ 0 = 至多等这么久：等不到（或这一键早有人等超时过）返回 1、*out = nil、*gave_up = 1，在途记录留着、编者照常编完（#884）
+static int par_fl_enter_wait(NSString *key, id *out, ParFlight **mine, int64_t wait_ns, int *gave_up) {
+    *mine = nil; *out = nil; if (gave_up) *gave_up = 0;
     if (!key) return 0;
     os_unfair_lock_lock(&g_par_fl_lock);
+    id late = g_par_late[key];
+    if (late) { [g_par_late removeObjectForKey:key]; os_unfair_lock_unlock(&g_par_fl_lock); *out = late; return 1; }
     ParFlight *f = g_par_flights[key];
     if (f) {
+        if (wait_ns >= 0 && atomic_load(&f->gave_up)) { os_unfair_lock_unlock(&g_par_fl_lock); if (gave_up) *gave_up = 1; return 1; }   // 已有人等超时：不再每次都等满
         pthread_override_t ov = f->builder && !pthread_equal(f->builder, pthread_self()) ? pthread_override_qos_class_start_np(f->builder, qos_class_self(), 0) : NULL;
         os_unfair_lock_unlock(&g_par_fl_lock);
         struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0);
-        dispatch_group_wait(f->done, DISPATCH_TIME_FOREVER);
+        long w = dispatch_group_wait(f->done, wait_ns < 0 ? DISPATCH_TIME_FOREVER : dispatch_time(DISPATCH_TIME_NOW, wait_ns));
         clock_gettime(CLOCK_MONOTONIC, &t1);
         if (ov) pthread_override_qos_class_end_np(ov);
         atomic_fetch_add(&g_par_dedup, 1); atomic_fetch_add(&g_par_dedup_ns, (uint64_t)((t1.tv_sec - t0.tv_sec) * 1000000000ll + (t1.tv_nsec - t0.tv_nsec)));
+        if (w) { atomic_store(&f->gave_up, 1); if (gave_up) *gave_up = 1; return 1; }
         *out = f->result; return 1;
     }
     f = [ParFlight new]; f->done = dispatch_group_create(); dispatch_group_enter(f->done); f->builder = pthread_self();
@@ -367,9 +374,12 @@ static int par_fl_enter(NSString *key, id *out, ParFlight **mine) {
     os_unfair_lock_unlock(&g_par_fl_lock);
     return 0;
 }
-static void par_fl_leave(NSString *key, ParFlight *mine, id result) {   // 编者编完：登记结果、摘掉在途、放行等它的
+static int par_fl_enter(NSString *key, id *out, ParFlight **mine) { return par_fl_enter_wait(key, out, mine, -1, NULL); }
+static void par_fl_leave(NSString *key, ParFlight *mine, id result) {   // 编者编完：登记结果、摘掉在途、放行等它的；有人等超时先走了的，结果留给下一次同键请求
     if (!mine) return;
-    os_unfair_lock_lock(&g_par_fl_lock); mine->result = result; [g_par_flights removeObjectForKey:key]; os_unfair_lock_unlock(&g_par_fl_lock);
+    os_unfair_lock_lock(&g_par_fl_lock); mine->result = result; [g_par_flights removeObjectForKey:key];
+    if (result && atomic_load(&mine->gave_up)) { if (!g_par_late) g_par_late = [NSMutableDictionary dictionary]; g_par_late[key] = result; }
+    os_unfair_lock_unlock(&g_par_fl_lock);
     dispatch_group_leave(mine->done);
 }
 static id<MTLRenderPipelineState> par_render_(MTLRenderPipelineDescriptor *d, NSString *key, NSError **e);
@@ -406,16 +416,46 @@ static id<MTLRenderPipelineState> par_render(MTLRenderPipelineDescriptor *d, NSS
     par_fl_leave(key, mine, ps);
     return ps;
 }
-static id<MTLComputePipelineState> par_compute(id<MTLFunction> fn, NSString *key, NSError **e) {
+// 建计算管线的实现（单测换成不返回 / 晚返回的桩，#884）
+static id<MTLComputePipelineState> (*g_par_compute_impl)(id<MTLFunction>, NSString *, NSError **) = par_compute_;
+// 至多等 wait_ns 建一条计算管线（< 0 = 一直等，原行为）。#884：Metal 编译服务对一条计算管线现编一直不返回，提交线程跟着卡死、开场剧情固定定格。
+//   有界时在后台队列编、调用方等到上限就返回 nil 且 *gave_up = 1（调用方跳过这一次、不记失败）；后台照常编完，结果登记给下一次同键请求（g_par_late）。
+//   同键已经有人等超时过：后到的不再等满、直接 *gave_up = 1
+static id<MTLComputePipelineState> par_compute_wait(id<MTLFunction> fn, NSString *key, NSError **e, int64_t wait_ns, int *gave_up) {
+    if (gave_up) *gave_up = 0;
     if (!fn) return nil;
-    id got; ParFlight *mine;
-    if (par_fl_enter(key, &got, &mine) && got) return got;
+    // 在途键：有界时没有归档键也要登记在途（函数对象地址），否则卡住的编译每次派发都再起一份、越堆越多；交给 Metal 的归档键照旧是 key
+    NSString *fk = key ?: (wait_ns >= 0 ? [NSString stringWithFormat:@"fn:%p", (__bridge void *)fn] : nil);
+    id got; ParFlight *mine; int gu = 0;
+    if (par_fl_enter_wait(fk, &got, &mine, wait_ns, &gu)) {
+        if (got) return got;
+        if (gu) { if (gave_up) *gave_up = 1; return nil; }
+    }
     ParSlow *sw = par_slow_begin(key ? key : fn.name, "compute", fn.name);
-    id<MTLComputePipelineState> ps = par_compute_(fn, key, e);
-    par_slow_end(sw, ps != nil);
-    par_fl_leave(key, mine, ps);
-    return ps;
+    if (wait_ns < 0) {
+        id<MTLComputePipelineState> ps = g_par_compute_impl(fn, key, e);
+        par_slow_end(sw, ps != nil);
+        par_fl_leave(fk, mine, ps);
+        return ps;
+    }
+    __block id<MTLComputePipelineState> res = nil; __block NSError *err = nil; dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    ParFlight *m2 = mine; NSString *k2 = key, *fk2 = fk; id<MTLFunction> f2 = fn;
+    dispatch_async(dispatch_get_global_queue(qos_class_self(), 0), ^{
+        NSError *ee = nil; id<MTLComputePipelineState> r = g_par_compute_impl(f2, k2, &ee);
+        par_slow_end(sw, r != nil);
+        res = r; err = ee;
+        par_fl_leave(fk2, m2, r);
+        dispatch_semaphore_signal(sem);
+    });
+    if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, wait_ns))) {
+        if (m2) { os_unfair_lock_lock(&g_par_fl_lock); if (!m2->result) atomic_store(&m2->gave_up, 1); os_unfair_lock_unlock(&g_par_fl_lock); }
+        if (gave_up) *gave_up = 1;
+        return nil;
+    }
+    if (e) *e = err;
+    return res;
 }
+static id<MTLComputePipelineState> par_compute(id<MTLFunction> fn, NSString *key, NSError **e) { return par_compute_wait(fn, key, e, -1, NULL); }
 static id<MTLRenderPipelineState> par_render_(MTLRenderPipelineDescriptor *d, NSString *key, NSError **e) {
     id<MTLBinaryArchive> b = par_bundle_for(key);
     if (b) {   // a miss (another OS / GPU than the package was made for) is no error: the device's archive and the compiler follow

@@ -37,9 +37,18 @@ pso_seed_vk_spv() {   # pso_seed_vk_spv <程序号> <本机 vk/ 目录>：Vulkan
   [ "$n" = 0 ] || echo "Vulkan 现编 SPIR-V：本机新收 ${n} 支 → ${d}"
 }
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
-  [ "${1:-}" = --all ] || { echo "用法：bash tools/pso_seed_keep.sh --all（或 source 后调 pso_seed_keep_mac <模块目录>）" >&2; exit 2; }
-  for f in "$HOME"/Documents/wire/*/pso_user.tsv; do
-    t=$(basename "$(dirname "$f")"); [[ "$t" =~ ^[0-9A-F]{16}$ ]] || continue   # 只认程序号目录（不收 .bak_* 之类的手工备份）
-    pso_seed_merge "$t" "$f"
-  done
+  case ${1:-} in
+    --one)
+      [ "$#" = 3 ] || { echo "用法：bash tools/pso_seed_keep.sh --one <程序号> <pso_user.tsv>" >&2; exit 2; }
+      t=$(tr 'a-f' 'A-F' <<< "$2"); [[ "$t" =~ ^[0-9A-F]{16}$ ]] || { echo "程序号不是 16 位十六进制：$2" >&2; exit 2; }
+      pso_seed_merge "$t" "$3"
+      ;;
+    --all)
+      for f in "$HOME"/Documents/wire/*/pso_user.tsv; do
+        t=$(basename "$(dirname "$f")"); [[ "$t" =~ ^[0-9A-F]{16}$ ]] || continue   # 只认程序号目录（不收 .bak_* 之类的手工备份）
+        pso_seed_merge "$t" "$f"
+      done
+      ;;
+    *) echo "用法：bash tools/pso_seed_keep.sh --all | --one <程序号> <pso_user.tsv>（或 source 后调 pso_seed_keep_mac <模块目录>）" >&2; exit 2;;
+  esac
 fi

@@ -105,6 +105,9 @@ struct PhoneOutcome: Equatable {
     var exportFolder = ""
     var exportGames = 0
     var exportBytes: Int64? = nil
+    /// 完成页「推到手机」（11-13）：推进手机上自签 S2Arm 的 .img 文件名（空 = 还没推）；推不成时作业给的一句「缺什么、怎么做」
+    var pushed: [String] = []
+    var pushNote = ""
 }
 
 /// 排队的一次出包。
@@ -190,7 +193,10 @@ public final class S2ArmLauncherModel: ObservableObject {
     @Published var availableUpdate: [String: Any]?
     /// 点「现在更新并重启」时有局 / 任务在跑：先拦下说明（文案号 update.gate.playing / update.gate.busy）
     @Published var updateGate: String?
-    var updateReady: [String: Any]?
+    /// 更新失败时 Sparkle 给的原因（界面在错误码文案之外照原话显示，控制口 /state 的 update.reason）
+    @Published var updateFailure: String?
+    /// 应用内更新（Sparkle 2）：第一次用时起，起来后整个 App 生命周期只一份
+    lazy var sparkleUpdate = SparkleUpdate(model: self)
     @Published var showAddGames = false
     @Published var showKeys = false
     /// 选好了但缺密钥（作业层 keys_missing）：等放入密钥后接着导入。解包好的游戏不要密钥，不经过这里。
@@ -316,7 +322,7 @@ public final class S2ArmLauncherModel: ObservableObject {
     public init(client: JobClient) {
         provider = S2ArmEngineProvider(client: client)
         controller = NS2LauncherController(
-            socketURL: provider.client.environment.privateRoot.appendingPathComponent("ns2-relay.sock"))
+            socketURL: provider.client.environment.privateRoot.appendingPathComponent("ns2-relay.sock"), watchGame: true)   // 游戏的手柄设置画面交给面板分配玩家（#520 E）
         exportChoice = provider.settings.exportTargets
     }
 
@@ -369,7 +375,7 @@ public final class S2ArmLauncherModel: ObservableObject {
     // ---- environment ----
 
     /// 作业层「这台 Mac 缺东西」的错误码（pack/jobs/errors.py RECOVERY）：失败行据此给环境检查页入口（剃刀 M4）
-    static let environmentCodes: Set<String> = ["xcode_unavailable", "xcode_setup_required", "metal_unavailable", "ios_platform_missing",
+    static let environmentCodes: Set<String> = ["xcode_unavailable", "xcode_setup_required", "metal_unavailable", "metal_download_unreachable", "ios_platform_missing",
         "ios_platform_unregistered", "dotnet_unavailable", "dotnet_sdk_missing", "os_unsupported", "architecture_unsupported",
         "engine_incomplete", "engine_toolchain_newer"]
 
@@ -747,6 +753,10 @@ public final class S2ArmLauncherModel: ObservableObject {
                                                              packBytes: (o["packBytes"] as? NSNumber)?.int64Value,
                                                              suggestion: failure["suggestion"] as? String ?? "", failureSummary: failure["failureSummary"] as? String,
                                                              notes: o["notes"] as? [String] ?? []))
+                // 装法是「导出，自己签名安装」：iPhone 包出好就接着导出（D-9ZF9，维护者实测：原先出完包停在完成页，导出要再点一次，文件夹里什么都没有）。
+                //   导出不连手机、不签名，没有副作用；排进 installAfterQueue，这次出包会话结束后由 pumpQueue 接着跑
+                if platform == .ios, state == .completed, self.installMode.mode == "export", !self.batchRunning, let gid = self.session?.gameID,
+                   !self.installAfterQueue.contains(gid) { self.installAfterQueue.append(gid) }
                 if self.batchRunning { self.batchStepEnded() }
             default:
                 sink.emit(event)
@@ -782,14 +792,19 @@ public final class S2ArmLauncherModel: ObservableObject {
     /// 正在装 / 要装的那台的称呼（进度胶囊用）：选中且连着 → 类型 + 名字；否则「iPhone / iPad」
     var installTargetLabel: String {
         guard let d = selectedDevice else { return "iPhone / iPad" }
-        let pad = (d["productType"] as? String)?.hasPrefix("iPad") == true
+        let pad = Self.padLike(d["productType"] as? String)
         return Self.deviceLabel(kind: pad ? "iPad" : "iPhone", name: d["name"] as? String ?? "")
     }
 
     var selectedDevice: [String: Any]? { Self.pickDevice(connectedDevices, chosen: chosenDevice) }
 
     /// 选中的设备是 iPad 时，「装到 iPhone」这几处入口文字换成「装到 iPad」（#487）；没连设备照旧写 iPhone
-    var installTargetIsPad: Bool { (selectedDevice?["productType"] as? String)?.hasPrefix("iPad") == true }
+    var installTargetIsPad: Bool { Self.padLike(selectedDevice?["productType"] as? String) }
+    /// iPad，以及按 iPad 兼容装的 Apple Vision Pro（机型号 RealityDevice*；理论支持、未真机验证）：入口和文案写 iPad
+    static func padLike(_ productType: String?) -> Bool {
+        guard let t = productType else { return false }
+        return t.hasPrefix("iPad") || t.hasPrefix("RealityDevice")
+    }
     /// 入口文字的键：iPad 版键名 = 原键 + "Pad"（zh / en 两份 l10n 同步）
     func installKey(_ key: String) -> String { installTargetIsPad ? key + "Pad" : key }
 
@@ -806,7 +821,12 @@ public final class S2ArmLauncherModel: ObservableObject {
         //   并按剃刀 M13 只报一次（5 秒轮询不重复弹）
         let probe: [String: Any]
         do { probe = try await provider.targetDevices(); readOK("s2arm.fail.targets") }
-        catch { connectedDevices = []; deviceProbeError = error.localizedDescription; reportFailure("s2arm.fail.targets", error, passive: true); return }
+        catch {
+            // 探测被取消不是读不到：设备行一消失（装完换到完成页）SwiftUI 就取消这次轮询，原先当成失败清空设备、弹「读不到连接的设备 /
+            //   任务已取消」（玩家截图：顶栏刚写「已装到 iPhone」就弹这框）。列表照旧，不弹
+            if Task.isCancelled || (error as? JobFailure)?.state == .cancelled { return }
+            connectedDevices = []; deviceProbeError = error.localizedDescription; reportFailure("s2arm.fail.targets", error, passive: true); return
+        }
         connectedDevices = probe["connected"] as? [[String: Any]] ?? []
         deviceProbeError = (probe["connectedError"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         targetModels = probe["models"] as? [[String: Any]] ?? []
@@ -851,14 +871,14 @@ public final class S2ArmLauncherModel: ObservableObject {
 
     /// 游戏库层的「上传给开发者」弹窗（LauncherView 挂）：游戏库「更多」菜单与控制口 /diagnostics {action: upload} 打开；"" = 不针对某款
     @Published var diagUploadFor: String?
-    /// 控制口替玩家点弹窗里的按钮（send / copy / close）：弹窗收到就照点、清掉（UploadDiagnosticsSheet.onReceive）
+    /// 控制口替玩家点弹窗里的按钮（send / copy / close / cancel）：弹窗收到就照点、清掉（UploadDiagnosticsSheet.onReceive）
     struct DiagUploadCommand: Equatable { let id = UUID(); let action: String }
     @Published var diagUploadCommand: DiagUploadCommand?
 
     /// 上传给开发者（diagnosticsUpload 作业）→ 短码。错误摘要的附加信息同 copyErrorReport（App 版本、目标设备、环境检查未过项）；
     ///   operations 为 nil（没有作业记录的失败，如环境检查）时把界面上的 fallback 正文交给作业放进包里。失败抛作业的原因（界面退回导出）
     struct DiagUploadReceipt: Equatable { let code: String; let issueURL: URL?; let repo: String }
-    func uploadDiagnostics(gameID: String?, operations: [String]?, fallback: String) async throws -> DiagUploadReceipt {
+    func uploadDiagnostics(gameID: String?, operations: [String]?, fallback: String, note: String = "") async throws -> DiagUploadReceipt {
         let info = Bundle.main.infoDictionary ?? [:]
         var extra: [String: Any] = ["app": info["CFBundleShortVersionString"] as? String ?? "", "build": info["S2ABuildID"] as? String ?? "",
                                     "checks": checks.filter { !$0.ok }.map { ["name": $0.name, "message": $0.message] }]
@@ -866,11 +886,28 @@ public final class S2ArmLauncherModel: ObservableObject {
         var request: [String: Any] = ["extra": extra]
         if let gameID { request["gameId"] = gameID }
         if let operations { request["operations"] = operations } else if !fallback.isEmpty { request["summary"] = fallback }
+        let said = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !said.isEmpty { request["note"] = said }   // 玩家一句「发生了什么」→ 作业层写进 manifest.json 的 note（pack/jobs/library.py diagnostics）
         let outcome = try await provider.client.perform("diagnosticsUpload", extra: request)
         guard let code = outcome.result["code"] as? String, !code.isEmpty else { throw UploadNoCode() }
         // 预填好的新帖页与仓库地址由作业层给（pack/jobs/diag_upload.py issue_url，iOS 同格式）
         return DiagUploadReceipt(code: code, issueURL: (outcome.result["issueUrl"] as? String).flatMap(URL.init(string:)),
                                  repo: outcome.result["repo"] as? String ?? "github.com/jhaizhou-ops/S2Arm")
+    }
+    /// 导出完成页「推到手机」：把「S2Arm 自签导出」里的完整 .img 推进手机上自签装好的 S2Arm（exportPush 作业）；结果写回 phoneOutcome
+    @Published var exportPushing = false
+    func pushExportToPhone(gameID: String?) {
+        guard !exportPushing else { return }
+        exportPushing = true
+        Task {
+            do {
+                let names = try await provider.exportPush(gameId: gameID, device: installDeviceID)
+                phoneOutcome?.pushed = names; phoneOutcome?.pushNote = ""
+            } catch {
+                phoneOutcome?.pushNote = error.localizedDescription
+            }
+            exportPushing = false
+        }
     }
     struct UploadNoCode: LocalizedError { var errorDescription: String? { Localizer().t("s2arm.diagUpload.noCode") } }
     /// 界面语言写进作业环境：之后每个作业请求都带 uiLanguage（zh-Hans / en），作业层按它出玩家看得到的文件名与说明
@@ -1378,7 +1415,7 @@ public final class S2ArmLauncherModel: ObservableObject {
         }
         if state == .completed && session.kind == .install { installDone = session.gameID }
         if session.kind == .installUpdate { phoneUpdateEnded(completed: state == .completed) }
-        if session.kind == .install { Task { pumpQueue() } }
+        if session.kind == .install || (session.kind == .export && !installAfterQueue.isEmpty) { Task { pumpQueue() } }   // 导出模式出完包排了导出（runExport / exportSink）
         if [.delete, .clearCache].contains(session.kind), let n = libraryNotice, n.kind == .running {   // 删除 / 清缓存的结果写进游戏库页顶部那条提示
             libraryNotice = LibraryNotice(kind: state == .completed ? .done : .failed, key: n.key, name: n.name,
                                           detail: state == .completed ? "" : (session.message.isEmpty ? JobOutcome.interruptedMessage : session.message))

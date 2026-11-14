@@ -34,5 +34,13 @@ final class GameResume {
         } catch (IllegalArgumentException error) { throw new IOException("invalid active game receipt", error); }
     }
 
+    /** Title of the published active-game receipt, or null while none is readable (a game still starting has none yet). */
+    static String activeTitle(File cache) {
+        try {
+            Object t = Json.object(Json.parse(new String(Files.readAllBytes(file(cache).toPath()), StandardCharsets.UTF_8)), "active game").get("title");
+            return t instanceof String ? (String) t : null;
+        } catch (IOException | RuntimeException error) { return null; }
+    }
+
     static void clear(File cache) throws IOException { Files.deleteIfExists(file(cache).toPath()); }
 }

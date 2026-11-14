@@ -172,7 +172,9 @@ def win_oneclick(c, oneclick, extraction, fonts, out, events, log, env, line, so
     结果事件里的 ipa / pack 改指交付件。sources / gid：游戏库里这款选中的原件与游戏号，一并交下去——
     共用解包目录只有序号 0 那支程序，多程序合集的其余序号要 oneclick_win 从原件解（#613：原先不给原件，多程序合集直接报「改给原件」）"""
     work = out / "work"
-    env = dict(env, S2A_FONTS=str(fonts))
+    # S2A_KEYS：多程序合集序号 1.. 要 oneclick_win 从原件解，用玩家导入的密钥（作业层 c.keys，同 build.py 刷新链）；
+    #   不给就落回 ~/.switch/prod.keys，玩家机上没有 → 「编 App 与签名」报 prod.keys 不在（#943）
+    env = dict(env, S2A_FONTS=str(fonts), S2A_KEYS=str(c.keys))
     c.run([os.sys.executable, "-X", "utf8", "-m", "pack.orch.oneclick_win", "--from-extract", extraction, "--out", work, "--target", "ios",
            "--shell", bundled_shell(c), "--events", events, *(["--title-id", gid] if gid else []), *map(str, sources)],
           log, env, cwd=c.engine, on_line=line)   # 按包起（模块里 from pack… 导入），从引擎根起
@@ -234,6 +236,7 @@ def _build(c):
     oneclick = c.engine / ("pack/orch/oneclick_win.py" if os.name == "nt" else "pack/oneclick/oneclick.sh")
     if not oneclick.is_file():
         raise Failure("应用内置引擎太旧，没有打 iPhone 包的工具，请安装最新版 S2Arm。")
+    drop_half_consumed(c, gid)   # 上次写 IMG 边写边删到一半被打断：产物根 RomFS 残缺，先清掉整个出包工作目录再出
     out = contained(layout.root_of(c, gid), layout.ios_work(c, gid))
     out.mkdir(parents=True, exist_ok=True)
     import milestones as ms
@@ -431,12 +434,35 @@ def deliver(c, gid, root, pack_dir, ipa):
     if dest.exists():
         os.replace(dest, old)
     os.replace(pack_dir, dest)   # 同一款文件夹内改名（build/ios → image/ios）
+    layout.hide(dest)
     if old.exists():
         _rm(c, managed, old)
+    if (image / layout.LEGACY_IOS_PACK).exists():   # 旧库留下的 pack/（没被 ios_pack 改过名的）：新资源包已在 .pack，旧的删掉
+        _rm(c, managed, image / layout.LEGACY_IOS_PACK)
     compat = host_update.engine_compat(c) or {}
     from rewrite_refresh import rewriter_id   # 这次的改写产物出自哪版改写器：改写器以后修了，更新手机时只核记号不同的款（rewrite_refresh.py）
     layout.update_info(c, gid, ios=dict(shellId=current_shell_id(c), pack=want, rewriterId=rewriter_id(c), **compat))
     Path(ipa).unlink(missing_ok=True)
+
+
+CONSUME_MARK = ".img_consume_inflight"   # 出包工作目录里：写 IMG 正在边写边删产物根 RomFS（#746），写成功才删
+
+
+def clear_build(c, gid):
+    """清掉这款整个出包工作目录（留出包日志），同出包成功的收尾；重试从解包重做"""
+    from library import _build_entries, _rm
+    for p in _build_entries(c, gid):
+        _rm(c, layout.root_of(c, gid), p)
+
+
+def drop_half_consumed(c, gid):
+    """写 IMG 边写边删到一半被打断（取消、启动器被关、进程被杀，来不及走失败清理）：标记还在 = 产物根 RomFS 已删掉一部分，
+    而 romfs.s2aidx 等阶段产物还按完整的列着——接着出会在写 IMG 时报「romfs.s2aidx 里的 X 不在 game.img 的 RomFS 段，也不在覆盖层」，
+    或者更糟、少了文件的包照出。看到标记就清掉整个出包工作目录（解包在游戏库 cache/ 里，不在这里，不受影响），从播种重出"""
+    mark = layout.ios_work(c, gid, create=False) / CONSUME_MARK
+    if mark.exists():
+        c.emit("message", "上次写单一 IMG 时被打断，产物根的 RomFS 已删掉一部分：清掉出包中间产物，这次从头出")
+        clear_build(c, gid)
 
 
 def to_img(c, gid, root, pack_dir):
@@ -447,16 +473,22 @@ def to_img(c, gid, root, pack_dir):
     # 边写边删解包出来的 RomFS（#746）：出包收尾本来就清掉整个出包工作目录（prune_unless_follow_up），提前到写 IMG 时，峰值少一整份游戏大小。
     #   同一款接着还要出别的平台（followUp）要留着解包，不删
     consume = c.r.get("followUp") is not True
+    mark = layout.ios_work(c, gid) / CONSUME_MARK
+    if consume:
+        mark.write_text(c.task, encoding="utf-8")   # 进程被杀、来不及走下面的清理时，下次出包靠它认出产物根已残缺（drop_half_consumed）
     try:   # 走 c.run：它每秒读 S2A_PROGRESS，img.py 按已写字节报进度，出包页这一步有进度条（几十 GB 要写一两分钟）
         c.run([os.sys.executable, "-X", "utf8", "pack/img.py", "convert", str(root), str(pack_dir), "--gid", gid.upper(), *(["--consume", "--work", str(layout.ios_work(c, gid))] if consume else [])],
               log, c.env(), cwd=c.engine)
-    except Failure as e:
-        if consume:   # 解包已删了一部分：清掉整个出包工作目录（同出包成功的收尾），重试从解包重做，不拿残缺的产物根接着出
-            from library import _build_entries, _rm
-            for p in _build_entries(c, gid):
-                _rm(c, layout.root_of(c, gid), p)
+    except BaseException as e:
+        # 解包已删了一部分：清掉整个出包工作目录（同出包成功的收尾），重试从解包重做，不拿残缺的产物根接着出。
+        #   取消（Cancelled）同样要清——原先只认 Failure，取消后重试接着用删了一半的产物根，写 IMG 报「romfs.s2aidx 里的 X 不在 RomFS 段」
+        if consume:
+            clear_build(c, gid)
+        if not isinstance(e, Failure):
+            raise
         from errors import tool_reason
         raise Failure("写单一 IMG（game.img）失败：" + (tool_reason(log) or str(e)), code="package_failed") from e
+    mark.unlink(missing_ok=True)
 
 
 def current_shell_id(c):
@@ -554,11 +586,12 @@ def container_custom(c):
     return out
 
 
-def assemble(c, gid, others=(), *, failed=(), root=None, dest=None):
+def assemble(c, gid, others=(), *, failed=(), root=None, dest=None, agreed=None):
     """现组容器（一个 App 装多款）：本版 iPhone 壳 + 这款和 others（这台手机上已有的各款）的容器件（pack/ship_ext.py container），出 S2Arm.app + S2Arm.ipa 到 dest
     （缺省游戏库同盘临时目录，由调用方装上后再放到默认位置根）。不再在上一次的底包上加款：底包和各款镜像会不一致，且换壳时要整包重出。
     gid 为 None：只组 others（从手机删一款）。哪款放不进本壳（不是本壳出的、新宿主也不认得）就报 container_stale 点名，不装半套；
     游戏库里已删的款不再带（手机上的存档还在）。root / dest：出包重叠早装用（旁路刚完成的产物根，出到临时目录）。
+    agreed：设备记录 staleAgreed（#479，{壳号: [游戏号]}）——这台手机在本版壳上同意过「这次不带」的；带不进的都在里面就不再问，照不带它们装。换了壳号重新问
     → (ipa, 全部款, 壳号)。Windows 不签（--sign none，交给 plumesign）；Mac 自签，装机时再按玩家团队重签"""
     import host_update
     sid = current_shell_id(c)
@@ -569,7 +602,7 @@ def assemble(c, gid, others=(), *, failed=(), root=None, dest=None):
         if roots[gid] is None:
             raise Failure("这款的 iPhone 版不是这一版 S2Arm 出的（或还没出）：先「打 iPhone 包」，再装到 iPhone。", code="container_stale")
     in_library = {g["id"].upper() for g in c.catalog()["games"]}
-    stale, deleted = [], []
+    stale, deleted, missing = [], [], set()
     names = {g["id"].upper(): g.get("name") or g["id"] for g in c.catalog()["games"]}
     for g in others:
         g = g.upper()
@@ -581,11 +614,19 @@ def assemble(c, gid, others=(), *, failed=(), root=None, dest=None):
         roots[g] = usable_kit(c, g, sid, failed)
         if roots[g] is None:
             stale.append(names.get(g, g))
+            if not (layout.ios_kit(c, g) / "main.npdm").is_file():
+                missing.add(g)
     stale_ids = [g for g in roots if roots[g] is None]
-    if stale and c.r.get("acceptStale") is not True:   # 认得出的风险（v0.3.1 装机原则）：问玩家，确认后这次先不带它们照装，不替他拒
-        raise Failure("S2Arm 更新过，手机上的「" + "」「".join(stale) + "」要按新版重新出包才能放进同一个 App。确认继续的话，这次先不带它们照装这款："
-                      "它们的存档和资源都留在手机上，之后给它们各「打 iPhone 包」再装一次就回来。不想这样就先给它们重新出包。", code="container_stale",
-                      internal=" ".join(stale_ids))
+    agreed = {a.upper() for a in ((agreed or {}).get(sid) or [])}
+    if any(g not in agreed for g in stale_ids) and c.r.get("acceptStale") is not True:   # 认得出的风险（v0.3.1 装机原则）：问玩家，确认后这次先不带它们照装，不替他拒
+        # 两种原因分开说（#479）：这台电脑上根本没有它的 iPhone 版（别的电脑出的 / 删了）、有但是旧版 S2Arm 出的（新版认不得，要重新打 iPhone 包）
+        #   每行一个固定句式（游戏名进 {0} 占位），界面按 Localizable.json 逐行翻
+        lost = "".join("「" + names.get(g, g) + "」" for g in stale_ids if g in missing)
+        old = "".join("「" + names.get(g, g) + "」" for g in stale_ids if g not in missing)
+        lines = ["手机上有几款游戏这次放不进同一个 App。"] + (["这台电脑上没有它们的 iPhone 版：" + lost] if lost else []) \
+            + (["它们是旧版 S2Arm 出的 iPhone 版，新版认不得，要重新「打 iPhone 包」：" + old] if old else []) \
+            + ["确认继续的话，这次先不带它们照装，它们的存档和资源都留在手机上，之后给它们「打 iPhone 包」再装一次就回来。同意一次后，这台手机在这一版 S2Arm 上不再为它们问。"]
+        raise Failure("\n".join(lines), code="container_stale", internal=" ".join(stale_ids))
     if stale:
         for g in stale_ids: roots.pop(g)
         c.diagnostic("「" + "」「".join(stale) + "」这次没放进新版 S2Arm（要按新版重新出包）；手机上的存档和资源都还在，给它们各「打 iPhone 包」再装一次就回来。",
@@ -595,7 +636,7 @@ def assemble(c, gid, others=(), *, failed=(), root=None, dest=None):
     if not roots:
         raise Failure("手机上的 S2Arm 里没有别的游戏了。", code="job_failed")
     shell = container_shell(c, sid)
-    icon = c.engine / "launchers/macos/Branding/AppIcon-1024.png"   # 宿主永远用 S2Arm 自己的图标，不退回某款游戏的（游戏图标只进 Games/<游戏号>/）
+    icon = c.engine / "launchers/macos/Branding/AppIcon-iOS.png"   # iPhone 用鲜艳版玻璃 S（11-13 维护者：Mac 不动，只换 iOS）；宿主永远用 S2Arm 自己的图标，不退回某款游戏的（游戏图标只进 Games/<游戏号>/）
     if not icon.is_file():
         raise Failure("这个 S2Arm 安装包不完整（缺应用图标），请重新下载 S2Arm。", code="engine_incomplete")
     out = Path(dest) if dest else Path(tempfile.mkdtemp(prefix=".container-", dir=c.library))
@@ -700,8 +741,8 @@ def oneclick_result(path):
 
 def resolve_target(c):
     """目标设备（只用来提示地址窗口，一包通用）：请求里给了（前端：连着的设备或玩家选的机型）就用它；没给就认连着的那一台。
-    认不出目标 → None、照常出包；所用 Xcode 的 SDK 比目标系统旧也不拦（直连库按 iOS 18 下限编）；
-    目标本身装不了（系统低于 18、GPU 太老：target_unsupported）照旧报红——包在那台上跑不了"""
+    目标有什么问题都不拦出包（预检清单 #39–#42，11-13 维护者：别预先判断拦玩家）：认不出 GPU、SDK 比目标旧、读不出 SDK、
+    目标芯片太老 / 系统太低——包本身照出、一包通用，能装哪台由装机那一步说；看得出的问题记一条提醒（severity warning）给玩家看"""
     import target as tg
     want = c.r.get("target") or {}
     try:
@@ -712,11 +753,14 @@ def resolve_target(c):
             if len(devs) != 1:
                 return None
             want = devs[0]
+        if not want.get("gpuArch"):
+            # 所用 Xcode 认不出目标的 GPU（新机型比 Xcode 的设备特征库新，诊断 D-6FTP iPhone19,7）：一包通用，目标只用来提示地址窗口（读 os）
+            return dict(want)
         return tg.check(want, tg.os_choices(c.env())[0])
     except tg.TargetError as e:
-        if not want or e.code == "xcode_sdk_too_old":   # 没给目标时探测连着的设备出错也不拦
-            return dict(want) or None
-        raise Failure(str(e), code=e.code) from e
+        if want and e.code == "target_unsupported":   # 那台设备跑不了这个包：照出，提醒一句（装到别的设备照样能用）
+            c.diagnostic(str(e), code=e.code, severity="warning")
+        return dict(want) or None
 
 
 # 只登记 oneclick.sh 实际 lap 阶段；子步骤从各自产生错误的脚本取，不虚构事件名。

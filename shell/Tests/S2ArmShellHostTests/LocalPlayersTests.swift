@@ -40,7 +40,6 @@ private func freshDefaults() throws -> (UserDefaults, String) {
     let (d, name) = try freshDefaults(); defer { d.removePersistentDomain(forName: name) }
     let store = LocalPlayers(shellDefaults: d)
     #expect(throws: LocalPlayers.NameError.empty) { try store.add("   ") }
-    #expect(throws: LocalPlayers.NameError.tooLong) { try store.add(String(repeating: "a", count: 21)) }
     #expect(throws: LocalPlayers.NameError.taken) { try store.add("player 1") }   // 第一个玩家没改名时显示「Player 1」
     let hong = try store.add("Hong")
     #expect(throws: LocalPlayers.NameError.taken) { try store.add("HONG") }
@@ -88,4 +87,14 @@ private func freshDefaults() throws -> (UserDefaults, String) {
     let reopened = S2ArmShellHostModel(catalogue: cat, play: { _ in }, stores: stores, installState: { _ in 1 })
     #expect(reopened.players.map(\.displayName) == ["Player 1", "Hong"])
     #expect(reopened.currentPlayer.uid == "d7a43a96495d0a594e615dd88587b6bf")
+}
+
+@Test func longNamesAreAcceptedAndTheFolderFitsTheFileSystem() throws {
+    // 11-13 不许堵门：名字不限长；文件夹名在整字处截到 200 字节（手算：「长」UTF-8 3 字节，300 个 = 900 字节 → 截到 66 个 = 198 字节，再加 9 字节前缀）
+    let (d, name) = try freshDefaults(); defer { d.removePersistentDomain(forName: name) }
+    let store = LocalPlayers(shellDefaults: d)
+    let long = try store.add(String(repeating: "长", count: 300))
+    #expect(long.name.count == 300)
+    #expect(long.folder == "SaveData-" + String(repeating: "长", count: 66))
+    #expect(long.folder.utf8.count == 207)
 }

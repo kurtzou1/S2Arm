@@ -35,6 +35,9 @@ struct s2a_vk_device {
     int swapchain_maintenance1_enabled;
     int timeline_semaphore_enabled;
     int index_type_uint8_enabled;
+    int draw_indirect_count_enabled; // KHR extension actually enabled, both entry points present
+    PFN_vkCmdDrawIndirectCountKHR draw_indirect_count;
+    PFN_vkCmdDrawIndexedIndirectCountKHR draw_indexed_indirect_count;
     int shader_draw_parameters_enabled;
     // 0 = 没有校准扩展；1 = VK_KHR_calibrated_timestamps；2 = VK_EXT_calibrated_timestamps。
     // GPU 时间戳换算到游戏时钟需要用它求 GPU 域与 CLOCK_MONOTONIC 的偏移。

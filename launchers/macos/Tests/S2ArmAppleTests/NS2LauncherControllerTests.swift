@@ -1,9 +1,76 @@
 import XCTest
+import AppKit
+import GameController
 @testable import NX2AppleUI
 
 // 手柄弹窗标题照连接程序报的型号写（#520）。期望按 ns2_kind 数值手写：1 Pro、2 Joy-Con 左、3 右、4 左右一对；
 //   没连 / 旧连接程序没报 kind 时写通用的 Switch 手柄 / Switch Controller
 final class NS2LauncherControllerTests: XCTestCase {
+    @MainActor
+    func testSystemControllerConnectionNotification() async {
+        let notifications = NotificationCenter()
+        let controller = NS2LauncherController(socketURL: URL(fileURLWithPath: "/tmp/s2arm-controller-test.sock"),
+                                              systemControllers: { [] }, notifications: notifications)
+        let pad = NamedSystemController("DualSense Wireless Controller (test)")
+        notifications.post(name: .GCControllerDidConnect, object: pad)
+        // 连接通知从主队列交给模型；不接管手柄的输入回调。
+        await Task.yield()
+        await Task.yield()
+        XCTAssertEqual(controller.title(simplifiedChinese: true), "DualSense Wireless Controller (test)")
+        XCTAssertEqual(controller.buttonStatus, "已连接")
+        XCTAssertEqual(controller.buttonColor, .systemGreen)
+        XCTAssertFalse(controller.detail.contains("SYNC"))
+        notifications.post(name: .GCControllerDidDisconnect, object: pad)
+        await Task.yield()
+        await Task.yield()
+        XCTAssertFalse(controller.hasSystemController)
+        XCTAssertEqual(controller.buttonStatus, "未连接")
+    }
+
+    @MainActor
+    func testAlreadyConnectedSystemControllerNeedsNoSwitchHelper() {
+        let pad = NamedSystemController("DualSense Wireless Controller")
+        var inputs = 0
+        pad.extendedGamepad?.valueChangedHandler = { _, _ in inputs += 1 }
+        let controller = NS2LauncherController(socketURL: URL(fileURLWithPath: "/tmp/s2arm-controller-test.sock"),
+                                              systemControllers: { [pad] }, notifications: NotificationCenter())
+        controller.startIfEnabled()
+        XCTAssertEqual(controller.title(simplifiedChinese: true), "DualSense Wireless Controller")
+        XCTAssertEqual(controller.buttonStatus, "已连接")
+        controller.gameDidStart()
+        controller.gameDidExit()
+        XCTAssertEqual(controller.buttonStatus, "已连接", "关闭游戏不能把系统仍连接的手柄显示成断开")
+        let gamepad = pad.extendedGamepad!
+        gamepad.valueChangedHandler?(gamepad, gamepad.buttonA)
+        XCTAssertEqual(inputs, 1, "状态观察不能接管游戏的输入回调")
+    }
+
+    @MainActor
+    func testDisconnectExcludesStaleSnapshotAndKeepsOtherController() async {
+        let dualSense = NamedSystemController("DualSense Wireless Controller")
+        let xbox = NamedSystemController("Xbox Wireless Controller")
+        var connected: [GCController] = [dualSense, xbox]
+        let notifications = NotificationCenter()
+        let controller = NS2LauncherController(socketURL: URL(fileURLWithPath: "/tmp/s2arm-controller-test.sock"),
+                                              systemControllers: { connected }, notifications: notifications)
+        XCTAssertEqual(controller.title(simplifiedChinese: false), "DualSense Wireless Controller")
+        notifications.post(name: .GCControllerDidDisconnect, object: dualSense)
+        await Task.yield()
+        await Task.yield()
+        XCTAssertEqual(controller.title(simplifiedChinese: false), "Xbox Wireless Controller")
+        XCTAssertEqual(controller.buttonStatus, "已连接")
+        connected = [xbox] // 枚举仍包含本次断开的设备，不能靠快照假定它还连着。
+        notifications.post(name: .GCControllerDidDisconnect, object: xbox)
+        await Task.yield()
+        await Task.yield()
+        XCTAssertEqual(controller.buttonStatus, "未连接")
+        connected = [dualSense]
+        notifications.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+        await Task.yield()
+        await Task.yield()
+        XCTAssertEqual(controller.title(simplifiedChinese: false), "DualSense Wireless Controller")
+    }
+
     func testTitleFollowsKind() {
         XCTAssertEqual(NS2LauncherController.title(kind: 2, simplifiedChinese: true), "Joy-Con 2 (L)")
         XCTAssertEqual(NS2LauncherController.title(kind: 3, simplifiedChinese: false), "Joy-Con 2 (R)")
@@ -54,4 +121,13 @@ final class NS2LauncherControllerTests: XCTestCase {
         let took = Date().timeIntervalSince(t0)
         XCTAssertFalse(stubborn.isRunning); XCTAssertGreaterThanOrEqual(took, 0.5); XCTAssertLessThan(took, 2.5)
     }
+}
+
+private final class NamedSystemController: GCController {
+    private let name: String
+    private let gamepadSnapshot = GCController.withExtendedGamepad()
+
+    init(_ name: String) { self.name = name; super.init() }
+    override var vendorName: String? { name }
+    override var extendedGamepad: GCExtendedGamepad? { gamepadSnapshot.extendedGamepad }
 }

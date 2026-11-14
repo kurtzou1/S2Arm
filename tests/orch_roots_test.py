@@ -437,6 +437,12 @@ class PlainRootsTest(unittest.TestCase):
         self.home = Path(self.temp.name)
         self.store = roots.Roots(self.home / 'roots', shared=False)
 
+    @unittest.skipUnless(os.name == 'nt', 'UNC volume probe is Windows-only')
+    def test_unc_share_uses_plain_mode_without_volume_junction_probe(self):
+        with patch.dict(os.environ, {'S2A_ROOTS_PLAIN': ''}), \
+             patch.object(roots, '_api', side_effect=AssertionError('UNC roots must not query junction-capable volume APIs')):
+            self.assertFalse(roots.links_supported(r'\\server\share\game-library'))
+
     def tearDown(self):
         roots.remove_owned(self.home); self.temp.cleanup(); self.env.stop()
 

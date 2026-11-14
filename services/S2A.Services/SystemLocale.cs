@@ -7,6 +7,9 @@ namespace S2A.Services
     // 系统语言缺省跟设备（维护者 10-20：「都要装上以后默认是中文版哈（系统本身也是中文版的）」）：
     //   没给 S2A_SYSTEM_LANGUAGE 时按 iPhone / Mac 的系统首选语言（CFLocaleCopyPreferredLanguages，BCP 47 标签如 zh-Hans-CN）映射 Switch SystemLanguage；
     //   测试资产 / 对真值局显式给的 S2A_SYSTEM_LANGUAGE 照旧优先。游戏不支持该语言时按 TitleFallback 的四步选。
+    //   不跟 App / 启动器界面语言（11-13 撤回同日的「跟界面」）：界面只有简 / 繁 / 英三种，日 / 韩语设备会被落成英语，游戏按语言换整套字体，
+    //   Switch 上用日 / 韩 / 中文起的名字导入后成乱码。iOS 里玩家在 App 设置选过界面语言时本 App 的 AppleLanguages 就是它，首选列表第一项随之是它，
+    //   所以「选过界面语言 → 游戏跟它」不另走一条路
     //   服务层是 InvariantGlobalization，CultureInfo 拿不到系统语言，所以直接调 CoreFoundation（iOS / macOS 同一个 C 接口）
     public static class SystemLocale
     {
@@ -61,22 +64,6 @@ namespace S2A.Services
 
             why = tags.Length == 0 ? "取不到系统首选语言" : $"系统首选语言 {string.Join(",", tags)} 都没有对应的 Switch 语言";
             return SystemLanguage.AmericanEnglish;
-        }
-
-        // 游戏语言的缺省（维护者 11-13：「玩家没单独指定时，游戏语言跟宿主 App / 启动器的界面语言一致」）：界面语言标签（iOS 壳按实际显示的字符串表写、
-        //   Mac 启动器按自己的界面语言给，都经 S2A_UI_LANGUAGE）映射得出就用它；没给 / 认不出才退回系统首选语言（旧行为）。
-        //   显式指定（S2A_SYSTEM_LANGUAGE）在调用方先判，不经这里
-        public static SystemLanguage FromUi(string uiTag, string[] preferred, out string why)
-        {
-            if (Map(uiTag) is SystemLanguage ui)
-            {
-                why = $"界面语言 {uiTag}";
-                return ui;
-            }
-
-            SystemLanguage d = FromPreferred(preferred, out string w);
-            why = string.IsNullOrEmpty(uiTag) ? w : $"界面语言 {uiTag} 认不出，{w}";
-            return d;
         }
 
         // 游戏不支持主语言时依次试的语言（交 Ryujinx GetDesiredLanguage，S2AHooks.TitleLanguageFallback）。只看宿主主语言 primary（Host.Language）：

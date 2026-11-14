@@ -11,6 +11,8 @@ import subprocess
 import sys
 import tempfile
 
+import host_link
+
 root = Path(__file__).resolve().parents[2]
 shim_path = 'android/native/nvn/mtl_vk_shim.c'
 parser = argparse.ArgumentParser()
@@ -250,7 +252,7 @@ def compile_present_fixture(directory, name, body):
         '-std=gnu11', '-O1', '-Wall', '-Wextra', '-Werror', '-pthread',
         str(c_file), '-o', str(exe),
     ]
-    result = subprocess.run(command, capture_output=True, text=True, timeout=90)
+    result = host_link.run(command, capture_output=True, text=True, timeout=90)
     if result.returncode:
         raise RuntimeError(f'{name}: fixture compile failed (not a behavior result)\n{result.stdout}{result.stderr}')
     return exe
@@ -271,42 +273,81 @@ def run_expected(executable, scenario, expected_failure=None):
 
 
 
-def export_fixture(direct_text, directory, with_producer):
-    weak_decl = 'extern uint64_t mtl_present_count(void) __attribute__((weak));'
-    if direct_text.count(weak_decl) != 1:
-        raise RuntimeError('direct_session weak NVN producer declaration is absent or duplicated')
+def export_fixture(direct_text, directory, producer_kind, withdraw_replay=False):
+    weak_decls = [
+        'extern uint64_t mtl_present_count(void) __attribute__((weak));',
+        'extern void rp_present_stats(uint64_t *shown, uint64_t *dropped) __attribute__((weak));',
+    ]
+    for declaration in weak_decls:
+        if direct_text.count(declaration) != 1:
+            raise RuntimeError('production weak producer declaration is absent or duplicated')
     export = function(direct_text, 'uint64_t s2a_android_nvn_present_count(void)')
-    producer = '''\n#ifdef WITH_PRODUCER\nstatic uint64_t fixture_producer_count;\nuint64_t mtl_present_count(void) { return fixture_producer_count; }\n#endif\n'''
-    main = r'''
+    if withdraw_replay:
+        original = 'if (rp_present_stats)'
+        if export.count(original) != 1:
+            raise RuntimeError('production replay priority mutation anchor changed')
+        export = export.replace(original, 'if (0 && rp_present_stats)')
+    main = r"""
 int main(void) {
-#ifdef WITH_PRODUCER
-    fixture_producer_count = 11;
-    if (s2a_android_nvn_present_count() != 11) return 1;
-    fixture_producer_count = 22;
-    if (s2a_android_nvn_present_count() != 22) return 1;
-#else
-    if (s2a_android_nvn_present_count() != 0) return 1;
+    fixture_legacy_count = 11; fixture_replay_count = 31;
+    if (s2a_android_nvn_present_count() != EXPECT_FIRST) { fprintf(stderr, "FAIL replay priority/count\n"); return 1; }
+    fixture_legacy_count = 22; fixture_replay_count = 42;
+    if (s2a_android_nvn_present_count() != EXPECT_SECOND) { fprintf(stderr, "FAIL replay priority/count\n"); return 1; }
+    if (legacy_calls != EXPECT_LEGACY_CALLS || replay_calls != EXPECT_REPLAY_CALLS) return 1;
+#ifdef WITH_REPLAY
+    fixture_replay_count = 0;
+    if (s2a_android_nvn_present_count() != 0 || legacy_calls != 0 || replay_calls != 3) {
+        fprintf(stderr, "FAIL replay zero must not use legacy\n"); return 1;
+    }
 #endif
     return 0;
 }
-'''
-    source = '#include <stdint.h>\n' + weak_decl + '\n' + export + producer + main
-    name = 'weak-present-export' if with_producer else 'weak-absent-export'
-    c_file = directory / f'{name}.c'
-    exe = directory / name
+"""
+    source = '#include <stdint.h>\n#include <stddef.h>\n#include <stdio.h>\n' + '\n'.join(weak_decls) + r"""
+uint64_t fixture_legacy_count, fixture_replay_count;
+int legacy_calls, replay_calls;
+""" + export + main
+    provider = r"""
+#include <stdint.h>
+extern uint64_t fixture_legacy_count, fixture_replay_count;
+extern int legacy_calls, replay_calls;
+#ifdef WITH_LEGACY
+uint64_t mtl_present_count(void) { legacy_calls++; return fixture_legacy_count; }
+#endif
+#ifdef WITH_REPLAY
+void rp_present_stats(uint64_t *shown, uint64_t *dropped) {
+    replay_calls++;
+    if (shown) *shown = fixture_replay_count;
+    if (dropped) *dropped = 0;
+}
+#endif
+"""
+    kind = {'absent': (0, 0, 0, 0), 'legacy': (11, 22, 2, 0),
+            'replay': (31, 42, 0, 2), 'both': (31, 42, 0, 2)}[producer_kind]
+    first, second, old_calls, new_calls = kind
+    c_file = directory / f'export-{producer_kind}.c'
+    producer_file = directory / f'producer-{producer_kind}.c'
+    exe = directory / f'export-{producer_kind}'
     c_file.write_text(source, encoding='utf-8')
+    producer_file.write_text(provider, encoding='utf-8')
     command = shlex.split(os.environ.get('CC', 'cc')) + [
         '-std=gnu11', '-Wall', '-Wextra', '-Werror',
+        f'-DEXPECT_FIRST={first}', f'-DEXPECT_SECOND={second}',
+        f'-DEXPECT_LEGACY_CALLS={old_calls}', f'-DEXPECT_REPLAY_CALLS={new_calls}',
     ]
-    if with_producer:
-        command.append('-DWITH_PRODUCER')
-    command.extend([str(c_file), '-o', str(exe)])
-    result = subprocess.run(command, capture_output=True, text=True, timeout=90)
+    if producer_kind in ('legacy', 'both'): command.append('-DWITH_LEGACY')
+    if producer_kind in ('replay', 'both'): command.append('-DWITH_REPLAY')
+    command.extend([str(c_file), str(producer_file), '-o', str(exe)])
+    result = host_link.run(command, capture_output=True, text=True, timeout=90)
     if result.returncode:
-        raise RuntimeError(f'{name}: fixture compile failed\n{result.stdout}{result.stderr}')
+        raise RuntimeError(f'{producer_kind}: fixture compile failed (not a behavior result)\n{result.stdout}{result.stderr}')
     run = subprocess.run([str(exe)], capture_output=True, text=True, timeout=10)
-    if run.returncode:
-        raise RuntimeError(f'{name}: weak export result mismatch\n{run.stdout}{run.stderr}')
+    if withdraw_replay:
+        if run.returncode != 1 or 'FAIL replay priority/count' not in run.stderr:
+            raise RuntimeError('withdraw replay priority did not fail its behavior assertion')
+        print('withdraw replay priority: expected assertion failure')
+    elif run.returncode:
+        raise RuntimeError(f'FAIL: {producer_kind} producer result/priority mismatch\n{run.stdout}{run.stderr}')
 
 
 DIRECT_SOURCE = (root / 'android/native/direct_session.c').read_text(encoding='utf-8')
@@ -347,9 +388,10 @@ with tempfile.TemporaryDirectory(prefix='nvn-present-count-', dir=os.environ.get
     wrong_increment = compile_present_fixture(temp, 'wrong-path-increment', wrong_path)
     run_expected(wrong_increment, 'timeout', 'FAIL acquire timeout does not increment')
 
-    export_fixture(DIRECT_SOURCE, temp, False)
-    export_fixture(DIRECT_SOURCE, temp, True)
+    for kind in ('absent', 'legacy', 'replay', 'both'):
+        export_fixture(DIRECT_SOURCE, temp, kind)
+    export_fixture(DIRECT_SOURCE, temp, 'both', withdraw_replay=True)
 
 print('PASS: production mtl_present/getter/declaration behavior; 4 present paths; '
       + ('4 concurrent readers / 5000 successful submissions; ' if '_Atomic' in counter_decl else 'baseline non-atomic concurrency NOT RUN; ')
-      + '2 functional mutation controls; weak producer linked absent/present')
+      + '3 functional mutation controls; weak producers absent/legacy/replay/both')

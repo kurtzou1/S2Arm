@@ -228,6 +228,9 @@ PLAT_ASM_SYM(sw_gate):
     mov sp, x16
     ldp x16, x17, [sp], #32
     ret
+// 门的结束标记：门的进出两头以客体 sp 为基址读写（借的 32 字节）；客体 sp 没对齐时这几条在苹果上 SIGBUS，crash.c 认 [sw_gate, sw_gate_end) 替它做（emul_sp.c）
+    .globl PLAT_ASM_SYM(sw_gate_end)
+PLAT_ASM_SYM(sw_gate_end):
 
 // sw_thread_enter(entry, arg, sp)：客体线程起点。切到 SDK 给的客体栈，x0 = 参数调入口；
 //    Horizon 线程须经 ExitThread 退出，入口返回即报错。

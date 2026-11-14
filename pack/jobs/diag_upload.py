@@ -19,6 +19,7 @@ from pathlib import Path
 import re
 import shutil
 import tempfile
+import threading
 import urllib.error
 import urllib.request
 import zipfile
@@ -33,6 +34,28 @@ LIMIT = 30 * 1024 * 1024   # 服务端收件上限（压缩后 ≤ 30 MB，方�
 CODE_RE = re.compile(r"D-[2-9A-HJKMNP-TV-Z]{4}")   # D- + 4 位，去掉 0 1 I L O U（念、抄不混）
 SUMMARY = "logs/error-summary.log"
 FALLBACK = "可以先导出诊断包，手动发给我们。"
+TOTAL_S = 90   # 打包 + 上传的总时限（11-13 玩家卡在「正在上传…」一直不动）：urlopen 的 timeout 只管两次收发之间多久没动静，网慢 / 代理半通时可以一直挂着，
+#   失败还会再试一次，没有总上限；打包这步也没有。到点按失败处理（diag_upload_failed，界面退回导出），说清是超时
+
+
+def _within(seconds, what, fn, *args):
+    """在 seconds 秒内跑完 fn，跑不完按失败处理。fn 在守护线程里跑：超时后作业照常以失败收尾、进程退出时线程随之结束（作业是独立进程）"""
+    box = {}
+
+    def run():
+        try:
+            box["value"] = fn(*args)
+        except BaseException as e:   # 原样带回主线程再抛（含 Failure）
+            box["error"] = e
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(max(0.0, seconds))
+    if t.is_alive():
+        raise Failure(f"{what}超过 {TOTAL_S} 秒还没完成（网络太慢或连接卡住），已停止。{FALLBACK}", code="diag_upload_failed",
+                      internal=f"{what}超时：总时限 {TOTAL_S} 秒")
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
 
 
 def endpoint():
@@ -132,7 +155,8 @@ def upload(c):
     try:
         path = tmp / "S2Arm-diagnostics.zip"
         c.r["path"] = str(path)
-        library.diagnostics(c)
+        deadline = time.monotonic() + TOTAL_S
+        _within(deadline - time.monotonic(), "打包诊断", library.diagnostics, c)
         add_summary(c, path)
         url = endpoint()
         if not url:
@@ -142,7 +166,7 @@ def upload(c):
             raise Failure(f"诊断包有 {size / 2**20:.0f} MB，超过上传上限 {LIMIT // 2**20} MB。{FALLBACK}", code="diag_upload_failed")
         c.begin("上传诊断")
         client = client_tag(c)
-        code = send(url, path, client)
+        code = _within(deadline - time.monotonic(), "上传诊断", send, url, path, client, min(60, max(5, int(deadline - time.monotonic()))))
         return dict(code=code, issueUrl=issue_url(code, client), repo=REPO)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

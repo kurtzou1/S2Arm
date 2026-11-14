@@ -32,6 +32,9 @@ enum { S2A_INIT_FAIL_EXIT = 1, S2A_INIT_FAIL_PAGE = 2 };
 #define S2A_INIT_FAIL_MSG_GENERIC_EN "Something went wrong during startup."
 #define S2A_INIT_FAIL_MSG_FILES   "游戏文件缺失，请重新导入：在 电脑上的 S2Arm 里对这款游戏再点一次「装到 iPhone」。"
 #define S2A_INIT_FAIL_MSG_FILES_EN "Game files are missing. Import them again: in S2Arm on your computer, choose \"Install on iPhone\" for this game again."
+// direct_lib_missing（码 id 沿用）：11-13 起没带直连库照样起局、着色器现编，只剩「设备本身跑不了直连」（无 Metal 4 / Metal 3 路径）会停在这里
+#define S2A_INIT_FAIL_MSG_SHADERS "这台设备的图形芯片跑不了 S2Arm（需要 A13 / M1 或更新的芯片）：换一台更新的 iPhone / iPad 再试。"
+#define S2A_INIT_FAIL_MSG_SHADERS_EN "This device's graphics chip can't run S2Arm (it needs an A13 / M1 or newer chip). Try a newer iPhone or iPad."
 #define S2A_INIT_FAIL_MSG_DEVICE  "这台设备的内存和地址空间不够运行这款游戏，换一台内存更大的 iPhone / iPad 再试；诊断里有它要多少、这台设备有多少。"
 #define S2A_INIT_FAIL_MSG_DEVICE_EN "This device doesn't have enough memory and address space to run this game. Try an iPhone or iPad with more memory; the diagnostics show how much it needs and how much this device has."
 // 错误码：由失败出口显式指定（host_main.c failed_session 的调用点一处一个），不从摘要文本猜。
@@ -44,7 +47,7 @@ enum { S2A_INIT_FAIL_EXIT = 1, S2A_INIT_FAIL_PAGE = 2 };
     X(S2A_INIT_FAIL_E_SERVICE_EARLY, "service_early", "服务失败早于初启成功发布",       S2A_INIT_FAIL_MSG_SERVICE) \
     X(S2A_INIT_FAIL_E_DGUARD_LIMIT,  "dguard_limit",  "直连安全网：此前已连续失败满 3 次，自动化局不停在提示页，收局（重新出包后从 0 数）", S2A_INIT_FAIL_MSG_GENERIC) \
     X(S2A_INIT_FAIL_E_GAME_FILES,    "game_files_missing", "服务会话初始化失败：资源包里没有 exefs/main.npdm（游戏文件不在机上 / 没导完）", S2A_INIT_FAIL_MSG_FILES) \
-    X(S2A_INIT_FAIL_E_DIRECT_LIB,    "direct_lib_missing", "包里没有本宿主口径的直连着色器库（没导完 / 旧版本出的包 / 设备跑不了直连；只有直连，11-07 拆通用模式后不再退通用）", S2A_INIT_FAIL_MSG_FILES) \
+    X(S2A_INIT_FAIL_E_DIRECT_LIB,    "direct_lib_missing", "设备跑不了直连（无 Metal 4 / Metal 3 路径）；包里没带直连库不再停在这里（11-13 起现编）", S2A_INIT_FAIL_MSG_SHADERS) \
     X(S2A_INIT_FAIL_E_DEVICE_ADDRESS, "device_address_space", "地址窗口连模块段、栈、堆前段都放不下：设备地址空间 / App 内存上限不够跑这款（#446，原先 abort 静默闪退）", S2A_INIT_FAIL_MSG_DEVICE)
 #define S2A_INIT_FAIL_ENUM_(e, id, summary, msg) e,
 enum { S2A_INIT_FAIL_E_UNKNOWN = 0, S2A_INIT_FAIL_CODES(S2A_INIT_FAIL_ENUM_) S2A_INIT_FAIL_E_COUNT };

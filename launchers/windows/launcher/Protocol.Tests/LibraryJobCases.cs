@@ -78,7 +78,7 @@ internal static class LibraryJobCases
         """;
         // 剃刀 W10：要不要 prod.keys 只读作业层 catalog 的 needsKeys（不按包格式另算）：NUP 款后端说要（比如带了 NSP 的 DLC）就是要，没给就是不要
         const string keyed = """
-        {"games":[{"id":"0100A","name":"A","display":"","cover":"","hidden":false,"missing":[],"packages":[{"type":"base","titleId":"0100A","version":0,"display":"","size":1,"format":"nup"}],"needsKeys":true},
+        {"games":[{"id":"0100A","name":"A","display":"","cover":"","hidden":false,"missing":[],"packages":[{"type":"base","titleId":"0100A","version":0,"display":"","size":1,"format":"nup"}],"needsKeys":true,"onPhone":true},
                   {"id":"0100B","name":"B","display":"","cover":"","hidden":false,"missing":[],"packages":[{"type":"base","titleId":"0100B","version":0,"display":"","size":1,"format":"nsp"}]}],
          "keys":{"ready":false,"message":""}}
         """;
@@ -86,6 +86,7 @@ internal static class LibraryJobCases
         {
             var g = LibraryCatalog.Parse(document.RootElement).Games;
             check(g[0].NeedsKeys && !g[1].NeedsKeys, "catalog: needsKeys comes from the backend field, not from package formats");
+            check(g[0].OnPhone && !g[1].OnPhone, "catalog: onPhone (recorded on a phone; delete confirm warns it stops opening there) read from the backend field");
         }
         using (var document = System.Text.Json.JsonDocument.Parse(updates))
         {

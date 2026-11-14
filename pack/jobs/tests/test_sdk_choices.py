@@ -41,12 +41,13 @@ class SdkChoicesTests(JobCase):
 
     def test_worker_callers_preserve_sdk_failure(self):
         self.c.r.update(developerDir="/synthetic/Xcode", quick=True, target=dict(model="fixture", gpuArch="applegpu_g18p", os=27))
-        for fn in (target.probe, ipa.resolve_target):
-            with self.subTest(fn=fn.__name__), patch.object(target, "models", return_value=[]), patch.object(target.subprocess, "run", return_value=subprocess.CompletedProcess(CMD, 9, "", "sdk rejected")):
-                with self.assertRaises(Failure) as raised:
-                    fn(self.c)
-                self.assertEqual(raised.exception.code, "xcode_unavailable")
-                self.assertIn("sdk rejected", str(raised.exception))
+        with patch.object(target, "models", return_value=[]), patch.object(target.subprocess, "run", return_value=subprocess.CompletedProcess(CMD, 9, "", "sdk rejected")):
+            with self.assertRaises(Failure) as raised:   # 设备 / 机型探测（界面列表）照实报
+                target.probe(self.c)
+            self.assertEqual(raised.exception.code, "xcode_unavailable")
+            self.assertIn("sdk rejected", str(raised.exception))
+            # 出包读目标（预检清单 #42，11-13）：SDK 读不出不拦出包，目标原样交回；Xcode 真坏了由后面编 Metal 那一步按原文报
+            self.assertEqual(ipa.resolve_target(self.c)["os"], 27)
 
     def test_applenv_reports_sdk_failure_in_json_and_text(self):
         def run(cmd, **kwargs):

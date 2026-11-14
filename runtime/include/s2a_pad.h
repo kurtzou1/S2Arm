@@ -1,6 +1,7 @@
 #ifndef S2A_PAD_H
 #define S2A_PAD_H
 #include <stdint.h>
+#include <stddef.h>
 
 // 固定三路输入，不合并不同手柄。系统手柄 > NS2 Pro BLE > 触屏；连着实体手柄时按最后一次输入切换（维护者 10-24）：
 //   屏幕被碰（s2a_pad_prefer_touch）→ 触屏接管，实体手柄有按键 / 摇杆动作 → 切回手柄。
@@ -25,6 +26,9 @@ void s2a_pad_stick(float x, float y, int32_t axes[2]);
 // iOS 与 Mac 共用这一套（#40、审计 P2-213）：category 取 GCController.productCategory（可为 NULL），is_xbox / is_playstation 由宿主按手柄类型判
 enum { S2A_PAD_KIND_OTHER = 0, S2A_PAD_KIND_NINTENDO, S2A_PAD_KIND_XBOX, S2A_PAD_KIND_PLAYSTATION };
 int s2a_pad_kind(const char *category, int is_xbox, int is_playstation);
+// NS2 手柄（Joy-Con 2 / NS2 Pro）由 S2Arm 自己的蓝牙连接读；系统手柄列表里也出现同一只时不再当另一位玩家（Mac sample_input 去重）。
+//   category 同上（GCController.productCategory，可为 NULL）
+int s2a_pad_is_ns2(const char *category);
 // 手柄按键布局（定义表 padFace，所有游戏共用；11-11 维护者「可切换 Xbox / Switch 布局，能识别型号就自动适配」）：
 //   自动（缺省）= 按键帽上印的字母：任天堂手柄即 Switch 布局、Xbox / MFi 即 Xbox 布局、PlayStation × = A；
 //   Switch 布局 = 按 Switch 的物理位置（右键确认）；Xbox 布局 = 按 Xbox 的物理位置（下键确认）。
@@ -40,6 +44,18 @@ void s2a_pad_abxy_order(int kind, int layout, int out[4]);
 //   slot_of[j] 写第 j 只占的槽（-1 = 超过 max 只，丢弃）；返回占到的最高槽位 + 1（至少 1：槽 0 留给键盘 / 鼠标 / 触屏）。
 //   还在线的保留原槽；新来的占最小空槽，所以断开后重连、中间没插别的就回原槽
 int s2a_slot_plan(const void *const *prev, const void *const *live, int count, int max, int *slot_of);
+
+// 分配玩家的顺序表（#520 E；启动器写 ~/Library/Application Support/S2Arm/pad-order.json，宿主读）：
+//   entry 依次是 P1、P2…——NS2 手柄写通道玩家号（ns2_player ≥ 0），系统手柄写名字 + 同名第几只（ns2_player = -1）；
+//   dropped = 分配时在线却没登记的手柄（保持连接、游戏不给玩家位；NS2 手柄写通道玩家号、系统手柄写名字 + 第几只；之后新连上的照常排在后面）
+enum { S2A_PAD_ORDER_MAX = 8, S2A_PAD_ORDER_UNLISTED = 100, S2A_PAD_ORDER_DROPPED = -1 };
+// 键盘也能当一位玩家（分配时按任一键登记）：entry 的 ns2_player 写 S2A_PAD_ORDER_KEYBOARD；排第几同手柄
+// 一代 Joy-Con 按设备当玩家（D2）：单只 name = 设备 id（序列号，蓝牙地址）；按设备读的一对 name = 「左 id|右 id」。几套都行，各占一位
+enum { S2A_PAD_ORDER_KEYBOARD = -2, S2A_PAD_ORDER_GEN1 = -3, S2A_PAD_ORDER_GEN1_PAIR = -4 };
+typedef struct { int ns2_player; char name[64]; int index; } s2a_pad_order_entry;
+typedef struct { int count, dropped_count; s2a_pad_order_entry entry[S2A_PAD_ORDER_MAX], dropped[S2A_PAD_ORDER_MAX]; } s2a_pad_order;
+// 一只手柄排第几（0 起）；表里没有 → S2A_PAD_ORDER_UNLISTED（排在表里的后面，彼此照原顺序）；被 dropped → S2A_PAD_ORDER_DROPPED（不进槽位）
+int s2a_pad_order_rank(const s2a_pad_order *order, int ns2_player, const char *name, int index);   // 键盘：ns2_player = S2A_PAD_ORDER_KEYBOARD；一代：GEN1 / GEN1_PAIR + name
 
 // 原子快照，固定 56 字节。epoch 在切源/前后台切换时变化，旧短按不得跨 epoch 回放。
 typedef struct {
@@ -96,4 +112,22 @@ int s2a_pad_read_mouse_pair(s2a_pad_mouse out[2]);
 //   位图变化也会唤醒（不动延迟统计的时间戳），没映射进手柄按键的键不必等 16 ms 心跳。宿主不喂则恒为空，键盘区同改前。
 void s2a_kb_update(const uint64_t keys[4], uint32_t modifiers);
 void s2a_kb_read(uint64_t keys_out[4], uint32_t *modifiers);   // 服务层 InputPump 每次 HID 提交读一次
+// 一代 Joy-Con / Pro 的 HID 震动（#520 E，macOS GameController 不给任天堂一代手柄 haptics 时走 macos/joycon_imu.m）：
+//   一侧的低频 / 高频振幅与频率 → 报告里那一侧的 4 字节（标准编码：高频 81.75–1252 Hz、低频 40.875–626 Hz，振幅 0–1）。振幅 0 = 中性 00 01 40 40
+void s2a_joycon1_rumble_encode(s2a_pad_vibration v, uint8_t out[4]);
+
+// 一代 Joy-Con / Pro 的 HID 输入报告解析（#520 D2，按设备分：两只被 macOS 合成一个时也各算一位玩家）。
+//   解析照 #592（lucaAce1024）的 decode_pad 与公开的协议整理（dekuNukem Nintendo_Switch_Reverse_Engineering bluetooth_hid_notes；
+//   SDL hidapi_switch、Linux hid-nintendo 同一套位）：标准全报告 0x30（按键 3 字节 + 12 位摇杆）、简单报告 0x3F（只有按键）。
+//   pid：0x2006 左只 / 0x2007 右只 / 0x2009 Pro。buttons 用宿主 16 位次序（东 南 北 西 LS RS L R ZL ZR + − ←↑→↓，同 front_mac.m sample_ns2_state）：
+//   单只照横握视角（左只十字键当 ABXY、SL / SR 当 L / R），Pro 照原样；side 另报这只自己的 SL / SR（bit0 SL、bit1 SR）与 L / R 肩键（bit2，分配玩家认手势用）。
+//   报告不认识 / 太短回 0
+enum { S2A_JC1_SIDE_SL = 1, S2A_JC1_SIDE_SR = 2, S2A_JC1_SIDE_SHOULDER = 4 };
+int s2a_joycon1_decode(int pid, const uint8_t *report, size_t length, uint32_t *buttons, int32_t sticks[4], int *side);
+// 按设备读的一对一代 Joy-Con（D2，多套一代时每对一位玩家）：两只各自最近一笔标准全报告去掉报告号后的前 11 字节
+//   （计时、电量、按键 3 字节、左摇杆 3 字节、右摇杆 3 字节）拼成一份 Pro 布局的报告——右只的第 1 个按键字节 + 左只的第 3 个 + 共用字节相或、左只的左摇杆 + 右只的右摇杆——
+//   照 Pro 解析（竖握，同 macOS 合成的那一对）。某一只没有报告传 NULL（那半边当没按、摇杆居中）
+enum { S2A_JC1_RAW = 11 };
+void s2a_joycon1_pair_decode(const uint8_t *left, const uint8_t *right, uint32_t *buttons, int32_t sticks[4]);
+
 #endif

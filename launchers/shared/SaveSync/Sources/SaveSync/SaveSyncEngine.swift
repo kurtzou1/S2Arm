@@ -124,6 +124,35 @@ public final class SaveSyncEngine: Sendable {
         }
     }
 
+    /// 只上传（游戏进行中切到后台时用）：本机比基线新、云端没有更新的版本才发布；云端有更新或有冲突时什么都不动，回 nil，
+    ///   留给下次起局前的完整同步（游戏在跑，不能把存档换掉，也没有页面让玩家选）
+    public func uploadIfAhead() async throws -> SaveSyncOutcome? {
+        let fm = FileManager.default
+        let scratch = work.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fm.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: scratch) }
+
+        let localArchive = scratch.appendingPathComponent("local.s2asave")
+        let hasLocal = try await ports.export(localArchive)
+        let local = hasLocal ? saveContentID(try await ports.inspect(localArchive)) : nil
+        let base = Self.decodeBase(loadBase())
+        let seen = base?.clock ?? [:]
+        let heads = try folder.heads()
+
+        switch decideSaveSync(local: local, base: base, heads: heads, device: device) {
+        case .upToDate:
+            return .upToDate
+        case .adopt(let same):
+            store(SaveBase(content: local!, clock: saveClockMerged([seen] + same.map(\.clock))))
+            return .upToDate
+        case .upload:
+            try publish(localArchive, content: local!, clock: bump(seen), heads: heads)
+            return .uploaded
+        case .download, .conflict:
+            return nil
+        }
+    }
+
     /// 下载 remote、核 sha256、走现成恢复；成功后基线 = remote（见过的向量合进它的）
     func take(_ remote: SaveHead, scratch: URL, seen: SaveClock) async throws {
         let incoming = scratch.appendingPathComponent("incoming.s2asave")

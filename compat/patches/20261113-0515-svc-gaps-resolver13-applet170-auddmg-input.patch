@@ -1,0 +1,209 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/LibraryAppletCreator/ILibraryAppletAccessor.cs b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/LibraryAppletCreator/ILibraryAppletAccessor.cs
+index bc8bc5225963dec1ef152f3c9153cd41dd8e95db..bd1887af72c8f7f3cb701dfc22ddbec7343d5042 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/LibraryAppletCreator/ILibraryAppletAccessor.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/LibraryAppletCreator/ILibraryAppletAccessor.cs
+@@ -28,7 +28,8 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Lib
+ 
+         private int _indirectLayerHandle;
+ 
+-        private bool _cmd170Logged;
++        private readonly KEvent _cmd170Event;
++        private int _cmd170EventHandle;
+ 
+         public ILibraryAppletAccessor(AppletId appletId, Horizon system)
+         {
+@@ -37,6 +38,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Lib
+             _stateChangedEvent = new KEvent(system.KernelContext);
+             _normalOutDataEvent = new KEvent(system.KernelContext);
+             _interactiveOutDataEvent = new KEvent(system.KernelContext);
++            _cmd170Event = new KEvent(system.KernelContext);
+ 
+             _applet = AppletManager.Create(appletId, system);
+ 
+@@ -254,19 +256,24 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Lib
+             return ResultCode.Success;
+         }
+ 
+-        [CommandCmif(170)] // Switch 2（S2Arm）
+-        // 火纹 Fortune's Weave 建软键盘小程序后、启动前调它；未实现时回 ResultSfUnknownMethodId，sdk 视为致命 Break（2010-0221）。
+-        // 同期 sdk 新增 nn::applet::SetStreamPlayShareEnabled(handle, bool, bool)：只把两个开关存进句柄、启动时才下发，判断本命令是这类串流 / 分享设置。
+-        // 宿主没有串流 / 分享功能：收下回成功、不生效；首次把请求原始参数打进日志，留作以后对照语义
+-        public ResultCode SwitchTwoAppletSetting170(ServiceCtx context)
++        [CommandCmif(170)] // 22.0.0+
++        // Cmd170() -> handle<copy>：无入参、回一个复制句柄（23.0.1 系统接口转储：inbytes 0、outhandles [copy]；另一实现同样回本小程序的一个可读事件）。
++        //   事件语义没有公开资料；本机没有能让它触发的状态，事件从不 signal（与 GetAppletStateChangedEvent 同法建句柄、同一句柄重复回）。
++        //   原先只回成功、不带句柄：客户端按协议取句柄会拿到 0
++        public ResultCode Cmd170(ServiceCtx context)
+         {
+-            if (!_cmd170Logged)
++            if (_cmd170EventHandle == 0)
+             {
+-                _cmd170Logged = true;
+-                byte[] raw = context.RequestData.ReadBytes((int)System.Math.Min(16, context.RequestData.BaseStream.Length - context.RequestData.BaseStream.Position));
+-                Logger.Info?.Print(LogClass.ServiceAm, $"ILibraryAppletAccessor 命令 170（Switch 2）：收下回成功、不生效；请求参数 {System.Convert.ToHexString(raw)}");
++                if (context.Process.HandleTable.GenerateHandle(_cmd170Event.ReadableEvent, out _cmd170EventHandle) != Result.Success)
++                {
++                    throw new InvalidOperationException("Out of handles!");
++                }
+             }
+ 
++            context.Response.HandleDesc = IpcHandleDesc.MakeCopy(_cmd170EventHandle);
++
++            Logger.Stub?.PrintStub(LogClass.ServiceAm);
++
+             return ResultCode.Success;
+         }
+ 
+@@ -288,6 +295,11 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Lib
+                 {
+                     _kernelContext.Syscall.CloseHandle(_interactiveOutDataEventHandle);
+                 }
++
++                if (_cmd170EventHandle != 0)
++                {
++                    _kernelContext.Syscall.CloseHandle(_cmd170EventHandle);
++                }
+             }
+ 
+             Horizon horizon = _kernelContext.Device.System;
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Sfdnsres/IResolver.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Sfdnsres/IResolver.cs
+index c68b24bff29c9afb07174a06ec7ffc155296f5dc..209668bd7358d810d62c10ecd3b7bc5390caa20f 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Sfdnsres/IResolver.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Sfdnsres/IResolver.cs
+@@ -244,6 +244,97 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Sfdnsres
+             return GetAddrInfoRequestImpl(context, outputBufferPosition, outputBufferSize, true, optionsBufferPosition, optionsBufferSize);
+         }
+ 
++        [CommandCmif(13)] // 5.0.0+
++        // GetNameInfoRequestWithOptions(u32 flags, ..., u64 pid_placeholder, pid, buffer<sockaddr, 5> address, buffer<i8, 6> host, buffer<i8, 6> service, buffer<options, 0x21>)
++        //   -> (i32 gai_error, i32 host_error, i32 errno)
++        // S2Arm: the getnameinfo of the resolver (address -> host name and port text). Wire shape from the 23.0.1 system interface dump: in-data 0x18, out-data 0xC,
++        //   buffers [A in, B out, B out, 0x21 in], pid; the out order follows the SDK proxy's (ai error, host error, errno). Only the flags word at in-data 0 is used
++        //   (the same place as in command 7, GetNameInfoRequest, 0x10 bytes); the rest of the in-data and the options are not needed to answer.
++        //   Only IPv4 (sockaddr_in: len, family 2, port big-endian, address) is understood, like the other requests here; another family gets EAI_FAMILY.
++        //   Service is always the port number (the console's resolver has no services database a game can rely on). Host: the numeric address when asked for it
++        //   (NI_NUMERICHOST) or when internet access is off, otherwise the reverse lookup with the numeric address as the fallback (EAI_NONAME under NI_NAMEREQD).
++        public ResultCode GetNameInfoRequestWithOptions(ServiceCtx context)
++        {
++            const uint NiNumericHost = 0x2, NiNameReqd = 0x4;
++
++            uint flags = context.RequestData.ReadUInt32();
++
++            ulong addressPosition = context.Request.SendBuff[0].Position;
++            ulong addressSize = context.Request.SendBuff[0].Size;
++            (ulong hostPosition, ulong hostSize) = (context.Request.ReceiveBuff[0].Position, context.Request.ReceiveBuff[0].Size);
++            (ulong servicePosition, ulong serviceSize) = (context.Request.ReceiveBuff[1].Position, context.Request.ReceiveBuff[1].Size);
++
++            byte[] sockaddr = new byte[Math.Min(addressSize, 0x80)];
++            context.Memory.Read(addressPosition, sockaddr);
++
++            GaiError gaiError = GaiError.Success;
++            NetDbError netDbError = NetDbError.Success;
++
++            if (sockaddr.Length < 8 || sockaddr[1] != (byte)AddressFamily.InterNetwork)
++            {
++                gaiError = GaiError.Family;
++            }
++            else
++            {
++                ushort port = BinaryPrimitives.ReadUInt16BigEndian(sockaddr.AsSpan(2));
++                IPAddress address = new(sockaddr.AsSpan(4, 4));
++                string host = address.ToString();
++
++                if ((flags & NiNumericHost) == 0 && context.Device.Configuration.EnableInternetAccess)
++                {
++                    try
++                    {
++                        host = Dns.GetHostEntry(address).HostName;
++                    }
++                    catch (SocketException exception)
++                    {
++                        if ((flags & NiNameReqd) != 0)
++                        {
++                            netDbError = ConvertSocketErrorCodeToNetDbError(exception.ErrorCode);
++                            gaiError = GaiError.NoName;
++                        }
++                    }
++                }
++                else if ((flags & NiNumericHost) == 0 && (flags & NiNameReqd) != 0)
++                {
++                    netDbError = NetDbError.HostNotFound;
++                    gaiError = GaiError.NoName;
++                }
++
++                if (gaiError == GaiError.Success && (!WriteNameInfoString(context, hostPosition, hostSize, host) ||
++                                                     !WriteNameInfoString(context, servicePosition, serviceSize, port.ToString())))
++                {
++                    gaiError = GaiError.Overflow;
++                }
++            }
++
++            context.ResponseData.Write((int)gaiError);
++            context.ResponseData.Write((int)netDbError);
++            context.ResponseData.Write(0);   // errno
++
++            return ResultCode.Success;
++        }
++
++        // A NUL-terminated string into an output buffer; a zero-size buffer means the caller did not ask for it (host or service NULL)
++        private static bool WriteNameInfoString(ServiceCtx context, ulong position, ulong size, string text)
++        {
++            if (size == 0)
++            {
++                return true;
++            }
++
++            byte[] bytes = Encoding.ASCII.GetBytes(text + '\0');
++
++            if ((ulong)bytes.Length > size)
++            {
++                return false;
++            }
++
++            context.Memory.Write(position, bytes);
++
++            return true;
++        }
++
+         [CommandCmif(14)] // 5.0.0+
+         // ResolverSetOptionRequest(buffer<unknown, 5, 0>, u64 unknown, u64 pid_placeholder, pid) -> (i32 ret, u32 bsd_errno)
+         public ResultCode ResolverSetOptionRequest(ServiceCtx context)
+diff --git a/src/Ryujinx.Horizon/Sdk/Audio/Detail/AudioDeviceManager.cs b/src/Ryujinx.Horizon/Sdk/Audio/Detail/AudioDeviceManager.cs
+index 56e4d95f02ed982bbfe070f9ba424f4adaf423cc..93d761ea02f6bfbc171d4a3ee39d47bd8c4ef868 100644
+--- a/src/Ryujinx.Horizon/Sdk/Audio/Detail/AudioDeviceManager.cs
++++ b/src/Ryujinx.Horizon/Sdk/Audio/Detail/AudioDeviceManager.cs
+@@ -44,8 +44,9 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+     partial class AudioDeviceManagerUserSession : IServiceObject, IDisposable
+     {
+         // nn::audio::devmgr::DeviceFunctionality：1 = 输出（GetDefaultVirtualOutputDevice / ListVirtualOutputDevices 发 1），
+-        //   2 = 输入（输入 / 注入设备发 2）。宿主声音后端不接收音（AppleHardwareDeviceDriver 只支持输出），输入一律报红
++        //   2 = 输入（输入 / 注入设备发 2）。宿主声音后端不接收音（AppleHardwareDeviceDriver 只支持输出）：列输入设备回 0 个，其余带输入功能的命令报红
+         private const uint FunctionalityOutput = 1;
++        private const uint FunctionalityInput = 2;
+ 
+         // 虚拟输出设备档案（401）+0x220 的 u32：OutputStreamImpl::Open 原样交给 sysmix CreateStream 当设备参数。
+         //   真机的取值语义不知道；它只在本机 devmgr 与本机 audsmx:u 之间往返，取值是我方定的（同设备名 "DeviceOut"）
+@@ -70,13 +71,21 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+         [CmifCommand(0)]
+         public Result ListVirtualDeviceNames(out int count, [Buffer(HipcBufferFlags.Out | HipcBufferFlags.MapAlias)] Span<DeviceName> names, bool flag, uint functionality)
+         {
+-            RequireOutput(0, functionality);
+-
+             if (flag)
+             {
+                 throw new NotImplementedException("auddmg:u IUserSession 0：bool 参数为 true（SDK 公开入口只发 false，true 的语义不明）");
+             }
+ 
++            // 列输入设备（功能 2）：宿主不收音，没有虚拟输入设备，回 0 个。SDK ListVirtualInputDevices 拿到 0 个，游戏不再开输入流（麦克风这一路直接返回）
++            if (functionality == FunctionalityInput)
++            {
++                count = 0;
++
++                return Result.Success;
++            }
++
++            RequireOutput(0, functionality);
++
+             count = 0;
+ 
+             foreach (string name in AudioOutputManager.ListAudioOuts())

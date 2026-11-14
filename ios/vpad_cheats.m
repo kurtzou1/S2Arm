@@ -111,13 +111,15 @@ static NSString *cheat_status_text(NSString *st) {
 - (void)documentPicker:(UIDocumentPickerViewController *)c didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     (void)c; NSFileManager *fm = NSFileManager.defaultManager; NSURL *dir = cheats_dir(); NSMutableArray *bad = [NSMutableArray array];
     [fm createDirectoryAtURL:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    // 11-13 维护者「不许堵门」：原先本地解析不出条目 / 不是 UTF-8 就不让导入；现在玩家选的文件一律原样拷进来，
+    //   认不认得、哪条生效以列表里的状态为准（解析不了的标「格式不认」，服务层读到再报它自己的状态）。只有拷贝真失败才报
     for (NSURL *u in urls) {
-        NSString *text = [NSString stringWithContentsOfURL:u encoding:NSUTF8StringEncoding error:nil];
         NSString *name = u.lastPathComponent;
         if (![name.pathExtension.lowercaseString isEqual:@"txt"]) name = [name stringByAppendingPathExtension:@"txt"];
-        if (!text || !s2a_cheats_parse(text).count || [name isEqual:@"enabled.txt"] || [name isEqual:@"status.txt"]) { [bad addObject:u.lastPathComponent]; continue; }
-        NSURL *dst = [dir URLByAppendingPathComponent:name]; NSError *e;
-        if (![text writeToURL:dst atomically:YES encoding:NSUTF8StringEncoding error:&e]) [bad addObject:[NSString stringWithFormat:S2AL(@"cheats.import.badItem"), u.lastPathComponent, e.localizedDescription]];
+        if ([name isEqual:@"enabled.txt"] || [name isEqual:@"status.txt"]) name = [@"cheat-" stringByAppendingString:name];   // 撞我们的两份记录文件：改个名照收
+        NSError *e = nil; NSData *data = [NSData dataWithContentsOfURL:u options:0 error:&e];
+        if (!data || ![data writeToURL:[dir URLByAppendingPathComponent:name] options:NSDataWritingAtomic error:&e])
+            [bad addObject:[NSString stringWithFormat:S2AL(@"cheats.import.badItem"), u.lastPathComponent, e.localizedDescription ?: @""]];
     }
     [self reload];
     if (bad.count) [self alert:S2AL(@"cheats.import.failed") message:[NSString stringWithFormat:S2AL(@"cheats.import.failed.message"), [bad componentsJoinedByString:@"\n"]]];

@@ -211,7 +211,8 @@ namespace Ryujinx.HLE.FileSystem
 
             RandomDataGenerator randomGenerator = Random.Shared.NextBytes;
 
-            DefaultFsServerObjects fsServerObjects = DefaultFsServerObjects.GetDefaultEmulatedCreators(serverBaseFs, KeySet, fsServer, randomGenerator);
+            // S2Arm: hide the host's own sidecar files (._<name> on exFAT / FAT, .DS_Store …) from guest directory listings (S2AHostJunkFilterFileSystem.cs, #914)
+            DefaultFsServerObjects fsServerObjects = DefaultFsServerObjects.GetDefaultEmulatedCreators(new S2AHostJunkFilterFileSystem(serverBaseFs), KeySet, fsServer, randomGenerator);
 
             // Use our own encrypted fs creator that doesn't actually do any encryption
             fsServerObjects.FsCreators.EncryptedFileSystemCreator = new EncryptedFileSystemCreator();

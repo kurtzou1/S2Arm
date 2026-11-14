@@ -94,6 +94,46 @@ namespace Ryujinx.HLE.HOS.Services.Hid
 
         // 左右两侧各一份：连着的那侧写它自己的读数；pair（手柄样式是一对）时没连的那侧也写已连接、位移 0（游戏左右两侧都查）。
         //   不再连着的格写成未连接，游戏不会把别的手柄也当成 Joy-Con 2
+        // 好几位玩家一拍一起写（#520：每位玩家的 Joy-Con 2 各在自己的手柄号上报已连接，两人的项目游戏两格都查）：这一拍没写到的格写一笔未连接
+        public struct Entry { public int NpadId; public Side Left, Right; public ulong TimestampUs; public bool Pair; }
+        public void PushMany(System.Collections.Generic.IReadOnlyList<Entry> entries)
+        {
+            lock (_lock)
+            {
+                if (_memory == null)
+                {
+                    return;
+                }
+
+                Span<int> keep = stackalloc int[SlotCount];
+                keep.Fill(0);
+                foreach (Entry e in entries)
+                {
+                    if (e.NpadId < 0 || e.NpadId >= NpadCount) continue;
+                    bool anySide = e.Left.Present || e.Right.Present;
+                    if (e.Left.Present || (e.Pair && anySide)) keep[SlotIndex(e.NpadId, 0)] = 1;
+                    if (e.Right.Present || (e.Pair && anySide)) keep[SlotIndex(e.NpadId, 1)] = 1;
+                }
+                for (int i = 0; i < SlotCount; i++)
+                {
+                    if (_connected[i] && keep[i] == 0)
+                    {
+                        WriteEntry(i, 0, 0, 0, 0);
+                        _positionKnown[i] = false;
+                        _lastTimestampUs[i] = 0;
+                        _connected[i] = false;
+                    }
+                }
+                foreach (Entry e in entries)
+                {
+                    if (e.NpadId < 0 || e.NpadId >= NpadCount) continue;
+                    int l = SlotIndex(e.NpadId, 0), r = SlotIndex(e.NpadId, 1);
+                    if (keep[l] != 0) WriteSide(l, e.Left, e.TimestampUs);
+                    if (keep[r] != 0) WriteSide(r, e.Right, e.TimestampUs);
+                }
+            }
+        }
+
         public void Push(int npadId, in Side left, in Side right, ulong timestampUs, bool pair = false)
         {
             lock (_lock)

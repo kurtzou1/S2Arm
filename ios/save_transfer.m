@@ -1,6 +1,7 @@
 // 弱链接[ios]：S2A_SaveTransfer（C# 存档迁移入口；未链服务层时向用户报错）
 // 弱链接[ios]：S2A_SaveTransferFree（释放 C# 存档迁移返回的字符串）
 #import "save_transfer.h"
+#import "app_settings.h"   // s2a_top_presenter
 #import "s2a_l10n.h"
 #import "settings.h"
 #import "play_layout.h"
@@ -326,8 +327,9 @@ int s2a_ios_save_management_requested(void) {
     [self presentViewController:picker animated:YES completion:nil];
 }
 - (void)exportSave {
+    // 11-13 维护者「不许堵门」：上次的临时副本删不掉不挡这次（新副本用新名字，互不冲突）；只记一行日志，下次再清
     NSString *warning = [self clearExport];
-    if (warning) { [self showError:warning]; return; }
+    if (warning) fprintf(stderr, "[S2A 存档] 上次的临时副本没删掉，照常继续：%s\n", warning.UTF8String);
     NSString *name = [NSString stringWithFormat:@"%@-%@.s2asave", self.game[@"id"], NSUUID.UUID.UUIDString];
     NSString *path = [[[self.dataRoot stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"save-exports"] stringByAppendingPathComponent:name];
     NSError *error = nil;
@@ -339,8 +341,9 @@ int s2a_ios_save_management_requested(void) {
 }
 - (void)exportBackup { if (self.backupPath.length) [self presentExport:self.backupPath]; }
 - (void)importSave {
+    // 11-13 维护者「不许堵门」：上次的临时副本删不掉不挡这次（新副本用新名字，互不冲突）；只记一行日志，下次再清
     NSString *warning = [self clearImport];
-    if (warning) { [self showError:warning]; return; }
+    if (warning) fprintf(stderr, "[S2A 存档] 上次的临时副本没删掉，照常继续：%s\n", warning.UTF8String);
     UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeData] asCopy:YES];
     picker.directoryURL = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
     picker.allowsMultipleSelection = NO; picker.delegate = self;
@@ -419,7 +422,8 @@ UIViewController *s2a_ios_save_manager(void (^start_game)(void)) {
 // 游戏内「存档管理」确认框：「退出游戏」只收尾退出；「退出并管理存档」才记下次先进存档管理（只记这一款）。
 //   原先只有一个「已保存，退出游戏」且必置开关：v0.2.2 起游戏里只有它写着「退出游戏」，玩家拿它当退出，之后每次打开都先进存档页
 void s2a_ios_save_present(UIViewController *presenter) {
-    if (!presenter || presenter.presentedViewController) return;
+    if (!presenter) return;
+    presenter = s2a_top_presenter(presenter);
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:S2AL(@"save.quit.title") message:S2AL(@"save.quit.message") preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:S2AL(@"save.quit.back") style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:S2AL(@"save.quit.only") style:UIAlertActionStyleDestructive handler:^(UIAlertAction *item) {

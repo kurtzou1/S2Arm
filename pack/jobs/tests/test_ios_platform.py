@@ -204,6 +204,38 @@ class IosPlatform(JobCase):
         self.assertEqual([e["done"] for e in got], [46.2, 47.1, 100.0])
         self.assertEqual([e["unit"] for e in got], ["%"] * 3)
 
+    def _metal_download_fails(self, tail):
+        """xcodebuild -downloadComponent 退出 70、日志末尾是 tail（诊断#f5eae9 三件的原文）→ 返回 download_metal 抛出的 Failure"""
+        log = self.root / "dl.log"; log.write_text("Beginning asset download...\n" + tail, encoding="utf-8")
+        def run(args, on_line=None, **kw):
+            self.c.last_log = log
+            raise Failure("下载 Metal 编译组件失败（退出码 70）：})", code="tool_exit")
+        with patch.object(self.c, "run", run), patch.object(self.c, "emit", lambda *a, **k: None):
+            with self.assertRaises(Failure) as e:
+                toolchain.download_metal(self.c)
+        return e.exception
+
+    def test_metal_catalog_unreachable_gets_own_code(self):
+        # 期望手写：两台 Mac（Xcode 27A266a / 27B47）原文「Failed fetching catalog … MetalToolchain」→ 码 metal_download_unreachable，
+        #   上屏一句说「连不上苹果的组件服务器」，下一步里有 -importComponent 手动导入的办法；不再是「})」
+        for build in ("27A266a", "27B47"):
+            with self.subTest(build=build):
+                f = self._metal_download_fails("xcodebuild: error: Failed fetching catalog for assetType (com.apple.MobileAsset.MetalToolchain), "
+                                               "serverParameters ({\n    RequestedBuild = %s;\n})\n" % build)
+                self.assertEqual(f.code, "metal_download_unreachable")
+                self.assertIn("连不上苹果的组件服务器", str(f)); self.assertNotIn("})", str(f))
+                self.assertIn("-importComponent MetalToolchain", RECOVERY["metal_download_unreachable"])
+
+    def test_metal_download_xcode_plugin_broken_is_first_launch(self):
+        # 期望手写：一台 Mac 原文「xcodebuild failed to load a required plug-in … -runFirstLaunch」（CoreSimulator 没装上）→ 码 xcode_setup_required
+        f = self._metal_download_fails("Library not loaded: /Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/CoreSimulator\n"
+                                       "xcodebuild failed to load a required plug-in. Ensure your system frameworks are up-to-date by running 'xcodebuild -runFirstLaunch'\n")
+        self.assertEqual(f.code, "xcode_setup_required")
+
+    def test_metal_download_unknown_failure_unchanged(self):
+        # 期望手写：日志里没有认得的字样 → 原样抛 tool_exit，不猜
+        self.assertEqual(self._metal_download_fails("something else went wrong\n").code, "tool_exit")
+
     def test_registration_error_does_not_redo_transfer_when_runtime_ready(self):
         def run(args, on_line=None, until=None, **kw):
             raise Failure("S2Arm 工具退出，当前阶段未完成。", code="tool_exit")

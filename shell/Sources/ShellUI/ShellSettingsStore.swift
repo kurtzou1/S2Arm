@@ -21,6 +21,11 @@ public final class ShellSettingsStore: @unchecked Sendable {
     /// Where the left stick sits, as the engine reads DM_TOUCH_STICK. The corner is the built-in place and is never stored.
     public static let touchStickPlaces = ["corner", "higher", "inward"]
     public static let touchLayoutKey = "touchLayout"             // the player's arrangement: DM_TOUCH_LAYOUT for every game
+    /// Game sound in Silent Mode: the same key as the system Settings app's S2Arm page (ios/Settings.bundle), read by ios/app.m
+    /// audio_category_apply from the app's defaults (Playback when on, SoloAmbient when off).
+    public static let playInSilentModeKey = "S2APlayInSilentMode"
+    /// S2Arm: 与其他 App 混音（宿主 ios/app.m audio_choice 读同一个键）；原只在系统设置 App 的 S2Arm 页（11-14 挪进游戏库设置）
+    public static let mixWithOthersKey = "S2AMixWithOthers"
     public static let liquidGlassKey = "liquidGlass"             // true/false; Liquid Glass on the floating surfaces, on unless turned off
 
     /// The store the app reads and writes. Tests and previews swap it.
@@ -39,11 +44,15 @@ public final class ShellSettingsStore: @unchecked Sendable {
     public var dataFolderName: String? { defaults.string(forKey: Self.dataFolderNameKey) }
     public var cloudSavesFolderName: String? { defaults.string(forKey: Self.cloudSavesNameKey) }
     public var performanceHUD: Bool { UserDefaults.standard.bool(forKey: Self.performanceHUDKey) }
+    public var playInSilentMode: Bool { UserDefaults.standard.bool(forKey: Self.playInSilentModeKey) }
+    public var mixWithOthers: Bool { UserDefaults.standard.bool(forKey: Self.mixWithOthersKey) }
 
     public func storeDataFolderName(_ name: String) { defaults.set(name, forKey: Self.dataFolderNameKey) }
     public func storeCloudSavesFolderName(_ name: String) { defaults.set(name, forKey: Self.cloudSavesNameKey) }
     public func clearDataFolderName() { defaults.removeObject(forKey: Self.dataFolderNameKey) }
     public func clearCloudSavesFolderName() { defaults.removeObject(forKey: Self.cloudSavesNameKey) }
+    public func storePlayInSilentMode(_ on: Bool) { UserDefaults.standard.set(on, forKey: Self.playInSilentModeKey) }
+    public func storeMixWithOthers(_ on: Bool) { UserDefaults.standard.set(on, forKey: Self.mixWithOthersKey) }
     public func storePerformanceHUD(_ on: Bool) {
         UserDefaults.standard.set(on, forKey: Self.performanceHUDKey)
         defaults.removeObject(forKey: Self.retiredPerformanceHUDKey)

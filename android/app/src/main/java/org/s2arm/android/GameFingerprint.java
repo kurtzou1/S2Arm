@@ -280,8 +280,15 @@ final class GameFingerprint {
                     return FileVisitResult.CONTINUE;
                 if (n==null) {
                     if (artifactName!=null && !name.equals("manifest.json") && !name.equals("index.tsv")
-                            && !name.equals(artifactName))
+                            && !name.equals(artifactName)) {
+                        // 版本目录根上的索引外文件（换 artifact 时没删掉的旧 artifact 等）游戏读不到，不挡起局：跳过、记日志（不堵门）。
+                        // 内容目录（romfs / exefs / systemdata …）里多出来的文件游戏读得到，照旧拒
+                        if (!name.contains("/") && attrs.isRegularFile()) {
+                            System.err.println("S2Arm: revision root file outside the content index ignored: "+name);
+                            return FileVisitResult.CONTINUE;
+                        }
                         throw new IOException("revision file is outside the content index: "+name);
+                    }
                     return FileVisitResult.CONTINUE;
                 }
                 seen[n]=true;

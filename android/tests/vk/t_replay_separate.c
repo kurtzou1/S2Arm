@@ -26,6 +26,11 @@ void rp_occl_draw(nvn_gpu_cmd c) { (void)c; }
 int rp_post_gpu_write(uint64_t a, uint64_t n) { (void)a; (void)n; return 0; }
 int rp_pool_find(uint64_t a, uint64_t n, const uint8_t **m, uint64_t *s) { (void)a; (void)n; (void)m; (void)s; return 0; }
 int rp_buf_resolve(nvn_gpu_cmd c, uint64_t a, uint64_t n, nvn_gpu_buf *b, uint64_t *o) { (void)c; (void)a; (void)n; (void)b; (void)o; return 0; }
+// #958 批量解析：逐段转给上面的单段替身（口径一致）
+int rp_buf_resolve_multi(int n, const uint64_t *a, const uint64_t *l, nvn_gpu_buf *b, uint64_t *o, unsigned char *ok) {
+    for (int i = 0; i < n; i++) ok[i] = l[i] && rp_buf_resolve(NULL, a[i], l[i], &b[i], &o[i]);
+    return 1;
+}
 void rp_view_pin_begin(void) {}
 void rp_view_pin_end(void) {}
 nvn_gpu_view rp_view_by_id(int id, nvn_gpu_cmd c, const tex_t **t) { (void)id; (void)c; (void)t; return NULL; }
@@ -41,6 +46,12 @@ const p_set_rt *rp_pass_target(void) { return &target; }
 int rp_pass_slot_attached(int i) { return i == 0; }
 void rp_pass_slot_size(int i, uint32_t *w, uint32_t *h) { (void)i; *w = *h = 4; }
 void rp_pass_note_draw(int d) { (void)d; }
+// #950 新增的回放核心依赖：替身取保守中性值（写日志恒报「写过」= 不让暂存命中；没有待折清除、不缩渲染区域）
+uint64_t rp_write_mark(void) { return 0; }
+int rp_write_touched(uint64_t mark, uint64_t addr, uint64_t len) { (void)mark; (void)addr; (void)len; return 1; }
+void rp_pass_prepare_draw(nvn_gpu_cmd c) { (void)c; }
+void rp_pass_land_reads(nvn_gpu_cmd c, const tex_t *const *ts, int n) { (void)c; (void)ts; (void)n; }
+int rp_pass_parked(void) { return 0; }
 int rp_pass_begin(nvn_gpu_cmd c) {
     nvn_gpu_pass_desc pass = {0}; pass.ncolor = 1; pass.color[0].view = target_view;
     pass.color[0].load = NVN_GPU_LOAD_CLEAR; pass.color[0].store = NVN_GPU_STORE_STORE;

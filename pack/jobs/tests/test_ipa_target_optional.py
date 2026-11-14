@@ -24,10 +24,16 @@ class DirectTargetOptional(JobCase):
         with patch.object(target, "os_choices", return_value=[26]):
             self.assertEqual(ipa.resolve_target(self.c)["os"], 27)
         self.c.r["target"] = dict(model="fixture", gpuArch="applegpu_g17p", os=17)
-        with patch.object(target, "os_choices", return_value=[27]):
-            with self.assertRaises(Failure) as raised:
-                ipa.resolve_target(self.c)
-            self.assertEqual(raised.exception.code, "target_unsupported")
+        with patch.object(target, "os_choices", return_value=[27]), patch.object(self.c, "diagnostic") as warn:   # 目标装不了也照出包、提醒一句（11-13）
+            self.assertEqual(ipa.resolve_target(self.c)["os"], 17)
+        self.assertEqual(warn.call_args.kwargs["code"], "target_unsupported")
+
+    def test_unknown_gpu_does_not_block(self):
+        """诊断 D-6FTP：玩家的 iPhone19,7 比所用 Xcode 的设备特征库新，前端带来的目标 gpuArch 为空。期望手写：
+        不拦、照常出包，交回请求里的目标（地址窗口提示只读 os = 27）"""
+        self.c.r["target"] = dict(model="iPhone 4", productType="iPhone19,7", gpuArch="", os=27)
+        with patch.object(target, "os_choices", return_value=[26]):
+            self.assertEqual(ipa.resolve_target(self.c), dict(model="iPhone 4", productType="iPhone19,7", gpuArch="", os=27))
 
 
 if __name__ == "__main__":

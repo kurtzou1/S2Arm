@@ -116,3 +116,4 @@ run	测试出包	记分板 / 全绿 / 里程碑 tsv	只追加单行（< 4 KB 原
 ~/.s2arm/run/s2arm/packq/bin/slot.sh	出包运维	机器槽脚本（我方运行区专用，不进发布物；Spare-host 上在同一路径手工放一份）；tools/slot_res.sh 缺省取它，S2A_SLOT_BIN 可改	只读脚本；更新用 .new + mv，不原地改在用的脚本
 ~/../reserve	出包运维	远端 <远端根>/reserve/（远端命令里 HOME=<远端根>/home 的上一级）：tools/remote.sh 在这台被独占预留时从本机预留目录同步一份，只读给 tools/slot_res.sh 复查	单写者 tools/remote.sh（put 先清后写、clear 删）；读方只读，S2A_RES_DIR 可改
 ~/.s2a/update-signing/ed25519.key	维护方	发版清单签名私钥（tools/sign_update_manifest.py 读；只在发版机上，不进仓库）	只读；权限 600，目录 700；脚本启动时校验它与启动器内置公钥一致，对不上就拒绝签名
+~/.s2arm/run/s2arm/shell_src	合入运维	出壳（pack/shell_build.sh）的按树私有镜像（shell_src/<树号>/src，含镜像里的 build/ 增量产物）	shell_build.sh 持本树镜像锁 src.lock（pid 存活检查）；不同树互不排队；只有出壳本身读写

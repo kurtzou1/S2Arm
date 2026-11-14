@@ -343,6 +343,20 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.Applicati
             return ResultCode.Success;
         }
 
+        [CommandCmif(29)] // 5.0.0+
+        // GetCacheStorageMax() -> (u32 cache_storage_index_max, u64 cache_storage_data_and_journal_size_max)
+        // S2Arm: the limits the game declared in its own control data (NACP), as the system answers it; command number and fields per switchbrew
+        //   IApplicationFunctions. Unimplemented, a game that asks before creating its cache storage gets 2010-0221 and aborts (0100D71004694000 at nnMain)
+        public ResultCode GetCacheStorageMax(ServiceCtx context)
+        {
+            ApplicationControlProperty nacp = context.Device.Processes.GetProcess(_pid).ApplicationControlProperties;
+
+            context.ResponseData.Write((ulong)nacp.CacheStorageIndexMax);
+            context.ResponseData.Write(nacp.CacheStorageDataAndJournalSizeMax);
+
+            return ResultCode.Success;
+        }
+
         [CommandCmif(30)]
         // BeginBlockingHomeButtonShortAndLongPressed()
         public ResultCode BeginBlockingHomeButtonShortAndLongPressed(ServiceCtx context)

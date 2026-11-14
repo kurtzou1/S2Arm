@@ -320,8 +320,8 @@ int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) 
         return fail(why, why_size, "required feature missing: shaderDrawParameters");
 
     // 容量取两边并集：main 的 index_type_uint8 + 本 PR 的 host import / AHB（其余是 swapchain /
-    // maintenance1 / 校准扩展），共 6 项，留到 10 不至于以后再加一项就越界。
-    const char *device_ext[10];
+    // maintenance1 / 校准扩展），新增可选 indirect count 后留 11 项，避免扩展数组越界。
+    const char *device_ext[11];
     uint32_t device_ext_count = 0;
     if (out->has_swapchain) device_ext[device_ext_count++] = "VK_KHR_swapchain";
     if (out->swapchain_maintenance1_enabled) device_ext[device_ext_count++] = "VK_EXT_swapchain_maintenance1";
@@ -388,6 +388,8 @@ int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) 
         device_ext[device_ext_count++] = "VK_ANDROID_external_memory_android_hardware_buffer";
         device_ext[device_ext_count++] = "VK_EXT_queue_family_foreign";   // 与 AHB 成对（VUID-vkCreateDevice / spec 外部内存要求）
     }
+    int indirect_count_ext = has_device_extension(out->physical, "VK_KHR_draw_indirect_count");
+    if (indirect_count_ext) device_ext[device_ext_count++] = "VK_KHR_draw_indirect_count";
     out->device_extension_count = device_ext_count;
 
     float priority = 1.0f;
@@ -418,6 +420,11 @@ int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) 
     }
     if (vkCreateDevice(out->physical, &device_info, NULL, &out->device) != VK_SUCCESS)
         return fail(why, why_size, "vkCreateDevice failed");
+    if (indirect_count_ext) {
+        out->draw_indirect_count = (PFN_vkCmdDrawIndirectCountKHR)vkGetDeviceProcAddr(out->device, "vkCmdDrawIndirectCountKHR");
+        out->draw_indexed_indirect_count = (PFN_vkCmdDrawIndexedIndirectCountKHR)vkGetDeviceProcAddr(out->device, "vkCmdDrawIndexedIndirectCountKHR");
+        out->draw_indirect_count_enabled = out->draw_indirect_count && out->draw_indexed_indirect_count;
+    }
     vkGetDeviceQueue(out->device, out->queue_family, 0, &out->queue);
     VkCommandPoolCreateInfo pool = {0};
     pool.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;

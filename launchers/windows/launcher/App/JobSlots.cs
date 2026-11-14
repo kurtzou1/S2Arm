@@ -42,7 +42,10 @@ public partial class EnvironmentWindow
     /// <summary>作业收尾第一件事就调（在 Render 之前）：重画抛异常也不会让登记留下、按钮永远灰着</summary>
     private void EndJob(FrontJob job)
     {
-        if (jobs.Remove(job)) job.Dispose();
+        if (!jobs.Remove(job)) return;
+        job.Dispose();
+        // 有排着的出包、这个作业又可能是挡着它的那个（如出包收尾的刷新游戏库）：排到这次收尾之后再看能不能接着出（ExportPages.PumpExportQueue）
+        if (exportQueue.Count > 0) Avalonia.Threading.Dispatcher.UIThread.Post(PumpExportQueue);
     }
 
     private FrontJob? JobOf(JobKind kind) => jobs.LastOrDefault(j => j.Kind == kind);

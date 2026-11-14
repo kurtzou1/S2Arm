@@ -11,6 +11,9 @@
 //   同在 v2（#520 A，v2 发版前一起进，不另升）：单只 Joy-Con 的 state / motion 报原始方向、SL / SR 在扩展位 21 / 22
 //   （ns2_set_joycon_raw；游戏宿主按游戏样式转）。v2 已随 v0.3.0–v0.3.5 发版，单只 Joy-Con 语义改动按上条规则升 3（#619 合入时）
 #define NS2_RELAY_VERSION 3u
+// 一条通道最多几位玩家（头部 player 0..NS2_RELAY_PLAYERS-1）：每个连接程序一组、每组两个号（2g、2g+1），最多 8 组（同原机最多 8 只手柄）；
+//   宿主最多 8 个槽位（front_mac.m S2A_MAX_PADS），号多于槽位时按分配 / 连接顺序取前 8 位
+#define NS2_RELAY_PLAYERS 16
 
 typedef enum {
     NS2_RELAY_INPUT = 1,
@@ -48,7 +51,10 @@ typedef struct {
     uint8_t kind;   // ns2_kind；只在 INPUT 包里有意义
     uint8_t motion_left_known;   // INPUT 包：motion_left 有值（Joy-Con 2 左右拼成一对时左只的六轴；motion 是右只的）。旧启动器发 0，宿主照旧只用 motion
     uint8_t mouse_kind;   // INPUT 包：mouse 有值时是读数来自哪一只（ns2_kind 左 / 右）；0 = 没有鼠标读数（旧启动器 / Pro）
-    uint8_t reserved[1];
+    // 这个包属于哪位玩家（0 起）。原是保留字节：旧启动器发 0 = 玩家 1，语义不变、不升版本；
+    //   INPUT 包按玩家各存一份（多手柄各占一个槽位）；超出 NS2_RELAY_PLAYERS 的包丢掉、不断线。
+    //   体感 / 鼠标 / 震动 / 连接状态只跟玩家 0 走（其余玩家的只用按键与摇杆）
+    uint8_t player;
     union {
         struct {   // RUMBLE 包（宿主 → 启动器）
             ns2_vibration vibration[2];

@@ -581,7 +581,12 @@ namespace S2A.Android.Aot
                 if (!ownerStopped)
                     Console.Error.WriteLine(
                         "【红】direct owner loop did not stop within its budget; native session/destroy retained (process teardown)");
-                if (stop != DirectAbi.Ok)
+                // #860 / #907 这一片：前端停稳还没有证明手段，活跃会话停局一律保留到进程退出、返回 Retirement——这是既定的正常收局，
+                // 不是故障，记普通信息；其余非 Ok（驱动 / 内部错误等）照旧报红。
+                if (stop == DirectAbi.Retirement && ownerStopped)
+                    Console.Error.WriteLine(
+                        "[s2a] direct stop: session retained until process exit (frontend retirement not proven yet; #860)");
+                else if (stop != DirectAbi.Ok)
                     Console.Error.WriteLine(
                         "【红】direct stop did not prove completion; native context retained, no normal-stop claim");
                 _directOwner = null;

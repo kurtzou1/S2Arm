@@ -7,13 +7,17 @@
 #include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
+#include <signal.h>
+#include <spawn.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -40,15 +44,31 @@ int nvn_plat_window_size(void *native, uint32_t *w, uint32_t *h) { (void)native;
 // S2A_TEST_NVK_DQ=1：整套用例在「两级回放开」下再跑一遍；S2A_TEST_DESC_MEMO=1：在「描述符组备忘开」下再跑一遍
 // （备忘开着时内容相同的组不再分配，按「分配了几组」写的那几条期望在这一遍里不比，像素期望照比）。
 static int g_memo_on;
+static int g_shown_timing_test;
 void nvn_plat_safepoint(void) {}
 static int g_plc_flag_off;   // C88：1 = 调试开关 nvk_pipe_cache 读成 0（管线缓存关）
+// C89（局中补写）：-1 = 用后端缺省；>= 0 = 把对应的调试开关读成这个值（后端在开会话时读一次，所以要在 open 之前设、open 之后撤）。
+static int g_plc_thr_new = -1, g_plc_thr_first_ms = -1, g_plc_thr_every_ms = -1;
+static int g_ulist_flag = -1, g_fbdrop_flag = -1;   // C201：nvk_ulist：-1 = 生产缺省，>= 0 = 读成这个值；nvk_fbdrop：-1 = 自检档（整套用例的默认），-2 = 生产缺省，>= 0 = 读成这个值（改完要让后端的开关缓存作废：nvn_vk_dbg_view_stat(5)）
 int nvn_plat_flag(const char *name, int dflt) {
+    if (!strcmp(name, "display_timing") && g_shown_timing_test) return 1;
+    if (!strcmp(name, "nvk_ulist") && g_ulist_flag >= 0) return g_ulist_flag;
+    // 整套用例在 nvk_fbdrop=2（自检档）下跑：视图销毁走快路之后再全表扫一遍，扫到残留（反查表没记到的帧缓冲）就报红，main 末尾核「残留 0」。
+    if (!strcmp(name, "nvk_fbdrop") && g_fbdrop_flag != -2) return g_fbdrop_flag >= 0 ? g_fbdrop_flag : 2;   // -2 = 读成生产缺省（C201 核缺省档的行为）
     if (!strcmp(name, "nvk_pipe_cache") && g_plc_flag_off) return 0;
+    if (!strcmp(name, "nvk_plc_new") && g_plc_thr_new >= 0) return g_plc_thr_new;
+    if (!strcmp(name, "nvk_plc_first_ms") && g_plc_thr_first_ms >= 0) return g_plc_thr_first_ms;
+    if (!strcmp(name, "nvk_plc_every_ms") && g_plc_thr_every_ms >= 0) return g_plc_thr_every_ms;
     if (!strcmp(name, "nvk_dq") && getenv("S2A_TEST_NVK_DQ")) return 1;
     if (!strcmp(name, "nvk_desc_memo") && getenv("S2A_TEST_DESC_MEMO")) { g_memo_on = 1; return 1; }
     return dflt;
 }
-void nvn_plat_log(int level, const char *cls, const char *text) { (void)level; printf("[%s] %s\n", cls ? cls : "", text ? text : ""); }
+static int g_shown_empty_logged;
+void nvn_plat_log(int level, const char *cls, const char *text) {
+    (void)level;
+    if (text && strstr(text, "分时（实际上屏）") && strstr(text, "帧率= ") && strstr(text, "扩展未启用或不支持")) g_shown_empty_logged++;
+    printf("[%s] %s\n", cls ? cls : "", text ? text : "");
+}
 static int g_tri_origin_ul;   // 1 = 按 NVN 窗口原点在左上画（视口翻转）：期望上下对调。缺省 0 = 原点在左下（Vulkan 的自然方向）
 
 // C66 only: model a strict driver enforcing maxSets=64; all other calls
@@ -78,31 +98,61 @@ struct plc_rec {
     unsigned gp, gp_cached, cp, cp_cached;
 };
 static struct plc_rec g_plc_rec;
+// C89（局中补写）：lavapipe 的缓存数据恒为 32 字节文件头，不随建管线变大，「数据变没变」这类判断在它上面看不出区别。
+// 所以把「驱动的缓存数据有多大」交给用例定：取数据时在真数据后面补 g_plc_extra + g_plc_per_pipe × 自 g_plc_pipe_base 起建的管线数 个填充字节
+// （模拟真驱动的缓存随管线变大）；下一局读回时（带着填充）建缓存前把填充去掉再交给 lavapipe（g_plc_strip_tail）。
+// 三个值缺省全 0 = 原样转给真函数，C88 等其余用例不受影响。
+static size_t g_plc_extra, g_plc_per_pipe;
+static unsigned g_plc_pipe_base;
+static int g_plc_strip_tail;
 VKAPI_ATTR VkResult VKAPI_CALL __real_vkCreatePipelineCache(VkDevice, const VkPipelineCacheCreateInfo *, const VkAllocationCallbacks *, VkPipelineCache *);
 VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkCreatePipelineCache(VkDevice device, const VkPipelineCacheCreateInfo *ci, const VkAllocationCallbacks *a, VkPipelineCache *out) {
     g_plc_rec.cache_creates++;
     g_plc_rec.last_initial = ci->initialDataSize;
     if (g_plc_rec.reject_initial && ci->initialDataSize) { g_plc_rec.reject_initial--; return VK_ERROR_INITIALIZATION_FAILED; }
+    VkPipelineCacheCreateInfo ci2;
+    if (g_plc_strip_tail && ci->pInitialData && ci->initialDataSize > 4) {   // 文件头第一个 u32 = 头长度（VkPipelineCacheHeaderVersionOne = 32）
+        uint32_t hs; memcpy(&hs, ci->pInitialData, sizeof hs);
+        if (hs >= 16 && hs < ci->initialDataSize) { ci2 = *ci; ci2.initialDataSize = hs; ci = &ci2; }
+    }
     VkResult r = __real_vkCreatePipelineCache(device, ci, a, out);
     if (r == VK_SUCCESS) g_plc_rec.last_cache = *out;
     return r;
 }
 VKAPI_ATTR VkResult VKAPI_CALL __real_vkGetPipelineCacheData(VkDevice, VkPipelineCache, size_t *, void *);
 VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkGetPipelineCacheData(VkDevice device, VkPipelineCache cache, size_t *size, void *data) {
-    VkResult r = __real_vkGetPipelineCacheData(device, cache, size, data);
-    if (data && r == VK_SUCCESS) g_plc_rec.last_data = *size;
-    return r;
+    size_t extra = g_plc_extra;
+    if (g_plc_per_pipe)
+        extra += g_plc_per_pipe * (size_t)(__atomic_load_n(&g_plc_rec.gp, __ATOMIC_RELAXED) + __atomic_load_n(&g_plc_rec.cp, __ATOMIC_RELAXED) - g_plc_pipe_base);
+    VkResult r;
+    if (!extra) {
+        r = __real_vkGetPipelineCacheData(device, cache, size, data);
+        if (data && r == VK_SUCCESS) __atomic_store_n(&g_plc_rec.last_data, *size, __ATOMIC_RELAXED);   // C89：局中补写在建管线的线程里取数据，两个线程同时建管线时这里会并发
+        return r;
+    }
+    size_t rs = 0;   // 真数据大小
+    r = __real_vkGetPipelineCacheData(device, cache, &rs, NULL);
+    if (r != VK_SUCCESS) return r;
+    if (!data) { *size = rs + extra; return VK_SUCCESS; }
+    size_t cap = *size, w = cap < rs ? cap : rs;
+    r = __real_vkGetPipelineCacheData(device, cache, &w, data);
+    if (r != VK_SUCCESS && r != VK_INCOMPLETE) return r;
+    size_t fill = 0;
+    if (w == rs) { fill = cap - w < extra ? cap - w : extra; memset((char *)data + rs, 0xA5, fill); }
+    *size = w + fill;
+    if (w == rs && fill == extra) { __atomic_store_n(&g_plc_rec.last_data, *size, __ATOMIC_RELAXED); return VK_SUCCESS; }
+    return VK_INCOMPLETE;   // 容量不够（取大小之后又有新管线）：按规范只写放得下的部分
 }
 VKAPI_ATTR VkResult VKAPI_CALL __real_vkCreateGraphicsPipelines(VkDevice, VkPipelineCache, uint32_t, const VkGraphicsPipelineCreateInfo *, const VkAllocationCallbacks *, VkPipeline *);
 VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkCreateGraphicsPipelines(VkDevice device, VkPipelineCache cache, uint32_t n, const VkGraphicsPipelineCreateInfo *ci, const VkAllocationCallbacks *a, VkPipeline *out) {
-    g_plc_rec.gp += n;
-    if (cache != VK_NULL_HANDLE && cache == g_plc_rec.last_cache) g_plc_rec.gp_cached += n;
+    __atomic_fetch_add(&g_plc_rec.gp, n, __ATOMIC_RELAXED);   // C89 ⑩：两个线程同时建管线
+    if (cache != VK_NULL_HANDLE && cache == g_plc_rec.last_cache) __atomic_fetch_add(&g_plc_rec.gp_cached, n, __ATOMIC_RELAXED);
     return __real_vkCreateGraphicsPipelines(device, cache, n, ci, a, out);
 }
 VKAPI_ATTR VkResult VKAPI_CALL __real_vkCreateComputePipelines(VkDevice, VkPipelineCache, uint32_t, const VkComputePipelineCreateInfo *, const VkAllocationCallbacks *, VkPipeline *);
 VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkCreateComputePipelines(VkDevice device, VkPipelineCache cache, uint32_t n, const VkComputePipelineCreateInfo *ci, const VkAllocationCallbacks *a, VkPipeline *out) {
-    g_plc_rec.cp += n;
-    if (cache != VK_NULL_HANDLE && cache == g_plc_rec.last_cache) g_plc_rec.cp_cached += n;
+    __atomic_fetch_add(&g_plc_rec.cp, n, __ATOMIC_RELAXED);
+    if (cache != VK_NULL_HANDLE && cache == g_plc_rec.last_cache) __atomic_fetch_add(&g_plc_rec.cp_cached, n, __ATOMIC_RELAXED);
     return __real_vkCreateComputePipelines(device, cache, n, ci, a, out);
 }
 
@@ -189,6 +239,23 @@ static const struct done_rec *wait_signal(uint64_t signal, int base, int ms) {
 static uint8_t *buf_cpu(nvn_gpu_buf b) { return nvn_gpu_buf_cpu(b); }
 
 static struct s2a_vk_device g_dev;
+// Inject only the optional extension: lavapipe still executes real presents,
+// and never sees the simulated extension structure on its unsupported device.
+static unsigned g_timing_tags, g_timing_bad;
+static uint32_t g_timing_previous;
+static VkSwapchainKHR g_timing_previous_swapchain;
+#ifdef S2A_C883_TEST
+static VKAPI_ATTR VkResult VKAPI_CALL fake_past_timing(VkDevice device, VkSwapchainKHR swapchain,
+        uint32_t *count, VkPastPresentationTimingGOOGLE *timings) {
+    (void)device; (void)swapchain; (void)timings; *count = 0; return VK_SUCCESS;
+}
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL __real_vkGetDeviceProcAddr(VkDevice, const char *);
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL __wrap_vkGetDeviceProcAddr(VkDevice device, const char *name) {
+    if (g_shown_timing_test == 1 && !strcmp(name, "vkGetPastPresentationTimingGOOGLE"))
+        return (PFN_vkVoidFunction)fake_past_timing;
+    return __real_vkGetDeviceProcAddr(device, name);
+}
+#endif
 static nvn_gpu_open_desc g_desc;
 
 // 保守故障注入：不等 fence 就返回 TIMEOUT，记录完成证明前的视图销毁；其余调用走真实 Vulkan。
@@ -265,6 +332,18 @@ static int g_wsi_subopt, g_wsi_rotated;
 VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(VkQueue q, const VkPresentInfoKHR *pi) {
     PFN_vkQueuePresentKHR real = (PFN_vkQueuePresentKHR)vkGetDeviceProcAddr(g_dev.device, "vkQueuePresentKHR");
     VkPresentInfoKHR mapped = *pi; uint32_t idx;
+    if (g_shown_timing_test && mapped.pNext) {
+        const VkPresentTimesInfoGOOGLE *times = mapped.pNext;
+        if (times->sType == VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE) {
+            if (times->swapchainCount != 1 || !times->pTimes || !times->pTimes[0].presentID ||
+                times->pTimes[0].desiredPresentTime != 0 ||
+                (g_timing_previous_swapchain == pi->pSwapchains[0] &&
+                 times->pTimes[0].presentID == g_timing_previous)) g_timing_bad++;
+            else { g_timing_previous = times->pTimes[0].presentID; g_timing_previous_swapchain = pi->pSwapchains[0]; }
+            g_timing_tags++;
+            mapped.pNext = times->pNext;
+        }
+    }
     if (g_w697_count && pi->swapchainCount == 1) {
         idx = pi->pImageIndices[0];
         CHECK(idx >= g_w697_base && idx < g_w697_count, "C697 present virtual index %u outside range", idx);
@@ -715,6 +794,14 @@ static void *read_file(const char *path, size_t *n) {
 // 原创纹理三角形：全屏三角形 + 2x2 纹理 + nearest 采样；逐像素用 CPU 手算真值。
 // 通道映射用例的旋钮（缺省全 0 = 不设）：存储自带映射、视图映射（NVN 取值 0 零 / 1 一 / 2 R / 3 G / 4 B / 5 A）
 static uint16_t g_tri_swz; static int g_tri_vsw_on; static uint8_t g_tri_vsw[4];
+static uint32_t g_tri_view_fmt;   // 非 0：建一个设了格式的视图（视图格式覆盖存储格式），用来验「按视图的有效格式判 alpha」
+// 没有 alpha 的 NVN 格式（硬件把 a 供给常数 1）：RGBX / BGRX / RGB5 / BGR5 / RGB_DXT1 及其变体
+static int tri_alpha_reads_one(uint32_t f) {
+    return f == NVN_FORMAT_RGBX8 || f == NVN_FORMAT_RGBX8_SRGB || f == NVN_FORMAT_BGRX8 || f == NVN_FORMAT_BGRX8_SRGB ||
+           f == NVN_FORMAT_RGB5 || f == NVN_FORMAT_BGR5 || f == NVN_FORMAT_RGB_DXT1 || f == NVN_FORMAT_RGB_DXT1_SRGB ||
+           (f >= NVN_FORMAT_RGBX8SN && f <= NVN_FORMAT_RGBX8I) || (f >= NVN_FORMAT_RGBX16F && f <= NVN_FORMAT_RGBX16I) ||
+           (f >= NVN_FORMAT_RGBX32F && f <= NVN_FORMAT_RGBX32I);
+}
 static const uint8_t *g_tri_expect;   // 非空：整张图期望都是这 4 个字节（压缩格式用，纹素不是按像素摆的）
 static int g_tri_tol;
 static uint64_t g_tri_signal = 5;
@@ -776,15 +863,17 @@ static void tri_impl(const char *shader_dir, uint32_t tex_fmt, const uint8_t *te
     {
         nvn_gpu_tex_desc td; memset(&td, 0, sizeof td);
         td.d.target = NVN_TEXTURE_TARGET_2D; td.d.format = (int)tex_fmt; td.d.width = 2; td.d.height = 2; td.d.depth = 1; td.d.levels = 1;
-        td.usage = NVN_GPU_TEX_SAMPLED | NVN_GPU_TEX_CPU_UPLOAD; td.swz = g_tri_swz;
+        td.usage = NVN_GPU_TEX_SAMPLED | NVN_GPU_TEX_CPU_UPLOAD | (g_tri_view_fmt ? NVN_GPU_TEX_VIEW_FMT : 0); td.swz = g_tri_swz;
         r = nvn_gpu_tex_create(&td, &tex, &e);
         CHECK(OK(r), "tex_create（swz=%#x）：%d %s", g_tri_swz, r.code, e.why);
     }
     nvn_gpu_view tview = NULL;
-    if (g_tri_vsw_on) {
-        view_t vw; memset(&vw, 0, sizeof vw); vw.set_swizzle = 1; memcpy(vw.swz, g_tri_vsw, 4);
+    if (g_tri_vsw_on || g_tri_view_fmt) {
+        view_t vw; memset(&vw, 0, sizeof vw);
+        if (g_tri_vsw_on) { vw.set_swizzle = 1; memcpy(vw.swz, g_tri_vsw, 4); }
+        if (g_tri_view_fmt) { vw.set_format = 1; vw.format = (int)g_tri_view_fmt; }
         r = nvn_gpu_view_create(tex, &vw, &tview, &e);
-        CHECK(OK(r), "view_create（带通道映射）：%d %s", r.code, e.why);
+        CHECK(OK(r), "view_create（带通道映射 / 视图格式）：%d %s", r.code, e.why);
     } else tview = make_view(tex);
     samp_par sp;
     memset(&sp, 0, sizeof sp);   // nearest / clamp
@@ -850,7 +939,10 @@ static void tri_impl(const char *shader_dir, uint32_t tex_fmt, const uint8_t *te
             if (g_tri_origin_ul) ty = 1 - ty;   // 原点在左上：同一个裁剪空间 y 落到相反的行
             const uint8_t *src = g_tri_expect ? g_tri_expect : texels + (ty * 2 + tx) * tbpp;
             // 期望：先取纹素（没有 alpha 的格式按 want_a），再按生效的通道映射手算（视图设了用视图的，否则用存储的）
-            uint8_t px[4] = {src[0], src[1], src[2], (uint8_t)(tbpp == 4 ? src[3] : want_a)}, mapped[4], sw[4] = {2, 3, 4, 5};
+            // 没有 alpha 的 NVN 格式（RGBX / BGRX / RGB5 / BGR5 / RGB_DXT1）：硬件把 a 读作 1，与存储的第 4 个字节无关；
+            // 判定按「视图的有效格式」——视图换格式时以视图格式为准（与硬件一致）
+            int noalpha = tri_alpha_reads_one(g_tri_view_fmt ? g_tri_view_fmt : tex_fmt);
+            uint8_t px[4] = {src[0], src[1], src[2], (uint8_t)(tbpp == 4 && !noalpha ? src[3] : want_a)}, mapped[4], sw[4] = {2, 3, 4, 5};
             if (g_tri_vsw_on) memcpy(sw, g_tri_vsw, 4);
             else if (g_tri_swz) for (int ch = 0; ch < 4; ch++) sw[ch] = (uint8_t)(g_tri_swz >> (3 * ch) & 7);
             for (int ch = 0; ch < 4; ch++) mapped[ch] = sw[ch] == 0 ? 0 : sw[ch] == 1 ? 255 : px[sw[ch] - 2];
@@ -882,6 +974,19 @@ static void t14_textured_triangle(const char *dir) {
 
 // C70：通道映射。存储自带映射 B G R 一（红蓝对调、alpha 恒 1）；视图映射 零 R A G 取代存储的（不是叠加）。
 // 纹素的四个通道互不相同，哪一路映射错了都读得出来。期望在 tri_impl 里按 NVN 取值手算。
+// C200：没有 alpha 的 NVN 格式，采样到的 a 必须是 1（RGBX8 的 X 字节摆 0 也一样），有 alpha 的格式照读。
+// NVN/Maxwell 的输出合成都按 alpha 参与混合，读错这一位就是深色场景光照逐层变暗的直接原因。
+// 每个变体自己一个会话：tri_impl 的提交序号固定（见 C70 / C195 的同一处理）。
+static void c200_alpha_reads_one(const char *dir, int k) {
+    static const uint8_t t4[16] = {255, 0, 0, 0,   0, 255, 0, 0,   0, 0, 255, 0,   255, 255, 255, 0};   // 四个纹素的第 4 字节全 0
+    switch (k) {
+    case 0: tri_impl(dir, NVN_FORMAT_RGBX8, t4, 4, 8, 255); break;                        // 宿主 RGBA8：X 字节不能当 alpha
+    case 1: tri_impl(dir, NVN_FORMAT_RGBA8, t4, 4, 8, 0); break;                         // 负控：有 alpha 的格式照读 0
+    case 2: g_tri_view_fmt = NVN_FORMAT_RGBA8; tri_impl(dir, NVN_FORMAT_RGBX8, t4, 4, 8, 0); g_tri_view_fmt = 0; break;   // 视图有 alpha：按视图格式照读存储的第 4 字节
+    default: g_tri_view_fmt = NVN_FORMAT_RGBX8; tri_impl(dir, NVN_FORMAT_RGBA8, t4, 4, 8, 255); g_tri_view_fmt = 0; break; // 视图没有 alpha：a 读作 1
+    }
+}
+
 static void c70_swizzle(const char *dir, int view_overrides) {
     static const uint8_t texels[16] = {10, 60, 110, 200,   20, 70, 120, 210,
                                        30, 80, 130, 220,   40, 90, 140, 230};
@@ -922,6 +1027,10 @@ static void c71_present(void) {
     CHECK(OK(r), "C71 present：%d %s", r.code, e.why);
     CHECK(g_shown_n == 1 && g_shown_ticket == 42 && g_shown_status == NVN_GPU_SHOWN_UNKNOWN, "C71 presented 应恰好一次、UNKNOWN（没有上屏时刻），得 n=%d status=%u", g_shown_n, g_shown_status);
     CHECK(OK(nvn_gpu_fence_wait(7, 5000000000ull, &e)), "C71 wait 7：%d %s", e.rc.code, e.why);
+    if (g_shown_timing_test == 2) {
+        struct timespec pause = {5, 100000000};
+        while (nanosleep(&pause, &pause) && errno == EINTR) {}
+    }
 
     // 取了不呈现：交回后下一次取到的是同一张
     nvn_gpu_drawable a, b; memset(&a, 0, sizeof a); memset(&b, 0, sizeof b);
@@ -1144,14 +1253,24 @@ static void c192_bc_order(void) {
     nvn_gpu_tex_release(bc); nvn_gpu_tex_release(a); nvn_gpu_tex_release(b); nvn_gpu_buf_release(rb, NULL, NULL);
 }
 
+// C193：现解贴图按压缩块回读：给上传时的原字节（不是解码后的颜色）；没上传过的区域给零。
 static void c193_bc_readback_rejected(void) {
-    nvn_gpu_tex bc = make_tex(4, 4, NVN_FORMAT_RGBA_DXT1, NVN_GPU_TEX_SAMPLED | NVN_GPU_TEX_CPU_UPLOAD);
-    nvn_gpu_buf rb = make_buf(64, NVN_GPU_MEM_SHARED, NULL);
+    nvn_gpu_tex bc = make_tex(8, 4, NVN_FORMAT_RGBA_DXT1, NVN_GPU_TEX_SAMPLED | NVN_GPU_TEX_CPU_UPLOAD);
+    uint8_t init[64]; memset(init, 0x5a, sizeof init);
+    nvn_gpu_buf rb = make_buf(64, NVN_GPU_MEM_SHARED, init);
     if (!bc || !rb) return;
+    static const uint8_t blk[8] = {0x11, 0xf8, 0x22, 0x07, 0x33, 0x44, 0x55, 0x66};
     nvn_gpu_cmd c = begin_cmd(); nvn_gpu_err e;
-    nvn_gpu_copy_tex_buf(c, bc, 0, 0, NULL, rb, 0, 8, 8);
+    nvn_gpu_copy_tex_buf(c, bc, 0, 0, NULL, rb, 0, 16, 16);              // ① 一次都没上传：两块都是零
+    NVNcopyRegion right = {4, 0, 0, 4, 4, 1};
+    nvn_gpu_tex_upload(c, bc, 0, 0, &right, blk, 8, 8);                  // 只传右边那块
+    nvn_gpu_copy_tex_buf(c, bc, 0, 0, NULL, rb, 32, 16, 16);             // ② 左块零、右块原字节
     nvn_gpu_rc r = nvn_gpu_cmd_commit(c, 1, on_done, NULL, &e);
-    CHECK(r.code == NVN_GPU_E_UNSUPPORTED, "C193 解码贴图按压缩块回读应 UNSUPPORTED，实得 %d", r.code);
+    CHECK(OK(r), "C193 解码贴图按压缩块回读 commit：%d %s", r.code, e.why);
+    CHECK(OK(nvn_gpu_fence_wait(1, 5000000000ull, &e)), "C193 wait：%s", e.why);
+    uint8_t want[64]; memcpy(want, init, sizeof want);
+    memset(want, 0, 16); memset(want + 32, 0, 8); memcpy(want + 40, blk, 8);
+    CHECK(memcmp(buf_cpu(rb), want, sizeof want) == 0, "C193 解码贴图回读应给原压缩字节（没上传过的为零）");
     nvn_gpu_tex_release(bc); nvn_gpu_buf_release(rb, NULL, NULL);
 }
 
@@ -1176,6 +1295,59 @@ static void c196_bc_close_timeout(void) {
     r = nvn_gpu_close(5000000000ull, &e);
     CHECK(OK(r), "C196 完成后 close 重试：%d %s", r.code, e.why);
     printf("C196 close 超时保活与重试已执行\n");
+}
+
+// C697e：小于一个压缩块的 mip（8×8 BC1 的第 2 级是 2×2）按整块区域 4×4 上传（NVN 的写法），应裁到边照常写入、读回纯蓝；
+//   区域超过边缘所在的整块（8×8）仍非法（commit 报 E_ARG）。#697 Mali 上「BC 上传子资源或区域非法」的一种来源。
+// 两处调用都排在会话最后、紧接 close：signal 取 100 / 101，高于同会话前面各测试用过的值。
+static void c697e_bc_small_mip_block_region(int decoded) {   // decoded=0：原生 BC 不能拷到 RGBA8，只核上传接受 / 超界拒
+    static const uint8_t blue[8] = {0x1f,0,0x1f,0,0,0,0,0};
+    static const uint8_t expect[4] = {0,0,255,255};
+    nvn_gpu_tex_desc td = {0}; td.d.target = NVN_TEXTURE_TARGET_2D; td.d.format = NVN_FORMAT_RGBA_DXT1;
+    td.d.width = td.d.height = 8; td.d.depth = 1; td.d.levels = 3; td.usage = NVN_GPU_TEX_SAMPLED | NVN_GPU_TEX_CPU_UPLOAD;
+    nvn_gpu_tex bc = NULL; nvn_gpu_err e = {0}; nvn_gpu_rc rc = nvn_gpu_tex_create(&td, &bc, &e);
+    CHECK(OK(rc) && bc, "C697e 建图：%d %s", rc.code, e.why); if (!bc) return;
+    nvn_gpu_tex out = make_tex(2, 2, NVN_FORMAT_RGBA8, NVN_GPU_TEX_SAMPLED);
+    nvn_gpu_buf rb = make_buf(64, NVN_GPU_MEM_SHARED, NULL);
+    if (!out || !rb) return;
+    NVNcopyRegion whole_block = {0, 0, 0, 4, 4, 1};
+    nvn_gpu_cmd c = begin_cmd();
+    nvn_gpu_tex_upload(c, bc, 2, 0, &whole_block, blue, 8, 8);
+    if (decoded) {
+        nvn_gpu_copy_tex(c, bc, 2, 0, NULL, out, 0, 0, NULL);
+        nvn_gpu_copy_tex_buf(c, out, 0, 0, NULL, rb, 0, 8, 16);
+    }
+    rc = nvn_gpu_cmd_commit(c, 100, on_done, NULL, &e); CHECK(OK(rc), "C697e 整块区域写 2×2 级应接受：%d %s", rc.code, e.why);
+    CHECK(OK(nvn_gpu_fence_wait(100, 5000000000ull, &e)), "C697e wait：%s", e.why);
+    if (decoded) for (int i = 0; i < 4; i++) CHECK(!memcmp(buf_cpu(rb) + i * 4, expect, 4), "C697e 像素 %d 应为纯蓝", i);
+    NVNcopyRegion too_big = {0, 0, 0, 8, 8, 1};
+    c = begin_cmd();
+    nvn_gpu_tex_upload(c, bc, 2, 0, &too_big, blue, 16, 64);
+    rc = nvn_gpu_cmd_commit(c, 101, on_done, NULL, &e);
+    CHECK(rc.code == NVN_GPU_E_ARG || rc.code == NVN_GPU_E_FAILED, "C697e 超过整块的区域仍应非法：%d %s", rc.code, e.why);
+    nvn_gpu_tex_release(bc); nvn_gpu_tex_release(out); nvn_gpu_buf_release(rb, NULL, NULL);
+    printf("C697e 小 mip 整块区域：已核对\n");
+}
+
+// C697f：缓冲 → 3D BC 现解贴图，调用方按 NVN 的写法把切片号放在 layer 里（#697 Mali：32×32×32、layers 1 的 BC 贴图按 layer 1 进来）。
+//   与直拷同一口径：layer 当 z 切片，应接受、提交成功；修前现解分支按数组层判「层越界」，commit 报 E_ARG。排在 C697e 前（它最后一笔故意失败）。
+static void c697f_bc_3d_slice_from_buf(void) {
+    static const uint8_t blue[32] = {0xff,0,0,0,0,0,0,0, 0xff,0,0,0,0,0,0,0, 0xff,0,0,0,0,0,0,0, 0xff,0,0,0,0,0,0,0};   // 4 个 BC4 块（每块 8 字节）
+    // 现解路线只给 BC4 开 3D（backend_vulkan.c tex_create；报告人那张正是 0x49 BC4）：本用例临时把 BC4 加进现解名单
+    uint32_t saved_mask = g_dev.bc_decode_mask; g_dev.bc_decode_mask |= 1u << (NVN_FORMAT_RGTC1_UNORM - 0x41);
+    nvn_gpu_tex_desc td = {0}; td.d.target = NVN_TEXTURE_TARGET_3D; td.d.format = NVN_FORMAT_RGTC1_UNORM;
+    td.d.width = td.d.height = 8; td.d.depth = 2; td.d.levels = 1; td.usage = NVN_GPU_TEX_SAMPLED | NVN_GPU_TEX_CPU_UPLOAD;
+    nvn_gpu_tex bc = NULL; nvn_gpu_err e = {0}; nvn_gpu_rc rc = nvn_gpu_tex_create(&td, &bc, &e);
+    CHECK(OK(rc) && bc, "C697f 建 3D 图：%d %s", rc.code, e.why); if (!bc) { g_dev.bc_decode_mask = saved_mask; return; }
+    nvn_gpu_buf src = make_buf(sizeof blue, NVN_GPU_MEM_SHARED, blue);
+    if (!src) { nvn_gpu_tex_release(bc); g_dev.bc_decode_mask = saved_mask; return; }
+    NVNcopyRegion whole = {0, 0, 0, 8, 8, 1};
+    nvn_gpu_cmd c = begin_cmd();
+    nvn_gpu_copy_buf_tex(c, src, 0, 16, 32, bc, 0, 1, &whole);
+    rc = nvn_gpu_cmd_commit(c, 90, on_done, NULL, &e); CHECK(OK(rc), "C697f 缓冲 → 3D BC 第 1 切片应接受：%d %s", rc.code, e.why);
+    CHECK(OK(nvn_gpu_fence_wait(90, 5000000000ull, &e)), "C697f wait：%s", e.why);
+    nvn_gpu_tex_release(bc); nvn_gpu_buf_release(src, NULL, NULL); g_dev.bc_decode_mask = saved_mask;
+    printf("C697f 3D BC 按切片号上传：已核对\n");
 }
 
 // C194：8×8 立方体的一级 mip 是 4×4，两个面分别为纯蓝、纯绿。
@@ -4337,6 +4509,127 @@ static void c197_pass_cache(void) {
     nvn_gpu_view_release(ov2); nvn_gpu_tex_release(out);
 }
 
+// C201：视图销毁的两处线性代价（真机世界场景：现存视图 2.3 万个、每帧销毁 56 个，这两处合起来占去掉托底线程后全部 CPU 样本的 23.9%，全程持后端大锁）。
+// ① 全局视图链：创建时头插、销毁时摘。原先摘链从链头线性找自己；现在按反向指针 O(1) 摘。
+//    期望（手算）：同一张贴图上建 N=1500 个视图，按「最旧先拆」逐个销毁（最旧的在链尾，旧做法的最坏顺序）——
+//      旧做法（nvk_ulist=0，保留作对照）摘链走过的节点数 = (N-1)+(N-2)+…+1+0 = N(N-1)/2 = 1124250；缺省做法 = 0；
+//      两种做法每拆一个现存视图数减 1，链结构（前驱指针指回自己、后继的反向指针指回本节点）零违例。
+//    再按 k×773 mod N 的次序（773 与 1500 互质，每个下标恰好一次）拆一轮：链头 / 链中 / 链尾都摘到，链结构仍零违例。
+// ② 帧缓冲缓存的反查表：视图记着自己当过哪些帧缓冲的附件，销毁时只拆那几个。视图从没当过附件时，原先也退回扫整张 8192 项的表。
+//    期望（手算）：缺省档销毁「从没当过附件」的视图，全表扫次数 +0（旧做法 nvk_fbdrop=0：至少 +1）；
+//    销毁「当过附件」的视图，缓存里恰好少 1 个帧缓冲（只有一个帧缓冲含它），全表扫仍 +0；
+//    颜色 + 深度两个附件的通道：先销毁深度视图，帧缓冲少 1；再用新深度视图开同一个颜色视图（槽可能复用、代数不同）后销毁颜色视图，新帧缓冲也要拆掉。
+uint64_t nvn_vk_dbg_view_stat(int which);
+static void c201_set_flags(int ulist, int fbdrop) { g_ulist_flag = ulist; g_fbdrop_flag = fbdrop; (void)nvn_vk_dbg_view_stat(5); }
+static void c201_check_chain(const char *what, int upto) {
+    uint64_t bad = nvn_vk_dbg_view_stat(4);
+    CHECK(bad == 0, "C201 %s（已拆 %d 个）：视图链结构违例期望 0 → %llu", what, upto, (unsigned long long)bad);
+}
+static void c201_view_list(void) {
+    enum { N = 1500, STEP = 773 };
+    static nvn_gpu_view vs[N];
+    nvn_gpu_tex t = make_tex(8, 8, NVN_FORMAT_RGBA8, NVN_GPU_TEX_SAMPLED);
+    for (int arm = 0; arm < 2; arm++) {   // 0 = 旧做法（对照）、1 = 缺省
+        c201_set_flags(arm == 0 ? 0 : -1, -1);   // 臂 1 读生产缺省（不显式设值）：缺省被改掉时这里会红
+        const uint64_t live0 = nvn_vk_dbg_view_stat(0), steps0 = nvn_vk_dbg_view_stat(1);
+        for (int i = 0; i < N; i++) vs[i] = make_view(t);
+        CHECK(nvn_vk_dbg_view_stat(0) - live0 == N, "C201 臂 %d 建 %d 个视图：期望现存视图 +%d → +%llu", arm, N, N, (unsigned long long)(nvn_vk_dbg_view_stat(0) - live0));
+        c201_check_chain("建完", 0);
+        for (int i = 0; i < N; i++) {   // 最旧先拆
+            nvn_gpu_view_release(vs[i]);
+            if (i < 64 || i % 50 == 0) { c201_check_chain("最旧先拆", i + 1); if (nvn_vk_dbg_view_stat(4)) break; }
+        }
+        const uint64_t steps = nvn_vk_dbg_view_stat(1) - steps0, want = arm == 0 ? (uint64_t)N * (N - 1) / 2 : 0;
+        printf("C201 视图摘链（%s）：最旧先拆 %d 个，摘链走过 %llu 个节点（期望 %llu）\n", arm == 0 ? "旧做法 nvk_ulist=0" : "缺省", N, (unsigned long long)steps, (unsigned long long)want);
+        CHECK(steps == want, "C201 臂 %d 最旧先拆 %d 个：摘链走过的节点数期望 %llu → %llu", arm, N, (unsigned long long)want, (unsigned long long)steps);
+        CHECK(nvn_vk_dbg_view_stat(0) == live0, "C201 臂 %d 拆完：现存视图数期望回到 %llu → %llu", arm, (unsigned long long)live0, (unsigned long long)nvn_vk_dbg_view_stat(0));
+        for (int i = 0; i < N; i++) vs[i] = make_view(t);
+        for (int k = 0; k < N; k++) {   // 乱序拆
+            nvn_gpu_view_release(vs[(int)(((long)k * STEP) % N)]);
+            if (k < 64 || k % 50 == 0) { c201_check_chain("乱序拆", k + 1); if (nvn_vk_dbg_view_stat(4)) break; }
+            if (k == N / 2) CHECK(nvn_vk_dbg_view_stat(0) == live0 + (uint64_t)(N - (N / 2 + 1)), "C201 臂 %d 乱序拆一半：现存视图数期望 %llu → %llu", arm, (unsigned long long)(live0 + (uint64_t)(N - (N / 2 + 1))), (unsigned long long)nvn_vk_dbg_view_stat(0));
+        }
+        CHECK(nvn_vk_dbg_view_stat(0) == live0, "C201 臂 %d 乱序拆完：现存视图数期望回到 %llu → %llu", arm, (unsigned long long)live0, (unsigned long long)nvn_vk_dbg_view_stat(0));
+    }
+    c201_set_flags(-1, -1);
+    nvn_gpu_tex_release(t);
+}
+static void c201_commit_pass(const nvn_gpu_pass_desc *p) {
+    static uint64_t sig = 2000;   // 同一会话里先后跑两档：围栏号只增不减
+    const uint64_t signal = ++sig;
+    nvn_gpu_err e;
+    nvn_gpu_cmd c = begin_cmd();
+    nvn_gpu_pass_begin(c, p); nvn_gpu_pass_end(c);
+    nvn_gpu_rc r = nvn_gpu_cmd_commit(c, signal, on_done, NULL, &e); CHECK(OK(r), "C201 commit %llu：%d %s", (unsigned long long)signal, r.code, e.why);
+    r = nvn_gpu_fence_wait(signal, 5000000000ull, &e); CHECK(OK(r), "C201 wait %llu：%d %s", (unsigned long long)signal, r.code, e.why);
+}
+static void c201_wait_fb(uint64_t want) {   // 视图销毁可能要等完成线程摘掉段里的引用，轮询到帧缓冲数到位（最多 2 秒）
+    for (int i = 0; i < 2000 && nvn_vk_dbg_view_stat(2) != want; i++) nanosleep(&(struct timespec){0, 1000000}, NULL);
+}
+// selfcheck = 0：生产缺省档（核全表扫次数）；selfcheck = 1：自检档 nvk_fbdrop=2（核「视图销毁走快路之后全表扫不到残留」，不核扫描次数）。
+#define C201_SCAN_CHECK(cond, ...) do { if (!selfcheck) CHECK(cond, __VA_ARGS__); } while (0)
+static void c201_fb_scan(int selfcheck) {
+    const int fl = selfcheck ? 2 : -2;
+    const uint64_t resid0 = nvn_vk_dbg_view_stat(3);
+    nvn_gpu_tex out = make_tex(64, 64, NVN_FORMAT_RGBA8, NVN_GPU_TEX_RENDER | NVN_GPU_TEX_SAMPLED);
+    nvn_gpu_tex dep = make_tex(64, 64, NVN_FORMAT_DEPTH32F, NVN_GPU_TEX_RENDER | NVN_GPU_TEX_SAMPLED);
+    nvn_gpu_tex idle = make_tex(8, 8, NVN_FORMAT_RGBA8, NVN_GPU_TEX_SAMPLED);
+    nvn_gpu_view cv = make_view(out), dv = make_view(dep);
+    nvn_gpu_pass_desc p; memset(&p, 0, sizeof p);
+    p.ncolor = 1; p.color[0].view = cv; p.color[0].load = NVN_GPU_LOAD_CLEAR; p.color[0].store = NVN_GPU_STORE_STORE;
+    p.depth.view = dv; p.depth.load = NVN_GPU_LOAD_CLEAR; p.depth.store = NVN_GPU_STORE_STORE; p.clear_depth = 1.0f;
+    p.w = 64; p.h = 64; p.layers = 1;
+    c201_set_flags(-1, fl);   // 生产缺省档（不自检）
+    const uint64_t fb0 = nvn_vk_dbg_view_stat(2);
+    c201_commit_pass(&p);
+    CHECK(nvn_vk_dbg_view_stat(2) - fb0 == 1, "C201 开一个颜色 + 深度通道：缓存里帧缓冲期望 +1 → +%llu", (unsigned long long)(nvn_vk_dbg_view_stat(2) - fb0));
+    // ② 销毁从没当过附件的视图：缺省档不扫表；旧做法（nvk_fbdrop=0）要扫
+    nvn_gpu_view iv = make_view(idle);
+    uint64_t s0 = nvn_vk_dbg_view_stat(6);
+    nvn_gpu_view_release(iv);
+    C201_SCAN_CHECK(nvn_vk_dbg_view_stat(6) - s0 == 0, "C201 缺省档销毁从没当过附件的视图：全表扫次数期望 +0 → +%llu", (unsigned long long)(nvn_vk_dbg_view_stat(6) - s0));
+    CHECK(nvn_vk_dbg_view_stat(2) - fb0 == 1, "C201 销毁无关视图后：帧缓冲数期望仍 +1 → +%llu", (unsigned long long)(nvn_vk_dbg_view_stat(2) - fb0));
+    c201_set_flags(-1, 0);
+    iv = make_view(idle);
+    s0 = nvn_vk_dbg_view_stat(6);
+    nvn_gpu_view_release(iv);
+    CHECK(nvn_vk_dbg_view_stat(6) - s0 >= 1, "C201 旧做法（nvk_fbdrop=0）销毁从没当过附件的视图：全表扫次数期望 ≥ +1 → +%llu", (unsigned long long)(nvn_vk_dbg_view_stat(6) - s0));
+    c201_set_flags(-1, fl);
+    // 销毁当过附件的视图（深度）：帧缓冲 -1，不扫表
+    s0 = nvn_vk_dbg_view_stat(6);
+    nvn_gpu_view_release(dv);
+    c201_wait_fb(fb0);
+    CHECK(nvn_vk_dbg_view_stat(2) == fb0, "C201 销毁深度视图：帧缓冲数期望回到 %llu → %llu", (unsigned long long)fb0, (unsigned long long)nvn_vk_dbg_view_stat(2));
+    C201_SCAN_CHECK(nvn_vk_dbg_view_stat(6) - s0 == 0, "C201 销毁当过附件的视图：全表扫次数期望 +0 → +%llu", (unsigned long long)(nvn_vk_dbg_view_stat(6) - s0));
+    // 同一个颜色视图 + 新深度视图再开：新帧缓冲（槽可能复用、代数不同）；销毁颜色视图要把它拆掉，不能被颜色视图里残留的旧记录误导
+    nvn_gpu_view dv2 = make_view(dep);
+    p.depth.view = dv2;
+    c201_commit_pass(&p);
+    CHECK(nvn_vk_dbg_view_stat(2) - fb0 == 1, "C201 换新深度视图再开：帧缓冲期望 +1 → +%llu", (unsigned long long)(nvn_vk_dbg_view_stat(2) - fb0));
+    s0 = nvn_vk_dbg_view_stat(6);
+    nvn_gpu_view_release(cv);
+    c201_wait_fb(fb0);
+    CHECK(nvn_vk_dbg_view_stat(2) == fb0, "C201 销毁颜色视图：新帧缓冲也要拆，帧缓冲数期望回到 %llu → %llu", (unsigned long long)fb0, (unsigned long long)nvn_vk_dbg_view_stat(2));
+    C201_SCAN_CHECK(nvn_vk_dbg_view_stat(6) - s0 == 0, "C201 销毁颜色视图：全表扫次数期望 +0 → +%llu", (unsigned long long)(nvn_vk_dbg_view_stat(6) - s0));
+    // 同一个颜色视图用在 8 个不同的帧缓冲里（超过反查表容量 6，记录溢出）：销毁它要退回全表扫，8 个帧缓冲一个不剩
+    nvn_gpu_view cv2 = make_view(out), dvs[8];
+    p.color[0].view = cv2;
+    for (int i = 0; i < 8; i++) { dvs[i] = make_view(dep); p.depth.view = dvs[i]; c201_commit_pass(&p); }
+    CHECK(nvn_vk_dbg_view_stat(2) - fb0 == 8, "C201 同一个颜色视图配 8 个深度视图各开一次：帧缓冲期望 +8 → +%llu", (unsigned long long)(nvn_vk_dbg_view_stat(2) - fb0));
+    s0 = nvn_vk_dbg_view_stat(6);
+    nvn_gpu_view_release(cv2);
+    c201_wait_fb(fb0);
+    CHECK(nvn_vk_dbg_view_stat(2) == fb0, "C201 销毁用在 8 个帧缓冲里的颜色视图（记录溢出）：帧缓冲数期望回到 %llu → %llu", (unsigned long long)fb0, (unsigned long long)nvn_vk_dbg_view_stat(2));
+    CHECK(nvn_vk_dbg_view_stat(6) - s0 >= 1, "C201 记录溢出时销毁视图：期望退回全表扫（≥ +1）→ +%llu", (unsigned long long)(nvn_vk_dbg_view_stat(6) - s0));
+    for (int i = 0; i < 8; i++) nvn_gpu_view_release(dvs[i]);
+    nvn_gpu_view_release(dv2);
+    nvn_gpu_tex_release(out); nvn_gpu_tex_release(dep); nvn_gpu_tex_release(idle);
+    c201_set_flags(-1, -1);
+    CHECK(nvn_vk_dbg_view_stat(3) == resid0, "C201 %s：视图销毁走快路之后全表扫到的残留期望 +0 → +%llu", selfcheck ? "自检档" : "缺省档", (unsigned long long)(nvn_vk_dbg_view_stat(3) - resid0));
+    printf("C201 帧缓冲缓存（%s）：起点 %llu 个帧缓冲，用例结束时 %llu 个；全表扫累计 %llu 次，残留 %llu（各步期望见上，不符会有 FAIL 行）\n", selfcheck ? "自检档" : "缺省档",
+           (unsigned long long)fb0, (unsigned long long)nvn_vk_dbg_view_stat(2), (unsigned long long)nvn_vk_dbg_view_stat(6), (unsigned long long)nvn_vk_dbg_view_stat(3));
+}
+
 static void c77_null_color_slot(const char *dir) {
     nvn_gpu_shader vs = NULL, fs = NULL; void *vm = NULL, *fm = NULL;
     if (!load_shader_pair(dir, "tri3.vert", "out1_green.frag", NULL, NULL, &vs, &fs, &vm, &fm)) { CHECK(0, "读不到 out1_green"); return; }
@@ -5042,6 +5335,31 @@ static void c74b_clear_rect_oob(void) {
     nvn_gpu_view_release(ov); nvn_gpu_tex_release(out);
 }
 
+// C937：release 之后再录制使用 → 粘滞 E_ARG，报错要带句柄类型和录制位置（真机长局里只有这一行能定位，#937）。
+//   同一段里先 use 一次让段持有引用（缓冲 release 后不会被回收，指针仍有效），release，再 use：第二次必须报。独占会话。
+// 粘滞错误的原因不进 commit 的 err，随段交给完成回调（真机日志「提交段失败…：原因」就是这里来的）：从回调里取。
+static char g_c937_why[256];
+static int g_c937_ready;   // 回调写完原因后再置位（release），主线程见位后再读（acquire）
+static void c937_done(void *u, const nvn_gpu_done *d) {
+    (void)u; snprintf(g_c937_why, sizeof g_c937_why, "%s", d->why ? d->why : "");
+    __atomic_store_n(&g_c937_ready, 1, __ATOMIC_RELEASE);
+}
+static void c937_use_after_release(void) {
+    nvn_gpu_buf b = make_buf(64, NVN_GPU_MEM_SHARED, NULL);
+    nvn_gpu_cmd c = begin_cmd();
+    nvn_gpu_buf_use(c, b);
+    nvn_gpu_buf_release(b, NULL, NULL);
+    nvn_gpu_buf_use(c, b);
+    nvn_gpu_err e; g_c937_why[0] = 0; __atomic_store_n(&g_c937_ready, 0, __ATOMIC_RELEASE);
+    nvn_gpu_rc r = nvn_gpu_cmd_commit(c, 117, c937_done, NULL, &e);
+    CHECK(r.code == NVN_GPU_E_ARG, "C937 release 后再用应 E_ARG，实为 %d", r.code);
+    nvn_gpu_fence_wait(117, 5000000000ull, &e);   // 失败段也走完成回调；回调可能在别的线程上稍后才到，最多再等 2 秒
+    for (int i = 0; i < 200 && !__atomic_load_n(&g_c937_ready, __ATOMIC_ACQUIRE); i++) { struct timespec ts = {0, 10000000}; nanosleep(&ts, NULL); }
+    CHECK(__atomic_load_n(&g_c937_ready, __ATOMIC_ACQUIRE), "C937 失败段 2 秒内没走完成回调");
+    CHECK(strstr(g_c937_why, "release 之后仍在使用句柄（buf ") && strstr(g_c937_why, "录制于 nvn_gpu_buf_use:"),
+          "C937 报错应带类型与录制位置：%s", g_c937_why);
+}
+
 // C75：深度偏移。开关（NVN 偏移开关的填充位 = 4）进管线，factor / units / clamp 走动态状态。
 //   深度整屏清成 0.5；两笔都画在 z = 0.5、深度 LESS，动态状态里都带 units = −4、factor = 1000：
 //   ① 绿，左半屏，管线没开偏移 → 0.5 < 0.5 不成立，画不上；
@@ -5554,6 +5872,639 @@ static void c88_pipe_cache(const char *sdir) {
     rmdir(dir); unlink(notdir); rmdir(root);
 }
 
+// ---- C89：驱动管线缓存的局中补写（#868）----
+// 契约（backend_vulkan.c「局中补写」一节）：给了缓存目录，建管线累计「新增 ≥ N 条」，且头一次距会话开始 ≥ F、之后距上一次保存 ≥ E 时，
+// 后端取一份驱动缓存数据交给后台线程落盘（沿用 nvk_driver_cache_write：临时文件 + fsync + 原子替换），被系统杀掉的局也给下一局留下缓存。
+// 缺省 N=64 条 / F=10 秒 / E=30 秒；宿主用例用调试开关 nvk_plc_new / nvk_plc_first_ms / nvk_plc_every_ms 改成 3 条 / 0 / 0。
+// 驱动缓存数据的大小由用例定（见 g_plc_extra 一段）：lavapipe 的数据恒为文件头，不随管线变，看不出「变没变」。下面「数据 X 字节」= lavapipe 真数据 + 用例补的填充。
+// 期望（手算，不取自被测实现；C88 那组 3 条管线 = 2 图形 + 1 计算，阈值 3 条时第 3 条建完的那一刻触发）：
+//  ① 空目录、数据 S1：建完 3 条（不 close）→ 交给后台写 1 次（统计 pipe_cache_saves +1，建完即可见）；后台写成功 1 次后，目录里恰好 1 个合规文件、
+//     没有临时文件，大小 = 文件头 48 字节 + S1；close 不重写（inode、修改时间都不变：数据大小与上次保存一致就不写）；下一局读回 S1 字节、rejected = 0；
+//  ② 负对照（各只改一处、其余同①）：条数没到（阈值 4）/ 头一次的等待没到（1000000 ms）/ 开关 nvk_pipe_cache=0 / 不给目录 → 不触发，close 前目录里没有文件；
+//     头一次的等待 1500 ms 的对照：开会话后立刻建够 3 条 → 不触发；光是时间到了也不触发；到点之后再建管线 → 触发、写成；
+//  ③ 目录里已有①写完的文件（数据 S1），同样 3 条管线、驱动数据仍是 S1 → 触发了，但与上次一致：不写（saves_same +1、saves 不变），文件原样；
+//     检查过之后再建 3 条 → 再检查 1 次（共 2 次，不是每条都查）；
+//     对照：驱动数据变大（S2 > S1，只改这一处）→ 写 1 次、文件变成 48 + S2；
+//  ④ 第二次保存：头一次之后驱动数据变大、再建 3 条新管线——间隔没到（1000000 ms）→ 不再触发（saves、saves_same 都不动）；间隔 0 → 再触发 1 次、文件变大；
+//  ⑤ 写失败只记日志：目录在会话中途被换成普通文件 → 后台写失败 1 次，会话照开、管线照建、close 返回 OK；
+//     失败只是这一次：临时文件路径被一个目录占着 → 局中写失败 1 次、目录里没有正式文件；放开后 close，数据大小虽与「上次保存」一致也要再写一次 → 目录里有了恰好 1 个合规文件；
+//  ⑥ 后台写途中收局：把临时文件路径占成一个没人读的管道，后台写卡在开文件上；close(200 ms) 返回 OK，用时 ≥ 150 ms（等了后台写，算进截止时间）
+//     且 < 3 s（到期放弃，不挂住）；旧文件原样；写还卡着时数据又变大、再建 3 条新管线 → 不再起新的写（同一时刻最多一次、不排队）；
+//     放开管道后后台写自己失败收尾、把临时文件清掉；下一局读回旧文件、rejected = 0；
+//  ⑦ 被杀（不经关局）：子进程建完管线、等局中写完，自己 SIGKILL；目录里恰好 1 个合规文件，下一局读回、rejected = 0；
+//  ⑧ 被杀在写盘途中：子进程的后台写卡在管道上时 SIGKILL；旧文件逐字节不变，残留的临时文件不碍事：下一局照常开、读回旧文件、rejected = 0（读了管道会卡死）；
+//  ⑨ 临时文件残留：<文件名>.tmp.<pid> 里是垃圾——没有正式文件时下一局 loaded = 0 且 rejected = 0（残留不当坏文件）、收尾照常写出正式文件；有正式文件时读回正式文件；残留原样不动；
+//     负对照：同样的垃圾放在正式文件名上 → rejected = 1（证明上面的 rejected = 0 不是计数坏了）；
+//  ⑩ 两个线程同时建管线、驱动数据随管线数变大 → 局中写盘与建管线并行（校验层 0 条由 run.sh 统一核）：每次触发的写都成功、目录里恰好 1 个合规文件，下一局读回、rejected = 0；
+//  ⑪ 缓存目录和它的上一层都还不存在（真机头一局的常态）→ 局中写盘由后台线程补出目录，写完（还没 close）目录里就有 1 个合规文件。
+#define C89_HDR 48   // 文件头：魔数 4 + 版本 4 + 长度 8 + SHA-256 32（nvn_vk_driver_cache.c）
+#define C89_X1 64    // 驱动数据的填充（字节）：数据 S1 = lavapipe 真数据 + 64
+#define C89_X2 128   // 驱动数据「变大」后的填充：S2 = lavapipe 真数据 + 128
+#define C89_X3 192   // 再变大一次：S3
+
+struct c89_st { uint64_t saves, ok, failed, same, loaded, rejected, made; int seen; };
+
+static void c89_stat_cb(void *u, const char *name, uint64_t v) {
+    struct c89_st *o = (struct c89_st *)u;
+    if (!strcmp(name, "pipe_cache_saves")) { o->saves = v; o->seen++; }
+    else if (!strcmp(name, "pipe_cache_saves_ok")) { o->ok = v; o->seen++; }
+    else if (!strcmp(name, "pipe_cache_saves_failed")) { o->failed = v; o->seen++; }
+    else if (!strcmp(name, "pipe_cache_saves_same")) { o->same = v; o->seen++; }
+    else if (!strcmp(name, "pipe_cache_loaded_bytes")) { o->loaded = v; o->seen++; }
+    else if (!strcmp(name, "pipe_cache_rejected")) { o->rejected = v; o->seen++; }
+    else if (!strcmp(name, "pipes_created")) { o->made = v; o->seen++; }
+}
+
+static struct c89_st c89_stats(void) {
+    struct c89_st o; memset(&o, 0, sizeof o);
+    nvn_gpu_stats(c89_stat_cb, &o, 0);
+    return o;
+}
+
+static void c89_sleep_ms(int ms) { struct timespec ts = {ms / 1000, (long)(ms % 1000) * 1000000L}; nanosleep(&ts, NULL); }
+
+static double c89_now_ms(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (double)ts.tv_sec * 1e3 + (double)ts.tv_nsec / 1e6; }
+
+// 开会话：cache_dir 与三个阈值（-1 = 缺省）只在这一次 open 里生效。
+static int c89_open(const char *dir, int nnew, int first_ms, int every_ms) {
+    g_plc_thr_new = nnew; g_plc_thr_first_ms = first_ms; g_plc_thr_every_ms = every_ms;
+    g_desc.cache_dir = dir;
+    int ok = open_backend();
+    g_desc.cache_dir = NULL;
+    g_plc_thr_new = g_plc_thr_first_ms = g_plc_thr_every_ms = -1;
+    return ok;
+}
+
+// 等后台写收尾（成功或失败都算）：比基线多 want 次，最多等 timeout_ms。
+static struct c89_st c89_wait_done(const struct c89_st *base, unsigned want, int timeout_ms) {
+    struct c89_st s = c89_stats();
+    for (int i = 0; i < timeout_ms / 2 && (s.ok + s.failed) - (base->ok + base->failed) < want; i++) { c89_sleep_ms(2); s = c89_stats(); }
+    return s;
+}
+
+// 「没被重写」按名字 + 大小 + 修改时间 + 内容判，不比 inode：Mac 上 colima 的 virtiofs 在虚拟机丢页缓存（每 16 秒一次 drop_caches）后，
+// 同一个没动过的文件会换 inode 号（实测 7237 → 7238），按 inode 判会把「原样」误报成「重写」
+struct c89_dir { int nreg, nother; char name[256]; long size; uint64_t sum; struct timespec mtim; };
+static uint64_t c89_file_sum(const char *path) {   // FNV-1a；读不出算 0（与任何真内容的和都不相等的概率可忽略）
+    FILE *f = fopen(path, "rb"); if (!f) return 0;
+    uint64_t h = 1469598103934665603ull; int c;
+    while ((c = fgetc(f)) != EOF) { h ^= (uint64_t)(unsigned char)c; h *= 1099511628211ull; }
+    fclose(f); return h;
+}
+
+// 数目录：正式文件（普通文件、名字里没有 .tmp.）记名字 / 大小 / inode / 修改时间；其余（临时文件、管道、子目录）都算 nother。
+static struct c89_dir c89_scan(const char *dir) {
+    struct c89_dir o; memset(&o, 0, sizeof o);
+    DIR *d = opendir(dir);
+    if (!d) { o.nreg = -1; return o; }
+    struct dirent *de;
+    while ((de = readdir(d))) {
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+        char p[900]; struct stat st;
+        snprintf(p, sizeof p, "%s/%s", dir, de->d_name);
+        if (!strstr(de->d_name, ".tmp.") && stat(p, &st) == 0 && S_ISREG(st.st_mode)) {
+            o.nreg++; snprintf(o.name, sizeof o.name, "%s", de->d_name);
+            o.size = (long)st.st_size; o.sum = c89_file_sum(p); o.mtim = st.st_mtim;
+        } else o.nother++;
+    }
+    closedir(d);
+    return o;
+}
+
+static int c89_same_file(const struct c89_dir *a, const struct c89_dir *b) {
+    return a->nreg == 1 && b->nreg == 1 && a->sum == b->sum && a->size == b->size &&
+           a->mtim.tv_sec == b->mtim.tv_sec && a->mtim.tv_nsec == b->mtim.tv_nsec && !strcmp(a->name, b->name);
+}
+
+// 再建 n 条新的图形管线：颜色写掩码 first_mask.. 依次不同（1..14）、图元 prim 给定 → 每条都是新管线；每条之后歇 gap_ms 毫秒（0 = 不歇）。
+static void c89_more_pipes_with(nvn_gpu_shader vs, nvn_gpu_shader fs, unsigned first_mask, unsigned n, unsigned prim, unsigned gap_ms) {
+    for (unsigned i = 0; i < n; i++) {
+        nvn_gpu_pipe_desc pd; nvn_gpu_pipe p = NULL; nvn_gpu_err e;
+        fill_gpipe_desc(&pd, vs, fs, 0);
+        pd.chmask.mask = (first_mask + i) & 0xF;
+        pd.prim = prim;
+        CHECK(OK(nvn_gpu_pipe_get(&pd, NVN_GPU_PIPE_SYNC, &p, &e)) && p, "C89 追加管线 mask=%u prim=%u：%d %s", first_mask + i, prim, e.rc.code, e.why);
+        if (gap_ms) c89_sleep_ms((int)gap_ms);
+    }
+}
+
+static void c89_more_pipes(const char *sdir, unsigned n) {
+    nvn_gpu_shader vs = NULL, fs = NULL; void *vm = NULL, *fm = NULL;
+    if (!load_shader_pair(sdir, "tri3.vert", "out1_green.frag", NULL, NULL, &vs, &fs, &vm, &fm)) { CHECK(0, "C89 读不到 out1_green"); return; }
+    c89_more_pipes_with(vs, fs, 1, n, 4, 0);
+    nvn_gpu_shader_release(vs); nvn_gpu_shader_release(fs); free(vm); free(fm);
+}
+
+// 只建 1 条图形管线（solid_green）的会话：给后面几例铺一个「上一局写完的旧文件」。默认阈值，收尾写盘。
+static int c89_seed(const char *sdir, const char *dir) {
+    if (!c89_open(dir, -1, -1, -1)) return 0;
+    nvn_gpu_shader vs = NULL, fs = NULL; void *vm = NULL, *fm = NULL;
+    int ok = load_shader_pair(sdir, "tri3.vert", "solid_green.frag", NULL, NULL, &vs, &fs, &vm, &fm);
+    if (ok) {
+        nvn_gpu_pipe_desc pd; nvn_gpu_pipe p = NULL; nvn_gpu_err e;
+        fill_gpipe_desc(&pd, vs, fs, 0);
+        ok = OK(nvn_gpu_pipe_get(&pd, NVN_GPU_PIPE_SYNC, &p, &e)) && p;
+        nvn_gpu_shader_release(vs); nvn_gpu_shader_release(fs); free(vm); free(fm);
+    }
+    nvn_gpu_err e2;
+    int closed = OK(nvn_gpu_close(5000000000ull, &e2));
+    return ok && closed;
+}
+
+// 下一局：默认阈值，不建管线，读统计后关。返回读到的字节数与 rejected。
+static struct c89_st c89_readback(const char *dir) {
+    struct c89_st z; memset(&z, 0, sizeof z);
+    if (!c89_open(dir, -1, -1, -1)) { CHECK(0, "C89 读回会话 open 失败"); return z; }
+    struct c89_st s = c89_stats();
+    nvn_gpu_err e;
+    CHECK(OK(nvn_gpu_close(5000000000ull, &e)), "C89 读回会话 close：%d %s", e.rc.code, e.why);
+    return s;
+}
+
+// 放开被占成管道的临时文件路径：读端打开让后台写的 open 返回，再把它写来的字节读掉，直到它自己失败收尾（管道上 fsync 不成，临时文件被它自己清掉）。
+// 读端必须一直开着到路径消失：后台写在本进程里，读端早关了它再 write 就是 SIGPIPE。read 返回 0 只表示「此刻没有写端」，不是收尾。
+struct c89_unblock { const char *fifo; atomic_int go; };
+static void *c89_unblock_main(void *arg) {
+    struct c89_unblock *u = (struct c89_unblock *)arg;
+    for (int i = 0; i < 350 && !atomic_load(&u->go); i++) c89_sleep_ms(10);   // 最多等 3.5 s：close 要是挂住了，到点也放开，免得整个用例卡死
+    int fd = open(u->fifo, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd >= 0) {
+        static char buf[65536];
+        for (int i = 0; i < 2000; i++) {   // 最多 10 s
+            ssize_t n = read(fd, buf, sizeof buf);
+            if (n > 0) continue;
+            struct stat st;
+            if (stat(u->fifo, &st) != 0) break;   // 路径已被后台写清掉
+            c89_sleep_ms(5);
+        }
+        close(fd);
+    }
+    return NULL;
+}
+
+static int c89_wait_gone(const char *path, int timeout_ms) {
+    struct stat st;
+    for (int i = 0; i < timeout_ms / 5; i++) { if (stat(path, &st) != 0) return 1; c89_sleep_ms(5); }
+    return stat(path, &st) != 0;
+}
+
+// 子进程：被 SIGKILL 的那一局。argv = <exe> <着色器目录> --c89-child <缓存目录> <开工信号文件> <kill-after-ok | kill-after-start>
+// 等 parent 摆好现场（开工信号文件出现）→ 开会话（阈值 3 / 0 / 0）→ 建 3 条管线 → 等到局中写完（ok）或后台写已交出去（start）→ 自己 SIGKILL，不 close。
+static int c89_child_main(char **argv) {
+    const char *sdir = argv[1], *dir = argv[3], *gate = argv[4], *mode = argv[5];
+    setvbuf(stdout, NULL, _IONBF, 0);   // 被杀时不丢日志
+    for (int i = 0; i < 3000 && access(gate, F_OK) != 0; i++) c89_sleep_ms(10);
+    if (access(gate, F_OK) != 0) { printf("C89 子进程等不到开工信号\n"); return 3; }
+    memset(&g_desc, 0, sizeof g_desc); g_desc.host_device = &g_dev; g_desc.app_label = "c89-child";
+    g_plc_strip_tail = 1;
+    g_plc_extra = !strcmp(mode, "kill-after-start") ? C89_X2 : C89_X1;   // 写盘途中被杀那局：驱动数据比旧文件里的大，后端才会真去写
+    if (!c89_open(dir, 3, 0, 0)) return 3;
+    struct c89_st b = c89_stats();
+    c88_make_pipes(sdir);
+    if (g_fail) return 4;
+    int want_ok = !strcmp(mode, "kill-after-ok");
+    for (int i = 0; i < 5000; i++) {   // 最多 10 s
+        struct c89_st s = c89_stats();
+        if (want_ok ? s.ok > b.ok : s.saves > b.saves) { fflush(stdout); kill(getpid(), SIGKILL); }
+        c89_sleep_ms(2);
+    }
+    printf("C89 子进程等不到局中写（%s）\n", mode);
+    return 5;
+}
+
+extern char **environ;
+// 起子进程（还是这个可执行文件，Linux 下用 /proc/self/exe，不依赖 argv[0] 怎么写的）；返回 pid（失败 -1）。
+static pid_t c89_spawn_child(const char *sdir, const char *dir, const char *gate, const char *mode) {
+    char *args[] = {(char *)"t_backend_vk", (char *)sdir, (char *)"--c89-child", (char *)dir, (char *)gate, (char *)mode, NULL};
+    pid_t pid = -1;
+    fflush(stdout);
+    if (posix_spawn(&pid, "/proc/self/exe", NULL, NULL, args, environ) != 0) return -1;
+    return pid;
+}
+
+// 等子进程收尾（最多 60 s，到点补一刀）；返回 waitpid 的状态，-1 = 没等到。
+static int c89_reap(pid_t pid) {
+    int st = 0;
+    for (int i = 0; i < 6000; i++) {
+        pid_t r = waitpid(pid, &st, WNOHANG);
+        if (r == pid) return st;
+        if (r < 0) return -1;
+        c89_sleep_ms(10);
+    }
+    kill(pid, SIGKILL); waitpid(pid, &st, 0);
+    return -1;
+}
+
+static int c89_touch(const char *path, const void *bytes, size_t n) {
+    FILE *f = fopen(path, "wb");
+    if (!f) return 0;
+    if (n) fwrite(bytes, 1, n, f);
+    fclose(f);
+    return 1;
+}
+
+static void c89_rm_tree(const char *dir) {
+    DIR *d = opendir(dir);
+    if (!d) return;
+    struct dirent *de;
+    while ((de = readdir(d))) {
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+        char p[900]; snprintf(p, sizeof p, "%s/%s", dir, de->d_name);
+        unlink(p);
+    }
+    closedir(d);
+    rmdir(dir);
+}
+
+// 一个建管线的线程：三种图元（三角形 / 条带 / 扇）× 颜色写掩码 1..14 = 42 条新管线，每条之后歇 1 ms（让局中写盘在建管线的同时一直在发生）。
+struct c89_thr { nvn_gpu_shader vs, fs; };
+static void *c89_thr_main(void *arg) {
+    struct c89_thr *t = (struct c89_thr *)arg;
+    for (unsigned prim = 4; prim <= 6; prim++) c89_more_pipes_with(t->vs, t->fs, 1, 14, prim, 1);
+    return NULL;
+}
+
+// C907：停局但会话保留到进程退出（#860 / #907 Stop 不关后端，走不到 close 的收尾写）时，nvn_gpu_vk_pipe_cache_flush 把驱动管线缓存落盘。
+//  ① 阈值调到不会触发局中补写、建 3 条管线：调用前目录为空（负对照：没有这次调用就没有文件）；
+//  ② 调用后后台写完成 1 次、目录里恰好 1 个正式文件、无残留临时文件；会话仍开着（之后还能建管线）；
+//  ③ 再调一次、没有新管线：记「与上次一致没写」，文件原样。
+void nvn_gpu_vk_pipe_cache_flush(void);
+static void c907_retained_flush(const char *sdir) {
+    char tmpl[512];
+    const char *tmp = getenv("TMPDIR");
+    snprintf(tmpl, sizeof tmpl, "%s/s2a-plc907.XXXXXX", tmp && tmp[0] ? tmp : "/tmp");
+    char *dir = mkdtemp(tmpl);
+    CHECK(dir != NULL, "C907 建不出临时目录");
+    if (!dir) return;
+    size_t keep_extra = g_plc_extra, keep_per = g_plc_per_pipe; int keep_strip = g_plc_strip_tail;
+    g_plc_extra = 0; g_plc_per_pipe = 0; g_plc_strip_tail = 0;
+    nvn_gpu_err e;
+    CHECK(c89_open(dir, 1000000, 3600000, 3600000), "C907 open");
+    c88_make_pipes(sdir);
+    struct c89_dir before = c89_scan(dir);
+    CHECK(before.nreg == 0 && before.nother == 0, "C907 ① 调用前目录应为空（局中补写不该触发）→ 正式 %d 个、其他 %d 个", before.nreg, before.nother);
+    struct c89_st b = c89_stats();
+    nvn_gpu_vk_pipe_cache_flush();
+    struct c89_st a = c89_wait_done(&b, 1, 5000);
+    struct c89_dir d1 = c89_scan(dir);
+    CHECK(a.saves == b.saves + 1 && a.ok == b.ok + 1 && a.failed == b.failed, "C907 ② 应交后台写 1 次且成功 → saves +%llu ok +%llu failed +%llu",
+          (unsigned long long)(a.saves - b.saves), (unsigned long long)(a.ok - b.ok), (unsigned long long)(a.failed - b.failed));
+    CHECK(d1.nreg == 1 && d1.nother == 0 && d1.size > 0, "C907 ② 目录里应恰好 1 个正式文件、无临时文件 → 正式 %d 个、其他 %d 个、%ld 字节", d1.nreg, d1.nother, d1.size);
+    c89_sleep_ms(20);   // 后台写线程先记成功、再清「在飞」：留一点时间让它清完，第二次调用不因「在飞」被跳过
+    nvn_gpu_vk_pipe_cache_flush();
+    struct c89_st a2 = c89_stats();
+    struct c89_dir d2 = c89_scan(dir);
+    CHECK(a2.saves == a.saves && a2.same == a.same + 1, "C907 ③ 没有新管线：不该再写、应记一次「一致没写」→ saves +%llu same +%llu",
+          (unsigned long long)(a2.saves - a.saves), (unsigned long long)(a2.same - a.same));
+    CHECK(c89_same_file(&d1, &d2), "C907 ③ 文件应原样不动");
+    CHECK(OK(nvn_gpu_close(5000000000ull, &e)), "C907 close：%d %s", e.rc.code, e.why);
+    g_plc_extra = keep_extra; g_plc_per_pipe = keep_per; g_plc_strip_tail = keep_strip;
+    c89_rm_tree(dir);
+    printf("C907 保留路径管线缓存落盘：已核对（%ld 字节）\n", d1.size);
+}
+
+static void c89_midrun_save(const char *sdir) {
+    char tmpl[512];
+    const char *tmp = getenv("TMPDIR");
+    snprintf(tmpl, sizeof tmpl, "%s/s2a-plc89.XXXXXX", tmp && tmp[0] ? tmp : "/tmp");
+    char *root = mkdtemp(tmpl);
+    CHECK(root != NULL, "C89 建不出临时目录");
+    if (!root) return;
+    nvn_gpu_err e;
+    // 先确认后端有局中补写的统计项：老后端没有它，整个 C89 就地报红（不往下跑，免得老实现上的管道用例卡死在收尾写盘上）。
+    CHECK(c89_open(NULL, -1, -1, -1), "C89 open");
+    struct c89_st probe = c89_stats();
+    CHECK(OK(nvn_gpu_close(5000000000ull, &e)), "C89 probe close：%d %s", e.rc.code, e.why);
+    CHECK(probe.seen == 7, "C89 后端应报出局中补写的统计项（pipe_cache_saves / _ok / _failed / _same）→ 读到 %d 项（期望 7 项）", probe.seen);
+    if (probe.seen != 7) { rmdir(root); return; }
+    g_plc_strip_tail = 1; g_plc_extra = C89_X1;   // 驱动数据 S1 = lavapipe 真数据 + 64 字节填充（见 g_plc_extra 一段）
+
+    // ① 空目录：局中写盘、close 不重写、下一局读回
+    char d1[600]; snprintf(d1, sizeof d1, "%s/c1", root); CHECK(mkdir(d1, 0700) == 0, "C89 建不出 c1");
+    CHECK(c89_open(d1, 3, 0, 0), "C89 ① open");
+    struct c89_st b1 = c89_stats();
+    c88_make_pipes(sdir);
+    struct c89_st s1 = c89_stats();
+    size_t mid1 = g_plc_rec.last_data;
+    CHECK(s1.saves == b1.saves + 1, "C89 ① 建完 3 条应触发 1 次局中保存 → 触发 %llu 次", (unsigned long long)(s1.saves - b1.saves));
+    struct c89_st w1 = c89_wait_done(&b1, 1, 5000);
+    CHECK(w1.ok == b1.ok + 1 && w1.failed == b1.failed, "C89 ① 后台写应成功 1 次 → 成功 +%llu、失败 +%llu", (unsigned long long)(w1.ok - b1.ok), (unsigned long long)(w1.failed - b1.failed));
+    struct c89_dir a1 = c89_scan(d1);
+    CHECK(a1.nreg == 1 && c88_name_ok(a1.name) && a1.nother == 0, "C89 ① 局中写完（还没 close）目录里应恰好 1 个合规文件、没有临时文件 → 文件 %d、其它 %d、名字 %s", a1.nreg, a1.nother, a1.name);
+    CHECK(mid1 > C89_X1 && a1.size == (long)mid1 + C89_HDR, "C89 ① 文件大小应 = 文件头 %d + 局中取出的 %zu 字节（> 填充 %d）→ %ld", C89_HDR, mid1, C89_X1, a1.size);
+    CHECK(OK(nvn_gpu_close(5000000000ull, &e)), "C89 ① close：%d %s", e.rc.code, e.why);
+    struct c89_dir a1b = c89_scan(d1);
+    CHECK(c89_same_file(&a1, &a1b) && a1b.nother == 0, "C89 ① close 不应重写：数据大小与局中保存时一致 → 大小 / 修改时间 / 内容不变");
+    struct c89_st r1 = c89_readback(d1);
+    CHECK(r1.loaded == mid1 && r1.rejected == 0, "C89 ① 下一局读回 %llu 字节（期望 %zu）、rejected=%llu（期望 0）", (unsigned long long)r1.loaded, mid1, (unsigned long long)r1.rejected);
+
+    // ② 负对照：各只改一处
+    static const struct { const char *what; int nnew, first, every, off, nodir; int want_final; } neg[] = {
+        {"条数没到（阈值 4 条，只建 3 条）", 4, 0, 0, 0, 0, 1},
+        {"头一次的等待没到（1000000 ms）", 3, 1000000, 0, 0, 0, 1},
+        {"开关 nvk_pipe_cache=0", 3, 0, 0, 1, 0, 0},
+        {"不给缓存目录", 3, 0, 0, 0, 1, 0},
+    };
+    for (int k = 0; k < 4; k++) {
+        char dn[600]; snprintf(dn, sizeof dn, "%s/n%d", root, k); CHECK(mkdir(dn, 0700) == 0, "C89 建不出 n%d", k);
+        g_plc_flag_off = neg[k].off;
+        int op = c89_open(neg[k].nodir ? NULL : dn, neg[k].nnew, neg[k].first, neg[k].every);
+        g_plc_flag_off = 0;
+        CHECK(op, "C89 ② %s：open", neg[k].what);
+        if (!op) continue;
+        struct c89_st nb = c89_stats();
+        c88_make_pipes(sdir);
+        struct c89_st ns = c89_stats();
+        CHECK(ns.saves == nb.saves && ns.same == nb.same, "C89 ② %s：不应触发 → 触发 %llu 次、「没变」%llu 次", neg[k].what, (unsigned long long)(ns.saves - nb.saves), (unsigned long long)(ns.same - nb.same));
+        struct c89_dir an = c89_scan(dn);
+        CHECK(an.nreg == 0 && an.nother == 0, "C89 ② %s：close 前目录里不应有文件 → 文件 %d、其它 %d", neg[k].what, an.nreg, an.nother);
+        CHECK(OK(nvn_gpu_close(5000000000ull, &e)), "C89 ② %s：close：%d %s", neg[k].what, e.rc.code, e.why);
+        struct c89_dir af = c89_scan(dn);
+        CHECK(af.nreg == neg[k].want_final && af.nother == 0, "C89 ② %s：close 后目录里应有 %d 个正式文件（收尾写盘照旧）→ %d 个、其它 %d", neg[k].what, neg[k].want_final, af.nreg, af.nother);
+        c89_rm_tree(dn);
+    }
+    {   // ② 对照：「头一次的等待」只差时间这一个变量——开会话后没到点不触发；到点之后再建管线才触发（只在建管线时检查，光是时间到了不触发）
+        char dt[600]; snprintf(dt, sizeof dt, "%s/c2t", root); CHECK(mkdir(dt, 0700) == 0, "C89 建不出 c2t");
+        double ta = c89_now_ms();
+        int opt = c89_open(dt, 3, 1500, 0);
+        double tb = c89_now_ms();   // 后端的「开会话时刻」落在 [ta, tb] 之间
+        CHECK(opt, "C89 ②t open");
+        if (opt) {
+            struct c89_st bt = c89_stats();
+            c88_make_pipes(sdir);
+            double tc = c89_now_ms();
+            struct c89_st st = c89_stats();
+            if (tc - ta < 1400) CHECK(st.saves == bt.saves && st.same == bt.same, "C89 ②t 开会话 %.0f ms 时已建够 3 条、等待 1500 ms 还没到：不应触发 → 触发 %llu 次、「没变」%llu 次", tc - ta, (unsigned long long)(st.saves - bt.saves), (unsigned long long)(st.same - bt.same));
+            else printf("C89 ②t 本机太慢（开会话到建完 3 条用了 %.0f ms），「没到点不触发」这半条跳过\n", tc - ta);
+            while (c89_now_ms() - tb < 1600) c89_sleep_ms(20);   // 从 open 返回算起也已过 1.5 s：后端那边一定到点了
+            struct c89_st mt = c89_stats();
+            CHECK(mt.saves == st.saves, "C89 ②t 光是时间到了不应触发（触发只在建管线时检查）→ 多触发 %llu 次", (unsigned long long)(mt.saves - st.saves));
+            c89_more_pipes(sdir, 3);
+            struct c89_st wt = c89_wait_done(&bt, 1, 5000);
+            CHECK(wt.saves == bt.saves + 1 && wt.ok == bt.ok + 1, "C89 ②t 到点之后再建管线应触发并写成 1 次 → 触发 +%llu、成功 +%llu", (unsigned long long)(wt.saves - bt.saves), (unsigned long long)(wt.ok - bt.ok));
+            CHECK(OK(nvn_gpu_close(5000000000ull, &e)), "C89 ②t close：%d %s", e.rc.code, e.why);
+        }
+        c89_rm_tree(dt);
+    }
+
+    // ③ 旧文件是完整的（①留下的，数据 S1），同样 3 条管线、驱动数据仍是 S1 → 触发了但与上次一致：不写
+    CHECK(c89_open(d1, 3, 0, 0), "C89 ③ open");
+    struct c89_st b3 = c89_stats();
+    c88_make_pipes(sdir);
+    struct c89_st s3 = c89_stats();
+    CHECK(s3.saves == b3.saves && s3.same == b3.same + 1, "C89 ③ 数据与上次一致：应触发检查 1 次但不写 → 写 +%llu 次、「没变」+%llu 次（期望 0 / 1）", (unsigned long long)(s3.saves - b3.saves), (unsigned long long)(s3.same - b3.same));
+    c89_more_pipes(sdir, 3);   // 检查过一次（没变）之后基线就推进了：要再多 3 条才再查一次，不是每建一条就查（每次查都是一回取数据的调用）
+    struct c89_st s3c = c89_stats();
+    CHECK(s3c.saves == b3.saves && s3c.same == b3.same + 2, "C89 ③ 检查过之后再建 3 条：应再检查 1 次（共 2 次）而不是每条都查 → 写 +%llu 次、「没变」+%llu 次（期望 0 / 2）", (unsigned long long)(s3c.saves - b3.saves), (unsigned long long)(s3c.same - b3.same));
+    CHECK(OK(nvn_gpu_close(5000000000ull, &e)), "C89 ③ close：%d %s", e.rc.code, e.why);
+    struct c89_dir a3 = c89_scan(d1);
+    CHECK(c89_same_file(&a1, &a3) && a3.nother == 0, "C89 ③ 文件应原样（大小 / 修改时间 / 内容不变）");
+    // ③ 对照：只把驱动数据变大（S2），其余同上 → 这回要写
+    g_plc_extra = C89_X2;
+    CHECK(c89_open(d1, 3, 0, 0), "C89 ③ 对照 open");
+    struct c89_st b3b = c89_stats();
+    c88_make_pipes(sdir);
+    struct c89_st w3b = c89_wait_done(&b3b, 1, 5000);
+    CHECK(w3b.saves == b3b.saves + 1 && w3b.ok == b3b.ok + 1 && w3b.same == b3b.same, "C89 ③ 对照（驱动数据变大）：应写 1 次 → 写 +%llu、成功 +%llu、「没变」+%llu", (unsigned long long)(w3b.saves - b3b.saves), (unsigned long long)(w3b.ok - b3b.ok), (unsigned long long)(w3b.same - b3b.same));
+    struct c89_dir a3b = c89_scan(d1);
+    CHECK(a3b.nreg == 1 && a3b.nother == 0 && a3b.size == a1.size + (C89_X2 - C89_X1), "C89 ③ 对照：文件应变成 48 + S2（比原来大 %d 字节）→ %ld → %ld 字节", C89_X2 - C89_X1, a1.size, a3b.size);
+    CHECK(OK(nvn_gpu_close(5000000000ull, &e)), "C89 ③ 对照 close：%d %s", e.rc.code, e.why);
+    g_plc_extra = C89_X1;
+
+    // ④ 第二次保存：驱动数据变大后，间隔没到不再触发；间隔 0 再触发、文件变大
+    char d4[600], d4b[600]; snprintf(d4, sizeof d4, "%s/c4a", root); snprintf(d4b, sizeof d4b, "%s/c4b", root);
+    CHECK(mkdir(d4, 0700) == 0 && mkdir(d4b, 0700) == 0, "C89 建不出 c4");
+    CHECK(c89_open(d4, 3, 0, 1000000), "C89 ④ 间隔没到 open");
+    struct c89_st b4 = c89_stats();
+    c88_make_pipes(sdir);
+    struct c89_st w4 = c89_wait_done(&b4, 1, 5000);
+    CHECK(w4.saves == b4.saves + 1 && w4.ok == b4.ok + 1, "C89 ④ 头一次应写成 1 次 → 触发 +%llu、成功 +%llu", (unsigned long long)(w4.saves - b4.saves), (unsigned long long)(w4.ok - b4.ok));
+    g_plc_extra = C89_X2;   // 驱动数据变大了：只剩「间隔没到」一个理由不写
+    c89_more_pipes(sdir, 3);
+    struct c89_st s4 = c89_stats();
+    CHECK(s4.saves == w4.saves && s4.same == w4.same, "C89 ④ 再建 3 条新管线、数据也变大了，但距上次保存的间隔没到 → 不应再触发（多触发 %llu 次、「没变」+%llu）", (unsigned long long)(s4.saves - w4.saves), (unsigned long long)(s4.same - w4.same));
+    CHECK(OK(nvn_gpu_close(5000000000ull, &e)), "C89 ④ 间隔没到 close：%d %s", e.rc.code, e.why);
+    g_plc_extra = C89_X1;
+    CHECK(c89_open(d4b, 3, 0, 0), "C89 ④ 间隔 0 open");
+    struct c89_st b4b = c89_stats();
+    c88_make_pipes(sdir);
+    struct c89_st w4b = c89_wait_done(&b4b, 1, 5000);
+    struct c89_dir a4 = c89_scan(d4b);
+    g_plc_extra = C89_X2;
+    c89_more_pipes(sdir, 3);
+    struct c89_st s4b = c89_stats();
+    CHECK(s4b.saves == w4b.saves + 1, "C89 ④ 间隔 0：再建 3 条新管线应再触发 1 次 → +%llu 次", (unsigned long long)(s4b.saves - w4b.saves));
+    struct c89_st x4b = c89_wait_done(&w4b, 1, 5000);
+    struct c89_dir a4b = c89_scan(d4b);
+    CHECK(x4b.ok == w4b.ok + 1 && a4b.nreg == 1 && a4b.size > a4.size, "C89 ④ 第二次保存应成功且文件变大 → 成功 +%llu、%ld → %ld 字节", (unsigned long long)(x4b.ok - w4b.ok), a4.size, a4b.size);
+    CHECK(OK(nvn_gpu_close(5000000000ull, &e)), "C89 ④ 间隔 0 close：%d %s", e.rc.code, e.why);
+    g_plc_extra = C89_X1;
+    c89_rm_tree(d4); c89_rm_tree(d4b);
+
+    // ⑤ 写失败只记日志：目录在会话中途被换成普通文件
+    char d5[600]; snprintf(d5, sizeof d5, "%s/c5", root); CHECK(mkdir(d5, 0700) == 0, "C89 建不出 c5");
+    CHECK(c89_open(d5, 3, 0, 0), "C89 ⑤ open");
+    struct c89_st b5 = c89_stats();
+    CHECK(rmdir(d5) == 0 && c89_touch(d5, "x", 1), "C89 ⑤ 换不掉目录");
+    c88_make_pipes(sdir);
+    struct c89_st w5 = c89_wait_done(&b5, 1, 5000);
+    CHECK(w5.saves == b5.saves + 1 && w5.failed == b5.failed + 1 && w5.ok == b5.ok, "C89 ⑤ 后台写应失败 1 次 → 触发 +%llu、失败 +%llu、成功 +%llu", (unsigned long long)(w5.saves - b5.saves), (unsigned long long)(w5.failed - b5.failed), (unsigned long long)(w5.ok - b5.ok));
+    CHECK(OK(nvn_gpu_close(5000000000ull, &e)), "C89 ⑤ 写失败后会话照常 close 返回 OK：%d %s", e.rc.code, e.why);
+    unlink(d5);
+
+    // ⑤ 续：失败只是这一次。临时文件路径被一个目录占着 → 局中写失败；放开后 close 要把没写成的补上。
+    char d5b[600], d5s[600]; snprintf(d5b, sizeof d5b, "%s/c5b", root); snprintf(d5s, sizeof d5s, "%s/c5s", root);
+    CHECK(mkdir(d5b, 0700) == 0 && mkdir(d5s, 0700) == 0, "C89 建不出 c5b");
+    CHECK(c89_seed(sdir, d5s), "C89 ⑤ 续 铺旧文件（只为拿到合规的文件名）");
+    struct c89_dir s5 = c89_scan(d5s);
+    char blk5[1000]; snprintf(blk5, sizeof blk5, "%s/%s.tmp.%ld", d5b, s5.name, (long)getpid());
+    CHECK(mkdir(blk5, 0700) == 0, "C89 ⑤ 续 占不了临时文件路径");
+    CHECK(c89_open(d5b, 3, 0, 0), "C89 ⑤ 续 open");
+    struct c89_st b5b = c89_stats();
+    c88_make_pipes(sdir);
+    struct c89_st w5b = c89_wait_done(&b5b, 1, 5000);
+    CHECK(w5b.saves == b5b.saves + 1 && w5b.failed == b5b.failed + 1 && w5b.ok == b5b.ok, "C89 ⑤ 续 路径被占：局中写应失败 1 次 → 触发 +%llu、失败 +%llu、成功 +%llu", (unsigned long long)(w5b.saves - b5b.saves), (unsigned long long)(w5b.failed - b5b.failed), (unsigned long long)(w5b.ok - b5b.ok));
+    struct c89_dir m5 = c89_scan(d5b);
+    CHECK(m5.nreg == 0, "C89 ⑤ 续 局中写失败后目录里不应有正式文件 → %d 个", m5.nreg);
+    CHECK(rmdir(blk5) == 0, "C89 ⑤ 续 放不开临时文件路径");
+    CHECK(OK(nvn_gpu_close(5000000000ull, &e)), "C89 ⑤ 续 close：%d %s", e.rc.code, e.why);
+    struct c89_dir f5 = c89_scan(d5b);
+    CHECK(f5.nreg == 1 && c88_name_ok(f5.name) && f5.nother == 0 && f5.size == (long)mid1 + C89_HDR,
+          "C89 ⑤ 续 局中没写成，close 应补上（数据大小与「上次保存」一致也要再写）→ 文件 %d、其它 %d、%ld 字节（期望 %zu）", f5.nreg, f5.nother, f5.size, mid1 + C89_HDR);
+    c89_rm_tree(d5b); c89_rm_tree(d5s);
+
+    // ⑪ 局中写盘也要补目录（真机头一局：<状态目录>/direct-cache/nvn-vk 谁都没建过）：目录和它的上一层都还不存在，写完（还没 close）目录里就该有 1 个合规文件
+    char d11p[600], d11[700]; snprintf(d11p, sizeof d11p, "%s/c11", root); snprintf(d11, sizeof d11, "%s/nvn-vk", d11p);
+    CHECK(c89_open(d11, 3, 0, 0), "C89 ⑪ open");
+    struct c89_st b11 = c89_stats();
+    c88_make_pipes(sdir);
+    struct c89_st w11 = c89_wait_done(&b11, 1, 5000);
+    CHECK(w11.ok == b11.ok + 1 && w11.failed == b11.failed, "C89 ⑪ 目录还不存在时局中写应成功 1 次（后台线程补目录）→ 成功 +%llu、失败 +%llu", (unsigned long long)(w11.ok - b11.ok), (unsigned long long)(w11.failed - b11.failed));
+    struct c89_dir a11 = c89_scan(d11);
+    CHECK(a11.nreg == 1 && c88_name_ok(a11.name) && a11.nother == 0, "C89 ⑪ 局中写完（还没 close）补出的目录里应有 1 个合规文件 → 文件 %d、其它 %d", a11.nreg, a11.nother);
+    CHECK(OK(nvn_gpu_close(5000000000ull, &e)), "C89 ⑪ close：%d %s", e.rc.code, e.why);
+    c89_rm_tree(d11); rmdir(d11p);
+
+    // ⑥ 后台写途中收局：临时文件路径被占成管道，后台写卡住；close(200 ms) 到期放弃、不挂住
+    char d6[600]; snprintf(d6, sizeof d6, "%s/c6", root); CHECK(mkdir(d6, 0700) == 0, "C89 建不出 c6");
+    CHECK(c89_seed(sdir, d6), "C89 ⑥ 铺旧文件");
+    struct c89_dir a6 = c89_scan(d6);
+    CHECK(a6.nreg == 1 && a6.nother == 0 && c88_name_ok(a6.name), "C89 ⑥ 旧文件应恰好 1 个合规文件 → %d 个、其它 %d", a6.nreg, a6.nother);
+    char f6[900], pre6[900]; snprintf(f6, sizeof f6, "%s/%s", d6, a6.name);
+    size_t n6a = 0; void *old6 = read_file(f6, &n6a);
+    snprintf(pre6, sizeof pre6, "%s/%s.tmp.%ld", d6, a6.name, (long)getpid());
+    CHECK(mkfifo(pre6, 0600) == 0, "C89 ⑥ 建不出管道");
+    g_plc_extra = C89_X2;   // 这一局驱动数据比旧文件里的大 → 后端才会真去写
+    CHECK(c89_open(d6, 3, 0, 0), "C89 ⑥ open");
+    struct c89_st b6 = c89_stats();
+    CHECK(b6.loaded == (uint64_t)(a6.size - C89_HDR) && b6.rejected == 0, "C89 ⑥ 开局应读到旧文件 %ld 字节、rejected=0 → %llu / %llu", a6.size - C89_HDR, (unsigned long long)b6.loaded, (unsigned long long)b6.rejected);
+    c88_make_pipes(sdir);   // blue + compute 是新的：数据变大，第 3 条建完触发，后台写卡在管道上
+    struct c89_st s6 = c89_stats();
+    CHECK(s6.saves == b6.saves + 1, "C89 ⑥ 新管线让数据变大：应触发 1 次后台写 → +%llu", (unsigned long long)(s6.saves - b6.saves));
+    c89_sleep_ms(100);
+    struct c89_st m6 = c89_stats();
+    CHECK(m6.ok + m6.failed == b6.ok + b6.failed, "C89 ⑥ 管道没人读时后台写应还卡着（没成功也没失败）→ 成功 +%llu、失败 +%llu", (unsigned long long)(m6.ok - b6.ok), (unsigned long long)(m6.failed - b6.failed));
+    g_plc_extra = C89_X3;   // 写还卡着时数据又变大了：再建 3 条新管线也不该再起新的写（同一时刻最多一次、不排队）
+    c89_more_pipes(sdir, 3);
+    struct c89_st t6 = c89_stats();
+    CHECK(t6.saves == s6.saves && t6.same == s6.same, "C89 ⑥ 上一次写还没收尾时不应再起新的写 → 又触发 %llu 次、「没变」+%llu", (unsigned long long)(t6.saves - s6.saves), (unsigned long long)(t6.same - s6.same));
+    g_plc_extra = C89_X2;
+    struct c89_unblock ub; ub.fifo = pre6; atomic_init(&ub.go, 0);
+    pthread_t ubt; int ubt_ok = pthread_create(&ubt, NULL, c89_unblock_main, &ub) == 0;
+    CHECK(ubt_ok, "C89 ⑥ 起不了放管道的线程");
+    double t0 = c89_now_ms();
+    nvn_gpu_rc rc6 = nvn_gpu_close(200000000ull, &e);
+    double ms6 = c89_now_ms() - t0;
+    CHECK(OK(rc6), "C89 ⑥ 后台写卡着时 close(200 ms) 应返回 OK（到期放弃这次写，不报超时）：%d %s", rc6.code, e.why);
+    CHECK(ms6 >= 150.0 && ms6 < 3000.0, "C89 ⑥ close 应等了后台写（算进 200 ms 截止时间）又没挂住 → 用了 %.0f ms（期望 150–3000）", ms6);
+    atomic_store(&ub.go, 1);
+    struct c89_dir x6 = c89_scan(d6);
+    CHECK(c89_same_file(&a6, &x6), "C89 ⑥ 放弃这次写后旧文件应原样（大小 / 修改时间 / 内容不变）");
+    if (ubt_ok) pthread_join(ubt, NULL);
+    CHECK(c89_wait_gone(pre6, 5000), "C89 ⑥ 放开管道后后台写应自己失败收尾、清掉临时文件");
+    size_t n6b = 0; void *now6 = read_file(f6, &n6b);
+    CHECK(old6 && now6 && n6a == n6b && !memcmp(old6, now6, n6a), "C89 ⑥ 旧文件应逐字节不变");
+    free(old6); free(now6);
+    g_plc_extra = C89_X1;
+    CHECK(c89_open(d6, -1, -1, -1), "C89 ⑥ 下一局 open");
+    struct c89_st r6 = c89_wait_done(&b6, 1, 5000);   // 读数是进程累计：顺带等放弃的那次写自己收尾
+    CHECK(OK(nvn_gpu_close(5000000000ull, &e)), "C89 ⑥ 下一局 close：%d %s", e.rc.code, e.why);
+    CHECK(r6.loaded == (uint64_t)(a6.size - C89_HDR) && r6.rejected == 0, "C89 ⑥ 下一局读回旧文件 %ld 字节、rejected=0 → %llu / %llu", a6.size - C89_HDR, (unsigned long long)r6.loaded, (unsigned long long)r6.rejected);
+    CHECK(r6.failed == b6.failed + 1 && r6.ok == b6.ok, "C89 ⑥ 放弃的那次写自己收尾后应记 1 次失败、0 次成功（管道上 fsync 不成）→ 失败 +%llu、成功 +%llu", (unsigned long long)(r6.failed - b6.failed), (unsigned long long)(r6.ok - b6.ok));
+    c89_rm_tree(d6);
+
+    // ⑦ 被杀（不经关局）：子进程局中写完后自己 SIGKILL
+    char d7[600], g7[700]; snprintf(d7, sizeof d7, "%s/c7", root); snprintf(g7, sizeof g7, "%s/go7", root);
+    CHECK(mkdir(d7, 0700) == 0, "C89 建不出 c7");
+    pid_t p7 = c89_spawn_child(sdir, d7, g7, "kill-after-ok");
+    CHECK(p7 > 0, "C89 ⑦ 起不了子进程");
+    if (p7 > 0) {
+        CHECK(c89_touch(g7, NULL, 0), "C89 ⑦ 摆不出开工信号");
+        int st7 = c89_reap(p7);
+        CHECK(st7 != -1 && WIFSIGNALED(st7) && WTERMSIG(st7) == SIGKILL, "C89 ⑦ 子进程应是被 SIGKILL 杀的（没有走 close）→ 状态 %#x", st7);
+        struct c89_dir a7 = c89_scan(d7);
+        CHECK(a7.nreg == 1 && a7.nother == 0 && c88_name_ok(a7.name) && a7.size > C89_HDR, "C89 ⑦ 被杀后目录里应已有恰好 1 个合规文件、没有临时文件 → 文件 %d、其它 %d、%ld 字节", a7.nreg, a7.nother, a7.size);
+        struct c89_st r7 = c89_readback(d7);
+        CHECK(a7.nreg == 1 && r7.loaded == (uint64_t)(a7.size - C89_HDR) && r7.rejected == 0, "C89 ⑦ 下一局应读回被杀那局写的 %ld 字节、rejected=0 → %llu / %llu", a7.size - C89_HDR, (unsigned long long)r7.loaded, (unsigned long long)r7.rejected);
+    }
+    c89_rm_tree(d7); unlink(g7);
+
+    // ⑧ 被杀在写盘途中：后台写卡在管道上时子进程被 SIGKILL
+    char d8[600], g8[700]; snprintf(d8, sizeof d8, "%s/c8", root); snprintf(g8, sizeof g8, "%s/go8", root);
+    CHECK(mkdir(d8, 0700) == 0, "C89 建不出 c8");
+    CHECK(c89_seed(sdir, d8), "C89 ⑧ 铺旧文件");
+    struct c89_dir a8 = c89_scan(d8);
+    char f8[900], pre8[1000]; snprintf(f8, sizeof f8, "%s/%s", d8, a8.name);
+    size_t n8a = 0; void *old8 = read_file(f8, &n8a);
+    pid_t p8 = c89_spawn_child(sdir, d8, g8, "kill-after-start");
+    CHECK(p8 > 0, "C89 ⑧ 起不了子进程");
+    if (p8 > 0) {
+        snprintf(pre8, sizeof pre8, "%s/%s.tmp.%ld", d8, a8.name, (long)p8);
+        CHECK(mkfifo(pre8, 0600) == 0, "C89 ⑧ 建不出管道");
+        CHECK(c89_touch(g8, NULL, 0), "C89 ⑧ 摆不出开工信号");
+        int st8 = c89_reap(p8);
+        CHECK(st8 != -1 && WIFSIGNALED(st8) && WTERMSIG(st8) == SIGKILL, "C89 ⑧ 子进程应是在后台写途中被 SIGKILL 杀的 → 状态 %#x", st8);
+        struct c89_dir x8 = c89_scan(d8);
+        CHECK(c89_same_file(&a8, &x8) && x8.nother == 1, "C89 ⑧ 被杀后旧文件应原样、只多一个残留的临时文件 → 其它 %d 个", x8.nother);
+        size_t n8b = 0; void *now8 = read_file(f8, &n8b);
+        CHECK(old8 && now8 && n8a == n8b && !memcmp(old8, now8, n8a), "C89 ⑧ 旧文件应逐字节不变");
+        free(now8);
+        struct c89_st r8 = c89_readback(d8);
+        CHECK(r8.loaded == (uint64_t)(a8.size - C89_HDR) && r8.rejected == 0, "C89 ⑧ 下一局照常开、读回旧文件 %ld 字节、rejected=0 → %llu / %llu", a8.size - C89_HDR, (unsigned long long)r8.loaded, (unsigned long long)r8.rejected);
+        unlink(pre8);
+    }
+    free(old8);
+    c89_rm_tree(d8); unlink(g8);
+
+    // ⑨ 临时文件残留：垃圾在 <名>.tmp.<pid> 里，下一局不读它
+    char d9[600], d9b[600], d9c[600]; snprintf(d9, sizeof d9, "%s/c9a", root); snprintf(d9b, sizeof d9b, "%s/c9b", root); snprintf(d9c, sizeof d9c, "%s/c9c", root);
+    CHECK(mkdir(d9, 0700) == 0 && mkdir(d9b, 0700) == 0 && mkdir(d9c, 0700) == 0, "C89 建不出 c9");
+    CHECK(c89_seed(sdir, d9b), "C89 ⑨ 铺旧文件");
+    struct c89_dir a9b = c89_scan(d9b);
+    static unsigned char junk[4096]; memset(junk, 0xA5, sizeof junk);
+    char t9[1000], t9b[1000], t9c[1000];
+    snprintf(t9, sizeof t9, "%s/%s.tmp.99999", d9, a9b.name);
+    snprintf(t9b, sizeof t9b, "%s/%s.tmp.99999", d9b, a9b.name);
+    snprintf(t9c, sizeof t9c, "%s/%s", d9c, a9b.name);
+    CHECK(c89_touch(t9, junk, sizeof junk) && c89_touch(t9b, junk, sizeof junk) && c89_touch(t9c, junk, sizeof junk), "C89 ⑨ 摆不出残留文件");
+    CHECK(c89_open(d9, -1, -1, -1), "C89 ⑨ 无正式文件 open");   // 只有残留
+    struct c89_st s9 = c89_stats();
+    CHECK(s9.loaded == 0 && s9.rejected == 0, "C89 ⑨ 只有残留的临时文件：读入应为 0、rejected=0（残留不当坏文件）→ %llu / %llu", (unsigned long long)s9.loaded, (unsigned long long)s9.rejected);
+    c88_make_pipes(sdir);
+    CHECK(OK(nvn_gpu_close(5000000000ull, &e)), "C89 ⑨ close：%d %s", e.rc.code, e.why);
+    struct c89_dir x9 = c89_scan(d9);
+    CHECK(x9.nreg == 1 && c88_name_ok(x9.name) && x9.nother == 1, "C89 ⑨ 收尾应照常写出正式文件、残留原样 → 正式 %d 个、其它 %d 个", x9.nreg, x9.nother);
+    { size_t nj = 0; void *j = read_file(t9, &nj); CHECK(j && nj == sizeof junk && !memcmp(j, junk, nj), "C89 ⑨ 残留文件内容不应被动"); free(j); }
+    struct c89_st s9b = c89_readback(d9b);   // 有正式文件、旁边有残留
+    CHECK(s9b.loaded == (uint64_t)(a9b.size - C89_HDR) && s9b.rejected == 0, "C89 ⑨ 正式文件旁有残留：应读回正式文件 %ld 字节、rejected=0 → %llu / %llu", a9b.size - C89_HDR, (unsigned long long)s9b.loaded, (unsigned long long)s9b.rejected);
+    struct c89_st s9c = c89_readback(d9c);   // 负对照：同样的垃圾放在正式文件名上
+    CHECK(s9c.loaded == 0 && s9c.rejected == 1, "C89 ⑨ 负对照：垃圾放在正式文件名上应被拒绝 → 读入 %llu、rejected=%llu（期望 0 / 1）", (unsigned long long)s9c.loaded, (unsigned long long)s9c.rejected);
+    c89_rm_tree(d9); c89_rm_tree(d9b); c89_rm_tree(d9c);
+
+    // ⑩ 两个线程同时建管线，局中写盘与建管线并行
+    char d10[600]; snprintf(d10, sizeof d10, "%s/c10", root); CHECK(mkdir(d10, 0700) == 0, "C89 建不出 c10");
+    g_plc_extra = 0; g_plc_per_pipe = 16;   // 驱动数据随管线数变大（每条 +16 字节）→ 每次触发都比上次大，写盘一直在发生
+    g_plc_pipe_base = g_plc_rec.gp + g_plc_rec.cp;
+    CHECK(c89_open(d10, 2, 0, 0), "C89 ⑩ open");
+    struct c89_st b10 = c89_stats();
+    nvn_gpu_shader vsa = NULL, fsa = NULL, vsb = NULL, fsb = NULL; void *ma[4] = {0};
+    int l10 = load_shader_pair(sdir, "tri3.vert", "out1_green.frag", NULL, NULL, &vsa, &fsa, &ma[0], &ma[1]) &&
+              load_shader_pair(sdir, "tri3.vert", "solid_blue.frag", NULL, NULL, &vsb, &fsb, &ma[2], &ma[3]);
+    CHECK(l10, "C89 ⑩ 读着色器");
+    if (l10) {
+        struct c89_thr ta = {vsa, fsa}, tb = {vsb, fsb};   // 两个线程用不同的片元着色器 → 84 条互不相同的新管线
+        pthread_t th[2];
+        int cr = pthread_create(&th[0], NULL, c89_thr_main, &ta) == 0 && pthread_create(&th[1], NULL, c89_thr_main, &tb) == 0;
+        CHECK(cr, "C89 ⑩ 起不了线程");
+        if (cr) { pthread_join(th[0], NULL); pthread_join(th[1], NULL); }
+        struct c89_st e10 = c89_wait_done(&b10, 1, 5000);
+        for (int i = 0; i < 2500; i++) {   // 等在飞的写收尾：成功 + 失败 = 触发
+            struct c89_st z = c89_stats();
+            if (z.ok + z.failed - (b10.ok + b10.failed) >= z.saves - b10.saves) { e10 = z; break; }
+            c89_sleep_ms(2);
+        }
+        CHECK(e10.made - b10.made == 84, "C89 ⑩ 两个线程应经缓存建出 84 条管线 → %llu 条", (unsigned long long)(e10.made - b10.made));
+        CHECK(e10.saves - b10.saves >= 3 && e10.failed == b10.failed && e10.ok - b10.ok == e10.saves - b10.saves,
+              "C89 ⑩ 并行建管线时局中写盘应发生多次且全部成功 → 触发 %llu 次（期望 ≥ 3）、成功 +%llu、失败 +%llu", (unsigned long long)(e10.saves - b10.saves), (unsigned long long)(e10.ok - b10.ok), (unsigned long long)(e10.failed - b10.failed));
+        nvn_gpu_shader_release(vsa); nvn_gpu_shader_release(fsa); nvn_gpu_shader_release(vsb); nvn_gpu_shader_release(fsb);
+        for (int i = 0; i < 4; i++) free(ma[i]);
+    }
+    CHECK(OK(nvn_gpu_close(5000000000ull, &e)), "C89 ⑩ close：%d %s", e.rc.code, e.why);
+    g_plc_per_pipe = 0; g_plc_extra = C89_X1;
+    struct c89_dir a10 = c89_scan(d10);
+    CHECK(a10.nreg == 1 && a10.nother == 0 && c88_name_ok(a10.name), "C89 ⑩ 目录里应恰好 1 个合规文件、没有残留 → 文件 %d、其它 %d", a10.nreg, a10.nother);
+    // 收尾那份是建完 84 条之后的数据：= 文件头 + lavapipe 真数据（①里测到的 mid1 去掉填充）+ 84 × 16；中途哪次写成功都不该把它盖回旧的
+    long want10 = C89_HDR + (long)(mid1 - C89_X1) + 84 * 16;
+    CHECK(a10.size == want10, "C89 ⑩ 收尾应把建完 84 条之后的数据落盘 → %ld 字节（期望 %ld）", a10.size, want10);
+    struct c89_st r10 = c89_readback(d10);
+    CHECK(a10.nreg == 1 && r10.loaded == (uint64_t)(a10.size - C89_HDR) && r10.rejected == 0, "C89 ⑩ 下一局应读回、rejected=0 → 读入 %llu、rejected=%llu", (unsigned long long)r10.loaded, (unsigned long long)r10.rejected);
+    printf("C89 局中补写：局中写出 %zu 字节；close 不重写；条数 / 等待 / 开关 / 无目录四个负对照不触发；数据没变不写；第二次保存受间隔约束；写失败只记日志、close 补写；"
+           "目录不存在时局中写补目录；后台写途中 close(200 ms) 用 %.0f ms 到期放弃；SIGKILL（写完后 / 写途中）都不坏下一局；临时文件残留不读；两线程并行建管线写盘全成功\n", mid1, ms6);
+    c89_rm_tree(d1); c89_rm_tree(d10);
+    rmdir(root);
+    g_plc_strip_tail = 0; g_plc_extra = 0; g_plc_per_pipe = 0;
+}
+
 // #697：强制 BC4 compute；端点与索引全由合成输入给出，不用解码器计算期望。
 // 7x5x4 的每个块/切片不同，24 字节行距包含填充；最后一行不要求尾填充。
 static void c697_bc4_done(void *u, const nvn_gpu_done *d) { (void)u; (void)d; }
@@ -5627,6 +6578,78 @@ static void c697_bc4_3d(void) {
     for (int i = 0; i < 12; i++) CHECK(out[420 + i] == (i < 6 ? 171 : 191), "C697 BC4 mip1 像素%d：%u", i, out[420 + i]);
     CHECK(out[432] == 251, "C697 BC4 mip2 1x1x1：%u", out[432]);
     printf("C697 BC4 3D：三份全深度快照420纹素、mip1 12纹素、mip2 1纹素已核对\n");
+    {   // 按压缩字节回读（贴图 → 缓冲）：Mali 等非原生 BC 设备上游戏会做这种拷贝，显存里是解码后的 R8，回读要给上传时的原字节。
+        // 期望值按上传的原块手工拼（c697_bc4_block：前两字节是端点、其余 0）；当前内容 = 第 1 次提交的结果（之后的整片重传都被放弃）。
+        uint8_t init[160]; memset(init, 0x5a, sizeof init);
+        nvn_gpu_buf rb2 = make_buf(sizeof init, NVN_GPU_MEM_SHARED, init);
+        if (!rb2) goto done;
+        c = begin_cmd();
+        nvn_gpu_copy_tex_buf(c, bc, 0, 1, NULL, rb2, 0, 16, 32);                 // ① 0 级切片 1 整片：列 0 原块，列 1 是补丁
+        nvn_gpu_copy_tex_buf(c, bc, 0, 3, NULL, rb2, 64, 24, 40);                // ② 0 级切片 3，行距 24：每行后 8 字节不许动
+        nvn_gpu_copy_tex_buf(c, bc, 1, 1, NULL, rb2, 112, 8, 8);                 // ③ 1 级切片 1：局部补丁盖过的那块
+        NVNcopyRegion col1 = {4, 0, 0, 3, 5, 1};
+        nvn_gpu_copy_tex_buf(c, bc, 0, 2, &col1, rb2, 128, 8, 16);               // ④ 0 级切片 2 只读块列 1
+        rc = nvn_gpu_cmd_commit(c, 3, c697_bc4_done, NULL, &e);
+        CHECK(OK(rc), "C697 BC4 回读 commit：%d %s", rc.code, e.why);
+        if (OK(rc)) rc = nvn_gpu_fence_wait(3, 5000000000ull, &e);
+        CHECK(OK(rc), "C697 BC4 回读 wait：%s", e.why);
+        const uint8_t *rd = buf_cpu(rb2);
+        uint8_t want[160]; memcpy(want, init, sizeof want);
+        for (int y = 0; y < 2; y++) { c697_bc4_block(want + y * 16, (uint8_t)(20 + 40 + y * 10)); c697_bc4_block(want + y * 16 + 8, (uint8_t)(211 + y * 3)); }
+        for (int y = 0; y < 2; y++) for (int x = 0; x < 2; x++) c697_bc4_block(want + 64 + y * 24 + x * 8, (uint8_t)(20 + 3 * 40 + y * 10 + x * 5));
+        c697_bc4_block(want + 112, 191);
+        for (int y = 0; y < 2; y++) c697_bc4_block(want + 128 + y * 8, (uint8_t)(211 + 10 + y * 3));
+        int bad = 0; for (int i = 0; i < 160; i++) if (rd[i] != want[i]) { if (bad++ < 4) CHECK(0, "C697 BC4 回读字节 %d：%u，期望 %u", i, rd[i], want[i]); }
+        CHECK(!bad, "C697 BC4 回读：%d 字节不符", bad);
+        if (!bad) printf("C697 BC4 回读：整片 / 带行距 / 下一级局部补丁 / 局部区域 四种按原压缩字节读回，160 字节已核对\n");
+        nvn_gpu_buf_release(rb2, NULL, NULL);
+    }
+    {   // 缓冲 → BC 现解贴图（#697 第二步，Mali 机上回读之后撞到的下一处）：同一段里先把 bc 的 0 级切片 1 回读进缓冲，
+        // 紧接着把这块缓冲拷进另一张 16x8 的 BC4 贴图左半；右半的源是 CPU 填好的块、行距 24（每行后 8 字节是填充）。
+        // 期望全部手算：两端点相同的 BC4 块解出来整块就是端点值（c697_bc4_block）。左半 = bc 切片 1 的块值，见上面回读期望。
+        nvn_gpu_tex bc2 = make_tex(16, 8, NVN_FORMAT_RGTC1_UNORM, NVN_GPU_TEX_SAMPLED);
+        nvn_gpu_tex pl2 = make_tex(16, 8, NVN_FORMAT_R8, NVN_GPU_TEX_SAMPLED);
+        uint8_t src[96]; memset(src, 0xee, sizeof src);
+        for (int y = 0; y < 2; y++) for (int x = 0; x < 2; x++) c697_bc4_block(src + 48 + y * 24 + x * 8, (uint8_t)(100 + (y * 2 + x) * 7));
+        nvn_gpu_buf sb = make_buf(sizeof src, NVN_GPU_MEM_SHARED, src);
+        nvn_gpu_buf pix = make_buf(128, NVN_GPU_MEM_SHARED, NULL), cmp = make_buf(64, NVN_GPU_MEM_SHARED, NULL);
+        if (!bc2 || !pl2 || !sb || !pix || !cmp) { CHECK(0, "C697 缓冲→BC 建资源失败"); goto c697b_done; }
+        c = begin_cmd();
+        nvn_gpu_copy_tex_buf(c, bc, 0, 1, NULL, sb, 0, 16, 32);                   // 回读：sb[0,32) 被 GPU 写成 bc 切片 1 的原块
+        NVNcopyRegion left = {0, 0, 0, 8, 8, 1}, right = {8, 0, 0, 8, 8, 1}, all = {0, 0, 0, 16, 8, 1};
+        nvn_gpu_copy_buf_tex(c, sb, 0, 16, 32, bc2, 0, 0, &left);                 // 同一段里刚写的字节 → BC 贴图
+        nvn_gpu_copy_buf_tex(c, sb, 48, 24, 40, bc2, 0, 0, &right);               // CPU 填的块，带行距
+        nvn_gpu_copy_tex(c, bc2, 0, 0, &all, pl2, 0, 0, &all);                    // 解出来的像素
+        nvn_gpu_copy_tex_buf(c, pl2, 0, 0, &all, pix, 0, 16, 128);
+        nvn_gpu_copy_tex_buf(c, bc2, 0, 0, NULL, cmp, 0, 32, 64);                 // 再按压缩字节读回
+        rc = nvn_gpu_cmd_commit(c, 4, c697_bc4_done, NULL, &e);
+        CHECK(OK(rc), "C697 缓冲→BC commit：%d %s", rc.code, e.why);
+        if (OK(rc)) rc = nvn_gpu_fence_wait(4, 5000000000ull, &e);
+        CHECK(OK(rc), "C697 缓冲→BC wait：%s", e.why);
+        if (OK(rc)) {
+            const uint8_t *px = buf_cpu(pix), *cb = buf_cpu(cmp);
+            int bad = 0;
+            for (int y = 0; y < 8; y++) for (int x = 0; x < 16; x++) {
+                int by = y / 4;
+                uint8_t want = x < 4 ? (uint8_t)(60 + by * 10) : x < 8 ? (uint8_t)(211 + by * 3) : (uint8_t)(100 + (by * 2 + (x - 8) / 4) * 7);
+                if (px[y * 16 + x] != want && bad++ < 4) CHECK(0, "C697 缓冲→BC 像素 (%d,%d)：%u，期望 %u", x, y, px[y * 16 + x], want);
+            }
+            uint8_t wantc[64];
+            for (int by = 0; by < 2; by++) {
+                c697_bc4_block(wantc + by * 32 + 0, (uint8_t)(60 + by * 10)); c697_bc4_block(wantc + by * 32 + 8, (uint8_t)(211 + by * 3));
+                c697_bc4_block(wantc + by * 32 + 16, (uint8_t)(100 + by * 14)); c697_bc4_block(wantc + by * 32 + 24, (uint8_t)(107 + by * 14));
+            }
+            for (int i = 0; i < 64; i++) if (cb[i] != wantc[i] && bad++ < 8) CHECK(0, "C697 缓冲→BC 压缩回读字节 %d：%u，期望 %u", i, cb[i], wantc[i]);
+            CHECK(!bad, "C697 缓冲→BC：%d 处不符", bad);
+            if (!bad) printf("C697 缓冲→BC：同段回读字节与带行距 CPU 块拷入现解贴图，128 像素与 64 压缩字节已核对\n");
+        }
+    c697b_done:
+        if (bc2) nvn_gpu_tex_release(bc2);
+        if (pl2) nvn_gpu_tex_release(pl2);
+        if (sb) nvn_gpu_buf_release(sb, NULL, NULL);
+        if (pix) nvn_gpu_buf_release(pix, NULL, NULL);
+        if (cmp) nvn_gpu_buf_release(cmp, NULL, NULL);
+    }
 done:
     if (bc) nvn_gpu_tex_release(bc);
     if (plain) nvn_gpu_tex_release(plain);
@@ -5670,14 +6693,235 @@ static int c697_bc4_3d_run(void) {
     return open_backend();
 }
 
+// #658: isolated native GPU-count truth tests; no NVN command expansion.
+static nvn_gpu_pipe c658_producer(const char *dir) {
+    char path[512]; size_t len=0;
+    snprintf(path,sizeof path,"%s/count_args.comp.spv",dir); void *blob=read_file(path,&len);
+    CHECK(blob != NULL,"C658 producer SPIR-V"); if(!blob)return NULL;
+    nvn_gpu_layout_ent ent={0}; ent.cls=NVN_GPU_RES_SSBO;ent.access=NVN_GPU_ACC_RW;
+    ent.binding=0;ent.count=1;ent.stages=1u<<NVN_GPU_SH_CS;
+    nvn_gpu_layout layout={0};layout.ent=&ent;layout.nent=1;
+    nvn_gpu_shader_src src={0};src.stage=NVN_GPU_SH_CS;src.kind=NVN_GPU_BLOB_SPIRV;
+    src.entry="main";src.blob=blob;src.bytes=len;src.layout=&layout;
+    nvn_gpu_shader sh=NULL;nvn_gpu_pipe pipe=NULL;nvn_gpu_err err={0};
+    nvn_gpu_rc r=nvn_gpu_shader_load(&src,&sh,&err);CHECK(OK(r),"C658 producer load %d %s",r.code,err.why);
+    if(OK(r)){nvn_gpu_stage_desc sd={0};sd.sh=sh;r=nvn_gpu_cpipe_get(&sd,NVN_GPU_PIPE_SYNC,&pipe,&err);CHECK(OK(r),"C658 producer pipe %d %s",r.code,err.why);}
+    if(sh) nvn_gpu_shader_release(sh);
+    free(blob);return pipe;
+}
+// Separate from mode8's g_retired oracle; static storage remains valid on timeout.
+static atomic_int c658_cleanup_retired;
+static int c658_cleanup_submitted; // Only the test thread changes this target.
+static void c658_cleanup_done(void *u) {
+    (void)u;
+    atomic_fetch_add(&c658_cleanup_retired,1);
+}
+static void c658_case(const char *dir,unsigned count,int indexed,int mode) {
+    int saved_enabled=g_dev.draw_indirect_count_enabled;
+    if(mode==7)g_dev.draw_indirect_count_enabled=0;
+    memset(&g_desc,0,sizeof g_desc);g_desc.host_device=&g_dev;g_desc.app_label="count-only";
+    if(!open_backend()){g_dev.draw_indirect_count_enabled=saved_enabled;return;}
+    nvn_gpu_caps caps;nvn_gpu_caps_get(&caps);
+    CHECK((!!(caps.caps & NVN_GPU_CAP_INDIRECT_COUNT))==(mode!=7),"C658 actual enabled count capability mode=%d",mode);
+    nvn_gpu_pipe gp=color_pipe(dir,0),cp=c658_producer(dir);
+    if(!gp||!cp){nvn_gpu_err err={0};nvn_gpu_close(5000000000ull,&err);g_dev.draw_indirect_count_enabled=saved_enabled;return;}
+    float verts[24][8]; const unsigned corners[6]={0,1,2,2,1,3};
+    for(unsigned region=0;region<4;region++)for(unsigned j=0;j<6;j++){
+        unsigned k=corners[j];float *v=verts[region*6+j];memset(v,0,8*sizeof *v);
+        v[0]=-1.0f+region*0.5f+((k&2)?0.5f:0.0f);v[1]=(k&1)?1.0f:-1.0f;v[3]=v[7]=1;
+        v[4+(region<3?region:0)]=1;
+    }
+    uint32_t initial[48];for(unsigned i=0;i<48;i++)initial[i]=0xA5A5A5A5u;
+    initial[0]=count;initial[4]=count?0:3; // Opposite CPU poison count, overwritten on GPU.
+    for(unsigned i=0;i<5;i++){unsigned b=8+i*8;initial[b]=6;initial[b+1]=1;initial[b+2]=18;initial[b+3]=initial[b+4]=0;}
+    uint32_t indices[24];for(unsigned i=0;i<24;i++)indices[i]=i;
+    nvn_gpu_buf args=make_buf(sizeof initial,NVN_GPU_MEM_SHARED,initial);
+    uint32_t count_initial[8]={0};count_initial[4]=count?0:3;
+    nvn_gpu_buf separate_count=mode==8?make_buf(sizeof count_initial,NVN_GPU_MEM_SHARED,count_initial):NULL;
+    nvn_gpu_buf vb=make_buf(sizeof verts,NVN_GPU_MEM_SHARED,verts);
+    nvn_gpu_buf ib=indexed?make_buf(sizeof indices,NVN_GPU_MEM_SHARED,indices):NULL;
+    nvn_gpu_buf rb=make_buf(64*64*4,NVN_GPU_MEM_SHARED,NULL);
+    nvn_gpu_tex tex=make_tex(64,64,NVN_FORMAT_RGBA8,NVN_GPU_TEX_RENDER);nvn_gpu_view view=make_view(tex);
+    uint64_t signal=1;int retire_base=atomic_load(&g_retired);
+    nvn_gpu_err err={0};
+    nvn_gpu_cmd cmd=begin_cmd();nvn_gpu_binding binding={0};binding.cls=NVN_GPU_RES_SSBO;
+    binding.u.b.buf=args;binding.u.b.len=sizeof initial;
+    nvn_gpu_set_pipe(cmd,cp);nvn_gpu_bind(cmd,NVN_GPU_SH_CS,&binding,1);nvn_gpu_dispatch(cmd,cp,1,1,1,NULL,0);
+    if(separate_count)nvn_gpu_copy_buf(cmd,args,16,separate_count,16,4);
+    nvn_gpu_barrier(cmd,NVN_BARRIER_ORDER_INDIRECT_DATA_BIT|NVN_BARRIER_INVALIDATE_SHADER_BIT);
+    if(mode==8){
+        nvn_gpu_rc prep=nvn_gpu_cmd_commit(cmd,1,on_done,NULL,&err);
+        CHECK(OK(prep),"C658 producer commit %d %s",prep.code,err.why);
+        if(!OK(prep))goto c658_cleanup;
+        // Waiting for a following empty segment proves the producer's retained
+        // references were retired, not merely that its fence was published.
+        nvn_gpu_cmd drain=begin_cmd();prep=nvn_gpu_cmd_commit(drain,2,on_done,NULL,&err);
+        CHECK(OK(prep),"C658 producer drain commit %d %s",prep.code,err.why);
+        if(!OK(prep))goto c658_cleanup;
+        prep=nvn_gpu_fence_wait(2,5000000000ull,&err);
+        CHECK(OK(prep),"C658 producer drain wait %d %s",prep.code,err.why);
+        if(!OK(prep))goto c658_cleanup;
+        cmd=begin_cmd();signal=3;
+    }
+
+    nvn_gpu_pass_desc pass={0};pass.ncolor=1;pass.color[0].view=view;
+    pass.color[0].load=NVN_GPU_LOAD_CLEAR;pass.color[0].store=NVN_GPU_STORE_STORE;pass.color[0].clear.f[3]=1;
+    pass.w=pass.h=64;pass.layers=1;nvn_gpu_pass_begin(cmd,&pass);nvn_gpu_set_pipe(cmd,gp);
+    nvn_gpu_dyn dyn={0};dyn.origin_ll=1;dyn.nvp=1;dyn.vp[0][2]=dyn.vp[0][3]=64;dyn.vp[0][5]=1;
+    dyn.has_sc=1;dyn.sc[2]=dyn.sc[3]=64;nvn_gpu_set_dyn(cmd,&dyn);nvn_gpu_set_vbuf(cmd,0,vb,0);
+    nvn_gpu_draw_args draw={0};draw.prim=4;draw.instances=1;draw.ind=args;draw.ind_off=32;
+    draw.first=draw.count=UINT32_MAX; // CPU direct-draw fields are stale, not GPU indirect authority.
+    draw.cnt=separate_count?separate_count:args;draw.cnt_off=16;draw.max_draws=mode==1?0:3;draw.stride=32;draw.ibuf=ib;draw.itype=2;
+    if(mode==2)draw.cnt_off=18;
+    if(mode==3)draw.ind_off=34;
+    if(mode==4)draw.stride=18;
+    if(mode==5)draw.ind_off=160; // max span exceeds 192-byte buffer despite valid actual count
+    if(mode==6)draw.cnt_off=192;
+    nvn_gpu_draw(cmd,&draw);
+    if(separate_count){nvn_gpu_buf_release(separate_count,on_retire,NULL);separate_count=NULL;
+        CHECK(atomic_load(&g_retired)==retire_base,"C658 distinct count retired before draw submission");
+        if(atomic_load(&g_retired)!=retire_base){nvn_gpu_cmd_abort(cmd);goto c658_cleanup;}
+    }
+    nvn_gpu_pass_end(cmd);nvn_gpu_copy_tex_buf(cmd,tex,0,0,NULL,rb,0,256,16384);
+    nvn_gpu_rc r=nvn_gpu_cmd_commit(cmd,signal,on_done,NULL,&err);
+    int expected_rc=mode==7?NVN_GPU_E_UNSUPPORTED:(mode>=2&&mode<=6?NVN_GPU_E_ARG:NVN_GPU_OK);
+    CHECK(r.code==expected_rc,"C658 count=%u indexed=%d mode=%d commit %d expected=%d %s",count,indexed,mode,r.code,expected_rc,err.why);
+    if(OK(r)){
+        r=nvn_gpu_fence_wait(signal,5000000000ull,&err);CHECK(OK(r),"C658 wait %d %s",r.code,err.why);
+        if(OK(r)){
+            const uint8_t *pixels=buf_cpu(rb);unsigned expected=mode==1?0:(count<3?count:3);
+            for(unsigned region=0;region<4;region++){
+                const uint8_t *p=pixels+(32*64+region*16+8)*4;
+                unsigned red=region<expected && region==0?255:0,green=region<expected && region==1?255:0,blue=region<expected && region==2?255:0;
+                CHECK(p[0]==red&&p[1]==green&&p[2]==blue&&p[3]==255,"C658 count=%u indexed=%d region=%u got %u/%u/%u/%u expected %u/%u/%u/255",count,indexed,region,p[0],p[1],p[2],p[3],red,green,blue);
+            }
+            const uint32_t *audit=(const uint32_t*)buf_cpu(args);
+            CHECK(audit[4]==count,"C658 GPU count audit %u expected %u",audit[4],count);
+            for(unsigned i=0;i<5;i++){unsigned b=8+i*8;
+                CHECK(audit[b]==6&&audit[b+1]==1&&audit[b+2]==6*(i<3?i:3)&&audit[b+3]==0&&audit[b+4]==0,"C658 GPU args audit draw %u",i);
+                CHECK(audit[b+5]==0xA5A5A5A5u&&audit[b+6]==0xA5A5A5A5u&&audit[b+7]==0xA5A5A5A5u,"C658 padded stride guard draw %u",i);
+            }
+        }
+    }
+    if(mode==8)CHECK(wait_until(&g_retired,retire_base+1,2000),"C658 distinct count did not retire after consumption");
+c658_cleanup:
+    nvn_gpu_view_release(view);nvn_gpu_tex_release(tex);
+    nvn_gpu_buf cleanup_bufs[]={separate_count,args,vb,ib,rb};
+    for(unsigned i=0;i<sizeof cleanup_bufs/sizeof cleanup_bufs[0];i++)if(cleanup_bufs[i]){
+        ++c658_cleanup_submitted;
+        nvn_gpu_buf_release(cleanup_bufs[i],c658_cleanup_done,NULL);
+    }
+    CHECK(wait_until(&c658_cleanup_retired,c658_cleanup_submitted,2000),"C658 cleanup buffers did not retire");
+    CHECK(OK(nvn_gpu_close(5000000000ull,&err)),"C658 close %s",err.why);
+    g_dev.draw_indirect_count_enabled=saved_enabled;
+}
+static void c658_suite(const char *dir,int strict) {
+    memset(&g_desc,0,sizeof g_desc);g_desc.host_device=&g_dev;g_desc.app_label="count-cap";
+    if(!open_backend())return;
+    nvn_gpu_caps caps;nvn_gpu_caps_get(&caps);nvn_gpu_err err={0};
+    CHECK(OK(nvn_gpu_close(5000000000ull,&err)),"C658 capability close");
+    int can_run=(caps.caps & NVN_GPU_CAP_INDIRECT_COUNT) && g_dev.properties.limits.maxDrawIndirectCount>=5;
+    if(strict)CHECK(can_run,"C658 isolated positive matrix requires enabled native count and device max >=5");
+    if(can_run || strict){
+        const unsigned values[]={0,1,3,5};
+        for(int indexed=0;indexed<2;indexed++)for(unsigned i=0;i<4;i++)c658_case(dir,values[i],indexed,0);
+        for(int indexed=0;indexed<2;indexed++)for(unsigned i=0;i<4;i++)c658_case(dir,values[i],indexed,8);
+        for(int indexed=0;indexed<2;indexed++)for(int mode=1;mode<=6;mode++)c658_case(dir,3,indexed,mode);
+    } else printf("C658 positive matrix unavailable on this device; checking unsupported path only\n");
+    for(int indexed=0;indexed<2;indexed++)c658_case(dir,3,indexed,7);
+}
+static int c658_main(int argc,char **argv) {
+    if(argc!=2){fprintf(stderr,"count-only: shader directory required\n");return 2;}
+    char why[256]={0};if(s2a_vk_device_create(&g_dev,why,sizeof why)!=0){fprintf(stderr,"count-only device: %s\n",why);return 2;}
+    printf("count-only device=%s maxDrawIndirectCount=%u\n",g_dev.properties.deviceName,g_dev.properties.limits.maxDrawIndirectCount);
+    if(g_dev.properties.limits.maxDrawIndirectCount<5){fprintf(stderr,"count-only needs device limit >=5\n");s2a_vk_device_destroy(&g_dev,1);return 2;}
+    c658_suite(argv[1],1);
+    {extern uint64_t nvn_vk_dbg_dq_recs(void);uint64_t n=nvn_vk_dbg_dq_recs();
+     CHECK(getenv("S2A_TEST_NVK_DQ")?n>0:n==0,"C658 DQ recording count=%llu",(unsigned long long)n);}
+    s2a_vk_device_destroy(&g_dev,1);printf("count-only failures=%d\n",g_fail);return g_fail?1:0;
+}
+
+// #697 A: no shaders or unrelated tests; copy callback-owned text before publishing completion.
+struct error697_done { atomic_int calls; uint64_t signal; int code; uint32_t status; char why[256]; };
+static void error697_callback(void *u, const nvn_gpu_done *d) {
+    struct error697_done *o=u;
+    o->signal=d->signal; o->code=d->rc.code; o->status=d->status;
+    snprintf(o->why,sizeof o->why,"%s",d->why?d->why:"");
+    atomic_fetch_add_explicit(&o->calls,1,memory_order_release);
+}
+static void error697_expect(struct error697_done *o, uint64_t signal, nvn_gpu_rc rc,
+                            const nvn_gpu_err *err, int code, const char *why) {
+    CHECK(rc.code==code && err->rc.code==code,"E697 synchronous rc=%d err=%d expected=%d",rc.code,err->rc.code,code);
+    CHECK(strstr(err->why,why)!=NULL,"E697 first reason missing: %s",err->why);
+    if(!wait_until(&o->calls,1,5000)){CHECK(0,"E697 callback timeout");return;}
+    CHECK(atomic_load_explicit(&o->calls,memory_order_acquire)==1,"E697 exactly one callback");
+    CHECK(o->signal==signal && o->code==code && o->status==NVN_GPU_DONE_FAILED,"E697 asynchronous result mismatch");
+    CHECK(!strcmp(o->why,err->why),"E697 synchronous/asynchronous reason mismatch: %s / %s",err->why,o->why);
+}
+static int error697_only(void) {
+    char why[256]={0};
+    if(s2a_vk_device_create(&g_dev,why,sizeof why)!=0){fprintf(stderr,"E697 device: %s\n",why);return 2;}
+    memset(&g_desc,0,sizeof g_desc);g_desc.host_device=&g_dev;g_desc.app_label="error697-only";
+    for(int mode=0;mode<3;mode++) {
+        if(!open_backend())return 1;
+        uint8_t zeros[16]={0};nvn_gpu_buf b=make_buf(16,NVN_GPU_MEM_SHARED,zeros);
+        nvn_gpu_cmd first=begin_cmd(),second=begin_cmd();
+        nvn_gpu_err e; memset(&e,0,sizeof e);e.rc.code=123;strcpy(e.why,"stale sentinel");
+        struct error697_done d1={0},d2={0};nvn_gpu_rc rc;
+        if(mode==0) {
+            nvn_gpu_fill_buf(first,b,0,6,0xdeadbeef); // first ARG: misaligned size
+            nvn_gpu_fill_buf(first,b,99,4,0xffffffff); // later bounds error must not overwrite it
+        } else nvn_gpu_fill_buf(first,b,0,16,0xdeadbeef);
+        nvn_gpu_fill_buf(second,b,0,16,0xffffffff);
+        if(mode==1)nvn_gpu_vk_test_set_fault(1);
+        uint64_t signal=mode==2?0:1;
+        rc=nvn_gpu_cmd_commit(first,signal,error697_callback,&d1,&e);
+        error697_expect(&d1,signal,rc,&e,mode==1?NVN_GPU_E_DEVICE:NVN_GPU_E_ARG,
+                        mode==0?"bytes=6":mode==1?"测试注入":"signal 0");
+        memset(&e,0,sizeof e);e.rc.code=123;strcpy(e.why,"second stale sentinel");
+        rc=nvn_gpu_cmd_commit(second,2,error697_callback,&d2,&e);
+        error697_expect(&d2,2,rc,&e,NVN_GPU_E_FAILED,"时间线已失败");
+        CHECK(nvn_gpu_fence_done()==0 && nvn_gpu_fence_failed()==1,"E697 timeline changed");
+        CHECK(nvn_gpu_fence_wait(2,0,&e).code==NVN_GPU_E_FAILED,"E697 failed wait");
+        for(int i=0;i<16;i++)CHECK(buf_cpu(b)[i]==0,"E697 failed command wrote buffer");
+        nvn_gpu_cmd blocked=NULL;CHECK(nvn_gpu_cmd_begin(NULL,&blocked,&e).code==NVN_GPU_E_FAILED,"E697 terminal begin");
+        nvn_gpu_buf_release(b,NULL,NULL);
+        CHECK(OK(nvn_gpu_close(5000000000ull,&e)),"E697 close");
+        CHECK(atomic_load(&d1.calls)==1 && atomic_load(&d2.calls)==1,"E697 duplicate callback after close");
+    }
+    s2a_vk_device_destroy(&g_dev,1);printf("E697 isolated failures=%d\n",g_fail);return g_fail?1:0;
+}
+
 int main(int argc, char **argv) {
+    setvbuf(stdout, NULL, _IOLBF, 0);   // 经 tee 的管道默认整块缓冲：超时被杀时最后一行不是卡点；按行刷新才看得出卡在哪
+    if (getenv("S2A_TEST_COUNT_ONLY")) return c658_main(argc, argv);
+    if (getenv("S2A_TEST_ERROR697_ONLY")) return error697_only();
     if (!getenv("S2A_TEST_LOGICOP_ONLY")) t29_format_expand();
     char why[256] = {0};
     if (s2a_vk_device_create(&g_dev, why, sizeof why) != 0) {
         printf("SKIP? 建 Vulkan 设备失败：%s\n", why);
         return 2;   // 不静默跳过：run.sh 把 2 当红
     }
+    if (argc > 5 && !strcmp(argv[2], "--c89-child")) return c89_child_main(argv);   // C89 里被 SIGKILL 的那一局：由 c89_midrun_save 起
     printf("device: %s (%s)\n", g_dev.properties.deviceName, g_dev.driver_name);
+    if (getenv("S2A_TEST_PLC_ONLY") && argc > 1) {   // 开发时只跑 C89（run.sh 不设这个变量）
+        memset(&g_desc, 0, sizeof g_desc); g_desc.host_device = &g_dev; g_desc.app_label = "nvn-backend-vk-test";
+        c89_midrun_save(argv[1]);
+        printf("nvn_gpu Vulkan 后端 C89 单跑：%s（%d 处不符）\n", g_fail ? "红" : "绿", g_fail);
+        s2a_vk_device_destroy(&g_dev, 1);
+        return g_fail ? 1 : 0;
+    }
+    if (getenv("S2A_TEST_C201_ONLY")) {   // 开发时只跑 C201（视图销毁的两处线性代价；run.sh 不设这个变量）
+        memset(&g_desc, 0, sizeof g_desc); g_desc.host_device = &g_dev; g_desc.app_label = "nvn-backend-vk-test";
+        if (!open_backend()) return 1;
+        c201_view_list();
+        c201_fb_scan(0);
+        c201_fb_scan(1);
+        nvn_gpu_err e201 = {0}; CHECK(OK(nvn_gpu_close(5000000000ull, &e201)), "C201 close：%d %s", e201.rc.code, e201.why);
+        printf("nvn_gpu Vulkan 后端 C201 单跑：%s（%d 处不符，自检残留 %llu）\n", g_fail ? "红" : "绿", g_fail, (unsigned long long)nvn_vk_dbg_view_stat(3));
+        s2a_vk_device_destroy(&g_dev, 1);
+        return g_fail ? 1 : 0;
+    }
     if (getenv("S2A_TEST_LOGICOP_ONLY")) {
         if(argc < 2) return 2;
         memset(&g_desc,0,sizeof g_desc);g_desc.host_device=&g_dev;g_desc.app_label="logic-only";
@@ -5713,6 +6957,35 @@ int main(int argc, char **argv) {
     memset(&g_desc, 0, sizeof g_desc);
     g_desc.host_device = &g_dev;
     g_desc.app_label = "nvn-backend-vk-test";
+    if (argc > 2 && (!strcmp(argv[2], "--shown-only") || !strcmp(argv[2], "--shown-unsupported"))) {
+        g_shown_timing_test = !strcmp(argv[2], "--shown-only") ? 1 : 2;
+        if (g_shown_timing_test == 2) {
+            uint32_t count = 0;
+            VkResult er = vkEnumerateDeviceExtensionProperties(g_dev.physical, NULL, &count, NULL);
+            VkExtensionProperties *exts = calloc(count ? count : 1, sizeof *exts);
+            CHECK(er == VK_SUCCESS && exts, "C883 enumerate extension count");
+            if (exts && er == VK_SUCCESS) {
+                er = vkEnumerateDeviceExtensionProperties(g_dev.physical, NULL, &count, exts);
+                CHECK(er == VK_SUCCESS, "C883 enumerate extension list");
+                int supported = 0;
+                for (uint32_t i = 0; i < count; i++) if (!strcmp(exts[i].extensionName, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME)) supported = 1;
+                CHECK(!supported, "C883 unsupported arm requires actual lavapipe without display timing");
+            }
+            free(exts);
+        }
+        g_dev.has_display_timing = g_shown_timing_test == 1; // simulated capability, not a lavapipe claim
+        if (!open_backend()) return 1;
+        c71_present();
+        if (g_shown_timing_test == 1)
+            CHECK(g_timing_tags >= 3 && g_timing_bad == 0,
+                  "C883 supported opt-in presents carry distinct IDs: tags=%u invalid=%u", g_timing_tags, g_timing_bad);
+        else CHECK(!g_timing_tags && g_shown_empty_logged,
+                   "C883 unsupported has no ID and logs empty metrics with reason: tags=%u logs=%d", g_timing_tags, g_shown_empty_logged);
+        nvn_gpu_err ce = {0};
+        CHECK(OK(nvn_gpu_close(5000000000ull, &ce)), "C883 close: %s", ce.why);
+        s2a_vk_device_destroy(&g_dev, 1);
+        return g_fail ? 1 : 0;
+    }
     if (!open_backend()) return 1;
     if (!getenv("S2A_TEST_WSI697_ONLY") && !c697_bc4_3d_run()) return 1;
     if (getenv("S2A_TEST_BC4_3D_ONLY")) {
@@ -5825,6 +7098,7 @@ int main(int argc, char **argv) {
     { nvn_gpu_err e73; CHECK(OK(nvn_gpu_close(5000000000ull, &e73)), "C73 close：%d %s", e73.rc.code, e73.why); }
     if (!open_backend()) return 1;
     c72_bc1_upload(argv[1], (g_dev.bc_decode_mask & (1u << (NVN_FORMAT_RGBA_DXT1 - 0x41))) != 0);
+    c697e_bc_small_mip_block_region(0);   // 原生 BC 路径（同一个 copy_region）
     { nvn_gpu_err e72; CHECK(OK(nvn_gpu_close(5000000000ull, &e72)), "C72 close：%d %s", e72.rc.code, e72.why); }
     { uint32_t saved_mask = g_dev.bc_decode_mask;
       g_dev.bc_decode_mask |= 1u << (NVN_FORMAT_RGBA_DXT1 - 0x41);
@@ -5832,6 +7106,8 @@ int main(int argc, char **argv) {
       c72_bc1_upload(argv[1], 1);
       c192_bc_order();
       c194_bc_cube_mips();
+      c697f_bc_3d_slice_from_buf();        // 现解路径：3D 贴图 layer 当切片
+      c697e_bc_small_mip_block_region(1);   // 现解路径（Mali 走这条）
       nvn_gpu_err e72; CHECK(OK(nvn_gpu_close(5000000000ull, &e72)), "C72 compute close：%d %s", e72.rc.code, e72.why);
       if (!open_backend()) return 1;
       c193_bc_readback_rejected();
@@ -5874,6 +7150,12 @@ int main(int argc, char **argv) {
         c70_swizzle(argv[1], k);
         nvn_gpu_err e70;
         CHECK(OK(nvn_gpu_close(5000000000ull, &e70)), "C70 close：%d %s", e70.rc.code, e70.why);
+    }
+    for (int k = 0; k < 4; k++) {   // C200：四张各一个会话（tri_impl 的提交序号固定）
+        if (!open_backend()) return 1;
+        c200_alpha_reads_one(argv[1], k);
+        nvn_gpu_err e200;
+        CHECK(OK(nvn_gpu_close(5000000000ull, &e200)), "C200 close：%d %s", e200.rc.code, e200.why);
     }
     if (!open_backend()) return 1;
     t31_vertex_formats(argv[1]);
@@ -5967,6 +7249,9 @@ int main(int argc, char **argv) {
     c74b_clear_rect_oob();
     CHECK(OK(nvn_gpu_close(5000000000ull, &e18)), "C74b close：%d %s", e18.rc.code, e18.why);
     if (!open_backend()) return 1;
+    c937_use_after_release();
+    CHECK(OK(nvn_gpu_close(5000000000ull, &e18)), "C937 close：%d %s", e18.rc.code, e18.why);
+    if (!open_backend()) return 1;
     c85_redundant_state(argv[1]);   // 独占会话：时间线信号不受前后用例的排列影响
     CHECK(OK(nvn_gpu_close(5000000000ull, &e18)), "C85 close：%d %s", e18.rc.code, e18.why);
     if (!open_backend()) return 1;
@@ -6003,6 +7288,11 @@ int main(int argc, char **argv) {
     if (!open_backend()) return 1;   // C197 自己一个会话：围栏号从这里重新算，和前后用例不相干
     c197_pass_cache();
     CHECK(OK(nvn_gpu_close(5000000000ull, &e18)), "C197 close：%d %s", e18.rc.code, e18.why);
+    if (!open_backend()) return 1;   // C201 同样自己一个会话
+    c201_view_list();
+    c201_fb_scan(0);
+    c201_fb_scan(1);
+    CHECK(OK(nvn_gpu_close(5000000000ull, &e18)), "C201 close：%d %s", e18.rc.code, e18.why);
 
     for (int sw = 0; sw < 2; sw++) {
         if (!open_backend()) return 1;
@@ -6017,8 +7307,13 @@ int main(int argc, char **argv) {
     }
 
     c88_pipe_cache(argv[1]);   // 每个会话自己开 / 关（带不同的 cache_dir）
+    c89_midrun_save(argv[1]);  // 同上；还会起子进程（被 SIGKILL 的那一局）
+    c658_suite(argv[1],0);   // Independently opens/closes; absent count capability is a negative control.
+    c907_retained_flush(argv[1]);   // 停局保留会话时的管线缓存落盘（#907 合入补）
+    // C201：整套用例都在 nvk_fbdrop=2（自检档）下跑，视图销毁走快路之后每次再全表扫一遍；反查表漏记过的帧缓冲会在这里留下残留计数。
+    CHECK(nvn_vk_dbg_view_stat(3) == 0, "C201 整套用例在自检档下跑完：视图销毁后帧缓冲缓存里扫到的残留期望 0 → %llu", (unsigned long long)nvn_vk_dbg_view_stat(3));
 
-    printf("nvn_gpu Vulkan 后端 C01–C08/C23/C25/C26/C27–C55/C56–C69/C74–C75/C88 + 清屏/复制/深度/纹理三角形用例：%s（%d 处不符，done %d 次，retired %d 次）\n",
+    printf("nvn_gpu Vulkan 后端 C01–C08/C23/C25/C26/C27–C55/C56–C69/C74–C75/C88/C89 + 清屏/复制/深度/纹理三角形用例：%s（%d 处不符，done %d 次，retired %d 次）\n",
            g_fail ? "红" : "绿", g_fail, atomic_load(&g_ndone), atomic_load(&g_retired));
     s2a_vk_device_destroy(&g_dev, 1);   // 最后一个会话已在 t20 close 里证明空闲
     { extern uint64_t nvn_vk_dbg_dq_recs(void); uint64_t n = nvn_vk_dbg_dq_recs();

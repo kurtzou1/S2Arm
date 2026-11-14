@@ -233,6 +233,19 @@ class LogReason(unittest.TestCase):
 
 
 class Product(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'nt', 'UNC product behavior is Windows-only')
+    def test_unc_product_source_is_copied_not_junctioned(self):
+        import _winapi
+        with tempfile.TemporaryDirectory() as t:
+            dst = Path(t) / 'product'
+            src = r'\\server\share\games\title\roots'
+            with patch.object(oneclick_win, 'WIN', True), \
+                 patch.object(_winapi, 'CreateJunction') as create, \
+                 patch.object(oneclick_win.shutil, 'copytree') as copytree:
+                oneclick_win.junction(dst, src)
+            create.assert_not_called()
+            copytree.assert_called_once_with(src, dst)
+
     def test_links_not_copies(self):
         with tempfile.TemporaryDirectory() as t:
             t = Path(t); cur = t / 'ver'; (cur / 'romfs').mkdir(parents=True)
@@ -605,6 +618,31 @@ class InstallWin(unittest.TestCase):
         body = "print('Error: Developer API error 1100: Your session has expired.')\nsys.exit(1)\n"
         e, got, _ = self.run_fake(body)
         self.assertIsInstance(e, install_win.Fail); self.assertEqual(e.err, 'apple_session_expired'); self.assertNotIn('push', got)
+
+    # #3fc02b 玩家原文（Windows 0.3.7，3 次上传同一句）：plumesign 取 anisette 时 DNS 解析失败
+    ANISETTE_DNS = ("Error: Anisette error: Request Error error sending request for url (https://mac-ani.jkcoxson.com/v3/client_info)\n\nCaused by:\n"
+                    "    0: Request Error error sending request for url (https://mac-ani.jkcoxson.com/v3/client_info)\n"
+                    "    1: error sending request for url (https://mac-ani.jkcoxson.com/v3/client_info)\n    2: client error (Connect)\n    3: dns error\n"
+                    "    4: 不知道这样的主机。 (os error 11001)")
+
+    def test_signing_server_unreachable_retried_once(self):
+        # 期望（手写）：第一次连不上签名服务器 → 等一下原样再签一次；第二次成了就照常推包、回包名，两次输出都在日志里
+        body = ("import os\nmark = os.path.join(os.path.dirname(sys.argv[0]), 'tried')\n"
+                "if not os.path.exists(mark):\n    open(mark, 'w').close(); print(%r); sys.exit(1)\n"
+                "print('Installation complete!')\nz = zipfile.ZipFile(a[a.index('-o') + 1], 'w')\n"
+                "z.writestr('Payload/S2Arm.app/Info.plist', b'<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>a.b.TEAM</string></dict></plist>')\nz.close()\n") % self.ANISETTE_DNS
+        with patch.object(install_win, 'RETRY_WAIT', 0):
+            bid, got, log = self.run_fake(body)
+        self.assertEqual(bid, 'a.b.TEAM'); self.assertEqual(got['push'][:2], ['U1', 'a.b.TEAM'])
+        self.assertIn('os error 11001', log); self.assertIn('连不上签名服务器：重试', log)
+
+    def test_signing_server_unreachable_twice_reports_code(self):
+        # 期望（手写）：两次都连不上 → 以 signing_server_unreachable 失败（不再是 device_install_failed），不推包
+        body = "print(%r)\nsys.exit(1)\n" % self.ANISETTE_DNS
+        with patch.object(install_win, 'RETRY_WAIT', 0):
+            e, got, _ = self.run_fake(body)
+        self.assertIsInstance(e, install_win.Fail); self.assertEqual(e.err, 'signing_server_unreachable'); self.assertNotIn('push', got)
+        self.assertIn('os error 11001', str(e))
 
     def test_legacy_case_bundle(self):
         self.assertEqual(install_win.legacy_case_bundle('io.s2arm.games.abcde12345'), 'io.s2arm.games.ABCDE12345')

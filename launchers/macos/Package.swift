@@ -20,7 +20,9 @@ let package = Package(
         .executableTarget(name: "S2ArmApple",
                           dependencies: [.product(name: "NX2AppleUI", package: "frontend"),
                                          .product(name: "S2ArmAppleAdapter", package: "adapter")],
-                          swiftSettings: [.swiftLanguageMode(.v5)]),
+                          swiftSettings: [.swiftLanguageMode(.v5)],
+                          // Sparkle.framework 在 App 的 Contents/Frameworks（build_app.py 放进去）
+                          linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])]),
         .testTarget(name: "S2ArmAppleAdapterTests", dependencies: [.product(name: "S2ArmAppleAdapter", package: "adapter")],
                     swiftSettings: [.swiftLanguageMode(.v5)]),
         // 新前端的本机控制口命令表（NX2Apple/S2ArmControl.swift，11-07）

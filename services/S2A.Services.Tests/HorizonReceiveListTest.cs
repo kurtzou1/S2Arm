@@ -80,8 +80,12 @@ namespace S2A.Services.Tests
                 if (count == 0) System.Threading.Thread.Sleep(10);
             }
             bool inside = at >= (ulong)_tlr + 8 && at + 0x40 <= (ulong)_tlr + 0x100 && (at & 0xF) == 0;
-            Check("P1-81 接收列表类型 1（接收区紧跟应答消息）放得下", $"rc 0x0、计数 1、标签 0x{tag:X}、地址在消息缓冲内应答之后且 16 对齐",
-                $"rc 0x{rc1:X}、计数 {count}、标签 0x{(inside ? *(ulong*)at : 0):X}、地址{(inside ? "在消息缓冲内应答之后且 16 对齐" : $" 0x{at:X} 不在消息缓冲内")}");
+            // 上面四次放不下的调用时第一块可能还没播完（音频线程按时刻放出，机器忙时更明显），没被取走就和这一块一起读到：
+            //   计数 2、第 1 项 0x81000001（#921 作者报的偶发红）。判据只看这次读到的缓冲：最后一项是这一块，前面若有只能是第一块
+            ulong last = inside && count >= 1 && count <= 8 ? *(ulong*)(at + (count - 1) * 8) : 0;
+            bool prefixOk = inside && (count == 1 || (count == 2 && *(ulong*)at == 0x81000001));
+            Check("P1-81 接收列表类型 1（接收区紧跟应答消息）放得下", $"rc 0x0、末项标签 0x{tag:X}、此前只可能有第一块、地址在消息缓冲内应答之后且 16 对齐",
+                $"rc 0x{rc1:X}、末项标签 0x{last:X}、{(prefixOk ? "此前只可能有第一块" : $"计数 {count} 前项不对")}、地址{(inside ? "在消息缓冲内应答之后且 16 对齐" : $" 0x{at:X} 不在消息缓冲内")}");
         }
     }
 }

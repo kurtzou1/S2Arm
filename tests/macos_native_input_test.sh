@@ -13,7 +13,7 @@ T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 export CLANG_MODULE_CACHE_PATH="$T/clang-cache"
 xcrun clang -fobjc-arc -O2 -Wall -Wextra -Wno-unused-parameter -Iruntime/include -Iios \
   launchers/macos/Tests/input_test.m runtime/src/input_config.c runtime/src/pad.c ios/input_config.m -o "$T/input" \
-  macos/ns2_controller.c macos/joycon_imu.m runtime/ns2pro/*.c runtime/ns2pro/NS2Transport.m -Iruntime/ns2pro/include \
+  macos/ns2_controller.c macos/joycon_imu.m macos/hid_pad.m runtime/ns2pro/*.c runtime/ns2pro/NS2Transport.m -Iruntime/ns2pro/include \
   macos/textinput_mac.m runtime/src/text_input.c \
   -framework AppKit -framework CoreGraphics -framework GameController -framework CoreHaptics -framework QuartzCore -framework CoreBluetooth -framework IOKit
 "$T/input"

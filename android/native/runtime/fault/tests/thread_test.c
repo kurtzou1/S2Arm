@@ -47,6 +47,8 @@ uint64_t now_ns(void){return plat_now_ns();}
 int plat_fault_install(int signal,void(*handler)(int,siginfo_t*,void*),unsigned flags){struct sigaction a={0};a.sa_sigaction=handler;a.sa_flags=SA_SIGINFO|(flags&PLAT_FAULT_ONSTACK?SA_ONSTACK:0);sigemptyset(&a.sa_mask);return sigaction(signal,&a,NULL)?errno:0;}
 pthread_key_t g_key18,g_keytls,g_keytlr,g_keygate;
 void sw_gate(void){abort();}
+char sw_gate_end[4];   // crash.c 栈指针未对齐分派按 [sw_gate, sw_gate_end) 认门（本夹具不走那条路）
+int s2a_emul_sp_unaligned(void *u){(void)u;return 0;}   // 同上：不替做，照崩溃处理
 uint64_t plat_tsd_base(void){return 0;}
 void *s2a_tlr_alloc(void){return calloc(1,4096);}
 void s2a_tlr_free(void *p){free(p);}

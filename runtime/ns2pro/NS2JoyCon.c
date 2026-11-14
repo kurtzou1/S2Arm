@@ -109,3 +109,18 @@ ns2_kind ns2_output_kind(ns2_kind a, int a_present, ns2_kind b, int b_present) {
     if (b_present) return b;
     return NS2_KIND_NONE;
 }
+int ns2_joycon_split_wanted(ns2_kind kind, int side_buttons) {
+    int want = kind == NS2_KIND_JOYCON_L ? (NS2_SIDE_SL_L | NS2_SIDE_SR_L) : kind == NS2_KIND_JOYCON_R ? (NS2_SIDE_SL_R | NS2_SIDE_SR_R) : 0;
+    return want && (side_buttons & want) == want;
+}
+ns2_assign_gesture ns2_assign_gesture_of(ns2_kind kind, uint64_t buttons, int side_buttons) {
+    int l = (buttons >> L) & 1, r = (buttons >> R) & 1;
+    switch (kind) {
+    case NS2_KIND_PRO: case NS2_KIND_JOYCON_PAIR: return l && r ? NS2_ASSIGN_WHOLE : NS2_ASSIGN_NONE;
+    case NS2_KIND_JOYCON_L: case NS2_KIND_JOYCON_R:
+        if (ns2_joycon_split_wanted(kind, side_buttons)) return NS2_ASSIGN_SINGLE;   // SL + SR 优先：横握时手指压着 SL / SR，顺带碰到肩键也算单只
+        return (kind == NS2_KIND_JOYCON_L ? l : r) ? NS2_ASSIGN_HALF : NS2_ASSIGN_NONE;
+    default: return NS2_ASSIGN_NONE;
+    }
+}
+

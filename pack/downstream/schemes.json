@@ -17,11 +17,11 @@
         }
       },
       "bundle": {
-        "tag": "v2.3.1",
-        "commit": "18bd146f00fcadd0921beb9496c61e023c5950a1",
-        "urls": ["https://dl.s2arm.com/d2r/v2.3.1/D2RMobile-s2arm-bundle.zip",
-                 "https://github.com/jhaizhou-ops/d2r-mobile/releases/download/v2.3.1/D2RMobile-s2arm-bundle.zip"],
-        "sha256": "bac5b9c3d84009f578e1e4ccc0041da5b636d479835330ea2de0ed9f2bf7e5ed"
+        "tag": "v2.3.2",
+        "commit": "90a7a83c142479a262ff7877e4e95ad45125b800",
+        "urls": ["https://dl.s2arm.com/d2r/v2.3.2/D2RMobile-s2arm-bundle.zip",
+                 "https://github.com/jhaizhou-ops/d2r-mobile/releases/download/v2.3.2/D2RMobile-s2arm-bundle.zip"],
+        "sha256": "688cd2053546beba06c9f7de5caec7d43c8f403f1f22826ddb1f95e73949ca2c"
       },
       "targets": {
         "ios": {

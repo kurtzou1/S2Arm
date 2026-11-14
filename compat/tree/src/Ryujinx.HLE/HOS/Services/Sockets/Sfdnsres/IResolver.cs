@@ -244,6 +244,97 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Sfdnsres
             return GetAddrInfoRequestImpl(context, outputBufferPosition, outputBufferSize, true, optionsBufferPosition, optionsBufferSize);
         }
 
+        [CommandCmif(13)] // 5.0.0+
+        // GetNameInfoRequestWithOptions(u32 flags, ..., u64 pid_placeholder, pid, buffer<sockaddr, 5> address, buffer<i8, 6> host, buffer<i8, 6> service, buffer<options, 0x21>)
+        //   -> (i32 gai_error, i32 host_error, i32 errno)
+        // S2Arm: the getnameinfo of the resolver (address -> host name and port text). Wire shape from the 23.0.1 system interface dump: in-data 0x18, out-data 0xC,
+        //   buffers [A in, B out, B out, 0x21 in], pid; the out order follows the SDK proxy's (ai error, host error, errno). Only the flags word at in-data 0 is used
+        //   (the same place as in command 7, GetNameInfoRequest, 0x10 bytes); the rest of the in-data and the options are not needed to answer.
+        //   Only IPv4 (sockaddr_in: len, family 2, port big-endian, address) is understood, like the other requests here; another family gets EAI_FAMILY.
+        //   Service is always the port number (the console's resolver has no services database a game can rely on). Host: the numeric address when asked for it
+        //   (NI_NUMERICHOST) or when internet access is off, otherwise the reverse lookup with the numeric address as the fallback (EAI_NONAME under NI_NAMEREQD).
+        public ResultCode GetNameInfoRequestWithOptions(ServiceCtx context)
+        {
+            const uint NiNumericHost = 0x2, NiNameReqd = 0x4;
+
+            uint flags = context.RequestData.ReadUInt32();
+
+            ulong addressPosition = context.Request.SendBuff[0].Position;
+            ulong addressSize = context.Request.SendBuff[0].Size;
+            (ulong hostPosition, ulong hostSize) = (context.Request.ReceiveBuff[0].Position, context.Request.ReceiveBuff[0].Size);
+            (ulong servicePosition, ulong serviceSize) = (context.Request.ReceiveBuff[1].Position, context.Request.ReceiveBuff[1].Size);
+
+            byte[] sockaddr = new byte[Math.Min(addressSize, 0x80)];
+            context.Memory.Read(addressPosition, sockaddr);
+
+            GaiError gaiError = GaiError.Success;
+            NetDbError netDbError = NetDbError.Success;
+
+            if (sockaddr.Length < 8 || sockaddr[1] != (byte)AddressFamily.InterNetwork)
+            {
+                gaiError = GaiError.Family;
+            }
+            else
+            {
+                ushort port = BinaryPrimitives.ReadUInt16BigEndian(sockaddr.AsSpan(2));
+                IPAddress address = new(sockaddr.AsSpan(4, 4));
+                string host = address.ToString();
+
+                if ((flags & NiNumericHost) == 0 && context.Device.Configuration.EnableInternetAccess)
+                {
+                    try
+                    {
+                        host = Dns.GetHostEntry(address).HostName;
+                    }
+                    catch (SocketException exception)
+                    {
+                        if ((flags & NiNameReqd) != 0)
+                        {
+                            netDbError = ConvertSocketErrorCodeToNetDbError(exception.ErrorCode);
+                            gaiError = GaiError.NoName;
+                        }
+                    }
+                }
+                else if ((flags & NiNumericHost) == 0 && (flags & NiNameReqd) != 0)
+                {
+                    netDbError = NetDbError.HostNotFound;
+                    gaiError = GaiError.NoName;
+                }
+
+                if (gaiError == GaiError.Success && (!WriteNameInfoString(context, hostPosition, hostSize, host) ||
+                                                     !WriteNameInfoString(context, servicePosition, serviceSize, port.ToString())))
+                {
+                    gaiError = GaiError.Overflow;
+                }
+            }
+
+            context.ResponseData.Write((int)gaiError);
+            context.ResponseData.Write((int)netDbError);
+            context.ResponseData.Write(0);   // errno
+
+            return ResultCode.Success;
+        }
+
+        // A NUL-terminated string into an output buffer; a zero-size buffer means the caller did not ask for it (host or service NULL)
+        private static bool WriteNameInfoString(ServiceCtx context, ulong position, ulong size, string text)
+        {
+            if (size == 0)
+            {
+                return true;
+            }
+
+            byte[] bytes = Encoding.ASCII.GetBytes(text + '\0');
+
+            if ((ulong)bytes.Length > size)
+            {
+                return false;
+            }
+
+            context.Memory.Write(position, bytes);
+
+            return true;
+        }
+
         [CommandCmif(14)] // 5.0.0+
         // ResolverSetOptionRequest(buffer<unknown, 5, 0>, u64 unknown, u64 pid_placeholder, pid) -> (i32 ret, u32 bsd_errno)
         public ResultCode ResolverSetOptionRequest(ServiceCtx context)

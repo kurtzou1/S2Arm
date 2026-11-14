@@ -179,6 +179,7 @@ void s2a_loadpage_attach(UIView *root) {
     if (v.stage == S2A_LOAD_DONE) return;
     g_page = [[S2ALoadPage alloc] initWithFrame:root.bounds firstRun:v.first_run];
     [root addSubview:g_page]; [g_page refresh];
+    { void s2a_report_gear_attach(UIView *); s2a_report_gear_attach(g_page); }   // 左上角小齿轮：故障报修（加载 / 解包时也找得到上传入口）
     __weak S2ALoadPage *w = g_page;
     g_page.timer = [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *t) { (void)t; [w refresh]; }];
 }

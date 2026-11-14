@@ -154,6 +154,15 @@ public final class InstallService {
                              skipped: r["skipped"] as? [String] ?? [])
     }
 
+    /// 推到手机（exportPush，pack/jobs/install.py push_export_job）：把「S2Arm 自签导出」里的完整 .img 推进手机上自签 S2Arm 的「放这里导入」。
+    ///   gameId 为 nil = 文件夹里全部；→ 推进去的文件名。推不了抛 JobFailure（原因 + 下一步：连线 / 信任 / 先装 S2Arm.ipa）
+    public func exportPush(gameId: String?, device: String? = nil, events: EventSink = .discard) async throws -> [String] {
+        var extra: [String: Any] = [:]
+        if let gameId, !gameId.isEmpty { extra["gameId"] = gameId }
+        if let device, !device.isEmpty { extra["device"] = device }
+        return try await client.perform("exportPush", extra: extra, events: events).result["pushed"] as? [String] ?? []
+    }
+
     // ---- 开发者证书（v0.2.4，pack/jobs/devcert.py）----
 
     /// 现况 + 体检；device = 连着的手机 UDID（判在不在设备列表），不给就不判。

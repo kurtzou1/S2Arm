@@ -511,3 +511,20 @@ nonisolated(unsafe) private var lastPlayed = ""
     }
     #expect(app.object(forKey: "S2ASplitScreen") == nil && app.object(forKey: "S2AScreenOrientation") == nil)
 }
+
+/// #968 签名身份比对：描述文件 application-identifier 的应用部分与包名不一致才报。期望按规则手写（描述文件前后夹二进制，同真 CMS 包装）
+@Test func signingIdentityMismatch() {
+    func provision(_ appID: String) -> Data {
+        var d = Data([0x30, 0x82, 0x01, 0x00, 0xff])
+        d.append(Data("<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>Entitlements</key><dict><key>application-identifier</key><string>\(appID)</string></dict></dict></plist>".utf8))
+        d.append(Data([0x00, 0xa0, 0x82]))
+        return d
+    }
+    #expect(SigningIdentity.mismatch(provision: provision("ABCDE12345.app.example.fixed"), bundleID: "io.s2arm.games") == "app.example.fixed")
+    #expect(SigningIdentity.mismatch(provision: provision("ABCDE12345.io.s2arm.games"), bundleID: "io.s2arm.games") == nil)
+    #expect(SigningIdentity.mismatch(provision: provision("ABCDE12345.*"), bundleID: "io.s2arm.games") == nil)
+    #expect(SigningIdentity.mismatch(provision: provision("ABCDE12345.io.s2arm.*"), bundleID: "io.s2arm.games") == nil)
+    #expect(SigningIdentity.mismatch(provision: provision("ABCDE12345.com.other.*"), bundleID: "io.s2arm.games") == "com.other.*")
+    #expect(SigningIdentity.mismatch(provision: nil, bundleID: "io.s2arm.games") == nil)
+    #expect(SigningIdentity.mismatch(provision: Data("no plist here".utf8), bundleID: "io.s2arm.games") == nil)
+}

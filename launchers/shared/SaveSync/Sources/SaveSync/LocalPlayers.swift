@@ -27,15 +27,13 @@ public struct LocalPlayer: Equatable, Identifiable, Sendable {
 
 public struct LocalPlayers {
     public static let listKey = "S2ALocalPlayers", currentKey = "S2ALocalPlayer"
-    /// 名字最长几个字（游戏里显示的昵称另由服务层截到 32 字节 UTF-8）
-    public static let nameLimit = 20
     public static let firstFolder = "SaveData"
     let defaults: UserDefaults
     /// 第一个玩家没改过名时界面显示的名字（重名判断也按它：不许再建一个「玩家 1」）
     let firstDefault: String
     public init(defaults: UserDefaults, firstDefault: String = "Player 1") { self.defaults = defaults; self.firstDefault = firstDefault }
 
-    public enum NameError: Error, Equatable { case empty, tooLong, taken }
+    public enum NameError: Error, Equatable { case empty, taken }
 
     /// 全部玩家，第一个玩家在最前；没存过 = 只有第一个玩家
     public var all: [LocalPlayer] {
@@ -62,7 +60,7 @@ public struct LocalPlayers {
         save(all, current: uid)
     }
 
-    /// 加一个玩家并选上；名字去掉首尾空白后不能空、不能超过 nameLimit 个字、不能和已有的重名（不分大小写）
+    /// 加一个玩家并选上；名字去掉首尾空白后不能空、不能和已有的重名（不分大小写）；不限长度（11-13 不许堵门：游戏里显示的昵称由服务层截到 32 字节 UTF-8，存档文件夹不按名字长短起名）
     @discardableResult
     public func add(_ raw: String) throws(NameError) -> LocalPlayer {
         let name = try check(raw, except: nil)
@@ -97,7 +95,6 @@ public struct LocalPlayers {
     private func check(_ raw: String, except uid: String?) throws(NameError) -> String {
         let name = raw.trimmingCharacters(in: .whitespacesAndNewlines).precomposedStringWithCanonicalMapping
         guard !name.isEmpty else { throw .empty }
-        guard name.count <= Self.nameLimit else { throw .tooLong }
         let key = name.lowercased()
         guard !all.contains(where: { $0.uid != uid && $0.displayName(firstDefault: firstDefault).lowercased() == key }) else { throw .taken }
         return name
@@ -124,6 +121,9 @@ public struct LocalPlayers {
         var cleaned = String(name.map { "/\\:".contains($0) ? "-" : $0 })
         while cleaned.hasPrefix(".") { cleaned.removeFirst() }
         cleaned = cleaned.trimmingCharacters(in: .whitespaces)
+        // 文件名上限 255 字节（APFS / NTFS）：名字不限长，文件夹名按 UTF-8 在整字处截到 200 字节（留给「SaveData-」与重名时的「-用户号」后缀）；
+        //   旧上限 20 字以内的名字最多 80 字节，原有文件夹名不变
+        while cleaned.utf8.count > 200 { cleaned.removeLast() }
         return cleaned.isEmpty ? "SaveData-" + uid(for: name).prefix(8) : "SaveData-" + cleaned
     }
 

@@ -40,6 +40,7 @@
 #include <string.h>
 
 #include "nvn/nvn_vk_program_result.h"
+#include "tbuf_spirv_fixtures.h"
 
 // 最小合法 SPIR-V：5 个头部 word（magic=0x07230203、version 1.3、generator 0、bound 1、schema 0）。
 // 生产 compute 解析只要求 base64 解码后 >=20 字节、4 字节对齐、magic 正确。
@@ -482,10 +483,26 @@ int main(void) {
             "\"hasUnalignedStorageBuffer\":false,\"c0Reads\":[],"
             "\"stages\":[{\"stage\":\"cs\",\"spirv\":\"%s\"}],"
             "\"bindings\":[{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":344,\"samp_slot\":127,\"count\":1}],"
-            "\"supportLayout\":{\"requiredSize\":2608},\"supportReads\":[]}}", k_spirv);
+            "\"supportLayout\":{\"requiredSize\":2608},\"supportReads\":[]}}", S2A_TEST_COMP_1);
         int rc = nvn_vk_program_parse_compute((const uint8_t *)json, (size_t)n, &p, why, sizeof why);
         ck_true("compute v2 separate maximum slots", rc == 0 && p.binding_count == 1 && p.bindings[0].tex_slot == 255 && p.bindings[0].samp_slot == 127, why);
         nvn_vk_program_free_compute(&p);
+    }
+
+    // 计算阶段的图像：handleIndex 72..86 偶数 = 驱动 c2 图像句柄表第 0..7 槽（同 iOS C2_IMG），槽号 = (handleIndex−72)/2；表外拒绝并报 handleIndex
+    {
+        static const struct { int slot, ok, want; } img[] = {{72, 1, 0}, {86, 1, 7}, {71, 0, 0}, {88, 0, 0}, {74, 1, 1}};
+        for (unsigned k = 0; k < sizeof img / sizeof img[0]; k++) {
+            struct nvn_vk_compute_program p; char why[192] = "", b[160];
+            snprintf(b, sizeof b, "{\"stage\":\"cs\",\"kind\":\"image\",\"set\":3,\"binding\":0,\"slot\":%d,\"count\":1}", img[k].slot);
+            checks++;
+            int rc = parse_case(b, "[]", "[]", &p, why, sizeof why);
+            if (img[k].ok && !(rc == 0 && p.binding_count == 1 && p.bindings[0].kind == 3 && p.bindings[0].tex_slot == img[k].want))
+                failf("compute image slot", "handleIndex %d 期望 接受、图像槽 %d，真结果 rc=%d why=%s", img[k].slot, img[k].want, rc, why);
+            if (!img[k].ok && !(rc != 0 && strstr(why, "image handleIndex")))
+                failf("compute image slot", "handleIndex %d 期望 拒绝，真结果 rc=%d why=%s", img[k].slot, rc, why);
+            nvn_vk_program_free_compute(&p);
+        }
     }
 
     if (fails) {

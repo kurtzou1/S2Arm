@@ -14,6 +14,8 @@ void s2a_diag_upload(void);
 // 弱链接[lab]：s2a_console_mode_set（runtime/src/os.c 接口 v2.15 提供；输入工作台不链原生核，取不到就不切）
 void s2a_console_mode_set(int docked) __attribute__((weak_import));
 BOOL s2a_diag_is_exporting(void);
+BOOL s2a_diag_is_uploading(void);   // diag.m：正在传（这一行改成「正在上传…点按取消」）
+void s2a_diag_cancel_upload(void);
 @implementation S2ASettingsRuntime
 @end
 static S2ASettingsRuntime *g_runtime;
@@ -66,12 +68,14 @@ static UILabel *textLabel(UIFontTextStyle style) {
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     NSInteger g = self.groups[section].integerValue;
     if (g == 6) return S2AL(@"play.group");
+    if (g == 7) return S2AL(@"settings.group.language");
     if (g == 5) return S2APICK(S2A_DPROMPT_SWITCH_GAME_TITLE);
     return @[S2AL(@"cpatch.group.gfx"), S2AL(@"settings.group.controls"), S2AL(@"settings.group.diag"), S2AL(@"settings.group.dev"), S2AL(@"settings.group.saves")][g];
 }
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     switch (self.groups[section].integerValue) {
         case 6: return S2AL(@"play.footer");
+        case 7: return S2AL(@"settings.footer.language");
         case 0: return S2AL(@"settings.footer.graphics");
         case 1: return S2AL(@"settings.footer.controls");
         case 2: return S2AL(@"settings.footer.diag");
@@ -149,7 +153,7 @@ static UILabel *textLabel(UIFontTextStyle style) {
 }
 - (void)updateColumns {
     BOOL compact = self.view.bounds.size.width < 650 || UIContentSizeCategoryIsAccessibilityCategory(self.traitCollection.preferredContentSizeCategory);
-    NSArray *secondary = _runtime.manageSaves ? @[@1, @4, @2, @3] : @[@1, @2, @3];
+    NSArray *secondary = _runtime.manageSaves ? @[@1, @7, @4, @2, @3] : @[@1, @7, @2, @3];   // 7：界面语言（11-13）
     if (_runtime.switchGame) secondary = [@[@5] arrayByAddingObjectsFromArray:secondary];   // 多款容器：「切换游戏」放第二栏最上（找回游戏库的玩家先看到）
     NSArray *groups = compact ? [@[@6, @0] arrayByAddingObjectsFromArray:secondary] : @[@6, @0];
     if (![_left.groups isEqual:groups]) {
@@ -246,8 +250,20 @@ static UILabel *textLabel(UIFontTextStyle style) {
         cell.accessoryView = control; return cell; }
     // 包里 60 帧是关的（强信号：逻辑速度红 / 崩溃 / 卡死 / 帧率达不到；11-02 起全引擎默认开，只有强信号才关）：开关显示玩家手动开没开（S2AFps60Manual，缺省关、不跟 S2AFps60 的缺省开），打开时先提示（11-02 维护者 / 维护者 定的文案）；下次启动生效（settings.m）
     // 包里满屏是关的（强信号：满屏画面坏 / 崩溃归因，tools/caps_policy.py）：设置开关改不动，如实显示关、置灰、写原因（不再缺省显示开、按了没用）
+    // 11-13 维护者「不许堵门」：原先锁灰不让开；现在开关照常可按，显示的是玩家有没有强制开（S2AWidenForce），打开时提示已知问题，下次启动生效
     if ([key isEqualToString:@"S2AWidescreen"] && s2a_ios_caps_value("widen") == 0) {
-        control.on = NO; control.enabled = NO; cell.detailTextLabel.text = S2AL(@"settings.widen.blocked"); control.accessibilityValue = cell.detailTextLabel.text;
+        NSUserDefaults *d = s2a_ios_settings_defaults();
+        control.on = [d boolForKey:@"S2AWidenForce"]; cell.detailTextLabel.text = S2AL(@"settings.widen.blocked"); control.accessibilityValue = cell.detailTextLabel.text;
+        __weak S2ASettingsController *weakSelf = self;
+        [control addAction:[UIAction actionWithHandler:^(UIAction *action) {
+            BOOL on = ((UISwitch *)action.sender).on;
+            [d setBool:on forKey:@"S2AWidenForce"];
+            if (on) [d setBool:YES forKey:@"S2AWidescreen"];   // 先前关过宽屏（存着 NO）会压过强制开
+            if (!on) return;
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:cell.textLabel.text message:S2AL(@"settings.widen.blocked.message") preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:S2AL(@"common.gotIt") style:UIAlertActionStyleCancel handler:nil]];
+            [weakSelf.navigationController.topViewController presentViewController:alert animated:YES completion:nil];
+        }] forControlEvents:UIControlEventValueChanged];
         cell.accessoryView = control; return cell; }
     if ([key isEqualToString:@"S2AFps60"] && s2a_ios_caps_value("fps60") == 0) {
         NSUserDefaults *d = s2a_ios_settings_defaults();
@@ -276,6 +292,7 @@ static UILabel *textLabel(UIFontTextStyle style) {
 }
 - (NSInteger)rowsForGroup:(NSInteger)group {
     if (group == 6) return 2;
+    if (group == 7) return 2;   // 界面语言、游戏语言
     if (group == 4 || group == 5) return 1;
     return group == 0 ? 7 + (_patchGroups.count > 0) : [@[@0, @4, @4, @2][group] integerValue];   // 诊断组第 4 行：诊断局
 }
@@ -289,6 +306,32 @@ static UILabel *textLabel(UIFontTextStyle style) {
         return [self dropdown:split?S2AL(@"play.split"):S2AL(@"play.orientation") labels:split?@[S2AL(@"play.auto"),S2AL(@"play.on"),S2AL(@"play.off")]:@[S2AL(@"play.auto"),S2AL(@"play.landscape"),S2AL(@"play.portrait")] selected:selected enabled:^BOOL(NSInteger i){ return YES; } choose:^(NSInteger i){
             [NSUserDefaults.standardUserDefaults setObject:values[i] forKey:key]; [weakSelf refresh];
         } identifier:[@"settings." stringByAppendingString:key]];
+    }
+    if (group == 7 && row == 1) {   // 游戏语言（按款，11-13；定义表 game_settings.v1.json language）：跟随系统 + Switch 全部语言，存这款的 S2AGameLanguage，下次开游戏生效
+        NSArray<NSString *> *values = s2a_ios_game_languages();
+        NSArray<NSString *> *labels = @[S2AL(@"settings.gameLanguage.system"), S2AL(@"settings.language.zhHans"), S2AL(@"settings.language.zhHant"), @"English (US)", @"English (UK)", S2AL(@"settings.gameLanguage.ja"), @"한국어", @"Français", @"Français (Canada)", @"Deutsch",
+                                        @"Español", @"Español (Latinoamérica)", @"Italiano", @"Nederlands", @"Português", @"Português (Brasil)", @"Русский", @"Polski", @"ไทย"];
+        NSUserDefaults *d = s2a_ios_settings_defaults();
+        NSString *cur = [d stringForKey:S2AGameLanguageKey]; NSInteger selected = cur ? (NSInteger)[values indexOfObject:cur] : 0; if (selected == NSNotFound) selected = 0;
+        return [self dropdown:S2AL(@"settings.gameLanguage") labels:labels selected:selected enabled:^BOOL(NSInteger i) { (void)i; return YES; } choose:^(NSInteger i) {
+            if (i == selected) return;
+            if (i == 0) [d removeObjectForKey:S2AGameLanguageKey]; else [d setObject:values[i] forKey:S2AGameLanguageKey];
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:S2AL(@"settings.gameLanguage") message:S2AL(@"settings.gameLanguage.restart") preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:S2AL(@"common.gotIt") style:UIAlertActionStyleCancel handler:nil]];
+            [weakSelf.navigationController.topViewController presentViewController:alert animated:YES completion:nil]; [weakSelf refresh];
+        } identifier:@"settings.gameLanguage"];
+    }
+    if (group == 7) {   // 界面语言（11-13 维护者）：跟随系统 / 简 / 繁 / 英，存 S2AUILanguageKey；重开 App 生效（ios/app.m 起进程时设本 App 的 AppleLanguages）
+        NSArray *values = @[@"system", @"zh-Hans", @"zh-Hant", @"en"];
+        NSString *cur = [NSUserDefaults.standardUserDefaults stringForKey:S2AUILanguageKey]; NSInteger selected = cur ? (NSInteger)[values indexOfObject:cur] : 0; if (selected == NSNotFound) selected = 0;
+        return [self dropdown:S2AL(@"settings.language") labels:@[S2AL(@"settings.language.system"), S2AL(@"settings.language.zhHans"), S2AL(@"settings.language.zhHant"), S2AL(@"settings.language.en")]
+                     selected:selected enabled:^BOOL(NSInteger i) { (void)i; return YES; } choose:^(NSInteger i) {
+            if (i == selected) return;
+            if (i == 0) [NSUserDefaults.standardUserDefaults removeObjectForKey:S2AUILanguageKey]; else [NSUserDefaults.standardUserDefaults setObject:values[i] forKey:S2AUILanguageKey];
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:S2AL(@"settings.language") message:S2AL(@"settings.language.restart") preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:S2AL(@"common.gotIt") style:UIAlertActionStyleCancel handler:nil]];
+            [weakSelf.navigationController.topViewController presentViewController:alert animated:YES completion:nil]; [weakSelf refresh];
+        } identifier:@"settings.uiLanguage"];
     }
     if (group == 5) {   // 多款容器切换游戏：点了弹确认（runtime.switchGame），同「导出诊断包」一样是一行动作
         UITableViewCell *cell = [self baseCell:S2APICK(S2A_DPROMPT_SWITCH_GAME_ACTION)];
@@ -323,7 +366,7 @@ static UILabel *textLabel(UIFontTextStyle style) {
         cell.userInteractionEnabled = s2a_vpad_has_layouts(); if (!cell.userInteractionEnabled) cell.textLabel.textColor = UIColor.secondaryLabelColor;
         return cell;
     }
-    if (group == 2 && row == 0) { UITableViewCell *cell = [self baseCell:S2AL(@"diag.upload")]; cell.textLabel.textColor = self.view.tintColor; cell.accessibilityIdentifier = @"settings.export"; return cell; }
+    if (group == 2 && row == 0) { UITableViewCell *cell = [self baseCell:s2a_diag_is_uploading() ? S2AL(@"diag.upload.cancelSending") : S2AL(@"diag.upload")]; cell.textLabel.textColor = self.view.tintColor; cell.accessibilityIdentifier = @"settings.export"; return cell; }
     if (group == 2 && row == 2) return [self toggleCell:8];
     if (group == 2 && row == 3) return [self toggleCell:10];
     return [self toggleCell:group == 1 ? row - 1 : group == 2 ? 3 : row + 4];
@@ -341,7 +384,7 @@ static UILabel *textLabel(UIFontTextStyle style) {
             layouts.navigationItem.rightBarButtonItem = self.navigationItem.rightBarButtonItem;
             [self.navigationController pushViewController:layouts animated:YES];
         }
-    } else if (group == 2 && row == 0) s2a_diag_upload();
+    } else if (group == 2 && row == 0) { if (s2a_diag_is_uploading()) s2a_diag_cancel_upload(); else s2a_diag_upload(); }
     else if (group == 4 && row == 0) _runtime.manageSaves(self.navigationController.topViewController);
     else if (group == 5 && row == 0 && _runtime.switchGame) _runtime.switchGame(self.navigationController.topViewController);
 }
@@ -410,7 +453,8 @@ static UILabel *textLabel(UIFontTextStyle style) {
 @end
 
 void s2a_settings_present(UIViewController *presenter) {
-    if (!presenter || presenter.presentedViewController) return;
+    if (!presenter) return;
+    presenter = s2a_top_presenter(presenter);
     s2a_vpad_set_settings_open(YES);
     S2ASettingsNavigation *navigation = [[S2ASettingsNavigation alloc] initWithRootViewController:[S2ASettingsController new]];
     navigation.modalPresentationStyle = UIModalPresentationOverFullScreen; navigation.modalInPresentation = YES;

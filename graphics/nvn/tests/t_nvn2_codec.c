@@ -351,6 +351,19 @@ int main(int argc, char **argv) {
         CHECK(ws && ws(&wsz, &wal, 0, 1920, 1080) == 0 && wsz == 0x1000 && wal == 0x1000);
         CHECK(s2a_codec_entry("_ZN2nn5codec30CalculateH264DecoderWorkBufferEPmS1_mtt") == (void *)ws && s2a_codec_entry("_ZN2nn5codec29CalculateVp8DecoderWorkBufferEPmS1_mtt") == (void *)ws);
     }
+    // #955 SDK 19 的按远程内存初始化（`mmttj`：图像尺寸前两个大小参数）：宿主接管、建的是宿主的解码器（Finalize 走宿主、不报「不是宿主初始化的」），64x64
+    {
+        typedef Result (*f_init_mm)(void *, uint64_t, uint64_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+        static const char *const mm[] = {
+            "_ZN2nn5codec20InitializeVp9DecoderEPNS0_14Vp9DecoderTypeEmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatE",
+            "_ZN2nn5codec20InitializeVp8DecoderEPNS0_14Vp8DecoderTypeEmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatE",
+            "_ZN2nn5codec20InitializeAv1DecoderEPNS0_14Av1DecoderTypeEmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatE",
+            "_ZN2nn5codec21InitializeH264DecoderEPNS0_15H264DecoderTypeEmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatEPKvm" };
+        for (unsigned k = 0; k < 4; k++) CHECK(s2a_codec_entry(mm[k]) != NULL);
+        _Alignas(16) uint8_t o19[256]; memset(o19, 0, sizeof o19);
+        CHECK(((f_init_mm)s2a_codec_entry(mm[0]))(o19, 0x8000, 0x1000, 64, 64, 30, 0, 2) == 0);
+        CHECK(((f_t)E(VP9.fini))(o19) == 0);
+    }
     CHECK(!s2a_codec_entry("_ZN5movie10VideoFrame20GetNativeImageHandleEPN2nn2gs17NativeImageHandleE"));
 
     // ---------- 同步句柄比较 ----------
@@ -374,6 +387,18 @@ int main(int argc, char **argv) {
         uint16_t w, h, w2, h2_; int64_t pts; uint8_t eos;
         CHECK(((f_props)E(VP9.props))(&w, &h, &w2, &h2_, &pts, &eos, r.obj, i1) == 0 && w == 64 && h == 64 && w2 == 64 && h2_ == 64 && pts == 33333000 && !eos);
         CHECK(((f_props)E(VP9.props))(&w, &h, &w2, &h2_, &pts, &eos, r.obj, i2) == 0 && pts == 66666000 && !eos);
+        // #955 SDK 19 的取属性（时间前多 ColorSpace*，9 个参数、序号在第一个栈槽）：同一帧同样的宽高 / 时间，颜色空间写 0（先填 0xdeadbeef）
+        {
+            typedef Result (*f_props19)(uint16_t *, uint16_t *, uint16_t *, uint16_t *, uint32_t *, int64_t *, uint8_t *, void *, uint64_t);
+            f_props19 p19 = (f_props19)s2a_codec_entry("_ZN2nn5codec35GetVp9DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_5movie10ColorSpaceEPNS_8TimeSpanEPbPNS0_14Vp9DecoderTypeEj");
+            uint32_t cs = 0xdeadbeef; w = h = w2 = h2_ = 0; pts = 0; eos = 9;
+            CHECK(p19 && p19(&w, &h, &w2, &h2_, &cs, &pts, &eos, r.obj, i2) == 0 && w == 64 && h == 64 && w2 == 64 && h2_ == 64 && cs == 0 && pts == 66666000 && !eos);
+            static const char *const p19n[] = {
+                "_ZN2nn5codec35GetVp8DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_5movie10ColorSpaceEPNS_8TimeSpanEPbPNS0_14Vp8DecoderTypeEj",
+                "_ZN2nn5codec35GetAv1DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_5movie10ColorSpaceEPNS_8TimeSpanEPbPNS0_14Av1DecoderTypeEj",
+                "_ZN2nn5codec36GetH264DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_5movie10ColorSpaceEPNS_8TimeSpanEPbPNS0_15H264DecoderTypeEj" };
+            for (unsigned k = 0; k < 3; k++) CHECK(s2a_codec_entry(p19n[k]) == (void *)p19);
+        }
         uint8_t p[4];
         for (uint32_t k = 0; k < 2; k++) { px(&r, k, p); printf("VP9 第 %u 帧像素 (%u,%u,%u,%u)\n", k, p[0], p[1], p[2], p[3]); CHECK(p[0] >= 253 && p[1] <= 1 && p[2] <= 1 && p[3] == 255); }
         // 释放后再出一帧（流结束：上一帧再给一次带标记）：句柄接着往后
@@ -584,8 +609,16 @@ int main(int argc, char **argv) {
         rig r; rig_up(&r, &AV1, 64, 64);
         uint64_t id;
         CHECK(((f_sub)E(AV1.sub))(&id, r.obj, red_av1_0, sizeof red_av1_0, 0, 0) == 0);
+        // 诊断 #4ddff2：只有时间分隔（0x12 0x00）+ 无长度填充 OBU 头（类型 15 = 0x78）的 3 字节包没有帧数据：跳过、不报「解码失败」，后面的帧照常出。
+        //   解码在后台按序做：日志收到取完第二帧为止
+        static const uint8_t frameless[] = {0x12, 0x00, 0x78};
+        char tmpl[] = "/tmp/t_nvn2_codec_av1_XXXXXX"; int lfd = mkstemp(tmpl), keep = g_s2a_logfd; CHECK(lfd >= 0); g_s2a_logfd = lfd;
+        CHECK(((f_sub)E(AV1.sub))(&id, r.obj, frameless, sizeof frameless, 16666000, 0) == 0);
         CHECK(((f_sub)E(AV1.sub))(&id, r.obj, red_av1_1, sizeof red_av1_1, 33333000, 0) == 0);
         sync_h a, b; take(&r, &AV1, &spev, &a); take(&r, &AV1, &spev, &b);
+        {   g_s2a_logfd = keep; char lg[8192] = {0}; lseek(lfd, 0, SEEK_SET); ssize_t ln = read(lfd, lg, sizeof lg - 1); close(lfd); unlink(tmpl);
+            int skipped = ln > 0 && strstr(lg, "没有帧数据") != NULL, failed = ln > 0 && strstr(lg, "解码失败") != NULL;
+            printf("AV1 无帧数据的 3 字节包：跳过 %d、报解码失败 %d（期望 1 / 0）\n", skipped, failed); CHECK(skipped && !failed); }
         uint8_t p[4];
         for (uint32_t k = 0; k < 2; k++) { px(&r, k, p); printf("AV1 第 %u 帧像素 (%u,%u,%u,%u)\n", k, p[0], p[1], p[2], p[3]); CHECK(p[0] >= 230 && p[1] <= 25 && p[2] <= 25 && p[3] == 255); }
         rig_down(&r, &AV1);

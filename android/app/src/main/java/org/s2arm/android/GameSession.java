@@ -75,7 +75,7 @@ final class GameSession implements AutoCloseable {
             boolean debugEntriesOpen, GameFingerprint.Timing timing)
             throws IOException, BootContract.BadGame, GamePack.BadPack {
         long phase = GameFingerprint.Timing.start(timing);
-        GameStorage storage = GameStorage.acquire(privateRoot);
+        GameStorage storage = GameStorage.acquire(privateRoot, new File(spec.gameRoot).getName());   // 只锁这一款（不堵门）
         GameFingerprint.Timing.end(timing, "storage_lock", phase);
         try {
             File gameRoot = new File(spec.gameRoot).getCanonicalFile();
@@ -93,9 +93,11 @@ final class GameSession implements AutoCloseable {
             Map<String, Object> artifact = Json.object(Json.parse(new String(Files.readAllBytes(
                 BootContract.under(revision, game.artifact, "artifact").toPath()), java.nio.charset.StandardCharsets.UTF_8)), "artifact");
             Map<String, Object> toolchain = Json.object(artifact.get("toolchain"), "toolchain");
+            // 改写 ABI 已在 BootContract（artifact rewriteAbi + 每个模块 fixups 头）核过；这里的工具链标签和运行时版本号只是标签，
+            // 不同只记日志、不挡起局（不堵门）
             if (!("runtime/rewriter@" + BootContract.REWRITE_ABI).equals(toolchain.get("rewriter")))
-                throw new IOException("artifact rewriter identity is not supported");
-            if (!"0.1.0".equals(game.runtimeVersion)) throw new IOException("artifact runtime version is not supported");
+                System.err.println("S2Arm: artifact rewriter label " + toolchain.get("rewriter") + " differs; ABI " + BootContract.REWRITE_ABI + " verified");
+            if (!"0.1.0".equals(game.runtimeVersion)) System.err.println("S2Arm: artifact runtime version " + game.runtimeVersion + " (built for 0.1.0)");
             GameFingerprint.Timing.end(timing, "artifact_checks", phase);
             phase = GameFingerprint.Timing.start(timing);
             byte[] index = GamePack.read(BootContract.under(revision, "index.tsv", "index"));
@@ -172,7 +174,8 @@ final class GameSession implements AutoCloseable {
                     String mainImage = game.modules.get(0).image;
                     int slash = mainImage.lastIndexOf('/');
                     String moduleDir = slash < 0 ? "" : mainImage.substring(0, slash + 1);
-                    for (String policy : new String[]{"widen_enable.handheld.tsv", "widen_enable.docked.tsv", "widen_full.handheld.tsv", "widen_full.docked.tsv", "widen_verified.tsv"}) {
+                    // 整包一份的可选表（与 bridge.cpp k_optional_tables 一致）：宽屏策略表 + 社区补丁表 cpatch.tsv（#48 D2）
+                    for (String policy : new String[]{"widen_enable.handheld.tsv", "widen_enable.docked.tsv", "widen_full.handheld.tsv", "widen_full.docked.tsv", "widen_verified.tsv", "cpatch.tsv"}) {
                         String path = apk.assetRoot + "/" + moduleDir + policy;
                         if (zip.getEntry("assets/" + path) == null) continue;
                         byte[] policyBytes = asset(zip, path);
@@ -434,9 +437,10 @@ final class GameSession implements AutoCloseable {
         Files.createDirectories(save);
         File[] old = save.toFile().listFiles();
         if (old == null) throw new IOException("cannot inspect save root");
+        // 存档根目录里的其他东西（玩家放进来的原生格式存档、旧版布局）不挡起局：原样留着、不迁移不覆盖，只记日志（不堵门）
         for (File entry : old)
             if (!entry.getName().equals("ryujinx-android"))
-                throw new IOException("save root contains an existing layout; no automatic migration");
+                System.err.println("S2Arm: save root keeps an existing entry untouched (no migration): " + entry.getName());
         Path state = save.resolve("ryujinx-android");
         if (Files.isSymbolicLink(state) || (Files.exists(state, LinkOption.NOFOLLOW_LINKS)
                 && !Files.isDirectory(state, LinkOption.NOFOLLOW_LINKS)))

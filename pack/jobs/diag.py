@@ -52,6 +52,46 @@ def devicectl(c, *args, timeout=120):
     return p.returncode, data, (p.stderr or p.stdout).strip()
 
 
+# Apple Vision Pro（visionOS）：按 iPad 兼容 App 装（「Designed for iPad」），走和 iPad 同一条路——理论支持、未真机验证（没有实物）。
+#   机型号以 RealityDevice 开头（本机 Xcode 的 XROS.platform 设备特征库：RealityDevice14,1 = Apple Vision Pro、17,1 = M5 款）；
+#   devicectl 给它报的 platform 写法没有公开资料，visionOS / xrOS 两种都认，机型号前缀兜底
+VISION_PLATFORMS = ("visionOS", "xrOS")
+
+
+def _hw(d):
+    """devicectl 设备（hardwareProperties 下）或 target 行（顶层 productType / platform）都认"""
+    return d.get("hardwareProperties") or d
+
+
+def is_vision(d):
+    h = _hw(d)
+    return (h.get("productType") or "").startswith("RealityDevice") or h.get("platform") in VISION_PLATFORMS
+
+
+def is_mobile(d):
+    """能装 iPhone / iPad 版 S2Arm 的设备：iPhone、iPad，以及按 iPad 兼容装的 Apple Vision Pro"""
+    return _hw(d).get("platform") in ("iOS", "iPadOS") or is_vision(d)
+
+
+def is_candidate(d):
+    """装机候选（install._pick_device、target.connected）：devicectl 列出的真设备都算——有硬件 UDID、或标着 physical、或有任何配对 / 连接信息。
+    不看配对状态 / 是否在线 / 开发者服务这些值来筛——装不装得上让装的那一步说（11-13 维护者：别预先判断拦玩家）。
+    只排除物理上装不了的：明确标成模拟器的、Mac / 手表 / 电视（这条装机链装不了 iOS App 上去）；平台没写或没见过的照收"""
+    h, cp = d.get("hardwareProperties", {}), d.get("connectionProperties", {})
+    if h.get("reality") == "simulated" or h.get("platform") in ("macOS", "watchOS", "tvOS"):
+        return False
+    return bool(h.get("udid") or h.get("reality") == "physical" or cp.get("pairingState") or cp.get("transportType"))
+
+
+def is_physical(d):
+    """devicectl 的这台是真机：有 reality 字段就照它（physical）；缺了（公开项目反映有 Xcode 测试版不再输出它，本机 26.6 / 27.0 / 27.1 都还有）
+    按真机才有的特征认——有硬件 UDID、且有配对状态或连接方式（模拟器两样都没有）。原先缺字段就一台都认不出、整个装机找不到设备"""
+    h, cp = d.get("hardwareProperties", {}), d.get("connectionProperties", {})
+    if h.get("reality"):   # 键缺或值为 null / 空都按「没给」走下面的特征（诊断#091bcf：报告里只见 reality=None，分不出是缺键还是 null）
+        return h["reality"] == "physical"
+    return bool(h.get("udid")) and bool(cp.get("pairingState") or cp.get("transportType"))
+
+
 def reachable(d):
     """连着线或隧道已通。数据线连着、已配对时隧道空闲是 disconnected，devicectl 用到会自己拉起（10-26 测试设备2 插着线被判「没连 iPhone」）"""
     cp = d.get("connectionProperties", {})
@@ -85,7 +125,7 @@ def pull(c):
         raise Failure("读不到设备列表：需要完整的 Xcode（devicectl）。" + (err.splitlines()[-1] if err else ""))
     want = (c.r.get("device") or "").strip()
     devices = [d for d in data.get("result", {}).get("devices", [])
-               if d.get("hardwareProperties", {}).get("platform") in ("iOS", "iPadOS")
+               if is_mobile(d)
                and reachable(d)
                and (not want or want in (d.get("identifier"), d.get("hardwareProperties", {}).get("udid"), d.get("deviceProperties", {}).get("name")))]
     if not devices:

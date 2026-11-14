@@ -138,6 +138,38 @@ class CleanupLinkTests(unittest.TestCase):
         self.assertEqual(payload.read_bytes(), b"player data must survive")
 
 
+class SharingViolationRetryTests(unittest.TestCase):
+    """#cdec0e：Windows 删旧解包目录时文件被杀毒 / 索引短暂占着（WinError 32）。统一删除对同一项隔一会儿重删。期望手写（间隔表 6 档）：
+    ① 前两次占着、第三次放了 → 睡 2 次（0.1、0.2）后删成，不抛；② 一直占着 → 睡满 6 次后抛最后那个 WinError 32；
+    ③ 不是 32 的错（如拒绝访问 5）→ 一次不睡、原样抛"""
+    def busy(self, code=32):
+        e = PermissionError(13, "另一个程序正在使用此文件，进程无法访问。"); e.winerror = code
+        return e
+
+    def test_released_after_two_tries(self):
+        slept, calls = [], []
+        def func(path):
+            calls.append(path)
+            if len(calls) < 2:
+                raise self.busy()
+        library._retry_shared(func, "x", self.busy(), sleep=slept.append)
+        self.assertEqual((slept, calls), ([0.1, 0.2], ["x", "x"]))
+
+    def test_still_busy_raises_last_error(self):
+        slept = []
+        def func(path):
+            raise self.busy()
+        with self.assertRaises(PermissionError) as e:
+            library._retry_shared(func, "x", self.busy(), sleep=slept.append)
+        self.assertEqual((len(slept), e.exception.winerror), (6, 32))
+
+    def test_other_error_not_retried(self):
+        slept = []
+        with self.assertRaises(PermissionError) as e:
+            library._retry_shared(lambda path: None, "x", self.busy(5), sleep=slept.append)
+        self.assertEqual((slept, e.exception.winerror), ([], 5))
+
+
 if __name__ == "__main__":
     unittest.main()
 

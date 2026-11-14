@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import ctypes as C
-from .shortroot import table_now, to_long
+from .shortroot import is_unc_path, table_now, to_long
 from .winlong import long_path   # Win32 路径入口（CreateFileW / CopyFile2 / SetFileSecurityW / GetVolumePathNameW）不吃 Python 层的前缀补丁：>240 字符必须自己过 long_path
 from ctypes import wintypes as W
 import errno
@@ -198,6 +198,8 @@ def links_supported(path):
         return False
     if os.name != 'nt':
         return True
+    if is_unc_path(str(Path(path).absolute())):
+        return False
     getpath = _api('kernel32', 'GetVolumePathNameW', W.BOOL, W.LPCWSTR, W.LPWSTR, W.DWORD)
     root = C.create_unicode_buffer(1024)
     if not getpath(long_path(str(Path(path).absolute())), root, len(root)):

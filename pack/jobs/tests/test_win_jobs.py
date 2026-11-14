@@ -170,8 +170,9 @@ class WinOneclick(unittest.TestCase):
         (self.t / "Shell").mkdir(); (self.t / "Shell/manifest.json").write_text("{}")
         self.out = self.t / "iPhone/0100FD70134FA000"; self.out.mkdir(parents=True)
         self.events = self.t / "ev.jsonl"; self.calls = []
+        self.envs = []
         def run(args, log, env=None, on_line=None, **kw):
-            self.calls.append([str(a) for a in args])
+            self.calls.append([str(a) for a in args]); self.envs.append(env)
             if "--from-extract" in map(str, args):
                 pk = self.out / "work/pkg/product/pkg"; (pk / "pack").mkdir(parents=True)
                 (pk / "t0100fd70134fa000.ipa").write_bytes(b"ipa"); (pk / "pack/a.bin").write_bytes(b"a")
@@ -179,7 +180,7 @@ class WinOneclick(unittest.TestCase):
                                                                       build_id="b1", graphics_mode="direct")) + "\n")
             else:   # deliver_pack.py <源> <目标>
                 __import__("shutil").copytree(args[-2], args[-1])
-        self.c = types.SimpleNamespace(r={"resources": str(self.t)}, private=self.t, engine=ROOT, run=run)
+        self.c = types.SimpleNamespace(r={"resources": str(self.t)}, private=self.t, engine=ROOT, run=run, keys=self.t / "keys/prod.keys")
 
     def go(self):
         self.ipa.win_oneclick(self.c, ROOT / "pack/orch/oneclick_win.py", self.t / "extract", self.t / "Fonts", self.out, self.events, self.t / "log", {}, None)
@@ -199,6 +200,8 @@ class WinOneclick(unittest.TestCase):
         self.ipa.win_oneclick(self.c, ROOT / "pack/orch/oneclick_win.py", self.t / "extract", self.t / "Fonts", self.out, self.events, self.t / "log", {}, None,
                               sources=[self.t / "a.xci", self.t / "b.nsp"], gid="0100FD70134FA000")
         self.assertEqual(self.calls[0][-4:], ["--title-id", "0100FD70134FA000", str(self.t / "a.xci"), str(self.t / "b.nsp")])
+        # #943：从原件解其余序号要玩家导入的密钥，作业层交 S2A_KEYS 下去（不给就落回 ~/.switch/prod.keys，玩家机没有）
+        self.assertEqual(self.envs[0]["S2A_KEYS"], str(self.t / "keys/prod.keys"))
 
     def test_failed_pack_not_delivered(self):
         self.ok = False
@@ -224,7 +227,13 @@ class FakeW:
             return st if st else {"verdict": impactor, "code": None if impactor == "ok" else "impactor_missing",
                                   "download": "https://github.com/claration/impactor/releases/tag/v2.7.2"}
         self.team = "ABCDE12345"   # 真实 accounts.json 每个账号都带十位团队号（审计 P2-253 Windows 实机核过）
-        self.impactor = types.SimpleNamespace(status=status, bundled=real.bundled, logged_in=lambda: self.logged, selected_team=lambda: self.team)
+        self.unselected, self.picks = [], []   # 账号存档里存着却没选中的 Apple ID（D-ZM37）；picks 记 select_only_account 收到的 plumesign
+        def select_only(exe):
+            self.picks.append(exe)
+            if len(self.unselected) != 1: return None
+            self.unselected = []; return "a@x"
+        self.impactor = types.SimpleNamespace(status=status, bundled=real.bundled, logged_in=lambda: self.logged, selected_team=lambda: self.team,
+                                              unselected_accounts=lambda: self.unselected, select_only_account=select_only)
         self.logged = False
         self.plumesign_path = lambda given=None: "C:/plumesign.exe" if plume else None
     def mux_devices(self):
@@ -273,7 +282,7 @@ class WinInstall(unittest.TestCase):
         if r["device"] is None: self.c.r.pop("device", None)
         gid = self.c.r["gameId"].upper()
         # assemble 替身：在游戏库临时目录出一个真 zip ipa（WinPhone.install 不解包，但 put_game 要把它放到默认位置根 S2Arm.ipa）
-        def fake_assemble(c, g, others=(), failed=(), root=None, dest=None):
+        def fake_assemble(c, g, others=(), failed=(), root=None, dest=None, agreed=()):
             self.assembled = self.t / "lib" / ".container-t" / "S2Arm.ipa"; self.assembled.parent.mkdir(exist_ok=True)
             with __import__("zipfile").ZipFile(self.assembled, "w") as z:
                 z.writestr("Payload/S2Arm.app/Info.plist", __import__("plistlib").dumps({"CFBundleIdentifier": "dev.s2arm.games", "CFBundleExecutable": "S2Arm"}))
@@ -372,23 +381,31 @@ class WinInstall(unittest.TestCase):
         self.assertEqual(res["unpackPending"], "资源包已传完，还差最后一步：打开 App")   # 结果带还差的一步（11-09 #336）
 
     def test_device_choice_errors(self):
-        """装到哪台由玩家选、作业照办（维护者 11-11）：没带设备号 → device_required（哪怕只连着一台也不自己挑）；
-        带了但那台不在 → device_not_connected，说的是那台（编号末尾），不换装旁边连着的另一台"""
-        for devs in ([("U1", "USB", 3), ("U2", "USB", 4)], [("U1", "USB", 3)], []):
-            with self.subTest(devs=devs), self.assertRaises(core.Failure) as e:
-                self.go(FakeW(devs), device=None)
+        """装到哪台（11-13 维护者：插着一台手机就别说识别不了）。期望手写：设备服务里只有一台 → 装它（没带设备号、或带的那台这次没列出都一样）；
+        选的那台列着 → 装它（同网也算，不换插线的另一台）；多台对不上 → 没带号报 device_required、带了号报 device_not_connected 并说连着几台；
+        一台都没有 → device_not_connected；设备服务连不上 → device_pairing_required"""
+        import install
+        with patch.object(install, "LINK_RETRY_WAIT", 0):
+            for devs, want in (([("U1", "USB", 3)], None), ([("U2", "USB", 3)], "U1"), ([("U2", "Network", 3)], "U1")):
+                with self.subTest(devs=devs, want=want):
+                    w = FakeW(devs); self.go(w, device=want)
+                    self.assertEqual(w.calls[0].udid, devs[0][0])
+            with self.assertRaises(core.Failure) as e:
+                self.go(FakeW([("U1", "USB", 3), ("U2", "USB", 4)]), device=None)
             self.assertEqual(e.exception.code, "device_required")
-        for devs, want in (([], "U1"), ([("U2", "USB", 3)], "U1"), ([("U2", "Network", 3)], "U1")):
-            with self.subTest(devs=devs, want=want), self.assertRaises(core.Failure) as e:
-                self.go(FakeW(devs), device=want)
-            self.assertEqual(e.exception.code, "device_not_connected")
-            self.assertIn("U1"[-6:], str(e.exception)); self.assertIn("不在线", str(e.exception))
-        w = FakeW([("U2", "USB", 3), ("U1", "Network", 9)])   # 选的那台走 Wi-Fi、另一台插着线：装选的那台
-        self.go(w, device="U1")
-        self.assertEqual(w.calls[0].udid, "U1")
-        with self.assertRaises(core.Failure) as e:
-            self.go(FakeW(ConnectionRefusedError()))
-        self.assertEqual(e.exception.code, "device_pairing_required")
+            with self.assertRaises(core.Failure) as e:
+                self.go(FakeW([("U2", "USB", 3), ("U3", "Network", 4)]), device="U1")
+            self.assertEqual(e.exception.code, "device_not_connected"); self.assertIn("连着 2 台", str(e.exception))
+            for want in (None, "U1"):
+                with self.subTest(empty=want), self.assertRaises(core.Failure) as e:
+                    self.go(FakeW([]), device=want)
+                self.assertEqual(e.exception.code, "device_not_connected")
+            w = FakeW([("U2", "USB", 3), ("U1", "Network", 9)])   # 选的那台走 Wi-Fi、另一台插着线：装选的那台
+            self.go(w, device="U1")
+            self.assertEqual(w.calls[0].udid, "U1")
+            with self.assertRaises(core.Failure) as e:
+                self.go(FakeW(ConnectionRefusedError()))
+            self.assertEqual(e.exception.code, "device_pairing_required")
 
     def test_shared_code_passes_through(self):
         with self.assertRaises(core.Failure) as e:
@@ -434,7 +451,7 @@ class WinInstall(unittest.TestCase):
         self.assertEqual(cmd[:-1], ["C:/Impactor/plumesign.exe", "sign", "--package", str(self.assembled),
                                     "--apple-id", "--register-and-install", "--udid", "7", "-o"])
         self.assertIn("signed.ipa", cmd[-1])   # 签名输出文件名含 signed.ipa
-        self.assertEqual(seen["push"][1:3], ("s2arm.t.0100.ABCDE12345", "pack"))   # 包名和资源包目录（这款的 image/ios/pack）
+        self.assertEqual(seen["push"][1:3], ("s2arm.t.0100.ABCDE12345", ".pack"))   # 包名和资源包目录（这款的 image/ios/pack）
         self.assertEqual((res["bundleId"], res["device"]), ("s2arm.t.0100.ABCDE12345", "U1"))
         self.assertEqual([(e[0], e[1], e[2]) for e in self.progress_events if e[2] == "B"], [(4 << 30, 8 << 30, "B")])
 
@@ -465,6 +482,23 @@ class WinInstall(unittest.TestCase):
         (d / impactor.PLUMESIGN_EXE).write_bytes(b"x")
         w2 = FakeW([("U1", "USB", 3)]); self.go(w2)
         self.assertEqual(w2.calls[0].plumesign, str(d / impactor.PLUMESIGN_EXE))
+
+    def test_unselected_account(self):
+        # D-ZM37：Impactor 存了 Apple ID 却没选中，plumesign 报「No account selected」。期望手写：
+        #   只存一个 → 装机签名前用 plumesign 选上（交的是装机用的同一份 plumesign），照常装好；
+        #   存多个 → 清单登录项 ✗、说「没有选中」、动作 openImpactor，仍不挡装机（只提示）
+        w = FakeW([("U1", "USB", 3)]); w.unselected = ["a@x"]
+        res = self.go(w)
+        self.assertEqual((w.picks, w.unselected, res["device"]), (["C:/plumesign.exe"], [], "U1"))
+        import impactor   # 登录项只在随包形态（发版启动器）出现
+        d = self.t / "launcher" / impactor.BUNDLE_DIR; d.mkdir(parents=True)
+        for n in impactor.BUNDLED: (d / n).write_bytes(b"x")
+        self.c.r["resources"] = str(self.t / "launcher")
+        w = FakeW([("U1", "USB", 3)]); w.logged = True; w.unselected = ["a@x", "b@x"]
+        with patch.object(self.m, "win_install_mod", return_value=w):
+            r = self.m.readiness_windows(self.c, self.gid)
+        login = next(i for i in r["items"] if i["id"] == "impactor_login")
+        self.assertEqual((login["ok"], login["action"]), (False, "openImpactor")); self.assertIn("没有选中", login["detail"]); self.assertTrue(r["ready"])
 
     def test_logged_in_reads_impactor_account_store(self):
         import json as _j, impactor

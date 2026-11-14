@@ -33,7 +33,7 @@ public class DebugAppProbe {
      accepted=true; check(session.spec.game.titleId.equals(TITLE),"title unchanged");
     } catch(BootContract.BadGame expected) { }
     check(accepted==(debug&&gate),"both debug gates required");
-    try(var lock=GameStorage.acquire(app.toFile())) {check(lock!=null,"lock released");}
+    try(var lock=GameStorage.acquire(app.toFile(),TITLE)) {check(lock!=null,"lock released");}
    }
    for(var wrong:List.of(new GameSession.InstalledApk(installed.file,BASE,1,installed.signerSha256,false),
      new GameSession.InstalledApk(installed.file,TEST,2,installed.signerSha256,false),

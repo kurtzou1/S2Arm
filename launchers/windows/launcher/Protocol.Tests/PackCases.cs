@@ -48,10 +48,27 @@ public static class PackCases
         check(at.HistorySamples == 2, "estimate: fewest history samples from the current step on");
         check(Math.Abs(at.Fill(1) - 0.25) < 1e-9 && at.Fill(0) == 1 && at.Fill(2) == 0, "estimate: fill 1 / 0.25 / 0");
         check(Math.Abs(at.TotalElapsed - 180) < 1e-9 && Math.Abs(at.StepElapsed - 60) < 1e-9, "estimate: elapsed 180 / step 60");
-        var rate = at with { Fraction = 0.5 };
-        // by rate: 60 × (1 − 0.5) ÷ 0.5 = 60.
+        var rate = at with { MeasuredStep = 60 };
+        // 本步按实测速率还需 60（MilestoneTrack 给），后面一步复用 0 → 整单 60
         check(rate.Remaining is { } r2 && Math.Abs(r2 - 60) < 1e-9, "estimate: current step by its real rate");
-        check((at with { Fraction = 0.04 }).StepRemainingByRate is null, "estimate: under 5 % no rate");
+        check(at.StepRemainingByRate is null && (at with { Fraction = 0.5 }).StepRemainingByRate is null, "estimate: no live counter rate, no step rate (fraction alone is not a rate)");
+
+        // ---- 本步还需按计数器自身斜率（#944：直连库翻译 35 分钟后换编批库 MB 计数器，原先已用时间里含翻译、头 5 % 不给）----
+        var slope = new MilestoneTrack();
+        void Feed(MilestoneTrack tr, string json, double t) { using var d = JsonDocument.Parse(json); tr.Ingest(d.RootElement, t); }
+        Feed(slope, """{"type":"plan","milestones":[{"id":"direct","label":"D","purpose":""}]}""", 0);
+        Feed(slope, """{"type":"progress","milestone":"direct","doneUnits":99084,"totalUnits":99084}""", 90);
+        Feed(slope, """{"type":"progress","milestone":"direct","doneUnits":0,"totalUnits":64490}""", 100);   // 换计数器：从这一条起算
+        Feed(slope, """{"type":"progress","milestone":"direct","doneUnits":10,"totalUnits":64490}""", 101);
+        check(slope.Estimate(101).StepRemainingByRate is null, "slope: under 2 s of counting, no rate");
+        Feed(slope, """{"type":"progress","milestone":"direct","doneUnits":1000,"totalUnits":64490}""", 110);
+        // 1000 ÷ 10 s = 100 /s → (64490 − 1000) ÷ 100 = 634.9 s（1.55 % 也给）；10 s 后倒数到 624.9
+        check(slope.Estimate(120).StepRemainingByRate is { } s1 && Math.Abs(s1 - 624.9) < 1e-9, "slope: counter's own rate, counted down between events");
+        Feed(slope, """{"type":"progress","milestone":"direct","doneUnits":5,"totalUnits":99084}""", 130);
+        check(slope.Estimate(131).StepRemainingByRate is null, "slope: a new counter starts its rate over");
+        Feed(slope, """{"type":"progress","milestone":"direct","doneUnits":500,"totalUnits":99084}""", 140);
+        Feed(slope, """{"type":"progress","milestone":"ipa","doneUnits":600,"totalUnits":99084}""", 150);
+        check(slope.Estimate(150).StepRemainingByRate is null, "slope: a new step starts its rate over");
         var unknown = new MilestoneEstimate([plan[0], plan[1], new("d", "D", "", 99, "none", 0, false)], "b", started, null, 180);
         check(unknown.Remaining is null, "estimate: a later step without a local record gives no total");
         check(new MilestoneEstimate(plan, null, started, null, 180).Remaining is null, "estimate: no current step, no total");

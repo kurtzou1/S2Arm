@@ -14,6 +14,7 @@ import java.nio.file.StandardCopyOption;
  * A missing file means the built-in layout; a damaged one is reported, never half-applied.
  */
 final class TouchLayoutStore {
+    static final int MAX_IMPORT_BYTES = 65536;
     static final String MINE = "mine";
     private final File file;
 
@@ -44,6 +45,43 @@ final class TouchLayoutStore {
             out.getFD().sync();
         }
         Files.move(temporary.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+    }
+
+    /** Read at most the limit plus one sentinel byte, regardless of provider metadata. */
+    static byte[] readImport(java.io.InputStream input) throws IOException {
+        if (input == null) throw new IOException("F01: document unavailable");
+        java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+        byte[] buffer = new byte[4096];
+        int count;
+        while ((count = input.read(buffer, 0, Math.min(buffer.length, MAX_IMPORT_BYTES + 1 - bytes.size()))) != -1) {
+            bytes.write(buffer, 0, count);
+            if (bytes.size() > MAX_IMPORT_BYTES)
+                throw new IllegalArgumentException("F01: layout must be at most 64 KiB");
+        }
+        return bytes.toByteArray();
+    }
+
+    /** Import into Android's one saved slot; keep the document identity for sharing. */
+    TouchLayout importLayout(byte[] data) throws IOException {
+        TouchLayout layout = TouchLayout.read(data);
+        // 内置布局的保留名（default / touch）不拒：换一个新名字照常导入（同导出时的做法），玩家拿到的是同一份布局
+        if ("default".equals(layout.identifier) || "touch".equals(layout.identifier))
+            layout = layout.copyAs("layout-" + java.util.UUID.randomUUID(), layout.name);
+        save(layout);
+        return layout;
+    }
+
+    /** Export the saved document or the current viewport's generated built-in layout. */
+    byte[] exportBytes(TouchLayout builtIn) throws IOException {
+        TouchLayout layout = load();
+        if (layout == null) layout = builtIn;
+        if ("default".equals(layout.identifier) || "touch".equals(layout.identifier))
+            layout = layout.copyAs("layout-" + java.util.UUID.randomUUID(), layout.name);
+        return layout.jsonBytes();
+    }
+
+    static String exportFilename(byte[] data) {
+        return TouchLayout.read(data).identifier + ".json";
     }
 
     /** Back to the built-in layout. */

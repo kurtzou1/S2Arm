@@ -39,21 +39,24 @@ def main(out, keys_tsv, shmap, skey_bytes, srcs):   # shmap 留在参数里（di
             elif c[0] == 'C' and len(c) >= 2: good = ok_key(c[1])
             elif c[0] == 'R' and len(c) >= 2 and len(c[1]) == 2 * skey_bytes and all(ch in '0123456789abcdef' for ch in c[1]):
                 vs, fs = r_keys(c[1]); good = ok_key(vs) and (not fs or ok_key(fs))
+            elif c[0] == 'M' and len(c) >= 4 and len(c[1]) == 2 * skey_bytes and all(ch in '0123456789abcdef' for ch in c[1]):
+                # 任务 / 网格管线（nvn_geometry.inc mtk_record，11-13 0400486024DEC000 开局发白根修）：顶点位置是网格键、第 2 列任务键（「-」= 无）、第 3 列补齐掩码；三个键都要是本包库的
+                ms, fs = r_keys(c[1]); good = ok_key(ms) and (not fs or ok_key(fs)) and (c[2] == '-' or ok_key(c[2]))
             else: good = False
             if good and l not in seen: seen.add(l); rows.append(l); kept += 1
         stat.append((f, n, kept))
     # 只装库的行挪到末尾（11-07 卡顿线，异度3 冷装读档）：顶点 / 片元的 S 行只装载着色器库、不建管线；键不在任何 R 行里的（Mac 累积来源 4874 行，多为 10-27 前
     #   「预取即记」的老行），加载页 30 秒里占掉约四成工时（S 约 11 ms / 行、R 约 47 ms / 行，按两段吞吐联立估），把进场景要等的 R 行挤到放行之后。
     #   不删：挪到所有别的行之后，照样在后台装。几何等别的阶段的 S 行（几何管线不记 R 行，只能靠 S 行预装）与 C 行不动
-    used = {k for r in rows if r.startswith('R\t') for k in r_keys(r.split('\t')[1]) if k}
+    used = {k for r in rows if r.startswith(('R\t', 'M\t')) for k in r_keys(r.split('\t')[1]) if k}
     lib_only = lambda r: r.startswith('S\t') and r.split('\t')[2] in ('0', '1') and r.split('\t')[1] not in used
     deferred = [r for r in rows if lib_only(r)]
     rows = [r for r in rows if not lib_only(r)] + deferred
     tmp = out + '.tmp'
     with open(tmp, 'w', encoding='utf-8', newline='\n') as fh: fh.write(HEAD + ''.join(r + '\n' for r in rows))
     os.replace(tmp, out)
-    cnt = {k: sum(1 for r in rows if r.startswith(k + '\t')) for k in 'SRC'}
-    print(f'管线种子表：S {cnt["S"]} / R {cnt["R"]} / C {cnt["C"]}（只收真跑见过的；只装库的 S 行 {len(deferred)} 挪到末尾）；来源 {len(stat)} 份：'
+    cnt = {k: sum(1 for r in rows if r.startswith(k + '\t')) for k in 'SRCM'}
+    print(f'管线种子表：S {cnt["S"]} / R {cnt["R"]} / C {cnt["C"]} / M {cnt["M"]}（只收真跑见过的；只装库的 S 行 {len(deferred)} 挪到末尾）；来源 {len(stat)} 份：'
           + '；'.join(f'{f} {k}/{n} 行可用' for f, n, k in stat) if rows else
           '管线种子表：空（没有真跑来源：首帧不等，用到再编）')
 

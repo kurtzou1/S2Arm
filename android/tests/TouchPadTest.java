@@ -188,6 +188,77 @@ public final class TouchPadTest {
         check(store.load() == null && !store.file().exists(), "reset");
         store.reset();   // idempotent
 
+        // Transfer expectations come from F01 and the literal iOS reference, not a second serializer.
+        byte[] classic = java.nio.file.Files.readAllBytes(java.nio.file.Path.of(args[0]));
+        TouchLayout exported = TouchLayout.read(store.exportBytes(TouchLayout.androidDefault(2400, 1080)));
+        check(exported.identifier.matches("layout-[a-f0-9-]{36}"), "built-in export gets user identity");
+        check(exported.button("A").x == 0.93 && exported.buttons.size() == 16, "built-in export geometry");
+        check(!store.file().exists(), "export does not save a layout");
+        store.importLayout(classic);
+        check(store.load().identifier.equals("classic-reference") && store.load().button("A").x == 0.944,
+                "iOS reference imports with original identity and geometry");
+        check(TouchLayoutStore.exportFilename(classic).equals("classic-reference.json"), "export filename is id.json");
+        byte[] transfer = store.exportBytes(TouchLayout.androidDefault(2400, 1080));
+        check(TouchLayout.read(transfer).identifier.equals("classic-reference"), "saved export keeps identity");
+        TouchLayoutStore other = new TouchLayoutStore(dir.toFile(), "0000000000000001");
+        other.importLayout(transfer);
+        check(other.load().button("A").x == 0.944 && other.load().buttons.size() == 14, "export import round trip");
+        store.importLayout(transfer); // Android's single slot replaces even the same id.
+        byte[] before = java.nio.file.Files.readAllBytes(store.file().toPath());
+        String text = new String(classic, java.nio.charset.StandardCharsets.UTF_8);
+        byte[] boundary = java.util.Arrays.copyOf(classic, 65536);
+        java.util.Arrays.fill(boundary, classic.length, boundary.length, (byte) ' ');
+        other.importLayout(boundary);
+        check(other.load().identifier.equals("classic-reference"), "exactly 64 KiB accepted");
+        check(java.util.Arrays.equals(boundary, TouchLayoutStore.readImport(new java.io.ByteArrayInputStream(boundary))),
+                "stream accepts exact 64 KiB without truncation");
+        java.io.ByteArrayInputStream huge = new java.io.ByteArrayInputStream(new byte[100000]);
+        boolean capped = false;
+        try { TouchLayoutStore.readImport(huge); } catch (IllegalArgumentException expected) { capped = true; }
+        check(capped && huge.available() == 100000 - 65537, "stream stops after cap plus sentinel");
+        byte[] badUtf8 = classic.clone();
+        for (int i = 0; i < badUtf8.length; i++) {
+            if (badUtf8[i] < 0) { badUtf8[i] = (byte) 0xff; break; }
+        } // Malformed bytes inside a valid JSON string: replacement decoding would wrongly accept it.
+        byte[][] rejected = {
+            java.util.Arrays.copyOf(boundary, 65537),
+            "{".getBytes(java.nio.charset.StandardCharsets.UTF_8),
+            badUtf8,
+            text.replace("0.944", "1.944").getBytes(java.nio.charset.StandardCharsets.UTF_8),
+            text.replace("\"schemaVersion\": 1", "\"schemaVersion\": true").getBytes(java.nio.charset.StandardCharsets.UTF_8),
+            (text + "false").getBytes(java.nio.charset.StandardCharsets.UTF_8)
+        };
+        for (int i = 0; i < rejected.length; i++) {
+            boolean failed = false;
+            try { store.importLayout(rejected[i]); } catch (IllegalArgumentException expected) {
+                failed = true;
+                if (i == 0) check(expected.getMessage().contains("64 KiB"), "oversize reason");
+                if (i == 2) check(expected.getMessage().contains("UTF-8"), "UTF-8 reason");
+            }
+            check(failed, "invalid transfer rejected " + i);
+            check(java.util.Arrays.equals(before, java.nio.file.Files.readAllBytes(store.file().toPath())),
+                    "failed import preserves bytes " + i);
+        }
+        // 内置保留名不挡：换新名字照常导入，按键位置与原文件一致（玩家拿到的是同一份布局）
+        for (String reserved : new String[] {"default", "touch"}) {
+            TouchLayoutStore renamed = new TouchLayoutStore(dir.toFile(), "00000000000000" + (reserved.equals("default") ? "0A" : "0B"));
+            TouchLayout got = renamed.importLayout(text.replace("classic-reference", reserved).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            check(got.identifier.startsWith("layout-") && renamed.load() != null
+                    && renamed.load().identifier.equals(got.identifier), "reserved identity " + reserved + " imported under a new name");
+            check(java.util.Arrays.equals(got.copyAs("classic-reference", got.name).jsonBytes(),
+                    TouchLayout.read(classic).copyAs("classic-reference", got.name).jsonBytes()), "renamed import keeps the layout " + reserved);
+        }
+        java.io.File blockedTemp = new java.io.File(dir.toFile(), store.file().getName() + ".tmp");
+        check(blockedTemp.mkdir(), "simulate unavailable temporary output");
+        boolean writeFailed = false;
+        try { store.importLayout(exported.jsonBytes()); } catch (java.io.IOException expected) { writeFailed = true; }
+        check(writeFailed && java.util.Arrays.equals(before, java.nio.file.Files.readAllBytes(store.file().toPath())),
+                "I/O failure preserves previous file");
+        check(blockedTemp.delete(), "remove simulated output failure");
+        store.importLayout(exported.jsonBytes());
+        check(store.load().button("A").x == 0.93, "valid transfer replaces previous geometry (negative control)");
+        check(TouchLayout.read(store.exportBytes(reference)).button("A").x == 0.93,
+                "export chooses saved file over supplied default");
         if (failures > 0) System.exit(1);
         System.out.println("TouchPad: ok");
     }

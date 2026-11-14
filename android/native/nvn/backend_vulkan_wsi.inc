@@ -4,6 +4,7 @@
 // 内部段不占时间线上的值，完成后只做资源回收。
 #include "nvn_plat_vk.h"
 #include "nvn_plat.h"
+#include "backend_vulkan_timing.h"
 
 struct nvn_gpu_surface_s {
     void *native;
@@ -22,6 +23,7 @@ struct nvn_gpu_surface_s {
     int64_t held;                                   // 取了没呈现、留作下次取图结果的那张（没有就是 -1）
     uint32_t held_sem;
     uint64_t presents;
+    struct wsi_timing timing;
     VkSurfaceTransformFlagBitsKHR built_transform;   // 建这一代交换链时表面的方向与尺寸：判「次优」是不是真的变了（见 wsi_suboptimal_stale）
     VkExtent2D built_cur;
     uint32_t subopt_n;
@@ -168,6 +170,7 @@ static nvn_gpu_rc wsi_build(struct nvn_gpu_surface_s *s, nvn_gpu_err *err) {
     for (uint32_t i = 0; i < ni; i++) if (!s->rendered[i] && vkCreateSemaphore(g.d, &si, NULL, &s->rendered[i]) != VK_SUCCESS) { wsi_destroy_swapchain(s); return fail(err, NVN_GPU_E_OOM, "信号量创建失败"); }
     s->held = -1; s->outdated = 0; s->acquire_next = 0;
     s->built_transform = caps.currentTransform; s->built_cur = caps.currentExtent; s->subopt_n = 0;
+    wsi_timing_init(&s->timing, g.d, nvn_plat_flag("display_timing", 0) == 1, g.dev->has_display_timing);
     return rc(NVN_GPU_OK);
 }
 
@@ -304,6 +307,11 @@ nvn_gpu_rc nvn_gpu_present(nvn_gpu_surface s, const nvn_gpu_drawable *dr, const 
         { uint64_t ns = __atomic_exchange_n(&g_pl_ns, 0, __ATOMIC_RELAXED), n = __atomic_exchange_n(&g_pl_n, 0, __ATOMIC_RELAXED), st = __atomic_exchange_n(&g_pl_steps, 0, __ATOMIC_RELAXED);
           snprintf(b, sizeof b, "取管线查找（每帧，近 300 帧）：%.1f 次、共 %.0f 微秒、每次比 %.1f 条", n / 300.0, ns / 300.0 / 1000.0, n ? (double)st / (double)n : 0.0);
           nvn_plat_log(NVN_PLAT_LOG_INFO, "gpu", b); }
+        { uint64_t dn = __atomic_exchange_n(&g_dv_n, 0, __ATOMIC_RELAXED), dt = __atomic_exchange_n(&g_dv_ns[0], 0, __ATOMIC_RELAXED), dl = __atomic_exchange_n(&g_dv_ns[1], 0, __ATOMIC_RELAXED);
+          uint64_t gn = __atomic_exchange_n(&g_gmu_n, 0, __ATOMIC_RELAXED), gw = __atomic_exchange_n(&g_gmu_wait_n, 0, __ATOMIC_RELAXED), gwn = __atomic_exchange_n(&g_gmu_wait_ns, 0, __ATOMIC_RELAXED);
+          snprintf(b, sizeof b, "视图销毁与锁（每帧，近 300 帧）：销毁 %.1f 个、共 %.2f 毫秒（其中摘链 %.3f 毫秒）；回放线程取 g_mu %.0f 次、被占着要等的 %.1f 次、共等 %.2f 毫秒；开关 nvk_ulist=%d nvk_fbdrop=%d",
+              dn / 300.0, dt / 300.0 / 1e6, dl / 300.0 / 1e6, gn / 300.0, gw / 300.0, gwn / 300.0 / 1e6, view_ulist_on(), fbdrop_mode());
+          nvn_plat_log(NVN_PLAT_LOG_INFO, "gpu", b); }
         // 后端现存对象（显存涨在哪）。悬着 = 上层已放、还被引用着没销毁
         { uint64_t nt = 0, ntd = 0, tb = 0, tdb = 0, nb = 0, nbd = 0, bb = 0, nvw = 0, nq = 0;
           pthread_mutex_lock(&g_mu);
@@ -393,10 +401,20 @@ nvn_gpu_rc nvn_gpu_present(nvn_gpu_surface s, const nvn_gpu_drawable *dr, const 
     VkPresentInfoKHR pi; memset(&pi, 0, sizeof pi);
     pi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR; pi.waitSemaphoreCount = 1; pi.pWaitSemaphores = &s->rendered[idx];
     pi.swapchainCount = 1; pi.pSwapchains = &s->swapchain; pi.pImageIndices = &idx;
+    uint32_t timing_id = wsi_timing_id(&s->timing);
+    VkPresentTimeGOOGLE pt = { timing_id, 0 };
+    VkPresentTimesInfoGOOGLE pts = { VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE, pi.pNext, 1, &pt };
+    if (timing_id) pi.pNext = &pts;
     r = vkQueuePresentKHR(g.queue, &pi);
     pthread_mutex_unlock(&g_submit_mu);
     s->presents++;
     if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) {
+        uint64_t tnow = now_ns();
+        if (!s->timing.start) s->timing.start = tnow;
+        wsi_timing_submitted(&s->timing, timing_id);
+        wsi_timing_poll(&s->timing, g.d, s->swapchain);
+        tnow = now_ns();
+        wsi_timing_report(&s->timing, tnow);
         shown.status = NVN_GPU_SHOWN_UNKNOWN;   // 交给了呈现引擎，但没有实际上屏时刻（没有 CAP_SHOWN_TIME）
         if ((r == VK_SUBOPTIMAL_KHR && wsi_suboptimal_stale(s)) || s->outdated == 2) s->outdated = 1;
     } else if (r == VK_ERROR_OUT_OF_DATE_KHR) { s->outdated = 1; out = fail(err, NVN_GPU_E_OUTDATED, "呈现时交换链已过期"); }
