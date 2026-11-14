@@ -199,6 +199,13 @@ namespace Ryujinx.Audio.Renderer.Dsp
                 Volatile.Write(ref S2AMaxLateNs, s2aLate);
             }
 
+            // S2Arm (11-14 卡顿诊断探针): 本周期比节拍晚到的纳秒累计给宿主 TSV 的 @aud_wait_ms 列（hle_nvn.c 每帧取走清零）。
+            // 游戏线程等的声音更新事件由本线程 Signal（AudioRendererManager.SendCommands）——这里晚到，等事件的游戏线程就同量晚醒
+            if (s2aLate > 0)
+            {
+                S2AAudLate.Note(s2aLate);
+            }
+
             // S2Arm: one sleep to the end of the period instead of polling WaitOne(1) (3.4 wakeups per 5 ms period → 1)
             if (timeNow < _lastTime + increment)
             {

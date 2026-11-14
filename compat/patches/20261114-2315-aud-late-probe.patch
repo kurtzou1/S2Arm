@@ -1,0 +1,60 @@
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs b/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs
+index 3b8075ffd9deece90b9430721ab5c35917cedc3b..80d0ea495b5353fe0cb6ba3684bd362a5d8caa1b 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs
+@@ -199,6 +199,13 @@ namespace Ryujinx.Audio.Renderer.Dsp
+                 Volatile.Write(ref S2AMaxLateNs, s2aLate);
+             }
+ 
++            // S2Arm (11-14 卡顿诊断探针): 本周期比节拍晚到的纳秒累计给宿主 TSV 的 @aud_wait_ms 列（hle_nvn.c 每帧取走清零）。
++            // 游戏线程等的声音更新事件由本线程 Signal（AudioRendererManager.SendCommands）——这里晚到，等事件的游戏线程就同量晚醒
++            if (s2aLate > 0)
++            {
++                S2AAudLate.Note(s2aLate);
++            }
++
+             // S2Arm: one sleep to the end of the period instead of polling WaitOne(1) (3.4 wakeups per 5 ms period → 1)
+             if (timeNow < _lastTime + increment)
+             {
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/S2AAudLate.cs b/src/Ryujinx.Audio/Renderer/Dsp/S2AAudLate.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..da44686fb6f951f059bfd6931748b9882ca4f463
+--- /dev/null
++++ b/src/Ryujinx.Audio/Renderer/Dsp/S2AAudLate.cs
+@@ -0,0 +1,36 @@
++using System;
++using System.Runtime.InteropServices;
++
++namespace Ryujinx.Audio.Renderer.Dsp
++{
++    /// <summary>
++    /// S2Arm (11-14 卡顿诊断探针): 把声音渲染线程每个 5 ms 周期的唤醒迟到纳秒累计交给宿主（hle_nvn.c 的 s2a_aud_late_note），
++    /// DM_NVN_TSV 每帧取走清零成 @aud_wait_ms 列。慢帧归因「在等事件」时用它看音频占比。
++    /// </summary>
++    /// <remarks>
++    /// 没有 s2a_native 这个符号的构建（安卓 / 单测 / 别的宿主）就不记：守门一次失败后不再调（同 S2AOutputDiag.HudAudio）。
++    /// </remarks>
++    internal static class S2AAudLate
++    {
++        [DllImport("s2a_native")] private static extern void s2a_aud_late_note(long ns);
++
++        private static bool _gone;
++
++        internal static void Note(long lateNs)
++        {
++            if (_gone)
++            {
++                return;
++            }
++
++            try
++            {
++                s2a_aud_late_note(lateNs);
++            }
++            catch (Exception e) when (e is DllNotFoundException || e is EntryPointNotFoundException || e is BadImageFormatException)
++            {
++                _gone = true;
++            }
++        }
++    }
++}

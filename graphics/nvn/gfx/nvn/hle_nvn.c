@@ -3212,6 +3212,13 @@ static double pres_expect_ms(uint64_t n) {   // the interval between presents n 
 __attribute__((weak)) double dm_brightness_now(void) { return -1; }
 __attribute__((weak)) void dm_perf_present(double iv_ms) { (void)iv_ms; }   // Default (unit tests); strong definition in the host's diag.c: always-on performance record perf.txt
 uint64_t dm_nvn_sub_cpu_ns(void) { return atomic_load(&g_cum_sub_cpu_ns); }   // Cumulative CPU nanoseconds of submit (excluding present)
+// ---------- 声音调度迟到探针（11-14 卡顿诊断）：C# 声音渲染线程每个 5 ms 周期把唤醒迟到的纳秒记进来（compat 补丁 aud-late-probe，
+//   AudioProcessor.Wait 的 s2aLate），@aud_wait_ms 每帧取走清零。游戏线程等的声音更新事件由该线程 Signal（AudioRendererManager.SendCommands）：
+//   这里晚到，游戏线程就同量晚醒——慢帧归因「在等事件」时用它看音频占比。安卓 / 单测 / 别的宿主没有 s2a_native 这个符号：C# 侧守门不记
+static _Atomic uint64_t g_aud_late_ns;
+__attribute__((visibility("default"), used)) void s2a_aud_late_note(long long ns) {
+    if (ns > 0) atomic_fetch_add_explicit(&g_aud_late_ns, (uint64_t)ns, memory_order_relaxed);
+}
 __attribute__((weak)) int dm_thermal_now(void) { return -1; }   // Strong definitions: iOS ios/app.m, Mac runtime/src/host_main.c (both NSProcessInfo, audit P1-80); -1 only in hosts/tests that link neither
 __attribute__((weak)) int dm_low_power_now(void) { return 0; }   // Low Power Mode (iOS front_ios.m); off on the Mac
 // Per-frame ring for the long-frame log (GPU time only arrives 8 frames late, so store first and judge later)
@@ -3724,6 +3731,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         trow(f, "@frame_ms", fr); trow(f, "@work_ms", wk); trow(f, "@nvn_ms", nv); trow(f, "@itv", (double)present_itv(o));
         // Slow-frame attribution (taken only when DM_NVN_TSV is on): this frame's present-thread CPU time (−1 if the thread changed), CPU of all threads in the process, acquire wait accumulated per frame, present call time (same base as the GPU / on-screen present times: ms since process start)
         trow(f, "@wait_ms", g_acq_wait_ns / 1e6); trow(f, "@pq_wait_ms", g_pq_wait_ns / 1e6);
+        trow(f, "@aud_wait_ms", atomic_exchange_explicit(&g_aud_late_ns, 0, memory_order_relaxed) / 1e6);   // 本帧窗里声音渲染线程节拍迟到累计（ms，s2a_aud_late_note 探针）；随 DM_SLOWFRAME 的慢帧行一并打出
         if (frame_rec()) {
             static pthread_t pth; static uint64_t pcpu, pproc;
             uint64_t c = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID); pthread_t th = pthread_self();
