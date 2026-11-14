@@ -865,7 +865,10 @@ static void map_pad_inputs(NSDictionary *all, NSDictionary *axes, uint32_t *out_
     for (int i = 0; i < 4; i++) {
         NSDictionary *binding = config[@"axes"][names[i]];
         float v = [axes[binding[@"source"] ?: @""] floatValue];
-        if (fabsf(v) > dz) sticks[i] += (int32_t)(v * ([binding[@"invert"] boolValue] ? -32767 : 32767));
+        // 死区内线性重缩放（pad.c s2a_pad_axis_deadzone，iOS 物理手柄 s2a_pad_stick 同口径；11-14 卡顿诊断手柄项）：
+        //   原实现过阈直接 v×32767，小推杆一过死区输出从 0 突跳死区宽度（缺省 15%）的量，呈「突然窜一下」的阶跃感；
+        //   满幅、反向（invert）、死区宽度配置语义都不变
+        if (fabsf(v) > dz) sticks[i] += (int32_t)(s2a_pad_axis_deadzone(v, dz) * ([binding[@"invert"] boolValue] ? -32767 : 32767));
     }
     *out_buttons = buttons;
 }

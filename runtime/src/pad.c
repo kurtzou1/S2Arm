@@ -254,6 +254,17 @@ void s2a_pad_stick(float x, float y, int32_t axes[2]) {
     axes[0] = (int32_t)lroundf(x * scale * 32767);
     axes[1] = (int32_t)lroundf(y * scale * 32767);
 }
+// 单轴死区线性重缩放（s2a_pad.h；11-14 卡顿诊断手柄项）：死区内 0，过阈从 0 线性爬到满幅 (|v|−dz)/(1−dz)，符号随 v。
+//   Mac map_pad_inputs（front_mac.m）三路手柄采样共用；iOS 物理手柄的径向版 s2a_pad_stick 本就重缩放，两端从此同一口径——
+//   原先过阈直接 v×32767：小推杆一过死区输出从 0 突跳死区宽度（缺省 15%）的量，呈「突然窜一下」的阶跃感。
+//   dz ≥ 1 或 NaN 天然回 0（|v| ≤ 1 ≤ dz 时过阈分支不进，无除零）；源值越界（坏源给出 |v| > 1）钳满幅，不放大
+float s2a_pad_axis_deadzone(float v, float dz) {
+    float a = fabsf(v);
+    if (!(a > dz)) return 0;
+    float r = (a - dz) / (1 - dz);
+    if (r > 1) r = 1;
+    return v < 0 ? -r : r;
+}
 // 本地多手柄槽位计划（Mac macos/front_mac.m 与 iOS ios/controller.m 共用；纯逻辑，不持有对象：单测直接喂身份指针，不碰 GameController）。
 //   prev 是上一轮的槽位身份（max 项，NULL = 空槽），live 是本次在线的手柄（顺序 = 连接顺序）。
 //   slot_of[j] 写第 j 只该占的槽（-1 = 超过 max 只，不参与）；返回占用到的最高槽位 + 1（至少 1：槽 0 总留给键盘 / 鼠标）。

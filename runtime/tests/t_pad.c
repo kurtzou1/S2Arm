@@ -267,6 +267,24 @@ int main(void) {
     s2a_pad_stick(-1, 1, stick); assert(stick[0] == -23170 && stick[1] == 23170);
     s2a_pad_stick(NAN, 0, stick); assert(!stick[0] && !stick[1]);
 
+    // 轴死区线性重缩放（s2a_pad_axis_deadzone，11-14 卡顿诊断手柄项；Mac map_pad_inputs 用，iOS 物理手柄的 s2a_pad_stick 径向版本本就重缩放）。
+    //   期望手算（dz = .15）：死区内与恰在阈值上 = 0；v = .16 → (.16−.15)/.85 ≈ .0117647（不再从 0 突跳死区宽度的输出）；满幅不变：±1 → ±1；
+    //   反向：−.5 → −(.5−.15)/.85 ≈ −.4117647；NaN → 0
+    {
+        int bad = 0; float want, got;
+        #define DZ(v, w) do { want = (w); got = s2a_pad_axis_deadzone((v), .15f); if (fabsf(got - want) > 1e-6f) { bad++; printf("✗ axis_deadzone(%.3f)=%.7f 期望 %.7f\n", (double)(v), (double)got, (double)want); } } while (0)
+        DZ(.04f, 0); DZ(.15f, 0); DZ(-.04f, 0);
+        DZ(.16f, (.16f - .15f) / .85f);
+        DZ(-.16f, -(.16f - .15f) / .85f);
+        DZ(.5f, (.5f - .15f) / .85f);
+        DZ(-.5f, -(.5f - .15f) / .85f);
+        DZ(1, 1); DZ(-1, -1);
+        #undef DZ
+        got = s2a_pad_axis_deadzone(NAN, .15f); if (got != 0) { bad++; printf("✗ axis_deadzone(NAN)=%.7f 期望 0\n", (double)got); }
+        assert(!bad);
+        puts("  ✓ 轴死区线性重缩放：死区内 0、过阈从 0 线性爬到满幅（.16→.0118）、±1 满幅与反向不变、NaN → 0");
+    }
+
     pthread_t thread; assert(!pthread_create(&thread, NULL, writer, NULL));
     do {
         int32_t axes[4]; assert(!s2a_pad_read(axes, NULL));

@@ -21,6 +21,8 @@ uint32_t s2a_pad_read(int32_t axes[4], s2a_pad_source *source);
 //   按着时返回当前序号，没按着返回 0。iOS 记下新序号、1.5 秒后再问一次仍是它 = 一直按着没松，开菜单（ios/controller.m）
 uint64_t s2a_pad_plus_press(void);
 void s2a_pad_stick(float x, float y, int32_t axes[2]);
+// 单轴死区线性重缩放：死区内 0、过阈从 0 线性爬到满幅 (|v|−dz)/(1−dz)，符号随 v（iOS 物理手柄的径向版 s2a_pad_stick 本就重缩放，两端同口径；Mac map_pad_inputs 用）
+float s2a_pad_axis_deadzone(float v, float dz);
 // 系统手柄的 ABXY：多数手柄按物理方位上报（buttonA 在南侧，MFi / Xbox 那颗键上印的也是 A），任天堂手柄（Pro、Joy-Con）按键帽字母上报（印 A 的右键 = buttonA）。
 //   所以系统的 buttonA 在每种手柄上都是印着 A（PS 是 ×）的那颗键。
 // iOS 与 Mac 共用这一套（#40、审计 P2-213）：category 取 GCController.productCategory（可为 NULL），is_xbox / is_playstation 由宿主按手柄类型判
