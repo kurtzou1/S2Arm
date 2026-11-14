@@ -3104,6 +3104,10 @@ enum { PACE_SWITCH = 3 };
 static _Atomic(uintptr_t) g_present_thr;   // 节拍主人（出帧的取图线程；上屏线程同时就是取图线程时即它）
 static _Atomic(uintptr_t) g_acq_thr[4];    // 交换链各图号最近一次的取图线程
 static uintptr_t g_pace_cand; static int g_pace_run;   // 上屏侧：候选主人与它连续出帧的次数（只在上屏线程里改）
+// #141：取图撞上还在屏上的那张时等下一次呈现翻走（present 存 shown 后广播）。取图线程等的是别的线程的呈现；
+//   节拍主人 / 最近一次呈现那张的取图线程就是本线程时不进入等待（下一次呈现多半由本线程自己发出），直接按原行为交出并报红
+static pthread_mutex_t g_flip_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_flip_cv = PTHREAD_COND_INITIALIZER;
 // 审计 #1534 P1-24：按活跃张数轮换（NVN 语义：SetNumActiveTextures 之后只轮换前 nactive 张，未设时 = 全部）。11-04 普查 485 份日志里超级马力欧兄弟 惊奇
 //   （010015100B514000）设 2 of 3，原先仍按 3 张轮换、交出被排除的第 3 张。活跃张数为 0（窗口没有纹理，或 SetNumActiveTextures(0)）没有可交的纹理：回 NATIVE_ERROR
 NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsync *s, int *idx) {
@@ -3112,11 +3116,38 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     if (nact <= 0) { static int n; if (n++ < 4) LOG("【红】 [nvn] WindowAcquireTexture: the window has no active texture (%d of %d): no texture handed out", nact, o->ntex); *idx = -1; return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_NATIVE_ERROR; }
     *idx = (int)((unsigned)__atomic_fetch_add(&o->next, 1, __ATOMIC_RELAXED) % (unsigned)nact);
     {   // #141（伊苏 8 闪退）：真机只交已归还的图——最近一次呈现的那张还在屏上（等下一次呈现翻走才归还），绝不会被取到。
-        //   这里报出交出的正是它的次数：前 20 次逐次报，之后每到 2 的幂报一次（带累计），修前修后比这个数
+        //   撞上就等下一次呈现把它翻走再交（真机的取图阻塞点：全链在等显示时等下一张放还，与下面的节拍等待、ticket 等待各管一段）。
+        //   活跃 1 张不适用：真机也没有第二张可交，取图等它自己那笔呈现处理完（下面的 ticket 等待）即是。
+        //   等的是别人的呈现，上限 2 个呈现周期：超时按原行为交出并照旧报红（那笔呈现迟迟不来——真机这种局面本就卡死在
+        //   取图，这里不把红着能跑变成卡死）。截图门（DM_DETCLOCK）不适用：定时等 + 超时兜底是墙上时钟竞态，门图确定性优先。
+        //   交出还在屏上那张的次数（同线程不等 / 超时兜底 / 单张 / 门图）：前 20 次逐次报，之后每到 2 的幂报一次（带累计），修前修后比这个数
         int sh = __atomic_load_n(&o->shown, __ATOMIC_RELAXED);
-        if (sh && *idx == sh - 1) { static _Atomic uint64_t n; uint64_t k = atomic_fetch_add(&n, 1) + 1;
-            if (k <= 20 || !(k & (k - 1))) LOG("【红】 [nvn] WindowAcquireTexture 交出了还在屏上的那张：图 %d 是最近一次呈现的、还没被下一次呈现翻走（真机不会交出），累计 %llu 次；活跃 %d / %d 张、间隔 %d、已呈现 %llu 次",
-                                               *idx, (unsigned long long)k, nact, o->ntex, o->interval, (unsigned long long)o->presents); } }
+        if (sh && *idx == sh - 1) {
+            int waited = 0;
+            // 节拍主人（出帧的取图线程）或最近一次呈现那张的取图线程就是本线程时，下一次呈现多半由本线程自己发出、
+            //   等它等于等自己：直接按原行为交出并报红，不进入等待（否则单线程引擎每撞一次白等 2 个呈现周期，帧率直接掉半）。
+            //   「最近一次呈现的线程」按被上屏那张的取图线程记（g_acq_thr，1:1 引擎里取图与上屏同线程）。
+            uintptr_t self = (uintptr_t)pthread_self();
+            int mine = atomic_load_explicit(&g_present_thr, memory_order_relaxed) == self ||
+                       (sh - 1 >= 0 && sh - 1 < 4 && atomic_load_explicit(&g_acq_thr[sh - 1], memory_order_relaxed) == self);
+            if (nact >= 2 && !dm_detclock_enabled() && !mine) {
+                uint64_t bound = 2 * present_period(o); if (bound > 250000000ull) bound = 250000000ull;
+                struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_nsec += (long)(bound % 1000000000ull); dl.tv_sec += (time_t)(bound / 1000000000ull);
+                if (dl.tv_nsec >= 1000000000L) { dl.tv_nsec -= 1000000000L; dl.tv_sec++; }
+                uint64_t w0 = now_ns(); DM_BLOCK_BEGIN();
+                pthread_mutex_lock(&g_flip_mu);
+                while (__atomic_load_n(&o->shown, __ATOMIC_RELAXED) == sh && !dm_gfx_session_stopping())
+                    if (pthread_cond_timedwait(&g_flip_cv, &g_flip_mu, &dl) == ETIMEDOUT) break;
+                int flip = __atomic_load_n(&o->shown, __ATOMIC_RELAXED) != sh;
+                pthread_mutex_unlock(&g_flip_mu);
+                DM_BLOCK_END();
+                __atomic_fetch_add(&g_pq_wait_ns, now_ns() - w0, __ATOMIC_RELAXED);   // 翻走等待计入取图内的呈现队列等待（@pq_wait_ms；原子加：与取图线程并发的另一取图线程也会累计）
+                if (flip) { waited = 1; static _Atomic uint64_t wn; uint64_t wk = atomic_fetch_add(&wn, 1) + 1;
+                    if (wk <= 20 || !(wk & (wk - 1))) LOG("[nvn] WindowAcquireTexture 撞上还在屏上的那张：图 %d 等了 %.1f ms 等到下一次呈现翻走才交出（真机语义），累计 %llu 次",
+                                                           *idx, (now_ns() - w0) / 1e6, (unsigned long long)wk); } }
+            if (!waited) { static _Atomic uint64_t n; uint64_t k = atomic_fetch_add(&n, 1) + 1;
+                if (k <= 20 || !(k & (k - 1))) LOG("【红】 [nvn] WindowAcquireTexture 交出了还在屏上的那张：图 %d 是最近一次呈现的、还没被下一次呈现翻走（真机不会交出），累计 %llu 次；活跃 %d / %d 张、间隔 %d、已呈现 %llu 次",
+                                                   *idx, (unsigned long long)k, nact, o->ntex, o->interval, (unsigned long long)o->presents); } } }
     if (*idx >= 0 && *idx < 4) atomic_store_explicit(&g_acq_thr[*idx], (uintptr_t)pthread_self(), memory_order_relaxed);
     uintptr_t pt = atomic_load_explicit(&g_present_thr, memory_order_relaxed);
     if (pt && pt != (uintptr_t)pthread_self()) {
@@ -3700,6 +3731,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     if (idx >= 0 && idx < o->ntex && idx < 4 && nvn_frec_on()) { pthread_mutex_lock(&g_sub_mu); nvn_frec_present(CTX(o->tex[idx]), present_period(o) / 1e9, crop); pthread_mutex_unlock(&g_sub_mu); }   // 帧录：持提交锁落盘，这一帧之后的提交等它
     if (idx >= 0 && idx < o->ntex && idx < 4) o->ticket[idx] = nvn_be_present(CTX(o->tex[idx]), present_period(o) / 1e9, crop);   // enqueue only, return immediately
     if (idx >= 0 && idx < o->ntex) __atomic_store_n(&o->shown, idx + 1, __ATOMIC_RELAXED);   // 屏上换成这张：上一张归还（AcquireTexture 的 #141 报红看它）
+    pthread_mutex_lock(&g_flip_mu); pthread_cond_broadcast(&g_flip_cv); pthread_mutex_unlock(&g_flip_mu);   // 撞上还在屏上那张的取图（#141）等这次呈现翻走；每帧一次锁内广播，无等者时开销可不计
     gfx_leave();
     atomic_fetch_add(&g_nvn_ns, now_ns() - t0);
     uint64_t f = g_frame, ps, dr; nvn_be_stats(&ps, &dr);

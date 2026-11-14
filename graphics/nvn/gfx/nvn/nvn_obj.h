@@ -102,7 +102,7 @@ typedef struct { uint32_t magic; volatile uint32_t *val; const pool_t *pool; int
 typedef struct { NVNdevice *dev; void *native; int32_t ntex, interval; NVNtexture *tex[4]; int32_t nactive; } win_builder_t;
 FITS(win_builder_t, NVNwindowBuilder);
 // avail[i]: time at which swapchain image i can be acquired again (ns, monotonic clock) = its display time + one present period; pace: target time of this window's present pacer
-typedef struct { uint32_t magic; void *native; int32_t ntex, interval, next, nactive, crop[4]; NVNtexture *tex[4]; uint64_t presents, avail[4], pace, ticket[4]; int32_t shown, nat; } win_t;   // ticket[i]: ticket of the most recent present of image i; shown: image of the most recent present + 1 (0 = none yet; on the device it stays on screen until the next present flips, so it is not returned)；nat：原生窗口交换间隔同步开着（hle_nvn.c nat_itv）
+typedef struct { uint32_t magic; void *native; int32_t ntex, interval, next, nactive, crop[4]; NVNtexture *tex[4]; uint64_t presents, avail[4], pace, ticket[4]; int32_t shown, nat; } win_t;   // ticket[i]: ticket of the most recent present of image i; shown: image of the most recent present + 1 (0 = none yet; on the device it stays on screen until the next present flips, so it is not returned; the host matches it too: a colliding acquire waits for the next present to flip it away, hle_nvn.c #141)；nat：原生窗口交换间隔同步开着（hle_nvn.c nat_itv）
 FITS(win_t, NVNwindow);
 
 // Command buffer: records are written into host blocks of each recording (hle_nvn.c, command buffer), handle = first record; a device cursor walks the command memory the game gives
