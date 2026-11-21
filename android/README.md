@@ -1,5 +1,21 @@
 # Android host bring-up
 
+## Supported devices / 支持的设备
+
+| Tier / 档 | Devices / 设备 |
+| --- | --- |
+| Guaranteed / 保证 | Snapdragon 8 Gen 2 and newer (Adreno 740+); Dimensity 9000 and newer (Mali-G710 / Immortalis). Stock vendor driver, 64-bit (`arm64-v8a`), Vulkan 1.1+, Android 14+.<br>骁龙 8 Gen 2 及以上（Adreno 740 起）；天玑 9000 及以上（Mali-G710 / Immortalis）。原厂驱动、64 位（`arm64-v8a`）、Vulkan 1.1+、Android 14+。 |
+| Best effort / 尽力 | Adreno 6xx–7xx, Dimensity 8000 series, Turnip (Mesa driver for Adreno), Samsung Xclipse.<br>Adreno 6xx–7xx、天玑 8000 系、Turnip（Adreno 的 Mesa 开源驱动）、三星 Xclipse。 |
+| Separate track / 单独跑道 | Kirin with Maleoon GPU (HarmonyOS): served by the HarmonyOS port (`ohos/` and its integration branch), not by this APK.<br>麒麟 Maleoon GPU（鸿蒙）：走鸿蒙移植（`ohos/` 及其集成分支），不走本 APK。 |
+| Not supported / 不支持 | GPUs that only expose Vulkan 1.0; 32-bit devices or systems.<br>只支持 Vulkan 1.0 的 GPU；32 位设备或系统。 |
+
+- Android 14 is the policy floor. The current package still declares minSdk 29 (Android 10); the floor becomes minSdk 34 when #1739 is merged.
+  Android 14 是支持范围的下限。当前包仍声明 minSdk 29（Android 10）；#1739 合入后改为 minSdk 34。
+- Dimensity (Mali / Immortalis) devices are verified by the community on real hardware.
+  天玑（Mali / Immortalis）机型由社区真机验证。
+- A GPU that only supports Vulkan 1.0 is rejected when the Vulkan device is created (`android/native/direct/vk_device.c`), and the player sees a readable reason on the failed start. Nothing is checked before the start.
+  只支持 Vulkan 1.0 的 GPU 在建 Vulkan 设备时具名拒绝（`android/native/direct/vk_device.c`），玩家在启动失败时看到看得懂的原因；启动前不做检查。
+
 This directory follows the multi-platform plan.
 It builds an ARM64 diagnostic APK with Activity / SurfaceView lifecycle, JNI,
 memory and rewrite probes, a Vulkan test presenter, and a gamepad snapshot using
@@ -153,8 +169,9 @@ AOT hosts). The sections below keep the Docker recipe for Linux / WSL hosts.
 ## Build with Docker (Linux / WSL hosts)
 
 Pinned tools: JDK 17, Gradle 9.8.1, Android Gradle Plugin 9.4.1, SDK / target 36,
-build-tools 36.0.0, NDK 29.0.14206865, CMake 3.31.6. Minimum OS is Android 10
-(API 29); only `arm64-v8a` is packaged. Native code queries the actual host page
+build-tools 36.0.0, NDK 29.0.14206865, CMake 3.31.6. The current package declares
+minSdk 29 (Android 10); it becomes minSdk 34 (Android 14) when #1739 is merged (see
+"Supported devices" above). Only `arm64-v8a` is packaged. Native code queries the actual host page
 size, and the library / APK are built with 16 KB alignment.
 
 From the repository root:

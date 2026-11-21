@@ -1008,8 +1008,8 @@ static void geo_draw(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0) {
         re = enc_r_begin(rd);
     }
     if (!run || g_gr.cap_pso != capture) { enc_r_pso(re, capture); if (run) g_gr.cap_pso = capture; }   // the capture lane keeps its pipeline across the run's draws
-    bind_vbufs(re, vs);
     p_draw vertex_range = {.first = (int32_t)first, .count = (int32_t)span, .instances = instances, .base_instance = (int32_t)first_instance};
+    bind_vbufs(re, vs, &vertex_range, NULL);
     vconv_bind(re, vs, 1, &vertex_range, NULL);
     args_dirty_all(); encode_args(re, vs, 0, 1); enc_r_vbuf(re, 13, capture_info);
     if (di0 && !by_range) enc_r_draw_indexed(re, MTLPrimitiveTypePoint, unique_count, MTLIndexTypeUInt32, capture_ix, nu * 4, instances, di.base_vertex, first_instance);
@@ -1088,8 +1088,8 @@ static void vcap_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di, uint64
     lc_land(); rp_flush(); rp_end(); ubd_land();
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     MTL4RenderPassDescriptor *rd = pass_desc(); rd.renderTargetWidth = rd.renderTargetHeight = rd.defaultRasterSampleCount = 1;
-    id<MTL4RenderCommandEncoder> re = enc_r_begin(rd); enc_r_pso(re, capture); bind_vbufs(re, vs);
     p_draw range = {.first = (int32_t)first, .count = (int32_t)span, .instances = instances, .base_instance = (int32_t)first_instance};
+    id<MTL4RenderCommandEncoder> re = enc_r_begin(rd); enc_r_pso(re, capture); bind_vbufs(re, vs, &range, NULL);
     vconv_bind(re, vs, 1, &range, NULL);
     args_dirty_all(); encode_args(re, vs, 0, 1); enc_r_vbuf(re, 13, ib.gpuAddress + io);
     enc_r_draw_instanced(re, MTLPrimitiveTypePoint, (NSUInteger)first, (NSUInteger)span, (NSUInteger)instances, first_instance);
@@ -1150,8 +1150,8 @@ static int sx_draw(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0) {
     memcpy(cpu + (info - gpu), ci, 16); memcpy(cpu + (info - gpu) + 16, cc, 16);
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     MTL4RenderPassDescriptor *rd = pass_desc(); rd.renderTargetWidth = rd.renderTargetHeight = rd.defaultRasterSampleCount = 1;
-    id<MTL4RenderCommandEncoder> re = enc_r_begin(rd); enc_r_pso(re, capture); bind_vbufs(re, vs);
     p_draw vertex_range = {.first = (int32_t)first, .count = (int32_t)span, .instances = instances, .base_instance = (int32_t)first_instance};
+    id<MTL4RenderCommandEncoder> re = enc_r_begin(rd); enc_r_pso(re, capture); bind_vbufs(re, vs, &vertex_range, NULL);
     g_draw_binst = first_instance;
     vconv_bind(re, vs, 1, &vertex_range, NULL);
     wd_drop(); args_dirty_all(); encode_args(re, vs, 0, 1); enc_r_vbuf(re, 13, info);   // 宽屏不改写只产出数据的绘制（widen_glue.inc wd_drop）

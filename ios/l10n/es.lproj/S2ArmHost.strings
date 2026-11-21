@@ -277,11 +277,11 @@
 "app.library.broken.title" = "Los archivos del juego están incompletos";
 "app.library.cantOpen" = "No se puede abrir este juego";
 "app.library.cantOpen.message" = "No se pudo preparar este juego para iniciarse. Desliza la app en el selector de apps y ábrela de nuevo; si sigue fallando, exporta el diagnóstico y envíanoslo.";
-"app.library.cantOpen.incomplete" = "Este juego está incompleto en S2Arm en este teléfono. En S2Arm en tu ordenador, envíalo al iPhone de nuevo; tus partidas guardadas se conservan.";
+"app.library.cantOpen.incomplete" = "Este juego está incompleto en S2Arm en este teléfono. En S2Arm en tu ordenador, haz clic en «Exportar…» en este juego, marca este teléfono y empieza para instalarlo de nuevo; tus partidas guardadas se conservan.";
 "app.library.cantOpen.storage" = "Este teléfono no pudo crear una carpeta para este juego, muy probablemente porque el almacenamiento está lleno. Libera espacio en Ajustes > General > Almacenamiento del iPhone, luego desliza la app y ábrela de nuevo.";
 "app.library.missing.title" = "Faltan recursos del juego";
-"app.library.packBroken" = "Solo se copió parte de los recursos de este juego — probablemente se interrumpió la copia. En S2Arm en tu ordenador, haz clic en \"Enviar al iPhone\" para este juego de nuevo para añadir lo que falta. Cuando termine, toca \"Comprobar de nuevo\".";
-"app.library.packMissing" = "Los recursos de este juego aún no están en el teléfono. En S2Arm en tu ordenador, haz clic en \"Push to iPhone\" para este juego y los recursos se copian automáticamente. También puedes exportar este juego en tu ordenador y poner sus dos archivos de la carpeta \"S2Arm Game Packs\", el .s2arm y el .img, en la carpeta \"Import Here\" de esta app en la app Archivos. Luego toca \"Comprobar de nuevo\".";
+"app.library.packBroken" = "Solo se copió parte de los recursos de este juego — probablemente se interrumpió la copia. En S2Arm en tu ordenador, haz clic en «Exportar…» en este juego, marca este teléfono y empieza para añadir lo que falta. Cuando termine, toca \"Comprobar de nuevo\".";
+"app.library.packMissing" = "Los recursos de este juego aún no están en el teléfono. En S2Arm en tu ordenador, haz clic en «Exportar…» en este juego, marca este teléfono y empieza; los recursos se copian automáticamente. También puedes exportar sin marcar ningún dispositivo y poner sus dos archivos de la carpeta \"S2Arm Game Packs\", el .s2arm y el .img, en la carpeta \"Import Here\" de esta app en la app Archivos. Luego toca \"Comprobar de nuevo\".";
 "app.library.reopen.message" = "Solo puedes jugar un juego cada vez que se abre la app. Desliza la app en el selector de apps, ábrela de nuevo y elige este juego.";
 "app.library.reopen.title" = "Cierra y vuelve a abrir la app";
 "app.library.stillMissing" = "Comprobado ahora mismo — los recursos completos siguen sin estar.\n\n";
@@ -330,7 +330,7 @@
 "img.importFolder" = "Import Here";
 "img.scanFailed.title" = "No se pudo importar el archivo del juego";
 "img.noShaders.title" = "Este archivo del juego está incompleto";
-"img.noShaders.body" = "«%@» está incompleto. Pon también aquí el .s2arm de este juego de la carpeta «S2Arm Game Packs» de tu ordenador (lleva los sombreadores del juego), o conecta tu teléfono y haz clic en «Push to iPhone» en S2Arm en tu ordenador.";
+"img.noShaders.body" = "«%@» está incompleto. Pon también aquí el .s2arm de este juego de la carpeta «S2Arm Game Packs» de tu ordenador (lleva los sombreadores del juego), o conecta tu teléfono, haz clic en «Exportar…» en este juego en S2Arm en tu ordenador, marca este teléfono y empieza.";
 "img.updateSkipped.title" = "Actualización de shaders omitida";
 "img.updateSkipped.body" = "«%@» no corresponde a la versión actual de este juego, así que se omitió y no se aplicó. El juego funciona con normalidad. Para usar esta actualización, añade junto con ella el .img completo de la misma exportación de tu ordenador.";
 "gameExport.preparing" = "Creando los archivos de exportación…";
@@ -401,6 +401,8 @@
 "gfx.fpsLimit" = "Límite de velocidad de fotogramas";
 "gfx.fpsLimit.none" = "Sin límite";
 "gfx.resolution" = "Resolución de renderizado";
+"gfx.brightness" = "Brillo";
+"gfx.brightness.system" = "Seguir el sistema";
 "iml.lost.body" = "Los juegos grandes pueden quedarse sin memoria y cerrarse o ralentizarse. Arréglalo según cómo instalaste S2Arm:\n· S2Arm en tu ordenador (Apple ID gratuito o de pago): pulsa «Renovar S2Arm» en la ficha «S2Arm» (la primera de la biblioteca) para reinstalar. Si después sigues viendo este aviso, añade el permiso con GetMoreRam (abajo) y vuelve a pulsar «Renovar S2Arm».\n· Tu propio certificado de desarrollador (.p12 + perfil de aprovisionamiento): en el sitio web de Apple Developer, activa «Increased Memory Limit» para el App ID de S2Arm (la identidad que Apple registra para cada app), vuelve a generar el perfil y firma e instala de nuevo con el perfil nuevo.\n· AltStore: reinstala (no actualices) con AltStore Classic 2.2 o posterior.\n· SideStore 0.7.0: su firma elimina este permiso; añádelo con GetMoreRam (abajo) y luego reinstala en SideStore.\n· Sideloadly: no compatible por ahora; no indica que conserve este permiso con un Apple ID gratuito y los permisos personalizados requieren una cuenta de Apple Developer de pago.\n· GetMoreRam: instálalo firmándolo con el mismo Apple ID que usaste para S2Arm (ocupa una de las plazas de apps de una cuenta gratuita; bórralo después), inicia sesión, abre App IDs, toca Actualizar, elige S2Arm, toca «Add Increased Memory Limit» y reinstala S2Arm como lo hiciste antes.";
 "iml.lost.short" = "Los juegos grandes pueden quedarse sin memoria y cerrarse. Toca «Más información» para ver cómo volver a firmar S2Arm con este permiso.";
 "iml.lost.title" = "Esta instalación perdió el permiso «Límite de memoria ampliado»";
@@ -433,7 +435,7 @@
 "notice.imgFile" = "NombreDelJuego.img";
 "notice.step.img" = "O bien exporta este juego en tu ordenador, coloca sus dos archivos de la carpeta «S2Arm Game Packs», el .s2arm y el .img, en la carpeta «Import Here» de «%@» en la app Archivos y abre «%@» de nuevo. Se detectará automáticamente.";
 "notice.step.imgApp" = "O bien exporta este juego en tu ordenador y coloca el .s2arm de la carpeta de este juego en el ordenador (y el .img, si lo hay) en la carpeta «Import Here» de «%@» en la app Archivos; después toca «Ya lo he copiado, comprobar de nuevo» abajo.";
-"notice.step.auto" = "En S2Arm en tu ordenador, haz clic en «Enviar al iPhone» para este juego y los recursos se copian automáticamente: la forma más fácil.";
+"notice.step.auto" = "En S2Arm en tu ordenador, haz clic en «Exportar…» en este juego, marca este teléfono y empieza; los recursos se copian automáticamente: la forma más fácil.";
 "save.blocked" = "%@\n\nCopia tus datos a un lugar seguro antes de decidir: abre la app Archivos → «En mi iPhone» («En mi iPad» en iPad) → «%@», y copia toda la carpeta «S2A» a otro lugar. Las operaciones sin terminar quedan registradas en S2A/save-transfer/save-transactions. También puedes seleccionar este dispositivo en el Finder de un Mac → «Archivos» y arrastrar la carpeta «S2A» de esta app hacia fuera.\n\nTras copiarla, puedes reempaquetar e instalar para intentarlo de nuevo, o tocar «Iniciar el juego de todas formas…».";
 "save.busy" = "La operación de guardado anterior sigue en curso. Vuelve a intentarlo cuando termine.";
 "save.checking" = "Comprobando partidas guardadas…";

@@ -170,6 +170,20 @@ class S2armExport(unittest.TestCase):
                 install.export_s2arm(self.c, self.A)
         self.assertEqual(e.exception.code, "devcert_missing")
 
+    def test_export_brings_game_to_current_like_update(self):
+        # #1162：导出 .s2arm 原先只重核程序（refresh_ios）、不重编着色器库，玩家导出装好后电脑上「建议更新」照亮。
+        #   期望和「更新这款」同一份定义（refresh_local）：着色器库重编在打包之前、在这款的程序锁里
+        import sgrade_bf
+        self.fixture()
+        order = []
+        with patch.object(sgrade_bf, "rechain_ios", lambda c, g: order.append(("rechain", g)) or "done"), \
+                patch.object(program_pack, "build", lambda c, g, **k: order.append(("build", g)) or self.pkg), \
+                patch.object(rewrite_refresh, "refresh_ios", lambda c, games, **k: order.append(("refresh", tuple(games))) or []), \
+                patch.object(install, "export_sign_mode", lambda c: "external"):
+            self.c.r.update(gameId=self.A, mode="export")
+            install.export_s2arm(self.c, self.A)
+        self.assertEqual(order, [("rechain", self.A), ("refresh", (self.A,)), ("build", self.A)])
+
     def test_sign_mode_set(self):
         from core import Failure
         for mode, want in (("external", "external"), ("appleId", "appleId")):

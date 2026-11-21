@@ -615,7 +615,16 @@ def access_facts(path):
         attrs = _api('kernel32', 'GetFileAttributesW', W.DWORD, W.LPCWSTR)(win_path(os.path.abspath(path)))
         out.append("属性 " + ("取不到 %d" % C.get_last_error() if attrs == 0xFFFFFFFF else hex(attrs)))   # 0x10 目录、0x1 只读、0x400 重解析点  # 非玩家句
     except OSError as e:
+        attrs = 0xFFFFFFFF
         out.append(f"属性 {e}")  # 非玩家句
+    # 连属性都取不到 = 进不了所在目录（D-BW75：devcert\state.json「属性 取不到 5；权限 取不到 5」，看不出是谁锁了目录）：上一级目录的属性与权限一并带上
+    parent = os.path.dirname(os.path.abspath(path))
+    if attrs == 0xFFFFFFFF and parent and parent != os.path.abspath(path) and not getattr(access_facts, "_inner", False):
+        access_facts._inner = True
+        try:
+            out.append(f"所在目录 {os.path.basename(parent) or parent}：{access_facts(parent)}")  # 非玩家句
+        finally:
+            access_facts._inner = False
     try:
         sd = C.c_void_p()
         # OWNER | GROUP | DACL = 1 | 2 | 4；SE_FILE_OBJECT = 1

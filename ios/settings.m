@@ -285,6 +285,14 @@ NSArray<NSDictionary *> *s2a_ios_graphics_options(void) {
     ];
 }
 
+// 游戏内亮度（按款）：档位用字符串，@"system" = 跟随系统（不导出 S2A_BRIGHTNESS、不改现有行为），其余是 0–1 的字符串。
+//   放进 graphics_options 同一套 slider 机制里显示，但由 brightnessCell 单独画、单独存 S2ABrightness。
+NSDictionary *s2a_ios_brightness_option(void) {
+    return @{@"key": @"S2ABrightness", @"title": S2AL(@"gfx.brightness"),
+             @"values": @[@"system", @"0.5", @"0.65", @"0.8", @"1"],
+             @"labels": @[S2AL(@"gfx.brightness.system"), @"50%", @"65%", @"80%", @"100%"]};
+}
+
 NSInteger s2a_ios_settings_docked_change(NSDictionary *entry, NSDictionary *now, BOOL *restart) {
     NSMutableDictionary *a = [entry mutableCopy] ?: [NSMutableDictionary new], *b = [now mutableCopy] ?: [NSMutableDictionary new];
     NSNumber *was = a[@"S2ADockedMode"], *is = b[@"S2ADockedMode"];
@@ -353,6 +361,32 @@ void s2a_ios_apply_graphics_settings(NSUserDefaults *defaults) {
         }
         apply_environment(options[i].env, value);
         fprintf(stderr, "[S2A 画面设置] %s=%s（本 App 设置）\n", options[i].env, [value UTF8String]);
+    }
+    // 游戏内亮度（按款）：S2ABrightness 存 0–1 的字符串→ S2A_BRIGHTNESS，交给 app.m 已有的 brightness_hold 每 2 秒保持、对抗自动亮度。
+    //   没选过 = 不导出（跟随系统、不改现有行为，和其它项的"缺省有值"不同）；显式启动环境优先；无效值清除、回退到不导出。
+    if (!getenv("S2A_BRIGHTNESS")) {
+        id value = [defaults objectForKey:@"S2ABrightness"];
+        if (value != nil) {
+            if ([value isEqual:@"system"]) {   // 跟随系统：与没选过一样，不导出、不改动屏幕亮度
+                fprintf(stderr, "[S2A 画面设置] S2ABrightness=system，亮度跟随系统\n");
+            } else {
+                double b = -1; BOOL valid = NO;
+                if ([value isKindOfClass:NSString.class]) {
+                    const char *s = [value UTF8String]; char *end = NULL;
+                    if (s && *s) { b = strtod(s, &end); valid = end && *end == '\0' && b >= 0 && b <= 1; }
+                }
+                char buf[32]; snprintf(buf, sizeof buf, "%.2f", b);
+                if (!valid) {
+                    fprintf(stderr, "[S2A 画面设置] 【红】S2ABrightness=%s 无效，清除保存值、亮度跟随系统\n", [[value description] UTF8String]);
+                    [defaults removeObjectForKey:@"S2ABrightness"];
+                } else {
+                    apply_environment("S2A_BRIGHTNESS", @(buf));
+                    fprintf(stderr, "[S2A 画面设置] S2A_BRIGHTNESS=%s（本 App 设置，画面亮度）\n", buf);
+                }
+            }
+        }
+    } else {
+        fprintf(stderr, "[S2A 画面设置] S2A_BRIGHTNESS=%s（启动环境）\n", getenv("S2A_BRIGHTNESS"));
     }
     // Switch 档位：与服务层 Host.Docked、直连 dm_opmode 和宽屏表共用；缺省掌机，下次启动生效。
     const char *docked = getenv("S2A_DOCKED");

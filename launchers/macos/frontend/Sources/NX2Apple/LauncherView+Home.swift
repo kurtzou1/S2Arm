@@ -105,32 +105,18 @@ extension LauncherView {
                     .overlay(alignment: .bottom) { if model.sgradeUpgrading(game.id) { SGradeUpgradeBar(progress: model.sgradeProgress(game.id)).padding(.horizontal, 14).padding(.bottom, 5) } }
                     .keyboardShortcut(.return, modifiers: [])
                     .launcherTooltip(homePrimaryTitle(game), placement: .above).accessibilityLabel(homePrimaryTitle(game))
-                    .controllerID(game.playable ? "hero.play" : game.iphoneReady ? "hero.install" : "hero.export").controllerShortcut(.rightTrigger)
-                Button {
-                    model.exportSelfSign(game)
-                    if game.iphoneExportable { installFor = game.id }
-                } label: {
-                    fitLabel(txt("library.hero.selfSign"), "square.and.arrow.up")
-                }
-                .controllerButtonStyle(ConsolePillButtonStyle()).controllerID("hero.selfSign")
-                .launcherTooltip(txt("library.hero.selfSign"), placement: .above).accessibilityLabel(txt("library.hero.selfSign"))
-                // 能直接导出的走手机槽（出包在跑也行，手机槽忙就排队）；要先出 iPhone 包的，主槽在跑非出包作业时等（出包在跑会排队）
-                .disabled(game.iphoneExportable ? model.phoneQueued(game.id) : model.mainBusy && model.session?.export == nil)
-                // 主按钮是「开始游戏」时，出过 iPhone 包的款照样要能一键装到 iPhone（主线游戏库两个都在）
-                if game.playable, game.iphoneReady {
-                    Button { model.selfSigning = false; model.targetInstalledDevice(of: game); installFor = game.id } label: {
-                        fitLabel(txt(game.iphoneInstalledAt != nil && game.iphoneFree ? "library.hero.renew" : "library.hero.install"), "iphone")
+                    .controllerID(Self.homePrimaryID(game)).controllerShortcut(.rightTrigger)
+                // 0.6.4 维护者：iPhone 这一侧只有「更新」「导出」两件事。更新只在电脑上做（没做过 iPhone 版不出这颗）；导出 = 导出确认页（签名 → 出法 → 设备多选）
+                HeroUpdateButton(model: model, game: game)
+                if Self.homePrimaryID(game) != "hero.exportSheet" {   // 主按钮已经是「导出…」/「续签」的款不重复出
+                    Button { model.openExportSheet(game.id) } label: {
+                        fitLabel(txt("exportsheet.open"), "square.and.arrow.up")
                     }
-                    .controllerButtonStyle(ConsolePillButtonStyle()).controllerID("hero.install")   // 只开装机窗：别的作业在跑，窗里点装机会排队
-                    .launcherTooltip(txt(game.iphoneInstalledAt != nil && game.iphoneFree ? "library.hero.renew" : "library.hero.install"), placement: .above)
+                    .controllerButtonStyle(ConsolePillButtonStyle()).controllerID("hero.exportSheet")   // 只开确认页：别的作业在跑也能点，开始后排队
+                    .launcherTooltip(txt("exportsheet.open.help"), placement: .above).accessibilityLabel(txt("exportsheet.open"))
                 }
-                if game.playable || game.iphoneReady {
-                    Button { model.exportFor = game.id } label: {
-                        fitLabel(loc.t("s2arm.export.action"), "shippingbox")
-                    }
-                    .controllerButtonStyle(ConsolePillButtonStyle()).controllerID("hero.export")
-                    .launcherTooltip(loc.t("s2arm.export.action"), placement: .above).accessibilityLabel(loc.t("s2arm.export.action"))
-                }
+                // 出包页（Mac / Apple TV / 安卓等其它平台）不再并排放在这里：游戏页只有「更新」「导出」两件事（维护者 11-21 定），
+                //   出包从「…」菜单和右键菜单进；还没准备的款主按钮「准备游戏」照旧去出包页
                 // 只留两个人人认得的圆钮（…、♡）；「查看出包结果」「启动设置」收进「…」菜单（11-16 维护者：三条横杠看不出是启动设置，一行三种形状不统一）
                 Button { moreFor = game.id } label: { Image(systemName: "ellipsis") }
                     .controllerButtonStyle(ConsoleIconButtonStyle(size: 52)).controllerID("hero.more")
@@ -148,6 +134,7 @@ extension LauncherView {
                 .accessibilityLabel(loc.t(favorited ? "home.unfavorite" : "home.favorite"))
                 .accessibilityAddTraits(favorited ? .isSelected : [])
             }.padding(.top, compact ? 4 : 10)
+            HeroUpdateLines(model: model, game: game)
         }
         .frame(maxWidth: min(920, size.width * 0.78), alignment: .leading)
         .accessibilityElement(children: .contain).accessibilityIdentifier("home.preview")
@@ -298,12 +285,16 @@ extension LauncherView {
                     .overlay(alignment: .topTrailing) {
                         HStack(spacing: 4) {
                             // 「建议更新」（0.6.0 通用壳开关后面）：收藏心旁边一个小角标，原因在选中后的状态行里
+                            // 可点：选中这款、焦点落到详情区的「更新这款」（11-21 定稿：角标原先只是字，点了等于点卡片）
                             if !model.updateReasons(game).isEmpty {
                                 Text(BackendText.launcherText("update.hint.badge", language: loc.lang.sharedCode))
                                     .font(.manrope(10.5, .bold)).foregroundStyle(.orange)
                                     .padding(.horizontal, 7).padding(.vertical, 4)
                                     .background(.black.opacity(0.68), in: Capsule()).overlay(Capsule().strokeBorder(.orange.opacity(0.6)))
+                                    .contentShape(Capsule())
+                                    .highPriorityGesture(TapGesture().onEnded { focusUpdate(game) })
                                     .accessibilityIdentifier("card.updateHint." + game.id)
+                                    .accessibilityAddTraits(.isButton).accessibilityAction { focusUpdate(game) }
                             }
                             if home.favorites.contains(game.id) {
                                 Image(systemName: "heart.fill")
@@ -374,7 +365,7 @@ extension LauncherView {
     private func homePrimarySymbol(_ game: GameSummary) -> String {
         if homeReturnSlot(game) != nil { return "arrow.up.forward.app" }
         if game.playable { return model.cloudSyncing ? "arrow.triangle.2.circlepath" : "play.fill" }
-        if game.iphoneReady { return "iphone.and.arrow.forward" }
+        if game.iphoneReady { return "square.and.arrow.up" }
         return "shippingbox"
     }
     func homePrimaryTitle(_ game: GameSummary) -> String {
@@ -382,10 +373,22 @@ extension LauncherView {
         if model.sgradeUpgrading(game.id) { return Self.sgradeUpgradingTitle(model.sgradeProgress(game.id), txt) }   // 这款在升 S 级优化：按钮上直接写进度，不另弹框
         if homeReturnSlot(game) != nil { return loc.t("home.currentTask") }
         if game.playable { return loc.t(model.cloudSyncing ? "s2arm.cloud.syncing" : "library.play") }
-        if game.iphoneReady {
-            return txt(game.iphoneInstalledAt != nil && game.iphoneFree ? "library.hero.renew" : "library.hero.install")
-        }
+        if game.iphoneReady { return txt(Self.renews(game) ? "library.hero.renew" : "exportsheet.open") }
         return loc.t("home.prepare")
+    }
+    /// 主按钮的手柄 id：能玩 → 开始游戏；做过 iPhone 版 → 导出（免费账号装过的是续签）；都没有 → 准备（出包页）。
+    ///   续签单独一个 id：主按钮是「续签」时旁边照样给「导出…」（续签只预勾原来那台，要装到另一台的玩家得有导出入口）
+    static func homePrimaryID(_ game: GameSummary) -> String {
+        game.playable ? "hero.play" : !game.iphoneReady ? "hero.export" : renews(game) ? "hero.renew" : "hero.exportSheet"
+    }
+    /// 免费账号装过的款：主按钮写「续签」
+    static func renews(_ game: GameSummary) -> Bool { game.iphoneInstalledAt != nil && game.iphoneFree }
+    /// 续签：打开导出确认页、预勾这款当初装的那台（唯一的预勾例外：续签就是重新签给原来那台；那台没连着时那一行置灰，不替玩家换）
+    func openRenew(_ game: GameSummary) { model.openExportSheet(game.id, preselect: Self.renews(game) ? game.iphoneInstallDevice : nil) }
+    /// 角标点了：选中这款，焦点移到「更新这款」
+    func focusUpdate(_ game: GameSummary) {
+        model.selectedID = game.id
+        DispatchQueue.main.async { navigation.focus("hero.update") }   // 等详情区换成这款再落焦点
     }
     /// 「正在升级 xx%」；作业还没给出百分比 / 排队中写「正在升级…」
     static func sgradeUpgradingTitle(_ progress: Double?, _ txt: (String) -> String) -> String {
@@ -404,7 +407,7 @@ extension LauncherView {
         }
         if game.location.state == "missing" { missingFor = game; return }
         if game.playable { model.play(game, uiLanguage: uiLanguage) }
-        else if game.iphoneReady { model.selfSigning = false; model.targetInstalledDevice(of: game); installFor = game.id }
+        else if game.iphoneReady { openRenew(game) }
         else { model.exportFor = game.id }
     }
     func reconcileHomeSelection() {
@@ -473,7 +476,7 @@ extension LauncherView {
                 return true
             case .down:
                 let game = homeGames[index]
-                navigation.focus(game.playable ? "hero.play" : game.iphoneReady ? "hero.install" : "hero.export")
+                navigation.focus(Self.homePrimaryID(game))
                 return true
             case .up: navigation.focus("home.search"); return true
             default: return false

@@ -29,6 +29,8 @@ struct PhoneJobPanel: View {
         let s = BackendText.launcherText(id, language: language)
         return s.hasPrefix("[") && s.hasSuffix("]") ? fallback : s
     }
+    /// 文案用的作业名：手机上原来没有 S2Arm、这次「更新 iPhone 上的 S2Arm」其实是第一次装 → 写「安装」（installShell），不写「更新 / 已更新到」
+    private var kindKey: String { session.kind == .installUpdate && model.shellFirstInstall ? "installShell" : session.kind.rawValue }
     private var device: String {
         // 作业结果里的那台（实际装上的）优先；进行中还没有结果时用这次要装的那台。不用 installedTo（那是上一次装机的设备）
         let d = model.phoneOutcome?.device ?? ""
@@ -46,7 +48,7 @@ struct PhoneJobPanel: View {
         VStack(alignment: .leading, spacing: 30) {
             // 这是什么操作（维护者：原先只看得到「更新中 · …」一小行）
             if showsOperation {
-                Text(t(exporting ? "phone.title.export" : "phone.title." + session.kind.rawValue)).font(.manrope(18, .bold)).accessibilityIdentifier("phone.operation")
+                Text(t(exporting ? "phone.title.export" : "phone.title." + kindKey)).font(.manrope(18, .bold)).accessibilityIdentifier("phone.operation")
             }
             switch session.phase {
             case .running, .stopping: running
@@ -69,7 +71,7 @@ struct PhoneJobPanel: View {
         return VStack(alignment: .leading, spacing: 22) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Circle().fill(LauncherPalette.building).frame(width: 9, height: 9)
-                Text(t(exporting ? "phone.status.running.export" : "phone.status.running." + session.kind.rawValue)).font(.manrope(14, .bold)).foregroundStyle(LauncherPalette.building)
+                Text(t(exporting ? "phone.status.running.export" : "phone.status.running." + kindKey)).font(.manrope(14, .bold)).foregroundStyle(LauncherPalette.building)
                 if !exporting { Text("· " + device).font(.manrope(13, .medium)).foregroundStyle(.secondary) }
             }
             .lineLimit(1)
@@ -122,25 +124,25 @@ struct PhoneJobPanel: View {
     // ---- 成功：封章、大字、结论句、成果数字 ----
     private var success: some View {
         let o = model.phoneOutcome
-        let sentence = t("phone.done." + session.kind.rawValue, t("phone.done.install"))
+        let sentence = t("phone.done." + kindKey, t("phone.done.install"))
             .replacingOccurrences(of: "{0}", with: device)
             .replacingOccurrences(of: "{1}", with: o?.version.isEmpty == false ? "v" + o!.version : "")
         var stats: [(String, String)] = []
         if let ended = session.ended { stats.append((t("phone.stat.time"), Self.duration(ended.timeIntervalSince(session.started), language: language))) }
         stats.append((t("phone.stat.device"), device))
-        if session.kind == .install || session.kind == .installUpdate, let o {
+        if session.kind == .install || session.kind == .installUpdate, kindKey != "installShell", let o {   // 第一次装 S2Arm：还没有游戏，不写「不用重推」
             stats.append((t("phone.stat.games"), (o.packBytes ?? 0) == 0 ? t("phone.stat.no_push")
                           : ByteCountFormatter.string(fromByteCount: o.packBytes ?? 0, countStyle: .file)))
         }
         var lines: [String] = []
-        if session.kind == .install || session.kind == .installUpdate, let o {
+        if session.kind == .install || session.kind == .installUpdate, kindKey != "installShell", let o {
             lines.append((o.packBytes ?? 0) == 0 ? t("phone.fact.no_push")
                          : t("phone.fact.pushed").replacingOccurrences(of: "{0}", with: ByteCountFormatter.string(fromByteCount: o.packBytes ?? 0, countStyle: .file))
                             .replacingOccurrences(of: "{1}", with: "\(o.packFiles ?? 0)"))
             if !o.skipped.isEmpty { lines.append(t("phone.fact.skipped").replacingOccurrences(of: "{0}", with: o.skipped.joined(separator: "、"))) }
         }
         return VStack(alignment: .leading, spacing: 26) {
-            headline(seal: AnyView(SuccessSeal()), title: t("phone.headline." + session.kind.rawValue, t("phone.headline.install")), subtitle: sentence)
+            headline(seal: AnyView(SuccessSeal()), title: t("phone.headline." + kindKey, t("phone.headline.install")), subtitle: sentence)
             HStack(alignment: .top, spacing: 52) {
                 ForEach(Array(stats.enumerated()), id: \.offset) { _, s in
                     VStack(alignment: .leading, spacing: 6) {
@@ -337,7 +339,7 @@ struct PhoneJobPanel: View {
     private var failure: some View {
         VStack(alignment: .leading, spacing: 24) {
             headline(seal: AnyView(StatusSeal(symbol: "exclamationmark", color: LauncherPalette.danger)),
-                     title: partial ? t("app.failed.partial") : exporting ? t("phone.failed.export") : t("phone.failed." + session.kind.rawValue, t("phone.failed.install")),
+                     title: partial ? t("app.failed.partial") : exporting ? t("phone.failed.export") : t("phone.failed." + kindKey, t("phone.failed.install")),
                      subtitle: loc.backend(session.message))
             if partial {   // 独立 App 装上了、资源没推完：重试只推剩下的（推送只推变了的文件）
                 PhoneJobFact(label: t("phone.next"), text: t("app.failed.partialNext"))

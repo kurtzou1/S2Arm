@@ -205,7 +205,9 @@ static void no_host_va(void) {
     for (int i=0; i<N; i++) { vpool_init(&v[i],1ull<<30); ok&=map(&v[i],0x3FFF0000,i%64,BLOCK); }
     uint64_t vs1=vsize(), lv1=lv_tracked();
     CHECK(ok,"200 个池全部建成、池尾一块映射成功");
-    CHECK(vs1-vs0<(64ull<<20),"进程虚拟地址合计增长 %llu MB（期望 < 64 MB；旧实现 ≈ 204800 MB）",(unsigned long long)((vs1-vs0)>>20));
+    // 有符号差：建池期间别的线程（Metal 等）放掉地址时 vs1 < vs0，无符号相减会下溢成 16 EB 误红；缩了也是「增长 < 64 MB」
+    int64_t dvs=(int64_t)(vs1-vs0);
+    CHECK(dvs<(int64_t)(64ll<<20),"进程虚拟地址合计增长 %lld MB（期望 < 64 MB；旧实现 ≈ 204800 MB）",(long long)(dvs/(1ll<<20)));
     CHECK(lv1==lv0,"低区账：建池后账面合计变化 %lld（期望 0）",(long long)(lv1-lv0));
     for (int i=0; i<N; i+=41) { char w[64]; snprintf(w,sizeof w,"池 %d 池尾一块",i); buf_check(&v[i],0x3FFF0000+0x40,i%64,w); }
     for (int i=0; i<N; i++) API(nvnMemoryPoolFinalize)(&v[i]);

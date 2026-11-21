@@ -435,15 +435,20 @@ if cmd == "forward":
         nul = os.open(os.devnull, os.O_RDWR); os.dup2(nul, 0); os.dup2(nul, 1); os.dup2(nul, 2)
         srv.settimeout(120)
         c, _ = srv.accept(); f = c.makefile("rb"); c.sendall(b"READY 1\\n"); f.readline()
-        n = 0
+        n = received_bytes = 0
         while True:
             line = f.readline().decode().rstrip("\\n")
             if line == "END":
                 break
             _, size, rel = line.split(" ", 2)
-            data = f.read(int(size)); dst = os.path.join(st["received_dir"], rel)
+            size = int(size)
+            data = f.read(size)
+            if len(data) != size:
+                c.sendall(b"ERR stream ended inside entry\\n"); c.close(); os._exit(1)
+            dst = os.path.join(st["received_dir"], rel)
             os.makedirs(os.path.dirname(dst), exist_ok=True); open(dst, "wb").write(data); n += 1
-        c.sendall(("OK %d 0\\n" % n).encode()); c.close(); os._exit(0)
+            received_bytes += len(data)
+        c.sendall(("OK %d %d\\n" % (n, received_bytes)).encode()); c.close(); os._exit(0)
     srv.close(); out("%d\\n" % port); sys.exit(0)
 if cmd == "exec-out":
     if len(argv) > 2 and argv[1] == "run-as":

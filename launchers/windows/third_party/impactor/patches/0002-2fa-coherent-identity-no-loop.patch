@@ -304,7 +304,7 @@ index a7d54a5..f4070cc 100644
 +    V.get_or_init(|| {
 +        let [model, os, build, cfnetwork, darwin] = read_this_mac().unwrap_or(PINNED.map(String::from));
 +        (
-+            format!("<{model}> <macOS;{os};{build}> <com.apple.AuthKit/1 (com.apple.akd/1.0)>"),
++            format!("<{model}> <Mac OS X;{os};{build}> <com.apple.AuthKit/1 (com.apple.akd/1.0)>"),
 +            format!("akd/1.0 CFNetwork/{cfnetwork} Darwin/{darwin}"),
 +        )
 +    })

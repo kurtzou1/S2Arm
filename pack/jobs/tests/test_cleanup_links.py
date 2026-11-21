@@ -57,6 +57,21 @@ class CleanupLinkTests(unittest.TestCase):
         self.assertTrue(library._rm_direct_transient(self.c, direct, direct / "work"))
         self.assertFalse((direct / "work").exists()); self.assertTrue((direct / "store").is_dir())
 
+    def test_clean_removes_direct_cache_on_game_volume(self):
+        # 诊断#0f1c42 D-CMJ7：游戏在别的盘、直连缓存在这款文件夹的 direct-cache/ 时，「清理缓存」（retain_compiler=False）
+        #   原先拿工具缓存当托管根删它，报「操作路径不属于托管目录」整单失败；期望整个删掉，存档不动。出包后的自动清理照样只删中间件
+        from unittest.mock import patch
+        self.c.work_root.mkdir()
+        direct = layout.path(self.c, self.gid, "direct-cache")
+        save = self.payload(layout.path(self.c, self.gid, "saves"))
+        with patch.object(library, "direct_cache_dir", lambda c, g: direct):
+            (direct / "work").mkdir(parents=True); (direct / "store").mkdir()
+            library.prune_build(self.c, self.gid)
+            self.assertFalse((direct / "work").exists()); self.assertTrue((direct / "store").is_dir())
+            library.prune_build(self.c, self.gid, retain_compiler=False)
+        self.assertFalse(direct.exists())
+        self.assertEqual(save.read_bytes(), b"player data must survive")
+
     def test_stage_logs_include_windows_work_logs(self):
         # #754：Windows 一键出包各步日志（seed.log 等）写在 build/ios/work 下，失败后随 build/ 删掉、诊断包里没有；期望拷进 <任务>-stages
         logs = self.root / "logs"; self.c.logs = logs; self.c.task = "t1"

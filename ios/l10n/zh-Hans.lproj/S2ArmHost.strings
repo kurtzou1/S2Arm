@@ -282,11 +282,11 @@
 "app.library.broken.title" = "游戏资源不完整";
 "app.library.cantOpen" = "这款游戏打不开";
 "app.library.cantOpen.message" = "启动这款游戏前的准备没做完。请从后台划掉 App 后重新打开再试；还是不行的话，导出诊断包发给我们。";
-"app.library.cantOpen.incomplete" = "这款游戏在手机上的 S2Arm 里不完整。请在电脑上的 S2Arm 里把它重新「推到 iPhone」一次；存档不受影响。";
+"app.library.cantOpen.incomplete" = "这款游戏在手机上的 S2Arm 里不完整。请在电脑上的 S2Arm 里对这款点「导出…」，勾上这台手机后开始，重新装一次；存档不受影响。";
 "app.library.cantOpen.storage" = "手机上没法给这款游戏建存放目录，多半是存储空间满了。请在「设置 → 通用 → iPhone 储存空间」腾出空间后，从后台划掉 App 再打开。";
 "app.library.missing.title" = "还缺游戏资源";
-"app.library.packBroken" = "这款游戏的资源只拷了一部分，多半是拷到一半断了。请在 电脑上的 S2Arm 里对这款游戏再点一次「推到 iPhone」，它会把缺的补上。补好后点「重新检查」。";
-"app.library.packMissing" = "这款游戏的资源还不在手机上。请在电脑上的 S2Arm 里对这款游戏点「推到 iPhone」，资源会自动拷进来；也可以在电脑上导出这款游戏，把「S2Arm 游戏包」文件夹里这款的 .s2arm 和 .img 两个文件一起放进「文件」App 里本 App 的「放这里导入」文件夹。放好后点「重新检查」。";
+"app.library.packBroken" = "这款游戏的资源只拷了一部分，多半是拷到一半断了。请在电脑上的 S2Arm 里对这款点「导出…」，勾上这台手机后开始，它会把缺的补上。补好后点「重新检查」。";
+"app.library.packMissing" = "这款游戏的资源还不在手机上。请在电脑上的 S2Arm 里对这款点「导出…」，勾上这台手机后开始，资源会自动拷进来；也可以导出时不勾设备，把「S2Arm 游戏包」文件夹里这款的 .s2arm 和 .img 两个文件一起放进「文件」App 里本 App 的「放这里导入」文件夹。放好后点「重新检查」。";
 "app.library.reopen.message" = "同一次打开只能玩一款游戏。请从后台划掉 App 后重新打开，再选这款。";
 "app.library.reopen.title" = "请关掉 App 重新打开";
 "app.library.stillMissing" = "刚刚查过，还是没有完整的资源包。\n\n";
@@ -335,7 +335,7 @@
 "img.importFolder" = "放这里导入";
 "img.scanFailed.title" = "没能导入游戏文件";
 "img.noShaders.title" = "这个游戏文件不完整";
-"img.noShaders.body" = "「%@」不完整。请把电脑上「S2Arm 游戏包」文件夹里这款的 .s2arm 也一起放进来（它带着这款要用的着色器），或者在电脑的 S2Arm 里连着手机点「推到 iPhone」。";
+"img.noShaders.body" = "「%@」不完整。请把电脑上「S2Arm 游戏包」文件夹里这款的 .s2arm 也一起放进来（它带着这款要用的着色器），或者连上手机，在电脑的 S2Arm 里对这款点「导出…」，勾上这台手机后开始。";
 "img.updateSkipped.title" = "这份着色器更新已跳过";
 "img.updateSkipped.body" = "「%@」和当前游戏版本不配套，已跳过、没有套用。游戏照常能玩；要用这份更新，请把电脑上同一次导出的完整 .img 和它一起放进来。";
 "gameExport.preparing" = "正在生成导出文件…";
@@ -406,6 +406,8 @@
 "gfx.fpsLimit" = "帧率上限";
 "gfx.fpsLimit.none" = "不限";
 "gfx.resolution" = "渲染分辨率";
+"gfx.brightness" = "画面亮度";
+"gfx.brightness.system" = "跟随系统";
 "iml.lost.body" = "大游戏可能内存不够闪退或变慢。按你装 S2Arm 的方式补上：\n· 电脑上的 S2Arm（免费或付费 Apple ID）：点游戏库第一格「S2Arm」里的「续签 S2Arm」重装一次；重装后还看到这条提示，就用下面的 GetMoreRam 补上，再点一次「续签 S2Arm」。\n· 自己的开发者证书（.p12 + 描述文件）：在苹果开发者网站给 S2Arm 的 App ID（苹果给每个 App 登记的身份）打开「Increased Memory Limit」，重新生成描述文件，用新描述文件重签再装。\n· AltStore：用 AltStore Classic 2.2 或更新版重装（不是刷新）。\n· SideStore 0.7.0：签名会丢这项权限，用下面的 GetMoreRam 补上后，在 SideStore 里重装。\n· Sideloadly：暂不支持，它没说免费账号会保留这项权限，自定义权限要付费开发者账号。\n· GetMoreRam：用装 S2Arm 的同一个 Apple ID 把它自签装到手机（占免费账号一个 App 名额，用完可删），登录后打开 App IDs、点刷新、选 S2Arm、点「Add Increased Memory Limit」，再用原来的方式重装 S2Arm。";
 "iml.lost.short" = "大游戏可能内存不够闪退。点「了解详情」看怎么重新签名带上这项权限。";
 "iml.lost.title" = "这次安装丢了「提高内存上限」权限";
@@ -438,7 +440,7 @@
 "notice.imgFile" = "游戏名.img";
 "notice.step.img" = "或者在电脑上导出这款游戏，把「S2Arm 游戏包」文件夹里这款的 .s2arm 和 .img 两个文件一起放进「文件」App 里「%@」的「放这里导入」文件夹，再重新打开「%@」，它会自动认出来。";
 "notice.step.imgApp" = "或者在电脑上导出这款游戏，把电脑上这款游戏文件夹里的 .s2arm（有 .img 的话一起）放进「文件」App 里「%@」的「放这里导入」文件夹，再点下面的「我已放好，重新检查」。";
-"notice.step.auto" = "在电脑上的 S2Arm 里点这款游戏的「推到 iPhone」，资源会自动拷进来——最省事。";
+"notice.step.auto" = "在电脑上的 S2Arm 里对这款点「导出…」，勾上这台手机后开始，资源会自动拷进来——最省事。";
 "save.blocked" = "%@\n\n先把数据拷走再决定：打开“文件”App →“我的 iPhone”（iPad 为“我的 iPad”）→“%@”，把整个“S2A”文件夹拷到别处；未完成的操作记录在 S2A/save-transfer/save-transactions 里。也可以用 Mac 访达选中这台设备 →“文件”，把这个 App 下的“S2A”拖出来。\n\n拷好后，可以重新打包安装再试，或点“仍要开始游戏…”。";
 "save.busy" = "上一项存档操作还在进行，请等它完成后再试。";
 "save.checking" = "正在检查存档…";

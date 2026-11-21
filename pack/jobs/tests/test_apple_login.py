@@ -40,6 +40,8 @@ FAKE = textwrap.dedent('''\
         print("Error: Authentication failed: -20101 Your Apple ID or password was entered incorrectly."); sys.exit(1)
     if mode == "badpw":
         print("Error: Authentication failed: -20101 Your Apple ID or password was entered incorrectly."); sys.exit(1)
+    if mode == "refused":   # 苹果边缘层拒收（#1864 / 11-20 起的 503 原句）
+        print("Error: HTTP request error 503 attempting to connect to https://gsa.apple.com/grandslam/GsService2"); sys.exit(1)
     if mode == "badpw22406":   # D-W2VH：plumesign 实际原句
         print("Error: Authentication SRP error -22406: Enter the correct password for this Apple Account."); sys.exit(1)
     print("Logging in...")
@@ -185,6 +187,61 @@ class AppleLogin(unittest.TestCase):
                 self.assertEqual(e.exception.code, want)
                 self.assertNotIn(PASSWORD, str(e.exception) + e.exception.internal)
 
+    def test_refused_cooldown_grows_and_clears(self):
+        # #1864：苹果回 5xx 后冷却累加（30、60…封顶 300 秒），拒收以外的结果清零
+        import time
+        f = self.t / "private/login/cooldown.json"
+        for before, n, want in ((0, 1, 30), (1, 2, 60), (3, 4, 240), (4, 5, 300), (9, 10, 300)):   # 30·2^(n-1)，封顶 300
+            if before:
+                f.write_text(json.dumps(dict(until=0, n=before)), encoding="utf-8")   # 上次拒收的冷却已过、累计 before 次
+            with patch.dict(os.environ, {"FAKE_PLUME_MODE": "refused"}):
+                self.c.apple_password = PASSWORD
+                with self.assertRaises(Failure) as e:
+                    apple_login.login(self.c)
+            got = json.loads(f.read_text(encoding="utf-8"))
+            self.assertEqual((e.exception.code, got["n"]), ("apple_login_refused", n))
+            self.assertAlmostEqual(got["until"] - time.time(), want, delta=2)
+            f.write_text(json.dumps(dict(got, until=0)), encoding="utf-8")
+        with patch.dict(os.environ, {"FAKE_PLUME_MODE": "badpw"}):
+            self.c.apple_password = PASSWORD
+            with self.assertRaises(Failure):
+                apple_login.login(self.c)
+        self.assertFalse(f.exists(), "密码错 = 苹果没拒收：冷却清零")
+
+    def test_waits_out_cooldown_before_contacting_apple(self):
+        import time
+        f = self.t / "private/login/cooldown.json"; f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(dict(until=time.time() + 1.5, n=1)), encoding="utf-8")
+        waits = []
+        def emit(kind="progress", message="", *a, **k):
+            if "wait" in k: waits.append(k["wait"])
+            self.c.events.append((kind, message))
+        self.c.emit = emit
+        self.code()
+        t0 = time.monotonic()
+        got = apple_login.login(self.c)
+        self.assertGreaterEqual(time.monotonic() - t0, 1.4)
+        self.assertEqual(got["account"], ACCOUNT)
+        self.assertEqual(waits, [2, 1])
+        self.assertEqual(self.keys[:3], ["appleLogin.wait", "appleLogin.wait", "appleLogin"])
+        self.assertFalse(f.exists(), "登录成功：冷却清零")
+
+    def test_cancel_during_cooldown_never_contacts_apple(self):
+        import time
+        f = self.t / "private/login/cooldown.json"; f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(dict(until=time.time() + 60, n=2)), encoding="utf-8")
+        class Cancelled(Exception): pass
+        def emit(kind="progress", message="", *a, **k): self.c.cancelled = True
+        def check():
+            if self.c.cancelled: raise Cancelled()
+        self.c.emit, self.c.check = emit, check
+        t0 = time.monotonic()
+        with self.assertRaises(Cancelled):
+            apple_login.login(self.c)
+        self.assertLess(time.monotonic() - t0, 3)
+        self.assertFalse(self.rec.exists(), "取消了就不起 plumesign")
+        self.assertTrue(f.exists(), "取消不清冷却")
+
     def test_echoed_password_scrubbed(self):
         with patch.dict(os.environ, {"FAKE_PLUME_MODE": "echo"}):
             with self.assertRaises(Failure) as e:
@@ -261,7 +318,7 @@ class BundlePlumesign(unittest.TestCase):
 
     def test_pinned_mac_hash_is_own_build(self):
         import impactor
-        self.assertEqual(impactor.BUNDLED_MAC, {"plumesign-macos-universal": "f3f8be40ebb05abc0e732e09a846bbbcbefaded87f9fd6bfe857adf8d100bcd9"})
+        self.assertEqual(impactor.BUNDLED_MAC, {"plumesign-macos-universal": "a4c94b2132a7b6bc8e583d03b10831ca48aa91187ff2f5a61a39534ec1bfc19a"})
 
 
 if __name__ == "__main__":

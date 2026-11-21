@@ -277,11 +277,11 @@
 "app.library.broken.title" = "ゲームファイルが不完全です";
 "app.library.cantOpen" = "このゲームは開けません";
 "app.library.cantOpen.message" = "このゲームの起動準備が完了しませんでした。アプリスイッチャーで App を閉じて再度開いてください。それでも失敗する場合は、診断をエクスポートしてご連絡ください。";
-"app.library.cantOpen.incomplete" = "このゲームはこの iPhone の S2Arm に不完全な状態でインストールされています。コンピューターの S2Arm でもう一度「iPhone に送る」を実行してください。セーブデータは保持されます。";
+"app.library.cantOpen.incomplete" = "このゲームはこの iPhone の S2Arm に不完全な状態でインストールされています。コンピューターの S2Arm でこのゲームの「書き出す…」をクリックし、この iPhone にチェックを入れて開始し、もう一度インストールしてください。セーブデータは保持されます。";
 "app.library.cantOpen.storage" = "ストレージが満杯のため、このゲーム用のフォルダを作成できませんでした。「設定 → 一般 → iPhone ストレージ」で空き容量を確保してから、アプリスイッチャーで App を閉じて再度開いてください。";
 "app.library.missing.title" = "ゲームリソースが不足しています";
-"app.library.packBroken" = "このゲームのリソースは一部しかコピーされていません。コピーが途中で中断された可能性があります。コンピューターの S2Arm でこのゲームの「iPhone に送る」をもう一度クリックして不足分を補ってください。完了したら「再確認」をタップしてください。";
-"app.library.packMissing" = "このゲームのリソースがまだ iPhone にありません。コンピューターの S2Arm でこのゲームの「Push to iPhone」をクリックするとリソースが自動的にコピーされます。または、コンピューターでこのゲームをエクスポートし、「S2Arm Game Packs」フォルダにあるこのゲームの .s2arm と .img の 2 つのファイルを、ファイル App 内のこの App の「Import Here」フォルダに一緒に入れてください。配置したら「再確認」をタップしてください。";
+"app.library.packBroken" = "このゲームのリソースは一部しかコピーされていません。コピーが途中で中断された可能性があります。コンピューターの S2Arm でこのゲームの「書き出す…」をクリックし、この iPhone にチェックを入れて開始すると不足分が補われます。完了したら「再確認」をタップしてください。";
+"app.library.packMissing" = "このゲームのリソースがまだ iPhone にありません。コンピューターの S2Arm でこのゲームの「書き出す…」をクリックし、この iPhone にチェックを入れて開始すると、リソースが自動的にコピーされます。または、デバイスにチェックを入れずに書き出し、「S2Arm Game Packs」フォルダにあるこのゲームの .s2arm と .img の 2 つのファイルを、ファイル App 内のこの App の「Import Here」フォルダに一緒に入れてください。配置したら「再確認」をタップしてください。";
 "app.library.reopen.message" = "App を開いている間にプレイできるゲームは 1 つだけです。アプリスイッチャーで App を閉じて再度開き、このゲームを選択してください。";
 "app.library.reopen.title" = "App を閉じて再度開いてください";
 "app.library.stillMissing" = "今確認しましたが、完全なリソースがまだありません。\n\n";
@@ -330,7 +330,7 @@
 "img.importFolder" = "Import Here";
 "img.scanFailed.title" = "ゲームファイルをインポートできませんでした";
 "img.noShaders.title" = "このゲームファイルは不完全です";
-"img.noShaders.body" = "「%@」は不完全です。PC の「S2Arm Game Packs」フォルダにあるこのゲームの .s2arm も一緒に入れてください（ゲームのシェーダーが入っています）。または iPhone を接続して PC の S2Arm で「Push to iPhone」をクリックしてください。";
+"img.noShaders.body" = "「%@」は不完全です。PC の「S2Arm Game Packs」フォルダにあるこのゲームの .s2arm も一緒に入れてください（ゲームのシェーダーが入っています）。または iPhone を接続し、PC の S2Arm でこのゲームの「書き出す…」をクリックして、この iPhone にチェックを入れて開始してください。";
 "img.updateSkipped.title" = "シェーダー更新をスキップしました";
 "img.updateSkipped.body" = "「%@」は現在のゲームのバージョンと対応していないため、スキップして適用していません。ゲームはそのまま遊べます。この更新を使うには、PC の同じエクスポートの完全な .img と一緒に入れてください。";
 "gameExport.preparing" = "書き出すファイルを作成中…";
@@ -401,6 +401,8 @@
 "gfx.fpsLimit" = "フレームレート上限";
 "gfx.fpsLimit.none" = "無制限";
 "gfx.resolution" = "レンダリング解像度";
+"gfx.brightness" = "明るさ";
+"gfx.brightness.system" = "システムに従う";
 "iml.lost.body" = "大容量ゲームはメモリ不足で終了したり遅くなったりする可能性があります。S2Arm をインストールした方法に合わせて付け直してください：\n· パソコンの S2Arm（無料・有料の Apple ID）：ライブラリ先頭の「S2Arm」タイルの「S2Arm を再署名」を押して再インストールします。その後もこの案内が出る場合は、下の GetMoreRam で権限を追加してから、もう一度「S2Arm を再署名」を押してください。\n· 自分の開発者証明書（.p12 + プロビジョニングプロファイル）：Apple Developer サイトで S2Arm の App ID（Apple が App ごとに登録する識別情報）の「Increased Memory Limit」をオンにし、プロファイルを作り直して、新しいプロファイルで署名し直してインストールします。\n· AltStore：AltStore Classic 2.2 以降で再インストールします（更新ではありません）。\n· SideStore 0.7.0：署名でこの権限が外れます。下の GetMoreRam で追加してから、SideStore で再インストールしてください。\n· Sideloadly：現在は非対応です。無料アカウントでこの権限が保たれるとは案内されておらず、カスタム権限には有料の Apple Developer アカウントが必要です。\n· GetMoreRam：S2Arm と同じ Apple ID で自分で署名してインストールし（無料アカウントの App 枠を 1 つ使います。使い終わったら削除してかまいません）、サインインして App IDs を開き、更新をタップ、S2Arm を選んで「Add Increased Memory Limit」をタップし、元の方法で S2Arm を再インストールします。";
 "iml.lost.short" = "大容量ゲームはメモリ不足で終了することがあります。「詳しく見る」で、この権限を付けて署名し直す方法を確認できます。";
 "iml.lost.title" = "このインストールは「メモリ上限の引き上げ」権限を失いました";
@@ -433,7 +435,7 @@
 "notice.imgFile" = "ゲーム名.img";
 "notice.step.img" = "または、パソコンでこのゲームをエクスポートし、「S2Arm Game Packs」フォルダにあるこのゲームの .s2arm と .img の 2 つのファイルを、「ファイル」App の「%@」内にある「Import Here」フォルダに一緒に入れて、「%@」を再度開くと自動的に認識されます。";
 "notice.step.imgApp" = "または、パソコンでこのゲームをエクスポートし、パソコン上のこのゲームのフォルダにある .s2arm（.img があればそれも）を「ファイル」App の「%@」内の「Import Here」フォルダに入れて、下の「配置しました — 再確認」をタップしてください。";
-"notice.step.auto" = "パソコンの S2Arm でこのゲームの「iPhone に送る」をクリックすると、リソースが自動的にコピーされます。最も簡単な方法です。";
+"notice.step.auto" = "パソコンの S2Arm でこのゲームの「書き出す…」をクリックし、この iPhone にチェックを入れて開始すると、リソースが自動的にコピーされます。最も簡単な方法です。";
 "save.blocked" = "%@\n\n決める前にデータを安全な場所にコピーしてください:「ファイル」App を開く →「この iPhone 内」(iPad の場合は「この iPad 内」)→「%@」、「S2A」フォルダ全体を別の場所にコピー。未完了の操作は S2A/save-transfer/save-transactions に記録されています。Mac の Finder でこのデバイスを選択 →「ファイル」から、この App の「S2A」フォルダをドラッグすることもできます。\n\nコピー後、再パッケージしてインストールし直すか、「仍要開始遊戲…」をタップできます。";
 "save.busy" = "前回のセーブデータ操作がまだ実行中です。完了後に再試行してください。";
 "save.checking" = "セーブデータを確認中…";

@@ -28,6 +28,6 @@ int main(void) {
     msync((void *)(uintptr_t)B, GCH + 16 * MB, MS_SYNC); msync((void *)(uintptr_t)B, GCH + 16 * MB, MS_INVALIDATE);
     s0 = s2a_guest_file_live_scanned(); v = s2a_guest_file_live(); s1 = s2a_guest_file_live_scanned();
     CHECK(v == 48 * MB && s1 - s0 == 2, "③ 写回 + 逐出后：48 MB、扫 2 块（得 %llu MB、%llu 块）", (unsigned long long)(v / MB), (unsigned long long)(s1 - s0));
-    printf("t_guest_need_whole：%s\n", bad ? "有失败" : "全过");
+    printf("%s t_guest_need_whole：%s\n", bad ? "✗" : "✓", bad ? "有失败" : "全过");   // 门禁按「✓ t_」结论行判
     return bad ? 1 : 0;
 }

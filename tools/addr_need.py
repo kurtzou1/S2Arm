@@ -201,11 +201,22 @@ def static_alias_gb(main, depth=6, window=16, wrapper_max=96, code=None):
     through short wrappers and tail-call thunks that pass the size on (UE4 FSwitchPlatformMemory 62 GiB, Xenoblade 3 60 GiB
     through three levels, Super Mario Party Jamboree 56 GiB through five). Budget = size + VammManager metadata, GiB
     rounded, at most ALIAS_MAX_GB; 0 when no such call is found."""
+    return static_claim(main, depth, window, wrapper_max, code)[0]
+
+
+ALLOCATOR_ENTRIES = frozenset(n for n in CLAIM_ENTRIES if n.startswith("_ZN2nn3mem17StandardAllocator"))
+
+
+def static_claim(main, depth=6, window=16, wrapper_max=96, code=None):
+    """(别名预算 GB, 大区是否经 StandardAllocator 初始化申请)：同 static_alias_gb，另记最大那个常量是顺着哪类入口找到的
+    （包装函数继承它所调入口的类别）。经分配器初始化的大区宿主开局闸门压得了（runtime/src/svc_mem.c s2a_sainit_gate），
+    直接 AllocateAddressRegion / nnmem_nlib_virtual_alloc 的不能压；两类同为最大时按不能压记。"""
     c = code or _Code(main)
-    members, seen, largest = _import_stubs(c.image, c.segments[0], CLAIM_ENTRIES), set(), 0
+    members = {at: name in ALLOCATOR_ENTRIES for at, name in _import_stub_names(c.image, c.segments[0], CLAIM_ENTRIES).items()}
+    seen, largest, alloc = set(), 0, False
     for _ in range(depth):
-        wrappers = set()
-        for member in members:
+        wrappers = {}
+        for member, via_alloc in members.items():
             for site in c.callers.get(member, ()):
                 if site in seen:
                     continue
@@ -218,15 +229,18 @@ def static_alias_gb(main, depth=6, window=16, wrapper_max=96, code=None):
                     block.insert(0, word)
                 found = max((v for v in _register_constants(block) if v >= 4 * GIB and v % GIB == 0 and v < (1 << 39)), default=0)
                 if found:
-                    largest = max(largest, found)
+                    if found > largest:
+                        largest, alloc = found, via_alloc
+                    elif found == largest:
+                        alloc = alloc and via_alloc
                     continue
                 start = c.function_start(site)
                 if start is not None and (site - start) // 4 <= wrapper_max:
-                    wrappers.add(start)
+                    wrappers[start] = wrappers.get(start, True) and via_alloc
         members = wrappers
         if not members:
             break
-    return min(ALIAS_MAX_GB, (largest + SDK_META + GIB - 1) // GIB) if largest else 0
+    return (min(ALIAS_MAX_GB, (largest + SDK_META + GIB - 1) // GIB), alloc) if largest else (0, False)
 
 
 # ---------- 上限不定（11-03 维护者：证明不了就不收窗口，宁慢不崩）----------
@@ -412,15 +426,18 @@ def collect(program, build, main=None, vamm=True):
     reasons (call site, source kind): the host then keeps the 64 GiB promise instead of fitting the alias region into
     its window (runtime/src/layout.c). Tables without such requests are byte-identical to before."""
     program, build = identity(program, build)
-    alias, reasons = 0, []
+    alias, reasons, via_alloc = 0, [], False
     if main and vamm:
         code = _Code(main)
-        alias = static_alias_gb(main, code=code)
+        alias, via_alloc = static_claim(main, code=code)
         reasons = alias_unbounded(main, code=code) if alias else []
     if alias:
         print(f"地址需求静态来源：{main} 开局在别名区申请大块地址区，别名预算 {alias} GB（别名优先，堆在宿主按窗口预算让位）", file=sys.stderr)
     table = (f"# 地址需求采集算法 {ALGORITHM_VERSION}\n版本\t2\n程序号\t{program}\n构建号\t{build}\n"
              f"别名区GB\t{alias}\n普通堆MB\t{APP_POOL_MB}\n")
+    if alias and via_alloc:
+        # 大区经分配器初始化申请：宿主闸门放不下时压小、不弹「地址不够」页（svc_mem.c）。只有这类款的表多这一行，其余逐字节同前
+        table += "大区来源\t分配器初始化\n"
     if reasons:
         # 一行不超过 400 字节（安卓读表单行上限 511，layout_android.inc）：放得下几处列几处，其余计数
         items = [f"main+{site:#x} {kind}（{detail}）" for site, kind, detail in reasons]

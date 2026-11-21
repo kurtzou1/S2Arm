@@ -19,6 +19,7 @@ REW=$C "$PY" "$H/tests/rewrite_front_synth_test.py" || { echo "🔴 rewrite_fron
 REW=$C "$PY" "$H/tests/rewrite_below_sp_test.py" || { echo "🔴 rewrite_below_sp_test：恢复 sp 后还用 sp 以下数据的函数里，x18 补丁岛仍往 sp 以下写（一款第一方动作游戏 / #515）"; rc=1; }
 REW=$C "$PY" "$H/tests/rewrite_eh_hdr_test.py" || { echo "🔴 rewrite_eh_hdr_test：.eh_frame_hdr 没有二分表 / 整个缺失时函数边界取不到或改写中止"; rc=1; }
 REW=$C "$PY" "$H/tests/rewrite_as36_test.py" || { echo "🔴 rewrite_as36_test：36 位老 SDK 写死的可随机区 / 栈区没认出、认错或 TRAP 表头不符（#1503）"; rc=1; }
+REW=$C "$PY" "$H/tests/rewrite_sainit_test.py" || { echo "🔴 rewrite_sainit_test：分配器初始化闸（StandardAllocator 入口压小）的补丁岛编码或门表行不符"; rc=1; }
 DEPS=$("$PY" "$H/pack/rewriter.py" deps-path) || { echo "🔴 取不到 C 改写器固定依赖（pack/rewriter.py deps-path）"; exit 1; }
 AB="$H/build/rewriter-api-test"
 # 固定构建目录的缓存记着上次配置时的源码路径：同一棵树先后跑过不同目录布局的分支（源码搬了目录）时，CMake 拒绝配置

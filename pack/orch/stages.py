@@ -187,7 +187,18 @@ class Dependencies:
         text(output / f'.stage_{self.stage}', base + '\n')
 
     def close(self):
-        self.temp.cleanup()
+        """收尾删掉阶段的临时依赖目录。Windows 上刚删的文件若还被别的进程开着（杀毒 / 索引），处于「删除挂起」，
+        紧接着删父目录报 WinError 145「目录不是空的」（诊断#8735d6 D-CFH5：阶段已做完，收尾这一下把整单出包判失败）。
+        短暂重试等挂起的删除落地；仍删不掉只说一句黄，不让收尾清理改变阶段结果"""
+        for wait in (0.1, 0.5, 2.0, None):
+            try:
+                self.temp.cleanup()
+                return
+            except OSError as e:
+                if wait is None:
+                    print(f'【黄】阶段临时目录没删干净 {self.work}：{e}', file=sys.stderr)
+                    return
+                time.sleep(wait)
 
 
 def romfs_walk(path):

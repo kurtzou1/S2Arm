@@ -85,6 +85,47 @@ class PushGameTests(JobCase):
         self.assertEqual(e.exception.code, "shell_update_required")
         self.assertEqual((self.ph.calls, self.pushed), ([], []), "不推、不装")
 
+    def test_update_game_stays_on_computer(self):
+        """作业 updateGame（11-21 维护者定：游戏页只有「更新」「导出」）：只在电脑上重编 / 刷新，不碰设备、不签名、不推；
+        做完回这款还剩的原因（host_update.game_reasons）。期望手写：调用顺序 = 刷新本地 → Mac 着色器库，手机对象一次都没碰"""
+        import host_update
+        seen = []
+        self.c.r = dict(self.c.r, gameId=GID.lower())
+        with mock.patch.object(install, "refresh_local", lambda c, g: seen.append(("local", g))), \
+                mock.patch.object(install, "update_mac_lib", lambda c, g: seen.append(("mac", g))), \
+                mock.patch.object(install, "push_phone", lambda c: self.fail("更新不该找设备")), \
+                mock.patch.object(install, "phone_for", lambda c: self.fail("更新不该找设备")), \
+                mock.patch.object(install, "phone_signing", lambda c, ph: self.fail("更新不该签名")), \
+                mock.patch.object(host_update, "game_reasons", lambda c, g: ["shaderMiss"] if g == GID else ["x"]):
+            r = install.update_game(self.c)
+        self.assertEqual(seen, [("local", GID), ("mac", GID)])
+        self.assertEqual(r, dict(gameId=GID, reasons=["shaderMiss"]))
+        self.assertEqual(self.ph.calls, [])
+
+    def test_update_game_needs_iphone_version(self):
+        """从没做过 iPhone 版的款：updateGame 照 ios_pack 报（前端本来不给它更新按钮），不做任何重活"""
+        self.c.r = dict(self.c.r, gameId="0100000000099000")
+        def none(c, g):
+            raise install.Failure("这款游戏还没出 iPhone 包", code="job_failed")
+        with mock.patch.object(install, "ios_pack", none), mock.patch.object(install, "refresh_local", lambda c, g: self.fail("没做过 iPhone 版不该重编")):
+            with self.assertRaises(install.Failure):
+                install.update_game(self.c)
+
+    def test_update_incomplete_is_said_not_silent(self):
+        """11-21：「更新这款」做不齐时照实给黄字（update_incomplete），不静默：没原料重编不了着色器库 / 宿主约定号变了要整款重出。期望手写"""
+        import sgrade_bf, host_update
+        layout.save_device(self.c, self.ph.key, dict(shellId="S1", bundleId=self.ph.bid, games={GID: dict(pack="P1")}))
+        for label, rechain, abi, want in (("没原料", "unavailable", host_update.HOST_ABI, [install.UPDATE_SHADER_NOT_REBUILT]),
+                                          ("约定号变了", "skip", host_update.HOST_ABI + 1, [install.UPDATE_NEEDS_REPACK]),
+                                          ("都齐", "updated", host_update.HOST_ABI, [])):
+            with self.subTest(label), mock.patch.object(sgrade_bf, "rechain_ios", lambda c, g, r=rechain: r), \
+                    mock.patch.object(layout, "program_info", lambda c, g, a=abi: dict(hostAbi=a)), \
+                    mock.patch.object(install, "update_mac_lib", lambda c, g: False):
+                self.c.job["diagnostics"] = []
+                install.push_game(self.c, GID, self.ph, steps=False)
+                got = [d for d in self.c.job["diagnostics"] if d.get("code") == "update_incomplete"]
+                self.assertEqual([d.get("message") or d.get("summary") for d in got], want)
+
     def test_pushes_this_game_only_never_installs(self):
         layout.save_device(self.c, self.ph.key, dict(shellId="S1", bundleId=self.ph.bid, games={"0100000000020000": dict(pack="Q")}))
         r = install.push_game(self.c, GID.lower(), self.ph, steps=False)
@@ -176,3 +217,25 @@ class InstallShellTests(JobCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PushSignChoice(JobCase):
+    """11-21 导出确认页「这次用什么签」：推到设备也认请求 sign（appleId / devCert），只管这一次、不改设置。期望手写"""
+
+    def run_sign(self, sign, active):
+        import devcert, program_pack
+        self.c.r = dict(self.c.r, **({"sign": sign} if sign else {}))
+        with mock.patch.object(devcert, "active", lambda c: active), mock.patch.object(devcert, "distribution", lambda c: False), \
+                mock.patch.object(devcert, "team", lambda c: dict(id="CERTTEAM")), mock.patch.object(devcert, "state", lambda c: dict(bundleId="cert.bid")), \
+                mock.patch.object(program_pack, "devcert_signer", lambda c: "cert-signer"), mock.patch.object(install.os, "name", "posix"):
+            try:
+                return install.phone_signing(self.c, object())
+            except AssertionError:
+                return "appleId"   # 走到 Apple ID 那条（posix + 不是 PlumeMacPhone 的替身在这里止住）
+
+    def test_request_sign_overrides_setting(self):
+        cert = ("CERTTEAM", "cert.bid", "cert-signer")
+        self.assertEqual(self.run_sign(None, True), cert, "没带：按设置（在用证书）")
+        self.assertEqual(self.run_sign(None, False), "appleId", "没带：按设置（Apple ID）")
+        self.assertEqual(self.run_sign("appleId", True), "appleId", "这次选 Apple ID：设置里在用证书也按 Apple ID 签")
+        self.assertEqual(self.run_sign("devCert", False), cert, "这次选证书：设置里没在用也按证书签")

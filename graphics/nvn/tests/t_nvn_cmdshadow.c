@@ -3,7 +3,7 @@
 // ⑨ 帧回放能放回影子块（7df29fdfc 后帧回放全红：块是 mmap(NULL) 落在内核挑的地址，回放进程的库 / 堆 / Metal 常占着）：本进程带 S2A_CMD_ARENA=1 当录的进程（构造期占命令记录区），
 //   录完列出全部影子块 → 每块都在命令记录区；再起一个子进程当回放进程（S2A_FRAME_REPLAY，同样构造期占区、只占不切），每块都落在子进程的区里且是空的保留（PROT_NONE），回放能 MAP_FIXED 放回原地址。
 //   不靠窗口尾部：窗口放不下标准布局的款没有尾部（11-05 哆啦A梦 1350 高，尾部 0 MB，块全退回 mmap(NULL)）
-// 设备字节按 hle_nvn.c dev_bytes 的约定手写：UpdateUniformBuffer 16 字节 = 记录大小 8 + 8 + 8 + 16 = 40，DrawArrays 32，DrawElements 48，BindTexture 24，CallCommands 16，END 8。
+// 设备字节按 hle_nvn.c dev_bytes 的约定手写：UpdateUniformBuffer 16 字节 = 记录大小 8 + 8 + 8 + 16 = 40，DrawArrays 32，DrawElements 24（驱动真值），BindTexture 24，CallCommands 16，END 0（驱动的 EndRecording 只写控制内存）。
 #include "nvn_protos.h"
 #include "nvn_obj.h"
 #include <stdio.h>
@@ -28,7 +28,7 @@ static unsigned checks;
 static void *load(const char *name) { void *e = h_nvnBootstrapLoader(name); CHECK(e != NULL); return e; }
 #define API(name) ((NVNT_##name)load(#name))
 
-enum { CMD_BYTES = 1 << 20, DATA_BYTES = 1 << 20, UB = 40, DRAW = 32, DRAWIDX = 48, BTEX = 24, CALL = 16, END = 8, FILL = 0x5a };
+enum { CMD_BYTES = 1 << 20, DATA_BYTES = 1 << 20, UB = 40, DRAW = 32, DRAWIDX = 24, BTEX = 24, CALL = 16, END = 0, FILL = 0x5a };
 static NVNdevice device;
 static NVNqueue queue;
 static NVNmemoryPool cmdpool, datapool;
@@ -123,14 +123,14 @@ static void used_by_device(void) {
 // ③ 设备口径会超出时才回调游戏，次数与需要量按设备字节；回调不给就调两次后宿主借窗口接着录
 static void callback_timing(void) {
     phase = "③ 回调时机与需要量按设备字节";
-    NVNcommandBuffer c; new_cmd(&c, 0x20000, 104);
+    NVNcommandBuffer c; new_cmd(&c, 0x20000, 96);
     API(nvnCommandBufferSetMemoryCallback)(&c, ring_cb); ring(0x21000, 100);
-    // BindTexture 宿主记录 40 字节、设备 24：4 条 + END = 104 设备字节正好装下（宿主 168 字节）——不回调
+    // BindTexture 宿主记录 40 字节、设备 24：4 条 = 96 设备字节正好装下（END 0；宿主 168 字节）——不回调
     API(nvnCommandBufferBeginRecording)(&c);
     for (int i = 0; i < 4; i++) API(nvnCommandBufferBindTexture)(&c, NVN_SHADER_STAGE_FRAGMENT, i, (NVNtextureHandle)(5 | 7u << 20));
     CHECK(API(nvnCommandBufferEndRecording)(&c) != 0);
     CHECK(g_cbs == 0); CHECK(used(&c) == 4 * BTEX + END); CHECK(freeb(&c) == 0);
-    // 再给 100：第 5 条（96 + 24 > 100）回调一次、要 24；新段里第 5 条 24 + END 8
+    // 再给 100：第 5 条（96 + 24 > 100）回调一次、要 24；新段里第 5 条 24（END 0）
     API(nvnCommandBufferAddCommandMemory)(&c, &cmdpool, 0x20100, 100);
     API(nvnCommandBufferBeginRecording)(&c);
     for (int i = 0; i < 5; i++) API(nvnCommandBufferBindTexture)(&c, NVN_SHADER_STAGE_FRAGMENT, i, (NVNtextureHandle)(5 | 7u << 20));
@@ -190,8 +190,8 @@ static void release(void) {
     const size_t R = 0x50000;
     NVNcommandBuffer x; new_cmd(&x, R, 4096);
     uint64_t live0 = s2a_hle_cmdshadow_live();
-    API(nvnCommandBufferBeginRecording)(&x); ub(&x, 0, 500); ub(&x, 1, 510); NVNcommandHandle a = API(nvnCommandBufferEndRecording)(&x);   // [R, R + 88)
-    API(nvnCommandBufferBeginRecording)(&x); ub(&x, 2, 520); ub(&x, 3, 530); NVNcommandHandle b = API(nvnCommandBufferEndRecording)(&x);   // [R + 88, R + 176)
+    API(nvnCommandBufferBeginRecording)(&x); ub(&x, 0, 500); ub(&x, 1, 510); NVNcommandHandle a = API(nvnCommandBufferEndRecording)(&x);   // [R, R + 80)（END 0）
+    API(nvnCommandBufferBeginRecording)(&x); ub(&x, 2, 520); ub(&x, 3, 530); NVNcommandHandle b = API(nvnCommandBufferEndRecording)(&x);   // [R + 80, R + 160)
     CHECK(a && b && s2a_hle_cmdshadow_live() == live0 + 2);
     NVNcommandBuffer y; new_cmd(&y, R, 4096);   // 同一块内存再给出去：只给不写，谁也不释放
     CHECK(s2a_hle_cmdshadow_live() == live0 + 2);
@@ -205,14 +205,14 @@ static void release(void) {
     CHECK(used(&z) == CALL + UB + END);
     memset(datamem, 0, 4096); run(hz);
     CHECK(slot_is(2, 520)); CHECK(slot_is(3, 530)); CHECK(slot_is(5, 550));
-    // 紧挨 b 前写满 [R + 48, R + 88)（y 的录制占 [R, R + 48)）：b 不释放、照样能 CALL；只写到 b 的最后一字节 [R + 175, …)：b 释放（区间按设备字节记）
-    NVNcommandBuffer v; new_cmd(&v, R + 48, 40);
-    API(nvnCommandBufferBeginRecording)(&v); ub(&v, 6, 1); CHECK(API(nvnCommandBufferEndRecording)(&v) != 0);   // END 超出 40、没回调：借窗口
+    // 紧挨 b 前写满 [R + 40, R + 80)（y 的录制占 [R, R + 40)）：b 不释放、照样能 CALL；从 b 的最后一字节 R + 159 起写一条：b 释放（区间按设备字节记）
+    NVNcommandBuffer v; new_cmd(&v, R + 40, 40);
+    API(nvnCommandBufferBeginRecording)(&v); ub(&v, 6, 1); CHECK(API(nvnCommandBufferEndRecording)(&v) != 0);   // 40 正好装下（END 0）
     CHECK(s2a_hle_cmdshadow_live() == live0 + 4);   // b、cy、hz、v
     memset(datamem, 0, 4096); run(hz); CHECK(slot_is(2, 520)); CHECK(slot_is(3, 530));
-    NVNcommandBuffer u; new_cmd(&u, R + 175, 8);
-    API(nvnCommandBufferBeginRecording)(&u); CHECK(API(nvnCommandBufferEndRecording)(&u) != 0);
-    CHECK(s2a_hle_cmdshadow_live() == live0 + 3);   // b 释放；空录制共用一份常驻 END，不算活录制（#783）
+    NVNcommandBuffer u; new_cmd(&u, R + 159, 40);
+    API(nvnCommandBufferBeginRecording)(&u); ub(&u, 7, 1); CHECK(API(nvnCommandBufferEndRecording)(&u) != 0);   // 写 [R + 159, R + 199)：盖到 b 的最后一字节
+    CHECK(s2a_hle_cmdshadow_live() == live0 + 4);   // b 释放、u +1（空录制不占字节、盖不到任何区间，所以这里写一条）
     // 另一个内存池里的录制：池销毁即释放
     NVNmemoryPool p2; uint8_t *m2; new_pool(&p2, &m2, 65536);
     NVNcommandBuffer w; memset(&w, 0, sizeof w); CHECK(API(nvnCommandBufferInitialize)(&w, &device));
@@ -342,7 +342,7 @@ static void spanning(void) {
     uint64_t live0 = s2a_hle_cmdshadow_live();
     API(nvnCommandBufferBeginRecording)(&c);
     for (unsigned i = 0; i < 6; i++) ub(&c, i, 700 + 10 * i);   // 每段 64 只放得下一条 40：第 2..6 条各回调一次
-    NVNcommandHandle h = API(nvnCommandBufferEndRecording)(&c);   // END 8 落在第 6 段剩下的 24 里
+    NVNcommandHandle h = API(nvnCommandBufferEndRecording)(&c);   // END 0：不占第 6 段剩下的 24
     CHECK(g_cbs == 5); for (unsigned i = 0; i < 5; i++) CHECK(g_need[i] == UB);
     CHECK(used(&c) == UB + END);
     memset(datamem, 0, 4096); run(h);
@@ -359,10 +359,10 @@ static void spanning(void) {
     for (unsigned i = 0; i < 300; i++) CHECK(slot_is(i, 20000 + i * 8));
     CHECK(!memcmp(datamem + 0x10000, big, sizeof big));
     CHECK(s2a_hle_cmdshadow_live() == live0 + 2);
-    // 只写第 3 段（0x71000 + 64 × 2 起）的一字节范围：跨段的录制 h 释放
+    // 只在第 3 段（0x71000 + 64 × 2 起，h 占其中 [0, 40)）里从 +16 写一条：跨段的录制 h 释放（空录制不占字节、盖不到区间，所以写一条）
     NVNcommandBuffer o; new_cmd(&o, 0x71000 + 64 * 2 + 16, 64);
-    API(nvnCommandBufferBeginRecording)(&o); CHECK(API(nvnCommandBufferEndRecording)(&o) != 0);
-    CHECK(s2a_hle_cmdshadow_live() == live0 + 1);   // h 释放；空录制共用常驻 END，不算活录制（#783）
+    API(nvnCommandBufferBeginRecording)(&o); ub(&o, 9, 1); CHECK(API(nvnCommandBufferEndRecording)(&o) != 0);
+    CHECK(s2a_hle_cmdshadow_live() == live0 + 2);   // h 释放、o +1（hb 仍活）
     API(nvnCommandBufferFinalize)(&c); API(nvnCommandBufferFinalize)(&b); API(nvnCommandBufferFinalize)(&o);
     printf("%s：通过\n", phase); fflush(stdout);
 }

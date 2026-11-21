@@ -123,9 +123,17 @@ class Hints(unittest.TestCase):
     def test_standalone_hint_by_sign_mode(self):
         import devcert
         c = object()
-        for mode, facts, want in (("external", {}, "external"), ("appleId", {}, "appleId"), ("devCert", {"wildcard": True}, "wildcard"), ("devCert", {"wildcard": False}, None)):
+        # 11-21：显式 App ID 的描述文件 → explicit（只允许一个包名，装一款顶掉前一款，装之前就说）；读不到描述文件 → None。期望手写
+        for mode, facts, want in (("external", {}, "external"), ("appleId", {}, "appleId"), ("devCert", {"wildcard": True}, "wildcard"),
+                                  ("devCert", {"wildcard": False}, "explicit"), ("devCert", {}, None)):
             with patch.object(install, "chosen_sign_mode", lambda c, m=mode: m), patch.object(devcert, "profile_facts", lambda c, f=facts: f):
-                self.assertEqual(install.standalone_hint(c), want, mode)
+                self.assertEqual(install.standalone_hint(c), want, (mode, facts))
+
+    def test_standalone_hints_follow_chosen_sign_not_setting(self):
+        """导出确认页按这次选的签名方式给那句：设置里是 Apple ID，证书那一项照样按描述文件给 explicit。期望手写"""
+        import devcert
+        with patch.object(install, "chosen_sign_mode", lambda c: "appleId"), patch.object(devcert, "profile_facts", lambda c: {"wildcard": False}):
+            self.assertEqual(install.standalone_hints(object()), dict(appleId="appleId", devCert="explicit", none="external"))
 
     def test_layout_recommend_by_debug_permission(self):
         # #1760：不带调试权限（分发 / 企业证书）推荐独立 App；开发证书、Apple ID、自签推荐通用 S2Arm；都没有 = 识别不了

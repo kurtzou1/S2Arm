@@ -174,6 +174,8 @@ public class ExitOrderFixture extends ParentActivity {
         static final int NONE=0, FOREGROUND=1, BACKGROUND=2, ENDING=3;
         static boolean cleanStop(int reason) { return reason == 0; }   // as LastSession.cleanStop (LastSessionTest)
     }
+    // onSessionStop 把认得出的停局原因换成玩家文案（PlayerError.stopText，vk_api_floor_test.sh 核原因短语）；本夹具测收局次序，桩成认不出
+    static class PlayerError { static String stopText(Object context,String detail) { return null; } }
     void sessionMark(int state) { events.add("mark_"+state); }
     void requestOrientation(android.content.Intent intent) { }
     // EXACT_METHODS

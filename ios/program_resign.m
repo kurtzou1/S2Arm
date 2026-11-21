@@ -51,12 +51,13 @@ static NSString *cert_ou(SecCertificateRef c) {
             ou = [[NSString alloc] initWithBytes:p + i + 7 length:p[i + 6] encoding:NSUTF8StringEncoding];
     CFRelease(d); return ou.length ? ou : nil;
 }
-// LiveContainer 的签名身份（见 ios/sign_state.m s2a_lc_cert）：1 = 取到（key / leaf 调用方 CFRelease，sha / team 带回）；0 = 不在 LiveContainer 里；-1 = 在里面但取不到（why 写原因）
+// LiveContainer 的签名身份（见 ios/sign_state.m s2a_lc_cert）：1 = 取到（key / leaf 调用方 CFRelease，sha / team 带回）；0 = 不在 LiveContainer 里；-1 = 在里面但它没导入证书；
+//   -2 = 它导入了证书、S2Arm 解不开（why 写原因；LiveContainer 自己用 OpenSSL 读，有的 p12 它认、系统的 SecPKCS12Import 不认，如 #502 / D-D8F4 的 -26275）
 static int lc_identity(SecKeyRef *key, SecCertificateRef *leaf, NSString **sha, NSString **team, NSString **why) {
     NSData *p12 = nil; NSString *pw = nil; int r = s2a_lc_cert(&p12, &pw);
     if (r <= 0) { if (r < 0) *why = @"在 LiveContainer 里运行，但 LiveContainer 还没导入签名证书：在 LiveContainer 的设置里导入证书（用 SideStore 装的会自动带上）后再开"; return r; }
     CFArrayRef chain = NULL; int st = s2a_selfsign_identity(p12.bytes, p12.length, pw.UTF8String, key, &chain);
-    if (st || !chain || CFArrayGetCount(chain) < 1) { if (chain) CFRelease(chain); if (*key) CFRelease(*key); *key = NULL; *why = [NSString stringWithFormat:@"LiveContainer 存的签名证书读不出来（%d）", st]; return -1; }
+    if (st || !chain || CFArrayGetCount(chain) < 1) { if (chain) CFRelease(chain); if (*key) CFRelease(*key); *key = NULL; *why = [NSString stringWithFormat:@"LiveContainer 存的签名证书读不出来（%d）", st]; return -2; }
     *leaf = (SecCertificateRef)CFRetain(CFArrayGetValueAtIndex(chain, 0)); CFRelease(chain);
     CFDataRef der = SecCertificateCopyData(*leaf); uint8_t h[CC_SHA1_DIGEST_LENGTH]; CC_SHA1(CFDataGetBytePtr(der), (CC_LONG)CFDataGetLength(der), h); CFRelease(der);
     *sha = hex(h, sizeof h); *team = cert_ou(*leaf);
@@ -81,8 +82,16 @@ static int program_resign(const char *home, const char *game_data, const char *g
         if (!home || !game_data || !gid || !module_dir || !images) return 0;
         // LiveContainer 里（#63639b）：进程的签名身份是 LiveContainer 的，程序库一律用它存的证书签；电脑交来的身份（current.json）在这里不算数
         SecKeyRef key = NULL; SecCertificateRef leaf = NULL; NSString *cur_sha = nil, *cur_team = nil, *lc_why = nil;
-        int in_lc = lc_identity(&key, &leaf, &cur_sha, &cur_team, &lc_why);
+        int in_lc = lc_identity(&key, &leaf, &cur_sha, &cur_team, &lc_why), lc_fb = 0;
 #define RELEASE_ID() do { if (key) CFRelease(key); if (leaf) CFRelease(leaf); key = NULL; leaf = NULL; } while (0)
+        if (in_lc == -2) {
+            // LiveContainer 的证书解不开：改用玩家导入进 S2Arm 的那张（齿轮 →「签名证书」→「导入 .p12…」，同一张或同团队的都行——库校验看团队），
+            //   没有就照实说怎么导（11-21 #502：原先直接拒，玩家在 LiveContainer 里每款都起不来、也不知道能怎么办）
+            s2a_cert_settle(home);
+            NSDictionary *cur = read_json([@(home) stringByAppendingPathComponent:@"Library/Application Support/S2Arm/identity/current.json"]);
+            if (str(cur[@"cert_sha1"])) { in_lc = 0; lc_fb = 1; }
+            else { in_lc = -1; lc_why = [lc_why stringByAppendingString:@"：在 S2Arm 齿轮 →「签名证书」→「导入 .p12…」导入同一张证书（SideStore / AltStore 的设置里能导出），S2Arm 会改用它签"]; }
+        }
         if (!in_lc) {
             s2a_cert_settle(home);   // 手机上有几张证书时用与 App 同团队、还能用的那张（导入别的团队的证书不顶掉它）
             NSString *idp = [@(home) stringByAppendingPathComponent:@"Library/Application Support/S2Arm/identity/current.json"];
@@ -96,14 +105,14 @@ static int program_resign(const char *home, const char *game_data, const char *g
         NSString *was_sha = str(signer[@"cert_sha1"]).lowercaseString, *team = str(cat[@"team"]);
         if (in_lc >= 0 && !force && (was_sha ? [was_sha isEqualToString:cur_sha] : (!in_lc && team && cur_team && [team isEqualToString:cur_team]))) { RELEASE_ID(); return 0; }
         NSString *why_sign = force ? @"程序库签名本机注册不了" : in_lc ? @"在 LiveContainer 里、程序库不是它的证书签的" : was_sha ? @"程序库是另一张证书签的" : team ? @"程序库是别的团队签的" : @"程序库还没签名";
-        const char *src = in_lc ? "LiveContainer 的证书" : "手机上的签名身份";
+        const char *src = in_lc ? "LiveContainer 的证书" : lc_fb ? "导入进 S2Arm 的证书（LiveContainer 存的那张解不开）" : "手机上的签名身份";
         uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
 #define FAIL(...) do { RELEASE_ID(); if (why && why_n) snprintf(why, why_n, __VA_ARGS__); RLOG("【黄】起局重签：游戏 %s %s，要用%s重签，没签成：%s；照旧用原来的程序库", gid, why_sign.UTF8String, src, why); return -1; } while (0)
         if (in_lc < 0) FAIL("%s", lc_why.UTF8String);
         // 证书的团队（电脑交身份时写进 current.json）和装这个 App 的团队（包里描述文件）不同：签出来的程序库团队号与 App 对不上，系统一定不认（库校验要同团队），
         //   签了也白签。AltStore / SideStore 装的 App 是玩家在那边登录的 Apple ID 的团队，启动器里登录了另一个 Apple ID 就是这种情况：把原因说清楚，不签
         //   LiveContainer 里不看本包的描述文件（客体 App 包里那份不是这个进程的身份），团队号取 LiveContainer 证书的、不带权限
-        char pteam[64] = "", pappid[512] = ""; int pr = in_lc ? -1 : g_prov_ids(pteam, sizeof pteam, pappid, sizeof pappid);
+        char pteam[64] = "", pappid[512] = ""; int pr = in_lc || lc_fb ? -1 : g_prov_ids(pteam, sizeof pteam, pappid, sizeof pappid);
         if (pr >= 0 && cur_team && ![cur_team isEqualToString:@(pteam)])
             FAIL("手机上的签名证书是团队 %s 的，这个 App 是团队 %s 签的（启动器里登录的 Apple ID 和装 App 用的不是同一个）：在启动器里登录装 App 用的那个 Apple ID 后再连一次电脑",
                  cur_team.UTF8String, pteam);
@@ -112,7 +121,20 @@ static int program_resign(const char *home, const char *game_data, const char *g
         const char *steam = pr >= 0 ? pteam : cur_team.UTF8String, *sappid = pr >= 0 ? pappid : NULL;
         NSData *in = [NSData dataWithContentsOfFile:@(images)];
         uint8_t *out = NULL; size_t on = 0; char w[256] = "";
-        int rc = in ? s2a_selfsign_macho(in.bytes, in.length, NULL, steam, sappid, key, chain, &out, &on, w, sizeof w) : -1;
+        NSString *lc_sign_id = nil;
+        if (in_lc || lc_fb) {
+            // LiveContainer 用宿主包名签 Mach-O；客体 mainBundle 已被替换，要取它保留的 lcMainBundle。
+            SEL selector = NSSelectorFromString(@"lcMainBundle");
+            if ([NSUserDefaults respondsToSelector:selector]) {
+                NSBundle *(*get_host_bundle)(id, SEL) = (NSBundle *(*)(id, SEL))[NSUserDefaults methodForSelector:selector];
+                lc_sign_id = get_host_bundle(NSUserDefaults.class, selector).bundleIdentifier;
+            }
+            if (lc_sign_id.length)
+                RLOG("LiveContainer 重签标识：用宿主包名 %s（不添加程序库权限）", lc_sign_id.UTF8String);
+            else
+                RLOG("【黄】LiveContainer 重签标识：取不到宿主包名，沿用程序库原标识");
+        }
+        int rc = in ? s2a_selfsign_macho(in.bytes, in.length, lc_sign_id.length ? lc_sign_id.UTF8String : NULL, steam, sappid, key, chain, &out, &on, w, sizeof w) : -1;
         RELEASE_ID(); if (chain) CFRelease(chain);
         if (!in) FAIL("程序库 %s 读不了", images);
         if (rc) FAIL("签名失败：%s", w);

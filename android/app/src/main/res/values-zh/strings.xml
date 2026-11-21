@@ -119,6 +119,8 @@
     <string name="player_err_pack_next">从电脑重新拷一份游戏包再导入。</string>
     <string name="player_err_other">出了意外。</string>
     <string name="player_err_other_next">在游戏库点「导出诊断包…」，把生成的文件发给我们。</string>
+    <string name="player_err_vulkan10">这台设备的 GPU 只支持 Vulkan 1.0，不在 S2Arm 安卓版支持范围内。</string>
+    <string name="player_err_vulkan10_next">支持范围：骁龙 8 Gen 2、天玑 9000 及以上，Android 14+（Vulkan 1.1+）；Adreno 6xx–7xx、天玑 8000 系、Turnip、三星 Xclipse 尽力支持。</string>
     <string name="library_game_starting">游戏正在启动，稍候就会打开…</string>
     <string name="library_current_game">正在运行的游戏</string>
     <string name="library_switch_title">切换游戏</string>

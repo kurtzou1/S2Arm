@@ -16,6 +16,7 @@ static void clear_environment(void) {
     for (size_t i = 0; i < 4; i++) unsetenv(variables[i]);
     unsetenv("S2A_WIDESCREEN"); unsetenv("S2A_FPS60"); unsetenv("S2A_CPATCH_ON"); unsetenv("S2A_DOCKED"); unsetenv("MTL_HUD_ENABLED");
     unsetenv("S2A_AUDIO_DEVICE"); unsetenv("S2A_AUDIO_VS_SPEAKERS"); unsetenv("S2A_AUDIO_VS_HEADPHONES");   // 输出设备类型 + 两个虚拟环绕开关（#189 后续，5.1 虚拟环绕第二片）
+    unsetenv("S2A_BRIGHTNESS");   // 游戏内亮度（#1699）
 }
 
 static int reload_checks(BOOL explicit) {
@@ -122,6 +123,23 @@ int main(int argc, char **argv) {
             s2a_ios_apply_ldn_settings(d);
             check(!getenv(ldn[0]) && !getenv(ldn[1]) && !getenv(ldn[2]), @"切回自动后忽略保存的手动地址");
             [d removePersistentDomainForName:suite];
+        }
+        {   // 游戏内亮度：按款偏好 S2ABrightness（0–1，字符串）→ 起局导出 S2A_BRIGHTNESS；没选过 = 跟随系统不导出；显式启动环境优先。
+            //   期望手算，不依赖被测实现：存 0.85 就该是 0.85；存无效值应清除并回退不导出。
+            NSString *suite = [@"local.s2arm.settings-brightness." stringByAppendingString:NSUUID.UUID.UUIDString];
+            NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:suite];
+            clear_environment(); [d removeObjectForKey:@"S2ABrightness"];
+            s2a_ios_apply_graphics_settings(d);
+            check(getenv("S2A_BRIGHTNESS") == NULL, @"没选过亮度 → 不导出 S2A_BRIGHTNESS（跟随系统，不改现有行为）");
+            [d setObject:@"0.85" forKey:@"S2ABrightness"]; s2a_ios_apply_graphics_settings(d);
+            check(getenv("S2A_BRIGHTNESS") && !strcmp(getenv("S2A_BRIGHTNESS"), "0.85"), @"存 0.85 → 导出 S2A_BRIGHTNESS=0.85");
+            [d setObject:@"0.4" forKey:@"S2ABrightness"]; setenv("S2A_BRIGHTNESS", "0.7", 1); s2a_ios_apply_graphics_settings(d);
+            check(!strcmp(getenv("S2A_BRIGHTNESS"), "0.7"), @"显式 S2A_BRIGHTNESS=0.7 优先于偏好 0.4");
+            [d setObject:@"不合法" forKey:@"S2ABrightness"]; clear_environment(); s2a_ios_apply_graphics_settings(d);
+            check(getenv("S2A_BRIGHTNESS") == NULL && [d objectForKey:@"S2ABrightness"] == nil, @"无效亮度值 → 清除保存值、不导出");
+            [d setObject:@"system" forKey:@"S2ABrightness"]; s2a_ios_apply_graphics_settings(d);
+            check(getenv("S2A_BRIGHTNESS") == NULL && [[d objectForKey:@"S2ABrightness"] isEqual:@"system"], @"跟随系统档 → 不导出、保留选择");
+            clear_environment(); [d removePersistentDomainForName:suite];
         }
         {   // 开着社区宽屏 / 自适应满屏补丁（11-12）：S2Arm 满屏让开（S2A_WIDESCREEN=0）；只开别类补丁不动；显式给了 S2A_WIDESCREEN 的照它
             NSString *suite = [@"local.s2arm.settings-cpws." stringByAppendingString:NSUUID.UUID.UUIDString];

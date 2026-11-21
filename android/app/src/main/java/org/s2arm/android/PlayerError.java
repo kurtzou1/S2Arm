@@ -45,4 +45,15 @@ final class PlayerError {
         return context.getString(R.string.player_err_fmt, context.getString(what), context.getString(cause),
             context.getString(next), detail);
     }
+
+    /** 原生原因串的开头（android/native/direct/vk_device.c 的 fail 文本；android/tests/vk_api_floor_test.sh 核两边一致）。 */
+    static final String VK_GPU_10 = "GPU supports only Vulkan 1.0", VK_LOADER_BELOW_11 = "Vulkan loader below 1.1";
+
+    /** 运行时停局（HostApi stop 的细节串）里认得出的原因换成玩家看得懂的话；认不出返回 null，调用方照旧显示原始串。
+     *  只解释已经发生的失败，不在启动前拦。 */
+    static String stopText(Context context, String detail) {
+        if (detail == null || !(detail.contains(VK_GPU_10) || detail.contains(VK_LOADER_BELOW_11))) return null;
+        return context.getString(R.string.player_err_fmt, context.getString(R.string.player_err_start),
+            context.getString(R.string.player_err_vulkan10), context.getString(R.string.player_err_vulkan10_next), detail);
+    }
 }

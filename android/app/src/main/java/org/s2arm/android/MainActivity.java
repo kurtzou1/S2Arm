@@ -1005,8 +1005,11 @@ public class MainActivity extends Activity
     // (render thread, surface) is onDestroy's, as for any finish.
     @Override public void onSessionStop(int reason, String detail) {
         String why = NativeBridge.stopReason(reason) + (detail.isEmpty() ? "" : ": " + detail);
-        status.setText("Session ended: " + why);
-        android.widget.Toast.makeText(this, "S2Arm session ended: " + why, android.widget.Toast.LENGTH_LONG).show();
+        String readable = PlayerError.stopText(this, detail);   // 认得出的原因（如 GPU 只支持 Vulkan 1.0）给玩家一句看得懂的话
+        if (readable != null) panel.setVisibility(android.view.View.VISIBLE);
+        status.setText(readable != null ? readable : "Session ended: " + why);
+        android.widget.Toast.makeText(this, readable != null ? readable : "S2Arm session ended: " + why,
+            android.widget.Toast.LENGTH_LONG).show();
         if (gameMode) stopGame(why, true, LastSession.cleanStop(reason));
         else finish();
     }

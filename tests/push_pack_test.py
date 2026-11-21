@@ -1237,6 +1237,29 @@ class GameImgZstd(Base):
         calls = []; dev = self.device(); self.push_it(dev, progress=lambda *a: calls.append(a))
         self.assertEqual(calls[-1][:2], (len(self.local) + 2, len(self.local) + 2))   # 计数口径仍是原始字节（game.img + b 两字节）
 
+    def devicectl_like(self, short):   # 只走 devicectl 的设备（Apple TV）：没有流式通道、能读机上文件长度；short = 第几次推哪块时只写进一半（devicectl 报成功、机上短）
+        dev = self.device(); n = {"k": 0}
+        def put_big(src, rel):
+            dev.big.append(rel); n["k"] += 1; b = Path(src).read_bytes()
+            dev.files[rel] = b[: len(b) // 2] if n["k"] in short else b
+        def size(rel):
+            v = dev.files.get(rel); return (-1, b"") if v is None else (len(v), b"")
+        dev.put_big, dev.size = put_big, size; dev.head = lambda rel, k: size(rel) if k == 0 else None
+        return dev
+
+    def test_devicectl_short_chunk_is_repushed(self):   # D-GZHR：推完逐块核长度，第 2 块第一次只到一半 → 原地重推，最终两块都完整
+        first = self.device(); self.push_it(first)
+        c0, c1 = self.chunks()
+        dev = self.devicectl_like(short={2}); self.log.clear(); self.push_it(dev)
+        self.assertEqual(dev.big, [c0, c1, c1])
+        self.assertEqual((dev.files[c0], dev.files[c1]), (first.files[c0], first.files[c1]))
+        self.assertTrue(any("推完核对" in l and "第 2/2 块" in l for l in self.log), self.log)
+
+    def test_devicectl_chunk_short_three_times_stops(self):   # 同一块三次都短 → 停（已推完的块下次续传）
+        dev = self.devicectl_like(short={2, 3, 4})
+        with self.assertRaises(push.Fail): self.push_it(dev)
+        self.assertEqual(dev.big, [self.chunks()[0]] + [self.chunks()[1]] * 3)
+
     def test_chunk_failure_says_resume(self):
         dev = self.device()
         def broken(src, rel): raise push.Fail("找不到设备 x")
@@ -1354,6 +1377,33 @@ class AppDirs(unittest.TestCase):
         with mock.patch.object(dev, "dcp", return_value=(0, "")):
             dev.put(str(src), f"{self.G}/资源包/a"); dev.put(str(src), f"{self.G}/资源包/b")
         self.assertEqual(dev.dp.calls, [("mkdir", f"{self.G}/资源包")])
+
+    def test_devicectl_size_from_listing(self):   # devicectl 读机上文件长度（Apple TV 压缩块续传 / 推完核对用）：列父目录一层，按文件名取 metadata.size
+        dev = push.Devicectl("D", "B", tempfile.mkdtemp())
+        listing = {"result": {"files": [dict(relativePath="game.img.ab.0000.zst", metadata=dict(size=5)), dict(relativePath="sub", resources=dict(isDirectory=True))]}}
+        seen = []
+        def dcp(t, *a, log=None):
+            seen.append(a); Path(a[a.index("--json-output") + 1]).write_text(json.dumps(listing)); return 0, ""
+        with mock.patch.object(dev, "dcp", side_effect=dcp):
+            self.assertEqual(dev.head("R/.incoming/game.img.ab.0000.zst", 0), (5, b""))
+            self.assertEqual(dev.head("R/.incoming/game.img.ab.0001.zst", 0), (-1, b""))
+            self.assertEqual(dev.head("R/.incoming/sub", 0), (-1, b""))   # 目录不算文件
+            self.assertIsNone(dev.head("R/.incoming/game.img.ab.0000.zst", 16))   # 要开头字节：devicectl 读不了，照旧 None
+        self.assertEqual(seen[0][seen[0].index("--subdirectory") + 1], "R/.incoming"); self.assertIn("--no-recurse", seen[0])
+        with mock.patch.object(dev, "dcp", return_value=(1, "")):
+            self.assertIsNone(dev.head("R/.incoming/x", 0))   # 列不出 = 判不了
+
+    def test_tv_probe_says_tv_not_phone(self):   # D-NCDE：推进 Apple TV 写探针两次都写不进 → 说 Apple TV、同一网络；不问锁屏、不说手机 / 数据线 / 锁屏
+        class Dev:
+            pack = "R"; docs = "D"; puts = 0
+            def put(self, src, rel): Dev.puts += 1; raise push.Fail("Operation timed out")
+            def lock_state(self): raise AssertionError("电视不问锁屏")
+        with mock.patch.dict(os.environ, {"S2A_PUSH_TV": "1"}), self.assertRaises(push.Fail) as e:
+            push.probe(Dev(), tempfile.mkdtemp(), sleep=lambda s: None)
+        m = str(e.exception)
+        self.assertTrue(m.startswith("Apple TV 写不进资源包（Operation timed out）"), m); self.assertIn("同一个网络", m)
+        for w in ("手机", "数据线", "锁屏", "iPhone"): self.assertNotIn(w, m)
+        self.assertEqual(Dev.puts, 2)
 
     def test_tv_put_failure_says_network_not_cable(self):   # #1696 期望（手写）：推进 Apple TV（S2A_PUSH_TV=1）写入中断 → 说 Apple TV、同一网络，不叫插数据线；iPhone 照旧
         dev = push.Devicectl("D", "B", tempfile.mkdtemp())

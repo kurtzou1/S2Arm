@@ -61,6 +61,7 @@ from pathlib import Path
 R = Path(__file__).resolve().parents[1]
 LIM = 1 << 30
 IMG = re.compile(r"(^|.*/)romfs\.img$|game\.img")   # 单文件镜像（旧形态 romfs.img / v0.3.0 单一 IMG game.img，pack/img.py）：直接写到最终路径，不进 tar、不用首启解开
+def is_direct(rel): return bool(IMG.fullmatch(rel))   # 资源包里哪些文件直写最终路径（整名匹配：game.imgmap 这类旁带文件进 tar、App 解开才就位）；推和核对（pack/jobs/tvos.py verify）共用这一条
 # 流式写失败后还能交给 devicectl 整份拷的上限（缺省 2 GiB，S2A_DC_FALLBACK_MAX 可改）：devicectl device copy to 把整个文件读进
 #   CoreDeviceService 内存（#641 实测 12.2 GiB 的资源包：服务涨到约 20 GB、整机换页 10 GB 并卡死，下一次流式写在 0 字节就失败）。
 #   批次 tar（≤1 GB）照旧可以退回
@@ -420,8 +421,23 @@ class Devicectl:
                 notes.append(f"{sub + '/' if sub else ''}{want}：读不到（devicectl rc={rc}）")
         return "写不进的位置（机上属主 / 权限，非玩家句）：" + "；".join(notes)
 
-    def head(self, rel, n):   # 续传只走 s2a-devpush（devicectl 读不了文件的一段）
-        return self.dp.head(rel, n) if self.dp else None
+    def head(self, rel, n):   # 读开头 n 字节只走 s2a-devpush（devicectl 读不了文件的一段）；只要长度（n=0）时 devicectl 列一层父目录也答得出
+        if self.dp: return self.dp.head(rel, n)
+        return self.size(rel) if n == 0 else None
+
+    def size(self, rel):   # 机上一个文件的长度（devicectl 列父目录一层，--json-output）→ (长度, b"") / 不在 (-1, b"") / 列不出 None。
+        #   Apple TV 没有 s2a-devpush（#1696 不走数据线通道）：原先 head 一律 None，压缩块断了每次整份重推、推完也核不了这一块（D-GZHR）
+        d, name = rel.rsplit("/", 1) if "/" in rel else ("", rel)
+        js = self.work / "size.json"; js.unlink(missing_ok=True)
+        rc, _ = self.dcp(60, "device", "info", "files", *self.container(), *(["--subdirectory", d] if d else []), "--no-recurse", "--json-output", js)
+        try:
+            files = json.loads(js.read_text(encoding="utf-8"))["result"]["files"]
+        except (OSError, ValueError, KeyError, TypeError):
+            return (-1, b"") if rc == 0 else None
+        for f in files:
+            if isinstance(f, dict) and (f.get("relativePath") or f.get("name") or "").rsplit("/", 1)[-1] == name and not (f.get("resources") or {}).get("isDirectory"):
+                return int((f.get("metadata") or {}).get("size") or 0), b""
+        return -1, b""
 
     def put_at(self, src, rel, off):
         if not self.dp: raise Fail("没有 s2a-devpush，续传不了")
@@ -589,7 +605,7 @@ def plan(dev, pack, work, full=False, say=print):
         pushed = rows(read(dev, f"{rp(dev)}/.pushed", work, "r.pushed"), 2) if keep and not cut else {}   # 有残批 / 上次撞截短包：不信 .pushed
         if keep: say(f"机上有推完、还没解开的推送包 {len(keep)} 个：其中 {len(pushed)} 个文件算已推，不重推")
         if have: have = spot_check(dev, pack, work, have, say)
-        cut_img = [r for r in have if IMG.fullmatch(r)]   # 账上有镜像才去机上核：没有镜像的包不多一次设备往返
+        cut_img = [r for r in have if is_direct(r)]   # 账上有镜像才去机上核：没有镜像的包不多一次设备往返
         if cut_img and not (read(dev, f"{rp(dev)}/.applied", work, "r.applied.pre") or "").strip():   # send 写镜像前把 .applied 清空：空 = 上次传镜像被打断，机上那份不完整，账不能信
             # 例外：.pushed 里记着这份镜像 = 上次已整份传完（put_big 成功后才记账），.applied 空只是后面解包没成（#457：原先照样打「被打断，这次重传」，
             #   实际按 .pushed 不重传、推送 0 个文件，日志自相矛盾，把排查带偏）。这时如实说镜像已传完、问题在解包
@@ -601,9 +617,9 @@ def plan(dev, pack, work, full=False, say=print):
     want = [w for w in (l.split("\t") for l in (pack / "index.tsv").read_text(encoding="utf-8").splitlines()) if len(w) == 3]
     acct = {**have, **pushed}
     todo = [w for w in want if acct.get(w[0]) != w[2]]
-    direct = [w for w in todo if IMG.fullmatch(w[0])]
+    direct = [w for w in todo if is_direct(w[0])]
     (work / "direct_img.tsv").write_text("".join("\t".join(w) + "\n" for w in direct), encoding="utf-8")
-    bs = batches_of(pack, [w for w in todo if not IMG.fullmatch(w[0])])
+    bs = batches_of(pack, [w for w in todo if not is_direct(w[0])])
     for i, b in enumerate(bs):
         (work / f"push_{i:03d}.tsv").write_text("".join("\t".join(w) + "\n" for w in b), encoding="utf-8")
     (work / "pushed").write_text("".join(f"{r}\t{h}\n" for r, h in pushed.items()), encoding="utf-8")
@@ -835,6 +851,7 @@ def _send(dev, pack, work, say=print, progress=None, zp=None):
             say(f"  续传 {w[0]}：机上已有 {n - len(todo)}/{n} 个压缩块，接着推剩下的")
             done += sum(min(ZCHUNK, size - k * ZCHUNK) for k in range(n) if k not in todo)
         comp = zstd_compressor()
+        check = not getattr(dev, "dp", None) and hasattr(dev, "size")   # 只走 devicectl（Apple TV）：每块推完列一次长度核对；流式通道自己按字节写完才返回，不另核
         def make(k):
             p = work / f"zchunk_{k:04d}"; p.write_bytes(comp(read_chunk(pack / w[0], k))); return p
         from concurrent.futures import ThreadPoolExecutor
@@ -845,12 +862,16 @@ def _send(dev, pack, work, say=print, progress=None, zp=None):
                     p = fut.result()
                     fut = ex.submit(make, todo[i + 1]) if i + 1 < len(todo) else None
                     raw = min(ZCHUNK, size - k * ZCHUNK)
-                    for attempt in (1, 2):   # 一块断了原地再推一次（同直写）；两次都不成才停，已推完的块下次续传
+                    for attempt in (1, 2, 3):   # 一块断了原地再推（同直写）；三次都不成才停，已推完的块下次续传
                         try:
-                            transfer(dev.put_big, p, f"{inc(dev)}/{names[k]}", size=raw, scale=raw / max(p.stat().st_size, 1)); break
+                            transfer(dev.put_big, p, f"{inc(dev)}/{names[k]}", size=raw, scale=raw / max(p.stat().st_size, 1))
+                            got = dev.head(f"{inc(dev)}/{names[k]}", 0) if check else None
+                            if got is not None and got[0] != sizes[k]:   # devicectl 报成功、机上这块却缺 / 短（D-GZHR：断一次重推后核对报 1/4 块不完整）
+                                raise Fail(f"推完核对：机上这块 {'没有' if got[0] < 0 else f'{got[0]} 字节'}，应为 {sizes[k]} 字节")
+                            break
                         except Fail as e2:
-                            if dev.nospc() or attempt == 2: raise
-                            say(f"【黄】推 {w[0]} 第 {k + 1}/{n} 块中断（{str(e2)[-200:]}），原地再试一次")
+                            if dev.nospc() or attempt == 3: raise
+                            say(f"【黄】推 {w[0]} 第 {k + 1}/{n} 块没推成（{str(e2)[-200:]}），原地再试（第 {attempt + 1} 次）")
                     p.unlink(missing_ok=True); done += raw
         except OSError as e2:
             raise Fail(f"读 {w[0]} 压缩失败：{e2}") from None
@@ -1078,6 +1099,13 @@ def probe(dev, work, sleep=None):
         return dev.put(str(src), rel)
     except Fail as e:
         first = e
+    if tv():   # Apple TV（D-NCDE）：没有锁屏、没有数据线，不问锁屏状态、不说手机；隔 2 秒再写一次，还不行按原文报网络连接
+        (sleep or time.sleep)(2)
+        try:
+            return dev.put(str(src), rel)
+        except Fail as e:
+            why = str(e).splitlines()[-1][:200] if str(e) else type(e).__name__
+            raise Fail(f"Apple TV 写不进资源包（{why}）。让 Apple TV 开着、别让它休眠，和这台电脑连同一个网络，再点一次。") from e
     locked = getattr(dev, "lock_state", lambda: None)()   # True 锁着 / False 没锁 / None 判不了（Windows、假设备）
     # 锁着也照样再写一次（预检清单 #72：锁屏时写文件照样成功，见上）；两次都写不进才报
     (sleep or time.sleep)(2)

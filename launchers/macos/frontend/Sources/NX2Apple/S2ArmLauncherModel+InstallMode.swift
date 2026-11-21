@@ -1,5 +1,5 @@
-// S2Arm（不是上游文件）：签名身份（一键装用 Apple ID / 我的开发者证书，installMode 作业只读）+ 游戏库「导出自签包」+ 更新 iPhone 上的 S2Arm。
-//   11-15 维护者：导出不再是一种「装法」，设置里没有切换；「推到 iPhone」「导出自签包」两个按钮并排，导不导出只看这次请求。
+// S2Arm（不是上游文件）：签名身份（一键装用 Apple ID / 我的开发者证书，installMode 作业只读）+ 导出到文件夹（控制口 / 总控台 / 失败页「改为导出」）+ 更新 iPhone 上的 S2Arm。
+//   0.6.4 维护者：游戏详情区只有「更新」「导出」两件事（S2ArmLauncherModel+UpdateExport）；导不导出只看这次请求。
 //   更新：库页右上角按钮（catalog phoneUpdates：设备记录的壳号比本版旧）→ 有要重新出包的款先三选一 → installUpdate 作业只换壳、不重推资源。
 import AppKit
 import Foundation
@@ -25,24 +25,9 @@ extension S2ArmLauncherModel {
         }
     }
 
-    /// 游戏库「导出自签包」（11-15 维护者：1 下开始导出，不经装机窗）：iPhone 包能直接导出（新格式）的直接导出（不连手机、不签名）；
-    ///   没出过、或包是旧格式的先出 iPhone 包、出完接着导出（selfSignAfterPack，出包会话结束后 pumpQueue 接上）——玩家点的是导出，就把导出做完
-    func exportSelfSign(_ game: GameSummary) {
-        if game.iphoneExportable { install(game, export: true); return }
-        selfSignAfterPack.insert(game.id)
-        if export(game, platforms: [.ios], mode: "export")?.stopsStart == true { selfSignAfterPack.remove(game.id); exportFor = game.id }   // 出不了（缺文件 / 缺密钥…）：去出包页看原因，不悄悄没反应
-    }
-
-    /// 出包页的「开始」：出 iPhone 时按「出完之后」那条路一步走完——装到 iPhone（出好接着装）或导出自签包（出好接着导出，不连手机）
-    @discardableResult
-    func startExport(_ game: GameSummary, location: String? = nil) -> ExportBlocker? {
-        guard exportTargets.contains(.ios) else { return export(game, location: location) }
-        let selfSign = iosAfterPack == "export"
-        if selfSign { selfSignAfterPack.insert(game.id) } else { installAfterPack.insert(game.id) }
-        let b = export(game, location: location, mode: selfSign ? "export" : nil)
-        if b?.stopsStart == true { selfSignAfterPack.remove(game.id); installAfterPack.remove(game.id) }
-        return b
-    }
+    /// 导出到文件夹、不经确认页（控制口 /selfsign、总控台「导出 .s2arm」、失败页「改为导出」）：签名按设置里的、不导入设备。
+    ///   同导出确认页「开始」都不勾设备：能直接导出的直接导出，没出过 / 旧格式的先出 iPhone 包、出完接着导出
+    func exportSelfSign(_ game: GameSummary) { runExportPlan(game, ExportPlan(sign: nil, devices: [])) }
 
     /// 装机 / 更新失败的那页上「改为导出自签包」：不连手机也能走完（11-16 维护者：没插手机就卡死是我们自己设的障碍）
     func switchToSelfSign(_ session: JobSession, language: String) {
@@ -80,6 +65,8 @@ extension S2ArmLauncherModel {
         updateConfirm = nil; updateRepack = repack
         // 更新哪台：壳旧了的那台（phoneUpdates 的设备记录键）；没有就是玩家选的那台。一律带上，作业层不自己挑（v0.3.0 验收测出连着两台报错；11-11 设备号贯穿所有装机入口）
         let device = mode == "export" ? nil : device ?? phoneUpdate?.device ?? installDeviceID
+        // 那台上原来没有 S2Arm（总控台「安装 S2Arm」、导出确认页「先装 S2Arm」）：结局页按「安装」写，不写「更新 / 已更新到」
+        shellFirstInstall = mode != "export" && phoneOverview?.phones.first(where: { $0.device == device }).map { !$0.installed && $0.installedBy == nil } == true
         phoneOutcome = nil
         selfSigning = mode == "export"
         lastUpdateArgs = UpdateArgs(acceptStale: acceptStale, repack: repack, language: language, device: device, accept: accept, mode: mode, sgradeUpgrade: sgradeUpgrade)
@@ -142,7 +129,8 @@ extension S2ArmLauncherModel {
     func installNextQueued() {
         guard !phoneBusy, !installAfterQueue.isEmpty else { return }   // 手机槽空就装（主槽在出别的款也装）
         let id = installAfterQueue.removeFirst()
-        installAfterPack.remove(id)
-        if let game = games.first(where: { $0.id == id }) { install(game, export: selfSignAfterPack.remove(id) != nil) } else { installNextQueued() }
+        let plan = exportAfterPack.removeValue(forKey: id)
+        guard let game = games.first(where: { $0.id == id }) else { installNextQueued(); return }
+        if let plan { runExportPlan(game, plan) } else { install(game) }   // 导出确认页要先出包的款按它那份计划走；批量「更新并重新出」出完的照旧装上
     }
 }

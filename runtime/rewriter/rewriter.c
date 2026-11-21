@@ -3777,6 +3777,64 @@ static void trap_rows(FILE* f) {   /* 序号 = 出现顺序（brk #(0x8000 + 序
     fprintf(f, "\t%s\t%d\t0x%08x\n", g->traps.v[i].kind, g->traps.v[i].reg, g->traps.v[i].w);
   }
 }
+/* nn::mem::StandardAllocator 初始化入口闸（分配器预留压小，runtime/src/svc_mem.c s2a_sainit_gate）：游戏把
+ * 「地址传空、尺寸几十 GiB」交给分配器，SDK 在别名区划一整块地址、用到才提交。宿主窗口放不下这块时，块的顶端伸出窗口
+ * 走远端代执行（每帧数百毫秒）。入口处挂一个门，宿主按窗口可放量把尺寸（x2）压小；放得下的不动寄存器。
+ * 门类复用 aregion、参数 1（门表格式不变、不升 HOST_ABI）：进门前 x0 压栈并清零，旧宿主的 aregion 处理看到 w0 = 0
+ * 什么都不做；出门恢复 x0、执行原入口第一条、跳回 +4。原第一条只收与位置无关、只碰栈或寄存器的几类（见 sainit_movable）。 */
+static const char* const SAINIT[] = {
+    "_ZN2nn3mem17StandardAllocator10InitializeEPvm", "_ZN2nn3mem17StandardAllocator10InitializeEPvmb",
+    "_ZN2nn3mem17StandardAllocatorC1EPvm",           "_ZN2nn3mem17StandardAllocatorC1EPvmb",
+    "_ZN2nn3mem17StandardAllocatorC2EPvm",           "_ZN2nn3mem17StandardAllocatorC2EPvmb"};
+static int sainit_movable(uint32_t w) {
+  if ((w & 0xfffff01fu) == 0xd503201fu)   /* 提示类（nop / paciasp / bti …） */
+    return 1;
+  if ((w & 0x1c000000u) == 0x10000000u)   /* 数据处理（立即数），adr / adrp 除外 */
+    return (w & 0x1f000000u) != 0x10000000u;
+  if ((w & 0x0e000000u) == 0x0a000000u)   /* 数据处理（寄存器） */
+    return 1;
+  if ((w & 0x0a000000u) == 0x08000000u)   /* 读写内存：只收以 sp 为基址的（压栈），字面量取数除外 */
+    return (w & 0x3b000000u) != 0x18000000u && ((w >> 5) & 31) == 31;
+  return 0;
+}
+static void gen_sainit(void* p) {
+  A at = *(A*)p, start = here();
+  emit(STRPRE(0, 31, -16));
+  emit(MOVZ(0, 0, 0));
+  emit(STPRE(29, 30, 31, -16));
+  gatecall();
+  emit(BLR(30));
+  Gate q = {here(), at, "aregion", 1};
+  PUSH(g->gates, q);
+  emit(LDPOST(29, 30, 31, 16));
+  emit(LDRPOST(0, 31, 16));
+  emit(iw(at));
+  emit(branch(here(), at + 4));
+  put(at, branch(at, start));
+  done(at);
+  bump("sdk_sainit");
+}
+static void sdk_sainit(void) {
+  if (!g->sdk_cut)
+    return;
+  g->guarding = 1;
+  for (size_t i = 0; i < sizeof SAINIT / sizeof *SAINIT; i++) {
+    A at, size;
+    if (!dynsym(SAINIT[i], &at, &size) || consumed(at))
+      continue;
+    Ins x;
+    if (!decode(iw(at), at, &x) || x.r18 || !sainit_movable(iw(at))) {
+      msg("【黄】%s 分配器初始化闸 0x%" PRIx64 " 跳过（不计缺口）：入口第一条 %08x 不能搬进补丁岛\n", g->r.module, (uint64_t)at, iw(at));
+      bump("sdk_sainit_skip");
+      continue;
+    }
+    if (!unit_run(at, gen_sainit, &at, NULL)) {
+      msg("【黄】%s 分配器初始化闸 0x%" PRIx64 " 跳过（不计缺口）：%s\n", g->r.module, (uint64_t)at, g->error);
+      bump("sdk_sainit_skip");
+    }
+  }
+  g->guarding = 0;
+}
 static void sdk_as36_ranges(void) {
   typedef struct {
     A at[2], call;
@@ -5588,6 +5646,7 @@ static int attempt(const s2a_rewrite_request* r, const s2a_rewrite_options* opti
     analyze();
     generate();
     sdk_aregion();
+    sdk_sainit();
     sdk_as36_ranges();
     widen();
     fps_rows(1);

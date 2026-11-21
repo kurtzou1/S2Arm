@@ -68,17 +68,6 @@ import AppKit
         XCTAssertEqual(model.lastUpdateArgs?.device, "OLD-UDID")
     }
 
-    /// 11-19 自签走查结构 8：出包页「出完之后」只管出包页那一次。选了导出时，续签 / 更新 S2Arm 没指定就照样装到手机（原先沿用记忆只导出、不动手机，7 天到点打不开）
-    func testRenewIgnoresExportPageChoice() async {
-        let before = UserDefaults.standard.object(forKey: "S2AIosAfterPack")
-        defer { UserDefaults.standard.set(before, forKey: "S2AIosAfterPack") }
-        model.iosAfterPack = "export"
-        model.updatePhone(acceptStale: false, repack: [], language: "zh-Hans", device: "PHONE1", ask: false)
-        XCTAssertNotNil(model.lastUpdateArgs)
-        XCTAssertNil(model.lastUpdateArgs?.mode, "没指定 = 装到手机")
-        XCTAssertEqual(model.lastUpdateArgs?.device, "PHONE1")
-    }
-
     /// s2armctl dismiss（「关掉提示框」）要关得掉新功能大窗和更新弹窗，同玩家点关闭；修前只清报错、弹窗原样开着
     func testDismissClosesFeatureSpotlightAndUpdatePopup() async {
         for popup: [String: Any] in [["kind": "feature", "id": "v0.0.0-probe"], ["kind": "update", "version": "99.0.0"]] {

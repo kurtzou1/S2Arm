@@ -500,7 +500,9 @@ static uint32_t vi_hdr_status(uint8_t *on, uint32_t *fmt, uint16_t *peak, const 
     }
     return 0;
 }
-static uint32_t vi_paper_white(uint16_t *nits, const void *disp) { (void)disp; if (nits) *nits = 100; return 0; }   // PR5 起答 100（v3 定稿 PQ 相对模型锚 EDR=nits/100，§1.4 判读③；203 是 BT.2408 参考白、游戏缺省声明值——m0b:414/415 实证被 told peak 覆盖。游戏侧后果未实测：T15 专项，如实写未测项）
+// 纸白：HDR 开（S2A_HDR auto / on）答 100（v3 PQ 相对模型锚 EDR=nits/100，§1.4 判读③）；HDR 关（缺省）答 203，与 0.5.8 一样
+//   （203 是 BT.2408 参考白、游戏缺省声明值）。关着时游戏照 SDR 输出，答案只应回现状；HDR 开时游戏侧后果未实测（T15 专项）
+static uint32_t vi_paper_white(uint16_t *nits, const void *disp) { (void)disp; if (nits) *nits = nvn2_hdr_switch() == HDR_OFF ? 203 : 100; return 0; }
 static uint32_t vi_max_res(uint32_t *res, const void *disp) { (void)disp; if (res) *res = dm_opmode() == 1 ? 3 : 1; return 0; }
 static uint32_t vi_vrr_supported(uint8_t *on, const void *disp) { (void)disp; if (on) *on = 0; return 0; }
 // 当前刷新率：RefreshRate 是 u32 赫兹（sdk 只认 60 / 120，火纹 sdk+0x5dd5a4），带 bool 的 SDK 21 起版本另出「VRR 在用」：宿主 60、没有 VRR

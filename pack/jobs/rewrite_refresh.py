@@ -39,6 +39,50 @@ OUTPUTS = ("patched.bin", "fixups.tsv", "gates.tsv", "sites.tsv", "gaps.tsv", "w
 # 受这次（或往后）改写器修复影响的必改点类别：x18_spdyn（11-11 栈指针动态改写修复）、pacga（11-17 确定性指针认证：较新 Switch 2 SDK
 #   切纤程把 pacga 校验值存进内存，宿主密钥每进程不同，即时快照换进程恢复后校验不过；改写器把它换成固定密钥实现）
 AFFECTED = re.compile(r"'(?:x18_spdyn|pacga)':\s*(\d+)")
+# 分配器初始化闸（11-20，改写器 sdk_sainit，宿主 svc_mem.c s2a_sainit_gate）：sdk 里 StandardAllocator 初始化入口挂门，窗口放不下
+#   开局大区时宿主把预留压小。几乎每款 sdk 都有这几个导出，但只有出包静态认出开局大区的款（addr_need.tsv「别名区GB」> 0）用得上：
+#   只有这些款算受影响、换 sdk 产物，并按同一套识别重出地址表（多一行「大区来源」，宿主据此不弹「地址不够」页）；其余款不换
+SAINIT = re.compile(r"'sdk_sainit':\s*(\d+)")
+
+
+def static_big(root):
+    """这款的地址表认出开局大区（别名区GB > 0；负值 = 上限不定，也算）"""
+    try:
+        for line in (Path(root) / "addr_need.tsv").read_text(encoding="utf-8").splitlines():
+            if line.startswith("别名区GB\t"):   # 非玩家句（地址表的键名）
+                return int(line.split("\t", 1)[1]) != 0
+    except (OSError, ValueError):
+        pass
+    return False
+
+
+def addr_table(c, root, exefs):
+    """按本引擎的识别（tools/addr_need.py collect）重出这款的地址表：身份取旧表的程序号 / 构建号，代码取原 main。
+    与旧表相同或取不到 → None"""
+    import importlib.util
+    old = (Path(root) / "addr_need.tsv").read_text(encoding="utf-8")
+    ident = dict(l.split("\t", 1) for l in old.splitlines() if l.count("\t") == 1)
+    if not {"程序号", "构建号"} <= ident.keys() or not (Path(exefs) / "main").is_file():   # 非玩家句（地址表的键名）
+        return None
+    spec = importlib.util.spec_from_file_location("addr_need", Path(c.engine) / "tools/addr_need.py")
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    try:
+        new = mod.collect(ident["程序号"], ident["构建号"], main=Path(exefs) / "main")   # 非玩家句（地址表的键名）
+    except (ValueError, IndexError, OSError, struct.error) as e:   # 读不了原 main：旧表照用（宿主照旧弹「地址不够」页，闸门照样压）
+        c.emit("message", f"地址表没重出（{str(e)[:120]}），沿用旧表")  # 非玩家句
+        return None
+    return new if new != old else None
+
+
+def write_table(path, text):
+    """整份换（先写同目录临时文件再改名）；换行一律 \n，同出包（tools/addr_need.py 写法）"""
+    from core import replace_retrying
+    tmp = Path(path).with_name(Path(path).name + ".partial")
+    tmp.write_text(text, encoding="utf-8", newline="\n")
+    try:
+        replace_retrying(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def rewriter_id(c):
@@ -236,7 +280,7 @@ def modules_of(exefs):
     return sorted(p.name for p in Path(exefs).iterdir() if MODULE.fullmatch(p.name))
 
 
-def rewrite_modules(binary, env, exefs, out, widen):
+def rewrite_modules(binary, env, exefs, out, widen, sainit=False):
     """exefs 里宿主会装载的模块（同 stage_rewrite.sh 的名单）逐个改写到 out → 这次修复会改到的模块（统计行 x18_spdyn > 0）。
     退出码 3 = 有缺口、产物照出（同 stage_rewrite.sh rw_all：社区补丁轮的缺口由 cpatch.py prune 认领），不算失败"""
     hit = []
@@ -245,7 +289,7 @@ def rewrite_modules(binary, env, exefs, out, widen):
         r = subprocess.run(args, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
         if r.returncode and not (r.returncode == 3 and (Path(out) / f"{m}.patched.bin").is_file()):
             raise Failure(f"重跑改写 {m} 失败（退出码 {r.returncode}）：" + ((r.stderr.strip().splitlines() or [""])[-1])[:200])  # 非玩家句
-        if max((int(x) for x in AFFECTED.findall(r.stdout)), default=0) > 0:
+        if max((int(x) for x in AFFECTED.findall(r.stdout) + (SAINIT.findall(r.stdout) if sainit else [])), default=0) > 0:
             hit.append(m)
     return hit
 
@@ -544,8 +588,12 @@ def check_and_update(c, gid, kit, target, rid, ignore_rewriter=False):
             layout.update_info(c, gid, ios={**{k: v for k, v in side.items() if k != "sgradeMissing"}, "rewriterId": rid, "sgradeKey": sgrade_key(c, gid, rid, bid), "mainBid": bid})
             return "updated"
         out = work / "out"; out.mkdir()
-        hit = rewrite_modules(rewriter_bin(c), rewrite_env(c, kit, exefs, target), exefs, out, kit / "widen_sites.tsv")
+        big = static_big(kit)
+        hit = rewrite_modules(rewriter_bin(c), rewrite_env(c, kit, exefs, target), exefs, out, kit / "widen_sites.tsv", sainit=big)
+        table = addr_table(c, kit, exefs) if big and "sdk" in hit else None
         apply_outputs(out, kit, hit)
+        if table is not None:
+            write_table(kit / "addr_need.tsv", table)
     layout.update_info(c, gid, ios=dict(side, rewriterId=rid, mainBid=bid))
     return "updated" if hit else "unaffected"
 
@@ -664,7 +712,9 @@ def refresh_mac(c, gid, runtime, hold=None, ignore_rewriter=False):
                 out, hit, tables = sgrade_rewrite(c, game, runtime, runtime / "exefs", "apple", Path(tmp))
             else:
                 out = Path(tmp)
-                hit = rewrite_modules(rewriter_bin(c), rewrite_env(c, runtime, runtime / "exefs", "apple"), runtime / "exefs", out, runtime / "widen_sites.tsv")
+                big = static_big(runtime)
+                hit = rewrite_modules(rewriter_bin(c), rewrite_env(c, runtime, runtime / "exefs", "apple"), runtime / "exefs", out, runtime / "widen_sites.tsv", sainit=big)
+                table = addr_table(c, runtime, runtime / "exefs") if big and "sdk" in hit else None
             if hold is not None:
                 if not held.enter_context(hold()):
                     return False
@@ -680,6 +730,9 @@ def refresh_mac(c, gid, runtime, hold=None, ignore_rewriter=False):
                     c.emit("message", "正在按新版更新这款游戏的程序（资源不动）")
                 apply_outputs(out, runtime, hit)
             files = dict(manifest["files"])
+            if not sg and table is not None:   # 地址表（随分配器闸一起换，见 SAINIT）：清单同步记大小
+                write_table(runtime / "addr_need.tsv", table)
+                files["addr_need.tsv"] = [(runtime / "addr_need.tsv").stat().st_size, ""]
             if names is not None:   # 补丁表：清单里先去掉旧的，再记这次出的
                 for k in [k for k in files if k in SGRADE_TABLES or k.startswith("cheat-src.")]:
                     files.pop(k)

@@ -58,9 +58,15 @@ internal sealed class PhoneJobTrack
     /// <summary>失败结果带 appInstalled：独立 App 已装上、资源没推完（失败页标题换成「App 已装上，资源没推完」）</summary>
     public bool AppInstalled;
 
+    /// <summary>界面上按哪种操作写字（phone.title / status.running / headline / done / failed.&lt;它&gt;）；"" = 按 Kind。
+    /// 同一个作业不同说法时用：installUpdate 给还没装 S2Arm 的手机第一次装，写「在 iPhone 上安装 S2Arm / 装好了」，不写「更新」（走查：新手看到「更新好了」不知道装没装上）</summary>
+    public string TextKind = "";
+    private string K => TextKind.Length > 0 ? TextKind : Kind;
+    public string TextKey(string prefix) => prefix + K;
+
     public void Begin(string kind, string device)
     {
-        Kind = kind; Device = device; Stages.Clear(); Log.Clear(); Overall = null; Step = Steps = null;
+        Kind = kind; TextKind = ""; Device = device; Stages.Clear(); Log.Clear(); Overall = null; Step = Steps = null;
         Started = DateTime.UtcNow; Ended = null; Suggestion = ""; PackBytes = null; PackFiles = null; Skipped = []; Version = "";
         ExportFolder = ""; ExportGames = 0; ExportBytes = null; ExportFresh = []; ExportReused = 0; ExportUnwritten = []; SGrade = [];
         Legacy = []; LegacyElsewhere = []; LegacyDevice = ""; DetailsOpen = false;
@@ -185,7 +191,7 @@ public sealed partial class EnvironmentWindow
         AutomationId(panel, "phone." + state);
         // 导出自签包：装机 / 更新作业不连手机、出到文件夹。完成后看结果，进行中看这次会话
         var exporting = tr.Kind is "install" or "installUpdate" && (tr.ExportFolder.Length > 0 || state == "running" && (tr.Kind == "install" ? installExport : lastUpdateMode == "export"));
-        var title = Label(T(exporting ? "phone.title.export" : "phone.title." + tr.Kind), 18); title.FontWeight = FontWeight.Bold;   // 这是什么操作（维护者：只看得到「更新中 · …」一小行）
+        var title = Label(T(exporting ? "phone.title.export" : tr.TextKey("phone.title.")), 18); title.FontWeight = FontWeight.Bold;   // 这是什么操作（维护者：只看得到「更新中 · …」一小行）
         AutomationId(title, "phone.operation");
         if (showsOperation) panel.Children.Add(title);   // 外层已用大标题写明是什么操作（导出自签包页）时不再画，免得「导出自签包」下面又一行「导出，自己签名安装」
         if (state == "drop")
@@ -214,7 +220,7 @@ public sealed partial class EnvironmentWindow
         {
             var status = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
             status.Children.Add(new Border { Width = 9, Height = 9, CornerRadius = new CornerRadius(4.5), Background = Brush.Parse("#FFC857"), VerticalAlignment = VerticalAlignment.Center });
-            status.Children.Add(new TextBlock { Text = T(exporting ? "phone.status.running.export" : "phone.status.running." + tr.Kind), FontSize = 14, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#FFC857") });
+            status.Children.Add(new TextBlock { Text = T(exporting ? "phone.status.running.export" : tr.TextKey("phone.status.running.")), FontSize = 14, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#FFC857") });
             if (!exporting) status.Children.Add(Muted("· " + device, 13));
             panel.Children.Add(status);
             var value = tr.Overall ?? 0;
@@ -298,10 +304,10 @@ public sealed partial class EnvironmentWindow
         {
             var done = state == "succeeded";
             panel.Children.Add(Seal(done ? "✓" : "!", done ? "#40D678" : "#FFC857"));
-            panel.Children.Add(Headline(T(done ? "phone.headline." + tr.Kind : "install.needs_player").Replace("{0}", device)));
+            panel.Children.Add(Headline(T(done ? tr.TextKey("phone.headline.") : "install.needs_player").Replace("{0}", device)));
             if (done)
             {
-                var sentence = T("phone.done." + tr.Kind).Replace("{0}", device).Replace("{1}", tr.Version.Length > 0 ? "v" + tr.Version : "");
+                var sentence = T(tr.TextKey("phone.done.")).Replace("{0}", device).Replace("{1}", tr.Version.Length > 0 ? "v" + tr.Version : "");
                 panel.Children.Add(Muted(sentence, 17));
                 var stats = new WrapPanel { Orientation = Orientation.Horizontal };
                 void Stat(string label, string value)
@@ -338,7 +344,7 @@ public sealed partial class EnvironmentWindow
         {
             panel.Children.Add(Seal("!", "#E05C5C"));
             // 独立 App 装上了、资源没推完（失败结果 appInstalled）：标题说清 App 在手机上了，下一步加「重试只推剩下的」
-            panel.Children.Add(Headline(T(tr.AppInstalled ? "app.failed.partial" : exporting ? "phone.failed.export" : "phone.failed." + tr.Kind)));
+            panel.Children.Add(Headline(T(tr.AppInstalled ? "app.failed.partial" : exporting ? "phone.failed.export" : tr.TextKey("phone.failed."))));
             if (message.Length > 0) panel.Children.Add(WrappedMuted(B(message), 17));
             var nextLines = new List<string>();
             if (tr.Suggestion.Length > 0) nextLines.Add(B(tr.Suggestion));

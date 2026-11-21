@@ -35,6 +35,9 @@ class UpdateHints(unittest.TestCase):
             ios_fixture(self.c, self.F, compat={k: v for k, v in ok.items() if k != "libGen"})   # 旧包：库没有客体输入（缺 libGen）
         for g in (self.A, self.B, self.C, self.D):   # 每款放一个游戏大文件：比对不许读它
             (layout.image_ios(self.c, g) / ".pack/game.img").write_bytes(b"\0" * 4096)
+        for g in (self.A, self.B, self.C, self.D) + ((self.F,) if getattr(self, "with_old_lib", False) else ()):
+            lib = layout.image_ios(self.c, g) / ".pack/shaders/direct/b-chain"   # 直连包：着色器原因只对有直连库的款算（host_update.ios_lib_reasons，只看在不在、不打开）
+            lib.mkdir(parents=True, exist_ok=True); (lib / "lib.idx").write_bytes(b"")
         ids = [self.A, self.B, self.C, self.D, self.E] + ([self.F] if getattr(self, "with_old_lib", False) else [])
         self.c.catalog = lambda: {"games": [{"id": g, "name": g} for g in ids]}
 

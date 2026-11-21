@@ -50,6 +50,6 @@ int main(void) {
     unsigned long long need = 0, beats = 0; int file = -1; FILE *f = fopen(rk, "r"); if (f) { if (fscanf(f, "%llu %llu %d", &need, &beats, &file) != 3) need = 0; fclose(f); }
     unlink(rk);
     CHECK(need == 132 * MB && file == 1, "⑥ 心跳记需求 = 实占 100 + 文件里 32 = 132 MB、文件后备 1（得 %llu MB、%d）", need / MB, file);
-    printf("t_guest_need_file：%s\n", bad ? "有失败" : "全过");
+    printf("%s t_guest_need_file：%s\n", bad ? "✗" : "✓", bad ? "有失败" : "全过");   // 门禁按「✓ t_」结论行判
     return bad ? 1 : 0;
 }

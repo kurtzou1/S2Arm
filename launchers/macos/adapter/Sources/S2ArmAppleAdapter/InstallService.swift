@@ -54,6 +54,8 @@ public struct InstallReadiness: Equatable {
 
 /// 开发者证书体检（devCert 作业，pack/jobs/devcert.py inspect）：问题只提示、不挡；blocking 非空 = 根本签不了。
 public struct DevCertInfo: Equatable {
+    /// 条目号（几张证书时选 / 删用，#487）与证书 SHA-1
+    public let entry, certSha1: String
     public let teamName, teamId, certName, certExpires, profileName, profileExpires, bundleId: String
     public let wildcard, allDevices: Bool
     public let deviceCount: Int
@@ -68,6 +70,7 @@ public struct DevCertInfo: Equatable {
 
     public init(result r: [String: Any]) {
         func s(_ k: String) -> String { r[k] as? String ?? "" }
+        entry = s("entry"); certSha1 = s("certSha1")
         teamName = s("teamName"); teamId = s("teamId"); certName = s("certName"); certExpires = s("certExpires")
         profileName = s("profileName"); profileExpires = s("profileExpires"); bundleId = s("bundleId")
         wildcard = r["wildcard"] as? Bool ?? false; allDevices = r["allDevices"] as? Bool ?? false
@@ -80,14 +83,43 @@ public struct DevCertInfo: Equatable {
     }
 }
 
-/// 开发者证书现况：导入过没有、出包装机用不用它、体检结果。
+/// 存着的一张证书（devCert status 的 certs，#487）：只按描述文件读，不跑签名工具。
+public struct DevCertEntry: Equatable, Identifiable {
+    public let entry, certSha1, bundleId, teamId, teamName, profileName, profileExpires: String
+    public let allDevices: Bool
+    public let deviceCount: Int
+    /// 描述文件管不管问的那台：nil = 没问哪台 / 读不出。
+    public let deviceListed: Bool?
+    /// 这台现装的 S2Arm 是不是这张签的（包名一样）。
+    public let installedHere: Bool
+    public var id: String { entry }
+
+    public init(result r: [String: Any]) {
+        func s(_ k: String) -> String { r[k] as? String ?? "" }
+        entry = s("entry"); certSha1 = s("certSha1"); bundleId = s("bundleId"); teamId = s("teamId"); teamName = s("teamName")
+        profileName = s("profileName"); profileExpires = s("profileExpires")
+        allDevices = r["allDevices"] as? Bool ?? false
+        deviceCount = (r["deviceCount"] as? NSNumber)?.intValue ?? 0
+        deviceListed = r["deviceListed"] as? Bool
+        installedHere = r["installedHere"] as? Bool ?? false
+    }
+}
+
+/// 开发者证书现况：导入过没有、出包装机用不用它、体检结果；带设备问时还有：存着的几张、这台选的哪张、要不要问玩家（#487）。
 public struct DevCertStatus: Equatable {
     public let imported: Bool
     public let active: Bool
     public let cert: DevCertInfo?
-    public init(imported: Bool, active: Bool, cert: DevCertInfo?) { self.imported = imported; self.active = active; self.cert = cert }
+    public let certs: [DevCertEntry]
+    public let chosen: String?
+    public let needsChoice: Bool
+    public init(imported: Bool, active: Bool, cert: DevCertInfo?, certs: [DevCertEntry] = [], chosen: String? = nil, needsChoice: Bool = false) {
+        self.imported = imported; self.active = active; self.cert = cert; self.certs = certs; self.chosen = chosen; self.needsChoice = needsChoice
+    }
     public init(result r: [String: Any]) {
-        self.init(imported: r["imported"] as? Bool ?? false, active: r["active"] as? Bool ?? false, cert: (r["cert"] as? [String: Any]).map(DevCertInfo.init(result:)))
+        self.init(imported: r["imported"] as? Bool ?? false, active: r["active"] as? Bool ?? false, cert: (r["cert"] as? [String: Any]).map(DevCertInfo.init(result:)),
+                  certs: (r["certs"] as? [[String: Any]] ?? []).map(DevCertEntry.init(result:)), chosen: r["chosen"] as? String,
+                  needsChoice: r["needsChoice"] as? Bool ?? false)
     }
 }
 
@@ -191,9 +223,12 @@ public final class InstallService {
     /// mode = "export"：游戏库「导出自签包」——不连手机、不签名，出未签名 S2Arm.ipa 和各款 .img 到文件夹（11-15 起导出只看这次请求）
     /// widget = false：玩家在设置里关了「装到 iPhone 时带主屏小组件」，作业层不带小组件扩展（不传 = 带）
     /// cloudSaves：玩家选的云存档文件夹（没开 = nil）。覆盖装前备份手机存档做不成时，作业层看这款在里面有没有快照：有就照装（覆盖装 App 不碰 iCloud 里那份）
+    /// sign：这次怎么签（导出确认页 ① 签名，0.6.4）：appleId / devCert = 已签名（推到设备时也强制用这一种），none = 自签（不签、手机上的 S2Arm 用它导入的证书签）；
+    ///   nil = 按设置里选的（作业层 install.export_sign_mode）。外部工具装的 S2Arm 作业层照旧自动走不签那条路，不论 sign
     public func install(gameId: String, teamId: String? = nil, device: String? = nil, acceptDropped: Bool = false, accept: Set<String> = [], mode: String? = nil,
-                        widget: Bool = true, cloudSaves: String? = nil, events: EventSink = .discard) async throws -> InstallResult {
+                        sign: String? = nil, widget: Bool = true, cloudSaves: String? = nil, events: EventSink = .discard) async throws -> InstallResult {
         var extra: [String: Any] = ["gameId": gameId]
+        if let sign, !sign.isEmpty { extra["sign"] = sign }
         if !widget { extra["widget"] = false }
         if let cloudSaves, !cloudSaves.isEmpty { extra["cloudSavesFolder"] = cloudSaves }
         if let mode { extra["mode"] = mode }
@@ -225,8 +260,10 @@ public final class InstallService {
     }
 
     /// 导入 .p12 + .mobileprovision；密码只经环境变量给这一次作业（S2A_DEVCERT_PASSWORD），不写进请求文件。导入成功即切到证书签名。
-    public func devCertImport(p12: String, profile: String, password: String, device: String? = nil) async throws -> DevCertInfo {
+    ///   add = true：加一张（几张证书，#487；带 device 时顺手给这台选它）；false = 旧义「换一个」，顶掉这台在用的那张。
+    public func devCertImport(p12: String, profile: String, password: String, device: String? = nil, add: Bool = false) async throws -> DevCertInfo {
         var extra: [String: Any] = ["action": "import", "p12Path": p12, "profilePath": profile]
+        if add { extra["add"] = true }
         if let device, !device.isEmpty { extra["device"] = device }
         return DevCertInfo(result: try await client.perform("devCert", extra: extra, secrets: ["S2A_DEVCERT_PASSWORD": password]).result)
     }
@@ -249,9 +286,16 @@ public final class InstallService {
         _ = try await client.perform("devCert", extra: ["action": "use", "active": active])
     }
 
-    /// 删掉本机存的证书、描述文件和钥匙串里的密码（回到 Apple ID 签名）。
-    public func devCertDelete() async throws {
-        _ = try await client.perform("devCert", extra: ["action": "delete"])
+    /// 给这台设备选用哪张证书（条目号，#487）。
+    public func devCertChoose(device: String, cert: String) async throws {
+        _ = try await client.perform("devCert", extra: ["action": "choose", "device": device, "cert": cert])
+    }
+
+    /// 删掉本机存的证书、描述文件和钥匙串里的密码：cert = 只删这一张（条目号），nil = 全删（回到 Apple ID 签名）。
+    public func devCertDelete(cert: String? = nil) async throws {
+        var extra: [String: Any] = ["action": "delete"]
+        if let cert { extra["cert"] = cert }
+        _ = try await client.perform("devCert", extra: extra)
     }
 
     // ---- Apple ID 登录（0.6.0 Mac：随包 plumesign 自己登录，pack/jobs/apple_login.py）----
@@ -375,9 +419,15 @@ public struct InstallModeInfo: Equatable, Sendable {
     public var distribution: Bool = false
     /// 选独立 App 时按签名方式给的一句提示的码（作业层 install.standalone_hint：appleId / wildcard / external；nil = 不提示）→ 文案 install.layout.hint.<码>
     public var standaloneHint: String? = nil
+    /// 同上、按导出确认页这次选的签名方式各给一个（作业层 install.standalone_hints，键同请求 sign：appleId / devCert / none）：
+    ///   devCert → wildcard（通配描述文件）| explicit（显式 App ID：装一款顶掉前一款）| 读不到为缺；确认页按 ① 当前选的取，不按设置
+    public var standaloneHints: [String: String] = [:]
     /// 按签名带不带调试权限推荐的出法（作业层 install.layout_recommend）：standalone / shell / nil（识别不了）；依据 distribution / devCertDebug / appleId / external / unknown
     public var recommend: String? = nil
     public var recommendWhy: String = "unknown"
+    /// 是不是从 installMode 作业读回的：没读回（启动器刚开、作业失败）时出法两张卡都不画选中——原先缺省 layout = shell
+    ///   先把「通用 S2Arm」画成选中，读回后才跳到真实那张，读失败就一直显示错的（0.6.2 前端走查）
+    public var loaded = false
     public init(exportAvailable: Bool = false, signMode: String = "appleId", signChoice: String = "appleId") {
         self.exportAvailable = exportAvailable; self.signMode = signMode; self.signChoice = signChoice
     }
@@ -385,11 +435,13 @@ public struct InstallModeInfo: Equatable, Sendable {
         self.init(exportAvailable: r["exportAvailable"] as? Bool ?? false, signMode: r["signMode"] as? String ?? "appleId",
                   signChoice: r["signChoice"] as? String ?? "appleId")
         let choice = r["layoutChoice"] as? [String: Any] ?? [:]
+        loaded = true
         layout = r["layout"] as? String ?? "shell"
         layoutDefault = choice["default"] as? String
         layoutGames = (choice["games"] as? [String: String] ?? [:]).reduce(into: [:]) { $0[$1.key.uppercased()] = $1.value }
         distribution = r["distribution"] as? Bool ?? false
         standaloneHint = r["standaloneHint"] as? String
+        standaloneHints = (r["standaloneHints"] as? [String: Any] ?? [:]).compactMapValues { $0 as? String }
         recommend = r["recommend"] as? String
         recommendWhy = r["recommendWhy"] as? String ?? "unknown"
     }

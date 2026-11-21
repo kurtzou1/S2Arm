@@ -4,10 +4,12 @@
 #   bash tests/sibling_root_test.sh。期望按规则手写：
 #   ① 同一 APFS 卷克隆：最后一行「克隆路线：APFS 克隆 N 项」，内容与阶段戳原样
 #   ② 克隆来的根阶段戳 = 本树算出的键 → root_stage_done 判已完成（跳过）；戳是旧提交的键 → 判没完成（照常重做），不因克隆就跳过
-#   ③ 目标在 exFAT 卷（hdiutil 临时盘）：卷不支持 RENAME_EXCL，clonedir 先确认目标不存在再普通改名发布（11-11 起；原先失败关闭，
+#   ③ 目标在 exFAT 卷：卷不支持 RENAME_EXCL，clonedir 先确认目标不存在再普通改名发布（11-11 起；原先失败关闭，
 #      解包 / 产物根 / 播种几个调用方在外接盘上全停，只有本处会退回播种）→ 退出 0、报「普通拷贝」、内容原样；③b 同一目标再发布一次 → 失败、不覆盖
+#      本机不挂 exFAT 映像（11-20 定：hdiutil 建的 exFAT 盘走 fskit 用户态文件系统，11-19 挂死后拖住整机 sync，只能重启清）：
+#      缺省跳过 ③；要验时在真外置 exFAT 盘上跑，S2A_EXFAT_DIR=<那块盘上一个可写目录>（只在里面建、跑完删，不挂任何映像）
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); bad=0; M=
-trap '[ -n "$M" ] && hdiutil detach -quiet "$M" 2> /dev/null; rm -rf "$T"' EXIT
+trap '[ -n "$M" ] && rm -rf "$M"; rm -rf "$T"' EXIT
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
 [ "$(uname -s)" = Darwin ] || { echo "非 macOS：本单测要 APFS / hdiutil，环境未就绪"; exit 75; }
 S=$T/sib; mkdir -p "$S/party@pkg-a/romfs"; echo a > "$S/party@pkg-a/romfs/x"; echo K-new > "$S/party@pkg-a/.stage_romfsidx"; echo K-old > "$S/party@pkg-a/.stage_rewrite"
@@ -17,11 +19,13 @@ ck "① 同卷克隆：退出 0、「${o##*$'\n'}」、内容与阶段戳原样"
 done_() { ( export S2A_ROOTS=$R; source "$H/pack/roots.sh"; root_stage_done "$R/$(cat "$R/G@现行")" "$1" "$2" ); }
 done_ romfsidx K-new; a=$?; done_ rewrite K-new; b=$?
 ck "② 戳 = 本树键 → 跳过（romfsidx ${a}）；戳是旧提交的键 → 重做（rewrite ${b}）" '[ $a = 0 ] && [ $b != 0 ]'
-hdiutil create -quiet -size 40m -fs ExFAT -volname S2ASIBT "$T/x.dmg" && M=$(hdiutil attach -nobrowse -noverify "$T/x.dmg" | tail -1 | awk -F'\t' '{print $NF}')
-if [ -n "$M" ] && [ -d "$M" ]; then
+if [ -z "${S2A_EXFAT_DIR:-}" ]; then echo "跳过 ③：exFAT 不在本机挂映像跑（fskit 挂死会拖住整机 sync）；要验就在真外置 exFAT 盘上跑，设 S2A_EXFAT_DIR=<盘上目录>"
+elif [ "$(diskutil info "$(df -P "$S2A_EXFAT_DIR" | awk 'NR==2{print $1}')" 2> /dev/null | awk -F': *' '/File System Personality/{print $2}')" != ExFAT ]; then
+  echo "不通 ③ S2A_EXFAT_DIR=${S2A_EXFAT_DIR} 不在 exFAT 卷上"; bad=1
+elif M=$(mktemp -d "$S2A_EXFAT_DIR/s2a_sibt.XXXXXX"); [ -n "$M" ] && [ -d "$M" ]; then
   o=$(python3 "$H/tools/clonedir.py" --report "$S/party@pkg-a" "$M/G@sib-pkg-a" 2>&1); r=$?
   ck "③ exFAT：普通拷贝发布、退出 0（${r}）、「${o##*$'\n'}」、内容与阶段戳原样" '[ $r = 0 ] && [[ "$o" == *"普通拷贝"* ]] && [ "$(cat "$M/G@sib-pkg-a/romfs/x")" = a ] && [ "$(cat "$M/G@sib-pkg-a/.stage_romfsidx")" = K-new ]'
   o=$(python3 "$H/tools/clonedir.py" --report "$S/party@pkg-a" "$M/G@sib-pkg-a" 2>&1); r=$?
   ck "③b exFAT 上目标已在 → 再发布失败、不覆盖（${r}）" '[ $r != 0 ] && [ "$(cat "$M/G@sib-pkg-a/romfs/x")" = a ]'
-else echo "不通 ③ hdiutil 建不了 exFAT 临时盘"; bad=1; fi
+else echo "不通 ③ 在 S2A_EXFAT_DIR=${S2A_EXFAT_DIR} 里建不了临时目录"; bad=1; fi
 [ $bad = 0 ] && echo "sibling_root 单测全过" || { echo "sibling_root 单测有不通"; exit 1; }

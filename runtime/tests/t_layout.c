@@ -96,6 +96,17 @@ int main(void) {
       EQ(s2a_alias_big_tops_window(AB, 63, WB + 62464 * MB), 1);
       EQ(s2a_alias_big_tops_window(AB, 57, WB + 59392 * MB + 2 * MB), 0);   // 窗口末比大区末端高一点 → 不弹（宁漏）
       EQ(s2a_alias_big_tops_window(AB, 0, WB + 1024 * MB), 0); }
+    // 分配器预留压小（11-20，改写器 StandardAllocator 初始化闸）：同上那台 Mac（起点 = 窗口 +2048M），应用池 3284M，别名区承诺 64 GiB（伸出窗口）。
+    //   ① 窗口 59392M、要 56G（57344M）：块末 = +59392M = 窗口末，加 8K 保护页放不下 → 压到 (59392 − 2048 − 3284)M − 8K = 54060M − 8K 向下取 GiB = 52G
+    //   ② 窗口 62464M（实测 60 帧、0 远端）：块末 +59392M + 8K ≤ 62464M → 原样 ③ 静态 63 GB（要 62G = 63488M）、窗口 62464M：压到 57132M − 8K → 55G
+    //   ④ 别名区整段在窗口里（别名区长 = 窗口末 − 别名基址）：要多大都原样 ⑤ 窗口只比起点多「应用池 + 512M」：压出来不到 1G → 原样 ⑥ 小块 2G → 原样
+    { const uint64_t WB = 0x70c0000000ull, AB = 0x70ef9fc000ull, P = 3284 * MB;
+      EQ(s2a_sainit_size(AB, 64 * GB, WB + 59392 * MB, P, 56 * GB), 52 * GB);
+      EQ(s2a_sainit_size(AB, 64 * GB, WB + 62464 * MB, P, 56 * GB), 56 * GB);
+      EQ(s2a_sainit_size(AB, 64 * GB, WB + 62464 * MB, P, 62 * GB), 55 * GB);
+      EQ(s2a_sainit_size(AB, WB + 59392 * MB - AB, WB + 59392 * MB, P, 62 * GB), 62 * GB);
+      EQ(s2a_sainit_size(AB, 64 * GB, WB + 2048 * MB + P + 512 * MB, P, 56 * GB), 56 * GB);
+      EQ(s2a_sainit_size(AB, 64 * GB, WB + 59392 * MB, P, 2 * GB), 2 * GB); }
     // 64 GiB 空洞、不是别名优先的款（王国之泪类：要满额堆）：放不下 63G + 526M + 3284M → 乙，堆给满 3284M + 256M 放前段，不是让到 32M
     EQ(s2a_layout_compute(3,80*MB,MOD,0,W,64*GB,&L,&mb,&sb),0); EQ(L.heap_size,3540*MB); EQ(mb,W); EQ(L.stack_size,2*GB); EQ(L.tlsio_base,W+6*GB);
     // 同空洞、别名优先（八方2 / 巫师3 / 异度3 类）：照旧甲，别名区在前、堆让到 32M

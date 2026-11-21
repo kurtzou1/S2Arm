@@ -437,6 +437,7 @@ static int npdm_read(const char *path, uint32_t *as_type, uint64_t *sysres, uint
 }
 static const char *npdm_dir(const char *npdm) {   // main.npdm 所在目录（模块目录）
     static char d[1100]; snprintf(d, sizeof d, "%s", npdm); char *sl = strrchr(d, '/'); if (sl) *sl = 0; else snprintf(d, sizeof d, "."); return d; }
+static int g_alias_alloc;   // 地址表「大区来源 分配器初始化」：静态大区是传给 nn::mem::StandardAllocator 初始化的（s2a_sainit_gate 压得了）；旧表没有这行 = 0
 // 出包静态提示（addr_need.tsv 的「别名区GB」= tools/addr_need.py static_alias_gb：main 里 AllocateAddressRegion 的常量尺寸，按代码特征认、不跑游戏）：
 //   > 0 = 开局在别名区要一整块巨大地址区（GiB，含 SDK 元数据），布局别名优先、按它定别名区承诺（layout.c）；表里「别名区上限 不定」时回负数（不收窗口）。
 //   没有文件 / 没有这一行 = 0；程序号对不上报红、按 0
@@ -444,7 +445,9 @@ static int alias_first_hint(const char *npdm, uint64_t pid) {
     char p[1100]; snprintf(p, sizeof p, "%s", npdm); char *sl = strrchr(p, '/'); snprintf(sl ? sl + 1 : p, sizeof p - (size_t)(sl ? sl + 1 - p : 0), "addr_need.tsv");
     FILE *f = fopen(p, "r"); if (!f) return 0;
     char line[1024]; unsigned long long alias = 0, tp = 0; int has_pid = 0, unbounded = 0;
+    g_alias_alloc = 0;
     while (fgets(line, sizeof line, f)) {
+        if (!strncmp(line, "大区来源\t分配器初始化", strlen("大区来源\t分配器初始化"))) g_alias_alloc = 1;   // addr_need.py：静态大区经 StandardAllocator 初始化申请（改写器闸门压得了）
         if (!strncmp(line, "别名区GB\t", strlen("别名区GB\t"))) alias = strtoull(line + strlen("别名区GB\t"), NULL, 10);
         else if (!strncmp(line, "别名区上限\t不定", strlen("别名区上限\t不定"))) unbounded = 1;
         else if (!strncmp(line, "上限不定原因\t", strlen("上限不定原因\t"))) { line[strcspn(line, "\n")] = 0; LOG("布局提示：别名区上限不定，不收窗口（照旧 64 GiB + 远端）——%s", line + strlen("上限不定原因\t")); }
@@ -512,6 +515,10 @@ static void addr_short_note(int alias_gb) {
     int s2a_alias_big_tops_window(uint64_t, int, uint64_t);
     uint64_t we = L.win_base + L.win_size;
     if (L.alias_base + L.alias_size <= we || !s2a_alias_big_tops_window(L.alias_base, alias_gb, we)) return;
+    if (g_alias_alloc) {   // 静态大区经分配器初始化申请：改写器闸门（s2a_sainit_gate）开局把它压进窗口，这页不弹
+        uint64_t big = (uint64_t)((alias_gb < 0 ? -alias_gb : alias_gb) - 1) << 30, y = s2a_sainit_size(L.alias_base, L.alias_size, we, APP_POOL, big);
+        if (y < big) { LOG("地址空间：静态大区 %d GB 顶到窗口末，来源是分配器初始化，开局闸门会把预留压到 %llu MB，不弹「仍要启动」", alias_gb < 0 ? -alias_gb : alias_gb, (unsigned long long)(y >> 20)); return; }
+    }
     LOG("【黄】地址空间不够这款：静态大区 %d GB 的末端顶到窗口末（窗口 %llu MB），游戏其余地址区会落在窗口外走远端，可能非常卡或停在开头",
         alias_gb < 0 ? -alias_gb : alias_gb, (unsigned long long)(L.win_size >> 20));
 #if TARGET_OS_IPHONE
@@ -1100,6 +1107,18 @@ int s2a_mem_write32_checked(uint64_t addr, uint32_t value) {
 
 // 游戏地址用量（诊断，C# 初始化后 / 收局 / 崩溃各打一次）：窗口里游戏真映射了多少、落在哪——别名区按 1 GB 一档列已映射字节，
 // 另报最低 / 最高已映射地址、堆当前大小、映射表（栈 / 共享内存）合计与最高地址。只读本文件的账，不扫页表
+// 分配器初始化闸（改写器 sdk_sainit：nn::mem::StandardAllocator 初始化 / 构造入口，gate.c aregion 门参数 1）：x1 = 地址、x2 = 尺寸。
+//   地址空（SDK 自己在别名区划地址）且窗口放不下这块 → 把 x2 压到 layout.c s2a_sainit_size 给的大小；其余情况寄存器原样
+void s2a_sainit_gate(uint64_t *regs) {
+    if (regs[1]) return;   // 带缓冲初始化：只用那块缓冲，不占别名区
+    uint64_t size = regs[2], we = L.win_base + L.win_size, y = s2a_sainit_size(L.alias_base, L.alias_size, we, APP_POOL, size);
+    static _Atomic int said;
+    if (y == size) { if (size >= (1ull << 30) && !atomic_exchange(&said, 1)) LOG("分配器预留 %llu MB：%s，不压", (unsigned long long)(size >> 20), L.alias_base + L.alias_size <= we ? "别名区整段在窗口里" : "窗口放得下（或窗口太小压了也不到 1 GiB）"); return; }
+    regs[2] = y;
+    static _Atomic unsigned n; if (atomic_fetch_add(&n, 1) < 8)
+        LOG("分配器预留从 %llu MB 压到 %llu MB（窗口末 %#llx，别名区起 %#llx，块后留应用池 %llu MB 给其余地址区；不压则块顶伸出窗口走远端）",
+            (unsigned long long)(size >> 20), (unsigned long long)(y >> 20), (unsigned long long)we, (unsigned long long)L.alias_base, (unsigned long long)(APP_POOL >> 20));
+}
 void s2a_guest_va_report(const char *when) {
     // 崩溃处理里也调：拿不到锁就不等（只读计数，读到半新不旧也只是诊断）
     // GMU_TRYLOCK 成功返回 1（与旧 pthread_mutex_trylock 的 0 成功相反）；苹果宏也统一成 1。

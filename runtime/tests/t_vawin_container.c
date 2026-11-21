@@ -21,6 +21,8 @@ extern char **environ;
 uint64_t s2a_window_container_need(const char *bundle, const char *home);   // vawin.c
 static char g_home[1300];   // 传给被测函数的 HOME（程序包根在它下面）：缺省是临时目录里的空家目录，不碰本机真实的 ~/Library
 static int bad;
+static int g_gc_reapply;   // GC 档位重选（gclimit.c）的桩：vawin.c 按名取（dlsym），这里计每次占下窗口后调了几次
+__attribute__((visibility("default"), used)) void s2a_gc_limit_reapply(void) { g_gc_reapply++; }
 static void ck(int ok, const char *what) { printf("%s %s\n", ok ? "✓" : "✗", what); if (!ok) bad++; }
 static void put(const char *path, const void *b, size_t n) { FILE *f = fopen(path, "wb"); if (!f) { perror(path); exit(1); } fwrite(b, 1, n, f); fclose(f); }
 // 一款：<dir>/main.npdm（类型 / 系统资源 / 是否 Switch 2）+ main 模块（fixups 表头 + patched.bin 0xD000 字节）
@@ -65,6 +67,7 @@ static unsigned long long single(const char *self, const char *dir) {   // 子�
 }
 // ⑥ 解包专用局（S2A_PACK_APPLY_ONLY=1）构造期不占窗口（解包局用不到客体内存；11-07「匿名窗口拖慢解包」的归因已证否，见 vawin.c）：子进程带 / 不带这个变量各起一次，
 //   读 s2a_window_ok 与窗口长度。期望：带 → 0 / 0；不带（对照）→ 窗口照占（1、长度 > 0）
+static int g_child_gc;   // 子进程里 GC 档位重选被调的次数
 static int winok(const char *self, const char *dir, int apply_only, unsigned long long *size_mb) {
     char out[1200]; snprintf(out, sizeof out, "%s/winok.txt", dir);
     posix_spawn_file_actions_t fa; posix_spawn_file_actions_init(&fa);
@@ -74,11 +77,11 @@ static int winok(const char *self, const char *dir, int apply_only, unsigned lon
     char *av[] = {(char *)self, (char *)dir, "winok", NULL}; pid_t p; int st = -1;
     if (posix_spawn(&p, self, &fa, NULL, av, environ) || waitpid(p, &st, 0) != p) st = -1;
     posix_spawn_file_actions_destroy(&fa); unsetenv("S2A_PACK_APPLY_ONLY");
-    FILE *f = fopen(out, "r"); int ok = -1; *size_mb = 0; if (!f || fscanf(f, "%d %llu", &ok, size_mb) != 2) ok = -1; if (f) fclose(f);
+    FILE *f = fopen(out, "r"); int ok = -1; *size_mb = 0; g_child_gc = -1; if (!f || fscanf(f, "%d %llu %d", &ok, size_mb, &g_child_gc) != 3) ok = -1; if (f) fclose(f);
     return ok;
 }
 int main(int argc, char **argv) {
-    if (argc == 3 && !strcmp(argv[2], "winok")) { uint64_t base, size; s2a_window_get(&base, &size); printf("%d %llu\n", s2a_window_ok(), (unsigned long long)(size >> 20)); return 0; }
+    if (argc == 3 && !strcmp(argv[2], "winok")) { uint64_t base, size; s2a_window_get(&base, &size); printf("%d %llu %d\n", s2a_window_ok(), (unsigned long long)(size >> 20), g_gc_reapply); return 0; }
     if (argc == 3 && !strcmp(argv[2], "child")) { uint64_t nd, fit; s2a_window_need(&nd, &fit); printf("%llu\n", (unsigned long long)(nd >> 20)); return 0; }
     unsetenv("S2A_WIN_NEED_MB"); unsetenv("S2A_VAWIN_NORESERVE"); unsetenv("S2A_VA_CAP_MB"); unsetenv("S2A_VA_IOS26");
     char tmp[] = "/tmp/t_vawin_container.XXXXXX"; if (!mkdtemp(tmp)) { printf("✗ mkdtemp\n"); return 1; }
@@ -95,7 +98,11 @@ int main(int argc, char **argv) {
     { unsigned long long sz_on = 0, sz_off = 0; snprintf(p, sizeof p, "%s/Games/%s", b, A);
       int on = winok(argv[0], p, 1, &sz_on), off = winok(argv[0], p, 0, &sz_off);
       printf("  解包专用局 窗口 %d / %llu MB；对照 %d / %llu MB\n", on, sz_on, off, sz_off);
-      ck(on == 0 && sz_on == 0 && off == 1 && sz_off > 0, "⑥ 解包专用局（S2A_PACK_APPLY_ONLY=1）构造期不占窗口；不带时照占（对照）"); }
+      int gc_off = g_child_gc;
+      ck(on == 0 && sz_on == 0 && off == 1 && sz_off > 0, "⑥ 解包专用局（S2A_PACK_APPLY_ONLY=1）构造期不占窗口；不带时照占（对照）");
+      // ⑨ 占下窗口后按占完的低区重选 GC 档位（诊断#f1e327：多款容器起宿主前补占窗口，档位仍是按整块空洞选的 10 GB 总上限档，.NET 初始化失败）：
+      //   补占 / 重占（s2a_window_reserve_late）与构造期走同一个占窗口函数，这里核那个函数占成功后调了 1 次重选
+      ck(gc_off == 1, "⑨ 占下窗口后调一次 GC 档位重选（补占 / 重占走同一处）"); }
     // ②
     uint64_t pool0 = s2a_app_pool(), r;
     snprintf(b, sizeof b, "%s/ab", tmp); bundle(b, (const char *[]){A, B}, (const int[]){0, 1}, 2);

@@ -28,12 +28,29 @@ public sealed partial class EnvironmentWindow
     // First Apple ID sign-in happens in Impactor itself (the password never passes through S2Arm); the checklist re-asks every 5 s and ticks when done.
     private void OpenBundledImpactor() => TryOpenBundledImpactor();
 
+    /// <summary>Impactor 窗口日志：&lt;私有目录&gt;/logs/impactor-gui.log；超过 1 MB 挪成 impactor-gui.old.log 再开新的（只留两份，有界）</summary>
+    private string ImpactorLog()
+    {
+        var dir = Path.Combine(privateRoot, "logs");
+        var log = Path.Combine(dir, "impactor-gui.log");
+        try
+        {
+            Directory.CreateDirectory(dir);
+            if (new FileInfo(log) is { Exists: true, Length: > 1 << 20 }) File.Move(log, Path.Combine(dir, "impactor-gui.old.log"), overwrite: true);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }   // 挪不动照样追加：日志不挡打开 Impactor
+        return log;
+    }
+
     private bool TryOpenBundledImpactor()
     {
         var ok = false;
         try
         {
-            using var p = Process.Start(new ProcessStartInfo(BundledImpactor) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(BundledImpactor)! });
+            var start = new ProcessStartInfo(BundledImpactor) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(BundledImpactor)! };
+            // 自编 Impactor 补丁 0004：窗口程序没有控制台，日志（登录提交 / 成功 / 失败原因）追加进这个文件，诊断包按 logs/*.log 收（同一套脱敏）
+            start.Environment["S2A_IMPACTOR_LOG"] = ImpactorLog();
+            using var p = Process.Start(start);
             if (p is null) installDiagnostics = T("process.start_failed"); else ok = true;
         }
         catch (Exception error) when (error is IOException or System.ComponentModel.Win32Exception or InvalidOperationException)
@@ -128,6 +145,8 @@ public sealed partial class EnvironmentWindow
     // 当前 / 最近一次手机作业属于哪一款（#308：原先只有一份「当前安装」状态、没记是哪款，回游戏库再点别的游戏，进度会画到那款上）。
     //   installSeen：跑完后玩家回安装页看过结果没有；没看过时顶栏胶囊一直在。进度计数来自作业事件 done / total / unit（推资源包按字节，机上解包按包）
     private string? installGameId, installGameName;
+    /// <summary>正在 / 刚刚装的那一单装到哪台（导出确认页逐台结果按它把进度画在对的那一行；导出到文件夹为 ""）</summary>
+    private string installDevice = "";
     private long? installDone, installTotal;
     private string installUnit = "";
     private DateTime installRateAt; private long installRateBase; private double? installRate;
@@ -169,7 +188,8 @@ public sealed partial class EnvironmentWindow
     {
         if (installGameId is null) return;
         libraryFolder = libraryFolderBox.Text ?? libraryFolder;
-        selectedGame = installGameId; readinessFor = null; Navigate("install");
+        selectedGame = installGameId; readinessFor = null;
+        Navigate(exportRuns.ContainsKey(installGameId) ? "exportgame" : "install");   // 导出确认页起的那一单：回逐台结果（走查：胶囊点进去是旧的装机页）
     }
 
     /// 顶栏胶囊（#308，Mac 同款）：装机在跑 → 「正在推到 iPhone：X · 查看进度」；跑完没回去看 → 「已装到 / 没装完 · 查看」。正看着这款的安装页时不显示
@@ -224,14 +244,14 @@ public sealed partial class EnvironmentWindow
     /// 装机在跑时只锁正在装的那款（玩家装一款大游戏的十几分钟里别的照常用）。原先漏了导入：导入中还能点出包（启动器剃刀 W20）
     private bool BusyFor(LibraryGame game) => jobs.Any(j => j.Blocks(game.Id));
     /// <summary>这款的手机作业（装机 / 导出已出好的）现在点不了：出包和别的手机作业不挡（排队），导入 / 游戏库 / 释放空间等照旧挡；已排上的也灰</summary>
-    private bool PhoneBlockedFor(LibraryGame game) => jobs.Any(j => j.Kind is not (JobKind.Pack or JobKind.Phone) && j.Blocks(game.Id)) || PhoneQueued(game.Id);
+    private bool PhoneBlockedFor(LibraryGame game) => jobs.Any(j => j.Kind is not (JobKind.Pack or JobKind.Phone or JobKind.Update) && j.Blocks(game.Id)) || PhoneQueued(game.Id);   // 更新这款在跑：推的那单排在它后面（PackHolds）
     private LibraryGame? SelectedGame => catalog?.Games.FirstOrDefault(g => g.Id == selectedGame && !g.Hidden);
     private static double Clock => DateTime.UtcNow.Subtract(DateTime.UnixEpoch).TotalSeconds;
 
     /// <summary>Pages owned by this file; false = not one of them.</summary>
     private bool RenderPackPages(StackPanel body)
     {
-        if (page is not ("build" or "progress" or "install" or "phoneupdate")) return false;
+        if (page is not ("build" or "progress" or "install" or "phoneupdate" or "exportgame")) return false;
         EnsureTicker();
         if (page == "progress" && packGame is null) page = "build";
 
@@ -241,11 +261,12 @@ public sealed partial class EnvironmentWindow
         if (page == "build") RenderExport(contentBody);
         else if (page == "progress") RenderProgress(contentBody);
         else if (page == "phoneupdate") contentBody.Children.Add(Card(PhoneUpdateCard()));   // 更新手机上的 S2Arm（InstallModePage.cs）
+        else if (page == "exportgame") RenderExportGame(contentBody);   // 导出确认页 / 逐台结果（ExportFlow.cs）
         else RenderInstall(contentBody);
 
         // 底部操作栏：出包选择页、装机页左上角已有同去游戏库的「← 游戏库」，不再在底栏重复一个（11-14 体验梳理）；
         //   进度页（停止 / 回游戏库）与手机更新页（没有别的返回入口）照旧
-        var bottomBar = page is "build" or "install" ? null : RenderBottomBar();
+        var bottomBar = page is "build" or "install" or "exportgame" ? null : RenderBottomBar();
 
         // 出包 / 进度 / 装机页没有游戏库页那条顶栏：胶囊放在这些页顶部，在哪页都找得回装机（#308）；装机进度事件只刷新胶囊这一格
         Control? top = PhonePill() is null ? null
@@ -397,11 +418,8 @@ public sealed partial class EnvironmentWindow
         if (DownstreamRow(game) is { } downstream) body.Children.Add(downstream);   // 移植方案（#1272，同 Mac ExportView downstream）：选过才出，能「更改」
 
         // platforms
-        var heading = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
-        heading.Children.Add(Label(T("export.platforms"), 16));
-        var existing = Action(PadKey("export.install_existing"), () => { readinessFor = null; Navigate("install"); }, !PhoneBlockedFor(game));   // 装机中也能进装机页：看别的游戏时提示「另一款正在装 · 查看那一款」
-        Grid.SetColumn(existing, 1); heading.Children.Add(existing);
-        body.Children.Add(heading);
+        // iPhone 的去向不在出包页（0.6.4「更新 / 导出」改版）：原先右上「已有 iPhone 包？推到 iPhone」、下方「出完之后」两张卡都拆掉，推 / 导出只走游戏库「导出…」
+        body.Children.Add(Label(T("export.platforms"), 16));
         if (!androidProbed) { androidProbed = true; _ = LoadAndroidPhonesAsync(); }   // 安卓卡开不开由作业层回报（开关缺省关：关着照旧「即将推出」）
         var tiles = new UniformGrid { Columns = 5 };
         foreach (var platform in new[] { PlatformIos, PlatformTv, "mac", "android", "ohos" })
@@ -434,7 +452,6 @@ public sealed partial class EnvironmentWindow
         body.Children.Add(tiles);
         body.Children.Add(LocationRow(game));
         if (exportAndroid && androidEnabled) body.Children.Add(AndroidPhoneRow(game));   // 出好装到哪台安卓手机；不选 / 没连 = 只出 APK
-        if (exportIos) body.Children.Add(IosAfterPackPicker(game));   // 出完之后：装到 iPhone（下面是签名身份）/ 导出自签 IPA（11-16 维护者：一个入口、两条分叉各走到底）
 
         // action bar
         var bar = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 16 };
@@ -445,7 +462,7 @@ public sealed partial class EnvironmentWindow
         reason.Children.Add(Muted(blocker ?? (behind is not null ? T("export.queue.behind").Replace("{0}", behind.Name) : T("export.hint")), 14));
         if (ExportBlockerKind(game) == "keys") reason.Children.Add(Action("nav.library", () => Navigate("library")));
         bar.Children.Add(reason);
-        var start = Primary(T(behind is not null ? "export.action.queue" : !exportIos ? "export.start" : IosAfterPack == "export" ? "export.start.selfsign" : "export.start.install"), () => StartPackBranch(game), !ExportStops(game));   // 缺文件 / 缺 keys 只在左边提示，不置灰（作业层核实）
+        var start = Primary(T(behind is not null ? "export.action.queue" : "export.start"), () => _ = StartPackAskedAsync(game), !ExportStops(game));   // 缺文件 / 缺 keys 只在左边提示，不置灰（作业层核实）
         AutomationId(start, "export.start");
         Grid.SetColumn(start, 1); bar.Children.Add(start);
         body.Children.Add(Card(bar, 18));
@@ -765,7 +782,7 @@ public sealed partial class EnvironmentWindow
 
     private string? ExportBlockerKind(LibraryGame game)
     {
-        if (!exportIos && !exportTv && !(exportAndroid && androidEnabled)) return "platform";
+        if (!exportIos && !exportTv && !(exportAndroid && androidEnabled) && !ExportRunPacking(game.Id)) return "platform";   // 导出时先做 iPhone 版：只出 iPhone，不看出包页勾的平台
         if (game.Missing.Count > 0) return "files";
         if (game.NeedsKeys && catalog?.KeysReady != true) return "keys";
         if (exportQueue.Any(q => q.Game.Id == game.Id)) return "queued";
@@ -795,9 +812,9 @@ public sealed partial class EnvironmentWindow
     /// 控制口（AI 操作）直接走 StartPack，不弹页</summary>
     private async Task StartPackAskedAsync(LibraryGame game)
     {
-        if (game.Downstream is { Choice: null } && exportIos)
+        if (game.Downstream is { Choice: null } && (exportIos || ExportRunPacking(game.Id)))
         {
-            if (!await ChooseDownstreamAsync(game)) { selfSignAfterPack.Remove(game.Id); Render(); return; }
+            if (!await ChooseDownstreamAsync(game)) { exportRuns.Remove(game.Id); Render(); return; }   // 关掉方案确认页 = 这次不出，也不导出
             game = catalog?.Games.FirstOrDefault(g => g.Id == game.Id) ?? game;
         }
         StartPack(game);
@@ -892,9 +909,10 @@ public sealed partial class EnvironmentWindow
         {
             var (queued, spaceOverride, location) = exportQueue[0];
             var game = catalog?.Games.FirstOrDefault(g => g.Id == queued.Id && !g.Hidden);
-            if (game is not null && (exportIos || exportTv) && LockedNow(game)) return;   // 暂时锁着：留在排头，等作业收尾再来
+            var wanted = game is not null && (exportIos || exportTv || ExportRunPacking(game.Id));
+            if (game is not null && wanted && LockedNow(game)) return;   // 暂时锁着：留在排头，等作业收尾再来
             exportQueue.RemoveAt(0);
-            if (game is null || !exportIos && !exportTv) continue;   // 已不在游戏库 / 平台都没勾：拿掉，接着下一款
+            if (game is null || !wanted) continue;   // 已不在游戏库 / 平台都没勾：拿掉，接着下一款
             var watching = page == "progress";
             packLocation = location;
             ResetPack(game);
@@ -924,88 +942,26 @@ public sealed partial class EnvironmentWindow
     private Task RunPackAsync(LibraryGame game, bool spaceOverride)
     {
         var platforms = new List<string>();
-        if (exportIos) platforms.Add("iphone");
-        if (exportTv) platforms.Add("appletv");
-        if (exportAndroid && androidEnabled) platforms.Add("android");
+        var forExport = ExportRunPacking(game.Id) ? exportRuns[game.Id] : null;   // 导出确认页起的：只出 iPhone（出包页勾的平台不带进来）
+        if (exportIos || forExport is not null) platforms.Add("iphone");
+        if (exportTv && forExport is null) platforms.Add("appletv");
+        if (exportAndroid && androidEnabled && forExport is null) platforms.Add("android");
         var plan = ExportStream.InlinePlan(game.Id, game.Name, platforms, packLocation, spaceOverride);
         if (platforms.Contains("android") && AndroidPhone is { } serial) plan["androidSerial"] = serial;   // 出好接着装到这台安卓手机（export_plan → installSerial）
         if (SGradeOff().Contains(game.Id)) plan["sgrade"] = false;   // 出包页取消「S 级优化（Beta）」：这次不带社区补丁与金手指（pack/jobs/patches.py prepare）
-        return RunExportAsync(plan, batch: false, mode: selfSignAfterPack.Contains(game.Id) ? "export" : null);
+        return RunExportAsync(plan, batch: false, mode: forExport is { Devices.Count: 0 } ? "export" : null);   // 出完导出到文件夹：步骤名照自签路写
     }
 
     // 这一步收到 stepEnded 没有（没收到 = 编排作业在第一步前就结束了：被拒、已有一个在出、取消）；子作业的终态（失败页的原因 / 建议从这里读）
     private bool exportStepEnded;
     private LibraryJobResult? exportChildReport;
 
-    /// <summary>跑一个出包编排作业：每一步的开始 / 子作业事件 / 结局都由 OnExportEvent 显示；取消 = 取消这个作业（它把正在出的那步停下）</summary>
-    private LibraryGame? exportAfterPack;   // 这次出完要接着导出的那款（出包作业收尾后起导出）
-    /// <summary>「导出自签包」点在没出过包的款上：这几款出完 iPhone 包接着导出（不是装机）</summary>
-    private readonly HashSet<string> selfSignAfterPack = new();
-    /// <summary>出包页选了「出完装到 iPhone」的款：iPhone 包出好接着装（同 selfSignAfterPack，走装机）</summary>
-    private readonly HashSet<string> installAfterPack = new();
-    private LibraryGame? installAfterPackGame;
-    /// <summary>出包页「出完之后」玩家选的那条路（install / export），记在私有目录（ios-after-export 在 = 导出自签）；「更新 iPhone 上的 S2Arm」也按它走</summary>
-    private string IosAfterPack
-    {
-        get => File.Exists(Path.Combine(privateRoot, "ios-after-export")) ? "export" : "install";
-        set
-        {
-            try { PrivateJobRequest.EnsurePrivateRoot(privateRoot); var f = Path.Combine(privateRoot, "ios-after-export"); if (value == "export") File.WriteAllBytes(f, []); else File.Delete(f); }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
-        }
-    }
-
-    /// <summary>玩家选了「出完导出自签 IPA」：自动装到手机（连上就更新、新版首启横幅）一律跳过，玩家自己签名安装</summary>
-
-    /// <summary>出包页的「开始」：出 iPhone 时按「出完之后」那条路一步走完（装到 iPhone / 导出自签包）</summary>
-    private void StartPackBranch(LibraryGame game)
-    {
-        if (exportIos) { if (IosAfterPack == "export") selfSignAfterPack.Add(game.Id); else installAfterPack.Add(game.Id); }
-        _ = StartPackAskedAsync(game);
-    }
-
-    /// <summary>出包页「出完之后」：两张卡二选一（同 Mac IosAfterPackPicker）；装到 iPhone 时下面接签名身份那一行</summary>
-    private Control IosAfterPackPicker(LibraryGame game)
-    {
-        var panel = new StackPanel { Spacing = 10 };
-        panel.Children.Add(Muted(T("export.after.title"), 13));
-        var row = new Grid { ColumnDefinitions = new ColumnDefinitions("*,*"), ColumnSpacing = 12 };
-        var i = 0;
-        foreach (var (id, title, note) in new[] { ("install", "export.after.install", "export.after.install_note"), ("export", "export.after.export", "export.after.export_note") })
-        {
-            var on = IosAfterPack == id;
-            var text = new StackPanel { Spacing = 4 };
-            text.Children.Add(Label((on ? "● " : "○ ") + T(title), 15));
-            var n = Muted(T(note), 12); n.TextWrapping = TextWrapping.Wrap; text.Children.Add(n);
-            var card = new Button { Content = text, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Left,
-                VerticalAlignment = VerticalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Top,   // 两张卡同高（说明长短不同也不错位）
-                Padding = new Thickness(14, 12), CornerRadius = new CornerRadius(12), Foreground = Ink,
-                Background = on ? Brush.Parse("#2A2722") : Surface, BorderBrush = on ? Accent : Brush.Parse("#2A2A2E"), BorderThickness = new Thickness(on ? 1.5 : 1) };
-            AutomationId(card, "export.after." + id);
-            card.Click += (_, _) => { IosAfterPack = id; Render(); };
-            Grid.SetColumn(card, i++); row.Children.Add(card);
-        }
-        panel.Children.Add(row);
-        if (IosAfterPack != "export") panel.Children.Add(InstallModeLine());
-        panel.Children.Add(Card(LayoutCards(game.Id), 14));   // 装到手机 / 导出两种去向都按这款的出法走（0.6.4）：出法两张卡 + 卡片下方一行提示
-        return panel;
-    }
-
-    /// <summary>这次装机作业是导出自签包：进度 / 结局按导出写，装机页只画结局卡、不画装机清单</summary>
+    /// <summary>这次装机作业是导出到文件夹（install mode = export）：进度 / 结局按导出写，装机页只画结局卡、不画装机清单</summary>
     private bool installExport;
 
-    /// <summary>游戏库「导出自签包」（11-15 维护者：导出不是装法，按钮常驻、1 下开始导出、不经装机清单）：iPhone 包能直接导出（新格式）的直接导出；
-    ///   没出过、或包是旧格式的先出 iPhone 包再导出（玩家点的是导出，就把导出做完）</summary>
-    private void ExportSelfSign(LibraryGame game)
-    {
-        libraryFolder = libraryFolderBox.Text ?? libraryFolder;
-        selectedGame = game.Id;
-        if (game.IphoneExportable) { _ = InstallAsync(game, export: true); Navigate("install"); return; }
-        selfSignAfterPack.Add(game.Id);
-        if (ExportStops(game)) { selfSignAfterPack.Remove(game.Id); OpenBuild(); return; }   // 出不了（缺文件 / 没勾 iPhone 等）：去出包页看原因
-        _ = StartPackAskedAsync(game);
-    }
+    private ExportRun? exportAfterPack;   // 这次出完要接着导出的那一单（导出确认页起的，出包作业收尾后接着导出 / 推，ExportFlow.cs）
 
+    /// <summary>跑一个出包编排作业：每一步的开始 / 子作业事件 / 结局都由 OnExportEvent 显示；取消 = 取消这个作业（它把正在出的那步停下）</summary>
     private async Task RunExportAsync(Dictionary<string, object?> plan, bool batch, string? mode = null)
     {
         var front = packJob!;
@@ -1040,9 +996,8 @@ public sealed partial class EnvironmentWindow
                 EndJob(front); if (packJob == front) packJob = null;
                 AfterArtifactJob(); Render();
                 if (batch) _ = BatchExportEndedAsync(job?.Report, error);
-                else if (exportAfterPack is { } g) { exportAfterPack = null; selfSignAfterPack.Remove(g.Id); _ = InstallAsync(g, export: true); }
-                else if (installAfterPackGame is { } ig) { installAfterPackGame = null; installAfterPack.Remove(ig.Id); _ = InstallAsync(ig); Navigate("install"); }   // 选了「出完装到 iPhone」：接着装
-                else if (packGame is { } pg) { selfSignAfterPack.Remove(pg.Id); installAfterPack.Remove(pg.Id); }   // 出包没成（起不来 / 失败 / 取消）：标记清掉，这款以后正常出包不再当导出画
+                else if (exportAfterPack is { } run) { exportAfterPack = null; ContinueExportRun(run); }   // 导出确认页起的：iPhone 版做好了，接着导出 / 逐台推
+                else if (packGame is { } pg && ExportRunPacking(pg.Id)) PackFailedForExport(pg.Id);   // 出包没成（起不来 / 失败 / 取消）：那一单停在「没做好」，写原因
                 if (!batch) PumpExportQueue();
             });
         }
@@ -1086,9 +1041,8 @@ public sealed partial class EnvironmentWindow
                 {
                     readinessFor = null;
                     if (packGame is not null) finishedPacks[packGame.Id] = (packState, packIpa ?? "", packIpaBytes, packPackBytes, packSeconds ?? 0);
-                    // 「导出自签包」点在没出过包的款上：出好就接着导出（D-9ZF9，同 Mac exportSink）；导出不连手机、不签名，等这次出包作业收尾后起
-                    if (!batch && packGame is not null && selfSignAfterPack.Contains(packGame.Id)) exportAfterPack = packGame;
-                    else if (!batch && packGame is not null && installAfterPack.Contains(packGame.Id)) installAfterPackGame = packGame;
+                    // 导出确认页起的、这款要先做好 iPhone 版：出好就接着导出 / 推（D-9ZF9，同 Mac exportSink），等这次出包作业收尾后起
+                    if (!batch && packGame is not null && ExportRunPacking(packGame.Id)) exportAfterPack = exportRuns[packGame.Id];
                 }
                 if (batch) _ = ReloadBatchAsync();
                 Render();
@@ -1548,11 +1502,11 @@ public sealed partial class EnvironmentWindow
 
             // 两个大按钮
             var buttons = new WrapPanel { Orientation = Orientation.Horizontal };
-            // 这次出包是为了导出自签包：按钮与说明照导出写（不写「一键装到 iPhone」），点了直接导出（D-9ZF9）
-            var selfSign = packGame is not null && selfSignAfterPack.Contains(packGame.Id);
-            var install = selfSign
-                ? Primary(T("library.hero.selfSign"), () => { if (packGame is { } g) ExportSelfSign(g); })
-                : Primary(T(PadKey("export.done.install")), () => { readinessFor = null; if (!installBusy) installExport = false; Navigate("install"); });
+            // 主按钮只有「导出…」（0.6.4 改版：推到手机 = 导出时勾设备）；这次出包是导出确认页起的 → 「查看导出」回那一单的逐台结果
+            var forExport = packGame is not null && exportRuns.ContainsKey(packGame.Id);
+            var install = forExport
+                ? Primary(T("export.run.view"), () => { if (packGame is { } g) { selectedGame = g.Id; Navigate("exportgame"); } })
+                : Primary(T("library.hero.export"), () => { if (packGame is { } g) OpenExport(g); });
             AutomationId(install, "progress.install");
             install.Margin = new Thickness(0, 0, 12, 0); buttons.Children.Add(install);
             // IPA 是装机时组装、整个游戏库共用一份（默认位置根 S2Arm.ipa）：出包这步没有 IPA，只给「打开游戏文件夹」（按索引找这款实际所在的位置）
@@ -1566,7 +1520,6 @@ public sealed partial class EnvironmentWindow
             folder.Margin = new Thickness(0, 0, 12, 0); buttons.Children.Add(folder);
             result.Children.Add(buttons);
             if (revealProblem.Length > 0) result.Children.Add(Muted(revealProblem, 13));
-            result.Children.Add(Muted(T(selfSign ? "export.done.exportNote" : "export.win.done.installNote"), 12));
 
             // 详细记录（折叠步骤列表）
             if (estimate is not null)
@@ -1803,7 +1756,7 @@ public sealed partial class EnvironmentWindow
             ? () => { _ = again(); } : (Action?)null;
         state.Children.Add(PhoneJobCard(installTrack, installState, installMessage, installDiagnostics, game.Id, notes, showsOperation: showsOperation, retry: retry,
             finish: () => { installState = ""; installSeen = true; revealProblem = ""; Navigate("library"); },
-            switchExport: installState is "failed" or "interrupted" && !installExport && installTrack.Kind == "install" ? () => { IosAfterPack = "export"; ExportSelfSign(game); } : null));
+            switchExport: installState is "failed" or "interrupted" && !installExport && installTrack.Kind == "install" ? () => OpenExport(game, sign: ExportChoice.SelfSign) : null));
         if (installState is "failed" && installChoice is { } choice)   // 装着不止一个 S2Arm、还没选：就在这页选，选好自动重推这一款
         {
             var phone = new PhoneOverview.Phone(choice.Device, "", true, false, null, false, null, null, null, [], NeedsChoice: true, Candidates: choice.Candidates);
@@ -1862,29 +1815,34 @@ public sealed partial class EnvironmentWindow
 
     /// <summary>accept：玩家已同意的确认参数（ConfirmCodes 的值，逐次累积）。ask = false（控制口）原样失败、不弹确认，由调用方带参数再发。</summary>
     /// <param name="export">游戏库「导出自签包」：不连手机、不签名，出到文件夹（作业层 install 请求带 mode = export，不带设备）</param>
-    /// <param name="device">装到哪台（总控台「续签」带那台的设备号）；不给 = 清单报回来的那台 / 装机记录里的那台（InstallDevice）</param>
-    private async Task InstallAsync(LibraryGame game, IReadOnlySet<string>? accept = null, bool ask = true, bool export = false, string? device = null)
+    /// <param name="device">装到哪台（导出确认页勾的那台）；不给 = 清单报回来的那台 / 装机记录里的那台（InstallDevice）</param>
+    /// <param name="sign">导出确认页选的签名方式（请求字段 sign：appleId / devCert / none）；不给 = 作业层按设置</param>
+    /// <param name="onDone">导出确认页逐台排队用：这一单最终的结局（状态、给玩家的那句、失败码）；问「仍然继续」重发的那次结束才报。
+    ///   给了就不做「这款已在推 / 已排上」的去重（同一款逐台推，排队由导出那一单自己串）</param>
+    private async Task InstallAsync(LibraryGame game, IReadOnlySet<string>? accept = null, bool ask = true, bool export = false, string? device = null,
+        string? sign = null, Action<string, string, string?>? onDone = null)
     {
-        if (PhonePushing(game.Id) || PhoneQueued(game.Id)) return;   // 这一款已在推 / 已排上：不重复排（按钮已置灰；控制口来的重复请求也挡在这）。排队的那单出队后才执行、确认后的续推在前一单结束后才发，都不受影响
-        if (QueuePhone(game.Id, () => InstallAsync(game, accept, ask, export, device))) return;   // 出包在跑不挡；手机上装机在跑 / 这款正在出包 → 排队
+        if (onDone is null && (PhonePushing(game.Id) || PhoneQueued(game.Id))) return;   // 这一款已在推 / 已排上：不重复排（按钮已置灰；控制口来的重复请求也挡在这）。排队的那单出队后才执行、确认后的续推在前一单结束后才发，都不受影响
+        if (QueuePhone(game.Id, () => InstallAsync(game, accept, ask, export, device, sign, onDone))) return;   // 出包在跑不挡；手机上装机在跑 / 这款正在出包 / 正在更新 → 排队
         accept ??= new HashSet<string>();
         var target = export ? "" : device ?? InstallDevice(game);
         var sent = accept;
-        lastInstall = () => InstallAsync(game, sent, ask, export, target);   // 失败页「重试」：同样的参数再发一次
-        installExport = export; installChoice = null;
+        lastInstall = () => InstallAsync(game, sent, ask, export, target, sign, onDone);   // 失败页「重试」：同样的参数再发一次
+        installExport = export; installChoice = null; installDevice = target; installCode = null;
         var front = BeginPhoneJob(game, "");
         string? dropAsk = null, askCode = null;
         try
         {
             var extra = AcceptExtra(accept, target) ?? new Dictionary<string, object?>();
             if (export) extra["mode"] = "export";
+            if (sign is not null) extra["sign"] = sign;
             if (!HomeWidget) extra["widget"] = false;   // 玩家关了「装到 iPhone 时带主屏小组件」
             var job = await PackJobClient.RunAsync(PackRequest("install", game.Id, extra), e => Dispatcher.UIThread.Post(() => IngestPhoneEvent(e)), front.Token, front.Next());
             if (ask && JobCode(job) is { } c && ConfirmCodes.ContainsKey(c)) { dropAsk = job.Report.Message; askCode = c; }
             installedTo = job.Report.Succeeded ? InstalledLabel(job.Report.Result) : "";
             installCode = job.Report.Succeeded ? null : JobCode(job);
             installChoice = !job.Report.Succeeded && PhoneOverview.ChoiceFacts(job.Report.Diagnostics) is { } choice
-                ? new PushChoice(choice.Device, choice.Candidates, job.Report.Message, () => InstallAsync(game, accept, ask, export, device)) : null;
+                ? new PushChoice(choice.Device, choice.Candidates, job.Report.Message, () => InstallAsync(game, accept, ask, export, device, sign, onDone)) : null;
             installState = job.Report.State;
             installMessage = job.Report.Succeeded && job.Report.Result.TryGetProperty("device", out var on) && on.ValueKind == JsonValueKind.String
                 ? T("install.device") + " · " + on.GetString() : job.Report.Message;
@@ -1903,8 +1861,10 @@ public sealed partial class EnvironmentWindow
             OperationCanceledException or PlatformNotSupportedException or System.ComponentModel.Win32Exception)
         { installState = "failed"; installDiagnostics = error.Message; }
         finally { EndJob(front); readinessFor = null; DynamicFinished(installState); AfterArtifactJob(); Render(); }
+        var (endState, endMessage, endCode) = (installState, installState is "succeeded" ? "" : installMessage, installCode);
         if (dropAsk is not null && await ConfirmInstallActionAsync("install.drop", dropAsk, ConfirmTitle(askCode), askCode, game))
-            await InstallAsync(game, new HashSet<string>(accept) { ConfirmCodes[askCode!] }, export: export, device: device);
+            await InstallAsync(game, new HashSet<string>(accept) { ConfirmCodes[askCode!] }, export: export, device: device, sign: sign, onDone: onDone);
+        else onDone?.Invoke(endState, endMessage, endCode);
     }
 
     /// 装到哪台：清单报回来的那台（续签时就是当初那台，在线才有），没有就是装机记录里的那台（不在线时作业层如实说「它不在线」）。

@@ -18,8 +18,6 @@ struct ExportView: View {
     @State private var hoveredPlatform: ExportPlatform?
     /// S 级优化卡片报了「这款什么都没有」的游戏号（整张卡不出）
     let game: GameSummary
-    /// 打开装机页（已出过 iPhone 包的款直接装）。
-    let install: () -> Void
 
     var body: some View {
         ExportPageLayout {
@@ -65,11 +63,6 @@ struct ExportView: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(loc.t("s2arm.export.platforms")).font(.manrope(15, .semibold)).foregroundStyle(.secondary).padding(.leading, 2)
                 Spacer()
-                if game.iphoneReady {
-                    Button(loc.t(model.installKey("s2arm.export.installExisting")), action: install)
-                        .controllerButtonStyle(.plain).font(.manrope(12.5, .semibold)).foregroundStyle(LauncherPalette.cream.opacity(0.85))
-                        .controllerID("export.install").controllerShortcut(.rightTrigger, focused: true)
-                }
                 if game.appleTvReady {   // 已出过 Apple TV 包：直接装到 Apple TV（tvInstall 作业）
                     Button(x("installAppleTV")) { model.installAppleTV(game) }
                         .controllerButtonStyle(.plain).font(.manrope(12.5, .semibold)).foregroundStyle(LauncherPalette.cream.opacity(0.85))
@@ -90,7 +83,6 @@ struct ExportView: View {
     private var optionsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             locationRow
-            if model.exportTargets.contains(.ios) { IosAfterPackPicker(model: model, gameId: game.id) }   // 出完之后：装到 iPhone / 导出自签 IPA（11-16 维护者：一个入口、两条分叉各走到底）
             if model.exportTargets.contains(.tvos) || game.appleTvReady {
                 appleTVRow
                 AppleTVXcodeTeam(model: model).padding(.leading, 2)   // Apple TV 装机仍用 Xcode 团队（tvos.install_tv）：引导项目 / 手填团队号只在这里
@@ -303,7 +295,8 @@ struct ExportView: View {
             Button(loc.t("s2arm.job.cancel")) { model.exportFor = nil }
                 .controllerButtonStyle(LauncherSecondaryButtonStyle(prominent: true))
                 .keyboardShortcut(.cancelAction).controllerID("export.cancel").controllerShortcut(.back)
-            Button { model.startExport(game, location: location.isEmpty ? nil : location) } label: {
+            // 出 iPhone 包只出包（0.6.4 维护者：推到设备 / 导出只走游戏详情区的「导出…」确认页，出包页不再有 iPhone 的「出完之后」）
+            Button { _ = model.export(game, location: location.isEmpty ? nil : location) } label: {
                 Label(model.mainBusy || model.phoneHolds(game.id) ? x("action.queue") : startTitle, systemImage: "shippingbox.fill")
             }
             .controllerButtonStyle(LauncherPrimaryButtonStyle(prominent: true))
@@ -311,7 +304,7 @@ struct ExportView: View {
             .busyHint(model, disabled: blocker == .busy)   // 别的任务（非出包）在跑：说在等谁（出包在跑时这里是「排队」，不置灰）
             .keyboardShortcut(.defaultAction)
             .controllerID("export.start").controllerShortcut(.rightTrigger)
-            .padTarget("export.start", scope: "main", radius: LauncherTheme.Metrics.controlRadius) { model.startExport(game, location: location.isEmpty ? nil : location) }
+            .padTarget("export.start", scope: "main", radius: LauncherTheme.Metrics.controlRadius) { _ = model.export(game, location: location.isEmpty ? nil : location) }
             .accessibilityLabel(startTitle)
             .accessibilityIdentifier("export.start")
         }
@@ -319,62 +312,10 @@ struct ExportView: View {
 }
 
 extension ExportView {
-    /// 开始按钮：出 iPhone 时写清出完去哪（出包并装到 iPhone / 出包并导出自签包），只出 Mac 时照旧
+    /// 开始按钮：一个平台「开始出包」，几个平台「开始出包 · N 个平台」
     var startTitle: String {
-        guard model.exportTargets.contains(.ios) else {
-            let count = model.exportTargets.count
-            return count > 1 ? String(format: loc.t("s2arm.export.startCount"), count) : loc.t("s2arm.export.start")
-        }
-        return BackendText.launcherText(model.iosAfterPack == "export" ? "export.start.selfsign" : "export.start.install", language: loc.lang.sharedCode)
-    }
-}
-
-/// 出包页「出完之后」：两张卡二选一（记住到下次）。装到 iPhone → 下面是目标设备与签名身份；导出自签 IPA → 说清导到哪、用什么装、不用连手机
-struct IosAfterPackPicker: View {
-    @ObservedObject var model: S2ArmLauncherModel
-    /// 这款：「装到手机」「导出」两条路下都给这款的出法行（0.6.4：出包页也能选通用 S2Arm / 独立 App，单款覆盖全局）
-    var gameId: String? = nil
-    @EnvironmentObject var loc: Localizer
-    @State private var hoveredOption: String?
-    private func x(_ id: String) -> String { BackendText.launcherText("export." + id, language: loc.lang.sharedCode) }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(x("after.title")).font(.manrope(13, .semibold)).foregroundStyle(.secondary).padding(.leading, 2)
-            HStack(alignment: .top, spacing: 12) {
-                option("install", x("after.install"), x("after.install_note"), "iphone.and.arrow.forward")
-                option("export", x("after.export"), x("after.export_note"), "square.and.arrow.up")
-            }.fixedSize(horizontal: false, vertical: true)   // 两张卡同高：按较高那张撑齐
-            if model.iosAfterPack != "export" {
-                TargetDeviceRow(model: model)
-                InstallModeLine(model: model)
-            }
-            if let gameId { InstallLayoutRow(model: model, gameId: gameId).padding(.top, 4) }
-        }
-    }
-
-    private func option(_ id: String, _ title: String, _ note: String, _ symbol: String) -> some View {
-        let on = model.iosAfterPack == id
-        let hovered = hoveredOption == id
-        return Button { model.iosAfterPack = id } label: {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: on ? "largecircle.fill.circle" : "circle").font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(on ? LauncherPalette.cream : .secondary).padding(.top, 2)
-                VStack(alignment: .leading, spacing: 4) {
-                    Label(title, systemImage: symbol).font(.manrope(14.5, .semibold)).foregroundStyle(.primary)
-                    Text(note).font(.manrope(12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(14).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .background(LauncherPalette.surface.opacity(on ? 0.95 : (hovered ? 0.75 : 0.55)), in: RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(on ? LauncherPalette.cream.opacity(hovered ? 0.9 : 0.75) : (hovered ? Color.white.opacity(0.18) : LauncherTheme.Colors.border), lineWidth: on ? 1.5 : 1))
-            .contentShape(RoundedRectangle(cornerRadius: 12))
-        }
-        .controllerButtonStyle(.plain).controllerID("export.after." + id)
-        .onHover { hoveredOption = $0 ? id : (hoveredOption == id ? nil : hoveredOption) }
-        .accessibilityAddTraits(on ? .isSelected : [])
-        .accessibilityIdentifier("export.after." + id)
+        let count = model.exportTargets.count
+        return count > 1 ? String(format: loc.t("s2arm.export.startCount"), count) : loc.t("s2arm.export.start")
     }
 }
 

@@ -61,7 +61,7 @@ struct ConsolePlayButtonStyle: ButtonStyle {
     }
 }
 
-/// 首页次要操作（导出自签包 / 装到 iPhone）：与主按钮同高同胶囊，深色磨砂底 + 细边（同圆钮），只是不用奶油底
+/// 首页次要操作（导出… / 无需更新 / 出包）：与主按钮同高同胶囊，深色磨砂底 + 细边（同圆钮），只是不用奶油底
 struct ConsolePillButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var enabled
     @State private var hovered = false

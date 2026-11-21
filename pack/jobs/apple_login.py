@@ -14,9 +14,10 @@
   验证码交过一次后同一次登录又来要码（苹果接受了码却不信任这台电脑）：不再转给界面，杀掉 plumesign，报 login_identity_rejected + 定句 SAY_2FA_REPEAT。
   结果 {account, team, teamName}；失败码：apple_id_wrong（账号或密码不对）/ two_factor_wrong（验证码不对或过期）/
   signing_server_unreachable、apple_server_unreachable（连不上）/ 其余 job_failed + plumesign 原句。
+冷却（#1864）：苹果回 5xx 拒收后，下一次登录先等够冷却再连（30 秒起、连续拒收翻倍、封顶 5 分钟，成功或别的结果清零），等的时候发 appleLogin.wait。
 作业 appleAccount：当前登录的账号 → {account, team, teamName}；没登录 → {account: None}。
 通用壳开关关着（0.6.0 前缺省）两个作业都只回 {enabled: False}，什么都不做。"""
-import os, re, subprocess, threading, time
+import json, os, re, subprocess, threading, time
 from pathlib import Path
 
 from core import Failure
@@ -34,6 +35,12 @@ SAY_SMS_PICK = "这个 Apple ID 绑了不止一个受信任手机号，S2Arm 选
 REPEAT = "S2A_2FA_REPEAT"
 SAY_2FA_REPEAT = ("苹果已经接受了验证码，但随后又要求再验证一次，再输也会一直这样，所以 S2Arm 先停下了。"
                   "请改用在你自己的 iPhone 或 iPad 上登录着的那个 Apple ID 来登录（验证码会弹在那台设备上）；还不行请把诊断发给我们。")
+# 苹果回 5xx（apple_login_refused）后的冷却（#1864：失败后登录键立刻又能点，28 分钟连发 74 次、间隔 0.24～1.2 秒，连发只会让苹果限流更久）：
+# 下一次登录先等够冷却再连苹果。连续第 n 次拒收冷却 COOL_BASE·2^(n-1) 秒、封顶 COOL_MAX；登录成功或别的结果清零。
+# 记在 <私有目录>/login/cooldown.json，换作业、重开启动器都算数；等的时候发 progress（stageKey = appleLogin.wait，wait = 还要等几秒），能取消
+COOL_BASE = 30
+COOL_MAX = 300
+COOL_CODES = ("apple_login_refused",)
 LOGIN_OK = "Successfully logged in"
 SAY_SIGN_IN = "登录 Apple ID"
 SAY_CODE = "等你填验证码"
@@ -61,11 +68,50 @@ def _wait_code(c, proc, allow_sms=False):
     return None
 
 
+def _cool_file(c):
+    return Path(c.private) / "login" / "cooldown.json"
+
+
+def _cool_read(c):
+    try:
+        got = json.loads(_cool_file(c).read_text(encoding="utf-8"))
+        return float(got.get("until", 0)), int(got.get("n", 0))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 0.0, 0
+
+
+def _cool_after(c, code):
+    """这次登录的结果 → 更新冷却：苹果拒收（5xx）累加一次，别的结果清零"""
+    f = _cool_file(c)
+    if code not in COOL_CODES:
+        f.unlink(missing_ok=True)
+        return
+    n = _cool_read(c)[1] + 1
+    f.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    f.write_text(json.dumps(dict(until=time.time() + min(COOL_BASE * 2 ** (n - 1), COOL_MAX), n=n)), encoding="utf-8")
+
+
+def _cool_wait(c):
+    """上次苹果拒收后冷却没过：等够再连（每秒发一次剩余秒数；作业取消照常收尾）"""
+    until = _cool_read(c)[0]
+    shown = None
+    while not c.cancelled:
+        left = int(until - time.time() + 0.999)
+        if left <= 0:
+            return
+        left = min(left, COOL_MAX)
+        if left != shown:
+            c.begin(SAY_SIGN_IN, 1, 1, key="appleLogin.wait")
+            c.emit("progress", wait=left)
+            shown = left
+        time.sleep(min(1.0, max(until - time.time(), 0.05)))
+
+
 def _classify(text):
     """plumesign 登录输出 → 失败码（impactor.explain 同一份原文对照）"""
     import impactor
     code = impactor.explain(text)
-    return code if code in ("apple_id_wrong", "two_factor_wrong", "signing_server_unreachable", "apple_server_unreachable", "login_identity_rejected") else "job_failed"
+    return code if code in ("apple_id_wrong", "two_factor_wrong", "signing_server_unreachable", "apple_server_unreachable", "apple_login_refused", "login_identity_rejected") else "job_failed"
 
 
 def _account_result(c, W):
@@ -88,6 +134,8 @@ def login(c):
     exe = install.plumesign_exe(c, W)
     if not exe:
         raise Failure("这个 S2Arm 安装包里缺登录要用的组件，请重新下载安装 S2Arm。", code="job_failed", internal="plumesign 不在随包目录 / S2A_PLUMESIGN / PATH")  # 非玩家句（internal 只进诊断）
+    _cool_wait(c)
+    c.check()   # 等冷却时取消了：照作业取消收尾，不连苹果
     c.begin(SAY_SIGN_IN, 1, 1, key="appleLogin")
     _code_file(c).parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     proc = subprocess.Popen([exe, "account", "login", "-u", account], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -148,7 +196,9 @@ def login(c):
     log.write_text(text, encoding="utf-8")   # plumesign 不回显密码；这里只有它的提示与报错
     c.check()   # 取消（再发一次 / 关掉登录框）：照作业取消收尾
     if proc.returncode == 0 and LOGIN_OK in text:
+        _cool_after(c, None)
         return _account_result(c, W)
+    _cool_after(c, None if repeat or REPEAT in text else _classify(text))
     if repeat or REPEAT in text:
         raise Failure(SAY_2FA_REPEAT, code="login_identity_rejected", internal=prompt[0].strip()[-300:] if repeat else text.strip().splitlines()[-1][-300:])
     if sms_sent and NO_TERMINAL.search(text):   # 改短信时要选号：管道里选不了（见文件头）

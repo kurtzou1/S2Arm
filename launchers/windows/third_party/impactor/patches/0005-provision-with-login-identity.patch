@@ -1,0 +1,218 @@
+diff --git a/3rdparty/omnisette/src/identity.rs b/3rdparty/omnisette/src/identity.rs
+new file mode 100644
+index 0000000..a18f065
+--- /dev/null
++++ b/3rdparty/omnisette/src/identity.rs
+@@ -0,0 +1,66 @@
++//! S2Arm: the machine identity Apple sees (model, OS, build, akd User-Agent) — one source for anisette provisioning and
++//! for every request plume_core sends to Apple. Apple trusts a login only from the machine identity the anisette data was
++//! provisioned under: provisioning with the anisette server's own value while signing in with another one makes the sign-in
++//! after a 2FA code fail with SRP -22410 (from 11-21; SideStore/SideStore#1749: changing Client Info without re-provisioning
++//! gives -22410, re-provisioning under the same value fixes it). Provisioning state is therefore stored per identity
++//! (identity_tag), so a change of identity provisions afresh instead of reusing state made under another one.
++
++use sha2::{Digest, Sha256};
++
++/// S2Arm: the machine identity sent to Apple (model, OS, build), one coherent triple for the whole login.
++/// macOS: this Mac's own model and OS (what Apple's own AuthKit sends); elsewhere a fixed real Mac.
++pub fn apple_client_info() -> &'static str {
++    &machine().0
++}
++
++/// S2Arm: akd's User-Agent for the same machine (its CFNetwork and Darwin versions).
++pub fn apple_user_agent() -> &'static str {
++    &machine().1
++}
++
++// One real Mac, all values read together off it on 11-20; used off macOS or when this Mac's values can't be read.
++const PINNED: [&str; 5] = ["Mac17,6", "27.2.1", "26B131", "3896.200.61", "27.2.0"];
++
++fn machine() -> &'static (String, String) {
++    static V: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
++    V.get_or_init(|| {
++        let [model, os, build, cfnetwork, darwin] = read_this_mac().unwrap_or(PINNED.map(String::from));
++        (
++            format!("<{model}> <Mac OS X;{os};{build}> <com.apple.AuthKit/1 (com.apple.akd/1.0)>"),
++            format!("akd/1.0 CFNetwork/{cfnetwork} Darwin/{darwin}"),
++        )
++    })
++}
++
++#[cfg(target_os = "macos")]
++fn read_this_mac() -> Option<[String; 5]> {
++    let run = |cmd: &str, args: &[&str]| -> Option<String> {
++        let o = std::process::Command::new(cmd).args(args).output().ok()?;
++        let v = String::from_utf8(o.stdout).ok()?.trim().to_string();
++        (o.status.success() && !v.is_empty() && !v.contains(['<', '>', ';', '\n', ' '])).then_some(v)
++    };
++    let cf: plist::Dictionary =
++        plist::from_file("/System/Library/Frameworks/CFNetwork.framework/Resources/Info.plist").ok()?;
++    let cfnetwork = cf.get("CFBundleVersion")?.as_string()?.to_string();
++    Some([
++        run("/usr/sbin/sysctl", &["-n", "hw.model"])?,
++        run("/usr/bin/sw_vers", &["-productVersion"])?,
++        run("/usr/bin/sw_vers", &["-buildVersion"])?,
++        cfnetwork,
++        run("/usr/bin/uname", &["-r"])?,
++    ])
++}
++
++#[cfg(not(target_os = "macos"))]
++fn read_this_mac() -> Option<[String; 5]> {
++    None
++}
++
++/// Short fingerprint of the identity (client info + User-Agent): part of the provisioning state file name
++pub fn identity_tag() -> String {
++    let mut h = Sha256::new();
++    h.update(apple_client_info().as_bytes());
++    h.update(b"\n");
++    h.update(apple_user_agent().as_bytes());
++    hex::encode(&h.finalize()[..4])
++}
+diff --git a/3rdparty/omnisette/src/lib.rs b/3rdparty/omnisette/src/lib.rs
+index 71f46c7..29f5ff5 100755
+--- a/3rdparty/omnisette/src/lib.rs
++++ b/3rdparty/omnisette/src/lib.rs
+@@ -64,16 +64,21 @@ pub const DEFAULT_ANISETTE_URL_V3: &str = "https://mac-ani.jkcoxson.com";
+ // (Apple ties sessions to the anisette server), so the fallback is used only after that rejection and is then remembered
+ // per data folder in V3_URL_FILE. ani.sidestore.io reports macOS 13.1.
+ pub const FALLBACK_ANISETTE_URL_V3: &str = "https://ani.sidestore.io";
++pub mod identity;
+ pub const V3_URL_FILE: &str = "anisette-v3-url";
+ 
+-/// S2Arm: provisioning state file for a v3 server ("state.plist" for the default one)
++/// S2Arm: provisioning state file for a v3 server and the machine identity it was provisioned under
++/// ("state-<identity>.plist" for the default server, "state-<host>-<identity>.plist" otherwise). State provisioned under
++/// another identity (older builds: "state.plist" / "state-<host>.plist", provisioned with the server's own client info) is
++/// not reused: signing in with an identity that differs from the provisioning one fails with SRP -22410 (identity.rs).
+ pub fn state_file_name(url: &str) -> String {
++    let tag = identity::identity_tag();
+     if url.trim_end_matches('/') == DEFAULT_ANISETTE_URL_V3 {
+-        return "state.plist".to_string();
++        return format!("state-{tag}.plist");
+     }
+     let host: String = url.split("://").last().unwrap_or(url).trim_end_matches('/')
+         .chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' }).collect();
+-    format!("state-{host}.plist")
++    format!("state-{host}-{tag}.plist")
+ }
+ 
+ #[derive(Clone, Debug)]
+diff --git a/3rdparty/omnisette/src/remote_anisette_v3.rs b/3rdparty/omnisette/src/remote_anisette_v3.rs
+index 4442998..3216bcc 100755
+--- a/3rdparty/omnisette/src/remote_anisette_v3.rs
++++ b/3rdparty/omnisette/src/remote_anisette_v3.rs
+@@ -177,6 +177,12 @@ impl AnisetteData {
+     }
+ }
+ 
++/// S2Arm: the machine identity (X-Mme-Client-Info, User-Agent) to provision under, given the server's own values:
++/// always the one every later request to Apple carries (identity.rs). Separate so patches/check/identity_check.rs can call it.
++pub fn provisioning_identity(_server_client_info: &str, _server_user_agent: &str) -> (String, String) {
++    (crate::identity::apple_client_info().to_string(), crate::identity::apple_user_agent().to_string())
++}
++
+ fn make_reqwest() -> Result<Client, AnisetteError> {
+     Ok(ClientBuilder::new()
+         .http1_title_case_headers()
+@@ -188,12 +194,18 @@ impl AnisetteClient {
+     pub async fn new(url: String) -> Result<AnisetteClient, AnisetteError> {
+         let path = format!("{}/v3/client_info", url);
+         let http_client = make_reqwest()?;
+-        let client_info = http_client
++        let mut client_info = http_client
+             .get(path)
+             .send()
+             .await?
+             .json::<AnisetteClientInfo>()
+             .await?;
++        // S2Arm: provision under the same machine identity every later request to Apple carries (identity.rs), not the
++        // server's own one ("<MacBookPro13,3> <Mac OS X;10.12.6;16G29>"): a mismatch makes the sign-in after 2FA fail with -22410
++        let (info, agent) = provisioning_identity(&client_info.client_info, &client_info.user_agent);
++        log::info!("S2A_ANISETTE_IDENTITY server {:?} replaced by {:?} / {:?}", client_info.client_info, info, agent);
++        client_info.client_info = info;
++        client_info.user_agent = agent;
+         Ok(AnisetteClient { client_info, url })
+     }
+ 
+@@ -495,7 +507,7 @@ impl AnisetteHeadersProvider for RemoteAnisetteProviderV3 {
+ 
+         fs::create_dir_all(&self.configuration_path)?;
+ 
+-        // S2Arm: provisioning state per server; the default server keeps "state.plist" (existing data stays valid)
++        // S2Arm: provisioning state per server and machine identity (lib.rs state_file_name)
+         let config_path = self.configuration_path.join(crate::state_file_name(&self.client_url));
+         if self.state.is_none() {
+             self.state = Some(if let Ok(text) = plist::from_file(&config_path) {
+diff --git a/apps/plumeimpactor/src/screen/settings.rs b/apps/plumeimpactor/src/screen/settings.rs
+index de10c35..0f97d44 100644
+--- a/apps/plumeimpactor/src/screen/settings.rs
++++ b/apps/plumeimpactor/src/screen/settings.rs
+@@ -93,7 +93,7 @@ impl SettingsScreen {
+             Message::SelectTeam(_, _) => Task::none(),
+             Message::SelectLocale(_) => Task::none(),
+             Message::ResetAnisetteData => {
+-                // S2Arm: provisioning state is per anisette server (state.plist, state-<host>.plist)
++                // S2Arm: provisioning state is per anisette server and machine identity (state-<identity>.plist, state-<host>-<identity>.plist; older state.plist)
+                 if let Ok(entries) = std::fs::read_dir(crate::defaults::get_data_path()) {
+                     for e in entries.flatten() {
+                         let name = e.file_name().to_string_lossy().to_string();
+diff --git a/crates/plume_core/src/auth/anisette_data.rs b/crates/plume_core/src/auth/anisette_data.rs
+index 9d15d99..7639966 100644
+--- a/crates/plume_core/src/auth/anisette_data.rs
++++ b/crates/plume_core/src/auth/anisette_data.rs
+@@ -101,51 +101,5 @@ impl AnisetteData {
+ }
+ 
+ 
+-/// S2Arm: the machine identity sent to Apple (model, OS, build), one coherent triple for the whole login.
+-/// macOS: this Mac's own model and OS (what Apple's own AuthKit sends); elsewhere a fixed real Mac.
+-pub fn apple_client_info() -> &'static str {
+-    &machine().0
+-}
+-
+-/// S2Arm: akd's User-Agent for the same machine (its CFNetwork and Darwin versions).
+-pub fn apple_user_agent() -> &'static str {
+-    &machine().1
+-}
+-
+-// One real Mac, all values read together off it on 11-20; used off macOS or when this Mac's values can't be read.
+-const PINNED: [&str; 5] = ["Mac17,6", "27.2.1", "26B131", "3896.200.61", "27.2.0"];
+-
+-fn machine() -> &'static (String, String) {
+-    static V: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
+-    V.get_or_init(|| {
+-        let [model, os, build, cfnetwork, darwin] = read_this_mac().unwrap_or(PINNED.map(String::from));
+-        (
+-            format!("<{model}> <Mac OS X;{os};{build}> <com.apple.AuthKit/1 (com.apple.akd/1.0)>"),
+-            format!("akd/1.0 CFNetwork/{cfnetwork} Darwin/{darwin}"),
+-        )
+-    })
+-}
+-
+-#[cfg(target_os = "macos")]
+-fn read_this_mac() -> Option<[String; 5]> {
+-    let run = |cmd: &str, args: &[&str]| -> Option<String> {
+-        let o = std::process::Command::new(cmd).args(args).output().ok()?;
+-        let v = String::from_utf8(o.stdout).ok()?.trim().to_string();
+-        (o.status.success() && !v.is_empty() && !v.contains(['<', '>', ';', '\n', ' '])).then_some(v)
+-    };
+-    let cf: plist::Dictionary =
+-        plist::from_file("/System/Library/Frameworks/CFNetwork.framework/Resources/Info.plist").ok()?;
+-    let cfnetwork = cf.get("CFBundleVersion")?.as_string()?.to_string();
+-    Some([
+-        run("/usr/sbin/sysctl", &["-n", "hw.model"])?,
+-        run("/usr/bin/sw_vers", &["-productVersion"])?,
+-        run("/usr/bin/sw_vers", &["-buildVersion"])?,
+-        cfnetwork,
+-        run("/usr/bin/uname", &["-r"])?,
+-    ])
+-}
+-
+-#[cfg(not(target_os = "macos"))]
+-fn read_this_mac() -> Option<[String; 5]> {
+-    None
+-}
++// S2Arm: the machine identity (one source for provisioning and every request to Apple) lives in omnisette::identity
++pub use omnisette::identity::{apple_client_info, apple_user_agent};

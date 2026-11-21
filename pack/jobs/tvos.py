@@ -457,7 +457,7 @@ def sign(c, app, team, bid, udid, log, npdms=None):
         if eva and EVA_SIGNS.search(text):
             raise Failure(S_EVA, code="tvos_eva_required", internal=tool_reason(log)) from e
         code = install.classify(text)
-        raise Failure("签名没成：" + tool_reason(log) + "；" + recovery(code, packaged=bool(c.r.get("engineBundle"))), code=code) from e  # 非玩家句
+        raise Failure("签名没成：" + tool_reason(log) + "；" + recovery(code, packaged=bool(c.r.get("engineBundle")), tv=True), code=code) from e  # 非玩家句
 
 
 # ---- 推资源包与核对 ----
@@ -483,9 +483,6 @@ def push(c, dev_id, bid, gid, pack, udid):
 NO_RETRY = ("device_space_low", "ios_install_no_space")
 
 
-IMG = re.compile(r"(^|.*/)romfs\.img$|game\.img")   # 直接写到最终路径的单文件镜像（同 tools/push_pack.py IMG）
-
-
 def zst_chunks(c, pack):
     """这份 game.img 这次推送是不是走压缩分块（同 tools/push_pack.py zstd_plan 的判法：index.tsv 有 game.img 那行、推送环境没关压缩、本机有 zstd）
     → [(资源包根下的块相对路径 .incoming/game.img.<号>.<块>.zst, 压缩字节)]；直推 → None"""
@@ -509,7 +506,11 @@ def verify(c, dev_id, bid, gid, pack):
         raise Failure("核对不了 Apple TV 上的资源包（列不出电视上的文件）：" + (err.splitlines()[-1] if err else f"devicectl 退出 {rc}"), code="resource_transfer_failed")  # 非玩家句
     there = {(f.get("relativePath") or f.get("path")): (f.get("metadata") or {}).get("size")
              for f in ((data.get("result") or {}).get("files") or []) if isinstance(f, dict) and not (f.get("resources") or {}).get("isDirectory")}
-    want = ["index.tsv", "manifest.json"] + sorted(p.relative_to(pack).as_posix() for p in pack.rglob("*") if p.is_file() and not layout.os_junk(p.name) and IMG.search(p.relative_to(pack).as_posix()))
+    sys.path.insert(0, str(Path(c.engine) / "tools"))
+    import push_pack as P
+    # 只核直写最终路径的单文件镜像，判法与推送同一条（P.is_direct，整名匹配）：原先这里用 search，game.imgmap 也被当成直写，
+    #   而推送按整名把它放进 tar、等 App 打开才解到最终路径 → 推完必报「game.imgmap 电视上没有」（D-NCDE、D-3KDG）
+    want = ["index.tsv", "manifest.json"] + sorted(p.relative_to(pack).as_posix() for p in pack.rglob("*") if p.is_file() and not layout.os_junk(p.name) and P.is_direct(p.relative_to(pack).as_posix()))
     chunks = zst_chunks(c, pack)
     for rel in want:
         local = pack / rel
@@ -523,7 +524,9 @@ def verify(c, dev_id, bid, gid, pack):
             if not bad and (not gone or (there.get(rel) or 0) > 0):
                 continue
             raise Failure(f"资源包没有完整传到 Apple TV：game.img 的压缩块 {len(bad) + len(gone)}/{len(chunks)} 个缺或不完整。"  # 非玩家句
-                          "再点一次「装到 Apple TV」会补传。", code="resource_transfer_failed")
+                          "再点一次「装到 Apple TV」会补传。", code="resource_transfer_failed",
+                          internal="电视上的压缩块：" + "；".join(f"{x.rsplit('/', 1)[-1]} 电视上 {there.get(x)} / 应为 {n}" for x, n in chunks if x in bad or x in gone)  # 非玩家句
+                          + f"；game.img 电视上 {there.get(rel)} 字节")  # 非玩家句
         if there.get(rel) != local.stat().st_size:
             got = there.get(rel)
             raise Failure(f"资源包没有完整传到 Apple TV：{rel} 电视上{'没有' if got is None else f'是 {got} 字节'}，这台 Mac 上是 {local.stat().st_size} 字节。"  # 非玩家句

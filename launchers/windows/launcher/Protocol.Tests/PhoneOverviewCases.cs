@@ -80,6 +80,7 @@ internal static class PhoneOverviewCases
         check(d0.Installed && d0.BundleId == "" && d0.InstalledBy is null, "choose: needsChoice phone is installed with no current bundle");
         check(duo.Phones[1].Candidates!.Count == 2 && duo.Phones[2].Candidates!.Count == 0 && duo.Phones[3].Candidates!.Count == 0, "choose: chosen keeps candidates; none = empty; candidates without bundle id dropped");
         check(K(d0) == "console.status.chooseApp" && K(d0 with { Online = null }) == "console.status.notConnectedNever", "status: choose after offline, before everything else");
+        check(Acts(Ph(installed: false)) == "installShell,updateSelected", "actions: no S2Arm on the phone yet → no hand-over-identity button (nothing to hand it to)");
         check(Acts(d0) == "chooseApp", "actions: needsChoice → only chooseApp (no install / update)");
         check(Acts(duo.Phones[1]) == "renewShell,handOverIdentity,updateSelected,chooseApp", "actions: chosen with several candidates → change entry at the end");
         check(Acts(a1) == "exportShellIpa,pushS2arm,exportS2arm,handOverIdentity", "actions: only one S2Arm → no change entry");

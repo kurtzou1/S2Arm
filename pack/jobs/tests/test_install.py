@@ -715,15 +715,16 @@ class FlowTests(unittest.TestCase):
 
     def test_link_only_the_chosen_device(self):
         """选机（11-13 维护者：插着手机就别说识别不了）：列着的、带 UDID 的都是候选，不看是否在线 / 配对 / 连接方式。期望手写：
-        选的那台列着就用它（哪怕列表说它离线：照装，装不上由装的那一步说）；选的那台没列出、但只有一台候选 → 用那一台；
-        多台候选都对不上 → 不装，列出看得到的让玩家选；一台都没有 → 按 USB 现状说"""
+        选的那台列着就用它（哪怕列表说它离线：照装，装不上由装的那一步说）；选的那台没列出 → 不装，列出看得到的让玩家连上那台或改选
+        （11-21 改：原先「只有一台候选就用那一台」，把游戏装进了玩家没打算装的 iPad；仍不说「识别不了」，照列看得到的那台）；一台都没有 → 按 USB 现状说"""
         ipad = self._p(name="小平板", ident="D2", transport="localNetwork", tunnel="connected", udid="PAD-UDID")
         ipad["hardwareProperties"]["platform"] = "iPadOS"
         offline_phone = self._p(name="我的手机", ident="D1", transport=None, tunnel="unavailable", udid="PHONE-UDID")
         link, _ = self._link([[offline_phone, ipad]], want="PHONE-UDID")
         self.assertEqual(link["device"]["identifier"], "D1")
         link, _ = self._link([[ipad]], want="旧手机")
-        self.assertEqual(link["device"]["identifier"], "D2")
+        self.assertIsNone(link["device"], "选的那台没连、只连着 iPad：不换装到 iPad")
+        self.assertIn("iPad「小平板」", link["problem"], "照列看得到的那台，不说识别不了")
         link, _ = self._link([[offline_phone, ipad]], want="0000AAAA-0000-BBBB-0000BB")
         self.assertIsNone(link["device"]); self.assertEqual(link["stage"], "connected")
         for text in ("编号末尾 0000BB", "iPhone「我的手机」", "iPad「小平板」"): self.assertIn(text, link["problem"])
@@ -734,8 +735,9 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(link["device"]["identifier"], "D2")
         watch = self._p(name="表", ident="W1", udid="WATCH-UDID"); watch["hardwareProperties"]["platform"] = "watchOS"
         sim = self._p(name="模拟", ident="S1", udid="SIM-UDID"); sim["hardwareProperties"]["reality"] = "simulated"
-        link, _ = self._link([[watch, sim, offline_phone]], want="旧手机")   # 手表 / 模拟器不算候选：剩一台手机就用它
-        self.assertEqual(link["device"]["identifier"], "D1")
+        link, _ = self._link([[watch, sim, offline_phone]], want="旧手机")   # 手表 / 模拟器不算候选；剩的那台手机也不是选的那台 → 不换装
+        self.assertIsNone(link["device"])
+        self.assertIn("iPhone「我的手机」", link["problem"]); self.assertNotIn("表", link["problem"].replace("列表", ""))
 
     def test_phone_requires_a_chosen_device(self):
         """真装机（phone）不带设备号（11-13 改）：只连着一台就装它；多台才拒（device_required，要玩家选）。期望手写"""
@@ -1166,14 +1168,14 @@ class AssembleTests(unittest.TestCase):
             z.writestr("Payload/S2Arm.app/s2a_catalogue.json", json.dumps({"schema": 1, "shell_id": sid, "games": [{"title_id": g} for g in games]}))
         return path
 
-    def _assemble(self, gid, others=(), failed=(), sid="SID1", runs=None, agreed=None):
+    def _assemble(self, gid, others=(), failed=(), sid="SID1", runs=None, agreed=None, **kw):
         import ipa as packer, host_update
         self.sid = sid
         shell = self.c.private / "shell"; shell.mkdir(exist_ok=True); (shell / "manifest.json").write_text("{}")
         runs = [] if runs is None else runs
         with um.patch.object(packer, "current_shell_id", return_value=sid), um.patch.object(packer, "container_shell", return_value=shell), \
              um.patch.object(host_update, "engine_compat", return_value=dict(self.COMPAT)), um.patch.object(self.c, "run", self._run(runs)):
-            return packer.assemble(self.c, gid, others, failed=failed, agreed=agreed or {})
+            return packer.assemble(self.c, gid, others, failed=failed, agreed=agreed or {}, **kw)
 
     @staticmethod
     def _games_arg(runs):
@@ -1189,6 +1191,18 @@ class AssembleTests(unittest.TestCase):
         self.assertNotIn("--base", cmd)
         self.assertEqual((got, games, sid), ([self.A], [self.A], "SID1"))
         self.assertEqual(install_ipa_games(ipa), ([self.A], "SID1"))
+
+    def test_standalone_bundle_id_per_game(self):
+        """独立 App 组装写进包里的包名每款一个（io.s2arm.games.app.<程序号小写>）：不由启动器签的导出包交侧载工具装，原先各款同为 io.s2arm.games，
+        装一款顶掉前一款；通用壳仍是占位 io.s2arm.games（装机时按团队换）"""
+        self._library((self.A, "甲"), (self.B, "乙")); ios_fixture(self.c, self.A); ios_fixture(self.c, self.B)
+        got = []
+        for gid, alone in ((self.A, True), (self.B, True), (self.A, False)):
+            runs = []
+            self._assemble(gid, runs=runs, standalone=alone)
+            _, cmd = self._games_arg(runs)
+            got.append(cmd[cmd.index("--bundle-id") + 1])
+        self.assertEqual(got, ["io.s2arm.games.app.0100000000010000", "io.s2arm.games.app.0100000000020000", "io.s2arm.games"])
 
     def test_assemble_passes_library_banner(self):
         """横图是游戏库的元数据（导入时抓好放在这款文件夹）：组装命令带 --banner 游戏号=那份；没有横图的款不带"""
@@ -1453,9 +1467,7 @@ class AssembleTests(unittest.TestCase):
             if not want:
                 raise Failure("多台", code="device_required")
             on = state["online"]
-            if want not in on:
-                if len(on) == 1:   # 同 _pick_device / win_udid：给的那台没列着、只连着一台 → 退到那一台
-                    return types.SimpleNamespace(key=next(iter(on)), pull_kept=lambda g: 0, app_running=lambda: False)
+            if want not in on:   # 同 _pick_device / win_udid（11-21 起）：给的那台没列着就报没连着，不退到别的那台
                 raise Failure("不在线", code="device_not_connected")
             return types.SimpleNamespace(key=want, pull_kept=lambda g: 0, app_running=lambda w=want: state["running"].get(w, False))
         def run(shell1, shell2, online=("dev1", "dev2"), running=None):
@@ -1471,7 +1483,7 @@ class AssembleTests(unittest.TestCase):
         self.assertEqual(run("SID1", "SID1", running={"dev1": True}), ("dev2", True, False), "都壳旧、第一台在玩 → 先回没在玩的")
         self.assertEqual(run("SID1", "SID1", running={"dev1": True, "dev2": True}), ("dev1", True, True), "都在玩 → 回第一台有事的（启动器这轮不装）")
         self.assertEqual(run("SID2", "SID2"), ("dev1", False, False), "都没事 → 第一台")
-        self.assertEqual(run("SID2", "SID1", online=("dev1",)), ("dev1", False, False), "dev2 没连着、选机退到 dev1：不把 dev2 的壳旧安到 dev1 头上")
+        self.assertEqual(run("SID2", "SID1", online=("dev1",)), ("dev1", False, False), "dev2 没连着：跳过它，不把 dev2 的壳旧安到 dev1 头上")
         def none(c): raise Failure("没连手机", code="device_not_connected")
         with um.patch.object(install, "phone_for", side_effect=none):
             self.assertEqual(install.phone_kept_pull(self.c)["device"], "")
@@ -1508,6 +1520,7 @@ class AssembleTests(unittest.TestCase):
         """11-15 导出不再是装法：installMode 作业只回签名身份；旧版留下的 install.json（装法设置）迁移时删掉，之后导不导出只看请求带的 mode"""
         self.assertEqual(install.install_mode_job(self.c), dict(exportAvailable=True, signMode="appleId", signChoice="appleId",
                                                               layout="shell", layoutChoice={}, distribution=False, standaloneHint="appleId",
+                                                              standaloneHints=dict(appleId="appleId", devCert=None, none="external"),
                                                               recommend=None, recommendWhy="unknown"))
         self.assertFalse((self.c.private / "install.json").exists(), "旧装法设置迁移一次就删")
         self.assertFalse(install.wants_export(self.c), "没带 mode：一键装")
@@ -1931,3 +1944,29 @@ class UpdatePrepareTests(unittest.TestCase):
         src = (Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
         self.assertIn('"installUpdatePrepare": install.update_prepare', src)
         self.assertEqual(core.OPERATION_NAMES["installUpdatePrepare"], "准备更新 iPhone 上的 S2Arm")
+
+
+class NoDeviceSwap(unittest.TestCase):
+    """11-21：玩家选的那台没连着、此刻只连着另一台时，不换装到那一台（「更新这款」把游戏装进了没打算装的 iPad）。期望手写"""
+    def dev(self, udid, name, platform="iOS"):
+        return {"identifier": "id-" + udid, "hardwareProperties": {"udid": udid, "platform": platform, "reality": "physical"},
+                "deviceProperties": {"name": name}, "connectionProperties": {"transportType": "wired", "pairingState": "paired"}}
+
+    def test_mac_pick_keeps_chosen(self):
+        ipad = self.dev("IPAD1", "客厅", "iPadOS")
+        d, why = install._pick_device([ipad], "IPHONE1", install=True)
+        self.assertIsNone(d, "选的 iPhone 没连、只连着 iPad：不装到 iPad")
+        self.assertIn("「IPHONE1」", why, "说清要装的是哪台")
+        self.assertIn("iPad「客厅」", why, "说清现在看得到的是哪台")
+        self.assertEqual(install._pick_device([ipad], "IPAD1", install=True)[0], ipad, "选的就是它：照装")
+        self.assertEqual(install._pick_device([ipad], "", install=True)[0], ipad, "没选、只连着一台：照旧用它（玩家自己点的推送）")
+
+    def test_windows_udid_keeps_chosen(self):
+        W = types.SimpleNamespace(mux_devices=lambda: [("IPAD1", "USB", None)])
+        with um.patch.object(install, "LINK_RETRY_WAIT", 0):
+            with self.assertRaises(Failure) as e:
+                install.win_udid(types.SimpleNamespace(r={"device": "IPHONE1"}), W)
+            self.assertEqual(e.exception.code, "device_not_connected", "选的那台没连、只连着另一台：报没连着，不换")
+            self.assertEqual(install.win_udid(types.SimpleNamespace(r={"device": "IPAD1"}), W), "IPAD1")
+            self.assertEqual(install.win_udid(types.SimpleNamespace(r={}), W), "IPAD1", "没选、只连着一台：照旧用它")
+

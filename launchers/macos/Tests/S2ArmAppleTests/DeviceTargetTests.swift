@@ -26,7 +26,11 @@ final class DeviceTargetTests: XCTestCase {
     }
 
     func testDeviceLabelUsesRealKindAndName() {
-        XCTAssertEqual(S2ArmLauncherModel.deviceLabel(kind: "iPad", name: "小平板"), "iPad「小平板」")
+        XCTAssertEqual(S2ArmLauncherModel.deviceLabel(kind: "iPad", name: "小平板", language: "zh-Hans"), "iPad「小平板」")
+        // 英文译文核对：英文界面不出中文直角引号，空一格用弯引号（同英文文案里设备名的写法）；日文同中文
+        XCTAssertEqual(S2ArmLauncherModel.deviceLabel(kind: "iPhone", name: "My iPhone", language: "en"), "iPhone “My iPhone”")
+        XCTAssertEqual(S2ArmLauncherModel.deviceLabel(kind: "iPad", name: "居間", language: "ja"), "iPad「居間」")
+        XCTAssertEqual(ExportSheetView.deviceLabel(kind: nil, name: "Spare", language: "en"), "Device “Spare”", "导出页设备行同一取法；类型读不到写「设备」")
         XCTAssertEqual(S2ArmLauncherModel.deviceLabel(kind: "", name: ""), "iPhone / iPad")
     }
 

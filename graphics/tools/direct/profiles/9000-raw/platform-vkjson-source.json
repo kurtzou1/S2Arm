@@ -1,0 +1,23 @@
+{
+  "source": "Android GPU service cmd gpu vkjson, shell-supported capabilities",
+  "instance_api": "1.4.0",
+  "instance_extensions": 13,
+  "physical_devices": 1,
+  "matching_app_driver_devices": 1,
+  "vulkaninfo_command_found_rc": 1,
+  "vulkaninfo_summary_rc": null,
+  "does_not_describe_app_enabled_extensions": true,
+  "physical_device_api": "1.1.177",
+  "app_device_api": "1.1.177",
+  "physical_device_limits": 106,
+  "physical_device_core_features": 55,
+  "physical_device_extensions": 71,
+  "redacted_paths": [
+    "devices.0.idProperties.deviceLUID",
+    "devices.0.idProperties.deviceLUIDValid",
+    "devices.0.idProperties.deviceNodeMask",
+    "devices.0.idProperties.deviceUUID",
+    "devices.0.idProperties.driverUUID",
+    "devices.0.properties.pipelineCacheUUID"
+  ]
+}

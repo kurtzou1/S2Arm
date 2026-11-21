@@ -111,6 +111,13 @@ with tempfile.TemporaryDirectory(prefix="s2a-addr-static-") as d:
           (57, 57, 0), (addr_need.static_alias_gb(thunk_chain("sa-thunk", SA_INIT, GIB56)),
                         addr_need.static_alias_gb(thunk_chain("aar-thunk", b"_ZN2nn2os21AllocateAddressRegionEPmm", GIB56)),
                         addr_need.static_alias_gb(thunk_chain("sa-small", SA_INIT, GIB3))))
+    # 大区来源（11-20，宿主分配器初始化闸）：同一条链，导入是分配器初始化 → 来源记分配器；是 AllocateAddressRegion → 不记（闸门压不了）；
+    #   表里只有前者多一行「大区来源 分配器初始化」，后者与改前逐字节相同
+    sa, aar = thunk_chain("sa-src", SA_INIT, GIB56), thunk_chain("aar-src", b"_ZN2nn2os21AllocateAddressRegionEPmm", GIB56)
+    check("大区来源：分配器初始化链 (57, 是) / AllocateAddressRegion 链 (57, 否) / 链上只有 3GiB (0, 否)",
+          ((57, True), (57, False), (0, False)), (addr_need.static_claim(sa), addr_need.static_claim(aar), addr_need.static_claim(thunk_chain("sa-src-small", SA_INIT, GIB3))))
+    check("大区来源行：只在分配器初始化链的表里",
+          (True, False), tuple("大区来源\t分配器初始化\n" in addr_need.collect(PROGRAM, BUILD, main=m) for m in (sa, aar)))
     # 11-05 瓦力欧制造 舞动（WarioWare: Move It!）：StandardAllocator::Initialize(nullptr, 60 GiB, true)（SDK 里 CentralHeap::Init →
     #   nnmem_nlib_virtual_alloc → AllocateAddressRegion）。形状照原件：调用方 mov x1, #60GiB; bl 包装；包装 stp 序言、mov x1, xzr、
     #   bl 小跳板；跳板 mov w3, #1; b 桩。手算：60 GiB + 元数据（<1 GiB）向上取整 → 61。nnmem_nlib_virtual_alloc 直接 60 GiB → 61。

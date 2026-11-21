@@ -50,11 +50,20 @@ struct JobSessionView: View {
         if session.isPhoneJob { phonePage } else { generalPage }
     }
 
+    /// 第一次装好 S2Arm：信任开发者那一步 + 接下来回游戏库点「导出…」（不然新手装完 App 不知道游戏怎么进去）
+    private var shellNotes: [String] {
+        guard session.kind == .installUpdate, finished == .completed, model.shellFirstInstall else { return [] }
+        let lang = loc.lang.sharedCode
+        let trust = model.installTrustName.isEmpty ? BackendText.launcherText("install.done.trust", language: lang)
+            : BackendText.launcherText("install.done.trustNamed", language: lang).replacingOccurrences(of: "{0}", with: model.installTrustName)
+        return [trust, BackendText.launcherText("exportsheet.shell.next", language: lang)]
+    }
+
     /// 手机作业：统一的三态结局（PhoneJobPanel），下面一排按钮
     private var phonePage: some View {
         VStack(spacing: 0) {
             ScrollView {
-                PhoneJobPanel(model: model, session: session)
+                PhoneJobPanel(model: model, session: session, notes: shellNotes)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, LauncherTheme.Metrics.libraryInset)
                     .padding(.top, 30).padding(.bottom, 40)

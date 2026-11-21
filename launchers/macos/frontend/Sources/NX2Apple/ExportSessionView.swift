@@ -49,9 +49,25 @@ struct ExportSessionView: View {
         }
     }
 
-    /// 这次出包是为了导出自签包（游戏库「导出自签包」点在没出过包的款上）：按钮和说明照导出写，出完自动接着导出
-    private var exportMode: Bool { model.selfSignAfterPack.contains(session.gameID ?? "") || (model.selfSigning && model.phoneSession?.kind == .install) }
+    /// 这次出包是导出确认页「开始」先做的那一步（还没做好 iPhone 版）：说明照导出写，出完自动接着导出 / 逐台导入
+    private var exportMode: Bool { model.exportAfterPack[session.gameID ?? ""] != nil || (model.selfSigning && model.phoneSession?.kind == .install) }
     private func x(_ id: String) -> String { BackendText.launcherText("export." + id, language: uiLanguage) }
+    /// 出完正在接着装 / 导出（导出确认页那一单还在跑）：按钮写「查看进度」，点了回到那一单的结果；否则「导出…」打开确认页
+    private var exportButtonTitle: String {
+        let gid = session.gameID ?? ""
+        let running = model.exportAfterPack[gid] != nil   // 出完马上接着做、还没轮到
+            || model.exportFlows[gid].map { $0.started >= session.started && ($0.running || ($0.folder && model.phoneBusy)) } == true
+        return BackendText.launcherText(running ? "exportsheet.viewProgress" : "exportsheet.open", language: uiLanguage)
+    }
+    private var afterBuildNote: String {
+        let gid = session.gameID ?? ""
+        // 出完已经接着做了（计划交给了 exportFlows）：按那一单；还在出：按记下的计划；都没有 = 单独出的包，告诉玩家下一步点「导出…」
+        let flow = model.exportFlows[gid].flatMap { $0.started >= session.started ? $0 : nil }
+        guard let folder = model.exportAfterPack[gid].map({ $0.devices.isEmpty }) ?? flow?.folder else {
+            return BackendText.launcherText("exportsheet.afterBuild", language: uiLanguage)
+        }
+        return BackendText.launcherText(folder ? "exportsheet.afterBuild.folder" : "exportsheet.afterBuild.devices", language: uiLanguage)
+    }
 
     var body: some View {
         ExportPageLayout {
@@ -410,8 +426,8 @@ struct ExportSessionView: View {
             if run.platforms.count > 1 {
                 successActions(platform).frame(maxWidth: .infinity, alignment: .trailing)
             }
-            if platform == .ios {
-                Text(x(exportMode ? "done.exportNote" : "done.installNote")).font(.manrope(13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if platform == .ios {   // 出好 iPhone 版后下一步：导出确认页要接着做的写它接着做什么；单独出包的告诉玩家点「导出…」
+                Text(afterBuildNote).font(.manrope(13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -424,8 +440,8 @@ struct ExportSessionView: View {
             }
             if let game { finderButton(loc.t("s2arm.export.openGameFolder")) { model.reveal(game) } }
             if platform == .ios {
-                Button { if exportMode, let game { model.exportSelfSign(game) } else { install(session.gameID ?? "") } } label: {
-                    Label(x(exportMode ? "done.export" : "done.install"), systemImage: exportMode ? "square.and.arrow.up" : "iphone")
+                Button { install(session.gameID ?? "") } label: {   // 打开导出确认页（签名 → 出法 → 设备多选），不再直接推
+                    Label(exportButtonTitle, systemImage: "square.and.arrow.up")
                 }
                 .controllerButtonStyle(LauncherPrimaryButtonStyle(prominent: true)).keyboardShortcut(.defaultAction)
                 .controllerID("result.ios.install").controllerShortcut(.rightTrigger, focused: run.platforms.count > 1)
@@ -482,7 +498,7 @@ struct ExportSessionView: View {
                             .controllerID("result.tvos.install").controllerShortcut(.rightTrigger, focused: true)
                         if let game { Button(loc.t("s2arm.export.openGameFolder")) { model.reveal(game) } }
                     } else {
-                        Button(loc.t(model.installKey("s2arm.action.install"))) { install(session.gameID ?? "") }
+                        Button(exportButtonTitle) { install(session.gameID ?? "") }
                             .controllerID("result.ios.install").controllerShortcut(.rightTrigger, focused: true)
                         if let ipa = outcome?.ipa, !ipa.isEmpty { Button(loc.t("s2arm.export.revealIpa")) { model.revealIpa(ipa) } }
                         if let game { Button(loc.t("s2arm.export.openGameFolder")) { model.reveal(game) } }

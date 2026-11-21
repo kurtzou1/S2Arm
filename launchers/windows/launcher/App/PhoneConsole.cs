@@ -50,7 +50,10 @@ public sealed partial class EnvironmentWindow
             var extra = probe ? new Dictionary<string, object?> { ["probe"] = true } : null;
             if (extra is not null && consoleDevice is { Length: > 0 } d) extra["device"] = d;   // 带上总控台当前这台
             var job = await PackJobClient.RunAsync(PackRequest("phoneOverview", "", extra), null, CancellationToken.None);
-            phoneOverview = job.Report.Succeeded ? PhoneOverview.Parse(job.Report.Result) : null;
+            // 作业没成（现查超时、作业层报错）：保持上次的值（同 Mac loadPhoneOverview 失败只记日志）。原先置空，首位 S2Arm 行和总控台
+            //   整块消失、页面跳回第一款；成功但作业层说开关关着 / 没有 phones 时 Parse 给 null，那才是真没有
+            if (job.Report.Succeeded) phoneOverview = PhoneOverview.Parse(job.Report.Result);
+            else Console.Error.WriteLine($"S2Arm phoneOverview: {job.Report.State} {job.Report.FailureCode} {job.Report.Message}");
             if (phoneOverview is not null && phoneOverview.Phones.All(p => p.Device != consoleDevice)) consoleDevice = null;
             SeedConsoleSelection();
         }
@@ -67,6 +70,11 @@ public sealed partial class EnvironmentWindow
         foreach (var id in suggested.Except(consoleSeeded)) consoleSelection.Add(id);
         consoleSeeded = suggested;
     }
+
+    /// <summary>手机在切换 / 页顶的叫法：有名字用名字；Windows 经 usbmuxd 读不到名字（AltStore 装的、没设备记录的那台），
+    ///   原先直接写 40 位 UDID——改成「iPhone · 编号末 6 位」（同装机报错「编号末尾 XXXXXX」的口径，多台时还分得开）</summary>
+    private static string PhoneLabel(PhoneOverview.Phone p) =>
+        p.Name.Length > 0 ? p.Name : "iPhone · " + (p.Device.Length > 6 ? p.Device[^6..] : p.Device).ToUpperInvariant();
 
     private string Tf(string key, params object[] args) =>
         args.Select((a, i) => (a, i)).Aggregate(T(key), (s, x) => s.Replace("{" + x.i + "}", x.a is DateTimeOffset d ? d.LocalDateTime.ToString("g") : x.a.ToString()));
@@ -228,7 +236,7 @@ public sealed partial class EnvironmentWindow
     {
         await RefreshPhoneOverviewAsync(probe: true);
         if (ConsolePhone is { InstalledBy: not null } found) { consoleDevice = found.Device; Render(); return; }
-        await UpdatePhoneAsync(false, [], device: ConsolePhone?.Device);
+        await UpdatePhoneAsync(false, [], device: ConsolePhone?.Device, firstInstall: true);
     }
 
     /// <summary>点总控台按钮（界面与控制口 POST /console-action 走这同一个函数；同 Mac runConsoleAction）。ids：推 / 导出哪几款（控制口可给；不给 = 勾选的、按游戏库顺序）。
@@ -239,7 +247,9 @@ public sealed partial class EnvironmentWindow
         var order = ids?.Select(i => i.ToUpperInvariant()).ToList() ?? shown.Where(g => consoleSelection.Contains(g.Id)).Select(g => g.Id.ToUpperInvariant()).ToList();
         switch (action)
         {
-            case PhoneOverview.Act.InstallShell or PhoneOverview.Act.UpdateShell or PhoneOverview.Act.RenewShell:
+            case PhoneOverview.Act.InstallShell:   // 第一次装：结局卡写「安装」，用 Apple ID 签的写清先信任再打开
+                _ = UpdatePhoneAsync(false, [], device: device, firstInstall: true); break;
+            case PhoneOverview.Act.UpdateShell or PhoneOverview.Act.RenewShell:
                 _ = UpdatePhoneAsync(false, [], device: device); break;
             case PhoneOverview.Act.ExportShellIpa:   // 导出通用 S2Arm.ipa（作业 installUpdate + mode export → export_shell_ipa）：不连手机
                 _ = UpdatePhoneAsync(false, [], mode: "export"); break;
@@ -304,7 +314,9 @@ public sealed partial class EnvironmentWindow
         detail.Children.Add(Label(ConsolePhone is { } p && p.Name.Length > 0 ? p.Name : "S2Arm", 18));
         detail.Children.Add(Muted(ConsoleStatusText(), 13));
         Grid.SetColumn(detail, 1); line.Children.Add(detail);
-        var open = Action("library.select", () => { selectedGame = ConsoleId; _ = RefreshPhoneOverviewAsync(probe: true); Render(); });
+        // 按钮写「打开」（走查：原先和游戏共用「选择这款游戏」，这一行是手机不是游戏）
+        var open = Action("console.row.open", () => { selectedGame = ConsoleId; _ = RefreshPhoneOverviewAsync(probe: true); Render(); });
+        AutomationId(open, "library.select");
         open.VerticalAlignment = VerticalAlignment.Center;
         Grid.SetColumn(open, 2); line.Children.Add(open);
         Avalonia.Automation.AutomationProperties.SetAutomationId(line, "card." + ConsoleId);
@@ -339,7 +351,7 @@ public sealed partial class EnvironmentWindow
         var head = new StackPanel { Spacing = 4 };
         if (phoneOverview!.Phones.Count > 1)
         {
-            var pick = new ComboBox { ItemsSource = phoneOverview.Phones.Select(p => p.Name.Length > 0 ? p.Name : p.Device).ToList(),
+            var pick = new ComboBox { ItemsSource = phoneOverview.Phones.Select(PhoneLabel).ToList(),
                 SelectedIndex = phoneOverview.Phones.ToList().FindIndex(p => p.Device == phone.Device) };
             pick.SelectionChanged += (_, _) =>
             {   // 换了一台：现查它装了哪些 S2Arm
@@ -350,7 +362,7 @@ public sealed partial class EnvironmentWindow
             Avalonia.Automation.AutomationProperties.SetAutomationId(pick, "console.phonePicker");
             head.Children.Add(pick);
         }
-        else head.Children.Add(Label(phone.Name.Length > 0 ? phone.Name : phone.Device, 24));
+        else head.Children.Add(Label(PhoneLabel(phone), 24));
         head.Children.Add(Muted(ConsoleStatusText(), 13));
         if (phone.Installed && phone.ShellCurrent && !phone.External && phone.Games.Count > 0 && phone.Games.All(g => g.State == PhoneOverview.GameState.Latest))
             head.Children.Add(new TextBlock { Text = "✓ " + T("console.allLatest"), Foreground = Brush.Parse("#30D158"), FontWeight = FontWeight.Bold });
@@ -386,26 +398,31 @@ public sealed partial class EnvironmentWindow
         if (phone.Apps is { Count: > 0 } standalone)
         {
             var list = new StackPanel { Spacing = 6 };
+            Grid.SetIsSharedSizeScope(list, true);
             foreach (var sa in standalone)
             {
-                var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10 };
-                var names = new StackPanel { MinWidth = 180 };
-                names.Children.Add(new TextBlock { Text = GameName(sa.GameId), Foreground = Ink });
-                names.Children.Add(new TextBlock { Text = sa.BundleId, Foreground = Brush.Parse("#8A8A92"), FontSize = 11 });
+                // 名字 | 状态（吃剩余宽度、列内换行）| 续签：原先横排 StackPanel 不给子控件宽度上限，窄窗 / 英文时整行溢出卡片右边被裁（0.6.2 前端走查）
+                var row = new Grid { ColumnSpacing = 10 };
+                row.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Auto) { SharedSizeGroup = "consoleAppName" });   // 各行名字列同宽，状态列对齐
+                row.ColumnDefinitions.Add(new ColumnDefinition(1, GridUnitType.Star)); row.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Auto));
+                var names = new StackPanel { MinWidth = 180, MaxWidth = 320 };
+                names.Children.Add(new TextBlock { Text = GameName(sa.GameId), Foreground = Ink, TextTrimming = TextTrimming.CharacterEllipsis });
+                names.Children.Add(new TextBlock { Text = sa.BundleId, Foreground = Brush.Parse("#8A8A92"), FontSize = 11, TextTrimming = TextTrimming.CharacterEllipsis });
                 row.Children.Add(names);
                 var expired = sa.ExpiresAtEstimate is { } e0 && e0 <= DateTimeOffset.Now;
                 var days = sa.ExpiresAtEstimate is { } e1 ? (int)Math.Ceiling((e1 - DateTimeOffset.Now).TotalDays) : (int?)null;
                 var text = expired ? T("console.status.expired") : !sa.ShellCurrent ? T("console.app.outdated")
                     : days is null ? T("console.status.okNoDays") : days <= 2 ? Tf("console.status.expiring", days) : Tf("console.status.ok", days);
-                row.Children.Add(new TextBlock { Text = text, Foreground = Brush.Parse(sa.ShellCurrent && !expired ? "#30D158" : "#FF9F0A"), FontSize = 12.5,
-                    TextWrapping = TextWrapping.Wrap, MaxWidth = 520, VerticalAlignment = VerticalAlignment.Center });
-                // 续签：等同这款的单款「推到 iPhone」，装到这台（InstallAsync 带设备号）；游戏库里没有这款（删了）或这台不在线时置灰
+                var status = new TextBlock { Text = text, Foreground = Brush.Parse(sa.ShellCurrent && !expired ? "#30D158" : "#FF9F0A"), FontSize = 12.5,
+                    TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center };
+                Grid.SetColumn(status, 1); row.Children.Add(status);
+                // 续签：打开这款的导出确认页、预勾这一台（RenewApp）；游戏库里没有这款（删了）或这台不在线时置灰
                 var owned = catalog?.Games.FirstOrDefault(g => string.Equals(g.Id, sa.GameId, StringComparison.OrdinalIgnoreCase));
                 var renew = Action("console.app.renew", () => { if (owned is not null) RenewApp(owned, phone.Device); },
                     owned is not null && !offline && !PhonePushing(owned.Id) && !PhoneQueued(owned.Id));
                 renew.VerticalAlignment = VerticalAlignment.Center;
                 Avalonia.Automation.AutomationProperties.SetAutomationId(renew, "console.app.renew." + sa.GameId);
-                row.Children.Add(renew);
+                Grid.SetColumn(renew, 2); row.Children.Add(renew);
                 Avalonia.Automation.AutomationProperties.SetAutomationId(row, "console.app." + sa.GameId);
                 list.Children.Add(row);
             }
@@ -414,6 +431,7 @@ public sealed partial class EnvironmentWindow
 
         // ② 游戏同步
         var sync = new StackPanel { Spacing = 6 };
+        Grid.SetIsSharedSizeScope(sync, true);
         // 0.5 → 0.6 升级后的老款（资源在、程序包不在：suggested + missing）排最上面、醒目标出，直到更新完（同 Mac consoleOrdered）
         PhoneOverview.Game RowOf(string id) => phone.Games.FirstOrDefault(x => string.Equals(x.GameId, id, StringComparison.OrdinalIgnoreCase))
                     ?? new PhoneOverview.Game(id.ToUpperInvariant(), PhoneOverview.GameState.NotPushed, [], null);
@@ -422,12 +440,19 @@ public sealed partial class EnvironmentWindow
         foreach (var game in shown.Where(x => Legacy(RowOf(x.Id))).Concat(shown.Where(x => !Legacy(RowOf(x.Id)))))
         {
             var g = RowOf(game.Id);
-            var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10 };
+            // 勾 | 游戏名（过长省略）| 状态（吃剩余宽度、列内换行）：原先横排 StackPanel，状态到 520px 才换行，窄窗 / 英文时溢出卡片被裁（同上）
+            var row = new Grid { ColumnSpacing = 10 };
+            row.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Auto));
+            row.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Auto) { SharedSizeGroup = "consoleGameName" });   // 各行名字列同宽，状态列对齐
+            row.ColumnDefinitions.Add(new ColumnDefinition(1, GridUnitType.Star));
             var box = new CheckBox { IsChecked = consoleSelection.Contains(game.Id), IsEnabled = !ConsoleUpdating };
             box.IsCheckedChanged += (_, _) => { if (box.IsChecked == true) consoleSelection.Add(game.Id); else consoleSelection.Remove(game.Id); Render(); };
             row.Children.Add(box);
             var pushing = ConsoleUpdating && string.Equals(consolePushing, game.Id, StringComparison.OrdinalIgnoreCase);
-            row.Children.Add(new TextBlock { Text = (pushing ? "⟳ " : "") + game.Name, MinWidth = 180, Foreground = Ink, VerticalAlignment = VerticalAlignment.Center });
+            var name = new TextBlock { Text = (pushing ? "⟳ " : "") + game.Name, MinWidth = 180, MaxWidth = 320, Foreground = Ink, VerticalAlignment = VerticalAlignment.Center,
+                TextTrimming = TextTrimming.CharacterEllipsis };
+            ToolTip.SetTip(name, game.Name);
+            Grid.SetColumn(name, 1); row.Children.Add(name);
             var asApp = g.State == PhoneOverview.GameState.NotPushed && (phone.Apps ?? []).Any(x => string.Equals(x.GameId, game.Id, StringComparison.OrdinalIgnoreCase));
             var (text, color) = asApp ? (T("console.game.standalone"), "#C8C8CE") : Legacy(g) ? (T("console.legacy.badge"), "#FFC857") : g.State switch
             {
@@ -436,7 +461,8 @@ public sealed partial class EnvironmentWindow
                 PhoneOverview.GameState.NeedsData => (T(g.DataOnComputer == false ? "console.game.needsDataOriginal" : "console.game.needsData"), "#FFD60A"),
                 _ => (T(g.DataOnComputer == false ? "console.game.notPushedNoData" : "console.game.notPushed"), "#A0A0A8"),
             };
-            row.Children.Add(new TextBlock { Text = text, Foreground = Brush.Parse(color), FontSize = 12.5, TextWrapping = TextWrapping.Wrap, MaxWidth = 520, VerticalAlignment = VerticalAlignment.Center });
+            var state = new TextBlock { Text = text, Foreground = Brush.Parse(color), FontSize = 12.5, TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center };
+            Grid.SetColumn(state, 2); row.Children.Add(state);
             Avalonia.Automation.AutomationProperties.SetAutomationId(row, "console.game." + game.Id.ToUpperInvariant());
             sync.Children.Add(row);
         }
@@ -493,13 +519,9 @@ public sealed partial class EnvironmentWindow
         return Card(page, 24);
     }
 
-    /// <summary>总控台独立 App 一行的「续签」：走单款装机（InstallAsync），装到总控台这台；去这款的装机页看进度与结局（同游戏库「导出自签包」的落点）</summary>
-    private void RenewApp(LibraryGame game, string device)
-    {
-        selectedGame = game.Id;
-        _ = InstallAsync(game, device: device);
-        Navigate("install");
-    }
+    /// <summary>总控台独立 App 一行的「续签」：原先直接推到这台（单款装机）；0.6.4 起推只来自导出确认页，这里打开这款的导出确认页并预先勾上这一台
+    ///   （确认页唯一的预勾例外：玩家点的就是「这台续签」；其余入口一律默认都不勾），签名 / 出法照确认页缺省，玩家点「开始」才推</summary>
+    private void RenewApp(LibraryGame game, string device) => OpenExport(game, preDevice: device);
 
     // ---- 顶栏动态窗口（同 Mac S2ArmLauncherModel+PhoneConsole「顶栏动态窗口」）：有和 App 相关的作业时「游戏库」那颗显示进度，做完闪 ✓，失败 / 停下留「!」直到点开 ----
     private bool dynamicDone, dynamicAlert;

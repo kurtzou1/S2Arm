@@ -1,0 +1,9 @@
+{
+  "source": "release r6 cold-on, latest completed at capture",
+  "log_source": "game PID logcat direct device caps",
+  "captured_utc": "2026-11-21T01:56:12.562000+00:00",
+  "fragments": 3,
+  "scope": "app direct Vulkan device record",
+  "redactions": false,
+  "same_capabilities_as_release_r5_cold_off": true
+}

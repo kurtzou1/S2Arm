@@ -223,6 +223,19 @@ class InstallTest(TvCase):
             with self.assertRaises(Failure):
                 self.run_install([(0, "")], pack_sizes=dict(base, **{"game.img": 0, names[0]: 1, names[1]: 2}))   # 块字节不对
 
+    def test_imgmap_rides_in_batch_not_checked_at_final_path(self):
+        # D-NCDE / D-3KDG：game.imgmap（镜像旁带的偏移表）推送按整名判、不算直写镜像，进 tar 放 .incoming、App 打开才解到最终路径；
+        #   推完核对原先按子串判成直写，电视上最终路径没有 → 必报「game.imgmap 电视上没有」。期望（手写）：最终路径没有 game.imgmap 也过；
+        #   game.img 本身照旧按最终大小核（电视上少一字节 → resource_transfer_failed）
+        pack = layout.path(self.c, G, "image", "tvos", ".pack")
+        (pack / "game.imgmap").write_bytes(b"m" * 16964)
+        sizes = {p.name: p.stat().st_size for p in pack.iterdir() if p.name != "game.imgmap"}
+        self.run_install([(0, "")], pack_sizes=sizes)
+        with self.assertRaises(Failure) as e:
+            self.run_install([(0, "")], pack_sizes=dict(sizes, **{"game.img": sizes["game.img"] - 1}))
+        self.assertEqual(e.exception.code, "resource_transfer_failed")
+        self.assertIn("game.img", str(e.exception)); self.assertNotIn("imgmap", str(e.exception))
+
     def test_not_built_for_tv(self):
         shutil.rmtree(layout.path(self.c, G, "image", "tvos"))
         self.c.r["gameId"] = G
@@ -231,6 +244,24 @@ class InstallTest(TvCase):
         self.assertEqual(e.exception.code, "job_failed")
         self.assertFalse(tvos.tv_ready(self.c, G))
         self.assertTrue(tvos.tv_ready(self.c, H))
+
+
+class TvRecoveryTest(TvCase):
+    def test_tv_jobs_get_tv_next_steps(self):
+        # D-NCDE / D-GZHR / D-3KDG：Apple TV 作业失败的「下一步」原先照 iPhone 说（解锁手机、数据线、给这台 iPhone 签名、改用 AltStore）。
+        #   期望（手写）：作业名以 tv 开头 → 电视那句（说 Apple TV、不说手机 / iPhone / 数据线 / 锁屏 / 解锁 / AltStore）；别的作业照旧；电视表没有的码照旧
+        import errors
+        for code in ("resource_transfer_failed", "signing_failed", "device_install_failed", "device_not_connected", "device_locked"):
+            for op, tv in (("tvInstall", True), ("tvExport", True), ("install", False)):
+                self.c.operation = op
+                got = self.c.describe_failure(Failure("x", code=code))["suggestion"]
+                if tv:
+                    self.assertIn("Apple TV", got, (op, code))
+                    for w in ("手机", "iPhone", "数据线", "锁屏", "解锁", "AltStore"): self.assertNotIn(w, got, (op, code))
+                else:
+                    self.assertEqual(got, errors.RECOVERY[code], (op, code))
+        self.c.operation = "tvInstall"
+        self.assertEqual(self.c.describe_failure(Failure("x", code="stage_timeout"))["suggestion"], errors.RECOVERY["stage_timeout"])
 
 
 class AssembleShellTest(TvCase):

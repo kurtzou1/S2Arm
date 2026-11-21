@@ -33,7 +33,8 @@ class ShaderMissHint(unittest.TestCase):
 
     def run_hints(self):
         with patch.object(core, "release_version", lambda e: "0.6.0"), \
-                patch.object(rewrite_refresh, "rewriter_id", lambda c: "RID"), patch.object(host_update, "engine_compat", lambda c: dict(hostAbi=2, dmshChain="chain1")):
+                patch.object(rewrite_refresh, "rewriter_id", lambda c: "RID"), patch.object(host_update, "engine_compat", lambda c: dict(hostAbi=2, dmshChain="chain1")), \
+                patch.object(host_update, "ios_direct_lib", lambda c, g: True):
             return {g["gameId"]: g["reasons"] for g in host_update.update_hints(self.c)["games"]}
 
     def test_counts_and_build_version(self):
@@ -73,7 +74,8 @@ class ShaderMissHint(unittest.TestCase):
                                                    shaderFallback={A: dict(count=3)}))
         layout.save_device(self.c, "PHONE-2", dict(shellId="S", games={A: dict(program=dict(sha="s", host_abi=2, rewriter_id="RID"), pack="P")}))
         with patch.object(core, "release_version", lambda e: "0.6.0"), \
-                patch.object(rewrite_refresh, "rewriter_id", lambda c: "RID"), patch.object(host_update, "engine_compat", lambda c: dict(hostAbi=2, dmshChain="chain1")):
+                patch.object(rewrite_refresh, "rewriter_id", lambda c: "RID"), patch.object(host_update, "engine_compat", lambda c: dict(hostAbi=2, dmshChain="chain1")), \
+                patch.object(host_update, "ios_direct_lib", lambda c, g: True):
             ph = {p["device"]: {g["gameId"]: g for g in p["games"]} for p in host_update.phone_overview(self.c)["phones"]}
         self.assertEqual(ph["PHONE-1"][A], dict(gameId=A, state="suggested", reasons=["shaderMiss"]))
         self.assertEqual(ph["PHONE-2"][A]["state"], "latest", "另一台没现场翻译过：不标")

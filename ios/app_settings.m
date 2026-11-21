@@ -17,6 +17,8 @@ int s2a_fps_cap_reason(void) __attribute__((weak_import));
 #import "cpatch_settings.h"
 #include "native.h"   // LOG
 #include "s2a_pad.h"   // 手柄按键排布（自动 / Switch / Xbox）的取值解析，同齿轮菜单
+// 游戏内亮度（按款）：option 定义在 ios/settings.m（纯数据，命令行单测也能编）；拖动即时生效函数在本文件下方（需要 UIKit）。
+NSDictionary *s2a_ios_brightness_option(void);
 // 弱链接[lab]：s2a_cpatch_fps_pick（runtime/src/cpatch.c：局中切帧率档，下一帧生效；输入工作台不链原生核，取不到就只记、下次进游戏生效）
 void s2a_cpatch_fps_pick(int target) __attribute__((weak_import));
 // 弱链接[lab]：s2a_pad_layout_parse（runtime/src/pad.c；输入工作台不链原生核，取不到就按存的字面值认）
@@ -46,6 +48,13 @@ S2ASettingsRuntime *s2a_settings_runtime(void) { return g_runtime; }
 - (void)accessibilityIncrement { self.value = MIN(self.maximumValue, roundf(self.value) + 1); [self sendActionsForControlEvents:UIControlEventValueChanged]; }
 - (void)accessibilityDecrement { self.value = MAX(self.minimumValue, roundf(self.value) - 1); [self sendActionsForControlEvents:UIControlEventValueChanged]; }
 @end
+// 游戏内亮度拖动即时生效：设置页这一进程直接改屏幕亮度，让玩家当场看到效果；起局真正生效靠 settings.m 导出的 S2A_BRIGHTNESS。
+//   @"system" = 跟随系统，不动屏幕亮度（下一局也不导出）；越界值忽略。
+static void s2a_brightness_apply_live(id value) {
+    if (![value isKindOfClass:NSString.class] || [value isEqual:@"system"]) return;
+    double b = atof([value UTF8String]); if (b < 0 || b > 1) return;
+    UIScreen.mainScreen.brightness = b;
+}
 
 @class S2ASettingsController;
 @interface S2ASettingsPane : UITableViewController
@@ -321,6 +330,38 @@ static UILabel *textLabel(UIFontTextStyle style) {
     [NSLayoutConstraint activateConstraints:@[[stack.leadingAnchor constraintEqualToAnchor:m.leadingAnchor], [stack.trailingAnchor constraintEqualToAnchor:m.trailingAnchor], [stack.topAnchor constraintEqualToAnchor:m.topAnchor], [stack.bottomAnchor constraintEqualToAnchor:m.bottomAnchor]]];
     return cell;
 }
+// 游戏内亮度滑块（按款）：跟随系统 / 50 / 65 / 80 / 100%。拖动写 S2ABrightness 并即时改屏幕亮度；起局生效靠 settings.m 导出 S2A_BRIGHTNESS。
+- (UITableViewCell *)brightnessCell {
+    NSDictionary *option = s2a_ios_brightness_option();
+    UITableViewCell *cell = [self baseCell:@""]; cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    NSArray *values = option[@"values"], *labels = option[@"labels"];
+    NSUserDefaults *d = s2a_ios_settings_defaults();
+    id saved = [d objectForKey:@"S2ABrightness"];
+    NSInteger selected = saved ? [values indexOfObject:saved] : 0; if (selected == NSNotFound) selected = 0;
+    UILabel *title = textLabel(UIFontTextStyleBody); title.text = option[@"title"];
+    UILabel *value = textLabel(UIFontTextStyleBody); value.text = labels[selected]; value.textColor = self.view.tintColor;
+    [value setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    UIStackView *heading = [[UIStackView alloc] initWithArrangedSubviews:@[title, value]]; heading.spacing = 12;
+    S2ASteppedSlider *slider = [S2ASteppedSlider new]; slider.tag = 100;
+    slider.minimumValue = 0; slider.maximumValue = values.count - 1; slider.value = selected;
+    slider.accessibilityLabel = option[@"title"]; slider.accessibilityValue = labels[selected];
+    slider.accessibilityIdentifier = @"settings.brightness";
+    [slider addAction:[UIAction actionWithHandler:^(UIAction *action) {
+        UISlider *control = (UISlider *)action.sender; NSInteger index = lroundf(control.value); control.value = index;
+        value.text = labels[index]; control.accessibilityValue = labels[index];
+        id v = values[index];
+        if ([v isEqual:@"system"]) [d removeObjectForKey:@"S2ABrightness"]; else [d setObject:v forKey:@"S2ABrightness"];
+        s2a_brightness_apply_live(v);
+    }] forControlEvents:UIControlEventValueChanged];
+    [slider.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+    UIStackView *ticks = [UIStackView new]; ticks.distribution = UIStackViewDistributionEqualSpacing;
+    for (NSString *label in labels) { UILabel *tick = textLabel(UIFontTextStyleCaption2); tick.text = label; tick.textColor = UIColor.secondaryLabelColor; tick.isAccessibilityElement = NO; [ticks addArrangedSubview:tick]; }
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[heading, slider, ticks]];
+    stack.axis = UILayoutConstraintAxisVertical; stack.spacing = 2; stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [cell.contentView addSubview:stack]; UILayoutGuide *m = cell.contentView.layoutMarginsGuide;
+    [NSLayoutConstraint activateConstraints:@[[stack.leadingAnchor constraintEqualToAnchor:m.leadingAnchor], [stack.trailingAnchor constraintEqualToAnchor:m.trailingAnchor], [stack.topAnchor constraintEqualToAnchor:m.topAnchor], [stack.bottomAnchor constraintEqualToAnchor:m.bottomAnchor]]];
+    return cell;
+}
 - (UITableViewCell *)toggleCell:(NSInteger)index {
     NSString *key = toggleKeys()[index]; UITableViewCell *cell = [self baseCell:toggleTitles()[index]];
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
@@ -430,6 +471,7 @@ static UILabel *textLabel(UIFontTextStyle style) {
     BOOL fpsP = NO, wsP = NO;
     for (S2ACPatchGroup *g in _patchGroups) for (S2ACPatchItem *it in g.items) { if (it.followsFps60) fpsP = YES; if ([g.kind isEqual:@"widescreen"] || it.followsFullscreen) wsP = YES; }
     NSMutableArray *rows = [@[@0, @1, @2, @3] mutableCopy];
+    [rows addObject:@21];   // 游戏内亮度（按款，所有游戏都有；跟随系统 / 50 / 65 / 80 / 100%）
     if (wsP) [rows addObject:@6];
     if (fpsP) [rows addObject:@7];
     if (fpsP && [self fpsLevels].count > 1) [rows addObject:@20];   // 帧率档位（两档以上才列）
@@ -510,6 +552,7 @@ static UILabel *textLabel(UIFontTextStyle style) {
     }
     if (group == 0) {
         NSInteger kind = [self graphicsRows][row].integerValue;
+        if (kind == 21) return [self brightnessCell];   // 游戏内亮度：拖动即时生效、按款记住
         if (kind == 20) {   // 帧率档位：自动（不超过 60 帧的最高一档，120 档要玩家自己选，11-16 #1285）/ 各档；选了存 S2AFpsPick，游戏里当场切（s2a_cpatch_fps_pick），否则下次进游戏生效
             NSArray<NSNumber *> *lv = [self fpsLevels]; NSMutableArray *labels = [NSMutableArray arrayWithObject:S2AL(@"settings.fps.pick.auto")];
             for (NSNumber *n in lv) [labels addObject:[NSString stringWithFormat:S2AL(@"settings.fps.pick.level"), n.longValue]];

@@ -197,7 +197,7 @@ struct BatchExportView: View {
                     .accessibilityIdentifier("batch.retry." + gid)
             }
             if state("iphone") == "completed" {
-                Button(t("install")) { install(gid) }.controllerButtonStyle(LauncherSecondaryButtonStyle()).disabled(model.phoneQueued(gid))   // 别的作业在跑也能装：装机窗里排队.controllerShortcut(.rightTrigger, focused: true)
+                Button(BackendText.launcherText("exportsheet.open", language: uiLanguage)) { install(gid) }.controllerButtonStyle(LauncherSecondaryButtonStyle()).disabled(model.phoneQueued(gid))   // 打开导出确认页（别的作业在跑也能开，开始后排队）
             }
             if state("mac") == "completed", let game = model.games.first(where: { $0.id == gid }) {
                 let blocked = !model.canPlay(gid)   // 这批还在出别的款也能玩（游戏槽）；在玩别的 / 全库动作在跑时置灰

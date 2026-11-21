@@ -110,6 +110,31 @@ int s2a_alias_big_tops_window(uint64_t alias_base, int alias_gb, uint64_t win_en
     return end >= win_end;
 }
 
+// 即时存档命令记录区 + 虚拟池区（共 a 字节）放哪（窗口放不下标准布局时，vawin_reserve）：纯函数（放这里与布局算式同处，单测只链本文件），t_vawin_snaparena 测。
+//   1 = 窗口所在空洞之外（[4 GB, 空洞起点) 里最大一块 out ≥ a）；2 = 窗口下方宿主保留段底部（段长 below，切走 a 后仍 ≥ host_min——
+//   11-20 关快照的那次改动只看窗口外，iOS 27 那一段被共享缓存占满、量出 0，可按应用池留的宿主段有 21 GB，所有游戏的快照都被关了，#1867）；
+//   0 = 都放不下，这一局关快照。宿主段只有 host_min 那么多时不切：Metal 着色器库要从那里放（原先切满 3 GB 首帧前 NSMallocException）
+int s2a_snap_arena_place(uint64_t out, uint64_t below, uint64_t a, uint64_t host_min) {
+    if (out >= a) return 1;
+    if (below >= a + host_min) return 2;
+    return 0;
+}
+
+// 分配器预留压小（改写器在 nn::mem::StandardAllocator 初始化入口挂的闸，svc_mem.c s2a_sainit_gate）：游戏传「地址空、尺寸 size」时
+//   SDK 在别名区划一整块，起点 = 元数据之后按 GiB 对齐（同上 s2a_alias_big_tops_window），末尾留 4 KiB 保护页。
+//   放得下 = 别名区整段在窗口里，或这块（连前后保护页 8 KiB）的末端在窗口里 → 原样，与今天逐字节相同（判据同「地址空间不够」提示）。
+//   放不下 → 压到「窗口末 − 起点 − 余量」按 GiB 向下取整。余量 = 应用池 + 8 KiB：块之后的其余地址区由 SDK 一路往上放
+//   （s2a_layout_compute 注释），它们的提交总量受应用池封顶，按每字节占一字节地址留（≥2 MiB 的区实测不到 2.01 倍、4 KiB 小区更多——
+//   留不够的那部分落到窗口外照旧走远端，只是慢，不会错）。压出来不到 1 GiB（窗口实在太小）→ 不压。返回值 = 该交给 SDK 的尺寸，等于 size 即不动
+uint64_t s2a_sainit_size(uint64_t alias_base, uint64_t alias_size, uint64_t win_end, uint64_t pool, uint64_t size) {
+    if (alias_base + alias_size <= win_end) return size;
+    uint64_t start = (alias_base + 0x3FE00000ull + GB - 1) & ~(GB - 1);
+    if (start < win_end && size + 0x2000 <= win_end - start) return size;
+    if (start >= win_end || win_end - start <= pool + 0x2000) return size;
+    uint64_t y = (win_end - start - pool - 0x2000) & ~(GB - 1);
+    return y >= GB && y < size ? y : size;
+}
+
 int s2a_layout_compute(uint32_t as_type, uint64_t sys_resource_size, uint64_t module_span, int alias_gb, uint64_t W, uint64_t S, s2a_layout *o, uint64_t *mod_base, uint64_t *shadow_base) {
     memset(o, 0, sizeof *o); *mod_base = *shadow_base = 0;
     uint64_t top = s2a_as_type_top(as_type);

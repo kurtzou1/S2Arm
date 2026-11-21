@@ -91,7 +91,7 @@ import S2ArmAppleAdapter
             guard let g = game() else { return .bad("没有这个 gameId") }
             return blocked(model.export(g, platforms: [.ios],
                                         deviceTarget: deviceTarget ?? (probe["connected"] as? [[String: Any]])?.first, spaceOverride: spaceOverride))
-        case ("POST", "/selfsign"):   // 同游戏库「导出自签包」：能直接导出的直接导出，没出过 / 旧格式的先出 iPhone 包再导出
+        case ("POST", "/selfsign"):   // 同导出确认页都不勾设备（签名按设置里的）：能直接导出的直接导出，没出过 / 旧格式的先出 iPhone 包再导出
             guard let g = game() else { return .bad("没有这个 gameId") }
             if let b = g.iphoneExportable ? phoneBusy() : busy() { return b }
             model.exportSelfSign(g); return .ok()

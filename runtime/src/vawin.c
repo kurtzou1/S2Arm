@@ -40,7 +40,7 @@ static int g_ok;            // 1 = 窗口已占到（首选位置整块 64 GB，
 static int g_noreserve;
 static uint64_t g_base, g_size;
 #if !TARGET_OS_OSX
-static uint64_t g_snap_below;   // 即时存档（iOS）：占窗口时在宿主段最底部给命令记录区多留的长度（0 = 没留）——11-20 起不再从窗口里让，恒为 0（旧快照恢复走 cmd_arena_at_snapshot）
+static uint64_t g_snap_below;   // 即时存档（iOS）：命令记录区放在窗口下方宿主保留段底部时的长度（0 = 没放那里）。11-20 起不再为它从窗口里让、不扩宿主段，只在宿主段本来就够大时切（s2a_snap_arena_place）
 static uint64_t g_snap_out;     // 即时存档（iOS）、窗口放不下标准布局：命令记录区 + 虚拟池区放在窗口所在空洞之外的这处（0 = 没放）
 #endif
 static uint64_t g_keep_lo;   // 放不下标准布局时窗口下方留给宿主的那段起点（0 = 没有）：Mac 复现 iPhone 约束时不占它（iphone_va_fence）
@@ -1295,8 +1295,12 @@ static void vawin_reserve(void) {
           if (!(rec && *rec) && s2a_snap_mode() && !s2a_snap_restoring()) {
               uint64_t oa = 0, os = 0, of = 0, ofa = 0, ol = 0;
               pick_hole_in(0x100000000ull, fat, A, &oa, &os, &of, &ofa, 0, &ol);
-              if (os >= A) { g_snap_out = oa + os - A;
+              int where = s2a_snap_arena_place(os, below, A, HOST_BELOW);
+              if (where == 1) { g_snap_out = oa + os - A;
                   LOG("即时存档：窗口放不下标准布局，命令记录区与虚拟池区不从窗口里让，放窗口外 %#llx +%llu MB", (unsigned long long)g_snap_out, (unsigned long long)(A >> 20)); }
+              else if (where == 2) { g_snap_below = A;   // 宿主保留段底部切 3 GB（cmd_arena_reserve 就地占），窗口与宿主段长度都不变
+                  LOG("即时存档：窗口放不下标准布局，窗口外没有整块 %llu MB 的空洞（最大 %llu MB）；窗口下方宿主保留段 %llu MB 够大，命令记录区与虚拟池区放在它底部，宿主还剩 %llu MB",
+                      (unsigned long long)(A >> 20), (unsigned long long)(of >> 20), (unsigned long long)(below >> 20), (unsigned long long)((below - A) >> 20)); }
               else { s2a_snap_disable(S2A_SNAP_OFF_ADDRESS);
                   LOG("【黄】即时存档：这台设备的地址空间放不下这款游戏的标准布局，窗口外也没有整块 %llu MB 的空洞（最大 %llu MB）——这一局不开快照，游戏照常玩（不再从窗口里让 3 GB）",
                       (unsigned long long)(A >> 20), (unsigned long long)(of >> 20)); } } }
@@ -1329,6 +1333,10 @@ static void vawin_reserve(void) {
     iphone_va_fence();
 #endif
     BOOT_MARK("进程创建 → 占窗口（dyld 装载 + 构造函数）");
+    // GC 上限按低区最大一块选档（gclimit.c）：窗口占下后低区变小，档位要按占完的样子重选。构造期这次 GC 档位还没选（重选是空操作）；
+    //   多款容器构造期没游戏、起宿主前才补占 / 重占（s2a_window_reserve_late）时，档位已按整块空洞选成总上限档（开局一次保留 10 GB），
+    //   补占后下方只剩 6 GB → .NET 运行时初始化失败（诊断#f1e327 / #7940bc，0.6.0–0.6.1 三台 iPhone）。放宽窗口那处（s2a_window_span_widen）原本就重选
+    { void (*gc)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "s2a_gc_limit_reapply"); if (gc) gc(); }
 }
 
 void s2a_window_reserve(void) {

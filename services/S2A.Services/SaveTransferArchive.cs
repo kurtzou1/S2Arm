@@ -235,6 +235,10 @@ public static partial class SaveTransfer
     {
         scan = Scan(root);
         Require(scan.Files.Keys.Any(n => n.StartsWith("bis/user/save/", StringComparison.Ordinal)), T("此游戏尚无可备份存档。", "This game has no save to back up yet."), "save_empty");
+        // 用户档案与存档索引是这款第一次起局时模拟器建的：存档从电脑推进来、还没起过局的 App 两样都没有。原先读档案时「找不到文件」被归成笼统的 save_invalid，
+        //   玩家看不出缺什么。先核在不在，缺了说清怎么办
+        Require(scan.Files.ContainsKey(Profile) && scan.Files.ContainsKey(Index),
+            T("这款在这台设备上还没进过游戏，缺少用户档案和存档索引，导出不了：先打开游戏进一次主界面，再导出存档。", "This game hasn't been started on this device yet, so its user profile and save index are missing and the save can't be exported. Open the game once to its main screen, then export."), "save_user");
         Profiles(SmallFile(Path.Combine(root, Profile)));
         var entries = Entries(name => SmallFile(Path.Combine(root, name)), scan.Files.Keys, scan.Directories);
         string platform = c.Request["androidRevisionIdentity"]?.GetValue<bool>() == true ? "android" : "ios";

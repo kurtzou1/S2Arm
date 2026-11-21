@@ -790,13 +790,13 @@ static _Atomic int g_q_ready, g_q_stop;
 static void q_free(uint64_t arg) { (void)arg; atomic_store(&g_q_ready, 1); while (!atomic_load(&g_q_stop)) {} uint64_t e[31] = {0}; svc_thread(0x0A, e); }
 static int lite_case(int mode) {   // 子进程里跑；mode 1 按需（缺省）/ 0 关；返回失败数
     bad = 0;   // fork 时继承了父进程的计数
-    // 0 / 3 测「关」档语义：显式 S2A_CORES=0（11-19 起苹果平台不设时缺省是按需，靠缺省会测成按需）
-    if (mode == 2) setenv("S2A_CORES", "1", 1); else if (mode == 1) setenv("S2A_CORES", "ondemand", 1); else if (mode == 4) unsetenv("S2A_CORES"); else setenv("S2A_CORES", "0", 1);   // 4：不设 = 缺省（苹果按需、其它关）
+    // 0 / 3 测「关」档语义：显式 S2A_CORES=0（缺省档另由 4 测，各平台缺省关）
+    if (mode == 2) setenv("S2A_CORES", "1", 1); else if (mode == 1) setenv("S2A_CORES", "ondemand", 1); else if (mode == 4) unsetenv("S2A_CORES"); else setenv("S2A_CORES", "0", 1);   // 4：不设 = 缺省（各平台关）
     if (mode == 3) setenv("S2A_PEER_YIELD", "0", 1);   // 3：反证——唤醒让先也关
     setenv("S2A_SAMECORE_DIAG", "1", 1);
     s2a_thread_main_init();
     #if defined(__APPLE__)
-    const int dflt_excl = 1;   // 11-19 维护者定：苹果平台缺省按需（同核互斥）
+    const int dflt_excl = 0;   // 11-21 维护者定：各平台缺省关（不同核互斥）；11-19～11-21 苹果曾缺省按需
 #else
     const int dflt_excl = 0;
 #endif
@@ -980,7 +980,7 @@ int main(void) {
                         "uninitialized guest TSD treated an unrelated host key as a guest owner"); }
     pthread_key_create(&g_key18, NULL); pthread_key_create(&g_keytls, NULL); pthread_key_create(&g_keytlr, NULL); pthread_key_create(&g_keygate, NULL);
     signal(SIGALRM, timeout_kill); alarm(TIMEOUT_S);
-    for (int mode = 4; mode >= 0; mode--) {   // 4：不设 S2A_CORES（缺省档，苹果应同按需）   // ㉓㉔㉕㉖：关 + 不让先（反证）/ 全部参与（S2A_CORES=1）/ 按需（=ondemand）/ 缺省（关、让先开）各一个子进程（cores_mode 进程内只读一次，必须在下面设 S2A_CORES=1 之前分出去）
+    for (int mode = 4; mode >= 0; mode--) {   // 4：不设 S2A_CORES（缺省档，各平台应同关）   // ㉓㉔㉕㉖：关 + 不让先（反证）/ 全部参与（S2A_CORES=1）/ 按需（=ondemand）/ 缺省（关、让先开）各一个子进程（cores_mode 进程内只读一次，必须在下面设 S2A_CORES=1 之前分出去）
         fflush(stdout); pid_t pid = fork();
         if (!pid) { g_case = "㉓㉔㉕㉖"; int rc_ = lite_case(mode); fflush(stdout); _exit(rc_ ? 1 : 0); }
         int st = 0; waitpid(pid, &st, 0); CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0, "㉓㉔㉕ 子进程（模式 %d：4 不设（缺省）/ 3 关+不让先 / 2 全部参与 / 1 按需 / 0 关）失败或异常退出（状态 %#x）", mode, st);

@@ -92,11 +92,13 @@ extension S2ArmLauncherModel {
     }
 
     /// 装机 / 推送失败的码要落到登录面板的（失败页「登录 Apple ID」按钮）：没登录、登录过期
+    /// 作业层等冷却的阶段（pack/jobs/apple_login.py _cool_wait；progress 带 wait = 还要等几秒）
+    static let appleLoginWaitKey = "appleLogin.wait"
     static let appleLoginCodes: [String: String?] = ["apple_not_signed_in": nil, "apple_session_expired": "expired"]
 
     /// 关面板：在登录的那一次作业一并停掉（作业层照取消收尾）
     func closeAppleLogin() {
-        appleLoginTask?.cancel(); appleLoginTask = nil
+        appleLoginTask?.cancel(); appleLoginTask = nil; appleLoginWait = nil
         if case .done = appleLoginPhase {} else { appleLoginPhase = .idle }
         appleLoginHost = nil; appleLoginReason = nil
     }
@@ -112,12 +114,18 @@ extension S2ArmLauncherModel {
     func startAppleLogin(account: String, password: String) {
         appleLoginTask?.cancel()
         appleLoginPhase = .signingIn
+        appleLoginWait = nil
         let sink = EventSink { [weak self] e in
+            if let key = e.fields["stageKey"] as? String, key.hasPrefix("appleLogin") {   // 冷却等完、开始连苹果：倒计时收起
+                let left = key == Self.appleLoginWaitKey ? (e.fields["wait"] as? NSNumber)?.intValue : nil
+                if key != Self.appleLoginWaitKey || left != nil { Task { @MainActor in self?.appleLoginWait = left } }
+            }
             guard let prompt = AppleLoginPrompt(event: e) else { return }
             Task { @MainActor in self?.appleLoginPhase = .needCode(prompt) }
         }
         let trimmed = account.trimmingCharacters(in: .whitespacesAndNewlines)
         appleLoginTask = Task { [weak self] in
+            defer { self?.appleLoginWait = nil }
             do {
                 guard let got = try await self?.provider.appleLogin(account: trimmed, password: password, events: sink) else { return }
                 if Task.isCancelled { return }

@@ -27,12 +27,14 @@ NOW = datetime.datetime(2026, 11, 9, tzinfo=datetime.timezone.utc)
 IML, EVA = devcert.WANT
 
 
-def profile(appid=f"{TEAM}.*", ents=None, devices=("00000000-000A1B2C3D4E5F60",), all_devices=False, expires=NOW + datetime.timedelta(days=200), certs=(DER,)):
+def profile(appid=f"{TEAM}.*", ents=None, devices=("00000000-000A1B2C3D4E5F60",), all_devices=False, expires=NOW + datetime.timedelta(days=200), certs=(DER,), uuid=None, name="Test Profile"):
     e = {"application-identifier": appid, "com.apple.developer.team-identifier": TEAM, "get-task-allow": True, IML: True, EVA: True,
          "keychain-access-groups": [f"{TEAM}.*"]}
     e.update(ents or {})
-    p = {"ApplicationIdentifierPrefix": [TEAM], "TeamIdentifier": [TEAM], "TeamName": "S2Arm Test Co", "Name": "Test Profile",
+    p = {"ApplicationIdentifierPrefix": [TEAM], "TeamIdentifier": [TEAM], "TeamName": "S2Arm Test Co", "Name": name,
          "ExpirationDate": expires.replace(tzinfo=None), "DeveloperCertificates": list(certs), "Entitlements": {k: v for k, v in e.items() if v is not None}}
+    if uuid:
+        p["UUID"] = uuid
     if all_devices:
         p["ProvisionsAllDevices"] = True
     else:
@@ -200,7 +202,8 @@ class Operation(unittest.TestCase):
         d = self.t / "private/devcert"
         self.assertEqual((r["active"], r["bundleId"]), (True, "io.s2arm.games.abcde12345"))
         self.assertEqual(self.sec.d, {SHA1: "pw"})
-        self.assertEqual(sorted(p.name for p in d.iterdir()), ["cert.p12", "profile.mobileprovision", "state.json"])
+        self.assertEqual(sorted(p.name for p in d.iterdir()), [".state.lock", "cert.p12", "entries", "entries.json", "profile.mobileprovision", "state.json"])   # 根下一份给旧版
+        self.assertEqual(sorted(p.name for p in (d / "entries" / SHA1).iterdir()), ["cert.p12", "profile.mobileprovision"])
         self.assertNotIn("pw", (d / "state.json").read_text())
         c = self.ctx()
         self.assertTrue(devcert.active(c))
@@ -209,8 +212,8 @@ class Operation(unittest.TestCase):
         self.assertIsNone(devcert.team(self.ctx()))
         self.assertTrue(devcert.operation(self.ctx(action="status"))["imported"])
         devcert.operation(self.ctx(action="delete"))
-        self.assertEqual((sorted(p.name for p in d.iterdir()), self.sec.d), ([], {}))
-        self.assertEqual(devcert.operation(self.ctx(action="status")), dict(imported=False, active=False, cert=None))
+        self.assertEqual((sorted(p.name for p in d.iterdir()), self.sec.d), ([".state.lock"], {}))
+        self.assertEqual(devcert.operation(self.ctx(action="status")), dict(imported=False, active=False, cert=None, certs=[], chosen=None, current=None, needsChoice=False))
 
     def test_blocked_import_keeps_previous(self):
         self.imp()
@@ -219,7 +222,7 @@ class Operation(unittest.TestCase):
             self.imp(password="new")
         self.assertEqual(e.exception.code, "devcert_mismatch")
         self.assertEqual(self.sec.d, {SHA1: "pw"})   # 旧证书和密码原样留着
-        self.assertEqual(devcert.parse_profile((self.t / "private/devcert/profile.mobileprovision").read_bytes())["DeveloperCertificates"], [DER])
+        self.assertEqual(devcert.parse_profile((self.t / "private/devcert/entries" / SHA1 / "profile.mobileprovision").read_bytes())["DeveloperCertificates"], [DER])
 
     def test_distribution_import_kept_and_recorded(self):
         # 0.6.3：分发描述文件照常导入（独立 App 能用），按存着的描述文件认出分发；缺项和给发放人的话照旧随结果给（导入页「复制」用）；导入请求没带设备 → UDID 是占位
@@ -257,6 +260,322 @@ class Operation(unittest.TestCase):
         with self.assertRaises(Failure) as e:
             devcert.operation(self.ctx(action="use", active=True))
         self.assertEqual(e.exception.code, "devcert_missing")
+
+
+class MultiCert(unittest.TestCase):
+    """几张证书一台一张（#487）：add 加一张、不删别的密码；每台按选定的那张签；没选过按现装包名 > 描述文件 > 只有一张挑，挑不出报 devcert_choose；
+    同一张 .p12 配每台各自的描述文件 = 几个条目；不带 add 的导入保持旧义「换一个」（Windows 证书页）；旧版单证书就地迁移、根下留一份给旧版"""
+    U1, U2, U3 = "00000000-000A1B2C3D4E5F61", "00000000-000A1B2C3D4E5F62", "00000000-000A1B2C3D4E5F63"
+    DER2 = b"\x30\x82second-cert-der"
+    SHA2 = hashlib.sha1(DER2).hexdigest()
+    PA, PB, PC = "aaaaaaaa-0000-0000-0000-000000000001", "bbbbbbbb-0000-0000-0000-000000000002", "cccccccc-0000-0000-0000-000000000003"
+
+    def setUp(self):
+        self.t = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.t, True)
+        (self.t / "lib").mkdir()
+        (self.t / "a.p12").write_bytes(b"A"); (self.t / "b.p12").write_bytes(b"B")
+        (self.t / "a.mobileprovision").write_bytes(profile(devices=(self.U1,), uuid=self.PA, name="iPhone profile"))
+        (self.t / "b.mobileprovision").write_bytes(profile(appid=f"{TEAM}.com.foo.ipad", devices=(self.U2,), certs=(self.DER2,), uuid=self.PB, name="iPad profile"))
+        # 同一张证书 A、给 U2 的另一份描述文件（按设备买证书常见：一张 .p12、每台一份描述文件）
+        (self.t / "c.mobileprovision").write_bytes(profile(appid=f"{TEAM}.com.foo.second", devices=(self.U2,), uuid=self.PC, name="second profile"))
+        self.sec = Secrets()
+        shas = {b"A": SHA1, b"B": self.SHA2}
+        self.clock = iter(range(10, 99))
+        for name, fake in (("normalize_p12", lambda src, dest, pw: Path(dest).write_bytes(Path(src).read_bytes())),
+                           ("cert_info", lambda rcs, p12, pw: cert(sha1=shas[Path(p12).read_bytes()])), ("rcodesign_path", lambda c: "rcs")):
+            p = patch.object(devcert, name, fake); p.start(); self.addCleanup(p.stop)
+
+    def ctx(self, password=None, **r):
+        return types.SimpleNamespace(r=r, private=self.t / "private", library=self.t / "lib", engine=self.t, devcert_secrets=self.sec,
+                                     devcert_password=password, begin=lambda *a: None)
+
+    def imp(self, p12, prof, password="pw", **extra):
+        # imported 时间戳逐次递增（同档几张取最新导入的）
+        with patch.object(devcert, "_now", lambda: (NOW + datetime.timedelta(minutes=next(self.clock))).isoformat()):
+            return devcert.operation(self.ctx(password, action="import", p12Path=str(self.t / f"{p12}.p12"), profilePath=str(self.t / f"{prof}.mobileprovision"), **extra))
+
+    def on(self, udid):
+        c = self.ctx(); devcert.bind(c, udid); return c
+
+    def installed(self, udid, bid):
+        import layout
+        layout.save_device(self.ctx(), udid, dict(games={}, bundleId=bid))
+
+    def test_two_certs_each_device_its_own(self):
+        self.imp("a", "a", password="pa"); self.imp("b", "b", password="pb", add=True)
+        self.assertEqual(self.sec.d, {SHA1: "pa", self.SHA2: "pb"})   # 第二张不顶掉第一张的密码
+        self.assertEqual(devcert.state(self.on(self.U1))["bundleId"], "io.s2arm.games.abcde12345")
+        self.assertEqual(devcert.state(self.on(self.U2.lower()))["bundleId"], "com.foo.ipad")   # 描述文件只有一张管这台：自动挑它
+        self.assertEqual(devcert.stored(self.on(self.U2))[2], "pb")
+        with self.assertRaises(Failure) as e:   # 哪张都不管、又有两张：不猜
+            devcert.state(self.on(self.U3))
+        self.assertEqual(e.exception.code, "devcert_choose")
+        with self.assertRaises(Failure) as e:   # 签名时没绑设备、两张：同样不猜
+            devcert.stored(self.ctx())
+        self.assertEqual(e.exception.code, "devcert_choose")
+        self.assertTrue(devcert.active(self.ctx()))
+        st = devcert.operation(self.ctx(action="status"))   # 没选设备的出包页：照常显示缺省那张，不报错
+        self.assertEqual((st["cert"]["entry"], st["needsChoice"]), (self.PA, False))
+
+    def test_one_p12_two_profiles(self):
+        self.imp("a", "a"); self.imp("a", "c", add=True)
+        s = devcert.store(self.ctx())
+        self.assertEqual(list(s["entries"]), [self.PA, self.PC])
+        self.assertEqual((devcert.state(self.on(self.U1))["entry"], devcert.state(self.on(self.U2))["entry"]), (self.PA, self.PC))
+        devcert.operation(self.ctx(action="delete", cert=self.PC))
+        self.assertEqual(self.sec.d, {SHA1: "pw"})   # 另一条还用这张证书：密码留着
+
+    def test_installed_app_wins_then_newest(self):
+        self.imp("a", "a"); self.imp("a", "c", add=True)
+        (self.t / "a2.mobileprovision").write_bytes(profile(appid=f"{TEAM}.com.foo.third", devices=(self.U1, self.U2), uuid="dddddddd-0000-0000-0000-000000000004", name="both"))
+        self.imp("a", "a2", add=True)
+        self.assertEqual(devcert.state(self.on(self.U2))["entry"], "dddddddd-0000-0000-0000-000000000004")   # 两条都管这台：取新导入的（不挡玩家）
+        self.installed(self.U2, "com.foo.second")
+        self.assertEqual(devcert.state(self.on(self.U2))["entry"], self.PC)   # 这台现装的是 PC 签的 App：用它，不另装一个
+        self.assertFalse(devcert.needs_choice(self.ctx(), self.U2))   # 老玩家已在用的那台不问
+        self.assertTrue(devcert.needs_choice(self.ctx(), self.U3))
+
+    def test_choice_wins_and_is_remembered(self):
+        self.imp("a", "a"); self.imp("b", "b", add=True)
+        devcert.operation(self.ctx(action="choose", device=self.U3, cert=self.PB))
+        self.assertEqual(devcert.state(self.on(self.U3))["entry"], self.PB)
+        devcert.operation(self.ctx(action="choose", device=self.U1, cert=self.PB))   # 玩家明选不管这台的那张：照用（装机前清单另报不在列表）
+        self.assertEqual(devcert.state(self.on(self.U1))["entry"], self.PB)
+        with self.assertRaises(Failure) as e:
+            devcert.operation(self.ctx(action="choose", device=self.U1, cert="nope"))
+        self.assertEqual(e.exception.code, "devcert_missing")
+        c = self.on(self.U2); devcert.stored(c); devcert.remember(c)   # 自动挑的签好装好了：记下
+        self.assertEqual(devcert.store(self.ctx())["devices"], {self.U3: self.PB, self.U1: self.PB, self.U2: self.PB})
+
+    def test_status_asks_once_per_device(self):
+        self.imp("a", "a")
+        st = devcert.operation(self.ctx(action="status", device=self.U2))
+        self.assertEqual((st["needsChoice"], st["chosen"], st["current"]), (False, None, self.PA))   # 只有一张不问：同旧版，就用它
+        self.assertEqual([(x["entry"], x["deviceListed"]) for x in st["certs"]], [(self.PA, False)])
+        self.imp("a", "c", add=True)   # 出包页「再导入一张」（不带设备）：有两张了，没选过的那台要问
+        self.assertTrue(devcert.operation(self.ctx(action="status", device=self.U3))["needsChoice"])
+        self.imp("b", "b", device=self.U2, add=True)   # 选证书窗里「导入新证书」：导入即给这台选它
+        st = devcert.operation(self.ctx(action="status", device=self.U2))
+        self.assertEqual((st["needsChoice"], st["chosen"], st["cert"]["bundleId"]), (False, self.PB, "com.foo.ipad"))
+        self.assertEqual({x["entry"]: x["deviceListed"] for x in st["certs"]}, {self.PA: False, self.PC: True, self.PB: True})
+        devcert.operation(self.ctx(action="use", active=False))
+        self.assertFalse(devcert.operation(self.ctx(action="status", device=self.U3))["needsChoice"])   # Apple ID 签名时不问
+
+    def test_installed_bid_needs_profile_cover(self):
+        # 同团队两份通配描述文件（A 管 U1、D 管 U2）算出的包名一样：U1 现装的那个包名不能把 D 挑给 U1（签出来装不上）
+        self.imp("a", "a")
+        (self.t / "d.mobileprovision").write_bytes(profile(devices=(self.U2,), uuid="dddddddd-0000-0000-0000-000000000004", name="iPad wildcard"))
+        self.imp("a", "d", add=True)
+        self.installed(self.U1, "io.s2arm.games.abcde12345")
+        self.installed(self.U2, "io.s2arm.games.abcde12345")
+        self.assertEqual(devcert.state(self.on(self.U1))["entry"], self.PA)
+        self.assertEqual(devcert.state(self.on(self.U2))["entry"], "dddddddd-0000-0000-0000-000000000004")
+        self.installed(self.U3, "io.s2arm.games.abcde12345")   # 哪份都不管 U3：包名对得上也不算，要问
+        self.assertTrue(devcert.needs_choice(self.ctx(), self.U3))
+
+    def test_remember_writes_entry_used_for_signing(self):
+        # 签名和记录之间导入了一张更新、也管这台的：记下的仍是签名时用的那张，下次包名不变
+        self.imp("a", "a")
+        c = self.on(self.U1)
+        self.assertEqual(devcert.stored(c)[0].parent.name, self.PA)
+        (self.t / "e.mobileprovision").write_bytes(profile(appid=f"{TEAM}.com.foo.newer", devices=(self.U1,), uuid="eeeeeeee-0000-0000-0000-000000000005", name="newer"))
+        self.imp("a", "e", add=True)
+        self.assertEqual(devcert.state(c)["entry"], self.PA)   # 同一作业里不换
+        devcert.remember(c)
+        self.assertEqual(devcert.store(self.ctx())["devices"], {self.U1: self.PA})
+        c2 = self.ctx(); devcert.remember(c2)   # 没签过名的作业：不记
+        self.assertEqual(devcert.store(self.ctx())["devices"], {self.U1: self.PA})
+
+    def test_lock_reentry_is_per_thread(self):
+        # 同一作业对象、另一线程：要等主线程放锁，不能当成重入直接进
+        import threading
+        self.imp("a", "a")
+        c, order = self.ctx(), []
+        with devcert._locked(c):
+            th = threading.Thread(target=lambda: (devcert._locked(c).__enter__(), order.append("thread")))
+            th.start(); th.join(0.5)
+            order.append("main")
+        th.join(5)
+        self.assertEqual(order, ["main", "thread"])
+
+    def test_sign_mode_set_with_two_certs(self):
+        # 设置里切签名方式（没有设备）：几张证书时不报 devcert_choose，开关经证书库改
+        import install
+        with self.assertRaises(Failure) as e:
+            install.sign_mode_set(self.ctx(mode="devCert"))
+        self.assertEqual(e.exception.code, "devcert_missing")
+        self.imp("a", "a"); self.imp("b", "b", add=True)
+        patch.object(install, "chosen_sign_mode", lambda c: "x").start(); self.addCleanup(patch.stopall)
+        install.sign_mode_set(self.ctx(mode="appleId"))
+        self.assertFalse(devcert.store(self.ctx())["active"])
+        self.assertFalse(json.loads((self.t / "private/devcert/state.json").read_text())["active"])
+        install.sign_mode_set(self.ctx(mode="devCert"))
+        self.assertTrue(devcert.store(self.ctx())["active"])
+
+    def test_installed_here_marks_current_app(self):
+        self.imp("a", "a"); self.imp("b", "b", add=True)
+        self.installed(self.U1, "io.s2arm.games.abcde12345")
+        self.assertEqual({x["entry"]: x["installedHere"] for x in devcert.listing(self.ctx(), self.U1)}, {self.PA: True, self.PB: False})
+
+    def test_legacy_import_replaces(self):
+        # 不带 add（Windows 证书页「换一个证书」、旧前端）：顶掉缺省那张，条目号不变，选过它的设备跟着换；旧证书的密码删掉
+        self.imp("a", "a", password="pa")
+        devcert.operation(self.ctx(action="choose", device=self.U1, cert=self.PA))
+        self.imp("b", "b", password="pb")
+        s = devcert.store(self.ctx())
+        self.assertEqual((list(s["entries"]), s["entries"][self.PA]["certSha1"], s["devices"], self.sec.d), ([self.PA], self.SHA2, {self.U1: self.PA}, {self.SHA2: "pb"}))
+
+    def test_renewed_profile_keeps_entry(self):
+        self.imp("a", "a"); self.imp("b", "b", add=True)
+        devcert.operation(self.ctx(action="choose", device=self.U3, cert=self.PA))
+        (self.t / "a.mobileprovision").write_bytes(profile(devices=(self.U1, self.U3), uuid="eeeeeeee-0000-0000-0000-000000000005", name="iPhone profile"))   # 续期：新 UUID、同名
+        self.imp("a", "a", add=True)
+        s = devcert.store(self.ctx())
+        self.assertEqual((list(s["entries"]), s["devices"]), ([self.PA, self.PB], {self.U3: self.PA}))
+        self.assertTrue(devcert.covers(self.ctx(), self.PA, self.U3))
+
+    def test_delete_one_keeps_other(self):
+        self.imp("a", "a"); self.imp("b", "b", add=True)
+        devcert.operation(self.ctx(action="choose", device=self.U3, cert=self.PA))
+        devcert.operation(self.ctx(action="delete", cert=self.PA))
+        s = devcert.store(self.ctx())
+        self.assertEqual((list(s["entries"]), s["devices"], self.sec.d), ([self.PB], {}, {self.SHA2: "pw"}))
+        self.assertEqual(devcert.state(self.on(self.U3))["entry"], self.PB)   # 只剩一张：同旧版，就用它
+        self.assertEqual(json.loads((self.t / "private/devcert/state.json").read_text())["certSha1"], self.SHA2)   # 给旧版的那份跟着换
+        devcert.operation(self.ctx(action="delete"))
+        self.assertEqual(sorted(p.name for p in (self.t / "private/devcert").iterdir()), [".state.lock"])
+
+    def test_migrates_single_cert(self):
+        d = self.t / "private/devcert"; d.mkdir(parents=True)
+        (d / "cert.p12").write_bytes(b"A"); (d / "profile.mobileprovision").write_bytes(profile(devices=(self.U1,), uuid=self.PA))
+        old = dict(active=True, certSha1=SHA1, bundleId="io.s2arm.games.abcde12345", teamId=TEAM, teamName="S2Arm Test Co", imported="2026-11-10T00:00:00+00:00")
+        (d / "state.json").write_text(json.dumps(old))
+        self.sec.d[SHA1] = "pw"
+        self.installed(self.U2, "io.s2arm.games.abcde12345")   # 用这张装过的另一台（描述文件不管它也一样）：认包名，不问
+        s = devcert.store(self.ctx())
+        self.assertEqual((list(s["entries"]), s["devices"], s["active"]), ([self.PA], {}, True))
+        self.assertFalse(devcert.needs_choice(self.ctx(), self.U2))
+        self.assertTrue((d / "cert.p12").is_file())   # 根下那份留给旧版
+        self.assertEqual({k: json.loads((d / "state.json").read_text())[k] for k in old if k != "imported"}, {k: v for k, v in old.items() if k != "imported"})
+        self.assertEqual(devcert.stored(self.on(self.U1))[2], "pw")
+        self.assertEqual(devcert.store(self.ctx()), s)   # 再读不再迁
+
+    def test_windows_style_secrets_replace_and_delete(self):
+        # Windows 密码按目录存（<条目>/password.dpapi，删的是整份文件、不分账户）：换证书先删旧的再存新的，不能把刚存的删掉
+        class DirSecrets:
+            def __init__(self, folder): self.f = Path(folder) / "password.dpapi"
+            def save(self, a, p): self.f.parent.mkdir(parents=True, exist_ok=True); self.f.write_text(p)
+            def load(self, a): return self.f.read_text() if self.f.is_file() else None
+            def delete(self, a): self.f.unlink(missing_ok=True)
+        with patch.object(devcert, "secrets", lambda c, eid=None: DirSecrets(devcert.entry_dir(c, eid) if eid else devcert.folder(c))):
+            self.imp("a", "a", password="pa")
+            self.imp("b", "b", password="pb")   # 旧义换一个
+            self.assertEqual(devcert.stored(self.on(self.U2))[2], "pb")
+            self.assertEqual(self.imp("a", "a", password="pa", add=True)["entry"], self.PA + "-2")   # PA 号还被换过的那条占着：新条目加后缀
+            devcert.operation(self.ctx(action="delete", cert=self.PA + "-2"))
+            self.assertEqual(devcert.stored(self.on(self.U2))[2], "pb")
+            self.assertEqual((self.t / "private/devcert/password.dpapi").read_text(), "pb")   # 给旧版的那份跟着缺省条目
+
+    def test_schema1_then_write_actions_no_deadlock(self):
+        d = self.t / "private/devcert"; d.mkdir(parents=True)
+        (d / "cert.p12").write_bytes(b"A"); (d / "profile.mobileprovision").write_bytes(profile(devices=(self.U1,), uuid=self.PA))
+        (d / "state.json").write_text(json.dumps(dict(active=True, certSha1=SHA1, bundleId="io.s2arm.games.abcde12345", teamId=TEAM, teamName="S2Arm Test Co")))
+        with patch.object(devcert, "LOCK_WAIT_S", 0.2):   # 自己等自己 = 卡到超时报错
+            devcert.operation(self.ctx(action="use", active=True))
+            devcert.operation(self.ctx(action="choose", device=self.U1, cert=self.PA))
+            self.imp("b", "b", add=True)
+        self.assertEqual(list(devcert.store(self.ctx())["entries"]), [self.PA, self.PB])
+
+    def test_status_does_not_claim_legacy_record(self):
+        import layout
+        self.imp("a", "a")
+        layout.save_device(self.ctx(), "legacy", dict(games={"0100000000000047": {}}, bundleId="io.s2arm.games.abcde12345"))
+        devcert.operation(self.ctx(action="status", device=self.U2))
+        devcert.listing(self.ctx(), self.U2); devcert.needs_choice(self.ctx(), self.U2)
+        self.assertTrue(layout.device_path(self.ctx(), "legacy").is_file())
+        self.assertFalse(layout.device_path(self.ctx(), self.U2).is_file())
+
+    def test_same_name_other_device_is_new_entry(self):
+        (self.t / "a.mobileprovision").write_bytes(profile(devices=(self.U1,), uuid=self.PA, name="iOS Team Provisioning Profile"))
+        (self.t / "c.mobileprovision").write_bytes(profile(devices=(self.U2,), uuid=self.PC, name="iOS Team Provisioning Profile"))
+        self.imp("a", "a"); self.imp("a", "c", add=True)
+        self.assertEqual(list(devcert.store(self.ctx())["entries"]), [self.PA, self.PC])
+
+    def test_same_cert_new_password_both_entries_sign(self):
+        self.imp("a", "a", password="old"); self.imp("a", "c", password="new", add=True)
+        for u in (self.U1, self.U2):
+            self.assertEqual(devcert.stored(self.on(u))[2], "new")
+        self.assertEqual((devcert.entry_dir(self.ctx(), self.PA) / "cert.p12").read_bytes(), (devcert.entry_dir(self.ctx(), self.PC) / "cert.p12").read_bytes())
+
+    def test_old_launcher_import_keeps_entries(self):
+        self.imp("a", "a"); self.imp("b", "b", add=True)
+        devcert.operation(self.ctx(action="choose", device=self.U3, cert=self.PB))
+        d = self.t / "private/devcert"   # 降级后旧版「换一个证书」：只改根下那份
+        (d / "cert.p12").write_bytes(b"A"); (d / "profile.mobileprovision").write_bytes(profile(devices=(self.U3,), uuid="ffffffff-0000-0000-0000-000000000006", name="third"))
+        (d / "state.json").write_text(json.dumps(dict(active=True, certSha1=SHA1, bundleId="io.s2arm.games.abcde12345", teamId=TEAM, teamName="S2Arm Test Co")))
+        s = devcert.store(self.ctx())
+        self.assertEqual((list(s["entries"]), s["devices"]), ([self.PA, self.PB, "ffffffff-0000-0000-0000-000000000006"], {self.U3: self.PB}))
+
+    def test_legacy_replace_for_unassigned_device_adds(self):
+        self.imp("a", "a"); self.imp("b", "b", add=True)
+        (self.t / "c.mobileprovision").write_bytes(profile(appid=f"{TEAM}.com.foo.u3", devices=(self.U3,), uuid=self.PC, name="u3"))
+        self.imp("a", "c", device=self.U3)   # Mac 行上「换一个证书…」、选中的是还没选过的 U3：加一张给它，不顶掉 U1 / U2 的
+        s = devcert.store(self.ctx())
+        self.assertEqual((list(s["entries"]), s["devices"]), ([self.PA, self.PB, self.PC], {self.U3: self.PC}))
+
+    def test_remember_never_raises(self):
+        self.imp("a", "a")
+        with patch.object(devcert, "_locked", side_effect=Failure("busy")):
+            devcert.remember(self.on(self.U1))   # 不抛
+
+
+    def test_mac_phone_binds_before_team(self):
+        # 装机：先认设备、再按这台挑证书读团队 / 包名（#487 B2）；App 装好才记下这台的选择，装失败不记
+        import install
+        self.imp("a", "a"); self.imp("b", "b", add=True)
+        def no_xcode(*a, **k):
+            raise AssertionError("证书模式不该读 Xcode 账号")
+        c = self.ctx(); c.env = lambda: {}
+        with patch.object(install, "xcode_teams", no_xcode), patch.object(install, "phone", lambda c: {"id": "D", "name": "iPad"}):
+            ph = install.MacPhone(c, udid=self.U2)
+            self.assertEqual(ph.bid, "com.foo.ipad")
+            with patch.object(install, "sign_and_install", side_effect=Failure("x", code="device_install_failed")), self.assertRaises(Failure):
+                ph.install("ipa", [])
+            self.assertEqual(devcert.store(self.ctx())["devices"], {})
+            with patch.object(install, "sign_and_install", lambda *a, **k: None):
+                ph.install("ipa", [])
+            self.assertEqual(devcert.store(self.ctx())["devices"], {self.U2: self.PB})
+            self.assertEqual(install.MacPhone(c, udid=self.U1).bid, "io.s2arm.games.abcde12345")   # 同一作业换一台：重新绑
+
+    def test_readiness_items_two_certs(self):
+        import install
+        self.imp("a", "a"); self.imp("b", "b", add=True)
+        items = []
+        item = lambda i, ok, title, why="", **k: items.append((i, bool(ok), why))
+        with patch.object(devcert, "summary", lambda c, udid=None: dict(blocking=[], warnings=[], allDevices=False, deviceListed=True)):
+            install.devcert_items(self.ctx(), item, "")             # 没选设备：照常显示缺省那张，不报错
+            install.devcert_items(self.ctx(), item, self.U3)        # 这台还没选：只说「先选一张」
+        self.assertEqual(items, [("devcert", True, ""), ("devcert", False, devcert.CHOOSE)])
+
+
+class StateUnreadable(unittest.TestCase):
+    """D-BW75（Windows 0.6.2，×14）：devcert\\state.json 读时拒绝访问（WinError 5、连属性都取不到），原先抛到 update_phone、整单装机失败。
+    期望手写：读不了 = 当作没启用证书——state() 回 {}、active() False、team() None；作业日志记一行黄字、结果页一条黄色诊断，同一作业只各记一次"""
+    def test_denied_counts_as_not_active(self):
+        import io, contextlib
+        t = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, t, True)
+        diags = []
+        c = types.SimpleNamespace(private=t / "private", diagnostic=lambda msg, **k: diags.append((msg, k.get("code"), k.get("severity"))))
+        denied = PermissionError(13, "拒绝访问。（属性 取不到 5；权限 取不到 5）")
+        err = io.StringIO()
+        with patch.object(devcert, "read", side_effect=denied), contextlib.redirect_stderr(err):
+            got = (devcert.state(c), devcert.active(c), devcert.team(c))
+        self.assertEqual(got, ({}, False, None))
+        lines = [l for l in err.getvalue().splitlines() if "开发者证书设置读不了" in l]
+        self.assertEqual(len(lines), 1, err.getvalue())
+        # 不悄悄换签法：结果页一条黄字（码 devcert_unreadable、warning），说清这次没读到证书设置、改按 Apple ID 签名
+        self.assertEqual([(d[1], d[2]) for d in diags], [("devcert_unreadable", "warning")])
+        self.assertIn("按 Apple ID 签名", diags[0][0])
 
 
 class PasswordNeverInRequest(unittest.TestCase):

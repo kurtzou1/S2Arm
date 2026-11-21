@@ -8,6 +8,8 @@
 //   · 发布顺序：GPU 完成 → done（核心回写）→ release 语义推进已完成值；fence_wait 以 acquire 语义读。
 // 本段不做：贴图 / 视图 / 采样器 / 着色器 / 管线 / 通道 / 上屏（清屏、三角形、深度用例随后接，届时按同一契约补）。
 //
+// 诊断开关：nvk_diag_draw_mode（见 nvn_gpu_draw 上方），只包 vkCmdDraw* 八处，缺省 0 时行为不变。
+//
 // 线程模型：[提交] 线程录制并提交；后端自己的 worker 线程等栅栏、调 done / retired（[回调]）。
 // 对象状态（refs / released）都由 g_mu 保护；回调一律在锁外调用。
 //
@@ -3272,6 +3274,15 @@ static nvn_gpu_rc compute_workgroup_check(const nvn_gpu_shader_src *s, nvn_gpu_e
                         local[0], local[1], local[2], limits->maxComputeWorkGroupInvocations, entry);
         threads *= local[k];
     }
+    // Workgroup 共享字节是最后一道保险：出库闸在 libpack_compute_v1 已核，本处同时盖住现编产物与绕过出库闸的路径。
+    uint64_t shared = 0;
+    const char *swhy = s2a_spv_workgroup_bytes(s->blob, s->bytes, &shared);
+    if (swhy) return fail(err, NVN_GPU_E_UNSUPPORTED, "%s (entry=%s)", swhy, entry);
+    if (shared > limits->maxComputeSharedMemorySize)
+        return fail(err, NVN_GPU_E_UNSUPPORTED,
+                    "compute workgroup: shared=%llu exceeds maxComputeSharedMemorySize=%u (entry=%s key=%02x%02x%02x%02x%02x%02x%02x%02x)",
+                    (unsigned long long)shared, limits->maxComputeSharedMemorySize, entry,
+                    s->key[0], s->key[1], s->key[2], s->key[3], s->key[4], s->key[5], s->key[6], s->key[7]);
     return rc(NVN_GPU_OK);
 }
 
@@ -5813,6 +5824,17 @@ static int prepare_bind_layouts(struct nvn_gpu_cmd_s *c, int compute) {
     return rc_is(c->sticky, NVN_GPU_OK);
 }
 
+// 只用于诊断（debug.s2a.nvk_diag_draw_mode，缺省 0，玩家包恒为 0）：分清一帧慢在回放这一侧还是 GPU 这一侧。
+//   1 = 状态、绑定、描述符照做，只是不发绘制调用（量回放一侧的帧率上限）；
+//   2 = 每笔绘制调用发两遍（GPU 光栅量约翻倍，回放一侧几乎不变）。
+// 两档画面都必然不对，不要用来判断画面；开关只在第一笔绘制时读一次，之后是缓存值。
+static int g_diag_draw_mode = -1;
+static inline int diag_draw_mode(void) {
+    if (__builtin_expect(g_diag_draw_mode < 0, 0)) g_diag_draw_mode = nvn_plat_flag("nvk_diag_draw_mode", 0);
+    return g_diag_draw_mode;
+}
+#define DIAG_DRAW(call) do { const int dm_ = diag_draw_mode(); if (__builtin_expect(dm_ != 1, 1)) { call; if (__builtin_expect(dm_ == 2, 0)) { call; } } } while (0)
+
 void nvn_gpu_draw(nvn_gpu_cmd ch, const nvn_gpu_draw_args *a) {
     draw_tm_init();   // 诊断：这笔绘制各段用时（nvk_gputime 开着才计）
     const int dtm = g_draw_tm; const uint64_t dt0 = dtm ? now_ns() : 0;
@@ -5978,30 +6000,30 @@ void nvn_gpu_draw(nvn_gpu_cmd ch, const nvn_gpu_draw_args *a) {
             if (a->cnt && !rc_is(c->sticky, NVN_GPU_OK)) return;
             uint32_t stride = a->stride ? a->stride : (uint32_t)sizeof(VkDrawIndexedIndirectCommand);
             if (a->cnt) {
-                vkCmdDrawIndexedIndirectCount(c->cb, a->ind->buffer, a->ind_off, a->cnt->buffer, a->cnt_off, a->max_draws, stride);
+                DIAG_DRAW(vkCmdDrawIndexedIndirectCount(c->cb, a->ind->buffer, a->ind_off, a->cnt->buffer, a->cnt_off, a->max_draws, stride));
             } else if (draws > 1) {
                 for (uint32_t i = 0; i < draws; i++)
-                    vkCmdDrawIndexedIndirect(c->cb, a->ind->buffer, a->ind_off + (uint64_t)i * stride, 1, stride);
+                    DIAG_DRAW(vkCmdDrawIndexedIndirect(c->cb, a->ind->buffer, a->ind_off + (uint64_t)i * stride, 1, stride));
             } else {
-                vkCmdDrawIndexedIndirect(c->cb, a->ind->buffer, a->ind_off, 1, stride);
+                DIAG_DRAW(vkCmdDrawIndexedIndirect(c->cb, a->ind->buffer, a->ind_off, 1, stride));
             }
         } else {
-            vkCmdDrawIndexed(c->cb, a->count, inst, first, a->base_vertex, a->base_instance);
+            DIAG_DRAW(vkCmdDrawIndexed(c->cb, a->count, inst, first, a->base_vertex, a->base_instance));
         }
     } else if (a->ind) {
         cmd_ref(c, a->ind, REF_BUF);
         if (a->cnt && !rc_is(c->sticky, NVN_GPU_OK)) return;
         uint32_t stride = a->stride ? a->stride : (uint32_t)sizeof(VkDrawIndirectCommand);
         if (a->cnt) {
-            vkCmdDrawIndirectCount(c->cb, a->ind->buffer, a->ind_off, a->cnt->buffer, a->cnt_off, a->max_draws, stride);
+            DIAG_DRAW(vkCmdDrawIndirectCount(c->cb, a->ind->buffer, a->ind_off, a->cnt->buffer, a->cnt_off, a->max_draws, stride));
         } else if (draws > 1) {
             for (uint32_t i = 0; i < draws; i++)
-                vkCmdDrawIndirect(c->cb, a->ind->buffer, a->ind_off + (uint64_t)i * stride, 1, stride);
+                DIAG_DRAW(vkCmdDrawIndirect(c->cb, a->ind->buffer, a->ind_off + (uint64_t)i * stride, 1, stride));
         } else {
-            vkCmdDrawIndirect(c->cb, a->ind->buffer, a->ind_off, 1, stride);
+            DIAG_DRAW(vkCmdDrawIndirect(c->cb, a->ind->buffer, a->ind_off, 1, stride));
         }
     } else {
-        vkCmdDraw(c->cb, a->count, inst, a->first, a->base_instance);
+        DIAG_DRAW(vkCmdDraw(c->cb, a->count, inst, a->first, a->base_instance));
     }
     if (dtm) { const uint64_t dt3 = now_ns(); __atomic_fetch_add(&g_draw_ns[0], dt1 - dt0, __ATOMIC_RELAXED); __atomic_fetch_add(&g_draw_ns[1], dt2 - dt1, __ATOMIC_RELAXED); __atomic_fetch_add(&g_draw_ns[2], dt3 - dt2, __ATOMIC_RELAXED);
         // 每 5 秒一次：把后端逐笔的三段（描述符 / 状态 / 顶点索引与绘制调用）摊到每笔上打印，

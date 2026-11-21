@@ -52,9 +52,8 @@ class EarlyInstall:
     def __init__(self, c, gid, env, out):
         import install as inst
         self.c, self.gid, self.inst, self.env = c, gid, inst, env
-        if inst.devcert.active(c):
-            self.team = inst.devcert.team(c)
-        else:   # Apple ID：随包 plumesign 当前选中的账号（同装 App / 推游戏）
+        cert = inst.devcert.active(c)   # 只看开关，不用先认设备
+        if not cert:   # Apple ID：随包 plumesign 当前选中的账号（同装 App / 推游戏）；没登录先报，不先去找手机（同 main 原顺序）
             acct = inst.plume_account(c, inst.win_install_mod(c)) if inst.mac_plume(c) else None
             if not acct:
                 from core import Failure
@@ -62,7 +61,9 @@ class EarlyInstall:
             self.team = dict(id=acct["team"], name=acct["teamName"] or acct["account"], free=True)
         self.dev = inst.phone(c)
         self.udid = inst.udid_of(c, self.dev["id"])
-        self.bid = inst.container_bundle_id(self.team["id"], c)
+        inst.devcert.bind(c, self.udid)   # 几张证书时按这台挑（#487）：先认设备再读证书团队
+        if cert:
+            self.team = inst.devcert.team(c)
         self.ready = c.logs / (c.task + "-early.ready")
         self.ready.unlink(missing_ok=True)
         self.log = c.logs / (c.task + "-early.log")

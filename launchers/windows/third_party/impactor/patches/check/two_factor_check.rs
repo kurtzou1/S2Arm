@@ -86,7 +86,7 @@ fn main() {
     assert!(seen.iter().all(|v| v == ci), "{seen:?} vs {ci}");
     // 身份三段齐全、是当代 macOS，UA 的 Darwin 与身份出自同一台机器
     let f: Vec<&str> = ci.split(['<', '>']).filter(|x| !x.trim().is_empty()).collect();
-    assert!(f.len() == 3 && f[0].starts_with("Mac") && f[1].starts_with("macOS;") && f[1].split(';').count() == 3, "{ci}");
+    assert!(f.len() == 3 && f[0].starts_with("Mac") && f[1].starts_with("Mac OS X;") && f[1].split(';').count() == 3, "{ci}");
     let major: u32 = f[1].split(';').nth(1).unwrap().split('.').next().unwrap().parse().unwrap();
     assert!(major >= 14, "{ci}");
     let ua = apple_user_agent();
@@ -94,7 +94,7 @@ fn main() {
     #[cfg(target_os = "macos")]
     {
         let sh = |c: &str, a: &[&str]| String::from_utf8(std::process::Command::new(c).args(a).output().unwrap().stdout).unwrap().trim().to_string();
-        assert!(ci.contains(&format!("<macOS;{};{}>", sh("/usr/bin/sw_vers", &["-productVersion"]), sh("/usr/bin/sw_vers", &["-buildVersion"]))), "{ci}");
+        assert!(ci.contains(&format!("<Mac OS X;{};{}>", sh("/usr/bin/sw_vers", &["-productVersion"]), sh("/usr/bin/sw_vers", &["-buildVersion"]))), "{ci}");
         assert!(ua.ends_with(&format!("Darwin/{}", sh("/usr/bin/uname", &["-r"]))), "{ua}");
     }
     // ⑧ 源码里不再有写死的旧身份（发给 Apple 的 User-Agent / Client-Info 只从 anisette_data 取）

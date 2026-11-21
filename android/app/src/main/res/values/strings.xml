@@ -119,6 +119,8 @@
     <string name="player_err_pack_next">Copy the game package from your computer again, then import it.</string>
     <string name="player_err_other">Something unexpected went wrong.</string>
     <string name="player_err_other_next">Tap Export diagnostics… on the library screen and send us the file.</string>
+    <string name="player_err_vulkan10">This device\'s GPU only supports Vulkan 1.0, which is outside the range S2Arm for Android supports.</string>
+    <string name="player_err_vulkan10_next">Supported: Snapdragon 8 Gen 2 or Dimensity 9000 and newer on Android 14+ (Vulkan 1.1+); Adreno 6xx–7xx, Dimensity 8000 series, Turnip and Samsung Xclipse are best effort.</string>
     <string name="library_game_starting">The game is still starting; it opens in a moment…</string>
     <string name="library_current_game">the game that is running</string>
     <string name="library_switch_title">Switch game</string>

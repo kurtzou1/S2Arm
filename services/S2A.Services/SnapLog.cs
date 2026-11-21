@@ -138,6 +138,9 @@ namespace S2A.Services
 
         // ---------- HIPC 描述符 ----------
         internal struct Desc { public int Kind; public int Off; public ulong Addr; public ulong Size; }   // Kind：0 X、1 A、2 B、3 W、4 C
+        // 地址照服务端（IpcBuffDesc / IpcPtrBuffDesc）过一遍 FixIpcAddr（native s2a_ipc_addr39）：老 SDK 只往描述符里写地址 32–35 位，36 位款窗口放在
+        //   2^36 以上那一块时游戏地址的高位全丢；macOS 别名区伸到 2^39 之上时第 39 位也丢。原先这里只按原始位拼，记日志时按残缺地址拷缓冲内容，
+        //   一款 36 位老版本游戏起局打开显卡驱动（路径 16 字节在 subsdk0 只读区）就段错误；服务端那一路补过、不崩，崩在旁边记日志这一路。C 接收描述符带 48 位地址，不丢位
         internal static List<Desc> ParseDescs(byte* msg, int size)
         {
             var d = new List<Desc>();
@@ -148,7 +151,7 @@ namespace S2A.Services
             for (int i = 0; i < nx; i++, off += 8)
             {
                 uint a = *(uint*)(msg + off), b = *(uint*)(msg + off + 4);
-                ulong addr = b | ((ulong)((a >> 12) & 0xF) << 32) | ((ulong)((a >> 6) & 0x7) << 36);
+                ulong addr = Ryujinx.HLE.S2AHooks.FixIpcAddr(b | ((ulong)((a >> 12) & 0xF) << 32) | ((ulong)((a >> 6) & 0x7) << 36));
                 d.Add(new Desc { Kind = 0, Off = off, Addr = addr, Size = a >> 16 });
             }
             for (int k = 1; k <= 3; k++)
@@ -157,7 +160,7 @@ namespace S2A.Services
                 for (int i = 0; i < n; i++, off += 12)
                 {
                     uint s0 = *(uint*)(msg + off), a0 = *(uint*)(msg + off + 4), f = *(uint*)(msg + off + 8);
-                    ulong addr = a0 | ((ulong)((f >> 28) & 0xF) << 32) | ((ulong)((f >> 2) & 0x7) << 36);
+                    ulong addr = Ryujinx.HLE.S2AHooks.FixIpcAddr(a0 | ((ulong)((f >> 28) & 0xF) << 32) | ((ulong)((f >> 2) & 0x7) << 36));
                     d.Add(new Desc { Kind = k, Off = off, Addr = addr, Size = s0 | ((ulong)((f >> 24) & 0xF) << 32) });
                 }
             }

@@ -19,6 +19,7 @@ S2Arm 的云存档走 iCloud 云盘里玩家选的文件夹（书签授权），
 from __future__ import annotations
 
 import base64
+import contextlib
 import datetime
 import hashlib
 import os
@@ -26,11 +27,13 @@ import plistlib
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
+import threading
 import zipfile
 from pathlib import Path
 
-from core import Failure, atomic, read
+from core import Failure, atomic, read, replace_retrying
 
 # S2Arm 要的权限：提高内存上限（大游戏必需，Apple ID 模式也带）+ 扩展寻址（付费账号才有，大地址窗口）；描述文件没开就不带、提示大游戏可能闪退
 WANT = ("com.apple.developer.kernel.increased-memory-limit", "com.apple.developer.kernel.extended-virtual-addressing")
@@ -370,6 +373,20 @@ class Secrets:
 
 
 # ---------- 存储与作业 ----------
+# 多张证书（#487，11-17）：按设备买的证书描述文件只登记一台的 UDID，一台一张。
+#   <私有目录>/devcert/entries.json  {schema: 2, entries: {条目号: {certSha1, profileUuid, appId, bundleId, teamId, teamName, profileName, imported}}, devices: {UDID: 条目号}}
+#   <私有目录>/devcert/entries/<条目号>/cert.p12、profile.mobileprovision（Windows 另有 password.dpapi）
+#   <私有目录>/devcert/state.json + cert.p12 / profile.mobileprovision / password.dpapi：旧版格式，照抄缺省条目（最早导入的那张）+ 签名方式开关 active。
+#     旧版启动器只认这一份：降级回去照样能签；旧版在这里导入 / 换了证书 → 下次读时它不在条目里，就加成一个新条目（不重建、不丢别的条目）。
+#   条目号 = 第一次导入时描述文件的 UUID：同一张 .p12 配每台各自的描述文件 = 几个条目。同证书、同名、同 App ID、设备只多不少 = 续期，就地换、条目号和各台的选择不变。
+#   密码按证书 SHA-1 存（旧版同）：同一张证书再导入时，把新规整的 p12 写进用这张证书的每个条目（各条目都用最新的密码打得开）；没有条目再用这张证书时才删。
+#   devices = 玩家给每台选定的条目（Mac 启动器在这台第一次连上时问）。没选过的按 resolve：这台现装 App 的包名对得上的 > 描述文件管这台的（新导入的优先）>
+#   只有一张；都不是 → devcert_choose。作业一认出目标设备就 bind(c, udid)，之后 active / state / team / stored / sign_app 读的都是这台那张。
+#   改写一律在 devcert/.state.lock 里做（同一作业里可重入）
+
+LOCK_WAIT_S = 30
+ROOT_FILES = ("cert.p12", "profile.mobileprovision", "password.dpapi")
+
 
 def folder(c):
     d = c.private / "devcert"
@@ -377,18 +394,278 @@ def folder(c):
     return d
 
 
-def secrets(c):
-    return getattr(c, "devcert_secrets", None) or Secrets(folder(c))
+def entry_dir(c, eid):
+    return folder(c) / "entries" / eid
 
 
-def state(c):
-    return read(folder(c) / "state.json") or {}
+def secrets(c, eid=None):
+    return getattr(c, "devcert_secrets", None) or Secrets(entry_dir(c, eid) if eid else folder(c))
+
+
+def _put(dst, src=None, data=None):
+    """整份换文件（临时文件 + 改名）：签名读这些文件时不拿锁，不能让它读到半份"""
+    dst = Path(dst)
+    tmp = dst.with_name(dst.name + ".tmp")
+    try:
+        if src is not None:
+            shutil.copy2(src, tmp)
+        else:
+            tmp.write_bytes(data)
+        replace_retrying(tmp, dst)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _udid(u):
+    return str(u or "").strip().upper()
+
+
+def _now():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+
+
+def _profile_at(path):
+    try:
+        return parse_profile(Path(path).read_bytes())
+    except (OSError, Failure):
+        return None
+
+
+def _appid(prof):
+    return (prof or {}).get("Entitlements", {}).get("application-identifier", "")
+
+
+def _udids(prof):
+    return {_udid(u) for u in (prof or {}).get("ProvisionedDevices") or []}
+
+
+@contextlib.contextmanager
+def _locked(c):
+    """devcert 读改写锁；同一作业、同一线程里嵌套调用不再拿（可重入）。计数按线程分：EarlyInstall 在子线程里拿锁时照常排队"""
+    held = c.__dict__.setdefault("_devcert_lock_held", set())
+    me = threading.get_ident()
+    if me in held:
+        yield
+        return
+    import filelock
+    try:
+        with filelock.held(folder(c) / ".state.lock", wait_s=LOCK_WAIT_S):
+            held.add(me)
+            try:
+                yield
+            finally:
+                held.discard(me)
+    except filelock.Busy as e:
+        raise Failure("开发者证书正被另一个任务读写，稍后再试。") from e  # 非玩家句
+
+
+UNREADABLE = "这次没能读到开发者证书设置（这台电脑拒绝 S2Arm 读它自己的证书设置文件夹），按 Apple ID 签名。如果你启用过自己的开发者证书，这次没有用它。"
+
+
+def _raw(c):
+    """证书库原样（entries.json + 根下 state.json）。读不了（Windows 拒绝访问，D-BW75 / #3c209a：整个 devcert 目录进不去、连属性都取不到）
+    = 当作没导入、没启用证书：只是「用不用开发者证书」这个开关，Apple ID 那条路照样走得通，不为它挡装机（原先抛到 update_phone，
+    「S2Arm 自己的文件读写不了」×14）。原因每个作业记一次进作业日志"""
+    try:
+        d = folder(c)
+        e, root = read(d / "entries.json") or {}, read(d / "state.json") or {}
+        e, root = (e if isinstance(e, dict) else {}), (root if isinstance(root, dict) else {})
+        entries = {k: v for k, v in (e.get("entries") or {}).items() if isinstance(v, dict) and (entry_dir(c, k) / "cert.p12").is_file()}   # 文件没了的不算
+    except PermissionError as error:
+        if not getattr(c, "_devcert_state_denied", False):
+            try:
+                c._devcert_state_denied = True
+            except AttributeError:
+                pass
+            print(f"[s2a] 【黄】开发者证书设置读不了（{error}），这次当作没启用证书、按 Apple ID 签名", file=sys.stderr, flush=True)  # 非玩家句
+            # 不悄悄换签法：结果页黄字说清这次没读到证书设置、改用 Apple ID（读不到就不知道玩家启没启用过，按「如果启用过」说）
+            if callable(getattr(c, "diagnostic", None)):
+                c.diagnostic(UNREADABLE, code="devcert_unreadable", severity="warning", internal=str(error))
+        return dict(active=False, entries={}, devices={}), {}
+    return dict(active=bool(root.get("active")), entries=entries, devices=dict(e.get("devices") or {})), root
+
+
+def _stray_root(c, s, root):
+    """根下（旧版格式）那张不在条目里：首次升级、或降级时旧版导入 / 换过证书 → 返回它的 (证书 SHA-1, 描述文件)；在 → None"""
+    d = folder(c)
+    sha = root.get("certSha1")
+    if not sha or not (d / "cert.p12").is_file():
+        return None
+    prof = _profile_at(d / "profile.mobileprovision") or {}
+    uuid = str(prof.get("UUID") or "").lower()
+    if any(v.get("certSha1") == sha and (v.get("profileUuid") or "") == uuid for v in s["entries"].values()):
+        return None
+    return sha, prof
+
+
+def store(c):
+    """证书库 {active, entries, devices}；根下有不在条目里的那张（旧版留下的）就在锁里加成条目"""
+    s, root = _raw(c)
+    if _stray_root(c, s, root):
+        with _locked(c):
+            s, root = _raw(c)
+            stray = _stray_root(c, s, root)
+            if stray:
+                sha, prof = stray
+                eid = _fresh_id(s, str(prof.get("UUID") or sha).lower())
+                to = entry_dir(c, eid)
+                to.mkdir(parents=True, exist_ok=True)
+                for n in ROOT_FILES:
+                    if (folder(c) / n).is_file():
+                        _put(to / n, folder(c) / n)
+                s["entries"][eid] = dict(certSha1=sha, profileUuid=str(prof.get("UUID") or "").lower(), appId=_appid(prof),
+                                         bundleId=root.get("bundleId", ""), teamId=root.get("teamId", ""), teamName=root.get("teamName", ""),
+                                         profileName=prof.get("Name") or "", imported=root.get("imported") or _now())
+                _write(c, s)
+    return s
+
+
+def _fresh_id(s, base):
+    eid, n = base, 2
+    while eid in s["entries"]:
+        eid, n = f"{base}-{n}", n + 1
+    return eid
+
+
+def _write(c, s):
+    """写条目表 + 根下旧版那份（缺省条目 = 最早导入的 + active）。只在 _locked 里调"""
+    d = folder(c)
+    first = next(iter(s["entries"]), None)
+    if not first:
+        for n in ("entries.json", "state.json") + ROOT_FILES:
+            (d / n).unlink(missing_ok=True)
+        shutil.rmtree(d / "entries", ignore_errors=True)
+        return
+    for n in ROOT_FILES:   # 给旧版的那份先写、条目表最后写：中途断了不会让删掉 / 换掉的那张复活
+        src = entry_dir(c, first) / n
+        if src.is_file():
+            _put(d / n, src)
+        else:
+            (d / n).unlink(missing_ok=True)
+    m = s["entries"][first]
+    atomic(d / "state.json", dict(active=bool(s["active"]), certSha1=m.get("certSha1", ""), bundleId=m.get("bundleId", ""), teamId=m.get("teamId", ""),
+                                  teamName=m.get("teamName", ""), imported=m.get("imported", "")))
+    atomic(d / "entries.json", dict(schema=2, entries=s["entries"], devices=s["devices"]))
+
+
+def covers(c, eid, udid):
+    """这个条目的描述文件管不管这台：True / False；描述文件读不出 → None"""
+    prof = _profile_at(entry_dir(c, eid) / "profile.mobileprovision")
+    if prof is None:
+        return None
+    return bool(prof.get("ProvisionsAllDevices")) or _udid(udid) in _udids(prof)
+
+
+def _installed_bid(c, udid):
+    """这台的设备记录里现装 App 的包名。直接读文件：layout.load_device 会认领旧容器记录（改名），这里只读不改"""
+    lib = getattr(c, "library", None)
+    if not udid or not lib:
+        return ""
+    import layout
+    for key in dict.fromkeys((str(udid).strip(), _udid(udid), str(udid).strip().lower())):
+        rec = read(layout.device_path(c, key), {})
+        if isinstance(rec, dict) and rec.get("bundleId"):
+            return rec["bundleId"]
+    return ""
+
+
+def _newest(s, ids):
+    return max(ids, key=lambda k: s["entries"][k].get("imported") or "") if ids else None
+
+
+def _by_installed(c, s, udid):
+    """包名对得上这台现装 App、描述文件又不排除这台的那几条（同团队两份通配描述文件算出的包名一样：管不管这台先筛掉）"""
+    bid = _installed_bid(c, udid)
+    return [k for k, v in s["entries"].items() if bid and v.get("bundleId") == bid and covers(c, k, udid) is not False]
+
+
+def resolve(c, udid, s=None):
+    """这台用哪个条目：玩家选过的（还在）> 这台现装 App 包名对得上的 > 描述文件管这台的 > 只有一张 > None（要玩家选）；同档几张取最新导入的"""
+    s = s or store(c)
+    if not s["entries"]:
+        return None
+    if udid:
+        chosen = s["devices"].get(_udid(udid))
+        if chosen in s["entries"]:
+            return chosen
+        hit = _newest(s, _by_installed(c, s, udid))
+        hit = hit or _newest(s, [k for k in s["entries"] if covers(c, k, udid)])
+        if hit:
+            return hit
+    return next(iter(s["entries"])) if len(s["entries"]) == 1 else None
+
+
+def needs_choice(c, udid, s=None):
+    """启动器要不要问这台：证书模式、不止一张证书、这台没选过、也没有包名对得上它现装 App 的（老玩家已在用的那台不问）。
+    只有一张不问：同旧版，就用它"""
+    s = s or store(c)
+    if not (udid and s["active"] and len(s["entries"]) > 1):
+        return False
+    if s["devices"].get(_udid(udid)) in s["entries"]:
+        return False
+    return not _by_installed(c, s, udid)
+
+
+def bind(c, udid):
+    """作业认出目标设备后调（每次都覆盖，空串 = 不绑）：本作业之后的证书读取都按这台。换了设备才清掉本作业定下的那张"""
+    u = _udid(udid)
+    if getattr(c, "devcert_udid", None) != u:
+        c.devcert_entry = None
+    c.devcert_udid = u
+
+
+CHOOSE = "有几张开发者证书，这台设备还没选用哪一张：在启动器里给这台选一张证书再装。"
+
+
+def _need(c, s):
+    """本作业用的那张：第一次挑定后记在作业对象上（包名、团队、签名、remember 都是这一张；中途有人导入新证书也不换）"""
+    if not s["entries"]:
+        raise Failure("还没导入开发者证书。", code="devcert_missing")
+    eid = getattr(c, "devcert_entry", None)
+    if eid in s["entries"]:
+        return eid
+    eid = resolve(c, getattr(c, "devcert_udid", "") or "", s)
+    if eid is None:
+        raise Failure(CHOOSE, code="devcert_choose")
+    c.devcert_entry = eid
+    return eid
+
+
+def _shown(c, s):
+    """只为显示（出包页 / 没选设备的清单）：按绑定的设备挑得出就用它，挑不出用缺省条目；不报错"""
+    return resolve(c, getattr(c, "devcert_udid", "") or "", s) or next(iter(s["entries"]), None)
 
 
 def active(c):
-    """出包装机用不用开发者证书：玩家在出包页选了「我的开发者证书」且证书在"""
-    s = state(c)
-    return bool(s.get("active") and s.get("certSha1") and (folder(c) / "cert.p12").is_file())
+    """出包装机用不用开发者证书：玩家在出包页选了「我的开发者证书」且至少有一张"""
+    s = store(c)
+    return bool(s["active"] and s["entries"])
+
+
+def state(c):
+    """本作业（按绑定的设备）那张的 {active, certSha1, bundleId, teamId, teamName, entry}；没导入 → {}；几张里挑不出 → devcert_choose"""
+    s = store(c)
+    if not s["entries"]:
+        return {}
+    eid = _need(c, s)
+    return dict(s["entries"][eid], active=s["active"], entry=eid)
+
+
+def ready(c):
+    """设置里选「自己的证书」前查：至少导入了一张、（按绑定的设备，没绑用缺省那张）不缺件；不报 devcert_choose。没有 / 缺件 → devcert_missing"""
+    s = store(c)
+    if not s["entries"]:
+        raise Failure("还没导入开发者证书。", code="devcert_missing")
+    stored(c, _shown(c, s))
+
+
+def set_active(c, on):
+    """切「在用」开关（同 operation use，但没导入时不报错、什么也不做）"""
+    with _locked(c):
+        s = store(c)
+        if s["entries"] and s["active"] != bool(on):
+            s["active"] = bool(on)
+            _write(c, s)
 
 
 def team(c):
@@ -399,20 +676,46 @@ def team(c):
     return dict(id=s["teamId"], name=s.get("teamName") or s["teamId"], free=False)
 
 
-def stored(c):
+def stored(c, eid=None):
     """签名要的三样：规整后的 p12、描述文件字节、密码；缺一样 = 要重新导入"""
-    s, d = state(c), folder(c)
-    pw = secrets(c).load(s.get("certSha1", "")) if s.get("certSha1") else None
+    s = store(c)
+    eid = eid or _need(c, s)
+    d = entry_dir(c, eid)
+    sha = (s["entries"].get(eid) or {}).get("certSha1", "")
+    pw = secrets(c, eid).load(sha) if sha else None
     if not (d / "cert.p12").is_file() or not (d / "profile.mobileprovision").is_file() or pw is None:
         raise Failure("开发者证书不完整（证书、描述文件或密码缺了）：在出包页重新导入一次。", code="devcert_missing")
     return d / "cert.p12", (d / "profile.mobileprovision").read_bytes(), pw
 
 
+def remember(c):
+    """App 装好了：这台还没记过选哪张 → 记下这次签名实际用的那张（_need 定在作业对象上的，不重挑）。尽力而为：记不下不影响已装好的结果"""
+    udid, eid = getattr(c, "devcert_udid", ""), getattr(c, "devcert_entry", None)
+    try:
+        if not udid or not eid or not active(c):
+            return
+        with _locked(c):
+            s = store(c)
+            if eid in s["entries"] and s["devices"].get(udid) not in s["entries"]:
+                s["devices"][udid] = eid
+                _write(c, s)
+    except (Failure, OSError) as e:
+        print(f"[证书] 没记下这台用的证书：{e}", file=sys.stderr, flush=True)  # 非玩家句
+
+
+def _profile_bytes(c):
+    """本作业那张的描述文件字节（只看描述文件、不要密码和 p12）：有条目 → 绑定设备那张（_need，几张里挑不出报 devcert_choose）；
+    没有条目（旧版根下只有描述文件、没 p12 不迁移）→ 根下那份。读不到抛 OSError / Failure"""
+    s = store(c)
+    d = entry_dir(c, _need(c, s)) if s["entries"] else folder(c)
+    return (d / "profile.mobileprovision").read_bytes()
+
+
 def distribution(c):
     """存着的描述文件缺 get-task-allow（分发 / ad hoc / 企业）：通用壳的游戏程序在 App 外映射会被系统拒（image_exec_cert）。
     按描述文件现算、不记在 state.json：导入时才记的话，这项判断上线前导入的证书永远认不出来；描述文件没了或读不出 → 不算"""
-    try:
-        allow = parse_profile((folder(c) / "profile.mobileprovision").read_bytes())["Entitlements"]
+    try:   # 多张证书（#487）：按本作业绑定的设备那张；根目录那份只是缺省条目的旧版副本
+        allow = parse_profile(_profile_bytes(c))["Entitlements"]
     except (OSError, Failure):
         return False
     return allow.get("get-task-allow") is not True
@@ -500,18 +803,60 @@ def identity(c):
     return dict(key=key, cert=cert, created=created, key_fp=hashlib.sha256(Path(p12).read_bytes()).hexdigest()[:16], team=team(c)["id"])
 
 
-def summary(c, udid=None):
-    """当前证书的体检结果（启动器出包页 / 装机前清单用）；没导入 → None"""
-    if not state(c).get("certSha1"):
+def summary(c, udid=None, eid=None):
+    """一个条目的体检结果（启动器出包页 / 装机前清单用）：缺省 = 这台的那张，挑不出用缺省条目；没导入 → None。不报 devcert_choose"""
+    s = store(c)
+    if not s["entries"]:
         return None
-    p12, prof, pw = stored(c)
-    return dict(inspect(rcodesign_path(c), p12, pw, prof, udid=udid), active=active(c))
+    if udid:
+        bind(c, udid)
+    eid = eid or _shown(c, s)
+    p12, prof, pw = stored(c, eid)
+    return dict(inspect(rcodesign_path(c), p12, pw, prof, udid=udid), active=active(c), entry=eid)
+
+
+def listing(c, udid=None, s=None):
+    """所有条目（启动器选证书用；只解析描述文件，不读密码、不跑 rcodesign）"""
+    s = s or store(c)
+    installed = _installed_bid(c, udid)
+    out = []
+    for eid, meta in s["entries"].items():
+        prof = _profile_at(entry_dir(c, eid) / "profile.mobileprovision") or {}
+        end = prof.get("ExpirationDate")
+        out.append(dict(entry=eid, certSha1=meta.get("certSha1", ""), bundleId=meta.get("bundleId", ""), teamId=meta.get("teamId", ""),
+                        teamName=meta.get("teamName", ""), profileName=prof.get("Name") or meta.get("profileName", ""),
+                        profileExpires=end.strftime("%Y-%m-%d") if isinstance(end, datetime.datetime) else "",
+                        allDevices=bool(prof.get("ProvisionsAllDevices")), deviceCount=len(prof.get("ProvisionedDevices") or []),
+                        deviceListed=covers(c, eid, udid) if udid else None,
+                        installedHere=bool(installed) and installed == meta.get("bundleId")))
+    return out
+
+
+def _drop_secret(c, s, sha, eid):
+    """这张证书的密码：没有别的条目再用它才删（Windows 删的是这个条目目录里那份）"""
+    if sha and not any(v.get("certSha1") == sha for k, v in s["entries"].items() if k != eid):
+        secrets(c, eid).delete(sha)
+
+
+def _renewal(c, s, sha, prof):
+    """续期：同证书、同名、同 App ID，设备只多不少（或两份都是所有设备）→ 那个条目号；不是 → None"""
+    for k, v in s["entries"].items():
+        if v.get("certSha1") != sha or v.get("profileName") != (prof.get("Name") or "") or v.get("appId") != _appid(prof):
+            continue
+        old = _profile_at(entry_dir(c, k) / "profile.mobileprovision") or {}
+        if (bool(old.get("ProvisionsAllDevices")) and bool(prof.get("ProvisionsAllDevices"))) or _udids(old) <= _udids(prof):
+            return k
+    return None
 
 
 def operation(c):
-    """作业 devCert：action = import（p12Path + profilePath，密码走环境变量）/ status / use（active 布尔）/ delete"""
+    """作业 devCert：
+    import（p12Path + profilePath，密码走环境变量）：add = true 加一张（新 Mac 选证书窗 / 再导入一张；带 device = 顺手给这台选它）；
+           不带 add = 旧义「换一个」：顶掉这台（没设备 = 缺省）那张，选过它的设备跟着换；这台还没有能用的（要玩家选）就加一张给它，不顶别的台的；
+    status（带 device：这台用哪张、要不要问）；choose（device + cert = 条目号）；use（active 布尔）；delete（cert = 删这一条；不带 = 全删）"""
     action = c.r.get("action") or "status"
     d = folder(c)
+    device = _udid(c.r.get("device"))
     if action == "import":
         password = getattr(c, "devcert_password", None)
         if password is None:
@@ -522,40 +867,93 @@ def operation(c):
                 raise Failure(text.format(p), code="devcert_invalid")
         c.begin("读取证书与描述文件", 1, 2)
         prof = prof_src.read_bytes()
-        parse_profile(prof)   # 先认描述文件，选错文件不用等规整
+        parsed = parse_profile(prof)   # 先认描述文件，选错文件不用等规整
+        add = c.r.get("add") is True
         with tempfile.TemporaryDirectory(dir=d) as t:
             norm = Path(t) / "cert.p12"
             normalize_p12(src, norm, password)
-            got = inspect(rcodesign_path(c), norm, password, prof, udid=c.r.get("device"))
+            got = inspect(rcodesign_path(c), norm, password, prof, udid=device or None)
             if got["blocking"]:
                 raise blocked(got)
             c.begin("保存证书", 2, 2)
-            old = state(c).get("certSha1")
-            if old and old != got["certSha1"]:
-                secrets(c).delete(old)
-            secrets(c).save(got["certSha1"], password)
-            os.replace(norm, d / "cert.p12")
-        (d / "profile.mobileprovision").write_bytes(prof)
-        os.chmod(d / "profile.mobileprovision", 0o600)
-        atomic(d / "state.json", dict(active=True, certSha1=got["certSha1"], bundleId=got["bundleId"], teamId=got["teamId"], teamName=got["teamName"],
-                                      imported=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")))
-        return dict(got, active=True)
+            sha = got["certSha1"]
+            with _locked(c):
+                s = store(c)
+                eid = _renewal(c, s, sha, parsed)
+                assign = add and bool(device)
+                if not eid and not add and s["entries"]:   # 旧义「换一个证书」（Windows 证书页 / 旧前端）
+                    if device and resolve(c, device, s) is None:
+                        assign = True   # 这台还没有能用的：加一张给它，不顶掉别的台在用的
+                    else:
+                        bind(c, device)
+                        eid = _shown(c, s)
+                if not eid:   # 新条目：条目号用描述文件 UUID；被占了（旧义「换一个」留着原号）就加后缀
+                    eid = _fresh_id(s, str(parsed.get("UUID") or sha).lower())
+                old = (s["entries"].get(eid) or {}).get("certSha1")
+                if old and old != sha:   # 先删旧密码再存新的：Windows 两份都在这个条目目录里，后删会把刚存的删掉
+                    _drop_secret(c, s, old, eid)
+                to = entry_dir(c, eid)
+                to.mkdir(parents=True, exist_ok=True)
+                secrets(c, eid).save(sha, password)
+                for k, v in s["entries"].items():   # 同一张证书的别的条目：换成这次规整的 p12（都用最新的密码打得开）
+                    if k != eid and v.get("certSha1") == sha:
+                        _put(entry_dir(c, k) / "cert.p12", norm)
+                        if os.name == "nt":
+                            secrets(c, k).save(sha, password)
+                os.replace(norm, to / "cert.p12")
+                _put(to / "profile.mobileprovision", data=prof)
+                os.chmod(to / "profile.mobileprovision", 0o600)
+                s["entries"][eid] = dict(certSha1=sha, profileUuid=str(parsed.get("UUID") or "").lower(), appId=_appid(parsed), bundleId=got["bundleId"],
+                                         teamId=got["teamId"], teamName=got["teamName"], profileName=parsed.get("Name") or "", imported=_now())
+                s["active"] = True
+                if assign:
+                    s["devices"][device] = eid
+                _write(c, s)
+        return dict(got, active=True, entry=eid)
+    if action == "choose":
+        eid = c.r.get("cert") or ""
+        with _locked(c):
+            s = store(c)
+            if not device or eid not in s["entries"]:
+                raise Failure("没有这张证书。", code="devcert_missing")
+            s["devices"][device] = eid
+            _write(c, s)
+        return dict(device=device, chosen=eid)
     if action == "use":
-        s = state(c)
-        want = c.r.get("active") is True
-        if want and not s.get("certSha1"):
-            raise Failure("还没导入开发者证书。", code="devcert_missing")
-        atomic(d / "state.json", dict(s, active=want))
+        with _locked(c):
+            s = store(c)
+            want = c.r.get("active") is True
+            if want and not s["entries"]:
+                raise Failure("还没导入开发者证书。", code="devcert_missing")
+            s["active"] = want
+            _write(c, s)
         return dict(active=want and active(c))
     if action == "delete":
-        s = state(c)
-        if s.get("certSha1"):
-            secrets(c).delete(s["certSha1"])
-        for n in ("cert.p12", "profile.mobileprovision", "state.json", "password.dpapi"):
-            (d / n).unlink(missing_ok=True)
-        return dict(deleted=True, active=False)
+        with _locked(c):
+            s = store(c)
+            drop = [c.r["cert"]] if c.r.get("cert") else list(s["entries"])
+            for eid in drop:
+                meta = s["entries"].get(eid)
+                if meta:
+                    _drop_secret(c, s, meta.get("certSha1", ""), eid)
+                    del s["entries"][eid]
+                shutil.rmtree(entry_dir(c, eid), ignore_errors=True)
+                s["devices"] = {k: v for k, v in s["devices"].items() if v != eid}
+            _write(c, s)
+        return dict(deleted=True, active=active(c))
     if action == "status":
-        return dict(imported=bool(state(c).get("certSha1")), active=active(c), cert=summary(c, udid=c.r.get("device")))
+        s = store(c)
+        if device:
+            bind(c, device)
+        chosen = s["devices"].get(device) if device else None
+        pick = resolve(c, device, s) if device else None
+        try:
+            cert = summary(c, udid=device or None) if s["entries"] else None
+        except Failure as e:   # 这张坏了（密码 / 文件缺了）：照样列出几张，让玩家在选证书窗里换一张或重新导入
+            cert = dict(blocking=[dict(id=e.code or "devcert_missing", text=str(e))], warnings=[], entry=_shown(c, s))
+        return dict(imported=bool(s["entries"]), active=active(c), cert=cert,
+                    certs=listing(c, device or None, s), chosen=chosen if chosen in s["entries"] else None, current=pick,
+                    needsChoice=needs_choice(c, device, s))
     raise Failure("不支持的证书操作。")
 
 
@@ -582,8 +980,8 @@ def signed_app_ipa(c, bid):
 
 def profile_facts(c):
     """在用的描述文件：{wildcard（通配 *，开不了「提高内存上限」等按能力开的权限）, expires（到期时刻，秒；读不到 None）}；读不了 → {}"""
-    try:
-        prof = parse_profile((folder(c) / "profile.mobileprovision").read_bytes())
+    try:   # 多张证书（#487）：本作业绑定设备的那张，不读根目录的缺省副本
+        prof = parse_profile(_profile_bytes(c))
     except (OSError, Failure):
         return {}
     _, wild = bundle_id(prof)

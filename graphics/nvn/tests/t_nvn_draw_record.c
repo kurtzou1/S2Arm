@@ -1,6 +1,6 @@
 // 真实公开 NVN API 录制，同生产 draw_idx_rec / bind_vbuf_rec / bind_program_rec 解码；不提交 GPU 绘制。
 // 记录在录制自己的宿主块里（句柄 = 第一条记录），游戏给的命令内存逐字节不动；GetCommandMemoryUsed / Free 按设备字节（hle_nvn.c dev_bytes：
-// 绘制 32、带索引绘制 48、渲染目标 96、绑程序 64、END 8，其余按记录大小）。混合格式交错检查字段与下一条记录边界；72B 命令内存验证设备口径正好用满不回调。
+// 绘制 32、带索引绘制按入口取驱动真值 DrawElements 24 / BaseVertex 48、72 / Instanced 44、48（间接仍 48）、渲染目标 96、绑程序 64、END 0，其余按记录大小）。混合格式交错检查字段与下一条记录边界；72B 命令内存验证设备口径正好用满不回调。
 #include "nvn_protos.h"
 #include "nvn_obj.h"
 #include "nvn2_cmd.h"   // OP_MULTI_DRAW / p_multi_draw（large_mdi）
@@ -79,15 +79,17 @@ static void mixed(void) {
     }
     op_hdr end; memcpy(&end, rec + offset, sizeof end);
     CHECK(end.op == OP_END); CHECK(end.size == 8); CHECK(offset + 8 == 376);
-    CHECK(API(nvnCommandBufferGetCommandMemoryUsed)(&cmd) == 8 * 48 + 8);   // 8 条带索引绘制 + END
-    CHECK(API(nvnCommandBufferGetCommandMemoryFree)(&cmd) == 512 - (8 * 48 + 8));
+    // 设备字节（驱动真值，#1904 旷野之息 NVN1 驱动实测与 NVN2 反汇编一致）：DrawElements 24、BaseVertex(-7) 72、Instanced(11, 4) 48、Instanced(-2, 8) 48、
+    //   间接 48、多绘两条各 48（间接不在入口表，仍按估算）、DrawElements 24、END 0
+    CHECK(API(nvnCommandBufferGetCommandMemoryUsed)(&cmd) == 24 + 72 + 48 + 48 + 48 + 2 * 48 + 24);
+    CHECK(API(nvnCommandBufferGetCommandMemoryFree)(&cmd) == 512 - (24 + 72 + 48 + 48 + 48 + 2 * 48 + 24));
     untouched(0, 65536);
     API(nvnCommandBufferFinalize)(&cmd);
 }
 
 static void tight(void) {
-    NVNcommandBuffer cmd; start(&cmd, 72);
-    // 设备字节：深度范围 16（记录大小）+ 带索引绘制 48 + END 8 = 72，正好用满；没设回调也不借窗口（借了 Used 不会正好是 72、Free 不会是 0）
+    NVNcommandBuffer cmd; start(&cmd, 88);
+    // 设备字节：深度范围 16（记录大小）+ BaseVertex(-13) 72 + END 0 = 88，正好用满；没设回调也不借窗口（借了 Used 不会正好是 88、Free 不会是 0）
     API(nvnCommandBufferSetDepthRange)(&cmd, 0.25f, 0.75f);
     API(nvnCommandBufferDrawElementsBaseVertex)(&cmd, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_INT, 31, 0x123450000ull, -13);
     uint8_t *rec = records(API(nvnCommandBufferEndRecording)(&cmd));
@@ -101,7 +103,7 @@ static void tight(void) {
         .count=31, .base_vertex=-13, .instances=1, .ibuf=0x123450000ull});
     const op_hdr *end = (const op_hdr *)(rec + 48);
     CHECK(end->op == OP_END); CHECK(end->size == 8);
-    CHECK(API(nvnCommandBufferGetCommandMemoryUsed)(&cmd) == 72);
+    CHECK(API(nvnCommandBufferGetCommandMemoryUsed)(&cmd) == 88);
     CHECK(API(nvnCommandBufferGetCommandMemoryFree)(&cmd) == 0);
     untouched(0, 65536);
     API(nvnCommandBufferFinalize)(&cmd);
@@ -151,13 +153,13 @@ static void vertex_buffers(void) {
     }
     op_hdr end; memcpy(&end, rec + offset, sizeof end);
     CHECK(end.op == OP_END); CHECK(end.size == 8); CHECK(offset + 8 == 320);
-    CHECK(API(nvnCommandBufferGetCommandMemoryUsed)(&cmd) == 24 + 24 + 24 + 32 + 48 + 5 * 48 + 8);   // 绑顶点缓冲按记录大小、带索引绘制 48、END 8
-    CHECK(API(nvnCommandBufferGetCommandMemoryFree)(&cmd) == 512 - (152 + 240 + 8));
+    CHECK(API(nvnCommandBufferGetCommandMemoryUsed)(&cmd) == 24 + 24 + 24 + 32 + 48 + 48 + 4 * 72);   // 绑顶点缓冲按记录大小；BaseVertex 基顶点 0 是 48、-1..-4 各 72；END 0
+    CHECK(API(nvnCommandBufferGetCommandMemoryFree)(&cmd) == 512 - (152 + 48 + 288));
     untouched(0, 65536);
     API(nvnCommandBufferFinalize)(&cmd);
 }
 // 游戏的内存回调按「至少 N 字节」正好补 N（无主之地3 虚幻 4：每次 40 字节、真池真偏移）：宿主照用，不借窗口（11-01 前不足 64 字节当没给、改借，借的段永不回收）。
-// N 是设备字节：每条带索引绘制 48、END 8；每次正好补一条，20 条绘制 + END 共 21 次回调、用掉 20 × 48 + 8 字节
+// N 是设备字节：每条 DrawElements 24、END 0；每次正好补一条，20 条绘制共 20 次回调、用掉 20 × 24 字节（END 不占字节、不回调）
 static size_t g_ring = 0x8000; static unsigned g_cbs; static size_t g_need[32];
 static void exact_cb(NVNcommandBuffer *c, NVNcommandBufferMemoryEvent e, size_t min, void *d) {
     (void)d; CHECK(e == NVN_COMMAND_BUFFER_MEMORY_EVENT_OUT_OF_COMMAND_MEMORY); CHECK(g_ring + min <= 65536); CHECK(g_cbs < 32);
@@ -170,17 +172,16 @@ static void exact_grant(void) {
     API(nvnCommandBufferBeginRecording)(&cmd);
     for (int i = 0; i < 20; i++) API(nvnCommandBufferDrawElements)(&cmd, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 3 + i, 0x100000000ull + 64 * (uint64_t)i);
     CHECK(API(nvnCommandBufferEndRecording)(&cmd) != 0);
-    CHECK(g_cbs == 21);
-    for (unsigned i = 0; i < 20; i++) CHECK(g_need[i] == 48);
-    CHECK(g_need[20] == 8);
-    CHECK(g_ring == 0x8000 + 20 * 48 + 8);
-    CHECK(API(nvnCommandBufferGetCommandMemoryUsed)(&cmd) == 8);    // 从最后一次补的内存算起：只有 END（借窗口不清零已用，借过就不会是 8）
+    CHECK(g_cbs == 20);
+    for (unsigned i = 0; i < 20; i++) CHECK(g_need[i] == 24);
+    CHECK(g_ring == 0x8000 + 20 * 24);
+    CHECK(API(nvnCommandBufferGetCommandMemoryUsed)(&cmd) == 24);   // 从最后一次补的内存算起：最后一条绘制（借窗口不清零已用，借过就不会是 24）
     CHECK(API(nvnCommandBufferGetCommandMemoryFree)(&cmd) == 0);
     API(nvnCommandBufferFinalize)(&cmd);
 }
 // GetCommandMemorySize = 游戏最近一次 AddCommandMemory 给的段长，录制中不变（大乱斗 01006A800016E000 按它给命令缓冲排序，main+0x3850850 introsort；
 //   旧实现 Used + Free 现算，溢出到宿主段 / 换段中间态 / 并发读时变，比较不稳定，扫描越过数组头读 0x50）。期望按设备字节手算（hle_nvn.c g_dev_bytes）：
-//   DrawElements 是带索引绘制 48B、END 8B；设备游标不写跳转（跳转只在宿主块里）
+//   DrawElements 24B（驱动真值）、END 0B；设备游标不写跳转（跳转只在宿主块里）
 static void memory_size(void) {
     PFNNVNCOMMANDBUFFERGETCOMMANDMEMORYSIZEPROC size_of = API(nvnCommandBufferGetCommandMemorySize);
     PFNNVNCOMMANDBUFFERGETCOMMANDMEMORYUSEDPROC used_of = API(nvnCommandBufferGetCommandMemoryUsed);
@@ -190,21 +191,21 @@ static void memory_size(void) {
     API(nvnCommandBufferAddCommandMemory)(&cmd, &pool, 0x2000, 256);
     CHECK(size_of(&cmd) == 256); CHECK(free_of(&cmd) == 256);
     API(nvnCommandBufferBeginRecording)(&cmd);
-    // 256B 段：每条 48 设备字节，前 5 条（240B）在段内，第 6 条（288B）装不下；无回调 → 借宿主窗口
-    for (int i = 1; i <= 6; i++) {
+    // 256B 段：每条 24 设备字节，前 10 条（240B）在段内，第 11 条（264B）装不下；无回调 → 借宿主窗口
+    for (int i = 1; i <= 11; i++) {
         API(nvnCommandBufferDrawElements)(&cmd, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 3, 0x100000000ull);
         CHECK(size_of(&cmd) == 256);
-        if (i <= 5) { CHECK(used_of(&cmd) == 48u * (unsigned)i); CHECK(free_of(&cmd) == 256 - 48u * (unsigned)i); }
+        if (i <= 10) { CHECK(used_of(&cmd) == 24u * (unsigned)i); CHECK(free_of(&cmd) == 256 - 24u * (unsigned)i); }
     }
-    CHECK(used_of(&cmd) == 256);                                             // 借窗口：游戏给的段算用尽，已用 = 大小、不超过大小（审计 #1534 P1-99；旧实现 6 × 48 = 288 > 256）
+    CHECK(used_of(&cmd) == 256);                                             // 借窗口：游戏给的段算用尽，已用 = 大小、不超过大小（审计 #1534 P1-99；旧实现会报 11 × 24 = 264 > 256）
     CHECK(free_of(&cmd) == 0);                                               // 已超出游戏给的段：Free = 大小 − 已用 = 0，不报宿主窗口剩余
     // 录制中游戏再给 128B：Size 换成 128，Used 从新段起算
     API(nvnCommandBufferAddCommandMemory)(&cmd, &pool, 0x3000, 128);
     CHECK(size_of(&cmd) == 128); CHECK(used_of(&cmd) == 0); CHECK(free_of(&cmd) == 128);
     API(nvnCommandBufferDrawElements)(&cmd, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 3, 0x100000000ull);
-    CHECK(size_of(&cmd) == 128); CHECK(used_of(&cmd) == 48); CHECK(free_of(&cmd) == 80);
+    CHECK(size_of(&cmd) == 128); CHECK(used_of(&cmd) == 24); CHECK(free_of(&cmd) == 104);
     CHECK(API(nvnCommandBufferEndRecording)(&cmd) != 0);
-    CHECK(size_of(&cmd) == 128); CHECK(used_of(&cmd) == 56); CHECK(free_of(&cmd) == 72);
+    CHECK(size_of(&cmd) == 128); CHECK(used_of(&cmd) == 24); CHECK(free_of(&cmd) == 104);   // END 不占字节
     // 游戏回调拿不出内存、给空池（宿主借窗口续录）：Size 是游戏给的 0，不是宿主窗口长
     API(nvnCommandBufferAddCommandMemory)(&cmd, NULL, 0, 0);
     CHECK(size_of(&cmd) == 0); CHECK(free_of(&cmd) == 0);
@@ -258,7 +259,7 @@ static void viewports(void) {
     const p_viewports *b = (const p_viewports *)(rec + 48);
     CHECK(b->first == 2); CHECK(b->n == 2); CHECK(b->v[0][0] == 1.f); CHECK(b->v[1][0] == 5.f); CHECK(b->v[1][3] == 8.f);
     memcpy(&h, rec + 104, sizeof h); CHECK(h.op == OP_END); CHECK(h.size == 8);
-    CHECK(API(nvnCommandBufferGetCommandMemoryUsed)(&cmd) == 112);   // 视口按记录大小：40 + 64 + END 8
+    CHECK(API(nvnCommandBufferGetCommandMemoryUsed)(&cmd) == 104);   // 视口按记录大小：40 + 64 + END 0
     API(nvnCommandBufferFinalize)(&cmd);
 }
 
@@ -297,7 +298,7 @@ static void render_targets(void) {
     CHECK(t[2].has_cview[1] && t[2].cview[1].base_level == 3 && t[2].cview[1].min_layer == 4);
     CHECK(t[2].has_dview && t[2].dview.base_level == 5 && t[2].dview.min_layer == 6);
     op_hdr end; memcpy(&end, rec + off, sizeof end); CHECK(end.op == OP_END); CHECK(end.size == 8);
-    CHECK(API(nvnCommandBufferGetCommandMemoryUsed)(&cmd) == 3 * 96 + 8);   // 渲染目标的快照只在宿主记录里：设备按 96 计
+    CHECK(API(nvnCommandBufferGetCommandMemoryUsed)(&cmd) == 3 * 96);   // 渲染目标的快照只在宿主记录里：设备按 96 计
     untouched(0, 65536);
     API(nvnCommandBufferFinalize)(&cmd);
 }
@@ -347,7 +348,7 @@ static void program_bind(void) {
     op_hdr h; memcpy(&h, rec, sizeof h);
     CHECK(h.op == OP_BIND_PROGRAM); CHECK(h.size == want_size);
     op_hdr end; memcpy(&end, rec + h.size, sizeof end); CHECK(end.op == OP_END);
-    CHECK(API(nvnCommandBufferGetCommandMemoryUsed)(&cmd) == 64 + 8);   // 绑程序设备按 64 计
+    CHECK(API(nvnCommandBufferGetCommandMemoryUsed)(&cmd) == 64);   // 绑程序设备按 64 计、END 0
     // 解码与直接查表一致，且与独立期望一致
     uint8_t tk[6][8], tok = 0xee, tst[6];
     const prog_t *snap = nvn_prog_snap_get(serial, tk, &tok, tst); CHECK(snap);
@@ -375,7 +376,7 @@ static void program_bind(void) {
         API(nvnCommandBufferBindProgram)(&many, &others[i], NVN_SHADER_STAGE_VERTEX_BIT);
     }
     CHECK(API(nvnCommandBufferEndRecording)(&many) != 0);
-    CHECK(API(nvnCommandBufferGetCommandMemoryUsed)(&many) == MANY * 64 + 8);
+    CHECK(API(nvnCommandBufferGetCommandMemoryUsed)(&many) == MANY * 64);
     API(nvnProgramFinalize)(&prog);
     for (int i = 0; i < MANY; i++) API(nvnProgramFinalize)(&others[i]);
     memset(&t, 0xcc, sizeof t);

@@ -191,7 +191,7 @@ import S2ArmAppleAdapter
         XCTAssertEqual((row("P1")["installed"] as? [String: Any])?["by"] as? String, nil, "测试替身 phone() 没给 installedBy → null")
         XCTAssertTrue((row("P1")["installed"] as? [String: Any])?["by"] is NSNull)
         XCTAssertEqual(row("P1")["actions"] as? [String], ["renewShell", "handOverIdentity", "updateSelected"])
-        XCTAssertEqual(row("NEW")["actions"] as? [String], ["installShell", "handOverIdentity", "updateSelected"])
+        XCTAssertEqual(row("NEW")["actions"] as? [String], ["installShell"], "还没装 S2Arm：只给安装（交签名身份、更新所选都要先有 S2Arm）")
         let launcher = PhoneOverview(phones: [PhoneOverview.Phone(device: "L", name: "", installed: true, shellCurrent: true, bundleId: "", signedAt: nil, free: true,
                                                                   expiresAtEstimate: nil, online: nil, lastSeen: nil, signMode: .appleId, games: [], installedBy: .launcher)])
         let l = S2ArmControl.phoneConsole(launcher, model: m).first?["installed"] as? [String: Any]

@@ -733,6 +733,10 @@ static void audio_category_apply(void) {
 }
 - (BOOL)application:(UIApplication *)app didFinishLaunchingWithOptions:(NSDictionary *)opts {
     display_focus_publish(app.applicationState == UIApplicationStateActive);
+    // 壳号进起局日志（冒烟与真机局据此核「跑的是不是本版壳」：机上 App 包的 Info.plist 外部读不到，devicectl 只给版本号）
+    NSDictionary *info = NSBundle.mainBundle.infoDictionary;
+    LOG("iOS 壳：壳号 %s、包号 %s、版本 %s（%s）", [info[@"S2AShellId"] ?: @"无" UTF8String], [info[@"S2ABuildID"] ?: @"无" UTF8String],
+        [info[@"CFBundleShortVersionString"] ?: @"?" UTF8String], [NSBundle.mainBundle.bundleIdentifier ?: @"?" UTF8String]);
     free_note();
     if (!s2a_host_boot_deferred()) [self startMonitoring];
     return YES;

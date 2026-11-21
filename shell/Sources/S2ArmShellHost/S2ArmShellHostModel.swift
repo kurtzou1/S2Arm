@@ -192,7 +192,7 @@ public final class S2ArmShellHostModel {
             return GameTile(id: id, title: nacpTitle(try? Data(contentsOf: ctl.appendingPathComponent("control.nacp"))) ?? id,
                             icon: icon.flatMap { Artwork(id: id + ".icon", data: $0) },
                             state: .broken(reason: shellText("Reinstall from the original computer"),
-                                           detail: shellText("This game was installed from another computer. Its saves and game data are still on this iPhone; on that computer, choose “Push to iPhone” again to bring it back.")))
+                                           detail: shellText("This game was installed from another computer. Its saves and game data are still on this iPhone; in S2Arm on that computer, click “Export…” for this game, tick this iPhone and start to bring it back.")))
         }
     }
 

@@ -1,5 +1,5 @@
 // 签名证书进游戏状态（ios/sign_state.m）单测，Mac 上跑。期望照 cmdr 走查「第 2 支期望」表手写，不跑被测实现算：
-//   每款签名状态 s2a_sign_state_at（情形 1–14；14 = LiveContainer 里）、挑现用证书 s2a_cert_settle（导入别的团队的证书不顶掉能用的）、
+//   每款签名状态 s2a_sign_state_at（情形 1–15；14 / 15 = LiveContainer 里，15 = 它那张 S2Arm 解不开）、挑现用证书 s2a_cert_settle（导入别的团队的证书不顶掉能用的）、
 //   证书登记表 certs.tsv（runtime/src/selfsign.c 导入成功时记：同一张不重复；钥匙串换成桩，不碰本机钥匙串）
 #import <Foundation/Foundation.h>
 #import <Security/Security.h>
@@ -14,7 +14,8 @@ int s2a_cert_health(const char *home);
 int s2a_identity_import_p12(const char *home, const void *p12, size_t n, const char *password, const char *source, char *team, size_t team_n, char *why, size_t why_n);
 void s2a_identity_test_store(int (*f)(SecKeyRef, SecCertificateRef, char *, size_t));
 void s2a_lc_cert_test(int (*f)(NSData **, NSString **));
-static int lc_ok(NSData **p, NSString **w) { if (p) *p = [NSData dataWithBytes:"x" length:1]; if (w) *w = @"t"; return 1; }
+static NSData *g_lc_p12;   // LiveContainer 共享偏好里那张（桩）：解得开的真 p12，或解不开的一段字节
+static int lc_ok(NSData **p, NSString **w) { if (p) *p = g_lc_p12; if (w) *w = @"t"; return 1; }
 
 static int bad;
 static void ck(int ok, NSString *what) { printf("%s %s\n", ok ? "  通" : "  【红】", what.UTF8String); if (!ok) bad++; }
@@ -68,12 +69,6 @@ int main(void) { @autoreleasepool {
     ck(s2a_cert_health(H.fileSystemRepresentation) == 0, @"13 状态行不标");
     reset(); app(@"TEAMAAAAAA", @[A1]); put([ID stringByAppendingPathComponent:@"current.json"], [NSString stringWithFormat:@"{\"schema\": 1, \"team\": \"TEAMAAAAAA\", \"cert_sha1\": \"%@\", \"imported\": 50, \"source\": \"pc\"}\n", A1]);
     cat(unsigned_); ck(st(0) == 0, @"老数据：只有 current.json（登记表之前导入的）也算一张 → 0");
-    // LiveContainer 里（#63639b）：起局用它的证书重签，游戏库不因手机上没有 / 只有别的团队的证书标「没证书 / 团队不符」
-    s2a_lc_cert_test(lc_ok);
-    reset(); app(@"TEAMAAAAAA", @[A1]); cat(unsigned_); ck(st(0) == 0, @"14 LiveContainer 里、程序没签、手机 0 张 → 0（起局用它的证书重签）");
-    certs(rowB1); ck(st(0) == 0, @"14 LiveContainer 里、只有别的团队证书 → 0");
-    ck(st(1) == 5, @"14 LiveContainer 里重签过仍被拒 → 5");
-    s2a_lc_cert_test(NULL);
     reset(); app(@"TEAMAAAAAA", @[A1]); certs(rowB1); ck(s2a_cert_health(H.fileSystemRepresentation) == 2, @"状态行：只有别的团队 → 2");
     reset(); app(@"TEAMAAAAAA", @[A2]); certs(rowA1); ck(s2a_cert_health(H.fileSystemRepresentation) == 3, @"状态行：同团队但已失效 → 3");
 
@@ -97,6 +92,19 @@ int main(void) { @autoreleasepool {
     ck(imp(@"b1") == 0 && lines() == 2 && [cur_sha() isEqualToString:sha(@"a1")], @"S2 再导入别团队 B1 → 登记 2 行、现用仍是 A1");
     ck(imp(@"a2") == 0 && lines() == 3 && [cur_sha() isEqualToString:sha(@"a2")] && [tsv() containsString:sha(@"a1")], @"S3 再导入 A2 → 现用 A2、A1 仍在登记表");
     ck(imp(@"a2") == 0 && lines() == 3, @"S4 同一张再导一次 → 登记表不重复");
+    // LiveContainer 里（#63639b）：起局用它的证书重签，游戏库不因手机上没有 / 只有别的团队的证书标「没证书 / 团队不符」
+    s2a_lc_cert_test(lc_ok); g_lc_p12 = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:@"a1.p12"]];
+    reset(); app(@"TEAMAAAAAA", @[A1]); cat(unsigned_); ck(st(0) == 0, @"14 LiveContainer 里、程序没签、手机 0 张 → 0（起局用它的证书重签）");
+    certs(rowB1); ck(st(0) == 0, @"14 LiveContainer 里、只有别的团队证书 → 0");
+    ck(st(1) == 5, @"14 LiveContainer 里重签过仍被拒 → 5");
+    // 15 LiveContainer 存的那张 S2Arm 解不开（#502 / D-D8F4 -26275）：起局改用导入进 S2Arm 的那张，游戏库同样按它判；
+    //   一张都没导 → 1「需要签名证书」（卡片上直接导入），不再是 5「回电脑推到 iPhone」（LiveContainer 里的玩家走不通那条）
+    g_lc_p12 = [NSData dataWithBytes:"not a p12" length:9];
+    reset(); app(@"TEAMAAAAAA", @[A1]); cat(unsigned_); ck(st(0) == 1, @"15 LiveContainer 的证书解不开、S2Arm 没导证书 → 1 需要签名证书");
+    ck(st(1) == 1, @"15 同上、点开始被拒过 → 仍是 1（不是 5）");
+    certs(rowA1); ck(st(0) == 0, @"15 解不开、但 S2Arm 导入了同团队能用的 → 0");
+    certs(rowB1); ck(st(0) == 2, @"15 解不开、S2Arm 只导入了别的团队的 → 2");
+    s2a_lc_cert_test(NULL);
     [NSFileManager.defaultManager removeItemAtPath:dir error:nil];
     return S2A_T_RESULT("t_sign_state", bad);
 } }

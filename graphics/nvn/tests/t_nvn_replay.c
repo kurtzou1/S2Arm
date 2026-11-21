@@ -520,7 +520,16 @@ static struct rp_prog g_cprog; static int g_cresolves, g_cresolve_rc, g_cpipe_ge
 static nvn_gpu_buf g_disp_ind; static uint64_t g_disp_off;
 static int g_ndisp_now(void) { return g_ndisp; }
 static nvn_gpu_binding g_cb[16]; static uint32_t g_ncb; static int g_cbinds;
-int rp_shader_resolve_compute(const struct rp_prog **out) { g_cresolves++; *out = g_cresolve_rc ? NULL : &g_cprog; return g_cresolve_rc; }
+static struct rp_prog g_cprog2; static const struct rp_prog *g_cresolve_next; static int g_lib_reject_calls;
+int rp_shader_resolve_compute(const struct rp_prog **out) { g_cresolves++; *out = g_cresolve_rc ? NULL : (g_cresolve_next ? g_cresolve_next : &g_cprog); return g_cresolve_rc; }
+// rp_shader_lib_reject 的替身：出库版标坏并切到「现编版」g_cprog2；非出库版（lib_sourced=0）原样报 0
+int rp_shader_lib_reject(const struct rp_prog *p) {
+    g_lib_reject_calls++;
+    if (!p || !p->lib_sourced) return 0;
+    ((struct rp_prog *)p)->lib_bad = 1;
+    g_cresolve_next = &g_cprog2;
+    return 1;
+}
 void rp_shader_reset(void) {}
 static int g_pipe_rc;
 static int g_pipe_gets, g_set_pipes, g_set_dyns, g_gdraws; static nvn_gpu_pipe_desc g_last_pdesc; static nvn_gpu_dyn g_last_dyn; static nvn_gpu_draw_args g_last_da;
@@ -3416,6 +3425,7 @@ static void ub_fill_async_run(int steal) {
     CHECK(waits == (steal ? 0 : 1));    // 只有改 A 的那一次要管；关着是等，开着是代拷、不等
     CHECK(takes == (steal ? 1 : 0));
     CHECK(pf[RP_PERF_UBO_FILL_N] == 2 && pf[RP_PERF_UBO_FILL_WAIT_N] == 1);
+    CHECK(pf[RP_PERF_UBO_STAGED_B] == 1024);   // 两片各 512 字节真落暂存（第二笔前 A 被改过，切片表认不回）；手算 = 2 × 512
     CHECK(pf[RP_PERF_UBO_FILL_STEAL_N] == (steal ? 1u : 0u) && pf[RP_PERF_UBO_FILL_STEAL_B] == (steal ? 512u : 0u) && pf[RP_PERF_UBO_FILL_BUSY_N] == 0);
     CHECK(pending == 0);       // 段提交前全部填完
     if (nlog == 2) {
@@ -4972,6 +4982,33 @@ static void t_compute_image_class(void) {
     v = img_class_view(9, 0, 0, NVN_TEXTURE_TARGET_3D + 1, &ok);   // 负对照：视图记录是一维数组、声明三维 → 真不符，整笔跳过
     CHECK(!ok && !v && nvn_unimpl_count("draw", "compute_image_decl_type_mismatch") == bad1 + 1);
     nvn_be_sub_commit(); fake_complete(NVN_GPU_DONE_OK);
+    memset(g_caps_stor, 0, sizeof g_caps_stor); rp_S.img[5][2] = 0; pass_fresh();
+}
+
+// 出库版绑定核对失败的同一笔回退：库版声明 R32ui、实绑 RG32F（字节不符）→ 身份标坏、换现编版（Unknown）重绑，同一笔派发出去；
+// 现编版再不符（lib_sourced=0）不再回退，照旧具名跳过——回退只走一次。
+static void t_compute_image_lib_fallback(void) {
+    pass_fresh(); res_fresh(); g_arena_used = 0; g_cresolve_rc = 0; g_cresolve_next = NULL; g_lib_reject_calls = 0;
+    g_caps_stor[0] = NVN_FORMAT_RG32F; g_caps_stor[1] = NVN_FORMAT_RG32UI;
+    tex_t rg = mk_tex(671, 0, NVN_FORMAT_RG32F, 1, 1, 1, NVN_TEXTURE_FLAGS_IMAGE);
+    nvn_be_reg_tex(3, &rg, NULL); nvn_be_set_tex_pool_n(8);
+    memset(&g_cprog, 0, sizeof g_cprog); g_cprog.is_compute = 1; g_cprog.sh[0] = &g_fsh[0]; g_cprog.nent[0] = 1; g_cprog.lib_sourced = 1;
+    nvn_gpu_layout_ent *e = &g_cprog.ent[0][0]; e->cls = NVN_GPU_RES_IMAGE; e->src_kind = NVN_RB_IMG; e->src_reg = 2; e->count = 1; e->access = NVN_GPU_ACC_R;
+    g_cprog.dtt[0][0] = NVN_TEXTURE_TARGET_2D + 1; g_cprog.dcls[0][0] = 1; g_cprog.difmt[0][0] = 33;   // 库版声明 R32ui（4B）vs 贴图 RG32F（8B）
+    memcpy(&g_cprog2, &g_cprog, sizeof g_cprog); g_cprog2.lib_sourced = 0; g_cprog2.difmt[0][0] = 0;   // 现编版声明 Unknown → 同位类 RG32UI 视图
+    int n = g_ndisp, res = g_cresolves;
+    rp_S.img[5][2] = 3;
+    nvn_be_sub_begin();
+    rp_dispatch(&g_fake_cmd, &(p_dispatch){.x = 1, .y = 1, .z = 1}, NULL);
+    CHECK(g_lib_reject_calls == 1 && g_cprog.lib_bad && g_ndisp == n + 1 && g_cresolves >= res + 2);   // 库版不符 → 换现编版同一笔派发
+    CHECK(g_ncb == 1 && g_cb[0].u.view && ((const struct nvn_gpu_view_s *)g_cb[0].u.view)->v.format == NVN_FORMAT_RG32UI);
+    // 现编版再声明不符：lib_sourced=0 不再回退（reject 不再被调），照旧具名跳过——回退只走一次
+    g_cprog2.difmt[0][0] = 33; g_lib_reject_calls = 0;   // 现编版也声明 R32ui：resolve 仍交 g_cprog2（g_cresolve_next 未动）
+    uint64_t m0 = nvn_unimpl_count("draw", "compute_image_decl_format_size_mismatch"); n = g_ndisp;
+    rp_dispatch(&g_fake_cmd, &(p_dispatch){.x = 1, .y = 1, .z = 1}, NULL);
+    CHECK(g_ndisp == n && g_lib_reject_calls == 0 && nvn_unimpl_count("draw", "compute_image_decl_format_size_mismatch") == m0 + 1);
+    nvn_be_sub_commit(); fake_complete(NVN_GPU_DONE_OK);
+    g_cresolve_next = NULL; g_lib_reject_calls = 0;
     memset(g_caps_stor, 0, sizeof g_caps_stor); rp_S.img[5][2] = 0; pass_fresh();
 }
 
@@ -7043,6 +7080,7 @@ int main(int argc, char **argv) {
     t_dispatch_ubop_ro_skip();
     t_compute_image();
     t_compute_image_class();
+    t_compute_image_lib_fallback();
     t_graphics_image();
     t_compute_tex_from_image();
     t_drv2_table();

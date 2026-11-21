@@ -63,6 +63,30 @@ if (args.Length == 1 && args[0] == "--running-gate")
     Console.WriteLine("✓ running gate: 6 checks");
     return;
 }
+if (args.Length == 1 && args[0] == "--export-unstarted")
+{
+    // 存档从电脑推进来、这款在这台设备上还没起过局：有 bis/user/save，没有用户档案与存档索引（第一次起局时模拟器才建）。
+    //   导出要报 save_user 并说清「先进一次游戏」，不再是读档案时找不到文件归成的笼统 save_invalid。期望手写
+    string tmp = Directory.CreateDirectory(Path.Combine(OperatingSystem.IsWindows() ? Path.GetTempPath() : "/private/tmp", "s2a-export-unstarted-" + Guid.NewGuid().ToString("N"))).FullName,
+    root = Path.Combine(tmp, "data"), work = Path.Combine(tmp, "work");
+    string save = Path.Combine(root, "bis", "user", "save", "0000000000000001", "0");
+    Directory.CreateDirectory(save); File.WriteAllText(Path.Combine(save, "slot.bin"), "progress");
+    JsonObject Req(string op, string name) => new() { ["operation"] = op, ["dataRoot"] = root, ["workRoot"] = work, ["path"] = Path.Combine(tmp, name),
+        ["game"] = new JsonObject { ["id"] = "0100000000010000", ["version"] = 0, ["contentIdentity"] = new string('a', 64), ["name"] = "t" } };
+    var fails = new List<string>();
+    void Expect(bool ok, string what) { Console.WriteLine((ok ? "PASS " : "FAIL ") + what); if (!ok) fails.Add(what); }
+    var r = JsonNode.Parse(SaveTransfer.Execute(Req("export", "a.s2asave").ToJsonString()));
+    string code = r["ok"].GetValue<bool>() ? "ok" : r["error"]["code"].GetValue<string>();
+    string msg = r["ok"].GetValue<bool>() ? "" : r["error"]["message"].GetValue<string>();
+    Expect(code == "save_user", $"save files without profile / index: export refused as save_user (got {code})");
+    Expect(msg.Contains("还没进过游戏") || msg.Contains("hasn't been started"), "message says the game hasn't been started on this device");
+    Expect(!File.Exists(Path.Combine(tmp, "a.s2asave")), "no archive left behind");
+    Expect(File.ReadAllText(Path.Combine(save, "slot.bin")) == "progress", "save files untouched");
+    Directory.Delete(tmp, true);
+    if (fails.Count > 0) { Console.WriteLine($"✗ export unstarted: {fails.Count} failed"); Environment.Exit(1); }
+    Console.WriteLine("✓ export unstarted: 4 checks");
+    return;
+}
 if (args.Length == 1 && args[0] == "--previous")
 {
     // 回到上一份存档：previous 只读、游戏在跑也给；restorePrevious 把已提交版本 0/ 与 .s2a_prev 原子交换，再调一次换回；在跑拒、没有上一份拒

@@ -83,6 +83,26 @@ class ImgConsume(JobCase):
                 self.assertIn(shown, str(e.exception))
                 self.assertIn(line, str(e.exception) + getattr(e.exception, "internal", ""))
 
+    def test_other_jobs_img_output_not_mixed_in(self):
+        # #1880：一款游戏的失败摘要里出现另一款的 IMG 路径。原先 logs/img.log 不分作业、追加写：前一款的输出（它的路径、它的盘满）
+        #   串进这一款的失败原因与归因。期望：这次的报错只按这次作业自己的日志归类，别的作业 / 游戏的输出一行都不进
+        c, out = self._work()
+        other = "【红】[Errno 28] No space left on device: '/lib/games/另一款/game.img'"
+        (Path(c.logs) / "img.log").parent.mkdir(parents=True, exist_ok=True)
+        (Path(c.logs) / "img.log").write_text(other + "\n", encoding="utf-8")   # 老版本留下的共用日志
+        (Path(c.logs) / "earlier-task-img.log").write_text(other + "\n", encoding="utf-8")   # 前一个作业自己的那份
+        mine = "【红】写标准 RomFS 段失败：坏了"
+        def fail(args, log, *a, **kw):
+            with open(log, "a", encoding="utf-8") as f:
+                f.write(mine + "\n")   # 同 c.run：追加写
+            raise Failure("退出码 1", code="tool_exit")
+        with patch.object(c, "run", side_effect=fail), self.assertRaises(Failure) as e:
+            ipa.to_img(c, GID, out / "roots/kuan@v1", out / "pack")
+        text = str(e.exception) + getattr(e.exception, "internal", "")
+        self.assertEqual(e.exception.code, "package_failed")
+        self.assertIn(mine, text)
+        self.assertNotIn("另一款", text)
+
 
 if __name__ == "__main__":
     unittest.main()

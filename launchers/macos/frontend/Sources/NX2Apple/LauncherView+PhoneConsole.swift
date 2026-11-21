@@ -41,6 +41,9 @@ extension LauncherView {
         let focused = navigation.visible && navigation.focusedID == "card." + S2ArmLauncherModel.consoleID
         let artworkSide = selected ? side * 1.36 : side
         let status = model.consoleStatus()
+        // 手机图标同一时刻只画一个（动画 1：选中时从卡片升到下方页顶）。原先卡片里那个一直在、只把 isSource 让给页顶，
+        //   matchedGeometryEffect 就把它摆到页顶图标的位置：面板一滚动，它压在卡片边框上或飘到卡片外（玩家录屏 0.6.2）
+        let headerShown = selected && status != .introduce && model.consolePhone != nil
         return Button {
             // 鼠标点进总控台也现查一次连着的手机（同键盘 / 手柄把焦点移过来，LauncherView+Home 焦点变化那条；同 Windows library.select）：
             //   原先只改选中，随后的焦点变化因已选中不再查，鼠标玩家的总控台永远按设备记录显示，装着多个 S2Arm 时也出不来选择
@@ -52,8 +55,10 @@ extension LauncherView {
             HomeCardSurface(selected: selected, focused: focused) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 15).fill(LinearGradient(colors: [Color(white: 0.16), Color(white: 0.07)], startPoint: .top, endPoint: .bottom))
-                    Image(systemName: "iphone").font(.system(size: artworkSide * 0.46, weight: .thin)).foregroundStyle(.white.opacity(0.9))
-                        .matchedGeometryEffect(id: "console.phone", in: consoleSpace, isSource: !selected)
+                    if !headerShown {
+                        Image(systemName: "iphone").font(.system(size: artworkSide * 0.46, weight: .thin)).foregroundStyle(.white.opacity(0.9))
+                            .matchedGeometryEffect(id: "console.phone", in: consoleSpace)
+                    }
                     Text("S2Arm").font(.manrope(artworkSide * 0.1, .bold)).foregroundStyle(.white).offset(y: artworkSide * 0.02)
                     if case .updating(let done, let total) = status {   // 动画 3 / 4：外圈进度环（更新所选 / 装 App 时）
                         Circle().trim(from: 0, to: CGFloat(done) / CGFloat(max(total, 1))).stroke(.orange, style: StrokeStyle(lineWidth: 3, lineCap: .round))
@@ -106,7 +111,7 @@ extension LauncherView {
         return HStack(alignment: .center, spacing: 18) {
             ZStack {
                 Image(systemName: "iphone").font(.system(size: 64, weight: .thin)).foregroundStyle(.white)
-                    .matchedGeometryEffect(id: "console.phone", in: consoleSpace, isSource: model.consoleSelected)
+                    .matchedGeometryEffect(id: "console.phone", in: consoleSpace)
                 if allLatest {
                     Text(sx("console.allLatest")).font(.manrope(9, .bold)).foregroundStyle(.green).shadow(color: .green.opacity(0.7), radius: 6)
                 }

@@ -1133,11 +1133,10 @@ static thr_t *g_cown[NCORE]; static uint64_t g_cown_t[NCORE]; enum { CW_MAX = 10
 // 11-19 维护者定：苹果平台缺省改「按需」。Switch 上同一核同一时刻只跑一条线程，游戏据此「读核号 → 改本核数据」不加锁；缺省关时这个前提每局都被打破
 //   （王国之泪 Mac 两局「读过核号的两线程同核同跑」129 / 161 次，按需档 0 次、帧数持平；8 GB Mac 上沿 +0x18 父指针读到正被改写的节点而崩，#9113f9）。
 //   显式设的照旧优先：S2A_CORES=0 关、=1 全部参与、=ondemand 按需。安卓侧缺省不变（另行评估）
-#if defined(__APPLE__)
-enum { CORES_DEFAULT = 1 };
-#else
+// 11-21 维护者定：苹果平台缺省回到关（同 0.5.8 调度），各平台一致。按需档缺省开后：
+//   一款 Switch 2 平台游戏（040074A01BF12000）Mac 缺省档第 1253 帧必崩、S2A_CORES=0 两局 180 秒不崩（普遍阻断，3 台设备）；
+//   iPhone 同包每千帧 CPU 按需 49.3 s 对关 39.5 s；当初要防的王国之泪崩溃开关各 30 局均 0 崩，没证明按需有效（真因另追，原生调度下根修）
 enum { CORES_DEFAULT = 0 };
-#endif
 static int cores_mode(void) { static int v = -1; if (v < 0) { const char *e = getenv("S2A_CORES");
     v = !e || !*e ? CORES_DEFAULT : !strcmp(e, "1") ? 2 : !strcmp(e, "ondemand") ? 1 : 0;
     LOG("虚拟核：%s%s", v == 2 ? "全部游戏线程参与（S2A_CORES=1）" : v == 1 ? "按需（读过核号 0x10 或钉单核的线程同核互斥）" : "关（游戏线程即宿主线程、不限同核并发）",

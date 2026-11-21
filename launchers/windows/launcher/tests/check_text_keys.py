@@ -36,7 +36,7 @@ def main() -> int:
     # 手机作业结局卡（App/PhoneJobCard.cs）的键是按作业类型拼的，上面的字面量扫描看不到：按「作业类型 × 结局状态」整张矩阵核，
     #   每一格用到的键中英都要有、不为空（11-11 维护者截图里缺文案露出机读码；运行时退回只是兜底，缺一格就红）
     by_id = {it["id"]: it for it in items if it.get("id")}
-    phone_kinds = ("install", "installRemove", "installRestore", "installUpdate", "phoneIdentity")
+    phone_kinds = ("install", "installRemove", "installRestore", "installUpdate", "installShell", "phoneIdentity")
     phone_states = {
         "running": ["phone.title.{k}", "phone.status.running.{k}", "export.overall", "phone.steps.more", "phone.details"],
         "succeeded": ["phone.title.{k}", "phone.headline.{k}", "phone.done.{k}", "phone.stat.time", "phone.stat.device", "phone.stat.games",

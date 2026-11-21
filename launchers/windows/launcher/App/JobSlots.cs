@@ -8,7 +8,7 @@ namespace S2Arm.Launcher;
 /// 并发的正确性由后端游戏库锁保证（排队 + 说清在等谁，pack/jobs/core.py）；这里只决定界面上什么能点、取消发给谁。</summary>
 public partial class EnvironmentWindow
 {
-    internal enum JobKind { Library, Import, Pack, Phone, Environment, Space }
+    internal enum JobKind { Library, Import, Pack, Phone, Environment, Space, Update }
 
     internal sealed class FrontJob(JobKind kind, string? gameId) : IDisposable
     {
@@ -24,6 +24,7 @@ public partial class EnvironmentWindow
         public bool Blocks(string gameId) => Kind switch
         {
             JobKind.Phone => GameId == gameId,
+            JobKind.Update => GameId == gameId,   // 「更新这款」（作业 updateGame）只在电脑上重做这一款：别的款照常用
             JobKind.Environment => false,
             _ => true
         };
@@ -54,7 +55,8 @@ public partial class EnvironmentWindow
     /// GameId = 它要用的那款（更新 iPhone 为 null）</summary>
     private readonly List<(string? GameId, Func<Task> Run)> phoneQueue = new();
     /// <summary>这款正在出包（出包会换它的程序件）：对它的手机作业等出完</summary>
-    private bool PackHolds(string? gameId) => gameId is not null && packRunning && packGame?.Id == gameId;
+    /// 这款正在「更新这款」（重编着色器库 / 刷新程序，也会换它的程序件）：同样等做完
+    private bool PackHolds(string? gameId) => gameId is not null && (packRunning && packGame?.Id == gameId || GameUpdating(gameId));
     private bool PhoneQueued(string? gameId) => phoneQueue.Any(q => q.GameId == gameId);
     /// <summary>手机上正在推这一款（装机作业在跑、装的就是它）</summary>
     private bool PhonePushing(string? gameId) => installBusy && gameId is not null && string.Equals(installGameId, gameId, StringComparison.OrdinalIgnoreCase);

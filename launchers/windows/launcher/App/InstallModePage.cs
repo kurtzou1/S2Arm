@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 S2Arm contributors
 // 一键装到 iPhone 的签名身份 + 更新 iPhone 上的 S2Arm（v0.3.0，同 Mac InstallModeViews.swift / S2ArmLauncherModel+InstallMode.swift）。
-//   签名身份 = Apple ID（在 Impactor 里登录）/ 我的开发者证书，沿用 DevCertPage.cs 那套。11-15 维护者：导出不再是装法——
-//   游戏库「推到 iPhone」「导出自签包」两个按钮并排（ExportPages.cs ExportSelfSign），设置里没有切换。
-//   InstallModeCard：设置里的一张卡；InstallModeLine：出包页一行只读签名身份 + 「更改」（去设置）。
+//   签名身份 = Apple ID（在 Impactor 里登录）/ 我的开发者证书，沿用 DevCertPage.cs 那套。0.6.4 起推 / 导出只有游戏库「导出…」一个入口，
+//   这次怎么签在导出确认页选（ExportFlow.cs），设置里这张卡给的是缺省。InstallModeCard：设置里的一张卡。
 //   更新：游戏库顶栏按钮（catalog phoneUpdates：设备记录的壳号比本版旧）→ 有要重新出包的款先三选一 → installUpdate 作业只换壳、不重推资源；
 //   选了「更新并重新出这几款」：更新成功后把它们排进批量出包（只出 iPhone），整批出完逐款装上。
 using System.Text.Json;
@@ -23,6 +22,9 @@ public sealed partial class EnvironmentWindow
     private string signChoice = "appleId";   // installMode 作业的 signChoice：appleId / devCert / external
     // 出法（0.6.3，installMode 作业）：layout = 缺省现在按哪种推（shell 通用 S2Arm / standalone 独立 App，一 App 一游戏）；layoutGames = 按款选过的
     private string layout = "shell";
+    /// <summary>installMode 作业读回过出法：没读回（首次渲染、作业失败）时两张卡都不画选中——原先先把缺省「通用 S2Arm」画成选中，
+    ///   读回后才跳到真实那张，读失败就一直显示错的（0.6.2 前端走查）</summary>
+    private bool layoutKnown;
     private Dictionary<string, string> layoutGames = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>出法选「独立 App」时按签名方式给的那句提示的码（installMode / layoutSet 结果 standaloneHint：appleId / wildcard / external；null → ""，不显示）</summary>
     private string standaloneHint = "";
@@ -42,14 +44,37 @@ public sealed partial class EnvironmentWindow
     private string updateAskCode = "";
 
     /// <summary>更新页（page = "phoneupdate"）：结局卡 + 失败重试 + 挤掉确认（页内）</summary>
-    private Control PhoneUpdateCard() => PhoneJobCard(updateTrack, updateState, updateMessage, updateDiagnostics, null,
-        retry: updateState is "failed" or "invalid" or "interrupted" ? () => _ = UpdatePhoneAsync(lastUpdate.AcceptStale, lastUpdate.Repack, lastUpdate.Accept, mode: lastUpdateMode, sgradeUpgrade: lastUpdateSGrade) : null,
+    /// <summary>更新页（page = "phoneupdate"）：结局卡；第一次装 S2Arm 且用 Apple ID 签的，成功时写「先信任再打开」；Apple ID 没登录 / 过期失败时卡下给「打开 Impactor」
+    ///   （走查：失败页的下一步写着去装机页点「打开 Impactor」，改版后这条路上没有装机页，玩家卡住）</summary>
+    private Control PhoneUpdateCard()
+    {
+        var box = new StackPanel { Spacing = 14 };
+        box.Children.Add(PhoneUpdateJobCard());
+        if (updateState is "failed" && updateCode is "apple_not_signed_in" or "apple_session_expired")
+        {
+            var impactor = Action("action.open_impactor", OpenBundledImpactor, File.Exists(BundledImpactor));
+            AutomationId(impactor, "phoneupdate.open_impactor");
+            box.Children.Add(impactor);
+        }
+        return box;
+    }
+
+    /// <summary>更新这一单的失败码（apple_not_signed_in 等：卡下给「打开 Impactor」）</summary>
+    private string? updateCode;
+    /// <summary>这一单是给还没装 S2Arm 的手机第一次装（总控台「安装 S2Arm」/ 介绍卡「连上 iPhone 开始」）</summary>
+    private bool updateFirstInstall;
+
+    private IReadOnlyList<string>? FirstInstallNotes() =>
+        updateFirstInstall && updateState == "succeeded" && signChoice == "appleId" ? [T("install.done.trust")] : null;
+
+    private Control PhoneUpdateJobCard() => PhoneJobCard(updateTrack, updateState, updateMessage, updateDiagnostics, null, FirstInstallNotes(),
+        retry: updateState is "failed" or "invalid" or "interrupted" ? () => _ = UpdatePhoneAsync(lastUpdate.AcceptStale, lastUpdate.Repack, lastUpdate.Accept, mode: lastUpdateMode, sgradeUpgrade: lastUpdateSGrade, firstInstall: updateFirstInstall) : null,
         confirmDrop: () => _ = UpdatePhoneAsync(lastUpdate.AcceptStale, lastUpdate.Repack,
             new HashSet<string>(lastUpdate.Accept) { ConfirmCodes.GetValueOrDefault(updateAskCode, "acceptDropped") }, mode: lastUpdateMode, sgradeUpgrade: lastUpdateSGrade),
         dropTitle: ConfirmTitle(updateAskCode),
         cancelDrop: () => { updateState = ""; updateOutcome = null; Navigate("library"); },
         alternateDrop: UpdateDropAlternate(),
-        switchExport: updateState is "failed" or "invalid" or "interrupted" && lastUpdateMode != "export"
+        switchExport: updateState is "failed" or "invalid" or "interrupted" && lastUpdateMode != "export" && !updateFirstInstall   // 第一次装时不给「改为导出自签包」：新手看不懂，失败原因下面的按钮（打开 Impactor / 重试）才是下一步
             ? () => { _ = UpdatePhoneAsync(lastUpdate.AcceptStale, lastUpdate.Repack, lastUpdate.Accept, mode: "export", sgradeUpgrade: lastUpdateSGrade); } : null);
     /// <summary>更新页 drop 态问的码有并列的另一条路（共享体验表 alternate，自签走查结构 7）：按钮文案键 + 点了做什么（不重发，走清单同一个派发）</summary>
     private (string Label, Action Run)? UpdateDropAlternate()
@@ -77,6 +102,7 @@ public sealed partial class EnvironmentWindow
                 exportAvailable = Flag(job.Report.Result, "exportAvailable");
                 signChoice = Str(job.Report.Result, "signChoice") is { Length: > 0 } sc ? sc : "appleId";   // 签名方式三选一（自签走查结构 6）
                 layout = Str(job.Report.Result, "layout") is { Length: > 0 } lo ? lo : "shell";
+                layoutKnown = true;
                 ReadLayoutRecommend(job.Report.Result);
                 layoutGames = new(StringComparer.OrdinalIgnoreCase);
                 if (job.Report.Result.TryGetProperty("layoutChoice", out var lc) && lc.ValueKind == JsonValueKind.Object &&
@@ -127,8 +153,12 @@ public sealed partial class EnvironmentWindow
 
     private static readonly IBrush LayoutGold = Brush.Parse("#E8C65A");
 
+    /// <summary>选「独立 App」时按签名方式给的提示码（作业 standaloneHints，导出确认页按这次选的签名取）</summary>
+    private IReadOnlyDictionary<string, string> standaloneHints = new Dictionary<string, string>();
+
     private void ReadLayoutRecommend(JsonElement result)
     {
+        standaloneHints = ExportChoice.StandaloneHints(result);
         standaloneHint = Str(result, "standaloneHint");
         layoutRecommend = Str(result, "recommend");
         layoutRecommendWhy = Str(result, "recommendWhy");
@@ -169,7 +199,7 @@ public sealed partial class EnvironmentWindow
 
         Control OneCard(string value, string body, string badge, bool gold)
         {
-            var on = now == value;
+            var on = (own is not null || layoutKnown) && now == value;
             var content = new Grid { RowDefinitions = new RowDefinitions("Auto,Auto,Auto,*,Auto"), RowSpacing = 6 };
             // 右上：角标 + 小问号（悬停展开原理说明，点一下也展开 / 收起；两张同一段）
             var top = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 6 };
@@ -208,7 +238,7 @@ public sealed partial class EnvironmentWindow
                 Background = on ? Brush.Parse("#2A2722") : Surface, BorderBrush = on ? LayoutGold : Brush.Parse("#3A3A3F"), BorderThickness = new Thickness(on ? 2 : 1) };
             AutomationId(card, (gameId is null ? "install.layout." : "install.layout.game.") + value);
             // 点卡片 = 选它（不拦）；已经明确选的就是它时不重发
-            card.Click += (_, _) => { if ((gameId is null ? layout : own) != value) _ = SetLayoutAsync(value, gameId); };
+            card.Click += (_, _) => { if (!layoutKnown || (gameId is null ? layout : own) != value) _ = SetLayoutAsync(value, gameId); };
             return card;
         }
         var standalone = OneCard("standalone", "layout.card.standalone.body", "layout.card.standalone.badge", gold: true);
@@ -250,24 +280,6 @@ public sealed partial class EnvironmentWindow
         catch (Exception error) when (error is LibraryProtocolException or IOException or UnauthorizedAccessException or ArgumentException or
             InvalidOperationException or System.ComponentModel.Win32Exception) { }
         await RefreshInstallModeAsync();
-    }
-
-    // ---- 出包页：一键装用谁签名 + 「更改」 ----
-
-    private Control InstallModeLine()
-    {
-        EnsureInstallMode();
-        if (devCert is null) EnsureDevCert();
-        var devcertOn = devCert is { } st && Flag(st, "active");
-        var summary = T(devcertOn ? "export.sign.devcert" : "export.sign.appleId");
-        var line = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 12 };
-        var text = Muted(T("install.mode.summary").Replace("{0}", summary), 13.5); text.VerticalAlignment = VerticalAlignment.Center;
-        AutomationId(text, "export.installMode");
-        line.Children.Add(text);
-        var change = Action("install.mode.change", () => Navigate("settings"));
-        AutomationId(change, "export.installMode.change");
-        Grid.SetColumn(change, 1); line.Children.Add(change);
-        return Card(line, 14);
     }
 
     // ---- 游戏库顶栏：更新 iPhone 上的 S2Arm ----
@@ -349,17 +361,20 @@ public sealed partial class EnvironmentWindow
     /// 控制口发起的不弹、原样失败，由调用方带 acceptDropped 再发（v0.3.0 只换壳验收：原先这条路没接确认，提示「确认继续再点一次」却永远过不去）
     /// mode / sgradeUpgrade：「S 级优化升级」页的两个按钮（SGradeUpgradePage.cs，同 Mac）——mode = device / export 这次按它装（不改设置里的装法），
     /// sgradeUpgrade = 壳已是本版也重组容器、给游戏程序补上 S 级优化（install.update_phone）
-    private async Task UpdatePhoneAsync(bool acceptStale, IReadOnlyList<string> repack, IReadOnlySet<string>? accept = null, bool ask = true, string? mode = null, bool sgradeUpgrade = false, string? device = null)
+    private async Task UpdatePhoneAsync(bool acceptStale, IReadOnlyList<string> repack, IReadOnlySet<string>? accept = null, bool ask = true, string? mode = null, bool sgradeUpgrade = false, string? device = null,
+        bool firstInstall = false)
     {
         if (connectedFolder is null || libraryId is null) return;
         // 没指定这次怎么走 = 装到手机（11-19 自签走查结构 8）：出包页「出完之后」只管出包页那一次，不当续签 / 更新的全局开关
-        if (QueuePhone(null, () => UpdatePhoneAsync(acceptStale, repack, accept, ask, mode, sgradeUpgrade, device))) return;   // 出包在跑不挡；手机上有作业在跑 → 排队
+        if (QueuePhone(null, () => UpdatePhoneAsync(acceptStale, repack, accept, ask, mode, sgradeUpgrade, device, firstInstall))) return;   // 出包在跑不挡；手机上有作业在跑 → 排队
         accept ??= new HashSet<string>();
         lastUpdate = (acceptStale, repack, accept);   // 失败页「重试」/ 挤掉确认的「仍然继续」按同样的参数再来
         lastUpdateMode = mode; lastUpdateSGrade = sgradeUpgrade;
         var front = BeginJob(JobKind.Phone); phoneUpdating = true; updateOutcome = null; updateDiagnostics = ""; updateDone = updateTotal = null;
         updateState = "running";
-        updateTrack.Begin("installUpdate", InstallTargetLabel); updateMessage = "";   // 实际装上的那台作业结束后按结果改（PhoneJobTrack.Finish）
+        updateTrack.Begin("installUpdate", InstallTargetLabel); updateMessage = "";
+        updateFirstInstall = firstInstall && mode != "export"; updateCode = null;
+        if (updateFirstInstall) updateTrack.TextKind = "installShell";   // 实际装上的那台作业结束后按结果改（PhoneJobTrack.Finish）
         updateTrack.Version = UpdateClient.CurrentVersion(InstallDir);
         Navigate("phoneupdate");   // 自己的一页：进行中 → 成功 / 失败（原先只有顶栏一个胶囊，失败原因被截断）
         var succeeded = false;
@@ -386,6 +401,7 @@ public sealed partial class EnvironmentWindow
             updateOutcome = succeeded ? "" : job.Report.Message.Length > 0 ? job.Report.Message : job.Report.State;
             updateMessage = succeeded ? "" : updateOutcome;
             updateDiagnostics = succeeded ? "" : JobDiagnostics(job);
+            updateCode = succeeded ? null : JobCode(job);
         }
         catch (Exception error) when (error is LibraryProtocolException or IOException or UnauthorizedAccessException or ArgumentException or
             InvalidOperationException or OperationCanceledException or PlatformNotSupportedException or System.ComponentModel.Win32Exception)

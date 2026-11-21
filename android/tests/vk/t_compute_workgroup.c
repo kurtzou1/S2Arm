@@ -3,6 +3,7 @@
 // Real shader_load/cpipe/dispatch with lavapipe and validation. Only reduce the
 // advertised limits, never raise them. Rejected shapes remain legal on the real
 // device, so the unfixed backend can fail our assertion without invalid Vulkan.
+// The raw Vulkan arm separately tests the validation layer against its real limit.
 #include "nvn_backend.h"
 #include "vk_device.h"
 #include "nvn_plat_vk.h"
@@ -12,12 +13,17 @@
 #include <string.h>
 
 static unsigned failures, cases, modules, pipelines;
+static int shared_vvl;
 static uint64_t signal_value;
 static nvn_gpu_err error;
 #define REQUIRE(x) do { if (!(x)) { fprintf(stderr, "fixture failure line %d: %s (%s)\n", __LINE__, #x, error.why); exit(2); } } while (0)
 #define GPU(x) REQUIRE(nvn_gpu_ok(x))
 
-const char *const *nvn_plat_vk_instance_exts(uint32_t *n) { *n = 0; return NULL; }
+const char *const *nvn_plat_vk_instance_exts(uint32_t *n) {
+    static const char *exts[] = {VK_EXT_DEBUG_UTILS_EXTENSION_NAME};
+    *n = shared_vvl ? 1 : 0;
+    return exts;
+}
 VkResult nvn_plat_vk_surface_create(VkInstance i, void *w, VkSurfaceKHR *s) {
     (void)i; (void)w; *s = VK_NULL_HANDLE; return VK_ERROR_EXTENSION_NOT_PRESENT;
 }
@@ -205,10 +211,110 @@ static void guard_edges(const char *dir) {
     free(expr);
 }
 
+struct shared_validation {
+    int creating_pipeline;
+    unsigned limit_errors, other_errors;
+};
+
+static VKAPI_ATTR VkBool32 VKAPI_CALL shared_validation_error(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+        VkDebugUtilsMessageTypeFlagsEXT type, const VkDebugUtilsMessengerCallbackDataEXT *data, void *user) {
+    (void)severity; (void)type;
+    struct shared_validation *result = user;
+    const char *id = data->pMessageIdName ? data->pMessageIdName : "(no message ID)";
+    fprintf(stderr, "%s: %s\n", id, data->pMessage);
+    if (result->creating_pipeline && !strcmp(id, "VUID-RuntimeSpirv-Workgroup-06530"))
+        result->limit_errors++;
+    else
+        result->other_errors++;
+    return VK_TRUE;   // Stop the invalid pipeline creation in the validation layer.
+}
+
+static void shared_limit_case(VkDevice device, VkPipelineLayout layout, const char *dir,
+                              const char *name, unsigned shared_bytes, struct shared_validation *validation,
+                              unsigned expected_errors) {
+    size_t bytes;
+    uint32_t *words = read_shader(dir, name, &bytes);
+    VkShaderModuleCreateInfo module_info = {
+        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = bytes, .pCode = words,
+    };
+    VkShaderModule module = VK_NULL_HANDLE;
+    REQUIRE(vkCreateShaderModule(device, &module_info, NULL, &module) == VK_SUCCESS);
+    free(words);
+
+    VkComputePipelineCreateInfo info = {
+        .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .layout = layout,
+        .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                  .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = module, .pName = "main"},
+    };
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    validation->creating_pipeline = 1;
+    const VkResult result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &info, NULL, &pipeline);
+    validation->creating_pipeline = 0;
+    printf("workgroup Vulkan shared_bytes=%u limit_errors=%u other_errors=%u result=%d\n",
+           shared_bytes, validation->limit_errors, validation->other_errors, result);
+    const int created = pipeline != VK_NULL_HANDLE;
+    if (created) vkDestroyPipeline(device, pipeline, NULL);
+    vkDestroyShaderModule(device, module, NULL);
+    REQUIRE(validation->limit_errors == expected_errors && validation->other_errors == 0);
+    REQUIRE(result == (expected_errors ? VK_ERROR_VALIDATION_FAILED_EXT : VK_SUCCESS));
+    REQUIRE(created == !expected_errors);
+}
+
+static void shared_limit_vvl(const struct s2a_vk_device *vk, const char *dir) {
+    const uint32_t limit = vk->properties.limits.maxComputeSharedMemorySize;
+    printf("workgroup Vulkan device=%s maxComputeSharedMemorySize=%u\n", vk->properties.deviceName, limit);
+    REQUIRE(limit == 32768);
+
+    PFN_vkCreateDebugUtilsMessengerEXT create = (PFN_vkCreateDebugUtilsMessengerEXT)
+        vkGetInstanceProcAddr(vk->instance, "vkCreateDebugUtilsMessengerEXT");
+    PFN_vkDestroyDebugUtilsMessengerEXT destroy = (PFN_vkDestroyDebugUtilsMessengerEXT)
+        vkGetInstanceProcAddr(vk->instance, "vkDestroyDebugUtilsMessengerEXT");
+    REQUIRE(create && destroy);
+    struct shared_validation validation = {0};
+    VkDebugUtilsMessengerCreateInfoEXT debug = {
+        .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+        .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
+        .messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT,
+        .pfnUserCallback = shared_validation_error, .pUserData = &validation,
+    };
+    VkDebugUtilsMessengerEXT messenger;
+    REQUIRE(create(vk->instance, &debug, NULL, &messenger) == VK_SUCCESS);
+
+    VkDescriptorSetLayoutBinding binding = {
+        .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+    };
+    VkDescriptorSetLayoutCreateInfo set_info = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 1, .pBindings = &binding,
+    };
+    VkDescriptorSetLayout set;
+    REQUIRE(vkCreateDescriptorSetLayout(vk->device, &set_info, NULL, &set) == VK_SUCCESS);
+    VkPipelineLayoutCreateInfo layout_info = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 1, .pSetLayouts = &set,
+    };
+    VkPipelineLayout layout;
+    REQUIRE(vkCreatePipelineLayout(vk->device, &layout_info, NULL, &layout) == VK_SUCCESS);
+    // Real driver limit. Call Vulkan directly so the backend precheck cannot intercept the oversized arm.
+    shared_limit_case(vk->device, layout, dir, "shared32k", 32768, &validation, 0);
+    shared_limit_case(vk->device, layout, dir, "shared45kb", 45056, &validation, 1);
+    vkDestroyPipelineLayout(vk->device, layout, NULL);
+    vkDestroyDescriptorSetLayout(vk->device, set, NULL);
+    REQUIRE(validation.other_errors == 0 && validation.limit_errors == 1);
+    destroy(vk->instance, messenger, NULL);
+}
+
 int main(int argc, char **argv) {
-    REQUIRE(argc == 2 || (argc == 3 && !strcmp(argv[2], "--guard-edges")));
+    shared_vvl = argc == 3 && !strcmp(argv[2], "--shared-vvl");
+    REQUIRE(argc == 2 || (argc == 3 && (shared_vvl || !strcmp(argv[2], "--guard-edges"))));
     struct s2a_vk_device device; char why[256];
     REQUIRE(!s2a_vk_device_create(&device, why, sizeof why));
+    if (shared_vvl) {
+        shared_limit_vvl(&device, argv[1]);
+        REQUIRE(!s2a_vk_device_destroy(&device, 1));
+        return 0;
+    }
     VkPhysicalDeviceLimits *l = &device.properties.limits;
     printf("device=%s real_limits=%u,%u,%u invocations=%u\n", device.properties.deviceName,
            l->maxComputeWorkGroupSize[0], l->maxComputeWorkGroupSize[1], l->maxComputeWorkGroupSize[2], l->maxComputeWorkGroupInvocations);
@@ -236,6 +342,18 @@ int main(int argc, char **argv) {
         run_case(mode == 1 ? "builtin_overrides_small" : mode == 2 ? "builtin_overrides_large" : "literal_only",
                  words, bytes, "main", mode == 2 ? NULL : "maxComputeWorkGroupInvocations", mode == 2 ? 128 : 256);
         free(words);
+    }
+    // 共享字节闸（nvn_gpu_shader_load 侧最后一道保险）：同一个 8 KB Workgroup 数组，
+    // 收窄到 4 KB 的上限下必须具名拒收且不交驱动，等上限（8 KB）放行照常编译派发。
+    {
+        uint32_t saved = l->maxComputeSharedMemorySize;
+        size_t bytes; uint32_t *w8 = read_shader(argv[1], "shared8k", &bytes);
+        l->maxComputeSharedMemorySize = 4096;
+        run_case("shared_over", w8, bytes, "main", "exceeds maxComputeSharedMemorySize", 0);
+        l->maxComputeSharedMemorySize = 8192;
+        run_case("shared_at_limit", w8, bytes, "main", NULL, 1);
+        l->maxComputeSharedMemorySize = saved;
+        free(w8);
     }
     two_entries[0] = SpvMagicNumber;
     run_case("entry_small", two_entries, sizeof two_entries, "small", NULL, 0);

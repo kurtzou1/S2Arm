@@ -57,7 +57,12 @@ struct AppleLoginSheet: View {
             HStack {
                 if working {
                     ProgressView().controlSize(.small)
-                    Text(lx(loc, "working")).font(LauncherTheme.TypeStyle.detail).foregroundStyle(.secondary)
+                    if let left = model.appleLoginWait {   // 苹果刚拒收过：作业层先等冷却再连，说清在等什么、还要多久
+                        Text(lx(loc, "wait").replacingOccurrences(of: "{0}", with: "\(left)")).font(LauncherTheme.TypeStyle.detail).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true).accessibilityIdentifier("appleLogin.wait")
+                    } else {
+                        Text(lx(loc, "working")).font(LauncherTheme.TypeStyle.detail).foregroundStyle(.secondary)
+                    }
                 }
                 Spacer()
                 if isDone {   // 登录成功页发现登错了号：就地回到输入页换一个（同设置里「换一个 Apple ID」打开的是同一个面板），不用先关掉再去设置里找

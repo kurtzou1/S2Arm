@@ -19,10 +19,10 @@
 //   - 同步句柄 NativeSyncHandle = {u32 ~计数器号, u32 模式, u64 值}，模式 1 比 64 位、否则 32 位回绕比；全 0 视为已达到。
 // 解码：VP9 / VP8 用仓库现成的 libvpx（services/vpx/build.sh，垫片 s2a_vp9.c / s2a_vp8.c，与服务层 Nvdec 同源）；AV1 用 VideoToolbox 硬件解码
 //   VP9 默认 libvpx；S2A_VP9_SYSTEM=1（仅 macOS）时整帧改走 VideoToolbox（关键帧解析 → vpcC，420v/420f → I420，失败自动回退 libvpx）；
-//   S2A_VPX 探测到本机可走系统 VP9（tools/vp9hw.sh）不链真 libvpx 时（链空垫片）默认就走系统，S2A_VPX=1 / =0 照旧显式给
+//   S2A_VPX 缺省 1（链真 libvpx）；显式设 auto 且探测到本机可走系统 VP9（tools/vp9hw.sh）时不链真 libvpx（链空垫片），那时默认走系统
 //   （火纹 82 支片头全是 AV1：2560x1440 78 支、1920x1080 4 支），VideoToolbox 不支持 AV1 的机器（M1 / M2、A16 及更早）用 dav1d 软件解码
-//   （services/dav1d/build.sh，垫片 s2a_av1.c）；S2A_AV1_SOFT=1 强制软解（验收用，缺省关）。S2A_DAV1D 缺省 auto：探测到本机有 AV1 硬解
-//   （tools/av1hw.sh：VideoToolbox 建得出 AV1 会话）就不链 dav1d（无硬解时 AV1 初始化报错，不会出假画面）；出包要落到无硬解机器上时设 S2A_DAV1D=1。H.264 走 VideoToolbox 硬件解码（每台苹果设备都有）：输入按 Annex B（起始码）
+//   （services/dav1d/build.sh，垫片 s2a_av1.c）；S2A_AV1_SOFT=1 强制软解（验收用，缺省关）。S2A_DAV1D 缺省 1（链 dav1d）；只有显式设 auto 时
+//   才探测本机（tools/av1hw.sh：VideoToolbox 建得出 AV1 会话），有 AV1 硬解就不链 dav1d（无硬解时 AV1 初始化报错，不会出假画面），只给本机自用的构建。H.264 走 VideoToolbox 硬件解码（每台苹果设备都有）：输入按 Annex B（起始码）
 //   或 4 字节长度前缀分 NAL，SPS / PPS 取自码流（变了就重建会话），样本按 AVCC 送；按解码次序出帧（带 B 帧的流显示次序会错，见到时间戳倒退报一次黄）。
 // 原生图像：main 拿帧的原生图像句柄（movie::VideoFrame::GetNativeImageHandle）经 nvnNativeImage* 建 NVN 纹理（火纹 main+0x1900d80：格式 0x38 RGBA8_SRGB）。
 //   宿主把这张图像的内存当成一个 CPU 可写的 NVN 内存池、纹理建成线性（LINEAR，行距 = 图像行距）：Metal 端是池缓冲上的零拷贝线性纹理（nvn_mtl.m tex_linear），
@@ -49,7 +49,7 @@
 // 弱链接[nvntest]：s2a_vp8_open（同上）
 // 弱链接[nvntest]：s2a_vp8_decode（同上）
 // 弱链接[nvntest]：s2a_vp8_close（同上）
-// 弱链接[nvntest,host,ios]：s2a_av1_open（services/dav1d 提供；NVN 单测不链服务层编解码库；宿主 / iOS 的 S2A_DAV1D 缺省 auto 探测到本机有 AV1 硬解时不链 dav1d（tools/av1hw.sh），那时 host / ios 链接也要放行未定义）
+// 弱链接[nvntest,host,ios]：s2a_av1_open（services/dav1d 提供；NVN 单测不链服务层编解码库；宿主 / iOS 的 S2A_DAV1D 显式设 auto 且探测到本机有 AV1 硬解时不链 dav1d（tools/av1hw.sh），那时 host / ios 链接也要放行未定义）
 // 弱链接[nvntest,host,ios]：s2a_av1_decode（同上）
 // 弱链接[nvntest,host,ios]：s2a_av1_close（同上）
 void *s2a_vp9_open(int threads) __attribute__((weak));

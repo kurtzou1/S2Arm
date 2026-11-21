@@ -473,6 +473,13 @@ def phone_lock(c):
 CONTAINER_BUNDLE = "io.s2arm.games"   # 组装时的占位包名：Mac 装机换成团队专属的 io.s2arm.games.<团队>（install.container_bundle_id）；Windows 由 plumesign 按账号定
 
 
+def standalone_bundle(gid):
+    """独立 App 组装时写进包里的包名：io.s2arm.games.app.<程序号 16 位小写>，每款一个。启动器签名装机照旧改成按团队 / 描述文件的（install.app_bundle）；
+    不由启动器签的（导出给 AltStore / SideStore / 别的签名工具、Apple ID 推送后留在游戏文件夹的那份）就带着它——原先各款都写占位的
+    io.s2arm.games，侧载工具按同一个包名装，后装的一款顶掉前一款（也顶掉通用 S2Arm）。「app」不会是团队号（团队号是 10 位大写字母数字）"""
+    return f"{CONTAINER_BUNDLE}.app.{gid.lower()}"
+
+
 def finish_kit_state(c, gid):
     """出 iPhone 包收尾：iPhone 设置页的 S 级状态底料写进 kit（sgrade_state.json：版本对照 / 满屏来源 / 出包时选不打入；手机上没有补丁库，
     开关与自动关由手机本机算），再把常驻配方重存一次——它在 deliver 存配方之后才写，不重存的话缓存清掉、按配方现建的 kit 缺它，
@@ -597,7 +604,9 @@ def to_img(c, gid, root, pack_dir):
     """资源包就地转单一 IMG 形态（v0.3.0，pack/img.py convert）：游戏原始资源进 game.img（之后字节不变），着色器库 / 覆盖层照旧按文件。
     多程序合集的 programs/ 一并进 IMG（#1545）。转失败 = 出包失败（不交一半）"""
     c.begin("把游戏资源写成单一 IMG（game.img）")
-    log = c.logs / "img.log"
+    # 按作业分份（#1880）：原先所有游戏、所有作业共用一份 logs/img.log 追加写，失败摘要取它末尾 16000 字节、归因也读它，
+    #   前一款写 IMG 的输出（别的游戏的路径、它当时的盘满）串进这一款的失败里。<作业号>-img.log 归这次作业：诊断包、错误摘要都按作业号收
+    log = c.logs / (c.task + "-img.log")
     # 边写边删解包出来的 RomFS（#746）：出包收尾本来就清掉整个出包工作目录（prune_unless_follow_up），提前到写 IMG 时，峰值少一整份游戏大小。
     #   同一款接着还要出别的平台（followUp）要留着解包，不删
     consume = c.r.get("followUp") is not True
@@ -780,7 +789,7 @@ def assemble(c, gid, others=(), *, failed=(), root=None, dest=None, agreed=None,
     from core import trace
     trace(c, f"组容器开始：{len(roots)} 款（{' '.join(sorted(roots))}）")
     try:
-        c.run([os.sys.executable, "-X", "utf8", "-B", c.engine / "pack/ship_ext.py", "container", "--shell", shell, "--out", app, "--bundle-id", CONTAINER_BUNDLE,
+        c.run([os.sys.executable, "-X", "utf8", "-B", c.engine / "pack/ship_ext.py", "container", "--shell", shell, "--out", app, "--bundle-id", standalone_bundle(gid) if standalone else CONTAINER_BUNDLE,
                "--icon", icon, "--sign", "none", "--custom", out / "custom.json", "--host-abi", str(host_update.HOST_ABI),
                "--version", release_version(c.engine), "--display-version", display_version(c.engine),
                *[x for r in roots.values() for x in ("--game", r)], *banner_args, *(["--standalone"] if standalone else [])], log, c.env())

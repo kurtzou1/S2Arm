@@ -15,7 +15,7 @@
 //   判据按事件 / 计数（⑤ ⑫ ⑬ ⑮ 的时限是产品承诺，照旧量墙钟）：生产只读计数 g_par_wait_enter（进入「等别人在编的同键」的次数）、
 //     g_par_slow_fast（编完时慢编译定时器还没到的次数）；该等到的一律等到为止（兜底 30 秒），不该发生的事用短窗负对照（负载高时只会漏检，不会假红）
 //   重译抢跑（v0.4.1，par_compute_wait 的 t_par_race；门槛改 100 ms、有界等待 300 ms、抢跑在途上限 2 秒）：期望按「谁先好用谁、做不了回原上限、都没好到上限才跳过」手写：
-//   ⑫ 原编译不返回、抢跑 50 ms 后给出 Y → 约 150 ms 返回 Y（同一对象）、gave_up 0；超过原上限 300 ms 也没跳过的反面看 ⑬
+//   ⑫ 原编译不返回、原上限 30 秒、抢跑 50 ms 后给出 Y → 约 150 ms（判 < 10 秒）返回 Y（同一对象）、gave_up 0；到原上限才跳过的反面看 ⑬
 //   ⑬ 原编译不返回、抢跑做不了（nil）→ 回原上限：约 300 ms 跳过（gave_up 1）
 //   ⑭ 原编译在门槛前就好（本例门槛 / 上限放到 30 秒）→ 抢跑不起（起抢跑计数不变），拿到原管线
 //   ⑮ 原编译不返回、抢跑也卡 3 秒 → 抢跑在途上限 600 ms 到了跳过（gave_up 1，用时 < 1 秒）
@@ -148,8 +148,10 @@ int main(void) { @autoreleasepool {
     ParRace rY = ^id<MTLComputePipelineState>{ usleep(50000); return Y; }, rNil = ^id<MTLComputePipelineState>{ return nil; };
     uint64_t won0 = atomic_load(&g_par_race_won), n0 = atomic_load(&g_par_race_n);
     gu = 7; t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); t_par_race = rY;
-    id r12 = par_compute_wait(fn, @"t-r1", &e, 300 * NSEC_PER_MSEC, &gu); double ms12 = ms_since(t0);
-    VERIFY(r12 == Y && gu == 0 && ms12 > 140 && ms12 < 290 && atomic_load(&g_par_race_won) == won0 + 1, "⑫ 原编译卡住、抢跑 50 ms 给出：%.0f ms 返回%s、gave_up %d、抢跑赢 +%llu", ms12, r12 == Y ? "抢跑那份" : "别的", gu, (unsigned long long)(atomic_load(&g_par_race_won) - won0));
+    // 原先原上限 300 ms、判 < 290 ms：负载 50 下抢跑线程醒晚，360 ms 才拿到抢跑那份（语义全对）就假红（11-21 门禁）。
+    //   原上限改 30 秒（抢跑仍在 100 ms 门槛起，与上限无关）：好实现约 150 ms 拿到抢跑那份；坏实现「等原上限才收抢跑结果」要 30 秒 → 判 < 10 秒，负载拖不红、退化照抓
+    id r12 = par_compute_wait(fn, @"t-r1", &e, NS30, &gu); double ms12 = ms_since(t0);
+    VERIFY(r12 == Y && gu == 0 && ms12 > 140 && ms12 < 10000 && atomic_load(&g_par_race_won) == won0 + 1, "⑫ 原编译卡住、抢跑 50 ms 给出（原上限 30 秒）：%.0f ms 返回%s（期望约 150 ms、< 10 秒）、gave_up %d、抢跑赢 +%llu", ms12, r12 == Y ? "抢跑那份" : "别的", gu, (unsigned long long)(atomic_load(&g_par_race_won) - won0));
     gu = 0; t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); t_par_race = rNil;
     id r13 = par_compute_wait(fn, @"t-r2", &e, 300 * NSEC_PER_MSEC, &gu); double ms13 = ms_since(t0);
     VERIFY(!r13 && gu == 1 && ms13 > 290 && ms13 < 600, "⑬ 抢跑做不了：%.0f ms 跳过（gave_up %d）", ms13, gu);

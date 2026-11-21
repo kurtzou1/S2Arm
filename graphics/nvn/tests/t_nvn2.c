@@ -567,7 +567,12 @@ int main(void) {
         uint32_t (*pw)(uint16_t *, const void *) = (uint32_t (*)(uint16_t *, const void *))nvn2_vi_entry("_ZN2nn2vi25QueryDisplayHdrPaperWhiteEPtPKNS0_7DisplayE");
         CHECK(pw);
         // ① 纸白 100（§1.4 判读③：v3 定稿 PQ 相对模型锚 EDR=nits/100——203 是 BT.2408 参考白、游戏缺省声明值，m0b 实证被 told peak 覆盖；游戏侧后果未实测 T15 专项）
-        uint16_t pwv = 9; CHECK(pw(&pwv, dp) == 0 && pwv == 100);
+        //   HDR 关（此处 S2A_HDR 未设 = 缺省关）答 203，与 0.5.8 一样；auto / on 答 100
+        uint16_t pwv = 9; CHECK(pw(&pwv, dp) == 0 && pwv == 203);
+        setenv("S2A_HDR", "auto", 1); pwv = 9; CHECK(pw(&pwv, dp) == 0 && pwv == 100);
+        setenv("S2A_HDR", "on", 1); pwv = 9; CHECK(pw(&pwv, dp) == 0 && pwv == 100);
+        setenv("S2A_HDR", "off", 1); pwv = 9; CHECK(pw(&pwv, dp) == 0 && pwv == 203);
+        unsetenv("S2A_HDR");
         // ② 假 HDR 屏注入（U2720QM 开态形状）+ auto 进层：快照发布 + tick 持稳（合成时钟：V4 末次 raw 变化 1500 起，100000 早过 500ms）→ can_settled ∧ s1_ready ∧ 层已排空 → 即进层
         hdr_snapshot pub5 = { .potential_edr = 4.555, .current_headroom = 0.5, .s1_ready = 1, .paper_white = 100 };
         unsetenv("S2A_HDR_PEAK");

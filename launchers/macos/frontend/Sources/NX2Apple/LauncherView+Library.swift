@@ -70,7 +70,7 @@ extension LauncherView {
                 Image(systemName: "clock.badge.exclamationmark").foregroundStyle(LauncherPalette.building)
                 Text((days == 0 ? txt("library.banner.expired") : txt("library.banner.renew")).replacingOccurrences(of: "{0}", with: game.name).replacingOccurrences(of: "{1}", with: "\(days)")).font(.manrope(13.5, .semibold))
                 Spacer(minLength: 12)
-                Button(txt("library.hero.renew")) { model.targetInstalledDevice(of: game); installFor = game.id }.controllerButtonStyle(LauncherSecondaryButtonStyle())
+                Button(txt("library.hero.renew")) { openRenew(game) }.controllerButtonStyle(LauncherSecondaryButtonStyle())
                 Button { model.freeSignReminder = false } label: { Image(systemName: "xmark").font(.system(size: 11, weight: .bold)).frame(width: 22, height: 22).contentShape(Rectangle()) }
                     .controllerButtonStyle(.plain).foregroundStyle(.secondary)
                     .launcherTooltip(txt("library.banner.dismiss"), placement: .above)
@@ -90,6 +90,9 @@ extension LauncherView {
             Divider().opacity(0.3).padding(.vertical, 4)
             if model.finishedExports[game.id] != nil, !(model.mainBusy && model.session?.gameID == game.id) {   // 这款上次出包 / 装机 / 导出的结果页（原首页圆钮）
                 moreRow(txt("library.hero.results"), "checkmark.seal") { model.viewingResult = model.finishedExports[game.id] }
+            }
+            if game.playable || game.iphoneReady {   // 出包页（其它平台 / 重新出包）：首页那颗胶囊收进这里
+                moreRow(loc.t("s2arm.export.action"), "shippingbox") { model.exportFor = game.id }
             }
             if game.appleTvReady {   // #1429：出好 Apple TV 包的款，游戏库里也有「装到 Apple TV」（原先只在出包页 / 出包结果页，离开就找不到）
                 moreRow(BackendText.launcherText("export.installAppleTV", language: loc.lang.sharedCode), "appletv") { model.installAppleTV(game) }
@@ -173,28 +176,6 @@ extension LauncherView {
         return (parts.joined(separator: " · "), expired ? LauncherPalette.danger : LauncherPalette.ready)
     }
 
-    /// 「建议更新」（0.6.0 通用壳开关后面）：对不上几样写几行原因，末行说点了会怎样，旁边「更新这款」（只做这一款，就是推到 iPhone）。
-    ///   不点照旧能用；开关关着 updateReasons 恒空，这里什么都不出
-    @ViewBuilder func updateHintLines(_ game: GameSummary) -> some View {
-        let reasons = model.updateReasons(game).compactMap(S2ArmLauncherModel.updateReasonKey)
-        if !reasons.isEmpty {
-            let lang = loc.lang.sharedCode
-            VStack(alignment: .leading, spacing: 3) {
-                ForEach(reasons, id: \.self) { key in
-                    Label(BackendText.launcherText(key, language: lang), systemImage: "arrow.triangle.2.circlepath")
-                        .font(.manrope(12, .medium)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
-                }
-                HStack(spacing: 10) {
-                    Text(BackendText.launcherText("update.hint.tail", language: lang)).font(.manrope(11.5)).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Button(BackendText.launcherText("update.hint.button", language: lang)) { model.updateSuggested(game) }
-                        .controllerButtonStyle(LauncherSecondaryButtonStyle()).accessibilityIdentifier("update.hint.button." + game.id)
-                }
-            }
-            .accessibilityIdentifier("update.hint." + game.id)
-        }
-    }
-
     func status(_ game: GameSummary, prominent: Bool = false) -> some View {
         let (text, color) = statusLine(game)
         return VStack(alignment: .leading, spacing: 4) {
@@ -221,7 +202,6 @@ extension LauncherView {
             }
             .buttonStyle(.plain).accessibilityIdentifier("sgrade.incomplete." + game.id)
         }
-        updateHintLines(game)
         }
         .accessibilityElement(children: .contain)
     }
@@ -330,5 +310,79 @@ private struct MoreMenuRowLabel: View {
         .contentShape(Rectangle())
         .foregroundStyle(danger ? LauncherPalette.danger : Color.primary)
         .onHover { hovered = $0 }
+    }
+}
+
+/// 详情区「更新」按钮（0.6.4）：没做过 iPhone 版不出；做过、没有原因 → 灰色不可点「无需更新」；有原因 → 主色「更新这款」。
+///   点了不二次确认、按钮当场变进度（不只标题栏）；同款正在出包 / 推送 / 在玩时置灰（作业层同一款不并行做）
+struct HeroUpdateButton: View {
+    @ObservedObject var model: S2ArmLauncherModel
+    @EnvironmentObject var loc: Localizer
+    let game: GameSummary
+    private func txt(_ id: String) -> String { BackendText.launcherText(id, language: loc.lang.sharedCode) }
+
+    @ViewBuilder var body: some View {
+        let state = model.updateButton(game)
+        let run = model.gameUpdate(game)
+        if state != .hidden {
+            if let run, run.running {
+                let p = run.progress.overall ?? run.progress.fraction
+                Button {} label: {
+                    Label(txt("update.hint.running") + (p.map { " \(Int(($0 * 100).rounded(.down)))%" } ?? ""), systemImage: "arrow.triangle.2.circlepath")
+                }
+                .controllerButtonStyle(ConsolePillButtonStyle()).disabled(true)
+                .overlay(alignment: .bottom) { SGradeUpgradeBar(progress: p).padding(.horizontal, 16).padding(.bottom, 6) }
+                .controllerID("hero.update").accessibilityIdentifier("hero.update.running")
+            } else if case .update = state {
+                Button { model.updateGame(game) } label: { Label(txt("update.hint.button"), systemImage: "arrow.triangle.2.circlepath") }
+                    .controllerButtonStyle(ConsolePlayButtonStyle()).disabled(model.mainHolds(game.id) || model.phoneHolds(game.id))
+                    .controllerID("hero.update").accessibilityIdentifier("hero.update")
+                    .launcherTooltip(txt("update.hint.tail"), placement: .above)
+            } else {
+                Button {} label: { Label(txt("update.hint.upToDate"), systemImage: "checkmark.circle") }
+                    .controllerButtonStyle(ConsolePillButtonStyle()).disabled(true)
+                    .controllerID("hero.update").accessibilityIdentifier("hero.update.upToDate")
+            }
+        }
+    }
+
+}
+
+/// 按钮下的几行：橙色 = 为什么建议更新（对不上几样写几行）；黄色 = 刚做完的这次没做齐的几项（作业层 update_incomplete 原句）；红色 = 没做成的原因
+struct HeroUpdateLines: View {
+    @ObservedObject var model: S2ArmLauncherModel
+    @EnvironmentObject var loc: Localizer
+    let game: GameSummary
+    private func txt(_ id: String) -> String { BackendText.launcherText(id, language: loc.lang.sharedCode) }
+
+    @ViewBuilder var body: some View {
+        let reasons = model.updateReasons(game).compactMap(S2ArmLauncherModel.updateReasonKey).reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }   // libGen / shaderMiss 同着色器那句：只写一次
+        let run = model.gameUpdate(game)
+        let incomplete = run.map { $0.running ? [] : $0.incomplete } ?? []
+        let failure = run.flatMap { $0.running ? nil : $0.failure }
+        // 更新只改电脑上这份：这款装到过设备的，做完说一句手机上那份要再导一次（不然玩家以为手机上已经是新的）
+        let sendAgain = run.map { !$0.running && $0.failure == nil } == true && game.iphoneInstalledAt != nil
+        if game.iphoneReady, !reasons.isEmpty || !incomplete.isEmpty || failure != nil || sendAgain {
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(reasons, id: \.self) { key in
+                    Label(txt(key), systemImage: "arrow.triangle.2.circlepath")
+                        .font(.manrope(12, .medium)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                }
+                ForEach(incomplete, id: \.self) { line in
+                    Label(loc.backend(line), systemImage: "exclamationmark.triangle.fill")
+                        .font(.manrope(12, .medium)).foregroundStyle(.yellow).fixedSize(horizontal: false, vertical: true)
+                }
+                if sendAgain {
+                    Label(txt("update.hint.sendAgain"), systemImage: "iphone.and.arrow.forward")
+                        .font(.manrope(12, .medium)).foregroundStyle(.white.opacity(0.85)).fixedSize(horizontal: false, vertical: true)
+                }
+                if let failure {
+                    Text(txt("update.hint.failed").replacingOccurrences(of: "{0}", with: loc.backend(failure)))
+                        .font(.manrope(12)).foregroundStyle(LauncherPalette.danger).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .shadow(color: .black.opacity(0.45), radius: 6, y: 1)
+            .accessibilityElement(children: .contain).accessibilityIdentifier("update.lines." + game.id)
+        }
     }
 }

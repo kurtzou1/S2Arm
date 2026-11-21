@@ -454,15 +454,18 @@ class WinInstall(unittest.TestCase):
                 self.assertIsNone(ph.backup(self.gid))
 
     def test_device_choice_errors(self):
-        """装到哪台（11-13 维护者：插着一台手机就别说识别不了）。期望手写：设备服务里只有一台 → 装它（没带设备号、或带的那台这次没列出都一样）；
+        """装到哪台（11-13 维护者：插着一台手机就别说识别不了）。期望手写：设备服务里只有一台、没带设备号 → 装它；带了号而那台这次没列出 → 不换装到连着的另一台，
+        报 device_not_connected（11-21：原先「只连着一台就装它」把游戏装进了没打算装的 iPad）；
         选的那台列着 → 装它（同网也算，不换插线的另一台）；多台对不上 → 没带号报 device_required、带了号报 device_not_connected 并说连着几台；
         一台都没有 → device_not_connected；设备服务连不上 → device_pairing_required"""
         import install
         with patch.object(install, "LINK_RETRY_WAIT", 0):
-            for devs, want in (([("U1", "USB", 3)], None), ([("U2", "USB", 3)], "U1"), ([("U2", "Network", 3)], "U1")):
-                with self.subTest(devs=devs, want=want):
-                    w = FakeW(devs); self.go(w, device=want)
-                    self.assertEqual(w.calls[0].udid, devs[0][0])
+            w = FakeW([("U1", "USB", 3)]); self.go(w, device=None)
+            self.assertEqual(w.calls[0].udid, "U1")
+            for kind in ("USB", "Network"):
+                with self.subTest(absent=kind), self.assertRaises(core.Failure) as e:
+                    self.go(FakeW([("U2", kind, 3)]), device="U1")
+                self.assertEqual(e.exception.code, "device_not_connected"); self.assertIn("连着 1 台", str(e.exception))
             with self.assertRaises(core.Failure) as e:
                 self.go(FakeW([("U1", "USB", 3), ("U2", "USB", 4)]), device=None)
             self.assertEqual(e.exception.code, "device_required")

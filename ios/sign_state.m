@@ -63,6 +63,23 @@ static int (*g_lc_cert)(NSData **, NSString **) = lc_cert_real;
 void s2a_lc_cert_test(int (*f)(NSData **, NSString **)) { g_lc_cert = f ? f : lc_cert_real; }   // 单测换掉「读 LiveContainer 的共享偏好」
 #endif
 int s2a_lc_cert(NSData **p12, NSString **pw) { return g_lc_cert(p12, pw); }
+// LiveContainer 存的那张起局重签用不用得上（同 ios/program_resign.m lc_identity）：1 = 在里面、解得开；0 = 不在里面；-1 = 在里面、它没导入；
+//   -2 = 导入了、S2Arm 解不开（#502 / D-D8F4 的 -26275：起局改用导入进 S2Arm 的那张，游戏库就按那张判，不再当「有能用的证书」）
+#include <Security/Security.h>
+int s2a_selfsign_identity(const void *p12, size_t n, const char *password, SecKeyRef *key, CFArrayRef *chain);
+static int lc_usable(void) {
+    static NSData *seen; static int ok;   // 只在 p12 换了时重解（游戏库每款判一次，解一次几十毫秒）
+    NSData *p12 = nil; NSString *pw = nil; int r = s2a_lc_cert(&p12, &pw);
+    if (r <= 0) return r;
+    if (![p12 isEqualToData:seen]) {
+        SecKeyRef key = NULL; CFArrayRef chain = NULL;
+        ok = !s2a_selfsign_identity(p12.bytes, p12.length, pw.UTF8String, &key, &chain) && chain && CFArrayGetCount(chain) > 0;
+        if (key) CFRelease(key);
+        if (chain) CFRelease(chain);
+        seen = p12;
+    }
+    return ok ? 1 : -2;
+}
 
 static BOOL usable(NSDictionary *r, app_t app) { return [r[@"team"] isEqualToString:app.team] && (!app.certs.count || [app.certs containsObject:r[@"sha"]]); }
 
@@ -115,7 +132,7 @@ int s2a_sign_state_at(const char *home, const char *catalogue, int rejected) {
         NSString *ssha = str(signer[@"cert_sha1"]).lowercaseString, *steam = str(signer[@"team"]) ?: str(cat[@"team"]);
         BOOL fine = steam && [steam isEqualToString:app.team] && (!ssha || !app.certs.count || [app.certs containsObject:ssha]);
         if (fine && !rejected) return S2A_SIGN_OK;
-        int p = s2a_lc_cert(NULL, NULL) > 0 ? 0 : s2a_cert_pick(home, NULL, 0, NULL, 0);   // LiveContainer 里：起局用它的证书重签
+        int p = lc_usable() > 0 ? 0 : s2a_cert_pick(home, NULL, 0, NULL, 0);   // LiveContainer 里：起局用它的证书重签；它那张解不开就同起局改看导入进 S2Arm 的
         if (p == 0) return rejected ? S2A_SIGN_COMPUTER : S2A_SIGN_OK;   // 起局时用能用的那张重签
         if (p == 1) return rejected && fine ? S2A_SIGN_OLD_FORMAT : S2A_SIGN_NO_CERT;
         return p == 2 ? S2A_SIGN_OTHER_TEAM : S2A_SIGN_REPLACED;

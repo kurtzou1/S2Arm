@@ -349,6 +349,10 @@ uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs) {
 #endif
                 return r;
             }
+            if (g->kind == G_AREGION && g->arg == 1) {   // 分配器初始化闸（改写器 sdk_sainit，StandardAllocator 初始化入口；进门前 x0 已清零，旧宿主走下面那支什么都不做）
+                static void (*h)(uint64_t *); if (!h) h = (void (*)(uint64_t *))dlsym(RTLD_DEFAULT, "s2a_sainit_gate");   // svc_mem.c；按名取，单测只链 gate.c
+                if (h) h(regs);
+                return regs[0]; }
             if (g->kind == G_AREGION) {   // SDK VammManager::AllocateAddressRegion 返回处（改写器 SDK 地址区安全阀）：失败当场报红，返回值原样还给游戏
                 if ((uint32_t)regs[0]) { static _Atomic uint64_t n; uint64_t k = atomic_fetch_add(&n, 1) + 1;
                     if (!(k & (k - 1))) { module_t *m = module_of((void *)g->orig);

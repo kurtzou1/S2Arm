@@ -1,0 +1,8 @@
+{
+  "source": "release r3 cold-on",
+  "log_source": "game PID logcat direct device caps",
+  "captured_utc": "2026-11-21T01:33:53.252000+00:00",
+  "fragments": 3,
+  "scope": "app direct Vulkan device record",
+  "redactions": false
+}

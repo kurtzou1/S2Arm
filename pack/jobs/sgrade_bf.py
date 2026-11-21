@@ -134,15 +134,24 @@ def _rebuild_win(c, gid, src_root, work):
 
 # ---- Mac ----
 
+def mac_due(c, gid, manifest):
+    """Mac 运行版本的直连库要不要重出（「建议更新」里 Mac 那份的原因都要能被它消掉，同 rechain_ios 对 iPhone 那份）：
+    _bf 代数旧 / 库内容代数（host_update.LIB_GEN）旧 / 现场翻译过库里没有的着色器且库是旧版启动器出的（shaderMiss）"""
+    import host_update
+    return stale(manifest.get("bfGen")) or host_update.lib_stale(manifest.get("libGen")) \
+        or (host_update.built_older(c, manifest.get("builtBy")) and host_update.shader_misses(c, gid)["mac"] > 0)
+
+
 def upgrade_mac(c, gid, runtime, hold=None):
-    """Mac 运行版本补 _bf：整份重出直连库换进运行版本（运行版本自带全部输入，不用原件）→ True = 换了。代数已是本引擎的 / 这次放弃 → False。
+    """Mac 运行版本补 _bf / 库内容代数：整份重出直连库换进运行版本（运行版本自带全部输入，不用原件）→ True = 换了。不用重出（mac_due）/ 这次放弃 → False。
+    11-21：原先只看、只写 bfGen，库内容代数（libGen）旧的 Mac 那份重出不了、也不记，「建议更新」点了永远消不掉；现在三项（mac_due）都认，换完记本版 libGen / builtBy
     hold（同 rewrite_refresh.refresh_mac）：重出只读运行版本、在锁外做；换库与改清单前进 hold()，它 yield False（玩家正在开始游戏）就整款放弃、
       不记代数，下次再补。不给 hold = 调用方已持锁"""
     import tempfile
     from core import read
     runtime = Path(runtime)
     manifest = read(runtime / "manifest.json", {})
-    if not isinstance(manifest.get("files"), dict) or not stale(manifest.get("bfGen")):
+    if not isinstance(manifest.get("files"), dict) or not mac_due(c, gid, manifest):
         return False
     if not (runtime / "shaders/direct/keys.tsv").is_file() or not _has_romfs(runtime):
         return False   # 不是直连包 / 没有 RomFS：没有可补的
@@ -185,7 +194,8 @@ def _upgrade_mac(c, gid, runtime, hold, tmp):
         files = {k: v for k, v in manifest["files"].items() if not k.startswith("shaders/direct/")}
         for rel, size in _lib_files(runtime):
             files[rel] = [size, ""]   # 同 build.snapshot：只记大小
-        atomic(runtime / "manifest.json", dict(manifest, files=files, bfGen=BF_GEN))
+        import host_update
+        atomic(runtime / "manifest.json", dict(manifest, files=files, bfGen=BF_GEN, libGen=host_update.LIB_GEN, builtBy=host_update.built_by(c)))
     shutil.rmtree(old, ignore_errors=True)
     return True
 
@@ -351,15 +361,10 @@ def rechain_ios(c, gid):
     # 库内容代数（host_update.LIB_GEN）旧了也重编：链号没变、库里却缺了设备要用的内容（0.5.x 出的库不带客体输入，同链号）
     # 手机上现场翻译过包里没有的着色器、库又是旧版启动器出的（「建议更新」原因 shaderMiss）也重编：同链号同代数，本版出包能多覆盖；
     #   原先只认链号 / 代数，玩家点「更新这款」推完提示照旧（#1756）。重编后记本版 builtBy，这条原因随之消掉
-    if not want:
-        return "skip"
-    if side.get("dmshChain", host_update.LEGACY_CHAIN) == want["dmshChain"] and not host_update.lib_stale(side.get("libGen")) \
-            and not (host_update.shader_misses(c, gid)["ios"] > 0 and host_update.built_older(c, side.get("builtBy"))):
-        return "skip"
+    if not host_update.ios_lib_reasons(c, gid, side, want):
+        return "skip"   # 「建议更新」不会为这款的 iPhone 着色器库标原因（链号 / 代数都对、没漏、或不是直连包）：同一个判据，判定和更新不各算各的
     pack = Path(layout.ios_pack(c, gid))
     direct = pack / "shaders/direct"
-    if lib_dir(direct) is None:
-        return "skip"   # 不是直连包
     with tempfile.TemporaryDirectory(dir=_scratch(c, gid)) as tmp:
         src, where = ios_inputs(c, gid, Path(tmp))
         if src is None:

@@ -72,18 +72,20 @@ class RewriteRefreshTests(unittest.TestCase):
             return root, list(mods), [root / "cpatch.tsv", root / "cheat-src.a.txt"]
         return run
 
-    def run_refresh(self, games, hits, fail=(), sgrade=None, key="x18_spdyn"):
+    def run_refresh(self, games, hits, fail=(), sgrade=None, key="x18_spdyn", big=False):
         """sgrade = None：这些款出包时取消了 S 级优化（只按改写器核，原有用例的口径）；给记号串 = 要补 S 级优化、这次的补丁记号"""
         binary = fake_rewriter(self.tmp, hits, key)
         real = rr.rewrite_modules   # 真的那份：桩里只在「这款要失败」时拦，其余照真函数跑假改写器
         cur = {}
         def exefs_of(c, game, work):
             cur["g"] = game["id"]; return self.exefs
-        def rewrite(binary_, env, exefs, out, widen):
+        def rewrite(binary_, env, exefs, out, widen, **kw):
             if cur.get("g") in fail:
                 raise Failure("fixture rewriter crashed")
-            return real(binary_, env, exefs, out, widen)
+            return real(binary_, env, exefs, out, widen, **kw)
         kits = {g: self.kit(g) for g in games}
+        for k in kits.values():
+            (k / "addr_need.tsv").write_text(f"版本\t2\n程序号\t0100a\n构建号\t{'0' * 32}\n别名区GB\t{57 if big else 0}\n")
         with patch.object(rr, "rewriter_id", return_value="rid-new"), patch.object(rr, "rewriter_bin", return_value=binary), \
              patch.object(rr, "rewrite_env", return_value=dict(os.environ)), patch.object(rr, "original_exefs", side_effect=exefs_of), \
              patch.object(rr.layout, "ios_kit", side_effect=lambda c, g: kits[g]), \
@@ -112,6 +114,35 @@ class RewriteRefreshTests(unittest.TestCase):
         self.assertEqual(updated, ["0100A"])
         self.assertEqual((kits["0100A"] / "sdk.patched.bin").read_bytes(), b"new-sdk")
         self.assertEqual((kits["0100A"] / "main.patched.bin").read_bytes(), b"old-main")
+
+    def test_sainit_counts_only_with_static_big_claim(self):
+        # 11-20 分配器初始化闸：几乎每款 sdk 都挂得上（统计 sdk_sainit > 0），只有地址表认出开局大区（别名区GB ≠ 0）的款算受影响：
+        #   换 sdk 产物并换上重出的地址表；没有大区的款 sdk 一个字节不动、地址表不动
+        with patch.object(rr, "addr_table", return_value="新表\n") as at:
+            updated, kits = self.run_refresh(["0100A"], hits=["sdk"], key="sdk_sainit", big=True)
+        self.assertEqual(updated, ["0100A"]); k = kits["0100A"]
+        self.assertEqual(((k / "sdk.patched.bin").read_bytes(), (k / "main.patched.bin").read_bytes()), (b"new-sdk", b"old-main"))
+        self.assertEqual((k / "addr_need.tsv").read_text(), "新表\n"); self.assertEqual(at.call_count, 1)
+        self.info.clear()
+        with patch.object(rr, "addr_table", side_effect=AssertionError("没有大区不重出地址表")):
+            updated, kits = self.run_refresh(["0100A"], hits=["sdk"], key="sdk_sainit", big=False)
+        self.assertEqual(updated, []); self.assertEqual((kits["0100A"] / "sdk.patched.bin").read_bytes(), b"old-sdk")
+
+    def test_static_big_and_addr_table(self):
+        # 地址表：别名区GB 非 0（含负值 = 上限不定）算有大区；重出时身份取旧表，与旧表相同 / 读不了 main → None（沿用旧表）
+        d = self.tmp / "t"; d.mkdir()
+        for v, want in (("57", True), ("-57", True), ("0", False)):
+            (d / "addr_need.tsv").write_text(f"程序号\t0100a\n构建号\tb\n别名区GB\t{v}\n"); self.assertEqual(rr.static_big(d), want, v)
+        self.assertFalse(rr.static_big(self.tmp / "none"))
+        eng = self.tmp / "eng"; (eng / "tools").mkdir(parents=True)
+        (eng / "tools/addr_need.py").write_text("def collect(p, b, main=None):\n    import pathlib\n    if pathlib.Path(main).read_bytes() == b'bad': raise ValueError('坏')\n"
+                                               "    return '程序号\\t%s\\n构建号\\t%s\\n别名区GB\\t57\\n大区来源\\t分配器初始化\\n' % (p, b)\n")
+        c = types.SimpleNamespace(engine=eng, emit=lambda *a, **k: None)
+        (d / "addr_need.tsv").write_text("程序号\t0100a\n构建号\tb\n别名区GB\t57\n")
+        self.assertEqual(rr.addr_table(c, d, self.exefs), "程序号\t0100a\n构建号\tb\n别名区GB\t57\n大区来源\t分配器初始化\n")
+        (d / "addr_need.tsv").write_text(rr.addr_table(c, d, self.exefs)); self.assertIsNone(rr.addr_table(c, d, self.exefs), "与旧表相同")
+        (self.exefs / "main").write_bytes(b"bad"); self.assertIsNone(rr.addr_table(c, d, self.exefs), "读不了 main")
+        rr.write_table(d / "addr_need.tsv", "甲\n"); self.assertEqual(((d / "addr_need.tsv").read_bytes(), sorted(p.name for p in d.iterdir())), ("甲\n".encode(), ["addr_need.tsv"]))
 
     def test_sgrade_rewrite_needs_no_symlink_privilege(self):
         # #1153：Windows 没开开发者模式建目录软链 WinError 1314，每款都「补丁打入失败」；改写根里的 exefs 要是真目录、内容同原件
@@ -184,6 +215,23 @@ class RewriteRefreshTests(unittest.TestCase):
             self.assertEqual(m["rewriterId"], "rid-new")
             with patch.object(rr, "rewrite_modules", side_effect=AssertionError("同一改写器不该再核")):
                 self.assertFalse(rr.refresh_mac(self.c, "0100A", rt))
+
+    def test_mac_sainit_swaps_table_and_records_it(self):
+        import json
+        rt = self.tmp / "mac"; (rt / "exefs").mkdir(parents=True)
+        for m in ("main", "sdk"):
+            (rt / "exefs" / m).write_bytes(b"x"); (rt / f"{m}.patched.bin").write_bytes(b"old-" + m.encode())
+        (rt / "addr_need.tsv").write_text("别名区GB\t57\n")
+        (rt / "manifest.json").write_text(json.dumps({"schema": 1, "files": {"addr_need.tsv": [14, ""]}, "gameId": "0100A"}))
+        binary = fake_rewriter(self.tmp, ["sdk"], key="sdk_sainit")
+        with patch.object(rr, "rewriter_id", return_value="rid-new"), patch.object(rr, "rewriter_bin", return_value=binary), \
+             patch.object(rr, "rewrite_env", return_value=dict(os.environ)), patch.object(rr, "sgrade_off", return_value=True), \
+             patch.object(rr, "addr_table", return_value="别名区GB\t57\n大区来源\t分配器初始化\n"):
+            self.assertTrue(rr.refresh_mac(self.c, "0100A", rt))
+        m = json.loads((rt / "manifest.json").read_text())
+        self.assertEqual((rt / "sdk.patched.bin").read_bytes(), b"new-sdk")
+        self.assertEqual(m["files"]["addr_need.tsv"], [(rt / "addr_need.tsv").stat().st_size, ""], "清单跟着记新表大小")
+        self.assertIn("大区来源", (rt / "addr_need.tsv").read_text())
 
     def test_mac_hold_busy_leaves_runtime_untouched(self):
         # 诊断 D-R8NG：后台补 S 级在锁外改写，换进前 hold() 拿不到锁（玩家点了开始）→ 放弃这款：返回 False，运行版本文件与清单原样

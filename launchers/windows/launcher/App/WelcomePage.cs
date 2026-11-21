@@ -64,7 +64,7 @@ public sealed partial class EnvironmentWindow
         intro.Children.Add(Spacer(34));
         intro.Children.Add(BigTitle(T("welcome.win.title")));
         intro.Children.Add(Spacer(20));
-        intro.Children.Add(Lead(T("welcome.win.lead")));
+        intro.Children.Add(Lead(T("welcome.win.lead.export")));
         intro.Children.Add(Spacer(14));
         intro.Children.Add(new TextBlock { Text = T("welcome.soon"), FontSize = 14, FontWeight = FontWeight.SemiBold,
             Foreground = Accent, Opacity = 0.75, TextWrapping = TextWrapping.Wrap });
@@ -86,7 +86,7 @@ public sealed partial class EnvironmentWindow
         {
             var oneclick = new Button
             {
-                Content = T("welcome.oneclick"), Background = Accent, Foreground = Canvas,
+                Content = T("welcome.export"), Background = Accent, Foreground = Canvas,
                 Padding = new Thickness(28, 12), CornerRadius = new CornerRadius(24), Margin = new Thickness(44, 28, 0, 0),
                 FontSize = 16, FontWeight = FontWeight.SemiBold, HorizontalAlignment = HorizontalAlignment.Left
             };
@@ -283,12 +283,11 @@ public sealed partial class EnvironmentWindow
         finally { EndJob(front); Render(); }
     }
 
-    // 欢迎页「一键出包」：进入出包页（由 ExportPages.cs 渲染），留空壳等另一个任务填。
+    // 欢迎页三步做完后的下一步：打开这款的导出确认页（0.6.4 改版；原先「一键出包」进出包页的平台卡，新手不知道接着点什么）
     public void StartOneClick(LibraryGame game)
     {
         welcomeGameId = null;
-        selectedGame = game.Id;
-        Navigate("build");
+        OpenExport(game);
     }
 
     // 两栏的下限：右栏 580 + 左栏放得下「大标题一行至少一个完整词」约 380 + 左右边距
@@ -372,13 +371,18 @@ public sealed partial class EnvironmentWindow
         }
         panel.Children.Add(Muted(T("welcome.win.step.pc.what")));
         // 随包项先列；Metal 编译器要玩家自己装，放最后（OrderBy 稳定，其余顺序不变）
-        foreach (var item in report.Checks.Where(c => c.Blocking).OrderBy(c => c.Id == "metal" ? 1 : 0))
+        // 只列还差的（标题写「只差下面几样」；走查：原先把「Windows 64位 就绪」「Impactor 2.7.3 + plumesign」也列进来）
+        foreach (var item in report.Checks.Where(c => c.Blocking && c.Status != "ok").OrderBy(c => c.Id == "metal" ? 1 : 0))
         {
             var row = new StackPanel { Spacing = 4, Margin = new Thickness(0, 8, 0, 0) };
             row.Children.Add(new TextBlock { Text = item.Name, FontSize = 14.5, FontWeight = FontWeight.SemiBold,
                 Foreground = Ink, TextWrapping = TextWrapping.Wrap });
-            row.Children.Add(new TextBlock { Text = item.Id == "metal" && item.Status == "missing" ? T("welcome.win.metal.detail") : item.Message,
-                FontSize = 13, Foreground = Brush.Parse("#A8A6A1"), TextWrapping = TextWrapping.Wrap });
+            // 有玩家句的检查项（welcome.win.check.<id>）写玩家句，作业层原文（查过哪些端口 / 服务）放悬停里、「故障报修」照带（走查：Apple 驱动那行直接露出 usbmux 端口号）
+            var plain = item.Id == "metal" && item.Status == "missing" ? T("welcome.win.metal.detail")
+                : text.Has("welcome.win.check." + item.Id) ? T("welcome.win.check." + item.Id) : item.Message;
+            var detail = new TextBlock { Text = plain, FontSize = 13, Foreground = Brush.Parse("#A8A6A1"), TextWrapping = TextWrapping.Wrap };
+            if (plain != item.Message) ToolTip.SetTip(detail, item.Message);
+            row.Children.Add(detail);
             var btns = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
             if (item.OfficialUrl is { } url)
             {

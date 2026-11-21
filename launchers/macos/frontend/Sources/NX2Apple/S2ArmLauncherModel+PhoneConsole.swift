@@ -57,7 +57,9 @@ extension S2ArmLauncherModel {
             let given = p.actions.compactMap(ConsoleAction.init).filter { !shell.contains($0) }
             return (given.isEmpty ? [.exportShellIpa, .pushS2arm, .exportS2arm, .handOverIdentity] : given) + change
         }
-        return [!p.installed ? .installShell : !p.shellCurrent ? .updateShell : .renewShell, .handOverIdentity, .updateSelected] + change
+        // 还没装 S2Arm：只给「安装 S2Arm」——交签名身份、更新所选都要手机上先有 S2Arm，列出来新手会以为要先点它们
+        if !p.installed { return [.installShell] + change }
+        return [!p.shellCurrent ? .updateShell : .renewShell, .handOverIdentity, .updateSelected] + change
     }
 
     /// 候选的标签（文案键，按顺序拼）：这台电脑的启动器装的 / 别的工具装的；导入的签名证书团队与 App 团队对得上时追加「已导入签名证书」。

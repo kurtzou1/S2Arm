@@ -26,13 +26,6 @@ import S2ArmAppleAdapter
         XCTAssertFalse(playing, "手机上 S2Arm 正在跑：不推（装 App 会杀掉这局）")
         XCTAssertEqual(runner.updates.count, 0)
         runner.running = false
-        let keptAfter = UserDefaults.standard.object(forKey: "S2AIosAfterPack")
-        defer { UserDefaults.standard.set(keptAfter, forKey: "S2AIosAfterPack") }
-        model.iosAfterPack = "export"   // 11-19 自签走查结构 8：出包页「出完之后」只管出包页那一次，不再挡后台收回 NRO；照样只发现、不装机
-        let selfSign = await model.keptModulesTick()
-        XCTAssertFalse(selfSign, "选了导出自签也只发现、不发起装机")
-        XCTAssertEqual(runner.updates.count, 0)
-        model.iosAfterPack = "install"
         runner.shellUpdate = true
         for round in 0..<5 {   // 手机在线、有没补进的款也壳旧了、没在玩：跑多轮
             let started = await model.keptModulesTick()

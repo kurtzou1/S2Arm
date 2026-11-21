@@ -29,14 +29,14 @@ PRODUCT = 'plumeimpactor'
 BUNDLE_DIR = 'ThirdParty/Impactor'
 IMPACTOR_EXE = 'Impactor-windows-x86_64-portable.exe'
 PLUMESIGN_EXE = 'plumesign-windows-x86_64.exe'
-BUNDLED = {IMPACTOR_EXE: 'fb5f89b659436e22ce690f28236d02a2c541de065f609e31baf95c34d9bca419',   # 自编 v2.7.3-s2a3（Windows 实机，rustc 1.99.1；补丁 0001 + 0002 + 0003）
-           PLUMESIGN_EXE: 'dbfb5603a7f4bd0db87fd8a81bb41d5ca0d883553f6e9a21e19e0661df9a679c'}
+BUNDLED = {IMPACTOR_EXE: '188e49ea40f0384c0a32988909efc3fe95dbd05842a3293db28917b23ada212f',   # 自编 v2.7.3-s2a6（Windows 实机，rustc 1.99.1；补丁 0001～0005；s2a6：0005 开通 anisette 用登录同一份本机身份，修 SRP -22410）
+           PLUMESIGN_EXE: '0fd734c19fe9fa47f7a2605ce7f227437f6b9df6f7835b8bb0c777015d26c31f'}   # s2a6 重编（0005 改 omnisette 开通身份与 plume_core 身份来源）
 # Mac 启动器随包同版 plumesign（0.6.0 通用壳：Mac 的 Apple ID 改用它登录、签名，自管私钥，免费团队也能签程序库）。
-#   自编 v2.7.3-s2a3 通用版（Mac 实机，rustc 1.94.0，固定目标目录）；Mac 发版要公证，随包时由 sign_release.sh 用我们的开发者身份重签外层签名，内容不改
+#   自编 v2.7.3-s2a6 通用版（补丁 0001～0005；0005 开通 anisette 用登录同一份本机身份，修 -22410）（Mac 实机，rustc 1.94.0，固定目标目录）；Mac 发版要公证，随包时由 sign_release.sh 用我们的开发者身份重签外层签名，内容不改
 PLUMESIGN_MAC = 'plumesign-macos-universal'
-BUNDLED_MAC = {PLUMESIGN_MAC: 'f3f8be40ebb05abc0e732e09a846bbbcbefaded87f9fd6bfe857adf8d100bcd9'}
+BUNDLED_MAC = {PLUMESIGN_MAC: 'a4c94b2132a7b6bc8e583d03b10831ca48aa91187ff2f5a61a39534ec1bfc19a'}
 PLUME_HOME_ENV = 'S2A_PLUME_HOME'   # 设了就是 plumesign 的数据目录（XDG_CONFIG_HOME，下面 PlumeImpactor/）：Mac 通用壳放启动器私有目录，不碰玩家 ~/.config
-OWN_BUILD = 's2a3'   # 自编版号（补丁或 Rust 版本变了加一，产物缓存目录 v{TESTED}-{OWN_BUILD}）
+OWN_BUILD = 's2a6'   # 自编版号（补丁或 Rust 版本变了加一，产物缓存目录 v{TESTED}-{OWN_BUILD}）
 SOURCE_TREE = f'https://github.com/claration/impactor/tree/v{TESTED}'
 # 自编产物的固定来源：我们公开仓的一个 Release（标签 impactor-v{TESTED}-{OWN_BUILD}，预发布、不进「最新版」，附补丁原文与许可）。
 #   打包时本机缓存没有（或哈希不对）就从这里下，按 BUNDLED / BUNDLED_MAC 钉的 SHA-256 校验，不符直接失败；缓存只是加速，任何一台机器都能打包
@@ -160,7 +160,9 @@ EXPLAIN = (
     (r'error sending request for url \(https?://[^\s)]*\bapple\.com', 'apple_server_unreachable'),
     # 苹果服务器回了 5xx（D-KF34 / #1798，Mac 0.6.1 plumesign 登录 10 次：「HTTP request error 503 attempting to connect to https://gsa.apple.com/grandslam/GsService2」）：
     #   请求到了、被苹果那边拒（限流 / 出口被拒 / 服务暂时不可用），账号密码还没到校验；同属「不是 Apple ID 的问题」。原先落 job_failed、英文原句上屏
-    (r'http request error 5\d\d attempting to connect to https?://[^\s]*\bapple\.com', 'apple_server_unreachable'),
+    #   11-20 定因（D-6NB2 / D-KRNJ）：这不是网络问题——苹果 GSA 边缘层拒收 X-Mme-Client-Info 系统名写 macOS; 的请求，一律 503，换网络、换 anisette 服务器都一样；
+    #   随包 plumesign 补丁 0002 曾这样拼（s2a4 起改 Mac OS X;）。单列 apple_login_refused，不再叫玩家换网络 / 换 DNS
+    (r'http request error 5\d\d attempting to connect to https?://[^\s]*\bapple\.com', 'apple_login_refused'),
     # 装机时恢复保存的登录要交互（D-G8Z8，Mac 0.6.1 plumesign「Restoring session for …」后「IO error: not a terminal」×6）：
     #   会话恢复要重新验证、管道里没终端问不了 → 等同登录过期，叫玩家重新登录。原先落 device_install_failed、建议「检查设备连接」，方向全错。
     #   只认「恢复会话」后面紧跟的这句：登录作业里多手机号选号的 not a terminal 由 apple_login.NO_TERMINAL 先认（不经过恢复会话）
@@ -170,7 +172,8 @@ EXPLAIN = (
     #   对从没登录成功过的玩家措辞不对（#edc5f5）。添加即选中（v2.7.2 accounts_add 设 selected_account）；只存了一个的在签名前已替玩家选上（select_only_account）
     (r'no account selected|please log ?in first|not logged in', 'apple_not_signed_in'),
     # 验证码不对排在「incorrect」前：苹果这句是「Incorrect verification code」（-21669），原先先命中账号密码那条，玩家被叫去重输密码
-    (r'-21669|verification code|two.?factor|2fa', 'two_factor_wrong'),
+    # 2fa 要整词（D-EH49：Windows 签名日志里着色器文件名 092fae66…_b.json 的十六进制撞上裸 2fa，真报错「device does not have pairing file」被判成验证码不对）
+    (r'-21669|verification code|two.?factor|\b2fa\b', 'two_factor_wrong'),
     # -22406「Enter the correct password for this Apple Account」（D-W2VH，Mac 0.6.1 plumesign）：同是密码不对，原先没认出、玩家看到英文原句
     (r'-2097\d|-20101|-22406|incorrect|entered incorrectly|enter the correct password', 'apple_id_wrong'),
     (r'unknown error occured while reading the file|unknown error occurred while reading the file|zip64', 'ipa_needs_repack'),

@@ -1,0 +1,80 @@
+{
+  "schema": "s2a-device-caps-v1",
+  "apiVersion": "1.3.284",
+  "driverVersion": 2150760520,
+  "vendorId": 20803,
+  "deviceId": 1141178369,
+  "deviceType": 1,
+  "deviceName": "Adreno (TM) 830",
+  "driverName": "Qualcomm Technologies Inc. Adreno Vulkan Driver",
+  "limits": {
+    "maxImageDimension2D": 16384,
+    "maxImageDimensionCube": 16384,
+    "maxImageArrayLayers": 2048,
+    "maxUniformBufferRange": 65536,
+    "maxStorageBufferRange": 2147483647,
+    "maxComputeSharedMemorySize": 32768,
+    "maxPerStageDescriptorSamplers": 16777216,
+    "maxPerStageDescriptorSampledImages": 16777216,
+    "maxPerStageDescriptorUniformBuffers": 16777216,
+    "maxPerStageDescriptorStorageBuffers": 16777216,
+    "maxPerStageDescriptorStorageImages": 16777216,
+    "minUniformBufferOffsetAlignment": 256,
+    "minStorageBufferOffsetAlignment": 64,
+    "minTexelBufferOffsetAlignment": 64,
+    "subgroupSize": 64,
+    "maxComputeWorkGroupInvocations": 1024,
+    "maxSamplerAnisotropy": 16.0
+  },
+  "features": {
+    "geometryShader": true,
+    "geometryShaderOcclusionQuery": true,
+    "tessellationShader": false,
+    "imageCubeArray": true,
+    "shaderFloat64": false,
+    "shaderInt64": false,
+    "fragmentStoresAndAtomics": true,
+    "vertexPipelineStoresAndAtomics": true,
+    "textureCompressionASTC_LDR": true,
+    "textureCompressionBC": true,
+    "textureCompressionETC2": true,
+    "shaderStorageImageExtendedFormats": true,
+    "independentBlend": true,
+    "depthClamp": true,
+    "multiViewport": true,
+    "samplerAnisotropy": true,
+    "shaderImageGatherExtended": true,
+    "shaderStorageImageReadWithoutFormat": true
+  },
+  "descriptorIndexing": {
+    "enabled": true,
+    "runtimeArray": true,
+    "partiallyBound": true,
+    "sampledImageArrayNonUniformIndexing": true,
+    "storageImageArrayNonUniformIndexing": true,
+    "variableDescriptorCount": true,
+    "sampledImageUpdateAfterBind": true
+  },
+  "formats": {
+    "bc123": true,
+    "bc45": true,
+    "bc67": true,
+    "etc2": true,
+    "astc": true,
+    "fiveBit": true,
+    "r4g4b4a4": true,
+    "scaledVertex": true
+  },
+  "memory": {
+    "deviceLocalBytes": 20185055232,
+    "heapCount": 2,
+    "memoryTypeCount": 9,
+    "deviceLocalHostVisible": true
+  },
+  "enabledExtensions": [
+    "VK_KHR_swapchain",
+    "VK_EXT_swapchain_maintenance1",
+    "VK_EXT_descriptor_indexing"
+  ],
+  "subgroupSize": 64
+}

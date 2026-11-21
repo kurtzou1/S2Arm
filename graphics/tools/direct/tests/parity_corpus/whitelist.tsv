@@ -1,0 +1,7 @@
+# 双翻等价白名单：已知差异（键 = 语料\设备\阶段\字段），只减不增；新增差异行未命中白名单即红。
+compute-suld-ro-img\8e\cs\caps	库按最低档案声明具体格式，设备档案答 true 声明 Unknown；运行时由 #1850 回退现编，每个程序至多一次（设计内差异，按设备能力出件落地时删）
+compute-suld-ro-img\8e\cs\image-types	库按最低档案声明具体格式，设备档案答 true 声明 Unknown；运行时由 #1850 回退现编，每个程序至多一次（设计内差异，按设备能力出件落地时删）
+compute-suld-ro-img\9000\cs\caps	库按最低档案声明具体格式，设备档案答 true 声明 Unknown；运行时由 #1850 回退现编，每个程序至多一次（设计内差异，按设备能力出件落地时删）
+compute-suld-ro-img\9000\cs\image-types	库按最低档案声明具体格式，设备档案答 true 声明 Unknown；运行时由 #1850 回退现编，每个程序至多一次（设计内差异，按设备能力出件落地时删）
+compute-suld-ro-img\9400\cs\caps	库按最低档案声明具体格式，设备档案答 true 声明 Unknown；运行时由 #1850 回退现编，每个程序至多一次（设计内差异，按设备能力出件落地时删）
+compute-suld-ro-img\9400\cs\image-types	库按最低档案声明具体格式，设备档案答 true 声明 Unknown；运行时由 #1850 回退现编，每个程序至多一次（设计内差异，按设备能力出件落地时删）

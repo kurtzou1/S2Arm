@@ -27,10 +27,13 @@ class Explain(unittest.TestCase):
                 ("Developer API error 9401 (HTTP Some(200)): An App ID with Identifier 'io.s2arm.games.abcde12345' is not available. Please enter a different string.", 'app_id_taken'),   # #408 Windows plumesign 原文
                 ('Developer Mode is disabled', 'developer_mode_required'),
                 ('    unexpected response from device: missing PairRecordData in pair record response', 'device_pairing_required'),   # #1198 Windows plumesign 原文
-                ('Error: HTTP request error 503 attempting to connect to https://gsa.apple.com/grandslam/GsService2', 'apple_server_unreachable'),   # D-KF34 / #1798 Mac plumesign 登录原文
+                ('Error: HTTP request error 503 attempting to connect to https://gsa.apple.com/grandslam/GsService2', 'apple_login_refused'),   # D-KF34 / #1798 / D-6NB2 Mac plumesign 登录原文：苹果拒收（11-20 起 macOS;），不是网络
+                ('Error: error sending request for url (https://gsa.apple.com/grandslam/GsService2)\n\nCaused by:\n    dns error', 'apple_server_unreachable'),   # 真连不上照旧叫查网络
                 ('[2026-11-20T14:20:23Z INFO  plumesign::commands::account] Restoring session for a@b.c...\nError: IO error: not a terminal\n', 'apple_session_expired'),   # D-G8Z8 Mac 装机签名原文
                 ('Error: IO error: not a terminal', 'device_install_failed'),   # 负对照：没有「恢复会话」在前的不认成登录过期
                 ('HTTP request error 503 attempting to connect to https://example.org/x', 'device_install_failed'),   # 负对照：不是苹果的服务器
+                ('Error: Idevice error: device does not have pairing file\n  /lib/sl/b-8967bb05a539/092fae66d35d311c_b.json', 'device_pairing_required'),   # D-EH49：十六进制里的 2fa 不算两步验证
+                ('2FA code was rejected', 'two_factor_wrong'),   # 整词 2FA 照认
                 ('完全看不懂的报错', 'device_install_failed')):
             with self.subTest(text=text): self.assertEqual(impactor.explain(text), code)
 

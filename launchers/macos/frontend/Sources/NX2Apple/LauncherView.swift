@@ -77,19 +77,19 @@ struct LauncherView: View {
             phoneUpdateBar
             libraryNoticeBar
             if model.batchShown {
-                BatchExportView(model: model, covers: covers, install: { installFor = $0 }, freeSpace: { spaceFor = $0 }, uiLanguage: uiLanguage)
+                BatchExportView(model: model, covers: covers, install: { model.openExportSheet($0) }, freeSpace: { spaceFor = $0 }, uiLanguage: uiLanguage)
             } else if let result = model.viewingResult, let run = result.export {
-                ExportSessionView(model: model, covers: covers, session: result, run: run, install: { installFor = $0 }, freeSpace: { spaceFor = $0 }, uiLanguage: uiLanguage)
+                ExportSessionView(model: model, covers: covers, session: result, run: run, install: { model.openExportSheet($0) }, freeSpace: { spaceFor = $0 }, uiLanguage: uiLanguage)
             } else if let play = model.playSession, !model.playHidden {   // 一局（游戏槽）：盖在出包等主槽作业页上面，收起或关掉后露出下面那页
                 PlaySessionView(model: model, covers: covers, session: play, uiLanguage: uiLanguage)
             } else if let session = model.session, let run = session.export, !model.sessionHidden {
-                ExportSessionView(model: model, covers: covers, session: session, run: run, install: { installFor = $0 }, freeSpace: { spaceFor = $0 }, uiLanguage: uiLanguage)
+                ExportSessionView(model: model, covers: covers, session: session, run: run, install: { model.openExportSheet($0) }, freeSpace: { spaceFor = $0 }, uiLanguage: uiLanguage)
             } else if let session = model.session, session.export == nil, !model.sessionHidden, !model.isInline(session) {
                 JobSessionView(model: model, session: session)
             } else if let phone = model.phoneSession, phone.wholePage, !model.phoneHidden {   // 更新 iPhone 上的 S2Arm / 更新所选没走成（手机槽）：主槽没占着整页时整页显示
                 JobSessionView(model: model, session: phone)
             } else if let id = model.exportFor, let game = model.games.first(where: { $0.id == id }) {
-                ExportView(model: model, covers: covers, game: game) { installFor = game.id }
+                ExportView(model: model, covers: covers, game: game)
             } else {
                 libraryPage
                     .overlay {
@@ -138,6 +138,9 @@ struct LauncherView: View {
         .sheet(isPresented: $model.sgradeUpgradeOpen) { SGradeUpgradeView(model: model).environmentObject(loc) }   // S 级优化升级（v0.4.0）
         .sheet(item: Binding(get: { installFor.map(OptionsTarget.init) }, set: { installFor = $0?.id })) { target in
             InstallView(model: model, gameID: target.id, onOpenSettings: { returnToInstallFromEnv = target.id }).environmentObject(loc)
+        }
+        .sheet(item: $model.exportSheet) { request in   // 导出确认页（签名 → 出法 → 设备多选 → 开始；开始后同一页看结果）
+            ExportSheetView(model: model, request: request).environmentObject(loc)
         }
         .onChange(of: model.spaceRequest) { id in if let id { spaceFor = id; model.spaceRequest = nil } }   // 设置页「磁盘空间」
         .onChange(of: model.displayRequest) { id in if let id { displayFor = id; model.displayRequest = nil } }   // 控制口打开启动设置
@@ -207,6 +210,7 @@ struct LauncherView: View {
         .sheet(isPresented: Binding(get: { model.showKeys && !model.showEnvironment }, set: { model.showKeys = $0 })) {
             ImportSheet(model: model, kind: .keys).environmentObject(loc)
         }
+        .sheet(item: $model.devCertChoice) { DevCertChooseSheet(model: model, choice: $0).environmentObject(loc) }   // 几张证书：这台第一次连上时问用哪张（#487）
         .sheet(isPresented: $model.showEnvironment) {
             EnvironmentView(model: model, onOpenSpace: { returnToEnvFromSpace = true }).environmentObject(loc)
         }
@@ -710,16 +714,16 @@ struct LauncherView: View {
     @ViewBuilder private var phonePill: some View {
         if installFor == nil {
             if let s = model.phoneSession, S2ArmLauncherModel.phoneKinds.contains(s.kind), let id = s.gameID {
-                Button { installFor = id } label: {
+                Button { openPhoneResult(id) } label: {
                     HStack(spacing: 7) {
                         ProgressView().controlSize(.mini)
-                        Text(txt(model.selfSigning && s.kind == .install ? "install.pill.exporting" : "install.pill.running").replacingOccurrences(of: "{0}", with: s.name).replacingOccurrences(of: "{1}", with: model.installTargetLabel)).font(.manrope(12.5, .semibold)).lineLimit(1)
+                        Text(txt(model.selfSigning && s.kind == .install ? "install.pill.exporting" : "install.pill.running").replacingOccurrences(of: "{0}", with: s.name).replacingOccurrences(of: "{1}", with: pillTarget(id))).font(.manrope(12.5, .semibold)).lineLimit(1)
                         if let f = s.progress.fraction { Text("\(Int(f * 100))%").font(.manrope(12)).monospacedDigit().foregroundStyle(.secondary) }
                     }
                 }
                 .controllerButtonStyle(LauncherSecondaryButtonStyle()).accessibilityIdentifier("install.pill")
             } else if let r = model.phoneResult {
-                Button { installFor = r.gameID } label: {
+                Button { openPhoneResult(r.gameID) } label: {
                     HStack(spacing: 7) {
                         Image(systemName: r.ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill").foregroundStyle(r.ok ? LauncherPalette.ready : LauncherPalette.danger)
                         Text(txt(!r.ok ? (model.selfSigning ? "install.pill.exportFailed" : "install.pill.failed") : (model.phoneOutcome?.exportFolder ?? "").isEmpty ? "install.pill.done" : "install.pill.exported").replacingOccurrences(of: "{0}", with: r.name)
@@ -729,6 +733,16 @@ struct LauncherView: View {
                 .controllerButtonStyle(LauncherSecondaryButtonStyle()).accessibilityIdentifier("install.pill")
             }
         }
+    }
+
+    /// 胶囊点了：这款是从导出确认页开始的 → 回到那一页看逐台结果；否则照旧开装机窗
+    private func openPhoneResult(_ id: String) {
+        if model.exportFlows[id] != nil { model.openExportSheet(id, results: true) } else { installFor = id }
+    }
+    /// 胶囊里正在导入的那台：导出确认页逐台导入时写那一行的设备，不写界面上选中的那台
+    private func pillTarget(_ id: String) -> String {
+        guard let row = model.exportFlows[id]?.rows.first(where: { $0.state == .running }) else { return model.installTargetLabel }
+        return ExportSheetView.deviceLabel(kind: row.kind, name: row.name, language: uiLanguage)
     }
 
     /// The file URLs of a drop, delivered together on the main queue.

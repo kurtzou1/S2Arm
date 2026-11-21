@@ -309,10 +309,12 @@ public final class S2ArmEngineProvider: EngineProvider {
     public func signingProject() async throws -> String { try await installer.signingProject() }
     public func installReadiness(gameId: String, device: String? = nil) async throws -> InstallReadiness { try await installer.readiness(gameId: gameId, device: device) }
     public func devCertStatus(device: String? = nil) async throws -> DevCertStatus { try await installer.devCertStatus(device: device) }
-    public func devCertImport(p12: String, profile: String, password: String, device: String? = nil) async throws -> DevCertInfo {
-        try await installer.devCertImport(p12: p12, profile: profile, password: password, device: device)
+    public func devCertImport(p12: String, profile: String, password: String, device: String? = nil, add: Bool = false) async throws -> DevCertInfo {
+        try await installer.devCertImport(p12: p12, profile: profile, password: password, device: device, add: add)
     }
     public func devCertUse(_ active: Bool) async throws { try await installer.devCertUse(active) }
+    public func devCertChoose(device: String, cert: String) async throws { try await installer.devCertChoose(device: device, cert: cert) }
+    public func devCertDelete(cert: String? = nil) async throws { try await installer.devCertDelete(cert: cert) }
     public func signModeSet(_ mode: String) async throws -> String { try await installer.signModeSet(mode) }
     public func layoutSet(_ layout: String?, gameId: String? = nil) async throws -> String { try await installer.layoutSet(layout, gameId: gameId) }
     public func appleLogin(account: String, password: String, events: EventSink = .discard) async throws -> AppleAccount {
@@ -320,11 +322,10 @@ public final class S2ArmEngineProvider: EngineProvider {
     }
     public func appleAccount() async throws -> AppleAccount { try await installer.appleAccount() }
     public func appleLoginCode(_ code: String, taskId: String) throws { try installer.appleLoginCode(code, taskId: taskId) }
-    public func devCertDelete() async throws { try await installer.devCertDelete() }
 
     public func install(gameId: String, teamId: String? = nil, device: String? = nil, acceptDropped: Bool = false, accept: Set<String> = [], mode: String? = nil,
-                        events: EventSink = .discard) async throws -> InstallResult {
-        try await installer.install(gameId: gameId, teamId: teamId, device: device, acceptDropped: acceptDropped, accept: accept, mode: mode,
+                        sign: String? = nil, events: EventSink = .discard) async throws -> InstallResult {
+        try await installer.install(gameId: gameId, teamId: teamId, device: device, acceptDropped: acceptDropped, accept: accept, mode: mode, sign: sign,
                                     widget: settings.homeWidget, cloudSaves: settings.cloudSavesFolder, events: events)
     }
 
@@ -354,6 +355,12 @@ public final class S2ArmEngineProvider: EngineProvider {
         }
         return out
     }
+    /// 「更新这款」（0.6.4，作业 updateGame）：只在电脑上按原因做齐这一款（重编 iPhone 与 Mac 两份着色器库、按本版改写器刷新程序），不找设备、不推、不签名。
+    ///   结果 reasons = 做完后还剩的建议更新原因（空 = 已是最新）；做不齐的项作业照常成功、另给 warning 诊断 update_incomplete（message 是玩家句），原样带回
+    public func updateGame(gameId: String, events: EventSink = .discard) async throws -> UpdateGameResult {
+        let o = try await client.perform("updateGame", extra: ["gameId": gameId], events: events)
+        return UpdateGameResult(outcome: o.result, diagnostics: o.diagnostics)
+    }
     public func updatePhone(acceptStale: Bool = false, acceptDropped: Bool = false, accept: Set<String> = [], mode: String? = nil, sgradeUpgrade: Bool = false,
                             device: String? = nil, events: EventSink = .discard) async throws -> [String: Any] {
         try await installer.updatePhone(acceptStale: acceptStale, acceptDropped: acceptDropped, accept: accept, mode: mode, sgradeUpgrade: sgradeUpgrade, device: device,
@@ -376,5 +383,16 @@ public final class S2ArmEngineProvider: EngineProvider {
 
     public func removeFromPhone(gameId: String, acceptDropped: Bool = false, accept: Set<String> = [], device: String? = nil, events: EventSink = .discard) async throws -> RemoveResult {
         try await installer.remove(gameId: gameId, acceptDropped: acceptDropped, accept: accept, device: device, events: events)
+    }
+}
+
+/// 「更新这款」的结果（作业 updateGame）：reasons = 做完后还剩的原因码（同 updateHints），incomplete = 这次没做齐的几项（作业层玩家句，warning 诊断 update_incomplete）
+public struct UpdateGameResult: Equatable {
+    public let reasons: [String]
+    public let incomplete: [String]
+    public init(reasons: [String], incomplete: [String]) { self.reasons = reasons; self.incomplete = incomplete }
+    public init(outcome r: [String: Any], diagnostics: [[String: Any]]) {
+        reasons = r["reasons"] as? [String] ?? []
+        incomplete = diagnostics.filter { $0["code"] as? String == "update_incomplete" }.compactMap { ($0["message"] as? String).flatMap { $0.isEmpty ? nil : $0 } }
     }
 }

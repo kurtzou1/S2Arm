@@ -94,6 +94,29 @@ Copyright 2026 S2Arm contributors
 
 Linux 暂不支持。跑不了的步骤写清原因和未测范围，不省略。
 
+## 安卓两条翻译路（设备现编 / 出包预编库）
+
+安卓直连的两条路共用 Ryujinx 着色器翻译核心。调试包使用设备现编。正式包可先从随包分发的 LibPack 取件，缺件时走设备现编。
+
+| 环节 | 设备现编 | 出包预编库（LibPack） |
+| --- | --- | --- |
+| 回答层 | 从 Vulkan 能力和当前绑定收集请求事实，按设备回答格式、类型和能力查询。[device_caps.c](android/native/direct/device_caps.c)、[compile_request.c](android/native/direct/compile_request.c)、[DirectGpuAccessor.cs](graphics/tools/direct/compiler/DirectGpuAccessor.cs) | 按出包配置档回答查询，由 `DshVk.CompileWithSpv` 生成 `_b.spv` 和 `_b.json`，按阶段键装入 `lib.idx` 和 `lib.*.pak`。[DshVk.cs](graphics/tools/direct/dsh/DshVk.cs)、[VkLib.cs](graphics/tools/direct/vklib/VkLib.cs) |
+| 收编层 | `DirectShaderCompiler` 根据请求输出 `s2a-direct-program`，设备解析结果并建管线。[DirectShaderCompiler.cs](graphics/tools/direct/compiler/DirectShaderCompiler.cs)、[nvk_shader.c](android/native/gfx_plat/nvk_shader.c) | 设备按每阶段 8 字节键取 SPIR-V 和反射数据，核对能力、重建绑定并合成 `s2a-direct-program-v1`，再走共用解析和建管线路径。[libpack_vk.c](android/native/direct/libpack_vk.c)、[nvn_vk_program_result.c](android/native/nvn/nvn_vk_program_result.c) |
+
+两条路的绑定模型在现编结果、LibPack 反射转换以及共用解析和回放之间传递。改动时沿着 guest 槽来源、描述符种类、图像维度与数值类型核到实际绑定。纹素缓冲和普通纹理即使槽号相同，也要保留各自的资源类型。[DirectShaderCompiler.cs](graphics/tools/direct/compiler/DirectShaderCompiler.cs)、[libpack_vk.c](android/native/direct/libpack_vk.c)、[nvn_vk_program_result.c](android/native/nvn/nvn_vk_program_result.c)、[rp_draw.c](graphics/nvn/replay/rp_draw.c)
+
+改回答层、收编层或绑定模型任一处，逐一核对两条路的对应实现。对同一输入，两路的描述符集合与类型、图像声明格式与维度、共享内存与工作组大小、能力与扩展声明、着色阶段输入输出应语义等价。用合成的最小着色器和仓内设备能力档案运行小语料同口径检查，在 PR 写出结果。白名单只减不增。[等价单测 #1849](https://github.com/jhaizhou-ops/S2Arm/pull/1849)
+
+```sh
+bash tests/libpack_device_parity_test.sh
+```
+
+全量检查由出包流程负责，不一致或无法核验的程序须记录程序键和原因，拒绝入库。设备取用时若核对失败，须标记该程序身份并回到现编，避免重复采用同一库件。现编也无法处理时须具名报红。[LibPack 拒收与回退 #1850](https://github.com/jhaizhou-ops/S2Arm/pull/1850)
+
+计算阶段的工作组尺寸和共享内存字节数都受设备上限约束。现编遇到可改写的超限共享内存时，`DirectSharedSpill` 将部分 `Workgroup` 数据转存到按工作组分片的存储缓冲。预编库件保留原始 `Workgroup` 声明，须在出包时按目标设备档案检查，在设备取用时再按实际 `maxComputeSharedMemorySize` 检查。共用装载路径还须在创建模块前按真实设备上限检查最终 SPIR-V 的有效局部尺寸和共享内存总字节数，超限具名拒绝。[DirectSharedSpill.cs](graphics/tools/direct/compiler/DirectSharedSpill.cs)、[backend_vulkan.c](android/native/nvn/backend_vulkan.c)、[#1836](https://github.com/jhaizhou-ops/S2Arm/issues/1836)
+
+曾遇到的差异包括无像素互锁能力的设备收到多余声明、只读按位读的库版声明 `R32ui` 而现编用 `Unknown`、计算程序声明 45,056 字节共享内存而设备上限为 32,768 字节，以及反射无法映射的绑定产生槽 `-1`。正式包验收须带 LibPack 进入可操控场景，确认库打开且有命中，GPU 故障及库件拒收后跳过的计数均为 0。[案例和正式包冒烟判据 #1836](https://github.com/jhaizhou-ops/S2Arm/issues/1836)
+
 ## 验证改动
 
 先运行与问题对应的最小充分检查，确认修复覆盖原场景。文档和配置检查内容、链接、格式及实际配置行为；运行代码需要验证受影响的调用路径。界面、设备、图形和性能结论应附对应运行证据，不能用编译成功代替。

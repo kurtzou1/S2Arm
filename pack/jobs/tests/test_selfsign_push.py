@@ -180,6 +180,7 @@ class PushGameRoute(unittest.TestCase):
                 patch.object(install, "phone_signing", signing), patch.object(install, "push_programs", programs), \
                 patch.object(install, "deliver_identity", lambda c, ph: calls.__setitem__("identity", calls["identity"] + 1)), \
                 patch.object(rewrite_refresh, "refresh_ios", lambda c, g: None), patch.object(sgrade_bf, "rechain_ios", lambda c, g: "skip"), \
+                patch.object(install.layout, "program_info", lambda c, g: {}), patch.object(install, "update_mac_lib", lambda c, g: False), \
                 patch.object(install, "push_mods", lambda c, ph, g, m: m), patch.object(install, "pack_id", lambda p: "P1"), \
                 patch.object(install, "pull_shader_counts", lambda c, ph, g: None), patch.object(install, "await_import", lambda c, ph, g, w: None), \
                 patch.object(install, "phone_identity_meta", lambda c, u, b: meta), \

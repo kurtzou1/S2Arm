@@ -89,6 +89,15 @@ def gaps(root):
     return out
 
 
+def misplaced(root):
+    """四语翻译表里落在顶层、不在 text 表里的中文键（11-21：合并时把新句子追加到文件末尾的 } 前，JSON 合法、检查全过，
+    但前端只查 text 表，这几句在四种语言里都显示回中文）"""
+    out = []
+    for path in sorted((root / "launchers/shared/l10n").glob("*.json")):
+        out += [(path.name, k) for k in json.loads(path.read_text(encoding="utf-8")) if HAN.search(k)]
+    return out
+
+
 def main(argv):
     args = [a for a in argv if not a.startswith("--")]
     root = Path(args[0] if args else Path(__file__).resolve().parents[1]).resolve()
@@ -106,7 +115,11 @@ def main(argv):
         print(f"🔴 pack/jobs/{f}:{l} 玩家句没有英文：「{t[:80]}」→ 加进 {TABLE}，或行尾写「{MARK}」")
     print(f"作业层中文句：缺翻译 {len(found)} 处（基线 {len(base)} 条），新增 {len(new)} 处" +
           (f"；基线里 {len(stale)} 条已补上，可跑 --baseline 收紧" if stale else ""))
-    return 1 if new else 0
+    wrong = misplaced(root)
+    for f, k in wrong:
+        print(f"🔴 launchers/shared/l10n/{f} 顶层有中文键、不在 text 表里（前端查不到、显示回中文）：「{k[:80]}」→ 挪进 text")
+    print(f"四语翻译表：放错层 {len(wrong)} 处")
+    return 1 if new or wrong else 0
 
 
 if __name__ == "__main__":

@@ -2678,12 +2678,14 @@ def prune_build(c, gid, *, retain_compiler=True, record=True):
                         _rm_entry(c, q); n += 1
                 continue
             _rm(c, layout.root_of(c, gid), p); n += 1
-    direct = c.work_root / 'run/s2arm/cache/direct' / gid.upper()
+    # 直连缓存跟 game_caches 取同一处（direct_cache_dir）：游戏在别的盘时它在这款文件夹的 direct-cache/，不在工具缓存下，
+    #   删它按 _direct_base 取托管根（诊断#0f1c42 D-CMJ7：「清理缓存」原先拿工具缓存当根删它，报「操作路径不属于托管目录」）
+    direct = direct_cache_dir(c, gid)
     for p in game_caches(c, gid, include_compiler=not retain_compiler):
         if retain_compiler and p.parent == direct:
             n += _rm_direct_transient(c, direct, p)
         else:
-            _rm(c, c.work_root, p); n += 1
+            _rm(c, _direct_base(c, direct) if p == direct else c.work_root, p); n += 1
     return n
 
 

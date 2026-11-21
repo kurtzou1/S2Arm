@@ -13786,37 +13786,37 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Push a game from S2Arm on your computer, or put its .s2arm and .img into Files → On My iPhone → S2Arm → Import Here, and it will appear here."
+            "value": "In S2Arm on your computer, click “Export…” for a game and tick this device, or put its .s2arm and .img into Files → On My iPhone → S2Arm → Import Here, and it will appear here."
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Envía un juego desde S2Arm en tu ordenador, o pon su .s2arm y su .img en Archivos → En mi iPhone → S2Arm → Import Here, y aparecerá aquí."
+            "value": "En S2Arm en tu ordenador, haz clic en «Exportar…» en un juego y marca este dispositivo, o pon su .s2arm y su .img en Archivos → En mi iPhone → S2Arm → Import Here, y aparecerá aquí."
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Envoyez un jeu depuis S2Arm sur votre ordinateur, ou placez son .s2arm et son .img dans Fichiers → Sur mon iPhone → S2Arm → Import Here, et il apparaîtra ici."
+            "value": "Dans S2Arm sur votre ordinateur, cliquez sur « Exporter… » pour un jeu et cochez cet appareil, ou placez son .s2arm et son .img dans Fichiers → Sur mon iPhone → S2Arm → Import Here, et il apparaîtra ici."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "パソコンの S2Arm からゲームを送るか、.s2arm と .img を「ファイル」→「このiPhone内」→「S2Arm」→「Import Here」に入れると、ここに表示されます。"
+            "value": "パソコンの S2Arm でゲームの「書き出す…」をクリックしてこのデバイスにチェックを入れるか、.s2arm と .img を「ファイル」→「このiPhone内」→「S2Arm」→「Import Here」に入れると、ここに表示されます。"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "在电脑上的 S2Arm 里把游戏推到这台设备，或者把 .s2arm 和 .img 放进「文件」→「我的 iPhone」→「S2Arm」→「放这里导入」，它就会出现在这里。"
+            "value": "在电脑上的 S2Arm 里对游戏点「导出…」并勾上这台设备，或者把 .s2arm 和 .img 放进「文件」→「我的 iPhone」→「S2Arm」→「放这里导入」，它就会出现在这里。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "在電腦上的 S2Arm 裡把遊戲推到這臺裝置，或者把 .s2arm 和 .img 放進「檔案」→「我的 iPhone」→「S2Arm」→「放这里导入」，它就會出現在這裡。"
+            "value": "在電腦上的 S2Arm 裡對遊戲點「匯出…」並勾上這臺裝置，或者把 .s2arm 和 .img 放進「檔案」→「我的 iPhone」→「S2Arm」→「放这里导入」，它就會出現在這裡。"
           }
         }
       }
@@ -23269,42 +23269,42 @@
         }
       }
     },
-    "This game was installed from another computer. Its saves and game data are still on this iPhone; on that computer, choose “Push to iPhone” again to bring it back.": {
+    "This game was installed from another computer. Its saves and game data are still on this iPhone; in S2Arm on that computer, click “Export…” for this game, tick this iPhone and start to bring it back.": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "This game was installed from another computer. Its saves and game data are still on this iPhone; on that computer, choose “Push to iPhone” again to bring it back."
+            "value": "This game was installed from another computer. Its saves and game data are still on this iPhone; in S2Arm on that computer, click “Export…” for this game, tick this iPhone and start to bring it back."
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Este juego se instaló desde otro ordenador. Sus partidas guardadas y datos siguen en este iPhone; en ese ordenador, elige \"Enviar al iPhone\" de nuevo para recuperarlo."
+            "value": "Este juego se instaló desde otro ordenador. Sus partidas guardadas y datos siguen en este iPhone; en S2Arm en ese ordenador, haz clic en «Exportar…» en este juego, marca este iPhone y empieza para recuperarlo."
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Ce jeu a été installé depuis un autre ordinateur. Les sauvegardes et les données du jeu sont toujours sur cet iPhone ; sur cet ordinateur, choisissez à nouveau « Envoyer sur l'iPhone » pour le restaurer."
+            "value": "Ce jeu a été installé depuis un autre ordinateur. Les sauvegardes et les données du jeu sont toujours sur cet iPhone ; dans S2Arm sur cet ordinateur, cliquez sur « Exporter… » pour ce jeu, cochez cet iPhone et lancez pour le restaurer."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "このゲームは別のコンピュータからインストールされました。セーブデータとゲームデータはこの iPhone に残っています。そのコンピュータで「iPhone に送る」をもう一度選択すると復元できます。"
+            "value": "このゲームは別のコンピュータからインストールされました。セーブデータとゲームデータはこの iPhone に残っています。そのコンピュータの S2Arm でこのゲームの「書き出す…」をクリックし、この iPhone にチェックを入れて開始すると復元できます。"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "这款是在另一台电脑上装的，存档和游戏资源都还在这台 iPhone 上；到那台电脑上再点一次「推到 iPhone」就能回来。"
+            "value": "这款是在另一台电脑上装的，存档和游戏资源都还在这台 iPhone 上；到那台电脑的 S2Arm 里对这款点「导出…」，勾上这台 iPhone 后开始，就能回来。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "這款是在另一臺電腦上裝的，存檔和遊戲資源都還在這臺 iPhone 上；到那臺電腦上再點一次「推到 iPhone」就能回來。"
+            "value": "這款是在另一臺電腦上裝的，存檔和遊戲資源都還在這臺 iPhone 上；到那臺電腦的 S2Arm 裡對這款點「匯出…」，勾上這臺 iPhone 後開始，就能回來。"
           }
         }
       }
@@ -23320,19 +23320,19 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Choose this game's data to get ready to play. If it was installed from a computer, connect the iPhone and click “Push to iPhone” for this game in S2Arm: it picks up from what was already copied, so it won’t start over."
+            "value": "Choose this game's data to get ready to play. If it was installed from a computer, connect the iPhone, click “Export…” for this game in S2Arm, tick this iPhone and start: it picks up from what was already copied, so it won’t start over."
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Elige los datos de este juego para prepararte para jugar. Si se instaló desde un ordenador, conecta el iPhone y, en el lanzador de S2Arm, haz clic en «Enviar al iPhone» para este juego: continúa desde lo que ya se copió, sin empezar de cero."
+            "value": "Elige los datos de este juego para prepararte para jugar. Si se instaló desde un ordenador, conecta el iPhone y, en el lanzador de S2Arm, haz clic en «Exportar…» en este juego, marca este iPhone y empieza: continúa desde lo que ya se copió, sin empezar de cero."
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Choisissez les données de ce jeu pour pouvoir y jouer. S'il a été installé depuis un ordinateur, connectez l'iPhone puis, dans le lanceur S2Arm, cliquez sur « Envoyer sur l'iPhone » pour ce jeu : la copie reprend là où elle s'était arrêtée, sans repartir de zéro."
+            "value": "Choisissez les données de ce jeu pour pouvoir y jouer. S'il a été installé depuis un ordinateur, connectez l'iPhone puis, dans le lanceur S2Arm, cliquez sur « Exporter… » pour ce jeu, cochez cet iPhone et lancez : la copie reprend là où elle s'était arrêtée, sans repartir de zéro."
           }
         },
         "it": {
@@ -23344,7 +23344,7 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "プレイの準備のため、このゲームのデータを選んでください。コンピュータからインストールした場合は、iPhone をつないで S2Arm ランチャーでこのゲームの「iPhone に送る」をクリックしてください。転送済みの部分から続きを送るので、最初からやり直す必要はありません。"
+            "value": "プレイの準備のため、このゲームのデータを選んでください。コンピュータからインストールした場合は、iPhone をつないで S2Arm ランチャーでこのゲームの「書き出す…」をクリックし、この iPhone にチェックを入れて開始してください。転送済みの部分から続きを送るので、最初からやり直す必要はありません。"
           }
         },
         "sv": {
@@ -23356,13 +23356,13 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "选择此游戏的数据以开始游戏。从电脑装的：连上电脑，在 S2Arm 启动器里对这款游戏点「推到 iPhone」，会从已传的部分接着继续，不用从头来。"
+            "value": "选择此游戏的数据以开始游戏。从电脑装的：连上电脑，在 S2Arm 启动器里对这款点「导出…」，勾上这台 iPhone 后开始，会从已传的部分接着继续，不用从头来。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "選擇此遊戲的資料以開始遊戲。從電腦裝的：連上電腦，在 S2Arm 啟動器裡對這款遊戲點「推到 iPhone」，會從已傳的部分接著繼續，不用從頭來。"
+            "value": "選擇此遊戲的資料以開始遊戲。從電腦裝的：連上電腦，在 S2Arm 啟動器裡對這款點「匯出…」，勾上這台 iPhone 後開始，會從已傳的部分接著繼續，不用從頭來。"
           }
         }
       }
@@ -23372,37 +23372,37 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Connect this iPhone to the computer, then click “Push to iPhone” for this game in S2Arm. It picks up from what was already copied, so it won’t start over."
+            "value": "Connect this iPhone to the computer, then in S2Arm click “Export…” for this game, tick this iPhone and start. It picks up from what was already copied, so it won’t start over."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "连上电脑，在 S2Arm 启动器里对这款游戏点「推到 iPhone」，会从已传的部分接着继续，不用从头来。"
+            "value": "连上电脑，在 S2Arm 启动器里对这款点「导出…」，勾上这台 iPhone 后开始，会从已传的部分接着继续，不用从头来。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "連上電腦，在 S2Arm 啟動器裡對這款遊戲點「推到 iPhone」，會從已傳的部分接著繼續，不用從頭來。"
+            "value": "連上電腦，在 S2Arm 啟動器裡對這款點「匯出…」，勾上這台 iPhone 後開始，會從已傳的部分接著繼續，不用從頭來。"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "コンピュータにつないで、S2Arm ランチャーでこのゲームの「iPhone に送る」をクリックしてください。転送済みの部分から続きを送るので、最初からやり直す必要はありません。"
+            "value": "コンピュータにつないで、S2Arm ランチャーでこのゲームの「書き出す…」をクリックし、この iPhone にチェックを入れて開始してください。転送済みの部分から続きを送るので、最初からやり直す必要はありません。"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Conecta el iPhone al ordenador y, en el lanzador de S2Arm, haz clic en «Enviar al iPhone» para este juego. Continúa desde lo que ya se copió, sin empezar de cero."
+            "value": "Conecta el iPhone al ordenador y, en el lanzador de S2Arm, haz clic en «Exportar…» en este juego, marca este iPhone y empieza. Continúa desde lo que ya se copió, sin empezar de cero."
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Connectez l'iPhone à l'ordinateur, puis dans le lanceur S2Arm, cliquez sur « Envoyer sur l'iPhone » pour ce jeu. La copie reprend là où elle s'était arrêtée, sans repartir de zéro."
+            "value": "Connectez l'iPhone à l'ordinateur, puis dans le lanceur S2Arm, cliquez sur « Exporter… » pour ce jeu, cochez cet iPhone et lancez. La copie reprend là où elle s'était arrêtée, sans repartir de zéro."
           }
         }
       }
@@ -23412,37 +23412,37 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "This game on your phone doesn't match S2Arm on this phone, so it can't open: it was built for another version, installed from another computer or Apple ID, or didn't finish installing. Connect your phone to your computer and click \"Push to iPhone\" for this game in S2Arm."
+            "value": "This game on your phone doesn't match S2Arm on this phone, so it can't open: it was built for another version, installed from another computer or Apple ID, or didn't finish installing. Connect your phone to your computer, click “Export…” for this game in S2Arm, tick this phone and start."
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Este juego del teléfono no coincide con S2Arm en este teléfono y no puede abrirse: se generó para otra versión, se instaló desde otro ordenador u otro Apple ID, o no terminó de instalarse. Conecta el teléfono al ordenador y, en S2Arm, pulsa «Enviar al iPhone» en este juego."
+            "value": "Este juego del teléfono no coincide con S2Arm en este teléfono y no puede abrirse: se generó para otra versión, se instaló desde otro ordenador u otro Apple ID, o no terminó de instalarse. Conecta el teléfono al ordenador y, en S2Arm, haz clic en «Exportar…» en este juego, marca este teléfono y empieza."
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Ce jeu sur le téléphone ne correspond pas à S2Arm sur ce téléphone et ne peut pas s'ouvrir : il a été généré pour une autre version, installé depuis un autre ordinateur ou un autre identifiant Apple, ou son installation n'est pas allée au bout. Branchez le téléphone à l'ordinateur et, dans S2Arm, cliquez sur « Envoyer sur l'iPhone » pour ce jeu."
+            "value": "Ce jeu sur le téléphone ne correspond pas à S2Arm sur ce téléphone et ne peut pas s'ouvrir : il a été généré pour une autre version, installé depuis un autre ordinateur ou un autre identifiant Apple, ou son installation n'est pas allée au bout. Branchez le téléphone à l'ordinateur et, dans S2Arm, cliquez sur « Exporter… » pour ce jeu, cochez ce téléphone et lancez."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "スマホのこのゲームはこのスマホの S2Arm と合わないため開けません（別のバージョン向けに作られた、別のパソコンや別の Apple ID でインストールされた、またはインストールが最後まで終わっていない）。スマホをパソコンにつなぎ、S2Arm でこのゲームの「iPhone に送る」を押してください。"
+            "value": "スマホのこのゲームはこのスマホの S2Arm と合わないため開けません（別のバージョン向けに作られた、別のパソコンや別の Apple ID でインストールされた、またはインストールが最後まで終わっていない）。スマホをパソコンにつなぎ、S2Arm でこのゲームの「書き出す…」を押して、このスマホにチェックを入れて開始してください。"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "手机上这款和这台手机上的 S2Arm 对不上，打不开：可能是按别的版本出的、用别的电脑或别的 Apple ID 装的，或者没装完整。连上电脑，在 S2Arm 里对这款点「推到 iPhone」。"
+            "value": "手机上这款和这台手机上的 S2Arm 对不上，打不开：可能是按别的版本出的、用别的电脑或别的 Apple ID 装的，或者没装完整。连上电脑，在 S2Arm 里对这款点「导出…」，勾上这台手机后开始。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "手機上這款和這台手機上的 S2Arm 對不上，打不開：可能是按別的版本出的、用別的電腦或別的 Apple ID 裝的，或者沒裝完整。連接電腦，在 S2Arm 裡對這款點「推到 iPhone」。"
+            "value": "手機上這款和這台手機上的 S2Arm 對不上，打不開：可能是按別的版本出的、用別的電腦或別的 Apple ID 裝的，或者沒裝完整。連接電腦，在 S2Arm 裡對這款點「匯出…」，勾上這台手機後開始。"
           }
         }
       }
@@ -24202,7 +24202,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "這款的遊戲資料已經在這台 iPhone 上，還缺它的程式，也就是這款的 .s2arm 檔案。在這裡匯入 .s2arm，或放進「檔案」裡的「放這裡匯入」；如果是電腦正在推送，等它自己到就行。"
+            "value": "這款的遊戲資料已經在這台 iPhone 上，還缺它的程式，也就是這款的 .s2arm 檔案。在這裡匯入 .s2arm，或放進「檔案」裡的「放这里导入」；如果是電腦正在推送，等它自己到就行。"
           }
         }
       }

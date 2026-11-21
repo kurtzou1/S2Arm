@@ -126,6 +126,33 @@ class StageTest(unittest.TestCase):
         finally:
             deps.close()
 
+    def test_close_survives_windows_delete_pending(self):   # D-CFH5：收尾删临时目录报 WinError 145，不得把阶段判失败
+        current = refresh.seed(self.store, '原创', self.source)
+        deps = stages.Dependencies('romfsidx', current)
+        real, calls = deps.temp.cleanup, []
+        def flaky():
+            calls.append(1)
+            if len(calls) == 1:
+                raise OSError(145, '目录不是空的。')
+            real()
+        with patch.object(deps.temp, 'cleanup', flaky), patch.object(stages.time, 'sleep') as slept:
+            deps.close()
+        self.assertEqual(len(calls), 2)
+        self.assertFalse(deps.work.exists())
+        self.assertEqual(slept.call_count, 1)
+        # 一直删不掉：不抛，只说一句黄（残留目录留着，手动清）
+        deps = stages.Dependencies('romfsidx', current)
+        def stuck():
+            raise OSError(145, '目录不是空的。')
+        import io, contextlib
+        err = io.StringIO()
+        try:
+            with patch.object(deps.temp, 'cleanup', stuck), patch.object(stages.time, 'sleep'), contextlib.redirect_stderr(err):
+                deps.close()
+            self.assertIn('【黄】阶段临时目录没删干净', err.getvalue())
+        finally:
+            deps.temp.cleanup()
+
     def test_content_gap_aborts_transaction_and_preserves_current(self):
         current = refresh.seed(self.store, '原创', self.source)
         engine = stages.Stages(self.store)

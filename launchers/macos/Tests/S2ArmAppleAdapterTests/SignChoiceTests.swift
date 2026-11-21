@@ -10,4 +10,11 @@ final class SignChoiceTests: XCTestCase {
         XCTAssertEqual(InstallModeInfo(result: ["signMode": "appleId"]).signChoice, "appleId", "旧作业层不带 signChoice：按 Apple ID")
         XCTAssertEqual(InstallModeInfo().signChoice, "appleId")
     }
+
+    /// 出法没读回（缺省构造）≠ 读回了 shell：界面据此决定两张卡画不画选中（0.6.2 前端走查）
+    func testInstallModeLoadedOnlyFromJobResult() {
+        XCTAssertFalse(InstallModeInfo().loaded)
+        XCTAssertTrue(InstallModeInfo(result: [:]).loaded)
+        XCTAssertEqual(InstallModeInfo(result: ["layout": "standalone"]).layout, "standalone")
+    }
 }

@@ -74,8 +74,9 @@ class ReadP12(unittest.TestCase):
     def test_identity_checks_key_matches_cert(self):
         st = dict(active=True, certSha1="x", teamId="TEAM-CERT")
         d = self.t / "devcert"; d.mkdir(); shutil.copy(self.p12, d / "cert.p12"); (d / "profile.mobileprovision").write_bytes(b"p")
-        with patch.object(devcert, "state", lambda c: st), patch.object(devcert, "folder", lambda c: d), \
-                patch.object(devcert, "secrets", lambda c: types.SimpleNamespace(load=lambda a: PW)):
+        # 多张证书（#487）后 identity 经 stored(c) 取本作业那张（p12、描述文件、密码），按入口替身，不按旧版单张的目录布局
+        with patch.object(devcert, "active", lambda c: st["active"]), patch.object(devcert, "team", lambda c: dict(id=st["teamId"])), \
+                patch.object(devcert, "stored", lambda c, eid=None: (d / "cert.p12", b"p", PW)):
             got = devcert.identity(self.c)
             self.assertEqual((got["key"], got["cert"], got["team"]), (self.want_key, self.want_cert, "TEAM-CERT"))
             self.assertEqual(got["key_fp"], hashlib.sha256(self.p12.read_bytes()).hexdigest()[:16])
@@ -103,7 +104,8 @@ class DevcertDelivery(unittest.TestCase):
         with patch.object(install.layout, "load_device", lambda c, key: dict(self.store.get(key, {}))), \
                 patch.object(install.layout, "save_device", lambda c, key, rec: self.store.__setitem__(key, rec)), \
                 patch.object(install.devcert, "active", lambda c: active), patch.object(install.devcert, "team", lambda c: {"id": "TEAM-CERT"}), \
-                patch.object(install.devcert, "folder", lambda c: self.t), patch.object(install.devcert, "identity", lambda c: ident), \
+                patch.object(install.devcert, "stored", lambda c, eid=None: (self.t / "cert.p12", b"", "pw")), \
+                patch.object(install.devcert, "identity", lambda c: ident), \
                 patch.object(install, "trace", lambda *a, **kw: None):
             return install.deliver_identity(self.c, ph, **k)
 
@@ -149,7 +151,7 @@ class DevcertDelivery(unittest.TestCase):
         ph, _ = self.mac_phone()
         with patch.object(install.layout, "load_device", lambda c, key: {}), \
                 patch.object(install.devcert, "active", lambda c: True), patch.object(install.devcert, "team", lambda c: {"id": "TEAM-CERT"}), \
-                patch.object(install.devcert, "folder", lambda c: self.t), patch.object(install.devcert, "identity", bad), \
+                patch.object(install.devcert, "stored", lambda c, eid=None: (self.t / "cert.p12", b"", "pw")), patch.object(install.devcert, "identity", bad), \
                 patch.object(install, "trace", lambda *a, **kw: None):
             with self.assertRaises(Failure) as e:
                 install.deliver_identity(self.c, ph, strict=True)

@@ -110,7 +110,7 @@ enum { RP_PERF_SUBMIT_NS, RP_PERF_COMMIT_NS, RP_PERF_SUBS, RP_PERF_WAIT_NS, RP_P
        RP_PERF_UBO_N, RP_PERF_UBO_KB, RP_PERF_UBO_C1_N,   // 常量缓冲暂存的次数 / 千字节 / 其中程序自带常量段（C1）的次数
        RP_PERF_BUF_GPU_ORDER_N, RP_PERF_UBO_MIRROR_N,   // 改 / 拷游戏内存的命令因还没落地的 GPU 写改在 GPU 上做的次数；常量缓冲因此直接绑镜像的次数（#1022）
        RP_PERF_UBO_FILL_N, RP_PERF_UBO_FILL_WAIT_N,   // 其中交给后端异步填的次数（nvn_gpu_arena_fill）/ 改游戏内存前因区间重叠等它填完的次数（rp_ub_fill_fence）
-       RP_PERF_UBO_FILL_STEAL_N, RP_PERF_UBO_FILL_STEAL_B, RP_PERF_UBO_FILL_BUSY_N,   // 其中回放线程自己代拷的笔数 / 字节（nvn_gpu_arena_fill_take）/ 撞上录制线程正在拷、等它拷完的次数
+       RP_PERF_UBO_FILL_STEAL_N, RP_PERF_UBO_FILL_STEAL_B, RP_PERF_UBO_FILL_BUSY_N, RP_PERF_UBO_STAGED_B,   // 其中回放线程自己代拷的笔数 / 字节（nvn_gpu_arena_fill_take）/ 撞上录制线程正在拷、等它拷完的次数；段内切片表没认回、真落进暂存区的字节（含异步填、就地拷、程序自带常量段）
        RP_PERF_BUF_FAST_N, RP_PERF_BUF_SLOW_N, RP_PERF_BUF_NOSPAN_N, RP_PERF_BUF_PAGES_N,   // 缓冲解析：快路命中 / 走逐页慢路 / 不受写跟踪 / 慢路里一共查了多少页
        RP_PERF_BUF_NOSPAN_FRESH_N,   // 其中不受写跟踪的池里、这一段本次提交里都同步过而免传的次数（page_fresh）
        RP_PERF_BUF_LOG_EV, RP_PERF_BUF_LOG_WORDS, RP_PERF_BUF_LOG_REBUILD,   // 脏页追加日志（nvk_buf_dirtylog）：灌进镜像的事件数 / 求交时看的位图字数 / 日志不可用、按逐页代号重建的次数

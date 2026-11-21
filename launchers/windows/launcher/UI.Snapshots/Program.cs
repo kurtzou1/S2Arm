@@ -36,13 +36,19 @@ var dismissProbe = args.Length > 0 && args[0] == "--dismiss-probe";
 var installActionProbe = args.Length > 0 && args[0] == "--install-action-probe";
 // --details-probe <目录>：装机卡片「详细过程」点开后不被进度事件刷新收起（D-237B，DetailsProbe.cs）
 var detailsProbe = args.Length > 0 && args[0] == "--details-probe";
-if (reportProbe || buildRouteProbe || dismissProbe || installActionProbe || detailsProbe) args = args[1..];
+// --console-probe <目录>：首位 S2Arm 总控台窄窗 / 英文不被裁、页顶不写长编号（0.6.2 前端走查，ConsoleProbe.cs）
+var consoleProbe = args.Length > 0 && args[0] == "--console-probe";
+// --update-export-probe <目录>：游戏库「更新 / 导出」两件事（0.6.4 改版：大卡三态、导出确认页设备行、开始后起的单、逐台结果，UpdateExportProbe.cs）
+var updateExportProbe = args.Length > 0 && args[0] == "--update-export-probe";
+// --walk-probe <目录>：玩家走查截图（6 个角色从打开启动器走到手机上玩，每步整页 PNG + 屏幕文字，WalkProbe.cs）
+var walkProbe = args.Length > 0 && args[0] == "--walk-probe";
+if (reportProbe || buildRouteProbe || dismissProbe || installActionProbe || detailsProbe || consoleProbe || updateExportProbe || walkProbe) args = args[1..];
 var outDir = args.Length > 0 ? args[0] : Path.Combine(
     Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
     ".s2arm/run/s2arm/cmdr/evidence/launcher/win");
 Directory.CreateDirectory(outDir);
 
-// 顶部选中游戏三按钮断言（v0.4.5 修）：有横图 / 无横图两个分支里都要找得到「推到 iPhone」与「导出自签包」；不通过时末尾退出 1
+// 顶部选中游戏按钮断言（v0.4.5 修；0.6.4 改成「更新 / 导出」两件事）：有横图 / 无横图两个分支里都要找得到「导出…」、找不到「推到 iPhone」「导出自签包」；不通过时末尾退出 1
 var heroActionFailures = new List<string>();
 
 AppBuilder.Configure<SnapshotApp>()
@@ -58,6 +64,9 @@ if (buildRouteProbe) { Environment.Exit(BuildRouteProbe.Run(outDir)); }
 if (dismissProbe) { Environment.Exit(DismissProbe.Run(outDir)); }
 if (installActionProbe) { Environment.Exit(InstallActionProbe.Run(outDir)); }
 if (detailsProbe) { Environment.Exit(DetailsProbe.Run(outDir)); }
+if (consoleProbe) { Environment.Exit(ConsoleProbe.Run(outDir)); }
+if (updateExportProbe) { Environment.Exit(UpdateExportProbe.Run(outDir)); }
+if (walkProbe) { Environment.Exit(WalkProbe.Run(outDir)); }
 
 // ── 统一夹具游戏（不用固定游戏名字符串以外的占位）────────────────────
 static LibraryGame MockGame(bool keysReady = true) => new(
@@ -215,24 +224,21 @@ SaveP("win_04c_export_success_sgrade", () => Navigate(pack, "progress"));
 SetW(pack, "packBoost", null);
 SetW(pack, "packNotes", (object?)new List<string>());
 
-// 导出自签包（11-15 起不是装法）：「导出自签包」点在没出过包的款上，出包进度最后一步是「整理 iPhone 版程序与资源包」、完成页主按钮与说明照导出写
-var selfSignSet = (HashSet<string>)GetW(pack, "selfSignAfterPack")!;
-selfSignSet.Add(MockGame(false).Id);
+// 导出到文件夹前先做 iPhone 版（0.6.4 导出确认页起的一单）：出包进度最后一步是「整理 iPhone 版程序与资源包」
 InjectMockProgress(pack, fraction: 0.85, stepIndex: 2, running: true, exportMode: true);
 SaveP("win_04c_export_selfsign_progress", () => Navigate(pack, "progress"));
 InjectMockProgress(pack, fraction: 1.0, stepIndex: -1, running: false, state: "succeeded",
     ipaBytes: 1_200_000_000L, packBytes: 3_400_000_000L, elapsed: 247, exportMode: true);
 SaveP("win_04d_export_selfsign_success", () => Navigate(pack, "progress"));
-selfSignSet.Clear();
 
 InjectMockProgress(pack, fraction: 0.12, stepIndex: 0, running: false, state: "failed",
     summary: "磁盘空间不足，无法继续出包。");
 SaveP("win_05_export_failed", () => Navigate(pack, "progress"));
 
 InjectMockGame(pack, ready: true);
-SaveP("win_06_library_iphone_ready", () => Navigate(pack, "library"));   // 大卡：装到 iPhone + 导出自签包 + 出包
+SaveP("win_06_library_iphone_ready", () => Navigate(pack, "library"));   // 大卡：更新（做过 iPhone 版才有）+ 导出… + 出包
 CheckHeroActions(pack, "无横图的选中游戏", heroActionFailures);
-// 顶部大图带操作按钮（v0.4.5 修）：有横图的选中游戏顶部也常驻「装到 iPhone / 导出自签包 / 出包」三个按钮。
+// 顶部大图带操作按钮（v0.4.5 修）：有横图的选中游戏顶部也常驻「更新 / 导出… / 出包」。
 //   横图是代码里合成的纯色渐变图（仓库里不放商店图）；夹具游戏名用通用占位，不用真游戏名
 {
     const string syntheticBannerPngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAUAAAAC0CAIAAABqhmJGAAAC0ElEQVR42u3TWU4UAQAA0T6CO4ODgIDIIruKqIiKuCtu9z+Lc4X+mlTykneCSmrYfPoPiBokAAMDcxn45C8QZWAoD/zo5C8QZWBoD/wHiDIwpAc+/gNEGRjaA/8GogwM5YE3jn8DUQaG9MBHv4AoA4OBAQMDYwe+BqIMDOWB1w+vgSgDQ3vgn0CUgcHAgIGBkQMf/ACiDAzlgdcOfgBRBob2wN+BKANDeuD970CUgaE98DcgysBQHvjh/jcgysCQHnjvKxBlYDAwYGBg7MBfgCgDQ3ng1SdfgCgDQ3vgz0CUgcHAgIGBkQPvfgKiDAzlgVd2PwFRBob2wB+BKANDeuCdj0CUgaE98BUQZWAwMDCXgZd3roCoYXn7CoiaDfwBiDIwGBgwMDB24EsgaljeugSihgdbl0CUgaE98HsgysBgYGA+Az9+D0TNBn4HRBkYygMvPX4HRBkY2gO/BaKGpc23QJSBwcDAnAa+AKIMDOWBp5sXQNQwfXQBRM0GfgNEGRgMDBgYGDvwORA1TDfOgajh/sY5EGVgaA/8GogyMBgYmM/A66+BqNnAr4AoA0N54MX1V0CUgaE98EsgalhcewlEGRgMDMxp4DMgysBQHniydgZEDZOHZ0DUbOAXQJSBwcCAgYGxA58CUcNk9RSIGhZWT4EoA4OBgTkN/ByIMjCkB155DkQZGNoDPwOiDAzlge+tPAOiDAzpgZefAlEGBgMDBgbGDnwCRBkYygPffXACRBkY2gMfA1EGBgMDBgZGDrx0BEQZGMoD31k6AqIMDO2BD4EoA0N64OkhEGVgaA98AEQZGMoD354eAFEGhvTA9/eBKAODgQEDA2MH3gOiDAzlgW8t7gFRBob2wE+AKAODgQEDAyMHnuwCUQaG8sA3J7tAlIGhPfAOEGVgSA+8sANEGRjaA28DUQaG8sA3FraBKANDeuB7W0CUgcHAwDz8B+xdxHNM+cLrAAAAAElFTkSuQmCC";
@@ -512,7 +518,7 @@ Dispatcher.UIThread.RunJobs();
 if (heroActionFailures.Count > 0)
 {
     foreach (var failure in heroActionFailures) Console.Error.WriteLine("  FAIL hero actions: " + failure);
-    Console.WriteLine("✗ 顶部选中游戏三按钮断言：不通过 " + heroActionFailures.Count);
+    Console.WriteLine("✗ 顶部选中游戏按钮断言：不通过 " + heroActionFailures.Count);
     Environment.Exit(1);
 }
 Console.WriteLine("done.");
@@ -543,18 +549,17 @@ static void CallW(object target, string method, params object?[] methodArgs)
 static void Navigate(EnvironmentWindow w, string pg)
     => w.GetType().GetMethod("Navigate", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(w, [pg]);
 
-// 顶部选中游戏三按钮断言：当前渲染的游戏库页里，顶部「推到 iPhone」与「导出自签包」都要找得到；
-//   夹具只有一款游戏：列表行自带一个「推到 iPhone」（Action 共用 library.hero.install 键），所以顶部按钮在时装到 iPhone 应出现 2 次、导出自签包 1 次（只数出现次数会把行按钮也算进来，数 1 次不够）。
+// 顶部选中游戏按钮断言：当前渲染的游戏库页里，顶部「导出…」要找得到、旧的「推到 iPhone」「导出自签包」不能再有；
+//   夹具只有一款游戏：列表行也有一颗「导出…」（同一个自动化 id library.hero.export），所以应出现 2 次
 //   有横图时还要确认真画了横图（而不是横图解码失败悄悄退回封面卡片）——HeroBanner 用 DecodeToWidth(…, 1600)，横图宽应为 1600
 static void CheckHeroActions(EnvironmentWindow window, string label, List<string> failures, bool expectBanner = false)
 {
     var images = window.GetVisualDescendants().OfType<Image>().ToList();
     var ids = window.GetVisualDescendants().OfType<Button>()
         .Select(b => Avalonia.Automation.AutomationProperties.GetAutomationId(b)).ToList();
-    var installCount = ids.Count(id => id == "library.hero.install");
-    var selfSignCount = ids.Count(id => id == "library.hero.selfSign");
-    if (installCount < 2) failures.Add($"{label}：顶部「推到 iPhone」缺失（library.hero.install 出现 {installCount} 次，含列表行应为 2 次）");
-    if (selfSignCount < 1) failures.Add($"{label}：找不到 library.hero.selfSign");
+    var exportCount = ids.Count(id => id == "library.hero.export");
+    if (exportCount < 2) failures.Add($"{label}：顶部「导出…」缺失（library.hero.export 出现 {exportCount} 次，含列表行应为 2 次）");
+    if (ids.Any(id => id is "library.hero.install" or "library.hero.selfSign")) failures.Add($"{label}：还有旧的「推到 iPhone / 导出自签包」");
     if (expectBanner)
     {
         var widths = images.Select(i => i.Source is Bitmap b ? b.PixelSize.Width : -1).ToList();

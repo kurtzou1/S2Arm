@@ -41,6 +41,17 @@ static int fail(char *why, size_t n, const char *text) {
     return -1;
 }
 
+// 支持范围的下限：物理设备（GPU 驱动）至少 Vulkan 1.1。loader 是 1.1 不代表 GPU 是（老 Mali / Adreno 5xx 驱动报 1.0），
+//   只查 loader 时这类设备会一路走到后面的特性检查或建管线才失败、原因看不懂。0 = 够；-1 = 不够，why 写明 GPU 报的版本。
+//   原因串开头的英文短语是契约：外壳 PlayerError.stopText 按它认出来、给玩家换成看得懂的话（android/tests/vk_api_floor_test.sh 核两边一致）。
+static int physical_api_floor(uint32_t api, char *why, size_t n) {
+    if (api >= VK_API_VERSION_1_1) return 0;
+    char text[160];
+    snprintf(text, sizeof text, "GPU supports only Vulkan 1.0 (apiVersion=%u.%u.%u), outside the supported range (Vulkan 1.1+ required)",
+             VK_API_VERSION_MAJOR(api), VK_API_VERSION_MINOR(api), VK_API_VERSION_PATCH(api));
+    return fail(why, n, text);
+}
+
 // 扩展查询（physical 为空 = 实例扩展，否则 = 该物理设备的设备扩展）：1 = 有，0 = 确实没有（枚举完整成功且不在表里），
 //   -1 = 能力未知（枚举失败；why 写原因）。第二次取数回 VK_INCOMPLETE（两次调用之间表变长）按新的数目重取，最多 4 轮；部分结果不拿来判「没有」
 static int extension_state(VkPhysicalDevice physical, const char *name, char *why, size_t why_n) {
@@ -74,6 +85,8 @@ static int has_extension(VkPhysicalDevice physical, const char *name) {
 static int has_instance_extension(const char *name) { return has_extension(VK_NULL_HANDLE, name); }
 static int has_device_extension(VkPhysicalDevice physical, const char *name) { return has_extension(physical, name); }
 
+// 弱链接[capshape]：nvn_plat_vk_instance_exts（宿主能力形态档 android/tests/caps_shape 不链平台件，靠弱符号为空）
+// 弱链接[capshape]：s2a_android_vk_custom_driver_prepare
 const char *const *nvn_plat_vk_instance_exts(uint32_t *n) __attribute__((weak));
 
 // ---------- 调试：Khronos 校验层（开关 debug.s2a.vk_validation=1，默认关） ----------
@@ -191,6 +204,7 @@ int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) 
     out->physical = physicals[0];   // 首个＝系统主 GPU；多 GPU 选择是 C8，不在首版猜。
     free(physicals);
     vkGetPhysicalDeviceProperties(out->physical, &out->properties);
+    if (physical_api_floor(out->properties.apiVersion, why, why_size)) return -1;
     vkGetPhysicalDeviceMemoryProperties(out->physical, &out->memory);
     out->has_2d_array_compatible = out->properties.apiVersion >= VK_API_VERSION_1_1 ||
                                    has_device_extension(out->physical, "VK_KHR_maintenance1");

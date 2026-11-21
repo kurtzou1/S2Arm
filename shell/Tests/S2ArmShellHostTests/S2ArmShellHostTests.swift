@@ -446,7 +446,7 @@ nonisolated(unsafe) private var lastPlayed = ""
     let stray = try #require(model.games.last?.game)
     #expect(["丙游戏", "Gamma"].contains(stray.title))
     #expect([GameState.broken(reason: "需要在原来那台电脑上重装", detail: "这款是在另一台电脑上装的，存档和游戏资源都还在这台 iPhone 上；到那台电脑上再点一次「装到 iPhone」就能回来。"),
-             .broken(reason: "Reinstall from the original computer", detail: "This game was installed from another computer. Its saves and game data are still on this iPhone; on that computer, choose “Push to iPhone” again to bring it back.")].contains(stray.state))
+             .broken(reason: "Reinstall from the original computer", detail: "This game was installed from another computer. Its saves and game data are still on this iPhone; in S2Arm on that computer, click “Export…” for this game, tick this iPhone and start to bring it back.")].contains(stray.state))
     model.actions.onPlay(c)
     #expect(played.isEmpty)
 }

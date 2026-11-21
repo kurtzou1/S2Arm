@@ -67,6 +67,14 @@ public struct PhoneOverview: Equatable {
         public let candidates: [Candidate]
         /// 这台上的独立 App（按游戏号排）；旧作业层不带 = 空
         public var apps: [App] = []
+        /// 设备类型（作业 kind，0.6.4）：「iPhone」/「iPad」；读不到为 nil，界面写「设备」，不写死 iPhone
+        public var kind: String? = nil
+        /// 手机上的 S2Arm 导入了签名证书没有（作业 certImported）；作业不带为 nil，导出确认页再看候选里同包名那一个的 certImported
+        public var certImported: Bool? = nil
+        /// 这台的 S2Arm 有没有导入签名证书：作业直给的 > 候选里同包名那一个 > 不知道（nil）
+        public var signCertImported: Bool? {
+            certImported ?? candidates.first(where: { $0.bundleId == bundleId && !bundleId.isEmpty })?.certImported
+        }
         public init(device: String, name: String, installed: Bool, shellCurrent: Bool, bundleId: String, signedAt: Date?, free: Bool,
                     expiresAtEstimate: Date?, online: String??, lastSeen: Date?, signMode: SignMode?, games: [Game],
                     installedBy: InstalledBy? = nil, actions: [String] = [], needsChoice: Bool = false, candidates: [Candidate] = []) {
@@ -104,6 +112,8 @@ public struct PhoneOverview: Equatable {
                          installedBy: (p["installedBy"] as? String).flatMap(InstalledBy.init), actions: p["actions"] as? [String] ?? [],
                          needsChoice: p["needsChoice"] as? Bool == true, candidates: candidates)
             phone.apps = apps
+            phone.kind = (p["kind"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            phone.certImported = p["certImported"] as? Bool
             return phone
         }
     }
