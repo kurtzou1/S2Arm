@@ -1,0 +1,72 @@
+name: Sync fork with upstream
+
+on:
+  schedule:
+    # Every 15 minutes (UTC). Best-effort: GitHub may delay scheduled runs under high load.
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-fork
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Merge upstream/main into main (never force) and keep only the fork's own workflows
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://x-access-token:${GH_TOKEN}@github.com/jhaizhou-ops/S2Arm.git"
+          git fetch upstream main
+          UP=$(git rev-parse upstream/main)
+          echo "upstream/main = ${UP}"
+
+          if git merge-base --is-ancestor "${UP}" HEAD; then
+            echo "main already contains upstream/main — no merge needed"
+          else
+            if ! git merge --no-edit "${UP}"; then
+              echo "::warning::merge conflicted — resolving .github/workflows by keep-list"
+              shopt -s nullglob
+              for f in .github/workflows/*.yml .github/workflows/*.yaml; do
+                [ "$f" = ".github/workflows/sync-fork.yml" ] && continue
+                [ "$f" = ".github/workflows/pr-branch-cleanup.yml" ] && continue
+                git rm -q --ignore-unmatch -- "$f" 2>/dev/null || true
+              done
+              LEFT=$(git diff --name-only --diff-filter=U || true)
+              if [ -n "${LEFT}" ]; then
+                echo "::error::unresolved conflicts outside .github/workflows: ${LEFT}"
+                git merge --abort
+                exit 1
+              fi
+              git commit --no-edit
+            fi
+          fi
+
+          # Keep-list hygiene: a merge may re-introduce inherited upstream workflow files.
+          shopt -s nullglob
+          for f in .github/workflows/*.yml .github/workflows/*.yaml; do
+            [ "$f" = ".github/workflows/sync-fork.yml" ] && continue
+            [ "$f" = ".github/workflows/pr-branch-cleanup.yml" ] && continue
+            git rm -q --ignore-unmatch -- "$f" 2>/dev/null || true
+          done
+          if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+            git commit -m "chore(sync): drop inherited upstream workflow files (keep fork lean)"
+          fi
+
+          git push origin main
+          echo "main is in sync with upstream/main (merge-based, no force push)"
+# rev3: merge-based sync (never reset/force) + keep-list hygiene; the disappearance
+# of rev2's files on 2026-11-15 was caused by a history rewrite of main, which
+# branch protection (no force pushes on main) now blocks.
