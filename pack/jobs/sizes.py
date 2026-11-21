@@ -75,7 +75,7 @@ def measure(c, gid, games=None, with_categories=True):
 #   cache       缓存：出包工作目录、运行时着色器缓存、这款的直连 / 编译缓存（不含各款共用的）、诊断与收回的程序——删了下次用到时现建
 #   四类共用一份去重状态，量的顺序 resources → programs → playerData → cache：克隆 / 硬链接共享的块记在资源上（玩家看到资源是真大小，缓存只记它独占的）
 CATEGORIES = ("resources", "programs", "playerData", "cache")
-CACHE_NAMES = ("build", "shader-cache", "direct-cache", "aoc-cache", "seen", "nro_kept", "diagrun", "downstream")   # 这款文件夹里归缓存的各项（出包工作目录不在这款文件夹的由 _build_entries 给出）
+CACHE_NAMES = ("build", "shader-cache", "direct-cache", "aoc-cache", ".work-tmp", "seen", "nro_kept", "diagrun", "downstream")   # 这款文件夹里归缓存的各项（出包工作目录不在这款文件夹的由 _build_entries 给出）
 
 
 def export_files(c, gid):

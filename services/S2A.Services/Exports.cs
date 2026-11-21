@@ -645,7 +645,8 @@ namespace S2A.Services
 
         internal static IHardwareDeviceDriver CreateAudioDriver()
         {
-            if (AudioFactory != null) return AudioFactory();
+            // 平台驱动包一层 AudioFallbackDriver：起不来 / 中途没了改无声输出、打一条红行，不结束游戏（AudioFallback.cs）
+            if (AudioFactory != null) return AudioFallbackDriver.Create(() => AudioFactory());
             Red.Report("声音输出工厂没有登记，使用哑设备", allowFailFast: false);
             return new DummyHardwareDeviceDriver();
         }

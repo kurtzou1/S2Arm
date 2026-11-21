@@ -22,8 +22,8 @@
 #include <os/proc.h>
 #endif
 
-// GPU 已分配（Metal 设备 currentAllocatedSize，直连层 graphics/nvn nvn_mtl.m 强定义）：和进程实占是两本账——内存池的零拷贝缓冲、贴图都记在这里，
-//   没有直连层 / 设备还没建 = 0（浮层就只写进程实占）
+// GPU 已分配（直连层 graphics/nvn nvn_mtl.m 强定义）：Metal 设备 currentAllocatedSize 减去零拷贝缓冲——贴图、我们自己分配的缓冲记在这里；
+//   内存池的零拷贝缓冲就是游戏内存（已在进程实占里），Metal 按每个缓冲全长、重叠的块重复记，不算进来（#1827）。没有直连层 / 设备还没建 = 0（浮层就只写进程实占）
 __attribute__((weak)) uint64_t s2a_gpu_alloc_bytes(void) { return 0; }
 // 上屏时间戳环在 ap_host.c（逐帧路径只依赖它自己；只链 ap_host 的单测不用带上本文件）：写方只有上屏线程，界面线程按序号读，读到被覆盖的就停
 enum { HR = 2048 };

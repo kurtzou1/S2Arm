@@ -235,6 +235,18 @@ class SpaceMeasured(JobCase):
         with patch.object(library.layout, "find_game", return_value=None):
             self.assertEqual(library.direct_cache_dir(c, GID), tool)
 
+    def test_scratch_follows_game_volume(self):
+        # D-NDV5（Windows 0.6.1）：游戏库设在别的盘，「更新」几款时重编着色器库的临时活写到系统盘。临时目录同直连缓存跟着游戏走（期望手写）：
+        #   同一块盘 → 工具缓存 tmp/；游戏在另一块盘 → 这款文件夹第一层 .work-tmp/；目录当场建好
+        c = self.context("installUpdate")
+        game_dir = Path(self.root) / "ext" / "games" / GID
+        with patch.object(library, "direct_cache_dir", return_value=c.work_root / "run" / "s2arm" / "cache" / "direct" / GID):
+            self.assertEqual(library.scratch_root(c, GID), c.work_root / "tmp")
+        with patch.object(library, "direct_cache_dir", return_value=game_dir / "direct-cache"):
+            got = library.scratch_root(c, GID)
+        self.assertEqual(got, game_dir / ".work-tmp")
+        self.assertTrue(got.is_dir())
+
     def test_aoc_cache_follows_game_volume(self):
         # #1725（诊断 D-K82N）：游戏库在外接盘，DLC 解到工具缓存（系统盘）写满。追加内容缓存同直连缓存跟着游戏走：
         #   同一块盘 → 工具缓存下的 cache/aoc（同原来）；游戏在另一块盘 → 这款文件夹第一层 aoc-cache/；还没有游戏文件夹 → 工具缓存；出包环境把它交给 S2A_AOC_CACHE

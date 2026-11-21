@@ -4,7 +4,7 @@
   --gap-from：缺口原因从抽取日志里取（最后一行「直连库失败：…」），写进缺口原因文件
 出：<输出目录>/b-<链号>/lib.idx 空容器（48 字节头、0 条 0 分片，graphics/nvn/lib_pack.inc）+ b-<链号>/inputs.tsv 戳 + 空 shader_map.tsv / keys.tsv + 空答案表 / 配对表
   + game.tsv（给了配置档才拷）+ runtime_only.txt（原因）。标签写 auto：按缺口原因文件内容算（x + sha256 前 11 位）。
---swap-to：输出目录先清空重建，做完换进正式输出目录（同 direct_lib.sh swap_out：没有就改名；有就三步改名，换下的旧版本落在输出目录名）、
+--swap-to：输出目录先清空重建，做完换进正式输出目录（同 direct_lib.py swap_out：没有就改名；有就三步改名，换下的旧版本落在输出目录名）、
   工作目录里的 *.log 拷进 <缓存目录>/logs。
 为什么不用 bash（v0.3.0 Windows 8 GB 机：直连抽取 MemoryError 后走这条兜底，bash 起 rm 时 cygwin fork 失败 Win32 299，兜底一起倒、整单失败）：
   兜底必须在内存吃紧时也做得完，只起这一个进程"""
@@ -49,7 +49,7 @@ def main(argv):
         try:
             with open(opts['--gap-from'], encoding='utf-8', errors='replace') as f: hits = [l for l in f if '直连库失败：' in l]
         except OSError: hits = []
-        gap = hits[-1][hits[-1].index('直连库失败：'):].rstrip('\n')[:260] if hits else '直连库失败：extract.sh 退 3 没写原因'
+        gap = hits[-1][hits[-1].index('直连库失败：'):].rstrip('\n')[:260] if hits else '直连库失败：extract.py 退 3 没写原因'
         with open(why, 'w', encoding='utf-8', newline='\n') as f: f.write(gap + '\n')
     if tag == 'auto':
         with open(why, 'rb') as f: tag = 'x' + hashlib.sha256(f.read()).hexdigest()[:11]

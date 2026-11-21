@@ -1506,7 +1506,9 @@ class AssembleTests(unittest.TestCase):
 
     def test_install_mode_job_reads_signing_and_drops_old_setting(self):
         """11-15 导出不再是装法：installMode 作业只回签名身份；旧版留下的 install.json（装法设置）迁移时删掉，之后导不导出只看请求带的 mode"""
-        self.assertEqual(install.install_mode_job(self.c), dict(exportAvailable=True, signMode="appleId", signChoice="appleId"))
+        self.assertEqual(install.install_mode_job(self.c), dict(exportAvailable=True, signMode="appleId", signChoice="appleId",
+                                                              layout="shell", layoutChoice={}, distribution=False, standaloneHint="appleId",
+                                                              recommend=None, recommendWhy="unknown"))
         self.assertFalse((self.c.private / "install.json").exists(), "旧装法设置迁移一次就删")
         self.assertFalse(install.wants_export(self.c), "没带 mode：一键装")
         self.c.r = dict(self.c.r, mode="export"); self.assertTrue(install.wants_export(self.c))

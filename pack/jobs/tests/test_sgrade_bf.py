@@ -18,6 +18,11 @@ import sgrade_bf
 from core import Failure
 
 
+def setUpModule():
+    # 临时目录放哪（library.scratch_root，跟着游戏走）另在 test_space_measured 测；这里的合成作业没有游戏库，临时活放私有目录
+    p = patch.object(sgrade_bf, "_scratch", lambda c, g: c.private); p.start(); unittest.addModuleCleanup(p.stop)
+
+
 class AddToPack(unittest.TestCase):
     def test_rows_under_prefix_replaced_and_manifest_rewritten(self):
         with tempfile.TemporaryDirectory() as t:
@@ -180,13 +185,17 @@ class RechainIos(unittest.TestCase):
         self.info = {"ios": {"dmshChain": "old", "pack": "pid0", "bfGen": 0, "shellId": "S", "libGen": host_update.LIB_GEN}}
         self.c = types.SimpleNamespace(emit=lambda *a, **k: None, private=str(t), logs=str(t), task="t")
 
-    def run_rechain(self, chain="new", src=True, rebuilt=None):
+    BUILT = {"version": "9.9.9", "display": "9.9.9"}   # 本版启动器（桩）：重编后记进 builtBy
+
+    def run_rechain(self, chain="new", src=True, rebuilt=None, ios_miss=0, cur="9.9.9"):
         calls = []
         def inputs(c, gid, work):
             return (Path(work) / "root", "game.img") if src else (None, "none")
         def build(c, gid, s, plat, work):
             calls.append(plat); return rebuilt or self.new
         with patch("host_update.engine_compat", lambda c: dict(hostAbi=1, dmshChain=chain)), \
+                patch("host_update.shader_misses", lambda c, g: dict(ios=ios_miss, mac=0)), patch("host_update.built_by", lambda c: self.BUILT), \
+                patch("core.release_version", lambda engine: cur), patch.object(self.c, "engine", None, create=True), \
                 patch.object(sgrade_bf.layout, "game_info", lambda c, g: self.info), patch.object(sgrade_bf.layout, "ios_pack", lambda c, g: self.pack), \
                 patch.object(sgrade_bf.layout, "update_info", lambda c, g, ios: self.info.update(ios=ios)), \
                 patch.object(sgrade_bf, "ios_inputs", inputs), patch.object(sgrade_bf, "rebuild", build):
@@ -210,7 +219,7 @@ class RechainIos(unittest.TestCase):
         pid = hashlib.sha256(ix.encode()).hexdigest()
         self.assertEqual(json.loads((self.pack / "manifest.json").read_text(encoding="utf-8"))["index_sha256"], pid)
         import host_update
-        self.assertEqual(self.info["ios"], {"dmshChain": "new", "pack": pid, "bfGen": sgrade_bf.BF_GEN, "shellId": "S", "libGen": host_update.LIB_GEN})
+        self.assertEqual(self.info["ios"], {"dmshChain": "new", "pack": pid, "bfGen": sgrade_bf.BF_GEN, "shellId": "S", "libGen": host_update.LIB_GEN, "builtBy": self.BUILT})
         self.assertFalse((self.pack / "shaders/.direct-old").exists() or (self.pack / "shaders/.direct-new").exists(), "不留临时目录")
 
     def test_same_chain_old_lib_generation_rebuilds(self):
@@ -220,6 +229,24 @@ class RechainIos(unittest.TestCase):
         r, calls = self.run_rechain(chain="old")
         self.assertEqual((r, calls), ("updated", ["ios"]))
         self.assertEqual((self.info["ios"]["dmshChain"], self.info["ios"]["libGen"]), ("old", host_update.LIB_GEN))
+
+    def test_shader_miss_on_old_build_rebuilds(self):
+        # 期望（手写，#1756）：链号、代数都是当前的，但手机上现场翻译过 3 支包里没有的着色器、库是 0.5.8 出的（本版 9.9.9）
+        #   → 只重编着色器库、记本版 builtBy（「建议更新」的 shaderMiss 随之消掉）；链号不变
+        self.info["ios"]["builtBy"] = {"version": "0.5.8", "display": "0.5.8"}
+        r, calls = self.run_rechain(chain="old", ios_miss=3)
+        self.assertEqual((r, calls), ("updated", ["ios"]))
+        self.assertEqual((self.info["ios"]["dmshChain"], self.info["ios"]["builtBy"]), ("old", self.BUILT))
+
+    def test_shader_miss_on_current_build_skips(self):
+        # 期望手写：现场翻译过、但库已是本版出的（9.9.9）→ 重编也补不上（出包流程的事），不重编
+        self.info["ios"]["builtBy"] = dict(self.BUILT)
+        self.assertEqual(self.run_rechain(chain="old", ios_miss=3), ("skip", []))
+
+    def test_no_miss_old_build_skips(self):
+        # 期望手写：库是旧版出的、但手机上没现场翻译过（0 支）→ 不重编（不因版本旧白跑几十分钟）
+        self.info["ios"]["builtBy"] = {"version": "0.5.8", "display": "0.5.8"}
+        self.assertEqual(self.run_rechain(chain="old", ios_miss=0), ("skip", []))
 
     def test_no_material_unavailable_and_untouched(self):
         before = (self.pack / "index.tsv").read_text(encoding="utf-8")

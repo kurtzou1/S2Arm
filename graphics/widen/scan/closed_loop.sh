@@ -33,7 +33,7 @@ G=${1:?款}; D=${2:?局目录}; SITES=${3:?点集}; FR=${4:?录像帧 a-b 或 ma
 #   10-25 动森 3.0.3：探测局 MARK 在 1800、闭环局在 1579，按探测局定死的 1950-1953 录到的不是场景，⑤ 退到截图口径判不过）
 case $FR in mark+*:*) NFR=${FR##*:};; *-*) NFR=$(( ${FR#*-} - ${FR%-*} + 1 ));; *) echo "🔴 录像帧 $FR 不认（a-b 或 mark+K:N）"; exit 2;; esac
 MODE=${S2A_LOOP_MODE:?S2A_LOOP_MODE=docked|handheld（产品档位；起局设服务层 S2A_DOCKED=1/0，服务接入线 95710dc）}; case $MODE in docked|handheld) ;; *) echo "🔴 S2A_LOOP_MODE 只认 docked / handheld"; exit 2;; esac
-H=$(cd "$(dirname "$0")" && pwd); R=$(cd "$H/../../.." && pwd); T=${S2A_RUN_TREE:-$R}; W=${S2A_SCREEN_W:-2346}; PY=/usr/bin/python3
+H=$(cd "$(dirname "$0")" && pwd); R=$(cd "$H/../../.." && pwd); source "$R/pack/roots.sh"; T=${S2A_RUN_TREE:-$R}; W=${S2A_SCREEN_W:-2346}; PY=/usr/bin/python3
 PYS=${S2A_PYTHON:-${S2A_PY:-$(bash "$R/tools/machine.sh" get S2A_PY 2> /dev/null)}}; PYS=${PYS:-$(command -v python3)}   # 读原版 NSO 要 lz4（widen_sig.py），同 pack/stage_rewrite.sh 口径
 PYA=$(command -v python3); "$PYA" -c "import numpy, PIL" 2>/dev/null || { echo "🔴 $PYA 缺 numpy / PIL（tests/visual 量具要用）"; exit 75; }
 mkdir -p "$D"; : > "$D/verdict.tsv"
@@ -41,12 +41,12 @@ export COST_LINE=${COST_LINE:-画幅} COST_WHY=${COST_WHY:-"宽屏第二层闭�
 REJ=0; [ "$WRITE" = --rejudge-write ] && REJ=1
 if [ "$WRITE" = --rejudge-write ]; then   # 离线重判：局目录里必须有上次起局留下的 host.log / 录像 / 候选表 / 构建号
   [ -s "$D/host.log" ] && [ -s "$D/widen_sites.tsv" ] && [ -s "$D/bid" ] || { echo "🔴 $D 不是跑完的闭环局目录（缺 host.log / widen_sites.tsv / bid）"; exit 75; }
-  src=$(cd -P "${S2A_ROOTS:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/roots}/$G@现行" && pwd); BID=$(cat "$D/bid"); rc=$(cat "$D/rc" 2>/dev/null || echo 0); WRITE=--write
+  src=$(root_cur_in "$S2A_ROOTS" "$G"); BID=$(cat "$D/bid"); rc=$(cat "$D/rc" 2>/dev/null || echo 0); WRITE=--write
   [ "$(xxd -s 0x40 -l 16 -p "$src/exefs/main")" = "$BID" ] || { echo "🔴 现行产物根 main 构建号与局目录不同，不能重判"; exit 75; }
 else
 # 不刷产物根（10-24 维护者 整改：Mac 局复用共享根现有产物，缺的着色器运行时现编；只有改了着色器翻译 / 烘焙才重烘）。S2A_LOOP_REFRESH=1 才刷
 if [ "${S2A_LOOP_REFRESH:-0}" = 1 ]; then bash "$T/pack/refresh.sh" "$G" > "$D/refresh.log" 2>&1 || { echo "🔴 $G 产物根刷新红：$(tail -1 "$D/refresh.log")"; exit 75; }; fi
-src=$(cd -P "${S2A_ROOTS:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/roots}/$G@现行" && pwd); sn=$D/in_snap; rm -rf "$sn"
+src=$(root_cur_in "$S2A_ROOTS" "$G"); sn=$D/in_snap; rm -rf "$sn"
 # 产物根快照只在本脚本跑着时有效（10-29 出包线：局在远端被超时杀掉时第 66 行的删快照没走到，维护方工具 --pull 用 rsync 把整个局目录拉回本机，
 #   克隆变成实拷贝——wire-c/fullbg 6 份 in_snap 每份 26.5 GB、共 159 GB）：任何方式退出都删本局的快照
 trap 'rm -rf "$D/in_snap" "$D"/*/in_snap' EXIT

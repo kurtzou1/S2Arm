@@ -116,14 +116,20 @@ o=$(BP "$T/o3" --os "$MAJ" --arch "$ARCH" --cache "$T/cache" 2>&1); r=$?
 same() { local f; for f in $(want); do cmp -s "$1/$f" "$2/$f" || return 1; done; }
 ck "④ 再跑：缓存命中 4、现编 0、预热对缓存命中、文件逐字节相同（$(tail -1 <<< "$o" | grep -o '缓存命中[^）]*')；$(tail -1 <<< "$o" | grep -o '首查预热对[^；]*')）" \
    '[ $r = 0 ] && [[ "$o" == *"缓存命中 4、现编 0"* ]] && [[ "$o" == *"首查预热对 1 份（缓存命中）"* ]] && same "$T/o1" "$T/o3"'
+# ④b 热缓存先查缓存、不包单函数库：xcrun 套一层记 metallib 次数，只剩首查预热对那 1 次（改前每对的顶点 / 片元模块各包一次）
+mkdir -p "$T/shim"; RX=$(command -v xcrun)
+printf '#!/bin/bash\nfor x in "$@"; do [ "$x" = metallib ] && echo 1 >> "%s/metallib.n"; done\nexec "%s" "$@"\n' "$T" "$RX" > "$T/shim/xcrun"; chmod +x "$T/shim/xcrun"; : > "$T/metallib.n"
+o=$(PATH="$T/shim:$PATH" BP "$T/o3b" --os "$MAJ" --arch "$ARCH" --cache "$T/cache" 2>&1); r=$?
+nm=$(wc -l < "$T/metallib.n" | tr -d ' ')
+ck "④b 热缓存再跑：xcrun metallib 只跑 ${nm} 次（期望 1：预热对），缓存命中 4、文件逐字节相同" '[ $r = 0 ] && [ "$nm" = 1 ] && [[ "$o" == *"缓存命中 4、现编 0"* ]] && same "$T/o1" "$T/o3b"'
 # ⑤
 printf '#!/bin/sh\necho "fake metal-tt: broken" >&2; exit 1\n' > "$T/badtt"; chmod +x "$T/badtt"
 o=$(S2A_METAL_TT=$T/badtt BP "$T/o4" --os "$MAJ" --arch "$ARCH" --cache "$T/cache4" 2>&1); r=$?
 ck "⑤ metal-tt 失败：退出 3、0 个文件、读数失败 4 对、预热对没编成（退出 ${r}，$(ls "$T/o4" 2> /dev/null | wc -l | tr -d ' ') 个文件）" \
    '[ $r = 3 ] && [ -z "$(ls "$T/o4")" ] && [[ "$(tail -1 <<< "$o")" == *"失败 4 对；首查预热对 没编成"* ]]'
 # ⑥ 阶段：假产物根（只有直连库目录与直连库阶段键），私有根
-RT=$T/roots; mkdir -p "$RT/fx@v1/shaders"; cp -R "$F" "$RT/fx@v1/shaders/"; echo k1 > "$RT/fx@v1/.stage_direct"; printf 'title_id\t0100aaaa00000000\n' > "$RT/fx@v1/unpack.tsv"; ln -s fx@v1 "$RT/fx@现行"
-cur() { cd -P "$RT/fx@现行" && pwd; }
+RT=$T/roots; mkdir -p "$RT/fx@v1/shaders"; cp -R "$F" "$RT/fx@v1/shaders/"; echo k1 > "$RT/fx@v1/.stage_direct"; printf 'title_id\t0100aaaa00000000\n' > "$RT/fx@v1/unpack.tsv"; printf '%s\n' fx@v1 > "$RT/fx@现行"
+cur() { cd -P "$RT/$(cat "$RT/fx@现行")" && pwd; }
 stage() { S2A_ROOTS=$RT S2A_ROOTS_SHARED=$T/shared S2A_RUN_ROOT=$T/run S2A_PACK_PLAT=macos S2A_MAC_OS=$MAJ S2A_PSO_ARCHS=$ARCH J=2 bash "$H/pack/stage_direct_cpso.sh" fx 2>&1; }
 o=$(stage); r=$?; [ $r = 0 ] || echo "$o" | tail -5
 ck "⑥ 阶段：退出 ${r}、现行根 pipelines/ 恰是这 4 个 + 预热对两份、记了键（$(grep -o '拉取基础管线归档[^；]*' <<< "$o" | head -1 | cut -c1-100)）" \
@@ -187,5 +193,10 @@ W=$(wc -c < "$T/b1/s2a_warm.metallib" 2> /dev/null | tr -d ' '); W=${W:-0}
 ck "⑧ 全装：退出 ${r}、12 个对文件 + 预热对两份、随包 $((12100 + W)) 字节（W=${W}）、读数没有预算字样（$(tail -1 <<< "$o" | grep -o '出 [0-9]* 对[^；]*')）" \
    '[ $r = 0 ] && [ "$(pfiles "$T/b1")" = "$(files "$S_G|$V7_G|$V6_G|$B_G|$A_G")" ] && [ -s "$T/b1/s2a_warm.mtl4archive" ] && [ "$W" -gt 0 ] \
     && [[ "$(tail -1 <<< "$o")" == *"出 12 对"* ]] && [[ "$o" == *"随包共 $((12100 + W)) 字节"* ]] && [[ "$(tail -1 <<< "$o")" != *预算* ]] && [[ "$(tail -1 <<< "$o")" != *原件* ]]'
+# ⑧f 进度（S2A_PROGRESS）：「直连库·拉取基础管线」按对从 0 计起、12/12 止
+PG="$T/progress.tsv"; : > "$PG"
+o=$(S2A_PROGRESS="$PG" BB "$T/b3p" 2>&1); r=$?
+pg=$(awk -F'\t' '$2 == "直连库·拉取基础管线" { print $3 "/" $4 }' "$PG" | tr '\n' ' ')
+ck "⑧f 进度：直连库·拉取基础管线 ${pg}（期望 0/12 起、12/12 止）" '[ $r = 0 ] && [ "${pg%% *}" = 0/12 ] && [ "$(awk "{print \$NF}" <<< "$pg")" = 12/12 ]'
 echo "t_base_pipelines：$n 项，失败 $fail"
 [ $fail = 0 ]

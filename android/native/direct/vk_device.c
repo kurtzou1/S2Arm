@@ -1,7 +1,13 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L   // clock_gettime / nanosleep（s2a_vk_wait_fences）
 #endif
+#if defined(__OHOS__)
+#define VK_USE_PLATFORM_OHOS 1
+#define S2A_VK_PLATFORM_SURFACE "VK_OHOS_surface"
+#else
 #define VK_USE_PLATFORM_ANDROID_KHR 1
+#define S2A_VK_PLATFORM_SURFACE "VK_KHR_android_surface"
+#endif
 #include "vk_device.h"
 #include "gs_path.h"
 #include "../capprobe/capprobe.h"
@@ -119,7 +125,7 @@ int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) 
     if (api < VK_API_VERSION_1_1) return fail(why, why_size, "Vulkan loader below 1.1");
 
     const char *wanted[] = {
-        "VK_KHR_get_physical_device_properties2", "VK_KHR_surface", "VK_KHR_android_surface",
+        "VK_KHR_get_physical_device_properties2", "VK_KHR_surface", S2A_VK_PLATFORM_SURFACE,
         "VK_KHR_get_surface_capabilities2", "VK_EXT_surface_maintenance1" };
     const char *enabled[sizeof wanted / sizeof *wanted + 9];
     uint32_t enabled_count = 0;
@@ -139,7 +145,7 @@ int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) 
         if (!strcmp(enabled[i], "VK_EXT_surface_maintenance1")) instance_surface_maintenance1 = 1;
         if (!strcmp(enabled[i], "VK_KHR_get_surface_capabilities2")) instance_surface_capabilities2 = 1;
     }
-    out->has_android_surface = has_instance_extension("VK_KHR_android_surface");
+    out->has_android_surface = has_instance_extension(S2A_VK_PLATFORM_SURFACE);
 
     VkApplicationInfo app = {0};
     app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;

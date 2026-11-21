@@ -13,7 +13,7 @@ namespace S2Arm.Launcher;
 
 /// <summary>S 级优化升级（11-18 维护者：点了才升、可批量，名字写明批量升级、有全选；同 Mac S2ArmLauncherModel+SGradeUpgrade.swift）。
 /// 排队只在作业层一份（sgradeUpgradeBatch，两端共用；关掉升级页 / 窗口队列照常跑）：界面只提交 / 追加号、调停止（sgradeUpgradeStop）、读状态。
-/// 状态来源：跑队列作业的事件（type=batch 每款 start / end，progress 带 gameId）实时更新；队列在跑时每 1.5 秒查 sgradeUpgradeStatus；
+/// 状态来源：跑队列作业的事件（type=batch 每款 start / end，整款进度 sgradeProgress 带 gameId）实时更新；队列在跑时每 1.5 秒查 sgradeUpgradeStatus；
 /// 都盖在游戏库 catalog 的 sgradeState / sgradeProgress 上。这款封面画进度、主按钮（装到 iPhone / 出包）写「正在升级 xx%」/「排队中」不可点</summary>
 public sealed partial class EnvironmentWindow
 {
@@ -108,7 +108,7 @@ public sealed partial class EnvironmentWindow
         Render();
     }
 
-    /// <summary>跑队列作业的一条事件：batch start → 在升；batch end → 结局；progress done/total → 进度；index / count → 批次</summary>
+    /// <summary>跑队列作业的一条事件：batch start → 在升（0）；batch end → 结局；带 sgradeProgress → 整款进度（只增不减，SGradeLiveProgress）；index / count → 批次</summary>
     private void IngestSGrade(JsonElement e)
     {
         if (!e.TryGetProperty("gameId", out var g) || g.ValueKind != JsonValueKind.String || g.GetString() is not { Length: > 0 } id) return;
@@ -127,8 +127,8 @@ public sealed partial class EnvironmentWindow
                 _ = RefreshLibraryAsync();
             }
         }
-        else if (e.TryGetProperty("done", out var d) && d.ValueKind == JsonValueKind.Number && e.TryGetProperty("total", out var tt) && tt.ValueKind == JsonValueKind.Number && tt.GetDouble() > 0)
-            sgradeLive[id] = ("running", Math.Clamp(d.GetDouble() / tt.GetDouble(), 0, 1));
+        else if (SGradeLiveProgress.FromEvent(e) is { } p)
+            sgradeLive[id] = ("running", sgradeLive.TryGetValue(id, out var old) ? SGradeLiveProgress.Running(p, old.State, old.Progress) : SGradeLiveProgress.Running(p, null, null));
         Render();
     }
 
@@ -157,11 +157,15 @@ public sealed partial class EnvironmentWindow
             if (!job.Report.Succeeded) return false;
             var r = job.Report.Result;
             sgradeBatchLive = SGradeBatch.Parse(r);
+            var before = new Dictionary<string, (string State, double? Progress)>(sgradeLive, StringComparer.OrdinalIgnoreCase);   // 在升的款与之前的值取较大（只增不减）
             sgradeLive.Clear();
             if (r.TryGetProperty("games", out var games) && games.ValueKind == JsonValueKind.Array)
                 foreach (var g in games.EnumerateArray())
                     if (g.TryGetProperty("gameId", out var id) && id.GetString() is { Length: > 0 } gid && g.TryGetProperty("state", out var st) && st.GetString() is { } state)
-                        sgradeLive[gid] = (state, g.TryGetProperty("progress", out var p) && p.ValueKind == JsonValueKind.Number ? p.GetDouble() : null);
+                    {
+                        double? p = g.TryGetProperty("progress", out var pe) && pe.ValueKind == JsonValueKind.Number ? pe.GetDouble() : null;
+                        sgradeLive[gid] = (state, state != "running" ? p : before.TryGetValue(gid, out var old) ? SGradeLiveProgress.Running(p, old.State, old.Progress) : SGradeLiveProgress.Running(p, null, null));
+                    }
             Render();
             return sgradeBatchLive.Running;
         }

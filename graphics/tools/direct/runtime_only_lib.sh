@@ -1,5 +1,5 @@
 #!/bin/bash
-# 运行时现编空直连库（抽取缺口时用；11-06 两条链共用一份：Mac 链 pack/stage_direct.sh、Windows 出包机链 graphics/tools/direct/direct_lib.sh 现场抽取退 3 时）：
+# 运行时现编空直连库（抽取缺口时用；11-06 两条链共用一份：Mac 链 pack/stage_direct.sh、Windows 出包机链 graphics/tools/direct/direct_lib.py 现场抽取退 3 时）：
 #   bash graphics/tools/direct/runtime_only_lib.sh <输出目录> <链号> <程序号> <inputs 标签> <缺口原因文件> [配置档 game.tsv]
 # 出：<输出目录>/b-<链号>/lib.idx 空容器（48 字节头、0 条 0 分片，graphics/nvn/lib_pack.inc）+ b-<链号>/inputs.tsv 戳（game / inputs runtime-only-<标签>）
 #   + 空 shader_map.tsv / keys.tsv + 空答案表 shader_facts.tsv / 配对表 shader_pairs.tsv + game.tsv（给了配置档才拷）+ runtime_only.txt（原因）；宿主见到 b-<链> + shader_map.tsv + lib.idx 就按直连起

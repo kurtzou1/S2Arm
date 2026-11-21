@@ -151,11 +151,15 @@ with tempfile.TemporaryDirectory(prefix='img test ') as t:
         try: img.orig_romfs(str(r6), str(T)); ck(False, '⑥ 没有 seed.txt 但叠过覆盖应报红')
         except img.Red: ck(True, '⑥ 没有 seed.txt 但产物根叠过覆盖 → 报红')
         (pk / 'programs/1').mkdir(parents=True); (pk / 'programs/1/a').write_bytes(b'p')
-        (pk / 'index.tsv').write_text((pk / 'index.tsv').read_text() + 'programs/1/a\t1\tx\n')
+        # #1782：序号 1 的 RomFS 行清单里叫 programs/1/romfs.img，库内实际是标准镜像 programs/1/romfs.std（0.6.0 起 RomFS 不落散文件）
+        (pk / 'programs/1/romfs.std').write_bytes(b'STD1')
+        (pk / 'index.tsv').write_text((pk / 'index.tsv').read_text() + 'programs/1/a\t1\tx\nprograms/1/romfs.img\t4\ty\n')
         # #1545：多程序合集序号 1.. 的 programs/<n>/… 进 IMG 其余文件段（手机解包按原路径解回），不再报红 / 不转
         got = img.convert(str(root), str(pk), romfs_index=cmd)
         toc = {r: n for r, _, n in img.entries(got)} if got else {}
         ck(got and toc.get('programs/1/a') == 1 and img.find(got, 'programs/1/a') is not None, f'④ 多程序合集：programs/1/a 进 game.img 目录表（{sorted(toc)}）')
+        ck(got and toc.get('programs/1/romfs.std') == 4 and 'programs/1/romfs.img' not in toc,
+           f'④ 多程序合集：序号 1 的 RomFS 按库内形态 programs/1/romfs.std 进 IMG（宿主照它读），不再报「romfs.img 不在」（{sorted(toc)}）')
         ck(not (pk / 'programs').exists() and 'programs/' not in (pk / 'index.tsv').read_text() and json.loads((pk / 'manifest.json').read_text())['format'] == 'img',
            '⑤ 转完资源包里不留 programs/ 旧文件、index.tsv 不列它、manifest 是 img 形态')
 # ⑧ #711（Windows 大游戏写 game.img 失败）：Windows 的 os.stat 没有 st_blocks，RomFS 段写满 1 秒时进度轮询原先抛 AttributeError、img.py 半路退出、
@@ -338,7 +342,7 @@ for keep_image in (True, False):
         W = T / 'work'; R = W / 'roots'; blob = os.urandom(5000)
         for v in ('kuan@v0', 'kuan@v1'): (R / v).mkdir(parents=True)
         (R / 'kuan@v1' / 'romfs.std').write_bytes(blob); os.link(R / 'kuan@v1' / 'romfs.std', R / 'kuan@v0' / 'romfs.std')
-        os.symlink('kuan@v1', R / 'kuan@现行')
+        (R / 'kuan@现行').write_text('kuan@v1\n')   # 现行指针文件
         (W / 'extract').mkdir(); (W / 'extract' / 'romfs.std').write_bytes(blob)
         (T / 'ext').mkdir(); (T / 'ext' / 'romfs.std').write_bytes(blob)
         if not keep_image: (R / 'kuan@v1' / 'romfs').mkdir(); (R / 'kuan@v1' / 'romfs' / 'a').write_bytes(b'a')
@@ -363,5 +367,47 @@ try:
         ck(img.update_worth(str(T13)) == want, f'⑬ 清单 {rows} → 出更新包 {want}')
 finally:
     shutil.rmtree(T13, ignore_errors=True)
+
+# ⑭ D-X5JB：Windows 上别的程序（杀毒软件、索引）拿着 RomFS 镜像时，边写边腾的截短报 [Errno 13]，原先整单失败。
+#    夹具 = 10 MiB 随机字节的镜像，第 2 次截短起抛 PermissionError（同 Windows 原文）。期望手写：照常写完、段字节 = 原镜像、镜像收尾删掉、打一行黄字
+class _DenyTruncate:
+    def __init__(self, f, after): self._f, self._after, self.calls = f, after, 0
+    def truncate(self, n):
+        self.calls += 1
+        if self.calls > self._after: raise PermissionError(13, 'Permission denied')
+        return self._f.truncate(n)
+    def __getattr__(self, k): return getattr(self._f, k)
+    def __enter__(self): self._f.__enter__(); return self
+    def __exit__(self, *a): return self._f.__exit__(*a)
+T14 = Path(tempfile.mkdtemp())
+try:
+    blob = os.urandom(10 << 20); std = T14 / 'romfs.std'; std.write_bytes(blob); part = T14 / 'out.part'; part.write_bytes(b'')
+    real_open = open
+    def deny_open(path, mode='r', *a, **k):
+        f = real_open(path, mode, *a, **k)
+        return _DenyTruncate(f, 1) if os.path.realpath(path) == os.path.realpath(std) and 'r+' in mode else f
+    import builtins, contextlib, io
+    buf = io.StringIO()
+    img.open = deny_open
+    try:
+        with contextlib.redirect_stdout(buf): n = img.copy_std(str(std), str(part), 16384, lambda d: None, True)
+        ok = True
+    except OSError as e:
+        ok = False; n = None; buf.write(f'抛了 {e!r}')
+    finally:
+        del img.open
+    ck(ok and n == len(blob), f'⑭ 截短被拒照常写完（{buf.getvalue()[-120:]}）')
+    ck(ok and part.read_bytes()[16384:16384 + len(blob)] == blob, '⑭ 段字节 = 原镜像')
+    ck(not std.exists(), '⑭ 镜像收尾照删')
+    ck('🟡 截短 RomFS 镜像被系统拒' in buf.getvalue(), '⑭ 打一行黄字说明不再边写边腾')
+finally:
+    shutil.rmtree(T14, ignore_errors=True)
+
+# ⑮ 系统调用报错（OSError）退出前把出错那一行打进日志（D-X5JB 只剩「[Errno 13] Permission denied」看不出哪一步）：ls 一个不存在的 IMG
+import contextlib, io
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf): rc = img.main(['ls', str(Path(tempfile.gettempdir()) / 's2arm-no-such.img')])
+lines = buf.getvalue().splitlines()
+ck(rc == 1 and len(lines) >= 2 and lines[-2].startswith('出错位置：img.py:') and lines[-1].startswith('【红】'), f'⑮ OSError 先打出错位置、末行仍是红行（{lines[-2:]}）')
 
 print(f'img 单测：{"全通" if not bad else f"{bad} 项不通"}'); sys.exit(1 if bad else 0)

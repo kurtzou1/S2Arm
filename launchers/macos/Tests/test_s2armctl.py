@@ -307,6 +307,21 @@ class WaitTests(unittest.TestCase):
         self.assertIn("queued", output)
         self.assertIn("running", output)
 
+    def test_completed_waits_for_launcher_to_finish_and_reload_library(self):
+        # 11-20 0.6.2 候选验收 ⑤c：任务记录先写成 completed，启动器还在收尾（busy）、随后异步重读游戏库（libraryLoading）；
+        #   wait 原先当场返回，紧接着读到的还是出包前「要重新准备」。期望：完成那次 + 收尾中 + 重读中 + 空闲 = 4 次读状态才退 0
+        done = task("new", "completed", 3)
+        states = [dict(state(done), busy=True), dict(state(done), busy=False, libraryLoading=True),
+                  dict(state(done), libraryLoading=True), dict(state(done), busy=False, libraryLoading=False)]
+        self.assertEqual(self.run_wait(states)[:2], (0, 4))
+        # 已经空闲（旧版启动器没有 libraryLoading 字段也算）：不多读，1 次
+        self.assertEqual(self.run_wait([state(done)])[:2], (0, 1))
+
+    def test_completed_settle_is_bounded(self):
+        # 启动器一直忙（另一单在跑）：最多等 20 秒就照常返回，不卡住；每 0.5 秒读一次 → 首次 + 40 次
+        done = task("new", "completed", 3)
+        self.assertEqual(self.run_wait([dict(state(done), busy=True)] * 50, limit=100)[:2], (0, 41))
+
     def test_new_failure_overrides_old_success(self):
         old = task("old", "completed", 1)
         states = [state(old, task("queued-game", "queued", 2), queue=["game"]),

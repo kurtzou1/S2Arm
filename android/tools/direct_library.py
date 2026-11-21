@@ -870,13 +870,13 @@ def validate_result(raw, what, request=None, descriptor=None, expected_profile=N
             #   * c2 分离贴图表：槽 90..345 偶数；
             #   * 游戏 UBO（片 3）：平铺的 uboSlot 0..15 + uboOffset（4 的倍数、0..65535），没有 slot。
             #   与宿主解析（nvn_vk_program_result.c）同一份合同：v2、单个贴图；与 samp_slot / uboHandle / sampler 对象互斥
-            #   （c2 形态还与 uboSlot 互斥）；计算阶段宿主没接，计算结果也不收。
+            #   （c2 形态还与 uboSlot 互斥）；计算阶段（片 7）只收 c2 形态，游戏 UBO 形态计算侧不接，计算结果也不收。
             from_ubo = 'uboSlot' in binding
-            if (schema == RESULT_SCHEMA or kind == 'compute' or binding.get('kind') != 'texture'
+            if (schema == RESULT_SCHEMA or binding.get('kind') != 'texture'
                     or 'samp_slot' in binding or 'uboHandle' in binding or 'sampler' in binding
-                    or (from_ubo and 'slot' in binding)):
-                _fail(f'{where}: constant sampler source requires a v2 graphics texture with one texture-word source '
-                      '(slot, or uboSlot without slot) and no samp_slot / uboHandle / sampler')
+                    or (from_ubo and ('slot' in binding or kind == 'compute'))):
+                _fail(f'{where}: constant sampler source requires a v2 texture with one texture-word source '
+                      '(slot; or, in graphics results only, uboSlot without slot) and no samp_slot / uboHandle / sampler')
             _integer(binding['constSampler'], f'{where}.constSampler', 0, 4095)
             if from_ubo:
                 _integer(binding['uboSlot'], f'{where}.uboSlot', 0, 15)

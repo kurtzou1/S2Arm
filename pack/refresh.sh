@@ -75,6 +75,9 @@ if [ "${S2A_PACK_PLAT:-ios}" = android ]; then
   prog_tick 刷新各阶段 3 6
   t=$SECONDS; out=$(bash "$H/stage_romfsidx.sh" "$G" 2>&1); rc=$?; tm romfsidx $((SECONDS - t)); echo "$out" | tail -1
   [ "$rc" = 0 ] || { echo "【红】$G 刷新停在 romfsidx 阶段（rc=${rc}），现行 = $(basename "$(root_cur "$G")")"; exit 1; }
+  # 首局预热种子（安卓真机跑局落下的预热清单随包，pack/stage_vk_warm_seed.sh）：种子出不来本段自己打黄退 0，非 0 只有产物根出错
+  t=$SECONDS; out=$(bash "$H/stage_vk_warm_seed.sh" "$G" 2>&1); rc=$?; tm vk_warm_seed $((SECONDS - t)); echo "$out" | tail -1
+  [ "$rc" = 0 ] || { echo "$out" | sed '$d'; echo "【红】$G 刷新停在 vk_warm_seed 阶段（rc=${rc}），现行 = $(basename "$(root_cur "$G")")"; exit 1; }
   prog_tick 刷新各阶段 4 6
   export S2A_RESOURCE_KEY_ONCE_FILE="$L/resource-input.key"   # 同苹果路线：抽取与直连库共用这一轮算好的资源输入键
   # 直连库（#783）：NVN 款出离线 Vulkan 库 shaders/direct/b-<链>-vk/（pack/stage_direct.sh，出库目标 android）。

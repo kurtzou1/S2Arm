@@ -9,6 +9,7 @@ import stat
 
 
 RECOVERY = {
+    "addr_short": "想正常玩，请换一台地址空间更大的设备（比如内存更大的 Mac），或等后续版本改进；游戏照常能启动。",   # Mac 起局宿主报「地址空间不够这款」（build.addr_short_watch 发的不阻塞提示 notice）
     "sgrade_upgrading": "等这款的 S 级优化升级做完（游戏上有进度），再点开始游戏；别的游戏照常能玩。",   # 11-17 S 级优化改手动单款升级（sgrade.upgrade_game），升级中只挡这一款
     "ios_install_dir_unwritable": "先试这两步：①在 iPhone 上打开一次 S2Arm，等游戏库界面出来；②回电脑对这款游戏再点一次「推到 iPhone」，会接着已传的部分继续，不用从头来。还是写不进，就要删掉 iPhone 上的 S2Arm App 再重装：先在游戏菜单「存档管理」里导出存档，存到 S2Arm 文件夹以外（比如 iCloud 云盘）；再在 iPhone 桌面长按 S2Arm，删除 App；然后在电脑上的 S2Arm 里对这款游戏再点一次「推到 iPhone」；装好后在「存档管理」里导回存档。电脑上的游戏和 S2Arm 都不用删。",   # iOS 端装机 / 导入失败：手机上的 S2Arm 报码、按码显示（11-11 维护者「补上说人话的原因」）
     "ios_install_no_space": "清出空间后点「重试」。",   # iOS 端装机 / 导入失败：手机上的 S2Arm 报码、按码显示（11-11 维护者「补上说人话的原因」）
@@ -120,6 +121,9 @@ RECOVERY = {
     "app_id_taken": "苹果拒绝注册这个包名（Apple 错误 9401：同一个包名在苹果那边已被占用）。请在 Impactor（Mac 上是 Xcode）里确认登录的是当初装 S2Arm 用的那个 Apple ID 再装；付费开发者账号也可以到 developer.apple.com 的「Certificates, Identifiers & Profiles → Identifiers」删掉 io.s2arm.games 开头的旧包名后重试。还不行请导出诊断包反馈。",   # Apple 错误 9401；Windows 装机先用大小写两种包名各试一次（install_win.install_app），都被拒才报这个码
     "app_other_signer": "手机上已经有一个用别的签名装的 S2Arm（包名相同、签名不同），系统不让覆盖。二选一：继续用你原来的签名工具更新它；或者在 iPhone 上长按 S2Arm 删掉它（里面的存档会一起删，先在 S2Arm 里导出存档），再点「推到 iPhone」。",   # 玩家先自签装过同包名的 S2Arm（11-11 反馈）：installation_proxy MismatchedApplicationIdentifierEntitlement
     "bundle_id_switched": "这个包名之前被别的签名用过（多半是你自己签名装 S2Arm 时用了同一个包名），这次已自动换成新包名装好。手机上可能有两个 S2Arm：新装的这个里有这台电脑装的游戏；旧的那个不再需要的话可以删掉（先导出存档）。",   # 包名被占（9401）时 Mac 自动换 <包名>.s2 装好（install.MacPhone.install），黄字说明
+    "image_exec_cert": "现在用的证书是分发（发布）证书，缺「调试权限（get-task-allow）」：通用 S2Arm 里的游戏用它签了打不开。在设置里把出法改成「独立 App」（一个 App 一款游戏）就能玩；或改用 Apple ID 登录签名、换成开发证书。",   # 通用壳 + 分发证书（install.phone_signing 黄字；手机端初启失败页同码）
+    "app_bundle_fixed": "你的描述文件是显式 App ID，只有一个包名：每款独立 App 和通用 S2Arm 都只能装成它，装一个会顶掉另一个（存档跟着那个 App 走）。想同时装多款，请让证书发放人给通配（*）的描述文件。",   # devcert.bundle_id 显式描述文件（install.put_app 黄字）
+    "free_app_limit_note": "免费 Apple ID 有苹果的限制：同时最多装 3 个自己签的 App（AltStore / SideStore 也算），每 7 天最多注册 10 个 App ID；独立 App 每款占一个。装满了就在 iPhone 上删掉不玩的那个再装。",   # install.put_app 免费账号装独立 App 时的提示（只提示不拦）
     "signing_server_unreachable": "这台电脑连不上 Impactor 签名要用的登录辅助服务器（mac-ani.jkcoxson.com，Impactor 内置、改不了），已自动重试过一次。检查这台电脑的网络：浏览器能打开这个地址就再点一次「推到 iPhone」；打不开就换个 DNS（如 223.5.5.5 或 1.1.1.1）或开 / 关代理后再装。手机、已装的 App 和存档都不受影响。",   # #3fc02b：plumesign 取 anisette（mac-ani.jkcoxson.com，Impactor v2.7.3 omnisette 写死）时 DNS / 连接失败（impactor.explain）
     "apple_session_expired": "Apple ID 登录已过期，请重新登录后再装：在装机页点「打开 Impactor」→「设置」，选中你的 Apple ID 点「移除账号」，再点「添加账号」用同一个 Apple ID 重新登录（邮箱、密码、手机上的验证码，输入前切到英文输入法），然后回来再点一次「推到 iPhone」。密码只在 Impactor 里输，S2Arm 不经手。",   # Windows plumesign 恢复保存的会话时 Apple 1100（impactor.explain）；Mac 同类原文归 xcode_account_missing（去 Xcode 重新登录）
     "apple_not_signed_in": "还没用 Apple ID 登录：点「登录 Apple ID」（装机清单和失败页上都有，也可以在设置 →「签名身份」下面点），在弹出的「用 Apple ID 签名」里填邮箱和密码（你的苹果设备上会弹出验证码），再点一次「推到 iPhone」。密码只用于这次向 Apple 登录，S2Arm 不保存。",   # Mac 通用壳：随包 plumesign 自己的登录面板（launchers/macos AppleLoginViews，按钮名 / 面板名与界面逐字一致；Windows 的 Impactor 说法在 WINDOWS_RECOVERY）
@@ -136,7 +140,7 @@ RECOVERY = {
     "devcert_password": "重新输入导出 .p12 时设的密码（区分大小写）；还不行就重新导出一份 .p12 再导入。",   # 开发者证书签名（pack/jobs/devcert.py，v0.2.4）
     "devcert_invalid": "选导出的 .p12 证书和开发者网站下载的 .mobileprovision 描述文件，再导入一次。",   # 开发者证书签名（pack/jobs/devcert.py，v0.2.4）
     "devcert_mismatch": "在开发者网站重新生成描述文件并勾上这张证书，下载后和证书一起重新导入。",   # 开发者证书签名（pack/jobs/devcert.py，v0.2.4）
-    "devcert_distribution": "点「改用 Apple ID 登录」用 Apple ID 签名；或点「复制给证书发放人的话」发给对方，换成开发证书和开发描述文件后重新导入。",   # 分发描述文件没有 get-task-allow，0.6 起游戏打不开（pack/jobs/devcert.py inspect）
+    "devcert_distribution": "推到 iPhone 的方式选「独立 App」，用这张证书照常能玩；要用通用 S2Arm：点「改用 Apple ID 登录」用 Apple ID 签名，或点「复制给证书发放人的话」发给对方，换成开发证书和开发描述文件后重新导入。",   # 分发描述文件没有 get-task-allow：通用 S2Arm 里游戏打不开，独立 App 能用（pack/jobs/devcert.py inspect）
     "devcert_missing": "在出包页「我的开发者证书」里重新导入证书和描述文件，或切回「Apple ID 签名」。",   # 开发者证书签名（pack/jobs/devcert.py，v0.2.4）
     "identity_unavailable": "在 AltStore 或 SideStore 的设置里导出签名证书，打开手机上的 S2Arm →「签名证书」→「导入 .p12…」导入；想让启动器新建证书就点「安装 S2Arm」（会先说明会让哪张证书失效）。",   # 交签名身份（install.deliver_identity，11-19）：Apple ID 方式、本机没有可交的证书；不为此新建（会顶掉 AltStore / SideStore 的证书）
     "identity_team_mismatch": "在启动器里登录装 S2Arm 用的那个 Apple ID（或选用和装 S2Arm 同一团队的证书），再点一次「把签名身份交给手机」。",   # 交签名身份（install.identity_target，11-19）：手机上的 S2Arm 是别的团队签的（AltStore 等用了另一个 Apple ID），交过去手机也签不了游戏
@@ -187,8 +191,10 @@ RECOVERY = {
     'game_files_mismatch': '用原版游戏文件重新导入这款：先在游戏库里移除它，再把原版文件拖进来。',
     'container_purge_failed': '手机解锁、数据线插稳后再删一次；不影响其他游戏。',
     'keychain_prompt': '在这台 Mac 屏幕上的钥匙串弹窗里点「始终允许」（需要的话输入 Mac 登录密码），再点一次「推到 iPhone」。',
+    'windows_mandatory_aslr': '打开「Windows 安全中心 → 应用和浏览器控制 → 漏洞利用保护设置 → 系统设置」，把「强制映像随机化（强制性 ASLR）」改回「使用默认值（关）」，再打一次包。',
     'windows_path_too_long': '路径太长：把游戏库搬到盘符根目录附近的短路径（比如 D:\\S2Arm），再打一次包；反馈时请带上错误摘要。',
     'pack_missing': '没找到这款的资源包目录：重新「打 iPhone 包」后再装到 iPhone。',
+    'game_folder_missing': '在启动器里重新添加这款游戏、打一次 iPhone 包，再装到 iPhone 或续签；手机上已装的 App 和存档不受影响。',
     'save_recovery_overridden': '已按你的确认跳过存档回退启动游戏；事务记录保留，下次启动会再试恢复。',
     'save_space': '释放备份目的地的磁盘空间后重试；不要删除原存档或唯一的备份。',
     'save_unsafe_path': '存档路径含符号链接或不安全目录；选择普通目录中的完整备份，不要绕过路径保护。',
@@ -329,7 +335,7 @@ def _where(error):
 
 
 # 实际阶段或命令确定分类，不从错误 prose 猜编译器/输入的根因（日志里有确凿根因字样的先由 LOG_CAUSES 判，见 classify_failure）。
-# direct（直连库出库，pack/stage_direct.sh → graphics/tools/direct/direct_lib.sh）：内容缺口退 3 走黄、到不了这里；其余非零按 stage_direct.sh 注
+# direct（直连库出库，pack/stage_direct.sh → graphics/tools/direct/direct_lib.py）：内容缺口退 3 走黄、到不了这里；其余非零按 stage_direct.sh 注
 #   是「基础设施出错」——dsh_batch（.NET）翻译 + Metal 编库，归编译失败（恢复口径＝检查 Xcode / Metal 组件 / .NET SDK）。
 STAGE_CODES = {
     "unpack": "content_invalid", "configure": "configuration_failed",
@@ -353,7 +359,7 @@ PLAYER_REASON = {
     "package_verify_mismatch": "资源包核对没通过：出包最后核对资源包时，有文件前后两次读出的内容对不上。多见于磁盘或内存读写不稳定，或有杀毒、云同步软件在改游戏库里的文件。",
     "ios_platform_missing": "缺少 iOS 平台组件：Xcode 的 iOS 平台还没装，打不了 iPhone 包。",
     "engine_toolchain_newer": "这版 S2Arm 不认识你的 Xcode：你的 Xcode 比这版 S2Arm 新。",
-    "graphics_api_unsupported": "这款游戏暂不支持：没找到任天堂官方图形接口（NVN / Vulkan / OpenGL），多见于自制或移植的程序。",
+    "graphics_api_unsupported": "这款游戏暂时出不了包：没认出它用的图形接口（NVN / Vulkan / OpenGL）。请把诊断发给我们，我们会核对是不是没认出来。",
     "game_structure_unsupported": "这款游戏暂不支持：程序的结构我们还不认识，多见于自制或移植的程序。",
     "tool_missing": "缺少工具：这条链上有个工具没装。",
     "content_invalid": "文件内容不对：文件结构校验没通过，可能没下完整。",
@@ -366,6 +372,7 @@ PLAYER_REASON = {
     "resource_preparation_failed": "资源准备失败。",
     "device_install_failed": "设备安装失败。",
     "package_failed": "出包未完成。",
+    "windows_mandatory_aslr": "Windows 的强制 ASLR 开着：出包工具起不了子进程。",
 }
 
 
@@ -377,9 +384,12 @@ def player_reason(code):
 # 只收工具 / 系统原样会打的字样，不从散文猜。
 LOG_CAUSES = (
     (r"WinError 206|filename or extension is too long|文件名或扩展名太长", "windows_path_too_long"),  # 非玩家句
+    # 随包 bash 起子进程刚建就退（#1762：MSYS 原文「dofork: child -1 - forked process … died unexpectedly, retry 0, exit code 0xC0000142」，连试 6 次）：
+    #   Windows「强制映像随机化（强制性 ASLR）」开着，MSYS 的 fork 要在子进程同一地址装 DLL，被系统强制换址后起不来。玩家关回系统默认即可出包
+    (r"dofork: child -1 - forked process \d+ died unexpectedly, retry \d+, exit code 0xC0000142", "windows_mandatory_aslr"),
     (r"No space left on device|\bENOSPC\b|\[Errno 28\]|\berrno\s*[=:]?\s*28\b"          # POSIX / Python OSError / .NET IOException（Mac）  # 非玩家句
      r"|There is not enough space on the disk|\bDisk full\b|WinError 112|ERROR_DISK_FULL|0x80070070"   # Windows / .NET
-     r"|STATUS_DISK_FULL|磁盘空间不足|【写满】", "disk_full"),                                       # Windows 退出码注（direct_lib.sh 127）/ 我方字样
+     r"|STATUS_DISK_FULL|磁盘空间不足|【写满】", "disk_full"),                                       # Windows 退出码注（direct_lib.py 127）/ 我方字样
     # 内存用完（#711：Windows 16 GB 抽取按核数开满进程池，Python 子进程 MemoryError）：Python / .NET / Windows 提交上限原样字样
     (r"(?m:^\s*MemoryError\b)|OutOfMemoryException|\[WinError 1455\]|paging file is too small|页面文件太小|Cannot allocate memory|\bENOMEM\b", "out_of_memory"),  # 非玩家句
     # 盘不支持某种文件操作（exFAT 外接盘不支持原子改名 / 克隆 / 硬链接，实测 errno 45）：出包写入的这块盘格式不对，说清换 APFS 盘（11-10 网友：存放位置设到外接盘写入失败）
@@ -497,6 +507,32 @@ def _free_bytes(path):
         return None
 
 
+# 漏洞利用保护的「强制映像随机化」（winnt.h PROCESS_CREATION_MITIGATION_POLICY_FORCE_RELOCATE_IMAGES_*，位 8–9：1 = 总开、3 = 总开且要求重定位）。
+#   系统设置写在 Session Manager\kernel，单程序覆盖写在 Image File Execution Options\<程序名>，两处都是 MitigationOptions（REG_BINARY，小端）
+ASLR_KEYS = (r"SYSTEM\CurrentControlSet\Control\Session Manager\kernel",
+             r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\bash.exe")
+
+
+def _force_relocate_on(blob):
+    return isinstance(blob, (bytes, bytearray)) and len(blob) >= 2 and blob[1] & 3 in (1, 3)
+
+
+def _mandatory_aslr_on():
+    """强制 ASLR 开着 → 依据（哪一处开着）；读得到、都没开 → None。只在 Windows 读（不需要管理员）"""
+    if os.name != "nt":
+        return None
+    import winreg
+    for key in ASLR_KEYS:
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key) as k:
+                blob, _ = winreg.QueryValueEx(k, "MitigationOptions")
+        except OSError:
+            continue
+        if _force_relocate_on(blob):
+            return "注册表 HKLM\\" + key + " 的 MitigationOptions 强制 ASLR 开着"  # 非玩家句
+    return None
+
+
 def _tool_present(name):
     import shutil
     return shutil.which(name) is not None
@@ -521,6 +557,11 @@ def _confirm(code, line, log, final=False):
         if least < DISK_FULL_FREE:
             return True, "核实：%s 所在盘只剩 %.1f GB" % (path, gib)  # 非玩家句
         return False, "所在盘还剩 %.1f GB（%s），不是盘满" % (gib, path)  # 非玩家句
+    if code == "windows_mandatory_aslr":   # 0xC0000142 也可能是别的原因（桌面堆耗尽、安全软件注入）：读注册表核实强制 ASLR 真开着才采信
+        on = _mandatory_aslr_on()
+        if on:
+            return True, "核实：" + on  # 非玩家句
+        return False, "强制 ASLR 没开（或读不到）"  # 非玩家句
     if code == "tool_missing":
         m = re.search(r"([\w.+-]+): command not found", line)
         if m and _tool_present(m.group(1)):
@@ -640,6 +681,40 @@ def tool_reason(log):
     return "工具未提供错误详情，请保留本阶段日志。"
 
 
+CAUSE_BYTES = 2400   # 失败原文行按字节封顶（UTF-8 按字节截、不截半个字）
+
+
+def cause_line(log):
+    """这一步失败的原文：日志末尾最后一行红行；它是 refresh 的终止转述行（「【红】<款> 刷新停在 <阶段>…」）就取它前一行红行——
+    那是失败阶段自己的红行，带失败子命令的名字、退出码与输出原文（如直连库「…出库失败 rc=1，[直连库] 🔴 …：dsh_batch.py 退出码 1：<原文>」）。
+    没有红行 → None。#1725 / #1730 / #1744：判不出原因落 package_failed 时，错误摘要只剩「出包未完成。」，原文只在日志里"""
+    if not log:
+        return None
+    try:
+        with open(log, "rb") as stream:
+            stream.seek(0, 2)
+            stream.seek(max(0, stream.tell() - 16000))
+            lines = stream.read().decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    red = [l.strip() for l in lines if l.strip() and not l.strip().startswith("[s2a] ") and any(mark in l for mark in _RED)]
+    if not red:
+        return None
+    stop = lambda l: "刷新停在" in l  # 非玩家句
+    if stop(red[-1]):
+        # 终止转述行之前、上一次终止行之后（同一轮刷新里）最后一行非终止的红行；没有就不另给（旧轮的红行不归给本轮）
+        prev = [l for l in red[:-1]]
+        cut = max((i for i, l in enumerate(prev) if stop(l)), default=-1)
+        mine = [l for l in prev[cut + 1:] if not stop(l)]
+        if not mine:
+            return None
+        line = mine[-1]
+    else:
+        line = red[-1]
+    b = line.encode("utf-8")
+    return line if len(b) <= CAUSE_BYTES else b[:CAUSE_BYTES].decode("utf-8", errors="ignore") + "…"
+
+
 def last_output_lines(log, limit=5):
     """日志末尾最有用的几行（红行优先，保持原顺序），每行截到 300 字；脱敏由调用方（Context.redact）做"""
     if not log:
@@ -689,6 +764,8 @@ def build_tool_failure(args, milestone, log):
         phase = "unpack"
     code, why = classify_failure(phase, log)
     said, advice = player_words(code, log)
+    cause = cause_line(log)   # 失败阶段自己的红行（带子命令原文）：终止转述行之外另记一行，错误摘要按「失败原文：」取（report.build）
+    more = "\n失败原文：" + cause if cause and cause != reason else ""  # 非玩家句
     # 上屏只放玩家话术；阶段 / rc / 构建号 / 红行原文进 internal → 诊断 detail（「复制错误摘要」带走）；机读事实进 facts（前端按字段显示）
-    return Failure(said, code=code, advice=advice, internal="Mac 准备失败（" + (phase or "未识别阶段") + "）：" + reason + "\n" + why,  # 非玩家句
+    return Failure(said, code=code, advice=advice, internal="Mac 准备失败（" + (phase or "未识别阶段") + "）：" + reason + more + "\n" + why,  # 非玩家句
                    facts=cause_facts(code, log))

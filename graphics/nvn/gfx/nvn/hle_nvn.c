@@ -51,7 +51,7 @@
 #include <stdatomic.h>
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
 #include "s2a_vp_alias.h"
 #include "../runtime/vm/backing.h"
 // svc_mem.c 的锁序断言与背板引用入口（只在 Android 有定义）。
@@ -111,7 +111,7 @@ uint64_t nvn_unimpl_c(nvn_slot_t *slot, uint64_t x0, uint64_t x1, uint64_t x2) {
 }
 
 typedef struct { const char *name; void *fn; } nvn_impl;
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
 #define NVN_IMPL_SECTION __attribute__((used, section("swnvn")))
 #else
 #define NVN_IMPL_SECTION __attribute__((used, section("__DATA,swnvn")))
@@ -155,7 +155,7 @@ static void nvn_init_slots(void) {
 
 // 即时存档恢复（跨版本换算交出的宿主指针）：本版里这个 NVN 函数名对应的 thunk 地址（counting = 计数版），没有 = 0
 uint64_t nvn_snap_proc(const char *name, int counting) {
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     (void)name; (void)counting; return 0;
 #else
     nvn_init_slots();
@@ -167,7 +167,7 @@ static void *nvn_lookup(const char *name) {
     nvn_init_slots();
     for (unsigned i = 0; i < NVN_NFUNC; i++)
         if (!strcmp(nvn_names[i], name)) {
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
             return nvn_slot[i].fn;   // Android 直接返回强类型实现，避免 Apple 汇编 thunk
 #else
             { void s2a_snap_handout_id(uint64_t, const char *) __attribute__((weak)); int c = nvn_counting(); void *fn = c ? nvn_thunk[i] : nvn_thunk_fast[i];
@@ -432,7 +432,7 @@ NVN(nvnMemoryPoolFlushMappedRange, void, const NVNmemoryPool *p, ptrdiff_t off, 
     const pool_t *o = (const pool_t *)p;
     if (o->magic != MAGIC('P', 'O', 'O', 'L') || !o->mem) return;   // 没初始化成功的池（审计 P1-190 余项，同池收尾）：mem 是残值，不刷
     ft_flush(o->mem + off, n);
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     // 后端可选：内容变化通知（安卓直连用它推进资源账本的内容版本）。
     // 只在安卓直连编；苹果宿主不链该后端，弱引用在 Mach-O 上会变成未定义符号。
     {
@@ -865,7 +865,7 @@ static int32_t pool_nvmap(pool_t *p) {
     int32_t h = __atomic_load_n(&p->nvmap, __ATOMIC_ACQUIRE);
     if (h) return h;
     static int (*mk)(uint64_t, uint32_t); static int looked;
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     // 安卓：服务层 NativeAOT 与本文件静态并入同一个 libs2arm_android.so，链接带 --exclude-libs,ALL，导出不进动态表，
     //   dlsym(RTLD_DEFAULT) 恒为 NULL（010045B018EC2000：每局句柄 0，影片播放器 NvBlit 已释放的缓冲崩在 sdk 内）。
     //   改成链接期弱引用：出包的单库里由归档解析（core-link 审计：归档定义的导出在库里仍未解析就失败）；不带服务层的门禁链接（gfx_plat/gate.sh，-z defs）里为空，走下面的报红
@@ -1004,22 +1004,22 @@ NVN(nvnSamplerInitialize, NVNboolean, NVNsampler *s, const NVNsamplerBuilder *b)
 NVN(nvnSamplerFinalize, void, NVNsampler *s) { ((samp_t *)s)->magic = 0; }
 
 // ---------- Programs ----------
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
 static void prog_pin_release(uint64_t serial, const void *owner);
 #endif
 NVN(nvnProgramInitialize, NVNboolean, NVNprogram *p, NVNdevice *d) {
     (void)d;
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     prog_pin_release(((prog_t *)p)->serial, p);   // 不 Finalize 直接重新 Initialize 时先解旧 serial 的 pin
 #endif
     memset(p, 0, sizeof(prog_t)); ((prog_t *)p)->magic = MAGIC('P', 'R', 'O', 'G'); return 1;
 }
 static void pk_drop(const void *p);
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
 extern void s2a_source_drop_pending(uint64_t prog_serial) __attribute__((weak));   // android/native/direct/source_store.c
 #endif
 NVN(nvnProgramFinalize, void, NVNprogram *p) {
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     prog_pin_release(((prog_t *)p)->serial, p);
     if (s2a_source_drop_pending) s2a_source_drop_pending(((prog_t *)p)->serial);   // SetShaders 自持的控制段随程序释放（#1622：原先 256 格环满了静默挤掉）
 #endif
@@ -1045,7 +1045,7 @@ static prog_keys_t *pk_get(const void *p, int make) {
 // 线程：录制线程写（g_ps_mu 串行），回放线程无锁读：条目整份建好后才以 release 写进槽位，扩容建新表整体发布、旧表不回收（读端可能正在探测，旧表合计小于新表）；
 //   条目里的快照写入后不再变，回放层可长期持有它的指针（nvn_mtl.m prog_live）；键变好时换一份新的键组发布，旧键组不回收（每序号至多 12 次：6 个键位 + 6 个阶段位各变一次）
 typedef struct { prog_t snap; _Atomic(const prog_keys_t *) ks;
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
                  struct nvn_program_pins pins;   // 该 serial 的源快照引用（g_ps_mu 保护）；苹果平台不占这份内存
 #endif
 } psnap_ent;
@@ -1106,7 +1106,7 @@ const prog_t *nvn_prog_snap_get(uint64_t serial, uint8_t keys[6][8], uint8_t *ok
     if (stage) memcpy(stage, k->stage, sizeof k->stage);
     return &e->snap;
 }
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
 // 源快照的 program 生命周期 pin：身份用 content_sha（不按 prog_t* 指针），引用记在 serial 的快照条目上。
 // SetShaders 换代 / program Finalize 时统一解 pin；同一 serial 的重复 Bind 去重。
 extern int s2a_source_pin_key(const uint8_t key[8], struct s2a_source_pin_ref *out) __attribute__((weak));
@@ -1138,7 +1138,7 @@ static void prog_pin_release(uint64_t serial, const void *owner) {
     if (s2a_source_unpin_ref)
         for (int i = 0; i < n; i++) (void)s2a_source_unpin_ref(&refs[i]);
 }
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
 // 源捕获诊断：计算源整段是零时，用这三行区分「没映射 / 还没写 / 地址语义错」。
 // budget 每进程有限条，但计算阶段（stage>=4）永远打印。
 static _Atomic int g_src_diag_budget = 24;
@@ -1267,7 +1267,7 @@ static void pk_drop(const void *p) {
     if (k) { CFDictionaryRemoveValue(g_pk, p); free(k); }
     pthread_mutex_unlock(&g_pk_mu);
 }
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
 // S2Arm: hand each program stage to the platform's direct shader survey (Android compiles a missing bundle at SetShaders and writes it for the engine). Undefined on platforms without it.
 extern void dm_shader_survey(const uint8_t key[8], uint64_t code, const void *control) __attribute__((weak));
 // S2Arm Android 统一生产链的输入侧：保存有界自有的 code/control 快照（其他平台无此实现）。
@@ -1451,7 +1451,7 @@ uint64_t nvn_prog_set_ns(uint64_t serial) {
     uint64_t ns = atomic_load_explicit(&e[1], memory_order_relaxed);
     return atomic_load_explicit(&e[0], memory_order_acquire) == serial ? ns : 0;
 }
-#if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !defined(__OHOS__)
 // 控制段只在 SetShaders 这次调用里保证有效（游戏之后可以复用那块内存），键却有留到首用（prog_key）才算的：Switch 2 阶段一律首用才算（代码区到首次绘制前还会变），
 //   Switch 1 阶段在代码区还不在已登记内存池时也是。原先首用时读游戏的控制段指针，读到的可能已是别的数据：
 //   0.5.7 iPhone 奥日2（Switch 1）+0x700 成了一个地址、+0x704 成了 0x76，键对不上库、代码长度取成 118 字节，现编越界；
@@ -1490,7 +1490,7 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
     prog_t *o = (prog_t *)p;
     if (n < 0 || n > 6) { LOG("【红】 ProgramSetShaders stage count %d", n); return 0; }
     NVNshaderData sdc[6]; for (int i = 0; i < n; i++) { sdc[i] = sd[i]; sdc[i].data = GA(sd[i].data); } sd = sdc;   // 代码区地址换回 CPU（见 GPU 地址空间）
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     uint64_t old_serial = o->serial;   // 旧阶段的 pin 等到新阶段存好/ pin 好之后再解，换 SetShaders 期间不留空窗
 #endif
     nvn_be_prog_release(o); o->nstage = n; memcpy(o->sd, sd, n * sizeof *sd); o->serial = nvn_new_serial();
@@ -1500,18 +1500,18 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
     prog_keys_t *k = pk_get(p, 1);
     k->ok = 0;
     memset(k->stage, 0xff, sizeof k->stage);
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     struct s2a_source_pin_ref pinrefs[NVN_PROGRAM_PIN_MAX];
     int npin = 0;
 #endif
     for (int i = 0; i < n; i++) {
         if (keys_hash(&sd[i], 1, k->key[i])) { k->ok |= (uint8_t)(1u << i); dm_shader_miss(k->key[i], sd[i].data, sd[i].control); nvn_be_shader_prefetch(k->key[i]); }   // S2Arm: a key missing from the map is translated on the device now (graphics/nvn/host_adapt.m)
         else { uint8_t early[8]; if (keys_hash_early(&sd[i], early)) nvn_be_shader_prefetch(early); }   // S2Arm #674: Switch 2 stages, keyed at first use
-#if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !defined(__OHOS__)
         // 首用才算键的阶段（Switch 2 一律；Switch 1 代码区还不在已登记内存池时），控制段先自持一份（ctl_intern）
         { uint32_t hl = ctl_hold_len(&sd[i], k->ok >> i & 1); if (hl) o->sd[i].control = ctl_intern(sd[i].control, hl); }
 #endif
-#if defined(__ANDROID__)   // Android 直连的阶段 / 源快照 / 按 serial 记 key；Apple 回放不读这些，保持 main 原行为
+#if defined(__ANDROID__) || defined(__OHOS__)   // Android 直连的阶段 / 源快照 / 按 serial 记 key；Apple 回放不读这些，保持 main 原行为
         // 阶段只在 control 仍有效、code 已映射的本次调用内读定；code 未映射时留给 Bind
         // 用自持 control + 当时的 code 补算，Bind 不碰 guest control。
         if (sd[i].control && (uintptr_t)sd[i].control < (1ull << 47)) {
@@ -1562,7 +1562,7 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
         // DM_NVN_SHDUMP (debugging): keep a copy of the control section so the replay layer can save shaders missing from the map (never freed)
         if (dump && sd[i].control) { size_t cl = nvn2_on() && nvn2_ctl(sd[i].control) ? NVN2_CTL_COPY : 0x880; void *c = calloc(1, 0x880); memcpy(c, sd[i].control, cl); o->sd[i].control = c; }   // NVN2: the section is only 0xe0 bytes
     }
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     prog_snap_put(o, k->key, k->ok, k->stage);   // 安卓：设置时就按序号存（游戏可能按值复制程序对象再绑定，控制段在本次调用后可能失效）
     prog_pin_set_owner(o->serial, o);             // 该 serial 的 pin 归属固定为原件，拷贝先 Bind 不抢 owner
     for (int i = 0; i < npin; i++) prog_pin_add(o->serial, o, &pinrefs[i]);
@@ -1745,7 +1745,7 @@ NVN(nvnQueueFinalize, void, NVNqueue *q) { ((queue_t *)q)->magic = 0; }
 //   没有现场读数前不改语义，只在「有记录却报无错」时打一次红线，作为定语义的读数
 NVN(nvnQueueGetError, NVNqueueGetErrorResult, NVNqueue *q, NVNqueueErrorInfo *info) {
     (void)q; if (info) memset(info, 0, sizeof *info);
-#if !defined(__ANDROID__)   // 错误记录是 Metal 后端的（nvn_be_wait_error，同 nvnDeviceWaitForError 的条件）
+#if !defined(__ANDROID__) && !defined(__OHOS__)   // 错误记录是 Metal 后端的（nvn_be_wait_error，同 nvnDeviceWaitForError 的条件）
     { static uint64_t seen; static int once; if (nvn_be_wait_error(&seen, 0) && !once++) LOG("【红】 [nvn] QueueGetError: the host has a recorded GPU execution error but reports GPU_NO_ERROR (queue error reporting not implemented; first case)"); }
 #endif
     return NVN_QUEUE_GET_ERROR_RESULT_GPU_NO_ERROR;
@@ -2381,7 +2381,7 @@ NVN(nvnCommandBufferBindProgram, void, NVNcommandBuffer *c, const NVNprogram *p,
     prog_keys_t *k = pk_get(p, 0);
     if (k) { memcpy(keys, k->key, sizeof keys); kok = k->ok; memcpy(stage, k->stage, sizeof stage); }
     prog_snap_put(&snap, keys, kok, stage);
-#if defined(__ANDROID__)   // Android 直连：按 serial 补 key、记阶段、补存源快照（Apple 回放不读，不在 Apple 上付扫表成本）
+#if defined(__ANDROID__) || defined(__OHOS__)   // Android 直连：按 serial 补 key、记阶段、补存源快照（Apple 回放不读，不在 Apple 上付扫表成本）
     (void)nvn_prog_snap_get(snap.serial, keys, &kok, stage);   // 合并后的最好已知（游戏按值复制的程序对象指针不同、序号相同）
     {
         // 绑定当时把 code/control 存进源快照。SetShaders 时代码可能还没登记进已映射内存池，
@@ -2678,14 +2678,14 @@ extern int thread_selfcounts(int type, void *buf, size_t nbytes);   // This thre
 // Supplementary readings for the submit path (on a real device Metal 4 instruction count is -18% while submit CPU time is +49%; need to tell apart kernel mode, execution efficiency, or frequency throttling):
 // this thread's cycle count (the second item of the same interface), kernel-mode CPU time (THREAD_BASIC_INFO), wall clock
 static void thr_counts(uint64_t *instr, uint64_t *cyc) {
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     *instr = 0; *cyc = 0;   // 未接，不填假值
 #else
     uint64_t c[2] = {0, 0}; thread_selfcounts(1, c, sizeof c); *instr = c[0]; *cyc = c[1];
 #endif
 }
 static uint64_t thr_sys_ns(void) {
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     return 0;   // Android 内核态 CPU 时间采样未接
 #else
     thread_basic_info_data_t bi; mach_msg_type_number_t n = THREAD_BASIC_INFO_COUNT; mach_port_t me = mach_thread_self(); uint64_t r = 0;
@@ -2700,7 +2700,7 @@ static _Atomic uint64_t g_cum_sub_cyc, g_cum_sub_sys_ns, g_cum_sub_wall_ns;
 static _Atomic uint64_t g_cum_sub_lv_t[2], g_cum_sub_lv_cyc[2];   // submit CPU time (mach units) and cycles on level 0 / level 1
 typedef struct { uint64_t ins, cyc, ut, st; } thsc_lv;
 static void thr_counts_lv(thsc_lv lv[2]) {
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     memset(lv, 0, 2 * sizeof *lv);   // 未接，不填假值
 #else
     memset(lv, 0, 2 * sizeof *lv); thread_selfcounts(4, lv, 2 * sizeof *lv);
@@ -2712,13 +2712,13 @@ static void thr_counts_lv(thsc_lv lv[2]) {
 // mean clock 1.49 GHz, submit CPU 13.8 ms a frame). Raise the submitting thread to USER_INTERACTIVE: checked at the first submit and every 256th after (the kernel may revoke a
 // real-time declaration later, and the thread then falls back to its QoS). A real-time thread reads QoS unspecified and refuses a QoS change (EPERM): left as it is.
 // Where every guest thread is USER_INTERACTIVE already (a Mac) this changes nothing. DM_NVN_RENDER_QOS=0 leaves the thread alone (A/B on a device)
-#if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !defined(__OHOS__)
 #include "../../../../runtime/include/s2a_qos.h"   // 全进程线程调度档一张表：提交线程 = S2A_QOS_SUBMIT
 static int render_qos_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_RENDER_QOS"); v = !(e && !strcmp(e, "0")); } return v; }
 static _Atomic uint32_t g_sub_qos_seen;   // the submit thread's QoS as last checked (summary line)
 #endif
 static void render_thread_qos(void) {
-#if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !defined(__OHOS__)
     static __thread uint32_t n;
     if (n++ & 255) return;
     qos_class_t q = QOS_CLASS_UNSPECIFIED; int rp = 0; pthread_get_qos_class_np(pthread_self(), &q, &rp);
@@ -2807,7 +2807,7 @@ static NVNqueue *g_err_queue;   // 最近一次提交的队列（nvnDeviceWaitFo
 // 签名依据：游戏 sdk 里这两个名字的跳板按「第一个空闲寄存器」装目标地址（sdk+0x4530f0 用 x2 → 2 个参数；sdk+0x453120 用 x4 → 4 个参数，同表 QueueFenceSync x4 / QueueWaitSync x2 /
 //   DeviceInitialize x2 对得上），真实现在系统固件驱动里、游戏包里没有；参数类型照 main 的调用点（main+0x8fd0dc：x0 = NVNsync*，x1 = 存 GL 同步句柄的 8 字节；main+0x8fc4c0：x0 = NVNsync*，
 //   x1 = NVNdevice*，x2 = glFenceSync 的返回值，x3 = 4 字节输出）。返回值两处调用都不读，按 NVN 惯例回 NVNboolean（没有反汇编依据）。
-#if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !defined(__OHOS__)
 uint64_t gl_sync_from_event(void *ev, uint64_t val); int gl_sync_event(uint64_t h, void **ev, uint64_t *val, int *committed);   // gfx/gl/gl_draw.m
 static void sync_ext_queue_wait(const sync_t *s) {
     void *ev; uint64_t v; if (!sync_ext(s, &ev, &v)) return;
@@ -3183,7 +3183,7 @@ static int nvn_stack_args(const char *n) {
     return !strcmp(n, "nvnWindowBuilderSetHdrDisplayMetadata") || !strcmp(n, "nvnWindowBuilderGetHdrDisplayMetadata") ||
            !strcmp(n, "nvnWindowSetHdrDisplayMetadata") || !strcmp(n, "nvnWindowGetHdrDisplayMetadata");
 }
-#if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !defined(__OHOS__)
 // 留在游戏栈上的 NVN 实现（命令录制 nvnCommandBuffer* 等，每帧上万次）套叶子桩（11-17，同 runtime/src/xstack.c 叶子名单）：游戏 sp 不是 16 字节对齐时
 //   （Horizon 不查、苹果芯片查），宿主实现开头一压栈就 SIGBUS；叶子桩 sp 对齐直接尾跳，不对齐先对齐、调完恢复。
 //   不套叶子桩：未实现桩 / 大栈入口 / 计时入口（靠跳板给的 x16 = 槽地址找实现，叶子桩会改写 x16；未实现桩与计时入口自己在汇编里对齐，
@@ -3216,7 +3216,7 @@ __attribute__((constructor)) static void nvn_nops_register(void) {
     }
     unsigned nnop = sizeof g_nops / sizeof *g_nops;
     unsigned nbig = 0;
-#if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !defined(__OHOS__)
     // Implemented functions other than command recording (nvnCommandBuffer*, tens of thousands per frame, where the host only appends records) run on the big host stack: submit / present / object creation do Metal work, and a game thread's stack may be too small (see nvn_entry.S nvn_big_entry)
     for (unsigned i = 0; i < NVN_NFUNC; i++)
         if (nvn_slot[i].fn != (void *)nvn_unimpl_entry && nvn_slot[i].fn != (void *)nvn_nop && strncmp(nvn_names[i], "nvnCommandBuffer", 16) && !nvn_stack_args(nvn_names[i])) {
@@ -3238,7 +3238,7 @@ __attribute__((constructor)) static void nvn_nops_register(void) {
         NVN_NFUNC, g_nsem + nnop, g_nsem, nnop, nbig, NVN_NFUNC - g_nsem - nnop);
 }
 
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
 // Android 大宿主栈注入点：direct_session.c 在选择事务冻结为 direct、把 nvnBootstrapLoader
 //   交给客机前调一次（本 .so 链不到 xstack，sw_xstack_wrap 只能以函数指针进来）。
 //   幂等：整表只包一次（重包会把桩再喂给包装器叠桩）。未注入时 nvn_lookup 照发裸实现——
@@ -3612,7 +3612,7 @@ static int dcmp(const void *a, const void *b) { double x = *(const double *)a, y
 // wakeups per second (interrupt / out of platform idle), GPU time per second (task_gpu_utilisation), thermal state, and the guest threads that yielded most (hle_thread.c);
 // then render-target traffic per frame (attachment load / store bytes, passes that load and store everything, stores saved by DM_NVN_UNWRITTEN_DC) and guest-thread CPU by Switch priority
 static void power_line(uint64_t frame) {
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     (void)frame;   // Android 功耗/能效采样未接；不输出假的 0 统计
     return;
 #else
@@ -3661,7 +3661,7 @@ static void power_line(uint64_t frame) {
 //   Reading: ≥ 90% of frames slow → a steady cadence below the target (11-01 Zelda: 60 fps on, it renders 30, slow 299 / 300 with 58% of 18 cores idle), checked first —
 //   contention only makes some frames slow; others high + slow frames → another process takes the CPU (game mode / background); this process high, others low + slow frames → our own threads oversubscribe
 //   (compile / prewarm / worker threads). On by default (one host_processor_info + getrusage per window); S2A_LOAD_LOG=0 turns it off. No machine-wide numbers (iOS may refuse) → no line
-#if !defined(__ANDROID__)   // host_processor_info / getrusage 份额是苹果侧读数；安卓的 tsummary 不走这里（同 power_line）
+#if !defined(__ANDROID__) && !defined(__OHOS__)   // host_processor_info / getrusage 份额是苹果侧读数；安卓的 tsummary 不走这里（同 power_line）
 static void load_line(uint64_t frame, unsigned slow, unsigned n) {
     static int on = -1; if (on < 0) { const char *e = getenv("S2A_LOAD_LOG"); on = !(e && !strcmp(e, "0")); }
     if (!on) return;
@@ -3684,7 +3684,7 @@ static void load_line(uint64_t frame, unsigned slow, unsigned n) {
 #endif
 void s2a_fps_slots_note(char *buf, size_t n); void nvn_be_rt_window(uint32_t *w, uint32_t *h, uint32_t *fmt);   // 定义见下（弱默认）
 static void tsummary(uint64_t frame) {
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     (void)frame;   // Android 的 Apple 线程/QoS/功耗诊断未接；不输出伪造读数
     return;
 #else
@@ -3905,6 +3905,11 @@ static int video_cap(void) {
     if (say_busy) LOG("[nvn] 视频按片源帧率出图：在解 ≤ 30 帧视频，但游戏每帧绘制 %.0f（> %d，视频只是画面里的一块），不封顶", dpf, VP_DRAW_MAX);
     return on;
 }
+// 档位梯子压回 30 帧档（runtime/src/fps.c s2a_fps_hold → 降档原因 4，#1766）：出图同放视频一路封顶 30（至少隔 2 拍、显示链接 30 Hz）。
+//   梯子只撤社区帧率补丁；有的补丁改的设定游戏只在起局读一次（一款 Unity 游戏读到 vSyncCount 1、起局设交换间隔 1）：撤了补丁游戏逻辑回到按 30 帧算，
+//   交换间隔却还是 1，出图照 60 → 两倍速。30 帧档就按 30 出图；游戏自己设间隔 2 的款本来就是 30，不变
+static int ladder30(void) { return s2a_fps_cap_reason() == 4; }
+static int cap30(void) { return video_cap() || ladder30(); }   // 先算 video_cap：它顺带记视频开始 / 结束的日志
 static int fps_step_cap(void) {
     if (!dm_fps_state) return 0;
     uint32_t b = __atomic_load_n((uint32_t *)dm_fps_state, __ATOMIC_RELAXED); float t; memcpy(&t, &b, sizeof t);
@@ -3917,7 +3922,7 @@ static nvn_fgpu g_fg;   // the GPU time at kmin and at the current hold (nvn_fst
 static struct { uint64_t f, t; } g_cpath[16];
 static _Atomic int g_fs_k;   // the hold presentation follows (0 = not decided yet)
 // The display link runs at 30 Hz at a 30 cap, except while the game fixes its own step at 1 (BotW's VFR override)
-int nvn_game_fps(void) { int c = fps_step_cap(); if (c) return c == 30 && atomic_load(&g_fs_k) == 1 && fstep_on() ? 60 : c; if (g_hz > 0 && video_cap()) return 30; uint64_t s = atomic_load(&g_itv2_since); return g_hz > 0 && !g_display_mode && s && now_ns() - s >= 1000000000ull ? 30 : 60; }
+int nvn_game_fps(void) { int c = fps_step_cap(); if (c) return c == 30 && atomic_load(&g_fs_k) == 1 && fstep_on() ? 60 : c; if (g_hz > 0 && cap30()) return 30; uint64_t s = atomic_load(&g_itv2_since); return g_hz > 0 && !g_display_mode && s && now_ns() - s >= 1000000000ull ? 30 : 60; }
 static void present_cfg(const win_t *o) {
     if (g_hz >= 0) return;
     // The interval mode comes from the game profile (present_interval, default game): whether frames follow the present interval the game sets depends on whether the game's logic counts frames, which differs per game. Environment variables override it, and can override the fixed 60 Hz.
@@ -3954,7 +3959,7 @@ static int present_itv(const win_t *o) {   // vsyncs per frame that presentation
     int c = fps_step_cap(), k = atomic_load(&g_fs_k);
     if (c) return k && fstep_on() ? k : 60 / c;
     int itv = g_display_mode && !atomic_load(&g_fps_game_itv) ? 1 : game_itv(o);
-    return itv < 2 && g_hz > 0 && video_cap() ? 2 : itv;   // 放 ≤ 30 帧视频：至少隔 2 拍（60 Hz 节拍下 30 帧）
+    return itv < 2 && g_hz > 0 && cap30() ? 2 : itv;   // 放 ≤ 30 帧视频 / 档位梯子 30 帧档：至少隔 2 拍（60 Hz 节拍下 30 帧）
 }
 // 显示链等几个 60 Hz vsync（nvn_be_link_wait_tick 的口径；0 = 一个真实链接拍）：出图节拍被放开到 60 Hz 以上（g_hz，社区帧率补丁经 DM_PRESENT_HZ / nvn_present_hz）时，
 //   游戏间隔按 g_hz 折算，与 present_period 同一口径。原先直接传游戏间隔，链路永远按 60 Hz 等：节拍 120 Hz、间隔 1 仍只出 60 帧（11-13 实机：每 600 拍只交 300 帧，
@@ -3969,7 +3974,7 @@ static int link_vsyncs(const win_t *o) {
 int nvn_present_fps(void) {
     int c = fps_step_cap(), hz = g_hz > 0 ? g_hz : 60;
     if (c) { int k = atomic_load(&g_fs_k); return hz / (k && fstep_on() ? k : 60 / c); }
-    if (g_hz > 0 && video_cap()) { int itv = atomic_load(&g_game_itv); return hz / (itv > 2 && !g_display_mode ? itv : 2); }
+    if (g_hz > 0 && cap30()) { int itv = atomic_load(&g_game_itv); return hz / (itv > 2 && !g_display_mode ? itv : 2); }
     if (g_display_mode && !atomic_load(&g_fps_game_itv)) return hz;
     uint64_t s = atomic_load(&g_itv2_since); int itv = atomic_load(&g_game_itv);
     return s && itv > 1 && now_ns() - s >= 1000000000ull ? hz / itv : hz;
@@ -3987,7 +3992,7 @@ static uint64_t present_period(const win_t *o) {
     int itv = present_itv(o), hz = g_hz;
     // 上限作用于最终周期，不能把基准 60 Hz 降到 30 后再乘 interval（interval 2 会误成 15 帧）。
     uint64_t period = nvn_fps_period_ns(hz > 0 ? (uint64_t)itv * 1000000000ull / (uint64_t)hz : 0);
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     // #48 A4：系统省电档对最终周期取 max(原周期, 33.3 ms)；A3：登记最终周期给刷新率投票。
     period = s2a_android_limit_frame_period(period);
     s2a_android_present_note(period);
@@ -4238,7 +4243,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     dump_frame();
     if (g_frame % TWIN == 0) tsummary(g_frame);
     nvn_be_set_frame(g_frame);
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     s2a_android_frame_note();   // 每帧一次（与上一行同点）：安卓侧量实际出图帧率，慢于目标才托 CPU 频率（android/native/cpu_floor.c）
 #endif
     atomic_store(&g_fps_game_itv, s2a_fps_present_hook() | (g_display_mode && s2a_fps_cap_reason() != 0));   // | 不用 ||：钩子每帧都要调（动态步长）。 S2Arm 帧率表：每帧只在这里调一次（present_period 一帧被调 3 次：取图 / 入队 / 节拍器，直连线 10-26 审出），present_itv 只读结果
@@ -4438,7 +4443,7 @@ NVN(nvnCommandBufferSetDebugLabel, void, NVNcommandBuffer *c, const char *s) { (
 //   which had no storage yet: BufferInitialize failed and BufferGetAddress read a null pool (11-03, eight games with the same red line)
 typedef struct { NVNmemoryPool *phys; int64_t poff, voff; uint64_t size; int32_t storage_class, _pad; } map_req;
 _Static_assert(sizeof(map_req) == 0x28, "NVNmappingRequest");
-#if defined(__ANDROID__)   // 安卓：回放层（graphics/nvn/replay）按「缓冲地址就是宿主内存」读写，虚拟池照旧占一段宿主地址、物理页别名进去（安卓 39 位地址空间够用）；苹果宿主见 #else 一支（#1143）
+#if defined(__ANDROID__) || defined(__OHOS__)   // 安卓：回放层（graphics/nvn/replay）按「缓冲地址就是宿主内存」读写，虚拟池照旧占一段宿主地址、物理页别名进去（安卓 39 位地址空间够用）；苹果宿主见 #else 一支（#1143）
 // True sparse virtual pools (Monster Hunter Rise: RE Engine's GPU heap is one 64 GB virtual pool, built from separately allocated 4 MB physical pools mapped at offsets of their own; boot maps 45 of them
 // over the first 180 MB). At Initialize every virtual pool gets an address range of its own (reserved, inaccessible),
 // and every mapping request vm_remaps the physical pool's pages over its part of that range: the virtual addresses then read and write the same memory as the physical pool, as the GPU page table does
@@ -4457,7 +4462,7 @@ struct vpool { const pool_t *pool; uint8_t *base; uint64_t len, size, top; int n
     int lv;   // 预留记进了低区账（vpool_lv_note；帧录虚拟池区里取的不在低区、不记）
     struct vlog_ent { uint64_t off, len; } *log; _Atomic uint64_t nlog;   // 映射变更日志（马车世界缺口 ①，照上游参考实现（MIT）hle_nvn.c vlog）：每次映射请求 [off, off + len) 进环（VLOG_N），nlog 是总条数；有人问才建（nvn_sparse_log_seq）
     _Atomic uint64_t gen; uint64_t id;   // gen：本池最近一次映射请求的全局代号（vpt_set）；id：建池序号（全局递增，池对象地址复用时区分新旧池）。GPU 写的稀疏贴图按它们跟映射（nvn_mtl.m gstex_*）
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     s2a_vp_alias_table alias;   // dst -> 背板源；vpool_map / vpool_release 维护（#1217 §2.8）
 #endif
 };   // len: reserved; size: the pool's; top: highest mapped end so far (logged per 128 MB)
@@ -4479,7 +4484,7 @@ static pthread_mutex_t g_vp_mu = PTHREAD_MUTEX_INITIALIZER;
 // Debug 构建下取 g_vp_mu 前问一次 svc_mem 当前线程是否持着 g_mu；是则直接 abort。
 // g_vph_lk 只在持 g_vp_mu 时写、nvn_sparse_pool 单独读，读写都不再取别的锁：g_vp_mu → g_vph_lk 一个方向
 static void vp_lock(void) {
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     s2a_mem_lockorder_vp_enter();
 #endif
     pthread_mutex_lock(&g_vp_mu);
@@ -4565,7 +4570,7 @@ static void vpool_release(const pool_t *o) {
     if (v) { vpool_unpublish(v);
         for (int k = 0; k < v->nrun; k++) nvn_be_pool_del(v->base + v->run[k].lo); vpool_unmap_range(v->base, v->len);
         if (v->lv) { int me; const s2a_lowva_api *lv = vpool_lv(&me); if (lv && me > 0) lv->note(me, -(int64_t)v->len); }
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
         // 拆池必须早于 s2a_mem_session_reset：祖先先是 vpool_release 再 reset，否则 unref 会下溢。
         s2a_vp_alias_clear(&v->alias);
 #endif
@@ -4625,7 +4630,7 @@ static int vsh_make(struct vpool *v, uint64_t off, uint64_t pg) {   // the host 
     if (vsh_find(v, off) >= 0) return 1;
     if (v->nsh == v->csh) { int c = v->csh ? 2 * v->csh : 16; struct vshp *t = realloc(v->sh, (size_t)c * sizeof *t); if (!t) die("virtual pool copied-page table allocation failed"); v->sh = t; v->csh = c; }
     if (mmap(v->base + off, pg, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE | MAP_FIXED, -1, 0) == MAP_FAILED) { LOG("【红】 virtual pool %p: host page %#llx cannot be made a copy (errno %d): a buffer there stays unaddressable", (const void *)v->pool, (unsigned long long)off, errno); return 0; }
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     s2a_vp_alias_remove(&v->alias, off, off + pg);   // an alias it replaces: the record goes (as an unmap)
 #endif
     v->sh[v->nsh++] = (struct vshp){off, 0}; vsh_fill(v, v->nsh - 1, pg);
@@ -4701,14 +4706,14 @@ static int vpool_map(struct vpool *v, const map_req *r) {   // caller holds g_vp
     vsh_drop(v, (uint64_t)r->voff, (uint64_t)r->voff + r->size);
     if (!r->phys) {   // unmap: inaccessible pages again
         if (mmap((void *)to, r->size, PROT_NONE, MAP_ANON | MAP_PRIVATE | MAP_FIXED, -1, 0) == MAP_FAILED) { LOG("【红】 virtual pool unmap %#lx+%#llx failed (errno %d)", (unsigned long)to, (unsigned long long)r->size, errno); return 0; }
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
         // 旧别名已被这张不可访问的映射覆盖：先切记录并 unref，源页若已死在这里打洞。
         s2a_vp_alias_remove(&v->alias, (uint64_t)r->voff, (uint64_t)r->voff + r->size);
 #endif
         vrun_set(v, (uint64_t)r->voff, (uint64_t)r->voff + r->size, 0); return 1;
     }
     uintptr_t from = (uintptr_t)ph->mem + (uintptr_t)r->poff;
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     // 长寿别名入口核活（owner Q1-A）：源落在背板区就整段 ref；源页已死回 -EFAULT，
     // 保留今天私有占位上 mremap 也失败的响亮失败（不静默建一个读到零的别名）。
     int refd = 0;
@@ -4722,18 +4727,18 @@ static int vpool_map(struct vpool *v, const map_req *r) {   // caller holds g_vp
 #endif
     vm_prot_t cur, max;
     kern_return_t kr = vm_remap(mach_task_self(), &to, r->size, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, mach_task_self(), (vm_address_t)from, FALSE, &cur, &max, VM_INHERIT_NONE);
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     // 不论成败都切旧记录：mach.h 的 vm_remap 失败时也会在 dst 补私有 PROT_NONE，
     // 旧别名已经没了，不能留着对旧源页的引用。
     s2a_vp_alias_remove(&v->alias, (uint64_t)r->voff, (uint64_t)r->voff + r->size);
 #endif
     if (kr != KERN_SUCCESS || to != (vm_address_t)(v->base + r->voff)) {
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
         if (refd) s2a_mem_backing_alias_unref((uint64_t)from, r->size);
 #endif
         LOG("【红】 virtual pool remap %#lx → %p (%#llx bytes) failed: %d", (unsigned long)from, (void *)(v->base + r->voff), (unsigned long long)r->size, kr); return 0;
     }
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     if (refd && s2a_vp_alias_add(&v->alias, (uint64_t)r->voff, (uint64_t)r->voff + r->size, (uint64_t)from)) {
         s2a_mem_backing_alias_unref((uint64_t)from, r->size);
         // 记录没登记成功就不能留着一个无 ref 的 dst 别名（源页之后被打洞会静默读零）；
@@ -4793,7 +4798,7 @@ static pthread_mutex_t g_vp_mu = PTHREAD_MUTEX_INITIALIZER;
 // g_vph_lk 只在持 g_vp_mu 时写、nvn_sparse_pool 单独读，读写都不再取别的锁：g_vp_mu → g_vph_lk 一个方向
 // 回放层的池表锁（nvn_mtl.m g_mu）在它之后：g_vp_mu → 回放 g_mu（登记 / 注销别名与副本）
 static void vp_lock(void) {
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     s2a_mem_lockorder_vp_enter();
 #endif
     pthread_mutex_lock(&g_vp_mu);
@@ -5585,7 +5590,7 @@ NVN(nvnCommandBufferMultiDrawArraysIndirectCount, void, NVNcommandBuffer *c, NVN
     if (max > MDI_INLINE) { ONCE_LOG("【红】 indirect-count multi-draw of up to %d draws: only the first %d are made", max, MDI_INLINE); max = MDI_INLINE; }
     for (int i = 0; i < max; i++) rec_draw(c, (p_draw){pr, 0, 0, 1, 0, GA(ind + (uint64_t)i * (uint64_t)stride), GA(cnt), i});
 }
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
 // Whether the host can read n bytes at a guest address: outside a sparse virtual pool always; inside one only where pages are mapped (nvn_mtl.m reads multi-draw counts there)
 int nvn_host_readable(uint64_t a, uint64_t n) {
     int ok = 1; vp_lock();
@@ -5622,7 +5627,7 @@ static struct vpool *vpool_at(const void *pool, uint64_t a) {
 // 帧录 / 帧回放（nvn_frame_rec.inc vpool.bin）：虚拟池的地址段与页表。贴图 / 缓冲地址 = 池基址 + 偏移，写在游戏内存里，回放要同址重建。
 //   录：活着的每个虚拟池 {池对象, 基址, 窗口长, 大小, 段数} + 段 {虚拟偏移, 长, 物理地址}（页表里虚拟、物理都连续的页合成一段）；
 //   放：同址建池（地址只是一个数、不占宿主内存；早先版本录的池地址是宿主预留，照样当数用），页表照段写回，各段照录时那样登记成回放层的别名
-#if !defined(__ANDROID__)   // 帧录放只在苹果宿主
+#if !defined(__ANDROID__) && !defined(__OHOS__)   // 帧录放只在苹果宿主
 typedef struct { uint64_t pool, base, len, size, nseg; } vp_rec_hd;
 typedef struct { uint64_t voff, size, phys; } vp_rec_seg;
 int s2a_hle_vpool_save(FILE *f) {   // → 存了几个，-1 写失败

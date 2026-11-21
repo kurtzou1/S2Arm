@@ -19,6 +19,8 @@ import tempfile
 # 仓库里唯一的 RomFS 遍历（graphics/nvn/tools/romfs_list.py）
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'graphics' / 'nvn' / 'tools'))
 import romfs_list
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
+from progress import Ticker   # 出包进度（tools/progress.py，不进阶段键）
 
 BLOCK = 64 * 1024
 SCHEMA = 2
@@ -255,8 +257,11 @@ def resource_key(root):
         entries.update(hit)
         changed = [row for row in changed if row[0] not in hit]
     workers = min(env_jobs('S2A_JOBS'), max(1, len(changed)))
+    # 进度（S2A_PROGRESS）：新解包 / 新克隆的根要逐个文件读首尾抽样（一款大作 4.8 万个文件约 6 GB、二十多秒），原先没有计数，界面在抽取开工前停半分钟
+    tk = Ticker('游戏输入键', len(changed))
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        entries.update(pool.map(sample, changed))
+        for name, entry in pool.map(sample, changed):
+            entries[name] = entry; tk.step()
     if inventory(root) != current:
         raise OSError('resource membership changed while hashing')
     h = hashlib.sha256(b's2arm-resource-inputs-v1\0')

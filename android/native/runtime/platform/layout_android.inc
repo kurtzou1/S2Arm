@@ -5,7 +5,7 @@
 typedef struct { unsigned alias_gb, version, unbounded; uint64_t heap_size; } s2a_layout_requirements;
 #define S2A_WINDOW_BUDGET (72ull << 30)
 #define S2A_UNBOUNDED_WINDOW_BUDGET (72ull << 30)
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(__OHOS__)
 _Static_assert(S2A_UNBOUNDED_WINDOW_BUDGET == S2A_WIN_SIZE, "Android 窗口与不定预算必须一致");
 #endif
 // 固定部分 = TLS/保护页 2 MiB + 栈区 2 GiB + 共享映射余量 96 MiB。

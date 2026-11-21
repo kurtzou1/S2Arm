@@ -21,7 +21,7 @@ def files(srcs):
         if os.path.isdir(s): yield from (os.path.join(s, f) for f in sorted(os.listdir(s)) if f.endswith('.tsv') and not f.startswith('._'))   # ._：exFAT 上的 AppleDouble 附属文件
         elif os.path.isfile(s): yield s
 
-def main(out, keys_tsv, shmap, skey_bytes, srcs):   # shmap 留在参数里（direct_lib.sh 调用口径不变），不再读
+def main(out, keys_tsv, shmap, skey_bytes, srcs):   # shmap 留在参数里（direct_lib.py 调用口径不变），不再读
     keys = {l.strip() for l in open(keys_tsv) if l.strip()}
     # 只核「键是本包库里的」（前 16 位在 keys.tsv：别的游戏版本的键不进）；库名后缀（_b / 几何模拟的 _bgv、_bg<i> 等）合不合法只由宿主库加载器一处判
     #   （nvn_mtl.m lp_kind_of，预热 warm_stale 用同一个函数），这里不另抄后缀表。11-05 Switch Sports：原先写死只收 _b，菜单转场那批几何管线（R 行顶点键 _bgv、

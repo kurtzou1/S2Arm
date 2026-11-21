@@ -528,7 +528,7 @@ else()
     target_compile_options(aaudio_format_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
     add_test(NAME android_aaudio_format COMMAND aaudio_format_test)
     # ADPF's Android API/clock/thread IDs are the only fake boundary.
-    add_executable(adpf_hint_test tests/adpf_hint_test.c native/adpf_hint.c)
+    add_executable(adpf_hint_test tests/adpf_hint_test.c native/adpf_hint.c native/system_tuning.c)
     target_include_directories(adpf_hint_test PRIVATE native)
     target_compile_definitions(adpf_hint_test PRIVATE S2A_ADPF_TEST)
     target_compile_options(adpf_hint_test PRIVATE -Wall -Wextra -Werror)

@@ -7,7 +7,6 @@ pack/ipa.sh	cp "$SA/user" "$W/pkg/save/"	建档用户号存在时复制，cp 失
 pack/ipa.sh	cp -cR "$SA/$d" "$W/pkg/save/"	device/account 存档目录存在时克隆，cp 失败未判；待出包运维线确认。
 pack/ipa.sh	cp -cR "$SA/padrec" "$W/pkg/"	录制目录与 TSV 存在后克隆，链尾 cp 没有终止兜底；待出包运维线确认。
 pack/roots.sh	cp "$w/.root_src" "$r/.root_src" 2 > /dev/null	重放时按祖先关系继承来源戳，条件之后的 cp 失败未判；待出包运维线确认。
-pack/roots.sh	ln -sfn "$(basename "$s")" "$S2A_ROOTS/$1@现行"	私有根初次克隆后更新现行链接，失败只 echo 红字并继续；待出包运维线确认。
 pack/roots.sh	mv "$r" "$w"	重放临时根改名，函数内不假设调用点 errexit；返回码是否所有调用点都接住待出包运维线确认。
 pack/srcs.sh	mv "$b.tmp.$$" "$b" 2 > /dev/null	内容寻址工具目录发布失败后清理临时目录并继续返回路径；并发赢家与真实错误未区分，待出包运维线确认。
 pack/srcver.sh	mv "$C.tmp.$$" "$C"	版本核对缓存原子改名未判，后续仍读缓存；待出包运维线确认。

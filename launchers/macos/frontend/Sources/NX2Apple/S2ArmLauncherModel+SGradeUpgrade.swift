@@ -6,10 +6,20 @@ import S2ArmAppleAdapter
 /// S 级优化升级（11-18 维护者：「改成不自动运行，玩家手动点击 S 级优化再升级；升级过程给小图标和开始游戏按钮上加进度动画，
 ///   不阻断玩家干别的，同时此时不能新开此游戏」；随后：「可以做批量升级，名字写明白就是批量升级……有全选功能没问题」）。
 ///   排队只在作业层一份（sgradeUpgradeBatch，Mac / Windows 共用；关掉升级页或窗口队列照常跑）：界面只提交 / 追加号、调停止、读状态。
-///   状态来源：跑队列的作业事件（type=batch 每款 start / end，progress 带 gameId）实时更新；队列在跑时每 1.5 秒查一次
+///   状态来源：跑队列的作业事件（type=batch 每款 start / end，整款进度 sgradeProgress 带 gameId）实时更新；队列在跑时每 1.5 秒查一次
 ///   sgradeUpgradeStatus（追加进来的、或别的窗口起的队列也看得到）；都盖在游戏库 catalog 的 sgradeState / sgradeProgress 上。
 ///   升级中这款卡片与开始按钮画进度、开始按钮不可点（作业层按款锁兜底），其他游戏照常；资源限额（后台档、核 / 内存各一半、玩游戏时 1 路）在作业层
-struct SGradeLive: Equatable { var state: String; var progress: Double? }
+struct SGradeLive: Equatable {
+    var state: String; var progress: Double?
+    /// 事件里这款的整款进度：只认作业层的 sgradeProgress（pack/jobs/sgrade.py _GameProgress，整款 0–1、只增不减）。
+    ///   普通 progress 的 done / total 是段内某个计数器（直连抽取 n/252686、某计数 5/6…），拿它当整款进度会来回跳（玩家报修 D-QNA9，Mac 实机）
+    static func eventProgress(_ f: [String: Any]) -> Double? { (f["sgradeProgress"] as? NSNumber)?.doubleValue }
+    /// 这款在升：新读数（事件或轮询）与之前在升时的值取较大——同一款 running 期间只增不减（事件与轮询先后到、轮询慢一拍都不回退）
+    static func running(_ p: Double?, after old: SGradeLive?) -> SGradeLive {
+        let prev = old?.state == "running" ? old?.progress : nil
+        return SGradeLive(state: "running", progress: [p, prev].compactMap { $0 }.max().map { min(1, max(0, $0)) })
+    }
+}
 
 extension S2ArmLauncherModel {
     /// 这款在升级队列里的状态：queued / running / done / skipped / incomplete；不在队里为 nil
@@ -69,7 +79,7 @@ extension S2ArmLauncherModel {
         }
     }
 
-    /// 跑队列作业的一条事件：batch start → 在升；batch end → 结局（done / skipped / incomplete…）；progress done/total → 进度
+    /// 跑队列作业的一条事件：batch start → 在升（0）；batch end → 结局（done / skipped / incomplete…）；带 sgradeProgress → 整款进度（只增不减）
     func ingestSGrade(id: String, event: String, fields f: [String: Any]) {
         if let i = (f["index"] as? NSNumber)?.intValue, let n = (f["count"] as? NSNumber)?.intValue {
             sgradeBatchLive = SGradeBatch(running: true, index: i, count: n)
@@ -81,9 +91,7 @@ extension S2ArmLauncherModel {
             else if phase == "end" { sgradeLive[id] = SGradeLive(state: f["status"] as? String == "updated" || f["status"] as? String == "unchanged" ? "done" : (f["status"] as? String ?? "done"), progress: nil); refresh() }
             return
         }
-        if let done = (f["done"] as? NSNumber)?.doubleValue, let total = (f["total"] as? NSNumber)?.doubleValue, total > 0 {
-            sgradeLive[id] = SGradeLive(state: "running", progress: min(1, max(0, done / total)))
-        }
+        if let p = SGradeLive.eventProgress(f) { sgradeLive[id] = SGradeLive.running(p, after: sgradeLive[id]) }
     }
 
     /// 队列在跑时每 1.5 秒查一次作业层状态（只起一个轮询）；跑过、停了再重读一次游戏库
@@ -112,7 +120,8 @@ extension S2ArmLauncherModel {
         var live: [String: SGradeLive] = [:]
         for g in r["games"] as? [[String: Any]] ?? [] {
             guard let id = g["gameId"] as? String, let st = g["state"] as? String else { continue }
-            live[id] = SGradeLive(state: st, progress: (g["progress"] as? NSNumber)?.doubleValue)
+            let p = (g["progress"] as? NSNumber)?.doubleValue
+            live[id] = st == "running" ? SGradeLive.running(p, after: sgradeLive[id]) : SGradeLive(state: st, progress: p)
         }
         sgradeLive = live
         return running

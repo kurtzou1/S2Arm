@@ -1,7 +1,7 @@
 // 各平台共用 SDK / guest 入口。调用方保留参数直到本线程退出。
 #include "native.h"
 #include "guest_main.h"
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(__OHOS__)
 #include "../../android/native/runtime/fault/fault.h"
 #include "../../android/native/runtime/runtime.h"
 #endif
@@ -46,19 +46,19 @@ static void guest_main_body(void) {
     LOG("nnMain 返回");
 }
 static void main_returned_host(void) {
-#if defined(__APPLE__) && !defined(__ANDROID__)
+#if defined(__APPLE__) && (!defined(__ANDROID__) && !defined(__OHOS__))
     void s2a_session_park_guest_end(const char *);
     s2a_session_park_guest_end("nnMain 返回");
 #endif
     // 正常收局：Android 的 s2a_host_shutdown 会在本 guest 线程里直接 _exit(0)，pthread_join 永远不返回，
     // runtime.c 里 join 之后的 s2a_direct_finish 在 Android 上到不了。这里在 _exit 之前清 direct
     // attempt 锁（非直连/非 Android 构建没有这个符号，weak 判空）。
-#if defined(__ANDROID__)   // Apple 不引用安卓专有符号：ld64 对未定义的弱引用照样报错，不靠逐条链接行 -U 放行
+#if defined(__ANDROID__) || defined(__OHOS__)   // Apple 不引用安卓专有符号：ld64 对未定义的弱引用照样报错，不靠逐条链接行 -U 放行
     { void s2a_direct_finish(int) __attribute__((weak)); if (s2a_direct_finish) s2a_direct_finish(1); }
 #endif
     void s2a_host_shutdown(const char *why); s2a_host_shutdown("nnMain 返回");
 }
-#if defined(__APPLE__) && !defined(__ANDROID__)
+#if defined(__APPLE__) && (!defined(__ANDROID__) && !defined(__OHOS__))
 static void thread_returned_host(void) {
     void s2a_session_park_guest_end(const char *), s2a_thread_terminal_stop_point(void);
     s2a_session_park_guest_end("游戏线程入口返回");
@@ -76,7 +76,7 @@ void sw_thread_returned(void) {
 void *s2a_guest_main(void *a) {
     g_start = a;
     if (!s2a_thread_main_init()) die("主线程登记失败");
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(__OHOS__)
     // 先进入既有g_all/TSD/TLR生命周期，shutdown/VM census才能看到正在附着的主线程。
     // thread owner的入口barrier与child共享。
     // 仍在 pthread 真实宿主栈上预分配 fault 状态；thread_bind_host已初始化时幂等。
@@ -84,14 +84,14 @@ void *s2a_guest_main(void *a) {
     if (fault_error) die("Android 主线程 fault 状态初始化失败 errno=%d", fault_error);
 #endif
     sw_xstack_thread_init(((uint64_t)__builtin_frame_address(0) - 0x400) & ~0xfull, g_start->stack_top);
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(__OHOS__)
     // 借用原 xstack host cursor，不能在独立 mmap 栈上调用 NativeAOT。
     if (!s2a_android_fault_thread_ready()) die("Android 主线程 fault/xstack 尚未就绪");
     int entry_error = s2a_android_runtime_enter_guest_thread();
     if (entry_error) die("Android 主线程最终准入失败 error=%d", entry_error);
 #endif
     { void s2a_det_set_ord(int), s2a_det_acquire(void); s2a_det_set_ord(0); s2a_det_acquire(); }
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(__OHOS__)
     // 只主 guest 发布共用会话 RUNNING（子线程经 thread.c 只走上面的逐线程准入），之后存档原子态等才问服务层
     int publish_error = s2a_android_runtime_publish_running();
     if (publish_error) die("Android 主线程运行态发布被拒绝（停止先到或会话已失败）error=%d", publish_error);

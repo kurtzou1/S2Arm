@@ -455,7 +455,8 @@ def adhoc_entitle(c, app, ents, log):
     import devcert
     ent = Path(app).parent / "downstream.entitlements"
     ent.write_bytes(plistlib.dumps({k: True for k in ents}))
-    c.run([devcert.rcodesign_path(c), "sign", "-e", ent, app], log)
+    eargs, ecwd = devcert.rcodesign_ents(ent)   # Windows 盘符：-e 按第一个冒号拆（D-J7CH），只传文件名
+    c.run([devcert.rcodesign_path(c), "sign", *eargs, str(Path(app).resolve())], log, cwd=ecwd)
 
 
 def _zip_payload(stage, out):

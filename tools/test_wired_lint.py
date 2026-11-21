@@ -54,7 +54,7 @@ def decl(mode):
     if not os.path.exists(DECL): return []
     return [l.split('\t') for l in subprocess.run([sys.executable, DECL, mode, root], capture_output=True, text=True).stdout.splitlines() if l]
 ROUTE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gate_route.py')
-# 过渡的无钩子路径（gate_route.py 的 NOHOOK，11-11 旧安卓三钩子删除后 android/）：那里的单测暂无钩子接线，不报；旧层源码删除时 NOHOOK 清空即恢复检查
+# 过渡的无钩子路径（gate_route.py 的 NOHOOK；11-20 起为空，android/ 由新钩子 android/gate.sh 接线）：列在那里的单测暂无钩子接线，不报
 nohook = tuple(subprocess.run([sys.executable, ROUTE, 'nohook'], cwd=root, capture_output=True, text=True).stdout.split()) if os.path.exists(ROUTE) else ()
 tests = [t for t in tests if not t.startswith(nohook)] if nohook else tests
 routed = subprocess.run([sys.executable, ROUTE, 'hooks'], cwd=root, capture_output=True, text=True)
@@ -508,14 +508,29 @@ def _shell_references(p, text, make, cwd):   # make=True：text 是 make 配方�
     return found
 
 wired, seen, todo = set(entry) & set(tests), set(entry), list(entry)   # 门禁入口自己就在跑（11-01：tests/visual/gate.sh 是钩子，分母改按 tests 目录后被当成没人调）
-while todo:
-    for t in references(todo.pop()):
-        if t in tests: wired.add(t)
-        if t not in seen: seen.add(t); todo.append(t)
+# 间接调用（单测文件头「门禁间接：<调用方> <说明>」，tools/gate_decl.py indirect）：调用方按通配或在进程内拼路径调它，静态引用追不到。
+#   只有调用方本身被门禁调到（在已追到的闭包里）才算接线，并接着追它自己引用的脚本；调用方不存在 / 没写说明 = 声明不对，报红。
+indirect = decl('indirect'); indirect_bad = []
+for row in indirect:
+    f, caller, why = (row + ['', ''])[:3]
+    if not why.strip(): indirect_bad.append(f'文件头「门禁间接」 {f} 没写说明')
+    elif caller not in files: indirect_bad.append(f'文件头「门禁间接」 {f} 的调用方 {caller} 不是仓库里的文件')
+changed = True
+while todo or changed:
+    while todo:
+        for t in references(todo.pop()):
+            if t in tests: wired.add(t)
+            if t not in seen: seen.add(t); todo.append(t)
+    changed = False
+    for row in indirect:
+        f, caller, why = (row + ['', ''])[:3]
+        if why.strip() and caller in seen and f in tests and f not in wired:
+            wired.add(f); changed = True
+            if f not in seen: seen.add(f); todo.append(f)
 
 def verdict(okl, okp):
     """按一份白名单出结论：(文本行, 退出码)。同一次扫描可按多份白名单出结论（S2A_WIRED_EMPTY_OUT），不必整仓重扫"""
-    ok, bad = {}, [f'{p}：解析失败（{why}）' for p, why in sorted(parse_errors.items())]
+    ok, bad = {}, [f'{p}：解析失败（{why}）' for p, why in sorted(parse_errors.items())] + indirect_bad
     stale = []
     for n, l in enumerate(okl, 1):
         lab = f'白名单第 {n} 行' if okp else '文件头「门禁手动」'

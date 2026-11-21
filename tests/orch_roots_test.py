@@ -163,7 +163,7 @@ class RootsTest(unittest.TestCase):
     def test_failed_activation_leaves_current(self):
         first = self.seed()
         tx = self.store.begin('原创', 'fail')
-        with patch.object(roots, 'replace_link', side_effect=OSError('activation denied')):
+        with patch.object(roots.curptr, 'write', side_effect=OSError('activation denied')):   # 切现行指针那一步失败
             with self.assertRaises(OSError):
                 tx.commit()
         self.assertEqual(self.store.cur('原创'), first)
@@ -428,24 +428,20 @@ class RootsTest(unittest.TestCase):
         self.assertIn('实拷', err.getvalue())
 
     @unittest.skipUnless(os.name == 'nt', 'native Windows junction fallback')
-    def test_junction_fallback_and_atomic_switch(self):
-        a, b = self.home / 'a', self.home / 'b'
-        a.mkdir(); b.mkdir()
+    def test_junction_fallback(self):
+        a = self.home / 'a'
+        a.mkdir()
         (a / 'file').write_bytes(b'A')
-        (b / 'file').write_bytes(b'B')
         with patch.object(roots.os, 'symlink', side_effect=OSError(1314, 'no privilege')):
-            roots.directory_link(a, self.home / 'current')
-            roots.directory_link(b, self.home / 'next')
-        self.assertTrue((self.home / 'current').is_junction())
-        roots.replace_link(self.home / 'next', self.home / 'current')
-        self.assertEqual((self.home / 'current/file').read_bytes(), b'B')
-        self.assertEqual((a / 'file').read_bytes(), b'A')
+            roots.directory_link(a, self.home / 'romfs')
+        self.assertTrue((self.home / 'romfs').is_junction())
+        self.assertEqual((self.home / 'romfs/file').read_bytes(), b'A')
 
     def test_prune_keeps_current_previous(self):
         self.seed()
         for tag in ('v2', 'v3', 'v4'):
             self.store.begin('原创', tag).commit()
-        names = sorted(p.name for p in self.store.path.glob('原创@*') if not roots.is_link(p))
+        names = sorted(p.name for p in self.store.path.glob('原创@*') if p.is_dir())
         self.assertEqual(names, ['原创@v3', '原创@v4'])
 
     def test_replay_exclusion_preserves_new_nested_data(self):
@@ -543,9 +539,9 @@ class RootsTest(unittest.TestCase):
 
 
 class SelfHealLinkModeTest(unittest.TestCase):
-    """链接模式（NTFS / APFS）的自愈（v0.3.1）。期望手写：
-    ① 现行链接丢了（被删 / 换版本中途被杀在换链接之前）：cur() 取最新的已提交版本重建现行，内容是那一版；没有任何版本时照旧 None
-    ② 换链接那一步失败：现行还是旧版（已有用例 test_failed_activation_leaves_current）；之后再提交照常"""
+    """现行指针的自愈（v0.3.1）。期望手写：
+    ① 现行指针丢了（被删 / 换版本中途被杀在写指针之前）：cur() 取最新的已提交版本重写指针，内容是那一版；没有任何版本时照旧 None
+    ② 写指针那一步失败：现行还是旧版（已有用例 test_failed_activation_leaves_current）；之后再提交照常"""
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='s2a-heal-'); self.home = Path(self.temp.name)
         self.store = roots.Roots(self.home / 'roots', shared=False)
@@ -561,17 +557,19 @@ class SelfHealLinkModeTest(unittest.TestCase):
             live = self.store.path / '原创@现行'
             roots.remove_owned(live)
             cur = self.store.cur('原创')
-        self.assertTrue(roots.is_link(live)); self.assertEqual(cur.name, '原创@v2'); self.assertEqual((cur / 'f').read_bytes(), b'2')
+        self.assertEqual(live.read_text(encoding='utf-8'), '原创@v2\n'); self.assertEqual(cur.name, '原创@v2'); self.assertEqual((cur / 'f').read_bytes(), b'2')
 
 
 class PlainRootsTest(unittest.TestCase):
     """实目录模式（v0.3.1：游戏库 / 存放位置在 exFAT / FAT32 上，卷上建不了目录链接；S2A_ROOTS_PLAIN=1 在 Mac 上走同一条）。期望手写：
-    ① 现行是真目录（不是链接），版本名记在 .root_tag；再提交一次，旧现行改回 <款>@<它的版本名>、内容不变，romfs 留在版本里、不建 .romfs_store
-    ② 两个事务从同一现行起，先提交的赢，后提交的没声明重放就 Conflict（版本身份按 .root_tag 比，不按固定的「@现行」目录名）
+    ① 现行与别的卷一样是指针文件、版本是 <款>@<标签> 真目录，不再把现行目录改名来改名去；romfs 留在版本里、不建 .romfs_store
+    ② 两个事务从同一现行起，先提交的赢，后提交的没声明重放就 Conflict
     ③ 声明了重放：两边的改动都在
-    ④ 第二次改名（新版本 → 现行）失败：旧现行改回原位、仍是现行（两次改名中间失败的自愈）；被杀在两次改名之间 / 现行被删 / 版本名记录丢了也自愈（见各用例）
+    ④ 写指针失败：现行还是旧版；现行指针被删：按最新的已提交版本自愈
     ⑤ prune 留现行 + 上一版，更早的删掉
-    ⑥ 播种 move_romfs：不把原处 romfs 整个搬走（搬走后原处没法留联接），原处还在、现行里有一份"""
+    ⑥ 播种 move_romfs：不把原处 romfs 整个搬走（搬走后原处没法留联接），原处还在、现行里有一份
+    ⑦ 老实目录模式留下的状态：现行是真目录（.root_tag 记版本名）→ 第一次取现行改成版本目录 + 指针；
+       旧码换版本中途被杀（旧现行已停回 <款>@seed、新版本还在 <款>@next.tmp 且 .root_tag = 原创@next、没有现行）→ 换上 原创@next"""
     def setUp(self):
         self.env = patch.dict(os.environ, {'S2A_ROOTS_PLAIN': '1'}); self.env.start()
         self.temp = tempfile.TemporaryDirectory(prefix='s2a-plain-')
@@ -593,19 +591,16 @@ class PlainRootsTest(unittest.TestCase):
             (tx.path / name).parent.mkdir(parents=True, exist_ok=True); (tx.path / name).write_bytes(data)
         return tx.commit()
 
-    def test_current_is_real_directory_and_old_is_parked(self):
+    def test_current_is_pointer_and_versions_stay(self):
         self.assertTrue(self.store.plain)
         first = self.commit('seed', {'exefs/main': b'm1', 'romfs/data': b'r1'})
         live = self.store.path / '原创@现行'
-        self.assertEqual(first, live); self.assertFalse(roots.is_link(live)); self.assertTrue(live.is_dir())
-        self.assertEqual(roots.read(live / '.root_tag'), '原创@seed')
-        self.commit('next', {'exefs/main': b'm2'})
-        self.assertEqual(self.store.cur('原创'), live)
-        self.assertEqual(roots.read(live / '.root_tag'), '原创@next')
-        self.assertEqual((live / 'exefs/main').read_bytes(), b'm2'); self.assertEqual((live / 'romfs/data').read_bytes(), b'r1')
-        old = self.store.path / '原创@seed'
-        self.assertEqual((old / 'exefs/main').read_bytes(), b'm1')
-        self.assertFalse(roots.is_link(live / 'romfs')); self.assertFalse((self.home / 'roots' / '.romfs_store').exists())
+        self.assertEqual(first, self.store.path / '原创@seed'); self.assertEqual(live.read_text(encoding='utf-8'), '原创@seed\n')
+        second = self.commit('next', {'exefs/main': b'm2'})
+        self.assertEqual(self.store.cur('原创'), second); self.assertEqual(live.read_text(encoding='utf-8'), '原创@next\n')
+        self.assertEqual((second / 'exefs/main').read_bytes(), b'm2'); self.assertEqual((second / 'romfs/data').read_bytes(), b'r1')
+        self.assertEqual((first / 'exefs/main').read_bytes(), b'm1')
+        self.assertFalse(roots.is_link(second / 'romfs')); self.assertFalse((self.home / 'roots' / '.romfs_store').exists())
 
     def test_concurrent_conflict_and_replay(self):
         self.commit('seed', {'exefs/main': b'm'})
@@ -618,60 +613,48 @@ class PlainRootsTest(unittest.TestCase):
         live = c.commit(replay=('c',))
         self.assertEqual(((live / 'a').read_bytes(), (live / 'c').read_bytes()), (b'A', b'C'))
 
-    def test_failed_second_rename_restores_current(self):
-        self.commit('seed', {'exefs/main': b'm1'})
-        live = self.store.path / '原创@现行'
+    def test_failed_pointer_write_keeps_current(self):
+        first = self.commit('seed', {'exefs/main': b'm1'})
         tx = self.store.begin('原创', 'next')
-        real = roots.rename_dir
-        def rename(src, dst, **kw):
-            if Path(dst) == live and Path(src) == tx.path:
-                raise OSError('rename denied')
-            return real(src, dst, **kw)
-        with patch.object(roots, 'rename_dir', rename), self.assertRaises(OSError):
+        with patch.object(roots.curptr, 'write', side_effect=OSError('write denied')), self.assertRaises(OSError):
             tx.commit()
-        self.assertEqual(self.store.cur('原创'), live)
-        self.assertEqual(roots.read(live / '.root_tag'), '原创@seed'); self.assertEqual((live / 'exefs/main').read_bytes(), b'm1')
+        self.assertEqual(self.store.cur('原创'), first); self.assertEqual((first / 'exefs/main').read_bytes(), b'm1')
 
     def test_prune_keeps_current_and_previous(self):
         for i in range(4):
             self.commit(f'v{i}', {'exefs/main': str(i).encode()})
             time.sleep(0.01)
         names = sorted(p.name for p in (self.home / 'roots').glob('原创@*') if p.is_dir())
-        self.assertEqual(names, ['原创@v2', '原创@现行'])
+        self.assertEqual(names, ['原创@v2', '原创@v3'])
 
-    def test_killed_between_two_renames_heals_to_new_version(self):
-        # ① 换版本中途被杀：旧现行已停回 <款>@seed，新版本还在 <款>@next.tmp（已写 .root_tag = 已校验、正在换上），没有现行 →
-        #   cur() 把换到一半的那个换上；内容是新版、版本名是 原创@next
-        self.commit('seed', {'exefs/main': b'm1'})
-        live = self.store.path / '原创@现行'
-        tx = self.store.begin('原创', 'next'); (tx.path / 'exefs/main').write_bytes(b'm2')
-        roots.text(tx.path / '.root_tag', '原创@next\n')
-        roots.rename_dir(live, self.store.path / '原创@seed')   # 被杀前已做完的第一次改名
-        cur = self.store.cur('原创')
-        self.assertEqual(cur, live); self.assertEqual((live / 'exefs/main').read_bytes(), b'm2')
-        self.assertEqual(roots.read(live / '.root_tag'), '原创@next')
-        self.assertTrue((self.store.path / '原创@seed').is_dir())
-
-    def test_missing_current_heals_to_newest_parked(self):
-        # ① 另一种被杀时机（新版本还没写 .root_tag）/ 现行目录被删：取最新的已提交版本换上
+    def test_missing_current_heals_to_newest(self):
         self.commit('v1', {'f': b'1'}); time.sleep(0.01); self.commit('v2', {'f': b'2'})
         live = self.store.path / '原创@现行'
-        roots.remove_owned(live)
+        live.unlink()
         with patch.dict(os.environ, {'S2A_ROOTS_NO_BOOT': '1'}):
             cur = self.store.cur('原创')
-        self.assertEqual(cur, live); self.assertEqual((live / 'f').read_bytes(), b'1')   # v2 是被删的那个现行；剩下最新的是 v1
-        self.assertEqual(roots.read(live / '.root_tag'), '原创@v1')
+        self.assertEqual(cur.name, '原创@v2'); self.assertEqual((cur / 'f').read_bytes(), b'2')
+        self.assertEqual(live.read_text(encoding='utf-8'), '原创@v2\n')
 
-    def test_lost_tag_is_rewritten_and_next_commit_parks_old(self):
-        # ② 现行的版本名记录（.root_tag）丢了：cur() 补记一个新名字；再提交时旧现行停到那个名字下，新的成现行
-        self.commit('seed', {'f': b'1'})
-        live = self.store.path / '原创@现行'
-        (live / '.root_tag').unlink()
-        self.store.cur('原创')
-        tag = roots.read(live / '.root_tag')
-        self.assertTrue(tag.startswith('原创@recovered-'))
-        self.commit('next', {'f': b'2'})
-        self.assertEqual((live / 'f').read_bytes(), b'2'); self.assertEqual(((self.store.path / tag) / 'f').read_bytes(), b'1')
+    def test_legacy_plain_current_migrates(self):
+        legacy = self.store.path / '原创@现行'
+        (legacy / 'exefs').mkdir(parents=True); (legacy / 'exefs/main').write_bytes(b'live')
+        roots.text(legacy / '.root_tag', '原创@seed\n')
+        with patch.dict(os.environ, {'S2A_ROOTS_NO_BOOT': '1'}):
+            cur = self.store.cur('原创')
+        self.assertEqual(cur, self.store.path / '原创@seed'); self.assertEqual((cur / 'exefs/main').read_bytes(), b'live')
+        self.assertFalse((cur / '.root_tag').exists()); self.assertEqual(legacy.read_text(encoding='utf-8'), '原创@seed\n')
+        second = self.commit('next', {'exefs/main': b'm2'})
+        self.assertEqual(self.store.cur('原创'), second); self.assertEqual((cur / 'exefs/main').read_bytes(), b'live')
+
+    def test_legacy_killed_between_two_renames_heals_to_new_version(self):
+        parked = self.store.path / '原创@seed'; (parked / 'exefs').mkdir(parents=True); (parked / 'exefs/main').write_bytes(b'm1')
+        pending = self.store.path / '原创@next.tmp'; (pending / 'exefs').mkdir(parents=True); (pending / 'exefs/main').write_bytes(b'm2')
+        roots.text(pending / '.root_tag', '原创@next\n')
+        with patch.dict(os.environ, {'S2A_ROOTS_NO_BOOT': '1'}):
+            cur = self.store.cur('原创')
+        self.assertEqual(cur, self.store.path / '原创@next'); self.assertEqual((cur / 'exefs/main').read_bytes(), b'm2')
+        self.assertFalse(pending.exists()); self.assertEqual((parked / 'exefs/main').read_bytes(), b'm1')
 
     def test_seed_does_not_move_romfs_away(self):
         from pack.orch import refresh
@@ -785,9 +768,9 @@ class ShortRootLinkTest(unittest.TestCase):
         fake = _Os('nt'); fake.symlink = Mock()
         long, short = self.home / 'long', self.home / 'j' / 'ab12'
         with patch.object(roots, 'os', fake), patch.object(roots, 'table_now', return_value=__import__('pack.orch.winlong', fromlist=['parse_table']).parse_table(f'{long}\t{short}')):
-            roots.directory_link(short / 'roots' / 'g@v1', short / 'roots' / 'g@现行', relative='g@v1')
+            roots.directory_link(short / 'roots' / '.romfs_store' / 'g' / 'id', short / 'roots' / 'g@v1' / 'romfs', relative='../.romfs_store/g/id')
         value = fake.symlink.call_args.args[0]
-        self.assertEqual(value, os.path.normpath(str(long / 'roots' / 'g@v1')))
+        self.assertEqual(value, os.path.normpath(str(long / 'roots' / '.romfs_store' / 'g' / 'id')))
         self.assertTrue(fake.symlink.call_args.kwargs.get('target_is_directory'))
 
     @unittest.skipUnless(os.name == 'nt', 'native Windows short-root junction')

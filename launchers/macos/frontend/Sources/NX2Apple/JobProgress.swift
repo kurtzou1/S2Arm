@@ -27,13 +27,16 @@ struct JobProgress: Equatable {
     private(set) var rate: Double?
     /// 本计数器第一次读数：作业时钟与已完成量（速率的起点）。
     private var origin: (t: Double, done: Double)?
+    /// 上次前进时刻（作业事件 advancedAt，pack/jobs/core.py emit：换了一步或计数变了才更新，心跳不算）。给「上次前进 N 秒前」：
+    ///   玩家据此分得清「后台还在走、只是慢」和「卡住了」（#1770 / #1773）
+    private(set) var advancedAt: Date?
     /// 出包 / 准备的里程碑（plan 事件 + 每条事件的当前 milestone）：步骤清单、每步实际用时、按本机历史的预计还需（适配层 MilestoneEstimate）。
     private(set) var track = MilestoneTrack()
 
     static func == (a: JobProgress, b: JobProgress) -> Bool {
         a.stage == b.stage && a.overall == b.overall && a.keychainPrompt == b.keychainPrompt && a.index == b.index && a.count == b.count && a.done == b.done && a.total == b.total && a.unit == b.unit
             && a.stageStarted == b.stageStarted && a.eta == b.eta && a.etaAt == b.etaAt && a.rate == b.rate
-            && a.origin?.t == b.origin?.t && a.origin?.done == b.origin?.done && a.track == b.track
+            && a.origin?.t == b.origin?.t && a.origin?.done == b.origin?.done && a.track == b.track && a.advancedAt == b.advancedAt
     }
 
     /// 速率至少要量这么久（作业时钟秒）才报剩余时间：头一两次读数的速度不稳。
@@ -50,6 +53,7 @@ struct JobProgress: Equatable {
             done = nil; total = nil; unit = ""; origin = nil; eta = nil; etaAt = nil; rate = nil; keychainPrompt = false
         }
         if let newIndex { index = newIndex }
+        if let a = number("advancedAt") { advancedAt = Date(timeIntervalSince1970: a) }
         if let k = e.fields["keychainPrompt"] as? Bool { keychainPrompt = k }
         if let c = number("stageCount") { count = Int(c) }
         if let o = number("overall") { overall = max(overall ?? 0, min(1, o)) }
@@ -63,6 +67,9 @@ struct JobProgress: Equatable {
             eta = max(0, t - d) / speed; etaAt = now
         }
     }
+
+    /// 距上次前进的秒数（没有 advancedAt 的旧事件为 nil，不显示）
+    func sinceAdvance(at now: Date) -> Double? { advancedAt.map { max(0, now.timeIntervalSince($0)) } }
 
     /// 作业结束：最后一步的用时到此为止。
     mutating func finish(at now: Date = Date()) { track.finish(at: now.timeIntervalSince1970) }

@@ -333,6 +333,8 @@ static const char *host_text(const char *s) {
         {S2A_SELFCHECK_DEVICE_TITLE, S2A_SELFCHECK_DEVICE_TITLE_EN}, {S2A_SELFCHECK_DEVICE_BODY, S2A_SELFCHECK_DEVICE_BODY_EN},
         {S2A_SELFCHECK_AS_TITLE, S2A_SELFCHECK_AS_TITLE_EN}, {S2A_SELFCHECK_AS32_BODY, S2A_SELFCHECK_AS32_BODY_EN},
         {S2A_SELFCHECK_MEM_BODY, S2A_SELFCHECK_MEM_BODY_EN}, {S2A_SELFCHECK_GO, S2A_SELFCHECK_GO_EN},
+        {S2A_SELFCHECK_ADDR_TITLE, S2A_SELFCHECK_ADDR_TITLE_EN}, {S2A_SELFCHECK_ADDR_BODY, S2A_SELFCHECK_ADDR_BODY_EN},   // 地址空间不够这款（svc_mem.c addr_short_note）
+        {S2A_SELFCHECK_ENT_BODY_APP, S2A_SELFCHECK_ENT_BODY_APP_EN}, {S2A_SELFCHECK_MEM_BODY_APP, S2A_SELFCHECK_MEM_BODY_APP_EN},   // 独立 App 的说法
         {S2A_INIT_FAIL_MSG_SERVICE, S2A_INIT_FAIL_MSG_SERVICE_EN}, {S2A_INIT_FAIL_MSG_RUNTIME, S2A_INIT_FAIL_MSG_RUNTIME_EN},
         {S2A_INIT_FAIL_MSG_GAME, S2A_INIT_FAIL_MSG_GAME_EN}, {S2A_INIT_FAIL_MSG_GENERIC, S2A_INIT_FAIL_MSG_GENERIC_EN},
         {S2A_INIT_FAIL_MSG_FILES, S2A_INIT_FAIL_MSG_FILES_EN}, {S2A_INIT_FAIL_NEXT, S2A_INIT_FAIL_NEXT_EN},
@@ -380,6 +382,13 @@ int s2a_ios_ask_continue(const char *symbol, const char *title, const char *body
     }); });
     dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
     return 1;
+}
+// 同上，文案按 S2ArmHost.strings 的键取（五语）：<键>.title / <键>.body + host.startAnyway。C 层只认得键名（svc_mem.c 地址空间不够这款，11-20）
+int s2a_ios_ask_continue_l10n(const char *key) {
+    if (!key) return 0;
+    if ([@(key) isEqualToString:@"addrshort"])
+        return s2a_ios_ask_continue("exclamationmark.triangle.fill", S2AL(@"addrshort.title").UTF8String, S2AL(@"addrshort.body").UTF8String, S2AL(@"host.startAnyway").UTF8String);
+    return 0;
 }
 // 老入口（停帧看门 ap_host.c 经 dlsym 调）：第一段当标题、其余当正文
 // 可用空间按「重要用途」口径（含系统随时能清掉的空间，同「设置 → 储存空间」里的「可用」）：statfs 的 f_bavail 不含这部分，常小好几 GB，
@@ -1424,6 +1433,78 @@ void s2a_shell_pick_s2arm(const char *gid) {   // 主线程（s2a_shell.h）
     if (!top) { LOG("【红】游戏库：没有窗口，.s2arm 选择器开不出来"); return; }
     [top presentViewController:p animated:YES completion:nil];
 }
+// 长按卡片「导出这一款…」（0.6.3，GitHub #1793：分发证书玩家换签名重装后不想再从电脑整套重推）：后台生成这款的 <名>.s2arm + <名>.img
+//   （game_export.m，.img 是资源包 game.img——推送装的款是 romfs.img——的同卷硬链接，不拷副本），放本款文档根下的临时文件夹 game-exports/<随机名>/，交「文件」App 存走（asCopy）。
+//   选好或取消都清掉临时件（同 save_transfer.m 存档导出：玩家选的目标正是临时件本身时那个不删）；导不出按码说人话。同时只做一次
+#include "game_export.h"
+@interface S2AGameExporter : NSObject <UIDocumentPickerDelegate> @property (copy) NSString *gid, *dir; @property (copy) NSArray<NSString *> *files; @end
+static S2AGameExporter *g_gexp;
+static void gexp_clear(S2AGameExporter *x, NSArray<NSURL *> *kept) {
+    NSFileManager *fm = NSFileManager.defaultManager; BOOL keep = NO;
+    for (NSString *f in x.files) {
+        NSURL *u = [NSURL fileURLWithPath:f].URLByResolvingSymlinksInPath; BOOL mine = NO;
+        for (NSURL *k in kept) mine |= [k.URLByResolvingSymlinksInPath isEqual:u];
+        if (mine) { keep = YES; continue; }
+        NSError *e = nil;
+        if (![fm removeItemAtPath:f error:&e] && [fm fileExistsAtPath:f]) LOG("【黄】导出这一款：临时件 %s 没删掉：%s", f.UTF8String, e.localizedDescription.UTF8String);
+    }
+    if (!keep && x.dir) [fm removeItemAtPath:x.dir error:nil];
+}
+@implementation S2AGameExporter
+- (void)documentPicker:(UIDocumentPickerViewController *)c didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    (void)c; LOG("导出这一款：%s 存到了 %s 等 %lu 处", self.gid.UTF8String, urls.firstObject.path.UTF8String, (unsigned long)urls.count);
+    gexp_clear(self, urls); g_gexp = nil;
+}
+- (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)c { (void)c; LOG("导出这一款：%s 玩家取消", self.gid.UTF8String); gexp_clear(self, nil); g_gexp = nil; }
+@end
+static NSString *gexp_text(int r, const char *why) {
+    switch (r) {
+    case S2A_GEXP_NO_PROGRAM: return S2AL(@"gameExport.noProgram");
+    case S2A_GEXP_IN_BUNDLE: return S2AL(@"gameExport.inBundle");
+    case S2A_GEXP_PARTIAL: return S2AL(@"gameExport.partial");
+    case S2A_GEXP_NO_IMG: return S2AL(@"gameExport.noImg");
+    default: return [NSString stringWithFormat:S2AL(@"gameExport.ioFailed"), @(why)];
+    }
+}
+void s2a_shell_export_game(const char *gid_c) {   // 主线程（s2a_shell.h）
+    if (!gid_c || strlen(gid_c) != 16) return;
+    if (g_gexp) { LOG("导出这一款：%s 上一次还没完，这次不接", g_gexp.gid.UTF8String); return; }
+    S2AGameExporter *x = [S2AGameExporter new]; x.gid = @(gid_c); g_gexp = x;
+    char d[1024]; s2a_container_docs(d, sizeof d); NSString *docs = @(d);
+    NSString *root = [docs stringByAppendingPathComponent:[NSString stringWithFormat:@"games/%@/game-exports", x.gid]];
+    [NSFileManager.defaultManager removeItemAtPath:root error:nil];   // 上次导出途中 App 被关留下的
+    x.dir = [root stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
+    // 生成要几秒（程序库 + 着色器库原样写一遍）：0.3 秒还没好才弹「正在生成」，说明写在里面（同 library_pack_help 的「正在检查」）
+    __block BOOL done = NO; __block UIAlertController *wait = nil;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (done) return;
+        UIViewController *top = lib_top(); if (!top) return;
+        wait = [UIAlertController alertControllerWithTitle:S2AL(@"gameExport.preparing") message:S2AL(@"gameExport.hint") preferredStyle:UIAlertControllerStyleAlert];
+        [top presentViewController:wait animated:YES completion:nil];
+    });
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        char s2[2400] = "", im[2400] = "", why[1024] = ""; int r; NSError *e = nil;
+        CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
+        if (![NSFileManager.defaultManager createDirectoryAtPath:x.dir withIntermediateDirectories:YES attributes:nil error:&e]) {
+            r = S2A_GEXP_IO; snprintf(why, sizeof why, "建导出文件夹失败：%s", e.localizedDescription.UTF8String); }
+        else r = s2a_game_export(docs.fileSystemRepresentation, x.gid.UTF8String, x.dir.fileSystemRepresentation, s2, sizeof s2, im, sizeof im, why, sizeof why);
+        LOG("导出这一款：%s %s（%.0f 毫秒）%s", x.gid.UTF8String, r ? "导不出" : "已生成", (CFAbsoluteTimeGetCurrent() - t0) * 1000, r ? why : s2);
+        NSString *s2s = @(s2), *ims = @(im), *text = r ? gexp_text(r, why) : nil;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            done = YES;
+            void (^next)(void) = ^{
+                if (r) { gexp_clear(x, nil); g_gexp = nil; if (g_lib_window) top_alert(g_lib_window, S2AL(@"gameExport.failed.title"), text); return; }
+                x.files = @[s2s, ims];
+                UIViewController *top = lib_top();
+                if (!top) { LOG("【红】导出这一款：没有窗口，「文件」导出页开不出来"); gexp_clear(x, nil); g_gexp = nil; return; }
+                UIDocumentPickerViewController *p = [[UIDocumentPickerViewController alloc] initForExportingURLs:@[[NSURL fileURLWithPath:s2s], [NSURL fileURLWithPath:ims]] asCopy:YES];
+                p.delegate = x;
+                [top presentViewController:p animated:YES completion:nil];
+            };
+            if (wait && wait.presentingViewController) [wait dismissViewControllerAnimated:NO completion:next]; else next();
+        });
+    });
+}
 #endif
 static void widget_open(NSURL *url, void *ctx) {
     if (url.isFileURL && [url.pathExtension.lowercaseString isEqualToString:@"s2arm"]) { s2arm_open(url); return; }
@@ -1462,6 +1543,15 @@ static void widget_open(NSURL *url, void *ctx) {
 #endif
     LOG("游戏库：已挂库界面（清单 %s）%s", cat.UTF8String, s2a_process_prewarmed() ? "，预热进程只显示库、不起宿主" : "");
     img_scan_bg();
+    // 独立 App（一 App 一游戏，0.6.3）：包里只有这一款、程序库也在包里 → 点开图标直接进这款，同玩家在库里点开始（崩溃恢复 → 起局前检查 → 起宿主）；
+    //   起不来（被拒）照常留在库界面、按原因标。预热进程只显示库，不起宿主
+    { char gid[64];
+      if (!s2a_process_prewarmed() && s2a_launch_ctx_single_game(s2a_launch_ctx_bundle_dir(), gid, sizeof gid)) {
+          char *g = strdup(gid); S2ASceneDelegate *sd = self;
+          LOG("游戏库：独立 App（只有 %s、程序在包里），直接进这款", gid);
+          dispatch_async(dispatch_get_main_queue(), ^{ library_play(g, (__bridge void *)sd); free(g); });
+          return;
+      } }
     // 测试开关（真机自动化点不到库界面的「开始」，同 diag.m S2A_OPEN_SETTINGS）：S2A_LIBRARY_AUTOPLAY=<程序号> 库界面挂上 2 秒后替玩家点这款的开始，
     //   走的就是玩家点开始那条路（library_play：崩溃恢复 → 起局前检查 → 起宿主），用来在多款容器里验证起局前的处理
     { const char *e = getenv("S2A_LIBRARY_AUTOPLAY");

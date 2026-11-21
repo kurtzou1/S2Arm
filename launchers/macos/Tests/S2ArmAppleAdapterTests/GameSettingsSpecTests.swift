@@ -20,7 +20,7 @@ final class GameSettingsSpecTests: XCTestCase {
         XCTAssertEqual(quality.detail("zh-Hans"), "")
         XCTAssertEqual(try XCTUnwrap(items.first { $0.id == "docked" }).options.map(\.value), ["docked", "handheld"])
         XCTAssertEqual(try XCTUnwrap(items.first { $0.id == "rumbleLevel" }).options.count, 6)
-        XCTAssertEqual(try XCTUnwrap(items.first { $0.id == "ldnMode" }).options.map(\.value), ["auto", "manual"])
+        XCTAssertEqual(try XCTUnwrap(items.first { $0.id == "ldnMode" }).options.map(\.value), ["auto", "manual", "switch"])
         XCTAssertEqual(try XCTUnwrap(items.first { $0.id == "ldnAddress" }).type, "text")
     }
 

@@ -12,7 +12,7 @@
 set -u
 H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); trap 'rm -rf "$T"' EXIT; fail=0
 ck() { if eval "$2"; then echo "✓ $1"; else echo "✗ $1"; fail=1; fi; }
-r=$T/roots/zz@v1; mkdir -p "$r/exefs"; ln -sfn zz@v1 "$T/roots/zz@现行"
+r=$T/roots/zz@v1; mkdir -p "$r/exefs"; printf '%s\n' zz@v1 > "$T/roots/zz@现行"
 { head -c 64 /dev/zero; printf 'BIDBIDBIDBIDBID1'; } > "$r/exefs/main"; B=$(xxd -s 0x40 -l 16 -p "$r/exefs/main")
 printf '模块\t偏移\t种类\t证据\nmain\t0x10\tf2w\tx\nmain\t0x20\tmovz\tx\nmain\t0x30\taspdiv\tx\n' > "$r/widen_sites.tsv"
 cat > "$T/stub.sh" <<'STUB'

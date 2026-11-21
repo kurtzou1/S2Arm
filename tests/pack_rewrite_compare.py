@@ -46,7 +46,7 @@ def compare(name, source, directory, env, baseline=None):
         clone(snapshot, initial)
         (initial / ".stage_rewrite").unlink(missing_ok=True)
         current = initial.parent / (name + "@现行")
-        current.symlink_to(initial.name, target_is_directory=True)
+        current.write_text(initial.name + "\n")   # 现行指针文件（pack/orch/current.py）：内容 = 版本目录名
         start = time.perf_counter()
         with (run / "stdout.log").open("w") as stdout, (run / "stderr.log").open("w") as stderr:
             # The production stage already bounds each module to 600 seconds.
@@ -56,7 +56,7 @@ def compare(name, source, directory, env, baseline=None):
                                               S2A_ROOTS_NO_BOOT="1"), stdout=stdout, stderr=stderr)
             rc = process.returncode
         elapsed = time.perf_counter() - start
-        outputs = current.resolve()
+        outputs = current.parent / current.read_text().strip()
         artifacts = {p.name: digest(p) for p in sorted(outputs.iterdir())
                      if p.is_file() and any(p.name.endswith("." + suffix) for suffix in SUFFIXES)}
         result["runs"][mode] = dict(returncode=rc, elapsed_seconds=elapsed, artifacts=artifacts)

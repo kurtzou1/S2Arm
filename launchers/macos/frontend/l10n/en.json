@@ -1650,6 +1650,7 @@
   "s2arm.export.installExistingPad": "Already built? Install it on iPad",
   "s2arm.fail.locations": "Couldn't read storage locations",
   "s2arm.fail.installMode": "Couldn't read the install method",
+  "s2arm.fail.layoutSet": "Couldn't change how games go to the iPhone",
   "s2arm.fail.installModeSet": "Couldn't switch the install method",
   "s2arm.fail.devCert": "Couldn't read the developer certificate status",
   "s2arm.bundleIncomplete.title": "S2Arm isn't fully installed",

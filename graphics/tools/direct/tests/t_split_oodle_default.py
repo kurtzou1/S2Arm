@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# 直连抽取找游戏解码器的缺省（11-07 勇者斗恶龙 XI S：私有根出包时 extract.sh 不设 DM_OODLE_HOST / DM_OODLE_MODULES，shader_split 遇 LZ5 包直接红，
+# 直连抽取找游戏解码器的缺省（11-07 勇者斗恶龙 XI S：私有根出包时 extract.py 不设 DM_OODLE_HOST / DM_OODLE_MODULES，shader_split 遇 LZ5 包直接红，
 #   而 pack/ue_pak.py、nxsh_extract 用 uepak.oodle_host_find 的缺省照样找得到）。translator/shader_split.py oodle_defaults。期望按约定手写：
 #   ① 两个变量都没设、产物根布局（<根>/romfs 与 <根>/main.fixups.tsv 并排）、宿主存在 → DM_OODLE_HOST = 宿主、DM_OODLE_MODULES = <根>（写进环境，派生的工人进程看得见）
 #   ② 调用方已设 → 原样不动

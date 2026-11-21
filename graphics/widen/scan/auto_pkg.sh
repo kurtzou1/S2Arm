@@ -11,10 +11,11 @@
 # 选表规则只在一处：pack/pkg_srcs.py widen_list（list 子命令调它；pack/stage_rewrite.sh 也用 list）
 set -u
 H=$(cd "$(dirname "$0")" && pwd); R=$(cd "$H/../../.." && pwd)
+source "$R/pack/roots.sh"   # root_cur_in：现行指针文件（S2A_ROOTS 缺省同上面各处的共享产物根）
 AUTO=${S2A_WIDEN_AUTO:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/widen/auto}; TB=${S2A_WIDEN_DIR:-$R/graphics/widen/tables}
 bid_of() { xxd -s 0x40 -l 16 -p "$1/exefs/main" 2> /dev/null; }
 auto_ok() { [ "$(LC_ALL=C awk -F'\t' '$1 == "过" || $1 == "不过" { print $1; exit }' "$1/$2.status" 2> /dev/null)" = 过 ]; }   # auto_ok <自动表目录> <档位>
-cur_bid() { local c; c=$(cd -P "${S2A_ROOTS:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/roots}/$1@现行" 2> /dev/null && pwd) && bid_of "$c"; }
+cur_bid() { local c; c=$(root_cur_in "$S2A_ROOTS" "$1" 2> /dev/null) && bid_of "$c"; }
 cmd=${1:?子命令 start / wait / list / copy / wanted}; G=${2:?款}
 # 这个包满屏会不会开（维护者 11-02 19:0x 满屏发布缺省关）：--all-caps（ipa.sh 导出 S2A_ALL_CAPS=1）或本款补丁（S2A_PATCH_DIR 给的补丁目录 <程序号>/patch.tsv；没给就不看补丁）
 #   [caps] widen 1 / 有 [widen.enable.*] 段才要满屏自动学习；发布口径没补丁的款满屏关，起闭环只占 Mac 局槽（11-02 19:4x 维护者：3 个局槽被这类闭环占着）

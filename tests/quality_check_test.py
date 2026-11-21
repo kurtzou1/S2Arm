@@ -28,6 +28,31 @@ def chk(name, want, got):
     ok = want == got; bad += not ok
     print(f'{"🟢" if ok else "🔴"} {name}' + ('' if ok else f'：期望「{want}」→ 真结果「{got}」'))
 
+def test_android_frame_source():
+    # 合成 3600 帧：16666 us → 60.00 fps / 16.7 ms / 慢帧 0%；
+    # 双列时 wall=33333 us，必须仍取 disp，不能混算或只按表头选标签。
+    cases = [
+        ('wall_only', ['wall_us'], ['16666'], 'wall_us'),
+        ('both', ['wall_us', 'disp_us'], ['33333', '16666'], 'disp_us'),
+        ('disp_only', ['disp_us'], ['16666'], 'disp_us'),
+        ('disp_empty', ['wall_us', 'disp_us'], ['16666', ''], 'wall_us'),
+        ('disp_zero', ['wall_us', 'disp_us'], ['16666', '0'], 'wall_us'),
+        ('disp_invalid', ['wall_us', 'disp_us'], ['16666', 'unknown'], 'wall_us'),
+    ]
+    with tempfile.TemporaryDirectory() as root:
+        for name, columns, values, source in cases:
+            o = os.path.join(root, name); os.makedirs(o)
+            with open(os.path.join(o, 'frames.tsv'), 'w') as f:
+                f.write('frame\t' + '\t'.join(columns) + '\n')
+                for i in range(3600): f.write(f'{i + 1}\t' + '\t'.join(values) + '\n')
+            r = q.check_android(o, name, ai=False)
+            chk(f'安卓帧率来源 {name}：判据不变', '过', r['帧率'])
+            expected = f'帧率 要 60（缺省 60）；{source}：平均 60.00 帧/秒，中位 16.7 ms，慢帧 0.00%，3600 帧'
+            chk(f'安卓帧率来源 {name}：标签与实际取值一致', True, expected in r['读数'])
+
+
+test_android_frame_source()
+
 T = tempfile.mkdtemp()
 im = Image.new('RGB', (1000, 460), (90, 120, 60))
 for x in list(range(100)) + list(range(900, 1000)):

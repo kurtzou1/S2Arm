@@ -30,6 +30,9 @@ API = "https://api.github.com/repos/jhaizhou-ops/S2Arm/releases/latest"
 #   国内共享出口很容易被限流）。安全靠清单的 Ed25519 签名，不靠来源：官网那份验签不过就当没有，回退 GitHub。
 MIRROR = "https://s2arm.com/update/latest.json"
 MIRROR_TIMEOUT = 8   # 官网是首选，连不上要尽快回退 GitHub：只试一次、不重试
+# 官网清单说「不比本机新」时再取一份：GitHub Release 最新版里的同一份签名清单。走下载地址（不是 API，不占每小时 60 次），只试一次、取不到就以官网为准。
+#   #1768：官网两份检出互相覆盖，清单回退到旧版，老玩家一直看不到新版；两处取较新的那份，任一处停在旧版都不挡更新
+RELEASE_MANIFEST = "https://github.com/jhaizhou-ops/S2Arm/releases/latest/download/" + "update-manifest.json"
 # 安装包仍从 GitHub Release 下载（下载链接不是 API，没有 60 次限制）；版本号取自签过名的清单
 RELEASE_DOWNLOAD = "https://github.com/jhaizhou-ops/S2Arm/releases/download/v{version}/{name}"
 R2_DOWNLOAD = "https://dl.s2arm.com/v{version}/{name}"   # 官网清单命中时安装包先从这里下（发版先传 R2、核过 sha256 才发官网清单），不通再退回 GitHub
@@ -221,9 +224,14 @@ def mirror_url():
     return os.environ.get("S2A_UPDATE_MIRROR", "") if os.environ.get("S2A_UPDATE_API") else MIRROR
 
 
-def mirror_manifest():
-    """官网那份签名清单 → dict；连不上、非 200、验签不过、格式不对一律 None（调用方回退 GitHub）。"""
-    url = mirror_url()
+def release_manifest_url():
+    """验收用的本机假 Release（S2A_UPDATE_API）只认 S2A_UPDATE_RELEASE_MANIFEST，没设就不取：单测不连真网"""
+    return os.environ.get("S2A_UPDATE_RELEASE_MANIFEST", "") if os.environ.get("S2A_UPDATE_API") else RELEASE_MANIFEST
+
+
+def mirror_manifest(url=None):
+    """官网那份签名清单（或给定地址的同格式清单，地址 + ".sig" 是签名）→ dict；连不上、非 200、验签不过、格式不对一律 None（调用方回退）。"""
+    url = mirror_url() if url is None else url
     if not url:
         return None
     import http.client
@@ -273,7 +281,13 @@ def query_latest(platform, current):
     if manifest is not None:
         version = str(manifest["version"]).strip().removeprefix("v")
         if not newer(version, current):
-            return {"available": False}
+            # 官网可能停在旧版（#1768）：再看 GitHub Release 那份签名清单，比本机新就按它给，安装包从 Release 下载地址取（R2 不一定有这版）
+            other = mirror_manifest(release_manifest_url()) if release_manifest_url() else None
+            if other is None or not newer(str(other["version"]).strip().removeprefix("v"), current):
+                return {"available": False}
+            version = str(other["version"]).strip().removeprefix("v")
+            template = os.environ.get("S2A_UPDATE_API") and os.environ.get("S2A_UPDATE_DOWNLOAD") or RELEASE_DOWNLOAD
+            return offer(platform, version, mine_name, other["files"], lambda name: template.format(version=version, name=name), other.get("notes"))
         template = os.environ.get("S2A_UPDATE_API") and os.environ.get("S2A_UPDATE_DOWNLOAD") or RELEASE_DOWNLOAD   # 假 Release 验收时下载也指到本机
         v = version
         info = offer(platform, version, mine_name, manifest["files"], lambda name: template.format(version=v, name=name), manifest.get("notes"))

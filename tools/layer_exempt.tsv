@@ -128,3 +128,5 @@ R-05	android/tools/direct_identity_host.c	android/native/direct/input_identity.h
 R-05	android/tools/direct_identity_host.c	android/native/direct/json.h	存量：平台壳包含图形内部头（方案 M3 / H1）；清零条件：改用公开图形接口后同笔删本行
 R-05	android/tools/direct_identity_host.c	android/native/direct/sha256.h	存量：平台壳包含图形内部头（方案 M3 / H1）；清零条件：改用公开图形接口后同笔删本行
 R-05	macos/front_mac.m	graphics/nvn/gfx/nvn/nvn_present_fit.h	存量：平台壳包含图形内部头（方案 M3 / H1）；清零条件：改用公开图形接口后同笔删本行
+R-05	ohos/native/plat_ohos.c	android/native/direct/selection.h	鸿蒙平台件：s2a_gfx_mode / s2a_gfx_mode_settled 读冻结的直连选择（同安卓 direct_session.c → selection.h 那条存量边），没有公开头可替；只在有直连树的构建里 __has_include 编入；清零条件：选择状态经公开图形接口（runtime/include/s2a_gfx_mode.h 由共用直连代码实现）给出后同笔删本行
+R-05	ohos/native/compat_android/android/native_window.h	graphics/nvn/replay/nvn_plat_vk.h	鸿蒙兼容头：ANativeWindow_getWidth/Height 在 NVK 后端下转到平台窗口接缝 nvn_plat_window_size（实现在 ohos/native/gfx_plat，不是回放内部状态）；清零条件：窗口尺寸进平台契约或 nvn_plat_vk.h 列入公开图形接口后同笔删本行

@@ -137,6 +137,38 @@ static int catalogue_has(const char *path, const char *gid, char *why, size_t wh
     free(buf);
     return hit;
 }
+// 独立 App（一 App 一游戏，0.6.3，pack/jobs/install.py put_app）：清单里只有一款（各 title_id 值都相同）、且这款的程序库就在 App 包里
+//   （Frameworks/S2AImages-<号>.dylib 是文件、Games/<号>/ 是目录）→ 回 1、gid 写这款；否则 0。通用壳的程序在 App 外，包里没有程序库，不会命中
+int s2a_launch_ctx_single_game(const char *b, char *gid, size_t gid_n) {
+    char p[S2A_LCTX_PATH], one[64] = ""; int bad = 0;
+    if (!b || !*b || !gid || !gid_n || join(p, b, "s2a_catalogue.json")) return 0;
+    FILE *f = fopen(p, "r"); if (!f) return 0;
+    enum { CAP = 4 << 20 }; char *buf = malloc(CAP + 1); size_t n = buf ? fread(buf, 1, CAP + 1, f) : 0; fclose(f);
+    if (!buf || n > CAP) { free(buf); return 0; }
+    buf[n] = 0;
+    for (char *k = buf; !bad && (k = strstr(k, "\"title_id\"")); ) {
+        char *v = k + 10; k = v;
+        while (*v == ' ' || *v == '\t' || *v == '\r' || *v == '\n') v++;
+        if (*v++ != ':') continue;
+        while (*v == ' ' || *v == '\t' || *v == '\r' || *v == '\n') v++;
+        if (*v++ != '"') continue;
+        char *e = v; while (*e && *e != '"' && *e != '\\') e++;
+        size_t l = (size_t)(e - v);
+        if (*e != '"' || !l || l >= sizeof one) { bad = 1; break; }
+        if (!*one) { memcpy(one, v, l); one[l] = 0; }
+        else if (strlen(one) != l || memcmp(one, v, l)) bad = 1;   // 第二款 → 多款容器
+    }
+    free(buf);
+    if (bad || !*one || strchr(one, '/') || *one == '.') return 0;
+    char rel[160];
+    snprintf(rel, sizeof rel, "Frameworks/S2AImages-%s.dylib", one);
+    if (join(p, b, rel) || !is_file(p)) return 0;
+    snprintf(rel, sizeof rel, "Games/%s", one);
+    if (join(p, b, rel) || !is_dir(p)) return 0;
+    if (strlen(one) >= gid_n) return 0;
+    memcpy(gid, one, strlen(one) + 1);
+    return 1;
+}
 // ---------- 宿主约定号核对（11-16）：清单 JSON 里找这款的对象，取 host_abi ----------
 // 跳过一个 JSON 字符串（p 指向开头的引号）→ 结尾引号之后；没闭合 → NULL
 static const char *skip_str(const char *p, const char *e) {
@@ -349,9 +381,12 @@ int s2a_launch_ctx_resolve_game(s2a_launch_ctx *c, const char *b, const char *ho
     if (join(hd, home, S2A_CONTAINER_DOCS_REL) || join(c->docs, hd, rel) || s2a_pack_root(c->game_data, sizeof c->game_data, c->docs) >= (int)sizeof c->game_data) {
         WHY("HOME 太长"); memset(c, 0, sizeof *c); return -1; }
     // 通用壳（11-16）：资源包根旁有程序包 program/catalogue.json → 这款的程序（镜像包 + 随行目录）从程序包取，App 包里没有它也行；
-    //   清单是写入的最后一步（电脑端先写 dylib、Games/，最后改名写清单），清单在 = 程序包写完。没有清单 → 照旧取 App 包内（过渡：程序都挪出 App
-    //   且各台手机推过一次新壳后删掉这一支）
-    int fp = program_paths(c->game_data, gid, c->module_dir, c->images, why, why_n);
+    //   清单是写入的最后一步（电脑端先写 dylib、Games/，最后改名写清单），清单在 = 程序包写完。没有清单 → 取 App 包内。
+    // App 包里自带这款的镜像包（独立 App，一 App 一游戏，0.6.3）→ 一律取包内、不看程序包：分发 / ad hoc 签的 App 只认包内的程序，
+    //   显式描述文件下独立 App 与通用壳同包名、沙盒里可能留着通用壳推过的程序包，取了它就回到包外映射被系统拒。包内这一支是独立 App 的正路，不许删
+    snprintf(rel, sizeof rel, "Frameworks/S2AImages-%s.dylib", gid);
+    int in_app = !join(p, b, rel) && is_file(p);
+    int fp = in_app ? 0 : program_paths(c->game_data, gid, c->module_dir, c->images, why, why_n);
     if (fp < 0) { memset(c, 0, sizeof *c); return -1; }
     if (fp) {
         c->from_program = 1;
@@ -432,7 +467,7 @@ int s2a_launch_ctx_game_needs_update(const char *gid) {
     if (!g_container) return 0;
     s2a_launch_ctx c; char w[600], prog[S2A_LCTX_PATH], app[S2A_LCTX_PATH];
     if (s2a_launch_ctx_resolve_game(&c, g_bundle, getenv("HOME"), gid, w, sizeof w) || join(app, g_bundle, "s2a_catalogue.json")) return 0;
-    return s2a_host_abi_check(s2a_program_catalogue_path(prog, sizeof prog, c.game_data) ? NULL : prog, app, gid, NULL, w, sizeof w) == 1;
+    return s2a_host_abi_check(!c.from_program || s2a_program_catalogue_path(prog, sizeof prog, c.game_data) ? NULL : prog, app, gid, NULL, w, sizeof w) == 1;
 }
 
 static int g_sel_kind;   // 上一次 s2a_launch_ctx_select 被拒的类别（S2A_SELECT_*）：库界面按它给玩家说人话，原文只进日志
@@ -451,7 +486,7 @@ const char *s2a_launch_ctx_select(const char *gid) {
     if (s2a_launch_ctx_resolve_game(&c, g_bundle, getenv("HOME"), gid, w, sizeof w)) { snprintf(why, sizeof why, "%s", w); g_sel_kind = S2A_SELECT_APP_INCOMPLETE; r = why; goto out; }
     {   // 宿主约定号（s2a_host_abi.h）：产物是按别的约定出的就不载入——不然改写器与运行时对不上，进游戏后静默崩。对不上 → 回游戏库标「要更新」
         char prog[S2A_LCTX_PATH], app[S2A_LCTX_PATH]; int have = 0;
-        int k = join(app, g_bundle, "s2a_catalogue.json") ? -1 : s2a_host_abi_check(s2a_program_catalogue_path(prog, sizeof prog, c.game_data) ? NULL : prog, app, gid, &have, w, sizeof w);
+        int k = join(app, g_bundle, "s2a_catalogue.json") ? -1 : s2a_host_abi_check(!c.from_program || s2a_program_catalogue_path(prog, sizeof prog, c.game_data) ? NULL : prog, app, gid, &have, w, sizeof w);
         // 11-17 维护者：校验不过不再整个拒绝，黄字提示照常进，之后出问题时报错带上这条（waived.c）
         if (k == 1) waive("游戏 %s 的程序按宿主约定号 %d 出，本宿主是 %d：版本不配，可能闪退，在电脑上重新出包 / 装到 iPhone 可解（ios_host_abi_mismatch）", gid, have, S2A_HOST_ABI);
         if (k < 0) waive("游戏 %s 的宿主约定号核不了：%s", gid, w[0] ? w : "App 包目录太长");

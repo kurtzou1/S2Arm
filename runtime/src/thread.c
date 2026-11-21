@@ -32,7 +32,10 @@
 #include <mach/mach_time.h>
 #else
 #include "../../android/native/runtime/fault/fault.h"
+// OHOS musl signal.h already provides these AArch64 context records.
+#if !defined(__OHOS__)
 #include <asm/sigcontext.h>
+#endif
 #include <linux/futex.h>
 #include <sys/syscall.h>
 #endif
@@ -148,6 +151,11 @@ typedef struct thr {
     arm_thread_state64_t pst; arm_neon_state64_t pns;
 #endif   // SetThreadActivity：在系统调用里的在出入口挂起；在游戏代码里的 Mach 挂起
     uint64_t *svc_regs; uint64_t svc_pc;   // 当前系统调用的门帧与原 svc 指令地址
+#if !defined(__APPLE__)   // 读的一端在 android/native/runtime/fault/thread_android.inc（停世界到期的线程明细），苹果不编、不付这份开销
+    _Atomic uint64_t sig_pc, sig_lr;   // 诊断：最近一次 SIGURG 落点（宿主区也记）
+    _Atomic uint64_t sig_bt[4];          // 诊断：落点往上 4 层帧指针链返回地址（只沿本栈 1 MiB 内的 fp 走）
+    _Atomic uint64_t blk_ra;   // 诊断：最外层 DM_BLOCK 的调用点（停世界到期时报出线程在哪段宿主活里）
+#endif
     uint64_t tsd;                      // 本宿主线程 TSD 基址：别的线程据此读本线程的 K18 / KTLS / KTLR 槽
     void *tlr;                         // ThreadLocalRegion（窗口 TLS/IO 区，svc_mem.c 分配）
     const uint32_t *wh; int wn;        // WaitSynchronization 在等的句柄数组与个数（现场导出用）
@@ -155,8 +163,11 @@ typedef struct thr {
     _Atomic int preempting;            // 时钟抢占：已被看门狗发信号、让核未完（看门狗不重复发）
     _Atomic int restoring;             // 时钟抢占（方案 d）：tramp 已让核、等二次信号覆盖 mcontext 回原
     _Atomic int off_guest;             // 放了核在宿主侧干活（IPC 进 C#、写跟踪 touch、抢占 tramp）：调度计数不算「在跑客体」
+    _Atomic uint64_t soft_keeps;       // 本线程「回客体时原核还在、免锁」次数（只本线程写；退出时并进 g_soft_keeps，热路径不碰共享计数）
+    _Atomic int csoft;                 // 宿主侧可借（S2A_VCORE_SOFT）：0 = 硬持 / 不持；1 = 持着核但在宿主代码里，等核者可直接取走；2 = 已被取走（回客体走取核慢路）
 #if defined(__APPLE__)
     _STRUCT_MCONTEXT porig;            // 时钟抢占：被抢点原 mcontext（客体区 sig1 存、二次信号恢复）
+    void *pstk;                        // 时钟抢占：tramp 专用栈（PSTK_SIZE，线程起来时在普通上下文分配、thr_free 释放；见 on_preempt）
     sigset_t pmask;
 #endif                    // 时钟抢占：被抢前的信号掩码（sig1 存、二次信号写回 uc_sigmask）
     uint32_t ss_nocore;                // 调度计数：本线程被采到「在跑客体却不持核」的次数（收局按线程列前 5，定位违规来源）
@@ -175,6 +186,7 @@ typedef struct thr {
     uint64_t trace_pause; unsigned trace_pause_conditions; // G 内请求身份
 #endif
 } thr_t;
+static _Atomic uint64_t g_soft_keeps, g_soft_steals;   // 宿主侧可借：退出线程并进来的「免锁拿回」次数 / 被等核者取走的次数（活着的线程各自记 soft_keeps）
 
 static pthread_mutex_t G = PTHREAD_MUTEX_INITIALIZER;
 #ifdef S2A_UNIT_TEST
@@ -677,7 +689,16 @@ void s2a_cs_thread_exit(uint32_t thread);                                  // ga
 #define TLS_SIZE 8192
 #define THREAD_OBJ_SIZE 0x400
 static pthread_key_t g_own_key;
-static void own_free(void *p) { void **b = p; if (!b) return; if (!b[2]) { free(b[0]); free(b[1]); } free(b); }
+// 线程退出时还它的 TLS 块 / 线程对象：宿主 calloc 的直接 free；即时存档档从确定性 arena 分的挂回空闲表复用（#ef04e6：原先不回收，线程起落多的游戏把 TLS/IO 区吃光后
+//   「确定性：TLS/IO 区放不下 TLS 块」致命退出）；确定性诊断档（S2A_DET ≥ 2）照旧不回收，保证每局地址相同
+static void own_free(void *p) {
+    void **b = p; if (!b) return;
+    if (!b[2]) { free(b[0]); free(b[1]); }
+#ifndef S2A_UNIT_TEST
+    else if (s2a_det_mode() < 2) { void s2a_det_arena_free(void *, size_t); s2a_det_arena_free(b[0], TLS_SIZE); s2a_det_arena_free(b[1], THREAD_OBJ_SIZE); }
+#endif
+    free(b);
+}
 static pthread_once_t thread_keys_once = PTHREAD_ONCE_INIT;
 static int thread_keys_error;
 static void thread_keys_create(void) {
@@ -771,6 +792,17 @@ static void set_qos(qos_class_t want) {
     if (rc || got != want) { static _Atomic int n; if (!atomic_fetch_add(&n, 1)) LOG("【红】游戏线程 QoS 设 %#x 失败：rc=%d 读回 %#x", want, rc, got); }
 }
 #endif
+#if defined(__APPLE__)
+// 时钟抢占 tramp 的专用栈（#515）：tramp 是 C 代码，原先跑在被抢线程的游戏栈上、只从原 sp 往下让 256 字节。游戏可以把活数据留在 sp 以下
+//   （一款第一方动作游戏：开变长数组后 mov sp, x29 收回 sp，之后照读写数组，数组大小随元素数涨），超出 256 字节的部分被 tramp 的栈帧盖掉 →
+//   下标成垃圾、野指针段错误（崩在同一函数，随抢占时机偶发）。改为每条线程一块自己的栈，tramp 一律在上面跑，不碰游戏栈
+#define PSTK_SIZE (64u << 10)
+static void preempt_stack_init(thr_t *t) {
+    if (!t->pstk && !(t->pstk = malloc(PSTK_SIZE))) die("时钟抢占：tramp 栈分配失败（%u 字节）", PSTK_SIZE);
+}
+#else
+static void preempt_stack_init(thr_t *t) { (void)t; }
+#endif
 static void thread_bind_host(thr_t *t) {
 #if !defined(__APPLE__)
     // Publish pthread lifetime under the same roster lock as the VM census.
@@ -794,6 +826,7 @@ static void thread_bind_host(thr_t *t) {
 #endif
     t->tsd = plat_tsd_base();
     s2a_crash_thread_init();
+    preempt_stack_init(t);
     guest_thread_init(t);
 }
 static void svc_exit(thr_t *t);
@@ -810,7 +843,7 @@ static void *thread_main(void *p) {
     uint64_t here = ((uint64_t)__builtin_frame_address(0) - 0x400) & ~0xfull;
     sw_xstack_thread_init(here, hostent ? 0 : t->stack_top);
     s2a_thread_stop_point();
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
     int s2a_android_runtime_enter_guest_thread(void);
     if (s2a_android_runtime_enter_guest_thread()) die("Android guest线程准入失败");
 #endif
@@ -877,17 +910,21 @@ static void thr_free(thr_t *t) {   // 持 G。被系统调用钉着（pins）就
     if (s2a_test_thr_freed) s2a_test_thr_freed(t);
 #endif
     for (thr_t **p = &g_all; *p; p = &(*p)->all) if (*p == t) { *p = t->all; break; }
-    pthread_cond_destroy(&t->cv); free(t);
+    pthread_cond_destroy(&t->cv);
+#if defined(__APPLE__)
+    free(t->pstk);
+#endif
+    free(t);
 }
 static void core_release(thr_t *t);
 #if defined(__APPLE__)
 static void wg_leave_self(void);   // 帧间隔工作组：线程退出前离开（见 wg_join_self）
 #endif
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
 extern void s2a_capacity_leave(int) __attribute__((weak));
 #endif
 static void thread_exit(thr_t *t) {
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
     if (t->is_main && s2a_capacity_leave) s2a_capacity_leave(0);
 #endif
 #if defined(__APPLE__)
@@ -896,7 +933,7 @@ static void thread_exit(thr_t *t) {
     core_release(t);   // 0x0A 里 svc_exit 会重取核：退出前放开，否则带着核退出、同核线程永远等（S2A_CORES 单测抓到）
     s2a_cs_thread_exit(t->handle);
     glock();
-    t->exited = 1; wake_sync_waiters();
+    t->exited = 1; atomic_fetch_add_explicit(&g_soft_keeps, atomic_exchange(&t->soft_keeps, 0), memory_order_relaxed); wake_sync_waiters();
     pthread_setspecific(g_keythr, NULL);
     void *tlr = t->tlr; t->tlr = NULL; void *hstk = t->hstk;
     if (t->closed) thr_free(t);
@@ -939,7 +976,7 @@ static void thread_exit(thr_t *t) {
 #endif
     sw_xstack_thread_fini();
     glock();
-    t->exited = 1; wake_sync_waiters();
+    t->exited = 1; atomic_fetch_add_explicit(&g_soft_keeps, atomic_exchange(&t->soft_keeps, 0), memory_order_relaxed); wake_sync_waiters();
     pthread_setspecific(g_keythr, NULL);
     if (t->closed) thr_free(t);
     pthread_mutex_unlock(&G);
@@ -1034,7 +1071,7 @@ void s2a_wg_frame(int fps) {
 #endif
 
 // 主线程登记，返回其句柄（nnosInitialize 的 x0）
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
 extern void s2a_capacity_enter(int) __attribute__((weak));
 extern void s2a_capacity_leave(int) __attribute__((weak));
 #endif
@@ -1053,7 +1090,7 @@ uint32_t s2a_thread_main_init(void) {
     if (wg_on() && g_wg_mode != 2) wg_join_self("游戏主线程");
 #endif
     thread_bind_host(t);
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
     if (s2a_capacity_enter) s2a_capacity_enter(0);
 #endif
 #if defined(__APPLE__)
@@ -1133,6 +1170,15 @@ static int core_pick(thr_t *t) {   // 持 g_cmu；返回可取的核或 -1（可
         int c = k < 0 ? ideal : k; if (!(m >> c & 1) || g_cown[c]) continue;
         if (!core_claimed(c, t)) return c;
     }
+    // 宿主侧可借的核（s2a_core_leave 没人等时只置可借、不放）：持核者此刻在宿主代码里、不跑客体，CAS 1 → 2 抢到就当空核用；
+    //   持核者回客体时 CAS 1 → 0 失败，走下面的取核慢路（同原先「进宿主就放核」的结果）。两边只有一方 CAS 得手：同核客体代码仍只有一条在跑
+    for (int k = -1; k < NCORE; k++) {
+        int c = k < 0 ? ideal : k; thr_t *o = g_cown[c]; int sv = 1;
+        if (!(m >> c & 1) || !o || o == t || core_claimed(c, t)) continue;
+        if (!atomic_compare_exchange_strong(&o->csoft, &sv, 2)) continue;
+        g_cown[c] = NULL; o->held_core = 0; atomic_fetch_add_explicit(&g_soft_steals, 1, memory_order_relaxed);
+        return c;
+    }
     // 空闲核迁移：Horizon 不迁优先级数值 < 2 的线程（HighestCoreMigrationAllowedPriority）
     for (int k = -1; k < NCORE; k++) {
         int c = k < 0 ? ideal : k; thr_t *o = g_cown[c];
@@ -1151,6 +1197,7 @@ static int core_pick(thr_t *t) {   // 持 g_cmu；返回可取的核或 -1（可
     return -1;
 }
 static void core_release_locked(thr_t *t) {   // 持 g_cmu：清持有登记并叫醒等核者
+    { int sv = 1; atomic_compare_exchange_strong(&t->csoft, &sv, 2); }   // 可借着就记「已取走」：持核者回客体时 CAS 1 → 0 必失败、走取核慢路
     int h = t->held_core; if (h) { g_cown[h - 1] = NULL; t->held_core = 0; pthread_cond_broadcast(&g_ccv); }
 }
 static void core_release(thr_t *t) {
@@ -1170,20 +1217,31 @@ static int core_release_try(thr_t *t) {
     pthread_mutex_unlock(&g_cmu);
     return 1;
 }
+// 不进锁、不碰共享计数就能确定「已持核且掩码容得下」→ 1（宿主侧可借着就 CAS 1 → 0 拿回；被取走 / 不持 / 掩码变了 → 0，走 core_acquire 的锁路）
+static int core_fast(thr_t *t) {
+    int sv = atomic_load(&t->csoft);
+    if (sv == 2 || (sv == 1 && !atomic_compare_exchange_strong(&t->csoft, &sv, 0))) return 0;
+    int h = atomic_load(&t->held_core);
+    if (!h || !(core_mask(t) >> (h - 1) & 1)) return 0;
+    if (sv == 1) atomic_store_explicit(&t->soft_keeps, atomic_load_explicit(&t->soft_keeps, memory_order_relaxed) + 1, memory_order_relaxed);   // 只本线程写：读改写不必是原子 RMW（不争缓存行）
+    return 1;
+}
 static void core_acquire(thr_t *t) {   // 不持 G 调：持 G 等核会和持核线程进系统调用互相等死
 #if !defined(__APPLE__)
     android_vm_barrier(t);
 #endif
     if (!core_part(t)) return;
+    if (core_fast(t)) return;
+    if (atomic_load(&t->csoft) == 2) { pthread_mutex_lock(&g_cmu); atomic_store(&t->csoft, 0); pthread_mutex_unlock(&g_cmu); }   // 被取走：等取走方在 g_cmu 下改完持核登记再往下（held_core 已是 0）
     int h = t->held_core; if (h && (core_mask(t) >> (h - 1) & 1)) return;
     core_release(t);   // 换了掩码（SetThreadCoreMask）：先放旧核
     pthread_mutex_lock(&g_cmu);
-    if (g_ncw < CW_MAX) g_cw[g_ncw++] = t;
+    if (g_ncw < CW_MAX) { g_cw[g_ncw] = t; __atomic_store_n(&g_ncw, g_ncw + 1, __ATOMIC_SEQ_CST); }   // 先登记再挑核（core_pick 读可借位），与 s2a_core_leave「先置可借再读 g_ncw」成对
     if (g_ncw == 1) pthread_cond_signal(&g_wd_cv);   // 第一个等核者：叫醒空闲的抢占看门狗
     int c; atomic_store(&t->wcore, 1);
     while ((c = core_pick(t)) < 0 && !atomic_load(&g_session_stop)) pthread_cond_wait(&g_ccv, &g_cmu);
     atomic_store(&t->wcore, 0);
-    for (int i = 0; i < g_ncw; i++) if (g_cw[i] == t) { g_cw[i] = g_cw[--g_ncw]; break; }
+    for (int i = 0; i < g_ncw; i++) if (g_cw[i] == t) { g_cw[i] = g_cw[g_ncw - 1]; __atomic_store_n(&g_ncw, g_ncw - 1, __ATOMIC_SEQ_CST); break; }   // g_ncw 有锁外读者（s2a_core_leave）：改一律原子
     if (c >= 0) { g_cown[c] = t; g_cown_t[c] = now_ns(); t->held_core = c + 1; t->yielded = 0; }
     // 还有别的线程在等：让它们按新局面重挑（本线程可能拿了别人在等的核以外的核，空核 / 可迁移的持有者跟着变了）
     if (g_ncw) pthread_cond_broadcast(&g_ccv);
@@ -1268,10 +1326,10 @@ static void on_preempt(int sig, siginfo_t *si, void *ctx) {
     if (module_of((void *)pc)) {                       // 客体区：改 PC 到 tramp（信号返回后让核）
         me->porig = *uc->uc_mcontext; me->pmask = uc->uc_sigmask;   // 被抢前的掩码（二次信号返回时写回）
         uc->uc_mcontext->__ss.__pc = (uint64_t)(uintptr_t)preempt_tramp;
-        // tramp 是 C 代码、跑在被抢线程的游戏栈上：sp 先往下让出 256 字节再进。改写器补丁区的桩把临时寄存器存在 sp 下方不挪 sp
-        //   （stp x0, x2, [sp, #-0x10] … ldp x0, x2, [sp, #-0x10]，红区用法），tramp 的栈帧若压在原 sp 上会盖掉它们（10-23 虚拟核缺省开后 Mac 塞尔达
-        //   两局 SIGBUS：x2 被读成 lr、拿去当偏移）。原 sp 随 porig 由二次信号恢复
-        uc->uc_mcontext->__ss.__sp = (uc->uc_mcontext->__ss.__sp - 256) & ~(uint64_t)15;
+        // tramp 跑在本线程的专用栈上（preempt_stack_init），不碰游戏栈：游戏栈 sp 以下可能有活数据——改写器补丁区桩的 16 字节暂存（10-23 Mac 塞尔达 SIGBUS），
+        //   也可能是游戏自己收回 sp 后还在用的变长数组（#515，大小不定，原先让 256 字节盖不住）。原 sp 随 porig 由二次信号恢复
+        uc->uc_mcontext->__ss.__sp = me->pstk ? ((uint64_t)(uintptr_t)me->pstk + PSTK_SIZE) & ~(uint64_t)15
+                                              : (uc->uc_mcontext->__ss.__sp - 256) & ~(uint64_t)15;   // 没分到专用栈的线程（不该有）：退回旧做法
     } else {                                           // 宿主区（svc 处理中 / 宿主代码里）
         // 置标志（svc_exit 是它的主场消费点），并当场 trylock 放核——只在正处系统调用处理中（in_svc）时放：
         //   卡在 svc 里回不到 svc_exit 就是这个缺口的现场（preempt_req 没人消费 = 抢占 100% 无效）。
@@ -1304,6 +1362,16 @@ static void on_preempt(int sig, siginfo_t *si, void *ctx) {
     thr_t *me = thread_current_or_null(); if (!me) return;
     ucontext_t *uc = ctx;
     uint64_t pc = uc->uc_mcontext.pc;
+    atomic_store_explicit(&me->sig_pc, pc, memory_order_relaxed); atomic_store_explicit(&me->sig_lr, uc->uc_mcontext.regs[30], memory_order_relaxed);
+    {
+        const uint64_t sp0 = uc->uc_mcontext.sp; uint64_t fp = uc->uc_mcontext.regs[29];
+        for (int k = 0; k < 4; ++k) {
+            uint64_t ra = 0;
+            if (fp >= sp0 && fp < sp0 + (1u << 20) && !(fp & 7)) { ra = ((const uint64_t *)(uintptr_t)fp)[1]; fp = ((const uint64_t *)(uintptr_t)fp)[0]; }
+            else fp = 0;
+            atomic_store_explicit(&me->sig_bt[k], ra, memory_order_relaxed);
+        }
+    }
     int guest = module_of((void *)(uintptr_t)pc) != NULL;
     if (atomic_load_explicit(&g_wd_enabled, memory_order_relaxed)) {
         atomic_fetch_add_explicit(&me->pause_sig_seen, 1, memory_order_relaxed);
@@ -1344,11 +1412,12 @@ enum { HC_KEY_MAX = 16 };
 static struct { int svc; uint64_t ret; uint32_t segs; uint64_t hits, max_us; } g_hc_key[HC_KEY_MAX];
 static int g_hc_nkey;
 static uint64_t g_hc_segs, g_hc_hits, g_hc_short, g_hc_pcskip, g_hc_over, g_hc_max_us, g_hc_last_us, g_hc_b[4];   // 全部在 G 内读写
+static int sched_diag(void);   // 调度诊断开关（定义在调度计数那段）
 static int hostcore_ms(void) {
     if (!cores_on()) return 0;   // 虚拟核没开就没有「等核」这回事：正式包热路径与日志与改前逐字节相同
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("S2A_HOSTCORE_MS"); v = e ? atoi(e) : 1; if (v < 0) v = 0;
+        const char *e = getenv("S2A_HOSTCORE_MS"); v = e ? atoi(e) : sched_diag() ? 1 : 0; if (v < 0) v = 0;   // 不设跟调度诊断（缺省关；持锁等核计时分桶同用这个阈值）
         if (v) LOG("宿主侧持核长跑：开（阈值 %d ms；调度计数 2 ms 采一次，故连续持核 ≥2 ms 才判长跑；S2A_HOSTCORE_MS 可调，0 关）", v);
     }
     return v;
@@ -1435,7 +1504,24 @@ static void hostcore_corewait(void *ra, uint64_t ticks) {
 // 在跑客体 = 已启动未退出、不在系统调用里、没被暂停、没在等核、没放核去宿主侧干活。持核的按持有核记，不持核却在跑的按理想核记（这就是违规）。
 // 线程对象会被释放，遍历要持 G：trylock 抢不到就跳过这次并计数，不拖慢系统调用。收局打进 host.log（s2a_sched_stat_log）
 static _Atomic uint64_t g_ss_n, g_ss_skip, g_ss_multi, g_ss_nocore, g_ss_sameprio_core, g_ss_sameprio_any; static _Atomic int g_ss_peak;
+// 调度诊断（调度计数采样 + 宿主侧持核长跑探测）开不开（纯函数，t_thread ㉜ 测）：S2A_SCHED_DIAG 显式（0 / 1）> 开发设施（os.c s2a_dev_on）> 缺省关。
+//   11-21 #1842：两者原本随虚拟核开就跑（代码自 v0.1.0 就有，0.5.8 虚拟核关所以没跑）——0.6.0 虚拟核缺省按需后进了玩家局：
+//   看门狗每 2 ms 持全局 G + g_cmu 遍历全部线程，对连续持核 ≥ 2 ms 的游戏线程持着这两把锁 Mach 挂起取 PC
+//   （一款开放世界游戏 iPhone 一局 15 分钟：采样 22.9 万次、抢不到锁跳过 5.2 万次，挂起 39,324 段、约每秒 43 次）。属开发设施（持全局锁、挂起线程），不是只进日志的诊断读数
+int s2a_sched_diag_decide(const char *env, int dev) { return env && *env ? *env != '0' : dev != 0; }
+int g_sched_diag = -1;   // -1 未读、0 关、1 开；非 static：单测同一进程里 A/B
+static int sched_diag(void) {
+    int v = g_sched_diag;
+    if (v < 0) {
+        int (*dev)(void) = (int (*)(void))dlsym(RTLD_DEFAULT, "s2a_dev_on");   // os.c；按名字取：只链 thread.c 的单测没有它 = 开发设施关
+        const char *e = getenv("S2A_SCHED_DIAG");
+        v = s2a_sched_diag_decide(e, dev ? dev() : 0); g_sched_diag = v;
+        if (cores_on()) LOG("调度诊断（调度计数采样 / 宿主侧持核长跑探测）：%s（%s；S2A_SCHED_DIAG=1 开）", v ? "开" : "关", e && *e ? "显式设定" : "跟开发设施");
+    }
+    return v;
+}
 static void sched_sample(void) {
+    if (!sched_diag()) return;
     if (pthread_mutex_trylock(&G)) { atomic_fetch_add(&g_ss_skip, 1); return; }
     // 核状态（held_core / g_cown）在 g_cmu 下改（取核 / 放核 / 空闲核迁移）：采样也持 g_cmu，读到的是一致快照。
     //   只持 G 时，迁移中途会读到被迁线程的旧核号与抢核线程的新核号同核，误报「同核 ≥2」（10-23 Mac 缺省开核对）
@@ -1566,6 +1652,8 @@ static void sched_hostcore_top(void) {   // 收局：宿主侧持核长跑（持
         }
     }
     sched_corewait_top(thr);
+    { uint64_t k = atomic_load(&g_soft_keeps); for (thr_t *t = g_all; t; t = t->all) k += t->soft_keeps;
+      LOG("虚拟核宿主侧可借（收局）：回客体时原核还在、免锁 %llu 次，被等核者取走 %llu 次", (unsigned long long)k, (unsigned long long)atomic_load(&g_soft_steals)); }
     pthread_mutex_unlock(&G);
 }
 static void sched_corewait_top(int thr) {   // 持 G（桶本身是原子写，这里只读）
@@ -1642,6 +1730,7 @@ static void *preempt_watchdog(void *a) {
         // 没人等核时抢占 / 时间片轮转都无事可做（两者都要有等核者）：睡在 g_wd_cv 上，有线程开始等核即醒；空闲期调度计数降到每 20 ms 一次。
         //   原先不管有没有等核者都 0.5 ms 轮询：每秒 2000 次唤醒、常驻性能核，10-24 测试设备2 动森直连同包虚拟核开 3.754 W / 关 2.597 W（唤醒 2380 / 630 次每秒）
         pthread_mutex_lock(&g_cmu);
+        while (!g_ncw && !sched_diag()) pthread_cond_wait(&g_wd_cv, &g_cmu);   // 调度诊断关：空闲期没事可做，等第一个等核者叫醒（不再每 20 ms 醒一次采样）
         while (!g_ncw) {
             struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_nsec += 20000000; if (dl.tv_nsec >= 1000000000L) { dl.tv_sec++; dl.tv_nsec -= 1000000000L; }
             if (pthread_cond_timedwait(&g_wd_cv, &g_cmu, &dl) == ETIMEDOUT && !g_ncw) { pthread_mutex_unlock(&g_cmu); sched_sample(); pthread_mutex_lock(&g_cmu); }
@@ -1699,7 +1788,24 @@ static void preempt_init(void) {                       // cores_on 首次开时�
     pthread_detach(t);
 }
 // gate.c：走 C# 的 IPC 前后（阻塞在服务线程上）
-void s2a_core_leave(void) { thr_t *t = thread_current_or_null(); if (t) { atomic_store(&t->off_guest, 1); core_release(t); } }
+// 宿主侧可借（11-21 #1842）：按需档缺省开后，每次直连调用进宿主（DM_BLOCK_BEGIN）放核、回客体取核，两头都拿全局 g_cmu、放核还广播叫醒等核者——
+//   一款开放世界游戏 iPhone 一局 15 分钟取核 4.8 亿次（约 53 万次 / 秒），CPU 95% → 231%（虚拟核关的 0.5.8 对 0.6.1，同机同款，D-5H47）。
+//   没人等核时不放：只置「可借」，回客体时一次 CAS 拿回；有人等（g_ncw > 0，或之后来的等核者在 core_pick 里看见可借）才走原先的放核。S2A_VCORE_SOFT=0 关（原行为）
+int g_vcore_soft = -1;   // -1 未读、0 关、1 开（缺省）；非 static：单测 t_thread ㉛ 同一进程里 A/B
+static int vcore_soft(void) {
+    int v = g_vcore_soft;
+    if (v < 0) { const char *e = getenv("S2A_VCORE_SOFT"); v = !(e && *e == '0'); g_vcore_soft = v; if (cores_on()) LOG("虚拟核：宿主侧可借 %s（S2A_VCORE_SOFT）", v ? "开" : "关"); }
+    return v;
+}
+void s2a_core_leave(void) {
+    thr_t *t = thread_current_or_null(); if (!t) return;
+    atomic_store(&t->off_guest, 1);
+    if (t->held_core && vcore_soft()) {
+        atomic_store(&t->csoft, 1);                                   // 先置可借（顺序一致）…
+        if (!__atomic_load_n(&g_ncw, __ATOMIC_SEQ_CST)) return;      // …再读等核数：两边至少一方看得见另一方（等核者先登记再在 core_pick 里读可借位）
+    }
+    core_release(t);
+}
 void s2a_core_enter(void) { thr_t *t = thread_current_or_null(); if (t) { core_acquire(t); atomic_store(&t->off_guest, 0); } }
 // 直连图形层里游戏线程要阻塞等 GPU / 上屏 / 管线时放核、等完取核（同 IPC 的 svc 门）：那些等待不经 svc，持核睡会让同核游戏线程全等核
 // （10-24 测试设备2 动森直连：虚拟核开着 152 秒才到 MARK、3.5 W，关掉 49 秒）。可嵌套，只有最外层放 / 取；非游戏线程空操作
@@ -1709,7 +1815,7 @@ void s2a_core_enter(void) { thr_t *t = thread_current_or_null(); if (t) { core_a
 //   S2A_LAZY_CORE=1 开、未设 / 0 = 旧行为（同一二进制运行期 A/B）。
 // entry.S 用 adrp/add 直接寻址它：ELF（Android 共享库）里这个对象不能被预占，否则 ld.lld 报
 //   relocation R_AARCH64_ADR_PREL_PG_HI21 cannot be used against symbol 'g_lazy_core'（同 xstack.c 的 g_xs_fn / g_xs_off）。
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
 #define S2A_ASM_INTERNAL __attribute__((visibility("hidden")))
 #else
 #define S2A_ASM_INTERNAL
@@ -1741,7 +1847,11 @@ static void wt_blk_add(uint64_t ra, uint64_t tid, uint64_t ns) {
         if (atomic_load(&g_wt_blk[i].key) == k || atomic_compare_exchange_strong(&g_wt_blk[i].key, &e, k) || e == k) {
             atomic_fetch_add(&g_wt_blk[i].ns, ns); atomic_fetch_add(&g_wt_blk[i].n, 1); return; } }
 }
-__attribute__((noinline)) void s2a_core_block_begin(void) { if (!t_blk++) { if (wt_on()) { t_wt_blk_t0 = thread_clock(); t_wt_blk_ra = (uint64_t)__builtin_return_address(0); } s2a_core_leave(); } }
+__attribute__((noinline)) void s2a_core_block_begin(void) { if (!t_blk++) {
+#if !defined(__APPLE__)
+    { thr_t *bt = thread_current_or_null(); if (bt) atomic_store_explicit(&bt->blk_ra, (uint64_t)__builtin_return_address(0), memory_order_relaxed); }
+#endif
+    if (wt_on()) { t_wt_blk_t0 = thread_clock(); t_wt_blk_ra = (uint64_t)__builtin_return_address(0); } s2a_core_leave(); } }
 // noinline：__builtin_return_address(0) 要拿到「DM_BLOCK_END 所在函数的返回点」，被内联进来就变成上一层调用点
 __attribute__((noinline)) void s2a_core_block_end(void) {
     if (!(t_blk > 0 && !--t_blk)) return;
@@ -1800,6 +1910,7 @@ void s2a_guest_return(void) {
         return; }
     // 惰性取核的等待也进「持锁等核分桶」：这里 ra 恒为 entry.S 那条 bl 的下一条，分不出调用点，
     //   所以用一个不会是真实返回地址的 sentinel（0x1）单独占一个桶，读数里一眼认出是「惰性取核」那一类。
+    if (!core_part(t) || core_fast(t)) { atomic_store(&t->off_guest, 0); return; }   // 不参与虚拟核（按需档里没读过核号的线程）/ 原核还在：不计时、不进「持锁等核分桶」——那里只记真等过核的   // 原核还在（宿主侧可借没被取走 / 一直硬持）：不计时、不进「持锁等核分桶」——那里只记真等过核的
     int on = hostcore_ms(), wt = wt_on();
     uint64_t t0 = 0;
     if (on || wt) t0 = thread_clock();
@@ -1855,7 +1966,7 @@ static void svc_exit(thr_t *t) {
         if (t->tr_lastwake_t) { wt_bucket(1, thread_clock_ns(n - t->tr_lastwake_t)); t->tr_lastwake_t = 0; }   // 唤醒方：唤醒别人 → 自己回到游戏
         t->tr_ret_t = n; t->tr_ret_svc = t->last_svc; t->tr_cpu_ns = wt_cpu_ns(); t_wt_blk_snap = t_wt_blk_ns; t_wt_core_snap = t_wt_core_ns; }
 }
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
 // gate只为实际native-memory处理者配对；未处理号恢复原状态，不重复thread/C#的计数。
 static _Thread_local struct { int in_svc, last_svc; uint64_t *regs, last_lr; } android_memory_previous;
 void s2a_android_memory_svc_enter(int num, uint64_t *regs) {
@@ -2671,6 +2782,7 @@ static void *snap_thread_main(void *arg) {
     { char nm[24]; snprintf(nm, sizeof nm, "nx-%llu", (unsigned long long)t->id); pthread_setname_np(nm); }
     t->mport = pthread_mach_thread_np(pthread_self()); t->tsd = plat_tsd_base(); t->pt = pthread_self();
     s2a_crash_thread_init();
+    preempt_stack_init(t);
 #if defined(__APPLE__)
     gl_snap_thread_bind(t->id);
 #endif
@@ -3499,7 +3611,7 @@ uint32_t s2a_shmem_create(uint64_t size, void **host) {
 }
 // 后备由 C# 持有（如 Ryujinx KSharedMemory 的页）：原生层只发句柄，映射时别名过去；源地址按平台实际宿主页对齐。
 uint32_t s2a_shmem_wrap(void *host, uint64_t size) {
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     // 与 plat_vm_alias 共用页大小；4 KB 设备上的合法源不必额外满足 Apple 的 16 KB 对齐。
     size_t page = plat_page_size();
     if (!page || !host || !size || (uintptr_t)host % page) { LOG("【红】s2a_shmem_wrap：后备 %p +%#llx 无效或未按宿主页 %#zx 对齐", host, (unsigned long long)size, page); return 0; }
@@ -3673,6 +3785,8 @@ int s2a_test_parked(uint32_t h) { glock(); thr_t *t = h_obj(h, S2A_OBJ_THREAD); 
 // t_thread ㉗：把本线程置成「正在系统调用里」并取核 —— 模拟 svc 处理中卡住、回不到 svc_exit 的现场（宿主区合法持核形态之一）
 void s2a_test_host_hold_svc(void) { thr_t *t = thread_current_or_null(); if (!t) return; atomic_store(&t->in_svc, 1); core_acquire(t); }
 int s2a_test_unpaired(void) { return atomic_load(&g_unpaired_n); }   // 惰性取核：钩子里「DM_BLOCK 未配对」早报的次数
+int s2a_test_core_lendable(uint32_t h) { glock(); thr_t *t = h_obj(h, S2A_OBJ_THREAD); int v = t ? (!t->held_core || atomic_load(&t->csoft) == 1) : -1; pthread_mutex_unlock(&G); return v; }   // 单测：不持核，或持着但宿主侧可借（等核者能直接取走）
+void s2a_test_soft_counts(uint64_t *keeps, uint64_t *steals) { glock(); uint64_t k = atomic_load(&g_soft_keeps); for (thr_t *t = g_all; t; t = t->all) if (!t->exited) k += t->soft_keeps; pthread_mutex_unlock(&G); *keeps = k; *steals = atomic_load(&g_soft_steals); }   // 单测：宿主侧可借计数
 int s2a_test_off_guest(uint32_t h) { glock(); thr_t *t = h_obj(h, S2A_OBJ_THREAD); int v = t ? atomic_load(&t->off_guest) : -1; pthread_mutex_unlock(&G); return v; }   // 惰性取核：block_end 之后应停在 1（回客体代码前不持核）
 int s2a_test_waiters(int kind, uint64_t a) { int n = 0; glock(); for (thr_t *t = g_wait; t; t = t->next) if (t->wkind == kind && (kind == 2 ? t->wkey : t->waddr) == a) n++; pthread_mutex_unlock(&G); return n; }
 // 第一个匹配的等待者句柄（0 = 没有）：单测按句柄查 0x34 的条件留档与逐线程被发信号次数

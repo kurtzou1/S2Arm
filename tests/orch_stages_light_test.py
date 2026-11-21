@@ -327,25 +327,35 @@ class LightTest(unittest.TestCase):
         self.assertEqual((current / 'ui_overlay/romfs/Layout/two').read_bytes(), b'original two')   # 底下仍是旧格式改过的那份 → 覆盖层放原版
         self.assertEqual((current / 'ui_overlay.tsv').read_bytes(), b'Layout/one\nLayout/two\n')
 
-    def test_seed_move_romfs_relinks_source_and_reseeds(self):   # 11-06：本单自己的解包目录，播种整目录搬 RomFS、原处联到存储身份
+    def test_seed_move_romfs_no_backlink_and_reseeds(self):   # 本单自己的解包目录，播种整目录搬 RomFS；原处不留回指链接（玩家诊断 #0fd185）
+        # 期望：产物根拿到 RomFS 原内容；解包目录原处没有 romfs（不是链接也不是目录）；seed.txt 记 romfs_moved=1；下一单重解后再播照常成功
         (self.source / 'romfs/Layout').mkdir()
         (self.source / 'romfs/Layout/a').write_bytes(b'aaa')
         (self.source / 'romfs/b').write_bytes(b'bb')
         current = refresh.seed(self.store, '原创', self.source, move_romfs=True)
-        identity = self.store._romfs(current, '原创')
-        self.assertTrue(roots.is_link(self.source / 'romfs'))
-        self.assertEqual((self.source / 'romfs').resolve(), identity.resolve())
-        self.assertEqual((self.source / 'romfs/Layout/a').read_bytes(), b'aaa')
+        self.assertFalse(os.path.lexists(self.source / 'romfs'))
+        self.assertEqual((current / 'romfs/Layout/a').read_bytes(), b'aaa')
         self.assertEqual((current / 'romfs/b').read_bytes(), b'bb')
-        # 布局阶段照旧从 seed.txt 记的 src/romfs 读原版
+        self.assertIn('romfs_moved=1', roots.read(current / 'seed.txt'))
         self.assertIn(f'src={self.source.resolve()}', roots.read(current / 'seed.txt'))
-        # 下一单：解包前只删联接（不进去删存储），重解后再播，照常成功
-        roots.remove_owned(self.source / 'romfs')
-        self.assertTrue(identity.is_dir() and (identity / 'b').read_bytes() == b'bb')
         (self.source / 'romfs').mkdir(); (self.source / 'romfs/b').write_bytes(b'b2')
         again = refresh.seed(self.store, '原创', self.source, move_romfs=True)
         self.assertEqual((again / 'romfs/b').read_bytes(), b'b2')
-        self.assertTrue(roots.is_link(self.source / 'romfs'))
+        self.assertFalse(os.path.lexists(self.source / 'romfs'))
+
+    def test_seed_move_romfs_links_denied(self):   # 玩家诊断 #0fd185：安全软件拦重解析点，软链与 junction 都报拒绝访问
+        # 期望：RomFS 收不进共享存储（版本里留真目录），播种照常成功、内容一致，解包目录原处不留东西
+        from unittest import mock
+        (self.source / 'romfs/Layout').mkdir()
+        (self.source / 'romfs/Layout/a').write_bytes(b'aaa')
+        (self.source / 'romfs/b').write_bytes(b'bb')
+        def denied(*a, **k): raise PermissionError(13, '拒绝访问')
+        with mock.patch.object(roots, 'directory_link', denied):
+            current = refresh.seed(self.store, '原创', self.source, move_romfs=True)
+        self.assertFalse(os.path.lexists(self.source / 'romfs'))
+        self.assertFalse(roots.is_link(current / 'romfs'))
+        self.assertEqual((current / 'romfs/Layout/a').read_bytes(), b'aaa')
+        self.assertEqual((current / 'romfs/b').read_bytes(), b'bb')
 
     def test_seed_without_move_keeps_source_real_dir(self):
         (self.source / 'romfs/b').write_bytes(b'bb')

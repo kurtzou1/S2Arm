@@ -947,6 +947,41 @@ int main(void) {
         uint32_t ok[sizeof CS_SPV / 4]; memcpy(ok, CS_SPV, sizeof ok); n = sizeof ok;
         CHECK(s2a_libpack_spv_admit_caps((uint8_t *)ok, &n, cw, sizeof cw) == 0 && n == sizeof CS_SPV, "能力核：无能力声明的模块原样过");
     }
+    {   // 片元像素锁：声明（能力 / 扩展 / 执行模式）一律删；真有临界区的两条指令也删、按模块计 libpack_interlock_dropped。期望值按 SPIR-V 编码手写
+        enum { MAXW = 64 };
+        uint32_t m[MAXW]; size_t k = 0;
+        #define W(x) (m[k++] = (x))
+        #define EXT(str) do { const char s_[] = str; const uint32_t nw_ = (uint32_t)((sizeof s_ + 3) / 4); W((nw_ + 1) << 16 | 10u); \
+                              memset(&m[k], 0, nw_ * 4); memcpy(&m[k], s_, sizeof s_); k += nw_; } while (0)
+        W(0x07230203u); W(0x00010000u); W(0u); W(3u); W(0u);
+        W(0x00020011u); W(1u);                       // OpCapability Shader
+        W(0x00020011u); W(5378u);                    // OpCapability FragmentShaderPixelInterlockEXT
+        EXT("SPV_EXT_fragment_shader_interlock");    // 34 字节 → 9 字 + 头 = 10 字
+        EXT("SPV_X");                                // 别的扩展：保留
+        W(0x00030010u); W(1u); W(5366u);             // OpExecutionMode %1 PixelInterlockOrderedEXT
+        W(0x00040015u); W(1u); W(32u); W(0u);        // OpTypeInt 32 0
+        const size_t decl_end = k;
+        W(0x000114F4u); W(0x000114F5u);              // OpBeginInvocationInterlockEXT / OpEndInvocationInterlockEXT
+        const size_t full = k;
+        uint32_t want[MAXW]; size_t wk = 0;
+        want[wk++] = 0x07230203u; want[wk++] = 0x00010000u; want[wk++] = 0u; want[wk++] = 3u; want[wk++] = 0u;
+        want[wk++] = 0x00020011u; want[wk++] = 1u;
+        want[wk++] = 3u << 16 | 10u; { const char x[] = "SPV_X"; memset(&want[wk], 0, 8); memcpy(&want[wk], x, sizeof x); wk += 2; }
+        want[wk++] = 0x00040015u; want[wk++] = 1u; want[wk++] = 32u; want[wk++] = 0u;
+        #undef W
+        #undef EXT
+        uint32_t d[MAXW]; memcpy(d, m, decl_end * 4); size_t n = decl_end * 4; char cw[128] = "";
+        const uint64_t c0 = s2a_libpack_caps_stripped(), i0 = s2a_libpack_interlock_dropped();
+        CHECK(s2a_libpack_spv_admit_caps((uint8_t *)d, &n, cw, sizeof cw) == 0 && n == wk * 4 && !memcmp(d, want, wk * 4),
+              "像素锁：只有声明 → 删能力 / 扩展名 / 执行模式三样，别的扩展与类型原样");
+        CHECK(s2a_libpack_caps_stripped() == c0 + 1 && s2a_libpack_interlock_dropped() == i0, "像素锁：只有声明 → 记删能力 1 条，不记丢互锁");
+        size_t n2 = n;
+        CHECK(s2a_libpack_spv_admit_caps((uint8_t *)d, &n2, cw, sizeof cw) == 0 && n2 == n && s2a_libpack_caps_stripped() == c0 + 1, "像素锁：再核一遍不变、不再计");
+        uint32_t f[MAXW]; memcpy(f, m, full * 4); n = full * 4;
+        CHECK(s2a_libpack_spv_admit_caps((uint8_t *)f, &n, cw, sizeof cw) == 0 && n == wk * 4 && !memcmp(f, want, wk * 4),
+              "像素锁：有临界区 → 不拒收，两条互锁指令也删，结果同上");
+        CHECK(s2a_libpack_interlock_dropped() == i0 + 1 && s2a_libpack_caps_stripped() == c0 + 2, "像素锁：有临界区 → 丢互锁计 1 条（libpack_interlock_dropped）");
+    }
     if (fails) { printf("libpack_vk_test: %d FAIL\n", fails); return 1; }
     printf("libpack_vk_test: all checks passed\n");
     return 0;

@@ -223,24 +223,29 @@ static void c_stuck_cap(void) {
     CHECK(g_gdraws == 1 && g_bad_draw == 0);
     session_end(); CASE_END("不可跳的笔：等满 unsafe 上限后跳过、stuck 后同管线直接跳、建好后照画");
 }
-// 7) 停局时在途的那条不能发布进下一局：上一局后台建卡住（停局有界等不到、线程脱离），下一局同一配方再要。
-//    期望：下一局的这一笔等到本局自己建的那条再画（管线属于本局、图元对），不被上一局迟到的结果唤醒。
+// 7) 停局时在途构建超出有界等待：旧 worker 保持归属，不能启动下一局 worker；旧线程退出后才允许重启。
 static void c_stop_discards(void) {
     CASE_BEGIN(); session_begin();
-    const int k0 = bg_entered(); gate_hold(k0); gate_hold(k0 + 1);
-    run_frame(1, F_CLEAR, TRI, 1);                                // 不可跳：等满 unsafe 后跳，后台那条卡在闸里
+    const int k0 = bg_entered(); gate_hold(k0);
+    run_frame(1, F_CLEAR, TRI, 1);
     CHECK(g_gdraws == 0);
-    nvn_vk_pipe_demand_stop();                                    // 有界：等不到就脱离线程
+    nvn_vk_pipe_demand_stop();
+    CHECK(!nvn_vk_pipe_demand_quiescent());                        // 超时仍保留旧的可 join worker
+    CHECK(nvn_vk_pipe_demand_worker_count() == 1);
+    nvn_vk_pipe_demand_start();
+    CHECK(nvn_vk_pipe_demand_worker_count() == 1);                  // 不创建重叠 worker
+    CHECK(bg_entered() == k0 + 1);
+    gate_open(k0);
+    int idle = 0;
+    for (int i = 0; i < 2000 && !idle; i++) { idle = nvn_vk_pipe_demand_quiescent(); if (!idle) sleep_ms(1); }
+    CHECK(idle && nvn_vk_pipe_demand_worker_count() == 0);
     pass_fresh(); g_gdraws = 0; g_bad_draw = 0; g_last_set = NULL;
     pthread_mutex_lock(&g_bmu); g_session++; pthread_mutex_unlock(&g_bmu);
     nvn_vk_pipe_demand_start();
-    struct rel ro = {k0, 50}, rn = {k0 + 1, 150};
-    pthread_t to = release_after(&ro), tn = release_after(&rn);
-    const double ms = run_frame(1, F_CLEAR, TRI, 1);
-    pthread_join(to, NULL); pthread_join(tn, NULL);
-    CHECK(g_gdraws == 1 && g_bad_draw == 0);                     // 画的是本局为它建的那条
-    CHECK(ms >= 145);                                             // 没被上一局 50 ms 时迟到的结果唤醒
-    session_end(); CASE_END("停局：上一局在途的结果不发布进下一局");
+    run_frame(1, F_CLEAR, TRI, 1);
+    CHECK(g_gdraws == 1 && g_bad_draw == 0);
+    CHECK(bg_entered() == k0 + 2);                                 // 旧 worker 退出后才构建新一代
+    session_end(); CASE_END("停局：旧 worker 未退出前不重启，回收后下一局再建");
 }
 // 8)（unbounded 组：fu_unsafe_ms = 0 = 不设限）不可跳的笔一直等到建好再画，不按某个分片超时跳过。
 static void c_unbounded(void) {

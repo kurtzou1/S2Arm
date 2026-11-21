@@ -33,8 +33,26 @@
 #define PLAT_ASM_ADD(reg, sym)    add reg, reg, :lo12:sym
 #define PLAT_ASM_LDR(reg, base, sym) ldr reg, [base, :lo12:sym]
 
+#elif defined(__OHOS__)
+
+// musl keeps a pointer to the real key table in the TCB.  Its signed offset is
+// measured on two real pthreads at startup; no Bionic layout is assumed.
+// Bias the logical base by one slot because the core reserves offset 0.
+// reg and scratch must be distinct; neither flags nor the stack are touched.
+#define PLAT_TSD_BASE_PAIR(reg, scratch) \
+    adrp reg, g_s2a_ohos_tsdoff; \
+    ldr reg, [reg, :lo12:g_s2a_ohos_tsdoff]; \
+    mrs scratch, tpidr_el0; \
+    ldr reg, [scratch, reg]; \
+    sub reg, reg, #8
+
+#define PLAT_ASM_SYM(sym)         sym
+#define PLAT_ASM_ADRP(reg, sym)   adrp reg, sym
+#define PLAT_ASM_ADD(reg, sym)    add reg, reg, :lo12:sym
+#define PLAT_ASM_LDR(reg, base, sym) ldr reg, [base, :lo12:sym]
+
 #else
 
-#error "platform/plat_asm.h: unsupported target (expected __APPLE__ or __ANDROID__)"
+#error "platform/plat_asm.h: unsupported target (expected __APPLE__, __ANDROID__ or __OHOS__)"
 
 #endif

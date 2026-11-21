@@ -275,6 +275,38 @@ def apk_probes(root, work, cs_project):
     return probes, sites
 
 
+def adpf_ndk_contract(root, work, toolchain, api):
+    """The minSdk object must load ADPF dynamically; the newest real header checks its types."""
+    source = Path(root) / "android/native/adpf_hint.c"
+    signature_api = min(api, 36)
+    prefixes = ("APerformanceHint_", "AWorkDuration_", "ASessionCreationConfig_")
+    for target in (29, signature_api):
+        obj = work / ("adpf-api%d.o" % target)
+        defines = ["-DS2A_ADPF_CHECK_SIGNATURES"] if target == signature_api else []
+        result = subprocess.run([
+            str(toolchain / "bin/clang"), "--target=aarch64-linux-android%d" % target,
+            "--sysroot=" + str(toolchain / "sysroot"), "-std=gnu11",
+            "-Werror=unguarded-availability", *defines, "-c", str(source), "-o", str(obj),
+        ], capture_output=True, text=True)
+        if result.returncode:
+            print("【红】ADPF NDK API %d 编译或签名检查失败" % target)
+            print(result.stderr.strip())
+            return 1
+        symbols = subprocess.run([
+            str(toolchain / "bin/llvm-nm"), "--undefined-only", "--format=just-symbols", str(obj),
+        ], capture_output=True, text=True)
+        if symbols.returncode:
+            print("【红】ADPF API %d 读取对象导入失败：%s" % (target, symbols.stderr.strip()))
+            return 1
+        imports = [name for name in symbols.stdout.splitlines() if name.startswith(prefixes)]
+        if imports:
+            print("【红】ADPF API %d 有直接导入：%s" % (target, ", ".join(imports)))
+            return 1
+    print("PASS ADPF：API 29 / %d 三类符号均为 0 直接导入；签名核对到 NDK 真头 API %d" %
+          (signature_api, signature_api))
+    return 0
+
+
 def apk_part(root, project, work, ndk, jobs, cs_project):
     """返回 (配置数, 链过数, 红行数, [构建目录…])。"""
     toolchain = ndk / "build/cmake/android.toolchain.cmake"
@@ -394,6 +426,7 @@ def main(argv=None):
             total, linked, red = total + n, linked + ok, red + r
             bdirs += [bdir] if bdir else []
         if "apk" in parts:
+            red += adpf_ndk_contract(root, work, base, api)
             n, ok, r, more = apk_part(root, project, work, ndk, a.jobs, a.cs_project)
             total, linked, red = total + n, linked + ok, red + r
             bdirs += more

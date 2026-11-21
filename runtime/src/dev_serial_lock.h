@@ -12,9 +12,14 @@
 #include <time.h>
 #include <unistd.h>
 
-// → 0 没配置 / 外层已持（没取）；1 当场拿到；2 排队后拿到；-1 配置了但锁文件打不开（照常起局，打一行说明）
+// → 0 没配置 / 外层已持 / 工具模式（没取）；1 当场拿到；2 排队后拿到；-1 配置了但锁文件打不开（照常起局，打一行说明）
 static inline int s2a_dev_serial_lock(void) {
     if (getenv("S2A_MAC_GAME_LOCK_HELD")) return 0;
+    // 宿主工具模式（出包期借游戏自带的代码办事，不起图形、不进游戏）不是 Mac 局，不取：runtime/src/oodle_tool.c DM_OODLE_JOB / DM_OODLE_SERVE（解压）、
+    //   runtime/src/glslc_tool.c DM_GLSLC_JOB（离线编 GLSL）。管线归档 / 帧回放真跑渲染、吃 GPU，照旧排队
+    //   出包抽取时 nxsh_extract 主进程与各工作进程、shader_split 各起一个工具宿主同时跑，第一个拿锁后在 stdin 上等请求，其余在 flock 上等它 → 互相等死
+    //   （0.6.2 候选验收无人深空出 iPhone 包停在「直连抽取 1/81」24 分钟，样本：9 个 s2arm-host 都在 main → flock，持锁那个在 s2a_oodle_tool_maybe → read）
+    if (getenv("DM_OODLE_JOB") || getenv("DM_OODLE_SERVE") || getenv("DM_GLSLC_JOB")) return 0;
     const char *home = getenv("HOME");
     if (!home || !*home) return 0;
     char cfg[1024], path[1024] = {0};

@@ -60,6 +60,15 @@ class Parse(unittest.TestCase):
             with self.subTest(appid=appid):
                 self.assertEqual(devcert.bundle_id(devcert.parse_profile(profile(appid))), want)
 
+    def test_standalone_bundle_id(self):
+        # 独立 App 按款（0.6.3）：通配 → io.s2arm.games.<小写团队号>.<完整 16 位程序号小写>；前缀通配 → 前缀 + s2arm.<程序号>；显式 → 只有它那一个（False = 定不了）
+        gid = "0100ABCD0000E000"
+        cases = {f"{TEAM}.*": ("io.s2arm.games.abcde12345.0100abcd0000e000", True), f"{TEAM}.com.foo.*": ("com.foo.s2arm.0100abcd0000e000", True),
+                 f"{TEAM}.com.foo.bar": ("com.foo.bar", False)}
+        for appid, want in cases.items():
+            with self.subTest(appid=appid):
+                self.assertEqual(devcert.bundle_id(devcert.parse_profile(profile(appid)), gid), want)
+
     def test_entitlements_are_profile_intersection(self):
         # 描述文件只开了提高内存上限：签进去的只有身份三项 + 这一项；钥匙串组等 S2Arm 不要的不带
         p = devcert.parse_profile(profile(ents={EVA: None}))
@@ -102,7 +111,7 @@ class Inspect(unittest.TestCase):
         self.assertEqual(self.codes(r), (["devcert_mismatch"], []))
 
     # 三项权限各自的「中文名（技术名）——后果」与给证书发放人的话：手写期望，不从 devcert 里取
-    GTA_LINE = "调试权限（get-task-allow）——没有它任何游戏都打不开"
+    GTA_LINE = "调试权限（get-task-allow）——没有它，通用 S2Arm 里的游戏打不开（「独立 App」不受影响）"
     IML_LINE = "提高内存上限（com.apple.developer.kernel.increased-memory-limit）——没有它大游戏可能内存不够、起不来"
     EVA_LINE = "扩展寻址（com.apple.developer.kernel.extended-virtual-addressing）——没有它大游戏可能地址不够、起不来"
     UDID = "00000000-000A1B2C3D4E5F60"
@@ -113,20 +122,22 @@ class Inspect(unittest.TestCase):
                 f"包含我的设备 UDID：{udid}，并开启以下权限：调试权限（get-task-allow）、提高内存上限（com.apple.developer.kernel.increased-memory-limit）、"
                 "扩展寻址（com.apple.developer.kernel.extended-virtual-addressing）。")
 
-    def test_distribution_profile_blocks(self):
-        # 分发描述文件：get-task-allow 是 false（或干脆没有）、两项内核权限都没有 → 根本签不了；三项全列，给发放人的话带连着的 UDID
+    def test_distribution_profile_warns(self):
+        # 分发描述文件（0.6.3）：get-task-allow 是 false（或干脆没有）、两项内核权限都没有 → 照常导入（独立 App 能用），降为提醒、distribution 为真；
+        #   三项全列、说清通用 S2Arm 里打不开，给发放人的话照旧带连着的 UDID
         for gta in (False, None):
             with self.subTest(get_task_allow=gta):
                 r = self.check(profile(ents={"get-task-allow": gta, IML: None, EVA: None}), udid=self.UDID)
-                self.assertEqual(self.codes(r), (["devcert_distribution"], []))
+                self.assertEqual((self.codes(r), r["distribution"]), (([], ["devcert_distribution"]), True))
                 self.assertEqual(r["missingEntitlements"], ["get-task-allow", IML, EVA])
-                self.assertEqual(r["blocking"][0]["text"].split("\n"), [
-                    "这是分发（发布）证书的描述文件，缺下面的权限，S2Arm 0.6 起用它签出来的 App 每款游戏都打不开：",
+                self.assertEqual(r["warnings"][0]["text"].split("\n"), [
+                    "这是分发（发布）证书的描述文件，缺下面的权限：可以照常用它装「独立 App」（一个 App 一款游戏），通用 S2Arm 里的游戏用它签了打不开。",
                     self.GTA_LINE, self.IML_LINE, self.EVA_LINE,
-                    "可以改用 Apple ID 登录签名，或复制下面这段话发给证书发放人，换成开发证书和开发描述文件后再导入。"])
+                    "要用通用 S2Arm：改用 Apple ID 登录签名，或复制下面这段话发给证书发放人，换成开发证书和开发描述文件后再导入。"])
                 self.assertEqual(r["requestText"], self.request(self.UDID))
-        # 和不配套一起出现：两条都报，不配套在前（导入失败码取第一条）
-        self.assertEqual(self.codes(self.check(profile(certs=(b"other",), ents={"get-task-allow": False}))), (["devcert_mismatch", "devcert_distribution"], []))
+        # 和不配套一起出现：只有不配套挡导入
+        self.assertEqual(self.codes(self.check(profile(certs=(b"other",), ents={"get-task-allow": False}))), (["devcert_mismatch"], ["devcert_distribution"]))
+        self.assertIs(self.check(profile())["distribution"], False)
 
     def test_missing_iml_dev_profile_warns(self):
         # 开发描述文件只缺提高内存上限：照常导入（不 blocking），只列这一项；没连手机 → UDID 写占位、提示玩家自己填
@@ -210,19 +221,34 @@ class Operation(unittest.TestCase):
         self.assertEqual(self.sec.d, {SHA1: "pw"})   # 旧证书和密码原样留着
         self.assertEqual(devcert.parse_profile((self.t / "private/devcert/profile.mobileprovision").read_bytes())["DeveloperCertificates"], [DER])
 
-    def test_distribution_import_refused_keeps_previous(self):
+    def test_distribution_import_kept_and_recorded(self):
+        # 0.6.3：分发描述文件照常导入（独立 App 能用），按存着的描述文件认出分发；缺项和给发放人的话照旧随结果给（导入页「复制」用）；导入请求没带设备 → UDID 是占位
         self.imp()
+        self.assertIs(devcert.distribution(self.ctx()), False)
         (self.t / "in.mobileprovision").write_bytes(profile(ents={"get-task-allow": False}))
-        with self.assertRaises(Failure) as e:
-            self.imp(password="new")
-        self.assertEqual(e.exception.code, "devcert_distribution")
-        # 缺项和给发放人的话作为机读事实带给前端（导入失败页「复制」用）；导入请求没带设备 → UDID 是占位
-        self.assertEqual(e.exception.facts["missingEntitlements"], ["get-task-allow"])
-        self.assertIn("包含我的设备 UDID：<你的设备 UDID>，", e.exception.facts["requestText"])
-        self.assertEqual(self.sec.d, {SHA1: "pw"})   # 旧证书、密码、描述文件原样留着
+        r = self.imp(password="new")
+        self.assertEqual(([w["id"] for w in r["warnings"]], r["missingEntitlements"], r["distribution"], r["active"]),
+                         (["devcert_distribution"], ["get-task-allow"], True, True))
+        self.assertIn("包含我的设备 UDID：<你的设备 UDID>，", r["requestText"])
+        self.assertIs(devcert.distribution(self.ctx()), True)
+        self.assertNotIn("distribution", json.loads((self.t / "private/devcert/state.json").read_text()))   # 不另记一份，免得与描述文件不一致
+        self.assertEqual(self.sec.d, {SHA1: "new"})   # 同一张证书换了密码：存新的
         kept = devcert.parse_profile((self.t / "private/devcert/profile.mobileprovision").read_bytes())
-        self.assertIs(kept["Entitlements"]["get-task-allow"], True)
+        self.assertIs(kept["Entitlements"]["get-task-allow"], False)
         self.assertTrue(devcert.active(self.ctx()))
+
+    def test_distribution_of_import_before_the_flag(self):
+        # 11-20 前导入的证书：state.json 只有 active / certSha1 / bundleId / teamId / teamName / imported，没有分发标记。
+        #   描述文件 get-task-allow 为假或缺 → 分发；为真 → 不是；描述文件没了 / 坏了 → 不算（期望按描述文件内容手写）
+        d = self.t / "private/devcert"; d.mkdir(parents=True, exist_ok=True)
+        (d / "state.json").write_text(json.dumps(dict(active=True, certSha1=SHA1, bundleId="io.s2arm.games.abcde12345", teamId=TEAM, teamName="T", imported="2026-11-01T00:00:00+00:00")))
+        for prof, want in ((profile(ents={"get-task-allow": False}), True), (profile(ents={"get-task-allow": None}), True),
+                           (profile(), False), (b"broken", False), (None, False)):
+            with self.subTest(want=want, prof=prof and prof[-40:]):
+                (d / "profile.mobileprovision").unlink(missing_ok=True)
+                if prof is not None:
+                    (d / "profile.mobileprovision").write_bytes(prof)
+                self.assertIs(devcert.distribution(self.ctx()), want)
 
     def test_no_password(self):
         with self.assertRaises(Failure) as e:
@@ -360,6 +386,17 @@ class RealTools(unittest.TestCase):
         out = devcert.export_ipa(c, t / "Payload")
         import zipfile
         self.assertIn("Payload/S2Arm.app/_CodeSignature/CodeResources", zipfile.ZipFile(out).namelist())
+
+
+class RcodesignEnts(unittest.TestCase):
+    """rcodesign_ents：给 rcodesign 传权限文件的唯一口子（D-J7CH：下游装机直接传盘符路径，-e 按第一个冒号拆成「作用范围 C」、os error 3）。
+    期望手写：参数只含文件名、不含冒号；运行目录 = 权限文件所在目录"""
+    def test_drive_path_passes_name_only(self):
+        p = Path("C:") / "Users" / "p" / "downstream.entitlements"   # 带冒号的一段同 Windows 盘符（rcodesign 按第一个冒号拆）
+        args, cwd = devcert.rcodesign_ents(p)
+        self.assertEqual(args, ["-e", "downstream.entitlements"])
+        self.assertEqual(cwd, Path("C:") / "Users" / "p")
+        self.assertFalse(any(":" in a for a in args))
 
 
 if __name__ == "__main__":

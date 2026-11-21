@@ -58,7 +58,7 @@ def _completed(root, path, suffix):
     parts = path.relative_to(root).parts
     name = parts[-1]
     if suffix == 'direct':
-        # Direct store (C# dsh_batch build Store, graphics/tools/direct/dsh/batch/Build.cs, S2Arm 11-01; direct_lib.sh gives it --cas <title>/store):
+        # Direct store (C# dsh_batch build Store, graphics/tools/direct/dsh/batch/Build.cs, S2Arm 11-01; direct_lib.py gives it --cas <title>/store):
         # <title>/store/dshb/<two hex>/<64 hex>.e, one entry per file (a translation or a Metal library), named by the sha256 of its key and filed under
         # its first two hex digits; <title>/store/cpso/ the same layout for the compute pipeline archives (graphics/tools/direct/cs_pipelines.py). Removing one only makes it miss on the next build; <64 hex>.e.tmp<pid>.<thread> is an entry being written, not an entry.
         # <title>/store/<two hex>.pack(.bad) are shards of the former Python store (dmsh_store.py, 10-31 to 11-01): no reader is left, reclaimable the same way

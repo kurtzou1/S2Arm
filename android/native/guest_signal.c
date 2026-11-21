@@ -13,7 +13,10 @@
 #include <sys/syscall.h>
 #include <ucontext.h>
 #if defined(__aarch64__)
+// OHOS musl signal.h already provides these AArch64 context records.
+#if !defined(__OHOS__)
 #include <asm/sigcontext.h>
+#endif
 #endif
 #include <unistd.h>
 #if defined(__ANDROID__)

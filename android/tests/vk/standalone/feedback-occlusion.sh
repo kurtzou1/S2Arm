@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 S2Arm contributors
+# 门禁间接：android/tests/vk/run.sh 默认档按 standalone/*.sh 通配逐个跑（run.sh 末段 for 循环），单独跑用 run.sh --<名>
 # 附件反馈快照在活动遮挡查询里拆通道（#1658）：真实驱动 + validation 层，样本数连续、续段槽按块给（刚好一块 / 跨块 / 跨块边界），
 # 以及一个查询续不下去（保险丝）/ 有一段没读到时只这个查询读 0、别的查询与整段不受影响。
 set -euo pipefail

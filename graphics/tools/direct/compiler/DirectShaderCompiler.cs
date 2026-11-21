@@ -31,6 +31,12 @@ namespace S2A.DirectCompiler
         [ThreadStatic] private static string _requestSha;
         private static string RequestSha() => _requestSha ?? "unknown";
 
+        // 翻译标志按阶段，与出库链同口径（graphics/tools/direct/dsh/Dsh.cs：debug = gs / cs，11-07 起）：顶点、片元关 DebugMode，
+        //   AST 表达式传播打开，产物不再满是局部变量读写（#1774：同一延迟光照合成片元，现编 62,841 字 vs 出库 30,099 字）；
+        //   几何保留（关掉后翻译慢 2.4 倍，首遇现编更卡）；计算走 ShaderCache.DecodeComputeShader，内部带 DebugMode，不经这里。
+        //   原先三段都沿用 Ryujinx ShaderCache.DefaultFlags（= DebugMode），是出库链 11-07 改口径时没跟上的遗留。
+        internal static TranslationFlags GraphicsFlags(string stage) => stage == "gs" ? ShaderCache.DefaultFlags : ShaderCache.DefaultFlags & ~TranslationFlags.DebugMode;
+
         public static byte[] Compile(byte[] requestUtf8)
         {
             // 诊断：拒收行带上请求 sha，真机上就能把拒收与同一条请求对上（不用另开请求落盘开关）。
@@ -132,7 +138,7 @@ namespace S2A.DirectCompiler
                         if (stage == null) continue;
                         var accessor = new DirectGpuAccessor(profile, program, stage, item.index, allocator, queries);
                         accessors.Add(accessor);
-                        contexts.Add((stage, accessor, ShaderCache.DecodeGraphicsShader(accessor, TargetApi.Vulkan, ShaderCache.DefaultFlags, 0)));
+                        contexts.Add((stage, accessor, ShaderCache.DecodeGraphicsShader(accessor, TargetApi.Vulkan, GraphicsFlags(item.name), 0)));
                     }
                     for (int i = contexts.Count - 2; i >= 0; i--)
                     {
@@ -383,9 +389,10 @@ namespace S2A.DirectCompiler
                     // #1594：贴图字在 c2 分离贴图表、采样器是着色器里的立即数采样器池下标（类型 3）。结果给 slot = 贴图字、constSampler = 池下标
                     //   （可选字段，按 v2 写）；宿主 / 回放按池下标直接取采样器（同 NVN_RB_SAMPI），不经 c2 采样器表。
                     //   绝不只填 slot：宿主会把「没有 samp_slot」读成采样器取同字高位（= 池里第 0 项），静默错绑。
-                    //   所以表达不了的形态——数组、计算阶段（宿主计算侧没接）、池下标超出句柄里 12 位的范围——具名报未接，什么都不填。
+                    //   所以表达不了的形态——数组、池下标超出句柄里 12 位的范围——具名报未接，什么都不填。
+                    //   计算阶段（#1594 片 7）与图形阶段同一份合同：宿主计算侧解析与回放派发都按同一个 const_samp_id 取采样器。
+                    //   计算阶段的游戏 UBO 来源（下一个分支）仍报未接。
                     string shape = binding.Count != 1 || resolved.ArrayLength > 1 ? "constant sampler array" :
-                                   binding.Stage == "cs" ? "constant sampler, compute" :
                                    constSampler > MaxConstSampler ? "constant sampler index above 4095" : null;
                     if (shape != null)
                         throw new DirectCompileException("UNSUPPORTED_PROGRAM",

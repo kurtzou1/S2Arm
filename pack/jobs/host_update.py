@@ -324,7 +324,7 @@ def phone_overview(c):
                      shellCurrent=None if external else bool(sid) and rec.get("shellId") == sid, signedAt=at, free=free,
                      signMode="external" if external else _sign_mode(c, rec, signed),
                      expiresAtEstimate=until, remainingDays=max(0, math.ceil((until - time.time()) / 86400)) if until else None, expiresKnown=known,
-                     lastSeen=rec.get("at") if isinstance(rec.get("at"), (int, float)) else None, canSign=_can_sign(rec), games=games)
+                     lastSeen=rec.get("at") if isinstance(rec.get("at"), (int, float)) else None, canSign=_can_sign(rec), games=games, apps=_app_rows(rec, sid))
         if external:   # 别的工具装的：给它自己的一套按钮，不出「安装 S2Arm」（会新建证书、顶掉玩家 AltStore 的证书）
             phone["actions"] = list(EXTERNAL_PHONE_ACTIONS)
         if choose:   # 装着不止一个、玩家还没选：只给「选用哪个 S2Arm」，不替玩家挑、不出安装
@@ -335,6 +335,23 @@ def phone_overview(c):
             phone["online"] = online.get(key)
         phones.append(phone)
     return dict(phones=phones)
+
+
+def _app_rows(rec, sid):
+    """这台手机上的独立 App（设备记录 apps，一 App 一游戏，0.6.3）→ [{gameId, bundleId, shellCurrent, signedAt, free, expiresAtEstimate, remainingDays, expiresKnown}]，
+    按游戏号排；到期口径同通用壳那行（签好的包里读到的真实值优先，没有按苹果规则估）"""
+    rows = []
+    for g, v in sorted((rec.get("apps") or {}).items()):
+        if not isinstance(v, dict):
+            continue
+        signed = v.get("signed") or {}
+        at = signed.get("at") if isinstance(signed.get("at"), (int, float)) else None
+        free = bool(signed.get("free", True))
+        known = isinstance(signed.get("expires"), (int, float))
+        until = signed["expires"] if known else (at + SIGN_LIFETIME["free" if free else "paid"]) if at else None
+        rows.append(dict(gameId=str(g).upper(), bundleId=v.get("bundleId") or "", shellCurrent=bool(sid) and v.get("shellId") == sid, signedAt=at, free=free,
+                         expiresAtEstimate=until, remainingDays=max(0, math.ceil((until - time.time()) / 86400)) if until else None, expiresKnown=known))
+    return rows
 
 
 def compatible(c, entry):

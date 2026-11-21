@@ -36,7 +36,7 @@ srcs=("$repo/android/tests/nvk_pipe_async_draw_test.c" "$repo/graphics/nvn/tests
 for f in rp_exec.c rp_copy_t2b.c rp_clear_tex.c rp_state.c rp_entry.c rp_res.c rp_buf.c rp_pass.c rp_present.c nvn_unimpl.c; do srcs+=("$repo/$rp/$f"); done
 srcs+=("$draw" "$repo/graphics/nvn/gfx/nvn/nvn_tex.c" "$repo/graphics/nvn/gfx/tex/nvn_deswizzle.c" "$demand" "$repo/android/native/nvn/nvn_pipe_pend.c" "$repo/graphics/nvn/gfx/nvn/nvn_first_use.c")
 weak=(); [ "$(uname -s)" = Darwin ] && read -r -a weak <<< "$(cd "$repo" && python3 tools/weak_link_decl.py flags replay)"
-flags=(-std=c11 -D_DEFAULT_SOURCE -DS2A_TEST_TS_ALLOC -O1 -g -pthread -Wall -Wextra -Werror)
+flags=(-std=c11 -D_DEFAULT_SOURCE -DS2A_TEST_TS_ALLOC -DS2A_NVN_PIPE_DEMAND_TEST=1 -O1 -g -pthread -Wall -Wextra -Werror)
 "$cc" "${flags[@]}" "${incs[@]}" -o "$tmp/t" "${srcs[@]}" ${weak[@]+"${weak[@]}"} -lm
 rc=0
 (cd "$repo" && timeout 60 "$tmp/t" main) || rc=1

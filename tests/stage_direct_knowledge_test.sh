@@ -1,5 +1,5 @@
 #!/bin/bash
-# 跑局知识进阶段键单测（审计 #1534 P1-54：pack/stage_direct.sh 的 know- 键 + pack/stage_direct_seed.sh 轻阶段；假 direct_lib.sh、真 run_knowledge / pso_seed，临时产物根，约 10 秒）
+# 跑局知识进阶段键单测（审计 #1534 P1-54：pack/stage_direct.sh 的 know- 键 + pack/stage_direct_seed.sh 轻阶段；假 direct_lib.py、真 run_knowledge / pso_seed，临时产物根，约 10 秒）
 #   bash tests/stage_direct_knowledge_test.sh
 # 期望按「什么改产物」手写（直连库只用配对 / 片元整数输出变体 / 采样模拟变体三张表；种子表只用 seen 行 + 直连库键），每步与上一步比：
 #   操作                                               直连键   种子键   直连出库调用
@@ -22,9 +22,10 @@ ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
 mkdir -p $T/repo/pack/stage_inputs $T/repo/tools $T/repo/graphics/nvn/tools $T/repo/translator $T/repo/graphics/tools/direct $T/repo/graphics/tools/shbake $T/repo/graphics/metal $T/roots $T/bin
 cp "$H/pack/roots.sh" "$H/pack/stage_direct.sh" "$H/pack/stage_direct_seed.sh" "$H/pack/stage_keyfiles.sh" "$H/pack/resource_input_key.py" "$H/pack/ue_pak.py" \
    "$H/pack/ipa_key.sh" "$H/pack/pkg_srcs.py" "$H/pack/pkg_inputs_key.py" $T/repo/pack/
+mkdir -p $T/repo/pack/orch && cp "$H/pack/orch/current.py" $T/repo/pack/orch/   # roots.sh 写现行指针 / 迁移老库（pack/orch/current.py）
 cp "$H/tools/toolchain.sh" "$H/tools/toolchain.env" "$H/tools/machine.sh" "$H/tools/clonedir.py" "$H/tools/plock.sh" "$H/tools/flock_hold.py" "$H/tools/stage_deps.py" $T/repo/tools/; cp -R "$H/tools/stage_deps_hook" $T/repo/tools/
 cp "$H/graphics/nvn/tools/romfs_list.py" "$H/graphics/nvn/tools/gfx_api.py" $T/repo/graphics/nvn/tools/; cp "$H/graphics/tools/shbake/pak_crypto.py" $T/repo/graphics/tools/shbake/
-mkdir -p "$T/repo/tools"; cp "$H/tools/pool_workers.py" "$T/repo/tools/"   # romfs_list / pak_crypto 经它取核数（#1332：核数唯一来源）
+mkdir -p "$T/repo/tools"; cp "$H/tools/pool_workers.py" "$H/tools/progress.py" "$T/repo/tools/"   # romfs_list / pak_crypto 经它取核数（#1332：核数唯一来源）
 for f in run_knowledge.py fout_want.py se_want.py run_pairs.py pso_layout.py pso_layout.json pso_seed.py; do cp "$H/graphics/tools/direct/$f" $T/repo/graphics/tools/direct/; done
 echo m > $T/repo/graphics/metal/gal_prog.m; printf 'def version(): return "v1"\n' > $T/repo/translator/dmsh_chain.py
 printf '入\t%s\n' pack/stage_direct.sh pack/ue_pak.py graphics/metal/gal_prog.m graphics/tools/direct/run_knowledge.py > $T/repo/pack/stage_inputs/direct.tsv
@@ -41,17 +42,20 @@ mkdir -p $T/Xcode.app/Contents/Developer; export S2A_DEVELOPER_DIR=$T/Xcode.app/
 printf 'exit 0\n' > $T/repo/pack/stage_direct_profile.sh
 printf 'import json,os\nprint(json.dumps({"profile": os.path.dirname(__file__)+"/profile/0100", "profile_key": "profile1"}))\n' > $T/repo/pack/direct_profile_stage.py
 # 假出库：库键 A B C D；记调用次数；把拿到的跑局知识快照（S2A_RUN_KNOWLEDGE）的配对表留一份看
-cat > $T/repo/graphics/tools/direct/direct_lib.sh <<'EOF'
-O=$2; echo 1 >> "$FAKE_CALLS"; cp "${S2A_RUN_KNOWLEDGE:?没交快照}/pairs.tsv" "$FAKE_CALLS.pairs"
-mkdir -p "$O/b-v1"; echo m > "$O/b-v1/lib.idx"; printf '%s\n' aaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbb cccccccccccccccc dddddddddddddddd > "$O/keys.tsv"; echo '# map' > "$O/shader_map.tsv"
-printf '{"title": "0100AAAA00000000", "pso_seed": "gen"}\n' > "$O/direct_lib.json"
-echo "[直连库] 🟢 0100AAAA00000000 直连库 b-v1：并集 4，出库 4，没出成 0"
+cat > $T/repo/graphics/tools/direct/direct_lib.py <<'EOF'
+import os, shutil, sys
+O = sys.argv[2]; C = os.environ['FAKE_CALLS']; open(C, 'a').write('1\n')
+kn = os.environ.get('S2A_RUN_KNOWLEDGE') or sys.exit('没交快照')
+shutil.copy(kn + '/pairs.tsv', C + '.pairs')
+os.makedirs(O + '/b-v1', exist_ok=True); open(O + '/b-v1/lib.idx', 'w').write('m\n'); open(O + '/keys.tsv', 'w').write(''.join(k * 16 + '\n' for k in 'abcd')); open(O + '/shader_map.tsv', 'w').write('# map\n')
+open(O + '/direct_lib.json', 'w').write('{"title": "0100AAAA00000000", "pso_seed": "gen"}\n')
+print('[直连库] 🟢 0100AAAA00000000 直连库 b-v1：并集 4，出库 4，没出成 0')
 EOF
 (cd $T/repo && git init -q && git add -A && git -c user.email=t@t -c user.name=t commit -qm x)
 # 假仓库不读本机配置（11-09：门禁 / 维护方机器设了 S2A_MACHINE_LOCAL，machine.local 里 S2A_PY=$HOME/…/venv 在 HOME 换成临时目录后指向不存在的 Python，12 例全红）
 export S2A_ROOTS=$T/roots S2A_ROOTS_SHARED=$T/shared FAKE_CALLS=$T/calls S2A_RUN_ROOT=$T/run HOME=$T/home; unset S2A_PSO_SOURCES S2A_MACHINE_LOCAL S2A_PY
 mkdir -p $T/roots/acnh@s0/romfs $T/roots/acnh@s0/exefs $T/home; echo r > $T/roots/acnh@s0/romfs/f; echo main > $T/roots/acnh@s0/exefs/main; echo ksh > $T/roots/acnh@s0/.stage_shaders
-printf 'title_id\t0100aaaa00000000\n' > $T/roots/acnh@s0/unpack.tsv; ln -s acnh@s0 $T/roots/acnh@现行
+printf 'title_id\t0100aaaa00000000\n' > $T/roots/acnh@s0/unpack.tsv; printf '%s\n' acnh@s0 > $T/roots/acnh@现行
 SD=$T/run/s2arm/pso_seed/0100AAAA00000000; mkdir -p $SD
 A=aaaaaaaaaaaaaaaa B=bbbbbbbbbbbbbbbb C=cccccccccccccccc D=dddddddddddddddd
 R() { python3 - "$T/repo/graphics/tools/direct/pso_layout.json" "$@" <<'EOF'   # R <顶点键> <片元键> [画布 0 像素格式] → 一条 R 行（同 t_run_knowledge.py 的造法）
@@ -62,7 +66,7 @@ print('R\t' + b.hex())
 EOF
 }
 R1=$(R $A $B); R2=$(R $A $D); R3=$(R $A $C 13); R4=$(R $B $C)
-cur() { cd -P $T/roots/acnh@现行 && pwd; }
+cur() { cd -P $T/roots/$(cat $T/roots/acnh@现行) && pwd; }
 calls() { wc -l < $T/calls 2> /dev/null | tr -d ' '; }
 rows() { grep -vc '^#' "$(cur)/shaders/direct/pso_manifest.tsv" 2> /dev/null; }
 S() { OD=$(bash $T/repo/pack/stage_direct.sh acnh 2>&1); RD=$?; OS=$(bash $T/repo/pack/stage_direct_seed.sh acnh 2>&1); RS=$?; KD=$(cat "$(cur)/.stage_direct"); KS=$(cat "$(cur)/.stage_direct_seed" 2> /dev/null); }

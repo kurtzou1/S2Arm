@@ -338,6 +338,14 @@
 "img.noShaders.body" = "“%@” is incomplete. Put this game’s .s2arm from the “S2Arm Game Packs” folder on your computer in here too (it carries the game’s shaders), or connect your phone and click “Push to iPhone” in S2Arm on your computer.";
 "img.updateSkipped.title" = "Shader update skipped";
 "img.updateSkipped.body" = "“%@” doesn’t match the current version of this game, so it was skipped and not applied. The game still plays normally. To use this update, add the full .img from the same export on your computer together with it.";
+"gameExport.preparing" = "Creating the export files…";
+"gameExport.hint" = "Creates a .s2arm and a .img file and saves them in the Files app. After reinstalling S2Arm with another signature, put them in “Import Here” to bring the game back.";
+"gameExport.failed.title" = "Couldn’t export this game";
+"gameExport.noProgram" = "This game was installed the old way (its program is inside the app), so it can’t be exported on the iPhone. Export it from S2Arm on your computer.";
+"gameExport.inBundle" = "This game is inside the app package, so it can’t be exported on the iPhone.";
+"gameExport.partial" = "This game is missing some files (only partly playable). Complete it, then export again.";
+"gameExport.noImg" = "This game’s files use the old format (no game.img), so it can’t be exported on the iPhone. Export it from S2Arm on your computer.";
+"gameExport.ioFailed" = "Couldn’t write the export files: %@";
 "container.locked.title" = "Some S2Arm files are locked by the system";
 "container.locked.body" = "%@ GB of old S2Arm files on this device are locked by the system. S2Arm can neither change nor delete them; they are only removed when the app is deleted.\n\nTo free this space:\n1. In each game, open the menu → Manage saves → Export current save…, to a place in Files outside the S2Arm folder (for example iCloud Drive; the S2Arm folder is deleted together with the app)\n2. Delete and reinstall S2Arm\n3. Use Manage saves → Choose a backup to check… to bring your saves back";
 "diag.fileWord" = "diag";
@@ -429,6 +437,7 @@
 "notice.cable" = "Cable";
 "notice.imgFile" = "GameName.img";
 "notice.step.img" = "Or export this game on your computer, put both of its files from the “S2Arm Game Packs” folder, the .s2arm and the .img, in the “Import Here” folder of “%@” in the Files app, and open “%@” again. It’s picked up automatically.";
+"notice.step.imgApp" = "Or export this game on your computer and put the .s2arm from this game’s folder on the computer (and the .img, if there is one) in the “Import Here” folder of “%@” in the Files app, then tap “I’ve copied it — check again” below.";
 "notice.step.auto" = "In S2Arm on your computer, click “Push to iPhone” for this game and the resources are copied over automatically — the easiest way.";
 "save.blocked" = "%@\n\nCopy your data somewhere safe before deciding: open the Files app → “On My iPhone” (“On My iPad” on iPad) → “%@”, and copy the whole “S2A” folder somewhere else. Unfinished operations are recorded in S2A/save-transfer/save-transactions. You can also select this device in Finder on a Mac → “Files”, and drag out the “S2A” folder under this app.\n\nAfter copying, you can repackage and install to try again, or tap “Start game anyway…”.";
 "save.busy" = "The previous save operation is still running. Try again when it finishes.";
@@ -596,6 +605,7 @@
 
 /* 0.6.0 快照：游戏中菜单 */
 "vpad.snap.save" = "Save this moment";
+"vpad.snap.offAddress" = "This device doesn't have enough address space for both this game and snapshots, so snapshots are off for this game here. The game plays as usual.";
 "vpad.snap.restore" = "Go back to the saved moment";
 "vpad.snap.saving" = "Saving this moment…";
 "vpad.snap.saved" = "Moment saved";
@@ -636,3 +646,6 @@
 "cert.source.sidestore" = "From SideStore";
 "cert.source.p12" = "Imported .p12";
 "cert.source.pc" = "From your computer";
+"addrshort.title" = "This device doesn't have enough address space for this game";
+"addrshort.body" = "This game needs one very large block of address space at startup, and this device can't provide that much: it may run very slowly or stay stuck at the start. You can tap \"Start Anyway\" to try; to play normally, use a device with more address space (such as an iPhone, iPad or Mac with more memory), or wait for a later version.";
+"host.startAnyway" = "Start Anyway";

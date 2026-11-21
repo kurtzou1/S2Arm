@@ -25,6 +25,21 @@ final class JobProgressTests: XCTestCase {
         XCTAssertFalse(p.keychainPrompt)
     }
 
+    /// #1770：上次前进 N 秒前按作业事件 advancedAt（Unix 秒）算；心跳带旧值不前移；旧事件没有这个字段 → 不显示。期望手算
+    func test_since_advance_follows_backend_advanced_at() throws {
+        func ev(_ kind: String, _ json: String) throws -> EngineEvent {
+            let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+            return EngineEvent(ev: kind, t: 0, code: nil, severity: .info, fields: fields)
+        }
+        var p = JobProgress()
+        XCTAssertNil(p.sinceAdvance(at: Date(timeIntervalSince1970: 100)))
+        p.ingest(try ev("progress", #"{"stage":"编译着色器库","stageIndex":3,"done":5,"total":10,"advancedAt":1000}"#))
+        p.ingest(try ev("heartbeat", #"{"stage":"编译着色器库","stageIndex":3,"advancedAt":1000}"#))
+        XCTAssertEqual(p.sinceAdvance(at: Date(timeIntervalSince1970: 1012)) ?? -1, 12, accuracy: 1e-9)
+        p.ingest(try ev("progress", #"{"stage":"编译着色器库","stageIndex":3,"done":6,"total":10,"advancedAt":1015}"#))
+        XCTAssertEqual(p.sinceAdvance(at: Date(timeIntervalSince1970: 1016)) ?? -1, 1, accuracy: 1e-9)
+    }
+
     func test_rate_appears_after_two_seconds_and_is_bytes_per_second() {
         var p = JobProgress()
         p.ingest(progress(0, done: 1_000_000_000))

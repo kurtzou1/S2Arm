@@ -25,11 +25,14 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm.Proxy
         private readonly AutoResetEvent _scanResponse = new(false);
         private long _lastScanTime;
 
-        public LdnProxyUdpServer(LanProtocol protocol, IPAddress address, int port) : base(address, port)
+        public LdnProxyUdpServer(LanProtocol protocol, IPAddress address, int port, bool subscribeToProtocol = true) : base(address, port)
         {
             _protocol = protocol;
-            _protocol.Scan += HandleScan;
-            _protocol.ScanResponse += HandleScanResponse;
+            if (subscribeToProtocol)
+            {
+                _protocol.Scan += HandleScan;
+                _protocol.ScanResponse += HandleScanResponse;
+            }
             _buffer = new byte[LanProtocol.BufferSize];
             OptionReuseAddress = true;
             OptionReceiveBufferSize = LanProtocol.RxBufferSizeMax;
@@ -59,13 +62,17 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm.Proxy
 
         protected override void OnError(SocketError error)
         {
-            Logger.Error?.PrintMsg(LogClass.ServiceLdn, $"LdnProxyUdpServer caught an error with code {error}");
+            Logger.Error?.PrintMsg(LogClass.ServiceLdn,
+                $"LdnProxyUdpServer caught an error with code {error}; endpoint={Endpoint}, local={Socket?.LocalEndPoint}");
         }
 
         protected override void Dispose(bool disposingManagedResources)
         {
-            _protocol.Scan -= HandleScan;
-            _protocol.ScanResponse -= HandleScanResponse;
+            if (_protocol != null)
+            {
+                _protocol.Scan -= HandleScan;
+                _protocol.ScanResponse -= HandleScanResponse;
+            }
 
             _scanResponse.Dispose();
 

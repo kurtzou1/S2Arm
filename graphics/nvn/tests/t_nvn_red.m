@@ -178,16 +178,17 @@ static void reg_case(int c) {   // 配置 c 的采样器注册为 1 + c
 //   sync 0：第一笔 = main0 替身（采样器不带归约、取平均）→ 16 像素都严格落在 (min, max) 之间、渲染管线只有 fc 0；等变体编好（≤ 20 秒），第二笔 = min 逐位、多出 fc 2 的管线
 //   sync 1（S2A_SE_SYNC=1）：第一笔就 = min 逐位，管线 fc 0 一条都不建
 //   sync 2（包内，缺口族 31 出包预编：库容器 T_RED_PACK 里有 <键>_se.metallib，种类 51）：后台编队列扣住也不影响，第一笔就 = min 逐位、管线 fc 0 一条都不建（se_packed 同步载）
+//   sync 3（包内批库，11-20）：同 sync 2，变体在两键合编的批库里（函数 s<键>_main0）；反证：宿主只认 main0 时这一路载不到、第一笔是替身 → 红
 static int child_async(const char *fsmsl, int sync) {
     alarm(60);
     mtl_init();
     REQUIRE(g_red_emu);
-    if (sync == 2) { const char *pk = getenv("T_RED_PACK"); REQUIRE(pk); g_msl_dir = @(pk); }
+    if (sync >= 2) { const char *pk = getenv(sync == 3 ? "T_RED_PACK_BATCH" : "T_RED_PACK"); REQUIRE(pk); g_msl_dir = @(pk); }
     tex_setup(); reg_case(0);
     static prog_t fprog; NvShader *ffs = fs_fixture(fsmsl, &fprog);
     static tex_t rt[2]; rt_setup(&rt[0], 9); rt_setup(&rt[1], 10);
     float a = val(0, 2, 5), b = val(0, 3, 5), lo = fminf(a, b), hi = fmaxf(a, b), mn = cpu_case(0, 0.34375f, 0.6875f, 0); REQUIRE(a != b && fb(mn) == fb(lo));
-    const char *tag = sync == 2 ? "包内预编" : sync ? "S2A_SE_SYNC=1" : "后台编";
+    const char *tag = sync == 3 ? "包内批库" : sync == 2 ? "包内预编" : sync ? "S2A_SE_SYNC=1" : "后台编";
     float px[16 * 4]; int n;
     // 后台编那一路先扣住 se_kick 的队列，第一笔读回后再放：编好前那一笔是替身由构造保证（10-30 列车 4 次红：gate-host 高负载时编码排在后台编完之后，
     //   第一笔已是变体、管线位集合 0x4；产品行为是对的——编好就用——错在单测假定了时序）
@@ -342,20 +343,27 @@ int main(int argc, char **argv) {
         { char cmd[1600]; snprintf(cmd, sizeof cmd, "mkdir -p '%s' && xcrun -sdk macosx metal -fpreserve-invariance '%s' -o '%s/%s_se.metallib' && python3 translator/dsh_batch.py --libpack pack '%s' '%s' %s > /dev/null",
                                    pks, argv[4], pks, FS_KEY, pks, pkd, DMSH_CHAIN);
           fflush(NULL); int rc = system(cmd); REQUIRE(rc == 0); setenv("T_RED_PACK", pkd, 1); }
+        // 包内批库（11-20 出包提速，S2A.Dsh Build.SeFinish）：变体按批合编，源码出自生产 Unity.VarSrc（dsh_batch --unity var-src：函数改名 s<键>_main0、折行标记核 s<键>_main0_fold），
+        //   本键与另一个键同批、两键的 <键>_se.metallib 是同一份字节；宿主 se_packed 按 s<键>_main0 取，第一笔就 = min 逐位（同包内预编那一路）
+        char pbd[400], pbs[400]; snprintf(pbd, sizeof pbd, "%s/pkb/b-%s", tmpl, DMSH_CHAIN); snprintf(pbs, sizeof pbs, "%s/pkb/src", tmpl);
+        { char cmd[2400]; snprintf(cmd, sizeof cmd, "mkdir -p '%s' && python3 translator/dsh_batch.py --unity var-src '%s/batch.metal' %s '%s' ffff00000000000e '%s' && xcrun -sdk macosx metal -fpreserve-invariance '%s/batch.metal' -o '%s/%s_se.metallib' "
+                                   "&& cp '%s/%s_se.metallib' '%s/ffff00000000000e_se.metallib' && rm '%s/batch.metal' && python3 translator/dsh_batch.py --libpack pack '%s' '%s' %s > /dev/null",
+                                   pbs, pbs, FS_KEY, argv[4], argv[4], pbs, pbs, FS_KEY, pbs, FS_KEY, pbs, pbs, pbs, pbd, DMSH_CHAIN);
+          fflush(NULL); int rc = system(cmd); REQUIRE(rc == 0); setenv("T_RED_PACK_BATCH", pbd, 1); }
         // 后台编 + 替身：S2A_SAMP_EMU=1、Metal 4，缺省（后台编）/ S2A_SE_SYNC=1 / 包内预编三路；stderr 存文件核编好那一行的格式
-        for (int sync = 0; sync < 3; sync++) {
+        for (int sync = 0; sync < 4; sync++) {
             char user[300], elog[300]; snprintf(user, sizeof user, "%s/pso_user_a%d.tsv", tmpl, sync); snprintf(elog, sizeof elog, "%s/err_a%d.log", tmpl, sync);
             fflush(NULL); pid_t pid = fork(); REQUIRE(pid >= 0);
             if (!pid) {
                 int fd = open(elog, O_WRONLY | O_CREAT | O_TRUNC, 0644); if (fd < 0 || dup2(fd, 2) < 0) _exit(126);
                 unsetenv("NXGAL_BE"); setenv("S2A_SAMP_EMU", "1", 1); if (sync) setenv("S2A_SE_SYNC", "1", 1); else unsetenv("S2A_SE_SYNC");
                 setenv("DM_NVN_ENC_THREAD", "0", 1); setenv("DM_PRESENT_LINK", "0", 1); setenv("DM_PSO_USER", user, 1);
-                execl(argv[0], argv[0], "--async", argv[3], sync == 2 ? "2" : sync ? "1" : "0", (char *)NULL); _exit(127);
+                execl(argv[0], argv[0], "--async", argv[3], sync == 3 ? "3" : sync == 2 ? "2" : sync ? "1" : "0", (char *)NULL); _exit(127);
             }
             int st = 0; pid_t w; do { w = waitpid(pid, &st, 0); } while (w < 0 && errno == EINTR); REQUIRE(w == pid);
             int ok = WIFEXITED(st) && WEXITSTATUS(st) == 0; bad += !ok; nrun++; unlink(user);
-            printf("%s process Metal 4 S2A_SAMP_EMU=1 %s (status=%d)\n", ok ? "PASS" : "FAIL", sync == 2 ? "包内预编" : sync ? "S2A_SE_SYNC=1" : "后台编 + 替身", st);
-            char line[4096]; const char *how = sync == 2 ? "包内完成" : sync ? "同步现编完成" : "后台编完成"; int hit = log_has(elog, how, line, sizeof line);
+            printf("%s process Metal 4 S2A_SAMP_EMU=1 %s (status=%d)\n", ok ? "PASS" : "FAIL", sync == 3 ? "包内批库" : sync == 2 ? "包内预编" : sync ? "S2A_SE_SYNC=1" : "后台编 + 替身", st);
+            char line[4096]; const char *how = sync >= 2 ? "包内完成" : sync ? "同步现编完成" : "后台编完成"; int hit = log_has(elog, how, line, sizeof line);
             bad += !hit; printf("%s 日志行格式（%s）：%s\n", hit ? "PASS" : "FAIL", how, hit ? line : "没有符合「[s2a] 归约变体：程序号 <16 位> 着色器 <键> … <x.y> ms」的行");
             if (!ok || !hit) { char cmd[400]; snprintf(cmd, sizeof cmd, "tail -40 '%s'", elog); fflush(NULL); system(cmd); }
             unlink(elog);
@@ -366,7 +374,7 @@ int main(int argc, char **argv) {
             size_t n = fread(have ? cur : ref, 1, sizeof cur, f); fclose(f); if (n != sizeof cur) { same = 0; continue; }
             if (have) { same &= !memcmp(ref, cur, sizeof cur); ncmp++; } have = 1; unlink(dumps[r]); }
         for (int i = 0; i < 2; i++) for (int k = 0; k < 3; k++) { char p[400]; snprintf(p, sizeof p, "%s/%s%s", fbd, i ? FS_KEY : CS_KEY, k == 0 ? "_b.json" : k == 1 ? "_b.metal" : "_se.metal"); unlink(p); }
-        rmdir(fbd); { char cmd[500]; snprintf(cmd, sizeof cmd, "rm -rf '%s/pk'", tmpl); system(cmd); } rmdir(tmpl);
+        rmdir(fbd); { char cmd[500]; snprintf(cmd, sizeof cmd, "rm -rf '%s/pk' '%s/pkb'", tmpl, tmpl); system(cmd); } rmdir(tmpl);
         bad += !same || !ncmp;
         printf("%s 各路输出逐位相等：%d 路对第 1 路，各 %d 个配置（含反证一项）× %d 个位置\n", same && ncmp ? "PASS" : "FAIL", ncmp, NRUN, NP);
         if (bad) printf("✗ t_nvn_red：%u 路子进程 + 跨路对拍，%u 项不过\n", nrun, bad);

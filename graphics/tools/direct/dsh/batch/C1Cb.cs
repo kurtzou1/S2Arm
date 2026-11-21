@@ -726,11 +726,13 @@ static class C1Cb
     public static int Cli(string[] argv)
     {
         if (argv.Length < 1) { Console.Error.WriteLine("用法：dsh_batch --c1cb <目录> [-j N] [--tables <c1 tsv> <cb tsv> <表头>]"); return 2; }
-        string dir = argv[0]; int nj = Environment.ProcessorCount; string[] tables = null;
+        string dir = argv[0]; int nj = Environment.ProcessorCount; string[] tables = null; Ticker tk = null;
         for (int i = 1; i < argv.Length; i++)
         {
             if (argv[i] == "-j" && i + 1 < argv.Length) nj = int.Parse(argv[++i], CultureInfo.InvariantCulture);
             else if (argv[i] == "--tables" && i + 3 < argv.Length) { tables = argv[(i + 1)..(i + 4)]; i += 3; }
+            else if (argv[i] == "--tick" && i + 3 < argv.Length)   // 出包进度：--tick <阶段> <此前已算> <全遍支数>（Build.C1CbChild 分批接力）
+            { tk = new Ticker(argv[i + 1], int.Parse(argv[i + 3], CultureInfo.InvariantCulture), int.Parse(argv[i + 2], CultureInfo.InvariantCulture), activity: false); i += 3; }
             else { Console.Error.WriteLine($"C1Cb：不认识的参数 {argv[i]}"); return 2; }
         }
         // 逐支读（11-02 出包内存）：原先先把目录里全部 .metal / .json 读进字典、再一次性建出全部任务（每个带整段 MSL），8 万键款子进程 13 GB；现在只列名字，并行循环里每支才读自己的两份
@@ -742,7 +744,9 @@ static class C1Cb
         Parallel.For(0, jobs.Count, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, nj) }, i =>
         {
             try { res[i] = BothOf(Load(jobs[i])); } catch (Exception e) when (e is OverflowException || e is OutOfMemoryException) { err[i] = "!" + e.GetType().Name; }
+            tk?.Step();
         });
+        tk?.Dispose();
         var outw = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false), 1 << 20) { NewLine = "\n" };
         for (int i = 0; i < jobs.Count; i++) outw.Write(jobs[i] + "\t" + (err[i] ?? res[i].C1 ?? "") + "\t" + (err[i] != null ? "" : res[i].Row ?? "") + "\n");
         outw.Flush();

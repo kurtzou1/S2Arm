@@ -199,7 +199,7 @@ class Upgrade3Tests(JobCase):
         b = L / "iPhone" / B; root = b / "roots/tb@pkg-1"
         (root / "romfs").mkdir(parents=True); (root / "romfs/huge.bin").write_bytes(b"x" * 100)
         (root / "main.npdm").write_bytes(b"META-B"); (root / "main.fixups.tsv").write_text(""); (root / "build.log").write_text("log")
-        (b / "roots/tb@现行").symlink_to("tb@pkg-1")
+        (b / "roots/tb@现行").symlink_to("tb@pkg-1")   # 老库：现行还是软链（读的时候迁移成指针文件，layout.current_root）
         (b / "tb资源包").mkdir(); (b / "tb资源包/manifest.json").write_text('{"index_sha256": "pb"}')
         (b / "shell.id").write_text("SIDB"); (b / "tb.ipa").write_bytes(b"ipa")
         (L / "iPhone" / C / "tc资源包").mkdir(parents=True); (L / "iPhone" / C / "tc.ipa").write_bytes(b"ipa")
@@ -462,17 +462,18 @@ class LocationTests(JobCase):
             layout.remove_tree(x)
 
     def test_cross_volume_move_keeps_links_as_links(self):
-        """跨卷移动不把链接展开（Windows junction 同理，Windows 实机另验）：产物根的「现行」这类相对链接原样；指向文件夹内部的绝对链接改指新位置"""
+        """跨卷移动不把链接展开（Windows junction 同理，Windows 实机另验）：相对链接原样；指向文件夹内部的绝对链接改指新位置；现行指针文件照拷"""
         d = layout.game_dir(self.c, A)
         root = d / "build" / "k" / "roots"; (root / "t@pkg").mkdir(parents=True); (root / "t@pkg" / "main.npdm").write_bytes(b"n")
-        (root / "t@现行").symlink_to("t@pkg")                                   # 相对
+        (root / "t@现行").write_text("t@pkg\n")                                   # 现行指针文件
+        (root / "rel-link").symlink_to("t@pkg")                                  # 相对
         (d / "abs-link").symlink_to(root / "t@pkg")                            # 绝对、指向文件夹内部
         with patch.object(layout, "_same_volume", return_value=False):
             moved = layout.move_game(self.c, A, self.disk)
         r = moved / "build" / "k" / "roots"
-        self.assertTrue((r / "t@现行").is_symlink()); self.assertEqual(os.readlink(r / "t@现行"), "t@pkg")
+        self.assertTrue((r / "rel-link").is_symlink()); self.assertEqual(os.readlink(r / "rel-link"), "t@pkg")
         self.assertTrue((moved / "abs-link").is_symlink()); self.assertEqual(Path(os.readlink(moved / "abs-link")), r / "t@pkg")
-        self.assertEqual((r / "t@现行" / "main.npdm").read_bytes(), b"n")
+        self.assertEqual((r / "t@现行").read_text(), "t@pkg\n"); self.assertEqual((r / "t@pkg" / "main.npdm").read_bytes(), b"n")
 
     def test_last_used_location_is_default_for_new_games(self):
         layout.use_location(self.c, self.disk)

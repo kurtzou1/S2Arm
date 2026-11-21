@@ -44,11 +44,13 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
         // NOTE: Credit to https://stackoverflow.com/a/39338188
         private static IPAddress GetBroadcastAddress(IPAddress address, IPAddress mask)
         {
-            uint ipAddress = BitConverter.ToUInt32(address.GetAddressBytes(), 0);
-            uint ipMaskV4 = BitConverter.ToUInt32(mask.GetAddressBytes(), 0);
+            // IPAddress bytes are network order; BitConverter is host order. Keep the
+            // conversion explicit so every supported host computes the same address.
+            uint ipAddress = NetworkHelpers.ConvertIpv4Address(address);
+            uint ipMaskV4 = NetworkHelpers.ConvertIpv4Address(mask);
             uint broadCastIpAddress = ipAddress | ~ipMaskV4;
 
-            return new IPAddress(BitConverter.GetBytes(broadCastIpAddress));
+            return NetworkHelpers.ConvertUint(broadCastIpAddress);
         }
 
         private static NetworkInfo GetEmptyNetworkInfo()
@@ -107,9 +109,11 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
             _random.NextBytes(_fakeSsid.Name.AsSpan()[..32]);
 
             _protocol = new LanProtocol(this);
-            _protocol.Accept += OnConnect;
+            _protocol.Accept += OnAccept;
+            _protocol.StationConnected += OnStationConnected;
             _protocol.SyncNetwork += OnSyncNetwork;
             _protocol.DisconnectStation += DisconnectStation;
+            _protocol.ClientDisconnected += OnClientDisconnected;
 
             NetworkInfo = GetEmptyNetworkInfo();
 
@@ -128,6 +132,8 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
         protected void OnSyncNetwork(NetworkInfo info)
         {
             bool updated = false;
+            string advertiseHex;
+            string nodes;
 
             lock (_lock)
             {
@@ -138,7 +144,17 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
 
                     Logger.Debug?.PrintMsg(LogClass.ServiceLdn, $"Host IP: {NetworkHelpers.ConvertUint(info.Ldn.Nodes[0].Ipv4Address)}");
                 }
+
+                advertiseHex = Convert.ToHexString(info.Ldn.AdvertiseData.AsSpan()[..info.Ldn.AdvertiseDataSize]);
+                nodes = string.Join(",", Enumerable.Range(0, LdnConst.NodeCountMax).Select(index =>
+                {
+                    NodeInfo node = info.Ldn.Nodes[index];
+                    return $"{node.NodeId}:{node.IsConnected}:{node.LocalCommunicationVersion}";
+                }));
             }
+
+            Logger.Info?.PrintMsg(LogClass.ServiceLdn,
+                $"LdnMitm SyncNetwork advertiseSize={info.Ldn.AdvertiseDataSize}, advertise={advertiseHex}, nodes={nodes}");
 
             if (updated)
             {
@@ -148,7 +164,22 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
             _apConnected.Set();
         }
 
-        protected void OnConnect(LdnProxyTcpSession station)
+        protected void OnClientDisconnected(LdnProxyTcpClient client)
+        {
+            lock (_lock)
+            {
+                if (!ReferenceEquals(_tcp, client))
+                {
+                    return;
+                }
+            }
+
+            Logger.Warning?.PrintMsg(LogClass.ServiceLdn,
+                $"LdnMitm client lost remote host: {client.Endpoint}");
+            _parent.InvokeNetworkChange(NetworkInfo, false, DisconnectReason.SignalLost);
+        }
+
+        protected void OnAccept(LdnProxyTcpSession station)
         {
             lock (_lock)
             {
@@ -163,8 +194,17 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
                 }
 
                 _stations.Add(station);
+            }
+        }
 
-                UpdateNodes();
+        protected void OnStationConnected(LdnProxyTcpSession station)
+        {
+            lock (_lock)
+            {
+                if (_stations.Contains(station))
+                {
+                    UpdateNodes();
+                }
             }
         }
 
@@ -207,6 +247,8 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
 
             data.CopyTo(NetworkInfo.Ldn.AdvertiseData.AsSpan());
             NetworkInfo.Ldn.AdvertiseDataSize = (ushort)data.Length;
+            Logger.Info?.PrintMsg(LogClass.ServiceLdn,
+                $"LdnMitm SetAdvertiseData size={data.Length}, data={Convert.ToHexString(data)}");
 
             // NOTE: Otherwise this results in SessionKeepFailed or MasterDisconnected
             lock (_lock)
@@ -323,7 +365,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
                 //       See this discussion: https://stackoverflow.com/questions/13666789/receiving-udp-broadcast-packets-on-linux
                 if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS() || (OperatingSystem.IsIOS() || OperatingSystem.IsTvOS()))   // 平台例外：tvOS 与 iOS 走同一分支
                 {
-                    _udp2 = new LdnProxyUdpServer(_protocol, LocalBroadcastAddr, DefaultPort);
+                    _udp2 = new LdnProxyUdpServer(_protocol, LocalBroadcastAddr, DefaultPort, subscribeToProtocol: false);
                 }
 
                 _udp = new LdnProxyUdpServer(_protocol, LocalAddr, DefaultPort);
@@ -429,14 +471,17 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
         {
             int countConnected = 1;
 
-            foreach (LdnProxyTcpSession station in _stations.Where(station => station.IsConnected))
+            foreach (LdnProxyTcpSession station in _stations)
             {
-                countConnected++;
-
                 station.OverrideInfo();
 
-                // NOTE: This is not part of the original implementation.
-                NetworkInfo.Ldn.Nodes[station.NodeId] = station.NodeInfo;
+                if (station.NodeInfo.IsConnected == 1)
+                {
+                    countConnected++;
+
+                    // NOTE: This is not part of the original implementation.
+                    NetworkInfo.Ldn.Nodes[station.NodeId] = station.NodeInfo;
+                }
             }
 
             byte nodeCount = (byte)countConnected;
@@ -447,7 +492,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
 
             foreach (LdnProxyTcpSession station in _stations)
             {
-                if (station.IsConnected)
+                if (station.NodeInfo.IsConnected == 1)
                 {
                     if (_protocol.SendPacket(station, LanPacketType.SyncNetwork, SpanHelpers.AsSpan<NetworkInfo, byte>(ref NetworkInfo).ToArray()) < 0)
                     {
@@ -477,6 +522,9 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
 
         public bool CreateNetwork(SecurityConfig securityConfig, UserConfig userConfig, NetworkConfig networkConfig)
         {
+            Logger.Info?.PrintMsg(LogClass.ServiceLdn,
+                $"LdnMitm CreateNetwork localCommunicationVersion={networkConfig.LocalCommunicationVersion}");
+
             if (!InitTcp(true))
             {
                 return false;
@@ -524,6 +572,10 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
         {
             _apConnected.Reset();
 
+            Logger.Info?.PrintMsg(LogClass.ServiceLdn,
+                $"LdnMitm Connect localCommunicationVersion={localCommunicationVersion}, " +
+                $"hostLocalCommunicationVersion={networkInfo.Ldn.Nodes[0].LocalCommunicationVersion}");
+
             if (networkInfo.Ldn.NodeCount == 0)
             {
                 return NetworkError.Unknown;
@@ -565,9 +617,11 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
                 _initialized = false;
             }
 
-            _protocol.Accept -= OnConnect;
+            _protocol.Accept -= OnAccept;
+            _protocol.StationConnected -= OnStationConnected;
             _protocol.SyncNetwork -= OnSyncNetwork;
             _protocol.DisconnectStation -= DisconnectStation;
+            _protocol.ClientDisconnected -= OnClientDisconnected;
         }
 
         public void DisconnectAndStop()

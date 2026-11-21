@@ -54,7 +54,7 @@ int s2a_svc_check_perm(const uint64_t perm[3], char *out, size_t cap) { (void)pe
 uint64_t guest_tick(void) { return 0; }
 static uint64_t g_t_hz = 19200000; void s2a_guest_tick_hz_set(uint64_t hz) { g_t_hz = hz; } uint64_t s2a_guest_tick_hz(void) { return g_t_hz; }   // os.c 替身（本测不链 os.c）
 uint64_t s2a_ns_to_tick(uint64_t ns) { return (uint64_t)((unsigned __int128)ns * g_t_hz / 1000000000u); } static module_t g_tmod; module_t *module_of(const void *p) { uint64_t x = (uint64_t)p; return g_tmod.base && x >= (uint64_t)g_tmod.base && x < (uint64_t)g_tmod.base + g_tmod.size ? &g_tmod : NULL; }
-void s2a_window_get(uint64_t *b, uint64_t *s) { *b = *s = 0; } void s2a_window_trim(uint64_t s) { (void)s; } int s2a_guest_zero(uint64_t a, uint64_t n) { (void)a; (void)n; return 0; }
+static uint64_t g_tw_b, g_tw_s; void s2a_window_get(uint64_t *b, uint64_t *s) { *b = g_tw_b; *s = g_tw_s; } void s2a_window_trim(uint64_t s) { (void)s; } int s2a_guest_zero(uint64_t a, uint64_t n) { (void)a; (void)n; return 0; }   // 窗口替身缺省 0（即时存档暂存区用例设成真内存）
 // #258 懒清零的桩：g_gfile=1 时把 [g_gfile_lo, g_gfile_hi) 当成文件后备窗口（没有文件后备时还页照旧换匿名占位）
 static int g_gfile; static uint64_t g_gfile_lo, g_gfile_hi;
 int s2a_guest_in_file(uint64_t a, uint64_t n) { return g_gfile && n && a >= g_gfile_lo && a + n <= g_gfile_hi; }
@@ -1045,6 +1045,33 @@ int main(void) {
           s2a_mem_test_setup(W36 + 8 * G, 6 * G, W36, 32 * G, (void *)(W36 + 2 * G), HL); s2a_mem_test_astype(1);
           CHECK(s2a_ipc_addr39(W36 + 2 * G + 0x10) == W36 + 2 * G + 0x10, "36 位窗口在 2^36 以下（原位置）：原样，不补"); }
     }
+    {   // #ef04e6 即时存档档 TLS 块 / 线程对象回收：线程退出挂回同尺寸空闲表、新线程先复用（原先只分配不回收，线程起落多的游戏把 TLS/IO 区吃光后致命退出）
+        //   期望按「同尺寸后进先出复用、复用的块清零、不同尺寸互不串、不在 arena 的地址忽略」手写
+        void *s2a_det_arena_alloc(size_t); void s2a_det_arena_free(void *, size_t); void s2a_mem_test_tlsio(uint64_t, uint64_t);
+        const uint64_t TS = 8192, OS = 0x400, AR = 256 * 1024;   // 区 256 KB：不回收时约 28 个线程就满
+        uint8_t *R = mmap(NULL, AR, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        CHECK(R != MAP_FAILED, "TLS 回收：预留 256 KB");
+        if (R != MAP_FAILED) {
+            s2a_mem_test_tlsio((uint64_t)R, AR);
+            uint8_t *a = s2a_det_arena_alloc(TS), *o = s2a_det_arena_alloc(OS);
+            CHECK(a && o && a != o, "TLS 回收①：分到 TLS 块与线程对象");
+            memset(a, 0x5a, TS); memset(o, 0x6b, OS);
+            s2a_det_arena_free(a, TS); s2a_det_arena_free(o, OS);
+            uint8_t *o2 = s2a_det_arena_alloc(OS), *a2 = s2a_det_arena_alloc(TS);
+            CHECK(a2 == a && o2 == o, "TLS 回收②：同尺寸取回同一块（a %p→%p，o %p→%p）", (void *)a, (void *)a2, (void *)o, (void *)o2);
+            int z = 1; for (uint64_t k = 0; k < TS; k++) z &= a2[k] == 0; for (uint64_t k = 0; k < OS; k++) z &= o2[k] == 0;
+            CHECK(z, "TLS 回收③：复用的块清零");
+            uint8_t *b = s2a_det_arena_alloc(TS);
+            CHECK(b && b < a2, "TLS 回收④：空闲表空了才往下新分");
+            uint8_t outside[64]; s2a_det_arena_free(outside, TS);
+            uint8_t *c = s2a_det_arena_alloc(TS);
+            CHECK(c && c < b, "TLS 回收⑤：不在 arena 的地址不收进空闲表");
+            int ok = 1;   // ⑥ 线程起落 10000 次（每次一块 TLS + 一块对象）不出区：原先只分不回收 256 KB 撑不过 30 次
+            for (int k = 0; k < 10000 && ok; k++) { void *t = s2a_det_arena_alloc(TS), *u = s2a_det_arena_alloc(OS); ok = t && u; s2a_det_arena_free(t, TS); s2a_det_arena_free(u, OS); }
+            CHECK(ok, "TLS 回收⑥：起落 10000 次不出区");
+            munmap(R, AR);
+        }
+    }
     printf("%s t_svc_mem：%d / %d 项通过（对拍 %d 区间不一致 %d；64 MB 整段查 8 字节 %d 次 老 %.1f ms → 新 %.2f ms）\n", bad ? "✗" : "✓", checks - bad, checks, N, diff, M, told, tnew);
     {   // #258 文件后备下还页懒清零：解除时锁内只改成不可访问并记「待清零」，不打洞；页重新放出来时就地清零（0x2C / MapMemory 拷贝路径）或只撤销标记（MapMemory 对齐路径盖掉原映射）。
         //   期望按语义手写：解除后页立刻不可访问、待清零计数 = 页数；放出来一律读到零 / 源内容；非文件后备路径行为不变
@@ -1095,6 +1122,33 @@ int main(void) {
         #undef SV3
         #undef PHYS
         g_gfile = 0; munmap(az, AZ);
+    }
+    {   // 即时存档重放暂存区（s2a_snap_scratch_map）：取窗口顶下 n 字节。期望按布局手算——
+        //   ① 别名区整段在窗口外（没有扩展寻址的机型，D-PYHB）：窗口顶落在堆区，堆没提交的部分 → 给出 窗口顶 − n；堆提交到那里 → 0（不崩）
+        //   ② 别名区在窗口里：别名区掩码空 → 给出；掩码有页 → 0
+        uint64_t s2a_snap_scratch_map(uint64_t); void s2a_snap_scratch_unmap(uint64_t, uint64_t); void s2a_mem_test_vamm(uint64_t, uint64_t, uint64_t);
+        void s2a_mem_test_subpage(uint64_t, int);
+        const uint64_t M = 1ull << 20, RS = 512 * M; uint8_t *rv = mmap(NULL, RS, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        CHECK(rv != MAP_FAILED, "暂存区：预留 512 MB 测试窗口");
+        uint64_t W = ((uint64_t)rv + 2 * M - 1) & ~(2 * M - 1), n = 64 * M;
+        // ① 窗口 [W, W+192M)；堆区 [W+64M, W+320M) 伸出窗口，已提交 32M；别名区 [W+320M, W+384M) 整段在窗口外
+        s2a_mem_test_setup(W + 320 * M, 64 * M, W, 192 * M, (void *)(W + 64 * M), 32 * M); s2a_mem_test_vamm(0, W + 64 * M, 256 * M);
+        g_tw_b = W; g_tw_s = 192 * M;
+        uint64_t got = s2a_snap_scratch_map(n);
+        CHECK(got == W + 128 * M, "暂存区①：别名区在窗口外，取堆区没提交的窗口顶段 W+128M（实得 %#llx，W %#llx）", (unsigned long long)got, (unsigned long long)W);
+        if (got) { memset((void *)got, 0x5a, (size_t)n); s2a_snap_scratch_unmap(got, n); }
+        s2a_mem_test_setup(W + 320 * M, 64 * M, W, 192 * M, (void *)(W + 64 * M), 100 * M); s2a_mem_test_vamm(0, W + 64 * M, 256 * M);
+        got = s2a_snap_scratch_map(n);
+        CHECK(got == 0, "暂存区①：堆已提交到窗口顶段（W+164M）→ 不给（0），不崩（实得 %#llx）", (unsigned long long)got);
+        // ② 窗口 [W, W+192M)；别名区 [W+96M, W+256M) 窗口里有一段
+        s2a_mem_test_setup(W + 96 * M, 160 * M, W, 192 * M, (void *)(W + 32 * M), 0);
+        got = s2a_snap_scratch_map(n);
+        CHECK(got == W + 128 * M, "暂存区②：别名区在窗口里、掩码空 → 窗口顶段 W+128M（实得 %#llx）", (unsigned long long)got);
+        if (got) s2a_snap_scratch_unmap(got, n);
+        s2a_mem_test_subpage(W + 150 * M, 1);
+        got = s2a_snap_scratch_map(n);
+        CHECK(got == 0, "暂存区②：那段别名区有已映射子页 → 0（实得 %#llx）", (unsigned long long)got);
+        g_tw_b = g_tw_s = 0; munmap(rv, RS);
     }
     return bad ? 1 : 0;
 }

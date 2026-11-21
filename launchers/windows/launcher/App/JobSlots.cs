@@ -56,6 +56,8 @@ public partial class EnvironmentWindow
     /// <summary>这款正在出包（出包会换它的程序件）：对它的手机作业等出完</summary>
     private bool PackHolds(string? gameId) => gameId is not null && packRunning && packGame?.Id == gameId;
     private bool PhoneQueued(string? gameId) => phoneQueue.Any(q => q.GameId == gameId);
+    /// <summary>手机上正在推这一款（装机作业在跑、装的就是它）</summary>
+    private bool PhonePushing(string? gameId) => installBusy && gameId is not null && string.Equals(installGameId, gameId, StringComparison.OrdinalIgnoreCase);
     /// <summary>手机作业要不要先排队：要排就排上并重画，返回 true</summary>
     private bool QueuePhone(string? gameId, Func<Task> run)
     {

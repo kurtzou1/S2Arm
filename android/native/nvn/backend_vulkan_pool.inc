@@ -7,7 +7,34 @@ static void pool_destroy_locked(struct nvn_gpu_pool_table_s *t) {
     if (*pp) *pp = t->next;
     if (t->objects) for (uint32_t i = 0; i <= t->count; i++)
         if (t->objects[i]) unref_locked(&g, t->objects[i], t->kind == NVN_GPU_POOL_IMAGE ? REF_VIEW : REF_SAMP);
+    free(t->uviews); free(t->unext); free(t->ikey); free(t->ihead);
     free(t->objects); free(t->images); free(t);
+}
+
+// 图像池的按图索引（建表时调一次，之后只读）：objects[0..count] 先按视图指针去重（占位视图会占掉很多项），再按 VkImage 串链。
+// 建不出（内存不足）不算错：表照常可用，反馈检测退回逐项扫（ikey == NULL）。
+static void pool_build_index(struct nvn_gpu_pool_table_s *t) {
+    const uint32_t n = t->count + 1;
+    uint32_t cap = 16; while (cap < n * 2) cap <<= 1;
+    uint64_t *seen = calloc(cap, sizeof *seen), *ik = calloc(cap, sizeof *ik);
+    void **uv = malloc((size_t)n * sizeof *uv); uint32_t *un = malloc((size_t)n * sizeof *un), *ih = malloc((size_t)cap * sizeof *ih);
+    if (!seen || !ik || !uv || !un || !ih) { free(seen); free(ik); free(uv); free(un); free(ih); return; }
+    uint32_t nu = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        struct nvn_gpu_view_s *v = t->objects[i];
+        const uint64_t img = v && v->tex ? (uint64_t)(uintptr_t)v->tex->image : 0, vk = (uint64_t)(uintptr_t)v;
+        if (!img) continue;
+        uint32_t h = pool_hash64(vk, cap);
+        while (seen[h] && seen[h] != vk) h = (h + 1) & (cap - 1);
+        if (seen[h]) continue;   // 这个视图已收过
+        seen[h] = vk; uv[nu] = v;
+        uint32_t g = pool_hash64(img, cap);
+        while (ik[g] && ik[g] != img) g = (g + 1) & (cap - 1);
+        if (!ik[g]) { ik[g] = img; ih[g] = UINT32_MAX; }
+        un[nu] = ih[g]; ih[g] = nu; nu++;
+    }
+    free(seen);
+    t->uviews = uv; t->unext = un; t->ikey = ik; t->ihead = ih; t->nuniq = nu; t->idx_cap = cap;
 }
 
 static int pool_view_class(const struct nvn_gpu_view_s *v) {
@@ -80,6 +107,7 @@ nvn_gpu_rc nvn_gpu_pool_create(const nvn_gpu_pool_desc *d, nvn_gpu_pool_table *o
             t->objects[i] = s; ref_bump(s, REF_SAMP); t->images[i].sampler = d->sampler_integer ? s->int_sampler : s->sampler;
         }
     }
+    if (d->kind == NVN_GPU_POOL_IMAGE) pool_build_index(t);
     t->next = g.pools; g.pools = t;
     pthread_mutex_unlock(&g_mu);
     *out = t; return rc(NVN_GPU_OK);

@@ -182,8 +182,8 @@ class IdentityTarget(unittest.TestCase):
     """11-19：交签名身份不只认启动器装的 App——AltStore / SideStore / ESign 装的 S2Arm 包名被改过，按手机上实际装着、团队对得上的那个交（期望手写）"""
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
-        self.c = types.SimpleNamespace(r={}, private=self.tmp.name)
-        self.ph = types.SimpleNamespace(udid="UDID1", bid="io.s2arm.games.team1")
+        self.c = types.SimpleNamespace(r={}, private=self.tmp.name, library=Path(self.tmp.name))
+        self.ph = types.SimpleNamespace(udid="UDID1", key="UDID1", bid="io.s2arm.games.team1")
 
     def target(self, rows, team="TEAM1"):
         cl = types.SimpleNamespace(apps=lambda: rows)

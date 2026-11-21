@@ -23,7 +23,7 @@ void s2a_widen_abort_boot_inputs(void) {
 #include <sys/stat.h>
 #include <unistd.h>
 #include <stdatomic.h>
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
 #include "../../android/native/screen_metrics.h"
 #endif
 #if defined(__APPLE__)
@@ -40,7 +40,7 @@ static pthread_t g_scanner;
 static int g_scanner_started;
 static _Atomic int g_scanner_stop;
 static int g_full = -1, g_setting_on = -1, g_default_narrow, g_ws_yield = -1;
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
 static int g_android_widen_active;
 // Authenticated source tables are copied before the source lease is released.
 static char *g_android_policy[5];
@@ -89,7 +89,7 @@ static const char *enable_name(void) { const char *d = getenv("S2A_DOCKED"); ret
 static char g_dir[1024];   // 模块目录（首个带宽屏候选表的模块装载时记下）：第三层表也在这里
 // 启用表：环境变量整表覆盖 > 当前档位的 widen_enable.<档位>.tsv
 static int enabled(const char *mod, uint32_t off, const char *dir) {
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
     if (!g_android_widen_active) return 0;
 #endif
     const char *e = getenv("S2A_WIDEN_SITES"); char key[64]; snprintf(key, sizeof key, "%s:%#x", mod, off);
@@ -97,7 +97,7 @@ static int enabled(const char *mod, uint32_t off, const char *dir) {
         while ((p = strstr(p, key))) { if ((p == e || p[-1] == ',' || p[-1] == ' ') && (p[kl] == 0 || p[kl] == ',' || p[kl] == ' ')) return 1; p += kl; }
         return 0; }
     char path[1100]; snprintf(path, sizeof path, "%s/%s", dir, enable_name()); FILE *f;
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
     f = g_android_source ? android_policy_open(enable_name()) : fopen(path, "r");
 #else
     f = fopen(path, "r");
@@ -154,7 +154,7 @@ static int widen_verified(void) {
     if (!s2a_caps_own()) return 0;
     // 包内能力清单（runtime/src/caps.c：1 = 开、0 = 发布包能力卡未验按 16:9）：在用户设置之后、名单之前（审计 #854 F-caps-beats-settings）
     const char *c = getenv("S2A_WIDEN_CAPS"); if (c) return !strcmp(c, "1");
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
     if (g_android_source) return g_android_policy[4] != NULL;
 #endif
     const char *d = s2a_module_dir(); char p[1100]; struct stat st;
@@ -196,7 +196,7 @@ static _Atomic int g_sw, g_sh; static _Atomic unsigned g_sgen;   // 屏幕宽 / 
 int s2a_screen_w(void) {
     int w = g_sw;
     if (!w) { const char *e = getenv("S2A_SCREEN_W"); int v = e ? atoi(e) : 1920, known = 1;
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
         if (!e) { int aw, ah; if (!s2a_android_screen_metrics(&aw, &ah)) return 0; v = aw; known = 0; }   // 安卓真屏宽也过名单门（F1 #1574：名单外 16:9）；不缓存——安卓没有 reaspect 热切，旋转靠每次新读
 #elif defined(__APPLE__) && TARGET_OS_IPHONE
         if (!e) { known = s2a_ios_screen_known(); v = s2a_ios_screen_w(); }   // 窗口场景连上前（装载期、主线程）只能拿主屏原生尺寸：Duo 上一直是外屏，先不缓存，场景连上后再定
@@ -220,7 +220,7 @@ int s2a_screen_w_after_load(void) {
 // 比 16:9 窄的真屏（iPhone Duo 外屏 1.455 / 内屏 1.42、iPad 4:3）照真屏加高（Vert+）。11-02 起：竖向遮罩外推 / 叠影 / EFB 竖向晋升修完，
 //   Duo 外屏真机自动验收（丝之歌、银河2 局内满屏、满屏判据 0 红）与 Mac 1920×1318 / 1920×1440 局过，撤掉原先压回 1080 的上限
 int s2a_screen_h(void) {
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
     if (!getenv("S2A_SCREEN_H")) { int w, h; if (!s2a_android_screen_metrics(&w, &h)) return 0;
         if (h > 1080) { int ok = widen_gate("屏幕高", h); if (ok < 0) return 1080; if (!ok) h = 1080; }   // F1 #1574：真屏高也过名单门（窄屏 Vert+ 名单外回 16:9）；不缓存
         return h; }
@@ -337,7 +337,7 @@ void s2a_frame_replay_screen(int w, int h, int game, int layout, int full) {
 int s2a_widen_full(void) {
     if (g_full >= 0) return g_full;
     const char *e = getenv("S2A_WIDEN_FULL");
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
     const char *verified = getenv("S2A_WIDEN_VERIFIED");
     if (!widen_setting_on() && !(verified && !strcmp(verified, "1"))) return g_full = 0;
     int allowed = widen_gate("宽屏改写", 1);
@@ -348,14 +348,14 @@ int s2a_widen_full(void) {
     const char *d = getenv("S2A_DOCKED"); char path[1200], line[64];
     int pf = s2a_patch_widen_full(d && !strcmp(d, "1")); if (pf >= 0) return g_full = pf;   // 补丁 [widen.full.<档位>] 压过包内表
     g_full = 1;
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
     if (!g_dir[0] && !g_android_source) return g_full;
 #else
     if (!g_dir[0]) return g_full;
 #endif
     snprintf(path, sizeof path, "%s/%s", g_dir, d && !strcmp(d, "1") ? "widen_full.docked.tsv" : "widen_full.handheld.tsv");
     FILE *f;
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
     f = g_android_source ? android_policy_open(d && !strcmp(d, "1") ? "widen_full.docked.tsv" : "widen_full.handheld.tsv") : fopen(path, "r");
 #else
     f = fopen(path, "r");
@@ -427,7 +427,7 @@ static int patch_enable(module_t *m, wmod_t *w) {
 }
 static void widen_load_stream(module_t *m, const char *dir, const char *path, FILE *f) {
     g_boot_file = f;
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
     // Disabled sites still need original-value key slots: rewritten guest code
     // reads them even when no experimental widening is enabled.
     const char *verified = getenv("S2A_WIDEN_VERIFIED");
@@ -449,12 +449,12 @@ static void widen_load_stream(module_t *m, const char *dir, const char *path, FI
     char line[256], k[16]; unsigned idx; unsigned long off, word; int non = 0;
     while (fgets(line, sizeof line, f)) {
         if (w->n >= WMAX) {
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
             if (g_android_source) die("%s：宽屏点超过槽容量", path);
 #endif
             break;
         }
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
         if (g_android_source) {
             char extra;
             if (sscanf(line, "%u %lx %15s %lx %c", &idx, &off, k, &word, &extra) != 4 ||
@@ -599,7 +599,7 @@ void s2a_widen_load(module_t *m, const char *dir) {
     char path[1100]; snprintf(path, sizeof path, "%s/%s.widen.tsv", dir, m->name);
     FILE *f = fopen(path, "r"); if (f) widen_load_stream(m, dir, path, f);
 }
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
 void s2a_widen_load_source(module_t *m, const void *bytes, size_t length) {
     for (unsigned i = 0; i < sizeof m->key_idx / sizeof m->key_idx[0]; i++)
         if (m->key_idx[i] >= WSLOT && m->key_idx[i] < WHIT + WMAX)
@@ -694,7 +694,7 @@ int s2a_widen_session_reset(void) {
     g_W = 1920; g_H = 1080; g_any = g_on = g_lyt = g_size = g_hsize = 0; g_dir[0] = 0;
     atomic_store(&g_sw, 0); atomic_store(&g_sh, 0); atomic_fetch_add(&g_sgen, 1);
     g_full = g_setting_on = g_ws_yield = -1;
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
     g_android_widen_active = 0;
     for (unsigned i = 0; i < 5; i++) { free(g_android_policy[i]); g_android_policy[i] = NULL; g_android_policy_len[i] = 0; }
     g_android_source = 0;

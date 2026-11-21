@@ -126,6 +126,8 @@ struct PhoneOutcome: Equatable {
     var legacyElsewhere: [String] = []
     /// 老款所在那台的设备记录键（作业结果 legacyDevice）：「更新这 N 款」推到它
     var legacyDevice = ""
+    /// 独立 App（0.6.4）：成功页 A（直装）/ B（导出，app.exported）按它画；通用壳为 nil
+    var app: StandaloneApp? = nil
 }
 
 /// 0.5.x 整包装上的老款（作业层 install.legacy_games）
@@ -193,6 +195,10 @@ public final class S2ArmLauncherModel: ObservableObject {
     @Published var phoneHidden = false
     /// 一局（launch 作业）单独一个游戏槽（作业层执行锁读写化：起局只拿执行锁共享 + 这款的按款锁，出包拿执行锁共享 + 出包锁 + 这款的按款锁）：
     ///   出包另一款时能开始玩、玩着时能给另一款出包；同一款边玩边出包、全库独占动作（删除 / 清缓存 / 导入 / 搬家…）与一局照旧互斥（canPlay / exportBlocker）
+    /// 这一局已为「地址空间不够这款」弹过提示条（作业层 notice addr_short，宿主那条黄行；每局一次，开局时清）
+    @Published var addrShortNoticed = false
+    /// 这一局的界面语言（共享文案取词用；开局时记下）
+    var playLanguage = "en"
     @Published var playSession: JobSession? {
         didSet { if playSession?.started != oldValue?.started { playHidden = false } }
     }
@@ -202,6 +208,8 @@ public final class S2ArmLauncherModel: ObservableObject {
     @Published var phoneQueue: [(gameID: String?, run: () -> Void)] = []
     /// 这款的手机作业排着队（手机槽前一个还没完 / 这款正在出包，出完接着装）：装机窗显示「已排队」，按钮不重复排
     func phoneQueued(_ gameID: String) -> Bool { phoneQueue.contains { $0.gameID == gameID } || installAfterQueue.contains(gameID) }
+    /// 手机槽正在推这一款（装机作业在跑、装的就是它）
+    func phonePushing(_ gameID: String) -> Bool { phoneBusy && phoneSession?.kind == .install && phoneSession?.gameID == gameID }
     /// 出包页开着的那一款（nil = 游戏库）。
     @Published var exportFor: String?
     /// 下游深度方案确认页（DownstreamConfirmSheet）：导出 iPhone 前弹，选完记下（downstreamChoice 作业）再接着导出这一单
@@ -233,6 +241,8 @@ public final class S2ArmLauncherModel: ObservableObject {
     @Published var showEnvironment = false
     /// 装到 iPhone 的方式（环境检查「装到 iPhone 的方式」卡，installMode 作业）与壳比本版旧的手机（catalog phoneUpdates，库页右上角按钮）
     @Published var installMode = InstallModeInfo()
+    /// 选了独立 App 出法、又不是用自己的证书签（Apple ID 可能是免费的）时作业层给的苹果限制提示（layoutSet 的 freeLimit，只提示不拦）；换选时清空
+    @Published var layoutNotice = ""
     /// 「建议更新」（0.6.0 通用壳开关后面，S2ArmLauncherModel+UpdateHints.swift）：游戏号（大写）→ 对不上的原因；开关关着恒为空
     @Published var updateHints: [String: [String]] = [:]
     /// iPhone 总控台（0.6.0 通用壳开关后面，S2ArmLauncherModel+PhoneConsole.swift）：nil = 开关关着，首页不出首位卡
@@ -327,6 +337,10 @@ public final class S2ArmLauncherModel: ObservableObject {
     @Published private(set) var inlineFailure: (kind: JobSession.Kind, message: String, suggestion: String)?
     /// 最近一次手机作业的结局事实（PhoneJobPanel 成功页用）；每个手机作业开工时清空
     @Published var phoneOutcome: PhoneOutcome?
+    /// 独立 App 装上了、资源没推完就失败（作业失败结果 appInstalled）：失败页的特例标题与说明
+    @Published var phoneAppPartial: StandaloneApp?
+    /// 单款装机 / 导出失败页的「重试」：上一次 install(...) 原样再来
+    var lastInstallRetry: (() -> Void)?
     /// 最近一次结束的手机作业（装机页的结局区读它：作业结束后 session 可能已被别的作业替换）
     @Published private(set) var lastPhoneSession: JobSession?
     /// 欢迎页上排着队的一键下载（作业同一时刻只有一个）。
@@ -1258,6 +1272,8 @@ public final class S2ArmLauncherModel: ObservableObject {
         let accept = acceptDropped ? accept.union(["acceptDropped"]) : accept
         // 不在这里再核装机页清单（启动器剃刀 M1）：装机页按钮和控制口调用前各自核过；批量出完自动装的款从没打开过装机页，原先在这里被悄悄挡掉、队列停住
         // 出包等主槽作业照跑也能装（手机槽）；手机槽忙 / 这款正被主槽占着（正在出这款）→ 排队，那单结束接着装
+        // 这一款已在推 / 已排上：不重复排（D-YXDW：点一下就给同一款再排一单，推完又推一遍）。排队那单出队后才执行、确认后的续推在前一单结束后才发，都不受影响
+        if phonePushing(game.id) || phoneQueued(game.id) { return }
         guard !phoneBusy, !mainHolds(game.id) else {
             phoneQueue.append((game.id, { [weak self] in self?.install(game, teamId: teamId, device: device, accept: accept, ask: ask, export: export) })); return
         }
@@ -1268,10 +1284,16 @@ public final class S2ArmLauncherModel: ObservableObject {
         installedTo = ""
         phoneOutcome = nil
         selfSigning = export
+        // 失败页「重试」：同样的参数原样再来一次（0.6.4：单款装机 / 导出失败原先只有「改为导出」）
+        lastInstallRetry = { [weak self] in self?.install(game, teamId: teamId, device: device, accept: accept, ask: ask, export: export) }
+        phoneAppPartial = nil
         start(.install, game: game, name: game.name) { [weak self] sink in
             do {
                 let r = try await self?.provider.install(gameId: game.id, teamId: teamId, device: device, accept: accept, mode: export ? "export" : nil, events: sink)
-                if let r, !r.exportFolder.isEmpty {   // 导出模式：没装手机，打开放好的文件夹
+                if let r, let app = r.app {   // 独立 App（0.6.4）：成功页 A / B 自己有「在访达中显示」，不自动弹访达
+                    self?.phoneOutcome = PhoneOutcome(device: Self.deviceLabel(kind: r.deviceKind, name: r.deviceName), packFiles: r.packFiles, packBytes: r.packBytes, app: app)
+                    if !app.exported { self?.installedTo = Self.deviceLabel(kind: r.deviceKind, name: r.deviceName) }
+                } else if let r, !r.exportFolder.isEmpty {   // 导出模式：没装手机，打开放好的文件夹
                     self?.phoneOutcome = PhoneOutcome(skipped: r.skipped, exportFolder: r.exportFolder, exportGames: r.exportGames, exportBytes: r.exportBytes,
                                                      exportFresh: r.exportFresh, exportReused: r.exportReused, exportUnwritten: r.exportUnwritten)
                     NSWorkspace.shared.open(URL(fileURLWithPath: r.exportFolder))
@@ -1289,6 +1311,8 @@ public final class S2ArmLauncherModel: ObservableObject {
             }
             catch let f as JobFailure {   // 装着不止一个 S2Arm、还没选：失败页就地列候选，选好重推这一款（同样的参数）
                 self?.notePushChoice(f) { [weak self] in self?.install(game, teamId: teamId, device: device, accept: accept, ask: ask, export: export) }
+                // 独立 App 装上了、资源没推完（作业失败结果 appInstalled）：失败页写「App 已装上，资源没推完」，重试只推剩下的
+                self?.phoneAppPartial = (f.outcome.result["appInstalled"] as? [String: Any]).map { StandaloneApp($0) }
                 throw f
             }
             return nil
@@ -1354,6 +1378,7 @@ public final class S2ArmLauncherModel: ObservableObject {
 
     func play(_ game: GameSummary, uiLanguage: String?) {
         guard canPlay(game.id) else { return }
+        playLanguage = uiLanguage ?? "en"; addrShortNoticed = false
         failAction(nil, game: nil)
         // 崩了能恢复（11-13 维护者改定：开局前不问）：上次开着某几条时异常退出，作业层已当场关掉（pack/jobs/cheats.py note_crash）→
         //   这次照常开局，同时弹一条通知说关了什么、想用去设置里再开；读不到记录照常开局
@@ -1804,6 +1829,13 @@ public final class S2ArmLauncherModel: ObservableObject {
                 controllerGameStarted = true
                 controller.gameDidStart()
             }
+        }
+        // 地址空间不够这款（宿主黄行 → 作业层 notice addr_short，pack/jobs/build.py addr_short_watch）：Mac 宿主没有确认页，游戏照常跑，
+        //   这里在游戏窗口之上弹一条不阻塞的提示条（文案同 iPhone 那页），玩家对着卡住的画面能知道是设备地址空间不够。每局一次
+        if session.kind == .play, event.ev == "notice", (event.code ?? event.fields["code"] as? String) == "addr_short", !addrShortNoticed {
+            addrShortNoticed = true
+            AddrShortBanner.show(title: BackendText.launcherText("play.addrShort.title", language: playLanguage),
+                                 body: BackendText.launcherText("play.addrShort.body", language: playLanguage))
         }
         session.progress.ingest(event)
         if !event.message.isEmpty {

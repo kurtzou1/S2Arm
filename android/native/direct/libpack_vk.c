@@ -22,21 +22,30 @@ static void s2a_lp_log(const char *fmt, ...) {
     __android_log_vprint(ANDROID_LOG_INFO, "S2Arm", fmt, ap);
     va_end(ap);
 }
+static void s2a_lp_red(const char *fmt, ...) {   // 具名红行：错误级、文本以「【红】」开头（同各模块口径）
+    char line[512]; va_list ap; va_start(ap, fmt); vsnprintf(line, sizeof line, fmt, ap); va_end(ap);
+    __android_log_print(ANDROID_LOG_ERROR, "S2Arm", "【红】%s", line);
+}
 #else
 static void s2a_lp_log(const char *fmt, ...) {
     va_list ap; va_start(ap, fmt); vfprintf(stderr, fmt, ap); va_end(ap); fputc('\n', stderr);
 }
+static void s2a_lp_red(const char *fmt, ...) {
+    va_list ap; va_start(ap, fmt); fputs("【红】", stderr); vfprintf(stderr, fmt, ap); va_end(ap); fputc('\n', stderr);
+}
 #endif
 #define LP_LOG(...) s2a_lp_log(__VA_ARGS__)
+#define LP_RED(...) s2a_lp_red(__VA_ARGS__)
 
 #include "../../../graphics/nvn/lib_pack_core.inc"
 #include "../../../graphics/nvn/gfx/nvn/dmsh_chain.h"
 
-struct s2a_libpack { lp_pack p; _Atomic int caps_said; };   // caps_said：本局（这次 open）已打过「删 64 位能力声明」那一行
+struct s2a_libpack { lp_pack p; _Atomic int caps_said, ilk_said; };   // ilk_said：本局已打过「丢掉互锁临界区」那一行红   // caps_said：本局（这次 open）已打过「删 64 位能力声明」那一行
 
-static _Atomic uint64_t g_hits, g_misses, g_rejects, g_caps_stripped;
+static _Atomic uint64_t g_hits, g_misses, g_rejects, g_caps_stripped, g_interlock_dropped;
 uint64_t s2a_libpack_hits(void) { return atomic_load(&g_hits); }
 uint64_t s2a_libpack_caps_stripped(void) { return atomic_load(&g_caps_stripped); }
+uint64_t s2a_libpack_interlock_dropped(void) { return atomic_load(&g_interlock_dropped); }
 uint64_t s2a_libpack_misses(void) { return atomic_load(&g_misses); }
 uint64_t s2a_libpack_rejects(void) { return atomic_load(&g_rejects); }
 
@@ -462,15 +471,26 @@ out:
 //   fp64_type_used / int64_type_used / int64_atomics_used，调用方照常走库拒收计数 s2a_libpack_rejects）。
 //   判据以类型声明为准：OpTypeFloat 64 只被 OpConstant 引用、没有运算也算用到（模块仍按 Float64 校验）。
 //   真删了能力声明的模块按条计数（libpack_caps_stripped，s2a_libpack_caps_stripped）；同一模块再核一遍不再计。
+// 片元像素锁（SPV_EXT_fragment_shader_interlock）：批翻链的翻译器对「宿主支持片元互锁」缺省答「有」，于是几乎每个模块都声明
+//   FragmentShader{Pixel,Sample,ShadingRate}InterlockEXT 能力和扩展，却没有一条 OpBegin/EndInvocationInterlockEXT（Mali-G710 上 94.6% 的库
+//   因此建模块失败、整库退回现编）。本后端建设备时从不启用这个扩展，所以三样声明（OpCapability / OpExtension / 互锁执行模式）一律删掉。
+//   模块里真有互锁临界区（Begin / End 指令）时：照常画、不带互锁（片元顺序可能不保），两条指令删掉，不拒收也不静默——按模块计数
+//   （libpack_interlock_dropped，s2a_libpack_interlock_dropped），调用方每局首次打一条具名红行。这两条指令没有结果 id，删掉不影响别的指令。
+static int lp_is_interlock_ext(const uint32_t *w, uint32_t wc) {   // OpExtension "SPV_EXT_fragment_shader_interlock"
+    static const char name[] = "SPV_EXT_fragment_shader_interlock";
+    const size_t bytes = (size_t)(wc - 1) * 4;
+    return bytes > sizeof name - 1 && !memcmp(&w[1], name, sizeof name);   // 含结尾 0
+}
 int s2a_libpack_spv_admit_caps(uint8_t *spv, size_t *n, char *why, size_t why_size) {
     uint32_t *w = (uint32_t *)spv; size_t nw = *n / 4;
-    int f64 = 0, i64 = 0;
+    int f64 = 0, i64 = 0, ilk = 0;
     if (nw < 5 || w[0] != 0x07230203u) { lp_fail(why, why_size, "not a SPIR-V module"); return -1; }
     for (size_t i = 5; i < nw; ) {
         uint32_t op = w[i] & 0xffff, wc = w[i] >> 16;
         if (!wc || i + wc > nw) { lp_fail(why, why_size, "truncated instruction at word %zu", i); return -1; }
         if (op == 22 && wc >= 3 && w[i + 2] == 64) f64 = 1;          // OpTypeFloat 64
         if (op == 21 && wc >= 4 && w[i + 2] == 64) i64 = 1;          // OpTypeInt 64
+        if ((op == 5364 || op == 5365) && wc == 1) ilk = 1;           // OpBegin / OpEndInvocationInterlockEXT
         i += wc;
     }
     for (size_t i = 5; i < nw; ) {
@@ -483,14 +503,19 @@ int s2a_libpack_spv_admit_caps(uint8_t *spv, size_t *n, char *why, size_t why_si
                         cap == 10 ? "Float64" : cap == 11 ? "Int64" : "Int64Atomics");
                 return -1;
             }
-            if (cap == 10 || cap == 11) {
+            if (cap == 10 || cap == 11 || cap == 5363 || cap == 5372 || cap == 5378) {   // 5363 / 5372 / 5378：Sample / ShadingRate / Pixel 互锁
                 memmove(&w[i], &w[i + 2], (nw - i - 2) * sizeof *w);
                 nw -= 2;
                 continue;
             }
         }
+        const int drop = (op == 10 && wc >= 2 && lp_is_interlock_ext(&w[i], wc))                     // OpExtension
+                      || (op == 16 && wc >= 3 && w[i + 2] >= 5366 && w[i + 2] <= 5371)            // OpExecutionMode 互锁顺序 5366..5371
+                      || ((op == 5364 || op == 5365) && wc == 1);                                 // 互锁临界区的两条指令
+        if (drop) { memmove(&w[i], &w[i + wc], (nw - i - wc) * sizeof *w); nw -= wc; continue; }
         i += wc;
     }
+    if (ilk) atomic_fetch_add(&g_interlock_dropped, 1);
     if (nw * 4 != *n) atomic_fetch_add(&g_caps_stripped, 1);
     *n = nw * 4;
     return 0;
@@ -569,8 +594,12 @@ static int lp_stage_emit(struct s2a_libpack *lp, const uint8_t key[8], unsigned 
             { lp_fail(why, why_size, "%s %s gs_input_topology is not %d", khex, jname, gs_topology); goto done; }
         if (sn < 20 || (sn & 3) || *(const uint32_t *)spv != 0x07230203u)
             { lp_fail(why, why_size, "%s %s is not a SPIR-V module", khex, sname); goto done; }
-        {   char cw[128] = ""; const size_t sn0 = sn;
+        {   char cw[128] = ""; const size_t sn0 = sn; const uint64_t il0 = s2a_libpack_interlock_dropped();
             if (s2a_libpack_spv_admit_caps(spv, &sn, cw, sizeof cw)) { lp_fail(why, why_size, "%s %s %s", khex, sname, cw); goto done; }
+            if (s2a_libpack_interlock_dropped() != il0 && !atomic_exchange(&lp->ilk_said, 1))   // 每局首次一行具名红，之后只计数
+                LP_RED("libpack_interlock_dropped: program %s %s uses a fragment interlock critical section; the device has no "
+                       "VK_EXT_fragment_shader_interlock, drawing without it (fragment ordering not guaranteed); counted per module, first one this session",
+                       khex, sname);
             if (sn != sn0 && !atomic_exchange(&lp->caps_said, 1))   // 每局首次一行（信息级），之后只计数
                 LP_LOG("libpack_caps_stripped: program %s %s dropped %zu unused 64-bit capability declaration(s) (Float64/Int64 without a 64-bit type); counted per module, first one this session",
                        khex, sname, (sn0 - sn) / 8); }

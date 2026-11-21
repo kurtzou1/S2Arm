@@ -25,6 +25,11 @@ spec.loader.exec_module(stage)
 TID = "0100ABCD00000000"
 
 
+def cur_of(roots, game):
+    """产物根里 game 的现行版本目录：<款>@现行 是指针文件，内容 = 版本目录名（pack/orch/current.py）"""
+    return (Path(roots) / (Path(roots) / f"{game}@现行").read_text(encoding="utf-8").strip()).resolve()
+
+
 def lz4_literal(raw):
     """A valid LZ4 block holding raw as one literal run (no matches): the fixture needs no python-lz4, like the tools (graphics/nvn/tools/lz4blk.py)"""
     n = len(raw); out = bytearray([min(n, 15) << 4])
@@ -811,7 +816,7 @@ class Profiles(unittest.TestCase):
         result = subprocess.run(["bash", str(REPO / "pack/seed_root.sh"), "fixture", "seed", str(self.root)],
                                 env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        return (roots / "fixture@现行").resolve(), env
+        return cur_of(roots, "fixture"), env
 
     def test_dual_seed_metadata_reaches_real_configuration_stage(self):
         sidecar = self.root / "direct-profile-input.json"
@@ -829,7 +834,7 @@ class Profiles(unittest.TestCase):
         extraction(seed, title=title)
         (seed / "ctl").mkdir()
         (seed / "ctl/control.nacp").write_bytes(b"synthetic-only")
-        (roots / "fixture@现行").symlink_to(seed.name)
+        (roots / "fixture@现行").write_text(seed.name + '\n')
         env = dict(os.environ, S2A_DISK_FREE_G="999", S2A_ROOTS=str(roots), S2A_ROOTS_SHARED=str(self.base / "shared"),   # 盘判定不看本机实况
                    S2A_ROOTS_PRIV=str(self.base / "private"), S2A_ROOTS_NO_BOOT="1",
                    S2A_PYTHON=sys.executable, S2A_PY=sys.executable,
@@ -846,7 +851,7 @@ class Profiles(unittest.TestCase):
         roots, seed, env = self.versioned()
         p = self.run_stage(env)
         self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
-        current = (roots / "fixture@现行").resolve()
+        current = cur_of(roots, "fixture")
         self.assertNotEqual(current, seed)
         data = json.loads((current / "direct_profile.json").read_text())
         self.assertFalse(Path(data["profile"]).is_absolute())
@@ -857,13 +862,13 @@ class Profiles(unittest.TestCase):
         self.assertFalse(data["runtime_verified"])
         again = self.run_stage(env)
         self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
-        self.assertEqual(current, (roots / "fixture@现行").resolve())
+        self.assertEqual(current, cur_of(roots, "fixture"))
 
     def test_versioned_for_build_keeps_candidate_unverified(self):
         roots, seed, env = self.versioned()
         p = self.run_stage(env, require=True)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        current = (roots / "fixture@现行").resolve()
+        current = cur_of(roots, "fixture")
         self.assertTrue((current / "direct_profile.json").is_file())
         self.assertFalse((current / ".stage_direct").exists())
         self.assertFalse(stage.selected(current)["runtime_verified"])
@@ -873,7 +878,7 @@ class Profiles(unittest.TestCase):
         (seed / "exefs/main").write_bytes(b"NSO0")
         p = self.run_stage(env)
         self.assertNotEqual(p.returncode, 0)
-        self.assertEqual(seed, (roots / "fixture@现行").resolve())
+        self.assertEqual(seed, cur_of(roots, "fixture"))
         self.assertFalse(list(roots.glob("*.tmp")))
         self.assertFalse(list(roots.glob("*@dp-*")))
 
@@ -881,11 +886,11 @@ class Profiles(unittest.TestCase):
         roots, seed, env = self.versioned("01006F8002326000")
         p = self.run_stage(env, require=True)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        self.assertEqual(seed, (roots / "fixture@现行").resolve())
+        self.assertEqual(seed, cur_of(roots, "fixture"))
         self.assertFalse((seed / "direct-profile").exists())
 
     def test_direct_entry_no_shader_container_runtime_only(self):
-        # 11-06：原「编译器失败 → 退 1、不写成功标记」这项是假绿——夹具没有认得出的着色器容器，旧 direct_lib.sh 在抽取退 3 时报「抽取失败」退 1，
+        # 11-06：原「编译器失败 → 退 1、不写成功标记」这项是假绿——夹具没有认得出的着色器容器，旧 direct_lib.py 在抽取退 3 时报「抽取失败」退 1，
         #   编译器失败那条路从没走到（xcrun 桩记的「被调用」是别处顺带调的）。抽取缺口现按 11-05 定的规矩出运行时现编空库（graphics/tools/direct/runtime_only_lib.sh），
         #   这里如实核这条路：退 0、现行 shaders/direct 带 runtime_only.txt 与 b-<链>/lib.idx、键记成功。编译器失败要另做带真着色器容器的夹具（后续项）
         roots, seed, env = self.versioned()
@@ -894,17 +899,17 @@ class Profiles(unittest.TestCase):
         stub.write_text("#!/bin/sh\ncase \" $* \" in *' --show-sdk-version '*) echo 27.0; exit 0;; *' metal --version '*) echo 'Apple metal version 1'; exit 0;; esac\nexit 1\n")
         stub.chmod(0o755)
         env["PATH"] = str(bin_dir) + os.pathsep + env["PATH"]
-        # direct_lib.sh 开头 source pack/srcs.sh 只为 prog_id，可 srcs.sh 一 source 就按源码哈希在运行根里找 nx_unpack、没有就现编；本例运行根是临时目录，
-        #   每跑一次都 dotnet build 一遍（2–30 秒；门禁里还要排本树 C# 构建锁，曾等到 720 秒超时）。这条路不解包、不跑 nx_unpack：
-        #   给一个不存在的路径（srcs.sh 认 S2A_NX_UNPACK 就不找不编），真用到它会当场报错而不是悄悄绿（11-14 门禁提速）
-        env["S2A_NX_UNPACK"] = str(self.base / "no-nx-unpack-needed")
+        # 调用方给了直连翻译库 → 阶段不现编 libdsx（同 tests/stage_direct_test.sh）：这条路夹具里没有着色器、出的是运行时现编空库，用不到它；
+        #   原先没给，全新工作树（门禁预检每次都是）里阶段先 make 一遍真的 libdsx，单这条用例冷跑 31 秒
+        dsx = self.base / "libdsx-unused.dylib"; dsx.write_bytes(b"")
+        env["DSX_LIB"] = str(dsx)
         p = subprocess.run(["bash", str(REPO / "pack/stage_direct.sh"), "fixture"], env=env, capture_output=True, text=True)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertIn("离线 0 支、运行时首遇现编", p.stdout + p.stderr)
-        d = (roots / "fixture@现行").resolve() / "shaders/direct"
+        d = cur_of(roots, "fixture") / "shaders/direct"
         self.assertTrue((d / "runtime_only.txt").is_file())
         self.assertTrue(list(d.glob("b-*/lib.idx")))
-        self.assertTrue(((roots / "fixture@现行").resolve() / ".stage_direct").exists())
+        self.assertTrue((cur_of(roots, "fixture") / ".stage_direct").exists())
 
     def refresh_harness(self):
         # Actual refresh/producer/root transaction; earlier unrelated stages
@@ -916,6 +921,7 @@ class Profiles(unittest.TestCase):
         for filename in ("roots.sh", "direct_profile_stage.py", "stage_keyfiles.sh", "decoder_need.sh"):   # stage_keyfiles：各阶段实际读入进键（10-30）；decoder_need：只剩直连快路后刷新必 source 它（11-08）
             (pack / filename).symlink_to(REPO / "pack" / filename)
         (sandbox / "tools").symlink_to(REPO / "tools")
+        (pack / "orch").symlink_to(REPO / "pack/orch")   # roots.sh 写现行指针（pack/orch/current.py）
         (sandbox / "graphics/nvn/tools").mkdir(parents=True); shutil.copyfile(REPO / "graphics/nvn/tools/gfx_api.py", sandbox / "graphics/nvn/tools/gfx_api.py")   # 出包分流判法
         # romfs_list.py：判法扫 RomFS 经它（仓库里唯一的 RomFS 遍历）
         for _f in ("nso_syms.py", "lz4blk.py", "romfs_list.py"): shutil.copyfile(REPO / "graphics/nvn/tools" / _f, sandbox / "graphics/nvn/tools" / _f)   # 判法读 NSO 导入表要它们
@@ -940,7 +946,7 @@ class Profiles(unittest.TestCase):
         seen = called.read_text().splitlines()
         self.assertEqual(seen[:2], ["romfsidx", "extract"])   # 10-25 抽着色器只做一次：抽取阶段在直连之前
         self.assertEqual(seen[2:], ["direct"])
-        current = (roots / "fixture@现行").resolve()
+        current = cur_of(roots, "fixture")
         self.assertTrue((current / "direct_profile.json").is_file())
         self.assertFalse(stage.selected(current)["runtime_verified"])
 
@@ -948,7 +954,7 @@ class Profiles(unittest.TestCase):
         roots, seed, env = self.versioned()
         result = self.run_stage(env)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        current = (roots / "fixture@现行").resolve()
+        current = cur_of(roots, "fixture")
         first = stage.selected(current)
         p = Path(first["profile"]) / "game.tsv"
         p.write_text(p.read_text() + "\nrender_cond\ton\n")
@@ -959,7 +965,7 @@ class Profiles(unittest.TestCase):
     def test_selected_artifact_cannot_escape_root(self):
         roots, seed, env = self.versioned()
         self.assertEqual(self.run_stage(env).returncode, 0)
-        current = (roots / "fixture@现行").resolve()
+        current = cur_of(roots, "fixture")
         record = current / "direct_profile.json"
         data = json.loads(record.read_text())
         data["profile"] = "../outside"
@@ -976,22 +982,21 @@ class Profiles(unittest.TestCase):
         tools = sandbox / "translator"; tools.mkdir(parents=True)
         games = nx / "games"; games.mkdir(parents=True)
         shutil.copyfile(REPO / "graphics/nvn/games/game.py", games / "game.py")
-        shutil.copyfile(REPO / "graphics/nvn/games/zero_skip.tsv", games / "zero_skip.tsv")   # 出库按程序号挑零源跳过事实写进 game.tsv（direct_lib.sh）
+        shutil.copyfile(REPO / "graphics/nvn/games/zero_skip.tsv", games / "zero_skip.tsv")   # 出库按程序号挑零源跳过事实写进 game.tsv（direct_lib.py）
         pack = sandbox / "pack"; pack.mkdir()
-        shutil.copyfile(REPO / "pack/srcs.sh", pack / "srcs.sh")
-        (pack / "jobs").mkdir(); shutil.copyfile(REPO / "pack/jobs/space_rule.py", pack / "jobs" / "space_rule.py"); shutil.copyfile(REPO / "pack/jobs/library.py", pack / "jobs" / "library.py")   # 出库开工前的空间复核（#265，direct_lib.sh 调）
+        (pack / "jobs").mkdir(); shutil.copyfile(REPO / "pack/jobs/space_rule.py", pack / "jobs" / "space_rule.py"); shutil.copyfile(REPO / "pack/jobs/library.py", pack / "jobs" / "library.py")   # 出库开工前的空间复核（#265，direct_lib.py 调）
         consumer = sandbox / "graphics/tools/direct"; consumer.mkdir(parents=True)
-        shutil.copyfile(REPO / "graphics/tools/direct/direct_lib.sh", consumer / "direct_lib.sh")
-        shutil.copyfile(REPO / "graphics/tools/direct/extract.sh", consumer / "extract.sh")   # 10-25「抽着色器只做一次」：产物根没有 extract/ 时当场抽（真脚本，抽取器是下面的合成桩）
+        shutil.copyfile(REPO / "graphics/tools/direct/direct_lib.py", consumer / "direct_lib.py")
+        shutil.copyfile(REPO / "graphics/tools/direct/extract.py", consumer / "extract.py")   # 10-25「抽着色器只做一次」：产物根没有 extract/ 时当场抽（真脚本，抽取器是下面的合成桩）
         (sandbox / "tools").mkdir(exist_ok=True); shutil.copyfile(REPO / "tools/clonedir.py", sandbox / "tools/clonedir.py")   # test/directlib12 起临时目录由它整目录克隆上次的库
-        for _f in ("progress.sh", "nostall.py"): shutil.copy2(REPO / "tools" / _f, sandbox / "tools" / _f)   # 进度协议、无进展看门狗
+        for _f in ("progress.py", "pool_workers.py", "nostall.py", "addr_need.py", "nso_plain.py"): shutil.copy2(REPO / "tools" / _f, sandbox / "tools" / _f)   # 进度协议、无进展看门狗、程序号（没有 unpack.tsv 时读 main.npdm）
         (nx / "tools").mkdir(exist_ok=True); shutil.copyfile(REPO / "graphics/nvn/tools/gfx_api.py", nx / "tools/gfx_api.py")   # 出包分流判法
-        # romfs_list.py：判法 / extract.sh 列 RomFS 经它（仓库里唯一的 RomFS 遍历）
+        # romfs_list.py：判法 / extract.py 列 RomFS 经它（仓库里唯一的 RomFS 遍历）
         for _f in ("nso_syms.py", "lz4blk.py", "romfs_list.py"): shutil.copyfile(REPO / "graphics/nvn/tools" / _f, nx / "tools" / _f)   # 判法读 NSO 导入表要它们
         (tools / "shader_split.py").write_text(
             "import sys\nfrom pathlib import Path\n"
             "for x in sys.argv[4:7]: Path(x).write_text('# synthetic\\n')\n")
-        (tools / "glslc_offline.py").write_text("print('GLSLC 离线编：不需要（合成桩）')\n")   # 10-29 起 extract.sh 先问运行时 GLSLC 款要不要离线编
+        (tools / "glslc_offline.py").write_text("print('GLSLC 离线编：不需要（合成桩）')\n")   # 10-29 起 extract.py 先问运行时 GLSLC 款要不要离线编
         # 翻译链口径（11-01 出库链挪进 C#）：dmsh_chain.py --build-env <profile-rows 文件> 给「链号\t程序号\t摘要」（合成边界：不核工具锁，摘要固定）；version() 照旧给链号
         (tools / "dmsh_chain.py").write_text(
             "import os, sys\nSTAMP = 'inputs.tsv'\ndef version(): return 'fixture'\n"
@@ -1000,12 +1005,12 @@ class Profiles(unittest.TestCase):
             "    if len(a) == 2 and a[0] == '--build-env':\n"
             "        print(\"note: built with this Mac's compilers (synthetic)\", file=sys.stderr)\n"
             "        open(a[1], 'w').write(''); print('fixture\\t' + os.environ['DM_GAME'] + '\\tsynthetic')\n"
-            "    elif len(a) == 2 and a[0] == '--check-stamp':\n"   # 11-06 出库后核库印章（direct_lib.sh）：合成边界不核翻译器指纹，只核库目录在
+            "    elif len(a) == 2 and a[0] == '--check-stamp':\n"   # 11-06 出库后核库印章（direct_lib.py）：合成边界不核翻译器指纹，只核库目录在
             "        sys.exit(0 if os.path.isdir(a[1]) else 'dmsh_chain.py stub: --check-stamp on a missing library ' + a[1])\n"
             "    elif not a: print(version())\n"
             "    else: sys.exit('dmsh_chain.py stub: unexpected ' + ' '.join(a))\n")
         # 整份直连出库 = C# dsh_batch build（graphics/tools/direct/dsh/batch/Build.cs 头注的接口）：dsh_batch.get() 给的命令换成下面的合成桩，按接口核参数、写出发布形态的产物
-        (tools / "spvc_inproc.py").write_text("def lib_path(): return '/synthetic/libspvc.dylib'\n")   # direct_lib.sh 先取 spirv-cross 进程内库路径交给 --spvc（合成边界：不编库）
+        (tools / "spvc_inproc.py").write_text("def lib_path(): return '/synthetic/libspvc.dylib'\n")   # direct_lib.py 先取 spirv-cross 进程内库路径交给 --spvc（合成边界：不编库）
         stub = tools / "dsh_batch_stub.py"
         (tools / "dsh_batch.py").write_text(
             "import sys\nfrom pathlib import Path\n"
@@ -1013,7 +1018,7 @@ class Profiles(unittest.TestCase):
             "def get(): return CMD, 'fixture'\n"
             "def build(): return CMD, 'fixture'\n"
             "def export(env): return env\n"
-            "if __name__ == '__main__':\n    import os; os.execv(CMD[0], CMD + sys.argv[1:])\n")   # 同真 dsh_batch.py：direct_lib.sh 经 python3 dsh_batch.py build … 调
+            "if __name__ == '__main__':\n    import os; os.execv(CMD[0], CMD + sys.argv[1:])\n")   # 同真 dsh_batch.py：direct_lib.py 经 python3 dsh_batch.py build … 调
         stub.write_text(
             "import sys\nfrom pathlib import Path\n"
             "a = sys.argv[1:]\n"
@@ -1039,7 +1044,7 @@ class Profiles(unittest.TestCase):
         shutil.copyfile(REPO / "graphics/tools/direct/run_pairs.py", consumer / "run_pairs.py")   # 10-26 起 ③ 后把跑局 P 行并进配对表（真工具，来源不存在时只出汇总行）
         for _f in ("fout_want.py", "pso_layout.py", "pso_layout.json"): shutil.copyfile(REPO / "graphics/tools/direct" / _f, consumer / _f)   # 10-26 起 ③ 后算输出类型变体请求表（真工具，来源不存在时出空表；11-04 起 Python 读提交的管线键布局）
         shutil.copyfile(REPO / "graphics/tools/direct/se_want.py", consumer / "se_want.py")   # 11-01 起输出类型变体请求表之后算采样模拟变体请求表（真工具，同目录 import run_pairs；来源不存在时出空表）
-        shutil.copyfile(REPO / "graphics/tools/direct/run_knowledge.py", consumer / "run_knowledge.py")   # 审计 #1534 P1-54：出库只读跑局知识快照（真工具；单独调用时 direct_lib.sh 现出一份，来源不存在时四张表全空）
+        shutil.copyfile(REPO / "graphics/tools/direct/run_knowledge.py", consumer / "run_knowledge.py")   # 审计 #1534 P1-54：出库只读跑局知识快照（真工具；单独调用时 direct_lib.py 现出一份，来源不存在时四张表全空）
         shutil.copyfile(REPO / "graphics/tools/direct/pso_seed.py", consumer / "pso_seed.py")   # 单独调用时 ⑤ 后照旧零配置生成种子表（真工具，读快照 seen.tsv）
         (consumer / "merge_extract.py").write_text(
             "import sys,json\nfrom pathlib import Path\n"
@@ -1051,7 +1056,7 @@ class Profiles(unittest.TestCase):
         shbake = sandbox / "graphics/tools/shbake"; shbake.mkdir()
         (shbake / "nxsh_extract.py").write_text(
             "import sys\nfrom pathlib import Path\nPath(sys.argv[1]).mkdir(parents=True)\n"
-            "(Path(sys.argv[1]) / 'rows.tsv').write_text('aaaaaaaaaaaaaaaa\\tvs\\tsynthetic\\t0\\n')\n")   # 10-29 起两边抽取都 0 支时 extract.sh 按缺口退 3：给 1 行，出库走到底
+            "(Path(sys.argv[1]) / 'rows.tsv').write_text('aaaaaaaaaaaaaaaa\\tvs\\tsynthetic\\t0\\n')\n")   # 10-29 起两边抽取都 0 支时 extract.py 按缺口退 3：给 1 行，出库走到底
         output = self.base / "direct-output"
         # 出包不读「文稿」（10-26 交付线：受保护目录，玩家机一碰就弹授权框；审计 #1534 P1-54 B4：我方机器也不读，Mac 局收局拷进 pso_seed/，同一提交 Mac 与Windows 出包机出同一个根）：
         #   假家目录里放一份 ~/Documents/wire/<程序号>/pso_user.tsv，不设 / 设 S2A_CPU_LEDGER=1 两次出库的跑局知识快照都是 0 个来源
@@ -1059,9 +1064,9 @@ class Profiles(unittest.TestCase):
         (wire / "pso_user.tsv").write_text("bbbbbbbbbbbbbbbb\t1\t0\n")
         env = dict(os.environ, DM_GAMES_DIR=generated["DM_GAMES_DIR"], DM_GAMES_FIRST="1", HOME=str(home),
                    S2A_DIRECT_CACHE=str(self.base / "library-cache"),
-                   S2A_NX_UNPACK=sys.executable, S2A_PYTHON=sys.executable,
+                   S2A_PYTHON=sys.executable,
                    PATH=str(REPO / "tools/bin") + os.pathsep + os.environ["PATH"])
-        result = subprocess.run(["bash", str(consumer / "direct_lib.sh"), str(self.root), str(output)],
+        result = subprocess.run([sys.executable, str(consumer / "direct_lib.py"), str(self.root), str(output)],
                                 env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("note: built with this Mac's compilers (synthetic)", result.stderr)
@@ -1074,7 +1079,7 @@ class Profiles(unittest.TestCase):
         self.assertEqual(json.loads((output / "direct_lib.json").read_text())["pso_seed"], "gen")
         self.assertFalse((games / TID).exists(), "consumer wrote a repository registration")
         # 第二次另设 S2A_PSO_SEED_STAGE=1（= 经 pack/stage_direct.sh 出库，审计 #1534 P1-54 B3）：种子表归轻阶段 pack/stage_direct_seed.sh，出库不生成、不发布配置档那份空表
-        ours = subprocess.run(["bash", str(consumer / "direct_lib.sh"), str(self.root), str(self.base / "direct-output-ours")],
+        ours = subprocess.run([sys.executable, str(consumer / "direct_lib.py"), str(self.root), str(self.base / "direct-output-ours")],
                               env=dict(env, S2A_CPU_LEDGER="1", S2A_PSO_SEED_STAGE="1"), capture_output=True, text=True)
         self.assertEqual(ours.returncode, 0, ours.stdout + ours.stderr)
         self.assertFalse((self.base / "direct-output-ours/pso_manifest.tsv").exists(), "经阶段出库仍生成 / 发布了种子表")
@@ -1083,7 +1088,7 @@ class Profiles(unittest.TestCase):
         # 第三次：种子工具坏了（审计 #1592 P1-100：种子表是锦上添花）→ 单独出库（Windows 出包路径）照常退 0、库照常发布，
         #   种子表换成只有表头的空表并写明缺了什么，打一行 🟡；原先 exit 1 在换进位之前、这次库不发布、包不出
         (consumer / "pso_seed.py").write_text("import sys\nsys.exit('模拟种子工具坏了')\n")
-        soft = subprocess.run(["bash", str(consumer / "direct_lib.sh"), str(self.root), str(self.base / "direct-output-soft")], env=env, capture_output=True, text=True)
+        soft = subprocess.run([sys.executable, str(consumer / "direct_lib.py"), str(self.root), str(self.base / "direct-output-soft")], env=env, capture_output=True, text=True)
         self.assertEqual(soft.returncode, 0, soft.stdout + soft.stderr)
         self.assertEqual((self.base / "direct-output-soft/keys.tsv").read_text(), "aaaaaaaaaaaaaaaa\n", "种子表失败时库没发布")
         seed = (self.base / "direct-output-soft/pso_manifest.tsv").read_text()

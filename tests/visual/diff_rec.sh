@@ -18,9 +18,9 @@ G=${1:?款}; D=${2:?局目录}; K=${3:-30}; N=${4:-90}
 H=$(cd "$(dirname "$0")" && pwd); R=${DIFF_TREE:-$(cd "$H/../.." && pwd)}; MAIN=${DIFF_MAIN_TREE:?DIFF_MAIN_TREE=<干净 origin/main 树>}
 S=${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm; [ -e "$D/host.log" ] && { echo "🔴 局目录 $D 已用过（有 host.log），换一个"; exit 1; }; mkdir -p "$D/pack" "$D/ryu" "$D/gal" "$D/macro"
 # DIFF_NO_REFRESH=1：不刷产物根（刷新的着色器阶段会排出包槽重烘；出包槽被占 / 维护者禁新出包时用，录像只用现行根里的改写产物与离线库，rec.txt 记现行版本）
-if [ "${DIFF_NO_REFRESH:-0}" = 1 ]; then echo "未刷新，现行 $(basename "$(cd -P "$S/roots/$G@现行" && pwd)")" > "$D/refresh.log"
+if [ "${DIFF_NO_REFRESH:-0}" = 1 ]; then echo "未刷新，现行 $(basename "$(cd -P "$S/roots/$(cat "$S/roots/$G@现行")" && pwd)")" > "$D/refresh.log"
 else bash "$MAIN/pack/refresh.sh" "$G" > "$D/refresh.log" 2>&1 || { echo "🔴 $G 产物根刷新红：$(tail -1 "$D/refresh.log")"; exit 1; }; fi
-src=$(cd -P "$S/roots/$G@现行" && pwd); sn=$D/in_snap
+src=$(cd -P "$S/roots/$(cat "$S/roots/$G@现行")" && pwd); sn=$D/in_snap
 python3 "$R/tools/clonedir.py" "$src" "$sn" || { echo "🔴 $G 快照失败"; exit 1; }
 BID=$(xxd -s 0x40 -l 16 -p "$sn/exefs/main"); X=()
 if [ "${DIFF_EMPTY_PACK:-0}" != 1 ]; then

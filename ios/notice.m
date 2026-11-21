@@ -4,6 +4,7 @@
 #import "notice.h"
 #import "tv_compat.h"
 #import "s2a_l10n.h"
+#include "s2a_launch_ctx.h"   // s2a_launch_ctx_single_game：包里只有一款（独立 App）
 
 UIColor *s2a_notice_accent(void) { return [UIColor colorWithRed:0.02 green:0.53 blue:0.57 alpha:1]; }   // 启动器 Brand.accent（launchers/macos/Sources/S2ArmLauncher/Appearance.swift）
 
@@ -113,9 +114,12 @@ UIView *s2a_notice_help_page(CGRect f, NSString *title, NSString *detail, NSStri
     UIStackView *left = [[UIStackView alloc] initWithArrangedSubviews:@[pic, fr]]; left.axis = UILayoutConstraintAxisVertical; left.spacing = 20; left.alignment = UIStackViewAlignmentCenter;
     UILabel *t = label(24, UIFontWeightBold, UIColor.labelColor); t.text = title;
     UILabel *d = label(16, UIFontWeightRegular, UIColor.secondaryLabelColor); d.text = detail;
+    // 独立 App（一 App 一游戏，0.6.4）：电脑导出的 .s2arm / .img 在这款自己的游戏文件夹里（不是「S2Arm 游戏包」）；它打开就在起这款、闸门每轮扫导入文件夹（pack_apply.c gate_thread），
+    //   放好点「重新检查」即可，不用重开
+    char gid[64]; int single = s2a_launch_ctx_single_game(s2a_launch_ctx_bundle_dir(), gid, sizeof gid);
     NSArray *steps = @[
         S2AL(@"notice.step.auto"),
-        [NSString stringWithFormat:S2AL(@"notice.step.img"), app, app]];
+        single ? [NSString stringWithFormat:S2AL(@"notice.step.imgApp"), app] : [NSString stringWithFormat:S2AL(@"notice.step.img"), app, app]];
     NSMutableArray *rows = [NSMutableArray arrayWithObjects:t, d, nil];
     for (NSUInteger i = 0; i < steps.count; i++) {
         UILabel *n = label(13, UIFontWeightBold, UIColor.whiteColor); n.text = [NSString stringWithFormat:@"%lu", (unsigned long)i + 1]; n.textAlignment = NSTextAlignmentCenter;

@@ -1,0 +1,196 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LanDiscovery.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LanDiscovery.cs
+index 7e2dcb3e3b4a48d5f055e5f6dd2a695505ff66e7..466900bc300f8f0b3b6ca2dca3376b06ecc4850d 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LanDiscovery.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LanDiscovery.cs
+@@ -113,6 +113,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+             _protocol.StationConnected += OnStationConnected;
+             _protocol.SyncNetwork += OnSyncNetwork;
+             _protocol.DisconnectStation += DisconnectStation;
++            _protocol.ClientDisconnected += OnClientDisconnected;
+ 
+             NetworkInfo = GetEmptyNetworkInfo();
+ 
+@@ -131,6 +132,8 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+         protected void OnSyncNetwork(NetworkInfo info)
+         {
+             bool updated = false;
++            string advertiseHex;
++            string nodes;
+ 
+             lock (_lock)
+             {
+@@ -141,8 +144,18 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+ 
+                     Logger.Debug?.PrintMsg(LogClass.ServiceLdn, $"Host IP: {NetworkHelpers.ConvertUint(info.Ldn.Nodes[0].Ipv4Address)}");
+                 }
++
++                advertiseHex = Convert.ToHexString(info.Ldn.AdvertiseData.AsSpan()[..info.Ldn.AdvertiseDataSize]);
++                nodes = string.Join(",", Enumerable.Range(0, LdnConst.NodeCountMax).Select(index =>
++                {
++                    NodeInfo node = info.Ldn.Nodes[index];
++                    return $"{node.NodeId}:{node.IsConnected}:{node.LocalCommunicationVersion}";
++                }));
+             }
+ 
++            Logger.Info?.PrintMsg(LogClass.ServiceLdn,
++                $"LdnMitm SyncNetwork advertiseSize={info.Ldn.AdvertiseDataSize}, advertise={advertiseHex}, nodes={nodes}");
++
+             if (updated)
+             {
+                 _parent.InvokeNetworkChange(info, true);
+@@ -151,6 +164,21 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+             _apConnected.Set();
+         }
+ 
++        protected void OnClientDisconnected(LdnProxyTcpClient client)
++        {
++            lock (_lock)
++            {
++                if (!ReferenceEquals(_tcp, client))
++                {
++                    return;
++                }
++            }
++
++            Logger.Warning?.PrintMsg(LogClass.ServiceLdn,
++                $"LdnMitm client lost remote host: {client.Endpoint}");
++            _parent.InvokeNetworkChange(NetworkInfo, false, DisconnectReason.SignalLost);
++        }
++
+         protected void OnAccept(LdnProxyTcpSession station)
+         {
+             lock (_lock)
+@@ -219,6 +247,8 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+ 
+             data.CopyTo(NetworkInfo.Ldn.AdvertiseData.AsSpan());
+             NetworkInfo.Ldn.AdvertiseDataSize = (ushort)data.Length;
++            Logger.Info?.PrintMsg(LogClass.ServiceLdn,
++                $"LdnMitm SetAdvertiseData size={data.Length}, data={Convert.ToHexString(data)}");
+ 
+             // NOTE: Otherwise this results in SessionKeepFailed or MasterDisconnected
+             lock (_lock)
+@@ -492,6 +522,9 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+ 
+         public bool CreateNetwork(SecurityConfig securityConfig, UserConfig userConfig, NetworkConfig networkConfig)
+         {
++            Logger.Info?.PrintMsg(LogClass.ServiceLdn,
++                $"LdnMitm CreateNetwork localCommunicationVersion={networkConfig.LocalCommunicationVersion}");
++
+             if (!InitTcp(true))
+             {
+                 return false;
+@@ -539,6 +572,10 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+         {
+             _apConnected.Reset();
+ 
++            Logger.Info?.PrintMsg(LogClass.ServiceLdn,
++                $"LdnMitm Connect localCommunicationVersion={localCommunicationVersion}, " +
++                $"hostLocalCommunicationVersion={networkInfo.Ldn.Nodes[0].LocalCommunicationVersion}");
++
+             if (networkInfo.Ldn.NodeCount == 0)
+             {
+                 return NetworkError.Unknown;
+@@ -584,6 +621,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+             _protocol.StationConnected -= OnStationConnected;
+             _protocol.SyncNetwork -= OnSyncNetwork;
+             _protocol.DisconnectStation -= DisconnectStation;
++            _protocol.ClientDisconnected -= OnClientDisconnected;
+         }
+ 
+         public void DisconnectAndStop()
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LanProtocol.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LanProtocol.cs
+index 6d02cd7d7531cfe8eda1fb369f3be97e8d59c0b2..6c5c6f5bf3d828c8a8c95ace05db75981ca71a07 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LanProtocol.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LanProtocol.cs
+@@ -34,6 +34,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+         public event Action<NodeInfo, EndPoint> Connect;
+         public event Action<LdnProxyTcpSession> StationConnected;
+         public event Action<LdnProxyTcpSession> DisconnectStation;
++        public event Action<LdnProxyTcpClient> ClientDisconnected;
+ 
+         public LanProtocol(LanDiscovery parent)
+         {
+@@ -55,6 +56,11 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+             DisconnectStation?.Invoke(session);
+         }
+ 
++        public void InvokeClientDisconnected(LdnProxyTcpClient client)
++        {
++            ClientDisconnected?.Invoke(client);
++        }
++
+         private void DecodeAndHandle(LanPacketHeader header, byte[] data, EndPoint endPoint = null)
+         {
+             switch (header.Type)
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LdnMitmClient.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LdnMitmClient.cs
+index 12a15e491ed7bad42032155f2b83a7c1f19fe4ae..f670dcb114b8422f5ce153d0f8b28f0e4e2d8f25 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LdnMitmClient.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LdnMitmClient.cs
+@@ -87,8 +87,8 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+ 
+         public void SetGameVersion(ReadOnlySpan<byte> versionString)
+         {
+-            // NOTE: This method is not implemented in ldn_mitm
+-            Logger.Stub?.PrintMsg(LogClass.ServiceLdn, "LdnMitmClient SetGameVersion");
++            string version = System.Text.Encoding.UTF8.GetString(versionString).TrimEnd('\0');
++            Logger.Info?.PrintMsg(LogClass.ServiceLdn, $"LdnMitmClient SetGameVersion: {version}");
+         }
+ 
+         public void SetStationAcceptPolicy(AcceptPolicy acceptPolicy)
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/Proxy/LdnProxyTcpClient.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/Proxy/LdnProxyTcpClient.cs
+index 7f755b409d39d36892528d5555301b05a7360bd3..49a43f9ac1761fef8fc509805e16a33c262f760e 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/Proxy/LdnProxyTcpClient.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/Proxy/LdnProxyTcpClient.cs
+@@ -11,6 +11,8 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm.Proxy
+         private readonly LanProtocol _protocol;
+         private byte[] _buffer;
+         private int _bufferEnd;
++        private int _localDisconnect;
++        private int _remoteDisconnectNotified;
+ 
+         public LdnProxyTcpClient(LanProtocol protocol, IPAddress address, int port) : base(address, port)
+         {
+@@ -34,6 +36,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm.Proxy
+ 
+         public void DisconnectAndStop()
+         {
++            Interlocked.Exchange(ref _localDisconnect, 1);
+             DisconnectAsync();
+ 
+             while (IsConnected)
+@@ -64,7 +67,20 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm.Proxy
+ 
+         protected override void OnError(SocketError error)
+         {
+-            Logger.Error?.PrintMsg(LogClass.ServiceLdn, $"LdnProxyTCPClient caught an error with code {error}");
++            Logger.Error?.PrintMsg(LogClass.ServiceLdn,
++                $"LdnProxyTCPClient caught an error with code {error}; endpoint={Endpoint}, connected={IsConnected}");
++        }
++
++        protected override void OnDisconnected()
++        {
++            Logger.Info?.PrintMsg(LogClass.ServiceLdn,
++                $"LdnProxyTCPClient disconnected; endpoint={Endpoint}, localClose={Volatile.Read(ref _localDisconnect) != 0}");
++
++            if (Volatile.Read(ref _localDisconnect) == 0 &&
++                Interlocked.Exchange(ref _remoteDisconnectNotified, 1) == 0)
++            {
++                _protocol.InvokeClientDisconnected(this);
++            }
+         }
+ 
+         protected override void Dispose(bool disposingManagedResources)
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/Proxy/LdnProxyUdpServer.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/Proxy/LdnProxyUdpServer.cs
+index 0c08283b958d1d0c1f3fa54f5d9ef917ba18581f..94abca4733257f2328042702045fc58e7eddbe63 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/Proxy/LdnProxyUdpServer.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/Proxy/LdnProxyUdpServer.cs
+@@ -62,7 +62,8 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm.Proxy
+ 
+         protected override void OnError(SocketError error)
+         {
+-            Logger.Error?.PrintMsg(LogClass.ServiceLdn, $"LdnProxyUdpServer caught an error with code {error}");
++            Logger.Error?.PrintMsg(LogClass.ServiceLdn,
++                $"LdnProxyUdpServer caught an error with code {error}; endpoint={Endpoint}, local={Socket?.LocalEndPoint}");
+         }
+ 
+         protected override void Dispose(bool disposingManagedResources)

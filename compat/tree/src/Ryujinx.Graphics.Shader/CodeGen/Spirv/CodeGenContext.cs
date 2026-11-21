@@ -387,8 +387,17 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             return TypeFloat(32);
         }
 
+        private bool _s2aFloat64Declared;
+
         public Instruction TypeFP64()
         {
+            // S2Arm（#1774）：用到 64 位浮点类型才声明 Float64（模块在 Generate 时才拼装，这里补声明不晚）
+            if (!_s2aFloat64Declared)
+            {
+                _s2aFloat64Declared = true;
+                AddCapability(Spv.Specification.Capability.Float64);
+            }
+
             return TypeFloat(64);
         }
     }

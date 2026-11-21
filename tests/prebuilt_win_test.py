@@ -130,6 +130,7 @@ class Direct(Base):   # ② ③
     def test_romfs_restore_skipped(self):
         os.environ['S2A_PREBUILT_TOOLS'] = str(make_pre(self.t / 'pre'))
         run, rec = self.run_obj()
+        (run.out / 'roots/tx@v1').mkdir(parents=True); (run.out / 'roots/tx@现行').write_text('tx@v1\n')   # 桩里的播种 / 轻阶段不提交：先放好现行
         oneclick_win.stages(run, 'tx', self.t / 'x', self.t / 'src')
         self.assertEqual([c[1] for c in rec.calls], ['seed.log', 'light.log'], '预编 RomFS 索引在：不还原依赖')
 

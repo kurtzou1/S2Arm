@@ -151,10 +151,69 @@ def mac_all(c):
     return dict(updated=[], checked=0, manual=True)
 
 
+class _GameProgress:
+    """这一款 S 级升级的整款进度（0–1）：作业层唯一一份，事件字段 sgradeProgress 与队列文件 progress 都是它，两端界面只认它。
+    为什么（玩家报修 D-QNA9，Mac 实机；Windows 同写法）：按段的粗进度（done / total = 第几段 / 共几段）和段内各模块自己的计数器
+    （直连抽取 20673/252686、某计数 5/6…）原先都用 done / total 发，界面拿到哪条就用哪条盖，加上轮询队列文件的粗进度，进度条在 50%、0%、80% 间来回跳。
+    口径同整单进度的按步算法（overall.py 的 _by_steps，期望可按事件手算）：(第几段 − 1 + 段内完成度) ÷ 段数，段内完成度 = 本段 progress 事件的 done / total；
+    只增不减（段内计数器换一个、从 0 重数都不回退）；段做完 = 第几段 ÷ 段数（最后一段做完前封顶 0.99），整款做完 = 1。
+    做法：升级期间包住 c.emit——段内各模块不用改，它们发的每条事件都顺带 sgradeProgress；队列文件（别的窗口 / 轮询读）节流写：涨够 1% 或隔 1 秒，段边界必写"""
+
+    def __init__(self, c, steps, on_progress):
+        import threading
+        import overall
+        self.c, self.steps, self.on_progress = c, steps, on_progress
+        self.meter, self.step, self.value = overall.Overall(), 1, 0.0
+        self.written, self.at, self.mutex = None, 0.0, threading.Lock()
+        self.own = "emit" in vars(c)   # 测试替身等把 emit 放在实例上：收尾还原它，不是删掉
+        self.emit = c.emit
+        c.emit = self.relay
+
+    def feed(self, kind, done=None, total=None, state=None):
+        with self.mutex:
+            v = self.meter.feed(kind, 0, None, state, self.step, max(1, self.steps), done, total)
+            self.value = max(self.value, v or 0.0)
+            return self.value
+
+    def save(self, force=False):
+        import time
+        if not self.on_progress:
+            return
+        with self.mutex:
+            now, v = time.monotonic(), self.value
+            if v == self.written or not (force or self.written is None or v - self.written >= 0.01 or now - self.at >= 1):
+                return
+            self.written, self.at = v, now
+        self.on_progress(v)
+
+    def relay(self, kind="progress", message="", done=None, total=None, **extra):
+        """段内模块发的事件：progress 的 done / total 喂进段内完成度；每条事件都带上整款进度"""
+        if kind == "progress":
+            self.feed(kind, done, total)
+        self.emit(kind, message, done=done, total=total, sgradeProgress=self.value, **extra)
+        if kind == "progress":
+            self.save()
+
+    def boundary(self, n):
+        """开始（n = 0）/ 第 n 段做完：照发按段的 done / total，整款进度落到 n ÷ 段数（全做完 = 1），队列文件必写"""
+        self.feed("progress", 1 if n else 0, 1)
+        if n and n >= self.steps:
+            self.feed("result", state="succeeded")
+        self.emit("progress", done=n, total=self.steps, sgradeProgress=self.value)
+        self.save(force=True)
+
+    def close(self):
+        if self.own:
+            self.c.emit = self.emit
+        else:
+            del self.c.emit
+
+
 def upgrade_game(c, on_progress=None):
     """作业 sgradeUpgradeGame：玩家对这一款点「S 级优化」才升级（11-17 维护者定，不自动）。Mac 运行版本补 S 级补丁（rewrite_refresh.refresh_mac）
     与可读瓦片版着色器（sgrade_bf.upgrade_mac）；有 iPhone 程序件的一并补（rewrite_refresh.refresh_ios，Windows 只有这一段）。
-    进度事件 done / total（每做完一段进一格），阶段事件 stageKey sgrade.mac / sgrade.bf / sgrade.ios；升级中这款开始游戏被拒（game_lock），别的游戏照常；
+    进度：这期间每条事件带 sgradeProgress（整款 0–1、只增不减，_GameProgress），on_progress(0–1) 节流写进队列；另照发按段的 done / total（每做完一段进一格），
+    阶段事件 stageKey sgrade.mac / sgrade.bf / sgrade.ios；升级中这款开始游戏被拒（game_lock），别的游戏照常；
     开始时写未完成标记、做完删——中途退出启动器，下次打开不续跑，catalog 标 sgradeIncomplete，玩家再点就是同一个单款升级（已做完的部分各步按记号跳过）"""
     import json, os, sys
     from rewrite_refresh import refresh_mac, refresh_ios
@@ -174,23 +233,24 @@ def upgrade_game(c, on_progress=None):
         atomic(marker, dict(task=c.task, pid=os.getpid()))
         steps = [k for k, on in (("mac", mac), ("bf", mac), ("ios", iphone)) if on]
         done = {}
-        c.emit("progress", done=0, total=len(steps))   # 界面画百分比（done / total，做完一段进一格）；段名看阶段事件 stageKey
-        if on_progress:
-            on_progress(0, len(steps))
-        for n, k in enumerate(steps, 1):
-            if k == "mac":
-                c.begin("补上 S 级优化（满屏 / 帧率 / 金手指）", n, len(steps), key="sgrade.mac")
-                done[k] = bool(refresh_mac(c, gid, runtime))   # 拿着这款的锁：起局拿不到，不用 hold
-            elif k == "bf":
-                c.begin("补上片上读取用的着色器（首次要几分钟）", n, len(steps), key="sgrade.bf")
-                done[k] = bool(sgrade_bf.upgrade_mac(c, gid, runtime))
-            else:
-                c.begin("补上 iPhone 版的 S 级优化", n, len(steps), key="sgrade.ios")
-                with packer.program_locks(c, [gid]):
-                    done[k] = bool(refresh_ios(c, [gid]))
-            c.emit("progress", done=n, total=len(steps))
-            if on_progress:
-                on_progress(n, len(steps))
+        meter = _GameProgress(c, len(steps), on_progress)
+        meter.boundary(0)   # 段名看阶段事件 stageKey
+        try:
+            for n, k in enumerate(steps, 1):
+                meter.step = n
+                if k == "mac":
+                    c.begin("补上 S 级优化（满屏 / 帧率 / 金手指）", n, len(steps), key="sgrade.mac")
+                    done[k] = bool(refresh_mac(c, gid, runtime))   # 拿着这款的锁：起局拿不到，不用 hold
+                elif k == "bf":
+                    c.begin("补上片上读取用的着色器（首次要几分钟）", n, len(steps), key="sgrade.bf")
+                    done[k] = bool(sgrade_bf.upgrade_mac(c, gid, runtime))
+                else:
+                    c.begin("补上 iPhone 版的 S 级优化", n, len(steps), key="sgrade.ios")
+                    with packer.program_locks(c, [gid]):
+                        done[k] = bool(refresh_ios(c, [gid]))
+                meter.boundary(n)
+        finally:
+            meter.close()
         marker.unlink(missing_ok=True)
     return dict(gameId=gid, updated=[gid] if any(done.values()) else [], steps=done, mac=mac, iphone=iphone)
 
@@ -246,7 +306,7 @@ def queue_status(c):
 
 def upgrade_batch(c):
     """作业 sgradeUpgradeBatch {gameIds}（也收单个 gameId）：见上方队列说明。跑队列时每款发 type=batch 事件 phase start / end（index / count，
-    end 带 status），每款内部照发单款的 progress（done / total，事件带 gameId）"""
+    end 带 status），每款内部的事件带 gameId 与整款进度 sgradeProgress（界面只认它；done / total 是段内计数，不当整款进度）"""
     import os, time
     from core import Cancelled, pid_start, read, trace
     ids = []
@@ -295,7 +355,7 @@ def upgrade_batch(c):
             c.r = dict(keep, gameId=cur)
             c.emit("batch", "", phase="start", index=index, count=count)
             try:
-                upgrade_game(c, on_progress=lambda d, t, g=cur: update(g, progress=round(d / t, 4) if t else 1.0))
+                upgrade_game(c, on_progress=lambda p, g=cur: update(g, progress=round(p, 4)))
                 state, reason = "done", ""
             except Cancelled:
                 raise

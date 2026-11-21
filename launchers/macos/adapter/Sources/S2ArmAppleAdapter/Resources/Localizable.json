@@ -6692,10 +6692,6 @@
   "en": "Recording the version now on iPhone"
  },
  {
-  "source": "这款游戏暂不支持：没找到任天堂官方图形接口（NVN / Vulkan / OpenGL），多见于自制或移植的程序。",
-  "en": "This game is not supported yet. No official Nintendo graphics API (NVN / Vulkan / OpenGL) was found; this is common for homebrew or ported programs."
- },
- {
   "source": "这款暂时打不了包，换一款官方游戏试试；如果确定是正版游戏，点「复制错误摘要」发给我们。",
   "en": "This game can't be packaged yet. Try an official game; if you are sure this is a retail game, click \"Copy error summary\" and send it to us."
  },
@@ -6778,10 +6774,6 @@
  {
   "source": "在开发者网站重新生成描述文件并勾上这张证书，下载后和证书一起重新导入。",
   "en": "Regenerate the provisioning profile on the developer website with this certificate selected, download it, and import it together with the certificate."
- },
- {
-  "source": "点「改用 Apple ID 登录」用 Apple ID 签名；或点「复制给证书发放人的话」发给对方，换成开发证书和开发描述文件后重新导入。",
-  "en": "Click “Sign In with Apple ID Instead” to sign with your Apple ID, or click “Copy Message for Certificate Issuer” and send it to them, then import the development certificate and profile you get back."
  },
  {
   "source": "在出包页「我的开发者证书」里重新导入证书和描述文件，或切回「Apple ID 签名」。",
@@ -10622,5 +10614,133 @@
  {
   "source": "苹果已经接受了验证码，但随后又要求再验证一次，再输也会一直这样，所以 S2Arm 先停下了。请改用在你自己的 iPhone 或 iPad 上登录着的那个 Apple ID 来登录（验证码会弹在那台设备上）；还不行请把诊断发给我们。",
   "en": "Apple accepted the verification code but then asked for another one, and it would keep doing that however many codes you enter, so S2Arm stopped. Sign in with the Apple ID that's signed in on your own iPhone or iPad instead (the code will appear on that device). If that still doesn't work, please send us a diagnostic."
+ },
+ {
+  "source": "直连库·采样模拟变体 {0}",
+  "en": "Direct library · sampler emulation variants {0}"
+ },
+ {
+  "source": "直连库·顶点补齐变体 {0}",
+  "en": "Direct library · padded vertex variants {0}"
+ },
+ {
+  "source": "直连库·计算管线 {0}",
+  "en": "Direct library · compute pipelines {0}"
+ },
+ {
+  "source": "直连库·拉取基础管线 {0}",
+  "en": "Direct library · base pipelines {0}"
+ },
+ {
+  "source": "Windows 的强制 ASLR 开着",
+  "en": "Windows Mandatory ASLR is on"
+ },
+ {
+  "source": "出包工具起不了子进程。",
+  "en": "The packing tools can't start child processes."
+ },
+ {
+  "source": "Windows 的强制 ASLR 开着：出包工具起不了子进程。",
+  "en": "Windows Mandatory ASLR is on: the packing tools can't start child processes."
+ },
+ {
+  "source": "打开「Windows 安全中心 → 应用和浏览器控制 → 漏洞利用保护设置 → 系统设置」，把「强制映像随机化（强制性 ASLR）」改回「使用默认值（关）」，再打一次包。",
+  "en": "Open Windows Security → App & browser control → Exploit protection settings → System settings, set \"Force randomization for images (Mandatory ASLR)\" back to \"Use default (Off)\", then package again."
+ },
+ {
+  "source": "游戏输入键 {0}",
+  "en": "Game input key {0}"
+ },
+ {
+  "source": "这是分发（发布）证书的描述文件，缺下面的权限：可以照常用它装「独立 App」（一个 App 一款游戏），通用 S2Arm 里的游戏用它签了打不开。",
+  "en": "This is a distribution (release) certificate profile and it lacks the entitlements below. You can still use it to install Standalone Apps (one app per game), but games in the universal S2Arm won't open when signed with it."
+ },
+ {
+  "source": "要用通用 S2Arm：改用 Apple ID 登录签名，或复制下面这段话发给证书发放人，换成开发证书和开发描述文件后再导入。",
+  "en": "To use the universal S2Arm: sign with your Apple ID instead, or copy the message below and send it to whoever issued the certificate, then import a development certificate and development profile."
+ },
+ {
+  "source": "调试权限（get-task-allow）——没有它，通用 S2Arm 里的游戏打不开（「独立 App」不受影响）",
+  "en": "Debugging (get-task-allow) — without it, games in the universal S2Arm can't open (Standalone Apps aren't affected)"
+ },
+ {
+  "source": "免费 Apple ID 有苹果的限制：同时最多装 3 个自己签的 App（AltStore / SideStore 也算），每 7 天最多注册 10 个 App ID；独立 App 每款占一个。",
+  "en": "A free Apple ID has Apple's limits: at most 3 self-signed apps installed at once (AltStore / SideStore count too), and at most 10 App IDs registered every 7 days. Each Standalone App uses one."
+ },
+ {
+  "source": "组这款的独立 App",
+  "en": "Building this game's Standalone App"
+ },
+ {
+  "source": "描述文件是显式 App ID，只能用它那一个包名 {0}：每款独立 App 和通用 S2Arm 都装成它，装一个会顶掉另一个。",
+  "en": "The profile uses an explicit App ID, so only its one bundle ID {0} can be used: every Standalone App and the universal S2Arm install as it, and installing one replaces the other."
+ },
+ {
+  "source": "现在用的证书缺「调试权限（get-task-allow）」（分发证书），通用 S2Arm 里的游戏打不开：在设置里把出法改成「独立 App」就能玩。",
+  "en": "The certificate in use lacks the debugging entitlement (get-task-allow) (it's a distribution certificate), so games in the universal S2Arm can't open. Switch the install style to Standalone App in Settings to play."
+ },
+ {
+  "source": "「{0}」的独立 App 要按新版重新出包：先给它「打 iPhone 包」，再推到 iPhone。",
+  "en": "The Standalone App for \"{0}\" needs to be built again for the new version: run \"Build for iPhone\" for it, then push it to the iPhone."
+ },
+ {
+  "source": "「{0}」的独立 App 这次没更新：{1}",
+  "en": "The Standalone App for \"{0}\" wasn't updated this time: {1}"
+ },
+ {
+  "source": "现在用的证书是分发（发布）证书，缺「调试权限（get-task-allow）」：通用 S2Arm 里的游戏用它签了打不开。在设置里把出法改成「独立 App」（一个 App 一款游戏）就能玩；或改用 Apple ID 登录签名、换成开发证书。",
+  "en": "The certificate in use is a distribution (release) certificate and lacks the debugging entitlement (get-task-allow): games in the universal S2Arm won't open when signed with it. Switch the install style to Standalone App (one app per game) in Settings to play, or sign with your Apple ID or a development certificate instead."
+ },
+ {
+  "source": "你的描述文件是显式 App ID，只有一个包名：每款独立 App 和通用 S2Arm 都只能装成它，装一个会顶掉另一个（存档跟着那个 App 走）。想同时装多款，请让证书发放人给通配（*）的描述文件。",
+  "en": "Your profile uses an explicit App ID with only one bundle ID: every Standalone App and the universal S2Arm can only install as it, and installing one replaces the other (saves stay with that app). To install several games side by side, ask whoever issued the certificate for a wildcard (*) profile."
+ },
+ {
+  "source": "免费 Apple ID 有苹果的限制：同时最多装 3 个自己签的 App（AltStore / SideStore 也算），每 7 天最多注册 10 个 App ID；独立 App 每款占一个。装满了就在 iPhone 上删掉不玩的那个再装。",
+  "en": "A free Apple ID has Apple's limits: at most 3 self-signed apps installed at once (AltStore / SideStore count too), and at most 10 App IDs registered every 7 days. Each Standalone App uses one. If you hit the limit, delete an app you no longer play from the iPhone and install again."
+ },
+ {
+  "source": "推到 iPhone 的方式选「独立 App」，用这张证书照常能玩；要用通用 S2Arm：点「改用 Apple ID 登录」用 Apple ID 签名，或点「复制给证书发放人的话」发给对方，换成开发证书和开发描述文件后重新导入。",
+  "en": "Choose “Standalone app” as the way games go to your iPhone and this certificate works as usual. To use the S2Arm app instead, click “Sign In with Apple ID Instead” to sign with your Apple ID, or click “Copy Message for Certificate Issuer” and send it to them, then import the development certificate and profile you get back."
+ },
+ {
+  "source": "先在 iPhone 上退出这款游戏，再删。",
+  "en": "Quit this game on the iPhone first, then remove it."
+ },
+ {
+  "source": "没能从 iPhone 上卸掉这款的独立 App：确认 iPhone 连着、已解锁，再试一次。",
+  "en": "Couldn't remove this game's standalone app from the iPhone. Make sure the iPhone is connected and unlocked, then try again."
+ },
+ {
+  "source": "从 iPhone 上卸掉这款的独立 App",
+  "en": "Removing this game's standalone app from the iPhone"
+ },
+ {
+  "source": "这款在电脑上的游戏文件夹不在了（被删或挪走），没有装到 iPhone。",
+  "en": "This game’s folder on the computer is gone (deleted or moved); nothing was installed on the iPhone."
+ },
+ {
+  "source": "在启动器里重新添加这款游戏、打一次 iPhone 包，再装到 iPhone 或续签；手机上已装的 App 和存档不受影响。",
+  "en": "Add this game again in the launcher and build the iPhone package once, then install or renew. The app already on the phone and its saves aren’t affected."
+ },
+ {
+  "source": "写进这款的游戏文件夹",
+  "en": "Writing to this game’s folder"
+ },
+ {
+  "source": "应用不完整，请重新安装 S2Arm。",
+  "en": "The app is incomplete. Reinstall S2Arm."
+ },
+ {
+  "source": "不另占空间",
+  "en": "no extra space"
+ },
+ {
+  "source": "这款游戏暂时出不了包：没认出它用的图形接口（NVN / Vulkan / OpenGL）。请把诊断发给我们，我们会核对是不是没认出来。",
+  "en": "This game can't be packed yet: we couldn't identify which graphics API it uses (NVN / Vulkan / OpenGL). Please send us a diagnostic so we can check whether we missed it."
+ },
+ {
+  "source": "想正常玩，请换一台地址空间更大的设备（比如内存更大的 Mac），或等后续版本改进；游戏照常能启动。",
+  "en": "To play normally, use a device with more address space (such as a Mac with more memory), or wait for a later version; the game still starts."
  }
 ]

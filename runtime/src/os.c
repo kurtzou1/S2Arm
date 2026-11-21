@@ -14,7 +14,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #endif
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
 #include <limits.h>
 #include <time.h>
 #include <string.h>
@@ -132,7 +132,7 @@ __attribute__((constructor(100))) static void logfd_init(void) {
     int fd = dup(2); if (fd >= 0) g_s2a_logfd = fd;
 }
 
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
 // Android 私有启动接缝：runtime 单次准入后、loader / NativeAOT 服务启动前调用。
 // constructor 尚不知道 app 私有目录；此处不替换 LOG，也不在信号处理里调用 Android logger。
 __attribute__((visibility("hidden"))) int s2a_android_session_log_start(const char *state_dir, uint64_t session) {

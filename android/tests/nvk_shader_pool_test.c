@@ -123,6 +123,7 @@ int rp_tex_snap_by_id(int id, tex_t *t, view_t *v, int *h) {
     memset(t, 0, sizeof *t); memset(v, 0, sizeof *v); t->d.format = NVN_FORMAT_RGBA8; t->d.target = NVN_TEXTURE_TARGET_2D; t->d.depth = 1;
     if (separate_fixture == 3) t->d.target = NVN_TEXTURE_TARGET_BUFFER;
     if (separate_fixture == 4) t->d.format = NVN_FORMAT_RGBA8_UI2F;   // 登记了，但 UI2F 不出编译事实
+    if (separate_fixture == 5 && id != 77) { t->d.target = NVN_TEXTURE_TARGET_2D_ARRAY; t->d.depth = id == 78 ? 2 : 8; }   // 78 / 79：二维数组贴图，层数 2 / 8（事实里的 array_length）
     *h = id == 77 && separate_fixture != 3; if (*h) { v->set_target = 1; v->target = NVN_TEXTURE_TARGET_RECTANGLE; } return 1;
 }
 // 用户常量缓冲夹具：rp_pool_find 只认这块宿主内存（真实实现在 rp_entry.c，查登记过的池）
@@ -184,10 +185,20 @@ static int32_t fake_compile(uint64_t session, uint64_t gen, s2a_direct_bytes req
     }
     if (fake_cs_success > 1) {
         const char *code = fake_cs_success == 2 ? S2A_SAMPLER_QUERY_SPV : S2A_SAMPLER_SAMPLE_SPV;
-        const char *bindings = "[{\"stage\":\"cs\",\"kind\":\"storage\",\"set\":1,\"binding\":0,\"count\":1,\"rw\":true,\"cbSlot\":0,\"cbOffset\":784,\"nvnSlot\":0},"
+        // 4：整池数组（v2 结果：贴图池 8448 项 + 采样器池 1280 项，#1594 片 8）；5：同样 8448 项但不带 pool 的普通数组（计算侧仍不接，ARRAY_UNSUPPORTED）；
+        // 6：带 pool 但池长只有 1（形状不对，整份拒，走 compute_program_parse_failed 而不是 ARRAY_UNSUPPORTED）
+        const char *bindings = fake_cs_success == 4 ?
+            "[{\"stage\":\"cs\",\"kind\":\"texture\",\"source\":\"texture\",\"set\":2,\"binding\":0,\"count\":8448,\"pool\":\"texture\"},"
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"source\":\"texture\",\"set\":2,\"binding\":1,\"count\":1280,\"pool\":\"sampler\"}]" :
+            fake_cs_success == 5 ?
+            "[{\"stage\":\"cs\",\"kind\":\"texture\",\"source\":\"texture\",\"set\":2,\"binding\":0,\"slot\":8,\"count\":8448}]" :
+            fake_cs_success == 6 ?
+            "[{\"stage\":\"cs\",\"kind\":\"texture\",\"source\":\"texture\",\"set\":2,\"binding\":0,\"count\":1,\"pool\":\"texture\"}]" :
+            "[{\"stage\":\"cs\",\"kind\":\"storage\",\"set\":1,\"binding\":0,\"count\":1,\"rw\":true,\"cbSlot\":0,\"cbOffset\":784,\"nvnSlot\":0},"
             "{\"stage\":\"cs\",\"kind\":\"texture\",\"source\":\"texture\",\"set\":2,\"binding\":0,\"slot\":72,\"count\":1}]";
+        const int ver = fake_cs_success >= 4 ? 2 : 1;   // 4..6 是 v2 结果（pool 字段只在 v2 里有合同）
         char result[8192];
-        int n = snprintf(result, sizeof result, "{\"schema\":\"s2a-direct-program-v1\",\"content\":{\"contract\":\"s2a-direct-program-content-v1\",\"kind\":\"compute\",\"hasUnalignedStorageBuffer\":false,\"c0Reads\":[],\"supportReads\":[],\"supportLayout\":{\"requiredSize\":16},\"stages\":[{\"stage\":\"cs\",\"spirv\":\"%s\"}],\"bindings\":%s}}", code, bindings);
+        int n = snprintf(result, sizeof result, "{\"schema\":\"s2a-direct-program-v%d\",\"content\":{\"contract\":\"s2a-direct-program-content-v%d\",\"kind\":\"compute\",\"hasUnalignedStorageBuffer\":false,\"c0Reads\":[],\"supportReads\":[],\"supportLayout\":{\"requiredSize\":16},\"stages\":[{\"stage\":\"cs\",\"spirv\":\"%s\"}],\"bindings\":%s}}", ver, ver, code, bindings);
         CHECK(n > 0 && (size_t)n < sizeof result, "compute result fixture fits");
         s2a_direct_bytes payload = {(const uint8_t *)result, (uint64_t)n};
         return emit(sink, payload);
@@ -749,6 +760,34 @@ static void graphics_fact_reuse_test(void) {
     rp_shader_reset(); rp_state_reset();
 }
 
+// 组合槽里的二维数组贴图：事实的 array_length 是贴图层数（texture_facts.c LAYERS_COUNT），不是「槽是数组」。
+// 编译器没查过的槽换一张层数不同的数组贴图，复用同一份程序、不再编；查过的槽整条事实（含层数）仍在键里，变了照常重编。
+static void graphics_fact_array_length_test(void) {
+    rp_shader_reset(); s2a_source_clear(); rp_state_reset(); nvn_unimpl_reset();
+    uint8_t keys[3][8]; for (unsigned st = 0; st < 3; st++) gs_source(st, 0, keys[st]);
+    memset(&gs_program, 0, sizeof gs_program); gs_program.magic = MAGIC('P','R','O','G');
+    gs_program.serial = 900; gs_program.nstage = 3;
+    memset(gs_stages, 0xff, sizeof gs_stages); memset(gs_keys, 0, sizeof gs_keys);
+    for (unsigned st = 0; st < 3; st++) { gs_stages[st] = (uint8_t)st; memcpy(gs_keys[st], keys[st], 8); }
+    gs_keys_ok = 7; p_bind_program_id bind = {&gs_program, gs_program.serial, 0x1f, 0};
+    CHECK(rp_state_op(OP_BIND_PROGRAM, &bind, sizeof bind + 8), "array length program binds");
+    bind_pools(100); fake_gs_success = fake_gs_fact_deps = 1; separate_fixture = 5; fake_reg_changes = 0;
+    struct rp_shader_req q = {0}; q.prim = 4; const struct rp_prog *p = NULL;
+    rp_S.tex[0][2] = 78;   // 没查过的槽里常驻一张 2 层的数组贴图
+    compiler_calls = 0; CHECK(!rp_shader_resolve(&q, &p) && p && compiler_calls == 1, "array length initial real producer resolves");
+    const struct rp_prog *first = p;
+    rp_S.tex[0][2] = 79;   // 同一槽换成 8 层：身份只差没查过的槽的 array_length
+    CHECK(!rp_shader_resolve(&q, &p) && p == first && compiler_calls == 1, "unqueried 2d-array layer count reuses compiled program");
+    rp_S.tex[1][5] = 78;
+    CHECK(!rp_shader_resolve(&q, &p) && p == first && compiler_calls == 1, "other stage unqueried 2d-array texture reuses program");
+    // 负对照：查过的槽（依赖里的 texture-fact:vs:8:-1）
+    rp_S.tex[0][0] = 78;
+    CHECK(!rp_shader_resolve(&q, &p) && compiler_calls == 2, "queried slot becoming a 2d-array recompiles");
+    rp_S.tex[0][0] = 79;
+    CHECK(!rp_shader_resolve(&q, &p) && compiler_calls == 3, "queried 2d-array layer count stays in the key and recompiles");
+    fake_gs_success = fake_gs_fact_deps = 0; separate_fixture = 0; fake_reg_changes = 1;
+    rp_shader_reset(); rp_state_reset();
+}
 static void graphics_high_slot_test(void) {
     rp_shader_reset(); s2a_source_clear(); rp_state_reset(); nvn_unimpl_reset();
     memset(&gs_program, 0, sizeof gs_program); gs_program.magic = MAGIC('P','R','O','G');
@@ -1275,6 +1314,48 @@ static void query_sampler_test(void) {
     fake_cs_success = 0;
 }
 
+// #1594 片 8：计算阶段整池数组的布局与日志键（真解析 + 生产 build_compute / layout_ent）。
+//   期望（手算）：v2 结果里贴图池 count 8448、采样器池 count 1280 → 两个布局项：NVN_RB_TEXP / 贴图 / count 8449（池长 + 表尾 dummy）、
+//   NVN_RB_SAMPP / 采样器 / count 1281，只给计算阶段，着色器装载 1 次，没有任何未接 / 解析失败记账；
+//   同样 8448 项但不带 pool 的普通数组：仍拒（装载 0 次）、记 texture_pool_array_unsupported 一次，原因带 stage / 长度与这份代码的 8 字节程序键
+//   （rp_S.skey[5] 按字节十六进制，同现编日志里的键），多个身份 / 多份代码的同类拒绝才能逐个对上
+static void compute_pool_test(void) {
+    for (int mode = 4; mode <= 6; ++mode) {
+        rp_state_reset(); rp_shader_reset(); nvn_unimpl_reset(); source(); bind_pools(100); separate_fixture = 1; last_red[0] = 0;
+        rp_S.skey[0][0] ^= 0xff;   // source() 把图形 VS 阶段的键也设成同一个值；错开它，日志里取错阶段的键才会被抓到（计算只认 skey[5]）
+        char needle[48];   // 键是 source() 登记的那份快照的哈希前 8 字节（计算阶段键 rp_S.skey[5]，与固定来源一一对应，不能随意改）
+        snprintf(needle, sizeof needle, "程序键 %02x%02x%02x%02x%02x%02x%02x%02x", rp_S.skey[5][0], rp_S.skey[5][1], rp_S.skey[5][2], rp_S.skey[5][3],
+                 rp_S.skey[5][4], rp_S.skey[5][5], rp_S.skey[5][6], rp_S.skey[5][7]);
+        fake_cs_success = mode; cs_loads = 0;
+        const struct rp_prog *p = NULL;
+        const int rc = rp_shader_resolve_compute(&p);
+        if (mode == 4) {
+            CHECK(rc == 0 && p && p->is_compute && p->nent[0] == 2, "compute pool fixture loads with two layout entries (rc=%d red=%s)", rc, last_red);
+            if (rc == 0 && p && p->nent[0] == 2) {
+                const nvn_gpu_layout_ent *t = &p->ent[0][0], *s = &p->ent[0][1];
+                CHECK(t->src_kind == NVN_RB_TEXP && t->cls == NVN_GPU_RES_TEX && t->count == 8449 && t->set == 2 && t->binding == 0 && t->stages == (1u << NVN_GPU_SH_CS),
+                      "compute texture pool entry: TEXP, texture class, 8448 + 1 dummy, CS only");
+                CHECK(s->src_kind == NVN_RB_SAMPP && s->cls == NVN_GPU_RES_SAMP && s->count == 1281 && s->set == 2 && s->binding == 1 && s->stages == (1u << NVN_GPU_SH_CS),
+                      "compute sampler pool entry: SAMPP, sampler class, 1280 + 1 dummy, CS only");
+            }
+            CHECK(cs_loads == 1 && nvn_unimpl_count("shader", "texture_pool_array_unsupported") == 0 && nvn_unimpl_count("shader", "compute_program_parse_failed") == 0,
+                  "compute pool result loads the shader once with no unimplemented accounting (loads=%d red=%s)", cs_loads, last_red);
+        } else if (mode == 5) {
+            CHECK(rc == -1 && !p && cs_loads == 0 && nvn_unimpl_count("shader", "texture_pool_array_unsupported") == 1,
+                  "plain 8448-element compute array is still rejected as array_unsupported (rc=%d loads=%d)", rc, cs_loads);
+            CHECK(strstr(last_red, "stage cs descriptor array length=8448 exceeds 64") && strstr(last_red, needle),
+                  "rejection line carries stage, length and the 8-byte program key (%s): %s", needle, last_red);
+        } else {   // 6：形状不对的池数组走「解析失败」的具名行，原因 + 程序键同样齐全，不记成数组未接
+            CHECK(rc == -1 && !p && cs_loads == 0 && nvn_unimpl_count("shader", "compute_program_parse_failed") == 1 &&
+                  nvn_unimpl_count("shader", "texture_pool_array_unsupported") == 0,
+                  "malformed compute pool array is a named parse failure, not array_unsupported (rc=%d loads=%d)", rc, cs_loads);
+            CHECK(strstr(last_red, "compute pool array length is outside 2..65534") && strstr(last_red, needle),
+                  "parse-failure line carries the shape reason and the 8-byte program key (%s): %s", needle, last_red);
+        }
+    }
+    fake_cs_success = 0; separate_fixture = 0;
+}
+
 // ---- 新层查出包预编库（LibPack，shaders/direct/b-<DMSH_CHAIN>-vk）的三段程序：vs + fs + gs ----
 // 容器在临时目录里现写（格式同 libpack_vk_test.c / LibPack.cs：头 48 字节 + 分片表 + (键, 种类) 升序记录），走真实 libpack_vk.c。
 // 期望手算：键按 NVN 位序紧排 vs / fs / gs；几何段按输入图元取 _vg<t>（种类 112+t / 120+t）——_vg0 是 24 字节（头 + 1 条 OpNop）、
@@ -1464,6 +1545,7 @@ int main(int argc, char **argv) {
     }
     if (argc != 1) return 2;
     graphics_fact_reuse_test();
+    graphics_fact_array_length_test();
     graphics_high_slot_test();
     graphics_active_ubo_test();
     graphics_alias_test(1);
@@ -1472,6 +1554,7 @@ int main(int argc, char **argv) {
     graphics_ubo_handle_fact_test();
     graphics_reject_context_test();
     query_sampler_test();
+    compute_pool_test();
     unsetenv("S2A_SHADER_REVISION_ROOT"); unsetenv("S2A_DIRECT_CACHE_DIR"); rp_state_reset(); source();
     for (int cs = 0; cs < 2; cs++) {
         run_case(cs, 0, 0, "texture_pool_missing");

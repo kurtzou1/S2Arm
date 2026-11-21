@@ -175,7 +175,7 @@ class ContractTests(unittest.TestCase):
             validate("event", after)
             self.assertEqual(set(before) - set(after), set())
             for key in before:
-                if key not in ("timestamp", "elapsed", "result"):
+                if key not in ("timestamp", "elapsed", "advancedAt", "result"):   # advancedAt：上次前进的墙钟时刻，同 timestamp 每次跑不同
                     self.assertEqual(before[key], after[key], key)
         for key, value in old[-1]["result"].items():
             self.assertEqual(value, new[-1]["result"][key])

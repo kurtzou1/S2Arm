@@ -9,7 +9,7 @@
 #include <pthread.h>
 #if defined(__APPLE__)
 #include <mach-o/getsect.h>
-#elif defined(__ANDROID__)
+#elif defined(__ANDROID__) || defined(__OHOS__)
 int s2a_android_is_host_code(uint64_t address);
 #else
 #error Unsupported native xstack platform
@@ -19,7 +19,7 @@ int s2a_android_is_host_code(uint64_t address);
 extern const uint32_t xs_stubs[], xs_leaf_stubs[];
 // entry.S uses direct PC-relative references within this DSO. ELF must not
 // preempt these two private objects; keep Apple's existing visibility.
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
 #define XS_INTERNAL __attribute__((visibility("hidden")))
 #else
 #define XS_INTERNAL
@@ -95,8 +95,15 @@ int sw_xstack_stop_boundary(void) {
     return s && s->gtop && (s->cur == s->top || s->cur + 832 == s->top);
 }
 // 地址是不是宿主自己的代码（主映像 __TEXT）：宿主借 SDK 建的客体线程入口是宿主函数，要跑宿主栈
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
 int sw_is_host_code(uint64_t address) {
+#if defined(__OHOS__)
+    // OHOS guest images are signed ELF carriers. dl_iterate_phdr sees their
+    // executable segments too; the registered guest module owns classification.
+    // Otherwise child guest threads would run on pthread host stacks and their
+    // IPC buffers would correctly fail the guest memory mapping check.
+    if (module_of((const void *)(uintptr_t)address)) return 0;
+#endif
     return s2a_android_is_host_code(address);
 }
 #else

@@ -177,7 +177,7 @@ def run(args):
     return subprocess.CompletedProcess(['spirv-cross', *args], rc, out, e)
 
 
-if __name__ == '__main__':   # spvc_inproc.py lib | cli：打印库 / 命令行路径（首次按需编；direct_lib.sh 在 Windows 上把命令行目录放进 PATH）
+if __name__ == '__main__':   # spvc_inproc.py lib | cli：打印库 / 命令行路径（首次按需编；direct_lib.py 在 Windows 上把命令行目录放进 PATH）
     import sys as _s
     if _s.argv[1:] not in (['lib'], ['cli']): _s.exit('用法：spvc_inproc.py lib | cli')
     print(lib_path() if _s.argv[1] == 'lib' else cli_path())

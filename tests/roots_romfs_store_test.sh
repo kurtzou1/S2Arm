@@ -60,7 +60,7 @@ A=$(ROOT_OWN_ROMFS=1 root_begin g ui2); B=$(root_begin g rw2); echo rw > $B/rw.t
 rm -f $A/romfs/a.bin && echo a2 > $A/romfs/a.bin; ROOT_REPLAY='romfs' root_commit g ui2 2> /dev/null
 C=$(root_cur g); ck "并发重放：现行 = ui2、romfs 是存储软链且 a.bin=a2、先提交的 rw.txt 在、存储只读" '[ "$(basename $C)" = g@ui2 ] && [ -L $C/romfs ] && [ "$(cat $C/romfs/a.bin)" = a2 ] && [ -f $C/rw.txt ] && [ -z "$(find $T/roots/.romfs_store/g/ -perm -u+w ! -type d -print -quit)" ]'
 # 旧格式根（romfs 是真目录，现网全部存量）：开工照旧克隆，提交收进存储
-mkdir -p $T/roots/k@old && cp -R $O/romfs $O/exefs $T/roots/k@old/ && ln -s k@old $T/roots/k@现行
+mkdir -p $T/roots/k@old && cp -R $O/romfs $O/exefs $T/roots/k@old/ && printf '%s\n' k@old > $T/roots/k@现行
 W=$(root_begin k n0); ( echo X > $W/romfs/a.bin ) 2> /dev/null; w5=$?; root_abort k n0
 ck "旧格式根开工：克隆来的 romfs 是真目录但已只读，写入失败（rc=${w5}）" '[ $w5 != 0 ]'
 W=$(root_begin k n1) && root_commit k n1; C=$(root_cur k)

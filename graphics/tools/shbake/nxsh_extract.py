@@ -12,7 +12,7 @@ import nxfmt
 sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'translator'))); import nvn_key   # Switch 1 键规则（宿主 nvn_key.h 同一口径）
 # 仓库里唯一的 RomFS 遍历（graphics/nvn/tools/romfs_list.py：walk 同 os.walk，heads 给清单里的文件头，同一份 RomFS 只读一次）
 sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'nvn', 'tools'))); import romfs_list
-sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'tools'))); from pool_workers import process_pool_size   # 进程池路数（Windows 至多 61，#1332）
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'tools'))); from pool_workers import process_pool_size; from progress import Ticker   # 进程池路数（Windows 至多 61，#1332）
 sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'translator'))); import mdb1   # Media.Vision 的 MVGL（MDB1）归档逐条目解出（时空异客等）
 _NXFMT_SRC = 'graphics/tools/nxfmt.py'  # 字面路径给 pack/stage_inputs.py 收进抽取 / 直连库的源码键
 if os.path.basename(nxfmt.__file__) != os.path.basename(_NXFMT_SRC):
@@ -1073,23 +1073,15 @@ def work_kpka(args):   # RE 引擎 pak 的一批条目（已按补丁链取最�
         if b'\x34\x12\x76\x98' in data or data[:4] in (b'SARC', b'Yaz0', b'BAHS', b'\x28\xb5\x2f\xfd'): visit(f'kpka:{os.path.basename(p)}@{h:016x}', data, rows, blobs, stat, zl=False)
         else: undecoded(f'kpka:{os.path.basename(p)}@{h:016x}', data)   # 不进 visit 的条目（没有 NVN 魔数 / 容器魔数）也报：里面可能还有一层压缩
     flush(blobs, outdir); return rows, stat
-def scan_unity(root, files, stat, known=None):
-    """Unity 资源（unity_res.py）：先读 UnityFS 资源包（Shader 带类型树，记下借给播放器数据），再读不带类型树的序列化文件。
-    每个代码块条目里的着色器来源记 unity:<文件>[//<包内文件>]@<对象>#<平台>.<分段>、变体号 = 条目号（同一条目的 vs + ps = 一个程序，「# 变体组」规则配）。返回 (rows, blobs)"""
+def _unity_file(kind, p, root, rows, blobs, stat, tt):
+    """一个 Unity 文件（kind = 'b' 资源包 / 'd' 播放器序列化文件）：每个代码块条目里的着色器来源记 unity:<文件>[//<包内文件>]@<对象>#<平台>.<分段>、
+    变体号 = 条目号（同一条目的 vs + ps = 一个程序，「# 变体组」规则配）。tt = [Shader 类型树]（不带类型树的文件借它）"""
     import unity_res
-    rows, blobs, tt = [], {}, [None]
     def entries(name, b):
         for pid, plat, si, i, ent in unity_res.shader_entries(b, tt, stat):
             r = []; _scan_blob('e', ent, r, blobs, stat)
             for k, st, _, _ in r: rows.append((k, st, f'unity:{name}@{pid:x}#{plat}.{si}', i))
-    heads = {}
-    for p in files:   # known = 调用方给的文件头表（RomFS 清单前 32 字节，判下面两种文件够用）；表里没有的才读盘
-        if known is not None and p in known: heads[p] = known[p]; continue
-        try:
-            with romfs_list.open_file(p) as f: heads[p] = f.read(32)
-        except OSError: pass
-    for p in files:   # 资源包先（类型树在这里）
-        if not unity_res.is_bundle(heads.get(p, b'')): continue
+    if kind == 'b':
         # 只读映射 + 逐个节点解（unity_res.iter_bundle）：原先整个包读进内存、全部解开再每个节点复制一份，
         #   v0.3.0 Windows 8 GB 机 3.45 GB 的 Unity 游戏第一个文件就 MemoryError
         try:
@@ -1101,8 +1093,37 @@ def scan_unity(root, files, stat, known=None):
             method = re.search(r'压缩方式 \d+（([^）]+)）', str(error))
             reason = method.group(1) if method else '其他'
             stat[f'UnityFS 解不开（{reason}）'] += 1
-            continue
+            return
         stat['UnityFS 资源包'] += 1
+    else:
+        try: entries(_rel(p, root), romfs_list.read_file(p))
+        except Exception: stat['Unity 序列化文件解析失败'] += 1
+NO_TT = 'Unity Shader 没有类型树可用（跳过）'
+def work_unity(args):   # 进程池里的一个 Unity 文件 → (rows, stat, 本文件里第一份 Shader 类型树, 着色器字节)
+    #   字节交回主进程、按文件顺序先到先得合并后一次落盘（不在工作进程里各写各的）：Unity 条目里同键可有尾部不同的几份，
+    #   各进程各写一份时读端取哪份随进程号变（丝之歌 45 键）；合并在主进程才与原串行逐字节相同
+    root, kind, p, rt = args; rows, blobs, stat, tt = [], {}, collections.Counter(), [rt]
+    _unity_file(kind, p, root, rows, blobs, stat, tt)
+    return rows, stat, tt[0], blobs
+def pmap(pool, fn, tasks, tk):
+    """进程池跑一组任务：完成一个计一个（tools/progress.py Ticker，不按提交顺序等），结果按提交顺序交回（来源取第一个，顺序决定 index.tsv 的「首个来源」）"""
+    futs = [pool.submit(fn, t) for t in tasks]
+    for _ in cf.as_completed(futs): tk.step()
+    return [f.result() for f in futs]
+def scan_unity(root, files, stat, known=None, pool=None):
+    """Unity 资源（unity_res.py）：先读 UnityFS 资源包（Shader 带类型树，记下借给播放器数据），再读不带类型树的序列化文件。返回 rows（字节已由各工作进程落盘）。
+    逐文件进进程池（11-20 丝之歌：原先在主进程串行，2068 个资源包 41.8 秒单核、进度不动）。类型树：资源包各自用自己的；
+    播放器数据借文件顺序里第一份（同原串行：第一份出现后就一直是它）；资源包里有 Shader 因本包还没见到类型树而跳过、别的包有类型树的，借第一份重读这个包。
+    返回 (rows, blobs)，blobs 由调用方落盘；没给进程池（单测）在本进程一个线程里逐个跑"""
+    heads = {}
+    for p in files:   # known = 调用方给的文件头表（RomFS 清单前 32 字节，判下面两种文件够用）；表里没有的才读盘
+        if known is not None and p in known: heads[p] = known[p]; continue
+        try:
+            with romfs_list.open_file(p) as f: heads[p] = f.read(32)
+        except OSError: pass
+    import unity_res
+    bund = [p for p in files if unity_res.is_bundle(heads.get(p, b''))]   # 资源包先（类型树在这里）
+    data = []
     for p in files:   # 播放器数据：Unity 序列化文件 v17–40
         h = heads.get(p, b'')
         if len(h) < 20 or unity_res.is_bundle(h) or h[16] > 1: continue
@@ -1114,8 +1135,24 @@ def scan_unity(root, files, stat, known=None):
             if len(h) < 32: continue   # 文件长在偏移 24 的 8 字节
             declared_size = struct.unpack_from('>Q', h, 24)[0]
         if declared_size != romfs_list.file_size(p): continue   # 头里记的文件长 = 实际长（动森 34 个文件头前几项碰巧像，这一项不像）
-        try: entries(_rel(p, root), romfs_list.read_file(p))
-        except Exception: stat['Unity 序列化文件解析失败'] += 1
+        data.append(p)
+    if not bund and not data: return [], {}
+    if pool is None:
+        with cf.ThreadPoolExecutor(1) as one: return scan_unity(root, files, stat, heads, one)
+    tk = Ticker('抽取·S2Arm（Unity）', len(bund) + len(data))
+    rb = pmap(pool, work_unity, [(root, 'b', p, None) for p in bund], tk)
+    rt = next((r[2] for r in rb if r[2] is not None), None)
+    redo = [i for i, r in enumerate(rb) if r[1][NO_TT] and rt is not None]
+    for i, r in zip(redo, pmap(pool, work_unity, [(root, 'b', bund[i], rt) for i in redo], Ticker('抽取·S2Arm（Unity 借类型树）', len(redo)))): rb[i] = r
+    rd = pmap(pool, work_unity, [(root, 'd', p, rt) for p in data], tk)
+    if rt is None:   # 资源包里一份类型树都没有：同原串行，播放器数据里第一份出现后借给其后的文件
+        rt = next((r[2] for r in rd if r[2] is not None), None)
+        redo = [i for i, r in enumerate(rd) if r[1][NO_TT] and rt is not None]
+        for i, r in zip(redo, pmap(pool, work_unity, [(root, 'd', data[i], rt) for i in redo], Ticker('抽取·S2Arm（Unity 借类型树）', len(redo)))): rd[i] = r
+    rows, blobs = [], {}
+    for r, s, _, b in rb + rd:
+        rows += r; stat.update(s)
+        for k, v in b.items(): blobs.setdefault(k, v)   # 先到先得，同原串行 _scan_blob
     return rows, blobs
 def work_casc(args):
     import casc_flat
@@ -1184,8 +1221,8 @@ if __name__ == '__main__':
                 if str(e) == '索引加密' or isinstance(e, ue_pak.Corrupt): files.remove(pp)
                 continue
             files.remove(pp); stat['pak'] += 1; stat['pak 条目'] += len(E)
-            with contextlib.nullcontext(pool) as ex:
-                for r, s_ in ex.map(work_pak, [(pp, E[i::J * 8], outdir, key) for i in range(J * 8)]): rows += r; stat.update(s_)
+            T = [(pp, E[i::J * 8], outdir, key) for i in range(J * 8)]
+            for r, s_ in pmap(pool, work_pak, T, Ticker('抽取·S2Arm', len(T))): rows += r; stat.update(s_)
         import re_pak
         kp = [f for f in files if f.lower().endswith('.pak') and re_pak.is_pak(f)]   # RE 引擎 pak：按补丁链取每个文件的最新版逐条解出再扫，pak 本身不进普通文件 / zlib 分段扫描
         for base, chain in re_pak.chains(kp).items():
@@ -1194,28 +1231,30 @@ if __name__ == '__main__':
             for p in chain: files.remove(p)
             stat['RE pak'] += len(chain); stat['RE pak 文件（取最新版）'] += len(E); stat['RE pak 被补丁换掉的旧版（不扫）'] += shadowed
             E.sort(key=lambda e: (e[0], e[2]))   # 同一 pak 内按偏移顺序读
-            with contextlib.nullcontext(pool) as ex:
-                for r, s_ in ex.map(work_kpka, [(E[i::J * 8], outdir) for i in range(J * 8)]): rows += r; stat.update(s_)
+            T = [(E[i::J * 8], outdir) for i in range(J * 8)]
+            for r, s_ in pmap(pool, work_kpka, T, Ticker('抽取·S2Arm', len(T))): rows += r; stat.update(s_)
         import kitpak, hgpak
         for m in (kitpak, hgpak):   # 带索引 / 分卷的厂商档案（11-02 着色器容器族 B 组：Unravel Two 的 kit! 索引 + 数据卷、No Man's Sky 的 HGPAK）：按条目切成任务逐条解出，档案本身不进普通文件 / 分段扫描
             try: E, taken = m.jobs(files, pkz_oodle, heads=hd)
             except (ValueError, RuntimeError) as e: stat['【红】厂商档案读不了'] += 1; print(f'【红】{m.__name__}：目录读不了（{e}）', file=sys.stderr, flush=True); continue
             if not taken: continue
             files = [f for f in files if f not in taken]; stat[m.__name__] += len(taken)
-            with contextlib.nullcontext(pool) as ex:
-                for r, s_ in ex.map(work_members, [(root, m.__name__, e, outdir) for e in E]): rows += r; stat.update(s_)
-        ur, ub = scan_unity(root, files, stat, hd)
+            T = [(root, m.__name__, e, outdir) for e in E]
+            for r, s_ in pmap(pool, work_members, T, Ticker('抽取·S2Arm', len(T))): rows += r; stat.update(s_)
+        ur, ub = scan_unity(root, files, stat, hd, pool)
         if ur: rows += ur; flush(ub, outdir); stat['Unity 着色器条目'] += len({(r[2], r[3]) for r in ur})
         for cd in cdirs:
             E = casc_flat.entries(cd); pick = [e for e in E if 'shader' in e[0].lower()] or E   # 路径带 shader 的优先（暗黑2 164 个包）；没有就全扫
             stat['CASC 条目'] += len(E); stat['CASC 扫的条目'] += len(pick)
-            with contextlib.nullcontext(pool) as ex:
-                for r, s in ex.map(work_casc, [(cd, pick[i::J * 4], outdir) for i in range(J * 4)]): rows += r; stat.update(s)
+            T = [(cd, pick[i::J * 4], outdir) for i in range(J * 4)]
+            for r, s in pmap(pool, work_casc, T, Ticker('抽取·S2Arm', len(T))): rows += r; stat.update(s)
         zt = [(root, p, lo, min(lo + BIG, romfs_list.file_size(p)), outdir) for p in files if big_split(p) and not (top_wwise(p) and not WWISE_AUDIT) for lo in range(0, romfs_list.file_size(p), BIG)]
-        with contextlib.nullcontext(pool) as ex:
-            fz = [ex.submit(work_zlib, t) for t in sorted(zt, key=lambda t: t[1])]
-            for r, s in ex.map(work, [(root, files[i::J * 8], outdir) for i in range(J * 8)]): rows += r; stat.update(s)
-            for x in fz: r, s = x.result(); rows += r; stat.update(s)
+        # 进度（11-20 丝之歌：抽取段里直连抽取先完、这一路还在跑时进度停住）：完成一个计一个；结果仍按原次序收（普通文件各批在前、大文件分段在后）
+        fz = [pool.submit(work_zlib, t) for t in sorted(zt, key=lambda t: t[1])]
+        fw = [pool.submit(work, (root, files[i::J * 8], outdir)) for i in range(J * 8)]
+        tk = Ticker('抽取·S2Arm', len(fz) + len(fw))
+        for _ in cf.as_completed(fz + fw): tk.step()
+        for x in fw + fz: r, s = x.result(); rows += r; stat.update(s)
     pool.shutdown()
     for p in nsos:
         blobs = {}; img = nso_image(p); scan_blob('nso:' + os.path.basename(p), img, rows, blobs, stat)
@@ -1247,7 +1286,7 @@ if __name__ == '__main__':
         for r in bad[:20]: print(f'【红】Wwise 核查反例：{r[2]} → {r[0]}', file=sys.stderr, flush=True)
     print('统计', dict(stat)); print('阶段记录', len(rows), '唯一键', len(uniq), '按阶段', dict(collections.Counter(v[0] for v in uniq.values())))
     # 读不了的文件跳过、其余照抽（v0.3.1 拿不准不停；原先 10-23 定「漏抽是硬错误」退 1、整款出不了包）：漏的那部分着色器运行时首遇现编，
-    #   按类计数写进 <输出目录>/degrade.tsv（graphics/tools/direct/extract.sh 并进抽取的降级汇总），逐条原因见上方【红】行
+    #   按类计数写进 <输出目录>/degrade.tsv（graphics/tools/direct/extract.py 并进抽取的降级汇总），逐条原因见上方【红】行
     skip = [(k, stat[k]) for k in ('【红】pak 索引加密', '【红】pak 损坏', '【红】pak 条目解码失败', '【红】zlib 块续解失败', '【红】PKZ/DAT 解析失败', '【红】厂商档案读不了', READ_RED) if stat[k]]
     with open(os.path.join(outdir, 'degrade.tsv'), 'w', encoding='utf-8') as f:
         for k, n in skip:

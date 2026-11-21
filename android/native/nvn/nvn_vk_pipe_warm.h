@@ -58,6 +58,10 @@ uint64_t nvk_pipe_warm_hash(const struct nvk_pipe_rec *rec);
 // 生产路径不调用它；缺省 0（真散列）。宿主单测 android/tests/nvn_vk_pipe_warm_test.c 用。
 void nvk_pipe_warm_test_hash_const(int on);
 
+// 随包种子（首局预热）：本机没有管线清单、且程序清单本局收下了随包种子（nvk_prog_warm_seed_dir 返回 1）时，读同一目录里的
+//   pipes-v<格式>-<描述版本>.bin（与本机清单同一格式、同一份整份校验）。本文件没有有效性头，所以只认与已收下的程序种子同目录的那份
+//   （目录名 = 闭包 + profile 摘要），并逐条核程序身份在程序清单里（nvk_prog_warm_contains），不在的不收：那条永远等不到程序发布。
+//   程序清单还没定（-1）时 load 返回 -1 让预热线程稍后重试；种子不在 / 坏只打一行黄，本局按没有清单走。本局落盘照常写本机路径。
 int nvk_pipe_warm_load(void);        // 开局读清单 + 整份校验；返回可用条数（<0 = 关闭/失败）
 int nvk_pipe_warm_take(struct nvk_pipe_rec *out);
 int nvk_pipe_warm_pending(void);

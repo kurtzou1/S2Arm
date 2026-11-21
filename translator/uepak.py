@@ -152,7 +152,7 @@ class OodleHost:
         self._fin = multiprocessing.util.Finalize(self, OodleHost._close, args=(self.p, self.priv), exitpriority=10)
     def output(self):
         """宿主输出的末 3000 字（进报错行）；设了 DM_OODLE_LOG_DIR 时把完整输出另存为 <目录>/oodle_host.<进程号>.log 并在头一行写明（11-01：只留末尾，
-        勇者斗恶龙 XI S 普查里看不到宿主为什么没起来；extract.sh 把它设成抽取目录，失败时随其它 .log 留进 .failed）"""
+        勇者斗恶龙 XI S 普查里看不到宿主为什么没起来；extract.py 把它设成抽取目录，失败时随其它 .log 留进 .failed）"""
         self.err.seek(0); full = self.err.read().decode(errors='replace'); head = ''
         d = os.environ.get('DM_OODLE_LOG_DIR')
         if d:

@@ -149,18 +149,18 @@ echo '通：App 内置来源离线使用，篡改拒绝'
 mkdir -p "$T/repo/pack/stages" "$T/roots/game@seed/systemdata" "$T/fonts"
 cp "$H/pack/stages/sysdata.sh" "$T/repo/pack/stages/"
 cat > "$T/repo/pack/roots.sh" <<'ROOTS'
-root_cur() { cd -P "$S2A_ROOTS/$1@现行" && pwd; }
+root_cur() { cd -P "$S2A_ROOTS/$(cat "$S2A_ROOTS/$1@现行")" && pwd; }
 root_tag() { local tag=$2 n=1; while [ -e "$S2A_ROOTS/$1@$tag" ] || [ -e "$S2A_ROOTS/$1@$tag.tmp" ]; do n=$((n+1)); tag="$2-$n"; done; echo "$tag"; }
 root_begin() { local w="$S2A_ROOTS/$1@$2.tmp"; cp -R "$(root_cur "$1")" "$w"; echo "$w"; }
 root_abort() { rm -rf "$S2A_ROOTS/$1@$2.tmp"; }
 root_stage_done() { if [ -n "${S2A_STAGE_KEYS:-}" ]; then printf '%s\t%s\n' "$2" "$3" >> "$S2A_STAGE_KEYS"; return 0; fi; [ "$(cat "$1/.stage_$2" 2>/dev/null)" = "$3" ]; }
 _root_rm() { rm -rf "$1"; }
 _root_cp() { cp "$@"; }
-root_commit() { mv "$S2A_ROOTS/$1@$2.tmp" "$S2A_ROOTS/$1@$2"; ln -sfn "$1@$2" "$S2A_ROOTS/$1@现行"; }
+root_commit() { mv "$S2A_ROOTS/$1@$2.tmp" "$S2A_ROOTS/$1@$2"; printf '%s\n' "$1@$2" > "$S2A_ROOTS/$1@现行"; }
 ROOTS
 printf '#!/usr/bin/env python3\n' > "$T/repo/pack/sysdata_need.py"
 printf 'font\n' > "$T/fonts/a.bfttf"
-ln -s game@seed "$T/roots/game@现行"
+printf '%s\n' game@seed > "$T/roots/game@现行"
 export S2A_ROOTS="$T/roots" S2A_FONTS="$T/fonts"
 if [ "$(uname -s)" = Linux ]; then
   # 主线根/字体复制仍用 macOS cp -c；这里仅为验证时区阶段行为替换这个外部工具。
@@ -173,27 +173,27 @@ COPY
 fi
 stage="$T/repo/pack/stages/sysdata.sh"
 bash "$stage" game > "$T/stage-first.log" 2>&1
-first=$(readlink "$T/roots/game@现行")
-if [ ! -s "$T/roots/game@现行/.stage_sysdata" ]; then
+first=$(cat "$T/roots/game@现行")
+if [ ! -s "$T/roots/$(cat "$T/roots/game@现行")/.stage_sysdata" ]; then
     echo '不通：生成时区未登记系统数据阶段键'; exit 1
 fi
 # 只算键不应需要字体、归档或编译器，也不能写产物根。
 if ! S2A_STAGE_KEYS="$T/sysdata.keys" S2A_FONTS="$T/no-fonts" S2A_TZDATA_CACHE="$T/empty" bash "$stage" game > "$T/key-only.log" 2>&1; then
     echo '不通：系统数据只算键依赖字体或源码归档'; exit 1
 fi
-[ "$(cut -f1 "$T/sysdata.keys")" = sysdata ] && [ "$(cut -f2 "$T/sysdata.keys")" = "$(cat "$T/roots/game@现行/.stage_sysdata")" ]
+[ "$(cut -f1 "$T/sysdata.keys")" = sysdata ] && [ "$(cut -f2 "$T/sysdata.keys")" = "$(cat "$T/roots/$(cat "$T/roots/game@现行")/.stage_sysdata")" ]
 cp "$H/pack/stage_keys.sh" "$H/pack/stage_sysdata.sh" "$T/repo/pack/"
 for item in rewrite uilayout aoc romfsidx shaders; do
     printf '#!/bin/bash\nprintf "%%s\t%%s\n" "%s" fixed >> "$S2A_STAGE_KEYS"\n' "$item" > "$T/repo/pack/stage_$item.sh"
-    printf 'fixed\n' > "$T/roots/game@现行/.stage_$item"
+    printf 'fixed\n' > "$T/roots/$(cat "$T/roots/game@现行")/.stage_$item"
 done
-S2A_FONTS="$T/no-fonts" S2A_TZDATA_CACHE="$T/empty" bash "$T/repo/pack/stage_keys.sh" game "$T/roots/game@现行" > "$T/keys-first"
+S2A_FONTS="$T/no-fonts" S2A_TZDATA_CACHE="$T/empty" bash "$T/repo/pack/stage_keys.sh" game "$T/roots/$(cat "$T/roots/game@现行")" > "$T/keys-first"
 if ! awk -F '\t' '$1=="sysdata" && $2==$3 && $2!="" {found=1} END {exit !found}' "$T/keys-first"; then
     echo '不通：只出程序快道没有读取系统数据阶段键'; exit 1
 fi
 # 真实只换程序入口 + 真实 stage_keys；其它阶段和 IPA 构建为合成桩。
 mkdir -p "$T/repo/tools" "$T/sched/pkgs" "$T/shared" "$T/snapshot/pack"
-ln -s "$T/roots/game@现行" "$T/shared/game@pkg-base"
+ln -s "$T/roots/$(cat "$T/roots/game@现行")" "$T/shared/game@pkg-base"
 printf 'COMMIT=base\nPKG=%q\n' "$T/snapshot" > "$T/sched/pkgs/game.env"
 printf old > "$T/snapshot/game.ipa"; printf 'old-resource' > "$T/snapshot/pack/data"
 cat > "$T/ipa" <<'IPA'
@@ -204,22 +204,22 @@ IPA
 chmod +x "$T/ipa"
 export S2A_SCHED_DIR="$T/sched" S2A_ROOTS_SHARED="$T/shared" S2A_APP_ONLY_DIR="$T/app-only" S2A_APP_ONLY_IPA="$T/ipa"
 mv "$T/repo/services/systemdata/tzdata-pins.sh" "$T/pins.backup"
-rc=0; bash "$T/repo/pack/stage_keys.sh" game "$T/roots/game@现行" > "$T/keys-missing.log" 2>&1 || rc=$?
+rc=0; bash "$T/repo/pack/stage_keys.sh" game "$T/roots/$(cat "$T/roots/game@现行")" > "$T/keys-missing.log" 2>&1 || rc=$?
 mv "$T/pins.backup" "$T/repo/services/systemdata/tzdata-pins.sh"
 [ "$rc" != 0 ] && grep -q '时区来源键无法计算' "$T/keys-missing.log"
 bash "$stage" game > "$T/stage-repeat.log" 2>&1
-[ "$(readlink "$T/roots/game@现行")" = "$first" ] || { echo '不通：来源不变时重复生成'; exit 1; }
+[ "$(cat "$T/roots/game@现行")" = "$first" ] || { echo '不通：来源不变时重复生成'; exit 1; }
 # 一个不同版本、内容的第二份经验证合成来源，必须形成新键并重生成。
 printf '2026g\n' > "$T/data/version"
 tar -czf "$T/cache/tzdata2026g.tar.gz" -C "$T/data" .
 cp "$T/cache/tzcode2026f.tar.gz" "$T/cache/tzcode2026g.tar.gz"
 DATA2_SHA=$(shasum -a 512 "$T/cache/tzdata2026g.tar.gz" | cut -d' ' -f1)
 printf 'TZ_VERSION=2026g\nTZ_CODE_SHA512=%s\nTZ_DATA_SHA512=%s\nTZ_OUTPUT_SHA256=%s\n' "$CODE_SHA" "$DATA2_SHA" "$(fixture_tree_sha 2026g)" > "$T/repo/services/systemdata/tzdata-pins.sh"
-S2A_FONTS="$T/no-fonts" S2A_TZDATA_CACHE="$T/empty" bash "$T/repo/pack/stage_keys.sh" game "$T/roots/game@现行" > "$T/keys-changed"
+S2A_FONTS="$T/no-fonts" S2A_TZDATA_CACHE="$T/empty" bash "$T/repo/pack/stage_keys.sh" game "$T/roots/$(cat "$T/roots/game@现行")" > "$T/keys-changed"
 awk -F '\t' '$1=="sysdata" && $2!=$3 && $3!="" {found=1} END {exit !found}' "$T/keys-changed" || { echo '不通：快道没有感知时区来源变更'; exit 1; }
 bash "$stage" game > "$T/stage-changed.log" 2>&1
-second=$(readlink "$T/roots/game@现行")
-if [ "$first" = "$second" ] || [ "$(cat "$T/roots/game@现行/systemdata/010000000000080E/version.txt")" != 2026g ]; then
+second=$(cat "$T/roots/game@现行")
+if [ "$first" = "$second" ] || [ "$(cat "$T/roots/$(cat "$T/roots/game@现行")/systemdata/010000000000080E/version.txt")" != 2026g ]; then
     echo '不通：钉版来源变化后系统数据阶段未失效'
     exit 1
 fi
@@ -230,27 +230,27 @@ tar -czf "$T/cache/tzcode2026g.tar.gz" -C "$T/code" .
 CODE2_SHA=$(shasum -a 512 "$T/cache/tzcode2026g.tar.gz" | cut -d' ' -f1)
 printf 'TZ_VERSION=2026g\nTZ_CODE_SHA512=%s\nTZ_DATA_SHA512=%s\nTZ_OUTPUT_SHA256=%s\n' "$CODE2_SHA" "$DATA2_SHA" "$(fixture_tree_sha 2026g)" > "$T/repo/services/systemdata/tzdata-pins.sh"
 bash "$stage" game > "$T/stage-sha-changed.log" 2>&1
-third=$(readlink "$T/roots/game@现行")
+third=$(cat "$T/roots/game@现行")
 [ "$second" != "$third" ] || { echo '不通：源码摘要变化后阶段键未变化'; exit 1; }
 # 缓存里的输入丢失：已生成过的产物也不能当成钉版来源已经备齐。
 if S2A_TZDATA_CACHE="$T/empty" bash "$stage" game > "$T/stage-missing.log" 2>&1; then
     echo '不通：缺少钉版来源时阶段仍成功'; exit 1
 fi
-[ "$(readlink "$T/roots/game@现行")" = "$third" ]
+[ "$(cat "$T/roots/game@现行")" = "$third" ]
 # 真系统数据不被钉版生成器覆盖，也无需借用宿主时区。
 mkdir -p "$T/roots/real@seed/systemdata/010000000000080E"
 printf 'real-user-data\n' > "$T/roots/real@seed/systemdata/010000000000080E/version.txt"
-ln -s real@seed "$T/roots/real@现行"
+printf '%s\n' real@seed > "$T/roots/real@现行"
 S2A_TZDATA_CACHE="$T/empty" bash "$stage" real > "$T/stage-real.log" 2>&1
-[ "$(cat "$T/roots/real@现行/systemdata/010000000000080E/version.txt")" = real-user-data ]
+[ "$(cat "$T/roots/$(cat "$T/roots/real@现行")/systemdata/010000000000080E/version.txt")" = real-user-data ]
 # 历史真系统数据无键时保留兼容；错误键需要下一次普通阶段自修。
-rm -f "$T/roots/real@现行/.stage_sysdata"
-S2A_FONTS="$T/no-fonts" S2A_TZDATA_CACHE="$T/empty" bash "$T/repo/pack/stage_keys.sh" real "$T/roots/real@现行" > "$T/keys-real"
+rm -f "$T/roots/$(cat "$T/roots/real@现行")/.stage_sysdata"
+S2A_FONTS="$T/no-fonts" S2A_TZDATA_CACHE="$T/empty" bash "$T/repo/pack/stage_keys.sh" real "$T/roots/$(cat "$T/roots/real@现行")" > "$T/keys-real"
 awk -F '\t' '$1=="sysdata" && $2=="real" && $3=="real" {found=1} END {exit !found}' "$T/keys-real"
-printf 'tz-stale\n' > "$T/roots/real@现行/.stage_sysdata"
+printf 'tz-stale\n' > "$T/roots/$(cat "$T/roots/real@现行")/.stage_sysdata"
 S2A_TZDATA_CACHE="$T/empty" bash "$stage" real > "$T/stage-real-repair.log" 2>&1
-[ "$(cat "$T/roots/real@现行/.stage_sysdata")" = real ]
-[ "$(cat "$T/roots/real@现行/systemdata/010000000000080E/version.txt")" = real-user-data ]
+[ "$(cat "$T/roots/$(cat "$T/roots/real@现行")/.stage_sysdata")" = real ]
+[ "$(cat "$T/roots/$(cat "$T/roots/real@现行")/systemdata/010000000000080E/version.txt")" = real-user-data ]
 echo '通：摘要变化、来源缺失和真实系统数据保留'
 # 数据 SHA 独立变更、版本不变也必须重新生成。
 printf 'second data source\n' > "$T/data/additional"
@@ -258,15 +258,15 @@ tar -czf "$T/cache/tzdata2026g.tar.gz" -C "$T/data" .
 DATA3_SHA=$(shasum -a 512 "$T/cache/tzdata2026g.tar.gz" | cut -d' ' -f1)
 printf 'TZ_VERSION=2026g\nTZ_CODE_SHA512=%s\nTZ_DATA_SHA512=%s\nTZ_OUTPUT_SHA256=%s\n' "$CODE2_SHA" "$DATA3_SHA" "$(fixture_tree_sha 2026g)" > "$T/repo/services/systemdata/tzdata-pins.sh"
 bash "$stage" game > "$T/stage-data-sha.log" 2>&1
-fourth=$(readlink "$T/roots/game@现行")
+fourth=$(cat "$T/roots/game@现行")
 [ "$third" != "$fourth" ] || { echo '不通：数据摘要变化后阶段键未变化'; exit 1; }
 # 旧生成器的 tz.log 证明来自宿主库时，不能当成玩家真实系统数据沿用。
 mkdir -p "$T/roots/legacy@seed/systemdata/010000000000080E"
 printf 'host-old\n' > "$T/roots/legacy@seed/systemdata/010000000000080E/version.txt"
 printf '时区数据：1 个区，版本 old\n' > "$T/roots/legacy@seed/tz.log"
-ln -s legacy@seed "$T/roots/legacy@现行"
+printf '%s\n' legacy@seed > "$T/roots/legacy@现行"
 bash "$stage" legacy > "$T/stage-legacy.log" 2>&1
-[ "$(cat "$T/roots/legacy@现行/systemdata/010000000000080E/version.txt")" = 2026g ]
+[ "$(cat "$T/roots/$(cat "$T/roots/legacy@现行")/systemdata/010000000000080E/version.txt")" = 2026g ]
 python3 - "$T/a/zoneinfo/Etc/Test" <<'PY'
 import pathlib, sys
 assert pathlib.Path(sys.argv[1]).read_bytes() == b'TZif2' + bytes(39) + b'PINNED'

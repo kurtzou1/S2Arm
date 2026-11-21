@@ -6,6 +6,8 @@
 //   * UBO 句柄形态（tex_ubo）里的 FD_SAMP_ID 仍走 TEXU 项，不被误读成常量采样器。
 // 片 3：贴图字在游戏 UBO 里的类型 3 句柄（平铺 uboSlot / uboOffset + constSampler）：布局项是 TEXU，采样器来源由生产 usrc_put 进程序的 usrc 表
 //   （SAMPI + samp_pool = 1 = 立即数采样器池下标，回放要加池起点）；离线库写法的 {"source":"id"}（登记号原值，含 >= 0x8000 的号）samp_pool 仍为 0。
+// 片 7：计算阶段（cs 贴图绑定的 c2 形态）走真实计算解析（nvn_vk_program_parse_compute）+ 同一个 layout_ent，布局项与图形侧一字不差；
+//   cs 的 UBO 句柄形态仍具名拒绝。
 #include "../native/gfx_plat/nvk_shader.c"
 #include "tbuf_spirv_fixtures.h"
 
@@ -40,6 +42,25 @@ static int map_json(const char *fields, nvn_gpu_layout_ent *e, struct rp_prog *p
 }
 static int map_one(const char *fields, nvn_gpu_layout_ent *e, char *why, size_t cap) { return map_json(fields, e, NULL, why, cap); }
 
+// 片 7：同一条 cs 贴图绑定走真实计算解析（nvn_vk_program_parse_compute）+ 同一个生产 layout_ent。返回 1 = 解析并映射成功
+static int map_cs(const char *fields, nvn_gpu_layout_ent *e, char *why, size_t cap) {
+    char json[4096];
+    int n = snprintf(json, sizeof json,
+        "{\"schema\":\"s2a-direct-program-v2\",\"content\":{\"contract\":\"s2a-direct-program-content-v2\",\"kind\":\"compute\","
+        "\"hasUnalignedStorageBuffer\":false,\"c0Reads\":[],\"stages\":[{\"stage\":\"cs\",\"spirv\":\"%s\"}],"
+        "\"bindings\":[{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"count\":1,%s}],"
+        "\"supportLayout\":{\"requiredSize\":2608},\"supportReads\":[]}}", S2A_TEST_COMP_1, fields);
+    struct nvn_vk_compute_program p;
+    memset(&p, 0, sizeof p);
+    memset(e, 0, sizeof *e);
+    why[0] = 0;
+    if (n <= 0 || (size_t)n >= sizeof json) return 0;
+    int rc = nvn_vk_program_parse_compute((const uint8_t *)json, (size_t)n, &p, why, cap);
+    int ok = !rc && p.binding_count == 1 && layout_ent(&p.bindings[0], e);
+    nvn_vk_program_free_compute(&p);
+    return ok;
+}
+
 int main(void) {
     nvn_gpu_layout_ent e;
     char why[192];
@@ -55,6 +76,22 @@ int main(void) {
         snprintf(what, sizeof what, "constant sampler %d is neither 'none' nor a sampler slot (src_reg2=%#x)", cs[k].sampler, (unsigned)e.src_reg2);
         CHECK(ok && e.src_reg2 != UINT16_MAX && (e.src_reg2 & NVN_GPU_SAMP2_CONST) && e.src_reg2 >= 128, what);
     }
+
+    // 片 7：计算阶段同一份合同——真实计算解析 + 同一个 layout_ent，布局项与图形侧一字不差（回放派发按这个 src_reg2 取采样器）
+    for (unsigned k = 0; k < sizeof cs / sizeof cs[0]; k++) {
+        char f[96], what[320];
+        snprintf(f, sizeof f, "\"slot\":%d,\"constSampler\":%d", cs[k].slot, cs[k].sampler);
+        int ok = map_cs(f, &e, why, sizeof why);
+        snprintf(what, sizeof what, "compute constant sampler %d (slot %d) maps to TEX %d + flagged src_reg2 (why=%s)", cs[k].sampler, cs[k].slot, cs[k].tex, why);
+        CHECK(ok && e.cls == NVN_GPU_RES_TEX_SAMP && e.src_kind == NVN_RB_TEX && e.src_reg == cs[k].tex && e.count == 1 &&
+              e.src_reg2 == (uint16_t)(NVN_GPU_SAMP2_CONST | (unsigned)cs[k].sampler), what);
+    }
+    CHECK(map_cs("\"slot\":90,\"samp_slot\":3", &e, why, sizeof why) && e.src_kind == NVN_RB_TEX && e.src_reg == 128 && e.src_reg2 == 3,
+          "compute samp_slot form keeps the sampler slot as src_reg2");
+    CHECK(map_cs("\"slot\":90", &e, why, sizeof why) && e.src_kind == NVN_RB_TEX && e.src_reg == 128 && e.src_reg2 == UINT16_MAX,
+          "compute direct separate texture keeps 'no second source'");
+    CHECK(!map_cs("\"slot\":90,\"uboSlot\":1,\"uboOffset\":1024,\"constSampler\":7", &e, why, sizeof why) && strstr(why, "constant sampler"),
+          "compute UBO-handle constant sampler stays rejected by name");
 
     // 没有 constSampler 的条目：src_reg2 不变
     CHECK(map_one("\"slot\":90,\"samp_slot\":3", &e, why, sizeof why) && e.src_kind == NVN_RB_TEX && e.src_reg == 128 && e.src_reg2 == 3,

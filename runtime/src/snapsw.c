@@ -20,6 +20,11 @@ static int snap_sw(void) {
     if (g_snap_sw < 0) { const char *m = getenv("S2A_SNAP_MODE"), *r = getenv("S2A_SNAP_RESTORE"); g_snap_sw = snap_save_on(m) | (r && *r) << 1; }
     return g_snap_sw;
 }
+// 这一局关掉即时存档（11-20：iOS 窗口放不下标准布局、窗口外也放不下命令记录区时，vawin.c 在构造期调）：只清「能存」，恢复中那一位不动；
+//   原因码给菜单写一句玩家看得懂的提示（ios/vpad.m）。之后 s2a_snap_mode / s2a_snap_logging 都按关算
+static int g_snap_off;
+void s2a_snap_disable(int why) { snap_sw(); g_snap_sw &= ~1; g_snap_off = why; atomic_store(&g_snap_live, 0); }
+int s2a_snap_off_reason(void) { return g_snap_off; }
 int s2a_snap_saving(void) { return snap_sw() & 1; }
 // 恢复中：每次现读 S2A_SNAP_RESTORE。进程内「回到这一刻」在宿主重启前才设它、恢复完 unsetenv，开局缓存的那一位跟不上——
 //   iPhone 上重建时把这一局当成不在恢复，按本款学到的跨度收了窗口（59392 → 8192 MB），快照核对「窗口不符」拒绝恢复

@@ -23,8 +23,21 @@ int plat_mem_read32(uint64_t address, uint32_t *value) {
 }
 
 int plat_mem_write32(uint64_t address, uint32_t value) {
+#if defined(__OHOS__)
+    // OHOS 模块页来自签名载体（私有映射），建不出共享别名；键页由装载器装在宿主内存、fps.c 已 key_rw 改成可写，直接写。
+    int s2a_ohos_key_page_store32(uint64_t, uint32_t);
+    if (!s2a_ohos_key_page_store32(address, value)) return 0;
+#endif
     // 裁定口径：内部不自旋。checked 返回什么就透传什么（正 errno），EAGAIN 由 fps.c 下一帧再试。
-    return -s2a_mem_write32_checked(address, value);
+    int e = -s2a_mem_write32_checked(address, value);
+#if defined(__OHOS__)
+    // 游戏视角可写、但私有模块页建不出别名：模块映像内直接写（见 s2a_ohos_module_store32）。
+    if (e == EINVAL || e == EOPNOTSUPP) {
+        int s2a_ohos_module_store32(uint64_t, uint32_t);
+        if (!s2a_ohos_module_store32(address, value)) return 0;
+    }
+#endif
+    return e;
 }
 
 // These loads are only used for addresses validated against a live module.

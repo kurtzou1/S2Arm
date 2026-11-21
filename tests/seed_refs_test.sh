@@ -66,7 +66,7 @@ mkdir -p "${PROT_DIR}/romfs" "${FREE_DIR}/romfs"
 R4=$T/run4/roots/xc3@v1; mkdir -p "${R4}"
 printf 'src=%s\ntag=gctest\n' "${PROT_DIR}" > "${R4}/seed.txt"
 # 造现行软链与旧版本，gc 产物根规则需要
-mkdir -p "$T/run4/roots/xc3@v0"; ln -s xc3@v1 "$T/run4/roots/xc3@现行"
+mkdir -p "$T/run4/roots/xc3@v0"; printf '%s\n' xc3@v1 > "$T/run4/roots/xc3@现行"
 # 把两个 wip 条目拨到 7 小时前，触发 gc 的 wip 6 小时闲删
 python3 -c "
 import os, sys, time

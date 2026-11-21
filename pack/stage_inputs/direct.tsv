@@ -54,14 +54,14 @@
 入	translator/unityfs.py
 入	translator/vk_shaders.py
 入	graphics/nvn/ios/tools/ios_metal.py
-外	graphics/nvn/tools/gfx_api.py	只用它判出的类别：stage_direct.sh 把类别写进键（api-<类别>，与 direct_lib.sh 同一调用、带 romfs）；判法改了而类别没变的款不重出
+外	graphics/nvn/tools/gfx_api.py	只用它判出的类别：stage_direct.sh 把类别写进键（api-<类别>，与 direct_lib.py 同一调用、带 romfs）；判法改了而类别没变的款不重出
 外	graphics/tools/direct/vklib/dsh_vklib.py	安卓目标（S2A_DIRECT_TARGETS=android，#783）出 Vulkan 库的入口：它与 vklib/ 下全部文件、dsh/DshVk.cs 一起算进 Vulkan 侧指纹 VkFp（vklib/VkFp.targets），stage_direct.sh 只在安卓目标把 VkFp 写进键（vk-<VkFp>）；记「外」：改它不让苹果款重出，安卓照样重出
 外	graphics/tools/direct/vklib/S2A.DshVkLib.csproj	同上：dsh_vklib.py 编的工程，进 VkFp、只经安卓键
 入	graphics/nvn/tools/lz4blk.py
 入	graphics/nvn/tools/nso_syms.py
-入	graphics/nvn/tools/romfs_list.py	仓库里唯一的 RomFS 遍历与文件头清单（11-03）：抽取 / 直连读哪些 RomFS 文件、文件头由它给（glslc_offline / nxsh_extract / ue_pak / spirv_msl / resource_input_key / direct_lib.sh 经它）
+入	graphics/nvn/tools/romfs_list.py	仓库里唯一的 RomFS 遍历与文件头清单（11-03）：抽取 / 直连读哪些 RomFS 文件、文件头由它给（glslc_offline / nxsh_extract / ue_pak / spirv_msl / resource_input_key / direct_lib.py 经它）
 入	pack/romfs_img.py	标准 RomFS 镜像读取（11-16）：RomFS 目录不在、旁边有 <目录>.std 时 romfs_list.py 从镜像盘点 / 读头经它
-入	graphics/tools/direct/direct_lib.sh
+入	graphics/tools/direct/direct_lib.py
 入	graphics/tools/direct/dsh/Dsh.cs	运行时与离线颜色出口同链失效
 入	graphics/tools/direct/dsh/SpvCross.cs	共用 half 出口改写的互操作入口
 入	graphics/tools/direct/dsh/DshCApi.cs	S2A.Dsh 源码（11-01 起出包每键改写由 C# 批量进程做，dmsh_build.py dsh_batch；S2A.Dsh.csproj 按 *.cs 全编，静态扫描扫不出）
@@ -73,7 +73,7 @@
 入	graphics/tools/direct/dsh/Vin.cs	同上
 入	graphics/tools/direct/dsh/Nvn2.cs	S2A.Dsh 源码：Switch 2 控制段（同上，*.cs 全编）
 入	graphics/tools/direct/dsh/S2A.Dsh.csproj	S2A.Dsh 工程（编哪些源码、翻译器指纹 Xfp 怎么算）
-入	graphics/tools/direct/dsh/batch/Program.cs	直连出库的 C# 进程入口（11-01 起整份出库在这个进程里，direct_lib.sh 经 dsh_batch.py 调）
+入	graphics/tools/direct/dsh/batch/Program.cs	直连出库的 C# 进程入口（11-01 起整份出库在这个进程里，direct_lib.py 经 dsh_batch.py 调）
 入	graphics/tools/direct/dsh/batch/Build.cs	整份出库编排（原 dmsh_build.py / dmsh_par.py：键表、翻译缓存、逐键收尾、变体、Metal 编译与缓存、内容寻址仓、汇总）
 入	graphics/tools/direct/dsh/batch/BuildXlate.cs	出库里影响翻译产物的那段（包记录切片、逐键翻译、翻译前开关）：从 Build.cs 拆出，同时是翻译器指纹 DshXfpInput 的输入（11-02 指纹单一来源）
 入	graphics/tools/direct/dsh/batch/C1Cb.cs	c1 越界核查表与常量读范围表（原 c1_guard.py / cb_extent.py）
@@ -84,7 +84,7 @@
 入	graphics/tools/direct/compiler/Sha256.cs	S2A.Dsh.csproj 编进来的源码
 入	translator/dmsh_xlate/Program.cs	S2A.Dsh.csproj 原样编进来的翻译器（写成 $(Nx)… 静态扫描扫不出）：11-01 起出包直接从源码编，不再只经 dmsh_xlate_bin
 入	graphics/widen/SpirvCbufUseText.cs	同上（S2A.Dsh.csproj 编进来的翻译器读数格式）
-入	graphics/tools/direct/extract.sh
+入	graphics/tools/direct/extract.py
 入	graphics/tools/direct/fout_want.py
 入	graphics/tools/direct/pso_layout.py	管线键布局读取（fout_want.py 与出库核 R 行长度共用）
 入	graphics/tools/direct/pso_layout.json	管线键布局与整数像素格式（pso_layout_gen.m 在 Mac 导出；t_fout_want.py 核与 nvn_pso_skey.h 一致）
@@ -97,9 +97,9 @@
 入	graphics/tools/direct/merge_extract.py
 入	graphics/tools/direct/run_pairs.py
 入	graphics/tools/direct/run_knowledge.py	跑局知识快照（审计 #1534 P1-54）：配对 / 片元整数输出变体 / 采样模拟变体三张表的推导与归一化（表内容另进本阶段键 know-）
-入	graphics/tools/direct/runtime_only_lib.sh	抽取缺口时的运行时现编空直连库（11-06 两条链共用：stage_direct.sh 有 direct_gap.txt 时、direct_lib.sh 现场抽取退 3 时）
-入	graphics/tools/direct/runtime_only_lib.py	运行时现编空直连库的实现（runtime_only_lib.sh 调它；direct_lib.sh 现场抽取退 3 时直接调：一个进程做完，内存吃紧时也做得完）
-外	graphics/tools/direct/pso_seed.py	经本阶段出库不跑（S2A_PSO_SEED_STAGE=1）：零配置种子表归 pack/stage_direct_seed.sh，按 pack/stage_inputs/direct_seed.tsv 进那一段的键；只在单独调用 direct_lib.sh（Windows 出包、单测）时生成
+入	graphics/tools/direct/runtime_only_lib.sh	抽取缺口时的运行时现编空直连库（11-06 两条链共用：stage_direct.sh 有 direct_gap.txt 时、direct_lib.py 现场抽取退 3 时）
+入	graphics/tools/direct/runtime_only_lib.py	运行时现编空直连库的实现（runtime_only_lib.sh 调它；direct_lib.py 现场抽取退 3 时直接调：一个进程做完，内存吃紧时也做得完）
+外	graphics/tools/direct/pso_seed.py	经本阶段出库不跑（S2A_PSO_SEED_STAGE=1）：零配置种子表归 pack/stage_direct_seed.sh，按 pack/stage_inputs/direct_seed.tsv 进那一段的键；只在单独调用 direct_lib.py（Windows 出包、单测）时生成
 入	graphics/tools/shbake/casc_flat.py
 入	graphics/tools/shbake/cri_cpk.py
 入	graphics/tools/shbake/crilayla.c
@@ -178,5 +178,5 @@
 入	graphics/third_party/spirv_cross/spirv_reflect.hpp	spvc_inproc.py 运行时编成进程内 spirv-cross 库（库身份进工具指纹，改了即变）；静态扫描扫不出
 
 入	pack/resource_input_key.py	抽取/直连共用资源内容抽样键（P2-53）
-入	translator/rt_dump_merge.py	真机转储着色器（产物根 rt_shaders/）并进直连库（direct_lib.sh 合并两边抽取之后调用）
-外	pack/jobs/space_rule.py	开工前空间复核（direct_lib.sh 抽取后调 direct-check）：只决定开不开编，不改直连产物
+入	translator/rt_dump_merge.py	真机转储着色器（产物根 rt_shaders/）并进直连库（direct_lib.py 合并两边抽取之后调用）
+外	pack/jobs/space_rule.py	开工前空间复核（direct_lib.py 抽取后调 direct-check）：只决定开不开编，不改直连产物

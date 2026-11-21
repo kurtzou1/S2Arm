@@ -1,5 +1,5 @@
 #!/bin/bash
-# 直连着色器库阶段单测（pack/stage_direct.sh，假 direct_lib.sh，临时产物根，约 2 秒）：bash tests/stage_direct_test.sh
+# 直连着色器库阶段单测（pack/stage_direct.sh，假 direct_lib.py，临时产物根，约 2 秒）：bash tests/stage_direct_test.sh
 # 期望按规则手写：出库成功 → 提交、direct/keys.tsv 在、记键；同键 → 跳过、不再出库；游戏输入变 → 键变、重出；
 # 配置前置拒绝 → 退出3、不调出库、不改现行/旧键；出库失败（基础设施，出库退 1）→ 退出1、【红】、现行不动、日志副本在 <根>/.failed/；
 # 出库内容缺口（出库退 3，10-25 维护者）→ 退出 3、【黄】带出库日志里的「直连缺口：…」原文、现行不动、日志副本在 .failed/；
@@ -13,8 +13,8 @@ mkdir -p $T/repo/pack $T/repo/tools $T/repo/graphics/nvn $T/repo/graphics/tools/
 cp "$H/pack/resource_input_key.py" $T/repo/pack/; cp "$H/pack/stage_keyfiles.sh" $T/repo/pack/; cp "$H/tools/stage_deps.py" $T/repo/tools/; cp -R "$H/tools/stage_deps_hook" $T/repo/tools/   # 各阶段实际读入进键（pack/stage_keyfiles.sh，10-30）
 # romfs_list.py：仓库里唯一的 RomFS 遍历（11-03），被测脚本经它列 RomFS
 mkdir -p $T/repo/graphics/nvn/tools; cp "$H/graphics/nvn/tools/romfs_list.py" $T/repo/graphics/nvn/tools/; cp "$H/graphics/nvn/tools/gfx_api.py" $T/repo/graphics/nvn/tools/   # 出包分流判法（假 main 不是 NSO → unknown，走 NVN 路径）
-mkdir -p "$T/repo/tools"; cp "$H/tools/pool_workers.py" "$T/repo/tools/"   # romfs_list / pak_crypto 经它取核数（#1332：核数唯一来源）
-cp "$H/pack/roots.sh" "$H/pack/stage_direct.sh" "$H/pack/ipa_key.sh" "$H/pack/pkg_srcs.py" "$H/pack/pkg_inputs_key.py" "$H/pack/ue_pak.py" $T/repo/pack/; cp "$H/tools/toolchain.sh" "$H/tools/toolchain.env" "$H/tools/machine.sh" "$H/tools/clonedir.py" "$H/tools/plock.sh" "$H/tools/flock_hold.py" $T/repo/tools/
+mkdir -p "$T/repo/tools"; cp "$H/tools/pool_workers.py" "$H/tools/progress.py" "$T/repo/tools/"   # romfs_list / pak_crypto 经它取核数（#1332：核数唯一来源）
+cp "$H/pack/roots.sh" "$H/pack/stage_direct.sh" "$H/pack/ipa_key.sh" "$H/pack/pkg_srcs.py" "$H/pack/pkg_inputs_key.py" "$H/pack/ue_pak.py" $T/repo/pack/; mkdir -p $T/repo/pack/orch && cp "$H/pack/orch/current.py" $T/repo/pack/orch/; cp "$H/tools/toolchain.sh" "$H/tools/toolchain.env" "$H/tools/machine.sh" "$H/tools/clonedir.py" "$H/tools/plock.sh" "$H/tools/flock_hold.py" $T/repo/tools/
 cp "$H/graphics/tools/shbake/pak_crypto.py" $T/repo/graphics/tools/shbake/
 for f in run_knowledge.py fout_want.py se_want.py run_pairs.py pso_layout.py pso_layout.json runtime_only_lib.sh runtime_only_lib.py; do cp "$H/graphics/tools/direct/$f" $T/repo/graphics/tools/direct/; done   # 跑局知识快照进键（审计 #1534 P1-54；来源 S2A_PSO_SOURCES 指空目录，键规则在 tests/stage_direct_knowledge_test.sh 核）
 echo n > $T/repo/graphics/nvn/x; echo s > $T/repo/graphics/tools/shbake/x
@@ -44,15 +44,20 @@ EOF
 
 
 # 假出库：FAKE_NOPROF=1 = 没有配置档（只打 🟡 行、不出表）；FAKE_FAIL=1 = 失败；每次调用记一行到 FAKE_CALLS
-cat > $T/repo/graphics/tools/direct/direct_lib.sh <<'EOF'
-O=$2; echo "${DSX_LIB-未设}" >> "$FAKE_CALLS.gal"; echo 1 >> "$FAKE_CALLS"; echo "${S2A_DIRECT_TARGETS-未设}" >> "$FAKE_CALLS.tgt"; echo "${S2A_DIRECT_PUBLISH-未设}" >> "$FAKE_CALLS.pub"; echo "${J:-未设}" >> "$FAKE_CALLS.j"   # 记下本次出几个平台的库、几路并行
-[ "${FAKE_FAIL:-0}" = 1 ] && { echo "[直连库] 🔴 出库失败 rc=3"; exit 1; }
-[ "${FAKE_GAP:-0}" = 1 ] && { echo "[直连库] 🟡 直连缺口：NVN 着色器 翻不了 1 支（0123456789abcdef：桩原因），现有出库不支持部分出库，本款这次走通用"; exit 3; }
-[ "${FAKE_NOPROF:-0}" = 1 ] && { echo "[直连库] 🟡 0100 没有直连配置档，不出直连库"; exit 0; }
-[ "${FAKE_VKHDR:-0}" = 1 ] && { mkdir -p "$O/vk" && printf '# key\tfile\n' > "$O/vk/vk_shaders.tsv" && : > "$O/keys.tsv"; echo "[直连库] 🟡 Vulkan 款 0100：RomFS 没有 SPIR-V，只出表头、全部设备首遇现编（vk/vk_shaders.tsv）"; exit 0; }
-mkdir -p "$O/b-v1"; echo m > "$O/b-v1/aaaaaaaaaaaaaaaa_b.metallib"; echo aaaaaaaaaaaaaaaa > "$O/keys.tsv"
-printf '# S2Arm 键\t直连键\ns2a0000000000001\taaaaaaaaaaaaaaaa\ns2a0000000000002\tbbbbbbbbbbbbbbbb\n' > "$O/key_map.tsv"
-echo "[直连库] 🟢 0100 直连库 b-v1：并集 1，出库 1，没出成 0"
+cat > $T/repo/graphics/tools/direct/direct_lib.py <<'EOF'
+import os, sys
+O = sys.argv[2]; C = os.environ['FAKE_CALLS']; e = os.environ.get
+def rec(suf, v): open(C + suf, 'a').write(v + '\n')
+rec('.gal', e('DSX_LIB', '未设')); rec('', '1'); rec('.tgt', e('S2A_DIRECT_TARGETS', '未设')); rec('.pub', e('S2A_DIRECT_PUBLISH', '未设')); rec('.j', e('J') or '未设')   # 记下本次出几个平台的库、几路并行
+if e('FAKE_FAIL', '0') == '1': print('[直连库] 🔴 出库失败 rc=3：dsh_batch.py 退出码 3：' + '前面的输出 ' * 40 + 'SIG_DIRECT_7f3a'); print('[直连库] 收尾'); sys.exit(1)   # 原文在 200 字之后、后面还有一行进度
+if e('FAKE_GAP', '0') == '1': print('[直连库] 🟡 直连缺口：NVN 着色器 翻不了 1 支（0123456789abcdef：桩原因），现有出库不支持部分出库，本款这次走通用'); sys.exit(3)
+if e('FAKE_NOPROF', '0') == '1': print('[直连库] 🟡 0100 没有直连配置档，不出直连库'); sys.exit(0)
+if e('FAKE_VKHDR', '0') == '1':
+    os.makedirs(O + '/vk', exist_ok=True); open(O + '/vk/vk_shaders.tsv', 'w').write('# key\tfile\n'); open(O + '/keys.tsv', 'w').close()
+    print('[直连库] 🟡 Vulkan 款 0100：RomFS 没有 SPIR-V，只出表头、全部设备首遇现编（vk/vk_shaders.tsv）'); sys.exit(0)
+os.makedirs(O + '/b-v1', exist_ok=True); open(O + '/b-v1/aaaaaaaaaaaaaaaa_b.metallib', 'w').write('m\n'); open(O + '/keys.tsv', 'w').write('aaaaaaaaaaaaaaaa\n')
+open(O + '/key_map.tsv', 'w').write('# S2Arm 键\t直连键\ns2a0000000000001\taaaaaaaaaaaaaaaa\ns2a0000000000002\tbbbbbbbbbbbbbbbb\n')
+print('[直连库] 🟢 0100 直连库 b-v1：并集 1，出库 1，没出成 0')
 EOF
 # 出库代码键按声明表算（pack/stage_keyfiles.sh + pack/stage_inputs/direct.tsv，10-26 键收窄）+ 翻译链号：假仓库只列它有的几个文件、假链号 v1
 cp "$H/pack/stage_keyfiles.sh" $T/repo/pack/; mkdir -p $T/repo/pack/stage_inputs $T/repo/translator
@@ -61,9 +66,9 @@ printf 'def version(): return "v1"\n' > $T/repo/translator/dmsh_chain.py
 (cd $T/repo && git init -q && git add -A && git -c user.email=t@t -c user.name=t commit -qm x)
 export S2A_ROOTS=$T/roots S2A_ROOTS_SHARED=$T/shared FAKE_CALLS=$T/calls S2A_PSO_SOURCES=$T/nopso
 mkdir -p $T/roots/acnh@s0/romfs $T/roots/acnh@s0/exefs; echo r > $T/roots/acnh@s0/romfs/f; echo main > $T/roots/acnh@s0/exefs/main; printf "title_id\t0100aaaa00000000\n" > $T/roots/acnh@s0/unpack.tsv; mkdir -p $T/roots/acnh@s0/shaders; echo ksh > $T/roots/acnh@s0/.stage_shaders
-printf '# 客体代码\t抽取键\n1111111111111111\ts2a0000000000001\n2222222222222222\ts2a0000000000002\n3333333333333333\ts2a0000000000001\n4444444444444444\tref0000000000009\n' > $T/roots/acnh@s0/shaders/guest_keys.tsv; ln -s acnh@s0 $T/roots/acnh@现行
+printf '# 客体代码\t抽取键\n1111111111111111\ts2a0000000000001\n2222222222222222\ts2a0000000000002\n3333333333333333\ts2a0000000000001\n4444444444444444\tref0000000000009\n' > $T/roots/acnh@s0/shaders/guest_keys.tsv; printf '%s\n' acnh@s0 > $T/roots/acnh@现行
 S() { bash $T/repo/pack/stage_direct.sh acnh; }
-cur() { cd -P $T/roots/acnh@现行 && pwd; }
+cur() { cd -P $T/roots/$(cat $T/roots/acnh@现行) && pwd; }
 calls() { wc -l < $T/calls 2>/dev/null | tr -d ' '; }
 # 现行的 RomFS 是只读共享存储（pack/roots.sh，11-03），已提交的版本不许改：「游戏输入变」按真实流程做——
 #   开一个自持 RomFS 的阶段（ROOT_OWN_ROMFS=1，同界面布局阶段），在它的工作根里改，提交成新现行。文件从只读存储克隆来，原地改的先 chmod u+w
@@ -92,7 +97,7 @@ ck "再次拒绝，不把准备候选当成功缓存（出库 $n1 → $(calls) �
 o=$(S 2>&1); k3=$(cat "$(cur)/.stage_direct"); n2=$(calls); echo ksh2 > $(cur)/.stage_shaders; o=$(S 2>&1); r=$?
 ck "着色器阶段键变 → 直连库不重出（10-25：直连库键不含着色器阶段，两段并行；出库 $n2 → $(calls) 次）" '[ $r = 0 ] && [ "$(calls)" = "$n2" ] && [ "$(cat "$(cur)/.stage_direct")" = "$k3" ]'
 rin 'echo r4 > romfs/i'; b=$(cur); o=$(FAKE_FAIL=1 S 2>&1); r=$?
-ck "出库失败 → 退出 1、现行不动、【红】、日志副本在 .failed/" '[ $r = 1 ] && [ "$(cur)" = "$b" ] && [[ "$o" == *【红】* ]] && [ -f $T/roots/.failed/acnh_direct_lib.log ] && [ -z "$(ls -d $T/roots/*.tmp 2>/dev/null)" ]'
+ck "出库失败 → 退出 1、现行不动、【红】带直连库 🔴 行全文（原文特征串 SIG_DIRECT_7f3a）、日志副本在 .failed/" '[ $r = 1 ] && [ "$(cur)" = "$b" ] && [[ "$o" == *【红】*SIG_DIRECT_7f3a* ]] && [ -f $T/roots/.failed/acnh_direct_lib.log ] && [ -z "$(ls -d $T/roots/*.tmp 2>/dev/null)" ]'
 rm -f $T/roots/.failed/acnh_direct_lib.log; o=$(FAKE_GAP=1 S 2>&1); r=$?
 ck "出库内容缺口 → 退出 3（rc=${r}）、【黄】带缺口原文、现行不动、日志副本在 .failed/" '[ $r = 3 ] && [ "$(cur)" = "$b" ] && [[ "$o" == *"【黄】acnh 直连缺口：NVN 着色器 翻不了 1 支（0123456789abcdef：桩原因）"* ]] && [[ "$o" != *【红】* ]] && [ -f $T/roots/.failed/acnh_direct_lib.log ] && [ -z "$(ls -d $T/roots/*.tmp 2>/dev/null)" ]'
 # 包键：各阶段键原样拼 + 直连库键；尾部带进包资源输入键与系统数据戳（只有直连，11-07：不再带通用着色器阶段键，环境里留着旧的 S2A_DUAL 也不改包键）

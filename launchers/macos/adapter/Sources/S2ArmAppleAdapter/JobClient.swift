@@ -190,6 +190,8 @@ public final class JobClient {
     public func jobEntry() throws -> URL {
         let bundled = environment.resources.appendingPathComponent("Jobs/main.py")
         if fileManager.fileExists(atPath: bundled.path) { return bundled }
+        // 玩家装的 App（带引擎包）缺作业入口 = 包不完整，照实说重装；源码树（开发）才说选源码目录
+        if environment.engineBundle != nil { throw JobClientError("应用不完整，请重新安装 S2Arm。", code: JobClientError.bundleIncomplete) }
         let checkout = URL(fileURLWithPath: environment.engineDir ?? "").appendingPathComponent("pack/jobs/main.py")
         guard fileManager.fileExists(atPath: checkout.path) else { throw JobClientError("请选择包含 pack/jobs 的 S2Arm 源码目录。") }
         return checkout

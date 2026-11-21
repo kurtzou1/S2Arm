@@ -42,6 +42,8 @@ final class TouchPad {
         }
     }
 
+    private static final String[] DIRECTIONS = {"UP", "DOWN", "LEFT", "RIGHT"};
+
     private static final String[][] KEYS = {   // F01 id, label, Npad bit
         {"A", "A", "0"}, {"B", "B", "1"}, {"X", "X", "2"}, {"Y", "Y", "3"}, {"LS", "LS", "4"}, {"RS", "RS", "5"},
         {"L", "L", "6"}, {"R", "R", "7"}, {"ZL", "ZL", "8"}, {"ZR", "ZR", "9"}, {"PLUS", "+", "10"}, {"MINUS", "−", "11"}};
@@ -130,10 +132,23 @@ final class TouchPad {
         return null;
     }
 
-    /** Editor drag: move a control's centre, kept inside the pad box. Input state is not touched. */
+    /** Editor drag: keep every direction frame in bounds when translating the D-pad as a group. */
     void moveControl(Control c, float x, float y) {
-        c.x = Math.max(box[0], Math.min(box[0] + box[2], x));
-        c.y = Math.max(box[1], Math.min(box[1] + box[3], y));
+        if (c.kind == DPAD) {
+            double minDx = -box[2], maxDx = box[2], minDy = -box[3], maxDy = box[3];
+            for (String key : DIRECTIONS) {
+                TouchLayout.Rect frame = current.frameForButton(key, box[0], box[1], box[2], box[3]);
+                minDx = Math.max(minDx, box[0] - frame.x);
+                maxDx = Math.min(maxDx, (double) box[0] + box[2] - frame.x - frame.width);
+                minDy = Math.max(minDy, box[1] - frame.y);
+                maxDy = Math.min(maxDy, (double) box[1] + box[3] - frame.y - frame.height);
+            }
+            c.x = (float) (c.homeX + Math.max(minDx, Math.min(maxDx, (double) x - c.homeX)));
+            c.y = (float) (c.homeY + Math.max(minDy, Math.min(maxDy, (double) y - c.homeY)));
+        } else {
+            c.x = Math.max(box[0], Math.min(box[0] + box[2], x));
+            c.y = Math.max(box[1], Math.min(box[1] + box[3], y));
+        }
     }
 
     boolean edited() {
@@ -154,7 +169,7 @@ final class TouchPad {
             if (c.x == c.homeX && c.y == c.homeY) continue;
             if (c.kind == BUTTON) centres.put(c.id, new double[] {c.x, c.y});
             else if (c.kind == DPAD)
-                for (String key : new String[] {"UP", "DOWN", "LEFT", "RIGHT"}) {
+                for (String key : DIRECTIONS) {
                     TouchLayout.Rect f = current.frameForButton(key, left, top, width, height);
                     centres.put(key, new double[] {f.x + f.width / 2 + (c.x - c.homeX), f.y + f.height / 2 + (c.y - c.homeY)});
                 }

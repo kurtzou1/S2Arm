@@ -15,7 +15,7 @@
 # S2A_GATE_HOST_DEFAULT='user@gate-host'
 # S2A_REMOTE_HOSTS='user@gate-host-direct user@gate-host-lan'
 # S2A_REMOTE_DEFAULT='user@gate-host-direct'
-# 我方共享机器（开发机 / gate-host / Spare-host）才设：直连库带我方管线种子（graphics/tools/direct/direct_lib.sh）。用户自己的机器不要设
+# 我方共享机器（开发机 / gate-host / Spare-host）才设：直连库带我方管线种子（graphics/tools/direct/direct_lib.py）。用户自己的机器不要设
 # S2A_CPU_LEDGER=1
 
 # 开发机的 Python 与数据目录（11-07 启动器零配置：出包链代码不再写死 ~/.s2arm/venv、~/.s2arm/data，一律读这里或同名环境变量；没设就按「没有」处理）

@@ -32,7 +32,7 @@ import sys
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -40,9 +40,11 @@ from repair_compute import Library   # 直连库容器（lib.idx + lib.NNN.pak�
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / 'tools'))
 from pool_workers import cores   # 核数 / 进程池路数唯一来源（tools/pool_workers.py，#1332）
+from progress import Ticker   # 出包进度（S2A_PROGRESS）：这段原先没有计数，界面停在「刷新各阶段 n/11 · 剩 0 秒」
 
 FORMAT = 'cs-pipelines 1'   # 改了产物形状（描述、文件名、脚本格式）就加一，旧缓存全部不中
 REPO = Path(__file__).resolve().parents[3]
+TT_TIMEOUT = 600   # 单次 metal-tt 上限（秒）
 
 
 def ckey(key):
@@ -110,30 +112,72 @@ def tt_suffix(path):
     return p.stdout.strip()
 
 
+# 子进程一律不走 fork（11-20 本机实测：18 路线程池里每对起 3 个子进程——metallib 包库、metal-tt、cp 克隆——fork 要复制整个大进程且持全局锁，
+#   同一时刻只能起一个，平均每次 300 ms；一款大作冷编 1200 对 100 秒里 metal-tt 只占线程时间的 36%，同时在跑的 metal-tt 中位 5 个）。
+#   posix_spawn 不复制父进程（单独起 12 ms 量级，不互相排队）：工具按绝对路径直接起（不经 xcrun 再转一手），克隆用 clonefile 进程内做。
+_TOOLS, _TMU = {}, threading.Lock()
+
+
+def sdk_tool(sdk, name):
+    """xcrun -sdk <sdk> -f <name> 的绝对路径（每个工具只问一次）；找不到退回 ['xcrun', '-sdk', sdk, name]"""
+    with _TMU:
+        if (sdk, name) not in _TOOLS:
+            p = subprocess.run(['xcrun', '-sdk', sdk, '-f', name], capture_output=True, text=True).stdout.strip()
+            _TOOLS[(sdk, name)] = [p] if p else ['xcrun', '-sdk', sdk, name]
+        return _TOOLS[(sdk, name)]
+
+
+def run_tool(argv):
+    """跑一个短工具、收输出：argv[0] 是绝对路径时 subprocess 走 posix_spawn（close_fds=False：本进程的描述符缺省都不继承，PEP 446）"""
+    return subprocess.run(argv, capture_output=True, close_fds=False)
+
+
 def run_tt(argv, env, log):
-    """跑一次 metal-tt（新进程组）；600 秒超时整组杀。→ (退出码, 输出)"""
-    p = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+    """跑一次 metal-tt（新会话 = 新进程组，posix_spawn 起、输出直接写 log）；600 秒超时整组杀。→ (退出码, 输出)"""
+    fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
     try:
-        out, _ = p.communicate(timeout=600)
-    except subprocess.TimeoutExpired:
+        pid = os.posix_spawnp(argv[0], argv, env, setsid=True, file_actions=[(os.POSIX_SPAWN_DUP2, fd, 1), (os.POSIX_SPAWN_DUP2, fd, 2)])
+    finally:
+        os.close(fd)
+    late = []
+
+    def kill():
         # 进程组信号唯一入口 tools/safe_killpg.sh（tests/killpg_lint_test.sh 守）；字样 = 本次 metal-tt 的脚本路径（组长命令行里必有，组号被复用时对不上、不杀）
-        subprocess.run(['bash', '-c', 'source "$1"; safe_killpg KILL "$2" "$3"', '_', str(ROOT / 'tools/safe_killpg.sh'), str(p.pid), str(argv[-3])],
+        late.append(1)
+        subprocess.run(['bash', '-c', 'source "$1"; safe_killpg KILL "$2" "$3"', '_', str(ROOT / 'tools/safe_killpg.sh'), str(pid), str(argv[-3])],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        out, _ = p.communicate()
-        out = (out or b'') + b'\ncs_pipelines: metal-tt ran past 600 s, process group killed'
-        rc = 124
-    else:
-        rc = p.returncode
-    text = (out or b'').decode('utf-8', 'replace')
-    log.write_text(text)
+    tm = threading.Timer(TT_TIMEOUT, kill); tm.daemon = True; tm.start()
+    try:
+        st = os.waitpid(pid, 0)[1]
+    finally:
+        tm.cancel()
+    rc = os.waitstatus_to_exitcode(st)
+    text = log.read_bytes().decode('utf-8', 'replace')
+    if late:
+        text += f'\ncs_pipelines: metal-tt ran past {TT_TIMEOUT} s, process group killed'; rc = 124
+        log.write_text(text)
     return rc, text
+
+
+_LIBC = []
+
+
+def _clonefile(src, dst):
+    if not _LIBC:
+        import ctypes
+        try:
+            f = ctypes.CDLL(None, use_errno=True).clonefile; f.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint32]; f.restype = ctypes.c_int
+        except (AttributeError, OSError):
+            f = None
+        _LIBC.append(f)
+    return bool(_LIBC[0]) and _LIBC[0](os.fsencode(src), os.fsencode(dst), 0) == 0
 
 
 def clone(src, dst):
     # 临时件名带进程号 + 线程号：base_pipelines / 本工具用线程池并发出管线，两路碰上同一缓存键时同写一个目标；只带进程号时同进程两条线程共用一个临时件，
     #   先改名的一条把它挪走，后一条 os.replace 报 FileNotFoundError，整阶段软失败、包里一份管线都没有（Ori 2 出包实例）。各写各的临时件，改名原子，后到的覆盖先到的、内容相同
     tmp = dst.with_name(dst.name + f'.{os.getpid()}.{threading.get_ident()}.tmp')
-    if subprocess.run(['cp', '-c', str(src), str(tmp)], capture_output=True).returncode:   # APFS 克隆；别的文件系统退回普通拷贝
+    if not _clonefile(src, tmp):   # APFS 克隆（进程内 clonefile，不起 cp 子进程）；别的文件系统 / 没有这个调用退回普通拷贝
         shutil.copyfile(src, tmp)
     os.replace(tmp, dst)
 
@@ -185,7 +229,7 @@ def main():
             if ml.is_file(): return ml
             tmp = work / f'{h}.{threading.get_ident()}.metallib'
             air.write_bytes(mod)
-            p = subprocess.run(['xcrun', '-sdk', sdk, 'metallib', str(air), '-o', str(tmp)], capture_output=True)
+            p = run_tool(sdk_tool(sdk, 'metallib') + [str(air), '-o', str(tmp)])
             try:
                 if p.returncode or lib_functions(tmp.read_bytes()).get(fn, ('',))[0] != h: return None
             except (OSError, ValueError, struct.error):
@@ -222,8 +266,9 @@ def main():
                 cf.parent.mkdir(parents=True, exist_ok=True); clone(tmp, cf)
             os.replace(tmp, dst); note('built', 1)
 
+        tk = Ticker('直连库·计算管线', len(jobs))
         with ThreadPoolExecutor(max(1, a.j)) as ex:
-            list(ex.map(one, jobs))
+            for f in as_completed([ex.submit(one, job) for job in jobs]): f.result(); tk.step()   # 按完成先后计：一支编得久，计数不停在它前面
     finally:
         shutil.rmtree(work, ignore_errors=True)
     files = [a.out / f'{ckey(k)}.metalarchive' for k in keys]

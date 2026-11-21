@@ -40,6 +40,11 @@ def lib_dir(direct):
     return ds[0] if len(ds) == 1 else None
 
 
+def _scratch(c, gid):
+    import library   # 局部导入：library 也会用到本模块
+    return library.scratch_root(c, gid)
+
+
 def _clone(c, src, dst):
     r = subprocess.run([sys.executable, "-X", "utf8", str(Path(c.engine) / "tools/clonedir.py"), str(src), str(dst)], capture_output=True, text=True)
     if r.returncode:
@@ -57,15 +62,15 @@ def rebuild(c, gid, src_root, plat, work):
     for stale_out in ("shaders/direct", ".stage_direct", ".stage_direct_seed", ".stage_direct_cpso"):   # 旧库与它的阶段键不带进来：键对得上会被当成「已是本树」跳过
         p = roots / tag / stale_out
         shutil.rmtree(p) if p.is_dir() else p.unlink(missing_ok=True)
-    os.symlink(tag, roots / f"{gid}@现行")  # 非玩家句
+    layout.set_current(c, roots, gid, tag)
     env = c.env()
     env.update(S2A_ROOTS=str(roots), S2A_ROOTS_SHARED=str(work / "never-shared"), S2A_ROOTS_PRIV=str(work / "roots-private"), S2A_PACK_PLAT=plat)
     logs = Path(c.logs) / c.task; logs.mkdir(parents=True, exist_ok=True)
     for st, extra in STAGES:
         c.run(["bash", Path(c.engine) / f"pack/stage_{st}.sh", gid, *extra], logs / f"sgbf_{st}.log", env)
-    cur = Path(os.path.realpath(roots / f"{gid}@现行"))  # 非玩家句
-    new = cur / "shaders/direct"
-    if not (new / "keys.tsv").is_file() or lib_dir(new) is None:
+    cur = layout.current_root(c, roots / (gid + layout.CURRENT))
+    new = cur / "shaders/direct" if cur is not None else None
+    if new is None or not (new / "keys.tsv").is_file() or lib_dir(new) is None:
         raise Failure("重出的直连着色器库不完整")  # 非玩家句
     return new
 
@@ -101,7 +106,7 @@ out = ow.direct(ow.Run(work), root, "ios", os.cpu_count() or 4, tid)
 
 
 def _rebuild_win(c, gid, src_root, work):
-    """Windows 重出直连库：同 Windows 出 iOS 包的直连库那一步（oneclick_win.direct：Git Bash 跑 graphics/tools/direct/direct_lib.sh，没有现成抽取就当场抽，
+    """Windows 重出直连库：同 Windows 出 iOS 包的直连库那一步（oneclick_win.direct：原生 Python 跑 graphics/tools/direct/direct_lib.py，没有现成抽取就当场抽，
     Metal for Windows 编）。照出包作业那样另起进程、用作业层的环境（c.env：随包预编件 S2A_PREBUILT_TOOLS 等；作业进程自己的环境里没有）＋ iOS 平台。
     输入是 ios_inputs 建的产物根形态目录（临时目录，就地补配置档）。直连缓存用这款出包时那份（library.direct_cache_dir：Metal 编译结果按内容寻址，
     没变的着色器多数命中）。→ 新的 shaders/direct 目录；这台电脑没装 Metal 开发工具 → None（同 Windows 出包：不带着色器库）"""
@@ -150,7 +155,7 @@ def upgrade_mac(c, gid, runtime, hold=None):
         with open(runtime / "game.img", "rb") as f:
             _copy_range(f, h["romfs"][0], h["romfs"][1], std)
     try:
-        with tempfile.TemporaryDirectory(dir=c.private) as tmp:
+        with tempfile.TemporaryDirectory(dir=_scratch(c, gid)) as tmp:
             return _upgrade_mac(c, gid, runtime, hold, Path(tmp))
     finally:
         if made:
@@ -307,7 +312,7 @@ def upgrade_ios(c, gid):
     old = lib_dir(pack / "shaders/direct")
     if old is None:
         return "skip"   # 不是直连包
-    with tempfile.TemporaryDirectory(dir=c.private) as tmp:
+    with tempfile.TemporaryDirectory(dir=_scratch(c, gid)) as tmp:
         src, where = ios_inputs(c, gid, Path(tmp))
         if src is None:
             return "unavailable"
@@ -344,13 +349,18 @@ def rechain_ios(c, gid):
     want = host_update.engine_compat(c)
     side = layout.game_info(c, gid).get("ios") or {}
     # 库内容代数（host_update.LIB_GEN）旧了也重编：链号没变、库里却缺了设备要用的内容（0.5.x 出的库不带客体输入，同链号）
-    if not want or (side.get("dmshChain", host_update.LEGACY_CHAIN) == want["dmshChain"] and not host_update.lib_stale(side.get("libGen"))):
+    # 手机上现场翻译过包里没有的着色器、库又是旧版启动器出的（「建议更新」原因 shaderMiss）也重编：同链号同代数，本版出包能多覆盖；
+    #   原先只认链号 / 代数，玩家点「更新这款」推完提示照旧（#1756）。重编后记本版 builtBy，这条原因随之消掉
+    if not want:
+        return "skip"
+    if side.get("dmshChain", host_update.LEGACY_CHAIN) == want["dmshChain"] and not host_update.lib_stale(side.get("libGen")) \
+            and not (host_update.shader_misses(c, gid)["ios"] > 0 and host_update.built_older(c, side.get("builtBy"))):
         return "skip"
     pack = Path(layout.ios_pack(c, gid))
     direct = pack / "shaders/direct"
     if lib_dir(direct) is None:
         return "skip"   # 不是直连包
-    with tempfile.TemporaryDirectory(dir=c.private) as tmp:
+    with tempfile.TemporaryDirectory(dir=_scratch(c, gid)) as tmp:
         src, where = ios_inputs(c, gid, Path(tmp))
         if src is None:
             c.emit("message", f"{gid}：着色器链更新了，但游戏库里没有 game.img、也没有 Mac 版可借：这次没重编着色器库")  # 非玩家句
@@ -371,7 +381,7 @@ def rechain_ios(c, gid):
         shutil.rmtree(old, ignore_errors=True)
         rels = [p.relative_to(pack).as_posix() for p in sorted(direct.rglob("*")) if p.is_file()]
         pid = add_to_pack(pack, "shaders/direct/", rels)
-    layout.update_info(c, gid, ios={**side, "dmshChain": want["dmshChain"], "bfGen": BF_GEN, "libGen": host_update.LIB_GEN, "pack": pid})
+    layout.update_info(c, gid, ios={**side, "dmshChain": want["dmshChain"], "bfGen": BF_GEN, "libGen": host_update.LIB_GEN, "pack": pid, "builtBy": host_update.built_by(c)})
     return "updated"
 
 

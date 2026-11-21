@@ -52,6 +52,16 @@ struct nvk_prog_rec {
 // v1 的 64 位最近使用字段继续兼容旧时间戳，仅保留相对顺序。当前局的 note 比载入历史更新。
 int nvk_prog_warm_load(void);
 
+// 随包种子（首局预热）：本机这一版翻译器还没有清单（本闭包那份与旧名那份都不在）时，load 改读包里带的同名种子
+//   <S2A_SHADER_REVISION_ROOT>/shaders/direct/warm-vk/<闭包摘要前 8 字节 hex>-<profile 摘要前 8 字节 hex>/programs-v1-<闭包摘要 hex>.bin。
+//   种子就是一台同类设备真跑落下的本清单（同一格式、同一份整份校验与本局有效性检查），出包时由
+//   graphics/tools/direct/vk_warm_seed.py 收进包；跑局知识里的苹果管线键换不出这里的身份（身份含设备 profile、纹理与绘制事实，
+//   c1 是现场捕获的），所以种子只能来自安卓真机。有本机清单一律不读种子；种子不在 / 坏 / 不属于本局只打一行，本局按没有清单走。
+//   收下种子后本局落盘照常写本机路径：第二局起读本机清单，不再读种子。
+// 本局随包种子的状态（管线清单据此决定读不读同目录的管线种子）：
+//   -1 = 本局还没定（load 还没走到能定的那一步，调用方稍后再问）；0 = 本局没用随包种子；1 = 用了，out 写入种子目录。
+int nvk_prog_warm_seed_dir(char *out, size_t n);
+
 // 预热带游标：1 = 取到一条（游标推进）；0 = 没有更多。
 int nvk_prog_warm_take(struct nvk_prog_rec *out);
 int nvk_prog_warm_pending(void);

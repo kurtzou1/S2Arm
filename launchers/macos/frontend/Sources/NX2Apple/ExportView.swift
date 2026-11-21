@@ -90,7 +90,7 @@ struct ExportView: View {
     private var optionsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             locationRow
-            if model.exportTargets.contains(.ios) { IosAfterPackPicker(model: model) }   // 出完之后：装到 iPhone / 导出自签 IPA（11-16 维护者：一个入口、两条分叉各走到底）
+            if model.exportTargets.contains(.ios) { IosAfterPackPicker(model: model, gameId: game.id) }   // 出完之后：装到 iPhone / 导出自签 IPA（11-16 维护者：一个入口、两条分叉各走到底）
             if model.exportTargets.contains(.tvos) || game.appleTvReady {
                 appleTVRow
                 AppleTVXcodeTeam(model: model).padding(.leading, 2)   // Apple TV 装机仍用 Xcode 团队（tvos.install_tv）：引导项目 / 手填团队号只在这里
@@ -332,6 +332,8 @@ extension ExportView {
 /// 出包页「出完之后」：两张卡二选一（记住到下次）。装到 iPhone → 下面是目标设备与签名身份；导出自签 IPA → 说清导到哪、用什么装、不用连手机
 struct IosAfterPackPicker: View {
     @ObservedObject var model: S2ArmLauncherModel
+    /// 这款：「装到手机」「导出」两条路下都给这款的出法行（0.6.4：出包页也能选通用 S2Arm / 独立 App，单款覆盖全局）
+    var gameId: String? = nil
     @EnvironmentObject var loc: Localizer
     @State private var hoveredOption: String?
     private func x(_ id: String) -> String { BackendText.launcherText("export." + id, language: loc.lang.sharedCode) }
@@ -343,12 +345,11 @@ struct IosAfterPackPicker: View {
                 option("install", x("after.install"), x("after.install_note"), "iphone.and.arrow.forward")
                 option("export", x("after.export"), x("after.export_note"), "square.and.arrow.up")
             }.fixedSize(horizontal: false, vertical: true)   // 两张卡同高：按较高那张撑齐
-            if model.iosAfterPack == "export" {
-                EmptyView()
-            } else {
+            if model.iosAfterPack != "export" {
                 TargetDeviceRow(model: model)
                 InstallModeLine(model: model)
             }
+            if let gameId { InstallLayoutRow(model: model, gameId: gameId).padding(.top, 4) }
         }
     }
 

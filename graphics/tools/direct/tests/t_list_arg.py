@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# 资源目录列表走 @<列表文件>（11-05 Windows 出包机怪猎崛起 273 个追加内容：extract.sh 把目录拼进命令行，超过 Windows 32767 字符上限，起 Python 报「Argument list too long」）。
+# 资源目录列表走 @<列表文件>（11-05 Windows 出包机怪猎崛起 273 个追加内容：extract.py 把目录拼进命令行，超过 Windows 32767 字符上限，起 Python 报「Argument list too long」）。
 #   期望手写：① shader_split.list_arg：逗号串照旧拆；@文件按行读，去掉行尾 \r\n、跳过空行
 #   ② nxsh_extract.py <输出> @<列表>：300 个长名资源目录各放 1 个文件（路径合计超过 32767 字符），退 0、统计「顶层文件」= 300（列表里的目录都被读到）
 import os, subprocess, sys, tempfile

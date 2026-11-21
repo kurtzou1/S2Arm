@@ -44,6 +44,7 @@ cp "$H/pack/stage_keyfiles.sh" $R/pack/; cp "$H/tools/stage_deps.py" $R/tools/; 
 cp "$H/pack/roots.sh" "$H/pack/srcs.sh" "$H/pack/stage_sysdata.sh" "$H/pack/stage_romfsidx.sh" \
    "$H/pack/stage_nacp.sh" "$H/pack/stage_aoc.sh" "$H/pack/direct_profile_input.py" \
    "$H/pack/sysdata_need.py" "$H/pack/sysdata_synth.py" "$H/pack/sysdata_mii.py" $R/pack/
+mkdir -p "$R/pack/orch" && cp "$H/pack/orch/current.py" "$R/pack/orch/"   # roots.sh 写现行指针 / 迁移老库（pack/orch/current.py）
 cp -R "$H/pack/stages" $R/pack/
 cp "$H/tools/clonedir.py" "$H/tools/safe_killpg.sh" "$H/tools/plock.sh" "$H/tools/flock_hold.py" $R/tools/   # roots.sh 提交锁用 tools/plock.sh（审计 P1-27）
 # romfs_list.py：仓库里唯一的 RomFS 遍历（11-03），被测脚本经它列 RomFS
@@ -119,20 +120,20 @@ touch -t 202601010101 $T/src/*.nsp
 
 mkroot() {   # mkroot <款> <exefs/main 内容> <romfs 文件内容>
   local d=$T/roots/$1@s0; mkdir -p "$d/exefs" "$d/romfs"; printf '%s\n' "$2" > "$d/exefs/main"; printf '%s\n' "$3" > "$d/romfs/f"
-  ln -s "$1@s0" "$T/roots/$1@现行"
+  printf '%s\n' "$1@s0" > "$T/roots/$1@现行"
 }
 mksys() {   # mksys <款>：带程序号 / 构建号 / 时区的产物根（系统数据阶段要）
   local d=$T/roots/$1@s0; mkdir -p "$d/exefs" "$d/systemdata/010000000000080E"
   printf 'title_id\t0100AAAA00000000\ndisplay_version\t9.9\n' > "$d/unpack.tsv"
   python3 -c "import sys;open(sys.argv[1],'wb').write(b'\0'*0x40+bytes.fromhex('11223344')+b'\0'*44)" "$d/exefs/main"
-  echo tz > "$d/systemdata/010000000000080E/binaryList.txt"; ln -s "$1@s0" "$T/roots/$1@现行"
+  echo tz > "$d/systemdata/010000000000080E/binaryList.txt"; printf '%s\n' "$1@s0" > "$T/roots/$1@现行"
 }
 mknacp() {   # mknacp <款>：只有 exefs/main（0x40 处是构建号 11223344），没有 ctl/control.nacp
   local d=$T/roots/$1@s0; mkdir -p "$d/exefs"
   python3 -c "import sys;open(sys.argv[1],'wb').write(b'\0'*0x40+bytes.fromhex('11223344')+b'\0'*44)" "$d/exefs/main"
-  ln -s "$1@s0" "$T/roots/$1@现行"
+  printf '%s\n' "$1@s0" > "$T/roots/$1@现行"
 }
-cur() { cd -P "$T/roots/$1@现行" && pwd; }
+cur() { cd -P "$T/roots/$(cat "$T/roots/$1@现行")" && pwd; }
 
 # ── A. 选包 / 解包 ────────────────────────────────────────────────────────────
 sec_unpack() {
@@ -317,7 +318,7 @@ sec_nacp() {
   mknacp p1; mknacp p2; mknacp p4; mknacp p5; mknacp p7; mknacp p8; mknacp p9
   mkdir -p $T/noxxd && printf '#!/bin/sh\nexit 127\n' > $T/noxxd/xxd && chmod +x $T/noxxd/xxd   # P2-278：玩家机没装 xxd
   head -c 66 "$(cur p9)/exefs/main" > $T/p9main && mv $T/p9main "$(cur p9)/exefs/main"          # 构建号只有 2 字节
-  mkdir -p $T/roots/p6@s0 && ln -s p6@s0 $T/roots/p6@现行   # p6 没有 exefs/main
+  mkdir -p $T/roots/p6@s0 && printf '%s\n' p6@s0 > $T/roots/p6@现行   # p6 没有 exefs/main
   # p1 旧入口 / p2 共享入口（同款不同名、同一份输入）→ 产物与标签必须一致
   ( $E bash $R/pack/stage_nacp.sh p1 $T/src/base.nsp > $T/p1.out 2>&1; echo $? > $T/p1.rc ) &
   ( $E bash $R/pack/stages/nacp.sh p2 $T/src/base.nsp > $T/p2.out 2>&1; echo $? > $T/p2.rc ) &
@@ -356,7 +357,7 @@ sec_nacp() {
 sec_aoc() {
   local r1 r2 k1 r3 o3 r4 r5 o5 r6 r7 o7 r8 b1 r9 o9 r10 o10
   mksys a1; mksys a2; mksys a3; mksys a4; mksys a5; mksys a7
-  mkdir -p $T/roots/a6@s0 && ln -s a6@s0 $T/roots/a6@现行   # a6 没有 exefs/main
+  mkdir -p $T/roots/a6@s0 && printf '%s\n' a6@s0 > $T/roots/a6@现行   # a6 没有 exefs/main
   mkdir -p $T/games $T/nogames
   for f in base dlc other; do printf '%s' "$f" > $T/games/$f.nsp; done
   touch -t 202601010101 $T/games/*.nsp

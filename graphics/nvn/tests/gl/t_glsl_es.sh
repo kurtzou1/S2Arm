@@ -79,4 +79,16 @@ ck "㉓ 3.20 的 sample 限定符不动" rewrite frag
 # ㉔ 3.10 开了 GL_OES_shader_multisample_interpolation：sample 是限定符，不动
 printf '#version 310 es\n#extension GL_OES_shader_multisample_interpolation : require\nprecision highp float;\nsample in vec4 v;\nout vec4 o;\nvoid main() { o = v; }\n' > "$T/in"; cp "$T/in" "$T/want"
 ck "㉔ 开了多重采样插值扩展：不动" rewrite frag
+# ㉕ D-45CD：「#version 320」（补成 320 es）里 sample 当名字 → 照样改 s2a_sample（原先 3.20 不改名，报 Reserved word）
+printf '#version 320 es\nprecision highp float;\nout vec4 o;\nvoid main() { float sample = 2.0; o = vec4(sample); }\n' > "$T/in"
+printf '#version 320 es\nprecision highp float;\nout vec4 o;\nvoid main() { float s2a_sample = 2.0; o = vec4(s2a_sample); }\n' > "$T/want"
+ck "㉕ 3.20 里 sample 当名字 → s2a_sample" rewrite frag
+# ㉖ 开了扩展、sample 当名字 → 改名
+printf '#version 310 es\n#extension GL_OES_shader_multisample_interpolation : require\nprecision highp float;\nout vec4 o;\nvoid main() { vec4 sample = vec4(1.0); o = sample; }\n' > "$T/in"
+printf '#version 310 es\n#extension GL_OES_shader_multisample_interpolation : require\nprecision highp float;\nout vec4 o;\nvoid main() { vec4 s2a_sample = vec4(1.0); o = s2a_sample; }\n' > "$T/want"
+ck "㉖ 开了扩展、sample 当名字 → 改名" rewrite frag
+# ㉗ 3.20 同一支里既有限定符又有名字：只改名字那处
+printf '#version 320 es\nprecision highp float;\nsample in vec4 v;\nout vec4 o;\nvoid main() { float sample = 0.5; o = v * sample; }\n' > "$T/in"
+printf '#version 320 es\nprecision highp float;\nsample in vec4 v;\nout vec4 o;\nvoid main() { float s2a_sample = 0.5; o = v * s2a_sample; }\n' > "$T/want"
+ck "㉗ 限定符留、名字改" rewrite frag
 [ $bad = 0 ] && echo "✓ t_glsl_es：$n 项全过" || { echo "✗ t_glsl_es：$n 项，失败 $bad"; exit 1; }

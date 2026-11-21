@@ -32,7 +32,9 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
         public event Action<NetworkInfo> ScanResponse;
         public event Action<NetworkInfo> SyncNetwork;
         public event Action<NodeInfo, EndPoint> Connect;
+        public event Action<LdnProxyTcpSession> StationConnected;
         public event Action<LdnProxyTcpSession> DisconnectStation;
+        public event Action<LdnProxyTcpClient> ClientDisconnected;
 
         public LanProtocol(LanDiscovery parent)
         {
@@ -44,9 +46,19 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
             Accept?.Invoke(session);
         }
 
+        public void InvokeStationConnected(LdnProxyTcpSession session)
+        {
+            StationConnected?.Invoke(session);
+        }
+
         public void InvokeDisconnectStation(LdnProxyTcpSession session)
         {
             DisconnectStation?.Invoke(session);
+        }
+
+        public void InvokeClientDisconnected(LdnProxyTcpClient client)
+        {
+            ClientDisconnected?.Invoke(client);
         }
 
         private void DecodeAndHandle(LanPacketHeader header, byte[] data, EndPoint endPoint = null)
@@ -71,12 +83,19 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
                     break;
                 case LanPacketType.Connect:
                     // TCP Session / Station
-                    Connect?.Invoke(MemoryMarshal.Cast<byte, NodeInfo>(data)[0], endPoint);
+                    HandleConnect(MemoryMarshal.Cast<byte, NodeInfo>(data)[0], endPoint);
                     break;
                 default:
                     Logger.Error?.PrintMsg(LogClass.ServiceLdn, $"Decode error: Unhandled type {header.Type}");
                     break;
             }
+        }
+
+        // Kept separate from DecodeAndHandle so the per-connection routing invariant can be tested
+        // without binding the production discovery sockets to a fixed LAN port.
+        internal void HandleConnect(NodeInfo info, EndPoint endPoint)
+        {
+            Connect?.Invoke(info, endPoint);
         }
 
         public void Read(scoped ref byte[] buffer, scoped ref int bufferEnd, byte[] data, int offset, int size, EndPoint endPoint = null)

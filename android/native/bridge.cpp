@@ -454,6 +454,7 @@ Java_org_s2arm_android_NativeBridge_createGame(JNIEnv *, jclass) {
     if (g_game_host) return 0;   // 一个进程只能创建一次真实 guest / GPU 组合。
     try {
         s2a_android_input_reset();
+        s2a_android_session_period_reset();   // 本局最短周期从这一局重新记
         g_game_host = new AndroidHost(nullptr, true);
         return reinterpret_cast<jlong>(g_game_host);
     } catch (const std::exception &error) {
@@ -1209,6 +1210,7 @@ Java_org_s2arm_android_NativeBridge_stopGame(JNIEnv *env, jclass, jlong handle, 
     s2a_capacity_stop();
     s2a_adpf_stop();
     s2a_cpu_floor_stop();
+    s2a_android_session_period_reset();
     host->stop_reason = jstring_or(env, why, "game stop requested");
     host->stop_normal.store(normal == JNI_TRUE);
     // 后台冻着的客机先放开（同 Mac display_focus_publish_ex(NO, NO) 的「收尾只报不冻」）：

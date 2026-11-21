@@ -36,6 +36,31 @@ static inline pf_vp pf_viewport(double dw, double dh, double cw, double ch) {
     return v;
 }
 
+// Fill modes for a target whose aspect differs from the picture's (replay presenter switch nvk_present_fill; mode 0 leaves pf_viewport's letterbox alone).
+// src = the source rectangle being shown (x, y, w, h with w, h > 0), dw x dh = the target, ta / sa = target / source aspect, off = max(ta/sa, sa/ta) - 1.
+//   mode 1, off <= 15%: stretch the whole source over the whole target (returns 1; crop = src)
+//   mode 2, 1% <= off <= 30%: keep the aspect, enlarge until the target is covered and crop what overflows, centered: a narrower target loses the
+//           left / right edges (w = floor(src h * ta)), a wider one the top / bottom (h = floor(src w / ta)) (returns 2; crop = the part of src to sample)
+//   anything else: returns 0, crop = src and *vp is left as the caller set it (the letterbox)
+// When it returns 1 or 2, *vp is the whole target.
+static inline int pf_fill(int mode, double dw, double dh, const int src[4], int crop[4], pf_vp *vp) {
+    for (int i = 0; i < 4; i++) crop[i] = src[i];
+    if ((mode != 1 && mode != 2) || !(dw > 0) || !(dh > 0) || src[2] <= 0 || src[3] <= 0) return 0;
+    const double cw = src[2], ch = src[3], ta = dw / dh, sa = cw / ch, off = ta > sa ? ta / sa - 1 : sa / ta - 1;
+    if (mode == 1) {
+        if (off > 0.15) return 0;
+        *vp = (pf_vp){0, 0, dw, dh};
+        return 1;
+    }
+    if (off < 0.01 || off > 0.30) return 0;
+    double nw = cw, nh = ch;
+    if (ta < sa) nw = floor(ch * ta); else nh = floor(cw / ta);
+    if (nw < 1 || nh < 1) return 0;
+    crop[0] = src[0] + (int)((cw - nw) / 2); crop[1] = src[1] + (int)((ch - nh) / 2); crop[2] = (int)nw; crop[3] = (int)nh;
+    *vp = (pf_vp){0, 0, dw, dh};
+    return 2;
+}
+
 // Output layer aspect (graphics/nvn/host_adapt.m out_aspect): a widened or heightened picture is shown at screen width / screen height (wide screens keep
 // height 1080, narrow screens keep width 1920, so one formula covers both); otherwise 16:9. 11-03 Duo (1920x1350) with the game drawing a taller
 // picture itself: the old width / 1080 gave 1.778 and squeezed the 1280x900 picture into a 16:9 layer with black above and below

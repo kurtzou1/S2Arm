@@ -40,6 +40,11 @@ for name, f, want in CASES:
     got, why = classify(f)
     ok = got == want; fails += not ok
     print(f'  {"过" if ok else "败"} {name}：期望 {want}，判 {got}（{why}）')
+# 判不出时依据写进结果（D-Z6WZ 形态：main 不导入 nvnBootstrapLoader、导入按名查找、映像里有名字串、只有 main rtld sdk）：期望按字段手写
+got, why = classify(F(evidence=dict(imports=812, ro_lookup=True, nvn_name=True, nvn_like=['nvnPrivate0'], mods=['main', 'main.npdm', 'rtld', 'sdk'])))
+want_why = '没有 NVN / Vulkan / OpenGL 任一接口的证据；依据：main 导入 812 个、按名查找（nn::ro::LookupSymbol）有、映像里 nvnBootstrapLoader 名字串有、带 nvn 的导入 nvnPrivate0、ExeFS 模块 main main.npdm rtld sdk'
+ok = (got, why) == ('unknown', want_why); fails += not ok; CASES.append(None)
+print(f'  {"过" if ok else "败"} 判不出时依据写进结果：{why}')
 # features 读 main.npdm 判位宽（META 头 0xC 字节 bit0 = 64 位指令集）：flags 0 → 32 位，不碰 main；flags 1 → 照旧看 main（这里 main 不是 NSO → None）
 for flags, want in ((0x00, {'arm32': True}), (0x01, None), (0x3F, None)):
     with tempfile.TemporaryDirectory() as d:

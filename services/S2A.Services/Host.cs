@@ -108,12 +108,24 @@ namespace S2A.Services
         //   2 有 provider 但程序号 / 端口无效或启动返回失败。界面经 S2A_LanState（LdnExports）读，非 0 就给玩家说明（Mac：front_mac.m 横幅）
         internal static int LanUnavailable => System.Threading.Volatile.Read(ref _lanUnavailable);
         private static int _lanUnavailable;
+        // Switch-compatible local wireless: ldn_mitm uses UDP/TCP 11452 and does not
+        // need the native provider that Mac hosts do not register.
+        internal static bool LdnMitmRequested =>
+            string.Equals(Environment.GetEnvironmentVariable("S2A_LDN_MITM"), "1", StringComparison.Ordinal);
 
         // 游戏初始化 ldn:u：按需启动已登记的平台发现；显式中继地址不自动发现。
         internal static void OnLdnInitializing()
         {
             lock (_lanLock)
             {
+                if (LdnMitmRequested)
+                {
+                    LdnAutoTried = true;
+                    Logger.SetEnable(LogLevel.NetLog, true);
+                    Console.Error.WriteLine("[S2A 联机] 游戏初始化 ldn:u：使用 Switch ldn_mitm 局域网协议（UDP/TCP 11452）");
+                    return;
+                }
+
                 if (_lanSessionStopped || LdnAutoTried || LdnServer != null)
                 {
                     return;
@@ -229,6 +241,12 @@ namespace S2A.Services
             lock (_ldnSelectionLock)
             {
                 if (Device == null) return;
+                if (LdnMitmRequested)
+                {
+                    Device.Configuration.MultiplayerMode = MultiplayerMode.LdnMitm;
+                    Device.Configuration.MultiplayerLdnServer = string.Empty;
+                    return;
+                }
                 Device.Configuration.MultiplayerMode = _ldnSelectionAvailable ? MultiplayerMode.LdnRyu : MultiplayerMode.Disabled;
                 Device.Configuration.MultiplayerLdnServer = _ldnSelectionAvailable ? (_ldnServerNow ?? "127.0.0.1") : string.Empty;
             }
@@ -245,6 +263,11 @@ namespace S2A.Services
         private static void StartLdnRelayLocked()
         {
             System.Net.IPAddress address;
+
+            if (LdnMitmRequested)
+            {
+                return;
+            }
 
             if (_ldnRelay != null)
             {
@@ -659,7 +682,7 @@ namespace S2A.Services
             Logger.SetEnable(LogLevel.Debug, false);
             Logger.SetEnable(LogLevel.Stub, true);   // 上游 Logger 缺省不建 Stub 级（Logger.Stub 为 null），不开就一条桩都收不到、汇总行假空
             Logger.SetEnable(LogLevel.Guest, true);  // 游戏经 lm 写的日志（八方2 SDK 初始化自退的原因就写在里面），排查常要，量小
-            Logger.SetEnable(LogLevel.NetLog, LdnServer != null);   // 开了联机才打：RyuLdn 客户端连上 / 断开 / 出错只在这一级（排查中继连不上、扫描没结果）
+            Logger.SetEnable(LogLevel.NetLog, LdnMitmRequested || LdnServer != null);   // 开了联机才打：RyuLdn 客户端连上 / 断开 / 出错只在这一级（排查中继连不上、扫描没结果）
             if (!_loggerInstalled)
             {
                 Logger.Updated += static (_, e) =>
@@ -754,7 +777,7 @@ namespace S2A.Services
             AccountManager account = new(libHac.RyujinxClient, null);
             UserChannelPersistence channel = Channel;   // 进程级，跨重启存活（见 Channel）
 
-            if (LdnServer == "lan") StartLanDiscovery();
+            if (!LdnMitmRequested && LdnServer == "lan") StartLanDiscovery();
             // 游戏不支持系统语言时的退路：只从宿主主语言出发（Host.Language：显式指定 → 平台标签 → 宿主首选第一项），见 SystemLocale.TitleFallback
             Ryujinx.HLE.S2AHooks.TitleLanguageFallback = SystemLocale.TitleFallback(Language);
             // 显式指定的系统语言（env.txt 也算）：游戏的控制数据没声明支持语言时仍按它回（IApplicationFunctions.GetDesiredLanguage）
@@ -778,7 +801,9 @@ namespace S2A.Services
                 audioVolume: 1.0f,
                 useHypervisor: false,
                 multiplayerLanInterfaceId: "0",
-                !LdnLan && (LdnServer == null || LdnServer == "lan") ? MultiplayerMode.Disabled : MultiplayerMode.LdnRyu,
+                LdnMitmRequested
+                    ? MultiplayerMode.LdnMitm
+                    : !LdnLan && (LdnServer == null || LdnServer == "lan") ? MultiplayerMode.Disabled : MultiplayerMode.LdnRyu,
                 multiplayerDisableP2p: true,      // 不开 UPnP 直连，数据全走中继
                 multiplayerLdnPassphrase: Environment.GetEnvironmentVariable("S2A_LDN_PASSPHRASE") ?? string.Empty,
                 multiplayerLdnServer: LdnLan ? (_ldnServerNow ?? "127.0.0.1") : LdnServer == "lan" ? string.Empty : LdnServer ?? string.Empty,   // 局域网：选举出结果前先用本机中继
@@ -805,7 +830,7 @@ namespace S2A.Services
             Ryujinx.HLE.S2AHooks.EncodeScreenshotJpeg = configuration?.ScreenshotEncoder ?? Exports.ScreenshotEncoder;
             StartLdnRelay();
             Device = new Switch(config);
-            if (_lan) ApplyLanSelection();
+            if (LdnMitmRequested || _lan) ApplyLanSelection();
             Native.Mark("服务：Ryujinx Switch 建（Horizon 服务线程起）\0"u8);
 
             // Ryujinx 在游戏进程 Start 时做的一步（ProcessResult.Start）：带设备重载内容表，顺带初始化时区、证书、共享字体

@@ -78,6 +78,12 @@ static inline void s2a_hidg_sticks(const s2a_hidg *h, int16_t s[4]) {
 
 // 走 Switch Pro 协议那一支（hid_pad.m 切 0x30 完整报告、体感）：名字带「Pro Controller」，大小写不敏感
 static inline int s2a_hidg_is_pro(const char *name) { return name && strcasestr(name, "Pro Controller") != NULL; }
+// 一代机身认法（joycon_imu.m 六轴轴向、拆不拆单只都照它）：产品号报左 / 右 Joy-Con（0x2006 / 0x2007）、名字却是「Pro Controller」且不带 Joy-Con 的
+//   是冒用 Joy-Con 产品号的第三方 Pro（D-52Z8：0x2006 + 「Pro Controller」被按左只侧握换算六轴，体感瞄准反向）：按 Pro（0x2009）认；其余照产品号
+static inline int s2a_hidg_jc_body_pid(int pid, const char *name) {
+    if ((pid == 0x2006 || pid == 0x2007) && s2a_hidg_is_pro(name) && !strcasestr(name, "Joy-Con")) return 0x2009;
+    return pid;
+}
 // 系统原生认得的厂商：微软 / 索尼 / 任天堂
 static inline int s2a_hidg_native_vendor(int vid) { return vid == 0x045e || vid == 0x054c || vid == 0x057e; }
 #define S2A_HIDG_GC_WAIT_US 2000000ull   // GameController 说认得时等它列出的时长（同参考实现 HIDPAD_GC_WAIT）

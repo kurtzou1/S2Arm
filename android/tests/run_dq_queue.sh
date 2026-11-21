@@ -23,6 +23,11 @@
 #     M15 清空等待不进直方图                 → C7b
 #     M16 等活延迟的起点终点算反             → C7a（记下的比墙钟还长）
 #     M17 百分位向下取整                     → C7d（合成直方图 p99 落错桶）
+#   暂存填充的代拷另有四种变异，只跑 C8 那一组：
+#     M18 代拷完就把水位推到自己的票号       → C8a（旧票号还没拷完，水位越过了它）
+#     M19 代拷完不置「拷完」                 → C8a（录制线程 / 再次代拷一直等「正在拷」，看门狗超时）
+#     M20 录制线程不认代拷、照拷             → C8a（被代拷的记录又拷一遍，把改过的来源带进暂存）
+#     M21 旁挂表复用槽前不先拷旧的那笔       → C8c（旧那笔被录制线程当成已代拷跳过，暂存没拷）
 set -euo pipefail
 ulimit -c 0 2> /dev/null || true   # 变异用例可能崩溃（M1 常见）：不留 core 文件
 repo=$(cd "$(dirname "$0")/../.." && pwd)
@@ -155,4 +160,15 @@ mutate M16 'dq_hist_add(g_dq_hw, &g_dq_hw_max, dq_now_ns() - t0);' 'dq_hist_add(
 neg M16 '【红】C7a：' 'C7' 0 C7
 mutate M17 'uint64_t need = (total * pct + 99) / 100, acc = 0;' 'uint64_t need = (total * pct) / 100, acc = 0;   /* M17：百分位向下取整 */'
 neg M17 '【红】C7d：' 'C7' 0 C7
-echo "两级回放队列宿主用例：正控全绿，十七种变异都红在预期处"
+# ---- 暂存填充的代拷：四种变异（C8）
+anchor_take_done='atomic_store_explicit(&sl->w, FILL_W(t, FILL_DONE), memory_order_release);'
+mutate M18 "$anchor_take_done" "$anchor_take_done"' atomic_store_explicit(&g_fill_done, t, memory_order_release);   /* M18：代拷完推水位 */'
+neg M18 '【红】C8a：' 'C8' 0 C8
+mutate M19 "$anchor_take_done" '/* M19：代拷完不置「拷完」 */'
+neg M19 '【红】超时' 'C8' 1 C8
+mutate M20 'if (atomic_compare_exchange_strong_explicit(w, &e, FILL_W(a->seq, FILL_BUSY), memory_order_acquire, memory_order_acquire)) {' \
+           'if (((void)atomic_compare_exchange_strong_explicit(w, &e, FILL_W(a->seq, FILL_BUSY), memory_order_acquire, memory_order_acquire), 1)) {   /* M20：不认代拷 */'
+neg M20 '【红】C8a：' 'C8' 0 C8
+mutate M21 'if ((ow >> 2) && (ow & 3) != FILL_DONE) dq_fill_take(ow >> 2);' '(void)ow;   /* M21：复用槽不先拷旧的 */'
+neg M21 '【红】C8c：' 'C8' 0 C8
+echo "两级回放队列宿主用例：正控全绿，二十一种变异都红在预期处"

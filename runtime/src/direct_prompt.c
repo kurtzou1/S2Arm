@@ -7,7 +7,7 @@
 int s2a_save_atomic_poll(void) {
     static int looked, warned, unknown; static int (*state)(void);
     if (warned || s2a_host_session_state() != S2A_SESSION_RUNNING) return 0;
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     // 安卓：服务层静态并入同一个 DSO（--exclude-libs,ALL），dlsym 找不到隐藏导出、恒为 NULL，提示从不出现。改链接期弱引用：
     //   出包的单库里由归档解析（core-link 审计守：归档定义的导出在库里仍未解析就失败）；不带服务层的门禁链接里为空，照旧不提示
     { extern int S2A_SaveAtomicState(void) __attribute__((weak)); if (!looked) { looked = 1; state = S2A_SaveAtomicState; } }
@@ -31,7 +31,7 @@ int s2a_save_atomic_poll(void) {
 int s2a_no_picture_decide(double secs, unsigned long long fails, unsigned long long draws, unsigned long long presents) {
     return secs >= S2A_NOPIC_AFTER_S && presents > 0 && fails > 0 && draws == 0;
 }
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
 int s2a_no_picture_poll_at(double now) { (void)now; return 0; }
 int s2a_no_picture_poll(void) { return 0; }   // 横幅只在 iPhone 壳（ios/dprompt.m）；安卓的直连现编另有口径
 #else

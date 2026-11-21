@@ -173,11 +173,13 @@ def main():
         method = 'fork' if 'fork' in mp.get_all_start_methods() else 'spawn'
         with mp.get_context(method).Pool(process_pool_size(NJ)) as pool:   # 只算新克隆 / 变了的文件
             need = [(rel, p) for rel, p in todo if rel not in csha]; ps = [p for _, p in need]   # 判沿用时已经算过 SHA 的不再算
-            hs = [h for part in pool.imap(sha_block, [ps[i:i + 64] for i in range(0, len(ps), 64)]) for h in part]
+            hs = []
+            for part in pool.imap(sha_block, [ps[i:i + 64] for i in range(0, len(ps), 64)]):   # 每块 64 个算完就计（11-20 010015100B514000：原先整份算完才计一次，进度停 53 秒）
+                hs += part; tk.step(len(part))
             for (rel, _), h in zip(need, hs): shas[rel] = h
             for rel, _ in todo:
                 if rel in csha: shas[rel] = csha[rel]
-            tk.step(len(todo))
+            tk.step(len(todo) - len(need))
     keep = {rel for rel, *_ in files if rel not in held} | set(stds) | {'manifest.json', 'index.tsv'}   # 上一版有、这一版没有的文件删掉（镜像形态：散文件删掉、留 <前缀>.std）
     for d, ds, fs in os.walk(out, topdown=False):
         for f in fs:

@@ -248,13 +248,13 @@ class ContainerTest(unittest.TestCase):
         (root / "ctl").mkdir(); (root / "ctl/control.nacp").write_bytes(bytes(nacp))
         return root
 
-    def run_c(self, d, shell, out, roots, base=None, version=None, display_version=None):
+    def run_c(self, d, shell, out, roots, base=None, version=None, display_version=None, extra=()):
         from PIL import Image
         icon = Path(d) / "brand.png"
         if not icon.exists(): Image.new("RGB", (64, 64), (1, 2, 3)).save(icon)
         cmd = [sys.executable, str(REPO / "pack/ship_ext.py"), "container", "--shell", str(shell), "--out", str(out), "--bundle-id", "dev.example.games", "--icon", str(icon), "--host-abi", "7"]
         cmd += [x for r in roots for x in ("--game", str(r))] + (["--base", str(base)] if base else []) + (["--version", version] if version else [])
-        cmd += ["--display-version", display_version] if display_version else []
+        cmd += (["--display-version", display_version] if display_version else []) + list(extra)
         return subprocess.run(cmd, capture_output=True, text=True,
                               env={**os.environ, "S2A_BANNER_FETCH": "0"})   # 单测零联网：抓图关掉，A 的 banner 走产物根自带拷贝路径
 
@@ -317,6 +317,37 @@ class ContainerTest(unittest.TestCase):
                          f"game_data\t@home/Library/Application Support/S2Arm/games/{self.A}/资源包\ndocs\t@home/Documents/games/{self.A}\n")   # 资源包挪出 Documents（11-11）
         info = plistlib.loads((app / "Info.plist").read_bytes())
         self.assertEqual((info["CFBundleIdentifier"], info["CFBundleDisplayName"]), ("dev.example.games", "S2Arm"))
+
+    def test_standalone_name_and_icon(self):
+        # 独立 App（--standalone，一 App 一游戏）：主屏名 = 游戏自带标题、不带「S2Arm」；Info.plist 本体取英文标题（ASCII）；图标 = 这款 icon.jpg 缩成 120 / 180。
+        #   期望手写：A 的 nacp 0 号槽（美式英语）「Game A」、14 号槽（简中）「甲游戏」；封面纯色 (200, 10, 10)；品牌图标 (1, 2, 3)
+        import plistlib
+        from PIL import Image
+        n = bytearray((self.a / "ctl/control.nacp").read_bytes()); n[0:6] = b"Game A"; (self.a / "ctl/control.nacp").write_bytes(bytes(n))
+        Image.new("RGB", (64, 64), (200, 10, 10)).save(self.a / "icon.jpg", quality=100)
+        r = self.run_c(self.d, self.shell, self.d / "s1/S2Arm.app", [self.a], extra=["--standalone"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        app = self.d / "s1/S2Arm.app"
+        info = plistlib.loads((app / "Info.plist").read_bytes())
+        self.assertEqual(info["CFBundleDisplayName"], "Game A")
+        self.assertEqual(info["CFBundleIcons"], {"CFBundlePrimaryIcon": {"CFBundleIconFiles": ["AppIcon60x60"]}})
+        self.assertIn('"CFBundleDisplayName" = "甲游戏";', (app / "zh-Hans.lproj/InfoPlist.strings").read_text(encoding="utf-8"))
+        self.assertIn('"CFBundleDisplayName" = "Game A";', (app / "en.lproj/InfoPlist.strings").read_text(encoding="utf-8"))
+        with Image.open(app / f"AppIcon60x60@{3}x.png") as im:
+            self.assertEqual(im.size, (180, 180))
+            px = im.convert("RGB").getpixel((90, 90))
+        self.assertTrue(all(abs(x - y) <= 6 for x, y in zip(px, (200, 10, 10))), px)
+        # 不带 --standalone：同一款照旧 S2Arm 名、S2Arm 图标
+        r = self.run_c(self.d, self.shell, self.d / "s2/S2Arm.app", [self.a])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        app = self.d / "s2/S2Arm.app"
+        self.assertEqual(plistlib.loads((app / "Info.plist").read_bytes())["CFBundleDisplayName"], "S2Arm")
+        self.assertFalse((app / "zh-Hans.lproj/InfoPlist.strings").exists() and "甲游戏" in (app / "zh-Hans.lproj/InfoPlist.strings").read_text(encoding="utf-8"))
+        with Image.open(app / f"AppIcon60x60@{3}x.png") as im:
+            self.assertEqual(im.convert("RGB").getpixel((90, 90)), (1, 2, 3))
+        # 两款不行
+        r = self.run_c(self.d, self.shell, self.d / "s3/S2Arm.app", [self.a, self.b], extra=["--standalone"])
+        self.assertNotEqual(r.returncode, 0); self.assertIn("--standalone 只装一款", r.stdout + r.stderr)
 
     def test_as_type_mismatch_refused(self):
         c = self.game(self.d, "c", 1, 0, 0x0100000000030000, "丙游戏")

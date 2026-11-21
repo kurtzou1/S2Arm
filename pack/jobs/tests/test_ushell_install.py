@@ -53,9 +53,11 @@ class RouteTests(JobCase):
         self.assertEqual(self.hits, ["push_game"])
 
     def test_update_uses_install_shell_only(self):
-        with mock.patch.object(install, "install_shell", lambda c, ph: self.hits.append("install_shell") or dict(updated=True)):
+        # 「更新 S2Arm」只装壳、不推各款；之后只重签壳号旧了的独立 App（update_apps，各款资源不动）
+        with mock.patch.object(install, "install_shell", lambda c, ph: self.hits.append("install_shell") or dict(updated=True, toShell="S1")), \
+             mock.patch.object(install, "update_apps", lambda c, ph, sid: self.hits.append("update_apps:" + sid) or []):
             install._update_phone(self.c)
-        self.assertEqual(self.hits, ["install_shell"])
+        self.assertEqual(self.hits, ["install_shell", "update_apps:S1"])
 
 class PushGameTests(JobCase):
     def setUp(self):

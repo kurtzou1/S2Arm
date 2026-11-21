@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# 门禁手动：要参数（--reference-only | --candidate | --prepare）并在 s2a-vk-ci-parity 容器里跑；接线方式待 owner 定
 # Exact CI Mesa/VVL container; Vulkan and property names come from NDK 29.
 # The reference-only mode calibrates the oracle; it makes no spill claim.
 set -euo pipefail

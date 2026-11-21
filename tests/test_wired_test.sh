@@ -47,6 +47,25 @@ o3=$(fixture_lint $R/tools/test_wired_lint.py $R 2>&1)
 ck "③b 子目录没人调的 key_orphan_test.sh 报没接线" 'grep -q "tests/visual/key_orphan_test.sh 没有门禁脚本调它" <<< "$o3"'
 ck "③b 顶层自动入口 tests/top_auto_test.sh 不报" '! grep -q "top_auto_test.sh" <<< "$o3"'
 rm -f $R/tests/visual/key_orphan_test.sh $R/tests/top_auto_test.sh
+# ③c 间接调用（文件头「门禁间接：<调用方> <说明>」，11-20 android/gate.sh 接回）：调用方按通配逐个跑、静态引用追不到。
+#   调用方已接线 → 算接上，并接着追它调的脚本；调用方没接线 → 照报；没写说明 / 调用方不存在 → 声明不对报红
+mkdir -p $R/graphics/x/tests/standalone
+printf 'for f in graphics/x/tests/standalone/*.sh; do bash "$f"; done\n' > $R/graphics/x/tests/run_all.sh
+printf 'bash graphics/x/tests/run_all.sh\n' >> $R/graphics/gate.sh
+printf '# 门禁间接：graphics/x/tests/run_all.sh 默认档按通配逐个跑\npython3 graphics/x/tests/t_behind.py\n' > $R/graphics/x/tests/standalone/glob_a_test.sh
+echo 'print(1)' > $R/graphics/x/tests/t_behind.py
+printf 'echo nobody\n' > $R/graphics/x/tests/unwired_runner.sh
+printf '# 门禁间接：graphics/x/tests/unwired_runner.sh 按通配跑\necho b\n' > $R/graphics/x/tests/standalone/glob_b_test.sh
+printf '# 门禁间接：graphics/x/tests/run_all.sh\necho c\n' > $R/graphics/x/tests/standalone/glob_c_test.sh
+printf '# 门禁间接：graphics/x/tests/no_such.sh 按通配跑\necho d\n' > $R/graphics/x/tests/standalone/glob_d_test.sh
+o4=$(fixture_lint $R/tools/test_wired_lint.py $R 2>&1)
+ck "③c 调用方已接线：glob_a_test.sh 算接上" '! grep -q "glob_a_test.sh 没有门禁脚本调它" <<< "$o4"'
+ck "③c 间接单测再调的 t_behind.py 也算接上" '! grep -q "t_behind.py 没有门禁脚本调它" <<< "$o4"'
+ck "③c 调用方没接线：glob_b_test.sh 照报" 'grep -q "glob_b_test.sh 没有门禁脚本调它" <<< "$o4"'
+ck "③c 没写说明：glob_c_test.sh 声明报红" 'grep -q "门禁间接」 graphics/x/tests/standalone/glob_c_test.sh 没写说明" <<< "$o4"'
+ck "③c 调用方不存在：glob_d_test.sh 声明报红" 'grep -q "glob_d_test.sh 的调用方 graphics/x/tests/no_such.sh 不是仓库里的文件" <<< "$o4"'
+rm -rf $R/graphics/x/tests/standalone $R/graphics/x/tests/run_all.sh $R/graphics/x/tests/t_behind.py $R/graphics/x/tests/unwired_runner.sh
+sed -i.bak '/run_all.sh/d' $R/graphics/gate.sh && rm -f $R/graphics/gate.sh.bak
 
 # ⑤ 独立反例：字面期望不从扫描器结果生成，不执行任何合成测试文件。
 Q=$T/mentions; mkdir -p "$Q/graphics/a/tests"

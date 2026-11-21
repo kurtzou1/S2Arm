@@ -545,6 +545,40 @@ def ios_work(c, gid, create=True):
     return build_dir(c, gid, create=create) / "ios"
 
 
+CURRENT = "@现行"   # 产物根里的现行指针文件名后缀：<款>@现行 是普通文件，内容 = 现行版本目录名（pack/orch/current.py）  # 非玩家句
+_CURRENT_MOD = {}
+
+
+def _current_mod(c):
+    """现行指针的读写与老库迁移（pack/orch/current.py，只依赖标准库）：按文件路径载入作业的引擎根里那份（同 programs._dirrename，#1424：
+    不走 import pack.orch）；引擎根里没有（单测的假引擎根）用本仓库那份"""
+    path = Path(c.engine) / "pack/orch/current.py"
+    if not path.is_file():
+        path = Path(__file__).resolve().parents[2] / "pack/orch/current.py"
+    key = str(path.resolve())
+    if key not in _CURRENT_MOD:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("s2a_engine_current", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _CURRENT_MOD[key] = mod
+    return _CURRENT_MOD[key]
+
+
+def current_root(c, pointer):
+    """产物根里的「<款>@现行」→ 现行版本目录 Path | None（没有 / 指针不合规）。老库的软链 / junction / 实目录当场迁移成指针文件
+    （持该款提交锁 <产物根>/.<款>.commit.lock，与 pack/roots.sh、pack/orch/roots.py 同一把，最多等 10 分钟）"""
+    import filelock
+    pointer = Path(pointer)
+    roots, game = pointer.parent, pointer.name[:-len(CURRENT)]
+    return _current_mod(c).resolve(roots, game, lock=lambda: filelock.held(roots / f".{game}.commit.lock", wait_s=600, poll=0.05))
+
+
+def set_current(c, roots, game, name):
+    """切 roots 里 game 的现行到同目录的版本目录 name（临时指针 fsync 后原子改名）"""
+    _current_mod(c).write(roots, game, name)
+
+
 def phone_ipa(c, previous=False):
     return c.library / (PHONE_PREVIOUS if previous else PHONE_IPA)
 
@@ -853,7 +887,7 @@ def _upgrade_3(c, marker):
             done.add(gid); atomic(marker, dict(state, iphone=sorted(done))); continue   # 游戏库里已经没有这款：留着的旧产物下面随 iPhone/ 一起删
         kit = d / "container-kit"
         if not (kit / "main.npdm").is_file():
-            root = next((r for r in [*sorted(d.glob("roots/*@现行")), d / "work/pkg/product"] if (r / "main.npdm").is_file()), None)  # 非玩家句
+            root = next((r for r in [*(current_root(c, p) for p in sorted(d.glob("roots/*" + CURRENT))), d / "work/pkg/product"] if r is not None and (r / "main.npdm").is_file()), None)
             if root is not None and any(p.suffix == ".ipa" for p in d.iterdir()):
                 save_container_kit(c, gid, root, dest=d)
         image = image_ios(c, gid)

@@ -14,7 +14,7 @@
 产物（<工作目录>/）：
   extract/            解包目录（nx_unpack / ns2_dump 产物，同 Mac 一键出包）
   roots/<款>@…        产物根（pack/orch 事务布局，现行 = <款>@现行）
-  direct/             直连库（iOS 或 Mac 目标，graphics/tools/direct/direct_lib.sh，Git Bash 下跑）
+  direct/             直连库（iOS 或 Mac 目标，graphics/tools/direct/direct_lib.py，原生 Python 直接起各工具，不经 shell）
   pkg/                --target ios：<款>.ipa（不签名，交侧载工具签）+ pack/ 资源包 v2；--target mac：product/ = 现行版本各项联接 + shaders/direct（普查回传整棵）
   timing.tsv          每步一行「步<TAB>秒<TAB>退出码」
 --install <UDID>（只 iOS 目标）：出好后接 pack/orch/install_win.py——Impactor 官方命令行 plumesign 签名 + 装机（复用玩家在 Impactor 里登过的账号），再推资源包；
@@ -38,7 +38,7 @@ SRC_EXT = ('.nsp', '.xci', '.nsz', '.xcz')
 RT_NAME = re.compile(r'\A[0-9a-f]{16}\.(ctl|code)\Z')
 def put_rt(x, rt):
     """--rt-shaders：真机转储的着色器（DM_NVN_SHDUMP 存的 <键>.ctl / .code，游戏文件里抽不到、真机首遇只能现编的）拷进本单解包目录 x/rt_shaders/，
-    播种（refresh.seed）带进产物根、直连阶段（direct_lib.sh rt_dump_merge.py）并进库。只用于内部验证包：转储是游戏内容、只在本机解包目录、不分发，玩家包没有它。
+    播种（refresh.seed）带进产物根、直连阶段（direct_lib.py rt_dump_merge.py）并进库。只用于内部验证包：转储是游戏内容、只在本机解包目录、不分发，玩家包没有它。
     只收「<16 位小写十六进制键>.ctl / .code」且两样成对的文件，别的一律报红不收；返回支数"""
     rt = Path(rt); fs = sorted(p for p in rt.iterdir() if p.is_file()) if rt.is_dir() else None
     if fs is None: raise Fail(f'--rt-shaders {rt} 不是目录')
@@ -203,7 +203,6 @@ def env_items(target, shell):
         add('prebuilt-dotnet', not miss, f'预编 C# 件（{pre}，源码身份与本引擎相同才用）' + (f'缺或身份不符：{"、".join(miss)}' if miss else '齐'))
     else:
         add('dotnet', shutil.which('dotnet'), 'nx_unpack / RomFS 索引 / 直连出库（.NET 10 SDK）')
-    add('git-bash', bash_exe(), '直连库脚本 direct_lib.sh 在 Git Bash 下跑（S2A_BASH 可指定）')
     if pre:
         sys.path.insert(0, str(R / 'graphics/widen/scan')); sys.path.insert(0, str(R / 'graphics/tools')); sys.path.insert(0, str(R / 'graphics/tools/shbake')); import ui_lyt, nxfmt, nxsh_extract
         miss = [n for n, ok in (('dsx/dsx.dll', prebuilt('dsx/dsx.dll')), ('codecs/' + ui_lyt.yaz0enc_name(), ui_lyt.yaz0enc_prebuilt()),
@@ -452,7 +451,7 @@ def glslc_need(x, G=None):
 
 def glslc_gate(run, x):
     """出包期离线编 GLSLC 要 Mac 宿主的工具模式（runtime/src/glslc_tool.c：调游戏自带 glslcCompile，要 SDK 初始化与 C# 服务层），Windows 还没有对应工具：
-    解包后、轻阶段前判出要编就跳过离线编（S2A_GLSLC_RUNTIME_ONLY，extract.sh 认），运行时现编。设了 DM_GLSLC_HOST（有能用的宿主）就照常离线编"""
+    解包后、轻阶段前判出要编就跳过离线编（S2A_GLSLC_RUNTIME_ONLY，extract.py 认），运行时现编。设了 DM_GLSLC_HOST（有能用的宿主）就照常离线编"""
     if os.environ.get('DM_GLSLC_HOST'): return
     why = run.step('判运行时 GLSLC', lambda: glslc_need(x))
     if not why: return
@@ -476,19 +475,19 @@ def stages(run, game, x, src_dir, own=False):
     if not prebuilt(ROMFS_EXE) and not (proj / 'obj/project.assets.json').is_file():   # 用预编 RomFS 索引（stages.py 同口径）就不编、不用还原
         run.step('还原 RomFS 索引依赖', lambda: run.sh(['dotnet', 'restore', str(proj), '-nologo', '-v', 'q'], 'romfs_index_restore.log'))
     run.step('八个轻阶段', lambda: run.sh([PY, '-X', 'utf8', '-m', 'pack.orch.refresh', game, '--roots', str(roots), '--stages', 'all-light'], 'light.log', env=env))
-    cur = roots / f'{game}@现行'
-    return Path(os.path.realpath(cur))
+    from pack.orch import current   # 现行指针文件（轻阶段刚提交过：已是指针，不会走到迁移）
+    found = current.read(roots, game)
+    if found is None:
+        raise RuntimeError(f'{game} 轻阶段跑完后没有合规的现行（{roots}）')
+    return Path(os.path.realpath(found))
 
 
 def pso_sources(tid, know=None):
-    """Windows 出包机道送来的跑局知识（S2A_PSO_KNOW，tools/tianyan_lane.py ensure_know）→ 本款的 S2A_PSO_SOURCES：与 Mac 我方机器 direct_lib.sh PSRC 同顺序
-    （wire/<程序号>/pso_user.tsv 在前、pso_seed/<程序号> 在后）。冒号分隔，盘符路径写成 Git Bash 的 /r/… 形（R:/… 里的冒号会被拆开；直连库调原生 Python 时自动转回）"""
+    """Windows 出包机道送来的跑局知识（S2A_PSO_KNOW，tools/tianyan_lane.py ensure_know）→ 本款的 S2A_PSO_SOURCES：与 Mac 我方机器 direct_lib.py PSRC 同顺序
+    （wire/<程序号>/pso_user.tsv 在前、pso_seed/<程序号> 在后）。按系统分隔符（Windows「;」、别处「:」）连、路径原样（直连库与 run_knowledge.py 都是原生 Python，不再经 Git Bash 转写）"""
     know = know or os.environ.get('S2A_PSO_KNOW')
     if not know or not tid: return None
-    def posix(p):
-        p = str(p).replace('\\', '/')
-        return '/' + p[0].lower() + p[2:] if re.match(r'^[A-Za-z]:/', p) else p
-    return ':'.join(posix(f'{know}/{rel}') for rel in (f'wire/{tid.upper()}/pso_user.tsv', f'pso_seed/{tid.upper()}'))
+    return os.pathsep.join(f'{know}/{rel}' for rel in (f'wire/{tid.upper()}/pso_user.tsv', f'pso_seed/{tid.upper()}'))
 
 
 def title_lock(path, wait=True):
@@ -600,20 +599,19 @@ def direct(run, cur, target, jobs, tid=None, name='direct'):
     if gv and 'GLSLANG' not in env: env['GLSLANG'] = mixed(gv)
     src = None if os.environ.get('S2A_PSO_SOURCES') else pso_sources(tid)
     if src: env['S2A_PSO_SOURCES'] = src
-    bash = bash_exe()
-    if not bash: raise Fail('没有 Git Bash（直连库脚本要它）', 75)
+    cmd = [PY, '-X', 'utf8', mixed(R / 'graphics/tools/direct/direct_lib.py'), mixed(cur), mixed(out)]   # 原生 Python 直接起，不经 Git Bash（MSYS2 fork 模拟在部分机器起不来子进程）
     rmtree_loud(out)
     label = '抽取 + 直连库' if name == 'direct' else f'抽取 + 直连库（{name}）'; dname = 'dcache' if name == 'direct' else f'dcache_{name}'   # 多程序合集各序号的私有缓存 / 日志分开
     croot = os.environ.get('S2A_DIRECT_CACHE_ROOT') if not os.environ.get('S2A_DIRECT_CACHE') and tid else None
     if not croot:
         env['S2A_DIRECT_CACHE'] = mixed(os.environ.get('S2A_DIRECT_CACHE') or run.out / dname)
-        run.step(label, lambda: run.sh([bash, mixed(R / 'graphics/tools/direct/direct_lib.sh'), mixed(cur), mixed(out)], 'direct_lib.log', env=env))
+        run.step(label, lambda: run.sh(cmd, 'direct_lib.log', env=env))
         return out
     root = Path(croot); root.mkdir(parents=True, exist_ok=True); c = root / tid.upper(); env['S2A_DIRECT_CACHE'] = mixed(c)
     lk = run.step('等同款直连缓存锁', lambda: title_lock(root / f'{tid.upper()}.lock'))
     try:
         run.say(f'直连缓存（常驻）：{c}')
-        try: run.step(label, lambda: run.sh([bash, mixed(R / 'graphics/tools/direct/direct_lib.sh'), mixed(cur), mixed(out)], 'direct_lib.log', env=env))
+        try: run.step(label, lambda: run.sh(cmd, 'direct_lib.log', env=env))
         finally:
             mine = run.out / dname / 'logs'; rmtree_loud(mine); mine.mkdir(parents=True)
             for f in (c / 'logs').glob('*.log'): shutil.copy2(f, mine / f.name)

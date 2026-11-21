@@ -16,12 +16,12 @@ now() { python3 -c 'import time;print(time.time())'; }
 #   排队按事件证（11-05 合入运维线根修 ②c，同法改 ①）：原先着色器段睡 2 秒、先到那份一落日志就起后到那份，后到那份拿锁前的前置
 #   （xcrun ×2 等）在负载下跑得比先到那份剩下的 2 秒长 → 拿到空锁、不打「已有一份刷新在跑」（11-02 / 11-04 两次红）。
 #   改成：先到那份停在直连库段（11-07 前是通用着色器段），等后到那份打出「已有一份刷新在跑」再放行；60 秒等不到（锁失效）或后到那份已跑完也放行，由判据报红
-mkdir -p $T/repo/pack $T/roots/acnh@v1/ctl; cp "$H/pack/refresh.sh" "$H/pack/roots.sh" $T/repo/pack/; mkdir -p $T/repo/tools; cp "$H/tools/toolchain.sh" "$H/tools/toolchain.env" "$H/tools/cores.sh" "$H/tools/progress.sh" "$H/tools/plock.sh" "$H/tools/flock_hold.py" $T/repo/tools/; export S2A_DISK_FREE_G=999; touch $T/roots/acnh@v1/ctl/control.nacp; ln -s acnh@v1 $T/roots/acnh@现行
+mkdir -p $T/repo/pack $T/roots/acnh@v1/ctl; cp "$H/pack/refresh.sh" "$H/pack/roots.sh" $T/repo/pack/; mkdir -p $T/repo/pack/orch && cp "$H/pack/orch/current.py" $T/repo/pack/orch/; mkdir -p $T/repo/tools; cp "$H/tools/toolchain.sh" "$H/tools/toolchain.env" "$H/tools/cores.sh" "$H/tools/progress.sh" "$H/tools/plock.sh" "$H/tools/flock_hold.py" $T/repo/tools/; export S2A_DISK_FREE_G=999; touch $T/roots/acnh@v1/ctl/control.nacp; printf '%s\n' acnh@v1 > $T/roots/acnh@现行
 printf '#!/bin/bash\necho "原件核对桩 rc=${FAKE_SRCVER_RC:-0}"; exit ${FAKE_SRCVER_RC:-0}\n' > $T/repo/pack/srcver.sh   # 原件版本核对桩（pack/srcver.sh 自己的单测见 tests/srcver_test.sh）
 cp "$H/pack/decoder_need.sh" $T/repo/pack/; mkdir -p $T/repo/translator $T/repo/graphics/nvn/tools; printf 'print("no")\n' > $T/repo/translator/glslc_offline.py; cp "$H/graphics/nvn/tools/romfs_list.py" $T/repo/graphics/nvn/tools/   # 直连链要的判据（同 tests/refresh_test.sh）
 # 直连库桩出 shaders/direct/keys.tsv（refresh.sh 核「直连库阶段退 0 但产物根里没有 keys.tsv」）
 for s in rewrite sysdata uilayout aoc caps romfsidx direct_profile extract direct direct_seed direct_cpso; do
-  printf '#!/bin/bash\necho "$S2A_TAG %s 起 $(python3 -c "import time;print(time.time())")" >> %s/log\n[ -n "${S2A_STUB_HOLD:-}" ] && [ %s = direct ] && { n=0; while [ ! -e "$S2A_STUB_HOLD" ] && [ $n -lt 600 ]; do sleep 0.1; n=$((n + 1)); done; }\n[ %s = direct ] && { d=$(cd -P "$S2A_ROOTS/acnh@现行" && pwd)/shaders/direct; mkdir -p "$d" && echo k > "$d/keys.tsv"; }\necho "$S2A_TAG %s 止 $(python3 -c "import time;print(time.time())")" >> %s/log\necho "🟢 %s 桩"\n' $s $T $s $s $s $T $s > $T/repo/pack/stage_$s.sh
+  printf '#!/bin/bash\necho "$S2A_TAG %s 起 $(python3 -c "import time;print(time.time())")" >> %s/log\n[ -n "${S2A_STUB_HOLD:-}" ] && [ %s = direct ] && { n=0; while [ ! -e "$S2A_STUB_HOLD" ] && [ $n -lt 600 ]; do sleep 0.1; n=$((n + 1)); done; }\n[ %s = direct ] && { d=$(cd -P "$S2A_ROOTS/$(cat "$S2A_ROOTS/acnh@现行")" && pwd)/shaders/direct; mkdir -p "$d" && echo k > "$d/keys.tsv"; }\necho "$S2A_TAG %s 止 $(python3 -c "import time;print(time.time())")" >> %s/log\necho "🟢 %s 桩"\n' $s $T $s $s $s $T $s > $T/repo/pack/stage_$s.sh
 done
 # 本单测测的是刷新锁的先后，不测并行度：跳过 tools/cores.sh 入口的忙核采样（11-04 起采 3 秒平均，B 在采样里等 3 秒时 A 的 2 秒桩已跑完，B 碰不到在跑的 A）
 RF() { S2A_TAG=$1 S2A_ROOTS=$T/roots S2A_ROOTS_SHARED=$T/roots S2A_REFRESH_LOCKS=$T/locks S2A_REFRESH_POLL_S=0.2 bash $T/repo/pack/refresh.sh acnh > $T/$1.out 2>&1; }
@@ -38,7 +38,7 @@ until [ -s $T/held ]; do sleep 0.05; done; kill -9 $dp; wait $dp 2> /dev/null; r
 t0=$(now); RF C; t1=$(now)
 ck "② 持有者已死 → 接管不等（$(python3 -c "print(round($t1 - $t0, 1))") 秒）：没打「已有一份刷新在跑」、跑完绿" '! grep -q "已有一份刷新在跑" $T/C.out && grep -q "🟢 acnh 现行产物根各阶段与本树一致" $T/C.out && python3 -c "import sys; sys.exit(0 if $t1 - $t0 < 60 else 1)"'
 # —— ②bc 私有根的锁：两份私有根各自从同一份现行起（同 ①：各段桩，停住 / 放行按事件）
-for d in p1 p2; do mkdir -p $T/$d/acnh@v1/ctl; touch $T/$d/acnh@v1/ctl/control.nacp; ln -s acnh@v1 $T/$d/acnh@现行; done
+for d in p1 p2; do mkdir -p $T/$d/acnh@v1/ctl; touch $T/$d/acnh@v1/ctl/control.nacp; printf '%s\n' acnh@v1 > $T/$d/acnh@现行; done
 RP() { S2A_TAG=$1 S2A_ROOTS=$T/$2 S2A_ROOTS_SHARED=$T/roots S2A_REFRESH_LOCKS=$T/locks S2A_REFRESH_POLL_S=0.2 bash $T/repo/pack/refresh.sh acnh > $T/$1.out 2>&1; }
 #   并行按事件证（11-05 维护者：不靠「着色器段睡 2 秒」碰重叠）：D 停在直连库段等放行文件，E 第一段落日志后才放行 D——按根加锁则 E 不被挡、E 起 < D 止；
 #   锁没按根分则 E 被 D 挡住，30 秒等不到 E 的日志照样放行 D，E 起 > D 止 → 红

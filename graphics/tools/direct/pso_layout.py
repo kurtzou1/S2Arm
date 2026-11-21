@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """管线键 pso_skey 布局（#1100 W6，11-04 Windows 出包线）：读 pso_layout.json（graphics/tools/direct/pso_layout_gen.m 在 Mac 上导出、提交进仓库），
 给出库的 Python 工具按运行时结构体 nvn_pso_skey.h 解 R 行，Mac / Windows 同一份（原先 pso_skey_size.m / fout_want.m 要现编 Objective-C）。
-  pso_layout.py skey-size        打印 pso_skey 字节数（原 pso_skey_size.m；direct_lib.sh 交 pso_seed.py 核 R 行长度）
+  pso_layout.py skey-size        打印 pso_skey 字节数（原 pso_skey_size.m；direct_lib.py 交 pso_seed.py 核 R 行长度）
 """
 import json
 import os

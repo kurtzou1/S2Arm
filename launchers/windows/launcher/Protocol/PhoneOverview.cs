@@ -19,6 +19,8 @@ public sealed record PhoneOverview(IReadOnlyList<PhoneOverview.Phone> Phones)
         /// <summary>导入的签名证书团队与 App 团队对得上（界面追加「已导入签名证书」）</summary>
         public bool CertImported => IdentityTeam is { Length: > 0 } t && t == Team;
     }
+    /// <summary>这台手机上的独立 App（一 App 一游戏，作业 apps，host_update._app_rows；同 Mac PhoneOverview.App）：壳号是不是本版、签名与到期</summary>
+    public sealed record App(string GameId, string BundleId, bool ShellCurrent, DateTimeOffset? SignedAt, DateTimeOffset? ExpiresAtEstimate);
     /// <param name="Online">Probed：带 probe 才问过 USB；没问时 Online 无意义。问过时 null = 没连</param>
     /// <param name="InstalledBy">手机上的 S2Arm 谁装的（作业 installedBy）："launcher" | "external"（AltStore / SideStore…）；null = 没装或判不出（旧作业不带）</param>
     /// <param name="Actions">作业给的这台的按钮（别的工具装的才有：exportShellIpa / pushS2arm / exportS2arm / handOverIdentity）；没给 = 空</param>
@@ -27,7 +29,7 @@ public sealed record PhoneOverview(IReadOnlyList<PhoneOverview.Phone> Phones)
     public sealed record Phone(string Device, string Name, bool Installed, bool ShellCurrent, DateTimeOffset? ExpiresAtEstimate,
         bool Probed, string? Online, DateTimeOffset? LastSeen, string? SignMode, IReadOnlyList<Game> Games,
         string? InstalledBy = null, string BundleId = "", IReadOnlyList<string>? Actions = null,
-        bool NeedsChoice = false, IReadOnlyList<Candidate>? Candidates = null)
+        bool NeedsChoice = false, IReadOnlyList<Candidate>? Candidates = null, IReadOnlyList<App>? Apps = null)
     {
         public bool KnownOffline => Probed && Online is null;
         public bool External => InstalledBy == "external";
@@ -100,10 +102,15 @@ public sealed record PhoneOverview(IReadOnlyList<PhoneOverview.Phone> Phones)
                 var actions = p.TryGetProperty("actions", out var av) && av.ValueKind == JsonValueKind.Array
                     ? av.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!).ToArray() : [];
                 var candidates = p.TryGetProperty("candidates", out var cs) ? Candidates(cs) : [];
+                var apps = new List<App>();   // 独立 App（0.6.4）；旧作业层不带 = 空
+                if (p.TryGetProperty("apps", out var aps) && aps.ValueKind == JsonValueKind.Array)
+                    foreach (var x in aps.EnumerateArray())
+                        if (x.ValueKind == JsonValueKind.Object && S(x, "gameId") is { Length: > 0 } aid && S(x, "bundleId") is { } abid)
+                            apps.Add(new App(aid.ToUpperInvariant(), abid, B(x, "shellCurrent"), D(x, "signedAt"), D(x, "expiresAtEstimate")));
                 phones.Add(new Phone(device, S(p, "name") ?? "", B(p, "installed"), B(p, "shellCurrent"), D(p, "expiresAtEstimate"),
                     p.TryGetProperty("online", out _), S(p, "online"), D(p, "lastSeen"), S(p, "signMode"), games,
                     S(p, "installedBy") is "launcher" or "external" ? S(p, "installedBy") : null, S(p, "bundleId") ?? "", actions,
-                    B(p, "needsChoice"), candidates));
+                    B(p, "needsChoice"), candidates, apps));
             }
         return new PhoneOverview(phones);
     }
@@ -136,6 +143,30 @@ public sealed record PhoneOverview(IReadOnlyList<PhoneOverview.Phone> Phones)
                 return (device, list);
         return null;
     }
+
+    /// <summary>「更新所选」没推成的一款：游戏号、错误码、原因（作业层给玩家的原句）</summary>
+    public sealed record PushFailure(string GameId, string Code, string Message);
+
+    /// <summary>「更新所选」（作业 pushSelected）失败时诊断带的逐款结果 facts {games: [{gameId, ok, code?, message?}]}（install.push_selected）→ 没推成的那几款，按推的顺序。
+    /// 换哪款都做不下去整轮停（没装 App / 手机断开…）的失败不带逐款结果 → 空：失败页只写作业原因，「重试」走续推</summary>
+    public static IReadOnlyList<PushFailure> PushFailures(JsonElement diagnostics)
+    {
+        static string? S(JsonElement o, string k) => o.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+        var failed = new List<PushFailure>();
+        if (diagnostics.ValueKind != JsonValueKind.Array) return failed;
+        foreach (var d in diagnostics.EnumerateArray())
+            if (d.ValueKind == JsonValueKind.Object && d.TryGetProperty("facts", out var f) && f.ValueKind == JsonValueKind.Object
+                && f.TryGetProperty("games", out var gs) && gs.ValueKind == JsonValueKind.Array)
+                foreach (var g in gs.EnumerateArray())
+                    if (g.ValueKind == JsonValueKind.Object && S(g, "gameId") is { Length: > 0 } id && !(g.TryGetProperty("ok", out var ok) && ok.ValueKind == JsonValueKind.True)
+                        && failed.All(x => !string.Equals(x.GameId, id, StringComparison.OrdinalIgnoreCase)))
+                        failed.Add(new PushFailure(id.ToUpperInvariant(), S(g, "code") ?? "job_failed", S(g, "message") ?? ""));
+        return failed;
+    }
+
+    /// <summary>失败页「重试」推哪几款（同一台）：知道逐款结果 → 只推没成的那几款；不知道（整轮停）→ null，按作业续推（resume：没推到的 + 失败的）</summary>
+    public static IReadOnlyList<string>? RetryOrder(IReadOnlyList<PushFailure> failed) =>
+        failed.Count > 0 ? failed.Select(x => x.GameId).ToArray() : null;
 
     /// <summary>总控台当前这台：选过的那台；没选过 → 连着的那台 → 最近同步过的那台</summary>
     public Phone? Pick(string? chosen) =>

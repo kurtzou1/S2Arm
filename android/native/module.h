@@ -24,6 +24,9 @@ struct s2a_module {
     size_t map_size;
     size_t patch_size; // 实际 RX 补丁区长度；FAR 前置保留空洞不算补丁。
     size_t patch2_size; // 双补丁岛另一个岛的长度（= PATCH2_LEN；映像文件末尾那段）
+#if defined(__OHOS__)
+    void *platform_owner; // HAP-signed DSO; never munmap a loader-owned range.
+#endif
 };
 
 // Parses a fixups.tsv header. Output without "# TARGET android" is refused:

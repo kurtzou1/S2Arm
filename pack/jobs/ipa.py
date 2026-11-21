@@ -278,7 +278,7 @@ def _build(c):
         except OSError as e:
             c.emit("message", f"【黄】原始程序没存下（以后升级要回原件）：{e}")
         kuan = oneclick_kuan(c, gid)
-        if os.name != "nt" and not (out / "roots" / (kuan + "@现行")).exists():   # Windows 机上没有 Mac 包可克隆  # 非玩家句
+        if os.name != "nt" and layout.current_root(c, out / "roots" / (kuan + layout.CURRENT)) is None:   # Windows 机上没有 Mac 包可克隆
             seed_from_sibling(c, game, out / "roots", kuan)
         # 出 iPhone 包：平台换成 iOS；.NET 只在源码树现编 C#（壳 / iOS 库）时用已确认的外部 SDK（发版应用全用随包预编，运行不要 .NET）
         for name in tuple(env):
@@ -374,7 +374,7 @@ def _build(c):
         from build import warn_offline_empty, collect_degrade
         warn_offline_empty(c, root)   # 离线 0 支（#470）：照常交付，完成页带黄字
         notes = collect_degrade(c, root)   # 降级继续的玩家提示：随结果交给完成卡（v0.3.1）；清理会删产物根，先读
-    # 早装先收尾再清理：清理会删它正在读的 roots/<款>@现行 与 .early（审计 P1-146：直连命中缓存时出包比早装推得快）
+    # 早装先收尾再清理：清理会删它正在读的现行产物根（roots/<款>@现行 指向的版本）与 .early（审计 P1-146：直连命中缓存时出包比早装推得快）
     pre = early.finish() if early else None
     # Q15：成功清一次性中间产物，编库缓存跨次保留并按预算裁剪；失败留现场。
     c.begin("清理出包中间产物")
@@ -614,8 +614,17 @@ def to_img(c, gid, root, pack_dir):
             clear_build(c, gid)
         if not isinstance(e, Failure):
             raise
-        from errors import tool_reason
-        raise Failure("写单一 IMG（game.img）失败：" + (tool_reason(log) or str(e)), code="package_failed") from e  # 非玩家句
+        from errors import cause_facts, classify_failure, player_words, tool_reason
+        reason = "写单一 IMG（game.img）失败：" + (tool_reason(log) or str(e))  # 非玩家句
+        # 日志确凿根因（盘满等，errors.LOG_CAUSES）照归：原先一律 package_failed，玩家看到的是英文原句「[Errno 28] No space left on device」
+        code, why = classify_failure("img", log, (reason,))
+        if code == "package_failed" and re.search(r"\[Errno 13\]|\bPermissionError\b|\[WinError (?:5|32|33)\]", reason):
+            # 写的都是游戏库里这款的文件（game.img、RomFS 镜像）：被拒 = 别的程序拿着 / 文件夹被保护（D-X5JB），归 permission_denied（Windows 有自己的下一步）
+            code, why = "permission_denied", why + "；按原文「拒绝访问」归 permission_denied"  # 非玩家句
+        if code == "package_failed":
+            raise Failure(reason, code=code, internal=why) from e
+        said, advice = player_words(code, log, (reason,))
+        raise Failure(said, code=code, advice=advice, internal=reason + "\n" + why, facts=cause_facts(code, log)) from e
     mark.unlink(missing_ok=True)
 
 
@@ -650,8 +659,8 @@ def product_root(c, gid):
     """这款的现行产物根（打包流程的工作目录）；不存在 → None"""
     from build import oneclick_kuan
     out = layout.ios_work(c, gid, create=False)
-    r = out / "work/pkg/product" if os.name == "nt" else out / "roots" / (oneclick_kuan(c, gid) + "@现行")   # Windows：win_oneclick 的工作根（现行各项联接 + 直连库，oneclick_win.product）  # 非玩家句
-    return resolve_path(r) if (r / "main.npdm").is_file() else None
+    r = out / "work/pkg/product" if os.name == "nt" else layout.current_root(c, out / "roots" / (oneclick_kuan(c, gid) + layout.CURRENT))   # Windows：win_oneclick 的工作根（现行各项联接 + 直连库，oneclick_win.product）
+    return resolve_path(r) if r is not None and (r / "main.npdm").is_file() else None
 
 
 def usable_kit(c, gid, sid, failed=()):
@@ -706,13 +715,14 @@ def incompatible_message(text, gid, names):
     return "这款和手机上已有的游戏地址空间类型不同，放不进同一个 App。"
 
 
-def assemble(c, gid, others=(), *, failed=(), root=None, dest=None, agreed=None):
+def assemble(c, gid, others=(), *, failed=(), root=None, dest=None, agreed=None, standalone=False):
     """现组容器（一个 App 装多款）：本版 iPhone 壳 + 这款和 others（这台手机上已有的各款）的容器件（pack/ship_ext.py container），出 S2Arm.app + S2Arm.ipa 到 dest
     （缺省游戏库同盘临时目录，由调用方装上后再放到默认位置根）。不再在上一次的底包上加款：底包和各款镜像会不一致，且换壳时要整包重出。
     gid 为 None：只组 others（从手机删一款）。哪款放不进本壳（不是本壳出的、新宿主也不认得）就报 container_stale 点名，不装半套；
     游戏库里已删的款不再带（手机上的存档还在）。root / dest：出包重叠早装用（旁路刚完成的产物根，出到临时目录）。
     agreed：设备记录 staleAgreed（#479，{壳号: [游戏号]}）——这台手机在本版壳上同意过「这次不带」的；带不进的都在里面就不再问，照不带它们装。换了壳号重新问
-    → (ipa, 全部款, 壳号)。Windows 不签（--sign none，交给 plumesign）；Mac 自签，装机时再按玩家团队重签"""
+    → (ipa, 全部款, 壳号)。Windows 不签（--sign none，交给 plumesign）；Mac 自签，装机时再按玩家团队重签。
+    standalone：独立 App（install.put_app，只这一款）——主屏名取游戏自带标题、图标取这款的（ship_ext container --standalone）"""
     import host_update
     shell, sid = built_shell(c)
     roots = {}
@@ -773,7 +783,7 @@ def assemble(c, gid, others=(), *, failed=(), root=None, dest=None, agreed=None)
         c.run([os.sys.executable, "-X", "utf8", "-B", c.engine / "pack/ship_ext.py", "container", "--shell", shell, "--out", app, "--bundle-id", CONTAINER_BUNDLE,
                "--icon", icon, "--sign", "none", "--custom", out / "custom.json", "--host-abi", str(host_update.HOST_ABI),
                "--version", release_version(c.engine), "--display-version", display_version(c.engine),
-               *[x for r in roots.values() for x in ("--game", r)], *banner_args], log, c.env())
+               *[x for r in roots.values() for x in ("--game", r)], *banner_args, *(["--standalone"] if standalone else [])], log, c.env())
     except Failure as e:
         text = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
         if e.code == "tool_exit" and "地址空间类型不一致" in text:  # 非玩家句
@@ -980,7 +990,7 @@ def _package_failure_phase(reason):
 
 
 def oneclick_failure(events, milestone, log, *, refresh_log=None, refresh_before=None):
-    from errors import classify_failure, player_reason, player_words, refresh_stop_phase, tool_reason
+    from errors import cause_line, classify_failure, player_reason, player_words, refresh_stop_phase, tool_reason
     name = "未记录阶段"  # 非玩家句
     result = None
     try:
@@ -1021,5 +1031,7 @@ def oneclick_failure(events, milestone, log, *, refresh_log=None, refresh_before
     texts = (reason,) + ((str(fresh_refresh),) if fresh_refresh else ())
     code, why = classify_failure(phase, log, texts)
     said, advice = player_words(code, log, texts)
+    cause = cause_line(fresh_refresh) if fresh_refresh else None   # 刷新里失败阶段自己的红行（带子命令原文），错误摘要按「失败原文：」取（report.build）
+    more = "\n失败原文：" + cause if cause and cause not in reason else ""  # 非玩家句
     # 上屏只放玩家话术；阶段 / 红行原文 / 归因依据进 internal → 诊断 detail（「复制错误摘要」带走）
-    return Failure(said, code=code, advice=advice, internal="一键出包失败（" + name + "）：" + reason + "\n" + why)  # 非玩家句
+    return Failure(said, code=code, advice=advice, internal="一键出包失败（" + name + "）：" + reason + more + "\n" + why)  # 非玩家句

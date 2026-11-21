@@ -560,6 +560,7 @@ static NSString *vp_running_gid(void) { const char *g = getenv("S2A_LAUNCH_GAME_
     // 弱链接[lab]：s2a_snap_on_done（即时快照：runtime/src/snapsw.c、snapshot.c、session.c 提供；输入工作台不链原生核，取不到菜单就不出这两项）
     // 弱链接[lab]：s2a_snap_request_save（即时快照：runtime/src/snapsw.c、snapshot.c、session.c 提供；输入工作台不链原生核，取不到菜单就不出这两项）
     // 弱链接[lab]：s2a_snap_save_changed（即时快照：runtime/src/snapsw.c、snapshot.c、session.c 提供；输入工作台不链原生核，取不到菜单就不出这两项）
+    // 弱链接[lab]：s2a_snap_off_reason（即时快照：runtime/src/snapsw.c 提供；输入工作台不链原生核，取不到就不出这一项）
     // 弱链接[lab]：s2a_host_restart（即时快照：runtime/src/snapsw.c、snapshot.c、session.c 提供；输入工作台不链原生核，取不到菜单就不出这两项）
     { int s2a_snap_logging(void) __attribute__((weak)); int s2a_snap_dir_for(const char *, char *, size_t) __attribute__((weak)); int s2a_snap_exists(const char *) __attribute__((weak));
       char sd[2048];
@@ -569,7 +570,13 @@ static NSString *vp_running_gid(void) { const char *g = getenv("S2A_LAUNCH_GAME_
           [snap addObject:vp_act(S2AL(@"vpad.snap.save"), @"record.circle", NO, ^{ [ws afterMenu:^{ [ws snapSave:dir]; }]; })];
           if (s2a_snap_exists && s2a_snap_exists(sd)) [snap addObject:vp_act(S2AL(@"vpad.snap.restore"), @"clock.arrow.circlepath", NO, ^{ [ws afterMenu:^{ [ws snapRestore:dir]; }]; })];
           [items addObject:vp_inline(snap)];
-      } }
+      } else {   // 这一局快照被宿主关了（vawin.c：这台设备地址空间放不下这款的标准布局、窗口外也放不下快照用的区）：照样列出、置灰并写原因，不让玩家以为功能丢了
+          int s2a_snap_off_reason(void) __attribute__((weak));
+          if (s2a_snap_off_reason && s2a_snap_off_reason() == 1) {
+              UIAction *off = vp_act(S2AL(@"vpad.snap.save"), @"record.circle", NO, ^{});
+              off.attributes = UIMenuElementAttributesDisabled; off.subtitle = S2AL(@"vpad.snap.offAddress");
+              [items addObject:vp_inline(@[off])];
+          } } }
     [items addObject:[self sgradeSection]];
     UIAction *edit = vp_act(S2AL(@"vpad.edit.title"), @"gamecontroller", NO, ^{ [ws afterMenu:^{ [ws beginEditing]; }]; });
     if (_touchOnly) { edit.attributes = UIMenuElementAttributesDisabled; edit.subtitle = S2AL(@"vpad.menu.editDisabled"); }

@@ -60,8 +60,8 @@ public struct DevCertInfo: Equatable {
     /// 连着的手机在不在设备列表：nil = 没连手机 / 不知道。
     public let deviceListed: Bool?
     public let blocking: [String]
-    /// blocking 各条的码（同序）：界面按码给出路，如 devcert_distribution →「改用 Apple ID 登录」
-    public let blockingIds: [String]
+    /// 分发 / ad hoc 描述文件（缺 get-task-allow）：照常导入、独立 App 能用；通用 S2Arm 里游戏打不开，界面给「改用 Apple ID 登录 / 复制给发放人的话」
+    public let distribution: Bool
     public let warnings: [String]
     /// 描述文件缺权限时给证书发放人的一段话（作业层整句写好，界面翻译后一键复制，不在前端拼）；不缺为空
     public let requestText: String
@@ -74,7 +74,7 @@ public struct DevCertInfo: Equatable {
         deviceCount = (r["deviceCount"] as? NSNumber)?.intValue ?? 0
         deviceListed = r["deviceListed"] as? Bool
         blocking = (r["blocking"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }
-        blockingIds = (r["blocking"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String }
+        distribution = r["distribution"] as? Bool ?? false
         warnings = (r["warnings"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }
         requestText = s("requestText")
     }
@@ -117,6 +117,36 @@ public struct InstallResult: Equatable {
     public var exportUnwritten: [String] = []
     /// 签名证书名（作业结果 trustName，如「Apple Development: someone@example.com (ABCDE12345)」）：iPhone「VPN 与设备管理」里要点「信任」的那一项；读不到为空
     public var trustName: String = ""
+    /// 独立 App（作业结果 layout = standalone，pack/jobs/install.py put_app / export_app）：主屏名、游戏文件夹里的 ipa / README、到期、下一步；通用壳为 nil
+    public var app: StandaloneApp? = nil
+}
+
+/// 独立 App（一 App 一游戏）这次的产物与事实（作业结果原样读，不猜；失败结果的 appInstalled 同形）。成功页 A（直装）/ B（导出）按它画
+public struct StandaloneApp: Equatable {
+    public var name = "", version = "", gameFolder = "", ipaPath = "", readmePath = "", signMode = ""
+    public var ipaBytes: Int64? = nil
+    public var nextSteps: [String] = []
+    /// 到期时刻；known = 读到的真值（签好的包 / 证书描述文件），否则按苹果规则估
+    public var expiresAt: Date? = nil
+    public var expiresKnown = false
+    /// 导出（成功页 B）：游戏包、资源本体（linked = 硬链接进了游戏文件夹；否则 resourcePath 是游戏库里的原位置）、签名
+    public var exported = false
+    public var s2armPath = "", resourcePath = ""
+    public var s2armBytes: Int64? = nil
+    public var resourceBytes: Int64? = nil
+    public var resourceLinked = false
+    public var signedCert = ""
+    public init() {}
+    public init(_ r: [String: Any]) {
+        name = r["appName"] as? String ?? ""; version = r["appVersion"] as? String ?? ""; gameFolder = r["gameFolder"] as? String ?? ""
+        ipaPath = r["ipaPath"] as? String ?? ""; readmePath = r["readmePath"] as? String ?? ""; signMode = r["signMode"] as? String ?? ""
+        ipaBytes = (r["ipaBytes"] as? NSNumber)?.int64Value; nextSteps = r["nextSteps"] as? [String] ?? []
+        expiresAt = (r["expiresAt"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) }; expiresKnown = r["expiresKnown"] as? Bool ?? false
+        exported = r["exported"] as? Bool ?? false; s2armPath = r["s2armPath"] as? String ?? ""; resourcePath = r["resourcePath"] as? String ?? ""
+        s2armBytes = (r["s2armBytes"] as? NSNumber)?.int64Value; resourceBytes = (r["resourceBytes"] as? NSNumber)?.int64Value; resourceLinked = r["resourceLinked"] as? Bool ?? false
+        let signed = r["signedWith"] as? [String: Any] ?? [:]
+        signedCert = signed["mode"] as? String == "devCert" ? (signed["name"] as? String ?? "") : ""
+    }
 }
 
 /// 从手机删一款的结果（installRemove 作业，pack/jobs/install.py remove_from_phone）。
@@ -181,7 +211,8 @@ public final class InstallService {
                              skipped: r["skipped"] as? [String] ?? [],
                              exportFresh: r["fresh"] as? [String] ?? [], exportReused: (r["reused"] as? NSNumber)?.intValue ?? 0,
                              exportUnwritten: r["unwritten"] as? [String] ?? [],
-                             trustName: r["trustName"] as? String ?? "")
+                             trustName: r["trustName"] as? String ?? "",
+                             app: r["layout"] as? String == "standalone" ? StandaloneApp(r) : nil)
     }
 
     // ---- 开发者证书（v0.2.4，pack/jobs/devcert.py）----
@@ -198,6 +229,14 @@ public final class InstallService {
         var extra: [String: Any] = ["action": "import", "p12Path": p12, "profilePath": profile]
         if let device, !device.isEmpty { extra["device"] = device }
         return DevCertInfo(result: try await client.perform("devCert", extra: extra, secrets: ["S2A_DEVCERT_PASSWORD": password]).result)
+    }
+
+    /// 出法（作业 layoutSet）：layout = shell / standalone / nil（nil = 撤掉选择、回到缺省）；gameId 给了只管这一款 → 结果里的 freeLimit（不用自己的证书选独立 App 时的苹果限制提示，只提示）
+    public func layoutSet(_ layout: String?, gameId: String? = nil) async throws -> String {
+        var extra: [String: Any] = [:]   // 不带 layout = 撤掉选择（作业层 c.r.get("layout") 为空）
+        if let layout { extra["layout"] = layout }
+        if let gameId, !gameId.isEmpty { extra["gameId"] = gameId }
+        return try await client.perform("layoutSet", extra: extra).result["freeLimit"] as? String ?? ""
     }
 
     /// 签名方式三选一（作业 signModeSet：appleId / devCert / external）→ 生效后的选择
@@ -324,17 +363,38 @@ public struct PhoneIdentityResult: Equatable, Sendable {
 
 /// 签名身份（installMode 作业）：signMode = devcert（我的开发者证书）/ appleId；exportAvailable = 导出作业在不在；
 ///   signChoice = 玩家选的签名方式三选一（appleId / devCert / external = 我自己用 AltStore / SideStore 签，自签走查结构 6）
+///   出法（0.6.3）：layout = 缺省现在按哪种推（shell 通用 S2Arm / standalone 独立 App，一 App 一游戏）；layoutDefault = 玩家选过的缺省（nil = 没选、按证书自动）；
+///   layoutGames = 按款选过的 {游戏号: 出法}；distribution = 在用的是分发 / ad hoc 证书（通用 S2Arm 里游戏打不开，自动缺省独立 App）
 public struct InstallModeInfo: Equatable, Sendable {
     public let exportAvailable: Bool
     public let signMode: String
     public let signChoice: String
+    public var layout: String = "shell"
+    public var layoutDefault: String? = nil
+    public var layoutGames: [String: String] = [:]
+    public var distribution: Bool = false
+    /// 选独立 App 时按签名方式给的一句提示的码（作业层 install.standalone_hint：appleId / wildcard / external；nil = 不提示）→ 文案 install.layout.hint.<码>
+    public var standaloneHint: String? = nil
+    /// 按签名带不带调试权限推荐的出法（作业层 install.layout_recommend）：standalone / shell / nil（识别不了）；依据 distribution / devCertDebug / appleId / external / unknown
+    public var recommend: String? = nil
+    public var recommendWhy: String = "unknown"
     public init(exportAvailable: Bool = false, signMode: String = "appleId", signChoice: String = "appleId") {
         self.exportAvailable = exportAvailable; self.signMode = signMode; self.signChoice = signChoice
     }
     init(result r: [String: Any]) {
         self.init(exportAvailable: r["exportAvailable"] as? Bool ?? false, signMode: r["signMode"] as? String ?? "appleId",
                   signChoice: r["signChoice"] as? String ?? "appleId")
+        let choice = r["layoutChoice"] as? [String: Any] ?? [:]
+        layout = r["layout"] as? String ?? "shell"
+        layoutDefault = choice["default"] as? String
+        layoutGames = (choice["games"] as? [String: String] ?? [:]).reduce(into: [:]) { $0[$1.key.uppercased()] = $1.value }
+        distribution = r["distribution"] as? Bool ?? false
+        standaloneHint = r["standaloneHint"] as? String
+        recommend = r["recommend"] as? String
+        recommendWhy = r["recommendWhy"] as? String ?? "unknown"
     }
+    /// 这款按哪种出法推：按款选过的 > 玩家选过的缺省 > 自动（作业层 install.chosen_layout 同序）
+    public func layout(for gameId: String) -> String { layoutGames[gameId.uppercased()] ?? layout }
 }
 
 /// Apple ID 登录结果 / 当前账号（appleLogin / appleAccount 作业）：account 为空 = 没登录；enabled = false = 这台不用 Apple ID 登录（Windows / 证书模式）

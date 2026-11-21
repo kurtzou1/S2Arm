@@ -4,7 +4,7 @@
 # 官方 tag 原样构建、不维护裁剪分支：16.6.0（与出包离线链 Homebrew glslangValidator 同版本），ENABLE_HLSL=OFF、ENABLE_OPT=OFF（不带 SPIRV-Tools）、不出命令行程序 / 单测。
 # 源码包按固定版本 + sha256 取（GitHub 官方 tag 归档），按 sha256 缓存在 ${S2A_BUILD_CACHE:-~/.cache/s2arm-build}/sources/（android/tools/fetch_source.sh，同 services/opus|vpx/build.sh）；
 #   构建产物按「本脚本内容 + 部署下限 + 平台」缓存在 ~/.s2arm/run/s2arm/cache/glslang，各工作树共用，命中秒过。
-# 安卓不用：安卓 GL 款运行时由系统驱动编 GLSL（graphics/tools/direct/direct_lib.sh 安卓分支不出 GL 库），GL 层（graphics/nvn/gfx/gl/*.m）只在苹果平台编。
+# 安卓不用：安卓 GL 款运行时由系统驱动编 GLSL（graphics/tools/direct/direct_lib.py 安卓分支不出 GL 库），GL 层（graphics/nvn/gfx/gl/*.m）只在苹果平台编。
 set -euo pipefail
 PLAT=${1:-osx-arm64}
 VER=16.6.0; SHA=9c09b901149c729df745057dafa815278aaa101b84d2b6e14f16a42de52f97f2

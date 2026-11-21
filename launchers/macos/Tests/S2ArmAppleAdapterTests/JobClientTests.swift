@@ -131,6 +131,12 @@ final class JobClientTests: XCTestCase {
             XCTAssertEqual(($0 as? JobClientError)?.message, "应用内置 Python 缺失，请重新安装完整应用。")
             XCTAssertEqual(($0 as? JobClientError)?.code, JobClientError.bundleIncomplete)   // 界面据此给「下载完整安装包」按钮
         }
+        // 玩家装的 App 缺作业入口：同样说包不完整、给重装，不说「选源码目录」（那是开发用源码树的话）
+        let noJobs = try Sandbox(bundledPython: true, jobs: false, engine: true); defer { noJobs.remove() }
+        XCTAssertThrowsError(try client(noJobs, FakeRunner()).jobEntry()) {
+            XCTAssertEqual(($0 as? JobClientError)?.message, "应用不完整，请重新安装 S2Arm。")
+            XCTAssertEqual(($0 as? JobClientError)?.code, JobClientError.bundleIncomplete)
+        }
         // 源码树：设置里指定的 Python；入口退到 <engineDir>/pack/jobs/main.py
         let dev = try Sandbox(bundledPython: false, jobs: false); defer { dev.remove() }
         var env = dev.environment()

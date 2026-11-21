@@ -88,14 +88,14 @@ def title(path):
     raise NoTitle(f'{p} 的 ApplicationTitle 全是空的' + (f'（{"；".join(bad)}）' if bad else ''))
 
 
-def compose(game, suffix=''):
-    """「<游戏名> S2Arm[ <后缀>]」：游戏名必须在最前面，后缀只用来区分实验 / 满屏等包"""
+def compose(game, suffix='', brand=True):
+    """「<游戏名> S2Arm[ <后缀>]」：游戏名必须在最前面，后缀只用来区分实验 / 满屏等包。brand=False（独立 App，一 App 一游戏，11-20 维护者：主屏名就是游戏名）不带「 S2Arm」"""
     game, suffix = (game or '').strip(), (suffix or '').strip()
     if not game:
         raise NoTitle('游戏名是空的')
     if any(ord(c) < 32 for c in game + suffix):
         raise NoTitle('游戏名 / 后缀含控制字符')
-    return f'{game} {BRAND}' + (f' {suffix}' if suffix else '')
+    return ' '.join(x for x in (game, BRAND if brand else '', suffix) if x)
 
 
 def display_name(path, suffix=''):
@@ -129,26 +129,26 @@ LPROJ = {0: 'en', 1: 'en-GB', 2: 'ja', 3: 'fr', 4: 'de', 5: 'es-419', 6: 'es', 7
          10: 'pt-PT', 11: 'ru', 12: 'ko', 13: 'zh-Hant', 14: 'zh-Hans', 15: 'pt-BR'}
 
 
-def localized_names(path, suffix=''):
+def localized_names(path, suffix='', brand=True):
     """各系统语言的桌面名（11-05 维护者「手机上 App 都叫游戏名 S2Arm」）：nacp 每个有标题的语言槽 → {<lproj>: 「<该语言标题> S2Arm[ 后缀]」}；
     简 / 繁中文槽和开发区域 en 是空的时用 title() 选出的名字（中文系统、以及没有对应标题的系统语言都能看到游戏名）。Info.plist 本体的 CFBundleDisplayName 另走 ascii_display_name"""
     p = nacp_path(path)
     with open(p, 'rb') as f:
         got, _ = titles(f.read())
-    out = {LPROJ[i]: compose(t, suffix) for i, t in sorted(got.items()) if i in LPROJ and t.strip()}
+    out = {LPROJ[i]: compose(t, suffix, brand) for i, t in sorted(got.items()) if i in LPROJ and t.strip()}
     for zh in ('zh-Hans', 'zh-Hant'):
-        out.setdefault(zh, compose(title(path), suffix))
+        out.setdefault(zh, compose(title(path), suffix, brand))
     # 开发区域 en（Info.plist CFBundleDevelopmentRegion）也总要有：系统语言没有对应 .lproj 时 iOS 退到开发区域，开发区域也没有才用 Info.plist 本体的 ASCII 名。
     #   11-07 DQ10（只有日文标题）在英文系统的 Duo 上桌面只显示「S2Arm」：ASCII 名删光日文只剩品牌、en.lproj 又没有；补上后任何没有对应标题的系统语言都显示游戏自带名
-    out.setdefault('en', compose(title(path), suffix))
+    out.setdefault('en', compose(title(path), suffix, brand))
     return out
 
 
-def ascii_display_name(path, suffix=''):
+def ascii_display_name(path, suffix='', brand=True):
     """Info.plist 的 CFBundleDisplayName（侧载工具拿它建 App ID）：「<英文游戏名> S2Arm[ <后缀>]」全 ASCII；中文名另放 zh-Hans / zh-Hant 本地化，
     中文系统的手机桌面照样显示中文（pack/ship_ext.py build）。英文名取不到 → 「S2Arm」"""
     game, suf = ascii_title(path), _ascii(suffix or '')
-    return ' '.join(x for x in (game, BRAND, suf) if x)
+    return ' '.join(x for x in (game, BRAND if brand or not game else '', suf) if x)   # 不带品牌（独立 App）时英文名取不到也退回「S2Arm」
 
 
 def main(argv=None):

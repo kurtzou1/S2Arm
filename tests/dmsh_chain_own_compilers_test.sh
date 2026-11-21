@@ -1,5 +1,5 @@
 #!/bin/bash
-# 门禁覆盖：translator/dmsh_chain.py graphics/tools/direct/direct_lib.sh tests/dmsh_chain_own_compilers_test.sh
+# 门禁覆盖：translator/dmsh_chain.py graphics/tools/direct/direct_lib.py tests/dmsh_chain_own_compilers_test.sh
 # 直连整份出库前核工具（dmsh_chain.py --build-env → own_compilers）：Xcode 与锁不同的机器照常出包（11-02 合入线对照 #1：C# 迁移删了 own_compilers.py 后每款出库前退出）。约 1 秒：bash tests/dmsh_chain_own_compilers_test.sh
 #   期望（手写）：只有 metal_macosx / metal_iphoneos 版本不同 → 全放行、照停为空；编译器缺失（actual missing）→ 照停；spirv-cross / 翻译器 dll / 翻译器源码不符 → 照停；混合时各归各
 #   不同编译器编的库不会被复用由 graphics/tools/direct/tests/t_unity.py ⑦ 实测（假 xcrun 报另一版本 → 新编、换回 → 命中）
@@ -24,43 +24,43 @@ ck('spirv-cross 不符 → 照停', dmsh_chain.own_compilers([SC]), ([], [SC]))
 ck('翻译器 dll / 源码不符 → 照停', dmsh_chain.own_compilers([DLL, SRC]), ([], [DLL, SRC]))
 ck('混合：Metal 放行、其余照停', dmsh_chain.own_compilers([M, SC, MISS]), ([M], [SC, MISS]))
 ck('全符 → 都空', dmsh_chain.own_compilers([]), ([], []))
-# 真跑 direct_lib.sh 的生产取值 / 校验块；工具边界只提供合成 stdout、stderr 与退出码。
+# 真跑 direct_lib.py 的生产取值 / 校验函数 build_env；工具边界只提供合成 stdout、stderr 与退出码。
 root = Path(dmsh_chain.HERE).parent
-source = (root / 'graphics/tools/direct/direct_lib.sh').read_text()
-start = source.index('BE=$(')
-block = source[start:source.index('\nSPVC=', start)]
 expected = 'c7a4970bffe5\t0100ABCD00000000\tsynthetic-inputs'
 note = "note: built with this Mac's compilers\ncompiler versions differ"
 fatal = '[RED] translation chain tools do not match the lock file: synthetic translator'
+sys.path.insert(0, str(root / 'graphics/tools/direct'))
+import contextlib, io, direct_lib
 with tempfile.TemporaryDirectory(prefix='s2a-chain-env-') as tmp:
-    # 假仓库布局与生产一致（direct_lib.sh：NX=<仓库>/graphics/nvn，核工具 cd "$NX/../../translator"）；迁仓前假脚本放 NX/graphics/tools，
-    #   迁仓改了生产路径没改这里，生产接线 8 项从首次公开快照起一直红（11-09 主线线定因）
-    base = Path(tmp); repo = base / 'repo with spaces'; nx = repo / 'graphics/nvn'; tools = repo / 'translator'
-    nx.mkdir(parents=True); tools.mkdir(parents=True)
+    base = Path(tmp); repo = base / 'repo with spaces'; tools = repo / 'translator'
+    tools.mkdir(parents=True)
     (tools / 'dmsh_chain.py').write_text(
         "import os, sys\n"
         "mode = os.environ['CHAIN_TEST_MODE']\n"
         "if mode in ('note', 'mismatch'): print(os.environ['CHAIN_TEST_NOTE'], file=sys.stderr)\n"
         "row = os.environ['CHAIN_TEST_ROW']\n"
         "if mode == 'mismatch': row = '000000000000' + row[12:]\n"
-        "print(row)\n"
+        "print(row, end='\\r\\n' if mode == 'crlf' else '\\n')\n"
         "if mode == 'error': print(os.environ['CHAIN_TEST_ERROR'], file=sys.stderr); sys.exit(7)\n")
-    for mode in ('normal', 'note', 'error', 'mismatch'):
+    for mode in ('normal', 'note', 'error', 'mismatch', 'crlf'):   # crlf：Windows 原生程序按 CRLF 写标准输出，取值不能带 CR
         work = base / mode; work.mkdir()
-        env = dict(os.environ, NX=str(nx), W=str(work), PY=sys.executable,
-                   V='c7a4970bffe5', CHAIN_TEST_MODE=mode, CHAIN_TEST_NOTE=note,
-                   CHAIN_TEST_ROW=expected, CHAIN_TEST_ERROR=fatal)
-        shell = 'say() { printf "[直连库] %s\\n" "$*"; }\n' + block
-        shell += '\nprintf "accepted\\t%s\\t%s\\t%s\\n" "$BV" "$BG" "$BI"\n'
-        r = subprocess.run(['/bin/bash', '-u', '-c', shell], env=env, capture_output=True, text=True)
-        ck(f'生产接线 {mode}：退出码', r.returncode, 0 if mode in ('normal', 'note') else 1)
-        if mode in ('normal', 'note'):
-            ck(f'生产接线 {mode}：三个字段保持原样', r.stdout.strip(), 'accepted\t' + expected)
+        os.environ.update(CHAIN_TEST_MODE=mode, CHAIN_TEST_NOTE=note, CHAIN_TEST_ROW=expected, CHAIN_TEST_ERROR=fatal)
+        out, err = io.StringIO(), io.StringIO(); rc = 0; got = None
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try: got = direct_lib.build_env(sys.executable, str(tools), str(work), 'c7a4970bffe5')
+            except direct_lib.Exit as e: rc = e.code
+        out, err = out.getvalue(), err.getvalue()
+        if got: out += 'accepted\t' + '\t'.join(got) + '\n'
+        ck(f'生产接线 {mode}：退出码', rc, 0 if mode in ('normal', 'note', 'crlf') else 1)
+        if mode in ('normal', 'note', 'crlf'):
+            ck(f'生产接线 {mode}：三个字段保持原样', out.strip(), 'accepted\t' + expected)
         if mode in ('note', 'mismatch'):
-            ck(f'生产接线 {mode}：提示保留在诊断输出', note in r.stderr, True)
+            ck(f'生产接线 {mode}：提示保留在诊断输出', note in err, True)
         if mode == 'error':
-            ck('工具退出非零：保留错误、拒绝其 stdout 中看似有效的结果', fatal in r.stdout + r.stderr and 'accepted\t' not in r.stdout, True)
+            ck('工具退出非零：保留错误、拒绝其 stdout 中看似有效的结果', fatal in out + err and 'accepted\t' not in out, True)
         if mode == 'mismatch':
-            ck('真实链号不符仍拒绝', '链号前后不一（c7a4970bffe5 / 000000000000）' in r.stdout, True)
+            ck('真实链号不符仍拒绝', '链号前后不一（c7a4970bffe5 / 000000000000）' in out, True)
+# 取子进程标准输出（同 $(…)）：Windows 原生程序写 CRLF，取到的路径不能带 CR（11-20 Windows 实跑：game.py dir 的路径带 CR，报「配置档缺 game.tsv」）
+ck('取值去掉 CRLF 的 CR', direct_lib.run([sys.executable, '-c', "import sys; sys.stdout.buffer.write(b'D:/p/0100\\r\\n')"], capture=True), (0, 'D:/p/0100'))
 print(f'dmsh_chain_own_compilers：{checks} 项，失败 {bad}'); raise SystemExit(1 if bad else 0)
 PY

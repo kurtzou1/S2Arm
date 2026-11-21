@@ -12,15 +12,16 @@ set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); bad=0
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
 source "$H/tools/plock.sh"
 waitev() { local i e; for i in $(seq 1 600); do for e in "$@"; do [ -e "$EV/$e" ] && return 0; done; sleep 0.05; done; echo "【红】等事件 $* 超时" >&2; return 1; }
-# 清扫读完现行的 romfs 链接时放行 B，等 B 收纳完或被锁挡住再往下（布防后只触发一次）
+# 清扫读完名单里最后一条 romfs 链接（g@s0：版本按名字排 g@rw1 < g@s0 < g@ui1.tmp，现行指针 g@现行 是文件、没有 romfs）时放行 B，
+#   等 B 收纳完或被锁挡住再往下（布防后只触发一次）
 readlink() {
   command readlink "$@"; local rc=$?
-  if [[ " ${FUNCNAME[*]} " == *" root_romfs_sweep "* ]] && [[ "$*" == *@现行/romfs ]] && [ -e $EV/armed ] && mkdir $EV/fired 2> /dev/null; then touch $EV/go; waitev interned blocked >&2; fi
+  if [[ " ${FUNCNAME[*]} " == *" root_romfs_sweep "* ]] && [[ "$*" == *@s0/romfs ]] && [ -e $EV/armed ] && mkdir $EV/fired 2> /dev/null; then touch $EV/go; waitev interned blocked >&2; fi
   return $rc
 }
 # 清扫要读 B 的 g@ui1.tmp/romfs 时（交错已放行之后）先等 B 把 .tmp 改名成正式名，最多 3 秒——把「再读链接时版本正被改名」这一刻钉死。
-#   要在 source pack/roots.sh 之后定义（它会重定义 _root_romfs_used）；B 那边切现行前等清扫做完（见 run 里 B 的 _root_mv_link），
-#   否则 B 刚改完名就切现行，清扫读 @现行/romfs 又能看到新身份，空当又靠墙钟
+#   要在 source pack/roots.sh 之后定义（它会重定义 _root_romfs_used）；B 那边切现行前等清扫做完（见 run 里 B 的 _root_ptr_py write），
+#   否则 B 刚改完名就切现行，空当又靠墙钟
 hook_used() {
   _root_romfs_used() {
     # 交错放行之后的第几次读链接：候选按名字排是 orphan、s0-…（在先拍的名单里，不再读）、ui1-…，第 1 次再读是 orphan 的、第 2 次就是 B 新身份的
@@ -45,8 +46,8 @@ run() {
     plock_take() { _real_plock_take "$1" 0 && return 0; touch $EV/blocked; _real_plock_take "$@"; }
     eval "_real_intern() $(declare -f _root_romfs_intern | tail -n +2)"
     _root_romfs_intern() { _real_intern "$@" || return 1; touch $EV/interned; }
-    eval "_real_mv_link() $(declare -f _root_mv_link | tail -n +2)"
-    _root_mv_link() { waitev sweptdone; _real_mv_link "$@"; }
+    eval "_real_ptr_py() $(declare -f _root_ptr_py | tail -n +2)"
+    _root_ptr_py() { [ "$1" != write ] || waitev sweptdone; _real_ptr_py "$@"; }
     mv() { if [[ "${1:-}" == *@ui1.tmp && "${2:-}" == *@ui1 ]]; then waitev_short reread; command mv "$@"; local rc=$?; touch $EV/renamed; return $rc; fi; command mv "$@"; }   # 只卡 .tmp → 正式名这一下（重放也会挪 .tmp）
     waitev go && ROOT_REPLAY='romfs' root_commit g ui1 2> $T/$n/b.err; echo $? > $EV/b.rc
   ) & BP=$!

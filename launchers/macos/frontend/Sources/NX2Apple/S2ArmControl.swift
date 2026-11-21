@@ -416,7 +416,7 @@ import S2ArmAppleAdapter
                 ["id": g.id, "name": g.name, "customName": g.customName, "customCover": g.customCover, "cover": g.cover ?? "", "display": g.display, "compatibility": g.compatibility, "ready": g.playable, "iphoneRestorable": g.iphoneRestorable,
                  "needsPreparation": g.needsPreparation, "needsKeys": g.needsKeys, "buildable": g.buildable, "missing": g.missing,
                  "baseBytes": g.packages.filter { $0.type == "base" }.reduce(Int64(0)) { $0 + $1.size }, "bytes": g.totalBytes] },
-            "session": session, "busy": m.busy, "phoneSession": phoneSession, "mainBusy": m.mainBusy, "phoneBusy": m.phoneBusy,
+            "session": session, "busy": m.busy, "libraryLoading": m.loading, "phoneSession": phoneSession, "mainBusy": m.mainBusy, "phoneBusy": m.phoneBusy,
             "playSession": playSession, "playBusy": m.playBusy,
             "phoneQueue": m.phoneQueue.map { $0.gameID ?? "" },
             "tasks": ControlJournal.tasks(privateRoot: privateRoot), "queue": [String](),

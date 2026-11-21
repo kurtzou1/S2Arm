@@ -69,6 +69,14 @@ public static class PackCases
         Feed(slope, """{"type":"progress","milestone":"direct","doneUnits":500,"totalUnits":99084}""", 140);
         Feed(slope, """{"type":"progress","milestone":"ipa","doneUnits":600,"totalUnits":99084}""", 150);
         check(slope.Estimate(150).StepRemainingByRate is null, "slope: a new step starts its rate over");
+        // ---- 上次前进（#1770）：作业事件 advancedAt（Unix 秒）原样记下，心跳只带旧值；没有这个字段的旧事件不显示 ----
+        var moved = new MilestoneTrack();
+        check(moved.SinceAdvance(100) is null, "advanced: no advancedAt yet, nothing shown");
+        Feed(moved, """{"type":"progress","milestone":"direct","doneUnits":5,"totalUnits":10,"advancedAt":1000}""", 1);
+        Feed(moved, """{"type":"heartbeat","advancedAt":1000}""", 2);
+        check(moved.SinceAdvance(1012) is { } a1 && Math.Abs(a1 - 12) < 1e-9, "advanced: heartbeat keeps the last advance, 12 s ago");
+        Feed(moved, """{"type":"progress","milestone":"direct","doneUnits":6,"totalUnits":10,"advancedAt":1015}""", 3);
+        check(moved.SinceAdvance(1016) is { } a2 && Math.Abs(a2 - 1) < 1e-9, "advanced: a new count resets it");
         var unknown = new MilestoneEstimate([plan[0], plan[1], new("d", "D", "", 99, "none", 0, false)], "b", started, null, 180);
         check(unknown.Remaining is null, "estimate: a later step without a local record gives no total");
         check(new MilestoneEstimate(plan, null, started, null, 180).Remaining is null, "estimate: no current step, no total");

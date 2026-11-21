@@ -48,6 +48,8 @@ int s2a_launch_ctx_resolve(s2a_launch_ctx *c, const char *exe_dir, const char *h
 int s2a_launch_ctx_resolve_game(s2a_launch_ctx *c, const char *bundle_dir, const char *home, const char *gid, char *why, size_t why_n);
 // 包根是不是多款容器布局（有 s2a_catalogue.json 且有 Games/ 目录）
 int s2a_launch_ctx_is_container_dir(const char *bundle_dir);
+// 独立 App（一 App 一游戏）：包根清单只有一款、且它的程序库在 App 包里（Frameworks/S2AImages-<号>.dylib + Games/<号>/）→ 1，gid 写这款；否则 0。纯函数
+int s2a_launch_ctx_single_game(const char *bundle_dir, char *gid, size_t gid_n);
 // 本进程是不是多款容器模式（③：容器布局且没设 S2A_LAUNCH_CTX）；只看包根与环境，不冻结、不读任何一款的文件，构造期可调
 int s2a_launch_ctx_container(void);
 // App 包根（可执行文件目录），不冻结；取不到为空串

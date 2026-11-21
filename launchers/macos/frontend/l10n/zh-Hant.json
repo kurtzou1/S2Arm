@@ -1653,6 +1653,7 @@
   "s2arm.export.installExistingPad": "已有 iPhone / iPad 包？裝到 iPad",
   "s2arm.fail.locations": "讀不到存放位置",
   "s2arm.fail.installMode": "讀不到裝機方式",
+  "s2arm.fail.layoutSet": "改不了推到 iPhone 的方式",
   "s2arm.fail.installModeSet": "裝機方式沒有切換成功",
   "s2arm.fail.devCert": "讀不到開發者證書狀態",
   "s2arm.bundleIncomplete.title": "S2Arm 應用不完整",

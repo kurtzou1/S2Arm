@@ -1,8 +1,24 @@
 #define _GNU_SOURCE
 #include "fault.h"
 #include "../../guest_signal.h"
+// OHOS musl signal.h already provides these AArch64 context records.
+#if !defined(__OHOS__)
 #include <asm/sigcontext.h>
 #include "sigframe_compat.h"
+#else
+// OHOS musl: no <asm/sigcontext.h>; same UAPI layouts as sigframe_compat.h for records it may lack.
+#ifndef FPMR_MAGIC
+#define FPMR_MAGIC 0x46504d52
+struct fpmr_context { struct _aarch64_ctx head; unsigned long long fpmr; };
+#endif
+#ifndef POE_MAGIC
+#define POE_MAGIC 0x504f4530
+struct poe_context { struct _aarch64_ctx head; unsigned long long por_el0; };
+#endif
+#ifndef SVE_SIG_FLAG_SM
+#define SVE_SIG_FLAG_SM 0x1
+#endif
+#endif
 #include <errno.h>
 #include <pthread.h>
 #include <signal.h>
@@ -179,8 +195,16 @@ static int records(const ucontext_t *context, uint64_t *esr, int *has_esr) {
             if (head->size < sizeof(struct sve_context)) return EINVAL;
             // Streaming SVE live at the fault: the redirected host body would resume in streaming
             // mode, where plain FP/SIMD traps. Neither guest nor host code enables it; refuse if seen.
+#if defined(__OHOS__)
+            // OHOS's older UAPI calls the flags word the first reserved halfword.
+            // Preserve the streaming-mode rejection, including on newer kernels.
+            if (((const struct sve_context *)head)->__reserved[0] & SVE_SIG_FLAG_SM) return unsupported(SVE_MAGIC);
+#else
             if (((const struct sve_context *)head)->flags & SVE_SIG_FLAG_SM) return unsupported(SVE_MAGIC);
+#endif
             bit = 4; break;
+        // OHOS musl's sigcontext has no SME records: unknown magic stays ENOTSUP below.
+#if defined(TPIDR2_MAGIC) && defined(ZA_MAGIC)
         case TPIDR2_MAGIC:
             if (!(atomic_load_explicit(&inline_sme_config, memory_order_acquire) & 1)) return unsupported(TPIDR2_MAGIC);
             if (head->size != sizeof(struct tpidr2_context)) return EINVAL;
@@ -194,6 +218,7 @@ static int records(const ucontext_t *context, uint64_t *esr, int *has_esr) {
             if (!sve_vl_valid(za->vl) || za->__reserved[0] || za->__reserved[1] || za->__reserved[2]) return EINVAL;
             bit = 16; break;
         }
+#endif
         // FPMR (FP8) and POE (permission overlay) are likewise inline, fixed-size register snapshots
         // that newer kernels append whenever the CPU has the feature; copied back intact like TPIDR2.
         case FPMR_MAGIC:

@@ -16,7 +16,7 @@ if [ -n "$C" ] && [ -z "${PACK_FP_IN_WT:-}" ]; then
   ( cd "$W" && PACK_FP_IN_WT=1 bash tools/pack_fp.sh "$G" ); exit $?
 fi
 R=$(git rev-parse --show-toplevel 2> /dev/null) || R=$(cd "$(dirname "$0")/.." && pwd)   # 算当前目录所在那棵树（复演旧提交时脚本可能来自别处）
-CUR=$(cd -P "${S2A_ROOTS_SHARED:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/roots}/$G@现行" 2> /dev/null && pwd) || exit 1
+source "$R/pack/roots.sh"; CUR=$(root_cur_in "$S2A_ROOTS_SHARED" "$G" 2> /dev/null) || exit 1   # 共享根的现行（指针文件）
 K=$(mktemp); CP=$(mktemp); trap 'rm -f "$K" "$CP"' EXIT
 for s in rewrite caps uilayout aoc romfsidx extract direct_profile direct direct_gk direct_seed direct_cpso shaders; do
   if [ "${S2A_PACK_FP_KEYS:-}" = recorded ]; then   # 单测：假产物根只有 .stage_* 记录、算不了键，取根里记的键

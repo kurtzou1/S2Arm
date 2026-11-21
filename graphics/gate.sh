@@ -233,6 +233,18 @@ run_vulkan_diag() {
 # 显卡独占锁只罩开真窗口 / 按真实显示时钟判的子项（11-14：原先 tools/gate.sh 给整个钩子套锁，一百多项离屏单测也排同一把，全机一次只能跑一个 graphics 钩子）。
 #   锁 = 全机共用的 Mac 局槽（与 solo、Mac 局同一把）；没给 S2A_PRIVATE_TOOLS（单机 / 本机直跑）照旧不套。用法：gpu_excl <拿齐后时限秒> <命令…>
 gpu_excl() { local lim=$1; shift; [ -n "${S2A_PRIVATE_TOOLS:-}" ] && { bash "$S2A_PRIVATE_TOOLS/mac_slot_frozen.sh" prio "graphics/gate.sh 上屏驻留" "$lim" -- "$@"; return; }; "$@"; }   # 写成 shift 后语句首执行 "$@"：接线扫描按转调函数认，被包的单测仍算接上
+# 离屏起 Metal 的子项取共享显卡锁（11-20 读写锁：一台门禁主机上 present_residency 单格 60 秒偶发，三次都撞上同机不取锁的离屏组——dsh / direct_link / vk / nvn / red
+#   与画面矩阵共用显卡队列和系统里唯一的 Metal 编译服务，矩阵每格启动现编管线被挤住）。共享可多个同时持有；上面 gpu_excl 的独占步在等或在跑时不发新的共享，
+#   独占等现有共享走空再跑（写优先）。按命令路径判：直连单测、graphics/nvn、graphics/metal 下的子项与 Vulkan / 共享 GPU 合同 / 纹理 DMA 取共享；
+#   只编不跑的预编（*_build / *_prebuild / direct_link_dsx）不取。没给 S2A_PRIVATE_TOOLS（单机 / 本机直跑）或仲裁副本没有共享锁时照旧直跑
+gpu_job() { case $1 in *_build|*_prebuild|direct_link_dsx) return 1;; vk|texture_dma_read|shared_gpu_contract) return 0;; esac; shift; local a
+  for a in "$@"; do case $a in graphics/tools/direct/tests/*|graphics/nvn|graphics/nvn/*|graphics/metal|graphics/metal/*|tests/se_want_test.py) return 0;; esac; done; return 1; }
+GPU_SHR_OK=0; [ -n "${S2A_PRIVATE_TOOLS:-}" ] && source "$S2A_PRIVATE_TOOLS/mac_slot_frozen.sh" 2> /dev/null && declare -F gpu_share_acquire > /dev/null && GPU_SHR_OK=1
+# gpu_share_on <子项键> <命令…>：要共享锁的子项排到锁（不要的直接返回 0）；排队超上限退 75。gpu_share_off 放（没拿也可调）
+gpu_share_on() { [ "$GPU_SHR_OK" = 1 ] && gpu_job "$@" || return 0; gpu_share_acquire "graphics/gate.sh $1"; }
+gpu_share_off() { [ "$GPU_SHR_OK" = 1 ] && gpu_share_release; return 0; }
+# gpu_share <子项键> <命令…>：排到锁再在同一 shell 里跑（函数子项照常可用），跑完放锁
+gpu_share() { local r; gpu_share_on "$@" || return; shift; "$@"; r=$?; gpu_share_off; return $r; }
 run_present_residency() {
   local out="build/tests/present-residency" widen_build="build/tests/present-residency/deps"
   local widen_target="$widen_build/tests/nvn/widen/S2Arm.Gfx.Widen.dylib"
@@ -281,19 +293,19 @@ if [ -n "${GATE_ONLY:-}" ]; then
   if has "$GATE_ONLY" shared_gpu_contract; then run_shared_gpu_contract; r=$?; out="${out:+$out / }共享 GPU 合同 $(tail -1 "$LOG/shared_gpu_contract.log")（退出 ${r}）"; [ "$r" = 0 ] || ok=0; fi
   if has "$GATE_ONLY" vulkan_diag; then run_vulkan_diag; r=$?; out="${out:+$out / }Vulkan 诊断默认值 $(tail -1 "$LOG/vulkan_diag.log")（退出 ${r}）"; [ "$r" = 0 ] || ok=0; fi
   if has "$GATE_ONLY" dsh && ! need_dsh; then out="${out:+$out / }直连兜底现编对拍：本批没改到 graphics/tools/direct，不跑"
-  elif has "$GATE_ONLY" dsh; then timeout 300 bash graphics/tools/direct/tests/t_dsh.sh > "$LOG/dsh.log" 2>&1; d=$?; out="${out:+$out / }直连兜底现编对拍 $(tail -1 "$LOG/dsh.log")（退出 ${d}）"; ev $d "$LOG/dsh.log" || ok=0; fi
+  elif has "$GATE_ONLY" dsh; then gpu_share dsh timeout 300 bash graphics/tools/direct/tests/t_dsh.sh > "$LOG/dsh.log" 2>&1; d=$?; out="${out:+$out / }直连兜底现编对拍 $(tail -1 "$LOG/dsh.log")（退出 ${d}）"; ev $d "$LOG/dsh.log" || ok=0; fi
   if has "$GATE_ONLY" gl && ! need_gl; then out="${out:+$out / }OpenGL 前端最小绘制：本批没改到 GL 前端，不跑"
   elif has "$GATE_ONLY" gl; then
-    timeout 120 bash graphics/nvn/tests/gl/t_gl_min.sh > "$LOG/gl.log" 2>&1; g=$?; out="${out:+$out / }OpenGL 前端最小绘制 $(tail -1 "$LOG/gl.log")（退出 ${g}）"; ev $g "$LOG/gl.log" || ok=0
-    timeout 300 bash graphics/nvn/tests/gl/t_gpu_mip.sh > "$LOG/gl_gpu_mip.log" 2>&1; g=$?; out="${out:+$out / }OpenGL 渲染纹理 mip / cube $(tail -1 "$LOG/gl_gpu_mip.log")（退出 ${g}）"; ev $g "$LOG/gl_gpu_mip.log" || ok=0
-    timeout 300 bash graphics/nvn/tests/gl/t_gpu_mrt.sh > "$LOG/gl_gpu_mrt.log" 2>&1; g=$?; out="${out:+$out / }OpenGL MRT $(tail -1 "$LOG/gl_gpu_mrt.log")（退出 ${g}）"; ev $g "$LOG/gl_gpu_mrt.log" || ok=0
-    timeout 300 bash graphics/nvn/tests/gl/t_gpu_depth_stencil.sh > "$LOG/gl_gpu_depth_stencil.log" 2>&1; g=$?; out="${out:+$out / }OpenGL 深度模板 $(tail -1 "$LOG/gl_gpu_depth_stencil.log")（退出 ${g}）"; ev $g "$LOG/gl_gpu_depth_stencil.log" || ok=0
-    timeout 120 bash graphics/nvn/tests/gl/t_gl_api.sh > "$LOG/gl_api.log" 2>&1; g=$?; out="${out:+$out / }OpenGL 接口补齐 $(tail -1 "$LOG/gl_api.log")（退出 ${g}）"; ev $g "$LOG/gl_api.log" || ok=0
-    timeout 60 bash graphics/nvn/tests/gl/t_glsl_es.sh > "$LOG/gl_glsl_es.log" 2>&1; g=$?; out="${out:+$out / }GLSL 改写层 $(tail -1 "$LOG/gl_glsl_es.log")（退出 ${g}）"; ev $g "$LOG/gl_glsl_es.log" || ok=0
-    timeout 300 bash graphics/nvn/tests/gl/t_gl_rt.sh > "$LOG/gl_rt.log" 2>&1; g=$?; out="${out:+$out / }OpenGL 运行时兜底 $(tail -1 "$LOG/gl_rt.log")（退出 ${g}）"; ev $g "$LOG/gl_rt.log" || ok=0
+    gpu_share gl timeout 120 bash graphics/nvn/tests/gl/t_gl_min.sh > "$LOG/gl.log" 2>&1; g=$?; out="${out:+$out / }OpenGL 前端最小绘制 $(tail -1 "$LOG/gl.log")（退出 ${g}）"; ev $g "$LOG/gl.log" || ok=0
+    gpu_share gl timeout 300 bash graphics/nvn/tests/gl/t_gpu_mip.sh > "$LOG/gl_gpu_mip.log" 2>&1; g=$?; out="${out:+$out / }OpenGL 渲染纹理 mip / cube $(tail -1 "$LOG/gl_gpu_mip.log")（退出 ${g}）"; ev $g "$LOG/gl_gpu_mip.log" || ok=0
+    gpu_share gl timeout 300 bash graphics/nvn/tests/gl/t_gpu_mrt.sh > "$LOG/gl_gpu_mrt.log" 2>&1; g=$?; out="${out:+$out / }OpenGL MRT $(tail -1 "$LOG/gl_gpu_mrt.log")（退出 ${g}）"; ev $g "$LOG/gl_gpu_mrt.log" || ok=0
+    gpu_share gl timeout 300 bash graphics/nvn/tests/gl/t_gpu_depth_stencil.sh > "$LOG/gl_gpu_depth_stencil.log" 2>&1; g=$?; out="${out:+$out / }OpenGL 深度模板 $(tail -1 "$LOG/gl_gpu_depth_stencil.log")（退出 ${g}）"; ev $g "$LOG/gl_gpu_depth_stencil.log" || ok=0
+    gpu_share gl timeout 120 bash graphics/nvn/tests/gl/t_gl_api.sh > "$LOG/gl_api.log" 2>&1; g=$?; out="${out:+$out / }OpenGL 接口补齐 $(tail -1 "$LOG/gl_api.log")（退出 ${g}）"; ev $g "$LOG/gl_api.log" || ok=0
+    gpu_share gl timeout 60 bash graphics/nvn/tests/gl/t_glsl_es.sh > "$LOG/gl_glsl_es.log" 2>&1; g=$?; out="${out:+$out / }GLSL 改写层 $(tail -1 "$LOG/gl_glsl_es.log")（退出 ${g}）"; ev $g "$LOG/gl_glsl_es.log" || ok=0
+    gpu_share gl timeout 300 bash graphics/nvn/tests/gl/t_gl_rt.sh > "$LOG/gl_rt.log" 2>&1; g=$?; out="${out:+$out / }OpenGL 运行时兜底 $(tail -1 "$LOG/gl_rt.log")（退出 ${g}）"; ev $g "$LOG/gl_rt.log" || ok=0
   fi
   if has "$GATE_ONLY" vk && ! need_vk; then out="${out:+$out / }Vulkan 层：本批没改到 Vulkan 前端，不跑"
-  elif has "$GATE_ONLY" vk; then run_vk; vi=$?; out="${out:+$out / }$VK_RESULT"; ev $vi || ok=0; fi
+  elif has "$GATE_ONLY" vk; then gpu_share vk run_vk; vi=$?; out="${out:+$out / }$VK_RESULT"; ev $vi || ok=0; fi
   if has "$GATE_ONLY" present_residency && ! need_present_residency; then out="${out:+$out / }上屏驻留集成：本批没改到相关路径，不跑"
   elif has "$GATE_ONLY" present_residency; then run_present_residency; pr=$?; out="${out:+$out / }$PRESENT_RESIDENCY_RESULT"; ev $pr || ok=0; fi
   if has "$GATE_ONLY" shdist && ! need_shdist; then out="${out:+$out / }shbake 分发组：本批没改到 shbake / 远端分发，不跑"
@@ -315,7 +327,7 @@ if [ -z "${S2A_DOTNET_LOCK:-}" ] && [ -f tools/dotnet_lock.c ] && mkdir -p build
 fi
 JOBD=$LOG/jobs; rm -rf "$JOBD"; mkdir -p "$JOBD"; LANES=
 # job <项> <命令…>：先认领（mkdir 原子，已被别的道认领就跳过），输出进 $LOG/<项>.log、退出码原子落 $JOBD/<项>.rc，用时记 $LOG/jobs.tsv（秒数 / 项 / 退出码 / 开跑时刻 / 道）；带 HOOK_REST=1 调的是「其余」子项（见 HOOK_KEYS），GATE_HOOK_ONLY 不点名 rest 时只记一行「不跑」、退出码 0
-job() { mkdir "$JOBD/$1.claim" 2> /dev/null || return 0; local k=$1 s=$SECONDS r; hook_rest_off && { echo "本步只跑点名子项（GATE_HOOK_ONLY=${GATE_HOOK_ONLY:-}），「其余」不在名单，不跑" > "$LOG/$k.log"; echo 0 > "$JOBD/$k.rc.t"; mv "$JOBD/$k.rc.t" "$JOBD/$k.rc"; return 0; }; unset HOOK_REST; shift; "$@" > "$LOG/$k.log" 2>&1 < /dev/null; r=$?; printf '%s\t%s\t%s\t%s\t%s\n' "$((SECONDS - s))" "$k" "$r" "$s" "${LANE:-}" >> "$LOG/jobs.tsv"; echo "$r" > "$JOBD/$k.rc.t"; mv "$JOBD/$k.rc.t" "$JOBD/$k.rc"; }
+job() { mkdir "$JOBD/$1.claim" 2> /dev/null || return 0; local k=$1 s=$SECONDS r; hook_rest_off && { echo "本步只跑点名子项（GATE_HOOK_ONLY=${GATE_HOOK_ONLY:-}），「其余」不在名单，不跑" > "$LOG/$k.log"; echo 0 > "$JOBD/$k.rc.t"; mv "$JOBD/$k.rc.t" "$JOBD/$k.rc"; return 0; }; unset HOOK_REST; : > "$LOG/$k.log"; r=75; gpu_share_on "$@" 2>> "$LOG/$k.log" && { shift; "$@" >> "$LOG/$k.log" 2>&1 < /dev/null; r=$?; gpu_share_off; }; printf '%s\t%s\t%s\t%s\t%s\n' "$((SECONDS - s))" "$k" "$r" "$s" "${LANE:-}" >> "$LOG/jobs.tsv"; echo "$r" > "$JOBD/$k.rc.t"; mv "$JOBD/$k.rc.t" "$JOBD/$k.rc"; }
 lanes_alive() { local p; for p in $LANES; do kill -0 "$p" 2> /dev/null && return 0; done; return 1; }
 # waitfor <项>：道内等别的道的某项跑完（不写退出码）；rcof <项>：主流程取退出码，四道都结束了还没有 = 没排进任何道 → 125 判红
 waitfor() { while [ ! -f "$JOBD/$1.rc" ] && lanes_alive; do sleep 0.2; done; }
@@ -346,6 +358,7 @@ lane_metal() {
   has "$RUNG" m3pack && job cs_pipelines timeout 300 bash graphics/tools/direct/tests/t_cs_pipelines.sh   # 直连计算管线随包归档：出包 → 设备同一描述命中 / 反证不命中 / 阶段键
   has "$RUNG" m3pack && job base_pipelines timeout 300 bash graphics/tools/direct/tests/t_base_pipelines.sh   # 直连拉取基础管线随包归档：出包 → 设备同一描述命中 / 反证不命中 / 阶段
   has "$RUNG" m3pack && job pipelines_clone timeout 120 python3 graphics/tools/direct/tests/t_pipelines_clone.py   # 管线缓存 clone 多线程同写一个目标不报错（临时件名带线程号）
+  has "$RUNG" m3pack && job pipelines_spawn timeout 120 python3 graphics/tools/direct/tests/t_pipelines_spawn.py   # 管线出包子进程不走 fork（posix_spawn / clonefile；fork 在线程池里排队，每次约 300 ms）
   # NVN 直连层 / GL / Vulkan 前端（graphics/nvn 与根 Makefile 的 make，链 libnvn.a、build/dsx/mac/libspvc.a）：同一道先后
   need_nvn && job nvn_m3 timeout 300 make -s -C graphics/nvn test
   need_nvn_tex && job nvn_tex timeout 120 make -s -B -C graphics/nvn/gfx/tex/tests run
@@ -715,7 +728,7 @@ rcof ue_pak_legacy; upk=$?; upkc=$(tail -1 "$LOG/ue_pak_legacy.log")
 # zstd 解压入口（zstd_lib：libzstd 流式接口，玩家 App 的 Python 3.12 没有 compression.zstd）：记 / 不记原长的帧、多帧、前缀、字典，截断与非 zstd 报错
 rcof zstd_lib; r=$?; reg $r "zstd 解压入口：$(tail -1 "$LOG/zstd_lib.log")（退出 ${r}）" "$LOG/zstd_lib.log"
 rcof keyscan; ks=$?; reg $ks "找钥回退扫描并行：$(tail -1 "$LOG/keyscan.log")（退出 ${ks}）" "$LOG/keyscan.log"   # pak_crypto find_key / _scan：1 路与多路都找到、段尾不漏窗、不打印密钥
-# IoStore 容器接入出包链（#247）：合成 .utoc/.ucas 解出全部记录、改前 extract.sh 门禁与改前 ue_pak.py 对纯 .utoc 根抽 0 支、Oodle 块判失败、TOC 3 不猜、加密容器借同包 pak 密钥（无钥判红）
+# IoStore 容器接入出包链（#247）：合成 .utoc/.ucas 解出全部记录、改前 extract.py 门禁与改前 ue_pak.py 对纯 .utoc 根抽 0 支、Oodle 块判失败、TOC 3 不猜、加密容器借同包 pak 密钥（无钥判红）
 rcof ue_iostore; r=$?; reg $r "IoStore 容器接入：$(tail -1 "$LOG/ue_iostore.log")（退出 ${r}）" "$LOG/ue_iostore.log"
 # UE pak 版本 9 冻结索引（11-02 鬼灭之刃 / 轩辕剑柒）：合成内存映像 pak 读名字 / 原文、uepak 与 ue_pak.py 两层、越界 / 缺名 / 加密三种判红、改前实现反证
 rcof ue_pak_frozen; r=$?; reg $r "UE pak 冻结索引：$(tail -1 "$LOG/ue_pak_frozen.log")（退出 ${r}）" "$LOG/ue_pak_frozen.log"
@@ -748,6 +761,7 @@ if has "$RUNG" m3pack; then rcof m3archive; r=$?; reg $r "Metal 3 运行时包�
 if has "$RUNG" m3pack; then rcof cs_pipelines; r=$?; reg $r "直连计算管线随包归档：$(tail -1 "$LOG/cs_pipelines.log")（退出 ${r}）" "$LOG/cs_pipelines.log"; fi
 if has "$RUNG" m3pack; then rcof base_pipelines; r=$?; reg $r "直连拉取基础管线随包归档：$(tail -1 "$LOG/base_pipelines.log")（退出 ${r}）" "$LOG/base_pipelines.log"; fi
 if has "$RUNG" m3pack; then rcof pipelines_clone; r=$?; reg $r "管线缓存多线程同写：$(tail -1 "$LOG/pipelines_clone.log")（退出 ${r}）" "$LOG/pipelines_clone.log"; fi
+if has "$RUNG" m3pack; then rcof pipelines_spawn; r=$?; reg $r "管线出包子进程不走 fork：$(tail -1 "$LOG/pipelines_spawn.log")（退出 ${r}）" "$LOG/pipelines_spawn.log"; fi
 # Unity ComputeShader 各版本的 kernel 变体布局（shader_split.kernel_variants）：2022.3 / 2020.3 / 2018.4（#379 Moving Out）三种认得、未知布局报红
 rcof unity_kernels; r=$?; reg $r "Unity 计算着色器布局：$(tail -1 "$LOG/unity_kernels.log")（退出 ${r}）" "$LOG/unity_kernels.log"
 rcof unity55_layout; r=$?; reg $r "Unity 5.5 精确布局：$(tail -1 "$LOG/unity55_layout.log")（退出 ${r}）" "$LOG/unity55_layout.log"
@@ -757,7 +771,7 @@ rcof unity_kw_pairs; r=$?; reg $r "Unity 按 Pass + 关键字配对：$(tail -1 
 rcof mtarc_width; r=$?; reg $r "MT ARC 条目宽度：$(tail -1 "$LOG/mtarc_width.log")（退出 ${r}）" "$LOG/mtarc_width.log"   # shader_split.py mtarc_members（11-02 生化危机6：路径 64 字节）
 rcof nlg4; r=$?; reg $r "NLG 新版档案：$(tail -1 "$LOG/nlg4.log")（退出 ${r}）" "$LOG/nlg4.log"   # shader_split.py nlg4_shaders（11-02 马力欧激战前锋 1.3.2）
 rcof source_path; r=$?; reg $r "来源列路径一律 /：$(tail -1 "$LOG/source_path.log")（退出 ${r}）" "$LOG/source_path.log"   # shader_split.py / nxsh_extract.py 来源串（11-05 Windows 出包机勇者斗恶龙 XI S 来源列反斜杠、分组全落 *_other）
-rcof list_arg; r=$?; reg $r "资源目录列表文件：$(tail -1 "$LOG/list_arg.log")（退出 ${r}）" "$LOG/list_arg.log"   # extract.sh / shader_split.py / nxsh_extract.py 的 @<列表文件>（11-05 Windows 出包机怪猎崛起 273 个追加内容超过 Windows 命令行上限）
+rcof list_arg; r=$?; reg $r "资源目录列表文件：$(tail -1 "$LOG/list_arg.log")（退出 ${r}）" "$LOG/list_arg.log"   # extract.py / shader_split.py / nxsh_extract.py 的 @<列表文件>（11-05 Windows 出包机怪猎崛起 273 个追加内容超过 Windows 命令行上限）
 rcof mtspk; r=$?; reg $r "MT SPK 两种排法：$(tail -1 "$LOG/mtspk.log")（退出 ${r}）" "$LOG/mtspk.log"   # shader_split.py mtspk_shaders（11-02 启示录2：控制段在前）
 rcof ue_oodle_inline; r=$?; reg $r "Unreal 内嵌 Oodle 着色器：$(tail -1 "$LOG/ue_oodle_inline.log")（退出 ${r}）" "$LOG/ue_oodle_inline.log"   # shader_split.py ue_inline_shaders / oodle_frames（11-01 无主之地3）
 rcof split_oodle_default; r=$?; reg $r "直连抽取解码器缺省：$(tail -1 "$LOG/split_oodle_default.log")（退出 ${r}）" "$LOG/split_oodle_default.log"   # shader_split.py oodle_defaults（11-07 勇者斗恶龙 XI S 私有根出包 LZ5 红）
@@ -766,7 +780,7 @@ rcof split_file_skip; r=$?; reg $r "直连抽取按文件降级：$(tail -1 "$LO
 rcof ue3_dnbc; r=$?; reg $r "UE3 包着色器：$(tail -1 "$LOG/ue3_dnbc.log")（退出 ${r}）" "$LOG/ue3_dnbc.log"   # shader_split.py ue3_package / ue3_dnbc_shaders（11-02 BioShock Infinite：LZ4 块里的 DNBC 记录）
 # Unity 无类型树的序列化文件（unityfs.shader_layout，10-29）：按版本生成的 Shader 布局与四份对过真树的金样等价、2017.1–2022.3 合成资源能解、版本错 / 多字节响亮停、计算着色器免树找 kernel、空 / 坏程序块跳过计数
 rcof unity_layouts; r=$?; reg $r "Unity 无树布局：$(tail -1 "$LOG/unity_layouts.log")（退出 ${r}）" "$LOG/unity_layouts.log"
-# 直连库整体替换（direct_lib.sh ⑥）：齐全判定的反例逐条不过、交换后新旧互换
+# 直连库整体替换（direct_lib.py ⑥）：齐全判定的反例逐条不过、交换后新旧互换
 rcof lib_swap; r=$?; reg $r "直连库发布核验：$(tail -1 "$LOG/lib_swap.log")（退出 ${r}）" "$LOG/lib_swap.log"
 # 编译时盘写满整次停、不当成单支编不过（#265，Build.cs Metal.DiskFull；假 xcrun 注入编译器输出）
 rcof metal_nospace; r=$?; reg $r "编译盘写满：$(tail -1 "$LOG/metal_nospace.log")（退出 ${r}）" "$LOG/metal_nospace.log"

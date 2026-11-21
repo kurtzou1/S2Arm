@@ -13,7 +13,7 @@ set -u
 R=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d "${TMPDIR:-/tmp}/missnet_test.XXXXXX"); trap 'rm -rf "$T"' EXIT; bad=0
 ck() { if eval "$2"; then echo "✓ $1"; else echo "✗ $1"; bad=1; fi; }
 mkdir -p "$T/sched/jobs/zz_1/out_1" "$T/roots/zz@v1/shaders" "$T/col"
-ln -s zz@v1 "$T/roots/zz@现行"
+printf '%s\n' zz@v1 > "$T/roots/zz@现行"
 k() { printf 's%016x' "$1"; }
 cat > "$T/sched/jobs/zz_1/out_1/host.log" <<EOF
 [gal] 特化管线 b2 $(k 1) $(k 2) 0 1 0 0 1

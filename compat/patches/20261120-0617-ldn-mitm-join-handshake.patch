@@ -1,0 +1,265 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LanDiscovery.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LanDiscovery.cs
+index 7eb2436240efe81615e3207a8ec6c5a357bbe82b..7e2dcb3e3b4a48d5f055e5f6dd2a695505ff66e7 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LanDiscovery.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LanDiscovery.cs
+@@ -44,11 +44,13 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+         // NOTE: Credit to https://stackoverflow.com/a/39338188
+         private static IPAddress GetBroadcastAddress(IPAddress address, IPAddress mask)
+         {
+-            uint ipAddress = BitConverter.ToUInt32(address.GetAddressBytes(), 0);
+-            uint ipMaskV4 = BitConverter.ToUInt32(mask.GetAddressBytes(), 0);
++            // IPAddress bytes are network order; BitConverter is host order. Keep the
++            // conversion explicit so every supported host computes the same address.
++            uint ipAddress = NetworkHelpers.ConvertIpv4Address(address);
++            uint ipMaskV4 = NetworkHelpers.ConvertIpv4Address(mask);
+             uint broadCastIpAddress = ipAddress | ~ipMaskV4;
+ 
+-            return new IPAddress(BitConverter.GetBytes(broadCastIpAddress));
++            return NetworkHelpers.ConvertUint(broadCastIpAddress);
+         }
+ 
+         private static NetworkInfo GetEmptyNetworkInfo()
+@@ -107,7 +109,8 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+             _random.NextBytes(_fakeSsid.Name.AsSpan()[..32]);
+ 
+             _protocol = new LanProtocol(this);
+-            _protocol.Accept += OnConnect;
++            _protocol.Accept += OnAccept;
++            _protocol.StationConnected += OnStationConnected;
+             _protocol.SyncNetwork += OnSyncNetwork;
+             _protocol.DisconnectStation += DisconnectStation;
+ 
+@@ -148,7 +151,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+             _apConnected.Set();
+         }
+ 
+-        protected void OnConnect(LdnProxyTcpSession station)
++        protected void OnAccept(LdnProxyTcpSession station)
+         {
+             lock (_lock)
+             {
+@@ -163,8 +166,17 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+                 }
+ 
+                 _stations.Add(station);
++            }
++        }
+ 
+-                UpdateNodes();
++        protected void OnStationConnected(LdnProxyTcpSession station)
++        {
++            lock (_lock)
++            {
++                if (_stations.Contains(station))
++                {
++                    UpdateNodes();
++                }
+             }
+         }
+ 
+@@ -323,7 +335,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+                 //       See this discussion: https://stackoverflow.com/questions/13666789/receiving-udp-broadcast-packets-on-linux
+                 if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS() || (OperatingSystem.IsIOS() || OperatingSystem.IsTvOS()))   // 平台例外：tvOS 与 iOS 走同一分支
+                 {
+-                    _udp2 = new LdnProxyUdpServer(_protocol, LocalBroadcastAddr, DefaultPort);
++                    _udp2 = new LdnProxyUdpServer(_protocol, LocalBroadcastAddr, DefaultPort, subscribeToProtocol: false);
+                 }
+ 
+                 _udp = new LdnProxyUdpServer(_protocol, LocalAddr, DefaultPort);
+@@ -429,14 +441,17 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+         {
+             int countConnected = 1;
+ 
+-            foreach (LdnProxyTcpSession station in _stations.Where(station => station.IsConnected))
++            foreach (LdnProxyTcpSession station in _stations)
+             {
+-                countConnected++;
+-
+                 station.OverrideInfo();
+ 
+-                // NOTE: This is not part of the original implementation.
+-                NetworkInfo.Ldn.Nodes[station.NodeId] = station.NodeInfo;
++                if (station.NodeInfo.IsConnected == 1)
++                {
++                    countConnected++;
++
++                    // NOTE: This is not part of the original implementation.
++                    NetworkInfo.Ldn.Nodes[station.NodeId] = station.NodeInfo;
++                }
+             }
+ 
+             byte nodeCount = (byte)countConnected;
+@@ -447,7 +462,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+ 
+             foreach (LdnProxyTcpSession station in _stations)
+             {
+-                if (station.IsConnected)
++                if (station.NodeInfo.IsConnected == 1)
+                 {
+                     if (_protocol.SendPacket(station, LanPacketType.SyncNetwork, SpanHelpers.AsSpan<NetworkInfo, byte>(ref NetworkInfo).ToArray()) < 0)
+                     {
+@@ -565,7 +580,8 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+                 _initialized = false;
+             }
+ 
+-            _protocol.Accept -= OnConnect;
++            _protocol.Accept -= OnAccept;
++            _protocol.StationConnected -= OnStationConnected;
+             _protocol.SyncNetwork -= OnSyncNetwork;
+             _protocol.DisconnectStation -= DisconnectStation;
+         }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LanProtocol.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LanProtocol.cs
+index a6470d94a89aba7f7c8c725f78c822217f02d230..6d02cd7d7531cfe8eda1fb369f3be97e8d59c0b2 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LanProtocol.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LanProtocol.cs
+@@ -32,6 +32,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+         public event Action<NetworkInfo> ScanResponse;
+         public event Action<NetworkInfo> SyncNetwork;
+         public event Action<NodeInfo, EndPoint> Connect;
++        public event Action<LdnProxyTcpSession> StationConnected;
+         public event Action<LdnProxyTcpSession> DisconnectStation;
+ 
+         public LanProtocol(LanDiscovery parent)
+@@ -44,6 +45,11 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+             Accept?.Invoke(session);
+         }
+ 
++        public void InvokeStationConnected(LdnProxyTcpSession session)
++        {
++            StationConnected?.Invoke(session);
++        }
++
+         public void InvokeDisconnectStation(LdnProxyTcpSession session)
+         {
+             DisconnectStation?.Invoke(session);
+@@ -71,7 +77,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+                     break;
+                 case LanPacketType.Connect:
+                     // TCP Session / Station
+-                    Connect?.Invoke(MemoryMarshal.Cast<byte, NodeInfo>(data)[0], endPoint);
++                    HandleConnect(MemoryMarshal.Cast<byte, NodeInfo>(data)[0], endPoint);
+                     break;
+                 default:
+                     Logger.Error?.PrintMsg(LogClass.ServiceLdn, $"Decode error: Unhandled type {header.Type}");
+@@ -79,6 +85,13 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+             }
+         }
+ 
++        // Kept separate from DecodeAndHandle so the per-connection routing invariant can be tested
++        // without binding the production discovery sockets to a fixed LAN port.
++        internal void HandleConnect(NodeInfo info, EndPoint endPoint)
++        {
++            Connect?.Invoke(info, endPoint);
++        }
++
+         public void Read(scoped ref byte[] buffer, scoped ref int bufferEnd, byte[] data, int offset, int size, EndPoint endPoint = null)
+         {
+             if (endPoint != null && _discovery.LocalAddr.Equals(((IPEndPoint)endPoint).Address))
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/Proxy/LdnProxyTcpSession.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/Proxy/LdnProxyTcpSession.cs
+index 667230b8177f8489aa63f6a878ed957bc6e50e5e..25c7efc11286d11eb21ad3cb40b974445cdb790f 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/Proxy/LdnProxyTcpSession.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/Proxy/LdnProxyTcpSession.cs
+@@ -11,6 +11,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm.Proxy
+ 
+         internal int NodeId;
+         internal NodeInfo NodeInfo;
++        internal bool HandshakeComplete { get; private set; }
+ 
+         private byte[] _buffer;
+         private int _bufferEnd;
+@@ -29,12 +30,13 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm.Proxy
+         public void OverrideInfo()
+         {
+             NodeInfo.NodeId = (byte)NodeId;
+-            NodeInfo.IsConnected = (byte)(IsConnected ? 1 : 0);
++            NodeInfo.IsConnected = (byte)(HandshakeComplete && IsConnected ? 1 : 0);
+         }
+ 
+         protected override void OnConnected()
+         {
+             Logger.Info?.PrintMsg(LogClass.ServiceLdn, "LdnProxyTCPSession connected!");
++            _protocol.InvokeAccept(this);
+         }
+ 
+         protected override void OnDisconnected()
+@@ -66,11 +68,16 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm.Proxy
+         {
+             try
+             {
+-                if (endPoint.Equals(this.Socket.RemoteEndPoint))
++                // LanProtocol.Connect is shared by every accepted station. A Connect frame belongs
++                // only to the TCP connection whose remote endpoint sent it.
++                if (endPoint == null || !endPoint.Equals(Socket.RemoteEndPoint))
+                 {
+-                    NodeInfo = info;
+-                    _protocol.InvokeAccept(this);
++                    return;
+                 }
++
++                NodeInfo = info;
++                HandshakeComplete = true;
++                _protocol.InvokeStationConnected(this);
+             }
+             catch (System.ObjectDisposedException)
+             {
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/Proxy/LdnProxyUdpServer.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/Proxy/LdnProxyUdpServer.cs
+index 37487131121203b2bb67ba6d4b37cd83818dded0..0c08283b958d1d0c1f3fa54f5d9ef917ba18581f 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/Proxy/LdnProxyUdpServer.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/Proxy/LdnProxyUdpServer.cs
+@@ -25,11 +25,14 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm.Proxy
+         private readonly AutoResetEvent _scanResponse = new(false);
+         private long _lastScanTime;
+ 
+-        public LdnProxyUdpServer(LanProtocol protocol, IPAddress address, int port) : base(address, port)
++        public LdnProxyUdpServer(LanProtocol protocol, IPAddress address, int port, bool subscribeToProtocol = true) : base(address, port)
+         {
+             _protocol = protocol;
+-            _protocol.Scan += HandleScan;
+-            _protocol.ScanResponse += HandleScanResponse;
++            if (subscribeToProtocol)
++            {
++                _protocol.Scan += HandleScan;
++                _protocol.ScanResponse += HandleScanResponse;
++            }
+             _buffer = new byte[LanProtocol.BufferSize];
+             OptionReuseAddress = true;
+             OptionReceiveBufferSize = LanProtocol.RxBufferSizeMax;
+@@ -64,8 +67,11 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm.Proxy
+ 
+         protected override void Dispose(bool disposingManagedResources)
+         {
+-            _protocol.Scan -= HandleScan;
+-            _protocol.ScanResponse -= HandleScanResponse;
++            if (_protocol != null)
++            {
++                _protocol.Scan -= HandleScan;
++                _protocol.ScanResponse -= HandleScanResponse;
++            }
+ 
+             _scanResponse.Dispose();
+ 
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
+index ed852da334c8216749c07c0fcb732d1a36de1577..d2aa18b4731e5bf00455c1aeb92c118f8cbcc052 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
+@@ -1,4 +1,5 @@
+ using Ryujinx.Common;
++using Ryujinx.Common.Configuration.Multiplayer;
+ using Ryujinx.Common.Logging;
+ using Ryujinx.HLE.HOS.Services.Sockets.Bsd.Impl;
+ using Ryujinx.HLE.HOS.Services.Sockets.Bsd.Types;
+@@ -125,7 +126,13 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+ 
+             try
+             {
+-                newBsdSocket = new ManagedSocket(netDomain, (SocketType)type, protocol, context.Device.Configuration.MultiplayerLanInterfaceId, !context.Device.Configuration.EnableInternetAccess)
++                // ldn_mitm assigns each peer a real LAN address and the game exchanges its payload
++                // through ordinary BSD sockets. Keep internet/NIFM semantics off, but do not route
++                // this mode's data sockets into the loopback-only offline network.
++                bool offline = !context.Device.Configuration.EnableInternetAccess &&
++                               context.Device.Configuration.MultiplayerMode != MultiplayerMode.LdnMitm;
++
++                newBsdSocket = new ManagedSocket(netDomain, (SocketType)type, protocol, context.Device.Configuration.MultiplayerLanInterfaceId, offline)
+                 {
+                     Blocking = !creationFlags.HasFlag(BsdSocketCreationFlags.NonBlocking),
+                 };

@@ -182,6 +182,53 @@ typedef struct { VkQueryPool p; uint32_t q; VkQueryControlFlags fl; } a_query;
 // 核心改来源内存之前按票号等（nvn_gpu_arena_fill_wait）。票号在生产者自旋锁里递增，录制线程按记录顺序做，所以「已做完」单调。
 typedef struct { void *d; const void *s; uint64_t n, seq; } a_memfill;
 static _Atomic uint64_t g_fill_seq, g_fill_done;
+// 代拷（nvn_gpu_arena_fill_take）：核心改来源内存之前，相交、还没开始的那几笔由核心自己拷，不再干等录制线程把它前面的活全做完。
+// 一台骁龙 8 至尊版手机上的读数（一款大型开放世界游戏洞内走动，每帧）：交异步填约 1,400 次、改内存前等填完约 260 次，
+// 游戏线程 15.1% 时间耗在等待里的 sched_yield，录制线程 58.6% 在 sched_yield 空转——等的那一笔前面排着的绘制记录才是大头。
+// 每笔填充一个状态字（按票号取模的旁挂表），字里带票号：w = 票号 << 2 | 状态，状态 0 未开始 / 1 有人在拷 / 2 拷完。
+//   拷贝权：谁把 (票号, 0) CAS 成 (票号, 1) 谁拷，拷完 release 存 (票号, 2)。录制线程处理 OP_FILL 时 CAS 失败：
+//     看到 (票号, 1) = 生产者正拷，等到 2 再往下（很少见，生产者拷的就是这一笔）；看到 (票号, 2) 或别的票号 = 生产者拷完了，跳过拷贝。
+//   g_fill_done 只由录制线程按记录顺序推进：每一条都确认「已拷完」（自己拷完，或 acquire 读到 2）之后才 release 存它的票号，
+//     所以「票号 ≤ g_fill_done 的都已拷完」不变；代拷不动 g_fill_done（新票号被代拷、旧票号还在排队时，水位不能越过旧票号）。
+//   槽复用：生产者给新票号占槽时，槽里的旧票号若还不是 2 就先代拷 / 等它到 2（容量 FILL_TAB 远大于核心同时挂着的 UBF_N = 256，正常碰不到）；
+//     所以槽里换成别的票号意味着旧票号已拷完，录制线程据此跳过。字里带票号，迟到的 CAS 不会误改复用后的槽。
+//   内存序：拷贝者的 memcpy →（release 存 2）→ 另一方 acquire 读到 2 / CAS 失败时 acquire 读到的值，所以
+//     ① 核心 rp_ub_fill_fence 返回时，相交的每一笔的读来源都 happens-before 核心随后改来源的写（内容是填充那一刻的）；
+//     ② 录制线程推进 g_fill_done 与之后的提交（vkEndCommandBuffer 先清空队列）都在拷贝之后，GPU 读上传片时内容已在；
+//     ③ 槽里的 d / s / n 由生产者在 release 存 (票号, 0) 之前写，代拷方 CAS 成功（acquire）后读，录制线程只用记录里自己那份。
+enum { FILL_TAB = 1024, FILL_TODO = 0, FILL_BUSY = 1, FILL_DONE = 2 };   // FILL_TAB 是 2 的幂
+#define FILL_W(seq, st) ((uint64_t)(seq) << 2 | (uint64_t)(st))
+typedef struct { _Atomic uint64_t w; void *d; const void *s; uint64_t n; } dq_fill_slot;
+static dq_fill_slot g_fill_tab[FILL_TAB];
+#ifndef DQ_FILL_REC_HOOK
+#define DQ_FILL_REC_HOOK(a) ((void)0)   // 用例钩子：录制线程认领了一笔、开拷之前（宿主用例在这里停住录制线程，造「录制线程正在拷」）
+#endif
+static void dq_fill_run(const a_memfill *a) {   // 录制线程
+    _Atomic uint64_t *w = &g_fill_tab[a->seq & (FILL_TAB - 1)].w;
+    uint64_t e = FILL_W(a->seq, FILL_TODO);
+    if (atomic_compare_exchange_strong_explicit(w, &e, FILL_W(a->seq, FILL_BUSY), memory_order_acquire, memory_order_acquire)) {
+        DQ_FILL_REC_HOOK(a);
+        memcpy(a->d, a->s, (size_t)a->n);
+        atomic_store_explicit(w, FILL_W(a->seq, FILL_DONE), memory_order_release);
+    } else if (e == FILL_W(a->seq, FILL_BUSY)) {
+        while (atomic_load_explicit(w, memory_order_acquire) == FILL_W(a->seq, FILL_BUSY)) sched_yield();   // 生产者正拷这一笔：拷完才能推进水位
+    }   // 否则生产者已拷完（2，或槽已换成更新的票号）：跳过
+    atomic_store_explicit(&g_fill_done, a->seq, memory_order_release);
+}
+// 让票号 t 这一笔拷完（生产者）。返回 0 = 早已拷完；1 = 本线程拷的；2 = 录制线程正在拷，等它拷完
+static int dq_fill_take(uint64_t t) {
+    if (!t || atomic_load_explicit(&g_fill_done, memory_order_acquire) >= t) return 0;
+    dq_fill_slot *sl = &g_fill_tab[t & (FILL_TAB - 1)];
+    uint64_t e = FILL_W(t, FILL_TODO);
+    if (atomic_compare_exchange_strong_explicit(&sl->w, &e, FILL_W(t, FILL_BUSY), memory_order_acquire, memory_order_acquire)) {
+        memcpy(sl->d, sl->s, (size_t)sl->n);
+        atomic_store_explicit(&sl->w, FILL_W(t, FILL_DONE), memory_order_release);
+        return 1;
+    }
+    if (e != FILL_W(t, FILL_BUSY)) return 0;
+    while (atomic_load_explicit(&sl->w, memory_order_acquire) == FILL_W(t, FILL_BUSY)) sched_yield();   // 录制线程拷到一半：等的只是这一笔的 memcpy
+    return 2;
+}
 
 static void dq_run(const dq_rec_hdr *h) {
     const uint8_t *p = (const uint8_t *)(h + 1); VkCommandBuffer cb = h->cb;
@@ -243,14 +290,19 @@ static void dq_run(const dq_rec_hdr *h) {
     case OP_vkCmdDrawIndirectByteCountEXT: { const a_bytecount *a = (const void *)p; r_vkCmdDrawIndirectByteCountEXT(cb, a->inst, a->first_inst, a->b, a->off, a->ctr_off, a->stride); break; }
     case OP_vkCmdBeginQuery: { const a_query *a = (const void *)p; r_vkCmdBeginQuery(cb, a->p, a->q, a->fl); break; }
     case OP_vkCmdEndQuery: { const a_query *a = (const void *)p; r_vkCmdEndQuery(cb, a->p, a->q); break; }
-    case OP_FILL: { const a_memfill *a = (const void *)p; memcpy(a->d, a->s, (size_t)a->n); atomic_store_explicit(&g_fill_done, a->seq, memory_order_release); break; }
+    case OP_FILL: dq_fill_run((const a_memfill *)(const void *)p); break;
     default: break;
     }
 }
+#ifdef __ANDROID__
+// 录制线程是每帧必经的帧线程：常驻进 ADPF 会话（android/native/adpf_hint.c），不靠忙线程扫描的阈值。弱引用：没链 ADPF 的夹具地址为空
+void s2a_adpf_pin_self(void) __attribute__((weak));
+#endif
 static void *dq_recorder_main(void *arg) {
     (void)arg; 
 #ifdef __ANDROID__
     pthread_setname_np(pthread_self(), "s2a-vk-record");
+    if (s2a_adpf_pin_self) s2a_adpf_pin_self();
 #endif
 #ifdef __linux__
     prctl(PR_SET_TIMERSLACK, 1000UL, 0UL, 0UL, 0UL);   // 定时醒（nvk_dq_poll_us）别被默认 50 微秒的定时器松弛拖长；只作用于本线程
@@ -294,10 +346,16 @@ static DQ_U uint64_t vk_dq_fill(void *d, const void *s, uint64_t n) {
     if (!a) { memcpy(d, s, (size_t)n); return 0; }
     const uint64_t seq = atomic_load_explicit(&g_fill_seq, memory_order_relaxed) + 1;   // 自旋锁里：按记录顺序递增
     atomic_store_explicit(&g_fill_seq, seq, memory_order_relaxed);
+    dq_fill_slot *sl = &g_fill_tab[seq & (FILL_TAB - 1)];
+    const uint64_t ow = atomic_load_explicit(&sl->w, memory_order_acquire);
+    if ((ow >> 2) && (ow & 3) != FILL_DONE) dq_fill_take(ow >> 2);   // 槽里的旧票号还没拷完（录制线程落后 FILL_TAB 笔以上）：先让它拷完再复用
+    sl->d = d; sl->s = s; sl->n = n;
+    atomic_store_explicit(&sl->w, FILL_W(seq, FILL_TODO), memory_order_release);
     a->d = d; a->s = s; a->n = n; a->seq = seq;
     dq_rec_end(a);
     return seq;
 }
+static DQ_U int vk_dq_fill_take(uint64_t t) { return dq_fill_take(t); }
 // 等票号 ≤ t 的填充做完：录制线程通常只落后几条，先叫醒它、让出几轮；还没到就走清空（它有睡眠与超时自报红），这条记录已发布，清空一定覆盖它
 static DQ_U uint64_t vk_dq_fill_wait(uint64_t t) {
     uint64_t d = atomic_load_explicit(&g_fill_done, memory_order_acquire);

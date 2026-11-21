@@ -407,11 +407,12 @@ class JobsTests(unittest.TestCase):
         game = self.game()
         sib = layout.ios_work(self.c, "0100000000000000") / "roots"; v = sib / "party@pkg-abc"   # iPhone 出包工作目录 build/ios 的现行根
         (v / "romfs").mkdir(parents=True); (v / ".stage_rewrite").write_text("K-rewrite\n"); (v / ".root_src").write_text("abcdef1234567890\n")
-        (sib / "party@现行").symlink_to("party@pkg-abc")
+        (sib / "party@现行").write_text("party@pkg-abc" + '\n')
         mac = layout.build_dir(self.c, "0100000000000000") / "key1/roots"
         self.assertFalse(build.seed_from_sibling(self.c, self.game(tid="0100000000000001"), mac, "0100000000000001"), "别的款的根不算兄弟")
         self.assertTrue(build.seed_from_sibling(self.c, game, mac, "0100000000000000"))
-        cur = (mac / "0100000000000000@现行").resolve()
+        self.assertEqual((mac / "0100000000000000@现行").read_text(), "0100000000000000@sib-pkg-abc\n")   # 现行是指针文件
+        cur = layout.current_root(self.c, mac / "0100000000000000@现行")
         self.assertEqual((cur.name, (cur / ".stage_rewrite").read_text()), ("0100000000000000@sib-pkg-abc", "K-rewrite\n"))
         ev = [e for e in self.events_of("cache") if "复用兄弟平台" in e.get("message", "")]
         self.assertTrue(ev and "提交 abcdef123" in ev[-1]["message"] and "克隆路线：APFS 克隆" in ev[-1]["message"], ev)
@@ -532,10 +533,11 @@ class JobsTests(unittest.TestCase):
         #   只有非现行版本里有、或没有 → 不补
         import unittest.mock as um, main, layout
         games = {"games": [{"id": "A", "packages": [{}]}]}
-        for where, want in (("ios/roots/ta@现行/pkg", True), ("ios/roots/ta@v1/pkg", False), (None, False)):
+        for where, want in (("ta@v2", True), ("ta@v1", False), (None, False)):   # 现行指针 ta@现行 → ta@v2
             with tempfile.TemporaryDirectory() as d:
+                roots = Path(d) / "ios/roots"; (roots / "ta@v1").mkdir(parents=True); (roots / "ta@v2").mkdir(); (roots / "ta@现行").write_text("ta@v2\n")
                 if where:
-                    (Path(d) / where).mkdir(parents=True); (Path(d) / where / "pack.files.verify_warn.txt").write_text("x\n")
+                    (roots / where / "pkg").mkdir(); (roots / where / "pkg" / "pack.files.verify_warn.txt").write_text("x\n")
                 with um.patch.object(self.c, "r", {"gameId": "A"}), um.patch.object(self.c, "catalog", return_value=games), \
                      um.patch.object(layout, "build_dir", return_value=Path(d)), um.patch.object(self.c, "diagnostic", create=True) as diag:
                     main.integrity_note(self.c)
@@ -907,7 +909,7 @@ class JobsTests(unittest.TestCase):
 
     def test_install_dotnet_reports_download_progress(self):
         # 10-24 #152：官方安装脚本下载时零输出、23 分钟看着像卡死。期望：按 --dry-run 给的包地址和 HEAD 大小，下载期间报「已下载 N / 总数」
-        import unittest.mock as um, toolchain, ipa, subprocess as sp, time
+        import unittest.mock as um, toolchain, ipa, subprocess as sp, time, core
         url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.402/dotnet-sdk-10.0.402-osx-x64.tar.gz"
         def fake_sub(args, *a, **k):
             if "--dry-run" in args:
@@ -925,7 +927,8 @@ class JobsTests(unittest.TestCase):
                 time.sleep(0.15)
         with um.patch.object(toolchain, "DOTNET_PROGRESS_S", 0.05), um.patch.object(toolchain.subprocess, "run", side_effect=fake_sub), \
              um.patch.object(self.c, "run", side_effect=fake_run), um.patch.object(self.c, "emit", side_effect=lambda *a, **k: seen.append(k)), \
-             um.patch.object(ipa, "dotnet_sdk", return_value=(Path("/x"), Path("/x/dotnet"))):
+             um.patch.object(ipa, "dotnet_sdk", return_value=(Path("/x"), Path("/x/dotnet"))), \
+             um.patch.object(core, "default_developer_dir", return_value=None):   # 缺省 Xcode 第一次用环境时才找（会调 xcode-select）：与本用例无关，固定成没有
             toolchain.install_dotnet(self.c)
         progress = [k for k in seen if k.get("unit") == "B"]
         self.assertTrue(progress, "下载期间没有进度")
@@ -1291,7 +1294,7 @@ class JobsTests(unittest.TestCase):
 
     def test_direct_check_cli_never_blocks(self):
         # 不许堵门（11-14，诊断 D-QDK9）：开工前空间预估不够只提示、不拦。期望手写：预估不够 → 退 0、打一行【黄】带原句与「照常开编」；
-        #   够 → 退 0、不打字；复核自己抛异常 → 退 2（direct_lib.sh 记黄照编）
+        #   够 → 退 0、不打字；复核自己抛异常 → 退 2（direct_lib.py 记黄照编）
         import space_rule, contextlib, io
         for why, rc, want in (("磁盘空间不足：直连库预计还要 15.0 GB", 0, "【黄】磁盘空间不足：直连库预计还要 15.0 GB：这是预估，照常开编"), (None, 0, "")):
             out = io.StringIO()
@@ -1322,7 +1325,7 @@ class JobsTests(unittest.TestCase):
             sizes[str(root / "aoc")] = 0; sizes[str(cache)] = 0   # 内容 2.9e9 → 小档 5e9
             self.assertIsNone(space_rule.direct_check(root, cache, out, free=lambda v: du(0, 0, int(5e9))))
             self.assertIsNotNone(space_rule.direct_check(root, cache, out, free=lambda v: du(0, 0, int(5e9) - 1)))
-            # 单测注入余量 S2A_DISK_FREE_G（GB）：给了就不看本机实况（直接真跑 direct_lib.sh 的单测靠它，11-09 列车假红）
+            # 单测注入余量 S2A_DISK_FREE_G（GB）：给了就不看本机实况（直接真跑 direct_lib.py 的单测靠它，11-09 列车假红）
             with unittest.mock.patch.dict(os.environ, S2A_DISK_FREE_G="4.9"):
                 self.assertIn("这块盘只剩 4.9 GB", space_rule.direct_check(root, cache, out))
 
@@ -1469,24 +1472,41 @@ class JobsTests(unittest.TestCase):
             self.assertEqual(toolchain.detect_xcode((str(apps),)), str(apps / "Xcode-27.1.app/Contents/Developer"))
             self.assertIsNone(toolchain.detect_xcode((str(self.root / "none"),)))
 
-    def test_detect_xcode_finds_xcode_on_external_volume(self):
-        # 玩家把 Xcode 装在扩展硬盘上（D-9WFW）：外接卷的 Applications 与卷根都看；/Volumes 里指回 / 的启动盘软链跳过
-        import plistlib, toolchain, unittest.mock as um
-        vols = self.root / "Volumes"
-        def mk(app, version):
-            (app / "Contents/Developer/usr/bin").mkdir(parents=True)
-            (app / "Contents/Info.plist").write_bytes(plistlib.dumps(dict(CFBundleIdentifier="com.apple.dt.Xcode", CFBundleShortVersionString=version)))
-            (app / "Contents/Developer/usr/bin/xcodebuild").write_text("")
-        mk(vols / "Ext SSD" / "Applications" / "Xcode.app", "27.1")
-        mk(vols / "Other" / "Xcode-26.app", "26.6")   # 直接放在卷根
-        boot = self.root / "boot"; (boot / "Applications").mkdir(parents=True)
-        (vols / "Macintosh HD").symlink_to(boot)
-        dirs = toolchain.default_app_dirs(str(vols))
-        self.assertEqual(dirs[2:], (str(vols / "Ext SSD" / "Applications"), str(vols / "Ext SSD"), str(vols / "Other" / "Applications"), str(vols / "Other")))
-        with um.patch.object(toolchain.subprocess, "run", side_effect=OSError):
-            ext = dirs[2:]   # 只看外接卷那几项：本机真 /Applications 里的 Xcode 不进期望
-            self.assertEqual(toolchain.detect_xcode(ext), str(vols / "Ext SSD" / "Applications" / "Xcode.app/Contents/Developer"))
-            self.assertEqual([x[1] for x in toolchain.installed_xcodes(ext)], ["27.1", "26.6"])
+    def test_xcode_search_never_lists_volumes(self):
+        # 接着外接盘的玩家一开启动器就弹「想访问可移除卷上的文件」（6aaab23d4 起自动找 Xcode 每次列 /Volumes）：自动查找只看 /Applications、~/Applications，
+        #   外接盘上的 Xcode 由玩家在设置页自己选。期望手写：目录恰好这两处；建任务 → 用环境 → 自动找 Xcode 全程，任何列目录 / 读目录的调用都不落在 /Volumes 下
+        import toolchain, unittest.mock as um, core
+        self.assertEqual(toolchain.default_app_dirs(), ("/Applications", str(Path.home() / "Applications")))
+        touched = []
+        def guard(real):
+            def f(p=".", *a, **k):
+                if str(p).startswith("/Volumes"):
+                    touched.append(str(p)); raise AssertionError("碰了 /Volumes：" + str(p))
+                return real(p, *a, **k)
+            return f
+        real_iterdir = Path.iterdir
+        def iterdir(self_):
+            if str(self_).startswith("/Volumes"):
+                touched.append(str(self_)); raise AssertionError("碰了 /Volumes：" + str(self_))
+            return real_iterdir(self_)
+        with um.patch.object(core.os, "listdir", guard(os.listdir)), um.patch.object(core.os, "scandir", guard(os.scandir)), \
+                um.patch.object(Path, "iterdir", iterdir):
+            c = Context(dict(self.request)); c.env()
+            toolchain.detect_xcode(); toolchain.installed_xcodes()
+            # 内置位置一份 Xcode 都没有（大多数只推 iPhone 的玩家）：也不去翻外接卷，答「没有」
+            empty = self.root / "no-xcode"; empty.mkdir()
+            with um.patch.object(toolchain, "default_app_dirs", return_value=(str(empty),)), um.patch.object(toolchain.subprocess, "run", side_effect=OSError):
+                self.assertIsNone(toolchain.detect_xcode())
+        self.assertEqual(touched, [])
+
+    def test_creating_a_task_does_not_look_for_xcode(self):
+        # 建任务不找 Xcode（原先 Context.__init__ 就调 default_developer_dir → 翻目录、找不到内置的还翻外接卷）：第一次要用环境时才找、同一任务只找一次
+        import core, unittest.mock as um
+        with um.patch.object(core, "default_developer_dir", side_effect=AssertionError("建任务就找了 Xcode")):
+            c = Context(dict(self.request))
+        with um.patch.object(core, "default_developer_dir", return_value=None) as found:
+            c.env(); c.env()
+        self.assertEqual(found.call_count, 1)
 
     def test_installed_xcodes_by_version_and_build_not_path(self):
         # 11-07 gate-host 现场：Xcode-27.app 被 App Store 原地升到 27.1（构建号 27A9275），Xcode-27.1.app 是指向它的软链 → 只算一套；
@@ -2122,12 +2142,13 @@ class JobsTests(unittest.TestCase):
         low, run = gid.lower(), self.c.work_root / "run" / "s2arm"
         out = layout.ios_work(self.c, gid)
         keep = [layout.image_ios(self.c, gid) / ".pack" / "manifest.json", out / "logs" / "a.log"]
-        gone = [out / "roots" / f"t{low}@现行" / "x", out / "extract" / "romfs" / "f", run / "cache" / "direct" / gid.upper() / "work" / "cas",
+        gone = [out / "roots" / f"t{low}@v0" / "x", out / "extract" / "romfs" / "f", run / "cache" / "direct" / gid.upper() / "work" / "cas",
                 run / "cache" / "bake" / f"{low}-abc" / "ok", run / "cache" / "aoc" / f"t{low}-k" / "aoc.tsv", run / "cache" / "srcver" / f"t{low}-k" / "r",
                 run / "widen" / f"t{low}_b" / "ui", run / "widen" / "auto" / f"t{low}_b" / "w", self.c.work_root / "cache" / "air" / "ios" / "x.air"]
         other = [run / "cache" / "direct" / "0100AAAAAAAAA000" / "cas", run / "cache" / "bake" / "0100aaaaaaaaa000-abc" / "ok", self.c.work_root / "cache" / "nxaot" / "host.o"]
         for f in keep + gone + other:
             f.parent.mkdir(parents=True, exist_ok=True); f.write_text("x")
+        (out / "roots" / f"t{low}@现行").write_text(f"t{low}@v0\n")   # 现行指针 → t<程序号>@v0
         return keep, gone, other
 
     def test_prune_build_keeps_ipa_pack_logs_and_clears_this_games_intermediates(self):
@@ -2135,11 +2156,11 @@ class JobsTests(unittest.TestCase):
         game = self.game(packages=[self.package()]); self.catalogue([game])
         keep, gone, other = self._build_leftovers(game["id"])
         keep.append(gone.pop())  # shared AIR cache is retained only on automatic success cleanup
-        # 多平台共用阶段：自动清理保留产物根现行版本（链接与它指向的版本），旧版本照删；显式清缓存 / 删除仍整个删（下两条）
+        # 多平台共用阶段：自动清理保留产物根现行版本（指针文件与它指向的版本），旧版本照删；显式清缓存 / 删除仍整个删（下两条）
         roots = layout.ios_work(self.c, game["id"]) / "roots"; low = game["id"].lower()
-        keep.append(gone.pop(0))   # roots/t<程序号>@现行/x
+        keep.append(gone.pop(0))   # roots/t<程序号>@v0/x（现行指针指向的版本）
         new = roots / f"t{low}x@gk-new" / "y"; new.parent.mkdir(); new.write_text("x"); keep.append(new)
-        (roots / f"t{low}x@现行").symlink_to(new.parent.name)   # 现行是链接：它指向的版本保留
+        (roots / f"t{low}x@现行").write_text(new.parent.name + '\n')   # 现行指针：它指向的版本保留
         old = roots / f"t{low}@gk-old" / "z"; old.parent.mkdir(); old.write_text("x"); gone.append(old)
         library.prune_build(self.c, game["id"])
         self.assertEqual([f for f in keep + other if not f.exists()], [])
@@ -2154,13 +2175,13 @@ class JobsTests(unittest.TestCase):
         self.assertTrue(kit.is_file()); self.assertTrue(keep[0].is_file())
 
     def test_prune_build_keeps_windows_work_root(self):
-        # #32：Windows 产物根在 work/ 下。手算期望：现行链接及指向、.romfs_store、direct*、pkg/product/main.npdm 留下；旧版本、其他中间产物、product/pkg（交付件已拷走）删掉；链接只删自身
+        # #32：Windows 产物根在 work/ 下。手算期望：现行指针及指向、.romfs_store、direct*、pkg/product/main.npdm 留下；旧版本、其他中间产物、product/pkg（交付件已拷走）删掉；链接只删自身
         game = self.game(packages=[self.package()]); self.catalogue([game])
         work = layout.ios_work(self.c, game["id"]) / "work"
         def f(rel):
             q = work / rel; q.parent.mkdir(parents=True, exist_ok=True); q.write_text("x"); return q
         keep = [f("roots/k@new/y"), f("roots/.romfs_store/b"), f("direct/lib"), f("direct_p1/lib"), f("pkg/product/main.npdm")]
-        (work / "roots/k@现行").symlink_to("k@new")
+        (work / "roots/k@现行").write_text("k@new" + '\n')
         gone = [f("roots/k@old/z"), f("dcache/a"), f("pkg/tmp/b"), f("pkg/product/pkg/x.ipa")]
         outside = self.c.library / "outside" / "z"; outside.parent.mkdir(parents=True); outside.write_text("x")
         (work / "pkg/link").symlink_to(outside.parent)   # 指向外部的链接：只删链接，指向的文件在
@@ -2169,7 +2190,7 @@ class JobsTests(unittest.TestCase):
             library.prune_build(self.c, game["id"])
         self.assertEqual([q for q in keep if not q.exists()], [])
         self.assertEqual([q for q in gone if q.exists()], [])
-        self.assertTrue((work / "roots/k@现行").is_symlink())
+        self.assertEqual((work / "roots/k@现行").read_text(), "k@new\n")
         self.assertFalse(os.path.lexists(work / "pkg/link"))
         self.assertTrue(outside.exists())
 
@@ -2493,6 +2514,20 @@ class JobsTests(unittest.TestCase):
         self.assertEqual(events[-1]["state"], "succeeded")
         self.assertEqual(events[-1]["artifactRef"], "/result")
         self.assertEqual(json.loads(self.c.jobpath.read_text())["state"], "completed")
+
+    def test_advanced_at_moves_only_on_real_progress(self):
+        # #1770：上次前进时刻只在换步 / 计数变了时更新；同样的计数再发（批次活动脉冲）、心跳都不更新。期望手写（时刻打桩）
+        import core
+        clock = [1000.0]
+        with patch.object(core.time, "time", lambda: clock[0]), patch.object(core.time, "monotonic", lambda: clock[0]):   # 0.2 秒节流也按同一时钟
+            self.c.begin("编译着色器库", 1, 2)                          # 换步：1000
+            clock[0] = 1003; self.c.emit(done=1, total=10)              # 计数变：1003
+            clock[0] = 1010; self.c.emit(done=1, total=10)              # 同样的计数（脉冲）：仍 1003
+            clock[0] = 1012; self.c.emit("heartbeat")                   # 心跳：仍 1003
+            clock[0] = 1020; self.c.emit(done=1, total=10, counters=[dict(name="直连库·采样模拟变体", done=7, total=9)])   # 子计数器变：1020
+        events = [json.loads(line) for line in self.output.getvalue().splitlines()]
+        self.assertEqual([e["advancedAt"] for e in events[-5:]], [1000, 1003, 1003, 1003, 1020])
+        self.assertEqual(json.loads(self.c.jobpath.read_text())["advancedAt"], 1020)
 
     def test_finish_records_ipa_device_and_pushed_files_for_relaunch(self):
         # 启动器重开后完成卡从任务记录读 IPA（11-01：原先只在结果事件里，重开后画面模式「未知」）
@@ -3004,7 +3039,7 @@ class JobsTests(unittest.TestCase):
         atomic(self.c.library / "catalog.json", dict(schema=1, games=[dict(id=gid, name="x", display="", packages=[], hidden=False)]))
         out = layout.ios_work(self.c, gid); root = out / "roots" / "k@pkg"; root.mkdir(parents=True)   # 出包工作目录 build/ios
         (root / "main.npdm").write_bytes(b"n"); (root / "stage.log").write_text("阶段日志")
-        (out / "roots" / "k@现行").symlink_to("k@pkg"); (layout.build_dir(self.c, gid) / "x").mkdir(parents=True)
+        (out / "roots" / "k@现行").write_text("k@pkg" + '\n'); (layout.build_dir(self.c, gid) / "x").mkdir(parents=True)
         (out / "logs").mkdir(); (out / "logs" / "oneclick.log").write_text("出包日志")
         image = layout.image_ios(self.c, gid)   # 上一次成功出包的交付件
         if ipa: (image / ".pack").mkdir(parents=True); (image / ".pack" / "manifest.json").write_text('{"index_sha256": "p"}')
@@ -3247,7 +3282,7 @@ class JobsTests(unittest.TestCase):
             p.write_text("seed-stage fixture only")
         env = self.c.env() | dict(S2A_ROOTS=str(self.root / "roots"), S2A_ROOTS_SHARED=str(self.root / "shared"))
         self.c.run(["bash", ROOT / "pack/seed_root.sh", "unit", "seed", source], env=env)
-        current = (self.root / "roots/unit@现行").resolve()
+        roots = self.root / "roots"; current = roots / (roots / "unit@现行").read_text().strip()   # 现行指针文件 → 版本目录
         self.assertEqual((current / "aoc/1/data").read_text(), "seed-stage fixture only")
         self.assertEqual((current / "aoc.tsv").read_bytes(), (source / "aoc.tsv").read_bytes())
         (current / "aoc/1/data").write_text("changed clone")

@@ -33,8 +33,9 @@ if [ "${GATE_IOS_MODS+x}" = x ]; then
   valid_mods "$c" || { echo "期望 iOS 编译链接通过 → 真结果 GATE_IOS_MODS 产物不完整：${MODS_ERROR}（${c}）"; exit 1; }
   M=$c
 else
+  source "$R/pack/roots.sh"   # root_cur_in：共享根里各款的现行（<款>@现行 是指针文件）
   for candidate in "$RT/acnh@现行" "$RT/mk8d@现行" "$RT/d2r@现行" "$RT/"*@现行; do
-    c=$(cd -P "$candidate" 2>/dev/null && pwd) || continue
+    candidate=${candidate##*/}; c=$(root_cur_in "$RT" "${candidate%@现行}" 2>/dev/null) || continue
     valid_mods "$c" && { M=$c; break; }
   done
 fi

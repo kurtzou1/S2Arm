@@ -79,7 +79,7 @@ struct DevCertRow: View {
             ForEach(c.warnings, id: \.self) { t in
                 Label(loc.backend(t), systemImage: "exclamationmark.triangle").font(LauncherTheme.TypeStyle.caption).foregroundStyle(.yellow).fixedSize(horizontal: false, vertical: true)
             }
-            if !c.requestText.isEmpty || c.blockingIds.contains("devcert_distribution") {
+            if !c.requestText.isEmpty || c.distribution {
                 DevCertFixActions(request: c.requestText, idPrefix: "export.sign") { model.switchToAppleIdLogin(host: loginHost) }
             }
             HStack(spacing: 10) {

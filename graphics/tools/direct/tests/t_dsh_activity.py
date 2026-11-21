@@ -80,7 +80,7 @@ static class Program {
         Check(Last() is { } c && c.GetProperty("state").GetString() == "active" && File.ReadAllLines(path).All(x => x.StartsWith("#")),
             "cache-only phase has activity without invented MB denominator");
         Dispose(cached);
-        Check(__OWNED_SCOPES__, "both production phases use disposable Ticker scopes");
+        Check(__OWNED_SCOPES__, "all four production phases (translate, unity, _se, _vp) use disposable Ticker scopes");
         Environment.SetEnvironmentVariable("S2A_PROGRESS", args[0]);
         var unwritable = new Ticker("直连库·编批库（MB）", 0); Dispose(unwritable);
         Check(true, "optional metadata failure does not turn a cache-only compile into failure");
@@ -94,7 +94,7 @@ if not dotnet:
     sys.exit('需要预先安装 .NET 10 SDK（DOTNET）；本测试不下载工具。')
 with tempfile.TemporaryDirectory(prefix='dsh-activity-test-') as directory:
     root = Path(directory)
-    program = PROGRAM.replace('__TICKER__', ticker).replace('__ACTIVITY__', activity).replace('__OWNED_SCOPES__', str(source.count('using var tk = new Ticker(') == 2).lower())
+    program = PROGRAM.replace('__TICKER__', ticker).replace('__ACTIVITY__', activity).replace('__OWNED_SCOPES__', str(source.count('using var tk = new Ticker(') == 4).lower())
     (root / 'Program.cs').write_text(program, encoding='utf-8')
     (root / 'test.csproj').write_text('<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType>'
         '<TargetFramework>net10.0</TargetFramework><Nullable>disable</Nullable></PropertyGroup></Project>')

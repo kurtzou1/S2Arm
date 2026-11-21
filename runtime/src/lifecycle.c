@@ -1,7 +1,7 @@
 // 宿主生命周期：优雅退出（游戏 ExitProcess / Break、SIGTERM、iOS App 终止回调）。先停住游戏线程的系统调用，再让 C# 停声音 / 显卡，再写报红汇总，_exit（码见 s2a_host_exit_code，缺省 0）；1.5 秒兜底直接退。
 // 弱链接[host,ios,nvntest]：nxgal_gpu_hold（通用渲染器 gal_core.m 提供；链接行按这行放行未定义，runtime/build.mk 自动收）
 #include "native.h"
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
 #include "../../android/native/runtime/platform/lifecycle_android.h"
 #include <android/log.h>
 #include <errno.h>
@@ -26,7 +26,7 @@ unsigned s2a_unresolved_count(void);
 // 收尾各阶段的累计耗时。1.5 秒兜底只会给出「超时」，不会说明停在哪一步；
 // 每次收局都打一次这几行，真机上直接看出是哪一步越过了预算。
 #define S2A_SHUTDOWN_STAGE(name, start) LOG("收局阶段 %s：累计 %.1f ms", (name), (double)(now_ns() - (start)) / 1e6)
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
 int s2a_android_guest_writers_installed(void);   // runtime/fault/thread_android.inc（安卓专用；宿主夹具给替身）
 // Only after terminal SVC park: a normal native shutdown caller cannot publish the
 // memory-SVC admission-safe state. An existing writer may still be completing its
@@ -54,7 +54,7 @@ void s2a_host_shutdown(const char *why) {
     { void (*run_mark)(int) = (void (*)(int))dlsym(RTLD_DEFAULT, "s2a_guest_run_mark"); if (run_mark) run_mark(0); }
     // 游玩时间（runtime/src/playtime.c）：收局把最后一次心跳之后攒的秒数写进去（收局走 _exit，不跑 atexit）；按名字取（只链本文件的单测没有它）
     { int (*pt_flush)(void) = (int (*)(void))dlsym(RTLD_DEFAULT, "s2a_playtime_flush"); if (pt_flush) pt_flush(); }
-#if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !defined(__OHOS__)
     // 兜底先开（11-14 iPhone 实机 第 17515 帧卡死）：原先排在统计汇总之后，游戏卡死时收尾停在更早一步（日志只到「收到 自动玩家结束：优雅退出」，
     //   一行收局阶段都没有），兜底从没开，进程挂到设备锁收割 SIGKILL。带着音频会话被强杀之后，手机系统声音服务一直坏到重启。
     //   1.5 秒：照旧打汇总、冲日志再退；汇总或冲日志本身也可能等卡住线程持有的锁，2.5 秒再无条件 _exit
@@ -67,12 +67,12 @@ void s2a_host_shutdown(const char *why) {
     if (session_exit) session_exit(0);
     // #618：管线归档停写、删 .writing（graphics/nvn/gfx/nvn/pso_archive.h）：正常收局时写线程可能正写到一半，_exit 后留下的标记会被下一局当成 #756 的「死在写里」、从此不写
     { void (*par_exit)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "s2a_pso_archive_exit"); if (par_exit) par_exit(); }
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
     // 在任何诊断、锁或托管回调前开兜底；异常路径不能把超时记为成功退出。
     if (s2a_android_shutdown_watchdog_start()) { S2A_EXIT_FAIL("shutdown watchdog start failed"); _exit(125); }
 #endif
     uint64_t t0 = now_ns(); LOG("收到 %s：优雅退出", why);
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
     // 直连模式阶段 1：先停止受理客体新的 Vulkan 调用：后面的停系统调用 / 关显卡期间客体不能再交帧，
     // 否则销毁 device 时仍有线程停在驱动里（真机上是驱动内部卡死或堆 abort）。
     // 返回 -1：本局从未配置直连（之后也不会再配置），没有可排空的驱动帧。
@@ -83,7 +83,7 @@ void s2a_host_shutdown(const char *why) {
     // 退出路径不依赖前后台状态（10-20 测试设备2 结束进程后设备文件服务挂住，维护者要求核）：先放开「失去前台」时的游戏线程冻结与 GPU 闸门，
     // 后面停系统调用 / 关 C# 服务时不会有人等被冻结的线程或卡在闸门里的提交者（在后台时放开闸门的提交会被系统拒、走出错退出，本来就在退出）
     { void s2a_guest_freeze(int); s2a_guest_freeze(0); if (nxgal_gpu_hold) nxgal_gpu_hold(0, "退出"); }   // 渲染器库弱引用：不带 C# / 渲染器的宿主构建（runtime/gate.sh）里没有它
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
     // 阶段 2：在取消服务等待、SVC 终局 park 与 writer epoch 之前，有界排空已受理的 Vulkan 驱动帧。
     // 其中的反向 allocator 回调可能进 SVC 或取回虚拟核；终局门一旦发布，它会停在驱动帧中间，
     // 外层 token / WSI / 驱动内部锁永远不放。收局线程等待期间不碰 guest 内存，标为 census 安全并放核。
@@ -107,7 +107,7 @@ void s2a_host_shutdown(const char *why) {
     { int s2a_handle_peak(void); LOG("句柄表峰值 %d 格（Switch 上限 1024）", s2a_handle_peak()); }
     { void s2a_yield_stat_log(const char *); s2a_yield_stat_log("收局"); }   // 让步退避计数（S2A_YIELD_BACKOFF 关时不打）
     // 诊断打点收局汇总（diag_brk.c，S2A_DIAG_STAMP 没设时不打）
-#if !defined(__ANDROID__)
+#if (!defined(__ANDROID__) && !defined(__OHOS__))
     // Android 不链接 Apple BRK 诊断对象；真实 fault dispatcher 不以空汇总替代它。
     { void s2a_diag_stamp_report(void); s2a_diag_stamp_report(); }
 #endif
@@ -115,7 +115,7 @@ void s2a_host_shutdown(const char *why) {
     if (s2a_trap_report) s2a_trap_report("收局");   // 双补丁岛 brk 兜底点命中（traps.c）
     { void s2a_svc_count_report(const char *); s2a_svc_count_report("收局"); }
     { void s2a_guest_va_report(const char *); s2a_guest_va_report("收局"); }
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
     // 单线程（基线）：地址余量仍在这里、不限时；拆线程挪到 StopGpu 之后、有界（见下）
     if (!s2a_android_shutdown_threaded()) { void s2a_vm_low(const char *); s2a_vm_low("收局"); }
 #else
@@ -124,7 +124,7 @@ void s2a_host_shutdown(const char *why) {
     s2a_lowva_peak_report("收局");
     S2A_SHUTDOWN_STAGE("统计与诊断汇总", t0);
     // 先让阻塞在服务等待里的调用立刻返回（C# 导出 S2A_CancelWaits，按名字取：不带 C# 的宿主构建里没有），再停游戏线程的系统调用、等在 C# 里的走完
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
     // NativeAOT 与 core 静态并入同一 DSO；隐藏归档符号不会进入 dlsym 的动态表。
     // 强引用也保证缺少真实取消实现时链接失败，不能悄悄跳过服务等待排空。
     S2A_CancelWaits();
@@ -134,7 +134,7 @@ void s2a_host_shutdown(const char *why) {
     S2A_SHUTDOWN_STAGE("取消服务等待", t0);
     { int s2a_svc_park_all(int wait_ms); int left = s2a_svc_park_all(300);   // 先停游戏线程的系统调用、等在 C# 里的走完，再关服务层
       if (left) {
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
           // 仍有调用使用服务对象时不销毁它们；整个进程退出后才允许启动下一局。
           LOG("【红】收局：还有 %d 个系统调用在 C# 里没回（等了 300 ms），进程失败退出", left);
           S2A_EXIT_FAIL("services still in flight: %d (park_all 300 ms)", left);
@@ -144,7 +144,7 @@ void s2a_host_shutdown(const char *why) {
 #endif
       } }
     S2A_SHUTDOWN_STAGE("停住系统调用", t0);
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
     // SVC 排空只涵盖服务入口；普通 guest 访存仍可触发 tracking fault→GPU 回调。
     // 真实线程 roster 的 writer epoch 同时挡住新 guest 入口，并等既有回调返回。
     // 成功后不 end：所有 guest 保持停稳到 _exit，绝不在 Dispose 后恢复它们。
@@ -163,7 +163,7 @@ void s2a_host_shutdown(const char *why) {
 #endif
     s2a_cs_shutdown(why);
     S2A_SHUTDOWN_STAGE("托管服务与显卡关停", t0);
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
     // void 回调返回不代表托管清理成功；只能接受同一 session 的真实 Stopped ack。
     // helper 同时处理从未尝试 services Start 的早期退出，并保留具体失败日志。
     { int error = s2a_android_runtime_shutdown_result();
@@ -174,20 +174,20 @@ void s2a_host_shutdown(const char *why) {
       } }
     S2A_SHUTDOWN_STAGE("清理结果核验", t0);
 #endif
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
     // 拆线程：地址余量要读 /proc/self/maps（拿 mmap_lock 读锁），收局前段游戏 / GPU 线程还在 mprotect / mmap，真机 9000 读了 862 ms、
     // 两局读不完被 1.5 s 兜底结束，收局请求都没发出。挪到服务层 Cleanup / StopGpu 之后（游戏线程已停稳、GPU 已停），并且有界：超时打一行黄、不等
     if (s2a_android_shutdown_threaded()) s2a_android_shutdown_vm_low();
 #endif
     { void s2a_widen_scan(void); s2a_widen_scan(); }   // 宽屏点首次命中：收局前补扫一次
     s2a_svc_red_summary();
-#if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !defined(__OHOS__)
     { void s2a_punch_summary(void); s2a_punch_summary(); }   // #258 文件后备懒清零读数
 #endif
     { void s2a_det_summary(void); s2a_det_summary(); }
     LOG("未解析导入：%u 个", s2a_unresolved_count());
     s2a_direct_summary(1);   // _exit 不跑 atexit；显式打印现编汇总，不改变停机语义
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     // 安卓：钩子在同一个单库里（android/native/runtime/platform/lifecycle_android.c），dlsym(RTLD_DEFAULT) 取不到库内符号
     //   （docs/坑记录.md「安卓单库里 dlsym(RTLD_DEFAULT) 找不到服务层导出」），改链接期弱引用；不带它的宿主单测链接里为空，照旧跳过。
     // 弱链接[android]：s2a_sesmark_clear_home（只有安卓 NDK 单库与 Linux 宿主单测链这一支，都不走 ld64，不需要放行参数）
@@ -199,7 +199,7 @@ void s2a_host_shutdown(const char *why) {
     s2a_logcon_flush(); _exit(atomic_load(&g_exit_code));
 }
 void s2a_term_install(void) {
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
     int error = s2a_android_term_install();
     if (error) die("Android SIGTERM 收尾线程安装失败 errno=%d", error);
 #else

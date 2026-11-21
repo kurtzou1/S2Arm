@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 S2Arm contributors
+# 门禁间接：android/tests/nvk_shutdown_test.py 在进程内按表逐个跑（含 --withdraw-* 撤回对照）
 """Run actual nvk shader producer with actual provider Stop/context bodies.
 
 Only scheduling is intercepted: provider context return or first compile entry.

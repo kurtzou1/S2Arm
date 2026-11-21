@@ -10,12 +10,24 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#if defined(__ANDROID__)
+#if defined(__OHOS__)
+#define S2A_MODULE_TARGET "ohos"
+#define S2A_MODULE_ABI "ohos-sp-safe-v1"
+#else
+#define S2A_MODULE_TARGET "android"
+#define S2A_MODULE_ABI "android-sp-safe-v1"
+#endif
+#if defined(__ANDROID__) || defined(__OHOS__)
 #include "../../runtime/src/native.h"
 int s2a_key_page_writable(module_t *m) {
     if (!m || !m->base || !m->key_page_size) return -1;
     return mprotect(m->base + m->key_page_off, m->key_page_size, PROT_READ | PROT_WRITE);
 }
+#endif
+#if defined(__OHOS__)
+#include "../../ohos/native/tsd_ohos.h"
+#include "../../ohos/native/signed_module.h"
+#include <dlfcn.h>
 #endif
 
 #define PAGE16 0x4000ull
@@ -49,6 +61,9 @@ int s2a_module_layout_mem(const char *text, size_t len, const char *what, struct
     char line[256], key[32];
     unsigned seen = 0, target = 0, abi = 0;
     int has_data_off = 0;
+#if defined(__OHOS__)
+    unsigned tsdoff = 0, fps_abi = 0, fps_sha = 0, code_sha = 0;
+#endif
     for (size_t at = 0; at < len;) {
         size_t end = at;
         while (end < len && text[end] != '\n') end++;
@@ -62,23 +77,50 @@ int s2a_module_layout_mem(const char *text, size_t len, const char *what, struct
         if (!tab || sscanf(line, "# %31s", key) != 1) return fail(err, n, EINVAL, "%s: malformed fixups header", path);
         const char *v = tab + 1;
         if (!strcmp(key, "TARGET")) {
-            if (target++ || strcspn(v, "\r\n") != 7 || memcmp(v, "android", 7))
-                return fail(err, n, ENOEXEC, "%s: expected one TARGET android", path);
+            if (target++ || strcspn(v, "\r\n") != sizeof(S2A_MODULE_TARGET) - 1 || memcmp(v, S2A_MODULE_TARGET, sizeof(S2A_MODULE_TARGET) - 1))
+                return fail(err, n, ENOEXEC, "%s: expected one TARGET " S2A_MODULE_TARGET, path);
             continue;
         }
         if (!strcmp(key, "REWRITE_ABI")) {
-            static const char expected[] = "android-sp-safe-v1";
+            static const char expected[] = S2A_MODULE_ABI;
             if (abi++ || strcspn(v, "\r\n") != sizeof expected - 1 || memcmp(v, expected, sizeof expected - 1))
-                return fail(err, n, ENOEXEC, "%s: expected one REWRITE_ABI android-sp-safe-v1", path);
+                return fail(err, n, ENOEXEC, "%s: expected one REWRITE_ABI " S2A_MODULE_ABI, path);
             continue;
         }
         if (!strcmp(key, "BUILD_ID") || !strcmp(key, "TRAP")) continue;   // TRAP 行（brk 兜底点）由 runtime/src/loader.c 读
+#if defined(__OHOS__)
+        // Enhancement headers are authenticated with the signed carrier's
+        // complete fixups bytes. They are strings, not layout integers.
+        if (!strcmp(key, "FPS_ABI")) {
+            static const char expected_fps[] = "s2a.ohos.fps.v1";
+            if (fps_abi++ || strcspn(v, "\r\n") != sizeof expected_fps - 1 ||
+                memcmp(v, expected_fps, sizeof expected_fps - 1))
+                return fail(err, n, ENOEXEC, "%s: invalid or duplicate FPS_ABI", path);
+            continue;
+        }
+        if (!strcmp(key, "FPS_SHA256") || !strcmp(key, "CODE_PATCH_SHA256")) {
+            unsigned *seen_digest = !strcmp(key, "FPS_SHA256") ? &fps_sha : &code_sha;
+            if ((*seen_digest)++ || strcspn(v, "\r\n") != 64)
+                return fail(err, n, EINVAL, "%s: invalid or duplicate digest %s", path, key);
+            for (unsigned i = 0; i < 64; ++i)
+                if (!((v[i] >= '0' && v[i] <= '9') || (v[i] >= 'a' && v[i] <= 'f')))
+                    return fail(err, n, EINVAL, "%s: invalid digest %s", path, key);
+            continue;
+        }
+#endif
         char *value_end;
         errno = 0;
         if (!strcmp(key, "PATCH_OFF") || !strcmp(key, "PATCH2_OFF")) (void)strtoll(v, &value_end, 16);
         else (void)strtoull(v, &value_end, !strncmp(key, "KEY_", 4) && strstr(key, "_IDX") ? 10 : 16);
         if (errno || value_end == v || (*value_end && strcmp(value_end, "\r")))
             return fail(err, n, EINVAL, "%s: invalid numeric header %s", path, key);
+#if defined(__OHOS__)
+        if (!strcmp(key, "KEY_TSDOFF_IDX")) {
+            if (tsdoff++ || strtoul(v, NULL, 10) != S2A_OHOS_TSDOFF_IDX)
+                return fail(err, n, ENOEXEC, "%s: expected one KEY_TSDOFF_IDX 4", path);
+            continue;
+        }
+#endif
         if (!strcmp(key, "LOAD_BIAS")) {
             if (strtoull(v, NULL, 16)) return fail(err, n, ENOEXEC, "%s: Android mapper does not support nonzero LOAD_BIAS", path);
         }
@@ -96,14 +138,22 @@ int s2a_module_layout_mem(const char *text, size_t len, const char *what, struct
             snprintf(want, sizeof want, "KEY_%s_IDX", key_name[k]);
             if (!strcmp(key, want)) {
                 unsigned long index = strtoul(v, NULL, 10);
-                if ((seen & (1u << k)) || index >= PAGE16 / 8)
+                if ((seen & (1u << k)) || index >= PAGE16 / 8
+#if defined(__OHOS__)
+                    || index == S2A_OHOS_TSDOFF_IDX
+#endif
+                )
                     return fail(err, n, EINVAL, "%s: duplicate or invalid key index", path);
                 l->key_idx[k] = (unsigned)index; seen |= 1u << k;
             }
         }
     }
     if (!target || !abi)
-        return fail(err, n, ENOEXEC, "%s: missing Android target or rewrite ABI", path);
+        return fail(err, n, ENOEXEC, "%s: missing " S2A_MODULE_TARGET " target or rewrite ABI", path);
+#if defined(__OHOS__)
+    if (!tsdoff) return fail(err, n, ENOEXEC, "%s: missing KEY_TSDOFF_IDX", path);
+    if (fps_abi != fps_sha) return fail(err, n, ENOEXEC, "%s: incomplete FPS ABI/digest binding", path);
+#endif
     if (!l->patch_off || l->patch_off == INT64_MIN || l->key_page_off > SIZE_MAX - PAGE16 || l->key_page_off % PAGE16 || l->key_page_size != PAGE16 || seen != (1u << S2A_KEY_N) - 1
         || !l->text_end || l->text_end > l->key_page_off || !has_data_off || l->data_off < l->text_end)
         return fail(err, n, EINVAL, "%s: incomplete header (PATCH_OFF / key page / four keys / TEXT_END / DATA_OFF)", path);
@@ -177,6 +227,9 @@ int s2a_module_map_mem(const char *what, const char *fixups, size_t fixups_len, 
     int e = s2a_module_layout_mem(fixups, fixups_len, what, &m->l, err, n);
     if (e) return e;
     if (!raw || !sz || sz > SIZE_MAX - (PAGE16 - 1)) return fail(err, n, EINVAL, "%s: invalid image size", path);
+#if defined(__OHOS__)
+    return s2a_ohos_signed_module_map(what, fixups, fixups_len, raw, sz, slot_off, m, err, n);
+#else
     const struct s2a_module_layout *l = &m->l;
     // Dual patch islands: the last PATCH2_LEN bytes of the file are the second island.
     uint64_t l2 = l->patch2_len, up2 = UP16(l2);
@@ -236,6 +289,12 @@ int s2a_module_map_mem(const char *what, const char *fixups, size_t fixups_len, 
     uint64_t *page = (uint64_t *)(m->base + l->key_page_off);
     memset(page, 0, PAGE16);
     for (unsigned k = 0; k < S2A_KEY_N; k++) page[l->key_idx[k]] = slot_off[k];
+#if defined(__OHOS__)
+    int64_t tsd_offset;
+    e = s2a_ohos_tsd_pointer_offset(&tsd_offset);
+    if (e) { s2a_module_unmap(m); return fail(err, n, e, "OHOS TSD probe is not ready"); }
+    page[S2A_OHOS_TSDOFF_IDX] = (uint64_t)tsd_offset;
+#endif
     if (mprotect(page, PAGE16, PROT_READ)) e = fail(err, n, errno, "mprotect key page");
     if (!e) e = seal_rx(m->base, UP16(l->text_end), "text", err, n);
     if (!e && far) {
@@ -254,6 +313,7 @@ int s2a_module_map_mem(const char *what, const char *fixups, size_t fixups_len, 
     }
     if (e) s2a_module_unmap(m);
     return e;
+#endif
 }
 
 int s2a_module_map_path(const char *image, const uint64_t slot_off[S2A_KEY_N],
@@ -282,6 +342,11 @@ int s2a_module_map_path(const char *image, const uint64_t slot_off[S2A_KEY_N],
 }
 
 void s2a_module_unmap(struct s2a_module *m) {
+#if defined(__OHOS__)
+    if (m->platform_owner) { dlclose(m->platform_owner); m->platform_owner = NULL; }
+    else if (m->map) munmap(m->map, m->map_size);
+#else
     if (m->map) munmap(m->map, m->map_size);
+#endif
     m->map = m->base = NULL; m->map_size = m->patch_size = 0;
 }

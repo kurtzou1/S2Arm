@@ -55,9 +55,9 @@ def seed(roots, game, source, *, move_romfs=False):
                 remove_owned(w / name)
                 src = source / name
                 # move_romfs（只给一键出包自己的解包目录，下次解包整目录重建）：同卷就把 RomFS 整目录改名搬进来（一次操作），不逐文件克隆
-                #   （11-06 出包速度线：0100F2C0115B6000 30.5 万个文件，Windows 出包机播种 1253 秒，逐文件克隆约 1 毫秒一个）；提交后原处留联接指向存储里的这份
-                # 实目录模式（exFAT 等建不了链接）不搬：搬走后原处没法留联接回指，界面布局等后续阶段要读原处
-                if name == 'romfs' and move_romfs and not roots.plain and not is_link(src) and os.stat(src).st_dev == os.stat(w).st_dev:
+                #   （11-06 维护者实测：0100F2C0115B6000 30.5 万个文件，Windows 出包机播种 1253 秒，逐文件克隆约 1 毫秒一个）
+                #   原处不留回指链接（seed.txt romfs_moved=1，布局阶段直接读产物根这份）：建不了链接的卷（exFAT、安全软件拦重解析点）也照搬
+                if name == 'romfs' and move_romfs and not is_link(src) and os.stat(src).st_dev == os.stat(w).st_dev:
                     rename_dir(src, w / 'romfs'); moved = src
                     tick.step(sum(1 for e in plain_entries(w / 'romfs') if not e.is_dir()))
                 else:
@@ -86,10 +86,10 @@ def seed(roots, game, source, *, move_romfs=False):
                 #   同一工作目录二次播种必红（11-06 Windows 出包机死机后原样重起的 3 单全红在这里）：先删旧的再复制
                 remove_owned(w / name)
                 copy_file(source / name, w / name)
-        text(w / 'seed.txt', f'src={source}\ntag={tx.tag}\nat={datetime.now():%Y-%m-%d %H:%M:%S}\n')
+        # romfs_moved=1：RomFS 已整目录挪进产物根（move_romfs），解包目录原处不再有 RomFS、也不留回指链接（玩家诊断 #0fd185：链接可能根本建不了；
+        #   原处每次出包前整目录删掉重解，读原版的布局阶段按这一行直接读产物根 RomFS，它就是原版）
+        text(w / 'seed.txt', f'src={source}\n' + ('romfs_moved=1\n' if moved is not None else '') + f'tag={tx.tag}\nat={datetime.now():%Y-%m-%d %H:%M:%S}\n')
         final = tx.commit()
-        if moved is not None:   # 原处（seed.txt 记的 src/romfs，界面布局读原版）联到存储里这份不可变的身份
-            directory_link(roots._romfs(final, game), moved)
         return final
     except BaseException as e:
         cleanup_after(e, tx.abort)   # 删半成品再出错（#669 WinError 145）不许盖住起因

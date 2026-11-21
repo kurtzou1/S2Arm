@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <time.h>
 #include <stdatomic.h>
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
 #include <signal.h>
 #endif
 
@@ -50,7 +50,7 @@ static int write_all(int fd, const char *p, size_t n) {
 
 static void *con_writer(void *arg) { s2a_thread_name("s2a-logcon");
     int fd = (int)(intptr_t)arg;
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     // Linux 没有 F_SETNOSIGPIPE；只在日志写线程屏蔽，断管由 write/EPIPE 关闭副本。
     sigset_t blocked; sigemptyset(&blocked); sigaddset(&blocked, SIGPIPE);
     int mask_error = pthread_sigmask(SIG_BLOCK, &blocked, NULL);
@@ -84,7 +84,7 @@ void s2a_logcon_flush(void) {
 int s2a_logcon_start(int fd) {
     if (fd < 0) return -1;
     fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) & ~O_NONBLOCK);
-#if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !defined(__OHOS__)
     fcntl(fd, F_SETNOSIGPIPE, 1);
 #endif
     pthread_t th; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);

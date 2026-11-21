@@ -13,7 +13,7 @@
 #else
 #include <sys/uio.h>
 #endif
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
 #include "../../android/native/runtime/fault/fault.h"
 #include <fcntl.h>
 #include <stdatomic.h>
@@ -143,7 +143,7 @@ void s2a_backtrace(uint64_t fp) {
 }
 void s2a_thread_dump(void);
 #include "../../graphics/track/s2a_track.h"
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
 // The existing dispatcher remains the only owner. Managed/ART handlers may
 // subsequently chain to it, so readiness is proved by fault_probe after managed
 // attachment, never by comparing the top-level sigaction function pointer.
@@ -176,11 +176,37 @@ static void android_sigabrt_ctx(const ucontext_t *context) {
     (void)context;
 #endif
 }
+// SIGABRT 栈扫描：abort 的帧指针链常在 libc 里断掉（chain=broken@0），看不出谁调的 abort。
+// 这里把 sp 起 4 KB 栈经内核读出，逐字找落在宿主库 / guest 模块代码里的值，按「库名+相对库基址偏移」
+// 打印（离线 addr2line 可还原），至多 24 条。只在进程已决定死亡时跑，不追求异步信号安全。
+static void android_sigabrt_scan(const ucontext_t *context) {
+#if defined(__aarch64__)
+    uint64_t buf[512];
+    struct iovec l = {buf, sizeof buf}, r = {(void *)(uintptr_t)context->uc_mcontext.sp, sizeof buf};
+    ssize_t got = process_vm_readv(getpid(), &l, 1, &r, 1, 0);
+    if (got <= 0) return;
+    int shown = 0;
+    for (size_t i = 0; i < (size_t)got / 8 && shown < 24; i++) {
+        uint64_t v = buf[i];
+        if (v < 0x10000) continue;
+        char b[200];
+        if (module_of((void *)(uintptr_t)v)) { where(v, b, sizeof b); LOG("[s2a] abort 栈扫描 sp+%#zx: %s", i * 8, b); shown++; continue; }
+        Dl_info di;
+        if (!dladdr((void *)(uintptr_t)v, &di) || !di.dli_fname || !di.dli_fbase) continue;
+        const char *base = strrchr(di.dli_fname, '/'); base = base ? base + 1 : di.dli_fname;
+        LOG("[s2a] abort 栈扫描 sp+%#zx: %s+%#llx %s", i * 8, base, (unsigned long long)(v - (uint64_t)(uintptr_t)di.dli_fbase),
+            di.dli_sname ? di.dli_sname : "");
+        shown++;
+    }
+#else
+    (void)context;
+#endif
+}
 // android/native/direct/compile_request.c：崩溃线程正在现编时把那份请求落盘（#1501 D②，同苹果侧 s2a_dsh_crash_dump）。
 //   链接期弱引用（安卓单库导出被 --exclude-libs 藏起，dlsym(RTLD_DEFAULT) 取不到）；只链运行时的单测没有它 = 空。
 extern void s2a_compile_inflight_dump(void) __attribute__((weak));
 static void android_crash_fatal(int sig, siginfo_t *si, const ucontext_t *context) {
-    if (sig == SIGABRT) android_sigabrt_ctx(context);
+    if (sig == SIGABRT) { android_sigabrt_ctx(context); android_sigabrt_scan(context); }
     if (s2a_compile_inflight_dump) s2a_compile_inflight_dump();   // 只 open / write / close；排在 fatal 行与链回之前（链回后可能不再回来）
     s2a_android_fatal(sig, si, context->uc_mcontext.pc, context->uc_mcontext.sp, (void *)context);
 }

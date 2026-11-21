@@ -14,31 +14,25 @@ import sys
 from core import Failure, atomic, digest, read, tree_hash
 
 
-def default_app_dirs(volumes="/Volumes"):
-    """找 Xcode 的目录：/Applications、~/Applications，加上每块外接卷的 Applications 与卷根（玩家把 Xcode 装在扩展硬盘上，
-    原先只看前两处，预检一直报「没找到完整的 Xcode」）。/Volumes 里的软链（启动盘指回 /）跳过；同一份从两条路径都看到时由
-    installed_xcodes 按版本 + 构建号去重。与前端 XcodeLocator 同一组目录，两处改一处要同步改另一处"""
-    dirs = ["/Applications", str(Path.home() / "Applications")]
-    try:
-        vols = sorted(Path(volumes).iterdir())
-    except OSError:
-        vols = []
-    for v in vols:
-        if v.is_symlink() or not v.is_dir():
-            continue
-        dirs += [str(v / "Applications"), str(v)]
-    return tuple(dirs)
+def default_app_dirs():
+    """自动找 Xcode 的目录：/Applications、~/Applications（xcode-select 指的那份由 installed_xcodes 另加）。与前端 XcodeLocator.searchDirs 同一组，两处改一处要同步改另一处。
+    不翻 /Volumes：列外接卷会弹系统隐私窗「想访问可移除卷上的文件」，6aaab23d4（11-18）起每建一个任务都列一遍，接着外接盘的玩家一开启动器就弹、
+    无人值守时作业挂在 opendir（0.6.2 验收卡在这里）。Xcode 装在外接盘上的玩家在设置页「选择 Xcode…」自己选（launch-settings.json 的 xcodeApp，玩家自选优先）"""
+    return ("/Applications", str(Path.home() / "Applications"))
 
 
 def installed_xcodes(apps_dirs=None, select="/usr/bin/xcode-select"):
+    """没给 apps_dirs 用 default_app_dirs（不含外接卷）；规则见 _scan_xcodes"""
+    return _scan_xcodes(default_app_dirs() if apps_dirs is None else apps_dirs, select)
+
+
+def _scan_xcodes(apps_dirs, select):
     """装着的完整 Xcode（com.apple.dt.Xcode 且有 usr/bin/xcodebuild），按（版本号, 构建号）认、去重，版本新的在前：[(版本元组, 版本串, 构建号, Developer 目录)]。
     11-07 gate-host：Xcode-27.1.app 是指向 Xcode-27.app 的软链，而 Xcode-27.app 已被 App Store 原地升到 27.1——按路径名认就成了「27.0 + 27.1 两套」，
     其实是同一份。所以路径名不参与判定：版本读 Contents/Info.plist（CFBundleShortVersionString），构建号读 Contents/version.plist（ProductBuildVersion，
     同 xcodebuild -version 的 Build version，不起进程）；同版本同构建号（软链 / 改名 / 拷贝）只留第一个见到的路径（xcode-select 指的那份排最前）。
     构建号读不到的按实际路径（解软链）去重。门禁 / 工具链列 Xcode 一律走这里（tests/shellui_ios_build_test.sh 等）"""
     import plistlib
-    if apps_dirs is None:
-        apps_dirs = default_app_dirs()
     apps = []
     try:
         sel = subprocess.run([select, "-p"], capture_output=True, text=True, timeout=10).stdout.strip()

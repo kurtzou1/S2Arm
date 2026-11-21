@@ -1,0 +1,55 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <AssemblyName>S2A.Ohos</AssemblyName>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <PredefinedCulturesOnly>false</PredefinedCulturesOnly>
+    <PublishAot>true</PublishAot>
+    <NativeLib>Shared</NativeLib>
+    <DisableUnsupportedError>true</DisableUnsupportedError>
+    <NoWarn>$(NoWarn);CA1416;IL2026;IL2072;IL2075;IL2080;IL3050</NoWarn>
+    <RepoRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../../'))</RepoRoot>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(RepoRoot)android/core-runtime/AndroidHostApi.cs" />
+    <Compile Include="$(RepoRoot)android/core-runtime/AndroidServiceState.cs" />
+    <Compile Include="$(RepoRoot)graphics/vulkan/runtime/AndroidVulkanRuntime.cs" />
+    <Compile Include="$(RepoRoot)graphics/vulkan/runtime/StartupWait.cs" />
+    <Compile Include="$(RepoRoot)graphics/vulkan/cache/ShaderPackLayout.cs" />
+    <Compile Include="$(RepoRoot)graphics/vulkan/cache/ShaderPackManifest.cs" />
+    <Compile Include="$(RepoRoot)graphics/vulkan/cache/ShaderPackArchive.cs" />
+    <Compile Include="$(RepoRoot)graphics/vulkan/cache/ShaderPackInstaller.cs" />
+    <!-- Direct mode (shared with Android): session ABI, the no-GPU renderer and the NativeAOT compiler/profile exports. -->
+    <Compile Include="$(RepoRoot)android/core-runtime/DirectAbi.cs" />
+    <Compile Include="$(RepoRoot)android/core-runtime/DirectSession.cs" />
+    <Compile Include="$(RepoRoot)android/core-runtime/DirectOwnerLoop.cs" />
+    <Compile Include="$(RepoRoot)android/core-runtime/DirectRenderer.cs" />
+    <Compile Include="$(RepoRoot)android/core-runtime/DirectCompileNative.cs" />
+    <Compile Include="$(RepoRoot)android/core-runtime/DirectProfileNative.cs" />
+    <ProjectReference Include="$(RepoRoot)graphics/tools/direct/compiler/S2A.DirectCompiler.csproj" />
+    <Compile Include="$(RepoRoot)graphics/metal/cs/NxTrack.cs" />
+    <ProjectReference Include="$(RepoRoot)services/S2A.Services/S2A.Services.csproj" />
+    <ProjectReference Include="$(RepoRoot)graphics/widen/gal/S2Arm.Gfx.Widen.Gal.csproj" />
+    <ProjectReference Include="$(RepoRoot)compat/tree/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <DirectPInvoke Include="s2a_native" />
+    <DirectPInvoke Include="s2a_opus" />
+    <DirectPInvoke Include="s2a_vpx" />
+    <!-- 直连托管侧按安卓库名导入 s2a_direct_bind_compiler_v1；鸿蒙里它静态链在同一个引擎，必须直接解析。 -->
+    <DirectPInvoke Include="libs2arm_android.so" />
+    <DirectPInvoke Include="s2arm_android" />
+    <UnmanagedEntryPointsAssembly Include="S2A.Services" />
+    <TrimmerRootAssembly Include="S2A.Ohos" />
+    <TrimmerRootAssembly Include="Ryujinx.HLE" />
+    <TrimmerRootAssembly Include="Ryujinx.Horizon" />
+    <TrimmerRootAssembly Include="S2A.Services" />
+    <TrimmerRootAssembly Include="Ryujinx.Graphics.Vulkan" />
+    <TrimmerRootAssembly Include="S2A.DirectCompiler" />
+  </ItemGroup>
+  <Target Name="S2AWriteOhosLinkInputs" AfterTargets="SetupOSSpecificProps" Condition="'$(S2ALinkInputs)' != ''">
+    <WriteLinesToFile File="$(S2ALinkInputs)" Overwrite="true" Lines="@(NativeLibrary);@(NativeSystemLibrary-&gt;'-l%(Identity)')" />
+  </Target>
+</Project>

@@ -7,7 +7,7 @@ bash 5 ships in Runtime/bin and comes first on the jobs' PATH: engine scripts ar
 (10-25 launcher Hades run: EXIT traps failed with 'BASHPID: unbound variable').
 bash is an aggregated GPL-3.0 program (separate process, not linked). Its COPYING and the source offer are copied into Runtime/licenses.
 timeout is the repository's own perl tools/bin/timeout (Apache-2.0; macOS ships perl), not GNU coreutils — the same one tools/toolchain.sh puts first on PATH.
-spirv-cross / glslangValidator build the direct shader library of Vulkan / OpenGL games (graphics/tools/direct/direct_lib.sh; Hades is Vulkan).
+spirv-cross / glslangValidator build the direct shader library of Vulkan / OpenGL games (graphics/tools/direct/direct_lib.py; Hades is Vulkan).
 The bundled C rewriter (Runtime/bin/s2a-rewrite) also needs CMake 3.18+, a C compiler and
 the pinned sources from `python3 runtime/rewriter/prepare_deps.py build/rewriter-deps`
 (or S2A_REWRITER_DEPS pointing at a prepared directory); the build never downloads.

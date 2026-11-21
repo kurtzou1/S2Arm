@@ -20,6 +20,7 @@ static void fits62(const s2a_layout *L) {
     uint64_t reg = (L->alias_base + 0x3FE00000ull + 0x1000 + GB - 1) & ~(GB - 1);
     if (reg + 62*GB > L->alias_base + L->alias_size - 0x1000) { printf("✗ 62 GiB 地址区放不下（起 %#llx）\n", (unsigned long long)reg); bad++; }
 }
+int s2a_alias_big_tops_window(uint64_t alias_base, int alias_gb, uint64_t win_end);   // layout.c：地址空间不够这款的判据
 int main(void) {
     s2a_layout L; uint64_t mb, sb;
     // 标准布局跨度：VAMM = 63G + TLS 2M + 栈 2048M（Horizon 39 位栈区 0x80000000）+ 堆 3284M + 余量 96M + 模块；堆模式 = 32G + 模块
@@ -85,6 +86,16 @@ int main(void) {
     //   要 1G + 1G + 59130M + 8K = 61178M + 8K；模块 300M 时能给 = 窗口 − 718M + 16K → 窗口 61896M − 8K 正好收（别名长 = 要的），少 4K 不收
     EQ(s2a_layout_compute(3,80*MB,MOD,1,W,61896*MB-0x2000,&L,&mb,&sb),0); EQ(L.alias_size,61178*MB+0x2000); EQ(sb,0);
     EQ(s2a_layout_compute(3,80*MB,MOD,1,W,61896*MB-0x3000,&L,&mb,&sb),0); EQ(L.alias_size,64*GB); EQ(sb,W+428*MB);
+    // 地址空间不够这款的判据（11-20，宁漏勿误）：大区长 (|alias_gb| − 1) GiB，起点 = (别名基址 + 0x3FE00000 + 1G − 1) & −1G，末端 ≥ 窗口末 → 弹。
+    //   一款大游戏的 Mac 实局（窗口 0x70c0000000、别名基址 0x70ef9fc000 = 窗口 +761M，静态 57 GB）：起点 = 窗口 +2048M，末端 = +2048M + 56G = +59392M。
+    //   ① 窗口 59392 MB（iPhone 被快照让掉 3 GB 时；实测远端 3959 万次、0 帧）：末端 = 窗口末 → 弹；② 窗口 62464 MB（实测 0 次远端、60 帧）：不弹；
+    //   ③ 另一台 Mac：窗口 61 GB = 62464 MB、静态 63 GB → 大区 62G，末端 +2048M + 62G = +65536M > 62464M → 弹；上限不定（负值）同样按绝对值算；没有静态大区 → 不弹
+    { const uint64_t WB = 0x70c0000000ull, AB = 0x70ef9fc000ull;
+      EQ(s2a_alias_big_tops_window(AB, -57, WB + 59392 * MB), 1);
+      EQ(s2a_alias_big_tops_window(AB, -57, WB + 62464 * MB), 0);
+      EQ(s2a_alias_big_tops_window(AB, 63, WB + 62464 * MB), 1);
+      EQ(s2a_alias_big_tops_window(AB, 57, WB + 59392 * MB + 2 * MB), 0);   // 窗口末比大区末端高一点 → 不弹（宁漏）
+      EQ(s2a_alias_big_tops_window(AB, 0, WB + 1024 * MB), 0); }
     // 64 GiB 空洞、不是别名优先的款（王国之泪类：要满额堆）：放不下 63G + 526M + 3284M → 乙，堆给满 3284M + 256M 放前段，不是让到 32M
     EQ(s2a_layout_compute(3,80*MB,MOD,0,W,64*GB,&L,&mb,&sb),0); EQ(L.heap_size,3540*MB); EQ(mb,W); EQ(L.stack_size,2*GB); EQ(L.tlsio_base,W+6*GB);
     // 同空洞、别名优先（八方2 / 巫师3 / 异度3 类）：照旧甲，别名区在前、堆让到 32M

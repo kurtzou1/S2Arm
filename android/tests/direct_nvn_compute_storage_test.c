@@ -480,8 +480,122 @@ static void case_spill(void) {
     reject_case("[S8] 非 spill 绑定带 bytesPerGroup", "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":8,\"count\":1,\"bytesPerGroup\":4}", "[]", "[]", "bytesPerGroup");
 }
 
+// 一份最小的 v<v> 计算结果，bindings 数组里放 binding 给出的若干条（逗号分隔的 JSON 对象）；返回解析 rc，p 由调用方 free
+static int parse_cs_one(int v, const char *binding, struct nvn_vk_compute_program *p, char *why, size_t why_size) {
+    char json[4096];
+    int n = snprintf(json, sizeof json,
+        "{\"schema\":\"s2a-direct-program-v%d\",\"content\":{"
+        "\"contract\":\"s2a-direct-program-content-v%d\",\"kind\":\"compute\","
+        "\"hasUnalignedStorageBuffer\":false,\"c0Reads\":[],"
+        "\"stages\":[{\"stage\":\"cs\",\"spirv\":\"%s\"}],"
+        "\"bindings\":[%s],"
+        "\"supportLayout\":{\"requiredSize\":2608},\"supportReads\":[]}}", v, v, S2A_TEST_COMP_1, binding);
+    memset(p, 0, sizeof *p);
+    return nvn_vk_program_parse_compute((const uint8_t *)json, (size_t)n, p, why, why_size);
+}
+
+// v2 结果骨架（整池数组只在 v2 里出现）：bindings 由用例给原文
+static int parse_v2_case(const char *bindings, struct nvn_vk_compute_program *p, char *why, size_t why_size) {
+    char json[8192];
+    int n = snprintf(json, sizeof json,
+        "{\"schema\":\"s2a-direct-program-v2\",\"content\":{"
+        "\"contract\":\"s2a-direct-program-content-v2\",\"kind\":\"compute\","
+        "\"hasUnalignedStorageBuffer\":false,\"c0Reads\":[],"
+        "\"stages\":[{\"stage\":\"cs\",\"spirv\":\"%s\"}],\"bindings\":[%s],"
+        "\"supportLayout\":{\"requiredSize\":2608},\"supportReads\":[]}}", k_spirv, bindings);
+    memset(p, 0, sizeof *p);
+    if (n <= 0 || (size_t)n >= sizeof json) { snprintf(why, why_size, "test fixture JSON does not fit"); return -1; }
+    return nvn_vk_program_parse_compute((const uint8_t *)json, (size_t)n, p, why, why_size);
+}
+
+// 整池数组（#1594 片 8：编译器 ResolvePoolSlots 给 cs 的回退，pool:"texture" / "sampler"，count = 池长）：
+//   接受口径与图形阶段同一份合同（只认 v2 贴图绑定、count 2..65534、不带槽位来源），计算侧另要求 stage 是 cs、不带存储来源 / 每组字节数；
+//   不带 pool 的大数组仍按原样拒（count > 64 报 ARRAY_UNSUPPORTED 带 stage / 长度；2..64 报「arrays are unsupported」）
+static void case_pool(void) {
+    group("[P] 整池数组 pool 绑定（stage cs）");
+    static const char tex_pool[] = "{\"stage\":\"cs\",\"kind\":\"texture\",\"source\":\"texture\",\"set\":2,\"binding\":0,\"count\":8448,\"pool\":\"texture\"}";
+    static const char samp_pool[] = "{\"stage\":\"cs\",\"kind\":\"texture\",\"source\":\"texture\",\"set\":2,\"binding\":1,\"count\":1280,\"pool\":\"sampler\"}";
+    struct nvn_vk_compute_program p; char why[256] = "", b[1024];
+    // 真实形状：支持块 + 贴图池 + 采样器池 + 一条普通贴图 + 三维存储图像 + 存储缓冲（池绑定之后的绑定下标不能错位）
+    snprintf(b, sizeof b,
+        "{\"stage\":\"program\",\"kind\":\"support\",\"set\":0,\"binding\":0,\"count\":1},%s,%s,"
+        "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":2,\"slot\":8,\"count\":1},"
+        "{\"stage\":\"cs\",\"kind\":\"image\",\"set\":3,\"binding\":0,\"slot\":72,\"count\":1},"
+        "{\"stage\":\"cs\",\"kind\":\"storage\",\"set\":1,\"binding\":0,\"count\":1,\"rw\":false,\"cbSlot\":0,\"cbOffset\":832,\"nvnSlot\":3}",
+        tex_pool, samp_pool);
+    int rc = parse_v2_case(b, &p, why, sizeof why);
+    ck_true("[P1] 真实形状被接受", rc == 0 && p.binding_count == 6, why);
+    if (rc == 0) {
+        const struct fd_binding *t = &p.bindings[1], *s = &p.bindings[2];
+        ck_true("[P1] 贴图池：kind 2、pool 1、count 8448、set 2 / binding 0", t->kind == 2 && t->pool == 1 && t->count == 8448 && t->set == 2 && t->binding == 0, "字段");
+        ck_true("[P1] 贴图池：stage cs / 阶段号 5、没有任何槽位", !strcmp(t->stage, "cs") && t->stage_idx == 5 && t->slot == -1 && t->tex_slot == -1 && t->samp_slot == -1 && t->ubo_slot == -1, "字段");
+        ck_true("[P1] 采样器池：kind 2、pool 2、count 1280、set 2 / binding 1", s->kind == 2 && s->pool == 2 && s->count == 1280 && s->set == 2 && s->binding == 1, "字段");
+        ck_true("[P1] 采样器池：stage cs / 阶段号 5、没有任何槽位", !strcmp(s->stage, "cs") && s->stage_idx == 5 && s->slot == -1 && s->tex_slot == -1 && s->samp_slot == -1, "字段");
+        ck_true("[P1] 池后的普通贴图：不是池、count 1、贴图槽 0", p.bindings[3].pool == 0 && p.bindings[3].count == 1 && p.bindings[3].tex_slot == 0, "字段");
+        ck_true("[P1] 池后的存储图像：kind 3、图像槽 0", p.bindings[4].kind == 3 && p.bindings[4].tex_slot == 0, "字段");
+        ck_true("[P1] 池后的存储缓冲：映射仍是 NVN 槽 3（storage 数组下标与绑定下标同步）", p.bindings[5].kind == 1 && p.storage[5].mapping == NVK_STORAGE_NVN && p.storage[5].index == 3, "字段");
+        nvn_vk_program_free_compute(&p);
+    }
+    // 池长边界：2 与 65534 接受；1、65535、0 拒绝
+    static const struct { unsigned count; int ok; } edge[] = {{2, 1}, {65534, 1}, {1, 0}, {65535, 0}, {0, 0}};
+    for (unsigned k = 0; k < sizeof edge / sizeof edge[0]; k++) {
+        char lab[96];
+        snprintf(b, sizeof b, "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"count\":%u,\"pool\":\"texture\"}", edge[k].count);
+        why[0] = 0; rc = parse_v2_case(b, &p, why, sizeof why);
+        snprintf(lab, sizeof lab, "[P2] 池长 %u %s", edge[k].count, edge[k].ok ? "接受" : "拒绝");
+        ck_true(lab, edge[k].ok ? rc == 0 && p.bindings[0].count == edge[k].count : (rc != 0 && why[0] && (edge[k].count ? strstr(why, "pool array") != NULL : strstr(why, "count") != NULL)), why);
+        nvn_vk_program_free_compute(&p);
+    }
+    // 不带 pool 的数组：行为与以前一致（这条是「放开 pool 没连带放开普通大数组」的对照）
+    snprintf(b, sizeof b, "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":8,\"count\":65}");
+    why[0] = 0; rc = parse_v2_case(b, &p, why, sizeof why);
+    ck_true("[P3] 无 pool 的 65 项数组：ARRAY_UNSUPPORTED，原因带 stage 与长度", rc == NVK_PROGRAM_ARRAY_UNSUPPORTED && strstr(why, "stage cs descriptor array length=65 exceeds 64"), why);
+    snprintf(b, sizeof b, "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":8,\"count\":2}");
+    why[0] = 0; rc = parse_v2_case(b, &p, why, sizeof why);
+    ck_true("[P3] 无 pool 的 2 项数组：拒绝「arrays are unsupported」", rc != 0 && rc != NVK_PROGRAM_ARRAY_UNSUPPORTED && strstr(why, "descriptor arrays are unsupported"), why);
+    // v1 结果带 pool：拒
+    snprintf(b, sizeof b, "%s", tex_pool);
+    why[0] = 0; rc = parse_case(b, "[]", "[]", &p, why, sizeof why);
+    ck_true("[P4] v1 结果带 pool 被拒、原因写 v2", rc != 0 && strstr(why, "v2"), why);
+    nvn_vk_program_free_compute(&p);
+    // 形状不对：整份拒，原因都带 "pool array"
+    static const struct { const char *label, *binding; } bad[] = {
+        {"[P5] pool 值既不是 texture 也不是 sampler", "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"count\":8,\"pool\":\"image\"}"},
+        {"[P5] pool 值不是字符串", "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"count\":8,\"pool\":7}"},
+        {"[P5] 池绑定是存储缓冲", "{\"stage\":\"cs\",\"kind\":\"storage\",\"set\":2,\"binding\":0,\"count\":8,\"pool\":\"texture\"}"},
+        {"[P5] 池绑定是统一缓冲", "{\"stage\":\"cs\",\"kind\":\"uniform\",\"set\":2,\"binding\":0,\"count\":8,\"slot\":3,\"pool\":\"texture\"}"},
+        {"[P5] 池绑定是存储图像", "{\"stage\":\"cs\",\"kind\":\"image\",\"set\":2,\"binding\":0,\"count\":8,\"pool\":\"texture\"}"},
+        {"[P5] 池绑定是支持块", "{\"stage\":\"program\",\"kind\":\"support\",\"set\":2,\"binding\":0,\"count\":8,\"pool\":\"texture\"}"},
+        {"[P5] 池绑定的 stage 是 vs", "{\"stage\":\"vs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"count\":8,\"pool\":\"texture\"}"},
+        {"[P5] 池绑定缺 stage", "{\"kind\":\"texture\",\"set\":2,\"binding\":0,\"count\":8,\"pool\":\"texture\"}"},
+        {"[P5] 池绑定带 slot", "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"count\":8,\"slot\":8,\"pool\":\"texture\"}"},
+        {"[P5] 池绑定带 samp_slot", "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"count\":8,\"samp_slot\":3,\"pool\":\"texture\"}"},
+        {"[P5] 池绑定带 constSampler", "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"count\":8,\"constSampler\":263,\"pool\":\"texture\"}"},
+        {"[P5] 池绑定带 uboSlot", "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"count\":8,\"uboSlot\":2,\"pool\":\"texture\"}"},
+        {"[P5] 池绑定带 uboOffset", "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"count\":8,\"uboOffset\":160,\"pool\":\"texture\"}"},
+        {"[P5] 池绑定带 uboHandle", "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"count\":8,\"uboHandle\":true,\"pool\":\"texture\"}"},
+        {"[P5] 池绑定带 bytesPerGroup", "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"count\":8,\"bytesPerGroup\":4,\"pool\":\"texture\"}"},
+        {"[P5] 池绑定带 rw", "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"count\":8,\"rw\":false,\"pool\":\"texture\"}"},
+        {"[P5] 池绑定带 cbSlot", "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"count\":8,\"cbSlot\":0,\"pool\":\"texture\"}"},
+        {"[P5] 池绑定带 cbOffset", "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"count\":8,\"cbOffset\":784,\"pool\":\"texture\"}"},
+        {"[P5] 池绑定带 nvnSlot", "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"count\":8,\"nvnSlot\":0,\"pool\":\"texture\"}"},
+        {"[P5] 池绑定带 uboPtr", "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"count\":8,\"uboPtr\":true,\"pool\":\"texture\"}"},
+    };
+    for (unsigned k = 0; k < sizeof bad / sizeof bad[0]; k++) {
+        why[0] = 0; rc = parse_v2_case(bad[k].binding, &p, why, sizeof why);
+        ck_true(bad[k].label, rc != 0 && rc != NVK_PROGRAM_ARRAY_UNSUPPORTED && strstr(why, "pool array"), why);
+        nvn_vk_program_free_compute(&p);
+    }
+    // 同一 set / binding 上的两条池绑定：重复，拒
+    snprintf(b, sizeof b, "%s,%s", tex_pool, tex_pool);
+    why[0] = 0; rc = parse_v2_case(b, &p, why, sizeof why);
+    ck_true("[P6] 同 set / binding 的两条池绑定被拒为重复", rc != 0 && strstr(why, "duplicate compute binding"), why);
+    nvn_vk_program_free_compute(&p);
+}
+
 int main(void) {
     case_spill();
+    case_pool();
     case_accept_nvn();
     case_accept_ubo_ptr();
     case_accept_ubo_address();
@@ -510,26 +624,78 @@ int main(void) {
         nvn_vk_program_free_compute(&p);
     }
 
-    // #1594：类型 3 句柄（常量采样器）计算侧没接。带 constSampler 的 cs 贴图绑定必须具名拒绝——不能被当成「没有 samp_slot = 采样器取同字高位」
-    //   而绑成错的采样器（宿主的计算回放不认这个来源）。v1 / v2 结果都一样；没有这个字段的同槽绑定照旧接受（见上面直接读 c2 分离贴图表的字）。
-    for (int v = 1; v <= 2; ++v) {
-        static const char *const fields[] = {"\"slot\":90,\"constSampler\":257", "\"slot\":344,\"constSampler\":0", "\"slot\":90,\"constSampler\":4096", "\"constSampler\":3",
-                                             "\"uboSlot\":2,\"uboOffset\":160,\"constSampler\":260"};   // 片 3：游戏 UBO 里的贴图字（图形侧接了，计算侧不接）
-        for (unsigned k = 0; k < sizeof fields / sizeof fields[0]; k++) {
-            char json[4096], why[192] = ""; struct nvn_vk_compute_program p;
-            int n = snprintf(json, sizeof json,
-                "{\"schema\":\"s2a-direct-program-v%d\",\"content\":{"
-                "\"contract\":\"s2a-direct-program-content-v%d\",\"kind\":\"compute\","
-                "\"hasUnalignedStorageBuffer\":false,\"c0Reads\":[],"
-                "\"stages\":[{\"stage\":\"cs\",\"spirv\":\"%s\"}],"
-                "\"bindings\":[{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,%s,\"count\":1}],"
-                "\"supportLayout\":{\"requiredSize\":2608},\"supportReads\":[]}}", v, v, S2A_TEST_COMP_1, fields[k]);
-            memset(&p, 0, sizeof p);
-            int rc = nvn_vk_program_parse_compute((const uint8_t *)json, (size_t)n, &p, why, sizeof why);
-            char what[96]; snprintf(what, sizeof what, "compute v%d constant sampler form %u is rejected by name", v, k);
+    // #1594 片 7：类型 3 句柄（常量采样器）的 c2 形态计算侧接了，合同同图形片 2：v2、单个贴图、slot = c2 分离贴图表的偶数字 90..344、
+    //   constSampler 0..4095，没有 samp_slot / uboSlot / uboOffset / uboHandle / sampler。映射：tex_slot = 128 + (slot − 90) / 2、
+    //   samp_src = FD_SAMP_ID、samp_val = 池下标、samp_pool = 1（回放要加池起点）、samp_slot = −1（不进 c2 采样器表）、tex_ubo = 0。
+    {
+        static const struct { int slot, sampler; } ok[] = { {90, 257}, {344, 0}, {90, 4095}, {128, 7} };
+        for (unsigned k = 0; k < sizeof ok / sizeof ok[0]; k++) {
+            char b[160], why[192] = "", what[96]; struct nvn_vk_compute_program p;
+            snprintf(b, sizeof b, "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":%d,\"constSampler\":%d,\"count\":1}", ok[k].slot, ok[k].sampler);
+            int rc = parse_cs_one(2, b, &p, why, sizeof why);
+            snprintf(what, sizeof what, "compute v2 constant sampler slot %d / index %d is accepted and mapped", ok[k].slot, ok[k].sampler);
+            ck_true(what, rc == 0 && p.binding_count == 1 && p.bindings[0].kind == 2 && p.bindings[0].tex_slot == 128 + (ok[k].slot - 90) / 2 &&
+                    p.bindings[0].samp_slot == -1 && p.bindings[0].samp_src == FD_SAMP_ID && p.bindings[0].samp_val == ok[k].sampler &&
+                    p.bindings[0].samp_pool == 1 && p.bindings[0].tex_ubo == 0 && p.bindings[0].count == 1, why);
+            nvn_vk_program_free_compute(&p);
+        }
+        // 同一个程序里：两个常量采样器各带各的、再加一个 c2 采样器槽的分离采样器与一个没有任何采样器字段的直读 c2 分离贴图项，互不串味
+        char why[192] = ""; struct nvn_vk_compute_program p;
+        int rc = parse_cs_one(2,
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":90,\"constSampler\":257,\"count\":1},"
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":1,\"slot\":100,\"constSampler\":259,\"count\":1},"
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":2,\"slot\":110,\"samp_slot\":5,\"count\":1},"
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":3,\"slot\":120,\"count\":1}", &p, why, sizeof why);
+        ck_true("compute v2 mixed constant / separate / plain c2 texture entries stay independent",
+                rc == 0 && p.binding_count == 4 &&
+                p.bindings[0].tex_slot == 128 && p.bindings[0].samp_src == FD_SAMP_ID && p.bindings[0].samp_val == 257 && p.bindings[0].samp_pool == 1 &&
+                p.bindings[1].tex_slot == 133 && p.bindings[1].samp_src == FD_SAMP_ID && p.bindings[1].samp_val == 259 && p.bindings[1].samp_pool == 1 &&
+                p.bindings[2].tex_slot == 138 && p.bindings[2].samp_slot == 5 && p.bindings[2].samp_src == FD_SAMP_NONE && p.bindings[2].samp_pool == 0 &&
+                p.bindings[3].tex_slot == 143 && p.bindings[3].samp_slot == -1 && p.bindings[3].samp_src == FD_SAMP_NONE && p.bindings[3].samp_pool == 0, why);
+        nvn_vk_program_free_compute(&p);
+    }
+    // 别的形态必须具名拒绝（why 含 constant sampler）——不能被当成「没有 samp_slot = 采样器取同字高位」而绑成错的采样器：
+    //   池下标越界 / 负 / 非整数 / 非数字、缺 slot、奇字、表外（分离贴图表之前 / 之后）、与 samp_slot / UBO 来源 / uboHandle / sampler 对象并存、
+    //   不是贴图、游戏 UBO 来源（片 3 的形态，图形侧接了，计算侧仍不接）。数组由「描述符数组」的老拒绝挡在前面。
+    {
+        static const char *const bad[] = {
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":90,\"constSampler\":4096,\"count\":1}",
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":90,\"constSampler\":-1,\"count\":1}",
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":90,\"constSampler\":1.5,\"count\":1}",
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":90,\"constSampler\":\"7\",\"count\":1}",
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"constSampler\":3,\"count\":1}",
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":91,\"constSampler\":7,\"count\":1}",
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":88,\"constSampler\":7,\"count\":1}",
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":346,\"constSampler\":7,\"count\":1}",
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":8,\"constSampler\":7,\"count\":1}",
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":90,\"samp_slot\":3,\"constSampler\":7,\"count\":1}",
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"uboSlot\":2,\"uboOffset\":160,\"constSampler\":260,\"count\":1}",
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":90,\"uboSlot\":1,\"uboOffset\":1024,\"constSampler\":7,\"count\":1}",
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":90,\"constSampler\":7,\"uboHandle\":{\"slot\":2,\"offset\":160},\"count\":1}",
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":90,\"constSampler\":7,\"sampler\":{\"source\":\"id\",\"id\":3},\"count\":1}",
+            "{\"stage\":\"cs\",\"kind\":\"image\",\"set\":2,\"binding\":0,\"slot\":90,\"constSampler\":7,\"count\":1}",
+            "{\"stage\":\"cs\",\"kind\":\"uniform\",\"set\":2,\"binding\":0,\"slot\":90,\"constSampler\":7,\"count\":1}",
+        };
+        for (unsigned k = 0; k < sizeof bad / sizeof bad[0]; k++) {
+            char why[192] = "", what[96]; struct nvn_vk_compute_program p;
+            int rc = parse_cs_one(2, bad[k], &p, why, sizeof why);
+            snprintf(what, sizeof what, "compute v2 constant sampler bad form %u is rejected by name", k);
             ck_true(what, rc != 0 && strstr(why, "constant sampler"), why);
             nvn_vk_program_free_compute(&p);
         }
+        // v1 结果带 constSampler：形态再合法也拒（新字段按 v2 写，v1 宿主不认就整份拒）
+        char why[192] = ""; struct nvn_vk_compute_program p;
+        int rc = parse_cs_one(1, "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":90,\"constSampler\":257,\"count\":1}", &p, why, sizeof why);
+        ck_true("compute v1 result with a constant sampler is rejected by name", rc != 0 && strstr(why, "constant sampler"), why);
+        nvn_vk_program_free_compute(&p);
+        // 数组：老的「描述符数组」拒绝在前面（本片不放开）
+        rc = parse_cs_one(2, "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":90,\"constSampler\":257,\"count\":2}", &p, why, sizeof why);
+        ck_true("compute v2 constant sampler array is still rejected", rc != 0 && strstr(why, "array"), why);
+        nvn_vk_program_free_compute(&p);
+        // 字段重复：唯一字段校验在前
+        rc = parse_cs_one(2, "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":90,\"constSampler\":7,\"constSampler\":8,\"count\":1}", &p, why, sizeof why);
+        ck_true("compute v2 duplicated constSampler field is rejected", rc != 0, why);
+        nvn_vk_program_free_compute(&p);
     }
 
     // 计算结果是「程序」级文档：超过 1 MiB（描述文件上限）的合法结果要接；超过程序结果上限（64 MiB，同跨局缓存单条）的拒，原因带大小

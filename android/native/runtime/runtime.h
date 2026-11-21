@@ -28,9 +28,10 @@ struct s2a_loader_source; // 私有只读APK来源，布局由shared loader.h定
 // services.graphics 必须为 NULL、graphics_mode=0：native 在 Prepare/commit 后构造局部 v2 请求。
 #define S2A_ANDROID_RUNTIME_ABI_V2 2u
 #define S2A_ANDROID_RUNTIME_REQUEST_V2_SIZE 160u
+#define S2A_ANDROID_GRAPHICS_DESCRIPTOR_MAX_BYTES (1u << 20)   // descriptor 上限；runtime.c 断言它等于 direct/json.h 的 S2A_JSON_MAX_BYTES
 struct s2a_android_graphics_descriptor {
     const uint8_t *json;   // 已验证的 graphics.v1.json 原文；native 自己解析并复制
-    uint64_t bytes;        // 必须 > 0 且 <= 1 MiB
+    uint64_t bytes;        // 必须 > 0 且 <= S2A_ANDROID_GRAPHICS_DESCRIPTOR_MAX_BYTES
 };
 struct s2a_android_runtime_request_v2 {
     uint32_t size, version;

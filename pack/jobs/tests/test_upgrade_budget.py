@@ -48,12 +48,12 @@ class QueueTests(unittest.TestCase):
             gid = c.r["gameId"]; self.seen.append(gid)
             self.assertEqual(c.r["other"], 1)
             try:
-                on_progress(0, 2); on_progress(1, 2)
+                on_progress(0); on_progress(0.5)
                 st = {x["gameId"]: x for x in sgrade.queue_status(self.ctx("reader", []))["games"]}
                 self.assertEqual((st[gid]["state"], st[gid]["progress"]), ("running", 0.5), "别的窗口读得到在跑那款与进度")
                 if extra:
                     extra(gid)
-                on_progress(2, 2)
+                on_progress(1.0)
                 return dict(gameId=gid, updated=[gid], steps={})
             finally:
                 self.active[0] -= 1

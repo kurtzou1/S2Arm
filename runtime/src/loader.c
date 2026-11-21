@@ -10,7 +10,7 @@
 #include "s2a_gfx_mode.h"
 #include "ro_find.h"
 #include "../../platform/plat.h"
-#if !defined(__ANDROID__)
+#if (!defined(__ANDROID__) && !defined(__OHOS__))
 #include <TargetConditionals.h>
 #endif
 #include <fcntl.h>
@@ -20,7 +20,7 @@ void s2a_init_failed(int code);   // host_main.c：初启失败出口（iOS 人�
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
 #include "../../android/native/module.h"
 #else
 #include <mach/mach.h>
@@ -199,7 +199,7 @@ static int text_line(struct loader_text *text, char *line, size_t capacity) {
             if (ferror(text->file)) die("读 %s 失败", text->what);
             return 0;
         }
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
         if (!strchr(line, '\n') && !feof(text->file)) die("%s: 表行过长", text->what);
 #endif
         return 1;
@@ -217,31 +217,39 @@ static int text_line(struct loader_text *text, char *line, size_t capacity) {
     return 1;
 }
 static int far_cmp(const void *a, const void *b) { int64_t x = ((const struct s2a_far *)a)->from, y = ((const struct s2a_far *)b)->from; return x < y ? -1 : x > y; }
+// 改写产物的目标与 ABI：鸿蒙用 S2A_TARGET=ohos 出（线程槽取法不同，见 runtime/rewriter/rewriter.c），与 android/native/module.c 同一口径
+#if defined(__OHOS__)
+#define S2A_LOADER_TARGET "ohos"
+#define S2A_LOADER_ABI "ohos-sp-safe-v1"
+#else
+#define S2A_LOADER_TARGET "android"
+#define S2A_LOADER_ABI "android-sp-safe-v1"
+#endif
 static void read_layout_text(module_t *m, struct loader_text *text) {
     const char *path = text->what;
     char line[256], key[32]; unsigned long v; unsigned seen = 0, trap_cap = 0, far_cap = 0; int have_traps = 0, have_fars = 0;
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
     int android_target = 0, android_abi = 0;
 #endif
     while (text_line(text, line, sizeof line)) {
         if (!strncmp(line, "# BUILD_ID\t", 11)) { if (!strcmp(m->name, "main")) { strlcpy(g_main_build_id, line + 11, sizeof g_main_build_id); g_main_build_id[strcspn(g_main_build_id, "\r\n")] = 0; } continue; }
         // 非苹果目标（S2A_TARGET=android 等）的产物线程槽取法不同：补丁代码读 tpidr_el0，在这里跑会读错槽。苹果产物没有这一行
         if (!strncmp(line, "# TARGET\t", 9)) {
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
             size_t len = strcspn(line + 9, "\r\n");
-            if (android_target || len != 7 || memcmp(line + 9, "android", 7))
-                die("%s: 必须是唯一 TARGET android 产物", path);
+            if (android_target || len != sizeof S2A_LOADER_TARGET - 1 || memcmp(line + 9, S2A_LOADER_TARGET, len))
+                die("%s: 必须是唯一 TARGET " S2A_LOADER_TARGET " 产物", path);
             android_target = 1; continue;
 #else
             die("%s: 改写目标是 %.*s，不是苹果，用缺省 S2A_TARGET 重出", path, (int)strcspn(line + 9, "\r\n"), line + 9);
 #endif
         }
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
         if (!strncmp(line, "# REWRITE_ABI\t", 14)) {
-            static const char expected[] = "android-sp-safe-v1";
+            static const char expected[] = S2A_LOADER_ABI;
             size_t len = strcspn(line + 14, "\r\n");
             if (android_abi || len != sizeof expected - 1 || memcmp(line + 14, expected, sizeof expected - 1))
-                die("%s: 必须是唯一 REWRITE_ABI android-sp-safe-v1 产物", path);
+                die("%s: 必须是唯一 REWRITE_ABI " S2A_LOADER_ABI " 产物", path);
             android_abi = 1; continue;
         }
 #endif
@@ -288,11 +296,11 @@ static void read_layout_text(module_t *m, struct loader_text *text) {
         }
     }
     // The caller owns the file or APK asset lease.
-#if defined(__ANDROID__)
-    if (!android_target) die("%s: 缺 TARGET android，不能执行苹果线程槽代码", path);
-    if (!android_abi) die("%s: 缺 REWRITE_ABI android-sp-safe-v1", path);
+#if (defined(__ANDROID__) || defined(__OHOS__))
+    if (!android_target) die("%s: 缺 TARGET " S2A_LOADER_TARGET "，不能执行苹果线程槽代码", path);
+    if (!android_abi) die("%s: 缺 REWRITE_ABI " S2A_LOADER_ABI, path);
 #endif
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
     if (m->load_bias) die("%s: Android mapper does not support nonzero LOAD_BIAS", path);
 #endif
     if (!m->patch_off || (m->key_page_off + m->load_bias) % 0x4000 || m->key_page_size != 0x4000 || seen != (1u << KEY_N) - 1 || m->load_bias % 0x1000 || m->load_bias >= 0x4000)   // 键页按宿主页网格（基址前移 load_bias）对齐
@@ -376,7 +384,7 @@ static void read_layout(module_t *m, const char *dir) {
     read_layout_text(m, &text);
     fclose(f); g_boot_file = NULL;
 }
-#if !defined(__ANDROID__)
+#if (!defined(__ANDROID__) && !defined(__OHOS__))
 int s2a_key_page_writable(module_t *m) {
     if (!m || !m->base || !m->key_page_size) return -1;
     return mprotect(m->base + m->key_page_off, m->key_page_size, PROT_READ | PROT_WRITE);
@@ -394,7 +402,7 @@ static void install_key_page(module_t *m) {
     if (mprotect(page, m->key_page_size, PROT_READ)) die("%s 键页 mprotect", m->name);
 }
 #endif
-#if !defined(__ANDROID__) && !defined(S2A_UNIT_TEST)   // 即时存档（只苹果平台）；单测用桩 mach 头（tests/support/hoststub），没有 vm_region_64
+#if !defined(__ANDROID__) && !defined(__OHOS__) && !defined(S2A_UNIT_TEST)   // 即时存档（只苹果平台）；单测用桩 mach 头（tests/support/hoststub），没有 vm_region_64
 // 即时存档恢复：游戏内存整块写回后，各模块键页里的线程键 TSD 偏移是 A 进程的（跨版本时宿主线程键的编号可能不同），按本进程重写；
 //   键页里别的槽（宽屏 / 补丁开关等玩家设置写的值）随快照照旧，不动
 int s2a_snap_keypages_reapply(void) {
@@ -419,7 +427,7 @@ static void register_gates_text(module_t *m, struct loader_text *text) {
     unsigned long ret, orig; char kind[16]; int arg;
     while (text_line(text, line, sizeof line)) {
         int count = sscanf(line, "%lx %15s %d %lx", &ret, kind, &arg, &orig);
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
         char tail; int used = 0;
         if (sscanf(line, "%lx %15s %d %lx %n%c", &ret, kind, &arg, &orig, &used, &tail) != 4)
             die("%s: 门表行格式错误", text->what);
@@ -474,7 +482,7 @@ static int jump_slot_addend(void) {
 }
 void s2a_nro_table_load(const char *dir); const char *s2a_nro_defer_lookup(const char *name);   // nrodefer.c：romfs NRO 导出表
 uint64_t s2a_direct_lookup(const char *name);
-#if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !defined(__OHOS__)
 uint64_t s2a_direct_stub(const char *name);   // gfxmode.c：找遍之后，直连模式下 gl* 核心名的安全空实现
 #endif
 static uint64_t resolve_global(const char *name) {   // 按装载顺序找已装模块里的定义（ELF 缺省语义 = Horizon rtld）
@@ -650,7 +658,7 @@ static void relocate(module_t *m) {
                 v = s2a_direct_lookup(nm);   // 直连模式（gfxmode.c）：游戏导入的 nvnBootstrapLoader 解析到直连图形层；通用模式恒 0，走下面原路径
                 if (!v) v = resolve_global(nm);
                 if (!v) { void *f = s2a_libc_lookup(nm); if (f) { v = (uint64_t)sw_xstack_wrap(nm, f); nlibc++; } }
-#if !defined(__ANDROID__)   // 安卓没有直连 GL 层（s2a_direct_lookup 在 android/native 自给）
+#if !defined(__ANDROID__) && !defined(__OHOS__)   // 安卓/鸿蒙没有直连 GL 层（s2a_direct_lookup 在 android/native 自给）
                 if (!v && !s2a_nro_defer_lookup(nm)) v = s2a_direct_stub(nm);   // 都没定义（romfs NRO 也没有）的 gl* 核心名：安全空实现；GL 驱动的带下划线名 _gl* / _egl* 去掉下划线交 GL 层。放最后免得顶掉游戏模块自己的定义（#601）
 #endif
                 if (!v && (s->st_info >> 4) == 2) {   // 无定义弱符号 = 0（ELF / rtld 语义）；D-WSFE：按名记下来（含槽位偏移），崩在「往全局指针写」时能对上是哪个
@@ -673,7 +681,7 @@ static void relocate(module_t *m) {
                     if (g_npend == g_cpend) { size_t c = g_cpend ? g_cpend * 2 : 256; pend_t *n = realloc(g_pend, c * sizeof *n); if (!n) die("未解析导入表扩到 %zu 项时内存不足", c); g_pend = n; g_cpend = c; }
                     g_pend[g_npend++] = (pend_t){where, nm, r->r_addend, type == R_AARCH64_JUMP_SLOT, 0, 0}; }
             }
-#ifdef __ANDROID__
+#if (defined(__ANDROID__) || defined(__OHOS__)) || defined(__OHOS__)
             uint64_t fb = v;   // Android does not provide the far-window binding.
 #else
             uint64_t fb = type == R_AARCH64_JUMP_SLOT ? s2a_far_bind(nm, v) : v;   // 远端开着时 SDK 内存函数族换成远端感知版（far.c）
@@ -723,7 +731,7 @@ void s2a_loader_test_relocate(module_t *m) {   // 单测：内存里的合成模
 }
 #endif
 
-#if !defined(__ANDROID__)
+#if (!defined(__ANDROID__) && !defined(__OHOS__))
 // ---------- 模块在窗口里的位置（10-25 马力欧银河 2：main 映像 2.86 GB、bss 约 2.6 GB）----------
 // 模块原先在窗口之外另 mmap（落低区）；iPhone 地址约束下窗口外低区最大一块只有约 723 MB，装不下大 bss 的款（Mac 开约束时 FATAL main mmap 0xaa5cc000，iPhone 同样起不来）。
 // 现在窗口跨度 = Horizon 各区 + 本函数算的模块跨度；模块段落点由布局定（layout.c），不再另找低区。
@@ -853,7 +861,7 @@ uint64_t s2a_module_span(const char *dir) { (void)dir; return 0; }
 #endif
 
 // ---------- 映射 ----------
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
 // 目录与 APK 输入共用 mapper、表头一致性检查和进程期映射所有权。
 static void adopt_mapping(module_t *m, struct s2a_module *mapped) {
     const struct s2a_module_layout *l = &mapped->l;
@@ -1208,7 +1216,7 @@ static int gpu_driver_skip(const char *dir, const char *name) {
     if (rerr) die("【红】直连：GPU 驱动模块名单 %s 读失败：%s", p, strerror(rerr));
     return hit;
 }
-#if !defined(__ANDROID__)
+#if (!defined(__ANDROID__) && !defined(__OHOS__))
 static int nro_table_count(void);   // 读 nro_modules.tsv（g_moddir，只读一次），回行数（nn::ro 一节）
 #endif
 void load_modules(const char *dir, const char **names_in, int n_in) {
@@ -1221,14 +1229,14 @@ void load_modules(const char *dir, const char **names_in, int n_in) {
         names[n++] = names_in[i];
     }
     int cap = n;
-#if !defined(__ANDROID__)
+#if (!defined(__ANDROID__) && !defined(__OHOS__))
     cap += nro_table_count();   // nn::ro 能装的 NRO 全在 nro_modules.tsv：模块表一次留够
 #endif
     mod_table_alloc(cap);
     for (int i = 0; i < n; i++) { strlcpy(g_mod[i].name, names[i], sizeof g_mod[i].name); read_layout(&g_mod[i], dir); }
     create_keys();
     if (plat_tsd_init()) die("TSD 初始化失败");
-#if !defined(__ANDROID__)
+#if (!defined(__ANDROID__) && !defined(__OHOS__))
     if (s2a_window_ok()) {   // 模块段起点由布局定（layout.c：标准布局在各区之后，窗口放不下标准布局时在窗口最前）
         uint64_t s2a_mem_mod_base(const char *npdm); char np[1100]; snprintf(np, sizeof np, "%s/main.npdm", dir);
         uint64_t wb, ws, span = s2a_module_span(dir);
@@ -1254,7 +1262,7 @@ void load_modules(const char *dir, const char **names_in, int n_in) {
     if (g_deferred) LOG("装载：%u 个导入延迟到 nn::ro 装载（romfs NRO 导出，游戏用 nn::ro 装进来时才解析；起局前没装就被调到照旧报红中止）", g_deferred);
     free(names);
 }
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
 static struct s2a_loader_blob read_asset(const struct s2a_loader_source *source, const char *name, const char *suffix) {
     char filename[128];
     if (snprintf(filename, sizeof filename, "%s.%s", name, suffix) >= (int)sizeof filename)
@@ -1348,7 +1356,7 @@ unsigned s2a_unresolved_count(void) { return g_unresolved; }
 typedef struct { char name[16]; uint8_t sha[32]; uint64_t size, bss; int mod, loaded; } nro_mod_t;   // loaded：0 没装、1 已装、2 即时存档恢复时按快照预装、等服务层重放 LoadNro 来认领（不另加字段：关着时表项大小不变）
 static nro_mod_t *g_nro; static int g_nnro = -1, g_cnro;   // nro_modules.tsv 的行，按需增长（无上限）
 static pthread_mutex_t g_nro_mu = PTHREAD_MUTEX_INITIALIZER;
-#if !defined(__ANDROID__)   // NRO 映射表只在非安卓路径读（安卓 s2a_nro_map 直接回 5：模块映射走 APK 资源）
+#if (!defined(__ANDROID__) && !defined(__OHOS__))   // NRO 映射表只在非安卓路径读（安卓 s2a_nro_map 直接回 5：模块映射走 APK 资源）
 static int hexbyte(const char *p) { int v = 0; for (int i = 0; i < 2; i++) { char c = p[i]; v = v * 16 + (c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1000); } return v; }
 static void nro_table(void) {   // 锁内调：起局（load_modules 定模块表容量）时读模块目录的 nro_modules.tsv（没有 = 本款没有 NRO），之后不再读
     if (g_nnro >= 0) return;
@@ -1384,7 +1392,7 @@ __attribute__((visibility("default"), used)) int s2a_nro_known(const uint8_t sha
 #endif
 }
 __attribute__((visibility("default"), used)) int s2a_nro_map(const uint8_t sha[32], uint64_t size, uint64_t bss, uint64_t *base) {
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
     (void)sha; (void)size; (void)bss; (void)base;
     LOG("【红】nn::ro 装 NRO：Android 未支持（模块映射走 APK 资源，见 load_modules_from_source）"); return 5;
 #else
@@ -1427,7 +1435,7 @@ __attribute__((visibility("default"), used)) int s2a_nro_map(const uint8_t sha[3
     pthread_mutex_unlock(&g_nro_mu); return rc;
 #endif
 }
-#if !defined(__ANDROID__)   // 即时存档只在苹果平台
+#if !defined(__ANDROID__) && !defined(__OHOS__)   // 即时存档只在苹果平台
 // 即时存档：动态装载的 NRO（nn::ro）。存：按装载先后（模块表序）记每个装过的 NRO 的哈希 / 大小 / bss / 此刻装着没有；
 //   取：在写回游戏内存之前按原顺序重新装（游标顺次前进，落点与存档时相同；门、符号表、导入补绑都由本版装载器重做），
 //   存档时已卸下的随后标卸下；装着的标「等服务层认领」——服务层重放 LoadNro 时回成功 + 同址，它的账本照原样重建

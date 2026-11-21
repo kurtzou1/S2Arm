@@ -21,13 +21,29 @@ nvn_gpu_view rp_view_by_id_decl(int id, uint8_t dtt, uint8_t dcls, int elem, nvn
 // 句柄在游戏常量缓冲里（NVN_RB_TEXU）：号没登记（越过池容量 / 负号 / 池里没登记）按 Ryujinx 的 null 贴图绑声明类型的零贴图，不跳整笔；
 // 其余同 rp_view_by_id_decl（elem = 0）。信息计数 rp_ubo_zero_count（换局清零）。
 nvn_gpu_view rp_view_by_ubo_handle_decl(int id, uint8_t dtt, uint8_t dcls, nvn_gpu_cmd c, tex_t *t_out);
+// 一维 / 一维数组折成二维 / 二维数组（同 iOS nvn_mtl.m tex_desc_fit，#1810）：后端建不出目标 0 / 3，翻译后的着色器也一律按二维采样
+// （Sample1DAs2D）。NVN 描述里一维数组的层数放在 height，折后放进 depth、高 1；一维的高、深都是 1。后端建图、零贴图、声明与实际目标的比较都先过这一步；
+// 登记快照 t->d 与客体布局 t->L 保持原样（解交织按客体的形状）。
+static inline int rp_fold_1d_target(int target) {
+    return target == NVN_TEXTURE_TARGET_1D ? NVN_TEXTURE_TARGET_2D :
+           target == NVN_TEXTURE_TARGET_1D_ARRAY ? NVN_TEXTURE_TARGET_2D_ARRAY : target;
+}
+static inline void rp_fold_1d_desc(nvn_texdesc *d) {
+    if (d->target == NVN_TEXTURE_TARGET_1D) { d->target = NVN_TEXTURE_TARGET_2D; d->height = 1; d->depth = 1; }
+    else if (d->target == NVN_TEXTURE_TARGET_1D_ARRAY) { d->depth = d->height ? d->height : 1; d->height = 1; d->target = NVN_TEXTURE_TARGET_2D_ARRAY; }
+}
+// 贴图自身的层数（不含视图记录）：立方体 6，二维数组 / 立方体数组取 depth，一维数组取 height，其余 1。
+static inline uint32_t rp_tex_layer_count(const tex_t *t) {
+    return t->d.target == NVN_TEXTURE_TARGET_CUBEMAP ? 6 :
+        t->d.target == NVN_TEXTURE_TARGET_2D_ARRAY || t->d.target == NVN_TEXTURE_TARGET_CUBEMAP_ARRAY ? t->d.depth :
+        t->d.target == NVN_TEXTURE_TARGET_1D_ARRAY ? t->d.height : 1;
+}
 // 按声明规划同一存储的视图目标；0 原样、1 已改记录、-1 无法桥接。不会创建零贴图。
 static inline int rp_decl_view_target(const tex_t *t, view_t *v, int has_v, uint8_t dtt) {
     if (!dtt) return 0;
-    int want = dtt - 1, have = has_v && v->set_target ? v->target : t->d.target;
+    int want = rp_fold_1d_target(dtt - 1), have = rp_fold_1d_target(has_v && v->set_target ? v->target : t->d.target);
     if (want == have) return 0;
-    uint32_t layers = t->d.target == NVN_TEXTURE_TARGET_CUBEMAP ? 6 :
-        t->d.target == NVN_TEXTURE_TARGET_2D_ARRAY || t->d.target == NVN_TEXTURE_TARGET_CUBEMAP_ARRAY ? t->d.depth : 1;
+    uint32_t layers = rp_tex_layer_count(t);
     if (has_v && v->set_layers) layers = v->nlayers ? v->nlayers : (layers > v->min_layer ? layers - v->min_layer : 1);
     uint32_t n = 0;
     int layered = have == NVN_TEXTURE_TARGET_2D || have == NVN_TEXTURE_TARGET_2D_ARRAY ||

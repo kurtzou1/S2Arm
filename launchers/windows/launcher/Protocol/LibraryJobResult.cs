@@ -410,3 +410,19 @@ public sealed record SGradeBatch(bool Running, int Index, int Count)
         e.TryGetProperty("index", out var i) && i.ValueKind == JsonValueKind.Number ? i.GetInt32() : 0,
         e.TryGetProperty("count", out var c) && c.ValueKind == JsonValueKind.Number ? c.GetInt32() : 0);
 }
+
+/// <summary>S 级升级这款在升时的进度（同 Mac SGradeLive）。玩家报修 D-QNA9（Mac 实机，Windows 同写法）：段内各计数器的 done / total 与队列轮询的粗进度互相盖，进度条来回跳。
+/// 事件只认作业层的整款进度 sgradeProgress（pack/jobs/sgrade.py _GameProgress，0–1、只增不减），普通 progress 的 done / total 是段内计数器、不认；
+/// 同一款 running 期间事件与轮询取较大值，只增不减；之前不在升（做完 / 排队）就从新读数起。</summary>
+public static class SGradeLiveProgress
+{
+    public static double? FromEvent(JsonElement e) =>
+        e.ValueKind == JsonValueKind.Object && e.TryGetProperty("sgradeProgress", out var p) && p.ValueKind == JsonValueKind.Number ? p.GetDouble() : null;
+
+    public static double? Running(double? next, string? oldState, double? oldProgress)
+    {
+        var prev = oldState == "running" ? oldProgress : null;
+        double? v = next is { } a ? (prev is { } b ? Math.Max(a, b) : a) : prev;
+        return v is { } x ? Math.Clamp(x, 0, 1) : null;
+    }
+}

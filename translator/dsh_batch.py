@@ -136,11 +136,11 @@ def admitted(cmd, argv):   # 整份出库（build）经内存 + 核数准入（t
     a = dict(zip(argv[1:], argv[2:]))   # 每个参数 → 它后面那个（取 --game / -j 的值）
     key = os.environ.get('S2A_MEM_KEY') or a.get('--game') or 'dsh_batch'   # S2A_MEM_KEY：pack/refresh.sh 给款名，与运行区实测表历来的键一致
     admit = os.path.normpath(os.path.join(DSH, '../../../../tools/mem_admit.sh'))
-    # 排队期间 mem_admit 至少每 S2A_MEM_SAY_S（缺省 300）秒往 stderr 写一行【排队】：direct_lib.sh 把它重定向进 build.log，外层 nostall.py（600 秒无进展）按日志在长算进展，不会把排队当挂死
+    # 排队期间 mem_admit 至少每 S2A_MEM_SAY_S（缺省 300）秒往 stderr 写一行【排队】：direct_lib.py 把它重定向进 build.log，外层 nostall.py（600 秒无进展）按日志在长算进展，不会把排队当挂死
     return ['bash', admit, 'dsh', key, '--cores', a.get('-j', '1'), '--', *cmd, *argv]
 
 
-if __name__ == '__main__':   # 入口：python3 dsh_batch.py <dsh_batch 参数…>（按需编，再以这些参数执行；如 build（direct_lib.sh）/ --unity share / --libpack pack，见 Build.cs / Unity.cs / LibPack.cs 文件头）
+if __name__ == '__main__':   # 入口：python3 dsh_batch.py <dsh_batch 参数…>（按需编，再以这些参数执行；如 build（direct_lib.py）/ --unity share / --libpack pack，见 Build.cs / Unity.cs / LibPack.cs 文件头）
     if sys.argv[1:] == ['--src-digest']: print(src_digest(os.path.join(DSH, 'batch', 'dsh_batch.csproj'))); sys.exit(0)   # 发版打包按 App 内这份源码写内置件的摘要（bundle_engine.py）
     cmd, _ = get()
     run = admitted(cmd, sys.argv[1:])

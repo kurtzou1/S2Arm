@@ -52,7 +52,7 @@ PY
 else
   echo "🟢 ${G} 配置选择：${SOURCE}（未改变配置）"
 fi
-# The direct line approved direct_lib.sh's DM_GAMES_DIR consumer in PR220.
+# The direct line approved direct_lib.py's DM_GAMES_DIR consumer in PR220.
 # This checks build input only; runtime loading remains the direct line's work.
 CUR=$(root_cur "$G")
 "$PY" "$H/direct_profile_stage.py" "$CUR" --selected > /dev/null || exit $?

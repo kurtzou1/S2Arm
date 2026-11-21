@@ -25,9 +25,9 @@ class PrivateTmpSweep(unittest.TestCase):
 
     def make(self, name, age, inner_age=None):
         p = self.c.private / name
-        (p / "roots/g@现行").mkdir(parents=True)
-        (p / "roots/g@现行/a.bin").write_bytes(b"x")
-        for q in (p / "roots/g@现行/a.bin", p / "roots/g@现行", p / "roots"):
+        (p / "roots/g@v1").mkdir(parents=True)
+        (p / "roots/g@v1/a.bin").write_bytes(b"x")
+        for q in (p / "roots/g@v1/a.bin", p / "roots/g@v1", p / "roots"):
             os.utime(q, (self.now - age, self.now - age))
         if inner_age is not None:
             os.utime(p / "roots", (self.now - inner_age, self.now - inner_age))

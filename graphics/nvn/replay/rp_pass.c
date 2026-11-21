@@ -541,7 +541,7 @@ static int pass_begin_colors(nvn_gpu_cmd c, uint8_t colors) {
     int pdpk = park_depth();   // 深度模板挂着的待折清除（一项可以带两面）
     int pcd = pdpk >= 0 && g_pk[pdpk].cd, pcs = pdpk >= 0 && g_pk[pdpk].cs;
     if (P.rt.depth) {
-        nvn_fmt_info fi; int ok = nvn_fmt_info_of((uint32_t)P.rt.depth->d.format, &fi);
+        nvn_fmt_info fi = {0}; int ok = nvn_fmt_info_of((uint32_t)P.rt.depth->d.format, &fi);
         view_t av;
         nvn_gpu_view v = rp_view_for(P.rt.depth, att_view(P.rt.depth, P.rt.has_dview, &P.rt.dview, &av), c);
         if (!v) { memset(g_shu, 0, sizeof g_shu); rp_view_pin_end(); return 0; }
@@ -777,7 +777,7 @@ void rp_pass_clear_ds(nvn_gpu_cmd c, const p_clear_ds *cd, const void *rec) {
     int sm = cd->stencil_mask & 0xff;
     if (!cd->depth_mask && !sm) return;
     // 目标实际有哪些面：没有的面这次清除对它无事可做（同 rp_pass_begin 的附件判定）
-    nvn_fmt_info fi; int ok = nvn_fmt_info_of((uint32_t)P.rt.depth->d.format, &fi);
+    nvn_fmt_info fi = {0}; int ok = nvn_fmt_info_of((uint32_t)P.rt.depth->d.format, &fi);
     int do_d = cd->depth_mask && (!ok || fi.depth), do_s = sm && ok && fi.stencil;
     if (!do_d && !do_s) return;
     if (!scissor_full(P.rt.depth, &P.rt.dview, P.rt.has_dview) || (do_s && sm != 0xff)) {
@@ -810,4 +810,13 @@ void rp_pass_reset(void) {
     memset(g_sh, 0, sizeof g_sh);
 }
 int rp_pass_is_open(void) { return P.open; }
+int rp_pass_draws(void) { return P.open ? P.ndraw : 0; }
+// 当前通道能不能在两笔之间切开、下一笔按 LOAD 续开（rp_exec.c pass_split）。存储恒为 STORE、续开时没有清除负载才算；
+// 影子附件、多重采样目标即使正确也不划算，一并不切。
+int rp_pass_split_ok(void) {
+    if (!P.open || park_here() || P.shape_smp > 1) return 0;
+    for (int i = 0; i < 8; i++) if (g_shu[i].base) return 0;
+    if (nvn_plat_flag("nvk_diag_load_dontcare", 0) || nvn_plat_flag("nvk_diag_store_dontcare", 0)) return 0;
+    return 1;
+}
 const p_set_rt *rp_pass_target(void) { return P.has_rt ? &P.rt : NULL; }

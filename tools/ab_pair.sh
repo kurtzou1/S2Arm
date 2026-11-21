@@ -12,7 +12,7 @@
 # --rejudge（放在最前）：不起局，对已跑完的同一局目录（第 3 个参数必给）重判——判据改了不重跑局。
 # --write（放在最前，可与 --rejudge 同用）：满屏整档结论写进 docs/名单_满屏比例/，全过且没有不过时补 verified.tsv（widen_accept.py --write，只加不删）。
 # 满屏判据三层：MARK 帧 + 关局对照（占宽 / 占高 / 黑边 / 拉伸 / 拉丝）、开局 host.log 上屏层（宿主每次出图判几何，截图只是游戏画幅量不到）、开局路线截图（菜单页）。
-# 产物根照 entry_check：${S2A_ROOTS:-~/.s2arm/run/s2arm/roots}/<款>@现行；在 gate-host / Spare-host 上跑时把 S2A_ROOTS 指到远端常驻根，不每局同步根：
+# 产物根照 entry_check：${S2A_ROOTS:-~/.s2arm/run/s2arm/roots} 里 <款> 的现行版本（指针文件 <款>@现行，pack/roots.sh root_cur_in）；在 gate-host / Spare-host 上跑时把 S2A_ROOTS 指到远端常驻根，不每局同步根：
 #   bash 维护方工具 --host gate-host -- bash -c 'S2A_ROOTS=$HOME/rpack/roots bash tools/ab_pair.sh octopath2 widen:4:3'
 set -u
 RJ=0; WR=0

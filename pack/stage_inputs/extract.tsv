@@ -13,9 +13,9 @@
 外	graphics/nvn/tools/gfx_api.py	只用它判出的类别：vulkan / gl 款没有 NVN 着色器、跳过抽取；抽取产物不依赖判定代码，类别本身进键（stage_extract.sh K），改判定规则不再让全款重抽取（11-01 维护者）
 入	graphics/nvn/tools/lz4blk.py
 入	graphics/nvn/tools/nso_syms.py
-入	graphics/nvn/tools/romfs_list.py	仓库里唯一的 RomFS 遍历与文件头清单（11-03）：抽取 / 直连读哪些 RomFS 文件、文件头由它给（glslc_offline / nxsh_extract / ue_pak / spirv_msl / resource_input_key / direct_lib.sh 经它）
+入	graphics/nvn/tools/romfs_list.py	仓库里唯一的 RomFS 遍历与文件头清单（11-03）：抽取 / 直连读哪些 RomFS 文件、文件头由它给（glslc_offline / nxsh_extract / ue_pak / spirv_msl / resource_input_key / direct_lib.py 经它）
 入	pack/romfs_img.py	标准 RomFS 镜像读取（11-16）：RomFS 目录不在、旁边有 <目录>.std 时 romfs_list.py 从镜像盘点 / 读头经它
-入	graphics/tools/direct/extract.sh
+入	graphics/tools/direct/extract.py
 入	graphics/tools/shbake/casc_flat.py
 入	graphics/tools/shbake/cri_cpk.py
 入	graphics/tools/shbake/crilayla.c

@@ -1,6 +1,6 @@
 // 起局分段计时：每段打一行「[起局] <段> +<距起点 ms>（本段 <ms>）」。起点 = 内核创建本进程的时刻（sysctl kern.proc.pid 的 p_starttime；多款容器点 Play 后改为点 Play 那刻，见 s2a_boot_rebase），
 // 含 dyld 装可执行文件与各库的时间。原生层自己的段在 host_main / vawin / ap_host 里打，C# 侧（运行时起来、服务登记）调导出的 s2a_boot_mark 打。
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
 #include "../../android/native/runtime/platform/boot_android.inc"
 #else
 #include "native.h"

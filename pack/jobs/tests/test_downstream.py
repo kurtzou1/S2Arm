@@ -276,10 +276,10 @@ class WinContext:
     def begin(self, name, i, n): self.steps.append((i, n, name))
     def emit(self, kind, m): self.messages.append(m)
 
-    def run(self, cmd, log, env=None):
-        self.runs.append([str(x) for x in cmd])
+    def run(self, cmd, log, env=None, cwd=None):
+        self.runs.append([str(x) for x in cmd]); self.cwds = getattr(self, "cwds", []) + [cwd]
         if "-e" in self.runs[-1]:
-            self.ents = plistlib.loads(Path(self.runs[-1][self.runs[-1].index("-e") + 1]).read_bytes())
+            self.ents = plistlib.loads((Path(cwd or ".") / self.runs[-1][self.runs[-1].index("-e") + 1]).read_bytes())
 
 
 class FakeWin:
@@ -342,6 +342,11 @@ class WinInstallTest(unittest.TestCase):
         self.assertEqual(self.c.ents, {IML: True})
         self.assertEqual(self.c.runs[0][:3], ["rcodesign.exe", "sign", "-e"])
         self.assertTrue(self.c.runs[0][-1].endswith("Demo.app"))
+        # D-J7CH：rcodesign 的 -e 是「作用范围:值」、按第一个冒号拆，Windows 盘符路径会把权限挂到「C」上（os error 3）
+        #   → 只传不含冒号的文件名、在权限文件所在目录里跑；被签的 .app 传绝对路径（运行目录换了也找得到）
+        e = self.c.runs[0][self.c.runs[0].index("-e") + 1]
+        self.assertNotIn(":", e); self.assertEqual(e, "downstream.entitlements")
+        self.assertIsNotNone(self.c.cwds[0]); self.assertTrue(Path(self.c.runs[0][-1]).is_absolute())
         self.assertIn("Payload/Demo.app/Demo", W.names)   # 交给 plumesign 的是重新打好的 .ipa
         self.assertEqual((W.ns.udid, W.ns.plumesign), ("UDID1", "plumesign.exe"))
         self.assertEqual((W.pushed["udid"], W.pushed["bid"], W.pushed["pack"]), ("UDID1", "io.s2arm.ds.demo.abcde12345", self.rec["pack"]))

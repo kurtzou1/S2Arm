@@ -395,7 +395,7 @@ def bundle(destination, developer_dir):
     digest_out = subprocess.run([sys.executable, "-I", str(destination / "translator/dsh_batch.py"), "--src-digest"],
                                 env=c.env(), check=True, capture_output=True, text=True).stdout.strip()
     (tools / "dsh_batch/.src_digest").write_text(digest_out + "\n", encoding="utf-8")
-    # 同一份 App 内源码的翻译器指纹（dmsh_chain.py --xfp 按 DshXfpInput 现算）：玩家机没有 .NET（SDK 更没有），展不开清单，direct_lib.sh 出库后核库印章取这份当「本树」值
+    # 同一份 App 内源码的翻译器指纹（dmsh_chain.py --xfp 按 DshXfpInput 现算）：玩家机没有 .NET（SDK 更没有），展不开清单，direct_lib.py 出库后核库印章取这份当「本树」值
     #   （dmsh_chain.tree_xfp ← dsh_batch.prebuilt_xfp，摘要相同才认）。与内置件自报的编译期 Xfp 不同就是发版件没按这份源码编，当场停
     xfp_out = subprocess.run(
         [sys.executable, "-I", str(destination / "translator/dmsh_chain.py"), "--xfp"],

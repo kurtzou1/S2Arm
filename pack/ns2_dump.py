@@ -25,7 +25,7 @@ Switch 2 游戏现在拿到手的形态是主机上导出的松散目录（11-04
 
 用法：
     ns2_dump.py --detect <目录>                 是导出目录就打印程序号、退出 0；不是退出 1
-    ns2_dump.py <导出目录> <输出解包目录> [--name <款名>]
+    ns2_dump.py <导出目录> <输出解包目录> [--name <款名>] [--base <本体目录>]   本体在别处（散文件解包目录）：<导出目录> 可以是空目录
 """
 import ctypes
 import hashlib
@@ -344,9 +344,12 @@ def nacp_title(n, lang):   # ApplicationTitle[lang] 的名字（0x200 字节 UTF
     return t or None
 
 
-def src_key(dump):
+def src_key(dump, base=None):
     h = hashlib.sha256()
-    for rel, a in sorted(walk(dump).items()):
+    files = dict(walk(dump))
+    if base:   # 本体在别处（--base，散文件解包目录不链接进来）：按 base/<相对路径> 计入，同链接进来时一样
+        files.update({os.path.join('base', rel): a for rel, a in walk(base).items()})
+    for rel, a in sorted(files.items()):
         st = os.stat(a)
         h.update(f'{rel}\t{st.st_size}\t{st.st_mtime_ns}\n'.encode())   # 纳秒（审计 P1-54：秒级键同一秒内换同大小的文件认不出）
     h.update(hashlib.sha256(open(os.path.abspath(__file__), 'rb').read()).digest())
@@ -358,8 +361,8 @@ def src_key(dump):
     return h.hexdigest()[:16]
 
 
-def convert(dump, out, name=None):
-    base = os.path.join(dump, 'base')
+def convert(dump, out, name=None, base=None):
+    base = base or os.path.join(dump, 'base')
     try:
         tid = read_tid(os.path.join(base, 'exefs', 'main.npdm'))
     except (OSError, ValueError, struct.error) as e:
@@ -368,7 +371,7 @@ def convert(dump, out, name=None):
     upd = os.path.join(dump, 'updates', ups[-1]) if ups else None
     if len(ups) > 1:
         print(f'🟡 有 {len(ups)} 个更新（{", ".join(ups)}），取最新 {ups[-1]}')
-    key = src_key(dump)
+    key = src_key(dump, base if base != os.path.join(dump, 'base') else None)
     kf = os.path.join(out, '.ns2_dump_key')
     if os.path.isfile(kf) and open(kf).read().strip() == key:
         print(f'🟢 导出目录没变（键 {key}），复用 {out}')
@@ -483,7 +486,11 @@ def main(a):
             return 1
         print(f'{read_tid(os.path.join(d, "base", "exefs", "main.npdm")):016X}\t{d}')
         return 0
-    name = None
+    name = base = None
+    if '--base' in a:   # 本体目录（exefs/ + romfs/）在别处：作业层导入的散文件解包目录直接交进来，不再链接成 <导出目录>/base（玩家诊断 #0fd185：链接可能建不了）
+        i = a.index('--base')
+        base = os.path.abspath(a[i + 1])
+        a = a[:i] + a[i + 2:]
     if '--name' in a:
         i = a.index('--name')
         name = a[i + 1]
@@ -491,6 +498,12 @@ def main(a):
     if len(a) != 2:
         print(__doc__.split('用法：')[1], file=sys.stderr)
         return 2
+    if base:
+        if not os.path.isfile(os.path.join(base, 'exefs', 'main.npdm')):
+            red(f'{base} 不是本体目录（要有 exefs/main.npdm）')
+        if not os.path.isdir(a[0]):
+            red(f'{a[0]} 不是目录')
+        return convert(os.path.abspath(a[0]), os.path.abspath(a[1]), name, base)
     d = find_dump(a[0]) if os.path.isdir(a[0]) else None
     if not d:
         red(f'{a[0]} 不是 Switch 2 导出目录（要有 base/exefs/main.npdm）')

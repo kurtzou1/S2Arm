@@ -19,7 +19,7 @@ static const int FD_HEADROOM = 64;
 
 static struct { char name[48]; s2a_lowva_evict_fn evict; void *ctx; _Atomic int64_t held, inflight; _Atomic int opt; } U[NUSER + 1];   // opt：做过可选申请（可拒绝）
 static _Atomic int g_nuser;
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
 static pthread_mutex_t g_mu;
 static pthread_once_t g_mu_once = PTHREAD_ONCE_INIT;
 static _Atomic int g_mu_ready;
@@ -271,7 +271,7 @@ const char *s2a_lowva_test_peak(uint64_t *t0, uint64_t *tmin, uint64_t *tmin_s, 
     *t0 = g_pk_t0; *tmin = g_pk_tmin; *tmin_s = g_pk_tmin_s; *bmin = g_pk_bmin; *bmin_s = g_pk_bmin_s; return g_pk_snap[atomic_load(&g_pk_cur)].tags;
 }
 void *s2a_lowva_test_mutex(void) {
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     int error = pthread_once(&g_mu_once, lowva_mutex_init);
     if (error) die("Android 低区账测试互斥初始化失败 errno=%d", error);
 #endif

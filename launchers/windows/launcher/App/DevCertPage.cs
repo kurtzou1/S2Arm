@@ -114,8 +114,8 @@ public sealed partial class EnvironmentWindow
                     foreach (var w in items.EnumerateArray())
                         panel.Children.Add(new TextBlock { Text = (list == "blocking" ? "✕ " : "⚠ ") + B(Str(w, "text")), FontSize = 12.5,
                             TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse(color) });
-            var distribution = c.TryGetProperty("blocking", out var bl) && bl.ValueKind == JsonValueKind.Array && bl.EnumerateArray().Any(w => Str(w, "id") == "devcert_distribution");
-            if (Str(c, "requestText").Length > 0 || distribution) panel.Children.Add(FixActions(Str(c, "requestText"), "export.sign", null));
+            // 分发 / ad hoc 描述文件：照常导入、独立 App 能用，通用 S2Arm 那条出路（改用 Apple ID / 复制给发放人）照给
+            if (Str(c, "requestText").Length > 0 || Flag(c, "distribution")) panel.Children.Add(FixActions(Str(c, "requestText"), "export.sign", null));
             var actions = new WrapPanel { Orientation = Orientation.Horizontal };
             var replace = new Button { Content = S("replace"), Padding = new Thickness(14, 8), CornerRadius = new CornerRadius(8),
                 Background = Brush.Parse("#29292D"), Foreground = Ink, Margin = new Thickness(0, 0, 10, 0) };

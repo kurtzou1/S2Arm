@@ -57,6 +57,10 @@ s2a_gate_step bash "$android_dir/core-link/provider-tests/run.sh"
 if [ "$(uname -s)" = Linux ]; then
     s2a_gate_step bash "$android_dir/tests/run_dq_queue.sh"
 fi
+# 游戏档（nvk_game_profile，plat_nvn.c 用 <link.h> 的 dl_iterate_phdr 认模块）：macOS 没有 <link.h>，只在 Linux 上跑
+if [ "$(uname -s)" = Linux ]; then
+    s2a_gate_step "$PY" "$android_dir/tests/nvk_game_profile_test.py"
+fi
 # 描述符写入初始化（宿主）：三路描述符必须整结构清零、dstArrayElement=0；「漏字段」反例必须被抓到。
 # 曾经漏填 dstArrayElement，真机第一笔 draw 就把 Adreno 驱动写崩。
 s2a_gate_step bash "$android_dir/tools/nvn_vk_desc_write_test.sh"
@@ -227,8 +231,10 @@ s2a_gate_step javac -encoding UTF-8 -d "$out/java" -cp "$out/java" \
     "$android_dir/app/src/main/java/org/s2arm/android/TouchLayoutStore.java" \
     "$android_dir/app/src/main/java/org/s2arm/android/TouchRouting.java" \
     "$android_dir/tests/TouchPadTest.java" \
+    "$android_dir/tests/TouchPadDpadEdgeTest.java" \
     "$android_dir/tests/TouchRoutingTest.java"
 s2a_gate_step java -cp "$out/java" org.s2arm.android.TouchPadTest "$repo_dir/ios/layouts/classic-reference.json"
+s2a_gate_step java -cp "$out/java" org.s2arm.android.TouchPadDpadEdgeTest
 s2a_gate_step java -cp "$out/java" org.s2arm.android.TouchRoutingTest
 # 触屏菜单文案：英文默认和 values-zh 必须成对，MainActivity 不再硬编码（#528 第 11 项）
 s2a_gate_step "$PY" "$android_dir/tests/touch_strings_test.py"
@@ -240,6 +246,9 @@ s2a_gate_step java -cp "$out/java" org.s2arm.android.BootContractTest
 # B6-1 F01 data/editor model: reads the existing iOS reference; no SDK or device evidence.
 s2a_gate_step "$PY" "$android_dir/tests/strings_translation_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/touch_layout_model_test.py"
+# 触屏外观（尺寸 / 透明度的模型与接线，含两条负对照）：之前没有门禁入口（11-20 android/gate.sh 接回时 test_wired 查出）
+s2a_gate_step "$PY" "$android_dir/tests/touch_appearance_model_test.py"
+s2a_gate_step "$PY" "$android_dir/tests/touch_appearance_wiring_test.py"
 s2a_gate_step javac -encoding UTF-8 -d "$out/java" -cp "$out/java" \
     "$android_dir/app/src/main/java/org/s2arm/android/BootSpec.java" \
     "$android_dir/app/src/main/java/org/s2arm/android/ProcessBirth.java" \
@@ -293,6 +302,8 @@ s2a_gate_step "$PY" "$android_dir/tests/jni_abi_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/dev_runtime_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/direct_batch_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/direct_prepare_test.py"
+# 首局预热随包种子整理（android/tools/vk_warm_seed.py）：校验 / 配对 / 按程序身份滤管线 / 与来源先后无关；宿主读种子的用例在 nvk_warm_modules_test.sh
+s2a_gate_step "$PY" "$android_dir/tests/vk_warm_seed_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/host_link_test.py"   # 宿主单测链接闭包：自动补链 / 弱引用放行 / 无提供方点名红 / 替身优先
 # 新回放层：真实图形/计算请求生产入口的贴图池容量、超限与调试读数。
 s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py"
@@ -304,6 +315,8 @@ s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py" --compute-warm-
 s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py" --diag-mutants
 # Shutdown admission, bounded waits and active-context retention (including negative controls).
 s2a_gate_step "$PY" "$android_dir/tests/nvk_shutdown_test.py"
+# 上屏线程 CPU（rp_present.c，#1501 差距 9）：同线程配对 / 跨线程与时间倒退不计 / 首次只记起点 / 取走清零 / 会话清起点 / 上屏接线，6 个点变异各撤一处必红（纯宿主 C）
+s2a_gate_step "$PY" "$repo_dir/graphics/nvn/tests/present_tc_mutation_test.py"
 # GS 脏位、阶段绑定、管线和原始图元拒绝的独立回退反证。
 s2a_gate_step "$PY" "$repo_dir/graphics/nvn/tests/gs_replay_mutation_test.py"
 # 写跟踪取范围（find_span）的有序索引（#1133）与池查找的线程内备忘（#974）：索引的排序 / 子树最大值 / 复查代际 / 写者纪律 / 上限与停用 / 备忘的键各处的撤改必红（纯宿主 C 编译）。
@@ -357,6 +370,8 @@ s2a_gate_step bash "$android_dir/tools/nvk_pipe_flight_test.sh"
 # 首用待定表（纯逻辑）与 demand 后台建管线（fake Vulkan）：状态机 / 同键合并 / 有界等待 / late-stuck / P0 不串管线。
 s2a_gate_step bash "$android_dir/tools/nvk_pipe_pend_test.sh"
 s2a_gate_step bash "$android_dir/tools/nvn_vk_pipe_demand_test.sh"
+# 会话关闭留存合同：需求线程未静止时不销毁后端，静止后可重试并安全重开。
+s2a_gate_step "$PY" "$android_dir/tests/nvk_session_budget_test.py" --demand-close
 # 新层首用管线异步的绘制级用例：真 rp_draw / rp_pass + 真 demand / 待定表 / 判定表，可控建管线闸（跳 / 等 / 预算 / 上限 / 停局丢弃）。
 s2a_gate_step bash "$android_dir/tools/nvk_pipe_async_draw_test.sh"
 s2a_gate_step bash "$android_dir/tools/nvk_shader_lease_test.sh"
@@ -407,6 +422,7 @@ PY
 s2a_gate_step javac -encoding UTF-8 -d "$out/java" -cp "$out/java" \
     "$android_dir/app/src/main/java/org/s2arm/android/GamePack.java" \
     "$android_dir/app/src/main/java/org/s2arm/android/GameInstall.java" \
+    "$android_dir/app/src/main/java/org/s2arm/android/SaveArchive.java" \
     "$android_dir/app/src/main/java/org/s2arm/android/ImportReceiver.java" \
     "$android_dir/tests/GamePackTest.java" \
     "$android_dir/tests/GameInstallTest.java"

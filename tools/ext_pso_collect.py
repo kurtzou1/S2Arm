@@ -43,6 +43,8 @@ def norm(b):
 
 def conv_nx(hx):
     """nxnative R（864 / 880 / 1008 / 1024 位）→ (我方 864 位 | None, 不收原因)。前 432 字节与我方同序；432 起依次 atest、logic（880 起）、高 16 个顶点属性（1008 起）、border（1024）"""
+    # 单条不合法只跳这一条、计数（11-20：上游两份清单各有一条 841 位的 R 行，截断丢了一位，fromhex 抛错让整份收集退出、种子停更）
+    if not re.fullmatch(r'(?:[0-9a-f]{2})+', hx): return None, f'nxnative 不是整字节十六进制（{len(hx)} 位）'
     raw = bytes.fromhex(hx); n = len(raw)
     if n < 432 or n not in (432, 440, 504, 512): return None, f'nxnative 未知结构（{n} 字节）'
     if u32(raw, A2C) > 1: return None, 'a2c 非 0 / 1（会落进我方 fc / at / msoff）'

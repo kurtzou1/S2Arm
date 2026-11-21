@@ -31,7 +31,10 @@ def fnv64(t):
     x = 0xcbf29ce484222325
     for c in t.encode(): x = ((x ^ c) * 0x100000001b3) & 0xffffffffffffffff
     return x
-root = os.environ.get('S2A_MISS_ROOT') or os.path.realpath(os.path.join(os.environ.get('S2A_ROOTS', os.path.expanduser('~/.s2arm/run/s2arm/roots')), G + '@现行'))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'pack', 'orch'))
+import current   # noqa: E402  现行指针文件（pack/orch/current.py，只依赖标准库）
+RT = os.environ.get('S2A_ROOTS', os.path.expanduser('~/.s2arm/run/s2arm/roots'))
+root = os.environ.get('S2A_MISS_ROOT') or str(current.read(RT, G) or os.path.join(RT, G + '@现行'))   # 没有现行：下面的索引都读不到（同原先断链）
 ip = os.path.join(root, 'shaders', 'gal_pso.idx'); idx = None
 if os.path.exists(ip):
     b = open(ip, 'rb').read(); n = struct.unpack_from('<I', b, 8)[0]; idx = {struct.unpack_from('<Q', b, 16 + 16 * i)[0] for i in range(n)}

@@ -126,7 +126,7 @@ ck "⑨ 反证：旧判法在同一夹具上误标「${old}」" '[ "$old" = 有�
 # ⑫ 一键流程 refresh 只跑一次（10-25：外层 refresh 和 ipa.sh 里的 refresh 各算一遍，工具链不一致时直连库整份出两遍）：
 #   oneclick 刷完把现行产物根名交给 ipa.sh（S2A_REFRESHED）。私有临时根故意缺 ctl/control.nacp（真刷新必红「刷不到本树的阶段键」）、
 #   缺改写产物（跳过刷新后在「没有改写产物」停下，不往下编包）。期望：不给 → 照刷；给了且等于现行 → 不刷；给了但现行已变 → 照刷
-mkdir -p $T/rr/acnh@v1/exefs; ln -s acnh@v1 $T/rr/acnh@现行
+mkdir -p $T/rr/acnh@v1/exefs; printf '%s\n' acnh@v1 > $T/rr/acnh@现行
 IP() { env S2A_ROOTS=$T/rr S2A_ROOTS_SHARED=$T/shr2 S2A_PACK_LOCKS=$T/locks2 S2A_PACK_PAUSE=$T/pause S2A_DISK_FREE_G=999 S2A_WIDEN_AUTO_RUN=0 S2A_SIGN=adhoc "$@" bash "$H/pack/ipa.sh" acnh 2>&1; }
 o1=$(IP); o2=$(IP S2A_REFRESHED=acnh@v1); o3=$(IP S2A_REFRESHED=acnh@旧)
 ck "⑫ 不给 S2A_REFRESHED → ipa.sh 照刷新（报刷不到阶段键）" '[[ "$o1" == *刷不到本树的阶段键* ]] && [[ "$o1" != *调用方刚刷过* ]]'

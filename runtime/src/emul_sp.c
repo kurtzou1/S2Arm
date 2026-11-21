@@ -22,9 +22,11 @@ int s2a_emul_sp_unaligned(void *ucv) {
     ss->__pc += 4;
     return 1;
 }
-#elif defined(__ANDROID__) && defined(__aarch64__)
+#elif (defined(__ANDROID__) || defined(__OHOS__)) && defined(__aarch64__)
 #include <signal.h>
+#if !defined(__OHOS__) // OHOS musl signal.h already defines the ARM64 context records.
 #include <asm/sigcontext.h>
+#endif
 // 安卓（Linux arm64）同一件事：内核同样给 EL0 开着 SP 对齐检查，SIGBUS（si_code BUS_ADRALN，ESR 类别 0x26）。
 //   通用寄存器在 mcontext.regs[0..30] / sp / pc；向量寄存器在 __reserved 里的 fpsimd_context 记录（找不到就不替做，照崩溃处理）。
 static struct fpsimd_context *fpsimd_of(mcontext_t *mc) {

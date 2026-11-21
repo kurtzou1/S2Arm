@@ -619,6 +619,52 @@ static int open_backend(void) {
     return OK(r);
 }
 
+#ifdef S2A_BACKEND_PIPE_CALL_TEST
+extern void nvn_vk_pipe_call_test_hold(int hold);
+extern int nvn_vk_pipe_call_test_wait(uint64_t timeout_ns);
+struct pipe_call_test_arg { int compute; nvn_gpu_rc result; nvn_gpu_err err; };
+static void *pipe_call_test_main(void *opaque) {
+    struct pipe_call_test_arg *a = opaque;
+    nvn_gpu_pipe out = NULL;
+    a->result = a->compute ? nvn_gpu_cpipe_get(NULL, 0, &out, &a->err) : nvn_gpu_pipe_get(NULL, 0, &out, &a->err);
+    return NULL;
+}
+
+static void pipe_call_lifetime_one(int compute) {
+    if (!open_backend()) { CHECK(0, "C1581 pipe-call open compute=%d", compute); return; }
+    struct pipe_call_test_arg a; memset(&a, 0, sizeof a); a.compute = compute;
+    pthread_t thread;
+    nvn_vk_pipe_call_test_hold(1);
+    if (pthread_create(&thread, NULL, pipe_call_test_main, &a) != 0) {
+        nvn_vk_pipe_call_test_hold(0);
+        nvn_gpu_err close_err = {0}; nvn_gpu_close(5000000000ull, &close_err);
+        CHECK(0, "C1581 pipe-call thread create compute=%d", compute);
+        return;
+    }
+    if (!nvn_vk_pipe_call_test_wait(2000000000ull)) {
+        nvn_vk_pipe_call_test_hold(0); pthread_join(thread, NULL);
+        nvn_gpu_err close_err = {0}; nvn_gpu_close(5000000000ull, &close_err);
+        CHECK(0, "C1581 pipe-call enters admitted gate compute=%d", compute);
+        return;
+    }
+    nvn_gpu_err close_err = {0};
+    nvn_gpu_rc close_rc = nvn_gpu_close(0, &close_err);
+    CHECK(close_rc.code == NVN_GPU_E_TIMEOUT, "C1581 close waits for active pipe call compute=%d rc=%d %s", compute, close_rc.code, close_err.why);
+    nvn_vk_pipe_call_test_hold(0);
+    pthread_join(thread, NULL);
+    CHECK(a.result.code == NVN_GPU_E_ARG, "C1581 admitted pipe error return compute=%d rc=%d", compute, a.result.code);
+    close_err = (nvn_gpu_err){0};
+    CHECK(OK(nvn_gpu_close(5000000000ull, &close_err)), "C1581 pipe-call close retry compute=%d: %s", compute, close_err.why);
+}
+
+static void pipe_call_lifetime_test(void) {
+    memset(&g_desc, 0, sizeof g_desc); g_desc.host_device = &g_dev; g_desc.app_label = "pipe-call-lifetime-test";
+    pipe_call_lifetime_one(0);
+    pipe_call_lifetime_one(1);
+    printf("C1581 pipe-call lifetime failures=%d\n", g_fail);
+}
+#endif
+
 static nvn_gpu_buf make_buf(uint64_t n, int mem, const void *init) {
     nvn_gpu_buf b = NULL;
     nvn_gpu_err e;
@@ -10638,6 +10684,13 @@ int main(int argc, char **argv) {
     }
     if (argc > 5 && !strcmp(argv[2], "--c89-child")) return c89_child_main(argv);   // C89 里被 SIGKILL 的那一局：由 c89_midrun_save 起
     printf("device: %s (%s)\n", g_dev.properties.deviceName, g_dev.driver_name);
+#ifdef S2A_BACKEND_PIPE_CALL_TEST
+    if (argc > 2 && !strcmp(argv[2], "--pipe-call-lifetime")) {
+        pipe_call_lifetime_test();
+        s2a_vk_device_destroy(&g_dev, 1);
+        return g_fail ? 1 : 0;
+    }
+#endif
     if (argc > 2 && !strcmp(argv[2], "--clear-capacity")) {
         memset(&g_desc, 0, sizeof g_desc); g_desc.host_device = &g_dev; g_desc.app_label = "clear-capacity-test";
         c1501_clear_capacity(argv[1]);

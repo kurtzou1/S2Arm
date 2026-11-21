@@ -9,6 +9,7 @@
 #   bash android/tests/vk/run.sh --fsr        # FSR1 EASU 专项（算法对照，不接上屏）
 #   bash android/tests/vk/run.sh --present-upscale  # 上屏 EASU 开/关夹具（独立进程）
 #   bash android/tests/vk/run.sh --clear-capacity  # 48/60 个清除管线键、段完成/放弃与后续绘制
+#   bash android/tests/vk/run.sh --pipe-call-lifetime  # 在途管线调用阻止 close 拆资源，并允许超时后重试
 #   bash android/tests/vk/run.sh --feedback-core    # 附件反馈快照、VVL 与同包负控（独立夹具，见 standalone/）
 #   bash android/tests/vk/run.sh --<名>            # android/tests/vk/standalone/<名>.sh 里的任一独立夹具
 # 环境：
@@ -146,10 +147,16 @@ find_layer() {
 
 icd=$(find_icd || true)
 layer=$(find_layer || true)
+need_glslc=1
+if [ "$mode" = "--pipe-call-lifetime" ]; then need_glslc=0; fi
 # 宿主缺原生 Vulkan 工具（lavapipe / validation / glslc 缺任一）：同 macOS，链已在上面出好，进共享的离线容器跑。
 # 容器没准备好（tests/vulkan/run.sh 退 75）就保持下面原来的红，只多提示一句；容器里跑出的结果（含红）原样退出。
-if [ -z "$in_container" ] && { [ -z "$icd" ] || [ -z "$layer" ] || [ -z "${GLSLC:-$(command -v glslc || true)}" ]; }; then
-    echo "本机缺原生 Vulkan 工具（lavapipe / validation / glslc），改走共享离线容器（同 macOS）" >&2
+if [ -z "$in_container" ] && { [ -z "$icd" ] || [ -z "$layer" ] || { [ "$need_glslc" = 1 ] && [ -z "${GLSLC:-$(command -v glslc || true)}" ]; }; }; then
+    if [ "$need_glslc" = 1 ]; then
+        echo "本机缺原生 Vulkan 工具（lavapipe / validation / glslc），改走共享离线容器（同 macOS）" >&2
+    else
+        echo "本机缺原生 Vulkan 工具（lavapipe / validation），改走共享离线容器（同 macOS）" >&2
+    fi
     export S2A_VULKAN_CACHE="$repo/build/vulkan-cache"
     rc=0
     bash "$repo/tests/vulkan/run.sh" android/tests/vk/run.sh "$@" || rc=$?
@@ -168,7 +175,7 @@ if [ -z "$layer" ]; then
 fi
 
 glslc=${GLSLC:-$(command -v glslc || true)}
-if [ -z "$glslc" ]; then
+if [ -z "$glslc" ] && [ "$need_glslc" = 1 ]; then
     echo "【红】找不到 glslc：纹理三角形用例要现编测试着色器（glslang / shaderc）。" >&2
     exit 2
 fi
@@ -261,10 +268,12 @@ export TMPDIR="$vk_tmp"
 out=$(mktemp -d "$TMPDIR/s2a-nvn-vk.XXXXXX")
 trap 'rm -rf "$out"' EXIT
 mkdir -p "$out/shaders"
+if [ "$mode" != "--pipe-call-lifetime" ]; then
 for s in vs_store.vert vs_load.vert vs_clip.vert vs_cull.vert msaa_read.frag count_args.comp logic_float.frag logic_uint.frag logic_float_mrt.frag logic_uint_mrt.frag ubo_dyn.frag ubo_dyn9.frag ubo_dyn34.frag gs_probe.vert gs_probe.geom gs_probe.frag gs_tstrip.vert gs_tstrip.geom gs_tstrip.frag tri.vert tri.frag tri_combined.frag tri3.vert tri_solid.frag tri_invert.frag solid_green.frag solid_blue.frag out1_green.frag tex_u.frag quad.vert quad.frag inst.vert div.vert point.vert cube_at.comp quad2.frag arr.frag cube.frag cubearr.frag tex3d.frag comp.comp pushc.frag pushc.comp tbuf.comp itbuf.comp itbuf_unknown.comp itbuf_unknown_read.comp img.comp img_rgba8.comp tsamp.comp arr2.frag separate.vert samp_at.comp samp_at_i.comp samp_at_u.comp separate.frag; do
     "$glslc" --target-env=vulkan1.1 "$repo/android/tests/vk/shaders/$s" -o "$out/shaders/$s.spv"
 done
 "$glslc" --target-env=vulkan1.1 "$repo/android/tests/vk/shaders/tbuf_replay.frag" -o "$out/shaders/tbuf_replay.frag.spv"
+fi
 
 inc=(-I "$repo/android/tests/vkhost"
      -I "$repo/graphics/nvn/third_party/vulkan-headers/include"
@@ -357,6 +366,7 @@ case "$mode" in
     --tsan) cflags+=(-fsanitize=thread) ;;
     --asan) cflags+=(-fsanitize=address,undefined -fno-omit-frame-pointer) ;;
     --shown-only) cflags+=(-DS2A_C883_TEST=1) ;;
+    --pipe-call-lifetime) cflags+=(-DS2A_BACKEND_PIPE_CALL_TEST=1) ;;
     ""|--sampler-minmax-only|--c63-same-view|--stencil8-only|--read-texels-core|--ds-upload-only|--gpu-deswizzle|--gpu-deswizzle-neg-height|--gpu-deswizzle-neg-stride|--gpu-deswizzle-neg-barrier|--msaa-only|--msaa-neg-pick|--msaa-neg-pipe|--msaa-neg-sampled|--msaa-neg-attachment|--present-only|--present-upscale|--separate-core|--separate-neg-sampler|--tbuf-core|--tbuf-compiler-core|--tbuf-neg-resolve|--tbuf-neg-format|--tbuf-neg-elements|--gs-only|--gs-compiler|--gs-core|--gs-no-cap|--gs-neg-stage|--gs-neg-flags|--gs-neg-cap|--clear-capacity|--clear-capacity-neg|--cmdpool-only|--cmdpool-neg) ;;
     *) echo "未知参数：${mode}（可用 --tsan / --asan）" >&2; exit 64 ;;
 esac
@@ -536,6 +546,10 @@ if [ "$mode" != "--tsan" ]; then
     export VK_LAYER_PATH=$layer
     export VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation
     export VK_LAYER_ENABLES=VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT   # 同步校验：缺屏障会报 SYNC-HAZARD-*
+    if [ "$mode" = "--pipe-call-lifetime" ]; then
+        S2A_TEST_LOGICOP_ONLY=1 timeout 60 "$out/t_backend_vk" "$out/shaders" --pipe-call-lifetime 2>&1 | tee "$out/pipe-call-lifetime.log"
+        exit 0
+    fi
 
 if [ "$mode" = "--cmdpool-only" ] || [ "$mode" = "--cmdpool-neg" ]; then
     bad=0

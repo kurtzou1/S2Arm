@@ -157,13 +157,12 @@ class MetalPath(unittest.TestCase):
     @unittest.skipIf(os.name == 'nt', '合成 .exe 为 POSIX 脚本；Windows 原生编译未覆盖')
     def test_direct_exports_selected_directory_to_both_tools(self):
         repo = self.root / 'repo'
-        script = repo / 'graphics/tools/direct/direct_lib.sh'
+        script = repo / 'graphics/tools/direct/direct_lib.py'
         script.parent.mkdir(parents=True)
-        script.write_text('''set -eu
-: "${S2A_METAL_BIN:?S2A_METAL_BIN missing from build environment}"
-test "$S2A_METAL_BIN" = "$S2A_EXPECT_METAL_BIN"
-"$S2A_METAL_BIN/metal.exe" --version
-"$S2A_METAL_BIN/metallib.exe" --version
+        script.write_text('''import os, subprocess, sys
+b = os.environ.get('S2A_METAL_BIN') or sys.exit('S2A_METAL_BIN missing from build environment')
+if b != os.environ['S2A_EXPECT_METAL_BIN']: sys.exit('S2A_METAL_BIN differs')
+for t in ('metal', 'metallib'): sys.stdout.flush(); subprocess.run([os.path.join(b, t + '.exe'), '--version'], check=True)
 ''', encoding='utf-8')
         explicit = self.root / '显式安装'
         explicit.mkdir()
@@ -179,7 +178,7 @@ test "$S2A_METAL_BIN" = "$S2A_EXPECT_METAL_BIN"
                 **({'S2A_METAL_BIN': str(explicit)} if source == 'explicit' else {}),
             }), patch.object(oneclick_win, 'R', repo), patch.object(oneclick_win, 'WIN', True), \
                  patch.object(oneclick_win, 'prebuilt', return_value=self.root / 'unused.dll'), \
-                 patch.object(oneclick_win, 'bash_exe', return_value='/bin/sh'):
+                 patch.object(oneclick_win, 'bash_exe', side_effect=AssertionError('直连库那一步不该再找 Git Bash')):
                 run = oneclick_win.Run(self.root / source)
                 try:
                     oneclick_win.direct(run, cur, 'ios', 1)
@@ -192,14 +191,14 @@ test "$S2A_METAL_BIN" = "$S2A_EXPECT_METAL_BIN"
     @unittest.skipIf(os.name == 'nt', 'Mac 子进程环境回归仅在 POSIX 宿主运行')
     def test_mac_does_not_export_windows_directory(self):
         repo = self.root / 'mac-repo'
-        script = repo / 'graphics/tools/direct/direct_lib.sh'
+        script = repo / 'graphics/tools/direct/direct_lib.py'
         script.parent.mkdir(parents=True)
-        script.write_text('test "${S2A_METAL_BIN+set}" != set\n', encoding='utf-8')
+        script.write_text("import os, sys\nsys.exit('S2A_METAL_BIN set' if 'S2A_METAL_BIN' in os.environ else 0)\n", encoding='utf-8')
         cur = self.root / 'cur'
         cur.mkdir()
         with patch.object(oneclick_win, 'R', repo), patch.object(oneclick_win, 'WIN', False), \
              patch.object(oneclick_win, 'prebuilt', return_value=None), \
-             patch.object(oneclick_win, 'bash_exe', return_value='/bin/sh'):
+             patch.object(oneclick_win, 'bash_exe', side_effect=AssertionError('直连库那一步不该再找 Git Bash')):
             run = oneclick_win.Run(self.root / 'mac-out')
             try:
                 oneclick_win.direct(run, cur, 'mac', 1)
@@ -377,7 +376,7 @@ class SeedAoc(unittest.TestCase):   # ④ 播种与轻阶段带 S2A_SEED_AOC=1�
             t = Path(t); run = oneclick_win.Run(t / 'out'); seen = {}
             def sh(args, log, env=None, ok=(0,), cwd=None): seen[log] = ((env or {}).get('S2A_SEED_AOC'), (env or {}).get('S2A_NX_UNPACK')); return 0
             run.sh = sh
-            (t / 'out/roots').mkdir(parents=True); (t / 'ver').mkdir(); os.symlink(t / 'ver', t / 'out/roots/tx@现行')
+            (t / 'out/roots/tx@v1').mkdir(parents=True); (t / 'out/roots/tx@现行').write_text('tx@v1\n')   # 现行指针文件
             tool = t / 'out/bin/nx_unpack_abc/nx_unpack.exe'
             with patch.object(oneclick_win, "nx_unpack", lambda r: tool):
                 oneclick_win.stages(run, 'tx', t / 'x', t / 'src')
@@ -739,7 +738,7 @@ class InstallWin(unittest.TestCase):
 
 
 class GlslcGate(unittest.TestCase):
-    """要离线编 GLSLC 而 Windows 跑不了：不再退 75，设 S2A_GLSLC_RUNTIME_ONLY 让 extract.sh 跳过（运行时现编）；不需要 / 有宿主时不设（11-08 DQB2）"""
+    """要离线编 GLSLC 而 Windows 跑不了：不再退 75，设 S2A_GLSLC_RUNTIME_ONLY 让 extract.py 跳过（运行时现编）；不需要 / 有宿主时不设（11-08 DQB2）"""
     class Run:
         def step(self, name, f): return f()
     def go(self, why, host=None):

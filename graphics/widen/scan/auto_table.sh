@@ -16,13 +16,14 @@
 # 出表目录：${S2A_WIDEN_AUTO:-~/.s2arm/run/s2arm/widen/auto}/<款>_<main 构建号>/（widen_enable.<档位>.tsv + 来源.txt + 各局目录）。档位：S2A_LOOP_MODE（缺省 handheld；auto_kick.sh 掌机 / 主机两档各调一次）。
 set -u
 G=${1:?款}; H=$(cd "$(dirname "$0")" && pwd); R=$(cd "$H/../../.." && pwd)
+source "$R/pack/roots.sh"   # root_cur_in：现行指针文件（S2A_ROOTS 缺省 = 共享产物根）
 export S2A_LOOP_MODE=${S2A_LOOP_MODE:-handheld}; MODE=$S2A_LOOP_MODE
 AUTO=${S2A_WIDEN_AUTO:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/widen/auto}; MAX=${S2A_AUTO_MAX:-8}
 CL=${S2A_AUTO_LOOP:-$H/closed_loop.sh}
 PYS=${S2A_PYTHON:-${S2A_PY:-$(bash "$R/tools/machine.sh" get S2A_PY 2> /dev/null)}}; PYS=${PYS:-$(command -v python3)}   # 读原版 NSO 要 lz4（widen_sig.py），同 pack/stage_rewrite.sh 口径
 # 单局时限缺省 295 秒；10-24 维护者 只给 xc3 放到 600（开场长，260 秒走不进场景）
 case $G in xc3) export S2A_LOOP_CAP=${S2A_LOOP_CAP:-595} S2A_LOOP_SEC=${S2A_LOOP_SEC:-560};; esac   # 单测换成桩（tests/widen_auto_table_test.sh），不起局
-src=$(cd -P "${S2A_ROOTS:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/roots}/$G@现行" 2>/dev/null && pwd) || { echo "🔴 $G 没有现行产物根"; exit 1; }
+src=$(root_cur_in "$S2A_ROOTS" "$G" 2>/dev/null) || { echo "🔴 $G 没有现行产物根"; exit 1; }
 BID=$(xxd -s 0x40 -l 16 -p "$src/exefs/main"); [ -n "$BID" ] || { echo "🔴 $G 现行产物根没有 exefs/main"; exit 1; }
 [ -f "$R/graphics/widen/tables/${G}_$BID/widen_enable.$MODE.tsv" ] && { echo "🟢 $G 已有仓库启用表（${MODE}），不自动出"; exit 0; }
 O=$AUTO/${G}_$BID; ST=$O/$MODE.status; mkdir -p "$O"
@@ -76,7 +77,7 @@ while :; do
   # 同构建号已有到了 MARK 的探测局就复用（10-24 维护者：少起 Mac 局）；探测局只为「哪些点会执行、MARK 在哪」，与工具版本无关
   if LC_ALL=C /usr/bin/grep -a -q 'S2A 标记 MARK' "$L" 2>/dev/null && [ "$(cat "$O/$MODE/probe/bid" 2>/dev/null)" = "$BID" ]; then echo "$(date '+%m-%d %H:%M') 复用探测局 $O/$MODE/probe" >> "$O/$MODE.log"
   else loop probe "$ALL" 1-1 S2A_SCREEN_W=1922 S2A_LOOP_UICLIP=0; fi
-  src=$(cd -P "${S2A_ROOTS:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/roots}/$G@现行" && pwd)   # 探测局起局前刷过产物根（closed_loop.sh → pack/refresh.sh），现行版本可能换了：重取（10-24 xc3 首例：旧路径已删，点表读不到）
+  src=$(root_cur_in "$S2A_ROOTS" "$G")   # 探测局起局前刷过产物根（closed_loop.sh → pack/refresh.sh），现行版本可能换了：重取（10-24 xc3 首例：旧路径已删，点表读不到）
   MK=$(LC_ALL=C /usr/bin/grep -a -o 'S2A 标记 MARK：帧 [0-9]*' "$L" 2>/dev/null | head -1 | grep -o '[0-9]*$')
   [ -n "$MK" ] && break   # 起了没崩没到 MARK 是未判（closed_loop.sh 退 75，上面 loop 已停）；到这里只剩崩
   SUS=$(hits "$ALL" "$L" | sed 's/:[^:]*$//' | paste -sd, -)

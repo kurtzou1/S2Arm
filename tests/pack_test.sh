@@ -150,12 +150,12 @@ ck "重放复制失败 → 中止、不切现行、不提交缺失产物" '[ "$c
 #   ② 新树先提交的是别的阶段 j（k 没动过）→ 旧树的 k 照常重放上去，j 也在，来源留 NEW 不退回（10-24 首版不分阶段一律作废：合入几分钟一笔、烘焙 20 分钟，
 #      持槽烘完的着色器总被新树的改写提交顶掉，一款都烘不上）；③ 旧树先、新树后 → 照常前进。期望按规则手写；私有根不受这条限制（上面各用例）
 OLD=$(git -C $H rev-parse HEAD~1); NEW=$(git -C $H rev-parse HEAD); SR=$T/sroots
-base() { rm -rf $SR; mkdir -p $SR/acnh@base && echo base > $SR/acnh@base/k.txt && echo Kb > $SR/acnh@base/.stage_k && echo Jb > $SR/acnh@base/.stage_j && echo $OLD > $SR/acnh@base/.root_src && ln -sfn acnh@base $SR/acnh@现行; }
+base() { rm -rf $SR; mkdir -p $SR/acnh@base && echo base > $SR/acnh@base/k.txt && echo Kb > $SR/acnh@base/.stage_k && echo Jb > $SR/acnh@base/.stage_j && echo $OLD > $SR/acnh@base/.root_src && printf '%s\n' acnh@base > $SR/acnh@现行; }
 fwd() {   # fwd <版本名> <来源> <阶段 k|j> <产物内容>：在共享根 $SR 里模拟从 acnh@base 开工的一个阶段 .tmp（不走 root_begin，它要本树在 origin/main 上）
   cp -R $SR/acnh@base $SR/acnh@$1.tmp && printf '.stage_j\tJb\n.stage_k\tKb\n' > $SR/acnh@$1.tmp/.root_base_stages && echo $2 > $SR/acnh@$1.tmp/.root_src && echo acnh@base > $SR/acnh@$1.tmp/.root_base
   echo $4 > $SR/acnh@$1.tmp/$3.txt && echo "$4" > $SR/acnh@$1.tmp/.stage_$3; }
 cm() { S2A_ROOTS=$SR S2A_ROOTS_SHARED=$SR bash -c "source $H/pack/roots.sh; ROOT_REPLAY='$2.txt .stage_$2' root_commit acnh $1" 2>&1; }
-cur() { cat "$(cd -P $SR/acnh@现行 && pwd)/$1"; }
+cur() { cat "$(cd -P $SR/$(cat $SR/acnh@现行) && pwd)/$1"; }
 base; fwd new $NEW k K_NEW; fwd old $OLD k K_OLD; o1=$(cm new k); r1=$?; o2=$(cm old k); r2=$?
 ck "① 新树先提交阶段 k（rc=${r1}）、旧树后提交同一阶段被拒（rc=${r2}）——现行 k = K_NEW、来源 NEW，旧树 .tmp 已丢" '[ $r1 = 0 ] && [ $r2 = 1 ] && [ "$(cur k.txt)" = K_NEW ] && [ "$(cur .root_src)" = $NEW ] && [ ! -e $SR/acnh@old.tmp ] && [ ! -e $SR/acnh@old ] && [[ "$o2" == *只许往前* ]]'
 base; fwd newj $NEW j J_NEW; fwd oldk $OLD k K_OLD; cm newj j > /dev/null; r3=$?; cm oldk k > /dev/null; r4=$?

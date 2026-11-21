@@ -1,7 +1,8 @@
 #!/bin/bash
 # 版本化产物根（唯一写法；底本旧库 run/pkgline/pkg_daemon3.sh 的 roots 段）：source pack/roots.sh 后用
 #   W=$(root_begin <款> <提交>)   新建 <根>/<款>@<提交>.tmp：从现行版本整目录 clonefile（不占新空间、秒级），出包只往 W 里写
-#   root_commit <款> <提交>       W.tmp → <款>@<提交>，再原子切 <款>@现行 → 它（rename(2) 换软链，读方任何时刻看到的都是完整的某一版）
+#   root_commit <款> <提交>       W.tmp → <款>@<提交>，再原子切现行到它（<款>@现行 是指针文件，内容 = 版本目录名；临时文件 fsync 后 rename(2) 覆盖，
+#                                 读方任何时刻看到的都是完整的某一版。三个平台同一形式、写与老库迁移只在 pack/orch/current.py 一处）
 #                                 并发保护：提交时现行必须还是开工时克隆的那一版，否则报红中止、不切（10-19 两个出包阶段并发，后提交的把先提交的宽屏改写静默盖掉）
 #                                 例外：阶段声明了自己的产物路径 ROOT_REPLAY="<相对路径或通配…>" 时，从新现行克隆一份、把这些路径换成本阶段的（W 里没有的 = 删），再提交
 #                                 （!<路径> = 声明路径里套着的别的阶段产物，换完后恢复成新现行的：着色器阶段 'shaders !shaders/direct'）
@@ -9,7 +10,8 @@
 #   root_tag <款> <标签>          给标签找一个没用过的版本目录名（标签已占用就加 -2、-3…）
 #   root_stage_done <现行目录> <阶段> <键>   现行版本里记的该阶段键 = <键> 时返回 0（阶段已做过、且就在现行这一版里）；各阶段提交前写 .stage_<阶段>
 #   root_abort <款> <提交>        出包失败：删 W.tmp，现行不动
-#   root_cur <款>                 打印现行版本的实际目录（读方一律先解析成实际目录再读，别跟着软链读到一半被切换）
+#   root_cur <款>                 打印现行版本的实际目录（读方一律先解析成实际目录再读，别读到一半被切换）
+#   root_cur_in <产物根> <款>     只解析现行（老库的软链 / 实目录当场迁移成指针文件），不修剪、不钉、不起步：只读的工具用它
 #   root_gc <款>                  取现行时自动调（root_cur）：修剪旧版 + 清无主 RomFS 身份 + 死持有者 .tmp / .trash 残余；提交锁被占就跳过
 #                                 S2A_ROOT_GC_FORCE=1 越过 10 分钟节流（出包收尾当场收，pack/refresh.sh 的 tail_gc：开工的取现行刚写过节流戳）
 # 每款只留现行 + 上一版（10-19 维护者：磁盘；commit、取现行与出包收尾都修剪，#338）。根目录 S2A_ROOTS，缺省 ~/.s2arm/run/s2arm/roots。
@@ -34,18 +36,41 @@ _root_cp() {
     *) echo "【红】不支持的目录复制宿主" >&2; return 1 ;;
   esac
 }
-# 不跟随现行软链，保持同目录 rename 的原子切换。
-_root_mv_link() {
-  [ "$#" = 2 ] || return 1
-  if [ -d "$2" ] && [ ! -L "$2" ]; then
-    echo "【红】现行目标是目录，拒绝切换" >&2; return 1
-  fi
-  case $(uname -s) in
-    Darwin) mv -fh "$@" || return $? ;;
-    Linux) mv -fT "$@" || return $? ;;
-    *) echo "【红】不支持的软链切换宿主" >&2; return 1 ;;
-  esac
+# 现行指针文件（pack/orch/current.py 同口径）：<根>/<款>@现行 是普通文件，内容 = 版本目录名（单行）。读在这里（root_cur 一次刷新调几十次，不起 Python）；
+#   写（临时文件 fsync 后原子改名）与老库迁移只在 current.py 一处
+_ROOT_PTR_PY=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/orch/current.py   # source 时定下（函数被单测拷走重定义时 BASH_SOURCE 会变）
+_root_ptr_py() { python3 -B -I "$_ROOT_PTR_PY" "$@"; }
+# _root_ptr_read <根> <款>：指针合规 → 打印版本目录的实际路径；没有 / 不合规（名字不是 <款>@<标签>、带路径、指向 .tmp、目录不在）→ 不打印、返回 1
+_root_ptr_read() {
+  local r=$1 g=$2 p=$1/$2@现行 n= x=
+  [ -f "$p" ] && [ ! -L "$p" ] || return 1
+  { IFS= read -r n; IFS= read -r x; } < "$p" 2> /dev/null   # 只用内建：不起子进程（root_cur 调得多），也不依赖 PATH 里有 cat
+  n=${n%$'\r'}; x=${x%$'\r'}; [ -z "$x" ] || return 1   # 单行
+  case $n in "$g@"|*/*|*\\*|*$'\r'*|*.tmp|*.tmp.rb|"$g@现行"|"$g@现行."*) return 1;; "$g@"*) ;; *) return 1;; esac
+  [ -d "$r/$n" ] && [ ! -L "$r/$n" ] || return 1
+  printf '%s/%s\n' "$(cd -P "$r" && pwd)" "$n"
 }
+# _root_ptr_left <根> <款>：有要迁移 / 收拾的：<款>@现行 是老形式（软链、实目录模式的真目录），或有临时指针 / 迁移旁边的旧链接
+#   （指针是普通文件、内容不合规不算：迁移也修不了，按没有现行处理，不为它每次取现行都等提交锁；同 current.py leftover）
+_root_ptr_left() {
+  local r=$1 g=$2 x
+  { [ -L "$r/$g@现行" ] || [ -d "$r/$g@现行" ]; } && return 0
+  for x in "$r/.$g@现行.new-"* "$r/$g@现行.migr-"*; do [ -e "$x" ] || [ -L "$x" ] && return 0; done
+  return 1
+}
+# _root_ptr_norm <根> <款>：持该款提交锁（本 shell 已持就不再拿）让 current.py normalize 迁移老形式、接上断在中途的迁移、清残留
+_root_ptr_norm() {
+  local r=$1 g=$2 held=
+  if [ -z "${_ROOT_LOCK_PID:-}" ] || [ "${_ROOT_LOCK_GAME:-}" != "$g" ] || [ "$r" != "$S2A_ROOTS" ]; then
+    type plock_take > /dev/null 2>&1 || source "$(dirname "${BASH_SOURCE[0]}")/../tools/plock.sh" || return 1
+    PLOCK_POLL_S=0.2 plock_take "$r/.$g.commit.lock" 600 || { echo "【红】$g 现行迁移拿不到提交锁（$r/.$g.commit.lock，持有者 pid $(plock_holder "$r/.$g.commit.lock")）" >&2; return 1; }
+    held=$PLOCK_PID
+  fi
+  _root_ptr_py normalize "$r" "$g"; local rc=$?
+  [ -z "$held" ] || plock_release "$held"
+  return $rc
+}
+root_cur_in() { local r=${1:?产物根} g=${2:?款}; _root_ptr_read "$r" "$g" && return 0; _root_ptr_left "$r" "$g" || return 1; _root_ptr_norm "$r" "$g" > /dev/null; _root_ptr_read "$r" "$g"; }
 # Canonicalize existing and first-run paths without starting Python. Resolve
 # symlink components before processing .., including links to absent targets.
 _root_resolve_dir() (
@@ -99,7 +124,7 @@ _root_tree_ok() {   # 本树能不能改共享现行（$1 = 款）：HEAD 是 or
   # 不联网：main 的每个提交都是本机列车合出来再推上去的，origin/main 本机已是最新（11-02 维护者「咱们是唯一的合并者」）
   git -C "$r" merge-base --is-ancestor HEAD origin/main 2> /dev/null || why="不在 origin/main 上（分支提交）"
   [ -z "$(git -C "$r" status --porcelain -- runtime ios graphics translator services compat pack 2>/dev/null)" ] || why="$why 阶段相关目录有未提交改动"
-  cur=$(cd -P "$S2A_ROOTS/${1:-?}@现行" 2>/dev/null && pwd); src=$(cat "$cur/.root_src" 2>/dev/null)
+  cur=$(root_cur_in "$S2A_ROOTS" "${1:-?}" 2>/dev/null); src=$(cat "$cur/.root_src" 2>/dev/null)
   [ -z "$why" ] && [ -n "$src" ] && ! git -C "$r" merge-base --is-ancestor "$src" HEAD 2> /dev/null && why="比现行的来源提交 ${src:0:9} 旧（会把现行刷回去）"
   [ -z "$why" ] && return 0
   echo "【红】本树（$(git -C "$r" rev-parse --short HEAD)）${why}：共享产物根只代表 main，不许改共享现行。分支树用私有根：S2A_ROOTS=${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/roots_priv/<名> 再跑（从共享现行克隆起步，只重做变了的阶段）；旧 main 树先 git checkout origin/main" >&2
@@ -201,18 +226,20 @@ _root_pinned() { local b f p l; b=$(basename "$1"); for f in "$S2A_ROOTS/.pin.$b
     [ -n "$p" ] && [ "$(_root_lstart "$p")" = "$l" ] && return 0; rm -f "$f"; done; return 1; }
 # 修剪被取代的版本：只留现行 + 上一版，被钉住（有进程正在把它当输入）的不删。$1 = 款，$2 = 现行目录名
 #   .tmp / .tmp.rb 是在途事务，不当版本候选：root_gc 与别的进程的重放可以并行（11-02 类别：在途重放被当成「最新备份」剪掉或挤掉真上一版）
-_root_prune() { ls -dt "$S2A_ROOTS/$1"@* 2>/dev/null | grep -v -e '@现行$' -e '\.tmp$' -e '\.tmp\.rb$' | while read -r d; do [ "$(basename "$d")" = "$2" ] || echo "$d"; done | tail -n +2 | while read -r d; do _root_pinned "$d" || _root_trash "$d"; done; }
+_root_prune() { ls -dt "$S2A_ROOTS/$1"@* 2>/dev/null | grep -v -e '@现行$' -e '@现行\.migr-' -e '\.tmp$' -e '\.tmp\.rb$' | while read -r d; do [ "$(basename "$d")" = "$2" ] || echo "$d"; done | tail -n +2 | while read -r d; do _root_pinned "$d" || _root_trash "$d"; done; }
 root_cur() { local r; r=$(_root_cur_raw "$@"); if [ -z "${S2A_ROOT_CUR:-}" ]; then root_gc "$1"; [ -n "$r" ] && _root_pin "$r"; fi; [ -z "$r" ] || echo "$r"; }
 _root_cur_raw() {
   [ -n "${S2A_ROOT_CUR:-}" ] && { echo "$S2A_ROOT_CUR"; return; }   # 只算键（pack/stage_keys.sh）：各阶段对指定产物根算键，不碰现行
-  [ -n "${S2A_ROOTS_NO_BOOT:-}" ] && { (cd -P "$S2A_ROOTS/$1@现行" 2>/dev/null && pwd); return; }   # 全新状态（tools/oneshot.sh）：不从共享现行起步
-  case "$S2A_ROOTS" in "$S2A_ROOTS_PRIV/"*) ;; *) (cd -P "$S2A_ROOTS/$1@现行" 2>/dev/null && pwd); return;; esac   # 只有约定的私有根自动起步（单测的临时根不克隆真数据）
-  if [ ! -e "$S2A_ROOTS/$1@现行" ] && [ -e "$S2A_ROOTS_SHARED/$1@现行" ]; then   # 私有根起步：克隆共享现行
-    local s; s=$(cd -P "$S2A_ROOTS_SHARED/$1@现行" && pwd); mkdir -p "$S2A_ROOTS"
+  root_cur_in "$S2A_ROOTS" "$1" && return
+  [ -n "${S2A_ROOTS_NO_BOOT:-}" ] && return 1   # 全新状态（tools/oneshot.sh）：不从共享现行起步
+  case "$S2A_ROOTS" in "$S2A_ROOTS_PRIV/"*) ;; *) return 1;; esac   # 只有约定的私有根自动起步（单测的临时根不克隆真数据）
+  local s
+  if [ ! -e "$S2A_ROOTS/$1@现行" ] && [ ! -L "$S2A_ROOTS/$1@现行" ] && s=$(root_cur_in "$S2A_ROOTS_SHARED" "$1"); then   # 私有根起步：克隆共享现行
+    mkdir -p "$S2A_ROOTS"
     python3 "$(dirname "${BASH_SOURCE[0]}")/../tools/clonedir.py" "$s" "$S2A_ROOTS/$(basename "$s")" > /dev/null 2>&1 \
-      && ln -sfn "$(basename "$s")" "$S2A_ROOTS/$1@现行" || echo "【红】私有根从共享现行 $s 克隆失败" >&2
+      && _root_ptr_py write "$S2A_ROOTS" "$1" "$(basename "$s")" || echo "【红】私有根从共享现行 $s 克隆失败" >&2
   fi
-  (cd -P "$S2A_ROOTS/$1@现行" 2>/dev/null && pwd); }
+  root_cur_in "$S2A_ROOTS" "$1"; }
 # 派生摘要可丢，真实克隆不可丢；所有阶段（含replay）在暴露新根前交接同一协议。
 _root_resource_clone() {
   local helper="$(dirname "${BASH_SOURCE[0]}")/resource_input_key.py"
@@ -320,7 +347,7 @@ root_commit() {
   rm -f "$w.tmp/.root_pid"; mv "$w.tmp" "$w" || { _root_unlock "$g"; return 1; }
   _root_resource_publish "$w"
   _root_shards "$w" "提交后(root_commit)"
-  ln -sfn "$(basename "$w")" "$S2A_ROOTS/.$g@现行.new" && _root_mv_link "$S2A_ROOTS/.$g@现行.new" "$S2A_ROOTS/$g@现行" || { _root_unlock "$g"; echo "【红】切现行失败" >&2; return 1; }
+  _root_ptr_py write "$S2A_ROOTS" "$g" "$(basename "$w")" || { _root_unlock "$g"; echo "【红】切现行失败" >&2; return 1; }
   local cur; cur=$(basename "$w")
   # 只留现行 + 上一版（被进程钉住的不删），再清没有版本指向的 RomFS 身份；都在放锁之前（P1-108：清扫与下一笔收纳同一把提交锁串行）
   _root_prune "$g" "$cur"
@@ -354,7 +381,8 @@ root_gc() {
   _ROOT_LOCK_PID=$PLOCK_PID; _ROOT_LOCK_GAME=$g   # 登记成本进程持锁：root_romfs_sweep 同一款不再重复拿（同 root_commit）
   hold=$PLOCK_PID
   touch "$stamp" 2> /dev/null
-  now=$(readlink "$S2A_ROOTS/$g@现行" 2> /dev/null); now=${now##*/}
+  _root_ptr_left "$S2A_ROOTS" "$g" && _root_ptr_norm "$S2A_ROOTS" "$g" > /dev/null 2>&1   # 现行指针的残留（崩溃留下的临时指针、迁移旁边的旧链接）
+  now=$(_root_ptr_read "$S2A_ROOTS" "$g"); now=${now##*/}
   _root_prune "$g" "$now"
   root_romfs_sweep "$g"
   for d in "$S2A_ROOTS/$g"@*.tmp "$S2A_ROOTS/$g"@*.tmp.rb; do

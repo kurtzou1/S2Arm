@@ -13,7 +13,12 @@ static int fact_cache_shape(const struct s2a_input_identity *id) {
     for (unsigned st = 0; st < stages; st++) for (unsigned slot = 0; slot < 32; slot++) {
         const struct s2a_compile_texture_src *t = &id->textures[st * 32 + slot];
         if (!t->stage || strcmp(t->stage, (const char *const[]){"vs", "fs", "gs"}[st]) ||
-            t->handle != 8 + 2 * slot || t->cbuf_slot != -1 || t->separate || t->is_buffer || t->array_length != 1) return 0;
+            t->handle != 8 + 2 * slot || t->cbuf_slot != -1 || t->separate || t->is_buffer) return 0;
+        /* array_length is not a shape condition: for 1d/2d-array targets it carries the texture's layer count
+         * (texture_facts.c LAYERS_COUNT), and the compiler never reads it from a fact (DirectGpuAccessor reads
+         * SamplerType / IsBuffer / Normalized / Format through recorded queries only). A queried slot's whole fact,
+         * array_length included, is still part of the masked key. Rejecting it here turned reuse off for every
+         * program of a title that keeps a 2d-array texture in any of the 64 slots. */
     }
     return 1;
 }
@@ -80,6 +85,7 @@ static int fact_cache_mask(const uint8_t *bytes, size_t len, const struct rp_pro
                    strncmp(text, "profile:", 8) && strncmp(text, "direct-v1:", 10) &&
                    strcmp(text, "graphicsState") && strcmp(text, "transformFeedbackEnabled") &&
                    strcmp(text, "binding-allocator") && strcmp(text, "translator") && strcmp(text, "unbound") &&
+                   strcmp(text, "translator:phi-see-through (same as dmsh_xlate)") &&   /* QueryBindlessPhiSeeThrough: constant true */
                    strcmp(text, "texture-pool-capacity") && strcmp(text, "sampler-pool-capacity") &&
                    strcmp(text, "first-version-four-sets") && strcmp(text, "first-version-no-transform-feedback")) {
             /* A new source needs an explicit identity contract before reuse. */

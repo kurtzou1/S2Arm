@@ -988,12 +988,61 @@ static int img_update(const char *proc_docs, const char *path, const uint8_t *h,
     LOG("资源导入：着色器更新包 %s 套到 %s（%llu MB 派生件，本体没动）", fn, gid, (unsigned long long)(bytes >> 20));
     return 0;
 }
+// ---- 手机导出的 romfs.img 布局（0.6.3，ios/game_export.m）：电脑「推到 iPhone」装的款资源包是 romfs.img（RomFS 拼接镜像，pack/romfs_image.py）+ 散文件，
+//   没有 game.img（iPhone 实机：资源包里 index.tsv、romfs.img、romfs.imgmap、exefs/、ctl/、shaders/…）。导出时 .img = 这份 romfs.img，.s2arm 的 pack/ 带
+//   index.tsv 列的其余文件，s2arm.json 记 img_kind "romfs" + img_size + img_fp。导入 .s2arm 时 manifest.json 先不落盘、和大小 / 指纹一起记进等待标记；
+//   「放这里导入」里不是 S2AIMG01 的文件，大小与指纹对得上某款的等待标记 → 挪成 资源包/romfs.img、最后写 manifest.json（同推送契约：清单最后到），
+//   之后游戏库判「传完了、等解开」，走推送装好后同一条 s2a_pack_apply（核对 index.tsv、清旧文件、写 .applied）。
+//   指纹 = XXH64（种子 0）(头 1 MB ‖ 尾 1 MB)，文件不到 1 MB 时头尾各取整份：几 GB 的镜像不整份哈希（手机上要读几十秒），
+//   它只用来认「这份是哪一款等着的、拷完没有」——大小要逐字节相等，头里是这款各文件开头的数据、尾是最后几个文件的数据，两款撞上等于拷错了游戏；
+//   「文件」App 拷贝先撑满全长再从头往后填（D-4VAX），尾巴最后才写到，尾 1 MB 对上 = 拷完。中段损坏不在它的射程里（同 game.img 认领只核头和目录表）
+#define S2A_ROMFS_WAIT ".s2arm_expect_romfs"   // 资源包里的等待标记：第一行镜像字节数、第二行指纹、其后 = 这份资源包的 manifest.json
+enum { S2A_IMG_FP_SPAN = 1 << 20 };
+int s2a_img_fp(const char *path, uint64_t size, char out[17]) {   // 0 = 算好（16 位小写十六进制）；-1 = 读不满
+    size_t h = size < S2A_IMG_FP_SPAN ? (size_t)size : S2A_IMG_FP_SPAN;
+    uint8_t *b = malloc(2 * h + 1); int fd = open(path, O_RDONLY), ok = b && fd >= 0;
+    if (ok) ok = pread(fd, b, h, 0) == (ssize_t)h && pread(fd, b + h, h, (off_t)(size - h)) == (ssize_t)h;
+    if (fd >= 0) close(fd);
+    if (ok) snprintf(out, 17, "%016llx", (unsigned long long)XXH64(b, 2 * h, 0));
+    free(b); return ok ? 0 : -1;
+}
+static char *read_small(const char *p, size_t cap) {   // 整份读进来（以 0 结尾）；不在 / 超过 cap → NULL
+    FILE *f = fopen(p, "rb"); if (!f) return NULL;
+    char *b = malloc(cap + 1); size_t k = b ? fread(b, 1, cap + 1, f) : 0; fclose(f);
+    if (!b || k > cap) { free(b); return NULL; }
+    b[k] = 0; return b;
+}
+// path 不是 S2AIMG01：找等着 romfs 镜像的那款。0 = 认领好；1 = 不归任何一款 / 还在拷（不动）；-4 = 挪 / 写清单失败（原样留着）
+static int romfs_claim(const char *proc_docs, const char *path, const struct stat *ist) {
+    char base[1200], gd[1300]; if (s2a_pack_base(base, sizeof base, proc_docs) <= 0) return 1;
+    snprintf(gd, sizeof gd, "%s/games", base); DIR *d = opendir(gd); if (!d) return 1;
+    struct dirent *e; char fp[17] = ""; int rc = 1;
+    while (rc == 1 && (e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        char root[2400], mk[2500], *m; snprintf(root, sizeof root, "%s/%s/资源包", gd, e->d_name); snprintf(mk, sizeof mk, "%s/" S2A_ROMFS_WAIT, root);
+        if (!(m = read_small(mk, 65536 + 64))) continue;
+        char *q, *mf; unsigned long long want = strtoull(m, &q, 10); char wfp[17] = "";
+        if (*q == '\n') { size_t l = strcspn(q + 1, "\n"); if (l == 16 && q[17] == '\n') memcpy(wfp, q + 1, 16); }
+        mf = wfp[0] ? q + 1 + 17 : NULL;
+        if (!want || !mf || (uint64_t)ist->st_size != want) { free(m); continue; }   // 大小不对：还在拷，或不是这款
+        if (!fp[0] && s2a_img_fp(path, want, fp)) { free(m); break; }
+        if (strcmp(fp, wfp)) { LOG("资源导入：%s 大小同 %s 等着的 romfs 镜像，指纹 %s ≠ %s：不是这款或还没拷完，不认领", path, e->d_name, fp, wfp); free(m); continue; }
+        char dst[2500]; snprintf(dst, sizeof dst, "%s/romfs.img", root);
+        if (pack_in_bundle(root, "认领 romfs 镜像")) { snprintf(g_img_err, sizeof g_img_err, "%s：这款的资源包在 App 包内，不能换", path); rc = -4; }
+        else { char gi[2500]; snprintf(gi, sizeof gi, "%s/game.img", root); unlink(gi);   // 换成 romfs.img 布局：别的布局留下的本体不能再被解包当成这份的
+            if (rename(path, dst)) { snprintf(g_img_err, sizeof g_img_err, "把 %s 挪进资源包失败：%s", path, strerror(errno)); rc = -4; }
+            else if (write_atomic(root, "manifest.json", mf)) { int er = errno; rename(dst, path); errno = er; snprintf(g_img_err, sizeof g_img_err, "写 %s/manifest.json 失败：%s", root, strerror(er)); rc = -4; }
+            else { unlink(mk); rc = 0; LOG("资源导入：%s → %s（%llu MB），等游戏库解开", strrchr(path, '/') ? strrchr(path, '/') + 1 : path, dst, want >> 20); } }
+        free(m);
+    }
+    closedir(d); return rc;
+}
 // pass 0 只认完整包、pass 1 只认着色器更新包（诊断#0787f1 D-YY32：完整 .img 与更新包一起放，同一次扫描里更新包排在前面，
 //   先报「手机上还没有本体」，紧接着本体才挪好——玩家看到假红；本体都先挪好再看更新包，与文件名 / 目录顺序无关）
 static int img_place(const char *proc_docs, const char *path, int pass) {   // 0 = 挪好了；1 = 不是 IMG / 还在拷 / 不归这一遍（不动）；负数 = 失败（原样留着）
     int fd = open(path, O_RDONLY); if (fd < 0) return 1;
-    uint8_t h[136]; struct stat st; int ok = pread(fd, h, sizeof h, 0) == (ssize_t)sizeof h && !memcmp(h, "S2AIMG01", 8) && !fstat(fd, &st); close(fd);
-    if (!ok) return 1;
+    uint8_t h[136]; struct stat st; int hd = pread(fd, h, sizeof h, 0) == (ssize_t)sizeof h && !fstat(fd, &st), ok = hd && !memcmp(h, "S2AIMG01", 8); close(fd);
+    if (!ok) return hd && pass == 0 ? romfs_claim(proc_docs, path, &st) : 1;   // 不是 IMG：可能是手机导出的 romfs 镜像（上面 romfs_claim）
     uint64_t total; memcpy(&total, h + 128, 8); if (total != (uint64_t)st.st_size) return 1;   // 还在拷
     uint32_t fmt; memcpy(&fmt, h + 8, 4);
     // 长度对上不等于拷完（D-4VAX 复现：拷贝方先把目标撑到全长、再从头往后填，App 扫到时头在、尾巴的目录表还是 0，原先照样认领挪走，
@@ -1065,6 +1114,12 @@ static int s2arm_json_str(const char *j, const char *key, char *out, size_t n) {
     size_t k = 0; for (p++; *p && *p != '"' && k + 1 < n; p++) { if (*p == '\\' && p[1]) p++; out[k++] = *p; }
     out[k] = 0; return *p == '"' ? 0 : -1;
 }
+static unsigned long long s2arm_json_u64(const char *j, const char *key) {   // 平铺数字字段；没有 / 不是数字 → 0
+    char pat[64]; snprintf(pat, sizeof pat, "\"%s\"", key);
+    const char *p = strstr(j, pat); if (!p) return 0;
+    p += strlen(pat); while (*p == ' ' || *p == ':' || *p == '\n' || *p == '\t' || *p == '\r') p++;
+    return *p >= '0' && *p <= '9' ? strtoull(p, NULL, 10) : 0;
+}
 static int s2arm_safe(const char *rel) {   // 条目路径不出目标目录：非空、不以 / 开头、没有 .. 段、没有反斜杠
     if (!*rel || *rel == '/' || strchr(rel, '\\')) return 0;
     for (const char *s = rel; *s; ) { const char *e = strchr(s, '/'); size_t l = e ? (size_t)(e - s) : strlen(s);
@@ -1107,6 +1162,7 @@ int s2a_s2arm_import(const char *proc_docs, const char *src, char *gid_out, size
     if (rc) { close(out); unlink(tarp); return rc; }
     // ② 读 tar：第一个条目必须是 s2arm.json
     char gid[17] = "", sha[80] = "", root[1400], prog[1400], vdir[64], fmt[32] = "", *cat = NULL; size_t catn = 0; unsigned nprog = 0, npack = 0; uint64_t off = 0;
+    char kind[16] = "", ifp[24] = "", *imf = NULL; unsigned long long isize = 0; int romfs = 0;   // img_kind "romfs"：.img 是资源包的 romfs.img（手机导出，见 romfs_claim）
     for (int first = 1;; first = 0) {
         unsigned char h[512]; if (pread(out, h, 512, (off_t)off) != 512) { rc = s2arm_fail(-1, "ios_install_pack_truncated", ".s2arm 里的 tar 截短了（第 %llu 字节）", (unsigned long long)off); break; }
         int zero = 1; for (int i = 0; i < 512 && zero; i++) zero = !h[i]; if (zero) break;
@@ -1125,6 +1181,11 @@ int s2a_s2arm_import(const char *proc_docs, const char *src, char *gid_out, size
             if (strstr(j, "\"schema\": 1") == NULL && strstr(j, "\"schema\":1") == NULL) LOG("【黄】.s2arm 导入：%s 的 schema 不是 1，按 1 的布局照常导入（维护者 11-17：校验不过不整个拒绝）", gid);
             snprintf(vdir, sizeof vdir, "v-%.16s-s2arm", strlen(sha) >= 16 ? sha : "0000000000000000");
             snprintf(root, sizeof root, "%s/games/%s/资源包", base, gid); snprintf(prog, sizeof prog, "%s/games/%s/program", base, gid);
+            s2arm_json_str(j, "img_kind", kind, sizeof kind); romfs = !strcmp(kind, "romfs");
+            if (romfs) { s2arm_json_str(j, "img_fp", ifp, sizeof ifp); isize = s2arm_json_u64(j, "img_size");
+                if (!isize || strlen(ifp) != 16) { rc = s2arm_fail(-2, "ios_install_manifest_bad", "s2arm.json 说 .img 是 romfs 镜像，但 img_size（%llu）/ img_fp（%s）不对", isize, ifp); break; }
+                // 这款原先的清单与应用记号先撤：romfs 镜像认领前不能被判成就绪 / 拿新 index.tsv 去解（清单在认领时才写）
+                const char *gone[] = {"manifest.json", ".applied", ".partial"}; for (int i = 0; i < 3; i++) { char gp[1500]; snprintf(gp, sizeof gp, "%s/%s", root, gone[i]); unlink(gp); } }
             char vd[1500]; snprintf(vd, sizeof vd, "%s/%s", prog, vdir); struct stat st;
             if (!lstat(vd, &st)) nftw(vd, s2arm_rm_one, 16, FTW_DEPTH | FTW_PHYS);   // 上次导到一半的同一版：清掉重写
             continue;
@@ -1137,7 +1198,11 @@ int s2a_s2arm_import(const char *proc_docs, const char *src, char *gid_out, size
             if (!cat || pread(out, cat, catn, (off_t)data) != (ssize_t)catn) { rc = s2arm_fail(-1, "ios_install_pack_truncated", "程序包清单读不全"); break; } cat[catn] = 0; continue;
         }
         if (!strncmp(name, "program/", 8)) { rel = name + 8; if (!s2arm_safe(rel)) { rc = s2arm_fail(-2, "ios_install_manifest_bad", "条目路径不对：%s", name); break; } snprintf(dst, sizeof dst, "%s/%s/%s", prog, vdir, rel); nprog++; }
-        else if (!strncmp(name, "pack/", 5)) { rel = name + 5; if (!s2arm_safe(rel) || !strcmp(rel, "game.img")) { rc = s2arm_fail(-2, "ios_install_manifest_bad", "条目路径不对：%s", name); break; } snprintf(dst, sizeof dst, "%s/%s", root, rel); npack++; }
+        else if (!strncmp(name, "pack/", 5)) { rel = name + 5; if (!s2arm_safe(rel) || !strcmp(rel, "game.img")) { rc = s2arm_fail(-2, "ios_install_manifest_bad", "条目路径不对：%s", name); break; } snprintf(dst, sizeof dst, "%s/%s", root, rel); npack++;
+            if (romfs && !strcmp(rel, "manifest.json")) {   // romfs 布局：清单先留在内存，认领镜像时才写（同推送契约：清单最后到）
+                if (size > 65536) { rc = s2arm_fail(-2, "ios_install_manifest_bad", "manifest.json 太大（%llu 字节）", (unsigned long long)size); break; }
+                free(imf); imf = malloc((size_t)size + 1);
+                if (!imf || pread(out, imf, (size_t)size, (off_t)data) != (ssize_t)size) { rc = s2arm_fail(-1, "ios_install_pack_truncated", "manifest.json 读不全"); break; } imf[size] = 0; continue; } }
         else { LOG("【黄】.s2arm 导入：不认识的条目 %s，跳过", name); continue; }
         if (s2arm_copy_out(out, data, size, dst)) { int e = errno; rc = s2arm_fail(-4, e == ENOSPC || e == EDQUOT ? "ios_install_no_space" : "ios_install_dir_unwritable", "写 %s 失败：%s", dst, strerror(e)); break; }
     }
@@ -1149,10 +1214,16 @@ int s2a_s2arm_import(const char *proc_docs, const char *src, char *gid_out, size
         int ok = f && fprintf(f, "{\"dir\": \"%s\",%s", vdir, b + 1) > 0; if (f && fclose(f)) ok = 0;
         if (!ok || rename(tp, cp)) { int e = errno; unlink(tp); rc = s2arm_fail(-4, e == ENOSPC ? "ios_install_no_space" : "ios_install_dir_unwritable", "写程序包清单 %s 失败：%s", cp, strerror(e)); }
     }
-    free(cat);
+    if (!rc && romfs) {   // 等待标记：镜像字节数、指纹、清单（romfs_claim 认领时写回 manifest.json）
+        if (!imf) rc = s2arm_fail(-2, "ios_install_manifest_bad", "%s 说 .img 是 romfs 镜像，但没带 pack/manifest.json", src);
+        else { size_t n = strlen(imf) + 64; char *w = malloc(n);
+            if (!w || (snprintf(w, n, "%llu\n%s\n%s", isize, ifp, imf), write_atomic(root, S2A_ROMFS_WAIT, w))) { int e = errno; rc = s2arm_fail(-4, e == ENOSPC ? "ios_install_no_space" : "ios_install_dir_unwritable", "写 %s/%s 失败：%s", root, S2A_ROMFS_WAIT, strerror(e)); }
+            free(w); }
+    }
+    free(cat); free(imf);
     if (rc) return rc;   // 原因已在 s2arm_fail 记过
     if (gid_out && gid_n) snprintf(gid_out, gid_n, "%s", gid);
-    LOG(".s2arm 导入：%s → 程序 %s（%u 个文件）、资源包派生件 %u 个；game.img 照常放「放这里导入」认领", gid, vdir, nprog, npack);
+    LOG(".s2arm 导入：%s → 程序 %s（%u 个文件）、资源包派生件 %u 个；%s照常放「放这里导入」认领", gid, vdir, nprog, npack, romfs ? "romfs 镜像（.img）" : "game.img ");
     return 0;
 }
 // 导入文件夹里认领 / 导入失败过的文件（0.6.0 自签走查 B1）：原先失败的文件原样留着、每次扫描（回前台、文件夹有写入、「重新检查」）都整份重新解压 / 读一遍。
@@ -1413,6 +1484,12 @@ static void *gate_thread(void *a) { (void)a;
     struct s2a_gate_watch w = {0}; int last = -1, poked = 0;
     for (;;) {
         char why[600]; int act = s2a_import_decide(g_imp_docs, &w, time(NULL), why, sizeof why);
+        // 没资源 / 不完整：先扫一遍「放这里导入」（.s2arm、.img）再判。独立 App（一 App 一游戏）打开就直接起这款，游戏库那边的扫描在选上游戏后就停了（app.m img_scan_now），
+        //   说明页教玩家把文件放进导入文件夹、点「重新检查」——这里不扫就永远等不到（0.6.4 独立 App 只导出那条路）。没变的失败文件 s2a_img_scan 自己跳过，3 秒一轮不重解
+        if (act == S2A_GATE_NONE || act == S2A_GATE_BROKEN) {
+            char proc[1024]; s2a_container_docs(proc, sizeof proc);
+            if (s2a_img_scan(proc) > 0) { LOG("资源导入：从「放这里导入」认出新文件，重新判"); continue; }
+        }
         if (act == S2A_GATE_READY) {
             // 预热路径：宿主线程在 s2a_import_gate 里等 → 收起页面、接着起游戏；老路径（闸门在主线程、UIKit 接管后不返回）没人等 → 请玩家重新打开。
             //   有没有人等在起线程前就定了（s2a_import_gate），不再在这里等 2 秒看宿主线程到没到（iOS 装机剃刀 #34：时间补丁，没赶上就误走「请重新打开」）

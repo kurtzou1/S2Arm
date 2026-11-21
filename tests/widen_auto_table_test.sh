@@ -16,7 +16,7 @@
 set -u
 H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); trap 'rm -rf "$T"' EXIT; fail=0
 ck() { if eval "$2"; then echo "✓ $1"; else echo "✗ $1"; fail=1; fi; }
-root() { local r=$T/roots/zz@v1; mkdir -p "$r/exefs"; ln -sfn zz@v1 "$T/roots/zz@现行"
+root() { local r=$T/roots/zz@v1; mkdir -p "$r/exefs"; printf '%s\n' zz@v1 > "$T/roots/zz@现行"
   { head -c 64 /dev/zero; printf 'BIDBIDBIDBIDBID1'; } > "$r/exefs/main"
   printf '模块\t偏移\t种类\t证据\nmain\t0x10\tf2w\tx\nmain\t0x20\tmovz\tx\nmain\t0x30\taspdiv\tx\nmain\t0x40\tmovz\tx\nmain\t0x50\tasp\tx\n' > "$r/widen_sites.tsv"; }
 cat > "$T/stub.sh" <<'EOF'
@@ -72,7 +72,7 @@ img = bytearray(start) + code; img[0x40:0x50] = bid.encode()[:16].ljust(16, b'0'
 open(out, 'wb').write(bytes(img))
 PY
 }
-yroot() { local r=$T/roots/yy@v2; mkdir -p "$r/exefs" "$T/old/exefs"; ln -sfn yy@v2 "$T/roots/yy@现行"
+yroot() { local r=$T/roots/yy@v2; mkdir -p "$r/exefs" "$T/old/exefs"; printf '%s\n' yy@v2 > "$T/roots/yy@现行"
   mkimg "$r/exefs/main" 0x80 NEWBIDNEWBIDNEW2 7; mkimg "$T/old/exefs/main" 0x40 OLDBIDOLDBIDOLD1 "$1"
   printf '模块\t偏移\t种类\t证据\nmain\t0x100\taspdiv\tx\nmain\t0x200\tmovz\tx\nmain\t0x300\tmovz\tx\n' > "$r/widen_sites.tsv"
   printf '模块\t偏移\t种类\t证据\nmain\t0xc0\taspdiv\tx\nmain\t0x1c0\tmovz\tx\n' > "$T/old/sites.tsv"
@@ -95,9 +95,9 @@ ck "④ 再跑复用探测局（桩里 1922 宽 0 次）、照常出表" '! grep
 #    手算期望：未判 ×2（status 第 4 列 1 → 2）→ 第 3 次桩 0 次、输出「不重排」；换了产物根（刷新出新根）也不重排——只有工具版本变才重来
 rm -rf "$T/auto"; : > "$T/log"; run STUB_INFRA=1 > /dev/null; run STUB_INFRA=1 > /dev/null; n2=$(head -1 "$E/handheld.status" | cut -f4); : > "$T/log"; o=$(run STUB_INFRA=1)
 ck "⑨ 同工具未判两次（第 4 列 ${n2}）→ 第 3 次桩 0 次、记不重排" '[ "$n2" = 2 ] && [ ! -s "$T/log" ] && grep -q 不重排 <<< "$o"'
-cp -R "$T/roots/zz@v1" "$T/roots/zz@v2"; ln -sfn zz@v2 "$T/roots/zz@现行"; : > "$T/log"; o=$(run STUB_INFRA=1)
+cp -R "$T/roots/zz@v1" "$T/roots/zz@v2"; printf '%s\n' zz@v2 > "$T/roots/zz@现行"; : > "$T/log"; o=$(run STUB_INFRA=1)
 ck "⑨ 刷新出新根（zz@v2）仍不重排（桩 $(wc -l < "$T/log" | tr -d ' ') 次）" '[ ! -s "$T/log" ]'
-ln -sfn zz@v1 "$T/roots/zz@现行"
+printf '%s\n' zz@v1 > "$T/roots/zz@现行"
 # ⑧ 两档互借（10-26 暗黑2：掌机档过了、主机档没拿那组点试）：主机档跑、同构建号掌机档自动表启用 0x20 movz / 0x30 aspdiv（真表格式：模块 偏移 种类 启用），
 #   桩只认 main:0x20,main:0x30 → 探测后第 1 局就是它（本档执行到的同种类分辨率点 movz 只有 0x20，不再加）、过。旧代码反证：第 1 局是整组 main:0x10,main:0x20,main:0x30（红）
 rm -rf "$T/auto"; mkdir -p "$E"; printf '模块\t偏移\t种类\t启用\nmain\t0x20\tmovz\t1\nmain\t0x30\taspdiv\t1\nmain\t0x10\tf2w\t0\n' > "$E/widen_enable.handheld.tsv"; : > "$T/log"

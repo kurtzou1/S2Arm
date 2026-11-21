@@ -169,13 +169,14 @@ class CompilerRetentionTests(unittest.TestCase):
             for name in ('g@new', 'g@old'):
                 (roots / name).mkdir()
                 (roots / name / 'romfs').symlink_to('../.romfs_store/g/s0-1')
-            (roots / 'g@现行').symlink_to('g@new')
+            (roots / 'g@现行').write_text('g@new' + '\n')
             for p in (ident / 'sub/a.bin', ident / 'sub', ident):
                 os.chmod(p, 0o555 if p.is_dir() else 0o444)
             pack = layout.image_ios(c, gid) / 'pack'; pack.mkdir(parents=True); (pack / 'manifest.json').write_text('{}')   # 老玩家：有资源包没容器件，现行产物根要留着
             library.prune_build(c, gid)
             self.assertFalse((roots / 'g@old').exists())
-            self.assertEqual((roots / 'g@现行/romfs/sub/a.bin').read_bytes(), b'original synthetic romfs')
+            self.assertEqual((roots / 'g@现行').read_text(), 'g@new\n')
+            self.assertEqual((roots / 'g@new/romfs/sub/a.bin').read_bytes(), b'original synthetic romfs')
             with patch.object(library, 'game_caches', return_value=[]):
                 library._rm(c, c.library, layout.find_game(c, gid))
             self.assertFalse(roots.exists())

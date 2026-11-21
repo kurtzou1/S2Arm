@@ -12,9 +12,9 @@ ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
 [ "$(uname -s)" = Darwin ] || { echo "非 macOS：本单测要 APFS / hdiutil，环境未就绪"; exit 75; }
 S=$T/sib; mkdir -p "$S/party@pkg-a/romfs"; echo a > "$S/party@pkg-a/romfs/x"; echo K-new > "$S/party@pkg-a/.stage_romfsidx"; echo K-old > "$S/party@pkg-a/.stage_rewrite"
 R=$T/mac; mkdir -p "$R"
-o=$(python3 "$H/tools/clonedir.py" --report "$S/party@pkg-a" "$R/G@sib-pkg-a" 2>&1); r=$?; ln -s G@sib-pkg-a "$R/G@现行"
-ck "① 同卷克隆：退出 0、「${o##*$'\n'}」、内容与阶段戳原样" '[ $r = 0 ] && [[ "$o" == *"克隆路线：APFS 克隆 3 项"* ]] && [ "$(cat "$R/G@现行/romfs/x")" = a ] && [ "$(cat "$R/G@现行/.stage_romfsidx")" = K-new ]'
-done_() { ( export S2A_ROOTS=$R; source "$H/pack/roots.sh"; root_stage_done "$R/G@现行" "$1" "$2" ); }
+o=$(python3 "$H/tools/clonedir.py" --report "$S/party@pkg-a" "$R/G@sib-pkg-a" 2>&1); r=$?; printf '%s\n' G@sib-pkg-a > "$R/G@现行"
+ck "① 同卷克隆：退出 0、「${o##*$'\n'}」、内容与阶段戳原样" '[ $r = 0 ] && [[ "$o" == *"克隆路线：APFS 克隆 3 项"* ]] && [ "$(cat "$R/$(cat "$R/G@现行")/romfs/x")" = a ] && [ "$(cat "$R/$(cat "$R/G@现行")/.stage_romfsidx")" = K-new ]'
+done_() { ( export S2A_ROOTS=$R; source "$H/pack/roots.sh"; root_stage_done "$R/$(cat "$R/G@现行")" "$1" "$2" ); }
 done_ romfsidx K-new; a=$?; done_ rewrite K-new; b=$?
 ck "② 戳 = 本树键 → 跳过（romfsidx ${a}）；戳是旧提交的键 → 重做（rewrite ${b}）" '[ $a = 0 ] && [ $b != 0 ]'
 hdiutil create -quiet -size 40m -fs ExFAT -volname S2ASIBT "$T/x.dmg" && M=$(hdiutil attach -nobrowse -noverify "$T/x.dmg" | tail -1 | awk -F'\t' '{print $NF}')

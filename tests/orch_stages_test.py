@@ -293,7 +293,7 @@ class StageTest(unittest.TestCase):
             'pack/roots.sh', 'pack/stage_rewrite.sh', 'pack/stage_keyfiles.sh', 'pack/rewriter.py',
             'pack/cpatch.py', 'runtime/rewriter', 'graphics/widen/scan', 'tools/addr_need.py',
             'tools/stage_deps.py', 'tools/stage_deps_hook', 'graphics/nvn/tools/romfs_list.py',
-            'tools/nso_plain.py', 'pack/pkg_srcs.py', 'tools/pool_workers.py'])   # 11-06：10b9156f3 起 addr_need.py 顶层 import nso_plain、stages.selected_tables 加载 pack/pkg_srcs.py，镜像少这两个 8 例红；#1332 起 wide_scan / romfs_list / stages 经 tools/pool_workers.py 取核数与进程池路数
+            'tools/nso_plain.py', 'pack/pkg_srcs.py', 'tools/pool_workers.py', 'tools/progress.py'])   # 11-06：10b9156f3 起 addr_need.py 顶层 import nso_plain、stages.selected_tables 加载 pack/pkg_srcs.py，镜像少这两个 8 例红；#1332 起 wide_scan / romfs_list / stages 经 tools/pool_workers.py 取核数与进程池路数
         for name in listed.decode('utf-8').split('\0'):
             if name and (original / name).is_file():
                 dest = mirror / name
@@ -614,7 +614,7 @@ class StageTest(unittest.TestCase):
             tx.abort(); deps.close()
 
     def test_index_manifest_preserves_eight_baseline_repository_rows(self):
-        # #1332：romfs_list / resource_input_key 经 tools/pool_workers.py 取核数，它照实进依赖清单（改它会换 romfsidx 的键）
+        # #1332：romfs_list / resource_input_key 经 tools/pool_workers.py 取核数，它照实进依赖清单（改它会换 romfsidx 的键）；resource_input_key 计进度经 tools/progress.py，同样照实进
         refresh.seed(self.store, '原创', self.source)
         engine = stages.Stages(self.store)
         def original_core_boundary(tx, deps):
@@ -629,7 +629,7 @@ class StageTest(unittest.TestCase):
         self.assertEqual(names, [
             'R:graphics/nvn/tools/romfs_list.py', 'R:pack/resource_input_key.py',
             'R:pack/stage_keyfiles.sh', 'R:pack/stages/romfsidx.sh',
-            'R:tools/clonedir.py', 'R:tools/direct_shards.py', 'R:tools/pool_workers.py', 'R:tools/stage_deps.py',
+            'R:tools/clonedir.py', 'R:tools/direct_shards.py', 'R:tools/pool_workers.py', 'R:tools/progress.py', 'R:tools/stage_deps.py',
             'R:tools/stage_deps_hook/sitecustomize.py'])
 
     @unittest.skipUnless(os.environ.get('S2A_ORCH_TEST_DOTNET') or shutil.which('dotnet'), 'existing .NET tool required; never downloaded')

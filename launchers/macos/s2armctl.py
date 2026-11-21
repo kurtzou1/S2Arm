@@ -226,7 +226,7 @@ AI_NEXT = {
     'devcert_password': ('human', '开发者证书密码不对或 .p12 坏了：请玩家在出包页重新导入并输入密码（密码只能玩家本人输，AI 不代做）'),
     'devcert_invalid': ('human', '选的不是 .p12 / .mobileprovision：请玩家在出包页重新选对文件导入'),
     'devcert_mismatch': ('human', '证书和描述文件不配套：请玩家在开发者网站重新生成含这张证书的描述文件，再在出包页重新导入'),
-    'devcert_distribution': ('human', '导入的是分发（发布）证书的描述文件，0.6 起用它签的 App 打不开任何游戏：请玩家在启动器里点「改用 Apple ID 登录」（要输密码，AI 不代做），或点「复制给证书发放人的话」发给证书发放人，换成开发证书和开发描述文件后重新导入'),
+    'devcert_distribution': ('human', '导入的是分发（发布）证书的描述文件：照常导入，推到 iPhone 的方式选「独立 App」（layoutSet 作业，layout=standalone）就能用它玩；通用 S2Arm 里用它签的游戏打不开——要用通用 S2Arm，请玩家在启动器里点「改用 Apple ID 登录」（要输密码，AI 不代做），或点「复制给证书发放人的话」发给证书发放人，换成开发证书和开发描述文件后重新导入'),
     'devcert_missing': ('human', '开发者证书不完整：请玩家在出包页重新导入，或切回 Apple ID 签名后 s2armctl install <游戏号>'),
     'identity_unavailable': ('human', '这台电脑上没有可交的签名证书：请玩家在 AltStore / SideStore 设置里导出签名证书、在手机 S2Arm「签名证书」里导入；不要为此新建证书'),
     'identity_team_mismatch': ('human', '手机上的 S2Arm 是另一个团队签的：请玩家在启动器里登录装 S2Arm 用的那个 Apple ID（要输密码，AI 不代做）或选用同一团队的证书，再交一次签名身份'),
@@ -482,6 +482,14 @@ def job_alive(j):
     if not st or not start.strip() or not isinstance(identity, str) or not identity.strip(): return None
     return start.strip() == identity
 
+def settle(s, limit=20):
+    """任务记录（作业层写盘）先于启动器收尾变成 completed：启动器这时还没收掉这单（busy），收掉后才异步重读游戏库（libraryLoading）。
+    等两样都落下再返回（最多 limit 秒），否则紧接着读到的 ready / needsPreparation 还是出包前那份（11-20 0.6.2 候选验收 ⑤c 读到出包前的
+    「要重新准备」判包过旧）。s 是刚读到的状态：已经空闲就不再多读"""
+    t0 = time.time()
+    while s is not None and (s.get('busy') or s.get('libraryLoading')) and time.time() - t0 < limit:
+        time.sleep(0.5); s = call('GET', '/state', soft=True)
+
 def wait(game, op, limit, before=None):   # before：发命令前已有的任务号，只等之后新起的那个（install 发完立刻等，别拿上一次的结果当这次）
     t0 = time.time(); last = None; tid = None
     before_queue = None; queue_started = None; said_lost = False
@@ -516,6 +524,7 @@ def wait(game, op, limit, before=None):   # before：发命令前已有的任务
             if not ts: print('排队已取消'); sys.exit(1)
         if ts:
             t = max(ts, key=lambda t: t.get('started') or 0); tid = t['id']
+            if t['state'] == 'completed': settle(s)
             last = show_task(t, t0, last)
         elif s['error'] and not queued: print('错误：' + s['error']); sys.exit(1)
         time.sleep(2)
@@ -609,10 +618,8 @@ def wait_op(op, before, limit=1800):
             if t['state'] not in ('running', 'queued', 'cancelling'):
                 print(f'{t["state"]}：{t.get("message") or ""}')
                 if t['state'] != 'completed': errors(); sys.exit(1)
-                # 作业记录写完时启动器还在收尾（刷新游戏库等）：等它空闲再返回，否则紧接着的下一条命令会被 409 挡回来
-                for _ in range(40):
-                    if not call('GET', '/state').get('busy'): break
-                    time.sleep(0.5)
+                # 作业记录写完时启动器还在收尾（刷新游戏库等）：等它空闲、游戏库重读完再返回，否则紧接着的下一条命令会被 409 挡回来、读到旧状态
+                settle(call('GET', '/state'))
                 # 导入完成后游戏库异步刷新：等到游戏出现在列表里（最多 10 秒）再打状态，好拿游戏号
                 for _ in range(20):
                     s = call('GET', '/state')

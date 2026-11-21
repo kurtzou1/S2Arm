@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <Nullable>disable</Nullable>
+    <NuGetAudit>false</NuGetAudit>
+    <UseSharedCompilation>false</UseSharedCompilation>
+    <RepoRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../../../'))</RepoRoot>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="TestBoundary.cs" />
+    <Compile Include="$(RepoRoot)ohos/cs/OhosKeyboard.cs" />
+    <Compile Include="$(RepoRoot)ohos/cs/OhosHostUi.cs" />
+    <Compile Include="$(RepoRoot)services/S2A.Services/Red.cs" />
+    <Compile Include="$(RepoRoot)compat/tree/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardUIArgs.cs" />
+    <Compile Include="$(RepoRoot)compat/tree/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/KeyboardMode.cs" />
+    <Compile Include="$(RepoRoot)compat/tree/src/Ryujinx.HLE/UI/IHostUIHandler.cs" />
+  </ItemGroup>
+</Project>

@@ -1,4 +1,5 @@
 using Ryujinx.Common;
+using Ryujinx.Common.Configuration.Multiplayer;
 using Ryujinx.Common.Logging;
 using Ryujinx.HLE.HOS.Services.Sockets.Bsd.Impl;
 using Ryujinx.HLE.HOS.Services.Sockets.Bsd.Types;
@@ -125,7 +126,13 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
 
             try
             {
-                newBsdSocket = new ManagedSocket(netDomain, (SocketType)type, protocol, context.Device.Configuration.MultiplayerLanInterfaceId, !context.Device.Configuration.EnableInternetAccess)
+                // ldn_mitm assigns each peer a real LAN address and the game exchanges its payload
+                // through ordinary BSD sockets. Keep internet/NIFM semantics off, but do not route
+                // this mode's data sockets into the loopback-only offline network.
+                bool offline = !context.Device.Configuration.EnableInternetAccess &&
+                               context.Device.Configuration.MultiplayerMode != MultiplayerMode.LdnMitm;
+
+                newBsdSocket = new ManagedSocket(netDomain, (SocketType)type, protocol, context.Device.Configuration.MultiplayerLanInterfaceId, offline)
                 {
                     Blocking = !creationFlags.HasFlag(BsdSocketCreationFlags.NonBlocking),
                 };

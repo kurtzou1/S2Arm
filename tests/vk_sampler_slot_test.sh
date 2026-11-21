@@ -1,4 +1,5 @@
 #!/bin/bash
+# 门禁显卡：共享（建 Metal 设备在本机显卡上跑、不按显示时钟判：取共享显卡锁，与按显示时钟判的独占步错开；11-20 读写锁）
 # 门禁覆盖：graphics/tools/spirv_msl.py graphics/metal/gal_vkx.m tests/vk_sampler_slot_test.sh
 # Vulkan / GLSL 前端的采样器槽（审计 1101 18:00 P1-19，约 5 秒，要 glslangValidator 与 Metal）：bash tests/vk_sampler_slot_test.sh
 # 一支片元着色器：绑定 0 独立采样器、绑定 1 组合采样器、绑定 2 独立纹理。改写后的下标同时是纹理下标和采样器下标，组合采样器要越过两个游标。

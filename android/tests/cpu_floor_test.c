@@ -5,6 +5,7 @@
 // 只替换边界——系统属性、单调时钟、核拓扑与钉核 / 降优先级系统调用、以及「满载一片」本身（计数代替真烧核）。
 // 时间用模拟时钟推进，线程是真线程：验证起停、门、帧计数接线、判定接线、停局回收。
 #include "cpu_floor.h"
+#include "adpf_hint.h"
 #include "power_state.h"
 #include "system_tuning.h"
 #include <errno.h>
@@ -24,6 +25,8 @@ static int failed;
 
 // ---- 假世界 ----
 static _Atomic uint64_t fake_now;
+static _Atomic int adpf_active;
+int s2a_adpf_session_active(void) { return atomic_load(&adpf_active); }
 static _Atomic int gate_on;                                  // 调试入口两道门（调试构建 + debug.s2a.debug_env=1）
 static _Atomic(const char *) prop_mode, prop_spin;
 static _Atomic int ncpu;
@@ -154,6 +157,7 @@ static void sleep_us(long us) { struct timespec ts = {0, us * 1000}; nanosleep(&
 
 static void world_reset(void) {
     atomic_store(&fake_now, 1000 * SEC);
+    atomic_store(&adpf_active, 0);
     atomic_store(&gate_on, 1); atomic_store(&prop_reads, 0);        // 缺省：调试入口开着（调试构建 + debug_env=1），属性生效
     atomic_store(&prop_mode, NULL); atomic_store(&prop_spin, NULL);
     atomic_store(&prop_gpu, "0");                                    // 原有用例只管 CPU 托底：GPU 锁频关着，各自的用例里再开
@@ -173,6 +177,7 @@ static void world_reset(void) {
     atomic_store(&fake_proc_cpu_ms, 0); atomic_store(&fake_thr_cpu_ms, 0);
     pthread_mutex_lock(&log_mu); log_buf[0] = 0; pthread_mutex_unlock(&log_mu);
     s2a_android_power_set(0, 0);                 // 热状态正常、省电关
+    s2a_android_session_period_reset();          // 每个用例是新的一局：本局最短周期从这里记起
     s2a_android_present_note(PERIOD30);
     s2a_cpu_floor_test_reset();
 }
@@ -352,11 +357,32 @@ static void test_auto(void) {
     run_fps(5.0, 80); CHECK(!s2a_cpu_floor_test_active());
     s2a_cpu_floor_stop();
     // 目标周期不是 30 帧档（50 ms = 20 fps）：慢的线是目标的 9/10 = 18 fps，19 fps 不慢、17 fps 慢；日志写出这个目标
-    world_reset(); s2a_android_present_note(50 * MS); start_game(); frac = 0;
+    world_reset(); s2a_android_session_period_reset(); s2a_android_present_note(50 * MS); start_game(); frac = 0;
     CHECK(WAIT_UNTIL(s2a_cpu_floor_test_ticks() >= 1));
     run_fps(19.0, 80); CHECK(!s2a_cpu_floor_test_active());
     run_fps(17.0, 13); CHECK(WAIT_UNTIL(s2a_cpu_floor_test_active()));
     CHECK(log_has("，上屏目标 20.0 fps"));
+    s2a_cpu_floor_stop();
+}
+
+// 本局最短周期（动态间隔的游戏掉档）：本局上过 16.7 ms、现在 33.3 ms、实际 30 帧 → 对 60 帧判：30 < 60 × 0.9 = 54，慢，托底出手。
+//   对照：只上过 33.3 ms 的局，同样 30 帧不托（test_auto 第一段）。120 帧周期 8.3 ms 封到 16.7 ms，目标写 60.0 不写 120.0
+static void test_session_period(void) {
+    world_reset(); s2a_android_present_note(16666667); s2a_android_present_note(PERIOD30); start_game(); frac = 0;
+    CHECK(s2a_android_present_ns() == PERIOD30 && s2a_android_session_period_ns() == 16666667);
+    CHECK(WAIT_UNTIL(s2a_cpu_floor_test_ticks() >= 1));
+    run_fps(30.0, 16); CHECK(WAIT_UNTIL(s2a_cpu_floor_test_active()));
+    CHECK(log_has("托底开 mode=auto") && log_has("，上屏目标 60.0 fps"));
+    s2a_cpu_floor_stop();
+    world_reset(); s2a_android_present_note(8333333); s2a_android_present_note(PERIOD30); start_game(); frac = 0;
+    CHECK(WAIT_UNTIL(s2a_cpu_floor_test_ticks() >= 1));
+    run_fps(30.0, 16); CHECK(WAIT_UNTIL(s2a_cpu_floor_test_active()));
+    CHECK(log_has("，上屏目标 60.0 fps") && !log_has("，上屏目标 120.0 fps"));
+    s2a_cpu_floor_stop();
+    // 停局清零后（下一局只上过 33.3 ms）：30 帧不慢
+    world_reset(); start_game(); frac = 0;
+    CHECK(WAIT_UNTIL(s2a_cpu_floor_test_ticks() >= 1));
+    run_fps(30.0, 40); CHECK(!s2a_cpu_floor_test_active() && atomic_load(&spin_slices) == 0);
     s2a_cpu_floor_stop();
 }
 
@@ -759,13 +785,42 @@ static void test_gpu_turbo(void) {
     s2a_cpu_floor_stop(); CHECK(atomic_load(&turbo_calls) == 1);
 }
 
-int main(void) {
+static void test_adpf_gate(void) {
+    world_reset();
+    atomic_store(&adpf_active, 1);
+    atomic_store(&prop_gpu, "auto");
+    atomic_store(&gpu_cur_khz, 300000);
+    atomic_store(&gpu_max_khz, 900000);
+    start_game();
+    frac = 0;
+    CHECK(WAIT_UNTIL(s2a_cpu_floor_test_ticks() >= 1));
+    run_fps(17.0, 16);
+    CHECK(!s2a_cpu_floor_test_active() && atomic_load(&spin_slices) == 0);
+    CHECK(atomic_load(&turbo_state) == 1);
+    atomic_store(&adpf_active, 0);
+    run_fps(17.0, 16);
+    CHECK(s2a_cpu_floor_test_active());
+    atomic_store(&adpf_active, 1);
+    run_fps(17.0, 2);
+    CHECK(!s2a_cpu_floor_test_active() && quiet());
+    CHECK(atomic_load(&turbo_state) == 1);
+    atomic_store(&prop_mode, "1");
+    run_fps(17.0, 2);
+    CHECK(!s2a_cpu_floor_test_active() && quiet());
+    s2a_cpu_floor_stop();
+    CHECK(atomic_load(&turbo_state) == 0);
+}
+
+int main(int argc, char **argv) {
+    test_adpf_gate();
+    if (argc == 2 && !strcmp(argv[1], "--adpf")) return failed != 0;
     test_start_gates();
     test_stop_before_start();
     test_property_modes();
     test_spin_kind();
     test_power_gates();
     test_auto();
+    test_session_period();
     test_topology();
     test_gate();
     test_ceiling();

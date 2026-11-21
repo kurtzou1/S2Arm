@@ -32,6 +32,17 @@ public struct PhoneOverview: Equatable {
             self.gameId = gameId; self.state = state; self.reasons = reasons; self.dataOnComputer = dataOnComputer
         }
     }
+    /// 这台手机上的独立 App（一 App 一游戏，作业 apps，host_update._app_rows）：壳号是不是本版、签名与到期（同手机那行的口径）
+    public struct App: Equatable {
+        public let gameId: String
+        public let bundleId: String
+        public let shellCurrent: Bool
+        public let signedAt: Date?
+        public let expiresAtEstimate: Date?
+        public init(gameId: String, bundleId: String, shellCurrent: Bool, signedAt: Date?, expiresAtEstimate: Date?) {
+            self.gameId = gameId; self.bundleId = bundleId; self.shellCurrent = shellCurrent; self.signedAt = signedAt; self.expiresAtEstimate = expiresAtEstimate
+        }
+    }
     public struct Phone: Equatable {
         public let device: String
         public let name: String
@@ -54,6 +65,8 @@ public struct PhoneOverview: Equatable {
         public let needsChoice: Bool
         /// 装着不止一个时的全部候选（选没选过都带，选过的据此给「换一个」）；只有一个或没探测 = 空
         public let candidates: [Candidate]
+        /// 这台上的独立 App（按游戏号排）；旧作业层不带 = 空
+        public var apps: [App] = []
         public init(device: String, name: String, installed: Bool, shellCurrent: Bool, bundleId: String, signedAt: Date?, free: Bool,
                     expiresAtEstimate: Date?, online: String??, lastSeen: Date?, signMode: SignMode?, games: [Game],
                     installedBy: InstalledBy? = nil, actions: [String] = [], needsChoice: Bool = false, candidates: [Candidate] = []) {
@@ -79,12 +92,19 @@ public struct PhoneOverview: Equatable {
                 return Game(gameId: id.uppercased(), state: s, reasons: g["reasons"] as? [String] ?? [], dataOnComputer: g["dataOnComputer"] as? Bool)
             }
             let candidates = Self.candidates(p["candidates"])
-            return Phone(device: device, name: p["name"] as? String ?? "", installed: p["installed"] as? Bool == true, shellCurrent: p["shellCurrent"] as? Bool == true,
+            let apps: [App] = (p["apps"] as? [[String: Any]] ?? []).compactMap { a in
+                guard let id = a["gameId"] as? String, let bid = a["bundleId"] as? String else { return nil }
+                return App(gameId: id.uppercased(), bundleId: bid, shellCurrent: a["shellCurrent"] as? Bool == true, signedAt: date(a["signedAt"]),
+                           expiresAtEstimate: date(a["expiresAtEstimate"]))
+            }
+            var phone = Phone(device: device, name: p["name"] as? String ?? "", installed: p["installed"] as? Bool == true, shellCurrent: p["shellCurrent"] as? Bool == true,
                          bundleId: p["bundleId"] as? String ?? "", signedAt: date(p["signedAt"]), free: p["free"] as? Bool == true,
                          expiresAtEstimate: date(p["expiresAtEstimate"]), online: online, lastSeen: date(p["lastSeen"]),
                          signMode: (p["signMode"] as? String).flatMap(SignMode.init), games: games,
                          installedBy: (p["installedBy"] as? String).flatMap(InstalledBy.init), actions: p["actions"] as? [String] ?? [],
                          needsChoice: p["needsChoice"] as? Bool == true, candidates: candidates)
+            phone.apps = apps
+            return phone
         }
     }
 

@@ -6,6 +6,7 @@
 //   InstallModeCard：设置里的一张卡；InstallModeLine：出包页一行只读签名身份 + 「更改」（去设置）。
 //   更新：游戏库顶栏按钮（catalog phoneUpdates：设备记录的壳号比本版旧）→ 有要重新出包的款先三选一 → installUpdate 作业只换壳、不重推资源；
 //   选了「更新并重新出这几款」：更新成功后把它们排进批量出包（只出 iPhone），整批出完逐款装上。
+using System.Text.Json;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Layout;
@@ -20,6 +21,14 @@ public sealed partial class EnvironmentWindow
     private bool exportAvailable;                // 作业层读回的 exportAvailable：只报给控制口（ControlInstallMode），界面不再据它置灰
     private bool installModeTried, installModeLoading;
     private string signChoice = "appleId";   // installMode 作业的 signChoice：appleId / devCert / external
+    // 出法（0.6.3，installMode 作业）：layout = 缺省现在按哪种推（shell 通用 S2Arm / standalone 独立 App，一 App 一游戏）；layoutGames = 按款选过的
+    private string layout = "shell";
+    private Dictionary<string, string> layoutGames = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>出法选「独立 App」时按签名方式给的那句提示的码（installMode / layoutSet 结果 standaloneHint：appleId / wildcard / external；null → ""，不显示）</summary>
+    private string standaloneHint = "";
+    /// <summary>作业层按签名带不带调试权限推荐的出法（installMode / layoutSet 结果 recommend：standalone / shell；null → ""，两张卡都不挂推荐）
+    ///   与推荐依据（recommendWhy：distribution / devCertDebug / appleId / external / unknown）：卡片「✓ 根据你的…推荐」和卡片下方那一行按它选句</summary>
+    private string layoutRecommend = "", layoutRecommendWhy = "";
     // 更新作业：正在跑 / 计数；结果没看过时顶栏留一个可点掉的提示（"" = 成功，否则失败原因）
     private bool phoneUpdating;
     private long? updateDone, updateTotal;
@@ -67,6 +76,12 @@ public sealed partial class EnvironmentWindow
             {
                 exportAvailable = Flag(job.Report.Result, "exportAvailable");
                 signChoice = Str(job.Report.Result, "signChoice") is { Length: > 0 } sc ? sc : "appleId";   // 签名方式三选一（自签走查结构 6）
+                layout = Str(job.Report.Result, "layout") is { Length: > 0 } lo ? lo : "shell";
+                ReadLayoutRecommend(job.Report.Result);
+                layoutGames = new(StringComparer.OrdinalIgnoreCase);
+                if (job.Report.Result.TryGetProperty("layoutChoice", out var lc) && lc.ValueKind == JsonValueKind.Object &&
+                    lc.TryGetProperty("games", out var lg) && lg.ValueKind == JsonValueKind.Object)
+                    foreach (var g in lg.EnumerateObject()) if (g.Value.ValueKind == JsonValueKind.String) layoutGames[g.Name] = g.Value.GetString() ?? "";
             }
         }
         catch (Exception error) when (error is LibraryProtocolException or IOException or UnauthorizedAccessException or ArgumentException or
@@ -102,9 +117,139 @@ public sealed partial class EnvironmentWindow
             identity.Children.Add(impactor);
         }
         panel.Children.Add(identity);
+        panel.Children.Add(LayoutCards(null));
         var card = Card(panel);
         AutomationId(card, "env.installMode");
         return card;
+    }
+
+    // ---- 出法（0.6.3 维护者定，两种并存、玩家自选；两张并排卡片，同 Mac InstallLayoutRow）----
+
+    private static readonly IBrush LayoutGold = Brush.Parse("#E8C65A");
+
+    private void ReadLayoutRecommend(JsonElement result)
+    {
+        standaloneHint = Str(result, "standaloneHint");
+        layoutRecommend = Str(result, "recommend");
+        layoutRecommendWhy = Str(result, "recommendWhy");
+    }
+
+    /// <summary>卡片下方那一行（只出一行，按顺序取第一个命中的；都不命中 → null）：(文案键, 颜色)。只提示不拦、不弹窗</summary>
+    private (string Key, string Color)? LayoutNote(string now) =>
+        now == "shell" && layoutRecommendWhy == "distribution" ? ("layout.card.warn.distShell", "#FF9F0A")
+        : now == "standalone" && layoutRecommendWhy == "appleId" ? ("layout.card.warn.freeStandalone", "#FF9F0A")
+        : now == "standalone" && layoutRecommendWhy == "external" ? ("install.layout.hint.external", "#FF9F0A")
+        : now == "standalone" && standaloneHint == "wildcard" ? ("install.layout.hint.wildcard", "#FFD60A")
+        : layoutRecommendWhy == "unknown" ? ("layout.card.unknown", "#A8A6A1")
+        : null;
+
+    /// <summary>出法两张卡（设置页 / 出包页 / 单款装机页共用）。gameId 为空 = 设置里的缺省（选中的是现在生效的那种：没选过时作业层按证书自动）；
+    ///   给了 = 这款单独选；单独选过时右上给「跟随设置（当前：…）」撤掉。推荐那张底部「✓ 根据你的…推荐」，卡片下方一行按 LayoutNote 提示</summary>
+    private Control LayoutCards(string? gameId)
+    {
+        EnsureInstallMode();
+        string Name(string v) => T(v == "standalone" ? "install.layout.standalone" : "install.layout.shell");
+        var own = gameId is null ? null : layoutGames.GetValueOrDefault(gameId);
+        var now = own ?? layout;
+        var panel = new StackPanel { Spacing = 10 };
+
+        var header = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 12 };
+        var title = Muted(T(gameId is null ? "install.layout.title" : "install.layout.game"), 13.5); title.VerticalAlignment = VerticalAlignment.Center;
+        header.Children.Add(title);
+        if (gameId is not null && own is not null)
+        {
+            var follow = new Button { Content = new TextBlock { Text = T("install.layout.follow").Replace("{0}", Name(layout)), TextDecorations = TextDecorations.Underline,
+                    Foreground = Brush.Parse("#A8A6A1"), FontSize = 12.5 },
+                Background = Brushes.Transparent, Padding = new Thickness(0, 2), VerticalAlignment = VerticalAlignment.Center };
+            follow.Click += (_, _) => _ = SetLayoutAsync(null, gameId);
+            AutomationId(follow, "install.layout.follow");
+            Grid.SetColumn(follow, 1); header.Children.Add(follow);
+        }
+        panel.Children.Add(header);
+
+        Control OneCard(string value, string body, string badge, bool gold)
+        {
+            var on = now == value;
+            var content = new Grid { RowDefinitions = new RowDefinitions("Auto,Auto,Auto,*,Auto"), RowSpacing = 6 };
+            // 右上：角标 + 小问号（悬停展开原理说明，点一下也展开 / 收起；两张同一段）
+            var top = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 6 };
+            top.Children.Add(new Border { Background = gold ? LayoutGold : Brush.Parse("#5A5A60"), CornerRadius = new CornerRadius(9), Padding = new Thickness(8, 2),
+                HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center,
+                Child = new TextBlock { Text = T(badge), FontSize = 11, FontWeight = FontWeight.Bold, TextWrapping = TextWrapping.Wrap,
+                    Foreground = gold ? Brushes.Black : Brushes.White } });
+            var help = new Button { Content = "?", FontSize = 11, FontWeight = FontWeight.Bold, Width = 20, Height = 20, Padding = new Thickness(0),
+                CornerRadius = new CornerRadius(10), HorizontalContentAlignment = HorizontalAlignment.Center, VerticalContentAlignment = VerticalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center, Background = Brush.Parse("#2E2E33"), Foreground = Brush.Parse("#A8A6A1") };
+            ToolTip.SetTip(help, new TextBlock { Text = T("layout.card.why"), TextWrapping = TextWrapping.Wrap, MaxWidth = 420, FontSize = 13, LineHeight = 20 });
+            ToolTip.SetShowDelay(help, 150); ToolTip.SetPlacement(help, PlacementMode.Bottom);
+            help.Click += (_, e) => { ToolTip.SetIsOpen(help, !ToolTip.GetIsOpen(help)); e.Handled = true; };   // 不冒泡到卡片：点问号不算选这张
+            Avalonia.Automation.AutomationProperties.SetName(help, T("layout.card.whyLabel"));
+            AutomationId(help, "install.layout.why." + value);
+            Grid.SetColumn(help, 1); top.Children.Add(help);
+            content.Children.Add(top);
+            // 圆点 + 标题：选中实心金点，没选灰圈
+            var head = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+            head.Children.Add(new Avalonia.Controls.Shapes.Ellipse { Width = 12, Height = 12, VerticalAlignment = VerticalAlignment.Center,
+                Fill = on ? LayoutGold : Brushes.Transparent, Stroke = on ? LayoutGold : Brush.Parse("#6E6E73"), StrokeThickness = 1.5 });
+            head.Children.Add(Label(Name(value), 16));
+            Grid.SetRow(head, 1); content.Children.Add(head);
+            var text = Muted(T(body), 12.5);
+            Grid.SetRow(text, 2); content.Children.Add(text);
+            if (layoutRecommend == value)
+            {
+                var rec = new TextBlock { Text = "✓ " + T(layoutRecommendWhy is "distribution" or "devCertDebug" ? "layout.card.recommendCert" : "layout.card.recommendSign"),
+                    FontSize = 12, FontWeight = FontWeight.SemiBold, Foreground = LayoutGold, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 4, 0, 0) };
+                AutomationId(rec, "install.layout.recommended." + value);
+                Grid.SetRow(rec, 4); content.Children.Add(rec);
+            }
+            var card = new Button { Content = content, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch,
+                VerticalAlignment = VerticalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch,   // 两张卡同高，推荐那行贴底
+                Padding = new Thickness(14, 12), CornerRadius = new CornerRadius(12), Foreground = Ink,
+                Background = on ? Brush.Parse("#2A2722") : Surface, BorderBrush = on ? LayoutGold : Brush.Parse("#3A3A3F"), BorderThickness = new Thickness(on ? 2 : 1) };
+            AutomationId(card, (gameId is null ? "install.layout." : "install.layout.game.") + value);
+            // 点卡片 = 选它（不拦）；已经明确选的就是它时不重发
+            card.Click += (_, _) => { if ((gameId is null ? layout : own) != value) _ = SetLayoutAsync(value, gameId); };
+            return card;
+        }
+        var standalone = OneCard("standalone", "layout.card.standalone.body", "layout.card.standalone.badge", gold: true);
+        var shell = OneCard("shell", "layout.card.shell.body", "layout.card.shell.badge", gold: false);
+        // 并排；窄时（不到 520 宽）上下排
+        var cards = new Grid { ColumnSpacing = 12, RowSpacing = 12 };
+        cards.Children.Add(standalone); cards.Children.Add(shell);
+        void Arrange(bool wide)
+        {
+            cards.ColumnDefinitions = new ColumnDefinitions(wide ? "*,*" : "*");
+            cards.RowDefinitions = new RowDefinitions(wide ? "Auto" : "Auto,Auto");
+            Grid.SetColumn(shell, wide ? 1 : 0); Grid.SetRow(shell, wide ? 0 : 1);
+        }
+        var wideNow = true; Arrange(true);
+        cards.SizeChanged += (_, e) => { var wide = e.NewSize.Width >= 520; if (wide != wideNow) { wideNow = wide; Arrange(wide); } };
+        panel.Children.Add(cards);
+
+        if (LayoutNote(now) is { } note)
+        {
+            var line = new TextBlock { Text = T(note.Key), TextWrapping = TextWrapping.Wrap, FontSize = 12, Foreground = Brush.Parse(note.Color) };
+            AutomationId(line, "install.layout.note");
+            panel.Children.Add(line);
+        }
+        AutomationId(panel, gameId is null ? "env.installLayout" : "install.layout");
+        return panel;
+    }
+
+    /// <summary>作业 layoutSet：layout = shell / standalone / null（撤掉选择）；gameId 给了只管这一款。下次推到 iPhone 时作业层按它分流，这里不装任何东西</summary>
+    private async Task SetLayoutAsync(string? value, string? gameId)
+    {
+        var args = new Dictionary<string, object?>();
+        if (value is not null) args["layout"] = value;   // 不带 layout = 撤掉选择（作业层 c.r.get("layout") 为空）
+        if (gameId is not null) args["gameId"] = gameId;
+        try
+        {
+            var job = await PackJobClient.RunAsync(PackRequest("layoutSet", "", args), null, CancellationToken.None);
+            if (job.Report.Succeeded) ReadLayoutRecommend(job.Report.Result);
+        }
+        catch (Exception error) when (error is LibraryProtocolException or IOException or UnauthorizedAccessException or ArgumentException or
+            InvalidOperationException or System.ComponentModel.Win32Exception) { }
+        await RefreshInstallModeAsync();
     }
 
     // ---- 出包页：一键装用谁签名 + 「更改」 ----

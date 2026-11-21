@@ -84,6 +84,8 @@ void rp_state_reset(void) {}
 int rp_state_op(uint32_t op, const void *a, uint32_t size) { (void)op; (void)a; (void)size; return 0; }
 void rp_dirty_all(void) {}
 int rp_pass_is_open(void) { return 0; }
+int rp_pass_draws(void) { return 0; }
+int rp_pass_split_ok(void) { return 0; }
 void rp_pass_end(nvn_gpu_cmd c) { (void)c; }
 void rp_pass_flush(nvn_gpu_cmd c) { (void)c; }
 void rp_pass_barrier(uint32_t bits) { (void)bits; }

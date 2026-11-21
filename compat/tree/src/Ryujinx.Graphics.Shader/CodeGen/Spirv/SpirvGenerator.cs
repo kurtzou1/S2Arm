@@ -67,10 +67,8 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             context.AddCapability(Capability.ImageQuery);
             context.AddCapability(Capability.SampledBuffer);
 
-            if (parameters.HostCapabilities.SupportsShaderFloat64)
-            {
-                context.AddCapability(Capability.Float64);
-            }
+            // S2Arm（#1774）：Float64 只在真建了 64 位浮点类型时声明（CodeGenContext.TypeFP64），不再按「宿主支持」声明——
+            //   原先宿主答「支持」时每个模块都带 OpCapability Float64，没开 shaderFloat64 的设备建模块就违反 VUID-…-08740。
 
             if (parameters.Definitions.TransformFeedbackEnabled && parameters.Definitions.LastInVertexPipeline)
             {
@@ -85,7 +83,9 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                     context.AddCapability(Capability.Geometry);
                 }
 
-                if (context.HostCapabilities.SupportsFragmentShaderInterlock)
+                // S2Arm（#1774）：片元互锁的能力和扩展只在程序真有互锁临界区（HelperFunctionsMask.FSI）时声明，与下面的执行模式同条件；
+                //   原先按「宿主支持」声明，Mali-G710 上 94.6% 的离线库模块声明了却没有一条互锁指令，设备没有这个扩展就建模块失败。
+                if ((context.Info.HelperFunctionsMask & HelperFunctionsMask.FSI) != 0 && context.HostCapabilities.SupportsFragmentShaderInterlock)
                 {
                     context.AddCapability(Capability.FragmentShaderPixelInterlockEXT);
                     context.AddExtension("SPV_EXT_fragment_shader_interlock");

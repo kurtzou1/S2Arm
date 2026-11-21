@@ -73,9 +73,9 @@ printf '#!/bin/sh\necho "fake metal-tt: broken" >&2; exit 1\n' > "$T/badtt"; chm
 o=$(S2A_METAL_TT=$T/badtt CS "$T/o6" --os "$MAJ" --arch "$ARCH" --cache "$T/cache6" 2>&1); r=$?
 ck "⑤ metal-tt 失败：退出 3、0 个文件、读数失败 2 支（退出 ${r}，$(ls "$T/o6" 2> /dev/null | wc -l | tr -d ' ') 个文件）" '[ $r = 3 ] && [ -z "$(ls "$T/o6")" ] && [[ "$(tail -1 <<< "$o")" == *"失败 2 支"* ]]'
 # ⑥ 阶段：假产物根（只有直连库目录与直连库阶段键），私有根
-RT=$T/roots; mkdir -p "$RT/fx@v1/shaders"; cp -R "$F" "$RT/fx@v1/shaders/"; echo k1 > "$RT/fx@v1/.stage_direct"; printf 'title_id\t0100aaaa00000000\n' > "$RT/fx@v1/unpack.tsv"; ln -s fx@v1 "$RT/fx@现行"
+RT=$T/roots; mkdir -p "$RT/fx@v1/shaders"; cp -R "$F" "$RT/fx@v1/shaders/"; echo k1 > "$RT/fx@v1/.stage_direct"; printf 'title_id\t0100aaaa00000000\n' > "$RT/fx@v1/unpack.tsv"; printf '%s\n' fx@v1 > "$RT/fx@现行"
 ST() { S2A_ROOTS=$RT S2A_ROOTS_SHARED=$T/shared S2A_RUN_ROOT=$T/run S2A_PACK_PLAT=macos S2A_MAC_OS=$MAJ S2A_PSO_ARCHS="$1" J=2 bash "$H/pack/stage_direct_cpso.sh" fx 2>&1; }
-cur() { cd -P "$RT/fx@现行" && pwd; }
+cur() { cd -P "$RT/$(cat "$RT/fx@现行")" && pwd; }
 o=$(ST "$ARCH"); r=$?
 ck "⑥ 阶段出归档：退出 ${r}、现行根 pipelines/ 恰是 A / B 两个、记了键（$(tail -1 <<< "$o" | cut -c1-140)）" \
    '[ $r = 0 ] && [ "$(ls "$(cur)/shaders/direct/pipelines" 2> /dev/null | sort)" = "$(printf "%s\n" "$FA" "$FB" | sort)" ] && [ -s "$(cur)/.stage_direct_cpso" ]'

@@ -44,14 +44,15 @@ import sys
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from cs_pipelines import container, lib_functions, tt_command, tt_suffix, run_tt, clone   # 同一套库读法与 metal-tt 调法
+from cs_pipelines import container, lib_functions, tt_command, tt_suffix, run_tt, clone, sdk_tool, run_tool   # 同一套库读法与 metal-tt 调法
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / 'tools'))
 from pool_workers import cores   # 核数 / 进程池路数唯一来源（tools/pool_workers.py，#1332）
+from progress import Ticker   # 出包进度（S2A_PROGRESS）：这段原先没有计数，界面停在「刷新各阶段 n/11 · 剩 0 秒」（一款体育游戏 6000 对单路二十多分钟）
 
 FORMAT = 'base-pipelines 2'   # 改了产物形状（描述、文件名、脚本格式、压缩）就加一，旧缓存全部不中（2：iPhone 逐对 lzfse，缓存存压过的）
 K_B, K_JSON, K_BP = 0, 1, 55   # 库容器种类：库段、反射、拉取式顶点库（graphics/nvn/lib_pack_core.inc）
@@ -213,6 +214,14 @@ def main():
                     except (ValueError, struct.error, KeyError, UnicodeDecodeError): info[sh] = ({}, None)
             return data, sh, info[sh]
 
+        def fn_id(key, kind, fn):
+            """不调 metallib 先算这个函数的身份串：取得出自己的模块 → 'm' + 函数表 HASH，否则整段 's' + 段 sha256；→ (身份串, 声明常量吗) 或 None。
+            缓存键只用它，所以先查缓存、命中就不必包库（热缓存时整段出包原先每对都先跑两次 xcrun metallib，一款大作这段要四分多钟）"""
+            data, sh, (fns, consts) = seg(key, kind)
+            if fn not in fns or consts is None or fn not in consts: return None
+            h, o, sz = fns[fn]; mod = data[o:o + sz]
+            return ('m' + h if mod and hashlib.sha256(mod).hexdigest() == h else 's' + sh), consts[fn]
+
         def fn_lib(key, kind, fn):
             """这个函数的库：能取出它自己的模块（sha256 = 函数表 HASH）就包成单函数库，否则整段；→ (库路径, 身份串, 声明常量吗, 整段吗) 或 None（库里没有这个函数 / 读不出常量表）"""
             data, sh, (fns, consts) = seg(key, kind)
@@ -223,7 +232,7 @@ def main():
                 if not ml.is_file():   # 两路同时包同一个模块：各写各的临时件、结果相同，后改名的覆盖先的
                     t = f'm{h}.{threading.get_ident()}'; air, tmp = work / f'{t}.air', work / f'{t}.metallib'
                     air.write_bytes(mod)
-                    p = subprocess.run(['xcrun', '-sdk', sdk, 'metallib', str(air), '-o', str(tmp)], capture_output=True)
+                    p = run_tool(sdk_tool(sdk, 'metallib') + [str(air), '-o', str(tmp)])
                     try: ok = not p.returncode and lib_functions(tmp.read_bytes()).get(fn, ('',))[0] == h
                     except (OSError, ValueError, struct.error): ok = False
                     if ok: os.replace(tmp, ml)
@@ -233,10 +242,15 @@ def main():
                 if not sp.is_file(): sp.write_bytes(data)
             return sp, 's' + sh, consts[fn], True
 
+        def cached(vid, entry, vc, fid, fname, fc):
+            """一条基础管线的缓存文件（没给 --cache 返回 None）"""
+            if not a.cache: return None
+            ck = hashlib.sha256('\n'.join([FORMAT, vid, entry, str(vc), fid, fname, str(fc), a.plat, str(a.os), ' '.join(archs), ttver]).encode()).hexdigest()
+            return a.cache / ck[:2] / f'{ck}.e'
+
         def build(dst, vl, entry, fl, fname):
             """一条基础管线 → dst（随包那份：iPhone 压过的）；→ 'hit' 缓存命中、'built' 现编，或 (退出码, 谁, 原因)"""
-            ck = hashlib.sha256('\n'.join([FORMAT, vl[1], entry, str(vl[2]), fl[1], fname, str(fl[2]), a.plat, str(a.os), ' '.join(archs), ttver]).encode()).hexdigest()
-            cf = a.cache / ck[:2] / f'{ck}.e' if a.cache else None
+            cf = cached(vl[1], entry, vl[2], fl[1], fname, fl[2])
             if cf and cf.is_file() and cf.stat().st_size:
                 clone(cf, dst); os.utime(cf); return 'hit'
             fds, sps = [], []
@@ -271,6 +285,10 @@ def main():
 
         def one(job):
             v, f, entry, fname = job
+            vi, fi = fn_id(v, K_BP, entry), fn_id(f, K_B, fname)
+            cf = cached(vi[0], entry, vi[1], fi[0], fname, fi[1]) if vi and fi else None
+            if cf and cf.is_file() and cf.stat().st_size:   # 先查缓存：命中就不包单函数库（包不成按整段的，键同样能算出、同样先查）
+                clone(cf, path(job)); os.utime(cf); return 'hit', sum(1 for x in (vi, fi) if x[0][0] == 's')
             vl, fl = fn_lib(v, K_BP, entry), fn_lib(f, K_B, fname)
             whole = sum(1 for x in (vl, fl) if x and x[3])
             if not vl or not fl:
@@ -294,8 +312,10 @@ def main():
             else:
                 clone(wlib, warm_files[1]); warm = '1 份' + ('（缓存命中）' if r == 'hit' else '')
                 used = sum(x.stat().st_size for x in warm_files)
+        tk = Ticker('直连库·拉取基础管线', len(jobs))   # 按对计
         with ThreadPoolExecutor(max(1, a.j)) as ex:   # 全装：plan 出的对全部并行编
-            for job, r in zip(jobs, ex.map(one, jobs)): res[job] = r
+            fut = {ex.submit(one, job): job for job in jobs}
+            for f in as_completed(fut): res[fut[f]] = f.result(); tk.step()   # 按完成先后计：一对编一分多钟时，按提交顺序取会让计数停在它前面（界面看着像卡住）
         for job in jobs:   # 没编成的不留同名旧文件
             if isinstance(res[job][0], tuple): path(job).unlink(missing_ok=True)
     finally:

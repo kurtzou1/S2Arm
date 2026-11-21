@@ -1,7 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 S2Arm contributors
-# 门禁覆盖：graphics/tools/direct/direct_lib.sh translator/gl_shaders.py
+# 门禁覆盖：graphics/tools/direct/direct_lib.py translator/gl_shaders.py
 # 直连库离线翻译降级汇总（v0.3.1 拿不准不停）：纯 GL 款，假 gl_shaders.py 只打汇总行、写表头（期望按输入手写）：
 #   ① 「成功 0、失败 2」退 0 → direct_lib 退 0、keys.tsv 空、产物根 degrade.direct.tsv = 表头 + 「direct gl_failed 2 <玩家提示>」（原先 gl_shaders 退 1、整款停）
 #   ② 「成功 3、失败 1」退 0、出库 → direct_lib 退 0、degrade.direct.tsv 记 gl_failed 1
@@ -11,9 +11,8 @@
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); trap 'rm -rf "$T"' EXIT; bad=0
 ck() { if [ "$2" = "$3" ]; then echo "通 $1：期望 $2 → 真结果 $3"; else echo "不通 $1：期望 $2 → 真结果 $3"; bad=1; fi; }
 F=$T/repo; mkdir -p $F/graphics/tools/direct $F/graphics/nvn/tools $F/pack $F/tools $F/translator $T/bin
-cp "$H/graphics/tools/direct/direct_lib.sh" $F/graphics/tools/direct/
+cp "$H/graphics/tools/direct/direct_lib.py" $F/graphics/tools/direct/; cp "$H/tools/progress.py" "$H/tools/pool_workers.py" $F/tools/
 printf 'import sys\nprint("gl\\tstub")\n' > $F/graphics/nvn/tools/gfx_api.py
-echo 'prog_id() { echo 0100000000000000; }' > $F/pack/srcs.sh; echo 'prog_tick() { :; }' > $F/tools/progress.sh
 printf 'import os, sys\na=sys.argv[sys.argv.index("--")+1:]; os.execv(a[0], a)\n' > $F/tools/nostall.py
 cat > $F/translator/gl_shaders.py <<'EOF'
 import os, pathlib, sys
@@ -25,8 +24,8 @@ if ios: (out / "gl_shaders.metallib").write_bytes(b"lib")
 print(f"GLSL 汇总：成功 {ok}、失败 {failed}、跳过 0")
 EOF
 for b in glslangValidator spirv-cross; do printf '#!/bin/bash\n' > $T/bin/$b; chmod +x $T/bin/$b; done
-G=$T/game; mkdir -p $G/romfs $G/exefs; echo x > $G/exefs/main
-run() { rm -rf $T/out; FAKE_GL="$1" PATH="$T/bin:$PATH" S2A_PY="$(command -v python3)" S2A_DIRECT_CACHE=$T/cache J=1 bash $F/graphics/tools/direct/direct_lib.sh $G $T/out > $T/log 2>&1; echo $?; }
+G=$T/game; mkdir -p $G/romfs $G/exefs; echo x > $G/exefs/main; printf 'title_id\t0100000000000000\n' > $G/unpack.tsv
+run() { rm -rf $T/out; FAKE_GL="$1" PATH="$T/bin:$PATH" S2A_PY="$(command -v python3)" S2A_DIRECT_CACHE=$T/cache J=1 python3 $F/graphics/tools/direct/direct_lib.py $G $T/out > $T/log 2>&1; echo $?; }
 r=$(run "0 2"); ck "① 成功 0 失败 2：退出码" 0 "$r"
 ck "① keys.tsv 为空" 0 "$([ -f $T/out/keys.tsv ] && grep -c . $T/out/keys.tsv; [ -f $T/out/keys.tsv ] || echo 无)"
 ck "① degrade.direct.tsv 记 gl_failed 2" "direct gl_failed 2" "$(grep -v '^#' $G/degrade.direct.tsv 2> /dev/null | cut -f1-3 | tr '\t' ' ')"

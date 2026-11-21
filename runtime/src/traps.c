@@ -1,6 +1,6 @@
 // 双补丁岛的 brk 兜底（原生层 10-30）：改写器双岛模式下，前岛（基址前）和后岛（键页后）都够不着的必改点原地写成 brk #(0x8000 + 序号)，
 //   点表在 fixups.tsv 的 # TRAP 行（loader.c 读进 module_t.traps）。执行到时 SIGTRAP（crash.c 先问这里）：按序号查表、核模块与偏移，
-//   照补丁区里那个点本来的块模拟原指令（与 runtime/rewriter/rewriter.c gensite 同语义），然后 pc += 4：
+//   照补丁区里那个点本来的块模拟原指令（与 native/rewriter/rewriter.c gensite 同语义），然后 pc += 4：
 //     tpidr_r   mrs xN, tpidr_el0    → xN = 线程槽 KTLS（线程槽基址 + 键页 KTLS 偏移，与块里 tp() + slot() 同一取法）
 //     tpidrro_r mrs xN, tpidrro_el0  → xN = 线程槽 KTLR
 //     tpidr_w   msr tpidr_el0, xN    → 线程槽 KTLS = xN
@@ -16,7 +16,7 @@
 static uint64_t slot_base(void) {
 #if defined(__aarch64__)
     uint64_t t;
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
     __asm__ volatile("mrs %0, tpidr_el0" : "=r"(t));
     return *(const uint64_t *)(t - 8);
 #else
@@ -27,7 +27,7 @@ static uint64_t slot_base(void) {
     return 0;
 #endif
 }
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
 #define REG(uc, n) ((uc)->uc_mcontext.regs[n])
 #define PC(uc) ((uc)->uc_mcontext.pc)
 #else

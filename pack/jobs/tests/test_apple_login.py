@@ -40,6 +40,8 @@ FAKE = textwrap.dedent('''\
         print("Error: Authentication failed: -20101 Your Apple ID or password was entered incorrectly."); sys.exit(1)
     if mode == "badpw":
         print("Error: Authentication failed: -20101 Your Apple ID or password was entered incorrectly."); sys.exit(1)
+    if mode == "badpw22406":   # D-W2VH：plumesign 实际原句
+        print("Error: Authentication SRP error -22406: Enter the correct password for this Apple Account."); sys.exit(1)
     print("Logging in...")
     if mode in ("sms", "smsmany", "smsloop"):   # 设备方式、账号有受信任手机号（同版 account.rs tfa_closure 原句）
         print("[INFO plumesign::commands::account] Enter the code sent to your device, or type 'sms' to receive it by text message: ", flush=True)
@@ -175,7 +177,7 @@ class AppleLogin(unittest.TestCase):
             self.assertIsNone(apple_login._wait_code(self.c, Proc(), allow_sms=True), "不是 6 位数字不收")
 
     def test_wrong_password_and_code(self):
-        for mode, want in (("badpw", "apple_id_wrong"), ("badcode", "two_factor_wrong")):
+        for mode, want in (("badpw", "apple_id_wrong"), ("badpw22406", "apple_id_wrong"), ("badcode", "two_factor_wrong")):   # badpw22406：D-W2VH 的 -22406 原句
             with self.subTest(mode=mode), patch.dict(os.environ, {"FAKE_PLUME_MODE": mode}):
                 self.c.apple_password = PASSWORD; self.code()
                 with self.assertRaises(Failure) as e:
@@ -259,7 +261,7 @@ class BundlePlumesign(unittest.TestCase):
 
     def test_pinned_mac_hash_is_own_build(self):
         import impactor
-        self.assertEqual(impactor.BUNDLED_MAC, {"plumesign-macos-universal": "8d770ff3b6d6c1a8db1c0be28826cff9c6e55b9602a2791649c7c3d3e9f13d38"})
+        self.assertEqual(impactor.BUNDLED_MAC, {"plumesign-macos-universal": "f3f8be40ebb05abc0e732e09a846bbbcbefaded87f9fd6bfe857adf8d100bcd9"})
 
 
 if __name__ == "__main__":

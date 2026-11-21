@@ -21,14 +21,14 @@ sed_edit() { sed -i.s2a-bak "$1" "$2" && rm -f "$2.s2a-bak"; }
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); bad=0
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
 mkdir -p $T/repo/pack $T/repo/tools $T/repo/graphics/widen/scan $T/roots $T/widen $T/data/g/romfs/Layout
-mkdir -p $T/repo/graphics/nvn/tools; cp "$H/graphics/nvn/tools/romfs_list.py" $T/repo/graphics/nvn/tools/; cp "$H/pack/roots.sh" "$H/pack/romfs_img.py" $T/repo/pack/; cp "${STAGE:-$H/pack/stage_uilayout.sh}" $T/repo/pack/stage_uilayout.sh; cp "$H/tools/clonedir.py" "$H/tools/plock.sh" "$H/tools/flock_hold.py" $T/repo/tools/
+mkdir -p $T/repo/graphics/nvn/tools; cp "$H/graphics/nvn/tools/romfs_list.py" $T/repo/graphics/nvn/tools/; cp "$H/pack/roots.sh" "$H/pack/romfs_img.py" $T/repo/pack/; mkdir -p $T/repo/pack/orch && cp "$H/pack/orch/current.py" $T/repo/pack/orch/; cp "${STAGE:-$H/pack/stage_uilayout.sh}" $T/repo/pack/stage_uilayout.sh; cp "$H/tools/clonedir.py" "$H/tools/plock.sh" "$H/tools/flock_hold.py" $T/repo/tools/
 mkdir -p "$T/repo/tools"; cp "$H/tools/pool_workers.py" "$T/repo/tools/"   # romfs_list / pak_crypto 经它取核数（#1332：核数唯一来源）
 gen() { cat > $T/repo/graphics/widen/scan/ui_lyt.py <<EOF
 import os, sys
 if os.environ.get('FAKE_RACE') == '1':   # 并行阶段在生成期间提交：新现行 g@race，起跑时的版本删掉（同 pack/roots.sh 的「只留现行 + 上一版」）
     import shutil
-    link = os.path.join(os.environ['S2A_ROOTS'], 'g@现行'); cur = os.path.realpath(link); new = os.path.join(os.environ['S2A_ROOTS'], 'g@race')
-    shutil.copytree(cur, new, symlinks=True); os.remove(link); os.symlink('g@race', link); shutil.rmtree(cur)
+    ptr = os.path.join(os.environ['S2A_ROOTS'], 'g@现行'); cur = os.path.join(os.environ['S2A_ROOTS'], open(ptr, encoding='utf-8').read().strip()); new = os.path.join(os.environ['S2A_ROOTS'], 'g@race')
+    shutil.copytree(cur, new, symlinks=True); open(ptr, 'w', encoding='utf-8').write('g@race\n'); shutil.rmtree(cur)   # 现行是指针文件
 if os.environ.get('FAKE_NONE') == '1': sys.exit(0)
 FAIL = os.environ.get('FAKE_FAIL') == '1'   # 写完 a.zs 再报「报错 3」、退出 1（部分包解不开）
 if os.environ.get('FAKE_EXTRA') == '1':
@@ -44,9 +44,9 @@ export S2A_ROOTS=$T/roots S2A_ROOTS_SHARED=$T/shared S2A_WIDEN_DIR=$T/widen
 printf orig-a > $T/data/g/romfs/Layout/a.zs; printf orig-b > $T/data/g/romfs/Layout/b.zs; printf orig-c > $T/data/g/romfs/Layout/c.zs
 C0=$T/roots/g@s0; mkdir -p $C0/exefs $C0/romfs/Layout; head -c 96 /dev/zero > $C0/exefs/main; printf 'src=%s\ntag=s0\n' "$T/data/g" > $C0/seed.txt
 printf old-a > $C0/romfs/Layout/a.zs; printf old-b > $C0/romfs/Layout/b.zs; printf orig-c > $C0/romfs/Layout/c.zs; printf 'Layout/a.zs\nLayout/b.zs\n' > $C0/ui_overlay.tsv; echo oldkey > $C0/.stage_uilayout
-echo stale-index > $C0/romfs.s2aidx; echo oldidx > $C0/.stage_romfsidx; ln -s g@s0 $T/roots/g@现行
+echo stale-index > $C0/romfs.s2aidx; echo oldidx > $C0/.stage_romfsidx; printf '%s\n' g@s0 > $T/roots/g@现行
 S() { bash $T/repo/pack/stage_uilayout.sh g; }
-c() { cd -P $T/roots/g@现行 && pwd; }
+c() { cd -P $T/roots/$(cat $T/roots/g@现行) && pwd; }
 rd() { local v; v=$(c); if [ -f "$v/ui_overlay/romfs/Layout/$1" ]; then cat "$v/ui_overlay/romfs/Layout/$1"; else cat "$v/romfs/Layout/$1"; fi; }
 base() { cat "$(c)/romfs/Layout/$1"; }
 ovl() { (cd "$(c)/ui_overlay/romfs" 2> /dev/null && find . -type f | sed 's#^\./##' | LC_ALL=C sort | tr '\n' ' '); }

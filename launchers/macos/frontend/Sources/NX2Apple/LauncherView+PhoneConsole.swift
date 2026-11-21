@@ -79,6 +79,7 @@ extension LauncherView {
                 VStack(alignment: .leading, spacing: 22) {
                     consoleHeader(phone, status: status)
                     consolePhoneSection(phone, status: status)
+                    if !phone.apps.isEmpty { consoleAppsSection(phone) }
                     consoleSyncSection(phone)
                     consoleHelpSection
                 }.frame(maxWidth: 860, alignment: .leading)
@@ -184,6 +185,41 @@ extension LauncherView {
         }.accessibilityIdentifier("console.section.phone")
     }
 
+    /// 独立 App（一 App 一游戏，0.6.4）：每款一行——封面、游戏名、签名还剩几天 / 已到期、壳有新版时提示去「更新 iPhone 上的 S2Arm」（那一下逐个重签）
+    private func consoleAppsSection(_ phone: PhoneOverview.Phone) -> some View {
+        consoleSection(sx("console.section.apps")) {
+            ForEach(phone.apps, id: \.gameId) { app in
+                let game = model.games.first { $0.id.uppercased() == app.gameId }
+                HStack(spacing: 10) {
+                    GameArtwork(covers: covers, cover: game?.cover).frame(width: 28, height: 28).clipShape(RoundedRectangle(cornerRadius: 5))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(game?.name ?? app.gameId).font(.manrope(13, .medium)).lineLimit(1)
+                        Text(app.bundleId).font(.manrope(11)).foregroundStyle(.white.opacity(0.5)).lineLimit(1)
+                    }.frame(minWidth: 160, alignment: .leading)
+                    Text(consoleAppText(app)).font(.manrope(12.5)).foregroundStyle(app.shellCurrent && !consoleAppExpired(app) ? Color.green : Color.orange).lineLimit(2)
+                    Spacer(minLength: 0)
+                    // 续签（0.6.4）= 这款再「推到 iPhone」一次：重签重装、资源只推变了的；打开这款的装机页看进度与结局（成功页 A / 失败页）
+                    if let game {
+                        Button(sx("console.app.renew")) { installFor = game.id; model.install(game, device: phone.device) }
+                            .controllerButtonStyle(ConsolePillButtonStyle()).controllerID("console.app.renew." + app.gameId)
+                            .disabled(consoleOffline || model.phonePushing(game.id) || model.phoneQueued(game.id))
+                            .accessibilityIdentifier("console.app.renew." + app.gameId)
+                    }
+                }
+                .accessibilityElement(children: .combine).accessibilityIdentifier("console.app." + app.gameId)
+            }
+        }.accessibilityIdentifier("console.section.apps")
+    }
+
+    private func consoleAppExpired(_ app: PhoneOverview.App) -> Bool { app.expiresAtEstimate.map { $0 <= Date() } ?? false }
+    private func consoleAppText(_ app: PhoneOverview.App) -> String {
+        if consoleAppExpired(app) { return sx("console.status.expired") }
+        if !app.shellCurrent { return sx("console.app.outdated") }
+        guard let end = app.expiresAtEstimate else { return sx("console.status.okNoDays") }
+        let days = Int((end.timeIntervalSinceNow / 86400).rounded(.up))
+        return days <= 2 ? sx("console.status.expiring", days) : sx("console.status.ok", days)
+    }
+
     /// 「选用哪个 S2Arm」：同一台手机上装着不止一个时，按作业给的顺序（包名排序）列出每一个，每个一颗按钮；只写事实（谁装的、证书导没导、团队号），不推荐。
     ///   点了跑作业 phoneChooseApp，记住后刷新总览；选过的再点「换一个」也到这里
     @ViewBuilder private func consoleChooser(_ phone: PhoneOverview.Phone) -> some View {
@@ -253,7 +289,11 @@ extension LauncherView {
                     GameArtwork(covers: covers, cover: game.cover).frame(width: 28, height: 28).clipShape(RoundedRectangle(cornerRadius: 5))
                         .overlay { if pushing { Circle().stroke(.orange, lineWidth: 2).padding(-3) } }
                     Text(game.name).font(.manrope(13, .medium)).lineLimit(1).frame(minWidth: 160, alignment: .leading)
-                    Text(consoleGameText(g)).font(.manrope(12.5, g.isLegacy ? .bold : .regular)).foregroundStyle(consoleGameColor(g)).lineLimit(2)
+                    if phone.apps.contains(where: { $0.gameId == id }) && g.state == .notPushed {   // 装成了独立 App（见上一节），不说「还没推」
+                        Text(sx("console.game.standalone")).font(.manrope(12.5)).foregroundStyle(.white.opacity(0.75)).lineLimit(2)
+                    } else {
+                        Text(consoleGameText(g)).font(.manrope(12.5, g.isLegacy ? .bold : .regular)).foregroundStyle(consoleGameColor(g)).lineLimit(2)
+                    }
                     Spacer(minLength: 0)
                 }
                 .accessibilityElement(children: .combine).accessibilityIdentifier("console.game." + id)

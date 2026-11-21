@@ -699,7 +699,12 @@ int s2a_direct_device_ok(void) {
         //   路径没合入时没有 Metal 4 的设备照旧不直连起手，不靠合入顺序（10-25 维护者）
         if (@available(macOS 15.0, iOS 18.0, *)) m3 = mtl_tab_selftest && d && [d supportsFamily:MTLGPUFamilyMetal3];
         ok = m4 || m3;
-        if (!ok) LOG("直连：这台设备既没有 Metal 4 也没有 Metal 3 路径（GPU 不在 Metal 3 家族或系统低于 macOS 15 / iOS 18），本局不直连起手");
+        // 读数逐项写出（红行，诊断定位卡只摘红行）：玩家诊断里两台 A13（苹果文档属 Metal 3 家族）也被判不能直连，手上没有 A13 实机，靠下一份诊断这行定因
+        if (!ok) {
+            NSOperatingSystemVersion v = NSProcessInfo.processInfo.operatingSystemVersion; int f3 = d && [d supportsFamily:MTLGPUFamilyMetal3];
+            LOG("【红】直连：这台设备既没有 Metal 4 也没有 Metal 3 路径，本局不直连起手（读数：设备 %s，系统 %ld.%ld，Metal 4 家族 %d，Metal 3 家族 %d，本构建 Metal 3 路径 %s）",
+                d ? d.name.UTF8String : "无", (long)v.majorVersion, (long)v.minorVersion, m4, f3, mtl_tab_selftest ? "在" : "不在");
+        }
     }
     return ok;
 }

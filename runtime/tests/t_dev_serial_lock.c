@@ -1,6 +1,7 @@
 // 开发机 Mac 局串行锁（runtime/src/dev_serial_lock.h）。期望手写：
 //   ① 没有 $HOME/.s2arm/mac_game_lock → 返回 0、不等；② 配置了：第一个进程拿到（1），第二个进程同时起 → 要等第一个退出（等待 ≥ 1 秒、返回 2）；
-//   ③ S2A_MAC_GAME_LOCK_HELD=1 → 返回 0（外层已持）；④ 锁文件打不开 → -1、不等
+//   ③ S2A_MAC_GAME_LOCK_HELD=1 → 返回 0（外层已持）；④ 锁文件打不开 → -1、不等；
+//   ⑤ 第一个局持锁期间，宿主工具模式（DM_OODLE_SERVE=1 / DM_OODLE_JOB=<文件> / DM_GLSLC_JOB=<文件>）的进程不取锁 → 返回 0、当场返回（不是 2）
 #include "../src/dev_serial_lock.h"
 #include "s2a_t_result.h"
 #include <sys/stat.h>
@@ -26,6 +27,13 @@ int main(void) {
     double t0 = now();
     pid_t b = fork();
     if (b == 0) { int r = s2a_dev_serial_lock(); _exit(r); }                                                            // 第二个局同时起
+    static const char *const tool[][2] = {{"DM_OODLE_SERVE", "1"}, {"DM_OODLE_JOB", "/tmp/x.job"}, {"DM_GLSLC_JOB", "/tmp/x.glslcjob"}};
+    for (int i = 0; i < 3; i++) {                                                                                      // ⑤ 局持锁时起工具宿主：都不排队
+        pid_t c = fork();
+        if (c == 0) { setenv(tool[i][0], tool[i][1], 1); _exit(s2a_dev_serial_lock()); }
+        int sc; waitpid(c, &sc, 0);
+        CHECK(WIFEXITED(sc) && WEXITSTATUS(sc) == 0, "⑤ 局持锁时工具模式（%s）不取锁、当场返回 0（实 %d）", tool[i][0], WEXITSTATUS(sc));
+    }
     int st; waitpid(b, &st, 0); double w = now() - t0;
     CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 2, "② 第二个局等第一个退出才拿到（返回 %d = 等过才拿到，等了 %.1f 秒）", WEXITSTATUS(st), w);   // 返回 2 由产品表明「等过」，不再用墙钟 ≥ 1 秒判（负载高时父进程取 t0 晚 → 假红）
     waitpid(a, &st, 0);

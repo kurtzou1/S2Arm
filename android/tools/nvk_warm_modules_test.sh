@@ -56,3 +56,40 @@ PY
   -I "$android/native/nvn" -o "$tmp/t_once" \
   "$android/tests/nvn_vk_pipe_once_test.c" "$android/native/nvn/nvn_vk_pipe_once.c"
 "$tmp/t_once"
+# 首局预热随包种子（nvn_vk_{prog,pipe}_warm.h「随包种子」）：两个模块一起链，本机清单为空读种子 / 本机优先 / 坏种子打黄不用 / 坏条目逐条跳过 /
+#   程序没定时管线稍后重试 / 种子配方逐字段对上手写字节
+"$cc" -std=gnu11 -O1 -Wall -Wextra -Werror -pthread -D_GNU_SOURCE \
+  -I "$android/native" -I "$android/native/nvn" -I "$android/native/direct" \
+  -I "$repo/graphics/nvn/replay" -I "$repo/graphics/nvn/gfx/nvn" -I "$repo/graphics/nvn/gfx/nvn/include" -I "$repo/graphics/nvn/gfx/tex" \
+  -o "$tmp/t_seed" "$android/tests/nvn_vk_warm_seed_test.c" "$android/native/nvn/nvn_vk_prog_warm.c" "$android/native/nvn/nvn_vk_pipe_warm.c" "$android/native/direct/sha256.c"
+"$tmp/t_seed"
+# 负对照：各撤一处，t_seed 必须红在对应断言（编译失败不算红）
+python3 - "$repo" "$tmp" <<'PY'
+import os, pathlib, subprocess, sys
+repo, tmp = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+prog, pipe = repo/'android/native/nvn/nvn_vk_prog_warm.c', repo/'android/native/nvn/nvn_vk_pipe_warm.c'
+cases = [
+    ('seed-even-with-local', prog, [('    if (rf && e == ENOENT && !seed_dir_of(seed_dir', '    if (!seed_dir_of(seed_dir')], '有本机程序清单：用本机的 1 条'),   # 不判本机清单是否为空
+    ('desc-field-swap', pipe, [('    d->dfmt = pw_get32(b, &at);\n    d->sfmt = pw_get32(b, &at);', '    d->sfmt = pw_get32(b, &at);\n    d->dfmt = pw_get32(b, &at);')], 'dfmt 0x3e / sfmt 0 / samples 4'),   # 配方映射错一个字段
+    ('bad-row-kept', prog, [('        if (!rec_well_formed(&s.rec)) { filtered++; continue; }', '')], '坏条目跳过：3 条收 2 条'),   # 坏行不跳过
+    ('pipe-row-unchecked', pipe, [('        if (from_seed && !(nvk_prog_warm_contains && nvk_prog_warm_contains(e))) { dropped++; continue; }', '')], '管线清单从种子收下 2 条'),   # 种子里程序不在的管线条目不跳过
+    ('pipe-no-wait', pipe, [('        if (s < 0) return -1;', '')], '程序清单还没载入：管线 load 返回 -1 稍后重试'),   # 程序没定就当没有种子
+]
+inc = []
+for d in ('android/native', 'android/native/nvn', 'android/native/direct', 'graphics/nvn/replay', 'graphics/nvn/gfx/nvn', 'graphics/nvn/gfx/nvn/include', 'graphics/nvn/gfx/tex'):
+    inc += ['-I', str(repo/d)]
+for name, src, edits, expect in cases:
+    t = src.read_text()
+    for old, new in edits:
+        assert t.count(old) == 1, (name, 'mutation anchor', old[:60])
+        t = t.replace(old, new)
+    m = tmp / f'seed_{name}_{src.name}'; m.write_text(t)
+    others = [str(m) if s == src else str(s) for s in (prog, pipe)]
+    exe = tmp / f't_seed_{name}'
+    subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-O1', '-Wall', '-Wextra', '-Werror', '-pthread', '-D_GNU_SOURCE', *inc, '-o', str(exe),
+                    str(repo/'android/tests/nvn_vk_warm_seed_test.c'), *others, str(repo/'android/native/direct/sha256.c')], check=True)
+    r = subprocess.run([str(exe)], capture_output=True, text=True, timeout=120)
+    assert r.returncode != 0 and expect in r.stderr, (name, r.stdout[-400:], r.stderr[-800:])
+    print(f'随包种子 负对照 {name}：红在「{expect}」')
+print(f'PASS: 随包种子负对照 {len(cases)} 项全部变红')
+PY

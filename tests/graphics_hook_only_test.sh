@@ -58,7 +58,7 @@ ok "inputs track_net 含另加前缀、ALL_PFX 与 .csproj 闭包（引到 Ryuji
 printf '#!/bin/sh\nexit 1\n' > "$T/python3"; chmod +x "$T/python3"
 ok "闭包算不出（python3 失败）→ .NET 键打 *" "$(PATH="$T:$PATH" GATE_HOOK_LIST=inputs bash "$G" | awk -F'\t' '$2 == "*" { printf "%s%s", s, $1; s = " " }')" "track_net shared_gpu_contract vulkan_diag vvl texture_dma_read cntdead session shbake_net frame_pacing rest"
 # ⑦ job 的「其余」分支：抽出 has / hook_sel / hook_rest_off / job 单独跑
-eval "$(grep -E '^(has|hook_sel|hook_rest_off|job)\(\) ' "$G")"
+eval "$(grep -E '^(has|hook_sel|hook_rest_off|job|gpu_share_on|gpu_share_off)\(\) ' "$G")"; GPU_SHR_OK=0   # job 经 gpu_share_on / off 取共享显卡锁（11-20）；这里按单机直跑：不取
 LOG=$T/log; JOBD=$T/jobs; mkdir -p "$LOG" "$JOBD"; : > "$LOG/jobs.tsv"
 rj() { rm -rf "$JOBD"/*; GATE_HOOK_ONLY="$1" HOOK_REST="$2" job probe sh -c 'echo "跑了 HOOK_REST=[${HOOK_REST-未设}]"'; echo "$(cat "$JOBD/probe.rc")|$(cat "$LOG/probe.log")"; }
 ok "job：HOOK_REST=1、名单不含 rest → 不跑、退出码 0" "$(rj dsh 1)" "0|本步只跑点名子项（GATE_HOOK_ONLY=dsh），「其余」不在名单，不跑"

@@ -3,7 +3,7 @@
 #   跑局记录 pso_user.tsv 里真绑过要模拟的采样器的键 → 配置档 se_want.tsv（dmsh_build.py se_finish 按它出 <键>_se.metallib 进库容器，种类 51；进链的输入表 dmsh_chain.py INPUT_TABLES）
 #   C\t<键>\t<fc 十六进制>：计算着色器，fc & 2（SE_RD）非 0；R\t<pso_skey 十六进制>：渲染管线，skey 432 字节，片元键 = 第 24–47 字节（C 串，取前 16 位）、fc = 第 157 字节，& 2 非 0
 # 用法：se_want.py <se_want.tsv（整份重写）> <union_keys.tsv（本次出库的并集键）> <来源…（pso_user.tsv 文件，或放 .tsv 的目录）>；只收本次并集里的键，来源不存在跳过。最后一行是汇总
-#   出包（direct_lib.sh）用 --keys <快照 se_want.tsv>：来源换成跑局知识快照（run_knowledge.py 已用本文件的 wants 推导好的键），只做按并集滤与写表
+#   出包（direct_lib.py）用 --keys <快照 se_want.tsv>：来源换成跑局知识快照（run_knowledge.py 已用本文件的 wants 推导好的键），只做按并集滤与写表
 import os, re, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from run_pairs import KEY, sources

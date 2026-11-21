@@ -1,4 +1,5 @@
 #!/bin/bash
+# 门禁显卡：共享（建 Metal 设备在本机显卡上跑、不按显示时钟判：取共享显卡锁，与按显示时钟判的独占步错开；11-20 读写锁）
 # 门禁覆盖：tools/pipeline_timing.m tests/fixtures/pipeline_timing/*
 set -eu
 H=$(cd "$(dirname "$0")/.." && pwd)

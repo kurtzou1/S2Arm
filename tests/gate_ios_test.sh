@@ -5,11 +5,11 @@
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); bad=0
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
 # 小仓库（gate_ios.sh 在仓库根跑、把整棵树 rsync 进镜像）
-mkdir -p $T/repo/tools $T/repo/ios && cp $H/tools/gate_ios.sh $T/repo/tools/ && cp $H/ios/embed.py $H/ios/macho_dylib.py $T/repo/ios/ && git -C $T/repo init -q && git -C $T/repo add -A && git -C $T/repo -c user.email=t@t -c user.name=t commit -qm t
+mkdir -p $T/repo/tools $T/repo/ios $T/repo/pack/orch && cp $H/tools/gate_ios.sh $T/repo/tools/ && cp $H/pack/roots.sh $T/repo/pack/ && cp $H/pack/orch/current.py $T/repo/pack/orch/ && cp $H/ios/embed.py $H/ios/macho_dylib.py $T/repo/ios/ && git -C $T/repo init -q && git -C $T/repo add -A && git -C $T/repo -c user.email=t@t -c user.name=t commit -qm t
 # 改写产物（格式有效的假模块：门禁要用它真写一次游戏镜像包）：TEXT_END 0x5000、键页 0x8000、PATCH_OFF 0xC000、patched.bin 0xD000 字节
 mods() { mkdir -p "$1"; head -c 53248 /dev/zero > "$1/main.patched.bin"; printf '# TEXT_END 0x5000\n# PATCH_OFF 0xc000\n# KEY_PAGE_OFF 0x8000\n# KEY_PAGE_SIZE 0x4000\n' > "$1/main.fixups.tsv"; echo g > "$1/main.gates.tsv"; echo n > "$1/main.npdm"; }
 # 共享根：acnh@现行 → acnh@pkg-old（带改写产物）
-mods $T/roots/acnh@pkg-old; ln -s acnh@pkg-old $T/roots/acnh@现行
+mods $T/roots/acnh@pkg-old; printf '%s\n' acnh@pkg-old > $T/roots/acnh@现行
 # 假 make（11-04 全外置后 make ios 只出壳、不收改写产物）：编译途中删掉共享根那一版（模拟登记新包时 root_commit 清旧版），门禁随后用自己的克隆写游戏镜像包；
 #   TRACE 记 make 收到的全部参数（核没有 IOS_MODS）；FAIL=1 时模拟配方失败
 mkdir -p $T/bin; cat > $T/bin/make <<'MK'
@@ -30,7 +30,7 @@ o2=$(run env FAIL=1 2>&1); r2=$?
 ck "配方失败（报错行不含 error）：门禁红（rc=${r2}），结论附配方最后 30 行（含 No such file 与 🔴 行、不含配方行 1–12）" '[ $r2 != 0 ] && grep -q "make ios 最后 30 行" <<< "$o2" && grep -q "No such file" <<< "$o2" && grep -q "🔴 make ios 失败" <<< "$o2" && grep -q "配方行 40" <<< "$o2" && ! grep -q "配方行 12$" <<< "$o2"'
 
 # 开发者只有非旧白名单款的现行，也能选；不依赖商业游戏输入。
-mods "$T/roots/silksong@pkg-local"; ln -s silksong@pkg-local "$T/roots/silksong@现行"
+mods "$T/roots/silksong@pkg-local"; printf '%s\n' silksong@pkg-local > "$T/roots/silksong@现行"
 o=$(run env 2>&1); rc=$?
 ck "共享根只有其他款的完整现行也能检查（rc=${rc}）" '[ "$rc" = 0 ] && grep -q "silksong@pkg-local（克隆）" <<< "$o"'
 mods "$T/roots/acnh@pkg-old"

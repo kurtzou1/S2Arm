@@ -444,7 +444,7 @@ static void *watchdog(void *a) {
 }
 void s2a_det_init(void) {
     const char *r = getenv("S2A_DET_REC"), *p = getenv("S2A_DET_PLAY"), *e = getenv("S2A_DET");
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     // 产品默认仍是真并行。调试串行/重放尚无 Android 信号与跨线程验收，显式拒绝而非静默忽略。
     if ((r && *r) || (p && *p) || (e && *e == '1'))
         die("Android 尚不支持确定性串行/记录/重放；请使用默认并行运行");

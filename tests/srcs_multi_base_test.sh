@@ -65,7 +65,7 @@ for t in $A $B; do
 done
 # ⑥ 下游三处按现行程序号找原件：现行产物根 sonic 的程序号 = BBBB（unpack.tsv），三处都要把它传给 nx_unpack
 mkdir -p "$T/roots/sonic@v1/exefs"; { head -c 64 /dev/zero; printf 'BUILD_v1........' ; head -c 32 /dev/zero; } > "$T/roots/sonic@v1/exefs/main"
-printf 'title_id\t%s\n' "$(printf '%s' $B | tr 'A-F' 'a-f')" > "$T/roots/sonic@v1/unpack.tsv"; ln -s sonic@v1 "$T/roots/sonic@现行"
+printf 'title_id\t%s\n' "$(printf '%s' $B | tr 'A-F' 'a-f')" > "$T/roots/sonic@v1/unpack.tsv"; printf '%s\n' sonic@v1 > "$T/roots/sonic@现行"
 mkdir -p "$T/shared"; export S2A_ROOTS=$T/roots S2A_ROOTS_SHARED=$T/shared S2A_SRCVER_CACHE=$T/srcver S2A_ICONS=$T/icons S2A_AOC_CACHE=$T/aoc
 : > "$T/calls"; o=$(bash "$H/pack/srcver.sh" sonic 2>&1); r=$?
 ck "⑥ srcver：--nacp-only 带 --title-id=${B}、给 multi.xci（退出 ${r}：${o:0:60}）" '[ $r = 0 ] && grep -q -- "--nacp-only --title-id=$B .*multi.xci" "$T/calls"'

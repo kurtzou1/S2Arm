@@ -67,6 +67,7 @@ void nvn_be_drain(void);                                // Wait for all commands
 void nvn_be_xv_window_tex(uint64_t serial);   // Register a window (swapchain) texture: the cross-submit validity ledger never collects it
 // External producers (the Vulkan layer, dm/gfx/vk): the shared Metal device; a serial for one of their textures; present it once their event reaches ev_val (ticket for nvn_be_present_wait)
 void *mtl_device(void);
+void *mtl_nocopy_buf(void *p, uint64_t n);   // 零拷贝 MTLBuffer（+1 引用，调用方 __bridge_transfer 接）：与本层同一记账入口 nocopy_buf，浮层「GPU 已分配」不重复计入（#1827）；nil = 建不出
 uint64_t mtl_ext_tex(void *tex);
 uint64_t mtl_present_ext(uint64_t serial, double period, void *ev, uint64_t ev_val, const int crop[4]);   // crop: x, y, w, h of the texture to show (NULL = all of it)
 void mtl_fit_pillar(int kind);   // 满屏判据免判种类（同 g_fit_pillar：1 = 核心说这帧是 16:9 原比例页；2 = 上屏贴图两侧是放宽内容；5 = 原比例回退）：GL / Vulkan 前端上屏前按宽屏核心结论设

@@ -47,6 +47,16 @@ import S2ArmAppleAdapter
         XCTAssertEqual(p?.games.last?.dataOnComputer, false)
     }
 
+    func testParseApps() {
+        // 独立 App（0.6.4，作业 apps）：游戏号转大写、到期与签名时刻按秒转日期；旧作业层不带 apps = 空。期望手写
+        let o = PhoneOverview(result: ["phones": [["device": "D1", "apps": [["gameId": "010026300ba4a000", "bundleId": "io.s2arm.games.t.010026300ba4a000", "shellCurrent": false,
+                                                                         "signedAt": 1000.0, "expiresAtEstimate": 865000.0], ["bundleId": "缺游戏号的丢掉"]]],
+                                                  ["device": "D2"]]])!
+        XCTAssertEqual(o.phones[0].apps, [PhoneOverview.App(gameId: "010026300BA4A000", bundleId: "io.s2arm.games.t.010026300ba4a000", shellCurrent: false,
+                                                            signedAt: Date(timeIntervalSince1970: 1000), expiresAtEstimate: Date(timeIntervalSince1970: 865000))])
+        XCTAssertEqual(o.phones[1].apps, [])
+    }
+
     func testStatusOrder() throws {
         let m = try makeModel()
         XCTAssertEqual(m.consoleStatus(now: now), .introduce, "从没装过也没连过：介绍卡")

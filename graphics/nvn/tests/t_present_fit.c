@@ -25,6 +25,17 @@ static void vp_case(const char *name, double dw, double dh, double cw, double ch
     CHECK(v.x >= 0 && v.y >= 0 && v.x + v.w <= dw && v.y + v.h <= dh, "%s：视口越出画布", name);
 }
 
+static void fill_case(const char *name, int mode, double dw, double dh, int sx, int sy, int sw, int sh, int want_rc, int ex, int ey, int ew, int eh, int want_full) {
+    const int src[4] = {sx, sy, sw, sh}; int crop[4] = {-7, -7, -7, -7};
+    const pf_vp box = pf_viewport(dw, dh, sw, sh); pf_vp v = box;
+    int rc = pf_fill(mode, dw, dh, src, crop, &v);
+    CHECK(rc == want_rc && crop[0] == ex && crop[1] == ey && crop[2] == ew && crop[3] == eh,
+          "%s：方式 %d、源 %d,%d %dx%d 放进 %gx%g 期望 返回 %d、取 %d,%d %dx%d 实得 返回 %d、取 %d,%d %dx%d",
+          name, mode, sx, sy, sw, sh, dw, dh, want_rc, ex, ey, ew, eh, rc, crop[0], crop[1], crop[2], crop[3]);
+    if (want_full) CHECK(v.x == 0 && v.y == 0 && v.w == dw && v.h == dh, "%s：期望视口铺满 %gx%g 实得 %g,%g %gx%g", name, dw, dh, v.x, v.y, v.w, v.h);
+    else CHECK(v.x == box.x && v.y == box.y && v.w == box.w && v.h == box.h, "%s：期望视口不动（等比加黑边 %g,%g %gx%g）实得 %g,%g %gx%g", name, box.x, box.y, box.w, box.h, v.x, v.y, v.w, v.h);
+    CHECK(crop[0] >= sx && crop[1] >= sy && crop[0] + crop[2] <= sx + sw && crop[1] + crop[3] <= sy + sh, "%s：取样矩形越出源矩形", name);
+}
 int main(void) {
     // ① 本局现场：2346x1080 裁剪、源 1920x1080 → 退回整张源（16:9），放进 2346x1080 屏：s = min(1.221875, 1) = 1，宽 1920、左右各 (2346−1920)/2 = 213 黑边，不拉伸
     crop_case("源窄于裁剪框（喷3 开局）", 0, 0, 2346, 1080, 1920, 1080, 1, 0, 0, 1920, 1080);
@@ -84,6 +95,24 @@ int main(void) {
     CHECK(pf_relayout_wait(0, 1, 1, 0) == 1, "重摆：层刚挪回根视图、根视图场景在后台 期望 等");
     //   层在外接屏窗口的视图上：不受手机进后台影响
     CHECK(pf_relayout_wait(1, 1, 1, 0) == 0 && pf_relayout_wait(1, 1, 0, 0) == 0, "重摆：层在外接屏视图 期望 不等");
-    printf("%s t_present_fit：直连上屏裁剪规整 + 等比视口 %d 项 → %s\n", g_bad ? "✗" : "✓", g_n, g_bad ? "有不符合项" : "全过");
+    // 铺满方式（回放层上屏开关 nvk_present_fill → pf_fill）。期望值手算。屏 2120x1320：ta = 2120 / 1320 = 1.606061；16:9 的源 sa = 1.777778，比例差 sa / ta − 1 = 10.69%
+    //   方式 0：不动（等比加黑边：s = min(2120 / 1280, 1320 / 720) = 1.65625，高 round(720 × 1.65625) = 1193，y = floor((1320 − 1192.5) / 2) = 63）
+    vp_case("铺满方式 0 的底：16:9 放 2120x1320 上下留黑", 2120, 1320, 1280, 720, 0, 63, 2120, 1193);
+    fill_case("方式 0 不动", 0, 2120, 1320, 0, 0, 1280, 720, 0, 0, 0, 1280, 720, 0);
+    fill_case("没有的方式号不动", 3, 2120, 1320, 0, 0, 1280, 720, 0, 0, 0, 1280, 720, 0);
+    //   方式 1：10.69% ≤ 15% → 整张源拉到整屏
+    fill_case("拉伸：16:9 铺满 2120x1320", 1, 2120, 1320, 0, 0, 1280, 720, 1, 0, 0, 1280, 720, 1);
+    //   方式 1 负对照：屏 2346x1080（ta = 2.172222）比例差 2.172222 / 1.777778 − 1 = 22.19% > 15% → 不拉，仍是黑边
+    fill_case("拉伸：比例差 22% 不拉", 1, 2346, 1080, 0, 0, 1280, 720, 0, 0, 0, 1280, 720, 0);
+    //   方式 2，窄屏裁左右：宽 floor(720 × 1.606061) = floor(1156.36) = 1156，x = (1280 − 1156) / 2 = 62 → 62,0 1156x720（与真机日志一致）
+    fill_case("放大裁边：1280x720 放 2120x1320 裁左右", 2, 2120, 1320, 0, 0, 1280, 720, 2, 62, 0, 1156, 720, 1);
+    //   游戏自己带裁剪（起点 8,4）：在它的矩形里再裁，起点跟着平移 → 70,4 1156x720
+    fill_case("放大裁边：在游戏裁剪矩形里再裁", 2, 2120, 1320, 8, 4, 1280, 720, 2, 70, 4, 1156, 720, 1);
+    //   方式 2，宽屏裁上下：屏 2346x1080，高 floor(1280 / 2.172222) = floor(589.26) = 589，y = floor((720 − 589) / 2) = 65 → 0,65 1280x589
+    fill_case("放大裁边：1280x720 放 2346x1080 裁上下", 2, 2346, 1080, 0, 0, 1280, 720, 2, 0, 65, 1280, 589, 1);
+    //   方式 2 负对照：带鱼屏 3440x1440（ta = 2.388889）比例差 34.4% > 30% → 不裁；比例相同（差 0 < 1%）→ 不裁（pf_viewport 本来就铺满）
+    fill_case("放大裁边：比例差 34% 不裁", 2, 3440, 1440, 0, 0, 1280, 720, 0, 0, 0, 1280, 720, 0);
+    fill_case("放大裁边：比例相同不裁", 2, 1920, 1080, 0, 0, 1280, 720, 0, 0, 0, 1280, 720, 0);
+    printf("%s t_present_fit：直连上屏裁剪规整 + 等比视口 + 铺满方式 %d 项 → %s\n", g_bad ? "✗" : "✓", g_n, g_bad ? "有不符合项" : "全过");
     return g_bad != 0;
 }

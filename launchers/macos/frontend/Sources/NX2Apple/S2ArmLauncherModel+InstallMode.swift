@@ -16,6 +16,15 @@ extension S2ArmLauncherModel {
         }
     }
 
+    /// 出法（0.6.3）：layout = shell（通用 S2Arm）/ standalone（独立 App，一 App 一游戏）/ nil（撤掉选择：缺省回到按证书自动，单款回到跟随设置）；
+    ///   gameId 给了只管这一款。下次推到 iPhone 时作业层按它分流（install.chosen_layout），这里不装任何东西
+    func setLayout(_ layout: String?, gameId: String? = nil) {
+        Task {
+            do { layoutNotice = try await provider.layoutSet(layout, gameId: gameId) } catch { reportFailure("s2arm.fail.layoutSet", error) }
+            refreshInstallMode()
+        }
+    }
+
     /// 游戏库「导出自签包」（11-15 维护者：1 下开始导出，不经装机窗）：iPhone 包能直接导出（新格式）的直接导出（不连手机、不签名）；
     ///   没出过、或包是旧格式的先出 iPhone 包、出完接着导出（selfSignAfterPack，出包会话结束后 pumpQueue 接上）——玩家点的是导出，就把导出做完
     func exportSelfSign(_ game: GameSummary) {

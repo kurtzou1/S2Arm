@@ -202,7 +202,7 @@ class LibraryGate(JobCase):
                 library.require_fat32_fits(self.c, game(50 << 30), "D:\\库")
 
     def test_copy_tree_links_materializes_when_target_has_no_links(self):
-        # 搬库 / 移动游戏到建不了链接的盘：链接指向的目录整份拷过来；产物根的 <款>@现行 拷成真目录、版本名记进 .root_tag（roots 实目录模式按它认）
+        # 搬库 / 移动游戏到建不了链接的盘：链接指向的目录整份拷过来；老库产物根的现行链接 <款>@现行 不展开，拷成指针文件（内容 = 版本目录名）
         src = self.root / "src"; (src / "roots" / "款@v1").mkdir(parents=True); (src / "roots" / "款@v1" / "f").write_bytes(b"v1")
         os.symlink("款@v1", src / "roots" / "款@现行")
         dst = self.root / "dst"
@@ -214,8 +214,8 @@ class LibraryGate(JobCase):
         with patch.object(library.os, "symlink", no_dir_links):
             library.copy_tree_links(src, dst)
         live = dst / "roots" / "款@现行"
-        self.assertFalse(live.is_symlink()); self.assertEqual((live / "f").read_bytes(), b"v1")
-        self.assertEqual((live / ".root_tag").read_text(encoding="utf-8").strip(), "款@v1")
+        self.assertFalse(live.is_symlink()); self.assertEqual(live.read_text(encoding="utf-8"), "款@v1\n")
+        self.assertEqual((dst / "roots" / "款@v1" / "f").read_bytes(), b"v1")
 
     def test_require_apfs_windows_wants_ntfs(self):
         with as_windows(library):

@@ -42,6 +42,12 @@ class LdnEnvTests(unittest.TestCase):
         self.assertEqual(community.ldn_env({"ldnMode": "manual", "ldnAddress": ""}),
                          {"S2A_LDN_SERVER": "0.0.0.0", "S2A_LDN_RELAY": "0"})
 
+    def test_switch_mode_only_enables_ldn_mitm(self):
+        # 「与 Switch 联机」只开 ldn_mitm，不混入中继变量；其余模式不开它（缺省不变）
+        self.assertEqual(community.ldn_env({"ldnMode": "switch", "ldnHost": True, "ldnAddress": "192.168.1.21"}), {"S2A_LDN_MITM": "1"})
+        for s in ({}, {"ldnMode": "auto"}, {"ldnMode": "manual", "ldnHost": True}):
+            self.assertNotIn("S2A_LDN_MITM", community.ldn_env(s))
+
     def test_shared_settings_save_and_launch_wiring(self):
         from types import SimpleNamespace
         from unittest.mock import patch

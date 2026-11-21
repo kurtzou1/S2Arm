@@ -259,6 +259,7 @@ void rp_occl_draw(nvn_gpu_cmd c) {                                              
     g_occ_cur = (int)g_occ_next++; nvn_gpu_occlusion(c, g_occ_cur - (int)g_occ_base);
 }
 static void seg_cut(int next_occ);
+static int g_pass_cuts;   // 这次提交里已在通道中途切过几次（pass_split）
 // 第一次复位落在没声明槽的段里（开段时还不知道游戏用这个计数器）：就地交段，后半段开成带槽的新段，复位之后的绘制照计
 // （同 iOS nvn_mtl.m 第一次复位就地拆通道）。前半段没有槽，不进 mids。中间值用完交不了时具名记账，这一段复位后不计。
 static nvn_gpu_cmd occ_first_reset_cut(nvn_gpu_cmd c) {
@@ -327,7 +328,7 @@ void nvn_be_sub_begin(void) {
     rc_retire(); g_rc_npend = 0; g_rc_skip = 0;
     g_occ_seg = g_occ_used; g_occ_next = 0; g_occ_base = 0; g_occ_cur = -1; g_occ_pass = 0;
     nvn_gpu_err err = {0}; nvn_gpu_cmd_desc d = {g_occ_seg ? OCC_SLOTS : 0, "nvn submit"};
-    g_cmd = NULL; g_pre = NULL; g_sub_serial++; g_seg_serial++; g_mid = 0; { uint64_t nd = 0, ns = 0; rp_draw_stats(&nd, &ns); g_split_base = nd; }
+    g_cmd = NULL; g_pre = NULL; g_sub_serial++; g_seg_serial++; g_mid = 0; g_pass_cuts = 0; { uint64_t nd = 0, ns = 0; rp_draw_stats(&nd, &ns); g_split_base = nd; }
     if (!nvn_gpu_ok(nvn_gpu_cmd_begin(&d, &g_cmd, &err))) { g_cmd = NULL; static int said; if (!said++) red("开提交段失败（之后同样的失败不再逐条报）：%s", err.why); }
     rp_dirty_all();   // 新段：已发给后端的状态全部重发；rp_S / rp_R 不动
 }
@@ -361,7 +362,27 @@ static void sub_split(void) {
     g_split_base = nd;
     seg_cut(g_occ_seg);
 }
-// 中途交段本体（sub_split 与第一次遮挡复位共用）：先交当前段，再开新段。交出去的这一段进不进 mids 看它自己声明没声明槽（g_occ_seg），
+// 超长通道中途先交（开关 nvk_split_pass = 每段笔数，0 = 关）：上面只在通道外交，一个通道上千笔（3D 场景的 G-buffer 通道一个就三千多笔）
+// 要等整个通道录完 GPU 才开工。这里在两笔绘制之间：本通道自开（或上次在这里切）以来已画满 N 笔，就结束通道、交出这一段，
+// 下一笔绘制照常开通道——附件都是 LOAD（通道一开就把待折清除、刚建清零吃掉了，续开时没有清除负载），存储一律 STORE，内容接得上。
+// 阈值按笔数、不按录制时长：同行两家一家按笔数（每通道 600 笔，一台骁龙 8 至尊版上 GPU 时间不增加：20.2–20.5 对 20.8–21.0 毫秒，
+// 录完到 GPU 做完 10–33 → 6–10 毫秒），一家按时长（翻译超过 3 毫秒，那款 3D 游戏 25.5 → 30.0 帧，按它的翻译速度约合千笔）。
+// 时长受首用管线编译这类停顿左右：几笔很慢的绘制也会被切，GPU 那头却没多少活，白付一次切段成本；笔数稳定、可复现。
+// 切一段的固定成本（状态全部重发、附件多存 / 载一遍）见 sub_split 的说明，所以只对超长通道生效，且每次提交最多切 rp_split_pass_max 次。
+// 不切的形态（rp_pass_split_ok 与下面）：用了遮挡计数的会话（槽按段声明、通道内的槽是连续计的）、影子附件（切一次要多拷回 / 拷进一整张）、
+// 多重采样目标（多重采样附件存 / 载的带宽是单采样的数倍）、当前目标还挂着待折清除、诊断开关把载入或存储换成了 DONTCARE。
+int rp_split_pass_draws = 600;   // 每段笔数（用例改小了测）
+int rp_split_pass_max = 8;       // 每次提交里通道中途最多切几次（防退化）
+static void pass_split(void) {
+    if (!g_cmd || !g_sub || g_mid >= SUB_STEP - 4 || g_pass_cuts >= rp_split_pass_max || g_occ_used || g_occ_seg) return;
+    int thr = nvn_plat_flag("nvk_split_pass", rp_split_pass_draws);
+    if (thr <= 0 || rp_pass_draws() < thr || !rp_pass_split_ok()) return;
+    rp_pass_end(g_cmd);
+    pf_add(RP_PERF_P_CUT_LONG, 1); g_pass_cuts++;
+    { uint64_t nd = 0, ns = 0; rp_draw_stats(&nd, &ns); g_split_base = nd; }
+    seg_cut(0);
+}
+// 中途交段本体（sub_split、pass_split 与第一次遮挡复位共用）：先交当前段，再开新段。交出去的这一段进不进 mids 看它自己声明没声明槽（g_occ_seg），
 // next_occ 是新段要不要声明槽。调用方保证 g_cmd / g_sub 在、通道已收、中间值没用完。
 static void seg_cut(int next_occ) {
     struct mid *m = calloc(1, sizeof *m);
@@ -732,9 +753,9 @@ static uint64_t exec_list(const uint8_t *p) {
                 break; }
             case OP_RESET_COUNTER: { uint64_t t; memcpy(&t, a, 8); if (t == NVN_COUNTER_TYPE_SAMPLES_PASSED) occ_reset(g_cmd); break; }   // 其余计数器的报告值本来就写 0，复位无事可做
             case OP_RENDER_COND: rc_cond(a); break;
-            case OP_DRAW: { if (g_rc_skip) break; p_draw t; rp_draw_stream = p; count_feed(&count_group, draw_rec(a, h.size, &t), NULL, p, tm); rp_draw_stream = NULL; break; }
-            case OP_DRAW_IDX: { if (g_rc_skip) break; p_draw_idx t; rp_draw_stream = p; count_feed(&count_group, NULL, draw_idx_rec(a, h.size, &t), p, tm); rp_draw_stream = NULL; break; }
-            case OP_MULTI_DRAW: { if (g_rc_skip) break; p_multi_draw m; if (h.size - 8 < sizeof m) { nvn_unimpl("rec", "multi_draw_short", p); break; } memcpy(&m, a, sizeof m); rp_multi_draw(g_cmd, &m, p); break; }
+            case OP_DRAW: { if (g_rc_skip) break; if (!count_group.n) pass_split(); p_draw t; rp_draw_stream = p; count_feed(&count_group, draw_rec(a, h.size, &t), NULL, p, tm); rp_draw_stream = NULL; break; }
+            case OP_DRAW_IDX: { if (g_rc_skip) break; if (!count_group.n) pass_split(); p_draw_idx t; rp_draw_stream = p; count_feed(&count_group, NULL, draw_idx_rec(a, h.size, &t), p, tm); rp_draw_stream = NULL; break; }
+            case OP_MULTI_DRAW: { if (g_rc_skip) break; if (!count_group.n) pass_split(); p_multi_draw m; if (h.size - 8 < sizeof m) { nvn_unimpl("rec", "multi_draw_short", p); break; } memcpy(&m, a, sizeof m); rp_multi_draw(g_cmd, &m, p); break; }
             case OP_SET_RT: { p_set_rt t; rp_pass_set_rt(g_cmd, set_rt_rec(a, h.size, &t)); sub_split(); break; }
             case OP_CLEAR_COLOR: if (!g_rc_skip) rp_pass_clear_color(g_cmd, a, p); break;
             case OP_CLEAR_DS: if (!g_rc_skip) rp_pass_clear_ds(g_cmd, a, p); break;

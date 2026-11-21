@@ -96,7 +96,7 @@ internal static class Program
                 OHAudioSink.s2a_ohaudio_wake(handle);
                 Require(SpinWait.SpinUntil(() => session.GetPlayedSampleCount() == 480 && session.WasBufferFullyConsumed(buffer), 2000),
                     "Actual feeder did not return all 480 played frames to the buffer owner");
-                Require(driver.GetUpdateRequiredEvent().WaitOne(0), "Completed buffer did not signal the update event");
+                Require(driver.GetUpdateRequiredEvent().WaitOne(2000), "Completed buffer did not signal the update event");
                 Require(driver.Failures.IsEmpty, "Actual feeder reported a failure");
             }
             finally

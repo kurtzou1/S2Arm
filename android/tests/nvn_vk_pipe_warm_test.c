@@ -70,6 +70,9 @@ void nvn_plat_log(int level, const char *cls, const char *text) {
     }
 }
 const char *nvk_session_cache_dir(void) { return getenv("S2A_PW_DIR"); }
+// 程序清单的随包种子（nvn_vk_prog_warm.c；本单测只链管线模块）：本局没用种子 = 管线也不读种子（种子用例在 nvn_vk_warm_seed_test.c）
+int nvk_prog_warm_seed_dir(char *out, size_t n) { if (out && n) out[0] = 0; return 0; }
+int nvk_prog_warm_contains(const uint8_t identity[32]) { (void)identity; return 0; }
 void nvn_gpu_pipe_warm_scope(int on) { (void)on; }
 uint64_t nvn_gpu_pipe_warm_hits(void) { return g_fake_hits; }
 uint64_t nvn_gpu_pipe_warm_created(void) { return 0; }

@@ -39,7 +39,7 @@
 extern "C" {
 #endif
 
-#define NVN_GPU_CONTRACT_VERSION 17   // 改任何签名或语义 +1；两个后端与核心同批改，t_nvn_backend.c 的签名表同批改
+#define NVN_GPU_CONTRACT_VERSION 18   // 改任何签名或语义 +1；两个后端与核心同批改，t_nvn_backend.c 的签名表同批改
 /* 定稿 #1（调用形式）：链接期直接调用 nvn_gpu_*。每个平台构建只链一个后端，Metal 3 / 4 的选择留在 Metal 后端内部。
    理由：零间接、可内联；同进程 A/B 对照没有真实消费者，不为它新增注册实体（vickwv 同意）。 */
 
@@ -197,6 +197,10 @@ nvn_gpu_rc nvn_gpu_arena_alloc(nvn_gpu_cmd c, uint64_t bytes, uint32_t align, nv
 uint64_t nvn_gpu_arena_fill(nvn_gpu_cmd c, const nvn_gpu_slice *sl, const void *src, uint64_t bytes);
 // 等票号 ≤ ticket 的填充全部做完，返回已做完的最大票号；ticket = 0 只查不等。线程：[提交]。
 uint64_t nvn_gpu_arena_fill_wait(uint64_t ticket);
+// 只让票号 ticket 这一笔做完：还没开始就在本线程拷（之后后端不再拷它），别的线程正在拷就等它拷完。不保证更旧的票号做完
+// （要「≤ ticket 全部做完」用 nvn_gpu_arena_fill_wait），nvn_gpu_arena_fill_wait(0) 的返回值仍是「≤ 它的全部做完」的水位，可能小于 ticket。
+// 返回 0 = 早已做完（ticket = 0 同此）；1 = 本线程拷的；2 = 别的线程正在拷、等到它拷完。线程：[提交]。
+int nvn_gpu_arena_fill_take(uint64_t ticket);
 
 // ---------- 贴图、视图、采样器 ----------
 enum {   // 用途创建时给全（Vulkan 的 usage 与可变格式事后补不了）

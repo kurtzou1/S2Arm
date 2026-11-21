@@ -54,7 +54,7 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
     static string ToolFp;
 
     static int Fail(string msg) { Console.Out.Flush(); Console.Error.WriteLine(msg); Console.Error.Flush(); return 1; }
-    static void Say(string s) { lock (Console.Out) { Console.Out.WriteLine(s); Console.Out.Flush(); } }
+    internal static void Say(string s) { lock (Console.Out) { Console.Out.WriteLine(s); Console.Out.Flush(); } }
     // 重活并行循环按序一次领一个（Parallel.ForEach 对 List 默认静态切块、对枚举攒块领：「大的先编」不成立，最大几批落进同一线程串行成长尾）
     static OrderablePartitioner<T> InOrder<T>(IEnumerable<T> s) => Partitioner.Create(s, EnumerablePartitionerOptions.NoBuffering);
     static readonly Stopwatch Clock = Stopwatch.StartNew(); static double LastPhase;
@@ -638,15 +638,16 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
         int Mb(long n) => (int)Math.Max(1, (n + (1 << 20) - 1) >> 20);
         var jobs = reuse.Values.Select(h => (Run: (Action)(() => Reused(h, false)), Mb: 0)).Concat(vinReuse.Values.Select(h => (Run: (Action)(() => Reused(h, true)), Mb: 0)))
             .Concat(units.Select(b => (Run: (Action)(() => OneBatch(b)), Mb: Mb(b.Sum(k => plan.Len[k]))))).Concat(vinPlanOrder.Select(b => (Run: (Action)(() => VinOne(b)), Mb: Mb(b.Sum(k => Unity.PyLen(vinSrc[k])))))).ToList();
+        int lanes = jobs.Any(j => j.Mb > 0) ? LiveLanes("编批库") : NJ; using var wide = Metal.Widen(lanes, jobs.Any(j => j.Mb > 0) ? "编批库" : null);   // 全拿缓存（没有要编的批）不读内存、不打行；先于 Ticker：活动记录报放宽后的路数
         using var tk = new Ticker("直连库·编批库（MB）", jobs.Sum(j => j.Mb));
-        Parallel.ForEach(InOrder(jobs), new ParallelOptions { MaxDegreeOfParallelism = NJ * 2 }, j => { j.Run(); tk.Step(j.Mb); });   // 大的先编；拼源码与回填在多出的那些线程里做，Metal 不断粮
+        Parallel.ForEach(InOrder(jobs), new ParallelOptions { MaxDegreeOfParallelism = Pool(lanes) }, j => { j.Run(); tk.Step(j.Mb); });   // 大的先编；拼源码与回填在多出的那些线程里做，Metal 不断粮
         var vinOrder = vinPlanOrder;
         if (!failed.IsEmpty)
         {
             var fs = new HashSet<string>(failed.Keys, StringComparer.Ordinal);
             var (_, order) = Unity.VinPlan(vinReps, Hot, UNITY, Dg, vinSrc, vinCap, fs);
             foreach (var m in fs) foreach (var sd in dirs) sd.Drop(m + "_bv.metallib");
-            Parallel.ForEach(InOrder(order.Where(b => !vinBuilt.ContainsKey(string.Join(',', b)))), new ParallelOptions { MaxDegreeOfParallelism = NJ * 2 }, VinOne);
+            Parallel.ForEach(InOrder(order.Where(b => !vinBuilt.ContainsKey(string.Join(',', b)))), new ParallelOptions { MaxDegreeOfParallelism = Pool(lanes) }, VinOne);
             vinOrder = order;
         }
         Count("vin batches", vinOrder.Count(b => vinBuilt.GetValueOrDefault(string.Join(',', b))) + vinReuse.Values.Count(h => vinBuilt.GetValueOrDefault(string.Join(',', h.Keys))));
@@ -661,17 +662,19 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
     // 分批（11-08 巫师3 Windows 出包机三次盘满，rc=127 死在收尾）：这一步把每支 MSL 明文写进临时目录再交子进程，巫师3 约 3 万键、明文近百 GB。子进程逐支独立分析（C1Cb.Cli 每支一个任务），
     //   按累计字节切批（缺省 256 MB，S2A_C1CB_CHUNK_MB，0 = 每支一批），一批跑完删目录，临时盘峰值 = 一批。原缺省 4 GB 对玩家等于不切：怪猎崛起后台遍
     //   整份 2.08 GB 一次落盘、正叠在编批库的盘峰值上（v0.2.4 出包空间）；后台遍与编批库并发，多起几次子进程不进墙钟
-    static Dictionary<string, (string C1, string Row)> C1CbChild(IReadOnlyList<string> names, string tag, Dictionary<string, string> sigs)
+    //   进度（11-20 010015100B514000：后台遍比编批库 / 两类变体晚完 85 秒，「等两张表」期间进度不动）：给了 tick = 阶段名，子进程每算完一支按全遍累计计一次
+    static Dictionary<string, (string C1, string Row)> C1CbChild(IReadOnlyList<string> names, string tag, Dictionary<string, string> sigs, string tick = null)
     {
         var res = new Dictionary<string, (string C1, string Row)>(StringComparer.Ordinal);
         long limit = long.TryParse(Environment.GetEnvironmentVariable("S2A_C1CB_CHUNK_MB"), out var mb) && mb >= 0 ? mb * 1000000 : 256000000L;
         var cur = new List<string>(); long bytes = 0; int part = 0;
-        void Flush() { if (cur.Count == 0) return; foreach (var kv in C1CbChunk(cur, tag + part++, sigs)) res[kv.Key] = kv.Value; cur = new List<string>(); bytes = 0; }
+        int done = 0; using var tk = tick == null ? null : new Ticker(tick, names.Count, 0, activity: false);
+        void Flush() { if (cur.Count == 0) return; foreach (var kv in C1CbChunk(cur, tag + part++, sigs, tick == null ? null : new[] { tick, done.ToString(), names.Count.ToString() })) res[kv.Key] = kv.Value; done += cur.Count; cur = new List<string>(); bytes = 0; }
         foreach (var n in names) { var m = MAC.Get(n); if (m == null) continue; if (cur.Count > 0 && bytes + m.Length > limit) Flush(); cur.Add(n); bytes += m.Length; }
-        Flush();
+        Flush(); tk?.Step(names.Count);   // 收满（没有 Mac 侧产物的那几支不进子进程）
         return res;
     }
-    static Dictionary<string, (string C1, string Row)> C1CbChunk(IReadOnlyList<string> names, string tag, Dictionary<string, string> sigs)
+    static Dictionary<string, (string C1, string Row)> C1CbChunk(IReadOnlyList<string> names, string tag, Dictionary<string, string> sigs, string[] tick)
     {
         var res = new Dictionary<string, (string C1, string Row)>(StringComparer.Ordinal);
         if (names.Count == 0) return res;
@@ -686,7 +689,7 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
             }
             var self = Path.GetFileNameWithoutExtension(Environment.ProcessPath) == "dotnet" ? new[] { Environment.ProcessPath, typeof(Build).Assembly.Location } : new[] { Environment.ProcessPath };
             var psi = new ProcessStartInfo(self[0]) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
-            foreach (var x in self[1..].Concat(new[] { "--c1cb", dir, "-j", NJ.ToString() })) psi.ArgumentList.Add(x);
+            foreach (var x in self[1..].Concat(new[] { "--c1cb", dir, "-j", NJ.ToString() }).Concat(tick == null ? Array.Empty<string>() : new[] { "--tick" }.Concat(tick))) psi.ArgumentList.Add(x);
             using var p = Process.Start(psi); var e = p.StandardError.ReadToEndAsync();
             string ln;
             while ((ln = p.StandardOutput.ReadLine()) != null)
@@ -707,7 +710,7 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
         var names = C1CbNames(); var sigs = new Dictionary<string, string>(StringComparer.Ordinal);
         Dictionary<string, (string C1, string Row)> r;
         // 后台遍只是预算，失败不算整次失败（同 Python 打黄字、收尾全算）：快照置空，收尾遍按最终产物重算（合入线 11-02 对照 #4）
-        try { r = C1CbChild(names, "bg", sigs); }
+        try { r = C1CbChild(names, "bg", sigs, "直连库·两张表"); }
         catch (Exception e) { C1CbSnap = null; Say($"[YELLOW] c1 / cb tables: the background pass failed, the final pass computes them all: {Trunc(e.Message, 300)}"); return; }
         C1CbSnap = names.Where(r.ContainsKey).ToDictionary(n => n, n => (sigs[n], r[n]), StringComparer.Ordinal);
         Say($"[分段] 两张表后台遍：{names.Count} 支，第 {t0:F1} 秒起、用 {Clock.Elapsed.TotalSeconds - t0:F1} 秒");
@@ -756,9 +759,51 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
         Phase("客体输入");
     }
 
+    // ---------------- 编 Metal 的几段（编批库、_se、_vp）按此刻空闲内存定路数 ----------------
+    //   -j 是出包开头按「dsh 主进程 1.7 GB + 1 个 metal 峰值 + (J − 1) × metal p90」从当时的空闲内存反推的（tools/cores.sh S2A_DIRECT_J），
+    //   玩家机开着别的程序时常常只剩 1 路，且整次出库都按它。到这几段开头，主进程已经在跑、它的内存已算在「已用」里：
+    //   按此刻空闲内存重算同一公式（不再扣主进程），上限本单核数 S2A_JOBS，下限 -j。读不到空闲内存（Windows 等）照旧 -j。
+    //   实测（16 GB / 8 核、开头空闲 4.8–5.8 GB → -j 1）：编批库单核约 16 分钟、1 万多键的 _se 单核二十多分钟；到这两段时空闲 5.4–5.6 GB，重算是 4 路
+    static int LiveLanes(string phase)
+    {
+        static int Env(string n, int d) => int.TryParse(Environment.GetEnvironmentVariable(n), out var v) && v > 0 ? v : d;
+        long avail = AvailMb();
+        if (avail <= 0) return NJ;
+        int jobs = Env("S2A_JOBS", Environment.ProcessorCount), peak = Env("S2A_DIRECT_METAL_PEAK_MB", 1065), p90 = Env("S2A_DIRECT_METAL_P90_MB", 420);
+        int lanes = Math.Max(NJ, (int)Math.Min(jobs, 1 + Math.Max(0, avail / 2 - peak) / p90));
+        Say($"{phase}：{lanes} 路编（-j {NJ}；此刻空闲内存 {avail} MB 的一半按 metal 峰值 {peak} MB + 每路 p90 {p90} MB 重算，上限本单 {jobs} 核）");
+        return lanes;
+    }
+    // 工作线程数：编译路数由 Metal 的闸管，线程按「本单核数 × 2」开（段内放宽后线程够用；拼源码、回填在多出的线程里做，Metal 不断粮）；不比 lanes × 2 少
+    static int Pool(int lanes) { int j = int.TryParse(Environment.GetEnvironmentVariable("S2A_JOBS"), out var v) && v > 0 ? v : Environment.ProcessorCount; return Math.Max(lanes, j) * 2; }
+    internal static long AvailMb()   // 此刻空闲内存（MB），同 tools/cores.sh s2a_avail_mb：S2A_MEM_AVAIL_MB 覆盖 > macOS vm_stat 空闲 + 非活跃 + 预读 + 可清除 > Linux MemAvailable；读不到 0
+    {
+        if (long.TryParse(Environment.GetEnvironmentVariable("S2A_MEM_AVAIL_MB"), out var o) && o > 0) return o;
+        try
+        {
+            if (OperatingSystem.IsMacOS())
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo("/usr/bin/vm_stat") { RedirectStandardOutput = true, UseShellExecute = false };
+                using var p = System.Diagnostics.Process.Start(psi); var text = p.StandardOutput.ReadToEnd(); p.WaitForExit();
+                var ps = System.Text.RegularExpressions.Regex.Match(text, @"page size of (\d+)");
+                long pages = System.Text.RegularExpressions.Regex.Matches(text, @"^Pages (free|inactive|speculative|purgeable):\s+(\d+)", System.Text.RegularExpressions.RegexOptions.Multiline)
+                    .Sum(m => long.Parse(m.Groups[2].Value));
+                return ps.Success ? pages * long.Parse(ps.Groups[1].Value) / 1048576 : 0;
+            }
+            if (OperatingSystem.IsLinux() && File.ReadLines("/proc/meminfo").FirstOrDefault(l => l.StartsWith("MemAvailable:", StringComparison.Ordinal)) is { } l)
+                return long.Parse(l.Split(' ', StringSplitOptions.RemoveEmptyEntries)[1]) / 1024;
+        }
+        catch (Exception e) when (e is IOException || e is System.ComponentModel.Win32Exception || e is FormatException || e is InvalidOperationException) { }
+        return 0;
+    }
+
     // ---------------- 采样模拟变体（缺口族 31，种类 51） ----------------
     //   0.6.0 出包着色器全覆盖（11-17）：原先只预编跑局见过的键（se_want.tsv），没见过的要到设备首遇才现编（编好前这对绘制照旧用 main0、采样走样）。
     //   现在库里每个键都试：FsRd 改不动的（没有要模拟的采样）不出库；se_want.tsv 只用来报覆盖（见过的里有几个出了）
+    //   编法（11-20 出包提速）：先逐键改写（FsRd，只吃 CPU），再按「全局声明相同」切批、每批源码封顶 DMSH_UNITY_BATCH_MB（缺省 0.5 MB，同编批库）合编一份库，
+    //   同批各键的 <键>_se.metallib 指向同一份字节（Side.Alias，容器里只存一次、设备上一段建一个库）；函数改名 s<键>_main0 / s<键>_main0_fold（折行标记核，Unity.Src），
+    //   宿主 se_packed 先找 main0（旧包的逐键库）再找 s<键>_main0。原先逐键各编一次 Metal：#1770 旷野之息 1 万多键冷编 2–7 分钟，
+    //   同类源码合编每键约 60 ms·路、逐键约 156 ms·路（#1723 实测编批库 / _se 两段之比）。一批编不过退回逐键（VarLib），一键不连累一批
     static void SeFinish()
     {
         var f = Table("se_want.tsv");
@@ -766,17 +811,67 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
         Count("se wanted", want.Count);
         var all = Keys.Where(k => MAC.Has(k + "_b.metal")).ToList();
         Count("se tried", all.Count);
-        Parallel.ForEach(InOrder(all), new ParallelOptions { MaxDegreeOfParallelism = NJ * 2 }, k =>
+        // 进度：这一段在「编批库」计数满了之后才跑，没计数器时界面停在 100% 像卡住（0.6.0 实测 1 万多键单核十几分钟）。按键计：改写完一键不计，编完（成或败）才计
+        int lanes = LiveLanes("采样模拟变体"); using var wide = Metal.Widen(lanes, "采样模拟变体");
+        using var tk = new Ticker("直连库·采样模拟变体", all.Count);
+        var vs = new ConcurrentDictionary<string, string>(StringComparer.Ordinal);
+        Parallel.ForEach(InOrder(all), new ParallelOptions { MaxDegreeOfParallelism = Pool(lanes) }, k =>
         {
-            string s0 = MAC.Text(k + "_b.metal"), v;
-            try { v = DshCompiler.FsRd(s0); }
-            catch (Exception e) { Count("se failed"); Say($"[RED] {k}: no sampler-emulation variant (S2A.Dsh FsRd: {e.GetType().Name}: {e.Message.Split('\n')[0]}): the device compiles it at first use"); return; }
-            if (v == s0) { Count("se nothing to emulate"); return; }
-            var e2 = VarLib(k, "_se", v);
-            if (e2 != null) { Count("se failed"); Say($"[RED] {k}: the sampler-emulation variant does not compile ({Trunc(e2, 120)}): the device compiles it at first use"); }
-            else { Count("se built"); if (want.Contains(k)) Count("se wanted built"); }
+            bool done = true;
+            try
+            {
+                string s0 = MAC.Text(k + "_b.metal"), v;
+                try { v = DshCompiler.FsRd(s0); }
+                catch (Exception e) { Count("se failed"); Say($"[RED] {k}: no sampler-emulation variant (S2A.Dsh FsRd: {e.GetType().Name}: {e.Message.Split('\n')[0]}): the device compiles it at first use"); return; }
+                if (v == s0) { Count("se nothing to emulate"); return; }
+                vs[k] = v; done = false;
+            }
+            finally { if (done) tk.Step(); }
         });
+        VarBatches("_se", "se", all, vs, lanes, tk, k => SeOk(k, want),
+            (k, e2) => { Count("se failed"); Say($"[RED] {k}: the sampler-emulation variant does not compile ({Trunc(e2, 120)}): the device compiles it at first use"); });
     }
+    // 变体按批合编（_se / _vp 共用，11-20 出包提速）：按全局声明相同切批、每批源码封顶 DMSH_UNITY_BATCH_MB（缺省 0.5 MB，同编批库），
+    //   源码出自 Unity.VarSrc（函数前缀 s<着色器键>_），同批各键 <键><sfx>.metallib 指向同一份字节；一批编不过退回逐键（VarLib，入口不改名），单键批照旧逐键。
+    //   计数「<tag> batches / <tag> batched keys / <tag> batch fallback keys」；每批编完（成或败）按键数计进度
+    static void VarBatches(string sfx, string tag, List<string> order, ConcurrentDictionary<string, string> vs, int lanes, Ticker tk, Action<string> ok, Action<string, string> fail)
+    {
+        long cap = Unity.VinBatchMax(Environment.GetEnvironmentVariable("DMSH_UNITY_BATCH_MB") ?? "0.5");
+        var batches = new List<List<string>>();
+        foreach (var g in order.Where(vs.ContainsKey).GroupBy(k => string.Join("\n", Unity.Sig(vs[k])), StringComparer.Ordinal))
+        {
+            List<string> cur = null; long sz = 0;
+            foreach (var k in g)
+            {
+                if (cur == null || (cap > 0 && sz > 0 && sz + vs[k].Length > cap)) { batches.Add(cur = new()); sz = 0; }
+                cur.Add(k); sz += vs[k].Length;
+            }
+        }
+        Count(tag + " batches", batches.Count);
+        Parallel.ForEach(InOrder(batches), new ParallelOptions { MaxDegreeOfParallelism = Pool(lanes) }, ks =>
+        {
+            try
+            {
+                if (ks.Count > 1 && One(ks)) { foreach (var k in ks) ok(k); return; }
+                if (ks.Count > 1) Count(tag + " batch fallback keys", ks.Count);
+                foreach (var k in ks) { var e2 = VarLib(k, sfx, vs[k]); if (e2 != null) fail(k, e2); else ok(k); }
+            }
+            finally { tk.Step(ks.Count); }
+        });
+
+        bool One(List<string> ks)   // 一批合编：成 → 各键 <键><sfx>.metallib 指向这份库；编不过 → false（调用方退回逐键）
+        {
+            var src = Unity.VarSrc(ks.Select(k => (k, vs[k])));
+            string lib = ks[0] + sfx + ".metallib";
+            var sides = new List<(string T, Side Sd)>(); if (!NoMac) sides.Add(("mac", MAC)); if (IosLib) sides.Add(("ios", IOS));
+            try { foreach (var (t, sd) in sides) sd.Put(lib, Metal.Compile(t, src, tag + Unity.Dg(src))); }
+            catch (Exception e) when (e is CompileError || e is CompileTimeout) { foreach (var (_, sd) in sides) sd.Drop(lib); return false; }
+            foreach (var (_, sd) in sides) foreach (var k in ks.Skip(1)) sd.Alias(lib, k + sfx + ".metallib");
+            Count(tag + " batched keys", ks.Count);
+            return true;
+        }
+    }
+    static void SeOk(string k, HashSet<string> want) { Count("se built"); if (want.Contains(k)) Count("se wanted built"); }
 
     // ---------------- 顶点补齐变体（0.6.0 出包着色器全覆盖，种类 54） ----------------
     //   片元读、顶点不写的 user(locn)：原先出包只按配对表（跑局见过的顶点 × 片元对，vs_pad）补进顶点主翻译，游戏按阶段拼程序，没见过的对到设备首遇才缺，
@@ -796,20 +891,28 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
         var vs = stage.Where(x => x.Value == "vs").Select(x => x.Key).Where(k => MAC.Has(k + "_b.metal")).ToList();
         Count("vp vertex shaders", vs.Count);
         if (union == 0) return;
-        Parallel.ForEach(InOrder(vs), new ParallelOptions { MaxDegreeOfParallelism = NJ * 2 }, k =>
+        int lanes = LiveLanes("顶点补齐变体"); using var wide = Metal.Widen(lanes, "顶点补齐变体");
+        using var tk = new Ticker("直连库·顶点补齐变体", vs.Count);   // 进度：同 SeFinish，先逐键补齐（只吃 CPU），再按批合编（VarBatches），编完才计
+        var src = new ConcurrentDictionary<string, string>(StringComparer.Ordinal); var masks = new ConcurrentDictionary<string, (uint Got, int N)>(StringComparer.Ordinal);
+        Parallel.ForEach(InOrder(vs), new ParallelOptions { MaxDegreeOfParallelism = Pool(lanes) }, k =>
         {
-            string s0 = MAC.Text(k + "_b.metal");
-            uint have = Bits(DshCompiler.UserLocs(s0, "vs"));
-            uint mask = union & ~have;
-            if (mask == 0) { Count("vp nothing to pad"); return; }
-            var (v, added) = DshCompiler.VsPadMask(s0, mask);
-            if (added.Count == 0) { Count("vp nothing to pad"); return; }
-            uint got = 0; foreach (long l in added) got |= 1u << (int)l;
-            v += $"\nvertex float4 dm_vp_mask_{got:x}() {{ return float4(0.0); }}\n";   // 掩码随库带：宿主从函数名读（nvn_mtl.m vp_pack）
-            var e = VarLib(k, "_vp", v);
-            if (e != null) { Count("vp failed"); Say($"[RED] {k}: the padded vertex variant (user(locn) mask {got:#x}) does not compile ({Trunc(e, 120)}): the device makes one per pair at first use"); }
-            else { Count("vp built"); Count("vp padded outputs", added.Count); }
+            bool done = true;
+            try
+            {
+                string s0 = MAC.Text(k + "_b.metal");
+                uint have = Bits(DshCompiler.UserLocs(s0, "vs"));
+                uint mask = union & ~have;
+                if (mask == 0) { Count("vp nothing to pad"); return; }
+                var (v, added) = DshCompiler.VsPadMask(s0, mask);
+                if (added.Count == 0) { Count("vp nothing to pad"); return; }
+                uint got = 0; foreach (long l in added) got |= 1u << (int)l;
+                src[k] = v + $"\nvertex float4 dm_vp_mask_{got:x}() {{ return float4(0.0); }}\n";   // 掩码随库带：宿主从函数名读（nvn_mtl.m vp_pack；批库里是 s<键>_main0_vpmask_<十六进制>）
+                masks[k] = (got, added.Count); done = false;
+            }
+            finally { if (done) tk.Step(); }
         });
+        VarBatches("_vp", "vp", vs, src, lanes, tk, k => { Count("vp built"); Count("vp padded outputs", masks[k].N); },
+            (k, e) => { Count("vp failed"); Say($"[RED] {k}: the padded vertex variant (user(locn) mask {masks[k].Got:#x}) does not compile ({Trunc(e, 120)}): the device makes one per pair at first use"); });
     }
 
     // ---------------- 汇总 ----------------
@@ -821,8 +924,8 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
         Say($"ast mem order kept: {N("astmem kept")} in {N("astmem keys")} keys (counted {N("astmem counted")} keys, uncounted {N("astmem uncounted")})");
         Say($"variant cache{(BfOn ? "" : " (readable-tile _bf off, DMSH_BF unset)")}: generated {N("bf generated")}");
         Say($"typed-output variants (ft_finish, fout_want.tsv {FoutWant.Values.Sum(s => s.Count)} requests): {N("ft entries")} entry points in {N("ft libs")} libraries, {N("ft covered")} covered by main0_u or nothing integer after the colour filter, {N("ft failed")} libraries failed");
-        Say($"sampler-emulation variants (<key>_se, every key tried {N("se tried")}): built {N("se built")} (of se_want.tsv's {N("se wanted")} keys {N("se wanted built")}), nothing to emulate {N("se nothing to emulate")}, failed {N("se failed")}");
-        Say($"padded vertex variants (<key>_vp, union of every pixel shader's user(locn) inputs): {N("vp vertex shaders")} vertex shaders, built {N("vp built")} ({N("vp padded outputs")} outputs added), nothing to pad {N("vp nothing to pad")}, failed {N("vp failed")}");
+        Say($"sampler-emulation variants (<key>_se, every key tried {N("se tried")}): built {N("se built")} ({N("se batched keys")} of them in {N("se batches")} batches, {N("se batch fallback keys")} built key by key after their batch failed; of se_want.tsv's {N("se wanted")} keys {N("se wanted built")}), nothing to emulate {N("se nothing to emulate")}, failed {N("se failed")}");
+        Say($"padded vertex variants (<key>_vp, union of every pixel shader's user(locn) inputs): {N("vp vertex shaders")} vertex shaders, built {N("vp built")} ({N("vp padded outputs")} outputs added; {N("vp batched keys")} of them in {N("vp batches")} batches, {N("vp batch fallback keys")} built key by key after their batch failed), nothing to pad {N("vp nothing to pad")}, failed {N("vp failed")}");
         Say($"pulling libraries (<key>_bp, S2A.Dsh DshPull): {N("pull generated")} generated ({N("pull inputs")} inputs pulled), {N("pull failed")} failed to compile, {N("pull not generated")} not generated");
         Say($"shadow-input libraries (<key>_bv, S2A.Dsh DshVin): {N("vin generated")} generated ({N("vin batches")} batches), {N("vin failed")} failed to compile, {N("vin not generated")} not generated; {N("vin inputs")} integer inputs shadowed, {N("vin float only")} of them with no other-sign shadow (attribute indices ran out)");
         Say(Metal.Summary());
@@ -855,7 +958,7 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
     }
     internal static string TableHead(string lib) => $"# chain {Path.GetFileName(Path.TrimEndingDirectorySeparator(lib))} inputs {ReadStamp(lib).GetValueOrDefault("inputs", "none")}";
     internal static string OutDir => Out; internal static string IosOutDir => IosOut; internal static string PublishSide => Publish; internal static bool IosLibOn => IosLib; internal static bool NoMacOn => NoMac;
-    internal static int Jobs => NJ; internal static string ProfileTable(string n) => Table(n); internal static string ChainV => Chain;
+    internal static int Jobs => Metal.Cur > 0 ? Metal.Cur : NJ;   // 放宽期间报实际路数（Ticker 的活动记录「目标 / 任务池」），否则 -j internal static string ProfileTable(string n) => Table(n); internal static string ChainV => Chain;
 }
 
 /// <summary>出库的一侧（Mac / iOS）：文件名 → 字节，只在内存（同原 dmsh_out.Side）</summary>
@@ -973,9 +1076,16 @@ sealed class Ticker : IDisposable
 {
     readonly string stage, path; readonly int total; int done; long last;
     bool disposed;
+    readonly bool activity = true;
     public Ticker(string stage, int total)
     {
         this.stage = stage; this.total = Math.Max(total, 0); path = Environment.GetEnvironmentVariable("S2A_PROGRESS");
+        Write(true); PublishActivity(false);
+    }
+    /// <summary>从 done0 起计（同一段分几个子进程接力计数）；activity = false 不写活动记录（并发的旁路工作，不改界面的路数）</summary>
+    public Ticker(string stage, int total, int done0, bool activity)
+    {
+        this.stage = stage; this.total = Math.Max(total, 0); done = done0; this.activity = activity; path = Environment.GetEnvironmentVariable("S2A_PROGRESS");
         Write(true); PublishActivity(false);
     }
     public void Step(int n = 1) { int d = Interlocked.Add(ref done, n); Write(d >= total); }
@@ -992,7 +1102,7 @@ sealed class Ticker : IDisposable
     }
     void PublishActivity(bool ending)
     {
-        if (string.IsNullOrEmpty(path) || Build.Jobs <= 0) return;
+        if (!activity || string.IsNullOrEmpty(path) || Build.Jobs <= 0) return;
         lock (this)
         {
             // Two columns: old four-column readers ignore this optional activity record.
@@ -1019,13 +1129,14 @@ sealed class CompileTimeout : CompileError { public CompileTimeout(string m) : b
 static class Metal
 {
     static readonly Dictionary<string, (string[] Cmd, string Sdk, byte[] Ident)> T = new();
-    static string Work; static SemaphoreSlim Gate;
+    static string Work; static SemaphoreSlim Gate; static int Cap;
+    internal static int Cur;   // 当前放宽到的路数（Widen 期间；0 = 没放宽）：Build.Jobs 报给界面的「目标 / 任务池」
     static readonly ConcurrentDictionary<string, long> St = new();
     static readonly ConcurrentBag<(double S, string Target, int Bytes)> Times = new();
     /// <summary>→ null 正常；编译工具用不了 → 一行【红】原因（调用方打出来、整次停，不再逐支翻译编译）</summary>
     public static string Init((string[] Cmd, string Rec, string Sdk)? mac, (string[] Cmd, string Rec, string Sdk)? ios, string work, int jobs)
     {
-        Work = work; Gate = new SemaphoreSlim(jobs);
+        Work = work; Gate = new SemaphoreSlim(jobs); Cap = jobs;
         foreach (var (name, t) in new[] { ("mac", mac), ("ios", ios) })
             if (t is { } v)
             {
@@ -1118,6 +1229,45 @@ static class Metal
     }
     // name：源文件名（不带 .metal），按它编。有全局构造函数的源码，库里嵌着文件名（_GLOBAL__sub_I_<name>.metal）：这种库按「名 + 源码」缓存，
     //   其余（库里没有文件名）按源码缓存、同源的键共用；查时先源码键、再名键
+    /// <summary>同时编译的 metal 进程临时放宽到 lanes 路（Build.LiveLanes）；Dispose 收回到 -j。期间 Cur = 实际路数（不比 -j 宽时就是 -j）。
+    /// 段内继续按实时空闲内存放宽（11-20 出包提速：开头那一刻算的路数整段沿用，16 GB 机器开头空闲少时后面空出来的核一直闲着）：
+    ///   每 S2A_LANE_GROW_S（缺省 5）秒读一次此刻空闲内存（已扣掉正在编的各路），一半里还放得下「metal 峰值 + 2 路 p90」就多放 1 路（一次只加 1 路、留 1 路余量，
+    ///   新加的那路要过几秒才吃到内存），上限本单核数 S2A_JOBS；只放宽不收窄。空闲内存是给定值（S2A_MEM_AVAIL_MB，单测）或读不到时不放宽：没有实时读数</summary>
+    public static IDisposable Widen(int lanes, string phase = null)
+    {
+        int extra = Math.Max(0, lanes - Cap); Cur = Cap + extra;
+        if (extra > 0) Gate.Release(extra);
+        return new Narrow(extra, phase);
+    }
+    sealed class Narrow : IDisposable
+    {
+        int extra, grown; readonly string phase; readonly Timer timer; readonly object mu = new();
+        public Narrow(int extra, string phase)
+        {
+            this.extra = extra; this.phase = phase;
+            bool live = phase != null && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("S2A_MEM_AVAIL_MB"));
+            int sec = int.TryParse(Environment.GetEnvironmentVariable("S2A_LANE_GROW_S"), out var g) && g > 0 ? g : 5;
+            if (live) timer = new Timer(_ => Grow(), null, sec * 1000, sec * 1000);
+        }
+        void Grow()
+        {
+            static int Env(string n, int d) => int.TryParse(Environment.GetEnvironmentVariable(n), out var v) && v > 0 ? v : d;
+            int cap = Env("S2A_JOBS", Environment.ProcessorCount), peak = Env("S2A_DIRECT_METAL_PEAK_MB", 1065), p90 = Env("S2A_DIRECT_METAL_P90_MB", 420);
+            lock (mu)
+            {
+                if (timer == null || Cap + extra >= cap) return;
+                long avail = Build.AvailMb();
+                if (avail <= 0 || avail / 2 < peak + 2L * p90) return;
+                extra++; grown++; Cur = Cap + extra; Gate.Release(1);
+            }
+        }
+        public void Dispose()
+        {
+            int n, g; lock (mu) { timer?.Dispose(); n = extra; g = grown; }
+            if (g > 0) Build.Say($"{phase}：段内按此刻空闲内存又放宽 {g} 路，最多 {Cap + n} 路");
+            for (int i = 0; i < n; i++) Gate.Wait(); Cur = 0;
+        }
+    }
     public static byte[] Compile(string target, string msl, string name) => Compile(target, msl, name, out _);
     /// <summary>编译身份（编译约定 + 编译器版本）的十六进制：批成员索引按它分键，换编译器不拿旧库</summary>
     public static string IdentHex(string target) => Convert.ToHexString(T[target].Ident).ToLowerInvariant()[..16];

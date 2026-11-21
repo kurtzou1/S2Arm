@@ -21,6 +21,12 @@ namespace Ryujinx.HLE.HOS.Services.Nifm.StaticService
         private int _event0Handle;
         private int _event1Handle;
 
+        // S2Arm: without internet access a real console answers a submitted request OnHold first, signals the request event,
+        // then settles on Error (the request failed). Answering Error straight away made games that resubmit until the
+        // request leaves OnHold (Hades: nn::nifm::SubmitNetworkRequest in a loop) spin on IPC without ever yielding,
+        // starving the threads sharing the core (#1823, about 80 s in). Same timing as nxnative's offline fix.
+        private bool _pendingOnHold;
+
 #pragma warning disable IDE0052 // Remove unread private member
         private readonly uint _version;
 #pragma warning restore IDE0052
@@ -39,7 +45,14 @@ namespace Ryujinx.HLE.HOS.Services.Nifm.StaticService
         {
             RequestState requestState = context.Device.Configuration.EnableInternetAccess
                 ? RequestState.Available
-                : RequestState.Error;
+                : _pendingOnHold ? RequestState.OnHold : RequestState.Error;
+
+            if (_pendingOnHold)
+            {
+                // First query after Submit saw OnHold; the request has now resolved: signal the state change, later queries see Error
+                _pendingOnHold = false;
+                _event0.ReadableEvent.Signal();
+            }
 
             context.ResponseData.Write((int)requestState);
 
@@ -103,6 +116,9 @@ namespace Ryujinx.HLE.HOS.Services.Nifm.StaticService
         public ResultCode Submit(ServiceCtx context)
         {
             Logger.Stub?.PrintStub(LogClass.ServiceNifm);
+
+            // Offline: the first state query after this submit answers OnHold (see _pendingOnHold)
+            _pendingOnHold = !context.Device.Configuration.EnableInternetAccess;
 
             return ResultCode.Success;
         }

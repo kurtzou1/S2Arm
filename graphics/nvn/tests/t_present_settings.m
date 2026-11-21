@@ -1,5 +1,6 @@
 // #604: GPU-rendered stimuli through the real direct presenter. The drawable
 // observer forwards to CAMetalLayer unchanged; it never supplies a replacement.
+#include <sched.h>
 #import <AppKit/AppKit.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
@@ -19,6 +20,7 @@ void *front_metal_layer(void);
 void nvn_be_set_origin_lower_left(int on);
 double nvn_be_presented_time(uint64_t ticket);
 void mtl_grab_next_present(void (^cb)(const uint8_t *, size_t, size_t, size_t));
+int mtl_grab_inflight(void);
 
 static int checked, failed, shown;
 static id<MTLDevice> device;
@@ -210,6 +212,9 @@ static NSData *fsrDrawable; static int fsrChanged;
 static NSData *capture(id<MTLTexture> source, const int crop[4], BOOL flip, int width, int height, NSString *name) {
     dispatch_sync(dispatch_get_main_queue(), ^{ layer.drawableSize = CGSizeMake(width, height); [CATransaction flush]; });
     noteWindow([name stringByAppendingString:@"-before"], 0, nil);
+    // 上一次抓图的完成回调先唤醒我们、再清「抓图进行中」：清之前再上屏，这一帧不抓（请求留给下一次上屏），而本测一次只上屏一帧 → 干等到超时。
+    //   等它清零再登记（同 t_nvn_m3 / t_nvn_present_init / t_nvn_rscale；11-20 门禁主机负载 68 时 mtl3 两格卡到 60 秒闹钟就是这个）
+    while (mtl_grab_inflight()) sched_yield();
     nvn_be_set_origin_lower_left(flip);
     pthread_mutex_lock(&drawableMutex); observedDrawable = nil; uint64_t before = drawableCount; pthread_mutex_unlock(&drawableMutex);
     dispatch_semaphore_t captured = dispatch_semaphore_create(0);

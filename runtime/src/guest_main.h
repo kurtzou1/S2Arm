@@ -6,7 +6,7 @@ struct s2a_guest_main_args {
     uint64_t stack_top;
     int argc;
     char **argv;
-#if defined(__APPLE__) && !defined(__ANDROID__)
+#if defined(__APPLE__) && (!defined(__ANDROID__) && !defined(__OHOS__))
     _Atomic int entered;
 #endif
 };

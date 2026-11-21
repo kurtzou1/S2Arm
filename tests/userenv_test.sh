@@ -56,14 +56,15 @@ cp "$H/pack/oneclick/oneclick.sh" "$H/pack/oneclick/cachehits.py" "$H/pack/onecl
 cp "$H/pack/direct_profile_input.py" "$R/pack/"   # 一键出包写直连版本旁注调它
 mkdir -p "$R/pack/jobs" "$R/compat/tree"; cp "$H"/pack/jobs/*.py "$R/pack/jobs/"; cp "$H/compat/tree/global.json" "$R/compat/tree/"   # 一键出包判 .NET SDK 调 pack/jobs/ipa.py dotnet_sdk()（版本按 global.json，全仓一处判法）
 cp "$H/pack/roots.sh" "$H/pack/srcs.sh" "$H/pack/build_id.sh" "$R/pack/"
+mkdir -p "$R/pack/orch" && cp "$H/pack/orch/current.py" "$R/pack/orch/"   # roots.sh 写现行指针 / 迁移老库（pack/orch/current.py）
 for f in cores.sh progress.sh machine.sh nospace.sh; do cp "$H/tools/$f" "$R/tools/"; done
 mkdir -p "$R/graphics/nvn/tools"; cp "$H/graphics/nvn/tools/romfs_list.py" "$R/graphics/nvn/tools/"   # --from-extract 播种键盘点 romfs/ aoc/（审计 #1534 P1-54）
 mkdir -p "$R/tools"; cp "$H/tools/pool_workers.py" "$R/tools/"   # romfs_list / pak_crypto 经它取核数（#1332：核数唯一来源）
-printf '#!/bin/bash\nr=$S2A_ROOTS/$1@$2; mkdir -p "$r" && cp -R "$3/exefs" "$r/" && cp "$3"/*.tsv "$r/" 2> /dev/null; ln -sfn "$1@$2" "$S2A_ROOTS/$1@现行"; echo "🟢 播种桩 $r"\n' > "$R/pack/seed_root.sh"
+printf '#!/bin/bash\nr=$S2A_ROOTS/$1@$2; mkdir -p "$r" && cp -R "$3/exefs" "$r/" && cp "$3"/*.tsv "$r/" 2> /dev/null; echo "$1@$2" > "$S2A_ROOTS/$1@现行"; echo "🟢 播种桩 $r"\n' > "$R/pack/seed_root.sh"
 printf '#!/bin/bash\necho "🟢 刷新桩"\n' > "$R/pack/refresh.sh"
 cat > "$R/pack/ipa.sh" <<'EOF'
 #!/bin/bash
-c=$(cd -P "$S2A_ROOTS/$1@现行" && pwd); mkdir -p "$c/pkg/pack"; python3 -c "import plistlib,sys,zipfile; z=zipfile.ZipFile(sys.argv[1],'w'); z.writestr('Payload/S2Arm.app/Info.plist', plistlib.dumps({'S2AGraphicsMode': 'direct', 'S2AGraphicsModeReason': ''})); z.close()" "$c/pkg/$1.ipa"; echo "{}" > "$c/pkg/pack/manifest.json"; : > "$c/pkg/pack/index.tsv"; echo "🟢 出包桩"
+c=$(cd -P "$S2A_ROOTS/$(cat "$S2A_ROOTS/$1@现行")" && pwd); mkdir -p "$c/pkg/pack"; python3 -c "import plistlib,sys,zipfile; z=zipfile.ZipFile(sys.argv[1],'w'); z.writestr('Payload/S2Arm.app/Info.plist', plistlib.dumps({'S2AGraphicsMode': 'direct', 'S2AGraphicsModeReason': ''})); z.close()" "$c/pkg/$1.ipa"; echo "{}" > "$c/pkg/pack/manifest.json"; : > "$c/pkg/pack/index.tsv"; echo "🟢 出包桩"
 EOF
 chmod +x "$R"/pack/*.sh
 { head -c 64 /dev/zero; printf 'BUILDIDBUILDID01'; head -c 32 /dev/zero; } > "$R/x/exefs/main"

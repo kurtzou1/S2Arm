@@ -1,6 +1,6 @@
 #!/bin/bash
 # 门禁覆盖：compat/tree/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs tests/vs_lane_id_test.sh
-# 门禁显卡：独占（建 Metal 设备、在本机 GPU 上真跑；11-11 合入运维线补声明：入队预检据此把它的红记「没判、交列车门禁」，门禁走显卡独占锁）
+# 门禁显卡：共享（11-20 读写锁：不按显示时钟判，从独占降为共享；建 Metal 设备、在本机 GPU 上真跑；11-11 维护者补声明：入队预检据此把它的红记「没判、交列车门禁」，门禁走显卡共享锁）
 # 顶点阶段车道号的计算（Ryujinx 补丁 vertex-lane-id-exact：Instructions.EmulatedLaneId，约 3 秒，要 Metal）：bash tests/vs_lane_id_test.sh
 # Metal 顶点函数没有车道号输入（SPIRV-Cross 拒绝 SubgroupLocalInvocationId），翻译器在顶点阶段算出它：r = simd_prefix_exclusive_sum(1)（活跃车道里的排名），
 #   车道号 = 硬件 ballot(true) 位图里第 r 个置位的位置（先按四个字的置位累计定位落在第几个字，再在字内 popcount 五步二分；审计 1101 18:00 P1-61：

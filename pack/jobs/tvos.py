@@ -696,7 +696,8 @@ def adhoc_entitle(c, app, ents, log):
         c.run(["codesign", "--force", "--sign", "-", "--entitlements", ents, app], log)
     else:
         import devcert
-        c.run([devcert.rcodesign_path(c), "sign", "--entitlements-xml-path", ents, exe], log)
+        eargs, ecwd = devcert.rcodesign_ents(ents)   # Windows 盘符：-e 按第一个冒号拆，只传文件名
+        c.run([devcert.rcodesign_path(c), "sign", *eargs, str(Path(exe).resolve())], log, cwd=ecwd)
 
 
 def write_tv_ipa(c, app, gid, pack, ipa, log):

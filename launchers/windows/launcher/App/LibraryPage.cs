@@ -858,7 +858,13 @@ public sealed partial class EnvironmentWindow
             DisplayJob(listing);
             if (!listing.Report.Succeeded) { librarySummary = "library.failed"; if (JobCode(listing) == "library_id_mismatch") otherLibrary = listing.Report.Message; return; }
             catalog = LibraryCatalog.Parse(listing.Report.Result); ClearCovers();
-            if (!catalog.Games.Any(g => g.Id == selectedGame && !g.Hidden)) selectedGame = null;
+            if (selectedGame is not null && !catalog.Games.Any(g => g.Id == selectedGame && !g.Hidden))
+            {
+                // #1392 读数：清空选中之前记一行（logs/launcher-crash.log）——选中的款、是缺席还是 Hidden、目录总款数、当时的出包款与状态
+                var present = catalog.Games.FirstOrDefault(g => g.Id == selectedGame);
+                LauncherCrash.Log(null, $"library.select.clear selected={selectedGame} state={(present is null ? "absent" : "hidden")} catalog={catalog.Games.Count} pack={packGame?.Id ?? "null"}/{(packState == "" ? "null" : packState)} result=cleared");
+                selectedGame = null;
+            }
             librarySummary = "library.completed";
             ResumeSGradeWatch();   // S 级批量升级队列还在跑就接着读进度（SGradeUpgrade.cs）
             _ = PreparePhoneUpdateAsync();   // 新版启动器头一次读到要更新的手机：后台准备 iPhone App 更新（PhoneAutoUpdate.cs）

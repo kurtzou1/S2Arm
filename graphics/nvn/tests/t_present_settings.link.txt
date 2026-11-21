@@ -137,6 +137,7 @@ hdr runtime/include/s2a_programs.h
 hdr runtime/include/s2a_qladder.h
 hdr runtime/include/s2a_qos.h
 hdr runtime/include/s2a_qprompt.h
+hdr runtime/include/s2a_selfcheck_page.h
 hdr runtime/include/s2a_sesdiag.h
 hdr runtime/include/s2a_session.h
 hdr runtime/include/s2a_text_input.h

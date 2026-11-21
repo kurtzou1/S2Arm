@@ -934,8 +934,10 @@ class Stages:
         #   否则用现行产物根的 romfs：本阶段只写覆盖层，Windows 别的阶段也不改 romfs，它一直联到播种时那份不可变的身份。
         #   解包目录不可靠：从原件解时 romfs 被挪进共享存储、原处链接在播种那一版修剪后悬空；玩家实报还指到过别的款的解包目录，
         #   原先照用，拿别的款的布局文件生成覆盖叠到这一款上（v0.3.0 Windows）
-        source = next((line[4:] for line in read(current / 'seed.txt').splitlines() if line.startswith('src=')), '')
-        original = Path(source) / 'romfs' if source else None
+        seed = read(current / 'seed.txt').splitlines()
+        source = next((line[4:] for line in seed if line.startswith('src=')), '')
+        # 播种把 RomFS 整目录挪进了产物根（refresh.py move_romfs，seed.txt romfs_moved=1）：产物根这份就是原版，解包目录原处没有 RomFS
+        original = current / 'romfs' if 'romfs_moved=1' in seed else Path(source) / 'romfs' if source else None
         theirs, ours = _title_id(Path(source)) if source else '', _title_id(current)
         lister = _own_romfs_list()   # RomFS 在不在、有没有 Layout / UI / Pack：目录或镜像 romfs.std 都认（romfs_list.is_dir）
         if original is None or not lister.is_dir(original) or (theirs and ours and theirs != ours):

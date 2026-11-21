@@ -966,7 +966,7 @@ def trpfs_jobs(files, parts=64):
         taken |= {p, p[:-1] + 'd'}
     return jobs, taken
 
-# The game's decoder defaults (11-07 DRAGON QUEST XI S, packq on a private root: extract.sh sets neither variable, so the LZ5 paks went red here while pack/ue_pak.py and
+# The game's decoder defaults (11-07 DRAGON QUEST XI S, packq on a private root: extract.py sets neither variable, so the LZ5 paks went red here while pack/ue_pak.py and
 #   nxsh_extract found the same host): uepak.oodle_host_find, the one lookup the three readers share (DM_OODLE_HOST else this tree's build/s2arm-host; DM_OODLE_MODULES else the
 #   RomFS's parent, the product root holding main.fixups.tsv). Set in the environment so the worker processes (spawned) see them; the reason is kept for the red line when not found
 def oodle_defaults(romfs):

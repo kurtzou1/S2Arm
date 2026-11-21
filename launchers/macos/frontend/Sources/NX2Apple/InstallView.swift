@@ -64,6 +64,8 @@ struct InstallView: View {
                         .padding(model.pickDeviceFocus ? 8 : 0)
                         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(LauncherPalette.cream, lineWidth: model.pickDeviceFocus ? 1.5 : 0))
                         .id(Self.deviceRowID)
+                    // 这款推成通用 S2Arm 里的一款还是独立 App（0.6.3）：缺省跟随设置，单款可改
+                    if let game { InstallLayoutRow(model: model, gameId: game.id) }
                     if let r = model.installReadiness {
                         CardGroup(loc.t("s2arm.install.checklist"), footnote: footnote(r)) {
                             ForEach(r.items) { item in
@@ -145,7 +147,7 @@ struct InstallView: View {
                         .controllerButtonStyle(LauncherSecondaryButtonStyle()).accessibilityIdentifier("install.revealIpa").controllerShortcut(.secondary)
                 }
                 Button(loc.t("launch.done")) { dismiss() }.controllerButtonStyle(LauncherSecondaryButtonStyle()).controllerShortcut(.rightTrigger, .back, focused: true)
-                Button(loc.t("s2arm.install.start")) {
+                Button(queued ? text("install.start.queued") : loc.t("s2arm.install.start")) {
                     if let game { model.clearInlineFailure(); model.install(game) }
                 }
                 .controllerButtonStyle(LauncherPrimaryButtonStyle()).keyboardShortcut(.defaultAction).controllerShortcut(.rightTrigger)

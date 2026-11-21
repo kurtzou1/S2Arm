@@ -314,6 +314,7 @@ public final class S2ArmEngineProvider: EngineProvider {
     }
     public func devCertUse(_ active: Bool) async throws { try await installer.devCertUse(active) }
     public func signModeSet(_ mode: String) async throws -> String { try await installer.signModeSet(mode) }
+    public func layoutSet(_ layout: String?, gameId: String? = nil) async throws -> String { try await installer.layoutSet(layout, gameId: gameId) }
     public func appleLogin(account: String, password: String, events: EventSink = .discard) async throws -> AppleAccount {
         try await installer.appleLogin(account: account, password: password, events: events)
     }

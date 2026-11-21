@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# 门禁手动：只在 Linux ARM64 上跑（真实 gate/VM 并发准入与停机）；原注释说登记在 tests/gate_not_default.tsv，那份表已不存在——接到哪个 Linux 门禁待 owner 定（11-20 android/gate.sh 接回时查出）
 """Linux ARM64：真实 gate/VM 并发准入与停机回归；不联网，不启动 Android。"""
 import argparse
 import hashlib

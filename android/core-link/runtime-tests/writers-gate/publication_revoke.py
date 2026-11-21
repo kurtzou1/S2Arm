@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# 门禁手动：由同目录 run.py 在进程内导入（from publication_revoke import run），run.py 只在 Linux ARM64 上跑、尚无门禁入口，随它定
 """Real writer admission; only host lifecycle/publication inputs use a shared page."""
 import ctypes
 import json

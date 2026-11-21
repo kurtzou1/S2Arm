@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# IoStore 容器接入出包链单测（#247：pack/ue_pak.py + graphics/tools/direct/extract.sh 第 28 行门禁）：合成容器，约 3 秒，退出 0 = 全过。**完全不含游戏数据**。
+# IoStore 容器接入出包链单测（#247：pack/ue_pak.py + graphics/tools/direct/extract.py 的 Unreal 包门禁）：合成容器，约 3 秒，退出 0 = 全过。**完全不含游戏数据**。
 # 构造（按 FIoStoreTocHeader 144 字节与压缩块表手写，不跑被测实现推期望）：header（魔数、版本、头长、chunk 条数、块条数、块条目 12、方法数、
 #   方法名长 32、块大小、目录索引、分区数、容器 ID、标志）+ chunk ID 表（12 字节 × n）+ 偏移长度表（各 5 字节大端）+
 #   压缩块表（5 字节偏移 + 3 字节存储长 + 3 字节原长 + u8 方法）+ 方法名表；容器未压缩流写进同名 .ucas。
@@ -9,8 +9,8 @@
 #   ③ 命名：Manifest 里列了 ShaderArchive-<库>-<格式> 就按它命名，没列 → ShaderArchive-IoStore-<哈希>
 #   ④ Oodle 块、没有宿主（不设 DM_OODLE_HOST / DM_OODLE_MODULES，RomFS 旁也没有改写模块）→ 退出非 0、日志点名容器与 Oodle、说明缺的是游戏自带解码器的宿主
 #      （与 pak 的 Oodle 口径一致；有宿主时解出，见 tests/ue_pak_test.sh ④ / tests/oodle_proto_test.sh）
-#   ⑤ 反证：改前 extract.sh 门禁谓词 / 改前 ue_pak.py 对同一个纯 .utoc 根抽 0 支；新代码抽全部
-#   ⑥ 出包链：真的 graphics/tools/direct/extract.sh（临时树 + 记账的假 split / s2x）—— 旧门禁行消费方一个存档都看不到，新门禁行看到全部
+#   ⑤ 反证：改前抽取门禁谓词 / 改前 ue_pak.py 对同一个纯 .utoc 根抽 0 支；新代码抽全部
+#   ⑥ 出包链：真的 graphics/tools/direct/extract.py（临时树 + 记账的假 split / s2x）—— 旧门禁行消费方一个存档都看不到，新门禁行看到全部
 #   ⑦ TOC 版本 3（UE 4.27）没有着色器代码库这套 chunk 编号 → 不猜、不写、退出 0、日志点明版本
 #   ⑧ 加密容器（标志位 2，块按 16 字节补齐后 AES-256-ECB，openssl 加密，不跑被测实现）+ 同包一个加密 pak、main 里嵌着密钥（t_ue_pak_encrypted 的合成件）
 #      → 用 pak 找到的密钥解出、记录逐条等于合成本；改前 ue_pak.py 当「不是 IoStore」跳过、写出 0 个（11-02 普查七龙珠 电光炸裂 ZERO）；
@@ -53,7 +53,7 @@ except Exception as e:
     sys.exit(1)
 
 UE_PAK = os.path.join(H, 'pack', 'ue_pak.py')
-EXTRACT = os.path.join(H, 'graphics', 'tools', 'direct', 'extract.sh')
+EXTRACT = os.path.join(H, 'graphics', 'tools', 'direct', 'extract.py')
 
 # ── 合成容器 ────────────────────────────────────────────────────────────────
 TOC_MAGIC = b'-==--==--==--==-'
@@ -163,7 +163,7 @@ r2 = os.path.join(T, 'r2')
 want2 = one_lib(os.path.join(r2, 'romfs', 'Paks', 'lab.utoc'), 'Lab', 'SF_GLSL_SWITCH', [S0, S1, S2],
                 method_of=lambda k: 1 if k % 2 == 0 else 0)
 ck(not any(f.endswith('.pak') for _, _, fs in os.walk(os.path.join(r2, 'romfs')) for f in fs),
-   '② 合成根里没有一个 .pak（改前那版 ue_pak.py 与 extract.sh 门禁都看不见它）')
+   '② 合成根里没有一个 .pak（改前那版 ue_pak.py 与抽取门禁都看不见它）')
 rc, log = run_ue_pak(os.path.join(r2, 'romfs'), os.path.join(r2, 'out'))
 got = os.path.join(r2, 'out', 'ShaderArchive-IoStore-' + lib_hash('Lab', 'SF_GLSL_SWITCH').hex() + '.ushaderbytecode')
 ck(rc == 0 and os.path.isfile(got), f'② 新 pack/ue_pak.py 退出 0（rc={rc}）并写出存档 {os.path.basename(got)}')
@@ -200,17 +200,17 @@ ck('iostore:oodle.utoc' in log4 and 'Oodle' in log4 and '游戏自带解码器' 
 ck(listing(os.path.join(r4, 'out')) == [], '④ 一支也没写出来（不当成功兜底）')
 
 # ── ⑤ 反证：改前的两个入口对同一个纯 .utoc 根 ───────────────────────────────
-old_gate = 'if [ -n "$(find "$ROOT/romfs" -iname \'*.pak\' -print -quit 2>/dev/null)" ]; then'
-# 11-03 起门禁经 RomFS 清单模块（graphics/nvn/tools/romfs_list.py has-ext，同 find -iname … -print -quit）
-new_gate = 'if "$PY" "$R/graphics/nvn/tools/romfs_list.py" has-ext "$ROOT/romfs" .pak .utoc 2> /dev/null; then'
-ex_text = open(EXTRACT).read()
-ck(new_gate in ex_text and old_gate not in ex_text, '⑤ extract.sh 第 28 行门禁是新的（.pak 或 .utoc）')
+# 11-03 起门禁经 RomFS 清单模块（graphics/nvn/tools/romfs_list.py has-ext，同 find -iname … -print -quit）；改前只认 .pak（反证用同一行去掉 .utoc 的形态）
+new_gate = "[PY, NX + '/tools/romfs_list.py', 'has-ext', ROOT + '/romfs', '.pak', '.utoc']"
+old_gate = "[PY, NX + '/tools/romfs_list.py', 'has-ext', ROOT + '/romfs', '.pak']"
+ex_text = open(EXTRACT, encoding='utf-8').read()
+ck(ex_text.count(new_gate) == 1 and old_gate not in ex_text, '⑤ extract.py 的 Unreal 包门禁是新的（.pak 或 .utoc）')
 ck(subprocess.run(['find', os.path.join(r2, 'romfs'), '-iname', '*.pak', '-print', '-quit'],
                   capture_output=True, text=True).stdout == '',
-   '⑤ 旧门禁谓词（只 -iname *.pak）在纯 .utoc 根上一个文件都选不出 → 旧 extract.sh 根本不跑 ue_pak.py')
+   '⑤ 旧门禁谓词（只 -iname *.pak）在纯 .utoc 根上一个文件都选不出 → 旧抽取根本不跑 ue_pak.py')
 ck(subprocess.run(['find', os.path.join(r2, 'romfs'), '(', '-iname', '*.pak', '-o', '-iname', '*.utoc', ')', '-print', '-quit'],
                   capture_output=True, text=True).stdout.strip().endswith('lab.utoc'),
-   '⑤ 新门禁谓词选出 .utoc → 新 extract.sh 会跑 ue_pak.py')
+   '⑤ 新门禁谓词选出 .utoc → 新抽取会跑 ue_pak.py')
 ck(subprocess.run([sys.executable, os.path.join(H, 'graphics', 'nvn', 'tools', 'romfs_list.py'), 'has-ext', os.path.join(r2, 'romfs'), '.pak', '.utoc']).returncode == 0,
    '⑤ 新门禁（romfs_list.py has-ext .pak .utoc）认出 .utoc，与上一条 find 谓词同真假')
 # 改前的 ue_pak.py：优先取 git 里的真改前文件；取不到（或已经是新版）就用「去掉新增那一步」的形态，其余逐字相同
@@ -246,23 +246,23 @@ if old_src is not None:
     ck('写出着色器代码存档 0 个' in log5, f'⑤ 改前日志：{log5.strip().splitlines()[-1][:110] if log5.strip() else "（无输出）"}')
 ck(len(recs) == 3, '⑤ 新代码对同一个根抽全部 3 支')
 
-# ── ⑥ 出包链：真的 extract.sh ──────────────────────────────────────────────
+# ── ⑥ 出包链：真的 extract.py ──────────────────────────────────────────────
 R6 = os.path.join(T, 'repo6')
 for d in ('pack', 'graphics/tools/direct', 'graphics/tools/shbake', 'translator', 'graphics/nvn/tools', 'tools'):
     os.makedirs(os.path.join(R6, d), exist_ok=True)
-# extract.sh 判有无 Unreal 包、ue_pak / uepak 列文件都经它（仓库里唯一的 RomFS 遍历）
+# extract.py 判有无 Unreal 包、ue_pak / uepak 列文件都经它（仓库里唯一的 RomFS 遍历）
 shutil.copy(os.path.join(H, 'graphics', 'nvn', 'tools', 'romfs_list.py'), os.path.join(R6, 'graphics', 'nvn', 'tools', 'romfs_list.py'))
 os.makedirs(os.path.join(R6, 'tools'), exist_ok=True); shutil.copy(os.path.join(H, 'tools', 'pool_workers.py'), os.path.join(R6, 'tools', 'pool_workers.py'))   # 同上
 shutil.copy(UE_PAK, os.path.join(R6, 'pack', 'ue_pak.py'))
-shutil.copy(EXTRACT, os.path.join(R6, 'graphics', 'tools', 'direct', 'extract.sh'))
-shutil.copy(os.path.join(H, 'tools', 'nostall.py'), os.path.join(R6, 'tools', 'nostall.py'))   # extract.sh 各步经无进展看门狗起（10-30 去固定超时）
+shutil.copy(EXTRACT, os.path.join(R6, 'graphics', 'tools', 'direct', 'extract.py'))
+shutil.copy(os.path.join(H, 'tools', 'nostall.py'), os.path.join(R6, 'tools', 'nostall.py'))   # extract.py 各步经无进展看门狗起（10-30 去固定超时）
+shutil.copy(os.path.join(H, 'tools', 'progress.py'), os.path.join(R6, 'tools', 'progress.py'))   # 出包进度协议
 shutil.copy(os.path.join(H, 'graphics', 'tools', 'shbake', 'pak_crypto.py'), os.path.join(R6, 'graphics', 'tools', 'shbake', 'pak_crypto.py'))
 shutil.copy(os.path.join(H, 'graphics', 'tools', 'shbake', 'unreal_pak.py'), os.path.join(R6, 'graphics', 'tools', 'shbake', 'unreal_pak.py'))   # 唯一的 pak 读取实现（pack/ue_pak.py、uepak.py 都调它）
 shutil.copy(os.path.join(H, 'graphics', 'tools', 'shbake', 'zstd_lib.py'), os.path.join(R6, 'graphics', 'tools', 'shbake', 'zstd_lib.py'))   # unreal_pak / shader_split 的 zstd 解压入口
 shutil.copy(os.path.join(H, 'translator', 'uepak.py'), os.path.join(R6, 'translator', 'uepak.py'))
-old_ex = os.path.join(R6, 'graphics', 'tools', 'direct', 'extract_old.sh')
-open(old_ex, 'w').write(ex_text.replace(new_gate, old_gate))
-os.chmod(old_ex, 0o755)
+old_ex = os.path.join(R6, 'graphics', 'tools', 'direct', 'extract_old.py')
+open(old_ex, 'w', encoding='utf-8').write(ex_text.replace(new_gate, old_gate))
 open(os.path.join(R6, 'translator', 'shader_split.py'), 'w').write(
     "import os, sys\n"
     "d = os.environ.get('DM_UE_SHADERS', '')\n"
@@ -270,12 +270,11 @@ open(os.path.join(R6, 'translator', 'shader_split.py'), 'w').write(
     "open(os.environ['FAKE_CALLS'], 'a').write('split %s\\n' % ','.join(names))\n"
     "os.makedirs(sys.argv[3], exist_ok=True); open(os.path.join(sys.argv[3], 'vs.pkg'), 'w').write('p')\n"
     "for p in sys.argv[4:7]: open(p, 'w').write('# t\\n')\n")
-# extract.sh 10-29 起先问运行时 GLSLC 款要不要离线编（translator/glslc_offline.py）：本例是 Unreal 款，桩答「不需要」、不出文件（同 tests/direct_profile_test.py 的合成桩）
+# extract.py（10-29 起）先问运行时 GLSLC 款要不要离线编（translator/glslc_offline.py）：本例是 Unreal 款，桩答「不需要」、不出文件（同 tests/direct_profile_test.py 的合成桩）
 open(os.path.join(R6, 'translator', 'glslc_offline.py'), 'w').write("print('GLSLC 离线编：不需要（合成桩）')\n")
 open(os.path.join(R6, 'graphics', 'tools', 'shbake', 'nxsh_extract.py'), 'w').write(
     "import os, sys\n"
     "os.makedirs(os.path.join(sys.argv[1], 'src'), exist_ok=True); open(os.path.join(sys.argv[1], 'rows.tsv'), 'w').write('r\\n')\n")
-open(os.path.join(R6, 'tools', 'progress.sh'), 'w').write('prog_tick() { :; }\n')
 root6 = os.path.join(T, 'root6')
 os.makedirs(os.path.join(root6, 'exefs'))
 one_lib(os.path.join(root6, 'romfs', 'Paks', 'chain.utoc'), 'Chain', 'SF_GLSL_SWITCH', [S0, S1, S2])
@@ -285,15 +284,15 @@ def chain(script):
     e = os.path.join(T, 'calls')
     if os.path.exists(e):
         os.remove(e)
-    r = subprocess.run(['bash', script, root6, os.path.join(T, 'x6')], capture_output=True, text=True, env=env6)
+    r = subprocess.run([PY, script, root6, os.path.join(T, 'x6')], capture_output=True, text=True, env=env6)
     calls = open(e).read().splitlines() if os.path.exists(e) else []
     return r, [c for c in calls if c.startswith('split')], os.path.join(T, 'x6')
 r_old, sp_old, x6 = chain(old_ex)
 ck(r_old.returncode == 0 and not os.path.isdir(os.path.join(x6, 'ue_shaders')) and (not sp_old or sp_old[-1] == 'split '),
-   f'⑥ 旧 extract.sh 门禁（只认 .pak）→ 消费方一个存档都看不到：{sp_old[-1] if sp_old else "（没跑 split）"}（rc={r_old.returncode}）')
-r_new, sp_new, x6 = chain(os.path.join(R6, 'graphics', 'tools', 'direct', 'extract.sh'))
+   f'⑥ 旧抽取门禁（只认 .pak）→ 消费方一个存档都看不到：{sp_old[-1] if sp_old else "（没跑 split）"}（rc={r_old.returncode}）')
+r_new, sp_new, x6 = chain(os.path.join(R6, 'graphics', 'tools', 'direct', 'extract.py'))
 ck(r_new.returncode == 0 and sp_new and sp_new[-1] != 'split ',
-   f'⑥ 新 extract.sh 门禁（.pak 或 .utoc）→ 消费方拿到存档：{sp_new[-1] if sp_new else "（没跑 split）"}（rc={r_new.returncode}）')
+   f'⑥ 新抽取门禁（.pak 或 .utoc）→ 消费方拿到存档：{sp_new[-1] if sp_new else "（没跑 split）"}（rc={r_new.returncode}）')
 out6 = os.path.join(x6, 'ue_shaders')
 u6 = listing(out6)
 ck(u6 == ['ShaderArchive-IoStore-' + lib_hash('Chain', 'SF_GLSL_SWITCH').hex() + '.ushaderbytecode']

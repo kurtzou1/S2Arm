@@ -1650,6 +1650,7 @@
   "s2arm.export.installExistingPad": "¿Ya tienes el paquete? Instálalo en el iPad",
   "s2arm.fail.locations": "No se pudieron leer las ubicaciones de almacenamiento",
   "s2arm.fail.installMode": "No se pudo leer el método de instalación",
+  "s2arm.fail.layoutSet": "No se pudo cambiar cómo se instalan los juegos en el iPhone",
   "s2arm.fail.installModeSet": "No se pudo cambiar el método de instalación",
   "s2arm.fail.devCert": "No se pudo leer el estado del certificado de desarrollador",
   "s2arm.bundleIncomplete.title": "S2Arm no está completamente instalado",

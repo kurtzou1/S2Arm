@@ -3,6 +3,7 @@
 #import <IOKit/hid/IOHIDManager.h>
 #import <GameController/GameController.h>
 #include "joycon_imu.h"
+#include "hid_generic.h"
 #include <pthread.h>
 #include <stdatomic.h>
 #include <string.h>
@@ -202,6 +203,11 @@ static void attach_device(IOHIDDeviceRef device) {
     CFNumberRef pid_cf = IOHIDDeviceGetProperty(device, CFSTR(kIOHIDProductIDKey));
     int pid = 0;
     if (pid_cf) CFNumberGetValue(pid_cf, kCFNumberIntType, &pid);
+    int raw_pid = pid;
+    CFTypeRef pn = IOHIDDeviceGetProperty(device, CFSTR(kIOHIDProductKey));
+    char name[96] = "";
+    if (pn && CFGetTypeID(pn) == CFStringGetTypeID()) CFStringGetCString(pn, name, sizeof name, kCFStringEncodingUTF8);
+    pid = s2a_hidg_jc_body_pid(pid, name);   // 冒用 Joy-Con 产品号的第三方 Pro 按 Pro 认：六轴轴向、震动、拆不拆单只都照 Pro（D-52Z8）
     int slot = side_for_pid(pid);
     if (slot < 0) return;
     CFTypeRef descriptor = IOHIDDeviceGetProperty(device, CFSTR(kIOHIDReportDescriptorKey));
@@ -214,7 +220,7 @@ static void attach_device(IOHIDDeviceRef device) {
     // Public API promises an associated GCController. Prefer that backend for
     // Pro sensor control; retain raw samples independently of calibrated fields.
     // The query is expensive: do it once per attachment, outside the transport lock.
-    int gc_motion_control = pid == JC_PID_PRO && [GCController supportsHIDDevice:device];
+    int gc_motion_control = raw_pid == JC_PID_PRO && [GCController supportsHIDDevice:device];   // 系统传感器控制只给真 Pro 产品号（冒用的照旧自己发子命令开六轴）
 
     pthread_mutex_lock(&g_mu);
     jc_dev *d = NULL;

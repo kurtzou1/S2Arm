@@ -1,3 +1,4 @@
+#include <dlfcn.h>
 // Included only by the real runtime/src/thread.c, after its thread roster/locks.
 // This is not another thread registry. All lifetime pins belong to thr_t under G.
 static _Atomic unsigned android_vm_epoch;
@@ -205,7 +206,7 @@ typedef struct {
         unsigned ack;
         int in_svc, off_guest, wait_safe, admission_wait, wcore, exited, closed;
         int last_svc;
-        uint64_t pc, lr;
+        uint64_t pc, lr, blk_ra, sig_pc, sig_lr, sig_bt[4];
     } rows[ANDROID_VM_TIMEOUT_ROWS];
 } android_vm_timeout_snapshot;
 static _Thread_local android_vm_timeout_snapshot android_vm_timeout;
@@ -256,6 +257,10 @@ static void android_vm_capture_locked(int reason, int error, unsigned epoch, uin
         snapshot->rows[rows].last_svc = thread->last_svc;
         snapshot->rows[rows].pc = thread->svc_pc;
         snapshot->rows[rows].lr = thread->last_lr;
+        snapshot->rows[rows].blk_ra = atomic_load_explicit(&thread->blk_ra, memory_order_relaxed);
+        snapshot->rows[rows].sig_pc = atomic_load_explicit(&thread->sig_pc, memory_order_relaxed);
+        snapshot->rows[rows].sig_lr = atomic_load_explicit(&thread->sig_lr, memory_order_relaxed);
+        for (int k = 0; k < 4; ++k) snapshot->rows[rows].sig_bt[k] = atomic_load_explicit(&thread->sig_bt[k], memory_order_relaxed);
         ++rows;
     }
     snapshot->pending = pending;
@@ -317,8 +322,19 @@ static void android_vm_report_timeout(void) {
         return;
     }
     for (size_t i = 0; i < ANDROID_VM_TIMEOUT_ROWS && i < snapshot->pending; ++i) {
+        const uint64_t where[7] = { snapshot->rows[i].blk_ra, snapshot->rows[i].sig_pc, snapshot->rows[i].sig_lr,
+            snapshot->rows[i].sig_bt[0], snapshot->rows[i].sig_bt[1], snapshot->rows[i].sig_bt[2], snapshot->rows[i].sig_bt[3] };
+        static const char *const what[7] = { "宿主活调用点", "信号落点pc", "信号落点lr", "栈1", "栈2", "栈3", "栈4" };
+        for (int k = 0; k < 7; ++k) {   // 模块 + 偏移 + 最近符号（离线 llvm-symbolizer 用偏移）
+            if (!where[k]) continue;
+            Dl_info di; memset(&di, 0, sizeof di);
+            if (dladdr((void *)(uintptr_t)where[k], &di) && di.dli_fbase)
+                LOG("【红】writer未停稳[%zu] %s：%s+%#llx（%s）", i, what[k], di.dli_fname ? di.dli_fname : "?",
+                    (unsigned long long)(where[k] - (uint64_t)(uintptr_t)di.dli_fbase), di.dli_sname ? di.dli_sname : "?");
+            else LOG("【红】writer未停稳[%zu] %s：%#llx（无模块）", i, what[k], (unsigned long long)where[k]);
+        }
         char handle[24], id[24], tid[24], last_svc[24], pc[24], lr[24];
-        LOG("【红】writer未停稳[%zu]：handle=%s id=%s tid=%s state=%s in_svc=%d off_guest=%d wait_safe=%d admission_wait=%d wcore=%d exited=%d closed=%d ack=%u last_svc=%s pc=%s lr=%s callback=unknown callback_stack=unknown",
+        LOG("【红】writer未停稳[%zu]：handle=%s id=%s tid=%s state=%s in_svc=%d off_guest=%d wait_safe=%d admission_wait=%d wcore=%d exited=%d closed=%d ack=%u last_svc=%s pc=%s lr=%s blk_ra=%#llx callback=unknown callback_stack=unknown",
             i, android_vm_hex_or_unknown(snapshot->rows[i].handle, handle, sizeof handle),
             android_vm_dec_or_unknown(snapshot->rows[i].id, id, sizeof id),
             android_vm_dec_or_unknown(snapshot->rows[i].tid, tid, sizeof tid),
@@ -327,7 +343,8 @@ static void android_vm_report_timeout(void) {
             snapshot->rows[i].exited, snapshot->rows[i].closed, snapshot->rows[i].ack,
             android_vm_hex_or_unknown((unsigned)snapshot->rows[i].last_svc, last_svc, sizeof last_svc),
             android_vm_hex_or_unknown(snapshot->rows[i].pc, pc, sizeof pc),
-            android_vm_hex_or_unknown(snapshot->rows[i].lr, lr, sizeof lr));
+            android_vm_hex_or_unknown(snapshot->rows[i].lr, lr, sizeof lr),
+            (unsigned long long)snapshot->rows[i].blk_ra);
     }
     if (!snapshot->pending)
         LOG("【红】writer未停稳线程明细：无（名册内线程均已停稳，失败在名册锁/串行锁/升级路径） callback=unknown callback_stack=unknown");
@@ -661,6 +678,15 @@ void s2a_android_guest_host_wait_end(void) {
     if (android_host_wait_core) core_acquire(thread); // includes android_vm_barrier
     else android_vm_barrier(thread);
     android_host_wait_core = 0;
+}
+
+// 宿主长活（同步回放 NVN 命令：读盘装程序、建管线可连续数秒）在包边界自查停世界 epoch：
+// 调用方不持 G / VM / GPU 后端锁。有进行中的 epoch 就在这里停车确认，结束后返回、再碰客体内存。
+void s2a_android_guest_host_poll(void) {
+    if (!atomic_load_explicit(&android_vm_epoch, memory_order_acquire)) return;
+    thr_t *thread = pthread_getspecific(g_keythr);
+    if (!thread || atomic_load(&android_vm_owner) == thread) return;
+    android_vm_barrier(thread);
 }
 
 // 宿主侧长工作里的自愿安全点：客体线程在一次原生调用里连续跑很久（图形回放一次提交可达数秒），

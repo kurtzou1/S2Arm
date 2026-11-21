@@ -3,7 +3,7 @@
 # 玩家机上出包不许写 ~/.s2arm/run（10-26 交付线：Spare-host 斯普拉遁3 出包后数据目录外多出直连缓存 6.5 GB + 翻译缓存 5.3 GB，清数据目录 / 删游戏都清不到）：
 #   出包链脚本里落到 ~/.s2arm/run 的缺省必须经 S2A_RUN_ROOT（bash `${S2A_RUN_ROOT:-$HOME/.s2arm/run}`、Python `os.environ.get('S2A_RUN_ROOT') or …`），
 #   启动器作业环境（pack/jobs/core.py Context.env）把 S2A_RUN_ROOT 指到私有目录下。我方开发机不设，照旧 ~/.s2arm/run。
-# 11-07 启动器零配置（联合开发者反馈：direct_lib.sh 回退 ~/.s2arm/venv、改写器依赖报错列 ${S2A_RUN_ROOT:-$HOME/.s2arm/run}、字体依赖提示指向 ~/.s2arm/venv）：
+# 11-07 启动器零配置（联合开发者反馈：当时的 direct_lib.sh 回退 ~/.s2arm/venv、改写器依赖报错列 ${S2A_RUN_ROOT:-$HOME/.s2arm/run}、字体依赖提示指向 ~/.s2arm/venv）：
 #   玩家路径（出包 / 起局链）与「从源码构建」路径不许出现开发机专用路径：~/.s2arm 下的 venv / data / toolchain / S2Arm / wt / build / gate_data / sw、
 #   s2arm-wt、.s2arm/rw、/Users/<我方账号>。开发机靠 tools/machine.local / 环境变量显式声明（bash tools/machine.sh get <名>），代码里不写死。
 # 期望（按规则手写）：① 扫出包链 + 构建路径全部 .sh / .py（不含 tests/ 与测试 / 门禁壳）的非注释行，裸写 ~/.s2arm/run 的 0 处；远端机路径（$RH / {home}，gate-host 上的队列）不算

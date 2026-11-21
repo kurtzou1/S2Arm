@@ -230,10 +230,15 @@ static int easu_eligible(struct nvn_gpu_tex_s *st, VkFormat dstfmt) {
     return 1;
 }
 
-// 把 sv 按 crop→dst 放大画到 dstImg 的 dstrect 区域。返回 1 = 已录制；0 = 无法录制（调用方回落）。
-static int easu_compose(struct nvn_gpu_cmd_s *c, VkImage dstImg, VkExtent2D dstExtent, uint32_t dstLevel,
-                        VkFormat dstfmt, struct nvn_gpu_view_s *sv, const int32_t crop[4],
-                        const int32_t dstrect[4], int flip_y, uint32_t surface_gen, int encode_srgb) {
+// 与实际录制共用归一化矩形，WSI 可在任何临时 clear/barrier 前识别自然回退。
+struct easu_rects {
+    uint32_t lw, lh;
+    int32_t sx, sy, sw, sh, dx, dy, dw, dh;
+};
+enum easu_rect_fit { EASU_RECT_INVALID, EASU_RECT_SKIP, EASU_RECT_ATTEMPT };
+// 无效矩形仍按原失败路径诊断；同尺寸/双轴整数倍率自然跳过。
+static int easu_rects_prepare(struct nvn_gpu_view_s *sv, VkExtent2D dstExtent,
+                             const int32_t crop[4], const int32_t dstrect[4], struct easu_rects *out) {
     struct nvn_gpu_tex_s *st = sv->tex;
     uint32_t lw = st->w >> sv->base_level, lh = st->h >> sv->base_level;
     if (!lw) lw = 1;
@@ -243,10 +248,23 @@ static int easu_compose(struct nvn_gpu_cmd_s *c, VkImage dstImg, VkExtent2D dstE
     int32_t dx = dstrect[0], dy = dstrect[1], dw = dstrect[2], dh = dstrect[3];
     if (dw <= 0 || dh <= 0) { dx = 0; dy = 0; dw = (int32_t)dstExtent.width; dh = (int32_t)dstExtent.height; }
     if (sx < 0 || sy < 0 || (uint32_t)(sx + sw) > lw || (uint32_t)(sy + sh) > lh ||
-        dx < 0 || dy < 0 || (uint32_t)(dx + dw) > dstExtent.width || (uint32_t)(dy + dh) > dstExtent.height) return 0;
+        dx < 0 || dy < 0 || (uint32_t)(dx + dw) > dstExtent.width || (uint32_t)(dy + dh) > dstExtent.height) return EASU_RECT_INVALID;
+    *out = (struct easu_rects){lw, lh, sx, sy, sw, sh, dx, dy, dw, dh};
     // 整数倍或同尺寸没有上采样的余量，交给原来的 blit。
-    if (sw == dw && sh == dh) return 0;
-    if (dw % sw == 0 && dh % sh == 0) return 0;
+    if (sw == dw && sh == dh) return EASU_RECT_SKIP;
+    if (dw % sw == 0 && dh % sh == 0) return EASU_RECT_SKIP;
+
+    return EASU_RECT_ATTEMPT;
+}
+
+// 把 sv 按 crop→dst 放大画到 dstImg 的 dstrect 区域。返回 1 = 已录制；0 = 无法录制（调用方回落）。
+static int easu_compose(struct nvn_gpu_cmd_s *c, VkImage dstImg, VkExtent2D dstExtent, uint32_t dstLevel,
+                        VkFormat dstfmt, struct nvn_gpu_view_s *sv, const struct easu_rects *rect,
+                        int flip_y, uint32_t surface_gen, int encode_srgb) {
+    struct nvn_gpu_tex_s *st = sv->tex;
+    uint32_t lw = rect->lw, lh = rect->lh;
+    int32_t sx = rect->sx, sy = rect->sy, sw = rect->sw, sh = rect->sh;
+    int32_t dx = rect->dx, dy = rect->dy, dw = rect->dw, dh = rect->dh;
 
     pthread_mutex_lock(&g_easu_mu);
     int ready = easu_pipelines_locked(dstfmt);   // 通道与管线按目标格式建（源可以是另一种字节序）

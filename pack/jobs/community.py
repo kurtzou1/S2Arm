@@ -599,7 +599,11 @@ def save(c):
 
 
 def ldn_env(settings, existing=None):
-    """手动中继的整套环境；自动不写变量，显式服务器优先且不混入托管 / 监听。"""
+    """手动中继的整套环境；自动不写变量，显式服务器优先且不混入托管 / 监听。
+    「与 Switch 联机」（switch）：只开 S2A_LDN_MITM=1，走 Switch 自制系统的 ldn_mitm 局域网协议（services/S2A.Services/Host.cs LdnMitmRequested），
+    玩家选了才开——它不走原有的发现 / 中继，和 iPhone / 另一台 Mac 的原有联机不通，不能做缺省"""
+    if settings.get("ldnMode") == "switch":
+        return {"S2A_LDN_MITM": "1"}
     if settings.get("ldnMode") != "manual" or "S2A_LDN_SERVER" in (existing or {}):
         return {}
     if settings.get("ldnHost") is True:

@@ -127,7 +127,7 @@ def main(a):
         if f.endswith('.bin'):
             if f.endswith('_s2a.bin'): red.append(f'直连包目录里已有 {f}（与本工具新增的文件重名）')
             s, d = os.path.join(nxpkg, f), os.path.join(pd, f)
-            if subprocess.run(['cp', '-c', s, d], capture_output=True).returncode: shutil.copyfile(s, d)   # APFS 克隆，不支持就普通拷
+            if sys.platform != 'darwin' or subprocess.run(['cp', '-c', s, d], capture_output=True).returncode: shutil.copyfile(s, d)   # macOS APFS 克隆，不支持就普通拷；别的系统直接普通拷（Windows 原生进程的 PATH 上没有 cp）
     add, per = [], {}
     for nk in only:
         k, st, code, ctl = s2[nk]

@@ -234,7 +234,7 @@ if __name__ == '__main__':
         g = load_game()
         if not g.table('shader_facts.tsv').exists(): sys.exit(f'[RED] no answer table {g.table("shader_facts.tsv")} (it comes with the game profile; an empty table = every query answered with defaults)')
         open(a[1], 'wb').write(profile_rows(g)); print(f'{v}\t{g.id}\t{inputs(g)}')
-    elif len(a) == 2 and a[0] == '--check-stamp':   # 出库后核库印章（Build.cs WriteStamp 记的 xfp / lock）与本树的翻译器指纹 / 锁文件摘要相同：不同或没记报红退 1（direct_lib.sh 出库后调）
+    elif len(a) == 2 and a[0] == '--check-stamp':   # 出库后核库印章（Build.cs WriteStamp 记的 xfp / lock）与本树的翻译器指纹 / 锁文件摘要相同：不同或没记报红退 1（direct_lib.py 出库后调）
         bad = stamp_mismatch(a[1])
         if bad: sys.exit('[RED] ' + bad)
     elif a == ['--xfp']: print(xlate_fp())   # 按本树源码现算的翻译器指纹（发版 bundle_engine.py 写内置件 .xfp 用）

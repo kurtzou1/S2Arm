@@ -94,5 +94,14 @@ fa = s4 / '0100AAAA00000000/ext_fk.tsv'
 ck(fa.is_file() and fa.read_text().split('\n')[2:] == ['S\t9999888877776666_b\t2', ''] and not (s4 / '0100BBBB00000000/ext_fk.tsv').exists()
    and (s4 / '0100AAAA00000000/ext_up.tsv').read_text().split('\n')[2:] == ['S\t1111222233334444_b\t0', ''],
    f'⑲ 跨来源去重：分叉只留独有的行，与上游完全相同的款不出文件（{o.stdout.strip()[-140:]}）')
-print(f'ext_pso_collect：{19 - fails}/19 通过'); sys.exit(1 if fails else 0)
+# ---- 单条坏数据只跳这一条（11-20 巡检：上游两份清单各有一条 841 位 R 行，截断丢一位，fromhex 抛错整份收集退出）----
+odd = (bytes(ours) + struct.pack('<II', 0, 7)).hex()[:-1]   # 880 位（440 字节）结构截掉最后一位 = 879 位
+ck(epc.conv_nx(odd) == (None, 'nxnative 不是整字节十六进制（879 位）'), '⑳ 奇数位 R 行：不抛错，返回不收原因（位数 879 = 440×2−1，手算）')
+c5 = repo('nx5', {'dm/games/0100FFFF00000000/pso_manifest.tsv': f'S\t1111222233334444_b\t0\n{r_ok}\nR\t{odd}\nR\t{h880.hex()}\n'})
+src5 = T / 'src5.tsv'; src5.write_text('来源\tnx5\thttps://e.x/nx5\tMIT\tnxnative\n'); seeds5 = T / 'seeds5'
+o = subprocess.run([sys.executable, str(R / 'tools/ext_pso_collect.py'), str(T / 'm'), str(seeds5), '--sources', str(src5)], capture_output=True, text=True)
+got = (seeds5 / '0100FFFF00000000/ext_nx5.tsv').read_text().split('\n')[2:] if o.returncode == 0 else o.stderr[-300:]
+ck(o.returncode == 0 and got == ['S\t1111222233334444_b\t0', r_ok, 'R\t' + want, ''] and "'R 行（nxnative 不是整字节十六进制（879 位））': 1" in o.stdout,
+   f'㉑ 整份照收：坏的那 1 条计数跳过，好的 S / 等长 R / 880 转换 R 三条都收（{got}；{o.stdout.strip()[-200:]}）')
+print(f'ext_pso_collect：{21 - fails}/21 通过'); sys.exit(1 if fails else 0)
 PY

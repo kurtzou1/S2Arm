@@ -51,6 +51,7 @@ struct PhoneJobPanel: View {
             switch session.phase {
             case .running, .stopping: running
             case .finished(.failed) where pendingConfirm != nil: dropAsk
+            case .finished(.completed) where session.kind == .install && model.phoneOutcome?.app != nil: appDone(model.phoneOutcome!.app!)
             case .finished(.completed) where exporting: exported
             case .finished(.completed): success
             case .finished(.cancelled): headline(seal: AnyView(StatusSeal(symbol: "xmark", color: LauncherPalette.unbuilt)), title: t("phone.cancelled", "已取消"), subtitle: "")
@@ -240,12 +241,107 @@ struct PhoneJobPanel: View {
         .accessibilityIdentifier("phone.done")
     }
 
+    // ---- 独立 App（0.6.4）：A = 直接装到手机（装到哪台、手机上叫什么、哪天到期）；B = 只导出 ipa（文件夹、文件、签名、按签名方式的下一步）----
+    //   两页都有「在访达中显示」（选中 ipa）；关闭在外层（装机页「关闭」）。各条分叉各自走到这里，不靠说明句指路（修流程不加提示）
+    private func appDone(_ a: StandaloneApp) -> some View {
+        let o = model.phoneOutcome ?? PhoneOutcome()
+        let size = { (b: Int64?) in b.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "" }
+        var stats: [(String, String)] = []
+        var lines: [String] = []
+        if !a.exported {
+            stats.append((t("app.done.name"), a.name))
+            if let end = a.expiresAt {
+                let days = max(0, Int(ceil(end.timeIntervalSinceNow / 86400)))
+                let day = end.formatted(Date.FormatStyle(date: .abbreviated, time: .omitted).locale(Locale(identifier: language)))
+                stats.append((t("app.done.expires"), t(a.expiresKnown ? "app.done.expiresValue" : "app.done.expiresEstimate")
+                    .replacingOccurrences(of: "{0}", with: day).replacingOccurrences(of: "{1}", with: "\(days)")))
+            }
+            stats.append((t("app.done.data"), (o.packBytes ?? 0) == 0 ? t("app.done.pushedNone")
+                : t("app.done.pushed").replacingOccurrences(of: "{0}", with: "\(o.packFiles ?? 0)").replacingOccurrences(of: "{1}", with: size(o.packBytes))))
+            lines.append(t("app.done.open").replacingOccurrences(of: "{0}", with: a.name))
+            lines += notes   // 第一次装要信任开发者、免费 Apple ID 的限制（装机页给的）
+        } else {
+            lines.append(a.signedCert.isEmpty ? t("app.export.unsigned") : t("app.export.signedCert").replacingOccurrences(of: "{0}", with: a.signedCert))
+        }
+        let files: [(String, String)] = a.exported
+            ? [((a.ipaPath as NSString).lastPathComponent, size(a.ipaBytes)), ((a.s2armPath as NSString).lastPathComponent, size(a.s2armBytes))]
+                + (a.resourceLinked && !a.resourcePath.isEmpty ? [((a.resourcePath as NSString).lastPathComponent,
+                    [size(a.resourceBytes), t("app.export.noExtraSpace")].filter { !$0.isEmpty }.joined(separator: " · "))] : [])
+            : []
+        return VStack(alignment: .leading, spacing: 22) {
+            // 大标题用短句（装机窗只有 600 宽）：装到哪台 / 哪款游戏放副标题，各项事实逐行「名称 + 值」，长值换行不截断
+            headline(seal: AnyView(SuccessSeal()), title: t(a.exported ? "phone.headline.export" : "phone.headline.install"),
+                     subtitle: a.exported ? t("app.export.title").replacingOccurrences(of: "{0}", with: a.name) : t("phone.done.install").replacingOccurrences(of: "{0}", with: device))
+            if a.exported {
+                Button { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: a.ipaPath)]) } label: {
+                    Text(t("app.export.folder").replacingOccurrences(of: "{0}", with: (a.gameFolder as NSString).abbreviatingWithTildeInPath))
+                        .font(.manrope(14)).foregroundStyle(.secondary).underline().fixedSize(horizontal: false, vertical: true).multilineTextAlignment(.leading)
+                }
+                .buttonStyle(.plain).help(a.gameFolder).accessibilityIdentifier("app.export.folder")
+            }
+            ForEach(Array(stats.enumerated()), id: \.offset) { _, s in PhoneJobFact(label: s.0, text: s.1) }
+            if !files.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(t("app.export.files")).font(.manrope(14, .semibold)).foregroundStyle(.secondary)
+                    ForEach(Array(files.enumerated()), id: \.offset) { _, f in
+                        HStack(spacing: 10) {
+                            Image(systemName: "doc").foregroundStyle(.secondary)
+                            Text(f.0).font(.manrope(15, .medium)).lineLimit(1).truncationMode(.middle)
+                            if !f.1.isEmpty { Text(f.1).font(.manrope(13)).foregroundStyle(.secondary).monospacedDigit() }
+                        }
+                    }
+                    if a.exported, !a.resourceLinked, !a.resourcePath.isEmpty {
+                        Text(t("app.export.imgElsewhere").replacingOccurrences(of: "{0}", with: a.resourcePath)).font(.manrope(13)).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                    }
+                }
+                .accessibilityIdentifier("app.export.files")
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                    Text(line).font(.manrope(14)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            if a.exported, !a.nextSteps.isEmpty {   // 下一步：只给这次签名方式那一段（作业层 app_folder.next_steps，按界面语言写好）
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(t("phone.next")).font(.manrope(15, .bold))
+                    ForEach(Array(a.nextSteps.enumerated()), id: \.offset) { k, step in
+                        HStack(alignment: .top, spacing: 10) {
+                            Text("\(k + 1)").font(.manrope(13, .bold)).frame(width: 20, height: 20).background(LauncherPalette.ready.opacity(0.25), in: Circle())
+                            Text(step).font(.manrope(14)).fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    if !a.readmePath.isEmpty {
+                        Text(t("app.export.readme").replacingOccurrences(of: "{0}", with: (a.readmePath as NSString).lastPathComponent)).font(.manrope(13)).foregroundStyle(.secondary)
+                    }
+                }
+                .accessibilityIdentifier("app.export.next")
+            }
+            HStack(spacing: 12) {
+                Button { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: a.ipaPath)]) } label: { LauncherHeroActionLabel(title: t("app.done.reveal"), symbol: "folder") }
+                    .controllerButtonStyle(.plain).disabled(a.ipaPath.isEmpty).controllerID("app.reveal").accessibilityIdentifier("app.reveal")
+                if a.exported, !a.readmePath.isEmpty {
+                    Button { NSWorkspace.shared.open(URL(fileURLWithPath: a.readmePath)) } label: { LauncherHeroActionLabel(title: t("app.export.openReadme"), symbol: "doc.text") }
+                        .controllerButtonStyle(.plain).controllerID("app.readme").accessibilityIdentifier("app.readme")
+                }
+            }
+            SGradeResultView(results: o.sgrade, text: { t($0) })
+        }
+        .accessibilityIdentifier(a.exported ? "app.exported" : "app.installed")
+    }
+
     // ---- 失败：红色标记、大字、原因、下一步、复制错误摘要 ----
+    /// 独立 App 已装上、资源没推完（作业失败结果 appInstalled）
+    private var partial: Bool { session.kind == .install && model.phoneAppPartial != nil }
+
     private var failure: some View {
         VStack(alignment: .leading, spacing: 24) {
             headline(seal: AnyView(StatusSeal(symbol: "exclamationmark", color: LauncherPalette.danger)),
-                     title: exporting ? t("phone.failed.export") : t("phone.failed." + session.kind.rawValue, t("phone.failed.install")), subtitle: loc.backend(session.message))
-            if !session.suggestion.isEmpty {
+                     title: partial ? t("app.failed.partial") : exporting ? t("phone.failed.export") : t("phone.failed." + session.kind.rawValue, t("phone.failed.install")),
+                     subtitle: loc.backend(session.message))
+            if partial {   // 独立 App 装上了、资源没推完：重试只推剩下的（推送只推变了的文件）
+                PhoneJobFact(label: t("phone.next"), text: t("app.failed.partialNext"))
+            } else if !session.suggestion.isEmpty {
                 PhoneJobFact(label: t("phone.next"), text: loc.backend(session.suggestion))
             }
             if let choice = model.pushChoice, session.failureCode == PhoneOverview.choiceRequiredCode, session.kind == .install || session.kind == .pushSelected {
@@ -262,6 +358,10 @@ struct PhoneJobPanel: View {
                 }
                 if session.kind == .pushSelected {   // 「更新所选」有款没推成（#1756）：续推没推成的那几款
                     Button { model.retryUpdateSelected() } label: { LauncherHeroActionLabel(title: t("phone.retry"), symbol: "arrow.clockwise") }
+                        .controllerButtonStyle(.plain).disabled(model.phoneBusy).controllerID("phone.retry").controllerShortcut(.rightTrigger)
+                }
+                if session.kind == .install, let retry = model.lastInstallRetry {   // 单款推到 iPhone / 导出没走成：同样的参数再来一次（0.6.4）
+                    Button { retry() } label: { LauncherHeroActionLabel(title: t("phone.retry"), symbol: "arrow.clockwise") }
                         .controllerButtonStyle(.plain).disabled(model.phoneBusy).controllerID("phone.retry").controllerShortcut(.rightTrigger)
                 }
                 if session.kind == .installUpdate {

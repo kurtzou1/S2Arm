@@ -475,7 +475,8 @@ class LibraryTest(unittest.TestCase):
     def test_v2_const_sampler_contract(self):
         # #1594：类型 3 句柄的 constSampler（采样器池下标 0..4095）：与宿主解析同一份合同——v2、单个贴图；贴图字来源二选一：
         #   c2 分离贴图表（slot 90..345 偶数）或游戏 UBO（平铺 uboSlot 0..15 + uboOffset 4 的倍数，没有 slot）；
-        #   不能同时有 samp_slot / uboHandle / sampler 对象；计算结果不收（宿主计算侧没接）。下标 0 与 4095 都是真下标。
+        #   不能同时有 samp_slot / uboHandle / sampler 对象；计算结果只收 c2 形态（片 7，宿主计算侧同一份合同），游戏 UBO 形态计算侧不接。
+        #   下标 0 与 4095 都是真下标。
         #   build 的 program_kind 是程序类型（graphics / compute）；fields 里的 kind 是绑定自己的种类（texture / uniform ...）。
         def build(program_kind='graphics', drop=(), **fields):
             request = make_request(kind=program_kind)
@@ -528,9 +529,25 @@ class LibraryTest(unittest.TestCase):
         result['schema'] = 's2a-direct-program-v1'
         result['content']['contract'] = 's2a-direct-program-content-v1'
         with self.assertRaises(direct_library.LibraryError, msg='v1'): direct_library.validate_result(raw(), 'v1 const sampler')
-        # 计算结果不收
-        _, raw = build(program_kind='compute')
-        with self.assertRaises(direct_library.LibraryError, msg='compute'): direct_library.validate_result(raw(), 'compute const sampler')
+        # 片 7：计算结果收 c2 形态——典型值、两端、最后一个贴图字；反例与图形的 c2 形态同一张表（宿主计算解析同样拒）
+        for sampler in (257, 0, 4095):
+            _, raw = build(program_kind='compute', constSampler=sampler)
+            direct_library.validate_result(raw(), f'compute const sampler {sampler}')
+        _, raw = build(program_kind='compute', slot=344)
+        direct_library.validate_result(raw(), 'compute last separate texture word')
+        for name, change in bad.items():
+            result, raw = build(program_kind='compute', **{k: v for k, v in change.items() if v is not None})
+            if 'slot' in change and change['slot'] is None:
+                del result['content']['bindings'][0]['slot']
+            with self.assertRaises(direct_library.LibraryError, msg=f'compute: {name}'):
+                direct_library.validate_result(raw(), f'compute: {name}')
+        result, raw = build(program_kind='compute')
+        result['schema'] = 's2a-direct-program-v1'
+        result['content']['contract'] = 's2a-direct-program-content-v1'
+        with self.assertRaises(direct_library.LibraryError, msg='compute v1'): direct_library.validate_result(raw(), 'compute v1 const sampler')
+        result, raw = build(program_kind='compute')
+        del result['content']['bindings'][0]['constSampler']
+        direct_library.validate_result(raw(), 'compute plain separate texture word')
         # 没有 constSampler 的同槽条目照旧接受（只改了带这个字段的）
         result, raw = build()
         del result['content']['bindings'][0]['constSampler']

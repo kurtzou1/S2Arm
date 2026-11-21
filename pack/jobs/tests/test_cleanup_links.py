@@ -104,7 +104,7 @@ class CleanupLinkTests(unittest.TestCase):
 
     def test_without_kit_prune_keeps_current_root(self):
         root = self.output / "roots" / "k@pkg"; self.seed_root(root)
-        (self.output / "roots" / "k@现行").symlink_to("k@pkg")
+        (self.output / "roots" / "k@现行").write_text("k@pkg" + '\n')
         pack = layout.image_ios(self.c, self.gid) / "pack"; pack.mkdir(parents=True); (pack / "manifest.json").write_text("{}")   # 老玩家：有资源包没容器件
         library.prune_build(self.c, self.gid)
         self.assertTrue((self.output / "roots" / "k@pkg" / "main.npdm").is_file())

@@ -73,8 +73,12 @@ static struct {
     uint8_t closure_sha[32];
     uint64_t max_rank;
     uint64_t reset_seq;           // 只由会话 reset 推进；锁外读盘不能跨会话提交
+    // 随包种子（首局预热，nvn_vk_prog_warm.h「随包种子」）：-1 = 本局还没定（load 没走到能定的那一步）；
+    // 0 = 本局没用随包种子（有本机清单 / 包里没带 / 坏了）；1 = 用了，seed_dir 是那一对种子所在目录（管线种子同目录）
+    int seed_state;
+    char seed_dir[NVK_PROG_WARM_MAX_PATH];
     struct nvk_prog_warm_stats st;
-} g = { .mu = PTHREAD_MUTEX_INITIALIZER, .limit = NVK_PROG_WARM_DEFAULT_MAX };
+} g = { .mu = PTHREAD_MUTEX_INITIALIZER, .limit = NVK_PROG_WARM_DEFAULT_MAX, .seed_state = -1 };
 // 落盘串行：预热线程的 30 秒定期写与收尾写不并发（否则两个临时文件抢同一个 rename 目标）。
 static pthread_mutex_t g_save_mu = PTHREAD_MUTEX_INITIALIZER;
 
@@ -115,6 +119,7 @@ static void reset_locked(void) {
     g.dirty = 0; g.have_facts = 0; g.max_rank = 0;
     memset(g.profile_sha, 0, sizeof g.profile_sha); memset(g.closure_sha, 0, sizeof g.closure_sha);
     g.direct_abi = 0;
+    g.seed_state = -1; g.seed_dir[0] = 0;
     stats_reset();
 }
 static int ensure_cap_locked(uint32_t need) {
@@ -141,6 +146,17 @@ static int fetch_facts(uint8_t profile_sha[32], uint8_t closure_sha[32], int32_t
 static int warm_path(char *out, size_t n, const char *dir, const uint8_t closure_sha[32]) {
     char hx[17]; for (int i = 0; i < 8; i++) snprintf(hx + 2 * i, 3, "%02x", closure_sha[i]);
     return snprintf(out, n, "%s/" NVK_PROG_WARM_PREFIX "%s.bin", dir, hx) >= (int)n ? -1 : 0;
+}
+// 随包种子目录：<安装 revision 根>/shaders/direct/warm-vk/<闭包摘要前 8 字节 hex>-<profile 摘要前 8 字节 hex>
+//   （revision 根与出包预编库同一个来源：环境变量 S2A_SHADER_REVISION_ROOT，nvk_shader.c libpack_fetch）。目录名带闭包与 profile：
+//   一份种子只给记下它的那一类设备 + 那一版翻译器用（文件头还会再整份核一遍）；管线种子没有自己的有效性头，靠同目录配对。
+//   0 = 拼好；-1 = 没有 revision 根 / 路径过长（= 没有随包种子）
+static int seed_dir_of(char *out, size_t n, const uint8_t closure_sha[32], const uint8_t profile_sha[32]) {
+    const char *root = getenv("S2A_SHADER_REVISION_ROOT");
+    if (!root || !root[0]) return -1;
+    char c[17], p[17];
+    for (int i = 0; i < 8; i++) { snprintf(c + 2 * i, 3, "%02x", closure_sha[i]); snprintf(p + 2 * i, 3, "%02x", profile_sha[i]); }
+    return snprintf(out, n, "%s/shaders/direct/warm-vk/%s-%s", root, c, p) >= (int)n ? -1 : 0;
 }
 static int warm_name_is_ours(const char *name) {   // programs-v1-<16 位小写 hex>.bin
     const size_t pl = sizeof NVK_PROG_WARM_PREFIX - 1;
@@ -260,18 +276,38 @@ int nvk_prog_warm_load(void) {
     const int32_t pc_abi = direct_abi;
 
     char path[NVK_PROG_WARM_MAX_PATH];
-    if (warm_path(path, sizeof path, dir, closure_sha)) return 0;
+    if (warm_path(path, sizeof path, dir, closure_sha)) {   // 路径过长：本局没有清单，种子也不用（定下来，管线那边不用再等）
+        pthread_mutex_lock(&g.mu); if (g.reset_seq == reset_seq) g.seed_state = 0; pthread_mutex_unlock(&g.mu);
+        return 0;
+    }
     uint8_t *buf = NULL; size_t len = 0;
     int rf = read_file(path, &buf, &len), e = rf ? errno : 0;
     if (rf && e == ENOENT) {   // 本闭包还没有清单：读旧名那份（升级后第一局；闭包对得上才收，见下面的有效性检查）
         char legacy[NVK_PROG_WARM_MAX_PATH];
         if (snprintf(legacy, sizeof legacy, "%s/%s", dir, NVK_PROG_WARM_FILE) < (int)sizeof legacy) { rf = read_file(legacy, &buf, &len); e = rf ? errno : 0; }
     }
+    // 首局（本机这一版翻译器连旧名清单都没有）：读随包种子。有本机清单一律用本机的，种子不读。
+    // 种子是锦上添花：不在 / 读不动 / 坏 / 不属于本局，都只打一行、按「本局没有清单」走，不拦起局。
+    int from_seed = 0;
+    char seed_dir[NVK_PROG_WARM_MAX_PATH] = "", seed_file[NVK_PROG_WARM_MAX_PATH] = "";
+    if (rf && e == ENOENT && !seed_dir_of(seed_dir, sizeof seed_dir, closure_sha, profile_sha)) {
+        const char *nm = strrchr(path, '/');
+        if (snprintf(seed_file, sizeof seed_file, "%s/%s", seed_dir, nm ? nm + 1 : path) < (int)sizeof seed_file) {
+            uint8_t *sb = NULL; size_t sl = 0;
+            int sr = read_file(seed_file, &sb, &sl), se = sr ? errno : 0;
+            if (!sr) { buf = sb; len = sl; rf = 0; e = 0; from_seed = 1; }
+            else if (se != ENOENT) {
+                char m[200]; snprintf(m, sizeof m, "【黄】程序清单随包种子读不动（%d），本局不用种子", se);
+                nvn_plat_log(NVN_PLAT_LOG_WARN, "warm", m);
+            }
+        }
+    }
     if (rf) {
         pthread_mutex_lock(&g.mu);
         if (g.reset_seq == reset_seq && !g.have_facts) {
             g.have_facts = 1; memcpy(g.profile_sha, profile_sha, 32); g.direct_abi = pc_abi; memcpy(g.closure_sha, closure_sha, 32);
         }
+        if (g.reset_seq == reset_seq) g.seed_state = 0;
         pthread_mutex_unlock(&g.mu);
         if (e == ENOENT) {
             const char *nm = strrchr(path, '/');
@@ -316,9 +352,15 @@ int nvk_prog_warm_load(void) {
     if (!g.have_facts) {
         g.have_facts = 1; memcpy(g.profile_sha, profile_sha, 32); g.direct_abi = pc_abi; memcpy(g.closure_sha, closure_sha, 32);
     }
+    g.seed_state = 0;   // 走到这里本局就定了：下面只有「种子整份收下」才改成 1
     if (bad) {
         pthread_mutex_unlock(&g.mu);
         free(buf);
+        if (from_seed) {   // 随包种子坏 / 不属于本局：锦上添花，打黄一行、不用，不算本机清单坏
+            char m[288]; snprintf(m, sizeof m, "【黄】程序清单随包种子不用：%s（%u 条）；本局按没有清单走，首遇照常准备", bad, (unsigned)count);
+            nvn_plat_log(NVN_PLAT_LOG_WARN, "warm", m);
+            return 0;
+        }
         { char m[288]; snprintf(m, sizeof m, "%s程序清单整份拒绝：%s（%u 条）", mismatch ? "【黄】" : "【红】", bad, (unsigned)count);
           nvn_plat_log(mismatch ? NVN_PLAT_LOG_WARN : NVN_PLAT_LOG_RED, "warm", m); }
         return 0;
@@ -388,12 +430,14 @@ int nvk_prog_warm_load(void) {
     g.limit = limit; g.max_rank = max_rank;
     g.st.loaded = loaded;
     g.st.rejected = filtered;
+    if (from_seed) { g.seed_state = 1; snprintf(g.seed_dir, sizeof g.seed_dir, "%s", seed_dir); }
     // recorded / dirty / 构建与命中统计属于本局，不因读取成功或失败清零。
     pthread_mutex_unlock(&g.mu);
     free(buf);
     {
         char m[224];
-        snprintf(m, sizeof m, "程序清单：可用 %u 条（上限 %u，过滤 %u 条），热点优先", (unsigned)loaded, (unsigned)limit, (unsigned)filtered);
+        snprintf(m, sizeof m, "程序清单%s：可用 %u 条（上限 %u，过滤 %u 条），热点优先", from_seed ? "（随包种子，本机还没有清单）" : "",
+                 (unsigned)loaded, (unsigned)limit, (unsigned)filtered);
         nvn_plat_log(NVN_PLAT_LOG_INFO, "warm", m);
     }
     return (int)loaded;
@@ -415,6 +459,14 @@ int nvk_prog_warm_pending(void) {
     uint32_t pending = g.plan_i < g.plan_n ? g.plan_n - g.plan_i : 0;
     pthread_mutex_unlock(&g.mu);
     return (int)pending;
+}
+
+int nvk_prog_warm_seed_dir(char *out, size_t n) {
+    pthread_mutex_lock(&g.mu);
+    int s = g.seed_state;
+    if (out && n) { if (s == 1) snprintf(out, n, "%s", g.seed_dir); else out[0] = 0; }
+    pthread_mutex_unlock(&g.mu);
+    return s;
 }
 
 int nvk_prog_warm_contains(const uint8_t identity[32]) {

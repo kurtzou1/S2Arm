@@ -32,11 +32,11 @@ namespace S2A.Services.Tests
                 line = null;
                 Exports.AudioFactory = &Create;
                 using var registered = (IHardwareDeviceDriver)method.Invoke(null, null);
-                if (registered is not DummyHardwareDeviceDriver || _calls != 1 || line != null) return 1;
+                if (registered is not AudioFallbackDriver { Real: DummyHardwareDeviceDriver } || _calls != 1 || line != null) return 1;   // 登记的工厂包一层无声回退（AudioFallback.cs）
                 Environment.SetEnvironmentVariable("S2A_AUDIO_OFF", "1");
                 using var appleOff = S2A.Apple.Audio.AppleAudio.Create();
                 if (appleOff is not DummyHardwareDeviceDriver || line != null) return 1;
-                Console.WriteLine("音频装配：未登记报红并用 Dummy；登记后调用指定工厂；Apple 关闭开关保留");
+                Console.WriteLine("音频装配：未登记报红并用 Dummy；登记后调用指定工厂并包无声回退；Apple 关闭开关保留");
                 return 0;
             }
             finally { Exports.AudioFactory = factory; Red.Log = log; Red.Strict = strict; Environment.SetEnvironmentVariable("S2A_AUDIO_OFF", audioOff); }

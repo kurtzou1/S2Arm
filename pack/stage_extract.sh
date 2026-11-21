@@ -1,7 +1,7 @@
 #!/bin/bash
 # 出包·抽取阶段（10-25 维护者「抽着色器只做一次」）：pack/stage_extract.sh <款>
-# 把 Switch 着色器从游戏文件里抽出来，放新版本产物根 extract/（graphics/tools/direct/extract.sh：Unreal 存档 ue_pak + 直连抽取 shader_split + S2Arm nxsh_extract，含追加内容）。
-#   直连库阶段（direct_lib.sh ①②）只读它，不再每次出库从头抽两遍（动森 J=4 时 127 + 44 秒；直连库键含整棵 graphics/nvn，翻译链 / 出库工具一改就整段重出，游戏没变也照抽）。
+# 把 Switch 着色器从游戏文件里抽出来，放新版本产物根 extract/（graphics/tools/direct/extract.py：Unreal 存档 ue_pak + 直连抽取 shader_split + S2Arm nxsh_extract，含追加内容）。
+#   直连库阶段（direct_lib.py ①②）只读它，不再每次出库从头抽两遍（动森 J=4 时 127 + 44 秒；直连库键含整棵 graphics/nvn，翻译链 / 出库工具一改就整段重出，游戏没变也照抽）。
 # 缓存键 = 游戏输入（romfs / aoc 路径+长度+首尾64KiB抽样、exefs/main 全内容）+ 抽取代码（pack/stage_inputs/extract.tsv「入」的文件：两个抽取器与依赖闭包，新依赖由 tests/stage_keys_test.sh 扫出、要在表里归类）
 #   + Python 与解包库版本 + 所选配置档的内容键（shader_split 读配置档的 shader_groups / shader_note / modules 与 shader_facts_manual.tsv）；与现行 .stage_extract 相同就跳过。
 # 排在会改 romfs / main 的阶段（改写、宽屏界面布局）之后、直连库阶段之前（pack/refresh.sh 双轨段）。Vulkan / OpenGL 款没有 NVN 着色器可抽，直接过。
@@ -70,20 +70,20 @@ if decoder_need "$R" "$W/romfs" || [ "$GN" = yes ]; then
       S2A_CS=$HCS bash "$R/tools/host_build.sh" --tree "$RN" ROOT="$RN" ) > "$W/host_build.log" 2>&1 || { echo "【红】$G 编译 Mac 宿主失败（$(tail -2 "$W/host_build.log" | tr '\n' ' ' | cut -c1-200)）"; root_abort "$G" "$TAG"; exit 1; }
   fi
 fi
-if [ -n "$RTO" ]; then   # 试跑：不调抽取器，按抽取缺口走（extract.sh 退 3 同一条路：下面写 direct_gap.txt，直连库阶段出运行时现编空库）
+if [ -n "$RTO" ]; then   # 试跑：不调抽取器，按抽取缺口走（extract.py 退 3 同一条路：下面写 direct_gap.txt，直连库阶段出运行时现编空库）
   echo "直连库失败：试跑 S2A_DIRECT_RUNTIME_ONLY=1，不抽不预编，运行时首遇现编" > "$W/extract.log"; xrc=3
 else
-DM_GAMES_DIR="$(dirname "$PDIR")${DM_GAMES_DIR:+:$DM_GAMES_DIR}" DM_GAMES_FIRST=1 DM_GAME=$TID bash "$R/graphics/tools/direct/extract.sh" "$W" "$W/extract" > "$W/extract.log" 2>&1; xrc=$?
+DM_GAMES_DIR="$(dirname "$PDIR")${DM_GAMES_DIR:+:$DM_GAMES_DIR}" DM_GAMES_FIRST=1 DM_GAME=$TID "$VPY" "$R/graphics/tools/direct/extract.py" "$W" "$W/extract" > "$W/extract.log" 2>&1; xrc=$?
 fi
-# 退 3 = 只有直连用的那两份抽不出（extract.sh 头注释：Unreal 存档读不开、认不出着色器容器、运行时现编的 GLSL 没抓到输出、拆分出错……）：
+# 退 3 = 只有直连用的那两份抽不出（extract.py 头注释：Unreal 存档读不开、认不出着色器容器、运行时现编的 GLSL 没抓到输出、拆分出错……）：
 #   11-05 维护者定「直连库编不出也照出包、运行时由宿主现翻兜底」——不再作废本阶段，把原因写进 extract/direct_gap.txt 照常提交、退 0，
 #   直连库阶段（stage_direct.sh）见到它出一个合法的空库（离线 0 支），运行时每支着色器在 ProgramSetShaders 首遇现编（nvn_mtl.m s2a_dsh_compile）。
 #   原先这里退 3、refresh 报「直连单轨停在 抽取阶段」整款出不了包（c1104_r2 直连缺口 11 款）。其余非 0 照旧是出包内部出错
 if [ $xrc = 3 ]; then
   gap=$(grep -a '直连库失败：' "$W/extract.log" 2> /dev/null | tail -1 | sed 's/^.*\(直连库失败：\)/\1/' | cut -c1-260)
   mkdir -p "$S2A_ROOTS/.failed" && cp "$W/extract.log" "$S2A_ROOTS/.failed/${G}_extract.log"
-  mkdir -p "$W/extract" && printf '%s\n' "${gap:-直连库失败：extract.sh 退 3 没写原因}" > "$W/extract/direct_gap.txt" || { root_abort "$G" "$TAG"; exit 1; }
-  echo "【黄】$G 抽取缺口：${gap:-extract.sh 退 3}；本款离线直连库为空，运行时首遇现编（照常出包）"; xrc=0
+  mkdir -p "$W/extract" && printf '%s\n' "${gap:-直连库失败：extract.py 退 3 没写原因}" > "$W/extract/direct_gap.txt" || { root_abort "$G" "$TAG"; exit 1; }
+  echo "【黄】$G 抽取缺口：${gap:-extract.py 退 3}；本款离线直连库为空，运行时首遇现编（照常出包）"; xrc=0
 fi
 # 失败时连同各步日志（extract/ 下的 s2x.log 等）一起留进 .failed/<款>_extract.d/（10-30 巫师3 / Bloodstained：只留了总日志，s2x.log 随临时根删掉，看不到哪几条解不开）
 if [ $xrc != 0 ]; then mkdir -p "$S2A_ROOTS/.failed" && cp "$W/extract.log" "$S2A_ROOTS/.failed/${G}_extract.log"

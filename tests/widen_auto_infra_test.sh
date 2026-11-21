@@ -73,7 +73,7 @@ a ui_build 未判 界面局
 V "$T/a/pass" "${GOOD[@]}" "⑤露空 ≤0.5%=过"; printf '%s\n' "$MARK" > "$T/a/pass/host.log"
 a pass 过
 # ── B closed_loop.sh --rejudge-write 真走（不起局：离线重判只读局目录）──
-r=$T/roots/zz@v1; mkdir -p "$r/exefs"; ln -sfn zz@v1 "$T/roots/zz@现行"
+r=$T/roots/zz@v1; mkdir -p "$r/exefs"; printf '%s\n' zz@v1 > "$T/roots/zz@现行"
 { head -c 64 /dev/zero; printf 'BIDBIDBIDBIDBID1'; } > "$r/exefs/main"; B=$(xxd -s 0x40 -l 16 -p "$r/exefs/main")
 printf '模块\t偏移\t种类\t证据\nmain\t0x10\tf2w\tx\nmain\t0x20\tmovz\tx\nmain\t0x30\taspdiv\tx\n' > "$r/widen_sites.tsv"
 bd() { mkdir -p "$1"; cp "$r/widen_sites.tsv" "$1/"; echo "${3:-$B}" > "$1/bid"; echo "$2" > "$1/rc"; }

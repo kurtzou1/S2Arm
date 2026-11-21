@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """普查直连库缓存（每台机器常驻，按款分目录 <根>/<程序号>/）的总量上限：用前调一次，超了按最久没用的款淘汰（11-01 维护者批）。
 用法：dcache_gc.py <根> <上限 GB> <本次要用的款>   → 先给本次的款记「用过」（<款>/.used 改时刻），再淘汰
-  - 在用的不淘汰：直连出库 direct_lib.sh 在 <款>/ 下建 work.stage.<进程号> / mac.stage.<进程号>，进程号还活着 = 有出包在用（与 direct_lib.sh 清残留同一判据）；
+  - 在用的不淘汰：直连出库 direct_lib.py 在 <款>/ 下建 work.stage.<进程号> / mac.stage.<进程号>，进程号还活着 = 有出包在用（与 direct_lib.py 清残留同一判据）；
     旧 Python 仓 dmsh_store 对 <款>/store/.inuse 持共享锁，拿不到独占锁也算在用。本次要用的款也不淘汰
     （11-02 无主之地3：C# 出库不持 .inuse 锁、Build.cs 还把它当旧文件删掉，别的批次的淘汰在出库中途删了这款缓存，build.log 被删、出库卡死 600 秒被杀）
   - 删除走 S2A_SAFE_RM（我方机器给 safe_rm.sh），没给就直接删；每次淘汰写一行到 <根>/gc.log 并打到标准输出

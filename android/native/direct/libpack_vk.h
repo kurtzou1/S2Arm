@@ -78,6 +78,7 @@ uint64_t s2a_libpack_hits(void);
 uint64_t s2a_libpack_misses(void);
 uint64_t s2a_libpack_rejects(void);
 uint64_t s2a_libpack_caps_stripped(void);   // 删过用不上的 Float64 / Int64 能力声明的模块条数（libpack_caps_stripped）
+uint64_t s2a_libpack_interlock_dropped(void);   // 真有互锁临界区、去掉互锁照常画的模块条数（libpack_interlock_dropped；本后端从不启用 VK_EXT_fragment_shader_interlock）
 
 #ifdef __cplusplus
 }

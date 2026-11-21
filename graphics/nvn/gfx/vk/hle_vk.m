@@ -680,7 +680,7 @@ static id<MTLBuffer> mem_buf(VkDeviceMemory m) {
     if (!m->buf) {
         uint64_t vn = ((m->size ? m->size : 16) + 16383) & ~16383ull; void *va = vs_on() && s2a_vp_arena_map ? s2a_vp_arena_map(vn) : NULL;   // 即时存档：放虚拟池区（固定地址，映射指针恢复后原样有效）
         if (va && mmap(va, vn, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0) == va) {
-            m->buf = [g_dev newBufferWithBytesNoCopy:va length:vn options:MTLResourceStorageModeShared deallocator:nil];
+            m->buf = (__bridge_transfer id<MTLBuffer>)mtl_nocopy_buf(va, vn);   // 同直连层一个记账入口：浮层「GPU 已分配」不重复计入这段内存（#1827）
             if (m->buf) vs_note_mem(va, vn);
         } else if (va) LOG("[vk] 【红】 即时存档：虚拟池区 %p 放不开写，这块设备内存退回普通分配（快照不含它）", va);
         if (!m->buf) m->buf = [g_dev newBufferWithLength:m->size ? m->size : 16 options:MTLResourceStorageModeShared];

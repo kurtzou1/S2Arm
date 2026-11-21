@@ -646,6 +646,33 @@ class MirrorTests(Base):
                 self.assertEqual(updater.query_latest("windows", "0.1.1"), {"available": False})
                 self.assertNotIn("/latest", ScriptedHandler.hits)
 
+    def test_site_stale_but_github_release_manifest_newer_is_offered(self):
+        """#1768：官网清单停在旧版（0.1.1，不比本机新）、GitHub Release 那份签名清单是 0.3.2 → 给 0.3.2，安装包走 Release 下载地址、不走 R2，不问 API"""
+        self.site("0.1.1")
+        raw, sig = signed("0.3.2", {self.pkg: {"sha256": "f" * 64, "size": 11}})
+        ScriptedHandler.scripts.update({"/rel/update-manifest.json": [(200, {}, raw)], "/rel/update-manifest.json.sig": [(200, {}, sig)]})
+        with patch.dict(os.environ, {"S2A_UPDATE_RELEASE_MANIFEST": self.base + "/rel/update-manifest.json", "S2A_UPDATE_R2": self.base + "/r2/v{version}/{name}"}):
+            info = updater.query_latest("windows", "0.1.1")
+        self.assertEqual((info["available"], info["version"], info["sha256"], info["size"]), (True, "0.3.2", "f" * 64, 11))
+        self.assertEqual(info["asset"], self.base + "/dl/0.3.2/" + self.pkg)
+        self.assertNotIn("assetFallback", info)
+        self.assertNotIn("/latest", ScriptedHandler.hits)
+
+    def test_site_stale_and_github_release_manifest_not_newer_or_bad_means_no_update(self):
+        """官网不新；GitHub Release 那份也不新 / 别的私钥签的 / 取不到 → 都是没有新版、不报错、不问 API"""
+        for case in ("same", "bad_key", "missing"):
+            with self.subTest(case=case):
+                ScriptedHandler.hits = []
+                ScriptedHandler.scripts.pop("/rel/update-manifest.json", None); ScriptedHandler.scripts.pop("/rel/update-manifest.json.sig", None)
+                self.site("0.1.1")
+                if case != "missing":
+                    raw, sig = signed("0.1.1" if case == "same" else "9.9.9", {self.pkg: {"sha256": "f" * 64, "size": 11}}, TEST_SECRET if case == "same" else bytes(range(1, 33)))
+                    ScriptedHandler.scripts.update({"/rel/update-manifest.json": [(200, {}, raw)], "/rel/update-manifest.json.sig": [(200, {}, sig)]})
+                with patch.dict(os.environ, {"S2A_UPDATE_RELEASE_MANIFEST": self.base + "/rel/update-manifest.json"}):
+                    self.assertEqual(updater.query_latest("windows", "0.1.1"), {"available": False})
+                self.assertIn("/rel/update-manifest.json", ScriptedHandler.hits)
+                self.assertNotIn("/latest", ScriptedHandler.hits)
+
     def test_site_timeout_falls_back_to_github(self):
         ScriptedHandler.scripts["/update/latest.json"] = ["sleep"]; self.github()
         info = updater.query_latest("windows", "0.1.1")
@@ -716,6 +743,9 @@ class MirrorTests(Base):
         with patch.dict(os.environ, {"S2A_UPDATE_API": ""}):
             self.assertEqual(updater.mirror_url(), "https://s2arm.com/update/latest.json")
             self.assertTrue(updater.trusted(updater.MIRROR))
+            self.assertEqual(updater.release_manifest_url(), "https://github.com/jhaizhou-ops/S2Arm/releases/latest/download/update-manifest.json")
+            self.assertTrue(updater.trusted(updater.RELEASE_MANIFEST))
+        self.assertEqual(updater.release_manifest_url(), "")   # 假 Release 验收没给地址：不连真网
         with patch.dict(os.environ, {"S2A_UPDATE_MIRROR": ""}):
             self.assertEqual(updater.mirror_url(), "")   # 假 Release 验收没给官网地址：不连真网
 

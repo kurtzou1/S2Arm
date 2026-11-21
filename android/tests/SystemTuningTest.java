@@ -20,6 +20,9 @@ public final class SystemTuningTest {
         attach.setAccessible(true); start.setAccessible(true); stop.setAccessible(true); detach.setAccessible(true);
 
         Build.VERSION.SDK_INT = 31;
+        long[] now = {1_000_000_000L}; final long HOLD = 5_000_000_000L;
+        java.lang.reflect.Field clock = Class.forName("org.s2arm.android.FrameRateVote").getDeclaredField("clock");
+        clock.setAccessible(true); clock.set(null, (java.util.function.LongSupplier) () -> now[0]);
         android.content.Context context = new android.content.Context();
         Handler handler = new Handler();
         Object tuning = ctor.newInstance(context, handler);
@@ -35,7 +38,9 @@ public final class SystemTuningTest {
         check(surface.calls == 1, "same period does not revote");
         NativeBridge.periodNs = 33333334;
         handler.runPending();
-        check(surface.calls == 2 && Math.abs(surface.value - 30f) < 0.01f, "capped period votes 30");
+        check(surface.calls == 1, "lower period is held");
+        now[0] += HOLD; handler.runPending();
+        check(surface.calls == 2 && Math.abs(surface.value - 30f) < 0.01f, "capped period votes 30 after the hold");
         NativeBridge.periodNs = 0;
         handler.runPending();
         check(surface.calls == 3 && surface.value == 0f, "no presents clears vote");
@@ -88,6 +93,8 @@ public final class SystemTuningTest {
         NativeBridge.periodNs = 33333334;
         start.invoke(tuning);
         handler.runPending();
+        check(surface.calls == votes, "resume: lower period is held");
+        now[0] += HOLD; handler.runPending();
         check(surface.calls == votes + 1 && Math.abs(surface.value - 30f) < 0.01f, "resume samples again");
 
         detach.invoke(tuning);

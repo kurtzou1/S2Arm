@@ -10,7 +10,7 @@
 #   ⑤ 同一份 nx_unpack 换到另一个目录（内容相同、路径不同）→ 键不变、命中缓存、不再调 nx_unpack（键里不许有工具路径）
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); bad=0; trap 'rm -rf "$T"' EXIT
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
-mkdir -p "$T/src" "$T/roots/acnh@v1/exefs" "$T/roots/acnh@v2/exefs"; ln -s acnh@v1 "$T/roots/acnh@现行"
+mkdir -p "$T/src" "$T/roots/acnh@v1/exefs" "$T/roots/acnh@v2/exefs"; printf '%s\n' acnh@v1 > "$T/roots/acnh@现行"
 for v in v1 v2; do { head -c 64 /dev/zero; printf "BUILD_$v.........." | head -c 16; head -c 32 /dev/zero; } > "$T/roots/acnh@$v/exefs/main"; printf 'title_id\t01006f8002326000\n' > "$T/roots/acnh@$v/unpack.tsv"; done
 echo base > "$T/src/game.nsp"; echo upd > "$T/src/upd.nsp"
 # 原件认包缓存预先写好（src_ids 按「路径 大小 修改时间」命中，不调 nx_unpack 认包）：卡带是本款，更新读不出程序号
@@ -35,7 +35,7 @@ mkdir -p "$T/bin2"; cp "$T/nxu" "$T/bin2/nxu"; cp "$T/nxu.dll" "$T/bin2/nxu.dll"
 o5=$(S2A_NX_UNPACK=$T/bin2/nxu FAKE_MODE=diff bash "$H/pack/srcver.sh" acnh); r5=$?; c5=$(n)
 ck "⑤ 工具换目录、内容不变 → 键不变、命中缓存（调 nx_unpack ${c5} 次，退出 ${r5}，缓存 $(ls "$T/cache" | wc -l | tr -d ' ') 份）" \
    '[ $r5 = 0 ] && [ "$c5" = 0 ] && [ "$(ls "$T/cache" | wc -l | tr -d " ")" = 1 ]'
-ln -sfn acnh@v2 "$T/roots/acnh@现行"
+printf '%s\n' acnh@v2 > "$T/roots/acnh@现行"
 o2=$(FAKE_MODE=diff bash "$H/pack/srcver.sh" acnh); r2=$?
 ck "② 现行换版本、原件报版本不符 → 退出 ${r2}、【红】写明要按原件重解（${o2:0:60}…）" '[ $r2 = 1 ] && [[ "$o2" == 【红】* ]] && [[ "$o2" == *要按原件重解* ]] && [[ "$o2" == *"版本不符：包里 main 构建号 FF1D"* ]]'
 rm -rf "$T/cache"; : > "$T/calls"
@@ -57,11 +57,11 @@ BASH_BIN=$(command -v bash)
 ck "⑥a 隔离 PATH 确无 xxd" '! PATH="$T/no-xxd" "$BASH_BIN" -c "command -v xxd"'
 rm -rf "$T/cache"; : > "$T/calls"
 printf 'title_id\t01006f8002326000\n' > "$T/roots/acnh@v2/unpack.tsv"
-ln -sfn acnh@v1 "$T/roots/acnh@现行"
+printf '%s\n' acnh@v1 > "$T/roots/acnh@现行"
 o6=$(PATH="$T/no-xxd" FAKE_MODE=same "$BASH_BIN" "$H/pack/srcver.sh" acnh); r6=$?
 # 42 55 49 4c 44 5f 76 31 是手写的 ASCII BUILD_v1，非从被测实现取期望。
 ck "⑥b 无 xxd 同版 → 退出 ${r6}、正确构建号" '[ $r6 = 0 ] && [[ "$o6" == *4255494c445f7631* ]]'
-ln -sfn acnh@v2 "$T/roots/acnh@现行"
+printf '%s\n' acnh@v2 > "$T/roots/acnh@现行"
 o6b=$(PATH="$T/no-xxd" FAKE_MODE=diff "$BASH_BIN" "$H/pack/srcver.sh" acnh); r6b=$?
 ck "⑥c 无 xxd 换版 → 退出 ${r6b}、不误中旧版缓存" '[ $r6b = 1 ] && [[ "$o6b" == 【红】* ]] && [ "$(n)" = 2 ]'
 # ⑦ 短头不是有效构建号，不能用部分 / 空读数查缓存或调用解包器。

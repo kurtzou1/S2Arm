@@ -494,7 +494,20 @@ def cmd_container(a):
                 games[at] = e
         if not a.shell_only and len(set(kinds.values())) != 1:   # 宿主构造期同一判据报红不占窗口（vawin.c s2a_window_container_need）：组装期先拒，不出起不了局的包
             red("各款 NPDM 地址空间类型不一致，装不进同一个窗口：" + "、".join(f"{g} 类型 {t}" for g, t in sorted(kinds.items())))
-        app = app_bundle.assemble(shell, work / "S2Arm.app", bundle_id=a.bundle_id, display_name=a.display_name, icon=a.icon,
+        # 独立 App（--standalone，一 App 一游戏，11-20 维护者：主屏名和图标就是这款的）：显示名 = 游戏自带标题（各语言 .lproj，Info.plist 本体 ASCII 英文名），
+        #   图标 = 这款的 icon.jpg；没有图标沿用 S2Arm 的。通用壳 / 多款容器照旧「S2Arm」+ S2Arm 图标
+        name, icon, loc = a.display_name, a.icon, None
+        if a.standalone:
+            if len(new) != 1 or games and len(games) != 1:
+                red("--standalone 只装一款：给且只给一个 --game，不带 --base")
+            r = next(iter(new.values()))[0]
+            try:
+                name, loc = ascii_display_name(r, brand=False), localized_names(r, brand=False)
+            except NoTitle as e:
+                red(f"取不到游戏名：{e}")
+            if (r / "icon.jpg").is_file():
+                icon = r / "icon.jpg"
+        app = app_bundle.assemble(shell, work / "S2Arm.app", bundle_id=a.bundle_id, display_name=name, icon=icon, localized_names=loc,
                                   metadata={**({"CFBundleShortVersionString": a.version} if a.version else {}),
                                             **({"S2ADisplayVersion": a.display_version} if a.display_version else {}), "S2AShellId": sid})
         # 发版号：同电脑上的 S2Arm（三端同号）；S2ADisplayVersion：界面上的版本字（v0.3.0 / v0.2.6-dev+ba0ef07，设置页与游戏库顶部读，玩家截图定版）；S2AShellId：壳号（同 s2a_catalogue.json shell_id），电脑读手机上装的 App 信息就知道壳旧没旧（「更新 iPhone 上的 S2Arm」）
@@ -565,6 +578,7 @@ def main():
     c.add_argument("--game", action="append", default=[]); c.add_argument("--bundle-id", required=True); c.add_argument("--icon", required=True)
     c.add_argument("--shell-only", action="store_true", help="通用壳（0.6.0）：只装壳，s2a_catalogue.json 的 games 为空，不带任何一款的 Games/ 与 S2AImages-*（各款程序包另推进手机 program/）")
     c.add_argument("--banner", action="append", default=[], help="游戏号=横图路径（游戏库那份；组装不联网）")
+    c.add_argument("--standalone", action="store_true", help="独立 App（一 App 一游戏）：只带一款，主屏名取游戏自带标题、图标取这款的 icon.jpg")
     c.add_argument("--version", default="", help="写进 Info.plist CFBundleShortVersionString 的发版号（同电脑上的 S2Arm）")
     c.add_argument("--display-version", default="", help="写进 Info.plist S2ADisplayVersion 的界面版本字（pack/jobs/core.py display_version）")
     c.add_argument("--host-abi", type=int, required=True)    # 宿主读产物约定号（pack/jobs/host_update.py HOST_ABI），写进每款条目

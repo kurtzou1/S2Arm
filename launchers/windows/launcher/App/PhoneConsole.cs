@@ -35,6 +35,10 @@ public sealed partial class EnvironmentWindow
     /// 选好（phoneChooseApp 成功）自动重推刚才那一次（同一台、同样的游戏）。installChoice = 推单款那页；consolePushChoice = 总控台「更新所选」</summary>
     private sealed record PushChoice(string Device, IReadOnlyList<PhoneOverview.Candidate> Candidates, string Message, Func<Task> Retry);
     private PushChoice? installChoice, consolePushChoice;
+    /// <summary>「更新所选」没走成（作业层 #1756 整单按失败报；同 Mac pushSelected 失败页）：② 区写清每一款名字 + 原因（作业层原句）、给「重试」。
+    /// Games = 逐款失败（PhoneOverview.PushFailures）；整轮停时为空，只写作业原因。Retry 只推没成的那几款、同一台</summary>
+    private sealed record PushFailed(string Device, string Message, IReadOnlyList<PhoneOverview.PushFailure> Games, Func<Task> Retry);
+    private PushFailed? consolePushFailed;
     private bool ConsoleUpdating => consoleJob is not null;
     private bool ConsoleSelected => phoneOverview is not null && selectedGame == ConsoleId;
     private PhoneOverview.Phone? ConsolePhone => phoneOverview?.Pick(consoleDevice);
@@ -75,29 +79,47 @@ public sealed partial class EnvironmentWindow
 
     /// <summary>「更新所选」/「推所选到 iPhone」（RunConsoleAction）：一单作业 pushSelected 按游戏库顺序推总控台这台（同 Mac updateSelected）。作业层一款失败接着推下一款，
     /// 换哪款都做不下去（没装 App / 手机断开）才整轮停；「停下」= 取消这一单，推完的留着</summary>
-    private async Task PushSelectedAsync(IReadOnlyList<string> order, string device)
+    /// <param name="resume">失败页「重试」且不知道逐款结果（整轮停）：按作业续推（没推到的 + 失败的），order 只作款数</param>
+    private async Task PushSelectedAsync(IReadOnlyList<string> order, string device, bool resume = false)
     {
-        if (QueuePhone(null, () => PushSelectedAsync(order, device))) return;   // 手机上有作业在跑 → 排队
-        var front = BeginJob(JobKind.Phone); consoleJob = front; consoleDone = 0; consoleTotal = order.Count; consolePushing = null; consolePushChoice = null;
+        if (QueuePhone(null, () => PushSelectedAsync(order, device, resume))) return;   // 手机上有作业在跑 → 排队
+        var front = BeginJob(JobKind.Phone); consoleJob = front; consoleDone = 0; consoleTotal = order.Count; consolePushing = null; consolePushChoice = null; consolePushFailed = null;
         var state = "running";
         Render();
         try
         {
-            var extra = new Dictionary<string, object?> { ["gameIds"] = order.ToArray(), ["device"] = device };
+            var extra = resume ? new Dictionary<string, object?> { ["resume"] = true, ["device"] = device }
+                : new Dictionary<string, object?> { ["gameIds"] = order.ToArray(), ["device"] = device };
             var job = await PackJobClient.RunAsync(PackRequest("pushSelected", "", extra), e => Avalonia.Threading.Dispatcher.UIThread.Post(() =>
             {
-                if (e.TryGetProperty("done", out var d) && d.ValueKind == System.Text.Json.JsonValueKind.Number) consoleDone = d.GetInt32();
-                if (e.TryGetProperty("total", out var t) && t.ValueKind == System.Text.Json.JsonValueKind.Number && t.GetInt32() > 0) consoleTotal = t.GetInt32();
-                if (e.TryGetProperty("current", out var c) && c.ValueKind == System.Text.Json.JsonValueKind.String) consolePushing = c.GetString()?.ToUpperInvariant();
+                // 款数只认带 current（正在推的游戏号）的那条（pack/jobs/install.py push_selected 每款开头发 done = 已推款数、total = 款数）：
+                //   推单款时作业里还有逐文件 / 字节的计数，原先也读成款数，界面写「正在更新 5307 / 5367 款」（D-4MPR）。同 Mac consoleProgress 只按每款一步算
+                if (e.TryGetProperty("current", out var c) && c.ValueKind == System.Text.Json.JsonValueKind.String)
+                {
+                    consolePushing = c.GetString()?.ToUpperInvariant();
+                    if (e.TryGetProperty("done", out var d) && d.ValueKind == System.Text.Json.JsonValueKind.Number) consoleDone = d.GetInt32();
+                    if (e.TryGetProperty("total", out var t) && t.ValueKind == System.Text.Json.JsonValueKind.Number && t.GetInt32() > 0) consoleTotal = t.GetInt32();
+                }
                 Render();
             }), front.Token, front.Next());
             state = job.Report.State;
             if (!job.Report.Succeeded && PhoneOverview.ChoiceFacts(job.Report.Diagnostics) is { } choice)
-                consolePushChoice = new PushChoice(choice.Device, choice.Candidates, job.Report.Message, () => PushSelectedAsync(order, device));
+                consolePushChoice = new PushChoice(choice.Device, choice.Candidates, job.Report.Message, () => PushSelectedAsync(order, device, resume));
+            else if (state is "failed" or "interrupted" or "invalid")
+            {   // 有款没推成：逐款原因写在 ② 区，「重试」只推没成的那几款（不知道逐款 = 整轮停 → 续推）
+                var failed = PhoneOverview.PushFailures(job.Report.Diagnostics);
+                var again = PhoneOverview.RetryOrder(failed);
+                consolePushFailed = new PushFailed(device, job.Report.Message.Length > 0 ? job.Report.Message : state, failed,
+                    () => again is not null ? PushSelectedAsync(again, device) : PushSelectedAsync(order, device, resume: true));
+            }
         }
         catch (Exception error) when (error is LibraryProtocolException or IOException or UnauthorizedAccessException or ArgumentException or
             InvalidOperationException or OperationCanceledException or System.ComponentModel.Win32Exception)
-        { state = error is OperationCanceledException ? "cancelled" : "failed"; Console.Error.WriteLine("S2Arm pushSelected: " + error.Message); }
+        {
+            state = error is OperationCanceledException ? "cancelled" : "failed"; Console.Error.WriteLine("S2Arm pushSelected: " + error.Message);
+            if (state == "failed")   // 启动器这头没跑起来：同一页写原因，「重试」照原样再推一次
+                consolePushFailed = new PushFailed(device, error.Message.Length > 0 ? error.Message : error.GetType().Name, [], () => PushSelectedAsync(order, device, resume));
+        }
         finally { EndJob(front); consoleJob = null; consolePushing = null; DynamicFinished(state); Render(); }
         await RefreshPhoneOverviewAsync();
     }
@@ -360,6 +382,36 @@ public sealed partial class EnvironmentWindow
         if (actions.Contains(PhoneOverview.Act.HandOverIdentity)) app.Children.Add(ConsoleIdentity(phone, offline));
         page.Children.Add(ConsoleSection("console.section.phone", app));
 
+        // ①b 独立 App（一 App 一游戏，0.6.4；同 Mac consoleAppsSection）：每款一行——游戏名、包名、签名还剩几天 / 已到期、壳有新版时提示去「更新 iPhone 上的 S2Arm」
+        if (phone.Apps is { Count: > 0 } standalone)
+        {
+            var list = new StackPanel { Spacing = 6 };
+            foreach (var sa in standalone)
+            {
+                var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10 };
+                var names = new StackPanel { MinWidth = 180 };
+                names.Children.Add(new TextBlock { Text = GameName(sa.GameId), Foreground = Ink });
+                names.Children.Add(new TextBlock { Text = sa.BundleId, Foreground = Brush.Parse("#8A8A92"), FontSize = 11 });
+                row.Children.Add(names);
+                var expired = sa.ExpiresAtEstimate is { } e0 && e0 <= DateTimeOffset.Now;
+                var days = sa.ExpiresAtEstimate is { } e1 ? (int)Math.Ceiling((e1 - DateTimeOffset.Now).TotalDays) : (int?)null;
+                var text = expired ? T("console.status.expired") : !sa.ShellCurrent ? T("console.app.outdated")
+                    : days is null ? T("console.status.okNoDays") : days <= 2 ? Tf("console.status.expiring", days) : Tf("console.status.ok", days);
+                row.Children.Add(new TextBlock { Text = text, Foreground = Brush.Parse(sa.ShellCurrent && !expired ? "#30D158" : "#FF9F0A"), FontSize = 12.5,
+                    TextWrapping = TextWrapping.Wrap, MaxWidth = 520, VerticalAlignment = VerticalAlignment.Center });
+                // 续签：等同这款的单款「推到 iPhone」，装到这台（InstallAsync 带设备号）；游戏库里没有这款（删了）或这台不在线时置灰
+                var owned = catalog?.Games.FirstOrDefault(g => string.Equals(g.Id, sa.GameId, StringComparison.OrdinalIgnoreCase));
+                var renew = Action("console.app.renew", () => { if (owned is not null) RenewApp(owned, phone.Device); },
+                    owned is not null && !offline && !PhonePushing(owned.Id) && !PhoneQueued(owned.Id));
+                renew.VerticalAlignment = VerticalAlignment.Center;
+                Avalonia.Automation.AutomationProperties.SetAutomationId(renew, "console.app.renew." + sa.GameId);
+                row.Children.Add(renew);
+                Avalonia.Automation.AutomationProperties.SetAutomationId(row, "console.app." + sa.GameId);
+                list.Children.Add(row);
+            }
+            page.Children.Add(ConsoleSection("console.section.apps", list));
+        }
+
         // ② 游戏同步
         var sync = new StackPanel { Spacing = 6 };
         // 0.5 → 0.6 升级后的老款（资源在、程序包不在：suggested + missing）排最上面、醒目标出，直到更新完（同 Mac consoleOrdered）
@@ -376,7 +428,8 @@ public sealed partial class EnvironmentWindow
             row.Children.Add(box);
             var pushing = ConsoleUpdating && string.Equals(consolePushing, game.Id, StringComparison.OrdinalIgnoreCase);
             row.Children.Add(new TextBlock { Text = (pushing ? "⟳ " : "") + game.Name, MinWidth = 180, Foreground = Ink, VerticalAlignment = VerticalAlignment.Center });
-            var (text, color) = Legacy(g) ? (T("console.legacy.badge"), "#FFC857") : g.State switch
+            var asApp = g.State == PhoneOverview.GameState.NotPushed && (phone.Apps ?? []).Any(x => string.Equals(x.GameId, game.Id, StringComparison.OrdinalIgnoreCase));
+            var (text, color) = asApp ? (T("console.game.standalone"), "#C8C8CE") : Legacy(g) ? (T("console.legacy.badge"), "#FFC857") : g.State switch
             {
                 PhoneOverview.GameState.Latest => (T("console.game.latest"), "#30D158"),
                 PhoneOverview.GameState.Suggested => (T("update.hint.badge") + " · " + string.Join(" ", g.Reasons.Select(UpdateReasonKey).OfType<string>().Select(T)), "#FF9F0A"),
@@ -412,6 +465,23 @@ public sealed partial class EnvironmentWindow
             sync.Children.Add(new TextBlock { Text = B(pushChoice.Message), Foreground = Brush.Parse("#FF9F0A"), FontSize = 12.5, TextWrapping = TextWrapping.Wrap });
             sync.Children.Add(ConsoleChooser(phone with { NeedsChoice = true, Candidates = pushChoice.Candidates }, offline, bid => _ = ChooseAppAsync(pushChoice.Device, bid)));
         }
+        if (consolePushFailed is { } pushFailed && pushFailed.Device == phone.Device && !ConsoleUpdating)   // 「更新所选」有款没推成：每一款名字 + 原因、「重试」只推没成的
+        {
+            var fail = new StackPanel { Spacing = 4, Margin = new Thickness(0, 6, 0, 0) };
+            var orange = Brush.Parse("#FF9F0A");
+            fail.Children.Add(new TextBlock { Text = pushFailed.Games.Count > 0 ? Tf("console.pushFailed", pushFailed.Games.Count) : B(pushFailed.Message),
+                Foreground = orange, FontWeight = FontWeight.Bold, TextWrapping = TextWrapping.Wrap });
+            foreach (var g in pushFailed.Games)
+                fail.Children.Add(new TextBlock { Text = GameName(g.GameId) + " · " + (g.Message.Length > 0 ? B(g.Message) : g.Code), Foreground = orange, FontSize = 12.5, TextWrapping = TextWrapping.Wrap });
+            var retry = Action("phone.retry", () => _ = pushFailed.Retry(), enabled: !offline);
+            Avalonia.Automation.AutomationProperties.SetAutomationId(retry, "console.pushRetry");
+            var retryRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
+            retryRow.Children.Add(retry);
+            if (offline) retryRow.Children.Add(Offline());
+            fail.Children.Add(retryRow);
+            Avalonia.Automation.AutomationProperties.SetAutomationId(fail, "console.pushFailed");
+            sync.Children.Add(fail);
+        }
         page.Children.Add(ConsoleSection("console.section.sync", sync));
 
         // ⑥ 帮助：重看第一次的引导、故障报修（同顶栏那颗）
@@ -421,6 +491,14 @@ public sealed partial class EnvironmentWindow
         page.Children.Add(ConsoleSection("console.section.help", help));
         Avalonia.Automation.AutomationProperties.SetAutomationId(page, "console.panel");
         return Card(page, 24);
+    }
+
+    /// <summary>总控台独立 App 一行的「续签」：走单款装机（InstallAsync），装到总控台这台；去这款的装机页看进度与结局（同游戏库「导出自签包」的落点）</summary>
+    private void RenewApp(LibraryGame game, string device)
+    {
+        selectedGame = game.Id;
+        _ = InstallAsync(game, device: device);
+        Navigate("install");
     }
 
     // ---- 顶栏动态窗口（同 Mac S2ArmLauncherModel+PhoneConsole「顶栏动态窗口」）：有和 App 相关的作业时「游戏库」那颗显示进度，做完闪 ✓，失败 / 停下留「!」直到点开 ----

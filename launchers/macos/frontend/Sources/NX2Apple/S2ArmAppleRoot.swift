@@ -28,3 +28,8 @@ public struct S2ArmAppleRootView: View {
             }
     }
 }
+
+/// 单页离屏截图（单测）用：给一页注入界面文案（同根视图的 Localizer，语言跟测试进程固定的系统语言），不经整个根视图
+extension View {
+    func s2aLocalized() -> some View { environmentObject(Localizer()) }
+}

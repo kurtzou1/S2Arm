@@ -13,6 +13,11 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 
+def cur_of(roots, game):
+    """产物根里 game 的现行版本目录：<款>@现行 是指针文件，内容 = 版本目录名（pack/orch/current.py）"""
+    return (Path(roots) / (Path(roots) / f"{game}@现行").read_text(encoding="utf-8").strip()).resolve()
+
+
 class CloneTests(unittest.TestCase):
     def test_clone_links_skip_collision_and_source_isolation(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -52,7 +57,7 @@ class RootsTests(unittest.TestCase):
 mkdir -p "$S2A_ROOTS_SHARED/fixture@seed/shaders/direct"
 printf original > "$S2A_ROOTS_SHARED/fixture@seed/shaders/common"
 printf old > "$S2A_ROOTS_SHARED/fixture@seed/shaders/direct/keys"
-ln -s fixture@seed "$S2A_ROOTS_SHARED/fixture@现行"
+printf '%s\n' fixture@seed > "$S2A_ROOTS_SHARED/fixture@现行"
 cur=$(root_cur fixture)
 [ "$cur" = "$S2A_ROOTS/fixture@seed" ]
 a=$(root_begin fixture direct)
@@ -66,7 +71,7 @@ cur=$(root_cur fixture)
 [ "$(cat "$cur/shaders/common")" = new-common ]
 [ "$(cat "$S2A_ROOTS_SHARED/fixture@seed/shaders/direct/keys")" = old ]
 [ "$(cat "$S2A_ROOTS_SHARED/fixture@seed/shaders/common")" = original ]
-[ "$(readlink "$S2A_ROOTS_SHARED/fixture@现行")" = fixture@seed ]
+[ "$(cat "$S2A_ROOTS_SHARED/fixture@现行")" = fixture@seed ]
 ''', "crosshost-private-roots", str(ROOT)], env=env, check=True)
 
     def test_clone_commit_replay_and_source_isolation(self):
@@ -77,7 +82,7 @@ cur=$(root_cur fixture)
 mkdir -p "$S2A_ROOTS/fixture@seed/romfs/sub"
 printf original > "$S2A_ROOTS/fixture@seed/romfs/sub/data"
 chmod 555 "$S2A_ROOTS/fixture@seed/romfs/sub"
-ln -s fixture@seed "$S2A_ROOTS/fixture@现行"
+printf '%s\n' fixture@seed > "$S2A_ROOTS/fixture@现行"
 a=$(root_begin fixture first)
 b=$(root_begin fixture second)
 printf first > "$a/first"
@@ -244,9 +249,9 @@ class ProducerTests(unittest.TestCase):
                 self.assertEqual((out / name).read_bytes(), expected, name)
             self.assertTrue((out / ".stage_unpack").is_file())
             checkpoint(out, "extract")
-            (t / "roots/fixture@现行").symlink_to("fixture@seed")
+            (t / "roots/fixture@现行").write_text("fixture@seed" + '\n')
             run("bash", str(ROOT / "pack/stage_rewrite.sh"), "fixture")
-            current = (t / "roots/fixture@现行").resolve()
+            current = cur_of(t / "roots", "fixture")
             gates = [line.split("\t") for line in (current / "main.gates.tsv").read_text().splitlines()]
             self.assertEqual([row[1:] for row in gates], [["svc", "1", "0x108"]])
             if widen:
@@ -259,7 +264,7 @@ class ProducerTests(unittest.TestCase):
             self.assertTrue((current / ".stage_rewrite").is_file())
             checkpoint(current, "rewrite")
             run("bash", str(ROOT / "pack/stages/romfsidx.sh"), "fixture")
-            current = (t / "roots/fixture@现行").resolve()
+            current = cur_of(t / "roots", "fixture")
             # This is a nonempty data-interval table, not the directory table.
             # Zero-length files remain in RomFS metadata and in the extracted tree.
             self.assertEqual(index_entries((current / "romfs.s2aidx").read_bytes()),
@@ -270,7 +275,7 @@ class ProducerTests(unittest.TestCase):
                 self.assertEqual((current / name).read_bytes(), expected, name)
             before = current
             run("bash", str(ROOT / "pack/stages/romfsidx.sh"), "fixture")
-            self.assertEqual((t / "roots/fixture@现行").resolve(), before)
+            self.assertEqual(cur_of(t / "roots", "fixture"), before)
             print("REAL PRODUCERS: synthetic RomFS extraction adapter + rewrite + source-built index; NOT encrypted NCA or Mac comparison", flush=True)
 
 

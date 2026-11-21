@@ -186,6 +186,11 @@ def build(private, task, extra=None):
         lines.append(f"错误码：{item.get('code') or '-'}（{item.get('component') or '-'}，阶段 {item.get('stage') or '-'}" +  # 非玩家句
                      (f"，退出码 {item['exitCode']}" if item.get("exitCode") is not None else "") + "）")  # 非玩家句
         lines.append("  说明：" + str(item.get("summary") or "-"))  # 非玩家句
+        if item.get("code") == "package_failed" and item.get("detail"):   # 没归类的失败：带上失败原文（errors.cause_line），摘要里不能只剩「出包未完成。」（#1725 / #1730 / #1744）
+            detail = [l.strip() for l in str(item["detail"]).splitlines() if l.strip()]
+            raw = next((l[len("失败原文："):] for l in detail if l.startswith("失败原文：")), detail[0] if detail else "")  # 非玩家句
+            if raw:
+                lines.append("  原文：" + raw[:2400])  # 非玩家句
         if item.get("suggestion"):
             lines.append("  建议：" + str(item["suggestion"]))  # 非玩家句
     if not diagnostics:

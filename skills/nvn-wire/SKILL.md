@@ -27,7 +27,7 @@ description: S2Arm 的 NVN 语义与教训参照：实现或修零配置直连 N
 
 ### 1. 起手（约 10 分钟）
 1. 工作树：`git -C <S2Arm 仓库> fetch origin && git -C <S2Arm 仓库> worktree add <工作树目录>/<名> origin/wire/silksong-c -b wire/<款>`。分支落后 main 时**按列车的方向**合：`git checkout --detach origin/main && git merge <本支>`；冲突如果出在 Ryujinx 补丁 series / 改动清单上，跑 `python3 tools/train_renumber.py "$PWD"` 续号（它会自己提交），再 `git branch -f <本支> HEAD && git checkout <本支>`。⚠ 别在本支上 `git merge origin/main` 再续号：工具默认「当前 = main」，会把 main 上已有补丁的号改掉（10-24 实测）。其他冲突照常手解。
-2. 私有产物根（公共现行根会被别人换掉）：`python3 tools/clonedir.py "$(cd -P <产物根目录>/<款>@现行 && pwd)" <私有产物根目录>/<名>/<款>`
+2. 私有产物根（公共现行根会被别人换掉）：`python3 tools/clonedir.py "<产物根目录>/$(cat <产物根目录>/<款>@现行)" <私有产物根目录>/<名>/<款>`（`<款>@现行` 是指针文件，内容 = 现行版本目录名）
 3. 侦察：`python3 graphics/wire/tools/nvn_recon.py <私有根>`，得到程序号、这款按名字取的 NVN 函数全集、还没实现的（按对象分组）、包里有没有着色器缓存。没有缓存就先让通用路径给这款出包。
 4. 编译：`S2A_CS=1 make -s host`。
 5. 真值局与第一个接线局同根、同参数、关输入，排队一起跑：

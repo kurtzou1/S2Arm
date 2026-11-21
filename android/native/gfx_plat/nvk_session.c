@@ -42,6 +42,7 @@ uint64_t nvk_session_stop_deadline(void) {
 }
 // Called while preparing an unpublished context, never concurrently with Stop.
 int nvk_session_prepare(void) {
+    if (!nvn_vk_pipe_demand_quiescent()) return -1;
     if (nvk_shader_open()) return -1;
     atomic_store_explicit(&g_stop_started, 0, memory_order_release);
     return 0;
@@ -72,6 +73,11 @@ const char *nvk_session_cache_dir(void) { return g_cache_dir[0] ? g_cache_dir : 
 int nvk_session_open(struct s2a_vk_device *dev, const char *cache_dir, char *why, size_t why_size) {
     pthread_mutex_lock(&g_mu);
     if (g_ready) { pthread_mutex_unlock(&g_mu); return 0; }
+    if (!nvn_vk_pipe_demand_quiescent()) {
+        if (why && why_size) snprintf(why, why_size, "首用管线后台线程仍未退出");
+        pthread_mutex_unlock(&g_mu);
+        return -1;
+    }
     snprintf(g_cache_dir, sizeof g_cache_dir, "%s", cache_dir ? cache_dir : "");
     nvn_gpu_open_desc d = {0}; d.host_device = dev; d.cache_dir = nvk_session_cache_dir(); d.app_label = "s2arm";
     nvn_gpu_err err = {0};
@@ -133,10 +139,16 @@ void nvn_vk_frame_log_dump(void) __attribute__((weak));
 int nvk_session_close(void) {
     pthread_mutex_lock(&g_mu);
     if (!g_ready) { pthread_mutex_unlock(&g_mu); return 0; }
+    nvn_vk_pipe_demand_stop();
+    if (!nvn_vk_pipe_demand_quiescent()) {
+        __android_log_print(ANDROID_LOG_ERROR, TAG,
+                            "【红】nvk session: 首用管线后台线程仍在运行，保留会话 / 后端资源；可重试 close");
+        pthread_mutex_unlock(&g_mu);
+        return 1;
+    }
     dump_unimpl();
     rp_present_set_surface(NULL, 0); g_surface = NULL;   // 还接着的面由 nvn_gpu_close 在在途段清空后收掉
     { uint64_t sh = 0, dp = 0; rp_present_stats(&sh, &dp); __android_log_print(ANDROID_LOG_INFO, TAG, "nvk session: presents shown=%llu dropped=%llu", (unsigned long long)sh, (unsigned long long)dp); }
-    nvn_vk_pipe_demand_stop();   // 幂等：确保后台建管线线程在设备关闭前已 join
     nvn_gpu_err err = {0};
     nvn_gpu_rc rc = nvn_gpu_close(2000000000ull, &err);
     if (nvn_vk_frame_log_dump) nvn_vk_frame_log_dump();

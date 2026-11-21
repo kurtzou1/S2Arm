@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# 游戏用哪种图形接口画主画面（出包分流的唯一判法：graphics/tools/direct/direct_lib.sh 调；接口说明 docs/研究/GL前端接口.md 第 1 节）。
+# 游戏用哪种图形接口画主画面（出包分流的唯一判法：graphics/tools/direct/direct_lib.py 调；接口说明 docs/研究/GL前端接口.md 第 1 节）。
 # 看 exefs/main（静态，零配置；只有「按名取 Vulkan」的候选才另读 ExeFS 其它模块的导出表）：
 #   Vulkan：不导入 nvnBootstrapLoader，且下面两种形态之一（判法在 vulkan_why，profile_guess.py shader_sources 也调它，单一来源）：
 #     静态：main 导入 vk*（哈迪斯：vk* 100 个、NVN 0）；
@@ -47,7 +47,11 @@ def features(exefs, romfs=None):
     f = {'egl_window': 'eglCreateWindowSurface' in imp, 'egl_ctx': 'eglCreateContext' in imp and 'eglMakeCurrent' in imp, 'gl_source': 'glShaderSource' in imp or b'glShaderSource\0' in img,
          'egl_proc': 'eglGetProcAddress' in imp, 'gl_driver': None,
          'glsl_main': len(re.findall(rb'#version[ \t]+\d+', img)), 'glsl_romfs': 0,
-         'nvn': 'nvnBootstrapLoader' in imp, 'vk': vk_imports(imp), 'vk_lookup': None}
+         'nvn': 'nvnBootstrapLoader' in imp, 'vk': vk_imports(imp), 'vk_lookup': None,
+         # 判不出时写进依据（11-20 D-Z6WZ：一款 Switch 2 第一方游戏判成 unknown，没原件，日志里得有能定因的读数）：main 导入总数、
+         #   是否导入按名查找（nn::ro::LookupSymbol）、映像里有没有 nvnBootstrapLoader 名字串、导入里带 nvn 的名字、ExeFS 模块
+         'evidence': dict(imports=len(imp), ro_lookup=RO_LOOKUP in imp, nvn_name=b'nvnBootstrapLoader\0' in img,
+                          nvn_like=sorted(n for n in imp if 'nvn' in n.lower())[:6], mods=sorted(os.listdir(exefs)))}
     if not f['vk'] and not f['nvn']: f['vk_lookup'] = vk_lookup(imp, VK_NAME in img, lambda: exefs_defs(exefs))   # main 静态判不出才看按名取
     if f['egl_window'] and not f['nvn'] and (f['gl_source'] or f['egl_proc']):   # GL 驱动在别的模块的候选才读其它模块（subsdk 解压几十 MB）
         f['gl_driver'] = gl_driver(exefs_syms(exefs))
@@ -172,7 +176,10 @@ def classify(f):
         w = f['nvn_module']
         return 'nvn', (f'main 不导入 nvnBootstrapLoader，NVN 渲染器是 {w}（导入 nvnBootstrapLoader；' +
                        ('装载器起局重定位它）' if w.startswith('exefs/') else 'main 经 nn::ro::LoadModule 装它，NRO 的导入经 rtld LookupGlobalAuto 解析）'))
-    return 'unknown', '没有 NVN / Vulkan / OpenGL 任一接口的证据'
+    e = f.get('evidence')
+    tail = ('；依据：main 导入 %d 个、按名查找（nn::ro::LookupSymbol）%s、映像里 nvnBootstrapLoader 名字串%s、带 nvn 的导入 %s、ExeFS 模块 %s' %
+            (e['imports'], '有' if e['ro_lookup'] else '无', '有' if e['nvn_name'] else '无', '、'.join(e['nvn_like']) or '无', ' '.join(e['mods']))) if e else ''
+    return 'unknown', '没有 NVN / Vulkan / OpenGL 任一接口的证据' + tail
 
 def gl_also(f):
     """f：features() 的结果 → (0 / 1, 依据)：判成 nvn 的款是否另带 GL（模块头注释「NVN 款另带 GL」三条）"""

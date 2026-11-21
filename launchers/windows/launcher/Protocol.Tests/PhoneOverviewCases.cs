@@ -17,6 +17,11 @@ internal static class PhoneOverviewCases
         check(p.Probed && p.KnownOffline && !o.Phones[1].Probed, "console: online key present and null = probed and offline; absent = not probed");
         check(string.Join(",", p.Games.Select(g => g.GameId)) == "0100A,0100B" && p.Games[1].DataOnComputer == false, "console: ids upper-cased, unknown states dropped");
 
+        // 独立 App（0.6.4，作业 apps）：游戏号转大写、秒转时刻；缺游戏号的丢掉；旧作业层不带 = 空。期望手写
+        var sa = PhoneOverview.Parse(J("""{"phones":[{"device":"D1","apps":[{"gameId":"010026300ba4a000","bundleId":"io.s2arm.games.t.010026300ba4a000","shellCurrent":false,"signedAt":1000,"expiresAtEstimate":865000},{"bundleId":"x"}]},{"device":"D2"}]}"""))!;
+        check(sa.Phones[0].Apps is { Count: 1 } la && la[0] == new PhoneOverview.App("010026300BA4A000", "io.s2arm.games.t.010026300ba4a000", false,
+            DateTimeOffset.FromUnixTimeSeconds(1000), DateTimeOffset.FromUnixTimeSeconds(865000)) && (sa.Phones[1].Apps?.Count ?? 0) == 0, "console: standalone apps parsed");
+
         var now = DateTimeOffset.FromUnixTimeSeconds(2_000_000_000);
         PhoneOverview.Phone Ph(bool installed = true, bool current = true, double? expires = 6 * 86_400 - 60, bool probed = false, string? online = null,
             PhoneOverview.GameState[]? games = null, string device = "D1", DateTimeOffset? seen = null) =>
@@ -97,5 +102,14 @@ internal static class PhoneOverviewCases
             && PhoneOverview.ChoiceFacts(J("""[{"code":"phone_app_choice_required","severity":"error"}]""")) is null
             && PhoneOverview.ChoiceFacts(J("""[{"code":"phone_app_choice_required","facts":{"device":"DUO-1","candidates":[]}}]""")) is null
             && PhoneOverview.ChoiceFacts(J("{}")) is null, "choice facts: other code / no facts / no candidates / not an array → null");
+        // 「更新所选」有款没推成：诊断 facts.games 逐款结果（install.push_selected）→ 失败款与原因（作业层原句），重试只推失败款（期望手写）
+        var pushFailed = J("""[{"code":"resource_transfer_failed","severity":"error","summary":"资源包写进 iPhone 时中断","facts":{"games":[{"gameId":"0100aaaa","ok":false,"code":"resource_transfer_failed","message":"资源包写进 iPhone 时中断"},{"gameId":"0100BBBB","ok":true},{"gameId":"0100CCCC","ok":false,"code":"pack_missing","message":"这款资源包缺件"}]}}]""");
+        var pf = PhoneOverview.PushFailures(pushFailed);
+        check(pf.SequenceEqual([new PhoneOverview.PushFailure("0100AAAA", "resource_transfer_failed", "资源包写进 iPhone 时中断"), new PhoneOverview.PushFailure("0100CCCC", "pack_missing", "这款资源包缺件")]),
+            "push failures: failed games with code and reason, in push order, succeeded one left out");
+        check(PhoneOverview.RetryOrder(pf) is { } ro && ro.SequenceEqual(["0100AAAA", "0100CCCC"]), "push retry: only the failed games");
+        var stopped = PhoneOverview.PushFailures(J("""[{"code":"device_not_connected","severity":"error","summary":"手机没连上"}]"""));
+        check(stopped.Count == 0 && PhoneOverview.RetryOrder(stopped) is null && PhoneOverview.PushFailures(J("{}")).Count == 0,
+            "push failures: whole-round stop has no per-game results → retry resumes");
     }
 }

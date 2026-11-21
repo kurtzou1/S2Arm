@@ -9,7 +9,7 @@
 #   Mac 局走 维护方 entry_check.sh（${S2A_PRIVATE_TOOLS}）（与能力关 / 开对照局 tools/ab_pair.sh 同一入口：同存档 / 进局路线挑选、独占局槽、宿主局外先编），
 #   末列「进局」= 自动玩家到 MARK（游戏场景里可操作）。只有直连（11-07 拆通用模式：精简档 --lite、QT_DUAL=0 通用局两条一并删）：
 #   根里没出成本链直连库就记直连失败。
-# 输出目录缺省 ./build/quicktest；每款工作目录 <输出目录>/work/<名>，跑完删掉（QT_KEEP=1 留下，之后可拿产物根 roots/*@现行 直接起局复现、不用再出包）；
+# 输出目录缺省 ./build/quicktest；每款工作目录 <输出目录>/work/<名>，跑完删掉（QT_KEEP=1 留下，之后可拿产物根 roots/ 里指针文件 <款>@现行 记的版本目录直接起局复现、不用再出包）；
 #   日志精简留在 <输出目录>/logs/<名>/（unpack / oneclick / refresh 的红黄行、host.log（超 2 MB 留头尾 + 中间判据关键行，tools/quicktest/keep_log.sh）、ap_mark / ap_mid / ap_end、最后一张视觉截图 last_vision.png）。
 # 环境：QT_RUN_S 局秒数（缺省 100）；QT_RUN_EXTEND 局时顺延上限（缺省 300 秒：自动玩家等视觉模型的秒数不算局时，宿主到点按它顺延，局墙钟同步加）；QT_KEYS prod.keys（缺省 ~/.switch/prod.keys）；QT_MEM_MB 宿主常驻上限（缺省 7680 MB = 目标机 17 Pro Max 单进程上限 8191 MB − 0.5 GB 余量；来源：11-06 测试设备1 六局真机 host.log「进程足迹 + 系统给本进程剩余」恒 8191 MB；旧 5120 无依据作废，维护者 11-06 定）；QT_KEEP=1 留产物；
 #   QT_TITLE_ID=<16 位程序号>：文件夹里不止一个本体（游戏 + 同系列小工具）时指定测哪一款（缺省按大小自动认主游戏，判不出就报红，10-26 #456）；
@@ -61,7 +61,7 @@ if [ $urc = 0 ] && [ -z "$PK" ]; then
   cp "$O/logs/timing.tsv" "$KL/" 2> /dev/null
   G=$(grep -a -o -m1 "款 [A-Za-z0-9_-]*" "$KL/oneclick.log" | cut -d' ' -f2); G=${G:--}
   PID=$(grep -a -m1 "① 认出" "$KL/oneclick.log" | grep -o "程序号 [0-9A-Fa-f]\{16\}" | cut -d' ' -f2); PID=${PID:--}
-  # 直连编不过的键清单（direct_lib.sh 写进直连缓存 logs/）：拷进局日志，普查总表「直连编不过」列读它；这次出包之前写的旧清单不拷
+  # 直连编不过的键清单（direct_lib.py 写进直连缓存 logs/）：拷进局日志，普查总表「直连编不过」列读它；这次出包之前写的旧清单不拷
   DCL=${S2A_DIRECT_CACHE:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/cache/direct/$(echo "${PID:-}" | tr a-z A-Z)}/logs/direct_fail.log
   [ -f "$DCL" ] && [ "$DCL" -nt "$KL/.pack_start" ] && cp "$DCL" "$KL/direct_fail.tsv"   # -nt 是 bash 内建，Linux 同样可用（不用 macOS 的 stat -f）
   # 出库日志（汇总行：着色器缓存命中、#1429 验收的「ast mem order kept」等）：同样只拷这次出包写的；直连缓存可被淘汰、远端缓存不拉回，局日志里这份才留得住

@@ -63,6 +63,8 @@ class PushSelected(unittest.TestCase):
         self.assertIsInstance(r, Failure)
         self.assertEqual((r.code, str(r)), ("resource_transfer_failed", str(boom)))
         self.assertEqual(self.progress()["done"], [C])
+        self.assertEqual([(g["gameId"], g["ok"], g.get("code")) for g in r.facts["games"]],
+                         [(A, False, "resource_transfer_failed"), (B, False, "resource_transfer_failed"), (C, True, None)], "逐款结果进机读事实：失败页逐款写原因、重试只推没成的")
         r, pushed = self.run_job({}, gameIds=[A, B])
         self.assertIsInstance(r, dict, "全推成：照常报完成")
         self.assertEqual((r["done"], r["failed"]), (2, 0))

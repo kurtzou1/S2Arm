@@ -360,7 +360,7 @@ namespace S2A.Services
             // 主 App 的纯 C 查询不加载可选 BLE 模块；只有真实 READY 会话才创建反馈对象。
             if (Feedback.RumbleSession != 0)
                 _rumbleSession = (delegate* unmanaged<ulong>)Feedback.RumbleSession;   // 平台登记（安卓）
-            else if (NativeLibrary.TryGetExport(NativeLibrary.GetMainProgramHandle(), "s2a_pad_rumble_session", out nint session))
+            else if (NativeLibrary.TryGetExport(FeedbackProgram, "s2a_pad_rumble_session", out nint session))
                 _rumbleSession = (delegate* unmanaged<ulong>)session;
             // Mac 宿主只导出六轴、没有震动会话：反馈对象照建，只走六轴
             else _motionOnly = ControllerFeedback.MotionExport(out _);
@@ -483,6 +483,9 @@ namespace S2A.Services
         // 11-04 维护者定：宿主前端的 s2a_vpad_touch_configured（iOS ios/touch_config.m、Mac macos/front_mac.m）。游戏调了 SetTouchScreenConfiguration
         //   （Ryujinx 补丁 hid-touch-config-mode 记进 Hid.Touchscreen.ConfiguredMode，-1 = 没调过）后每次 HID 提交递一次模式：
         //   壳返回 0 = 还没出首帧，下次再递；返回 1 = 收下了（壳自动切仅触屏，玩家手动选过的不切），清空、之后不再递。只在 HID 线程上读写
+        // 震动导出所在的库：鸿蒙引擎是宿主 dlopen 进来的 .so，导出不在主程序里，由平台在起局时登记这个句柄；为 0 时按主程序查。
+        public static nint FeedbackLibraryHandle;
+        internal static nint FeedbackProgram => FeedbackLibraryHandle != 0 ? FeedbackLibraryHandle : NativeLibrary.GetMainProgramHandle();
         internal static delegate* unmanaged<int, int> VPadTouchConfigured;
         internal static void OfferTouchConfigured(int mode)
         {

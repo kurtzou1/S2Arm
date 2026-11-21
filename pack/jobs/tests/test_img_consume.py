@@ -6,6 +6,7 @@
   ③ 取消 / 进程被杀（玩家报「romfs.s2aidx 里的 X 不在 game.img 的 RomFS 段」）：取消同样清空；被杀来不及清的，靠出包工作目录里的
      .img_consume_inflight 标记，下次出包开头（drop_half_consumed）清空；写成功标记删掉"""
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 from jobcase import JobCase
 from core import Cancelled, Context, Failure
@@ -64,6 +65,24 @@ class ImgConsume(JobCase):
         with patch.object(c, "run", return_value=None):   # 写成功：标记删掉、别的不动
             ipa.to_img(c, GID, out / "roots/kuan@v1", out / "pack")
         self.assertFalse((out / ipa.CONSUME_MARK).exists()); self.assertIn("roots", [q.name for q in out.iterdir()])
+
+    def test_failure_code_follows_log_cause(self):
+        # D-6DEQ：Windows 写 game.img 写到 20 GB 报「[Errno 28] No space left on device」，原先一律 package_failed，玩家看到英文原句。
+        #   期望：img.log 里有确凿盘满字样 → disk_full、上屏是盘满话术、原文进 internal；别的报错 → 仍 package_failed、原文照旧在上屏句里
+        for line, code, shown in (("【红】[Errno 28] No space left on device", "disk_full", "磁盘空间不够"),
+                                  ("【红】[Errno 13] Permission denied", "permission_denied", "出包未完成"),   # D-X5JB：原因句同其他判出码的；下一步按码给（Windows：关掉占着的程序、等杀毒扫完）
+                                  ("【红】写标准 RomFS 段失败：坏了", "package_failed", "写单一 IMG（game.img）失败：【红】写标准 RomFS 段失败：坏了")):
+            with self.subTest(code=code):
+                c, out = self._work()
+                def fail(args, log, *a, **kw):
+                    Path(log).parent.mkdir(parents=True, exist_ok=True); Path(log).write_text(line + "\n", encoding="utf-8")
+                    raise Failure("退出码 1", code="tool_exit")
+                with patch.object(c, "run", side_effect=fail), self.assertRaises(Failure) as e:
+                    ipa.to_img(c, GID, out / "roots/kuan@v1", out / "pack")
+                self.assertEqual(e.exception.code, code)
+                self.assertIn(shown, str(e.exception))
+                self.assertIn(line, str(e.exception) + getattr(e.exception, "internal", ""))
+
 
 if __name__ == "__main__":
     unittest.main()

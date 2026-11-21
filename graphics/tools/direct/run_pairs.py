@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# 跑局里见到、出包没配上的「顶点 + 片元」对 → 配置档的配对表（direct_lib.sh ③ 之后、④ 翻译之前）：宿主建管线前发现片元读了顶点没写的 user(locn)（nvn_mtl.m pso_pair_ok），
+# 跑局里见到、出包没配上的「顶点 + 片元」对 → 配置档的配对表（direct_lib.py ③ 之后、④ 翻译之前）：宿主建管线前发现片元读了顶点没写的 user(locn)（nvn_mtl.m pso_pair_ok），
 #   那笔不画、往 pso_user.tsv 记一行「P<TAB>顶点键<TAB>片元键」；这里把这些行并进 shader_pairs.tsv，dmsh_build.py vs_pad 就给那个顶点着色器补上片元要读的输出，
 #   值 (0,0,0,1)，同硬件上没写的输出读到的。巫师3 10-26：配对表 158 对、着色器 29672 个，跑局里 4 对没配上，iOS 上建这种管线 Metal 断言崩溃。
 # 用法：run_pairs.py <shader_pairs.tsv（就地追加）> <union_keys.tsv（本次出库的并集键）> <来源…（pso_user.tsv 文件，或放 .tsv 的目录）>

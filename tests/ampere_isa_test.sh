@@ -1,4 +1,5 @@
 #!/bin/bash
+# 门禁显卡：共享（建 Metal 设备在本机显卡上跑、不按显示时钟判：取共享显卡锁，与按显示时钟判的独占步错开；11-20 读写锁）
 # 门禁覆盖：compat/tree/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpere* compat/tree/src/Ryujinx.Graphics.Shader/Instructions/InstEmitFloatArithmetic.cs compat/tree/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMemory.cs compat/tree/src/Ryujinx.Graphics.Shader/Decoders/DecoderAmpere.cs compat/tree/src/Ryujinx.Graphics.Shader/Decoders/AmpereOp.cs graphics/tools/direct/dsh/* graphics/tools/direct/tests/dsh_cmp/* graphics/tools/direct/tests/dshfn.py graphics/nvn/gfx/nvn/nvn_tex.c graphics/nvn/gfx/nvn/nvn_tex.h tests/ampere_isa/* tests/ampere_isa_test.sh
 # Switch 2（Ampere）指令单测（约 30 秒，要 Metal）：bash tests/ampere_isa_test.sh
 # 合成的 NVN2 片元着色器经出包同一条链（S2A.Dsh Compile，dsh_cmp --fn ampere_compile）翻成 MSL，在 GPU 上画 1 个像素读回，期望按公开规格手算（tests/ampere_isa/cases.py 文件头）。

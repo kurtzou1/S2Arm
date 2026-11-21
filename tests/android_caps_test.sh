@@ -23,7 +23,7 @@ open(main, 'wb').write(b'NSO0' + bytes(0x3C) + bid + bytes(0x60))
 n = bytearray(0x100); n[:4] = b'META'; struct.pack_into('<I', n, 0x70, 0x80); n[0x80:0x84] = b'ACI0'; struct.pack_into('<Q', n, 0x90, pid)
 open(npdm, 'wb').write(n)
 EOF
-ln -s mk7@v1 $T/roots/mk7@现行
+printf '%s\n' mk7@v1 > $T/roots/mk7@现行
 RW=$T/fake_rewriter; printf '#!/bin/sh\nexit 0\n' > $RW; chmod +x $RW   # 安卓改写键只要后端键：桩个可执行文件给 S2A_REWRITER_C，不真编
 export S2A_ROOTS=$T/roots S2A_ROOTS_SHARED=$T/roots_shared S2A_REWRITER_C=$RW S2A_CAPS_REPO=$T/synrepo   # 私有根：分支树不许改共享现行（roots.sh _root_tree_ok）
 mkdir -p $T/synrepo/docs $T/widen_tables
@@ -32,27 +32,27 @@ printf '# 程序号\t构建号\t款\t平台\t登记日期\t依据\n%s\t%s\tmk7\t
 run() { S2A_PACK_PLAT=$1 S2A_WIDEN_DIR=$T/widen_tables bash $H/pack/stage_caps.sh mk7 > $T/caps-$2.log 2>&1; echo $?; }
 # 现行根已有苹果验证标记：安卓生成不得把它当成安卓验证。
 printf '%s\t%s\tmk7\tapple\t2026-11-01\t合成 apple 验过\n' "$PROG" "$BID" > "$R1/widen_verified.tsv"
-r=$(run android a1); C=$T/roots/mk7@现行
+r=$(run android a1); C=$T/roots/$(cat $T/roots/mk7@现行)
 ck "① 安卓无 .stage_rewrite 也出清单（rc=${r}；$(tail -1 $T/caps-a1.log)）" '[ $r = 0 ] && [ -f $C/s2a_caps.tsv ]'
 ck "① 安卓清单首行 plat<TAB>android；--all-caps 那份同头" '[ "$(head -1 $C/s2a_caps.tsv)" = "plat	android" ] && [ "$(head -1 $C/s2a_caps.all.tsv)" = "plat	android" ]'
 ck "② 发布缺省关：只有 apple 验过行 → widen 0「发布缺省关」、根里不写 widen_verified.tsv" \
   '[ "$(v $C/s2a_caps.tsv widen)" = 0 ] && [[ "$(why $C/s2a_caps.tsv widen)" == *发布缺省关* ]] && [ ! -e $C/widen_verified.tsv ]'
 ck "② --all-caps 口径区分：同根 widen 1（有来源即开，不看缺省关）" '[ "$(v $C/s2a_caps.all.tsv widen)" = 1 ]'
 printf '%s\t%s\tmk7\tandroid\t2026-11-01\t合成安卓验过\n' "$PROG" "$BID" >> $T/widen_tables/verified.tsv
-r=$(run android a2); C=$(cd $T/roots && pwd -P)/mk7@现行   # 第二次出了新版根，重取现行
+r=$(run android a2); C=$(cd $T/roots && pwd -P)/$(cat $T/roots/mk7@现行)   # 第二次出了新版根，重取现行
 ck "③ 补安卓行 → 标记整行原样写进根、widen 1（rc=${r}）" \
   '[ $r = 0 ] && [ "$(v $C/s2a_caps.tsv widen)" = 1 ] && [ "$(cat $C/widen_verified.tsv)" = "0100000000000F00	aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa	mk7	android	2026-11-01	合成安卓验过" ]'
 # 验证账撤销后，克隆出的旧安卓标记不能参与本次判定，也不能留在新根。
 printf '# 程序号\t构建号\t款\t平台\t登记日期\t依据\n%s\t%s\tmk7\tapple\t2026-11-01\t合成 apple 验过\n' "$PROG" "$BID" > "$T/widen_tables/verified.tsv"
-r=$(run android a3); C=$(cd "$T/roots" && pwd -P)/mk7@现行
+r=$(run android a3); C=$(cd "$T/roots" && pwd -P)/$(cat "$T/roots/mk7@现行")
 ck "③ 撤销安卓验证行 → 清除旧标记并关闭发布宽屏（rc=${r}）" \
   '[ $r = 0 ] && [ "$(v $C/s2a_caps.tsv widen)" = 0 ] && [ ! -e $C/widen_verified.tsv ]'
 # 清理旧标记失败必须中止，不得发布沿用旧根或继续生成清单。
 mkdir "$C/widen_verified.tsv"; printf 'force-rebuild\n' > "$C/.stage_caps"
-OLD=$(readlink "$T/roots/mk7@现行")
+OLD=$(cat "$T/roots/mk7@现行")
 r=$(run android blocked)
 ck "③ 旧标记无法清除 → 报红退出、现行根不变（rc=${r}）" \
-  '[ "$r" != 0 ] && [ "$(readlink "$T/roots/mk7@现行")" = "$OLD" ] && grep -q "清除旧宽屏验证标记失败" "$T/caps-blocked.log"'
+  '[ "$r" != 0 ] && [ "$(cat "$T/roots/mk7@现行")" = "$OLD" ] && grep -q "清除旧宽屏验证标记失败" "$T/caps-blocked.log"'
 rmdir "$C/widen_verified.tsv"
 # ④ 平台盐 + 按平台实现集（合成实现仓库：IMPL 两域文件的并集各建一份 v1）
 python3 - "$T" "$H" <<'EOF'

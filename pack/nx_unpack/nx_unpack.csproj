@@ -18,8 +18,10 @@
 
   <!-- NativeAOT's Unix target copies NativeLibrary into LinkerArg before the
        project target runs. Quote the final linker arguments so repository
-       paths containing spaces remain one argument. -->
-  <Target Name="QuoteNativeAotLibraryPaths" AfterTargets="IlcCompile">
+       paths containing spaces remain one argument.
+       Unix only: on Windows link.exe options also start with "/" and one LinkerArg item can hold
+       several options ("/NOLOGO /MANIFEST:NO"); quoting them makes one bogus option (LNK1184). -->
+  <Target Name="QuoteNativeAotLibraryPaths" AfterTargets="IlcCompile" Condition="'$(OS)' != 'Windows_NT'">
     <ItemGroup>
       <_S2AQuotedLinkerArg Include="@(LinkerArg->'&quot;%(Identity)&quot;')"
                            Condition="$([System.String]::Copy('%(Identity)').StartsWith('/'))" />

@@ -99,6 +99,17 @@ uint64_t s2a_alias_report_size(uint64_t alias_base, uint64_t alias_size, uint64_
     return r >= 8 * GB && r < alias_size ? r : alias_size;
 }
 
+// 地址空间不够这款的判据（11-20 维护者定，宁漏勿误）：出包静态认出的开局大区（alias_gb GB = 大区 + SDK 元数据向上取整，大区本身是整 GiB，
+//   故大区长 = (|alias_gb| − 1) GiB）由 SDK 放在元数据之后、按 GiB 对齐的起点（起点 = (别名基址 + 0x3FE00000 + 1 GiB − 1) & −1 GiB）；
+//   大区末端顶到或超过窗口末 → 游戏其余地址区（SDK 放在「最高空隙的底部」= 大区之上，一款大游戏实测这里用 864 MB）必落窗口外 → 1。
+//   大区末端还在窗口里（上面还留着空间）→ 0：其余地址区放不放得下读码定不了，不弹（宁漏）。alias_gb == 0（没有静态大区）→ 0
+int s2a_alias_big_tops_window(uint64_t alias_base, int alias_gb, uint64_t win_end) {
+    if (!alias_gb) return 0;
+    uint64_t gb = (uint64_t)(alias_gb < 0 ? -alias_gb : alias_gb);
+    uint64_t start = (alias_base + 0x3FE00000ull + GB - 1) & ~(GB - 1), end = start + (gb - 1) * GB;
+    return end >= win_end;
+}
+
 int s2a_layout_compute(uint32_t as_type, uint64_t sys_resource_size, uint64_t module_span, int alias_gb, uint64_t W, uint64_t S, s2a_layout *o, uint64_t *mod_base, uint64_t *shadow_base) {
     memset(o, 0, sizeof *o); *mod_base = *shadow_base = 0;
     uint64_t top = s2a_as_type_top(as_type);

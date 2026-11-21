@@ -87,8 +87,8 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
 
         public void SetGameVersion(ReadOnlySpan<byte> versionString)
         {
-            // NOTE: This method is not implemented in ldn_mitm
-            Logger.Stub?.PrintMsg(LogClass.ServiceLdn, "LdnMitmClient SetGameVersion");
+            string version = System.Text.Encoding.UTF8.GetString(versionString).TrimEnd('\0');
+            Logger.Info?.PrintMsg(LogClass.ServiceLdn, $"LdnMitmClient SetGameVersion: {version}");
         }
 
         public void SetStationAcceptPolicy(AcceptPolicy acceptPolicy)

@@ -172,6 +172,9 @@ for tf in $TESTS; do [ -f "$tf" ] || continue; inlayer "单测 $(basename "$tf" 
   #   11-06 present_settings_test 和同批 gfx 钩子并行，窗口被抢焦点、宿主失焦冻结客机，矩阵 14/18 红，重跑 18/18 绿（冤退两支）
   if head -6 "$tf" | LC_ALL=C grep -q '^# 门禁显卡：独占'; then hl=${tb:-${GATE_HOOK_S:-600}}; pl=$(( hl + ${S2A_GATE_GPU_QUEUE_S:-1800} + 30 )); [ "$pl" -gt "${BMAX:-0}" ] && BMAX=$pl
     add "单测 $(basename "$tf" .sh)" "${S2A_PRIVATE_TOOLS:+bash $S2A_PRIVATE_TOOLS/mac_slot_frozen.sh prio '单测 $(basename "$tf" .sh)' $hl -- }bash $tf" $pl
+  # 离屏起 Metal、不按显示时钟判的单测（文件头 6 行内「# 门禁显卡：共享」）取共享显卡锁（11-20 读写锁）：可多个同跑，独占步在等或在跑时排队；外层上限留排队余量
+  elif head -6 "$tf" | LC_ALL=C grep -q '^# 门禁显卡：共享'; then pl=$(( ${tb:-${GATE_HOOK_S:-600}} + ${S2A_GATE_GPU_QUEUE_S:-1800} + 30 ))
+    add "单测 $(basename "$tf" .sh)" "${S2A_PRIVATE_TOOLS:+bash $S2A_PRIVATE_TOOLS/mac_slot_frozen.sh share '单测 $(basename "$tf" .sh)' -- }bash $tf" $pl
   else add "单测 $(basename "$tf" .sh)" "bash $tf" ${tb:-}; fi; done
 # 各线钩子
 HOOKS=
@@ -193,7 +196,8 @@ fi
     # 优先步骤本机独占跑（10-31 维护者：显卡步骤不跟本机重活抢，删掉「等 300 秒到点照跑」）：排队（独占锁 + 等 Mac 局让出，上限 S2A_GATE_GPU_QUEUE_S，缺省 1800 秒）
     #   不占钩子自己的上限——钩子上限交给 维护方工具 在拿齐后才计时；本步外层上限 = 钩子上限 + 排队上限 + 30 秒收尾
     case $hk in graphics/gate.sh|tests/visual/gate.sh) hl=${bl:-${GATE_HOOK_S:-600}}; pl=$(( hl + ${S2A_GATE_GPU_QUEUE_S:-1800} + 30 )); [ "$pl" -gt "${BMAX:-0}" ] && BMAX=$pl
-      add "钩子 $hk" "bash $hk" $pl;; *) add "钩子 $hk" "bash $hk" $bl;; esac; done   # 11-14：不再整钩子套显卡锁——graphics 钩子只在开窗口 / 按显示时钟判的子项上自己拿（graphics/gate.sh gpu_excl），visual 钩子全是离屏对拍、不拿；外层上限仍留排队余量
+      # visual 钩子全是离屏真显卡回放对拍：整钩子取共享显卡锁（11-20 读写锁）；graphics 钩子在自己的子项上分别取共享 / 独占
+      [ "$hk" = tests/visual/gate.sh ] && add "钩子 $hk" "${S2A_PRIVATE_TOOLS:+bash $S2A_PRIVATE_TOOLS/mac_slot_frozen.sh share '钩子 $hk' -- }bash $hk" $pl || add "钩子 $hk" "bash $hk" $pl;; *) add "钩子 $hk" "bash $hk" $bl;; esac; done   # 11-14：不再整钩子套显卡锁——graphics 钩子只在开窗口 / 按显示时钟判的子项上自己拿（graphics/gate.sh gpu_excl），visual 钩子全是离屏对拍、不拿；外层上限仍留排队余量
 fi   # 非 doc 档的语法 / 单测 / 平台钩子
 # 预算查询（列车起门禁前问）：GATE_BUDGET_Q=1 bash tools/gate.sh → 打本次要跑的钩子里自报的最大预算（秒）后退出、什么都不跑
 #   只算钩子自报的预算（没人自报 = 0，列车照缺省上限）；iOS 编译那一步的 3600 秒含排队、不算

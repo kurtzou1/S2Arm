@@ -33,6 +33,9 @@ uint64_t nvn_gpu_pipe_warm_hits(void) __attribute__((weak));
 uint64_t nvn_gpu_pipe_warm_created(void) __attribute__((weak));
 uint64_t nvn_gpu_pipe_warm_tag(nvn_gpu_pipe p) __attribute__((weak));
 void nvn_gpu_pipe_warm_tag_set(nvn_gpu_pipe p, uint64_t tag) __attribute__((weak));
+// 程序清单（nvn_vk_prog_warm.c）：随包种子的状态与「这个身份在不在程序清单里」。宿主单测只链本模块时没有它们 = 不读管线种子。
+int nvk_prog_warm_seed_dir(char *out, size_t n) __attribute__((weak));
+int nvk_prog_warm_contains(const uint8_t identity[32]) __attribute__((weak));
 
 // ---- 文件格式 ----
 // 头 32 字节：magic(8) + 格式版本 + 描述版本（=紧凑配方字节数）+ 条目大小 + 条数 + FNV-1a 整份校验。
@@ -99,7 +102,7 @@ static void pw_log(int red, const char *fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(b, sizeof b, fmt, ap);
     va_end(ap);
-    nvn_plat_log(red ? NVN_PLAT_LOG_RED : NVN_PLAT_LOG_INFO, "pipe", b);
+    nvn_plat_log(red == 2 ? NVN_PLAT_LOG_WARN : red ? NVN_PLAT_LOG_RED : NVN_PLAT_LOG_INFO, "pipe", b);   // red：0 普通 / 1 红 / 2 黄
 }
 
 static int pw_id_zero(const uint8_t id[32]) {
@@ -917,6 +920,20 @@ int nvk_pipe_warm_load(void) {
         pw_log(1, "管线预热清单读失败：%s", path);
         return -1;   // 读不动：让预热线程稍后重试，不把「读失败」当「清单是空的」
     }
+    // 首局（本机没有管线清单）：程序清单用了随包种子时，读同目录的管线种子（nvn_vk_pipe_warm.h「随包种子」）。
+    // 管线种子没有自己的有效性头：只认和已收下的程序种子同一目录（目录名 = 闭包 + profile），条目再逐条核程序身份在程序清单里。
+    int from_seed = 0;
+    char seed_path[sizeof g.path + 64];
+    if (enoent) {
+        char sd[sizeof g.path];
+        int s = nvk_prog_warm_seed_dir ? nvk_prog_warm_seed_dir(sd, sizeof sd) : 0;
+        if (s < 0) return -1;   // 程序清单本局还没定（它先载入）：稍后重试，不把「还不知道」当「没有种子」
+        if (s == 1 && snprintf(seed_path, sizeof seed_path, "%s/pipes-v%u-%u.bin", sd, (unsigned)NVK_PW_FORMAT, (unsigned)NVK_PW_DESC_BYTES) < (int)sizeof seed_path) {
+            int se = 0;
+            if (pw_read_file(seed_path, &buf, &bytes, &se) != 0) pw_log(2, "【黄】管线预热清单随包种子读不动：%s，本局不用种子", seed_path);
+            else if (!se) { from_seed = 1; enoent = 0; }
+        }
+    }
     if (enoent) {
         pthread_mutex_lock(&g.mu); g.loaded = 1; pthread_mutex_unlock(&g.mu);
         pw_log(0, "管线预热清单：目录里还没有旧文件（%s），本局只记不预热", path);
@@ -941,7 +958,8 @@ int nvk_pipe_warm_load(void) {
         g.loaded = 1;
         __atomic_fetch_add(&g.st.rejected, cnt ? cnt : 1, __ATOMIC_RELAXED);
         pthread_mutex_unlock(&g.mu);
-        pw_log(1, "管线预热清单整份拒绝（%s）：%s，本局不预热", why, path);
+        if (from_seed) pw_log(2, "【黄】管线预热清单随包种子不用（%s）：%s；本局按没有清单走，首遇照常建", why, seed_path);   // 锦上添花：不算本机清单坏
+        else pw_log(1, "管线预热清单整份拒绝（%s）：%s，本局不预热", why, path);
         free(buf);
         return 0;
     }
@@ -955,22 +973,29 @@ int nvk_pipe_warm_load(void) {
     for (uint32_t i = 0; i < g.nbucket; i++) g.bucket[i] = -1;
     for (uint32_t i = 0; i < g.cap; i++) g.next[i] = -1;
     if (dg.on > 0 && dg.ev) { memset(dg.ev, 0, ((size_t)1 << PW_DG_EV_BITS) * sizeof *dg.ev); dg.ev_n = 0; }   // 诊断：换了一份清单，旧的淘汰记录作废
+    // 随包种子逐条核：程序身份要在程序清单里（= 随包程序种子收下的那批，或本局已记的）。不在的那条预热时永远等不到程序发布，
+    // 只会占着重试槽白等 5 秒——宁可少建，不收。本机清单照旧整份收（它的程序本来就是本机记的）。
+    uint32_t kept = 0, dropped = 0, file_cnt = cnt;
     for (uint32_t i = 0; i < cnt; i++) {
         const uint8_t *e = buf + NVK_PW_HDR + (size_t)i * NVK_PW_ENTRY;
-        struct nvk_pipe_rec *r = &g.recs[i];
+        if (from_seed && !(nvk_prog_warm_contains && nvk_prog_warm_contains(e))) { dropped++; continue; }
+        uint32_t k = kept++;
+        struct nvk_pipe_rec *r = &g.recs[k];
         memcpy(r->prog_identity, e, 32);
         memcpy(r->desc, e + 32, NVK_PW_DESC_BYTES);
         r->bytes = NVK_PW_DESC_BYTES;
         r->uses = pw_r32(e + 32 + NVK_PW_DESC_BYTES);
-        g.uses[i] = r->uses;
-        g.seen[i] = cnt - i;   // 文件按热点降序写：前面 = 更近
-        g.hash[i] = pw_slot_hash(r->desc, r->prog_identity);
-        g.gen[i] = pw_next_gen_locked();   // 槽里换了一份配方：这之前发出去的标签全部作废
-        g.used[i] = 1;
-        uint32_t b = pw_bucket_of(g.hash[i], g.nbucket);
-        g.next[i] = g.bucket[b];
-        g.bucket[b] = (int32_t)i;
+        g.uses[k] = r->uses;
+        g.seen[k] = cnt - i;   // 文件按热点降序写：前面 = 更近
+        g.hash[k] = pw_slot_hash(r->desc, r->prog_identity);
+        g.gen[k] = pw_next_gen_locked();   // 槽里换了一份配方：这之前发出去的标签全部作废
+        g.used[k] = 1;
+        uint32_t b = pw_bucket_of(g.hash[k], g.nbucket);
+        g.next[k] = g.bucket[b];
+        g.bucket[b] = (int32_t)k;
     }
+    if (dropped) __atomic_fetch_add(&g.st.rejected, dropped, __ATOMIC_RELAXED);
+    cnt = kept;
     g.count = cnt;
     // 冻结本局预热集：文件顺序（uses 降序）= 热点优先的一份值拷贝，之后的 note / 淘汰 / 重排都影响不到它。
     free(g.plan); g.plan = NULL; g.plan_n = g.plan_i = 0;
@@ -979,7 +1004,7 @@ int nvk_pipe_warm_load(void) {
         if (g.plan) { int cs = nvn_plat_flag("nvk_compute_warm", 0); for (uint32_t i = 0; i < cnt; i++) if (cs || g.recs[i].desc[0] != 0x80) g.plan[g.plan_n++] = g.recs[i]; }
         else pw_log(1, "【红】管线预热清单：本局预热集快照分配失败（本局不预热，清单照常记录）");
     }
-    g.clock = cnt;
+    g.clock = file_cnt;   // 最近序号接着文件里最大的那个往后发（种子滤掉几条时 seen 仍按文件位置算）
     g.loaded = 1;
     g.dirty = 0;
     g.note_gen = 1;
@@ -987,7 +1012,8 @@ int nvk_pipe_warm_load(void) {
     g.st.loaded = cnt;
     pthread_mutex_unlock(&g.mu);
     free(buf);
-    pw_log(0, "管线预热清单：%u 条（%s，%zu 字节）", (unsigned)cnt, path, bytes);
+    if (from_seed) pw_log(0, "管线预热清单（随包种子，本机还没有清单）：%u 条（程序不在程序清单里的 %u 条不收；%s）", (unsigned)cnt, (unsigned)dropped, seed_path);
+    else pw_log(0, "管线预热清单：%u 条（%s，%zu 字节）", (unsigned)cnt, path, bytes);
     return (int)cnt;
 }
 

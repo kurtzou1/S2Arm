@@ -22,22 +22,23 @@ cp "$H/pack/oneclick/oneclick.sh" "$H/pack/oneclick/cachehits.py" "$H/pack/onecl
 cp "$H/pack/direct_profile_input.py" $R/pack/   # 一键出包写直连版本旁注调它（算法只一份，解包阶段也调它）
 mkdir -p "$R/pack/jobs" "$R/compat/tree"; cp "$H"/pack/jobs/*.py "$R/pack/jobs/"; cp "$H/compat/tree/global.json" "$R/compat/tree/"   # 一键出包判 .NET SDK 调 pack/jobs/ipa.py dotnet_sdk()（版本按 global.json，全仓一处判法）
 cp "$H/pack/roots.sh" "$H/pack/srcs.sh" "$H/pack/build_id.sh" $R/pack/
+mkdir -p "$R/pack/orch" && cp "$H/pack/orch/current.py" "$R/pack/orch/"   # roots.sh 写现行指针 / 迁移老库（pack/orch/current.py）
 mkdir -p $R/graphics/nvn/tools; cp "$H/graphics/nvn/tools/romfs_list.py" $R/graphics/nvn/tools/   # 播种键盘点 romfs/ 与 aoc/（审计 #1534 P1-54）
 mkdir -p "$R/tools"; cp "$H/tools/pool_workers.py" "$R/tools/"   # romfs_list / pak_crypto 经它取核数（#1332：核数唯一来源）
 for f in cores.sh progress.sh machine.sh; do cp "$H/tools/$f" $R/tools/; done
 cat > $R/pack/seed_root.sh <<'EOF'
 #!/bin/bash
 echo $(( $(cat "$(dirname "$S2A_ROOTS")/../seed.n" 2> /dev/null || echo 0) + 1 )) > "$(dirname "$S2A_ROOTS")/../seed.n"   # 播种次数（⑩）：S2A_ROOTS = $T/<输出>/roots
-r=$S2A_ROOTS/$1@$2; mkdir -p "$r" && cp -R "$3/exefs" "$r/" && cp "$3"/*.tsv "$3"/*.json "$r/" 2> /dev/null; ln -sfn "$1@$2" "$S2A_ROOTS/$1@现行"; echo "🟢 播种桩 $r"
+r=$S2A_ROOTS/$1@$2; mkdir -p "$r" && cp -R "$3/exefs" "$r/" && cp "$3"/*.tsv "$3"/*.json "$r/" 2> /dev/null; printf '%s\n' "$1@$2" > "$S2A_ROOTS/$1@现行"; echo "🟢 播种桩 $r"
 EOF
 cat > $R/pack/refresh.sh <<EOF
 #!/bin/bash
-[ -z "\${FAKE_AOC_MISS:-}" ] || printf '追加内容缺\t%s\t假原因\n' "\$FAKE_AOC_MISS" > "\$S2A_ROOTS/\$1@现行/aoc.log"   # 追加内容阶段记下没解出的包（审计 P2-30）
+[ -z "\${FAKE_AOC_MISS:-}" ] || printf '追加内容缺\t%s\t假原因\n' "\$FAKE_AOC_MISS" > "\$S2A_ROOTS/\$(cat "\$S2A_ROOTS/\$1@现行")/aoc.log"   # 追加内容阶段记下没解出的包（审计 P2-30）
 echo "PLAT=\${S2A_PACK_PLAT:-无} WPKG=\${S2A_WIDEN_PKG:-无} WAUTO=\${S2A_WIDEN_AUTO_RUN:-无}" >> $T/refresh.log; echo "LITE=\${S2A_PACK_LITE:-无}" >> $T/lite.log; echo "🟢 刷新桩"
 EOF
 cat > $R/pack/ipa.sh <<EOF
 #!/bin/bash
-echo ipa >> $T/ipa.log; c=\$(cd -P "\$S2A_ROOTS/\$1@现行" && pwd); mkdir -p "\$c/pkg/pack"; python3 -c "import os,plistlib,sys,zipfile; m=os.environ.get('FAKE_GM','direct'); z=zipfile.ZipFile(sys.argv[1],'w'); z.writestr('Payload/S2Arm.app/Info.plist', plistlib.dumps(dict(S2AGraphicsMode=m, S2AGraphicsModeReason=os.environ.get('FAKE_GR','')) if m else {})); z.close()" "\$c/pkg/\$1.ipa"; echo '{}' > "\$c/pkg/pack/manifest.json"; : > "\$c/pkg/pack/index.tsv"; echo "🟢 出包桩"
+echo ipa >> $T/ipa.log; c=\$(cd -P "\$S2A_ROOTS/\$(cat "\$S2A_ROOTS/\$1@现行")" && pwd); mkdir -p "\$c/pkg/pack"; python3 -c "import os,plistlib,sys,zipfile; m=os.environ.get('FAKE_GM','direct'); z=zipfile.ZipFile(sys.argv[1],'w'); z.writestr('Payload/S2Arm.app/Info.plist', plistlib.dumps(dict(S2AGraphicsMode=m, S2AGraphicsModeReason=os.environ.get('FAKE_GR','')) if m else {})); z.close()" "\$c/pkg/\$1.ipa"; echo '{}' > "\$c/pkg/pack/manifest.json"; : > "\$c/pkg/pack/index.tsv"; echo "🟢 出包桩"
 EOF
 chmod +x $R/pack/*.sh
 { head -c 64 /dev/zero; printf 'BUILDIDBUILDID01'; head -c 32 /dev/zero; } > $R/x/exefs/main
@@ -52,7 +53,7 @@ export S2A_NX_UNPACK=$NXU S2A_MACHINE_NO_LOCAL=1 S2A_BEAT_S=3600
 OC() { bash $R/pack/oneclick/oneclick.sh "$@" --keys $T/没有.keys 2>&1; }
 o1=$(OC --from-extract $R/x --target mac --out $T/o1); r1=$?
 ck "① --from-extract --target mac：rc=${r1}、刷新「$(cat $T/refresh.log 2> /dev/null)」、出包桩 $(grep -c . $T/ipa.log 2> /dev/null || echo 0) 次、Mac 产物根 $(cat $T/o1/logs/mac_root.txt 2> /dev/null)" \
-  '[ $r1 = 0 ] && [ "$(cat $T/refresh.log)" = "PLAT=macos WPKG=0 WAUTO=0" ] && [ ! -e $T/ipa.log ] && [ "$(cat $T/o1/logs/mac_root.txt)" = "$(cd -P $T/o1/roots/t0100abcd00001000@现行 && pwd)" ] && [[ "$o1" == *"完成（Mac 产物根）"* ]]'
+  '[ $r1 = 0 ] && [ "$(cat $T/refresh.log)" = "PLAT=macos WPKG=0 WAUTO=0" ] && [ ! -e $T/ipa.log ] && [ "$(cat $T/o1/logs/mac_root.txt)" = "$(cd -P $T/o1/roots/$(cat $T/o1/roots/t0100abcd00001000@现行) && pwd)" ] && [[ "$o1" == *"完成（Mac 产物根）"* ]]'
 dp=$(python3 -c "import json; d = json.load(open('$R/x/direct-profile-input.json')); print(d['title_id'], d['content_version'])" 2> /dev/null)
 ck "① 版本元数据按 unpack.tsv 合成：${dp}" '[ "$dp" = "0100ABCD00001000 2228224" ]'
 rm -f $T/refresh.log

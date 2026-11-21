@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 S2Arm contributors
+# 门禁手动：要 Vulkan 测试容器环境（读 S2A_VK_LAYER_DIR / lavapipe），宿主直接跑 KeyError；该接进 android/tests/vk/run.sh 还是 tests/android_vk_test.sh 待 owner 定（改 vk 夹具须在 CI 同版本容器跑整套）
 """Run the original SPIR-V image-size fixture with lavapipe and Vulkan validation."""
 import os
 from pathlib import Path

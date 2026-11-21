@@ -134,6 +134,45 @@ class SGradeTests(unittest.TestCase):
         self.assertEqual((r["updated"], r["steps"]), (["0100A"], {"mac": True, "bf": True, "ios": True}))
         self.assertFalse((self.t / "lib/0100A" / sgrade.UPGRADING).exists())
 
+    @unittest.skipUnless(sys.platform == "darwin", "Mac 运行版本只在 Mac 上补")
+    def test_upgrade_progress_one_monotone_value(self):
+        # 玩家报修 D-QNA9（Mac 实机）：段内计数器各自的 done / total 与按段的粗进度互相盖，进度条在 50%、0%、80% 间来回跳。
+        # 两段（Mac 运行版本 + 片上读取着色器，没有 iPhone 件），整款进度 = (第几段 − 1 + 段内完成度) ÷ 2，只增不减，期望逐条手算：
+        #   开始 0；段一 A 1/4 → 0.125、A 2/4 → 0.25、B 从 0 重数 0/100 → 仍 0.25、B 20/100（0.05）→ 仍 0.25、B 60/100 → 0.3、C 5/6 → 5/12 ≈ 0.4167、段一做完 0.5；
+        #   段二 D 0/8 → 0.5、D 2/8 → 0.625、E 1/10 → 仍 0.625、一条文字消息也带 0.625、D 6/8 → 0.875、整款做完 1.0
+        self._manual_fixture("0100A")
+        shutil.rmtree(self.t / "lib/0100A/image/ios")
+        self.c.r = {"gameIds": ["0100A"]}; self.c.library = self.t; self.c.logs = self.t
+        seen = []   # (类型, sgradeProgress, done, total)
+        self.c.emit = lambda k, text="", **kw: seen.append((k, kw.get("sgradeProgress"), kw.get("done"), kw.get("total")))
+        queue = []   # 段内读到的队列文件进度（别的窗口 / 轮询看到的）
+        def read_queue():
+            queue.append(sgrade.queue_status(self.c)["games"][0]["progress"])
+        def seg_mac(c, g, *a, **k):
+            for d, t in ((1, 4), (2, 4), (0, 100), (20, 100), (60, 100), (5, 6)):
+                c.emit("progress", done=d, total=t)
+            read_queue()
+            return True
+        def seg_bf(c, g, *a, **k):
+            read_queue()
+            c.emit("progress", done=0, total=8); c.emit("progress", done=2, total=8); c.emit("progress", done=1, total=10)
+            c.emit("message", "编着色器库")
+            c.emit("progress", done=6, total=8)
+            return True
+        import rewrite_refresh
+        import sgrade_bf
+        with patch.object(rewrite_refresh, "refresh_mac", side_effect=seg_mac), patch.object(sgrade_bf, "upgrade_mac", side_effect=seg_bf), \
+             patch.object(rewrite_refresh, "refresh_ios", side_effect=AssertionError("没有 iPhone 件不补")):
+            r = sgrade.upgrade_batch(self.c)
+        inner = [(k, p) for k, p, d, t in seen if k != "batch"]
+        self.assertEqual([p for _, p in inner], [0.0, 0.125, 0.25, 0.25, 0.25, 0.3, 0.4167, 0.5, 0.5, 0.625, 0.625, 0.625, 0.875, 1.0],
+                         "每条事件都带整款进度，计数器换一个 / 从 0 重数都不回退")
+        self.assertEqual([(d, t) for k, p, d, t in seen if k == "progress" and p in (0.0, 0.5, 1.0) and t == 2], [(0, 2), (1, 2), (2, 2)],
+                         "按段的 done / total 照发，段边界整款进度 0、0.5、1.0")
+        self.assertEqual(queue, [0.4167, 0.5], "队列文件（轮询读的）与最后一次发出的整款进度一致：段一末 5/12、段二开头 = 段一做完 0.5")
+        self.assertEqual((r["games"][0]["state"], r["games"][0]["progress"]), ("done", 1.0))
+        self.assertEqual(self.c.emit.__name__, "<lambda>", "收尾还原成原来的 c.emit（不是删掉）")
+
     def test_upgrade_game_refused_while_playing(self):
         # 这款正在运行（开始游戏拿着这款的 S 级锁）：点升级报原因、什么都不做、不写标记
         self._manual_fixture("0100A")

@@ -218,7 +218,7 @@ int vk_snap_restore(const char *path) {
     uint32_t nmem = 0, nimg = 0, nbad = 0;
     for (uint32_t i = 0; ok && i < h.nmemobj; i++) { uint64_t r[3]; ok = vs_r(f, r, sizeof r); if (!ok) break;
         VkDeviceMemory m = (VkDeviceMemory)(uintptr_t)r[0];
-        m->buf = [g_dev newBufferWithBytesNoCopy:(void *)(uintptr_t)r[1] length:r[2] options:MTLResourceStorageModeShared deallocator:nil];
+        m->buf = (__bridge_transfer id<MTLBuffer>)mtl_nocopy_buf((void *)(uintptr_t)r[1], r[2]);   // 同一记账入口（#1827）
         if (m->buf) { atomic_store_explicit(&m->raw, (__bridge void *)m->buf, memory_order_release); nmem++; } else nbad++; }
     for (uint32_t i = 0; ok && i < h.nimg; i++) { uint64_t a; ok = vs_r(f, &a, 8) && nvn_snap_tex_load; if (!ok) break;
         void *t = nvn_snap_tex_load(f); if (!t) { ok = 0; break; } VkImage im = (VkImage)(uintptr_t)a; im->tex = (__bridge_transfer id<MTLTexture>)t; nimg++;

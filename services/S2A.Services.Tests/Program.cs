@@ -2812,7 +2812,9 @@ namespace S2A.Services.Tests
             }
 
             // ---- 系统数据按号（fsp-srv OpenDataStorageByDataId）：0100152000022000 产物根的 0100000000000802 Mii 资源 ----
-            string sysRoot = Environment.GetEnvironmentVariable("S2A_TEST_SYSTEMDATA") ?? Path.Combine(Environment.GetEnvironmentVariable("S2A_RUN_ROOT") ?? Path.Combine(Environment.GetEnvironmentVariable("HOME"), ".s2arm/run"), "s2arm/roots/mk8d@现行/systemdata");
+            string runRoots = Path.Combine(Environment.GetEnvironmentVariable("S2A_RUN_ROOT") ?? Path.Combine(Environment.GetEnvironmentVariable("HOME"), ".s2arm/run"), "s2arm/roots");
+            string mk8dPtr = Path.Combine(runRoots, "mk8d@现行");   // 现行是指针文件，内容 = 版本目录名（pack/orch/current.py）；没有 = 下面按无数据跳过
+            string sysRoot = Environment.GetEnvironmentVariable("S2A_TEST_SYSTEMDATA") ?? Path.Combine(runRoots, File.Exists(mk8dPtr) ? File.ReadAllText(mk8dPtr).Trim() : "mk8d@无现行", "systemdata");
 
             if (Directory.Exists(Path.Combine(sysRoot, "0100000000000802")))
             {

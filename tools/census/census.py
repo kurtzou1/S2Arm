@@ -688,7 +688,7 @@ def api_gap():
 
 def direct_fail(key, lg):
     """直连库编不过的支数（11-01 维护者：确定性编不过是翻译缺陷，玩家首遇卡顿、设备上编不过少画东西，目标归零）：读局日志 direct_fail.tsv
-    （direct_lib.sh 出库成功就写、快测拷来）→ 「N（类别 n、…）」，没有清单 = 「-」（没出直连库 / 没读到）；
+    （direct_lib.py 出库成功就写、快测拷来）→ 「N（类别 n、…）」，没有清单 = 「-」（没出直连库 / 没读到）；
     各键追加进 CENSUS_FAIL_LIST（census.sh 给批次的「直连编不过清单.tsv」：款 / 键 / 类别 / 错误），按款汇总交直连缺陷线归族"""
     p = os.path.join(lg, 'direct_fail.tsv')
     if not os.path.exists(p): return '-'

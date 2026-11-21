@@ -4,7 +4,7 @@
 # 为什么要：有的着色器游戏文件里抽不到（时之笛 Switch 2 版开局 11 支计算着色器：解压后的 romfs、三个程序模块、抽取产物 4.1 万支里都搜不到原码），
 #   真机只能在首遇时现翻译 + 现编 Metal：单支 MSL 0.17–1.7 MB，编库约 9 秒、建管线约 10 秒，提交线程同步等、GPU 空闲，开局停帧 30 秒以上。
 #   宿主 DM_NVN_SHDUMP 把这类着色器的控制段与代码区按真机键存成 <键>.ctl / <键>.code（graphics/nvn/host/dsh_miss.inc）；放进解包目录 rt_shaders/ 后，
-#   直连出库（graphics/tools/direct/direct_lib.sh 合并两边抽取之后）调本工具，按 shader_split.py 的同一记录格式追加进 <阶段>_rt.bin、同一键算法核键、补着色器表与答案表，
+#   直连出库（graphics/tools/direct/direct_lib.py 合并两边抽取之后）调本工具，按 shader_split.py 的同一记录格式追加进 <阶段>_rt.bin、同一键算法核键、补着色器表与答案表，
 #   出库（Build.cs 按 shader_map.tsv 的键列取记录）就把它们编进直连库，真机按原键命中、不再现编。
 #
 # 规矩：文件名的键必须等于按 shader_split.skey 重算的键（不等 = 转储坏了或键算法变了，报红退 1，不进库）；控制段 / 代码区要过 shader_split.check；

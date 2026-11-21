@@ -9,8 +9,8 @@
 #     最后一笔提交时并行段进程还活着钉着的版本剪不动，段进程退出后收尾强制收成现行 + 上一版。
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); trap 'chmod -R u+w "$T" 2> /dev/null; rm -rf "$T"; [ -z "${SP:-}" ] || kill "$SP" 2> /dev/null' EXIT; bad=0
 ck() { if [ "$2" = "$3" ]; then echo "通 $1"; else echo "不通 $1：期望「$2」真结果「$3」"; bad=1; fi; }
-mk() { export S2A_ROOTS=$T/roots; rm -rf "$S2A_ROOTS"; mkdir -p "$S2A_ROOTS"; for i in 1 2 3 4; do mkdir "$S2A_ROOTS/g@v$i"; touch -t 20260101000$i "$S2A_ROOTS/g@v$i"; done; ln -s g@v4 "$S2A_ROOTS/g@现行"; }
-mk2() { export S2A_ROOTS=$T/roots; rm -rf "$S2A_ROOTS"; mkdir -p "$S2A_ROOTS/g@v3" "$S2A_ROOTS/g@v4"; ln -s g@v4 "$S2A_ROOTS/g@现行"; }
+mk() { export S2A_ROOTS=$T/roots; rm -rf "$S2A_ROOTS"; mkdir -p "$S2A_ROOTS"; for i in 1 2 3 4; do mkdir "$S2A_ROOTS/g@v$i"; touch -t 20260101000$i "$S2A_ROOTS/g@v$i"; done; printf '%s\n' g@v4 > "$S2A_ROOTS/g@现行"; }
+mk2() { export S2A_ROOTS=$T/roots; rm -rf "$S2A_ROOTS"; mkdir -p "$S2A_ROOTS/g@v3" "$S2A_ROOTS/g@v4"; printf '%s\n' g@v4 > "$S2A_ROOTS/g@现行"; }
 ls_roots() { ls "$S2A_ROOTS" | grep -v '^\.' | grep -v 现行 | tr '\n' ' '; }
 . "$H/pack/roots.sh"
 mk; echo "999999 Mon Jan  1 00:00:00 2001" > "$S2A_ROOTS/.pin.g@v1.999999"

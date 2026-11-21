@@ -34,7 +34,9 @@ var buildRouteProbe = args.Length > 0 && args[0] == "--build-route-probe";
 var dismissProbe = args.Length > 0 && args[0] == "--dismiss-probe";
 // --install-action-probe <目录>：装机前清单按钮落点（11-19 落点契约：action 唯一来源、/install-action、presented；InstallActionProbe.cs）
 var installActionProbe = args.Length > 0 && args[0] == "--install-action-probe";
-if (reportProbe || buildRouteProbe || dismissProbe || installActionProbe) args = args[1..];
+// --details-probe <目录>：装机卡片「详细过程」点开后不被进度事件刷新收起（D-237B，DetailsProbe.cs）
+var detailsProbe = args.Length > 0 && args[0] == "--details-probe";
+if (reportProbe || buildRouteProbe || dismissProbe || installActionProbe || detailsProbe) args = args[1..];
 var outDir = args.Length > 0 ? args[0] : Path.Combine(
     Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
     ".s2arm/run/s2arm/cmdr/evidence/launcher/win");
@@ -55,6 +57,7 @@ if (reportProbe) { Environment.Exit(ReportProbe.Run(outDir)); }
 if (buildRouteProbe) { Environment.Exit(BuildRouteProbe.Run(outDir)); }
 if (dismissProbe) { Environment.Exit(DismissProbe.Run(outDir)); }
 if (installActionProbe) { Environment.Exit(InstallActionProbe.Run(outDir)); }
+if (detailsProbe) { Environment.Exit(DetailsProbe.Run(outDir)); }
 
 // ── 统一夹具游戏（不用固定游戏名字符串以外的占位）────────────────────
 static LibraryGame MockGame(bool keysReady = true) => new(

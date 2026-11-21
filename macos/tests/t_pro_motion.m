@@ -13,16 +13,17 @@ static unsigned writes, opens;
 static unsigned support_queries;
 static int output_pid[128], output_dev[128], output_cmd[128], output_arg[128], output_packet[128];
 static void (*write_observer)(IOHIDDeviceRef);
-static unsigned references[5], retains, releases;
-static IOHIDReportCallback callbacks[5]; static void *contexts[5];
+static unsigned references[6], retains, releases;
+static IOHIDReportCallback callbacks[6]; static void *contexts[6];
 static IOHIDDeviceRef dev(int n) { return (IOHIDDeviceRef)(uintptr_t)n; }
 static int index_of(IOHIDDeviceRef d) { return (int)(uintptr_t)d; }
-static int pid_of(IOHIDDeviceRef d) { return d == dev(3) ? 0x2006 : 0x2009; }
+static int pid_of(IOHIDDeviceRef d) { return d == dev(3) || d == dev(5) ? 0x2006 : 0x2009; }   // dev(5)：冒用左 Joy-Con 产品号、名字是 Pro Controller 的第三方 Pro（D-52Z8）
 static const uint8_t pad_desc[] = {0x05,1,0x09,4,0xa1,1,0x85,0x30,0x75,8,0x95,63,0x81,2,0x85,1,0x91,2,0xc0};
 static const uint8_t vendor_desc[] = {0x06,0x7a,0xff,0x09,1,0xa1,1,0x75,8,0x95,64,0x81,2,0x91,2,0xc0};
 static CFTypeRef property(IOHIDDeviceRef d, CFStringRef key) {
-    if (CFEqual(key, CFSTR(kIOHIDProductIDKey))) return (__bridge CFTypeRef)(d == dev(3) ? @0x2006 : @0x2009);
-    if (CFEqual(key, CFSTR(kIOHIDSerialNumberKey))) return d == dev(3) ? CFSTR("fixture-left") : d == dev(4) ? CFSTR("fixture-unmanaged") : CFSTR("fixture-pro");
+    if (CFEqual(key, CFSTR(kIOHIDProductIDKey))) return (__bridge CFTypeRef)(pid_of(d) == 0x2006 ? @0x2006 : @0x2009);
+    if (CFEqual(key, CFSTR(kIOHIDProductKey))) return d == dev(5) ? CFSTR("Pro Controller") : d == dev(3) ? CFSTR("Joy-Con (L)") : NULL;
+    if (CFEqual(key, CFSTR(kIOHIDSerialNumberKey))) return d == dev(3) ? CFSTR("fixture-left") : d == dev(4) ? CFSTR("fixture-unmanaged") : d == dev(5) ? CFSTR("fixture-clone") : CFSTR("fixture-pro");
     if (CFEqual(key, CFSTR(kIOHIDReportDescriptorKey))) {
         static NSData *pad, *vendor;
         if (!pad) { pad = [NSData dataWithBytes:pad_desc length:sizeof pad_desc]; vendor = [NSData dataWithBytes:vendor_desc length:sizeof vendor_desc]; }
@@ -240,5 +241,14 @@ int main(void) { @autoreleasepool {
     // #1671：服务层只在会话号非 0 时建反馈对象、开六轴；关了震动 / 没有能震的手柄也要非 0，且不是 P1 一代 Joy-Con 的 HID 震动会话（MAC_RUMBLE_BASE | 0xffffffff）
     CHECK(s2a_mac_feedback_session(0) != 0 && s2a_mac_feedback_session(0) != 0x534d0000ffffffffull, "rumble off / no rumble device still gives a motion-only feedback session");
     CHECK(s2a_mac_feedback_session(0x534d000000000003ull) == 0x534d000000000003ull, "a live rumble session passes through unchanged");
+    // D-52Z8：冒用左 Joy-Con 产品号（0x2006）的第三方 Pro 按 Pro 认：列表报 0x2009，六轴按 Pro 轴向（加速度 x = -原始 y），不按左只侧握（x = +原始 y）
+    atomic_store(&g_want,1); before=writes; attach_device(dev(5));
+    { s2a_joycon_info jl[16]; int jn=s2a_joycon_list(jl,16), pro=0; for (int i=0;i<jn;i++) if (!strcmp(jl[i].id,"fixture-clone")) pro=jl[i].pid==0x2009;
+      CHECK(pro && writes==before+2 && output_cmd[before]==0x40, "Joy-Con product id with a Pro Controller name is listed as Pro and still gets raw IMU enabled"); }
+    { uint8_t b[64]={0x30}; b[39]=0x00; b[40]=0x10;   // 原始加速度 y = 0x1000 计数 = 0.999 g
+      callbacks[5](contexts[5],kIOReturnSuccess,dev(5),kIOHIDReportTypeInput,0x30,b,sizeof b);
+      s2a_pad_motion c={0}; CHECK(s2a_joycon_imu_read_id("fixture-clone",&c) && c.acceleration_x < -0.99f && c.acceleration_x > -1.01f && c.acceleration_y == 0.0f,
+            "clone Pro motion uses Pro axes, not sideways Joy-Con (L) axes"); }
+    detach_device(dev(5)); atomic_store(&g_want,0);
     printf("pro_motion: %u checks, %u failures\n",checks,failed); return failed ? 1 : 0;
 } }

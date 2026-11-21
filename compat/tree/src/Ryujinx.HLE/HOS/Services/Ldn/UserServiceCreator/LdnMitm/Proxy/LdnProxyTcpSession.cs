@@ -11,6 +11,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm.Proxy
 
         internal int NodeId;
         internal NodeInfo NodeInfo;
+        internal bool HandshakeComplete { get; private set; }
 
         private byte[] _buffer;
         private int _bufferEnd;
@@ -29,12 +30,13 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm.Proxy
         public void OverrideInfo()
         {
             NodeInfo.NodeId = (byte)NodeId;
-            NodeInfo.IsConnected = (byte)(IsConnected ? 1 : 0);
+            NodeInfo.IsConnected = (byte)(HandshakeComplete && IsConnected ? 1 : 0);
         }
 
         protected override void OnConnected()
         {
             Logger.Info?.PrintMsg(LogClass.ServiceLdn, "LdnProxyTCPSession connected!");
+            _protocol.InvokeAccept(this);
         }
 
         protected override void OnDisconnected()
@@ -66,11 +68,16 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm.Proxy
         {
             try
             {
-                if (endPoint.Equals(this.Socket.RemoteEndPoint))
+                // LanProtocol.Connect is shared by every accepted station. A Connect frame belongs
+                // only to the TCP connection whose remote endpoint sent it.
+                if (endPoint == null || !endPoint.Equals(Socket.RemoteEndPoint))
                 {
-                    NodeInfo = info;
-                    _protocol.InvokeAccept(this);
+                    return;
                 }
+
+                NodeInfo = info;
+                HandshakeComplete = true;
+                _protocol.InvokeStationConnected(this);
             }
             catch (System.ObjectDisposedException)
             {

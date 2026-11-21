@@ -1,4 +1,5 @@
 #!/bin/bash
+# 门禁显卡：共享（建 Metal 设备在本机显卡上跑、不按显示时钟判：取共享显卡锁，与按显示时钟判的独占步错开；11-20 读写锁）
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 S2Arm contributors
 # MSL 的 NoContraction 辅助函数（spvFAdd / spvFSub / spvFMul / 三种矩阵乘）去掉 optnone、改内联后，舍入与原版逐位相同、且编译器无从再融合。

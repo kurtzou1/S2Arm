@@ -44,9 +44,11 @@ TID=$(prog_id "$CUR")
 C=${S2A_DIRECT_CACHE:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/cache/direct/${TID:-unknown}}
 TAG=$(root_tag "$G" "cp-${K:0:8}"); W=$(root_begin "$G" "$TAG") || exit 1
 P=$W/shaders/direct/pipelines; rm -rf "$P"
-o=$("$PY" "$R/graphics/tools/direct/cs_pipelines.py" "$W/shaders/direct" "$P" --plat "$PLAT" --os "$OSV" $(printf -- '--arch %s ' $ARCHS) --cache "$C/store/cpso" -j "${J:-$(getconf _NPROCESSORS_ONLN)}" 2>&1); rc=$?
+# 路数用本单核数 S2A_JOBS（tools/cores.sh：不吃大内存的步骤用它），不用按每路 1.5 GB 定的 J：metal-tt 每路实测约 4 MB、编译服务约 7 MB、本工具约 0.1 GB，
+#   原先跟 J 走，开头空闲内存少时整段单路（16 GB 机器空闲 4.8 GB → J 1：一款体育游戏 6000 对基础管线二十多分钟）
+o=$("$PY" "$R/graphics/tools/direct/cs_pipelines.py" "$W/shaders/direct" "$P" --plat "$PLAT" --os "$OSV" $(printf -- '--arch %s ' $ARCHS) --cache "$C/store/cpso" -j "${S2A_JOBS:-${J:-$(getconf _NPROCESSORS_ONLN)}}" 2>&1); rc=$?
 if [ "$rc" != 0 ] && [ "$rc" != 3 ]; then root_abort "$G" "$TAG"; soft "cs_pipelines.py 退出 ${rc}：$(tail -1 <<< "$o" | cut -c1-200)"; fi
-ob=$("$PY" "$R/graphics/tools/direct/base_pipelines.py" "$W/shaders/direct" "$P" --plat "$PLAT" --os "$OSV" $(printf -- '--arch %s ' $ARCHS) --cache "$C/store/cpso" -j "${J:-$(getconf _NPROCESSORS_ONLN)}" 2>&1); rb=$?
+ob=$("$PY" "$R/graphics/tools/direct/base_pipelines.py" "$W/shaders/direct" "$P" --plat "$PLAT" --os "$OSV" $(printf -- '--arch %s ' $ARCHS) --cache "$C/store/cpso" -j "${S2A_JOBS:-${J:-$(getconf _NPROCESSORS_ONLN)}}" 2>&1); rb=$?
 if [ "$rb" != 0 ] && [ "$rb" != 3 ]; then root_abort "$G" "$TAG"; soft "base_pipelines.py 退出 ${rb}：$(tail -1 <<< "$ob" | cut -c1-200)"; fi
 NOTE=; [ "$rc" = 3 ] && NOTE="；🟡 有支没编成，照旧首遇现编（$(grep -c '^【黄】计算管线' <<< "$o") 条示例见日志）"
 [ "$rb" = 3 ] && NOTE="${NOTE}；🟡 有对的拉取基础管线没编成，照旧设备后台建（$(grep -c '^【黄】拉取基础管线' <<< "$ob") 条示例见日志）"

@@ -34,8 +34,6 @@ ALLOW = {
         "误判：删的是出包目录 pack_dir 里搬进 game.img 后留下的空目录（自下而上），不是 RomFS",
     ("translator/shader_split.py", "main:listdir"):
         "误判：列的是 RomFS 旁边的 glslc_capture/、ue_shaders/ 与输出目录（路径由 RomFS 路径的上一级拼出），不是 RomFS；RomFS 本身经 romfs_list.walk",
-    ("tools/nostall.py", "walk:scandir"):
-        "误判：nostall 是看门狗包装（命令行里的 RomFS 是交给被包的工具的），它自己只盘点 --watch 给的输出目录",
     ("pack/stage_uilayout.sh", "$T/romfs"):
         "误判：$T/romfs 是界面布局生成器刚写出的覆盖层（只含改过的几个包），不是游戏 RomFS",
     ("pack/stage_uilayout.sh", "$OV/romfs"):

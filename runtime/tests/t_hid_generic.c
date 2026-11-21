@@ -85,6 +85,9 @@ int main(void) {
     CHECK(s2a_hidg_route(1, 0x057e, 1, 0, 0) == S2A_HIDG_TAKE && s2a_hidg_route(1, 0, 0, 0, 0) == S2A_HIDG_TAKE, "Pro：原厂 / 0 号厂商都立刻读");
     CHECK(s2a_hidg_route(1, 0x057e, 1, 1, 0) == S2A_HIDG_YIELD && s2a_hidg_route(1, 0, 0, 1, 5000000) == S2A_HIDG_YIELD, "Pro：系统列出同名就让（不成两个玩家）");
     CHECK(s2a_hidg_is_pro("Lic Pro Controller") && s2a_hidg_is_pro("PRO CONTROLLER") && !s2a_hidg_is_pro("Stadia Controller") && !s2a_hidg_is_pro(""), "Pro 那一支按名字");
+    CHECK(s2a_hidg_jc_body_pid(0x2006, "Pro Controller") == 0x2009 && s2a_hidg_jc_body_pid(0x2007, "Wireless Pro Controller") == 0x2009, "冒用 Joy-Con 产品号的第三方 Pro：按 Pro 认");
+    CHECK(s2a_hidg_jc_body_pid(0x2006, "Joy-Con (L)") == 0x2006 && s2a_hidg_jc_body_pid(0x2007, "Joy-Con (R)") == 0x2007 && s2a_hidg_jc_body_pid(0x2006, NULL) == 0x2006 &&
+          s2a_hidg_jc_body_pid(0x2006, "Joy-Con Pro Controller Grip") == 0x2006 && s2a_hidg_jc_body_pid(0x2009, "Pro Controller") == 0x2009, "真 Joy-Con / 没名字 / 真 Pro：照产品号");
 
     // 首次按键才占位：没按过 + 没按 = 不占；按过一次之后松开也一直占；Pro 那一支接上就占
     CHECK(!s2a_hidg_joined(0, 0, 0), "没按过不占位（键盘接收器）");

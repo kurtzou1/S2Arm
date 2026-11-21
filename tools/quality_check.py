@@ -383,6 +383,7 @@ def check_android(o, name, ai=True):
     # wall_us（CPU present 间隔，契约同款回退）——真实确认读数优先，不混口径。
     disp = [int(r['disp_us']) / 1000 for r in rows if (r.get('disp_us') or '').isdigit() and int(r['disp_us']) > 0]
     win = disp or [int(r['wall_us']) / 1000 for r in rows if (r.get('wall_us') or '').isdigit() and int(r['wall_us']) > 0]
+    source = 'disp_us' if disp else 'wall_us'
     import fps_truth
     t = fps_truth.load().get(pid.lower()) if pid else None; fps = float(t['目标帧率']) if t else 60.0; bud = 1000.0 / fps
     short = None
@@ -406,7 +407,7 @@ def check_android(o, name, ai=True):
     else:
         avg = len(win) * 1000 / sum(win); slow = sum(w > 1.5 * bud for w in win) / len(win) * 100; med = sorted(win)[len(win) // 2]
         out['帧率'] = '过' if avg >= fps * 0.99 and slow <= 1 else '不过'
-        read.append(f'帧率 要 {fps:g}（{"帧率真值表" if t else "缺省 60"}）；disp_us：平均 {avg:.2f} 帧/秒，中位 {med:.1f} ms，慢帧 {slow:.2f}%，{len(win)} 帧')
+        read.append(f'帧率 要 {fps:g}（{"帧率真值表" if t else "缺省 60"}）；{source}：平均 {avg:.2f} 帧/秒，中位 {med:.1f} ms，慢帧 {slow:.2f}%，{len(win)} 帧')
     # 满屏：整屏截图直接数黑列
     look = game or ([] if ans else ps)
     if look:

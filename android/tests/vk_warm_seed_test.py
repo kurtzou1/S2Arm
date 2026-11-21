@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""安卓首局预热随包种子整理（android/tools/vk_warm_seed.py）单测：python3 android/tests/vk_warm_seed_test.py
+
+文件按宿主格式手写（程序清单 60 + n*844 + 8、管线清单 32 + n*388，见 android/native/nvn/nvn_vk_{prog,pipe}_warm.c），
+期望的目录名、条数、字节由测试自己算，不调被测实现：
+  ① 一台设备一份（程序 P1 P2 + 管线 P1 P2 P9）→ <闭包 hex16>-<profile hex16>/ 下：程序清单逐字节原样，管线清单只剩 P1 P2（P9 的程序不在），
+     条数 2、校验和按手算 FNV-1a 重算
+  ② 坏文件不收不崩：程序清单 FNV 坏、文件名闭包与文件头不符；管线清单条目大小不符 → 程序照收、不带管线
+  ③ 同闭包同 profile 两份来源：取程序条目多的；换来源先后、换子目录名结果逐字节相同
+  ④ 不同 profile 两份：各出一个目录
+  ⑤ 没有来源 / 来源不存在：输出目录是空的、退 0、汇总行写「空」
+  ⑥ 默认来源：S2A_VK_WARM_SOURCES 没给时读 <S2A_RUN_ROOT>/s2arm/vk_warm/<程序号>/
+"""
+import hashlib
+import os
+import struct
+import subprocess
+import sys
+import tempfile
+import unittest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+TOOL = os.path.join(HERE, '..', 'tools', 'vk_warm_seed.py')
+
+
+def read(path):
+    with open(path, 'rb') as f: return f.read()
+
+
+def fnv(b):   # 宿主清单的 FNV-1a 起始值是 1469598103934665603（nvn_vk_{prog,pipe}_warm.c 原样，不是标准的 14695981039346656037），照抄
+    h = 1469598103934665603
+    for x in b: h = ((h ^ x) * 0x100000001b3) % (1 << 64)
+    return h
+
+
+def ident(n): return bytes((n * 31 + i + 1) & 0xFF for i in range(32))
+
+
+def sha8(s): return hashlib.sha256(s.encode()).digest()[:8]
+
+
+def prog_file(ids, profile='profile-A', closure='closure-A', corrupt=False):
+    hdr = struct.pack('<IIII', 0x31575053, 1, 844, len(ids)) + hashlib.sha256(profile.encode()).digest() + struct.pack('<i', 7) + sha8(closure)
+    assert len(hdr) == 60
+    body = b''.join(ident(n) + struct.pack('<I', 3) + bytes(24) + b'\x03\x02\x00\x00' + bytes([n]) * 768 + struct.pack('<IQ', 9, 1) for n in ids)
+    b = hdr + body
+    return b + struct.pack('<Q', fnv(b) ^ (1 if corrupt else 0)), 'programs-v1-' + sha8(closure).hex() + '.bin'
+
+
+def pipe_entry(n): return ident(n) + bytes([3]) + bytes([n]) * 351 + struct.pack('<I', 5)
+
+
+def pipe_file(ids, entry_size=388):
+    body = b''.join(pipe_entry(n) for n in ids)
+    return b'S2APW1\0\0' + struct.pack('<IIII', 1, 352, entry_size, len(ids)) + struct.pack('<Q', fnv(body)) + body
+
+
+def put(d, name, b):
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, name), 'wb') as f: f.write(b)
+
+
+def run(out, *srcs, env=None):
+    e = dict(os.environ); e.pop('S2A_VK_WARM_SOURCES', None); e.update(env or {})
+    r = subprocess.run([sys.executable, TOOL, out, '0100AAAA00000000', *srcs], capture_output=True, text=True, env=e)
+    return r.returncode, r.stdout
+
+
+def tree(d):
+    res = {}
+    for root, _, files in os.walk(d):
+        for f in files:
+            p = os.path.join(root, f); res[os.path.relpath(p, d)] = read(p)
+    return res
+
+
+class T(unittest.TestCase):
+    def setUp(self):
+        self.t = tempfile.TemporaryDirectory(); self.d = self.t.name
+        self.dir_a = sha8('closure-A').hex() + '-' + sha8('profile-A').hex()
+
+    def tearDown(self): self.t.cleanup()
+
+    def test_1_pair_and_filter(self):
+        pb, pn = prog_file([1, 2]); src = os.path.join(self.d, 'src')
+        put(src, pn, pb); put(src, 'pipes-v1-352.bin', pipe_file([1, 2, 9]))
+        rc, out = run(os.path.join(self.d, 'out'), src)
+        self.assertEqual(rc, 0, out)
+        got = tree(os.path.join(self.d, 'out'))
+        self.assertEqual(sorted(got), sorted([f'{self.dir_a}/{pn}', f'{self.dir_a}/pipes-v1-352.bin']))
+        self.assertEqual(got[f'{self.dir_a}/{pn}'], pb)
+        body = pipe_entry(1) + pipe_entry(2)
+        want = b'S2APW1\0\0' + struct.pack('<IIII', 1, 352, 388, 2) + struct.pack('<Q', fnv(body)) + body
+        self.assertEqual(got[f'{self.dir_a}/pipes-v1-352.bin'], want)
+        self.assertIn('程序 2 条、管线 2 条（程序不在的管线 1 条不收）', out)
+
+    def test_2_bad_files_skipped(self):
+        pb, pn = prog_file([1, 2]); bad, _ = prog_file([3], corrupt=True); other, on = prog_file([4], closure='closure-B')
+        src = os.path.join(self.d, 'src')
+        put(src, pn, pb); put(src, 'pipes-v1-352.bin', pipe_file([1], entry_size=400))
+        put(os.path.join(src, 'b'), pn, bad)                                  # 校验和坏
+        put(os.path.join(src, 'c'), 'programs-v1-0000000000000000.bin', other)   # 文件名的闭包与文件头不符
+        rc, out = run(os.path.join(self.d, 'out'), src)
+        self.assertEqual(rc, 0, out)
+        got = tree(os.path.join(self.d, 'out'))
+        self.assertEqual(sorted(got), [f'{self.dir_a}/{pn}'])
+        self.assertEqual(out.count('【黄】'), 3, out)
+
+    def test_3_bigger_wins_order_free(self):
+        p2, pn = prog_file([1, 2]); p3, _ = prog_file([1, 2, 3])
+        a, b = os.path.join(self.d, 'a'), os.path.join(self.d, 'b')
+        put(a, pn, p2); put(b, pn, p3); put(b, 'pipes-v1-352.bin', pipe_file([3]))
+        run(os.path.join(self.d, 'o1'), a, b); run(os.path.join(self.d, 'o2'), b, a)
+        x, y = os.path.join(self.d, 'x'), os.path.join(self.d, 'y')
+        put(os.path.join(x, 'zz'), pn, p2); put(os.path.join(x, 'aa'), pn, p3); put(os.path.join(x, 'aa'), 'pipes-v1-352.bin', pipe_file([3]))
+        run(os.path.join(self.d, 'o3'), x)
+        o1, o2, o3 = (tree(os.path.join(self.d, k)) for k in ('o1', 'o2', 'o3'))
+        self.assertEqual(o1[f'{self.dir_a}/{pn}'], p3)
+        self.assertEqual(o1, o2); self.assertEqual(o1, o3)
+
+    def test_4_two_profiles(self):
+        pa, pn = prog_file([1]); pbb, _ = prog_file([2], profile='profile-B')
+        put(os.path.join(self.d, 's', '1'), pn, pa); put(os.path.join(self.d, 's', '2'), pn, pbb)
+        run(os.path.join(self.d, 'out'), os.path.join(self.d, 's'))
+        dir_b = sha8('closure-A').hex() + '-' + sha8('profile-B').hex()
+        self.assertEqual(sorted(tree(os.path.join(self.d, 'out'))), sorted([f'{self.dir_a}/{pn}', f'{dir_b}/{pn}']))
+
+    def test_5_no_source(self):
+        rc, out = run(os.path.join(self.d, 'out'), os.path.join(self.d, 'nope'))
+        self.assertEqual(rc, 0); self.assertEqual(tree(os.path.join(self.d, 'out')), {}); self.assertIn('空', out)
+
+    def test_6_default_source(self):
+        pb, pn = prog_file([1]); put(os.path.join(self.d, 'run', 's2arm', 'vk_warm', '0100AAAA00000000'), pn, pb)
+        rc, out = run(os.path.join(self.d, 'out'), env={'S2A_RUN_ROOT': os.path.join(self.d, 'run')})
+        self.assertEqual(rc, 0, out); self.assertEqual(sorted(tree(os.path.join(self.d, 'out'))), [f'{self.dir_a}/{pn}'])
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)

@@ -1301,7 +1301,7 @@ static void warm_diag(const char *fmt, ...) {
     va_end(ap);
     nvn_plat_log(NVN_PLAT_LOG_INFO, "warm", b);
 }
-static struct entry *build_compute(const uint8_t *, size_t, const struct s2a_source_entry_view *, const uint8_t[32]);
+static struct entry *build_compute(const uint8_t *, size_t, const struct s2a_source_entry_view *, const uint8_t[32], const uint8_t[8]);
 
 static struct entry *warm_work_run(const struct nvk_prog_rec *rec, int nst) {
     uint8_t *bytes = NULL; size_t len = 0; char why[256] = "";
@@ -1340,7 +1340,7 @@ static struct entry *warm_work_run(const struct nvk_prog_rec *rec, int nst) {
     // 预热清单不记绘制图元：几何程序这里取不到（topology 传 NULL → miss），等提交线程按本笔图元取
     if (!bytes && libpack_fetch(rec->identity, compute ? NULL : (const uint8_t (*)[8])rec->keys,
                                 compute ? 0 : rec->stage_mask, compute ? rec->keys[0] : NULL, rec->lp_ok == 2, NULL, &pc, &bytes, &len)) {
-        struct entry *le = compute ? build_compute(bytes, len, &views[0], rec->identity) : build(bytes, len, views, nst, rec->identity);
+        struct entry *le = compute ? build_compute(bytes, len, &views[0], rec->identity, rec->keys[0]) : build(bytes, len, views, nst, rec->identity);
         if (le && !compute) le->prog.z_raw = 1;
         free(bytes); bytes = NULL; len = 0;
         if (le && !le->failed) { libpack_note_hit(); return le; }
@@ -1357,7 +1357,7 @@ static struct entry *warm_work_run(const struct nvk_prog_rec *rec, int nst) {
         return NULL;
     }
     // c1 随清单落盘（开局 source_store 是空的）：views 在上面按清单填好、传给 build()，逐位与真实解析一致。
-    struct entry *e = compute ? build_compute(bytes, len, &views[0], rec->identity) : build(bytes, len, views, nst, rec->identity);
+    struct entry *e = compute ? build_compute(bytes, len, &views[0], rec->identity, rec->keys[0]) : build(bytes, len, views, nst, rec->identity);
     if (!compute && e && !e->failed && have_res && alias_on()) entry_set_res(e, rsha, (uint64_t)len, nst);
     // 结果合并命中时前台要把事实复用（#1187）登记到这份程序上，登记要用「编译器实际读了哪些绑定事实」的掩码：
     // 前台自己建的（work_run）本来就算好了，预热带建的也要算（纯函数，后台线程能算）。关着开关时保持原样不算。
@@ -1823,8 +1823,16 @@ static int resolve_slow(const struct rp_shader_req *q, const struct rp_prog **ou
 // 输入的构造与身份用旧层留下的零件（nvn_vk_compute_request.c：只做输入，不碰设备），结果解析用 nvn_vk_program_parse_compute。
 // 存储缓冲三种来源：NVN 存储槽（SBUFP）、别名某个用户 UBO 槽的本体（map 2 / UBOP）、
 // 用户 UBO 里 8 字节裸指针（map 3 / UBOA，带字节偏移）。图像、间接派发：记账、取不到。
+// 计算程序的拒绝日志带 8 字节程序键（同 rp_S.skey[5]，spill 派发 / 现编日志里的那个键）：
+//   同一份代码的多个身份、不同代码的同类拒绝，才能在日志里逐个对上（身份是 32 字节哈希，键才是游戏代码的名字）
+static void with_program_key(char *out, size_t cap, const char *why, const uint8_t key[8]) {
+    int n = snprintf(out, cap, "%s", why);
+    if (key && n > 0 && (size_t)n < cap)
+        snprintf(out + n, cap - (size_t)n, "（程序键 %02x%02x%02x%02x%02x%02x%02x%02x）",
+                 key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7]);
+}
 static struct entry *build_compute(const uint8_t *bytes, size_t len, const struct s2a_source_entry_view *src,
-                                   const uint8_t identity[32]) {
+                                   const uint8_t identity[32], const uint8_t key[8]) {
     struct entry *e = calloc(1, sizeof *e);
     if (!e) return NULL;
     e->prog.is_compute = 1;
@@ -1833,7 +1841,8 @@ static struct entry *build_compute(const uint8_t *bytes, size_t len, const struc
     memset(&cp, 0, sizeof cp);
     int parsed = nvn_vk_program_parse_compute(bytes, len, &cp, why, sizeof why);
     if (parsed) {
-        if (parsed == NVK_PROGRAM_ARRAY_UNSUPPORTED) array_unsupported(why); else red1("compute_program_parse_failed", why);
+        char note[256]; with_program_key(note, sizeof note, why, key);
+        if (parsed == NVK_PROGRAM_ARRAY_UNSUPPORTED) array_unsupported(note); else red1("compute_program_parse_failed", note);
         e->failed = 1; return e;
     }
     e->prog.support_bytes = cp.support_bytes; e->prog.spill_bytes = cp.spill_bytes;
@@ -2020,7 +2029,7 @@ static int resolve_compute_slow(const struct rp_prog **out, const struct s2a_dir
         // 出包预编库：口径同图形那条（跨局缓存之后、现编之前；同一句柄、同一张不可用表）。键 = 计算阶段 8 字节控制键 rp_S.skey[5]
         struct entry *lpe = NULL;
         if (!bytes && libpack_fetch(rq.identity, NULL, 0, rp_S.skey[5], !unaligned, NULL, &pc, &bytes, &len)) {
-            lpe = build_compute(bytes, len, &rq.source, rq.identity);
+            lpe = build_compute(bytes, len, &rq.source, rq.identity, rp_S.skey[5]);
             free(bytes); bytes = NULL; len = 0;
             if (lpe && !lpe->failed) libpack_note_hit();
             else { entry_free(lpe); lpe = NULL; libpack_mark_bad(rq.identity); }
@@ -2054,7 +2063,7 @@ static int resolve_compute_slow(const struct rp_prog **out, const struct s2a_dir
             if (cdir && !nvn_plat_flag("no_disk_cache", 0)) s2a_program_cache_store_async(cdir, rq.identity, bytes, len);
         }
         if (lpe) e = lpe;
-        else { e = build_compute(bytes, len, &rq.source, rq.identity); free(bytes); }
+        else { e = build_compute(bytes, len, &rq.source, rq.identity, rp_S.skey[5]); free(bytes); }
         pthread_mutex_lock(&g_progs_mu);
         struct entry *have = progs_get_locked(rq.identity);
         if (!have && e) (void)nvn_hm_put(&g_progs, rq.identity, e);

@@ -333,6 +333,14 @@
 "img.noShaders.body" = "«%@» está incompleto. Pon también aquí el .s2arm de este juego de la carpeta «S2Arm Game Packs» de tu ordenador (lleva los sombreadores del juego), o conecta tu teléfono y haz clic en «Push to iPhone» en S2Arm en tu ordenador.";
 "img.updateSkipped.title" = "Actualización de shaders omitida";
 "img.updateSkipped.body" = "«%@» no corresponde a la versión actual de este juego, así que se omitió y no se aplicó. El juego funciona con normalidad. Para usar esta actualización, añade junto con ella el .img completo de la misma exportación de tu ordenador.";
+"gameExport.preparing" = "Creando los archivos de exportación…";
+"gameExport.hint" = "Crea un archivo .s2arm y un .img y los guarda en la app Archivos. Tras reinstalar S2Arm con otra firma, ponlos en «Import Here» para recuperar el juego.";
+"gameExport.failed.title" = "No se pudo exportar este juego";
+"gameExport.noProgram" = "Este juego se instaló de la forma antigua (su programa está dentro de la app), así que no se puede exportar en el iPhone. Expórtalo desde S2Arm en tu ordenador.";
+"gameExport.inBundle" = "Este juego está dentro del paquete de la app, así que no se puede exportar en el iPhone.";
+"gameExport.partial" = "A este juego le faltan archivos (solo se puede jugar en parte). Complétalo y vuelve a exportarlo.";
+"gameExport.noImg" = "Los archivos de este juego usan el formato antiguo (sin game.img), así que no se puede exportar en el iPhone. Expórtalo desde S2Arm en tu ordenador.";
+"gameExport.ioFailed" = "No se pudieron escribir los archivos de exportación: %@";
 "container.locked.title" = "El sistema bloqueó algunos archivos de S2Arm";
 "container.locked.body" = "En este dispositivo hay %@ GB de archivos antiguos de S2Arm bloqueados por el sistema. S2Arm no puede cambiarlos ni borrarlos; solo se eliminan al borrar la app.\n\nPara liberar ese espacio:\n1. En cada juego abre el menú → Gestionar partidas guardadas → Exportar partida guardada actual…, a un lugar de Archivos fuera de la carpeta de S2Arm (por ejemplo iCloud Drive; la carpeta de S2Arm se borra junto con la app)\n2. Borra y vuelve a instalar S2Arm\n3. Usa Gestionar partidas guardadas → Elige una copia de seguridad para comprobar… para recuperar tus partidas";
 "diag.fileWord" = "diag";
@@ -424,6 +432,7 @@
 "notice.cable" = "Cable";
 "notice.imgFile" = "NombreDelJuego.img";
 "notice.step.img" = "O bien exporta este juego en tu ordenador, coloca sus dos archivos de la carpeta «S2Arm Game Packs», el .s2arm y el .img, en la carpeta «Import Here» de «%@» en la app Archivos y abre «%@» de nuevo. Se detectará automáticamente.";
+"notice.step.imgApp" = "O bien exporta este juego en tu ordenador y coloca el .s2arm de la carpeta de este juego en el ordenador (y el .img, si lo hay) en la carpeta «Import Here» de «%@» en la app Archivos; después toca «Ya lo he copiado, comprobar de nuevo» abajo.";
 "notice.step.auto" = "En S2Arm en tu ordenador, haz clic en «Enviar al iPhone» para este juego y los recursos se copian automáticamente: la forma más fácil.";
 "save.blocked" = "%@\n\nCopia tus datos a un lugar seguro antes de decidir: abre la app Archivos → «En mi iPhone» («En mi iPad» en iPad) → «%@», y copia toda la carpeta «S2A» a otro lugar. Las operaciones sin terminar quedan registradas en S2A/save-transfer/save-transactions. También puedes seleccionar este dispositivo en el Finder de un Mac → «Archivos» y arrastrar la carpeta «S2A» de esta app hacia fuera.\n\nTras copiarla, puedes reempaquetar e instalar para intentarlo de nuevo, o tocar «Iniciar el juego de todas formas…».";
 "save.busy" = "La operación de guardado anterior sigue en curso. Vuelve a intentarlo cuando termine.";
@@ -590,6 +599,7 @@
 
 /* 0.6.0 快照：游戏中菜单 */
 "vpad.snap.save" = "Guardar este momento";
+"vpad.snap.offAddress" = "Este dispositivo no tiene espacio de direcciones suficiente para este juego y las instantáneas a la vez, así que aquí las instantáneas están desactivadas para este juego. El juego funciona con normalidad.";
 "vpad.snap.restore" = "Volver al momento guardado";
 "vpad.snap.saving" = "Guardando este momento…";
 "vpad.snap.saved" = "Momento guardado";
@@ -630,3 +640,6 @@
 "cert.source.sidestore" = "De SideStore";
 "cert.source.p12" = ".p12 importado";
 "cert.source.pc" = "Desde tu ordenador";
+"addrshort.title" = "Este dispositivo no tiene espacio de direcciones suficiente para este juego";
+"addrshort.body" = "Este juego necesita al empezar un bloque muy grande de espacio de direcciones y este dispositivo no puede darle tanto: puede ir muy lento o quedarse parado al principio. Puedes tocar «Iniciar de todos modos» para probar; para jugar con normalidad, usa un dispositivo con más espacio de direcciones (por ejemplo, un iPhone, iPad o Mac con más memoria) o espera a una versión posterior.";
+"host.startAnyway" = "Iniciar de todos modos";

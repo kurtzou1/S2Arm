@@ -13,7 +13,7 @@
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); bad=0
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
 mkdir -p $T/repo/pack $T/repo/tools $T/roots $T/fonts $T/sd/0100000000000801 $T/sd/0100000000000802 $T/sd_empty/0100000000000802
-cp "$H/pack/roots.sh" "$H/pack/sysdata_synth.py" "$H/pack/sysdata_mii.py" $T/repo/pack/; cp "${NEED:-$H/pack/sysdata_need.py}" $T/repo/pack/sysdata_need.py
+cp "$H/pack/roots.sh" "$H/pack/sysdata_synth.py" "$H/pack/sysdata_mii.py" $T/repo/pack/; mkdir -p $T/repo/pack/orch && cp "$H/pack/orch/current.py" $T/repo/pack/orch/; cp "${NEED:-$H/pack/sysdata_need.py}" $T/repo/pack/sysdata_need.py
 cp -R "$H/pack/stages" $T/repo/pack/
 cp "${STAGE:-$H/pack/stage_sysdata.sh}" $T/repo/pack/stage_sysdata.sh; cp "$H/tools/clonedir.py" "$H/tools/plock.sh" "$H/tools/flock_hold.py" $T/repo/tools/
 printf 'font' > $T/fonts/a.bfttf; printf 'errmsg-v1' > $T/sd/0100000000000801/version.dat; printf 'real' > $T/sd/0100000000000802/ShapeHigh.dat
@@ -21,10 +21,10 @@ printf '# 程序号\t构建号\t版本\t系统数据号\t用途\t依据\n0100CCC
 export S2A_ROOTS=$T/roots S2A_ROOTS_SHARED=$T/shared S2A_FONTS=$T/fonts; unset S2A_SYSDATA S2A_SYSDATA_NEED
 mk() {   # mk <款> <程序号> <构建号前 4 字节>：产物根 <款>@s0（时区已在、无字体）并设现行
   local d=$T/roots/$1@s0; mkdir -p $d/exefs $d/systemdata/010000000000080E; printf 'title_id\t%s\ndisplay_version\t9.9\n' "$2" > $d/unpack.tsv
-  python3 -c "import sys;open(sys.argv[1],'wb').write(b'\0'*0x40+bytes.fromhex(sys.argv[2])+b'\0'*12+b'\0'*32)" $d/exefs/main "$3"; echo tz > $d/systemdata/010000000000080E/binaryList.txt; ln -s $1@s0 $T/roots/$1@现行
+  python3 -c "import sys;open(sys.argv[1],'wb').write(b'\0'*0x40+bytes.fromhex(sys.argv[2])+b'\0'*12+b'\0'*32)" $d/exefs/main "$3"; echo tz > $d/systemdata/010000000000080E/binaryList.txt; printf '%s\n' $1@s0 > $T/roots/$1@现行
 }
 S() { bash $T/repo/pack/stage_sysdata.sh "$1"; }
-c() { cd -P $T/roots/$1@现行 && pwd; }
+c() { cd -P $T/roots/$(cat $T/roots/$1@现行) && pwd; }
 n() { ls "$(c "$1")/systemdata/$2" 2> /dev/null | wc -l | tr -d ' '; }
 mk g 0100AAAA00000000 11223344
 o=$(S g 2>&1); r=$?

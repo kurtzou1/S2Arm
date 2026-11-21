@@ -31,7 +31,7 @@ R=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); trap 'chmod -R u+w "$T" 2> 
 chk() { if [ "$2" = "$3" ]; then echo "🟢 $1"; else echo "🔴 $1：期望「$2」→ 真结果「$3」"; bad=1; fi; }
 python3 "$R/tools/quicktest/verdict.py" --selftest > "$T/st.out"; chk "① verdict 自测" 0 $?
 F=$T/repo; mkdir -p "$F/tools/quicktest" "$F/pack/stages" "$F/pack/oneclick"
-cp "$R"/tools/quicktest/*.sh "$R"/tools/quicktest/*.py "$F/tools/quicktest/"; cp "$R/pack/roots.sh" "$F/pack/"
+cp "$R"/tools/quicktest/*.sh "$R"/tools/quicktest/*.py "$F/tools/quicktest/"; cp "$R/pack/roots.sh" "$F/pack/"; mkdir -p "$F/pack/orch" && cp "$R/pack/orch/current.py" "$F/pack/orch/"
 cat > "$F/pack/stages/unpack.sh" <<'EOF'
 echo "unpack" >> "$FAKE/calls"; [ -f "$FAKE/bit32" ] && { echo "🔴 main.npdm 不是 64 位：32 位程序不支持"; exit 1; }
 [ -f "$FAKE/probefail" ] && { echo "【红】机器原因：原件探测出错（nx_unpack --nacp-only 退出 131，不是游戏的问题）：You must install .NET to run this application. （/s/g.nsp）" >&2; echo "【红】列原始包失败（/s）" >&2; exit 1; }
@@ -40,8 +40,8 @@ EOF
 cat > "$F/pack/oneclick/oneclick.sh" <<'EOF'
 case " $* " in *" --lite "*) l=lite;; *) l=full;; esac; echo "$l ${S2A_DUAL:-unset}" >> "$FAKE/dual"
 while [ $# -gt 0 ]; do [ "$1" = --out ] && O=$2; shift; done
-echo "③ 款 tstub" ; echo "① 认出 本体（1.0，程序号 0100000000ABC000）"; mkdir -p "$O/roots/tstub@现行" "$O/logs"; echo "pack" >> "$FAKE/calls"
-if [ -f "$FAKE/rostore" ]; then s=$O/roots/.romfs_store/tstub/oc-1; mkdir -p "$s/a/b"; for i in 1 2 3; do echo x > "$s/a/b/f$i"; echo y > "$s/f$i"; done; chmod -R a-w "$s"; ln -s ../.romfs_store/tstub/oc-1 "$O/roots/tstub@现行/romfs"; fi
+echo "③ 款 tstub" ; echo "① 认出 本体（1.0，程序号 0100000000ABC000）"; mkdir -p "$O/roots/tstub@v1" "$O/logs"; echo tstub@v1 > "$O/roots/tstub@现行"; echo "pack" >> "$FAKE/calls"
+if [ -f "$FAKE/rostore" ]; then s=$O/roots/.romfs_store/tstub/oc-1; mkdir -p "$s/a/b"; for i in 1 2 3; do echo x > "$s/a/b/f$i"; echo y > "$s/f$i"; done; chmod -R a-w "$s"; ln -s ../.romfs_store/tstub/oc-1 "$O/roots/tstub@v1/romfs"; fi
 [ -f "$FAKE/locked" ] && chflags uchg "$O/roots/.romfs_store/tstub/oc-1/f1"
 if [ -f "$FAKE/directgap" ]; then echo "🔴 刷新停在：【红】tstub 直连单轨停在 直连配置推导：直连缺口：配置推导不支持本款"; exit 1; fi
 if [ -f "$FAKE/packfail" ]; then mkdir -p "$O/roots/.failed"; echo "PFRW gaps=1" > "$O/roots/.failed/tstub_main.log"; echo "【红】tstub 改写 main 失败"; exit 1; fi

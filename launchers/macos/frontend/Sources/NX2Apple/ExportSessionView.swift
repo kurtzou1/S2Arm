@@ -303,7 +303,7 @@ struct ExportSessionView: View {
                 if !m.purpose.isEmpty {
                     Text(loc.backend(m.purpose)).font(.manrope(12.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
-                if state == .running { stepProgress(k, m, e: e) }
+                if state == .running { stepProgress(k, m, e: e, now: now) }
             }
             .padding(.bottom, last ? 0 : 16)
         }
@@ -324,11 +324,13 @@ struct ExportSessionView: View {
     }
 
     /// 当前步：单项进度条、百分比 / 数量 / 速度 / 还需，再加作业此刻在做什么（真实作业消息）。
-    private func stepProgress(_ k: Int, _ m: Milestone, e: MilestoneEstimate) -> some View {
+    private func stepProgress(_ k: Int, _ m: Milestone, e: MilestoneEstimate, now: Date) -> some View {
         let p = session.progress
         let value = p.fraction ?? (m.measured != nil ? e.fill(k) : nil)
         let left = e.stepRemainingByRate.map { x("step.left").replacingOccurrences(of: "{0}", with: duration($0)) }
-        let parts = [p.fraction.map { "\(Int($0 * 100))%" }, p.unit == "%" ? "" : p.countText, p.unit == "B" ? p.rateText : "", left]
+        // 上次前进 N 秒前（#1770）：计数停着、这个数一直涨 = 真卡住；隔几秒就归零 = 后台在走
+        let moved = p.sinceAdvance(at: now).map { x("step.advanced").replacingOccurrences(of: "{0}", with: clock(max(1, $0))) }
+        let parts = [p.fraction.map { "\(Int($0 * 100))%" }, p.unit == "%" ? "" : p.countText, p.unit == "B" ? p.rateText : "", left, moved]
         let detail = parts.compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
         return VStack(alignment: .leading, spacing: 6) {
             ZStack(alignment: .leading) {

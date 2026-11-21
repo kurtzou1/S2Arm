@@ -44,7 +44,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#if defined(__ANDROID__)
+#if (defined(__ANDROID__) || defined(__OHOS__))
 #include <android/log.h>
 #define S2A_DIAG_WARN(...) \
     __android_log_print(ANDROID_LOG_WARN, "S2Arm", __VA_ARGS__)

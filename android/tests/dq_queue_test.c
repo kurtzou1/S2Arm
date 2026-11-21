@@ -21,6 +21,8 @@
 //      g 三条线程同时清空、录制线程睡着、阈值够不着：三条都立刻被叫醒。
 //   C7 等待分布读数（「睡着后第一条记录从发布到被录」和「清空等待」两张直方图，读数行给 p50 / p99 / 最大）：
 //      a 每轮由测试线程量墙钟，读数必须不长于它、贴近它，桶与百分位按规格重算后对照；b 清空等待进直方图；c 读数行与直方图一致且取走清零；d 百分位取整的合成用例。
+//   C8 暂存填充的代拷：a 代拷新票号时水位不越过还没拷完的旧票号、录制线程跳过被代拷的；b 与正在拷的录制线程抢同一笔只拷一次、等它拷完才返回；
+//      c 旁挂表复用前先代拷槽里没开始的；d 按票号等的老路径；e 两级回放关着就地拷；f 并发抢的压力（每笔恰好拷一次、返回时内容对）。
 //   C1b / C1c 同 C1，但录制线程用定时醒 + 按批叫（C1b 无清空噪声：积压只靠定时醒 / 过线 / 末尾清空取走）。
 // 任何一处卡住由看门狗在 TEST_TIMEOUT_S 秒后以退出码 3 收场（队列死锁不会让 CI 挂着）。
 // 带一个参数时只跑那一组（如 `dq_queue_test C6`），变异负控用它直奔被测的阶段。
@@ -118,7 +120,10 @@ static void rec_note(VkCommandBuffer cb, uint64_t op, uint64_t a, uint64_t b, ui
     g_hash[i] = fold(g_hash[i], op, a, b, c, d); g_cnt[i]++;
     atomic_fetch_add_explicit(&g_executed[i], 1, memory_order_release);
 }
-static VKAPI_ATTR void VKAPI_CALL rec_draw(VkCommandBuffer cb, uint32_t vc, uint32_t ic, uint32_t fv, uint32_t fi) { rec_note(cb, 1, vc, ic, fv, fi); }
+static _Atomic int g_c8_block, g_c8_blocked;   // C8c：录制线程做到 cb 7 上的绘制时停住（不认领任何填充），直到用例清掉 g_c8_block
+static VKAPI_ATTR void VKAPI_CALL rec_draw(VkCommandBuffer cb, uint32_t vc, uint32_t ic, uint32_t fv, uint32_t fi) {
+    if (cb_index(cb) == 7 && atomic_load(&g_c8_block)) { atomic_store(&g_c8_blocked, 1); while (atomic_load(&g_c8_block)) sched_yield(); atomic_store(&g_c8_blocked, 0); }
+    rec_note(cb, 1, vc, ic, fv, fi); }
 static VKAPI_ATTR void VKAPI_CALL rec_bindpipe(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipeline p) { rec_note(cb, 2, (uint64_t)bp, (uint64_t)(uintptr_t)p, 0, 0); }
 static VKAPI_ATTR void VKAPI_CALL rec_viewport(VkCommandBuffer cb, uint32_t first, uint32_t n, const VkViewport *vp) { rec_note(cb, 3, first, n, hash_bytes(vp, n * sizeof *vp), 0); }
 static VKAPI_ATTR void VKAPI_CALL rec_barrier(VkCommandBuffer cb, VkPipelineStageFlags src, VkPipelineStageFlags dst, VkDependencyFlags dep, uint32_t nm, const VkMemoryBarrier *m,
@@ -156,6 +161,17 @@ static int c5_timedwait(pthread_cond_t *cond, pthread_mutex_t *mu, const struct 
     return pthread_cond_timedwait(cond, mu, dl);
 }
 #define pthread_cond_timedwait c5_timedwait
+// C8 的钩子：录制线程认领一笔填充（状态 0 → 1）之后、开拷之前。记下它拷了哪一笔（按票号计数）；票号等于 g_c8_pause 时停在这里，
+// 直到用例放行——这时这一笔的状态是「录制线程正在拷」，录制线程后面的记录也都没做
+enum { C8_MAXT = 1 << 16 };
+static _Atomic uint32_t g_c8_rec_copies[C8_MAXT];   // 下标 = 票号 % C8_MAXT（单个用例里的票号跨度远小于它）
+static _Atomic uint64_t g_c8_pause;
+static _Atomic int g_c8_paused, g_c8_release;
+static void c8_rec_hook(uint64_t seq) {
+    atomic_fetch_add(&g_c8_rec_copies[seq % C8_MAXT], 1);
+    if (seq && seq == atomic_load(&g_c8_pause)) { atomic_store(&g_c8_paused, 1); while (!atomic_load(&g_c8_release)) sched_yield(); atomic_store(&g_c8_paused, 0); }
+}
+#define DQ_FILL_REC_HOOK(a) c8_rec_hook((a)->seq)
 #include "nvn_vk_dq.inc"
 #undef pthread_cond_timedwait
 static int c5_drainer_count(void) { return atomic_load(&g_dq_draining); }
@@ -496,6 +512,128 @@ static void run_latency_phase(void) {
     set_wait(200, 0, 0);   // 还原缺省
 }
 
+// ---- C8：暂存填充的代拷（nvn_gpu_arena_fill_take → dq_fill_take；录制线程 dq_fill_run）----
+// 期望全是手算的常量与「谁拷了几次」的计数，不读被测的水位来定期望（水位本身是被测量，和手算值对）。
+static void c8_wait_paused(void) { while (!atomic_load(&g_c8_paused)) sched_yield(); }   // 卡住由看门狗收场
+static void c8_release(void) { atomic_store(&g_c8_release, 1); while (atomic_load(&g_c8_paused)) sched_yield(); atomic_store(&g_c8_pause, 0); atomic_store(&g_c8_release, 0); }
+static int all_eq(const uint8_t *p, size_t n, uint8_t v) { for (size_t i = 0; i < n; i++) if (p[i] != v) return 0; return 1; }
+static _Atomic int g_c8b_released;
+static void *c8b_releaser(void *arg) { (void)arg; struct timespec ts = { 0, 20 * 1000000L }; nanosleep(&ts, NULL); atomic_store(&g_c8b_released, 1); c8_release(); return NULL; }
+static uint8_t g_c8_src[1100][256], g_c8_dst[1100][256];
+static void run_fill_steal_phase(void) {
+    vk_dq_drain();
+    // C8a：录制线程停在 t1（正拷），t2、t3 排在后面。代拷 t3 → 1、内容是代拷那一刻的；水位仍是 t1 - 1（不能越过还没拷完的 t1、t2）；
+    //      放行后录制线程拷 t1、t2，轮到 t3 跳过（来源已改成 0x5A，再拷就会把 0x5A 带进暂存）；清空后水位 = t3
+    phase("C8a 代拷最新一笔、旧的还在排队");
+    const uint64_t t0 = atomic_load(&g_fill_seq);
+    for (int i = 0; i < 3; i++) { memset(g_c8_src[i], 0xA1 + i, 256); memset(g_c8_dst[i], 0, 256); }
+    atomic_store(&g_c8_pause, t0 + 1);
+    const uint64_t t1 = vk_dq_fill(g_c8_dst[0], g_c8_src[0], 256), t2 = vk_dq_fill(g_c8_dst[1], g_c8_src[1], 256), t3 = vk_dq_fill(g_c8_dst[2], g_c8_src[2], 256);
+    CHECK(t1 == t0 + 1 && t2 == t0 + 2 && t3 == t0 + 3, "C8a：票号不是连续递增：%llu %llu %llu（上一张 %llu）", (unsigned long long)t1, (unsigned long long)t2, (unsigned long long)t3, (unsigned long long)t0);
+    c8_wait_paused();
+    const int r3 = vk_dq_fill_take(t3);
+    CHECK(r3 == 1, "C8a：代拷还没开始的 t3 应返回 1（本线程拷），实为 %d", r3);
+    CHECK(all_eq(g_c8_dst[2], 256, 0xA3), "C8a：代拷后 t3 的暂存不是来源内容 0xA3");
+    memset(g_c8_src[2], 0x5A, 256);   // 核心代拷完就改来源
+    const uint64_t d_mid = vk_dq_fill_wait(0);
+    CHECK(d_mid == t0, "C8a：t1 正拷、t2 排队时代拷了 t3，水位应停在 %llu，实为 %llu（越过了还没拷完的旧票号）", (unsigned long long)t0, (unsigned long long)d_mid);
+    CHECK(vk_dq_fill_take(t3) == 0, "C8a：t3 已代拷，再代拷应返回 0");
+    c8_release();
+    vk_dq_drain();
+    const uint64_t d_end = vk_dq_fill_wait(0);
+    CHECK(d_end == t3, "C8a：清空后水位应为 t3 = %llu，实为 %llu", (unsigned long long)t3, (unsigned long long)d_end);
+    CHECK(all_eq(g_c8_dst[0], 256, 0xA1) && all_eq(g_c8_dst[1], 256, 0xA2), "C8a：录制线程拷的 t1 / t2 内容不对");
+    CHECK(all_eq(g_c8_dst[2], 256, 0xA3), "C8a：t3 的暂存被改了（录制线程没跳过被代拷的记录，把改过的来源 0x5A 又拷了一遍）");
+    CHECK(g_c8_rec_copies[t1 % C8_MAXT] == 1 && g_c8_rec_copies[t2 % C8_MAXT] == 1 && g_c8_rec_copies[t3 % C8_MAXT] == 0,
+          "C8a：录制线程拷的次数 t1/t2/t3 应为 1/1/0，实为 %u/%u/%u", g_c8_rec_copies[t1 % C8_MAXT], g_c8_rec_copies[t2 % C8_MAXT], g_c8_rec_copies[t3 % C8_MAXT]);
+
+    // C8b：录制线程正拷 t（停在钩子里），核心代拷同一笔：必须返回 2、只在录制线程拷完后返回、全程只拷一次
+    phase("C8b 与录制线程抢同一笔");
+    memset(g_c8_src[3], 0xB1, 256); memset(g_c8_dst[3], 0, 256);
+    atomic_store(&g_c8_pause, atomic_load(&g_fill_seq) + 1);
+    const uint64_t tb = vk_dq_fill(g_c8_dst[3], g_c8_src[3], 256);
+    c8_wait_paused();
+    atomic_store(&g_c8b_released, 0);
+    pthread_t rl; pthread_create(&rl, NULL, c8b_releaser, NULL);
+    const int rb = vk_dq_fill_take(tb);
+    const int released_before = atomic_load(&g_c8b_released);
+    CHECK(rb == 2, "C8b：录制线程正在拷时代拷应返回 2（等它拷完），实为 %d", rb);
+    CHECK(released_before == 1, "C8b：代拷在录制线程拷完之前就返回了");
+    CHECK(all_eq(g_c8_dst[3], 256, 0xB1), "C8b：代拷返回时暂存不是 0xB1");
+    memset(g_c8_src[3], 0x00, 256);
+    pthread_join(rl, NULL);
+    vk_dq_drain();
+    CHECK(all_eq(g_c8_dst[3], 256, 0xB1) && g_c8_rec_copies[tb % C8_MAXT] == 1, "C8b：录制线程拷了 %u 次（应 1 次）或暂存被改", g_c8_rec_copies[tb % C8_MAXT]);
+    CHECK(vk_dq_fill_wait(0) == tb, "C8b：清空后水位应为 %llu", (unsigned long long)tb);
+
+    // C8c：旁挂表复用。录制线程停在 cb 7 的一条绘制上（一笔填充都没认领），再交 FILL_TAB + 5 笔：最后 5 笔占的槽里是最早的 5 笔（还没开始），
+    //      必须先代拷它们再复用——录制线程还停着时这 5 笔已拷好、第 6 笔还没拷；放行后全部内容对，最早 5 笔录制线程拷 0 次、其余 1 次
+    phase("C8c 旁挂表满了复用槽");
+    enum { C8C_N = FILL_TAB + 5 };
+    static uint8_t src16[C8C_N][16], dst16[C8C_N][16];
+    for (int i = 0; i < C8C_N; i++) { memset(src16[i], (uint8_t)(i * 7 + 1), 16); memset(dst16[i], 0, 16); }
+    atomic_store(&g_c8_block, 1);
+    vkCmdDraw(cb_of(7), 3, 1, 0, 0);
+    while (!atomic_load(&g_c8_blocked)) sched_yield();
+    const uint64_t tp = atomic_load(&g_fill_seq) + 1;
+    for (int i = 0; i < C8C_N; i++) { const uint64_t t = vk_dq_fill(dst16[i], src16[i], 16); if (t != tp + (uint64_t)i) { CHECK(0, "C8c：票号不连续"); break; } }
+    int stolen_early = 0; for (int i = 0; i < 5; i++) stolen_early += all_eq(dst16[i], 16, (uint8_t)(i * 7 + 1));
+    CHECK(stolen_early == 5 && all_eq(dst16[5], 16, 0), "C8c：复用槽之前应先代拷槽里没开始的 5 笔（录制线程还停着时已拷 %d 笔，应 5），第 6 笔应还没拷", stolen_early);
+    for (int i = 0; i < 5; i++) memset(src16[i], 0xEE, 16);   // 已代拷：改来源不该再进暂存
+    atomic_store(&g_c8_block, 0);
+    vk_dq_drain();
+    int bad = 0, extra = 0;
+    for (int i = 0; i < C8C_N; i++) {
+        if (!all_eq(dst16[i], 16, (uint8_t)(i * 7 + 1))) bad++;
+        const uint32_t rc = g_c8_rec_copies[(tp + (uint64_t)i) % C8_MAXT], want = i < 5 ? 0 : 1;
+        if (rc != want) extra++;
+    }
+    CHECK(bad == 0, "C8c：%d 笔暂存内容不对", bad);
+    CHECK(extra == 0, "C8c：%d 笔录制线程拷的次数不对（被代拷的应 0 次、其余 1 次）", extra);
+    CHECK(vk_dq_fill_wait(0) == tp + C8C_N - 1, "C8c：清空后水位不对");
+
+    // C8d：等待路径不变（nvk_ub_fill_steal = 0 时核心走它）：交 3 笔、等最后一笔，返回时三笔都拷完、水位 ≥ 最后一笔
+    phase("C8d 关代拷：按票号等");
+    for (int i = 0; i < 3; i++) { memset(g_c8_src[10 + i], 0xC1 + i, 256); memset(g_c8_dst[10 + i], 0, 256); }
+    uint64_t tw = 0; for (int i = 0; i < 3; i++) tw = vk_dq_fill(g_c8_dst[10 + i], g_c8_src[10 + i], 256);
+    const uint64_t dw = vk_dq_fill_wait(tw);
+    CHECK(dw >= tw && all_eq(g_c8_dst[10], 256, 0xC1) && all_eq(g_c8_dst[11], 256, 0xC2) && all_eq(g_c8_dst[12], 256, 0xC3), "C8d：等到票号 %llu 返回时三笔没拷完（水位 %llu）", (unsigned long long)tw, (unsigned long long)dw);
+
+    // C8e：两级回放关着：直接拷、返回 0，代拷 0 号也返回 0
+    phase("C8e 两级回放关着");
+    set_dq(0);
+    memset(g_c8_src[20], 0xD1, 256); memset(g_c8_dst[20], 0, 256);
+    CHECK(vk_dq_fill(g_c8_dst[20], g_c8_src[20], 256) == 0 && all_eq(g_c8_dst[20], 256, 0xD1) && vk_dq_fill_take(0) == 0, "C8e：关着时应就地拷、返回 0");
+    set_dq(1);
+
+    // C8f：并发抢：录制线程自由跑，核心每交一笔就立刻代拷它、随即改来源。每笔必须恰好拷一次（录制线程 + 核心），代拷返回时内容对
+    phase("C8f 并发抢同一笔（压力）");
+    enum { C8F_N = 30000, C8F_K = 1024 };
+    static uint8_t prod_copied[C8F_N];
+    memset(prod_copied, 0, sizeof prod_copied);
+    vk_dq_drain();
+    const uint64_t tf0 = atomic_load(&g_fill_seq) + 1;
+    int wrong = 0, n1 = 0, n2 = 0, n0 = 0; uint64_t rs = 0x9e3779b97f4a7c15ull;
+    for (int i = 0; i < C8F_N; i++) {
+        const int k = i % C8F_K; const uint8_t v = (uint8_t)(i * 13 + 5);
+        memset(g_c8_src[k], v, 256);
+        const uint64_t t = vk_dq_fill(g_c8_dst[k], g_c8_src[k], 256);
+        if (t != tf0 + (uint64_t)i) { CHECK(0, "C8f：票号不连续"); break; }
+        for (int sp = (int)(rnd(&rs) % 64); sp > 0; sp--) __asm__ volatile("" ::: "memory");   // 抖一抖，让录制线程有时先到、有时后到
+        const int r = vk_dq_fill_take(t);
+        if (r == 1) { prod_copied[i] = 1; n1++; } else if (r == 2) n2++; else n0++;
+        if (!all_eq(g_c8_dst[k], 256, v)) wrong++;
+        memset(g_c8_src[k], (uint8_t)~v, 256);   // 核心改来源
+    }
+    vk_dq_drain();
+    int dup = 0, miss = 0;
+    for (int i = 0; i < C8F_N; i++) { const uint32_t c = g_c8_rec_copies[(tf0 + (uint64_t)i) % C8_MAXT] + prod_copied[i]; if (c > 1) dup++; if (c < 1) miss++; }
+    CHECK(wrong == 0, "C8f：%d 笔代拷返回时暂存内容不对", wrong);
+    CHECK(dup == 0 && miss == 0, "C8f：%d 笔拷了不止一次、%d 笔一次都没拷", dup, miss);
+    CHECK(vk_dq_fill_wait(0) == tf0 + C8F_N - 1, "C8f：清空后水位不对");
+    printf("  %-38s 代拷 %d 笔、撞上录制线程正在拷 %d 次、录制线程已拷完 %d 次（共 %d 笔，每笔恰好拷一次）\n", "C8 暂存填充代拷", n1, n2, n0, C8F_N);
+}
+
 int main(int argc, char **argv) {
     const char *only = argc > 1 ? argv[1] : NULL;
 #define WANT(id) (!only || !strcmp(only, id))
@@ -517,6 +655,7 @@ int main(int argc, char **argv) {
     if (WANT("C6")) run_wait_phase();
     if (WANT("C7")) run_latency_phase();
     if (WANT("C1b")) { set_wait(0, 100, 4); run_seq_phase("C1b 多生产者序列（定时醒 + 按批叫，无清空噪声）", 4, 160000, 0, 0); set_wait(200, 0, 0); }
+    if (WANT("C8")) run_fill_steal_phase();
     if (WANT("C1c")) { set_wait(0, 0, 16); run_seq_phase("C1c 多生产者序列（只按批叫 + 清空噪声）", 4, 160000, 1, 0); set_wait(200, 0, 0); }
     CHECK(atomic_load(&g_red_logs) == 0, "队列自己报过 %d 次红", atomic_load(&g_red_logs));
     printf("dq_queue_test：%d 项检查，%d 项红（交给录制线程 %llu 条，直调 %llu 次）\n", g_checks, g_bad, (unsigned long long)nvn_vk_dbg_dq_recs(), (unsigned long long)g_dq_direct);

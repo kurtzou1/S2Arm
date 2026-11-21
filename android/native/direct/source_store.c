@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(__OHOS__)
 #include <android/log.h>
 #endif
 
@@ -44,7 +44,7 @@ extern void s2a_source_log_line(const char *line) __attribute__((weak));
 // （#1622：keep 失败 3 万多次，当局 logcat 里 0 行红行），所以安卓上再直接写一份 logcat（tag 与其他 S2Arm 行一致）。
 static void source_red(const char *line) {
     if (s2a_source_log_line) s2a_source_log_line(line);
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(__OHOS__)
     __android_log_print(ANDROID_LOG_ERROR, "S2Arm", "【红】%s", line);
 #endif
 }

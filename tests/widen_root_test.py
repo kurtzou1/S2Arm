@@ -84,7 +84,7 @@ class WidenRootTests(unittest.TestCase):
         self.table = self.base / 'tables' / 'verified.tsv'
         self.table.parent.mkdir()
         self.table.write_text(ROW + '\n')
-        (self.root.parent / 'fixture@现行').symlink_to(self.root.name)
+        (self.root.parent / 'fixture@现行').write_text(self.root.name + '\n')
 
     def checker(self, status=0, message=None, caps=None):
         before = {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob('*') if p.is_file() and not p.is_symlink()}

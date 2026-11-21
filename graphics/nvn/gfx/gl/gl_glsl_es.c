@@ -300,6 +300,22 @@ static char *flatten_blocks(char *t, size_t n, char stage, size_t *on) {
     *on = n; return t;
 }
 
+// 整词 sample：后面（跳过空白）紧跟限定词的是限定符，原样；否则是名字，改成 s2a_sample
+static int sample_is_qualifier(const char *t, size_t n, size_t i) {
+    static const char *const q[] = {"in", "out", "centroid", "flat", "smooth", "noperspective", "highp", "mediump", "lowp", "precise", "invariant", NULL};
+    while (i < n && (t[i] == ' ' || t[i] == '\t' || t[i] == '\n' || t[i] == '\r')) i++;
+    for (int k = 0; q[k]; k++) { size_t l = strlen(q[k]); if (i + l <= n && !memcmp(t + i, q[k], l) && (i + l == n || !is_word((unsigned char)t[i + l]))) return 1; }
+    return 0;
+}
+static char *sample_names(const char *t, size_t n, size_t *on) {
+    sb o = {0}; size_t last = 0;
+    for (size_t i = 0; i + 6 <= n; i++) {
+        if (memcmp(t + i, "sample", 6) || (i && is_word((unsigned char)t[i - 1])) || (i + 6 < n && is_word((unsigned char)t[i + 6]))) continue;
+        if (sample_is_qualifier(t, n, i + 6)) continue;
+        sb_put(&o, t + last, i - last); sb_str(&o, "s2a_sample"); last = i + 6; i += 5;
+    }
+    sb_put(&o, t + last, n - last); return sb_take(&o, on);
+}
 char *s2a_glsl_es_rewrite(const char *pre, size_t n, char stage, size_t *out_n, char *err, size_t errn) {
     if (errn) err[0] = 0;
     if (stage != 'v' && stage != 'f' && stage != 'c') { snprintf(err, errn, "stage %c is not v / f / c", stage); return NULL; }
@@ -329,10 +345,9 @@ char *s2a_glsl_es_rewrite(const char *pre, size_t n, char stage, size_t *out_n, 
     // 「sample」在 GLSL ES 3.00 / 3.10 是保留字，3.20 或开了 GL_OES_shader_multisample_interpolation 才是插值限定符；ES 1.00 里是普通名字。
     //   游戏拿它当变量名（ES 1.00 原文、或 NVIDIA 编译器放过的 3.x），升到 3.10 后 glslang 报「'sample' : Reserved word」整支编不过，
     //   游戏查编译状态失败就断言退出（D-9EPN：5 支片元编不过、随后游戏 Break）。结果不是 3.20、也没开那个扩展时，这个词只可能是名字：整词改成 s2a_sample
-    int v320 = 0, msi = 0;
-    if (at) { size_t j = skip_space(at, rest, 8); v320 = starts(at, rest, j, "320") && (j + 3 == rest || !is_word((unsigned char)at[j + 3])); }
-    { static const char ext[] = "GL_OES_shader_multisample_interpolation"; for (size_t i = 0; !msi && i + sizeof ext - 1 <= n; i++) msi = !memcmp(pre + i, ext, sizeof ext - 1); }
-    if (!v320 && !msi) { size_t sn; char *x = sub_word(body, bn, "sample", "s2a_sample", &sn, NULL); free(body); if (!x) { if (errn && !err[0]) snprintf(err, errn, "out of memory"); return NULL; } body = x; bn = sn; }
+    //   11-20 D-45CD：原先只在「结果不是 3.20、也没开扩展」时改名——游戏写「#version 320」（NVIDIA 放过不写 es，s2a_glsl_es_prefix 补成 320 es）
+    //   又拿 sample 当名字，照样报 Reserved word。改成按用法判，不按版本判：sample 后面紧跟 in / out / 插值 / 精度限定词才是限定符（原样），其余一律是名字、改 s2a_sample
+    { size_t sn; char *x = sample_names(body, bn, &sn); free(body); if (!x) { if (errn && !err[0]) snprintf(err, errn, "out of memory"); return NULL; } body = x; bn = sn; }
     size_t fn; char *fx = fixups(body, bn, &fn, err, errn);
     if (!fx) return NULL;
     return flatten_blocks(fx, fn, stage, out_n);

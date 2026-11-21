@@ -47,6 +47,28 @@ namespace S2A.Services.Tests
             Check("nifm IGeneralService 101 GetCurrentNetworkProfile(V2)，离线：结果 NoInternetConnection、不报红", $"0x{noNet:X}、红 +0", $"0x{rc:X}、红 +{Red.Total - red0}");
         }
 
+        [SvcCase]
+        private static void NifmSubmitOfflineOnHoldThenError()
+        {
+            // #1823：离线时（没开联网）真机对提交的请求先回 OnHold、发请求事件，之后稳定回 Error。原先直接回 Error，
+            //   会反复提交、等请求离开 OnHold 的游戏在 IPC 上空转。期望按真机时序手写：提交前 1（Error）、提交后第一次 2（OnHold）、
+            //   之后 1；再提交一次又是先 2 后 1
+            uint sm = SmSession();
+            uint nif = Call(sm, Msg.Cmif(1, Name8("nifm:u"))).Move[0];
+            Msg cd = Msg.Cmif(0); cd.Type = 5;
+            int root = *(int*)Call(nif, cd).Data;
+            Msg cgs = Msg.Cmif(5, Bytes(0UL)); cgs.SendPid = true;
+            int gs = *(int*)DomainCall(nif, cgs, root).Data;
+            int req = *(int*)DomainCall(nif, Msg.Cmif(4, Bytes(2u)), gs).Data;   // CreateRequest(version 2)
+            int State() => *(int*)DomainCall(nif, Msg.Cmif(0), req).Data;        // GetRequestState
+            int before = State();
+            DomainCall(nif, Msg.Cmif(4), req);                                    // Submit
+            int s1 = State(), s2 = State(), s3 = State();
+            DomainCall(nif, Msg.Cmif(4), req);
+            int t1 = State(), t2 = State();
+            Check("nifm IRequest 离线：提交前 / 提交后三次 / 再提交后两次的状态", "1 / 2 1 1 / 2 1", $"{before} / {s1} {s2} {s3} / {t1} {t2}");
+        }
+
         [SoloTest("--pctl-real-application", Booted = true)]
         private static void ZeldaPctl1101()
         {

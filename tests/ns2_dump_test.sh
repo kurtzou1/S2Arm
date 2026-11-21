@@ -234,6 +234,17 @@ chk('⑪ 哈希对不上：照常整理（退出 0）、黄字点名「subsdk0 �
 sys.path.insert(0, os.path.dirname(tool)); import ns2_dump as nd
 w(f'{T}/okx/exefs/subsdk0', lz4nso(b'\x59' * 16, good, plain)); w(f'{T}/okh/exefs/subsdk0', lz4nso(b'\x59' * 16, good, plain + b'x'))
 chk('⑪ check_exefs：好件 → 没有对不上的段；哈希对不上 → [(subsdk0, text)]、不抛', nd.check_exefs(f'{T}/okx/exefs') == [] and nd.check_exefs(f'{T}/okh/exefs') == [('subsdk0', 'text')])
+# ⑫ --base（玩家诊断 #0fd185：作业层把散文件解包目录直接交进来，不再链接成 <导出目录>/base）：只有本体的导出目录，
+#   放在 <导出目录>/base 里整理 vs 空目录 + --base 本体目录整理，两份输出逐文件逐字节相同（整理键也同）
+def tree(r): return {os.path.relpath(os.path.join(dp, f), r): open(os.path.join(dp, f), 'rb').read() for dp, _, fs in os.walk(r) for f in fs}
+lb = f'{T}/LooseIn'; w(f'{lb}/base/exefs/main', nso(b'\x33' * 16)); w(f'{lb}/base/exefs/main.npdm', npdm(TID)); w(f'{lb}/base/romfs/A/a.bin', b'loose-a')
+rc1, out1 = run(lb, f'{T}/xl1', '--name', 'G'); os.makedirs(f'{T}/empty', exist_ok=True)
+rc2, out2 = run(f'{T}/empty', f'{T}/xl2', '--base', f'{lb}/base', '--name', 'G')   # 款名同给（作业层总带 --name；不给时取导出目录名，两边目录名不同）
+chk('⑫ 两种交法都退出 0', rc1 == 0 and rc2 == 0, out1 + out2)
+t1, t2 = tree(f'{T}/xl1'), tree(f'{T}/xl2')
+chk('⑫ 输出逐文件相同', t1 == t2 and len(t1) > 3, sorted(set(t1) ^ set(t2)) or [k for k in t1 if t1[k] != t2.get(k)])
+rc3, out3 = run(f'{T}/empty', f'{T}/xl3', '--base', f'{T}/empty')
+chk('⑫ --base 给的不是本体目录：报红退出', rc3 != 0 and '不是本体目录' in out3, out3)
 print(f'ns2_dump：{ok} 过 / {bad} 红'); sys.exit(1 if bad else 0)
 PY
 r=$?

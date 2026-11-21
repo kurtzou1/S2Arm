@@ -61,6 +61,12 @@ def partial_import_result(c):
     return getattr(c, "import_result", None) if c.operation == "import" and c.r.get("partialResults") is True else None
 
 
+def app_installed_result(c):
+    """独立 App 装上了、资源没推完就失败（install.put_app 记的 c.app_installed）：失败结果带 appInstalled，失败页写「App 已装上，资源没推完」、重试只推剩下的"""
+    got = getattr(c, "app_installed", None)
+    return dict(appInstalled=got) if c.operation == "install" and got else None
+
+
 def run_request(request_path, *, context_class=Context, operation_overrides=None):
     # 开发者证书密码（devCert 导入那一次由启动器经环境变量给，devcert.py ⑤）：先从环境摘掉，任何子进程都拿不到；请求文件里从不放
     devcert_password = os.environ.pop(devcert.PASSWORD_ENV, None)
@@ -110,6 +116,7 @@ def run_request(request_path, *, context_class=Context, operation_overrides=None
                   "tvInstall": tvos.install_tv, "tvExport": tvos.export_tv, "tvDevices": tvos.devices_job, "tvSaveBackup": tvos.autobackup,   # Apple TV（tvOS 版，pack/jobs/tvos.py）
                   "pushSelected": install.push_selected,
                   "signModeSet": install.sign_mode_set,
+                  "layoutSet": install.layout_set,   # 出法：通用 S2Arm / 独立 App（一 App 一游戏，0.6.3）
                   "saveStatus": saves.status, "saveBackup": saves.backup, "saveInspect": saves.inspect, "saveRestore": saves.restore, "savePrevious": save_previous.status, "saveRestorePrevious": save_previous.restore,
                   "community": community.listing, "communitySave": community.save, "patchMatch": patches.match, "sgradeScan": sgrade.scan, "sgradeUpgradeGame": sgrade.upgrade_one, "sgradeUpgradeBatch": sgrade.upgrade_batch, "sgradeUpgradeStop": sgrade.upgrade_stop, "sgradeUpgradeStatus": sgrade.upgrade_status, "updateHints": host_update.update_hints, "phoneOverview": host_update.phone_overview, "sgradeMac": sgrade.mac_all, "sgradeReenable": sgrade.reenable, "devCert": devcert.operation, "export": export_plan.export,
                   "android": android_export.build_job, "androidDevices": android_export.devices_job}
@@ -173,7 +180,7 @@ def run_request(request_path, *, context_class=Context, operation_overrides=None
         integrity_note(c)
         if c.operation in CLEANS_AFTER_STOP:   # 错误摘要要读产物根里的日志，所以排在它后面
             library.clean_after_stop(c)
-        c.finish("failed", message, partial_import_result(c))
+        c.finish("failed", message, partial_import_result(c) or app_installed_result(c))
         return 1
     finally:
         ended.set()
@@ -191,7 +198,8 @@ def integrity_note(c):
         if library.integrity_skipped(game):
             c.diagnostic(library.SOURCE_INTEGRITY_FAILED_NOTE, code="source_integrity_skipped", severity="warning")
         # 出包时资源包核对没对上（pack/verify.py 改黄后照常出包，原因落 <包目录>.verify_warn.txt；全对时它会删掉旧的）：现行产物根里还留着就补一句
-        if any(layout.build_dir(c, gid, create=False).glob("*/roots/*@现行/pkg/*.verify_warn.txt")):  # 非玩家句（路径）
+        roots = (layout.current_root(c, p) for p in layout.build_dir(c, gid, create=False).glob("*/roots/*" + layout.CURRENT))
+        if any(r is not None and any(r.glob("pkg/*.verify_warn.txt")) for r in roots):
             c.diagnostic(PACK_VERIFY_NOTE, code="source_integrity_skipped", severity="warning")
     except (Failure, OSError, ValueError, KeyError, TypeError):
         pass

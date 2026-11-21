@@ -90,6 +90,12 @@ def main():
                        "--install-action-probe", str(Path(temporary) / "out"), "--data-root=" + str(Path(temporary) / "data")], env)
             if "✓ 装机前清单按钮落点" not in out.stdout:
                 raise RuntimeError("install action probe did not report success")
+        # 装机卡片「详细过程」点开后不被进度事件刷新收起（D-237B；UI.Snapshots/DetailsProbe.cs）
+        with tempfile.TemporaryDirectory(prefix="s2arm-details-probe-") as temporary:
+            out = run([dotnet, "run", "--project", str(probe), "--no-build", "--configuration", "Release", "--",
+                       "--details-probe", str(Path(temporary) / "out"), "--data-root=" + str(Path(temporary) / "data")], env)
+            if "✓ 装机卡片详细过程点开后不被进度刷新收起" not in out.stdout:
+                raise RuntimeError("details probe did not report success")
         if args.negative_controls:
             with tempfile.TemporaryDirectory(prefix="s2arm-ui-negative-") as temporary:
                 target = Path(temporary).resolve()

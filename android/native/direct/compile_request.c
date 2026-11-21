@@ -18,7 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
 #include <sys/system_properties.h>
 #endif
 
@@ -755,7 +755,7 @@ static void inflight_init(void) {
     const char *dir = getenv("S2A_FRAME_LOG_DIR");
     if (dir && dir[0] == '/' && strlen(dir) < sizeof g_inflight_dir) strcpy(g_inflight_dir, dir);
     strcpy(g_inflight_uuid, "-");
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__OHOS__)
     char uuid[PROP_VALUE_MAX];
     if (__system_property_get("debug.s2a.session_uuid", uuid) > 0 && strlen(uuid) < sizeof g_inflight_uuid)
         strcpy(g_inflight_uuid, uuid);

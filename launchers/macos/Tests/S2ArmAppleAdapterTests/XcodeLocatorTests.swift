@@ -1,22 +1,10 @@
 import XCTest
 @testable import S2ArmAppleAdapter
 
-/// 找 Xcode 的目录（D-9WFW：玩家把 Xcode 装在扩展硬盘上）：外接卷的 Applications 与卷根都看，/Volumes 里指回 / 的启动盘软链跳过。
-///   与作业层 pack/jobs/toolchain.py default_app_dirs 同一组目录
+/// 自动找 Xcode 的目录：只看 /Applications、~/Applications，不翻 /Volumes（列外接卷会弹系统隐私窗「想访问可移除卷上的文件」，
+///   接着外接盘的玩家一开启动器就弹）；Xcode 装在外接盘上的由玩家在设置页自己选。与作业层 pack/jobs/toolchain.py default_app_dirs 同一组目录
 final class XcodeLocatorTests: XCTestCase {
-    func testSearchDirsIncludeExternalVolumesAndSkipBootLink() throws {
-        let fm = FileManager.default
-        let root = fm.temporaryDirectory.appendingPathComponent("s2arm-xcode-" + UUID().uuidString)
-        defer { try? fm.removeItem(at: root) }
-        let vols = root.appendingPathComponent("Volumes")
-        try fm.createDirectory(at: vols.appendingPathComponent("Ext SSD/Applications"), withIntermediateDirectories: true)
-        try fm.createDirectory(at: vols.appendingPathComponent("Other"), withIntermediateDirectories: true)
-        let boot = root.appendingPathComponent("boot")
-        try fm.createDirectory(at: boot, withIntermediateDirectories: true)
-        try fm.createSymbolicLink(at: vols.appendingPathComponent("Macintosh HD"), withDestinationURL: boot)
-        let dirs = XcodeLocator.searchDirs(volumes: vols.path)
-        XCTAssertEqual(Array(dirs.prefix(2)), ["/Applications", NSHomeDirectory() + "/Applications"])
-        XCTAssertEqual(Array(dirs.dropFirst(2)), [vols.path + "/Ext SSD/Applications", vols.path + "/Ext SSD",
-                                                  vols.path + "/Other/Applications", vols.path + "/Other"])
+    func testSearchDirsAreInternalOnly() {
+        XCTAssertEqual(XcodeLocator.searchDirs(), ["/Applications", NSHomeDirectory() + "/Applications"])
     }
 }
