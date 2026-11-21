@@ -13,6 +13,8 @@
 #include "pad_liveness.h"
 #include "haptic_retry.h"
 #include "ea_rumble.h"   // GameSir G8+ MFi 有线：手柄马达走配件协议（#462）
+#include "keyboard.h"     // iPad 外接键盘（#1869）：键态由 keyboard.m 交来，这里照 Mac 选源
+#include "keyboard_map.h"
 #include <dlfcn.h>
 #include <stdatomic.h>
 #include <pthread.h>
@@ -28,6 +30,11 @@ uint64_t s2a_phone_rumble_session(void); void s2a_phone_rumble_pair(const s2a_pa
 - (void)setForeground:(BOOL)foreground;
 - (void)bleStatus:(ns2_status)status message:(NSString *)message;
 - (void)selectSystem;
+- (void)updateVisibility;
+- (dispatch_queue_t)inputQueue;
+- (void)keyboardChanged:(BOOL)pressed;   // 以下三个给 iPad 外接键盘（#1869）：前两个只在 inputQueue 上调，screenTouched 在主线程
+- (void)keyboardEnd;
+- (BOOL)screenTouched;
 @end
 static S2AController *g_controller;
 static NSString *const adapterPreference = @"S2ANS2ProAdapterEnabled";
@@ -371,8 +378,41 @@ static BOOL write_record(NSString *identifier, BOOL automatic) {
 
 // 手柄 / 触屏按最后一次输入切换（维护者 10-24）：实体手柄输入可能把生效来源从触屏切回手柄（pad.c 触屏接管），
 //   这里在输入队列 / BLE 回调里发现变化后派回主线程更新虚拟按键显示；没变时只读一个原子量
-static _Atomic int g_shown_external = -1;   // 虚拟按键当前按「实体手柄生效」隐藏着（1）/ 显示着（0）
+static _Atomic int g_shown_external = -1;   // 虚拟按键当前按「实体手柄 / 键盘生效」隐藏着（1）/ 显示着（0）
 static void pad_selection_check(void);
+// iPad 外接键盘（ios/keyboard.m，#1869）：选源照 Mac（front_mac.m publish_pad_state / pad_event_fast）——
+//   没有手柄占玩家 1 时，键盘按触屏源发布（掌机样式不变，服务层不会因此改成 Pro 手柄）；系统手柄 / NS2 Pro 占玩家 1 时并进它那一份。
+//   iPad 比 Mac 多一套屏幕虚拟按键：按键模式下键盘一接管就收起虚拟按键（同接实体手柄），手指碰屏幕再显示回来；
+//   触屏模式下这一层照留、手指照常进游戏，与键盘同时可用（同 vpad.m setInputEnabled: 对实体手柄的处理）。吸附键盘不算接管，按下第一个键才接管
+enum { KB_IDLE, KB_PENDING, KB_ACTIVE };
+static _Atomic int g_kb_state;                        // 键盘接管屏幕按键：没有 / 正在收起虚拟按键 / 已接管
+static _Atomic uint32_t g_kb_buttons, g_kb_pending;   // 键盘这一份按键（keyboard.m 算好）；收起虚拟按键期间按过的键（短按不丢）
+static _Atomic int32_t g_kb_sticks[4];
+static _Atomic uint32_t g_ble_p1_buttons;             // NS2 Pro 当玩家 1 时上一帧的原始按键 / 摇杆：键盘变了照它并一份重发（只在 g_feedback_mu 内写）
+static _Atomic int32_t g_ble_p1_axes[4];
+static void kb_snapshot(uint32_t *buttons, int32_t sticks[4]) {
+    *buttons = atomic_load(&g_kb_buttons);
+    for (int i = 0; i < 4; i++) sticks[i] = atomic_load(&g_kb_sticks[i]);
+}
+// 虚拟按键该不该收起：实体手柄生效，或键盘接管了
+static int shown_external_now(void) { return s2a_pad_has_controller() || atomic_load(&g_kb_state) != KB_IDLE; }
+// 没有手柄占玩家 1：键盘按触屏源发布（同 Mac 没手柄时键盘走触屏源）
+static void kb_publish_touch(uint32_t buttons, const int32_t sticks[4]) { s2a_pad_update(S2A_PAD_TOUCH, 1, buttons, sticks); }
+int s2a_vpad_touch_only(void);   // vpad.m：1 触屏模式 / 0 按键模式 / -1 没挂（任意线程）
+// 键盘的「+」长按 1.5 秒开快捷菜单（同手柄长按「+」：menu_hold_check → diag.m s2a_diag_menu_hold）。键盘走触屏源时 pad.c 不记「+」序号
+//   （触屏的「+」是虚拟键），这里自己计；并进手柄时 pad.c 照常认，不走这里。只在输入队列上调
+static _Atomic uint64_t g_kb_plus_seq;
+static void kb_menu_hold(uint32_t buttons) {
+    static int down;
+    int now = (buttons >> 10) & 1;
+    if (now == down) return;
+    down = now;
+    uint64_t seq = atomic_fetch_add(&g_kb_plus_seq, 1) + 1;   // 按下、松开都换序号：松开即作废
+    if (!now) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (atomic_load(&g_kb_plus_seq) == seq && atomic_load(&g_kb_state) == KB_ACTIVE) { void s2a_diag_open_menu(void); s2a_diag_open_menu(); }
+    });
+}
 static void pad_face_sync(void);
 
 // 本地多手柄（双人同玩）：槽 0 = 玩家 1，仍走 pad.c（触屏 / NS2 Pro / 系统手柄三选一，服务层读 s2a_pad_read_ex）；
@@ -433,7 +473,10 @@ static void ble_slot_set_locked(int slot) {
     if (old == slot) return;
     if (old == 0) s2a_pad_update(S2A_PAD_BLE, 0, 0, NULL);
     else if (old > 0) { for (int i = 0; i < 4; i++) atomic_store(&g_slot_sticks[old][i], 0); atomic_store(&g_slot_buttons[old], 0); }
-    if (slot == 0) { int32_t axes[4] = {0}; s2a_pad_update(S2A_PAD_BLE, 1, 0, axes); }
+    if (slot == 0) {
+        int32_t axes[4] = {0}; s2a_pad_update(S2A_PAD_BLE, 1, 0, axes);
+        atomic_store(&g_ble_p1_buttons, 0); for (int i = 0; i < 4; i++) atomic_store(&g_ble_p1_axes[i], 0);
+    }
     if (slot >= 0) LOG("NS2 Pro：占玩家 %d", slot + 1);
     else if (old >= 0) LOG("NS2 Pro：让出玩家 %d", old + 1);
 }
@@ -442,12 +485,22 @@ static void ble_motion(const ns2_motion *motion, void *context) {
     if (motion->known && (uintptr_t)context == atomic_load(&g_session) && atomic_load(&g_ble_ready)) s2a_pad_wake();
 }
 
+// NS2 Pro 当玩家 1（持 g_feedback_mu）：并进键盘再进 pad.c（同 Mac 槽 0 = 第一只手柄 + 键盘）；原始值留一份，键盘变了照它重发
+static void ble_p1_publish(uint32_t raw, const int32_t raw_axes[4]) {
+    atomic_store(&g_ble_p1_buttons, raw);
+    for (int i = 0; i < 4; i++) atomic_store(&g_ble_p1_axes[i], raw_axes[i]);
+    uint32_t buttons = raw, kb_buttons; int32_t axes[4], kb_sticks[4];
+    memcpy(axes, raw_axes, sizeof axes);
+    kb_snapshot(&kb_buttons, kb_sticks);
+    s2a_kbd_merge(&buttons, axes, kb_buttons, kb_sticks);
+    s2a_pad_update(S2A_PAD_BLE, 1, buttons, axes);
+}
 static void ble_input(const ns2_state *state, void *context) {
     pthread_mutex_lock(&g_feedback_mu);
     if (atomic_load(&g_adapter_enabled) && (uintptr_t)context == atomic_load(&g_session) && atomic_load(&g_ble_ready)) {
         int32_t axes[4] = { state->lx, state->ly, state->rx, state->ry };
         int slot = atomic_load(&g_ble_slot);
-        if (slot == 0) s2a_pad_update(S2A_PAD_BLE, 1, (uint32_t)state->buttons, axes);
+        if (slot == 0) ble_p1_publish((uint32_t)state->buttons, axes);
         else if (slot > 0 && atomic_load(&g_slots_active)) {   // 玩家 2–4：同系统手柄槽（Home 扩展位只给玩家 1 开菜单用，publishSlot 同）
             for (int i = 0; i < 4; i++) atomic_store(&g_slot_sticks[slot][i], axes[i]);
             atomic_store(&g_slot_buttons[slot], (uint32_t)state->buttons & S2A_PAD_KEYS);
@@ -506,6 +559,7 @@ static void log_controllers(int why);   // 下面 systemChanged 旁：GameContro
     log_controllers(0);
     return self;
 }
+- (dispatch_queue_t)inputQueue { return _inputQueue; }
 - (void)createConnectionButton {
     UIView *root = _root;
     _connect = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -606,15 +660,77 @@ static void pad_face_sync(void) {
 }
 - (void)updateVisibility {
     BOOL external = s2a_pad_has_controller();
-    atomic_store(&g_shown_external, external);
+    BOOL keyboard = atomic_load(&g_kb_state) != KB_IDLE;   // 键盘接管：虚拟按键同实体手柄一样收起（触屏模式下这一层照留，手指照常进游戏）
+    atomic_store(&g_shown_external, external || keyboard);
     _connect.hidden = !_adapterEnabled || !_foreground || external;
-    _touchEnabled(_foreground && !external);
+    _touchEnabled(_foreground && !external && !keyboard);
+    s2a_ios_mouse_sync();   // 虚拟按键回来了：鼠标视角不该再锁着
 }
 - (void)publishSystem:(GCExtendedGamepad *)pad {
-    uint32_t buttons; int32_t axes[4];
+    uint32_t buttons, kb_buttons; int32_t axes[4], kb_sticks[4];
     sample_extended(pad, &buttons, axes);
+    kb_snapshot(&kb_buttons, kb_sticks);
+    s2a_kbd_merge(&buttons, axes, kb_buttons, kb_sticks);   // 同 Mac 槽 0：第一只手柄 + 键盘
     s2a_pad_update(S2A_PAD_SYSTEM, 1, buttons, axes);
     pad_selection_check();
+}
+// 键盘这一份变了（只在 inputQueue 上跑，keyboard.m 经 s2a_ios_keyboard_publish 调）：照 Mac 选源。pressed = 这次有新按下的键（抬键不触发接管）
+- (void)keyboardChanged:(BOOL)pressed {
+    if (_system.extendedGamepad) { [self publishSystem:_system.extendedGamepad]; return; }   // 系统手柄当玩家 1：并进它
+    pthread_mutex_lock(&g_feedback_mu);
+    BOOL ble = atomic_load(&g_adapter_enabled) && ble_is_p1();
+    if (ble) {   // NS2 Pro 当玩家 1：照它上一帧并一份重发
+        int32_t axes[4]; for (int i = 0; i < 4; i++) axes[i] = atomic_load(&g_ble_p1_axes[i]);
+        ble_p1_publish(atomic_load(&g_ble_p1_buttons), axes);
+    }
+    pthread_mutex_unlock(&g_feedback_mu);
+    if (ble) { pad_selection_check(); return; }
+    uint32_t buttons; int32_t sticks[4];
+    kb_snapshot(&buttons, sticks);
+    int state = atomic_load(&g_kb_state);
+    if (state == KB_IDLE) {
+        if (!pressed) return;   // 吸附键盘、抬键都不算接管
+        atomic_store(&g_kb_pending, buttons);
+        atomic_store(&g_kb_state, KB_PENDING);
+        // 先收起虚拟按键（vpad.m setInputEnabled:NO 会把触屏源清零），收完再发键盘这一份，免得刚发的被清掉
+        __weak S2AController *weakSelf = self;
+        dispatch_queue_t queue = _inputQueue;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf updateVisibility];
+            dispatch_async(queue, ^{ [weakSelf keyboardTakeover]; });
+        });
+        return;
+    }
+    if (state == KB_PENDING) { atomic_fetch_or(&g_kb_pending, buttons); return; }
+    kb_publish_touch(buttons, sticks);
+    kb_menu_hold(buttons);
+    pad_selection_check();
+}
+// 虚拟按键已收起（inputQueue）：接管生效，把收起期间按过的键补报一下（pad.c 锁存，短按不丢），再发当前这一份
+- (void)keyboardTakeover {
+    int expected = KB_PENDING;
+    if (!atomic_compare_exchange_strong(&g_kb_state, &expected, KB_ACTIVE)) return;   // 期间碰了屏幕 / 键盘断开 / 切后台
+    uint32_t buttons; int32_t sticks[4];
+    kb_snapshot(&buttons, sticks);
+    uint32_t pending = atomic_exchange(&g_kb_pending, 0);
+    if (pending & ~buttons) kb_publish_touch(buttons | pending, sticks);
+    kb_publish_touch(buttons, sticks);
+    kb_menu_hold(buttons);
+    pad_selection_check();
+    LOG("外接键盘：接管玩家 1（虚拟按键收起）");
+}
+// 结束键盘接管（inputQueue）：键盘断开 / 切后台 / 按键模式下碰了屏幕。虚拟按键显示回来时自己会清零触屏源再接着发
+- (void)keyboardEnd {
+    atomic_store(&g_kb_pending, 0);
+    kb_menu_hold(0);
+    if (atomic_exchange(&g_kb_state, KB_IDLE) != KB_IDLE) LOG("外接键盘：交回屏幕按键");
+}
+// 按键模式下手指碰屏幕（主线程，S2ATouchWatch）：结束键盘接管、虚拟按键显示回来；触屏模式下手指与键盘本就同时可用，不动
+- (BOOL)screenTouched {
+    if (atomic_load(&g_kb_state) == KB_IDLE || s2a_vpad_touch_only() == 1) return NO;
+    dispatch_sync(_inputQueue, ^{ [self keyboardEnd]; });
+    [self updateVisibility];
+    return YES;
 }
 // 槽 1–3 采一次写进原子量（空槽 / 后台写零）。只在 inputQueue 上跑
 - (void)publishSlot:(int)slot {
@@ -755,6 +871,7 @@ static void pad_face_sync(void) {
             if (mayClear) LOG("系统手柄：%s 确认断开（%d ms 复查仍不可用，%d 个在场），清零并摘 handler", name, S2A_SYSTEM_RECHECK_MS, (int)controllers.count);
             else LOG("系统手柄：%s 断开（不在前台），清零并摘 handler", name);
             [self clearSystem];
+            if (atomic_load(&g_kb_state) == KB_ACTIVE) [self keyboardChanged:NO];   // 手柄走了、键盘还接管着：键盘这一份接着走触屏源
             break;
         case S2A_SYS_NONE:
         default:
@@ -882,6 +999,8 @@ static void log_controllers(int why) {   // why：0 启动时、1 连接通知�
     if (!foreground) { atomic_store(&g_ble_ready, 0); ble_slot_set_locked(-1); }
     pthread_mutex_unlock(&g_feedback_mu);
     s2a_pad_set_active(foreground);
+    if (!foreground) { s2a_ios_keyboard_background(); s2a_ios_mouse_background(); }   // 外接键盘：按着的键放开，接管保留（同系统手柄，回前台虚拟按键不跳出来）；鼠标释放锁定（同 Mac 失焦）
+    else s2a_ios_keyboard_foreground();               // 后台期间键盘拔了：结束接管，虚拟按键回来
     atomic_store(&g_slots_active, foreground);   // 槽 1–3：下面 selectSystem 分槽时按它采样或清零
     s2a_ios_slot_feedback_active(foreground);   // 玩家 2–4 的震动 / 体感：后台不收
     if (foreground) { phone_refresh_availability(); [self reloadAdapterPreference]; if (_adapterEnabled) [self reloadRecord]; }
@@ -916,15 +1035,44 @@ static void menu_hold_check(void) {
 static void pad_selection_check(void) {
     menu_hold_check();
     system_sync_selection();
-    int external = s2a_pad_has_controller();
+    int external = shown_external_now();
     if (atomic_load(&g_shown_external) != external) dispatch_async(dispatch_get_main_queue(), ^{ [g_controller updateVisibility]; });
 }
-// 屏幕被碰（含虚拟按键隐藏时碰到游戏画面）：连着实体手柄时改由触屏生效、显示虚拟按键。只观察、不拦截任何触摸
+// 屏幕被碰（含虚拟按键隐藏时碰到游戏画面）：连着实体手柄时改由触屏生效、显示虚拟按键。只观察、不拦截任何触摸。
+//   触控板 / 鼠标点击（UITouchTypeIndirectPointer，#1869 PR 2）：虚拟按键收起时不算碰屏幕（交 mouse.m 的规则：锁定 / 按键 / 当触屏点），
+//   要当触屏点的那一下转给 vpad.m 的触点槽，跟到抬起为止；虚拟按键显示着或仅触屏时照旧当手指
 @interface S2ATouchWatch : UIGestureRecognizer
 @end
-@implementation S2ATouchWatch
+@implementation S2ATouchWatch {
+    NSMutableSet<UITouch *> *_routed;   // 正当触屏点转给 vpad.m 的触控板点击
+}
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    (void)touches; (void)event;
+    BOOL finger = NO;
+    for (UITouch *t in touches) {
+        if (t.type != UITouchTypeIndirectPointer) { finger = YES; continue; }
+#if TARGET_OS_TV
+        int how = s2a_ios_mouse_pointer(0);   // 电视没有触控板指针（tv_host.m 回 0：当手指）
+#else
+        int how = s2a_ios_mouse_pointer((long)event.buttonMask);
+#endif
+        if (how == 0) finger = YES;
+        else if (how == 2) { if (!_routed) _routed = [NSMutableSet set]; [_routed addObject:t]; s2a_vpad_pointer_touch(t, 0); }
+    }
+    if (finger) [self fingerDown];
+    if (!_routed.count) self.state = UIGestureRecognizerStateFailed;
+}
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    (void)event; for (UITouch *t in touches) if ([_routed containsObject:t]) s2a_vpad_pointer_touch(t, 1);
+}
+- (void)lift:(NSSet<UITouch *> *)touches {
+    for (UITouch *t in touches) if ([_routed containsObject:t]) { s2a_vpad_pointer_touch(t, 2); [_routed removeObject:t]; }
+    if (!_routed.count) self.state = UIGestureRecognizerStateFailed;
+}
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { (void)event; [self lift:touches]; }
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { (void)event; [self lift:touches]; }
+- (void)reset { [super reset]; for (UITouch *t in _routed) s2a_vpad_pointer_touch(t, 2); [_routed removeAllObjects]; }
+- (void)fingerDown {
+    [g_controller screenTouched];   // 键盘接管中（按键模式）：虚拟按键显示回来
     if (s2a_pad_prefer_touch()) {
         system_sync_selection();
         pthread_mutex_lock(&g_feedback_mu);
@@ -935,7 +1083,6 @@ static void pad_selection_check(void) {
         pthread_mutex_unlock(&g_feedback_mu);
         [g_controller updateVisibility];
     }
-    self.state = UIGestureRecognizerStateFailed;
 }
 @end
 void s2a_controller_attach(UIView *root, void (^touchEnabled)(BOOL)) {
@@ -945,11 +1092,25 @@ void s2a_controller_attach(UIView *root, void (^touchEnabled)(BOOL)) {
     S2ATouchWatch *watch = [S2ATouchWatch new];   // 不吃游戏 / 虚拟按键的触摸（同 diag.m 四指长按的设法）
     watch.cancelsTouchesInView = NO; watch.delaysTouchesBegan = NO; watch.delaysTouchesEnded = NO;
     [root addGestureRecognizer:watch];
+    s2a_ios_keyboard_attach();   // iPad 外接键盘（keyboard.m）：回调挂到上面的输入队列
+    s2a_ios_mouse_attach(root);  // 触控板 / 鼠标（mouse.m）：同一条输入队列；root 用来请求指针锁定
 }
+int s2a_ios_inputs_hidden(void) { return atomic_load(&g_shown_external) == 1; }
 // 前后台切换会改手柄 / 虚拟手柄的 UIKit 状态（selectSystem → updateVisibility、S2AVPadView setInputEnabled → clearTouches），只许在主线程做。
 //   v0.3.0 起挂起 / 恢复在串行队列 s2a.ios-lifecycle 上跑（app.m s2a_ios_suspend），从那里直接调会在 UIImageView setHidden 处触发 UIKit 主线程断言、
 //   整个 App 被系统中止（11-11 真机：局中一失焦就崩，崩溃报告 EXC_BREAKPOINT，队列 s2a.ios-lifecycle）。不在主线程就排到主队列：
 //   用 async 不用 sync——调用方可能正持着主线程要等的东西；主队列先进先出，前后台的先后顺序不变
+// iPad 外接键盘（ios/keyboard.m，#1869）用：回调挂的输入队列、交键态、结束接管
+dispatch_queue_t s2a_ios_input_queue(void) { return g_controller.inputQueue; }
+void s2a_ios_keyboard_publish(uint32_t buttons, const int32_t sticks[4], int pressed) {
+    atomic_store(&g_kb_buttons, buttons);
+    for (int i = 0; i < 4; i++) atomic_store(&g_kb_sticks[i], sticks[i]);
+    [g_controller keyboardChanged:pressed != 0];
+}
+void s2a_ios_keyboard_end(void) {
+    [g_controller keyboardEnd];
+    dispatch_async(dispatch_get_main_queue(), ^{ [g_controller updateVisibility]; });
+}
 void s2a_controller_set_foreground(int foreground) {
     BOOL fg = foreground != 0;
     if (NSThread.isMainThread) { [g_controller setForeground:fg]; return; }

@@ -10,7 +10,7 @@ static int g_fail, g_ok;
 static void reset(const char *mode, const char *restore) {
     if (mode) setenv("S2A_SNAP_MODE", mode, 1); else unsetenv("S2A_SNAP_MODE");
     if (restore) setenv("S2A_SNAP_RESTORE", restore, 1); else unsetenv("S2A_SNAP_RESTORE");
-    g_snap_sw = -1; atomic_store(&g_snap_live, -1);
+    g_snap_sw = -1; atomic_store(&g_snap_live, -1); g_snap_off = 0;   // 每项从新开局算：上一项关掉的原因码不带过来
 }
 static void eq(const char *n, int want, int got) { if (want == got) g_ok++; else { g_fail++; printf("  不符：%s 期望 %d → 真结果 %d\n", n, want, got); } }
 int main(void) {
@@ -39,6 +39,10 @@ int main(void) {
     reset("1", NULL); eq("⑨ 设置关、启动环境给 1：能存", 1, s2a_snap_saving());
     g_pref = 0; reset(NULL, NULL); eq("⑨ 设置开：能存", 1, s2a_snap_saving());
     g_pref = -1; reset(NULL, NULL); eq("⑨ 没存过：能存", 1, s2a_snap_saving()); eq("⑨ 没存过：来源缺省", 1, !strcmp(s2a_snap_source(), "缺省"));
+    // ⑩ 构造期因放不下关掉：依据写「本局放不下快照区」（不是设置来源「缺省」）；选定游戏后重开：依据回到设置来源
+    g_pref = -1; reset(NULL, NULL); s2a_snap_disable(S2A_SNAP_OFF_ADDRESS);
+    eq("⑩ 放不下关掉：依据写放不下", 1, !strcmp(s2a_snap_source(), "本局放不下快照区"));
+    eq("⑩ 重开", 1, s2a_snap_reenable(S2A_SNAP_OFF_ADDRESS)); eq("⑩ 重开后：依据回到缺省", 1, !strcmp(s2a_snap_source(), "缺省"));
     if (g_fail) printf("✗ t_snapsw：%d 项不符（共 %d 项）\n", g_fail, g_ok + g_fail); else printf("✓ t_snapsw：0 处不符（共 %d 项）\n", g_ok);
     return g_fail ? 1 : 0;
 }

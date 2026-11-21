@@ -19,7 +19,9 @@ public final class DiagnosticBundlePolicy {
     /** Uncompressed proposed payload budget; ZIP framing still needs its own cap. */
     public static final long MAX_TOTAL_BYTES = 30L << 20;
     public static final int MAX_ARCHIVED_LOGS = 9;
-    public static final int MAX_ENTRIES = 14;
+    /** Device profile (s2a-device-profile-v1, android/native/direct/dev_facts.c): a few tens of KB; bigger is not one of ours. */
+    public static final long MAX_PROFILE_BYTES = 256L << 10;
+    public static final int MAX_ENTRIES = 15;
 
     private DiagnosticBundlePolicy() {}
 
@@ -65,15 +67,16 @@ public final class DiagnosticBundlePolicy {
             boolean manifest = "manifest.json".equals(name);
             boolean archive = name != null
                     && name.matches("logs/host-[0-9]{8}-[0-9]{6}(?:_(?:0[2-9]|[1-9][0-9]))?\\.log");
+            boolean profile = name != null && name.matches("devprofile/[0-9a-f]{16}\\.json");
             // No normalization, basename extraction or URL decoding: a variant
             // is rejected, never repaired into an allowed path.
-            if (!manifest && !archive && !"logs/host.log".equals(name)
+            if (!manifest && !archive && !profile && !"logs/host.log".equals(name)
                     && !"logs/frames.tsv".equals(name) && !"logs/threads.txt".equals(name)
                     && !"logs/unpack.log".equals(name))
                 throw new Rejected(Rejection.NAME_NOT_ALLOWED);
             if (!names.add(name)) throw new Rejected(Rejection.DUPLICATE_NAME);
             if (entry.bytes < 0) throw new Rejected(Rejection.INVALID_SIZE);
-            if (entry.bytes > (manifest ? MAX_MANIFEST_BYTES : MAX_TEXT_BYTES))
+            if (entry.bytes > (manifest ? MAX_MANIFEST_BYTES : profile ? MAX_PROFILE_BYTES : MAX_TEXT_BYTES))
                 throw new Rejected(Rejection.ENTRY_TOO_LARGE);
             if (archive && ++archives > MAX_ARCHIVED_LOGS)
                 throw new Rejected(Rejection.TOO_MANY_ARCHIVES);

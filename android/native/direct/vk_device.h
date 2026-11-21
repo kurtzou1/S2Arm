@@ -5,6 +5,11 @@
 #include <stdint.h>
 #include <vulkan/vulkan.h>
 
+// 直连实例申请的 Vulkan 版本（VkApplicationInfo.apiVersion）。用更高核心版本才有的物理设备功能，要应用申请的版本和设备版本都够：
+//   有效版本 = 两者较低者；不够就只认对应扩展（Khronos：VkApplicationInfo 描述、初始化一章的 physical-device 扩展段）。
+#define S2A_VK_APP_API_VERSION VK_API_VERSION_1_1
+static inline uint32_t s2a_vk_effective_api(uint32_t device_api) { return device_api < S2A_VK_APP_API_VERSION ? device_api : S2A_VK_APP_API_VERSION; }
+
 // 等栅栏，按墙钟算时限。有的驱动在等待被信号打断时不接着等，直接返回 VK_TIMEOUT（#697：天玑 9000+ / Mali-G710 r32p1 上，
 // 一次计算解码的提交之后 vkWaitForFences(5 秒) 不到 1 毫秒就返回超时、栅栏其实稍后才触发；等待期间屏蔽本线程的异步信号后正常）。
 // 我们的进程里信号很多（写跟踪的缺页、游戏线程的挂起），所以超时返回不能当真：没到墙钟时限就接着等。

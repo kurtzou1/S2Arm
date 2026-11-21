@@ -165,7 +165,7 @@ int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) 
     app.pApplicationName = "s2a-direct-vk";
     app.applicationVersion = 1;
     app.pEngineName = "s2a";
-    app.apiVersion = VK_API_VERSION_1_1;
+    app.apiVersion = S2A_VK_APP_API_VERSION;
     VkInstanceCreateInfo info = {0};
     info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     info.pApplicationInfo = &app;
@@ -204,6 +204,12 @@ int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) 
     out->physical = physicals[0];   // 首个＝系统主 GPU；多 GPU 选择是 C8，不在首版猜。
     free(physicals);
     vkGetPhysicalDeviceProperties(out->physical, &out->properties);
+    // #1749 M0：设备事实现查一次、落盘成设备档案、打【事实】摘要（dev_facts.c，只查询不改启用项）。放在一切「缺能力就拒绝」之前（含下一行的 1.1 版本下限）：
+    //   建不成设备的机器也留下档案（1.0 设备只记核心查询）。弱引用：只链 vk_device.c 的宿主探针照旧能链接（没有就不记）。
+    {
+        extern int s2a_dev_facts_on_device_create(VkPhysicalDevice) __attribute__((weak));
+        if (s2a_dev_facts_on_device_create) (void)s2a_dev_facts_on_device_create(out->physical);
+    }
     if (physical_api_floor(out->properties.apiVersion, why, why_size)) return -1;
     vkGetPhysicalDeviceMemoryProperties(out->physical, &out->memory);
     out->has_2d_array_compatible = out->properties.apiVersion >= VK_API_VERSION_1_1 ||
@@ -211,10 +217,15 @@ int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) 
 
     VkPhysicalDeviceDriverProperties driver = {0};
     driver.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES;
-    VkPhysicalDeviceProperties2 props2 = {0};
-    props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-    props2.pNext = &driver;
-    vkGetPhysicalDeviceProperties2(out->physical, &props2);
+    // 驱动属性是 1.2 核心 / VK_KHR_driver_properties：有效版本（应用申请 1.1 与设备取低）不到 1.2 时只在列了扩展才挂；
+    //   都没有 = 驱动身份未知（名字空、ID 0），按名字识别的特殊处理都不命中
+    if (s2a_vk_effective_api(out->properties.apiVersion) >= VK_API_VERSION_1_2 ||
+        has_device_extension(out->physical, "VK_KHR_driver_properties")) {
+        VkPhysicalDeviceProperties2 props2 = {0};
+        props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        props2.pNext = &driver;
+        vkGetPhysicalDeviceProperties2(out->physical, &props2);
+    }
     snprintf(out->driver_name, sizeof out->driver_name, "%.120s", driver.driverName);
     snprintf(out->driver_info, sizeof out->driver_info, "%.120s", driver.driverInfo);
     out->driver_id = (int)driver.driverID;
@@ -421,10 +432,14 @@ int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) 
     {
         VkPhysicalDeviceFeatures2 query = {0};
         query.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-        draw_parameters.pNext = has_timeline ? (void *)&timeline : (void *)&index_u8;
-        timeline.pNext = &index_u8;
-        index_u8.pNext = has_4444 ? &f4444 : NULL;
-        if (has_dcc) { dcc.pNext = index_u8.pNext; index_u8.pNext = &dcc; }
+        // 只属于扩展的特性结构只在设备列出该扩展时挂（规范：pNext 上的结构必须属于设备支持的版本或扩展；没列却挂，驱动多半忽略、位停在 0）。
+        //   index_type_uint8 原先无条件挂进查询链（启用时才看扩展），#1879 的形态档假驱动按规范判红后发现
+        const int has_u8 = has_device_extension(out->physical, "VK_EXT_index_type_uint8");
+        void **tail = &draw_parameters.pNext; *tail = NULL;
+        if (has_timeline) { *tail = &timeline; tail = &timeline.pNext; *tail = NULL; }
+        if (has_u8) { *tail = &index_u8; tail = &index_u8.pNext; *tail = NULL; }
+        if (has_4444) { *tail = &f4444; tail = &f4444.pNext; *tail = NULL; }
+        if (has_dcc) { *tail = &dcc; tail = &dcc.pNext; *tail = NULL; }
         query.pNext = &draw_parameters;
         if (out->has_swapchain_maintenance1) {
             maintenance.pNext = &draw_parameters;

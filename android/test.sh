@@ -82,9 +82,12 @@ s2a_gate_step bash "$android_dir/tests/nvk_shown_timing_test.sh"
 s2a_gate_step bash "$android_dir/tests/vk_dev_ext_test.sh"
 # 支持范围下限：GPU 只支持 Vulkan 1.0（物理设备 apiVersion < 1.1）具名拒绝，原因短语与外壳 PlayerError 一致；3 个负对照。
 s2a_gate_step bash "$android_dir/tests/vk_api_floor_test.sh"
-# 整台设备能力形态档（#1749 只看能力）：建设备 / caps JSON / 几何着色器路径 / 数组层夹取缺省在 Adreno、Mali、保守三档下各跑一遍，
-#   两台真机档另与 devices/*.json 逐项比；六种「能力判断改坏」的负对照必须红在对应档（宿主 cc + 假驱动，约 5 秒）
+# 整台设备能力形态档（#1749 只看能力）：每份设备档案（tests/devprofiles/*.json：Adreno、Mali、Vulkan 1.1 保守档）下各跑一遍建设备 /
+#   caps JSON / 几何着色器路径 / 数组层夹取缺省 / 设备事实落盘，生成的档案与档案文件逐字段比、再当形态档回读一遍；两台真机档另与
+#   devices/*.json 逐项比；「能力判断改坏」与「设备事实漏记」的负对照必须红在对应档（宿主 cc + 假驱动，约 12 秒）
 s2a_gate_step bash "$android_dir/tests/caps_shape/run.sh"
+# 设备档案白名单校验与导出工具（#1749 M0）：正反例、隐私负对照（白名单外的键必红）、诊断包 / run-as 两条取法（adb 替身，约 2 秒）
+s2a_gate_step bash "$android_dir/tests/devprofiles/lint_test.sh"
 # 调试开关读数的线程内缓存（宿主，确定性）：命中 / 过期 / 缺省 / 名字比较 / 名字上限，7 个负对照。
 s2a_gate_step bash "$android_dir/tests/nvk_flag_cache_test.sh"
 # 自定义边框色就近取内置三档（宿主，确定性）：没有 VK_EXT_custom_border_color 时浮点 / 整数各取最近一档。
@@ -325,6 +328,10 @@ s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py" --live-compile-
 s2a_gate_step "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -I "$android_dir/native/direct" -I "$repo_dir/graphics/third_party/spirv_cross" \
     "$android_dir/tests/t_spv_workgroup_bytes.c" -o "$out/spv-workgroup-bytes-test"
 s2a_gate_step "$out/spv-workgroup-bytes-test"
+# #1865 统一 SPIR-V 合规核对的宿主件：声明扫描 / 能力扩展需求表 / push 与 Workgroup 字节，合成模块逐类负控
+s2a_gate_step "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -I "$android_dir/native/direct" -I "$repo_dir/graphics/third_party/spirv_cross" \
+    "$android_dir/tests/t_spv_compliance.c" -o "$out/spv-compliance-test"
+s2a_gate_step "$out/spv-compliance-test"
 # Shutdown admission, bounded waits and active-context retention (including negative controls).
 s2a_gate_step "$PY" "$android_dir/tests/nvk_shutdown_test.py"
 # 上屏线程 CPU（rp_present.c，#1501 差距 9）：同线程配对 / 跨线程与时间倒退不计 / 首次只记起点 / 取走清零 / 会话清起点 / 上屏接线，6 个点变异各撤一处必红（纯宿主 C）

@@ -96,14 +96,19 @@ static int program_resign(const char *home, const char *game_data, const char *g
             s2a_cert_settle(home);   // 手机上有几张证书时用与 App 同团队、还能用的那张（导入别的团队的证书不顶掉它）
             NSString *idp = [@(home) stringByAppendingPathComponent:@"Library/Application Support/S2Arm/identity/current.json"];
             NSDictionary *cur = read_json(idp); cur_sha = str(cur[@"cert_sha1"]).lowercaseString; cur_team = str(cur[@"team"]);
-            if (!cur_sha) return 0;   // 手机上没有身份（电脑签好推上来的玩家）：不碰
+            if (!cur_sha) { RLOG("起局重签：游戏 %s 不重签：手机上没有签名身份（电脑签好推上来的）", gid); return 0; }   // 不碰
         }
         NSString *prog = [[@(game_data) stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"program"];
         NSString *catp = [prog stringByAppendingPathComponent:@"catalogue.json"];
-        NSDictionary *cat = read_json(catp); if (!cat) { RELEASE_ID(); return 0; }
+        NSDictionary *cat = read_json(catp); if (!cat) { RELEASE_ID(); RLOG("起局重签：游戏 %s 不重签：程序包清单读不到（%s）", gid, catp.UTF8String); return 0; }
         NSDictionary *signer = [cat[@"signer"] isKindOfClass:NSDictionary.class] ? cat[@"signer"] : nil;
         NSString *was_sha = str(signer[@"cert_sha1"]).lowercaseString, *team = str(cat[@"team"]);
-        if (in_lc >= 0 && !force && (was_sha ? [was_sha isEqualToString:cur_sha] : (!in_lc && team && cur_team && [team isEqualToString:cur_team]))) { RELEASE_ID(); return 0; }
+        if (in_lc >= 0 && !force && (was_sha ? [was_sha isEqualToString:cur_sha] : (!in_lc && team && cur_team && [team isEqualToString:cur_team]))) {
+            // 判「不用签」也记一行（D-RG9V：LiveContainer 里外置镜像被拒、日志里一行重签都没有，分不清是证书没取到还是程序库本来就是这张签的）
+            RLOG("起局重签：游戏 %s 不用重签：程序库签名 %s 团队 %s，当前%s %s 团队 %s", gid, was_sha.UTF8String ?: "无", team.UTF8String ?: "无",
+                 in_lc ? "LiveContainer 的证书" : lc_fb ? "导入进 S2Arm 的证书" : "手机上的签名身份", cur_sha.UTF8String ?: "无", cur_team.UTF8String ?: "无");
+            RELEASE_ID(); return 0;
+        }
         NSString *why_sign = force ? @"程序库签名本机注册不了" : in_lc ? @"在 LiveContainer 里、程序库不是它的证书签的" : was_sha ? @"程序库是另一张证书签的" : team ? @"程序库是别的团队签的" : @"程序库还没签名";
         const char *src = in_lc ? "LiveContainer 的证书" : lc_fb ? "导入进 S2Arm 的证书（LiveContainer 存的那张解不开）" : "手机上的签名身份";
         uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);

@@ -60,7 +60,7 @@ def main():
         host_link.run(base + [str(p) for p in src] + [strip, '-lm', '-o', str(exe)], check=True, timeout=60)
         return subprocess.run([str(exe), *args], capture_output=True, text=True, timeout=30, env=env)
 
-    live_modes = ('--live-compile-thread', '--live-compile-pending', '--live-compile-stop', '--live-compile-nowait', '--cs-libpack')
+    live_modes = ('--live-compile-thread', '--live-compile-pending', '--live-compile-stop', '--cs-libpack')
     if len(sys.argv) == 2 and sys.argv[1] in live_modes:
         result = run(sys.argv[1][2:], original, args=(sys.argv[1],))
         sys.stdout.write(result.stdout)
@@ -78,9 +78,6 @@ def main():
              '--live-compile-thread', 'compute first use publishes the real compiled program'),
             ('pending-marked-failed', '        return LIVE_PENDING;', '        return LIVE_ABORT;',
              '--live-compile-pending', 'exhausted safe budget must defer'),
-            ('ignore-nowait', 'nvn_plat_flag("nvk_live_compile_nowait", 0) ? 0 : nvn_plat_flag("fu_frame_ms", 100)',
-             'nvn_plat_flag("fu_frame_ms", 100)', '--live-compile-nowait',
-             'no-wait must bypass the available frame budget while callbacks are gated'),
         ]
         for name, old, new, mode, expected in mutants:
             assert text.count(old) == 1, (name, 'mutation anchor')
@@ -99,8 +96,8 @@ def main():
              '    rec.lp_ok = unaligned ? 0 : 2;\n    (void)rec;', '--compute-warm', 'compute program must be recorded in warm manifest'),
             ('wrong-stage', 'memcpy(rec.identity, p->identity, 32); rec.stage_mask = 32;',
              'memcpy(rec.identity, p->identity, 32); rec.stage_mask = 1;', '--compute-warm', 'persisted compute manifest retains identity'),
-            ('wrong-build', 'struct entry *e = compute ? build_compute(bytes, len, &views[0], rec->identity, rec->keys[0]) : build(bytes, len, views, nst, rec->identity);',
-             'struct entry *e = build(bytes, len, views, nst, rec->identity);', '--compute-warm', 'compute program warm builds from prior cache'),
+            ('wrong-build', 'struct entry *e = compute ? build_compute(bytes, len, &views[0], rec->identity, rec->keys[0], 0) : build(bytes, len, views, nst, rec->identity, 0);',
+             'struct entry *e = build(bytes, len, views, nst, rec->identity, 0);', '--compute-warm', 'compute program warm builds from prior cache'),
             ('flag-ignored', 'if (!nvn_plat_flag("nvk_compute_warm", 0)) return;',
              '(void)nvn_plat_flag("nvk_compute_warm", 0);', '--compute-warm-off', 'compute warm off must not record programs'),
         ]

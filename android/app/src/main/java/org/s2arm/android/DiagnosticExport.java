@@ -27,7 +27,7 @@ import java.util.TreeMap;
 
 /**
  * #528 item 15: the Android side of "export diagnostics". Collects what only a Context knows
- * (this app's directories, the imported key file, version and device facts) and runs
+ * (this app's directories, the imported key file, version, device facts and the device profile) and runs
  * DiagnosticBundleWriter. Call off the main thread.
  */
 final class DiagnosticExport {
@@ -39,8 +39,10 @@ final class DiagnosticExport {
         DiagnosticRedactor redactor = new DiagnosticRedactor(prefixes(context), DiagnosticRedactor.keyValues(keyText(context)));
         Path saves = new File(context.getFilesDir(), "user/0/saves").toPath();   // same root as BootSpecSource
         String word = Locale.getDefault().getLanguage().equals("zh") ? "诊断" : "diag";
-        return DiagnosticBundleWriter.write(saves, DiagnosticShareProvider.checkedDirectory(context), redactor::redact,
-                                            info(context), exits(context), word, System.currentTimeMillis(), TimeZone.getDefault()).bundle;
+        Path profiles = new File(context.getFilesDir(), "devprofile").toPath();   // device profile (android/native/direct/dev_facts.c, #1749)
+        return DiagnosticBundleWriter.write(saves, profiles, DiagnosticShareProvider.checkedDirectory(context), redactor::redact,
+                                            info(context), exits(context), word, System.currentTimeMillis(), TimeZone.getDefault(),
+                                            DiagnosticBundleWriter.MAX_ZIP_BYTES).bundle;
     }
 
     /** This app's own directories, under every spelling a log may use; the rest of each path is kept. */

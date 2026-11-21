@@ -25,6 +25,11 @@ targets:
       - ios/l10n   # 宿主界面字符串表（<语言>.lproj/S2ArmHost.strings，ios/s2a_l10n.h S2AL，#316）
       - ios/settings.m
       - ios/controller.m
+      - ios/keyboard.m            # iPad 外接键盘（#1869）：GCKeyboard 采键，controller.m 照 Mac 选源
+      - ios/keyboard_settings.m   # 外接键盘改键页（齿轮菜单第一层）
+      - ios/mouse.m               # 触控板 / 鼠标（#1869 PR 2）：GCMouse 采键与位移、指针锁定
+      - ios/input_config.m        # 键位：起局点名的 S2A_INPUT_CONFIG（keyboard.m 读）
+      - runtime/src/input_config.c   # schema 1 解析与共用缺省键位
       - ios/slot_feedback.m
       - ios/ea_rumble.m
       - ios/phone_motion.m

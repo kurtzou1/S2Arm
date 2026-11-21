@@ -316,9 +316,11 @@ final class GameLibrary {
 
     // Progress for the panel, every 64 MiB copied.
     private GameInstall.Progress progress() {
-        long[] last = {0};
+        long[] last = {0, 0};
         return (done, total) -> {
             if (done - last[0] > (64L << 20)) { last[0] = done; listener.onStatus(context.getString(R.string.import_progress, done >> 20, total >> 20)); }
+            // 部署工具（deploy_game）按这一行判导入还在推进：进度在涨就继续等，停住才算超时（大包在机上校验 + 复制可远慢于直传）
+            if (done - last[1] > (512L << 20)) { last[1] = done; Log.i("S2Arm", "Game import progress: " + (done >> 20) + " / " + (total >> 20) + " MiB"); }
         };
     }
 

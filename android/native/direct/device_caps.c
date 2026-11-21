@@ -225,7 +225,8 @@ int s2a_vk_device_caps_json(const struct s2a_vk_device *d, char *out, size_t cap
         js_bool(optimal_all(d, k_etc2, sizeof k_etc2 / sizeof k_etc2[0])),
         js_bool(optimal_all(d, k_astc, sizeof k_astc / sizeof k_astc[0])),
         js_bool(optimal_all(d, k_five_bit, sizeof k_five_bit / sizeof k_five_bit[0])),
-        js_bool(optimal_all(d, k_r4g4b4a4, sizeof k_r4g4b4a4 / sizeof k_r4g4b4a4[0])),
+        // A4B4G4R4 是 1.3 核心 / VK_EXT_4444_formats：直连实例只申请 1.1，只有扩展启用了（formats_4444_enabled）才能合法查这个格式
+        js_bool(d->formats_4444_enabled && optimal_all(d, k_r4g4b4a4, sizeof k_r4g4b4a4 / sizeof k_r4g4b4a4[0])),
         js_bool(scaled_vertex_ok(d)));
 
     PUT("\"memory\":{\"deviceLocalBytes\":%llu,\"heapCount\":%u,\"memoryTypeCount\":%u,"

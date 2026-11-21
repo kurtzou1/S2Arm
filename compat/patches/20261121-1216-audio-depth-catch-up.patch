@@ -1,0 +1,90 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+index 7f78fd2bdb6859f0b61dd88a6fcb48bf2b30efd5..334ecb88a7f25503122211fdd83415b4b6c684c1 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+@@ -585,6 +585,7 @@ namespace Ryujinx.Audio.Backends.Apple
+                 _repFreezeSeq = freezeSeq;
+ 
+                 long skipped = Interlocked.Exchange(ref AudioProcessor.S2ASkippedPeriods, 0);
++                long catchUps = Interlocked.Exchange(ref AudioProcessor.S2ACatchUps, 0);   // #1957：在途不到目标一半时越过墙钟上限追设备的渲染拍数
+                 long nanSamples = Interlocked.Exchange(ref Ryujinx.Audio.Renderer.Dsp.Command.DeviceSinkCommand.S2ANaNSamples, 0);
+                 long lateNs = Interlocked.Exchange(ref AudioProcessor.S2AMaxLateNs, 0);
+                 HudAudio(-1, 0, skipped);   // 渲染丢周期是整个渲染器的，不分会话：单报一次
+@@ -653,7 +654,7 @@ namespace Ryujinx.Audio.Backends.Apple
+                     Console.Error.WriteLine(
+                         $"[声] 输出 #{d.Index} 10 秒：回调 {cb - d._repCallbacks} 次，交设备 {sub - d._repSubmitted} 帧、播完 {pl - d._repPlayed} 帧，" +
+                         $"账上在途归零 {und - d._repUnderruns} 次（最长 {maxStarveMs:F1} ms；设备交还早于播完，归零时设备内部仍有缓冲，断音看真缺口与交还迟到）、停流 {pau - d._repPauses} 次，回调后最少在途 {(minInFlight == long.MaxValue ? -1 : minInFlight)} 帧，" +
+-                        $"回调最长间隔 {maxGapMs:F1} ms、交设备入队最长 {maxEnqMs:F1} ms；渲染丢周期 {skipped}、周期最晚 {lateNs / 1e6:F1} ms；真缺口 {gap - d._repGapFrames} 帧（{(gap - d._repGapFrames) * 1000.0 / d._rate:F1} ms）；放回提前量 {Volatile.Read(ref d._leadFrames)} 帧；交还迟到 {lb - d._repLateBursts} 次（最多比一拉晚 {lateOverMs:F1} ms）{lat}{level}{(d._ring != null ? $"；wav 丢 {d._ringDropped} B" : "")}");
++                        $"回调最长间隔 {maxGapMs:F1} ms、交设备入队最长 {maxEnqMs:F1} ms；渲染丢周期 {skipped}、追设备 {catchUps} 拍、周期最晚 {lateNs / 1e6:F1} ms；真缺口 {gap - d._repGapFrames} 帧（{(gap - d._repGapFrames) * 1000.0 / d._rate:F1} ms）；放回提前量 {Volatile.Read(ref d._leadFrames)} 帧；交还迟到 {lb - d._repLateBursts} 次（最多比一拉晚 {lateOverMs:F1} ms）{lat}{level}{(d._ring != null ? $"；wav 丢 {d._ringDropped} B" : "")}");
+ 
+                     HudAudio(d.Index, gap * 1000 / d._rate, 0);
+ 
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs b/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs
+index 7fa74ca078ef76e25bdac0e5c7738416306ed404..1682b56e1fdd6efc4a0da5ea56f5912b5e5c26a5 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs
+@@ -287,6 +287,17 @@ namespace Ryujinx.Audio.Renderer.Dsp
+         //   not make this loop render as fast as it can until the watchdog restarts the queue
+         private long _s2aVirt;
+ 
++        // S2Arm (#1957 Mac 一款开放世界游戏玩 3～4 小时后爆音不停，诊断 D-EZH5): the cap above holds rendering to the wall clock, but the
++        //   device plays by its own clock. One a few ppm faster eats the depth slowly (start of that run: at least 1200 frames in flight;
++        //   3 hours later: 0, 165 → 920 zero-in-flight hand-backs every 10 s, rendering exactly 480240 frames per 10 s = the wall clock
++        //   while below the target, i.e. held by the cap). So while the output holds less than half the target and has been fed, a render may
++        //   pass the cap without moving _s2aVirt (the device is ahead of the wall clock: follow it). At most one such render per
++        //   S2ACatchUpEvery renders (+3.1%, far above any real clock drift — that run: ~75 ms of headroom gone in ~3 h ≈ 7 ppm): an output that
++        //   hands buffers back unplayed (never fills) gets at most 3.1% more than the wall clock, not a spin
++        private const int S2ACatchUpEvery = 32;
++        private int _s2aCatchUp, _s2aCatchUpTick;
++        public static long S2ACatchUps;   // 诊断：追设备的渲染次数（10 秒行读取清零）
++
+         // True: paced by depth (the next render may start now). False: no fed output can tell its depth: use the wall clock
+         private bool S2ADepthWait(long increment, long timeNow)
+         {
+@@ -312,6 +323,14 @@ namespace Ryujinx.Audio.Renderer.Dsp
+             // What a long stall left unrendered is a gap already heard: owe at most 8 periods, never more
+             _s2aVirt = Math.Max(_s2aVirt, timeNow - 8 * increment);
+ 
++            bool catchUp = false;
++
++            if (++_s2aCatchUpTick >= S2ACatchUpEvery)
++            {
++                _s2aCatchUpTick = 0;
++                _s2aCatchUp = Math.Min(_s2aCatchUp + 1, 4);
++            }
++
+             while (true)
+             {
+                 bool below = buffered < S2ADepthFrames;
+@@ -322,6 +341,13 @@ namespace Ryujinx.Audio.Renderer.Dsp
+                     break;
+                 }
+ 
++                if (buffered < S2ADepthFrames / 2 && _s2aCatchUp > 0)
++                {
++                    catchUp = true;
++
++                    break;
++                }
++
+                 // Wall clock: the output is near the target (a device a little slower than the clock), or it stopped draining (bounded wait)
+                 if ((timeNow >= _s2aVirt && buffered < S2ADepthFrames + 2 * period) || timeNow >= _s2aVirt + 4 * increment)
+                 {
+@@ -353,7 +379,16 @@ namespace Ryujinx.Audio.Renderer.Dsp
+ 
+             S2AFedBufferedFrames(true);
+ 
+-            _s2aVirt += increment;
++            if (catchUp)
++            {
++                _s2aCatchUp--;
++                Interlocked.Increment(ref S2ACatchUps);
++            }
++            else
++            {
++                _s2aVirt += increment;
++            }
++
+             _lastTime = timeNow;
+             _playbackEnds = timeNow;
+ 

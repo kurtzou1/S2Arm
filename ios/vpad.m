@@ -45,6 +45,7 @@ void S2A_AudioSetVolume(int percent) __attribute__((weak_import));
 #import "play_layout.h"
 #include "s2a_docs.h"   // iOS 进程级容器 Documents（s2a_container_docs）
 #include "s2a_pad.h"
+#include "keyboard.h"   // 外接键盘改键页（齿轮菜单第一层，#1869）
 #include "s2a_direct_prompt.h"   // 触屏提示的文案（与 launchers/shared/experience.v1.json prompts 逐字一致）
 #include <stdatomic.h>
 #include <dlfcn.h>
@@ -180,14 +181,18 @@ static void note_read(s2a_pad_source source, uint32_t b, const int32_t *sticks) 
     if (atomic_fetch_add(&g_reads, 1) == 0) LOG("输入：HID 线程开始读取触屏 / 实体手柄快照");
     if (source == S2A_PAD_TOUCH) rec_note(b, s);
 }
+// 弱链接[touchtest]：s2a_ios_mouse_take
+void s2a_ios_mouse_take(int32_t sticks[4]) __attribute__((weak_import));   // mouse.m：鼠标视角位移（触屏读数对照单测只编本文件这一段，不带 mouse.m；电视版不编本文件）
 // C# InputPump 查这个导出接到 InputHook：返回按键位，sticks[4] = 左 x / y、右 x / y（±32767，上为正）
 __attribute__((visibility("default"), used)) uint32_t s2a_vpad_read(int32_t *sticks) {
     s2a_pad_source source; uint32_t b = s2a_pad_read(sticks, &source);
+    if (s2a_ios_mouse_take) s2a_ios_mouse_take(sticks);   // 鼠标视角位移加进右摇杆，读一次消费一次（同 Mac s2a_vpad_read）
     note_read(source, b, sticks);
     return b;
 }
 __attribute__((visibility("default"), used)) void s2a_vpad_read_ex(s2a_pad_snapshot *out) {
     s2a_pad_read_ex(out);
+    if (s2a_ios_mouse_take) s2a_ios_mouse_take(out->axes);   // 同上（同 Mac s2a_vpad_read_ex）
     note_read((s2a_pad_source)out->source, out->buttons, out->axes);
 }
 
@@ -257,6 +262,7 @@ __attribute__((visibility("default"), used)) void s2a_vpad_read_ex(s2a_pad_snaps
 - (void)addLayoutAction:(UIAlertController *)menu controller:(UIViewController *)controller;
 - (void)refreshTouchHud;
 - (int)readTouches:(int32_t *)xy attributes:(uint32_t *)attributes;   // HID 线程调用，内部加锁
+- (void)pointerTouch:(UITouch *)t phase:(int)phase;   // 触控板左键当触屏点（主线程）
 - (void)offerTouchHint;
 - (int)setTouchOnly:(BOOL)on manual:(BOOL)manual why:(NSString *)why;
 - (BOOL)touchOnly;
@@ -294,6 +300,7 @@ void s2a_dprompt_ask(NSString *title, NSString *body, NSString *accept, NSString
     //   槽位制：一根手指固定占一个下标，Start 只发首帧、End 发末帧，中间帧下标不变 = 游戏认得出是同一根手指。
     BOOL _touchOnly;
     int32_t _slotX[16], _slotY[16]; uint8_t _slotState[16]; BOOL _slotStart[16];   // 0 空闲 / 1 按住 / 2 等发 End
+    uint16_t _pointerSlots;   // 按键模式下虚拟按键收起时，触控板左键当触屏点占的槽（controller.m 转来，#1869 PR 2）
     NSMapTable<UITouch *, NSNumber *> *_slot;
     UILabel *_hud;                          // 触屏真值那一行（见 g_hud_on）
     S2AScreenLockView *_screenLock;
@@ -583,6 +590,9 @@ static NSString *vp_running_gid(void) { const char *g = getenv("S2A_LAUNCH_GAME_
     UIAction *edit = vp_act(S2AL(@"vpad.edit.title"), @"gamecontroller", NO, ^{ [ws afterMenu:^{ [ws beginEditing]; }]; });
     if (_touchOnly) { edit.attributes = UIMenuElementAttributesDisabled; edit.subtitle = S2AL(@"vpad.menu.editDisabled"); }
     [items addObject:edit];
+    // 外接键盘的改键页（keyboard_settings.m，#1869）：与「编辑虚拟按键」并排放第一层；接着键盘或这款改过键位才列（拔了键盘还能回来看 / 恢复默认）
+    if (s2a_ios_keyboard_connected() || s2a_ios_mouse_connected() || s2a_ios_keyboard_customized())
+        [items addObject:vp_act(S2AL(@"kbd.menu"), @"keyboard", NO, ^{ [ws afterMenu:^{ [ws openKeyboard]; }]; })];
     // 按键布局（选方案：菜单不收，选中的打勾；「编辑虚拟按键」在切到仅触屏后变灰要等下次打开菜单）
     NSMutableArray<UIMenuElement *> *lay = [NSMutableArray array];
     void (^addLayout)(NSString *, NSString *, NSString *) = ^(NSString *lid, NSString *name, NSString *note) {
@@ -927,6 +937,7 @@ static void snap_restart_result(int result, const char *detail, void *context) {
     if (error) LOG("触屏布局：选定方案加载失败，暂用默认布局：%s", error.localizedDescription.UTF8String);
     [self rebuildKeys]; [self setNeedsLayout]; [self wake];
     atomic_store(&g_touch_only, _touchOnly ? 1 : 0); atomic_store(&g_user_chose, _layoutStore.manualChosen ? 1 : 0);
+    s2a_ios_mouse_sync();   // 切到仅触屏：鼠标视角不该再锁着
     if (_touchOnly) { LOG("触屏布局：纯触屏（不显示虚拟按键，手指直接交给游戏）"); return; }
     LOG("触屏布局：应用 %s（schema 1）", _layout.identifier.UTF8String);
 }
@@ -1221,6 +1232,18 @@ static NSString *const kSlideSwitchKey = @"S2AVPadSlideSwitch";   // 滑动切�
     navigation.modalInPresentation = YES;
     [controller presentViewController:navigation animated:YES completion:nil];
 }
+// 外接键盘改键页（keyboard_settings.m，#1869）：同 openLayouts，开着时触屏输入停住
+- (void)openKeyboard {
+    UIViewController *controller = self.window.rootViewController;
+    if (!controller || _settingsOpen) return;
+    controller = s2a_top_presenter(controller);
+    _settingsOpen = YES; [self clearTouches];
+    __weak S2AVPadView *weakSelf = self;
+    [controller presentViewController:s2a_ios_keyboard_settings(^{
+        S2AVPadView *view = weakSelf; if (!view) return;
+        view->_settingsOpen = NO; [view clearTouches]; [view wake];
+    }) animated:YES completion:nil];
+}
 - (void)setSettingsOpen:(BOOL)open {
     _settingsOpen = open; [self clearTouches]; if (!open) [self wake];
 }
@@ -1480,12 +1503,12 @@ static NSString *const kSlideSwitchKey = @"S2AVPadSlideSwitch";   // 滑动切�
 - (int)readTouches:(int32_t *)xy attributes:(uint32_t *)attributes {
     @synchronized(self) {
         // 不碰 UIKit（hidden 之类）——这是 HID 线程。暂停期间不留半截触点，免得恢复后补发一帧 End。
-        if (_settingsOpen || !_touchOnly || atomic_load(&_screenLocked)) { for (int i = 0; i < 16; i++) _slotState[i] = 0; return 0; }
+        if (_settingsOpen || (!_touchOnly && !_pointerSlots) || atomic_load(&_screenLocked)) { for (int i = 0; i < 16; i++) _slotState[i] = 0; _pointerSlots = 0; return 0; }
         int n = 0;
         for (int i = 0; i < 16; i++) {
             if (_slotState[i] == 0) continue;
             xy[2 * n] = _slotX[i]; xy[2 * n + 1] = _slotY[i];
-            if (_slotState[i] == 2) { attributes[n] = 2u; _slotState[i] = 0; }
+            if (_slotState[i] == 2) { attributes[n] = 2u; _slotState[i] = 0; _pointerSlots &= (uint16_t)~(1u << i); }
             else { attributes[n] = _slotStart[i] ? 1u : 0u; _slotStart[i] = NO; }
             n++;
         }
@@ -1527,6 +1550,15 @@ static NSString *const kSlideSwitchKey = @"S2AVPadSlideSwitch";   // 滑动切�
     int slot = n.intValue;
     @synchronized(self) { _slotState[slot] = _slotState[slot] == 1 ? 2 : 0; }   // End 由 HID 线程下一帧发出去
 }
+- (void)pointerTouch:(UITouch *)t phase:(int)phase {
+    CGPoint p = [t locationInView:self];
+    if (phase == 0) {
+        [self beginSlot:t at:p];
+        NSNumber *n = [_slot objectForKey:t];
+        if (n) @synchronized(self) { _pointerSlots |= (uint16_t)(1u << n.intValue); }
+    } else if (phase == 1) [self moveSlot:t at:p];
+    else [self endSlot:t];
+}
 - (void)moveStick:(int)k to:(CGPoint)p {
     CGFloat radius = MAX(_radius[k], 1);
     CGFloat dx = (p.x - _c[k].x) / radius, dy = (p.y - _c[k].y) / radius, m = hypot(dx, dy); if (m > 1) { dx /= m; dy /= m; }
@@ -1553,6 +1585,7 @@ static NSString *const kSlideSwitchKey = @"S2AVPadSlideSwitch";   // 滑动切�
     if (_settingsOpen || (!_inputEnabled && !_touchOnly)) return;
     [self wake];
     for (UITouch *t in ts) {
+        if (t.type == UITouchTypeIndirectPointer && !(e.buttonMask & UIEventButtonMaskPrimary)) continue;   // 触控板 / 鼠标右键、中键：不当手指（照鼠标映射走 mouse.m）
         CGPoint p = [t locationInView:self];
         if (_touchOnly) { [self beginSlot:t at:p]; continue; }   // 纯触屏：没有按键也没有摇杆，这一下直接进游戏
         if (_split && (!CGRectContainsPoint(_safeRect,p) || CGRectContainsPoint(_division,p))) continue;
@@ -1619,6 +1652,11 @@ static NSString *const kSlideSwitchKey = @"S2AVPadSlideSwitch";   // 滑动切�
 // C# InputPump 按符号查这个导出：每帧问一次当前触点。
 // 返回触点个数（0..16）；xy = {x0,y0,…} 用游戏自己的画布坐标系（一般是 1280×720；宽屏款是游戏真出图的宽，如 1564×720），
 // attributes 是 TouchAttribute（1 Start、2 End、0 无）。
+// 触控板左键当触屏点（controller.m 触摸观察转来，主线程）：按键模式下虚拟按键收起时这一层收不到触摸，借触点槽送进游戏（同 Mac 左键点画面 = 触屏）
+void s2a_vpad_pointer_touch(UITouch *touch, int phase) {
+    S2AVPadView *v = g_vpad; if (!v) return;
+    [v pointerTouch:touch phase:phase];
+}
 __attribute__((visibility("default"), used)) int s2a_vpad_read_touch(int32_t *xy, uint32_t *attributes) {
     S2AVPadView *v = g_vpad; return v ? [v readTouches:xy attributes:attributes] : 0;
 }

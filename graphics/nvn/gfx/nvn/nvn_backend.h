@@ -39,7 +39,7 @@
 extern "C" {
 #endif
 
-#define NVN_GPU_CONTRACT_VERSION 18   // 改任何签名或语义 +1；两个后端与核心同批改，t_nvn_backend.c 的签名表同批改
+#define NVN_GPU_CONTRACT_VERSION 19   // 改任何签名或语义 +1；两个后端与核心同批改，t_nvn_backend.c 的签名表同批改
 /* 定稿 #1（调用形式）：链接期直接调用 nvn_gpu_*。每个平台构建只链一个后端，Metal 3 / 4 的选择留在 Metal 后端内部。
    理由：零间接、可内联；同进程 A/B 对照没有真实消费者，不为它新增注册实体（vickwv 同意）。 */
 
@@ -285,6 +285,7 @@ typedef struct {
     const void *blob; size_t bytes;  // 调用返回后后端不再引用
     const char *entry;               // 入口名（main0 / main0_z / entry_layer …，核心按变体选）
     const nvn_gpu_layout *layout;    // 已核对的中间布局；后端装载时与 blob 自带反射逐项核对（set / binding / 类别 / 数量 / 阶段 / 身份）
+    uint8_t precompiled;             // 1 = 出包预编库件（LibPack，带现编回退链）：SPIR-V 合规核对对「表外声明」按拒收处理；0 = 现编 / 缓存 / 离线件：表外声明只警告计数
 } nvn_gpu_shader_src;
 // 装载一个阶段的代码与布局（布局被后端拷走）。线程：[任意]（含 [后台] 预取）。生命周期：到 release；管线持有它用到的着色器。
 // 出错：NVN_GPU_E_COMPILE（why 带编译器原文）、NVN_GPU_E_LAYOUT（布局与 blob 不符，why 写第一处不符的项）、NVN_GPU_E_UNSUPPORTED（不收这种 blob）。

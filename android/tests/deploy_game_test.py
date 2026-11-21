@@ -34,6 +34,8 @@ class FakeAdb:
         self.calls = []
         self.wrong_hash, self.refused, self.stale_start = wrong_hash, refused, stale_start
         self.slow_import = slow_import   # 导入一直没做完：logcat 里没有成功行
+        self.import_progress = None   # 非空：导入期间每次读 logcat 依次出这些进度（MiB），出完后进度停住；import_done_after 次后出成功行
+        self.import_done_after = None; self.import_polls = 0
         self.receive_reply = receive_reply   # 非空：接收端回这一行（如 ERR …）而不是 OK
         self.drop_first = drop_first         # 前几次连接一接上就断（设备端还没监听时 adb forward 的样子）
         self.started = False
@@ -130,7 +132,12 @@ class FakeAdb:
             accepted = f'Game startup accepted: {TITLE} session 1'
             if self.refused:
                 return f'Game import of import/{self.name} refused: missing resource'
-            if self.slow_import:
+            if self.import_progress is not None:
+                self.import_polls += 1
+                if self.import_done_after is None or self.import_polls <= self.import_done_after:
+                    seen = self.import_progress[:self.import_polls]
+                    return '\n'.join(f'Game import progress: {d} / 20000 MiB' for d in seen)
+            elif self.slow_import:
                 return ''
             imported = f'Game build artifact updated (same files): test [{TITLE}] from import/{self.name}'
             if self.receipt:
@@ -562,6 +569,31 @@ class DeployTest(unittest.TestCase):
                 self.deploy(adb)
         started = max(i for i, x in enumerate(adb.calls) if x[:3] == ('am', 'start', '-W') and 'IMPORT_RECEIVE' in ' '.join(map(str, x)))
         self.assertFalse(any(x[:2] == ('am', 'force-stop') for x in adb.calls[started + 1:]))
+
+    def fake_clock(self):
+        # 每次 sleep 时钟前进 100 秒；monotonic 读当前值（期望按这个步长手算）
+        now = [0.0]
+        def sleep(s): now[0] += 100
+        return patch.object(deploy_game.time, 'monotonic', side_effect=lambda: now[0]), patch.object(deploy_game.time, 'sleep', side_effect=sleep)
+
+    def test_import_progress_extends_wait_past_size_estimate(self):
+        # 按大小估的等待只有 1 秒；进度每轮都涨（512 → 2560 MiB，5 轮 = 400 秒），第 6 轮出成功行：要等到成功，不能在 1 秒处判超时
+        adb = FakeAdb()
+        adb.import_progress, adb.import_done_after = [512, 1024, 1536, 2048, 2560], 5
+        mono, slp = self.fake_clock()
+        with patch.object(deploy_game, 'import_wait_for', return_value=1), mono, slp:   # 走真的直传（替身 adb 记下导入目录名，成功行才对得上）
+            self.deploy(adb)   # 不抛 = 等到了成功行；旧逻辑第 2 轮（100 秒）就过了 1 秒的截止、报超时
+        self.assertGreaterEqual(adb.import_polls, 6)   # 第 6 次读日志才出成功行（之后启动阶段还会再读）
+
+    def test_import_progress_stalled_times_out(self):
+        # 进度涨到 512 MiB 后停住：截止 = 首次看到进度的时刻 0 + 600 秒；时钟每轮 +100，第 7 轮在 600 秒处出循环，报「进度停在 512 MiB」
+        adb = FakeAdb()
+        adb.import_progress = [512]
+        mono, slp = self.fake_clock()
+        with patch.object(deploy_game, 'import_wait_for', return_value=1), patch.object(deploy_game, 'send_tree'), mono, slp:
+            with self.assertRaisesRegex(RuntimeError, '进度停在 512 MiB 已 600 秒没涨'):
+                self.deploy(adb)
+        self.assertEqual(adb.import_polls, 6)
 
     def test_resources_current_identity_and_result(self):
         resources = self.root / 'resources'

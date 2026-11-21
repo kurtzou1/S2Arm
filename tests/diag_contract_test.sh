@@ -180,9 +180,11 @@ ck("③b 电脑端诊断包整包预算留出 manifest 余量后不超收件整�
 # ④ 安卓：DiagnosticBundlePolicy.validate 的允许名单（还没有上传端，不打包）：字面量全名 + 归档日志正则的两个样例，逐个过契约
 src = (H / "android/app/src/main/java/org/s2arm/android/DiagnosticBundlePolicy.java").read_text(encoding="utf-8")
 lits = re.findall(r'"(manifest\.json|logs/[A-Za-z0-9_.-]+)"', src)
-arch = re.search(r'name\.matches\("([^"]+)"\)', src).group(1).replace("\\\\", "\\")
-samples = ["logs/host-20261116-120000.log", "logs/host-20261116-120000_02.log"]
-ck("④ 安卓归档日志正则认得手写样例", all(re.fullmatch(arch, n) for n in samples), arch)
+# 每条名字正则（归档日志、设备档案 devprofile/<事实摘要前 16 位>.json）都要有手写样例认得它，样例再逐个过契约
+pats = [p.replace("\\\\", "\\") for p in re.findall(r'name\.matches\("([^"]+)"\)', src)]
+samples = ["logs/host-20261116-120000.log", "logs/host-20261116-120000_02.log", "devprofile/0123456789abcdef.json"]
+ck("④ 安卓每条名字正则都有手写样例认得、每个样例都有正则认得", len(pats) == 2 and all(any(re.fullmatch(p, n) for n in samples) for p in pats)
+   and all(any(re.fullmatch(p, n) for p in pats) for n in samples), "、".join(pats))
 names = sorted(set(lits)) + samples
 want = {"manifest.json", "logs/host.log", "logs/frames.tsv", "logs/threads.txt", "logs/unpack.log"}
 rej = [n for n in names if dc.judge(contract, n, 1, {})[1]]

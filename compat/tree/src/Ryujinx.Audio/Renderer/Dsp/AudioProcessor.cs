@@ -287,6 +287,17 @@ namespace Ryujinx.Audio.Renderer.Dsp
         //   not make this loop render as fast as it can until the watchdog restarts the queue
         private long _s2aVirt;
 
+        // S2Arm (#1957 Mac 一款开放世界游戏玩 3～4 小时后爆音不停，诊断 D-EZH5): the cap above holds rendering to the wall clock, but the
+        //   device plays by its own clock. One a few ppm faster eats the depth slowly (start of that run: at least 1200 frames in flight;
+        //   3 hours later: 0, 165 → 920 zero-in-flight hand-backs every 10 s, rendering exactly 480240 frames per 10 s = the wall clock
+        //   while below the target, i.e. held by the cap). So while the output holds less than half the target and has been fed, a render may
+        //   pass the cap without moving _s2aVirt (the device is ahead of the wall clock: follow it). At most one such render per
+        //   S2ACatchUpEvery renders (+3.1%, far above any real clock drift — that run: ~75 ms of headroom gone in ~3 h ≈ 7 ppm): an output that
+        //   hands buffers back unplayed (never fills) gets at most 3.1% more than the wall clock, not a spin
+        private const int S2ACatchUpEvery = 32;
+        private int _s2aCatchUp, _s2aCatchUpTick;
+        public static long S2ACatchUps;   // 诊断：追设备的渲染次数（10 秒行读取清零）
+
         // True: paced by depth (the next render may start now). False: no fed output can tell its depth: use the wall clock
         private bool S2ADepthWait(long increment, long timeNow)
         {
@@ -312,6 +323,14 @@ namespace Ryujinx.Audio.Renderer.Dsp
             // What a long stall left unrendered is a gap already heard: owe at most 8 periods, never more
             _s2aVirt = Math.Max(_s2aVirt, timeNow - 8 * increment);
 
+            bool catchUp = false;
+
+            if (++_s2aCatchUpTick >= S2ACatchUpEvery)
+            {
+                _s2aCatchUpTick = 0;
+                _s2aCatchUp = Math.Min(_s2aCatchUp + 1, 4);
+            }
+
             while (true)
             {
                 bool below = buffered < S2ADepthFrames;
@@ -319,6 +338,13 @@ namespace Ryujinx.Audio.Renderer.Dsp
 
                 if (below && timeNow >= capAt)
                 {
+                    break;
+                }
+
+                if (buffered < S2ADepthFrames / 2 && _s2aCatchUp > 0)
+                {
+                    catchUp = true;
+
                     break;
                 }
 
@@ -353,7 +379,16 @@ namespace Ryujinx.Audio.Renderer.Dsp
 
             S2AFedBufferedFrames(true);
 
-            _s2aVirt += increment;
+            if (catchUp)
+            {
+                _s2aCatchUp--;
+                Interlocked.Increment(ref S2ACatchUps);
+            }
+            else
+            {
+                _s2aVirt += increment;
+            }
+
             _lastTime = timeNow;
             _playbackEnds = timeNow;
 

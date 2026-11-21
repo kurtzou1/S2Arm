@@ -159,6 +159,10 @@ def start_activity(adb, *args):
 PUSH_BYTES_PER_S = 30e6
 PUSH_MARGIN = 2
 PUSH_FLOOR_S = 120
+# 导入等待按事件续：App 每推进 512 MiB 打一行「Game import progress: 已做 / 总量 MiB」，进度在涨就把截止往后挪这么多秒；
+#   停住这么久都没涨才算卡住。大包在机上逐文件校验 + 复制（硬链接被拒时）可远慢于直传（11-21 一款 20.6 GB 的包直传 541 秒后又等 835 秒仍没完成）
+IMPORT_STALL_S = 600
+IMPORT_PROGRESS = re.compile(r'Game import progress: (\d+) / (\d+) MiB')
 PUSH_PROGRESS_S = 5
 RECEIVE_CONNECT_S = 30      # App 开好套接字的最长等待
 # 原地使用的约定位置（LibraryActivity.IN_PLACE_DIR）：写 canonical 路径（/sdcard 是它的链接），App 登记、回执里都是这条
@@ -475,9 +479,14 @@ def deploy_resources(apk, resources, adb, work, mode='auto', timeout=180, push_t
     else:
         import_wait = import_wait_for(resources, timeout) if paths is None else max(timeout, transfer_timeout(planned_bytes))
     deadline = time.monotonic() + import_wait
+    progressed = -1
     while time.monotonic() < deadline:
         logs = own_lines(adb, package, adb.shell('logcat', '-d', '-v', 'brief', '-T', since, '-s', 'S2Arm:I'))
         (work / 'deploy.log').write_text(logs + '\n')
+        done_mib = max((int(m.group(1)) for m in IMPORT_PROGRESS.finditer(logs)), default=-1)
+        if done_mib > progressed:   # 导入还在推进：截止往后挪（按事件续等，不拍总时长）
+            progressed = done_mib
+            deadline = max(deadline, time.monotonic() + IMPORT_STALL_S)
         if in_place and 'Game in-place registration' in logs and 'refused:' in logs:
             raise RuntimeError('原地登记被拒绝：' + next(line for line in logs.splitlines()
                                                     if 'Game in-place registration' in line and 'refused:' in line)[-300:])
@@ -503,7 +512,7 @@ def deploy_resources(apk, resources, adb, work, mode='auto', timeout=180, push_t
         time.sleep(1)
     else:
         retry = '同一差分命令' if delta_marker else '同一命令加 --refresh-existing'
-        raise RuntimeError(f'等待导入超时（{import_wait} 秒内没有成功回执）：导入可能还在进行，没有强停应用；'
+        raise RuntimeError(f'等待导入超时（{import_wait} 秒内没有成功回执' + (f'，进度停在 {progressed} MiB 已 {IMPORT_STALL_S} 秒没涨' if progressed >= 0 else '，也没有进度行') + '）：导入可能还在进行，没有强停应用；'
                            f'等它做完后用{retry}重跑核对')
     save_receipt = None
     if save_archive is not None:

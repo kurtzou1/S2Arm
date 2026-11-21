@@ -679,6 +679,7 @@ id s2a_ios_ext_register(UIViewController *vc);   // extdisplay.m：登记外接�
 @interface S2AGameVC : S2APlayViewController
 @property (strong, nonatomic) id extDisplay;   // 外接屏场景配件的登记，跟本控制器同寿
 @end
+int s2a_ios_mouse_lock_wanted(void);   // ios/mouse.m
 @implementation S2AGameVC
 - (void)viewDidLoad { [super viewDidLoad]; self.extDisplay = s2a_ios_ext_register(self); }
 // 游戏画面在前台就保持亮屏（#1199）；回游戏库 / 换游戏时根控制器被替换，这里收到消失、交还自动锁屏
@@ -687,6 +688,8 @@ id s2a_ios_ext_register(UIViewController *vc);   // extdisplay.m：登记外接�
 - (UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll; }
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
 - (BOOL)prefersStatusBarHidden { return YES; }
+// 触控板 / 鼠标「转动视角」（ios/mouse.m，#1869 PR 2）：点左键后要系统锁定指针，Esc / 切后台 / 虚拟按键回来就放
+- (BOOL)prefersPointerLocked { return s2a_ios_mouse_lock_wanted(); }
 - (void)viewDidLayoutSubviews {   // 屏幕尺寸变了（10-27 Duo 合上切外屏、展开回内屏）：记下当前屏的比例；直连出图层按新尺寸重摆（graphics/nvn/host_adapt.m；通用模式没有这个符号）
     [super viewDidLayoutSubviews];
     void s2a_dprompt_layout(void) __attribute__((weak_import));   // ios/dprompt.m：屏幕尺寸变了，触屏提示条按新宽度重排（只链前端的单测没有它）

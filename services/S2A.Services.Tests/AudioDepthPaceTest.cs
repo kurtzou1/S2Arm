@@ -28,12 +28,14 @@ namespace S2A.Services.Tests
         private sealed class FakeSession : HardwareDeviceSessionOutputBase, IS2AOutputDepth
         {
             private readonly bool _dropAll;
+            private readonly double _speed;   // 设备时钟比墙钟快多少倍（④ 1.01 = 快 1%，#1957 设备钟快于墙钟）
             private readonly long _t0 = Stopwatch.GetTimestamp();
             private long _given;
 
-            public FakeSession(bool dropAll) : base(null, SampleFormat.PcmInt16, Rate, 2)
+            public FakeSession(bool dropAll, double speed = 1.0) : base(null, SampleFormat.PcmInt16, Rate, 2)
             {
                 _dropAll = dropAll;
+                _speed = speed;
             }
 
             public long S2ABufferedFrames
@@ -45,7 +47,7 @@ namespace S2A.Services.Tests
                         return 0;
                     }
 
-                    long played = (Stopwatch.GetTimestamp() - _t0) * Rate / Stopwatch.Frequency;
+                    long played = (long)((Stopwatch.GetTimestamp() - _t0) * _speed * Rate / Stopwatch.Frequency);
 
                     lock (this)
                     {
@@ -57,7 +59,7 @@ namespace S2A.Services.Tests
 
             public override void QueueBuffer(AudioBuffer buffer)
             {
-                long played = (Stopwatch.GetTimestamp() - _t0) * Rate / Stopwatch.Frequency;
+                long played = (long)((Stopwatch.GetTimestamp() - _t0) * _speed * Rate / Stopwatch.Frequency);
 
                 lock (this)
                 {
@@ -75,7 +77,7 @@ namespace S2A.Services.Tests
             public override bool WasBufferFullyConsumed(AudioBuffer buffer) => true;
         }
 
-        private sealed class FakeDriver(bool dropAll) : IHardwareDeviceDriver
+        private sealed class FakeDriver(bool dropAll, double speed = 1.0) : IHardwareDeviceDriver
         {
             private readonly ManualResetEvent _update = new(false), _pause = new(true);
             public float Volume { get; set; } = 1f;
@@ -84,7 +86,7 @@ namespace S2A.Services.Tests
 
             public IHardwareDeviceSession OpenDeviceSession(IHardwareDeviceDriver.Direction direction, IVirtualMemoryManager memoryManager, SampleFormat sampleFormat, uint sampleRate, uint channelCount)
             {
-                var s = new FakeSession(dropAll);
+                var s = new FakeSession(dropAll, speed);
                 Session0 ??= s;
                 return s;
             }
@@ -173,9 +175,30 @@ namespace S2A.Services.Tests
 
             var drv3 = new FakeDriver(true);
             var p3 = new AudioProcessor();
-            p3.Start(Chain(drv3));
+            IHardwareDeviceDriver chain3 = Chain(drv3);
+            p3.Start(chain3);
             double ms3 = RenderN(p3, 75);
             Row("③ 交还即丢渲染 75 拍用时（不空转）", "≥ 240 ms", $"{ms3:F1} ms", ms3 >= 240);
+            p3.Stop();
+            chain3.Dispose();
+
+            // ④ #1957 设备钟比墙钟快：渲染被墙钟上限压着时在途一路被吃光（那局 3 小时后零在途、爆音）。上限给的余量 = 目标 30 ms + 1 拍 + 欠 8 拍 ≈ 75 ms，
+            //   设备快 2% 时约 3.75 秒吃光。渲染 1400 拍（约 7 秒，设备多吃约 140 ms > 75 ms）：期望最后 100 拍交完的在途中位数 ≥ 240、追设备拍数 > 0
+            //   （不到目标一半时越过上限追设备，每 32 拍至多 1 拍 = +3.1% > 2%）；负控：改前的节拍（没有追设备）同一序列最后 100 拍中位数 = 240 以下（被吃光，只剩刚交的一拍）
+            var drv4 = new FakeDriver(false, 1.02);
+            var p4 = new AudioProcessor();
+            IHardwareDeviceDriver chain4 = Chain(drv4);
+            p4.Start(chain4);
+            Interlocked.Exchange(ref AudioProcessor.S2ACatchUps, 0);
+            var d4 = new System.Collections.Generic.List<long>();
+            RenderN(p4, 1300, drv4.Session0);
+            RenderN(p4, 100, drv4.Session0, d4);
+            d4.Sort();
+            long m4 = d4.Count > 0 ? d4[d4.Count / 2] : -1;
+            long cu4 = Interlocked.Read(ref AudioProcessor.S2ACatchUps);
+            Row("④ 设备钟快 2%、渲染 1400 拍后最后 100 拍在途中位数", "≥ 240（追设备，不被吃光）", $"{m4}（追设备 {cu4} 拍）", m4 >= 240 && cu4 > 0);
+            p4.Stop();
+            chain4.Dispose();
 
             return bad == 0 ? 0 : 1;
         }

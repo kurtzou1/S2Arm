@@ -37,7 +37,8 @@ for rel in "${front_srcs[@]}"; do
     objects+=("$object")
 done
 # 原生层链接库同生产（runtime/build.mk 的 HOST_LIBS：Foundation、Security 等）：本脚本整目录编 runtime/src，手写框架表会漏新依赖（11-17 selfsign.c 加 Security 后这里链接红）
-weak_output=$(printf '%s\n' 'fps-limit-weak:;@echo $(NVN_TEST_WEAK) $(HOST_LIBS)' | make -s -f "$root/runtime/build.mk" -f - fps-limit-weak)
+# 上面链进了生产 Mac 前端（HOST_SRCS），它的弱引用登记在「弱链接[host]」：同生产宿主链接行带上 S2A_HOST_WEAK（如 ios/ldn_lan.m 的 S2A_LdnSetServer，C# 服务层提供）
+weak_output=$(printf '%s\n' 'fps-limit-weak:;@echo $(NVN_TEST_WEAK) $(S2A_HOST_WEAK) $(HOST_LIBS)' | make -s -f "$root/runtime/build.mk" -f - fps-limit-weak)
 read -r -a weak_flags <<< "$weak_output"
 xcrun --sdk macosx clang "${common[@]}" -std=gnu11 -fobjc-arc \
     -I"$root/graphics/nvn/gfx/nvn" -I"$root/graphics/nvn/gfx/nvn/include" -I"$root/graphics/nvn/host" \

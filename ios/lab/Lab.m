@@ -6,6 +6,8 @@
 #import "vpad.h"
 #import "play_layout.h"
 #include "s2a_pad.h"
+int s2a_ios_mouse_lock_wanted(void);   // ios/mouse.m
+void s2a_vpad_read_ex(s2a_pad_snapshot *out);   // ios/vpad.m
 #include <math.h>
 
 void s2a_diag_attach(UIViewController *controller);
@@ -72,7 +74,7 @@ int s2a_screen_w_after_load(void) { return s2a_screen_w(); }
 }
 - (void)refresh:(CADisplayLink *)link {
     displayTicks++;
-    s2a_pad_snapshot snapshot; s2a_pad_read_ex(&snapshot);
+    s2a_pad_snapshot snapshot; s2a_vpad_read_ex(&snapshot);   // 走游戏同一个读导出（InputPump 读的就是它）：鼠标视角位移在这里加进右摇杆，直接读 pad.c 看不到
     _snapshot.text = [NSString stringWithFormat:@"F01 输入诊断 · 无游戏运行\nsource=%u buttons=0x%04x\nL=(%d,%d) R=(%d,%d)",
         snapshot.source, snapshot.buttons, snapshot.axes[0], snapshot.axes[1], snapshot.axes[2], snapshot.axes[3]];
     if (![_lastSnapshot isEqualToString:_snapshot.text]) {
@@ -84,6 +86,7 @@ int s2a_screen_w_after_load(void) { return s2a_screen_w(); }
 - (void)background:(NSNotification *)note { s2a_controller_set_foreground(0); [self record:@{@"kind": @"background"}]; [self refresh:nil]; }
 - (void)foreground:(NSNotification *)note { s2a_controller_set_foreground(1); [self record:@{@"kind": @"foreground"}]; [self refresh:nil]; }
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
+- (BOOL)prefersPointerLocked { return s2a_ios_mouse_lock_wanted(); }   // 触控板 / 鼠标转动视角（mouse.m），同游戏页 S2AGameVC
 @end
 
 @interface S2AInputLabApplication : UIApplication

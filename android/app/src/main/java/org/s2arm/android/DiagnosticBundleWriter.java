@@ -49,6 +49,7 @@ final class DiagnosticBundleWriter {
     private static final Pattern TITLE_ID = Pattern.compile("[0-9A-Fa-f]{16}");
     private static final Pattern SESSION_LOG = Pattern.compile("host-[0-9]{1,20}-[0-9]{1,10}-[A-Za-z0-9]{6}\\.log");
     private static final Pattern BUNDLE = Pattern.compile("S2Arm-[^/]+\\.zip");
+    private static final Pattern PROFILE = Pattern.compile("[0-9a-f]{16}\\.json");   // files/devprofile/<事实摘要前 16 位>.json（dev_facts.c）
     private static final Pattern WORD = Pattern.compile("[A-Za-z]{1,16}|诊断");
     private static final String STATE_DIR = "ryujinx-android";
     // The cut marker ("\n…截掉 N 字节…\n", at most 41 bytes) comes out of the tail, so head + marker + tail ≤ cap.
@@ -128,6 +129,18 @@ final class DiagnosticBundleWriter {
 
     static Result write(Path savesRoot, Path outDir, Function<String, String> redactor, Map<String, Map<String, String>> info,
                         List<Map<String, Object>> exits, String word, long now, TimeZone zone, long maxZipBytes) throws IOException {
+        return write(savesRoot, null, outDir, redactor, info, exits, word, now, zone, maxZipBytes);
+    }
+
+    /**
+     * {@code profileDir}: files/devprofile (#1749 M0). Its newest regular &lt;16 hex&gt;.json goes in as devprofile/&lt;name&gt;,
+     * byte for byte: it is NOT run through the log redactor. The profile holds whitelisted fields only (dev_facts.c writes
+     * nothing else; tools/devprofile_lint.py rejects anything else on the way back), and the redactor would turn its
+     * "sha256-&lt;64 hex&gt;" factsDigest into [KEY_MATERIAL], so the exported profile could never pass lint.
+     * None there, null, or over MAX_PROFILE_BYTES = no entry. Symlinks and other names are never read.
+     */
+    static Result write(Path savesRoot, Path profileDir, Path outDir, Function<String, String> redactor, Map<String, Map<String, String>> info,
+                        List<Map<String, Object>> exits, String word, long now, TimeZone zone, long maxZipBytes) throws IOException {
         if (!WORD.matcher(word).matches()) throw new IllegalArgumentException("bundle word");
         Files.createDirectories(outDir);
         List<SessionLog> logs = sessionLogs(savesRoot);
@@ -136,6 +149,13 @@ final class DiagnosticBundleWriter {
         long budget = DiagnosticBundlePolicy.MAX_TOTAL_BYTES - DiagnosticBundlePolicy.MAX_MANIFEST_BYTES;
         int omitted = 0;
         try {
+            Path profile = newestProfile(profileDir);
+            byte[] profileBytes = null;
+            if (profile != null) {
+                boolean[] truncated = {false};
+                byte[] raw = readCapped(profile, DiagnosticBundlePolicy.MAX_PROFILE_BYTES, truncated);   // no symlink; a cut profile is no profile
+                if (!truncated[0]) { profileBytes = raw; budget -= raw.length; }   // verbatim (see the method comment)
+            }
             for (SessionLog log : logs) {
                 if (entries.size() >= MAX_LOGS) { omitted++; continue; }
                 boolean[] truncated = {false};
@@ -162,6 +182,15 @@ final class DiagnosticBundleWriter {
                 session.put("modified", iso(log.modified));
                 session.put("current", sessions.isEmpty());
                 sessions.add(session);
+            }
+            if (profileBytes != null) {   // after the logs: the first log's name depends on entries being empty
+                String name = "devprofile/" + profile.getFileName();
+                entries.put(name, profileBytes);
+                Map<String, Object> file = new TreeMap<>();
+                file.put("path", name);
+                file.put("bytes", (long) profileBytes.length);
+                file.put("truncated", false);
+                files.add(file);
             }
             Map<String, Object> manifest = new TreeMap<>();
             manifest.put("schema", 1L);
@@ -227,6 +256,25 @@ final class DiagnosticBundleWriter {
         } catch (DiagnosticBundlePolicy.Rejected e) {
             throw new IOException("bundle rejected: " + e.reason);
         }
+    }
+
+    /** The newest regular file named like a profile generation, or null (no directory, none there, too large to be ours). */
+    static Path newestProfile(Path dir) throws IOException {
+        if (dir == null || !Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) return null;
+        Path best = null;
+        long bestTime = Long.MIN_VALUE;
+        try (DirectoryStream<Path> ds = Files.newDirectoryStream(dir)) {
+            for (Path p : ds) {
+                if (!PROFILE.matcher(p.getFileName().toString()).matches()) continue;
+                BasicFileAttributes a = Files.readAttributes(p, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+                if (!a.isRegularFile() || a.size() > DiagnosticBundlePolicy.MAX_PROFILE_BYTES) continue;
+                long t = a.lastModifiedTime().toMillis();
+                if (best == null || t > bestTime || (t == bestTime && p.getFileName().toString().compareTo(best.getFileName().toString()) > 0)) {
+                    best = p; bestTime = t;
+                }
+            }
+        }
+        return best;
     }
 
     /** Reads at most cap bytes: over the cap, the head quarter and the tail, each cut at a line break. */

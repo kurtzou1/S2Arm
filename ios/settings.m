@@ -63,7 +63,8 @@ void s2a_ios_apply_overlay_settings(NSUserDefaults *defaults) {
 NSArray *s2a_ios_per_game_keys(void) {
     return @[@"S2AResolutionScale", @"S2AAntiAliasing", @"S2AScalingFilter", @"S2AFrameRateLimit", @"S2AWidescreen", @"S2AFps60",
              @"S2AFps60Manual", @"S2ADockedMode", @"S2ACommunityPatches", @"S2AWidescreenAsked", @"S2AFps60Asked", @"S2AFpsNative60", @"S2AFpsPick", S2AGameLanguageKey, @"S2AFrameInterp", @"S2AGameVolume",
-             @"S2AAudioDevice", @"S2AAudioVsSpeakers", @"S2AAudioVsHeadphones"];   // 输出设备类型 + 两个虚拟环绕开关（#189 后续，5.1 虚拟环绕第二片，按游戏存）
+             @"S2AAudioDevice", @"S2AAudioVsSpeakers", @"S2AAudioVsHeadphones",   // 输出设备类型 + 两个虚拟环绕开关（#189 后续，5.1 虚拟环绕第二片，按游戏存）
+             @"S2AKeyboardMap"];   // 外接键盘键位（ios/keyboard_settings.m，#1869）：按款存，同 Mac 启动器每款一份 input.json
 }
 NSArray<NSString *> *s2a_ios_game_languages(void) {
     return @[@"system", @"SimplifiedChinese", @"TraditionalChinese", @"AmericanEnglish", @"BritishEnglish", @"Japanese", @"Korean", @"French", @"CanadianFrench", @"German",

@@ -7,6 +7,8 @@
 // 构造（期望按语义手写，与被测实现无关）：16×16 RGBA8 单级二维贴图，池指针指向一块可读的假池（存储不在它里面），存储指向一页 PROT_NONE 的内存。
 //   ① pkg_upload 不崩、建出 16×16 的贴图（读不了的字节按 0）；② 打出那一行红「only 0 of its 1024 storage bytes are mapped」。
 // 反证：同一用例编改前的 nvn_mtl.m（截短只在 !t->pool 时做）→ 进程在 move 里 SIGBUS，测试走不到汇总行。
+static int g_stage_fail;   // ⑨：>0 时 CPU 上传暂存的下一次分配给 nil（模拟分配不到）
+#define UP_CPU_STAGE_NEW(n) (g_stage_fail > 0 ? (g_stage_fail--, (id<MTLBuffer>)nil) : [g_dev newBufferWithLength:(n) options:MTLResourceStorageModeShared])
 #include "../gfx/nvn/nvn_mtl.m"
 #include "../gfx/nvn/nvn_protos.h"
 #include <sys/mman.h>
@@ -77,6 +79,15 @@ int main(void) { @autoreleasepool {
         uint8_t *pp3 = NULL; const uint8_t *s3 = tex_src(&t3, t3.L.size, &pp3); int z3 = 1; for (uint64_t i = 0; i < t3.L.size; i++) z3 &= s3[i] == 0;
         VERIFY(s3 != t3.mem && z3, "⑧ 权限可读（按权限判可读 %llu / %llu 字节）但背后文件已截短：tex_src 不崩、给出全 0 副本", (unsigned long long)rd3, (unsigned long long)t3.L.size);
         free(pp3); munmap(r3, 2 * pg); close(fd); }
+    {   // ⑨ D-8QFH：CPU 上传暂存第一次分配不到（返回 nil）。期望（手写）：不抛 ObjC 异常、交出在途批后重分配，建出 16×16 贴图、重试计数 +1、打一行「重分配成功」
+        //   反证：改前 nil 直接进 up_keep_add → NSInvalidArgumentException「object cannot be nil」，进程中止，走不到汇总行
+        int pfd2[2]; REQUIRE(!pipe(pfd2)); int keep2 = dup(2); dup2(pfd2[1], 2); close(pfd2[1]);
+        uint64_t r0 = g_up_stage_retries; g_stage_fail = 1; uint64_t st9 = 0; id<MTLTexture> m9 = pkg_upload(&t, &st9, nil, NULL, NULL, 0);
+        fflush(stderr); dup2(keep2, 2); close(keep2);
+        char b9[65536]; ssize_t k9 = read(pfd2[0], b9, sizeof b9 - 1); b9[k9 > 0 ? k9 : 0] = 0; close(pfd2[0]);
+        VERIFY(m9 && m9.width == 16 && g_stage_fail == 0 && g_up_stage_retries == r0 + 1 && strstr(b9, "重分配成功"),
+               "⑨ 暂存第一次分配不到：不崩、重分配后建出贴图（%lux%lu）、重试 %llu 次、打出重分配成功", (unsigned long)m9.width, (unsigned long)m9.height, (unsigned long long)(g_up_stage_retries - r0));
+        if (!strstr(b9, "重分配成功")) fputs(b9, stdout); }
     printf("%s t_nvn_pkg_unreadable：%u 项，%u 项失败\n", fails ? "✗" : "✓", checks, fails);
     return fails ? 1 : 0;
 } }

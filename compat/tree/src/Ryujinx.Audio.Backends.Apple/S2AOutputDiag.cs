@@ -585,6 +585,7 @@ namespace Ryujinx.Audio.Backends.Apple
                 _repFreezeSeq = freezeSeq;
 
                 long skipped = Interlocked.Exchange(ref AudioProcessor.S2ASkippedPeriods, 0);
+                long catchUps = Interlocked.Exchange(ref AudioProcessor.S2ACatchUps, 0);   // #1957：在途不到目标一半时越过墙钟上限追设备的渲染拍数
                 long nanSamples = Interlocked.Exchange(ref Ryujinx.Audio.Renderer.Dsp.Command.DeviceSinkCommand.S2ANaNSamples, 0);
                 long lateNs = Interlocked.Exchange(ref AudioProcessor.S2AMaxLateNs, 0);
                 HudAudio(-1, 0, skipped);   // 渲染丢周期是整个渲染器的，不分会话：单报一次
@@ -653,7 +654,7 @@ namespace Ryujinx.Audio.Backends.Apple
                     Console.Error.WriteLine(
                         $"[声] 输出 #{d.Index} 10 秒：回调 {cb - d._repCallbacks} 次，交设备 {sub - d._repSubmitted} 帧、播完 {pl - d._repPlayed} 帧，" +
                         $"账上在途归零 {und - d._repUnderruns} 次（最长 {maxStarveMs:F1} ms；设备交还早于播完，归零时设备内部仍有缓冲，断音看真缺口与交还迟到）、停流 {pau - d._repPauses} 次，回调后最少在途 {(minInFlight == long.MaxValue ? -1 : minInFlight)} 帧，" +
-                        $"回调最长间隔 {maxGapMs:F1} ms、交设备入队最长 {maxEnqMs:F1} ms；渲染丢周期 {skipped}、周期最晚 {lateNs / 1e6:F1} ms；真缺口 {gap - d._repGapFrames} 帧（{(gap - d._repGapFrames) * 1000.0 / d._rate:F1} ms）；放回提前量 {Volatile.Read(ref d._leadFrames)} 帧；交还迟到 {lb - d._repLateBursts} 次（最多比一拉晚 {lateOverMs:F1} ms）{lat}{level}{(d._ring != null ? $"；wav 丢 {d._ringDropped} B" : "")}");
+                        $"回调最长间隔 {maxGapMs:F1} ms、交设备入队最长 {maxEnqMs:F1} ms；渲染丢周期 {skipped}、追设备 {catchUps} 拍、周期最晚 {lateNs / 1e6:F1} ms；真缺口 {gap - d._repGapFrames} 帧（{(gap - d._repGapFrames) * 1000.0 / d._rate:F1} ms）；放回提前量 {Volatile.Read(ref d._leadFrames)} 帧；交还迟到 {lb - d._repLateBursts} 次（最多比一拉晚 {lateOverMs:F1} ms）{lat}{level}{(d._ring != null ? $"；wav 丢 {d._ringDropped} B" : "")}");
 
                     HudAudio(d.Index, gap * 1000 / d._rate, 0);
 

@@ -3960,6 +3960,26 @@ static uint64_t up_keep_cap(void) { static uint64_t v; if (!v) { const char *e =
 #define UP_KEEP_CAP up_keep_cap()
 static uint64_t g_up_keep_bytes; static uint64_t g_up_cap_flushes;
 static void up_keep_add(id<MTLBuffer> b) { if (!g_up_keep) g_up_keep = [NSMutableArray array]; [g_up_keep addObject:b]; g_up_keep_bytes += b.length; }
+// CPU 上传的暂存（pkg_upload_ 的 CPU 路径）。D-8QFH（0.6.1，iPad，一局 9400 帧、实占 3.8 GB 时）：这里分配返回 nil 没判空，直接进 up_keep_add，
+//   NSMutableArray 收 nil 抛未捕获的 ObjC 异常闪退（日志里没有当时要的字节数）。这里能回收的是在途上传批攥着的暂存：先把本批交出去、等在途的批退役放掉暂存，再分配一次；
+//   仍分配不到才停（同 up_alloc 暂存块分配失败的口径），并写清要了多少、批里攥着多少。调用前已 up_begin，本函数返回时批仍开着
+#ifndef UP_CPU_STAGE_NEW   // 单测替换这一处分配（t_nvn_pkg_unreadable ⑨ 模拟第一次分配不到）
+#define UP_CPU_STAGE_NEW(n) [g_dev newBufferWithLength:(n) options:MTLResourceStorageModeShared]
+#endif
+static uint64_t g_up_stage_retries;
+static void up_begin(void);   // 下面定义
+static id<MTLBuffer> up_cpu_stage(size_t n, const tex_t *t) {
+    id<MTLBuffer> b = UP_CPU_STAGE_NEW(n);
+    if (b) return b;
+    uint64_t held = g_up_keep_bytes;
+    up_flush(); rec_drain(); up_wait_zero(&g_up_pending);   // 同 q_cb：交出本批、交给编码线程、等全部上传批完成（完成回调放掉它们的暂存）
+    up_begin();
+    b = UP_CPU_STAGE_NEW(n); g_up_stage_retries++;
+    if (b) { MLOG("【黄】CPU 上传暂存 %zu 字节第一次分配不到（本批攥着 %llu 字节）：交出在途上传批、等它们放掉暂存后重分配成功（ser=%llu %ux%u format %#x）",
+                  n, (unsigned long long)held, (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format); return b; }
+    MDIE("CPU upload staging of %zu bytes could not be allocated even after the in-flight upload batches retired (held %llu bytes before; ser=%llu %ux%u format %#x levels %u)",
+         n, (unsigned long long)held, (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format, t->d.levels);
+}
 
 
 // The upload command buffer was discarded by the system (dropped along during GPU error recovery; the first frame on entering Travincal drops one every run): the objects of this batch of textures are built and the timestamps updated, but the content was never written in,
@@ -4918,7 +4938,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     //   原先只在没有池指针时截短，这种跳过了、块线性拷贝直接从起点读，提交线程 SIGBUS。CPU 拷贝前一律先问可读长度（不看有没有池指针）
     else src = tex_src(t, t->L.size, &part);
     up_begin();
-    id<MTLBuffer> stg = [g_dev newBufferWithLength:total ? total : 16 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> stg = up_cpu_stage(total ? total : 16, t);
     res_add(stg); up_keep_add(stg);
     size_t off = 0;
     int zb = zblock_on() && t->d.format >= 0x79 && t->d.format <= 0x94; if (zb) { g_zb_ser = t->serial; g_zb_n = (int)MIN(d.mipmapLevelCount, 16u); memset(g_zb, 0, sizeof g_zb); memset(g_zb_tot, 0, sizeof g_zb_tot); }

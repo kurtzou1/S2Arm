@@ -73,7 +73,9 @@ done
 # 只打印生产构建定义的弱引用参数，不运行 runtime/build.mk 的构建配方。
 # 例如自动玩家在本集成测试中不链接；缺省弱引用须保持为空，不能提供替身。
 # 原生层链接库同生产（runtime/build.mk 的 HOST_LIBS：Foundation、Security 等）：本脚本整目录编 runtime/src，手写框架表会漏新依赖（11-17 selfsign.c 加 Security 后这里链接红）
-weak_output=$(printf '%s\n' 'present-residency-weak:;@echo $(NVN_TEST_WEAK) $(HOST_LIBS)' | \
+# 链进来的 Mac 前端源文件（上面 HOST_SRCS）的弱引用登记在「弱链接[host]」，生产宿主链接行带 S2A_HOST_WEAK 放行；这里同样带上，
+#   不然前端新加一个弱引用（如 ios/ldn_lan.m 的 S2A_LdnSetServer，由 C# 服务层提供）本测试就链接红，而生产宿主照样链得过
+weak_output=$(printf '%s\n' 'present-residency-weak:;@echo $(NVN_TEST_WEAK) $(S2A_HOST_WEAK) $(HOST_LIBS)' | \
     make -s -f "$root/runtime/build.mk" -f - present-residency-weak)
 read -r -a weak_flags <<< "$weak_output"
 xcrun --sdk macosx clang "${common[@]}" -std=gnu11 -fobjc-arc \
@@ -84,7 +86,7 @@ xcrun --sdk macosx clang "${common[@]}" -std=gnu11 -fobjc-arc \
     -Wl,-rpath,"$(dirname "$widen")" \
     -framework AppKit -framework GameController -framework CoreHaptics -framework CoreBluetooth -framework IOKit -framework Metal -framework Foundation \
     -framework QuartzCore -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers -lc++
-# -u 拉入真实前端与 GAL 定义；仅沿用 NVN_TEST_WEAK 的生产弱引用放行，不启用 dynamic_lookup。
+# -u 拉入真实前端与 GAL 定义；只沿用生产的弱引用放行（NVN_TEST_WEAK + 宿主的 S2A_HOST_WEAK），不启用 dynamic_lookup。
 shasum -a 256 "$root/graphics/nvn/tests/t_present_residency.m" "${objects[@]}" "$nvn" "$gal" "$dsx" "$widen" \
     "${front_objects[@]}" "$out/t_present_residency" > "$out/link-inputs.sha256"
 

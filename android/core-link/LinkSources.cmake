@@ -85,6 +85,7 @@ function(s2a_android_nvk_sources output)
         native/direct/graphics.c native/direct/attempt.c native/direct/selection.c native/direct/control.c
         # 设备与能力
         native/direct/vk_device.c native/direct/gs_path.c native/direct/device_caps.c native/direct/vk_identity.c
+        native/direct/dev_facts.c   # 设备事实与设备档案（#1749 M0：vk_device.c 建设备时弱引用调它，只记录不决策）
         # 着色器链里与旧回放无关的部分
         native/direct/compiler_bind.c native/direct/source_store.c native/direct/diag.c
         native/direct/compile_worker.c native/direct/program_cache.c native/direct/offline_library.c

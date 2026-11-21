@@ -78,7 +78,9 @@ int main(int argc, char **argv) {
     check(count_in(source, "_hasSystem") == 0, "#1428：不再有「有系统手柄就不连 / 停掉 NS2 Pro」的门槛（原 8 处 _hasSystem）");
     check(count_in(source, "system controller selected") == 0, "#1428：选到系统手柄时不停 NS2 Pro");
     check(count_in(source, "ids[n] = &g_ble_slot_tag") == 1, "#1428：NS2 Pro 连着就参加 s2a_slot_plan 分槽");
-    check(count_in(source, "if (slot == 0) s2a_pad_update(S2A_PAD_BLE, 1, (uint32_t)state->buttons, axes)") == 1,
+    // #1869：槽 0 经 ble_p1_publish 并进外接键盘再进 pad.c（同 Mac 槽 0 = 第一只手柄 + 键盘），「槽 0 才进 pad.c」不变
+    check(count_in(source, "if (slot == 0) ble_p1_publish((uint32_t)state->buttons, axes)") == 1 &&
+          count_in(source, "s2a_pad_update(S2A_PAD_BLE, 1, buttons, axes)") == 1,
           "#1428：NS2 Pro 输入按占的槽走（槽 0 才进 pad.c 当玩家 1）");
     check(count_in(source, "atomic_store(&g_slot_buttons[slot], (uint32_t)state->buttons & S2A_PAD_KEYS)") == 1,
           "#1428：NS2 Pro 占玩家 2–4 时写那个槽");

@@ -63,7 +63,7 @@ int g_s2a_logfd = 2;
 static const char *fake_compile_error;
 static const char *fake_compile_file;
 static pthread_t last_compiler_thread;
-static int fixture_live_compile, fixture_live_slots, fixture_live_nowait;
+static int fixture_live_compile, fixture_live_slots;
 static int fixture_live_frame_ms = 100, fixture_live_unsafe_ms = 10000;
 static pthread_mutex_t live_gate_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t live_gate_cv = PTHREAD_COND_INITIALIZER;
@@ -113,7 +113,6 @@ const char *nvn_plat_dir(int which) { return which == NVN_PLAT_DIR_CACHE ? geten
 int nvn_plat_flag(const char *name, int dflt) {
     if (!strcmp(name, "nvk_live_compile_async") && fixture_live_compile >= 0) return fixture_live_compile;
     if (!strcmp(name, "nvk_live_compile_slots") && fixture_live_slots) return fixture_live_slots;
-    if (!strcmp(name, "nvk_live_compile_nowait")) return fixture_live_nowait;
     if (!strcmp(name, "fu_frame_ms")) return fixture_live_frame_ms;
     if (!strcmp(name, "fu_unsafe_ms")) return fixture_live_unsafe_ms;
     if (!strcmp(name, "nvk_compute_warm")) return getenv("S2A_COMPUTE_WARM") ? atoi(getenv("S2A_COMPUTE_WARM")) : dflt;
@@ -1711,51 +1710,6 @@ static int fixture_defer_frame(uint64_t *frame) {
     return 1;
 }
 
-static int live_compile_nowait_test(void) {
-    fixture_live_compile = 1;
-    fixture_live_slots = 2;
-    fixture_live_nowait = 1;
-    fixture_live_frame_ms = 600;
-    fixture_live_unsafe_ms = 250;
-    fixture_parallel_compile = 1;
-    live_gate_hold = 1;
-
-    CHECK(nvk_shader_open() == 0, "open no-wait session");
-    rp_state_reset(); source(); bind_pools(64); fake_array_count = 64;
-    struct rp_shader_req tri = {.prim = 4, .compile_defer_frame = fixture_defer_frame};
-    struct rp_shader_req points = {.prim = 0, .compile_defer_frame = fixture_defer_frame};
-    const struct rp_prog *p = NULL;
-    CHECK(rp_shader_resolve(&tri, &p) == 1 && !p, "recoverable triangle queues and defers");
-    CHECK(rp_shader_resolve(&points, &p) == 1 && !p, "recoverable point draw queues and defers");
-    CHECK(live_gate_wait(2), "both distinct requests enter actual worker slots before release");
-    struct rp_shader_live_compile_stats stats;
-    rp_shader_live_compile_take(&stats);
-    printf("recoverable draws: queued %llu, deferred %llu, submit interval %.3f ms (legacy frame budget %d ms)\n",
-           (unsigned long long)stats.enqueued, (unsigned long long)stats.pending, stats.wait_ns / 1e6, fixture_live_frame_ms);
-    CHECK(stats.enqueued == 2 && stats.pending == 2 && stats.timeout == 0,
-          "safe draws count two submissions and two deferrals");
-    CHECK(stats.wait_ns < (uint64_t)fixture_live_frame_ms * 500000,
-          "no-wait must bypass the available frame budget while callbacks are gated");
-
-    tri.compile_defer_frame = NULL;
-    CHECK(rp_shader_resolve(&tri, &p) < 0 && !p, "unsafe first use reports deadline failure");
-    rp_shader_live_compile_take(&stats);
-    CHECK(stats.timeout == 1 && stats.pending == 0 && stats.enqueued == 0,
-          "unsafe draw waits on the original worker job and reports timeout, with no safe deferral");
-    live_gate_release();
-    points.compile_defer_frame = NULL;
-    CHECK(rp_shader_resolve(&tri, &p) == 0 && p, "triangle adopts its finished result after the unsafe timeout");
-    CHECK(rp_shader_resolve(&points, &p) == 0 && p, "points adopt their finished result on next use");
-    struct s2a_compile_worker_stats workers;
-    s2a_compile_worker_stats(&workers);
-    CHECK(workers.compiles == 2, "retry publishes the original two results without compiling them again");
-    nvk_shader_stop();
-    CHECK(s2a_compile_worker_stop_bounded(2000, NULL, 0) == 0, "stop retires the no-wait pool");
-    rp_shader_reset(); s2a_source_clear();
-    printf("live-compile-nowait checks=%d failures=%d\n", checks, failures);
-    return failures ? 1 : 0;
-}
-
 static int live_compile_pending_test(int stop) {
     fixture_live_compile = 1;
     fixture_live_frame_ms = 0;
@@ -1814,7 +1768,6 @@ static int live_compile_pending_test(int stop) {
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--live-compile-thread")) return live_compile_thread_test();
     if (argc == 2 && !strcmp(argv[1], "--live-compile-pending")) return live_compile_pending_test(0);
-    if (argc == 2 && !strcmp(argv[1], "--live-compile-nowait")) return live_compile_nowait_test();
     if (argc == 2 && !strcmp(argv[1], "--live-compile-stop")) return live_compile_pending_test(1);
     if (argc == 2 && !strcmp(argv[1], "--diag-compile")) return diag_compile_test();
     if (argc == 2 && !strcmp(argv[1], "--gs-libpack")) return gs_libpack_test();

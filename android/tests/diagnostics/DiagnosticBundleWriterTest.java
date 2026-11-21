@@ -7,6 +7,8 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -93,7 +95,7 @@ public final class DiagnosticBundleWriterTest {
     public static void main(String[] args) throws IOException {
         Path root = Files.createTempDirectory("s2a-diag-");
         try {
-            run(root);
+            run(root, args);
         } finally {
             deleteTree(root);
         }
@@ -101,7 +103,8 @@ public final class DiagnosticBundleWriterTest {
         if (fails != 0) System.exit(1);
     }
 
-    private static void run(Path root) throws IOException {
+    /** args: [真实设备档案（带 factsDigest）, 写出的含档案诊断包放哪]——android/tests/diagnostics/run.sh 传仓库里的档案，再拿 lint 核包里那份 */
+    private static void run(Path root, String[] args) throws IOException {
         List<String[]> prefixes = new ArrayList<>();
         prefixes.add(new String[] {"/data/user/0/org.s2arm.android", "<APP>"});
         prefixes.add(new String[] {"/data/app/~~Ab12==/org.s2arm.android-Cd34==", "<BUNDLE>"});
@@ -319,6 +322,36 @@ public final class DiagnosticBundleWriterTest {
         for (int at = em.indexOf("\"reason_code\""); at >= 0; at = em.indexOf("\"reason_code\"", at + 1)) n++;
         expect("最多 16 条", DiagnosticExits.MAX_RECORDS, n);
         expect("按给的顺序取前 16 条：最后一条是 lmk 13", true, em.contains("\"lmk 13\"") && !em.contains("\"lmk 14\""));
+
+        // ---- 5b. Device profile (#1749 M0): files/devprofile 里最新的一代 <16 hex>.json 原样进包（不走日志脱敏：脱敏器会把
+        //   "sha256-<64 hex>" 的 factsDigest 换成 [KEY_MATERIAL]，导出的档案就过不了 lint）；别的名字 / 符号链接 / 过大的不读
+        Path prof = root.resolve("files/devprofile");
+        String realProfile = args.length > 0 ? new String(Files.readAllBytes(Paths.get(args[0])), StandardCharsets.UTF_8)
+            : "{\"factsDigest\":\"sha256-" + "0123456789abcdef".repeat(4) + "\"}\n";
+        expect("用例档案里有 sha256-<64 hex> 的 factsDigest（这正是脱敏器会改的那种串）", true,
+               java.util.regex.Pattern.compile("\"sha256-[0-9a-f]{64}\"").matcher(realProfile).find());
+        write(prof.resolve("aaaaaaaaaaaaaaaa.json"), "{\"old\":1}\n", T0);
+        write(prof.resolve("bbbbbbbbbbbbbbbb.json"), realProfile, T1);
+        write(prof.resolve("notes.json"), "NOTES-SECRET", T2 + 1000);
+        write(prof.resolve("CCCCCCCCCCCCCCCC.json"), "UPPER-SECRET", T2 + 1000);
+        Path bigProfile = write(root.resolve("big-profile.json"), "x".repeat((int) DiagnosticBundlePolicy.MAX_PROFILE_BYTES + 1), T2 + 1000);
+        Files.createSymbolicLink(prof.resolve("dddddddddddddddd.json"), outside);
+        Files.copy(bigProfile, prof.resolve("eeeeeeeeeeeeeeee.json"));
+        Files.setLastModifiedTime(prof.resolve("eeeeeeeeeeeeeeee.json"), java.nio.file.attribute.FileTime.fromMillis(T2 + 2000));
+        r = DiagnosticBundleWriter.write(saves, prof, root.resolve("prof-out"), redactor::redact, info(), new ArrayList<>(), "diag", NOW, UTC,
+                                         DiagnosticBundleWriter.MAX_ZIP_BYTES);
+        Map<String, String> pz = zip(r.bundle);
+        expect("档案取最新一代、逐字节原样（不脱敏；过大 / 符号链接 / 别的名字都跳过）", realProfile, pz.get("devprofile/bbbbbbbbbbbbbbbb.json"));
+        if (args.length > 1) Files.copy(r.bundle, Paths.get(args[1]), StandardCopyOption.REPLACE_EXISTING);
+        long profileEntries = pz.keySet().stream().filter(k -> k.startsWith("devprofile/")).count();
+        expect("档案只进一份", 1L, profileEntries);
+        expect("清单 files 里列了档案", true, pz.get("manifest.json").contains("\"path\" : \"devprofile/bbbbbbbbbbbbbbbb.json\""));
+        expect("首份日志名不受档案影响", true, pz.containsKey("logs/host.log"));
+        for (String secret : new String[] {"NOTES-SECRET", "UPPER-SECRET", "OUTSIDE-SECRET"})
+            expect("没读到 " + secret, false, String.join("\n", pz.values()).contains(secret));
+        r = DiagnosticBundleWriter.write(saves, root.resolve("no-such-profile-dir"), root.resolve("prof-none"), redactor::redact, info(),
+                                         new ArrayList<>(), "diag", NOW, UTC, DiagnosticBundleWriter.MAX_ZIP_BYTES);
+        expect("没有档案目录 = 不带档案", false, zip(r.bundle).keySet().stream().anyMatch(k -> k.startsWith("devprofile/")));
 
         // ---- 6. Over the cap: head quarter and tail, cut at line breaks (cap 1000: head 250, tail 750 - 64 = 686).
         StringBuilder lines = new StringBuilder();

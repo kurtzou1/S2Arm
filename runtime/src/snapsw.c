@@ -44,7 +44,8 @@ int s2a_snap_reenable(int why) {
     if (!why || g_snap_off != why || !snap_save_on(getenv("S2A_SNAP_MODE"))) return 0;
     snap_sw(); g_snap_sw |= 1; g_snap_off = 0; atomic_store(&g_snap_live, -1); return 1;
 }
-const char *s2a_snap_source(void) { snap_sw(); return g_snap_src; }
+// 本局构造期因放不下关掉（s2a_snap_disable）：「能存」这一位的依据就是它，不再报设置来源（11-21 真机：前一行黄字说放不下，这行却写「依据 缺省」）
+const char *s2a_snap_source(void) { snap_sw(); return g_snap_off ? "本局放不下快照区" : g_snap_src; }   // 原因码现在只有 S2A_SNAP_OFF_ADDRESS（native.h）
 int s2a_snap_saving(void) { return snap_sw() & 1; }
 // 恢复中：每次现读 S2A_SNAP_RESTORE。进程内「回到这一刻」在宿主重启前才设它、恢复完 unsetenv，开局缓存的那一位跟不上——
 //   iPhone 上重建时把这一局当成不在恢复，按本款学到的跨度收了窗口（59392 → 8192 MB），快照核对「窗口不符」拒绝恢复
