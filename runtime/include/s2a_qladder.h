@@ -21,6 +21,10 @@ int s2a_ql_why(void);
 int s2a_ql_cpu_bound(void);
 // 玩家点「再试 60 帧」/ 局中重开 60 帧：回 60 帧档、清掉 CPU 跟不上的记号（没 setup 过不动）
 void s2a_ql_retry(uint64_t now);
+// 窗口不在前台（#1949：Mac 失焦 / 睡眠时系统给游戏降速，采样窗口里帧率掉下来就把 60 帧压成 30 帧、还记成 CPU 跟不上整局不升回）：
+//   丢掉正在攒的窗口与 GPU 起点，回到前台后再空等 S2A_QL_SETTLE_NS 才重新计时；宿主侧每帧在失焦 / 睡眠时调
+#define S2A_QL_SETTLE_NS 3000000000ull
+void s2a_ql_away(uint64_t now);
 // 最近一次判定窗口的读数（换档日志用）
 void s2a_ql_last(double *fps, double *slow_pct, double *gpu_pct, int *thermal);
 // 梯子换档压回 / 放开 60 帧时要不要告诉玩家（审计 P1-80 原因 4：原先梯子压帧不弹横幅，60 帧开关显示开着、画面已回原帧率，玩家不知道为什么）：

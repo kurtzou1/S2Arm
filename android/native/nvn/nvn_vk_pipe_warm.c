@@ -82,6 +82,7 @@ static struct pw_state {
     int32_t *next;          // 桶链
     int32_t *bucket;        // 桶头（-1 空）
     uint8_t *used;          // 槽位占用位
+    uint8_t *fresh;         // 本轮碰过（新记 / 命中 / 标签刷新）= 1；载入时全清 0；满表淘汰先挑没碰过的（见 pw_victim_locked）
     int32_t *order;         // take / 落盘的顺序（uses 降序、同 uses 最近优先）
     uint64_t order_gen, note_gen;
     uint64_t clock;         // 单调使用序号
@@ -268,11 +269,12 @@ static int pw_init_locked(void) {
     g.hash = calloc(g.cap, sizeof *g.hash);
     g.next = calloc(g.cap, sizeof *g.next);
     g.used = calloc(g.cap, 1);
+    g.fresh = calloc(g.cap, 1);
     g.order = calloc(g.cap, sizeof *g.order);
     g.bucket = malloc((size_t)nb * sizeof *g.bucket);
-    if (!g.recs || !g.uses || !g.seen || !g.gen || !g.hash || !g.next || !g.used || !g.order || !g.bucket) {
-        free(g.recs); free(g.uses); free(g.seen); free(g.gen); free(g.hash); free(g.next); free(g.used); free(g.order); free(g.bucket);
-        g.recs = NULL; g.uses = NULL; g.seen = NULL; g.gen = NULL; g.hash = NULL; g.next = NULL; g.used = NULL; g.order = NULL; g.bucket = NULL;
+    if (!g.recs || !g.uses || !g.seen || !g.gen || !g.hash || !g.next || !g.used || !g.fresh || !g.order || !g.bucket) {
+        free(g.recs); free(g.uses); free(g.seen); free(g.gen); free(g.hash); free(g.next); free(g.used); free(g.fresh); free(g.order); free(g.bucket);
+        g.recs = NULL; g.uses = NULL; g.seen = NULL; g.gen = NULL; g.hash = NULL; g.next = NULL; g.used = NULL; g.fresh = NULL; g.order = NULL; g.bucket = NULL;
         return -1;
     }
     for (uint32_t i = 0; i < nb; i++) g.bucket[i] = -1;
@@ -464,7 +466,7 @@ static void pw_dg_window_locked(struct pw_dg_out *o, uint64_t now) {
     snprintf(o->line, sizeof o->line,
              "预热清单诊断 %.1f 秒：note %llu 次（memo %llu / 链 %llu / 新记 %llu）；新记里 此前没见过 %llu、被淘汰过又插回 %llu；"
              "满后淘汰 %llu 次；淘汰扫描 %llu 次共 %llu 微秒；淘汰集合清空 %llu 次（累计 %llu）；条数 %u / 容量 %u；"
-             "累计 新记 %llu（没见过 %llu、插回 %llu）、淘汰 %llu、扫描 %llu 次共 %llu 微秒",
+             "累计 新记 %llu（没见过 %llu、插回 %llu）、淘汰 %llu、扫描 %llu 次共 %llu 微秒；淘汰新一轮累计 %llu 次",
              (double)(now - dg.t0) / 1e9,
              (unsigned long long)(a->calls - b->calls), (unsigned long long)(a->memo_hits - b->memo_hits),
              (unsigned long long)(a->chain_hits - b->chain_hits), (unsigned long long)(a->news - b->news),
@@ -474,7 +476,8 @@ static void pw_dg_window_locked(struct pw_dg_out *o, uint64_t now) {
              (unsigned long long)(a->ev_clears - b->ev_clears), (unsigned long long)a->ev_clears,
              (unsigned)g.count, (unsigned)g.cap,
              (unsigned long long)a->news, (unsigned long long)a->fresh, (unsigned long long)a->reins,
-             (unsigned long long)a->evicts, (unsigned long long)a->scans, (unsigned long long)(a->scan_ns / 1000u));
+             (unsigned long long)a->evicts, (unsigned long long)a->scans, (unsigned long long)(a->scan_ns / 1000u),
+             (unsigned long long)g.st.epochs);
     dg.c0 = dg.c;
     dg.t0 = now;
     dg.win_s_fresh = dg.win_s_reins = 0;
@@ -536,15 +539,24 @@ static void pw_dg_out_run(const struct pw_dg_out *o) {
     if (o->sample) pw_dg_sample_run(o);
 }
 
-// 淘汰目标：uses 最小，同 uses 取最久没用的。
+// 淘汰目标：表没满 = 第一个空槽。表满了：
+//   · 先在「本轮没碰过」的条目（g.fresh == 0）里挑：uses 最小，同 uses 取最久没用的；
+//   · 没有这样的条目（本轮碰过的配方把表占满）= 开新一轮：全部清成没碰过，再在全表里按同一规则挑。
+// 为什么不是只看 uses：满表时载入进来的旧条目 uses 都 ≥ 2，而新记的配方 uses 才 1，只看 uses 的话每条新配方都只能挤掉
+// 上一条新配方——同一批配方记了又被挤、挤了又记（真机 99.9% 的新记是「被淘汰过又插回」），标签永远立不住，
+// 清单也学不到本局的配方。先挑没碰过的，新配方在旧条目挤光之前不会被下一条新配方挤掉；旧条目里仍是 uses 最小的先走，
+// 热点旧配方留到最后。
 static uint32_t pw_victim_locked(void) {
-    uint32_t best = 0;
+    uint32_t cold = UINT32_MAX, hot = UINT32_MAX;   // 没碰过的最小条目 / 碰过的最小条目
     for (uint32_t i = 0; i < g.cap; i++) {
         if (!g.used[i]) return i;
-        if (!g.used[best]) { best = i; continue; }
-        if (g.uses[i] < g.uses[best] || (g.uses[i] == g.uses[best] && g.seen[i] < g.seen[best])) best = i;
+        uint32_t *best = g.fresh[i] ? &hot : &cold;
+        if (*best == UINT32_MAX || g.uses[i] < g.uses[*best] || (g.uses[i] == g.uses[*best] && g.seen[i] < g.seen[*best])) *best = i;
     }
-    return best;
+    if (cold != UINT32_MAX) return cold;
+    memset(g.fresh, 0, g.cap);   // 全表都碰过了：新一轮，下一次起重新分「碰过 / 没碰过」
+    g.st.epochs++;
+    return hot;
 }
 
 // 槽代号：槽里每换一份配方就取一个新值（0 不发）。标签 = 代号 << 32 | (槽号 + 1)，所以 0 永远不是有效标签。
@@ -576,6 +588,7 @@ static uint32_t pw_insert_locked(const uint8_t *desc, const uint8_t ident[32], u
     g.gen[slot] = pw_next_gen_locked();
     g.hash[slot] = h;
     g.used[slot] = 1;
+    g.fresh[slot] = 1;   // 新记进来的算本轮碰过：旧条目挤光之前不会被下一条新配方挤掉
     uint32_t b = pw_bucket_of(h, g.nbucket);
     g.next[slot] = g.bucket[b];
     g.bucket[b] = (int32_t)slot;
@@ -588,6 +601,7 @@ static uint32_t pw_insert_locked(const uint8_t *desc, const uint8_t ident[32], u
 static void pw_touch_locked(uint32_t slot) {
     g.uses[slot]++;
     g.seen[slot] = (uint32_t)++g.clock;
+    g.fresh[slot] = 1;   // 命中（含 memo / 桶链 / 标签快路径）也算本轮碰过
     g.recs[slot].uses = g.uses[slot];
     g.dirty = 1;
 }
@@ -967,6 +981,7 @@ int nvk_pipe_warm_load(void) {
     // 同一进程里第二次 load（测试 / 重新开局）要先清掉上一份的槽位与桶：哈希链是按槽位下标串的，
     // 留着旧链会让新表指到上一份的条目上。
     memset(g.used, 0, g.cap);
+    memset(g.fresh, 0, g.cap);   // 载入进来的都是旧条目：一次都还没被本轮碰过
     // 最近 4 条备忘里的槽号也随旧表作废：留着的话，载入前记过的配方在已经空出来的槽上「命中」备忘，
     // 只给空槽加 uses、不再记进清单（载入文件里没有它）。
     for (int i = 0; i < NVK_PW_MEMO; i++) { g.memo[i].slot = -1; g.memo[i].h = 0; }

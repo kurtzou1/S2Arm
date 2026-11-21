@@ -324,6 +324,14 @@ class PutApp(unittest.TestCase):
         layout.save_device(self.c, "UDID1", dict(shellId="SID2", bundleId="com.acme.one", games={G2: {}}, apps={G3: dict(bundleId="com.acme.one")}))
         self.ph.bid = "com.acme.one"
         with use_devcert(self.c, distribution=True, bundle="com.acme.one", appid=f"{TEAM}.com.acme.one"):
+            # #1941：装前先问——会顶掉 G3 那款和通用 S2Arm；没确认不装、记录不动
+            with self.assertRaises(Failure) as e:
+                self.run_put()
+            self.assertEqual(e.exception.code, "app_bundle_replace_confirm")
+            self.assertIn("通用 S2Arm", str(e.exception)); self.assertIn("com.acme.one", str(e.exception))
+            self.assertEqual(self.calls["snap"], [])
+            self.assertEqual(sorted(layout.load_device(self.c, "UDID1")["apps"]), [G3])
+            self.c.r["acceptBundleReplace"] = True
             out = self.run_put()
         rec = layout.load_device(self.c, "UDID1")
         self.assertEqual((sorted(rec["apps"]), rec["shellId"], rec["games"]), ([G1], "", {}))
@@ -347,15 +355,17 @@ class PutApp(unittest.TestCase):
         with patch.object(downstream, "requested", lambda c, g: None), patch.object(install, "ios_pack", lambda c, g: self.pack), \
                 patch.object(install, "phone_for", lambda c: "PH"), patch.object(install, "push_phone", lambda c: "PUSH"), \
                 patch.object(install, "put_app", lambda c, g, ph: seen.append(("app", g, ph))), \
-                patch.object(install, "push_game", lambda c, g, ph: seen.append(("shell", g, ph))):
-            self.c.r = dict(gameId=G1); install._install(self.c)
+                patch.object(install, "push_game", lambda c, g, ph: seen.append(("shell", g, ph)) or {}), \
+                patch.object(install, "write_s2arm_readme", lambda folder, lang: None), \
+                patch.object(install, "ensure_shell_ipa", lambda c: seen.append(("shellIpa",)) or Path("S2Arm.ipa")):
+            self.c.r = dict(gameId=G1); install._install(self.c)   # 通用壳推到手机：推完也在「S2Arm 游戏包」备本版 S2Arm.ipa（11-21），独立 App 不备
             install.layout_set(jobcase.fake_context(self.t, r=dict(layout="standalone", gameId=G1)))
             install._install(self.c)
-            with patch.object(install, "export_app", lambda c, g: seen.append(("exportApp", g))), patch.object(install, "export_s2arm", lambda c, g: seen.append(("s2arm", g))):
+            with patch.object(install, "export_app", lambda c, g: seen.append(("exportApp", g))), patch.object(install, "export_s2arm", lambda c, g: seen.append(("s2arm", g)) or {}):
                 self.c.r = dict(gameId=G1, mode="export"); install._install(self.c)   # 独立 App 导出：ipa + .s2arm + README 进游戏文件夹
                 install.layout_set(jobcase.fake_context(self.t, r=dict(layout="shell", gameId=G1)))
-                install._install(self.c)   # 通用壳导出照旧 .s2arm 两件套
-        self.assertEqual(seen, [("shell", G1, "PUSH"), ("app", G1, "PH"), ("exportApp", G1), ("s2arm", G1)])
+                install._install(self.c)   # 通用壳导出：.s2arm 两件套 + 同文件夹本版 S2Arm.ipa（#502），独立 App 导出不放
+        self.assertEqual(seen, [("shell", G1, "PUSH"), ("shellIpa",), ("app", G1, "PH"), ("exportApp", G1), ("shellIpa",), ("s2arm", G1)])
 
 
 class ShellOwner(unittest.TestCase):

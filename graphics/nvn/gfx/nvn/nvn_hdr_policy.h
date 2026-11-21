@@ -252,6 +252,20 @@ static inline int hdr_present_fill(float p[8], int src_pf, int dst_pt, int vi_an
     return pv;
 }
 
+// ---------- PR3d：AA/FX/FI 旁路判定（评审稿 v3 §2.5 开关矩阵 / §3 A3 行 / §4 PR3d）----------
+//   直连上屏增强一族（上屏抗锯齿 nvn_present_aa.inc / MetalFX 空间放大 nvn_present_fx.inc / FSR nvn_present_fsr.inc /
+//   出图补帧 nvn_present_fi.inc）的中间图与 MetalFX 纹理全是 8 位 sRGB 感知空间（BGRA8Unorm）：对 PQ 码值不适配——
+//   PQ 1.0 = 10000 nit，感知锐化在高光无界过冲（nxnative 合成实测 ΔE_ITP 比 bilinear 差 65%/31% @1.25×/1.5×，未复测）。
+//   HDR 窗口（RGB10A2 ∧ vi 答过——才当 PQ 码值，m0b 实证游戏在 on=1 后才建 0x3d 窗）旁路这一族、画质按 present 直通；
+//   SDR 窗口（8 位 / 未答过的 10 位 gamma / float / 未知）照常走——层在 PQ 态的排空帧先缩放后 mode 2 转换
+//   （§2.5「SDR 窗入 PQ 层仍走 MetalFX」先例）。旁路是产品限制（写入 docs/画面设置.md），不静默降画质。
+//   判定三输入：窗口格式（nvn_mtl.m present_hdr_pf 归类）× S2A_HDR 三态 × vi 答过 latch（答过永不清，PR3b 簿记）。
+//   off 恒不旁路（缺省字节级零行为变化——off 局 latch 本就恒 0，开关再挡一道：不假设簿记永不出错）。
+//   纯函数、无状态；出图热路径经 nvn2_hdr_bypass_upscale 读已算好的 latch（快路径一次宽松原子读，nvn2_hdr_present 同款口径）。
+static inline int hdr_bypass_upscale(int sw, int src_pf, int vi_answered) {
+    return sw != HDR_OFF && vi_answered && src_pf == HDR_PF_HDR10;
+}
+
 // nvn2.c 侧的存储与入口（实现都在 nvn2.c：同 PR1 探针 nvn2_vi_hdr_probe 的口径，声明不进 nvn2.h，统一收在本头）。
 //   快照与层状态机 / peak 状态都存 nvn2.c（PR1 g_hdr 探针存储同款先例，同一把锁）：nvn2.c 仍纯 C、不引平台头、不对宿主符号有链接依赖（宿主侧调进来，方向同 nvn2_sev_attach_register）；
 //   nxnative dm_hdr_layer_tick / vi_screen_peak 的散布式全局态由此收进本文件单点（评审稿 §2.7）。
@@ -264,3 +278,4 @@ void nvn2_hdr_tick_frame(int sw, int frame_is_pq);                       // 层 
 void nvn2_hdr_preattach(int raw_can, unsigned long long now_ms);         // PR4 开机预挂的存储侧：识别 Switch 2 游戏即进层——不滞回（开机无翻屏史），赶在首查询前（§4 PR4 ③）；SDR 屏 / off / 已在层内各自让位
 hdr_decision nvn2_hdr_answer(int src_hdr, unsigned long long now_ms);    // 同源答案入口：三态开关 + 已发布快照 + 存储的 peak 状态进 choose_mode——vi 门控 / 出图都从这读，不各自判
 int nvn2_hdr_present(float p[8], int src_pf, int dst_pt);   // PR3b 出图热路径读已算好的结果：返回六态模式（HDR_PV_*）并填 UV 常量缓冲 p[0..7]（hdr_present_fill 喂存储态：vi 答过 latch + 已告知 peak + PR1 声明的范围 hi + 快照净空）
+int nvn2_hdr_bypass_upscale(int src_pf);                    // PR3d 出图热路径旁路判定（AA/FX/FSR/补帧，§4 PR3d）：窗口格式进、bool 出——非 HDR10 窗零开销直返（连原子读都不进），HDR10 窗一次宽松原子读 latch，vi 答过才读 S2A_HDR（getenv 只发生在 HDR 管线已接手的局）

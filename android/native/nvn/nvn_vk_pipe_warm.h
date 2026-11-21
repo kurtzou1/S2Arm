@@ -73,7 +73,12 @@ int nvk_pipe_warm_build(const struct nvk_pipe_rec *rec);
 
 // 真实创建成功后记录一条（提交线程）。着色器句柄 / nspec / spec 不进记录、不参与判等；nspec 非 0 或
 // 程序没有身份就直接跳过；去重按整份配方字节 + 程序身份（重复只 uses++）；有界：上限
-// debug.s2a.nvk_warm_max（缺省 8192，也是硬顶），满了淘汰 uses 最小、同 uses 最久没用的那条。
+// debug.s2a.nvk_warm_max（缺省 8192，也是硬顶）。
+// 满了的淘汰目标：先在「本轮没碰过」的条目里挑 uses 最小、同 uses 最久没用的那条。「碰过」= 本轮新记进来、被命中、
+// 被标签快路径刷新过；载入进来之后一次都没被碰过的旧条目算「没碰过」。没有这样的条目了（本轮碰过的配方把表占满）
+// 就开新一轮：全部算没碰过，再按同一规则挑。这样刚记进来的配方在旧条目挤光之前不会被下一条新配方挤掉——
+// 满表时旧条目的 uses 都 ≥ 2、新配方才 1，只按 uses 挑就会让每条新配方只挤掉上一条新配方（记了又被挤、挤了又记，
+// 清单学不到本局的配方，每次 note 还要整表扫一遍）。
 void nvk_pipe_warm_note(const nvn_gpu_pipe_desc *d, const uint8_t prog_identity[32]);
 
 // rp_draw 用的入口：程序身份从 rp_prog 取（回放核心里不出现身份解析）。程序没有身份就不记。
@@ -99,6 +104,7 @@ struct nvk_pipe_warm_stats {
     uint64_t pending;     // 还没有被 take 的条数
     uint64_t draw_hits;   // 转发 backend：真实 draw 命中「后台预建」对象的次数（验收读数）
     uint64_t tag_hits;    // 换管线时标签对得上、只加了计数的次数（没走序列化 / 散列 / 查表）
+    uint64_t epochs;      // 满表时「本轮碰过的条目把表占满、开新一轮」的次数（见 nvk_pipe_warm_note 的淘汰规则）
 };
 void nvk_pipe_warm_stats(struct nvk_pipe_warm_stats *out);
 

@@ -1,6 +1,5 @@
 package org.s2arm.android;
 
-import android.os.Build;
 import android.view.Surface;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
@@ -40,9 +39,6 @@ public final class FrameRateVoteTest {
         target.invoke(vote, 30f); check(first.calls == 6 && first.value == 30f, "vote after clear is immediate");
         detach.invoke(vote);
         check(first.calls == 7 && first.value == 0f, "detach clears live surface");
-        Surface second = new Surface(); Build.VERSION.SDK_INT = 29;
-        attach.invoke(vote, second); target.invoke(vote, 60f); detach.invoke(vote);
-        check(second.calls == 0, "pre-30 does not call unavailable API");
-        System.out.println("frame vote / hold / raise / bounce / unknown / detach / pre-30 passed");
+        System.out.println("frame vote / hold / raise / bounce / unknown / detach passed");
     }
 }

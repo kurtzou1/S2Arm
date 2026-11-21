@@ -218,14 +218,22 @@ namespace S2A.Services.Tests
             byte[] ap = new ReadOnlySpan<byte>(gaiOut + 28, 4).ToArray();
             var gl = AddrInfo("", "7777", 0);
             byte[] al = new ReadOnlySpan<byte>(gaiOut + 28, 4).ToArray();
+            int glType = System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(new ReadOnlySpan<byte>(gaiOut + 12, 4)), glProto = System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(new ReadOnlySpan<byte>(gaiOut + 16, 4));
             var gn = AddrInfo("", "7777");
             byte[] an = new ReadOnlySpan<byte>(gaiOut + 28, 4).ToArray();
+            int gnType = System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(new ReadOnlySpan<byte>(gaiOut + 12, 4)), gnProto = System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(new ReadOnlySpan<byte>(gaiOut + 16, 4));
             // 回环的 4 字节同上面 hostent 的核法两种字节序都认（序列化字节序不在本改动范围）
             static string Lo(byte[] a) => (a[0] == 127 && a[1] == 0 && a[2] == 0 && a[3] == 1) || (a[0] == 1 && a[1] == 0 && a[2] == 0 && a[3] == 127) ? "回环" : string.Join(".", a);
             Check("sfdnsres 离线：GetAddrInfo 空主机名 + AI_PASSIVE / 空主机名不带 / 空主机名无 hints",
                 "netdb 0、gai 0、长度 > 0、地址 0.0.0.0 / netdb 0、gai 0、地址 回环 / netdb 0、gai 0、地址 回环",
                 $"netdb {gp.NetDb}、gai {gp.Gai}、长度 {(gp.Size > 0 ? "> 0" : gp.Size.ToString())}、地址 {string.Join(".", ap)} / " +
                 $"netdb {gl.NetDb}、gai {gl.Gai}、地址 {Lo(al)} / netdb {gn.NetDb}、gai {gn.Gai}、地址 {Lo(an)}");
+
+            // 回的 addrinfo 带 socket 类型 / 协议（11-21 D-TVB8 同一款：原先一律 0，游戏拿 0 建 socket 被拒、读空指针崩）。期望手写：hints 类型 2（数据报）→ 类型 2、协议 17（UDP）、
+            //   一条（长度 = 一条 + 4 字节结尾）；没 hints → 数据报 / UDP 与流 / TCP 两条（FreeBSD 顺序，第一条 2 / 17），长度 = 两条 + 4
+            Check("sfdnsres：GetAddrInfo 回的类型 / 协议（hints 数据报 / 无 hints）",
+                "类型 2、协议 17 / 第一条类型 2、协议 17、两条",
+                $"类型 {glType}、协议 {glProto} / 第一条类型 {gnType}、协议 {gnProto}、{(gn.Size == 2 * (gl.Size - 4) + 4 ? "两条" : $"长度 {gn.Size}（一条 {gl.Size}）")}");
 
             // 会等宿主网络的模块（sfdnsres / ssl）不和通用锁上的服务串行：联网时一次慢解析只挡它自己（不让所有游戏线程跟着停帧）。
             // 正对照：两个 nifm 会话在同一串行域

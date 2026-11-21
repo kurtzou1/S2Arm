@@ -22,7 +22,7 @@ wrap=()
 for fn in vkCreateImageView vkCreateFramebuffer vkCmdBeginRenderPass vkUpdateDescriptorSets vkCmdBindDescriptorSets vkCmdDraw vkCmdCopyImage vkGetDeviceProcAddr vkDestroyImageView vkWaitForFences; do wrap+=(-Wl,--wrap="$fn"); done
 cc -D_POSIX_C_SOURCE=200809L -std=c11 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
     -ffunction-sections -fdata-sections -DS2A_ANDROID_VK_BACKEND_NVN_VK=1 \
-    "${inc[@]}" "${src[@]}" "${wrap[@]}" -Wl,--gc-sections -lvulkan -lpthread -lm -o "$out/test"
+    -DS2A_NVK_POOL_HOST_TEST=1 "${inc[@]}" "${src[@]}" "${wrap[@]}" -Wl,--gc-sections -lvulkan -lpthread -lm -o "$out/test"
 export VK_ICD_FILENAMES="$S2A_LAVAPIPE_ICD" VK_LAYER_PATH="$S2A_VK_LAYER_DIR" VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation
 # run.sh 在调用此独立入口之后才开同步校验，不能依赖父进程或本地包装器。
 # 同计算写入负控一样同时打开 shader 访问启发式；仅加载 validation 层不够。
@@ -34,8 +34,8 @@ SETTINGS
 export VK_LAYER_SETTINGS_PATH="$out/vk_layer_settings.txt"
 printf 'feedback validation: sync=1 shader_accesses_heuristic=1 settings=%s\n' "$VK_LAYER_SETTINGS_PATH"
 failed=0
-# 案例数：0–11（12）+ 深度 2 + 中止 1 + 16 / 17 + 守卫 18 = 18；opt=0 另有 15 / 19（要求池里的图都是 GENERAL），共 20；opt=1 共 18。
-cases_want() { echo $((20 - 2 * $1)); }
+# 案例数：0–11（12）+ 深度 2 + 中止 1 + 16 / 17 + 守卫 18 + 整池组回收 20 = 19；opt=0 另有 15 / 19（要求池里的图都是 GENERAL），共 21；opt=1 共 19。
+cases_want() { echo $((21 - 2 * $1)); }
 # 白名单（只用于缺省档 opt=0 / pool_fb=0）：整池数组与「本笔写着的附件」别名，着色器真去采样它时，同步校验必然（也应当）报「采样读 ↔ 颜色附件写」冒险。
 # 只放过这一类：案例 10 / 15 / 18 / 19 里，校验 ID 为 SYNC-HAZARD-READ-AFTER-WRITE 或 SYNC-HAZARD-WRITE-AFTER-READ、命令是 vkCmdDraw、
 # 一方是 SYNC_FRAGMENT_SHADER_SHADER_SAMPLED_READ、另一方是 SYNC_COLOR_ATTACHMENT_OUTPUT_COLOR_ATTACHMENT_WRITE。
@@ -121,6 +121,35 @@ for p in "${pairs[@]}"; do
         echo "【红】feedback 读数没有按档分开：$(basename "$f") 缺「${pat}」" >&2; failed=1
     fi
 done
+# 案例 20（整池组回收，反馈补丁段完成时还原）：每一档都必须读到「第 2 段取回 1 个回收组、4 条补丁、没有已销毁的视图被采样」。
+for p in dq0-opt0 dq0-opt1 dq1-opt0 dq1-opt1 dq0-opt0-poolskip dq0-opt1-poolskip dq1-opt0-poolskip dq1-opt1-poolskip; do
+    if ! grep -qE 'feedback rec-restore .* case=20 draws=4 copies=2 dead-samples=0 overlap=0 rec-hit=0/1 patches=4 draws-bad=0 copy-bad=0 dead-bad=0 overlap-bad=0 hit-bad=0 patch-bad=0' "$out/$p.log"; then
+        echo "【红】feedback 案例 20（整池组回收）没有读到预期：$p" >&2; grep 'rec-restore' "$out/$p.log" >&2 || true; failed=1
+    fi
+done
+# 整池组回收的负控：段完成时不还原反馈补丁 → 放回空闲串的组里还是已销毁的快照视图，第 2 段取回来就在用已销毁的视图。同一份夹具，只改这一处后端源码。
+mut="$out/mut"; mkdir -p "$mut"
+cp "$repo/android/native/nvn/backend_vulkan.c" "$mut/backend_vulkan.c"
+python3 - "$repo/android/native/nvn/backend_vulkan_pool.inc" "$mut/backend_vulkan_pool.inc" <<'PYMUT'
+import pathlib, sys
+s = pathlib.Path(sys.argv[1]).read_text()
+a = 'if (!u->npatch) { free(u->patch); u->patch = NULL; continue; }'
+if s.count(a) != 1: raise SystemExit('rec-restore mutation anchor changed')
+pathlib.Path(sys.argv[2]).write_text(s.replace(a, 'if (1) { free(u->patch); u->patch = NULL; continue; }'))
+PYMUT
+msrc=(); for f in "${src[@]}"; do [ "$f" = "$repo/android/native/nvn/backend_vulkan.c" ] && f="$mut/backend_vulkan.c"; msrc+=("$f"); done
+cc -D_POSIX_C_SOURCE=200809L -std=c11 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
+    -ffunction-sections -fdata-sections -DS2A_ANDROID_VK_BACKEND_NVN_VK=1 -DS2A_NVK_POOL_HOST_TEST=1 \
+    "${inc[@]}" "${msrc[@]}" "${wrap[@]}" -Wl,--gc-sections -lvulkan -lpthread -lm -o "$out/test-mut"
+set +e
+timeout 120 "$out/test-mut" "$out/shaders" 0 0 1 1 > "$out/rec-restore-neg.log" 2>&1
+mut_rc=$?
+set -e
+if [ "$mut_rc" -eq 0 ] || ! grep -qE 'feedback rec-restore .* case=20 .* dead-samples=[1-9][0-9]* .* dead-bad=1' "$out/rec-restore-neg.log"; then
+    echo '【红】feedback 整池组回收负控：补丁不还原没有被案例 20 判红' >&2; tail -n 12 "$out/rec-restore-neg.log" >&2; failed=1
+else
+    echo 'feedback rec-restore negative: PASS (补丁不还原 → 第 2 段采样到已销毁的快照视图，案例 20 判红)'
+fi
 # Negative control disables the whole snapshot path (copy + barriers + descriptor
 # substitution), with the same binary and real driver / validation configuration.
 set +e

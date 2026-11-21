@@ -1,0 +1,5 @@
+#version 450
+// 回放 imageBuffer 夹具（t_replay_image_tbuf.c）：每个元素原子加 5（存储纹素缓冲原子，要格式的 STORAGE_TEXEL_BUFFER_ATOMIC）
+layout(local_size_x = 4, local_size_y = 1, local_size_z = 1) in;
+layout(r32ui, set = 0, binding = 0) uniform uimageBuffer ib;
+void main() { imageAtomicAdd(ib, int(gl_GlobalInvocationID.x), 5u); }

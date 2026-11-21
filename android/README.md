@@ -9,8 +9,8 @@
 | Separate track / 单独跑道 | Kirin with Maleoon GPU (HarmonyOS): served by the HarmonyOS port (`ohos/` and its integration branch), not by this APK.<br>麒麟 Maleoon GPU（鸿蒙）：走鸿蒙移植（`ohos/` 及其集成分支），不走本 APK。 |
 | Not supported / 不支持 | GPUs that only expose Vulkan 1.0; 32-bit devices or systems.<br>只支持 Vulkan 1.0 的 GPU；32 位设备或系统。 |
 
-- Android 14 is the policy floor. The current package still declares minSdk 29 (Android 10); the floor becomes minSdk 34 when #1739 is merged.
-  Android 14 是支持范围的下限。当前包仍声明 minSdk 29（Android 10）；#1739 合入后改为 minSdk 34。
+- Android 14 is the policy floor and the package floor: minSdk 34 (Android 14).
+  Android 14 是支持范围与包的下限：最低 Android 14（minSdk 34）。
 - Dimensity (Mali / Immortalis) devices are verified by the community on real hardware.
   天玑（Mali / Immortalis）机型由社区真机验证。
 - A GPU that only supports Vulkan 1.0 is rejected when the Vulkan device is created (`android/native/direct/vk_device.c`), and the player sees a readable reason on the failed start. Nothing is checked before the start.
@@ -170,8 +170,7 @@ AOT hosts). The sections below keep the Docker recipe for Linux / WSL hosts.
 
 Pinned tools: JDK 17, Gradle 9.8.1, Android Gradle Plugin 9.4.1, SDK / target 36,
 build-tools 36.0.0, NDK 29.0.14206865, CMake 3.31.6. The current package declares
-minSdk 29 (Android 10); it becomes minSdk 34 (Android 14) when #1739 is merged (see
-"Supported devices" above). Only `arm64-v8a` is packaged. Native code queries the actual host page
+minSdk 34 (Android 14, see "Supported devices" above). Only `arm64-v8a` is packaged. Native code queries the actual host page
 size, and the library / APK are built with 16 KB alignment.
 
 From the repository root:
@@ -1052,7 +1051,7 @@ Microsoft's release metadata. It then publishes NativeAOT shared libraries for
   - **Opus and VP8 decoding** (implementation plan §6.2 / §6.3). The service layer
     binds `s2a_opus` (Horizon's `HardwareOpusDecoder`) and `s2a_vpx` (Nvdec's
     `VpxVp8Decoder`), C shims in `services/opus` and `services/vpx` that Apple links
-    statically. `codecs/build.sh` builds the same libraries for the NDK (API 29),
+    statically. `codecs/build.sh` builds the same libraries for the NDK (API 34),
     with the version, source SHA-256 and configure options read from
     `services/*/build.sh`. It also builds each shim into one archive with its
     library. `cs/build.sh` appends both archives to `link.txt`, and the AOT project
@@ -1124,7 +1123,7 @@ Packaged in the APK, in the same form as the root README's
 
 | Dependency | Version | License | Use |
 |---|---|---|---|
-| [OpenSSL](https://www.openssl.org) | 3.5.9 (`openssl-3.5.9.tar.gz`, sha256 `603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a`; the GitHub release and openssl.org agree) | Apache-2.0 | `libssl.so` / `libcrypto.so` for .NET's crypto on Android, which aborts the process without a loadable libssl. Built by `openssl/build.sh` with the NDK (`android-arm64`, API 29) from the pinned source, not stored in the repository |
+| [OpenSSL](https://www.openssl.org) | 3.5.9 (`openssl-3.5.9.tar.gz`, sha256 `603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a`; the GitHub release and openssl.org agree) | Apache-2.0 | `libssl.so` / `libcrypto.so` for .NET's crypto on Android, which aborts the process without a loadable libssl. Built by `openssl/build.sh` with the NDK (`android-arm64`, API 34) from the pinned source, not stored in the repository |
 | [.NET runtime](https://github.com/dotnet/runtime) (NativeAOT runtime pack `linux-bionic-arm64`) | 10.0.14 (SDK 10.0.403, `compat/tree/global.json`) | MIT (third-party components such as LLVM libunwind under the notices in that package) | The C# service layer's runtime, linked from nuget.org's runtime pack by `cs/build.sh`, either into its own `.so` or into `libs2arm_android.so` (single-library build) |
 | [libopus](https://opus-codec.org) | 1.6.1 (pin and options from `services/opus/build.sh`) | BSD-3-Clause (with patent license notices) | Horizon's hardware Opus decoder (hwopus), linked into `libs2arm_android.so` by the single-library build. Built by `codecs/build.sh` with the NDK, not stored in the repository |
 | [libvpx](https://chromium.googlesource.com/webm/libvpx) | 1.17.0 (pin and options from `services/vpx/build.sh`; VP8 and VP9 decoders, with S2Arm's NVDEC hook patch `services/vpx/patches/`) | BSD-3-Clause plus patent grant (`PATENTS`) | Nvdec's VP8 video, and Nvdec's VP9 video by default (NVDEC jobs through the hook; the managed decoder takes any job libvpx cannot represent exactly; `S2A_NVDEC_VP9=managed` in debuggable builds turns it off), linked into `libs2arm_android.so` by the single-library build. Built by `codecs/build.sh` with the NDK, not stored in the repository |

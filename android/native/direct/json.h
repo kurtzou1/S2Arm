@@ -13,7 +13,7 @@ extern "C" {
 
 #define S2A_JSON_MAX_BYTES (1u << 20)   // 单个文档 1 MiB：与契约 §4.3 的限额分开，描述文件远小于此
 #define S2A_JSON_MAX_DEPTH 16
-#define S2A_JSON_MAX_FIELDS 64
+#define S2A_JSON_MAX_FIELDS 128   // 设备能力档 capabilities 已到 65 个键（#1273 加了变量接口上限），64 时计算请求解析能力档整段失败、计算派发全跳；一个对象约 47 KB，解析都在大栈线程上
 #define S2A_JSON_MAX_SHORT 256
 
 enum s2a_json_kind {

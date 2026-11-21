@@ -44,8 +44,8 @@ enum { S2A_INIT_FAIL_EXIT = 1, S2A_INIT_FAIL_PAGE = 2 };
 #define S2A_INIT_FAIL_MSG_EXEC_LC_EN "The system won't let this game's code run: no usable LiveContainer certificate was found. Import the certificate again in LiveContainer's settings, then open it again."
 #define S2A_INIT_FAIL_MSG_EXEC_CERT    "安装这个 S2Arm 用的证书缺「调试权限（get-task-allow）」，没有它系统不让游戏运行。请找证书发放人要含这项权限的 Apple Development 开发证书和开发描述文件（在电脑上的 S2Arm 导入证书时会列出全部缺项，并给出可直接复制给发放人的话），或在电脑上的 S2Arm 改用 Apple ID 登录后重新安装。"
 #define S2A_INIT_FAIL_MSG_EXEC_CERT_EN "The certificate used to install this S2Arm is missing the debugging entitlement (get-task-allow), and without it iOS won't let games run. Ask whoever issued the certificate for an Apple Development certificate and development provisioning profile that include it (importing the certificate in S2Arm on your computer lists everything that's missing and gives you a message to send them), or sign in with an Apple ID in S2Arm on your computer and install again."
-#define S2A_INIT_FAIL_MSG_DEVICE  "这台设备的内存和地址空间不够运行这款游戏，换一台内存更大的 iPhone / iPad 再试；诊断里有它要多少、这台设备有多少。"
-#define S2A_INIT_FAIL_MSG_DEVICE_EN "This device doesn't have enough memory and address space to run this game. Try an iPhone or iPad with more memory; the diagnostics show how much it needs and how much this device has."
+#define S2A_INIT_FAIL_MSG_DEVICE  "这台设备的内存和系统能给 App 的地址范围不够运行这款游戏（和存储空间无关），换一台内存更大的 iPhone / iPad 再试；诊断里有它要多少、这台设备有多少。"
+#define S2A_INIT_FAIL_MSG_DEVICE_EN "This device doesn't have enough memory and app address range to run this game (this has nothing to do with storage space). Try an iPhone or iPad with more memory; the diagnostics show how much it needs and how much this device has."
 // 错误码：由失败出口显式指定（host_main.c failed_session 的调用点一处一个），不从摘要文本猜。
 //   X(枚举名, 码 id, 内部摘要（只进诊断）, 玩家话术宏)；码 id 与话术归类同样登记在 experience.v1.json 的 init_fail_page.codes。
 //   码表外的值按 S2A_INIT_FAIL_E_UNKNOWN（码 id unknown、通用句）处理

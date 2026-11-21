@@ -87,7 +87,7 @@ def adapt(root,out):
         '    if (argc>1 && !strcmp(argv[1],"watchdog")) { pthread_t wd;\n'
         '        setenv("S2A_SCHED_DIAG","1",1);   /* 测的是空闲期按时醒（调度诊断开时才定时醒；玩家局缺省关时空闲期纯等等核者叫醒，#1842） */\n'
         '        pw_check(!pthread_create(&wd,NULL,preempt_watchdog,NULL),"actual watchdog starts");\n'
-        '        while(pw_watchdog_calls<4)usleep(100);   /* 按事件等满 4 轮（不设墙钟：负载高时 1 秒转不满 4 轮，11-02 假红）；挂死交 run_pause_wait_checks.run() 的 40 秒 */\n'
+        '        while(pw_watchdog_calls<4)usleep(100);   /* 按事件等满 4 轮（不设墙钟：负载高时 1 秒转不满 4 轮，11-02 假红）；挂死交门禁分组超时 */\n'
         '        pw_check(pw_watchdog_calls>=4 && pw_watchdog_changes>=3,"independent watchdog deadlines may change");\n'
         '        return pw_finish("watchdog",0,0); }\n'
         '    return pw_finish("pause-waits",pause_wait_suite(),0);')
@@ -108,7 +108,7 @@ def main():
     rows=[]
     for name,cmd in [('compile',['/usr/bin/clang','-O1','-g','-Wall','-Wextra','-Wno-unused-parameter','-Wno-unused-function','-I'+str(tree/'runtime/include'),str(tree/'test.c'),'-o',str(out/'test')]),
                      ('off',[str(out/'test'),'off']),('on',[str(out/'test'),'on'])]:
-        c=subprocess.run(cmd,cwd=tree,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=45)
+        c=subprocess.run(cmd,cwd=tree,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)  # 不设墙钟超时（同 run_pause_wait_checks.run），挂死交门禁分组超时
         (out/(name+'.log')).write_bytes(c.stdout);rows.append(dict(name=name,exit=c.returncode,command=cmd,fail_rows=len(re.findall(rb'\bFAIL\b',c.stdout))))
         print(name,c.returncode,flush=True)
         if name=='compile' and c.returncode:print(c.stdout.decode());break

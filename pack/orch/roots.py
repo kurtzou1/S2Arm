@@ -846,7 +846,7 @@ class Roots:
                          and p != current), key=lambda p: p.stat().st_mtime_ns, reverse=True)
         for p in others[1:]:
             if not self._pinned(p):
-                remove_owned(p)
+                _prune_one(p)
         store = self.path / '.romfs_store' / game
         if store.is_dir() and not is_link(store):
             used = {self._romfs(p, game) for p in self.path.glob(f'{game}@*')
@@ -854,7 +854,17 @@ class Roots:
             for name in romfs_list.listdir(store):
                 p = store / name
                 if p not in used and not is_link(p):
-                    remove_owned(p)
+                    _prune_one(p)
+
+
+def _prune_one(p):
+    """prune 删一份旧版本 / 没人用的 RomFS 身份：是打扫，不是本次结果的一部分（prune 在新版本已提交、指针已写之后才跑）。
+    删不掉（诊断#8735d6 D-GGG5：Windows 杀毒 / 索引开着句柄，删除挂起，remove_owned 重试 2 秒后仍 WinError 145「目录不是空的」）
+    只说一句黄、接着删下一份，不把已成功的提交报成出包失败；残留下次 prune 再删（同 stages.Dependencies.close，D-CFH5）"""
+    try:
+        remove_owned(p)
+    except OSError as e:
+        print(f'【黄】旧版本没删干净（下次出包再清）{p}：{e}', file=sys.stderr)
 
 
 class Transaction:

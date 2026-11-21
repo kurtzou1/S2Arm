@@ -101,7 +101,7 @@ class LinkSymbolTests(unittest.TestCase):
                     host = "darwin-x86_64" if sys.platform == "darwin" else "linux-x86_64"
                     tools = ndk / "toolchains/llvm/prebuilt" / host / "bin"
                     tools.mkdir(parents=True)
-                    for name in ("aarch64-linux-android29-clang", "aarch64-linux-android29-clang++", "ld.lld", "llvm-nm"):
+                    for name in ("aarch64-linux-android34-clang", "aarch64-linux-android34-clang++", "ld.lld", "llvm-nm"):
                         (tools / name).touch()
                     env = {"HOME": str(root / "empty-home") if index == 0 else ""}
                     with mock.patch.dict(os.environ, env, clear=True), \
@@ -181,7 +181,7 @@ class LinkSymbolTests(unittest.TestCase):
             host = "darwin-x86_64" if sys.platform == "darwin" else "linux-x86_64"
             tools = good / "toolchains/llvm/prebuilt" / host / "bin"
             tools.mkdir(parents=True)
-            for name in ("aarch64-linux-android29-clang", "aarch64-linux-android29-clang++", "ld.lld", "llvm-nm"):
+            for name in ("aarch64-linux-android34-clang", "aarch64-linux-android34-clang++", "ld.lld", "llvm-nm"):
                 (tools / name).touch()
             cases = (
                 {"HOME": str(root), "ANDROID_NDK_HOME": str(root / "stale"), "ANDROID_HOME": str(sdk)},
@@ -223,7 +223,7 @@ class LinkSymbolTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"HOME": temp, "ANDROID_NDK_HOME": str(wrong),
                                               "ANDROID_SDK_ROOT": str(sdk)}, clear=True):
                 self.assertEqual(LINK.find_ndk(), correct)
-                with self.assertRaisesRegex(RuntimeError, "missing .*aarch64-linux-android29-clang"):
+                with self.assertRaisesRegex(RuntimeError, "missing .*aarch64-linux-android34-clang"):
                     GAME.ndk_bin()
 
     def test_production_touch_and_avc_bindings_are_wired_in_both_modes(self):

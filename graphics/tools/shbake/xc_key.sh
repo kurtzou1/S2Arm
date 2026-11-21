@@ -10,15 +10,17 @@ set -u
 H=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); R=$(cd "$H/../../.." && pwd)
 LUT=compat/tree/src/Ryujinx.Graphics.Vulkan/Effects/Textures
 C=${S2A_XCKEY_CACHE:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/cache/xckey}; mkdir -p "$C"
+# 渲染器源码在这几个目录之外引的头：出图 gal_present.m 引 HDR 策略头（直连层与 gal 同一份），取 HEAD 源码要一起带上、也进键的输入
+HDRP=graphics/nvn/gfx/nvn/nvn_hdr_policy.h
 if [ -n "${S2A_XCKEY_TREE:-}" ]; then S=$(cd "$S2A_XCKEY_TREE" && pwd); M=
-else M=$({ git -C "$R" rev-parse HEAD:graphics/metal HEAD:graphics/dsx HEAD:graphics/third_party "HEAD:$LUT/SmaaAreaTexture.bin" "HEAD:$LUT/SmaaSearchTexture.bin"; clang --version | head -1; xcrun --sdk macosx --show-sdk-version 2> /dev/null; cat "$H/xc_key.sh" "$H/xc_unroot.py"; } | shasum -a 256 | cut -c1-32)
+else M=$({ git -C "$R" rev-parse HEAD:graphics/metal HEAD:graphics/dsx HEAD:graphics/third_party "HEAD:$LUT/SmaaAreaTexture.bin" "HEAD:$LUT/SmaaSearchTexture.bin" HEAD:$HDRP; clang --version | head -1; xcrun --sdk macosx --show-sdk-version 2> /dev/null; cat "$H/xc_key.sh" "$H/xc_unroot.py"; } | shasum -a 256 | cut -c1-32)
   [ -s "$C/$M" ] && { cat "$C/$M"; exit 0; }; S=
   # 同一组只编一份：各款刷新会同时算键（合入后九款并行出包），后到的等先到的出结果（持有者死了接管）
   until mkdir "$C/$M.lock" 2> /dev/null; do [ -s "$C/$M" ] && { cat "$C/$M"; exit 0; }
     p=$(cat "$C/$M.lock/pid" 2> /dev/null); [ -n "$p" ] && ! kill -0 "$p" 2> /dev/null && rm -rf "$C/$M.lock"; sleep 1; done
   echo $$ > "$C/$M.lock/pid"; fi
 T=$(mktemp -d); trap 'rm -rf "$T"; [ -n "$M" ] && rm -rf "$C/$M.lock"' EXIT
-if [ -z "$S" ]; then mkdir -p "$T/src" && git -C "$R" archive HEAD graphics/metal graphics/dsx graphics/third_party tools/toolchain.env "$LUT/SmaaAreaTexture.bin" "$LUT/SmaaSearchTexture.bin" | tar -x -C "$T/src" || { echo "【红】xc_key：取 HEAD 源码失败" >&2; exit 1; }; S=$T/src; fi
+if [ -z "$S" ]; then mkdir -p "$T/src" && git -C "$R" archive HEAD graphics/metal graphics/dsx graphics/third_party tools/toolchain.env "$LUT/SmaaAreaTexture.bin" "$LUT/SmaaSearchTexture.bin" "$HDRP" | tar -x -C "$T/src" || { echo "【红】xc_key：取 HEAD 源码失败" >&2; exit 1; }; S=$T/src; fi
 MD=$S/graphics/metal; DD=$S/graphics/dsx; SP=$S/graphics/third_party/spirv_cross; O=$T/o; mkdir -p "$O/gal" "$O/spvc" "$O/gen"
 mkv() { make -s --no-print-directory -C "${2:-$MD}" -f Makefile -f <(printf 'xk_print:\n\t@echo $(%s)\n' "$1") OUT="$O" xk_print; }
 OF=$(mkv OBJCFLAGS) && SD=$(mkv SPVC_DEF "$DD") && DF=$(mkv DSX_CFLAGS "$DD") && MV=$(mkv MACOSX_DEPLOYMENT_TARGET) && MS=$(mkv MACSYS) && [ -n "$MV" ] || { echo "【红】xc_key：读不出 Makefile 的编译参数" >&2; exit 1; }

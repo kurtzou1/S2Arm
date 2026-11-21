@@ -511,6 +511,10 @@ static void alias_report_overrun(uint64_t a, uint64_t size) {
 // 地址空间不够这款（layout.c s2a_alias_big_tops_window）：静态大区末端顶到窗口末、别名区又伸出窗口 → 游戏其余地址区必落远端，可能非常卡或停在开头。
 //   日志打黄；iOS 人手局弹「仍要启动」页（不拦，点了照常起局）；自动化局不弹；Mac 只打日志（宿主没有确认页通道）
 // 弱链接[host]：s2a_ios_ask_continue_l10n（ios/app.m 提供；Mac 宿主、原生单测没有，取不到就只打日志）
+// 弹不弹「地址空间不够」（纯函数，t_vawin_container 测）：只在本款已知的最高跨度（本机记录 / 种子表，s2a_window_span_seen）比窗口还大时弹 → 1——
+//   那是游戏真碰到过、这台设备给不了的。不知道（0：这款本机没玩过、种子表也没有）不弹（11-21：原先不知道也弹，拿静态大区的末端（整份标准布局）
+//   与窗口比，带提高内存上限权限的 12 GB iPhone 开一款 63 GB 静态大区、实际最高只碰到 40.8 GB 的游戏也让玩家「换一台设备」）：按需起局，边玩边学
+int s2a_addr_note_needed(uint64_t learned, uint64_t win_size) { return learned && learned > win_size; }
 static void addr_short_note(int alias_gb) {
     int s2a_alias_big_tops_window(uint64_t, int, uint64_t);
     uint64_t we = L.win_base + L.win_size;
@@ -519,8 +523,16 @@ static void addr_short_note(int alias_gb) {
         uint64_t big = (uint64_t)((alias_gb < 0 ? -alias_gb : alias_gb) - 1) << 30, y = s2a_sainit_size(L.alias_base, L.alias_size, we, APP_POOL, big);
         if (y < big) { LOG("地址空间：静态大区 %d GB 顶到窗口末，来源是分配器初始化，开局闸门会把预留压到 %llu MB，不弹「仍要启动」", alias_gb < 0 ? -alias_gb : alias_gb, (unsigned long long)(y >> 20)); return; }
     }
-    LOG("【黄】地址空间不够这款：静态大区 %d GB 的末端顶到窗口末（窗口 %llu MB），游戏其余地址区会落在窗口外走远端，可能非常卡或停在开头",
-        alias_gb < 0 ? -alias_gb : alias_gb, (unsigned long long)(L.win_size >> 20));
+    // 本款已知的最高跨度（本机记录 / 种子表）在窗口之内，或还不知道：静态大区只是承诺、不等于游戏真要这么多，不弹（#1903：静态认出 63 GB 的款
+    //   实际跨度 42–43 GB，窗口 54272 MB，每次起局都弹「仍要启动」、远端缺页 0 次）。只有已知跨度比窗口大才弹：那是设备真给不了
+    { uint64_t (*span_seen)(uint64_t) = (uint64_t (*)(uint64_t))dlsym(RTLD_DEFAULT, "s2a_window_span_seen");   // vawin.c；安卓 / 单测没有 → 照旧弹
+      uint64_t seen = span_seen ? span_seen(g_lay_pid) : 0;
+      if (s2a_addr_note_needed(seen, L.win_size) == 0) {
+          LOG("地址空间：静态大区 %d GB 顶到窗口末，但这款已知的最高跨度 %llu MB（本机记录 / 种子表，0 = 还不知道、按需起局）不超出窗口 %llu MB，不弹「仍要启动」",
+              alias_gb < 0 ? -alias_gb : alias_gb, (unsigned long long)(seen >> 20), (unsigned long long)(L.win_size >> 20));
+          return; } }
+    LOG("【黄】地址空间不够这款：这款碰到过的最高跨度比这台设备给得出的窗口（%llu MB）还大，静态大区 %d GB，游戏其余地址区会落在窗口外走远端，可能非常卡或停在开头",
+        (unsigned long long)(L.win_size >> 20), alias_gb < 0 ? -alias_gb : alias_gb);
 #if TARGET_OS_IPHONE
     if (s2a_unattended()) return;
     int s2a_ios_ask_continue_l10n(const char *) __attribute__((weak_import));   // ios/app.m：文案按 S2ArmHost.strings 键 addrshort.* 出五语（中英宏 S2A_SELFCHECK_ADDR_* 是实现来源 / 日志用）
@@ -584,6 +596,7 @@ static void layout_prepare(const char *npdm) {
               (unsigned long long)(g_alias_report >> 30), (unsigned long long)(L.alias_size >> 30), (unsigned long long)(ws_hole >> 20), (unsigned long long)(g_lay_need >> 20));
       else if (full && s2a_alias_report_size(L.alias_base, L.alias_size, L.win_base + L.win_size, ws_hole, g_lay_need, alias_gb, 0) < L.alias_size)
           LOG("【黄】别名区不收小：本款上次收小后仍映射到收掉的那段（wire/%016llX/alias_full），这局照旧报 %llu GB、伸出段走远端", (unsigned long long)pid, (unsigned long long)(L.alias_size >> 30)); }
+    { void (*late)(int) = (void (*)(int))dlsym(RTLD_DEFAULT, "s2a_window_snap_late"); if (late) late(!g_shadow_base); }   // 没有远端段的款：收尾还回去的那段里补放快照区（vawin.c）
     s2a_window_trim(L.win_size);   // 布局之外的窗口尾部交给宿主（vawin.c）
     if (g_shadow_base) s2a_far_set(L.win_base + L.win_size, L.alias_base + L.alias_size, L.heap_base, L.heap_base + L.heap_size);   // 乙：别名区伸出窗口，伸出段走远端影子（far.c）
     g_lay_ok = 1;

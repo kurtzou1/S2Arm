@@ -120,14 +120,12 @@ extension S2ArmLauncherModel {
             if let result, result["error"] == nil, let available = result["available"] as? Bool {
                 if !available {
                     let version = result["version"] as? String ?? currentVersion
-                    showEnvironment = false
                     activateWindow?()
                     updatePopup = ["kind": "upToDate", "version": version]
                     return
                 }
                 if let version = result["version"] as? String, !version.isEmpty {
                     availableUpdate = result
-                    showEnvironment = false
                     activateWindow?()
                     showUpdatePopup()
                     return
@@ -135,7 +133,6 @@ extension S2ArmLauncherModel {
             }
             let code = result?["error"] as? String ?? ""
             checkError = ["update_network", "update_rate_limited", "update_server"].contains(code) ? code : "update_failed"
-            showEnvironment = false
             activateWindow?()
         }
     }

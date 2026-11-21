@@ -286,6 +286,9 @@ void s2a_fps_start(const char *dir) {
         //   超出的部分落在注释里（前半截已有 #）照常用；数据段本身超长整行报红、不用
         if (!strchr(line, '\n') && !feof(f)) { int ch; while ((ch = fgetc(f)) != EOF && ch != '\n') {}
             if (!strchr(line, '#')) { LOG("【红】帧率表 %s：行超过 %zu 字节且数据段没在其中结束，整行不用（前段：%.40s…）", path, sizeof line - 1, line); bad++; continue; } }
+        // UTF-8 BOM（Windows 记事本存的表，11-21 D-FE44 玩家 mod 目录的 fps.tsv）：行首 EF BB BF 去掉再解析。原先首行「BOM # 注释」去掉注释后只剩 BOM，
+        //   报「不认的行」红；首行若是「BOM build …」，build 认不出、整表按对不上不用
+        if ((unsigned char)line[0] == 0xEF && (unsigned char)line[1] == 0xBB && (unsigned char)line[2] == 0xBF) memmove(line, line + 3, strlen(line + 3) + 1);
         char *h = strchr(line, '#'); if (h) *h = 0;
         char a[16], b[48], c[32], t[8], v[32], x[96] = "", cmod[48], coff[32], ct[8], cop[4], cval[32]; int cn = 0;
         char *iff = strstr(line, " if ");

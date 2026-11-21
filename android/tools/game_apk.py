@@ -220,7 +220,7 @@ def apk_signer_sha256(apk):
             certs, _ = prefixed(signed_data, off)
             cert, _ = prefixed(certs, 0)
             return hashlib.sha256(cert).hexdigest()
-    sys.exit(f'{apk}: no v2 / v3 signature (minSdk 29 builds are signed with them)')
+    sys.exit(f'{apk}: no v2 / v3 signature (minSdk 34 builds are signed with them)')
 
 
 def apk_identity(apk):

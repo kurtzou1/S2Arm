@@ -19,7 +19,7 @@ public final class SystemTuningTest {
             stop = type.getDeclaredMethod("stop"), detach = type.getDeclaredMethod("detach");
         attach.setAccessible(true); start.setAccessible(true); stop.setAccessible(true); detach.setAccessible(true);
 
-        Build.VERSION.SDK_INT = 31;
+        Build.VERSION.SDK_INT = 34;   // minSdk 34 起 GameManager 恒可用，无低 API 门
         long[] now = {1_000_000_000L}; final long HOLD = 5_000_000_000L;
         java.lang.reflect.Field clock = Class.forName("org.s2arm.android.FrameRateVote").getDeclaredField("clock");
         clock.setAccessible(true); clock.set(null, (java.util.function.LongSupplier) () -> now[0]);
@@ -70,13 +70,6 @@ public final class SystemTuningTest {
         handler.runPending();
         check(!NativeBridge.cap && NativeBridge.capCalls == calls1 + 2, "battery_cap=0 forces cap off");
         android.os.SystemProperties.values.clear();
-
-        // API<31 不读 GameManager：省电档不可见 → cap 保持 false
-        Build.VERSION.SDK_INT = 30;
-        context.gameManager.mode = android.app.GameManager.GAME_MODE_BATTERY;
-        handler.runPending();
-        check(!NativeBridge.cap, "pre-31 does not consult GameManager");
-        Build.VERSION.SDK_INT = 31;
 
         // stop 后迟到的回调不采：不投票、不改 cap、不重排
         handler.runPending();

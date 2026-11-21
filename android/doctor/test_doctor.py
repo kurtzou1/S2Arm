@@ -168,7 +168,7 @@ class DoctorTest(unittest.TestCase):
         self.assertEqual(self.pins['gradle'], '9.8.1')
         self.assertEqual(self.pins['ndk'], '29.0.14206865')
         self.assertEqual(self.pins['openssl_cache'],
-                         'openssl/3.5.9-ndk29.0.14206865-api29-' + openssl_recipe(self.repo))
+                         'openssl/3.5.9-ndk29.0.14206865-api34-' + openssl_recipe(self.repo))
         self.assertIn('android/tools/jdk17.sh', self.pins['sources'])
 
     def test_source_drift_fails(self):

@@ -139,6 +139,11 @@ void s2a_ap_set_notice_hook(void (*fn)(const char *)) { g_notice_hook = fn; }
 //   也不在 10 秒就动手：有的游戏加载时正常停帧十几秒，过早会把好好的帧率补丁误关。正常游戏 30 秒低于 0.5 帧本来就是坏了
 int s2a_ap_crawl_due(uint64_t frames_in_30s);
 int s2a_ap_crawl_due(uint64_t frames_in_30s) { return frames_in_30s <= 15; }
+// 停帧救场的 30 秒窗口在「外因」下清空重来（#1857：Mac 王国之泪切到后台 67 / 114 秒，宿主焦点=0、后台 30 秒上屏 0 帧，被当成帧率补丁停住画面，
+//   关掉帧率补丁还记成下次也关，回前台一直 30 帧）。外因：客机冻结=1、宿主焦点=0（窗口在后台，本来就不出帧）、宿主睡眠=1。
+//   取不到符号（-1）不算外因，同现场那行的口径。纯函数，t_ap_host ⑥d 测
+int s2a_ap_stall_external(int frozen, int focused, int sleeping);
+int s2a_ap_stall_external(int frozen, int focused, int sleeping) { return frozen == 1 || focused == 0 || sleeping == 1; }
 // 看门线程走过的格数（每格 250 ms 一圈，圈首加一）：单测按「动作之后又走了几格」等，不按墙钟睡（11-19：负载高时线程分不到 CPU，
 //   固定睡 1.6 秒后格数不够、现场份数对不上，测的是机器负载不是看门逻辑）。只读计数，产品行为不变
 static _Atomic uint64_t g_stall_ticks;
@@ -165,7 +170,7 @@ static void *stall_watch(void *a) { s2a_thread_name("s2a-ap-stall");
         usleep(250000); uint64_t f = s2a_ap_frames();
         if (atomic_load(&g_stall_stop)) break;
         if (++rt % 4 == 0) {
-            if (frozen && frozen()) rn = 0;
+            if (s2a_ap_stall_external(frozen ? frozen() : -1, focused ? focused() : -1, sleeping ? sleeping() : -1)) rn = 0;
             else {
                 if (!crawled && rn >= 30 && s2a_ap_crawl_due(f - ring[rn % 30])) {
                     crawled = 1;   // 每局只判一次：救场本身也只救一次

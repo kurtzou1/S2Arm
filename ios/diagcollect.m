@@ -13,6 +13,27 @@ static NSArray<NSString *> *archived_logs(NSString *D) {
     return r;
 }
 
+// 按 UTF-8 解，坏字节就地换成 U+FFFD（按最长合法前缀算一个），其余逐字节不变。
+//   原先整份解不了就整份按 Latin-1 解再存回 UTF-8：一个坏字节就让整份中文变成二次编码的乱码（如「写回原值」→「å\u0086\u0099…」），
+//   诊断读不出来；坏字节来自宿主按字节截断的长行（直连层统计行截进定长缓冲、切在汉字中间），往局日志 264 份诊断中招
+static NSString *utf8_lossy(NSData *d) {
+    NSString *s = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding]; if (s) return s;
+    const uint8_t *p = d.bytes; NSUInteger n = d.length, i = 0; NSMutableData *o = [NSMutableData dataWithCapacity:n + 64];
+    static const uint8_t rep[3] = {0xEF, 0xBF, 0xBD};
+    while (i < n) {
+        uint8_t c = p[i]; NSUInteger len = c < 0x80 ? 1 : (c & 0xE0) == 0xC0 && c >= 0xC2 ? 2 : (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 && c <= 0xF4 ? 4 : 0;
+        NSUInteger k = 1;
+        if (len > 1) {
+            uint8_t lo = 0x80, hi = 0xBF;   // 第二字节的合法范围（排除超长编码与代理区，同 Unicode 表 3-7）
+            if (c == 0xE0) lo = 0xA0; else if (c == 0xED) hi = 0x9F; else if (c == 0xF0) lo = 0x90; else if (c == 0xF4) hi = 0x8F;
+            while (k < len && i + k < n && p[i + k] >= (k == 1 ? lo : 0x80) && p[i + k] <= (k == 1 ? hi : 0xBF)) k++;
+        }
+        if (len && k == len) [o appendBytes:p + i length:len]; else [o appendBytes:rep length:3];
+        i += len && k == len ? len : k;
+    }
+    return [[NSString alloc] initWithData:o encoding:NSUTF8StringEncoding] ?: @"";
+}
+
 // 文本文件：超过 cap 只留头 cap/4 + 尾 cap*3/4（按行边界），中间一行「…截掉 N 字节…」；脱敏后写到 dst。返回 {bytes, truncated}
 static NSDictionary *copy_text(NSString *src, NSString *dst, NSUInteger cap, NSString *(^redact)(NSString *)) {
     NSData *d = [NSData dataWithContentsOfFile:src options:NSDataReadingMappedIfSafe error:nil]; if (!d) return nil;
@@ -25,7 +46,7 @@ static NSDictionary *copy_text(NSString *src, NSString *dst, NSUInteger cap, NSS
         [m appendData:[[NSString stringWithFormat:@"\n…截掉 %lu 字节…\n", (unsigned long)(ts - head)] dataUsingEncoding:NSUTF8StringEncoding]];
         [m appendData:[d subdataWithRange:NSMakeRange(ts, d.length - ts)]]; out = m;
     }
-    NSString *s = [[NSString alloc] initWithData:out encoding:NSUTF8StringEncoding] ?: [[NSString alloc] initWithData:out encoding:NSISOLatin1StringEncoding];
+    NSString *s = utf8_lossy(out);
     NSData *w = [redact(s ?: @"") dataUsingEncoding:NSUTF8StringEncoding];
     if (!w || ![w writeToFile:dst atomically:NO]) return nil;
     return @{@"bytes": @(w.length), @"truncated": @(cut)};

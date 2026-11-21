@@ -36,7 +36,7 @@ avc_prepare() (
 )
 
 avc_cache_key() {
-    { printf '%s\n' "$avc_tag" "$avc_commit" "$avc_content_sha" "$toolchain_key" 'Release PIC arm64-v8a android-29 aarch64 tests=OFF mvc=OFF svc=OFF';
+    { printf '%s\n' "$avc_tag" "$avc_commit" "$avc_content_sha" "$toolchain_key" 'Release PIC arm64-v8a android-34 aarch64 tests=OFF mvc=OFF svc=OFF';
       "${CMAKE:-$ANDROID_HOME/cmake/$S2A_ANDROID_CMAKE/bin/cmake}" --version;
       # The shared helper layer is part of the recipe: cache.sh owns toolchain/
       # publish semantics and build.sh owns source verification/dispatch.
@@ -69,7 +69,7 @@ build_avc() {
         [[ "$cmake_version" =~ ^cmake\ version\ ${S2A_ANDROID_CMAKE//./\.}(-g[0-9a-f]+)?$ ]] || { echo "libavc requires CMake $S2A_ANDROID_CMAKE" >&2; return 1; }
     fi
     grep -q '^Pkg.Revision = '$S2A_ANDROID_NDK'$' "$ndk/source.properties" || { echo "libavc requires NDK $S2A_ANDROID_NDK" >&2; return 1; }
-    local flags='Release PIC arm64-v8a android-29 aarch64 tests=OFF mvc=OFF svc=OFF'
+    local flags='Release PIC arm64-v8a android-34 aarch64 tests=OFF mvc=OFF svc=OFF'
     archive=$(avc_source "${S2A_AVC_ARCHIVE:-}") || return 1
     init_codec_toolchain
     key=$(avc_cache_key)
@@ -88,7 +88,7 @@ build_avc() {
         tar -xzf "$work/source.tar.gz" -C "$work/src"
         "$cmake_bin" -S "$work/src" -B "$work/obj" \
             -DCMAKE_TOOLCHAIN_FILE="$ndk/build/cmake/android.toolchain.cmake" \
-            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-29 \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-34 \
             -DSYSTEM_NAME=Android -DSYSTEM_PROCESSOR=aarch64 \
             -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
             -DENABLE_TESTS=OFF -DENABLE_MVC=OFF -DENABLE_SVC=OFF >&2

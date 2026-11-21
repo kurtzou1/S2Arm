@@ -173,6 +173,29 @@ class RequestTest(unittest.TestCase):
         self.assertEqual(ds.requested(FakeContext("/nonexistent", dict(scheme="d2r-mobile")), dict(id=TITLE))["id"], "d2r-mobile")
 
 
+class WorkDirTest(unittest.TestCase):
+    """#1915：DM_ROOT 跨出包复用，换了包件还留着上一版工具放的翻译器 → 用错。工作目录归属某一份包件，换包件整个清掉"""
+    def test_same_bundle_keeps_work_other_bundle_clears_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "out"
+            old = scheme(bundle=dict(tag="v2.3.1", commit=COMMIT, urls=[], sha256="a" * 64))
+            new = scheme(bundle=dict(tag="v2.3.3", commit=COMMIT, urls=[], sha256="b" * 64))
+            w = ds.work_dir(out, old)
+            stale = w / "build/gfx/dmsh_xlate/dmsh_xlate"; stale.parent.mkdir(parents=True); stale.write_bytes(b"old")
+            self.assertEqual(ds.work_dir(out, old), out / "work")
+            self.assertEqual(stale.read_bytes(), b"old")                      # 同一份包件：照旧复用
+            w = ds.work_dir(out, new)
+            self.assertFalse(stale.exists())                                  # 换包件：上一版放的东西清掉
+            self.assertEqual((w / ".bundle").read_text(), "b" * 64)
+
+    def test_work_left_by_old_version_without_mark_is_cleared(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "out"
+            stale = out / "work/build/gfx/dmsh_xlate/dmsh_xlate"; stale.parent.mkdir(parents=True); stale.write_bytes(b"old")
+            ds.work_dir(out, scheme(bundle=dict(tag="v1", commit=COMMIT, urls=[], sha256="c" * 64)))
+            self.assertFalse(stale.exists())                                  # 修复前留下的、没记归属：清一次
+
+
 class BundleTest(unittest.TestCase):
     def make(self, d, commit=COMMIT):
         z = Path(d) / "bundle.zip"

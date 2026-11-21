@@ -144,7 +144,7 @@ if(ANDROID)
             set_source_files_properties(native/nvn/nvn_drvinfo_android.c PROPERTIES COMPILE_OPTIONS "-Wno-error")
         endif()
         # Bionic exposes process_vm_readv (used by crash.c's safe frame read)
-        # only with GNU feature declarations; Android minSdk 29 exceeds API 23.
+        # only with GNU feature declarations.
         set_property(SOURCE "${S2A_ANDROID_RUNTIME_ROOT}/runtime/src/crash.c" APPEND PROPERTY COMPILE_DEFINITIONS _GNU_SOURCE)
         # thread.c 用到 pthread_getname_np（bionic 在 _GNU_SOURCE 下才声明），与 crash.c 同一处理。
         set_property(SOURCE "${S2A_ANDROID_RUNTIME_ROOT}/runtime/src/thread.c" APPEND PROPERTY COMPILE_DEFINITIONS _GNU_SOURCE)
@@ -534,18 +534,17 @@ else()
     target_compile_options(adpf_hint_test PRIVATE -Wall -Wextra -Werror)
     target_link_libraries(adpf_hint_test PRIVATE Threads::Threads)
     add_test(NAME android_adpf_hint COMMAND adpf_hint_test)
-    # CPU 频率托底：判定表是纯函数（模拟时间线）；运行体把生产的 cpu_floor.c / power_state.c / system_tuning.c
-    # 原样链入，只假系统属性、时钟、核拓扑与钉核 / 降优先级、「满载一片」本身。
-    add_executable(cpu_floor_policy_test tests/cpu_floor_policy_test.c)
-    target_include_directories(cpu_floor_policy_test PRIVATE native)
-    target_compile_options(cpu_floor_policy_test PRIVATE -Wall -Wextra -Werror)
-    add_test(NAME android_cpu_floor_policy COMMAND cpu_floor_policy_test)
-    add_executable(cpu_floor_test tests/cpu_floor_test.c native/cpu_floor.c native/power_state.c native/system_tuning.c)
-    target_include_directories(cpu_floor_test PRIVATE native)
-    target_compile_definitions(cpu_floor_test PRIVATE S2A_CPU_FLOOR_TEST)
-    target_compile_options(cpu_floor_test PRIVATE -Wall -Wextra -Werror)
-    target_link_libraries(cpu_floor_test PRIVATE Threads::Threads)
-    add_test(NAME android_cpu_floor COMMAND cpu_floor_test)
+    # Adreno GPU 提频。用模拟时间线和 KGSL 观测独立判定。
+    add_executable(gpu_turbo_policy_test tests/gpu_turbo_policy_test.c)
+    target_include_directories(gpu_turbo_policy_test PRIVATE native)
+    target_compile_options(gpu_turbo_policy_test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME android_gpu_turbo_policy COMMAND gpu_turbo_policy_test)
+    add_executable(gpu_turbo_test tests/gpu_turbo_test.c native/gpu_turbo.c native/system_tuning.c)
+    target_include_directories(gpu_turbo_test PRIVATE native)
+    target_compile_definitions(gpu_turbo_test PRIVATE S2A_GPU_TURBO_TEST)
+    target_compile_options(gpu_turbo_test PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(gpu_turbo_test PRIVATE Threads::Threads)
+    add_test(NAME android_gpu_turbo COMMAND gpu_turbo_test)
     # wsi_lease.c 用 pthread_condattr_setclock（Linux 专属）：同一门。
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         add_executable(wsi_lease_test tests/wsi_lease_test.c native/wsi_lease.c)

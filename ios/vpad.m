@@ -54,6 +54,8 @@ void S2A_AudioSetVolume(int percent) __attribute__((weak_import));
 #include <sys/stat.h>
 #include "native.h"
 #include "s2a_unattended.h"
+// 弱链接[lab]：s2a_main_build_id（runtime/src/loader.c 主程序构建号；输入工作台不链原生核，取不到按没有）
+const char *s2a_main_build_id(void) __attribute__((weak_import));
 uint64_t s2a_ap_frames(void);                                   // ap_host.c：上屏帧数
 int s2a_autoplay_on(void) __attribute__((weak_import));         // tests/autoplay：自动玩家在跑时不录
 void s2a_ap_snapshot(const char *path) __attribute__((weak_import));
@@ -105,7 +107,7 @@ static int rec_open(void) {   // 持 g_rmu
     snprintf(g_rpath, sizeof g_rpath, "%s/%s_%s.tsv", dir, g.UTF8String, ts);
     g_rec = fopen(g_rpath, "w"); if (!g_rec) { g_roff = 1; LOG("【红】录手柄：建 %s 失败", g_rpath); return 0; }
     g_rt0 = rec_ms();
-    fprintf(g_rec, "# 构建号 %s\n", s2a_main_build_id());   // 主程序构建号（exefs/main 0x40 起 16 字节）：执行器按它定 saves/<款>_<构建号>/
+    fprintf(g_rec, "# 构建号 %s\n", s2a_main_build_id ? s2a_main_build_id() : "");   // 主程序构建号（exefs/main 0x40 起 16 字节）：执行器按它定 saves/<款>_<构建号>/
     fprintf(g_rec, "# 录手柄 款 %s：帧号（上屏）\t按键位\t左x\t左y\t右x\t右y\t毫秒；「帧号\t存档\tN\t毫秒」= 游戏第 N 次存档提交（存档副本 <同名>.saveN/、截图 <同名>.saveN.png）\n", g.UTF8String); fflush(g_rec);
     LOG("录手柄：写 %s", g_rpath); return 1;
 }

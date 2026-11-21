@@ -44,7 +44,7 @@ command -v ninja > /dev/null 2>&1 || { echo "【红】安卓门禁：找不到 n
 out=$(mktemp -d "${TMPDIR:-/tmp}/s2a-android-nvk-link.XXXXXXXX")
 trap 'rm -rf "$out"' EXIT
 "$cm" -S android -B "$out" -G Ninja -DCMAKE_TOOLCHAIN_FILE="$ndk/build/cmake/android.toolchain.cmake" \
-      -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-29 -DCMAKE_BUILD_TYPE=Debug \
+      -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-34 -DCMAKE_BUILD_TYPE=Debug \
       -DS2A_ANDROID_NATIVE_MODE=diagnostic -DS2A_ANDROID_VK_ENGINE=ON -DS2ARM_ANDROID_VK_BACKEND=nvk > "$out/configure.log" 2>&1 \
   || { tail -20 "$out/configure.log"; echo "【红】安卓门禁：新层取值的 CMake 配置失败"; exit 1; }
 "$cm" --build "$out" --target s2arm_android > "$out/build.log" 2>&1 \

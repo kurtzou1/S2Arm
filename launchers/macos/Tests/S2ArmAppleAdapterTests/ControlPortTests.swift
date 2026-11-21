@@ -78,6 +78,20 @@ import XCTest
         XCTAssertEqual(ControlJournal.tasks(privateRoot: r, limit: 1).compactMap { $0["id"] as? String }, ["b"])
     }
 
+    /// #1946：/retry 照原请求回填 device / teamId / mode——读得到原请求；不在、坏文件、带路径的任务号都给 nil
+    func testJournalRequestReadsOriginalRequest() throws {
+        let r = root(); defer { try? FileManager.default.removeItem(at: r) }
+        let jobs = r.appendingPathComponent("logs/jobs"); try FileManager.default.createDirectory(at: jobs, withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: ["id": "t1", "operation": "install", "gameId": "G", "device": "UDID-2", "teamId": "TEAM", "mode": "export"])
+            .write(to: jobs.appendingPathComponent("t1.request.json"))
+        try Data("not json".utf8).write(to: jobs.appendingPathComponent("t2.request.json"))
+        let req = ControlJournal.request(privateRoot: r, id: "t1")
+        XCTAssertEqual([req?["device"] as? String, req?["teamId"] as? String, req?["mode"] as? String], ["UDID-2", "TEAM", "export"])
+        XCTAssertNil(ControlJournal.request(privateRoot: r, id: "t2"))
+        XCTAssertNil(ControlJournal.request(privateRoot: r, id: "nope"))
+        XCTAssertNil(ControlJournal.request(privateRoot: r, id: "../t1"))
+    }
+
     /// 任务列表有缓存（控制口每秒刷一次，原先每次全量重读）：新增、删除、原子改名更新、正在跑的任务原地改写，都要当场反映出来
     func testJournalTasksCacheFollowsEveryKindOfChange() throws {
         let r = root(); defer { try? FileManager.default.removeItem(at: r) }

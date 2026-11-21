@@ -47,13 +47,14 @@ namespace S2A.Services
         private readonly delegate* unmanaged<MotionSample*, int> _readMotionPair;   // 可选：左右两路（Mac Joy-Con HID）
         // 可选（Mac 宿主 s2a_pad_read_motion_slot，#520）：P1 以外的玩家各自的体感；没导出照旧只有 P1
         private readonly delegate* unmanaged<int, MotionSample*, int> _readMotionSlot;
-        private sealed class SlotMotion { public MotionInput Left, Right; public readonly float[] Orientation = new float[9], OrientationRight = new float[9]; public ulong Timestamp; public readonly List<SixAxisInput> Last = new(2); }
+        private sealed class SlotMotion { public MotionInput Left, Right; public readonly GyroZeroDrift DriftLeft = new(), DriftRight = new(); public readonly float[] Orientation = new float[9], OrientationRight = new float[9]; public ulong Timestamp; public readonly List<SixAxisInput> Last = new(2); }
         private readonly Dictionary<int, SlotMotion> _slotMotion = new();
         private readonly List<SixAxisInput> _p1States = new(2);   // P1 最近一次的六轴（P1 没新样本、别人有时照样带上）
         private readonly delegate* unmanaged<int, void> _setMotionEnabled;
         private readonly List<SixAxisInput> _motionStates = new(2);
         private readonly float[] _orientation = new float[9];
         private readonly float[] _orientationRight = new float[9];
+        private GyroZeroDrift _driftLeft = new(), _driftRight = new();   // P1 左 / 右（单路时只用左）；换玩家 / 会话（可能换了手柄）重学
         private MotionInput _motion, _motionRight;
         private PlayerIndex _rumblePlayer, _motionPlayer;
         private ulong _session;
@@ -254,6 +255,7 @@ namespace S2A.Services
                 _motion = _motionRight = null;
                 _motionTimestamp = 0;
                 _motionLogged = false;
+                _driftLeft = new(); _driftRight = new();
                 if (_motionPublished)
                 {
                     _motionStates.Clear();
@@ -306,9 +308,9 @@ namespace S2A.Services
                     Console.Error.WriteLine($"[输入反馈] first motion known={known} pair={nPair} player={(int)player} timestamp_us={sample.TimestampUs} accel_g=({sample.AccelerationX},{sample.AccelerationY},{sample.AccelerationZ}) gyro_deg_s=({sample.GyroX},{sample.GyroY},{sample.GyroZ})");
                 }
                 // 左右 Joy-Con 各一路：同一 PlayerId 连续两份，UpdateSixAxis 把第二份写入右手六轴；Npad IMU 左只写传感器 0、右只写传感器 1（单路时 -1：左右同一份）
-                AddMotionState(player, sample, ref _motion, _orientation, imuSensor: nPair >= 2 ? 0 : -1);
+                AddMotionState(player, sample, ref _motion, _orientation, _driftLeft, imuSensor: nPair >= 2 ? 0 : -1);
                 if (nPair >= 2)
-                    AddMotionState(player, sampleR, ref _motionRight, _orientationRight, imuSensor: 1);
+                    AddMotionState(player, sampleR, ref _motionRight, _orientationRight, _driftRight, imuSensor: 1);
                 _p1States.Clear(); _p1States.AddRange(_motionStates);
                 fresh = true;
             }
@@ -339,8 +341,8 @@ namespace S2A.Services
                 if (buf[0].TimestampUs == state.Timestamp && n < 2) { _motionStates.AddRange(state.Last); continue; }
                 state.Timestamp = buf[0].TimestampUs;
                 int before = _motionStates.Count;
-                AddMotionState(who, buf[0], ref state.Left, state.Orientation, imuSensor: n >= 2 ? 0 : -1);
-                if (n >= 2) AddMotionState(who, buf[1], ref state.Right, state.OrientationRight, imuSensor: 1);
+                AddMotionState(who, buf[0], ref state.Left, state.Orientation, state.DriftLeft, imuSensor: n >= 2 ? 0 : -1);
+                if (n >= 2) AddMotionState(who, buf[1], ref state.Right, state.OrientationRight, state.DriftRight, imuSensor: 1);
                 state.Last.Clear(); state.Last.AddRange(_motionStates.GetRange(before, _motionStates.Count - before));
                 fresh = true;
             }
@@ -397,12 +399,17 @@ namespace S2A.Services
         private static readonly bool s_invertPitch = Environment.GetEnvironmentVariable("S2A_MOTION_INVERT_Y") == "1";
         private static readonly bool s_invertYaw = Environment.GetEnvironmentVariable("S2A_MOTION_INVERT_X") == "1";
 
-        private void AddMotionState(PlayerIndex player, MotionSample sample, ref MotionInput motion, float[] orientation, int imuSensor)
+        private void AddMotionState(PlayerIndex player, MotionSample sample, ref MotionInput motion, float[] orientation, GyroZeroDrift drift, int imuSensor)
         {
             if (s_invertPitch) sample.GyroX = -sample.GyroX;
             if (s_invertYaw) sample.GyroZ = -sample.GyroZ;
             Vector3 accel = new(SixAxisSensorIc.ClampAcceleration(sample.AccelerationX), SixAxisSensorIc.ClampAcceleration(sample.AccelerationY), SixAxisSensorIc.ClampAcceleration(sample.AccelerationZ));
-            Vector3 gyro = new(SixAxisSensorIc.ClampAngularRate(sample.GyroX), SixAxisSensorIc.ClampAngularRate(sample.GyroY), SixAxisSensorIc.ClampAngularRate(sample.GyroZ));
+            // 扣掉手柄自身的陀螺零偏（GyroZeroDrift：静止时学），再进姿态积分与游戏的六轴 / IMU（#1935、D-BYT6）
+            bool learned = drift.Learned;
+            Vector3 raw = drift.Apply(accel, new Vector3(sample.GyroX, sample.GyroY, sample.GyroZ), sample.TimestampUs);
+            if (drift.Learned && !learned)
+                Console.Error.WriteLine($"[输入反馈] 陀螺零偏 player={(int)player} {(imuSensor == 1 ? "右" : "左")}路 学到 ({drift.Bias.X:F2},{drift.Bias.Y:F2},{drift.Bias.Z:F2}) 度/秒");
+            Vector3 gyro = new(SixAxisSensorIc.ClampAngularRate(raw.X), SixAxisSensorIc.ClampAngularRate(raw.Y), SixAxisSensorIc.ClampAngularRate(raw.Z));
             _npads.PushImu(player, accel, gyro, sample.TimestampUs, imuSensor);
             if (motion != null && (sample.TimestampUs < motion.TimeStamp || sample.TimestampUs - motion.TimeStamp > 250_000))
                 motion = null;

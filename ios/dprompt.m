@@ -3,6 +3,7 @@
 #import <UIKit/UIKit.h>
 #import "tv_compat.h"
 #import "s2a_l10n.h"
+#import "dprompt_layout.h"
 #import <GameController/GameController.h>
 #include "s2a_direct_prompt.h"
 #include "native.h"
@@ -13,9 +14,25 @@ double s2a_prov_hours_left_self(void);   // prov_expiry.m：本包描述文件�
 static UIVisualEffectView *g_banner;
 static UILabel *g_title, *g_body;
 static UIButton *g_accept, *g_decline;
+static UIStackView *g_row, *g_buttons;
+static NSLayoutConstraint *g_width;
 static NSInteger g_gen;
 static void (^g_onAnswer)(BOOL);
 void s2a_dprompt_notice(NSString *title, NSString *body, double delay, double seconds);
+void s2a_dprompt_layout(void) {
+    UIView *root = g_banner.superview; if (!root) return;
+    UIEdgeInsets insets = root.safeAreaInsets;
+    CGFloat safeWidth = MAX(0, root.bounds.size.width - insets.left - insets.right);
+    CGFloat widest = MAX(g_accept.intrinsicContentSize.width, g_decline.hidden ? 0 : g_decline.intrinsicContentSize.width);
+    NSInteger count = g_decline.hidden ? 1 : 2;
+    S2APromptLayout layout = S2APromptLayoutMake(safeWidth, widest, count);
+    g_width.constant = layout.width;
+    g_row.axis = layout.vertical ? UILayoutConstraintAxisVertical : UILayoutConstraintAxisHorizontal;
+    g_row.alignment = layout.vertical ? UIStackViewAlignmentFill : UIStackViewAlignmentCenter;
+    g_row.spacing = layout.vertical ? 12 : 16;
+    g_buttons.axis = layout.verticalButtons ? UILayoutConstraintAxisVertical : UILayoutConstraintAxisHorizontal;
+    g_buttons.distribution = layout.vertical ? UIStackViewDistributionFillEqually : UIStackViewDistributionFill;
+}
 
 static void hide(void) { g_banner.hidden = YES; }
 static void answer(BOOL accept) { void (^cb)(BOOL) = g_onAnswer; g_onAnswer = nil; hide(); if (cb) cb(accept); }
@@ -31,6 +48,7 @@ static void show(NSString *title, NSString *body, NSString *accept, NSString *de
     g_title.text = title; g_title.hidden = title.length == 0; g_body.text = body;
     [g_accept setTitle:accept ?: S2APICK(S2A_DPROMPT_OK) forState:UIControlStateNormal];
     [g_decline setTitle:decline forState:UIControlStateNormal]; g_decline.hidden = accept == nil;
+    s2a_dprompt_layout();
     g_banner.hidden = NO; [g_banner.superview bringSubviewToFront:g_banner]; NSInteger gen = ++g_gen;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(seconds * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (gen == g_gen && !g_banner.hidden) { if (accept) answer(NO); else hide(); } });
@@ -51,25 +69,32 @@ static UIButton *button(SEL action, BOOL primary) {
     UIButtonConfiguration *c = primary ? UIButtonConfiguration.filledButtonConfiguration : UIButtonConfiguration.grayButtonConfiguration;
     c.cornerStyle = UIButtonConfigurationCornerStyleCapsule; c.buttonSize = UIButtonConfigurationSizeMedium;
     UIButton *b = [UIButton buttonWithConfiguration:c primaryAction:nil];
+    b.titleLabel.numberOfLines = 1;
+    [b setContentCompressionResistancePriority:UILayoutPriorityDefaultHigh forAxis:UILayoutConstraintAxisHorizontal];
+    b.titleLabel.adjustsFontSizeToFitWidth = YES; b.titleLabel.minimumScaleFactor = .7;
+    NSLayoutConstraint *height = [b.heightAnchor constraintGreaterThanOrEqualToConstant:44];
+    height.priority = UILayoutPriorityRequired - 1; height.active = YES;
     [b addTarget:S2APromptTarget.class action:action forControlEvents:UIControlEventTouchUpInside]; return b;
 }
 // 游戏画面建好后调（app.m 场景代理，提示页不调）
 void s2a_dprompt_attach(UIView *root) {
     g_banner = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:S2A_BLUR_MATERIAL_DARK]];
     g_banner.layer.cornerRadius = 16; g_banner.clipsToBounds = YES; g_banner.hidden = YES; g_banner.translatesAutoresizingMaskIntoConstraints = NO;
-    g_title = [UILabel new]; g_title.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold]; g_title.textColor = UIColor.whiteColor;
+    g_title = [UILabel new]; g_title.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold]; g_title.textColor = UIColor.whiteColor; g_title.numberOfLines = 0;
     g_body = [UILabel new]; g_body.font = [UIFont systemFontOfSize:14]; g_body.textColor = [UIColor colorWithWhite:1 alpha:0.75]; g_body.numberOfLines = 0;
     g_accept = button(@selector(accept), YES); g_decline = button(@selector(decline), NO);
     UIStackView *text = [[UIStackView alloc] initWithArrangedSubviews:@[g_title, g_body]]; text.axis = UILayoutConstraintAxisVertical; text.spacing = 2;
     UIStackView *buttons = [[UIStackView alloc] initWithArrangedSubviews:@[g_decline, g_accept]]; buttons.spacing = 8;
     UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[text, buttons]]; row.spacing = 16; row.alignment = UIStackViewAlignmentCenter;
+    g_row = row; g_buttons = buttons;
     row.translatesAutoresizingMaskIntoConstraints = NO; [g_banner.contentView addSubview:row]; [root addSubview:g_banner];
     [buttons setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
     [NSLayoutConstraint activateConstraints:@[
         [row.leadingAnchor constraintEqualToAnchor:g_banner.contentView.leadingAnchor constant:18], [row.trailingAnchor constraintEqualToAnchor:g_banner.contentView.trailingAnchor constant:-12],
         [row.topAnchor constraintEqualToAnchor:g_banner.contentView.topAnchor constant:12], [row.bottomAnchor constraintEqualToAnchor:g_banner.contentView.bottomAnchor constant:-12],
-        [g_banner.topAnchor constraintEqualToAnchor:root.safeAreaLayoutGuide.topAnchor constant:12], [g_banner.centerXAnchor constraintEqualToAnchor:root.centerXAnchor],
-        [g_banner.widthAnchor constraintLessThanOrEqualToAnchor:root.widthAnchor multiplier:0.55]]];
+        [g_banner.topAnchor constraintEqualToAnchor:root.safeAreaLayoutGuide.topAnchor constant:52], [g_banner.centerXAnchor constraintEqualToAnchor:root.safeAreaLayoutGuide.centerXAnchor]]];
+    g_width = [g_banner.widthAnchor constraintEqualToConstant:0]; g_width.active = YES;
+    s2a_dprompt_layout();
     [NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer *t) { (void)t; poll(); }];
     // 签名到期提示（prov_expiry.m）：描述文件剩不到 48 小时，起局 3 秒后提示一次；读不到描述文件不提示
     double h = s2a_prov_hours_left_self();

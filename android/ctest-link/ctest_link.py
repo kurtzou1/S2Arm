@@ -24,7 +24,7 @@
 
 --parts apk：安卓单库 libs2arm_android.so（APK 里那个库）同一套真编真链。起因 #1086：共享前端 hle_nvn.c 每帧调用
 nvn_be_tex_tick，只有 Apple 后端有定义，单库缺符号；core-link/link_symbols.py 的 -z defs 真链只在合入后层，合入前没拦住。
-  1. 用 NDK 自带的 build/cmake/android.toolchain.cmake（与 Gradle 同一工具链、arm64-v8a、android-29 = minSdk、Debug）按
+  1. 用 NDK 自带的 build/cmake/android.toolchain.cmake（与 Gradle 同一工具链、arm64-v8a、android-34 = minSdk、Debug）按
      android/CMakeLists.txt 的 if(ANDROID) 分支配置，APK_CONFIGS 三种组合各配一次：诊断 / 游戏 × nvk 后端
      （引擎恒开：共享前端 hle_nvn.c 等编进来；旧回放层与「引擎关」构建已删除，#1501），外加 Gradle 缺省的诊断构建
      （S2A_CS_SERVICES=0、不带探针，#557）；
@@ -280,7 +280,7 @@ def adpf_ndk_contract(root, work, toolchain, api):
     source = Path(root) / "android/native/adpf_hint.c"
     signature_api = min(api, 36)
     prefixes = ("APerformanceHint_", "AWorkDuration_", "ASessionCreationConfig_")
-    for target in (29, signature_api):
+    for target in (34, signature_api):
         obj = work / ("adpf-api%d.o" % target)
         defines = ["-DS2A_ADPF_CHECK_SIGNATURES"] if target == signature_api else []
         result = subprocess.run([
@@ -302,7 +302,7 @@ def adpf_ndk_contract(root, work, toolchain, api):
         if imports:
             print("【红】ADPF API %d 有直接导入：%s" % (target, ", ".join(imports)))
             return 1
-    print("PASS ADPF：API 29 / %d 三类符号均为 0 直接导入；签名核对到 NDK 真头 API %d" %
+    print("PASS ADPF：API 34 / %d 三类符号均为 0 直接导入；签名核对到 NDK 真头 API %d" %
           (signature_api, signature_api))
     return 0
 
@@ -325,14 +325,14 @@ def apk_part(root, project, work, ndk, jobs, cs_project):
         cfg = subprocess.run([
             "cmake", "-S", str(project), "-B", str(bdir), "-G", "Ninja",
             "-DCMAKE_TOOLCHAIN_FILE=" + str(toolchain), "-DANDROID_ABI=arm64-v8a",
-            "-DANDROID_PLATFORM=android-29", "-DCMAKE_BUILD_TYPE=Debug",
+            "-DANDROID_PLATFORM=android-34", "-DCMAKE_BUILD_TYPE=Debug",
             "-DS2A_ANDROID_NATIVE_MODE=" + mode, "-DS2A_ANDROID_VK_ENGINE=" + engine,
             "-DS2ARM_ANDROID_VK_BACKEND=" + backend,
             "-DS2A_ANDROID_LINK_PROBE=" + (str(probes[mode]) if use_probe else ""), "-DS2A_CS_SERVICES=0"],
             capture_output=True, text=True)
         if cfg.returncode:
             print("\n".join((cfg.stdout + cfg.stderr).strip().splitlines()[-20:]))
-            print("【红】目标 %s CMake 配置失败（NDK 安卓工具链 arm64-v8a android-29）" % tlabel)
+            print("【红】目标 %s CMake 配置失败（NDK 安卓工具链 arm64-v8a android-34）" % tlabel)
             red += 1
             continue
         bdirs.append(bdir)
@@ -357,7 +357,7 @@ def apk_part(root, project, work, ndk, jobs, cs_project):
         elif not fails and not bld.returncode:
             print("【红】目标 %s 没链出来（射程不全）" % tlabel)
             red += 1
-    print("单库链接配置 %d 个（%s，NDK 安卓工具链 arm64-v8a android-29，诊断 / 游戏 × nvk + 诊断 Gradle 缺省）：链过 %d、红 %d" % (
+    print("单库链接配置 %d 个（%s，NDK 安卓工具链 arm64-v8a android-34，诊断 / 游戏 × nvk + 诊断 Gradle 缺省）：链过 %d、红 %d" % (
         len(APK_CONFIGS), APK_LIB, linked, len(APK_CONFIGS) - linked))
     return len(APK_CONFIGS), linked, red, bdirs
 

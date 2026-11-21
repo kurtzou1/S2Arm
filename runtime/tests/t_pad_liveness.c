@@ -12,11 +12,15 @@ static void check(int ok, const char *what) {
     if (!ok) { failures++; fprintf(stderr, "✗ %s\n", what); }
 }
 
-static s2a_sys_state state(bool foreground, bool has_current, bool current_alive, bool candidate_ready, bool may_clear) {
+static s2a_sys_state state_l(bool foreground, bool has_current, bool current_alive, bool listed, bool candidate_ready, bool may_clear) {
     s2a_sys_state s;
-    s.foreground = foreground; s.has_current = has_current; s.current_alive = current_alive;
+    s.foreground = foreground; s.has_current = has_current; s.current_alive = current_alive; s.current_listed = listed;
     s.candidate_ready = candidate_ready; s.may_clear = may_clear;
     return s;
+}
+// 原有各项：当前对象在快照里（#1952 之前的口径）
+static s2a_sys_state state(bool foreground, bool has_current, bool current_alive, bool candidate_ready, bool may_clear) {
+    return state_l(foreground, has_current, current_alive, has_current, candidate_ready, may_clear);
 }
 
 // controller.m 全文里 needle 的出现次数（接线断言用）。
@@ -35,9 +39,9 @@ int main(int argc, char **argv) {
     fclose(file);
     source[size] = 0;
 
-    // ---- 行为：核心回归。快照不含当前手柄（candidate_ready=0），但对象自身 extendedGamepad 非 nil ----
+    // ---- 行为：核心回归。对象自身 extendedGamepad 非 nil、快照里没有别的候选 ----
     check(s2a_system_action(state(true, true, true, false, false)) == S2A_SYS_PUBLISH,
-          "快照不含 + extendedGamepad 非 nil → 刷新共享内存，不清零");
+          "没有别的候选 + extendedGamepad 非 nil → 刷新共享内存，不清零");
     check(s2a_system_action(state(true, true, true, false, true)) == S2A_SYS_PUBLISH,
           "延迟复查时 extendedGamepad 仍非 nil → 已恢复，不清零");
     check(s2a_system_action(state(true, true, true, true, false)) == S2A_SYS_PUBLISH,
@@ -57,6 +61,19 @@ int main(int argc, char **argv) {
     check(s2a_system_action(state(false, false, false, true, false)) == S2A_SYS_NONE,
           "后台且没有当前对象 → 什么都不做");
     check(S2A_SYSTEM_RECHECK_MS == 200, "复查延迟是 200ms");
+    // ---- #1952：关机后旧对象 extendedGamepad 仍非 nil、但已不在快照里 ----
+    check(s2a_system_action(state_l(true, true, true, false, false, false)) == S2A_SYS_DEFER,
+          "#1952：不在快照里（对象仍报可用）→ 延迟确认，不清零、不摘 handler（抖动保护不变）");
+    check(s2a_system_action(state_l(true, true, true, false, false, true)) == S2A_SYS_CLEAR,
+          "#1952：复查时仍不在快照里 → 确认断开，让出玩家 1");
+    check(s2a_system_action(state_l(true, true, true, true, false, true)) == S2A_SYS_PUBLISH,
+          "#1952：复查时回到快照里 → 已恢复，不清零");
+    check(s2a_system_action(state_l(true, true, true, false, true, true)) == S2A_SYS_ATTACH,
+          "#1952：复查时仍不在快照里、快照里有另一只占槽 0 的 → 换对象");
+    check(count_in(source, ".current_listed = current && [controllers containsObject:current]") == 1,
+          "#1952 接线：判活带上「在快照里」");
+    check(count_in(source, "if (current.extendedGamepad && (!mayClear || [GCController.controllers containsObject:current]))") == 1,
+          "#1952 接线：延迟复查时不在快照里的旧对象不再占槽 0（再连上的新对象回玩家 1）");
     // ---- #1428 接线：NS2 Pro 和系统手柄一视同仁分槽，系统手柄不再挡 NS2 Pro ----
     check(count_in(source, "_hasSystem") == 0, "#1428：不再有「有系统手柄就不连 / 停掉 NS2 Pro」的门槛（原 8 处 _hasSystem）");
     check(count_in(source, "system controller selected") == 0, "#1428：选到系统手柄时不停 NS2 Pro");
@@ -69,8 +86,8 @@ int main(int argc, char **argv) {
     check(count_in(source, "if (_slotId[slot] == &g_ble_slot_tag) return;") == 1, "#1428：分槽刷新不把 NS2 Pro 的槽清零");
 
     // ---- 接线：controller.m 真的按这套决策走 ----
-    check(count_in(source, "[controllers containsObject:") == 0,
-          "controller.m 不再用 GCController.controllers 快照判活");
+    check(count_in(source, "[controllers containsObject:") == 1,
+          "controller.m 的快照只经 current_listed 进决策（不在快照先延迟确认，不据它立刻清；#58 / #1952）");
     check(count_in(source, "current.extendedGamepad != nil") == 1,
           "controller.m 用对象自身的 extendedGamepad 判活");
     check(count_in(source, "s2a_system_action(state)") == 1,

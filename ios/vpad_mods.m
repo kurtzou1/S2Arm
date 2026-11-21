@@ -3,6 +3,7 @@
 //   认法同 pack/jobs/mods.py：选的就是 romfs → 一份；否则往下找名为 romfs 的文件夹（大小写都认、不进 romfs 里面再找），
 //   路径上出现别的 16 位程序号 = 给别的游戏的，不收；找到几个就存几份（同名整份替换）
 #import "vpad_mods.h"
+#import "picker_present.h"   // 选文件界面弹出 + 日志（#1939）
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include "s2a_docs.h"
 #import "s2a_l10n.h"
@@ -122,7 +123,7 @@ static NSArray *find_romfs(NSURL *root, NSMutableArray<NSString *> *notes) {
 - (void)import {
     UIDocumentPickerViewController *p = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeFolder] asCopy:NO];
     p.delegate = self; p.allowsMultipleSelection = YES;
-    [self presentViewController:p animated:YES completion:nil];
+    s2a_present_picker(self, p, "mods-import");
 }
 - (void)documentPicker:(UIDocumentPickerViewController *)c didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     NSFileManager *fm = NSFileManager.defaultManager; NSMutableArray<NSString *> *notes = [NSMutableArray array], *done = [NSMutableArray array];

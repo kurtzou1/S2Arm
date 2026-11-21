@@ -53,7 +53,7 @@ class ShellIpaExport(unittest.TestCase):
         self.assertEqual(self.names(r["ipa"]), sorted([APP, WIDGET]))
         self.assertEqual((r["games"], r["files"], r["shellId"], r["exported"]), ([], [], "SHELL1", True))
         text = (folder / "怎么导入.txt").read_text(encoding="utf-8")
-        self.assertTrue(text.startswith("S2Arm.ipa：用你自己的签名工具（AltStore、SideStore 等）签好装到手机。"), "导出了 ipa：说明最前面是 ipa 那句")
+        self.assertTrue(text.startswith("S2Arm.ipa：S2Arm App 本体（不带游戏、未签名），给自签工具用：在 LiveContainer 里直接导入它，或用 SideStore、AltStore 等签好装到手机。"), "导出了 ipa：说明最前面是 ipa 那句，写清用途")
         self.assertIn("点开 .s2arm 文件", text)
         self.assertEqual((old / "S2Arm.ipa").read_bytes(), b"0.5.x", "0.5.x 的自签导出文件夹不碰")
         self.assertEqual(sorted(p.name for p in Path(self.c.library).iterdir() if p.name.startswith(".export-")), [], "不留临时目录")
@@ -66,7 +66,7 @@ class ShellIpaExport(unittest.TestCase):
         self.assertNotIn("S2Arm.ipa", (folder / "怎么导入.txt").read_text(encoding="utf-8"))
         self.export()
         ins.write_s2arm_readme(folder, "en")
-        self.assertTrue((folder / "How to import.txt").read_text(encoding="utf-8").startswith("S2Arm.ipa: sign it with your own tool"))
+        self.assertTrue((folder / "How to import.txt").read_text(encoding="utf-8").startswith("S2Arm.ipa: the S2Arm app itself (no games, unsigned), for self-signing tools: import it directly in LiveContainer"))
 
     def test_widget_off_strips_extension(self):
         self.c.r["widget"] = False
@@ -111,6 +111,69 @@ class ShellIpaExport(unittest.TestCase):
             r = install._update_phone(self.c)
         self.assertTrue(r["updated"])
         self.assertEqual((self.assembled, Path(r["ipa"]).parent.name), (1, "S2Arm 游戏包"))
+
+
+
+    def test_folder_export_brings_current_shell_ipa_once(self):
+        # #502：「导出…」通用 S2Arm、一台都不勾 = 导出到文件夹，原先只出 .s2arm；单独导出 S2Arm.ipa 只在总控台登记过的手机下面，
+        #   LiveContainer / 没连过电脑的玩家拿不到新版 S2Arm.ipa。期望（手写）：同文件夹放上本版壳号的 S2Arm.ipa；已是本版就不重组；壳号变了才换
+        self.assembled = 0
+        with patch.object(packer, "assemble_shell", self.fake_shell), patch.object(packer, "current_shell_id", lambda c: "SHELL1"):
+            out = install.ensure_shell_ipa(self.c)
+            again = install.ensure_shell_ipa(self.c)
+        folder = Path(self.c.library) / "S2Arm 游戏包"
+        self.assertEqual((out, again), (folder / "S2Arm.ipa", folder / "S2Arm.ipa"))
+        self.assertEqual(self.assembled, 1, "第二次已是本版壳号，不重组")
+        self.assertEqual((folder / install.SHELL_IPA_MARK).read_text(encoding="utf-8").strip(), "SHELL1")
+        with patch.object(packer, "assemble_shell", lambda c, dest=None: (self.fake_shell(c, dest=dest)[0], [], "SHELL2")), \
+                patch.object(packer, "current_shell_id", lambda c: "SHELL2"):
+            install.ensure_shell_ipa(self.c)
+        self.assertEqual(self.assembled, 2, "壳号变了就换")
+        self.assertEqual((folder / install.SHELL_IPA_MARK).read_text(encoding="utf-8").strip(), "SHELL2")
+
+    def test_install_export_shell_layout_calls_ensure_before_s2arm(self):
+        order = []
+        self.c.r.update(gameId="0100000000010000", mode="export")
+        import downstream
+        with patch.object(downstream, "requested", lambda c, g: None), patch.object(install, "ios_pack", lambda c, g: None), \
+                patch.object(install, "chosen_layout", lambda c, g=None: "shell"), \
+                patch.object(install, "ensure_shell_ipa", lambda c: order.append("ipa") or Path("/x/S2Arm.ipa")), \
+                patch.object(install, "export_s2arm", lambda c, g: order.append("s2arm") or dict(exported=True)):
+            r = install._install(self.c)
+        self.assertEqual(order, ["ipa", "s2arm"])
+        self.assertEqual(r["shellIpa"], "/x/S2Arm.ipa")
+
+    def device_push(self, ensure=None):
+        """「导出…」勾了设备 = 通用 S2Arm 推到这台（不带 mode）：推完照样在「S2Arm 游戏包」放本版 S2Arm.ipa + 说明"""
+        self.assembled = 0
+        self.c.r.update(gameId="0100000000010000")
+        self.c.r.pop("mode", None)
+        import downstream
+        with patch.object(downstream, "requested", lambda c, g: None), patch.object(install, "ios_pack", lambda c, g: None), \
+                patch.object(install, "chosen_layout", lambda c, g=None: "shell"), patch.object(install, "push_phone", lambda c: "PH"), \
+                patch.object(install, "push_game", lambda c, g, ph: dict(games=[g], bundleId="io.s2arm.games.x")), \
+                patch.object(packer, "assemble_shell", self.fake_shell), patch.object(packer, "current_shell_id", lambda c: "SHELL1"), \
+                patch.object(install, "ensure_shell_ipa", ensure or install.ensure_shell_ipa):
+            return install._install(self.c)
+
+    def test_device_push_also_brings_shell_ipa(self):
+        # 11-21 维护者：「导出…」不论勾不勾设备，导出文件夹里都带上本版 S2Arm.ipa。期望（手写）：推完的结果原样 + shellIpa 指向
+        #   「S2Arm 游戏包/S2Arm.ipa」（替身组的壳），说明文件开头是写清用途的 ipa 那句；同一版再推不重组
+        r = self.device_push()
+        folder = Path(self.c.library) / "S2Arm 游戏包"
+        self.assertEqual((r["games"], r["bundleId"], r["shellIpa"]), (["0100000000010000"], "io.s2arm.games.x", str(folder / "S2Arm.ipa")))
+        self.assertEqual(self.names(folder / "S2Arm.ipa"), sorted([APP, WIDGET]))
+        self.assertTrue((folder / "怎么导入.txt").read_text(encoding="utf-8").startswith("S2Arm.ipa：S2Arm App 本体"))
+        self.assertEqual(self.assembled, 1)
+        self.device_push()
+        self.assertEqual(self.assembled, 0, "本版已在文件夹里：第二次推不重组")
+
+    def test_device_push_keeps_result_when_ipa_fails(self):
+        # 组壳失败不把已推好的这一款判成失败：结果照旧带推送字段，原因放 shellIpaError
+        def broken(c):
+            raise install.Failure("组不出壳", code="job_failed")
+        r = self.device_push(ensure=broken)
+        self.assertEqual((r["games"], r["shellIpaError"], "shellIpa" in r), (["0100000000010000"], "组不出壳", False))
 
 
 if __name__ == "__main__":

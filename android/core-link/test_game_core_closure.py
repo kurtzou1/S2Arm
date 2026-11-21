@@ -41,7 +41,7 @@ def ndk_bin():
         command = f'{shlex.quote(manager)} --sdk_root={shlex.quote(sdk)} {shlex.quote("ndk;29.0.14206865")}'
         raise RuntimeError(f'expected Android NDK 29.0.14206865; searched [{searched}]; env [{env}]; install: {command}')
     binary = ndk / 'toolchains/llvm/prebuilt' / system / 'bin'
-    for tool in ('aarch64-linux-android29-clang', 'aarch64-linux-android29-clang++', 'ld.lld', 'llvm-nm'):
+    for tool in ('aarch64-linux-android34-clang', 'aarch64-linux-android34-clang++', 'ld.lld', 'llvm-nm'):
         if not (binary / tool).is_file():
             raise RuntimeError(f'missing {binary / tool}; install NDK 29.0.14206865 or set ANDROID_NDK_HOME')
     return binary
@@ -69,7 +69,7 @@ def main():
                         '-I', ANDROID / 'native/nvn/compat', '-I', ANDROID / 'native/direct',
                         '-I', ROOT / 'graphics/track']
         for mode, extra in (('diagnostic', []), ('game', ['-DS2A_ANDROID_GAME_RUNTIME=1'])):
-            run([ndk / 'aarch64-linux-android29-clang++', *bridge_flags, *extra, '-c',
+            run([ndk / 'aarch64-linux-android34-clang++', *bridge_flags, *extra, '-c',
                  ANDROID / 'native/bridge.cpp', '-o', temp / (mode + '-bridge.o')])
         print('diagnostic and game bridge: NDK real C++ compilation passed')
         listing = temp / 'sources.txt'
@@ -91,7 +91,7 @@ def main():
             if source not in sources:
                 continue
             obj = temp / (source.stem + '.o')
-            run([ndk / 'aarch64-linux-android29-clang', *flags, '-c', source, '-o', obj])
+            run([ndk / 'aarch64-linux-android34-clang', *flags, '-c', source, '-o', obj])
             objects.append(obj)
         linked = temp / 'core.o'
         run([ndk / 'ld.lld', '-r', *objects, '-o', linked])

@@ -51,7 +51,7 @@ if [ -z "$ndk" ] || [ ! -x "$clang" ]; then
     exit 2
 fi
 
-target=aarch64-none-linux-android29
+target=aarch64-none-linux-android34
 includes=(-I runtime/include -I runtime/src -I platforms -I graphics/track)
 
 # --shim：苹果的 TargetConditionals.h 只在苹果 SDK 里有，值全 0 就走非苹果分支。

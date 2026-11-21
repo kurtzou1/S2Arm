@@ -76,8 +76,9 @@ static void read_expect(NVNtexture *t, const NVNtextureView *view, const uint8_t
     begin(2*SEGMENT); readback_view(t,view); submit(); expect(rgba);
 }
 static void retire_source(NVNtexture *presented) {
-    // Re-record over the source's device interval: only this releases its host shadow.
-    begin(0); end();
+    // Re-record over the source's device interval: only this releases its host shadow. It must write command memory
+    // (a barrier, 8 bytes): EndRecording takes none (#1904), so an empty recording covers nothing and is shared by content.
+    begin(0); API(nvnCommandBufferBarrier)(&commands,0); end();
     // Production shadow blocks wait two presented frames before reuse. A real NVN window
     // in windowless mode drives that same present path; merely nvn_be_set_frame would not.
     NVNwindowBuilder b; NVNwindow w; NVNtexture *textures[]={presented};

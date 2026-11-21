@@ -949,14 +949,20 @@ static int log_has(const char *needle) { return log_count(needle) > 0; }
 
 // 序列 S（清单上限 4；E1..E4 的 prim = 6..9，A / B / C 的 prim = 20 / 21 / 22，其余字节全同、程序身份同）：
 //   E1..E4 各记 3 次填满（uses 都是 3，E1 最久）；然后 A、B、C 轮流记 3 轮；再记一次还在表里的 E2；最后把第 1 轮被挤掉的 E1 记回来。
-// 手算（淘汰目标 = uses 最小、同 uses 取最久没用的）：
-//   第 1 轮：A 挤掉 E1（4 条 uses 都是 3，E1 最久）；B 挤掉 A（uses 1 最小）；C 挤掉 B。表 = {C, E2, E3, E4}。
-//   第 2、3 轮：A 挤掉 C、B 挤掉 A、C 挤掉 B；A / B / C 每次都是「被淘汰过又插回来」。
-//   E2 还在表里（uses 3 → 4）；E1 在第 1 轮被挤掉过：这次记回来是新记，挤掉 C（uses 1 最小），算「被淘汰过又插回来」——
+// 手算（淘汰规则：先挑本轮没碰过的；全表都碰过了就开新一轮）：
+//   E1..E4 填满，全是本轮碰过的。A 进来：没有「没碰过」的 → 开新一轮（epochs 1，全部清成没碰过），按 uses / 最久挑 E1，A 记为碰过。
+//   B 进来：没碰过的 = {E2, E3, E4}，挤掉 E2；C 进来：挤掉 E3。表 = {A, B, C, E4}（A / B / C 碰过，E4 没碰过）。
+//   第 2、3 轮：A / B / C 全在表里，只是命中（memo 里正好是 {C, B, A, E4}，6 次全是 memo 命中），uses 3 / 3 / 3。
+//   E2 在第 1 轮被挤掉过：记回来是新记，没碰过的只剩 E4 → 挤掉 E4（E2 算「被淘汰过又插回来」）；
+//   E1 同样被挤掉过：记回来是新记，表里 A / B / C / E2 全是碰过的 → 开新一轮（epochs 2），挤掉 uses 最小的 E2（uses 1），E1 算「插回」——
 //   这一条专防「只记新配方被挤掉时的散列、不记被挤掉那条自己的散列」：E1 是填表时进的，不是靠挤掉别人进来的。
-// note 共 12 + 9 + 1 + 1 = 23 次；memo 命中 8（E1..E4 各 2 次重复）；桶链命中 1（E2：memo 里只剩 C 的槽）；
-// 新记 4 + 9 + 1 = 14；其中表满后淘汰 9 + 1 = 10；此前没见过 4 + 3 = 7（E1..E4、第 1 轮的 A / B / C）；
-// 被淘汰过又插回 6 + 1 = 7（第 2、3 轮的 6 次 + E1）；淘汰扫描 14 次（每次新记一遍，含填表时找空位）。
+//   note 共 12 + 9 + 1 + 1 = 23 次；memo 命中 8 + 6 = 14、桶链 0；新记 4 + 3 + 1 + 1 = 9；表满后淘汰 3 + 1 + 1 = 5；
+//   此前没见过 4 + 3 = 7（E1..E4、第 1 轮的 A / B / C）；被淘汰过又插回 2（E2、E1）；淘汰扫描 9 次（每次新记一遍，含填表时找空位）。
+//   最后表 = {A 3, B 3, C 3, E1 1}。
+// 反证（改坏项「去掉先挑没碰过的」= 整表只看 uses、同 uses 取最久没用的，也就是满表淘汰以前的老规则）：
+//   第 1 轮 A 挤 E1、B 挤 A、C 挤 B，表 = {C, E2, E3, E4}；第 2、3 轮 A 挤 C、B 挤 A、C 挤 B，每次都是「被淘汰过又插回来」；
+//   E2 还在表里（memo 里只剩 C 的槽，走桶链）；E1 记回来挤掉 C，算「插回」。读数 memo 8 / 桶链 1 / 新记 14 / 淘汰 10 / 插回 7 / 扫描 14：
+//   这条序列真的颠簸，下面的断言（memo 14 / 新记 9 / 淘汰 5 / 插回 2 / 新一轮 2）红在这一条上。
 static void seq_mixed(const uint8_t id[32]) {
     nvn_gpu_pipe_desc e[4], r[3];
     for (int i = 0; i < 4; i++) { base_desc(&e[i]); e[i].prim = 6 + (uint32_t)i; }
@@ -967,7 +973,7 @@ static void seq_mixed(const uint8_t id[32]) {
     nvk_pipe_warm_note(&e[0], id);
 }
 
-// (a) 颠簸：小清单里三条配方轮流进出。
+// (a) 颠簸：小清单里三条配方轮流进出。读数按上面的「手算」；去掉「先挑没碰过的」这一步，同一条序列真的颠簸（见「反证」），这里的断言就红。
 static int mode_diag_thrash(void) {
     setenv("S2A_PW_MAX", "4", 1);
     setenv("S2A_PW_DIAG", "1", 1);
@@ -976,32 +982,40 @@ static int mode_diag_thrash(void) {
     ident_fill(id, 0x81);
     prog_setup(0x81);
     seq_mixed(id);
+    const unsigned long long w_memo = 14, w_chain = 0, w_news = 9, w_evict = 5, w_reins = 2, w_epochs = 2;
     struct nvk_pipe_warm_diag d;
     nvk_pipe_warm_diag_stats(&d);
     CHECK(d.on == 1, "diag must be on when nvk_pw_diag=1");
-    CHECK(d.calls == 23 && d.memo_hits == 8 && d.chain_hits == 1,
-          "note/memo/chain want 23/8/1, got %llu/%llu/%llu", U64(d.calls), U64(d.memo_hits), U64(d.chain_hits));
-    CHECK(d.news == 14 && d.evicts == 10, "new/evict want 14/10, got %llu/%llu", U64(d.news), U64(d.evicts));
-    CHECK(d.fresh == 7 && d.reins == 7, "never-seen/reinserted want 7/7, got %llu/%llu", U64(d.fresh), U64(d.reins));
-    CHECK(d.scans == 14, "victim scans want 14, got %llu", U64(d.scans));
+    CHECK(d.calls == 23 && d.memo_hits == w_memo && d.chain_hits == w_chain,
+          "note/memo/chain want 23/%llu/%llu, got %llu/%llu/%llu", w_memo, w_chain, U64(d.calls), U64(d.memo_hits), U64(d.chain_hits));
+    CHECK(d.news == w_news && d.evicts == w_evict, "new/evict want %llu/%llu, got %llu/%llu", w_news, w_evict, U64(d.news), U64(d.evicts));
+    CHECK(d.fresh == 7 && d.reins == w_reins, "never-seen/reinserted want 7/%llu, got %llu/%llu", w_reins, U64(d.fresh), U64(d.reins));
+    CHECK(d.scans == w_news, "victim scans want %llu, got %llu", w_news, U64(d.scans));
     CHECK(d.ev_clears == 0, "no eviction-set clear expected, got %llu", U64(d.ev_clears));
     CHECK(d.samples_fresh == 1 && d.samples_reins == 1, "one sample per class per window, got %llu/%llu",
           U64(d.samples_fresh), U64(d.samples_reins));
     struct nvk_pipe_warm_stats st;
     nvk_pipe_warm_stats(&st);
     CHECK(st.recorded == d.news, "diag news must equal stats.recorded (%llu vs %llu)", U64(d.news), U64(st.recorded));
+    CHECK(st.epochs == w_epochs, "epochs want %llu, got %llu", w_epochs, U64(st.epochs));
     CHECK(g_nlogs == 3, "before the flush: the switch-on line and the two sample lines only (no window line yet), got %d", g_nlogs);
     nvk_pipe_warm_diag_flush();
-    CHECK_LOG("秒：note 23 次（memo 8 / 链 1 / 新记 14）");
-    CHECK_LOG("新记里 此前没见过 7、被淘汰过又插回 7");
-    CHECK_LOG("满后淘汰 10 次");
-    CHECK_LOG("淘汰扫描 14 次");
+    char want[256];
+    snprintf(want, sizeof want, "秒：note 23 次（memo %llu / 链 %llu / 新记 %llu）", w_memo, w_chain, w_news);
+    CHECK_LOG(want);
+    snprintf(want, sizeof want, "新记里 此前没见过 7、被淘汰过又插回 %llu", w_reins);
+    CHECK_LOG(want);
+    snprintf(want, sizeof want, "满后淘汰 %llu 次", w_evict);
+    CHECK_LOG(want);
+    snprintf(want, sizeof want, "淘汰扫描 %llu 次", w_news);
+    CHECK_LOG(want);
     CHECK_LOG("淘汰集合清空 0 次（累计 0）");
     CHECK_LOG("条数 4 / 容量 4");
     // 样本：第一条「此前没见过」是 E2（清单里只有 E1，只差 prim 的低字节 06→07）；
-    // 第一条「被淘汰过又插回」是第 2 轮的 A（表 = {C, E2, E3, E4}，都只差 prim，取最前的 C：16→14）。
+    // 第一条「被淘汰过又插回」是 E2 记回来那次（表 = {A, B, C, E4}，都只差 prim，取最前的 A：14→07）；
+    // 去掉「先挑没碰过的」时是第 2 轮的 A（表 = {C, E2, E3, E4}，取最前的 C：16→14）。
     CHECK_LOG("样本（此前没见过，第 1 条）：最近条目程序身份相同，配方差 1 字节：prim@53 06→07");
-    CHECK_LOG("样本（被淘汰过又插回来，第 1 条）：最近条目程序身份相同，配方差 1 字节：prim@53 16→14");
+    CHECK_LOG("样本（被淘汰过又插回来，第 1 条）：最近条目程序身份相同，配方差 1 字节：prim@53 14→07");
     // 样本行带抽样耗时：持锁只拷快照，整表比对在锁外
     CHECK_LOG("快照拷贝 ");
     CHECK_LOG(" 微秒（持锁）、比对 ");
@@ -1200,6 +1214,7 @@ static int mode_diag_save(void) {
     setenv("S2A_PW_MAX", "4", 1);
     const char *e = getenv("S2A_PW_DIAG");
     const int want_on = e && *e && atoi(e) != 0;
+    const unsigned long long w_news = 9, w_reins = 2, w_evict = 5;   // 读数按 seq_mixed 的手算
     uint8_t id[32];
     ident_fill(id, 0x81);
     prog_setup(0x81);
@@ -1207,8 +1222,8 @@ static int mode_diag_save(void) {
     struct nvk_pipe_warm_diag d;
     nvk_pipe_warm_diag_stats(&d);
     if (want_on) {
-        CHECK(d.on == 1 && d.news == 14 && d.reins == 7 && d.evicts == 10, "diag on: on/new/reins/evict want 1/14/7/10, got %d/%llu/%llu/%llu",
-              d.on, U64(d.news), U64(d.reins), U64(d.evicts));
+        CHECK(d.on == 1 && d.news == w_news && d.reins == w_reins && d.evicts == w_evict, "diag on: on/new/reins/evict want 1/%llu/%llu/%llu, got %d/%llu/%llu/%llu",
+              w_news, w_reins, w_evict, d.on, U64(d.news), U64(d.reins), U64(d.evicts));
     } else {
         CHECK(d.on == 0 && d.calls == 0 && d.memo_hits == 0 && d.chain_hits == 0 && d.news == 0 && d.evicts == 0 && d.fresh == 0 &&
               d.reins == 0 && d.scans == 0 && d.scan_ns == 0 && d.samples_fresh == 0 && d.samples_reins == 0,
@@ -1218,13 +1233,141 @@ static int mode_diag_save(void) {
     }
     struct nvk_pipe_warm_stats st;
     nvk_pipe_warm_stats(&st);
-    CHECK(st.recorded == 14, "recorded must be 14 with the diag on or off, got %llu", U64(st.recorded));
+    CHECK(st.recorded == w_news, "recorded must be %llu with the diag on or off, got %llu", w_news, U64(st.recorded));
     nvk_pipe_warm_save();
+    return g_fail;
+}
+
+// ---- 模式：满表淘汰规则（先挑本轮没碰过的旧条目；合同见 nvk_pipe_warm_note）----
+// 起因（真机读数）：清单载入就是满的（8192 条，旧条目 uses 都 ≥ 2，其中 uses == 1 的只有 1 条），本局的配方是新记的、uses 才 1，
+// 只按 uses 挑牺牲者就让每条新配方只能挤掉上一条新配方：一局里 65 万次「新记」有 99.9% 是被淘汰过又插回，清单学不到本局的配方。
+// 反证不靠产品里的旧规则开关（产品里只有一条规则）：android/tools/nvk_warm_modules_test.sh 里有一个改坏项「去掉先挑没碰过的」，
+// 把被测实现改回旧规则，下面的断言必须红在「新配方被互相挤掉」上，说明用例不是空转。
+// 配方 k = 第 2 条流的 stride 取 AG_BASE + k（其余字节全同、程序身份同）；落盘文件里按整份配方字节认 k，不碰被测实现的内部。
+enum { AG_BASE = 5000, AG_NK = 128 };
+static void ag_desc(nvn_gpu_pipe_desc *d, uint32_t k) { base_desc(d); d->stream[1].stride = AG_BASE + k; }
+static void ag_note(const uint8_t id[32], uint32_t k, int times) {
+    nvn_gpu_pipe_desc d;
+    ag_desc(&d, k);
+    for (int i = 0; i < times; i++) nvk_pipe_warm_note(&d, id);
+}
+// 读回落盘文件：uses_of[k] = 配方 k 的 uses（文件里没有 = 0）。返回条数；读不了 / 有认不出的条目 = -1。
+static int ag_file_uses(const uint8_t id[32], uint32_t *uses_of) {
+    memset(uses_of, 0, AG_NK * sizeof *uses_of);
+    char path[600];
+    if (file_path(path, sizeof path)) return -1;
+    unsigned char *b = NULL;
+    long n = 0;
+    if (read_all(path, &b, &n) || n < 32) { free(b); return -1; }
+    const uint32_t cnt = (uint32_t)b[20] | (uint32_t)b[21] << 8 | (uint32_t)b[22] << 16 | (uint32_t)b[23] << 24;
+    const size_t ent = 32 + NVK_PW_DESC_BYTES + 4;
+    if ((size_t)n != 32 + cnt * ent) { free(b); return -1; }
+    static struct nvk_pipe_rec want[AG_NK];
+    for (uint32_t k = 0; k < AG_NK; k++) { nvn_gpu_pipe_desc d; ag_desc(&d, k); nvk_pipe_warm_rec_of(&d, id, &want[k]); }
+    int bad = 0;
+    for (uint32_t i = 0; i < cnt; i++) {
+        const unsigned char *e = b + 32 + i * ent;
+        int found = -1;
+        for (uint32_t k = 0; k < AG_NK && found < 0; k++)
+            if (!memcmp(e, id, 32) && !memcmp(e + 32, want[k].desc, NVK_PW_DESC_BYTES)) found = (int)k;
+        if (found < 0) { bad++; continue; }
+        const unsigned char *u = e + 32 + NVK_PW_DESC_BYTES;
+        uses_of[found] = (uint32_t)u[0] | (uint32_t)u[1] << 8 | (uint32_t)u[2] << 16 | (uint32_t)u[3] << 24;
+    }
+    free(b);
+    return bad ? -1 : (int)cnt;
+}
+static void ag_setup(const char *cap, uint8_t seed, uint8_t id[32]) {
+    setenv("S2A_PW_MAX", cap, 1);
+    ident_fill(id, seed);
+    prog_setup(seed);
+}
+
+// 上一局记下 16 条（配方 k 记 k + 2 次 → uses 2..17，正好填满），本局载入后只用 5 条新配方轮流（40 轮 = 200 次 note）。
+// 5 条新配方各只记一次（recorded +5），挤掉的是旧条目里 uses 最小的 5 条（配方 0..4），其余 11 条旧条目原样留着，
+// 没有「新一轮」（epochs 0），每条新配方 40 次 note = uses 40。
+// 去掉「先挑没碰过的」（改坏项 no-fresh-preference）：新配方 uses 才 1，只能挤掉上一条新配方——200 次 note 全是新记（recorded +200），
+// 旧条目只丢了配方 0，清单里最后只剩最后一条新配方（uses 1）；下面「新配方被互相挤掉」的断言红。
+static int mode_aging_thrash(void) {
+    enum { CAP = 16, WS = 5, ROUNDS = 40, NEW0 = 100 };
+    uint8_t id[32];
+    ag_setup("16", 0x71, id);
+    for (uint32_t k = 0; k < CAP; k++) ag_note(id, k, (int)k + 2);
+    nvk_pipe_warm_save();
+    CHECK(nvk_pipe_warm_load() == CAP, "aging thrash: the previous session's %d recipes must load back", CAP);
+    struct nvk_pipe_warm_stats s0, s1;
+    nvk_pipe_warm_stats(&s0);
+    for (int r = 0; r < ROUNDS; r++) for (uint32_t j = 0; j < WS; j++) ag_note(id, NEW0 + j, 1);
+    nvk_pipe_warm_stats(&s1);
+    nvk_pipe_warm_save();
+    uint32_t u[AG_NK];
+    CHECK(ag_file_uses(id, u) == CAP, "aging thrash: the saved manifest must hold %d recipes", CAP);
+    const uint64_t rec_d = s1.recorded - s0.recorded;
+    CHECK(rec_d == WS, "aging thrash: each of the %d new recipes is recorded once, got %llu new records", WS, U64(rec_d));
+    CHECK(s1.epochs == 0, "aging thrash: old entries never ran out, epochs want 0, got %llu", U64(s1.epochs));
+    CHECK(s1.rejected - s0.rejected == WS, "aging thrash: %d evictions (one per new recipe), got %llu", WS, U64(s1.rejected - s0.rejected));
+    for (uint32_t k = 0; k < WS; k++) CHECK(u[k] == 0, "aging thrash: old recipe %u (uses %u, among the %d coldest) must be evicted, still has uses %u", k, k + 2, WS, u[k]);
+    for (uint32_t k = WS; k < CAP; k++) CHECK(u[k] == k + 2, "aging thrash: old recipe %u must stay with uses %u, got %u", k, k + 2, u[k]);
+    for (uint32_t j = 0; j < WS; j++) CHECK(u[NEW0 + j] == ROUNDS, "aging thrash: new recipe %u must be kept with uses %d, got %u", NEW0 + j, ROUNDS, u[NEW0 + j]);
+    return g_fail;
+}
+
+// 载入进来的旧条目本局被命中一次就算碰过：新配方来时先挤别的旧条目，哪怕被命中的这条 uses 仍是最小。
+// 旧文件：配方 0..3 的 uses = 1 / 3 / 4 / 5。本局命中配方 0（uses 2），再来一条新配方 100：
+//   挤掉配方 1（没碰过的里 uses 最小）；去掉「先挑没碰过的」时会挤掉刚被命中的配方 0（全表 uses 最小）。
+static int mode_aging_touch(void) {
+    uint8_t id[32];
+    ag_setup("4", 0x72, id);
+    static const int old_uses[4] = {1, 3, 4, 5};
+    for (uint32_t k = 0; k < 4; k++) ag_note(id, k, old_uses[k]);
+    nvk_pipe_warm_save();
+    CHECK(nvk_pipe_warm_load() == 4, "aging touch: 4 old recipes must load back");
+    ag_note(id, 0, 1);
+    ag_note(id, 100, 1);
+    nvk_pipe_warm_save();
+    uint32_t u[AG_NK];
+    CHECK(ag_file_uses(id, u) == 4, "aging touch: the saved manifest must hold 4 recipes");
+    CHECK(u[0] == 2, "aging touch: the recipe hit this session (uses 2) must stay, got uses %u", u[0]);
+    CHECK(u[1] == 0, "aging touch: the coldest untouched old recipe (uses 3) must be evicted, got uses %u", u[1]);
+    CHECK(u[2] == 4 && u[3] == 5 && u[100] == 1, "aging touch: recipes 2 / 3 / new keep uses 4 / 5 / 1, got %u / %u / %u", u[2], u[3], u[100]);
+    return g_fail;
+}
+
+// 本轮碰过的配方把表占满以后，工作集换了一批：开新一轮，换进来的新配方不再互相挤。
+// 上限 8；配方 0..7 本局各记 20 - 2k 次（uses 20 / 18 / ... / 6，记的顺序 = 0 先 7 后，所以 uses 最小的 7 反而最近），全是本轮碰过的。
+//   然后新配方 100..102 轮流 30 轮（90 次 note）。
+//   100 进来时没有「没碰过」的 → 新一轮（epochs 1），挤 uses 最小的 7；101 挤 6、102 挤 5（按 uses，不按最近）；
+//   之后 90 次里只有这 3 次是新记。表 = {0..4, 100..102}，新配方各 30 次 note = uses 30。
+//   再命中 4（uses 12 → 13，仍是旧条目里最小，但碰过了），来新配方 110：挤的是没碰过的里 uses 最小的 3（14），不是 4。
+//   去掉「先挑没碰过的」时：100 挤 7；101 挤上一条 100（uses 1）；之后每次 note 都新记（recorded +90），表里 0..6 不动、最后一条新配方 uses 1。
+static int mode_aging_epoch(void) {
+    enum { CAP = 8, ROUNDS = 30, NEW0 = 100 };
+    uint8_t id[32];
+    ag_setup("8", 0x73, id);
+    for (uint32_t k = 0; k < CAP; k++) ag_note(id, k, 20 - 2 * (int)k);
+    struct nvk_pipe_warm_stats s0, s1;
+    nvk_pipe_warm_stats(&s0);
+    for (int r = 0; r < ROUNDS; r++) for (uint32_t j = 0; j < 3; j++) ag_note(id, NEW0 + j, 1);
+    nvk_pipe_warm_stats(&s1);
+    const uint64_t rec_d = s1.recorded - s0.recorded;
+    CHECK(rec_d == 3, "aging epoch: the 3 new recipes are recorded once each, got %llu new records", U64(rec_d));
+    CHECK(s1.epochs == 1, "aging epoch: the first new recipe finds every entry touched → one new round, got epochs %llu", U64(s1.epochs));
+    ag_note(id, 4, 1);          // 旧条目里 uses 最小的一条（12）被命中：13，本轮碰过
+    ag_note(id, 110, 1);
+    nvk_pipe_warm_save();
+    uint32_t u[AG_NK];
+    CHECK(ag_file_uses(id, u) == CAP, "aging epoch: the saved manifest must hold %d recipes", CAP);
+    static const uint32_t keep[] = {20, 18, 16, 0, 13};   // 配方 0 / 1 / 2 / 3 / 4（3 被挤掉了）
+    for (uint32_t k = 0; k < 5; k++) CHECK(u[k] == keep[k], "aging epoch: old recipe %u want uses %u, got %u", k, keep[k], u[k]);
+    for (uint32_t k = 5; k < 8; k++) CHECK(u[k] == 0, "aging epoch: old recipe %u (uses %d) must be evicted by uses order, got uses %u", k, 20 - 2 * (int)k, u[k]);
+    for (uint32_t j = 0; j < 3; j++) CHECK(u[NEW0 + j] == ROUNDS, "aging epoch: new recipe %u want uses %d, got %u", NEW0 + j, ROUNDS, u[NEW0 + j]);
+    CHECK(u[110] == 1, "aging epoch: the last new recipe is kept with uses 1, got %u", u[110]);
     return g_fail;
 }
 
 static const char *k_modes[] = {"compute", "compute_off", "fields", "dedup", "collide", "cap", "defcap", "hardcap", "frozen", "lease", "save", "load", "save_race",
                                 "tag_reload", "tag_prog", "tag_twin",
+                                "aging_thrash", "aging_touch", "aging_epoch",
                                 "diag_thrash", "diag_vary", "diag_calm", "diag_evict", "diag_clear", "diag_mt"};
 static const char *k_bad[] = {"magic", "fmt", "descver", "entry", "count", "sum", "trunc", "payload"};
 
@@ -1289,6 +1432,8 @@ int main(int argc, char **argv) {
                           !strcmp(m, "frozen") ? mode_frozen : !strcmp(m, "lease") ? mode_lease :
                           !strcmp(m, "save_race") ? mode_save_race : !strcmp(m, "tag_reload") ? mode_tag_reload :
                           !strcmp(m, "tag_prog") ? mode_tag_prog : !strcmp(m, "tag_twin") ? mode_tag_twin :
+                          !strcmp(m, "aging_thrash") ? mode_aging_thrash : !strcmp(m, "aging_touch") ? mode_aging_touch :
+                          !strcmp(m, "aging_epoch") ? mode_aging_epoch :
                           !strcmp(m, "diag_thrash") ? mode_diag_thrash : !strcmp(m, "diag_vary") ? mode_diag_vary :
                           !strcmp(m, "diag_calm") ? mode_diag_calm : !strcmp(m, "diag_evict") ? mode_diag_evict :
                           !strcmp(m, "diag_clear") ? mode_diag_clear : !strcmp(m, "diag_mt") ? mode_diag_mt :

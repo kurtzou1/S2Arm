@@ -397,6 +397,7 @@
 "gfx.filter.metalfx.note" = "L'agrandissement net (MetalFX) ajoute un peu de travail GPU à chaque image : la fréquence d'images et l'autonomie peuvent en être légèrement affectées.";
 "gfx.filter.fsr" = "FSR";
 "gfx.filter.fsr.noDirect" = "FSR n'est pas disponible non plus.";
+"gfx.hdrUpscaleBypass.note" = "HDR activé (S2A_HDR) : les fenêtres HDR contournent l'anticrénelage à l'écran, le filtre de mise à l'échelle (MetalFX / FSR) et l'interpolation d'images — la mise à l'échelle perceptuelle 8 bits ne convient pas aux valeurs de code PQ (limitation du produit) ; les fenêtres SDR ne sont pas concernées.";
 "gfx.filter.nearest" = "Pour les jeux 2D";
 "gfx.fpsLimit" = "Limite de fréquence d'images";
 "gfx.fpsLimit.none" = "Illimitée";
@@ -601,7 +602,7 @@
 
 /* 0.6.0 快照：游戏中菜单 */
 "vpad.snap.save" = "Sauvegarder cet instant";
-"vpad.snap.offAddress" = "Cet appareil n'a pas assez d'espace d'adressage pour ce jeu et les instantanés à la fois : les instantanés sont désactivés pour ce jeu ici. Le jeu fonctionne normalement.";
+"vpad.snap.offAddress" = "Ce jeu a besoin de plus de plage d'adresses que le système de cet appareil ne peut en donner aux apps : il n'y a pas de place pour les instantanés, ils sont désactivés pour ce jeu ici. Cela n'a rien à voir avec le stockage ; le jeu fonctionne normalement.";
 "vpad.snap.restore" = "Revenir à l’instant sauvegardé";
 "vpad.snap.saving" = "Sauvegarde de cet instant…";
 "vpad.snap.saved" = "Instant sauvegardé";
@@ -642,6 +643,6 @@
 "cert.source.sidestore" = "Depuis SideStore";
 "cert.source.p12" = ".p12 importé";
 "cert.source.pc" = "Depuis votre ordinateur";
-"addrshort.title" = "Cet appareil n'a pas assez d'espace d'adressage pour ce jeu";
-"addrshort.body" = "Ce jeu a besoin au démarrage d'un très grand bloc d'espace d'adressage, et cet appareil ne peut pas en fournir autant : il peut être très lent ou rester bloqué au début. Vous pouvez toucher « Lancer quand même » pour essayer ; pour jouer normalement, utilisez un appareil avec plus d'espace d'adressage (par exemple un iPhone, un iPad ou un Mac avec plus de mémoire) ou attendez une version ultérieure.";
+"addrshort.title" = "Le système de cet appareil ne peut pas donner aux apps assez de plage d'adresses pour ce jeu";
+"addrshort.body" = "Ce jeu a besoin au démarrage d'une grande plage d'adresses continue, et le système de cet appareil ne peut pas en donner assez aux apps (cela n'a rien à voir avec le stockage ; libérer de l'espace n'aidera pas) : il peut être très lent ou rester bloqué au début. Vous pouvez toucher « Lancer quand même » pour essayer ; pour jouer normalement, utilisez un iPhone, un iPad ou un Mac avec plus de mémoire (ils donnent aux apps une plage d'adresses plus grande) ou attendez une version ultérieure.";
 "host.startAnyway" = "Lancer quand même";

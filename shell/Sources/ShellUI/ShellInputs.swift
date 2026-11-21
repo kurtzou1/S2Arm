@@ -326,6 +326,8 @@ public struct ShellActions {
     public var onUseShellCloud: ((String) -> Void)?
     public var onClearShellData: (() -> Void)?
     public var onClearShellCloud: (() -> Void)?
+    /// S2Arm: settings → "Storage" (read-only breakdown of the space S2Arm's data uses on this device). Nil hides the row.
+    public var onManageStorage: (() -> Void)?
     /// S2Arm: settings → "Report a problem" (the host packs the logs, uploads them and shows a short code). Nil hides the row.
     public var onReportProblem: (() -> Void)?
     /// S2Arm: settings → "Signing certificate" (0.6.0): the certificate this iPhone signs imported games with ("" = none yet),

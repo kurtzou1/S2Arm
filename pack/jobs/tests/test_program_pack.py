@@ -359,9 +359,17 @@ class PushProgramTests(JobCase):
         import ipa
         same = dict(sha="0123456789abcdef" + "f" * 48, team="T", host_abi=7, rewriter_id="rw", dir="v-0123456789abcdef-s2arm", look=self.install.look_of(None))
         with mock.patch.object(program_pack, "sign", lambda c, g, team, bundle, signer: self.pkg), mock.patch.object(ipa, "container_custom", lambda c: {}):
-            cl = FakeClient()
+            cat = f"Library/Application Support/S2Arm/games/{GID}/program/catalogue.json"
+            cl = FakeClient(have={cat: b"{}"})
             got = self.install.push_programs(self.c, cl, [GID], dict(games={GID: dict(program=same)}), "T", "io.b", None)
-            self.assertEqual((cl.calls, got), ([], {GID: same}), "对得上：什么都不推，连导入文件夹都不列")
+            self.assertEqual((cl.calls, got), ([], {GID: same}), "对得上、机上清单在：什么都不推，连导入文件夹都不列")
+            # D-TW8E：记录说推过、机上清单不在（玩家在 App 里删过）→ 补推；导入文件夹里还有没导走的 .s2arm → 不重推
+            cl = FakeClient()
+            self.install.push_programs(self.c, cl, [GID], dict(games={GID: dict(program=same)}), "T", "io.b", None)
+            self.assertEqual([c for c in cl.calls if c[0] == "put"], [("put", f"Documents/Import Here/{GID}.s2arm")], "机上没有：补推")
+            cl = FakeClient(have={f"Documents/Import Here/{GID}.s2arm": b"x" * 10})
+            self.install.push_programs(self.c, cl, [GID], dict(games={GID: dict(program=same)}), "T", "io.b", None)
+            self.assertEqual([c for c in cl.calls if c[0] == "put"], [], "还在导入文件夹里等导入：不重推")
             cl = FakeClient(dirs=["放这里导入"])
             got = self.install.push_programs(self.c, cl, [GID], dict(games={}), "T", "io.b", None)
             self.assertEqual([c for c in cl.calls if c[0] == "put"], [("put", f"Documents/放这里导入/{GID}.s2arm")])

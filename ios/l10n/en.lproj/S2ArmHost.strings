@@ -402,6 +402,7 @@
 "gfx.filter.metalfx.note" = "Sharp upscaling (MetalFX) adds a little GPU time every frame, so frame rate and battery use may be slightly affected.";
 "gfx.filter.fsr" = "FSR";
 "gfx.filter.fsr.noDirect" = "FSR isn't available either.";
+"gfx.hdrUpscaleBypass.note" = "HDR is on (S2A_HDR): HDR windows bypass on-screen anti-aliasing, upscaling (MetalFX / FSR) and frame interpolation — 8-bit perceptual scaling doesn't fit PQ code values (a product limitation); SDR windows are unaffected.";
 "gfx.filter.nearest" = "For 2D games";
 "gfx.fpsLimit" = "Frame rate limit";
 "gfx.fpsLimit.none" = "Unlimited";
@@ -607,7 +608,7 @@
 
 /* 0.6.0 快照：游戏中菜单 */
 "vpad.snap.save" = "Save this moment";
-"vpad.snap.offAddress" = "This device doesn't have enough address space for both this game and snapshots, so snapshots are off for this game here. The game plays as usual.";
+"vpad.snap.offAddress" = "This game needs more address range than the system on this device can give apps, so there's no room for snapshots and they're off for this game on this device. This has nothing to do with storage space; the game plays as usual.";
 "vpad.snap.restore" = "Go back to the saved moment";
 "vpad.snap.saving" = "Saving this moment…";
 "vpad.snap.saved" = "Moment saved";
@@ -648,6 +649,6 @@
 "cert.source.sidestore" = "From SideStore";
 "cert.source.p12" = "Imported .p12";
 "cert.source.pc" = "From your computer";
-"addrshort.title" = "This device doesn't have enough address space for this game";
-"addrshort.body" = "This game needs one very large block of address space at startup, and this device can't provide that much: it may run very slowly or stay stuck at the start. You can tap \"Start Anyway\" to try; to play normally, use a device with more address space (such as an iPhone, iPad or Mac with more memory), or wait for a later version.";
+"addrshort.title" = "The system on this device can't give apps enough address range for this game";
+"addrshort.body" = "This game needs one large continuous address range at startup, and the system on this device can't give apps enough (this has nothing to do with storage space; freeing up storage won't help): it may run very slowly or stay stuck at the start. You can tap \"Start Anyway\" to try; to play normally, use an iPhone, iPad or Mac with more memory (their systems can give apps a larger address range), or wait for a later version.";
 "host.startAnyway" = "Start Anyway";

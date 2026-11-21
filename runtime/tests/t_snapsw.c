@@ -1,5 +1,8 @@
 // 即时存档开关（runtime/src/snapsw.c）两态：苹果端缺省开、S2A_SNAP_MODE=0 关；恢复局另算。期望按 0.6.0 口径手写（玩家要真能用快照，设置里能关）
+#define S2A_SNAPSW_TEST
 #include "../src/snapsw.c"
+static int g_pref = -1;   // ios/settings.m s2a_ios_snap_pref_off 的替身：-1 没存过、0 存为开、1 存为关
+int s2a_ios_snap_pref_off(void) { return g_pref == 1; }
 #define S2A_SNAP_OFF_ADDRESS 1   // native.h（snapsw.c 不含它）
 #include <stdio.h>
 #include <string.h>
@@ -24,6 +27,18 @@ int main(void) {
     reset(NULL, NULL);  eq("⑦ 没关过：原因 0", 0, s2a_snap_off_reason());
     s2a_snap_disable(S2A_SNAP_OFF_ADDRESS);
     eq("⑦ 关后：不能存", 0, s2a_snap_saving()); eq("⑦ 关后：不记日志", 0, s2a_snap_logging()); eq("⑦ 关后：快照模式关", 0, s2a_snap_mode()); eq("⑦ 关后：原因 1", 1, s2a_snap_off_reason());
+    // ⑧ 选定游戏后放得下又重新打开（s2a_snap_reenable，vawin.c 选定游戏后补放快照区）：按 ⑦ 关的原因重开 → 能存、记日志、原因 0；
+    //   原因码不对（2）不开；玩家自己关着（S2A_SNAP_MODE=0）不开；没关过不开（回 0）
+    eq("⑧ 原因码不对不开", 0, s2a_snap_reenable(2)); eq("⑧ 原因码不对：仍不能存", 0, s2a_snap_saving());
+    eq("⑧ 按原因 1 重开", 1, s2a_snap_reenable(S2A_SNAP_OFF_ADDRESS)); eq("⑧ 重开后：能存", 1, s2a_snap_saving()); eq("⑧ 重开后：记日志", 1, s2a_snap_logging());
+    eq("⑧ 重开后：原因 0", 0, s2a_snap_off_reason()); eq("⑧ 已开着再重开：回 0", 0, s2a_snap_reenable(S2A_SNAP_OFF_ADDRESS));
+    reset("0", NULL); s2a_snap_disable(S2A_SNAP_OFF_ADDRESS); eq("⑧ 玩家关着：不重开", 0, s2a_snap_reenable(S2A_SNAP_OFF_ADDRESS)); eq("⑧ 玩家关着：仍不能存", 0, s2a_snap_saving());
+    // ⑨ 玩家在设置里关快照（键 S2ASnapshot = NO）、启动环境没给 S2A_SNAP_MODE：第一次读（构造期，vawin.c 据此决定占不占命令记录区 / 虚拟池区）就是关，来源写「玩家设置」；
+    //   启动环境给了 1 照开（启动环境 > 用户设置）；设置为开 / 没存过 → 开。11-21 前设置只在开局写环境变量，构造期第一次读已缓存「开」
+    g_pref = 1; reset(NULL, NULL); eq("⑨ 设置关：不能存", 0, s2a_snap_saving()); eq("⑨ 设置关：快照模式关（构造期不占地址）", 0, s2a_snap_mode()); eq("⑨ 设置关：来源是玩家设置", 1, !strcmp(s2a_snap_source(), "玩家设置（关）"));
+    reset("1", NULL); eq("⑨ 设置关、启动环境给 1：能存", 1, s2a_snap_saving());
+    g_pref = 0; reset(NULL, NULL); eq("⑨ 设置开：能存", 1, s2a_snap_saving());
+    g_pref = -1; reset(NULL, NULL); eq("⑨ 没存过：能存", 1, s2a_snap_saving()); eq("⑨ 没存过：来源缺省", 1, !strcmp(s2a_snap_source(), "缺省"));
     if (g_fail) printf("✗ t_snapsw：%d 项不符（共 %d 项）\n", g_fail, g_ok + g_fail); else printf("✓ t_snapsw：0 处不符（共 %d 项）\n", g_ok);
     return g_fail ? 1 : 0;
 }

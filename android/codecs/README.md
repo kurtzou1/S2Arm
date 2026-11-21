@@ -4,7 +4,7 @@
 archives. Without a directory this preparation command may download; with a
 directory it only imports locally supplied tarballs and never falls back to the
 network. Normal `build.sh` and `--avc-only` builds are offline and fail when a
-source archive is missing or fails its pinned identity check. They build arm64-v8a/API29 static
+source archive is missing or fails its pinned identity check. They build arm64-v8a/API34 static
 archives with NDK 29.0.14206865. Its stdout contains archive paths only. The
 NativeAOT static build links all three into `libs2arm_android.so`.
 

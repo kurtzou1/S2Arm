@@ -75,12 +75,15 @@ static void exercise(const char *name, NVNdevice *device, NVNmemoryPool *pool, s
     CHECK(a.calls == 0 && b.calls == 0);
 
     phase = "真实内存回调与 Begin/End 保留";
+    // 每条录制录一笔要命令内存的命令（屏障，8 字节）触发回调：EndRecording 按驱动真值不占命令内存（#1904），空录制不再要内存、不回调
     API(nvnCommandBufferBeginRecording)(&first.object);
     read_query(&first, callback_a, &a, &a, &b);
+    API(nvnCommandBufferBarrier)(&first.object, 0);
     CHECK(API(nvnCommandBufferEndRecording)(&first.object) != 0);
     CHECK(a.calls == 1 && b.calls == 0);
     read_query(&first, callback_a, &a, &a, &b);
     API(nvnCommandBufferBeginRecording)(&second.object);
+    API(nvnCommandBufferBarrier)(&second.object, 0);
     CHECK(API(nvnCommandBufferEndRecording)(&second.object) != 0);
     CHECK(a.calls == 1 && b.calls == 1);
     read_query(&second, callback_b, &b, &a, &b);

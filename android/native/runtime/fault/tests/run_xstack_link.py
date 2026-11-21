@@ -27,7 +27,7 @@ def ndk_tools():
     if ndk is None or host is None:
         raise SystemExit('【红】找不到固定 NDK 29.0.14206865；设 ANDROID_NDK_HOME 或传 --cc/--readelf')
     bin_dir = ndk / 'toolchains/llvm/prebuilt' / host / 'bin'
-    tools = (bin_dir / 'aarch64-linux-android29-clang', bin_dir / 'llvm-readelf')
+    tools = (bin_dir / 'aarch64-linux-android34-clang', bin_dir / 'llvm-readelf')
     for tool in tools:
         if not tool.is_file():
             raise SystemExit(f'【红】缺少 {tool}；设 ANDROID_NDK_HOME 或传 --cc/--readelf')
@@ -55,7 +55,7 @@ def main():
                        Path('platform/plat_asm.h'), FAULT / 'tests/run_xstack_link.py']
     inputs += sorted(p.relative_to(ROOT) for p in (ROOT / 'runtime/include').glob('*.h'))
     hashes = {str(p): sha(ROOT / p) for p in inputs}
-    receipt = {'kind': 'NDK29 Bionic API29 actual xstack shared link',
+    receipt = {'kind': 'NDK29 Bionic API34 actual xstack shared link',
                'source_sha256': hashes, 'commands': [], 'checks': {},
                'android_executed': False, 'managed_executed': False,
                'providers': 'link-only abort/ENOSYS; not a runtime implementation'}

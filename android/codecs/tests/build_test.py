@@ -39,7 +39,7 @@ def _fake_ndk_clang(ndk):
     tag = 'darwin-x86_64' if os.uname().sysname == 'Darwin' else 'linux-x86_64'
     bindir = ndk / 'toolchains/llvm/prebuilt' / tag / 'bin'
     bindir.mkdir(parents=True, exist_ok=True)
-    clang = bindir / 'aarch64-linux-android29-clang'
+    clang = bindir / 'aarch64-linux-android34-clang'
     clang.write_text('#!/bin/sh\nif [ "$1" = --version ]; then echo fixture-clang; exit 0; fi\n'
                      'prev=; for a in "$@"; do [ "$prev" = -o ] && : > "$a"; prev=$a; done\nexit 0\n')
     clang.chmod(0o755)
@@ -82,7 +82,7 @@ class BuildTest(unittest.TestCase):
             bindir = ndk / ('toolchains/llvm/prebuilt/' + ('darwin-x86_64' if os.uname().sysname == 'Darwin' else 'linux-x86_64') + '/bin')
             bindir.mkdir(parents=True)
             tools = {
-                'aarch64-linux-android29-clang': '#!/bin/sh\nif [ "$1" = --version ]; then echo fixture-clang; exit; fi\nwhile [ $# -gt 0 ]; do if [ "$1" = -o ]; then shift; : > "$1"; exit; fi; shift; done\n',
+                'aarch64-linux-android34-clang': '#!/bin/sh\nif [ "$1" = --version ]; then echo fixture-clang; exit; fi\nwhile [ $# -gt 0 ]; do if [ "$1" = -o ]; then shift; : > "$1"; exit; fi; shift; done\n',
                 'llvm-ar': '#!/bin/sh\n: > "$2"\n',
                 'llvm-ranlib': '#!/bin/sh\nexit 0\n',
             }
@@ -262,7 +262,7 @@ class BuildTest(unittest.TestCase):
             sdk=root/'sdk';ndk=sdk/'ndk/29.0.14206865';ndk.mkdir(parents=True)
             (ndk/'source.properties').write_text('Pkg.Revision = 29.0.14206865\n')
             tag='darwin-x86_64' if os.uname().sysname=='Darwin' else 'linux-x86_64'
-            compiler=ndk/'toolchains/llvm/prebuilt'/tag/'bin/aarch64-linux-android29-clang';compiler.parent.mkdir(parents=True)
+            compiler=ndk/'toolchains/llvm/prebuilt'/tag/'bin/aarch64-linux-android34-clang';compiler.parent.mkdir(parents=True)
             compiler.write_text('#!/bin/sh\necho clang-fixture-version\n');compiler.chmod(0o755)
             cmake=root/'cmake';cmake.write_text('#!/bin/sh\necho cmake-version-fixture\n');cmake.chmod(0o755)
             env=dict(os.environ,ANDROID_HOME=str(sdk),S2A_BUILD_CACHE=str(root/'cache'),CMAKE=str(cmake))

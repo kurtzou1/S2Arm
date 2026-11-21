@@ -129,6 +129,11 @@ int nvn_be_shutdown_session(void) {
     for (id<MTLBuffer> b in g_keep) res_remove(b);
     [g_keep removeAllObjects]; g_dead_pools = nil;
     free(g_pools); g_pools = NULL; g_npool = g_cap = g_pool_res_n = 0;
+    // 大池记录同池表一起清（11-21 D-Q349 等 8 份诊断，0.4.5 起的「-[__NSArrayM insertObject:atIndex:]: object cannot be nil」）：块表 chunk / full 存的是池表下标，
+    //   池表清空、新一局重新登记后，上一局的块表还指着那些下标。新一局查到同一段地址（大池地址每局多半相同）就拿旧下标去读新表：越界或撞上别的条目，
+    //   块加长时把那条的缓冲（空）塞进 old 数组，抛 ObjC 异常闪退。每份都是进程内重开之后的那一局。旧块缓冲在 old 里（强引用），清掉随会话放
+    for (int k = 0; k < g_nbig; k++) { for (id<MTLBuffer> ob in g_big[k].old) res_remove(ob); free(g_big[k].chunk); g_big[k].chunk = NULL; g_big[k].old = nil; }
+    g_nbig = 0;
     free(g_pidx); g_pidx = NULL; g_pidx_cap = g_pidx_ok = 0; g_plast = -1;
     atomic_fetch_add(&g_pool_gen, 1); atomic_fetch_add(&g_reg_gen, 1); atomic_fetch_add(&g_ser_gen, 1);
     // Keys for these caches include program/guest buffer identity. Reuse only

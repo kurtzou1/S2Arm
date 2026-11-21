@@ -4,12 +4,12 @@ sed_edit() { sed -i.s2a-bak "$1" "$2" && rm -f "$2.s2a-bak"; }
 # 着色器阶段键「GAL 翻译代码」分量单测（graphics/tools/shbake/xc_key.sh；四次编译，SPIRV-Cross 目标文件有缓存时约 40 秒）：bash tests/xc_key_test.sh
 # 期望按规则手写（不跑被测实现推期望）：同一份源码换个目录 → 键相同；渲染器里加翻译用不到的代码（ObjC 类 + C 函数，旧做法下 ObjC 类是链接根、会进键）→ 键相同；
 # 翻译入口 nxgal_prog_xc_mt 函数体里加一句 → 键变；改 SPIRV-Cross 源码（spirv_msl.cpp）→ 键变。改动都按结构打（追加 / 入口函数首行 / 源码文件尾），不依赖具体代码行
-# 门禁覆盖：graphics/metal/* graphics/dsx/* graphics/third_party/* tools/toolchain.env compat/tree/src/Ryujinx.Graphics.Vulkan/Effects/Textures/Smaa*.bin
+# 门禁覆盖：graphics/metal/* graphics/dsx/* graphics/third_party/* tools/toolchain.env compat/tree/src/Ryujinx.Graphics.Vulkan/Effects/Textures/Smaa*.bin graphics/nvn/gfx/nvn/nvn_hdr_policy.h
 #   （隔离树必须带齐 xc_key 的构建输入；Makefile 没扩展名，按文件名推不出来——10-22 toolchain271 改 graphics/metal/Makefile 去 include toolchain.env，路由没带上本单测，main 红了才发现）
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); bad=0; trap 'rm -rf "$T"' EXIT
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
 LUT=compat/tree/src/Ryujinx.Graphics.Vulkan/Effects/Textures
-mk() { mkdir -p "$T/$1/graphics" "$T/$1/tools" "$T/$1/$LUT" && cp -R "$H/graphics/metal" "$H/graphics/dsx" "$H/graphics/third_party" "$T/$1/graphics/" && rm -rf "$T/$1/graphics/metal/tests" && cp "$H/tools/toolchain.env" "$T/$1/tools/" && cp "$H/$LUT/SmaaAreaTexture.bin" "$H/$LUT/SmaaSearchTexture.bin" "$T/$1/$LUT/"; }   # 隔离树使用生产构建输入
+mk() { mkdir -p "$T/$1/graphics" "$T/$1/tools" "$T/$1/$LUT" && cp -R "$H/graphics/metal" "$H/graphics/dsx" "$H/graphics/third_party" "$T/$1/graphics/" && rm -rf "$T/$1/graphics/metal/tests" && cp "$H/tools/toolchain.env" "$T/$1/tools/" && cp "$H/$LUT/SmaaAreaTexture.bin" "$H/$LUT/SmaaSearchTexture.bin" "$T/$1/$LUT/" && mkdir -p "$T/$1/graphics/nvn/gfx/nvn" && cp "$H/graphics/nvn/gfx/nvn/nvn_hdr_policy.h" "$T/$1/graphics/nvn/gfx/nvn/"; }   # 隔离树使用生产构建输入（gal_present.m 引 HDR 策略头 nvn_hdr_policy.h，同直连层一份）
 key() { S2A_XCKEY_TREE=$T/$1 S2A_XCKEY_CACHE=${S2A_XCKEY_CACHE:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/cache/xckey} bash "$H/graphics/tools/shbake/xc_key.sh"; }
 mk a; mk b; mk c; mk d; mk e; mk f
 # e：Makefile 只加一个单测目标（编译参数不变）→ 键不变；f：OBJCFLAGS 加一个宏 → 键变（10-22 起键里是编译参数、不是整份 Makefile）

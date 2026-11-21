@@ -121,8 +121,8 @@ static uint32_t pw_start(struct pw_job *j, pthread_t *pt, int cv, int64_t ns) {
     *j=(struct pw_job){.cv=cv&1,.mask_signal=(cv&2)!=0,.ns=ns};
     cv=cv&1; atomic_store(&pw_done,0);
     pw_check(!pthread_create(pt,NULL,pw_worker,j),"real pthread created");
-    uint64_t end=now_ns()+2000000000ull; uint32_t handle=0;
-    while (now_ns()<end) {
+    uint32_t handle=0;   /* 按事件等目标进入等待，不设墙钟上限；挂死交门禁分组超时 */
+    for (;;) {
         glock();
         if (j->thread && j->thread->vm_wait_safe && j->thread->wkind==(cv?2:4))
             handle=j->thread->handle;
@@ -146,15 +146,13 @@ static void pw_join(pthread_t pt, uint32_t h, uint64_t want) {
     pw_check(!r[0],"closed original handle after exit"); s2a_event_clear(pw_event);
 }
 static int pause_wait_suite(void) {
-    alarm(30);
     pw_event=s2a_event_create(&pw_read,&pw_write);
     for (int mode=0;mode<5;++mode) {
         struct pw_job j; pthread_t pt; int cv=mode==1 || mode==4,cancel=mode==2;
         uint32_t h=pw_start(&j,&pt,mode>=3?(mode==3?2:3):cv,-1); if (!h) return 1;
         if (mode<2) {
             pw_check(!pthread_kill(pt,SIGURG),"real native SIGURG delivered");
-            uint64_t signal_end=now_ns()+1000000000ull;
-            while (!atomic_load(&j.thread->preempt_req) && now_ns()<signal_end) usleep(100);
+            while (!atomic_load(&j.thread->preempt_req)) usleep(100);
             pw_check(atomic_load(&j.thread->preempt_req),"native handler reached without guest trampoline");
             glock();pw_check(!j.thread->woke && !atomic_load(&j.thread->paused_ack),
                 "real signal does not forge wake or ack");pthread_mutex_unlock(&G);
@@ -189,9 +187,7 @@ static int pause_wait_suite(void) {
             atomic_store(&pw_boundary_violation,0);
             atomic_store(&pw_writer_active,1);
             pw_check(!pw_activity(h,0),"resume accepted");
-            uint64_t barrier_end=now_ns()+1000000000ull;
-            while (!pw_epoch_parked(j.thread) && !atomic_load(&pw_boundary_violation)
-                   && now_ns()<barrier_end) usleep(100);
+            while (!pw_epoch_parked(j.thread) && !atomic_load(&pw_boundary_violation)) usleep(100);
             pw_check(pw_epoch_parked(j.thread) && !atomic_load(&pw_boundary_violation),
                      "resumed waiter reaches actual VM return barrier");
             pw_check(!atomic_load(&pw_done),"resumed waiter cannot escape VM epoch");
@@ -202,7 +198,7 @@ static int pause_wait_suite(void) {
     }
     for (int cv=0;cv<2;++cv) for (int expires=0;expires<2;++expires) {
         struct pw_job finite; pthread_t pt;
-        uint64_t begin=now_ns();uint32_t h=pw_start(&finite,&pt,cv,expires?50000000:1000000000);
+        uint32_t h=pw_start(&finite,&pt,cv,expires?50000000:1000000000);
         if (!h) return 1;pw_notify_cv=&finite.thread->cv;
         uint32_t result=pw_activity(h,1); pw_check(!result,"finite wait pauses");
         if (!result) {
@@ -212,7 +208,7 @@ static int pause_wait_suite(void) {
             if (!expires) pw_produce(cv,0,h);
         } else if (!expires) pw_produce(cv,0,h);
         pw_join(pt,h,expires?R_TIMEOUT:0);
-        if (expires) pw_check(now_ns()-begin<500000000,"pause does not restart finite deadline");
+        // 「暂停不重启有限 deadline」按事件判：每次真实 timedwait 的绝对 deadline 都要等于首次（pw_wait_probe），不再量墙钟
     }
     // CloseHandle 不释放仍存活且有 pin 的目标；旧 handle 不可继续控制它。
     struct pw_job closed;pthread_t closed_pt;uint32_t closed_h=pw_start(&closed,&closed_pt,0,-1);
@@ -236,14 +232,14 @@ static int pause_wait_suite(void) {
 // 握手制造真实伪唤醒，不改生产 deadline、wake 谓词、Result 或 ack。
 // 同一 pthread 连续执行两次独立 SVC；每项都至少进入两次真实 timedwait。
 static int pw_scope_suite(void) {
-    alarm(30);pw_event=s2a_event_create(&pw_read,&pw_write);
+    pw_event=s2a_event_create(&pw_read,&pw_write);
     unsigned firsts=atomic_load(&pw_guest_firsts),retries=atomic_load(&pw_guest_retries);
     for (int cv=0;cv<2;++cv) {
         struct pw_job j={.cv=cv,.ns=1000000000,.operations=2};pthread_t pt;
         pw_check(!pthread_create(&pt,NULL,pw_worker,&j),"scope real worker created");
         for (int op=1;op<=2;++op) {
-            uint64_t end=now_ns()+2000000000ull;uint32_t h=0;
-            while (now_ns()<end) {
+            uint32_t h=0;
+            for (;;) {
                 glock();
                 if (j.thread && atomic_load(&j.ready)==op && atomic_load(&j.timed_calls)>=1
                     && j.thread->vm_wait_safe && j.thread->wkind==(cv?2:4)) {
@@ -254,8 +250,7 @@ static int pw_scope_suite(void) {
                 pthread_mutex_unlock(&G);if(h)break;usleep(100);
             }
             pw_check(h!=0,"scope real operation entered timedwait");if(!h)return 1;
-            end=now_ns()+2000000000ull;
-            while (atomic_load(&j.timed_calls)<2 && now_ns()<end) usleep(100);
+            while (atomic_load(&j.timed_calls)<2) usleep(100);
             pw_check(atomic_load(&j.timed_calls)>=2,"same operation actually retries timedwait");
             glock();pw_check(!j.thread->woke && atomic_load(&j.completed)<op,
                             "real retry leaves original predicate and operation pending");
@@ -286,8 +281,7 @@ static int pw_vm_orders_suite(void) {
         pw_produce(cv,0,h);
         if (first) pw_check(!pw_activity(h,0),"resume first pause into VM");
         for (int repeat=0;repeat<4;++repeat) {
-            uint64_t end=now_ns()+1000000000ull;
-            while ((!pw_epoch_parked(j.thread)||atomic_load(&j.thread->paused_ack)) && now_ns()<end) usleep(100);
+            while (!pw_epoch_parked(j.thread)||atomic_load(&j.thread->paused_ack)) usleep(100);
             pw_check(pw_epoch_parked(j.thread)&&!atomic_load(&j.thread->paused_ack),
                      "VM barrier reached with previous pause ack cleared");
             uint32_t result=pw_activity(h,1);

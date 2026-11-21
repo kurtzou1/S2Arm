@@ -305,6 +305,10 @@ static UILabel *textLabel(UIFontTextStyle style) {
     cell.accessoryView = button; return cell;
 }
 - (UITableViewCell *)sliderCell:(NSDictionary *)option {
+    return [self sliderCell:option note:nil];
+}
+// note：刻度下一行小字（同 dropdown 的 note；PR3d HDR 开关联动时抗锯齿行下写产品限制）；nil = 不写
+- (UITableViewCell *)sliderCell:(NSDictionary *)option note:(NSString *)note {
     UITableViewCell *cell = [self baseCell:@""]; cell.selectionStyle = UITableViewCellSelectionStyleNone;
     NSArray *values = option[@"values"], *labels = option[@"labels"];
     NSInteger selected = [values indexOfObject:s2a_ios_graphics_snapshot(s2a_ios_settings_defaults())[option[@"key"]]];
@@ -324,7 +328,9 @@ static UILabel *textLabel(UIFontTextStyle style) {
     [slider.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
     UIStackView *ticks = [UIStackView new]; ticks.distribution = UIStackViewDistributionEqualSpacing;
     for (NSString *label in labels) { UILabel *tick = textLabel(UIFontTextStyleCaption2); tick.text = label; tick.textColor = UIColor.secondaryLabelColor; tick.isAccessibilityElement = NO; [ticks addArrangedSubview:tick]; }
-    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[heading, slider, ticks]];
+    NSMutableArray *rows = [NSMutableArray arrayWithArray:@[heading, slider, ticks]];
+    if (note.length) { UILabel *nl = textLabel(UIFontTextStyleFootnote); nl.text = note; nl.textColor = UIColor.secondaryLabelColor; nl.numberOfLines = 0; [rows addObject:nl]; }
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:rows];
     stack.axis = UILayoutConstraintAxisVertical; stack.spacing = 2; stack.translatesAutoresizingMaskIntoConstraints = NO;
     [cell.contentView addSubview:stack]; UILayoutGuide *m = cell.contentView.layoutMarginsGuide;
     [NSLayoutConstraint activateConstraints:@[[stack.leadingAnchor constraintEqualToAnchor:m.leadingAnchor], [stack.trailingAnchor constraintEqualToAnchor:m.trailingAnchor], [stack.topAnchor constraintEqualToAnchor:m.topAnchor], [stack.bottomAnchor constraintEqualToAnchor:m.bottomAnchor]]];
@@ -568,14 +574,19 @@ static UILabel *textLabel(UIFontTextStyle style) {
         if (kind >= 6) return [self toggleCell:kind];
         row = kind;
         NSDictionary *option = s2a_ios_graphics_options()[row];
-        if (row != 2) return [self sliderCell:option];
+        // PR3d HDR 开关联动（照 nxnative Upscaling 行 needs=DM_HDR=0 形态映射，S2A_HDR 是启动环境开关、无设置页行）：
+        //   HDR 管线接手时上屏增强一族对 HDR 窗口旁路（8 位感知缩放不适配 PQ 码值）——行下写产品限制提示，不置灰：
+        //   SDR 窗口（排空帧：先缩放后 mode 2 转换）照常用这两行，置灰会谎报「设置无效」
+        if (row != 2) return [self sliderCell:option note:row == 1 && s2a_ios_hdr_upscale_bypassed() ? S2AL(@"gfx.hdrUpscaleBypass.note") : nil];
         NSArray *values = option[@"values"];
         NSInteger selected = [values indexOfObject:s2a_ios_graphics_snapshot(s2a_ios_settings_defaults())[option[@"key"]]];
         // 画质提升（11-15 维护者：标准 / 2D 游戏专用 / 锐利放大）：选了锐利放大（MetalFX）才在标题下写一行代价，另两档不写；
         //   这款没走直连（锐利放大用不了）：锐利放大置灰，标题下写为什么。FSR（AMD FSR 1）同样只直连上屏有：一并置灰、补一句；存过 Fsr 又用不了时
         //   同已存 MetalFX 的做法，照显示（通用路径按双线性 = 标准，services/S2A.Services/GraphicsSettings.cs）
         BOOL blocked = s2a_ios_metalfx_blocked(nil);
-        NSString *note = blocked ? [NSString stringWithFormat:@"%@ %@", S2AL(@"gfx.filter.metalfx.noDirect"), S2AL(@"gfx.filter.fsr.noDirect")] : [values[MAX(selected, 0)] isEqual:@"MetalFX"] ? S2AL(@"gfx.filter.metalfx.note") : nil;
+        // PR3d：HDR 开时这行下的提示先说产品限制（不置灰，见上——SDR 窗口照常）；没开 HDR 照旧按直连 / MetalFX 代价提示
+        NSString *note = s2a_ios_hdr_upscale_bypassed() ? S2AL(@"gfx.hdrUpscaleBypass.note") : nil;
+        if (!note) note = blocked ? [NSString stringWithFormat:@"%@ %@", S2AL(@"gfx.filter.metalfx.noDirect"), S2AL(@"gfx.filter.fsr.noDirect")] : [values[MAX(selected, 0)] isEqual:@"MetalFX"] ? S2AL(@"gfx.filter.metalfx.note") : nil;
         return [self dropdown:option[@"title"] note:note labels:option[@"labels"] selected:selected enabled:^BOOL(NSInteger index) { return !(blocked && ([values[index] isEqual:@"MetalFX"] || [values[index] isEqual:@"Fsr"])); } choose:^(NSInteger index) {
             [s2a_ios_settings_defaults() setObject:values[index] forKey:option[@"key"]]; [weakSelf refresh];
         } identifier:@"settings.filter"];

@@ -45,47 +45,8 @@ def _pool_workers():
 
 
 def available_mb():
-    """此刻可用内存（MB）。S2A_MEM_AVAIL_MB 覆盖（单测 / 模拟小内存机器，同 tools/cores.sh）；
-    macOS vm_stat 空闲 + 非活跃 + 预读 + 可清除页；Windows GlobalMemoryStatusEx；Linux MemAvailable；都读不到 → None"""
-    o = os.environ.get("S2A_MEM_AVAIL_MB")
-    if o:
-        try:
-            return max(0, int(o))
-        except ValueError:
-            pass
-    if sys.platform == "darwin":
-        try:
-            out = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5).stdout
-            page, pages = 0, 0
-            for line in out.splitlines():
-                if "page size of" in line:
-                    page = int(line.split("page size of")[1].split()[0])
-                elif line.startswith(("Pages free:", "Pages inactive:", "Pages speculative:", "Pages purgeable:")):
-                    pages += int(line.rsplit(None, 1)[1].rstrip("."))
-            if page and pages:
-                return pages * page >> 20
-        except (OSError, ValueError, IndexError, subprocess.SubprocessError):
-            pass
-        return None
-    if sys.platform == "win32":
-        import ctypes
-        class MEMORYSTATUSEX(ctypes.Structure):
-            _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong), ("ullTotalPhys", ctypes.c_ulonglong),
-                        ("ullAvailPhys", ctypes.c_ulonglong), ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
-                        ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong), ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
-        st = MEMORYSTATUSEX(); st.dwLength = ctypes.sizeof(st)
-        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
-            return st.ullAvailPhys >> 20
-        return None
-    try:
-        with open("/proc/meminfo", encoding="ascii") as f:
-            for line in f:
-                if line.startswith("MemAvailable:"):
-                    return int(line.split()[1]) >> 10
-    except (OSError, ValueError):
-        pass
-    return None
-
+    """此刻可用内存（MB）：唯一取法在 tools/pool_workers.py available_mb（S2A_MEM_AVAIL_MB 覆盖；读不到 → None）"""
+    return _pool_workers().available_mb()
 
 def plan(cores, avail_mb, busy=False):
     """→ {jobs, bake, budgetMb, cap}（见文件头）。avail_mb None（读不到）：只按核数上限的一半开、重活 1 路，不猜内存"""

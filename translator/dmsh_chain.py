@@ -160,9 +160,16 @@ def tools_now():
     win = os.environ.get('S2A_METAL_BIN') or r'C:\Program Files\Metal Developer Tools\bin' if os.name == 'nt' else None
     for sdk in ('macosx', 'iphoneos'):
         cmd = [os.path.join(win, 'metal.exe'), '--version'] if win else ['xcrun', '-sdk', sdk, 'metal', '--version']
-        try: out = subprocess.run(cmd, capture_output=True, text=True).stdout.splitlines()[0:1]
-        except OSError: out = []
-        t['metal_' + sdk] = (out or ['missing'])[0]
+        # 读不到版本时分清是哪种（D-TYCN，Windows 0.6.3：编着色器库报「actual missing」，分不清没装 / 被拦 / 起来就失败）：都以 missing 开头（own_compilers 照停），
+        #   文件不在 → missing；起进程被拒（安全软件 / 应用控制）→ missing (start blocked: …)；起来了没打版本（缺运行库等）→ missing (no version output: …)
+        why = None
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True); out = r.stdout.splitlines()[0:1]
+            if not out: why = f'no version output: exit code {r.returncode:#x}' + (f'; stderr {r.stderr.strip()[-160:]}' if (r.stderr or '').strip() else '')
+        except OSError as e:
+            out = []
+            if not (isinstance(e, FileNotFoundError) or (win and not os.path.isfile(cmd[0]))): why = f'start blocked: {e}'
+        t['metal_' + sdk] = (out or ['missing' + (f' ({why})' if why else '')])[0]
     return t
 
 XLATE_SOURCES = ('Program.cs', 'dmsh_xlate.csproj', '../../graphics/widen/SpirvCbufUseText.cs')   # = the csproj's src0..src2
@@ -200,7 +207,7 @@ def check_tools():
 def own_compilers(bad):
     """check_tools 的不符项 → (放行的, 照停的)：只有 Metal 编译器（macOS / iOS）版本与锁不同才放行（Metal 编译缓存按编译器身份分键，换 Xcode 只是重编，
     不会复用别的编译器编的库，见 t_unity.py ⑦）；编译器缺失、翻译器 / spirv-cross / 翻译器源码不符照停"""
-    own = [b for b in bad if re.match(r'(metal_macosx|metal_iphoneos): lock .* / actual (?!missing$)', b)]
+    own = [b for b in bad if re.match(r'(metal_macosx|metal_iphoneos): lock .* / actual (?!missing\b)', b)]   # missing 及 missing (原因) 都照停
     return own, [b for b in bad if b not in own]
 
 def header_text(v):

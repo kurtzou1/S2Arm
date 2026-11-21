@@ -50,6 +50,17 @@ namespace Ryujinx.Audio.Backends.Common
             return ahead;
         }
 
+        // S2Arm (#1921 王之凝视 iPhone，诊断 1210 / 3084 份出现过): the hand-back criterion above cannot tell a timeline ahead from a
+        //   queue playing at zero margin (bursty hand-backs, each emptying the ledger, at the sample rate). D-G8YT: 13 restarts in 40 s;
+        //   each restart's 2 s check said the device played normally (96800 of 97456 frames), and 2 s later (the back-off) it fired
+        //   again; every restart is a cut the player hears. So the criterion only raises a suspicion, and the queue's own clock decides:
+        //   the queue places buffers given without a time stamp end to end on its timeline (from 0 at start; a stop resets it), so a
+        //   queue playing what it was given never plays past what it was given. Past it by more than the tolerance = the timeline ran
+        //   ahead (the buffers sit at a time already gone). Asked only on a suspicion and only on the watchdog thread: asking per
+        //   hand-back on the callback thread disturbed iPhone output (11-03, up to ~50 ms a call).
+        public static bool PastSubmitted(long queueSampleTime, long submittedFrames, long toleranceFrames) =>
+            queueSampleTime - submittedFrames > toleranceFrames;
+
         /// <summary>Forget the previous tick (the queue was stopped or restarted).</summary>
         public void Reset()
         {

@@ -383,6 +383,23 @@ namespace S2A.Services.Tests
             Check("服务池耗尽", "失败、报红 +1", $"{(r == Ryujinx.Horizon.Common.Result.Success ? "成功" : "失败")}、报红 +{Red.Total - red0}");
         }
 
+        // 陀螺零偏补偿（#1935、D-BYT6）：期望值按构造手算——静置 2 秒、零偏 (−4.68, 0.30, 0.20) 度/秒、X 轴 ±0.3 交替抖动 → 学到的就是零偏，扣完只剩抖动；
+        //   绕重力轴匀速 90 度/秒（加速度不变、陀螺不抖）超过零偏上限不学；手里晃（陀螺 ±20 交替）不学
+        static void GyroZeroDriftTest()
+        {
+            var still = new System.Numerics.Vector3(0, 0, 1);
+            var bias = new System.Numerics.Vector3(-4.68f, 0.30f, 0.20f);
+            var d = new GyroZeroDrift();
+            System.Numerics.Vector3 last = default;
+            for (int i = 0; i <= 400; i++) last = d.Apply(still, bias + new System.Numerics.Vector3(i % 2 == 0 ? 0.3f : -0.3f, 0, 0), 1_000_000UL + (ulong)i * 5_000);
+            string a = $"{d.Learned} ({d.Bias.X:F2},{d.Bias.Y:F2},{d.Bias.Z:F2}) {MathF.Abs(last.X) <= 0.31f && MathF.Abs(last.Y) < 0.01f && MathF.Abs(last.Z) < 0.01f}";
+            var r = new GyroZeroDrift();
+            for (int i = 0; i <= 400; i++) r.Apply(still, new System.Numerics.Vector3(0, 0, 90), 1_000_000UL + (ulong)i * 5_000);
+            var h = new GyroZeroDrift();
+            for (int i = 0; i <= 400; i++) h.Apply(still, new System.Numerics.Vector3(i % 2 == 0 ? 20 : -20, 0, 0), 1_000_000UL + (ulong)i * 5_000);
+            Check("陀螺零偏：静置学到并扣掉 / 匀速转不学 / 晃动不学", "True (-4.68,0.30,0.20) True / False / False", $"{a} / {r.Learned} / {h.Learned}");
+        }
+
         internal static void Check(string name, object expect, object actual)
         {
             string e = Fmt(expect), a = Fmt(actual);
@@ -863,6 +880,20 @@ namespace S2A.Services.Tests
                 InputPump.SetPrimary(Host.Device, Ryujinx.HLE.HOS.Services.Hid.PlayerIndex.Handheld, Ryujinx.HLE.HOS.Services.Hid.ControllerType.Handheld);   // 还原
                 Check("游戏不收 Pro 手柄 → 换成它收的样式，再收 Pro 时换回（掌机档 / 主机档 / 只收双 Joy-Con）",
                     "Handheld Handheld → Player1 ProController / Player1 JoyconRight → Player1 ProController / Player1 ProController → Player1 ProController", got);
+                // D-JQGC：掌机档从掌机格起，手柄选择页只收 Pro / 双 Joy-Con → Player1 双 Joy-Con；游戏又收全部样式（含掌机）→ 留在双 Joy-Con、不退回掌机格；
+                //   之后游戏只收掌机（双 Joy-Con 不收了）→ 才退回掌机格
+                Host.Device.System.State.DockedMode = false; npads.SupportedStyleSets = full;
+                InputPump.SetPrimary(Host.Device, Ryujinx.HLE.HOS.Services.Hid.PlayerIndex.Handheld, Ryujinx.HLE.HOS.Services.Hid.ControllerType.Handheld);
+                npads.SupportedStyleSets = Ryujinx.HLE.HOS.Services.Hid.ControllerType.ProController | Ryujinx.HLE.HOS.Services.Hid.ControllerType.JoyconPair; InputPump.FollowSupportedStyles(Host.Device);
+                string pair = $"{InputPump.Player} {InputPump.Type}";
+                npads.SupportedStyleSets = full; InputPump.FollowSupportedStyles(Host.Device);
+                string stay = $"{InputPump.Player} {InputPump.Type}";
+                npads.SupportedStyleSets = Ryujinx.HLE.HOS.Services.Hid.ControllerType.Handheld; InputPump.FollowSupportedStyles(Host.Device);
+                string hh = $"{InputPump.Player} {InputPump.Type}";
+                Host.Device.System.State.DockedMode = docked0; npads.SupportedStyleSets = full;
+                InputPump.SetPrimary(Host.Device, Ryujinx.HLE.HOS.Services.Hid.PlayerIndex.Handheld, Ryujinx.HLE.HOS.Services.Hid.ControllerType.Handheld);   // 还原
+                Check("掌机格被换成双 Joy-Con 后游戏又收掌机：留在双 Joy-Con；双 Joy-Con 不收了才退回掌机格",
+                    "Player1 JoyconPair / Player1 JoyconPair / Handheld Handheld", $"{pair} / {stay} / {hh}");
             }
             // 单只 Joy-Con 横握（11-03 010036B0034E4000）：横握后看到的 ABXY / 摇杆换成物理键 / 物理方向（右只顺时针 90°：A→X、B→A、X→Y、Y→B，摇杆 (x,y)→(−y,x)；
             //   左只逆时针 90°：A→下、B→左、X→右、Y→上，摇杆 (x,y)→(y,−x)）；竖握 / Pro 手柄不动。右只横握的物理摇杆是右摇杆（#592），读右摇杆槽
@@ -877,6 +908,7 @@ namespace S2A.Services.Tests
                     R(Ryujinx.HLE.HOS.Services.Hid.ControllerType.ProController, HZ, Ryujinx.HLE.HOS.Services.Hid.ControllerKeys.A, 0, 32767));
                 Check("单只 Joy-Con 横握换物理键：右只 A / 上推、右只 B+ / 右推、左只 A+Y / 上推、右只竖握、Pro", "X(-32767,0) / A, Plus(0,32767) / DpadUp, DpadDown(32767,0) / A(0,32767) / A(0,32767)", got);
             }
+            GyroZeroDriftTest();
             StickButtonsTest();
             TwoPadsTest();
 

@@ -25,8 +25,7 @@ struct s2a_vs_ops {                                        // dlsym 解析出的
     void     (*ALooper_wake)(ALooper *looper);
     AChoreographer *(*AChoreographer_getInstance)(void);
     void (*AChoreographer_postVsyncCallback)(AChoreographer *, AChoreographer_vsyncCallback, void *);   // API 33 首选
-    void (*AChoreographer_postFrameCallback64)(AChoreographer *, AChoreographer_frameCallback64, void *); // API 29 次选
-    void (*AChoreographer_postFrameCallback)(AChoreographer *, AChoreographer_frameCallback, void *);   // API 24 兜底
+    void (*AChoreographer_postFrameCallback64)(AChoreographer *, AChoreographer_frameCallback64, void *); // 降级支（四件套缺符号时）
     int64_t (*AChoreographerFrameCallbackData_getFrameTimeNanos)(const AChoreographerFrameCallbackData *);
     size_t  (*AChoreographerFrameCallbackData_getFrameTimelinesLength)(const AChoreographerFrameCallbackData *);
     size_t  (*AChoreographerFrameCallbackData_getPreferredFrameTimelineIndex)(const AChoreographerFrameCallbackData *);

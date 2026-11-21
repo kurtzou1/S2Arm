@@ -79,7 +79,10 @@ int s2a_energy_snap(s2a_esnap *s);
 int s2a_snap_saving(void); int s2a_snap_restoring(void); int s2a_snap_mode(void); int s2a_snap_logging(void);
 // 这一局关掉即时存档（snapsw.c）与原因码：S2A_SNAP_OFF_ADDRESS = 这台设备地址空间放不下标准布局、窗口外也放不下命令记录区（vawin.c）
 #define S2A_SNAP_OFF_ADDRESS 1
-void s2a_snap_disable(int why); int s2a_snap_off_reason(void);
+void s2a_snap_disable(int why); int s2a_snap_off_reason(void); int s2a_snap_reenable(int why);   // snapsw.c：构造期因 why 关的快照、选定游戏后放得下时重新打开（vawin.c s2a_window_snap_late）
+void s2a_window_snap_late(int no_far);   // vawin.c：布局定了、收尾前调，这一款没有远端段时在收尾还回去的那段里补放快照区
+int s2a_snap_late_fits(uint64_t released, uint64_t a, uint64_t host_min);   // vawin.c：纯函数
+const char *s2a_snap_source(void);   // snapsw.c：「能存」这一位按什么定的（启动环境 / 玩家设置 / 缺省）
 // 两次采样之间的 GPU 忙 ms/s：分母取 GPU 时钟差（gpu_clk_ms，已入账各帧最晚 GPU 结束），不取墙钟——GPU 忙晚 8 帧在 CPU 帧边界入账，墙钟窗口会把慢帧前的时间挤进来；
 //   读不到（没有直连层）返回 -1，这段时间没有帧入账返回 0
 double s2a_gpu_busy_rate(const s2a_esnap *a, const s2a_esnap *b);
@@ -185,6 +188,8 @@ uint64_t s2a_app_pool(void); void s2a_app_pool_set(uint64_t v);   // layout.c
 // 标准布局（各区全有宿主地址）的跨度，含模块段；0 = 地址空间类型不支持
 uint64_t s2a_layout_need(uint32_t as_type, uint64_t sys_resource_size, uint64_t module_span);
 int s2a_snap_arena_place(uint64_t out, uint64_t below, uint64_t a, uint64_t host_min);   // layout.c：即时存档命令记录区放哪（1 窗口外 / 2 宿主段底部 / 0 关快照）
+int s2a_snap_arena_place2(uint64_t out, uint64_t fit, uint64_t *below, uint64_t a, uint64_t host_min, uint64_t span, uint64_t margin);   // layout.c：宿主段不够时按本款已知最高跨度决定让不让窗口（11-21）
+uint64_t s2a_span_seed(uint64_t pid);   // vawin.c：种子表里本款的最高跨度（0 = 没有）
 uint64_t s2a_sainit_size(uint64_t alias_base, uint64_t alias_size, uint64_t win_end, uint64_t pool, uint64_t size);   // layout.c：分配器预留压小后的尺寸（等于 size = 不压）
 uint64_t s2a_alias_report_size(uint64_t alias_base, uint64_t alias_size, uint64_t win_end, uint64_t hole, uint64_t need, int alias_gb, int full_flag);   // layout.c：报给游戏的别名区大小（#1441）
 // 按宿主占到的窗口 [win_base, +win_size) 排布局：放得下标准布局就照标准排，放不下就小区在前、别名区伸出窗口。

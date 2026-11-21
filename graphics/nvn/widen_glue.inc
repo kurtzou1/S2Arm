@@ -498,7 +498,7 @@ static void wd_sub_end(void) {   // 提交结束：本次提交开始前排的�
     static uint64_t n, a0; static int has_a0;
     if (++n % 300 == 0) {
         pthread_mutex_lock(&g_wd_mu);
-        uint64_t a = s2a_widen_alloc_bytes(); char line[1024]; s2a_widen_report(line, sizeof line);   // 增量取在出统计行之前：统计行本身分配（字符串）不算进渲染路径
+        uint64_t a = s2a_widen_alloc_bytes(); char line[4096]; s2a_widen_report(line, sizeof line);   // 增量取在出统计行之前：统计行本身分配（字符串）不算进渲染路径
         MLOG("S2Arm widen: submits %llu, draws %llu (depth-write 3D draws past the core %llu, into core %llu, rewritten %llu with %llu new copies, %llu slot results reused, slots given as the GPU will read them %llu, skipped slots with GPU-side writes %llu), dispatches %llu (writing widened images: groups widened %llu, not per pixel %llu), 16:9 sampling remaps %llu, managed alloc +%llu bytes; hook %llu K instr/submit %llu instr/draw; %s", (unsigned long long)n, (unsigned long long)g_wd_draws, (unsigned long long)g_wd_light, (unsigned long long)g_wd_core,
              (unsigned long long)g_wd_rw_draws, (unsigned long long)g_wd_copies, (unsigned long long)g_wd_reuse, (unsigned long long)g_wd_view_n, (unsigned long long)g_wd_skip_pend, (unsigned long long)g_wd_disp, (unsigned long long)g_wd_disp_wide, (unsigned long long)g_wd_disp_flat, (unsigned long long)g_wd_uvx_n, (unsigned long long)(has_a0 ? a - a0 : 0), (unsigned long long)(g_wd_prof_t / 300 / 1000), (unsigned long long)(g_wd_prof_n ? g_wd_prof_t / g_wd_prof_n : 0), line); g_wd_prof_t = g_wd_prof_n = 0;
         MLOG("S2Arm widen: render targets registered %d (table %d), texture objects live %u; shadow slots unchanged since last hand-over %llu (not re-bound, results reused %llu), handed over by their updated pieces only %llu, whole %llu",

@@ -55,6 +55,12 @@ namespace Ryujinx.Audio.Backends.Apple
         private QueueTimelineWatch _timeline;
         private int _zeroReturns;
         private long _returnedBytes, _timelineTicks;
+        // S2Arm (#1921): frames enqueued since the queue was created or last stopped = the end of what it was given on its own timeline
+        //   (QueueTimelineWatch.PastSubmitted). Written by the pump (one writer at a time), reset with the queue
+        private long _enqueuedFrames;
+        // 这 10 秒里交还判据起疑、但队列时钟没越过交付量（零余量按时播）的次数，与时钟减交付量的最大值；看门狗线程独占
+        private int _suspectCalm;
+        private long _suspectMaxPast = long.MinValue, _suspectWindowTicks;
         // S2Arm (11-02 Pokopia iPhone 杂音): releases each queued buffer when the credit's play head reaches its end, one per buffer
         //   like a Switch (see PlaybackCredit), instead of a whole device pull at each hand-back. Woken by hand-backs and new buffers
         private readonly AutoResetEvent _paceEvent = new(false);
@@ -117,6 +123,8 @@ namespace Ryujinx.Audio.Backends.Apple
         //   S2A_AUDIO_HEAL=0 关（同包 A/B）；S2A_AUDIO_TEST_STALL_AT=<秒>：开播后到点暂停一次队列（模拟系统停播，测试用）
         private const int StallMs = 1000;
         private const int HealBackoffMs = 2000;
+        // #1921：队列时钟越过交付量多少帧算真跑前（10 ms @48k；正常播放时时钟不会越过交付量，留一点读数时差）
+        private const long AheadToleranceFrames = 480;
         // S2Arm (#1598 Mac 无声)：一次交设备（AudioQueueEnqueueBuffer，问音频服务进程）卡这么久 = 输出队列卡死，看门狗重启它。
         //   正常是微秒级；iPhone 上问音频服务的调用偶发最长约 50 ms（见 Pump 头注释）。玩家 M2 局：渲染一拍里「DSP」从 10 ms 级跳到 340 ms → 2.3 / 4.9 / 6.7 s、
         //   随后停流全无声，切窗口走解冻路径重启输出队列后立刻回到 10 ms 级——慢的是交设备这一步而不是混音计算（快路径是进程级静态开关，重启队列碰不到它）。
@@ -422,12 +430,31 @@ namespace Ryujinx.Audio.Backends.Apple
             // S2Arm (11-13 断音): iOS only. A macOS queue recovers by itself (QueueTimelineWatch), and its criterion cannot tell a timeline
             //   ahead from a queue playing at zero margin: 0400486024DEC000 Mac 局第 26 秒 a 30 ms render stall left zero margin, this fired, and the
             //   synchronous stop / restart only cut the audio once more (zero-in-flight hand-backs 24 → 39 in the next window)
+            // #1921：交还判据只算起疑，队列自己的时钟越过交付量才是真跑前（QueueTimelineWatch.PastSubmitted）；没越过 = 零余量按时播，不重启
+            //   （重启本身就是一次断音，D-G8YT 40 秒 13 次）。时钟读不到按旧判据重启（永久静音那条不能漏）
             if ((OperatingSystem.IsIOS() || OperatingSystem.IsTvOS()) && _timeline.Tick(zero, returned, elapsed) && now - _lastHealTicks >= (long)HealBackoffMs * Stopwatch.Frequency / 1000)   // 平台例外：苹果后端内部，iOS 队列跑前要重启、macOS 队列自己恢复
             {
-                S2ARecover($"队列时间轴跑到声音前面（这 {elapsed * 1000 / Stopwatch.Frequency} ms 交还 {returned / _bytesPerFrame} 帧、{zero} 次交还后在途为 0：欠载后交的缓冲排在已过去的时刻，没播就交还）",
-                           false, now, false);
+                long past = S2AQueuePastSubmitted();
 
-                return;
+                if (past == long.MinValue || QueueTimelineWatch.PastSubmitted(past, 0, AheadToleranceFrames))
+                {
+                    S2ARecover($"队列时间轴跑到声音前面（这 {elapsed * 1000 / Stopwatch.Frequency} ms 交还 {returned / _bytesPerFrame} 帧、{zero} 次交还后在途为 0；" +
+                               (past == long.MinValue ? "队列时钟读不到，按交还判" : $"队列时钟越过交付量 {past} 帧") + "：欠载后交的缓冲排在已过去的时刻，没播就交还）",
+                               false, now, false);
+
+                    return;
+                }
+
+                _suspectCalm++;
+                _suspectMaxPast = Math.Max(_suspectMaxPast, past);
+            }
+
+            if (_suspectCalm > 0 && now - _suspectWindowTicks >= 10 * Stopwatch.Frequency)
+            {
+                Console.Error.WriteLine($"[声] 输出 #{_diag.Index} 10 秒：交还判据起疑 {_suspectCalm} 次，队列时钟都没越过交付量（时钟 − 交付量 最大 {_suspectMaxPast} 帧，容差 {AheadToleranceFrames}）：零余量按时播，不重启");
+                _suspectCalm = 0;
+                _suspectMaxPast = long.MinValue;
+                _suspectWindowTicks = now;
             }
 
             long stall = now - Volatile.Read(ref _lastCallbackTicks);
@@ -531,6 +558,23 @@ namespace Ryujinx.Audio.Backends.Apple
             return true;
         }
 
+        // #1921：队列时钟（播到的采样时刻）减开播 / 上次停队列以来交给它的帧数；队列没在播或读不到 → long.MinValue。只在看门狗线程、起疑时调
+        private unsafe long S2AQueuePastSubmitted()
+        {
+            nint q = _audioQueue;
+
+            if (q == nint.Zero || !Volatile.Read(ref _queueRunning))
+            {
+                return long.MinValue;
+            }
+
+            long* ts = stackalloc long[8];   // AudioTimeStamp 64 字节，mSampleTime（double）在偏移 0
+
+            return AudioQueueGetCurrentTime(q, nint.Zero, ts, nint.Zero) == 0
+                ? (long)*(double*)ts - Interlocked.Read(ref _enqueuedFrames)
+                : long.MinValue;
+        }
+
         // 恢复输出流：iOS 重新激活会话 → 同步停队列（重置时重建）→ 收回在途 → 重新排进去 → 开播
         private void S2ARecover(string why, bool rebuild, long now, bool red)
         {
@@ -565,6 +609,7 @@ namespace Ryujinx.Audio.Backends.Apple
                         if (stopRc == 0)
                         {
                             Interlocked.Exchange(ref _returnedMask, 0);
+                            Interlocked.Exchange(ref _enqueuedFrames, 0);   // 停队列时间轴归零，收回的缓冲随后重新交
                         }
 
                         return stopRc;
@@ -649,6 +694,7 @@ namespace Ryujinx.Audio.Backends.Apple
             AudioStreamBasicDescription format = AppleHardwareDeviceDriver.GetAudioFormat(RequestedSampleFormat, RequestedSampleRate, (uint)_deviceChannelCount);   // 平台例外：Apple 后端平台实现内部的队列格式（#189）
             nint callbackPtr = Marshal.GetFunctionPointerForDelegate(_callbackDelegate);
             nint userData = GCHandle.ToIntPtr(_gcHandle);
+            Interlocked.Exchange(ref _enqueuedFrames, 0);
             int result = AudioQueueNewOutput(ref format, callbackPtr, userData, nint.Zero, nint.Zero, 0, out _audioQueue);
 
             if (result != 0)
@@ -855,8 +901,13 @@ namespace Ryujinx.Audio.Backends.Apple
                     Console.Error.WriteLine($"[声] 测试钩子：输出 #{_s._diag.Index} 开播后第 {_testEnqStall.AtS} 秒一次交设备卡 {_testEnqStall.Ms} ms（模拟输出队列卡死）");
                     Thread.Sleep(_testEnqStall.Ms);
                 }
-                AudioQueueEnqueueBuffer(_s._audioQueue, bufferPtr, 0, nint.Zero);
+                int enqRc = AudioQueueEnqueueBuffer(_s._audioQueue, bufferPtr, 0, nint.Zero);
                 long dt = Stopwatch.GetTimestamp() - t0;
+
+                if (enqRc == 0)
+                {
+                    Interlocked.Add(ref _s._enqueuedFrames, bytes / _s._bytesPerFrame);
+                }
 
                 // 泵锁内调用，同一时刻只有一个写方；看门狗用 Interlocked.Exchange 取走
                 _s._diag.OnEnqueue(dt);

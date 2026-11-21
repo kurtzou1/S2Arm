@@ -434,6 +434,11 @@ class FreeAccountLimits(unittest.TestCase):
         self.assertIn("mac-ani.jkcoxson.com", RECOVERY["signing_server_unreachable"]); self.assertIn("DNS", RECOVERY["signing_server_unreachable"])
         self.assertTrue(loc.get(RECOVERY["signing_server_unreachable"]) and spec["signing_server_unreachable"]["title"]["en"] and "signing_server_unreachable" in guide)
         self.assertEqual(ctl.AI_NEXT["signing_server_unreachable"][0], "human")
+        # 远程 Anisette 异常响应在旧版 plumesign 中会表现为 Rust panic；不能把 RUST_BACKTRACE 提示直接上屏。
+        panic = ("thread 'main' panicked at 3rdparty/omnisette/src/remote_anisette_v3.rs:448:54:\n"
+                 "called `Option::unwrap()` on a `None` value\n"
+                 "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace")
+        self.assertEqual(impactor.explain(panic), "signing_server_unreachable")
         self.assertEqual(impactor.explain("Anisette error: -80046 Apple rejected"), "login_identity_rejected")
         # #edc5f5 拆三种（期望手写）：没登录 / 没选中 → apple_not_signed_in；连不上 *.apple.com → apple_server_unreachable；1100 仍是过期。
         #   连不上 anisette 服务器（jkcoxson）仍归 signing_server_unreachable，不被新的那条吞掉；各处都登记

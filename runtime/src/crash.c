@@ -495,11 +495,61 @@ static int ww_fault(void *ctx, uint64_t fa, int w) {
     return 0;
 }
 static void (*g_dsh_crash_dump)(void);   // graphics/nvn/host/dsh_miss.inc s2a_dsh_crash_dump：现编时崩溃，落盘正在编的那支输入；装信号时 dlsym 取一次（信号处理里不调 dlsym），只链运行时的单测取不到 = 空
+// 宿主代执行记录（11-21 王国之泪 main+0x8fe7d8：4 件玩家现场里 x8 / x22 / x25 与游戏指令流对不上，b30 之后只有读，
+//   x22 却是 b34 之前的旧值——要分清是不是宿主在信号里改过这条线程的寄存器）。每线程最近 8 次「信号里替游戏做 / 改道」：
+//   类别、pc、地址、指令，以及改了哪些通用寄存器（最多记 3 个：旧值 → 新值）。崩溃现场打崩的这条线程那几条。
+//   预分配（线程初始化时，同 touch.c），信号处理里只读写、不分配；没分配到（非游戏线程）就不记
+typedef struct { uint64_t t, pc, addr; uint32_t insn; uint8_t kind, nchg, reg[3]; uint64_t was[3], now[3]; } er_ev;
+typedef struct { uint64_t r[32]; } er_regs;   // x0..x28、fp、lr、sp
+typedef struct { uint32_t n; er_ev ev[8]; er_regs at3; int have3; } er_ring;   // at3：最近一次改道时的现场（改道还原要原样放回它）
+static pthread_key_t g_erkey; static int g_erkey_ok;
+static _Atomic uint64_t g_er_total[8];   // [7] = 起局拦写模拟自测（同一条信号路径，证明记录本身在工作；不进玩家现场的判断）   // 全进程按类别累计（崩溃报告里对照：本线程 0 次时，全进程有没有发生过）
+__attribute__((constructor)) static void er_key_init(void) { g_erkey_ok = pthread_key_create(&g_erkey, free) == 0; }
+static void er_thread_init(void) { if (g_erkey_ok && !pthread_getspecific(g_erkey)) pthread_setspecific(g_erkey, calloc(1, sizeof(er_ring))); }
+static void er_snap(void *ctx, er_regs *o) {
+    _STRUCT_ARM_THREAD_STATE64 *ss = &((ucontext_t *)ctx)->uc_mcontext->__ss;
+    for (int k = 0; k < 29; k++) o->r[k] = ss->__x[k];
+    o->r[29] = ss->__fp; o->r[30] = ss->__lr; o->r[31] = ss->__sp;
+}
+static void er_note(int kind, void *ctx, const er_regs *was, uint64_t pc, uint64_t addr) {
+    if (kind > 0 && kind < 8) atomic_fetch_add_explicit(&g_er_total[kind], 1, memory_order_relaxed);
+    if (kind == 7) return;   // 自测只计数，不占线程记录
+    er_ring *g = g_erkey_ok ? pthread_getspecific(g_erkey) : NULL; if (!g) return;
+    er_regs now; er_snap(ctx, &now);
+    if (kind == 3) { g->at3 = *was; g->have3 = 1; }
+    if (kind == 4 && g->have3) was = &g->at3;   // 改道还原：比的是「还原后」对「改道那一刻」，应 0 个不同；不为 0 = 还原错了
+    er_ev *e = &g->ev[g->n++ % 8]; memset(e, 0, sizeof *e);
+    e->t = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); e->pc = pc; e->addr = addr; e->kind = (uint8_t)kind;
+    e->insn = module_of((void *)pc) ? *(const uint32_t *)(uintptr_t)pc : 0;
+    for (int k = 0; k < 32; k++) if (was->r[k] != now.r[k]) { if (e->nchg < 3) { e->reg[e->nchg] = (uint8_t)k; e->was[e->nchg] = was->r[k]; e->now[e->nchg] = now.r[k]; } if (e->nchg < 255) e->nchg++; }
+}
+static void er_totals(const char *when) {
+    LOG("宿主代执行记录（全进程累计，%s）：读模拟 %llu、写模拟 %llu、改道回写 %llu、改道还原 %llu、远端代执行 %llu、栈未对齐代做 %llu（另：起局拦写自测 %llu 次，记录通路自证）", when,
+        (unsigned long long)g_er_total[1], (unsigned long long)g_er_total[2], (unsigned long long)g_er_total[3],
+        (unsigned long long)g_er_total[4], (unsigned long long)g_er_total[5], (unsigned long long)g_er_total[6], (unsigned long long)g_er_total[7]);
+}
+void s2a_er_totals_log(const char *when) { er_totals(when); }   // 收局也打一行（lifecycle.c），不靠崩溃
+static void er_report(void) {
+    er_totals("崩溃时");
+    er_ring *g = g_erkey_ok ? pthread_getspecific(g_erkey) : NULL;
+    if (!g) { LOG("宿主代执行记录：本线程没有（非游戏线程）"); return; }
+    if (!g->n) { LOG("宿主代执行记录：本线程 0 次（这条线程没被宿主在信号里替做过读写 / 改道）"); return; }
+    static const char *kn[] = {"?", "读模拟", "写模拟", "改道回写", "改道还原", "远端代执行", "栈未对齐代做"};
+    uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    LOG("宿主代执行记录：本线程共 %u 次，最近 %u 次（新的在后；寄存器 29=fp 30=lr 31=sp）：", g->n, g->n < 8 ? g->n : 8);
+    for (uint32_t i = g->n > 8 ? g->n - 8 : 0; i < g->n; i++) {
+        er_ev *e = &g->ev[i % 8]; char w[160]; where(e->pc, w, sizeof w); char c[200] = ""; size_t o = 0;
+        for (int k = 0; k < e->nchg && k < 3; k++) o += (size_t)snprintf(c + o, sizeof c - o, " x%d %llx→%llx", e->reg[k], (unsigned long long)e->was[k], (unsigned long long)e->now[k]);
+        LOG("  %.3f 秒前 %s pc %s 指令 %08x 地址 %#llx 改了 %d 个寄存器%s", (double)(now - e->t) / 1e9, e->kind < 7 ? kn[e->kind] : "?", w, e->insn,
+            (unsigned long long)e->addr, e->nchg, c);
+    }
+}
 static void on_crash(int sig, siginfo_t *si, void *ctx) {
     // 先给 16 KB 写跟踪（graphics/track）认领：游戏 / 原生层写到被写保护的游戏页，跟踪模块记脏、放开后返回重执行那条指令。
     // 是否写取 ESR 的 WnR 位（数据中止 EC = 0x24 / 0x25 时有效）
     // 写跟踪 A 方案（touch.c）：跳板回写完的 brk——恢复缺页时的现场、重执行那条写
-    { int s2a_touch_brk(void *); if (sig == SIGTRAP && s2a_touch_brk(ctx)) return; }
+    { int s2a_touch_brk(void *); er_regs b; uint64_t p0 = ((ucontext_t *)ctx)->uc_mcontext->__ss.__pc; if (sig == SIGTRAP) er_snap(ctx, &b);
+      if (sig == SIGTRAP && s2a_touch_brk(ctx)) { er_note(4, ctx, &b, ((ucontext_t *)ctx)->uc_mcontext->__ss.__pc, p0); return; } }
     // 诊断钩子（diag_brk.c，S2A_DIAG_DELAY / S2A_DIAG_STAMP，只 Mac）
     { int s2a_diag_brk(void *); if (sig == SIGTRAP && s2a_diag_brk(ctx)) return; }
     // 双补丁岛 brk 兜底点（traps.c）：两岛都够不着的必改点，按原语义模拟后 pc += 4
@@ -508,17 +558,17 @@ static void on_crash(int sig, siginfo_t *si, void *ctx) {
         uint32_t esr = ((ucontext_t *)ctx)->uc_mcontext->__es.__esr, ec = esr >> 26;
         // 栈指针未对齐（EC 0x26）：Switch 不查、苹果查，替游戏做这一条读写（emul_sp.c）。范围 = 游戏代码（含补丁区）+ 系统调用门进出两头
         //   （门用客体 sp 借 32 字节，entry.S [sw_gate, sw_gate_end)）；宿主自己的代码不会让 sp 不对齐，不在此列
-        { int s2a_emul_sp_unaligned(void *);
+        { int s2a_emul_sp_unaligned(void *); er_regs sb;
           uint64_t pc0 = ((ucontext_t *)ctx)->uc_mcontext->__ss.__pc;
           int gate = pc0 >= (uint64_t)(uintptr_t)sw_gate && pc0 < (uint64_t)(uintptr_t)sw_gate_end;
-          if (ec == 0x26 && (gate || module_of((void *)pc0)) && s2a_emul_sp_unaligned(ctx)) { atomic_fetch_add_explicit(&g_sp_unaligned, 1, memory_order_relaxed); return; } }
+          if (ec == 0x26 && (gate || module_of((void *)pc0)) && (er_snap(ctx, &sb), s2a_emul_sp_unaligned(ctx))) { er_note(6, ctx, &sb, pc0, (uint64_t)si->si_addr); atomic_fetch_add_explicit(&g_sp_unaligned, 1, memory_order_relaxed); return; } }
         if (ec == 0x24 || ec == 0x25) {
             int w = (int)(esr >> 6 & 1); uint64_t pc = ((ucontext_t *)ctx)->uc_mcontext->__ss.__pc;
             if (ww_fault(ctx, (uint64_t)si->si_addr, w)) return;   // 写监视（S2A_WRITE_WATCH，诊断）：记下写的人后放开重执行
             { uint64_t bp = atomic_load(&g_esb_page), fa0 = (uint64_t)si->si_addr;   // 拦写模拟自测页（见 s2a_emul_store_bench）
-              if (bp && w && (fa0 & ~0x3FFFull) == bp) { uint8_t *wa = s2a_alias_page_rw(bp); if (wa && s2a_emul_store(ctx, fa0, wa + (fa0 & 0x3FFF), NULL, NULL, NULL)) return; } }
+              if (bp && w && (fa0 & ~0x3FFFull) == bp) { uint8_t *wa = s2a_alias_page_rw(bp); er_regs b; er_snap(ctx, &b); if (wa && s2a_emul_store(ctx, fa0, wa + (fa0 & 0x3FFF), NULL, NULL, NULL)) { er_note(7, ctx, &b, pc, fa0); return; } } }
             // 远端（far.c，乙布局）：别名区伸出宿主窗口那段一碰即缺页，在影子上代执行这条访存并记点
-            { int s2a_far_fault(void *, uint64_t, int); if (s2a_far_fault(ctx, (uint64_t)si->si_addr, w)) return; }
+            { int s2a_far_fault(void *, uint64_t, int); er_regs b; er_snap(ctx, &b); if (s2a_far_fault(ctx, (uint64_t)si->si_addr, w)) { er_note(5, ctx, &b, pc, (uint64_t)si->si_addr); return; } }
             // 直连模式的缺页钩子（双轨，s2a_direct_host.h）：游戏代码 / 宿主代码两条分支都最先问；通用模式下没人登记，这里只读一个空指针
             { int s2a_direct_fault(void *, int, void *); if (s2a_direct_fault(si->si_addr, w, ctx)) return; }
             // 游戏代码（模块原始代码 / 补丁区）写到 GPU 改过的页：改道到正常上下文先回写；宿主代码的缺页照原路径
@@ -528,25 +578,28 @@ static void on_crash(int sig, siginfo_t *si, void *ctx) {
                 uint64_t fa = (uint64_t)si->si_addr;
                 if (!w && s2a_track_read_emulable(si->si_addr)) {
                     const uint8_t *al = s2a_alias_page(fa & ~0x3FFFull);
-                    if (al && s2a_emul_load(ctx, fa, al + (fa & 0x3FFF), s2a_track_emul_ok)) { s2a_track_note_emul(); return; }
+                    er_regs b; er_snap(ctx, &b);
+                    if (al && s2a_emul_load(ctx, fa, al + (fa & 0x3FFF), s2a_track_emul_ok)) { er_note(1, ctx, &b, pc, fa); s2a_track_note_emul(); return; }
                     // 模拟不了：记类别与 pc（写跟踪每 10 秒一行报，缺页处模拟的覆盖率；al 为空记类别 -1）
                     s2a_track_note_emul_fail(al ? s2a_emul_class(*(const uint32_t *)(uintptr_t)pc) : -1, *(const uint32_t *)(uintptr_t)pc, pc);
                 }
                 // 拦写模拟（帧率能耗线 10-24，docs/研究/拦写模拟.md；缺省开，S2A_TRACK_EMUL_STORE=0 关）：游戏写到缓冲标的 GPU 改过子页、
                 // 写的字节不碰 GPU 改过的字节 → 经可写别名替它写（同宽原子存储）、记「CPU 写过」位图、pc 前进，页保持拦截，不回写不等 GPU。
                 // 任一条件不满足（store_ok 里判）→ 落到下面原路径（改道回写 → 重执行）
+                er_regs eb;
                 if (w && s2a_track_store_try(si->si_addr)) {
                     uint64_t t0 = mach_absolute_time(), ea = 0, len = 0;
                     uint8_t *wa = s2a_alias_page_rw(fa & ~0x3FFFull);
                     if (!wa) s2a_track_note_store_fail(6);
-                    else if (s2a_emul_store(ctx, fa, wa + (fa & 0x3FFF), s2a_track_store_ok, &ea, &len)) {
+                    else if (er_snap(ctx, &eb), s2a_emul_store(ctx, fa, wa + (fa & 0x3FFF), s2a_track_store_ok, &ea, &len)) {
+                        er_note(2, ctx, &eb, pc, fa);
                         static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
                         s2a_track_store_done(ea, len, (mach_absolute_time() - t0) * tb.numer / tb.denom); return; }
                     else if (!len) s2a_track_note_store_fail(7);   // 解码不认（认得但被 store_ok 拒的，原因已在 store_ok 里记）
                 }
                 uint64_t s2a_touch_skip(void); void s2a_touch_clear(void); int s2a_touch_redirect(void *, uint64_t);
                 int r = s2a_track_fault_guest(si->si_addr, w, s2a_touch_skip());
-                if (r == 2) { if (s2a_touch_redirect(ctx, (uint64_t)si->si_addr)) return; r = s2a_track_fault(si->si_addr, w); }
+                if (r == 2) { er_regs b; er_snap(ctx, &b); if (s2a_touch_redirect(ctx, (uint64_t)si->si_addr)) { er_note(3, ctx, &b, pc, (uint64_t)si->si_addr); return; } r = s2a_track_fault(si->si_addr, w); }
                 s2a_touch_clear();
                 if (r) return;
             } else if (s2a_track_fault(si->si_addr, w)) return;
@@ -575,6 +628,7 @@ static void on_crash(int sig, siginfo_t *si, void *ctx) {
     { const char *(*wn)(void) = (const char *(*)(void))dlsym(RTLD_DEFAULT, "s2a_waived_note"); const char *w = wn ? wn() : NULL;   // waived.c
       if (w && *w) LOG("【红】之前这些校验没过（照常继续了）：%s", w); }
     for (int i = 0; i < 29; i += 4) LOG("  x%-2d %016llx %016llx %016llx %016llx", i, uc->uc_mcontext->__ss.__x[i], uc->uc_mcontext->__ss.__x[i + 1], i + 2 < 29 ? uc->uc_mcontext->__ss.__x[i + 2] : 0, i + 3 < 29 ? uc->uc_mcontext->__ss.__x[i + 3] : 0);
+    er_report();
     s2a_backtrace(fp);
     code_note(pc, lr, fp);
     fault_region_note(sig, si, uc);
@@ -601,6 +655,7 @@ static void alt_tail_release(void *p, size_t n) { s2a_tail_unmap(p, n, S2A_TAIL_
 void s2a_crash_thread_init(void) {
     plat_fault_altstack_set_mem(alt_tail_alloc, alt_tail_release);
     { void s2a_touch_thread_init(void); s2a_touch_thread_init(); }   // 写跟踪 A 方案的每线程保存区（信号处理里不分配）
+    er_thread_init();   // 宿主代执行记录（信号里只记不分配）
     // 缺页处模拟读的只读别名槽（alias.c，每线程 16 KB）
     s2a_alias_thread_init();
     int e = plat_fault_altstack_init();

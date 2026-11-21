@@ -277,7 +277,8 @@ NSArray<NSDictionary *> *s2a_ios_crash_decide_for(NSString *gid) {
     [d setObject:@{@"ver": app_version(), @"items": rec} forKey:@"S2ACrashAutoOff"];
     return items;
 }
-void s2a_dprompt_notice(NSString *title, NSString *body, double delay, double seconds);   // dprompt.m
+// 弱链接[lab]：s2a_dprompt_notice（dprompt.m 提供的提示条；输入工作台不编 dprompt.m，取不到就不提示）
+void s2a_dprompt_notice(NSString *title, NSString *body, double delay, double seconds) __attribute__((weak_import));
 void s2a_ios_crash_session_begin(NSString *gid, BOOL prev_clean) {
     if (!gid.length) return;
     NSUserDefaults *d = s2a_ios_settings_defaults_for(gid);
@@ -298,7 +299,7 @@ void s2a_ios_crash_session_begin(NSString *gid, BOOL prev_clean) {
         [d removeObjectForKey:@"S2ACrashAutoOff"];
         NSString *joined = [names componentsJoinedByString:S2AL(@"common.listSeparator")];
         LOG("崩溃恢复：App 换了版本（%s → %s），重开上次崩溃时自动关掉的 %s", [ao[@"ver"] UTF8String], app_version().UTF8String, joined.UTF8String);
-        if (names.count) s2a_dprompt_notice(S2AL(@"crash.restored.title"), [NSString stringWithFormat:S2AL(@"crash.restored.body"), joined], 3, 8);
+        if (names.count && s2a_dprompt_notice) s2a_dprompt_notice(S2AL(@"crash.restored.title"), [NSString stringWithFormat:S2AL(@"crash.restored.body"), joined], 3, 8);
     }
     NSArray *last = [d arrayForKey:@"S2ACrashSessionOn"];
     if (prev_clean && last) [d setObject:last forKey:@"S2ACrashGoodOn"];

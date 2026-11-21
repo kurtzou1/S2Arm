@@ -83,9 +83,9 @@ src=(android/tests/vk/t_pool_table.c android/native/nvn/backend_vulkan.c android
 for i in "${!src[@]}"; do src[$i]="$repo/${src[$i]}"; done
 if [ -n "$mode" ]; then
     cp "$repo/android/native/nvn/backend_vulkan.c" "$out/mutant.c"
-    python3 - "$repo/android/native/nvn/backend_vulkan_pool.inc" "$out/backend_vulkan_pool.inc" "$mode" <<'PYMUT'
+    python3 - "$repo/android/native/nvn/backend_vulkan_pool.inc" "$out/backend_vulkan_pool.inc" "$mode" "$out/mutant.c" <<'PYMUT'
 import pathlib, sys
-src, dst, mode = sys.argv[1:]
+src, dst, mode, cpath = sys.argv[1:]
 s = pathlib.Path(src).read_text()
 mutations = {
  '-neg-image': ('t->images[i].imageView = v->view;', 't->images[i].imageView = (i == 64 ? dv : v)->view;'),
@@ -102,11 +102,57 @@ mutations = {
  '-neg-aggregate': ('if (limit) { pool_cmd_unref(c, t); return pool_bind_error(c, err, NVN_GPU_E_UNSUPPORTED, limit); }', 'if (0 && limit) { pool_cmd_unref(c, t); return pool_bind_error(c, err, NVN_GPU_E_UNSUPPORTED, limit); }'),
  '-neg-sampler-resource': ('d->kind == NVN_GPU_POOL_IMAGE && (uint64_t)d->count + 1 > l->maxPerStageResources', '(uint64_t)d->count + 1 > l->maxPerStageResources'),
  '-neg-preflight': ('if (pool_shader_source(compute)) return pool_pipeline_limit(p, graphics);', 'if (0 && pool_shader_source(compute)) return pool_pipeline_limit(p, graphics);'),
+ # 整池组备忘（nvk_pool_memo）：键里不放池快照序号 → 换了快照却命中旧组
+ '-neg-memo-key': ('info[e->set].k1 += pool_key_mix1(e->binding, t->uid); info[e->set].k2 += pool_key_mix2(e->binding, t->uid);',
+                   'info[e->set].k1 += pool_key_mix1(e->binding, 0); info[e->set].k2 += pool_key_mix2(e->binding, 0);'),
+ # 整池组回收（nvk_pool_rec）：取组时不核键（任何空闲组都当「键相同」）→ 换了采样器 / 贴图池快照却不重写，读到旧内容
+ '-neg-rec-key': ('if (b->free[i]->k1 == si->k1 && b->free[i]->k2 == si->k2) { at = i; hit = 1; break; }', 'if (1) { at = i; hit = 1; break; }'),
+ # 整表写完不记键 → 空闲串里的组永远对不上，第二段还是整表重写
+ '-neg-rec-mark': ('c->prs_use[uidx].rs->k1 = si->k1; c->prs_use[uidx].rs->k2 = si->k2;', '(void)c; (void)uidx; (void)si;'),
+ # 键不同的空闲组也当「内容就绪」不写整表 → 里面还是上一张表的内容，读到旧的采样 / 贴图
+ '-neg-rec-valid': ('*uidx = c->prs_n++; *out = rs->set; *valid = hit;', '*uidx = c->prs_n++; *out = rs->set; *valid = hit || !reserve;'),
+ # 总量不按字节封顶（放得下放不下都新建）
+ '-neg-rec-cap': ('if (g_prs_bytes + nb > g_prs_cap) { why = 2; b = NULL; }', 'if (0) { why = 2; b = NULL; }'),
+ # 空闲不封顶
+ '-neg-rec-keep': ('if (!g_prs_closed && rs->bytes <= g_prs_idle_cap) {', 'if (!g_prs_closed) {'),
+ # 字节估算不乘每项字节数（只数了描述符项数）→ 账上的字节和估算公式对不上，封顶也就失准
+ '-neg-rec-bytes': ('return bytes < PRS_GROUP_MIN_BYTES ? PRS_GROUP_MIN_BYTES : bytes;', '(void)bytes; return n < PRS_GROUP_MIN_BYTES ? PRS_GROUP_MIN_BYTES : n;'),
+ # 淘汰挑了空闲串里最新放回的、不是最久没用的 → 留下的是老组
+ '-neg-rec-lru': ('    struct pool_rs *rs = ob->free[0];\n    memmove(ob->free, ob->free + 1, (size_t)(ob->nfree - 1) * sizeof *ob->free);\n    ob->nfree--;',
+                  '    struct pool_rs *rs = ob->free[ob->nfree - 1];\n    ob->nfree--;'),
+ # 跨布局淘汰不比 seq（只拿第一个有空闲组的布局的头）→ 刚放回的小组被淘汰、更老的大组留着
+ '-neg-rec-global': ('if (b->nfree && (!ob || b->free[0]->seq < ob->free[0]->seq)) ob = b;', 'if (b->nfree && !ob) ob = b;'),
+ # 向驱动新建放不下时不淘汰空闲组（别的布局占着空闲组也直接退回老路径）
+ '-neg-rec-evict-take': ('for (struct pool_rs *ev; g_prs_bytes + nb > g_prs_cap && (ev = prs_evict_oldest_locked()); ) { ev->next = dead; dead = ev; }', ';'),
+ # 放回空闲串时空闲超封顶不淘汰（空闲越攒越多）
+ '-neg-rec-evict-rel': ('for (struct pool_rs *ev; g_prs_idle_bytes + rs->bytes > g_prs_idle_cap && (ev = prs_evict_oldest_locked()); ) { ev->next = dead; dead = ev; }', ';'),
+ # 缺省空闲封顶又设回总量的一半 → 一帧用到的组一起放回空闲串，比一帧的用量还小（真机重场景每帧淘汰 14–30 组又新建）；缺省封顶读数对不上
+ '-neg-rec-default-half': ('g_prs_cap = (uint64_t)mb << 20; g_prs_idle_cap = g_prs_cap;', 'g_prs_cap = (uint64_t)mb << 20; g_prs_idle_cap = g_prs_cap / 2;'),
+ # 放回时按空闲封顶的一半淘汰 → 一帧用到的组数等于封顶能放的组数时，每帧都淘汰又新建
+ '-neg-rec-keep-half': ('g_prs_idle_bytes + rs->bytes > g_prs_idle_cap && (ev = prs_evict_oldest_locked())', 'g_prs_idle_bytes + rs->bytes > g_prs_idle_cap / 2 && (ev = prs_evict_oldest_locked())'),
 }
-if mode not in mutations: raise SystemExit('unknown pool mutation: ' + mode)
-a, b = mutations[mode]
-if s.count(a) != 1: raise SystemExit('pool mutation anchor changed: ' + mode)
-pathlib.Path(dst).write_text(s.replace(a, b))
+# 下面几条改的是 backend_vulkan.c（已拷成 mutant.c），.inc 原样放过去
+cmutations = {
+ # 整池组永不命中 = 修前的行为：同键第二笔还是新建 + 整池重写
+ '-neg-memo-miss': ('if (m->h1 == h1[set] && m->h2 == h2[set] && m->dsl == p->dsl[set])', 'if (!(pool_dirty >> set & 1) && m->h1 == h1[set] && m->h2 == h2[set] && m->dsl == p->dsl[set])'),
+ # 开关 nvk_pool_memo=0 不起作用
+ '-neg-memo-flag': ('(g_pmemo_cur && !pool_fb)', '(1 && !pool_fb)'),
+ # 整池组的键里不放这一笔的普通绑定 → 换了输出缓冲却命中旧组，第二块输出缓冲没人写
+ '-neg-memo-binding': ('for (int k = 0; k < 5; k++) { h1[set] = (h1[set] ^ v[k])', 'for (int k = 0; k < 5 && !(pool_dirty >> set & 1); k++) { h1[set] = (h1[set] ^ v[k])'),
+ # 开关 nvk_pool_rec=0 不起作用
+ '-neg-rec-flag': ('const int rec = g_prs_cur && pool_dirty &&', 'const int rec = 1 && pool_dirty &&'),
+}
+if mode not in mutations and mode not in cmutations: raise SystemExit('unknown pool mutation: ' + mode)
+if mode in mutations:
+    a, b = mutations[mode]
+    if s.count(a) != 1: raise SystemExit('pool mutation anchor changed: ' + mode)
+    pathlib.Path(dst).write_text(s.replace(a, b))
+else:
+    a, b = cmutations[mode]
+    cs = pathlib.Path(cpath).read_text()
+    if cs.count(a) != 1: raise SystemExit('pool mutation anchor changed: ' + mode)
+    pathlib.Path(cpath).write_text(cs.replace(a, b))
+    pathlib.Path(dst).write_text(s)
 PYMUT
     src[1]="$out/mutant.c"
 fi
@@ -132,6 +178,23 @@ if [ -n "$mode" ]; then
         -neg-aggregate) expected='aggregate stage resources 66 images' ;;
         -neg-sampler-resource) expected='samplers must not count against maxPerStageResources' ;;
         -neg-preflight) expected='small pool pipeline aggregate 64 images'  ;;
+        -neg-memo-key) expected='pool memo table change output\[10\]' ;;
+        -neg-memo-miss) expected='pool memo same key: need/hit/made/elems expected 2/1/1/132' ;;
+        -neg-memo-flag) expected='pool memo off: need/hit/made/elems expected 2/0/2/264' ;;
+        -neg-memo-binding) expected='pool memo binding change second output\[0\]' ;;
+        -neg-rec-key) expected='pool rec stale sampler: need/memohit/oldnew/elems/rec-hit/miss/new/fallback expected 2/1/0/132/0/1/0/0' ;;
+        -neg-rec-mark) expected='pool rec warm: need/memohit/oldnew/elems/rec-hit/miss/new/fallback expected 2/1/0/0/1/0/0/0' ;;
+        -neg-rec-valid) expected='pool rec stale sampler: need/memohit/oldnew/elems/rec-hit/miss/new/fallback expected 2/1/0/132/0/1/0/0' ;;
+        -neg-rec-cap) expected='pool rec cap: need/memohit/oldnew/elems/rec-hit/miss/new/fallback expected 2/0/1/264/0/0/1/1' ;;
+        -neg-rec-keep) expected='pool rec keep: total/idle expected 0/0' ;;
+        -neg-rec-bytes) expected='pool rec bytes: total/idle bytes expected' ;;
+        -neg-rec-lru) expected='pool rec lru keeps second' ;;
+        -neg-rec-global) expected='pool rec global lru evict: total/idle/bytes/evicted expected' ;;
+        -neg-rec-evict-take) expected='pool rec cross evict small: need/memohit/oldnew/elems/rec-hit/miss/new/fallback expected 1/0/0/128/0/0/1/0' ;;
+        -neg-rec-evict-rel) expected='pool rec lru: total/idle/bytes/evicted expected 2/2/' ;;
+        -neg-rec-default-half) expected='pool rec default caps: total/idle caps expected 384 MB/equal' ;;
+        -neg-rec-keep-half) expected='pool rec steady frame 2+: need/memohit/oldnew/elems/rec-hit/miss/new/fallback expected 3/0/0/0/3/0/0/0' ;;
+        -neg-rec-flag) expected='pool rec off: need/memohit/oldnew/elems/rec-hit/miss/new/fallback expected 2/1/1/132/0/0/0/0' ;;
         *) exit 2 ;;
     esac
     grep -q "FAIL .*${expected}" "$out/run.log" || { echo "mutation $mode failed somewhere else" >&2; exit 1; }

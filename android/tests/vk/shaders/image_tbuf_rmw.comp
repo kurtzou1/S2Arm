@@ -1,0 +1,5 @@
+#version 450
+// 回放 imageBuffer 夹具（t_replay_image_tbuf.c）：每个元素读出 v、写回 3v + 1（读写同一个存储纹素缓冲）
+layout(local_size_x = 4, local_size_y = 1, local_size_z = 1) in;
+layout(r32ui, set = 0, binding = 0) uniform uimageBuffer ib;
+void main() { int i = int(gl_GlobalInvocationID.x); uint v = imageLoad(ib, i).x; imageStore(ib, i, uvec4(v * 3u + 1u)); }

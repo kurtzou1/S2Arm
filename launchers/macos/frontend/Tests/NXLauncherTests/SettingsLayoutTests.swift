@@ -1306,6 +1306,35 @@ import S2ArmAppleAdapter
         }
     }
 
+    /// 游戏库「…」菜单有「导出 S2Arm.ipa」（11-21 维护者：不连手机、不经总控台也能拿到本版 S2Arm.ipa），点了发的是不连手机的导出作业。
+    ///   不开窗：核菜单的项目表、执行这一项的动作看作业请求；离屏 NSHostingView 出图核画得出来（S2A_SETTINGS_SHOTS 给目录就存 PNG）
+    func testHomeMoreMenuOffersShellIpaExportWithoutWindow() async throws {
+        _ = NSApplication.shared
+        let fixture = try SettingsFixture()
+        defer { fixture.remove() }
+        for language in [Lang.zh, .en] {
+            let menu = HomeMoreMenu(model: fixture.model, loc: Localizer(language), dismiss: {})
+            let item = try XCTUnwrap(menu.items.first { $0.id == "home.exportShellIpa" }, "更多菜单里有「导出 S2Arm.ipa」")
+            XCTAssertEqual(item.title, language == .zh ? "导出 S2Arm.ipa" : "Export S2Arm.ipa")
+            XCTAssertFalse(item.disabled, "不连手机也能点")
+        }
+        let menu = HomeMoreMenu(model: fixture.model, loc: Localizer(.zh), dismiss: {})
+        try XCTUnwrap(menu.items.first { $0.id == "home.exportShellIpa" }).action()
+        for _ in 0..<200 where !fixture.runner.requests.contains(where: { $0["operation"] as? String == "installUpdate" }) { try await Task.sleep(for: .milliseconds(10)) }
+        let request = try XCTUnwrap(fixture.runner.requests.first { $0["operation"] as? String == "installUpdate" }, "点了发出更新 / 导出作业")
+        XCTAssertEqual(request["mode"] as? String, "export", "走导出：只出不带游戏的通用 S2Arm.ipa（export_shell_ipa）")
+        XCTAssertNil(request["device"], "不指定手机：不依赖手机登记")
+        let host = NSHostingView(rootView: menu.environment(\.padControls, fixture.navigation))
+        host.frame = CGRect(x: 0, y: 0, width: 240, height: 120)
+        host.layoutSubtreeIfNeeded()
+        let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+        host.cacheDisplay(in: host.bounds, to: bitmap)
+        if let output = ProcessInfo.processInfo.environment["S2A_SETTINGS_SHOTS"] {
+            try bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: output).appendingPathComponent("home-more-menu.png"))
+        }
+        XCTAssertGreaterThan(bitmap.pixelsWide, 0)
+    }
+
     func testHomeSearchControllerOpensKeyboardAndRestoresTextFocus() async throws {
         let fixture = try SettingsFixture()
         defer { fixture.remove() }

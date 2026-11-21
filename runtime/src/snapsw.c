@@ -9,8 +9,22 @@ static int g_snap_sw = -1;   // 位 0 能存、位 1 恢复中
 static _Atomic int g_snap_live = -1;
 // 能存：苹果端缺省开（0.6.0：玩家要真能用快照，设置里能关），S2A_SNAP_MODE=0 关（iPhone App / Mac 启动器作业层按玩家设置写）；
 //   安卓不编快照引擎，恒关（设了 1 也不开）
+// iOS 上玩家在设置里关快照（键 S2ASnapshot = NO）：原先只由 ios/settings.m 在开局时（host_main → s2a_ios_load_graphics_settings）写 S2A_SNAP_MODE=0，
+//   而这个开关在进程启动的构造期（vawin.c vawin_boot：命令记录区 / 虚拟池区占不占、占多大）就第一次读并缓存了，玩家关了也照开、地址照占（11-21 #f0490a 读码）。
+//   启动环境没给 S2A_SNAP_MODE 时直接读设置（同 settings.m 的口径：显式存过且为假才关；启动环境 > 用户设置）
+#if defined(__APPLE__)
+// ios/settings.m 给强定义（读 NSUserDefaults 的 S2ASnapshot：显式存过且为假 → 1）；Mac 宿主不链它（启动器作业层按玩家设置写 S2A_SNAP_MODE），用下面的弱缺省
+int s2a_ios_snap_pref_off(void);
+#ifndef S2A_SNAPSW_TEST   // 单测（t_snapsw.c）自己给替身
+__attribute__((weak)) int s2a_ios_snap_pref_off(void) { return 0; }   // 弱缺省：Mac 宿主 / 只链运行时的单测没有 ios/settings.m，按没关
+#endif
+static int snap_pref_off(void) { return s2a_ios_snap_pref_off(); }
+#endif
+static const char *g_snap_src = "缺省";   // 「能存」这一位按什么定的（构造期日志 / 诊断用）
 static int snap_save_on(const char *m) {
 #if defined(__APPLE__)
+    if (!(m && *m)) { int off = snap_pref_off(); g_snap_src = off ? "玩家设置（关）" : "缺省"; return !off; }
+    g_snap_src = "启动环境 S2A_SNAP_MODE";
     return !(m && *m == '0');
 #else
     (void)m; return 0;
@@ -25,6 +39,12 @@ static int snap_sw(void) {
 static int g_snap_off;
 void s2a_snap_disable(int why) { snap_sw(); g_snap_sw &= ~1; g_snap_off = why; atomic_store(&g_snap_live, 0); }
 int s2a_snap_off_reason(void) { return g_snap_off; }
+// 构造期因 why 关掉的快照，选定游戏后又放得下（vawin.c s2a_window_snap_late，11-21）：玩家本来开着快照才重新打开，清原因码，「记日志」按新状态重算。回 1 = 重新打开了
+int s2a_snap_reenable(int why) {
+    if (!why || g_snap_off != why || !snap_save_on(getenv("S2A_SNAP_MODE"))) return 0;
+    snap_sw(); g_snap_sw |= 1; g_snap_off = 0; atomic_store(&g_snap_live, -1); return 1;
+}
+const char *s2a_snap_source(void) { snap_sw(); return g_snap_src; }
 int s2a_snap_saving(void) { return snap_sw() & 1; }
 // 恢复中：每次现读 S2A_SNAP_RESTORE。进程内「回到这一刻」在宿主重启前才设它、恢复完 unsetenv，开局缓存的那一位跟不上——
 //   iPhone 上重建时把这一局当成不在恢复，按本款学到的跨度收了窗口（59392 → 8192 MB），快照核对「窗口不符」拒绝恢复

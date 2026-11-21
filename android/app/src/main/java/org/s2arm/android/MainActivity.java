@@ -141,13 +141,11 @@ public class MainActivity extends Activity
                 return;
             }
             gameLifecycle("created");
-            if (Build.VERSION.SDK_INT >= 24) getWindow().setSustainedPerformanceMode(true);
-            if (Build.VERSION.SDK_INT >= 31) {
-                android.app.GameManager manager = getSystemService(android.app.GameManager.class);
-                if (manager != null) android.util.Log.i("S2Arm", "game mode=" + manager.getGameMode());
-            }
+            getWindow().setSustainedPerformanceMode(true);
+            android.app.GameManager gameManager = getSystemService(android.app.GameManager.class);
+            if (gameManager != null) android.util.Log.i("S2Arm", "game mode=" + gameManager.getGameMode());
             GameSession.clearDirectCache = getIntent().getBooleanExtra("s2arm.clear_direct_cache", false);
-            if (Build.VERSION.SDK_INT >= 30 && getIntent().getBooleanExtra(GameActivity.LIFECYCLE_TEST_EXTRA,false)
+            if (getIntent().getBooleanExtra(GameActivity.LIFECYCLE_TEST_EXTRA,false)
                     && (getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
                 try {
                     int pid = android.os.Process.myPid();
@@ -164,11 +162,9 @@ public class MainActivity extends Activity
                     gameLifecycle("process-birth-failed " + error);
                 }
             }
-            if (Build.VERSION.SDK_INT >= 33) {
-                gameBackCallback = this::onGameBack;
-                getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
-                    android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, gameBackCallback);
-            }
+            gameBackCallback = this::onGameBack;
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, gameBackCallback);
             // A5/#163 读数落 logcat（采集的 logcat.txt）：数值变化才写一行，插电时
             // unavailable 只在状态变化时报一次；rails 是 Android 15+ 的 CPU/GPU 轨功耗
             //（插电也可读），event 是低频原始值行（保留电流原号，供真机对账）。
@@ -276,14 +272,9 @@ public class MainActivity extends Activity
             updateFrameRate(getIntent());
         }
         root.setOnApplyWindowInsetsListener((view, insets) -> {
-            if (Build.VERSION.SDK_INT >= 30) {
-                android.graphics.Insets bars = insets.getInsets(
-                    android.view.WindowInsets.Type.systemBars() | android.view.WindowInsets.Type.displayCutout());
-                windowInsets[0] = bars.left; windowInsets[1] = bars.top; windowInsets[2] = bars.right; windowInsets[3] = bars.bottom;
-            } else {
-                windowInsets[0] = insets.getSystemWindowInsetLeft(); windowInsets[1] = insets.getSystemWindowInsetTop();
-                windowInsets[2] = insets.getSystemWindowInsetRight(); windowInsets[3] = insets.getSystemWindowInsetBottom();
-            }
+            android.graphics.Insets bars = insets.getInsets(
+                android.view.WindowInsets.Type.systemBars() | android.view.WindowInsets.Type.displayCutout());
+            windowInsets[0] = bars.left; windowInsets[1] = bars.top; windowInsets[2] = bars.right; windowInsets[3] = bars.bottom;
             panel.setPadding(pad + windowInsets[0], pad + windowInsets[1], pad + windowInsets[2], pad);
             if (touchPad != null) touchPad.setInsets(windowInsets[0], windowInsets[1], windowInsets[2], windowInsets[3]);
             fpsLayout.topMargin = windowInsets[1];
@@ -1082,19 +1073,13 @@ public class MainActivity extends Activity
         else if (host != 0) NativeBridge.destroy(host);
         host = 0;
         if (library != null) library.close();
-        if (Build.VERSION.SDK_INT >= 33 && gameBackCallback != null)
+        if (gameBackCallback != null)
             getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(gameBackCallback);
         if (current == this) current = null;
         super.onDestroy();
     }
     private void onGameBack() { stopGame("back requested", true); }
 
-    // API 29-32 use onBackPressed; API 33+ is registered with the predictive-back dispatcher above.
-    @android.annotation.SuppressLint("GestureBackNavigation")
-    @Override public void onBackPressed() {
-        if (gameMode) stopGame("back requested", true);
-        else super.onBackPressed();
-    }
     @Override public void onWindowFocusChanged(boolean focused) {
         super.onWindowFocusChanged(focused);
         if (!focused) clearInput();
@@ -1109,22 +1094,12 @@ public class MainActivity extends Activity
         if (!gameMode || gameStopping || surface == null) return;
         surface.setKeepScreenOn(true);
         android.view.Window window = getWindow();
-        if (Build.VERSION.SDK_INT >= 30) {
-            window.setDecorFitsSystemWindows(false);
-            android.view.WindowInsetsController controller = window.getInsetsController();
-            if (controller != null) {
-                controller.setSystemBarsBehavior(
-                    android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
-                controller.hide(android.view.WindowInsets.Type.systemBars());
-            }
-        } else {
-            window.getDecorView().setSystemUiVisibility(
-                android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                | android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                | android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                | android.view.View.SYSTEM_UI_FLAG_FULLSCREEN
-                | android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                | android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+        window.setDecorFitsSystemWindows(false);
+        android.view.WindowInsetsController controller = window.getInsetsController();
+        if (controller != null) {
+            controller.setSystemBarsBehavior(
+                android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            controller.hide(android.view.WindowInsets.Type.systemBars());
         }
     }
     @Override public void onInputDeviceAdded(int id) { updateTouchPad(); publishPhoneFeedback(); }

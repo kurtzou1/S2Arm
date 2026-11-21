@@ -104,10 +104,18 @@ ios_want = ["manifest.json", "logs/host.log", "logs/host-20261116-120000.log", "
             f"shaders/{A}_aaaaaaaaaaaaaaaa.inflight.ctl", f"shaders/{A}_aaaaaaaaaaaaaaaa.inflight.code", f"shaders/{A}_bbbbbbbbbbbbbbbb.fail.ctl",
             f"shaders/{A}_bbbbbbbbbbbbbbbb.fail.code", f"shaders/{A}_cccccccccccccccc_b.slow.metal", f"shaders/{B}_dddddddddddddddd_b.slow.metal",
             "diagrun/app_shot.png", f"diagrun/{A}_frame.PNG", f"pso/{A}.tsv", f"pso/{B}.tsv", f"shader_miss/{A}.tar", f"shader_miss/{B}.tar"]
+# 往局日志里一行被按字节截在汉字中间（宿主直连层统计行截进定长缓冲，现场「写回原\xe5\x80」）：原先一个坏字节就让整份按 Latin-1 解、中文全成二次编码乱码。
+#   期望（手写）：别的行逐字节不变，坏的那截换成一个 U+FFFD
+cn_ok1, cn_bad, cn_ok2 = "[s2a] 开发设施：关（玩家口径）\n".encode(), b"[dm] \xe5\x86\x99\xe5\x9b\x9e\xe5\x8e\x9f\xe5\x80\n", "[s2a] 地址窗口：多款容器 要 70124 MB\n".encode()
+put("logs/host-20261115-090000.log", cn_ok1 + cn_bad + cn_ok2)
 r = subprocess.run([str(T / "collect"), str(D), str(T / "ios_work"), str(T / "ios.zip")], capture_output=True, text=True)
 ck("② iOS 收成员 + 写 zip 成功", r.returncode == 0, r.stderr.strip())
 if r.returncode == 0:
     judge_zip("② iOS（ios/diagcollect.m）", (T / "ios.zip").read_bytes(), ios_want)
+    with zipfile.ZipFile(T / "ios.zip") as z:
+        got_cn = z.read("logs/host-20261115-090000.log")
+    ck("② 中文日志带一处截断的半个汉字：其余行逐字节不变、坏的那截换成一个 U+FFFD（不再整份二次编码）",
+       got_cn == cn_ok1 + "[dm] 写回原\ufffd\n".encode() + cn_ok2, repr(got_cn[:160]))
 
 # ③ Mac / Windows：真跑上传作业，本机回环假服务收包（同 pack/jobs/tests/test_diag_upload.py 的做法，不联外网）
 sys.path.insert(0, str(H / "pack/jobs/tests")); sys.path.insert(0, str(H / "pack/jobs"))

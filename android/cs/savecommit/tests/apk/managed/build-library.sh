@@ -30,7 +30,7 @@ case $(uname -s) in Linux) HOST=linux-x86_64;; Darwin) HOST=darwin-x86_64;; *) e
 N=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$HOST/bin
 export PATH="$N:$PATH" DOTNET_PROCESSOR_COUNT=2
 mkdir -p "$BUILD_DIR/managed" "$BUILD_DIR/lib/arm64-v8a"
-"$N/aarch64-linux-android29-clang" -std=c11 -O2 -g -fPIC -Wall -Wextra -Werror -Wpedantic \
+"$N/aarch64-linux-android34-clang" -std=c11 -O2 -g -fPIC -Wall -Wextra -Werror -Wpedantic \
     -c "$ROOT/android/native/s2a_savecommit.c" -o "$BUILD_DIR/managed/production.o"
 # No restore here: preparation is explicit and never runs inside an offline gate.
 "$DOTNET" publish "$PROJECT" -c Release -r linux-bionic-arm64 --no-restore \
@@ -39,7 +39,7 @@ mkdir -p "$BUILD_DIR/managed" "$BUILD_DIR/lib/arm64-v8a"
     -p:SaveCommitNativeObject="$BUILD_DIR/managed/production.o" \
     -o "$BUILD_DIR/managed/publish" --nologo
 cp "$BUILD_DIR/managed/publish/libs2a_savecommit_managed.so" "$BUILD_DIR/lib/arm64-v8a/"
-"$N/aarch64-linux-android29-clang" -std=c11 -O2 -g -fPIC -shared -Wall -Wextra -Werror -Wpedantic \
+"$N/aarch64-linux-android34-clang" -std=c11 -O2 -g -fPIC -shared -Wall -Wextra -Werror -Wpedantic \
     -DS2ARM_SOURCE_COMMIT=\""$S2ARM_SOURCE_ID"\" \
     -DJNI_ENTRY=Java_org_s2arm_probe_savecommit_moongrant_ManagedInstrumentation_nativeRun \
     "$HERE/../native/runner.c" "$HERE/bridge.c" \

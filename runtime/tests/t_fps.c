@@ -115,6 +115,26 @@ int main(void) {
         }
         int ws = 0; waitpid(p, &ws, 0); expect("超长行子进程：不符项数", 0, WIFEXITED(ws) ? WEXITSTATUS(ws) : -1);
     }
+    // UTF-8 BOM 开头的表（11-21 D-FE44：玩家 mod 目录里 Windows 记事本存的 fps.tsv，首行「BOM # 注释」报「不认的行」红）。各在子进程里起一次，期望手写：
+    //   ① 首行「BOM # 注释」：不报「不认的行」、slot 2045 写 11；② 首行「BOM build …」：照认、不报「整表不用」、slot 2045 写 11。旧实现：①有红；②整表不用、2045 仍 0
+    static const char *bom_tab[2] = {"\xEF\xBB\xBF# 记事本存的表\nbuild 1234abcd5678ef00\nslot 2045 i32 11\n", "\xEF\xBB\xBF" "build 1234abcd5678ef00\nslot 2045 i32 11\n"};
+    for (int i = 0; i < 2; i++) {
+        fflush(stdout); pid_t p = fork(); if (p < 0) return 1;
+        if (!p) {
+            fails = 0; dm_fps_state = NULL; setenv("S2A_FSTEP", "0", 1); setenv("S2A_FPS60", "1", 1);
+            char d5[] = "/tmp/t_fps_bom_XXXXXX"; if (!mkdtemp(d5)) _exit(99);
+            char p5[256]; snprintf(p5, sizeof p5, "%s/fps.tsv", d5); FILE *f5 = fopen(p5, "w"); fputs(bom_tab[i], f5); fclose(f5);
+            char lg[256]; snprintf(lg, sizeof lg, "%s/err.log", d5); fflush(stderr); int se = dup(2); FILE *ef = fopen(lg, "w"); dup2(fileno(ef), 2);
+            s2a_fps_start(d5); wait_round(); fflush(stderr); dup2(se, 2); fclose(ef);
+            FILE *rf = fopen(lg, "r"); char buf[8192] = ""; size_t nr = rf ? fread(buf, 1, sizeof buf - 1, rf) : 0; buf[nr] = 0; if (rf) fclose(rf);
+            int32_t s5; memcpy(&s5, img + 0x4000 + 2045 * 8, 4);
+            expect(i ? "BOM②：首行「BOM build …」不报「不认的行」" : "BOM①：首行「BOM # 注释」不报「不认的行」", 0, strstr(buf, "不认的行") != NULL);
+            expect(i ? "BOM②：不报「整表不用」" : "BOM①：不报「整表不用」", 0, strstr(buf, "整表不用") != NULL);
+            expect(i ? "BOM②：照常写 slot 2045 = 11" : "BOM①：照常写 slot 2045 = 11", 11, s5);
+            fflush(stdout); _exit(fails);
+        }
+        int ws = 0; waitpid(p, &ws, 0); expect("BOM 子进程：不符项数", 0, WIFEXITED(ws) ? WEXITSTATUS(ws) : -1);
+    }
     // 起局开关只认 S2A_FPS60（#619 F-fps-cap-disables-table）：起局状态是进程级的，每种组合在子进程里起一次；表目录不存在 = 只走开关那一步。期望手写：
     //   帧率上限 S2A_FPS=30、S2A_FPS60 未设 → 关 0（11-11：默认原帧率、玩家手动开）；S2A_FPS60=0 → 关 0；S2A_FPS=30 且 S2A_FPS60=1 → 开 1；S2A_FPS=120 且 S2A_FPS60=0 → 关 0；
     //   S2A_FPS60=00（不是整串 1）→ 关 0

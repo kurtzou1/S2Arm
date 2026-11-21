@@ -564,7 +564,11 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
             var at = new Dictionary<string, string>();
             foreach (var (t, sd) in tg)
                 try { sd.Put(name + ".metallib", Metal.Compile(t, src, name, out var mk)); at[t] = mk; }
-                catch (CompileError e) { return $"{t}: {Trunc(e.Message, 160)}"; }
+                catch (CompileError e)
+                {
+                    Say($"[unity] batch {name} ({ks.Count} keys, {src.Length / 1024} KB) {t} {(e is CompileTimeout ? "timed out" : "failed")}, building key by key next: {Trunc(e.Message, 160)}");
+                    return $"{t}: {Trunc(e.Message, 160)}";
+                }
             Unity.ReuseIndex.Record("u", name, at, Metal.IdentHex, ks.Select(k => (Dg(k), Dg(k), Text(k))).ToList());   // 记下这批的成员：下次翻译器改了、这些键 MSL 没变就整批拿来
             return null;
         }
@@ -636,11 +640,16 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
         // 进度按待编源码 MB 计，不按批数：Metal 编译耗时与源码字节成正比（11-04 Spare-host 实测 0.14 → 7.6 → 24.5 秒 / 0.06 → 12 → 39 MB），批又是大的先编，
         //   按批数外推把开头的大批当常态（Pokopia 2,696 批：头 105 批是批数的 4%、字节的 17%，编到这里报「还剩 11 小时」，按字节与实测吞吐折算约 2.2 小时）。拿来的批不编、不计
         int Mb(long n) => (int)Math.Max(1, (n + (1 << 20) - 1) >> 20);
-        var jobs = reuse.Values.Select(h => (Run: (Action)(() => Reused(h, false)), Mb: 0)).Concat(vinReuse.Values.Select(h => (Run: (Action)(() => Reused(h, true)), Mb: 0)))
-            .Concat(units.Select(b => (Run: (Action)(() => OneBatch(b)), Mb: Mb(b.Sum(k => plan.Len[k]))))).Concat(vinPlanOrder.Select(b => (Run: (Action)(() => VinOne(b)), Mb: Mb(b.Sum(k => Unity.PyLen(vinSrc[k])))))).ToList();
+        var jobs = reuse.Values.Select(h => (Run: (Action)(() => Reused(h, false)), Mb: 0, Name: "reused " + h.Name)).Concat(vinReuse.Values.Select(h => (Run: (Action)(() => Reused(h, true)), Mb: 0, Name: "reused vin " + h.Name)))
+            .Concat(units.Select(b => (Run: (Action)(() => OneBatch(b)), Mb: Mb(b.Sum(k => plan.Len[k])), Name: $"u{Dg(b[0])} ({b.Count} keys)"))).Concat(vinPlanOrder.Select(b => (Run: (Action)(() => VinOne(b)), Mb: Mb(b.Sum(k => Unity.PyLen(vinSrc[k]))), Name: $"vin {Dg(b[0])} ({b.Count} keys)"))).ToList();
         int lanes = jobs.Any(j => j.Mb > 0) ? LiveLanes("编批库") : NJ; using var wide = Metal.Widen(lanes, jobs.Any(j => j.Mb > 0) ? "编批库" : null);   // 全拿缓存（没有要编的批）不读内存、不打行；先于 Ticker：活动记录报放宽后的路数
         using var tk = new Ticker("直连库·编批库（MB）", jobs.Sum(j => j.Mb));
-        Parallel.ForEach(InOrder(jobs), new ParallelOptions { MaxDegreeOfParallelism = Pool(lanes) }, j => { j.Run(); tk.Step(j.Mb); });   // 大的先编；拼源码与回填在多出的那些线程里做，Metal 不断粮
+        // 一项编了很久当场记一行（0400A3A01EE4C000 Windows 出包：编批库一小时一批都没编完、被无进展看门狗停掉，日志里一行都没有，定不了是哪批）
+        Parallel.ForEach(InOrder(jobs), new ParallelOptions { MaxDegreeOfParallelism = Pool(lanes) }, j =>
+        {
+            var sw = Stopwatch.StartNew(); j.Run(); tk.Step(j.Mb);
+            if (sw.Elapsed.TotalSeconds >= SlowJobS) Say($"[unity] slow: {j.Name}, {j.Mb} MB, {sw.Elapsed.TotalSeconds:F0} s");
+        });   // 大的先编；拼源码与回填在多出的那些线程里做，Metal 不断粮
         var vinOrder = vinPlanOrder;
         if (!failed.IsEmpty)
         {
@@ -770,12 +779,19 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
         long avail = AvailMb();
         if (avail <= 0) return NJ;
         int jobs = Env("S2A_JOBS", Environment.ProcessorCount), peak = Env("S2A_DIRECT_METAL_PEAK_MB", 1065), p90 = Env("S2A_DIRECT_METAL_P90_MB", 420);
-        int lanes = Math.Max(NJ, (int)Math.Min(jobs, 1 + Math.Max(0, avail / 2 - peak) / p90));
+        // 可以收窄到 -j 以下（D-CMAE，Windows 15 GB 王国之泪：-j 是开工那一刻按空闲内存定的 12 路，出到后段主进程已很大，照开 12 路 metal，
+        //   提交内存用尽，连解压一块缓存都申请不到、出库失败）；至少 1 路
+        int lanes = (int)Math.Max(1, Math.Min(jobs, 1 + Math.Max(0, avail / 2 - peak) / p90));
         Say($"{phase}：{lanes} 路编（-j {NJ}；此刻空闲内存 {avail} MB 的一半按 metal 峰值 {peak} MB + 每路 p90 {p90} MB 重算，上限本单 {jobs} 核）");
         return lanes;
     }
     // 工作线程数：编译路数由 Metal 的闸管，线程按「本单核数 × 2」开（段内放宽后线程够用；拼源码、回填在多出的线程里做，Metal 不断粮）；不比 lanes × 2 少
+    // 编批库里一项超过这么多秒当场记一行（S2A_UNITY_SLOW_S 可改；正常一批零点几秒到几秒）
+    static readonly int SlowJobS = int.TryParse(Environment.GetEnvironmentVariable("S2A_UNITY_SLOW_S"), out var s) && s > 0 ? s : 120;
     static int Pool(int lanes) { int j = int.TryParse(Environment.GetEnvironmentVariable("S2A_JOBS"), out var v) && v > 0 ? v : Environment.ProcessorCount; return Math.Max(lanes, j) * 2; }
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    struct MemStatus { public uint Length, MemoryLoad; public ulong TotalPhys, AvailPhys, TotalPageFile, AvailPageFile, TotalVirtual, AvailVirtual, AvailExtendedVirtual; }
+    [System.Runtime.InteropServices.DllImport("kernel32", SetLastError = true)] static extern bool GlobalMemoryStatusEx(ref MemStatus m);   // 平台例外：Windows 读空闲内存
     internal static long AvailMb()   // 此刻空闲内存（MB），同 tools/cores.sh s2a_avail_mb：S2A_MEM_AVAIL_MB 覆盖 > macOS vm_stat 空闲 + 非活跃 + 预读 + 可清除 > Linux MemAvailable；读不到 0
     {
         if (long.TryParse(Environment.GetEnvironmentVariable("S2A_MEM_AVAIL_MB"), out var o) && o > 0) return o;
@@ -789,6 +805,12 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
                 long pages = System.Text.RegularExpressions.Regex.Matches(text, @"^Pages (free|inactive|speculative|purgeable):\s+(\d+)", System.Text.RegularExpressions.RegexOptions.Multiline)
                     .Sum(m => long.Parse(m.Groups[2].Value));
                 return ps.Success ? pages * long.Parse(ps.Groups[1].Value) / 1048576 : 0;
+            }
+            // Windows（D-CMAE：原先读不到、恒为 0，各段从不按实时内存重算）：可用物理内存与剩余可提交内存取小——超了提交上限分配直接失败，不像 macOS 能换出
+            if (OperatingSystem.IsWindows())   // 平台例外：Windows 读空闲内存要 kernel32
+            {
+                var m = new MemStatus { Length = (uint)System.Runtime.InteropServices.Marshal.SizeOf<MemStatus>() };
+                return GlobalMemoryStatusEx(ref m) ? (long)(Math.Min(m.AvailPhys, m.AvailPageFile) / 1048576) : 0;
             }
             if (OperatingSystem.IsLinux() && File.ReadLines("/proc/meminfo").FirstOrDefault(l => l.StartsWith("MemAvailable:", StringComparison.Ordinal)) is { } l)
                 return long.Parse(l.Split(' ', StringSplitOptions.RemoveEmptyEntries)[1]) / 1024;
@@ -1235,16 +1257,19 @@ static class Metal
     ///   新加的那路要过几秒才吃到内存），上限本单核数 S2A_JOBS；只放宽不收窄。空闲内存是给定值（S2A_MEM_AVAIL_MB，单测）或读不到时不放宽：没有实时读数</summary>
     public static IDisposable Widen(int lanes, string phase = null)
     {
-        int extra = Math.Max(0, lanes - Cap); Cur = Cap + extra;
+        lanes = Math.Max(1, lanes);
+        int extra = Math.Max(0, lanes - Cap), held = Math.Max(0, Cap - lanes);   // held：比 -j 窄时这一段先扣住的闸位（段开头上一段已编完，立即拿到）
+        for (int i = 0; i < held; i++) Gate.Wait();
+        Cur = Cap + extra - held;
         if (extra > 0) Gate.Release(extra);
-        return new Narrow(extra, phase);
+        return new Narrow(extra, held, phase);
     }
     sealed class Narrow : IDisposable
     {
-        int extra, grown; readonly string phase; readonly Timer timer; readonly object mu = new();
-        public Narrow(int extra, string phase)
+        int extra, held, grown; readonly string phase; readonly Timer timer; readonly object mu = new();
+        public Narrow(int extra, int held, string phase)
         {
-            this.extra = extra; this.phase = phase;
+            this.extra = extra; this.held = held; this.phase = phase;
             bool live = phase != null && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("S2A_MEM_AVAIL_MB"));
             int sec = int.TryParse(Environment.GetEnvironmentVariable("S2A_LANE_GROW_S"), out var g) && g > 0 ? g : 5;
             if (live) timer = new Timer(_ => Grow(), null, sec * 1000, sec * 1000);
@@ -1255,16 +1280,18 @@ static class Metal
             int cap = Env("S2A_JOBS", Environment.ProcessorCount), peak = Env("S2A_DIRECT_METAL_PEAK_MB", 1065), p90 = Env("S2A_DIRECT_METAL_P90_MB", 420);
             lock (mu)
             {
-                if (timer == null || Cap + extra >= cap) return;
+                if (timer == null || Cap + extra - held >= cap) return;
                 long avail = Build.AvailMb();
                 if (avail <= 0 || avail / 2 < peak + 2L * p90) return;
-                extra++; grown++; Cur = Cap + extra; Gate.Release(1);
+                if (held > 0) held--; else extra++;   // 收窄过的先还扣住的闸位
+                grown++; Cur = Cap + extra - held; Gate.Release(1);
             }
         }
         public void Dispose()
         {
-            int n, g; lock (mu) { timer?.Dispose(); n = extra; g = grown; }
-            if (g > 0) Build.Say($"{phase}：段内按此刻空闲内存又放宽 {g} 路，最多 {Cap + n} 路");
+            int n, h, g; lock (mu) { timer?.Dispose(); n = extra; h = held; g = grown; }
+            if (g > 0) Build.Say($"{phase}：段内按此刻空闲内存又放宽 {g} 路，最多 {Cap + n - h} 路");
+            if (h > 0) Gate.Release(h);
             for (int i = 0; i < n; i++) Gate.Wait(); Cur = 0;
         }
     }

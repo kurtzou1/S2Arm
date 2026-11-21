@@ -5,13 +5,21 @@
 //   诊断里只剩「主队列 → GameController」几帧偏移，异常名和原因都丢了，判不了是哪一步用法触发的
 #import <Foundation/Foundation.h>
 #include "../runtime/src/native.h"
+#include <dlfcn.h>
+#include <string.h>
 
 static NSUncaughtExceptionHandler *g_prev;
 static void s2a_uncaught(NSException *e) {
     LOG("【红】未捕获的 ObjC 异常：%s：%s", e.name.UTF8String ?: "?", e.reason.UTF8String ?: "（无原因）");
     if (e.userInfo.count) LOG("  异常 userInfo：%s", e.userInfo.description.UTF8String ?: "");
-    NSArray<NSString *> *st = e.callStackSymbols;
-    for (NSUInteger i = 0; i < st.count && i < 32; i++) LOG("  异常栈 %s", st[i].UTF8String ?: "");
+    NSArray<NSString *> *st = e.callStackSymbols; NSArray<NSNumber *> *ra = e.callStackReturnAddresses;
+    // 每帧另写「模块 + 偏移」（11-21 D-Q349：符号名是离它最近的导出符号，静态函数会被记成别人的「+1240」，要回找同版本构建产物反查；有了偏移直接 atos）
+    for (NSUInteger i = 0; i < st.count && i < 32; i++) {
+        Dl_info di = {0}; uintptr_t a = i < ra.count ? (uintptr_t)ra[i].unsignedLongLongValue : 0;
+        if (a && dladdr((const void *)a, &di) && di.dli_fname && di.dli_fbase) { const char *bn = strrchr(di.dli_fname, '/');
+            LOG("  异常栈 %s（%s+%#lx）", st[i].UTF8String ?: "", bn ? bn + 1 : di.dli_fname, (unsigned long)(a - (uintptr_t)di.dli_fbase)); }
+        else LOG("  异常栈 %s", st[i].UTF8String ?: "");
+    }
     if (g_prev) g_prev(e);
 }
 __attribute__((constructor)) static void s2a_uncaught_install(void) {

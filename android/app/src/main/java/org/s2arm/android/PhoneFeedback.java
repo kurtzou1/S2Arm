@@ -3,7 +3,6 @@ package org.s2arm.android;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.hardware.display.DisplayManager;
-import android.os.Build;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.view.Display;
@@ -29,13 +28,8 @@ final class PhoneFeedback implements DisplayManager.DisplayListener {
         this.prefs = prefs;
         this.gamepad = gamepad;
         this.displays = context.getSystemService(DisplayManager.class);
-        Vibrator v;
-        if (Build.VERSION.SDK_INT >= 31) {
-            android.os.VibratorManager manager = context.getSystemService(android.os.VibratorManager.class);
-            v = manager != null ? manager.getDefaultVibrator() : null;
-        } else {
-            v = context.getSystemService(Vibrator.class);
-        }
+        android.os.VibratorManager manager = context.getSystemService(android.os.VibratorManager.class);
+        Vibrator v = manager != null ? manager.getDefaultVibrator() : null;
         vibrator = v != null && v.hasVibrator() ? v : null;
         amplitudeControl = vibrator != null && vibrator.hasAmplitudeControl();
     }
@@ -87,11 +81,6 @@ final class PhoneFeedback implements DisplayManager.DisplayListener {
         if (amplitude <= 0 || (!amplitudeControl && amplitude < 32)) { v.cancel(); return; }
         VibrationEffect effect = VibrationEffect.createOneShot(leaseMs,
             amplitudeControl ? Math.min(255, amplitude) : VibrationEffect.DEFAULT_AMPLITUDE);
-        if (Build.VERSION.SDK_INT >= 33) {
-            v.vibrate(effect, android.os.VibrationAttributes.createForUsage(android.os.VibrationAttributes.USAGE_MEDIA));
-        } else {
-            v.vibrate(effect, new android.media.AudioAttributes.Builder()
-                .setUsage(android.media.AudioAttributes.USAGE_GAME).build());
-        }
+        v.vibrate(effect, android.os.VibrationAttributes.createForUsage(android.os.VibrationAttributes.USAGE_MEDIA));
     }
 }

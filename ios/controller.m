@@ -633,11 +633,12 @@ static void pad_face_sync(void) {
 }
 // 分槽（只在 inputQueue 上跑）：在线扩展手柄按连接顺序交给 s2a_slot_plan，整表重建；槽 1–3 换人时装 / 摘回调。
 //   返回该占槽 0（玩家 1）的手柄，由 selectSystemLocked 照原有的判活 / 延迟复查逻辑接成系统手柄；槽 0 的回调归 attachSystem / clearSystem 管
-- (GCController *)planSlots {
+- (GCController *)planSlots:(BOOL)mayClear {
     const void *ids[9]; GCController *ctrls[9]; int n = 0;   // 数组留得比槽位多，超出的交给 s2a_slot_plan 判 -1 丢弃
     GCController *current = _system;
-    // 当前玩家 1 的对象自身可用就算在线（同 s2a_system_action：快照抖动期不让出槽 0）
-    if (current.extendedGamepad) { ids[n] = (__bridge const void *)current; ctrls[n] = current; n++; }
+    // 当前玩家 1 的对象自身可用就算在线（同 s2a_system_action：快照抖动期不让出槽 0）；延迟复查时仍不在快照里就不算（#1952：关机后旧对象
+    //   extendedGamepad 仍非 nil，原先一直占着槽 0，再连上的新对象只能排玩家 2）
+    if (current.extendedGamepad && (!mayClear || [GCController.controllers containsObject:current])) { ids[n] = (__bridge const void *)current; ctrls[n] = current; n++; }
     for (GCController *c in GCController.controllers) {
         if (!c.extendedGamepad || c == current) continue;
         if (n >= 9) break;
@@ -724,12 +725,13 @@ static void pad_face_sync(void) {
     NSArray<GCController *> *controllers = GCController.controllers;
     GCController *current = _system;
     // 玩家 1 = 占槽 0 的那只（s2a_slot_plan）：还在线的手柄保留原槽，所以两只时 1 号断开、2 号仍是玩家 2，不顶上来当玩家 1
-    GCController *slot0 = [self planSlots];
+    GCController *slot0 = [self planSlots:mayClear];
     GCController *candidate = slot0 != current ? slot0 : nil;
     s2a_sys_state state = {
         .foreground = foreground,
         .has_current = current != nil,
         .current_alive = current.extendedGamepad != nil,
+        .current_listed = current && [controllers containsObject:current],
         .candidate_ready = candidate != nil,
         .may_clear = mayClear,
     };

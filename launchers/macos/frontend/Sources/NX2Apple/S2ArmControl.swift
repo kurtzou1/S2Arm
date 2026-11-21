@@ -229,13 +229,16 @@ import S2ArmAppleAdapter
                 return .bad("没有这个 taskId")
             }
             let g = (t["gameId"] as? String).flatMap { gid in model.games.first { $0.id == gid } }
+            // 照原请求重试（#1946）：装到哪台 / 哪个团队 / 导出还是装、怎么签，都从这条任务的请求文件回填；原先不带，多台在线时报 device_required 或装到界面选中的另一台
+            let req = ControlJournal.request(privateRoot: model.provider.client.environment.privateRoot, id: id) ?? [:]
+            let rs: (String) -> String? = { (req[$0] as? String).flatMap { $0.isEmpty ? nil : $0 } }
             switch (t["operation"] as? String, g) {
             case ("build", let g?): return blocked(model.export(g, platforms: [.mac]))
             case ("ipa", let g?): return blocked(model.export(g, platforms: [.ios], deviceTarget: deviceTarget))
             case ("install", let g?):
-                model.install(g, ask: false); return .ok()
-            case ("installRemove", let g?): model.removeFromPhone(g, ask: false); return .ok()
-            case ("installRestore", let g?): model.restorePhone(g); return .ok()
+                model.install(g, teamId: rs("teamId"), device: rs("device"), ask: false, export: rs("mode") == "export", sign: rs("sign")); return .ok()
+            case ("installRemove", let g?): model.removeFromPhone(g, ask: false, device: rs("device")); return .ok()
+            case ("installRestore", let g?): model.restorePhone(g, device: rs("device")); return .ok()
             default: return .bad("这条任务（\(t["operation"] as? String ?? "?")）不能直接重试：照原样再发一次命令（keys / games 带路径）")
             }
         case ("POST", "/update"):

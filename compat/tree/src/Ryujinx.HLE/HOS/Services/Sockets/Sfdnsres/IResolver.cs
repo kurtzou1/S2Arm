@@ -728,7 +728,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Sfdnsres
                 if (int.TryParse(service, out int port) || string.IsNullOrEmpty(service))
                 {
                     errno = GaiError.Success;
-                    serializedSize = SerializeAddrInfos(context, responseBufferPosition, responseBufferSize, hostEntry, port);
+                    serializedSize = SerializeAddrInfos(context, responseBufferPosition, responseBufferSize, hostEntry, port, AddrInfoKinds(context));
                 }
                 else
                 {
@@ -762,7 +762,44 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Sfdnsres
             return result;
         }
 
-        private static int SerializeAddrInfos(ServiceCtx context, ulong responseBufferPosition, ulong responseBufferSize, IPHostEntry hostEntry, int port)
+        // S2Arm: the socket type / protocol each returned addrinfo carries (11-21 D-TVB8, 0100D58012E12000 offline): every entry used to say type 0 / protocol 0
+        //   ("0 = Any"), the game passed that straight to Socket (type 0x10000000 = non-blocking flag over base type 0), the BSD service refused it
+        //   (ESOCKTNOSUPPORT, as the console's FreeBSD stack would) and the game read through the socket it never got. Like the console's getaddrinfo:
+        //   the hints' type (and protocol, or the type's own: stream → TCP, datagram → UDP); hints naming only a protocol → that protocol's type;
+        //   no type and no protocol → one datagram / UDP and one stream / TCP entry per address, in FreeBSD's order. Hints are read from their header
+        //   (DeserializeAddrInfos drops an entry with no address, which hints always are)
+        private static (int Type, int Protocol)[] AddrInfoKinds(ServiceCtx context)
+        {
+            int type = 0, protocol = 0;
+
+            if (context.Request.SendBuff.Count > 2 && context.Request.SendBuff[2].Size >= (ulong)Unsafe.SizeOf<AddrInfoSerializedHeader>())
+            {
+                AddrInfoSerializedHeader hints = context.Memory.Read<AddrInfoSerializedHeader>(context.Request.SendBuff[2].Position);
+                hints.ToHostOrder();
+
+                if (hints.Magic == SfdnsresContants.AddrInfoMagic)
+                {
+                    type = hints.SocketType & 0x0FFFFFFF;
+                    protocol = hints.Protocol;
+                }
+            }
+
+            const int Stream = 1, Dgram = 2, Tcp = 6, Udp = 17;
+
+            if (type != 0)
+            {
+                return [(type, protocol != 0 ? protocol : type == Stream ? Tcp : type == Dgram ? Udp : 0)];
+            }
+
+            return protocol switch
+            {
+                Tcp => [(Stream, Tcp)],
+                Udp => [(Dgram, Udp)],
+                _ => [(Dgram, Udp), (Stream, Tcp)],
+            };
+        }
+
+        private static int SerializeAddrInfos(ServiceCtx context, ulong responseBufferPosition, ulong responseBufferSize, IPHostEntry hostEntry, int port, (int Type, int Protocol)[] kinds)
         {
             ulong originalBufferPosition = responseBufferPosition;
 #pragma warning disable IDE0059 // Remove unnecessary value assignment
@@ -784,12 +821,14 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Sfdnsres
                     continue;
                 }
 
-                // NOTE: 0 = Any
-                AddrInfoSerializedHeader header = new(ip, 0);
-                AddrInfo4 addr = new(ip, (short)port);
-                AddrInfoSerialized info = new(header, addr, null, hostEntry.HostName);
+                foreach ((int type, int protocol) in kinds)
+                {
+                    AddrInfoSerializedHeader header = new(ip, (SocketType)type) { Protocol = protocol };
+                    AddrInfo4 addr = new(ip, (short)port);
+                    AddrInfoSerialized info = new(header, addr, null, hostEntry.HostName);
 
-                data = info.Write(data);
+                    data = info.Write(data);
+                }
             }
 
             uint sentinel = 0;

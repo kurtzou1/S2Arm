@@ -202,7 +202,8 @@ check_tier() {
             run_tier no_custom_border "$log" VK_KHRONOS_PROFILES_EXCLUDE_DEVICE_EXTENSIONS=VK_EXT_custom_border_color || rc=$?
             [ "$rc" -eq 0 ] || red no_custom_border "run.sh rc=${rc}，期望契约绿"
             has "$log" "C976b 自定义边框色：设备 custom_border=0" || red no_custom_border "层没去掉 VK_EXT_custom_border_color"
-            has "$log" "C976b 没有扩展：自定义边框色建采样器 rc=-1002（sampler_border_color_custom：" || red no_custom_border "缺扩展时自定义边框色没回 UNSUPPORTED（#976：不静默换成不透明黑）" ;;
+            # 缺扩展时就近取内置三档照常建采样器、不丢绘制（bc62c3a81，Pura X / Maleoon 920 实例），具名黄色计数 sampler_border_color_nearest 由 t_backend_vk C976b 核
+            has "$log" "C976b 没有扩展：自定义边框色就近建采样器 rc=0" || red no_custom_border "缺扩展时自定义边框色没有就近建成采样器（bc62c3a81：不再回 UNSUPPORTED 丢绘制）" ;;
         no_minmax)
             run_tier no_minmax "$log" VK_KHRONOS_PROFILES_EXCLUDE_DEVICE_EXTENSIONS=VK_EXT_sampler_filter_minmax || rc=$?
             [ "$rc" -eq 0 ] || red no_minmax "run.sh rc=$rc"

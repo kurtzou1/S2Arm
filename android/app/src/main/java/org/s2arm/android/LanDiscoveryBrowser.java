@@ -128,20 +128,19 @@ final class LanDiscoveryBrowser {
         public void onServiceLost(NsdServiceInfo service) {
             handler.post(() -> session.lost(generation, service.getServiceName()));
         }
-        @SuppressWarnings("deprecation") // API 29 floor; executor overload is API 34.
         void resolveNext() {
             if (stopped || inFlight != null || queue.isEmpty()) return;
             Pending pending = queue.remove();
             inFlight = pending;
             try {
-                manager.resolveService(pending.service, new NsdManager.ResolveListener() {
+                manager.resolveService(pending.service, handler::post, new NsdManager.ResolveListener() {
                     public void onResolveFailed(NsdServiceInfo service, int error) {
-                        handler.post(() -> finish(pending, null, 0));
+                        finish(pending, null, 0);
                     }
                     public void onServiceResolved(NsdServiceInfo service) {
                         String address = service.getHost() instanceof Inet4Address
                             ? service.getHost().getHostAddress() : null;
-                        handler.post(() -> finish(pending, address, service.getPort()));
+                        finish(pending, address, service.getPort());
                     }
                 });
             } catch (RuntimeException e) {

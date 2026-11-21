@@ -1969,6 +1969,20 @@ CUSTOM_COVER_LIMIT = 16 << 20
 _CUSTOM_COVER = re.compile(r"cover\.custom\.[0-9a-f]{8}\.jpg")
 
 
+def game_cover(c, gid, custom=None):
+    """这款用哪张封面（游戏库列表与起局给宿主的 Dock 图标同一份定义）→ 路径字符串，没有 → ""。
+    三级：玩家换的 → 游戏包自带图标（导入时从控制分区 icon_*.dat 取，cover.jpg）→ 商店横图（store_meta，banner.jpg）→ 空（界面用 S2Arm 标志）。
+    #994：起局拿的是 catalog.json 里的原始记录（没有 cover 字段），原先只在列表这边现算，Dock 图标永远拿不到封面"""
+    custom = custom if custom is not None else game_custom(c, gid)
+    if custom["cover"]:
+        return str(custom["cover"])
+    for name in ("cover.jpg", "banner.jpg"):
+        p = layout.path(c, gid, name, create=False)
+        if p.is_file():
+            return str(p)
+    return ""
+
+
 def game_custom(c, gid):
     """玩家改过的显示名和封面（games/<程序号>/custom.json）。只影响显示，不改 catalog.json，不让已出的包失效；重新导入也不会覆盖。"""
     folder = layout.path(c, gid, create=False)
@@ -2090,13 +2104,11 @@ def catalog(c):
         root = place.parent.parent if where == "ok" else place
         game["location"] = dict(state=where, path=str(root) if root else "", folder=str(place) if where == "ok" else "",
                                 volume=_volume(root) if root else "", default=root == c.library if root else True)
-        cover = layout.path(c, game["id"], "cover.jpg", create=False)
-        banner = layout.path(c, game["id"], "banner.jpg", create=False)
         custom = game_custom(c, game["id"])
         game["customName"], game["customCover"] = bool(custom["name"]), custom["cover"] is not None
         game["name"] = custom["name"] or game["name"]
-        # 封面三级：玩家换的 → 游戏包自带图标（导入时从控制分区 icon_*.dat 取，cover.jpg）→ 商店横图（store_meta，banner.jpg）→ 空（界面用 S2Arm 标志）
-        game["cover"] = str(custom["cover"] or (cover if cover.is_file() else banner if banner.is_file() else "")) if custom["cover"] or cover.is_file() or banner.is_file() else ""
+        game["cover"] = game_cover(c, game["id"], custom)
+        banner = layout.path(c, game["id"], "banner.jpg", create=False)
         # 已下载的商店横图另给一份（#378）：Mac 游戏库顶部大图按「玩家换的 → 横图 → 封面」取，不把 256×256 的图标放大；列表卡片照旧用 cover
         game["banner"] = str(banner) if banner.is_file() else ""
         choices = [p for p in selected_packages(game) if p["type"] in ("base", "update")]

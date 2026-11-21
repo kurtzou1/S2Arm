@@ -14,6 +14,7 @@ int s2a_ios_caps_value(const char *cap);
 //   s2a_ios_set_fps60：玩家拨开关（写 S2AFps60 + S2AFps60Manual，起局只认后者算「开」）
 BOOL s2a_ios_fps60_on(void);
 BOOL s2a_ios_metalfx_blocked(NSString *gid);   // 画质提升：这款没走直连（清单 direct 0）→ 锐利放大用不了
+BOOL s2a_ios_hdr_upscale_bypassed(void);       // HDR 开关联动（PR3d）：S2A_HDR=auto/on（启动环境）→ 抗锯齿 / 缩放滤镜 / 补帧对 HDR 窗口旁路（8 位感知缩放不适配 PQ 码值，产品限制；SDR 窗口照常）
 BOOL s2a_ios_fi_on(void);       // 补帧开关（这款；没设过 = 开）
 void s2a_ios_set_fi(BOOL on);
 void s2a_ios_set_fps60(BOOL on);

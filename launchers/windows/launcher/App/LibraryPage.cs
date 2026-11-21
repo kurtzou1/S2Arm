@@ -15,6 +15,16 @@ namespace S2Arm.Launcher;
 
 public sealed partial class EnvironmentWindow
 {
+    /// <summary>「导出 S2Arm.ipa」：不连手机、不经总控台，组不带游戏的通用 S2Arm.ipa 放进「S2Arm 游戏包」
+    /// （作业 installUpdate + mode export → export_shell_ipa），给 LiveContainer / SideStore / AltStore 自签（11-21 维护者；同总控台那台手机下的同名按钮）</summary>
+    private Control ExportShellIpaEntry()
+    {
+        var b = new Button { Content = T("console.button.exportShellIpa"), IsEnabled = !libraryBusy, Padding = new Thickness(12, 6) };
+        b.Click += (_, _) => _ = UpdatePhoneAsync(false, [], mode: "export");
+        Avalonia.Automation.AutomationProperties.SetAutomationId(b, "library.exportShellIpa");
+        return b;
+    }
+
     private string page = "library";
     private string libraryFolder = "";
     private string? libraryMoveFrom;
@@ -297,8 +307,13 @@ public sealed partial class EnvironmentWindow
         if (catalog is null || libraryBusy || librarySummary is "library.failed" or "library.invalid_result" or "library.interrupted")
             body.Children.Add(Card(status));
 
-        if (catalog is not null && games.Length > 0)   // 「S 级优化升级」入口（同 Mac 游戏库标题行，v0.4.0）
-            body.Children.Add(new StackPanel { HorizontalAlignment = HorizontalAlignment.Right, Children = { SGradeUpgradeEntry() } });
+        if (catalog is not null)   // 游戏库标题行：「导出 S2Arm.ipa」+「S 级优化升级」（同 Mac 游戏库标题行，v0.4.0）
+        {
+            var head = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right };
+            head.Children.Add(ExportShellIpaEntry());
+            if (games.Length > 0) head.Children.Add(SGradeUpgradeEntry());
+            body.Children.Add(head);
+        }
         if (catalog is not null && phoneOverview is not null) body.Children.Add(ConsoleRow());   // 首位固定「S2Arm」（0.6.0 开关后面），不算进游戏数
         foreach (var game in games)
         {

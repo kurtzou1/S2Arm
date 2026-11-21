@@ -15,7 +15,7 @@ def ndk_cc():
     sys.path.insert(0,str(ROOT/'android/core-link'));import link_symbols
     ndk=link_symbols.find_ndk();host={'darwin':'darwin-x86_64','linux':'linux-x86_64'}.get(sys.platform.split('-')[0])
     if ndk is None or host is None:raise SystemExit('【红】找不到固定 NDK 29.0.14206865；设 ANDROID_NDK_HOME 或传 --cc')
-    cc=ndk/'toolchains/llvm/prebuilt'/host/'bin/aarch64-linux-android29-clang'
+    cc=ndk/'toolchains/llvm/prebuilt'/host/'bin/aarch64-linux-android34-clang'
     if not cc.is_file():raise SystemExit(f'【红】缺少 {cc}；设 ANDROID_NDK_HOME 或传 --cc')
     return cc
 def main():
@@ -24,7 +24,7 @@ def main():
     out.mkdir(parents=True,exist_ok=True)
     inputs=SOURCES+[FAULT/'fault.h',FAULT/'thread_android.inc',Path('runtime/src/native.h'),Path('platform/plat.h'),Path('platform/plat_asm.h')]
     inputs+=sorted(p.relative_to(ROOT) for p in (ROOT/'runtime/include').glob('*.h'))
-    hashes={str(p):sha(ROOT/p) for p in inputs};receipt={'kind':'NDK29 Bionic API29 objects only','source_sha256':hashes,'commands':[],'android_executed':False,'baseline_warning_exception':'gate.c has six existing137fa uint64_t/%llx warnings; only format stays warning for this object'}
+    hashes={str(p):sha(ROOT/p) for p in inputs};receipt={'kind':'NDK29 Bionic API34 objects only','source_sha256':hashes,'commands':[],'android_executed':False,'baseline_warning_exception':'gate.c has six existing137fa uint64_t/%llx warnings; only format stays warning for this object'}
     def run(command,name):
         p=subprocess.run([str(x) for x in command],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=45);(out/(name+'.log')).write_text(p.stdout)
         receipt['commands'].append({'argv':[str(x) for x in command],'exit':p.returncode,'log':name+'.log'});(out/'results.json').write_text(json.dumps(receipt,indent=2)+'\n')

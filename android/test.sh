@@ -315,6 +315,8 @@ s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py" --withdraw
 # 几何着色器走出包预编库的负对照（正例在上面无参那一步里单独起进程跑）：撤掉接线各一处，--gs-libpack 必红
 s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py" --gs-libpack-mutants
+# 计算程序出包预编库的非对齐闸负对照（#496085）：撤掉 state_ok 对 ckey 的生效，--cs-libpack 必红
+s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py" --cs-libpack-mutants
 # 计算程序预热（清单记账 / 阶段 / 从缓存建 / 开关）与现场编译诊断事件（图形 / 计算）的负对照：各撤一处，对应断言必红
 s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py" --compute-warm-mutants
 s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py" --diag-mutants
@@ -562,7 +564,7 @@ s2a_gate_step python3 "$android_dir/core-link/link_symbols.py"
 s2a_gate_step "$PY" "$android_dir/core-link/tests/t_link_symbols.py"
 # Cross-compile and partially link the real game loader/provider with the pinned NDK.
 s2a_gate_step "$PY" "$android_dir/core-link/test_game_core_closure.py"
-# #1309：fault 的 10 个真实 Bionic API29 对象只编不链（crash.c/thread.c 按生产 CMake 带 _GNU_SOURCE）；固定 NDK，不上设备。
+# #1309：fault 的 10 个真实 Bionic API34 对象只编不链（crash.c/thread.c 按生产 CMake 带 _GNU_SOURCE）；固定 NDK，不上设备。
 s2a_gate_step "$PY" "$android_dir/native/runtime/fault/tests/run_objects.py" --out "$out/fault-owner-objects"
 # 真实 NDK 共享链接 / 符号可见性回归（#1309）：entry.S 惰性取核钩子引用的
 # g_lazy_core / s2a_guest_return 由测试夹具补齐，生产新增外部符号时这里同步跟平。

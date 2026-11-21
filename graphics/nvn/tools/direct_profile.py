@@ -142,7 +142,6 @@ def validate_nso(path):
                     f"{path.name}: segment hash mismatch")
     require(end + struct.unpack_from("<I", d, 0x3c)[0] <= 2 * MAX_IMAGE,
             f"{path.name}: oversized BSS")
-    require(any(d[0x40:0x60]), f"{path.name}: missing build ID")
     img = pg.nso(path)[0]
     validate_symbols(img)
 

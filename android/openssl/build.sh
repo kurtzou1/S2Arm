@@ -9,7 +9,7 @@
 set -euo pipefail
 version=3.5.9   # LTS; .NET prefers 3.x and takes 4.x only as a fallback
 sha256=603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a
-api=29          # app minSdk
+api=34          # app minSdk
 repo_dir=$(cd "$(dirname "$0")/../.." && pwd -P)
 . "$repo_dir/android/tools/versions.sh"
 ndk=${ANDROID_HOME:?ANDROID_HOME is required for OpenSSL compilation}/ndk/$S2A_ANDROID_NDK

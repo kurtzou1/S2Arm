@@ -60,6 +60,6 @@ int main(void) {
     return fail != 0;
 }
 // android/test.sh 用固定 NDK 编译链接（宿主跑不了：要 arm64 安卓信号上下文）；在手机上执行：
-// 用法（出包机）：$NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android29-clang -O1 -Iruntime/include \
+// 用法（出包机）：$NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android34-clang -O1 -Iruntime/include \
 //   android/tests/emul_sp_android_test.c runtime/src/emul_sp.c runtime/src/emul_ld.c runtime/src/emul_st.c -o t_emul_sp_android
 //   adb push t_emul_sp_android /data/local/tmp/ && adb shell /data/local/tmp/t_emul_sp_android

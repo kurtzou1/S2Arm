@@ -130,9 +130,18 @@ $(HELPERS): $(OUT)/gal_xc
 	mkdir -p $(OUT)/gal_helpers/m3 && for f in $(OUT)/gal_helpers/src/*.metal; do xcrun -sdk macosx metal -std=metal3.2 -mmacosx-version-min=$(MACOSX_DEPLOYMENT_TARGET) -o $(OUT)/gal_helpers/m3/$$(basename $$f .metal).metallib $$f || exit 1; done
 	touch $@
 # 单测：.c 按 C 编，.m 按 Objective-C（ARC）编；都直接连源码。都依赖离线辅助库（单测断言渲染器启动到首帧不现编）
+#   EXTRA_FLAGS / EXTRA_SRCS：目标各自的追加旗标 / 追加源码（缺省空——其余单测命令行一字不变）
 $(OUT)/t_%: tests/t_%.* $(SRCS) $(HDRS) $(wildcard tests/*.h) $(DSX_MAC_A) $(GENH) | $(HELPERS)
 	@mkdir -p $(OUT)
-	clang $(PFX) $(MACSYS) $(OBJCFLAGS) -o $@ $(firstword $(wildcard tests/t_$*.c tests/t_$*.m)) $(wildcard tests/t_$*_stubs.m) $(SRCS) $(LIBS) $(SPVC)
+	clang $(PFX) $(MACSYS) $(EXTRA_FLAGS) $(OBJCFLAGS) -o $@ $(firstword $(wildcard tests/t_$*.c tests/t_$*.m)) $(wildcard tests/t_$*_stubs.m) $(EXTRA_SRCS) $(SRCS) $(LIBS) $(SPVC)
+
+# t_present_hdr（PR7 gal HDR 闭环，评审稿 v3 §4 PR7）：链生产策略存储 graphics/nvn/gfx/nvn/nvn2.c（纯 C）——
+#   gal 经 dlsym 接缝（RTLD_DEFAULT，同 gal_present.m ap_direct 先例）消费策略入口：宿主里由直连图形层给，
+#   本单测里命中可执行文件自身的生产强定义。nvn2.c 的 dm_opmode 由测试文件替身给（同 graphics/nvn/tests/t_nvn2.c 文案）；
+#   其 dm.h（替身头）引 native.h 的生成头按 -Iruntime/include 取（同 runtime/build.mk NATIVE_INC）
+$(OUT)/t_present_hdr: EXTRA_SRCS := ../nvn/gfx/nvn/nvn2.c
+$(OUT)/t_present_hdr: EXTRA_FLAGS := -I$(ROOT)/runtime/include
+$(OUT)/t_present_hdr: ../nvn/gfx/nvn/nvn2.c
 
 # GPU 挂死看门狗单测（T10 / #635）：只链 gal_gpuwd.m + 自己，不链整套源码 —— 它不碰 Metal、不碰 gal_core，
 #   全程不提交任何命令缓冲（用「登记了栅栏但从不推进完成号」造挂死，主线程用 read 空管道冒充 waitUntilCompleted）

@@ -29,7 +29,7 @@ public final class LibraryActivity extends Activity {
     private final Set<String> listed = new HashSet<>();
     private final java.util.Map<String, String> names = new java.util.HashMap<>();
     private final android.os.Handler ui = new android.os.Handler(android.os.Looper.getMainLooper());
-    private static final int PICK_PACKAGE = 1, PICK_IN_PLACE = 2, ASK_LEGACY_READ = 3, SAVE_DIAGNOSTICS = 4,
+    private static final int PICK_PACKAGE = 1, PICK_IN_PLACE = 2, SAVE_DIAGNOSTICS = 4,
         PICK_MOD_ZIP = 5, PICK_MOD_DIR = 6, PICK_SAVE = 7;
     // 资源替换类 mod（GameMods）：面板打开时正中那张卡片的那一款；一次只做一件（导入 / 开关 / 删除）
     private String modsTitle;
@@ -761,20 +761,15 @@ public final class LibraryActivity extends Activity {
     }
 
     // 原地使用：读共享存储上别处来的文件要「所有文件访问」（安卓 11+）；没开就说明并带去系统设置页
-    //   （做法照 mamcjr/Swap2-Native MainActivity.needAccess / openAccessSettings，MIT）。安卓 10 走旧的读存储权限
+    //   （做法照 mamcjr/Swap2-Native MainActivity.needAccess / openAccessSettings，MIT）
     private void useInPlace() {
-        if (android.os.Build.VERSION.SDK_INT >= 30 && !android.os.Environment.isExternalStorageManager()) {
+        if (!android.os.Environment.isExternalStorageManager()) {
             new android.app.AlertDialog.Builder(this)
                 .setTitle(R.string.in_place_access_title)
                 .setMessage(getString(R.string.in_place_access_text))
                 .setPositiveButton(R.string.in_place_access_open, (dialog, which) -> openAllFilesAccess())
                 .setNegativeButton(R.string.library_switch_cancel, null)
                 .show();
-            return;
-        }
-        if (android.os.Build.VERSION.SDK_INT < 30 && checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE)
-                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[] {android.Manifest.permission.READ_EXTERNAL_STORAGE}, ASK_LEGACY_READ);
             return;
         }
         pickInPlace();
@@ -797,10 +792,5 @@ public final class LibraryActivity extends Activity {
         startActivityForResult(pick, PICK_IN_PLACE);
     }
 
-    @Override public void onRequestPermissionsResult(int request, String[] permissions, int[] results) {
-        super.onRequestPermissionsResult(request, permissions, results);
-        if (request == ASK_LEGACY_READ && results.length == 1 && results[0] == android.content.pm.PackageManager.PERMISSION_GRANTED)
-            pickInPlace();
-    }
     @Override protected void onDestroy() { if (library != null) library.close(); super.onDestroy(); }
 }

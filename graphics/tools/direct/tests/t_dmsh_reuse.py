@@ -234,8 +234,8 @@ for tb in ('c1_full.tsv', 'cb_extent.tsv'):
     check(head is not None and head.startswith(f'# chain b-{chain} inputs '), f'⑪ {tb} 在、首行 {head!r}（期望以「# chain b-{chain} inputs 」开头）')
 
 # ⑬ 编 Metal 的几段（编批库 / _se / _vp）按此刻空闲内存重算编译路数（Build.cs LiveLanes）：-j 2，空闲 6000 MB / 本单 8 核 → 1 + (3000 − 1065) ÷ 420 = 5 路；
-#    空闲 1000 MB 算出来不到 -j → 照旧 2 路（只放宽、不收窄）；本单 3 核 → 封顶 3 路
-for avail, jobs, want in (('6000', '8', 5), ('1000', '8', 2), ('6000', '3', 3)):
+#    空闲 1000 MB 算出来 1 + max(0, 500 − 1065) ÷ 420 = 1 路 → 收窄到 1 路（D-CMAE：可以比 -j 窄）；本单 3 核 → 封顶 3 路
+for avail, jobs, want in (('6000', '8', 5), ('1000', '8', 1), ('6000', '3', 3)):
     lp = os.path.join(t, f'lanes{avail}_{jobs}.progress.tsv')
     rc, o, _, _, _, _ = build(f'lanes{avail}_{jobs}', 'cas_lanes', progress=lp, env_add={'S2A_MEM_AVAIL_MB': avail, 'S2A_JOBS': jobs})
     acts = [json.loads(l.split('\t', 1)[1]) for l in open(lp, encoding='utf-8') if l.startswith('#dsh_activity\t')] if os.path.exists(lp) else []

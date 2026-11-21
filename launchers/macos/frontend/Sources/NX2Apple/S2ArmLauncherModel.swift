@@ -280,6 +280,7 @@ public final class S2ArmLauncherModel: ObservableObject {
     var updateRepack: [String] = []
     var batchInstallAfter = false
     var installAfterQueue: [String] = []
+    var installAfterDevice: String?   // 「更新并重新出」出完逐款回装装到哪台：发起更新时那台（#1946：原先不带，多台在线时报 device_required 或装到界面选中的另一台）
     /// 导出确认页点了「开始」、这款还没做好 iPhone 版（或是旧格式）：先出 iPhone 包，出完按这份计划接着导出 / 逐台导入（S2ArmLauncherModel+UpdateExport）
     var exportAfterPack: [String: ExportPlan] = [:]
     /// 这次装机会话是导出自签包（进度 / 结局页照导出写；完成后看结局里的导出文件夹）

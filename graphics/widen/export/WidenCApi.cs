@@ -407,6 +407,9 @@ namespace S2Arm.Gfx.Widen
             {
                 byte[] b = Encoding.UTF8.GetBytes(t);
                 int n = (int)Math.Min((nuint)b.Length, cap - 1);
+                // 截断落在多字节字符中间（下一个字节是 UTF-8 后续字节 10xxxxxx）就退到这个字符开头：宿主把它原样写进 host.log，
+                //   半个汉字（「写回原\xe5\x80」）让 iOS 诊断包把整份日志按 Latin-1 解成乱码（已收诊断里 264 份、467 个日志文件中招）
+                while (n > 0 && n < b.Length && (b[n] & 0xC0) == 0x80) n--;
                 new ReadOnlySpan<byte>(b, 0, n).CopyTo(new Span<byte>(buf, n));
                 buf[n] = 0;
             }

@@ -21,7 +21,7 @@
 
 static struct {
     int on, tier, why, cpu_bound, no_up;   // no_up：本局因 CPU 跟不上从 60 帧降下来过，不再按 GPU 余量升回
-    uint64_t win_ns, up_ns, last_change, gpu_t0; double gpu0;
+    uint64_t win_ns, up_ns, last_change, gpu_t0, settle_until; double gpu0;   // settle_until：回前台后到这一刻之前的帧不进窗口
     uint32_t dt_us[QL_RING]; int nd;
     double l_fps, l_slow, l_gpu; int l_th;
 } q;
@@ -39,10 +39,13 @@ static int go(uint64_t now, int t, int why) {
     q.win_ns = q.up_ns = 0; q.nd = 0; q.gpu0 = -1;
     return t;
 }
+// #1949：不在前台的时段整段不算（系统降速不是跑不动）；回前台后空等 S2A_QL_SETTLE_NS，窗口从那之后重新计时。前台真实掉帧照常判
+void s2a_ql_away(uint64_t now) { if (!q.on) return; q.win_ns = 0; q.nd = 0; q.gpu0 = -1; q.settle_until = now + S2A_QL_SETTLE_NS; }
 void s2a_ql_retry(uint64_t now) { if (!q.on) return; q.no_up = 0; go(now, 0, S2A_QL_WHY_RETRY); }
 int s2a_ql_frame(uint64_t now, int game, uint64_t dt, double gpu_ms, int thermal, int game_itv) {
     if (!q.on) return -1;
     if (!game || !dt || dt >= QL_GAP_NS) return -1;
+    if (now < q.settle_until) return -1;   // 刚回前台：这几秒的帧（含后台留下的慢帧）不进窗口；GPU 起点从第一帧计时帧起
     if (q.gpu0 < 0 && gpu_ms >= 0) { q.gpu0 = gpu_ms; q.gpu_t0 = now; }
     if (q.nd < QL_RING) q.dt_us[q.nd++] = (uint32_t)(dt / 1000);
     q.win_ns += dt;

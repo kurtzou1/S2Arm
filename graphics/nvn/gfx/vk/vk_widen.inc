@@ -256,7 +256,7 @@ static void wd_present(uint32_t id, uint32_t w, uint32_t h, int crop[4]) {
     if (crop[2] > 0 && crop[3] > 0) { c.left = crop[0]; c.right = crop[0] + crop[2]; c.top = crop[1]; c.bottom = crop[1] + crop[3]; }
     s2a_widen_present(id, &c);
     crop[0] = c.left; crop[1] = c.top; crop[2] = c.right - c.left; crop[3] = c.bottom - c.top;
-    static uint64_t n; if (++n % 300 == 0) { char line[1024]; s2a_widen_report(line, sizeof line);
+    static uint64_t n; if (++n % 300 == 0) { char line[4096]; s2a_widen_report(line, sizeof line);
         VLOG("宽屏核心：绘制 %llu（进核心 %llu、有改写 %llu、大于 4 KB 的新出副本 %llu、复用副本 %llu、副本分配块 %llu、读片元坐标要横向倍率 %llu；钩子 %llu 条指令 / 笔）；%s", (unsigned long long)g_wd_draws, (unsigned long long)g_wd_core,
              (unsigned long long)g_wd_rw, (unsigned long long)g_wd_big, (unsigned long long)g_wd_reuse, (unsigned long long)g_wd_chunks, (unsigned long long)g_wd_fragx, (unsigned long long)(g_wd_prof_n ? g_wd_prof_t / g_wd_prof_n : 0), line); g_wd_prof_t = g_wd_prof_n = 0; }
     pthread_mutex_unlock(&g_wd_mu);

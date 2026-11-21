@@ -149,6 +149,10 @@ namespace Ryujinx.Audio.Backends.Apple.Native
         [LibraryImport("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox")]
         internal static partial int AudioQueueStop(nint audioQueue, [MarshalAs(UnmanagedType.I1)] bool immediate);
 
+        // outTimeStamp：AudioTimeStamp（64 字节，mSampleTime 在偏移 0）；看门狗线程按需调（QueueTimelineWatch.PastSubmitted）
+        [LibraryImport("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox")]   // 平台例外：Apple 后端平台实现的 AudioToolbox P/Invoke 声明（#1921 队列时钟）
+        internal static unsafe partial int AudioQueueGetCurrentTime(nint audioQueue, nint timeline, void* outTimeStamp, nint outDiscontinuity);
+
         [LibraryImport("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox")]
         internal static partial int AudioQueueSetParameter(
             nint audioQueue,

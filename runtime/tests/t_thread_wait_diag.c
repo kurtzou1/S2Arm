@@ -35,12 +35,11 @@ static void wd_waiter1a(uint64_t owner) {
     uint64_t e[31]={0}; svc_thread(0x0a,e);
 }
 static void wd_until(int kind, uint64_t address) {
-    uint64_t end=now_ns()+30000000000ull;
-    while (!s2a_test_waiters(kind,address) && now_ns()<end) usleep(100);
+    while (!s2a_test_waiters(kind,address)) usleep(100);   /* 按事件等，不设墙钟上限；挂死交门禁分组超时 */
     CHECK(s2a_test_waiters(kind,address)>0,"waiter actually registered kind %d",kind);
 }
 static void wd_join(uint32_t h) {
-    uint64_t r[31]={0,(uintptr_t)&h,1,30000000000ull}; svc_thread(0x18,r);
+    uint64_t r[31]={0,(uintptr_t)&h,1,(uint64_t)-1}; svc_thread(0x18,r);   /* 无限等退出事件 */
     CHECK(!r[0] && atomic_load(&wd_done),"real ExitThread observable before CloseHandle");
     uint64_t close_regs[31]={h}; svc_thread(0x16,close_regs);
 }
@@ -65,7 +64,7 @@ int main(int argc,char **argv) {
     setenv("S2A_CORES","0",1);
     pthread_key_create(&g_key18,NULL); pthread_key_create(&g_keytls,NULL);
     pthread_key_create(&g_keytlr,NULL); pthread_key_create(&g_keygate,NULL);
-    g_wtag=s2a_thread_main_init(); alarm(120);   // 各处等待兜底已放到 30 秒，整测上限跟着放宽（只防挂死）
+    g_wtag=s2a_thread_main_init();   // 不设整测墙钟上限：各处等待都按事件判，挂死交门禁分组超时
     CHECK((s2a_test_wait_enabled?s2a_test_wait_enabled():0)==enabled,"诊断开关在第一次等待前已初始化");
     if (ring) {
         uint64_t first=0,last=0,dropped=0; size_t pending=0;
@@ -133,7 +132,7 @@ int main(int argc,char **argv) {
     //   只看键表（1024 格直映）分不出「没人发」和「发了没轮到我」——「从没被发过信号」可能就是撞掉的记录
     atomic_store(&wd_addr,1);
     { uint32_t h0,h1; spawn(wd_waiter34,0,&h0); spawn(wd_waiter34,1,&h1);
-      uint64_t t0=now_ns(); while(s2a_test_waiters(3,(uintptr_t)&wd_addr)<2&&now_ns()-t0<30000000000ull) usleep(100);
+      while(s2a_test_waiters(3,(uintptr_t)&wd_addr)<2) usleep(100);   // 按事件等，挂死交门禁分组超时
       CHECK(s2a_test_waiters(3,(uintptr_t)&wd_addr)==2,"two address waiters registered");
       uint64_t s1[31]={(uintptr_t)&wd_addr,0,0,1}; svc_thread(0x35,s1);
       CHECK(!s1[0]&&s2a_test_waiters(3,(uintptr_t)&wd_addr)==1,"one signal wakes exactly one address waiter");
@@ -144,8 +143,8 @@ int main(int argc,char **argv) {
       CHECK(ok&&nsig==1,"per-waiter signal count ignores who was picked (got %u)",nsig);
       { void s2a_thread_dump(void); s2a_thread_dump(); }   // 现场导出走一遍「等地址」分支（条件原样写出）
       uint64_t s2[31]={(uintptr_t)&wd_addr,0,0,(uint64_t)-1}; svc_thread(0x35,s2);
-      t0=now_ns(); while(s2a_test_waiters(3,(uintptr_t)&wd_addr)&&now_ns()-t0<30000000000ull) usleep(100);
-      t0=now_ns(); while((!atomic_load(&wd_a34_done[0])||!atomic_load(&wd_a34_done[1]))&&now_ns()-t0<30000000000ull) usleep(100);
+      while(s2a_test_waiters(3,(uintptr_t)&wd_addr)) usleep(100);
+      while(!atomic_load(&wd_a34_done[0])||!atomic_load(&wd_a34_done[1])) usleep(100);
       CHECK(atomic_load(&wd_a34_done[0])&&atomic_load(&wd_a34_done[1]),"both address waiters returned");
       ty0=ty; (void)ty0;
       uint64_t cl[31]={h0}; svc_thread(0x16,cl); cl[0]=h1; svc_thread(0x16,cl); }

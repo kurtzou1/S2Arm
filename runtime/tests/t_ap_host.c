@@ -237,6 +237,15 @@ int main(void) {
             if (got != cr[i].want) { printf("✗ ⑥c 停帧救场判据 30 秒 %llu 帧 → %d（期望 %d）\n", (unsigned long long)cr[i].d, got, cr[i].want); bad++; }
             else printf("✓ ⑥c 停帧救场判据 30 秒 %llu 帧 → %d\n", (unsigned long long)cr[i].d, got);
         }
+        // ⑥d 停帧救场窗口的外因（#1857：Mac 切后台、宿主焦点=0 时 30 秒 0 帧，被当停帧关了帧率补丁）。期望手写（冻结 / 焦点 / 睡眠，-1 = 取不到符号）：
+        //   前台正常 (0,1,0) → 否；切后台 (0,0,0) → 是；冻结 (1,1,0) → 是；睡眠 (0,1,1) → 是；全取不到 (-1,-1,-1) → 否（不冒充外因）
+        int s2a_ap_stall_external(int, int, int);
+        struct { int fz, fo, sl, want; } xc[] = {{0, 1, 0, 0}, {0, 0, 0, 1}, {1, 1, 0, 1}, {0, 1, 1, 1}, {-1, -1, -1, 0}};
+        for (unsigned i = 0; i < sizeof xc / sizeof *xc; i++) {
+            int got = s2a_ap_stall_external(xc[i].fz, xc[i].fo, xc[i].sl);
+            if (got != xc[i].want) { printf("✗ ⑥d 救场窗口外因 冻结=%d 焦点=%d 睡眠=%d → %d（期望 %d）\n", xc[i].fz, xc[i].fo, xc[i].sl, got, xc[i].want); bad++; }
+            else printf("✓ ⑥d 救场窗口外因 冻结=%d 焦点=%d 睡眠=%d → %d\n", xc[i].fz, xc[i].fo, xc[i].sl, got);
+        }
         // ⑥b 第 2 档提示时刻：退出时退出前 NOTICE_S 秒，但不早于「打完现场」（钳位）；不退出（s=0，缺省）时停满 NOTICE_IDLE_S 秒（q）提示（审计 P1-4），q=0 关
         int s2a_ap_stall_notice_after(int, int, int, int, int, int);
         struct { int idle, n, lim, s, ns, q, want; } nt[] = {

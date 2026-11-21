@@ -34,7 +34,7 @@ def main():
     prebuilt = list((args.ndk / "toolchains/llvm/prebuilt").glob("*"))
     if len(prebuilt) != 1:
         parser.error("need one host toolchain in --ndk")
-    cc = prebuilt[0] / "bin/aarch64-linux-android29-clang"
+    cc = prebuilt[0] / "bin/aarch64-linux-android34-clang"
     header = prebuilt[0] / "sysroot/usr/include/vulkan/vulkan_core.h"
     bridge = NATIVE / "direct_vk.c"
     inputs = [bridge, NATIVE / "direct_vk.h", NATIVE / "direct_vk_commands.inc", NATIVE / "wsi_lease.c",

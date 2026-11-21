@@ -2,7 +2,6 @@ package org.s2arm.android;
 
 import android.app.GameManager;
 import android.content.Context;
-import android.os.Build;
 import android.os.Handler;
 
 /**
@@ -62,7 +61,6 @@ final class SystemTuning implements Runnable {
     }
 
     private int gameMode() {
-        if (Build.VERSION.SDK_INT < 31) return GameManager.GAME_MODE_UNSUPPORTED;
         try {
             GameManager manager = context.getSystemService(GameManager.class);
             return manager == null ? GameManager.GAME_MODE_UNSUPPORTED : manager.getGameMode();

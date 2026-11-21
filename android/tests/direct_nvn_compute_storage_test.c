@@ -494,6 +494,40 @@ static int parse_cs_one(int v, const char *binding, struct nvn_vk_compute_progra
     return nvn_vk_program_parse_compute((const uint8_t *)json, (size_t)n, p, why, why_size);
 }
 
+// 存储图像是不是缓冲贴图（imageBuffer）：SPIR-V 证得出以它为准，证不出按编译器的 source（"buffer-image" / "image"）。
+//   手写 SPIR-V：set 3 / binding 0 的 UniformConstant 变量，类型 OpTypeImage(uint, Dim, Sampled=2, R32ui)。
+//   期望（按 SPIR-V 规范手算，不跑被测实现）：Dim=Buffer(5) → texel_buffer 1（描述符 STORAGE_TEXEL_BUFFER）；Dim=2D(1) → 0，
+//   即使 source 写 buffer-image 也是 0（SPIR-V 就是要绑的描述符）；SPIR-V 里没有这个绑定时 source=buffer-image → 1、image → 0、别的 source → 拒。
+static const char *const k_spirv_img_buffer = "AwIjBwAAAQAAAAAABQAAAAAAAABHAAQABAAAACIAAAADAAAARwAEAAQAAAAhAAAAAAAAABUABAABAAAAIAAAAAAAAAAZAAkAAgAAAAEAAAAFAAAAAAAAAAAAAAAAAAAAAgAAACEAAAAgAAQAAwAAAAAAAAACAAAAOwAEAAMAAAAEAAAAAAAAAA==";
+static const char *const k_spirv_img_2d = "AwIjBwAAAQAAAAAABQAAAAAAAABHAAQABAAAACIAAAADAAAARwAEAAQAAAAhAAAAAAAAABUABAABAAAAIAAAAAAAAAAZAAkAAgAAAAEAAAABAAAAAAAAAAAAAAAAAAAAAgAAACEAAAAgAAQAAwAAAAAAAAACAAAAOwAEAAMAAAAEAAAAAAAAAA==";
+static void case_image_buffer(void) {
+    group("[IB] 计算存储图像：imageBuffer 分类");
+    static const struct { const char *spirv, *source; int ok, tb; const char *label; } c[] = {
+        {"AwIjBwABAwAAAAAAAQAAAAAAAAA=", "\"source\":\"buffer-image\",", 1, 1, "[IB1] 证不出 + source buffer-image → 缓冲"},
+        {"AwIjBwABAwAAAAAAAQAAAAAAAAA=", "\"source\":\"image\",", 1, 0, "[IB2] 证不出 + source image → 普通图像"},
+        {"AwIjBwABAwAAAAAAAQAAAAAAAAA=", "", 1, 0, "[IB3] 证不出、没有 source → 普通图像（老结果）"},
+        {"AwIjBwABAwAAAAAAAQAAAAAAAAA=", "\"source\":\"texture\",", 0, 0, "[IB4] 别的 source → 拒"},
+        {NULL, "\"source\":\"image\",", 1, 1, "[IB5] SPIR-V Dim=Buffer 证出缓冲（盖过 source image）"},
+        {NULL, "\"source\":\"buffer-image\",", 1, 0, "[IB6] SPIR-V Dim=2D 证出普通图像（盖过 source buffer-image）"},
+    };
+    for (unsigned k = 0; k < sizeof c / sizeof c[0]; k++) {
+        const char *sp = c[k].spirv ? c[k].spirv : k == 4 ? k_spirv_img_buffer : k_spirv_img_2d;
+        char json[4096], why[192] = ""; struct nvn_vk_compute_program p; memset(&p, 0, sizeof p);
+        int n = snprintf(json, sizeof json,
+            "{\"schema\":\"s2a-direct-program-v1\",\"content\":{"
+            "\"contract\":\"s2a-direct-program-content-v1\",\"kind\":\"compute\","
+            "\"hasUnalignedStorageBuffer\":false,\"c0Reads\":[],"
+            "\"stages\":[{\"stage\":\"cs\",\"spirv\":\"%s\"}],"
+            "\"bindings\":[{\"stage\":\"cs\",\"kind\":\"image\",%s\"set\":3,\"binding\":0,\"slot\":76,\"count\":1}],"
+            "\"supportLayout\":{\"requiredSize\":2608},\"supportReads\":[]}}", sp, c[k].source);
+        int rc = n > 0 && (size_t)n < sizeof json ? nvn_vk_program_parse_compute((const uint8_t *)json, (size_t)n, &p, why, sizeof why) : -1;
+        if (c[k].ok) ck_true(c[k].label, rc == 0 && p.binding_count == 1 && p.bindings[0].kind == 3 && p.bindings[0].tex_slot == 2 &&
+                             p.bindings[0].texel_buffer == c[k].tb, c[k].tb ? "接受、图像槽 2、texel_buffer 1" : "接受、图像槽 2、texel_buffer 0");
+        else ck_true(c[k].label, rc != 0 && strstr(why, "unknown image source"), "拒绝：unknown image source");
+        if (rc == 0) nvn_vk_program_free_compute(&p);
+    }
+}
+
 // v2 结果骨架（整池数组只在 v2 里出现）：bindings 由用例给原文
 static int parse_v2_case(const char *bindings, struct nvn_vk_compute_program *p, char *why, size_t why_size) {
     char json[8192];
@@ -596,6 +630,7 @@ static void case_pool(void) {
 int main(void) {
     case_spill();
     case_pool();
+    case_image_buffer();
     case_accept_nvn();
     case_accept_ubo_ptr();
     case_accept_ubo_address();

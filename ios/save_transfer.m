@@ -1,6 +1,7 @@
 // 弱链接[ios]：S2A_SaveTransfer（C# 存档迁移入口；未链服务层时向用户报错）
 // 弱链接[ios]：S2A_SaveTransferFree（释放 C# 存档迁移返回的字符串）
 #import "save_transfer.h"
+#import "picker_present.h"   // 选文件界面弹出 + 日志（#1939）
 #import "app_settings.h"   // s2a_top_presenter
 #import "s2a_l10n.h"
 #import "settings.h"
@@ -383,7 +384,7 @@ S2A_VERTICAL_BAR_OFF
     UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForExportingURLs:@[[NSURL fileURLWithPath:path]] asCopy:YES];
     picker.directoryURL = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
     picker.delegate = self; self.exportPicker = picker;
-    [self presentViewController:picker animated:YES completion:nil];
+    s2a_present_picker(self, picker, "save-export");
 }
 - (void)exportSave {
     // 11-13 维护者「不许堵门」：上次的临时副本删不掉不挡这次（新副本用新名字，互不冲突）；只记一行日志，下次再清
@@ -406,7 +407,7 @@ S2A_VERTICAL_BAR_OFF
     UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeData] asCopy:YES];
     picker.directoryURL = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
     picker.allowsMultipleSelection = NO; picker.delegate = self;
-    [self presentViewController:picker animated:YES completion:nil];
+    s2a_present_picker(self, picker, "save-import");
 }
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     if (controller == self.exportPicker) {

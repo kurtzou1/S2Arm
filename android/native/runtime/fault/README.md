@@ -28,11 +28,11 @@ Apple 原 dispatcher/touch 路径保持；Android 不链接 Mach 的 touch/alias
 ```sh
 python3 android/native/runtime/fault/tests/run.py --out /tmp/fault-host
 python3 android/native/runtime/fault/tests/run_thread.py --out /tmp/thread-host
-python3 android/native/runtime/fault/tests/run_objects.py --out /tmp/fault-ndk --cc /path/to/aarch64-linux-android29-clang
+python3 android/native/runtime/fault/tests/run_objects.py --out /tmp/fault-ndk --cc /path/to/aarch64-linux-android34-clang
 ```
 
 前两个需要原生 Linux ARM64；输出必须在 checkout 外。runner 保存 SHA、实际命令和原始输出，变异仅写私有副本。`run.py` 检查真实 SEG/TRAP/rt_sigreturn、32 SIMD、FPCR/FPSR、GPR、112B redzone、cursor 和 final probe；缺失 q0/cursor/probe 路由必须报红。
 
 `run_thread.py` 直接编译生产 thread/crash/xstack/fault，使用真实 pthread、保护页、信号与不同 guest 栈，虚拟核开/关分别验证。包括真实 Touch 阻塞排空、owner 重入拒绝、guest 写循环停止/恢复、SetThreadActivity/context、条件醒来、新入口、ExitThread pin 退休、持 G/回调超时和撤销后继续；错误 off_guest ack、删等待返回屏障、删真实 thread_bind_host 入口屏障均须报红。
 
-该 fixture 的模块 PC 范围、TSD offset、TLR 分配器及 tracker callback 是明确提供者，不验证 Bionic 的 TSD 快速汇编、真实 managed/GPU 读回。NDK runner 只编译真实 Bionic API29 对象，不运行 Android；gate.c 的既有六处 uint64_t/%llx 警告单独记录，未放宽其余对象。仍需总装 `-z defs`、真正 NativeAOT 附着/handler 链、设备 self-probe 和首游戏验证，不能据 host 测试宣称 game_ready。
+该 fixture 的模块 PC 范围、TSD offset、TLR 分配器及 tracker callback 是明确提供者，不验证 Bionic 的 TSD 快速汇编、真实 managed/GPU 读回。NDK runner 只编译真实 Bionic API34 对象，不运行 Android；gate.c 的既有六处 uint64_t/%llx 警告单独记录，未放宽其余对象。仍需总装 `-z defs`、真正 NativeAOT 附着/handler 链、设备 self-probe 和首游戏验证，不能据 host 测试宣称 game_ready。

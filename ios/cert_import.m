@@ -6,6 +6,7 @@
 //   证书的团队和这个 App 不同（包里描述文件的团队）：照样存（不拦），如实告诉玩家用它签的游戏系统不认、该怎么办；
 //   手机上按证书各存一份，原来能用的那张不被顶掉：现用哪张由 ios/sign_state.m s2a_cert_settle 按 App 团队挑
 #import <UIKit/UIKit.h>
+#import "picker_present.h"   // 选文件界面弹出 + 日志（#1939）
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import "s2a_l10n.h"
 #include "native.h"   // LOG
@@ -93,7 +94,7 @@ void s2a_shell_cert_p12(void) {   // 游戏库设置「签名证书」→「导�
     UTType *p12 = [UTType typeWithIdentifier:@"com.rsa.pkcs-12"] ?: UTTypeData;
     // 任何文件都能选（AltStore / 别的工具导出的证书扩展名不一定是 .p12）：导入时按内容判，不是证书再说「不是能用的证书文件」
     UIDocumentPickerViewController *p = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[p12, UTTypeData] asCopy:YES];
-    p.delegate = delegate; [top_vc() presentViewController:p animated:YES completion:nil];
+    p.delegate = delegate; s2a_present_picker(top_vc(), p, "cert-import");
 }
 #else
 void s2a_shell_cert_p12(void) {}

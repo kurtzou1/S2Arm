@@ -11,8 +11,9 @@
 // API 33+ 优先 postVsyncCallback + FrameCallbackData 时间线——目标呈现时刻取
 // ExpectedPresentationTimeNanos(preferredIndex)（对应 iOS
 // CAMetalDisplayLinkUpdate.targetPresentationTimestamp；deadline 是「帧须此前就绪」
-// 不是呈现时刻，VsyncId 是标识不是时刻，都不用）；API 29–32 退 postFrameCallback64
-// （frameTimeNanos + 相邻拍实测周期估目标）；API 24–28 退 postFrameCallback。
+// 不是呈现时刻，VsyncId 是标识不是时刻，都不用）；postFrameCallback64（frameTimeNanos +
+// 相邻拍实测周期估目标）只留作四件套符号缺失时的降级支——minSdk 34 下真机恒走
+// postVsyncCallback 路径。
 // 拿不到可用节拍源返回 -1，核心回退 nvn_pace 计时。
 //
 // 直连消费侧（mtl_link_active / mtl_link_wait_tick → nvn_be_link_*）走
@@ -81,7 +82,6 @@ static int ops_resolve(char *why, size_t why_size) {
     SYM(g_ops.AChoreographer_getInstance, "AChoreographer_getInstance");
     SYM(g_ops.AChoreographer_postVsyncCallback, "AChoreographer_postVsyncCallback");
     SYM(g_ops.AChoreographer_postFrameCallback64, "AChoreographer_postFrameCallback64");
-    SYM(g_ops.AChoreographer_postFrameCallback, "AChoreographer_postFrameCallback");
     SYM(g_ops.AChoreographerFrameCallbackData_getFrameTimeNanos,
         "AChoreographerFrameCallbackData_getFrameTimeNanos");
     SYM(g_ops.AChoreographerFrameCallbackData_getFrameTimelinesLength,
@@ -101,9 +101,8 @@ static int ops_resolve(char *why, size_t why_size) {
         g_ops.AChoreographer_postVsyncCallback = NULL;
     if (!g_ops.ALooper_prepare || !g_ops.ALooper_pollOnce || !g_ops.ALooper_wake ||
         !g_ops.AChoreographer_getInstance ||
-        (!g_ops.AChoreographer_postVsyncCallback && !g_ops.AChoreographer_postFrameCallback64 &&
-         !g_ops.AChoreographer_postFrameCallback)) {
-        snprintf(g_ops_why, sizeof g_ops_why, "AChoreographer/ALooper NDK 符号缺失（API<24 或被裁剪）");
+        (!g_ops.AChoreographer_postVsyncCallback && !g_ops.AChoreographer_postFrameCallback64)) {
+        snprintf(g_ops_why, sizeof g_ops_why, "AChoreographer/ALooper NDK 符号缺失（符号被裁剪）");
         goto fail;
     }
     g_ops_ok = 1;
@@ -152,15 +151,12 @@ static pthread_once_t g_conds_once = PTHREAD_ONCE_INIT;
 
 static void vs_cb_vsync(const AChoreographerFrameCallbackData *data, void *user);
 static void vs_cb_frame64(int64_t frame_ns, void *user);
-static void vs_cb_frame(long frame_ns, void *user);
 
 static void beat_post_next(void) {          // 只在节拍线程上调用
     if (g_ops.AChoreographer_postVsyncCallback)
         g_ops.AChoreographer_postVsyncCallback(g_choreo, vs_cb_vsync, NULL);
-    else if (g_ops.AChoreographer_postFrameCallback64)
-        g_ops.AChoreographer_postFrameCallback64(g_choreo, vs_cb_frame64, NULL);
     else
-        g_ops.AChoreographer_postFrameCallback(g_choreo, vs_cb_frame, NULL);
+        g_ops.AChoreographer_postFrameCallback64(g_choreo, vs_cb_frame64, NULL);
 }
 
 // 记账（计拍、60Hz 槽位、实测周期），调用户 fn，仍在跑就重投下一拍。回调里不许
@@ -206,7 +202,6 @@ static void vs_cb_frame64(int64_t frame_ns, void *user) {
     (void)user;
     deliver(((double)frame_ns + (double)g_period_ns) / 1e9, frame_ns);   // frameTimeNanos 是拍起点，目标呈现≈+1 周期
 }
-static void vs_cb_frame(long frame_ns, void *user) { vs_cb_frame64(frame_ns, user); }
 
 static void *beat_main(void *arg) {
     (void)arg;

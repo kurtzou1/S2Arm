@@ -11,7 +11,9 @@
 # 本机自测排在门禁后面：不在门禁里跑（没有 GATE2_PAR）就把自己降到 nice 15，子进程继承；门禁步的优先级由门禁自己定
 [ -n "${GATE2_PAR:-}" ] || renice 15 -p $$ > /dev/null 2>&1 || true
 set -u
-GT=300
+GT=300   # 每组无进展秒：连续这么久日志不长、进程树 CPU / 磁盘不涨、没有编译子进程才判挂死（tools/nostall.py）
+GHX=${GATE_HARD_X:-4}   # 墙钟保底 = GT × GHX：只兜一直吃 CPU 的死循环。11-21：原先每组固定墙钟 300 秒，本机同时出候选（负载 70）时
+#   graphics_session / nvn_red / nvn_vppack 正常推进只是变慢，被当超时判红；这几条单测本身没有墙钟判据。判据只问输出对不对，负载不造成假红
 has_file() { [ -f "runtime/tests/t_$1.c" ] || [ -f "runtime/tests/t_$1.m" ] || [ -f "graphics/nvn/tests/t_$1.c" ] || [ -f "graphics/nvn/tests/t_$1.m" ]; }
 # 子项键也认只有构建分片、没有单测源文件的组（runtime/tests/mk/<键>.mk：touch_compat、ns2pro 这类打自己通过行的目标；11-14 新门禁按组拆步要能单跑它们）
 is_key() { has_file "$1" || [ -f "runtime/tests/mk/$1.mk" ]; }
@@ -45,15 +47,19 @@ exec_group() {   # exec_group <键>：跑一组，输出 / 退出码 / 秒数写
   local k=$1 t0=$SECONDS rc
   date +%s > "$OUT/$k.start"
   # -k 15：到时限先 TERM、15 秒后还没退就 KILL（单测进程收不掉时不拖到门禁看门狗把整步停了）
-  NVN_TEST_PREBUILT=${NVN_TEST_PREBUILT:-} timeout -k 15 "$GT" make -s "native-test-$k" > "$OUT/$k.out" 2>&1; rc=$?
+  if [ -f tools/nostall.py ]; then   # 无进展看门狗（门禁步一级早已在用，tools/gate.sh）；每组一个取证目录：挂死时 nostall 在这里留各进程调用栈
+    mkdir -p "$OUT/$k.ns"; NVN_TEST_PREBUILT=${NVN_TEST_PREBUILT:-} timeout -k 15 "$((GT * GHX))" "${S2A_PY:-python3}" tools/nostall.py --watch "$OUT/$k.ns" "$GT" -- make -s "native-test-$k" > "$OUT/$k.out" 2>&1; rc=$?
+  else NVN_TEST_PREBUILT=${NVN_TEST_PREBUILT:-} timeout -k 15 "$GT" make -s "native-test-$k" > "$OUT/$k.out" 2>&1; rc=$?; fi   # 缺 nostall.py（单测假仓库）= 旧行为
   echo "$rc $((SECONDS - t0))" > "$OUT/$k.rc"
 }
 judge() {   # judge <键>：按 $OUT 里这一组的结果判，绿 G+1 / 红 R+1 并记原因与细节
   local k=$1 o rc sec why=
   o=$(cat "$OUT/$k.out" 2> /dev/null); read -r rc sec < "$OUT/$k.rc" 2> /dev/null || { rc=1; sec=0; o="（没有结果：这一组没跑起来）"; }
   TM="${TM}${sec} ${k}"$'\n'   # 每组墙钟（10-28 梳理：原先只判红绿、不知道慢在哪组）
-  if [ $rc = 124 ]; then why="超时（${GT} 秒）"
-  elif [ $rc = 137 ]; then why="超时（${GT} 秒，TERM 后 15 秒仍不退、补了 KILL）"
+  if [ $rc = 124 ] && grep -aq "无进展看门狗" < <(printf '%s\n' "$o"); then why="挂死（连续 ${GT} 秒无进展：日志不长、进程树 CPU / 磁盘不涨）"
+  elif [ $rc = 124 ] && [ -d "$OUT/$k.ns" ]; then why="超时（墙钟保底 $((GT * GHX)) 秒仍没跑完，期间一直有进展）"
+  elif [ $rc = 124 ]; then why="超时（${GT} 秒）"
+  elif [ $rc = 137 ]; then why="超时（TERM 后 15 秒仍不退、补了 KILL）"
   elif [ $rc = 125 ]; then why="没跑（NVN 共用前置构建失败，见上）"
   elif grep -aq '^✗ t_' < <(printf '%s\n' "$o"); then why="判据不符"
   # 「ld: warning:」不是构建错误（nvn_texu_pending 每次链接都打 ld: warning: ignoring duplicate libraries）：原先 ^ld: 连它一起认，运行时真失败（rc 非 0、
@@ -67,11 +73,19 @@ judge() {   # judge <键>：按 $OUT 里这一组的结果判，绿 G+1 / 红 R+
   # 细节：判据不符列全部「✗」行（不只尾部：打得早的判据行会被截掉，10-24 t_thread 偶发三次都看不出是哪条）；构建失败列报错行；其余给尾部
   local d
   case $why in
-    判据不符) d=$(grep -aE '^(✗ |FAIL )' < <(printf '%s\n' "$o") | head -20);;   # FAIL：单测自己的判据行（t_dirty_growth / t_nvn_red 这样打，10-30 列车线：原先只认 ✗ 被丢）
     构建失败) d=$(grep -av '^ld: warning:' < <(printf '%s\n' "$o") | grep -aE ': (fatal )?error:|^clang: error:|^ld: |^Undefined symbols|^  "_|referenced from|^      [_A-Za-z].* in ' | head -16);;   # 链接红连缺的符号名 / 谁引用一起带（11-05 nvn_rec_cover 偶发「Undefined symbols」只剩一行、定不了因）
-    *) d=$(tail -10 < <(printf '%s\n' "$o"));;
+    *) d=$(printf '%s\n' "$o" | red_excerpt)   # 判据不符 / 超时 / 异常退出 / 没打结论行：同一份摘录
+       local sf; for sf in "$OUT/$k.ns"/nostall_stacks.*.log; do [ -f "$sf" ] && d="$d"$'\n'"--- 挂死取证（各进程调用栈，前 2 KB）"$'\n'"$(head -c 2048 "$sf" | iconv -c -f UTF-8 -t UTF-8)"; done;;
   esac
   DET="${DET}✗ 组 ${k}：${why}"$'\n'"$d"$'\n'
+}
+# 红组的输出摘录（11-21 维护者：原先判据不符只取顶格「✗ / FAIL」行、其余只给末尾 10 行，单测缩进打的逐项「FAIL ①…」、崩溃行、
+#   超时组被杀前打的取证都丢了，门禁日志只剩「11 项里 2 项不符」这类汇总，查因要本机连跑碰运气）：
+#   按原顺序取「判据 / 红 / 崩溃」特征行 ∪ 末尾 20 行（不重复），封顶约 4 KB、按字节截后去掉截断的半个字。只用于红组，绿组日志不变
+red_excerpt() {
+  awk '{ L[NR] = $0 } END { s = NR - 19; for (i = 1; i <= NR; i++)
+         if (i >= s || L[i] ~ /FAIL|✗|【红】|不通|unrecognized selector|[Aa]ssertion|[Aa]ssert\(|signal|SIG[A-Z]+|Terminating app|uncaught exception|libc\+\+abi|Abort trap|Segmentation fault|Bus error|EXC_[A-Z_]+|panic|Killed/) print L[i] }' \
+    | head -c 4096 | iconv -c -f UTF-8 -t UTF-8
 }
 uses_pre() { grep -qs 'NVN_TEST_LIB\|NVN_TEST_HOST_OBJS' "runtime/tests/mk/$1.mk"; }   # 这组用 NVN 共用前置（库 / 宿主目标文件）
 run_groups() {   # run_groups <键…>：前置建一次 → 非 SER 组按上次耗时从长到短并行 → SER 组串行 → 按传入顺序判

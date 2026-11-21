@@ -372,6 +372,7 @@
 "gfx.filter.metalfx.note" = "銳利放大（MetalFX）每一幀會多花一點顯示卡時間，幀率和耗電會略受影響。";
 "gfx.filter.fsr" = "FSR 銳化放大";
 "gfx.filter.fsr.noDirect" = "FSR 銳化放大也用不了。";
+"gfx.hdrUpscaleBypass.note" = "HDR 開（S2A_HDR）：HDR 視窗（RGB10A2 PQ 碼值）旁路上屏抗鋸齒、縮放濾鏡（MetalFX / FSR）與補幀——8 位感知縮放不適配 PQ 碼值（產品限制）；SDR 視窗照常。";
 "gfx.filter.nearest" = "2D 遊戲專用";
 "gfx.fpsLimit" = "幀率上限";
 "gfx.fpsLimit.none" = "不限";
@@ -607,7 +608,7 @@
 
 /* 0.6.0 快照：游戏中菜单 */
 "vpad.snap.save" = "存下這一刻";
-"vpad.snap.offAddress" = "這台裝置的位址空間不夠同時放下這款遊戲和快照，這款在這台裝置上不能存快照；遊戲照常玩。";
+"vpad.snap.offAddress" = "這款遊戲要用的位址範圍比這台裝置的系統能給 App 的多，放不下快照，所以在這台裝置上不能存快照。這和儲存空間無關，遊戲照常玩。";
 "vpad.snap.restore" = "回到上次存下的這一刻";
 "vpad.snap.saving" = "正在存下這一刻…";
 "vpad.snap.saved" = "已存下這一刻";
@@ -648,6 +649,6 @@
 "cert.source.sidestore" = "來自 SideStore";
 "cert.source.p12" = "匯入的 .p12";
 "cert.source.pc" = "電腦交來";
-"addrshort.title" = "這台裝置的位址空間不夠這款遊戲";
-"addrshort.body" = "這款遊戲開局要一整塊很大的位址空間，這台裝置給不了這麼多：可能會非常卡，或一直停在開頭。可以先點「仍要啟動」試試；想正常玩，請換一台位址空間更大的裝置（例如記憶體更大的 iPhone / iPad / Mac），或等後續版本改進。";
+"addrshort.title" = "這台裝置的系統能給 App 的位址範圍不夠這款遊戲";
+"addrshort.body" = "這款遊戲開局要一大塊連續的位址範圍，這台裝置的系統能給 App 的不夠（和儲存空間無關，清理空間沒有用）：可能會非常卡，或一直停在開頭。可以先點「仍要啟動」試試；想正常玩，請換一台記憶體更大的 iPhone / iPad / Mac（系統能給 App 的位址範圍更大），或等後續版本改進。";
 "host.startAnyway" = "仍要啟動";

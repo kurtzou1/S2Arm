@@ -52,6 +52,57 @@ PY
   -I "$repo/graphics/nvn/replay" -I "$repo/graphics/nvn/gfx/nvn" -I "$repo/graphics/nvn/gfx/nvn/include" -I "$repo/graphics/nvn/gfx/tex" \
   -o "$tmp/t_pipe" "$android/tests/nvn_vk_pipe_warm_test.c" "$android/native/nvn/nvn_vk_pipe_warm.c"
 "$tmp/t_pipe"
+# 负对照（管线清单满表淘汰规则：先挑本轮没碰过的旧条目）：各改被测实现一处，整套用例必须红在对应的断言上（编译失败不算红）
+python3 - "$repo" "$tmp" <<'PY'
+import os, pathlib, re, subprocess, sys
+repo, tmp = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+src, test = repo/'android/native/nvn/nvn_vk_pipe_warm.c', repo/'android/tests/nvn_vk_pipe_warm_test.c'
+text = src.read_text()
+inc = []
+for d in ('android/native', 'android/native/nvn', 'android/native/direct', 'graphics/nvn/replay', 'graphics/nvn/gfx/nvn', 'graphics/nvn/gfx/nvn/include', 'graphics/nvn/gfx/tex'):
+    inc += ['-I', str(repo/d)]
+INS = '    g.fresh[slot] = 1;   // 新记进来的算本轮碰过：旧条目挤光之前不会被下一条新配方挤掉\n'
+TCH = '    g.fresh[slot] = 1;   // 命中（含 memo / 桶链 / 标签快路径）也算本轮碰过\n'
+LOAD = '    memset(g.fresh, 0, g.cap);   // 载入进来的都是旧条目：一次都还没被本轮碰过\n'
+RESET = '    memset(g.fresh, 0, g.cap);   // 全表都碰过了：新一轮，下一次起重新分「碰过 / 没碰过」\n    g.st.epochs++;\n'
+SEL = '        uint32_t *best = g.fresh[i] ? &hot : &cold;\n'
+CMP = '        if (*best == UINT32_MAX || g.uses[i] < g.uses[*best] || (g.uses[i] == g.uses[*best] && g.seen[i] < g.seen[*best])) *best = i;\n'
+TAG = '        pw_touch_locked(slot1 - 1);\n        g.st.tag_hits++;\n'
+# (名字, 改动, 必须全部出现的断言片段)——产品里只有一条规则；满表淘汰以前的老规则 = 改坏项 no-fresh-preference
+cases = [
+    ('new-not-fresh', [(INS, '')], ['aging thrash:']),                                  # 新记进来不算碰过：新配方又会互相挤
+    ('hit-not-fresh', [(TCH, '')], ['aging touch:']),                                    # 命中不算碰过：刚被命中的旧条目照样被挤
+    ('load-keeps-fresh', [(LOAD, '')], ['aging thrash:']),                               # 载入不清标记：旧条目一进来就当碰过
+    ('no-new-round', [(RESET, '    g.st.epochs++;\n')], ['aging epoch:']),              # 全表碰过时不开新一轮：工作集换批后新配方互相挤
+    ('no-epoch-count', [(RESET, '    memset(g.fresh, 0, g.cap);\n')], ['epochs want']),  # 开了新一轮但不计数
+    ('select-inverted', [(SEL, '        uint32_t *best = !g.fresh[i] ? &hot : &cold;\n')], ['aging thrash:']),   # 先挑碰过的
+    ('no-fresh-preference', [(SEL, '        uint32_t *best = &cold;\n')],                                         # 去掉「先挑没碰过的」= 老规则：新配方被互相挤掉
+     ['aging thrash: each of the', 'aging thrash: new recipe', 'aging touch:', 'aging epoch:', 'note/memo/chain want 23/14/0']),
+    ('uses-inverted', [(CMP, '        if (*best == UINT32_MAX || g.uses[i] > g.uses[*best] || (g.uses[i] == g.uses[*best] && g.seen[i] < g.seen[*best])) *best = i;\n')],
+     ['aging thrash:']),                                                                  # 同一类里挑 uses 最大的
+    ('seen-only', [(CMP, '        if (*best == UINT32_MAX || g.seen[i] < g.seen[*best]) *best = i;\n')], ['aging epoch:']),    # 只看最近序号，不看 uses
+    ('tag-touch-not-fresh', [(TAG, '        g.uses[slot1 - 1]++; g.seen[slot1 - 1] = (uint32_t)++g.clock; g.recs[slot1 - 1].uses = g.uses[slot1 - 1]; g.dirty = 1;\n        g.st.tag_hits++;\n')], ['不同']),   # 标签快路径不标碰过
+]
+for name, edits, expects in cases:
+    t = text
+    for old, new in edits:
+        assert t.count(old) == 1, (name, 'mutation anchor', old[:70])
+        t = t.replace(old, new)
+    m = tmp / f'pipe_warm_{name}.c'; m.write_text(t)
+    exe = tmp / f't_pipe_{name}'
+    subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-O1', '-Wall', '-Wextra', '-Werror', '-pthread', '-D_GNU_SOURCE', *inc, '-o', str(exe), str(test), str(m)], check=True)
+    d = tmp / f'pw_dir_{name}'; d.mkdir()
+    r = subprocess.run([str(exe)], capture_output=True, text=True, timeout=300, env=dict(os.environ, S2A_PW_DIR=str(d)))
+    out = r.stdout + r.stderr
+    assert r.returncode != 0 and all(e in out for e in expects), (name, [e for e in expects if e not in out], out[-800:])
+    fails = []   # 红在测试文件的哪几行（去重，取前 3 条）
+    for line_no, text_ in re.findall(r'FAIL \S*nvn_vk_pipe_warm_test\.c:(\d+): ([^\n]{0,64})', out):
+        if line_no not in [f[0] for f in fails]: fails.append((line_no, text_))
+    hit = next((l.strip()[:90] for l in out.splitlines() if expects[0] in l), expects[0])
+    where = '；'.join(f'nvn_vk_pipe_warm_test.c:{n}「{t_}」' for n, t_ in fails[:3]) + f'（共 {len(fails)} 处）' if fails else f'「{hit}」'
+    print(f'管线清单淘汰规则 负对照 {name}：红在 {where}')
+print(f'PASS: 管线清单淘汰规则负对照 {len(cases)} 项全部变红')
+PY
 "$cc" -std=gnu11 -O1 -Wall -Wextra -Werror -pthread -D_GNU_SOURCE \
   -I "$android/native/nvn" -o "$tmp/t_once" \
   "$android/tests/nvn_vk_pipe_once_test.c" "$android/native/nvn/nvn_vk_pipe_once.c"

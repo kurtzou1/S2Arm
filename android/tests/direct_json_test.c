@@ -92,12 +92,14 @@ int main(void) {
         static char text[70000];
         size_t at = 0;
         at += (size_t)snprintf(text, sizeof text, "{");
-        for (int i = 0; i < 64; i++) at += (size_t)snprintf(text + at, sizeof text - at, "%s\"k%d\":%d", i ? "," : "", i, i);
+        // 上限要容得下设备能力档的 capabilities（现 65 个键）：至少 96，留余量给后续能力字段
+        CHECK(S2A_JSON_MAX_FIELDS >= 96, "field limit fits the device profile capabilities object (65 keys today)");
+        for (int i = 0; i < S2A_JSON_MAX_FIELDS; i++) at += (size_t)snprintf(text + at, sizeof text - at, "%s\"k%d\":%d", i ? "," : "", i, i);
         at += (size_t)snprintf(text + at, sizeof text - at, "}");
-        CHECK(s2a_json_parse_object((const uint8_t *)text, at, &object, error, sizeof error) == 0, "64 fields accepted");
+        CHECK(s2a_json_parse_object((const uint8_t *)text, at, &object, error, sizeof error) == 0, "max fields accepted");
         text[at - 1] = 0;
-        at += (size_t)snprintf(text + at - 1, sizeof text - at + 1, ",\"k64\":64}");
-        CHECK(s2a_json_parse_object((const uint8_t *)text, at, &object, error, sizeof error) != 0, "65 fields rejected");
+        at += (size_t)snprintf(text + at - 1, sizeof text - at + 1, ",\"kx\":1}");
+        CHECK(s2a_json_parse_object((const uint8_t *)text, at, &object, error, sizeof error) != 0, "max + 1 fields rejected");
     }
     {
         char text[600];

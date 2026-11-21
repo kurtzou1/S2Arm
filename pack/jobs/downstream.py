@@ -339,6 +339,19 @@ def _downstream_input(c, extraction, work):
     return view, romfs
 
 
+def work_dir(out, scheme):
+    """下游做包工具的工作目录（DM_ROOT）：跨出包复用、工具自己按「文件在不在」跳步。工具里放的东西（翻译器等）随包件版本变，
+    换了包件还留着上一版放的那份就会用错（#1915：框架依赖版翻译器没有 .NET 时 rc 131、被报成「嵌入为空」）。
+    所以目录归属某一份包件：.bundle 记它的 SHA-256，对不上（或没记、是旧版留下的）就整个清掉重建；同一份包件照旧复用"""
+    work, sha = out / "work", scheme["bundle"]["sha256"]
+    mark = work / ".bundle"
+    if (work.exists() or work.is_symlink()) and not (mark.is_file() and mark.read_text().strip() == sha):
+        shutil.rmtree(work)
+    work.mkdir(parents=True, exist_ok=True)
+    mark.write_text(sha)
+    return work
+
+
 def out_dir(c, gid, scheme):
     import layout
     return layout.path(c, gid, "downstream", scheme["id"])
@@ -365,8 +378,9 @@ def build_ios(c, game, scheme):
     ipa = out / f"{scheme['id']}.ipa"
     pack = out / f"{scheme['id']}资源包"  # 非玩家句
     ipa.unlink(missing_ok=True)
-    env = dict(c.env(), DM_ROOT=str(out / "work"), D2RM_S2ARM_PACK=str(pack), PYTHONUTF8="1")
-    game_dir, expanded = _downstream_input(c, extraction, out / "work")
+    work = work_dir(out, scheme)
+    env = dict(c.env(), DM_ROOT=str(work), D2RM_S2ARM_PACK=str(pack), PYTHONUTF8="1")
+    game_dir, expanded = _downstream_input(c, extraction, work)
     try:
         c.run([sys.executable, bundle / "src" / t["tool"], bundle / "shell.zip", game_dir, ipa], logs / "downstream-ios.log", env)
     finally:

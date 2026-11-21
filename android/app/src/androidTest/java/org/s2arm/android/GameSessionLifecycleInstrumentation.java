@@ -118,7 +118,7 @@ public final class GameSessionLifecycleInstrumentation extends Instrumentation {
         Bundle result = new Bundle(); Context context = getTargetContext();
         int activePid = 0;
         try {
-            check(android.os.Build.VERSION.SDK_INT >= 30, "API 30+ is required to verify the actual exit status");
+            // minSdk 34 起步：getHistoricalProcessExitReasons（API 30+）恒可用
             String title = arguments.getString("titleId");
             check(title != null && title.matches("[0-9A-F]{16}"), "titleId argument required");
             check(gamePid(context) == 0, "no previous game process");

@@ -42,7 +42,7 @@ S2ARM_ANDROID_REWRITER=1 S2A_REWRITER_DEPS=/path/to/pinned-deps ./gradlew :app:a
 时输出一行【红】并退出，直接 JNI 测试也在 JDK/构建前独立报红。不会因外部 CLI 覆盖
 跳过 mandatory 同源测试，也不安装或从 Python 模块目录猜测 C 源码。
 
-`libs2arm_rewriter.so` 静态包含固定 Capstone/LZ4、隐藏 C 核心符号，只导出 JNI 入口，Android arm64/API29，16KiB ELF LOAD 对齐。Gradle 通过 Variant generated-assets API 生成 Capstone BSD/LLVM 与 LZ4 C BSD2 许可；APK 检查器在包含准备库时强制这两份非空许可。
+`libs2arm_rewriter.so` 静态包含固定 Capstone/LZ4、隐藏 C 核心符号，只导出 JNI 入口，Android arm64/API34，16KiB ELF LOAD 对齐。Gradle 通过 Variant generated-assets API 生成 Capstone BSD/LLVM 与 LZ4 C BSD2 许可；APK 检查器在包含准备库时强制这两份非空许可。
 
 电脑产品出包入口仍按统一 refresh 流程；这里的独立 CMake 和测试命令用于开发验证。设备内准备不运行 bash。
 
@@ -60,7 +60,7 @@ NDK 入口独立于游戏运行时：
 ```sh
 cmake -S android/rewriter -B build/android-rewriter \
   -DCMAKE_TOOLCHAIN_FILE=/path/to/ndk/build/cmake/android.toolchain.cmake \
-  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-29 \
+  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-34 \
   -DS2A_REWRITER_DEPS=/path/to/pinned-deps
 cmake --build build/android-rewriter --parallel 2
 ```

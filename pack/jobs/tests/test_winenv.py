@@ -494,7 +494,9 @@ class EnvironmentTests(unittest.TestCase):
         for text in ("", "Some other compiler version 1", "error: broken\nApple metal version 9"):
             with self.subTest(text=text):
                 self.probe.values["metal"] = {"output": text}
-                self.assertEqual(self.item(self.report(), "metal")["status"], "missing")
+                c = self.item(self.report(), "metal")
+                self.assertEqual(c["status"], "missing")
+                self.assertIn(" / ".join(text.splitlines()) or "（空）", c["message"])   # 认不出时带输出原文（D-NJGH）
 
     def test_cap_metal_missing_message_lists_searched_places(self):
         # 玩家装了还认不出：「复制错误摘要」读 message，要带上找过的每一处和结果

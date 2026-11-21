@@ -2,7 +2,7 @@ init_codec_toolchain() {
     # Production recipes set their own flags; ambient host flags are not inputs.
     unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
     grep -q '^Pkg.Revision = '$S2A_ANDROID_NDK'$' "$ndk/source.properties" || { echo "codecs require NDK $S2A_ANDROID_NDK" >&2; return 1; }
-    toolchain_key=$({ cat "$ndk/source.properties"; "$cc" --version; printf '%s\n' 'arm64-v8a android-29 PIC'; } | s2a_sha256 | cut -d' ' -f1)
+    toolchain_key=$({ cat "$ndk/source.properties"; "$cc" --version; printf '%s\n' 'arm64-v8a android-34 PIC'; } | s2a_sha256 | cut -d' ' -f1)
 }
 
 # Shared offline source/cache operations. No build path performs a download.

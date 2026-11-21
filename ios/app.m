@@ -3,6 +3,7 @@
 #include <dlfcn.h>
 #import "s2a_l10n.h"
 #import <UIKit/UIKit.h>
+#import "picker_present.h"   // 选文件界面弹出 + 日志（#1939）
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <AVFAudio/AVFAudio.h>
 #import "controller.h"
@@ -688,6 +689,8 @@ id s2a_ios_ext_register(UIViewController *vc);   // extdisplay.m：登记外接�
 - (BOOL)prefersStatusBarHidden { return YES; }
 - (void)viewDidLayoutSubviews {   // 屏幕尺寸变了（10-27 Duo 合上切外屏、展开回内屏）：记下当前屏的比例；直连出图层按新尺寸重摆（graphics/nvn/host_adapt.m；通用模式没有这个符号）
     [super viewDidLayoutSubviews];
+    void s2a_dprompt_layout(void) __attribute__((weak_import));   // ios/dprompt.m：屏幕尺寸变了，触屏提示条按新宽度重排（只链前端的单测没有它）
+    if (s2a_dprompt_layout) s2a_dprompt_layout();
     void s2a_direct_relayout(void) __attribute__((weak_import));
     if (s2a_direct_relayout) s2a_direct_relayout();
     void nxgal_window_relayout_ios(void) __attribute__((weak_import));
@@ -1435,7 +1438,7 @@ void s2a_shell_pick_s2arm(const char *gid) {   // 主线程（s2a_shell.h）
     UIDocumentPickerViewController *p = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeData] asCopy:YES];
     p.delegate = delegate; UIViewController *top = lib_top();
     if (!top) { LOG("【红】游戏库：没有窗口，.s2arm 选择器开不出来"); return; }
-    [top presentViewController:p animated:YES completion:nil];
+    s2a_present_picker(top, p, "s2arm-import");
 }
 // 长按卡片「导出这一款…」（0.6.3，GitHub #1793：分发证书玩家换签名重装后不想再从电脑整套重推）：后台生成这款的 <名>.s2arm + <名>.img
 //   （game_export.m，.img 是资源包 game.img——推送装的款是 romfs.img——的同卷硬链接，不拷副本），放本款文档根下的临时文件夹 game-exports/<随机名>/，交「文件」App 存走（asCopy）。
@@ -1503,7 +1506,7 @@ void s2a_shell_export_game(const char *gid_c) {   // 主线程（s2a_shell.h）
                 if (!top) { LOG("【红】导出这一款：没有窗口，「文件」导出页开不出来"); gexp_clear(x, nil); g_gexp = nil; return; }
                 UIDocumentPickerViewController *p = [[UIDocumentPickerViewController alloc] initForExportingURLs:@[[NSURL fileURLWithPath:s2s], [NSURL fileURLWithPath:ims]] asCopy:YES];
                 p.delegate = x;
-                [top presentViewController:p animated:YES completion:nil];
+                s2a_present_picker(top, p, "game-export");
             };
             if (wait && wait.presentingViewController) [wait dismissViewControllerAnimated:NO completion:next]; else next();
         });

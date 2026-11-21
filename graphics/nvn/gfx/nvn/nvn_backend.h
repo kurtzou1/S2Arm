@@ -132,6 +132,8 @@ typedef struct {
     uint32_t min_ubo_align, min_ssbo_align;   // (minUniformBufferOffsetAlignment, minStorageBufferOffsetAlignment / 家族表)
     uint64_t max_ubo_range, max_ssbo_range;   // (maxUniformBufferRange, maxStorageBufferRange / 家族表)
     uint64_t max_buf_bytes;
+    uint32_t min_texel_align;      // 缓冲视图（TBUF / IMAGE_TBUF）偏移对齐 (minTexelBufferOffsetAlignment / 0 = 后端不报，核心不做对齐副本)
+    uint32_t max_texel_elems;      // 缓冲视图元素上限 (maxTexelBufferElements / 0 = 不报)
     uint32_t max_stage_res[NVN_GPU_RES_N];    // 每阶段每类描述符上限 (maxPerStageDescriptor* / 参数缓冲上限)
     uint32_t max_sets;             // 可同时绑定的描述符集数 (maxBoundDescriptorSets；Metal 0 = 不用 set)
     uint32_t storage_stages;       // 允许存储缓冲 / 存储图像写的 NVN 阶段位（1 << nvn_gpu_stage）(vertexPipelineStoresAndAtomics / fragmentStoresAndAtomics)

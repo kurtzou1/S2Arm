@@ -173,9 +173,10 @@ static int read_tasks(struct s2a_adpf_task *out, int max) {
     closedir(d);
     return n;
 }
-// APerformanceHint_* needs API 33+: resolve the symbols lazily so older Android
-// keeps running with the hint silently absent instead of failing to load.
-// APK 门禁以较高 API 真头核对动态函数类型。生产对象仍可按 API 29 编译，
+// APerformanceHint_* needs API 33+ (always present at minSdk 34): resolve the
+// symbols lazily so the API 35/36 additions stay optional instead of requiring
+// a newer platform or failing to load.
+// APK 门禁以较高 API 真头核对动态函数类型。生产对象仍可按 API 34 编译，
 // 因为 typeof(&symbol) 本身也会触发 availability 检查。
 #define ADPF_LOOKUP(ptr, symbol) ((ptr) = (__typeof__(ptr))dlsym(android_lib, #symbol))
 #ifdef S2A_ADPF_CHECK_SIGNATURES

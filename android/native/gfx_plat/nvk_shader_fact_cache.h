@@ -55,7 +55,7 @@ static int fact_cache_mask(const uint8_t *bytes, size_t len, const struct rp_pro
         if (e->src_kind == NVN_RB_TEX) {
             if (e->count != 1 || e->src_reg >= 32 || e->src_reg2 != UINT16_MAX) return 0;
             mask[st] |= 1u << e->src_reg;
-        } else if (e->src_kind == NVN_RB_TBUF || e->cls == NVN_GPU_RES_IMAGE) return 0;
+        } else if (e->src_kind == NVN_RB_TBUF || e->cls == NVN_GPU_RES_IMAGE || e->cls == NVN_GPU_RES_IMAGE_TBUF) return 0;
     }
     /* Walk once: arr_item for every query would repeatedly scan long code-read
      * traces. No dependency string or game code is retained by this cache. */

@@ -22,6 +22,7 @@ int s2a_sesmark_prev(const char *docs) {
     char p[1100]; if (!mark_path(docs, p, sizeof p)) return S2A_SESMARK_NONE;
     int fd = open(p, O_RDONLY); if (fd < 0) return S2A_SESMARK_NONE;
     char b[8] = {0}; ssize_t r = read(fd, b, sizeof b - 1); close(fd);
+    if (r >= 2 && !memcmp(b, "ab", 2)) return S2A_SESMARK_ABORT;
     return r >= 2 && !memcmp(b, "bg", 2) ? S2A_SESMARK_BG : S2A_SESMARK_FG;   // 读不全按 fg：宁可多问一次
 }
 // 只解包的起动（S2A_PACK_APPLY_ONLY=1，推完资源包起一次 App 解开就退）不是一局：不写也不删标记，上一局留下的照原样留给下一次正式起局。
@@ -31,9 +32,16 @@ void s2a_sesmark_set(const char *docs, int state) {
     char p[1100]; if (apply_only() || !mark_path(docs, p, sizeof p)) return;
     if (state == S2A_SESMARK_NONE) { if (unlink(p) && errno != ENOENT) LOG("【红】会话标记删除失败 errno=%d", errno); return; }
     int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0644); if (fd < 0) { LOG("【红】会话标记写入失败 errno=%d", errno); return; }
-    ssize_t w = write(fd, state == S2A_SESMARK_BG ? "bg\n" : "fg\n", 3); (void)w; close(fd);
+    ssize_t w = write(fd, state == S2A_SESMARK_BG ? "bg\n" : state == S2A_SESMARK_ABORT ? "ab\n" : "fg\n", 3); (void)w; close(fd);
 }
 // 优雅退出时删标记（lifecycle.c 收局最后调）。只在 iOS：Mac 的 HOME/Documents 是开发者的文稿目录，不往里写
+// 游戏 Break 收局（lifecycle.c）：不删、改写成「游戏中止」。只在 iOS（同 clear_home）
+void s2a_sesmark_abort_home(void) {
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    char d[1030]; int r = s2a_container_docs(d, sizeof d); if (r <= 0 || (size_t)r >= sizeof d) return;
+    s2a_sesmark_set(d, S2A_SESMARK_ABORT);
+#endif
+}
 void s2a_sesmark_clear_home(void) {
 #if defined(__APPLE__) && TARGET_OS_IPHONE
     char d[1030]; int r = s2a_container_docs(d, sizeof d); if (r <= 0 || (size_t)r >= sizeof d) return;

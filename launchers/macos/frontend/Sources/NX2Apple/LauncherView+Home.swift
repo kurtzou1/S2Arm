@@ -5,6 +5,7 @@ import SwiftUI
 import NXCore
 import NXLauncher
 import S2ArmAppleAdapter
+import NXModel
 
 extension LauncherView {
     var homeGames: [GameSummary] { home.games(model.games) }
@@ -181,22 +182,7 @@ extension LauncherView {
     }
 
     private var homeMoreMenu: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            homeMoreRow(loc.t("s2arm.library.refresh"), "arrow.clockwise", id: "home.refresh") { model.refresh() }
-                .disabled(model.loading)
-        }
-        .padding(8).frame(width: 220).font(.manrope(13.5, .semibold)).preferredColorScheme(.dark)
-    }
-
-    private func homeMoreRow(_ title: String, _ symbol: String, id: String, action: @escaping () -> Void) -> some View {
-        Button { showHomeMore = false; action() } label: {
-            HStack(spacing: 10) {
-                Image(systemName: symbol).font(.system(size: 14, weight: .medium)).frame(width: 20, height: 20)
-                Text(title).lineLimit(1)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10).padding(.vertical, 8).contentShape(Rectangle())
-        }
-        .controllerButtonStyle(.plain).controllerID(id)
+        HomeMoreMenu(model: model, loc: loc) { showHomeMore = false }
     }
 
     private func homeCoverStrip(size: CGSize) -> some View {
@@ -580,5 +566,45 @@ private struct HorizontalWheelScroll: NSViewRepresentable {
             monitor = nil
         }
         deinit { stopObserving() }
+    }
+}
+
+/// 游戏库标题行「…」弹出的菜单（游戏库级动作）。菜单项是一张表（id / 标题 / 图标 / 动作）：界面照表画，单测直接核表里有哪几项、点了发出什么作业，
+///   不用在桌面上开窗（离屏 NSHostingView 读不到无障碍树）
+struct HomeMoreMenu: View {
+    struct Item {
+        let id: String, title: String, symbol: String
+        let disabled: Bool
+        let action: () -> Void
+    }
+    @ObservedObject var model: S2ArmLauncherModel
+    let loc: Localizer
+    let dismiss: () -> Void
+
+    var items: [Item] {
+        let lang = loc.lang.sharedCode
+        return [
+            Item(id: "home.refresh", title: loc.t("s2arm.library.refresh"), symbol: "arrow.clockwise", disabled: model.loading) { [model] in model.refresh() },
+            // 不连手机、不经总控台：组不带游戏的通用 S2Arm.ipa 放进「S2Arm 游戏包」（作业 installUpdate + mode export → export_shell_ipa），
+            //   给 LiveContainer / SideStore / AltStore 自签（11-21 维护者；同总控台「别的工具装的」那台手机下的同名按钮）
+            Item(id: "home.exportShellIpa", title: BackendText.launcherText("console.button.exportShellIpa", language: lang), symbol: "square.and.arrow.up",
+                 disabled: false) { [model] in model.updatePhone(acceptStale: false, repack: [], language: lang, mode: "export") },
+        ]
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(items, id: \.id) { item in
+                Button { dismiss(); item.action() } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: item.symbol).font(.system(size: 14, weight: .medium)).frame(width: 20, height: 20)
+                        Text(item.title).lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10).padding(.vertical, 8).contentShape(Rectangle())
+                }
+                .controllerButtonStyle(.plain).controllerID(item.id).disabled(item.disabled)
+            }
+        }
+        .padding(8).frame(width: 220).font(.manrope(13.5, .semibold)).preferredColorScheme(.dark)
     }
 }

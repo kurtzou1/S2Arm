@@ -33,6 +33,10 @@ static int p_rows(const char *path) {
 int main(void) {
     @autoreleasepool {
         setenv("DM_NVN_FIRST_SKIP", "0", 1);   // 测的是等管线这条路径，不走首遇跳过
+        // 等管线不限时：单条上限（DM_NVN_PSO_WAIT_MS，缺省 2 秒）、每帧预算（DM_NVN_PSO_FRAME_MS，缺省 100 ms）、不可跳过绘制上限（DM_NVN_PSO_UNSAFE_WAIT_MS）
+        //   都是墙钟：负载高时现编一条 Metal 管线超过 100 ms，pso_get_ 先回空、这一笔跳过，「匹配的一对照常建成」「MARK 后再建一对」两项假红（11-21 门禁负载 70 / 18 核）。
+        //   本测核的是配对核对与计数口径，与编译快慢无关
+        setenv("DM_NVN_PSO_WAIT_MS", "0", 1); setenv("DM_NVN_PSO_FRAME_MS", "0", 1); setenv("DM_NVN_PSO_UNSAFE_WAIT_MS", "0", 1);
         char user[] = "/tmp/t_pairguard_XXXXXX"; int fd = mkstemp(user); REQUIRE(fd >= 0); close(fd); setenv("DM_PSO_USER", user, 1);
         char map[] = "/tmp/t_pairguard_map_XXXXXX"; fd = mkstemp(map); REQUIRE(fd >= 0); close(fd); setenv("DM_NVN_SHMAP", map, 1);
         mtl_init();

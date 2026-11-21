@@ -252,6 +252,17 @@ struct ShellSettingsView: View {
                                 }
                             }
                         }
+                        // S2Arm: "Storage" (how much space games, saves and caches take on this device; read-only, #1606)
+                        if let manageStorage = actions.onManageStorage {
+                            SettingsGroup(title: ShellStrings.text("Storage")) {
+                                SourceRow(symbol: "internaldrive", title: ShellStrings.text("Storage"),
+                                          note: ShellStrings.text("See how much space games, saves and caches take on this device.")) {
+                                    Button(ShellStrings.text("View")) { manageStorage() }
+                                        .buttonStyle(ShellButtonStyle(fills: true)).accessibilityIdentifier("s2arm.storage.open")
+                                        .shellTarget("shs.storage") { manageStorage() }
+                                }
+                            }
+                        }
                         // S2Arm: at the bottom, "Report a problem" (the host asks for an optional sentence, then uploads the logs and shows a short code)
                         if let report = actions.onReportProblem {
                             SettingsGroup(title: ShellStrings.text("Report a problem")) {

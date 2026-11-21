@@ -207,10 +207,16 @@ struct nvn_gpu_samp_s {
     struct nvn_gpu_samp_s *all_next;
 };
 
+struct prs_use;     // 整池组回收的本段取用记录（见 backend_vulkan_pool.inc 的 prs_*）
+struct nvn_gpu_cmd_s;
+static void prs_release(struct nvn_gpu_cmd_s *c, int executed);   // 段结束：还原反馈补丁、把回收的整池组放回（finish_cmd 最先一步）
+static void prs_open(void);
+static void prs_close(void);
 // Pool tables are immutable; each slot holds a resource reference, including dummies.
 struct nvn_gpu_pool_table_s {
     uint32_t kind, count;
     int released, refs;
+    uint64_t uid;               // 建表时取的序号（全进程单调增、不复用）：备忘 / 回收的键用它而不是指针——表销毁后地址会被新表复用，按指针会误命中旧组
     void **objects;
     VkDescriptorImageInfo *images;
     // 图像池的「按图索引」（建表时一次建好，表不可变）：同一张 VkImage 的视图（按视图指针去重）串成链。
@@ -338,6 +344,7 @@ struct nvn_gpu_cmd_s {
     uint8_t pool_active;
     nvn_gpu_pool_table pool_binds[6][64];  // 各阶段布局项上的池快照，cmd_ref 保活
     VkDescriptorPool *pool_dpools; uint32_t pool_ndpools, pool_dpool_cap;
+    struct prs_use *prs_use; uint32_t prs_n, prs_cap;   // 本段取过的回收整池组（段完成时还原反馈补丁并放回，见 prs_release）
     VkDescriptorSet desc_sets[4];   // 仅本命令段；旧组仍归本段的池所有，不就地覆盖在途绑定
     VkPipelineLayout desc_layout;
     uint32_t desc_dirty;
@@ -466,6 +473,33 @@ static uint64_t g_dyn_rebind, g_dyn_pipes[2], g_dyn_fast;   // 诊断：只换�
 // 描述符组备忘开关 nvk_desc_memo（缺省开；0 = 关，回到「静态 UBO、不备忘」的老路径）。开 = 段内备忘 + 动态 UBO 偏移（备忘的键里没有偏移才有命中，见 pipe_build / write_binds）。
 // 建管线时读一次（决定这条管线的 UBO 用不用动态偏移），绑定时按段读（bind_descriptor_groups 里有短缓存）；两处读到不一样也能正确：动态与否是管线自己的属性，备忘与否只是这一笔要不要查表。
 static int desc_memo_flag(void) { return nvn_plat_flag("nvk_desc_memo", 1) != 0; }
+// 整池数组组（NVN_RB_TEXP / SAMPP：贴图池 / 采样器池整表一个绑定，count = 池长 + 1）的备忘开关 nvk_pool_memo（缺省开；0 = 关，每笔脏组都新建整池组，A/B 与负对照用）。
+// 整池组原先不进上面的备忘：每笔画的脏组都向驱动新建一个只装它的描述符池（maxSets = 1）、分一组、把整张表（真机一款 3D 游戏：贴图池 8448 项 + 采样器池 1280 项）重写一遍，
+// 池快照不可变、本段持引用，指针相同 = 内容相同，所以「同一布局 + 同样的普通写入 + 同样的池快照」的组可以像别的组一样段内复用（键见 pool_set_mask，用法见 bind_descriptor_groups）。
+static int pool_memo_flag(void) { return nvn_plat_flag("nvk_pool_memo", 1) != 0; }
+static int g_pmemo_cur = -1; static uint32_t g_pmemo_k;   // 开关缓存：绑定时每 256 次重读一次（宿主用例经 nvn_gpu_vk_test_pool_memo_refresh 立即作废）
+// 整池组回收开关 nvk_pool_rec（缺省开；0 = 关，每笔脏的整池组新建单组专用池、整表写、段完成销毁，A/B 与负对照用）。见 backend_vulkan_pool.inc 的 prs_*。
+static int pool_rec_flag(void) { return nvn_plat_flag("nvk_pool_rec", 1) != 0; }
+static int g_prs_cur = -1;   // 开关缓存：同上
+// 回收总量按字节封顶（维护方在 #1905 定的口径，不按组数）：在用 + 空闲的回收组占用的描述符池，估算字节合计 ≤ 封顶（缺省 384 MB）；
+// 超了先淘汰空闲串里最久没用的组，淘汰完还不够才退回老路径，不拦任何操作。空闲串不再另设「一半」的封顶：一帧里各段完成时，这一帧用到的整池组一起放回空闲串（真机重场景一帧用 170–187
+// 组，估算约 204–224 MB），空闲封顶设成总封顶的一半（192 MB ≈ 160 组）就比一帧的用量还小，每帧放回时超出的 14–30 组被淘汰、下一帧又得新建
+// （取组 + 放回 3.7–10.3 毫秒 / 帧）；总量封顶已经封住了内存。
+// 每个描述符按 PRS_DESC_BYTES 字节估：一款 3D 游戏的整池组（贴图池 8448 项 + 采样器池 1280 项，
+// 共约 9.7 千项）实测每组使进程内存涨约 0.85 MB（回收开 / 关两档 PSS 差 +271 MB，其中图形内存 +219 MB，现存 257 组），0.85 MB ÷ 9.7 千项 ≈ 88 字节 / 项。
+// 这是估算，不是读数：别的驱动 / 别的 GPU 的每项开销会不同，封顶只是防止换一款表更大的游戏时一路涨到被系统杀掉。真机缺省包不能改封顶；调试包用开关 nvk_pool_rec_mb 压低（验淘汰）。
+enum { PRS_DESC_BYTES = 88, PRS_GROUP_MIN_BYTES = 4096, PRS_CAP_MB = 384 };
+static pthread_mutex_t g_prs_mu = PTHREAD_MUTEX_INITIALIZER;   // 保护回收表和下面的计数；回放线程只 trylock，碰上就走老路径
+static uint32_t g_prs_total, g_prs_idle;   // 现存组（在用 + 空闲）/ 其中空闲（持 g_prs_mu）
+static uint64_t g_prs_bytes, g_prs_idle_bytes;   // 现存组 / 其中空闲的估算字节（持 g_prs_mu）
+static uint64_t g_prs_cap = (uint64_t)PRS_CAP_MB << 20, g_prs_idle_cap = (uint64_t)PRS_CAP_MB << 20;   // 总量封顶 / 空闲封顶（字节，持 g_prs_mu；会话开始按 nvk_pool_rec_mb 重置，缺省两者相等：空闲 ≤ 总量，总量封顶封住内存）
+static uint64_t g_prs_seq;   // 放回空闲串的序号发号器（持 g_prs_mu）：越小越久没用，淘汰时全局取最小
+static uint64_t g_prs_evict;   // 按字节封顶淘汰掉的空闲组，会话内累计（原子累加，读数不加锁）
+static uint64_t g_prs_why[4];   // 没走回收的原因累计（原子）：碰锁或内存不够 / 写法不同 / 到上限 / 补丁太多
+static uint64_t g_pool_uid;                         // 池快照序号发号器（持 g_mu）
+enum { PN_NEED, PN_HIT, PN_NEW, PN_FB, PN_ELEMS, PN_RHIT, PN_RMISS, PN_RNEW, PN_RFALL, PN_RPATCH, PN_N };
+// 回收（nvk_pool_rec）读数：PN_RHIT 取到键相同的空闲组（整池免写）/ PN_RMISS 取到键不同的空闲组（整表重写）/ PN_RNEW 向驱动新建 / PN_RFALL 没走回收（退回老路径）/ PN_RPATCH 反馈补丁写入的项数
+static uint64_t g_pool_n[PN_N], g_pool_ns[3];   // 整池组读数：要的组数 / 段内备忘命中 / 新建（建池 + 分组）/ 因反馈拷贝在用而绕开备忘 / 整池写入的描述符项数 / 回收：取到键相同的空闲组 / 取到键不同的 / 向驱动新建 / 没走回收 / 反馈补丁写入项数；新建（建池 + 分组）与整池写入的纳秒（nvk_gputime 开着才计）
 // 诊断累加器（g_desc_* / g_draw_ns）只增不清零：每个读者自带一份「上次读到的值」，读数 = 当前 − 上次。
 // 近 300 帧读数（backend_vulkan_wsi.inc）与每 5 秒的逐笔读数（nvn_gpu_draw 末尾）原先各自对同一批累加器 exchange 清零，
 // 互相取走对方窗口里的一部分，两边读数的每帧值、每笔值都偏小（nvk_gputime 开着时）。
@@ -1541,6 +1575,8 @@ static void fill_caps(struct nvn_gpu_vk *vk, const nvn_gpu_open_desc *d) {
     c->max_push_bytes = l->maxPushConstantsSize;
     c->min_ubo_align = (uint32_t)l->minUniformBufferOffsetAlignment;
     c->min_ssbo_align = (uint32_t)l->minStorageBufferOffsetAlignment;
+    c->min_texel_align = (uint32_t)l->minTexelBufferOffsetAlignment;
+    c->max_texel_elems = l->maxTexelBufferElements;
     c->max_ubo_range = l->maxUniformBufferRange;
     c->max_ssbo_range = l->maxStorageBufferRange;   // 描述符「范围」上限（不等于单次分配上限）
     // 单次分配上限来自 VkPhysicalDeviceMaintenance3Properties.maxMemoryAllocationSize（Vulkan 1.1）；
@@ -1716,6 +1752,7 @@ static void finish_cmd(struct nvn_gpu_cmd_s *c, int executed) {
     // 放弃的段（abort / 带粘滞错误不提交）没走过 vkEndCommandBuffer 的清空：两级回放队列里可能还有它的记录（往上传片里填、引用它的暂存缓冲 / 管线），
     // 先整队清空再归还 / 销毁下面这些资源。执行过的段已经过了 GPU 完成，记录早就做完了
     if (!executed) vk_dq_drain();
+    prs_release(c, executed);   // 回收的整池组：先把反馈补丁写回正典再放回（要在下面销毁快照视图、归还表引用之前：补丁的正典内容引用着表里的视图）
     // 布局按段跟踪（c->lay）：段不执行时命令缓冲里什么都没跑，没有要回滚的；t->layout 只做诊断。
     detach_live(c);   // 已提交的 cmd 在 commit 时已摘下，这里兜底
     // 放弃 / 提交前失败的段仍可能有 DQ 待录命令引用快照；先排空录制，再销毁。
@@ -2293,6 +2330,7 @@ nvn_gpu_rc nvn_gpu_open(const nvn_gpu_open_desc *d, nvn_gpu_err *err) {
         g_cv_ready = 1;
     }
     dset_open();   // 按布局回收的描述符组（#1096）：开关在开会话时读一次
+    prs_open();    // 整池组回收（nvk_pool_rec）
     g_deswizzle_count = g_deswizzle_bytes = g_deswizzle_fallbacks = 0;
     memset(g_deswizzle_reasons, 0, sizeof g_deswizzle_reasons);
     if (nvn_plat_flag("nvk_gpu_deswizzle", 1) && !deswizzle_open())
@@ -2460,6 +2498,7 @@ nvn_gpu_rc nvn_gpu_close(uint64_t timeout_ns, nvn_gpu_err *err) {
     clr_close();
     depth_blit_close();
     dset_close();   // 在途段都完成了：增长池整池销毁（组随池一起没了；布局只在会话收尾销毁，下面销毁完管线之后才轮到它，所以回收表不用跟着布局摘表）
+    prs_close();    // 整池组回收的空闲组：连池销毁
     easu_close();
     struct nvn_gpu_pipe_s *p = g.pipes;
     g.pipes = NULL;
@@ -3041,13 +3080,14 @@ static VkDescriptorType vk_desc_type(uint8_t cls) {
 //   · 项与 blob 对不上 → E_LAYOUT（逐项核对的 A1 要求）；数值类 / 位宽推不出 → E_UNSUPPORTED。
 enum { SPV_OP_CAPABILITY = 17, SPV_OP_TYPE_INT = 21, SPV_OP_TYPE_FLOAT = 22, SPV_OP_TYPE_VECTOR = 23, SPV_OP_TYPE_IMAGE = 25,
        SPV_OP_TYPE_SAMPLED_IMAGE = 27, SPV_OP_TYPE_ARRAY = 28, SPV_OP_TYPE_RUNTIME_ARRAY = 29,
-       SPV_OP_TYPE_POINTER = 32, SPV_OP_VARIABLE = 59, SPV_OP_DECORATE = 71 };
+       SPV_OP_TYPE_POINTER = 32, SPV_OP_VARIABLE = 59, SPV_OP_IMAGE_TEXEL_POINTER = 60, SPV_OP_DECORATE = 71 };
 enum { SPV_DEC_BINDING = 33, SPV_DEC_SET = 34 };
 enum { SPV_DIM_BUFFER = 5, SPV_SC_UNIFORM_CONST = 0 };   // SPIR-V Dim：0-3 维度、4=Rect、5=Buffer
 
 struct spv_id {
     uint8_t kind;          // 1 int 2 float 3 vector 4 image 5 array 7 pointer 8 variable 9 sampled_image
     uint8_t sgn, sampled, dim;
+    uint8_t atom;          // variable: 着色器对它取过 OpImageTexelPointer（图像原子）
     uint32_t a;            // int/float: 位宽；vector: 分量类型 id；image: sampled 类型 id；array: elem id；ptr: pointee id；var: 指针类型 id
     uint32_t fmt;          // image: ImageFormat 操作数
 };
@@ -3162,6 +3202,9 @@ static nvn_gpu_rc spv_texel_formats(const void *blob, size_t bytes,
                 t->kind = 8; t->a = o[0];
             }
             break;
+        case SPV_OP_IMAGE_TEXEL_POINTER:   // 结果类型 / 结果 / 图像（指向变量的指针）/ 坐标 / 样本：图像原子要格式的 STORAGE_TEXEL_BUFFER_ATOMIC
+            if (wc >= 6 && o[2] < bound) ids[o[2]].atom = 1;
+            break;
         case SPV_OP_DECORATE:
             if (wc >= 4 && o[0] < bound) {
                 if (o[1] == SPV_DEC_BINDING) vbind[o[0]] = o[2];
@@ -3207,6 +3250,17 @@ static nvn_gpu_rc spv_texel_formats(const void *blob, size_t bytes,
         if (ids[t].fmt && f == VK_FORMAT_UNDEFINED) {
             r = fail(err, NVN_GPU_E_UNSUPPORTED, "texel 布局项 (set %u, binding %u) 格式推不出（ImageFormat=%u）", e->set, e->binding, ids[t].fmt);
             break;
+        }
+        // 存储纹素缓冲上的原子：绑定视图的格式必须等于声明格式（写描述符时核），所以在这里按声明格式查一次设备的
+        //   STORAGE_TEXEL_BUFFER_ATOMIC 就够；声明 Unknown 时证不出绑定格式能做原子，照实报不支持，不赌驱动
+        if (e->cls == NVN_GPU_RES_IMAGE_TBUF && ids[v].atom) {
+            VkFormatProperties fp; memset(&fp, 0, sizeof fp);
+            if (f != VK_FORMAT_UNDEFINED) s2a_vk_format_properties(g.phys, f, &fp);
+            if (!(fp.bufferFeatures & VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_ATOMIC_BIT)) {
+                r = fail(err, NVN_GPU_E_UNSUPPORTED, "texel 布局项 (set %u, binding %u) 做图像原子：格式 %d 没有 STORAGE_TEXEL_BUFFER_ATOMIC（ImageFormat=%u）",
+                         e->set, e->binding, (int)f, ids[t].fmt);
+                break;
+            }
         }
         tfmt[i] = f;
     }
@@ -3756,6 +3810,28 @@ static void dlay_close(void) {
 //   通道录制路径的缓存，跟建管线无关）。以后往这里加共享可写状态必须先加锁或改成构建期私有，不能裸加。
 // 装缓存由 pipe_install_locked 做（g_mu 下双检 + 着色器引用）。
 static const char *pool_pipeline_preflight(const struct nvn_gpu_pipe_s *, const nvn_gpu_pipe_desc *, const struct nvn_gpu_shader_s *);
+// 建管线的 Vulkan 调用失败：VkResult 原名带进 why（回放层按「返回码 + 原文」分类，rp_draw.c rp_pfail_kind），返回码按结果分——
+// 内存类（主存 / 显存 / 池）= NVN_GPU_E_OOM（暂时性，回放层退避重试）；设备丢失 = NVN_GPU_E_DEVICE（终态）；其余用调用方给的确定性码。
+static const char *pipe_vk_res_name(VkResult r) {
+    switch (r) {
+    case VK_ERROR_OUT_OF_HOST_MEMORY: return "VK_ERROR_OUT_OF_HOST_MEMORY";
+    case VK_ERROR_OUT_OF_DEVICE_MEMORY: return "VK_ERROR_OUT_OF_DEVICE_MEMORY";
+    case VK_ERROR_OUT_OF_POOL_MEMORY: return "VK_ERROR_OUT_OF_POOL_MEMORY";
+    case VK_ERROR_DEVICE_LOST: return "VK_ERROR_DEVICE_LOST";
+    case VK_ERROR_INITIALIZATION_FAILED: return "VK_ERROR_INITIALIZATION_FAILED";
+    case VK_ERROR_INVALID_SHADER_NV: return "VK_ERROR_INVALID_SHADER_NV";
+    case VK_ERROR_FEATURE_NOT_PRESENT: return "VK_ERROR_FEATURE_NOT_PRESENT";
+    case VK_ERROR_FORMAT_NOT_SUPPORTED: return "VK_ERROR_FORMAT_NOT_SUPPORTED";
+    case VK_ERROR_UNKNOWN: return "VK_ERROR_UNKNOWN";
+    case VK_PIPELINE_COMPILE_REQUIRED: return "VK_PIPELINE_COMPILE_REQUIRED";
+    default: return "VkResult";
+    }
+}
+static int pipe_vk_res_code(VkResult r, int fixed) {
+    if (r == VK_ERROR_OUT_OF_HOST_MEMORY || r == VK_ERROR_OUT_OF_DEVICE_MEMORY || r == VK_ERROR_OUT_OF_POOL_MEMORY) return NVN_GPU_E_OOM;
+    if (r == VK_ERROR_DEVICE_LOST) return NVN_GPU_E_DEVICE;
+    return fixed;
+}
 static nvn_gpu_rc pipe_build(const nvn_gpu_pipe_desc *d, struct nvn_gpu_pipe_s **out, nvn_gpu_err *err) {
     *out = NULL;
     const nvn_gpu_pipe_desc *requested = d;
@@ -3887,10 +3963,11 @@ static nvn_gpu_rc pipe_build(const nvn_gpu_pipe_desc *d, struct nvn_gpu_pipe_s *
     pli.pSetLayouts = p->nset ? p->dsl : NULL;
     pli.pushConstantRangeCount = npr;
     pli.pPushConstantRanges = npr ? pr : NULL;
-    if (vkCreatePipelineLayout(g.d, &pli, NULL, &p->layout) != VK_SUCCESS) {
-        free(p);
-        return fail(err, NVN_GPU_E_UNSUPPORTED, "vkCreatePipelineLayout 失败");
-    }
+    { const VkResult vr = vkCreatePipelineLayout(g.d, &pli, NULL, &p->layout);
+      if (vr != VK_SUCCESS) {
+          free(p);
+          return fail(err, pipe_vk_res_code(vr, NVN_GPU_E_UNSUPPORTED), "vkCreatePipelineLayout 失败（%s %d）", pipe_vk_res_name(vr), (int)vr);
+      } }
     p->pass = make_pipeline_pass(d);
     if (!p->pass) {
         vkDestroyPipelineLayout(g.d, p->layout, NULL);
@@ -4137,8 +4214,9 @@ static nvn_gpu_rc pipe_build(const nvn_gpu_pipe_desc *d, struct nvn_gpu_pipe_s *
     gp.renderPass = p->pass;
     gp.subpass = 0;
     const uint64_t pl_t0 = now_ns();   // 驱动编译管线是同步的：超过 3 毫秒就打一行（走路/进新场景时会集中出现）
-    if (vkCreateGraphicsPipelines(g.d, g_plc, 1, &gp, NULL, &p->pipe) != VK_SUCCESS) {
-        nvn_gpu_rc bad = fail(err, NVN_GPU_E_COMPILE, "vkCreateGraphicsPipelines 失败");
+    const VkResult gvr = vkCreateGraphicsPipelines(g.d, g_plc, 1, &gp, NULL, &p->pipe);
+    if (gvr != VK_SUCCESS) {
+        nvn_gpu_rc bad = fail(err, pipe_vk_res_code(gvr, NVN_GPU_E_COMPILE), "vkCreateGraphicsPipelines 失败（%s %d）", pipe_vk_res_name(gvr), (int)gvr);
         destroy_pipe_objects(p);
         return bad;
     }
@@ -5636,9 +5714,18 @@ static int write_binds(struct nvn_gpu_cmd_s *c, const struct nvn_gpu_pipe_s *p, 
     return nw;
 }
 
-static int pool_set_mask(struct nvn_gpu_cmd_s *, const struct nvn_gpu_pipe_s *, int, uint32_t *);
+// 带整池数组的组的键：各池绑定（绑定号, 池快照序号）的两路无序混合和（进段内备忘 / 回收的键）；own = 这一组里按（阶段, 条目）顺序遇到的第一张池快照（NULL = 这一组没有池绑定）。
+struct pool_set_info { uint64_t k1, k2; nvn_gpu_pool_table own; };
+static int pool_set_mask(struct nvn_gpu_cmd_s *, const struct nvn_gpu_pipe_s *, int, uint32_t *, struct pool_set_info *);
 static int pool_alloc_set(struct nvn_gpu_cmd_s *, const struct nvn_gpu_pipe_s *, uint32_t, VkDescriptorSet *);
-static int pool_write_sets(struct nvn_gpu_cmd_s *, const struct nvn_gpu_pipe_s *, int, uint32_t);
+static int pool_write_sets(struct nvn_gpu_cmd_s *, const struct nvn_gpu_pipe_s *, int, uint32_t, uint32_t);
+// 整池组回收（见 backend_vulkan_pool.inc 的 prs_*）。反馈拷贝在用时，这一笔整池（图像池）里要换成快照的项：
+enum { PRS_PATCH_MAX = 64 };
+struct prs_plan { uint32_t n; struct { uint32_t set, binding, idx; VkImageView view; VkDescriptorImageInfo canon; } e[PRS_PATCH_MAX]; };
+static int prs_plan(struct nvn_gpu_cmd_s *, const struct nvn_gpu_pipe_s *, int, uint32_t, struct prs_plan *);
+static int prs_take(struct nvn_gpu_cmd_s *, const struct nvn_gpu_pipe_s *, uint32_t, uint64_t, const struct pool_set_info *, VkDescriptorSet *, int *, uint32_t *);
+static void prs_mark(struct nvn_gpu_cmd_s *, uint32_t, const struct pool_set_info *);
+static int prs_apply(struct nvn_gpu_cmd_s *, const struct prs_plan *, uint32_t, const uint32_t *);
 static int pool_check_layouts(struct nvn_gpu_cmd_s *, const struct nvn_gpu_pipe_s *, int);
 // 脏组分配新对象，不能更新前一笔已经引用的组；跨阶段共用同一组时写全组。
 static int bind_descriptor_groups(struct nvn_gpu_cmd_s *c, const struct nvn_gpu_pipe_s *p, int compute) {
@@ -5650,8 +5737,8 @@ static int bind_descriptor_groups(struct nvn_gpu_cmd_s *c, const struct nvn_gpu_
     }
     // A descriptor-free pipeline ignores bindings left by the previous pipeline.
     if (!p->nset) return 1;
-    uint32_t pool_mask = 0;
-    if (c->pool_active && !pool_set_mask(c, p, compute, &pool_mask)) return 0;
+    uint32_t pool_mask = 0; struct pool_set_info pinfo[4] = {{0, 0, NULL}, {0, 0, NULL}, {0, 0, NULL}, {0, 0, NULL}};   // 带整池数组的组；每组里各池绑定（绑定号, 池快照序号）的混合和，进备忘 / 回收的键
+    if (c->pool_active && !pool_set_mask(c, p, compute, &pool_mask, pinfo)) return 0;
     uint32_t dirty = c->desc_dirty & ((1u << p->nset) - 1u);
     // 哪一组都没变、布局和绑定点也没换：命令缓冲里绑着的就是这几组，不用重写也不用重绑。
     // 纹素缓冲的格式核对随管线变（见 write_binds），有这类绑定的管线不走这条近路。
@@ -5672,7 +5759,23 @@ static int bind_descriptor_groups(struct nvn_gpu_cmd_s *c, const struct nvn_gpu_
     // UBO 用动态偏移时（pipe_build）描述符里没有偏移（高 32 位一般为 0），只换偏移的两组键相同，才会命中；静态 UBO 的管线偏移在键里，命中率低（#1233）。
     static int memo_cur = -1; static uint32_t memo_k;
     if (memo_cur < 0 || !(++memo_k & 255)) memo_cur = desc_memo_flag();
-    const int memo = memo_cur && dirty && !pool_mask;
+    // 整池数组组（pool_mask 里的组）：脏的整池组也进备忘（nvk_pool_memo，缺省开，0 = 关）。键 = 布局 + 这一笔写入的普通绑定 + 每个池绑定的（绑定号, 池快照指针）（pool_set_mask）；
+    // 池快照建好就不可变、本段持引用到段完成，指针相同 = 整张表的内容相同，所以键相同的组直接用上次写好的那一组，不再建池、不再重写整张表。
+    // 反馈拷贝在用时整池里的视图要换成拷贝（pool_write_sets），拷贝随反馈表变、不在键里：这一笔整体走不备忘的老路径。池组不脏时不影响别的组备忘。
+    if (g_pmemo_cur < 0 || !(++g_pmemo_k & 255)) { g_pmemo_cur = pool_memo_flag(); g_prs_cur = pool_rec_flag(); }
+    const uint32_t pool_dirty = dirty & pool_mask;
+    const int pool_fb = pool_dirty && c->feedback != c->feedback_stop;
+    const int memo = memo_cur && dirty && (!pool_dirty || (g_pmemo_cur && !pool_fb));
+    // 整池组回收（nvk_pool_rec，见 backend_vulkan_pool.inc 的 prs_*）：反馈拷贝在用时先算「整池里要换成快照的项」（补丁），太多就这一笔整个走老路径。
+    struct prs_plan plan; plan.n = 0;
+    const int rec = g_prs_cur && pool_dirty && (!pool_fb || prs_plan(c, p, compute, pool_dirty, &plan));
+    uint32_t rec_mask = 0, valid_mask = 0, uidx[4] = {0, 0, 0, 0};   // 回收取到的组 / 其中整池内容已就绪的组 / 它们在本段取用记录里的下标
+    if (pool_dirty) {
+        const uint64_t np = (uint64_t)__builtin_popcount(pool_dirty);
+        __atomic_fetch_add(&g_pool_n[PN_NEED], np, __ATOMIC_RELAXED);
+        if (pool_fb) __atomic_fetch_add(&g_pool_n[PN_FB], np, __ATOMIC_RELAXED);
+    }
+    uint32_t hit = 0;   // 备忘命中的组：不分配、不写
     // 先不分配：写入项里先放记号（认出每条属于哪一组），写完才知道每一组这一笔的「写法」（write_binds 的 sig），再按写法去回收表取组（见 dset_take）。
     // 备忘开着时命中的组连取都省了；备忘关着时取完组把记号换成真的组。
     VkDescriptorSet mark[4];
@@ -5691,7 +5794,11 @@ static int bind_descriptor_groups(struct nvn_gpu_cmd_s *c, const struct nvn_gpu_
         const uint64_t ta0 = tm ? now_ns() : 0;
         for (uint32_t set = 0; set < p->nset; set++)
             if (dirty & (1u << set)) {
-                if (pool_mask & (1u << set)) { if (!pool_alloc_set(c, p, set, c->desc_sets + set)) return 0; }
+                if (pool_mask & (1u << set)) {
+                    int v = 0;
+                    if (rec && prs_take(c, p, set, sig[set], pinfo + set, c->desc_sets + set, &v, uidx + set)) { rec_mask |= 1u << set; if (v) valid_mask |= 1u << set; }
+                    else if (!pool_alloc_set(c, p, set, c->desc_sets + set)) return 0;
+                }
                 else if (!alloc_sets(c, p->dsl + set, 1, c->desc_sets + set, pm, set, sig[set])) return 0;
             }
         for (uint32_t i = 0; i < nw; i++) {   // 记号换成真的组（write_binds 只写脏组，记号一定落在 0..3）
@@ -5701,7 +5808,7 @@ static int bind_descriptor_groups(struct nvn_gpu_cmd_s *c, const struct nvn_gpu_
         if (tm) ta = now_ns() - ta0;
     }
     if (memo) {
-        uint64_t h1[4], h2[4]; uint32_t hit = 0;
+        uint64_t h1[4], h2[4];
         for (uint32_t set = 0; set < 4; set++) { h1[set] = 1469598103934665603ull ^ (uintptr_t)(set < p->nset ? p->dsl[set] : 0); h2[set] = 0x9E3779B97F4A7C15ull + set; }
         for (uint32_t i = 0; i < nw; i++) {
             const uint32_t set = (uint32_t)((uintptr_t)wr[i].dstSet - 0x5a0); if (set >= 4) continue;
@@ -5710,6 +5817,10 @@ static int bind_descriptor_groups(struct nvn_gpu_cmd_s *c, const struct nvn_gpu_
             else if (wr[i].pBufferInfo) { v[2] = (uint64_t)(uintptr_t)wr[i].pBufferInfo->buffer; v[3] = wr[i].pBufferInfo->offset; v[4] = wr[i].pBufferInfo->range; }
             else if (wr[i].pTexelBufferView) v[2] = (uint64_t)(uintptr_t)*wr[i].pTexelBufferView;
             for (int k = 0; k < 5; k++) { h1[set] = (h1[set] ^ v[k]) * 1099511628211ull; h2[set] = (h2[set] + v[k]) * 0xff51afd7ed558ccdull; h2[set] ^= h2[set] >> 29; }
+        }
+        for (uint32_t set = 0; set < 4; set++) if (pool_dirty >> set & 1) {   // 整池组：再把每个池绑定的（绑定号, 池快照序号）混进键
+            h1[set] = (h1[set] ^ pinfo[set].k1) * 1099511628211ull;
+            h2[set] = (h2[set] + pinfo[set].k2) * 0xff51afd7ed558ccdull; h2[set] ^= h2[set] >> 29;
         }
         if (!c->memo) c->memo = calloc(DESC_MEMO_N, sizeof *c->memo);
         for (uint32_t set = 0; set < p->nset; set++) {
@@ -5721,7 +5832,11 @@ static int bind_descriptor_groups(struct nvn_gpu_cmd_s *c, const struct nvn_gpu_
                 if (m->h1 == h1[set] && m->h2 == h2[set] && m->dsl == p->dsl[set]) { c->desc_sets[set] = m->set; found = 1; break; }
             }
             if (found) { hit |= 1u << set; continue; }
-            if (!alloc_sets(c, p->dsl + set, 1, c->desc_sets + set, pm, set, sig[set])) return 0;
+            if (pool_dirty >> set & 1) {
+                int v = 0;
+                if (rec && prs_take(c, p, set, sig[set], pinfo + set, c->desc_sets + set, &v, uidx + set)) { rec_mask |= 1u << set; if (v) valid_mask |= 1u << set; }   // 回收的整池组
+                else if (!pool_alloc_set(c, p, set, c->desc_sets + set)) return 0;   // 整池组：单组专用池（和不备忘时同一条路）
+            } else if (!alloc_sets(c, p->dsl + set, 1, c->desc_sets + set, pm, set, sig[set])) return 0;
             if (slot && c->memo_n < DESC_MEMO_N * 3 / 4) { slot->h1 = h1[set]; slot->h2 = h2[set]; slot->dsl = p->dsl[set]; slot->set = c->desc_sets[set]; c->memo_n++; }
         }
         uint32_t keep = 0;   // 命中的组不用写：把它们的写入项去掉，其余的换上真的组
@@ -5732,6 +5847,7 @@ static int bind_descriptor_groups(struct nvn_gpu_cmd_s *c, const struct nvn_gpu_
         }
         nw = keep;
         if (tm) __atomic_fetch_add(&g_desc_hit, (uint64_t)__builtin_popcount(hit), __ATOMIC_RELAXED);
+        if (hit & pool_dirty) __atomic_fetch_add(&g_pool_n[PN_HIT], (uint64_t)__builtin_popcount(hit & pool_dirty), __ATOMIC_RELAXED);
     }
     // 只重写变过的条目（切换 nvk_desc_skip 时整份写）。影子按「组对象 + binding 槽」记：换了组对象就整组作废。
     {
@@ -5764,7 +5880,12 @@ static int bind_descriptor_groups(struct nvn_gpu_cmd_s *c, const struct nvn_gpu_
     }
     const uint64_t t2 = tm ? now_ns() : 0;
     if (nw) { OC(OC_DWRITE); vkUpdateDescriptorSets(g.d, nw, wr, 0, NULL); }
-    if (pool_mask && !pool_write_sets(c, p, compute, dirty)) return 0;
+    if (pool_dirty & ~hit) {   // 命中的整池组已经写好，只写这一笔新建的；回收的组里整池内容已就绪的（valid_mask）也不用写
+        const uint32_t full = pool_dirty & ~hit & ~valid_mask;
+        if (full && !pool_write_sets(c, p, compute, full, rec_mask)) return 0;   // 回收的组整表写正典（反馈视图改走补丁），其余照旧
+        for (uint32_t set = 0; set < 4; set++) if ((rec_mask & ~valid_mask) >> set & 1) prs_mark(c, uidx[set], &pinfo[set]);   // 整表写完才记里面写着哪几张表
+        if (rec_mask && plan.n && !prs_apply(c, &plan, rec_mask, uidx)) return 0;   // 反馈快照的补丁
+    }
     const uint64_t t3 = tm ? now_ns() : 0;
     c->desc_dirty = 0; c->dyn_dirty = 0;
     if ((dirty || dynd) && p->nset) {

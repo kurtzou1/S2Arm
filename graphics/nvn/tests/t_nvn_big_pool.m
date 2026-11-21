@@ -111,6 +111,18 @@ static int child(int chunks) {
     { pthread_mutex_lock(&g_mu); int nb = g_nbig; pthread_mutex_unlock(&g_mu);
       CHECK(nb==0 && entries_of(mem)==0,"⑦ 池注销：大池记录 %d、块条目 %d（期望都 0）",nb,entries_of(mem)); }
     CHECK(aliases()==0,"⑨ 池注销后：指着被 ③ 加长替下的旧块缓冲的别名条目 %d（期望 0；旧块不在池表里，原先留下指向已放缓冲的条目）",aliases());
+    // ⑰ 进程内重开一局（会话关 → 开）后大池记录要清（D-Q349 等 8 份诊断「insertObject:atIndex: object cannot be nil」，都在重开后的那局）：期望手写——
+    //   重开前登记一个 640 MB 大池、查 100 MB 处建块；重开后大池记录 0；同一块内存重新登记、查同一处建块、再按 40 MB 查（加长）都成功、条目 1、旧块缓冲 1。
+    //   旧实现：重开后大池记录仍 1，块表指着旧池表下标，重新登记后查同一处直接用旧下标读新表，加长时把空缓冲塞进 old 抛异常
+    { uint8_t *m2 = NULL; REQUIRE(!posix_memalign((void **)&m2, 16*MB, SZ)); nvn_be_pool_add(m2, SZ);
+      REQUIRE(mtl_gpu_addr((uint64_t)(uintptr_t)m2 + 100*MB, 64, &bp, &off, &gpu));
+      REQUIRE(!nvn_be_shutdown_session()); nvn_be_begin_session();
+      pthread_mutex_lock(&g_mu); int nb = g_nbig; pthread_mutex_unlock(&g_mu);
+      CHECK(nb==0,"⑰ 重开后大池记录 %d（期望 0）",nb);
+      nvn_be_pool_add(m2, SZ);
+      int a1 = mtl_gpu_addr((uint64_t)(uintptr_t)m2 + 100*MB, 64, &bp, &off, &gpu), a2 = mtl_gpu_addr((uint64_t)(uintptr_t)m2 + 100*MB, 40*MB, &bp, &off, &gpu);
+      pthread_mutex_lock(&g_mu); int nold = g_nbig ? (int)g_big[0].old.count : -1; nb = g_nbig; pthread_mutex_unlock(&g_mu);
+      CHECK(a1 && a2 && nb==1 && entries_of(m2)==1 && nold==1,"⑰ 重开后同一块内存重新登记：查 %d、加长 %d、大池记录 %d、条目 %d、旧块缓冲 %d（期望 1 1 1 1 1）",a1,a2,nb,entries_of(m2),nold); }
     printf("%s t_nvn_big_pool 子进程（缺省）：%u 项，%u 项失败\n",failures?"✗":"✓",checks,failures);
     return failures!=0;
 }

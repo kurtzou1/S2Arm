@@ -3,7 +3,7 @@
 # 垫片 s2a_vp8.c / s2a_vp9.c 已合在 libs2a_vpx.a 里），测的就是要上线的那份库。
 # 用法：ANDROID_HOME=... build.sh [out_dir]   输出 <out_dir>/vpxbench（缺省 build/vpxbench）
 set -euo pipefail
-api=29
+api=34
 repo_dir=$(cd "$(dirname "$0")/../../.." && pwd -P)
 out=${1:-$repo_dir/build/vpxbench}
 source "$repo_dir/android/tools/versions.sh"

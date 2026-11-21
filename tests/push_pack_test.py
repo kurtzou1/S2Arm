@@ -1208,7 +1208,8 @@ class GameImgZstd(Base):
 
     def test_threshold_is_15_percent(self):   # 假压缩器按比例出字节：省 16% → 压；省 14% → 不压
         row = ["game.img", str(len(self.local)), sha(self.local)]
-        def fake(r): return lambda b: b"z" * round(len(b) * r)
+        def clen(path, k): return max(0, min(push.ZCHUNK, Path(path).stat().st_size - k * push.ZCHUNK))
+        def fake(r): return lambda path, k, out=None: round(clen(path, k) * r)   # 新接口：(路径, 块号, out) → 压缩后字节数
         # 两块 65536 + 100 字节：0.84 → 55050 + 84 = 55134，省 1 − 55134/65636 = 16.0%；0.86 → 56361 + 86 = 56447，省 14.0%
         self.assertEqual(push.zstd_plan(self.pk, row, say=self.log.append, comp=fake(0.84)), [55050, 84])
         (self.pk.parent / "pack.zstd.json").unlink()
@@ -1216,13 +1217,44 @@ class GameImgZstd(Base):
 
     def test_measured_once_per_image(self):   # 同一份 game.img 只量一次（记在资源包目录旁）；镜像变了重量
         row = ["game.img", str(len(self.local)), sha(self.local)]; calls = []
-        def comp(b): calls.append(len(b)); return b"z" * 10
+        def comp(path, k, out=None): calls.append(max(0, min(push.ZCHUNK, Path(path).stat().st_size - k * push.ZCHUNK))); return 10
         push.zstd_plan(self.pk, row, say=self.log.append, comp=comp); push.zstd_plan(self.pk, row, say=self.log.append, comp=comp)
         self.assertEqual(calls, [self.Z, 100])
         self.assertEqual(json.loads((self.pk.parent / "pack.zstd.json").read_text())["z"], [10, 10])
         self.assertFalse((self.pk / "pack.zstd.json").exists())   # 不进资源包目录
         push.zstd_plan(self.pk, ["game.img", row[1], "0" * 64], say=self.log.append, comp=comp)
         self.assertEqual(len(calls), 4)
+
+    def test_measure_reports_progress_by_bytes(self):   # #1942：测压缩率块内按读进的字节报进度，不只在每块开头报一次
+        row = ["game.img", str(len(self.local)), sha(self.local)]; seen = []
+        m = mock.patch.object(push, "ZREAD", 4096); m.start(); self.addCleanup(m.stop)
+        push.zstd_plan(self.pk, row, say=self.log.append, stage=lambda name, done, total: seen.append((name, done, total)))
+        total = len(self.local)   # 期望手算：两块 65536 + 100 字节，按 4096 一段读：第 0 块开头 0、16 段各报 4096 的倍数；第 1 块开头 65536、读完报 65636
+        want = [0] + [4096 * i for i in range(1, 17)] + [65536, 65636]
+        self.assertEqual(seen, [(push.STAGE_ZSTD, d, total) for d in want])
+
+    def test_stream_frames_decode_and_reads_bounded(self):   # D-DVFJ：每块仍一个 zstd 帧、解开即原样；按 ZREAD 分段读，不整块读进内存；写出的字节数 = 返回值
+        try: from compression.zstd import decompress
+        except ImportError: from zstandard import decompress
+        import builtins, io
+        m = mock.patch.object(push, "ZREAD", 4096); m.start(); self.addCleanup(m.stop)
+        src = self.pk / "game.img"; reads = []; real_open = builtins.open
+        class Spy(io.BufferedReader):
+            def read(self, n=-1): reads.append(n); return super().read(n)
+        def spy_open(f, mode="r", *a, **k):
+            return Spy(real_open(f, "rb", buffering=0)) if Path(f) == src and mode == "rb" else real_open(f, mode, *a, **k)
+        comp = push.zstd_compressor()
+        with mock.patch("builtins.open", spy_open):
+            outs = [io.BytesIO() for _ in range(2)]; ns = [comp(src, k, outs[k]) for k in range(2)]
+        self.assertEqual(ns, [len(o.getvalue()) for o in outs])
+        self.assertEqual(b"".join(decompress(o.getvalue()) for o in outs), self.local)
+        self.assertTrue(all(o.getvalue()[:4] == b"\x28\xb5\x2f\xfd" for o in outs))
+        self.assertTrue(reads and max(reads) <= 4096, reads)   # 64 KB 的块分 16 段读，100 字节的末块 1 段
+
+    def test_workers_fixed_whatever_memory(self):   # #1942：线程数固定 2，与可用内存、核数无关（帧随线程数变，量数和推送要一样长）
+        for avail, ncpu in (("200", "16"), ("4096", "16"), ("4096", "1")):
+            with mock.patch.dict(os.environ, {"S2A_MEM_AVAIL_MB": avail, "S2A_NCPU": ncpu}):
+                self.assertEqual(push.zstd_workers(), 2, (avail, ncpu))
 
     def test_resume_skips_complete_chunks_and_drops_stale(self):
         first = self.device(); self.push_it(first)
@@ -1232,6 +1264,9 @@ class GameImgZstd(Base):
         self.assertEqual(dev.big, [c1]); self.assertEqual(dev.rms, [stale]); self.assertNotIn(stale, dev.files)
         self.assertEqual(dev.files[c1], first.files[c1])
         self.assertTrue(any("机上已有 1/2 个压缩块" in l for l in self.log), self.log)
+        n1 = len(first.files[c1])   # 机上第 2 块短一个字节：记一行哪块、机上长度、量数长度、重推（期望按构造手写）
+        self.assertTrue(any(f"第 2/2 块机上 {n1 - 1} 字节，量数记的是 {n1} 字节，对不上，这块重推" in l for l in self.log), self.log)
+        self.assertFalse(any("第 1/2 块机上" in l for l in self.log), "长度对的块不记")
 
     def test_progress_counts_raw_bytes(self):
         calls = []; dev = self.device(); self.push_it(dev, progress=lambda *a: calls.append(a))

@@ -293,6 +293,16 @@ NSDictionary *s2a_ios_brightness_option(void) {
              @"labels": @[S2AL(@"gfx.brightness.system"), @"50%", @"65%", @"80%", @"100%"]};
 }
 
+// HDR 开关联动（PR3d，照 nxnative Upscaling 行 needs=DM_HDR=0 形态映射到本仓设置页）：HDR 管线接手（S2A_HDR=auto/on，
+//   启动环境开关、无设置页行）时，上屏增强一族（抗锯齿 / 缩放滤镜 MetalFX·FSR / 补帧）对 HDR 窗口旁路——8 位感知缩放
+//   不适配 PQ 码值（graphics/nvn/gfx/nvn/nvn_hdr_policy.h hdr_bypass_upscale；产品限制写入 docs/画面设置.md，不静默降画质）。
+//   设置页时刻读不到「下次启动」的环境（开关无持久键，页面内行内置灰会误导）——联动落在两处：设置 → 环境的应用通道
+//   （s2a_ios_apply_graphics_settings 记一行）与设置页两行下的提示（app_settings.m 按此谓词显示）。
+BOOL s2a_ios_hdr_upscale_bypassed(void) {
+    const char *v = getenv("S2A_HDR");
+    return v && (!strcmp(v, "auto") || !strcmp(v, "on"));
+}
+
 NSInteger s2a_ios_settings_docked_change(NSDictionary *entry, NSDictionary *now, BOOL *restart) {
     NSMutableDictionary *a = [entry mutableCopy] ?: [NSMutableDictionary new], *b = [now mutableCopy] ?: [NSMutableDictionary new];
     NSNumber *was = a[@"S2ADockedMode"], *is = b[@"S2ADockedMode"];
@@ -388,6 +398,10 @@ void s2a_ios_apply_graphics_settings(NSUserDefaults *defaults) {
     } else {
         fprintf(stderr, "[S2A 画面设置] S2A_BRIGHTNESS=%s（启动环境）\n", getenv("S2A_BRIGHTNESS"));
     }
+    // HDR 开关联动（PR3d，照 nxnative Upscaling 行 needs=DM_HDR=0 形态）：HDR 管线接手时上屏增强对 HDR 窗口旁路——
+    //   抗锯齿 / 缩放滤镜两行照存照传（SDR 窗口照常用它），这里只声明产品限制（不静默降画质，docs/画面设置.md）
+    if (s2a_ios_hdr_upscale_bypassed())
+        fprintf(stderr, "[S2A 画面设置] S2A_HDR=%s：HDR 窗口（RGB10A2 PQ 码值）旁路上屏抗锯齿 / 缩放滤镜（MetalFX / FSR）/ 补帧——8 位感知缩放不适配 PQ 码值（产品限制，SDR 窗口照常；docs/画面设置.md）\n", getenv("S2A_HDR"));
     // Switch 档位：与服务层 Host.Docked、直连 dm_opmode 和宽屏表共用；缺省掌机，下次启动生效。
     const char *docked = getenv("S2A_DOCKED");
     if (docked) fprintf(stderr, "[S2A 画面设置] S2A_DOCKED=%s（启动环境）\n", docked);
@@ -642,6 +656,15 @@ NSDictionary<NSString *, NSString *> *s2a_ios_local_player(NSUserDefaults *defau
     return @{@"uid": want, @"name": name, @"folder": folder};
 }
 
+// 玩家在设置里关了即时快照（S2ASnapshot 显式存过且为假）：runtime/src/snapsw.c 在构造期（vawin.c vawin_boot 定命令记录区 / 虚拟池区时）第一次读开关就问这里，
+//   不等开局再写 S2A_SNAP_MODE（那时开关已缓存成「开」、地址已占，11-21）。只读 NSUserDefaults，构造期可调
+int s2a_ios_snap_pref_off(void) {
+    // 测试口（装机冒烟从电脑侧起局，没法替玩家拨设置；往容器偏好文件里写又会被 cfprefsd 缓存挡住）：S2A_TEST_SNAP_PREF=0 / 1 当作玩家在设置里存了关 / 开，
+    //   走的仍是这一路（快照开关来源记「玩家设置」），不同于直接给 S2A_SNAP_MODE（来源记「启动环境」）
+    const char *t = getenv("S2A_TEST_SNAP_PREF"); if (t && *t) return *t == '0';
+    NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+    return [d objectForKey:@"S2ASnapshot"] != nil && ![d boolForKey:@"S2ASnapshot"];
+}
 void s2a_ios_load_graphics_settings(void) {
     @autoreleasepool {
         // 先套用户设置、再读包内能力清单（在 App 包顶层）：两边都只在环境变量未设时写，先写的赢 → 启动环境 > 用户设置 > 清单

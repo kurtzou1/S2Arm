@@ -226,7 +226,11 @@ namespace S2A.Services
                 SetPrimary(device, _player, _type);
                 return;
             }
-            if (_styleBefore != ControllerType.None && _type != _styleBefore && Accepts(device, styles, _styleBefore))
+            // 原来是掌机格、被游戏的手柄选择页换成了它要的分离样式（D-JQGC 摇摇乐派对：只收 Pro / 双 Joy-Con → Player1 双 Joy-Con）：之后游戏只是又声明
+            //   「也收掌机」、现在的样式仍收着，就不退回掌机格——退回去游戏看到的是插在主机上的 Joy-Con，体感关掉；真机上拆下来的 Joy-Con 也不会自己插回去。
+            //   现在的样式不收了才退回；原来是 Pro 等外接样式的（#359）照旧换回
+            if (_styleBefore != ControllerType.None && _type != _styleBefore && Accepts(device, styles, _styleBefore)
+                && (_styleBefore != ControllerType.Handheld || !Accepts(device, styles, _type)))
             {
                 Console.Error.WriteLine($"S2A 虚拟手柄：游戏又收 {_styleBefore}，换回去");
                 ControllerType back = _styleBefore; _styleBefore = ControllerType.None;

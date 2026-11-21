@@ -79,6 +79,7 @@ def main(argv):
     cc = ["xcrun", "-sdk", "iphoneos", "clang", "-arch", "arm64", f"-miphoneos-version-min={p['ios_min']}"]
     flags = ["-fobjc-arc", "-fmodules", *[f"-D{d}" for d in p["defines"]], *[f"-I{i}" for i in p["includes"]]]
     objs = []
+    src_of = {}   # 目标文件 → 源文件（点名用）
     for src in p["sources"]:
         if Path(src).suffix not in (".c", ".m", ".mm", ".cpp"):   # 资源（如 ios/l10n 字符串表，#316）只进包、不编
             continue
@@ -87,7 +88,7 @@ def main(argv):
         if r.returncode:
             print(f"【红】iOS 输入工作台编链：编 {src} 失败\n{r.stderr[-2000:]}")
             return 1
-        objs.append(str(obj))
+        objs.append(str(obj)); src_of[str(obj)] = src
     weak = weak_link_decl.flags("lab")
     link = cc + objs + [f for fw in p["frameworks"] for f in ("-framework", fw)] + [f"-l{l}" for l in p["libs"]] + weak + ["-o", str(out / "S2ArmInputLab")]
     r = subprocess.run(link, capture_output=True, text=True)
@@ -95,7 +96,20 @@ def main(argv):
         undef = sorted(set(re.findall(r'^\s+"(_[A-Za-z0-9_]+)", referenced from', r.stderr, re.M)))
         print(f"【红】iOS 输入工作台编链：链接失败，未定义 {' '.join(undef) or '（见下）'}——工程 sources 缺了提供它的源文件，或它该登记「// 弱链接[lab]：<符号>」\n{r.stderr[-1500:]}")
         return 1
-    print(f"iOS 输入工作台编链：{len(p['sources'])} 个源文件、{len(p['frameworks'])} 个框架、放行 {len(weak)} 个弱符号 → 链得过")
+    # #1953：-U 放行对整个符号生效，同一符号只要一处按弱引用登记过，别处的普通声明（强引用）照样链得过，真机一启动 dyld 就因找不到它退出。
+    #   所以链过之后逐个目标文件核：放行的符号在每个引用它的目标文件里都得是弱引用（nm -m 记「weak external」）
+    left = subprocess.run(["xcrun", "nm", "-u", str(out / "S2ArmInputLab")], capture_output=True, text=True).stdout.split()
+    allowed = weak_link_decl.registered("lab") & {u[1:] for u in left}   # 只核链完仍未定义的（工作台自己编了提供方的不算）
+    strong = []
+    for obj in objs:
+        nm = subprocess.run(["xcrun", "nm", "-m", obj], capture_output=True, text=True).stdout
+        for m in re.finditer(r"^\s*\(undefined\) (weak )?external _([A-Za-z0-9_]+)", nm, re.M):
+            if m.group(2) in allowed and not m.group(1):
+                strong.append(f"{src_of[obj]}：{m.group(2)}")
+    if strong:
+        print(f"【红】iOS 输入工作台编链：放行的弱符号在这些源文件里是普通声明（强引用），工作台一启动就找不到符号退出——声明加 __attribute__((weak_import))、调用前判空：{'；'.join(strong)}")
+        return 1
+    print(f"iOS 输入工作台编链：{len(p['sources'])} 个源文件、{len(p['frameworks'])} 个框架、放行 {len(weak)} 个弱符号（逐个目标文件核过都是弱引用）→ 链得过")
     return 0
 
 

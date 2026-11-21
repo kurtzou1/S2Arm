@@ -48,6 +48,9 @@ public struct S2ArmShellHostView: View {
             .animation(.smooth(duration: 0.25), value: model.deleteNotice)
             .animation(.smooth(duration: 0.25), value: model.imlNotice)
             .sheet(isPresented: Binding(get: { model.imlGuideOpen }, set: { model.imlGuideOpen = $0 })) { IMLGuideView() }
+            .sheet(isPresented: Binding(get: { model.storageOpen }, set: { model.storageOpen = $0 })) {
+                S2ArmStorageView(names: model.storageNames, root: S2ArmStorage.liveRoot)
+            }
             // 首次进入引导（三页横滑：设置 / 金手指 / 故障报修），盖在最上面；看过一次就不再弹
             .overlay {
                 if model.guideOpen {

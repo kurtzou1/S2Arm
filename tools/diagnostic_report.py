@@ -33,6 +33,23 @@ FIELDS = {
 }
 
 
+def undo_double_utf8(text):
+    """iOS 0.6.3 及更早的诊断包：往局日志里有一处坏字节（宿主按字节截断的长行切在汉字中间），客户端整份按 Latin-1 解再存成 UTF-8，
+    中文全成二次编码乱码（「写回原值」→「å\x86\x99…」，264 份诊断中招；ios/diagcollect.m 已改成坏字节就地换 U+FFFD）。
+    这里认出这种整份二次编码的文本并还原：字符全在 U+0000–U+00FF、按 Latin-1 还原成字节后基本是合法 UTF-8（坏字节不到解出的非 ASCII 字符的 1/20、
+    且至少 3 个），才换；真的西文（如 café）还原不出合法 UTF-8，原样不动"""
+    if not any('\x80' <= ch <= '\xff' for ch in text):
+        return text
+    try:
+        raw = text.encode('latin-1')
+    except UnicodeEncodeError:
+        return text
+    fixed = raw.decode('utf-8', errors='replace')
+    wide = sum(1 for ch in fixed if ord(ch) > 0x7f)
+    bad = fixed.count('\ufffd')
+    return fixed if wide >= 3 and bad * 20 < wide else text
+
+
 def sanitize(value, path=(), identity_model=False, key_values=None):
     if isinstance(value, dict):
         return {redact_text(k, key_values=key_values): '[REDACTED]' if SECRET.search(str(k)) else sanitize(v, path + (str(k),), identity_model, key_values) for k, v in value.items()}
@@ -401,7 +418,7 @@ def generate(source, output, metadata=None, key_paths=None):
             dest = None
             if not media:
                 dest = f'logs/{index:04d}.txt'
-                text = data.decode(errors='replace')
+                text = undo_double_utf8(data.decode(errors='replace'))
                 try:
                     text = json.dumps(sanitize(json.loads(text), identity_model=k == 'manifest', key_values=key_values), ensure_ascii=False, indent=2)
                 except (ValueError, UnicodeError):

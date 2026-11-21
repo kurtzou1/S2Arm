@@ -24,7 +24,7 @@ if ndk is None:
     raise RuntimeError("Android NDK 29.0.14206865 not found via the platform resolver")
 host = {"Linux": "linux-x86_64", "Darwin": "darwin-x86_64"}[platform.system()]
 tools = ndk / "toolchains/llvm/prebuilt" / host / "bin"
-cc, readelf = tools / "aarch64-linux-android29-clang", tools / "llvm-readelf"
+cc, readelf = tools / "aarch64-linux-android34-clang", tools / "llvm-readelf"
 args = [e.attrib["Include"] for e in ET.parse(MANAGED / "SaveCommit.AppProbe.csproj").findall(".//LinkerArg")]
 expected_arg = "-Wl,-soname,libs2a_savecommit_managed.so"
 assert args.count(expected_arg) == 1, "the actual AOT project must supply its SONAME exactly once"

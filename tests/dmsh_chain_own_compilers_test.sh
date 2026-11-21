@@ -20,6 +20,10 @@ def ck(name, got, want):
     ok = got == want; bad += not ok; print(('✓ ' if ok else '✗ ') + name + ('' if ok else f'：期望 {want}，实际 {got}'))
 ck('两个 Metal 编译器版本都不同 → 全放行', dmsh_chain.own_compilers([M, I]), ([M, I], []))
 ck('Metal 编译器缺失 → 照停', dmsh_chain.own_compilers([MISS]), ([], [MISS]))
+# D-TYCN：读不到版本的原因写在括号里，同样是缺失、照停（不能被当成「版本不同」放行）
+MB = 'metal_macosx: lock Apple metal version 32023.921 (metalfe-32023.921.6) / actual missing (start blocked: [WinError 5] Access is denied)'
+MN = 'metal_iphoneos: lock Apple metal version 32023.921 (metalfe-32023.921.6) / actual missing (no version output: exit code 0xc0000135)'
+ck('Metal 编译器起不来 / 没打版本 → 照停', dmsh_chain.own_compilers([MB, MN]), ([], [MB, MN]))
 ck('spirv-cross 不符 → 照停', dmsh_chain.own_compilers([SC]), ([], [SC]))
 ck('翻译器 dll / 源码不符 → 照停', dmsh_chain.own_compilers([DLL, SRC]), ([], [DLL, SRC]))
 ck('混合：Metal 放行、其余照停', dmsh_chain.own_compilers([M, SC, MISS]), ([M], [SC, MISS]))

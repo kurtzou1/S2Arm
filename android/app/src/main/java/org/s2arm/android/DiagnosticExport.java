@@ -64,7 +64,6 @@ final class DiagnosticExport {
     /** How this app's processes (library, :game) ended, newest first; none before API 30. */
     static List<Map<String, Object>> exits(Context context) {
         List<Map<String, Object>> out = new ArrayList<>();
-        if (Build.VERSION.SDK_INT < 30) return out;
         ActivityManager am = context.getSystemService(ActivityManager.class);
         if (am == null) return out;
         List<ApplicationExitInfo> all = new ArrayList<>(am.getHistoricalProcessExitReasons(context.getPackageName(), 0, DiagnosticExits.MAX_RECORDS));
@@ -106,7 +105,7 @@ final class DiagnosticExport {
         device.put("android", Build.VERSION.RELEASE);
         device.put("sdk", Integer.toString(Build.VERSION.SDK_INT));
         device.put("abi", Build.SUPPORTED_ABIS.length > 0 ? Build.SUPPORTED_ABIS[0] : "");
-        device.put("soc", Build.VERSION.SDK_INT >= 31 ? Build.SOC_MODEL : "");
+        device.put("soc", Build.SOC_MODEL);
         settings.put("language", Locale.getDefault().toLanguageTag());
         Map<String, Map<String, String>> info = new TreeMap<>();
         info.put("app", app);

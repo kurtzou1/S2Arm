@@ -43,6 +43,26 @@ class PushSelected(unittest.TestCase):
     def progress(self):
         return install.read(self.c.private / install.PUSH_SELECTED, {})
 
+    def test_missing_ios_pack_is_built_before_push(self):
+        # D-C444 #1934：电脑上这款没有 iPhone 资源包（删 iPhone 包只删资源包、留程序件）→ 先起一步 iPhone 出包子作业再推，不报 pack_missing。
+        #   期望（手写）：缺包的那款起一次子作业（游戏号、平台 iphone），有包的不起；子作业失败 → 这款按子作业的原因记失败、接着推下一款
+        import tempfile, export_plan
+        with tempfile.TemporaryDirectory() as d:
+            have, lack = Path(d, "have"), Path(d, "lack")
+            have.mkdir(); (have / "manifest.json").write_text("{}"); lack.mkdir()
+            calls, outcome = [], {"state": "completed"}
+            def step(c, child, gid, platform, plan, location, followUp):
+                calls.append((gid, platform)); return dict(outcome)
+            with patch.object(install.layout, "state", lambda c, g: ("ready",)), patch.object(install.layout, "has_ios_kit", lambda c, g: True), \
+                    patch.object(install.layout, "ios_pack", lambda c, g: lack if g in (B, C) else have), \
+                    patch.object(export_plan, "_run_step", step):
+                r, pushed = self.run_job({}, gameIds=[A, B])
+                self.assertEqual((calls, pushed), ([(B, "iphone")], [A, B]))
+                calls.clear(); outcome.update(state="failed", message="原件不在", code="input_missing")
+                r, pushed = self.run_job({}, gameIds=[C, A])
+                self.assertEqual((calls, pushed), ([(C, "iphone")], [A]))
+                self.assertEqual((r.code, self.progress()["failed"][C]["code"]), ("input_missing", "input_missing"))
+
     def test_one_failure_does_not_block_next(self):
         r, pushed = self.run_job({B: Failure("这款资源包缺件", code="pack_missing")}, gameIds=[A, B.lower(), C, A])
         self.assertEqual(pushed, [A, B, C], "按所选顺序、去重、大写")

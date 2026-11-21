@@ -57,7 +57,7 @@ struct fd_binding {
     int8_t stage_idx;         // 0=vs 1=fs 2=gs 3=tcs 4=tes 5=cs，-1 = 其它/未知
     int16_t tex_slot;         // 组合槽 0..31 或分离贴图槽 128..255；-1 = 未解析
     int16_t samp_slot;        // -1 = 组合句柄；0..127 = 分离采样器来源槽
-    uint8_t texel_buffer;     // 真实 SPIR-V 证明该 texture 是只读 Buffer；不是普通采样图像
+    uint8_t texel_buffer;     // kind==2：真实 SPIR-V 证明该 texture 是只读 Buffer（不是普通采样图像）；kind==3：存储图像是 imageBuffer（Dim=Buffer，存储纹素缓冲）
     // kind==2 且 tex_ubo = 1：贴图句柄不在槽里，在用户常量缓冲 tex_u 处（_b.json tex_ubo / tbuf_ubo）。此时 tex_slot = -1。
     //   samp_src = 组合采样的采样器从哪来：FD_SAMP_UBO = 常量缓冲 samp_u 处的字；FD_SAMP_ID = 常量采样器号 samp_val；
     //   FD_SAMP_SLOT = NVN 采样器槽 samp_val；FD_SAMP_NONE = 着色器没有采样器半边

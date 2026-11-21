@@ -10,7 +10,7 @@ avc_sha=c0af9b9967854a39c8412e47c6dfbd2b08edd63d33d529707142dd8c04bae08d
 # Canonical paths, file bytes, types and modes from that archive. Gitiles tar
 # mtimes and gzip headers can vary for the same commit and are not identity.
 avc_content_sha=8901129497b2ba38ec2c52c2667d478626d9b554dd87603ffc5fd5be0a84651a
-api=29
+api=34
 repo_dir=$(cd "$(dirname "$0")/../.." && pwd -P)
 out=$repo_dir/build/android-cs
 if [ -z "${S2A_BUILD_CACHE:-}" ] && [ -z "${HOME:-}" ]; then

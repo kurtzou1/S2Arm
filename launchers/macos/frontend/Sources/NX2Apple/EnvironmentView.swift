@@ -96,9 +96,6 @@ struct EnvironmentView: View {
             }
         }
         .onAppear { if model.checks.isEmpty { model.checkEnvironment() } }
-        .onChange(of: model.updatePopup != nil) { hasPopup in
-            if hasPopup { model.showEnvironment = false }
-        }
         .appleLoginSheet(model, host: "settings")
         .onDisappear {
             model.settingsFocus = nil

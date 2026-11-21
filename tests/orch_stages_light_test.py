@@ -795,5 +795,17 @@ class WindowsBashTest(unittest.TestCase):
         S._MACHINE_CFG.clear()
 
 
+class ToolCrashTest(unittest.TestCase):
+    def test_python_tool_crash_reports_python_stack(self):
+        # D-FVSY：阶段里的 Python 工具崩在原生代码，报红原先只有「退出 3221225477；末尾：（无输出）」。
+        #   现在子进程开 faulthandler，报红带崩溃那段（Fatal Python error + 最近的调用帧）
+        script = "import ctypes\ndef deep():\n    ctypes.string_at(0)\ndeep()\n"
+        with self.assertRaises(stages.StageError) as error:
+            stages.run([sys.executable, '-c', script])
+        text = str(error.exception)
+        self.assertRegex(text, r'Fatal Python error|Windows fatal exception')
+        self.assertIn('line 3 in deep', text)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -134,7 +134,8 @@ int main(int argc, char **argv) {
       snprintf(b, sizeof b, "%s/b", tmp); ctr(b, tmp);
       ck(s2a_window_span_learned() == 18446744073ull, "⑦ 容器 {B}：读到 Documents/games/B/wire/B/span_peak 里的跨度 18446744073");
       snprintf(b, sizeof b, "%s/ab", tmp); ctr(b, tmp);
-      ck(s2a_window_span_learned() == 32770ull << 20, "⑦ 容器 {A, B}：A 没玩过、没有记录 → 按 A 自己的布局需求 32770 MB 算，与 B 的 18446744073 取大 = 34361835520（原先整容器取 0）");
+      { uint64_t s2a_span_seed(uint64_t); uint64_t sa = s2a_span_seed(strtoull(A, NULL, 16)), want = sa ? (sa > 18446744073ull ? sa : 18446744073ull) : 0;
+        ck(s2a_window_span_learned() == want, "⑦ 容器 {A, B}：A 本机没记录 → 有种子表值就按它与 B 的 18446744073 取大，没有就整容器跨度不知道 = 0（11-21 前拿 A 的布局需求 32770 MB 顶）"); }
       snprintf(f, sizeof f, "%s/Documents/wire", home); mkdir(f, 0755); snprintf(f, sizeof f, "%s/Documents/wire/%s", home, A); mkdir(f, 0755);
       snprintf(f, sizeof f, "%s/Documents/wire/%s/span_peak", home, A); put(f, "2000000000\n", 11);
       ctr(b, tmp);
@@ -176,6 +177,22 @@ int main(int argc, char **argv) {
     ck(ctr(b, tmp) == 32770 && strstr(g_log, "程序不在这台") && strstr(g_log, "1 款取最大 32770 MB"), "④ 某款缺 main.npdm（程序没推到）：跳过它，按其余款 32770 MB，黄行「程序不在这台」");
     snprintf(b, sizeof b, "%s/missall", tmp); bundle(b, (const char *[]){B}, (const int[]){4}, 1);
     ck(ctr(b, tmp) == 0 && strstr(g_log, "下没有游戏"), "④ 唯一一款也缺 main.npdm：0、红行「下没有游戏」");
+    // ⑩ 空容器的占位窗口（#1903 D-D2YQ：导入后第一局起宿主前才补占，地址空间已碎，窗口 31744 MB、远端缺页 4488 万次）。期望手写：
+    //   占位需求 = 76 GiB（比最大的标准布局 D 75876 MB 还大 → 走「按需：占最大一块」）；有游戏 / 有别的错（非空）时不占位
+    { uint64_t s2a_window_need_or_placeholder(uint64_t, int); int s2a_window_late_keep(uint64_t, int, uint64_t, uint64_t);
+      ck(s2a_window_need_or_placeholder(0, 1) == 76ull << 30 && (76ull << 30) > (75876ull << 20), "⑩ 空容器占位需求 76 GiB，比最大的标准布局 75876 MB 大");
+      ck(s2a_window_need_or_placeholder(0, 0) == 0 && s2a_window_need_or_placeholder(69944ull << 20, 1) == 69944ull << 20, "⑩ 有错（非空）回 0、有需求照原值，不占位");
+      // 起宿主前核占位窗口：真实需求 0 → 留着；36 位款（类型 1）→ 重占；类型 3、按本款宿主该留的 ≥ 现在留的 → 留着；该留的更少（小内存 iPad 本可多给窗口）→ 重占
+      ck(s2a_window_late_keep(0, -1, 3ull << 30, 3ull << 30) == 1, "⑩ 起宿主前仍没有可算的款：占位窗口留着");
+      ck(s2a_window_late_keep(69944ull << 20, 1, 3ull << 30, 3ull << 30) == 0, "⑩ 导入的是 36 位款：放掉重占");
+      ck(s2a_window_late_keep(69944ull << 20, 3, 3ull << 30, 3ull << 30) == 1 && s2a_window_late_keep(69944ull << 20, 3, 3ull << 30, 9ull << 30) == 1, "⑩ 类型 3、宿主该留的不比现在少：留着");
+      ck(s2a_window_late_keep(3285ull << 20, 3, 3ull << 30, 2ull << 30) == 0, "⑩ 按本款应用池宿主该少留（小内存 iPad 窗口本可更大）：放掉重占"); }
+    // ⑪ 「地址空间不够」弹不弹（#1903：静态认出 63 GB，实际跨度 42–43 GB，窗口 54272 MB，每次都弹）：学到的跨度在窗口内不弹；没学到 / 超出照旧弹
+    { int s2a_addr_note_needed(uint64_t, uint64_t);
+      ck(s2a_addr_note_needed(43322ull << 20, 54272ull << 20) == 0, "⑪ 学到 43322 MB、窗口 54272 MB：不弹");
+      ck(s2a_addr_note_needed(0, 54272ull << 20) == 0, "⑪ 跨度不知道（本机没记录、种子表也没有）：不弹（11-21 前弹，错怪设备）");
+      ck(s2a_addr_note_needed(60000ull << 20, 54272ull << 20) == 1, "⑪ 已知跨度 60000 MB 超出窗口 54272 MB：弹");
+      ck(s2a_addr_note_needed(54272ull << 20, 54272ull << 20) == 0, "⑪ 学到的正好等于窗口：不弹（碰到的最高地址没出窗口）"); }
     // ⑤ 只读偏移表（iOS 上 s2a_loader_span_images 用它取各款 x1 块长）
     snprintf(b, sizeof b, "%s/img", tmp); mkdir(b, 0755); game(b, 3, 0, 0);
     snprintf(p, sizeof p, "python3 ios/embed.py '%s' '%s/S2AImages.dylib' main >/dev/null", b, b);

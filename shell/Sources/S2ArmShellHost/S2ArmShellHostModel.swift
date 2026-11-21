@@ -481,6 +481,7 @@ public final class S2ArmShellHostModel {
                      onManageSaves: { [weak self] id in self?.manageSaves(id) })
         actions.onReorderGames = { [weak self] sources, before in self?.reorderGames(sources, before: before) ?? false }
         actions.onReportProblem = { s2a_shell_report_problem() }
+        actions.onManageStorage = { [weak self] in self?.storageOpen = true }   // 设置 →「存储」（#1606）：只读总览
         #if !os(tvOS)
         actions.signingCertStatus = { String(cString: s2a_shell_cert_status()) }   // 签名证书（0.6.0，宿主 ios/cert_import.m）：手机上自己签导入的游戏用哪张
         actions.onImportSigningCert = { s2a_shell_cert_p12() }
@@ -663,6 +664,9 @@ public final class S2ArmShellHostModel {
     public private(set) var imlNotice: IMLNotice?
     /// 「了解详情」页（IMLGuideView）：按装法教怎么自签时带上这项权限
     public var imlGuideOpen = false
+    /// 设置 →「存储」页开着（S2ArmStorageView）；storageNames：页里每款显示的名字（游戏库卡片上的）
+    public var storageOpen = false
+    public var storageNames: [String: String] { Dictionary(allGames.map { ($0.id, $0.game.title) }, uniquingKeysWith: { a, _ in a }) }
     nonisolated static func imlNotice(json: String?) -> IMLNotice? {
         guard let json,
               let o = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any],

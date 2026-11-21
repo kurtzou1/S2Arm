@@ -35,14 +35,14 @@ def main():
         if p.returncode:raise RuntimeError(name+": "+(p.stdout+p.stderr).decode()[-2000:])
     for i,src in enumerate(sources):
         obj=out/(str(i)+".o");objects.append(obj)
-        flags=["--target=aarch64-none-linux-android29","-I"+str(ROOT/"runtime/include"),
+        flags=["--target=aarch64-none-linux-android34","-I"+str(ROOT/"runtime/include"),
                "-std=gnu11","-O2","-Wall","-Wextra","-Werror","-Wno-unused-parameter",
                "-Wno-unused-function","-Wno-unused-variable","-Wno-missing-field-initializers",
                "-Wno-misleading-indentation","-ffunction-sections","-fdata-sections","-pthread"]
         if str(src) in ["runtime/src/crash.c","runtime/src/xstack.c"]:flags+=["-D_GNU_SOURCE"]
         run([cc,*flags,"-c",ROOT/src,"-o",obj],str(i))
     exe=out/"thread-pause-test"
-    run([cc,"--target=aarch64-none-linux-android29","-pthread",*objects,
+    run([cc,"--target=aarch64-none-linux-android34","-pthread",*objects,
          "-Wl,--gc-sections","-Wl,-z,max-page-size=16384","-ldl","-llog","-o",exe],"link")
     files=set(sources+[Path("runtime/src/thread.c"),Path("runtime/src/thread_wait_diag.inc"),
                       Path("runtime/src/native.h"),Path("platform/plat.h"),Path("graphics/track/s2a_track.h"),

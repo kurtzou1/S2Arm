@@ -247,14 +247,15 @@ class S2armExport(unittest.TestCase):
             self.export()
 
     def test_install_export_goes_to_s2arm(self):
-        # 导出一款：只有 .s2arm 两件套（0.6.0 起没有旧的自签导出）
+        # 导出一款（通用 S2Arm）：.s2arm 两件套 + 同文件夹本版 S2Arm.ipa（#502）；0.6.0 起没有旧的自签导出
         self.fixture()
         self.c.r.update(gameId=self.A, mode="export")
         calls = []
         with patch.object(install, "export_s2arm", lambda c, g: calls.append(("s2arm", g)) or {}), \
+                patch.object(install, "ensure_shell_ipa", lambda c: calls.append(("ipa",)) or Path("S2Arm.ipa")), \
                 patch.object(install, "ios_pack", lambda c, g: self.pack), patch("downstream.requested", lambda c, g: None, create=True):
             install._install(self.c)
-        self.assertEqual(calls, [("s2arm", self.A)])
+        self.assertEqual(calls, [("ipa",), ("s2arm", self.A)], "通用 S2Arm 导出到文件夹：先放本版 S2Arm.ipa，再出这款的 .s2arm（#502）")
 
 
 if __name__ == "__main__":

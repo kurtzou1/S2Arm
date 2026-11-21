@@ -7,10 +7,11 @@
 static pthread_mutex_t observed_mu = PTHREAD_MUTEX_INITIALIZER;
 #define OBS_REAL(f) extern __typeof__(f) __real_##f
 #define OBS_TYPE(f) _Static_assert(__builtin_types_compatible_p(__typeof__(&__wrap_##f), PFN_##f), #f " signature")
-static struct { VkImageView view; VkImage image; VkImageSubresourceRange range; } observed_views[256];
+static struct { VkImageView view; VkImage image; VkImageSubresourceRange range; unsigned char dead; } observed_views[256];   // dead：已销毁（同一个句柄重新创建时清零）
 static struct { VkFramebuffer fb; VkImageView views[9]; unsigned n; } observed_fbs[256];
 static struct { VkDescriptorSet set; VkImageView views[4][8]; } observed_sets[256];
 static unsigned observed_nv, observed_nf, observed_ns, observed_draws, observed_overlap, observed_copies;
+static unsigned observed_dead_samples;   // 绘制时绑着的组里被采样的、已经销毁的视图条数（整池组回收：补丁没还原时才会出现）
 static unsigned observed_expect_samples=1, observed_early_destroy;
 static VkImage observed_copy_targets[32];
 static unsigned observed_ntargets;
@@ -25,7 +26,7 @@ static void (*observed_on_draw)(void);
 static unsigned (*observed_sample_sets)(void);
 static PFN_vkVoidFunction (*observed_command)(const char *);
 static void observer_reset(void) {
-    observed_nv=observed_nf=observed_ns=observed_draws=observed_overlap=observed_copies=0;
+    observed_nv=observed_nf=observed_ns=observed_draws=observed_overlap=observed_copies=observed_dead_samples=0;
     observed_ntargets=observed_early_destroy=0;observed_expect_samples=1;observed_aborted=0;atomic_store(&observed_fence_proven,0);
     observed_fb=VK_NULL_HANDLE;memset(observed_bound,0,sizeof observed_bound);
 }
@@ -41,7 +42,7 @@ OBS_REAL(vkCreateImageView);
 VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkCreateImageView(VkDevice d,const VkImageViewCreateInfo *p,const VkAllocationCallbacks *a,VkImageView *v) {
     VkResult r=__real_vkCreateImageView(d,p,a,v);
     pthread_mutex_lock(&observed_mu);
-    if(r==VK_SUCCESS){unsigned i=0;while(i<observed_nv&&observed_views[i].view!=*v)i++;if(i==observed_nv){REQUIRE(observed_nv<256);observed_nv++;}observed_views[i].view=*v;observed_views[i].image=p->image;observed_views[i].range=p->subresourceRange;}
+    if(r==VK_SUCCESS){unsigned i=0;while(i<observed_nv&&observed_views[i].view!=*v)i++;if(i==observed_nv){REQUIRE(observed_nv<256);observed_nv++;}observed_views[i].view=*v;observed_views[i].image=p->image;observed_views[i].range=p->subresourceRange;observed_views[i].dead=0;}
     pthread_mutex_unlock(&observed_mu);return r;
 }
 OBS_TYPE(vkCreateImageView);
@@ -88,7 +89,7 @@ VKAPI_ATTR void VKAPI_CALL __wrap_vkCmdDraw(VkCommandBuffer c,uint32_t n,uint32_
       unsigned si=observed_set(observed_bound[i]);
       for(unsigned binding=0;binding<4;binding++)for(unsigned elem=0;elem<8;elem++){
         VkImageView v=observed_sets[si].views[binding][elem];if(!v)continue;
-        unsigned s=observed_view(v);samples++;
+        unsigned s=observed_view(v);samples++;if(observed_views[s].dead)observed_dead_samples++;
         for(unsigned k=0;k<observed_fbs[f].n;k++){
             unsigned a=observed_view(observed_fbs[f].views[k]);
             if(observed_views[a].image==observed_views[s].image&&observed_intersects(observed_views[a].range,observed_views[s].range))observed_overlap++;
@@ -109,7 +110,7 @@ OBS_TYPE(vkCmdCopyImage);
 OBS_REAL(vkDestroyImageView);
 VKAPI_ATTR void VKAPI_CALL __wrap_vkDestroyImageView(VkDevice d,VkImageView v,const VkAllocationCallbacks *a) {
     pthread_mutex_lock(&observed_mu);
-    unsigned vi=observed_view(v);
+    unsigned vi=observed_view(v);observed_views[vi].dead=1;
     for(unsigned i=0;i<observed_ntargets;i++)if(observed_views[vi].image==observed_copy_targets[i]&&!atomic_load(&observed_fence_proven)&&!observed_aborted)observed_early_destroy++;
     pthread_mutex_unlock(&observed_mu);__real_vkDestroyImageView(d,v,a);
 }

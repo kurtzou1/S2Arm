@@ -209,6 +209,10 @@ end;
   翻页时 CurPageChanged 先放开并撤掉这个计时器，它不参与正常翻页的那一帧 }
 procedure LockRedraw;
 begin
+  { 静默安装（启动器自更新 /VERYSILENT）不锁：WM_SETREDRAW 关重画会清掉窗口的可见标志、开重画又把它设上，
+    Inno 静默时照样调 NextButtonClick / CurPageChanged，放开重画那一下把本该隐藏的向导窗设成可见，页面没布置，
+    玩家看到一个只有深色底的空「S2Arm 安装程序」窗口（#1919，Windows 11 自更新到 0.6.4 每次都这样）。没锁就不会放 }
+  if WizardSilent then exit;
   if RedrawLocked then exit;
   RedrawLocked := True;
   SendMessage(WizardForm.Handle, WM_SETREDRAW, 0, 0);

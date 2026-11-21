@@ -22,6 +22,10 @@ int main(void) {
     s2a_sesmark_set(dir, S2A_SESMARK_FG); CHECK(s2a_sesmark_prev(dir) == S2A_SESMARK_FG, "起局写 fg → 下次读到 fg（死在前台）");
     s2a_sesmark_set(dir, S2A_SESMARK_BG); CHECK(s2a_sesmark_prev(dir) == S2A_SESMARK_BG, "进后台写 bg → 读到 bg（后台被划掉不算异常）");
     s2a_sesmark_set(dir, S2A_SESMARK_NONE); CHECK(s2a_sesmark_prev(dir) == S2A_SESMARK_NONE, "优雅退出删掉 → 读到无");
+    // 游戏自己中止（Break）收局写「游戏中止」（#351）：读回是 ABORT，不是 FG（不当成被系统杀 / 死于内存，不关设置）、也不是 NONE（下次要问发诊断）
+    s2a_sesmark_set(dir, S2A_SESMARK_ABORT); CHECK(s2a_sesmark_prev(dir) == S2A_SESMARK_ABORT, "游戏 Break 收局写 ab → 下次读到「游戏中止」（问发诊断）");
+    CHECK(S2A_SESMARK_ABORT != S2A_SESMARK_FG && S2A_SESMARK_ABORT != S2A_SESMARK_NONE, "「游戏中止」与「死在前台」「正常收尾」分开");
+    s2a_sesmark_set(dir, S2A_SESMARK_NONE);
     // 只解包的起动不算一局：不写也不删，上一局留下的照原样留给下一次正式起局
     setenv("S2A_PACK_APPLY_ONLY", "1", 1);
     s2a_sesmark_set(dir, S2A_SESMARK_FG); CHECK(s2a_sesmark_prev(dir) == S2A_SESMARK_NONE, "只解包起动写 fg 不落盘 → 下次正式起局读到无（不误判上次死在前台）");

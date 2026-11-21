@@ -5,7 +5,6 @@ import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
-import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
@@ -129,23 +128,18 @@ final class PadFeedback {
 
     @SuppressWarnings("deprecation")
     private static Motors motorsOf(InputDevice device) {
-        if (Build.VERSION.SDK_INT >= 31) {
-            android.os.VibratorManager manager = device.getVibratorManager();
-            int[] ids = manager.getVibratorIds();
-            if (ids.length >= 2) return new Motors(null, manager, ids);
-            if (ids.length == 1) {
-                Vibrator v = manager.getVibrator(ids[0]);
-                return v.hasVibrator() ? new Motors(v, null, ids) : null;
-            }
-            return null;
+        android.os.VibratorManager manager = device.getVibratorManager();
+        int[] ids = manager.getVibratorIds();
+        if (ids.length >= 2) return new Motors(null, manager, ids);
+        if (ids.length == 1) {
+            Vibrator v = manager.getVibrator(ids[0]);
+            return v.hasVibrator() ? new Motors(v, null, ids) : null;
         }
-        Vibrator v = device.getVibrator();
-        return v != null && v.hasVibrator() ? new Motors(v, null, new int[0]) : null;
+        return null;
     }
 
-    /** API 31+: the controller's sensor manager when it has both an accelerometer and a gyroscope. */
+    /** The controller's sensor manager when it has both an accelerometer and a gyroscope. */
     private static SensorManager sensorsOf(InputDevice device) {
-        if (Build.VERSION.SDK_INT < 31) return null;
         SensorManager manager = device.getSensorManager();
         return manager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) != null
             && manager.getDefaultSensor(Sensor.TYPE_GYROSCOPE) != null ? manager : null;
@@ -185,7 +179,7 @@ final class PadFeedback {
     private static void cancel(Motors m) {
         try {
             if (m.single != null) m.single.cancel();
-            else if (Build.VERSION.SDK_INT >= 31) ((android.os.VibratorManager) m.manager).cancel();
+            else ((android.os.VibratorManager) m.manager).cancel();
         } catch (RuntimeException e) { Log.e(TAG, "Controller rumble: cancel failed", e); }
     }
 
@@ -200,7 +194,7 @@ final class PadFeedback {
         if (m == null) return;
         try {
             if (left <= 0 && right <= 0) { cancel(m); return; }
-            if (m.single == null && Build.VERSION.SDK_INT >= 31) {
+            if (m.single == null) {
                 android.os.CombinedVibration.ParallelCombination both = android.os.CombinedVibration.startParallel();
                 if (left > 0) both.addVibrator(m.ids[0], VibrationEffect.createOneShot(leaseMs, Math.min(255, left)));
                 if (right > 0) both.addVibrator(m.ids[1], VibrationEffect.createOneShot(leaseMs, Math.min(255, right)));

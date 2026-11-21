@@ -11,7 +11,7 @@
 #include <netinet/in.h>
 #include <stdlib.h>
 #include <string.h>
-#include "native.h"
+#include "../runtime/src/native.h"   // 相对路径：Mac 宿主的头文件路径没有 runtime/src（ldn_lan.m 也编进 Mac 宿主）
 #include "s2a_lan_discovery.h"
 #include "s2a_lan_elect.h"
 #include <errno.h>

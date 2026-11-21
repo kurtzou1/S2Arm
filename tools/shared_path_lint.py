@@ -28,6 +28,7 @@ DOCS_ROOT_OK = {   # 文件 → 理由（只放有理由的）
     'graphics/loop/ShaderPack.cs': 'C# 调不到 C 头：DocsRoot() 是本程序集同口径的唯一一份',
     'graphics/metal/gal_core.m': '渲染器自成一体不含原生头，且 graphics/metal 改动即冷（tools/coldcheck.py ③）；只在显式设诊断变量 NXGAL_PASS_LOG 为相对名时走，下一笔 graphics/metal 冷改动顺带归位',
     'graphics/metal/gal_present.m': '同 gal_core.m；只在显式设诊断变量 NXGAL_FRAME_CAP 时走',
+    'shell/Sources/S2ArmShellHost/S2ArmStorage.swift': '存储总览（只读）：扫到的相对路径首段与 Documents 比对来分类，不拼文档根、不按它开文件；扫描根由调用方给沙盒根',
 }
 DOCS_ROOT_TEST = re.compile(r'(^|/)t_[^/]*$|_test\.[^/]*$|(^|/)[^/]*[Tt]ests?/|/third_party/|^compat/tree/src/Ryujinx(?!\.Audio\.Backends\.Apple)')
 

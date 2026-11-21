@@ -142,7 +142,8 @@ final class GameLibrary {
                             try {
                                 BootContract.Current now = BootContract.readCurrent(new File(gamesDir, result.titleId));
                                 Log.i("S2Arm", "Game import receipt: " + result.titleId + " contentRoot=" + now.contentRoot
-                                    + " artifactSha256=" + now.artifactSha256 + " from import/" + source.getName());
+                                    + " artifactSha256=" + now.artifactSha256
+                                    + (result.resourceDelta ? " resourceDelta=1" : "") + " from import/" + source.getName());
                             } catch (BootContract.BadGame | IOException receipt) {
                                 Log.i("S2Arm", "Game import receipt unavailable: " + result.titleId + " from import/" + source.getName());
                             }
@@ -226,7 +227,7 @@ final class GameLibrary {
 
     /** 读共享存储失败、而本 App 确实没有「所有文件访问」时，把这个真原因放进报错（不预先拦：先做，真失败再说为什么）。 */
     private static Throwable inPlaceAccess(Throwable error, boolean inPlace) {
-        if (!inPlace || android.os.Build.VERSION.SDK_INT < 30 || android.os.Environment.isExternalStorageManager()) return error;
+        if (!inPlace || android.os.Environment.isExternalStorageManager()) return error;
         return new IOException("All files access is off for this app: " + error.getMessage(), error);
     }
 

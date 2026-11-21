@@ -1,7 +1,7 @@
 // C0：直连 ABI 的 C 端布局/校验/NVN 风格实调探针。
 // 同一份源码在主机（LP64 测试）和 Android ARM64（真机探针）编译：
 //   direct_abi_test                    —— 主机 CTest，打印 JSON 并跑全部向量
-//   aarch64-linux-android29-clang ...  —— 推到 /data/local/tmp 执行，证明 ARM64 真实调用
+//   aarch64-linux-android34-clang ...  —— 推到 /data/local/tmp 执行，证明 ARM64 真实调用
 // 只使用本仓头文件，不链接 Vulkan/NVN；调用经函数指针（与 xstack 交付宿主实现的路径同型）。
 #include "../native/direct/s2a_direct.h"
 #include "../native/runtime/runtime.h"

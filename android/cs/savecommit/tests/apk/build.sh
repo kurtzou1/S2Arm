@@ -26,8 +26,8 @@ export PATH="$JAVA_HOME/bin:$PATH"
 "$JAVA_HOME/bin/java" -version 2> "$BUILD_DIR/java-version.txt"
 grep -Eq 'version "17\.' "$BUILD_DIR/java-version.txt"
 for tool in aapt2 d8 apksigner zipalign; do test -x "$B/$tool"; done
-test -f "$A"; test -x "$N/aarch64-linux-android29-clang"
-"$N/aarch64-linux-android29-clang" --version > "$BUILD_DIR/clang-version.txt"
+test -f "$A"; test -x "$N/aarch64-linux-android34-clang"
+"$N/aarch64-linux-android34-clang" --version > "$BUILD_DIR/clang-version.txt"
 HEAD=$(git -C "$ROOT" rev-parse HEAD)
 DIRTY=$(git -C "$ROOT" status --porcelain -- android/native/s2a_savecommit.c android/native/s2a_savecommit.h android/cs/savecommit android/cs/aot/AndroidSaveCommit.cs android/cs/aot/S2A.Android.Aot.csproj compat/tree/src/Ryujinx.HLE/FileSystem/S2AHostFileSystem.cs)
 IDENTITY=$HEAD; if [ -n "$DIRTY" ]; then IDENTITY=$HEAD+dirty; fi
@@ -42,16 +42,16 @@ for name in native openread; do
         source=$HERE/../open_read_host_test.c; entry=OpenRead
         wraps=(open fstat s2a_savecommit_open_read)
     fi
-    "$N/aarch64-linux-android29-clang" "${flags[@]}" -pthread -Dmain=suite_main -c "$source" -o "$BUILD_DIR/obj/$name-test.o"
-    "$N/aarch64-linux-android29-clang" "${flags[@]}" -pthread -c "$ROOT/android/native/s2a_savecommit.c" -o "$BUILD_DIR/obj/$name-production.o"
-    "$N/aarch64-linux-android29-clang" "${flags[@]}" -DS2ARM_SOURCE_COMMIT=\""$IDENTITY"\" -DJNI_ENTRY=Java_org_s2arm_probe_savecommit_moongrant_${entry}Instrumentation_nativeRun -c "$HERE/native/runner.c" -o "$BUILD_DIR/obj/$name-runner.o"
+    "$N/aarch64-linux-android34-clang" "${flags[@]}" -pthread -Dmain=suite_main -c "$source" -o "$BUILD_DIR/obj/$name-test.o"
+    "$N/aarch64-linux-android34-clang" "${flags[@]}" -pthread -c "$ROOT/android/native/s2a_savecommit.c" -o "$BUILD_DIR/obj/$name-production.o"
+    "$N/aarch64-linux-android34-clang" "${flags[@]}" -DS2ARM_SOURCE_COMMIT=\""$IDENTITY"\" -DJNI_ENTRY=Java_org_s2arm_probe_savecommit_moongrant_${entry}Instrumentation_nativeRun -c "$HERE/native/runner.c" -o "$BUILD_DIR/obj/$name-runner.o"
     objects=("$BUILD_DIR/obj/$name-test.o" "$BUILD_DIR/obj/$name-production.o" "$BUILD_DIR/obj/$name-runner.o")
     if [ "$FD_DIAGNOSTICS" = 1 ]; then
-        "$N/aarch64-linux-android29-clang" "${flags[@]}" -pthread -c "$HERE/native/fd_observer.c" -o "$BUILD_DIR/obj/$name-observer.o"
+        "$N/aarch64-linux-android34-clang" "${flags[@]}" -pthread -c "$HERE/native/fd_observer.c" -o "$BUILD_DIR/obj/$name-observer.o"
         objects+=("$BUILD_DIR/obj/$name-observer.o"); wraps+=(opendir readdir closedir)
     fi
     links=(); for wrap in "${wraps[@]}"; do links+=("-Wl,--wrap=$wrap"); done
-    "$N/aarch64-linux-android29-clang" -shared -pthread -Wl,-Bsymbolic-functions "${links[@]}" "${objects[@]}" -o "$BUILD_DIR/lib/arm64-v8a/lib${name}_suite.so"
+    "$N/aarch64-linux-android34-clang" -shared -pthread -Wl,-Bsymbolic-functions "${links[@]}" "${objects[@]}" -o "$BUILD_DIR/lib/arm64-v8a/lib${name}_suite.so"
 done
 if [ "$INCLUDE_MANAGED" = 1 ]; then
     S2ARM_SOURCE_ID="$IDENTITY" BUILD_DIR="$BUILD_DIR" bash "$HERE/managed/build-library.sh"
@@ -60,7 +60,7 @@ fi
 classes=(); for name in Probe Native OpenRead; do classes+=(-C "$BUILD_DIR/classes" "org/s2arm/probe/savecommit/moongrant/${name}Instrumentation.class"); done
 if [ "$INCLUDE_MANAGED" = 1 ]; then classes+=(-C "$BUILD_DIR/classes" org/s2arm/probe/savecommit/moongrant/ManagedInstrumentation.class); fi
 "$JAVA_HOME/bin/jar" cf "$BUILD_DIR/classes.jar" "${classes[@]}"
-"$B/d8" --lib "$A" --min-api 29 --output "$BUILD_DIR/dex" "$BUILD_DIR/classes.jar"
+"$B/d8" --lib "$A" --min-api 34 --output "$BUILD_DIR/dex" "$BUILD_DIR/classes.jar"
 MANIFEST=$HERE/AndroidManifest.xml
 if [ "$INCLUDE_MANAGED" = 1 ]; then MANIFEST=$HERE/managed/AndroidManifest.xml; fi
 "$B/aapt2" link -I "$A" --manifest "$MANIFEST" -o "$BUILD_DIR/resources.apk"

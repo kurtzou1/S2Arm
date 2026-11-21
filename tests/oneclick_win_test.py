@@ -552,6 +552,9 @@ class InstallWin(unittest.TestCase):
         self.assertEqual(install_win.device_id('U1', [('U1', 'Network', 7), ('U2', 'USB', 3), ('U1', 'USB', 9)]), 9)
         self.assertEqual(install_win.device_id('U1', [('U1', 'Network', 7)]), 7)
         self.assertIsNone(install_win.device_id('U3', [('U1', 'USB', 9)]))
+        # D-XHV5：设备服务与 devicectl 的编号写法不同（短横、大小写）也认同一台；空编号不匹配任何一台
+        self.assertEqual(install_win.device_id('ab-cd', [('ABCD', 'USB', 5)]), 5)
+        self.assertIsNone(install_win.device_id('', [('', 'USB', 5)]))
 
     def test_plumesign_is_never_taken_from_desktop_or_downloads(self):
         # 11-11 审查：桌面 / 下载里叫 plumesign* 的任意程序不能被拿来执行；其他档都没有时就是找不到（发版随包那份由调用方传）
@@ -588,6 +591,20 @@ class InstallWin(unittest.TestCase):
                 try: return install_win.run(self.ns(d, exe), say=lambda m: None), got, Path(d, 'p.log').read_text()
                 except install_win.Fail as e: return e, got, None
             finally: install_win.mux_devices, install_win.push_pack = olds
+
+    def test_target_not_listed_is_not_connected(self):
+        # D-XHV5：要装的那台不在设备服务里（插着线的是另一台）→ device_not_connected，报错里写出在列的是哪台；不是「要信任电脑」
+        with tempfile.TemporaryDirectory() as d:
+            exe = self.fake(d, "print('should not run')\n")
+            old = install_win.mux_devices
+            install_win.mux_devices = lambda: [('OTHER', 'USB', 42)]
+            try:
+                with self.assertRaises(install_win.Fail) as e:
+                    install_win.install_app(self.ns(d, exe), say=lambda m: None)
+            finally:
+                install_win.mux_devices = old
+        self.assertEqual(e.exception.err, 'device_not_connected')
+        self.assertIn('OTHER/USB', str(e.exception))
 
     def test_ok(self):
         body = ("print('args', a)\nprint('Installation complete!')\nz = zipfile.ZipFile(a[a.index('-o') + 1], 'w')\n"

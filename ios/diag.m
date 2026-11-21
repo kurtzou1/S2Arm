@@ -103,9 +103,11 @@ static NSString *title_id(void) {
     if (aci + 0x18 > d.length || memcmp(p + aci, "ACI0", 4)) return @"";
     return [NSString stringWithFormat:@"%016llX", *(const unsigned long long *)(p + aci + 0x10)];
 }
+// 弱链接[lab]：s2a_main_build_id（runtime/src/loader.c 主程序构建号；输入工作台不链原生核，取不到按没有）
+const char *s2a_main_build_id(void) __attribute__((weak_import));
 // 主程序构建号：起局后取装载器读到的（loader.c）；还没起局（启动即导出 / 上次崩了这次刚开）就从资源包 exefs/main 的 NSO 头 0x40 起 16 字节读
 static NSString *main_build_id(void) {
-    const char *b = s2a_main_build_id(); if (b && *b) return @(b);
+    const char *b = s2a_main_build_id ? s2a_main_build_id() : NULL; if (b && *b) return @(b);
     NSFileHandle *h = [NSFileHandle fileHandleForReadingAtPath:[pack_root() stringByAppendingPathComponent:@"exefs/main"]]; if (!h) return @"";
     [h seekToFileOffset:0x40]; NSData *d = [h readDataOfLength:16]; [h closeFile];
     if (d.length < 16) return @"";
@@ -484,7 +486,8 @@ static S2ADiagMK *g_mk;
 
 // 崩溃恢复关掉了什么（金手指 / 补丁 / 60 帧的名字，app.m 游戏库容器或本文件单款壳记）：上次死在前台时和诊断询问并成一个提示说，不另弹横幅（11-13 维护者：两个弹层叠在一起）
 static NSString *g_crash_off;
-void s2a_dprompt_notice(NSString *title, NSString *body, double delay, double seconds);   // dprompt.m
+// 弱链接[lab]：s2a_dprompt_notice（dprompt.m 提供的提示条；输入工作台不编 dprompt.m，取不到就不提示）
+void s2a_dprompt_notice(NSString *title, NSString *body, double delay, double seconds) __attribute__((weak_import));
 // 弱链接[lab]：s2a_iml_lost
 int s2a_iml_lost(void) __attribute__((weak_import));   // iml_probe.m：这次安装确定丢了「提高内存上限」权限
 // 弱链接[lab]：s2a_iml_claim
@@ -499,7 +502,7 @@ int s2a_diag_asking(void) { return g_promptAlert.presentingViewController != nil
 void s2a_diag_note_crash_off(NSString *names) { g_crash_off = [names copy]; }
 // 不弹询问时（已问过 / 自动化局 / 正在导出），关掉了什么仍要告诉玩家：退回只有「知道了」的提示条
 static void crash_off_notice_only(void) {
-    if (!g_crash_off) return;
+    if (!g_crash_off || !s2a_dprompt_notice) return;
     s2a_dprompt_notice(S2AL(@"crash.off.title"), [NSString stringWithFormat:S2AL(@"crash.off.body"), g_crash_off], 0, 8); g_crash_off = nil;
 }
 // 问一句「把上次的诊断发给我们？」（每次启动最多问一次）；崩溃恢复刚关掉东西时，同一个提示先说关掉了什么。
@@ -614,8 +617,8 @@ void s2a_diag_attach(UIViewController *vc) {
     // 上次会话是不是死在前台：只读会话标记（runtime/src/sesdiag.c，几字节），不读日志（11-07：主线程整份读上一局日志卡几秒，见 session_summary）。
     //   标记在这里先读后写：读到的是上一局留下的，然后标成本局「前台」；进后台 / 回前台由 app.m 改写，优雅退出（lifecycle.c）删掉
     { uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); int prev = s2a_sesmark_prev(docs().fileSystemRepresentation); s2a_sesmark_set(docs().fileSystemRepresentation, S2A_SESMARK_FG);
-      LOG("诊断包：上次会话标记 %s（主线程 %.2f ms，不读日志）→ %s", prev == S2A_SESMARK_FG ? "前台未收尾" : prev == S2A_SESMARK_BG ? "后台" : "无（正常收尾）", (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1e6, prev == S2A_SESMARK_FG ? "提示导出" : "不提示");
-      g_will_ask = prev == S2A_SESMARK_FG && !getenv("S2A_OPEN_SETTINGS") && !s2a_unattended();   // 同步定：游戏里提示条（iml_probe.m，起局 3 秒后）到点时要看
+      LOG("诊断包：上次会话标记 %s（主线程 %.2f ms，不读日志）→ %s", prev == S2A_SESMARK_FG ? "前台未收尾" : prev == S2A_SESMARK_BG ? "后台" : prev == S2A_SESMARK_ABORT ? "游戏中止" : "无（正常收尾）", (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1e6, prev == S2A_SESMARK_FG ? "提示导出" : "不提示");
+      g_will_ask = (prev == S2A_SESMARK_FG || prev == S2A_SESMARK_ABORT) && !getenv("S2A_OPEN_SETTINGS") && !s2a_unattended();   // 游戏中止也问发诊断（不关设置：crash_auto_off 只认 fg）   // 同步定：游戏里提示条（iml_probe.m，起局 3 秒后）到点时要看
       dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         check_toggle();
         // 真机自动化（S2A_OPEN_SETTINGS 测试开关在）每局都是被强杀收尾的，上次异常退出的提示会挡住要截的设置页：只在这时不问（玩家给不了这个环境变量）

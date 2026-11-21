@@ -2,6 +2,7 @@
 //   读服务层写的 status.txt 显示每条状态（每秒刷新）。执行、版本校验、改代码拦截都在 services/S2A.Services/Cheats.cs，开关约 1 秒内生效，不用重启。
 //   解析规则与 Cheats.cs Parse 一致：[名字] 普通条目，{名字} 主代码（不单独列开关，随同文件任一条开着执行），其余非空行是指令。
 #import "vpad_cheats.h"
+#import "picker_present.h"   // 选文件界面弹出 + 日志（#1939）
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include "s2a_docs.h"
 #import "s2a_l10n.h"
@@ -139,7 +140,7 @@ static NSString *cheat_status_text(NSString *st) {
 }
 
 - (void)import {
-    UIDocumentPickerViewController *p = s2a_cheats_import_picker(); p.delegate = self; [self presentViewController:p animated:YES completion:nil];
+    UIDocumentPickerViewController *p = s2a_cheats_import_picker(); p.delegate = self; s2a_present_picker(self, p, "cheats-import");
 }
 - (void)documentPicker:(UIDocumentPickerViewController *)c didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     (void)c; NSFileManager *fm = NSFileManager.defaultManager; NSURL *dir = cheats_dir(); NSMutableArray *bad = [NSMutableArray array];

@@ -17,7 +17,7 @@ here = Path(__file__).resolve().parent
 repo = here.parents[3]
 out = a.out.resolve()
 out.mkdir(parents=True, exist_ok=False)
-clang = a.toolchain.resolve() / 'aarch64-linux-android29-clang'
+clang = a.toolchain.resolve() / 'aarch64-linux-android34-clang'
 commands = [
     [clang, '-O2', '-fPIC', '-fvisibility=hidden', '-ffunction-sections', '-fdata-sections',
      '-shared', '-Wl,--gc-sections,--no-undefined', here/'native_fixture.c', '-ldl', '-o', out/'libepoch_native.so'],

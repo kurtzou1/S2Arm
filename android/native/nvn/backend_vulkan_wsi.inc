@@ -462,7 +462,7 @@ nvn_gpu_rc nvn_gpu_present(nvn_gpu_surface s, const nvn_gpu_drawable *dr, const 
     { static uint64_t np; if (np % 300 == 1) g_draw_tm = nvn_plat_flag("nvk_gputime", 0) != 0;
       if (++np % 300 == 0 && g_draw_tm) {   // 诊断读数：见 g_oc
         uint64_t v[OC_N]; for (int i = 0; i < OC_N; i++) v[i] = __atomic_exchange_n(&g_oc[i], 0, __ATOMIC_RELAXED);
-        char b[400]; snprintf(b, sizeof b, "对象读数（每帧，近 300 帧）：新建渲染通道 %.1f、帧缓冲 %.1f、命令池 %.1f、描述符池 %.1f；分配描述符集 %.1f 次、写描述符 %.1f 次；遮挡查询 %.1f 个；新建视图 %.1f 个；取窗口图 %.1f 毫秒",
+        char b[640]; snprintf(b, sizeof b, "对象读数（每帧，近 300 帧）：新建渲染通道 %.1f、帧缓冲 %.1f、命令池 %.1f、描述符池 %.1f；分配描述符集 %.1f 次、写描述符 %.1f 次；遮挡查询 %.1f 个；新建视图 %.1f 个；取窗口图 %.1f 毫秒",
             v[OC_RP] / 300.0, v[OC_FB] / 300.0, v[OC_CPOOL] / 300.0, v[OC_DPOOL] / 300.0, v[OC_DALLOC] / 300.0, v[OC_DWRITE] / 300.0, v[OC_QUERY] / 300.0, v[OC_VIEW] / 300.0, (double)__atomic_exchange_n(&g_acq_ns, 0, __ATOMIC_RELAXED) / 300.0 / 1e6);
         nvn_plat_log(NVN_PLAT_LOG_INFO, "gpu", b);
         { static uint64_t last_feedback[4], last_snap[2];
@@ -505,6 +505,24 @@ nvn_gpu_rc nvn_gpu_present(nvn_gpu_surface s, const nvn_gpu_drawable *dr, const 
           snprintf(b, sizeof b, "描述符细分（每帧毫秒，近 300 帧）：分配 %.2f、构造写入项 %.2f、写入 %.2f、绑定 %.2f；每帧重写 %.0f 组（其中备忘命中 %.0f 组）、写 %.0f 条描述符",
               v4[0] / 300.0 / 1e6, v4[1] / 300.0 / 1e6, v4[2] / 300.0 / 1e6, v4[3] / 300.0 / 1e6, nst / 300.0, diag_delta(&g_desc_hit, &l_hit) / 300.0, nwt / 300.0);
           nvn_plat_log(NVN_PLAT_LOG_INFO, "gpu", b); }
+        { static uint64_t l_pn[PN_N], l_pns[3]; uint64_t pn[PN_N], pns[3];   // 整池数组组（贴图池 / 采样器池整表一个绑定）：没有这类组时不打
+          for (int i = 0; i < PN_N; i++) pn[i] = diag_delta(&g_pool_n[i], &l_pn[i]);
+          for (int i = 0; i < 3; i++) pns[i] = diag_delta(&g_pool_ns[i], &l_pns[i]);
+          if (pn[PN_NEED]) {
+              snprintf(b, sizeof b, "整池数组组（每帧，近 300 帧）：要 %.1f 组、备忘命中 %.1f 组、新建 %.1f 组（因反馈拷贝在用绕开备忘 %.1f 组）；整池写入 %.0f 项；新建（建池 + 分组）%.2f 毫秒、整池写入 %.2f 毫秒；nvk_pool_memo=%d",
+                  pn[PN_NEED] / 300.0, pn[PN_HIT] / 300.0, pn[PN_NEW] / 300.0, pn[PN_FB] / 300.0, pn[PN_ELEMS] / 300.0, pns[0] / 300.0 / 1e6, pns[1] / 300.0 / 1e6, pool_memo_flag());
+              nvn_plat_log(NVN_PLAT_LOG_INFO, "gpu", b);
+              static uint64_t l_why[4]; uint64_t why[4]; for (int i = 0; i < 4; i++) why[i] = diag_delta(&g_prs_why[i], &l_why[i]);
+              pthread_mutex_lock(&g_prs_mu);
+              const uint32_t rt = g_prs_total, ri = g_prs_idle; const uint64_t rb = g_prs_bytes, rib = g_prs_idle_bytes, rcap = g_prs_cap;
+              pthread_mutex_unlock(&g_prs_mu);
+              static uint64_t l_ev; const uint64_t ev_win = diag_delta(&g_prs_evict, &l_ev), ev_all = __atomic_load_n(&g_prs_evict, __ATOMIC_RELAXED);
+              snprintf(b, sizeof b, "整池组回收（每帧，近 300 帧）：取到键相同的空闲组 %.1f（整池免写）、取到键不同的 %.1f（整表重写）、向驱动新建 %.1f、没走回收 %.1f（碰锁或内存不够 %.2f、写法不同 %.2f、到上限 %.2f、补丁太多 %.2f）；反馈补丁写入 %.1f 项；取组 + 补丁还原放回 %.2f 毫秒；现存 %u 组（空闲 %u），估算占用 %.1f MB（空闲 %.1f MB，封顶 %llu MB）；按字节封顶淘汰空闲组 %llu 个（进程累计 %llu 个）；nvk_pool_rec=%d",
+                  pn[PN_RHIT] / 300.0, pn[PN_RMISS] / 300.0, pn[PN_RNEW] / 300.0, pn[PN_RFALL] / 300.0, why[0] / 300.0, why[1] / 300.0, why[2] / 300.0, why[3] / 300.0,
+                  pn[PN_RPATCH] / 300.0, pns[2] / 300.0 / 1e6, rt, ri, rb / 1048576.0, rib / 1048576.0, (unsigned long long)(rcap >> 20),
+                  (unsigned long long)ev_win, (unsigned long long)ev_all, pool_rec_flag());
+              nvn_plat_log(NVN_PLAT_LOG_INFO, "gpu", b);
+          } }
         { static uint64_t l_rb; const double rb = (double)diag_delta(&g_dyn_rebind, &l_rb) / 300.0;   // 动态 UBO 偏移（#1233）读数
           snprintf(b, sizeof b, "动态 UBO 偏移（每帧，近 300 帧）：只换偏移、不重写组、只重绑 %.0f 次；用动态偏移的管线 %llu 条（建过带 UBO 的管线 %llu 条）；设备动态 UBO 上限 %u；nvk_desc_memo=%d",
               rb, (unsigned long long)__atomic_load_n(&g_dyn_pipes[0], __ATOMIC_RELAXED), (unsigned long long)__atomic_load_n(&g_dyn_pipes[1], __ATOMIC_RELAXED), g_max_dyn_ubo, desc_memo_flag());

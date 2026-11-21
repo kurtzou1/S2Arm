@@ -217,7 +217,7 @@ android {
         testInstrumentationRunner project.findProperty('s2arm.testRunner') ?: 'org.s2arm.android.GamepadMappingInstrumentation'
         // Same switch as the native S2A_ANDROID_EXPERIMENTAL_TOUCH below: the touch menu offers passthrough only when built in.
         buildConfigField 'boolean', 'EXPERIMENTAL_TOUCH', project.findProperty('s2arm.experimentalTouch') == 'true' ? 'true' : 'false'
-        minSdk 29
+        minSdk 34
         targetSdk 36
         versionCode gameDir ? Integer.parseInt(game.versionCode ?: '1') : 1   // game_apk.py --version-code
         versionName gameDir ? "${game.version} (S2Arm 0.1.0-dev)" : '0.1.0-dev'

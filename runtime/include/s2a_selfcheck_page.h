@@ -18,10 +18,10 @@
 #define S2A_SELFCHECK_MEM_BODY_APP_EN "This install is missing the \"Increased Memory Limit\" permission, so iOS gives this game less memory. You can tap \"Start Anyway\" to try it; large games may be closed by iOS mid-play. To fix it for good, ask whoever issued your certificate to turn it on for this game's App ID (a wildcard * profile can't have it, so the game needs its own App ID), or switch to Apple ID signing in S2Arm on your computer, then click \"Push to iPhone\" for this game again."
 // 地址空间不够这款（11-20 维护者定：静态大区末端顶到窗口末 = 游戏其余地址区必落远端、可能卡在开头）：不拦，「仍要启动」照常起局。
 //   iOS 屏上按 S2ArmHost.strings 的 addrshort.* 出五语（ios/app.m host_text），这里的中英是实现来源与日志用
-#define S2A_SELFCHECK_ADDR_TITLE    "这台设备的地址空间不够这款游戏"
-#define S2A_SELFCHECK_ADDR_TITLE_EN "This device doesn't have enough address space for this game"
-#define S2A_SELFCHECK_ADDR_BODY     "这款游戏开局要一整块很大的地址空间，这台设备给不了这么多：可能会非常卡，或一直停在开头。可以先点「仍要启动」试试；想正常玩，请换一台地址空间更大的设备（比如内存更大的 iPhone / iPad / Mac），或等后续版本改进。"
-#define S2A_SELFCHECK_ADDR_BODY_EN  "This game needs one very large block of address space at startup, and this device can't provide that much: it may run very slowly or stay stuck at the start. You can tap \"Start Anyway\" to try; to play normally, use a device with more address space (such as an iPhone, iPad or Mac with more memory), or wait for a later version."
+#define S2A_SELFCHECK_ADDR_TITLE    "这台设备的系统能给 App 的地址范围不够这款游戏"
+#define S2A_SELFCHECK_ADDR_TITLE_EN "The system on this device can't give apps enough address range for this game"
+#define S2A_SELFCHECK_ADDR_BODY     "这款游戏开局要一大块连续的地址范围，这台设备的系统能给 App 的不够（和存储空间无关，清理空间没有用）：可能会非常卡，或一直停在开头。可以先点「仍要启动」试试；想正常玩，请换一台内存更大的 iPhone / iPad / Mac（系统能给 App 的地址范围更大），或等后续版本改进。"
+#define S2A_SELFCHECK_ADDR_BODY_EN  "This game needs one large continuous address range at startup, and the system on this device can't give apps enough (this has nothing to do with storage space; freeing up storage won't help): it may run very slowly or stay stuck at the start. You can tap \"Start Anyway\" to try; to play normally, use an iPhone, iPad or Mac with more memory (their systems can give apps a larger address range), or wait for a later version."
 #define S2A_SELFCHECK_GO           "仍要启动"
 #define S2A_SELFCHECK_GO_EN        "Start Anyway"
 // 读不到本款要多大地址（包不完整）→ 重装补资源

@@ -1,5 +1,25 @@
 [
  {
+  "source": "装这款会顶掉手机上的{0}：你的描述文件只允许一个包名（{1}），装上后被顶掉的那个就打不开了。它的存档还留在手机上这个包名的数据里，以后换回来接着能玩。",
+  "en": "Installing this game replaces {0} on the device: your provisioning profile allows only one bundle ID ({1}), so the replaced app stops opening. Its saves stay on the device under that bundle ID and come back if you switch back."
+ },
+ {
+  "source": "通用 S2Arm（里面的游戏都要重新推）",
+  "en": "the universal S2Arm (its games will need to be sent again)"
+ },
+ {
+  "source": "点「仍然继续」照装。不想顶掉的话，换一份通配描述文件（App ID 以 .* 结尾），或改用 Apple ID 签名，或把几款都装进通用 S2Arm。",
+  "en": "Choose Continue Anyway to install. To keep the other app, use a wildcard provisioning profile (App ID ending in .*), sign with an Apple ID instead, or install the games into the universal S2Arm."
+ },
+ {
+  "source": "这款电脑上没有 iPhone 资源包，先在电脑上做好再推",
+  "en": "This game has no iPhone resource pack on this computer; building it here first, then sending it"
+ },
+ {
+  "source": "这款的 iPhone 包没做成。",
+  "en": "The iPhone build for this game did not finish."
+ },
+ {
   "source": "满屏补丁（按屏幕比例自动选）",
   "en": "Full-screen patch (picked for your screen ratio)"
  },
@@ -5054,6 +5074,10 @@
  {
   "source": "出包未完成。",
   "en": "Packaging incomplete."
+ },
+ {
+  "source": "找不到游戏文件：选中的游戏文件已不在原处。",
+  "en": "Game file missing: the selected game file is no longer where it was."
  },
  {
   "source": "按安装错误检查设备连接与包的有效性；保持手机解锁后重试，保留原 App 和存档。",
@@ -10212,6 +10236,14 @@
   "en": "{0} stopped S2Arm's tool \"{1}\" from running."
  },
  {
+  "source": "被 Windows 拦下：Windows 的应用控制或杀毒软件没让 S2Arm 自带的工具运行。",
+  "en": "Blocked by Windows: Windows app control or antivirus stopped one of S2Arm's own tools from running."
+ },
+ {
+  "source": "缺少Windows版Metal工具：未找到能报告有效版本的官方Windows版Metal编译器。",
+  "en": "Windows Metal tools unavailable: No official Windows Metal compiler reporting a valid version was found."
+ },
+ {
   "source": "Windows 的「智能应用控制」",
   "en": "Windows Smart App Control"
  },
@@ -10760,10 +10792,6 @@
   "en": "This game can't be packed yet: we couldn't identify which graphics API it uses (NVN / Vulkan / OpenGL). Please send us a diagnostic so we can check whether we missed it."
  },
  {
-  "source": "想正常玩，请换一台地址空间更大的设备（比如内存更大的 Mac），或等后续版本改进；游戏照常能启动。",
-  "en": "To play normally, use a device with more address space (such as a Mac with more memory), or wait for a later version; the game still starts."
- },
- {
   "source": "苹果的登录服务器拒收了这次登录请求（回了「服务暂不可用」，还没到核对账号密码那一步），不是这台电脑的网络、Apple ID 或密码的问题，换网络、换 DNS 也没用。多半是苹果又调整了对第三方签名工具的规则：把 S2Arm 更新到最新版后再登录；最新版仍这样，点「复制错误摘要」发给我们。手机、已装的 App 和存档都没动。",
   "en": "Apple's sign-in server refused this sign-in request (it answered \"service unavailable\" before checking your account). This is not a problem with this computer's network, your Apple ID or your password, and switching networks or DNS will not help. Apple most likely changed its rules for third-party signing tools: update S2Arm to the latest version and sign in again. If the latest version still shows this, click \"Copy error summary\" and send it to us. Your phone, installed apps and saves were not touched."
  },
@@ -10870,5 +10898,9 @@
  {
   "source": "手机连稳（数据线插好、解锁）后，对这款再导出到这台手机一次，会重新复制。",
   "en": "With the phone firmly connected (cable in, unlocked), export this game to this phone again and the save will be copied again."
+ },
+ {
+  "source": "这款游戏要的地址范围比这台 Mac 的系统能给 App 的多（和存储空间无关）：想正常玩，请换一台内存更大的 Mac，或等后续版本改进；游戏照常能启动。",
+  "en": "This game needs more address range than the system on this Mac can give apps (this has nothing to do with storage space): to play normally, use a Mac with more memory, or wait for a later version; the game still starts."
  }
 ]

@@ -110,6 +110,13 @@ int main(void) {
         VERIFY(mtl_gpu_err_fatal(ignored) == 0, "SubmissionsIgnored 不判（连带错误）");
         VERIFY(mtl_gpu_err_fatal(m3_to) == 1 && mtl_gpu_err_fatal(m3_pf) == 1, "Metal 3 旧队列 Timeout / PageFault 判挂死");
         VERIFY(mtl_gpu_err_fatal(m3_victim) == 0, "Metal 3 Timeout 但原因是 InnocentVictim：不判");
+        // GPU 内存用满（#327 D-DNWG 真机原文：Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)）：判停；Metal 3 只有错误码 8 同判；被牵连的不判
+        NSError *oom = mtl4_err(8, @"Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)", 8);
+        NSError *m3_oom = [NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorOutOfMemory userInfo:nil];
+        NSError *m3_oom_victim = [NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorOutOfMemory userInfo:@{NSUnderlyingErrorKey:
+            [NSError errorWithDomain:@"IOGPUCommandQueueErrorDomain" code:5 userInfo:@{NSLocalizedDescriptionKey: @"Discarded (victim of GPU error/recovery) (00000005:kIOGPUCommandBufferCallbackErrorInnocentVictim)"}]}];
+        VERIFY(mtl_gpu_err_fatal(oom) == 1, "GPU 内存用满（kIOGPUCommandBufferCallbackErrorOutOfMemory）判停（原先不判、继续交，整机卡死）");
+        VERIFY(mtl_gpu_err_fatal(m3_oom) == 1 && mtl_gpu_err_fatal(m3_oom_victim) == 0, "Metal 3 错误码 8（内存不足）判停；原因是被牵连的不判");
 
         // ② 流程：牵连错误不停、计数在动
         uint64_t c0 = atomic_load(&g_gpu_commits);
@@ -138,6 +145,18 @@ int main(void) {
         VERIFY(ms < 50, "进后台排空 nvn_be_drain 立即返回（%.2f ms），不交不等", ms);
         VERIFY(atomic_load(&g_gpu_commits) == c1 && atomic_load(&g_gpu_refused) > r1, "安全停后放行计数不涨（%llu），拒交 %llu 次", (unsigned long long)atomic_load(&g_gpu_commits), (unsigned long long)(atomic_load(&g_gpu_refused) - r1));
         unlink(map);
+
+        // ④ 内存用满安全停：驻留集当场清空（iOS 上是全机共用的 wired 内存，不等进程退出）。先放一个缓冲进去，期望手写：停之前 ≥1 个，停之后 0 个
+        if (g_res) {
+            atomic_store(&g_gpu_halt, 0); g_notified = 0; g_note[0] = 0;
+            id<MTLBuffer> rb4 = [g_dev newBufferWithLength:1 << 20 options:MTLResourceStorageModeShared]; res_add(rb4); res_commit();
+            NSUInteger before = g_res.allocationCount;
+            VERIFY(mtl_gpu_cb_error(oom, "segment", 7001) == 1 && mtl_gpu_halted() && g_notified == 1 && strstr(g_note, "OutOfMemory"), "内存用满 → 安全停置位、宿主通知带原因");
+            VERIFY(before >= 1 && g_res.allocationCount == 0, "内存用满安全停：驻留集从 %lu 个清到 %lu 个", (unsigned long)before, (unsigned long)g_res.allocationCount);
+            // 负对照：Hang 停下的不清（还要留着现场取证，进程退出自然放掉）
+            atomic_store(&g_gpu_halt, 0); g_notified = 0; res_add(rb4); res_commit(); NSUInteger b2 = g_res.allocationCount;
+            VERIFY(mtl_gpu_cb_error(hang, "main replay", 7002) == 1 && b2 >= 1 && g_res.allocationCount == b2, "负对照：Hang 安全停不清驻留集（%lu 个不变）", (unsigned long)g_res.allocationCount);
+        } else VERIFY(1, "④ 本机后端没有驻留集（Metal 3），跳过清空检查");
     }
     return S2A_T_RESULT("t_nvn_gpu_halt", bad);
 }

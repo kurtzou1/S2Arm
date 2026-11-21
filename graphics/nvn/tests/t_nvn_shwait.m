@@ -30,7 +30,11 @@ static void one(int register_builder, int *before, int *during) {
         //   原先固定睡 100 ms 当「已进去」，负载高时等待者还没跑到 → ① 读到后台档、假红（11-19 门禁）。按事件等，外面 alarm(30) 兜底
         while (!os_unfair_lock_trylock(&g_shader_lock)) usleep(1000);
         os_unfair_lock_unlock(&g_shader_lock);
-        b1 = curpri();
+        // 借来的优先级按事件判：连续读，直到读到借到的档（≥ 31）或 5 秒上限（负载高时系统施加 override 可能晚于这一刻，11-21 门禁负载 70 下 ① 又假红一次）；
+        //   ② 反证没人借，用短窗：200 ms 内一直 ≤ 20（负载高时只会漏检，不会假红）
+        { uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW), lim = register_builder ? 5000000000ull : 200000000ull; int hi = -1;
+          for (;;) { int p = curpri(); if (p > hi) hi = p; if ((register_builder && p >= 31) || clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0 >= lim) break; usleep(1000); }
+          b1 = hi; }
         os_unfair_lock_lock(&g_shader_lock); [g_shader_flights removeObjectForKey:@"t"]; dispatch_group_leave(f->done); os_unfair_lock_unlock(&g_shader_lock);
     });
     dispatch_semaphore_wait(ready, DISPATCH_TIME_FOREVER);

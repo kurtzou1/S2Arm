@@ -97,6 +97,9 @@ def run(args, *, env=None, log=None, allowed=(0,), timeout=600):
     flat that long), not a wall clock: 11-05 Tianyan census Trine 5 direct_profile
     was killed at 600 s while still scanning a large original."""
     command = [str(a) for a in args]
+    # 子进程里的 Python 崩在原生代码（Windows 0xC0000005 / 段错误）时把 Python 调用栈打到 stderr（D-FVSY：随包 python.exe 两次各崩在不同阶段、
+    #   日志「（无输出）」，定不了因）；对正常运行没有影响
+    env = dict(os.environ if env is None else env, PYTHONFAULTHANDLER='1')
     try:
         if os.name == 'nt':
             from pack.jobs import winproc
@@ -126,7 +129,10 @@ def run(args, *, env=None, log=None, allowed=(0,), timeout=600):
     if rc not in allowed:
         # 日志写在本阶段事务目录里，阶段失败事务整个丢弃（roots.py abort），「详见 <日志>」事后找不到（11-06 Windows 出包机0100C9C00E25C000只剩一句「详见 nro_to_nso.log」）：
         #   把工具输出最后几行带进报红，light.log / 红日志包里就有原因
-        tail = [ln.strip() for ln in (out + err).decode('utf-8', errors='replace').splitlines() if ln.strip()][-4:]
+        lines = [ln.strip() for ln in (out + err).decode('utf-8', errors='replace').splitlines() if ln.strip()]
+        # 崩溃时 faulthandler 那段（「Windows fatal exception / Fatal Python error」起，最近的调用在前）比末尾几行（最外层调用）有用
+        crash = next((i for i, ln in enumerate(lines) if ln.startswith(('Windows fatal exception', 'Fatal Python error'))), None)
+        tail = lines[crash:crash + 6] if crash is not None else lines[-4:]
         raise StageError(f'{Path(command[0]).name} 退出 {rc}；{Path(log).name if log else "stderr"} 末尾：' + (' / '.join(tail)[-600:] or '（无输出）'),
                          3 if rc == 3 else 1)
     # Protocol stdout is text (JSON/TSV/keys); preserve the raw log above,

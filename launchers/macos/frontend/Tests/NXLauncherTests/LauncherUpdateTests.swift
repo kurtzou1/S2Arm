@@ -32,6 +32,23 @@ import S2ArmAppleAdapter
         return S2ArmLauncherModel(client: client, updateDefaults: defaults)
     }
 
+    func testUpdateNotesUseSimplifiedChineseForBothChineseLanguagesAndEnglishOtherwise() {
+        let item = ["zh-Hans": "修复启动问题。", "en": "Fixed startup."]
+        for language in ["zh-Hans", "zh-Hant"] {
+            XCTAssertEqual(UpdateNoteCopy.text(item, language: language), "修复启动问题", language)
+            XCTAssertEqual(UpdateNoteCopy.heading("修复", language: language), "修复", language)
+        }
+        for language in ["en", "ja", "fr", ""] {
+            XCTAssertEqual(UpdateNoteCopy.text(item, language: language), "Fixed startup", language)
+            XCTAssertEqual(UpdateNoteCopy.heading("修复", language: language), "Fixes", language)
+        }
+    }
+
+    func testUpdateNotesPreserveUntranslatedContent() {
+        XCTAssertEqual(UpdateNoteCopy.text(["zh-Hans": "修复启动问题"], language: "ja"), "修复启动问题")
+        XCTAssertEqual(UpdateNoteCopy.heading("Compatibility", language: "en"), "Compatibility")
+    }
+
     func testManualCheckReopensASeenOffer() async {
         sim.simulateStartupCheck(failed: false)
         XCTAssertEqual(model.updatePopup?["version"] as? String, "9.9.9")
@@ -65,6 +82,31 @@ import S2ArmAppleAdapter
         XCTAssertNil(model.updatePopup)
         sim.simulateStartupCheck(failed: false)
         XCTAssertEqual(model.updatePopup?["kind"] as? String, "update")
+    }
+
+    /// 查得慢时玩家在设置里打开了 Apple ID 登录：查完不能收起设置页和登录面板，结果留着等它们关了再弹
+    func testManualCheckResultKeepsSettingsAndAppleLoginOpen() async {
+        for result in [SimulatedUpdateDriver.CheckResult.upToDate, .network] {
+            sim.checkResult = result
+            model.showEnvironment = true
+            model.checkForUpdatesManually()
+            model.appleLoginHost = "settings"
+            await model.updateCheckTask?.value
+            XCTAssertTrue(model.showEnvironment)
+            XCTAssertEqual(model.appleLoginHost, "settings")
+            XCTAssertTrue(model.updatePopup != nil || model.checkError != nil)
+            model.appleLoginHost = nil; model.showEnvironment = false; model.updatePopup = nil; model.checkError = nil
+        }
+        sim.simulateStartupCheck(failed: false)
+        model.closeUpdatePopup()
+        model.showEnvironment = true
+        sim.checkResult = .available
+        model.appleLoginHost = "settings"
+        model.checkForUpdatesManually()
+        await model.updateCheckTask?.value
+        XCTAssertTrue(model.showEnvironment)
+        XCTAssertEqual(model.appleLoginHost, "settings")
+        XCTAssertEqual(model.updatePopup?["version"] as? String, "9.9.9")
     }
 
     func testManualFailuresUseCheckErrorAndStartupFailureIsSilent() async {

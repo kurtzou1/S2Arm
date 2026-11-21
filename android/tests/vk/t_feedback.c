@@ -6,6 +6,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#ifdef S2A_NVK_POOL_HOST_TEST
+extern uint64_t nvn_gpu_vk_test_pool_sets(int which);   // 整池组读数（只增不清零）：5 取到键相同的回收组 6 取到键不同的 7 回收新建 8 没走回收 9 反馈补丁写入项数
+extern uint64_t nvn_gpu_vk_test_prs(int which);          // 回收：0 现存组 1 其中空闲
+#endif
 static nvn_gpu_err err;
 static int dq_mode,opt_mode,copy_mode=1,pool_fb_mode=1;   // pool_fb_mode：nvk_pool_fb（1 = 整池数组也为写着的附件拷快照，旧行为；0 = 缺省，不拷）
 static unsigned failures,begins,ncases;
@@ -173,6 +178,62 @@ static void run_depth(struct s2a_vk_device *device,const char *dir,unsigned form
     failures+=observed_overlap+copy_bad+bad;nvn_gpu_buf_release(rb,NULL,NULL);
     nvn_gpu_shader_release(vs);nvn_gpu_shader_release(fs);GPU(nvn_gpu_close(5000000000ull,&err));REQUIRE(observed_early_destroy==0);
 }
+#ifdef S2A_NVK_POOL_HOST_TEST
+// 案例 20（整池组回收）：反馈补丁必须在段完成时还原。同一局里连提两段：
+//   第 1 段 = 案例 16 的录法（池里登记的 0 号附件本笔没写：每笔拷快照、把池里的两项换成快照视图 = 补丁；段完成时快照视图销毁，补丁要先写回）；
+//   第 2 段 = 同一张池快照、同一个采样器，附件换成另一张图（与池里的图不重叠、不拷快照）：取回第 1 段放回的整池组，里面采样的必须是原图的视图，不能还是第 1 段已销毁的快照视图。
+// 回收读数核「第 2 段真的取回了回收组」（rec-hit = 1），免得用例空转；补丁项数 = 2 笔 × 池里 2 项 = 4。
+static void run_rec_restore(struct s2a_vk_device *device,const char *dir) {
+    observer_reset();begins=0;skip_logs=0;ncases++;nvn_gpu_open_desc od={0};od.host_device=device;od.app_label="feedback-rec-restore";GPU(nvn_gpu_open(&od,&err));
+    printf("feedback begin dq=%d opt=%d pool_fb=%d case=20\n",dq_mode,opt_mode,pool_fb_mode);
+    nvn_gpu_layout_ent ent[2]={{0}};ent[0].cls=NVN_GPU_RES_TEX;ent[1].cls=NVN_GPU_RES_SAMP;ent[1].binding=1;
+    for(unsigned i=0;i<2;i++){ent[i].access=NVN_GPU_ACC_R;ent[i].count=1;ent[i].stages=1u<<NVN_GPU_SH_FS;}
+    ent[0].count=2;ent[0].src_kind=NVN_RB_TEXP;observed_expect_samples=2;
+    nvn_gpu_layout layout={0};layout.ent=ent;layout.nent=2;
+    nvn_gpu_shader vs=shader(dir,"fullscreen.vert",NVN_GPU_SH_VS,NULL),fs=shader(dir,"feedback_pool.frag",NVN_GPU_SH_FS,&layout);
+    nvn_gpu_pipe_desc pd={0};pd.poly.mode=NVN_POLYGON_MODE_FILL;pd.color.logic_op=3;pd.prim=4;pd.samples=1;pd.chmask.mask=240;
+    pd.st[NVN_GPU_SH_VS].sh=vs;pd.st[NVN_GPU_SH_FS].sh=fs;pd.cfmt[0]=NVN_FORMAT_RGBA8;
+    nvn_gpu_pipe pipe=NULL;GPU(nvn_gpu_pipe_get(&pd,NVN_GPU_PIPE_SYNC,&pipe,&err));
+    nvn_gpu_tex images[2]={0};nvn_gpu_view views[2]={0},sample=NULL;
+    nvn_gpu_tex_desc td={0};td.d.target=NVN_TEXTURE_TARGET_2D;td.d.format=NVN_FORMAT_RGBA8;td.d.width=td.d.height=4;td.d.depth=1;td.d.levels=1;td.usage=NVN_GPU_TEX_RENDER|NVN_GPU_TEX_SAMPLED;
+    view_t av={0};av.set_layers=1;av.nlayers=1;av.min_layer=0;av.set_target=1;av.target=NVN_TEXTURE_TARGET_2D;
+    for(unsigned i=0;i<2;i++){GPU(nvn_gpu_tex_create(&td,&images[i],&err));GPU(nvn_gpu_view_create(images[i],&av,&views[i],&err));}
+    view_t v={0};v.set_levels=1;v.nlevels=1;v.base_level=0;
+    GPU(nvn_gpu_view_create(images[0],&v,&sample,&err));
+    samp_par sp={0};nvn_gpu_samp sampler=NULL;GPU(nvn_gpu_samp_create(&sp,&sampler,&err));
+    nvn_gpu_pool_table pool=NULL;
+    {nvn_gpu_pool_item item={.state=NVN_GPU_POOL_READY};item.resource.view=sample;nvn_gpu_pool_desc d={.kind=NVN_GPU_POOL_IMAGE,.count=1,.items=&item};d.dummy.view=sample;GPU(nvn_gpu_pool_create(&d,&pool,&err));}
+    nvn_gpu_binding sb={0};sb.ent=1;sb.cls=NVN_GPU_RES_SAMP;sb.u.samp=sampler;
+    nvn_gpu_dyn dyn={0};dyn.nvp=1;dyn.vp[0][2]=dyn.vp[0][3]=4;dyn.vp[0][5]=1;dyn.has_sc=1;dyn.sc[2]=dyn.sc[3]=4;
+    nvn_gpu_draw_args a={0};a.prim=4;a.count=3;a.instances=1;
+    const uint64_t hit0=nvn_gpu_vk_test_pool_sets(5),patch0=nvn_gpu_vk_test_pool_sets(9);uint64_t hit_seg1=0;
+    for(int seg=0;seg<2;seg++){
+        // 栅栏到了不等于完成线程把上一段做完（放回回收组在 finish_cmd 里）：开下一段前等现存组都放回
+        for(int w=0;w<2000&&nvn_gpu_vk_test_prs(0)!=nvn_gpu_vk_test_prs(1);w++){struct timespec ts={0,1000000};nanosleep(&ts,NULL);}
+        if(seg)hit_seg1=nvn_gpu_vk_test_pool_sets(5)-hit0;
+        nvn_gpu_cmd cmd=NULL;GPU(nvn_gpu_cmd_begin(NULL,&cmd,&err));
+        if(!seg)for(unsigned i=0;i<2;i++){begin_pass(cmd,views[i],NVN_GPU_LOAD_CLEAR,4);nvn_gpu_pass_end(cmd);}
+        begin_pass(cmd,views[seg],NVN_GPU_LOAD_LOAD,4);
+        nvn_gpu_set_pipe(cmd,pipe);nvn_gpu_set_dyn(cmd,&dyn);
+        nvn_gpu_bind(cmd,NVN_GPU_SH_FS,&sb,1);GPU(nvn_gpu_pool_bind(cmd,NVN_GPU_SH_FS,0,pool,&err));
+        nvn_gpu_draw(cmd,&a);nvn_gpu_draw(cmd,&a);
+        nvn_gpu_pass_end(cmd);
+        GPU(nvn_gpu_cmd_commit(cmd,1+seg,done,NULL,&err));GPU(nvn_gpu_fence_wait(1+seg,5000000000ull,&err));
+    }
+    REQUIRE(nvn_gpu_fence_failed()==0);
+    const uint64_t hit_seg2=nvn_gpu_vk_test_pool_sets(5)-hit0-hit_seg1,patches=nvn_gpu_vk_test_pool_sets(9)-patch0;
+    unsigned draws_bad=observed_draws!=4,copy_bad=observed_copies!=2,dead_bad=observed_dead_samples!=0,overlap_bad=observed_overlap!=0;
+    unsigned hit_bad=!(hit_seg1==0&&hit_seg2==1),patch_bad=patches!=4;   // 第 1 段：空局里没有回收组可取（0 次命中）；第 2 段：取回 1 个
+    printf("feedback rec-restore dq=%d opt=%d pool_fb=%d case=20 draws=%u copies=%u dead-samples=%u overlap=%u rec-hit=%llu/%llu patches=%llu draws-bad=%u copy-bad=%u dead-bad=%u overlap-bad=%u hit-bad=%u patch-bad=%u\n",
+           dq_mode,opt_mode,pool_fb_mode,observed_draws,observed_copies,observed_dead_samples,observed_overlap,(unsigned long long)hit_seg1,(unsigned long long)hit_seg2,(unsigned long long)patches,
+           draws_bad,copy_bad,dead_bad,overlap_bad,hit_bad,patch_bad);
+    failures+=draws_bad+copy_bad+dead_bad+overlap_bad+hit_bad+patch_bad;
+    nvn_gpu_pool_release(pool);nvn_gpu_samp_release(sampler);nvn_gpu_view_release(sample);
+    for(unsigned i=0;i<2;i++){nvn_gpu_view_release(views[i]);nvn_gpu_tex_release(images[i]);}
+    nvn_gpu_shader_release(vs);nvn_gpu_shader_release(fs);GPU(nvn_gpu_close(5000000000ull,&err));
+    REQUIRE(observed_early_destroy==0);
+}
+#endif
 int main(int argc,char **argv) {
     if(argc!=6)return 2;
     setvbuf(stdout,NULL,_IOLBF,0);   // 行缓冲：校验层的报错和 begin / 结果行按真实先后进同一份日志（脚本按 begin 行把报错归到案例）
@@ -194,5 +255,8 @@ int main(int argc,char **argv) {
     if(!opt_mode){run_case(&device,argv[1],15);run_case(&device,argv[1],19);}
     run_case(&device,argv[1],16);
     run_case(&device,argv[1],17);
+#ifdef S2A_NVK_POOL_HOST_TEST
+    run_rec_restore(&device,argv[1]);   // 案例 20：整池组回收，反馈补丁段完成时还原
+#endif
     REQUIRE(!s2a_vk_device_destroy(&device,1));printf("feedback cases=%u failures=%u\n",ncases,failures);return failures?1:0;
 }

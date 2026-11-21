@@ -438,7 +438,7 @@ int s2a_compile_worker_active(void) {
     return active;
 }
 
-// Android minSdk 29 提供 monotonic_np；旧层和新层的超时都不受系统时间校准影响。
+// Android minSdk 34 提供 monotonic_np；旧层和新层的超时都不受系统时间校准影响。
 static void deadline_at(struct timespec *ts, int ms) {
 #ifdef __ANDROID__
     clock_gettime(CLOCK_MONOTONIC, ts);

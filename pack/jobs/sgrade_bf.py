@@ -66,8 +66,13 @@ def rebuild(c, gid, src_root, plat, work):
     env = c.env()
     env.update(S2A_ROOTS=str(roots), S2A_ROOTS_SHARED=str(work / "never-shared"), S2A_ROOTS_PRIV=str(work / "roots-private"), S2A_PACK_PLAT=plat)
     logs = Path(c.logs) / c.task; logs.mkdir(parents=True, exist_ok=True)
-    for st, extra in STAGES:
+    # 步与步之间报「已完成几步 / 共几步」（D-QPGF，Mac 0.6.4：更新这款重编着色器 247 秒停在第一步、done / total 一直空，按钮一直「更新中 0%」）：
+    #   没有分段计划的作业按本段计数插值整单进度（pack/jobs/overall.py），只增不减；步内工具自己写的 S2A_PROGRESS 计数照常上报
+    n = len(STAGES)
+    for i, (st, extra) in enumerate(STAGES):
+        c.emit("progress", done=i, total=n)
         c.run(["bash", Path(c.engine) / f"pack/stage_{st}.sh", gid, *extra], logs / f"sgbf_{st}.log", env)
+    c.emit("progress", done=n, total=n)
     cur = layout.current_root(c, roots / (gid + layout.CURRENT))
     new = cur / "shaders/direct" if cur is not None else None
     if new is None or not (new / "keys.tsv").is_file() or lib_dir(new) is None:
@@ -142,6 +147,17 @@ def mac_due(c, gid, manifest):
         or (host_update.built_older(c, manifest.get("builtBy")) and host_update.shader_misses(c, gid)["mac"] > 0)
 
 
+def gfx_api(c, root):
+    """这款主画面用哪种图形接口（出包分流的唯一判法 graphics/nvn/tools/gfx_api.py，看 <root>/exefs）→ nvn / vulkan / gl / arm32 / unknown。
+    判不了（脚本出错、没有 exefs）→ unknown：调用方照旧按 NVN 走，不猜"""
+    try:
+        r = subprocess.run([sys.executable, "-X", "utf8", str(Path(c.engine) / "graphics/nvn/tools/gfx_api.py"), str(Path(root) / "exefs")],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    return (r.stdout.split("\t", 1)[0].strip() or "unknown") if r.returncode in (0, 3) else "unknown"
+
+
 def upgrade_mac(c, gid, runtime, hold=None):
     """Mac 运行版本补 _bf / 库内容代数：整份重出直连库换进运行版本（运行版本自带全部输入，不用原件）→ True = 换了。不用重出（mac_due）/ 这次放弃 → False。
     11-21：原先只看、只写 bfGen，库内容代数（libGen）旧的 Mac 那份重出不了、也不记，「建议更新」点了永远消不掉；现在三项（mac_due）都认，换完记本版 libGen / builtBy
@@ -155,6 +171,15 @@ def upgrade_mac(c, gid, runtime, hold=None):
         return False
     if not (runtime / "shaders/direct/keys.tsv").is_file() or not _has_romfs(runtime):
         return False   # 不是直连包 / 没有 RomFS：没有可补的
+    if gfx_api(c, runtime) in ("vulkan", "gl"):
+        # D-RAKK（mac/0.6.5，0100CD801CE5E000）：Vulkan / OpenGL 款没有 NVN Metal 直连库（运行版本里只有空的直连目录），重出必然「不完整」，
+        #   原先每点一次「更新这款」整单失败、「建议更新」永远消不掉。不重出，记本版代数（库本来就没有可补的），判定随之消掉（同 iPhone 那份 ios_direct_lib）
+        import contextlib, host_update
+        from core import atomic
+        with (hold() if hold else contextlib.nullcontext(True)) as free:
+            if free:
+                atomic(runtime / "manifest.json", dict(read(runtime / "manifest.json", {}), bfGen=BF_GEN, libGen=host_update.LIB_GEN, builtBy=host_update.built_by(c)))
+        return False
     c.emit("message", "正在给这款重出着色器库（补上片上读取用的着色器，资源不动；首次要几分钟到几十分钟）")
     # 运行版本的 RomFS 是 game.img（0.6.0 一款一份资源，pack/jobs/onerom.py）：重出要产物根形态的 romfs.std，同 iPhone 那条（ios_inputs）从 RomFS 段拷出一份，补完删掉
     std = runtime / "romfs.std"

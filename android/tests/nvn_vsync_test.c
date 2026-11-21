@@ -10,7 +10,7 @@
 //
 // 覆盖：节拍到达、vsyncs>0 的 60Hz 槽位等拍（60Hz/120Hz 屏两档）、丢拍超时、
 // 后台/停局停节拍、重启恢复、门（debug.s2a.vsync 默认关）、不可用回退、
-// API 33→29→24 回退路径、preferredIndex 语义（非末条）、expected≠deadline 负控面。
+// API 33→29 降级路径、preferredIndex 语义（非末条）、expected≠deadline 负控面。
 #include <errno.h>
 #include <inttypes.h>
 #include <pthread.h>
@@ -45,7 +45,6 @@ static struct {
     pthread_mutex_t mu; pthread_cond_t cv;
     AChoreographer_vsyncCallback cb_vs;        // API 33+ 登记的一次性回调
     AChoreographer_frameCallback64 cb64;       // API 29+
-    AChoreographer_frameCallback cb;           // API 24+
     void *cb_user;
     int pending, woke;
     int64_t frame_ns_fallback;                 // cb64/cb 派发用的 frameTimeNanos
@@ -62,12 +61,10 @@ static int fk_poll(int ms, int *fd, int *ev, void **data) {
         fk.pending = 0;
         AChoreographer_vsyncCallback v = fk.cb_vs;
         AChoreographer_frameCallback64 f64 = fk.cb64;
-        AChoreographer_frameCallback f = fk.cb;
         void *u = fk.cb_user;
         pthread_mutex_unlock(&fk.mu);
         if (v) v(&fk.data, u);
         else if (f64) f64(fk.frame_ns_fallback, u);
-        else if (f) f((long)fk.frame_ns_fallback, u);
         return 1;
     }
     fk.woke = 0;
@@ -76,9 +73,8 @@ static int fk_poll(int ms, int *fd, int *ev, void **data) {
 }
 static void fk_wake(ALooper *looper) { (void)looper; pthread_mutex_lock(&fk.mu); fk.woke = 1; pthread_cond_broadcast(&fk.cv); pthread_mutex_unlock(&fk.mu); }
 static AChoreographer *fk_choreo(void) { return (AChoreographer *)0x2; }
-static void fk_post_vs(AChoreographer *c, AChoreographer_vsyncCallback cb, void *u) { (void)c; pthread_mutex_lock(&fk.mu); fk.cb_vs = cb; fk.cb64 = NULL; fk.cb = NULL; fk.cb_user = u; pthread_mutex_unlock(&fk.mu); }
-static void fk_post64(AChoreographer *c, AChoreographer_frameCallback64 cb, void *u) { (void)c; pthread_mutex_lock(&fk.mu); fk.cb64 = cb; fk.cb_vs = NULL; fk.cb = NULL; fk.cb_user = u; pthread_mutex_unlock(&fk.mu); }
-static void fk_post(AChoreographer *c, AChoreographer_frameCallback cb, void *u) { (void)c; pthread_mutex_lock(&fk.mu); fk.cb = cb; fk.cb_vs = NULL; fk.cb64 = NULL; fk.cb_user = u; pthread_mutex_unlock(&fk.mu); }
+static void fk_post_vs(AChoreographer *c, AChoreographer_vsyncCallback cb, void *u) { (void)c; pthread_mutex_lock(&fk.mu); fk.cb_vs = cb; fk.cb64 = NULL; fk.cb_user = u; pthread_mutex_unlock(&fk.mu); }
+static void fk_post64(AChoreographer *c, AChoreographer_frameCallback64 cb, void *u) { (void)c; pthread_mutex_lock(&fk.mu); fk.cb64 = cb; fk.cb_vs = NULL; fk.cb_user = u; pthread_mutex_unlock(&fk.mu); }
 static int64_t fk_frame_time(const AChoreographerFrameCallbackData *d) { return d->frame_ns; }
 static size_t fk_tl_len(const AChoreographerFrameCallbackData *d) { return d->len; }
 static size_t fk_tl_pref(const AChoreographerFrameCallbackData *d) { return d->pref; }
@@ -93,10 +89,6 @@ static AVsyncId fk_tl_vsync_id(const AChoreographerFrameCallbackData *d, size_t 
 DECLARED(ALooper_prepare); DECLARED(ALooper_pollOnce); DECLARED(ALooper_wake);
 DECLARED(AChoreographer_getInstance); DECLARED(AChoreographer_postVsyncCallback);
 DECLARED(AChoreographer_postFrameCallback64);
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-DECLARED(AChoreographer_postFrameCallback);      // 真头 __DEPRECATED_IN(29)：符号存在即可用，钉名不判新旧
-#pragma GCC diagnostic pop
 DECLARED(AChoreographerFrameCallbackData_getFrameTimeNanos);
 DECLARED(AChoreographerFrameCallbackData_getFrameTimelinesLength);
 DECLARED(AChoreographerFrameCallbackData_getPreferredFrameTimelineIndex);
@@ -110,7 +102,6 @@ static const struct { const char *name; void *fn; } kNdk[] = {
     REG(AChoreographer_getInstance, fk_choreo),
     REG(AChoreographer_postVsyncCallback, fk_post_vs),
     REG(AChoreographer_postFrameCallback64, fk_post64),
-    REG(AChoreographer_postFrameCallback, fk_post),
     REG(AChoreographerFrameCallbackData_getFrameTimeNanos, fk_frame_time),
     REG(AChoreographerFrameCallbackData_getFrameTimelinesLength, fk_tl_len),
     REG(AChoreographerFrameCallbackData_getPreferredFrameTimelineIndex, fk_tl_pref),
@@ -183,26 +174,31 @@ int main(void) {
     int cst = 0; waitpid(p, &cst, 0);
     T(WIFEXITED(cst) && WEXITSTATUS(cst) == 0);
 
-    // 0b. 回退路径（各自在干净子进程里跑，ops 解析不黏）：藏掉 API33 → postFrameCallback64 派上拍；
-    //     再藏掉 postFrameCallback64 → postFrameCallback 派上拍。
-    static const char *fb[][2] = {
-        { "AChoreographer_postVsyncCallback", NULL },                       // → API 29 路径
-        { "AChoreographer_postVsyncCallback", "AChoreographer_postFrameCallback64" }, // → API 24 路径
-    };
-    for (int k = 0; k < 2; k++) {
+    // 0b. 降级支（干净子进程跑，ops 解析不黏）：藏掉 API33 → postFrameCallback64 派上拍。
+    {
         pid_t q = fork();
         if (q == 0) {
-            fk.hide_n = 0;
-            for (size_t i = 0; i < sizeof fb[k] / sizeof fb[k][0] && fb[k][i]; i++) fk.hide[fk.hide_n++] = fb[k][i];
-            _Atomic uint64_t got = 0;
+            fk.hide_n = 0; fk.hide[fk.hide_n++] = "AChoreographer_postVsyncCallback";
             if (nvn_vsync_start(0, usr_fn, NULL, why, sizeof why) != 0) _exit(2);
             fire_at((int64_t)t_now() + 100000000);
             for (int i = 0; i < 300 && !atomic_load(&usr.n); i++) t_sleep_ms(1);
-            got = atomic_load(&usr.n);
-            _exit(got >= 1 ? 0 : 3);
+            _exit(atomic_load(&usr.n) >= 1 ? 0 : 3);
         }
         int st = 0; waitpid(q, &st, 0);
-        if (!(WIFEXITED(st) && WEXITSTATUS(st) == 0)) printf("  fallback child k=%d raw st=%#x\n", k, st);
+        if (!(WIFEXITED(st) && WEXITSTATUS(st) == 0)) printf("  fallback child raw st=%#x\n", st);
+        T(WIFEXITED(st) && WEXITSTATUS(st) == 0);
+    }
+    // 0c. 两条回调臂都被裁（minSdk 34 下不应出现）：启动报 -1 而非沉默兜底。
+    {
+        pid_t q = fork();
+        if (q == 0) {
+            fk.hide_n = 0;
+            fk.hide[fk.hide_n++] = "AChoreographer_postVsyncCallback";
+            fk.hide[fk.hide_n++] = "AChoreographer_postFrameCallback64";
+            char w[96] = "";
+            _exit(nvn_vsync_start(0, usr_fn, NULL, w, sizeof w) == -1 && w[0] ? 0 : 1);
+        }
+        int st = 0; waitpid(q, &st, 0);
         T(WIFEXITED(st) && WEXITSTATUS(st) == 0);
     }
 

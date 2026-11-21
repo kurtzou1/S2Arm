@@ -425,7 +425,8 @@ static int present_fsr_encode(id cb, id<MTLTexture> src, id<MTLTexture> dst, con
     // 视口尺寸的结果 1:1 拷进画布，就用上面算出的那个视口。不经 present_blit：它会拿取整后的 ow×oh 再算一次视口，画幅差落在 1% 判据边上时两次结果不同
     //   （1267×720 → 1920×1080：头一次 9,0 1901×1080，再算一次 1920/1080 ÷ 1901/1080 = 1.00999 就成了铺满，画面被拉宽）。着色器与取样器是上屏拷贝的那一套，
     //   present crop / present viewport 两行日志照它的格式记（真机屏幕级验收 screen_check.py 读后一行）
-    present_pipeline(dst.pixelFormat);   // 上面抗锯齿的输入拷贝可能把 g_blit_pso 换成了中间图格式的
+    id<MTLRenderPipelineState> blit_pso = present_pso(dst.pixelFormat);   // PR3c 按目标格式取槽：旧单槽时上面抗锯齿的输入拷贝（BGRA8 中间图）会把 g_blit_pso 换成中间图格式的、这里要重建回画布格式——多槽后两格式并存互不挤占
+    if (!blit_pso) return 0;   // 死槽防御（HDR 槽建不出、负缓存）：present_now 已把层回退 SDR 基线，正常路径到不了这里
     { static uint64_t last[10]; uint64_t meta[10] = {src.width, src.height, cx, cy, cw, ch, dst.width, dst.height, (uint64_t)pv.x << 32 | (uint64_t)pv.y, (uint64_t)pv.w << 32 | (uint64_t)pv.h};
       pthread_mutex_lock(&g_fsr_mu); int changed = memcmp(meta, last, sizeof meta) != 0; if (changed) memcpy(last, meta, sizeof meta); pthread_mutex_unlock(&g_fsr_mu);
       if (changed) { MLOG("present crop: source texture %lux%lu, valid %lu,%lu %lux%lu → target %lux%lu", (unsigned long)src.width, (unsigned long)src.height,
@@ -435,6 +436,6 @@ static int present_fsr_encode(id cb, id<MTLTexture> src, id<MTLTexture> dst, con
     //   只给前 8 个时 Metal 3 校验断言（片元参数 64 字节、只绑了 32），Metal 4 槽缓冲后半留着上一次上屏的旧参数
     float uv[16] = {0, 0, 1, 1, 0.5f / (float)ow, 0.5f / (float)oh, ((float)ow - 0.5f) / (float)ow, ((float)oh - 0.5f) / (float)oh};
     present_hdr_uv(uv + 8, src, dst, YES);
-    if (m4) { int r_ = 0; if (@available(macOS 26.0, iOS 26.0, *)) r_ = present_fsr_pass4(cb, g_blit_pso, f->output, dst, uv, sizeof uv, uvb, table, &pv); return r_; }
-    return present_fsr_pass3(cb, g_blit_pso, f->output, dst, uv, sizeof uv, &pv);
+    if (m4) { int r_ = 0; if (@available(macOS 26.0, iOS 26.0, *)) r_ = present_fsr_pass4(cb, blit_pso, f->output, dst, uv, sizeof uv, uvb, table, &pv); return r_; }
+    return present_fsr_pass3(cb, blit_pso, f->output, dst, uv, sizeof uv, &pv);
 }

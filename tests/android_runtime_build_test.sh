@@ -47,7 +47,7 @@ EOF
 # 链接探针源只占 S2A_ANDROID_LINK_PROBE 的位（配置不读内容、这里也不编它）
 : > "$T/link_probe.c"
 if ! "$CMAKE" -S android -B "$T/b" -G Ninja -DCMAKE_MAKE_PROGRAM="$NINJA" -DCMAKE_TOOLCHAIN_FILE="$TC" \
-     -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-29 -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+     -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-34 -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
      -DS2A_ANDROID_NATIVE_MODE=game -DS2A_ANDROID_VK_ENGINE=ON -DS2ARM_ANDROID_VK_BACKEND=nvk \
      -DS2A_ANDROID_LINK_PROBE="$T/link_probe.c" > "$T/configure.log" 2>&1; then
   cat "$T/configure.log"; echo "android_runtime_build：CMake 配置 android/CMakeLists.txt 失败（见上）"; exit 1

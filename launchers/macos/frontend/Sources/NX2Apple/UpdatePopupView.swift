@@ -9,9 +9,30 @@ import NXModel
 import NXLauncher
 import S2ArmAppleAdapter
 
-/// 更新说明里的一条：{zh-Hans, en?}；英文没有就用中文
-private func noteText(_ item: [String: Any], _ language: String) -> String {
-    LauncherCopy.note((language == "en" ? item["en"] as? String : nil) ?? item["zh-Hans"] as? String ?? "")
+enum UpdateNoteCopy {
+    private static let englishHeadings = [
+        "这一版的重点": "Highlights",
+        "新功能": "New Features",
+        "改进": "Improvements",
+        "修复": "Fixes",
+        "从 0.5 升级": "Upgrading from 0.5",
+        "系统要求": "System Requirements",
+        "已知问题": "Known Issues",
+        "数字": "By the Numbers",
+    ]
+
+    private static func prefersChinese(_ language: String) -> Bool {
+        language == "zh-Hans" || language == "zh-Hant"
+    }
+
+    static func text(_ item: [String: Any], language: String) -> String {
+        let english = prefersChinese(language) ? nil : item["en"] as? String
+        return LauncherCopy.note(english ?? item["zh-Hans"] as? String ?? "")
+    }
+
+    static func heading(_ title: String, language: String) -> String {
+        prefersChinese(language) ? title : englishHeadings[title] ?? title
+    }
 }
 
 private func releasePage(_ version: String) -> URL? { URL(string: "https://github.com/jhaizhou-ops/S2Arm/releases/tag/v" + version) }
@@ -113,7 +134,8 @@ struct UpdatePopupView: View {
                 } else {
                     ForEach(Array(sections.enumerated()), id: \.offset) { _, section in
                         VStack(alignment: .leading, spacing: 8) {
-                            Text(section["title"] as? String ?? "").font(.manrope(14, .semibold)).foregroundStyle(LauncherPalette.cream)
+                            Text(UpdateNoteCopy.heading(section["title"] as? String ?? "", language: language))
+                                .font(.manrope(14, .semibold)).foregroundStyle(LauncherPalette.cream)
                             bullets(section["items"] as? [[String: Any]] ?? [])
                         }
                     }
@@ -267,7 +289,7 @@ struct UpdatePopupView: View {
             ForEach(Array(items.enumerated()), id: \.offset) { _, item in
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text("•").foregroundStyle(.secondary)
-                    Text(noteText(item, language)).font(LauncherTheme.TypeStyle.body).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                    Text(UpdateNoteCopy.text(item, language: language)).font(LauncherTheme.TypeStyle.body).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
                 }
             }
         }
@@ -318,7 +340,7 @@ struct MessagesPanel: View {
                 let items = (notes["highlights"] as? [[String: Any]]).flatMap { $0.isEmpty ? nil : $0 }
                     ?? (notes["sections"] as? [[String: Any]] ?? []).flatMap { $0["items"] as? [[String: Any]] ?? [] }
                 ForEach(Array(items.prefix(3).enumerated()), id: \.offset) { _, item in
-                    Text("• " + noteText(item, language)).font(LauncherTheme.TypeStyle.body).fixedSize(horizontal: false, vertical: true)
+                    Text("• " + UpdateNoteCopy.text(item, language: language)).font(LauncherTheme.TypeStyle.body).fixedSize(horizontal: false, vertical: true)
                 }
                 if let link = releasePage(version) {
                     Button { NSWorkspace.shared.open(link) } label: { Text(t("update.popup.fullLog")).font(LauncherTheme.TypeStyle.detail).underline() }

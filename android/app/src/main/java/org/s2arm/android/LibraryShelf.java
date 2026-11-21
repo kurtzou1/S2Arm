@@ -83,9 +83,8 @@ final class LibraryShelf extends FrameLayout {
         backdrop.setAlpha(0.75f);
         ColorMatrix saturate = new ColorMatrix(); saturate.setSaturation(1.25f);
         backdrop.setColorFilter(new ColorMatrixColorFilter(saturate));
-        // CoverFlowBackdrop 的 blur(radius: 60)：安卓 12 起用系统模糊；更早的系统靠 48 像素小图放大（Artwork.thumbnail 同一个办法）
-        if (android.os.Build.VERSION.SDK_INT >= 31)
-            backdrop.setRenderEffect(android.graphics.RenderEffect.createBlurEffect(60 * dp, 60 * dp, Shader.TileMode.CLAMP));
+        // CoverFlowBackdrop 的 blur(radius: 60)：用系统模糊（API 31+，minSdk 34 满足）
+        backdrop.setRenderEffect(android.graphics.RenderEffect.createBlurEffect(60 * dp, 60 * dp, Shader.TileMode.CLAMP));
         addView(backdrop, new LayoutParams(-1, -1));
         addView(new Shade(context), new LayoutParams(-1, -1));
 

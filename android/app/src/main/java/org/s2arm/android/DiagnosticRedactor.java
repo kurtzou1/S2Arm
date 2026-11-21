@@ -232,7 +232,7 @@ final class DiagnosticRedactor {
         String s = text;
         for (int i = 0; i < IDENTITY.length; i++) s = IDENTITY[i].matcher(s).replaceAll(IDENTITY_REPLACEMENT[i]);
         Matcher line = PHYSICAL_LINE.matcher(s);
-        StringBuffer out = new StringBuffer(s.length());   // appendReplacement(StringBuilder) is Java 9, newer than minSdk 29
+        StringBuffer out = new StringBuffer(s.length());   // appendReplacement(StringBuilder) 是 Java 9 API，desugaring 不覆盖
         while (line.find()) {
             String physical = line.group();
             String replaced = DEVICE_CONTEXT.matcher(physical).find()

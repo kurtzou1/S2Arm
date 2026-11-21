@@ -282,6 +282,10 @@ ck "写自己的工作目录被拒：分类 access_denied、点名是 S2Arm 的�
 S2A_NXUNPACK_TEST_THROW=denied-src run "$T/d2" "$K" "$T/od2" "$T/junk.bin"
 ck "源文件读被拒：分类 access_denied、点名是源文件" '[ "$(cat "$T/d2.rc")" = 1 ] && grep -q "【原因 access_denied】" "$T/d2" && grep -q "被拒的是源文件" "$T/d2"'
 
+# ---- 用例：原件路径不在（诊断#24fb13：原先落进 io「文件被截断、换一份完整的」，原件其实是挪走了 / 外置盘没连上）----
+run "$T/m1" "$K" "$T/om" "$T/no-such-drive/game.nsp"
+ck "原件路径不在：分类 source_missing、说原件挪走或盘没连上、不说截断、rc=1" '[ "$(cat "$T/m1.rc")" = 1 ] && grep -q "【原因 source_missing】" "$T/m1" && grep -q "所在的磁盘没连上" "$T/m1" && ! grep -q "截断" "$T/m1"'
+
 # ---- Windows 挂载卷：RomFS 发布拒绝按目录改名退避；非 Windows 不重试 ----
 run "$T/p1" --test-romfs-publish "$T/publish"
 ck "发布拒绝句柄等待后成功；非 Windows 直接失败；持续拒绝按 9 档退避并给出路径建议，暂存保留" '[ "$(cat "$T/p1.rc")" = 0 ] && grep -qE "Windows 同盘句柄(测试|对照)：" "$T/p1" && grep -q "负对照：windows=false 的直接发布遇一次 E_ACCESSDENIED 即原样失败" "$T/p1" && grep -q "负控：持续拒绝 → 按 dirrename 重试 9 次（总等待 60.8 秒）后报红" "$T/p1"'

@@ -245,7 +245,7 @@ void gl_wd_present(uint32_t id, uint32_t w, uint32_t h, int crop[4]) {
     int pr = s2a_widen_present(id, &c); g_p2_fb = pr == 5; g_wd_frame++;
     mtl_fit_pillar(pr == 1 || pr == 2 || pr == 5 ? pr : 0);
     crop[0] = c.left; crop[1] = c.top; crop[2] = c.right - c.left; crop[3] = c.bottom - c.top;
-    static uint64_t n; if (++n % 300 == 0) { char line[1024]; s2a_widen_report(line, sizeof line);
+    static uint64_t n; if (++n % 300 == 0) { char line[4096]; s2a_widen_report(line, sizeof line);
         GLOG("宽屏核心：绘制 %llu（进核心 %llu、有改写 %llu、大于 4 KB 的改写 %llu、读片元坐标要横向倍率 %llu；影子先拷原图内容 %llu、上传作废丢内容 %llu、"
              "按链 / 换位采样没换影子 %llu）；%s", (unsigned long long)g_wd_draws, (unsigned long long)g_wd_core,
              (unsigned long long)g_wd_rw, (unsigned long long)g_wd_big, (unsigned long long)g_wd_fragx, (unsigned long long)g_wd_seed, (unsigned long long)g_wd_lost,

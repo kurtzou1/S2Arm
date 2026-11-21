@@ -27,6 +27,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, '..', '..'))
 sys.path.insert(0, HERE)   # filecopy.py / direct_library.py 与本脚本同目录；测试用 importlib 从路径载入本脚本时 sys.path 里没有它们
 from filecopy import copy_file   # noqa: E402
+from game_resource_rows import GameResourceRows   # noqa: E402
 import direct_library   # noqa: E402  F5.2：图形描述的文件清单与离线库校验只有这一份实现
 sys.path.insert(0, os.path.join(REPO, 'tools'))
 from module_order import load_order   # noqa: E402  Horizon 装载序（main → subsdk0..N → sdk）：排序规则只有这一份
@@ -336,8 +337,8 @@ def romfs_image(root):
     return not os.path.isdir(os.path.join(root, 'romfs')) and os.path.isfile(os.path.join(root, 'romfs.std'))
 
 
-def entries_from_root(root, staging, sysdata=None, direct_vulkan=False):
-    """(pack path, source) pairs, as pack/ipa.sh chooses them, plus modules/."""
+def game_resource_entries(root, staging, sysdata=None):
+    """Choose the external game payload independently of shader and module generation."""
     # RomFS 两种形态（约定同 graphics/nvn/tools/romfs_list.py、服务层 Application.cs StdOf / OpenStd）：romfs/ 目录，
     #   或目录不在、只有标准 RomFS 镜像 romfs.std（出包缺省不落散文件，8fe66d7fe）——镜像整份进包，起局时服务层直接读它
     image = romfs_image(root)
@@ -372,6 +373,12 @@ def entries_from_root(root, staging, sysdata=None, direct_vulkan=False):
             out.append((name, caps_path))
         elif os.path.exists(os.path.join(root, name)):
             out.append((name, os.path.join(root, name)))
+    return out
+
+
+def entries_from_root(root, staging, sysdata=None, direct_vulkan=False, game_entries=None):
+    """(pack path, source) pairs, as pack/ipa.sh chooses them, plus modules/."""
+    out = game_resource_entries(root, staging, sysdata) if game_entries is None else list(game_entries)
     shaders = os.path.join(root, 'shaders')
     if os.path.isdir(shaders):
         if os.environ.get('S2A_ANDROID_SKIP_APPLE_ARTIFACTS') == '1':
@@ -500,22 +507,7 @@ def check_output(out, force):
                  'pick another output, or pass --force to replace it')
 
 
-def write_pack(out, entries, force=False, graphics=None):
-    # main 的替换前准入：旧包只有在所有模块都通过硬件/ABI 校验后才删除。
-    for name, source in entries:
-        if name == 'modules':
-            images = sorted(Path(source).glob('*.patched.bin'))
-            if not any(p.name == 'main.patched.bin' for p in images):
-                sys.exit('【红】package has no modules/main.patched.bin')
-            for image in images:
-                validate_module(source, image.name[:-len('.patched.bin')])
-    if os.path.lexists(out):
-        check_output(out, force)
-        if os.path.isdir(out) and not os.path.islink(out):
-            shutil.rmtree(out)
-        else:
-            os.remove(out)
-    os.makedirs(out)
+def flatten_entries(entries):
     files = []
     for name, src in entries:
         if os.path.isfile(src):
@@ -539,23 +531,66 @@ def write_pack(out, entries, force=False, graphics=None):
             files[i] = None
         else:
             pos[rel] = i
-    files = [f for f in files if f is not None]
+    return [f for f in files if f is not None]
+
+
+def write_pack(out, entries, force=False, graphics=None, static_cache=None):
+    # main 的替换前准入：旧包只有在所有模块都通过硬件/ABI 校验后才删除。
+    for name, source in entries:
+        if name == 'modules':
+            images = sorted(Path(source).glob('*.patched.bin'))
+            if not any(p.name == 'main.patched.bin' for p in images):
+                sys.exit('【红】package has no modules/main.patched.bin')
+            for image in images:
+                validate_module(source, image.name[:-len('.patched.bin')])
+    if os.path.lexists(out):
+        check_output(out, force)
+    files = flatten_entries(entries)
+    layer = None
+    if static_cache is not None:
+        import ast
+        import inspect
+
+        directory, selections = static_cache
+        selector = [ast.dump(ast.parse(inspect.getsource(fn))) for fn in
+                    (game_resource_entries, stage_system_data, romfs_image, flatten_entries)]
+        selected = dict(flatten_entries(selections))
+        effective = [(name, src) for name, src in files if selected.get(name) == src]
+        layer = GameResourceRows(directory, effective, selector)
+    if os.path.lexists(out):
+        if os.path.isdir(out) and not os.path.islink(out):
+            shutil.rmtree(out)
+        else:
+            os.remove(out)
+    os.makedirs(out)
     lines = []
     rows = []
     total = 0
     for rel, src in files:
         dst = os.path.join(out, rel)
-        h = hashlib.sha256()
-        # copy_file 两条路都已把 dst 复制好（CoW 共享数据块或 shutil.copy2，权限随源）：
-        # 这里只读 dst 算哈希，不再二次写入——源是只读（0444，RomFS 共享存储）时二次写会 PermissionError。
+        # copy_file gives a private copy (APFS/FICLONE where available). On a hit
+        # hash provenance is the unchanged, previously verified source identity.
         copy_file(src, dst)
-        with open(dst, 'rb') as a:
-            for chunk in iter(lambda: a.read(1 << 22), b''):
-                h.update(chunk)
         size = os.path.getsize(dst)
+        tracked = layer is not None and layer.tracked(rel, src)
+        if tracked and layer.hit:
+            expected_size, digest = layer.rows[rel]
+            if size != expected_size:
+                raise ValueError('游戏资源复制后长度与缓存不符')
+        else:
+            h = hashlib.sha256()
+            with open(dst, 'rb') as a:
+                for chunk in iter(lambda: a.read(1 << 22), b''):
+                    h.update(chunk)
+            digest = h.hexdigest()
+            if tracked:
+                layer.rows[rel] = [size, digest]
         total += size
-        lines.append(f'{rel}\t{size}\t{h.hexdigest()}\n')
-        rows.append((rel, size, h.hexdigest()))
+        lines.append(f'{rel}\t{size}\t{digest}\n')
+        rows.append((rel, size, digest))
+    if layer is not None:
+        layer.finish()
+        print(f'游戏资源索引缓存：{"命中" if layer.hit else "已封存"} {len(layer.rows)} 行')
     index = ''.join(lines)
     with open(os.path.join(out, 'index.tsv'), 'w', newline='\n') as f:
         f.write(index)
@@ -657,6 +692,9 @@ def main():
     source.add_argument('--root')
     source.add_argument('--synthetic', action='store_true')
     parser.add_argument('--sysdata', help='unsupported here; pass player system data to refresh')
+    parser.add_argument('--game-resource-cache', type=Path, help='memo of verified static game index rows')
+    parser.add_argument('--game-resource-root', type=Path,
+                        help='original frozen game input for a separate extract/direct result root')
     parser.add_argument('--force', action='store_true')
     parser.add_argument('--direct-vulkan', action='store_true', help='experimental direct Vulkan module-selection descriptor')
     parser.add_argument('--direct-graphics', metavar='DESCRIPTOR',
@@ -665,6 +703,8 @@ def main():
     args = parser.parse_args()
     if args.sysdata:
         parser.error('--sysdata must be supplied to refresh; make_pack reads the prepared product root')
+    if args.game_resource_root and (args.synthetic or not args.game_resource_cache):
+        parser.error('--game-resource-root requires --root and --game-resource-cache')
     if args.synthetic and args.direct_vulkan:
         parser.error('--direct-vulkan requires a real Vulkan product root')
     out = os.path.abspath(args.out)
@@ -686,11 +726,29 @@ def main():
         if graphics is not None and os.path.isfile(os.path.join(root, GRAPHICS_MANIFEST)):
             parser.error(f'{GRAPHICS_MANIFEST} already exists under the product root; '
                          'keep one source: pass it with --direct-graphics instead')
-        entries = entries_from_root(root, os.path.join(tmp, 'modules'),
-                                    '' if args.synthetic else args.sysdata, args.direct_vulkan)
+        staging = os.path.join(tmp, 'modules')
+        game_entries = None
+        cache = None
+        if args.game_resource_cache:
+            game = args.game_resource_root.resolve(strict=True) if args.game_resource_root else Path(root).resolve()
+            prepared = Path(root).resolve()
+            cache_dir = args.game_resource_cache.resolve()
+            if any(cache_dir == item or cache_dir.is_relative_to(item) or item.is_relative_to(cache_dir)
+                   for item in (game, prepared, Path(out).resolve())):
+                parser.error('game resource cache must be separate from the inputs and output')
+            if game != prepared:
+                # Extract/direct run on a derivative of the game input. Their
+                # output can replace shaders, but never the game identity.
+                for rel in ('ctl/control.nacp', 'exefs/main.npdm', 'exefs/main'):
+                    if (game / rel).read_bytes() != (prepared / rel).read_bytes():
+                        parser.error('game resource root does not belong to the prepared root')
+            game_entries = game_resource_entries(os.fspath(game), staging, '' if args.synthetic else args.sysdata)
+            cache = cache_dir, game_entries
+        entries = entries_from_root(root, staging, '' if args.synthetic else args.sysdata,
+                                    args.direct_vulkan, game_entries=game_entries)
         if graphics is not None:
             entries.append((GRAPHICS_MANIFEST, args.direct_graphics))
-        n, total = write_pack(out, entries, args.force, graphics)
+        n, total = write_pack(out, entries, args.force, graphics, static_cache=cache)
     print(f'{n} files, {total} bytes: {out}')
 
 

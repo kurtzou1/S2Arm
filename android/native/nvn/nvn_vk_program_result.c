@@ -59,7 +59,8 @@ static int compute_u32(struct s2a_jv v, uint32_t *out);
 // Return 1 for a proven sampled Buffer, 0 for another proven sampled image,
 // -1 when the set/binding and its type chain cannot be proved. Op/Dim values
 // correspond to the repository's SPIR-V headers (spirv_cross/spirv.h).
-static int texture_buffer_kind(const void *bytes, size_t size, uint32_t set, uint32_t binding) {
+// image = 1：存储图像（Sampled 0 / 2，imageBuffer 是 Dim=Buffer 的存储图像）；0：采样贴图（Sampled 0 / 1）。
+static int texture_buffer_kind(const void *bytes, size_t size, uint32_t set, uint32_t binding, int image) {
     const uint8_t *p = bytes;
     if (!p || size < 20 || (size & 3u) || s2a_spv_word(p) != 0x07230203u) return -1;
     uint32_t bound = s2a_spv_word(p + 12);
@@ -107,7 +108,7 @@ static int texture_buffer_kind(const void *bytes, size_t size, uint32_t set, uin
             uint32_t dim = s2a_spv_word(p + 4*(pos + 3));
             uint32_t arrayed = s2a_spv_word(p + 4*(pos + 5)), ms = s2a_spv_word(p + 4*(pos + 6));
             uint32_t sampled = s2a_spv_word(p + 4*(pos + 7));
-            if (dim > 6 || arrayed > 1 || ms > 1 || sampled > 1) goto done;
+            if (dim > 6 || arrayed > 1 || ms > 1 || sampled > 2 || sampled == (image ? 1u : 2u)) goto done;
             if (dim == 5 && (arrayed || ms)) goto done;
             result = dim == 5;
             break;
@@ -126,12 +127,30 @@ static int texture_classify(struct s2a_jv binding, const struct fd_stage *stage,
     if (has_source && s2a_jv_str(source, kind, sizeof kind)) return fail(why, why_size, "texture source invalid");
     if (has_source && strcmp(kind, "texture") && strcmp(kind, "buffer-texture"))
         return fail(why, why_size, "unknown texture source");
-    int actual = stage && stage->present ? texture_buffer_kind(stage->spirv, stage->spirv_bytes, (uint32_t)out->set, (uint32_t)out->binding) : -1;
+    int actual = stage && stage->present ? texture_buffer_kind(stage->spirv, stage->spirv_bytes, (uint32_t)out->set, (uint32_t)out->binding, 0) : -1;
     // 不堵门：SPIR-V 能证就以它为准（它就是要绑的描述符）；证不出（结果列了着色器没声明的描述符、同号多变量等）
     // 不拒整段程序，按 source 走，没有 source 就照合入前当普通纹理。
     if (actual < 0) actual = has_source && !strcmp(kind, "buffer-texture");
     out->texel_buffer = actual == 1;
     if (out->texel_buffer && out->count != 1) return fail(why, why_size, "buffer texture arrays are unsupported");
+    return 0;
+}
+
+// 存储图像是不是缓冲贴图（imageBuffer，编译器 source = "buffer-image"，DirectGpuAccessor 按 SamplerType.TextureBuffer 出）。
+//   同 texture_classify：SPIR-V 证得出就以它为准（它就是要绑的描述符：Dim=Buffer 要 STORAGE_TEXEL_BUFFER，否则 STORAGE_IMAGE），
+//   证不出按 source；没有 source 的老结果照旧当普通存储图像。
+static int image_classify(struct s2a_jv binding, const struct fd_stage *stage,
+                          struct fd_binding *out, char *why, size_t why_size) {
+    struct s2a_jv source;
+    char kind[32] = "";
+    int has_source = !s2a_jv_obj_find(binding, "source", &source);
+    if (has_source && s2a_jv_str(source, kind, sizeof kind)) return fail(why, why_size, "image source invalid");
+    if (has_source && strcmp(kind, "image") && strcmp(kind, "buffer-image"))
+        return fail(why, why_size, "unknown image source");
+    int actual = stage && stage->present ? texture_buffer_kind(stage->spirv, stage->spirv_bytes, (uint32_t)out->set, (uint32_t)out->binding, 1) : -1;
+    if (actual < 0) actual = has_source && !strcmp(kind, "buffer-image");
+    out->texel_buffer = actual > 0;   // 写法与 texture_classify 那行不同：libpack_tbuf_withdraw_test.py 按那一行做负控，锚点要唯一
+    if (out->texel_buffer && out->count != 1) return fail(why, why_size, "buffer image arrays are unsupported");
     return 0;
 }
 
@@ -402,6 +421,9 @@ static int parse_graphics(const uint8_t *bytes, size_t length, struct fd_program
                 return fail(why, why_size, "invalid texture source");
             }
             if (dst->kind == 2 && texture_classify(b,
+                    dst->stage_idx >= 0 && dst->stage_idx < FD_MAX_STAGES ? &out->stage[dst->stage_idx] : NULL,
+                    dst, why, why_size)) return -1;
+            if (dst->kind == 3 && image_classify(b,
                     dst->stage_idx >= 0 && dst->stage_idx < FD_MAX_STAGES ? &out->stage[dst->stage_idx] : NULL,
                     dst, why, why_size)) return -1;
             if (dst->kind == 1) {
@@ -793,7 +815,13 @@ int nvn_vk_program_parse_compute(const uint8_t *bytes, size_t length,
         }
         if (dst->kind == 1 && (dst->slot != -1 || compute_storage(b, &out->storage[i])))
             CS_FAIL("compute storage source mapping is unknown or inconsistent");
-        if (dst->kind == 3) dst->tex_slot = (int16_t)((dst->slot - 72) / 2);   // 图像槽（复用 tex_slot 字段，见上）
+        if (dst->kind == 3) {
+            dst->tex_slot = (int16_t)((dst->slot - 72) / 2);   // 图像槽（复用 tex_slot 字段，见上）
+            if (image_classify(b, &out->stage, dst, why, why_size)) {
+                nvn_vk_program_free_compute(out);
+                return -1;
+            }
+        }
         if (dst->kind == 2) {
             if (has_samp) dst->tex_slot = (int16_t)(128 + (dst->slot - 90) / 2);
             else if (dst->slot >= 72 && dst->slot < 88 && !(dst->slot & 1)) {

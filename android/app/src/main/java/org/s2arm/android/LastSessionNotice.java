@@ -5,7 +5,6 @@ package org.s2arm.android;
 import android.app.ActivityManager;
 import android.app.ApplicationExitInfo;
 import android.content.Context;
-import android.os.Build;
 import java.util.List;
 
 /**
@@ -24,7 +23,6 @@ final class LastSessionNotice {
     }
 
     private static String reason(Context context, long markedAt) {
-        if (Build.VERSION.SDK_INT < 30) return null;
         List<ApplicationExitInfo> exits;
         try {
             ActivityManager am = context.getSystemService(ActivityManager.class);

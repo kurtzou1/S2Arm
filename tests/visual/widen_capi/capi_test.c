@@ -112,7 +112,21 @@ int main(void) {
     checki("留黑边：上屏返回 1", 1, s2a_widen_present(0, NULL));
     checki("init：屏宽 1920 → 关（0）", S2A_WIDEN_OFF, s2a_widen_init(1920, 1080, S2A_WIDEN_GAME));
 
-    char rep[1024]; s2a_widen_report(rep, sizeof rep); printf("%s\n", rep);
+    char rep[4096]; s2a_widen_report(rep, sizeof rep); printf("%s\n", rep);
+    {   // 报告按缓冲截断不切在 UTF-8 字符中间（报告含中文；host.log 留下半个汉字时，iOS 诊断包整份日志被解成乱码）。
+        //   期望按 UTF-8 规则手写：每个缓冲大小取一次，结尾 0 之前是完整的 UTF-8（首字节说明的后续字节数都在），且是整行的前缀
+        int full = (int)strlen(rep), bad_cap = 0, bad_pfx = 0;
+        for (int cap = 1; cap <= full + 1; cap++) {
+            char b[4096]; memset(b, 0x55, sizeof b); s2a_widen_report(b, cap);
+            int n = (int)strlen(b), i = 0;
+            if (n > cap - 1 || memcmp(b, rep, (size_t)n)) { bad_pfx = cap; break; }
+            while (i < n) { unsigned char c = (unsigned char)b[i]; int k = c < 0x80 ? 1 : (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 0;
+                if (!k || i + k > n) { bad_cap = cap; break; } for (int j = 1; j < k; j++) if (((unsigned char)b[i + j] & 0xC0) != 0x80) { bad_cap = cap; break; } if (bad_cap) break; i += k; }
+            if (bad_cap) break;
+        }
+        char why[64]; snprintf(why, sizeof why, "整行 %d 字节；坏缓冲 %d / 非前缀 %d", full, bad_cap, bad_pfx);
+        check("报告按缓冲截断：每种大小都是完整 UTF-8、整行前缀", full > 0 && !bad_cap && !bad_pfx, "坏 0 / 非前缀 0", why);
+    }
     printf("\n共 %d 项，失败 %d 项\n", total, fails);
     return fails;
 }

@@ -40,7 +40,7 @@ UINT清除必须保留ColorF的原始位模式，不能把浮点数数值强转�
 
 使用本机NDK的`glslc --target-env=vulkan1.1`分别编译`probe.vert`、`probe.frag`、
 `probe_uint.frag`，
-用NDK的`aarch64-linux-android29-clang -O2 -Wall -Wextra driver_probe.c -lvulkan`
+用NDK的`aarch64-linux-android34-clang -O2 -Wall -Wextra driver_probe.c -lvulkan`
 生成可执行文件。部署到授权设备的测试目录，执行：
 
 ```text

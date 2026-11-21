@@ -104,6 +104,7 @@ extension S2ArmLauncherModel {
     func phoneUpdateEnded(completed: Bool) {
         let repack = completed ? updateRepack : []
         updateRepack = []
+        if !repack.isEmpty { installAfterDevice = lastUpdateArgs?.device }
         refresh()
         guard !repack.isEmpty else { return }
         Task {
@@ -131,6 +132,6 @@ extension S2ArmLauncherModel {
         let id = installAfterQueue.removeFirst()
         let plan = exportAfterPack.removeValue(forKey: id)
         guard let game = games.first(where: { $0.id == id }) else { installNextQueued(); return }
-        if let plan { runExportPlan(game, plan) } else { install(game) }   // 导出确认页要先出包的款按它那份计划走；批量「更新并重新出」出完的照旧装上
+        if let plan { runExportPlan(game, plan) } else { install(game, device: installAfterDevice) }   // 导出确认页要先出包的款按它那份计划走；批量「更新并重新出」出完的照旧装上
     }
 }

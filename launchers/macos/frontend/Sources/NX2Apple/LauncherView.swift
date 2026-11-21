@@ -578,6 +578,7 @@ struct LauncherView: View {
 
     private var isUpdatePopupPresented: Bool {
         model.updatePopup != nil && !model.showAddGames && !model.showKeys && !model.showEnvironment
+            && model.appleLoginHost == nil && model.installViewOpen == nil && model.exportSheet == nil   // 别的弹层开着时等它关了再弹，不顶掉（D-6DR6）
     }
 
     @ViewBuilder private var updateErrorToast: some View {

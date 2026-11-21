@@ -1,6 +1,5 @@
 package org.s2arm.android;
 
-import android.os.Build;
 import android.view.Surface;
 import java.util.function.LongSupplier;
 
@@ -33,7 +32,7 @@ final class FrameRateVote {
     }
 
     void target(float fps) {
-        if (surface == null || !surface.isValid() || Build.VERSION.SDK_INT < 30) return;
+        if (surface == null || !surface.isValid()) return;
         float valid = Float.isNaN(fps) || Float.isInfinite(fps) || fps <= 0 ? 0 : fps;
         if (Float.compare(last, valid) == 0) { lowerSince = -1; return; }
         boolean lower = valid > 0 && !Float.isNaN(last) && last > 0 && valid < last;

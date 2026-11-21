@@ -135,7 +135,7 @@ static void mc_split_uv(const uint8_t *src, uint32_t src_stride, uint8_t *du,
     }
 }
 
-/* AMEDIAFORMAT_KEY_SLICE_HEIGHT 自 API 28 才有，minSdk 29 满足。 */
+/* AMEDIAFORMAT_KEY_SLICE_HEIGHT 自 API 28 才有，minSdk 34 满足。 */
 static int32_t mc_read_format(s2a_mc *m, s2a_mc_diag *diag,
                               int32_t *color, int32_t *stride, int32_t *slice_h,
                               int32_t *crop_l, int32_t *crop_r, int32_t *crop_t, int32_t *crop_b,

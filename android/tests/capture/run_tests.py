@@ -62,7 +62,7 @@ def main():
     jar = args.android_sdk/'platforms/android-36/android.jar'
     run('java-android-compile', [args.jdk/'bin/javac', '--release', '17', '-cp', jar, '-d', out/'android',
         java/'CapturePixels.java', java/'CaptureEncoder.java'])
-    run('native-android-compile', [ndk_bin/'clang++', '--target=aarch64-linux-android29', '-std=c++17',
+    run('native-android-compile', [ndk_bin/'clang++', '--target=aarch64-linux-android34', '-std=c++17',
         '-Wall', '-Wextra', '-Werror', '-fPIC', '-c', native/'capture_jpeg.cpp', '-o', out/'capture-arm64.o'])
     run('jni-host-build', [args.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror',
         '-I'+str(args.jdk/'include'), '-I'+str(args.jdk/'include'/include_os), '-I'+str(native),

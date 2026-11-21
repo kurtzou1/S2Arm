@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import errno
+import json
 import os
 import re
 from pathlib import Path
@@ -9,7 +10,7 @@ import stat
 
 
 RECOVERY = {
-    "addr_short": "想正常玩，请换一台地址空间更大的设备（比如内存更大的 Mac），或等后续版本改进；游戏照常能启动。",   # Mac 起局宿主报「地址空间不够这款」（build.addr_short_watch 发的不阻塞提示 notice）
+    "addr_short": "这款游戏要的地址范围比这台 Mac 的系统能给 App 的多（和存储空间无关）：想正常玩，请换一台内存更大的 Mac，或等后续版本改进；游戏照常能启动。",   # Mac 起局宿主报「地址空间不够这款」（build.addr_short_watch 发的不阻塞提示 notice）
     "sgrade_upgrading": "等这款的 S 级优化升级做完（游戏上有进度），再点开始游戏；别的游戏照常能玩。",   # 11-17 S 级优化改手动单款升级（sgrade.upgrade_game），升级中只挡这一款
     "ios_install_dir_unwritable": "先试这两步：①在 iPhone 上打开一次 S2Arm，等游戏库界面出来；②回电脑对这款游戏再点一次「推到 iPhone」，会接着已传的部分继续，不用从头来。还是写不进，就要删掉 iPhone 上的 S2Arm App 再重装：先在游戏菜单「存档管理」里导出存档，存到 S2Arm 文件夹以外（比如 iCloud 云盘）；再在 iPhone 桌面长按 S2Arm，删除 App；然后在电脑上的 S2Arm 里对这款游戏再点一次「推到 iPhone」；装好后在「存档管理」里导回存档。电脑上的游戏和 S2Arm 都不用删。",   # iOS 端装机 / 导入失败：手机上的 S2Arm 报码、按码显示（11-11 维护者「补上说人话的原因」）
     "ios_install_no_space": "清出空间后点「重试」。",   # iOS 端装机 / 导入失败：手机上的 S2Arm 报码、按码显示（11-11 维护者「补上说人话的原因」）
@@ -194,6 +195,7 @@ RECOVERY = {
     'phone_app_running': '在 iPhone 上从后台划掉 S2Arm（或回到主屏后等几秒），再点一次还原。',
     'save_backup_failed': '确认后再点一次就照装：存档没备份，万一覆盖出问题可能丢档；想先备份就把手机解锁、数据线插稳后再点一次。',
     'cert_revoke_confirm': '点「仍然继续」会新建证书照签。不想动现有证书的话，点「改用已有证书」，把在 AltStore / SideStore 导出的 .p12 导进来，就不用新建。',
+    'app_bundle_replace_confirm': '点「仍然继续」照装。不想顶掉的话，换一份通配描述文件（App ID 以 .* 结尾），或改用 Apple ID 签名，或把几款都装进通用 S2Arm。',
     'device_space_low': '点「仍然继续」照传：手机报的空闲不含系统随时能清掉的空间，实际多半放得下，真写满了会停下并说明还差多少；也可以先在「设置 → 通用 → iPhone 储存空间」腾出空间。',
     'container_stale': '先给点名的游戏各「打 iPhone 包」一次，再装到 iPhone；也可以确认后这次先不带它们照装，它们的存档和资源留在手机上，重新出包再装就回来。',
     'container_incompatible': '这款没法和手机上已有的游戏放进同一个 App：先从 iPhone 删掉不兼容的那款。',
@@ -394,7 +396,10 @@ PLAYER_REASON = {
     "resource_preparation_failed": "资源准备失败。",
     "device_install_failed": "设备安装失败。",
     "package_failed": "出包未完成。",
+    "input_missing": "找不到游戏文件：选中的游戏文件已不在原处。",
     "windows_mandatory_aslr": "Windows 的强制 ASLR 开着：出包工具起不了子进程。",
+    "app_control_blocked": "被 Windows 拦下：Windows 的应用控制或杀毒软件没让 S2Arm 自带的工具运行。",
+    "win_metal_missing": "缺少Windows版Metal工具：未找到能报告有效版本的官方Windows版Metal编译器。",
 }
 
 
@@ -406,6 +411,17 @@ def player_reason(code):
 # 只收工具 / 系统原样会打的字样，不从散文猜。
 LOG_CAUSES = (
     (r"WinError 206|filename or extension is too long|文件名或扩展名太长", "windows_path_too_long"),  # 非玩家句
+    # 起我方自带工具被拒（D-GVDA / #1912：Windows 0.6.3，出包「准备资源」起随包预编的 Yaz0 编码器 Binaries\Prepare\codecs\yaz0enc-*.exe 报 WinError 5；
+    #   同一台机器建 RomFS 目录链接（软链、junction）也报 WinError 5，普通拷文件照常）：安全软件按行为拦下，同 4551 / 1260 / 225 / 226（winproc.APP_CONTROL_BLOCKED）
+    #   归 app_control_blocked，玩家拿到「去安全中心 / 杀毒软件放行安装文件夹」那句，而不是笼统的「出包未完成」。编排层子进程里出的错只剩文字，按回溯原文认：
+    #   起进程（subprocess _execute_child）被拒，或建目录链接（roots._junction）被拒
+    (r"in _execute_child\b[\s\S]{0,400}?\[WinError (?:5|4551|1260|225|226)\]|in _junction\b[\s\S]{0,400}?\[WinError 5\]", "app_control_blocked"),  # 非玩家句
+    # 编着色器库前核工具读不到 Windows 版 metal.exe 的版本（translator/dmsh_chain.py tools_now，D-TYCN）：起进程被拒 → 被 Windows 拦下；
+    #   文件不在 / 起来了没打版本 → 缺少 Windows 版 Metal 工具（去苹果开发者下载页装 / 重装）。原先落笼统的「出包未完成」加一句开发者口吻的 --update-lock 提示
+    (r"metal_(?:macosx|iphoneos): lock .{0,120}? / actual missing \(start blocked", "app_control_blocked"),  # 非玩家句
+    (r"metal_(?:macosx|iphoneos): lock .{0,120}? / actual missing", "win_metal_missing"),  # 非玩家句
+    # 解包读原件时路径不在（pack/nx_unpack 打的分类行；诊断#24fb13：原先按阶段落成 content_invalid「文件没下完整」，原件其实是挪走了 / 盘没连上）
+    (r"【原因 source_missing】", "input_missing"),  # 非玩家句
     # 随包 bash 起子进程刚建就退（#1762：MSYS 原文「dofork: child -1 - forked process … died unexpectedly, retry 0, exit code 0xC0000142」，连试 6 次）：
     #   Windows「强制映像随机化（强制性 ASLR）」开着，MSYS 的 fork 要在子进程同一地址装 DLL，被系统强制换址后起不来。玩家关回系统默认即可出包
     (r"dofork: child -1 - forked process \d+ died unexpectedly, retry \d+, exit code 0xC0000142", "windows_mandatory_aslr"),
@@ -672,11 +688,38 @@ def player_words(code, log=None, texts=()):
     return player_reason(code), None
 
 
+def missing_prebuilt(env=None):
+    """随包预编件清单（S2A_PREBUILT_TOOLS/prepare.json，launchers/windows/bundle_prepare_win.py：逐文件大小 + sha256）里列着、盘上却没有或大小不对的文件
+    → 相对路径列表；没有清单 / 读不了 → []。只在失败归因时查（启动前不做文件校验）。D-VPXS / #1912（Windows 0.6.3）：随包的 rewriter\\s2a-rewrite.exe
+    不在了，改写阶段退回现编、报「CMake 未就绪」；同一台机器上另一个随包工具起进程被拒（D-GVDA）——杀毒软件隔离 / 清空了随包工具"""
+    tools = (env or os.environ).get("S2A_PREBUILT_TOOLS")
+    if not tools:
+        return []
+    root = Path(tools)
+    try:
+        files = json.loads((root / "prepare.json").read_text(encoding="utf-8"))["files"]
+        items = list(files.items())
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return []
+    gone = []
+    for rel, entry in items:
+        path = root / str(rel).replace("\\", "/")
+        try:
+            if not path.is_file() or (isinstance(entry, list) and entry and path.stat().st_size != entry[0]):
+                gone.append(str(rel))
+        except OSError:
+            gone.append(str(rel))
+    return gone
+
+
 def classify_failure(phase, log, texts=()):
     """Mac 准备（build_tool_failure）与 iPhone 打包（ipa.oneclick_failure，Mac / Windows 同一份）共用：
     日志确凿根因优先，其次阶段映射，判不出 package_failed。返回 (码, 写进 internal 的归因说明)。"""
     chunks = gather_evidence(log, texts)
     read = "；".join("%s（尾 %d 字节）" % (label, len(text.encode("utf-8"))) for label, text in chunks if label != "原因") or "无日志"  # 非玩家句
+    gone = missing_prebuilt()
+    if gone:   # 随包工具不见了：后面各阶段的报错（退回现编缺编译器、起不来）都是它的连带，先认它
+        return "app_control_blocked", "归因 app_control_blocked：随包预编件缺 / 大小不对 %d 个（%s），多半被杀毒软件隔离；读过 %s" % (len(gone), "、".join(gone[:6]), read)  # 非玩家句
     hit = log_cause(chunks, log)
     if hit[0]:
         code, label, line, why = hit

@@ -1,14 +1,16 @@
 # 上屏设置矩阵的链接清单：由 graphics/nvn/tests/t_present_settings_closure.py 按链接器实算生成，不要手改（改了也会被构建核对拦住）。
 # 构建（t_present_settings.sh）只编、只链 src 行；门禁按本清单的路径算 present_settings_test / present_settings_env_test 的输入。
-# 候选 101 个源文件，闭包 90 个。
+# 候选 103 个源文件，闭包 93 个。
 src graphics/track/glue.c
 src graphics/track/track.c
+src ios/ldn_lan.m
 src macos/controller_view.m
 src macos/front_mac.m
 src macos/heartbeat_mac.c
 src macos/hid_pad.m
 src macos/input_guide.m
 src macos/joycon_imu.m
+src macos/lan_permission.m
 src macos/ns2_controller.c
 src macos/textinput_mac.m
 src platform/apple/plat_apple.c
@@ -51,6 +53,7 @@ src runtime/src/hostmem_apple.c
 src runtime/src/hud.c
 src runtime/src/imgpack.c
 src runtime/src/input_config.c
+src runtime/src/lan_elect.c
 src runtime/src/launchctx.c
 src runtime/src/layout.c
 src runtime/src/libc.c
@@ -125,6 +128,8 @@ hdr runtime/include/s2a_host_abi.h
 hdr runtime/include/s2a_hud.h
 hdr runtime/include/s2a_init_fail.h
 hdr runtime/include/s2a_input_config.h
+hdr runtime/include/s2a_lan_discovery.h
+hdr runtime/include/s2a_lan_elect.h
 hdr runtime/include/s2a_launch_ctx.h
 hdr runtime/include/s2a_loadprog.h
 hdr runtime/include/s2a_lowva.h
@@ -158,7 +163,9 @@ hdr runtime/src/ro_find.h
 hdr runtime/src/selfsign_certs.inc
 hdr runtime/src/snapfile.h
 hdr runtime/src/snapfmt.h
+hdr runtime/src/span_seed.inc
 hdr runtime/src/thread_wait_diag.inc
+dyn _S2A_LdnSetServer
 dyn _S2A_SnapAudioFp
 dyn _S2A_SnapAudioRestore
 dyn _S2A_SnapAudioSave

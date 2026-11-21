@@ -113,8 +113,8 @@ static double run_frame(uint64_t frame, int flags, const int *prims, int n) {
     return ms;
 }
 static const int TRI[] = {4};
-// 后台建完第 k 次（从 0 数）为止：最多等 2 秒
-static int wait_bg_built(int k) { for (int i = 0; i < 2000; i++) { pthread_mutex_lock(&g_bmu); int b = g_bg_builds; pthread_mutex_unlock(&g_bmu); if (b > k) return 1; sleep_ms(1); } return 0; }
+// 后台建完第 k 次（从 0 数）为止：按事件等，不设墙钟上限（挂死交门禁分组超时）
+static int wait_bg_built(int k) { for (;;) { pthread_mutex_lock(&g_bmu); int b = g_bg_builds; pthread_mutex_unlock(&g_bmu); if (b > k) return 1; sleep_ms(1); } }
 // 放闸后等结果真发布进待取表（需求模块 published 涨过放闸前的值）再画下一帧：后台建好（g_bg_builds）在发布之前，
 //   中间若下一帧先到，那笔管线还挂着「卡住」标记，同管线直接跳过（0 ms），用例 6 就红在「建好后照画」。
 //   一台测试主机上 16 路并跑：只等建好 80 次红 16 次（全在 :212，现场 gdraws=0、第 2 帧 0 ms、built=1）；等发布 128 次全绿。
@@ -123,9 +123,11 @@ static int open_and_wait_published(int k) {
     const uint64_t p0 = demand_published();
     gate_open(k);
     if (!wait_bg_built(k)) return 0;
-    for (int i = 0; i < 2000; i++) { if (demand_published() > p0) return 1; sleep_ms(1); }
-    return 0;
+    while (demand_published() <= p0) sleep_ms(1);   // 按事件等发布，不设墙钟上限
+    return 1;
 }
+// 等待超时次数（需求模块：一笔按上限等、到点没建好 = 1 次）。「第二笔不再等」「不按首用等」按这个计数判，不量墙钟
+static uint64_t demand_timeouts(void) { struct nvn_pipe_demand_stats st; nvn_vk_pipe_demand_stats(&st); return st.timeouts; }
 // 定时放闸：ms 毫秒后放第 k 次
 struct rel { int k; unsigned ms; };
 static void *rel_main(void *a) { struct rel *r = a; sleep_ms(r->ms); gate_open(r->k); return NULL; }
@@ -134,8 +136,14 @@ static void session_begin(void) {
     pass_fresh(); g_gdraws = 0; g_bad_draw = 0; g_last_set = NULL; gate_reset();
     pthread_mutex_lock(&g_bmu); g_session++; pthread_mutex_unlock(&g_bmu);
     nvn_vk_pipe_demand_start();
+    CHECK(nvn_vk_pipe_demand_worker_count() == 1);   // 前提：本局后台 worker 真起来了（没起来时被测的笔会走前台同步建，后面的断言全错位）
 }
-static void session_end(void) { nvn_vk_pipe_demand_stop(); for (int k = 0; k < MAXP; k++) gate_open(k); }
+// 停局 + 放开所有闸 + 按事件等旧 worker 真退出：产品的 stop 只有界等 worker（卡在闸里的那条要等放闸后才退出），
+//   不等它退出就进下一个用例，下一局 start 会因旧 worker 还在跑而不启动（负载高时 11-21 车道偶发红在用例 6）
+static void session_end(void) {
+    nvn_vk_pipe_demand_stop(); for (int k = 0; k < MAXP; k++) gate_open(k);
+    while (!nvn_vk_pipe_demand_quiescent()) sleep_ms(1);
+}
 // 目标先画两帧（三角形，后台建、闸开着）：第 3 帧起这张目标「近两帧画过」
 static void steady_target(void) {
     CHECK(run_frame(1, F_CLEAR, TRI, 1) >= 0 && g_gdraws == 1);
@@ -151,9 +159,11 @@ static void c_steady_skip(void) {
     CASE_BEGIN(); session_begin(); steady_target();
     const int k = bg_entered(); gate_hold(k);
     const int pts2[] = {0, 0};
+    const uint64_t to0 = demand_timeouts();
     const double ms = run_frame(3, F_CLEAR, pts2, 2);
     CHECK(g_gdraws == 2);                                         // 两笔都跳了
-    CHECK(ms >= g_item_ms - 2 && ms < 2.0 * g_item_ms);           // 第一笔等满单项上限，第二笔不再等
+    CHECK(ms >= g_item_ms - 2);                                   // 第一笔等满单项上限（下界：负载只会更长）
+    CHECK(demand_timeouts() == to0 + 1);                          // 第二笔 late、不再等：只有第一笔那一次超时
     CHECK(open_and_wait_published(k));
     const int fg0 = g_fg_builds;
     const int pts1[] = {0};
@@ -190,9 +200,10 @@ static void c_tf_not_fu_skip(void) {
     const int k = bg_entered(); gate_hold(k);
     const uint64_t tf0 = nvn_unimpl_count("draw", "transform_feedback_active");
     const int pts1[] = {0};
-    const double ms = run_frame(3, F_CLEAR | F_TF, pts1, 1);
+    const uint64_t to0 = demand_timeouts();
+    run_frame(3, F_CLEAR | F_TF, pts1, 1);
     CHECK(g_gdraws == 2 && nvn_unimpl_count("draw", "transform_feedback_active") == tf0 + 1);
-    CHECK(bg_entered() == k && ms < g_item_ms - 2);              // 没交后台建，也没按首用等
+    CHECK(bg_entered() == k && demand_timeouts() == to0);        // 没交后台建，也没按首用等（一次等待超时都没有）
     { stream e = {0}; p_tf_state *tt = put(&e, OP_TF_STATE, sizeof *tt); tt->what = 1; end(&e); submit1(&e); fake_complete(NVN_GPU_DONE_OK); }
     session_end(); CASE_END("开着 TF：按未接具名拒画，不算首用跳过、不交后台建");
 }
@@ -202,12 +213,17 @@ static void c_frame_budget(void) {
     CASE_BEGIN(); session_begin(); steady_target();
     { const int b = bg_entered(); for (int k = b; k < b + 8; k++) gate_hold(k); }
     const int five[] = {0, 1, 3, 5, 6};
+    const uint64_t to0 = demand_timeouts();
     const double ms = run_frame(3, F_CLEAR, five, 5);
     CHECK(g_gdraws == 2);
-    CHECK(ms >= g_frame_ms - 3 && ms < g_frame_ms + 15);
+    CHECK(ms >= g_frame_ms - 3);                                  // 5 笔各可等 item、合计超过预算：预算一定用满（下界）
+    // 预算 frame = 100、单项 item = 30：至多前 4 笔真等（30 + 30 + 30 + 剩下的 10），第 5 笔没预算不等；预算失效时 5 笔都等 = 5 次。
+    //   负载高时单笔等得更久、预算更早用完，超时只会更少，所以判「≤ 4」
+    CHECK(demand_timeouts() - to0 <= 4);
     const int last[] = {6};
+    const uint64_t to1 = demand_timeouts();
     const double ms2 = run_frame(4, F_CLEAR, last, 1);           // 第 5 条在上一帧是「预算用完」跳的，不打 late：新一帧照常等满单项上限
-    CHECK(g_gdraws == 2 && ms2 >= g_item_ms - 2 && ms2 < g_item_ms + 15);
+    CHECK(g_gdraws == 2 && ms2 >= g_item_ms - 2 && demand_timeouts() == to1 + 1);
     session_end(); CASE_END("帧预算：单调钟扣、用完即跳、下一帧重置");
 }
 // 6) 不可跳的笔按 unsafe 上限等，等满就跳并打 stuck；同管线再来一笔（同样不可跳）立即跳；放闸建好后下一帧画出来。
@@ -215,9 +231,11 @@ static void c_stuck_cap(void) {
     CASE_BEGIN(); session_begin();
     const int k = bg_entered(); gate_hold(k);
     const int tri2[] = {4, 4};
+    const uint64_t to0 = demand_timeouts();
     const double ms = run_frame(1, F_CLEAR, tri2, 2);
     CHECK(g_gdraws == 0);
-    CHECK(ms >= g_unsafe_ms - 3 && ms < g_unsafe_ms + 40);       // 第一笔等满上限，第二笔不再等
+    CHECK(ms >= g_unsafe_ms - 3);                                 // 第一笔等满上限（下界）
+    CHECK(demand_timeouts() == to0 + 1);                          // 第二笔 stuck、不再等：只有第一笔那一次超时
     CHECK(open_and_wait_published(k));
     run_frame(2, F_CLEAR, TRI, 1);
     CHECK(g_gdraws == 1 && g_bad_draw == 0);
@@ -236,9 +254,8 @@ static void c_stop_discards(void) {
     CHECK(nvn_vk_pipe_demand_worker_count() == 1);                  // 不创建重叠 worker
     CHECK(bg_entered() == k0 + 1);
     gate_open(k0);
-    int idle = 0;
-    for (int i = 0; i < 2000 && !idle; i++) { idle = nvn_vk_pipe_demand_quiescent(); if (!idle) sleep_ms(1); }
-    CHECK(idle && nvn_vk_pipe_demand_worker_count() == 0);
+    while (!nvn_vk_pipe_demand_quiescent()) sleep_ms(1);            // 按事件等旧 worker 退出，不设墙钟上限
+    CHECK(nvn_vk_pipe_demand_worker_count() == 0);
     pass_fresh(); g_gdraws = 0; g_bad_draw = 0; g_last_set = NULL;
     pthread_mutex_lock(&g_bmu); g_session++; pthread_mutex_unlock(&g_bmu);
     nvn_vk_pipe_demand_start();

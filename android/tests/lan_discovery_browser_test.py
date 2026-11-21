@@ -27,7 +27,10 @@ public class NsdManager { public static final int PROTOCOL_DNS_SD=1;
  public DiscoveryListener discovery; public ResolveListener resolve; public int calls, stops, starts;
  public void discoverServices(String t,int p,DiscoveryListener l){discovery=l;starts++;}
  public void stopServiceDiscovery(DiscoveryListener l){stops++;}
- public void resolveService(NsdServiceInfo s,ResolveListener l){resolve=l;calls++;}
+ // minSdk 34：只有带执行器的版本，回调像真机一样经执行器送达（产品代码不再自己 post）
+ public void resolveService(NsdServiceInfo s,java.util.concurrent.Executor x,ResolveListener l){calls++;resolve=new ResolveListener(){
+  public void onResolveFailed(NsdServiceInfo i,int e){x.execute(()->l.onResolveFailed(i,e));}
+  public void onServiceResolved(NsdServiceInfo i){x.execute(()->l.onServiceResolved(i));}};}
 }
 ''',
 'org/s2arm/android/BrowserProbe.java': '''package org.s2arm.android;

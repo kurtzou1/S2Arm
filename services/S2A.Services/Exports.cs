@@ -228,8 +228,14 @@ namespace S2A.Services
         // remain observable. The legacy unmanaged Apple entry above retains its ABI.
         public static void Initialize(HostConfiguration configuration = null) => InitializeCore(configuration, session: false);
 
+        private static int _unhandledHooked;
         private static void InitializeCore(HostConfiguration configuration, bool session, Action<Exception> sessionFailure = null)
         {
+            // 未接住的托管异常完整落一行（11-21 D-B2Q6：哈迪斯托管堆顶满后崩，运行时只写出「Unhandled exception.」半行，异常类型和栈被并发的心跳日志冲掉）：
+            //   运行时自己写 stderr 前先经 Red 一次写出整段（类型、消息、栈），进诊断。只挂一次
+            if (Interlocked.Exchange(ref _unhandledHooked, 1) == 0)
+                AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+                    Red.Report("服务层未接住的托管异常", (e.ExceptionObject as Exception)?.ToString() ?? e.ExceptionObject?.ToString() ?? "（无异常对象）", allowFailFast: false);
             if (!Native.Ready)
             {
                 if (configuration != null) throw new InvalidOperationException("Native provider must be bound before service initialization");

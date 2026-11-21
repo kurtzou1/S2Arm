@@ -116,7 +116,7 @@ static partial class P {
     // 任何没被专门接住的异常翻译成「能照做的红字 + 分类码」。分类码是给普查 / 日志聚合看的，不参与成功判定。
     //   异常链里每一个（含并行读包 AggregateException 的全部 inner）各分一次类，按 Prio 取最具体的那个（#772 F-nxunpack-leaf-first：
     //   原先只顺着第一条 inner 走到底，缺密钥 / 容器坏排在第二条时记成 internal，普查和「内部错误」混在一起）
-    static readonly string[] Prio = { "disk_full", "access_denied", "ticket_missing", "keys_missing", "keys_wrong", "hash_mismatch", "container_invalid", "out_of_range", "io", "oom", "hresult", "source", "usage", "internal" };
+    static readonly string[] Prio = { "disk_full", "access_denied", "ticket_missing", "keys_missing", "keys_wrong", "hash_mismatch", "container_invalid", "out_of_range", "source_missing", "io", "oom", "hresult", "source", "usage", "internal" };
     static (string Code, string Message) Explain(Exception e) {
         (string Code, string Message) best = ExplainOne(e); int bi = Array.IndexOf(Prio, best.Code);
         foreach (Exception x in Chain(e)) { var r = ExplainOne(x); int i = Array.IndexOf(Prio, r.Code); if (i < bi) { best = r; bi = i; } }
@@ -127,6 +127,10 @@ static partial class P {
     static bool AccessDenied(Exception x) => x is UnauthorizedAccessException ||
         x is IOException && (x.HResult == unchecked((int)0x80070005) || x.HResult == 13 || (x.Message ?? "").StartsWith("Access to the path", StringComparison.Ordinal));
     internal static string OutDir;   // 本次输出目录（Run 里赋值）：被拒路径在它下面 = 我们自己的工作目录
+    static bool InOutDir(Exception x) {   // 异常原文点名的路径在本次输出目录下
+        var m = System.Text.RegularExpressions.Regex.Match(x.Message ?? "", "'([^']+)'");
+        return m.Success && OutDir != null && Path.GetFullPath(m.Groups[1].Value).StartsWith(Path.GetFullPath(OutDir).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+    }
     internal static string DeniedMessage(Exception x, string first) {
         var m = System.Text.RegularExpressions.Regex.Match(x.Message ?? "", "'([^']+)'");
         string path = m.Success ? m.Groups[1].Value : null;
@@ -167,6 +171,10 @@ static partial class P {
                 return ("disk_full", "写入内容所需的磁盘空间不足");
             case UnauthorizedAccessException or IOException when AccessDenied(x):
                 return ("access_denied", DeniedMessage(x, first));
+            // 打开时路径不在（原件挪走 / 删掉、外置盘没连上；诊断#24fb13：原先落进 io「文件被截断、换一份完整的」，玩家去重下文件）。
+            //   不在的是我们自己的解包工作目录时不算原件的事，照 io 报
+            case FileNotFoundException or DirectoryNotFoundException when !InOutDir(x):
+                return ("source_missing", $"找不到源文件（{first}）：原件被挪走或删掉了，或它所在的磁盘没连上（外置盘掉线？）。接上那块盘、确认文件还在原位置，或把原件重新放进来再试");
             case IOException io:   // 含 EndOfStreamException（NCZ 临时文件 / zstd 流提前结束）
                 return ("io", $"读源文件失败（{first}）：文件被截断或读不动（外置盘掉线？），换一份完整的");
             case OutOfMemoryException:

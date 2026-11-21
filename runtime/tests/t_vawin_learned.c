@@ -18,6 +18,7 @@ static int bad;
 #define GB (1ull << 30)
 static uint64_t g_test_span;
 __attribute__((used, visibility("default"))) uint64_t s2a_mem_span_now(void) { return g_test_span; }   // vawin.c 按名字取（dlsym），这里冒充 svc_mem.c
+extern uint64_t s2a_span_seed(uint64_t);
 int main(void) {
     CHECK(s2a_window_host_below(64 * GB, 0) == 3 * GB, "① 没学到跨度：宿主照旧 3 GiB");
     uint64_t h = s2a_window_host_below(64 * GB, 16395 * MB);
@@ -31,11 +32,15 @@ int main(void) {
     CHECK(s2a_window_for_span(1) == 3 * GB, "④e 学到 1 字节：2 GiB 多一点 → 3 GiB（取整后不低于 2 GiB）");
     char p[] = "/tmp/s2a_span_peak_XXXXXX"; int fd = mkstemp(p); dprintf(fd, "17191403520\n"); close(fd);
     setenv("S2A_WIN_SPAN_PEAK", p, 1);
-    CHECK(s2a_window_span_seen(0x0400486024DEC000ull) == 17191403520ull, "⑤ 记录文件有值：读出 17191403520");
+    CHECK(s2a_window_span_seen(0x01000000000AB000ull) == 17191403520ull, "⑤ 记录文件有值（种子表里没有的号）：读出 17191403520");
+    CHECK(s2a_window_span_seen(0x0400486024DEC000ull) == s2a_span_seed(0x0400486024DEC000ull) && s2a_span_seed(0x0400486024DEC000ull) > 17191403520ull,
+          "⑤ 种子表里有、比本机记录大的号：取种子表的值（本机短局记的只是下界）");
+    { char q[] = "/tmp/s2a_span_peak_XXXXXX"; int fq = mkstemp(q); dprintf(fq, "%llu\n", (unsigned long long)(s2a_span_seed(0x0400486024DEC000ull) + 1)); close(fq); setenv("S2A_WIN_SPAN_PEAK", q, 1);
+      CHECK(s2a_window_span_seen(0x0400486024DEC000ull) == s2a_span_seed(0x0400486024DEC000ull) + 1, "⑤ 本机记录比种子表大：取本机记录"); unlink(q); setenv("S2A_WIN_SPAN_PEAK", p, 1); }
     FILE *f = fopen(p, "w"); fputs("坏\n", f); fclose(f);
-    CHECK(s2a_window_span_seen(0x0400486024DEC000ull) == 0, "⑤ 记录读不出：0（照旧 3 GiB）");
+    CHECK(s2a_window_span_seen(0x01000000000AB000ull) == 0, "⑤ 记录读不出：0（照旧 3 GiB）");
     unlink(p);
-    CHECK(s2a_window_span_seen(0x0400486024DEC000ull) == 0, "⑤ 没有记录：0");
+    CHECK(s2a_window_span_seen(0x01000000000AB000ull) == 0, "⑤ 没有记录、种子表也没有：0");
     // ⑥ 只记真跑起来的局（11-12 iPhone 实机：一局刚开就死只碰到 2.26 GB，记下后下一局窗口缩到 5 GB 起不来、且锁死）：出图满 300 次才记
     extern int s2a_window_span_worth(uint64_t presents);
     CHECK(!s2a_window_span_worth(0) && !s2a_window_span_worth(299) && s2a_window_span_worth(300), "⑥ 出图 0 / 299 次不记、300 次起记");
@@ -78,6 +83,16 @@ int main(void) {
         CHECK(s2a_window_host_below_for_pool(6 * GB, 0, 9 * GB) == 2 * GB, "⑭ Switch 2 池 9 GiB 也压到下限，仍放不下由失败页说清");
         CHECK(s2a_window_host_below_for_pool(64 * GB, 16395 * MB, 3285 * MB) == 41 * GB, "⑮ 学到更大跨度时不被池需求反向压小");
         CHECK(s2a_window_host_below_for_pool(6 * GB, 0, 0) == 3 * GB, "⑯ 不知道池时照旧 3 GiB"); }
+    // ⑰ 种子表查表（vawin.c s2a_span_seed，表 = tools/span_seed.py 生成的 span_seed.inc）：表里每一条都查得到原值、程序号严格升序（二分的前提）；
+    //   不在表里的号（0、1、全 F、表里相邻两号之间）回 0
+    { static const struct { uint64_t pid; uint32_t mb, n; } T[] = {
+#include "../src/span_seed.inc"
+      };
+      extern uint64_t s2a_span_seed(uint64_t); size_t n = sizeof T / sizeof T[0]; int miss = 0, order = 0, gap = 0;
+      for (size_t i = 0; i < n; i++) { if (s2a_span_seed(T[i].pid) != (uint64_t)T[i].mb << 20 || T[i].n < 2) miss++; if (i && T[i - 1].pid >= T[i].pid) order++;
+          if (i && T[i].pid - T[i - 1].pid > 1 && s2a_span_seed(T[i - 1].pid + 1)) gap++; }
+      CHECK(n > 0 && !miss && !order && !gap, "⑰ 种子表 %zu 条：查不到原值或样本 < 2 的 %d 条、不升序 %d 处、相邻号之间查出值 %d 处（期望 0）", n, miss, order, gap);
+      CHECK(!s2a_span_seed(0) && !s2a_span_seed(1) && !s2a_span_seed(~0ull), "⑰ 不在表里的号回 0"); }
     printf("%s t_vawin_learned：%d 处不符\n", bad ? "✗" : "✓", bad);
     return bad ? 1 : 0;
 }

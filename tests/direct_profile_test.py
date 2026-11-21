@@ -376,6 +376,14 @@ class Profiles(unittest.TestCase):
             self.generate()
         self.assertEqual(content, (p / "game.tsv").read_bytes())
 
+    def test_zero_build_id_still_profiles(self):
+        # 构建号全 0 的 main 照样推导（D-GDRS，0.5.8 玩家出包「直连配置阶段拒绝：main: missing build ID」）：直连配置不用构建号，
+        #   构建号只给金手指 / 补丁按版本匹配，全 0 时那边自然匹配不到；这里拦下等于整款出不了包
+        p = self.root / "exefs/main"
+        d = bytearray(p.read_bytes()); d[0x40:0x60] = bytes(32); p.write_bytes(d)
+        g = dp.game.Game(self.generate()["profile"])
+        self.assertEqual(g.get("program_id"), TID)
+
     def test_no_main(self):
         (self.root / "exefs/main").unlink()
         self.reject()

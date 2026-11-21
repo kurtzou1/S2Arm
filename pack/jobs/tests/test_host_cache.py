@@ -81,6 +81,9 @@ class HostCacheTests(unittest.TestCase):
         info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
         self.assertEqual(info["LSMinimumSystemVersion"], "15.0")
         self.assertEqual(info["CFBundleExecutable"], "s2arm-host")
+        # 本地联机·同一 Wi-Fi（Mac 宿主编进 ios/ldn_lan.m）：系统「本地网络」授权要说明文字，Bonjour 服务名与 iOS App 同一个
+        self.assertEqual(info["NSBonjourServices"], ["_s2arm-ldn._tcp"])
+        self.assertIn("same Wi-Fi", info["NSLocalNetworkUsageDescription"])
 
     def test_complete_signed_cache_hits(self):
         self.assertTrue(build.host_cache_ok(self.app, self.stamp))

@@ -444,6 +444,27 @@ class RootsTest(unittest.TestCase):
         names = sorted(p.name for p in self.store.path.glob('原创@*') if p.is_dir())
         self.assertEqual(names, ['原创@v3', '原创@v4'])
 
+    def test_prune_failure_does_not_fail_commit(self):
+        # D-GGG5：新版本已提交、指针已写，prune 删旧版本时 Windows 删除挂起（WinError 145，重试后仍删不掉）。期望（手写）：
+        #   commit 照常返回新版本、现行指针指向它；删不掉的那份留着，下次 prune 再删；错误只在 stderr 说一句黄
+        self.seed()
+        for tag in ('v2', 'v3'):
+            self.store.begin('原创', tag).commit()
+        real = roots.remove_owned
+        def stuck(p):
+            if Path(p).name == '原创@v2':
+                raise OSError(errno.ENOTEMPTY, '目录不是空的。', str(p))
+            return real(p)
+        err = io.StringIO()
+        with patch.object(roots, 'remove_owned', side_effect=stuck), contextlib.redirect_stderr(err):
+            final = self.store.begin('原创', 'v4').commit()
+        self.assertEqual(final.name, '原创@v4')
+        self.assertEqual(self.store.cur('原创', pin=False).name, '原创@v4')
+        self.assertIn('原创@v2', sorted(p.name for p in self.store.path.glob('原创@*') if p.is_dir()), '删不掉的留着')
+        self.assertIn('【黄】旧版本没删干净', err.getvalue())
+        self.store.begin('原创', 'v5').commit()   # 下次 prune 删得掉了就删
+        self.assertEqual(sorted(p.name for p in self.store.path.glob('原创@*') if p.is_dir()), ['原创@v4', '原创@v5'])
+
     def test_replay_exclusion_preserves_new_nested_data(self):
         self.seed()
         a = self.store.begin('原创', 'a')

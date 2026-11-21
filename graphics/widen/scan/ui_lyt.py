@@ -178,7 +178,10 @@ def yaz0_pack(raw, hdr):
     import tempfile
     with tempfile.TemporaryDirectory() as d:
         i, o = os.path.join(d, 'in'), os.path.join(d, 'out'); open(i, 'wb').write(raw)
-        subprocess.run([_ENC, i, o, bytes(hdr[:16]).hex()], check=True, capture_output=True)
+        try: subprocess.run([_ENC, i, o, bytes(hdr[:16]).hex()], check=True, capture_output=True)
+        except OSError as e:   # 起编码器失败（D-GVDA：Windows 上被安全软件拦，WinError 5）：CreateProcess 的报错不带文件名，补上是哪个 exe（随包预编件还是现编缓存）
+            if not e.filename: e.filename = _ENC
+            raise
         return open(o, 'rb').read()
 
 def yaz0_enc(raw, hdr):

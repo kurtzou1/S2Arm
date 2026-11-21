@@ -101,6 +101,9 @@ void s2a_host_shutdown(const char *why) {
       S2A_SHUTDOWN_STAGE("排空已受理Vulkan调用", t0); }
 #endif
     { void s2a_track_stat_log(const char *); s2a_track_stat_log("收局"); }
+#if defined(__APPLE__)
+    { void (*er)(const char *) = (void (*)(const char *))dlsym(RTLD_DEFAULT, "s2a_er_totals_log"); if (er) er("收局"); }   // 宿主代执行全进程累计（crash.c，苹果；只链本文件的单测取不到）
+#endif
     { uint64_t s2a_track_protected_pages(void); LOG("写跟踪累计保护页 %llu 页（直连模式下应为 0：写保护只归直连写跟踪）", (unsigned long long)s2a_track_protected_pages()); }
     { void s2a_direct_res_report(void); s2a_direct_res_report(); }   // 直连模式：资源行（s2a_res_report_register 登记）
     { void s2a_sched_stat_log(const char *); s2a_sched_stat_log("收局"); }   // S2A_CORES 调度计数（虚拟核关时不打）
@@ -193,7 +196,10 @@ void s2a_host_shutdown(const char *why) {
     // 弱链接[android]：s2a_sesmark_clear_home（只有安卓 NDK 单库与 Linux 宿主单测链这一支，都不走 ld64，不需要放行参数）
     { extern void s2a_sesmark_clear_home(void) __attribute__((weak)); if (s2a_sesmark_clear_home) s2a_sesmark_clear_home(); }   // 会话标记：只删 Java 干净收尾写的 end（#528 第 15 项）
 #else
-    { void (*clr)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "s2a_sesmark_clear_home"); if (clr) clr(); }   // 会话标记（sesdiag.c）：正常收尾，下次启动不问「上次没正常退出」
+    // 会话标记（sesdiag.c）：正常收尾删掉，下次启动不问「上次没正常退出」。游戏自己中止（Break）的改写成「游戏中止」：下次启动问发诊断
+    //   （#351：PRAGMATA 缺 Switch 2 音频服务命令、游戏 Abort，原先这里照删，玩家看到闪退却拿不到诊断包），但不当成被杀，不关设置（diag.m）
+    { int brk = why && !strcmp(why, "游戏 Break");
+      void (*mk)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, brk ? "s2a_sesmark_abort_home" : "s2a_sesmark_clear_home"); if (mk) mk(); }
 #endif
     LOG("优雅退出完成（%.3f 秒）", (now_ns() - t0) / 1e9);
     s2a_logcon_flush(); _exit(atomic_load(&g_exit_code));

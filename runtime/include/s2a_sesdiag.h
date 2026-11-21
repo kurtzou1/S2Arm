@@ -2,7 +2,7 @@
 #ifndef S2A_SESDIAG_H
 #define S2A_SESDIAG_H
 #include <stddef.h>
-enum { S2A_SESMARK_NONE = 0, S2A_SESMARK_FG = 1, S2A_SESMARK_BG = 2 };
+enum { S2A_SESMARK_NONE = 0, S2A_SESMARK_FG = 1, S2A_SESMARK_BG = 2, S2A_SESMARK_ABORT = 4 };   // ABORT：游戏自己中止（Break）收的局——下次问发诊断，但不当成被系统杀 / 死于内存
 enum { S2A_SUM_END_UNKNOWN = 0, S2A_SUM_END_EXIT = 1, S2A_SUM_END_CRASH = 2 };
 #define S2A_SUM_HEAD (1u << 20)   // 头 1 MB：标记行
 #define S2A_SUM_TAIL (3u << 20)   // 尾 3 MB：心跳 / 收尾 / 崩溃行
@@ -10,6 +10,7 @@ enum { S2A_SUM_END_UNKNOWN = 0, S2A_SUM_END_EXIT = 1, S2A_SUM_END_CRASH = 2 };
 int s2a_sesmark_prev(const char *docs);
 void s2a_sesmark_set(const char *docs, int state);
 void s2a_sesmark_clear_home(void);
+void s2a_sesmark_abort_home(void);   // 游戏 Break 收局：标记改写成「游戏中止」（不删），下次启动问发诊断（#351：PRAGMATA 缺服务命令主动中止，玩家拿不到诊断包）
 typedef struct {
     long long frames, thermal, peak_mb;   // -1 = 没见到
     int mark, end, last_state, truncated;  // last_state：S2A_SESMARK_FG / BG / 3 = 前台失焦，0 = 没有心跳

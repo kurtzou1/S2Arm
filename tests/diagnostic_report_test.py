@@ -107,6 +107,23 @@ with patch.object(Path, 'home', return_value=Path(home)):
         self.assertFalse(list(self.output.rglob('*.png')))
         self.assertEqual(result['field_sources']['code.commit'], 'metadata:code.commit')
 
+    def test_double_encoded_chinese_log_restored(self):
+        # iOS 0.6.3 及更早：往局日志一处坏字节让客户端整份按 Latin-1 解再存 UTF-8，中文全成二次编码（264 份诊断）。期望（手写）：
+        #   收件还原成原中文，坏的那截成一个 U+FFFD；正常中文日志、真西文（café）、纯 ASCII 原样不动
+        lines = ["[s2a] 开发设施：关（玩家口径）\n", "[s2a] 地址窗口：多款容器 要 70124 MB\n"]
+        raw = lines[0].encode() + b"[dm] \xe5\x86\x99\xe5\x9b\x9e\xe5\x8e\x9f\xe5\x80\n" + lines[1].encode()
+        moji = raw.decode('latin-1')            # 旧客户端整份按 Latin-1 解
+        (self.source / 'logs').mkdir(parents=True, exist_ok=True)
+        (self.source / 'logs' / 'host-20261121-182325.log').write_bytes(moji.encode('utf-8'))   # 再存成 UTF-8
+        (self.source / 'logs' / 'host-20261121-190000.log').write_bytes("".join(lines).encode())
+        (self.source / 'logs' / 'note.log').write_bytes("café ok\n".encode())
+        report = self.run_report()
+        got = {e['path']: (self.output / e['sanitized_path']).read_text(encoding='utf-8') for e in report['evidence'] if e.get('sanitized_path')}
+        self.assertEqual(got['logs/host-20261121-182325.log'], lines[0] + "[dm] 写回原\ufffd\n" + lines[1])
+        self.assertEqual(got['logs/host-20261121-190000.log'], "".join(lines))
+        self.assertEqual(got['logs/note.log'], "café ok\n")
+        self.assertEqual(dr.undo_double_utf8("plain ascii\n"), "plain ascii\n")
+
     def test_missing_and_invalid_manifest(self):
         self.put('manifest.json', '{broken')
         result = self.run_report()

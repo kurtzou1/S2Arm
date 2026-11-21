@@ -774,6 +774,17 @@ int nvn2_hdr_present(float p[8], int src_pf, int dst_pt) {   // PR3b 出图热�
     return hdr_present_fill(p, src_pf, dst_pt, answered, headroom, (int)declared, told, nvn2_hdr_sdr_gamma());
 }
 
+// PR3d：AA/FX/FI 旁路判定的存储侧（评审稿 v3 §2.5 / §3 A3 / §4 PR3d）：出图热路径（nvn_mtl.m present 族）经它读已算好的
+//   结果——非 10 位窗零开销直返（连原子读都不进：缺省 SDR 局每帧只多两次整型比较），10 位窗一次宽松原子读 latch
+//   （nvn2_hdr_present 同款口径）；vi 答过 ∧ HDR10 才读 S2A_HDR 三态（getenv——只发生在 HDR 管线已接手的局，PQ 态
+//   慢路径本身就有锁，无缺省路径新增成本）。off 恒不旁路（缺省字节级回现状）；SDR 窗口（8 位 / 未答过的 10 位窗 /
+//   float）照常走 AA/FX/FSR/补帧——层在 PQ 态的排空帧先缩放后 mode 2 转换（§2.5 先例）。
+int nvn2_hdr_bypass_upscale(int src_pf) {
+    if (src_pf != HDR_PF_HDR10) return 0;
+    if (!atomic_load_explicit(&g_hdr_vi_answered, memory_order_relaxed)) return 0;
+    return hdr_bypass_upscale(nvn2_hdr_switch(), src_pf, 1);
+}
+
 void nvn2_device_init(void) {
     if (!nvn2_on()) return;
     nvn_gob_switch2 = getenv("DM_NVN_GOB_X1") ? 0 : 1;   // DM_NVN_GOB_X1=1 (diagnostic): the Tegra X1's order, to compare against on a Switch 2 game
