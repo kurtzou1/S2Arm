@@ -164,19 +164,21 @@ private struct LauncherRowControlFrame: ViewModifier {
 }
 
 package struct LauncherSecondaryButtonStyle: ButtonStyle {
-    package init(accent: Color? = nil, fill: Bool = false, prominent: Bool = false) {
-        self.accent = accent; self.fill = fill; self.prominent = prominent
+    package init(accent: Color? = nil, fill: Bool = false, prominent: Bool = false, capsule: Bool = false) {
+        self.accent = accent; self.fill = fill; self.prominent = prominent; self.capsule = capsule
     }
     /// Text and border in this colour (the build bar's Stop); plain white otherwise.
     package var accent: Color? = nil
     package var fill = false
     package var prominent = false
+    package var capsule = false
     /// Inside a setting row the button is exactly LauncherControl.width wide and LauncherControl.height high, its label centred on
     /// one line (a little smaller when it does not fit): the buttons of a page line up in one column and are equally high.
     @Environment(\.launcherControlWidth) private var width
     @Environment(\.isEnabled) private var enabled
     @State private var hovered = false
     package func makeBody(configuration: Configuration) -> some View {
+        let shape = LauncherControlShape(capsule: capsule)
         configuration.label
             .font(prominent ? .manrope(16, .semibold) : LauncherTheme.TypeStyle.button)
             .labelStyle(LauncherLabelStyle())
@@ -188,14 +190,43 @@ package struct LauncherSecondaryButtonStyle: ButtonStyle {
             .frame(minWidth: width == nil ? LauncherTheme.Metrics.actionMinWidth : nil)
             .frame(maxWidth: fill ? .infinity : nil)
             .background(configuration.isPressed ? LauncherTheme.Colors.pressed : hovered ? LauncherTheme.Colors.hover : LauncherTheme.Colors.control,
-                        in: RoundedRectangle(cornerRadius: LauncherTheme.Metrics.controlRadius, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: LauncherTheme.Metrics.controlRadius, style: .continuous)
-                .strokeBorder(accent?.opacity(0.75) ?? LauncherTheme.Colors.border))
+                        in: shape)
+            .overlay(shape.strokeBorder(accent?.opacity(0.75) ?? LauncherTheme.Colors.border))
             .foregroundStyle(enabled ? (accent ?? Color.white.opacity(0.92)) : .gray)
             .opacity(enabled ? 1 : 0.55)
-            .contentShape(RoundedRectangle(cornerRadius: LauncherTheme.Metrics.controlRadius, style: .continuous))
+            .contentShape(shape)
             .onHover { hovered = $0 }
             .launcherMeasured(label: configuration.label.font(prominent ? .manrope(16, .semibold) : LauncherTheme.TypeStyle.button), room: LauncherControl.buttonLabelWidth)
+    }
+}
+
+/// A standalone radio option: the controller focus ring wraps only the circular radio indicator, not the label.
+package struct LauncherRadioRow<Label: View>: View {
+    package let selected: Bool
+    package let action: () -> Void
+    package let label: Label
+    @Environment(\.isEnabled) private var enabled
+    package init(selected: Bool, action: @escaping () -> Void, @ViewBuilder label: () -> Label) {
+        self.selected = selected; self.action = action; self.label = label()
+    }
+    package var body: some View {
+        HStack(spacing: 10) {
+            Button(action: action) {
+                Image(systemName: selected ? "largecircle.fill.circle" : "circle")
+                    .font(.system(size: 15, weight: .semibold))
+                    .frame(width: 16, height: 16)
+                    .foregroundStyle(selected ? LauncherPalette.cream : .secondary)
+            }
+            .controllerButtonStyle(.plain)
+            .controllerRingRadius(.infinity, outset: LauncherTheme.Focus.radioOutset)
+            label
+            Spacer(minLength: 0)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { if enabled { action() } }
+        .opacity(enabled ? 1 : 0.45)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : [.isButton])
     }
 }
 
@@ -215,7 +246,7 @@ package struct LauncherSwitchStyle: ToggleStyle {
             .contentShape(Capsule())
         }
         .controllerButtonStyle(.plain)
-        .controllerRingRadius(.infinity, outset: 3)   // 胶囊开关：焦点框也是胶囊，画在外侧 3 pt（开着时整条奶油色，贴边的框看不见）
+        .controllerRingRadius(.infinity, outset: LauncherTheme.Focus.creamOutset)   // 胶囊开关：焦点框也是胶囊，画在外侧（开着时整条奶油色，贴边的框看不见）
         .opacity(enabled ? 1 : 0.45)
         .accessibilityAddTraits(configuration.isOn ? .isSelected : [])
         .accessibilityRepresentation { Toggle(isOn: configuration.$isOn) { configuration.label }.toggleStyle(.switch) }
@@ -294,6 +325,7 @@ package struct LauncherSegmented: View {
                         .contentShape(RoundedRectangle(cornerRadius: LauncherTheme.Metrics.controlRadius - 3))
                 }
                 .controllerButtonStyle(.plain)
+                .controllerRingRadius(LauncherTheme.Metrics.controlRadius - 3, outset: on ? LauncherTheme.Focus.creamOutset : 0)
                 .accessibilityAddTraits(on ? .isSelected : [])
             }
         }
@@ -338,8 +370,8 @@ package struct LauncherSlider: View {
         }
         .frame(height: LauncherControl.height)
         .focusable(enabled).focused($focused)
-        .overlay(RoundedRectangle(cornerRadius: LauncherTheme.Metrics.controlRadius)
-            .strokeBorder(focused ? LauncherPalette.cream.opacity(0.7) : .clear).padding(-3).allowsHitTesting(false))
+        .overlay(RoundedRectangle(cornerRadius: LauncherTheme.Metrics.controlRadius, style: .continuous)
+            .strokeBorder(focused ? LauncherPalette.cream.opacity(0.7) : .clear, lineWidth: LauncherTheme.Focus.lineWidth).allowsHitTesting(false))
         .onMoveCommand { direction in
             if direction == .left { adjust(-1) } else if direction == .right { adjust(1) }
         }
@@ -348,6 +380,7 @@ package struct LauncherSlider: View {
             else { Slider(value: Binding(get: { value }, set: change), in: range).labelsHidden() }
         }
         .controllerControl(activate: { focused = true }, adjust: adjust)
+        .controllerRingRadius(LauncherTheme.Metrics.controlRadius)
     }
 
     private func adjust(_ direction: Int) {
@@ -357,4 +390,6 @@ package struct LauncherSlider: View {
     }
 }
 
-extension LauncherSecondaryButtonStyle: PadRingShaped { package var padRingRadius: CGFloat { LauncherTheme.Metrics.controlRadius } }
+extension LauncherSecondaryButtonStyle: PadRingShaped {
+    package var padRingRadius: CGFloat { capsule ? .infinity : LauncherTheme.Metrics.controlRadius }
+}

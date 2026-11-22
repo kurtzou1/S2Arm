@@ -334,10 +334,14 @@ static int fr_dump_state(const char *path) {
     fr_state_hd hd = {FR_MAGIC, (uint32_t)atomic_load(&g_depth_zero), (uint32_t)atomic_load(&g_origin_ll) | (s2a_nvn_rast_flip ? 2u : 0u) | 4u, (uint32_t)g_tpool_n};   // origin_ll bit 1: the queue's front-face raster flip, bit 2: recorded (older recordings: keep the default)
     fr_pool *pools = NULL; uint64_t *live = NULL, *cpu = NULL; fr_treg *tr = NULL; fr_sreg *sr = NULL;
     pthread_mutex_lock(&g_mu);
-    pools = malloc((size_t)(g_npool + 1) * sizeof *pools);
+    pools = malloc((size_t)(g_npool + g_nbig + 1) * sizeof *pools);
     for (int i = 0; pools && i < g_npool; i++) {   // 虚拟池的段不进这张表：回放由 vpool.bin 重建时登记（s2a_hle_vpool_load）
         if (g_pools[i].vpf || (s2a_vp_arena_has && s2a_vp_arena_has((const void *)(uintptr_t)g_pools[i].lo, g_pools[i].hi - g_pools[i].lo))) continue;   // vpf：虚拟池地址上的别名 / 副本（苹果宿主）；区里的：安卓那支的宿主预留
+        // 大池（g_big，按块用到才包）在池表里只有查到过的块：照块写的话放回时每块成了一个独立的小池，整池没登记，没查到过的部分落到地址兜底的 64 KB 窗口里
+        //   （不知道长度的索引缓冲被窗口截断，真机 11-21：恢复后人物模型拉丝）。块不写，下面按大池记录写整池一条，放回时 nvn_be_pool_add 照样登记成大池
+        { int chunk = 0; for (int k = 0; k < g_nbig && !chunk; k++) chunk = g_pools[i].key == g_big[k].mem && g_pools[i].lo >= g_big[k].lo && g_pools[i].hi <= g_big[k].hi; if (chunk) continue; }
         pools[hd.npool++] = (fr_pool){g_pools[i].lo, g_pools[i].hi - g_pools[i].lo}; }
+    for (int k = 0; pools && k < g_nbig; k++) if (!g_big[k].dead) pools[hd.npool++] = (fr_pool){g_big[k].lo, g_big[k].hi - g_big[k].lo};
     pthread_mutex_unlock(&g_mu);
     pthread_mutex_lock(&g_smu);
     live = malloc((g_tex_live.n + 1) * 8);

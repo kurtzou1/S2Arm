@@ -235,6 +235,7 @@ void nvn_be_tex_cpu_written(const tex_t *t) {
     if (x) { x->cpu = 1; x->gpu_written = 0; x->uploaded = 0; x->check_epoch = 0; x->check_seg = 0; x->check_dirty = 1; }   // 游戏刚用 CPU 写了它：下次使用整张重传（纪元清零 = 强制重查）
     pthread_mutex_unlock(&g_rmu);
 }
+void nvn_be_tex_cpu_inferred(const tex_t *t) { nvn_be_tex_cpu_written(t); }
 // 调试取证：这个序号的存储现在的归属（位 0 当 CPU 贴图、位 1 传过、位 2 GPU 写过、位 3 有存储），没建过 = 0
 int rp_tex_debug_state(uint64_t serial) {
     pthread_mutex_lock(&g_rmu);
@@ -320,9 +321,20 @@ const uint8_t *rp_tex_src(const tex_t *t, uint8_t **part) {
 static int linear_class(const tex_t *t, const char **why, int initial) {
     *why = NULL;
     if (!(t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_SPARSE))) return 0;
-    if (!initial && !(t->d.flags & NVN_TEXTURE_FLAGS_LINEAR)) { *why = "linear_render_target_unsupported"; return -1; }   // 只有 LINEAR_RENDER_TARGET：内容通常归 GPU
-    if (!initial && (t->d.flags & NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) { *why = "linear_render_target_and_linear_unsupported"; return -1; }
-    if (t->d.flags & NVN_TEXTURE_FLAGS_SPARSE) { *why = "linear_sparse_unsupported"; return -1; }
+    if (initial) {
+        // 真要传：排布只看 LINEAR / LINEAR_RENDER_TARGET（同苹果端 nvn_mtl.m 的 lin）。SPARSE 只说驻留方式、不改排布：
+        //   只带 SPARSE 的是普通块线性贴图，不进线性族；带 SPARSE 的线性贴图照线性逐行拷。真在虚拟池里的由下面「池不可 CPU 访问」拦下，
+        //   虚拟池里的压缩贴图走 x->sparse 那条（upload_all 不进这里）。原先这里一律当「线性加稀疏」拒：11-21 同一款带存档局一局 442 万次、整屏黑
+        if (!(t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET))) {
+            // 只带 SPARSE、又在虚拟池 / CPU 不可访问的池里（虚拟池里的非压缩贴图，x->sparse 不收）：内容不在 CPU 读得到的地方，照旧不传、不读
+            if (t->pool && (t->pool->flags & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL))) { *why = "linear_sparse_unsupported"; return -1; }
+            return 0;
+        }
+    } else {
+        if (!(t->d.flags & NVN_TEXTURE_FLAGS_LINEAR)) { *why = "linear_render_target_unsupported"; return -1; }   // 只有 LINEAR_RENDER_TARGET：内容通常归 GPU
+        if (t->d.flags & NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET) { *why = "linear_render_target_and_linear_unsupported"; return -1; }
+        if (t->d.flags & NVN_TEXTURE_FLAGS_SPARSE) { *why = "linear_sparse_unsupported"; return -1; }
+    }
     if (!t->mem || !t->pool) { *why = "linear_no_cpu_memory"; return -1; }
     if (t->has_layout) { *why = "linear_packaged_unsupported"; return -1; }
     if (t->d.target != NVN_TEXTURE_TARGET_2D) { *why = "linear_target_not_2d"; return -1; }
@@ -771,7 +783,7 @@ nvn_gpu_tex rp_tex_resolve(const tex_t *t, nvn_gpu_cmd c) {
         alias_key k; alias_key_of(&k, t);
         if (!cpu && t->pool) { x = nvn_hm_get(&g_alias, &k); if (x) x->seen = rp_sub_serial() + 1; }   // 同存储同描述的另一个对象已经建过：共用
         if (!x) {
-            nvn_gpu_tex_desc d = {0}; d.d = t->d; d.usage = usage_of(t, cpu); d.swz = t->set_swz && t->swz != SWZ_IDENTITY ? t->swz : 0; d.stencil_view = t->stencil;
+            nvn_gpu_tex_desc d = {0}; d.d = t->d; d.usage = usage_of(t, cpu); d.swz = t->set_swz && t->swz != SWZ_IDENTITY ? t->swz : 0;
             rp_fold_1d_desc(&d.d);   // 后端没有一维目标：一维 → 高 1 的二维，一维数组 → 二维数组（#1810）
             nvn_gpu_tex g = NULL; nvn_gpu_err err = {0};
             uint64_t mk0_ = res_now(); nvn_gpu_rc mkr_ = nvn_gpu_tex_create(&d, &g, &err); rp_perf_add(RP_PERF_RES_MAKE, res_now() - mk0_);
@@ -988,6 +1000,20 @@ void nvn_be_alias_drop_pool(const void *pool) {
     pthread_mutex_unlock(&g_rmu);
 }
 
+// 深度模板贴图按深度还是模板采样：视图自己设了模式取视图的，否则取建贴图时设的（TextureBuilderSetDepthStencilMode）。
+// 与 iOS 层同一规则（nvn_mtl.m tex_by_id：want_st = 视图设了 ? 视图 == STENCIL : 贴图.stencil）。
+static int sample_stencil_mode(const tex_t *t, const view_t *v, int has_v) {
+    return has_v && v->set_dsmode ? v->dsmode == NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL : t->stencil;
+}
+// 交给后端建采样视图的记录。后端只认视图记录里的深度模板模式（取哪个面），不认贴图对象上的标志：建贴图时设了模板模式、视图没设时，
+// 在这里把模板模式补进视图记录。同一块存储上的两个贴图对象（深度模式、模板模式）在同存储共用表里是同一份后端存储，区别只在视图。
+static const view_t *sample_view_rec(const tex_t *t, const view_t *v, int has_v, view_t *tmp) {
+    if (!t->stencil || (has_v && v->set_dsmode)) return has_v ? v : NULL;
+    if (has_v) *tmp = *v; else memset(tmp, 0, sizeof *tmp);
+    tmp->set_dsmode = 1; tmp->dsmode = NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL;
+    return tmp;
+}
+
 nvn_gpu_view rp_view_by_id(int id, nvn_gpu_cmd c, tex_t *t_out) {
     if (t_out) memset(t_out, 0, sizeof *t_out);
     pthread_mutex_lock(&g_rmu);
@@ -1006,8 +1032,9 @@ nvn_gpu_view rp_view_by_id(int id, nvn_gpu_cmd c, tex_t *t_out) {
         if (!r->view && x) {
             nvn_gpu_err err = {0};
             struct registered_view *owned = calloc(1, sizeof *owned);
+            view_t sv;
             if (!owned) nvn_unimpl("gpu", "registered_view_allocation", r);
-            else if (nvn_gpu_ok(nvn_gpu_view_create(x->g, has_v ? &v : NULL, &owned->view, &err))) {
+            else if (nvn_gpu_ok(nvn_gpu_view_create(x->g, sample_view_rec(&t, &v, has_v, &sv), &owned->view, &err))) {
                 r->owned = owned; r->view = owned->view; r->of = x; x->nreg++;
             } else { free(owned); nvn_unimpl("gpu", "view_create", r); }
         }
@@ -1053,6 +1080,10 @@ static nvn_gpu_view decl_zero(uint8_t dtt, uint8_t dcls, nvn_gpu_cmd c) {
 }
 
 static nvn_gpu_view view_by_id_decl(int id, uint8_t dtt, uint8_t dcls, nvn_gpu_cmd c, tex_t *t_out);
+// 出库程序的绑定核对（rp_res.h rp_decl_probe_begin）。只在提交线程读写
+static int g_decl_probe, g_decl_unbridged;
+void rp_decl_probe_begin(void) { g_decl_probe = 1; g_decl_unbridged = 0; }
+int rp_decl_probe_end(void) { const int r = g_decl_unbridged; g_decl_probe = g_decl_unbridged = 0; return r; }
 static _Atomic uint64_t g_empty_slot_zero;   // 空槽绑零贴图的次数（#1147；信息计数，不是未接）
 uint64_t rp_empty_slot_zero_count(void) { return atomic_load(&g_empty_slot_zero); }
 nvn_gpu_view rp_view_by_id_decl(int id, uint8_t dtt, uint8_t dcls, int elem, nvn_gpu_cmd c, tex_t *t_out) {
@@ -1063,7 +1094,7 @@ nvn_gpu_view rp_view_by_id_decl(int id, uint8_t dtt, uint8_t dcls, int elem, nvn
             nvn_fmt_info fi;
             uint32_t fmt = has_v && v.set_format ? v.format : (uint32_t)t.d.format;
             if (nvn_fmt_info_of(fmt, &fi)) {
-                int stencil = fi.stencil && (!fi.depth || (has_v && v.set_dsmode && v.dsmode == NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL));
+                int stencil = fi.stencil && (!fi.depth || sample_stencil_mode(&t, &v, has_v));
                 int cls = stencil || fi.kind == NVN_FMT_UINT ? 1 : fi.kind == NVN_FMT_SINT ? 2 : 0;
                 if (cls && cls != dcls) {
                     // 数组各元素共用一个声明的数值类型，这个元素登记的是另一类（整数贴图进了声明成浮点的数组等）：登记的视图不能交给后端。
@@ -1078,6 +1109,7 @@ nvn_gpu_view rp_view_by_id_decl(int id, uint8_t dtt, uint8_t dcls, int elem, nvn
         }
     }
     nvn_gpu_view out = view_by_id_decl(id, dtt, dcls, c, t_out);
+    if (g_decl_probe && g_decl_unbridged) return NULL;   // 核对中且声明桥接不了：不往下补零贴图，交调用方换现编版
     // 贴图数组里取不到的元素：描述符数组每项都要有效，用声明类型的零贴图顶上（类型与声明一致，不再拿别的元素凑）
     if (!out && elem) out = decl_zero(dtt, dcls, c);
     // 空槽（#1147）：着色器声明了这个组合槽、游戏这一笔没绑贴图（句柄 0 → 取池里 tex_base + 0；0 号是驱动保留区、TexturePoolInitialize 不写），
@@ -1101,7 +1133,7 @@ static _Atomic uint64_t g_ubo_zero;   // 常量缓冲句柄指向没登记的号
 uint64_t rp_ubo_zero_count(void) { return atomic_load(&g_ubo_zero); }
 nvn_gpu_view rp_view_by_ubo_handle_decl(int id, uint8_t dtt, uint8_t dcls, nvn_gpu_cmd c, tex_t *t_out) {
     nvn_gpu_view out = rp_view_by_id_decl(id, dtt, dcls, 0, c, t_out);
-    if (out || !dtt) return out;
+    if (out || !dtt || (g_decl_probe && g_decl_unbridged)) return out;
     pthread_mutex_lock(&g_rmu);
     const int unregistered = id < 0 || id >= g_ntreg || !g_treg[id].ok;
     const int cap = g_tpool_n;
@@ -1128,6 +1160,7 @@ static nvn_gpu_view view_by_id_decl(int id, uint8_t dtt, uint8_t dcls, nvn_gpu_c
     int planned = rp_decl_view_target(&t, &v, has_v, dtt);
     if (!planned) return rp_view_by_id(id, c, t_out);
     if (planned < 0) {
+        if (g_decl_probe) { g_decl_unbridged = 1; return NULL; }   // 出库程序核对：声明是出包时推的，不绑零贴图、不记未接，交调用方换现编版
         uint32_t layers = rp_tex_layer_count(&t);
         if (has_v && v.set_layers) layers = v.nlayers ? v.nlayers : (layers > v.min_layer ? layers - v.min_layer : 1);
         int cube = want == NVN_TEXTURE_TARGET_CUBEMAP || want == NVN_TEXTURE_TARGET_CUBEMAP_ARRAY;
@@ -1152,7 +1185,8 @@ static nvn_gpu_view view_by_id_decl(int id, uint8_t dtt, uint8_t dcls, nvn_gpu_c
         nvn_gpu_view z = decl_zero(dtt, dcls, c);
         return z ? z : rp_view_by_id(id, c, t_out);
     }
-    return rp_view_for(&t, &v, c);
+    view_t sv;   // 改写目标 / 层数之后 v 一定是一份完整记录
+    return rp_view_for(&t, sample_view_rec(&t, &v, 1, &sv), c);
 }
 
 // 一组贴图槽的「编译事实」摘要：每槽取绑定贴图的有效格式、有效目标、深度（没登记的槽取「在不在池范围里」）。

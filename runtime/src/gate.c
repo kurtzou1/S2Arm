@@ -355,6 +355,7 @@ uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs) {
                 return regs[0]; }
             if (g->kind == G_AREGION) {   // SDK VammManager::AllocateAddressRegion 返回处（改写器 SDK 地址区安全阀）：失败当场报红，返回值原样还给游戏
                 if ((uint32_t)regs[0]) { static _Atomic uint64_t n; uint64_t k = atomic_fetch_add(&n, 1) + 1;
+                    { static void (*af)(uint32_t); if (!af) af = (void (*)(uint32_t))dlsym(RTLD_DEFAULT, "s2a_alias_alloc_failed"); if (af) af((uint32_t)regs[0]); }   // svc_mem.c：收小后失败记下本款
                     if (!(k & (k - 1))) { module_t *m = module_of((void *)g->orig);
                         LOG("【红】地址区分配失败（第 %llu 次）：SDK AllocateAddressRegion 回 %#x（%s+%#llx）——别名区耗尽或碎片，游戏接下来会把 0 当地址用；别名区账见下一行",
                             (unsigned long long)k, (unsigned)regs[0], m ? m->name : "?", (unsigned long long)(m ? g->orig - (uint64_t)m->base : g->orig));

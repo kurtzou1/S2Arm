@@ -63,10 +63,33 @@ static UIViewController *top_controller(void) {
 static void present(S2ATextInput *in, NSDictionary *a) {
     UIViewController *top = top_controller();
     if (!top) { [in finish:0 text:nil]; return; }   // 没有界面可挂：按取消交回（游戏收到取消，不卡）
-    NSString *header = [a[@"header"] length] ? a[@"header"] : S2AL(@"textinput.header");
+    BOOL player = a[@"localPlayers"] != nil;
+    NSString *createTitle = S2AL(@"textinput.player.create");
+    NSArray *names = a[@"localPlayers"];
+    if (names.count) {
+        UIAlertController *list = [UIAlertController alertControllerWithTitle:S2AL(@"textinput.player.select")
+            message:nil preferredStyle:UIAlertControllerStyleAlert];
+        [names enumerateObjectsUsingBlock:^(NSString *name, NSUInteger row, BOOL *stop) {
+            [list addAction:[UIAlertAction actionWithTitle:name style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                [in finish:1 text:[@(row) stringValue]];
+            }]];
+        }];
+        [list addAction:[UIAlertAction actionWithTitle:createTitle style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            NSMutableDictionary *creator = a.mutableCopy;
+            creator[@"localPlayers"] = @[];
+            [top dismissViewControllerAnimated:YES completion:^{ if (!in.answered) present(in, creator); }];
+        }]];
+        [list addAction:[UIAlertAction actionWithTitle:S2AL(@"common.cancel") style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) {
+            [in finish:0 text:nil];
+        }]];
+        in.alert = list;
+        [top presentViewController:list animated:YES completion:nil];
+        return;
+    }
+    NSString *header = player ? createTitle : [a[@"header"] length] ? a[@"header"] : S2AL(@"textinput.header");
     NSMutableArray *lines = [NSMutableArray array];
     if ([a[@"subtitle"] length]) [lines addObject:a[@"subtitle"]];
-    if (in.min > 1 || in.max > 0) [lines addObject:in.max > 0 ? [NSString stringWithFormat:S2AL(@"textinput.range"), (long)MAX(in.min, 0), (long)in.max] : [NSString stringWithFormat:S2AL(@"textinput.min"), (long)in.min]];
+    if (!player && (in.min > 1 || in.max > 0)) [lines addObject:in.max > 0 ? [NSString stringWithFormat:S2AL(@"textinput.range"), (long)MAX(in.min, 0), (long)in.max] : [NSString stringWithFormat:S2AL(@"textinput.min"), (long)in.min]];
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:header message:lines.count ? [lines componentsJoinedByString:@"\n"] : nil preferredStyle:UIAlertControllerStyleAlert];
     __weak S2ATextInput *weak = in;
     [alert addTextFieldWithConfigurationHandler:^(UITextField *f) {
@@ -82,7 +105,8 @@ static void present(S2ATextInput *in, NSDictionary *a) {
     [alert addAction:[UIAlertAction actionWithTitle:S2AL(@"common.cancel") style:UIAlertActionStyleCancel handler:^(UIAlertAction *x) { (void)x; [weak finish:0 text:nil]; }]];
     UIAlertAction *ok = [UIAlertAction actionWithTitle:[a[@"submit"] length] ? a[@"submit"] : S2AL(@"textinput.ok") style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) {
         (void)x; S2ATextInput *s = weak; UIAlertController *al = s.alert;
-        [s finish:1 text:s2a_text_input_clip(al.textFields.firstObject.text ?: @"", s.max)];
+        NSString *name = s2a_text_input_clip(al.textFields.firstObject.text ?: @"", s.max);
+        [s finish:1 text:player ? [@"new:" stringByAppendingString:name] : name];
     }];
     [alert addAction:ok];
     alert.preferredAction = ok;

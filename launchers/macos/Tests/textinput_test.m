@@ -62,6 +62,29 @@ int main(void) {
         s2a_host_text_input_cancel(4); spin(0.5);
         ck(g_win.attachedSheet == nil && g_calls == 0, "⑤ 外部收框：表单关、不回调");
 
+        const char *roster = "{\"localPlayers\":[\"小明\",\"小林\"],\"initial\":\"Player3\",\"min\":1,\"max\":32}";
+        begin(7, roster);
+        S2ATextInputMac *picker = g_inputs[@7];
+        ck(picker.playerTable.numberOfRows == 3 && !picker.field, "两个用户各占一行，末尾是创建");
+        [picker.playerTable selectRowIndexes:[NSIndexSet indexSetWithIndex:1] byExtendingSelection:NO];
+        [NSApp sendAction:picker.playerTable.action to:picker.playerTable.target from:picker.playerTable];
+        spin(.3);
+        ck(g_calls == 1 && g_status == 1 && !strcmp(g_text, "1"), "选中第二行直接返回对应用户");
+
+        begin(8, roster);
+        picker = g_inputs[@8];
+        [picker.playerTable selectRowIndexes:[NSIndexSet indexSetWithIndex:2] byExtendingSelection:NO];
+        [picker choosePlayer:picker.playerTable];
+        ck(picker.field != nil && !picker.playerTable, "创建行进入命名表单");
+        picker.field.stringValue = @"新队友";
+        [picker.saveButton performClick:nil]; spin(.3);
+        ck(g_calls == 1 && !strcmp(g_text, "new:新队友"), "新建返回填写的中文名字");
+
+        begin(9, "{\"localPlayers\":[],\"initial\":\"Player2\",\"min\":1,\"max\":32}");
+        picker = g_inputs[@9];
+        ck(!picker.playerTable && [picker.field.stringValue isEqual:@"Player2"], "直接创建时打开名字输入框");
+        [picker cancelPlayer:nil]; spin(.3);
+        ck(g_calls == 1 && g_status == 0, "取消新建不产生用户");
         setenv("S2A_AUTOPLAY", "1", 1);
         ck(s2a_host_text_input(5, "{\"mode\":\"full\"}", cb) == 0, "⑥ 无人值守不弹、返回 0");
         setenv("S2A_TEXT_INPUT_UI", "1", 1);

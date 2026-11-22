@@ -190,6 +190,24 @@ int main(void) {
         uint8_t bad5[64]; memcpy(bad5, ss.p ? ss.p : (uint8_t *)"x", ss.n < 64 ? ss.n : 64); g_store_n = 0;
         int r7 = ss.n >= 64 ? s2a_identity_import_p12(h5, bad5, 64, "x", "sidestore", team, sizeof team, why, sizeof why) : -9;
         CHECK(r7 == -1 && g_store_n == 0, "明文格式截断成 64 字节：返回 %d（期望 -1）、不存", r7);
+        // ⑥ 加密但不带 MAC 的 p12（D-QSEB：有的签名工具这样导出，系统 SecPKCS12Import 一律回 -26275）。期望手写：密码对 → 导入、团队号 = 证书 OU；
+        //   密码错 → 1（让玩家再输一次，不是「文件不能用」）；空密码导出 + 空密码 → 导入。样本：openssl -nomac 默认 AES-256、-legacy 3DES
+        printf("⑥ 加密但不带 MAC 的 .p12\n");
+        const char *kinds[][2] = {{"aes", "-passout pass:t"}, {"3des", "-legacy -passout pass:t"}, {"aes_empty", "-passout pass:"}};
+        for (int i = 0; i < 3; i++) {
+            char c6[1200], f6[600], h6[600]; snprintf(f6, sizeof f6, "%s/enc_nomac_%s.p12", dir, kinds[i][0]); snprintf(h6, sizeof h6, "%s/home_enc_%s", dir, kinds[i][0]);
+            snprintf(c6, sizeof c6, "cd %s && openssl pkcs12 -export -inkey k.pem -in c.pem -out %s -nomac %s 2>/dev/null", dir, f6, kinds[i][1]);
+            size_t en = 0; uint8_t *eb = system(c6) == 0 ? slurp(f6, &en) : NULL; const char *pw = i == 2 ? "" : "t";
+            SecKeyRef k6 = NULL; CFArrayRef ch6 = NULL; int sr = eb ? s2a_selfsign_identity(eb, en, pw, &k6, &ch6) : -9;
+            CHECK(sr == 0 && k6 && ch6 && CFArrayGetCount(ch6) >= 1, "%s（%zu 字节）：s2a_selfsign_identity 返回 %d（期望 0，补 MAC 前系统回 -26275）", kinds[i][0], en, sr);
+            if (k6) CFRelease(k6);
+            if (ch6) CFRelease(ch6);
+            if (i < 2) { g_store_n = 0; int rw = eb ? s2a_identity_import_p12(h6, eb, en, "错的", NULL, team, sizeof team, why, sizeof why) : -9;
+                         CHECK(rw == 1 && g_store_n == 0, "%s 密码错：返回 %d（期望 1 = 再问密码）、不存", kinds[i][0], rw); }
+            g_store_n = 0; int ro = eb ? s2a_identity_import_p12(h6, eb, en, pw, NULL, team, sizeof team, why, sizeof why) : -9;
+            CHECK(ro == 0 && g_store_n == 1 && !strcmp(team, "ABCDE12345"), "%s 密码对：返回 %d（期望 0）、存钥匙串 %d 次、团队号 %s（%s）", kinds[i][0], ro, g_store_n, team, why);
+            free(eb);
+        }
         free(k1); free(cd); free(ss.p); free(nm);
         s2a_identity_test_store(NULL);
     }

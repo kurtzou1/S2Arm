@@ -135,7 +135,7 @@ struct Switch2ProConnectionPopover: View {
                         //   要断开请按手柄上的 sync 钮，或用鼠标点这颗。controllerExcluded 连 AX 兜底扫描也一起排除，见 PadExclusion
                         .controllerExcluded("controller.main-action")
                     Button { setSettings(!showSettings) } label: { Image(systemName: "gearshape").font(.system(size: 15, weight: .semibold)) }
-                        .controllerButtonStyle(PanelSquareButtonStyle())   // 方钮，高度同左边主按钮
+                        .controllerButtonStyle(LauncherIconButtonStyle())   // 方钮，高度同左边主按钮
                         .help(t("settings"))
                         .accessibilityLabel(t("settings"))
                         .controllerID("controller.settings")
@@ -249,7 +249,7 @@ struct Switch2ProConnectionPopover: View {
                                     Button { selectedPlayer = index; setFaceMap(!(showFaceMap && currentPlayer == index)) } label: {
                                         Image(systemName: "circle.grid.cross").font(.system(size: 13, weight: .semibold))
                                     }
-                                    .controllerButtonStyle(RowIconButtonStyle())
+                                    .controllerButtonStyle(LauncherIconButtonStyle(size: 28, cornerRadius: 8))
                                     .help(faceMapTitle)
                                     .accessibilityLabel("P\(index + 1) \(faceMapTitle)")
                                     .controllerID("controller.player.\(index).faceMap")
@@ -501,39 +501,6 @@ private struct ToggleRow: View {
             Spacer(minLength: 8)
             Toggle("", isOn: isOn).toggleStyle(LauncherSwitchStyle()).labelsHidden().accessibilityLabel(label)
         }
-    }
-}
-
-// 齿轮方钮：与左边主按钮（LauncherSecondaryButtonStyle）同高、同底色 / 边框 / 圆角，宽 = 高
-private struct PanelSquareButtonStyle: ButtonStyle, PadRingShaped {
-    var padRingRadius: CGFloat { LauncherTheme.Metrics.controlRadius }
-    @Environment(\.isEnabled) private var enabled
-    @State private var hovered = false
-    func makeBody(configuration: Configuration) -> some View {
-        let shape = RoundedRectangle(cornerRadius: LauncherTheme.Metrics.controlRadius, style: .continuous)
-        return configuration.label
-            .frame(width: LauncherControl.height, height: LauncherControl.height)
-            .background(configuration.isPressed ? LauncherTheme.Colors.pressed : hovered ? LauncherTheme.Colors.hover : LauncherTheme.Colors.control, in: shape)
-            .overlay(shape.strokeBorder(LauncherTheme.Colors.border))
-            .foregroundStyle(enabled ? Color.white.opacity(0.92) : .gray)
-            .contentShape(shape)
-            .onHover { hovered = $0 }
-    }
-}
-
-// 玩家行最右边的小方钮（四键布局）：28 见方，同主题控件底 / 边框 / 圆角
-private struct RowIconButtonStyle: ButtonStyle, PadRingShaped {
-    var padRingRadius: CGFloat { 8 }
-    @State private var hovered = false
-    func makeBody(configuration: Configuration) -> some View {
-        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
-        return configuration.label
-            .frame(width: 28, height: 28)
-            .background(configuration.isPressed ? LauncherTheme.Colors.pressed : hovered ? LauncherTheme.Colors.hover : LauncherTheme.Colors.control, in: shape)
-            .overlay(shape.strokeBorder(LauncherTheme.Colors.border))
-            .foregroundStyle(Color.white.opacity(0.92))
-            .contentShape(shape)
-            .onHover { hovered = $0 }
     }
 }
 

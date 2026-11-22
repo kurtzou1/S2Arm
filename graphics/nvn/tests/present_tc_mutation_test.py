@@ -23,7 +23,7 @@ mutations = [
     ('not-wired', '{ const uint64_t cpu = tc_thread_cpu_ns(); if (cpu) rp_present_tc_note(now, cpu); }', '{ const uint64_t cpu = tc_thread_cpu_ns(); if (cpu && 0) rp_present_tc_note(now, cpu); }', 'tc[2] + tc[3] >= 1'),
 ]
 sources = ['graphics/nvn/tests/t_nvn_replay.c','graphics/nvn/tests/nvn_clear_view_unused.c',
-           *('graphics/nvn/replay/'+x for x in ('rp_exec.c','rp_copy_t2b.c','rp_clear_tex.c','rp_state.c','rp_entry.c','rp_res.c','rp_draw.c','rp_pass.c','rp_buf.c','nvn_unimpl.c')),
+           *('graphics/nvn/replay/'+x for x in ('rp_exec.c','rp_copy_t2b.c','rp_clear_tex.c','rp_draw_tex.c','rp_state.c','rp_entry.c','rp_res.c','rp_draw.c','rp_pass.c','rp_buf.c','nvn_unimpl.c')),
            'graphics/nvn/gfx/nvn/nvn_tex.c','graphics/nvn/gfx/tex/nvn_deswizzle.c']
 base = [os.environ.get('CC','cc'),'-O2','-g','-DS2A_GPU_LAND_TEST','-pthread','-Wall','-Wextra','-Wno-unused-parameter','-std=c11','-D_DEFAULT_SOURCE','-Werror',
         *('-I'+str(ROOT/x) for x in ('.','graphics/nvn/gfx/nvn','graphics/nvn/gfx/nvn/include','graphics/nvn/gfx/tex','graphics/nvn/replay'))]

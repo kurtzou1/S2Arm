@@ -109,6 +109,17 @@ namespace S2A.Services.Tests
                 $"有缺省用户、{P2}:Hong；{dflt} 他的最新进度 / {P2} 她的进度；报红 +0",
                 $"{table}；{u3a} {Is(s3a, laterSave, "他的最新进度")} / {u3b} {Is(s3b, hongSave, "她的进度")}；报红 +{Red.Total - red0}");
 
+            Environment.SetEnvironmentVariable("S2A_LOCAL_PLAYERS",
+                """[{"user":"first","folder":"SaveData"},{"user":"5a1e0b7c3d9f4e2a8b6c1d0e9f8a7b6c","name":"Hong","folder":"SaveData-Hong"}]""");
+            Launch(LocalPlayer.First, null, f1);
+            LocalPlayer.MarkPlayerUsed(p2);
+            Saves.SeedFrom(Host.Device, Pid, [("account", Dir("coop2", oldSave))], p2);
+            SaveFolder.WriteBack(Host.Device);
+            Check("同屏结束后两位玩家的目录各自写回", "P1 / P2",
+                Is(File.ReadAllBytes(Path.Combine(f1, "save/0/progress.sav")), laterSave, "P1") + " / " +
+                Is(File.ReadAllBytes(Path.Combine(f2, "save/0/progress.sav")), oldSave, "P2"));
+            Environment.SetEnvironmentVariable("S2A_LOCAL_PLAYERS", null);
+
             // 第一个玩家的存档位置没记用户号（还没写回过）：回缺省用户，不沿用上一局的第二个玩家；
             // 名字截到 32 字节 UTF-8（Switch 昵称上限），不截半个字；认不出的玩家号报红、按没给处理
             Directory.Delete(f1, true); File.Delete(st1);

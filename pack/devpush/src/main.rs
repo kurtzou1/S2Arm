@@ -10,6 +10,9 @@
 //   s2a-devpush <udid> <包名> uninstall -               卸 App（连容器）：免费账号一台手机最多 3 个 App，测试台腾位用
 //   s2a-devpush - - devices                              连着的设备（USB 在前）：每行一个 UDID
 //   s2a-devpush <udid> - apps                          手机上装的用户 App：每行「包名<TAB>可执行文件名<TAB>团队号」（认别的工具装的 S2Arm）
+//   s2a-devpush <udid> - pair [电脑名]                 和手机配对并把配对记录存进本机设备服务（#1973）：设备服务里已有这台的记录且能用 → 打「pair 已配对」；
+//     没有 → 向手机发起配对（手机弹「要信任此电脑吗」，等玩家点，最多 PAIR_WAIT_SECONDS 秒）→ 用新记录试开一次会话 → SavePairRecord → 打「pair 已配对（新）」。
+//     Windows 上只有 iTunes / Apple Devices 会发起配对；它们没开时手机点了「信任」也没有记录，签名工具报「device does not have pairing file」
 //   S2A_DEVPUSH_DOCUMENTS=1：进不了整个容器（不是开发签名）时退到只进 Documents（要 App 开了文件共享），自签导出「推到手机」用
 //   s2a-devpush <udid> <包名> launch [变量=值…]     起 App（先结束在跑的同包进程），带环境变量；打印 pid。Windows 测试台起局 / 只解包用（Mac 用 devicectl）：
 //     经 lockdown 的 CoreDeviceProxy 建用户态隧道（不要管理员、不装驱动）→ RSD → CoreDevice app_service（同 Xcode / devicectl 的起 App 服务；iOS 17+，要开发者模式与已挂开发者镜像）
@@ -236,6 +239,33 @@ async fn tar_ok<R: AsyncRead + AsyncSeek + Unpin>(r: &mut R) -> Result<bool, Str
     Ok(tail.iter().all(|&b| b == 0))
 }
 
+const PAIR_WAIT_SECONDS: u64 = 180;
+
+// 配对（#1973）：同 idevice tools/src/pair.rs 的做法——lockdown Pair（手机弹信任框，未回应时设备回 PairingDialogResponsePending、库内每秒重发）
+//   → 用新记录开一次会话核对 → 记录里补 UDID → 交设备服务 SavePairRecord（之后签名工具、iTunes 都读这一份）
+async fn pair(mux: &mut UsbmuxdConnection, provider: &idevice::provider::UsbmuxdProvider, udid: &str, name: Option<&str>) -> Result<(), String> {
+    if let Ok(existing) = mux.get_pair_record(udid).await {
+        let mut lc = idevice::lockdown::LockdownClient::connect(provider).await.map_err(|e| format!("连不上手机的 lockdown：{e}"))?;
+        if lc.start_session(&existing).await.is_ok() { println!("pair 已配对"); return Ok(()); }
+        eprintln!("设备服务里这台的配对记录用不了（手机上可能点过「还原位置与隐私」或换过电脑），重新配对");
+    }
+    let buid = mux.get_buid().await.map_err(|e| format!("读不到设备服务的系统编号：{e}"))?;
+    let mut lc = idevice::lockdown::LockdownClient::connect(provider).await.map_err(|e| format!("连不上手机的 lockdown：{e}"))?;
+    println!("pair 等手机上点「信任」");
+    let host_id = uuid::Uuid::new_v4().to_string().to_uppercase();
+    let mut record = lc.pair(host_id, buid, name).await.map_err(|e| match e {
+        idevice::IdeviceError::UserDeniedPairing => "手机上点了「不信任」：拔下数据线再插上，在弹出的框里点「信任」".to_string(),
+        idevice::IdeviceError::PasswordProtected => "手机锁着：先解锁手机（停在主屏幕），再装一次".to_string(),
+        e => format!("配对没成：{e}"),
+    })?;
+    lc.start_session(&record).await.map_err(|e| format!("配对后试开会话失败：{e}"))?;
+    record.udid = Some(udid.to_string());
+    let bytes = record.serialize().map_err(|e| format!("配对记录写不出：{e}"))?;
+    mux.save_pair_record(udid, bytes).await.map_err(|e| format!("设备服务没收下配对记录：{e}"))?;
+    println!("pair 已配对（新）");
+    Ok(())
+}
+
 fn read_list(p: &str) -> Result<Vec<String>, String> {
     Ok(std::fs::read_to_string(p).map_err(|e| format!("读不了清单 {p}：{e}"))?.lines().filter(|l| !l.is_empty()).map(String::from).collect())
 }
@@ -254,7 +284,7 @@ async fn run(a: &[String]) -> Result<(), String> {
     // 找设备与连设备走同一个设备服务地址（USBMUXD_SOCKET_ADDRESS，缺省本机）：原先找设备固定连本机、连设备才看环境变量，
     //   设了地址时两边设备编号对不上（11-06 Windows 端到端线：手机插在别的机器上、经它的设备服务推包）
     // 和手机读写文件的操作：从连设备服务起，连不上 / 写不进去超过上限就报错退出（装 ipa、起 App 另有自己的等待，不在内）
-    if !matches!(op, "launch" | "install" | "uninstall") { arm_watchdog(); }
+    if !matches!(op, "launch" | "install" | "uninstall" | "pair") { arm_watchdog(); }
     let addr = UsbmuxdAddr::from_env_var().map_err(|e| e.to_string())?;
     let sock = addr.to_socket().await.map_err(|e| format!("连不上 Apple 设备服务：{e}"))?;
     let mut mux = UsbmuxdConnection::new(sock, 0);
@@ -271,7 +301,11 @@ async fn run(a: &[String]) -> Result<(), String> {
     found.retain(|d| d.udid == *udid);
     found.sort_by_key(|d| !matches!(d.connection_type, idevice::usbmuxd::Connection::Usb));
     let dev = found.into_iter().next().ok_or_else(|| format!("找不到设备 {udid}：{}", idevice::IdeviceError::DeviceNotFound))?;
-    let provider = dev.to_provider(addr, "s2a-devpush");
+    let provider = dev.to_provider(addr.clone(), "s2a-devpush");
+    if op == "pair" {
+        return tokio::time::timeout(Duration::from_secs(PAIR_WAIT_SECONDS), pair(&mut mux, &provider, &dev.udid, a.get(4).map(String::as_str))).await
+            .map_err(|_| format!("等了 {PAIR_WAIT_SECONDS} 秒，手机上还没点「信任」：解锁手机、在弹出的「要信任此电脑吗」里点「信任」并输入锁屏密码，再装一次"))?;
+    }
     if op == "launch" {
         // CoreDevice app_service：idevice（钉的提交）自带的 launch_application 请求缺新系统要的字段（iOS 27 实测依次报缺 standardIOIdentifiers、
         //   platformSpecificOptions 不能是空数据），这里按 Xcode 同款请求自己拼
@@ -489,6 +523,6 @@ async fn main() {
     let a: Vec<String> = std::env::args().collect();
     // launch 可以不带环境变量（多款容器推完拉起到游戏库，tools/push_pack.py Devpush.launch({})）：原先一律要 ≥ 5 个参数，这种调用只打用法、退 2，
     //   Windows 上「分开的文件」资源包推完永远拉不起 App（11-11 Windows 实机实测）
-    if a.len() < 5 && !(a.len() == 4 && (a[3] == "launch" || a[3] == "devices" || a[3] == "apps")) { eprintln!("用法：s2a-devpush <udid> <包名> put <本地> <远端> | put-at <本地> <远端> <偏移> | head <远端> <字节数> <本地> | get <远端> <本地> | ls <目录> | du <目录>… | mv <远端> <远端> | mkdir <远端目录> ；s2a-devpush <udid> - apps | devices | launch"); std::process::exit(2); }
+    if a.len() < 5 && !(a.len() == 4 && (a[3] == "launch" || a[3] == "devices" || a[3] == "apps" || a[3] == "pair")) { eprintln!("用法：s2a-devpush <udid> <包名> put <本地> <远端> | put-at <本地> <远端> <偏移> | head <远端> <字节数> <本地> | get <远端> <本地> | ls <目录> | du <目录>… | mv <远端> <远端> | mkdir <远端目录> ；s2a-devpush <udid> - apps | devices | launch | pair [电脑名]"); std::process::exit(2); }
     if let Err(e) = run(&a).await { eprintln!("{e}"); std::process::exit(1); }
 }

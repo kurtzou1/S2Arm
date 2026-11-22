@@ -230,6 +230,25 @@ namespace S2A.Services
             }
             return false;
         }
+        internal static bool StateGetterQueryRulesOn = true;   // 单测负对照用：关掉就公共状态的纯查询照常进日志
+        internal static bool BinderQueryRulesOn = true;   // 单测负对照用：关掉就 HOSBinderDriverServer 的纯查询事务照常进日志
+        // HOSBinderDriverServer 的 TransactParcel（0）/ TransactParcelAuto（3）：紧跟 CMIF 头 "SFCI"（16 字节）是 binderId(s32)、code(u32)、flags(u32)。
+        //   IGraphicBufferProducer 的纯只读查询事务不改任何服务状态、不建句柄：Query（9）、GetBufferInfo（16）、GetBufferHistory（17，nn::vi::ListFrameHistory）。
+        //   HOSBinderDriverServer 会话整局常驻，按活对象收不会淘汰；每帧调 GetBufferHistory 的游戏（如 FF Resonance、巫师 3）跑 ~2.5 小时日志可涨到 ~250 MB / SOH 383 MB，
+        //   撞托管堆上限触发持续 GC 抖动卡死整局。Connect / SetPreallocatedBuffer / RequestBuffer / DequeueBuffer / QueueBuffer / CancelBuffer 等改状态事务照常记、照常重放
+        internal static bool DropBinderQuery(string n, long cmd, byte* msg, int size)
+        {
+            if (!BinderQueryRulesOn) return false;
+            uint c = (uint)cmd;
+            if (!n.Contains("HOSBinderDriver") || !(c == 0 || c == 3)) return false;
+            for (int o = 8; o + 16 + 8 <= size; o += 4)
+            {
+                if (*(uint*)(msg + o) != 0x49434653u) continue;   // CMIF 头 "SFCI"
+                uint code = *(uint*)(msg + o + 16 + 4);
+                return code == 9 || code == 16 || code == 17;     // Query / GetBufferInfo / GetBufferHistory
+            }
+            return false;
+        }
         internal static bool AudioQueueRulesOn = true;   // 单测负对照用：关掉就 AudioOut / AudioIn 的队列命令照常进日志
         internal static bool Drop(string n, long cmd)
         {
@@ -246,6 +265,10 @@ namespace S2A.Services
             if (n.Contains("AudioDevice") && (c == 0 || c == 2 || c == 3 || c == 5 || c == 6 || c == 8 || c == 10 || c == 13)) return true;
             // 每帧都发、不留状态的：不进日志，否则日志随游玩时长线性涨（实测一款大游戏 200 秒 2.2 万条、约 8 MB，一小时约 300 MB 常驻内存）
             if (n.EndsWith("ICommonStateGetter") && c == 50) return true;                                  // IsVrModeEnabled：纯查询
+            // 公共状态的其余纯查询：取运行模式（5）/ 性能模式（6）/ 启动模式（8）/ 焦点（9）/ 缺省分辨率（60）/ HDCP 状态（62）/ 内置屏类型（68）/ 当前性能配置（91）/ 平台区域（300）——
+            //   只往回复里写值，不改状态、不建句柄。有的游戏每帧都查（D-4FFR：一款足球游戏每帧取性能模式，28 分钟 25.8 万条、97 MB，占请求日志近八成，
+            //   托管堆涨到 GC 反复跑、出帧停住）。取事件（0 / 13 / 61）、收消息（1）、设置类（10 / 51–54 / 66 / 130 / 900）照常记
+            if (StateGetterQueryRulesOn && n.EndsWith("ICommonStateGetter") && (c == 5 || c == 6 || c == 8 || c == 9 || c == 60 || c == 62 || c == 68 || c == 91 || c == 300)) return true;
             if (n.EndsWith("DatabaseServiceImpl") && c == 0) return true;                                 // 头像库 IsUpdated：纯查询
             if (n.Contains("IHidServer") && (c == 201 || c == 206)) return true;                          // 发震动（单 / 多）：只输出
             if (n.EndsWith("HardwareOpusDecoder") && c != 1 && c != 3 && c <= 9) return true;            // Opus 解码：只解这一段，留下的只有解码器内部预测（下一段自愈）；建 / 设上下文（1 / 3）照常
@@ -294,7 +317,7 @@ namespace S2A.Services
                 lock (_lock) { _lastMm.Remove((cookie, 2u, fid)); _lastMm.Remove((cookie, 6u, fid)); }   // Finalize 了这个请求号：之前留的最后一次设值作废（Finalize 本身照常进日志）
             _pendingNvMap = null;
             if (NvRule(n, num, cookie, cmd, msg, size)) { lock (_lock) { _dropped++; _dropBy[n + "#" + (uint)cmd] = _dropBy.GetValueOrDefault(n + "#" + (uint)cmd) + 1; } s2a_snap_hctx(-3); return -1; }
-            if (Drop(n, cmd) || DropNvSubmit(n, cmd, msg, size)) { lock (_lock) { _dropped++; _dropBy[n + "#" + (uint)cmd] = _dropBy.GetValueOrDefault(n + "#" + (uint)cmd) + 1; } s2a_snap_hctx(-3); return -1; }
+            if (Drop(n, cmd) || DropNvSubmit(n, cmd, msg, size) || DropBinderQuery(n, cmd, msg, size)) { lock (_lock) { _dropped++; _dropBy[n + "#" + (uint)cmd] = _dropBy.GetValueOrDefault(n + "#" + (uint)cmd) + 1; } s2a_snap_hctx(-3); return -1; }
             lock (_lock)
             {
                 int seq = _seq++; _kept++;

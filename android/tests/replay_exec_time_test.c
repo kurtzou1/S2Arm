@@ -95,6 +95,7 @@ void rp_op_copy_t2b(nvn_gpu_cmd c, const p_copy_b2t *o, const void *rec) { (void
 void rp_op_copy_b2t(nvn_gpu_cmd c, const p_copy_b2t *o, const void *rec) { (void)c; (void)o; (void)rec; }
 void rp_op_copy_t2t(nvn_gpu_cmd c, const p_copy_t2t *o, const void *rec) { (void)c; (void)o; (void)rec; }
 void rp_op_clear_tex(nvn_gpu_cmd c, const p_clear_tex *o, const void *rec) { (void)c; (void)o; (void)rec; }
+void rp_op_draw_tex(nvn_gpu_cmd c, const p_draw_tex *o, const void *rec) { (void)c; (void)o; (void)rec; }
 void rp_op_copy_b2b(const void *a, const void *rec) { (void)a; (void)rec; }
 void rp_op_clear_buf(const p_clear_buf *cb, const void *rec) { (void)cb; (void)rec; }
 int rp_op_update_ub_gpu(nvn_gpu_cmd c, const void *a, const void *rec) { (void)c; (void)a; (void)rec; return 0; }   // 没有还没落地的 GPU 写：照旧走 CPU 版（计时口径不变）

@@ -13,15 +13,28 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm.Proxy
         private int _bufferEnd;
         private int _localDisconnect;
         private int _remoteDisconnectNotified;
+        private readonly IPAddress _localAddress;
 
-        public LdnProxyTcpClient(LanProtocol protocol, IPAddress address, int port) : base(address, port)
+        public LdnProxyTcpClient(LanProtocol protocol, IPAddress address, int port, IPAddress localAddress = null) : base(address, port)
         {
             _protocol = protocol;
+            _localAddress = localAddress;
             _buffer = new byte[LanProtocol.BufferSize];
             OptionSendBufferSize = LanProtocol.TcpTxBufferSize;
             OptionReceiveBufferSize = LanProtocol.TcpRxBufferSize;
             OptionSendBufferLimit = LanProtocol.TxBufferSizeMax;
             OptionReceiveBufferLimit = LanProtocol.RxBufferSizeMax;
+        }
+
+        protected override Socket CreateSocket()
+        {
+            Socket socket = base.CreateSocket();
+            if (_localAddress != null && !socket.IsBound)
+            {
+                socket.Bind(new IPEndPoint(_localAddress, 0));
+            }
+
+            return socket;
         }
 
         protected override void OnConnected()

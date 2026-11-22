@@ -64,7 +64,7 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
         if (bs.count > NVN_REFL_MAXARG) FAIL("%lu bindings, over the argument buffer limit %d", (unsigned long)bs.count, NVN_REFL_MAXARG);   // each binding takes at least one entry
         if (!(o->b = calloc(bs.count ? bs.count : 1, sizeof *o->b))) FAIL("allocation of %lu bindings failed", (unsigned long)bs.count);
         o->route_b = 1; o->abi = 0;   // spirv-cross set 0 → [[buffer(0)]]
-        NSMutableDictionary<NSString *, NSNumber *> *by_name = [NSMutableDictionary dictionary], *lead_for = [NSMutableDictionary dictionary];   // #798 TBLEAD：成员名 → 下标；前导项下标 → 它所属的成员名
+        NSMutableDictionary<NSString *, NSNumber *> *by_name = [NSMutableDictionary dictionary]; NSMutableDictionary<NSNumber *, NSString *> *lead_for = [NSMutableDictionary dictionary];   // #798 TBLEAD：成员名 → 下标；前导项下标 → 它所属的成员名
         for (NSDictionary *b in bs) {
             NSString *k = b[@"kind"]; nvn_rbind *r = &o->b[o->nb];
             id rg = b[@"reg"]; int reg = [rg isKindOfClass:[NSNumber class]] ? [rg intValue] : -1, aid = [b[@"arg_id"] intValue];

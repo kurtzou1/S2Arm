@@ -120,8 +120,8 @@ struct SGradeCardView: View {
                             .padding(.horizontal, 8).padding(.vertical, 3.5)
                             .background(Color.white.opacity(0.06), in: Capsule())
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityIdentifier("export.sgrade.details")
+                        .controllerButtonStyle(.plain).controllerRingRadius(.infinity)
+                        .controllerID("export.sgrade.details")
                     }
                     Spacer(minLength: 12)
                     if let on {
@@ -229,7 +229,7 @@ struct SGradeCardView: View {
                 HStack(spacing: 8) {
                     Spacer(minLength: 0)
                     if let modHelp { ModHelpButton(text: modHelp.text, label: modHelp.label, id: "export.sgrade.mod.help") }
-                    Button(x("mod.import"), action: importMod).buttonStyle(LauncherSecondaryButtonStyle()).accessibilityIdentifier("export.sgrade.mod.import")
+                    Button(x("mod.import"), action: importMod).controllerButtonStyle(LauncherSecondaryButtonStyle()).controllerID("export.sgrade.mod.import")
                 }
                 .padding(.top, 2)
                 ForEach(modNotes, id: \.self) { note($0) }

@@ -28,6 +28,7 @@ if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pack.shell.manifest import validate_download_paths
 from pack import widget_ext
+from pack.orch.dirrename import rename_dir   # 目录改名带 Windows 杀软 / 索引占用退避重试（#361；D-ZPA3：刚组装完的 S2Arm.app 改名就位报 WinError 5）
 
 
 class BundleError(ValueError):
@@ -260,7 +261,7 @@ def assemble(template_app, output_app, *, bundle_id, display_name, icon, metadat
         temp.chmod(0o755)
         if os.path.lexists(dest):
             raise BundleError(f'不覆盖已有目标：{dest}')
-        temp.rename(dest)
+        rename_dir(temp, dest)   # 刚写完整个 App 目录，Windows 上杀软 / 索引还开着里面文件的句柄时直接改名报 WinError 5（D-ZPA3），按 #361 同一套退避
         return dest
     finally:
         if temp.exists():

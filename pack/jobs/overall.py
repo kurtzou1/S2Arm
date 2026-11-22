@@ -17,6 +17,9 @@
 - 成功的结果事件（state succeeded / completed）才到 1。失败、取消停在原处。
 - 没有 plan 的作业（装到手机、续签、删除、装回、更新手机上的 S2Arm…）：按「第几步 / 共几步」（core.begin 的 number / count）推，
   本步内按本步计数 done / total 插进去：(第几步 − 1 + 本步完成度) ÷ 共几步；同样只增不减、成功才到 1（11-11 维护者：更新页做完还写「正在更新」）。
+  本步计数只认作业自己发的计数（core.progress / emit("progress", done, total)），不认阶段工具进度文件里的子计数（core.emit_stage_counter，带 counters）：
+  子计数在一步里先后出现、互不嵌套，一个小计数报满（如某段 1/1）就会把本步算成做完——「更新这款」因此第一步一开头就到 50%，
+  之后编批库 3214 / 8191 MB 走了几小时整单还是 50%（11-21）。子计数照常随事件发出，由前端单独显示（已完成 / 总数 / 速度）。
   plan 先到、或作业中途才到 plan：从那以后按 plan 算（按步算出的值只用在 plan 到之前，plan 一到从 0 重新按 plan 推）。
 - 既没有 plan、也没有「共几步」：不给 overall（None），前端按原来的计数显示。
 """
@@ -47,10 +50,10 @@ class Overall:
         if self.value is None or getattr(self, "stepped", False):   # plan 到之前按步算的值作废，从 0 按 plan 推（出包的 plan 在第一条 1/1 阶段之后马上到，那时还是 0）
             self.value, self.stepped = 0.0, False
 
-    def feed(self, kind, elapsed, milestone, state=None, step=None, steps=None, done=None, total=None):
-        """一条事件 → 这条事件该带的 overall（None = 本作业没有整单进度）"""
+    def feed(self, kind, elapsed, milestone, state=None, step=None, steps=None, done=None, total=None, sub=False):
+        """一条事件 → 这条事件该带的 overall（None = 本作业没有整单进度）；sub = 阶段工具的子计数（不参与按步插值）"""
         if self.weights is None:
-            return self._by_steps(kind, state, step, steps, done, total)
+            return self._by_steps(kind, state, step, steps, None if sub else done, None if sub else total)
         if kind == "result":
             if state in ("succeeded", "completed"):
                 self.value = 1.0

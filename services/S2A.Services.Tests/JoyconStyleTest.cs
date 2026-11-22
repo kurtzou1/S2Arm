@@ -3,7 +3,7 @@ using Ryujinx.HLE.HOS.Services.Hid;
 
 namespace S2A.Services.Tests
 {
-    // #520 A：连着单只 Joy-Con 2 时照真机报单只样式（InputPump.JoyconPick）。期望按「游戏收它那一侧的单只样式、只有一个手柄才改；
+    // #520 A：照实体报告单只或成对的 Joy-Con 样式（InputPump.JoyconPick）。期望按「游戏收它的样式、只有一个手柄才改；
     //   Joy-Con 不在了 / 游戏不收了换回改之前的」手写，不跑被测实现推期望。
     public static partial class Program
     {
@@ -15,7 +15,7 @@ namespace S2A.Services.Tests
             {
                 string actual = $"{got.Item1} {got.Item2}";
                 bool ok = expect == actual; if (!ok) bad++;
-                Console.WriteLine($"{(ok ? "✓" : "✗")} 单只 Joy-Con 样式 {what}：{expect} → {actual}");
+                Console.WriteLine($"{(ok ? "✓" : "✗")} Joy-Con 样式 {what}：{expect} → {actual}");
             }
             const ControllerType None = ControllerType.None, Pro = ControllerType.ProController, HH = ControllerType.Handheld;
             const ControllerType L = ControllerType.JoyconLeft, R = ControllerType.JoyconRight, Pair = ControllerType.JoyconPair;
@@ -42,6 +42,8 @@ namespace S2A.Services.Tests
             Row("游戏不收单只了", "Player1 ProController", InputPump.JoyconPick(Pro | Pair, R, 1, R, Pro, PlayerIndex.Player1));
             // ⑪ 没改过（游戏自己只收右只，原来的跟随样式改的）、没有 Joy-Con：不动
             Row("没改过", "Unknown None", InputPump.JoyconPick(R, None, 1, R, None, PlayerIndex.Unknown));
+            Row("掌机模式接上双 Joy-Con", "Player1 JoyconPair", InputPump.JoyconPick(all, Pair, 1, HH, None, PlayerIndex.Unknown));
+            Row("双 Joy-Con 断开后换回掌机格", "Handheld Handheld", InputPump.JoyconPick(all, None, 1, Pair, HH, PlayerIndex.Handheld));
             // 告诉宿主的样式（ReportedStyle）：期望按「Pro / 双 Joy-Con 这一对看游戏收不收 Pro」手写
             void Rep(string what, string expect, ControllerType got)
             {
@@ -55,7 +57,7 @@ namespace S2A.Services.Tests
             // ⑭ 单只样式、掌机、游戏还没声明：原样
             Rep("单只右", "JoyconRight", InputPump.ReportedStyle(all, R));
             Rep("游戏没声明", "ProController", InputPump.ReportedStyle(None, Pro));
-            Console.WriteLine($"{(bad == 0 ? "🟢" : "🔴")} 单只 Joy-Con 样式单测：15 项，不符 {bad}");
+            Console.WriteLine($"{(bad == 0 ? "🟢" : "🔴")} Joy-Con 样式单测：17 项，不符 {bad}");
             return bad == 0 ? 0 : 1;
         }
     }

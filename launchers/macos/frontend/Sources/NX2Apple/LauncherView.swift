@@ -520,9 +520,7 @@ struct LauncherView: View {
             Button { model.restartToUpdate() } label: {
                 Text(title)
             }
-            .controllerButtonStyle(LauncherSecondaryButtonStyle())
-            .clipShape(Capsule())
-            .overlay(Capsule().strokeBorder(LauncherTheme.Colors.border).allowsHitTesting(false))
+            .controllerButtonStyle(LauncherSecondaryButtonStyle(capsule: true))
             .launcherTooltip(title, placement: .below).controllerID("top.update")
         case .ready:
             Image(systemName: "arrow.down.circle")

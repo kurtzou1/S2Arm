@@ -86,8 +86,21 @@ static inline int s2a_pack_root(char *out, size_t n, const char *docs) {
     return s2a_pack_legacy_root(out, n, docs ? docs : ".");
 }
 // 进程级 Documents（<容器>/Documents）→ 资源包位置的根（备用位置在就是它，否则 Library/Application Support/S2Arm；迁移、#569 写不进修复扫这里的 games/）；
-//   proc_docs 不以 /Documents 结尾返回 -1（不猜）。s2a_pack_base_main / _alt：固定取其中一处（修复时两处都要看）
+//   proc_docs 不以 /Documents 结尾返回 -1（不猜；tvOS 见上面 s2a_pack_base_tv）。s2a_pack_base_main / _alt：固定取其中一处（修复时两处都要看）
+// Apple TV（11-21 D-SDS6：电视上 .s2arm 导入全拒「文档根 …/Library/Caches/S2Arm 不是 …/Documents」）：容器文档根就是 <容器>/Library/Caches/S2Arm，
+//   每款资源包按 s2a_pack_root 的旧位置在 <文档根>/games/<号>/资源包、程序在 <文档根>/games/<号>/program（s2a_program_games_root 同一套推出来）——
+//   资源位置的根就是文档根本身，没有 Library/Application Support 那一层、也没有备用位置。proc_docs 不以 /Library/Caches/S2Arm 结尾返回 -1（不猜）。
+//   纯函数，各平台都编、单测 runtime/tests/t_docs.c；只在 tvOS 上由 s2a_pack_base_at 用
+static inline int s2a_pack_base_tv(char *out, size_t n, const char *proc_docs) {
+    static const char tail[] = "/Library/Caches/S2Arm";
+    size_t l = proc_docs ? strlen(proc_docs) : 0, t = sizeof tail - 1;
+    if (l <= t || strcmp(proc_docs + l - t, tail)) return -1;
+    return snprintf(out, n, "%s", proc_docs);
+}
 static inline int s2a_pack_base_at(char *out, size_t n, const char *proc_docs, const char *rel) {
+#if defined(__APPLE__) && TARGET_OS_TV
+    (void)rel; return s2a_pack_base_tv(out, n, proc_docs);   // 电视只有一处，_main / _alt 都是它
+#endif
     size_t l = proc_docs ? strlen(proc_docs) : 0;
     if (l < 10 || strcmp(proc_docs + l - 10, "/Documents")) return -1;
     return snprintf(out, n, "%.*s/%s", (int)(l - 10), proc_docs, rel ? rel : s2a_pack_base_rel(proc_docs, (int)(l - 10)));

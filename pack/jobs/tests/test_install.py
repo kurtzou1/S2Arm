@@ -952,6 +952,13 @@ class SaveBackupTests(unittest.TestCase):
         self.assertEqual((d / "0000000000000001/0/save.dat").read_text(), "内容:" + got[0])
         self.assertEqual(d.parent, self.c.library / "games/0100C2500FC20000/save_backup")
 
+    def test_update_backup_reports_completed_files(self):
+        self.c.begin("备份这款的存档", 2, 4, key="phone_save_backup")
+        with um.patch.object(self.c, "emit") as emit:
+            self._run([("a", False), ("b", False)])
+        counts = [call.kwargs for call in emit.call_args_list if call.args[0] == "progress"]
+        self.assertEqual(counts, [dict(done=1, total=2, unit="files"), dict(done=2, total=2, unit="files")])
+
     def test_list_entry_without_relative_path_asks_not_crash(self):
         # #908：Xcode 16.0 的 devicectl 有条目不带 relativePath，原先 KeyError 让整个装机作业崩成「本地任务失败」。
         #   path 字段照认、照备份；两种都没有 → 停在「备份不了存档」确认（save_backup_failed），玩家确认后照装
@@ -1867,11 +1874,12 @@ class WinWidgetInstallTests(unittest.TestCase):
             z.writestr("Payload/S2Arm.app/PlugIns/S2ArmWidget.appex/S2ArmWidget", b"ext")
         (self.tmp / "logs").mkdir()
 
-    def run_install(self, fails=(), widget=None, expiry=None, info=None):
-        given = []
+    def run_install(self, fails=(), widget=None, expiry=None, info=None, elsewhere=None):
+        given = []; self.fallback = []
         class Fail(Exception):
             def __init__(self, msg, err=None): super().__init__(msg); self.err = err
         def install_app(ns, say=None):
+            self.fallback.append(getattr(ns, "fallback_install", None))
             with zipfile.ZipFile(ns.ipa) as z: given.append(sorted(z.namelist()))
             if len(given) <= len(fails): raise Fail("plumesign 退 1", fails[len(given) - 1])
             if expiry: ns.signed_expiry = expiry   # 同 install_win.install_app：签好的包里读到的真实期限
@@ -1883,11 +1891,22 @@ class WinWidgetInstallTests(unittest.TestCase):
                                   last_log=None, diagnostic=um.MagicMock())
         me = types.SimpleNamespace(W=W, c=c, udid="U", key="dev1", bid=None, backup=lambda g: None, bundle_for_signing=lambda: None, info=info if info is not None else {})
         me.say = lambda m: install.WinPhone.say(me, m)   # install_win 的进度回调（签好后核 IML 的那行也经它）
+        if elsewhere: me.install_signed_elsewhere = elsewhere
         self.me = me
         with um.patch.object(install.devcert, "active", return_value=False), um.patch.object(install.layout, "load_device", return_value={}), \
              um.patch.object(install.layout, "save_device"):
             install.WinPhone.install(me, self.ipa, [], steps=False)
         return given, c.diagnostic
+
+    def test_mac_hands_devicectl_installer_windows_does_not(self):
+        # D-WFBG / D-ST8X：PlumeMacPhone 有 install_signed_elsewhere（签好经 devicectl 装）→ 交给 install_win 当 fallback_install；WinPhone 没有 → 不交
+        mac = lambda p: None
+        self.run_install(elsewhere=mac)
+        self.assertEqual(self.fallback, [mac])
+        self.run_install()
+        self.assertEqual(self.fallback, [None])
+        self.assertTrue(callable(getattr(install.PlumeMacPhone, "install_signed_elsewhere", None)))
+        self.assertIsNone(getattr(install.WinPhone, "install_signed_elsewhere", None))
 
     def test_quota_retry_without_widget(self):
         given, diag = self.run_install(fails=("free_appid_limit",))
@@ -1969,4 +1988,14 @@ class NoDeviceSwap(unittest.TestCase):
             self.assertEqual(e.exception.code, "device_not_connected", "选的那台没连、只连着另一台：报没连着，不换")
             self.assertEqual(install.win_udid(types.SimpleNamespace(r={"device": "IPAD1"}), W), "IPAD1")
             self.assertEqual(install.win_udid(types.SimpleNamespace(r={}), W), "IPAD1", "没选、只连着一台：照旧用它")
+
+    def test_windows_udid_matches_other_spelling(self):
+        # D-C2DX：启动器记的设备号带短横 / 小写，设备服务列的是不带短横的大写；同一台必须认出来，返回设备服务那种写法
+        W = types.SimpleNamespace(mux_devices=lambda: [("ABCD12EF", "USB", 7)])
+        with um.patch.object(install, "LINK_RETRY_WAIT", 0):
+            for asked in ("AB-CD12EF", "ab-cd12ef", "ABCD12EF"):
+                self.assertEqual(install.win_udid(types.SimpleNamespace(r={"device": asked}), W), "ABCD12EF", asked)
+            with self.assertRaises(Failure) as e:
+                install.win_udid(types.SimpleNamespace(r={"device": "AB-CD12EE"}), W)
+            self.assertEqual(e.exception.code, "device_not_connected", "真是另一台：照旧报没连着")
 

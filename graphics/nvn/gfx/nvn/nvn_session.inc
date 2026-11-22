@@ -84,11 +84,17 @@ static void session_resource_release(void *v) {
     CFRelease(v);
 }
 int nvn_be_drain_session(void) { return session_wait_backend(); }
-int nvn_be_shutdown_session(void) {
+// 销毁旧会话时经手的 Metal 对象（查表取出来的贴图、缓冲）有自动释放的引用，调用线程是长活的会话线程、没有自己的池：包一层，旧局的贴图当场放
+static int nvn_be_shutdown_session_body(void);
+int nvn_be_shutdown_session(void) { @autoreleasepool { return nvn_be_shutdown_session_body(); } }
+static int nvn_be_shutdown_session_body(void) {
     int e = session_wait_backend(); if (e) { MLOG("【红】重启：Metal 工作仍持有旧会话 (%d)", e); return e; }
     // Keep completed immutable shader loads in the device cache. This also
     // consumes the old prefetch handoff before its pipeline maps are cleared.
     warm_claim();
+    // 停在跨队列等待上的队列记录（事件地址在旧局游戏内存里、续点指着旧局命令流）随旧局走：留着的话新局 xq_ready 解引用旧事件地址、看门狗到点回放旧命令流
+    while (g_nxq) xq_drop(&g_xq[0]);
+    g_xq_cur = NULL; g_xq_unwind = 0; g_xq_nuc = g_xq_ucover = 0;
     pool_session_reset();   // before the owners below: its pins would keep what they remove resident
     // No callbacks can touch these objects now. Drop descriptors first, then
     // texture/program owners, then no-copy memory-pool buffers.
@@ -103,7 +109,7 @@ int nvn_be_shutdown_session(void) {
     nvn_hm_clear(&g_treg_ser, NULL);
     // 同理按贴图序号 / 上一局游戏内存建的：未压缩贴图 → 池、即时存档的贴图地址表与待写回表（新一局的池、贴图对象都是新的）
     pthread_mutex_lock(&g_cpu_tex_mu); nvn_hm_clear(&g_cpu_unc, NULL); pthread_mutex_unlock(&g_cpu_tex_mu);
-    nvn_hm_clear(&g_snap_texaddr, NULL); nvn_hm_clear(&g_snap_ghost_pend, hm_rel);
+    nvn_hm_clear(&g_snap_texaddr, NULL); nvn_hm_clear(&g_snap_ghost_pend, session_resource_release);   // 这些贴图读进来时登记进了常驻集（snap_al_load），只放引用的话常驻集还攥着，每回一次快照留一批
     for (int i = 0; i < g_nsreg; i++) if (g_sview[i]) CFRelease(g_sview[i]);
     free(g_sreg); free(g_sreg_ok); free(g_sview); free(g_srid);
     g_sreg = NULL; g_sreg_ok = NULL; g_sview = NULL; g_srid = NULL; g_nsreg = 0;
@@ -111,12 +117,17 @@ int nvn_be_shutdown_session(void) {
     nvn_hm_clear(&g_vc, vc_set_free);
     nvn_hm_clear(&g_by_serial, session_resource_release);
     nvn_hm_clear(&g_alias, session_resource_release);
-    nvn_hm_clear(&g_ghost, hm_rel);
+    nvn_hm_clear(&g_ghost, session_resource_release);   // 同 g_snap_ghost_pend：只剩这张表持有、进过常驻集的贴图（恢复放回的、已销毁序号的）也要出集
     nvn_hm_clear(&g_alias_seen, NULL); nvn_hm_clear(&g_tex_live, NULL);
+    // 与上面几张同键的两张也清：共享存储「最后一次 GPU 写在几号栅栏」（号倒回后旧的大号让活着的渲染目标被判成「之后被覆盖」）、幽灵贴图的淘汰环（旧序号会把新局同序号的幽灵淘汰掉）
+    nvn_hm_clear(&g_alias_wrote, NULL); memset(g_ghost_ring, 0, sizeof g_ghost_ring); g_ghost_next = 0;
     pthread_mutex_lock(&g_gpw_mu);
     nvn_hm_clear(&g_gpw, free); nvn_hm_clear(&g_gpw_ser, free);
+    nvn_hm_clear(&g_gpw_own, free);   // 贴图序号 → GPU 写过的存储范围，同上两张（序号按快照拨回后会撞上旧项，CPU 写入不再重传）
     g_gpw_skips = 0; g_gpw_gen = 1; atomic_store(&g_gpw_nblk, 0);
     pthread_mutex_unlock(&g_gpw_mu);
+    // 「GPU 写过的池」按池对象地址记：新局同地址的池一上来就算写过，未压缩贴图不再按 CPU 内容重传。抬代数让每线程缓存失效
+    pthread_mutex_lock(&g_pool_gpuw_mu); nvn_hm_clear(&g_pool_gpuw, NULL); atomic_fetch_add(&g_pool_gpuw_gen, 1); atomic_store(&g_pool_gpuw_new, 0); pthread_mutex_unlock(&g_pool_gpuw_mu);
     free(g_gone); g_gone = NULL; g_gone_n = g_gone_cap = 0;
     if (g_alias_set) CFSetRemoveAllValues(g_alias_set);
     nvn_hm_clear(&g_cpu_tex, NULL);
@@ -134,6 +145,11 @@ int nvn_be_shutdown_session(void) {
     //   块加长时把那条的缓冲（空）塞进 old 数组，抛 ObjC 异常闪退。每份都是进程内重开之后的那一局。旧块缓冲在 old 里（强引用），清掉随会话放
     for (int k = 0; k < g_nbig; k++) { for (id<MTLBuffer> ob in g_big[k].old) res_remove(ob); free(g_big[k].chunk); g_big[k].chunk = NULL; g_big[k].old = nil; }
     g_nbig = 0;
+    // 原始池表的访问位（gslot：位 → 池表下标）同理：位图里旧局置的位留着，新局首次 gmem_scan 按旧下标取 g_pools[i]（没有边界判断）
+    g_gslot_hi = g_gslot_nfree = 0; if (g_gbits) memset(g_gbits.contents, 0, GSLOT_MAX / 8);
+    // 其余按旧局地址 / 栅栏号记的小表：地址兜底池的键（新局首次提交的 adhoc_drop 会把同键的新池注销）、条件渲染的已提交记录（号倒回后旧的大号一直算「没做完」、读 0）
+    //   与写过报告的地址表、见过的事件地址
+    g_adhoc_nk = 0; g_rc_nsubmitted = 0; free(g_rc_occ); g_rc_occ = NULL; g_rc_ocap = g_rc_on = 0; g_neva = 0;
     free(g_pidx); g_pidx = NULL; g_pidx_cap = g_pidx_ok = 0; g_plast = -1;
     atomic_fetch_add(&g_pool_gen, 1); atomic_fetch_add(&g_reg_gen, 1); atomic_fetch_add(&g_ser_gen, 1);
     // Keys for these caches include program/guest buffer identity. Reuse only
@@ -142,7 +158,7 @@ int nvn_be_shutdown_session(void) {
     if (g_mtk_group) dispatch_group_wait(g_mtk_group, DISPATCH_TIME_FOREVER);   // task / mesh pipelines (nvn_geometry.inc mtk_pso): the background builds write the map
     os_unfair_lock_lock(&g_pso_mtk_lock); nvn_hm_clear(&g_pso_mtk, hm_rel); os_unfair_lock_unlock(&g_pso_mtk_lock);
     nvn_hm_clear(&g_pso_fail, hm_rel); nvn_hm_clear(&g_pso_retry, hm_rel);
-    nvn_hm_clear(&g_ir, free); nvn_hm_clear(&g_rt_seen, NULL); nvn_hm_clear(&g_rt_seen_mem, NULL); nvn_hm_clear(&g_rt_fresh, NULL);
+    ir_clear(); nvn_hm_clear(&g_rt_seen, NULL); nvn_hm_clear(&g_rt_seen_mem, NULL); nvn_hm_clear(&g_rt_fresh, NULL);
     g_rt_history_frame = 0; g_rt_history_valid = 0;
     for (int i = 0; i < PSO_PEND_MAX; i++) { g_pp[i].ps = nil; g_pp[i].used = g_pp[i].done = g_pp[i].late = 0; }
     g_geo_program = nil; g_pso_fsfn = nil; g_pso_lmap = NULL;
@@ -200,6 +216,7 @@ int nvn_be_shutdown_session(void) {
     memset(g_wd_last, 0, sizeof g_wd_last); memset(g_wd_b, 0, sizeof g_wd_b); memset(g_wd_gpu, 0, sizeof g_wd_gpu);
     memset(g_wd_bound, 0, sizeof g_wd_bound); memset(g_wd_had, 0, sizeof g_wd_had); memset(g_wd_viewm, 0, sizeof g_wd_viewm);
     g_wd = -1; g_wd_sh = g_wd_sh_push = g_wd_nt = g_wd_npr = g_wd_npr_arm = 0;
+    memset(g_wd_t, 0, sizeof g_wd_t); memset(g_wd_s3d, 0, sizeof g_wd_s3d); g_wd_s3d_n = 0;   // 表本身也清（上一行只清了条数）：按贴图序号查，同序号同尺寸直接返回旧局的值、不向新的宽屏核心会话登记
     g_wd_c0 = 0; g_wd_d0 = ~0ull; g_wd_fskey = "-";
     // All prefetch producers are drained. Compiled code stays resident, but
     // widening ids and the first-use recording bit belong to the retired run.

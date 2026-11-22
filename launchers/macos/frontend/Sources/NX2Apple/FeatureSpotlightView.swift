@@ -139,10 +139,9 @@ struct FeatureSpotlightView: View {
         HStack {
             Spacer()
             Button { model.closeUpdatePopup() } label: {
-                Image(systemName: "xmark").font(.system(size: 13, weight: .bold)).foregroundStyle(.white.opacity(0.85))
-                    .frame(width: 32, height: 32).background(Color.black.opacity(0.45), in: Circle())
+                Label(t("feature.close"), systemImage: "xmark")
             }
-            .buttonStyle(.plain).help(t("feature.close")).accessibilityLabel(t("feature.close")).accessibilityIdentifier("feature.close")
+            .controllerButtonStyle(ConsoleIconButtonStyle(size: 32)).help(t("feature.close")).controllerID("feature.close")
         }
         .padding(16)
     }

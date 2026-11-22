@@ -188,20 +188,21 @@ VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceProperties2(VkPhysicalDevice p, Vk
             ((VkPhysicalDeviceSubgroupProperties *)b)->subgroupSize = s->subgroup_size;
             ((VkPhysicalDeviceSubgroupProperties *)b)->supportedStages = s->subgroup_stages;
             ((VkPhysicalDeviceSubgroupProperties *)b)->supportedOperations = s->subgroup_ops;
-            ((VkPhysicalDeviceSubgroupProperties *)b)->quadOperationsInAllStages = s->subgroup_quad ? VK_TRUE : VK_FALSE; break;
-        // 扩展属性：只有设备列出了扩展才答（没列出的扩展挂了结构也只回 0）
+            ((VkPhysicalDeviceSubgroupProperties *)b)->quadOperationsInAllStages = s->subgroup_quad_all; break;
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_PROPERTIES_EXT:
-            if (cs_has_ext(s, "VK_EXT_custom_border_color")) ((VkPhysicalDeviceCustomBorderColorPropertiesEXT *)b)->maxCustomBorderColorSamplers = s->border_max; break;
-        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_FILTER_MINMAX_PROPERTIES:
-            if (cs_has_ext(s, "VK_EXT_sampler_filter_minmax")) {
-                ((VkPhysicalDeviceSamplerFilterMinmaxProperties *)b)->filterMinmaxSingleComponentFormats = s->minmax_single ? VK_TRUE : VK_FALSE;
-                ((VkPhysicalDeviceSamplerFilterMinmaxProperties *)b)->filterMinmaxImageComponentMapping = s->minmax_mapping ? VK_TRUE : VK_FALSE;
-            } break;
+            if (!cs_has_ext(s, "VK_EXT_custom_border_color")) cs_reject(s, "自定义边框颜色属性缺扩展");
+            ((VkPhysicalDeviceCustomBorderColorPropertiesEXT *)b)->maxCustomBorderColorSamplers = s->border_max; break;
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_PROPERTIES_EXT:
-            if (cs_has_ext(s, "VK_EXT_vertex_attribute_divisor")) ((VkPhysicalDeviceVertexAttributeDivisorPropertiesEXT *)b)->maxVertexAttribDivisor = s->vdiv_max; break;
+            if (!cs_has_ext(s, "VK_EXT_vertex_attribute_divisor")) cs_reject(s, "EXT 实例除数属性缺扩展");
+            ((VkPhysicalDeviceVertexAttributeDivisorPropertiesEXT *)b)->maxVertexAttribDivisor = s->divisor_max; break;
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_FILTER_MINMAX_PROPERTIES_EXT:
+            if (!cs_has_ext(s, "VK_EXT_sampler_filter_minmax")) cs_reject(s, "采样器 minmax 属性缺扩展");
+            ((VkPhysicalDeviceSamplerFilterMinmaxPropertiesEXT *)b)->filterMinmaxSingleComponentFormats = s->minmax_single;
+            ((VkPhysicalDeviceSamplerFilterMinmaxPropertiesEXT *)b)->filterMinmaxImageComponentMapping = s->minmax_mapping; break;
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT:
-            if (cs_has_ext(s, "VK_EXT_external_memory_host")) ((VkPhysicalDeviceExternalMemoryHostPropertiesEXT *)b)->minImportedHostPointerAlignment = s->host_align; break;
-        default: break;   // placed 映射对齐：没有读数，保持调用方清零的 0（= 无）
+            if (!cs_has_ext(s, "VK_EXT_external_memory_host")) cs_reject(s, "主机内存导入属性缺扩展");
+            ((VkPhysicalDeviceExternalMemoryHostPropertiesEXT *)b)->minImportedHostPointerAlignment = s->host_align; break;
+        default: break;   // 没有读数的结构（如 placed 对齐）保持调用方清零的 0。
         }
     }
 }

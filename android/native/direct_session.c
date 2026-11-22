@@ -4,9 +4,7 @@
 #include "direct_choice.h"   // direct-vulkan.txt 的唯一解析、AUTO 判定与 attempt 标记（#274）
 #include "direct_callback.h"
 #include "direct/selection.h"   // NVN 直连的冻结选择（s2a_direct_lookup 的 nvnBootstrapLoader 分支）
-#include "capprobe/capprobe.h"  // #1456 runtime-lost 回写
 #include "vk_loader_shim.h"  // 窄 shim 的入口表（__wrap_* 在 vk_loader_shim.c；拦的是 Vulkan loader 一级的实例创建，归平台壳）
-S2A_CAPPROBE_RUNTIME_LOST_WEAK_REF;   // 宿主链接单元无 bridge.cpp 时解析为 NULL
 #include <errno.h>
 #include <stdatomic.h>
 // 浮层的「成功交给呈现」计数：新回放层（缺省）取 rp_present_stats 的已上屏数，旧层（对照诊断用）取 mtl_present_count。
@@ -70,9 +68,6 @@ static void error(const char *operation, VkResult result) {
     fprintf(stderr, "[vk-direct] 【红】%s: VkResult=%d\n", operation, result);
     if (result == VK_ERROR_DEVICE_LOST) {
         mark_failure(operation);
-        // #1456：真实 DEVICE_LOST 回写当前指纹 capprobe 结果（source=runtime-lost，
-        // 只记指纹不记游戏），下次启动直接走规避不再探。
-        if (s2a_capprobe_runtime_lost) s2a_capprobe_runtime_lost();
         const s2a_host_api_v1 *h = s2a_host_get();
         if (h && h->stop) h->stop->request_stop(h->host, S2A_HOST_STOP_DEVICE_LOST, operation);
     }

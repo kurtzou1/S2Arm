@@ -116,6 +116,17 @@ static void inspect_attach_write(IOHIDDeviceRef device) {
     if (mode==3) atomic_store(&g_want,0);
 }
 int main(void) { @autoreleasepool {
+    // 两只手柄同向时，原始 Y、Z 的符号相反。三轴取不同的非零值，覆盖轴序与符号。
+    const uint8_t left_imu[] = {0, 0x10, 0, 0x08, 0, 0xfc, 0x08, 0, 0xf4, 0xff, 0x10, 0};
+    const uint8_t right_imu[] = {0, 0x10, 0, 0xf8, 0, 0x04, 0x08, 0, 0x0c, 0, 0xf0, 0xff};
+    s2a_pad_motion left_pose = {0}, right_pose = {0};
+    decode_imu(0, JC_PID_L, left_imu, &left_pose);
+    decode_imu(1, JC_PID_R, right_imu, &right_pose);
+    CHECK(left_pose.acceleration_x == right_pose.acceleration_x && left_pose.acceleration_y == right_pose.acceleration_y &&
+          left_pose.acceleration_z == right_pose.acceleration_z, "same Joy-Con pose yields matching acceleration axes");
+    CHECK(left_pose.gyro_x == right_pose.gyro_x && left_pose.gyro_y == right_pose.gyro_y && left_pose.gyro_z == right_pose.gyro_z,
+          "same Joy-Con rotation yields matching gyro axes");
+
     g_started = 1;   // Never enumerate/open real controllers in this test.
     attach_device(dev(2)); CHECK(opens == 0, "vendor interface lacking Nintendo report IDs is not opened");
     attach_device(dev(1)); s2a_joycon_imu_set_enabled(1);

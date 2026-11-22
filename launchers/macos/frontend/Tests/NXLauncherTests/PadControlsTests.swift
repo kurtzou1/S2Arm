@@ -80,6 +80,31 @@ import NXLauncher
         XCTAssertEqual(state.choice, "two", "禁用档位不能覆盖当前选择")
     }
 
+    func testCapsuleButtonStylesReportCapsuleFocusRing() async throws {
+        XCTAssertEqual(LauncherPrimaryButtonStyle().padRingRadius, LauncherTheme.Metrics.controlRadius)
+        XCTAssertEqual(LauncherPrimaryButtonStyle(capsule: true).padRingRadius, .infinity)
+        XCTAssertEqual(LauncherPrimaryButtonStyle(capsule: true).padRingOutset, 3)
+        XCTAssertEqual(LauncherSecondaryButtonStyle().padRingRadius, LauncherTheme.Metrics.controlRadius)
+        XCTAssertEqual(LauncherSecondaryButtonStyle(capsule: true).padRingRadius, .infinity)
+        XCTAssertEqual(LauncherSecondaryButtonStyle(capsule: true).padRingOutset, 0)
+        XCTAssertEqual(LauncherIconButtonStyle().padRingRadius, LauncherTheme.Metrics.controlRadius)
+        XCTAssertEqual(LauncherIconButtonStyle(size: 28, cornerRadius: 8).padRingRadius, 8)
+
+        let navigation = LauncherPadNavigation()
+        let content = HStack(spacing: 12) {
+            Button("Later") {}.controllerButtonStyle(LauncherSecondaryButtonStyle(capsule: true)).controllerID("later")
+            Button("Update now") {}.controllerButtonStyle(LauncherPrimaryButtonStyle(capsule: true)).controllerID("now")
+        }.padding(40)
+        let window = host(content, navigation: navigation)
+        defer { navigation.detach(); window.close() }
+        try await Task.sleep(for: .milliseconds(100))
+        let targets = Dictionary(uniqueKeysWithValues: navigation.controlTargets(in: window).map { ($0.id, $0) })
+        XCTAssertEqual(targets["later"]?.ringRadius, .infinity)
+        XCTAssertEqual(targets["later"]?.ringOutset, 0)
+        XCTAssertEqual(targets["now"]?.ringRadius, .infinity)
+        XCTAssertEqual(targets["now"]?.ringOutset, LauncherTheme.Focus.creamOutset)
+    }
+
     private func host<V: View>(_ content: V, navigation: LauncherPadNavigation) -> NSWindow {
         _ = NSApplication.shared
         let window = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 500, height: 400), styleMask: [.borderless], backing: .buffered, defer: false)

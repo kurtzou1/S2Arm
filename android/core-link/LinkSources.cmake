@@ -86,6 +86,7 @@ function(s2a_android_nvk_sources output)
         # 设备与能力
         native/direct/vk_device.c native/direct/gs_path.c native/direct/device_caps.c native/direct/vk_identity.c
         native/direct/dev_facts.c   # 设备事实与设备档案（#1749 M0：vk_device.c 建设备时弱引用调它，只记录不决策）
+        native/direct/dev_policy.c  # M1：同一份设备事实 → 现状兼容策略摘要
         # 着色器链里与旧回放无关的部分
         native/direct/compiler_bind.c native/direct/source_store.c native/direct/diag.c
         native/direct/compile_worker.c native/direct/program_cache.c native/direct/offline_library.c
@@ -107,7 +108,7 @@ function(s2a_android_nvk_sources output)
         native/nvn/nvn_vk_driver_cache.c   # 驱动管线缓存落盘文件层（backend_vulkan.c 的 plc_open / plc_close 用；SHA-256 用上面的 sha256.c）
         ../graphics/nvn/gfx/nvn/nvn_fmt_expand.c
         # 回放核心（安卓 / 鸿蒙共用）
-        ../graphics/nvn/replay/rp_exec.c ../graphics/nvn/replay/rp_copy_t2b.c ../graphics/nvn/replay/rp_clear_tex.c ../graphics/nvn/replay/rp_state.c ../graphics/nvn/replay/rp_entry.c
+        ../graphics/nvn/replay/rp_exec.c ../graphics/nvn/replay/rp_copy_t2b.c ../graphics/nvn/replay/rp_clear_tex.c ../graphics/nvn/replay/rp_draw_tex.c ../graphics/nvn/replay/rp_state.c ../graphics/nvn/replay/rp_entry.c
         ../graphics/nvn/replay/rp_res.c ../graphics/nvn/replay/rp_buf.c ../graphics/nvn/replay/rp_pass.c
         ../graphics/nvn/replay/rp_present.c ../graphics/nvn/replay/rp_draw.c
         ../graphics/nvn/replay/nvn_unimpl.c

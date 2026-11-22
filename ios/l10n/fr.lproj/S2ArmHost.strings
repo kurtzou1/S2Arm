@@ -270,6 +270,8 @@
 "app.fpsCap.ladder" = "Cette session ne peut pas maintenir 60 FPS de façon stable ; le jeu revient pour l'instant à sa fréquence native. Il repartira à 60 FPS la prochaine fois que vous ouvrirez le jeu.";
 "app.fpsCap.restored" = "60 FPS est rétabli.";
 "app.fpsCap.retry" = "Réessayer 60 FPS";
+"app.os180.title" = "Cette version du système peut planter";
+"app.os180.body" = "iOS / iPadOS 18.0 a un problème système qui peut fermer l’app dès que l’image du jeu apparaît ; 18.1 le corrige. Mettez à jour dans Réglages > Général > Mise à jour logicielle vers 18.1 ou plus récent (gratuit) et le plantage disparaîtra.";
 "app.lowRam.title" = "Cet appareil n'a peut-être pas assez de mémoire";
 "app.lowRam.body" = "Ce jeu nécessite plus de mémoire que cet appareil n'en dispose. Il démarrera quand même, mais il pourrait ralentir ou être fermé par le système.";
 "app.gpuStop.body" = "Fermez cette app depuis le sélecteur d'apps puis rouvrez-la : vous pourrez généralement reprendre depuis le dernier enregistrement du jeu. Pour nous aider à trouver la cause, touchez « Signaler un problème » pour nous envoyer le diagnostic.";
@@ -529,6 +531,8 @@
 "settings.toggle.touchHud" = "Diagnostic tactile";
 "settings.widen.blocked" = "Le plein écran a des problèmes connus dans ce jeu ; vous pouvez quand même l'activer";
 "textinput.header" = "Saisir du texte";
+"textinput.player.create" = "Créer un utilisateur";
+"textinput.player.select" = "Choisir un utilisateur S2Arm";
 "textinput.min" = "Au moins %ld caractères";
 "textinput.ok" = "OK";
 "textinput.range" = "%ld–%ld caractères";
@@ -644,7 +648,7 @@
 "cert.source.p12" = ".p12 importé";
 "cert.source.pc" = "Depuis votre ordinateur";
 "addrshort.title" = "Le système de cet appareil ne peut pas donner aux apps assez de plage d'adresses pour ce jeu";
-"addrshort.body" = "Ce jeu a besoin au démarrage d'une grande plage d'adresses continue, et le système de cet appareil ne peut pas en donner assez aux apps (cela n'a rien à voir avec le stockage ; libérer de l'espace n'aidera pas) : il peut être très lent ou rester bloqué au début. Vous pouvez toucher « Lancer quand même » pour essayer ; pour jouer normalement, utilisez un iPhone, un iPad ou un Mac avec plus de mémoire (ils donnent aux apps une plage d'adresses plus grande) ou attendez une version ultérieure.";
+"addrshort.body" = "Ce jeu a besoin au démarrage d'une grande plage d'adresses continue, et le système de cet appareil ne peut pas en donner assez aux apps (cela n'a rien à voir avec le stockage ; libérer de l'espace n'aidera pas) : il peut être très lent ou rester bloqué au début. Vous pouvez toucher « Lancer quand même » pour essayer ; pour jouer normalement, utilisez un iPhone ou un iPad avec plus de mémoire (ils donnent aux apps une plage d'adresses plus grande) ou attendez une version ultérieure.";
 "host.startAnyway" = "Lancer quand même";
 /* iPad 外接键盘改键页（ios/keyboard_settings.m，#1869）：除菜单项 / 标题 / 说明外，文案同 Mac 启动器（launchers/shared input.*） */
 "kbd.menu" = "Clavier et souris…";
@@ -694,3 +698,16 @@
 "kbd.target.RS_DOWN" = "Stick droit vers le bas";
 "kbd.target.RS_LEFT" = "Stick droit vers la gauche";
 "kbd.target.RS_RIGHT" = "Stick droit vers la droite";
+"kbd.section.manage" = "Gérer l’affectation des touches";
+"kbd.manage.note" = "Les fichiers d’affectation exportés peuvent être importés dans d’autres jeux. Le fichier input.json de chaque jeu du lanceur Mac utilise le même format et peut aussi être importé. L’importation ne modifie que ce jeu.";
+"kbd.import" = "Importer une affectation des touches…";
+"kbd.export" = "Exporter l’affectation actuelle…";
+"kbd.export.fileName" = "Affectation des touches S2Arm";
+"kbd.export.err.title" = "Impossible d’exporter l’affectation";
+"kbd.import.err.title" = "Impossible d’importer l’affectation";
+"kbd.import.err.read" = "Impossible de lire ce fichier. Choisissez un fichier d’affectation des touches (.json). Votre affectation actuelle n’a pas changé.";
+"kbd.import.err.tooLarge" = "Ce fichier est trop volumineux pour être une affectation des touches (moins de 64 Ko). Votre affectation actuelle n’a pas changé.";
+"kbd.import.err.json" = "Ce fichier n’est pas une affectation des touches (JSON non valide). Votre affectation actuelle n’a pas changé.";
+"kbd.import.err.schema" = "Ce fichier n’est pas une affectation des touches S2Arm, ou sa version n’est pas prise en charge. Votre affectation actuelle n’a pas changé.";
+"kbd.import.err.duplicate" = "Le fichier affecte la même touche à plusieurs boutons. Votre affectation actuelle n’a pas changé.";
+"kbd.import.err.invalid" = "L’affectation de ce fichier est incomplète ou contient des valeurs non valides. Votre affectation actuelle n’a pas changé.";

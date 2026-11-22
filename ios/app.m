@@ -1,5 +1,6 @@
 // iOS App 壳：UIKit 占主线程（s2a_front_run 覆盖 host_main.c 的弱缺省）。窗口与根视图在这里建；Metal 层与触屏 / 手柄由帧率能耗线、服务接入线挂到 s2a_ios_root_view()。
 #include "s2a_loadprog.h"   // 前台激活门
+#include "os_notice.h"   // 系统版本提示（library_play）
 #include <dlfcn.h>
 #import "s2a_l10n.h"
 #import <UIKit/UIKit.h>
@@ -1000,10 +1001,24 @@ void s2a_shell_restore_snapshot(const char *gid) {   // 主线程
     UIViewController *p = sd.window.rootViewController; while (p.presentedViewController) p = p.presentedViewController; [p presentViewController:a animated:YES completion:nil];
 }
 extern NSString *g_s2a_prev_last_game;   // ios/save_transfer.m 定义。多款容器：这次点开始之前上一局是哪款（library_play_go 覆盖 S2ALastGameId 前记下）；单款 App 一直 nil
-static void library_play(const char *gid, void *ctx) {   // 主线程（s2a_shell.h 约定）
-    S2ASceneDelegate *sd = (__bridge S2ASceneDelegate *)ctx;
+static void library_play_now(const char *gid, S2ASceneDelegate *sd) {
     if (!atomic_load(&g_game_picked)) crash_auto_off(gid);
     library_play_go(gid, sd);
+}
+static void library_play(const char *gid, void *ctx) {   // 主线程（s2a_shell.h 约定）
+    S2ASceneDelegate *sd = (__bridge S2ASceneDelegate *)ctx;
+    // iOS / iPadOS 18.0.x：系统自己的上屏断言（ios/os_notice.h），开局前提示一次升级系统，只有「知道了」，点了照常开局（认得出的风险让玩家确认后继续）
+    NSOperatingSystemVersion v = NSProcessInfo.processInfo.operatingSystemVersion; NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
+    if (s2a_os_18_0_affected(v.majorVersion, v.minorVersion) && ![ud boolForKey:@"S2AOS180NoticeShown"]) {
+        LOG("系统版本提示：%ld.%ld.%ld 上屏有系统断言，开局前提示一次升级到 18.1 或更新", (long)v.majorVersion, (long)v.minorVersion, (long)v.patchVersion);
+        char *g = strdup(gid);
+        UIAlertController *a = [UIAlertController alertControllerWithTitle:S2AL(@"app.os180.title") message:S2AL(@"app.os180.body") preferredStyle:UIAlertControllerStyleAlert];
+        [a addAction:[UIAlertAction actionWithTitle:S2AL(@"common.gotIt") style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *x) {
+            [ud setBool:YES forKey:@"S2AOS180NoticeShown"]; library_play_now(g, sd); free(g); }]];
+        UIViewController *p = sd.window.rootViewController; while (p.presentedViewController) p = p.presentedViewController; [p presentViewController:a animated:YES completion:nil];
+        return;
+    }
+    library_play_now(gid, sd);
 }
 // 程序约定号对不上本宿主的款（游戏号 → 1 / 0）：s2a_shell_game_needs_host_update 的缓存，点开被拒时也写进来
 static NSMutableDictionary<NSString *, NSNumber *> *g_host_update;

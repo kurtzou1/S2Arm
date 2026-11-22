@@ -100,7 +100,7 @@ struct ConsoleLabelStyle: LabelStyle {
 // 圆钮 / 胶囊：焦点框跟着画成圆 / 胶囊
 extension ConsoleIconButtonStyle: PadRingShaped { var padRingRadius: CGFloat { .infinity } }
 extension ConsolePillButtonStyle: PadRingShaped { var padRingRadius: CGFloat { .infinity } }
-extension ConsolePlayButtonStyle: PadRingShaped {   // 白底胶囊：贴边的奶油框看不见，改外扩 3 pt
+extension ConsolePlayButtonStyle: PadRingShaped {   // 白底胶囊：贴边的奶油框看不见，改外扩
     var padRingRadius: CGFloat { .infinity }
-    var padRingOutset: CGFloat { 3 }
+    var padRingOutset: CGFloat { LauncherTheme.Focus.creamOutset }
 }

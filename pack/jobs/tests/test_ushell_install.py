@@ -169,6 +169,18 @@ class InstallShellTests(JobCase):
                   mock.patch.object(install, "push_programs", lambda *a, **k: self.fail("装壳不推程序包"))):
             p.start(); self.addCleanup(p.stop)
 
+    def test_certificate_decision_precedes_save_backup(self):
+        ph = mock.Mock(spec=install.PlumeMacPhone)
+        ph.W = mock.Mock()
+        ph.key = "PHONE"
+        layout.save_device(self.c, ph.key, dict(games={GID: {}}))
+        with mock.patch.object(install, "win_cert_gate", side_effect=install.Failure("confirm", code="cert_revoke_confirm")), \
+                mock.patch.object(install, "snapshot_phone_saves") as backup, self.assertRaises(install.Failure) as failed:
+            install.install_shell(self.c, ph)
+        self.assertEqual(failed.exception.code, "cert_revoke_confirm")
+        backup.assert_not_called()
+        ph.install.assert_not_called()
+
     def test_installs_shell_only(self):
         layout.save_device(self.c, self.ph.key, dict(shellId="S1", games={GID: dict(pack="P", program=dict(sha="s"))}))
         r = install.install_shell(self.c, self.ph, steps=False)

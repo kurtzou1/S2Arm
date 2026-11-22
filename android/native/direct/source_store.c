@@ -540,14 +540,16 @@ int s2a_source_hold_pending(uint64_t prog_serial, uint32_t stage, const void *co
     return 0;
 }
 
-int s2a_source_pending_control(uint64_t prog_serial, uint32_t stage, const uint8_t **control, uint32_t *control_bytes) {
-    if (!control || !control_bytes || stage >= 6) return 0;
+int s2a_source_pending_control_copy(uint64_t prog_serial, uint32_t stage, void *dst, uint32_t cap, uint32_t *n) {
+    if (!n) return 0;
+    *n = 0;
+    if (!dst || stage >= 6) return 0;
     int hit = 0;
     pthread_mutex_lock(&g_mu);
     struct pending_entry *e = *pending_find_locked(prog_serial, stage);
-    if (e) {
-        *control = e->control;   // 调用方在 hle_nvn.c 里立刻拷走；条目只在 Finalize / 重设 / 重置时释放
-        *control_bytes = e->control_bytes;
+    if (e && cap >= e->control_bytes) {
+        memcpy(dst, e->control, e->control_bytes);
+        *n = e->control_bytes;
         hit = 1;
     }
     pthread_mutex_unlock(&g_mu);

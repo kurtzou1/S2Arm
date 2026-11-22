@@ -118,6 +118,15 @@ class DeviceLocked(Fail):
     code = "device_locked"
 
 
+class DeveloperModeOff(Fail):
+    """devicectl 原话「Developer Mode is disabled」（CoreDeviceError 10005）：手机没开开发者模式，重试 / 插稳数据线都没用（D-MHM5：
+    原先只报「devicectl 退出码 1：确认手机解锁、数据线插稳」，把玩家往错的方向引）。调用方按码 developer_mode_required 收尾，原因句照做即过"""
+    code = "developer_mode_required"
+
+
+DEV_MODE_OFF = re.compile(r"Developer\s*Mode\s*(?:is\s*)?(?:disabled|not enabled)|CoreDeviceError error 10005")
+
+
 class LowSpace(Fail):
     """推之前估算手机空间不够（估算值偏小：AFC 报的空闲不含 iOS 随时能清掉的空间，「设置 → 储存空间」里的「可用」含它）：
     认得出的风险让玩家确认——调用方报 device_space_low，界面「仍然继续」带 acceptLowSpace 重来就照推，真写满了才停"""
@@ -367,10 +376,13 @@ class Devicectl:
             self.made.add(d); self.dp.mkdir(d)
         s0 = time.time(); t = int((self.env or os.environ).get("S2A_CP_T0", "60")) + Path(src).stat().st_size // (10 << 20)
         for i in (1, 2):
-            rc, _ = self.dcp(t, "device", "copy", "to", *self.container(), "--source", src, "--destination", rel, log="cp.log")
+            rc, out = self.dcp(t, "device", "copy", "to", *self.container(), "--source", src, "--destination", rel, log="cp.log")
             if rc != 124: break
             with open(self.work / "slow_devicectl.log", "a", encoding="utf-8") as f: f.write(f"[{time.strftime('%H:%M:%S')}] 挂：推 {rel} 超 {t} 秒（第 {i} 次）\n")
         self.slow(f"推 {rel}", s0, rc)
+        if rc and DEV_MODE_OFF.search(out or ""):
+            dev = "Apple TV" if tv(self.env) else "iPhone"
+            raise DeveloperModeOff(f"{dev} 没开开发者模式，资源包推不进去：在 {dev} 上打开「设置 → 隐私与安全性 → 开发者模式」，按提示重启，解锁后再点一次")
         if rc:
             if tv(self.env):   # Apple TV（#1696）：没有数据线，同网经 devicectl 推
                 raise Fail("资源包写进 Apple TV 时中断（" + ("Apple TV 空间不够" if self.nospc() else f"devicectl 退出码 {rc}") + "）：确认 Apple TV 开着、没有休眠、和这台电脑在同一个网络、空间够后再点一次")

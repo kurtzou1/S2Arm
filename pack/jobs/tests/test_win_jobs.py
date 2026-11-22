@@ -183,7 +183,7 @@ class Reader(unittest.TestCase):
 
     def test_stale_warns_and_continues(self):
         """维护者 11-17：校验不过不再拒绝。期望手写：身份对不上、exe 在 → 照常返回 exe、发一条 warning 级 reader_unavailable；
-        身份不在（.src_digest 读不到）同样照用；exe 不在 → 物理上用不了，照旧报 reader_unavailable"""
+        身份不在（.src_digest 读不到）同样照用；exe 不在 → 物理上用不了，报 app_control_blocked（D-9G73）"""
         (self.d / "nx_unpack.exe").write_bytes(b"x")
         for case in ("stale", "no_digest"):
             with self.subTest(case=case), as_windows(toolchain):
@@ -197,7 +197,11 @@ class Reader(unittest.TestCase):
         (self.d / ".src_digest").write_text("abc123abc123\n")   # 身份对、exe 不在
         with as_windows(toolchain), self.assertRaises(core.Failure) as e:
             toolchain.reader(self.c)
-        self.assertEqual(e.exception.code, "reader_unavailable")
+        # D-9G73：装好后 exe 不见了 = 杀毒软件隔离；期望手写：码 app_control_blocked，原因句点名 nx_unpack.exe、指去保护历史还原，不叫玩家重装
+        self.assertEqual(e.exception.code, "app_control_blocked")
+        self.assertIn("nx_unpack.exe", str(e.exception))
+        self.assertIn("保护历史记录", str(e.exception))
+        self.assertNotIn("重新安装", str(e.exception))
 
 
 class WinOneclick(unittest.TestCase):

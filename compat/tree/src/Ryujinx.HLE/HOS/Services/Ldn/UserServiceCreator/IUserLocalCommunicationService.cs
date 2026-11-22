@@ -214,7 +214,13 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
 
                 if (config.ProxyIp == 0)
                 {
-                    (_, UnicastIPAddressInformation unicastAddress) = NetworkHelpers.GetLocalInterface(context.Device.Configuration.MultiplayerLanInterfaceId);
+                    // ldn_mitm advertises a real LAN address. Use the same address the control
+                    // channel selected, otherwise a second enumeration can hand the game en0 while
+                    // the room TCP connection is bound to en8.
+                    IPAddress ldnAddress = (NetworkClient as LdnMitmClient)?.LocalAddress;
+                    (_, UnicastIPAddressInformation unicastAddress) = NetworkHelpers.GetLocalInterfaceForTarget(
+                        context.Device.Configuration.MultiplayerLanInterfaceId,
+                        ldnAddress);
 
                     if (unicastAddress == null)
                     {
@@ -1326,7 +1332,16 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
 
                     break;
                 case MultiplayerMode.LdnMitm:
-                    NetworkClient = new LdnMitmClient(context.Device.Configuration);
+                    try
+                    {
+                        NetworkClient = new LdnMitmClient(context.Device.Configuration);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Error?.Print(LogClass.ServiceLdn, $"Could not initialize ldn_mitm: {ex.Message}");
+                        S2AHooks.Red?.Invoke($"ldn: ldn_mitm unavailable, {ex.Message}");
+                        return ResultCode.DeviceNotAvailable;
+                    }
                     break;
             }
 

@@ -39,7 +39,7 @@
 extern "C" {
 #endif
 
-#define NVN_GPU_CONTRACT_VERSION 19   // 改任何签名或语义 +1；两个后端与核心同批改，t_nvn_backend.c 的签名表同批改
+#define NVN_GPU_CONTRACT_VERSION 20   // 改任何签名或语义 +1；两个后端与核心同批改，t_nvn_backend.c 的签名表同批改
 /* 定稿 #1（调用形式）：链接期直接调用 nvn_gpu_*。每个平台构建只链一个后端，Metal 3 / 4 的选择留在 Metal 后端内部。
    理由：零间接、可内联；同进程 A/B 对照没有真实消费者，不为它新增注册实体（vickwv 同意）。 */
 
@@ -112,6 +112,8 @@ enum {
     NVN_GPU_CAP_REPORT_TIMESTAMP  = 1u << 22,  // 逐报告位置的时间戳：已校准 CLOCK_MONOTONIC ns；首版仅 Vulkan，Metal 明确不置位
     NVN_GPU_CAP_STORAGE_SRGB_ALIAS = 1u << 23, // 带图像标志的 sRGB 贴图可按同位宽 UNORM 视图当存储图像写（字节原样，不做 sRGB 编码；建图 EXTENDED_USAGE、
                                                //   其余视图剥掉存储用途）。Vulkan（1.1+）置位；Metal 不置位，核心照旧按「不可写」跳过
+    NVN_GPU_CAP_DRAW_TEX          = 1u << 24,  // v20：通道内画贴图矩形（NVN DrawTexture，nvn_gpu_draw_tex，#1452）。Vulkan 置位；
+                                               //   Metal 后端不置位（iOS 由 nvn_mtl.m draw_tex 自己画），核心照旧记「未接 op OP_DRAW_TEX」跳过
 };
 // 绑定资源类别（布局项 cls；描述符上限按它分）
 enum { NVN_GPU_RES_UBO = 0, NVN_GPU_RES_SSBO, NVN_GPU_RES_TEX, NVN_GPU_RES_SAMP, NVN_GPU_RES_TEX_SAMP, NVN_GPU_RES_IMAGE,
@@ -472,6 +474,27 @@ typedef struct {
 } nvn_gpu_clear;
 // 线程：[提交]，通道内。出错：粘滞 ORDER（通道外）/ ARG（下标越界、通道没有该附件、矩形越界或为空、什么都不清、掩码为 0）。
 void nvn_gpu_clear_rect(nvn_gpu_cmd c, const nvn_gpu_clear *d);
+// v20：DrawTexture（NVN nvnCommandBufferDrawTexture，#1452）。要 NVN_GPU_CAP_DRAW_TEX。对照 iOS nvn_mtl.m draw_tex 与 Ryujinx HelperShader.DrawTexture：
+//   在当前通道里画一个四边形到颜色附件 0（pass_desc.color[0]），只写这一个附件；深度 / 模板测试关、不剔除、单样本着色，
+//   视口 = 目的矩形（与 nvn_gpu_dyn.vp 同约定，窗口原点按 origin_ll 换，同普通绘制），裁剪照 sc / has_sc（同 nvn_gpu_dyn.sc）。
+//   源按 uv 采样：(u0, v0) 落在裁剪空间 (-1, +1) 那一角、(u1, v1) 落在 (+1, -1) 那一角，中间线性插值；镜像由核心交换端点表达，dst 的 w / h 恒为正。
+//   混合与写掩码只取 color(0) 这一份、由调用方显式给（游戏可以不先绑管线就调 DrawTexture，状态不从 set_pipe 取）。
+//   同 clear_rect：不看也不保证当前管线、动态状态与绑定，调用之后核心照「新通道」那样在下一笔绘制前全部重发。
+typedef struct {
+    nvn_gpu_view src; nvn_gpu_samp samp;   // 源：二维颜色视图（浮点 / 归一化读，不收整数、深度模板）；采样器原样用
+    float dst[4];                          // 目的矩形 x, y, w, h（像素，w / h > 0）
+    float uv[4];                           // 源 u0, v0, u1, v1（按源贴图尺寸归一化）
+    int32_t sc[4]; uint8_t has_sc;         // 裁剪（左上原点像素，必须整个落在通道里且非空）；has_sc = 0 = 整个通道
+    uint8_t origin_ll;                     // 窗口原点在左下（同 nvn_gpu_dyn.origin_ll）
+    uint8_t blend_en;                      // color(0) 开混合（blend 生效）
+    uint8_t color_mask;                    // color(0) 写掩码 r=1 g=2 b=4 a=8，至少一位
+    blend_st blend;                        // color(0) 的混合；不收高级混合（adv_mode）
+    float blend_color[4];
+} nvn_gpu_draw_tex_desc;
+// 线程：[提交]，通道内。出错：粘滞 ORDER（通道外）/ ARG（句柄为空、矩形为空 / 非有限、裁剪越界或为空、掩码为 0、通道没有颜色附件 0）/
+//   UNSUPPORTED（没置 CAP_DRAW_TEX、源不是二维颜色视图或是整数 / 深度模板、颜色附件 0 是整数格式、高级混合、设备没开 dualSrcBlend 却给了双源因子、
+//   源正是本通道的附件）。这些核心都在调用前筛掉并具名记账；走到这里报的是核心的错。
+void nvn_gpu_draw_tex(nvn_gpu_cmd c, const nvn_gpu_draw_tex_desc *d);
 // NVN 屏障（NVNbarrierBits 原样）。
 /* 定稿 #7：核心只表达 NVN 的顺序与访问语义（这个位、这次拷贝、这次附件写）；Vulkan 后端自己跟踪每个子资源的 layout / stage / access 并据此发屏障，
    VkImageLayout 不进核心；Metal 4 后端同理自己补编码器间屏障，Metal 3 交给自动冒险追踪。经裸 GPU 地址的写后读只有 NVN 位能表达，核心照游戏原样传。 */

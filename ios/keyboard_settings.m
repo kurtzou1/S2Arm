@@ -7,7 +7,10 @@
 //   鼠标部分（#1869 PR 2）同 Mac 启动器：每个按键位的「…」里选鼠标键（未绑定 / 左 / 右 / 中 / 侧键 1、2），另有一组「鼠标」——
 //   移动鼠标时（转动视角 / 不起作用）、左右 / 上下灵敏度（0.1–10，步长 0.1）、左右 / 上下反过来、停手后视角回正；文案逐字取 Mac 启动器 input.mouse*。
 //   页面开着时键盘 / 鼠标不进游戏（keyboard.m 静音）。入口：齿轮菜单第一层，「编辑虚拟按键」旁（vpad.m）
+//   「管理键位」组（#1987）：导入 / 导出这一款的键位文件，做法同触屏布局页（vpad_settings.m）——选文件面板只认 JSON，导出先写临时目录再交面板；
+//   文件就是按款存的那份 schema 1 JSON（与 Mac 启动器每款的 input.json 同格式），导入只改这一款
 #import <UIKit/UIKit.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import "s2a_l10n.h"
 #include "keyboard.h"
 #include "keyboard_map.h"
@@ -17,6 +20,8 @@
 static const int kButtons[] = {0, 1, 2, 3, 6, 7, 8, 9, 4, 5, 10, 11, 13, 15, 12, 14};   // A B X Y L R ZL ZR 按下左右摇杆 + - 十字键上下左右
 static const int kSticks[] = {17, 19, 16, 18, 21, 23, 20, 22};                         // 左摇杆上下左右、右摇杆上下左右
 static const int kCommonKeys[] = {36, 53, 49, 48, 56, 59, 58};                         // 同 Mac InputSettingsSheet.commonKeys
+// 组：0 按键、1 摇杆、2 鼠标、3 管理键位（导入 / 导出）
+static const NSInteger kMouseSection = 2, kManageSection = 3;
 
 // 按键位显示名（同 Mac InputNames.target：A / B / X / Y / L / R / ZL / ZR 各语言相同，其余走文案）
 static NSString *target_name(int t) {
@@ -73,12 +78,26 @@ static void load_saved(s2a_input_config *out) {
 }
 int s2a_ios_keyboard_customized(void) { return [s2a_ios_settings_defaults() stringForKey:S2AKeyboardMapKey].length > 0; }
 
-@interface S2AKeyboardSettings : UITableViewController
+// 导入没成：每类原因一句话（解析器的 s2a_input_config_error_message 是英文、给日志用，不上屏）
+static NSString *import_error(int code) {
+    switch (code) {
+        case S2A_KBD_IMPORT_TOO_LARGE: return S2AL(@"kbd.import.err.tooLarge");
+        case S2A_INPUT_CONFIG_JSON: return S2AL(@"kbd.import.err.json");
+        case S2A_INPUT_CONFIG_SCHEMA: return S2AL(@"kbd.import.err.schema");
+        case S2A_INPUT_CONFIG_DUPLICATE: return S2AL(@"kbd.import.err.duplicate");
+        case S2A_INPUT_CONFIG_IO: return S2AL(@"kbd.import.err.read");
+        default: return S2AL(@"kbd.import.err.invalid");   // 缺字段 / 无效按键位 / 无效绑定 / 超范围
+    }
+}
+
+@interface S2AKeyboardSettings : UITableViewController <UIDocumentPickerDelegate>
 @property(nonatomic, copy) void (^closed)(void);
 @end
 @implementation S2AKeyboardSettings {
     s2a_input_config _map;
     int _recording;   // 在录的按键位；-1 = 没在录
+    NSURL *_exportDirectory;   // 导出时写文件的临时目录（面板关掉就删）
+    BOOL _importing;           // 选文件面板这次是导入（否则是导出）
 }
 - (instancetype)init {
     if (!(self = [super initWithStyle:UITableViewStyleInsetGrouped])) return nil;
@@ -101,16 +120,19 @@ int s2a_ios_keyboard_customized(void) { return [s2a_ios_settings_defaults() stri
 }
 - (void)done { [self.navigationController dismissViewControllerAnimated:YES completion:nil]; }
 - (int)targetAt:(NSIndexPath *)path { return path.section == 0 ? kButtons[path.row] : kSticks[path.row]; }
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 3; }
-- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section { return section == 0 ? 16 : section == 1 ? 8 : 6; }
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 4; }
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    return section == 0 ? 16 : section == 1 ? 8 : section == kMouseSection ? 6 : 2;
+}
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
-    return section == 0 ? S2AL(@"kbd.section.buttons") : section == 1 ? S2AL(@"kbd.section.sticks") : S2AL(@"kbd.mouse");
+    return section == 0 ? S2AL(@"kbd.section.buttons") : section == 1 ? S2AL(@"kbd.section.sticks") : section == kMouseSection ? S2AL(@"kbd.mouse") : S2AL(@"kbd.section.manage");
 }
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
-    return section == 1 ? S2AL(@"kbd.footer") : section == 2 ? S2AL(@"kbd.mouse.note") : nil;
+    return section == 1 ? S2AL(@"kbd.footer") : section == kMouseSection ? S2AL(@"kbd.mouse.note") : section == kManageSection ? S2AL(@"kbd.manage.note") : nil;
 }
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)path {
-    if (path.section == 2) return [self mouseCell:path.row];
+    if (path.section == kMouseSection) return [self mouseCell:path.row];
+    if (path.section == kManageSection) return [self manageCell:path.row];
     int target = [self targetAt:path];
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
     [self configure:cell target:target];
@@ -159,10 +181,10 @@ int s2a_ios_keyboard_customized(void) { return [s2a_ios_settings_defaults() stri
 - (void)refreshVisibleRows {
     for (NSIndexPath *path in self.tableView.indexPathsForVisibleRows) {
         UITableViewCell *cell = [self.tableView cellForRowAtIndexPath:path];
-        if (!cell) continue;
-        if (path.section == 2) [self configureMouse:cell row:path.row];
+        if (!cell || path.section == kManageSection) continue;   // 「管理键位」两行是固定文字，没有可刷新的
+        if (path.section == kMouseSection) [self configureMouse:cell row:path.row];
         else [self configure:cell target:[self targetAt:path]];
-        if (path.section < 2) {   // 「…」菜单里鼠标键的勾跟着换
+        if (path.section < kMouseSection) {   // 「…」菜单里鼠标键的勾跟着换
             UIButton *more = (UIButton *)cell.accessoryView;
             UIMenu *menu = more.menu; NSMutableArray *children = [menu.children mutableCopy];
             if (children.count == 3) {
@@ -225,7 +247,7 @@ int s2a_ios_keyboard_customized(void) { return [s2a_ios_settings_defaults() stri
 - (void)sensitivityMoved:(UISlider *)slider {
     double v = MAX(0.1, MIN(10, round(slider.value * 10) / 10));
     if (slider.tag == 1) _map.sensitivity_x = v; else _map.sensitivity_y = v;
-    UITableViewCell *cell = [self.tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:slider.tag inSection:2]];
+    UITableViewCell *cell = [self.tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:slider.tag inSection:kMouseSection]];
     UIListContentConfiguration *c = (UIListContentConfiguration *)cell.contentConfiguration;
     c.secondaryText = [NSString stringWithFormat:@"%.1f", v]; cell.contentConfiguration = c;
 }
@@ -254,7 +276,8 @@ int s2a_ios_keyboard_customized(void) { return [s2a_ios_settings_defaults() stri
 // 点按键位：开始录（再点一次同一行取消）
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)path {
     [tableView deselectRowAtIndexPath:path animated:YES];
-    if (path.section == 2) return;   // 鼠标组用行内的开关 / 滑块 / 菜单
+    if (path.section == kMouseSection) return;   // 鼠标组用行内的开关 / 滑块 / 菜单
+    if (path.section == kManageSection) { [self stopRecording]; if (path.row == 0) [self importKeys]; else [self exportKeys]; return; }
     int target = [self targetAt:path];
     if (_recording == target) { [self stopRecording]; return; }
     [self stopRecording];
@@ -293,6 +316,70 @@ int s2a_ios_keyboard_customized(void) { return [s2a_ios_settings_defaults() stri
     }]];
     [self presentViewController:alert animated:YES completion:nil];
 }
+// ---- 「管理键位」组：0 导入键位…、1 导出当前键位… ----
+- (UITableViewCell *)manageCell:(NSInteger)row {
+    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+    UIListContentConfiguration *c = [UIListContentConfiguration cellConfiguration];
+    c.text = row == 0 ? S2AL(@"kbd.import") : S2AL(@"kbd.export");
+    c.textProperties.color = self.view.tintColor;
+    c.image = [UIImage systemImageNamed:row == 0 ? @"square.and.arrow.down" : @"square.and.arrow.up"];
+    cell.contentConfiguration = c;
+    cell.accessibilityIdentifier = row == 0 ? @"kbd.import" : @"kbd.export";
+    return cell;
+}
+- (void)showImportError:(NSString *)reason {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:S2AL(@"kbd.import.err.title") message:reason preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:S2AL(@"common.ok") style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+- (void)importKeys {
+    _importing = YES;
+    UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeJSON] asCopy:YES];
+    picker.delegate = self; picker.allowsMultipleSelection = NO;
+    [self presentViewController:picker animated:YES completion:nil];
+}
+- (void)cleanExport {
+    if (_exportDirectory) [NSFileManager.defaultManager removeItemAtURL:_exportDirectory error:nil];
+    _exportDirectory = nil;
+}
+// 导出：这一款现在的键位（没改过就是缺省）写成文件，先放临时目录，再交选文件面板存到玩家选的位置
+- (void)exportKeys {
+    [self cleanExport]; _importing = NO;
+    char json[4096]; int n = s2a_kbd_config_json(&_map, json, sizeof json);
+    _exportDirectory = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:[@"s2arm-keys-" stringByAppendingString:NSUUID.UUID.UUIDString]] isDirectory:YES];
+    const char *gid = getenv("S2A_LAUNCH_GAME_ID");
+    NSString *name = gid && *gid ? [NSString stringWithFormat:@"%@ %s.json", S2AL(@"kbd.export.fileName"), gid] : [S2AL(@"kbd.export.fileName") stringByAppendingString:@".json"];
+    NSURL *url = [_exportDirectory URLByAppendingPathComponent:name];
+    NSError *error;
+    if (n <= 0 || ![NSFileManager.defaultManager createDirectoryAtURL:_exportDirectory withIntermediateDirectories:NO attributes:nil error:&error]
+        || ![[NSData dataWithBytes:json length:(NSUInteger)n] writeToURL:url options:NSDataWritingAtomic error:&error]) {
+        [self cleanExport];
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:S2AL(@"kbd.export.err.title") message:error.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:S2AL(@"common.ok") style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+        return;
+    }
+    UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForExportingURLs:@[url] asCopy:YES];
+    picker.delegate = self; [self presentViewController:picker animated:YES completion:nil];
+}
+- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    if (!_importing) { [self cleanExport]; return; }
+    NSURL *url = urls.firstObject; if (!url) return;
+    BOOL scoped = [url startAccessingSecurityScopedResource];
+    NSDictionary *attributes = [NSFileManager.defaultManager attributesOfItemAtPath:url.path error:nil];
+    // 先看大小再读：超过上限的文件不整个读进内存（s2a_kbd_import 也会再查一次）
+    NSData *data = [attributes[NSFileType] isEqualToString:NSFileTypeRegular] && [attributes fileSize] <= S2A_KBD_IMPORT_MAX_BYTES
+        ? [NSData dataWithContentsOfURL:url options:0 error:nil] : nil;
+    BOOL tooLarge = [attributes[NSFileType] isEqualToString:NSFileTypeRegular] && [attributes fileSize] > S2A_KBD_IMPORT_MAX_BYTES;
+    if (scoped) [url stopAccessingSecurityScopedResource];
+    if (!data) { [self showImportError:import_error(tooLarge ? S2A_KBD_IMPORT_TOO_LARGE : S2A_INPUT_CONFIG_IO)]; return; }
+    s2a_input_config imported = _map;
+    int r = s2a_kbd_import(data.bytes, data.length, &imported);
+    if (r != S2A_KBD_IMPORT_OK) { [self showImportError:import_error(r)]; return; }
+    _map = imported;
+    [self save];   // 只写这一款，当场生效
+}
+- (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller { [self cleanExport]; }
 - (void)restoreDefault {
     [self stopRecording];
     s2a_kbd_default(&_map);

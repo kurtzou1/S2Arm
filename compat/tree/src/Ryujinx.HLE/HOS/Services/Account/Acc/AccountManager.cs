@@ -24,6 +24,7 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc
         private readonly HorizonClient _horizonClient;
 
         private readonly ConcurrentDictionary<string, UserProfile> _profiles;
+        private string[] _userOrder = [];
         private UserProfile[] _storedOpenedUsers;
 
         public UserProfile LastOpenedUser { get; private set; }
@@ -229,7 +230,17 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc
 
         public IEnumerable<UserProfile> GetAllUsers()
         {
-            return _profiles.Values;
+            // S2Arm local players: the listed players first, in the host's order, then every other user on this device. Ordering only, never
+            // hiding: users created before the list existed (PlayerN from the user creator) and their saves stay visible to the game.
+            if (_userOrder.Length == 0) return _profiles.Values;
+            return _userOrder.Select(key => _profiles.TryGetValue(key, out var user) ? user : null)
+                .Where(user => user != null)
+                .Concat(_profiles.Where(p => !_userOrder.Contains(p.Key)).OrderBy(p => p.Key, StringComparer.Ordinal).Select(p => p.Value));   // fixed order: the dictionary has none
+        }
+
+        public void SetUserOrder(IEnumerable<UserId> orderedUsers)
+        {
+            _userOrder = orderedUsers.Select(id => id.ToString()).Distinct().ToArray();
         }
 
         internal IEnumerable<UserProfile> GetOpenedUsers()

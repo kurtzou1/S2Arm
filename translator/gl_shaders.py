@@ -178,11 +178,18 @@ def es(args, data):
 def glsl_type(t, refl):
     return refl['types'][t]['name'] if t in refl.get('types', {}) else t
 
+def _text(data):
+    """子进程输出按 UTF-8 解、解不开的字节换成替代符。不用 text=True：那是按系统代码页解（中文 Windows 是 GBK），工具吐出 UTF-8 或游戏着色器里的
+    日文注释就解不开，Windows 上读输出的线程出错后 stdout / stderr 变成 None，失败时拼原因先抛 TypeError，真原因丢掉（D-TCA9 Windows 0.6.7 出包）"""
+    return (data or b"").decode("utf-8", errors="replace")
+
+
 def run(command):
-    result = subprocess.run([str(arg) for arg in command], capture_output=True, text=True, timeout=120)
+    result = subprocess.run([str(arg) for arg in command], capture_output=True, timeout=120)
+    out, err = _text(result.stdout), _text(result.stderr)
     if result.returncode:
-        raise ValueError((result.stdout + result.stderr).strip())
-    return result.stdout
+        raise ValueError((out + err).strip())
+    return out
 
 
 def translate(src, stage, key, tmp):
@@ -346,10 +353,11 @@ def one(task, temp, components):
 
 def metal(command, temp):
     """Metal 编译器：Windows 上按相对 temp 的路径交给编译器（spirv_msl.metal_run：空格会被再拆开、非 ASCII 打不开）"""
-    result = metal_run([str(arg) for arg in command], temp, capture_output=True, text=True, timeout=120)
+    result = metal_run([str(arg) for arg in command], temp, capture_output=True, timeout=120)
+    out, err = _text(result.stdout), _text(result.stderr)
     if result.returncode:
-        raise ValueError((result.stdout + result.stderr).strip())
-    return result.stdout
+        raise ValueError((out + err).strip())
+    return out
 
 
 def compile_msl(task, temp):
@@ -369,10 +377,11 @@ def library(airs, destination, sdk):
 
 
 def tool_version(command):
-    result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+    result = subprocess.run(command, capture_output=True, timeout=120)
+    out, err = _text(result.stdout), _text(result.stderr)
     if result.returncode:
-        raise ValueError((result.stdout + result.stderr).strip())
-    return " ".join((result.stdout + result.stderr).split())
+        raise ValueError((out + err).strip())
+    return " ".join((out + err).split())
 
 
 def table_header():

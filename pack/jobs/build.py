@@ -203,8 +203,9 @@ def runtime_env(c, game, runtime, input_ok=True):
     #   不叫 Saves：同一文件夹里已有运行层内部的 saves/，APFS / NTFS 不分大小写会撞名；ASCII 名避开非 ASCII 路径的坑
     # 本地玩家（#623）：请求带 player {user: first | 32 位十六进制, name, folder} = 启动器顶栏选的玩家 → 服务层 S2A_PLAYER_USER / S2A_PLAYER_NAME
     #   （services/S2A.Services/LocalPlayer.cs），存档位置换成这款文件夹里这个玩家的那个（第一个玩家仍是 SaveData）；没带 = 旧行为
-    from saves import requested_player   # 校验规则与导入社区存档共用一份（saves.py）
+    from saves import requested_player, requested_local_players   # 校验规则与导入社区存档共用一份（saves.py）
     player = requested_player(c.r)
+    local_players = requested_local_players(c.r)
     save_folder = contained(layout.root_of(c, game["id"]), layout.path(c, game["id"], player["folder"] if player else "SaveData"))
     cache = contained(layout.root_of(c, game["id"]), layout.path(c, game["id"], "shader-cache"))
     docs = contained(c.library, c.library / "temp" / game["id"])
@@ -236,6 +237,8 @@ def runtime_env(c, game, runtime, input_ok=True):
         env["S2A_PLAYER_USER"] = player["user"]
         if player.get("name"):
             env["S2A_PLAYER_NAME"] = player["name"]
+    if local_players:
+        env["S2A_LOCAL_PLAYERS"] = json.dumps(local_players, ensure_ascii=False, separators=(",", ":"))
     if language is not None:
         env["S2A_SYSTEM_LANGUAGE"] = LANGUAGES[language]
     if c.r.get("devHud"):

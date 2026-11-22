@@ -21,12 +21,20 @@
 
 static struct {
     int on, tier, why, cpu_bound, no_up;   // no_up：本局因 CPU 跟不上从 60 帧降下来过，不再按 GPU 余量升回
-    uint64_t win_ns, up_ns, last_change, gpu_t0, settle_until; double gpu0;   // settle_until：回前台后到这一刻之前的帧不进窗口
+    uint64_t win_ns, up_ns, last_change, gpu_t0, settle_until; double gpu0; double vsync_us;   // vsync_us：屏幕刷新一拍（0 = 不知道）   // settle_until：回前台后到这一刻之前的帧不进窗口
     uint32_t dt_us[QL_RING]; int nd;
     double l_fps, l_slow, l_gpu; int l_th;
 } q;
 
-void s2a_ql_setup(void) { memset(&q, 0, sizeof q); q.on = 1; q.gpu0 = -1; }
+void s2a_ql_setup(void) { double v = q.vsync_us; memset(&q, 0, sizeof q); q.on = 1; q.gpu0 = -1; q.vsync_us = v; }
+void s2a_ql_set_refresh_hz(int hz) { q.vsync_us = hz > 0 ? 1e6 / hz : 0; }
+// 慢帧门槛（纯函数，t_qladder 测）：目标 × 1.5；知道刷新率时不低于「目标按刷新拍取整的拍数 × 拍长 + 半拍」——刷新率不是帧率整数倍时，按时出的帧也要等到下一拍
+double s2a_ql_slow_us(double target_us, double vsync_us);
+double s2a_ql_slow_us(double target_us, double vsync_us) {
+    double t = target_us * 1.5;
+    if (vsync_us > 0) { double beats = __builtin_ceil(target_us / vsync_us - 0.01), q2 = beats * vsync_us + vsync_us / 2; if (q2 > t) t = q2; }
+    return t;
+}
 int s2a_ql_tier(void) { return q.tier; }
 int s2a_ql_fps60(int tier) { return tier == 0; }
 int s2a_ql_why(void) { return q.why; }
@@ -55,7 +63,8 @@ int s2a_ql_frame(uint64_t now, int game, uint64_t dt, double gpu_ms, int thermal
     double itv_us = 1e6 / 60 * (game_itv >= 1 ? game_itv : 1);
     double target_us = q.tier == 0 ? 1e6 / 60 : 1e6 / 30;
     if (target_us < itv_us) target_us = itv_us;
-    int slow = 0; for (int i = 0; i < q.nd; i++) slow += q.dt_us[i] > target_us * 1.5;
+    double slow_us = s2a_ql_slow_us(target_us, q.vsync_us);
+    int slow = 0; for (int i = 0; i < q.nd; i++) slow += q.dt_us[i] > slow_us;
     qsort(q.dt_us, (size_t)q.nd, sizeof q.dt_us[0], cmpu);
     double med = q.nd ? q.dt_us[q.nd / 2] : 0, slow_pct = q.nd ? 100.0 * slow / q.nd : 0;
     double gpu_pct = q.gpu0 >= 0 && gpu_ms >= q.gpu0 && now > q.gpu_t0 ? 100.0 * (gpu_ms - q.gpu0) / ((double)(now - q.gpu_t0) / 1e6) : -1;

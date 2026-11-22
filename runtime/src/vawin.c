@@ -340,8 +340,37 @@ uint64_t s2a_span_seed(uint64_t pid) {
     while (a < b) { size_t m = (a + b) / 2; if (g_span_seed[m].pid < pid) a = m + 1; else b = m; }
     return a < sizeof g_span_seed / sizeof g_span_seed[0] && g_span_seed[a].pid == pid ? (uint64_t)g_span_seed[a].mb << 20 : 0;
 }
-// 本款已知的最高跨度：本机记录与种子表取大（本机短局记下的只是下界，别人设备上碰到过更高的照收，宁可保守）；0 = 都没有
-uint64_t s2a_window_span_seen(uint64_t pid) { char p[1024]; uint64_t r = pid && span_path(p, sizeof p, pid) ? read_u64(p) : 0, s = pid ? s2a_span_seed(pid) : 0; return r > s ? r : s; }
+// 收窄后没到首帧的自愈（D-PR33，11-21 iOS 26.7、0.6.7）：按已知跨度（本机记录 / 种子表）收窄窗口的一局，起局时写 <前缀>wire/<号>/span_cap_try（内容 = 这次按的跨度），
+//   首帧上屏删掉（s2a_window_cap_ok，ap_host.c）；下一局起局还看见它 = 上一局收窄后没到首帧（开局就停 / 崩 / 被杀），改名 span_cap_bad，
+//   之后这款已知跨度不超过它就不按跨度收、窗口照缺省给；跨度长大（本机记下更高的）超过它再试。种子表随宿主下发、本机删不掉，
+//   原自愈（s2a_window_span_forget）只删本机记录，种子里一个早夭局的小跨度会让这款每局都收得过小、每局都打不开。
+//   没到首帧不一定是窗口的错，也照算：多给窗口只是少还宿主一些，不会因此打不开。本局自己写的标记本局不认（g_cap_try_pid）
+static uint64_t g_cap_try_pid; static char g_cap_try_p[1024];
+static int cap_file(char *o, size_t n, const char *pre, uint64_t pid, const char *name) {
+    int k = s2a_docs_path(o, n, "%swire/%016llX/%s", pre ? pre : "", (unsigned long long)pid, name); return k > 0 && (size_t)k < n; }
+int s2a_window_span_cap_blocked(uint64_t span, uint64_t bad) { return bad && span <= bad; }   // 纯函数，t_vawin_learned 测
+uint64_t s2a_window_span_trust(const char *pre, uint64_t pid, uint64_t span) {   // 已知跨度这局能不能用来收窄：能 = 原值，不能 = 0
+    char t[1024], b[1024];
+    if (!span || !pid || !cap_file(b, sizeof b, pre, pid, "span_cap_bad")) return span;
+    if (pid != g_cap_try_pid && cap_file(t, sizeof t, pre, pid, "span_cap_try") && !access(t, F_OK)) {
+        if (!rename(t, b)) LOG("【黄】地址窗口：本款（%016llX）上一局按已知跨度收窄窗口后没到首帧，记下（%s），已知跨度不超过它时不再按它收", (unsigned long long)pid, b);
+        else LOG("【红】地址窗口：本款（%016llX）上一局收窄后没到首帧，标记改名 %s 失败（errno %d）", (unsigned long long)pid, b, errno); }
+    uint64_t bad = read_u64(b);
+    if (!s2a_window_span_cap_blocked(span, bad)) return span;
+    static uint64_t said; if (said != pid) { said = pid;
+        LOG("地址窗口：本款（%016llX）按已知跨度 %llu MB 收窄过、那局没到首帧（%s 记 %llu MB）：这局不按跨度收", (unsigned long long)pid, (unsigned long long)(span >> 20), b, (unsigned long long)(bad >> 20)); }
+    return 0;
+}
+void s2a_window_cap_try(const char *pre, uint64_t pid, uint64_t span) {   // 这局按 span 收窄了窗口：记下，首帧上屏删
+    char p[1024]; if (!span || !pid || !cap_file(p, sizeof p, pre, pid, "span_cap_try")) return;
+    { char d[1024]; snprintf(d, sizeof d, "%s", p); char *sl = strrchr(d, '/'); if (sl) { *sl = 0; char *w = strrchr(d, '/'); if (w) { *w = 0; mkdir(d, 0755); *w = '/'; } mkdir(d, 0755); } }   // wire/、wire/<号>/ 可能都还没有
+    FILE *f = fopen(p, "w"); if (!f) { LOG("【红】地址窗口：写收窄标记 %s 失败（errno %d）", p, errno); return; }
+    fprintf(f, "%llu\n", (unsigned long long)span); fclose(f);
+    g_cap_try_pid = pid; snprintf(g_cap_try_p, sizeof g_cap_try_p, "%s", p);
+}
+void s2a_window_cap_ok(void) { if (g_cap_try_p[0] && !unlink(g_cap_try_p)) g_cap_try_p[0] = 0; }   // 首帧上屏（ap_host.c）：收窄后跑起来了
+// 本款已知的最高跨度：本机记录与种子表取大（本机短局记下的只是下界，别人设备上碰到过更高的照收，宁可保守）；0 = 都没有 / 收窄过没到首帧（s2a_window_span_trust）
+uint64_t s2a_window_span_seen(uint64_t pid) { char p[1024]; uint64_t r = pid && span_path(p, sizeof p, pid) ? read_u64(p) : 0, s = pid ? s2a_span_seed(pid) : 0; return s2a_window_span_trust(NULL, pid, r > s ? r : s); }
 static uint64_t g_span_learned;   // 本款（多款容器 = 各款最大，有一款没记录就 0）学到的跨度
 uint64_t s2a_window_span_learned(void) { return g_span_learned; }   // 单测 t_vawin_container 读
 // 自愈：窗口按学到的跨度收窄后布局仍放不下（svc_mem.c 起局判「连模块段、栈、堆前段都放不下」那一刻）——这份记录不可信，删掉，下一局退回缺省给法
@@ -1182,6 +1211,7 @@ uint64_t s2a_window_container_need(const char *bundle, const char *home) {
         { uint64_t pid = strtoull(gid, NULL, 16), sl = 0, sg = 0; char sp[1400];
           if (pid) { s2a_docs_path(sp, sizeof sp, "games/%s/wire/%016llX/span_peak", gid, (unsigned long long)pid); sl = read_u64(sp); }
           sg = s2a_window_span_seen(pid); if (sg > sl) sl = sg;   // 旧位置的记录、种子表取大
+          { char pre[64]; snprintf(pre, sizeof pre, "games/%s/", gid); sl = s2a_window_span_trust(pre, pid, sl); }   // 这款收窄过、那局没到首帧：按不知道（选定后 svc_mem.c 同样不收）
           // 这款本机没记录、种子表也没有：跨度不知道。不再拿整份标准布局 ni 顶（必然不小于空洞、被当成「学到的跨度不对」作废，日志还说成旧版记错）：
           //   记一笔「不知道」，整容器按不知道处理（窗口不按跨度收、快照区照放、不弹「地址空间不够」）
           if (!sl) { span_unknown = 1; LOG("地址窗口：多款容器 %s 本机没记下跨度、种子表也没有：这款跨度不知道，按需起局、边玩边学", gid); }
@@ -1319,6 +1349,7 @@ static void vawin_reserve(void) {
     if (!sz && g_fit >= MIN_WIN + HOST_BELOW) {
         uint64_t pool = s2a_window_container_pool();   // 多款容器在构造期逐款读过 NPDM；单款 0 = 不知道，照旧 3 GiB
         uint64_t below = s2a_window_host_below_for_pool(g_fit, g_span_learned, pool);
+        if (!g_ctr && g_span_learned && below > HOST_BELOW) s2a_window_cap_try(NULL, g_ctor_pid, g_span_learned);   // 单款按已知跨度收窄了：记标记（多款容器选定游戏后按那款记，svc_mem.c）
         if (pool && below != HOST_BELOW) LOG("地址窗口：按本款应用池 %llu MB 定宿主保留 %llu MB（固定 %llu MB 时窗口放不下 SDK 开局要的堆）",
             (unsigned long long)(pool >> 20), (unsigned long long)(below >> 20), (unsigned long long)(HOST_BELOW >> 20));
 #if !TARGET_OS_OSX

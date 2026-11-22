@@ -45,6 +45,27 @@ TARGETS = (
     ('adreno-750-sd8g3', 49630, '骁龙 8 Gen 3'),
     ('adreno-840-sd8eg5', 52150, '骁龙 8 Elite Gen 5'),          # SM-S948B（Galaxy S26 Ultra）
     ('adreno-850-sd8exg6', 52618, '骁龙 8 Elite Extreme Gen 6'),  # OnePlus PYB110；Adreno 850 = Extreme 档（Qualcomm 命名）
+    # 天玑（9000 有真机 probed 档 mali-g710-r32p1、9400 等真机导出，都不拼）
+    ('mali-g710-d9000p', 50347, '天玑 9000+'),                   # vivo V2231A
+    ('mali-g715-d9200', 49866, '天玑 9200'),
+    ('mali-g715-d9200p', 45760, '天玑 9200+'),                   # vivo V2302A
+    ('mali-g720-d9300', 45060, '天玑 9300'),
+    ('mali-g720-d9300p', 42339, '天玑 9300+'),                   # vivo V2359A
+    ('mali-g925-d9400p', 45836, '天玑 9400+'),                   # vivo V2458A
+    ('mali-g1ultra-d9500', 52556, '天玑 9500'),                  # OPPO PLG110
+    ('mali-g2ultra-d9600pro', 52183, '天玑 9600 Pro'),           # OPPO PMX110
+    # 猎户座
+    ('mali-g78-e2100', 40572, 'Exynos 2100'),                    # SM-G998B（Galaxy S21 Ultra），最新报告是 Android 15
+    ('xclipse-920-e2200', 45599, 'Exynos 2200（Xclipse 一代）'),
+    ('xclipse-940-e2400', 52490, 'Exynos 2400'),                 # SM-S926B（Galaxy S24+）
+    ('xclipse-950-e2500', 43405, 'Exynos 2500'),                 # SM-F766B（Galaxy Z Flip7）
+    ('xclipse-960-e2600', 52499, 'Exynos 2600'),                 # SM-S942B
+    # Google Tensor（G5 起换成 Imagination PowerVR；G6 的 PowerVR C-Series 在 gpuinfo 上没有报告）
+    ('mali-g78-tg1', 53386, 'Tensor G1'),                        # Pixel 6
+    ('mali-g710-tg2', 47341, 'Tensor G2'),                       # Pixel 7
+    ('mali-g715-tg3', 47617, 'Tensor G3'),                       # Pixel 8
+    ('mali-g715-tg4', 51222, 'Tensor G4'),                       # Pixel 9
+    ('powervr-dxt-tg5', 51806, 'Tensor G5'),                     # Pixel 10
 )
 
 

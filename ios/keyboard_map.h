@@ -158,3 +158,14 @@ static inline int s2a_kbd_config_json(const s2a_input_config *c, char *out, size
 #undef S2A_KBD_PUT
     return (int)at;
 }
+
+// 导入键位（改键页「导入键位…」，#1987）：先查大小，再交共用解析器。成功写进 out；失败 out 不动（解析器同样约定），返回原因：
+//   S2A_KBD_IMPORT_TOO_LARGE = 文件超过上限（键位 JSON 几 KB，带鼠标选项、Mac 启动器缩进写出的也远小于 64 KB；超了多半不是键位文件，不交给解析器）；
+//   其余为 s2a_input_config_parse 的错误码（S2A_INPUT_CONFIG_JSON / SCHEMA / DUPLICATE …）。Mac 启动器的 input.json 同格式，照原样导入、不补 iPad 多绑的键
+#define S2A_KBD_IMPORT_OK 0
+#define S2A_KBD_IMPORT_TOO_LARGE 100
+#define S2A_KBD_IMPORT_MAX_BYTES (64u * 1024u)
+static inline int s2a_kbd_import(const void *data, size_t n, s2a_input_config *out) {
+    if (n > S2A_KBD_IMPORT_MAX_BYTES) return S2A_KBD_IMPORT_TOO_LARGE;
+    return s2a_input_config_parse(n ? (const char *)data : "", n, out);
+}

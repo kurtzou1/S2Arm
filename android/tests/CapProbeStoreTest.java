@@ -186,6 +186,17 @@ public final class CapProbeStoreTest {
               "runtime-lost writeback rewrites the same fingerprint file");
         check(after.tessOcclusion == CapProbeVerdict.Verdict.SUPPORTED,
               "runtime-lost keeps the unrelated tess verdict");
+        FakeRunner reprobe = new FakeRunner();
+        reprobe.lines.putAll(wb.lines);
+        FakePublisher republished = new FakePublisher();
+        CapProbe.ensure(dirLostWb, "", "1.1", reprobe, republished);
+        CapProbe.Result refreshed = CapProbe.readResult(supportedFile);
+        check(reprobe.armRuns() == CapProbeVerdict.ARMS_IN_ORDER.length
+              && supportedFile.getAbsolutePath().equals(republished.path)
+              && refreshed != null && refreshed.gsOcclusion == CapProbeVerdict.Verdict.SUPPORTED
+              && "probe".equals(refreshed.source),
+              "legacy runtime-lost verdict must be re-probed: arms=" + reprobe.armRuns()
+              + " source=" + (refreshed == null ? "missing" : refreshed.source));
 
         /* 9. retention: beyond RETAIN only the newest files stay */
         File dirMany = tempDir("retain");

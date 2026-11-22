@@ -245,6 +245,8 @@
 "app.fpsCap.ladder" = "這一局跑不穩 60 幀，已先回到原生幀率；下次開遊戲會重新從 60 幀開始。";
 "app.fpsCap.restored" = "60 幀已恢復。";
 "app.fpsCap.retry" = "再試 60 幀";
+"app.os180.title" = "這個系統版本會閃退";
+"app.os180.body" = "iOS / iPadOS 18.0 系統本身有個問題，遊戲畫面一出來就可能閃退，18.1 已經修好。請到「設定 > 一般 > 軟體更新」把系統升到 18.1 或更新（免費），升級後就不會再這樣閃退。";
 "app.lowRam.title" = "這台裝置記憶體可能不夠";
 "app.lowRam.body" = "這款遊戲需要的記憶體比這台裝置多。照樣可以開始，但可能卡頓，或被系統關掉。";
 "app.gpuStop.body" = "從背景滑掉本 App 再開啟，一般能接著玩，存檔停在遊戲上次儲存的地方。想讓我們查原因，點「故障報修」把診斷傳給我們。";
@@ -503,6 +505,8 @@
 "settings.toggle.touchHud" = "觸控診斷資訊";
 "settings.widen.blocked" = "本遊戲的全螢幕有已知問題，仍可開啟";
 "textinput.header" = "輸入";
+"textinput.player.create" = "建立新使用者";
+"textinput.player.select" = "選擇 S2Arm 使用者";
 "textinput.min" = "至少 %ld 個字";
 "textinput.ok" = "確定";
 "textinput.range" = "%ld–%ld 個字";
@@ -650,7 +654,7 @@
 "cert.source.p12" = "匯入的 .p12";
 "cert.source.pc" = "電腦交來";
 "addrshort.title" = "這台裝置的系統能給 App 的位址範圍不夠這款遊戲";
-"addrshort.body" = "這款遊戲開局要一大塊連續的位址範圍，這台裝置的系統能給 App 的不夠（和儲存空間無關，清理空間沒有用）：可能會非常卡，或一直停在開頭。可以先點「仍要啟動」試試；想正常玩，請換一台記憶體更大的 iPhone / iPad / Mac（系統能給 App 的位址範圍更大），或等後續版本改進。";
+"addrshort.body" = "這款遊戲開局要一大塊連續的位址範圍，這台裝置的系統能給 App 的不夠（和儲存空間無關，清理空間沒有用）：可能會非常卡，或一直停在開頭。可以先點「仍要啟動」試試；想正常玩，請換一台記憶體更大的 iPhone / iPad（系統能給 App 的位址範圍更大），或等後續版本改進。";
 "host.startAnyway" = "仍要啟動";
 /* iPad 外接键盘改键页（ios/keyboard_settings.m，#1869）：除菜单项 / 标题 / 说明外，文案同 Mac 启动器（launchers/shared input.*） */
 "kbd.menu" = "鍵盤與滑鼠…";
@@ -700,3 +704,16 @@
 "kbd.target.RS_DOWN" = "右搖桿向下";
 "kbd.target.RS_LEFT" = "右搖桿向左";
 "kbd.target.RS_RIGHT" = "右搖桿向右";
+"kbd.section.manage" = "管理鍵位";
+"kbd.manage.note" = "匯出的鍵位檔案可以在別的遊戲裡匯入；Mac 啟動器每款遊戲的 input.json 格式相同，也能匯入。匯入只改這款遊戲的鍵位。";
+"kbd.import" = "匯入鍵位…";
+"kbd.export" = "匯出目前鍵位…";
+"kbd.export.fileName" = "S2Arm 鍵位";
+"kbd.export.err.title" = "沒能匯出鍵位";
+"kbd.import.err.title" = "沒能匯入鍵位";
+"kbd.import.err.read" = "讀不了這個檔案。請選一個鍵位檔案（.json）。目前的鍵位沒有變動。";
+"kbd.import.err.tooLarge" = "檔案太大，不像鍵位檔案（鍵位檔案不超過 64 KB）。目前的鍵位沒有變動。";
+"kbd.import.err.json" = "這個檔案不是鍵位檔案（讀不出 JSON）。目前的鍵位沒有變動。";
+"kbd.import.err.schema" = "這個檔案不是 S2Arm 的鍵位檔案，或版本不支援。目前的鍵位沒有變動。";
+"kbd.import.err.duplicate" = "檔案裡同一個鍵綁給了不只一個按鍵。目前的鍵位沒有變動。";
+"kbd.import.err.invalid" = "檔案裡的鍵位不完整或有無效的值。目前的鍵位沒有變動。";

@@ -43,6 +43,22 @@ public final class DiagnosticRedactorTest {
         return out.toString();
     }
 
+    private static String spacedPathLine(int chars) {
+        StringBuilder b = new StringBuilder("/private/var/joe/");
+        while (b.length() < chars) b.append("原 子 ");
+        return b.append("12 ms").toString();
+    }
+
+    private static long bestNanos(DiagnosticRedactor r, String line) {
+        long best = Long.MAX_VALUE;
+        for (int i = 0; i < 5; i++) {
+            long t0 = System.nanoTime();
+            r.redact(line);
+            best = Math.min(best, System.nanoTime() - t0);
+        }
+        return best;
+    }
+
     public static void main(String[] args) throws IOException {
         DiagnosticRedactor plain = new DiagnosticRedactor(Collections.emptyList(), Collections.emptyList());
 
@@ -89,14 +105,15 @@ public final class DiagnosticRedactorTest {
             {"写入 /private/var/X/S2Arm/a.img（12.5 MB）", "写入 [PRIVATE_PATH]（12.5 MB）"},
         };
         for (String[] c : readings) expect("路径后读数保留：" + c[0], c[1], plain.redact(c[0]));
-        {   // linear: a 100k-char path line full of spaces must not make the tail walk or the end pattern backtrack quadratically
-            StringBuilder big = new StringBuilder("/private/var/joe/");
-            while (big.length() < 100000) big.append("原 子 ");
-            big.append("12 ms");
-            long t0 = System.nanoTime();
-            String got = plain.redact(big.toString());
-            long ms = (System.nanoTime() - t0) / 1000000;
-            expect("十万字路径行 2 秒内（实际 " + ms + " ms）", "true", String.valueOf(ms < 2000 && got.endsWith(" 12 ms")));
+        {   // linear: a path line full of spaces must not make the tail walk or the end pattern backtrack quadratically.
+            // Judged by how the time grows, not by a wall-clock limit (a loaded gate host ran the old 2 s limit at 2048 ms on linear code):
+            // the same machine, the same moment, 10x the length -> linear ~10x, quadratic ~100x. Best of 5 for each length.
+            String small = spacedPathLine(10000), large = spacedPathLine(100000);
+            long ts = bestNanos(plain, small), tl = bestNanos(plain, large);
+            double ratio = (double) tl / Math.max(1, ts);
+            expect("十万字路径行耗时是一万字的 30 倍以内（线性约 10、平方级约 100；实际 " + String.format("%.1f", ratio) + " 倍，" + ts / 1000000 + " → " + tl / 1000000 + " ms）",
+                   "true", String.valueOf(ratio < 30));
+            expect("十万字路径行尾的读数保留", "true", String.valueOf(plain.redact(large).endsWith(" 12 ms")));
         }
 
         // 3. Differential corpus from tools/redact.py with the same synthetic key values.

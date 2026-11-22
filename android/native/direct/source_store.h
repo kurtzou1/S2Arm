@@ -104,8 +104,9 @@ uint64_t s2a_source_rejected(void);
 // SetShaders 的 control 只在当次调用内有效。代码尚未登记进已映射池、key 还算不出来时，
 // 先把 control 存进有界 pending 表；Bind 时再用当时的 code + 这份 control 补算 key。
 int s2a_source_hold_pending(uint64_t prog_serial, uint32_t stage, const void *control, uint32_t control_bytes);
-// 取回 pending control 的借用指针（用于补算 key / keep）；命中返回 1。
-int s2a_source_pending_control(uint64_t prog_serial, uint32_t stage, const uint8_t **control, uint32_t *control_bytes);
+// 在锁内拷出 pending control（用于补算 key / keep）；成功返回 1，*n 为拷贝长度。
+// 缺项、参数无效或 cap 不足返回 0，不改 dst；n 非 NULL 时失败置 *n = 0（不报告所需长度）。
+int s2a_source_pending_control_copy(uint64_t prog_serial, uint32_t stage, void *dst, uint32_t cap, uint32_t *n);
 void s2a_source_drop_pending(uint64_t prog_serial);
 void s2a_source_drop_pending_stage(uint64_t prog_serial, uint32_t stage);   // 该阶段的源已存进源快照：释放它的自持控制段
 uint32_t s2a_source_pending_count(void);   // 现存自持控制段条数（单测 / 诊断用）

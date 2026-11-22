@@ -39,7 +39,7 @@ import org.s2arm.android.CapProbeVerdict.Verdict;
  *    {"gs_occlusion":...,"tess_occlusion":...},"inconclusive_count":N,
  *    "probed_utc":"...","app_version":"..."}
  *
- * A fingerprint with a final verdict is reused forever; an inconclusive
+ * A fingerprint with a final probe verdict is reused; an inconclusive
  * verdict re-probes on the next launch, and two consecutive inconclusive
  * probes fix the fingerprint as unsupported with
  * source=inconclusive-twice. At most RETAIN recent files are kept.
@@ -365,6 +365,12 @@ public final class CapProbe {
         }
         File file = new File(dir, resultFileName(fp));
         Result existing = readResult(file);
+        if (existing != null && "runtime-lost".equals(existing.source)) {
+            // A lost device in a game does not say which feature caused it.
+            // Discard this old inference and run the usual fingerprint policy.
+            warn("legacy runtime-lost verdict ignored; checking GS+occlusion again");
+            existing = null;
+        }
 
         // Cached final verdicts never re-probe; inconclusive re-probes
         // (second consecutive inconclusive fixes the fingerprint).

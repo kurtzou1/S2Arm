@@ -43,7 +43,7 @@ mutations = [
 ]
 
 others = ['graphics/nvn/tests/t_nvn_replay.c', 'graphics/nvn/tests/nvn_clear_view_unused.c',
-          *('graphics/nvn/replay/' + x for x in ('rp_copy_t2b.c', 'rp_clear_tex.c', 'rp_state.c', 'rp_res.c', 'rp_buf.c', 'rp_pass.c', 'rp_present.c', 'rp_draw.c', 'nvn_unimpl.c')),
+          *('graphics/nvn/replay/' + x for x in ('rp_copy_t2b.c', 'rp_clear_tex.c', 'rp_draw_tex.c', 'rp_state.c', 'rp_res.c', 'rp_buf.c', 'rp_pass.c', 'rp_present.c', 'rp_draw.c', 'nvn_unimpl.c')),
           'graphics/nvn/gfx/nvn/nvn_tex.c', 'graphics/nvn/gfx/tex/nvn_deswizzle.c']
 flags = ['-O1', '-g', '-Wall', '-Wextra', '-Wno-unused-parameter', '-std=c11', '-D_DEFAULT_SOURCE', '-DS2A_TEST_TS_ALLOC', '-DS2A_GPU_LAND_TEST', '-DS2A_TEST_TREG_SCRUB',
          *('-I' + str(ROOT / x) for x in ('.', 'graphics/nvn/gfx/nvn', 'graphics/nvn/gfx/nvn/include', 'graphics/nvn/gfx/tex', 'graphics/nvn/replay'))]

@@ -193,7 +193,10 @@ def reader(c):
             if not same:
                 c.diagnostic("S2Arm 读取工具与引擎版本不符，这次照常使用；解包出错时请重新安装完整的 S2Arm。", code="reader_unavailable", severity="warning")
             return d / "nx_unpack.exe"
-        raise Failure("S2Arm 读取工具缺失或与引擎版本不符，请重新安装完整的 S2Arm。", code="reader_unavailable")
+        # D-9G73（windows/0.6.7）：安装包里一定带着它，装好后不见了就是杀毒软件当木马隔离了（玩家原话「被防火墙拦截，提示特洛伊木马」）；
+        #   归 app_control_blocked，与随包预编件缺（errors.missing_prebuilt）同一归因，玩家拿到「去保护历史还原 / 放行」而不是「重新安装」
+        raise Failure("S2Arm 自带的读取工具 nx_unpack.exe 不见了：是杀毒软件把它当成病毒隔离了。到「Windows 安全中心 → 保护历史记录」里把它还原并允许，"
+                      "把 S2Arm 安装文件夹加进信任后再点一次。", code="app_control_blocked")
     from embedded import artifact
     bundled = artifact(c, "Reader")
     if bundled:

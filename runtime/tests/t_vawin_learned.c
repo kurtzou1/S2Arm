@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 __attribute__((constructor(100))) static void need(void) { setenv("S2A_VAWIN_NORESERVE", "1", 1); }   // 先于 vawin.c 的构造函数（101）：不占窗口
 static int bad;
 #define CHECK(c, ...) do { if (c) { printf("✓ "); } else { printf("✗ "); bad++; } printf(__VA_ARGS__); putchar('\n'); } while (0)
@@ -93,6 +95,44 @@ int main(void) {
           if (i && T[i].pid - T[i - 1].pid > 1 && s2a_span_seed(T[i - 1].pid + 1)) gap++; }
       CHECK(n > 0 && !miss && !order && !gap, "⑰ 种子表 %zu 条：查不到原值或样本 < 2 的 %d 条、不升序 %d 处、相邻号之间查出值 %d 处（期望 0）", n, miss, order, gap);
       CHECK(!s2a_span_seed(0) && !s2a_span_seed(1) && !s2a_span_seed(~0ull), "⑰ 不在表里的号回 0"); }
+    // ⑱ 收窄后没到首帧的自愈（D-PR33）：种子里一款的跨度来自开局就停掉的局（小），按它收窄后这局还是没到首帧——下一局必须不按它收，否则种子删不掉、每局都打不开。
+    //   用「子进程 = 一局」：子进程按已知跨度收窄（s2a_window_cap_try）后不报首帧直接退出 = 早夭局；父进程 = 下一局。期望手写：
+    //   早夭后 span_seen = 0（不收）且记下 span_cap_bad = 种子值；本机后来记下比它大 1 字节的跨度 → 照收（回该值）；跑到首帧（s2a_window_cap_ok）的局之后照收；
+    //   本局自己写的标记本局不认；多款容器按 games/<号>/ 前缀同样生效；纯判定：跨度 ≤ 记下的值不收、> 照收、没记录照收
+    {
+        extern uint64_t s2a_span_seed(uint64_t);
+        const uint64_t A = 0x0100024008310000ull, B = 0x0100000011D90000ull;   // 种子表里的两款（span_seed.inc 前几行）
+        CHECK(s2a_span_seed(A) && s2a_span_seed(B), "⑱ 前提：两款都在种子表里（%llu / %llu MB）", (unsigned long long)(s2a_span_seed(A) >> 20), (unsigned long long)(s2a_span_seed(B) >> 20));
+        CHECK(s2a_window_span_cap_blocked(356 * MB, 356 * MB) && !s2a_window_span_cap_blocked(356 * MB + 1, 356 * MB) && !s2a_window_span_cap_blocked(356 * MB, 0),
+              "⑱ 纯判定：跨度 ≤ 记下的值不收、大 1 字节照收、没记录照收");
+        unsetenv("S2A_WIN_SPAN_PEAK");
+        char d[] = "/tmp/s2a_captry_XXXXXX"; if (!mkdtemp(d)) { CHECK(0, "⑱ 建临时文档根"); } setenv("S2A_DOCS", d, 1);
+        char bp[512], tp[512], rp[512];
+        snprintf(bp, sizeof bp, "%s/wire/%016llX/span_cap_bad", d, (unsigned long long)A); snprintf(tp, sizeof tp, "%s/wire/%016llX/span_cap_try", d, (unsigned long long)A);
+        snprintf(rp, sizeof rp, "%s/wire/%016llX/span_peak", d, (unsigned long long)A);
+        CHECK(s2a_window_span_seen(A) == s2a_span_seed(A), "⑱ 第一局：没有标记，按种子值收");
+        pid_t c = fork(); if (!c) { s2a_window_cap_try(NULL, A, s2a_window_span_seen(A)); _exit(s2a_window_span_seen(A) == s2a_span_seed(A) ? 0 : 3); }   // 早夭局：收窄、不报首帧就退出
+        int st = 0; waitpid(c, &st, 0);
+        CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0, "⑱ 早夭局本局自己写的标记本局不认（局内再查仍按种子值）");
+        CHECK(access(tp, F_OK) == 0, "⑱ 早夭局退出后标记还在");
+        CHECK(s2a_window_span_seen(A) == 0, "⑱ 下一局：上一局收窄后没到首帧 → 不按种子收（回 0）");
+        CHECK(access(tp, F_OK) != 0 && access(bp, F_OK) == 0, "⑱ 标记改名 span_cap_bad");
+        CHECK(s2a_window_span_seen(A) == 0, "⑱ 再下一局：种子值仍不超过记下的值 → 照旧不收（不会又打不开）");
+        { FILE *f = fopen(rp, "w"); fprintf(f, "%llu\n", (unsigned long long)(s2a_span_seed(A) + 1)); fclose(f); }
+        CHECK(s2a_window_span_seen(A) == s2a_span_seed(A) + 1, "⑱ 本机后来学到更大的跨度（多 1 字节）：照收");
+        c = fork(); if (!c) { s2a_window_cap_try(NULL, B, s2a_window_span_seen(B)); s2a_window_cap_ok(); _exit(0); }   // 收窄后跑到首帧的局
+        waitpid(c, &st, 0);
+        CHECK(s2a_window_span_seen(B) == s2a_span_seed(B), "⑱ 收窄后跑到首帧的款：下一局照按种子收");
+        // 多款容器：构造期按 games/<号>/ 前缀查（选定后 S2A_DOCS 换成 games/<号>、按 NULL 前缀查同一个文件）
+        char gd[600]; snprintf(gd, sizeof gd, "%s/games", d); mkdir(gd, 0755); snprintf(gd, sizeof gd, "%s/games/%016llX", d, (unsigned long long)B); mkdir(gd, 0755);
+        c = fork(); if (!c) { setenv("S2A_DOCS", gd, 1); s2a_window_cap_try(NULL, B, s2a_span_seed(B)); _exit(0); }   // 容器里选定 B 后收窄、早夭
+        waitpid(c, &st, 0);
+        char pre[64]; snprintf(pre, sizeof pre, "games/%016llX/", (unsigned long long)B);
+        CHECK(s2a_window_span_trust(pre, B, s2a_span_seed(B)) == 0, "⑱ 多款容器：选定后收窄早夭的款，下一局构造期按 games/<号>/ 查到、不收");
+        CHECK(s2a_window_span_seen(B) == s2a_span_seed(B), "⑱ 多款容器的标记不影响旧位置（文档根直下 wire/）的同号");
+        setenv("S2A_DOCS", gd, 1); CHECK(s2a_window_span_seen(B) == 0, "⑱ 多款容器选定后（S2A_DOCS = games/<号>）同样不收"); unsetenv("S2A_DOCS");
+        char cmd[600]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", d); if (system(cmd)) {}
+    }
     printf("%s t_vawin_learned：%d 处不符\n", bad ? "✗" : "✓", bad);
     return bad ? 1 : 0;
 }

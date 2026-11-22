@@ -100,7 +100,7 @@ namespace S2A.Services
         // 种入内核（S2A_SAVE_DIR 与存档位置 SaveData 共用，见 SaveFolder.cs）：每项 (类型, 目录)，目录内容 = 游戏挂载存档后看到的根目录。
         //   类型 account / device；save = 有账号存档写账号存档，这款只有设备存档就写设备存档（NX2Apple 引擎的 save/ 规矩，存档位置也用它）。
         //   清空 → 整棵拷入 → 提交；拷入或提交失败抛 InvalidOperationException（本次起局失败，已提交的旧档原样）
-        internal static void SeedFrom(Switch device, ulong programId, System.Collections.Generic.IEnumerable<(string kind, string dir)> sources)
+        internal static void SeedFrom(Switch device, ulong programId, System.Collections.Generic.IEnumerable<(string kind, string dir)> sources, Ryujinx.HLE.HOS.Services.Account.Acc.UserId? targetUserId = null)
         {
             HorizonClient hc = device.System.LibHacHorizonManager.RyujinxClient;
             ApplicationId app = new(programId);
@@ -108,10 +108,11 @@ namespace S2A.Services
 
             foreach ((string kind0, string sub) in sources)
             {
+                if (targetUserId.HasValue && kind0 == "device") continue;
                 total++;
                 string kind = kind0;
                 Result r;
-                var u = device.System.AccountManager.LastOpenedUser.UserId;
+                var u = targetUserId ?? device.System.AccountManager.LastOpenedUser.UserId;
                 // 走 Shim 里有实现的重载（Ncm.ApplicationId + Fs.UserId → MountSaveDataImpl，类型 Account，同 Ryujinx IFileSystemProxy.OpenSaveDataFileSystem 的路子）；
                 //   LibHac.Fs.SaveData 里收 Account.Uid 的两个重载是 throw NotImplementedException（0.21.0-alpha.133），10-20 一款第一方动作冒险游戏带账号存档起局 S2A_Init 当场失败
                 Result Account() => LibHac.Fs.Shim.SaveData.MountSaveData(hc.Fs, "s2asave"u8, new LibHac.Ncm.ApplicationId(programId), new LibHac.Fs.UserId((ulong)u.High, (ulong)u.Low));
@@ -121,7 +122,7 @@ namespace S2A.Services
                 else
                 {
                     r = Account(); kind = "account";
-                    if (r.IsFailure()) { r = hc.Fs.MountDeviceSaveData("s2asave"u8, app); kind = "device"; }
+                    if (r.IsFailure() && !targetUserId.HasValue) { r = hc.Fs.MountDeviceSaveData("s2asave"u8, app); kind = "device"; }
                 }
 
                 if (r.IsFailure())
@@ -177,14 +178,14 @@ namespace S2A.Services
         //   账号存档只取当前用户的。失败报红不抛（录制照常）。返回拷了几类存档
         //   整份先拷进同级 <dir>.tmp、连 user 文件都写完才改名成 dir（审计 #859：原先边拷边写最终目录，中途抛错留下半份 .saveN，
         //   tools/padrec_cut.py 只看目录在不在就整棵拿去回放）；任何失败删掉临时目录、也不留 dir（旧的同名副本不是这一刻的存档），返回 0
-        public static int Snapshot(Switch device, ulong programId, string dir)
+        public static int Snapshot(Switch device, ulong programId, string dir, Ryujinx.HLE.HOS.Services.Account.Acc.UserId? targetUserId = null)
         {
             string tmp = dir.TrimEnd(Path.DirectorySeparatorChar) + ".tmp";
 
             try
             {
                 HorizonClient hc = device.System.LibHacHorizonManager.RyujinxClient;
-                var u = device.System.AccountManager.LastOpenedUser.UserId;
+                var u = targetUserId ?? device.System.AccountManager.LastOpenedUser.UserId;
                 var user = new LibHac.Fs.UserId((ulong)u.High, (ulong)u.Low);
                 SaveDataFilter filter = SaveDataFilter.Make(programId: programId, saveType: default, userId: default, saveDataId: default, index: default);
                 using UniqueRef<SaveDataIterator> it = new();

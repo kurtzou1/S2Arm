@@ -595,7 +595,7 @@
   "console.section.sync": "Synchro des jeux",
   "console.section.help": "Aide",
   "play.addrShort.title": "Le système de cet appareil ne peut pas donner aux apps assez de plage d'adresses pour ce jeu",
-  "play.addrShort.body": "Ce jeu a besoin au démarrage d'une grande plage d'adresses continue, et le système de cet appareil ne peut pas en donner assez aux apps (cela n'a rien à voir avec le stockage ; libérer de l'espace n'aidera pas) : il peut être très lent ou rester bloqué au début. Pour jouer normalement, utilisez un Mac avec plus de mémoire (il donne aux apps une plage d'adresses plus grande) ou attendez une version ultérieure.",
+  "play.addrShort.body": "Ce jeu a besoin au démarrage d'une grande plage d'adresses continue, et macOS ne peut pas en donner assez aux apps (c'est pareil sur tous les Mac et cela ne dépend ni de la mémoire ni du stockage, donc changer de Mac ou libérer de l'espace n'aide pas) : il peut être très lent ou rester bloqué au début. Nous y travaillons ; le jeu démarre quand même.",
   "console.section.apps": "Apps autonomes",
   "console.app.outdated": "Nouvelle version · cliquez sur « Mettre à jour S2Arm sur l'iPhone » pour re-signer",
   "console.game.standalone": "Installé comme app autonome (voir ci-dessus)",

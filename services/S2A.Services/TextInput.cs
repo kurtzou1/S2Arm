@@ -80,6 +80,12 @@ namespace S2A.Services
             using (Utf8JsonWriter w = new(m))
             {
                 w.WriteStartObject();
+                if (a.LocalPlayerNames != null)
+                {
+                    w.WriteStartArray("localPlayers");
+                    foreach (string name in a.LocalPlayerNames) w.WriteStringValue(name);
+                    w.WriteEndArray();
+                }
                 w.WriteString("header", a.HeaderText ?? "");
                 w.WriteString("subtitle", a.SubtitleText ?? "");
                 w.WriteString("guide", a.GuideText ?? "");

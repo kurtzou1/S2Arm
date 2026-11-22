@@ -380,6 +380,23 @@ class RechainIos(unittest.TestCase):
         self.assertTrue((self.pack / "shaders/direct/b-old/lib.idx").is_file(), "重编不完整不动旧库")
 
 
+class MacRebuildCache(unittest.TestCase):
+    """11-21：Mac 重编（「更新这款」/ 推送时补库）的阶段子进程用这款出包时的直连缓存（library.direct_cache_dir），不落回工具缓存默认位置；
+    游戏在外接盘时那份在游戏文件夹的 direct-cache/。原先作业层只在出包作业里设 S2A_DIRECT_CACHE，更新时整份重编"""
+    def test_stages_get_this_games_direct_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp); src = t / "src"; src.mkdir(); envs = []
+            done = t / "cur"; lib = done / "shaders/direct/b-new"; lib.mkdir(parents=True); (lib / "lib.idx").write_bytes(b"L"); (done / "shaders/direct/keys.tsv").write_text("k\n")
+            c = types.SimpleNamespace(engine=str(t), logs=str(t / "logs"), task="t", env=lambda: {}, emit=lambda *a, **k: None,
+                                      run=lambda args, log, env, **k: envs.append(env.get("S2A_DIRECT_CACHE")))
+            ext = t / "外接盘" / "游戏" / "direct-cache"
+            with patch.object(sgrade_bf, "WIN", False), patch.object(sgrade_bf, "_clone", lambda c, a, b: Path(b).mkdir(parents=True)), \
+                    patch("layout.set_current", lambda *a, **k: None), patch("layout.current_root", lambda c, p: done), \
+                    patch("library.direct_cache_dir", lambda c, g: ext):
+                sgrade_bf.rebuild(c, "0100aaaa00000000", src, "ios", t / "w")
+            self.assertEqual(envs, [str(ext)] * len(sgrade_bf.STAGES))
+
+
 class MacRebuildProgress(unittest.TestCase):
     """D-QPGF：Mac 重出（STAGES 逐步跑阶段脚本）每步之前报一次「已完成几步 / 共几步」，最后报满。期望按 STAGES 手算：0/5 → 第 1 步 → 1/5 → … → 第 5 步 → 5/5"""
     def test_reports_step_counts_between_stages(self):
@@ -390,7 +407,8 @@ class MacRebuildProgress(unittest.TestCase):
                                       emit=lambda kind, msg="", **k: seq.append((kind, k.get("done"), k.get("total"))) if kind == "progress" else None,
                                       run=lambda args, log, env, **k: seq.append(("run", Path(str(args[1])).name)))
             with patch.object(sgrade_bf, "WIN", False), patch.object(sgrade_bf, "_clone", lambda c, a, b: Path(b).mkdir(parents=True)), \
-                    patch("layout.set_current", lambda *a, **k: None), patch("layout.current_root", lambda c, p: done):
+                    patch("layout.set_current", lambda *a, **k: None), patch("layout.current_root", lambda c, p: done), \
+                    patch("library.direct_cache_dir", lambda c, g: t / "dcache" / g):
                 sgrade_bf.rebuild(c, "0100aaaa00000000", src, "ios", t / "w")
             n = len(sgrade_bf.STAGES)
             want = []

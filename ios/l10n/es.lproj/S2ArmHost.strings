@@ -270,6 +270,8 @@
 "app.fpsCap.ladder" = "En esta partida no se pueden mantener 60 FPS de forma estable, así que el juego vuelve por ahora a su velocidad de fotogramas nativa. La próxima vez que abras el juego empezará de nuevo a 60 FPS.";
 "app.fpsCap.restored" = "60 FPS restablecidos.";
 "app.fpsCap.retry" = "Probar 60 FPS de nuevo";
+"app.os180.title" = "Esta versión del sistema puede cerrarse inesperadamente";
+"app.os180.body" = "iOS / iPadOS 18.0 tiene un problema del sistema que puede cerrar la app en cuanto aparece la imagen del juego; 18.1 lo corrige. Actualiza en Ajustes > General > Actualización de software a 18.1 o posterior (gratis) y dejará de ocurrir.";
 "app.lowRam.title" = "Es posible que este dispositivo no tenga suficiente memoria";
 "app.lowRam.body" = "Este juego necesita más memoria de la que tiene este dispositivo. Seguirá iniciándose, pero puede ralentizarse o ser cerrado por el sistema.";
 "app.gpuStop.body" = "Cierra esta app desde el selector de apps y vuelve a abrirla; normalmente podrás seguir jugando desde el último guardado del juego. Para ayudarnos a encontrar la causa, toca «Informar de un problema» y envíanos el diagnóstico.";
@@ -529,6 +531,8 @@
 "settings.toggle.touchHud" = "Diagnóstico táctil";
 "settings.widen.blocked" = "La pantalla completa tiene problemas conocidos en este juego; aun así puedes activarla";
 "textinput.header" = "Introducir texto";
+"textinput.player.create" = "Crear usuario nuevo";
+"textinput.player.select" = "Elegir usuario de S2Arm";
 "textinput.min" = "Al menos %ld caracteres";
 "textinput.ok" = "Entendido";
 "textinput.range" = "%ld–%ld caracteres";
@@ -644,7 +648,7 @@
 "cert.source.p12" = ".p12 importado";
 "cert.source.pc" = "Desde tu ordenador";
 "addrshort.title" = "El sistema de este dispositivo no puede dar a las apps suficiente rango de direcciones para este juego";
-"addrshort.body" = "Este juego necesita al empezar un gran rango continuo de direcciones y el sistema de este dispositivo no puede dar tanto a las apps (no tiene nada que ver con el almacenamiento; liberar espacio no ayuda): puede ir muy lento o quedarse parado al principio. Puedes tocar «Iniciar de todos modos» para probar; para jugar con normalidad, usa un iPhone, iPad o Mac con más memoria (dan a las apps un rango de direcciones mayor) o espera a una versión posterior.";
+"addrshort.body" = "Este juego necesita al empezar un gran rango continuo de direcciones y el sistema de este dispositivo no puede dar tanto a las apps (no tiene nada que ver con el almacenamiento; liberar espacio no ayuda): puede ir muy lento o quedarse parado al principio. Puedes tocar «Iniciar de todos modos» para probar; para jugar con normalidad, usa un iPhone o iPad con más memoria (dan a las apps un rango de direcciones mayor) o espera a una versión posterior.";
 "host.startAnyway" = "Iniciar de todos modos";
 /* iPad 外接键盘改键页（ios/keyboard_settings.m，#1869）：除菜单项 / 标题 / 说明外，文案同 Mac 启动器（launchers/shared input.*） */
 "kbd.menu" = "Teclado y ratón…";
@@ -694,3 +698,16 @@
 "kbd.target.RS_DOWN" = "Palanca derecha abajo";
 "kbd.target.RS_LEFT" = "Palanca derecha izquierda";
 "kbd.target.RS_RIGHT" = "Palanca derecha derecha";
+"kbd.section.manage" = "Gestionar asignación de teclas";
+"kbd.manage.note" = "Los archivos de asignación exportados se pueden importar en otros juegos. El input.json de cada juego del lanzador de Mac usa el mismo formato y también se puede importar. Importar solo cambia este juego.";
+"kbd.import" = "Importar asignación de teclas…";
+"kbd.export" = "Exportar asignación actual…";
+"kbd.export.fileName" = "Asignación de teclas S2Arm";
+"kbd.export.err.title" = "No se pudo exportar la asignación";
+"kbd.import.err.title" = "No se pudo importar la asignación";
+"kbd.import.err.read" = "No se puede leer este archivo. Elige un archivo de asignación de teclas (.json). Tu asignación actual no ha cambiado.";
+"kbd.import.err.tooLarge" = "El archivo es demasiado grande para ser una asignación de teclas (ocupan menos de 64 KB). Tu asignación actual no ha cambiado.";
+"kbd.import.err.json" = "Este archivo no es una asignación de teclas (no es JSON válido). Tu asignación actual no ha cambiado.";
+"kbd.import.err.schema" = "Este archivo no es una asignación de teclas de S2Arm o su versión no es compatible. Tu asignación actual no ha cambiado.";
+"kbd.import.err.duplicate" = "El archivo asigna la misma tecla a más de un botón. Tu asignación actual no ha cambiado.";
+"kbd.import.err.invalid" = "La asignación del archivo está incompleta o tiene valores no válidos. Tu asignación actual no ha cambiado.";

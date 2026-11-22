@@ -58,18 +58,28 @@ extension S2ArmLauncherModel {
                      mode: String? = nil, sgradeUpgrade: Bool = false) {
         let accept = acceptDropped ? accept.union(["acceptDropped"]) : accept
         // 没指定这次怎么走 = 装到手机（11-19 自签走查结构 8）：出包页「出完之后」只管出包页那一次，不当续签 / 更新的全局开关；要导出就由调用方明确传 mode = "export"
-        guard !phoneBusy else {   // 出包等主槽作业照跑也能更新（手机槽）；手机槽忙 → 排队
-            phoneQueue.append((nil, { [weak self] in self?.updatePhone(acceptStale: acceptStale, repack: repack, language: language, device: device, accept: accept, ask: ask,
-                                                                       mode: mode, sgradeUpgrade: sgradeUpgrade) })); return
+        let device = mode == "export" ? nil : device ?? phoneUpdate?.device ?? installDeviceID
+        let args = UpdateArgs(acceptStale: acceptStale, repack: repack, language: language, device: device, accept: accept, mode: mode, sgradeUpgrade: sgradeUpgrade)
+        if phoneSession?.kind == .installUpdate, lastUpdateArgs == args, phoneBusy || dropConfirm != nil {
+            phoneHidden = false
+            return
+        }
+        if phoneBusy || dropConfirm != nil {
+            guard queuedPhoneUpdates.insert(args).inserted else { return }
+            phoneQueue.append((nil, { [weak self] in
+                guard let self else { return }
+                self.queuedPhoneUpdates.remove(args)
+                self.updatePhone(acceptStale: acceptStale, repack: repack, language: language, device: device, accept: accept, ask: ask,
+                                 mode: mode, sgradeUpgrade: sgradeUpgrade)
+            }))
+            return
         }
         updateConfirm = nil; updateRepack = repack
-        // 更新哪台：壳旧了的那台（phoneUpdates 的设备记录键）；没有就是玩家选的那台。一律带上，作业层不自己挑（v0.3.0 验收测出连着两台报错；11-11 设备号贯穿所有装机入口）
-        let device = mode == "export" ? nil : device ?? phoneUpdate?.device ?? installDeviceID
         // 那台上原来没有 S2Arm（总控台「安装 S2Arm」、导出确认页「先装 S2Arm」）：结局页按「安装」写，不写「更新 / 已更新到」
         shellFirstInstall = mode != "export" && phoneOverview?.phones.first(where: { $0.device == device }).map { !$0.installed && $0.installedBy == nil } == true
         phoneOutcome = nil
         selfSigning = mode == "export"
-        lastUpdateArgs = UpdateArgs(acceptStale: acceptStale, repack: repack, language: language, device: device, accept: accept, mode: mode, sgradeUpgrade: sgradeUpgrade)
+        lastUpdateArgs = args
         start(JobSession(kind: .installUpdate, gameID: nil, name: BackendText.launcherText("update.running", language: language))) { [weak self] sink in
             do {
                 let r = try await self?.provider.updatePhone(acceptStale: acceptStale, accept: accept, mode: mode, sgradeUpgrade: sgradeUpgrade, device: device, events: sink) ?? [:]

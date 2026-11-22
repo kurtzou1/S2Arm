@@ -365,6 +365,7 @@ const char *s2a_capprobe_gs_occ_state(void) {
     json_field(buf, "\"source\":\"", src, sizeof src);
     json_field(buf, "\"gs_occlusion\":\"", verdict, sizeof verdict);
     if (!verdict[0]) return "malformed";
+    if (!strcmp(src, "runtime-lost")) return "legacy-runtime-lost:inconclusive";
     snprintf(state, sizeof state, "%s:%s", src[0] ? src : "unknown", verdict);
     return state;
 }

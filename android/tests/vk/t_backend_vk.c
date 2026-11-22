@@ -8375,18 +8375,18 @@ static void c86c_bc_3d_slice_copy(void) {
 }
 
 // ---- C202（#1087）：命令段暂存缓冲的回收表只留标准大小（VK_ARENA_MIN = 256 KB）的块 ----
-// 背景：回收表 32 个位置，按「大小完全相同」取用。加载阶段留下的非标准大小块（每块大小各不相同）之后再没人要，会把位置占满，
-// 之后每帧要的标准块一半没命中：每帧各新建、销毁十来次（vkAllocateMemory / vkFreeMemory + 映射的缺页）。
+// 背景：回收表按「大小完全相同」取用，容量 256 个位置（SEGPOOL_STG_BIG_N；#1087 时是 32 个，#1938 放大）。加载阶段留下的非标准大小块（每块大小各不相同）之后再没人要，会把位置占满，
+// 之后每帧要的标准块一部分没命中：每帧各新建、销毁（vkAllocateMemory / vkFreeMemory + 映射的缺页）。
 // 计数从 nvn_gpu_stats 读（stg_pool_hit / miss / kept / rejected / full，开会话清零）。一个命令段第一次 arena_alloc 占一块暂存缓冲，
-// 同时开着 n 个段就同时占 n 块；段做完放回一块。arena 大小 = max(bytes + 16, 256 KB)：1000 字节 → 标准块，300000 + 4096 i 字节 → 各不相同的非标准块。
-// 期望（手算，不取自被测实现；每个会话开始时表空、计数全 0）：
+// 同时开着 n 个段就同时占 n 块；段做完放回一块。arena 大小 = max(bytes + 16, 256 KB)：1000 字节 → 标准块，270000 + 64 k 字节 → 各不相同的非标准块。
+// 期望（手算，不取自被测实现；每个会话开始时表空、计数全 0；表容量按 256 算）：
 //  缺省档（只留标准块）：
 //   ① 6 个段各要 1000 字节：没命中 6、命中 0；放回 6 块全留（留 6）；
 //   ② 再来一轮同样的 6 个段：命中 6、没命中仍 6；放回再留 6（累计留 12）；
-//   ③ 40 个段各要不同的非标准大小（分 5 批，每批 8 个同时开）：没命中 40（累计 46）；放回 40 块全因非标准没留（非标准没留 40、留仍 12、表满没留 0）；表里还是 6 块标准块；
+//   ③ 256 个段各要不同的非标准大小（k = 0..255，分 32 批，每批 8 个同时开）：没命中 256（累计 262）；放回 256 块全因非标准没留（非标准没留 256、留仍 12、表满没留 0）；表里还是 6 块标准块；
 //   ④ 连续 3 轮、每轮 12 个段各要 1000 字节：第 1 轮命中 6、没命中 6（表里只有 6 块）、放回 12 块全留；第 2、3 轮命中 12、没命中 0、放回 12 块全留；表满没留 始终 0。
 //  对照档（nvk_stg_std = 0，旧行为：什么大小都留）：
-//   ①② 同上；③ 40 块非标准块没命中 40，放回时表里只剩 26 个空位：留 26（累计 38）、表满没留 14，非标准没留 0——表被 26 块谁也不会再要的块占着，连同 6 块标准块 = 32 满；
+//   ①② 同上；③ 256 块非标准块没命中 256，放回时表里只剩 250 个空位（256 − 6）：留 250（累计 262）、表满没留 6，非标准没留 0——表被 250 块谁也不会再要的块占着，连同 6 块标准块 = 256 满；
 //   ④ 每轮 12 个段：表里只有 6 块标准块 → 命中 6、没命中 6；放回 12 块只有 6 个空位 → 留 6、表满没留 6。每轮都新建 6 次、销毁 6 次，永远这样（真机世界场景每帧 11.8 次就是这个）。
 struct stg_stats { uint64_t hit, miss, kept, rej, full; int seen; };
 static void stg_stat_cb(void *u, const char *name, uint64_t v) {
@@ -8437,11 +8437,11 @@ static void c202_arm(int std_flag, const char *tag) {
     s = stg_read();
     CHECK(s.hit == 6 && s.miss == 6 && s.kept == 12 && s.rej == 0 && s.full == 0, "C202 %s ②：命中 6 / 没命中 6 / 留 12 / 非标准 0 / 表满 0 → %llu/%llu/%llu/%llu/%llu", tag,
           (unsigned long long)s.hit, (unsigned long long)s.miss, (unsigned long long)s.kept, (unsigned long long)s.rej, (unsigned long long)s.full);
-    for (int b = 0; b < 5; b++) stg_round(scratch, 8, 300000 + (uint64_t)b * 8 * 4096, 4096, &fence, "③ 非标准块");   // 40 个大小各不相同
+    for (int b = 0; b < 32; b++) stg_round(scratch, 8, 270000 + (uint64_t)b * 8 * 64, 64, &fence, "③ 非标准块");   // 256 个大小各不相同（270000 + 64 k）
     s = stg_read();
-    if (std_on) CHECK(s.hit == 6 && s.miss == 46 && s.kept == 12 && s.rej == 40 && s.full == 0, "C202 %s ③：命中 6 / 没命中 46 / 留 12 / 非标准没留 40 / 表满 0 → %llu/%llu/%llu/%llu/%llu", tag,
+    if (std_on) CHECK(s.hit == 6 && s.miss == 262 && s.kept == 12 && s.rej == 256 && s.full == 0, "C202 %s ③：命中 6 / 没命中 262 / 留 12 / 非标准没留 256 / 表满 0 → %llu/%llu/%llu/%llu/%llu", tag,
                       (unsigned long long)s.hit, (unsigned long long)s.miss, (unsigned long long)s.kept, (unsigned long long)s.rej, (unsigned long long)s.full);
-    else CHECK(s.hit == 6 && s.miss == 46 && s.kept == 38 && s.rej == 0 && s.full == 14, "C202 %s ③：命中 6 / 没命中 46 / 留 38 / 非标准没留 0 / 表满 14 → %llu/%llu/%llu/%llu/%llu", tag,
+    else CHECK(s.hit == 6 && s.miss == 262 && s.kept == 262 && s.rej == 0 && s.full == 6, "C202 %s ③：命中 6 / 没命中 262 / 留 262 / 非标准没留 0 / 表满 6 → %llu/%llu/%llu/%llu/%llu", tag,
                (unsigned long long)s.hit, (unsigned long long)s.miss, (unsigned long long)s.kept, (unsigned long long)s.rej, (unsigned long long)s.full);
     for (int r = 0; r < 3; r++) {
         p = stg_read();
@@ -8460,6 +8460,135 @@ static void c202_arm(int std_flag, const char *tag) {
 static void c202_stg_pool(void) {
     c202_arm(-1, "缺省档");
     c202_arm(0, "对照档 nvk_stg_std=0");
+}
+
+// ---- C210：池镜像同步的暂存写按标准块切开（nvn_gpu_buf_write，stg_chunk 一节）----
+// 背景：一笔写要的暂存超过一个标准块（256 KB）时，旧做法新建一个 bytes + 4 字节的非标准块，回收表不收，段完成就销毁，下一次又是一段新映射的内存（memcpy 逐页缺页）。
+// 真机（Adreno 8 系，一款 3D 游戏的世界场景，R29 调试包）：每帧池镜像同步约 90 MB，其中约 34 MB 走这条暂存路径，主线程每秒约 20.8 万次缺页。
+// 现在：一笔超过一个标准块就按 STG_CHUNK = 262140（= 标准块 262144 - 4：arena_alloc 要 bytes + 4 字节的块，整块用满时恰好是标准块）切开；
+// 当前块还剩 4096 字节以上先用满它；回收表放大到 256 个位置。
+// 期望（手算，不取自被测实现；会话开始时表空、计数全 0；每轮开 A、B 两个段各一次提交，等它们的暂存块都放回，共 3 轮）：
+//  段 A：对 24 MB 目标缓冲，先写 6292456 字节（= 24 × 262140 + 1096）到偏移 12，再写 100 字节到偏移 6300000。
+//        分块：前 24 块各 262140 字节（每块只剩 4 字节，不到 4096，下一块另开）+ 1 块 1096 字节；第二笔 100 字节放进最后一块的余量。→ 暂存块 25 个、拷贝命令 26 条；
+//  段 B：先写 100000 字节到偏移 7000000，再写 300000 字节到偏移 7200000，最后把第一笔的区间用新内容再写一遍（100000 字节，与第一笔重叠：两次写同一段，之间必须有屏障）。
+//        第一笔占一个新块（余 162144）；第二笔 300000 超过一块：当前块余量 162144 在 [4096, 262140) 之内，先写 162144，余下 137856 放进新的标准块（余 124288）；
+//        第三笔 100000 放进这块的余量。→ 暂存块 2 个、拷贝命令 1 + 2 + 1 = 4 条。
+//  每轮：写缓冲 5 笔、其中超过一个标准块 2 笔（6292456 与 300000）、拷贝命令 30 条；暂存块 27 个：
+//        第 1 轮 命中 0 / 没命中 27 / 新建 27 个共 27 × 262144 字节，放回 27 块全留（留 27、非标准没留 0、表满没留 0）；
+//        第 2、3 轮 命中 27 / 没命中 0 / 新建 0，放回再留 27、累计 54、81。
+//  内容：每轮写完核对目标缓冲里写入区逐字节等于源（段 B 第一笔的区间要是第三笔的新内容；源每轮换种子，旧内容蒙混不过去），空隙保持开局的哨兵 0xEE（切错偏移 / 越界写会改到它）。
+//  同步校验：整个单跑过程不许有 Validation Error / SYNC-HAZARD（一笔写之间缺屏障、或把屏障漏掉，段 B 的重叠两笔会报写后写冒险）。
+//  表的上限：一笔写 264 × 262140 = 69204960 字节（264 个整块），段完成放回：表里留 256（SEGPOOL_STG_BIG_N）、表满没留 8；
+//        紧接着再写一次同样的：命中 256 / 没命中 8（表被放大的上限封住，内存有界）。
+struct stg_wr_stats { uint64_t hit, miss, kept, rej, full, n, bytes, copies, big, nblk, nbytes; int seen; };
+static void stg_wr_cb(void *u, const char *name, uint64_t v) {
+    struct stg_wr_stats *o = (struct stg_wr_stats *)u;
+    if (!strcmp(name, "stg_pool_hit")) { o->hit = v; o->seen++; }
+    else if (!strcmp(name, "stg_pool_miss")) { o->miss = v; o->seen++; }
+    else if (!strcmp(name, "stg_pool_kept")) { o->kept = v; o->seen++; }
+    else if (!strcmp(name, "stg_pool_rejected")) { o->rej = v; o->seen++; }
+    else if (!strcmp(name, "stg_pool_full")) { o->full = v; o->seen++; }
+    else if (!strcmp(name, "stg_write_n")) { o->n = v; o->seen++; }
+    else if (!strcmp(name, "stg_write_bytes")) { o->bytes = v; o->seen++; }
+    else if (!strcmp(name, "stg_write_copies")) { o->copies = v; o->seen++; }
+    else if (!strcmp(name, "stg_write_big")) { o->big = v; o->seen++; }
+    else if (!strcmp(name, "stg_new_blocks")) { o->nblk = v; o->seen++; }
+    else if (!strcmp(name, "stg_new_bytes")) { o->nbytes = v; o->seen++; }
+}
+static struct stg_wr_stats stg_wr_read(void) { struct stg_wr_stats s; memset(&s, 0, sizeof s); nvn_gpu_stats(stg_wr_cb, &s, 0); return s; }
+static void c210_fill(uint8_t *p, uint64_t n, uint32_t seed) { for (uint64_t i = 0; i < n; i++) p[i] = (uint8_t)((i * 131u) ^ (i >> 9) ^ (seed * 29u + 7u)); }
+// 目标缓冲里 [a, b) 全是哨兵 0xEE 吗；返回第一个不是的位置（都是 = UINT64_MAX）
+static uint64_t c210_sentinel(const uint8_t *p, uint64_t a, uint64_t b) { for (uint64_t i = a; i < b; i++) if (p[i] != 0xEE) return i; return UINT64_MAX; }
+// 等「放回」：留 + 非标准没留 + 表满没留 的总数到 target
+static void c210_wait_returned(uint64_t target, const char *what) {
+    for (int t = 0; t < 1000; t++) {
+        struct stg_wr_stats s = stg_wr_read();
+        if (s.kept + s.rej + s.full >= target) return;
+        sleep_ms(10);
+    }
+    CHECK(0, "C210 %s：10 秒内暂存块没都放回（要 %llu 块）", what, (unsigned long long)target);
+}
+static void c210_stg_chunk(void) {
+    enum { DST = 24 << 20, A1N = 6292456, A1O = 12, A2N = 100, A2O = 6300000, B1N = 100000, B1O = 7000000, B2N = 300000, B2O = 7200000 };
+    if (!open_backend()) return;
+    nvn_gpu_err e;
+    nvn_gpu_buf dst = make_buf(DST, NVN_GPU_MEM_SHARED, NULL);
+    uint8_t *a1 = malloc(A1N), *a2 = malloc(A2N), *b1 = malloc(B1N), *b2 = malloc(B2N), *b3 = malloc(B1N);
+    CHECK(dst && a1 && a2 && b1 && b2 && b3, "C210：测试缓冲分配");
+    if (!(dst && a1 && a2 && b1 && b2 && b3)) goto out;
+    memset(buf_cpu(dst), 0xEE, DST);
+    struct stg_wr_stats s0 = stg_wr_read();
+    CHECK(s0.seen == 11 && s0.n == 0 && s0.copies == 0 && s0.nblk == 0 && s0.hit == 0 && s0.miss == 0, "C210：开会话时 11 项读数期望全 0 → %d 项 n=%llu 拷贝=%llu 新建=%llu",
+          s0.seen, (unsigned long long)s0.n, (unsigned long long)s0.copies, (unsigned long long)s0.nblk);
+    uint32_t fence = 1;
+    for (int r = 1; r <= 3; r++) {
+        struct stg_wr_stats p = stg_wr_read();
+        c210_fill(a1, A1N, (uint32_t)r); c210_fill(a2, A2N, (uint32_t)r + 10); c210_fill(b1, B1N, (uint32_t)r + 20); c210_fill(b2, B2N, (uint32_t)r + 30); c210_fill(b3, B1N, (uint32_t)r + 40);
+        nvn_gpu_cmd ca = begin_cmd(), cb = begin_cmd();
+        if (!ca || !cb) goto out;
+        nvn_gpu_buf_write(ca, dst, A1O, a1, A1N); nvn_gpu_buf_write(ca, dst, A2O, a2, A2N);
+        nvn_gpu_buf_write(cb, dst, B1O, b1, B1N); nvn_gpu_buf_write(cb, dst, B2O, b2, B2N); nvn_gpu_buf_write(cb, dst, B1O, b3, B1N);
+        nvn_gpu_rc rca = nvn_gpu_cmd_commit(ca, fence++, on_done, NULL, &e);
+        CHECK(OK(rca), "C210 第 %d 轮 commit A：%d %s", r, rca.code, e.why);
+        nvn_gpu_rc rcb = nvn_gpu_cmd_commit(cb, fence++, on_done, NULL, &e);
+        CHECK(OK(rcb), "C210 第 %d 轮 commit B：%d %s", r, rcb.code, e.why);
+        CHECK(OK(nvn_gpu_fence_wait(fence - 1, 10000000000ull, &e)), "C210 第 %d 轮 wait：%s", r, e.why);
+        const uint64_t blocks = 27;   // 这一轮用到的暂存块（见上面的手算），段完成各放回一次
+        c210_wait_returned(p.kept + p.rej + p.full + blocks, "每轮");
+        struct stg_wr_stats s = stg_wr_read();
+        const uint64_t wcopies = 30, wnew = r == 1 ? 27 : 0;
+        const uint64_t whit = r == 1 ? 0 : 27, wmiss = r == 1 ? 27 : 0;
+        const uint64_t wkept = 27, wrej = 0, wbytes = (uint64_t)A1N + A2N + B1N + B2N + B1N;
+        CHECK(s.n - p.n == 5 && s.big - p.big == 2 && s.copies - p.copies == wcopies && s.bytes - p.bytes == wbytes,
+              "C210 第 %d 轮：写缓冲 5 笔 / 超一块 2 笔 / 拷贝命令 %llu 条 / %llu 字节 → %llu / %llu / %llu / %llu", r, (unsigned long long)wcopies,
+              (unsigned long long)wbytes, (unsigned long long)(s.n - p.n), (unsigned long long)(s.big - p.big),
+              (unsigned long long)(s.copies - p.copies), (unsigned long long)(s.bytes - p.bytes));
+        CHECK(s.hit - p.hit == whit && s.miss - p.miss == wmiss && s.nblk - p.nblk == wnew && s.kept - p.kept == wkept && s.rej - p.rej == wrej && s.full - p.full == 0,
+              "C210 第 %d 轮：命中 %llu / 没命中 %llu / 新建 %llu / 留 %llu / 非标准没留 %llu / 表满 0 → %llu/%llu/%llu/%llu/%llu/%llu", r,
+              (unsigned long long)whit, (unsigned long long)wmiss, (unsigned long long)wnew, (unsigned long long)wkept, (unsigned long long)wrej,
+              (unsigned long long)(s.hit - p.hit), (unsigned long long)(s.miss - p.miss), (unsigned long long)(s.nblk - p.nblk), (unsigned long long)(s.kept - p.kept),
+              (unsigned long long)(s.rej - p.rej), (unsigned long long)(s.full - p.full));
+        if (r == 1) CHECK(s.nbytes == 27ull * 262144ull, "C210 第 1 轮：新建的 27 块应都是 262144 字节标准块，共 %llu 字节 → %llu", 27ull * 262144ull, (unsigned long long)s.nbytes);
+        const uint8_t *m = buf_cpu(dst);
+        CHECK(!memcmp(m + A1O, a1, A1N), "C210 第 %d 轮：段 A 第一笔（偏移 %d，%d 字节）内容与源不符", r, A1O, A1N);
+        CHECK(!memcmp(m + A2O, a2, A2N), "C210 第 %d 轮：段 A 第二笔（偏移 %d，%d 字节）内容与源不符", r, A2O, A2N);
+        CHECK(!memcmp(m + B1O, b3, B1N), "C210 第 %d 轮：段 B 第一笔的区间（偏移 %d，%d 字节）应是第三笔的新内容（读到第一笔的内容 = 重叠两笔的顺序错了）", r, B1O, B1N);
+        CHECK(!memcmp(m + B2O, b2, B2N), "C210 第 %d 轮：段 B 第二笔（偏移 %d，%d 字节）内容与源不符（切块边界处 162144 / 137856）", r, B2O, B2N);
+        const uint64_t gaps[5][2] = {{0, A1O}, {A1O + A1N, A2O}, {A2O + A2N, B1O}, {B1O + B1N, B2O}, {B2O + B2N, DST}};
+        for (int g = 0; g < 5; g++) { uint64_t bad = c210_sentinel(m, gaps[g][0], gaps[g][1]); CHECK(bad == UINT64_MAX, "C210 第 %d 轮：空隙 [%llu, %llu) 的哨兵在 %llu 处被改写", r, (unsigned long long)gaps[g][0], (unsigned long long)gaps[g][1], (unsigned long long)bad); }
+    }
+    {   // 表的上限
+        enum { CH = 262140, NB = 264 };
+        const uint64_t total = (uint64_t)NB * CH;
+        nvn_gpu_buf big_dst = make_buf(total, NVN_GPU_MEM_SHARED, NULL);
+        uint8_t *src = malloc(total);
+        CHECK(big_dst && src, "C210 表的上限：大缓冲分配");
+        if (big_dst && src) {
+            c210_fill(src, total, 99);
+            for (int pass = 0; pass < 2; pass++) {
+                struct stg_wr_stats p = stg_wr_read();
+                nvn_gpu_cmd c = begin_cmd(); if (!c) break;
+                nvn_gpu_buf_write(c, big_dst, 0, src, total);
+                nvn_gpu_rc rc = nvn_gpu_cmd_commit(c, fence++, on_done, NULL, &e);
+                CHECK(OK(rc), "C210 表的上限 第 %d 遍 commit：%d %s", pass + 1, rc.code, e.why);
+                CHECK(OK(nvn_gpu_fence_wait(fence - 1, 20000000000ull, &e)), "C210 表的上限 第 %d 遍 wait：%s", pass + 1, e.why);
+                c210_wait_returned(p.kept + p.rej + p.full + NB, "表的上限");
+                struct stg_wr_stats s = stg_wr_read();
+                // 进第 1 遍时表里已有 27 块（前三轮留下的标准块）：要 264 块，27 块命中、237 块新建；放回 264 块，表容量 256 → 留 256、表满没留 8。
+                // 第 2 遍进来时表里 256 块：命中 256、新建 8；放回 264 块，同样留 256、表满没留 8。
+                const uint64_t whit = pass == 0 ? 27 : 256, wmiss = pass == 0 ? 237 : 8;
+                CHECK(s.hit - p.hit == whit && s.miss - p.miss == wmiss && s.kept - p.kept == 256 && s.full - p.full == 8 && s.rej - p.rej == 0,
+                      "C210 表的上限 第 %d 遍：命中 %llu / 没命中 %llu / 留 256 / 表满没留 8 / 非标准 0 → %llu/%llu/%llu/%llu/%llu", pass + 1, (unsigned long long)whit, (unsigned long long)wmiss,
+                      (unsigned long long)(s.hit - p.hit), (unsigned long long)(s.miss - p.miss), (unsigned long long)(s.kept - p.kept), (unsigned long long)(s.full - p.full), (unsigned long long)(s.rej - p.rej));
+                CHECK(!memcmp(buf_cpu(big_dst), src, total), "C210 表的上限 第 %d 遍：69204960 字节内容与源不符", pass + 1);
+            }
+        }
+        free(src); nvn_gpu_buf_release(big_dst, NULL, NULL);
+    }
+out:
+    free(a1); free(a2); free(b1); free(b2); free(b3);
+    if (dst) nvn_gpu_buf_release(dst, NULL, NULL);
+    nvn_gpu_err ce; CHECK(OK(nvn_gpu_close(5000000000ull, &ce)), "C210 close：%d %s", ce.rc.code, ce.why);
 }
 
 // ---- C206（#1194）：段内「已引用句柄」备忘 ----
@@ -10805,10 +10934,11 @@ int main(int argc, char **argv) {
         s2a_vk_device_destroy(&g_dev, 1);
         return g_fail ? 1 : 0;
     }
-    if (getenv("S2A_TEST_STG_ONLY")) {   // 开发时只跑 C202（暂存缓冲回收表；run.sh 不设这个变量）
+    if (getenv("S2A_TEST_STG_ONLY")) {   // 开发时只跑 C202 / C210（暂存缓冲回收表、暂存写分块；run.sh 不设这个变量）
         memset(&g_desc, 0, sizeof g_desc); g_desc.host_device = &g_dev; g_desc.app_label = "nvn-backend-vk-test";
         c202_stg_pool();
-        printf("nvn_gpu Vulkan 后端 C202 单跑：%s（%d 处不符）\n", g_fail ? "红" : "绿", g_fail);
+        c210_stg_chunk();
+        printf("nvn_gpu Vulkan 后端 C202 / C210 单跑：%s（%d 处不符）\n", g_fail ? "红" : "绿", g_fail);
         s2a_vk_device_destroy(&g_dev, 1);
         return g_fail ? 1 : 0;
     }
@@ -11281,6 +11411,7 @@ int main(int argc, char **argv) {
     c1581_cmdpool();   // 独立会话：额外命令缓冲随命令池复用
 #endif
     c202_stg_pool();   // 缺省档与对照档各自开 / 关会话（围栏号从各自会话重新算）
+    c210_stg_chunk();  // C210 暂存写分块：一个会话
     c206_ref_seen();   // C206 段内已引用句柄备忘：缺省档与对照档各三个会话
 
     c205_all(argv[1]);   // C205 图形管线散列表：每个臂自己一个会话

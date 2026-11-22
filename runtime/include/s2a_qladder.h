@@ -25,6 +25,9 @@ void s2a_ql_retry(uint64_t now);
 //   丢掉正在攒的窗口与 GPU 起点，回到前台后再空等 S2A_QL_SETTLE_NS 才重新计时；宿主侧每帧在失焦 / 睡眠时调
 #define S2A_QL_SETTLE_NS 3000000000ull
 void s2a_ql_away(uint64_t now);
+// 屏幕刷新率（#1857 玩家 75 Hz 屏：60 帧只能 1 拍 / 2 拍交替出，帧间隔 13.3 / 26.7 ms 交替，26.7 ms 按「目标 × 1.5 = 25 ms」算成慢帧，
+//   平均 59.9 帧也压回 30）。慢帧门槛取「目标 × 1.5」与「这一帧按刷新拍该占几拍 × 拍长 + 半拍」的大者；0 / 不调 = 不知道刷新率，照旧
+void s2a_ql_set_refresh_hz(int hz);
 // 最近一次判定窗口的读数（换档日志用）
 void s2a_ql_last(double *fps, double *slow_pct, double *gpu_pct, int *thermal);
 // 梯子换档压回 / 放开 60 帧时要不要告诉玩家（审计 P1-80 原因 4：原先梯子压帧不弹横幅，60 帧开关显示开着、画面已回原帧率，玩家不知道为什么）：

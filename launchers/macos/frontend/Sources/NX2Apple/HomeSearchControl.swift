@@ -30,7 +30,7 @@ struct HomeSearchControl: View {
                     .background(.white.opacity(hovered ? 0.08 : 0), in: Circle())
                     .contentShape(Circle())
             }
-            .buttonStyle(.plain).controllerControl(id: "home.search", activate: editFromController)
+            .buttonStyle(.plain).controllerControl(id: "home.search", activate: editFromController).controllerRingRadius(.infinity)
             .controllerID("home.search")
             .onHover { hovered = $0 }
             .launcherTooltip(loc.t(isExpanded ? "home.collapseSearch" : "home.search"), placement: .below)

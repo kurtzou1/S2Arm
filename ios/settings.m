@@ -1,3 +1,4 @@
+#include "local_player_prefs.h"
 #import <Foundation/Foundation.h>
 #include "s2a_docs.h"   // s2a_container_docs：容器文档根（Apple TV 在 Library/Caches/S2Arm）
 #import "settings.h"
@@ -342,8 +343,10 @@ void s2a_ios_apply_ldn_settings(NSUserDefaults *defaults) {
     if (hosting) setenv("S2A_LDN_LISTEN", "0.0.0.0", 0);
 }
 
+static void publish_local_players(void);
 void s2a_ios_apply_graphics_settings(NSUserDefaults *defaults) {
     s2a_ios_apply_ldn_settings(NSUserDefaults.standardUserDefaults);
+    publish_local_players();
     // 字符串与 Settings.bundle 一致。起局工具显式给出的环境变量优先。
     const struct {
         __unsafe_unretained NSString *key;
@@ -657,6 +660,36 @@ NSDictionary<NSString *, NSString *> *s2a_ios_local_player(NSUserDefaults *defau
     return @{@"uid": want, @"name": name, @"folder": folder};
 }
 
+static void publish_local_players(void) {
+    if (!getenv("S2A_LOCAL_PLAYERS")) {
+        id list = [NSUserDefaults.standardUserDefaults objectForKey:@"S2ALocalPlayers"];
+        NSMutableArray *all = [NSMutableArray array];
+        BOOL hasFirst = NO;
+        if ([list isKindOfClass:NSArray.class] && [(NSArray *)list count]) {
+            for (id item in (NSArray *)list) {
+                if (![item isKindOfClass:NSDictionary.class] || ![item[@"uid"] isKindOfClass:NSString.class]) continue;
+                NSString *uid = item[@"uid"];
+                NSString *pname = [item[@"name"] isKindOfClass:NSString.class] ? item[@"name"] : @"";
+                if (!uid.length) {
+                    if (hasFirst) continue;
+                    hasFirst = YES;
+                    [all addObject:@{ @"user": @"first", @"name": pname, @"folder": @"SaveData" }];
+                } else if (player_uid_ok(uid)) {
+                    NSString *pfolder = player_folder_ok(item[@"folder"]) && ![item[@"folder"] isEqualToString:@"SaveData"]
+                        ? item[@"folder"] : [@"SaveData-" stringByAppendingString:uid];
+                    [all addObject:@{ @"user": uid, @"name": pname, @"folder": pfolder }];
+                }
+            }
+        }
+        if (!hasFirst) [all insertObject:@{ @"user": @"first", @"name": @"", @"folder": @"SaveData" } atIndex:0];
+        NSData *jsonData = [NSJSONSerialization dataWithJSONObject:all options:0 error:nil];
+        if (jsonData) {
+            NSString *jsonStr = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
+            if (jsonStr.length) apply_environment("S2A_LOCAL_PLAYERS", jsonStr);
+        }
+    }
+}
+
 // 玩家在设置里关了即时快照（S2ASnapshot 显式存过且为假）：runtime/src/snapsw.c 在构造期（vawin.c vawin_boot 定命令记录区 / 虚拟池区时）第一次读开关就问这里，
 //   不等开局再写 S2A_SNAP_MODE（那时开关已缓存成「开」、地址已占，11-21）。只读 NSUserDefaults，构造期可调
 int s2a_ios_snap_pref_off(void) {
@@ -666,6 +699,7 @@ int s2a_ios_snap_pref_off(void) {
     NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
     return [d objectForKey:@"S2ASnapshot"] != nil && ![d boolForKey:@"S2ASnapshot"];
 }
+
 void s2a_ios_load_graphics_settings(void) {
     @autoreleasepool {
         // 先套用户设置、再读包内能力清单（在 App 包顶层）：两边都只在环境变量未设时写，先写的赢 → 启动环境 > 用户设置 > 清单
@@ -719,3 +753,7 @@ int s2a_ios_reload_graphics_settings(void) {
     }
 }
 
+
+__attribute__((visibility("default"), used)) int s2a_local_player_persist(const char *uid, const char *name, const char *folder) {
+    return s2a_store_local_player(NSUserDefaults.standardUserDefaults, uid, name, folder);
+}

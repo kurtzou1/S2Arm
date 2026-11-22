@@ -72,6 +72,7 @@ struct s2a_vk_device {
     // descriptor indexing 仅建可选设备能力；编译器的 non-uniform profile 仍独立关闭。
     // ext_state: -1 枚举失败（未知），0 未列出，1 列出。后续位为物理设备支持，不等于启用。
     int descriptor_indexing_ext_state, descriptor_indexing_enabled;
+    int device_fault_ext_state;  // 仅诊断：1 已列出，0 未列出，-1 枚举失败
     int descriptor_indexing_runtime, descriptor_indexing_partial, descriptor_indexing_sampled_nonuniform;
     int descriptor_indexing_storage_nonuniform, descriptor_indexing_variable_count, descriptor_indexing_sampled_update_after_bind;
     // #1199：逐格式 BC 能力位（bit i 对应 NVN 格式 0x41+i）。

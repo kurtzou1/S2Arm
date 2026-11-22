@@ -79,12 +79,17 @@ import S2ArmAppleAdapter
         let model = S2ArmLauncherModel(client: JobClient(environment: JobEnvironment(
             privateRoot: root, resources: root, library: root.appendingPathComponent("lib").path, libraryId: "fixture"), runner: runner))
         model.updatePhone(acceptStale: false, repack: [], language: "zh-Hans", device: "D1")
+        model.updatePhone(acceptStale: false, repack: [], language: "zh-Hans", device: "D1")
+        XCTAssertTrue(model.phoneQueue.isEmpty, "重复点更新不排第二次备份")
         for _ in 0..<300 where model.busy || model.dropConfirm == nil { try? await Task.sleep(for: .milliseconds(10)) }
         let ask = try XCTUnwrap(model.dropConfirm, "更新失败时也要问「仍然继续」")
         XCTAssertEqual(ask.kind, .installUpdate); XCTAssertEqual(ask.code, "save_backup_failed"); XCTAssertEqual(ask.accept, ["acceptNoBackup"])
         for _ in 0..<300 where model.lastPhoneSession == nil { try? await Task.sleep(for: .milliseconds(10)) }
         XCTAssertEqual(model.lastPhoneSession?.kind, .installUpdate)
         XCTAssertEqual(model.lastPhoneSession?.failureCode, "save_backup_failed", "结局页按这单的失败码出确认，不能是前面那条警告的码")
+        model.retryPhoneUpdate()
+        XCTAssertFalse(model.phoneBusy, "待确认时普通重试不能重新发起更新")
+        XCTAssertEqual(runner.installs.count, 1)
         model.confirmDrop(ask)
         for _ in 0..<300 where model.busy || runner.installs.count < 2 { try? await Task.sleep(for: .milliseconds(10)) }
         XCTAssertEqual(runner.installs.count, 2)

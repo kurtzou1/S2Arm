@@ -416,6 +416,9 @@ int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) 
     const int has_dcc = has_device_extension(out->physical, "VK_EXT_depth_clip_control");
     // 设备按 Vulkan 1.1 创建：扩展的 properties2 / maintenance3 依赖由 1.1 满足。
     // 扩展不可枚举时保持未知；仅在列出且物理设备版本满足依赖时查询。
+    char device_fault_why[96];
+    out->device_fault_ext_state = extension_state(out->physical, VK_EXT_DEVICE_FAULT_EXTENSION_NAME,
+                                                   device_fault_why, sizeof device_fault_why);
     char descriptor_why[96] = "";
     out->descriptor_indexing_ext_state = extension_state(out->physical, VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,
                                                           descriptor_why, sizeof descriptor_why);

@@ -921,6 +921,7 @@ if [ "$mode" = "" ]; then bash "$repo/android/tests/vk/run.sh" --tbuf-compiler-c
 if [ "$mode" = "" ]; then bash "$repo/android/tests/vk/run_replay_copy_t2b.sh"; fi
 if [ "$mode" = "" ]; then bash "$repo/android/tests/vk/run_replay_read_texels.sh"; fi   # ReadTexels 读 GPU 内容（rp_read_texels.inc + 真后端）
 if [ "$mode" = "" ]; then bash "$repo/android/tests/vk/run_replay_clear_tex.sh"; fi
+if [ "$mode" = "" ]; then bash "$repo/android/tests/vk/run_replay_draw_tex.sh"; fi
 if [ "$mode" = "" ]; then bash "$repo/android/tests/vk/run_replay_ssbo_window.sh"; fi
 # 计算读回要求校验层声明 syncval_shader_accesses_heuristic；共享镜像的层（Ubuntu noble 1.3.275）没有，夹具退 75（环境验不了）。
 # 原先在 set -e 下直接调，75 让整个默认档就此退出：其后的主套件（t_backend_vk 三遍、上屏、BC 解码等）在任何门禁机上都没跑过，

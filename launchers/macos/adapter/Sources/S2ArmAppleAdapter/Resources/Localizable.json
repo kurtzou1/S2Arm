@@ -10900,7 +10900,15 @@
   "en": "With the phone firmly connected (cable in, unlocked), export this game to this phone again and the save will be copied again."
  },
  {
-  "source": "这款游戏要的地址范围比这台 Mac 的系统能给 App 的多（和存储空间无关）：想正常玩，请换一台内存更大的 Mac，或等后续版本改进；游戏照常能启动。",
-  "en": "This game needs more address range than the system on this Mac can give apps (this has nothing to do with storage space): to play normally, use a Mac with more memory, or wait for a later version; the game still starts."
+  "source": "这款游戏要的地址范围比 macOS 能给 App 的多（每台 Mac 都一样，和内存大小、存储空间都无关，换 Mac 没有用）：可能会卡或停在开头，我们在改进；游戏照常能启动。",
+  "en": "This game needs more address range than macOS can give apps (it is the same on every Mac and has nothing to do with memory size or storage space, so another Mac won't help): it may be slow or stay at the beginning, and we're working on it; the game still starts."
+ },
+ {
+  "source": "S2Arm 自带的读取工具 nx_unpack.exe 不见了：是杀毒软件把它当成病毒隔离了。到「Windows 安全中心 → 保护历史记录」里把它还原并允许，把 S2Arm 安装文件夹加进信任后再点一次。",
+  "en": "S2Arm's bundled reader nx_unpack.exe is gone: antivirus software quarantined it as a virus. Open Windows Security → Protection history, restore and allow it, add the S2Arm install folder to the trusted list, then try again."
+ },
+ {
+  "source": "备份手机上各款的存档",
+  "en": "Backing up saves for the games on the device"
  }
 ]

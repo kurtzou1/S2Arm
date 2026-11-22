@@ -162,6 +162,13 @@ BOOL s2a_diag_collect(NSString *D, NSString *W, NSUInteger cap, BOOL slim, NSStr
             NSString *rel = [NSString stringWithFormat:@"pso/%@.tsv", gid];
             [fm createDirectoryAtPath:[W stringByAppendingPathComponent:@"pso"] withIntermediateDirectories:YES attributes:nil error:nil];
             if ([fm copyItemAtPath:e[1] toPath:[W stringByAppendingPathComponent:rel] error:nil]) { [files addObject:@{@"path": rel, @"bytes": @(n), @"truncated": @NO}]; used += n; [seen addObject:gid]; }
+            // 同目录的局内用到的着色器（shader_seen.tsv，graphics/nvn/gfx/nvn/hle_nvn.c seen_note；只有键与阶段号）：放 pso/<号>.seen.tsv，同一份上限
+            NSString *sv = [[e[1] stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"shader_seen.tsv"];
+            NSDictionary *sa = [fm attributesOfItemAtPath:sv error:nil]; unsigned long long sn = sa.fileSize;
+            if ([sa.fileType isEqualToString:NSFileTypeRegular] && sn && sn <= (4ull << 20) && used + sn <= (8ull << 20)) {
+                NSString *srel = [NSString stringWithFormat:@"pso/%@.seen.tsv", gid];
+                if ([fm copyItemAtPath:sv toPath:[W stringByAppendingPathComponent:srel] error:nil]) { [files addObject:@{@"path": srel, @"bytes": @(sn), @"truncated": @NO}]; used += sn; }
+            }
         } }
     // 着色器补料（graphics/nvn/host/dsh_salvage.inc，同 Mac pack/jobs/library.py 口径）：多款容器 games/<号>/wire/<号>/shader_miss/、单款包 wire/<号>/shader_miss/ 里
     //   库里没有 / 现编失败的着色器（index.tsv + 成对的 <键>.ctl / .code），每款打成一个 tar 放 shader_miss/<号>.tar（诊断包成员数有上限：

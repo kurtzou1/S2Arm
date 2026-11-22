@@ -21,6 +21,11 @@ nvn_gpu_view rp_view_by_id_decl(int id, uint8_t dtt, uint8_t dcls, int elem, nvn
 // 句柄在游戏常量缓冲里（NVN_RB_TEXU）：号没登记（越过池容量 / 负号 / 池里没登记）按 Ryujinx 的 null 贴图绑声明类型的零贴图，不跳整笔；
 // 其余同 rp_view_by_id_decl（elem = 0）。信息计数 rp_ubo_zero_count（换局清零）。
 nvn_gpu_view rp_view_by_ubo_handle_decl(int id, uint8_t dtt, uint8_t dcls, nvn_gpu_cmd c, tex_t *t_out);
+// 出库程序（出包预编库，声明是出包时推的）的绑定核对：begin 之后的 rp_view_by_id_decl / rp_view_by_ubo_handle_decl 遇到
+//   「登记过、在池里、声明目标桥接不了」的贴图，不绑零贴图、不记未接，返回 NULL；end 返回 1 = 遇到过（调用方换现编版重绑）。
+//   不另取锁：判据就是取视图时那一次。线程：[提交]
+void rp_decl_probe_begin(void);
+int rp_decl_probe_end(void);
 // 一维 / 一维数组折成二维 / 二维数组（同 iOS nvn_mtl.m tex_desc_fit，#1810）：后端建不出目标 0 / 3，翻译后的着色器也一律按二维采样
 // （Sample1DAs2D）。NVN 描述里一维数组的层数放在 height，折后放进 depth、高 1；一维的高、深都是 1。后端建图、零贴图、声明与实际目标的比较都先过这一步；
 // 登记快照 t->d 与客体布局 t->L 保持原样（解交织按客体的形状）。

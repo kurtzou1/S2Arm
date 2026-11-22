@@ -29,6 +29,7 @@ FITS(queue_t, NVNqueue);
 typedef struct { NVNdevice *dev; void *mem; uint64_t size; uint32_t flags; } pool_builder_t;  FITS(pool_builder_t, NVNmemoryPoolBuilder);
 typedef struct { uint32_t magic, flags; uint8_t *mem; uint64_t size; int32_t nvmap; uint64_t gva; } pool_t;  FITS(pool_t, NVNmemoryPool);   // nvmap: the pool's nvmap handle, opened on first nvnTextureGetNvRmSurfaceNVX (0 = none yet); gva: 池的 GPU 地址（hle_nvn.c gva_alloc，0 = 没分到，用 CPU 地址）
 uint64_t nvn_ga2ca(uint64_t a);   // 游戏拿到的 GPU 地址 → 池存储的 CPU 地址；窗口外原样返回（hle_nvn.c）
+int nvn_ga_unmapped(uint64_t a);   // 换算后仍是 GPU 地址（换不成 CPU 地址、宿主上没映射）：完成回调不能往这里写（hle_nvn.c）
 int nvn_gva_snapshot(uint64_t *out, int cap);   // GPU 地址表按 {GPU 起点, CPU 起点, 字节数} 三元组写出，返回段数（帧录放 nvn_frame_rec.inc 存 state.bin 用）
 // 缓冲长度查询：CPU 地址所在活 nvnBuffer 的 {起点, 总长度}（1 = 命中）。storage 绑定只给地址、
 // size=0 时用它求精确长度；查不到再退回池尾近似。

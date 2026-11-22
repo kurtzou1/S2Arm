@@ -1182,6 +1182,24 @@ class JobsTests(unittest.TestCase):
             self.assertEqual(archive.read(f"pso/{A}.tsv"), b"S\t0123456789abcdef_b\t1\nC\t1111222233334444_b\n")
             self.assertIn(f"pso/{A}.tsv", json.loads(archive.read("manifest.json"))["files"])
 
+    def test_diagnostics_carries_shader_seen(self):
+        # 11-21：局内用到的着色器（同目录 shader_seen.tsv，只有键与阶段号）进 pso/<号>.seen.tsv；只有它、没有 pso_user.tsv 的也放；空的不放。期望按规则手写
+        import zipfile
+        A, B, C = "0100AAAA00000000", "0100BBBB00000000", "0100CCCC00000000"
+        atomic(self.c.library / "catalog.json", dict(schema=1, games=[dict(id=g, name=g) for g in (A, B, C)]))
+        def put(g, name, data):
+            f = self.c.library / "temp" / g / "wire" / g / name; f.parent.mkdir(parents=True, exist_ok=True); f.write_bytes(data)
+        put(A, "pso_user.tsv", b"S\t0123456789abcdef_b\t1\n"); put(A, "shader_seen.tsv", b"0123456789abcdef\t1\n")
+        put(B, "shader_seen.tsv", b"fedcba9876543210\t0\n")
+        put(C, "shader_seen.tsv", b"")
+        destination = self.root / "diag-seen.zip"; destination.unlink(missing_ok=True); self.c.r["path"] = str(destination)
+        library.diagnostics(self.c)
+        with zipfile.ZipFile(destination) as archive:
+            names = sorted(n for n in archive.namelist() if n.startswith("pso/"))
+            self.assertEqual(names, [f"pso/{A}.seen.tsv", f"pso/{A}.tsv", f"pso/{B}.seen.tsv"])
+            self.assertEqual(archive.read(f"pso/{A}.seen.tsv"), b"0123456789abcdef\t1\n")
+            self.assertEqual(archive.read(f"pso/{B}.seen.tsv"), b"fedcba9876543210\t0\n")
+
     def test_diagnostics_zip_budget_skips_optional_members_and_records_them(self):
         # 整包预算（DIAGNOSTIC_ZIP_BUDGET，收件 30 MB 上限）：日志先放；放不下的可选成员（这里是管线记录）跳过、记进 manifest budget.skipped，
         #   整包压缩后不超预算。预算临时压到 600 KB，三份各 400 KB 不可压缩的管线记录只放得下 1 份。期望按规则手写

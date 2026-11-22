@@ -595,7 +595,7 @@
   "console.section.sync": "Sincronizar juegos",
   "console.section.help": "Ayuda",
   "play.addrShort.title": "El sistema de este dispositivo no puede dar a las apps suficiente rango de direcciones para este juego",
-  "play.addrShort.body": "Este juego necesita al empezar un gran rango continuo de direcciones y el sistema de este dispositivo no puede dar tanto a las apps (no tiene nada que ver con el almacenamiento; liberar espacio no ayuda): puede ir muy lento o quedarse parado al principio. Para jugar con normalidad, usa un Mac con más memoria (da a las apps un rango de direcciones mayor) o espera a una versión posterior.",
+  "play.addrShort.body": "Este juego necesita al empezar un gran rango continuo de direcciones y macOS no puede dar suficiente a las apps (es igual en todos los Mac y no depende de la memoria ni del almacenamiento, así que cambiar de Mac o liberar espacio no ayuda): puede ir muy lento o quedarse en el inicio. Estamos trabajando en ello; el juego se inicia igualmente.",
   "console.section.apps": "Apps independientes",
   "console.app.outdated": "Nueva versión · haz clic en «Actualizar S2Arm en el iPhone» para volver a firmar",
   "console.game.standalone": "Instalado como app independiente (ver arriba)",

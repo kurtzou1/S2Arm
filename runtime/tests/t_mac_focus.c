@@ -45,7 +45,7 @@ int main(int argc, char **argv) {
           "front_mac.m 不留旧的 isActive && isKeyWindow 判定");
     check(strstr(front, "s2a_text_input_mac_is_input_window(key)") != NULL, "判定查的是当前 key window 是不是登记中的输入框");
     check(strstr(ti, "int s2a_text_input_mac_is_input_window(NSWindow *w)") != NULL, "textinput_mac.m 导出输入框识别");
-    check(strstr(ti, "!in.answered && in.alert.window == w") != NULL, "已答复的输入框不算");
+    check(strstr(ti, "!in.answered && (in.alert.window == w || in.panel == w)") != NULL, "已答复的输入框不算");
 
     printf("%s t_mac_focus：%d / %d\n", failures ? "✗" : "✓", checks - failures, checks);
     return failures ? 1 : 0;

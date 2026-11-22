@@ -72,6 +72,18 @@ int main(void) {
         id<MTLTexture> mw = tex_mtl(&W), mr = tex_mtl(&Rd), mf = tex_mtl(&F);
         CHECK(mw && mw == mr, "⑤ 采样数 0 + IMAGE 与采样数 1、同存储同描述：同一张 Metal 贴图（%p / %p）", (__bridge void *)mw, (__bridge void *)mr);
         CHECK(mf && mf != mw, "⑤ 反证：同存储、格式不同 → 另一张贴图");
+        // ⑥ #674：已 Finalize 但贴图池 ID 仍在用（视图缓存命中快路径、不刷新 g_alias_seen）的共享贴图不能被孤儿回收踢掉；注销 ID 后才回收
+        static tex_t D; make(&D, 28 << 20, 256); id<MTLTexture> d0 = tex_mtl(&D); gpw_mark(&D, 0, 0, 1, 0, 0, 0, 0);
+        nvn_be_reg_tex(10, &D, NULL); submit(); nvn_be_tex_release(&D); submit();
+        id<MTLTexture> d1 = tex_by_id(10); idle();
+        uint64_t rw6 = g_alias_orph_rw, v6 = g_alias_orph_valve;
+        memset(D.mem, 4, D.L.size); alias_orphan_pass(); alias_orph_evict(NULL, UINT64_MAX); settle();
+        id<MTLTexture> d2 = tex_by_id(10);
+        CHECK(d1 == d0 && d2 == d0 && g_alias_orph_rw == rw6 && g_alias_orph_valve == v6,
+              "⑥ 已 Finalize 但仍被贴图 ID 视图持有的共享贴图：留着（d1=%d d2=%d rw+%llu v+%llu）",
+              d1 == d0, d2 == d0, (unsigned long long)(g_alias_orph_rw - rw6), (unsigned long long)(g_alias_orph_valve - v6));
+        nvn_be_unreg_tex_range(10, 1); idle(); alias_orphan_pass(); settle();
+        CHECK(g_alias_orph_rw == rw6 + 1, "⑥ 反证：注销贴图 ID 后再回收 → 放 +%llu（期望 +1）", (unsigned long long)(g_alias_orph_rw - rw6));
         printf("%s t_nvn_alias_orphan: %u checks %u failures; backend Metal%d\n", failures ? "✗" : "✓", checks, failures, g_m3 ? 3 : 4);
         return failures != 0;
     }

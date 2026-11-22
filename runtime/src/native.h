@@ -158,6 +158,10 @@ uint64_t s2a_window_for_span(uint64_t learned);                     // vawin.c�
 uint64_t s2a_window_host_below(uint64_t fit, uint64_t learned);   // vawin.c：放不下标准布局时窗口下方留给宿主多少（按学到的跨度，#783）
 uint64_t s2a_window_host_below_for_pool(uint64_t fit, uint64_t learned, uint64_t pool);  // vawin.c：按本款应用池给窗口（小内存 iPad 的 3234 MB 堆，宿主至少 2 GiB）
 uint64_t s2a_window_span_seen(uint64_t pid);                        // vawin.c：本款本机学到的地址跨度（wire/<程序号>/span_peak；没有 = 0）
+uint64_t s2a_window_span_trust(const char *pre, uint64_t pid, uint64_t span);   // vawin.c：已知跨度这局能不能拿来收窗（上一局按它收窄后没到首帧 = 0；pre = 文档根下前缀，NULL = 直接 wire/）
+int s2a_window_span_cap_blocked(uint64_t span, uint64_t bad);         // vawin.c：纯函数，跨度不超过「收窄后没到首帧」记下的值就不收
+void s2a_window_cap_try(const char *pre, uint64_t pid, uint64_t span); // vawin.c：这局按 span 收窄了窗口，记 wire/<号>/span_cap_try
+void s2a_window_cap_ok(void);                                         // vawin.c：首帧上屏，删本局的收窄标记
 uint64_t s2a_mem_span_now(void);                                     // svc_mem.c：本局已碰到的地址跨度（碰到的最高地址 − 窗口基址）
 void s2a_low_holes(uint64_t *total, uint64_t *largest);   // 4 GB 到窗口底之间的空洞合计 / 最大块           // 布局只用前 size 字节时把尾部还给系统        // 打一行窗口探测：窗口内除自己的占位外还有没有别人的映射
 void s2a_lowva_start(void);   // 低区统一记账（lowva.c，接口 runtime/include/s2a_lowva.h）：起巡检线程
@@ -198,6 +202,7 @@ uint64_t s2a_alias_report_size(uint64_t alias_base, uint64_t alias_size, uint64_
 //     负数 = 同样大小但读码判「上限不定」（addr_need.tsv 别名区上限 = 不定），别名优先照旧、不收窗口
 //   乙另回 *shadow_base = 堆区起点：远端影子块从堆区顶往下分（far.c），与堆共用这段地址；别名区没伸出窗口（甲，或别名优先收在窗口内）为 0
 #define S2A_FAR_SLACK (256ull << 20)   // 乙的堆区比应用池多给这么多：影子按 2 MiB 块取整的余量
+int s2a_layout_cap_fits(int rc, uint64_t heap_base, uint64_t win_end, uint64_t heap_want);   // layout.c：按学到跨度收窗口前的试算判据（D-PR33）
 int s2a_layout_compute(uint32_t as_type, uint64_t sys_resource_size, uint64_t module_span, int alias_gb, uint64_t win_base, uint64_t win_size, s2a_layout *out, uint64_t *mod_base, uint64_t *shadow_base);
 
 // ---------- 远端（far.c，乙布局一律开）：别名区伸出宿主窗口那段的内容放影子区，游戏一碰即缺页代执行并记点 ----------

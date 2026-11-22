@@ -22,6 +22,9 @@ public sealed partial class EnvironmentWindow
 
     /// <summary>正在更新的款：进度（作业 overall 或 done / total 折成 0–1，没有 = null）与当前步骤说明（作业原句）</summary>
     private readonly Dictionary<string, (double? Fraction, string Message)> gameUpdating = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>正在更新的款当前这一段的计数（作业事件 doneUnits / totalUnits / unit）与速率起点：重编着色器库一段可能几小时，
+    /// 只看整单百分比分不出卡没卡（11-21），按钮下写「3214 / 8191 MB · 1.2 MB/s · 还剩约 68 分钟」（同 Mac HeroUpdateLines）</summary>
+    private readonly Dictionary<string, (double Done, double Total, string Unit, double T0, double D0, double? Rate)> gameUpdateCount = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>最近一次更新的结局：成没成、没成的原因（作业原句）、做不齐的黄字（诊断 update_incomplete 的玩家句）</summary>
     private readonly Dictionary<string, (bool Ok, string Message, IReadOnlyList<string> Warnings)> gameUpdated = new(StringComparer.OrdinalIgnoreCase);
     private bool GameUpdating(string? gameId) => gameId is not null && gameUpdating.ContainsKey(gameId);
@@ -44,6 +47,18 @@ public sealed partial class EnvironmentWindow
                 else if (e.TryGetProperty("done", out var d) && d.ValueKind == System.Text.Json.JsonValueKind.Number &&
                          e.TryGetProperty("total", out var t) && t.ValueKind == System.Text.Json.JsonValueKind.Number && t.GetDouble() > 0) fraction = d.GetDouble() / t.GetDouble();
                 var message = e.TryGetProperty("message", out var m) && m.ValueKind == System.Text.Json.JsonValueKind.String ? m.GetString() ?? "" : "";
+                if (e.TryGetProperty("type", out var ty) && ty.GetString() == "stage") gameUpdateCount.Remove(game.Id);
+                else if (e.TryGetProperty("doneUnits", out var du) && du.ValueKind == System.Text.Json.JsonValueKind.Number &&
+                         e.TryGetProperty("totalUnits", out var tu) && tu.ValueKind == System.Text.Json.JsonValueKind.Number && tu.GetDouble() > 0)
+                {
+                    double dn = du.GetDouble(), tn = tu.GetDouble(), now = Clock;
+                    var unit = e.TryGetProperty("unit", out var un) && un.ValueKind == System.Text.Json.JsonValueKind.String ? un.GetString() ?? "" : "";
+                    var prev = gameUpdateCount.GetValueOrDefault(game.Id);
+                    // 换了计数器（总数变 / 从头数）就从这一条重算速率（同 MilestoneTrack）；量满 2 秒才报速率
+                    gameUpdateCount[game.Id] = !gameUpdateCount.ContainsKey(game.Id) || prev.Total != tn || dn < prev.Done
+                        ? (dn, tn, unit, now, dn, null)
+                        : (dn, tn, unit, prev.T0, prev.D0, now - prev.T0 >= 2 && dn > prev.D0 ? (dn - prev.D0) / (now - prev.T0) : prev.Rate);
+                }
                 var was = gameUpdating.GetValueOrDefault(game.Id);
                 if (gameUpdating.ContainsKey(game.Id)) gameUpdating[game.Id] = (fraction ?? was.Fraction, message.Length > 0 ? message : was.Message);
                 RefreshLive();   // 只换按钮那一格（大卡按钮放在活格子里）
@@ -64,7 +79,7 @@ public sealed partial class EnvironmentWindow
         catch (Exception error) when (error is LibraryProtocolException or IOException or UnauthorizedAccessException or ArgumentException or
             InvalidOperationException or OperationCanceledException or PlatformNotSupportedException or System.ComponentModel.Win32Exception)
         { gameUpdated[game.Id] = (false, error.Message.Length > 0 ? error.Message : error.GetType().Name, []); }
-        finally { EndJob(front); gameUpdating.Remove(game.Id); Render(); }
+        finally { EndJob(front); gameUpdating.Remove(game.Id); gameUpdateCount.Remove(game.Id); Render(); }
         await RefreshUpdateHintsAsync();   // 判据照旧以 updateHints 为准（只读指纹、秒回）
     }
 
@@ -79,6 +94,13 @@ public sealed partial class EnvironmentWindow
             var text = "⟳ " + T("update.button.running") + (now.Fraction is { } f ? " " + (int)Math.Round(100 * Math.Clamp(f, 0, 1)) + "%" : "");
             button = Primary(text, () => { }, enabled: false);
             if (now.Message.Length > 0) ToolTip.SetTip(button, B(now.Message));
+            if (UpdateCountText(game.Id) is { Length: > 0 } line)
+            {
+                var count = new TextBlock { Text = line, Foreground = Brush.Parse("#A0A0A8"), FontSize = 12, VerticalAlignment = VerticalAlignment.Center };
+                AutomationId(count, "library.hero.update.count");
+                AutomationId(button, "library.hero.update");
+                return new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12, Children = { button, count } };
+            }
         }
         else if (state == ExportChoice.Update.Suggested)
             button = Primary(T("update.hint.button"), () => _ = UpdateGameAsync(game),
@@ -90,6 +112,21 @@ public sealed partial class EnvironmentWindow
         }
         AutomationId(button, "library.hero.update");
         return button;
+    }
+
+    /// <summary>更新中这一段的计数：「3214 / 8191 MB · 1.2 MB/s · 还剩约 68 分钟」；没有计数 → 空</summary>
+    private string UpdateCountText(string gameId)
+    {
+        if (!gameUpdateCount.TryGetValue(gameId, out var c)) return "";
+        var parts = new List<string> { c.Unit == "B" ? FormatBytes((long)c.Done) + " / " + FormatBytes((long)c.Total)
+                                                     : (long)c.Done + " / " + (long)c.Total + (c.Unit is "MB" ? " MB" : "") };
+        if (c.Rate is { } rate && rate > 0)
+        {
+            parts.Add(c.Unit == "B" ? FormatBytes((long)rate) + "/s" : rate.ToString("0.0") + (c.Unit is "MB" ? " MB/s" : "/s"));
+            var left = (c.Total - c.Done) / rate;
+            parts.Add(T("install.eta").Replace("{0}", left < 90 ? Math.Max(1, (int)left) + T("install.eta_seconds") : (int)Math.Round(left / 60) + T("install.eta_minutes")));
+        }
+        return string.Join(" · ", parts);
     }
 
     /// <summary>按钮上方：对不上几样写几行橙色原因 + 末行说点了会怎样（只在建议更新、没在更新时）</summary>

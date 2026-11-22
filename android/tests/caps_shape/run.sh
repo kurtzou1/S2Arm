@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 门禁覆盖：android/tests/caps_shape/* android/tests/devprofiles/* android/tests/vk/profiles/devices/* android/native/direct/vk_device.c android/native/direct/vk_device.h android/native/direct/device_caps.c android/native/direct/dev_facts.c android/native/direct/dev_facts.h android/native/direct/gs_path.c android/native/nvn/nvn_vk_format.c android/native/nvn/backend_vulkan.c tools/devprofile_lint.py
+# 门禁覆盖：android/tests/caps_shape/* android/tests/devprofiles/* android/tests/vk/profiles/devices/* android/native/direct/vk_device.c android/native/direct/vk_device.h android/native/direct/device_caps.c android/native/direct/dev_facts.c android/native/direct/dev_facts.h android/native/direct/dev_policy* android/native/direct/gs_path.c android/native/nvn/nvn_vk_format.c android/native/nvn/backend_vulkan.c tools/devprofile_lint.py
 # 接线：android/test.sh 调本脚本（钩子 android/gate.sh，改 android/ 任一文件都会跑）
 # 整台设备能力形态档（#1749：不读厂商号，只看能力）：依赖设备能力的宿主测试在每份设备档案（android/tests/devprofiles/*.json）下各跑一遍。
 #   档的定义与来源见 shapes.py 文件头；假驱动 fake_vk.c 按 S2A_CAPS_SHAPE 选档回答，生产代码原样编进来。
@@ -32,18 +32,20 @@ PY
 mkdir -p "$out/src"
 fresh_src() {   # 被测源的临时副本（负对照只改副本）
   cp "$repo/android/native/direct/vk_device.c" "$repo/android/native/direct/gs_path.c" "$repo/android/native/direct/dev_facts.c" "$repo/android/native/direct/device_caps.c" "$out/src/"
+  cp "$repo/android/native/direct/dev_policy.c" "$out/src/"
   extract "$repo/android/native/nvn/backend_vulkan.c" array_query_default "$out/src/array_query_default.inc"
 }
 fresh_src
 # vk_device.c 的两个弱引用（平台表面扩展表 / 自定义驱动）本测试不提供，保持「没有」：macOS 链接器要显式放行弱的未定义符号
 weak=()
 [ "$(uname -s)" = Darwin ] && read -r -a weak <<< "$(python3 "$repo/tools/weak_link_decl.py" flags capshape)"   # 放行清单唯一来源：vk_device.c 里的「弱链接[capshape]」登记
-build() {   # $1 输出名 [$2 假驱动头所在目录，缺省 $out]：用 $out/src 里的（可能被改坏的）副本
+build() {   # $1 输出名 [$2 假驱动头所在目录] [$3 用例源]：用 $out/src 里可能被改坏的副本
   "${CC:-cc}" ${weak[@]+"${weak[@]}"} -std=gnu11 -O1 -Wall -Wextra -Werror -DS2A_ANDROID_VK_BACKEND_NVN_VK=1 -DS2A_DEV_FACTS_TEST=1 \
     -I "${2:-$out}" -I "$out/src" -I "$here" -I "$repo/android/native/direct" -I "$repo/android/native/nvn" -I "$repo/graphics/nvn/gfx/nvn" \
     -I "$repo/android/tests/vkhost" -I "$repo/graphics/nvn/third_party/vulkan-headers/include" \
     -I "$repo/android/native" -I "$repo/android/native/capprobe" \
-    "$here/vk_device_shape_test.c" "$here/fake_vk.c" "$out/src/vk_device.c" "$out/src/gs_path.c" "$out/src/dev_facts.c" \
+    "${3:-$here/vk_device_shape_test.c}" "$here/fake_vk.c" "$out/src/vk_device.c" "$out/src/gs_path.c" "$out/src/dev_facts.c" \
+    "$out/src/dev_policy.c" \
     "$out/src/device_caps.c" "$repo/android/native/direct/sha256.c" "$repo/android/native/nvn/nvn_vk_format.c" -o "$out/$1"
 }
 build test
@@ -51,6 +53,7 @@ build test
 # 按档跑的宿主测试（名字 命令…）
 SHAPE_TESTS=(
   'vk_device|mkdir -p "$S2A_CAPS_SHAPE_OUT.files" && S2A_TEST_FILES_DIR="$S2A_CAPS_SHAPE_OUT.files" S2A_CAPS_SHAPE=$S2A_CAPS_SHAPE "$out/test" "$S2A_CAPS_SHAPE_OUT" "$S2A_CAPS_SHAPE_OUT.profile.json" 2>"$S2A_CAPS_SHAPE_OUT.log"'
+  'policy_summary|count=$(grep -c "【策略】v1" "$S2A_CAPS_SHAPE_OUT.log" || true); if [ "$count" != 1 ]; then echo "FAIL: [$S2A_CAPS_SHAPE] 策略启动摘要：期望 1 条 → 实测 $count 条"; exit 1; fi'
   'device_profile|"${PY:-python3}" "$here/shapes.py" compare "$S2A_CAPS_SHAPE" "$S2A_CAPS_SHAPE_OUT.profile.json"'
   'real_device_oracle|case $S2A_CAPS_SHAPE in adreno-8xx-qcom|mali-g710-r32p1) "${PY:-python3}" "$here/shapes.py" oracle "$S2A_CAPS_SHAPE" "$S2A_CAPS_SHAPE_OUT";; *) echo "PASS: [$S2A_CAPS_SHAPE] 没有真机 caps 读数（合成档），不比";; esac'
 )
@@ -66,6 +69,46 @@ done
 [ $rc = 0 ] || { echo "【红】整台设备能力形态档：有档红（上面 FAIL 行）"; exit 1; }
 echo "PASS: 形态档 $(echo $shapes | wc -w | tr -d ' ') 档 × ${#SHAPE_TESTS[@]} 项 = $n 次全绿（${shapes}）"
 grep -h "【事实】" "$out"/caps-*.json.log | head -1 | sed "s/^/  摘要样例：/"
+
+"${PY:-python3}" "$here/shapes.py" policy-header "$out/policy_archives_gen.h"
+build policy "$out" "$here/t_dev_policy.c"
+for shape in adreno-8xx-qcom mali-g710-r32p1 minimal-1.1 lavapipe; do
+  S2A_CAPS_SHAPE=$shape "$out/policy" > "$out/$shape.policy" 2> "$out/$shape.policy.log" \
+    || { cat "$out/$shape.policy.log"; exit 1; }
+  diff -u "$repo/android/tests/devprofiles/$shape.policy.golden" "$out/$shape.policy"
+  grep '策略 L0' "$out/$shape.policy.log"
+done
+
+neg_policy() {
+  fresh_src
+  "${PY:-python3}" - "$out/src/dev_policy.c" "$2" "$3" <<'PY'
+import sys
+from pathlib import Path
+path, before, after = Path(sys.argv[1]), *sys.argv[2:]
+source = path.read_text(encoding='utf-8')
+assert source.count(before) == 1, before
+path.write_text(source.replace(before, after), encoding='utf-8')
+PY
+  build policy-neg "$out" "$here/t_dev_policy.c"
+  if S2A_CAPS_SHAPE=$4 "$out/policy-neg" > "$out/policy-neg.log" 2>&1; then
+    echo "FAIL: 策略负对照 $1 漏抓"; exit 1
+  fi
+  if ! grep -F "$5" "$out/policy-neg.log"; then
+    echo "FAIL: 策略负对照 $1 红因不符"; cat "$out/policy-neg.log"; exit 1
+  fi
+  echo "PASS: 策略负对照 $1 红在 $5"
+}
+neg_policy '缺扩展仍开格式列表' \
+  'item[S2A_POLICY_TEX_FMT_LIST] = queried_extension(facts, VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME);' \
+  'item[S2A_POLICY_TEX_FMT_LIST] = queried(1, VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME);' \
+  minimal-1.1 'tex.fmt_list 与现状选择不同'
+neg_policy '枚举失败当成未列出' 'if (facts->ext_state != 1) return -1;' 'if (facts->ext_state != 1) return 0;' \
+  adreno-8xx-qcom 'tex.fmt_list 枚举失败须保留未证'
+neg_policy '按厂商号改变选择' \
+  'item[S2A_POLICY_TEX_FMT_LIST] = queried_extension(facts, VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME);' \
+  'item[S2A_POLICY_TEX_FMT_LIST] = facts->props.vendorID == UINT32_MAX ? queried(0, "identity") : queried_extension(facts, VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME);' \
+  adreno-8xx-qcom 'tex.fmt_list 不读身份字段'
+fresh_src
 
 # 回读闭环：各档生成的档案原样放进一个新的档案目录当形态档，再建设备、再生成，第二代与第一代逐字段比（期望 = 第一代文件本身）
 mkdir -p "$out/rt/profiles"

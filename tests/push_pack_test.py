@@ -1451,6 +1451,23 @@ class AppDirs(unittest.TestCase):
         self.assertIn("写进 Apple TV 时中断", str(tv.exception)); self.assertIn("同一个网络", str(tv.exception)); self.assertNotIn("数据线", str(tv.exception))
         self.assertIn("写进 iPhone 时中断", str(ph.exception)); self.assertIn("数据线插稳", str(ph.exception))
 
+    def test_developer_mode_off_says_turn_it_on(self):   # D-MHM5 期望（手写）：devicectl 原话「Developer Mode is disabled」→ 报码 developer_mode_required、叫玩家开开发者模式，不说数据线 / 解锁
+        dev = push.Devicectl("D", "B", tempfile.mkdtemp())
+        src = Path(tempfile.mkdtemp()) / "f"; src.write_bytes(b"ok")
+        said = "ERROR: The operation failed because Developer Mode is disabled. (com.apple.dt.CoreDeviceError error 10005 (0x2715))"
+        with mock.patch.object(dev, "dcp", return_value=(1, said)), mock.patch.object(dev, "nospc", return_value=False), \
+                mock.patch.dict(os.environ, {"S2A_PUSH_TV": ""}), self.assertRaises(push.DeveloperModeOff) as e:
+            dev.put(str(src), "a")
+        m = str(e.exception)
+        self.assertEqual(e.exception.code, "developer_mode_required")
+        self.assertIn("开发者模式", m); self.assertIn("隐私与安全性", m)
+        for w in ("数据线", "退出码"): self.assertNotIn(w, m)
+        with mock.patch.object(dev, "dcp", return_value=(1, "")), mock.patch.object(dev, "nospc", return_value=False), \
+                mock.patch.dict(os.environ, {"S2A_PUSH_TV": ""}), self.assertRaises(push.Fail) as other:
+            dev.put(str(src), "a")
+        self.assertNotIsInstance(other.exception, push.DeveloperModeOff)   # 别的失败照旧
+        self.assertIn("数据线插稳", str(other.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

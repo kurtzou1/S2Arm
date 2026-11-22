@@ -17,6 +17,8 @@
 //   ⑮ Vulkan 前端的入口 mtl_nocopy_buf（hle_vk.m / vk_snap.inc 用）：同一段 32 MB 内存上包两个重叠缓冲 [0, 32) MB、[16, 32) MB——设备总量涨 32 + 16 = 48 MB，
 //     浮层读数涨不到 1 MB（这段内存只计一次：在进程实占里，不进 GPU 已分配）；两个都放掉后记账回到建前
 //   ⑯ 零拷贝缓冲只有一个建法：nvn_mtl.m 里 newBufferWithBytesNoCopy: 只出现 1 次（nocopy_buf 里），hle_vk.m、vk_snap.inc 里 0 次
+//   ⑱ 状态表存取（子进程；快照 gfx_state.bin / 帧录 state.bin）：640 MB 池查出两块 → fr_dump_state → 会话销毁 → fr_restore_state →
+//      大池记录 1（整池）、池表 0 条；存之前没查到过的 500 MB 处按长度 1 查：查到、往后可读 ≥ 64 MB、不走地址兜底。反证：nvn_frame_rec.inc 照块写 → 两项红
 //   反证：s2a_gpu_alloc_bytes 改回只读 currentAllocatedSize → ⑬ ⑮ 红（涨 96 / 48 MB）；nocopy_buf 的 deallocator 不减 → ⑭ ⑮ 红；hle_vk.m 改回直接建 → ⑯ 红
 //   反证：去掉 nvn_be_pool_add_body 里登记大池那段 → ① ② ③ ④ 红（整池一个缓冲）；去掉注销时把旧块缓冲算进被放掉的那两行 → ⑨ 注销后 1 条红；去掉 big_new 建块前的 dm_guest_write_prepare → ⑫ 红
 #include "../gfx/nvn/nvn_mtl.m"
@@ -29,12 +31,29 @@ static unsigned checks, failures;
 static int aliases(void) { int n=0; pthread_mutex_lock(&g_mu); for (int i=0;i<g_npool;i++) n+=g_pools[i].alias; pthread_mutex_unlock(&g_mu); return n; }
 static int entries_of(const void *mem) { int n=0; pthread_mutex_lock(&g_mu); for (int i=0;i<g_npool;i++) n+=g_pools[i].key==mem; pthread_mutex_unlock(&g_mu); return n; }
 
+static void t_win(uint64_t *b, uint64_t *s) { *b = 0; *s = ~0ull >> 1; }   // ⑱ 地址兜底的客体窗口：全放开（照块写的旧行为下兜底能成，读数才对得上真机）
 static int child(int chunks) {
     alarm(60); unsetenv("NXGAL_BE");
     if (chunks) unsetenv("DM_NVN_POOL_CHUNKS"); else setenv("DM_NVN_POOL_CHUNKS","0",1);
     mtl_init();
     const uint64_t SZ = 640 * MB; uint8_t *mem = NULL; REQUIRE(!posix_memalign((void **)&mem, 16*MB, SZ));   // 16 MB 对齐：块按绝对地址取步长，期望好手算
     nvn_be_pool_add(mem, SZ);
+    if (chunks == 2) {   // ⑱ 状态表（快照 gfx_state.bin / 帧录 state.bin）存取大池：存整池一条、不存块
+        g_adhoc_win = t_win;
+        void *bp0; uint64_t off0, gpu0; REQUIRE(mtl_gpu_addr((uint64_t)(uintptr_t)mem + 100*MB + 16, 64, &bp0, &off0, &gpu0));
+        REQUIRE(mtl_gpu_addr((uint64_t)(uintptr_t)mem + 300*MB, 1, &bp0, &off0, &gpu0));
+        char path[256]; snprintf(path, sizeof path, "%s/t_nvn_big_pool.%d.bin", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp", getpid());
+        REQUIRE(entries_of(mem)==2 && fr_dump_state(path));
+        REQUIRE(!nvn_be_shutdown_session()); nvn_be_begin_session();
+        int ntex = 0; REQUIRE(fr_restore_state(path, &ntex)); unlink(path);
+        uint64_t ad0 = atomic_load(&g_adhoc_n);
+        { pthread_mutex_lock(&g_mu); int nb = g_nbig, ne = g_npool; uintptr_t blo = nb ? g_big[0].lo : 0, bhi = nb ? g_big[0].hi : 0; pthread_mutex_unlock(&g_mu);
+          CHECK(nb==1 && ne==0 && blo==(uintptr_t)mem && bhi==(uintptr_t)mem + SZ,"⑱ 放回后：大池记录 %d、池表 %d 条、记录范围 %s（期望 1、0、整池 640 MB；照块写则记录 0、池表 2 条）",nb,ne,blo==(uintptr_t)mem && bhi==(uintptr_t)mem + SZ?"整池":"不对"); }
+        void *bp1; uint64_t off1, gpu1; int got = mtl_gpu_addr((uint64_t)(uintptr_t)mem + 500*MB + 0xbf00, 1, &bp1, &off1, &gpu1);   // 存之前没查到过的一段，不知道读多远
+        uint64_t room = got ? ((__bridge id<MTLBuffer>)bp1).length - off1 : 0;
+        CHECK(got && room >= 64*MB && atomic_load(&g_adhoc_n)==ad0,"⑱ 放回后查没碰过的 500 MB 处（长度 1）：查到 %d、往后可读 %llu MB、走地址兜底 %llu 次（期望 1、≥ 64、0；照块写则兜底 1 次、可读不到 64 KB）",got,(unsigned long long)(room/MB),(unsigned long long)(atomic_load(&g_adhoc_n)-ad0));
+        printf("%s t_nvn_big_pool 子进程（状态表存取）：%u 项，%u 项失败\n",failures?"✗":"✓",checks,failures); return failures!=0;
+    }
     if (!chunks) {
         pthread_mutex_lock(&g_mu); uint64_t len = 0; int n = 0; for (int i=0;i<g_npool;i++) if (g_pools[i].key==mem) { n++; len = g_pools[i].buf.length; } int nb = g_nbig; pthread_mutex_unlock(&g_mu);
         CHECK(nb==0 && n==1 && len==SZ,"⑧ DM_NVN_POOL_CHUNKS=0：大池记录 %d（期望 0）、整池缓冲 %d 个长 %llu MB（期望 1 个 640）",nb,n,(unsigned long long)(len/MB));
@@ -129,13 +148,13 @@ static int child(int chunks) {
 int main(int argc, char **argv) { @autoreleasepool {
     setvbuf(stdout,NULL,_IOLBF,0);
     if (argc==3 && !strcmp(argv[1],"--child")) return child(atoi(argv[2]));
-    unsigned bad=0; static const char *const modes[2]={"1","0"};
-    for (int m=0; m<2; m++) {
+    unsigned bad=0; static const char *const modes[3]={"1","0","2"};
+    for (int m=0; m<3; m++) {
         fflush(NULL); pid_t pid=fork(); REQUIRE(pid>=0);
         if (!pid) { execl(argv[0],argv[0],"--child",modes[m],(char *)NULL); _exit(127); }
         int st=0; pid_t w; do { w=waitpid(pid,&st,0); } while (w<0 && errno==EINTR); REQUIRE(w==pid);
         bad+=!(WIFEXITED(st) && WEXITSTATUS(st)==0);
     }
-    printf("%s t_nvn_big_pool：缺省 / DM_NVN_POOL_CHUNKS=0 两个子进程，%u 个不过（大内存池按块用到才包）\n",bad?"✗":"✓",bad);
+    printf("%s t_nvn_big_pool：缺省 / DM_NVN_POOL_CHUNKS=0 / 状态表存取三个子进程，%u 个不过（大内存池按块用到才包）\n",bad?"✗":"✓",bad);
     return bad!=0;
 } }

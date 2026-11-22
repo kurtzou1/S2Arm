@@ -540,6 +540,53 @@ class Events(unittest.TestCase):   # ⑥ ⑦ ⑧ 机器读事件流与 --from-ex
 
 
 class InstallWin(unittest.TestCase):
+    def setUp(self):
+        # 签名前的配对检查（#1973）问的是本机真实设备服务：其余用例一律当「已配对」，配对本身见 test_pair_*
+        self._pair = install_win.has_pair_record; install_win.has_pair_record = lambda udid: True
+    def tearDown(self): install_win.has_pair_record = self._pair
+
+    def pair_case(self, record, devpush_body):
+        """设备服务里有没有配对记录（True / False / OSError）+ 假 s2a-devpush → (结果或 Fail, 事件顺序, devpush 收到的参数)"""
+        body = ("open(a[a.index('-o') + 1] + '.ev', 'w').close()\nprint('Installation complete!')\nz = zipfile.ZipFile(a[a.index('-o') + 1], 'w')\n"
+                "z.writestr('Payload/S2Arm.app/Info.plist', b'<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>a.b.T</string></dict></plist>')\nz.close()\n")
+        with tempfile.TemporaryDirectory() as d:
+            ev = Path(d, 'events'); exe = self.fake(d, f"open({str(ev)!r}, 'a').write('sign\\n')\n" + body)
+            dp = Path(d, 's2a-devpush'); dp.write_text(f"#!/usr/bin/env python3\nimport sys\na = sys.argv[1:]\nopen({str(ev)!r}, 'a').write('pair ' + ' '.join(a[:3]) + '\\n')\n" + devpush_body); dp.chmod(0o755)
+            def rec(udid):
+                if isinstance(record, Exception): raise record
+                return record
+            old = install_win.mux_devices, install_win.has_pair_record
+            install_win.mux_devices = lambda: [('U1', 'USB', 42)]; install_win.has_pair_record = rec
+            ns = self.ns(d, exe); ns.devpush = str(dp)
+            try:
+                try: got = install_win.install_app(ns, say=lambda m: None)
+                except install_win.Fail as e: got = e
+            finally: install_win.mux_devices, install_win.has_pair_record = old
+            return got, (ev.read_text().split('\n')[:-1] if ev.is_file() else [])
+
+    def test_pair_missing_record_pairs_then_signs(self):
+        # #1973：设备服务里没有这台的配对记录（Windows 上 Apple Devices 没开时手机点「信任」也不会存）→ 先 s2a-devpush pair、再签名
+        got, ev = self.pair_case(False, "print('pair 已配对（新）')\n")
+        self.assertEqual(got, 'a.b.T')
+        self.assertEqual(ev, ['pair U1 - pair', 'sign'])
+
+    def test_pair_record_present_skips_pairing(self):
+        got, ev = self.pair_case(True, "print('不该跑')\n")
+        self.assertEqual((got, ev), ('a.b.T', ['sign']))
+
+    def test_pair_refused_reports_pairing_not_signing(self):
+        # 手机上点了「不信任」：报 devpush 给的原因、错误码 device_pairing_required，不再去签名（签名只会报更难懂的「没有配对文件」）
+        got, ev = self.pair_case(False, "sys.stderr.write('手机上点了「不信任」：拔下数据线再插上，在弹出的框里点「信任」\\n'); sys.exit(1)\n")
+        self.assertIsInstance(got, install_win.Fail)
+        self.assertEqual(got.err, 'device_pairing_required')
+        self.assertIn('不信任', str(got))
+        self.assertEqual(ev, ['pair U1 - pair'])
+
+    def test_pair_service_unreadable_goes_on_to_sign(self):
+        # 设备服务问不了配对记录：不在这里拦，照常签名，由签名报真原因
+        got, ev = self.pair_case(OSError('refused'), "print('不该跑')\n")
+        self.assertEqual((got, ev), ('a.b.T', ['sign']))
+
     def fake(self, d, body):
         f = Path(d, 'plumesign'); f.write_text('#!/usr/bin/env python3\nimport sys, zipfile\na = sys.argv[1:]\n' + body); f.chmod(0o755); return str(f)
 
@@ -591,6 +638,22 @@ class InstallWin(unittest.TestCase):
                 try: return install_win.run(self.ns(d, exe), say=lambda m: None), got, Path(d, 'p.log').read_text()
                 except install_win.Fail as e: return e, got, None
             finally: install_win.mux_devices, install_win.push_pack = olds
+
+    def test_not_in_device_service_with_other_installer_signs_only_then_hands_over(self):
+        # D-WFBG / D-ST8X：Mac 上手机只在同一 Wi-Fi，设备服务（usbmux）里没有；调用方给了别的装法 → plumesign 只签名（不 --register-and-install），
+        #   签好的包交它装、返回签好包里的包名。期望手写
+        body = ("print('args', a)\nz = zipfile.ZipFile(a[a.index('-o') + 1], 'w')\n"
+                "z.writestr('Payload/S2Arm.app/Info.plist', b'<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>a.b.W</string></dict></plist>')\nz.close()\n")
+        with tempfile.TemporaryDirectory() as d:
+            exe = self.fake(d, body); handed = []
+            old = install_win.mux_devices; install_win.mux_devices = lambda: []
+            ns = self.ns(d, exe); ns.fallback_install = lambda p: handed.append(__import__("zipfile").ZipFile(p).namelist())
+            try: bid = install_win.install_app(ns, say=lambda m: None)
+            finally: install_win.mux_devices = old
+            log = Path(d, 'p.log').read_text()
+        self.assertEqual(bid, 'a.b.W')
+        self.assertEqual(handed, [['Payload/S2Arm.app/Info.plist']])
+        self.assertNotIn('--register-and-install', log)
 
     def test_target_not_listed_is_not_connected(self):
         # D-XHV5：要装的那台不在设备服务里（插着线的是另一台）→ device_not_connected，报错里写出在列的是哪台；不是「要信任电脑」

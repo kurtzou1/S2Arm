@@ -393,7 +393,13 @@ enum LauncherPadSpatial {
         case .back:
             // B 只关最里面那一层：开着的下拉选单先关（选单没有自己的「返回」钮，落到窗口取消会把整个面板关掉）
             if hasDropdown { NotificationCenter.default.post(name: .launcherDropdownClose, object: currentWindow); break }
-            if !S2ALauncherAX.cancel(currentWindow) { sendKey(53, "\u{1b}", in: currentWindow) }
+            if S2ALauncherAX.cancel(currentWindow) { break }
+            // 不再发 Esc（会触发 macOS 系统提示音「咚」）：主窗口无层可关时静默忽略，弹窗/浮层直接用 AppKit 关
+            if currentWindow !== window {
+                if let sheetParent = currentWindow.sheetParent { sheetParent.endSheet(currentWindow) }
+                else if let panel = currentWindow as? NSSavePanel { panel.cancel(nil) }
+                else { currentWindow.close() }
+            }
         case .left, .right, .up, .down:
             let step = action == .left ? -1 : 1
             if action == .left || action == .right,
@@ -528,12 +534,13 @@ private final class LauncherPadRing: NSView {
         defer { NSGraphicsContext.restoreGraphicsState() }
         if let clip { NSBezierPath(rect: clip).addClip() }
         NSColor(srgbRed: 1, green: 0.94, blue: 0.84, alpha: 1).setStroke()
+        let width = LauncherTheme.Focus.lineWidth
         guard let radius else {
-            let ring = NSBezierPath(roundedRect: target.insetBy(dx: -3, dy: -3), xRadius: 10, yRadius: 10)
-            ring.lineWidth = 3; ring.stroke(); return
+            let r = LauncherTheme.Focus.plainRadius
+            let ring = NSBezierPath(roundedRect: target.insetBy(dx: -LauncherTheme.Focus.plainPaddingX, dy: -LauncherTheme.Focus.plainPaddingY), xRadius: r, yRadius: r)
+            ring.lineWidth = width; ring.stroke(); return
         }
         // 有边框的控件：焦点框画在它自己的边框上（同一外缘、同一圆角），与按钮边框对齐
-        let width: CGFloat = 2
         let edge = target.insetBy(dx: -outset, dy: -outset)
         let r = max(0, min(radius, target.height / 2, target.width / 2) + outset - width / 2)
         let ring = NSBezierPath(roundedRect: edge.insetBy(dx: width / 2, dy: width / 2), xRadius: r, yRadius: r)

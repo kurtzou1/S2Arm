@@ -109,16 +109,16 @@ struct ExportSheetView: View {
                 if sign == "appleId", account.isEmpty {   // 没登录：装到设备会失败（apple_not_signed_in）。就地给登录，不等开始后才报
                     HStack(spacing: 10) {
                         Text(t("exportsheet.sign.notSignedIn")).font(LauncherTheme.TypeStyle.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
-                        Button(t("exportsheet.sign.login")) { model.openAppleLogin(host: "exportSheet") }.buttonStyle(.link).font(LauncherTheme.TypeStyle.caption)
-                            .accessibilityIdentifier("exportsheet.sign.login")
+                        Button(t("exportsheet.sign.login")) { model.openAppleLogin(host: "exportSheet") }.controllerButtonStyle(.link).font(LauncherTheme.TypeStyle.caption)
+                            .controllerID("exportsheet.sign.login")
                     }.padding(.leading, 25)
                 }
                 HStack(spacing: 10) {
                     radio("devCert", t("exportsheet.sign.devCert"), note: model.devCert?.imported == true ? nil : t("exportsheet.sign.devCertMissing"),
                           enabled: model.devCert?.imported == true)
                     if model.devCert?.imported != true {   // 买了证书还没导入：就地导入，导好这一项就能选
-                        Button(t("exportsheet.sign.importCert")) { importCert = true }.buttonStyle(.link).font(LauncherTheme.TypeStyle.caption)
-                            .accessibilityIdentifier("exportsheet.sign.importCert")
+                        Button(t("exportsheet.sign.importCert")) { importCert = true }.controllerButtonStyle(.link).font(LauncherTheme.TypeStyle.caption)
+                            .controllerID("exportsheet.sign.importCert")
                     }
                 }
                 radio("none", t("exportsheet.sign.none"))
@@ -153,19 +153,12 @@ struct ExportSheetView: View {
 
     private func radio(_ value: String, _ title: String, note: String? = nil, enabled: Bool = true) -> some View {
         let on = sign == value
-        return Button { sign = value; seeded = true } label: {
-            HStack(spacing: 10) {
-                Image(systemName: on ? "largecircle.fill.circle" : "circle").font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(on ? LauncherPalette.cream : .secondary)
-                Text(title).font(.manrope(14, .semibold))
-                if let note { Text(note).font(LauncherTheme.TypeStyle.caption).foregroundStyle(.secondary) }
-                Spacer(minLength: 0)
-            }
-            .contentShape(Rectangle())
+        return LauncherRadioRow(selected: on, action: { sign = value; seeded = true }) {
+            Text(title).font(.manrope(14, .semibold))
+            if let note { Text(note).font(LauncherTheme.TypeStyle.caption).foregroundStyle(.secondary) }
         }
-        .buttonStyle(.plain).disabled(!enabled).opacity(enabled ? 1 : 0.45)
-        .controllerID("exportsheet.sign." + value).accessibilityIdentifier("exportsheet.sign." + value)
-        .accessibilityAddTraits(on ? .isSelected : [])
+        .disabled(!enabled)
+        .controllerID("exportsheet.sign." + value)
     }
 
     private func gameStateText(_ s: ExportDeviceRow.GameState) -> String {
@@ -215,12 +208,12 @@ struct ExportSheetView: View {
                 }
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain).disabled(!row.selectable).opacity(row.selectable ? 1 : 0.5)
+            .controllerButtonStyle(.plain).controllerRingRadius(8).disabled(!row.selectable).opacity(row.selectable ? 1 : 0.5)
             .controllerID("exportsheet.device." + row.device).accessibilityIdentifier("exportsheet.device." + row.device)
             .accessibilityAddTraits(on ? .isSelected : [])
             if row.hasLink {
                 Button(linkTitle(row.note)) { openConsole(row.device) }
-                    .buttonStyle(.link).font(LauncherTheme.TypeStyle.caption).accessibilityIdentifier("exportsheet.link." + row.device)
+                    .controllerButtonStyle(.link).font(LauncherTheme.TypeStyle.caption).controllerID("exportsheet.link." + row.device)
             }
         }
         .padding(12)

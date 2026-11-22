@@ -312,7 +312,13 @@ int main(void) {
             CHECK(PHYS(0x2C, b + 12 * MB, 4 * MB) == 0 && access(flag, F_OK) != 0, "收小处以内映射：成功、不记越界");
             CHECK(PHYS(0x2D, b + 12 * MB, 4 * MB) == 0 && PHYS(0x2C, b + 18 * MB, 1 * MB) == 0, "越过收小处映射 1 MB：照常成功（内部别名区以内）");
             CHECK(access(flag, F_OK) == 0, "越过收小处：记下本款（%s）", flag);
-            unlink(flag); unsetenv("S2A_ALIAS_FULL"); s2a_mem_test_alias_report(0);
+            unlink(flag);
+            // 收小后 SDK 申请地址区失败（gate.c 返回门调 s2a_alias_alloc_failed）：收小着 → 记下本款；没收小 → 不记（同一个记录文件，下局恢复原值）
+            { void s2a_alias_alloc_failed(uint32_t); s2a_mem_test_alias_report(0); s2a_alias_alloc_failed(0x1803);
+              CHECK(access(flag, F_OK) != 0, "没收小时申请地址区失败：不记");
+              s2a_mem_test_alias_report(16 * MB); s2a_alias_alloc_failed(0x1803);
+              CHECK(access(flag, F_OK) == 0, "收小着申请地址区失败：记下本款（%s）", flag); unlink(flag); }
+            unsetenv("S2A_ALIAS_FULL"); s2a_mem_test_alias_report(0);
             CHECK(PHYS(0x2D, b + 18 * MB, 1 * MB) == 0 && PHYS(0x2C, b + 12 * MB, 4 * MB) == 0 && s2a_mem_test_phys() == 9 * MB, "还原：池子回到占满 9 MB（后面的用例要）");
         }
         // Switch 2 新类型（switchbrew SVC [S2]）：29–32 远端区地址 / 大小 / 用量 / 峰值 = 0（宿主不给远端区），33 页大小 = Horizon 4 KB；子号非 0 回 InvalidCombination

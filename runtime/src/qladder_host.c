@@ -15,6 +15,7 @@ int s2a_fps_real_source(void); int s2a_fps_enabled(void); void s2a_fps_hold(int 
 void s2a_ios_fps_capped(int reason);   // runtime/src/fps.c 弱定义（单测不说），ios/app.m、macos/front_mac.m 强定义：横幅
 __attribute__((weak)) double s2a_gpu_busy_ms(void) { return -1; }   // 直连层 graphics/nvn hle_nvn.c 强定义
 __attribute__((weak)) int dm_thermal_now(void) { return -1; }        // iOS ios/app.m、Mac runtime/src/host_main.c 强定义
+__attribute__((weak)) int nvn_be_display_hz(void) { return 0; }      // 直连后端 graphics/nvn/gfx/nvn/nvn_mtl.m 强定义：有窗口时屏幕最高刷新率
 __attribute__((weak)) int s2a_host_focused(void) { return 1; }       // runtime/src/os.c 强定义（平台壳写：iOS 前后台、Mac 失焦）
 __attribute__((weak)) int s2a_host_sleeping(void) { return 0; }      // runtime/src/os.c 强定义（iOS 后台、Mac 系统睡眠）
 
@@ -44,6 +45,7 @@ void s2a_ql_host_frame(uint64_t now, int game, uint64_t dt, int game_itv) {
     if (atomic_exchange(&g_retry, 0)) { s2a_ql_retry(now); apply(0, 1); LOG("档位梯子：玩家要再试 60 帧，放开 60 帧"); }
     // #1949：失焦 / 睡眠时系统给游戏降速，那段帧率说明不了跑不跑得动：丢掉在攒的窗口，回前台后空等几秒再计时
     if (!s2a_host_focused() || s2a_host_sleeping()) { s2a_ql_away(now); return; }
+    static unsigned rf; if (rf++ % 300 == 0) s2a_ql_set_refresh_hz(nvn_be_display_hz());   // #1857 慢帧按刷新拍取整（换屏 / 外接显示器时 300 帧内跟上）
     double gpu = s2a_gpu_busy_ms();
     if (gpu < 0 && !g_nogpu_said) { g_nogpu_said = 1; LOG("档位梯子：这一局没有 GPU 读数，判不了是不是跑不动，不降档，照玩家选的 60 帧跑"); }
     int t = s2a_ql_frame(now, game, dt, gpu, dm_thermal_now(), game_itv);

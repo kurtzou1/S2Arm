@@ -44,6 +44,18 @@ package enum LauncherTheme {
         package static let actionMinWidth: CGFloat = 80
         package static let icon: CGFloat = 18
     }
+    /// 手柄焦点框的统一主题令牌：全站线宽、外扩、圆角与留白均从此处取用
+    package enum Focus {
+        package static let lineWidth: CGFloat = 2
+        package static let creamOutset: CGFloat = 3
+        package static let checkboxRadius: CGFloat = 4
+        package static let checkboxOutset: CGFloat = 2
+        package static let radioOutset: CGFloat = 0
+        package static let plainPaddingX: CGFloat = 8
+        package static let plainPaddingY: CGFloat = 5
+        package static let plainRadius: CGFloat = 8
+        package static let rowRadius: CGFloat = 8
+    }
     package enum TypeStyle {
         package static let title = Font.manrope(26, .heavy)
         package static let panelTitle = Font.manrope(18, .bold)
@@ -335,14 +347,36 @@ package struct LauncherLabelStyle: LabelStyle {
     }
 }
 
+package struct LauncherControlShape: InsettableShape {
+    package let capsule: Bool
+    private var insetAmount: CGFloat = 0
+    package init(capsule: Bool = false) { self.capsule = capsule }
+    package func inset(by amount: CGFloat) -> Self {
+        var copy = self
+        copy.insetAmount += amount
+        return copy
+    }
+    package func path(in rect: CGRect) -> Path {
+        if capsule {
+            return Capsule(style: .continuous).inset(by: insetAmount).path(in: rect)
+        }
+        return RoundedRectangle(cornerRadius: LauncherTheme.Metrics.controlRadius, style: .continuous)
+            .inset(by: insetAmount).path(in: rect)
+    }
+}
+
 package struct LauncherPrimaryButtonStyle: ButtonStyle {
-    package init(fill: Bool = false, prominent: Bool = false) { self.fill = fill; self.prominent = prominent }
+    package init(fill: Bool = false, prominent: Bool = false, capsule: Bool = false) {
+        self.fill = fill; self.prominent = prominent; self.capsule = capsule
+    }
     package var fill = false
     package var prominent = false
+    package var capsule = false
     @Environment(\.isEnabled) private var enabled
     @Environment(\.launcherControlWidth) private var width
     @State private var hovered = false
     package func makeBody(configuration: Configuration) -> some View {
+        let shape = LauncherControlShape(capsule: capsule)
         configuration.label
             .font(prominent ? .manrope(16, .semibold) : LauncherTheme.TypeStyle.button).labelStyle(LauncherLabelStyle())
             .lineLimit(1).minimumScaleFactor(width == nil ? 1 : LauncherControl.minimumLabelScale)
@@ -351,9 +385,8 @@ package struct LauncherPrimaryButtonStyle: ButtonStyle {
             .frame(minWidth: width == nil ? LauncherTheme.Metrics.actionMinWidth : nil)
             .frame(maxWidth: fill ? .infinity : nil)
             .foregroundStyle(LauncherPalette.background)
-            .background(LauncherPalette.cream.opacity(configuration.isPressed ? 0.8 : hovered ? 0.93 : 1),
-                        in: RoundedRectangle(cornerRadius: LauncherTheme.Metrics.controlRadius, style: .continuous))
-            .contentShape(RoundedRectangle(cornerRadius: LauncherTheme.Metrics.controlRadius, style: .continuous))
+            .background(LauncherPalette.cream.opacity(configuration.isPressed ? 0.8 : hovered ? 0.93 : 1), in: shape)
+            .contentShape(shape)
             .opacity(enabled ? 1 : 0.45)
             .onHover { hovered = $0 }
     }
@@ -415,16 +448,22 @@ package struct LauncherSearchField: View {
 }
 
 package struct LauncherIconButtonStyle: ButtonStyle {
-    package init() {}
+    package init(size: CGFloat = LauncherControl.height, cornerRadius: CGFloat = LauncherTheme.Metrics.controlRadius) {
+        self.size = size; self.cornerRadius = cornerRadius
+    }
+    package var size: CGFloat = LauncherControl.height
+    package var cornerRadius: CGFloat = LauncherTheme.Metrics.controlRadius
     @Environment(\.isEnabled) private var enabled
     @State private var hovered = false
     package func makeBody(configuration: Configuration) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         configuration.label.font(.system(size: 14, weight: .medium))
-            .frame(width: LauncherControl.height, height: LauncherControl.height)
+            .frame(width: size, height: size)
+            .foregroundStyle(enabled ? Color.white.opacity(0.92) : .gray)
             .background(configuration.isPressed ? LauncherTheme.Colors.pressed : hovered ? LauncherTheme.Colors.hover : LauncherTheme.Colors.control,
-                        in: RoundedRectangle(cornerRadius: LauncherTheme.Metrics.controlRadius))
-            .overlay(RoundedRectangle(cornerRadius: LauncherTheme.Metrics.controlRadius).strokeBorder(LauncherTheme.Colors.border))
-            .contentShape(RoundedRectangle(cornerRadius: LauncherTheme.Metrics.controlRadius))
+                        in: shape)
+            .overlay(shape.strokeBorder(LauncherTheme.Colors.border))
+            .contentShape(shape)
             .opacity(enabled ? 1 : 0.45).onHover { hovered = $0 }
     }
 }
@@ -446,8 +485,8 @@ package struct LauncherGuideStep: View {
 }
 
 // 手柄焦点框画在控件自己的边框上：各样式报自己的圆角
-extension LauncherPrimaryButtonStyle: PadRingShaped {   // 奶油底：贴边的奶油框看不见，改外扩 3 pt、同心圆角
-    package var padRingRadius: CGFloat { LauncherTheme.Metrics.controlRadius }
-    package var padRingOutset: CGFloat { 3 }
+extension LauncherPrimaryButtonStyle: PadRingShaped {   // 奶油底：贴边的奶油框看不见，改外扩同心圆角
+    package var padRingRadius: CGFloat { capsule ? .infinity : LauncherTheme.Metrics.controlRadius }
+    package var padRingOutset: CGFloat { LauncherTheme.Focus.creamOutset }
 }
-extension LauncherIconButtonStyle: PadRingShaped { package var padRingRadius: CGFloat { LauncherTheme.Metrics.controlRadius } }
+extension LauncherIconButtonStyle: PadRingShaped { package var padRingRadius: CGFloat { cornerRadius } }

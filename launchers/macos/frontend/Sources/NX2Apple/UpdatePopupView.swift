@@ -117,7 +117,7 @@ struct UpdatePopupView: View {
                 }
                 .controllerButtonStyle(ConsoleIconButtonStyle(size: 32))
                 .help(t("update.popup.close"))
-                .accessibilityIdentifier("update.popup.close")
+                .controllerID("update.popup.close")
             }
             Text(t("update.popup.meta")).font(LauncherTheme.TypeStyle.detail).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -233,10 +233,8 @@ struct UpdatePopupView: View {
                     }
                     Spacer(minLength: LauncherTheme.Space.medium)
                     Button(t(actions.secondary)) { model.closeUpdatePopup() }
-                        .controllerButtonStyle(LauncherSecondaryButtonStyle())
-                        .clipShape(Capsule())
-                        .overlay(Capsule().strokeBorder(LauncherTheme.Colors.border).allowsHitTesting(false))
-                        .keyboardShortcut(.cancelAction).accessibilityIdentifier("update.popup.later").controllerShortcut(.back)
+                        .controllerButtonStyle(LauncherSecondaryButtonStyle(capsule: true))
+                        .keyboardShortcut(.cancelAction).controllerID("update.popup.later").controllerShortcut(.back)
                     Button {
                         if model.updateState == .ready { model.restartToUpdate() }
                         else { model.downloadUpdate() }
@@ -248,14 +246,13 @@ struct UpdatePopupView: View {
                             Text(t(actions.primary))
                         }
                     }
-                    .controllerButtonStyle(LauncherPrimaryButtonStyle()).disabled(!actions.primaryEnabled || model.updateGate != nil)
-                    .clipShape(Capsule())
-                    .accessibilityIdentifier("update.popup.now").controllerShortcut(.rightTrigger)
+                    .controllerButtonStyle(LauncherPrimaryButtonStyle(capsule: true)).disabled(!actions.primaryEnabled || model.updateGate != nil)
+                    .controllerID("update.popup.now").controllerPreferredFocus(true).controllerShortcut(.rightTrigger)
                 }
                 if actions.showsAutoRestart {
                     Toggle(t("update.popup.autoRestart"), isOn: $model.autoRestartWhenReady)
-                        .toggleStyle(.checkbox).font(LauncherTheme.TypeStyle.detail).foregroundStyle(.secondary)
-                        .accessibilityIdentifier("update.popup.autoRestart")
+                        .toggleStyle(PadToggleStyle(.checkbox)).font(LauncherTheme.TypeStyle.detail).foregroundStyle(.secondary)
+                        .controllerID("update.popup.autoRestart")
                 }
             }
         }
@@ -275,10 +272,9 @@ struct UpdatePopupView: View {
                 }
                 Spacer()
                 Button(t("update.after.ok")) { model.closeUpdatePopup() }
-                    .controllerButtonStyle(LauncherPrimaryButtonStyle())
-                    .clipShape(Capsule())
+                    .controllerButtonStyle(LauncherPrimaryButtonStyle(capsule: true))
                     .keyboardShortcut(.defaultAction)
-                    .accessibilityIdentifier("update.after.ok").controllerShortcut(.rightTrigger, .back)
+                    .controllerID("update.after.ok").controllerPreferredFocus(true).controllerShortcut(.rightTrigger, .back)
             }
         }
         .padding(LauncherTheme.Space.page)
@@ -320,6 +316,7 @@ struct MessagesPanel: View {
         .padding(LauncherTheme.Metrics.cardInset).frame(width: 440)
         .background(.regularMaterial)
         .environment(\.colorScheme, .dark)
+        .controllerBackAction("messages.close") { dismiss() }
         .accessibilityIdentifier("messages.panel")
     }
 

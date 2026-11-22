@@ -852,6 +852,29 @@ def requested_player(r):
     return player
 
 
+def requested_local_players(r):
+    """请求里的 localPlayers 列表 [{user, name, folder}, …]；没带或格式不合规返回 None"""
+    raw = r.get("localPlayers")
+    if not raw:
+        return None
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return None
+    if not isinstance(raw, list):
+        return None
+    result = []
+    for item in raw:
+        try:
+            player = requested_player({"player": item})
+        except Failure:
+            continue
+        if player:
+            result.append({"user": player["user"], "name": player.get("name", ""), "folder": player["folder"]})
+    return result or None
+
+
 def folder_user(folder, program):
     """存档位置里记的用户号（同 services SaveFolder.FolderUser）；没有 = None"""
     with contextlib.suppress(OSError):

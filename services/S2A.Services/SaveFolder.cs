@@ -28,6 +28,8 @@ namespace S2A.Services
         static string _atLaunch;   // 起局时存档位置的摘要：退出时对不上 = 这一局里被玩家动过
         static ulong _programId;
         static bool _keep;         // 起局时放进来的没认出：这一局不写回，原样留给玩家改（不然退出时被当前存档盖掉，玩家放错的东西就没了）
+        static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string atLaunch, bool keep)> _secondaryStates = new(StringComparer.Ordinal);
+        static Ryujinx.HLE.HOS.Services.Account.Acc.UserId _primaryUser;
 
         public static string Folder()
         {
@@ -37,8 +39,8 @@ namespace S2A.Services
         }
         static string DataRoot() => Ryujinx.Common.Configuration.AppDataManager.BaseDirPath;
         // 本地玩家（#623，LocalPlayer.cs）：每个玩家一个存档位置，两个记录文件也按玩家分；第一个玩家仍是原文件名（升级后接着用）
-        internal static string StatePath() => Path.Combine(DataRoot(), Path.GetFileNameWithoutExtension(StateFile) + LocalPlayer.FileSuffix() + ".txt");
-        internal static string ProblemPath() => Path.Combine(DataRoot(), Path.GetFileNameWithoutExtension(ProblemFile) + LocalPlayer.FileSuffix() + ".txt");
+        internal static string StatePath(string suffix = null) => Path.Combine(DataRoot(), Path.GetFileNameWithoutExtension(StateFile) + (suffix ?? LocalPlayer.FileSuffix()) + ".txt");
+        internal static string ProblemPath(string suffix = null) => Path.Combine(DataRoot(), Path.GetFileNameWithoutExtension(ProblemFile) + (suffix ?? LocalPlayer.FileSuffix()) + ".txt");
 
         // ---- 摘要 ----
         internal static List<string> Files(string dir)
@@ -226,39 +228,61 @@ namespace S2A.Services
             string folder = Folder();
             if (folder == null) return;
             _programId = programId; _keep = false;
+            _secondaryStates.Clear();
+            _primaryUser = device.System.AccountManager.LastOpenedUser.UserId;
+            ReadInFor(device, programId, folder, StatePath(), ProblemPath(), null, out _atLaunch, out _keep);
+            var activeUid = device.System.AccountManager.LastOpenedUser.UserId;
+            foreach (var p in LocalPlayer.AllPlayers)
+            {
+                if (p.UserId == activeUid || string.IsNullOrEmpty(p.FolderPath)) continue;
+                ReadSecondary(device, p);
+            }
+        }
+
+        internal static void ReadSecondary(Switch device, LocalPlayer.PlayerEntry player)
+        {
+            if (player.FolderPath == null || _programId == 0) return;
+            ReadInFor(device, _programId, player.FolderPath, StatePath(player.FileSuffix), ProblemPath(player.FileSuffix),
+                player.UserId, out string atLaunch, out bool keep);
+            _secondaryStates[player.FolderPath] = (atLaunch, keep);
+        }
+
+        static void ReadInFor(Switch device, ulong programId, string folder, string state, string problem, Ryujinx.HLE.HOS.Services.Account.Acc.UserId? targetUserId, out string atLaunch, out bool keep)
+        {
+            atLaunch = null; keep = false;
             try
             {
                 Recover(folder);
                 Directory.CreateDirectory(folder);   // 玩家第一次就能在访达 / 「文件」App 里看到这个文件夹
-                string now = Digest(folder), state = StatePath();
-                _atLaunch = now;
+                string now = Digest(folder);
+                atLaunch = now;
                 string last = File.Exists(state) ? File.ReadAllText(state).Trim() : null;
                 if (now == "" || now == last) return;   // 空的（还没写回过）/ 和上次一样：沿用当前存档
                 // 记录是 0.2.5 及更早按修改时间算的（#755：升级后第一次起局，新摘要与旧记录必然不等，原先当成「玩家放了新存档」读入，
                 //   把当前进度换成旧版最后一次正常退出时写回的那份——旧版崩溃退出不写回，那份可能更旧）：按旧算法对上 = 旧版写回后没被动过，
                 //   沿用当前存档，记录改写成新摘要
                 if (last != null && last == LegacyDigest(folder)) { File.WriteAllText(state, now); Console.Error.WriteLine("S2A 存档位置：旧版记录、写回后没被动过，沿用当前存档（记录改成新格式）"); return; }
-                var top = new HashSet<string>(OwnTop(device, programId));
+                var top = new HashSet<string>(OwnTop(device, programId, targetUserId));
                 var src = Detect(folder, programId, top, out string why);
                 if (src == null)
                 {
-                    _keep = true;
-                    File.WriteAllText(ProblemPath(), why);
+                    keep = true;
+                    File.WriteAllText(problem, why);
                     Red.Report("存档位置：认不出放进来的存档，沿用当前存档", $"{why}（{folder}）");
                     return;
                 }
-                Saves.SeedFrom(device, programId, src);
+                Saves.SeedFrom(device, programId, src, targetUserId);
                 File.WriteAllText(state, now);
-                File.Delete(ProblemPath());
+                File.Delete(problem);
                 Console.Error.WriteLine($"S2A 存档位置：读入玩家放进来的存档 {string.Join("、", src.Select(x => x.kind + " ← " + Path.GetRelativePath(folder, x.dir)))}");
             }
             catch (InvalidOperationException) { throw; }   // 拷入 / 提交失败：本次起局失败（同 S2A_SAVE_DIR）
             catch (Exception e) { Red.Report("存档位置：读入失败，沿用当前存档", e.Message); }
         }
-        static IEnumerable<string> OwnTop(Switch device, ulong programId)
+        static IEnumerable<string> OwnTop(Switch device, ulong programId, Ryujinx.HLE.HOS.Services.Account.Acc.UserId? targetUserId = null)
         {
             string tmp = Path.Combine(Path.GetTempPath(), $"s2a_savedata_top_{Environment.ProcessId}");
-            try { return Saves.Snapshot(device, programId, tmp) > 0 ? Subdirs(tmp).Where(d => Path.GetFileName(d) != "user").SelectMany(TopNames).ToList() : []; }
+            try { return Saves.Snapshot(device, programId, tmp, targetUserId) > 0 ? Subdirs(tmp).Where(d => Path.GetFileName(d) != "user").SelectMany(TopNames).ToList() : []; }
             finally { if (Directory.Exists(tmp)) Directory.Delete(tmp, true); }
         }
 
@@ -267,8 +291,22 @@ namespace S2A.Services
         {
             string folder = Folder();
             if (folder == null || _programId == 0 || device == null) return;
-            if (_keep) { Console.Error.WriteLine("S2A 存档位置：起局时放进来的没认出，不写回（原样留着，原因见存档管理页）"); return; }
-            if (_atLaunch != null && Digest(folder) != _atLaunch)
+            WriteBackFor(device, folder, StatePath(), _atLaunch, _keep, _primaryUser.IsNull ? null : _primaryUser);
+            var activeUid = _primaryUser;
+            var appOpened = new HashSet<Ryujinx.HLE.HOS.Services.Account.Acc.UserId>(
+                device.System.AccountManager.GetApplicationOpenedUsers().Select(u => u.UserId));
+            foreach (var p in LocalPlayer.AllPlayers)
+            {
+                if (p.UserId == activeUid || string.IsNullOrEmpty(p.FolderPath)) continue;
+                if (!LocalPlayer.WasPlayerUsedInSession(p.UserId) && !appOpened.Contains(p.UserId)) continue;
+                if (!_secondaryStates.TryGetValue(p.FolderPath, out var st)) continue;
+                WriteBackFor(device, p.FolderPath, StatePath(p.FileSuffix), st.atLaunch, st.keep, p.UserId);
+            }
+        }
+        static void WriteBackFor(Switch device, string folder, string statePath, string atLaunch, bool keep, Ryujinx.HLE.HOS.Services.Account.Acc.UserId? targetUserId)
+        {
+            if (keep) { Console.Error.WriteLine("S2A 存档位置：起局时放进来的没认出，不写回（原样留着，原因见存档管理页）"); return; }
+            if (atLaunch != null && Digest(folder) != atLaunch)
             {
                 Console.Error.WriteLine("S2A 存档位置：这一局里被玩家动过，不写回（下次起局读它）");
                 return;
@@ -277,17 +315,19 @@ namespace S2A.Services
             try
             {
                 foreach (string d in new[] { snap, next, old }) if (Directory.Exists(d)) Directory.Delete(d, true);
-                if (Saves.Snapshot(device, _programId, snap) == 0) return;   // 这款没有存档：不动
+                if (Saves.Snapshot(device, _programId, snap, targetUserId) == 0) return;   // 这款没有存档：不动
                 Directory.CreateDirectory(next);
                 string acc = Path.Combine(snap, "account"), dev = Path.Combine(snap, "device");
                 if (Directory.Exists(acc)) Directory.Move(acc, Path.Combine(next, "save"));
-                if (Directory.Exists(dev)) Directory.Move(dev, Path.Combine(next, Directory.Exists(acc) || Directory.Exists(Path.Combine(next, "save")) ? "save_device" : "save"));
+                // 设备存档全机共用、不分玩家：只写回第一个玩家的文件夹；副玩家的文件夹只放它自己的用户存档（多一份拷贝下次起局反倒要认）
+                bool secondary = targetUserId is { } t && t != _primaryUser;
+                if (!secondary && Directory.Exists(dev)) Directory.Move(dev, Path.Combine(next, Directory.Exists(acc) || Directory.Exists(Path.Combine(next, "save")) ? "save_device" : "save"));
                 string user = Path.Combine(snap, "user");   // 用户号跟着写回（P1-162），下次起局 / 拷到另一台先套用它
                 if (File.Exists(user)) File.Move(user, Path.Combine(next, "user"));
                 if (Directory.Exists(folder)) Directory.Move(folder, old);
                 Directory.Move(next, folder);
                 if (Directory.Exists(old)) Directory.Delete(old, true);
-                File.WriteAllText(StatePath(), Digest(folder));
+                File.WriteAllText(statePath, Digest(folder));
                 Console.Error.WriteLine($"S2A 存档位置：当前存档写回 {folder}");
             }
             catch (Exception e)

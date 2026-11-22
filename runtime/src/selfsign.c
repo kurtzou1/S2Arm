@@ -6,6 +6,7 @@
 //   证书带叶证书 + p12 里的链（WWDR 中间证书）。RSA PKCS#1 v1.5 + SHA-256。
 // 输入可以已有签名（ad-hoc 或别的证书）：在原 LC_CODE_SIGNATURE 处截断、按新签名大小改该命令与 __LINKEDIT 尺寸后重写，代码页本身不动。
 #include <CommonCrypto/CommonDigest.h>
+#include <CommonCrypto/CommonHMAC.h>
 #include <Security/Security.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -212,6 +213,8 @@ static int build_ents(const char *appid, const char *team, buf *xml, buf *der) {
     free(kv.p); free(d.p); free(e1.p); free(e2.p); free(top.p); return r ? -1 : 0;
 }
 
+static int p12_with_mac(const uint8_t *p, size_t n, const char *password, buf *out);
+
 // ---------- Mach-O ----------
 // p12 → 私钥 + 证书链；team = 证书 OU（调用方给，或从证书里取）
 int s2a_selfsign_identity(const void *p12, size_t n, const char *password, SecKeyRef *key, CFArrayRef *chain) {
@@ -222,6 +225,16 @@ int s2a_selfsign_identity(const void *p12, size_t n, const char *password, SecKe
     if (__builtin_available(iOS 18.0, macOS 15.0, *)) { k[1] = kSecImportToMemoryOnly; nk = 2; }   // 更老的 iOS 本来就只放内存
     CFDictionaryRef opt = CFDictionaryCreate(NULL, k, v, nk, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     CFArrayRef items = NULL; OSStatus st = SecPKCS12Import(d, opt, &items);
+    if (st == errSecDecode) {   // -26275：系统接口不认不带 MAC 的 p12（不论里面加没加密，iOS 26.5 模拟器 / macOS 实测），按玩家的密码补上 MAC 再交系统解（D-QSEB）
+        buf m = {0};
+        if (!p12_with_mac(p12, n, password, &m)) {
+            CFDataRef d2 = CFDataCreate(NULL, m.p, (CFIndex)m.n);
+            if (items) CFRelease(items);
+            items = NULL; st = SecPKCS12Import(d2, opt, &items); CFRelease(d2);
+            if (st == errSecDecode) st = errSecAuthFailed;   // MAC 是按这个密码补的、包体却解不开 = 密码不对（实测系统此时回 -26275）：让玩家再输一次
+        }
+        free(m.p);
+    }
     CFRelease(d); CFRelease(pw); CFRelease(opt);
     if (st != errSecSuccess || !items || CFArrayGetCount(items) < 1) { if (items) CFRelease(items); return (int)(st ? st : -1); }
     CFDictionaryRef it = CFArrayGetValueAtIndex(items, 0);
@@ -441,6 +454,40 @@ static const uint8_t *data_content(const uint8_t *ci, size_t n, size_t *out_n) {
     if (!oid_is(ci, end, SS_OID_DATA, sizeof SS_OID_DATA, &nx)) return NULL;
     const uint8_t *e0 = der_read(nx, end, &t, &l, &nx); if (!e0 || t != 0xa0) return NULL;
     const uint8_t *nx2, *oc = der_read(e0, e0 + l, &t, out_n, &nx2); return oc && t == 0x04 ? oc : NULL;
+}
+// 给不带 MAC 的 p12 补上 MAC（RFC 7292：HMAC-SHA1，密钥按附录 B 由密码、8 字节随机盐、2048 轮、ID = 3 派生），authSafe 原样不动 → out（调用方 free）。
+//   有的签名工具导出的 p12 包体照常加密、只是不写 macData，系统 SecPKCS12Import 一律回 -26275；补上后加解密仍全交系统，密码不对系统照常回 -25293。
+//   已带 MAC / 结构认不出 / authSafe 不是 data → -1
+static int p12_with_mac(const uint8_t *p, size_t n, const char *password, buf *out) {
+    const uint8_t *end = p + n, *nx, *nx2; uint8_t t; size_t l, cl;
+    const uint8_t *pfx = der_read(p, end, &t, &l, &nx); if (!pfx || t != 0x30) return -1;
+    const uint8_t *pend = pfx + l;
+    if (!der_read(pfx, pend, &t, &cl, &nx) || t != 0x02) return -1;   // version
+    const uint8_t *ci = der_read(nx, pend, &t, &cl, &nx2); if (!ci || t != 0x30 || nx2 != pend) return -1;   // authSafe 之后还有东西 = 已带 MAC
+    size_t an; const uint8_t *auth = data_content(ci, cl, &an); if (!auth) return -1;
+    // 密码 → BMPString（UTF-16 大端，带结尾 00 00）
+    CFStringRef ps = CFStringCreateWithCString(NULL, password ? password : "", kCFStringEncodingUTF8); if (!ps) return -1;
+    CFIndex ul = CFStringGetLength(ps), pl = (ul + 1) * 2; uint8_t *pw = calloc(1, (size_t)pl);
+    CFIndex got = 0; CFStringGetBytes(ps, CFRangeMake(0, ul), kCFStringEncodingUTF16BE, 0, false, pw, pl - 2, &got); CFRelease(ps);
+    pl = got ? got + 2 : 0;   // 空密码：系统算 MAC 时不带结尾 00 00（实测带上就回 -25293）
+    // 附录 B.2，SHA-1：u = 20、v = 64，要 20 字节 = 一块 A1；I = S ‖ P（各补满 64 的整数倍）
+    enum { V = 64, IT = 2048 }; uint8_t salt[8]; arc4random_buf(salt, sizeof salt);
+    size_t sl = V, plen = (size_t)((pl + V - 1) / V) * V, il = sl + plen; uint8_t *di = malloc(V + il), a[CC_SHA1_DIGEST_LENGTH];
+    memset(di, 3, V);
+    for (size_t i = 0; i < sl; i++) di[V + i] = salt[i % sizeof salt];
+    for (size_t i = 0; i < plen; i++) di[V + sl + i] = pw[i % (size_t)pl];   // pl = 0 时 plen = 0，不进循环
+    CC_SHA1(di, (CC_LONG)(V + il), a);
+    for (int r = 1; r < IT; r++) CC_SHA1(a, sizeof a, a);
+    free(di); free(pw);
+    uint8_t mac[CC_SHA1_DIGEST_LENGTH]; CCHmac(kCCHmacAlgSHA1, a, sizeof a, auth, an, mac);
+    // MacData { DigestInfo { AlgorithmIdentifier { sha1, NULL }, mac }, salt, 2048 }
+    static const uint8_t SS_OID_SHA1[] = {0x2b, 0x0e, 0x03, 0x02, 0x1a}; const uint8_t iters[] = {0x08, 0x00};
+    buf alg = {0}, dg = {0}, md = {0}, body = {0}; int r = 0;
+    r |= der_oid(&alg, SS_OID_SHA1, sizeof SS_OID_SHA1) || der_tlv(&alg, 0x05, NULL, 0) || der_wrap(&dg, 0x30, &alg) || der_tlv(&dg, 0x04, mac, sizeof mac);
+    r |= der_wrap(&md, 0x30, &dg) || der_tlv(&md, 0x04, salt, sizeof salt) || der_tlv(&md, 0x02, iters, sizeof iters);
+    r |= bput(&body, pfx, (size_t)(pend - pfx)) || der_wrap(&body, 0x30, &md) || der_wrap(out, 0x30, &body);
+    free(alg.p); free(dg.p); free(md.p); free(body.p);
+    return r ? -1 : 0;
 }
 static int p12_plain(const uint8_t *p, size_t n, const uint8_t **key, size_t *key_n, const uint8_t **cert, size_t *cert_n) {
     const uint8_t *end = p + n, *nx, *c; uint8_t t; size_t l; *key = *cert = NULL;

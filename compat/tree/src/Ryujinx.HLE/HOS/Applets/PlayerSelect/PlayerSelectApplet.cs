@@ -61,6 +61,33 @@ namespace Ryujinx.HLE.HOS.Applets
 
                 return ResultCode.Success;
             }
+            // S2Arm local players: with the host's player list and a picker UI, the player picks one of the device's users or names a new one
+            // (saved to the list). With no picker UI (unattended runs) fall through to the console-less answers below, which add nothing to the list.
+            var create = S2AHooks.CreateLocalPlayer;
+            if (create != null && mode is (0 or UiModeUserCreator) && _system.Device.UIHandler is Ryujinx.HLE.UI.IAsyncTextInput input)
+            {
+                var accounts = _system.AccountManager;
+                var excluded = InvalidUsers(uiSettings);
+                var candidates = accounts.GetAllUsers().Where(u => !excluded.Contains(u.UserId)).ToArray();
+                bool createOnly = mode == UiModeUserCreator || candidates.Length == 0;   // as on the console: the list whenever someone is left to pick
+                var args = new SoftwareKeyboardUIArgs
+                {
+                    LocalPlayerNames = createOnly ? Array.Empty<string>() : candidates.Select(u => u.Name).ToArray(),
+                    InitialText = $"Player{accounts.GetUserCount() + 1}",
+                    StringLengthMin = 1, StringLengthMax = 32,
+                };
+                UserProfile Resolve(string reply)
+                {
+                    if (reply.StartsWith("new:", StringComparison.Ordinal)) return create(reply[4..]);
+                    return !createOnly && int.TryParse(reply, out int row) && row >= 0 && row < candidates.Length
+                        ? candidates[row] : null;
+                }
+                // The reply arrives on the UI thread; creating a player mounts its save, so finish off it
+                if (input.BeginTextInput(args, (ok, reply) => System.Threading.Tasks.Task.Run(() => Complete(Resolve, ok ? reply : null))) != null)
+                {
+                    return ResultCode.Success;
+                }
+            }
             if (mode == UiModeUserCreator)
             {
                 UserProfile created = CreatePlayerUser();
@@ -79,13 +106,7 @@ namespace Ryujinx.HLE.HOS.Applets
             // picks or creates another user: answer an existing user not in the list, else create one as UserCreator does.
             if (selected != null && uiSettings != null && uiSettings.Length >= InvalidUidListOffset + InvalidUidListCount * 16)
             {
-                HashSet<UserId> invalid = new();
-                for (int i = 0; i < InvalidUidListCount; i++)
-                {
-                    int at = InvalidUidListOffset + 16 * i;
-                    UserId id = new(uiSettings[at..(at + 16)]);
-                    if (!id.IsNull) invalid.Add(id);
-                }
+                var invalid = InvalidUsers(uiSettings);
                 if (invalid.Contains(selected.UserId))
                 {
                     UserProfile other = _system.AccountManager.GetAllUsers().FirstOrDefault(u => !invalid.Contains(u.UserId)) ?? CreatePlayerUser();
@@ -111,6 +132,36 @@ namespace Ryujinx.HLE.HOS.Applets
             _system.ReturnFocus();
 
             return ResultCode.Success;
+        }
+
+        private static HashSet<UserId> InvalidUsers(byte[] settings)
+        {
+            HashSet<UserId> invalid = new();
+            for (int i = 0; settings != null && i < InvalidUidListCount; i++)
+            {
+                int at = InvalidUidListOffset + i * 16;
+                if (at + 16 > settings.Length) break;
+                UserId id = new(settings[at..(at + 16)]);
+                if (!id.IsNull) invalid.Add(id);
+            }
+            return invalid;
+        }
+
+        private void Complete(Func<string, UserProfile> resolve, string value)
+        {
+            UserProfile user = null;
+            try
+            {
+                if (value != null) user = resolve(value);
+                if (user != null) S2AHooks.UserSelected?.Invoke(user.UserId);
+            }
+            catch (Exception e)
+            {
+                Logger.Error?.Print(LogClass.ServiceAm, $"Local player operation failed: {e.Message}");
+            }
+            _normalSession.Push(user == null ? BuildCancelledResponse() : BuildResponse(user));
+            AppletStateChanged?.Invoke(this, null);
+            _system.ReturnFocus();
         }
 
         // Adds a user the way the console's user creator would, with the default icon and a free PlayerN nickname (the host has

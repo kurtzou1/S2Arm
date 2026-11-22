@@ -365,6 +365,7 @@ namespace S2A.Services
             HorizonHost.Reset();
             GuestMemory.ResetSession();
             Application.Reset();
+            LocalPlayer.ResetSession();
             Aoc.Reset();
             SystemDataSeen.Clear();
             Ryujinx.HLE.S2ASessionState.End();
@@ -913,10 +914,13 @@ namespace S2A.Services
             //   照 NpadDevices.StyleSupported 认，同游戏内的样式判断（#747）；改前只认一代位 → 判成没有可配的样式、游戏提示要 Joy-Con 2
             var npads = Host.Device.Hid.Npads;
             bool takes(ControllerType t) => npads.StyleSupported(t, args.SupportedStyles);
-            ControllerType externalType = takes(ControllerType.ProController) ? ControllerType.ProController
-                                        : takes(ControllerType.JoyconPair) ? ControllerType.JoyconPair : ControllerType.None;
+            bool takesPro = takes(ControllerType.ProController);
+            bool takesPair = takes(ControllerType.JoyconPair);
+            bool prefersJoyconPair = takesPair && InputPump.PrefersJoyconPair;
+            ControllerType externalType = takesPair && (!takesPro || prefersJoyconPair) ? ControllerType.JoyconPair
+                                        : takesPro ? ControllerType.ProController : ControllerType.None;
 
-            if ((InputPump.ExternalController || InputPump.Pads > 1) && players.Exists(p => p != PlayerIndex.Handheld) && externalType != ControllerType.None)
+            if ((InputPump.ExternalController || prefersJoyconPair || InputPump.Pads > 1) && players.Exists(p => p != PlayerIndex.Handheld) && externalType != ControllerType.None)
             {
                 (player, type) = (players.Find(p => p != PlayerIndex.Handheld), externalType);
             }

@@ -36,6 +36,7 @@ struct PlayerToolbarButton: View {
         .popover(isPresented: $show, arrowEdge: .bottom) {
             popover.frame(width: 340).padding(LauncherTheme.Metrics.cardInset).background(.regularMaterial)
                 .controllerButtonStyle(LauncherSecondaryButtonStyle())
+                .controllerBackAction("players.back") { if editing != .none { finish() } else { show = false } }
         }
     }
 

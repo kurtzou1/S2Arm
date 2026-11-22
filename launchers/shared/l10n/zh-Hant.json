@@ -611,7 +611,7 @@
   "console.section.sync": "遊戲同步",
   "console.section.help": "說明",
   "play.addrShort.title": "這台裝置的系統能給 App 的位址範圍不夠這款遊戲",
-  "play.addrShort.body": "這款遊戲開局要一大塊連續的位址範圍，這台裝置的系統能給 App 的不夠（和儲存空間無關，清理空間沒有用）：可能會非常卡，或一直停在開頭。想正常玩，請換一台記憶體更大的 Mac（系統能給 App 的位址範圍更大），或等後續版本改進。",
+  "play.addrShort.body": "這款遊戲開局要一大塊連續的位址範圍，macOS 能給 App 的不夠（每台 Mac 都一樣，和記憶體大小、儲存空間都無關，換 Mac 或清理空間都沒有用）：可能會非常卡，或一直停在開頭。我們在改進，遊戲照常能啟動。",
   "console.section.apps": "獨立 App",
   "console.app.outdated": "有新版 · 點「更新 iPhone 上的 S2Arm」重簽",
   "console.game.standalone": "裝成了獨立 App（見上）",

@@ -136,15 +136,13 @@ namespace S2A.Services
             type == ControllerType.Handheld ? (styles & type) != 0 && !device.System.State.DockedMode
             : device.Hid.Npads.StyleSupported(type, styles) || (type == ControllerType.ProController && (styles & ControllerType.JoyconPair) != 0)
                                    || (type == ControllerType.JoyconPair && (styles & ControllerType.ProController) != 0);   // 这一对 Remap 自己会换
-        // 单只 Joy-Con（#520 A，照真机）：连着单只 Joy-Con 2（宿主 s2a_vpad_joycon_style 报它那一侧的 JoyconLeft / JoyconRight）、
-        //   游戏收这个样式、只有一个手柄 → 改成 Player1 的这个样式，游戏按 NpadJoyHoldType 自己转竖 / 横；
-        //   Joy-Con 断开 / 换成别的、或游戏不收了 → 换回改之前的。返回要改成的 (手柄号, 样式)，不改为 (Unknown, None)。纯函数，单测 --joycon-style
-        internal static (PlayerIndex, ControllerType) JoyconPick(ControllerType styles, ControllerType single, int pads, ControllerType current,
+        // 单只或成对的 Joy-Con，游戏收实体样式时按原样报告。断开或游戏改换允许的样式时恢复原配置。
+        internal static (PlayerIndex, ControllerType) JoyconPick(ControllerType styles, ControllerType physical, int pads, ControllerType current,
                                                                 ControllerType before, PlayerIndex playerBefore)
         {
-            if (single != ControllerType.None && (styles & single) != 0 && pads == 1)
-                return current == single ? (PlayerIndex.Unknown, ControllerType.None) : (PlayerIndex.Player1, single);
-            if (before != ControllerType.None && current is ControllerType.JoyconLeft or ControllerType.JoyconRight)
+            if (physical != ControllerType.None && (styles & physical) != 0 && pads == 1)
+                return current == physical ? (PlayerIndex.Unknown, ControllerType.None) : (PlayerIndex.Player1, physical);
+            if (before != ControllerType.None && current is ControllerType.JoyconLeft or ControllerType.JoyconRight or ControllerType.JoyconPair)
                 return (playerBefore, before);
             return (PlayerIndex.Unknown, ControllerType.None);
         }
@@ -155,6 +153,8 @@ namespace S2A.Services
         private static delegate* unmanaged<int, int, void> _setSlotStyle;   // 每一格的样式（#520：玩家 2 起的单只 Joy-Con 也照它那一格定原始方向 / 横握，同玩家 1）
         private static readonly ControllerType[] _slotTypes = new ControllerType[MaxPads];
         private static delegate* unmanaged<int, int> _slotStyle;   // 每一格的实体手柄样式（Mac 宿主 s2a_vpad_slot_style，#520）：多手柄时照它配格
+        internal static bool PrefersJoyconPair => _pads == 1 && _slotStyle != null &&
+                                                  _slotStyle(0) == (int)ControllerType.JoyconPair;
         // 多手柄时这一格配什么样式（同原机：手柄号的样式由连着的那只手柄定）：实体是单只 Joy-Con（左 / 右只）、游戏收这一侧 → 就用它
         //   （改前一律「一号右只、二号左只」交替或同一种，拆开的左只当 P1 时游戏以为是右只：按 A 确认不了、震动给错侧）；
         //   别的（Pro / 一对 / 系统手柄 / 游戏不收这一侧）照原来的配法 fallback。纯函数，单测 --joycon-style
@@ -170,18 +170,20 @@ namespace S2A.Services
         }
         private static bool FollowJoyconStyle(Switch device, ControllerType styles)
         {
-            ControllerType single = _joyconStyle != null ? (ControllerType)_joyconStyle() : ControllerType.None;
-            (PlayerIndex player, ControllerType type) = JoyconPick(styles, single, _pads, _type, _joyconBefore, _joyconPlayerBefore);
-            if (type == ControllerType.None) return single != ControllerType.None && _type == single;
-            if (type == single)
+            ControllerType physical = _joyconStyle != null ? (ControllerType)_joyconStyle() : ControllerType.None;
+            if (PrefersJoyconPair && device.Hid.Npads.IsSupportedPlayer(PlayerIndex.Player1))
+                physical = ControllerType.JoyconPair;
+            (PlayerIndex player, ControllerType type) = JoyconPick(styles, physical, _pads, _type, _joyconBefore, _joyconPlayerBefore);
+            if (type == ControllerType.None) return physical != ControllerType.None && (styles & physical) != 0 && _type == physical;
+            if (type == physical)
             {
                 if (_joyconBefore == ControllerType.None) { _joyconBefore = _type; _joyconPlayerBefore = _player; }
-                Console.Error.WriteLine($"S2A 虚拟手柄：连着单只 Joy-Con、游戏收 {single}，改成 {player} 的 {type}（游戏按握法自己转）");
+                Console.Error.WriteLine($"S2A 虚拟手柄：连着 {physical} 且游戏支持，改成 {player} 的 {type}");
             }
             else
             {
                 _joyconBefore = ControllerType.None;
-                Console.Error.WriteLine($"S2A 虚拟手柄：单只 Joy-Con 不在了或游戏不收 {_type}，换回 {player} 的 {type}");
+                Console.Error.WriteLine($"S2A 虚拟手柄：Joy-Con 不在了或游戏不收 {_type}，换回 {player} 的 {type}");
             }
             SetPrimary(device, player, type);
             return true;

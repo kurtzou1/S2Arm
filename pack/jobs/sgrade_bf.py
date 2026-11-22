@@ -64,7 +64,12 @@ def rebuild(c, gid, src_root, plat, work):
         shutil.rmtree(p) if p.is_dir() else p.unlink(missing_ok=True)
     layout.set_current(c, roots, gid, tag)
     env = c.env()
-    env.update(S2A_ROOTS=str(roots), S2A_ROOTS_SHARED=str(work / "never-shared"), S2A_ROOTS_PRIV=str(work / "roots-private"), S2A_PACK_PLAT=plat)
+    # 直连缓存用这款出包时那份（library.direct_cache_dir，同 _rebuild_win）：Metal 编译结果与批成员索引按内容寻址，翻译器改了没变的支整批沿用旧库。
+    #   作业层只在出包作业（build / ipa）里给子进程设它，「更新这款」/ 推送时补库的作业拿不到，direct_lib 落回工具缓存下的默认位置；
+    #   游戏放外接盘时出包用的是游戏文件夹里的 direct-cache/，更新时一支都命中不了、整份重编（11-21）
+    import library
+    env.update(S2A_ROOTS=str(roots), S2A_ROOTS_SHARED=str(work / "never-shared"), S2A_ROOTS_PRIV=str(work / "roots-private"), S2A_PACK_PLAT=plat,
+               S2A_DIRECT_CACHE=str(library.direct_cache_dir(c, gid)))
     logs = Path(c.logs) / c.task; logs.mkdir(parents=True, exist_ok=True)
     # 步与步之间报「已完成几步 / 共几步」（D-QPGF，Mac 0.6.4：更新这款重编着色器 247 秒停在第一步、done / total 一直空，按钮一直「更新中 0%」）：
     #   没有分段计划的作业按本段计数插值整单进度（pack/jobs/overall.py），只增不减；步内工具自己写的 S2A_PROGRESS 计数照常上报

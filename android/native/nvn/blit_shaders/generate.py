@@ -45,3 +45,14 @@ with tempfile.TemporaryDirectory(prefix='s2a-easu-shaders-') as directory:
     emit(directory, 'fullscreen.vert', 'vs', easl, 'k_easu_')
     emit(directory, 'easu.frag', 'fs', easl, 'k_easu_')
 (here.parent/'nvn_vk_easu_spv.h').write_text('\n'.join(easl)+'\n')
+
+# DrawTexture built-in quad (#1452). Own header so the headers above stay byte-identical.
+dtxl = ['// SPDX-License-Identifier: Apache-2.0',
+        '// Copyright 2026 S2Arm contributors',
+        '// Generated from blit_shaders/draw_tex.vert and blit_shaders/draw_tex.frag by blit_shaders/generate.py.',
+        '// Regenerate: python3 android/native/nvn/blit_shaders/generate.py --glslc "$GLSLC"',
+        '#pragma once']
+with tempfile.TemporaryDirectory(prefix='s2a-drawtex-shaders-') as directory:
+    emit(directory, 'draw_tex.vert', 'vs', dtxl, 'k_dtx_')
+    emit(directory, 'draw_tex.frag', 'fs', dtxl, 'k_dtx_')
+(here.parent/'backend_vulkan_draw_tex_spv.h').write_text('\n'.join(dtxl)+'\n')

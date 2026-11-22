@@ -777,7 +777,8 @@ class Context:
             transient = extra.pop("transient", False)   # 只给标准输出、不进事件记录（出包编排转发子作业事件：子作业自己的记录里已有，剃刀 H13）
             if kind == "plan":
                 self.overall.plan(extra.get("milestones"))
-            overall = self.overall.feed(kind, now - self.t0, getattr(self, "milestone", None), state, self.number, self.count, done, total)
+            overall = self.overall.feed(kind, now - self.t0, getattr(self, "milestone", None), state, self.number, self.count, done, total,
+                                        sub=kind == "progress" and "counters" in extra)   # 阶段工具的子计数（emit_stage_counter）
             if overall is not None:
                 extra["overall"] = overall
                 self.job["overall"] = overall

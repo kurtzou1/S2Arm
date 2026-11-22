@@ -34,12 +34,12 @@ def plumesign_path(given=None):
     return None
 
 
-def _mux_list():
-    """本机设备服务（usbmux）ListDevices 的原始设备表"""
+def _mux_request(req):
+    """向本机设备服务（usbmux）发一条 plist 请求 → 回包字典"""
     if os.name == 'nt': s = socket.create_connection(('127.0.0.1', 27015), 5)
     else: s = socket.socket(socket.AF_UNIX); s.settimeout(5); s.connect('/var/run/usbmuxd')
     with s:
-        p = plistlib.dumps({'MessageType': 'ListDevices', 'ClientVersionString': 'S2Arm-install', 'ProgName': 'S2Arm-install', 'kLibUSBMuxVersion': 3})
+        p = plistlib.dumps({**req, 'ClientVersionString': 'S2Arm-install', 'ProgName': 'S2Arm-install', 'kLibUSBMuxVersion': 3})
         s.sendall(struct.pack('<IIII', 16 + len(p), 1, 8, 1) + p)
         h = b''
         while len(h) < 16: h += s.recv(16 - len(h))
@@ -48,7 +48,44 @@ def _mux_list():
             c = s.recv(n - len(b))
             if not c: break
             b += c
-    return plistlib.loads(b).get('DeviceList', [])
+    return plistlib.loads(b)
+
+
+def _mux_list():
+    """本机设备服务（usbmux）ListDevices 的原始设备表"""
+    return _mux_request({'MessageType': 'ListDevices'}).get('DeviceList', [])
+
+
+def has_pair_record(udid):
+    """设备服务里存着这台的配对记录吗（ReadPairRecord 回 PairRecordData）；问不了设备服务抛 OSError"""
+    return bool(_mux_request({'MessageType': 'ReadPairRecord', 'PairRecordID': udid}).get('PairRecordData'))
+
+
+PAIR_TIMEOUT = 200   # s2a-devpush pair 自己最多等 180 秒手机上点「信任」
+
+
+def ensure_paired(udid, devpush=None, say=lambda m: print(m, flush=True), log=None):
+    """签名装机前先配对（#1973）：Windows 上只有 iTunes / Apple Devices 会向手机发起配对、存配对记录。它们没开着时，手机上点了「信任」
+    也没有记录，plumesign 报「device does not have pairing file」，玩家怎么点都没用。设备服务里没有这台的记录 → 用 s2a-devpush pair 自己发起配对
+    （手机弹「要信任此电脑吗」）、存进设备服务，再去签名。有记录不动；设备服务问不了交给后面报真原因"""
+    try:
+        if has_pair_record(udid): return
+    except OSError:
+        return
+    sys.path.insert(0, str(R / 'tools')); import push_pack as P
+    exe = P.devpush_path(devpush)
+    if not exe: return   # 没有配对工具：照常去签名，没记录时由签名报真原因
+    say('这台电脑还没和手机配对：解锁手机，在弹出的「要信任此电脑吗」里点「信任」并输入锁屏密码')
+    try:
+        r = subprocess.run([exe, udid, '-', 'pair', socket.gethostname()], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=PAIR_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise Fail('手机上一直没点「信任」：解锁手机、点「信任」并输入锁屏密码，再装一次', 1, 'device_pairing_required')
+    if log:
+        with open(log, 'a', encoding='utf-8') as f: f.write(f'\n--- 配对（s2a-devpush pair）退出码 {r.returncode} ---\n{r.stdout}{r.stderr}\n')
+    if r.returncode != 0:
+        why = (r.stderr.strip().splitlines() or ['配对没成'])[-1]
+        raise Fail(why, 1, 'device_pairing_required')
+    say('已和手机配对')
 
 
 def mux_devices():
@@ -435,6 +472,23 @@ def main(argv=None):
         print(f'【红】{e}', flush=True); return e.code
 
 
+def _sign_then_install_elsewhere(exe, a, say):
+    """只签名（plumesign sign --apple-id，不 --register-and-install，不连手机）→ 签好的 ipa 交 a.fallback_install(路径) 装 → 实际包名。
+    装不上照它抛的原因报（没登记过的新手机：手机不认描述文件，那句由调用方按 devicectl 原文归码）"""
+    log = a.log or os.path.join(os.path.dirname(os.path.abspath(a.ipa)), 'plumesign.log')
+    with tempfile.TemporaryDirectory() as t:
+        out = Path(t, 'signed.ipa'); say('签名（手机不在本机设备服务里，签好后经 Wi-Fi 装）…')
+        sign_install(exe, a.ipa, None, a.name, log, out, getattr(a, 'bundle', None), register=False)
+        bid = bundle_id_of(out) if out.is_file() else None
+        if not bid: raise Fail('签好了但读不到签好的 ipa 里的包名，装不了', 1, 'device_install_failed')
+        a.signed_expiry = signed_expiry(out)
+        line = iml_line(out)
+        with open(log, 'a', encoding='utf-8') as f: f.write('\n' + line + '\n')
+        if line.startswith('【IML 丢了】'): say(line)
+        a.fallback_install(out)
+    return bid
+
+
 def install_app(a, say=lambda m: print(m, flush=True)):
     """签名 + 覆盖装（同包名不卸载，Documents 保留）→ 装机后的实际包名；失败抛 Fail。
     签好的包里读到的真实到期（signed_expiry）放在 a.signed_expiry（读不到为 None），调用方据此记签名状态（#1772）"""
@@ -443,10 +497,15 @@ def install_app(a, say=lambda m: print(m, flush=True)):
     try: devs = mux_devices()
     except OSError as e: raise Fail(f'连不上本机苹果设备服务（{e}）：装 iTunes 或「Apple 设备」', 75, 'device_pairing_required')
     dev = device_id(a.udid, devs)
+    # Mac 上手机只在同一 Wi-Fi（D-WFBG / D-ST8X）：设备服务（usbmux）看不到，devicectl（CoreDevice）看得到。调用方给了别的装法（a.fallback_install，
+    #   Mac PlumeMacPhone 的 devicectl）就只签名不登记（这台更新 S2Arm 时早已登记在团队里，描述文件带着它），签好的包交它装；Windows 不给，照旧报没连上
+    if dev is None and getattr(a, 'fallback_install', None):
+        return _sign_then_install_elsewhere(exe, a, say)
     # 要装的那台不在设备服务里（D-XHV5：选中的是只在局域网上的 iPad，插着线的是另一台 iPhone）：是「没连上」，不是「要信任电脑」
     if dev is None: raise Fail(f'设备服务里没有要装的那台 {a.udid or "（没拿到设备编号）"}（在列：{", ".join(f"{u}/{c}" for u, c, _ in devs) or "无"}）：'
                                '给这台插上数据线并解锁，或在电脑上给它打开「通过 Wi-Fi 显示」', 75, 'device_not_connected')
     log = a.log or os.path.join(os.path.dirname(os.path.abspath(a.ipa)), 'plumesign.log')
+    ensure_paired(next((u for u, _, d in devs if d == dev and u), a.udid), getattr(a, 'devpush', None), say, log)   # 设备服务里记的写法（不带横线）
     with tempfile.TemporaryDirectory() as t:
         out = Path(t, 'signed.ipa'); say(f'签名 + 装机（设备编号 {dev}）…')
         bundle = getattr(a, 'bundle', None)

@@ -84,15 +84,16 @@ struct InstallLayoutRow: View {
                 Text(ix(loc, gameId == nil ? "install.layout.title" : "install.layout.game")).font(LauncherTheme.TypeStyle.detail).foregroundStyle(.secondary)
                 Spacer(minLength: 12)
                 Button { showWhy.toggle() } label: { Label(ix(loc, "layout.card.whyLabel"), systemImage: "questionmark.circle").font(LauncherTheme.TypeStyle.caption) }
-                    .buttonStyle(.plain).foregroundStyle(.secondary).help(ix(loc, "layout.card.why"))
+                    .controllerButtonStyle(.plain).foregroundStyle(.secondary).help(ix(loc, "layout.card.why"))
                     .popover(isPresented: $showWhy, arrowEdge: .bottom) {
                         Text(ix(loc, "layout.card.why")).font(.manrope(13)).fixedSize(horizontal: false, vertical: true).frame(width: 360).padding(16)
+                            .controllerBackAction("install.layout.why.close") { showWhy = false }
                     }
-                    .accessibilityIdentifier("install.layout.why")
+                    .controllerID("install.layout.why")
                 if let gameId, own != nil, selection == nil {
                     Button(ix(loc, "install.layout.follow").replacingOccurrences(of: "{0}", with: name(m.layout))) { model.setLayout(nil, gameId: gameId) }
-                        .buttonStyle(.plain).font(LauncherTheme.TypeStyle.caption).foregroundStyle(.secondary).underline()
-                        .accessibilityIdentifier("install.layout.follow")
+                        .controllerButtonStyle(.plain).font(LauncherTheme.TypeStyle.caption).foregroundStyle(.secondary).underline()
+                        .controllerID("install.layout.follow")
                 }
             }
             HStack(alignment: .top, spacing: 12) {
@@ -136,7 +137,8 @@ struct InstallLayoutRow: View {
             .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(on ? Self.gold : Color.white.opacity(0.14), lineWidth: on ? 2 : 1))
             .contentShape(RoundedRectangle(cornerRadius: 12))
         }
-        .buttonStyle(.plain).controllerID((gameId == nil ? "install.layout." : "install.layout.game.") + value)
+        .controllerButtonStyle(.plain).controllerRingRadius(12)
+        .controllerID((gameId == nil ? "install.layout." : "install.layout.game.") + value)
         .accessibilityIdentifier("install.layout.card." + value)
     }
 }

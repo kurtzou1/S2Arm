@@ -224,9 +224,37 @@ private struct PadControlFrame: NSViewRepresentable {
 package struct PadToggleStyle<Style: ToggleStyle>: ToggleStyle {
     let style: Style
     package init(_ style: Style) { self.style = style }
-    package func makeBody(configuration: Configuration) -> some View {
-        Toggle(isOn: configuration.$isOn) { configuration.label }.toggleStyle(style)
-            .modifier(PadControlModifier(activate: { configuration.isOn.toggle() }, adjust: { configuration.isOn = $0 > 0 },
-                                         styleRadius: (style as? any PadRingShaped)?.padRingRadius))
+    @ViewBuilder package func makeBody(configuration: Configuration) -> some View {
+        if #available(macOS 15.0, *), style is CheckboxToggleStyle {
+            PadCheckboxToggleBody(style: style, configuration: configuration)
+        } else {
+            Toggle(isOn: configuration.$isOn) { configuration.label }.toggleStyle(style)
+                .modifier(PadControlModifier(activate: { configuration.isOn.toggle() }, adjust: { configuration.isOn = $0 > 0 },
+                                             styleRadius: (style as? any PadRingShaped)?.padRingRadius))
+        }
+    }
+}
+
+@available(macOS 15.0, *)
+private struct PadCheckboxToggleBody<Style: ToggleStyle>: View {
+    let style: Style
+    let configuration: ToggleStyleConfiguration
+    @Environment(\.labelsVisibility) private var labelsVisibility
+    var body: some View {
+        HStack(spacing: labelsVisibility == .hidden ? 0 : 6) {
+            Toggle("", isOn: configuration.$isOn)
+                .toggleStyle(style)
+                .labelsHidden()
+                .modifier(PadControlModifier(activate: { configuration.isOn.toggle() }, adjust: { configuration.isOn = $0 > 0 },
+                                             styleRadius: LauncherTheme.Focus.checkboxRadius, styleOutset: LauncherTheme.Focus.checkboxOutset))
+            if labelsVisibility != .hidden {
+                configuration.label
+                    .contentShape(Rectangle())
+                    .onTapGesture { configuration.isOn.toggle() }
+            }
+        }
+        .accessibilityRepresentation {
+            Toggle(isOn: configuration.$isOn) { configuration.label }.toggleStyle(style)
+        }
     }
 }

@@ -762,6 +762,7 @@ static uint64_t exec_list(const uint8_t *p) {
             case OP_BARRIER: { int32_t bits; memcpy(&bits, a, 4); rp_pass_barrier((uint32_t)bits); break; }
             case OP_COPY_T2B: rp_pass_flush(g_cmd); rp_op_copy_t2b(g_cmd, a, p); break;
             case OP_CLEAR_TEX: rp_pass_flush(g_cmd); rp_op_clear_tex(g_cmd, a, p); break;
+            case OP_DRAW_TEX: { if (g_rc_skip) break; p_draw_tex t; if (h.size - 8 < sizeof t) { nvn_unimpl("rec", "draw_tex_short", p); break; } memcpy(&t, a, sizeof t); rp_op_draw_tex(g_cmd, &t, p); break; }   // 通道内画，不收通道
             case OP_COPY_B2T: rp_pass_flush(g_cmd); rp_op_copy_b2t(g_cmd, a, p); break;   // 传输在通道外
             case OP_COPY_T2T: rp_pass_flush(g_cmd); rp_op_copy_t2t(g_cmd, a, p); break;   // 先落地待折清除：拷贝可能读写那些目标
             case OP_UPDATE_UB: if (!rp_op_update_ub_gpu(g_cmd, a, p)) rp_op_update_ub(a, p); break;   // 碰到还没落地的 GPU 写才走 GPU（#1022）

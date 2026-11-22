@@ -10,7 +10,7 @@ import stat
 
 
 RECOVERY = {
-    "addr_short": "这款游戏要的地址范围比这台 Mac 的系统能给 App 的多（和存储空间无关）：想正常玩，请换一台内存更大的 Mac，或等后续版本改进；游戏照常能启动。",   # Mac 起局宿主报「地址空间不够这款」（build.addr_short_watch 发的不阻塞提示 notice）
+    "addr_short": "这款游戏要的地址范围比 macOS 能给 App 的多（每台 Mac 都一样，和内存大小、存储空间都无关，换 Mac 没有用）：可能会卡或停在开头，我们在改进；游戏照常能启动。",   # Mac 起局宿主报「地址空间不够这款」（build.addr_short_watch 发的不阻塞提示 notice）
     "sgrade_upgrading": "等这款的 S 级优化升级做完（游戏上有进度），再点开始游戏；别的游戏照常能玩。",   # 11-17 S 级优化改手动单款升级（sgrade.upgrade_game），升级中只挡这一款
     "ios_install_dir_unwritable": "先试这两步：①在 iPhone 上打开一次 S2Arm，等游戏库界面出来；②回电脑对这款游戏再点一次「推到 iPhone」，会接着已传的部分继续，不用从头来。还是写不进，就要删掉 iPhone 上的 S2Arm App 再重装：先在游戏菜单「存档管理」里导出存档，存到 S2Arm 文件夹以外（比如 iCloud 云盘）；再在 iPhone 桌面长按 S2Arm，删除 App；然后在电脑上的 S2Arm 里对这款游戏再点一次「推到 iPhone」；装好后在「存档管理」里导回存档。电脑上的游戏和 S2Arm 都不用删。",   # iOS 端装机 / 导入失败：手机上的 S2Arm 报码、按码显示（11-11 维护者「补上说人话的原因」）
     "ios_install_no_space": "清出空间后点「重试」。",   # iOS 端装机 / 导入失败：手机上的 S2Arm 报码、按码显示（11-11 维护者「补上说人话的原因」）

@@ -79,6 +79,17 @@ class Replay(unittest.TestCase):
         f.feed("stage", 0.1, None, "running", 2, 4)
         self.assertEqual(f.feed("result", 1.0, None, "failed"), 0.25, "失败停在原处")
 
+    def test_tool_sub_counters_do_not_finish_the_step(self):
+        # 11-21「更新这款」：共 2 步，第 1 步里重编着色器库。阶段工具的子计数先有一个 1/1 报满，之后编批库 3214 / 8191 MB 跑几小时。
+        #   原先子计数也算本步计数：1/1 一来就 (0 + 1) / 2 = 50%，之后一直 50%。子计数不参与插值：只按作业自己的步计数（重编 7 段里第 2 段 = 2/7）推
+        o = overall.Overall()
+        self.assertEqual(o.feed("stage", 0.1, None, "running", 1, 2), 0.0)
+        self.assertEqual(o.feed("progress", 1.0, None, "running", 1, 2, 2, 7), round((0 + 2 / 7) / 2, 4))
+        self.assertEqual(o.feed("progress", 2.0, None, "running", 1, 2, 1, 1, sub=True), round((0 + 2 / 7) / 2, 4), "子计数报满不把本步算完")
+        self.assertEqual(o.feed("progress", 3.0, None, "running", 1, 2, 3214, 8191, sub=True), round((0 + 2 / 7) / 2, 4))
+        self.assertEqual(o.feed("progress", 4.0, None, "running", 1, 2, 3, 7), round((0 + 3 / 7) / 2, 4))
+        self.assertEqual(o.feed("stage", 5.0, None, "running", 2, 2), 0.5)
+
     def test_no_plan_no_overall(self):
         o = overall.Overall()
         self.assertIsNone(o.feed("progress", 1.0, None))

@@ -91,8 +91,7 @@ static void send_attach_sub(jc_dev *d, IOHIDDeviceRef device, uint64_t generatio
     CFRelease(target);
 }
 
-// Joy-Con 报告里的加速度 / 角速度 → 近似 NS2 原始坐标（g、度/秒）。
-// 竖握：L/R 机身轴不同；Fit Boxing 横握挥拳时主要靠角速度幅值，先保证有读数。
+// Joy-Con 报告里的加速度 / 角速度 → 宿主体感坐标（g、度/秒）。
 static void decode_imu(int slot, int product_id, const uint8_t *s, s2a_pad_motion *out) {
     float ax = rd16(s + 0) * 0.000244f;
     float ay = rd16(s + 2) * 0.000244f;
@@ -100,10 +99,10 @@ static void decode_imu(int slot, int product_id, const uint8_t *s, s2a_pad_motio
     float gx = rd16(s + 6) * 0.06103f;
     float gy = rd16(s + 8) * 0.06103f;
     float gz = rd16(s + 10) * 0.06103f;
-    // 映射到「正面法线 = z、上沿 = y、右 = x」的近似：与常见 SDL hidapi_nintendo 竖握一致
+    // 同向竖握时，左右 Joy-Con 的原始 Y、Z 轴符号相反。按右手柄的轴向输出。
     if (product_id == JC_PID_L) {
-        out->acceleration_x = ay; out->acceleration_y = -ax; out->acceleration_z = az;
-        out->gyro_x = gy; out->gyro_y = -gx; out->gyro_z = gz;
+        out->acceleration_x = ay; out->acceleration_y = ax; out->acceleration_z = -az;
+        out->gyro_x = gy; out->gyro_y = gx; out->gyro_z = -gz;
     } else {
         // Joy-Con (R) / Pro
         out->acceleration_x = -ay; out->acceleration_y = ax; out->acceleration_z = az;

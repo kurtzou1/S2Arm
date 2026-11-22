@@ -63,14 +63,23 @@ class KeepAwakeTests(unittest.TestCase):
                 ran.append(1)
         self.assertEqual(ran, [1])
 
-    def test_windows_sets_then_restores_execution_state(self):
+    def test_windows_holds_system_and_execution_requests_then_clears(self):
+        # 11-21：电源请求两种都要（SystemRequired 挡空闲休眠、ExecutionRequired 挡现代待机熄屏后挂起桌面程序），结束时两种都清、句柄关掉。期望手写
         calls = []
-        kernel = types.SimpleNamespace(SetThreadExecutionState=lambda v: calls.append(v) or 1)
-        fake_ctypes = types.SimpleNamespace(windll=types.SimpleNamespace(kernel32=kernel))
-        with patch.object(awake.sys, "platform", "win32"), patch.object(awake.os, "name", "nt"), patch.dict(sys.modules, {"ctypes": fake_ctypes}):
+        api = (lambda: calls.append("create") or 7, lambda h, t: calls.append(("set", h, t)) or 1,
+               lambda h, t: calls.append(("clear", h, t)) or 1, lambda h: calls.append(("close", h)) or 1)
+        with patch.object(awake.sys, "platform", "win32"), patch.object(awake.os, "name", "nt"), patch.object(awake, "_win_power", lambda: api):
             with awake.keep_awake():
-                self.assertEqual(calls, [0x80000001])
-        self.assertEqual(calls, [0x80000001, 0x80000000])
+                self.assertEqual(calls, ["create", ("set", 7, 1), ("set", 7, 3)])
+        self.assertEqual(calls[3:], [("clear", 7, 1), ("clear", 7, 3), ("close", 7)])
+
+    def test_windows_request_unavailable_still_runs(self):
+        ran = []
+        api = (lambda: None, lambda h, t: 1, lambda h, t: 1, lambda h: 1)
+        with patch.object(awake.sys, "platform", "win32"), patch.object(awake.os, "name", "nt"), patch.object(awake, "_win_power", lambda: api):
+            with awake.keep_awake():
+                ran.append(1)
+        self.assertEqual(ran, [1])
 
 
 class JobKeepAwakeTests(JobCase):
@@ -86,13 +95,13 @@ class JobKeepAwakeTests(JobCase):
         def probe(c):
             held.append((c.operation, len(FakeProc.started) == 1 and FakeProc.started[0].alive))
             return {}
-        for op in ("build", "ipa", "install", "installUpdate", "installRestore", "catalog"):
+        for op in ("build", "ipa", "install", "installUpdate", "installRestore", "updateGame", "catalog"):
             FakeProc.started = []
             with patch.object(awake.sys, "platform", "darwin"), patch.object(awake, "_spawn", FakeProc):
                 self.run_op(op, probe)
             if FakeProc.started:
                 self.assertFalse(FakeProc.started[0].alive, f"{op} 结束后 caffeinate 还在")
-        self.assertEqual(held, [("build", True), ("ipa", True), ("install", True), ("installUpdate", True), ("installRestore", True), ("catalog", False)])
+        self.assertEqual(held, [("build", True), ("ipa", True), ("install", True), ("installUpdate", True), ("installRestore", True), ("updateGame", True), ("catalog", False)])
 
     def test_failed_push_releases(self):
         FakeProc.started = []

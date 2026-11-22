@@ -695,20 +695,20 @@ import S2ArmAppleAdapter
                 // 平台卡按标识认（iPhone / Apple TV / Mac 三张，Apple TV 卡在出包机配了 Apple TV 时才有），不按高度猜
                 let platforms = targets.filter { $0.id.hasPrefix("export.platform.") }.sorted { $0.frame.minX < $1.frame.minX }
                 let mac = try XCTUnwrap(platforms.first { $0.id == "export.platform.mac" })
-                // 复选框与平台之间夹着 mod 一行（「？」格式说明，11-17）：方向键逐行走，不跳行
-                let modHelp = targets.first { $0.id == "export.sgrade.mod.help" }
+                // 复选框与平台之间夹着 mod 一行（「？」格式说明 + 导入按钮）：方向键逐行走，不跳行
+                let modRow = Set(targets.map(\.id).filter { $0 == "export.sgrade.mod.help" || $0 == "export.sgrade.mod.import" })
                 navigation.focus(mac.id); navigation.handle(.up)
-                if let modHelp {
-                    XCTAssertEqual(navigation.focusedID, modHelp.id, "向上应先进平台上方紧邻的 mod 一行")
+                if !modRow.isEmpty {
+                    XCTAssertTrue(navigation.focusedID.map(modRow.contains) == true, "向上应先进平台上方紧邻的 mod 一行")
                     navigation.handle(.up)
                 }
                 XCTAssertEqual(navigation.focusedID, checkbox.id, "向上应先经过紧邻的平台上方的复选框，不能跳过整行")
                 navigation.focus("export.name"); navigation.handle(.down)
-                XCTAssertEqual(navigation.focusedID, checkbox.id, "标题向下也应进入复选框，不能停在同一行的封面")
+                XCTAssertTrue(["export.sgrade.details", checkbox.id].contains(navigation.focusedID), "标题向下应进入 S 级卡片首行，不能停在同一行的封面")
                 navigation.focus(checkbox.id); navigation.handle(.up)
                 XCTAssertNotEqual(navigation.focusedID, checkbox.id, "向上应离开复选框回到游戏信息")
                 navigation.focus(checkbox.id); navigation.handle(.down)
-                if let modHelp { XCTAssertEqual(navigation.focusedID, modHelp.id, "向下先进 mod 一行"); navigation.handle(.down) }
+                if !modRow.isEmpty { XCTAssertTrue(navigation.focusedID.map(modRow.contains) == true, "向下先进 mod 一行"); navigation.handle(.down) }
                 XCTAssertTrue(platforms.contains { $0.id == navigation.focusedID }, "向下应离开复选框进入可选平台")
                 let before = fixture.model.sgradeOn(game.id)
                 navigation.focus(checkbox.id); navigation.handle(.confirm)
@@ -716,7 +716,7 @@ import S2ArmAppleAdapter
                 XCTAssertEqual(fixture.model.sgradeOn(game.id), !before)
                 XCTAssertEqual(navigation.focusedID, checkbox.id, "切换勾选后仍保持有效焦点")
                 navigation.handle(.down)
-                if let modHelp { XCTAssertEqual(navigation.focusedID, modHelp.id); navigation.handle(.down) }
+                if !modRow.isEmpty { XCTAssertTrue(navigation.focusedID.map(modRow.contains) == true); navigation.handle(.down) }
                 XCTAssertTrue(platforms.contains { $0.id == navigation.focusedID }, "勾选状态改变后也能移出")
                 XCTAssertEqual(fixture.model.sgradeOn(game.id), !before, "方向导航不能修改勾选")
             }

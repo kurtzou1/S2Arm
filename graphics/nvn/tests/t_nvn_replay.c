@@ -488,6 +488,8 @@ static void t_framelog_fence(void) {   // 帧日志 fence 字段：同步等待 
 
 static struct { nvn_gpu_clear d; int npd, ends; } g_cr[8]; static int g_ncr;   // 矩形清：记描述，以及收到时已开 / 已关过几个通道
 void nvn_gpu_clear_rect(nvn_gpu_cmd c, const nvn_gpu_clear *d) { (void)c; if (g_ncr < 8) { g_cr[g_ncr].d = *d; g_cr[g_ncr].npd = g_npd; g_cr[g_ncr].ends = g_pass_ends; } g_ncr++; }
+static struct { nvn_gpu_draw_tex_desc d; int in_pass, npd; } g_dt[8]; static int g_ndt;   // DrawTexture（#1452）：记描述，以及收到时通道开着没有、已开过几个通道
+void nvn_gpu_draw_tex(nvn_gpu_cmd c, const nvn_gpu_draw_tex_desc *d) { (void)c; if (g_ndt < 8) { g_dt[g_ndt].d = *d; g_dt[g_ndt].in_pass = g_pass_open; g_dt[g_ndt].npd = g_npd; } g_ndt++; }
 static uint64_t g_tick;   // 游戏时钟替身
 uint64_t s2a_guest_tick(void) { return g_tick; }
 static int g_ts_convert_fail;
@@ -511,9 +513,10 @@ struct nvn_gpu_shader_s { int x; }; struct nvn_gpu_pipe_s { int x; };
 static struct nvn_gpu_shader_s g_fsh[3]; static struct nvn_gpu_pipe_s g_fpipe;
 static struct rp_prog g_fprog, g_variant_prog; static struct nvn_gpu_shader_s g_variant_fs; static int g_rt_variant;
 static int g_resolves, g_resolve_rc; static struct rp_shader_req g_last_req;
+static struct rp_prog g_gprog2; static const struct rp_prog *g_gresolve_next;   // 图形出库回退用例：拒收后解析交「现编版」g_gprog2
 int rp_shader_resolve(const struct rp_shader_req *q, const struct rp_prog **out) {
     g_resolves++; g_last_req = *q;
-    *out = g_resolve_rc ? NULL : (g_rt_variant && q->rt_format[0] == NVN_FORMAT_RGBA32UI ? &g_variant_prog : &g_fprog);
+    *out = g_resolve_rc ? NULL : g_gresolve_next ? g_gresolve_next : (g_rt_variant && q->rt_format[0] == NVN_FORMAT_RGBA32UI ? &g_variant_prog : &g_fprog);
     return g_resolve_rc;
 }
 // 计算：程序、管线、派发的替身
@@ -523,12 +526,12 @@ static int g_ndisp_now(void) { return g_ndisp; }
 static nvn_gpu_binding g_cb[16]; static uint32_t g_ncb; static int g_cbinds;
 static struct rp_prog g_cprog2; static const struct rp_prog *g_cresolve_next; static int g_lib_reject_calls;
 int rp_shader_resolve_compute(const struct rp_prog **out) { g_cresolves++; *out = g_cresolve_rc ? NULL : (g_cresolve_next ? g_cresolve_next : &g_cprog); return g_cresolve_rc; }
-// rp_shader_lib_reject 的替身：出库版标坏并切到「现编版」g_cprog2；非出库版（lib_sourced=0）原样报 0
+// rp_shader_lib_reject 的替身：出库版标坏并切到「现编版」（计算 g_cprog2 / 图形 g_gprog2）；非出库版（lib_sourced=0）原样报 0
 int rp_shader_lib_reject(const struct rp_prog *p) {
     g_lib_reject_calls++;
     if (!p || !p->lib_sourced) return 0;
     ((struct rp_prog *)p)->lib_bad = 1;
-    g_cresolve_next = &g_cprog2;
+    if (p->is_compute) g_cresolve_next = &g_cprog2; else g_gresolve_next = &g_gprog2;
     return 1;
 }
 void rp_shader_reset(void) {}
@@ -1943,6 +1946,17 @@ static void t_linear_reject(void) {
       CHECK(g_up[n0].first[0] == 0x40 && g_up[n0].first[3] == 0x43 && g_up[n0].first[4] == 0x44 && g_up[n0].first[15] == 0x4F);   // 逐行拷、padding 不进缓冲
       nvn_be_tex_release(&b2); }
     res_fresh();
+    { // 线性渲染目标再带 SPARSE（普通池，不是虚拟池）：SPARSE 只说驻留、不改排布，照线性逐行拷，不报「线性加稀疏」——同苹果端 lin 口径
+      tex_t b3 = mk_tex(55, 0x2000, NVN_FORMAT_R8, 4, 4, 1, NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_SPARSE);
+      b3.d.stride = 8; nvn_tex_layout(&b3.d, &b3.L); b3.mem = g_tmem + b3.off;
+      for (int y = 0; y < 4; y++) { for (int x = 0; x < 4; x++) b3.mem[y * 8 + x] = (uint8_t)(0x60 + y * 4 + x); memset(b3.mem + y * 8 + 4, 0xEE, 4); }
+      nvn_be_tex_cpu_written(&b3);
+      int n0 = g_nup;
+      CHECK(rp_tex_resolve(&b3, &g_fake_cmd) != NULL && nvn_unimpl_count("tex", "linear_sparse_unsupported") == 0);
+      CHECK(g_nup == n0 + 1 && g_up[n0].pitch == 4 && g_up[n0].img == 16);
+      CHECK(g_up[n0].first[0] == 0x60 && g_up[n0].first[4] == 0x64 && g_up[n0].first[15] == 0x6F);
+      nvn_be_tex_release(&b3); }
+    res_fresh();
     { tex_t c = mk_tex(53, (int64_t)sizeof g_tmem - 0x10, NVN_FORMAT_R8, 64, 64, 1, NVN_TEXTURE_FLAGS_LINEAR);   // 源范围出池（池大小跟着 g_tmem 走）
       CHECK(rp_tex_resolve(&c, &g_fake_cmd) != NULL && nvn_unimpl_count("tex", "linear_range_outside_pool") == 1);
       nvn_be_tex_release(&c); }
@@ -2344,6 +2358,56 @@ static void t_decl_array_numeric(void) {
     rp_view_pin_end(); nvn_be_sub_commit(); fake_complete(NVN_GPU_DONE_OK); res_fresh();
 }
 
+// 深度模板贴图按哪个面采样（#1679 斑马纹的根因）：建贴图时设了模板模式（TextureBuilderSetDepthStencilMode）、视图没设模式时，
+// 交给后端的采样视图记录要带模板模式；视图自己设了模式就取视图的（同 iOS 层 nvn_mtl.m tex_by_id 的规则）。
+// 同一块存储上的深度模式贴图与模板模式贴图在同存储共用表里是同一份后端存储，区别只在视图记录。
+static void t_stencil_sample_mode(void) {
+    nvn_be_sub_begin(); res_fresh(); nvn_unimpl_reset(); nvn_be_set_tex_pool_n(8); rp_view_pin_begin();
+    const int ds = NVN_FORMAT_DEPTH24_STENCIL8;
+    tex_t dep = mk_tex(8101, 0, ds, 16, 16, 1, 0);                    // 深度缓冲本体：深度模式
+    tex_t stn = mk_tex(8102, 0, ds, 16, 16, 1, 0); stn.stencil = 1;   // 同池同偏移同描述的第二个对象：建贴图时设了模板模式
+    nvn_be_reg_tex(1, &dep, NULL); nvn_be_reg_tex(2, &stn, NULL);
+    int c0 = g_tex_creates;
+    nvn_gpu_view vd = rp_view_by_id(1, &g_fake_cmd, NULL), vs = rp_view_by_id(2, &g_fake_cmd, NULL);
+    CHECK(vd && vs && vd != vs && vd->of == vs->of && g_tex_creates - c0 == 1);   // 一份后端存储、两个视图
+    CHECK(!vd->has_v);                                                           // 深度模式：不带视图记录，后端取深度面
+    CHECK(vs->has_v && vs->v.set_dsmode && vs->v.dsmode == NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL);   // 模板模式：记录带模板
+    // 模板模式的贴图是存储的第一个使用者：存储照常建，建存储时不带模板标志（取哪个面由视图决定）
+    tex_t first = mk_tex(8103, 0x4000, ds, 16, 16, 1, 0); first.stencil = 1; nvn_be_reg_tex(3, &first, NULL);
+    nvn_gpu_view vf = rp_view_by_id(3, &g_fake_cmd, NULL);
+    CHECK(vf && vf->of != vs->of && vf->of->d.stencil_view == 0 && vf->has_v && vf->v.set_dsmode && vf->v.dsmode == NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL);
+    // 视图自己设了模式：取视图的（贴图是模板模式、视图设深度 → 深度；贴图是深度模式、视图设模板 → 模板）
+    view_t vdep = {0}; vdep.set_dsmode = 1; vdep.dsmode = NVN_TEXTURE_DEPTH_STENCIL_MODE_DEPTH;
+    view_t vstn = {0}; vstn.set_dsmode = 1; vstn.dsmode = NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL;
+    tex_t sd = mk_tex(8104, 0x8000, ds, 16, 16, 1, 0); sd.stencil = 1; nvn_be_reg_tex(4, &sd, &vdep);
+    tex_t ds2 = mk_tex(8105, 0xC000, ds, 16, 16, 1, 0); nvn_be_reg_tex(5, &ds2, &vstn);
+    nvn_gpu_view v4 = rp_view_by_id(4, &g_fake_cmd, NULL), v5 = rp_view_by_id(5, &g_fake_cmd, NULL);
+    CHECK(v4 && v4->has_v && v4->v.set_dsmode && v4->v.dsmode == NVN_TEXTURE_DEPTH_STENCIL_MODE_DEPTH);
+    CHECK(v5 && v5->has_v && v5->v.set_dsmode && v5->v.dsmode == NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL);
+    // 视图记录里别的设定（只取第 0 级）原样保留，只补模式
+    view_t lv = {0}; lv.set_levels = 1; lv.base_level = 0; lv.nlevels = 1;
+    tex_t sl = mk_tex(8106, 0x10000, ds, 16, 16, 1, 0); sl.stencil = 1; nvn_be_reg_tex(6, &sl, &lv);
+    nvn_gpu_view v6 = rp_view_by_id(6, &g_fake_cmd, NULL);
+    CHECK(v6 && v6->has_v && v6->v.set_levels && v6->v.nlevels == 1 && v6->v.set_dsmode && v6->v.dsmode == NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL);
+    // 声明目标与贴图不同、要改写视图的路径（12 层二维数组按二维读）：模板模式照样带上
+    tex_t arr = mk_tex(8107, 0x14000, ds, 4, 4, 1, 0); arr.stencil = 1;
+    arr.d.target = NVN_TEXTURE_TARGET_2D_ARRAY; arr.d.depth = 12; nvn_tex_layout(&arr.d, &arr.L); nvn_be_reg_tex(7, &arr, NULL);
+    CHECK(rp_view_by_id_decl(7, NVN_TEXTURE_TARGET_2D + 1, 0, 0, &g_fake_cmd, NULL) != NULL);
+    CHECK(g_vw_last_has && g_vw_last.set_target && g_vw_last.target == NVN_TEXTURE_TARGET_2D && g_vw_last.set_layers && g_vw_last.nlayers == 1 &&
+          g_vw_last.set_dsmode && g_vw_last.dsmode == NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL);
+    // 描述符数组元素：模板的数值型是整数（uint），进了声明成浮点的数组按「数值型不符」处理；声明成 uint 的拿登记的
+    uint8_t dtt = NVN_TEXTURE_TARGET_2D + 1;
+    nvn_gpu_view z = rp_view_by_id_decl(2, dtt, 0, 1, &g_fake_cmd, NULL);
+    CHECK(z && z->of->d.d.width == 1 && z->of->d.d.height == 1 && nvn_unimpl_count("tex", "sampled_array_numeric_mismatch") == 1);
+    CHECK(rp_view_by_id_decl(2, dtt, 1, 1, &g_fake_cmd, NULL) == vs && nvn_unimpl_count("tex", "sampled_array_numeric_mismatch") == 1);
+    // 负对照：同一块存储上深度模式的贴图声明成浮点，拿登记的、不记账；颜色贴图不带视图记录
+    CHECK(rp_view_by_id_decl(1, dtt, 0, 1, &g_fake_cmd, NULL) == vd && nvn_unimpl_count("tex", "sampled_array_numeric_mismatch") == 1);
+    tex_t col = mk_tex(8108, 0x18000, NVN_FORMAT_RGBA8, 4, 4, 1, 0); nvn_be_reg_tex(0, &col, NULL);
+    nvn_gpu_view vc = rp_view_by_id(0, &g_fake_cmd, NULL);
+    CHECK(vc && !vc->has_v);
+    rp_view_pin_end(); nvn_be_sub_commit(); fake_complete(NVN_GPU_DONE_OK); res_fresh();
+}
+
 static void t_buf_mirror_fail_once(void) {   // 池镜像建不出来：同一个池只尝试一次，之后直接按未接返回；池释放再登记会重试
     nvn_be_sub_begin();
     nvn_be_shutdown_session(); nvn_unimpl_reset(); g_pg_tracked = 1; g_nbw = 0;
@@ -2704,6 +2768,88 @@ static void t_pass_clear_fold(void) {   // 整屏清除不单独编码：折进�
 static int pd_zero_clear(const nvn_gpu_pass_desc *d) { static const nvn_gpu_pass_desc z; return d->color[0].load == NVN_GPU_LOAD_CLEAR && !memcmp(&d->color[0].clear, &z.color[0].clear, sizeof z.color[0].clear); }   // 刚建的目标：载入时清成零（不是折进来的清除值）
 // 刚建的单级单层颜色目标：初始的全零不在 CPU 上整张上传，由第一个通道载入时清零；之后的通道照常载入。
 // 多级的不行（一个附件视图盖不住整张图）：照旧逐级填零。已有整屏清除的：按清除值清，不被零盖掉。
+// DrawTexture（#1452，rp_draw_tex.c）：期望值都按 NVN 语义手算（iOS nvn_mtl.m draw_tex / Ryujinx HelperShader.DrawTexture），不跑被测实现。
+//   负对照：后端没置 NVN_GPU_CAP_DRAW_TEX 时照旧记「未接 op OP_DRAW_TEX」、一笔不画、不开通道；同一段命令置位后才画。
+static void put_draw_tex(stream *s, int tid, int sid, float x0, float y0, float x1, float y1, float s0, float t0, float s1, float t1) {
+    p_draw_tex *d = put(s, OP_DRAW_TEX, sizeof *d); d->handle = (uint64_t)tid | (uint64_t)sid << 20;
+    d->dst[0] = x0; d->dst[1] = y0; d->dst[2] = x1; d->dst[3] = y1; d->src[0] = s0; d->src[1] = t0; d->src[2] = s1; d->src[3] = t1;
+}
+static void put_state(stream *s, int kind, const void *v, size_t n) { p_bind_state *b = put(s, OP_BIND_STATE, sizeof *b); b->kind = kind; memcpy(b->bytes, v, n); }
+static void t_draw_tex(void) {
+    tex_t rt = mk_tex(71, 0, NVN_FORMAT_RGBA8, 64, 32, 1, 0), src = mk_tex(72, 0x4000, NVN_FORMAT_RGBA8, 8, 4, 1, 0);
+    tex_t isrc = mk_tex(73, 0x8000, NVN_FORMAT_R32UI, 8, 4, 1, 0), irt = mk_tex(74, 0xC000, NVN_FORMAT_RGBA8UI, 16, 16, 1, 0);
+    samp_par sp; memset(&sp, 0, sizeof sp);
+#define DT_FRESH() do { pass_fresh(); g_ndt = 0; rp_state_reset(); nvn_be_tex_init(&src); nvn_be_tex_init(&isrc); \
+        nvn_be_set_tex_pool_n(16); nvn_be_reg_tex(7, &src, NULL); nvn_be_reg_tex(8, &isrc, NULL); nvn_be_reg_tex(9, &rt, NULL); nvn_be_reg_samp(3, &sp); } while (0)
+    g_caps_extra = 0; DT_FRESH();
+    // ① 负对照：没有能力位
+    { stream a = {0}; put_set_rt(&a, &rt, NULL); put_draw_tex(&a, 7, 3, 10, 20, 42, 4, 0, 0, 8, 4); end(&a);
+      submit1(&a); fake_complete(NVN_GPU_DONE_OK);
+      CHECK(g_ndt == 0 && g_npd == 0 && nvn_unimpl_count("op", "OP_DRAW_TEX") == 1 && nvn_unimpl_kinds() == 1); }
+    // ② 有能力位：同一段命令画一笔。目的 (10,20)→(42,4) 上下反向：视口 = 10,4 32x16，源 v 端点交换；源矩形按 8x4 归一化
+    g_caps_extra = NVN_GPU_CAP_DRAW_TEX; DT_FRESH();
+    { stream a = {0}; put_set_rt(&a, &rt, NULL);
+      p_scissor *sc = put(&a, OP_SCISSOR, sizeof *sc); sc->x = 5; sc->y = 6; sc->w = 100; sc->h = 100;   // 夹到 64x32：5,6 59x26
+      put_draw_tex(&a, 7, 3, 10, 20, 42, 4, 2, 1, 6, 3); end(&a);
+      submit1(&a); fake_complete(NVN_GPU_DONE_OK); }
+    CHECK(g_ndt == 1 && nvn_unimpl_kinds() == 0);
+    if (g_ndt == 1) {
+        const nvn_gpu_draw_tex_desc *d = &g_dt[0].d;
+        CHECK(g_dt[0].in_pass == 1 && g_dt[0].npd == 1 && g_pd[0].ncolor >= 1 && g_pd[0].color[0].view != NULL);   // 在开着的通道里、颜色 0 挂着目标
+        CHECK(d->dst[0] == 10 && d->dst[1] == 4 && d->dst[2] == 32 && d->dst[3] == 16);
+        CHECK(d->uv[0] == 0.25f && d->uv[2] == 0.75f && d->uv[1] == 0.75f && d->uv[3] == 0.25f);   // u 2/8→6/8；v 1/4→3/4 交换成 3/4→1/4
+        CHECK(d->has_sc == 1 && d->sc[0] == 5 && d->sc[1] == 6 && d->sc[2] == 59 && d->sc[3] == 26);
+        CHECK(d->src != NULL && d->samp != NULL && d->color_mask == 0xf && d->blend_en == 0);   // NVN 缺省：四通道全写、不混合
+        CHECK(d->origin_ll == (uint8_t)(rp_origin_lower_left() != 0));
+    }
+    CHECK(rp_pso_dirty == 1);   // 后端换了内置管线：下一笔绘制前全部重发
+    // ③ 混合与写掩码照游戏当前状态，只取 color(0) 那一份
+    DT_FRESH();
+    { stream a = {0}; put_set_rt(&a, &rt, NULL);
+      color_st cs; memset(&cs, 0, sizeof cs); cs.blend_en = 1; cs.logic_op = NVN_LOGIC_OP_COPY; put_state(&a, 1, &cs, sizeof cs);
+      chmask_st cm = {0x5u | 0xf0u}; put_state(&a, 2, &cm, sizeof cm);   // color(0) 只写 r、b；color(1) 的位不进
+      blend_st bs; memset(&bs, 0, sizeof bs); bs.target = 0; bs.src_rgb = NVN_BLEND_FUNC_SRC_ALPHA; bs.dst_rgb = NVN_BLEND_FUNC_ONE_MINUS_SRC_ALPHA; bs.src_a = NVN_BLEND_FUNC_ONE; bs.dst_a = NVN_BLEND_FUNC_ZERO;
+      bs.eq_rgb = NVN_BLEND_EQUATION_ADD; bs.eq_a = NVN_BLEND_EQUATION_ADD; put_state(&a, 0, &bs, sizeof bs);
+      p_blend_color *bc = put(&a, OP_BLEND_COLOR, sizeof *bc); bc->rgba[2] = 0.5f;
+      put_draw_tex(&a, 7, 3, 0, 0, 8, 4, 0, 0, 8, 4); end(&a);
+      submit1(&a); fake_complete(NVN_GPU_DONE_OK); }
+    CHECK(g_ndt == 1 && nvn_unimpl_kinds() == 0);
+    if (g_ndt == 1) {
+        const nvn_gpu_draw_tex_desc *d = &g_dt[0].d;
+        CHECK(d->color_mask == 0x5 && d->blend_en == 1 && d->blend.src_rgb == NVN_BLEND_FUNC_SRC_ALPHA && d->blend.dst_rgb == NVN_BLEND_FUNC_ONE_MINUS_SRC_ALPHA);
+        CHECK(d->blend_color[2] == 0.5f && d->has_sc == 0);
+        CHECK(d->dst[0] == 0 && d->dst[2] == 8 && d->uv[0] == 0 && d->uv[1] == 0 && d->uv[2] == 1 && d->uv[3] == 1);
+    }
+    // ④ 各种拒绝：都具名记账、一笔不画；空矩形 / 写掩码为 0 什么都不画也不算未接
+    struct { const char *name; int tid; int rt; int kind; } rj[] = {
+        {"source_format", 8, 0, 0},        // 整数源
+        {"texture_unregistered", 11, 0, 0},
+        {"target_integer", 7, 1, 0},       // 整数目标
+        {"source_is_target", 9, 0, 0},     // 源就是当前目标（反馈）
+        {"logic_op", 7, 0, 1},
+        {"dual_source_blend", 7, 0, 2},
+        {NULL, 7, 0, 3},                   // 空矩形
+        {NULL, 7, 0, 4},                   // color(0) 写掩码为 0
+    };
+    for (size_t i = 0; i < sizeof rj / sizeof rj[0]; i++) {
+        DT_FRESH();
+        stream a = {0}; put_set_rt(&a, rj[i].rt ? &irt : &rt, NULL);
+        if (rj[i].kind == 1) { color_st cs; memset(&cs, 0, sizeof cs); cs.logic_op = NVN_LOGIC_OP_XOR; put_state(&a, 1, &cs, sizeof cs); }
+        if (rj[i].kind == 2) { color_st cs; memset(&cs, 0, sizeof cs); cs.blend_en = 1; cs.logic_op = NVN_LOGIC_OP_COPY; put_state(&a, 1, &cs, sizeof cs);
+                               blend_st bs; memset(&bs, 0, sizeof bs); bs.src_rgb = 0x10; bs.dst_rgb = NVN_BLEND_FUNC_ZERO; bs.src_a = NVN_BLEND_FUNC_ONE; bs.dst_a = NVN_BLEND_FUNC_ZERO;
+                               bs.eq_rgb = bs.eq_a = NVN_BLEND_EQUATION_ADD; put_state(&a, 0, &bs, sizeof bs); }
+        if (rj[i].kind == 4) { chmask_st cm = {0xf0u}; put_state(&a, 2, &cm, sizeof cm); }
+        if (rj[i].kind == 3) put_draw_tex(&a, rj[i].tid, 3, 4, 4, 4, 9, 0, 0, 8, 4);
+        else put_draw_tex(&a, rj[i].tid, 3, 0, 0, 8, 4, 0, 0, 8, 4);
+        end(&a); submit1(&a); fake_complete(NVN_GPU_DONE_OK);
+        CHECK(g_ndt == 0);
+        if (rj[i].name) CHECK(nvn_unimpl_count("draw_tex", rj[i].name) == 1 && nvn_unimpl_kinds() == 1);
+        else CHECK(nvn_unimpl_kinds() == 0);
+    }
+    g_caps_extra = 0; pass_fresh(); rp_state_reset();
+#undef DT_FRESH
+}
+
 static void t_pass_fresh_zero(void) {
     pass_fresh();
     tex_t a = mk_tex(64, 0, NVN_FORMAT_RGBA8, 16, 16, 1, 0);
@@ -3254,6 +3400,26 @@ static void t_fmt_filter_blend(void) {
     CHECK(rp_samp_for_tex(3, 7) == NULL);  // 最近点采样器分配失败，不能交原来的线性采样器
     g_samp_fail_nearest = 0; g_caps_nofilter = g_caps_noblend = ~0u;
     pass_fresh();
+}
+
+// 图形片元采样（真机出事的那条路）：库版声明二维、实绑三维 → 标坏换现编版同一笔画出去，片元绑的是这张贴图，不记「类型不符」
+static void t_draw_tex_lib_fallback(void) {
+    pass_fresh(); g_resolve_rc = g_cresolve_rc = 0; g_gresolve_next = NULL; g_lib_reject_calls = 0;
+    int g0 = g_gdraws; uint64_t mm0 = nvn_unimpl_count("tex", "decl_type_mismatch");
+    tex_t a = mk_tex(673, 0, NVN_FORMAT_RGBA8, 16, 16, 4, 0); a.d.target = NVN_TEXTURE_TARGET_3D;
+    samp_par sp; memset(&sp, 0, sizeof sp); nvn_be_reg_tex(7, &a, NULL); nvn_be_reg_samp(3, &sp);
+    stream s = {0}; q_env(&s);
+    g_fprog.nent[1] = 1; g_fprog.ent[1][0].cls = NVN_GPU_RES_TEX_SAMP; g_fprog.ent[1][0].src_kind = NVN_RB_TEX; g_fprog.ent[1][0].src_reg = 5;
+    g_fprog.dtt[1][0] = NVN_TEXTURE_TARGET_2D + 1; g_fprog.lib_sourced = 1;                    // 库版声明二维
+    memcpy(&g_gprog2, &g_fprog, sizeof g_fprog); g_gprog2.lib_sourced = 0; g_gprog2.dtt[1][0] = NVN_TEXTURE_TARGET_3D + 1;   // 现编版声明三维
+    p_bind_handles *bh = put(&s, OP_BIND_TEX, sizeof *bh); bh->stage = 1; bh->first = 5; bh->n = 1; bh->h[0] = 7 | 3 << 20;
+    q_draw(&s); end(&s);
+    submit1(&s); fake_complete(NVN_GPU_DONE_OK);
+    CHECK(g_lib_reject_calls == 1 && g_fprog.lib_bad && g_gdraws == g0 + 1);
+    CHECK(g_nfb[1] == 1 && g_fb[1][0].u.ts.view && ((const struct nvn_gpu_view_s *)g_fb[1][0].u.ts.view)->of->d.d.target == NVN_TEXTURE_TARGET_3D &&
+          ((const struct nvn_gpu_view_s *)g_fb[1][0].u.ts.view)->of->d.d.width == 16);
+    CHECK(nvn_unimpl_count("tex", "decl_type_mismatch") == mm0);
+    g_gresolve_next = NULL; g_lib_reject_calls = 0; g_fprog.lib_sourced = 0; g_fprog.lib_bad = 0; pass_fresh();
 }
 
 static void t_pass_clear_park_read(void) {   // 被读之前必须落地（正确性红线）：清 A 后把 A 当采样贴图用，绘制路径先落地再开通道
@@ -5094,6 +5260,34 @@ static void t_compute_image_lib_fallback(void) {
     nvn_be_sub_commit(); fake_complete(NVN_GPU_DONE_OK);
     g_cresolve_next = NULL; g_lib_reject_calls = 0;
     memset(g_caps_stor, 0, sizeof g_caps_stor); rp_S.img[5][2] = 0; pass_fresh();
+}
+
+// 出库版采样贴图声明与实绑桥接不了：出包预编库按苹果端约定翻译（缺类型答案时一维取数译成二维行读），声明不随这一刻绑的贴图变。
+//   库版声明二维、实绑三维 → 身份标坏、换现编版（声明三维）重绑，同一笔派发出去，不绑零贴图、不记「类型不符」；
+//   非出库版同样不符 → 不回退（reject 不被调），照旧绑声明类型的零贴图、记一次「类型不符」（Ryujinx 语义）。
+static void t_compute_tex_lib_fallback(void) {
+    pass_fresh(); res_fresh(); g_arena_used = 0; g_cresolve_rc = 0; g_cresolve_next = NULL; g_lib_reject_calls = 0;
+    tex_t t = mk_tex(672, 0, NVN_FORMAT_RGBA8, 8, 8, 4, 0); t.d.target = NVN_TEXTURE_TARGET_3D;
+    samp_par sp; memset(&sp, 0, sizeof sp);
+    nvn_be_reg_tex(3, &t, NULL); nvn_be_reg_samp(0, &sp); nvn_be_set_tex_pool_n(16);
+    memset(&g_cprog, 0, sizeof g_cprog); g_cprog.is_compute = 1; g_cprog.sh[0] = &g_fsh[0]; g_cprog.nent[0] = 1; g_cprog.lib_sourced = 1;
+    nvn_gpu_layout_ent *e = &g_cprog.ent[0][0];
+    e->cls = NVN_GPU_RES_TEX_SAMP; e->src_kind = NVN_RB_TEX; e->src_reg = 2; e->src_reg2 = UINT16_MAX; e->count = 1; e->access = NVN_GPU_ACC_R;
+    g_cprog.dtt[0][0] = NVN_TEXTURE_TARGET_2D + 1;                                              // 库版声明二维
+    memcpy(&g_cprog2, &g_cprog, sizeof g_cprog); g_cprog2.lib_sourced = 0; g_cprog2.dtt[0][0] = NVN_TEXTURE_TARGET_3D + 1;   // 现编版按事实声明三维
+    rp_S.tex[5][2] = 3;
+    p_dispatch dp = {.x = 1, .y = 1, .z = 1};
+    int n = g_ndisp; uint64_t mm0 = nvn_unimpl_count("tex", "decl_type_mismatch");
+    nvn_be_sub_begin(); rp_dispatch(&g_fake_cmd, &dp, NULL);
+    CHECK(g_lib_reject_calls == 1 && g_cprog.lib_bad && g_ndisp == n + 1);                     // 库版不符 → 换现编版同一笔派发
+    CHECK(g_ncb == 1 && g_cb[0].u.ts.view && ((const struct nvn_gpu_view_s *)g_cb[0].u.ts.view)->of->d.d.target == NVN_TEXTURE_TARGET_3D && ((const struct nvn_gpu_view_s *)g_cb[0].u.ts.view)->of->d.d.width == 8);   // 绑的是这张 8 宽的三维贴图，不是 1x1 零贴图
+    CHECK(nvn_unimpl_count("tex", "decl_type_mismatch") == mm0);                               // 回退了就不是「类型不符」
+    // 非出库版同样不符：不回退，绑零贴图照派发，记一次「类型不符」
+    g_cprog2.dtt[0][0] = NVN_TEXTURE_TARGET_2D + 1; g_lib_reject_calls = 0; n = g_ndisp;
+    rp_dispatch(&g_fake_cmd, &dp, NULL);
+    CHECK(g_lib_reject_calls == 0 && g_ndisp == n + 1 && nvn_unimpl_count("tex", "decl_type_mismatch") == mm0 + 1);
+    nvn_be_sub_commit(); fake_complete(NVN_GPU_DONE_OK);
+    g_cresolve_next = NULL; g_lib_reject_calls = 0; rp_S.tex[5][2] = 0; pass_fresh();
 }
 
 // #659：计算阶段独立图像槽，读写属性决定 GPU 所有权；不涉及间接参数同步。
@@ -7196,6 +7390,7 @@ int main(int argc, char **argv) {
     t_decl_view();
     t_decl_view_1d();
     t_decl_array_numeric();
+    t_stencil_sample_mode();
 #ifdef S2A_GPU_LAND_TEST
     t_gpu_land_concurrent();
     t_gpu_land_destroy();
@@ -7214,6 +7409,7 @@ int main(int argc, char **argv) {
     t_pass_shared_pending_clear();
     t_pass_shared_explicit_rect();
     t_pass_clear_fold();
+    t_draw_tex();
     t_pass_depth_shadow();
     t_pass_no_attachment();
     t_pass_bc_shadow();
@@ -7249,6 +7445,8 @@ int main(int argc, char **argv) {
     t_compute_image();
     t_compute_image_class();
     t_compute_image_lib_fallback();
+    t_compute_tex_lib_fallback();
+    t_draw_tex_lib_fallback();
     t_graphics_image();
     t_compute_tex_from_image();
     t_drv2_table();

@@ -106,6 +106,53 @@ static void test_dual_nvpkg_alias_split(void) {
     API(nvnTextureFinalize)(&tb);
 }
 
+static void test_dual_nvpkg_ft_written(void) {
+    enum { N = 4, READ_OFF = 1 << 20 };
+    size_t off = 5 << 20;
+    NVNtextureBuilder b; API(nvnTextureBuilderSetDefaults)(&b); API(nvnTextureBuilderSetDevice)(&b, &device);
+    API(nvnTextureBuilderSetTarget)(&b, NVN_TEXTURE_TARGET_3D);
+    API(nvnTextureBuilderSetSize3D)(&b, N, N, N);
+    API(nvnTextureBuilderSetLevels)(&b, 1);
+    API(nvnTextureBuilderSetFormat)(&b, NVN_FORMAT_RGBA16F);
+    API(nvnTextureBuilderSetFlags)(&b, 0);
+    API(nvnTextureBuilderSetStorage)(&b, &pool, (ptrdiff_t)off);
+
+    NVNtexture ta = {0}, tb = {0};
+    REQUIRE(API(nvnTextureInitialize)(&ta, &b));
+    REQUIRE(API(nvnTextureInitialize)(&tb, &b));
+    // 初始化之后 CPU 写池页（触发 nvn_ft_written 路径，而非 tex_cpu_content）
+    uint16_t *hp = (uint16_t *)(memory + off);
+    for (size_t i = 0; i < (64u << 10) / 2; i++) hp[i] = 0x3C00;
+
+    nvn_be_sub_begin();
+    id<MTLTexture> ma = tex_mtl((const tex_t *)&ta);
+    id<MTLTexture> mb = tex_mtl((const tex_t *)&tb);
+    uint64_t f = nvn_be_sub_commit(); REQUIRE(nvn_be_wait(f, 10000000000ull));
+    REQUIRE(ma != nil && mb != nil);
+    REQUIRE([tex_get(((const tex_t *)&ta)->serial) isKindOfClass:[NvPkg class]]);
+    REQUIRE([tex_get(((const tex_t *)&tb)->serial) isKindOfClass:[NvPkg class]]);
+
+    static const float clr[4] = {0.25f, 0.5f, 0.75f, 1.0f};
+    NVNcopyRegion whole = {0, 0, 0, N, N, N};
+    begin_cmd();
+    API(nvnCommandBufferClearTexture)(&commands, &ta, NULL, &whole, clr, 15);
+    submit_cmd();
+
+    memset(memory + READ_OFF, 0, N * N * N * 8);
+    NVNbufferAddress dst = API(nvnMemoryPoolGetBufferAddress)(&pool) + READ_OFF;
+    begin_cmd();
+    API(nvnCommandBufferCopyTextureToBuffer)(&commands, &tb, NULL, &whole, dst, 0);
+    submit_cmd();
+
+    const uint16_t *out = (const uint16_t *)(memory + READ_OFF);
+    CHECK(out[0] == 0x3400 && out[1] == 0x3800 && out[2] == 0x3A00 && out[3] == 0x3C00,
+          "④ 同存储双 NvPkg（nvn_ft_written）：GPU 写 ta 后 tb 读到新色 expected=(0x3400,0x3800,0x3a00,0x3c00) actual=(%#x,%#x,%#x,%#x)",
+          out[0], out[1], out[2], out[3]);
+
+    API(nvnTextureFinalize)(&ta);
+    API(nvnTextureFinalize)(&tb);
+}
+
 static void test_tbuf_int_as_float_fit(void) {
     size_t off = 4 << 20;
     NVNtextureBuilder b; API(nvnTextureBuilderSetDefaults)(&b); API(nvnTextureBuilderSetDevice)(&b, &device);
@@ -132,6 +179,116 @@ static void test_tbuf_int_as_float_fit(void) {
     API(nvnTextureFinalize)(&t);
 }
 
+static void test_dual_nvpkg_ft_flush(void) {
+    // ⑤ ft_flush / nvn_ft_poll 经 nvn_be_tex_cpu_inferred 标出的 NvPkg，在同存储另一张共享贴图被 GPU 写后并入共享贴图
+    const int W = 64, H = 64;
+    size_t off = 5 << 20, src_off = (5 << 20) + 0x40000;
+    NVNtextureBuilder b; API(nvnTextureBuilderSetDefaults)(&b); API(nvnTextureBuilderSetDevice)(&b, &device);
+    API(nvnTextureBuilderSetTarget)(&b, NVN_TEXTURE_TARGET_2D);
+    API(nvnTextureBuilderSetSize2D)(&b, W, H);
+    API(nvnTextureBuilderSetLevels)(&b, 1);
+    API(nvnTextureBuilderSetFormat)(&b, NVN_FORMAT_RGBA_DXT1);
+    API(nvnTextureBuilderSetStorage)(&b, &pool, (ptrdiff_t)off);
+    size_t sz = API(nvnTextureBuilderGetStorageSize)(&b);
+    memset(memory + off, 0, sz);
+
+    NVNtexture ta = {0}, tb = {0};
+    REQUIRE(API(nvnTextureInitialize)(&ta, &b));
+    API(nvnMemoryPoolFlushMappedRange)(&pool, (ptrdiff_t)off, (ptrdiff_t)sz);   // ft_flush → nvn_be_tex_cpu_inferred
+
+    nvn_be_sub_begin();
+    id<MTLTexture> ma = tex_mtl((const tex_t *)&ta);
+    uint64_t f = nvn_be_sub_commit(); REQUIRE(nvn_be_wait(f, 10000000000ull));
+    REQUIRE(ma != nil && [tex_get(((const tex_t *)&ta)->serial) isKindOfClass:[NvPkg class]]);
+
+    REQUIRE(API(nvnTextureInitialize)(&tb, &b));
+    const size_t lin_sz = (W / 4) * (H / 4) * 8;
+    memset(memory + src_off, 0x5A, lin_sz);
+    NVNbufferAddress base = API(nvnMemoryPoolGetBufferAddress)(&pool);
+    NVNcopyRegion whole = {0, 0, 0, W, H, 1};
+    begin_cmd();
+    API(nvnCommandBufferCopyBufferToTexture)(&commands, base + src_off, &tb, NULL, &whole, 0);
+    submit_cmd();
+
+    const size_t read_off = 1 << 20;
+    memset(memory + read_off, 0, lin_sz);
+    begin_cmd();
+    API(nvnCommandBufferCopyTextureToBuffer)(&commands, &ta, NULL, &whole, base + read_off, 0);
+    submit_cmd();
+
+    size_t bad = 0;
+    for (size_t i = 0; i < lin_sz; i++) bad += (memory[read_off + i] != 0x5A);
+    CHECK(bad == 0, "⑤ ft_flush 推断的 NvPkg 在同存储 GPU 写后并入共享贴图（bad=%zu/%zu）", bad, lin_sz);
+
+    API(nvnTextureFinalize)(&ta);
+    API(nvnTextureFinalize)(&tb);
+}
+
+static void test_storage_upload_gpw_and_nvpkg_ph(void) {
+    // ⑥a CopyBufferToTexture 后 storage_move 不得提前 gpw_unmark 清掉 GPU 归属
+    const int SIDE = 8;
+    size_t off1 = 6 << 20, off2 = (6 << 20) + 0x20000, src_off = (6 << 20) + 0x40000;
+    NVNtextureBuilder b; API(nvnTextureBuilderSetDefaults)(&b); API(nvnTextureBuilderSetDevice)(&b, &device);
+    API(nvnTextureBuilderSetTarget)(&b, NVN_TEXTURE_TARGET_2D);
+    API(nvnTextureBuilderSetSize2D)(&b, SIDE, SIDE);
+    API(nvnTextureBuilderSetLevels)(&b, 1);
+    API(nvnTextureBuilderSetFormat)(&b, NVN_FORMAT_RGBA8);
+    size_t sz = API(nvnTextureBuilderGetStorageSize)(&b);
+
+    memset(memory + off1, 0, sz);
+    API(nvnTextureBuilderSetStorage)(&b, &pool, (ptrdiff_t)off1);
+    NVNtexture tg = {0}; REQUIRE(API(nvnTextureInitialize)(&tg, &b));
+    memset(memory + src_off, 0x33, SIDE * SIDE * 4);
+    NVNbufferAddress base = API(nvnMemoryPoolGetBufferAddress)(&pool);
+    NVNcopyRegion whole = {0, 0, 0, SIDE, SIDE, 1};
+    // 编码 CopyBufferToTexture 但先不提交 GPU：t->mem 尚未被 move_bytes 写入，gpw_stale 必须仍标记为陈旧
+    nvn_be_sub_begin();
+    p_copy_b2t cb2t = {0};
+    cb2t.src = base + src_off; cb2t.tex = (const tex_t *)&tg; cb2t.r = whole;
+    copy_b2t(&cb2t);
+    uint64_t *runs = NULL, stale_b = 0;
+    int nr = gpw_stale(((const tex_t *)&tg)->mem, ((const tex_t *)&tg)->L.size, &runs, &stale_b);
+    free(runs);
+    uint64_t fg = nvn_be_sub_commit(); REQUIRE(nvn_be_wait(fg, 10000000000ull));
+    CHECK(nr > 0 && stale_b > 0,
+          "⑥a CopyBufferToTexture 编码期（move_bytes 尚未执行）不提前 gpw_unmark（nr=%d stale_b=%llu）", nr, (unsigned long long)stale_b);
+    API(nvnTextureFinalize)(&tg);
+
+    // ⑥b NvPkg 贴图经 CopyBufferToTexture 后，texture_storage_upload 不改写 t->mem 破坏 pk->ph，同页邻居 CPU 写不触发误局部重传
+    memset(memory + off2, 0x11, sz);
+    API(nvnTextureBuilderSetStorage)(&b, &pool, (ptrdiff_t)off2);
+    NVNtexture tp = {0}; REQUIRE(API(nvnTextureInitialize)(&tp, &b));
+    API(nvnMemoryPoolFlushMappedRange)(&pool, (ptrdiff_t)off2, (ptrdiff_t)sz);
+    nvn_be_sub_begin();
+    id<MTLTexture> mp = tex_mtl((const tex_t *)&tp);
+    uint64_t f = nvn_be_sub_commit(); REQUIRE(nvn_be_wait(f, 10000000000ull));
+    REQUIRE(mp != nil && [tex_get(((const tex_t *)&tp)->serial) isKindOfClass:[NvPkg class]]);
+    // 等待后台首传页哈希落地（PH_OK）
+    NvPkg *pk = tex_get(((const tex_t *)&tp)->serial);
+    for (int i = 0; i < 200 && pk->ph && !ph_usable(pk->ph, pk->nph); i++) usleep(1000);
+    REQUIRE(pk->ph && ph_usable(pk->ph, pk->nph));
+
+    memset(memory + src_off, 0x77, SIDE * SIDE * 4);
+    begin_cmd();
+    API(nvnCommandBufferCopyBufferToTexture)(&commands, base + src_off, &tp, NULL, &whole, 0);
+    submit_cmd();
+
+    uint64_t partial_before = g_pkg_partial;
+    memory[off2 + sz + 64] = 0xBB;   // 同 16 KB 宿主页邻居 CPU 写
+    const size_t read_off = 1 << 20;
+    memset(memory + read_off, 0, SIDE * SIDE * 4);
+    begin_cmd();
+    API(nvnCommandBufferCopyTextureToBuffer)(&commands, &tp, NULL, &whole, base + read_off, 0);
+    submit_cmd();
+
+    size_t bad = 0;
+    for (size_t i = 0; i < SIDE * SIDE * 4; i++) bad += (memory[read_off + i] != 0x77);
+    CHECK(g_pkg_partial == partial_before && bad == 0,
+          "⑥b NvPkg CopyBufferToTexture 后同页邻居写不误触发局部重传且纹素保持 0x77（partial +%llu bad=%zu）",
+          (unsigned long long)(g_pkg_partial - partial_before), bad);
+    API(nvnTextureFinalize)(&tp);
+}
+
 int main(void) { @autoreleasepool {
     setvbuf(stdout, NULL, _IOLBF, 0);
     struct sigaction sa = {0}; sa.sa_sigaction = fault; sa.sa_flags = SA_SIGINFO;
@@ -150,7 +307,10 @@ int main(void) { @autoreleasepool {
 
     test_tbuf_shader_write();
     test_dual_nvpkg_alias_split();
+    test_dual_nvpkg_ft_written();
     test_tbuf_int_as_float_fit();
+    test_dual_nvpkg_ft_flush();
+    test_storage_upload_gpw_and_nvpkg_ph();
 
     API(nvnCommandBufferFinalize)(&commands); API(nvnQueueFinalize)(&queue);
     API(nvnMemoryPoolFinalize)(&pool); API(nvnDeviceFinalize)(&device); free(memory);

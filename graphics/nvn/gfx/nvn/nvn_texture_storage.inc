@@ -47,18 +47,6 @@ static int storage_move(const tex_t *t, unsigned lv, unsigned layer, const NVNco
     enc_c_args(e, src.gpuAddress, 0); enc_c_args(e, dst.gpuAddress, 1); enc_c_args(e, params.gpuAddress + off, 2);
     enc_c_dispatch(e, MTLSizeMake((p.bytes + 255) / 256, p.rows, p.slices), MTLSizeMake(16, 1, 1));
     enc_c_end(e); args_dirty_all();
-    if (!unpack && atomic_load_explicit(&g_gpw_nblk, memory_order_relaxed)) {
-        // Only the GOBs actually updated become current. This also handles
-        // partial depth slices, where tex_rect_gobs conservatively takes a level.
-        pthread_mutex_lock(&g_gpw_mu);
-        for (uint32_t z = p.z; z < p.z + p.slices; z++)
-            for (uint32_t y = p.y / 8; y <= (p.y + p.rows - 1) / 8; y++)
-                for (uint32_t x = p.x / 64; x <= (p.x + p.bytes - 1) / 64; x++) {
-                    uint64_t at = p.base + nvn_bl_offset(x * 64, y * 8, z, p.gx * 64, rows, th, td);
-                    gpw_unmark(((uint64_t)t->mem + at) >> 9);
-                }
-        pthread_mutex_unlock(&g_gpw_mu);
-    }
     return 1;
 }
 // Returns NULL when the pool storage now holds the upload (or needs nothing), else why it could not be updated (the caller's red line names it).
@@ -68,6 +56,8 @@ static const char *texture_storage_upload(const p_copy_b2t *c, id<MTLBuffer> sou
     id<MTLBuffer> src = source;
     const tex_t *t = c->tex;
     if (t->d.target == NVN_TEXTURE_TARGET_BUFFER || (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET))) return NULL;
+    // An NvPkg tracks CPU writes by comparing per-page hashes (pk->ph) against t->mem; mutating t->mem from the GPU breaks those hashes and turns neighbor CPU writes in the same host page into false partial re-uploads.
+    if ([tex_get(t->serial) isKindOfClass:[NvPkg class]]) return NULL;
     if (t->has_layout) return "packaged layout";
     if (t->d.samples > 1) return "multisampled";
     if (!t->pool) return "no pool";

@@ -140,6 +140,19 @@ namespace Ryujinx.HLE.Loaders.Processes
             if (resultCode.IsFailure())
             {
                 Logger.Error?.Print(LogClass.Application, $"Error calling EnsureApplicationSaveData. Result code {resultCode.ToStringWithName()}");
+                return resultCode;
+            }
+
+            if (S2AHooks.CreateLocalPlayer == null) return resultCode;
+            foreach (var profile in device.System.AccountManager.GetAllUsers())
+            {
+                if (profile.UserId == device.System.AccountManager.LastOpenedUser.UserId) continue;
+                Uid otherUid = profile.UserId.ToLibHacUid();
+                LibHac.Result otherRes = device.System.LibHacHorizonManager.RyujinxClient.Fs.EnsureApplicationSaveData(out _, applicationId, in control, in otherUid);
+                if (otherRes.IsFailure())
+                {
+                    Logger.Warning?.Print(LogClass.Application, $"Error calling EnsureApplicationSaveData for secondary user {profile.UserId}. Result code {otherRes.ToStringWithName()}");
+                }
             }
 
             return resultCode;

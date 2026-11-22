@@ -1044,7 +1044,7 @@ def backup_saves(c, ident, bid, gid, docs="Documents"):
     if not files:
         return None
     dest = layout.path(c, gid, "save_backup", time.strftime("%Y%m%d-%H%M%S"))
-    for rel in files:
+    for index, rel in enumerate(files, 1):
         try:
             (dest / rel).parent.mkdir(parents=True, exist_ok=True)
         except OSError as e:
@@ -1056,6 +1056,8 @@ def backup_saves(c, ident, bid, gid, docs="Documents"):
         if rc or not (dest / rel).is_file():
             return save_backup_stuck(c, gid, f"拉存档失败（{rel}）：" + (err.splitlines()[-1] if err else f"devicectl 退出 {rc}"),  # 非玩家句
                                      nospace=rc == DEVICECTL_NOSPACE)
+        if getattr(c, "stage_key", None) == "phone_save_backup":
+            c.emit("progress", f"{gid} · {index}/{len(files)}", done=index, total=len(files), unit="files")
     return dest
 
 
@@ -1903,6 +1905,11 @@ def win_udid(c, W):
     （11-13 维护者：插着一台手机就别说识别不了），多台让玩家选。
     设备服务列表会瞬时空（插拔 / 同网切数据线），最多读 3 次、间隔 3 秒再判"""
     want = (c.r.get("device") or "").strip()
+    # D-C2DX：启动器记的设备号与设备服务列出的 SerialNumber 写法可能不同（带不带短横、大小写），原样比对永远对不上，只连着一台也报「没列出来」。
+    #   按 install_win.udid_key 的同一写法比，返回设备服务里的那种写法（后面 plumesign / s2a-devpush 都按它找设备）
+    key = W.udid_key if hasattr(W, "udid_key") else (lambda u: str(u or "").replace("-", "").upper())
+    def match(udids):
+        return next((u for u in udids if want and key(u) == key(want)), None)
     udids = []
     for k in range(LINK_READS):
         try:
@@ -1910,12 +1917,12 @@ def win_udid(c, W):
         except OSError as e:
             raise Failure(f"连不上本机苹果设备服务（{e}）：从 Microsoft Store 装「Apple Devices」后重试。", code="device_pairing_required") from e
         udids = list(dict.fromkeys(u for u, _, _ in links if u))
-        if (want and want in udids) or (not want and udids):
+        if (want and match(udids)) or (not want and udids):
             break
         if k + 1 < LINK_READS:
             time.sleep(LINK_RETRY_WAIT)
-    if want and want in udids:
-        return want
+    if want and match(udids):
+        return match(udids)
     if not want and len(udids) == 1:
         return udids[0]
     if not udids:
@@ -2219,6 +2226,8 @@ class WinPhone:
             if had and self.c.r.get("widget") is False:
                 ipa, had = plain, False
             ns = argparse.Namespace(ipa=str(ipa), udid=self.udid, name=None, plumesign=b.get("plumesign"), log=str(log), bundle=bid or self.bundle_for_signing())
+            if getattr(self, "install_signed_elsewhere", None):   # Mac：手机只在同一 Wi-Fi、设备服务看不到时签好交 devicectl 装（PlumeMacPhone）
+                ns.fallback_install = self.install_signed_elsewhere
             try:
                 installed = self.W.install_app(ns, say=self.say)
             except self.W.Fail as e:
@@ -2376,6 +2385,24 @@ class PlumeMacPhone(MacPhone):
         super().__init__(c, team=dict(id=acct["team"], name=acct["teamName"] or acct["account"], free=True), dev=dev, udid=udid)
 
     install = WinPhone.install                       # plumesign 签名装机（含 9401 旧写法、设备已登记、小组件去掉重来）
+
+    def install_signed_elsewhere(self, ipa):
+        """D-WFBG / D-ST8X：手机只连同一 Wi-Fi，devicectl（CoreDevice）看得到、plumesign 走的设备服务（usbmux）看不到；第 1 步认得手机、
+        签名装机那步却报「设备服务里没有要装的那台」。plumesign 只签名（install_win._sign_then_install_elsewhere），签好的包这里经 devicectl 装，
+        同 MacPhone 的装法：开发者通道没连上（4016）等 10 秒再装一次；失败按 devicectl 原文归码（手机不认描述文件 = 这台还没登记过，要插线装一次）"""
+        from diag import devicectl
+        with tempfile.TemporaryDirectory(dir=self.c.private) as t:
+            r = subprocess.run(["/usr/bin/ditto", "-x", "-k", str(ipa), t], capture_output=True, text=True)
+            app = next((p for p in (Path(t) / "Payload").glob("*.app") if p.is_dir()), None)
+            if r.returncode or not app:
+                raise Failure("解不开签好的 iPhone 包：" + (r.stderr.strip()[-200:] or str(ipa)), code="job_failed")  # 非玩家句
+            rc, _, err = devicectl(self.c, "device", "install", "app", "--device", self.dev["id"], str(app), timeout=1800)
+            if rc and classify(err, default="") == "device_tunnel_unavailable":
+                note(self.c, "iPhone 的开发者通道没连上（CoreDevice 4016）：10 秒后再装一次")  # 非玩家句
+                time.sleep(TUNNEL_RETRY_S)
+                rc, _, err = devicectl(self.c, "device", "install", "app", "--device", self.dev["id"], str(app), timeout=1800)
+            if rc:
+                raise Failure("装不上 iPhone：" + (err.strip()[-2000:] or f"devicectl 退出 {rc}（未提供错误详情）"), code=classify(err, default="device_install_failed"))  # 非玩家句
     say = WinPhone.say                               # install 里交给 plumesign 的进度回调（没借它：Mac 免费账号装机一调就 AttributeError）
     bundle_for_signing = WinPhone.bundle_for_signing
 
@@ -3705,10 +3732,19 @@ def install_shell(c, ph, steps=True):
     import ipa as packer
     rec = layout.load_device(c, ph.key)
     before = last_signer(rec)   # 装之前取（换包名时 forget_other_app 会清记录）
-    snapshot_phone_saves(c, ph, list(rec.get("games") or {}))   # 0.6.0：装壳前把手机上各款的存档拉回电脑（同 push_game）
-    if steps: c.begin("组 S2Arm（不带游戏）", 2, 3)
+    # Check the signing decision before doing any backup. Keep the check at sign time too.
+    if isinstance(ph, (WinPhone, PlumeMacPhone)) and not devcert.active(c):
+        tools = ph.W.impactor.bundled(c.r.get("resources")) or {}
+        exe = ph.W.plumesign_path(tools.get("plumesign"))
+        win_cert_gate(c, ph.W, exe)
+    games = list(rec.get("games") or {})
+    stages = 4 if games else 3
+    if games and steps:
+        c.begin("备份手机上各款的存档", 2, stages, key="phone_save_backup")
+    snapshot_phone_saves(c, ph, games)
+    if steps: c.begin("组 S2Arm（不带游戏）", stages - 1, stages)
     ipa, _, sid = packer.assemble_shell(c)
-    if steps: c.begin("签名并装到 iPhone", 3, 3)
+    if steps: c.begin("签名并装到 iPhone", stages, stages)
     ph.install(ipa, [], steps=False)
     forget_other_app(c, ph)
     rec = layout.load_device(c, ph.key)

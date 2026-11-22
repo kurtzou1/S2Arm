@@ -1,0 +1,67 @@
+diff --git a/src/Ryujinx.HLE/HOS/Applets/PlayerSelect/PlayerSelectApplet.cs b/src/Ryujinx.HLE/HOS/Applets/PlayerSelect/PlayerSelectApplet.cs
+index e2ad848c5ed185a8590cf72c441fab2e154194d5..ec43847ad724cf0d15d77bbcb4ae2959d439e969 100644
+--- a/src/Ryujinx.HLE/HOS/Applets/PlayerSelect/PlayerSelectApplet.cs
++++ b/src/Ryujinx.HLE/HOS/Applets/PlayerSelect/PlayerSelectApplet.cs
+@@ -61,14 +61,15 @@ namespace Ryujinx.HLE.HOS.Applets
+ 
+                 return ResultCode.Success;
+             }
++            // S2Arm local players: with the host's player list and a picker UI, the player picks one of the device's users or names a new one
++            // (saved to the list). With no picker UI (unattended runs) fall through to the console-less answers below, which add nothing to the list.
+             var create = S2AHooks.CreateLocalPlayer;
+-            if (create != null && mode is 0 or UiModeUserCreator)
++            if (create != null && mode is (0 or UiModeUserCreator) && _system.Device.UIHandler is Ryujinx.HLE.UI.IAsyncTextInput input)
+             {
+                 var accounts = _system.AccountManager;
+                 var excluded = InvalidUsers(uiSettings);
+                 var candidates = accounts.GetAllUsers().Where(u => !excluded.Contains(u.UserId)).ToArray();
+-                var preferred = candidates.FirstOrDefault(u => u.UserId == accounts.LastOpenedUser.UserId) ?? candidates.FirstOrDefault();
+-                bool createOnly = mode == UiModeUserCreator || candidates.Length == 0 || accounts.GetUserCount() == 1;
++                bool createOnly = mode == UiModeUserCreator || candidates.Length == 0;   // as on the console: the list whenever someone is left to pick
+                 var args = new SoftwareKeyboardUIArgs
+                 {
+                     LocalPlayerNames = createOnly ? Array.Empty<string>() : candidates.Select(u => u.Name).ToArray(),
+@@ -81,13 +82,11 @@ namespace Ryujinx.HLE.HOS.Applets
+                     return !createOnly && int.TryParse(reply, out int row) && row >= 0 && row < candidates.Length
+                         ? candidates[row] : null;
+                 }
+-                if (_system.Device.UIHandler is not Ryujinx.HLE.UI.IAsyncTextInput input ||
+-                    input.BeginTextInput(args, (ok, reply) => Complete(Resolve, ok ? reply : null)) == null)
++                // The reply arrives on the UI thread; creating a player mounts its save, so finish off it
++                if (input.BeginTextInput(args, (ok, reply) => System.Threading.Tasks.Task.Run(() => Complete(Resolve, ok ? reply : null))) != null)
+                 {
+-                    if (createOnly) Complete(create, args.InitialText);
+-                    else Complete(_ => preferred, "");
++                    return ResultCode.Success;
+                 }
+-                return ResultCode.Success;
+             }
+             if (mode == UiModeUserCreator)
+             {
+diff --git a/src/Ryujinx.HLE/HOS/Services/Account/Acc/AccountManager.cs b/src/Ryujinx.HLE/HOS/Services/Account/Acc/AccountManager.cs
+index cbb017ec5d8368a37355be55c43ad723452659fd..61ba05668d2ac522f23374a50ee411cda8ac6ffc 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Account/Acc/AccountManager.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Account/Acc/AccountManager.cs
+@@ -220,7 +220,7 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc
+ 
+         internal int GetUserCount()
+         {
+-            return GetAllUsers().Count();
++            return _profiles.Count;
+         }
+ 
+         internal bool TryGetUser(UserId userId, out UserProfile profile)
+@@ -230,9 +230,12 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc
+ 
+         public IEnumerable<UserProfile> GetAllUsers()
+         {
++            // S2Arm local players: the listed players first, in the host's order, then every other user on this device. Ordering only, never
++            // hiding: users created before the list existed (PlayerN from the user creator) and their saves stay visible to the game.
+             if (_userOrder.Length == 0) return _profiles.Values;
+             return _userOrder.Select(key => _profiles.TryGetValue(key, out var user) ? user : null)
+-                .Where(user => user != null);
++                .Where(user => user != null)
++                .Concat(_profiles.Where(p => !_userOrder.Contains(p.Key)).OrderBy(p => p.Key, StringComparer.Ordinal).Select(p => p.Value));   // fixed order: the dictionary has none
+         }
+ 
+         public void SetUserOrder(IEnumerable<UserId> orderedUsers)

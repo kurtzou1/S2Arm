@@ -129,7 +129,7 @@ struct EnvironmentView: View {
                     .contentShape(Capsule())
                 }
                 .controllerButtonStyle(.plain)
-                .controllerRingRadius(.infinity)
+                .controllerRingRadius(.infinity, outset: active ? LauncherTheme.Focus.creamOutset : 0)
                 .controllerID("settings.tab." + tab.rawValue)
                 .accessibilityIdentifier("settings.tab." + tab.rawValue)
                 .accessibilityAddTraits(active ? .isSelected : [])

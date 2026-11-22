@@ -133,6 +133,12 @@ namespace Ryujinx.HLE
         // directory of the synthesized archive, null when it cannot. Consulted only after the game's own systemdata/<id>/, so real data wins
         public static System.Func<ulong, string> SystemDataFallback;
 
+        // S2Arm multi-user: create and persist a new S2Arm LocalPlayer when an additional controller joins and no unused S2Arm player remains.
+        public static System.Func<string, Ryujinx.HLE.HOS.Services.Account.Acc.UserProfile> CreateLocalPlayer;
+
+        // S2Arm multi-user: record that a user profile was selected/bound in PlayerSelectApplet during this session.
+        public static System.Action<Ryujinx.HLE.HOS.Services.Account.Acc.UserId> UserSelected;
+
         public static string SystemDataDir(ulong id)
         {
             if (SystemDataRoot != null)

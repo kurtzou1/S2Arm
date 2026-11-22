@@ -3456,12 +3456,14 @@ def diagnostics(c):
                     gid = (g.get("id") or "").upper()
                     if not re.fullmatch(r"[0-9A-F]{16}", gid):
                         continue
-                    f = c.library / "temp" / gid / "wire" / gid / "pso_user.tsv"
-                    if f.is_symlink() or not f.is_file() or not 0 < f.stat().st_size <= DIAG_PSO_FILE_LIMIT:
-                        continue
-                    data = f.read_bytes()
-                    if fits(f"pso/{gid}.tsv", packed(data)):
-                        archive.writestr(f"pso/{gid}.tsv", data)
+                    # 同目录的局内用到的着色器（shader_seen.tsv，宿主 hle_nvn.c seen_note：只有键与阶段号）放 pso/<号>.seen.tsv，同一份上限
+                    for name, rel in (("pso_user.tsv", f"pso/{gid}.tsv"), ("shader_seen.tsv", f"pso/{gid}.seen.tsv")):
+                        f = c.library / "temp" / gid / "wire" / gid / name
+                        if f.is_symlink() or not f.is_file() or not 0 < f.stat().st_size <= DIAG_PSO_FILE_LIMIT:
+                            continue
+                        data = f.read_bytes()
+                        if fits(rel, packed(data)):
+                            archive.writestr(rel, data)
                 # 着色器补料（graphics/nvn/host/dsh_salvage.inc）：各款 temp/<号>/wire/<号>/shader_miss/ 里库里没有 / 现编失败的着色器（<键>.ctl / .code + index.tsv），
                 #   每款打成一个 tar 放 shader_miss/<号>.tar（诊断包成员数有上限：tools/diagnostic_report.py MAX_FILES 1000，一款就可能上千个文件）；
                 #   取件按程序号归档进管线种子目录 rt_shaders/，出包编进那款的直连库。只有游戏着色器字节与键，不含个人信息、不过脱敏（index.tsv 的失败原文是翻译器 rc，不含路径）。

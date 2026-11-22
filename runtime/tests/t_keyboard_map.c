@@ -23,6 +23,14 @@ static int count_in(const char *text, const char *needle) {
     for (const char *p = text; (p = strstr(p, needle)) != NULL; p += len) n++;
     return n;
 }
+// 两份键位逐字段相同（不用 memcmp：结构体里有填充字节）
+static int kbd_same(const s2a_input_config *a, const s2a_input_config *b) {
+    for (int i = 0; i < S2A_INPUT_TARGET_COUNT; i++)
+        if (a->keyboard[i].code != b->keyboard[i].code || a->keyboard[i].modifiers != b->keyboard[i].modifiers || a->mouse[i] != b->mouse[i] || a->gamepad[i] != b->gamepad[i]) return 0;
+    for (int i = 0; i < S2A_INPUT_AXIS_COUNT; i++) if (a->axes[i].source != b->axes[i].source || a->axes[i].invert != b->axes[i].invert) return 0;
+    return a->deadzone == b->deadzone && a->sensitivity_x == b->sensitivity_x && a->sensitivity_y == b->sensitivity_y && a->mouse_camera == b->mouse_camera
+        && a->invert_x == b->invert_x && a->invert_y == b->invert_y && a->recenter == b->recenter && a->back_buttons[0] == b->back_buttons[0] && a->back_buttons[1] == b->back_buttons[1];
+}
 // 取函数体：从签名到下一个行首的「}」（找不到返回空串，调用方照常断言即红）
 static char *body_of(const char *text, const char *signature) {
     const char *p = strstr(text, signature), *e = p ? strstr(p, "\n}") : NULL;
@@ -46,7 +54,7 @@ static int mac_code(unsigned usage) {
 static int sticks_are(const int32_t s[4], int32_t a, int32_t b, int32_t c, int32_t d) { return s[0] == a && s[1] == b && s[2] == c && s[3] == d; }
 
 int main(int argc, char **argv) {
-    if (argc != 4) { fprintf(stderr, "用法：t_keyboard_map <front_mac.m> <controller.m> <keyboard.m>\n"); return 2; }
+    if (argc != 5) { fprintf(stderr, "用法：t_keyboard_map <front_mac.m> <controller.m> <keyboard.m> <keyboard_settings.m>\n"); return 2; }
 
     // ① 键码表与 front_mac.m 的 mac_key_hid 逐项相同（读原文里的 [0xNN] = 0xMM）
     char *mac = slurp(argv[1]);
@@ -145,6 +153,55 @@ int main(int argc, char **argv) {
     check(s2a_kbd_config_json(&def, json, 16) == -1, "缓冲放不下 → -1");
 
     // ⑨ 接线：controller.m 照 Mac 选源（没有手柄走触屏源、有手柄并进系统手柄 / NS2 Pro），keyboard.m 采 GCKeyboard、挡 ⌘、喂键盘区
+    // ⑨ 导入键位（#1987）：改键页「导入键位…」读进来的文件走 s2a_kbd_import——先看大小，再交共用解析器；失败不动当前键位
+    {
+        // Mac 启动器格式的标准键位（手写，照 input_config.c:466 的缺省键码表与 validate_input 的字段；没绑的按键位不写）
+        static const char mac_standard[] =
+            "{\"schema\": 1,\n"
+            " \"keyboard\": {\"A\": {\"code\": 14}, \"B\": {\"code\": 56}, \"X\": {\"code\": 49}, \"LS\": {\"code\": 59}, \"RS\": {\"code\": 8},\n"
+            "   \"L\": {\"code\": 12}, \"R\": {\"code\": 5}, \"ZR\": {\"code\": 15}, \"PLUS\": {\"code\": 48}, \"MINUS\": {\"code\": 46},\n"
+            "   \"LEFT\": {\"code\": 123}, \"UP\": {\"code\": 126}, \"RIGHT\": {\"code\": 124}, \"DOWN\": {\"code\": 125},\n"
+            "   \"LS_LEFT\": {\"code\": 0}, \"LS_UP\": {\"code\": 13}, \"LS_RIGHT\": {\"code\": 2}, \"LS_DOWN\": {\"code\": 1}},\n"
+            " \"mouse\": {\"Y\": 0, \"ZL\": 1},\n"
+            " \"gamepad\": {\"A\": \"east\", \"B\": \"south\", \"X\": \"north\", \"Y\": \"west\", \"LS\": \"leftStick\", \"RS\": \"rightStick\",\n"
+            "   \"L\": \"leftShoulder\", \"R\": \"rightShoulder\", \"ZL\": \"leftTrigger\", \"ZR\": \"rightTrigger\", \"PLUS\": \"menu\", \"MINUS\": \"options\",\n"
+            "   \"LEFT\": \"dpadLeft\", \"UP\": \"dpadUp\", \"RIGHT\": \"dpadRight\", \"DOWN\": \"dpadDown\"},\n"
+            " \"axes\": {\"LX\": {\"source\": \"leftX\"}, \"LY\": {\"source\": \"leftY\"}, \"RX\": {\"source\": \"rightX\"}, \"RY\": {\"source\": \"rightY\"}},\n"
+            " \"deadzone\": 0.15,\n"
+            " \"mouseOptions\": {\"mode\": \"camera\", \"sensitivityX\": 1, \"sensitivityY\": 1}}\n";
+        s2a_input_config got, want, before;
+        s2a_input_config_default(&want);
+        s2a_kbd_default(&got);
+        check(s2a_kbd_import(mac_standard, sizeof mac_standard - 1, &got) == S2A_KBD_IMPORT_OK && kbd_same(&got, &want),
+              "导入 Mac 启动器格式的标准键位 → 与共用缺省逐项相同（不替玩家补 iPad 多绑的 Y / ZL / 右摇杆）");
+        // 改过的键位（含修饰键、鼠标键、鼠标选项）：导出再导入，逐项相同
+        s2a_input_config mine; s2a_kbd_default(&mine);
+        mine.keyboard[0] = (s2a_input_key){14, 1}; mine.mouse[1] = 2; mine.mouse_camera = 0; mine.sensitivity_x = 2.5; mine.invert_y = 1; mine.recenter = 0;
+        char out[4096]; int n = s2a_kbd_config_json(&mine, out, sizeof out);
+        s2a_kbd_default(&got);
+        check(n > 0 && s2a_kbd_import(out, (size_t)n, &got) == S2A_KBD_IMPORT_OK && kbd_same(&got, &mine), "改过的键位导出再导入，逐项相同（含修饰键、鼠标键、鼠标选项）");
+        // 大小：上限内（有效 JSON 后面补空白到正好上限）收；多 1 字节就拒，不交给解析器、不动当前键位
+        size_t limit = S2A_KBD_IMPORT_MAX_BYTES;
+        char *big = malloc(limit + 1);
+        if (big) {
+            memset(big, ' ', limit + 1); memcpy(big, mac_standard, sizeof mac_standard - 1);
+            s2a_kbd_default(&got);
+            check(s2a_kbd_import(big, limit, &got) == S2A_KBD_IMPORT_OK && kbd_same(&got, &want), "正好上限大小（有效 JSON 补空白）→ 收");
+            s2a_kbd_default(&got); before = got;
+            check(s2a_kbd_import(big, limit + 1, &got) == S2A_KBD_IMPORT_TOO_LARGE && kbd_same(&got, &before), "超过上限 1 字节 → 拒（太大），当前键位不动");
+            free(big);
+        } else check(0, "分配大文件缓冲");
+        // 坏文件：各自给出对应的错误，当前键位不动
+        static const char dup[] = "{\"schema\": 1, \"keyboard\": {\"A\": {\"code\": 14}, \"B\": {\"code\": 14}}, \"mouse\": {}, \"gamepad\": {}, \"axes\": {},"
+                                  " \"deadzone\": 0.15, \"mouseOptions\": {\"mode\": \"camera\", \"sensitivityX\": 1, \"sensitivityY\": 1}}";
+        static const char v2[] = "{\"schema\": 2}";
+        s2a_kbd_default(&got); before = got;
+        check(s2a_kbd_import("{", 1, &got) == S2A_INPUT_CONFIG_JSON && kbd_same(&got, &before), "读不出 JSON → JSON 错，当前键位不动");
+        check(s2a_kbd_import("", 0, &got) == S2A_INPUT_CONFIG_JSON && kbd_same(&got, &before), "空文件 → JSON 错");
+        check(s2a_kbd_import(v2, sizeof v2 - 1, &got) == S2A_INPUT_CONFIG_SCHEMA && kbd_same(&got, &before), "schema 不是 1 → 版本错");
+        check(s2a_kbd_import(dup, sizeof dup - 1, &got) == S2A_INPUT_CONFIG_DUPLICATE && kbd_same(&got, &before), "同一个键绑两个按键位 → 重复错");
+    }
+
     char *ctl = slurp(argv[2]), *kbd = slurp(argv[3]);
     check(ctl && kbd, "读得到 controller.m 与 keyboard.m");
     if (ctl && kbd) {
@@ -166,7 +223,29 @@ int main(int argc, char **argv) {
     }
     free(ctl); free(kbd);
 
+    // ⑩ 改键页的导入 / 导出接线（UIKit 在 Mac 宿主上编不了，接线靠文本钉住；语法另由 keyboard_map.mk 用 iOS SDK 查）
+    char *page = slurp(argv[4]);
+    check(page != NULL, "读得到 keyboard_settings.m");
+    if (page) {
+        check(count_in(page, "initForOpeningContentTypes:@[UTTypeJSON] asCopy:YES") == 1, "导入：选文件面板只认 JSON、以副本方式读（同触屏布局页）");
+        check(count_in(page, "s2a_kbd_import(") == 1, "导入：读进来的内容交 s2a_kbd_import（先查大小再解析）");
+        check(count_in(page, "initForExportingURLs:") == 1, "导出：用选文件面板导出（同触屏布局页，不走分享面板）");
+        check(count_in(page, "s2a_kbd_config_json(") == 2, "导出与存盘写的是同一份 schema 1 JSON");
+        char *cancel = body_of(page, "- (void)documentPickerWasCancelled:");
+        check(cancel && count_in(cancel, "cleanExport") == 1, "导出取消也清掉临时目录");
+        free(cancel);
+        static const char *const errs[] = {"kbd.import.err.read", "kbd.import.err.tooLarge", "kbd.import.err.json", "kbd.import.err.schema", "kbd.import.err.duplicate", "kbd.import.err.invalid"};
+        int all = 1; for (size_t i = 0; i < sizeof errs / sizeof *errs; i++) all &= count_in(page, errs[i]) >= 1;
+        check(all, "导入失败的每一类都有自己的说法（读不了 / 太大 / 不是 JSON / 版本不对 / 重复绑定 / 内容无效）");
+        // 新加的「管理键位」组不能被当成按键位行（refreshVisibleRows / 点击原先按「不是鼠标组就是按键位」处理）
+        char *refresh = body_of(page, "- (void)refreshVisibleRows"), *select = body_of(page, "- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:");
+        check(refresh && count_in(refresh, "kManageSection") >= 1, "refreshVisibleRows 跳过「管理键位」组");
+        check(select && count_in(select, "kManageSection") >= 1, "点「管理键位」组的行走导入 / 导出，不进录键");
+        free(refresh); free(select);
+    }
+    free(page);
+
     if (failures) { fprintf(stderr, "✗ t_keyboard_map：%d/%d 项不通\n", failures, checks); return 1; }
-    printf("✓ t_keyboard_map：%d 项（键码表与 Mac 逐项相同、iPad 缺省、按键 / 摇杆 / 组合键同 Mac、并进手柄、键盘区、schema 1 往返、接线）\n", checks);
+    printf("✓ t_keyboard_map：%d 项（键码表与 Mac 逐项相同、iPad 缺省、按键 / 摇杆 / 组合键同 Mac、并进手柄、键盘区、schema 1 往返、导入 / 导出、接线）\n", checks);
     return 0;
 }

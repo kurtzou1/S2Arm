@@ -248,6 +248,23 @@ class BundleTests(unittest.TestCase):
             out = subprocess.run(['plutil', '-convert', 'json', '-o', '-', str(self.out / 'zh-Hans.lproj/InfoPlist.strings')], capture_output=True, text=True)
             self.assertEqual(json.loads(out.stdout), {'NSLocalNetworkUsageDescription': '本地联机：互相发现', 'NSBluetoothAlwaysUsageDescription': '连 "Pro" 手柄', 'CFBundleDisplayName': '泰拉瑞亚 S2Arm'})
 
+    def test_windows_rename_denied_while_scanned_retries(self):
+        """D-ZPA3（期望手写）：Windows 上刚组装完的目录被杀软 / 索引开着句柄，第一次改名报 WinError 5；退避后再改就成，结果照常"""
+        from pack.orch import dirrename
+        real, calls = Path.rename, []
+        def flaky(src, dst):
+            calls.append(Path(src).name)
+            if len(calls) == 1:
+                e = PermissionError(13, '拒绝访问。'); e.winerror = 5; raise e
+            return real(src, dst)
+        import types
+        with patch.object(dirrename, 'os', types.SimpleNamespace(name='nt')), patch.object(Path, 'rename', flaky), patch.object(dirrename.time, 'sleep', lambda s: None):
+            result = self.assemble()
+        self.assertEqual(result, self.out.resolve())
+        self.assertEqual(len(calls), 2, '第一次被拒、第二次成')
+        self.assertTrue(calls[0].startswith('.assemble-'))
+        self.assertEqual([p.name for p in self.out.parent.iterdir() if p.name.startswith('.assemble-')], [], '不留临时目录')
+
     def test_existing_destination_is_not_overwritten(self):
         self.out.mkdir(parents=True)
         with self.assertRaises(ValueError):

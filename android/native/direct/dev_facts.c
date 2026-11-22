@@ -6,6 +6,7 @@
 #define _DARWIN_C_SOURCE           // 宿主测试：macOS 上 _SC_NPROCESSORS_CONF 不在纯 POSIX 名字空间
 #endif
 #include "dev_facts.h"
+#include "dev_policy.h"
 #include "vk_device.h"
 #include "sha256.h"
 
@@ -952,7 +953,7 @@ int s2a_dev_facts_on_device_create(VkPhysicalDevice physical) {
     s2a_dev_facts_collect(physical, f);
     const double collect_ms = ms_since(&t0);
     size_t len = 0; char digest[65] = "";
-    char line[768], where[160] = "";
+    char line[1536], where[160] = "";
     if (s2a_dev_profile_json(f, json, CAP, &len, digest)) {
         S2A_FLOG("【红】【事实】档案序列化失败（超过 %d 字节），本次不落盘", (int)CAP);
     } else {
@@ -971,6 +972,18 @@ int s2a_dev_facts_on_device_create(VkPhysicalDevice physical) {
         s2a_dev_facts_summary(f, digest, line, sizeof line);
         S2A_FLOG("%s %s 采集 %.1f ms 合计 %.1f ms", line, where, collect_ms, ms_since(&t0));
         if (f->ext_state != 1) S2A_FLOG("【红】【事实】设备扩展表未知（%s）：档案 extensions 为空表、带 extensionsWhy", f->ext_why);
+        struct s2a_dev_policy policy;
+        const struct s2a_dev_policy_inputs inputs = {.facts = f};
+        if (!s2a_dev_policy_derive(&inputs, &policy) && !s2a_dev_policy_summary(&policy, digest, line, sizeof line)) {
+            S2A_FLOG("%s", line);
+            for (enum s2a_policy_id id = 0; id < S2A_POLICY_COUNT; id++) {
+                const struct s2a_policy_item *item = s2a_dev_policy_get(&policy, id);
+                if (item->basis == S2A_POLICY_UNKNOWN)
+                    S2A_FLOG("【红】【策略】%s 未证（%s）", s2a_dev_policy_meta(id)->name, item->evidence);
+            }
+        } else {
+            S2A_FLOG("【红】【策略】现状兼容摘要生成失败");
+        }
         snprintf(g_logged_digest, sizeof g_logged_digest, "%.16s", digest);
         logged = 1;
     }

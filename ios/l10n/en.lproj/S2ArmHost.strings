@@ -275,6 +275,8 @@
 "app.fpsCap.ladder" = "This session can't hold 60 FPS steadily, so the game is back at its native frame rate for now. It starts at 60 FPS again the next time you open the game.";
 "app.fpsCap.restored" = "60 FPS is back.";
 "app.fpsCap.retry" = "Try 60 FPS again";
+"app.os180.title" = "This system version may crash";
+"app.os180.body" = "iOS / iPadOS 18.0 has a system issue that can close the app as soon as the game picture appears; 18.1 fixes it. Please update in Settings > General > Software Update to 18.1 or later (free) and the crash will go away.";
 "app.lowRam.title" = "This device may not have enough memory";
 "app.lowRam.body" = "This game needs more memory than this device has. It will still start, but it may stutter or be closed by the system.";
 "app.gpuStop.body" = "Swipe this app away in the app switcher and open it again — you can usually keep playing from where the game last saved. To help us find the cause, tap “Report a Problem” to send us diagnostics.";
@@ -534,6 +536,8 @@
 "settings.toggle.touchHud" = "Touch diagnostics";
 "settings.widen.blocked" = "Full screen has known issues in this game; you can still turn it on";
 "textinput.header" = "Enter Text";
+"textinput.player.create" = "Create new user";
+"textinput.player.select" = "Select S2Arm user";
 "textinput.min" = "At least %ld characters";
 "textinput.ok" = "OK";
 "textinput.range" = "%ld–%ld characters";
@@ -650,7 +654,7 @@
 "cert.source.p12" = "Imported .p12";
 "cert.source.pc" = "From your computer";
 "addrshort.title" = "The system on this device can't give apps enough address range for this game";
-"addrshort.body" = "This game needs one large continuous address range at startup, and the system on this device can't give apps enough (this has nothing to do with storage space; freeing up storage won't help): it may run very slowly or stay stuck at the start. You can tap \"Start Anyway\" to try; to play normally, use an iPhone, iPad or Mac with more memory (their systems can give apps a larger address range), or wait for a later version.";
+"addrshort.body" = "This game needs one large continuous address range at startup, and the system on this device can't give apps enough (this has nothing to do with storage space; freeing up storage won't help): it may run very slowly or stay stuck at the start. You can tap \"Start Anyway\" to try; to play normally, use an iPhone or iPad with more memory (their systems can give apps a larger address range), or wait for a later version.";
 "host.startAnyway" = "Start Anyway";
 /* iPad 外接键盘改键页（ios/keyboard_settings.m，#1869）：除菜单项 / 标题 / 说明外，文案同 Mac 启动器（launchers/shared input.*） */
 "kbd.menu" = "Keyboard & Mouse…";
@@ -700,3 +704,16 @@
 "kbd.target.RS_DOWN" = "Right stick down";
 "kbd.target.RS_LEFT" = "Right stick left";
 "kbd.target.RS_RIGHT" = "Right stick right";
+"kbd.section.manage" = "Manage Key Mapping";
+"kbd.manage.note" = "Exported key mapping files can be imported in other games. The input.json in each game folder of the Mac launcher uses the same format and can be imported too. Importing changes this game only.";
+"kbd.import" = "Import Key Mapping…";
+"kbd.export" = "Export Current Key Mapping…";
+"kbd.export.fileName" = "S2Arm Key Mapping";
+"kbd.export.err.title" = "Couldn’t Export Key Mapping";
+"kbd.import.err.title" = "Couldn’t Import Key Mapping";
+"kbd.import.err.read" = "This file can’t be read. Choose a key mapping file (.json). Your current mapping hasn’t changed.";
+"kbd.import.err.tooLarge" = "This file is too large to be a key mapping file (they are under 64 KB). Your current mapping hasn’t changed.";
+"kbd.import.err.json" = "This isn’t a key mapping file (it isn’t valid JSON). Your current mapping hasn’t changed.";
+"kbd.import.err.schema" = "This isn’t an S2Arm key mapping file, or its version isn’t supported. Your current mapping hasn’t changed.";
+"kbd.import.err.duplicate" = "The file binds the same key to more than one button. Your current mapping hasn’t changed.";
+"kbd.import.err.invalid" = "The mapping in this file is incomplete or has invalid values. Your current mapping hasn’t changed.";

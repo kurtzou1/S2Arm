@@ -52,6 +52,8 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnRyu
         private byte[] _gameVersion = new byte[0x10];
 
         private readonly HleConfiguration _config;
+        private readonly IPAddress _serverAddress;
+        private readonly IPAddress _localAddress;
 
         public event EventHandler<NetworkChangeEventArgs> NetworkChange;
 
@@ -59,6 +61,14 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnRyu
 
         public LdnMasterProxyClient(string address, int port, HleConfiguration config) : base(address, port)
         {
+            _serverAddress = IPAddress.TryParse(address, out IPAddress parsed)
+                ? parsed
+                : Array.Find(Dns.GetHostAddresses(address), item => item.AddressFamily == AddressFamily.InterNetwork);
+
+            (_, UnicastIPAddressInformation selected) =
+                NetworkHelpers.GetLocalInterfaceForTarget(config.MultiplayerLanInterfaceId, _serverAddress);
+            _localAddress = selected?.Address;
+
             if (ProxyHelpers.SupportsNoDelay())
             {
                 OptionNoDelay = true;
@@ -84,6 +94,17 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnRyu
 
             _config = config;
             _useP2pProxy = !config.MultiplayerDisableP2p;
+        }
+
+        protected override Socket CreateSocket()
+        {
+            Socket socket = base.CreateSocket();
+            if (_localAddress != null && !socket.IsBound)
+            {
+                socket.Bind(new IPEndPoint(_localAddress, 0));
+            }
+
+            return socket;
         }
 
         private void TimeoutConnection()
@@ -439,7 +460,13 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnRyu
                         Logger.NetLog?.Print(LogClass.ServiceLdn, $"Created a wireless P2P network on port {request.ExternalProxyPort}.");
                         _hostedProxy.Start();
 
-                        (_, UnicastIPAddressInformation unicastAddress) = NetworkHelpers.GetLocalInterface();
+                        (_, UnicastIPAddressInformation unicastAddress) =
+                            NetworkHelpers.GetLocalInterfaceForTarget(_config.MultiplayerLanInterfaceId, _serverAddress);
+
+                        if (unicastAddress == null)
+                        {
+                            throw new InvalidOperationException("No local IPv4 route is available for the RyuLDN relay.");
+                        }
 
                         unicastAddress.Address.GetAddressBytes().AsSpan().CopyTo(request.PrivateIp.AsSpan());
                         request.InternalProxyPort = _hostedProxy.PrivatePort;

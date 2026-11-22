@@ -20,8 +20,8 @@
 //   iOS 屏上按 S2ArmHost.strings 的 addrshort.* 出五语（ios/app.m host_text），这里的中英是实现来源与日志用
 #define S2A_SELFCHECK_ADDR_TITLE    "这台设备的系统能给 App 的地址范围不够这款游戏"
 #define S2A_SELFCHECK_ADDR_TITLE_EN "The system on this device can't give apps enough address range for this game"
-#define S2A_SELFCHECK_ADDR_BODY     "这款游戏开局要一大块连续的地址范围，这台设备的系统能给 App 的不够（和存储空间无关，清理空间没有用）：可能会非常卡，或一直停在开头。可以先点「仍要启动」试试；想正常玩，请换一台内存更大的 iPhone / iPad / Mac（系统能给 App 的地址范围更大），或等后续版本改进。"
-#define S2A_SELFCHECK_ADDR_BODY_EN  "This game needs one large continuous address range at startup, and the system on this device can't give apps enough (this has nothing to do with storage space; freeing up storage won't help): it may run very slowly or stay stuck at the start. You can tap \"Start Anyway\" to try; to play normally, use an iPhone, iPad or Mac with more memory (their systems can give apps a larger address range), or wait for a later version."
+#define S2A_SELFCHECK_ADDR_BODY     "这款游戏开局要一大块连续的地址范围，这台设备的系统能给 App 的不够（和存储空间无关，清理空间没有用）：可能会非常卡，或一直停在开头。可以先点「仍要启动」试试；想正常玩，请换一台内存更大的 iPhone / iPad（系统能给 App 的地址范围更大），或等后续版本改进。"
+#define S2A_SELFCHECK_ADDR_BODY_EN  "This game needs one large continuous address range at startup, and the system on this device can't give apps enough (this has nothing to do with storage space; freeing up storage won't help): it may run very slowly or stay stuck at the start. You can tap \"Start Anyway\" to try; to play normally, use an iPhone or iPad with more memory (their systems can give apps a larger address range), or wait for a later version."
 #define S2A_SELFCHECK_GO           "仍要启动"
 #define S2A_SELFCHECK_GO_EN        "Start Anyway"
 // 读不到本款要多大地址（包不完整）→ 重装补资源

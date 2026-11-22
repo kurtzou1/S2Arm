@@ -292,7 +292,7 @@ extension LauncherView {
                 HStack(spacing: 10) {
                     Toggle("", isOn: Binding(get: { model.consoleSelection.contains(id) },
                                              set: { if $0 { model.consoleSelection.insert(id) } else { model.consoleSelection.remove(id) } }))
-                        .toggleStyle(.checkbox).labelsHidden().disabled(model.consoleUpdating)
+                        .toggleStyle(PadToggleStyle(.checkbox)).labelsHidden().disabled(model.consoleUpdating)
                     GameArtwork(covers: covers, cover: game.cover).frame(width: 28, height: 28).clipShape(RoundedRectangle(cornerRadius: 5))
                         .overlay { if pushing { Circle().stroke(.orange, lineWidth: 2).padding(-3) } }
                     Text(game.name).font(.manrope(13, .medium)).lineLimit(1).frame(minWidth: 160, alignment: .leading)

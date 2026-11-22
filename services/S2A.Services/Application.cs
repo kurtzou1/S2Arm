@@ -55,13 +55,24 @@ namespace S2A.Services
 
         // 本进程登记的游戏数据根（ExecuteProgram 切程序前核包里有没有目标序号用）
         internal static string GameDir { get; set; }
+        private static ulong _applicationId;
+        private static BlitStruct<ApplicationControlProperty> _nacp;
 
         internal static void Reset()
         {
             ProgramId = 0;
             ProgramIndex = 0;
+            _applicationId = 0;
+            _nacp = default;
             Ryujinx.HLE.S2AHooks.DataStorageAliasIndex = -1;
             LazyHostFile.CloseAll();
+        }
+
+        internal static void EnsureCurrentSaveData(Switch device)
+        {
+            if (device == null || _applicationId == 0 || _nacp.ByteSpan.Length == 0)
+                return;
+            ProcessLoaderHelper.EnsureSaveData(device, new ApplicationId(_applicationId), _nacp);
         }
 
         public static void Register(Switch device, string gameDir, bool requireSuccess = false)
@@ -91,6 +102,7 @@ namespace S2A.Services
                 Console.Error.WriteLine($"S2A 单独导出的程序 {ownIndex}（程序号 {ProgramId:X16}）：身份序号 {ownIndex}，序号 0 的资源请求给本程序这一份");
             // 应用号 = 程序号去掉末位（Ryujinx NcaExtensions.Load：多程序应用的存档按主程序号建）；单程序款末位本来就是 0
             ulong applicationId = ProgramId & ~0xFul;
+            _applicationId = applicationId;
 
             BlitStruct<ApplicationControlProperty> nacp = new(1);
             string nacpPath = Path.Combine(programDir, "ctl", "control.nacp");
@@ -104,6 +116,7 @@ namespace S2A.Services
             {
                 Red.Report("游戏数据缺 ctl/control.nacp", programDir);
             }
+            _nacp = nacp;
 
             // Horizon 服务（arp 等）要先就绪
             if (requireSuccess) HorizonHost.WaitServicesReady(device.System.ServiceTable, System.TimeSpan.FromSeconds(30));

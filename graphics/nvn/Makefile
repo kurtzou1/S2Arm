@@ -51,7 +51,7 @@ $(PGO_BIN): $(PGO_TXT)
 	@mkdir -p $(OUT)/pgo
 	DEVELOPER_DIR=$(DEVELOPER_DIR) xcrun llvm-profdata merge -o $@.$$$$ $< && mv -f $@.$$$$ $@
 INC   := -I$(ROOT)/graphics/nvn/gfx/nvn/include -I$(ROOT)/graphics/nvn/host -I$(ROOT)/runtime/include -I$(ROOT)/graphics/nvn/third_party/vulkan-headers/include -I$(OUT)/gen
-WARN  := -Wall -Wno-unused-function -Wno-unguarded-availability-new -Wno-unguarded-availability
+WARN  := -Wall -Wno-unused-function -Wno-unguarded-availability-new -Wno-unguarded-availability -Werror=incompatible-pointer-types   # 指针类型不符按错误编（11-21：对 os_unfair_lock 调 pthread_mutex_lock 只是警告，没上锁、提交线程缺页闪退）
 
 # S2Arm tessellation: 嵌入 CHWTessellator（tools/embed_msl.py 把源文件转成 C 字符串常量）
 $(OUT)/gen/gal_tess_msl.h: $(ROOT)/graphics/metal/gal_tess_d3d.h $(ROOT)/graphics/metal/tools/embed_msl.py

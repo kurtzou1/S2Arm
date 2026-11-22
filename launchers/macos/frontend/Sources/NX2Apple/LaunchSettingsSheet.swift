@@ -311,7 +311,7 @@ struct LaunchSettingsSheet: View {
                 .disabled(saving || model.busy)
                 Button(t("input.save")) {
                     Task { await load([item.id: options[item.id]?.value as? String ?? ""]) }
-                }.buttonStyle(LauncherSecondaryButtonStyle()).disabled(saving || model.busy)
+                }.controllerButtonStyle(LauncherSecondaryButtonStyle()).disabled(saving || model.busy)
             }
         case "mods":
             CardRow(title, detail: modsNote(item)) {

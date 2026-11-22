@@ -257,7 +257,7 @@ def background_priority():
         print(f"[s2a] 自动任务降优先级没做成，照常跑：{error}", file=sys.stderr, flush=True)
 
 
-KEEP_AWAKE = ("build", "ipa", "android", "install", "installUpdate", "installRestore", "exportPush", "tvInstall", "tvExport")   # 出包 / 推送期间电脑不空闲休眠（awake.py；v0.3.1 玩家推大包被休眠打断成「传输中断」）
+KEEP_AWAKE = ("build", "ipa", "android", "install", "installUpdate", "installRestore", "exportPush", "tvInstall", "tvExport", "updateGame")   # 出包 / 推送 / 更新这款（重编着色器库可能几小时，11-21）期间电脑不空闲休眠（awake.py；v0.3.1 玩家推大包被休眠打断成「传输中断」）
 HEAL_AFTER = ("import", "build", "ipa")   # 结束时顺手把还叫游戏号的文件夹改英文名（layout.heal_folder_names）
 ORCHESTRATION = ("export",)   # 只起子作业的编排：引擎副本、游戏库结构由每一步的子作业自己核（剃刀 H13）
 DEVICE_ONLY = ("androidDevices",)   # 只问已连接设备（adb），不碰引擎副本与游戏库

@@ -184,6 +184,36 @@ static int rp_fu_storage_write(void) {
     return 0;
 }
 // iOS skip_safe：无 storage 写 + 每个颜色/深度目标本帧 fresh + 近两帧 steady。任一不满足就不许跳。
+// 出库版程序（lib_sourced）在绑定核对里发现声明与实际绑定不符：身份标坏（rp_shader_lib_reject），按当前状态取现编版。
+//   出包预编库按苹果端约定翻译（缺类型答案时一维取数译成二维行读，宿主侧按行绑缓冲贴图，nvn_mtl.m tbuf_as_2d），
+//   声明不随这一刻绑的贴图变；现编按此刻的贴图事实翻译，声明与绑定一致。回退只做一次（lib_retry），现编版再不符照旧按原因处理。
+//   返回新程序；NULL = 不是出库版 / 已回退过 / 取不到现编版（调用方照原路处理）。
+static const struct rp_prog *lib_fallback_graphics(const struct rp_prog *p, int *lib_retry, uint32_t prim, const p_set_rt *rt) {
+    if (!p->lib_sourced || *lib_retry || !rp_shader_lib_reject || !rp_shader_lib_reject(p)) return NULL;
+    struct rp_shader_req q; memset(&q, 0, sizeof q); q.prim = prim; q.rt_count = rt->n;
+    for (int k = 0; k < rt->n && k < 8; k++) if (rt->color[k]) q.rt_format[k] = (uint32_t)(rt->has_cview[k] && rt->cview[k].set_format ? rt->cview[k].format : rt->color[k]->d.format);
+    const struct rp_prog *np = NULL;
+    *lib_retry = 1;
+    rp_view_pin_end();
+    return !rp_shader_resolve(&q, &np) && np ? np : NULL;
+}
+static const struct rp_prog *lib_fallback_compute(const struct rp_prog *p, int *lib_retry) {
+    if (!p->lib_sourced || *lib_retry || !rp_shader_lib_reject || !rp_shader_lib_reject(p)) return NULL;
+    const struct rp_prog *np = NULL;
+    *lib_retry = 1;
+    rp_view_pin_end();
+    return !rp_shader_resolve_compute(&np) && np && np != p ? np : NULL;
+}
+// 采样贴图取视图。出库版（还没回退过）带核对：声明目标与此刻绑的贴图桥接不了时返回 NULL、*unbridged = 1（不绑零贴图），
+//   调用方换现编版重绑；其余同 rp_view_by_id_decl / rp_view_by_ubo_handle_decl。
+static nvn_gpu_view sampled_view(const struct rp_prog *p, int lib_retry, int *unbridged, int ubo, int id, uint8_t dtt, uint8_t dcls, int elem, nvn_gpu_cmd c, tex_t *t_out) {
+    const int probe = p->lib_sourced && !lib_retry && dtt;
+    if (probe) rp_decl_probe_begin();
+    nvn_gpu_view v = ubo ? rp_view_by_ubo_handle_decl(id, dtt, dcls, c, t_out) : rp_view_by_id_decl(id, dtt, dcls, elem, c, t_out);
+    *unbridged = probe && rp_decl_probe_end();
+    return v;
+}
+
 static int rp_fu_skip_safe(const p_set_rt *rt) {
     if (!rt || rp_fu_storage_write()) return 0;
     const uint64_t frame = rp_frame();
@@ -1713,7 +1743,13 @@ draw_rebind:   // 出库回退落地：g_prog 已换现编版（pso_dirty 已置
             if (e->count != 1 || e->src_reg2 >= g_prog->nusrc) { skip("uniform_handle_shape", rec); goto draw_done; }
             int tid = 0, sid = 0; const char *bad = usrc_ids(st, &g_prog->usrc[e->src_reg2], &tid, &sid);
             if (bad) { skip(bad, rec); goto draw_done; }
-            tv[st][i] = rp_view_by_ubo_handle_decl(tid, g_prog->dtt[st][i], g_prog->dcls[st][i], c, NULL);   // 没登记的号绑零贴图（Ryujinx null 贴图），不跳整笔
+            int unb = 0;
+            tv[st][i] = sampled_view(g_prog, lib_retry, &unb, 1, tid, g_prog->dtt[st][i], g_prog->dcls[st][i], 0, c, NULL);
+            if (unb) {
+                const struct rp_prog *np = lib_fallback_graphics(g_prog, &lib_retry, prim, rt);
+                if (np) { g_prog = np; rp_pso_dirty = 1; goto draw_rebind; }
+                tv[st][i] = rp_view_by_ubo_handle_decl(tid, g_prog->dtt[st][i], g_prog->dcls[st][i], c, NULL);
+            }   // 没登记的号绑零贴图（Ryujinx null 贴图），不跳整笔
             // 立即数采样器池下标（#1594 片 3）：号没登记 = Ryujinx 的空采样器，绑默认采样器、整笔照画（片 6，不拿别的已登记采样器顶替）；
             //   登记了但后端建不出的仍具名跳过。samp_pool = 0（离线库登记号）口径不变
             const int const_samp = g_prog->usrc[e->src_reg2].samp_pool;
@@ -1735,14 +1771,8 @@ draw_rebind:   // 出库回退落地：g_prog 已换现编版（pso_dirty 已置
         if (e->src_kind == NVN_RB_IMG) {   // 图形阶段存储图像：与计算派发同一解析（image_resolve），句柄取这一阶段 BindImage 的槽
             const char *why = image_resolve(c, g_prog, st, i, st, &tv[st][i], &g_gimg_snap[st][i]);
             if (why) {
-                if (g_prog->lib_sourced && !lib_retry && rp_shader_lib_reject && rp_shader_lib_reject(g_prog)) {   // 出库版声明与实绑不符：身份标坏换现编版，同一笔重绑
-                    struct rp_shader_req q; memset(&q, 0, sizeof q); q.prim = prim; q.rt_count = rt->n;
-                    for (int k = 0; k < rt->n && k < 8; k++) if (rt->color[k]) q.rt_format[k] = (uint32_t)(rt->has_cview[k] && rt->cview[k].set_format ? rt->cview[k].format : rt->color[k]->d.format);
-                    const struct rp_prog *np = NULL;
-                    lib_retry = 1;
-                    rp_view_pin_end();
-                    if (!rp_shader_resolve(&q, &np) && np) { g_prog = np; rp_pso_dirty = 1; goto draw_rebind; }
-                }
+                const struct rp_prog *np = lib_fallback_graphics(g_prog, &lib_retry, prim, rt);   // 出库版声明与实绑不符：身份标坏换现编版，同一笔重绑
+                if (np) { g_prog = np; rp_pso_dirty = 1; goto draw_rebind; }
                 skip(why, rec); goto draw_done;
             }
             g_gimg[st][i] = &g_gimg_snap[st][i];
@@ -1757,7 +1787,13 @@ draw_rebind:   // 出库回退落地：g_prog 已换现编版（pso_dirty 已置
             for (uint32_t k = 0; k < e->count; k++) {
                 int slot = (int)(e->src_reg + k) - RP_HANDLE_TABLE_FIRST_SLOT;
                 uint64_t hk = slot >= 0 && slot < 32 ? rp_S.tex[st][slot] : 0;
-                g_av[st][k] = rp_view_by_id_decl(hk ? (int)(hk & 0xFFFFF) : rp_S.tex_base, g_prog->dtt[st][i], g_prog->dcls[st][i], 1, c, NULL);
+                int unb = 0;
+                g_av[st][k] = sampled_view(g_prog, lib_retry, &unb, 0, hk ? (int)(hk & 0xFFFFF) : rp_S.tex_base, g_prog->dtt[st][i], g_prog->dcls[st][i], 1, c, NULL);
+                if (unb) {
+                    const struct rp_prog *np = lib_fallback_graphics(g_prog, &lib_retry, prim, rt);
+                    if (np) { g_prog = np; rp_pso_dirty = 1; goto draw_rebind; }
+                    g_av[st][k] = rp_view_by_id_decl(hk ? (int)(hk & 0xFFFFF) : rp_S.tex_base, g_prog->dtt[st][i], g_prog->dcls[st][i], 1, c, NULL);
+                }
                 g_as[st][k] = rp_samp_for_tex(hk ? (int)(hk >> 20) : rp_S.samp_base, hk ? (int)(hk & 0xFFFFF) : rp_S.tex_base);
                 if (hk && !g_as[st][k]) { skip("sampler_slot_unresolved", rec); goto draw_done; }
             }
@@ -1769,7 +1805,13 @@ draw_rebind:   // 出库回退落地：g_prog 已换现编版（pso_dirty 已置
         }
         uint64_t h = graphics_tex_handle(st, e->src_reg);
         tex_t tsnap, *tt = g_log_left ? &tsnap : NULL;   // 登记快照只给逐笔日志用：日志关时不拷
-        tv[st][i] = rp_view_by_id_decl(h ? (int)(h & 0xFFFFF) : rp_S.tex_base, g_prog->dtt[st][i], g_prog->dcls[st][i], 0, c, tt);
+        { int unb = 0;
+          tv[st][i] = sampled_view(g_prog, lib_retry, &unb, 0, h ? (int)(h & 0xFFFFF) : rp_S.tex_base, g_prog->dtt[st][i], g_prog->dcls[st][i], 0, c, tt);
+          if (unb) {
+              const struct rp_prog *np = lib_fallback_graphics(g_prog, &lib_retry, prim, rt);
+              if (np) { g_prog = np; rp_pso_dirty = 1; goto draw_rebind; }
+              tv[st][i] = rp_view_by_id_decl(h ? (int)(h & 0xFFFFF) : rp_S.tex_base, g_prog->dtt[st][i], g_prog->dcls[st][i], 0, c, tt);
+          } }
         if (tt && tn < sizeof tl - 56) {
             int id = h ? (int)(h & 0xFFFFF) : rp_S.tex_base;
             if (tt->serial) {
@@ -2231,12 +2273,8 @@ cs_rebind:
         if (e->src_kind == NVN_RB_IMG) {
             const char *why = image_resolve(c, pg, 0, i, 5, &tv[i], &img_snap[i]);
             if (why) {
-                if (pg->lib_sourced && !lib_retry && rp_shader_lib_reject && rp_shader_lib_reject(pg)) {   // 出库版声明与实绑不符：身份标坏换现编版，同一笔重绑
-                    const struct rp_prog *np = NULL;
-                    lib_retry = 1;
-                    rp_view_pin_end();
-                    if (!rp_shader_resolve_compute(&np) && np && np != pg) { pg = np; goto cs_rebind; }
-                }
+                const struct rp_prog *np = lib_fallback_compute(pg, &lib_retry);   // 出库版声明与实绑不符：身份标坏换现编版，同一笔重绑
+                if (np) { pg = np; goto cs_rebind; }
                 skip(why, rec); goto done;
             }
             images[i] = &img_snap[i];
@@ -2253,7 +2291,13 @@ cs_rebind:
         const int cs_const = e->src_reg2 != UINT16_MAX && (e->src_reg2 & NVN_GPU_SAMP2_CONST);
         // 贴图槽 32..39 = c2 图像句柄表第 0..7 项被当贴图采样：取图像槽绑着的句柄（同 iOS nvn_mtl.m tex_slot_h）；没绑同组合槽，读作池第 0 项
         uint64_t h = e->src_reg >= 32 && e->src_reg < 40 ? rp_S.img[5][e->src_reg - 32] : rp_S.tex[5][e->src_reg];
-        tv[i] = rp_view_by_id_decl(h ? (int)(h & 0xFFFFF) : rp_S.tex_base, pg->dtt[0][i], pg->dcls[0][i], 0, c, NULL);
+        { int unb = 0;
+          tv[i] = sampled_view(pg, lib_retry, &unb, 0, h ? (int)(h & 0xFFFFF) : rp_S.tex_base, pg->dtt[0][i], pg->dcls[0][i], 0, c, NULL);
+          if (unb) {
+              const struct rp_prog *np = lib_fallback_compute(pg, &lib_retry);
+              if (np) { pg = np; goto cs_rebind; }
+              tv[i] = rp_view_by_id_decl(h ? (int)(h & 0xFFFFF) : rp_S.tex_base, pg->dtt[0][i], pg->dcls[0][i], 0, c, NULL);
+          } }
         if (cs_const) {
             // 采样器号 = 贴图字高 12 位 | 着色器里的立即数池下标（const_samp_id，同 Ryujinx ReadPackedId），登记号 = 采样器号 + 池起点；
             //   号没登记 = 空采样器：绑默认采样器照派发（同图形阶段片 6）；登记了但后端建不出的具名跳过。不经 NVN 采样器槽。

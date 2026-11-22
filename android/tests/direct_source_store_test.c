@@ -8,6 +8,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
+#include <sched.h>
+#include <stdatomic.h>
 
 #include "direct/sha256.h"
 #include "direct/source_store.h"
@@ -57,7 +60,61 @@ static int s2a_source_identity_ok_for_test(const uint8_t key[8]) {
     return s2a_source_identity(key, sha, &cb, &ctlb) == 0;
 }
 
+enum { PENDING_STRESS_ROUNDS = 12000 };
+static uint8_t pending_patterns[2][S2A_SOURCE_CONTROL_BYTES];
+static atomic_int pending_reader_ready;
+static int pending_writer_failed, pending_reader_failed;
+static unsigned pending_hits;
+
+static void *pending_writer(void *unused) {
+    (void)unused;
+    while (!atomic_load(&pending_reader_ready)) sched_yield();
+    for (unsigned i = 0; i < PENDING_STRESS_ROUNDS; i++) {
+        if (s2a_source_hold_pending(90001, 2, pending_patterns[i & 1], S2A_SOURCE_CONTROL_BYTES))
+            pending_writer_failed = 1;
+        sched_yield();
+        s2a_source_drop_pending_stage(90001, 2);
+    }
+    return NULL;
+}
+
+static void *pending_reader(void *unused) {
+    (void)unused;
+    for (unsigned i = 0; i < PENDING_STRESS_ROUNDS * 2; i++) {
+        uint8_t copy[S2A_SOURCE_CONTROL_BYTES];
+        uint32_t n = 0;
+        if (s2a_source_pending_control_copy(90001, 2, copy, sizeof copy, &n)) {
+            pending_hits++;
+            if (n != sizeof copy || (memcmp(copy, pending_patterns[0], sizeof copy) &&
+                                    memcmp(copy, pending_patterns[1], sizeof copy)))
+                pending_reader_failed = 1;
+        }
+        atomic_store(&pending_reader_ready, 1);
+    }
+    return NULL;
+}
+
+static void pending_stress(void) {
+    memset(pending_patterns[0], 0x35, sizeof pending_patterns[0]);
+    memset(pending_patterns[1], 0xca, sizeof pending_patterns[1]);
+    CHECK(s2a_source_hold_pending(90001, 2, pending_patterns[0], S2A_SOURCE_CONTROL_BYTES) == 0,
+          "seed pending stress");
+    pthread_t writer, reader;
+    int wr = pthread_create(&writer, NULL, pending_writer, NULL);
+    int rd = pthread_create(&reader, NULL, pending_reader, NULL);
+    CHECK(wr == 0 && rd == 0, "start pending stress threads");
+    if (rd != 0) atomic_store(&pending_reader_ready, 1);
+    if (wr == 0) CHECK(pthread_join(writer, NULL) == 0, "join pending writer");
+    if (rd == 0) CHECK(pthread_join(reader, NULL) == 0, "join pending reader");
+    CHECK(!pending_writer_failed && !pending_reader_failed && pending_hits > 0,
+          "concurrent pending copies contain one complete pattern");
+    s2a_source_drop_pending(90001);
+    printf("pending stress: %u writer rounds, %u reader rounds, %u hits\n",
+           PENDING_STRESS_ROUNDS, PENDING_STRESS_ROUNDS * 2, pending_hits);
+}
+
 int main(void) {
+    pending_stress();
     enum { CODE_BYTES = 0x200 };
     static uint8_t code_a[CODE_BYTES], code_b[CODE_BYTES], ctl_a[S2A_SOURCE_CONTROL_BYTES], ctl_b[S2A_SOURCE_CONTROL_BYTES];
     for (int i = 0; i < CODE_BYTES; i++) code_a[i] = (uint8_t)(i * 7 + 1);
@@ -529,28 +586,40 @@ int main(void) {
           "too-short control is rejected");
 
     // pending control：SetShaders 自持，Bind 取回同一份；存到程序 Finalize（drop_pending）为止，不按条数挤掉（#1622）。
-    const uint8_t *pc = NULL;
+    uint8_t pc[S2A_SOURCE_CONTROL_BYTES];
     uint32_t pn = 0;
     uint32_t n0 = s2a_source_pending_count();
     CHECK(s2a_source_hold_pending(4242, 1, ctl_a, S2A_SOURCE_CONTROL_BYTES) == 0, "hold pending control");
-    CHECK(s2a_source_pending_control(4242, 1, &pc, &pn) == 1 && pn == S2A_SOURCE_CONTROL_BYTES &&
+    CHECK(s2a_source_pending_control_copy(4242, 1, pc, sizeof pc, &pn) == 1 && pn == S2A_SOURCE_CONTROL_BYTES &&
           !memcmp(pc, ctl_a, pn), "pending control returns the same bytes");
-    CHECK(s2a_source_pending_control(4242, 0, &pc, &pn) == 0, "pending control is per stage");
+    CHECK(s2a_source_pending_control_copy(4242, 0, pc, sizeof pc, &pn) == 0 && pn == 0, "pending control is per stage");
+    memset(pc, 0xa5, sizeof pc);
+    pn = 99;
+    CHECK(s2a_source_pending_control_copy(4242, 1, pc, sizeof pc - 1, &pn) == 0 && pn == 0,
+          "insufficient capacity fails without reporting a length");
+    int untouched = 1;
+    for (unsigned i = 0; i < sizeof pc; i++) if (pc[i] != 0xa5) untouched = 0;
+    CHECK(untouched, "insufficient capacity leaves destination and bytes beyond cap untouched");
+    CHECK(s2a_source_pending_control_copy(4242, 1, NULL, sizeof pc, &pn) == 0 && pn == 0,
+          "null destination rejected");
+    CHECK(s2a_source_pending_control_copy(4242, 1, pc, sizeof pc, NULL) == 0, "null length rejected");
+    CHECK(s2a_source_pending_control_copy(4242, 6, pc, sizeof pc, &pn) == 0 && pn == 0,
+          "invalid pending stage rejected");
     // 一次注册 3000 个程序 × 2 阶段（旧实现 256 格环：最早的 4242 和 1000..2743 早被挤掉）→ 全部还在
     for (int i = 0; i < 3000; i++) {
         s2a_source_hold_pending((uint64_t)(1000 + i), 0, ctl_a, S2A_SOURCE_CONTROL_BYTES);
         s2a_source_hold_pending((uint64_t)(1000 + i), 4, ctl_b, S2A_SOURCE_CONTROL_BYTES);
     }
-    CHECK(s2a_source_pending_control(4242, 1, &pc, &pn) == 1 && !memcmp(pc, ctl_a, pn), "earliest pending survives 6000 later holds");
-    CHECK(s2a_source_pending_control(1000, 4, &pc, &pn) == 1 && !memcmp(pc, ctl_b, pn), "first of the burst still retrievable per stage");
+    CHECK(s2a_source_pending_control_copy(4242, 1, pc, sizeof pc, &pn) == 1 && !memcmp(pc, ctl_a, pn), "earliest pending survives 6000 later holds");
+    CHECK(s2a_source_pending_control_copy(1000, 4, pc, sizeof pc, &pn) == 1 && !memcmp(pc, ctl_b, pn), "first of the burst still retrievable per stage");
     CHECK(s2a_source_pending_count() == n0 + 1 + 6000, "pending count = live program stages");
     // 同程序同阶段重设：换内容、不增条数
-    CHECK(s2a_source_hold_pending(1000, 0, ctl_b, S2A_SOURCE_CONTROL_BYTES) == 0 && s2a_source_pending_control(1000, 0, &pc, &pn) == 1 &&
+    CHECK(s2a_source_hold_pending(1000, 0, ctl_b, S2A_SOURCE_CONTROL_BYTES) == 0 && s2a_source_pending_control_copy(1000, 0, pc, sizeof pc, &pn) == 1 &&
           !memcmp(pc, ctl_b, pn) && s2a_source_pending_count() == n0 + 1 + 6000, "re-hold replaces in place");
     // Finalize：该程序全部阶段一起释放，别的程序不受影响
     s2a_source_drop_pending(1000);
-    CHECK(s2a_source_pending_control(1000, 0, &pc, &pn) == 0 && s2a_source_pending_control(1000, 4, &pc, &pn) == 0, "drop pending frees all stages");
-    CHECK(s2a_source_pending_control(1001, 4, &pc, &pn) == 1 && s2a_source_pending_count() == n0 + 1 + 5998, "drop pending leaves other programs");
+    CHECK(s2a_source_pending_control_copy(1000, 0, pc, sizeof pc, &pn) == 0 && s2a_source_pending_control_copy(1000, 4, pc, sizeof pc, &pn) == 0, "drop pending frees all stages");
+    CHECK(s2a_source_pending_control_copy(1001, 4, pc, sizeof pc, &pn) == 1 && s2a_source_pending_count() == n0 + 1 + 5998, "drop pending leaves other programs");
     for (int i = 1; i < 3000; i++) s2a_source_drop_pending((uint64_t)(1000 + i));
     s2a_source_drop_pending(4242);
     CHECK(s2a_source_pending_count() == n0, "all pending released after finalize");
@@ -561,8 +630,8 @@ int main(void) {
         CHECK(s2a_source_hold_pending(7777, 0, ctl_a, S2A_SOURCE_CONTROL_BYTES) == 0 &&
               s2a_source_hold_pending(7777, 4, ctl_b, S2A_SOURCE_CONTROL_BYTES) == 0, "hold two stages");
         s2a_source_drop_pending_stage(7777, 0);
-        CHECK(s2a_source_pending_control(7777, 0, &pc, &pn) == 0, "kept stage control released");
-        CHECK(s2a_source_pending_control(7777, 4, &pc, &pn) == 1 && !memcmp(pc, ctl_b, pn), "other stage of the same program stays");
+        CHECK(s2a_source_pending_control_copy(7777, 0, pc, sizeof pc, &pn) == 0, "kept stage control released");
+        CHECK(s2a_source_pending_control_copy(7777, 4, pc, sizeof pc, &pn) == 1 && !memcmp(pc, ctl_b, pn), "other stage of the same program stays");
         CHECK(s2a_source_pending_count() == m0 + 1, "count drops by one");
         s2a_source_drop_pending_stage(7777, 0);   // 重复释放无副作用
         s2a_source_drop_pending_stage(7777, 9);   // 越界阶段忽略

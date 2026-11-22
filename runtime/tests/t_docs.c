@@ -52,6 +52,16 @@ int main(void) {
     k = s2a_pack_base(o, sizeof o, "/var/mobile/C/X/Documents");
     ck(k > 0 && !strcmp(o, "/var/mobile/C/X/Library/Application Support/S2Arm"), "进程级 Documents → 新位置的根");
     ck(s2a_pack_base(o, sizeof o, "/var/mobile/C/X/Docs") < 0, "不以 /Documents 结尾 → -1（不猜）");
+    // Apple TV（D-SDS6，期望手写）：资源位置根 = 文档根本身，导入写的 <根>/games/<号>/资源包 与运行时 s2a_pack_root 读的旧位置同一处
+    k = s2a_pack_base_tv(o, sizeof o, "/var/mobile/C/TV/Library/Caches/S2Arm");
+    ck(k > 0 && !strcmp(o, "/var/mobile/C/TV/Library/Caches/S2Arm"), "tvOS 容器文档根 → 它本身");
+    {   char want[300]; snprintf(want, sizeof want, "%s/games/0100ABCD00010000/资源包", o);
+        s2a_pack_root(o, sizeof o, "/var/mobile/C/TV/Library/Caches/S2Arm/games/0100ABCD00010000");
+        ck(!strcmp(o, want), "tvOS：导入写的位置 = 运行时读的资源包根"); }
+    ck(s2a_pack_base_tv(o, sizeof o, "/var/mobile/C/X/Documents") < 0, "tvOS 判法不认 Documents → -1");
+    ck(s2a_pack_base_tv(o, sizeof o, "/x/Library/Caches/S2Arm/games/A") < 0, "每款文档根不是进程级 → -1（不猜）");
+    ck(s2a_pack_base_tv(o, sizeof o, "/Library/Caches/S2Arm") < 0, "只有尾巴、前面没有容器 → -1");
+    ck(s2a_pack_base_tv(o, sizeof o, "Library/Caches/S2Arm") < 0, "没有容器前缀 → -1");
     {   // App 包内资源包（Apple TV 安装包导出）：<bundle>/Games/<号>/资源包/manifest.json 在才用包内，否则回 0（照旧）
         char b[200]; snprintf(b, sizeof b, "%s/t_docs_bundle_%d", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp", (int)getpid());
         char d[300], m[400]; snprintf(d, sizeof d, "%s/Games/0100ABCD00010000/资源包", b);

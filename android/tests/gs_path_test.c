@@ -51,11 +51,14 @@ static int fails;
     if (!(cond)) { printf("FAIL %d: %s\n", __LINE__, #cond); fails++; } \
 } while (0)
 
-static char g_result_path[256];
+static char g_result_path[4096];
 static void write_result(const char *json) {
-    snprintf(g_result_path, sizeof g_result_path,
-             "/tmp/gs-path-test-%d.json", (int)getpid());
+    const char *tmp = getenv("TMPDIR");
+    int n = snprintf(g_result_path, sizeof g_result_path,
+                     "%s/gs-path-test-%d.json", tmp && *tmp ? tmp : ".", (int)getpid());
+    if (n < 0 || (size_t)n >= sizeof g_result_path) abort();
     FILE *f = fopen(g_result_path, "w");
+    if (!f) abort();
     fputs(json, f);
     fclose(f);
     setenv("S2A_CAPPROBE_RESULT", g_result_path, 1);
@@ -98,7 +101,7 @@ int main(void) {
     write_result(RESULT("known-bad", "unsupported"));
     expect("known-bad", 1, 0, "known-bad:unsupported");
     write_result(RESULT("runtime-lost", "unsupported"));
-    expect("runtime-lost", 1, 0, "runtime-lost:unsupported");
+    expect("legacy runtime-lost", 1, 0, "legacy-runtime-lost:inconclusive");
     write_result(RESULT("probe", "inconclusive"));
     expect("inconclusive", 1, 0, "probe:inconclusive");
     write_result("{\"schema\":1}");

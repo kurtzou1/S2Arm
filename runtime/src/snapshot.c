@@ -687,13 +687,18 @@ static void *snap_timer(void *arg) {
 #include "s2a_session.h"
 static void snap_restart_cb(int rc, const char *why, void *ctx) { (void)ctx; LOG("即时存档：进程内重启%s%s%s", rc ? "没成：" : "已开始", rc && why ? why : "", ""); }
 static void *snap_restart_timer(void *arg) {
-    (void)arg; long sec = atol(getenv("S2A_SNAP_RESTART_AT")); const char *dir = s2a_snap_path(getenv("S2A_SNAP_RESTART_DIR"));
+    (void)arg; long sec = atol(getenv("S2A_SNAP_RESTART_AT")); const char *dir = strdup(s2a_snap_path(getenv("S2A_SNAP_RESTART_DIR")));   // 留一份（s2a_snap_path 回的是轮转的静态缓冲，连着几次要跨几分钟）
     int s2a_thread_alive_count(void); while (s2a_thread_alive_count() == 0) usleep(200000);
-    sleep((unsigned)sec);
-    while (atomic_load(&g_snap_busy)) usleep(100000);   // 正在存就等存完
-    LOG("即时存档：游戏起来后 %ld 秒到点，回到快照（进程内重启）%s", sec, dir);
-    setenv("S2A_SNAP_RESTORE", dir, 1);
-    int rc = s2a_host_restart(snap_restart_cb, NULL); if (rc) LOG("【红】即时存档：进程内重启请求被拒 %d", rc);
+    // S2A_SNAP_RESTART_REPEAT=<次数>（缺省 1）：连着回到快照几次，每次都等上一次重建完、再过同样的秒数（量连续恢复的内存 / 残留用）
+    long rep = 1; { const char *r = getenv("S2A_SNAP_RESTART_REPEAT"); if (r && atol(r) > 1) rep = atol(r); }
+    for (long i = 0; i < rep; i++) {
+        if (i) { sleep(2); int st; while ((st = s2a_host_session_state()) != S2A_SESSION_RUNNING && st != S2A_SESSION_FAILED) usleep(200000); if (st == S2A_SESSION_FAILED) { LOG("【红】即时存档：上一次进程内重启没起来，后面 %ld 次不做", rep - i); break; } }
+        sleep((unsigned)sec);
+        while (atomic_load(&g_snap_busy)) usleep(100000);   // 正在存就等存完
+        LOG("即时存档：游戏起来后 %ld 秒到点，回到快照（进程内重启，第 %ld / %ld 次）%s", sec, i + 1, rep, dir);
+        setenv("S2A_SNAP_RESTORE", dir, 1);
+        int rc = s2a_host_restart(snap_restart_cb, NULL); if (rc) LOG("【红】即时存档：进程内重启请求被拒 %d", rc);
+    }
     return NULL;
 }
 __attribute__((constructor)) static void snap_restart_ctor(void) {

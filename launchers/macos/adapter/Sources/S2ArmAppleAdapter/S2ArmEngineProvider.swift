@@ -293,6 +293,9 @@ public final class S2ArmEngineProvider: EngineProvider {
         if let user = s.values["playerUser"] {
             arguments["player"] = ["user": user, "name": s.values["playerName"] ?? "", "folder": s.values["playerFolder"] ?? "SaveData"]
         }
+        if let localPlayers = s.values["localPlayers"] {
+            arguments["localPlayers"] = localPlayers
+        }
         return arguments
     }
 

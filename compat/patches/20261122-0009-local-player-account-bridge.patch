@@ -1,0 +1,174 @@
+diff --git a/src/Ryujinx.HLE/HOS/Applets/PlayerSelect/PlayerSelectApplet.cs b/src/Ryujinx.HLE/HOS/Applets/PlayerSelect/PlayerSelectApplet.cs
+index 65a61379c129cf5d2ac3a38da2f558a97fb7c157..81f984b8b539277d1461d63e0cdd5b5dbd828625 100644
+--- a/src/Ryujinx.HLE/HOS/Applets/PlayerSelect/PlayerSelectApplet.cs
++++ b/src/Ryujinx.HLE/HOS/Applets/PlayerSelect/PlayerSelectApplet.cs
+@@ -61,6 +61,28 @@ namespace Ryujinx.HLE.HOS.Applets
+ 
+                 return ResultCode.Success;
+             }
++            var create = S2AHooks.CreateLocalPlayer;
++            if (create != null && mode is 0 or UiModeUserCreator)
++            {
++                var accounts = _system.AccountManager;
++                var excluded = InvalidUsers(uiSettings);
++                var candidates = accounts.GetAllUsers().Where(u => !excluded.Contains(u.UserId)).ToArray();
++                var preferred = candidates.FirstOrDefault(u => u.UserId == accounts.LastOpenedUser.UserId) ?? candidates.FirstOrDefault();
++                if (mode == UiModeUserCreator || candidates.Length == 0)
++                {
++                    string initial = $"Player{accounts.GetUserCount() + 1}";
++                    if (!Ask("新建 S2Arm 玩家", "输入新玩家的名字", initial, create))
++                        Complete(create, initial);
++                }
++                else if (candidates.Length == 1 || !Ask("选择 S2Arm 玩家",
++                    string.Join("  ", candidates.Select((u, i) => $"{i + 1}. {u.Name}")),
++                    (Array.IndexOf(candidates, preferred) + 1).ToString(),
++                    value => int.TryParse(value, out int n) && n >= 1 && n <= candidates.Length ? candidates[n - 1] : null))
++                {
++                    Complete(_ => preferred, "");
++                }
++                return ResultCode.Success;
++            }
+             if (mode == UiModeUserCreator)
+             {
+                 UserProfile created = CreatePlayerUser();
+@@ -79,13 +101,7 @@ namespace Ryujinx.HLE.HOS.Applets
+             // picks or creates another user: answer an existing user not in the list, else create one as UserCreator does.
+             if (selected != null && uiSettings != null && uiSettings.Length >= InvalidUidListOffset + InvalidUidListCount * 16)
+             {
+-                HashSet<UserId> invalid = new();
+-                for (int i = 0; i < InvalidUidListCount; i++)
+-                {
+-                    int at = InvalidUidListOffset + 16 * i;
+-                    UserId id = new(uiSettings[at..(at + 16)]);
+-                    if (!id.IsNull) invalid.Add(id);
+-                }
++                var invalid = InvalidUsers(uiSettings);
+                 if (invalid.Contains(selected.UserId))
+                 {
+                     UserProfile other = _system.AccountManager.GetAllUsers().FirstOrDefault(u => !invalid.Contains(u.UserId)) ?? CreatePlayerUser();
+@@ -113,6 +129,47 @@ namespace Ryujinx.HLE.HOS.Applets
+             return ResultCode.Success;
+         }
+ 
++        private static HashSet<UserId> InvalidUsers(byte[] settings)
++        {
++            HashSet<UserId> invalid = new();
++            for (int i = 0; settings != null && i < InvalidUidListCount; i++)
++            {
++                int at = InvalidUidListOffset + i * 16;
++                if (at + 16 > settings.Length) break;
++                UserId id = new(settings[at..(at + 16)]);
++                if (!id.IsNull) invalid.Add(id);
++            }
++            return invalid;
++        }
++
++        private bool Ask(string title, string guide, string initial, Func<string, UserProfile> resolve)
++        {
++            if (_system.Device.UIHandler is not Ryujinx.HLE.UI.IAsyncTextInput input) return false;
++            var args = new SoftwareKeyboardUIArgs
++            {
++                HeaderText = title, SubtitleText = guide, InitialText = initial,
++                StringLengthMin = 1, StringLengthMax = 32,
++            };
++            return input.BeginTextInput(args, (ok, value) => Complete(resolve, ok ? value : null)) != null;
++        }
++
++        private void Complete(Func<string, UserProfile> resolve, string value)
++        {
++            UserProfile user = null;
++            try
++            {
++                if (value != null) user = resolve(value);
++                if (user != null) S2AHooks.UserSelected?.Invoke(user.UserId);
++            }
++            catch (Exception e)
++            {
++                Logger.Error?.Print(LogClass.ServiceAm, $"Local player operation failed: {e.Message}");
++            }
++            _normalSession.Push(user == null ? BuildCancelledResponse() : BuildResponse(user));
++            AppletStateChanged?.Invoke(this, null);
++            _system.ReturnFocus();
++        }
++
+         // Adds a user the way the console's user creator would, with the default icon and a free PlayerN nickname (the host has
+         // no nickname / icon UI).
+         private UserProfile CreatePlayerUser()
+diff --git a/src/Ryujinx.HLE/HOS/Services/Account/Acc/AccountManager.cs b/src/Ryujinx.HLE/HOS/Services/Account/Acc/AccountManager.cs
+index b57df13df14de4bcd66a44661e4305945d0a73bf..cbb017ec5d8368a37355be55c43ad723452659fd 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Account/Acc/AccountManager.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Account/Acc/AccountManager.cs
+@@ -24,6 +24,7 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc
+         private readonly HorizonClient _horizonClient;
+ 
+         private readonly ConcurrentDictionary<string, UserProfile> _profiles;
++        private string[] _userOrder = [];
+         private UserProfile[] _storedOpenedUsers;
+ 
+         public UserProfile LastOpenedUser { get; private set; }
+@@ -219,7 +220,7 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc
+ 
+         internal int GetUserCount()
+         {
+-            return _profiles.Count;
++            return GetAllUsers().Count();
+         }
+ 
+         internal bool TryGetUser(UserId userId, out UserProfile profile)
+@@ -229,7 +230,14 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc
+ 
+         public IEnumerable<UserProfile> GetAllUsers()
+         {
+-            return _profiles.Values;
++            if (_userOrder.Length == 0) return _profiles.Values;
++            return _userOrder.Select(key => _profiles.TryGetValue(key, out var user) ? user : null)
++                .Where(user => user != null);
++        }
++
++        public void SetUserOrder(IEnumerable<UserId> orderedUsers)
++        {
++            _userOrder = orderedUsers.Select(id => id.ToString()).Distinct().ToArray();
+         }
+ 
+         internal IEnumerable<UserProfile> GetOpenedUsers()
+diff --git a/src/Ryujinx.HLE/Loaders/Processes/ProcessLoaderHelper.cs b/src/Ryujinx.HLE/Loaders/Processes/ProcessLoaderHelper.cs
+index 31f66c777ea69709b340d3fe3f6efeca8dac4a84..f93c3c556be93d953f4b37bb7efc2f504fa327d0 100644
+--- a/src/Ryujinx.HLE/Loaders/Processes/ProcessLoaderHelper.cs
++++ b/src/Ryujinx.HLE/Loaders/Processes/ProcessLoaderHelper.cs
+@@ -140,6 +140,19 @@ namespace Ryujinx.HLE.Loaders.Processes
+             if (resultCode.IsFailure())
+             {
+                 Logger.Error?.Print(LogClass.Application, $"Error calling EnsureApplicationSaveData. Result code {resultCode.ToStringWithName()}");
++                return resultCode;
++            }
++
++            if (S2AHooks.CreateLocalPlayer == null) return resultCode;
++            foreach (var profile in device.System.AccountManager.GetAllUsers())
++            {
++                if (profile.UserId == device.System.AccountManager.LastOpenedUser.UserId) continue;
++                Uid otherUid = profile.UserId.ToLibHacUid();
++                LibHac.Result otherRes = device.System.LibHacHorizonManager.RyujinxClient.Fs.EnsureApplicationSaveData(out _, applicationId, in control, in otherUid);
++                if (otherRes.IsFailure())
++                {
++                    Logger.Warning?.Print(LogClass.Application, $"Error calling EnsureApplicationSaveData for secondary user {profile.UserId}. Result code {otherRes.ToStringWithName()}");
++                }
+             }
+ 
+             return resultCode;
+diff --git a/src/Ryujinx.HLE/S2AHooks.cs b/src/Ryujinx.HLE/S2AHooks.cs
+index f7b291f51b03593590dab96924f5139c82215235..b4d41be6cf4d3d743aecf4811cca4e6a298a5d20 100644
+--- a/src/Ryujinx.HLE/S2AHooks.cs
++++ b/src/Ryujinx.HLE/S2AHooks.cs
+@@ -133,6 +133,12 @@ namespace Ryujinx.HLE
+         // directory of the synthesized archive, null when it cannot. Consulted only after the game's own systemdata/<id>/, so real data wins
+         public static System.Func<ulong, string> SystemDataFallback;
+ 
++        // S2Arm multi-user: create and persist a new S2Arm LocalPlayer when an additional controller joins and no unused S2Arm player remains.
++        public static System.Func<string, Ryujinx.HLE.HOS.Services.Account.Acc.UserProfile> CreateLocalPlayer;
++
++        // S2Arm multi-user: record that a user profile was selected/bound in PlayerSelectApplet during this session.
++        public static System.Action<Ryujinx.HLE.HOS.Services.Account.Acc.UserId> UserSelected;
++
+         public static string SystemDataDir(ulong id)
+         {
+             if (SystemDataRoot != null)

@@ -16,6 +16,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="S2A.ShBake" /> <!-- S2A：离线着色器烘焙器宿主单测（selftest-gsdiag）用诊断钩子内部入口 -->
+    <InternalsVisibleTo Include="S2A.Services.Tests" /> <!-- S2A：服务层回归直测网卡候选评分 -->
   </ItemGroup>
 
 </Project>

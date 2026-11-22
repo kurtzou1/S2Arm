@@ -7,11 +7,13 @@
   adreno-8xx-qcom = 骁龙 8 至尊版 / Adreno 830
   mali-g710-r32p1 = 天玑 9000 / Mali-G710 MC10
   minimal-1.1     = Vulkan 1.1 保守档（只留建设备必需的特性、不列任何设备扩展；限值 / 格式 / 内存取两台真机逐项更紧）
+  lavapipe        = CI 的 Mesa 26.0.8，经 M0 采集；Linux 宿主不提供 Android 系统段
 三份怎么来的见 android/tests/devprofiles/make_profiles.py。假驱动只读档案的 api / identity / vulkan 三段；
 档案里写 null（来源没有读数）的项，假驱动按「无」回答（与原形态档同一口径）。
 
 子命令：
   header <out.h>                    出各档的 C 头（假驱动 fake_vk.c 按 S2A_CAPS_SHAPE 选档）
+  policy-header <out.h>             为 L0 保留原档的未知字段和系统事实
   names                             列档名
   oracle <档名> <设备打出的 caps JSON>  真机档：本构建在该形态下打出的 caps 和 android/tests/vk/profiles/devices/*.json 逐项比
   compare <档名> <生成的档案>          本构建在该形态下现查生成的设备档案和该档的档案文件逐字段比（期望 = 档案文件本身）
@@ -36,14 +38,18 @@ EXT_FEATURES = (('shaderDrawParameters', 'shaderDrawParameters'), ('timelineSema
                 ('indexTypeUint8', 'indexTypeUint8'), ('customBorderColors', 'customBorderColors'),
                 ('customBorderColorWithoutFormat', 'customBorderColorWithoutFormat'),
                 ('vertexAttributeInstanceRateDivisor', 'vertexAttributeInstanceRateDivisor'),
-                ('vertexAttributeInstanceRateZeroDivisor', 'vertexAttributeInstanceRateZeroDivisor'), ('formatA4B4G4R4', 'formatA4B4G4R4'),
-                ('formatA4R4G4B4', 'formatA4R4G4B4'),
+                ('vertexAttributeInstanceRateZeroDivisor', 'vertexAttributeInstanceRateZeroDivisor'),
+                ('formatA4B4G4R4', 'formatA4B4G4R4'), ('formatA4R4G4B4', 'formatA4R4G4B4'),
                 ('depthClipControl', 'depthClipControl'), ('swapchainMaintenance1', 'swapchainMaintenance1'),
                 ('runtimeDescriptorArray', 'diRuntimeArray'), ('descriptorBindingPartiallyBound', 'diPartiallyBound'),
                 ('shaderSampledImageArrayNonUniformIndexing', 'diSampledNonUniform'),
                 ('shaderStorageImageArrayNonUniformIndexing', 'diStorageNonUniform'),
                 ('descriptorBindingVariableDescriptorCount', 'diVariableCount'),
                 ('descriptorBindingSampledImageUpdateAfterBind', 'diSampledUpdateAfterBind'))
+EXT_PROPERTIES = (('subgroupQuadOperationsInAllStages', 'subgroup_quad_all'),
+                  ('maxCustomBorderColorSamplers', 'border_max'), ('maxVertexAttribDivisor', 'divisor_max'),
+                  ('filterMinmaxSingleComponentFormats', 'minmax_single'), ('filterMinmaxImageComponentMapping', 'minmax_mapping'),
+                  ('minImportedHostPointerAlignment', 'host_align'))
 
 
 def names():
@@ -97,11 +103,8 @@ def header(out):
         lines.append('  .driver_id = %d, .driver_name = %s, .max_alloc = %dull, .max_per_set = %d, .subgroup_size = %d,' % (
             z(i['driverId']), c_str(z(i['driverName'], '')), z(pr.get('maxMemoryAllocationSize')), z(pr.get('maxPerSetDescriptors'), 1024),
             z(pr.get('subgroupSize'))))
-        lines.append('  .subgroup_stages = %du, .subgroup_ops = %du, .subgroup_quad = %du,' % (
-            z(pr.get('subgroupSupportedStages')), z(pr.get('subgroupSupportedOperations')), z(pr.get('subgroupQuadOperationsInAllStages'))))
-        lines.append('  .border_max = %du, .minmax_single = %du, .minmax_mapping = %du, .vdiv_max = %du, .host_align = %dull,' % (
-            z(pr.get('maxCustomBorderColorSamplers')), z(pr.get('filterMinmaxSingleComponentFormats')), z(pr.get('filterMinmaxImageComponentMapping')),
-            z(pr.get('maxVertexAttribDivisor')), z(pr.get('minImportedHostPointerAlignment'))))
+        lines.append('  .subgroup_stages = %du, .subgroup_ops = %du,' % (z(pr.get('subgroupSupportedStages')), z(pr.get('subgroupSupportedOperations'))))
+        lines.append('  ' + ', '.join('.%s = %s' % (field, c_val(z(pr.get(k)))) for k, field in EXT_PROPERTIES) + ',')
         mem = v['memory']
         lines.append('  .n_heap = %d, .heaps = { %s }, .n_type = %d, .types = { %s },' % (
             len(mem['heaps']), ', '.join('{%dull, %d}' % (h['size'], h['flags']) for h in mem['heaps']),
@@ -118,6 +121,27 @@ def header(out):
     lines.append('}')
     lines.append('static const char *const cs_instance_ext[] = { %s };' % ', '.join(c_str(e) for e in INSTANCE_EXTS))
     open(out, 'w').write('\n'.join(lines) + '\n')
+
+
+def policy_header(out):
+    # 建设备的替身必须对 Vulkan 查询返回 0 或 1。策略 L0 另保留来源里的 null，
+    # 并使用档案系统段，而不是把构建宿主的页大小或核数当成设备事实。
+    lines = ['static const struct policy_archive policy_archives[] = {']
+    for name in names():
+        p = load(name)
+        s, v = p['system'], p['vulkan']
+        features = v['features']
+        unknown_formats = [fmt for fmt, flags in v['formats'].items() if flags is None]
+        formats = ', '.join([*unknown_formats, 'VK_FORMAT_UNDEFINED'])
+        lines.append('    { .name = %s, .ext_unknown = %d, .index_known = %d, .border_known = %d, .packed_known = %d,' % (
+            c_str(name), 'extensionsWhy' in v or -1 in v['extensions'].values(), features.get('indexTypeUint8') is not None,
+            features.get('customBorderColors') is not None, features.get('formatA4B4G4R4') is not None))
+        lines.append('      .page_size = %d, .kgsl = %d, .adpf = %d, .vsync = %d,' % (
+            z(s['pageSize'], -1), z(s['kgsl'], -1), z(s['adpf'], -1), z(s['vsyncApi'], -1)))
+        lines.append('      .unknown_formats = (const VkFormat[]){%s} },' % formats)
+    lines.append('};')
+    with open(out, 'w', encoding='utf-8') as output:
+        output.write('\n'.join(lines) + '\n')
 
 
 def caps_format_groups():
@@ -250,6 +274,7 @@ def check_variant(name, got_path):
 if __name__ == '__main__':
     cmd = sys.argv[1] if len(sys.argv) > 1 else ''
     if cmd == 'header' and len(sys.argv) == 3: header(sys.argv[2])
+    elif cmd == 'policy-header' and len(sys.argv) == 3: policy_header(sys.argv[2])
     elif cmd == 'names': print(' '.join(names()))
     elif cmd == 'oracle' and len(sys.argv) == 4: sys.exit(oracle(sys.argv[2], sys.argv[3]))
     elif cmd == 'compare' and len(sys.argv) == 4: sys.exit(compare(sys.argv[2], sys.argv[3]))

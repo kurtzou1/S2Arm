@@ -450,7 +450,7 @@ static int alias_first_hint(const char *npdm, uint64_t pid) {
         if (!strncmp(line, "大区来源\t分配器初始化", strlen("大区来源\t分配器初始化"))) g_alias_alloc = 1;   // addr_need.py：静态大区经 StandardAllocator 初始化申请（改写器闸门压得了）
         if (!strncmp(line, "别名区GB\t", strlen("别名区GB\t"))) alias = strtoull(line + strlen("别名区GB\t"), NULL, 10);
         else if (!strncmp(line, "别名区上限\t不定", strlen("别名区上限\t不定"))) unbounded = 1;
-        else if (!strncmp(line, "上限不定原因\t", strlen("上限不定原因\t"))) { line[strcspn(line, "\n")] = 0; LOG("布局提示：别名区上限不定，不收窗口（照旧 64 GiB + 远端）——%s", line + strlen("上限不定原因\t")); }
+        else if (!strncmp(line, "上限不定原因\t", strlen("上限不定原因\t"))) { line[strcspn(line, "\n")] = 0; LOG("布局提示：别名区上限不定（窗口放不下时照样收到窗口末；收小后申请地址区失败就记下本款、下一局不收）——%s", line + strlen("上限不定原因\t")); }
         else if (!strncmp(line, "程序号\t", strlen("程序号\t"))) { tp = strtoull(line + strlen("程序号\t"), NULL, 16); has_pid = 1; }
     }
     fclose(f);
@@ -501,6 +501,19 @@ int s2a_mem_heap_learned_restart(void) {
 static int alias_full_seen(uint64_t pid) { char p[1024]; FILE *f = alias_full_path(p, sizeof p, pid) ? fopen(p, "r") : NULL; if (f) fclose(f); return f != NULL; }   // 只用 fopen / fclose：安卓 VM 端点集合（check_endpoints.py）
 // 收小后游戏照旧映射到收掉的那段（它没按报的大小来，比如写死了 64 GiB）：这一局照常服务（那段在 L.alias_size 内，伸出窗口的走远端，同收小前），
 //   报一次红并记下本款，下次起局恢复原值——宁慢不写错
+// 收小后 SDK 申请地址区失败（gate.c 地址区返回门调，rc = AllocateAddressRegion 的返回值）：本局报给游戏的别名区收小过才管。当场记下本款（同上 alias_full，下一局恢复原值）、
+//   打一行红（开局 / 局中分开写，诊断里能统计），并让下次启动问发诊断。本局不救：游戏接下来会把 0 当地址用（11-21 D-97S7：收到 11 GB、开局即失败、随后段错误）
+void s2a_alias_alloc_failed(uint32_t rc) {
+    if (!g_alias_report || g_alias_report >= L.alias_size) return;
+    static _Atomic int said; if (atomic_exchange(&said, 1)) return;
+    char p[1024]; int ok = 0;
+    if (alias_full_path(p, sizeof p, g_lay_pid)) { FILE *f = fopen(p, "w"); if (f) ok = !fclose(f); }
+    uint64_t (*pc)(void) = (uint64_t (*)(void))dlsym(RTLD_DEFAULT, "mtl_present_count"); uint64_t frames = pc ? pc() : 0;   // 直连图形层；单测 / 安卓没有 = 按开局算
+    LOG("【红】收小后%s申请地址区失败：报给游戏的别名区 %llu MB（内部 %llu MB），SDK AllocateAddressRegion 回 %#x（已出 %llu 帧）；%s", frames ? "局中" : "开局",
+        (unsigned long long)(g_alias_report >> 20), (unsigned long long)(L.alias_size >> 20), rc, (unsigned long long)frames, ok ? "已记下本款，下一局别名区恢复原值" : "记录写不进，下一局仍会收小");
+    // 每一次都要能从玩家诊断里统计到：会话标记改成「游戏中止」，下次启动问发诊断（sesdiag.c，同 Break 收局那条）；本局接下来多半段错误，标记不删
+    { void (*ab)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "s2a_sesmark_abort_home"); if (ab) ab(); }
+}
 static void alias_report_overrun(uint64_t a, uint64_t size) {
     static _Atomic int said; if (atomic_exchange(&said, 1)) return;
     char p[1024]; int ok = 0;
@@ -561,15 +574,26 @@ static void layout_prepare(const char *npdm) {
     //   宿主只剩 11 GB，虚拟池预留减半到 16 MB 也占不到、Metal 拿到空数据崩。布局按收窄后的大小算，多出的尾部由下面 s2a_window_trim 还给宿主；
     //   只在窗口本来就放不下标准布局（按需档）时收：放得下的款照旧给满标准布局，不因学到的跨度小而改成按需。
     //   收窄后放不下走原有自愈（-2 → 删记录、放宽重算）。单款包构造期已按本款跨度给，这里至多再收 1 GiB 取整的零头
-    { uint64_t (*span_seen)(uint64_t) = (uint64_t (*)(uint64_t))dlsym(RTLD_DEFAULT, "s2a_window_span_seen");   // vawin.c；安卓 / 单测没有就不收
+    uint64_t cap = 0, cap_span = 0;
+    { uint64_t (*span_seen)(uint64_t) = (uint64_t (*)(uint64_t))dlsym(RTLD_DEFAULT, "s2a_window_span_seen");   // vawin.c；安卓 / 单测没有就不收（收窄过、那局没到首帧的回 0）
       uint64_t (*for_span)(uint64_t) = (uint64_t (*)(uint64_t))dlsym(RTLD_DEFAULT, "s2a_window_for_span");
-      uint64_t cap = span_seen && for_span ? for_span(span_seen(pid)) : 0;
+      cap_span = span_seen && for_span ? span_seen(pid) : 0; cap = cap_span ? for_span(cap_span) : 0;
       // 即时存档恢复：窗口要与快照时一样（vawin.c 构造期已按快照清单占），学到的跨度不再收（两局之间学到的不同，收了就「窗口不符」）
-      { int s2a_snap_restoring(void); if (cap && s2a_snap_restoring()) { LOG("即时存档恢复：不按本款学到的跨度收窗口（窗口保持快照时的 %llu MB）", (unsigned long long)(ws >> 20)); cap = 0; } }
-      if (ws < g_lay_need && cap && cap < ws) { LOG("地址窗口：按本款（%016llx）学到的跨度收到 %llu MB（原 %llu MB），其余还给宿主", (unsigned long long)pid, (unsigned long long)(cap >> 20), (unsigned long long)(ws >> 20)); ws = cap; } }
+      { int s2a_snap_restoring(void); if (cap && s2a_snap_restoring()) { LOG("即时存档恢复：不按本款学到的跨度收窗口（窗口保持快照时的 %llu MB）", (unsigned long long)(ws >> 20)); cap = 0; } } }
     int alias_gb = alias_first_hint(npdm, pid);
     { void s2a_layout_heap_floor_set(uint64_t); uint64_t hn = heap_need_read(pid); s2a_layout_heap_floor_set(hn); g_lay_heap_floor = hn;   // 上一局真要过的普通堆（见 heap_need_path）
       if (hn) LOG("地址布局：本款上一局要过 %llu MB 普通堆（wire/%016llX/heap_need），堆区至少给到这么多", (unsigned long long)(hn >> 20), (unsigned long long)pid); }
+      // 收窄前按收窄后的大小试算一遍：堆区装不下这款要的堆（上一局记录；没记录按应用池满额）就不收。D-PR33（11-21，iOS 26.7、0.6.7）：
+      //   学到的跨度来自开局就因窗口太小停掉的局（只碰到 356 MB），收到 3072 MB 后堆区只剩 2716 MB、游戏要 3252 MB，又停在开局——
+      //   这条路不经构造期的当场放宽（s2a_window_span_widen 只认构造期按单款收的窗口），自愈不了，每局都打不开
+      if (ws < g_lay_need && cap && cap < ws) {
+          s2a_layout tl; uint64_t tmb = 0, tsb = 0, want = g_lay_heap_floor ? g_lay_heap_floor : APP_POOL;
+          if (s2a_layout_cap_fits(s2a_layout_compute(t, sr, mod, alias_gb, wb, cap, &tl, &tmb, &tsb), tl.heap_base, wb + cap, want)) {
+              LOG("地址窗口：按本款（%016llx）学到的跨度收到 %llu MB（原 %llu MB），其余还给宿主", (unsigned long long)pid, (unsigned long long)(cap >> 20), (unsigned long long)(ws >> 20)); ws = cap;
+              void (*cap_try)(const char *, uint64_t, uint64_t) = (void (*)(const char *, uint64_t, uint64_t))dlsym(RTLD_DEFAULT, "s2a_window_cap_try");
+              if (cap_try) cap_try(NULL, pid, cap_span); }   // 首帧上屏删；没到首帧下一局就不按这个跨度收（vawin.c s2a_window_span_trust）
+          else LOG("地址窗口：本款（%016llx）学到的跨度只够 %llu MB 窗口，堆区装不下要的 %llu MB 堆，不收窄（保持 %llu MB）",
+                   (unsigned long long)pid, (unsigned long long)(cap >> 20), (unsigned long long)(want >> 20), (unsigned long long)(ws >> 20)); }
     int rc = s2a_layout_compute(t, sr, mod, alias_gb, wb, ws, &L, &g_mod_base, &g_shadow_base);
     if (rc == -1) die("【红】NPDM 地址空间类型 %u（%s）暂不支持（布局只支持类型 1 = 36 位、3 = 39 位）", t, s2a_as_type_bits(t));
     if (rc == -2) {   // 窗口按学到的跨度收窄了（#783）：当场放宽回缺省给法、重算一次（vawin.c；安卓 / 单测没有这个就不调）

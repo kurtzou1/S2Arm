@@ -308,7 +308,10 @@ static partial class Program
         Check("exact 18-component vertex budget passes", Translate(true, [31], [31], "direct", TargetLanguage.Spirv, vertexLimit: 18).Count == 2);
         Rejected("17-component vertex budget rejects", () => Translate(true, [31], [31], "direct", TargetLanguage.Spirv, vertexLimit: 17));
         Rejected("3-component fragment budget rejects vec4", () => Translate(true, [31], [31], "direct", TargetLanguage.Spirv, fragmentLimit: 3));
-        Rejected("missing vertex limit refuses unsupported capability", () => Translate(true, [31], [31], "direct", TargetLanguage.Spirv, vertexLimit: 0));
+        // Unknown limit (0, a profile that never measured it) does not block linking; measured positive limits still do (the 17 / 3 cases above).
+        //   Same contract as the direct compiler (graphics/tools/direct/tests/compiler: "linked accepts unknown/zero limit").
+        Check("unknown vertex limit links without a budget check", Translate(true, [31], [31], "direct", TargetLanguage.Spirv, vertexLimit: 0).Count == 2);
+        Check("unknown fragment limit links without a budget check", Translate(true, [31], [31], "direct", TargetLanguage.Spirv, fragmentLimit: 0).Count == 2);
         DynamicCase(false, false); Check("dynamic dense identity retains legacy emission", true);
         DynamicCase(false, true); Check("dynamic dense native passthrough retains legacy emission", true);
         DynamicCase(true, false, 5); Check("dynamic sparse in-range identity retains legacy emission", true);

@@ -19,6 +19,7 @@ import re
 import sys
 
 LAYOUT = re.compile(r'布局：程序号 ([0-9a-fA-F]{16}) ')
+FIRST_FRAME = '首帧上屏'   # 宿主起局计时行「[起局] nnMain → 首帧上屏」（host_main.c）：这局出过第一帧
 SPAN = re.compile(r'地址按需 \[(?:收局|崩溃时)\]：宿主占到 0x[0-9a-f]+ \+(\d+) MB（标准布局要 (\d+) MB），本局所需跨度 (\d+) MB')
 
 
@@ -47,6 +48,8 @@ def collect(root):
                 text = open(os.path.join(dp, f), encoding='utf-8', errors='ignore').read()
             except OSError:
                 continue
+            if FIRST_FRAME not in text:   # D-PR33 / D-99XJ（11-21）：没出过首帧的局（窗口太小、开局要堆就停掉 / 游戏自己 Break）只碰到几百 MB，
+                continue                  #   收进种子会把窗口再收小、下一局照样停——自我强化。只收上过屏的局
             for pid, win, need, span in readings(text):
                 mx, n = seen.get(pid, (0, 0))
                 seen[pid] = (max(mx, span), n + 1)

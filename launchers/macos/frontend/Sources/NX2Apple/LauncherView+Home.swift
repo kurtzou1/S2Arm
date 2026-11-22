@@ -94,7 +94,7 @@ extension LauncherView {
                 HStack(spacing: 10) {
                     Text(txt("library.hostUpdate.incompatible")).font(.manrope(12.5)).foregroundStyle(.white.opacity(0.75)).fixedSize(horizontal: false, vertical: true)
                     Button(txt("library.hostUpdate.prepare")) { model.exportFor = game.id }
-                        .buttonStyle(.link).disabled(model.mainBusy).controllerID("hero.hostUpdate")
+                        .controllerButtonStyle(.link).disabled(model.mainBusy).controllerID("hero.hostUpdate")
                 }
             }
             if let error = model.actionError(for: game.id) {

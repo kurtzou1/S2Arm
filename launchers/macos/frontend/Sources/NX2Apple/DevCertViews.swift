@@ -308,8 +308,8 @@ struct DevCertChooseSheet: View {
             .contentShape(Rectangle())
             .launcherPanel()
         }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("export.sign.choose.row." + c.entry)
+        .controllerButtonStyle(.plain).controllerRingRadius(LauncherTheme.Metrics.cardRadius)
+        .controllerID("export.sign.choose.row." + c.entry)
     }
 }
 

@@ -52,7 +52,8 @@ const char *s2a_capprobe_last_diag(void);
  * s2a_vk_gs_path): reads getenv("S2A_CAPPROBE_RESULT")'s result file
  * and renders it as a short static string — "<source>:<verdict>"
  * (e.g. "probe:supported", "known-bad:unsupported",
- * "runtime-lost:unsupported") — or a fixed token when no verdict can
+ * "legacy-runtime-lost:inconclusive" for old runtime writebacks) — or a
+ * fixed token when no verdict can
  * be read: "no-result" (variable unset), "unreadable" (file missing),
  * "malformed" (no gs_occlusion field). Anything that does not end in
  * ":supported" keeps the capability off.
@@ -67,19 +68,10 @@ const char *s2a_capprobe_gs_occ_state(void) __attribute__((weak));
  * host did not configure a probe directory this launch. */
 int s2a_capprobe_ensure(void);
 
-/* bridge.cpp — runtime DEVICE_LOST writeback: delegates to Java
- * CapProbe.markRuntimeLost so the current fingerprint's file is rewritten
- * with source=runtime-lost and gs_occlusion=unsupported. Only the
- * fingerprint is recorded, never the game.
- * The provider (bridge.cpp) must define it strongly: the game core-link
- * audit requires a strong provider, and a weak attribute on this shared
- * declaration would make bridge.cpp's definition weak too. Callers that may
- * link without bridge.cpp (host link units) reference it weakly via
- * S2A_CAPPROBE_RUNTIME_LOST_WEAK_REF (resolves NULL there — no Java exists,
- * so skipping the writeback is correct). */
+/* bridge.cpp — legacy entry point used by the generic Vulkan frontend.
+ * Strong export required by the game core-link audit and the managed ABI.
+ * CapProbe.ensure re-evaluates records from this entry point. */
 void s2a_capprobe_runtime_lost(void);
-#define S2A_CAPPROBE_RUNTIME_LOST_WEAK_REF \
-    extern void s2a_capprobe_runtime_lost(void) __attribute__((weak))
 
 #ifdef __cplusplus
 }
