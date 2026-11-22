@@ -46,6 +46,8 @@ int s2a_ios_keyboard_customized(void);        // 这款在改键页存过键位
 @class UIViewController, UIView, UITouch;
 // 改键页（带导航栏，模态呈现）；关掉后调 closed
 UIViewController *s2a_ios_keyboard_settings(void (^closed)(void));
+// 这一款的键位（keyboard.m 持有，改键页改完当场换）；实体系统手柄改键也读它（输入队列上调）
+const s2a_input_config *s2a_ios_pad_map_config(void);
 void s2a_ios_mouse_attach(UIView *root);      // mouse.m：主线程，controller.m 建好输入队列后调一次；root = 游戏页根视图（请求锁定用）
 void s2a_vpad_pointer_touch(UITouch *touch, int phase);   // vpad.m：触控板左键当触屏点（phase 0 按下、1 移动、2 抬起；主线程）
 #endif

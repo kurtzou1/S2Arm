@@ -5,6 +5,7 @@
 //   3. 签名表：每个契约函数的类型逐个钉死。改签名必须同时改这里和 NVN_GPU_CONTRACT_VERSION（两个后端同批改）。
 //   4. 错误码在独立区间、与安卓会话 ABI 不相交；nvn_gpu_rc 不能当 int 用（.mk 另跑两条「必须编译失败」的探针）。
 // 「头文件里没有 Metal / Vulkan 类型」由 .mk 里的去注释扫描判（注释里的 MTL* / Vk* 对照允许）。签名表与编译自洽不证明语义，语义见设计文档 §8 契约用例清单。
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include "nvn_backend.h"
@@ -28,6 +29,10 @@ _Static_assert(sizeof(((nvn_gpu_pipe_desc *)0)->st) / sizeof(nvn_gpu_stage_desc)
 _Static_assert(__builtin_types_compatible_p(__typeof__(((nvn_gpu_pipe_desc *)0)->blend[0]), blend_st), "混合状态用 NVN 记录");
 _Static_assert(__builtin_types_compatible_p(__typeof__(((nvn_gpu_pipe_desc *)0)->attr[0]), va_st), "顶点属性用 NVN 记录");
 _Static_assert(__builtin_types_compatible_p(__typeof__(((nvn_gpu_tex_desc *)0)->d), nvn_texdesc), "贴图描述用 NVN 记录");
+// 贴图描述的字节布局：回放夹具格式 §4.3（android/tests/replay_fixture/FORMAT.md）按这个逐字节写金样；末尾 2 字节是保留位（恒 0）
+_Static_assert(sizeof(nvn_texdesc) == 40 && offsetof(nvn_gpu_tex_desc, usage) == 40 && offsetof(nvn_gpu_tex_desc, host_w) == 44 && offsetof(nvn_gpu_tex_desc, host_h) == 48
+               && offsetof(nvn_gpu_tex_desc, swz) == 52 && offsetof(nvn_gpu_tex_desc, _rsv) == 54 && sizeof(((nvn_gpu_tex_desc *)0)->_rsv) == 2 && sizeof(nvn_gpu_tex_desc) == 56,
+               "贴图描述的字节布局变了：回放夹具格式 §4.3 与已提交的金样同批改");
 _Static_assert(__builtin_types_compatible_p(__typeof__(((nvn_gpu_dyn *)0)->ds), ds_st), "深度模板用 NVN 记录");
 _Static_assert(sizeof(((nvn_gpu_dyn *)0)->vp) == 16 * 6 * sizeof(float), "视口记录同 p_viewports");
 _Static_assert(sizeof(((nvn_gpu_err *)0)->why) >= 160, "why 至少容下安卓 s2a_record_result.why 的 160 字节");

@@ -271,7 +271,7 @@ static void e_tex(const nvn_texdesc *d, uint32_t usage, uint32_t hid) {
     bb b = {0};
     bx(&b, d, sizeof *d);                          // nvn_texdesc 40B 全字段
     b32(&b, usage); b32(&b, 0); b32(&b, 0);        // usage / host_w / host_h
-    b16(&b, 0); b8(&b, 0); b8(&b, 0);              // swz 恒等 / stencil_view / rsv
+    b16(&b, 0); b8(&b, 0); b8(&b, 0);              // swz 恒等 / rsv[2] 恒 0
     b32(&b, 0); b32(&b, hid);
     EXP(RFX_GPU_TEX_CREATE, &b);
 }

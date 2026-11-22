@@ -181,6 +181,7 @@ public static partial class SaveTransfer
     }
     private static JsonObject Restore(Context c)
     {
+        if (Community(c)) return RestoreCommunity(c);   // 其他模拟器 / 工具的存档（#2070）：备份当前存档后放进存档位置，下次起局读入
         using var archive = new Archive(Source(c));
         Identity(c, archive.Manifest);   // 对不上的提示检查时已给玩家看过（确认即同意）；sync 时照旧拒绝
         string fingerprint = Fingerprint(c.Root);

@@ -16,7 +16,7 @@
 // 隐私上不多留原文）。任一与当前会话不一致就整份拒绝——那是另一台设备 / 另一版翻译器的清单，拿来做
 // 预热只会白读盘。条目的阶段键只作日志/定位：开局 source_store 还是空的，预热不依赖它（c1 随记录落盘）。
 //
-// 有界：上限 debug.s2a.nvk_warm_max（缺省 8192 条，一条 844 字节，约 6.9 MB）。满了淘汰 uses 最低
+// 有界：上限 debug.s2a.nvk_warm_max（缺省 8192 条，一条 88 字节头 + 各阶段 c1 整段，常见约 0.9 KB，约 7 MB）。满了淘汰 uses 最低
 // （同 uses 淘汰最久没用）的一条，不拒绝新条目：热点优先才让常见路线先安全。
 // 缺省为什么是 8192：真机同进程 45 秒里出现 4430 个不同身份；世界场景一条路线（站着、前走、折返、转视角，约 6 分钟）
 // 一局出现 6533 个。缺省 4096 时只有走动才会用到的程序排在 uses 低位被挤掉，每次走进新区域都要在回放线程上
@@ -43,13 +43,72 @@
 #define NVK_PROG_WARM_PREFIX "programs-v1-"
 #define NVK_PROG_WARM_KEEP 2
 #define NVK_PROG_WARM_MAGIC 0x31575053u     // "SPW1" little-endian：S P W 1
-#define NVK_PROG_WARM_VERSION 1u
-#define NVK_PROG_WARM_HDR_FIELDS 60u        // magic4 版本4 条目大小4 条数4 profile32 ABI4 闭包摘要8
+#define NVK_PROG_WARM_VERSION 2u              // 2：条目变长，c1 按整段记（版本 1 每阶段定长 0x100：长 c1 被截，预热以同一身份发布后段全 0 的程序 → 八方旅人场景黑）。
+                                            //   版本 1 的文件整份按「版本不符」拒收（不按新格式误读），本局照常记、落盘写成版本 2
+#define NVK_PROG_WARM_HDR_FIELDS 60u        // magic4 版本4 条目头大小4 条数4 profile32 ABI4 闭包摘要8
 #define NVK_PROG_WARM_SUM 8u                // 末尾 FNV-1a 64
-#define NVK_PROG_WARM_ENTRY 844u            // identity32 mask4 keys24 c1_ok1 pad3 c1 768 uses4 last_use8
+#define NVK_PROG_WARM_ENTRY 88u             // 条目头：identity32 mask4 keys24 c1_ok1 lp_ok1 pad2 c1_len 3×4 uses4 last_use8；其后按阶段 0..2 依次接有效阶段的 c1 整段（各补齐到 4 字节）
+#define NVK_PROG_WARM_FILE_MAX (64u << 20)  // 读文件的体积硬顶（8192 条 × 平均 c1 约 1 KB ≈ 9 MB；硬顶留余量，超了整份拒）
 #define NVK_PROG_WARM_ABS_MAX 16384u        // 上限的硬顶（flag 调再大也不超过它）
-#define NVK_PROG_WARM_DEFAULT_MAX 8192      // 缺省上限（真机走一圈 6533 个身份；一条 844 字节，约 6.9 MB）
+#define NVK_PROG_WARM_DEFAULT_MAX 8192      // 缺省上限（真机走一圈 6533 个身份；一条约 0.9 KB，约 7 MB）
 #define NVK_PROG_WARM_MAX_PATH 640
+
+// c1 只读副本：只追加、按内容去重、进程内不释放。记录按值拷给预热线程 / 冻结快照 / 落盘排序，指针一直有效，
+//   不随会话复位作废（复位后预热线程手上残留的记录也不会读到释放过的内存）。量级 = 本进程见过的不同 c1 的总字节（几 MB）。
+static pthread_mutex_t g_c1_mu = PTHREAD_MUTEX_INITIALIZER;
+static struct { uint64_t h; uint32_t len; uint8_t *p; } *g_c1v;
+static uint32_t g_c1n, g_c1cap, *g_c1tab, g_c1tab_n;   // g_c1tab：开放寻址表，值 = 下标 + 1（0 = 空）
+static uint64_t c1_hash(const uint8_t *p, uint32_t len) {
+    uint64_t h = 1469598103934665603ull ^ len;
+    for (uint32_t i = 0; i < len; i++) { h ^= p[i]; h *= 1099511628211ull; }
+    return h ? h : 1;
+}
+static int c1_tab_put(uint32_t idx) {   // 调用方持 g_c1_mu；表至少半空
+    uint32_t m = g_c1tab_n - 1, i = (uint32_t)g_c1v[idx].h & m;
+    while (g_c1tab[i]) i = (i + 1) & m;
+    g_c1tab[i] = idx + 1;
+    return 0;
+}
+static const uint8_t *c1_intern(const uint8_t *p, uint32_t len) {
+    if (!p || len < NVK_PROG_REC_C1_MIN || len > NVK_PROG_REC_C1_MAX) return NULL;
+    const uint64_t h = c1_hash(p, len);
+    pthread_mutex_lock(&g_c1_mu);
+    if (g_c1tab_n) {
+        for (uint32_t m = g_c1tab_n - 1, i = (uint32_t)h & m; g_c1tab[i]; i = (i + 1) & m) {
+            uint32_t k = g_c1tab[i] - 1;
+            if (g_c1v[k].h == h && g_c1v[k].len == len && !memcmp(g_c1v[k].p, p, len)) { const uint8_t *r = g_c1v[k].p; pthread_mutex_unlock(&g_c1_mu); return r; }
+        }
+    }
+    if (g_c1n == g_c1cap) {
+        uint32_t cap = g_c1cap ? g_c1cap * 2 : 256;
+        void *v = realloc(g_c1v, (size_t)cap * sizeof *g_c1v);
+        if (!v) { pthread_mutex_unlock(&g_c1_mu); return NULL; }
+        g_c1v = v; g_c1cap = cap;
+    }
+    if ((uint64_t)(g_c1n + 1) * 2 > g_c1tab_n) {   // 装载率 ≤ 1/2：翻倍重建
+        uint32_t n = g_c1tab_n ? g_c1tab_n * 2 : 512;
+        uint32_t *t = calloc(n, sizeof *t);
+        if (!t) { pthread_mutex_unlock(&g_c1_mu); return NULL; }
+        free(g_c1tab); g_c1tab = t; g_c1tab_n = n;
+        for (uint32_t k = 0; k < g_c1n; k++) c1_tab_put(k);
+    }
+    uint8_t *q = malloc(len);
+    if (!q) { pthread_mutex_unlock(&g_c1_mu); return NULL; }
+    memcpy(q, p, len);
+    g_c1v[g_c1n].h = h; g_c1v[g_c1n].len = len; g_c1v[g_c1n].p = q;
+    c1_tab_put(g_c1n++);
+    pthread_mutex_unlock(&g_c1_mu);
+    return q;
+}
+// 把记录里有效阶段的 c1 换成本模块的只读副本；长度越界 / 指针空 / 内存不足的阶段清掉有效位（那一段按没捕获处理，同 build 的判据）。
+static void rec_intern_c1(struct nvk_prog_rec *r) {
+    for (int st = 0; st < NVK_PROG_REC_STAGES; st++) {
+        const uint8_t *q = (r->c1_ok & (1u << st)) ? c1_intern(r->c1[st], r->c1_len[st]) : NULL;
+        if (!q) { r->c1_ok &= (uint8_t)~(1u << st); r->c1[st] = NULL; r->c1_len[st] = 0; }
+        else r->c1[st] = q;
+    }
+}
+static uint32_t pad4(uint32_t n) { return (n + 3u) & ~3u; }
 
 struct slot {
     struct nvk_prog_rec rec;
@@ -106,7 +165,10 @@ static int stage_count(uint32_t mask) {
 }
 // 清单条目的结构合法性（不是本局有效性：那是 profile/ABI/闭包那条，在 load 里整份判）。
 static int rec_well_formed(const struct nvk_prog_rec *r) {
-    return r && stage_count(r->stage_mask) && !(r->c1_ok & ~7u) && !identity_zero(r->identity);
+    if (!r || !stage_count(r->stage_mask) || (r->c1_ok & ~7u) || identity_zero(r->identity)) return 0;
+    for (int st = 0; st < NVK_PROG_REC_STAGES; st++)
+        if ((r->c1_ok & (1u << st)) && (!r->c1[st] || r->c1_len[st] < NVK_PROG_REC_C1_MIN || r->c1_len[st] > NVK_PROG_REC_C1_MAX)) return 0;
+    return 1;
 }
 static void stats_reset(void) { memset(&g.st, 0, sizeof g.st); }
 static void reset_locked(void) {
@@ -239,7 +301,7 @@ static int read_file(const char *path, uint8_t **out, size_t *out_len) {
     struct stat st;
     if (fstat(fd, &st) || !S_ISREG(st.st_mode)) { close(fd); errno = EINVAL; return -1; }
     // 上限按硬顶算：上一次会话的 nvk_warm_max 可能比本局大，文件更大也要能读，读后按本局上限截。
-    size_t cap = (size_t)NVK_PROG_WARM_HDR_FIELDS + (size_t)NVK_PROG_WARM_ABS_MAX * NVK_PROG_WARM_ENTRY + NVK_PROG_WARM_SUM;
+    size_t cap = NVK_PROG_WARM_FILE_MAX;
     if (st.st_size < (off_t)NVK_PROG_WARM_HDR_FIELDS || (uint64_t)st.st_size > (uint64_t)cap) { close(fd); errno = EFBIG; return -1; }
     uint8_t *buf = (uint8_t *)malloc((size_t)st.st_size);
     if (!buf) { close(fd); errno = ENOMEM; return -1; }
@@ -327,10 +389,23 @@ int nvk_prog_warm_load(void) {
     else if (get_u32(buf + 8) != NVK_PROG_WARM_ENTRY) bad = "条目大小不符";
     else {
         count = get_u32(buf + 12);
-        uint64_t want = (uint64_t)NVK_PROG_WARM_HDR_FIELDS + (uint64_t)count * NVK_PROG_WARM_ENTRY + NVK_PROG_WARM_SUM;
         if (count > NVK_PROG_WARM_ABS_MAX) bad = "条数超过硬顶";
-        else if ((uint64_t)len != want) bad = "长度与条数不符";
-        else if (get_u64(buf + len - NVK_PROG_WARM_SUM) != fnv1a64(buf, len - NVK_PROG_WARM_SUM)) bad = "FNV 校验不符";
+        else {   // 变长条目：逐条走一遍，每条的 c1 长度在 [MIN, MAX]、合计正好落到校验和之前
+            uint64_t off = NVK_PROG_WARM_HDR_FIELDS, end = (uint64_t)len - NVK_PROG_WARM_SUM;
+            for (uint32_t i = 0; i < count && !bad; i++) {
+                if (off + NVK_PROG_WARM_ENTRY > end) { bad = "长度与条数不符"; break; }
+                const uint8_t *e = buf + off; off += NVK_PROG_WARM_ENTRY;
+                for (int st = 0; st < NVK_PROG_REC_STAGES && !bad; st++) {
+                    if (!(e[60] & (1u << st))) { if (get_u32(e + 64 + 4 * st)) bad = "条目 c1 长度与有效位不符"; continue; }
+                    uint32_t cl = get_u32(e + 64 + 4 * st);
+                    if (cl < NVK_PROG_REC_C1_MIN || cl > NVK_PROG_REC_C1_MAX) bad = "条目 c1 长度越界";
+                    else if (off + pad4(cl) > end) bad = "长度与条数不符";
+                    else off += pad4(cl);
+                }
+            }
+            if (!bad && off != end) bad = "长度与条数不符";
+            if (!bad && get_u64(buf + len - NVK_PROG_WARM_SUM) != fnv1a64(buf, len - NVK_PROG_WARM_SUM)) bad = "FNV 校验不符";
+        }
     }
     const uint8_t *hdr_profile = buf + 16, *hdr_closure = buf + 52;
     int mismatch = 0;   // 1 = 文件本身好、只是不属于本局（换版本 / 换设备是正常情形，打黄不打红）
@@ -371,8 +446,9 @@ int nvk_prog_warm_load(void) {
     uint32_t keep_cap = count < limit ? count : limit;
     struct slot *disk = keep_cap ? (struct slot *)malloc((size_t)keep_cap * sizeof *disk) : NULL;
     if (keep_cap && !disk) { pthread_mutex_unlock(&g.mu); free(buf); return 0; }
+    size_t eoff = NVK_PROG_WARM_HDR_FIELDS;   // 整份校验已走过一遍，这里按同样的步长取
     for (uint32_t i = 0; i < count; i++) {
-        const uint8_t *e = buf + NVK_PROG_WARM_HDR_FIELDS + (size_t)i * NVK_PROG_WARM_ENTRY;
+        const uint8_t *e = buf + eoff; eoff += NVK_PROG_WARM_ENTRY;
         struct slot s;
         memset(&s, 0, sizeof s);
         memcpy(s.rec.identity, e, 32);
@@ -380,10 +456,16 @@ int nvk_prog_warm_load(void) {
         memcpy(s.rec.keys, e + 36, sizeof s.rec.keys);
         s.rec.c1_ok = e[60];
         s.rec.lp_ok = e[61];   // 2 = 按含「存储缓冲不对齐」的规则判可用；旧清单里的 1 当不可用
-        memcpy(s.rec.c1, e + 64, sizeof s.rec.c1);
-        s.rec.uses = get_u32(e + 60 + 4 + 768);
-        s.last_use_rank = get_u64(e + 60 + 4 + 768 + 4);
+        for (int st = 0; st < NVK_PROG_REC_STAGES; st++) {
+            if (!(s.rec.c1_ok & (1u << st))) continue;
+            s.rec.c1_len[st] = get_u32(e + 64 + 4 * st); s.rec.c1[st] = buf + eoff; eoff += pad4(s.rec.c1_len[st]);
+        }
+        s.rec.uses = get_u32(e + 76);
+        s.last_use_rank = get_u64(e + 80);
         if (!rec_well_formed(&s.rec)) { filtered++; continue; }
+        const uint8_t c1_had = s.rec.c1_ok;
+        rec_intern_c1(&s.rec);   // 指针换成本模块的副本（buf 马上释放）
+        if (s.rec.c1_ok != c1_had) { filtered++; continue; }   // 内存不足拷不下：这条不收，不发布缺 c1 的程序
         if (usable == keep_cap) { filtered++; continue; }   // 本局上限比文件小：更冷的丢掉
         if (usable < keep_cap) disk[usable] = s;
         usable++;
@@ -478,8 +560,10 @@ int nvk_prog_warm_contains(const uint8_t identity[32]) {
 }
 
 // ---------------- 记 ----------------
-void nvk_prog_warm_note(const struct nvk_prog_rec *rec) {
-    if (!rec || !rec_well_formed(rec)) return;
+void nvk_prog_warm_note(const struct nvk_prog_rec *rec_in) {
+    if (!rec_in || !rec_well_formed(rec_in)) return;
+    struct nvk_prog_rec copy = *rec_in; const struct nvk_prog_rec *rec = &copy;
+    rec_intern_c1(&copy);   // 调用方的 c1 只在本次调用期间有效：换成本模块的只读副本（锁外做，拷贝不占清单锁）
     pthread_mutex_lock(&g.mu);
     if (!g.cap && ensure_cap_locked(64)) { pthread_mutex_unlock(&g.mu); return; }
     if (!g.limit) g.limit = warm_limit();
@@ -500,7 +584,7 @@ void nvk_prog_warm_note(const struct nvk_prog_rec *rec) {
         // c1 只在这次快照确实带回来时才覆盖（真实 resolve 有视图；清单加载来的记录没有新视图）。
         for (int st = 0; st < NVK_PROG_REC_STAGES; st++)
             if (rec->c1_ok & (1u << st)) {
-                memcpy(s->rec.c1[st], rec->c1[st], NVK_PROG_REC_C1_BYTES);
+                s->rec.c1[st] = rec->c1[st]; s->rec.c1_len[st] = rec->c1_len[st];
                 s->rec.c1_ok |= (uint8_t)(1u << st);
             }
         g.st.recorded++;
@@ -617,7 +701,11 @@ void nvk_prog_warm_save(void) {
             pthread_mutex_unlock(&g_save_mu);
             return;
         }
-        len = (size_t)NVK_PROG_WARM_HDR_FIELDS + (size_t)g.n * NVK_PROG_WARM_ENTRY + NVK_PROG_WARM_SUM;
+        len = (size_t)NVK_PROG_WARM_HDR_FIELDS + NVK_PROG_WARM_SUM;
+        for (uint32_t i = 0; i < g.n; i++) {
+            len += NVK_PROG_WARM_ENTRY;
+            for (int st = 0; st < NVK_PROG_REC_STAGES; st++) if (g.v[i].rec.c1_ok & (1u << st)) len += pad4(g.v[i].rec.c1_len[st]);
+        }
         buf = (uint8_t *)malloc(len);
         if (!buf) { pthread_mutex_unlock(&g.mu); pthread_mutex_unlock(&g_save_mu); nvn_plat_log(NVN_PLAT_LOG_RED, "warm", "【红】程序清单落盘：内存不足，本局不写"); return; }
         // 落盘顺序 = 下局预热带顺序：uses 降序、同 uses 最近用过的先。排的是下标表（副本），不改 g.v。
@@ -646,10 +734,15 @@ void nvk_prog_warm_save(void) {
             memcpy(p, s->rec.identity, 32); p += 32;
             put_u32(&p, s->rec.stage_mask);
             memcpy(p, s->rec.keys, sizeof s->rec.keys); p += sizeof s->rec.keys;
-            put_u8(&p, s->rec.c1_ok); put_u8(&p, s->rec.lp_ok); p += 2;   // 保留
-            memcpy(p, s->rec.c1, sizeof s->rec.c1); p += sizeof s->rec.c1;
+            put_u8(&p, s->rec.c1_ok); put_u8(&p, s->rec.lp_ok); put_u8(&p, 0); put_u8(&p, 0);   // 保留
+            for (int st = 0; st < NVK_PROG_REC_STAGES; st++) put_u32(&p, (s->rec.c1_ok & (1u << st)) ? s->rec.c1_len[st] : 0);
             put_u32(&p, s->rec.uses);
             put_u64(&p, s->last_use_rank);
+            for (int st = 0; st < NVK_PROG_REC_STAGES; st++) {
+                if (!(s->rec.c1_ok & (1u << st))) continue;
+                const uint32_t cl = s->rec.c1_len[st];
+                memcpy(p, s->rec.c1[st], cl); memset(p + cl, 0, pad4(cl) - cl); p += pad4(cl);
+            }
         }
         free(idx);
         put_u64(&p, fnv1a64(buf, len - NVK_PROG_WARM_SUM));

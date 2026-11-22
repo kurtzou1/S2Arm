@@ -278,7 +278,7 @@
 "app.os180.title" = "This system version may crash";
 "app.os180.body" = "iOS / iPadOS 18.0 has a system issue that can close the app as soon as the game picture appears; 18.1 fixes it. Please update in Settings > General > Software Update to 18.1 or later (free) and the crash will go away.";
 "app.lowRam.title" = "This device may not have enough memory";
-"app.lowRam.body" = "This game needs more memory than this device has. It will still start, but it may stutter or be closed by the system.";
+"app.lowRam.body" = "This game needs about %1$@ GB of memory; this device has %2$@ GB. Storage makes up the difference, so you can play, but it may slow down or be closed mid-game. Shown only once.";
 "app.gpuStop.body" = "Swipe this app away in the app switcher and open it again — you can usually keep playing from where the game last saved. To help us find the cause, tap “Report a Problem” to send us diagnostics.";
 "app.gpuStop.title" = "The game got stuck and was stopped safely";
 "app.library.broken.title" = "Game files are incomplete";
@@ -457,7 +457,7 @@
 "save.exported" = "Backup exported.";
 "save.import" = "Choose a backup to check…";
 "save.inspected" = "Backup checked. Waiting for your confirmation.";
-"save.intro" = "The game hasn’t started yet. You can export your save to Files, or import a .s2asave backup from a Mac or another device. Your current save is kept before restoring.";
+"save.intro" = "The game hasn’t started yet. You can export your save to Files, import a .s2asave backup from a Mac or another device, or import a save folder or zip from another emulator or tool (JKSV, Checkpoint, Ryujinx, yuzu and so on). Your current save is kept before restoring.";
 "save.journalUnreadable" = "Can’t read the save operation records folder (%@), so there’s no way to tell whether the last import / restore finished.\n%@";
 "save.location" = "Save location: open the Files app → On My iPhone (On My iPad on iPad) → %@ → %@\n\nPut a save folder in its original format there (exported from a console, JKSV / Checkpoint and similar tools, or copied from the same game's SaveData on your computer) and the game uses it the next time you start. When you quit, it's updated with your latest progress; copy the whole folder to the same place on your computer or another device to keep playing.\n\nCopying from a computer: on a Mac, select this device in the Finder sidebar → Files, drag the folder onto \"%@\", then use the Files app to move it into the location above.";
 "save.location.problem" = "The save you put there last time wasn't loaded: %@. Your current save is unchanged.";
@@ -488,6 +488,8 @@
 "save.restore.title" = "Restore this backup?";
 "save.restoreCancelled" = "Restore cancelled.";
 "save.restored" = "Save restored. You can start the game to check your progress. A pre-restore backup was kept (none is created if there was no save before).";
+"save.community.message" = "This is a save from another emulator or tool: %@ files, %@.\n\nAfter you confirm, your current save is backed up first, then this save goes into the game’s save folder and is loaded the next time you start the game.";
+"save.community.done" = "Done: this save will be loaded the next time you start the game. Your previous save was backed up (no backup is made if there was no save before).";
 "save.serviceInvalid" = "The save service didn’t return a valid result. Close and reopen the app; your existing data is kept.";
 "save.previous.ask.title" = "This game couldn’t load its save last time. Go back to the previous save?";
 "save.previous.ask.crash" = "The last session quit right at the start. You can switch back at any time.";
@@ -619,6 +621,8 @@
 "vpad.snap.notSaved" = "Couldn’t save this time. Try again in a moment";
 "vpad.snap.busy" = "Still saving the last one";
 "vpad.snap.restoreFailed" = "Couldn’t go back: %@";
+"vpad.snap.useLibrary.title" = "Can’t go back from inside the game";
+"vpad.snap.useLibrary.body" = "This moment was saved with the game’s memory in a different place than this session, so it can’t be resumed from inside the game. Go back to the library, long-press this game and tap “Go back to the saved moment” to restore it. The snapshot is still there.";
 "vpad.snap.saveChanged.title" = "Go back to the saved moment?";
 "vpad.snap.saveChanged.body" = "The game saved after that moment. Going back also takes the game’s save back to that moment; your current save is backed up first.";
 "vpad.snap.saveChanged.go" = "Go back";
@@ -679,7 +683,7 @@
 "kbd.section.sticks" = "Sticks";
 "kbd.record" = "Press a key, Esc to cancel";
 "kbd.common" = "Common keys";
-"kbd.clear" = "Clear keyboard key";
+"kbd.clear" = "Clear key settings";
 "kbd.unbound" = "Not set";
 "kbd.restoreDefault" = "Restore defaults";
 "kbd.rebind.title" = "Reassign this key?";
@@ -708,6 +712,12 @@
 "kbd.manage.note" = "Exported key mapping files can be imported in other games. The input.json in each game folder of the Mac launcher uses the same format and can be imported too. Importing changes this game only.";
 "kbd.import" = "Import Key Mapping…";
 "kbd.export" = "Export Current Key Mapping…";
+"kbd.setDefault" = "Set as Default for All Games";
+"kbd.default.done" = "Set as the default for all games";
+"kbd.default.undo" = "Undo";
+"kbd.source.custom" = "Current mapping: Custom";
+"kbd.source.default" = "Current mapping: Default";
+"kbd.manage.noteAll" = "Exported key mapping files can be imported in other games. The input.json in each game folder of the Mac launcher uses the same format and can be imported too. Importing changes this game only.\n“Set as Default for All Games” makes the current mapping the default for every game. Games you have customized separately are not affected, and games you add later use it too. “Restore defaults” returns to this default.";
 "kbd.export.fileName" = "S2Arm Key Mapping";
 "kbd.export.err.title" = "Couldn’t Export Key Mapping";
 "kbd.import.err.title" = "Couldn’t Import Key Mapping";
@@ -717,3 +727,14 @@
 "kbd.import.err.schema" = "This isn’t an S2Arm key mapping file, or its version isn’t supported. Your current mapping hasn’t changed.";
 "kbd.import.err.duplicate" = "The file binds the same key to more than one button. Your current mapping hasn’t changed.";
 "kbd.import.err.invalid" = "The mapping in this file is incomplete or has invalid values. Your current mapping hasn’t changed.";
+
+/* 游戏内「分配玩家」（ios/player_assign.m，#1606 ④）：叫法同 Mac 启动器「分配玩家」 */
+"assign.menu" = "Assign Players…";
+"assign.title" = "Assign Players";
+"assign.hint" = "Starting with P1, press any button on each player’s controller in turn. Controllers you don’t assign stay connected but don’t get a player.";
+"assign.waiting" = "Press any button on a controller";
+"assign.restart" = "Start Over";
+"assign.automatic" = "Back to Automatic (connection order)";
+"assign.ns2pro" = "Switch 2 Pro Controller";
+"assign.saveFailed" = "Couldn’t save the assignment. Please try again.";
+"assign.ok" = "OK";

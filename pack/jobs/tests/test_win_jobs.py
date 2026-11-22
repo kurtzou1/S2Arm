@@ -394,6 +394,21 @@ class WinInstall(unittest.TestCase):
         with patch.object(self.m, "win_install_mod", return_value=w), as_windows(self.m):
             self.assertEqual(self.m.WinPhone(self.c).bid, "s2arm.T.0100")
 
+    def test_signed_record_keeps_device_kind(self):
+        # #1962 复测：游戏库状态写「已推到 iPad」靠设备记录里存的 deviceKind（期望手写：设备服务报 ipad → 记 iPad；报不出 → 空，前端填「iPhone / iPad」）
+        for reported, want in (("ipad", "iPad"), (None, "")):
+            with self.subTest(reported=reported):
+                w = FakeW([("U1", "USB", 3)])
+                if reported:
+                    w.device_kind = lambda udid, k=reported: k
+                real = w.install_app
+                def signed(ns, say=None):   # 同 install_win.install_app：签好的包里读到期限才记 signed
+                    ns.signed_expiry = dict(expires=1000, days=7)
+                    return real(ns, say)
+                w.install_app = signed
+                self.go(w)
+                self.assertEqual(layout.load_device(self.c, "U1")["signed"]["deviceKind"], want)
+
     def test_bundle_matches_mac_lowercase_team(self):
         # 9401：交给 plumesign 的包名和 Mac 一致（io.s2arm.games.<小写团队号>）；这台记录过只差大小写的包名就沿用（不在手机上多出一个 S2Arm）；
         #   读不到团队号 → 不传（照旧由 plumesign 定）

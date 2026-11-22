@@ -98,6 +98,25 @@ static inline void s2a_kbd_map(const s2a_input_config *c, const s2a_kbd_keys *k,
         if (!(consumed & s2a_kbd_mod_bit(b->code)) && s2a_kbd_held(k, b->code)) s2a_kbd_action(t, buttons, sticks);
     }
 }
+// 实体手柄改键（#1606 ④；同 Mac front_mac.m map_pad_inputs）：buttons 进来时第 i 位 = 物理键 i（east south north west … 同 input_config.c input_pads，
+//   即 controller.m sample_extended 按布局排好后的出口位序），按配置 gamepad 段改成目标键 / 摇杆方向；摇杆按 axes 段选源轴、取反。
+//   缺省配置（s2a_kbd_default：gamepad 恒等、axes 恒等不取反）输出与输入逐位相同；16 位以上的扩展位（Home bit16）原样保留、不参与映射。
+//   死区沿用 iOS s2a_pad_stick 的径向死区，不读配置的 deadzone（不改现有手感）。按键绑到摇杆方向时与源轴叠加，夹到 ±32767
+static inline void s2a_pad_map(const s2a_input_config *c, uint32_t *buttons, int32_t sticks[4]) {
+    if (!c) return;
+    uint32_t in = *buttons, out = in & ~0xffffu;
+    int32_t src[4] = {sticks[0], sticks[1], sticks[2], sticks[3]}, acc[4] = {0, 0, 0, 0};
+    for (int t = 0; t < S2A_INPUT_TARGET_COUNT; t++) {
+        int p = c->gamepad[t];
+        if (p >= 0 && p < 16 && (in >> p & 1)) s2a_kbd_action(t, &out, acc);
+    }
+    for (int i = 0; i < 4; i++) {
+        int a = c->axes[i].source;
+        if (a >= 0 && a < 4) acc[i] += c->axes[i].invert ? -src[a] : src[a];
+        sticks[i] = acc[i] > 32767 ? 32767 : acc[i] < -32767 ? -32767 : acc[i];
+    }
+    *buttons = out;
+}
 // 并进实体手柄（front_mac.m pad_event_fast：槽 0 = 第一只手柄 + 键盘）：按键或起来、摇杆相加后夹到 ±32767
 static inline void s2a_kbd_merge(uint32_t *buttons, int32_t sticks[4], uint32_t kb_buttons, const int32_t kb_sticks[4]) {
     *buttons |= kb_buttons;
@@ -168,4 +187,12 @@ static inline int s2a_kbd_config_json(const s2a_input_config *c, char *out, size
 static inline int s2a_kbd_import(const void *data, size_t n, s2a_input_config *out) {
     if (n > S2A_KBD_IMPORT_MAX_BYTES) return S2A_KBD_IMPORT_TOO_LARGE;
     return s2a_input_config_parse(n ? (const char *)data : "", n, out);
+}
+
+// 清除一个按键位（#2071）：改键页一行把键盘键和鼠标键合在一起显示（「Y　F · 左键」），清除也按一行算，两半一起清。
+//   手柄（gamepad）不在这一行显示，不动；按键位号越界什么都不改
+static inline void s2a_kbd_clear_target(s2a_input_config *c, int target) {
+    if (!c || target < 0 || target >= S2A_INPUT_TARGET_COUNT) return;
+    c->keyboard[target] = (s2a_input_key){-1, 0};
+    c->mouse[target] = -1;
 }

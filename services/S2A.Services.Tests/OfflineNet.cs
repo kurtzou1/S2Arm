@@ -5,7 +5,7 @@ using System.Text;
 namespace S2A.Services.Tests
 {
     // 离线机（无联网权限 = Switch 离线：只有回环接口）不碰宿主网络。期望按 Switch / FreeBSD 网络栈语义写：
-    //   建 / 绑 socket 照常；去别的主机 connect / sendto 回 ENETUNREACH（101，无路由）；回环 UDP 本地送达；回环 TCP 无监听 ECONNREFUSED（111）；
+    //   建 / 绑 socket 照常；去别的主机 connect / sendto 回 ENETUNREACH（101，无路由）；回环 UDP 本地送达；回环 TCP 无监听 ECONNREFUSED（111）、有监听照常连上（D-BE82）；
     //   空队列非阻塞收 EAGAIN（11）；sfdnsres 的 localhost 答 127.0.0.1、数字地址照答、别的名字 HostNotFound（1）。
     // 旧版每个 bsd socket 都是宿主真 socket（暗黑2 起局建 UDP 绑端口 0，iOS 随即弹「允许使用无线数据」盖住游戏），去外网的 sendto 真发出去。
     public static unsafe partial class Program
@@ -133,6 +133,64 @@ namespace S2A.Services.Tests
             Check("bsd 离线：非阻塞 TCP connect 203.0.113.1:80 / 127.0.0.1 无监听",
                 "-1 errno 101 / -1 errno 111",
                 $"{tcpFar.Ret} errno {tcpFar.Errno} / {tcpLoop.Ret} errno {tcpLoop.Errno}");
+
+            // 回环 TCP（D-BE82：一款赛车游戏的 asio 自唤醒——监听 127.0.0.1、自连、accept、写一字节唤醒 select；原先 connect 一律 ECONNREFUSED、游戏断言退出）：
+            //   监听 127.0.0.1:0 → 阻塞 connect 成功 → accept 拿到对端 127.0.0.1 → 客户端发「ping」服务端收到 → 服务端发「x」客户端收到 →
+            //   空队列非阻塞 accept EAGAIN → 服务端关闭后客户端读到流结束（0）；全程不开宿主网络 socket
+            (int Ret, int Errno) Send(int fd, string text)
+            {
+                Encoding.ASCII.GetBytes(text).CopyTo(new Span<byte>(data, 0x40));
+                Msg m = Msg.Cmif(10, Bytes(fd, 0));
+                m.A.Add(((ulong)data, (ulong)text.Length));
+                return R(Call(bsd, m));
+            }
+            (int Ret, int Errno) Recv(int fd)
+            {
+                Msg m = Msg.Cmif(8, Bytes(fd, 0));
+                m.B.Add(((ulong)rbuf, 0x40));
+                return R(Call(bsd, m));
+            }
+            int hostBefore = HostInetSockets();
+            int lis = Socket(1);
+            SockAddr(127, 0, 0, 1, 0);
+            var lbind = WithAddr(13, lis);
+            var listen = R(Call(bsd, Msg.Cmif(18, Bytes(lis, 1))));
+            Msg lgsn = Msg.Cmif(16, Bytes(lis));
+            lgsn.B.Add(((ulong)raddr, 16));
+            Call(bsd, lgsn);
+            int lport = raddr[2] << 8 | raddr[3];
+            int cli = Socket(1);
+            SockAddr(127, 0, 0, 1, lport);
+            var conn = WithAddr(14, cli);
+            Msg acc = Msg.Cmif(12, Bytes(lis));
+            acc.B.Add(((ulong)raddr, 16));
+            var accepted = R(Call(bsd, acc));
+            string peer = $"{raddr[4]}.{raddr[5]}.{raddr[6]}.{raddr[7]}";
+            int srv = accepted.Ret;
+            var ping = Send(cli, "ping");
+            var gotPing = Recv(srv);
+            string pingText = gotPing.Ret > 0 ? Encoding.ASCII.GetString(rbuf, gotPing.Ret) : "";
+            var pong = Send(srv, "x");
+            var gotPong = Recv(cli);
+            string pongText = gotPong.Ret > 0 ? Encoding.ASCII.GetString(rbuf, gotPong.Ret) : "";
+            int nbLis = Socket(1 | (2 << 28));
+            SockAddr(127, 0, 0, 1, 0);
+            WithAddr(13, nbLis);
+            R(Call(bsd, Msg.Cmif(18, Bytes(nbLis, 1))));
+            Msg nbAcc = Msg.Cmif(12, Bytes(nbLis));
+            nbAcc.B.Add(((ulong)raddr, 16));
+            var nbEmpty = R(Call(bsd, nbAcc));
+            Call(bsd, Msg.Cmif(26, Bytes(srv)));
+            var eof = Recv(cli);
+            int hostTcp = HostInetSockets() - hostBefore;
+            foreach (int fd in new[] { lis, cli, nbLis })
+            {
+                Call(bsd, Msg.Cmif(26, Bytes(fd)));
+            }
+            Check("bsd 离线：回环 TCP 监听 / connect / accept（对端）/ 客户端发 → 服务端收 / 服务端发 → 客户端收 / 空队列非阻塞 accept / 服务端关后客户端读 / 宿主 socket 增量",
+                "0/0、0/0；connect 0；accept ≥ 0 来自 127.0.0.1；4 →「ping」；1 →「x」；-1 errno 11；0；0",
+                $"{lbind.Ret}/{lbind.Errno}、{listen.Ret}/{listen.Errno}；connect {conn.Ret}；accept {(srv >= 0 ? "≥ 0" : srv + " errno " + accepted.Errno)} 来自 {peer}；" +
+                $"{ping.Ret} →「{pingText}」；{pong.Ret} →「{pongText}」；{nbEmpty.Ret} errno {nbEmpty.Errno}；{eof.Ret}；{hostTcp}");
 
             // sfdnsres GetHostByNameRequest(u32 enable_nsd_resolve, u32 timeout, u64 pid, pid, buffer<5> host, buffer<6> hostent) -> (netdb errno, gai errno, size)
             uint dns = Call(sm, Msg.Cmif(1, Name8("sfdnsres"))).Move[0];

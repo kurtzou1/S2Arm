@@ -326,6 +326,8 @@ s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py" --diag-mutants
 s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py" --live-compile-mutants
 # 图形阶段存储图像（#999）：句柄字 72..86 偶 → 图像槽 / 表外·奇字·数组不猜 / 声明落程序记录；解析与声明各改坏一处，graphics_image_layout_test 必红
 s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py" --graphics-image-mutants
+# 计算程序装载：游戏 UBO 形态的类型 3 句柄进程序 usrc 表（#1594 片 10）：撤掉这一步、或对所有项都放，必红（真解析 + 生产 build_compute）
+s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py" --cs-ubo-sampler-mutants
 # Workgroup 共享字节核算的宿主件：OpTypeFloat/Int 词数分校、位宽负控、无共享变量零计数
 s2a_gate_step "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -I "$android_dir/native/direct" -I "$repo_dir/graphics/third_party/spirv_cross" \
     "$android_dir/tests/t_spv_workgroup_bytes.c" -o "$out/spv-workgroup-bytes-test"
@@ -344,6 +346,9 @@ s2a_gate_step "$PY" "$repo_dir/graphics/nvn/tests/gs_replay_mutation_test.py"
 s2a_gate_step "$PY" "$repo_dir/graphics/nvn/tests/dirty_span_memo_mutation_test.py"
 # 存储缓冲槽长度语义：地址有效、长度 0 按硬件语义绑真实内存（池剩余长度，回写按它登记），没有可绑内存才绑空缓冲照画；5 个点变异各撤一处必红（纯宿主 C）
 s2a_gate_step "$PY" "$repo_dir/graphics/nvn/tests/storage_unmapped_mutation_test.py"
+# 计算派发里「贴图字在游戏常量缓冲里的类型 3 句柄」（#1594 片 10）：读计算阶段绑的常量缓冲、采样器号 = 字高位 | 池下标 + 池起点、没登记绑默认采样器 / 建不出具名跳过、
+#   形状校验、取视图带声明；7 个点变异各撤一处必红（纯宿主 C）
+s2a_gate_step "$PY" "$repo_dir/graphics/nvn/tests/cs_ubo_sampler_mutation_test.py"
 # ReadTexels 读 GPU 内容（rp_read_texels.inc / 旁路段 / rp_entry 分支）：等之前的活、提交锁、行距片距、READBACK 与块对齐、栅栏推进、提交内拒绝、修前，各撤一处必红（纯宿主 C）
 s2a_gate_step "$PY" "$repo_dir/graphics/nvn/tests/read_texels_gpu_mutation_test.py"
 # 原创 Maxwell 经生产请求、真实编译器与生产结果解析；GPU 像素由 Vulkan 门禁另验。

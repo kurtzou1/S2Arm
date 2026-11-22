@@ -198,6 +198,25 @@ class ImportTests(JobCase):
         self.assertEqual(run(), [str(original.resolve())])
 
 
+    def test_relink_original_checks_it_is_this_game(self):
+        # #1961「重新添加原件…」带 expectGameId：是这一款 → 改记新位置（同重放原件）；不是 → input_wrong_game、catalog 一字不改、不把那款加进库。
+        #   替身读取器把这份原件读成 0100000000000000（期望手写）
+        import json
+        self.import_keys(); self.install_reader_fixture()
+        old = self.root / "drive" / "game.nsp"; old.parent.mkdir(); old.write_bytes(b"synthetic game fixture")
+        _, done = self.worker("import", paths=[str(old)])
+        self.assertEqual(done["state"], "succeeded")
+        moved = self.root / "other-drive" / "game.nsp"; moved.parent.mkdir(); old.rename(moved)
+        before = (self.c.library / "catalog.json").read_bytes()
+        _, done = self.worker("import", paths=[str(moved)], expectGameId="0100000000000099")
+        self.assertEqual((done["state"], [d["code"] for d in done["diagnostics"]]), ("failed", ["input_wrong_game"]))
+        self.assertEqual((self.c.library / "catalog.json").read_bytes(), before)
+        _, done = self.worker("import", paths=[str(moved)], expectGameId="0100000000000000")
+        self.assertEqual(done["state"], "succeeded")
+        games = json.loads((self.c.library / "catalog.json").read_text())["games"]
+        self.assertEqual([(g["id"], [p["path"] for p in g["packages"]]) for g in games], [("0100000000000000", [str(moved.resolve())])])
+
+
 class PartialImportTests(JobCase):
     def setUp(self):
         super().setUp()

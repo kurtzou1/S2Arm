@@ -32,8 +32,9 @@ int s2a_direct_provider_compile_context(struct s2a_direct_compile_context *out) 
 static struct nvk_prog_rec rec(unsigned id, unsigned uses, unsigned mark) {
     struct nvk_prog_rec v = {0};
     v.identity[0] = (uint8_t)id;
+    static uint8_t c1buf[256][NVK_PROG_REC_C1_MIN];   // c1 整段：记录只带指针，按 mark 各用一块
     v.uses = uses; v.stage_mask = 1; v.c1_ok = 1;
-    memset(v.c1[0], (int)mark, sizeof v.c1[0]);
+    memset(c1buf[mark & 255], (int)mark, NVK_PROG_REC_C1_MIN); v.c1[0] = c1buf[mark & 255]; v.c1_len[0] = NVK_PROG_REC_C1_MIN;
     return v;
 }
 

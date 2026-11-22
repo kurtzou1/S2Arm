@@ -5,6 +5,7 @@
 #include "nvn_plat.h"
 
 #include <errno.h>
+#include <inttypes.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdatomic.h>
@@ -117,7 +118,7 @@ static int warm_sleep_or_stop(uint32_t ms) {
 
 static void warm_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void warm_log(const char *fmt, ...) {
-    char b[512];
+    char b[1536];
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(b, sizeof b, fmt, ap);
@@ -133,15 +134,34 @@ static void warm_progress(const char *tag) {
     memset(&qs, 0, sizeof qs);
     nvk_prog_warm_stats(&ps);
     nvk_pipe_warm_stats(&qs);
+    struct nvk_pipe_creation_stats psos[NVK_PIPE_CREATION_BUCKETS];
+    const enum nvk_pipe_feedback_mode feedback = nvn_vk_pipe_creation_stats(psos);
+    const char *mode = feedback == NVK_PIPE_FEEDBACK_ON ? "on" :
+                       feedback == NVK_PIPE_FEEDBACK_OFF ? "off" : "unavailable";
+    static const char *const names[NVK_PIPE_CREATION_BUCKETS] = {
+        [NVK_PIPE_GFX_WARM] = "gfx_warm", [NVK_PIPE_COMPUTE_WARM] = "compute_warm",
+        [NVK_PIPE_GFX_DRAW] = "gfx_draw", [NVK_PIPE_COMPUTE_DRAW] = "compute_draw",
+    };
+    // 每桶固定 7 列，含 64 位计数的最坏长度也可容纳。
+    char line[704];
+    size_t used = 0;
+    for (unsigned i = 0; i < NVK_PIPE_CREATION_BUCKETS; i++) {
+        const struct nvk_pipe_creation_stats *p = &psos[i];
+        used += (size_t)snprintf(line + used, sizeof line - used,
+                                 " %s=%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64,
+                                 names[i], p->created, p->valid, p->no_feedback, p->app_hit,
+                                 p->driver_ns, p->driver_p95_le_ns, p->wall_ns);
+    }
     warm_log("nvk warm %s: 程序 载入 %llu / 记录 %llu / 建 %llu / 失败 %llu / 本局 draw 命中 %llu 自备 %llu（剩 %llu）；"
-             "管线 载入 %llu / 记录 %llu / 建 %llu / 失败 %llu / draw 命中 %llu / 标签命中 %llu（剩 %llu）；%lld 毫秒",
+             "管线 载入 %llu / 记录 %llu / 建 %llu / 失败 %llu / draw 命中 %llu / 标签命中 %llu（剩 %llu）；%lld 毫秒"
+             "；PSO feedback=%s（created/valid/no_feedback/app_hit/driver_ns/p95_le_ns/wall_ns）%s",
              tag,
              (unsigned long long)ps.loaded, (unsigned long long)ps.recorded, (unsigned long long)ps.built,
              (unsigned long long)ps.failed, (unsigned long long)ps.draw_hits, (unsigned long long)ps.draw_miss,
              (unsigned long long)ps.pending,
              (unsigned long long)qs.loaded, (unsigned long long)qs.recorded, (unsigned long long)qs.built,
              (unsigned long long)qs.failed, (unsigned long long)qs.draw_hits, (unsigned long long)qs.tag_hits, (unsigned long long)qs.pending,
-             (long long)(g_t0 ? warm_now_ms() - g_t0 : 0));
+             (long long)(g_t0 ? warm_now_ms() - g_t0 : 0), mode, line);
 }
 
 // 唯一的落盘入口：周期落盘与停局落盘都走这里、同一把锁（同一 owner 的两次 save 不交错写同一个临时文件）。

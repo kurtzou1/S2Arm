@@ -10,6 +10,7 @@ runtime/src/	核心	原生	共用层
 runtime/src/host_main.c	平台壳	Mac开发宿主	终端壳
 runtime/src/snapshot.c	平台壳	即时快照（苹果：Mach 线程、系统压缩）	终端壳
 runtime/src/snapdel.c	平台壳	即时快照（苹果：删整份快照目录，随 snapshot.c；安卓没有快照）	终端壳
+runtime/src/snaprelaunch.c	平台壳	即时快照（Mac：进程内接不上快照时原地重新执行自己、构造期按快照原址占窗口；其余平台空实现）	终端壳
 runtime/src/hostmem_apple.c	平台壳	宿主可用内存（苹果：iPhone 离上限余量 / Mac 可回收页；应用池扩池用，安卓在 svc_mem.c 读 sysconf）	终端壳
 runtime/include/	核心	原生头	共用层
 runtime/third_party/	核心	原生三方库	共用层

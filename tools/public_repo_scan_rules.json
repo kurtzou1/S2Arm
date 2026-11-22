@@ -524,6 +524,19 @@
       ],
       "regex": "[a-z0-9-]+@openssh\\.com",
       "reason": "OpenSSH 算法 / 扩展名的命名约定（如 ssh -c aes128-gcm@openssh.com），不是邮箱。"
+    },
+    {
+      "id": "readme_contributor_login_imariohiro",
+      "categories": [
+        "compliance_copy"
+      ],
+      "paths": [
+        "README.md",
+        "README.zh-CN.md"
+      ],
+      "regex": "(?i)mario",
+      "line_regex": "\\*\\*(?:联合开发者|Co-developers)\\*\\*.*\\[@imariohiro\\]\\(https://github\\.com/imariohiro\\)",
+      "reason": "README 联合开发者名单里的 GitHub 账号名 imariohiro 含 mario 字样（贡献者真实账号，不是游戏名）：命中文字须正好是 mario、所在行须是名单行且含这个账号链接才放；名单外照拦。"
     }
   ],
   "boundaries": {

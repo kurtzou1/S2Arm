@@ -225,6 +225,7 @@ public static partial class SaveTransfer
     }
     private static JsonObject Inspect(Context c)
     {
+        if (Community(c)) return InspectCommunity(c);   // 其他模拟器 / 工具的存档（#2070，SaveTransferCommunity.cs）
         using var archive = new Archive(Source(c));
         var warnings = Identity(c, archive.Manifest);
         return new() { ["manifest"] = Copy(archive.Manifest), ["archiveSha256"] = archive.Sha, ["warnings"] = warnings,

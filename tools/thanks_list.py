@@ -16,6 +16,7 @@ OWN = {'jhaizhou-ops'}   # 维护方自己的账号，不进致谢
 #   星号转义（\*），免得 Markdown 当成强调。再遇到同类往这里加，不在名单里删人
 DISPLAY = {
     'fucknima': r'f\*\*\*\*\*\*\*',   # 11-09 维护方定：用户名是粗口（#145 的报告者）
+    'FuckyouBB': r'F\*\*\*\*\*\*\*\*',   # 11-22：用户名是粗口，同上口径（照样列出、链接保留原账号、只打码显示文字）
 }
 ROOT = Path(__file__).resolve().parent.parent
 FILES = [(ROOT / 'README.zh-CN.md', '- **联合开发者**：', '。'), (ROOT / 'README.md', '- **Co-developers**:', '.')]

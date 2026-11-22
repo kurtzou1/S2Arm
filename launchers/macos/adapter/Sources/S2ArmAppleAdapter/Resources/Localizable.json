@@ -1,5 +1,9 @@
 [
  {
+  "source": "选这一款的原件（nsp / xci 等）再试：选错的那份没有记进游戏库。",
+  "en": "Try again with this game's original file (nsp, xci and so on); the one you picked wasn't added to the library."
+ },
+ {
   "source": "装这款会顶掉手机上的{0}：你的描述文件只允许一个包名（{1}），装上后被顶掉的那个就打不开了。它的存档还留在手机上这个包名的数据里，以后换回来接着能玩。",
   "en": "Installing this game replaces {0} on the device: your provisioning profile allows only one bundle ID ({1}), so the replaced app stops opening. Its saves stay on the device under that bundle ID and come back if you switch back."
  },
@@ -6684,10 +6688,6 @@
   "en": "\"{0}\" was removed from the library, so the new S2Arm no longer includes it. Its saves stay on the phone."
  },
  {
-  "source": "这款游戏在这台电脑上还没玩过：存档会在下次启动游戏时放进去。",
-  "en": "You haven't played this game on this Mac yet. The save will be added the next time you start the game."
- },
- {
   "source": "这款游戏没有可用的 60 帧方案。",
   "en": "No 60 FPS option is available for this game."
  },
@@ -10176,8 +10176,8 @@
   "en": "Couldn't read the private key in your certificate, so it wasn't handed to S2Arm on your {0}. Import the certificate again in Settings."
  },
  {
-  "source": "把证书交给 iPhone 上的 S2Arm",
-  "en": "Handing the certificate to S2Arm on your iPhone"
+  "source": "把证书交给 {0} 上的 S2Arm",
+  "en": "Handing the certificate to S2Arm on your {0}"
  },
  {
   "source": "现在没在用你自己的开发者证书签名，没有要交给 {0} 的证书：先在设置里导入并选用你的证书。",
@@ -10496,8 +10496,8 @@
   "en": "Sent to your phone. It installs automatically the next time you open S2Arm."
  },
  {
-  "source": "等 iPhone 上的 S2Arm 装好这款的程序",
-  "en": "Waiting for S2Arm on the iPhone to install this game's program"
+  "source": "等 {0} 上的 S2Arm 装好这款的程序",
+  "en": "Waiting for S2Arm on the {0} to install this game's program"
  },
  {
   "source": "Intel Mac：给 iPhone 出包可用；在 Mac 上起游戏仍要 Apple 芯片。",
@@ -10828,8 +10828,20 @@
   "en": "To use your own developer certificate: check whether antivirus software or Controlled folder access in Windows Security is blocking S2Arm (add S2Arm to the allowed apps), then import the certificate again in Settings. If you never turned on a developer certificate, you can ignore this."
  },
  {
-  "source": "这款的着色器库这次没能重编（电脑上没有这款的游戏文件，或这台电脑没装 Metal 开发工具），「建议更新」会继续显示：补上游戏文件或装好工具后再点「更新这款」。",
-  "en": "This game's shader library could not be rebuilt this time (this computer does not have the game files, or the Metal developer tools are not installed), so \"Update suggested\" will keep showing. Add the game files or install the tools, then click \"Update this game\" again."
+  "source": "这款的着色器库这次没能重编：这台电脑没装 Metal 开发工具。在「准备这台电脑」装好后再点「更新这款」；「建议更新」会继续显示。",
+  "en": "This game's shader library couldn't be rebuilt this time: the Metal developer tools aren't installed on this computer. Install them in \"Prepare this computer\", then click \"Update this game\" again; \"Update suggested\" stays until then."
+ },
+ {
+  "source": "这款的着色器库这次没能重编：游戏库里重编要用的游戏文件不在了（比如清理空间时删了已出好的 iPhone 包）。原件还在：在出包页对这款重新出包。",
+  "en": "This game's shader library couldn't be rebuilt this time: the game files needed to rebuild it are no longer in the library (for example, the built iPhone package was removed when freeing up space). The original is still there: rebuild this game on the build page."
+ },
+ {
+  "source": "这款的着色器库这次没能重编：游戏库里重编要用的游戏文件和这款的原件都不在了。点「重新添加原件…」选这款的原件，再在出包页对这款重新出包。",
+  "en": "This game's shader library couldn't be rebuilt this time: neither the game files needed to rebuild it nor this game's original file are available. Click \"Re-add original…\" to pick this game's original, then rebuild it on the build page."
+ },
+ {
+  "source": "选的是另一款游戏（{0}），不是这一款（{1}）：这款的记录没有改动，请选这款的原件。",
+  "en": "That's a different game ({0}), not this one ({1}): nothing was changed. Pick this game's original file."
  },
  {
   "source": "这款在这台 Mac 上正在运行，Mac 版的着色器库这次没更新：退出游戏后再点一次「更新这款」。",
@@ -11022,5 +11034,25 @@
  {
   "source": "照上面说的把这台 {0} 上的 S2Arm 更新到这一版，再点这台的「重试」。",
   "en": "Update S2Arm on this {0} to this version as described above, then click Retry for this device."
+ },
+ {
+  "source": "这款游戏在这台电脑上还没玩过：存档会在下次在这台电脑上启动这款时放进去；推到 iPhone / iPad 的这款不带这份存档。",
+  "en": "You haven't played this game on this computer yet: the save goes in the next time you start this game on this computer; the copy pushed to iPhone / iPad doesn't get it."
+ },
+ {
+  "source": "删掉待放入的存档",
+  "en": "Discarding the waiting save"
+ },
+ {
+  "source": "你的 Apple ID 团队里还没登记任何 iPhone / iPad，电脑上签不了，这份游戏包未签名，导入后由手机上的 S2Arm 签名。",
+  "en": "Your Apple ID team has no iPhone or iPad registered yet, so this computer can't sign: this game package is unsigned, and S2Arm on the phone signs it after import."
+ },
+ {
+  "source": "你的 Apple ID 团队里还没登记任何 iPhone / iPad，电脑上签不了，这份游戏包未签名；手机上的 S2Arm 还没拿到签名身份，导入后签不了。用 AltStore 或 SideStore 装的 S2Arm：在它们的设置里导出签名证书，到手机上 S2Arm 齿轮 →「签名证书」→「导入 .p12…」导入。",
+  "en": "Your Apple ID team has no iPhone or iPad registered yet, so this computer can't sign: this game package is unsigned, and S2Arm on the phone doesn't have a signing identity yet, so it can't sign it after import. If you installed S2Arm with AltStore or SideStore: export the signing certificate in their settings, then on the phone open S2Arm's gear → “Signing Certificate” → “Import .p12…”."
+ },
+ {
+  "source": "想在电脑上签：用数据线把 iPhone 连上这台电脑、解锁并点「信任」，在启动器里推一次游戏（会把这台登记进你的团队），再导出。",
+  "en": "To sign on this computer: connect the iPhone with a cable, unlock it and tap “Trust”, push a game once from the launcher (this registers the device to your team), then export again."
  }
 ]

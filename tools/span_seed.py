@@ -4,13 +4,16 @@
 只收窗口放不下标准布局的局（「地址按需 [收局] / [崩溃时]：宿主占到 +W MB（标准布局要 N MB），本局所需跨度 S MB」且 W < N）：
 放得下标准布局的局按标准排，跨度总约等于整份布局，不反映游戏实际要多少。一局的游戏号取它之前最近的「布局：程序号 X」行。
 每款取所有读数的最大值（别人设备上的极端值照收，宁可保守），读数少于 --min-samples 的款不收。
+贴顶样本不收（11-22 宿主下限复核）：跨度 ≥ 窗口 − 512 MB 的局，跨度是跟着窗口走的（别名区报到窗口末、游戏贴着顶映射：异度神剑3 六局窗口都是
+  62464、跨度都是 62080，局长 29–234 帧也一样；同一款修后窗口缩到 53248 MB 时远端缺页 0 次），不代表游戏要多少；收进来会把「地址空间不够」提示
+  和快照区放不放得下判反。例外：那一局有越界映射（「越界映射 N 次」N > 0）或远端缺页（「远端 [...]：…缺页 N 次」N > 0）——游戏真碰到了窗口外，贴顶也收。
 
 用法：tools/span_seed.py <报告目录> [--out runtime/src/span_seed.inc] [--min-samples 2] [--tsv 清单.tsv]
 
 发版：切候选前在有诊断报告库的那台机器上跑一次（报告目录 = 诊断收取的 reports/），生成的 span_seed.inc 有变化就提交进 main 再切。
   span_seed.inc 在壳输入表里（runtime/src），表一变壳号就变，随启动器带的壳下发；不重出游戏包。
 用途（runtime/src/vawin.c s2a_span_seed / s2a_window_span_seen，取本机记录与种子表的较大值）：
-  ① 窗口放不下标准布局时快照区放不放得下：空洞 ≥ 已知最高跨度 + 2 GB 余量 + 6 GB（宿主 3 GB + 快照区 3 GB）才放，不知道也放；
+  ① 窗口放不下标准布局时快照区放不放得下：空洞 ≥ 已知最高跨度 + 2 GB 余量 + 宿主下限 + 快照区 3 GB 才放，不知道也放；
   ② 「地址空间不够」提示只在已知最高跨度大于窗口时弹；③ 窗口按跨度收窄（× 1.25 + 2 GB）。
 """
 import argparse
@@ -20,12 +23,15 @@ import sys
 
 LAYOUT = re.compile(r'布局：程序号 ([0-9a-fA-F]{16}) ')
 FIRST_FRAME = '首帧上屏'   # 宿主起局计时行「[起局] nnMain → 首帧上屏」（host_main.c）：这局出过第一帧
-SPAN = re.compile(r'地址按需 \[(?:收局|崩溃时)\]：宿主占到 0x[0-9a-f]+ \+(\d+) MB（标准布局要 (\d+) MB），本局所需跨度 (\d+) MB')
+SPAN = re.compile(r'地址按需 \[(?:收局|崩溃时)\]：宿主占到 0x[0-9a-f]+ \+(\d+) MB（标准布局要 (\d+) MB），本局所需跨度 (\d+) MB(?:（[^）]*），越界映射 (\d+) 次)?')
+FAR = re.compile(r'远端 \[[^\]]+\]：影子区用 \d+ MB（堆区外 \d+ MB）；缺页 (\d+) 次')
+TOP_MARGIN_MB = 512   # 跨度离窗口末不到这么多 = 贴顶
 
 
 def readings(text):
-    """一份局日志里的 (游戏号, 窗口 MB, 标准布局 MB, 跨度 MB)，只收窗口放不下标准布局的。"""
+    """一份局日志里的 (游戏号, 窗口 MB, 标准布局 MB, 跨度 MB)，只收窗口放不下标准布局的、不贴顶的（贴顶但碰过窗口外的照收）。"""
     pid = None
+    far = max((int(x) for x in FAR.findall(text)), default=0)   # 这份日志里远端缺页最多的一次读数（同一局的 [C# 初始化后] / [收局] 取大）
     for line in text.splitlines():
         m = LAYOUT.search(line)
         if m:
@@ -33,8 +39,9 @@ def readings(text):
             continue
         m = SPAN.search(line)
         if m and pid:
-            win, need, span = (int(x) for x in m.groups())
-            if 0 < span and win < need:
+            win, need, span = (int(x) for x in m.groups()[:3])
+            oob = int(m.group(4) or 0)
+            if 0 < span and win < need and (span < win - TOP_MARGIN_MB or oob > 0 or far > 0):
                 yield pid, win, need, span
 
 

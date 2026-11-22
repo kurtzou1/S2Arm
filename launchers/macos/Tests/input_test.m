@@ -23,6 +23,8 @@ void s2a_ql_retry60(void) {}   // 档位梯子「再试 60 帧」（runtime/src/
 int s2a_snap_logging(void) { return 0; }
 int s2a_snap_dir_for(const char *gid, char *out, size_t n) { (void)gid; (void)out; (void)n; return -1; }
 int s2a_snap_exists(const char *dir) { (void)dir; return 0; }
+int s2a_snap_fits_inplace(const char *dir) { (void)dir; return -1; }   // 快照落点预检（runtime/src/snapshot.c）：本单测不恢复
+int s2a_snap_relaunch(const char *dir, int rollback) { (void)dir; (void)rollback; return -1; }   // Mac 原地重开（runtime/src/snaprelaunch.c）
 int s2a_snap_save_changed(const char *dir) { (void)dir; return -1; }
 int s2a_snap_request_save(const char *dir) { (void)dir; return -1; }
 void s2a_snap_on_done(void (*cb)(int, const char *)) { (void)cb; }
@@ -1323,6 +1325,19 @@ int main(int argc, const char **argv) {
     expect(s2a_hidg_route(1, 0x057e, 1, 0, 0) == S2A_HIDG_TAKE, "HID pad fallback takes Nintendo's own Pro Controller at once");
     expect(s2a_hid_pad_axis(0, 0, 65535, 0) == -32767 && s2a_hid_pad_axis(65535, 0, 65535, 0) == 32767 &&
            s2a_hid_pad_axis(0, 0, 65535, 1) == 32767 && abs(s2a_hid_pad_axis(32768, 0, 65535, 0)) <= 1, "HID pad axis normalisation");
+    // 兜底手柄六轴跟启动设置「体感」走（#1383：关了体感，GameController 不认的 Pro 仍把陀螺仪交给游戏）。期望手写
+    expect(s2a_hid_pad_motion_ok(1, 1000000, 900000) && !s2a_hid_pad_motion_ok(0, 1000000, 900000),
+           "HID pad motion passes only while motion is enabled");
+    expect(!s2a_hid_pad_motion_ok(1, 1000000, 0) && !s2a_hid_pad_motion_ok(1, 1000000, 800000) && s2a_hid_pad_motion_ok(1, 1000000, 800001),
+           "HID pad motion needs a sample younger than 200 ms");
+    setenv("S2A_MOTION", "0", 1);
+    s2a_pad_set_motion_enabled(1);   // 游戏要六轴，但启动设置关了体感
+    expect(!s2a_mac_hid_pad_motion_enabled(), "motion off in launch settings also turns off the HID fallback pad's motion");
+    unsetenv("S2A_MOTION");
+    s2a_pad_set_motion_enabled(1);
+    expect(s2a_mac_hid_pad_motion_enabled(), "HID fallback pad motion is on again when the setting allows it");
+    s2a_pad_set_motion_enabled(0);
+    expect(!s2a_mac_hid_pad_motion_enabled(), "game stops asking for motion: HID fallback pad motion off");
     {   // Switch Pro 协议（#934 11-15：PowerA 简易模式量程不对、摇杆慢五六倍；改发子命令切 0x30 完整报告）。期望全部手算：
         //   摇杆：中心 2048、行程 ±1600 → 3648 满、448 满负、2848 半程（800 / 1600 × 32767 = 16383.5 → 16383）
         expect(s2a_pro_axis(2048, 2048, 1600, 1600) == 0 && s2a_pro_axis(3648, 2048, 1600, 1600) == 32767 && s2a_pro_axis(448, 2048, 1600, 1600) == -32767 &&

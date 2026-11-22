@@ -1609,6 +1609,17 @@ import S2ArmAppleAdapter
     /// S 级优化手动 / 批量升级（11-18 维护者：点了才做；可批量，写明批量升级、有全选）：每款一个勾选框和「升级」，
     ///   点某款「升级」只交那一款；页脚「批量升级所选（N 款）」N 跟勾选走、没勾时不可点；正在升级的那款勾选框和按钮都不可用；
     ///   批量进行中页脚换成「第 i 款 / 共 n 款」+「停止」；没有可升级的款不出行按钮；进度环 / 进度条四种状态出图
+    /// #2066：没在这台 Mac 上玩过的这款，恢复只放进待放区——状态读出等着的文件数（不再当「还没有存档」）、恢复结果标 pending；旧作业层不给时照旧（期望手写）
+    func testSaveStatusReadsPendingSeed() throws {
+        let waiting = try XCTUnwrap(SaveStatusInfo(["hasSave": false, "fileCount": 0, "totalBytes": 0, "pendingSeed": ["fileCount": 3, "totalBytes": 45056]]))
+        XCTAssertEqual(waiting.pendingFiles, 3)
+        XCTAssertNil(try XCTUnwrap(SaveStatusInfo(["hasSave": false])).pendingFiles)
+        XCTAssertTrue(SaveRestoreInfo(["committed": true, "hadOriginal": false, "pending": true]).pending)
+        XCTAssertFalse(SaveRestoreInfo(["committed": true, "hadOriginal": true]).pending)
+        XCTAssertEqual(BackendText.launcherText("save.pending", language: "zh-Hans").replacingOccurrences(of: "{0}", with: "3"),
+                       "已放好 3 个文件，第一次在这台 Mac 上启动这款时放进存档")
+    }
+
     /// 回到上一份存档（Mac）：上一局出事才问；回到上一份 → 再换回，两次都交 saveRestorePrevious、状态翻回原样；齿轮页一行有上一份才出
     func testPreviousSaveAskRestoreAndSwitchBack() async throws {
         let fixture = try SettingsFixture()

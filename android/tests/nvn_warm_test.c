@@ -46,11 +46,24 @@ static atomic_int g_save_delay_us;
 // Stop 的读数行与红行：落盘归属改到后台之后，「Stop 有没有超时」只能从这一行看出来，所以断言它。
 static char g_stop_line[512];
 static atomic_int g_red_seen;
+static atomic_int g_creation_feedback_reported;
+
+enum nvk_pipe_feedback_mode nvn_vk_pipe_creation_stats(struct nvk_pipe_creation_stats out[NVK_PIPE_CREATION_BUCKETS]) {
+    memset(out, 0, sizeof(*out) * NVK_PIPE_CREATION_BUCKETS);
+    out[NVK_PIPE_GFX_WARM] = (struct nvk_pipe_creation_stats){.created = 2, .valid = 1, .no_feedback = 1,
+                                                          .app_hit = 1, .driver_ns = 100, .driver_p95_le_ns = 103,
+                                                          .wall_ns = 200};
+    return NVK_PIPE_FEEDBACK_ON;
+}
 
 int nvn_plat_flag(const char *name, int dflt) { (void)dflt; return strcmp(name, "nvk_warm") == 0 ? g_flag : dflt; }
 void nvn_plat_log(int level, const char *cls, const char *text) {
     (void)cls;
     if (level == 2) atomic_store(&g_red_seen, 1);   // NVN_PLAT_LOG_RED = 2（graphics/nvn/replay/nvn_plat.h）
+    if (text && strstr(text, "nvk warm 收尾:") &&
+        strstr(text, "PSO feedback=on") && strstr(text, "gfx_warm=2/1/1/1/100/103/200") &&
+        strstr(text, "compute_draw=0/0/0/0/0/0/0"))
+        atomic_store(&g_creation_feedback_reported, 1);
     if (text && strstr(text, "停局：耗时")) snprintf(g_stop_line, sizeof g_stop_line, "%s", text);
 }
 static int64_t now_ms(void) {
@@ -136,6 +149,7 @@ static void t_disable(int delay_us) {
     assert(dt <= 500);
     assert(atomic_load(&g_saved) >= 1);
     assert(strstr(g_stop_line, "清单落盘 完成") != NULL);
+    assert(atomic_load(&g_creation_feedback_reported));
     printf("t_disable ok（debug.s2a.nvk_warm=0 时不起线程，落盘归一次性 saver）\n");
 }
 
@@ -233,6 +247,7 @@ static void t_order_and_counts(void) {
     assert(atomic_load(&g_quiesced) >= 1);
     assert(atomic_load(&g_red_seen) == 0);       // 快路径不打红
     assert(strstr(g_stop_line, "清单落盘 完成") != NULL);
+    assert(atomic_load(&g_creation_feedback_reported));
     assert(strstr(g_stop_line, "detach 累计") != NULL);   // 读数行里有 detach 计数
     // 幂等：收干净之后再调一次必须立刻返回 0（会话 request_stop 与 destroy 会各调一次）。
     t0 = now_ms();

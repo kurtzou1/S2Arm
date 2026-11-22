@@ -15,6 +15,8 @@ struct SaveStatusInfo: Equatable {
     let recovered: Bool
     /// 没做完的恢复自动撤回失败时的记录位置；没有为空。
     let recoveryFailed: String
+    /// 待放区里等着的存档文件数（没在这台 Mac 上玩过的这款，恢复先放进待放区、第一次启动时灌入；#2066）；没有为 nil。
+    let pendingFiles: Int?
 
     init?(_ r: [String: Any]) {
         guard let has = r["hasSave"] as? Bool else { return nil }
@@ -24,6 +26,7 @@ struct SaveStatusInfo: Equatable {
         previousBackup = r["previousBackup"] as? String ?? ""
         recovered = r["recovered"] as? Bool ?? false
         recoveryFailed = r["recoveryFailed"] as? String ?? ""
+        pendingFiles = ((r["pendingSeed"] as? [String: Any])?["fileCount"] as? NSNumber)?.intValue
     }
 }
 
@@ -71,9 +74,12 @@ struct SaveRestoreInfo: Equatable {
     let previousBackup: String
     /// 存档已恢复但事务记录没清完时作业层的原话；正常为空。
     let cleanupWarning: String
+    /// 只是放进了待放区（这款在这台 Mac 上还没玩过），第一次启动时才进存档（#2066）
+    let pending: Bool
 
     init(_ r: [String: Any]) {
         hadOriginal = r["hadOriginal"] as? Bool ?? false
+        pending = r["pending"] as? Bool ?? false
         previousBackup = r["previousBackup"] as? String ?? ""
         cleanupWarning = r["cleanupWarning"] as? String ?? ""
     }
@@ -98,6 +104,11 @@ extension S2ArmLauncherModel {
     func saveStatus(_ gameID: String, events: EventSink? = nil) async throws -> SaveStatusInfo {
         guard let info = SaveStatusInfo(try await saveJob("saveStatus", gameID: gameID, events: events)) else { throw SaveResultIncomplete() }
         return info
+    }
+
+    /// 存档页「不要了」：删掉待放区里这款等着的存档（saveDiscardSeed，#2066）
+    func saveDiscardSeed(_ gameID: String, events: EventSink? = nil) async throws {
+        _ = try await saveJob("saveDiscardSeed", gameID: gameID, events: events)
     }
 
     /// 备份到 destination（玩家在保存面板里选的文件）；回作业层实际写下的路径。

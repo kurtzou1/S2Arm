@@ -357,7 +357,7 @@ class RechainIos(unittest.TestCase):
     def test_no_material_unavailable_and_untouched(self):
         before = (self.pack / "index.tsv").read_text(encoding="utf-8")
         r, calls = self.run_rechain(src=False)
-        self.assertEqual((r, calls), ("unavailable", []))
+        self.assertEqual((r, calls), ("no_source", []))   # #1961：没原料与没装工具分开返回
         self.assertEqual((self.pack / "index.tsv").read_text(encoding="utf-8"), before)
         self.assertEqual(self.info["ios"]["dmshChain"], "old", "没重编就不记新链号（「建议更新」照旧提示）")
 
@@ -369,7 +369,7 @@ class RechainIos(unittest.TestCase):
                 patch.object(sgrade_bf.layout, "game_info", lambda c, g: self.info), patch.object(sgrade_bf.layout, "ios_pack", lambda c, g: self.pack), \
                 patch.object(sgrade_bf, "ios_inputs", lambda c, g, w: (Path(w) / "root", "game.img")):
             r = sgrade_bf.rechain_ios(self.c, "0100AAAA00000000")
-        self.assertEqual(r, "unavailable")
+        self.assertEqual(r, "no_tools")
         self.assertEqual((self.pack / "index.tsv").read_text(encoding="utf-8"), before)
         self.assertEqual(self.info["ios"]["dmshChain"], "old")
 

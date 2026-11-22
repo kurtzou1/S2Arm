@@ -9,6 +9,10 @@ struct GameUpdateRun: Equatable {
     var progress = JobProgress()
     var incomplete: [String] = []
     var failure: String?
+    /// 黄字带「重新添加原件…」（#1961，作业 facts.action = relinkSource）；relinking = 正在核对选的原件；relinked = 已找回，提示去出包页重新出包
+    var relinkSource = false
+    var relinking = false
+    var relinked = false
 }
 
 /// 详情区「更新」按钮的三种样子：没做过 iPhone 版不显示；做过、没有原因 → 灰色「无需更新」；有原因 → 主色「更新这款」+ 橙色原因行
@@ -37,6 +41,28 @@ extension S2ArmLauncherModel {
 
     func gameUpdate(_ game: GameSummary) -> GameUpdateRun? { gameUpdates[game.id.uppercased()] }
 
+    /// 黄字旁「重新添加原件…」（#1961）：选这款的原件 → import 作业只认这一款（expectGameId）→ 记下新位置；选错了说清楚、不改记录。
+    ///   找回后不自动重新出包（整款重出要几分钟到几十分钟），黄字换成「原件已找回：在出包页对这款重新出包」
+    func relinkSource(_ game: GameSummary, source: URL) {
+        let id = game.id.uppercased()
+        guard var run = gameUpdates[id], !run.running, !run.relinking else { return }
+        run.relinking = true; run.failure = nil
+        gameUpdates[id] = run
+        Task { [weak self] in
+            guard let self else { return }
+            var run = self.gameUpdates[id] ?? GameUpdateRun(running: false)
+            do {
+                try await self.provider.relinkSource(gameId: game.id, source: source)
+                run.relinked = true; run.relinkSource = false
+                self.refresh()
+            } catch {
+                run.failure = (error as? JobFailure)?.errorDescription ?? error.localizedDescription
+            }
+            run.relinking = false
+            self.gameUpdates[id] = run
+        }
+    }
+
     /// 点「更新这款」：起 updateGame 作业（不占作业槽：只在电脑上做这一款，同款的出包 / 推送在跑时按钮置灰）。
     ///   做完按结果的 reasons 当场改这款的提示（空 = 变「无需更新」），再重读一次 updateHints；做不齐的项（update_incomplete）列黄字、不当失败
     func updateGame(_ game: GameSummary) {
@@ -54,6 +80,7 @@ extension S2ArmLauncherModel {
             do {
                 let r = try await self.provider.updateGame(gameId: game.id, events: sink)
                 run.incomplete = r.incomplete
+                run.relinkSource = r.relinkSource
                 if r.reasons.isEmpty { self.updateHints[id] = nil } else { self.updateHints[id] = r.reasons }
             } catch {
                 run.failure = (error as? JobFailure)?.errorDescription ?? error.localizedDescription

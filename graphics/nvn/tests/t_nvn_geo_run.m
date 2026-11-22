@@ -26,6 +26,8 @@
 //      [上报 时间戳][结束] 照旧结束段、原因记「状态之外的操作」操作码 5。反证：执行循环去掉 SAMPLES_PASSED 例外 → ⑭ 第一条红
 //   ⑮ 段内事件信号 / 写值（#1449 0.6.7 D-CQG6：同款每次遮挡上报后跟一笔 ReportValue，⑭ 之后改成每笔都被它断段）：[信号 写值][结束] 段不结束、
 //      收尾后事件按写值落地（提交完成后由 CPU 写）；[等事件][结束] 照旧结束段、原因记操作码 4。反证：执行循环去掉信号例外 → ⑮ 第一条红
+//   ⑯ 段内遮挡查询重置（#1449 主线 11-22 尼尔 Mac 局：⑭⑮ 之后每笔几何绘制前的 SAMPLES_PASSED 重置断段，429 万段每段 1.008 笔）：[重置 SAMPLES_PASSED][结束] 段不结束、
+//      开始计数；[重置 时间戳][结束] 照旧结束段、原因记操作码 36。反证：执行循环去掉重置例外 → ⑯ 第一条红
 //   ⑨ 直通几何快路选择（geo_pt_pick）：几何核标直通（json geometry.passthrough）、单实例、单次调用、三角 → 换成 <键>_bgs3 与 <键>_bgc；
 //      没标直通 → 不走、一次表都不查；两实例 / 邻接三角（拓扑 4）/ 开变换反馈 / 几何核两次调用 / DM_NVN_GEO_PT=0 → 不走；缺 _bgc → 不走、几何核与读取器保持原样
 #include "../gfx/nvn/nvn_mtl.m"
@@ -135,6 +137,19 @@ int main(void) { @autoreleasepool {
         g_on = 0; put(OP_SIGNAL_EVENT, rs, sizeof rs); put(OP_END, NULL, 0); nvn_be_exec(g_ops);
         int ended = !g_gr.active, why = g_gr_end[GEO_END_OP] - e_op == 1 && g_gr_end_op[OP_SIGNAL_EVENT] - e_se == 1; finish();
         CHECK(ended && why, "⑮ [等事件][结束] 照旧结束段（%d，期望 1），原因记「状态之外的操作」操作码 4（%d，期望 1）", ended, why); }
+
+    // ⑯ 段内遮挡查询重置：不结束段；别的计数器重置照旧结束段
+    {   uint64_t rq[1] = {NVN_COUNTER_TYPE_SAMPLES_PASSED};
+        reset_mem(); nvn_be_sub_begin(); geo_run_begin(); lane_kernel(1); g_vis_counting = 0;
+        g_on = 0; put(OP_RESET_COUNTER, rq, sizeof rq); put(OP_END, NULL, 0); nvn_be_exec(g_ops);
+        int kept = g_gr.active, counting = g_vis_counting; finish(); g_vis_on = g_vis_counting = 0;   // 后面各项按没开遮挡计数写
+        CHECK(kept && counting && count() == 1 && outv(0) == 1, "⑯ [重置 SAMPLES_PASSED][结束] 之后段仍开着（%d，期望 1）、开始计数（%d，期望 1）；收尾后几何核照常执行（计数 %u，期望 1）", kept, counting, count());
+        uint64_t rt[1] = {NVN_COUNTER_TYPE_TIMESTAMP};
+        reset_mem(); nvn_be_sub_begin(); geo_run_begin(); lane_kernel(1);
+        uint64_t e_op = g_gr_end[GEO_END_OP], e_rs = g_gr_end_op[OP_RESET_COUNTER];
+        g_on = 0; put(OP_RESET_COUNTER, rt, sizeof rt); put(OP_END, NULL, 0); nvn_be_exec(g_ops);
+        int ended = !g_gr.active, why = g_gr_end[GEO_END_OP] - e_op == 1 && g_gr_end_op[OP_RESET_COUNTER] - e_rs == 1; finish();
+        CHECK(ended && why, "⑯ [重置 时间戳][结束] 照旧结束段（%d，期望 1），原因记「状态之外的操作」操作码 36（%d，期望 1）", ended, why); }
 
     // ② 段外工作：先结束段，几何核排在它前面
     reset_mem(); nvn_be_sub_begin(); geo_run_begin(); lane_kernel(1);

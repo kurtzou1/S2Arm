@@ -30,12 +30,19 @@ static NSString *game_manage_key(void) {
 //   （文件夹先建出来，「文件」App 里马上看得到），上次没读进来的原因（数据根 savedata-problem.txt，服务层写）接在后面
 //   本地玩家（#623）：存档位置是当前玩家的那个文件夹（第一个玩家 SaveData，同 settings.m s2a_ios_local_player），没读进来的原因也按玩家分文件
 //   （services/S2A.Services/SaveFolder.cs ProblemPath）；页上写明当前玩家，以及导出 / 导入 / iCloud 是这款所有玩家的存档一起
-static NSString *save_location(NSString *root) {
+// 本款存档位置的绝对路径（当前玩家的那个文件夹）：页上显示的路径、导入其他工具的存档放到哪（#2070，服务层 saveFolder）都按它
+static NSString *save_folder(void) {
     NSString *documents = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
     NSDictionary<NSString *, NSString *> *player = s2a_ios_local_player(NSUserDefaults.standardUserDefaults);
     const char *f = getenv("S2A_SAVE_FOLDER"), *d = getenv("S2A_DOCS");   // 同 ios/settings.m 起局时给服务层的那条；存档页在起局前打开时按同一规则算
     NSString *folder = f && *f ? @(f) : [(d && *d ? @(d) : documents) stringByAppendingPathComponent:player ? player[@"folder"] : @"SaveData"];
     [NSFileManager.defaultManager createDirectoryAtPath:folder withIntermediateDirectories:YES attributes:nil error:nil];
+    return folder;
+}
+static NSString *save_location(NSString *root) {
+    NSString *documents = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+    NSDictionary<NSString *, NSString *> *player = s2a_ios_local_player(NSUserDefaults.standardUserDefaults);
+    NSString *folder = save_folder();
     char *rd = realpath(documents.fileSystemRepresentation, NULL), *rf = realpath(folder.fileSystemRepresentation, NULL);
     NSString *base = rd ? @(rd) : documents, *full = rf ? @(rf) : folder; free(rd); free(rf);
     if (![full hasPrefix:[base stringByAppendingString:@"/"]]) return @"";
@@ -310,6 +317,7 @@ S2A_VERTICAL_BAR_OFF
     self.busy = YES; self.status.text = S2AL(@"save.processing"); [self updateButtons];
     NSMutableDictionary *request = [operation mutableCopy];
     request[@"game"] = self.game; request[@"dataRoot"] = self.dataRoot; request[@"workRoot"] = self.workRoot; request[@"language"] = save_language();
+    request[@"saveFolder"] = save_folder();   // #2070：选到其他工具的存档时，服务层认出后放进这里，下次起局读入
     dispatch_async(self.worker, ^{
         @autoreleasepool {
             NSError *error = nil;
@@ -404,7 +412,8 @@ S2A_VERTICAL_BAR_OFF
     // 11-13 维护者「不许堵门」：上次的临时副本删不掉不挡这次（新副本用新名字，互不冲突）；只记一行日志，下次再清
     NSString *warning = [self clearImport];
     if (warning) fprintf(stderr, "[S2A 存档] 上次的临时副本没删掉，照常继续：%s\n", warning.UTF8String);
-    UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeData] asCopy:YES];
+    // #2070：其他工具的存档常是一个文件夹，文件夹也能选（服务层按存档位置的同一套规则认）
+    UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeData, UTTypeFolder] asCopy:YES];
     picker.directoryURL = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
     picker.allowsMultipleSelection = NO; picker.delegate = self;
     s2a_present_picker(self, picker, "save-import");
@@ -424,7 +433,8 @@ S2A_VERTICAL_BAR_OFF
     dispatch_async(self.worker, ^{
         BOOL scoped = [url startAccessingSecurityScopedResource];
         NSString *folder = [self.workRoot stringByAppendingPathComponent:@"imports"];
-        NSString *path = [folder stringByAppendingPathComponent:[NSUUID.UUID.UUIDString stringByAppendingPathExtension:@"s2asave"]];
+        // 临时副本保留原扩展名（文件夹没有）：是不是我方备份由服务层按内容认，不靠名字
+        NSString *path = [folder stringByAppendingPathComponent:url.pathExtension.length ? [NSUUID.UUID.UUIDString stringByAppendingPathExtension:url.pathExtension] : NSUUID.UUID.UUIDString];
         NSError *error = nil;
         BOOL copied = [NSFileManager.defaultManager createDirectoryAtPath:folder withIntermediateDirectories:YES attributes:nil error:&error] &&
             [NSFileManager.defaultManager copyItemAtURL:url toURL:[NSURL fileURLWithPath:path] error:&error];
@@ -450,10 +460,11 @@ S2A_VERTICAL_BAR_OFF
     [self showResult:S2AL(@"save.exportCancelled") warning:warning];
 }
 - (void)confirmRestore {
+    BOOL community = [self.preview[@"community"] boolValue];   // #2070：其他模拟器 / 工具的存档，没有我方备份的游戏名 / 版本 / 用户清单
     NSDictionary *manifest = self.preview[@"manifest"];
     NSString *users = [manifest[@"users"][@"ids"] componentsJoinedByString:@"\n"];
     NSString *size = [NSByteCountFormatter stringFromByteCount:[self.preview[@"totalBytes"] longLongValue] countStyle:NSByteCountFormatterCountStyleFile];
-    NSString *message = [NSString stringWithFormat:S2AL(@"save.restore.message"), manifest[@"game"][@"name"], manifest[@"game"][@"version"], manifest[@"createdAt"], users.length ? users : S2AL(@"save.deviceSave"), self.preview[@"fileCount"], size];
+    NSString *message = community ? [NSString stringWithFormat:S2AL(@"save.community.message"), self.preview[@"fileCount"], size] : [NSString stringWithFormat:S2AL(@"save.restore.message"), manifest[@"game"][@"name"], manifest[@"game"][@"version"], manifest[@"createdAt"], users.length ? users : S2AL(@"save.deviceSave"), self.preview[@"fileCount"], size];
     // 版本 / DLC 组合、账号归属对不上：服务层不再拒绝，给出提示句（已按界面语言），确认前放在说明最前面
     NSArray *warnings = [self.preview[@"warnings"] isKindOfClass:NSArray.class] ? self.preview[@"warnings"] : @[];
     if (warnings.count) message = [NSString stringWithFormat:@"⚠️ %@\n\n%@", [warnings componentsJoinedByString:@"\n⚠️ "], message];
@@ -471,7 +482,7 @@ S2A_VERTICAL_BAR_OFF
             self.backupPath = [result[@"previousBackup"] isKindOfClass:NSString.class] ? result[@"previousBackup"] : nil;
             self.hasSave = YES;
             NSString *warning = [self clearImport];
-            NSString *message = S2AL(@"save.restored");
+            NSString *message = [result[@"pending"] boolValue] ? S2AL(@"save.community.done") : S2AL(@"save.restored");   // #2070：放进了存档位置，下次起局才读入
             [self showResult:message warning:warning];
         }];
     }]];

@@ -130,14 +130,14 @@ int main(int argc, char **argv) {
       snprintf(f, sizeof f, "%s/Documents", home); mkdir(f, 0755); snprintf(f, sizeof f, "%s/Documents/games", home); mkdir(f, 0755);
       snprintf(f, sizeof f, "%s/Documents/games/%s", home, B); mkdir(f, 0755); snprintf(f, sizeof f, "%s/Documents/games/%s/wire", home, B); mkdir(f, 0755);
       snprintf(f, sizeof f, "%s/Documents/games/%s/wire/%s", home, B, B); mkdir(f, 0755);
-      snprintf(f, sizeof f, "%s/Documents/games/%s/wire/%s/span_peak", home, B, B); put(f, "18446744073\n", 12);
+      snprintf(f, sizeof f, "%s/Documents/games/%s/wire/%s/span_peak2", home, B, B); put(f, "18446744073\n", 12);
       snprintf(b, sizeof b, "%s/b", tmp); ctr(b, tmp);
-      ck(s2a_window_span_learned() == 18446744073ull, "⑦ 容器 {B}：读到 Documents/games/B/wire/B/span_peak 里的跨度 18446744073");
+      ck(s2a_window_span_learned() == 18446744073ull, "⑦ 容器 {B}：读到 Documents/games/B/wire/B/span_peak2 里的跨度 18446744073");
       snprintf(b, sizeof b, "%s/ab", tmp); ctr(b, tmp);
       { uint64_t s2a_span_seed(uint64_t); uint64_t sa = s2a_span_seed(strtoull(A, NULL, 16)), want = sa ? (sa > 18446744073ull ? sa : 18446744073ull) : 0;
         ck(s2a_window_span_learned() == want, "⑦ 容器 {A, B}：A 本机没记录 → 有种子表值就按它与 B 的 18446744073 取大，没有就整容器跨度不知道 = 0（11-21 前拿 A 的布局需求 32770 MB 顶）"); }
       snprintf(f, sizeof f, "%s/Documents/wire", home); mkdir(f, 0755); snprintf(f, sizeof f, "%s/Documents/wire/%s", home, A); mkdir(f, 0755);
-      snprintf(f, sizeof f, "%s/Documents/wire/%s/span_peak", home, A); put(f, "549755813887\n", 13);   // 512 GB：比种子表任何一款都大（829a4d0f9 起占位号 A 进了种子表，31296 MB），取大后只能是它 = 旧位置确实被读到
+      snprintf(f, sizeof f, "%s/Documents/wire/%s/span_peak2", home, A); put(f, "549755813887\n", 13);   // 512 GB：比种子表任何一款都大（829a4d0f9 起占位号 A 进了种子表，31296 MB），取大后只能是它 = 旧位置确实被读到
       ctr(b, tmp);
       ck(s2a_window_span_learned() == 549755813887ull, "⑦ A 只有旧位置（单款包时代）的记录 549755813887 也认：{A, B} 取最大 549755813887（与种子表内容无关）");
       if (oh) { setenv("HOME", oh, 1); free(oh); } snprintf(g_home, sizeof g_home, "%s/nohome", tmp); }

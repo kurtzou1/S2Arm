@@ -52,7 +52,7 @@ import S2ArmAppleAdapter
         // #1967：期望手写——作业认出 iPad 画 iPad；iPhone、读不到类型都画 iPhone
         XCTAssertEqual(S2ArmLauncherModel.deviceSymbol("iPad"), "ipad")
         XCTAssertEqual(S2ArmLauncherModel.deviceSymbol("iPhone"), "iphone")
-        XCTAssertEqual(S2ArmLauncherModel.deviceSymbol(nil), "iphone")
+        XCTAssertEqual(S2ArmLauncherModel.deviceSymbol(nil), "ipad.and.iphone")   // #1967：不知道类型不再默认 iPhone
     }
 
     func testConsolePanelFitsWindowWidth() async throws {

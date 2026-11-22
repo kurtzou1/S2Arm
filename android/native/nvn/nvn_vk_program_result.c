@@ -653,18 +653,25 @@ static int compute_storage(struct s2a_jv b, struct nvn_vk_compute_storage *s) {
     }
     return -1;
 }
-/* #1594 片 7：计算阶段的类型 3 句柄（贴图字在 c2 分离贴图表，采样器池下标是着色器里的立即数 constSampler）。
- * 合同与图形片 2 同一份：v2、单个贴图、slot = c2 分离贴图表的偶数字 90..344、constSampler 0..4095（csamp 是它的值），
- * 且不带 samp_slot / uboSlot / uboOffset / uboHandle / sampler（贴图字来源要唯一、采样器来源要唯一）。
- * 返回 0 = 合同成立（*imm = 池下标）；-1 = 形态不接，调用方具名拒——包括游戏 UBO 来源（计算侧仍不接）。 */
-static int compute_const_sampler(struct s2a_jv b, struct s2a_jv csamp, int v2, int kind, uint32_t *imm) {
-    struct s2a_jv v;
+/* #1594 片 7 / 片 10：计算阶段的类型 3 句柄（采样器池下标是着色器里的立即数 constSampler）。贴图字两种来源，合同与图形片 2 / 片 3 同一份：
+ *   * c2 分离贴图表（片 7）：slot = 偶数字 90..344，不带 uboSlot / uboOffset；
+ *   * 游戏 UBO（片 10）：平铺的 uboSlot 0..15 + uboOffset（4 字节对齐、不超过 0xFFFF），不带 slot；
+ * 两种都要：v2、单个贴图、constSampler 0..4095（csamp 是它的值），且不带 samp_slot / uboHandle / sampler（贴图字来源要唯一、采样器来源要唯一）。
+ * 返回 0 = c2 来源成立；1 = 游戏 UBO 来源成立（*ubo_slot / *ubo_off 填好）；-1 = 形态不接，调用方具名拒——
+ * 缺来源 / 两种来源并存 / 奇字 / 越界 / 不是贴图。只给 uboSlot / uboOffset 不带 constSampler（组合句柄的 UBO 来源）不进这里，计算侧仍拒（见调用处的存储来源字段检查）。 */
+static int compute_const_sampler(struct s2a_jv b, struct s2a_jv csamp, int v2, int kind, uint32_t *imm, uint32_t *ubo_slot, uint32_t *ubo_off) {
+    struct s2a_jv v, sv, us, uo;
     uint32_t slot;
+    *ubo_slot = *ubo_off = 0;
     if (!v2 || kind != 2 || compute_u32(csamp, imm) || *imm > 4095u) return -1;
-    if (s2a_jv_obj_find(b, "slot", &v) || compute_u32(v, &slot) || slot < 90 || slot >= 346 || (slot & 1u)) return -1;
-    if (!s2a_jv_obj_find(b, "samp_slot", &v) || !s2a_jv_obj_find(b, "uboSlot", &v) || !s2a_jv_obj_find(b, "uboOffset", &v) ||
-        !s2a_jv_obj_find(b, "uboHandle", &v) || !s2a_jv_obj_find(b, "sampler", &v)) return -1;
-    return 0;
+    if (!s2a_jv_obj_find(b, "samp_slot", &v) || !s2a_jv_obj_find(b, "uboHandle", &v) || !s2a_jv_obj_find(b, "sampler", &v)) return -1;
+    const int has_slot = !s2a_jv_obj_find(b, "slot", &sv);
+    const int has_ubo = !s2a_jv_obj_find(b, "uboSlot", &us);
+    const int has_off = !s2a_jv_obj_find(b, "uboOffset", &uo);
+    if (has_slot == has_ubo || has_ubo != has_off) return -1;   // 恰好一种来源；uboSlot 与 uboOffset 成对
+    if (has_slot) return compute_u32(sv, &slot) || slot < 90 || slot >= 346 || (slot & 1u) ? -1 : 0;
+    if (compute_u32(us, ubo_slot) || *ubo_slot >= 16u || compute_u32(uo, ubo_off) || *ubo_off > 0xffffu || (*ubo_off & 3u)) return -1;
+    return 1;
 }
 /* 整池数组绑定（pool = "texture" / "sampler"）：整个 NVN 贴图池 / 采样器池当一个描述符数组（编译器 ResolvePoolSlots，
  * 着色器按运行时下标取句柄、追不到槽时的回退）。合同与图形阶段同一份（nvn_vk_program_parse 的 pool 分支）：只认 v2 的贴图绑定、
@@ -790,15 +797,16 @@ int nvn_vk_program_parse_compute(const uint8_t *bytes, size_t length,
             out->binding_count++;
             continue;
         }
-        // #1594 片 7：类型 3 句柄（贴图字在 c2 分离贴图表、采样器池下标是着色器里的立即数）。计算侧接 c2 这一种形态，合同同图形片 2
-        //   （compute_const_sampler）；别的形态——游戏 UBO 来源、越界、奇字、与 samp_slot 并存、不是贴图——一律拒，
+        // #1594 片 7 / 片 10：类型 3 句柄（采样器池下标是着色器里的立即数）。计算侧接两种贴图字来源——c2 分离贴图表（片 7）与游戏 UBO（片 10），
+        //   合同同图形片 2 / 片 3（compute_const_sampler）；别的形态——两种来源并存、缺来源、越界、奇字、与 samp_slot 并存、不是贴图——一律拒，
         //   带 constSampler 的计算绑定不能被当成「没有 samp_slot = 采样器取同字高位」绑成错的采样器。
         //   放在 slot 等检查之前，原因才不会被别的拒绝盖住。
-        uint32_t csamp_v = 0; int has_csamp = 0;
+        uint32_t csamp_v = 0, csamp_ubo_slot = 0, csamp_ubo_off = 0; int has_csamp = 0, csamp_ubo = 0;
         { struct s2a_jv csamp;
           if (!s2a_jv_obj_find(b, "constSampler", &csamp)) {
-              if (compute_const_sampler(b, csamp, v2, dst->kind, &csamp_v)) CS_FAIL("compute constant sampler source is invalid");
-              has_csamp = 1;
+              const int form = compute_const_sampler(b, csamp, v2, dst->kind, &csamp_v, &csamp_ubo_slot, &csamp_ubo_off);
+              if (form < 0) CS_FAIL("compute constant sampler source is invalid");
+              has_csamp = 1; csamp_ubo = form == 1;
           } }
         {   // 每线程组字节数只属于 spill；spill 必须带、且 4 字节对齐、不超过客体上限 48 KiB；整个程序最多一个
             struct s2a_jv per; int has_per = !s2a_jv_obj_find(b, "bytesPerGroup", &per);
@@ -818,6 +826,8 @@ int nvn_vk_program_parse_compute(const uint8_t *bytes, size_t length,
                 "rw", "cbSlot", "cbOffset", "nvnSlot", "uboPtr", "uboSlot", "uboOffset" };
             for (unsigned k = 0; k < sizeof storage_only / sizeof storage_only[0]; ++k) {
                 struct s2a_jv extra;
+                // 片 10：游戏 UBO 来源的类型 3 句柄带平铺的 uboSlot / uboOffset，已在 compute_const_sampler 里成对核过；没带 constSampler 的仍按拼错的绑定拒
+                if (csamp_ubo && (!strcmp(storage_only[k], "uboSlot") || !strcmp(storage_only[k], "uboOffset"))) continue;
                 if (!s2a_jv_obj_find(b, storage_only[k], &extra))
                     CS_FAIL("compute non-storage binding carries a storage mapping field");
             }
@@ -832,7 +842,7 @@ int nvn_vk_program_parse_compute(const uint8_t *bytes, size_t length,
             dst->slot = (int)u;
         }
         if (dst->kind == 4 && dst->slot >= 0) CS_FAIL("compute spill binding carries a guest slot");
-        if (!dst->is_support && dst->kind != 1 && dst->kind != 4 && dst->slot < 0) CS_FAIL("compute binding has no reflected guest slot");
+        if (!dst->is_support && dst->kind != 1 && dst->kind != 4 && dst->slot < 0 && !csamp_ubo) CS_FAIL("compute binding has no reflected guest slot");   // 片 10：游戏 UBO 来源的类型 3 句柄没有槽，来源由 compute_const_sampler 核过
         // 图像（kind 3）：handleIndex 指驱动 c2 图像句柄表（字节 0x120 起 8 槽 × 8 字节 = 4 字节字下标 72..86 偶数，
         //   同 iOS nvn_mtl.m C2_IMG / tex_slot_h），NVN 图像槽 = (handleIndex − 72) / 2；回放按 BindImage 的槽取（rp_draw NVN_RB_IMG）
         if (dst->kind == 3 && (dst->slot < 72 || dst->slot >= 88 || (dst->slot & 1))) {
@@ -854,6 +864,11 @@ int nvn_vk_program_parse_compute(const uint8_t *bytes, size_t length,
         }
         if (has_csamp) {   // 采样器 = 着色器里的立即数池下标；samp_slot 仍为 -1，不进 c2 采样器表（回放：采样器号 = 贴图字高 12 位 | 池下标，再加池起点）
             dst->samp_src = FD_SAMP_ID; dst->samp_val = (uint16_t)csamp_v; dst->samp_pool = 1;
+        }
+        if (csamp_ubo) {   // 片 10：贴图字在游戏 UBO（NVN UBO 号 = uboSlot、字节偏移 = uboOffset，同图形片 3 的 tex_u）；没有槽，采样器字不读（samp_u 清零）
+            memset(&dst->tex_u, 0, sizeof dst->tex_u); memset(&dst->samp_u, 0, sizeof dst->samp_u);
+            dst->tex_u.slot = (uint8_t)csamp_ubo_slot; dst->tex_u.offset = (uint16_t)csamp_ubo_off;
+            dst->tex_ubo = 1;
         }
         if (dst->kind == 0 && !dst->is_support) {
             // NVN cbuf 语义（与图形侧 nvn_vk_first_draw.c 同一套）：0 = c0/support、1 = c1 常量段、
@@ -879,7 +894,8 @@ int nvn_vk_program_parse_compute(const uint8_t *bytes, size_t length,
             }
         }
         if (dst->kind == 2) {
-            if (has_samp) dst->tex_slot = (int16_t)(128 + (dst->slot - 90) / 2);
+            if (csamp_ubo) dst->tex_slot = -1;   // 句柄在游戏 UBO 里：没有 NVN 贴图槽（回放按 tex_u 逐笔读字）
+            else if (has_samp) dst->tex_slot = (int16_t)(128 + (dst->slot - 90) / 2);
             else if (dst->slot >= 72 && dst->slot < 88 && !(dst->slot & 1)) {
                 // 按贴图采样 c2 图像句柄表的字（字节 0x120 + 8k）：贴图槽 32 + k，回放取图像槽 k 绑着的句柄
                 //   （同 iOS nvn_mtl.m tex_slot_h：C2_TEX_SLOTS = 41，寄存器 32..39 落在图像表）

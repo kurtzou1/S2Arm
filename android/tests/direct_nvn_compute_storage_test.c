@@ -689,9 +689,38 @@ int main(void) {
                 p.bindings[3].tex_slot == 143 && p.bindings[3].samp_slot == -1 && p.bindings[3].samp_src == FD_SAMP_NONE && p.bindings[3].samp_pool == 0, why);
         nvn_vk_program_free_compute(&p);
     }
+    // #1594 片 10：类型 3 句柄的游戏 UBO 形态（贴图字在游戏常量缓冲里）计算侧也接了，合同同图形片 3：v2、单个贴图、平铺的 uboSlot（0..15 = cbuf − 3）/
+    //   uboOffset（0..65535、4 字节对齐）+ constSampler 0..4095，没有 slot / samp_slot / uboHandle / sampler。映射：tex_ubo = 1、tex_u = {uboSlot, uboOffset}、
+    //   tex_slot = −1、samp_src = FD_SAMP_ID、samp_val = 池下标、samp_pool = 1、samp_slot = −1。
+    {
+        static const struct { int ubo, off, sampler; } okq[] = { {2, 160, 260}, {0, 0, 0}, {15, 65532, 4095}, {3, 160, 262} };
+        for (unsigned k = 0; k < sizeof okq / sizeof okq[0]; k++) {
+            char b[192], why[192] = "", what[128]; struct nvn_vk_compute_program p;
+            snprintf(b, sizeof b, "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"uboSlot\":%d,\"uboOffset\":%d,\"constSampler\":%d,\"count\":1}", okq[k].ubo, okq[k].off, okq[k].sampler);
+            int rc = parse_cs_one(2, b, &p, why, sizeof why);
+            snprintf(what, sizeof what, "compute v2 UBO %d +%d with constant sampler %d is accepted and mapped", okq[k].ubo, okq[k].off, okq[k].sampler);
+            ck_true(what, rc == 0 && p.binding_count == 1 && p.bindings[0].kind == 2 && p.bindings[0].tex_slot == -1 && p.bindings[0].slot == -1 &&
+                    p.bindings[0].tex_ubo == 1 && p.bindings[0].tex_u.slot == okq[k].ubo && p.bindings[0].tex_u.offset == okq[k].off &&
+                    p.bindings[0].samp_slot == -1 && p.bindings[0].samp_src == FD_SAMP_ID && p.bindings[0].samp_val == okq[k].sampler &&
+                    p.bindings[0].samp_pool == 1 && p.bindings[0].count == 1, why);
+            nvn_vk_program_free_compute(&p);
+        }
+        // 同一个程序里：UBO 形态、c2 常量采样器形态、c2 采样器槽形态各带各的，互不串味（tex_ubo 只在第一项）
+        char why[192] = ""; struct nvn_vk_compute_program p;
+        int rc = parse_cs_one(2,
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"uboSlot\":2,\"uboOffset\":160,\"constSampler\":260,\"count\":1},"
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":1,\"slot\":100,\"constSampler\":259,\"count\":1},"
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":2,\"slot\":110,\"samp_slot\":5,\"count\":1}", &p, why, sizeof why);
+        ck_true("compute v2 mixed UBO-word / c2 constant / separate texture entries stay independent",
+                rc == 0 && p.binding_count == 3 &&
+                p.bindings[0].tex_ubo == 1 && p.bindings[0].tex_slot == -1 && p.bindings[0].tex_u.slot == 2 && p.bindings[0].tex_u.offset == 160 && p.bindings[0].samp_val == 260 && p.bindings[0].samp_pool == 1 &&
+                p.bindings[1].tex_ubo == 0 && p.bindings[1].tex_slot == 133 && p.bindings[1].samp_val == 259 && p.bindings[1].samp_pool == 1 &&
+                p.bindings[2].tex_ubo == 0 && p.bindings[2].tex_slot == 138 && p.bindings[2].samp_slot == 5 && p.bindings[2].samp_src == FD_SAMP_NONE && p.bindings[2].samp_pool == 0, why);
+        nvn_vk_program_free_compute(&p);
+    }
     // 别的形态必须具名拒绝（why 含 constant sampler）——不能被当成「没有 samp_slot = 采样器取同字高位」而绑成错的采样器：
     //   池下标越界 / 负 / 非整数 / 非数字、缺 slot、奇字、表外（分离贴图表之前 / 之后）、与 samp_slot / UBO 来源 / uboHandle / sampler 对象并存、
-    //   不是贴图、游戏 UBO 来源（片 3 的形态，图形侧接了，计算侧仍不接）。数组由「描述符数组」的老拒绝挡在前面。
+    //   不是贴图；游戏 UBO 形态（片 10 接了）的 uboSlot / uboOffset 越界 / 不对齐 / 缺一半、池下标越界、与别的来源并存。数组由「描述符数组」的老拒绝挡在前面。
     {
         static const char *const bad[] = {
             "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":90,\"constSampler\":4096,\"count\":1}",
@@ -704,8 +733,20 @@ int main(void) {
             "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":346,\"constSampler\":7,\"count\":1}",
             "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":8,\"constSampler\":7,\"count\":1}",
             "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":90,\"samp_slot\":3,\"constSampler\":7,\"count\":1}",
-            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"uboSlot\":2,\"uboOffset\":160,\"constSampler\":260,\"count\":1}",
             "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":90,\"uboSlot\":1,\"uboOffset\":1024,\"constSampler\":7,\"count\":1}",
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"uboSlot\":16,\"uboOffset\":160,\"constSampler\":260,\"count\":1}",
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"uboSlot\":2,\"uboOffset\":65536,\"constSampler\":260,\"count\":1}",
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"uboSlot\":2,\"uboOffset\":162,\"constSampler\":260,\"count\":1}",
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"uboSlot\":2,\"constSampler\":260,\"count\":1}",
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"uboOffset\":160,\"constSampler\":260,\"count\":1}",
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"uboSlot\":2,\"uboOffset\":160,\"constSampler\":4096,\"count\":1}",
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"uboSlot\":2,\"uboOffset\":160,\"constSampler\":-1,\"count\":1}",
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"uboSlot\":2,\"uboOffset\":-4,\"constSampler\":7,\"count\":1}",
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"uboSlot\":2,\"uboOffset\":160,\"samp_slot\":3,\"constSampler\":7,\"count\":1}",
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"uboSlot\":2,\"uboOffset\":160,\"constSampler\":7,\"uboHandle\":{\"slot\":2,\"offset\":160},\"count\":1}",
+            "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"uboSlot\":2,\"uboOffset\":160,\"constSampler\":7,\"sampler\":{\"source\":\"id\",\"id\":3},\"count\":1}",
+            "{\"stage\":\"cs\",\"kind\":\"image\",\"set\":2,\"binding\":0,\"uboSlot\":2,\"uboOffset\":160,\"constSampler\":7,\"count\":1}",
+            "{\"stage\":\"cs\",\"kind\":\"uniform\",\"set\":2,\"binding\":0,\"uboSlot\":2,\"uboOffset\":160,\"constSampler\":7,\"count\":1}",
             "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":90,\"constSampler\":7,\"uboHandle\":{\"slot\":2,\"offset\":160},\"count\":1}",
             "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":90,\"constSampler\":7,\"sampler\":{\"source\":\"id\",\"id\":3},\"count\":1}",
             "{\"stage\":\"cs\",\"kind\":\"image\",\"set\":2,\"binding\":0,\"slot\":90,\"constSampler\":7,\"count\":1}",
@@ -723,9 +764,19 @@ int main(void) {
         int rc = parse_cs_one(1, "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":90,\"constSampler\":257,\"count\":1}", &p, why, sizeof why);
         ck_true("compute v1 result with a constant sampler is rejected by name", rc != 0 && strstr(why, "constant sampler"), why);
         nvn_vk_program_free_compute(&p);
+        rc = parse_cs_one(1, "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"uboSlot\":2,\"uboOffset\":160,\"constSampler\":260,\"count\":1}", &p, why, sizeof why);
+        ck_true("compute v1 result with a UBO-word constant sampler is rejected by name", rc != 0 && strstr(why, "constant sampler"), why);
+        nvn_vk_program_free_compute(&p);
+        // 没有 constSampler 的 UBO 形态（组合句柄在游戏 UBO 里，采样器取同字高位）：计算侧仍不接（这一片只接常量采样器）
+        rc = parse_cs_one(2, "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"uboSlot\":2,\"uboOffset\":160,\"count\":1}", &p, why, sizeof why);
+        ck_true("compute v2 UBO-word texture without a constant sampler is still rejected", rc != 0, why);
+        nvn_vk_program_free_compute(&p);
         // 数组：老的「描述符数组」拒绝在前面（本片不放开）
         rc = parse_cs_one(2, "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":90,\"constSampler\":257,\"count\":2}", &p, why, sizeof why);
         ck_true("compute v2 constant sampler array is still rejected", rc != 0 && strstr(why, "array"), why);
+        nvn_vk_program_free_compute(&p);
+        rc = parse_cs_one(2, "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"uboSlot\":2,\"uboOffset\":160,\"constSampler\":260,\"count\":2}", &p, why, sizeof why);
+        ck_true("compute v2 UBO-word constant sampler array is rejected", rc != 0 && strstr(why, "array"), why);
         nvn_vk_program_free_compute(&p);
         // 字段重复：唯一字段校验在前
         rc = parse_cs_one(2, "{\"stage\":\"cs\",\"kind\":\"texture\",\"set\":2,\"binding\":0,\"slot\":90,\"constSampler\":7,\"constSampler\":8,\"count\":1}", &p, why, sizeof why);

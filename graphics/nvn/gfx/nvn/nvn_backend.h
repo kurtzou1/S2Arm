@@ -218,7 +218,7 @@ typedef struct {
     uint32_t usage;            // NVN_GPU_TEX_*
     uint32_t host_w, host_h;   // 宿主实际尺寸（0 = 同 d）：宽屏放宽的目标（nvn_mtl.m tex_widen）
     uint16_t swz;              // 存储自带通道映射（tex_builder_t.swz 打包法，0 = 恒等）
-    uint8_t stencil_view, _rsv;
+    uint8_t _rsv[2];           // 保留，恒 0（模板模式只在视图记录 view_t 里表达，建贴图描述不带；字节位置留着是为了回放夹具格式不变）
 } nvn_gpu_tex_desc;
 typedef struct { uint32_t w, h, depth, levels, layers, samples; uint32_t nvn_format; uint32_t fmt_flags; } nvn_gpu_tex_info;
 // 建贴图存储。内容未定义。身份（serial、别名、同池同偏移复用）全在核心，后端不缓存贴图。线程：[任意]。

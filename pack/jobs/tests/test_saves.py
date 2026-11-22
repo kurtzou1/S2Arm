@@ -1032,6 +1032,41 @@ class ExternalImportTests(unittest.TestCase):
         saves.finish_seed(c, GID, log)
         self.assertIsNone(saves.claim_seed(c, GID))
 
+    def test_pending_seed_is_shown_and_can_be_discarded(self):
+        # #2066：没玩过的这款，恢复只是放进待放区——结果标 pending、存档状态报「已放好几个文件」（不是光说没有存档）；「不要了」删掉（期望手写）
+        import shutil
+
+        shutil.rmtree(self.root / "bis")
+        status = lambda: saves.status(self.context(operation="saveStatus"))
+        self.assertNotIn("pendingSeed", status())   # 还没放：不报
+        src = self.community("raw", {"progress.bin": b"native-save", "sub/more.bin": b"more"})
+        preview = saves.inspect(self.context(operation="saveInspect", path=str(src)))
+        result = saves.restore(self.context(operation="saveRestore", path=str(src), **preview))
+        self.assertTrue(result["pending"])
+        now = status()
+        self.assertFalse(now["hasSave"])
+        self.assertEqual(now["pendingSeed"], dict(fileCount=2, totalBytes=15))   # 11 + 4 字节
+        self.assertEqual(saves.discard_seed(self.context(operation="saveDiscardSeed")), dict(discarded=True))
+        self.assertNotIn("pendingSeed", status())
+        self.assertFalse(saves.pending_seed(self.context(operation="saveStatus"), GID).exists())
+
+    def test_finder_zip_macosx_folder_is_not_imported(self):
+        # #2066：访达压的 zip 带 __MACOSX/._*：不解出来，待放区里只有存档本身（期望手写：只剩 account/progress.bin）
+        import shutil
+
+        shutil.rmtree(self.root / "bis")
+        zpath = self.directory / "finder.zip"
+        with zipfile.ZipFile(zpath, "w") as z:
+            z.writestr("progress.bin", b"native-save")
+            z.writestr("__MACOSX/._progress.bin", b"\x00\x05\x16\x07")
+        preview = saves.inspect(self.context(operation="saveInspect", path=str(zpath)))
+        self.assertEqual(preview["fileCount"], 1)
+        c = self.context(operation="saveRestore", path=str(zpath), **preview)
+        saves.restore(c)
+        pending = saves.pending_seed(c, GID)
+        got = sorted(p.relative_to(pending).as_posix() for p in pending.rglob("*"))
+        self.assertEqual(got, ["account", "account/progress.bin"])
+
     def test_seed_done_line_matches_service_layer(self):
         # 审计 P1-156：作业层删种子认的那句，必须是服务层每类都灌入后才打的那句（一字不差）
         cs = (Path(__file__).resolve().parents[3] / "services/S2A.Services/Saves.cs").read_text(encoding="utf-8")

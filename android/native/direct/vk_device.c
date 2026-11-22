@@ -488,6 +488,11 @@ int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) 
                                   out->descriptor_indexing_storage_nonuniform;
     const char *device_ext[24];
     uint32_t device_ext_count = 0;
+    // 反馈没有独立的 feature 位。实例仍申请 1.1，物理设备报 1.3 也须实际启用 EXT。
+    const int pipe_feedback_core = s2a_vk_effective_api(out->properties.apiVersion) >= VK_API_VERSION_1_3;
+    const int pipe_feedback_ext = !pipe_feedback_core &&
+        has_device_extension(out->physical, VK_EXT_PIPELINE_CREATION_FEEDBACK_EXTENSION_NAME);
+    if (pipe_feedback_ext) device_ext[device_ext_count++] = VK_EXT_PIPELINE_CREATION_FEEDBACK_EXTENSION_NAME;
     // apiVersion=1.1，不能拿物理设备支持 1.3 当作应用已启用核心 NONE。
     // 此扩展没有额外 feature 位；缺失时仍走独立快照，不能用 DONT_CARE 假代 NONE。
     out->load_store_op_none_enabled = has_device_extension(out->physical, VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME);
@@ -716,6 +721,7 @@ int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) 
     }
     if (vkCreateDevice(out->physical, &device_info, NULL, &out->device) != VK_SUCCESS)
         return fail(why, why_size, "vkCreateDevice failed");
+    out->pipeline_creation_feedback_enabled = pipe_feedback_core || pipe_feedback_ext;
     out->descriptor_indexing_enabled = descriptor_enable;
     S2A_DLOG("[s2a] vk descriptor indexing: ext_state=%d queried=%d runtime=%d partial=%d sampled_nonuniform=%d "
              "storage_nonuniform=%d variable_count=%d sampled_update_after_bind=%d enabled=%d "

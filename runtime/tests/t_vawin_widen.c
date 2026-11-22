@@ -1,7 +1,7 @@
 // t_vawin_widen：窗口按学到的跨度收窄后布局放不下，同一次启动里当场放宽（vawin.c s2a_window_span_widen，v0.3.4）。
 // 用 S2A_VA_IOS26=1 模拟 iOS 26 大地址档（空洞 51 GiB，放不下 68110 MB 标准布局），学到的跨度 1 GiB。期望（手算）：
 //   收窄窗口 = ⌈1 × 1.25 + 2⌉ = 4 GiB，宿主 47 GiB → 窗口在空洞底 + 47 GiB、+4 GiB；
-//   放宽后 = 空洞底 + 3 GiB 起、窗口顶不变 → 48 GiB（同没学到时的缺省窗口，t_vawin_ios26）；记录文件已删；放宽的那段别人映射不进去；再调一次回 0
+//   放宽后 = 空洞底 + 宿主下限 6 GiB 起、窗口顶不变 → 45 GiB（同没学到时的缺省窗口，t_vawin_ios26）；记录文件已删；放宽的那段别人映射不进去；再调一次回 0
 #include "../src/native.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,7 +22,7 @@ int main(void) {
     uint64_t top = wb + ws;
     CHECK(s2a_window_span_widen() == 1, "当场放宽返回 1");
     s2a_window_get(&wb, &ws);
-    CHECK(wb == hole + 3 * GB && wb + ws == top && ws == 48 * GB, "放宽后 %#llx +%llu GiB（应 空洞底 + 3 GiB、48 GiB，顶不变）", (unsigned long long)wb, (unsigned long long)(ws / GB));
+    CHECK(wb == hole + 6 * GB && wb + ws == top && ws == 45 * GB, "放宽后 %#llx +%llu GiB（应 空洞底 + 6 GiB、45 GiB，顶不变）", (unsigned long long)wb, (unsigned long long)(ws / GB));
     CHECK(access(g_rec, F_OK) != 0, "坏记录已删");
     void *p = mmap((void *)(wb + GB), 1 << 20, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
     CHECK(p != (void *)(wb + GB), "放宽的那段已占住，别人映射不进去");

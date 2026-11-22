@@ -135,6 +135,21 @@ class PhoneOverview(unittest.TestCase):
         self.assertEqual(by["PHONE-1"].get("kind"), "iPhone")
         self.assertNotIn("kind", by["PAD-1"])
 
+    def test_kind_falls_back_to_install_record(self):
+        """#1967：不现查（首页卡片）时 kind 退回装机记录存的 signed.deviceKind（大小写照规整）；记录没存（0.6.9 前装的）不带；
+        现查认出的为准（记录说 iPad、现查是 iPhone → iPhone）。总览不写回设备记录。期望手写"""
+        self.fixture()
+        rec = layout.load_device(self.c, "PHONE-1")
+        layout.save_device(self.c, "PHONE-1", dict(rec, signed=dict(rec["signed"], deviceKind="ipad")))
+        before = layout.load_device(self.c, "PHONE-1")
+        by = {p["device"]: p for p in self.overview()["phones"]}
+        self.assertEqual(by["PHONE-1"].get("kind"), "iPad")
+        self.assertNotIn("kind", by["PHONE-2"])
+        by = {p["device"]: p for p in self.overview(probe=True, online={"PHONE-1": "usb"}, kinds={"PHONE-1": "iPhone"},
+                                                     owners={"PHONE-1": ("launcher", "io.example.one")})["phones"]}
+        self.assertEqual(by["PHONE-1"].get("kind"), "iPhone")
+        self.assertEqual(layout.load_device(self.c, "PHONE-1"), before)
+
     def test_has_game_data_accepts_legacy_img_without_manifest(self):
         pack = layout.image_ios(self.c, self.A) / ".pack"
         pack.mkdir(parents=True)

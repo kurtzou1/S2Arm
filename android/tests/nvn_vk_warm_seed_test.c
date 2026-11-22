@@ -8,7 +8,7 @@
 //   bad_pipe      程序种子好、管线种子校验和坏 → 程序照用、管线打黄一行不用
 //   undecided     程序清单还没载入时管线 load 返回 -1（稍后重试），程序载入后再 load 收下种子
 //   other_profile 种子目录名对得上但文件头是另一台设备 profile 记的 → 打黄不用
-// 期望值不来自被测实现：种子文件按格式手写（程序 60 + n*844 + 8、管线 32 + n*388），种子目录名由测试自己算 SHA-256，
+// 期望值不来自被测实现：种子文件按格式手写（程序 60 + n*600 + 8：88 字节条目头 + 两段 0x100 字节 c1、管线 32 + n*388），种子目录名由测试自己算 SHA-256，
 // 管线紧凑配方的字段偏移按 nvn_vk_pipe_warm.c pw_desc_write 的顺序手算（smask 0、cfmt 1..32、dfmt 33、sfmt 37、samples 41、
 // lmap 45..52、prim 53、patch 57、restart 61、blend 62..125、color 126、chmask 130、ms 134..143、attr 144..207、stream 208..335、
 // ds 336、poly 344、rast_discard 348、clip_neg1 349、origin_ll 350、depth_clamp 351）。
@@ -98,18 +98,19 @@ static int write_file(const char *path, const uint8_t *b, size_t n) {
 static long file_size(const char *path) { struct stat st; return stat(path, &st) ? -1 : (long)st.st_size; }
 // 程序清单文件：ids[i] 的身份 + masks[i]（3 = 顶点 + 片元；5 是非法掩码，用来造坏条目），uses = 10 - i
 static void write_prog(const char *path, const int *ids, const uint32_t *masks, int n, const char *profile, int corrupt) {
-    size_t len = 60 + (size_t)n * 844 + 8;
+    size_t len = 60 + (size_t)n * 600 + 8;   // 条目 = 88 字节头 + 顶点 / 片元两段 c1 各 0x100
     uint8_t *b = calloc(1, len);
     uint8_t ps[32], cs[32]; sha(profile, ps); sha(g_closure, cs);
-    w32(b, 0x31575053u); w32(b + 4, 1); w32(b + 8, 844); w32(b + 12, (uint32_t)n);
+    w32(b, 0x31575053u); w32(b + 4, 2); w32(b + 8, 88); w32(b + 12, (uint32_t)n);
     memcpy(b + 16, ps, 32); w32(b + 48, (uint32_t)g_abi); memcpy(b + 52, cs, 8);
     for (int i = 0; i < n; i++) {
-        uint8_t *e = b + 60 + (size_t)i * 844;
+        uint8_t *e = b + 60 + (size_t)i * 600;
         ident(ids[i], e); w32(e + 32, masks[i]);
         for (int k = 0; k < 24; k++) e[36 + k] = (uint8_t)(ids[i] + k);
         e[60] = 3; e[61] = 2;
-        memset(e + 64, ids[i], 768);
-        w32(e + 832, (uint32_t)(10 - i)); w64(e + 836, (uint64_t)(n - i));
+        w32(e + 64, 0x100); w32(e + 68, 0x100); w32(e + 72, 0);
+        w32(e + 76, (uint32_t)(10 - i)); w64(e + 80, (uint64_t)(n - i));
+        memset(e + 88, ids[i], 0x200);
     }
     w64(b + len - 8, fnv(b, len - 8) ^ (corrupt ? 1u : 0u));
     CHECK(write_file(path, b, len) == 0, "write %s", path);
@@ -203,10 +204,11 @@ static void case_seed_used(void) {
     }
     CHECK(n == 2 && saw1 && g_pipe_get_calls == 2, "预热集 2 条、都建了（取 %d、建 %d）", n, g_pipe_get_calls);
     // 本局记一条新程序 → 落盘写本机路径；种子文件不动
-    struct nvk_prog_rec pr; memset(&pr, 0, sizeof pr); ident(3, pr.identity); pr.stage_mask = 3; pr.c1_ok = 3; pr.uses = 1;
+    static uint8_t c1b[0x100]; struct nvk_prog_rec pr; memset(&pr, 0, sizeof pr); ident(3, pr.identity); pr.stage_mask = 3; pr.c1_ok = 3; pr.uses = 1;
+    pr.c1[0] = pr.c1[1] = c1b; pr.c1_len[0] = pr.c1_len[1] = 0x100;
     nvk_prog_warm_note(&pr);
     nvk_prog_warm_save();
-    CHECK(file_size(g_local_prog) == 60 + 3 * 844 + 8, "落盘写本机路径：种子 2 条 + 本局 1 条（得 %ld 字节）", file_size(g_local_prog));
+    CHECK(file_size(g_local_prog) == 60 + 3 * 600 + 8, "落盘写本机路径：种子 2 条 + 本局 1 条（得 %ld 字节）", file_size(g_local_prog));
     CHECK(file_size(g_seed_prog) == seed_prog_len && file_size(g_seed_pipe) == seed_pipe_len, "种子文件不动");
 }
 static void case_local_first(void) {

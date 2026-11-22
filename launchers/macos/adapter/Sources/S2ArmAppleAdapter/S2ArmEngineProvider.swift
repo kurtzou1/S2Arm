@@ -361,6 +361,12 @@ public final class S2ArmEngineProvider: EngineProvider {
     }
     /// 「更新这款」（0.6.4，作业 updateGame）：只在电脑上按原因做齐这一款（重编 iPhone 与 Mac 两份着色器库、按本版改写器刷新程序），不找设备、不推、不签名。
     ///   结果 reasons = 做完后还剩的建议更新原因（空 = 已是最新）；做不齐的项作业照常成功、另给 warning 诊断 update_incomplete（summary 是玩家句），原样带回
+    /// 「重新添加原件…」（#1961）：import 作业带 expectGameId，只认这一款——是 → 改记原件新位置（不动已有出包）；不是 → input_wrong_game、不记进库
+    public func relinkSource(gameId: String, source: URL, events: EventSink = .discard) async throws {
+        try await library.ensureLibrary(events: events)
+        _ = try await client.perform("import", extra: ["paths": [source.path], "expectGameId": gameId], events: events)
+    }
+
     public func updateGame(gameId: String, events: EventSink = .discard) async throws -> UpdateGameResult {
         let o = try await client.perform("updateGame", extra: ["gameId": gameId], events: events)
         return UpdateGameResult(outcome: o.result, diagnostics: o.diagnostics)
@@ -394,9 +400,12 @@ public final class S2ArmEngineProvider: EngineProvider {
 public struct UpdateGameResult: Equatable {
     public let reasons: [String]
     public let incomplete: [String]
-    public init(reasons: [String], incomplete: [String]) { self.reasons = reasons; self.incomplete = incomplete }
+    /// 黄字里有「原件也不在」那句（诊断 facts.action = relinkSource，#1961）：按钮下给「重新添加原件…」
+    public let relinkSource: Bool
+    public init(reasons: [String], incomplete: [String], relinkSource: Bool = false) { self.reasons = reasons; self.incomplete = incomplete; self.relinkSource = relinkSource }
     public init(outcome r: [String: Any], diagnostics: [[String: Any]]) {
         reasons = r["reasons"] as? [String] ?? []
+        relinkSource = diagnostics.contains { $0["code"] as? String == "update_incomplete" && ($0["facts"] as? [String: Any])?["action"] as? String == "relinkSource" }
         // 玩家句在诊断的 summary（作业层 c.diagnostic 的形状，没有 message 字段；#1961）；suggestion 是通用句，不拼进来（整句才能按翻译表译）
         incomplete = diagnostics.filter { $0["code"] as? String == "update_incomplete" }.compactMap { ($0["summary"] as? String).flatMap { $0.isEmpty ? nil : $0 } }
     }

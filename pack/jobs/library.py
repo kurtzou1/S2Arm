@@ -1914,6 +1914,11 @@ def import_games(c):
                 else:
                     packages = nup_inspect(c, source, icons)
                 row["name"] = next((p["name"] for p in packages if p.get("name")), source.name)
+                # 「重新添加原件…」（#1961）带 expectGameId：认出的不是这一款就停，不记进 catalog（原先会把选错的那款当新游戏加进库）
+                want = str(c.r.get("expectGameId") or "").upper()
+                if want and {str(p.get("baseId") or "").upper() for p in packages} != {want}:
+                    other = "、".join(sorted({str(p.get("baseId") or "?").upper() for p in packages}))
+                    raise Failure(f"选的是另一款游戏（{other}），不是这一款（{want}）：这款的记录没有改动，请选这款的原件。", code="input_wrong_game")
                 c.begin("校验游戏文件", idx * 2 + 2, total)
                 sha = ""
                 if not extracted:   # 原件身份按读取器给的 content ID + 大小算，不读全文件；读取器没给才整份算（source_identity）

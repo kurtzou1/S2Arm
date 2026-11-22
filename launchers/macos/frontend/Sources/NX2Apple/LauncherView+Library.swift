@@ -170,8 +170,9 @@ extension LauncherView {
         if game.iphoneInstalledAt != nil {
             if let days = model.freeSignDaysLeft(game) {
                 expired = days == 0
-                parts.append(expired ? txt("library.status.expired") : txt("library.status.installed").replacingOccurrences(of: "{0}", with: "\(days)"))
-            } else { parts.append(txt("library.status.installedPaid")) }
+                parts.append(expired ? txt("library.status.expired") : txt("library.status.installed").replacingOccurrences(of: "{0}", with: "\(days)")
+                    .replacingOccurrences(of: "{1}", with: BackendText.deviceKind(game.iphoneInstallKind)))
+            } else { parts.append(txt("library.status.installedPaid").replacingOccurrences(of: "{0}", with: BackendText.deviceKind(game.iphoneInstallKind))) }   // #1962：推到的是 iPad 就写 iPad
         } else if game.iphoneReady { parts.append(txt("library.status.iphone")) }
         if game.playable { parts.append(loc.t("library.ready")) }
         if parts.isEmpty { return (loc.t("s2arm.library.notPrepared"), LauncherPalette.unbuilt) }
@@ -357,6 +358,14 @@ struct HeroUpdateLines: View {
     let game: GameSummary
     private func txt(_ id: String) -> String { BackendText.launcherText(id, language: loc.lang.sharedCode) }
 
+    /// 选这款的原件（同添加游戏收的格式；文件夹 = 解包好的游戏）
+    private func pickSource() {
+        let panel = NSOpenPanel()
+        panel.message = txt("update.relink.pick")
+        panel.canChooseFiles = true; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url { model.relinkSource(game, source: url) }
+    }
+
     @ViewBuilder var body: some View {
         let reasons = model.updateReasons(game).compactMap(S2ArmLauncherModel.updateReasonKey).reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }   // libGen / shaderMiss 同着色器那句：只写一次
         let run = model.gameUpdate(game)
@@ -384,6 +393,16 @@ struct HeroUpdateLines: View {
                 ForEach(incomplete, id: \.self) { line in
                     Label(loc.backend(line), systemImage: "exclamationmark.triangle.fill")
                         .font(.manrope(12, .medium)).foregroundStyle(.yellow).fixedSize(horizontal: false, vertical: true)
+                }
+                // #1961：原料和原件都不在 → 就在黄字下补原件（选错了作业层拒、不改记录）；找回后指去出包页重新出包
+                if let run, !run.running, run.relinkSource {
+                    Button(txt(run.relinking ? "update.relink.checking" : "update.relink")) { pickSource() }
+                        .controllerButtonStyle(LauncherSecondaryButtonStyle()).disabled(run.relinking)
+                        .accessibilityIdentifier("update.relink." + game.id)
+                }
+                if let run, !run.running, run.relinked {
+                    Label(txt("update.relink.done"), systemImage: "checkmark.circle")
+                        .font(.manrope(12, .medium)).foregroundStyle(.white.opacity(0.85)).fixedSize(horizontal: false, vertical: true)
                 }
                 if sendAgain {
                     Label(txt("update.hint.sendAgain"), systemImage: "iphone.and.arrow.forward")

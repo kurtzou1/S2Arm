@@ -9,6 +9,7 @@
 #   bash android/tests/vk/run.sh --fsr        # FSR1 EASU 专项（算法对照，不接上屏）
 #   bash android/tests/vk/run.sh --present-upscale  # 上屏 EASU 开/关夹具（独立进程）
 #   bash android/tests/vk/run.sh --clear-capacity  # 48/60 个清除管线键、段完成/放弃与后续绘制
+#   bash android/tests/vk/run.sh --pipe-creation-feedback  # 管线创建反馈三形态
 #   bash android/tests/vk/run.sh --pipe-call-lifetime  # 在途管线调用阻止 close 拆资源，并允许超时后重试
 #   bash android/tests/vk/run.sh --feedback-core    # 附件反馈快照、VVL 与同包负控（独立夹具，见 standalone/）
 #   bash android/tests/vk/run.sh --<名>            # android/tests/vk/standalone/<名>.sh 里的任一独立夹具
@@ -367,7 +368,7 @@ case "$mode" in
     --asan) cflags+=(-fsanitize=address,undefined -fno-omit-frame-pointer) ;;
     --shown-only) cflags+=(-DS2A_C883_TEST=1) ;;
     --pipe-call-lifetime) cflags+=(-DS2A_BACKEND_PIPE_CALL_TEST=1) ;;
-    ""|--sampler-minmax-only|--c63-same-view|--stencil8-only|--read-texels-core|--ds-upload-only|--gpu-deswizzle|--gpu-deswizzle-neg-height|--gpu-deswizzle-neg-stride|--gpu-deswizzle-neg-barrier|--msaa-only|--msaa-neg-pick|--msaa-neg-pipe|--msaa-neg-sampled|--msaa-neg-attachment|--present-only|--present-upscale|--separate-core|--separate-neg-sampler|--tbuf-core|--tbuf-compiler-core|--tbuf-neg-resolve|--tbuf-neg-format|--tbuf-neg-elements|--gs-only|--gs-compiler|--gs-core|--gs-no-cap|--gs-neg-stage|--gs-neg-flags|--gs-neg-cap|--clear-capacity|--clear-capacity-neg|--cmdpool-only|--cmdpool-neg) ;;
+    ""|--pipe-creation-feedback|--pipe-creation-feedback-neg-valid|--sampler-minmax-only|--c63-same-view|--stencil8-only|--read-texels-core|--ds-upload-only|--gpu-deswizzle|--gpu-deswizzle-neg-height|--gpu-deswizzle-neg-stride|--gpu-deswizzle-neg-barrier|--msaa-only|--msaa-neg-pick|--msaa-neg-pipe|--msaa-neg-sampled|--msaa-neg-attachment|--present-only|--present-upscale|--separate-core|--separate-neg-sampler|--tbuf-core|--tbuf-compiler-core|--tbuf-neg-resolve|--tbuf-neg-format|--tbuf-neg-elements|--gs-only|--gs-compiler|--gs-core|--gs-no-cap|--gs-neg-stage|--gs-neg-flags|--gs-neg-cap|--clear-capacity|--clear-capacity-neg|--cmdpool-only|--cmdpool-neg) ;;
     *) echo "未知参数：${mode}（可用 --tsan / --asan）" >&2; exit 64 ;;
 esac
 # 撤改只写入临时源码副本；逐项必须红在指定行为断言。
@@ -525,11 +526,25 @@ pathlib.Path(sys.argv[2]).write_text(s.replace(a, b))
 PYNEG
     src[1]="$out/cmdpool_mutant.c"
 fi
-# 管线缓存四个入口的 --wrap 只给默认档：--gs-core 档的测试源（t_replay_gs.c）没有对应的 __wrap 定义，带上会链接失败。
+if [ "$mode" = "--pipe-creation-feedback-neg-valid" ]; then
+    python3 - "${src[1]}" "$out/pipe_creation_feedback_mutant.c" <<'PYNEG'
+from pathlib import Path
+import sys
+source = Path(sys.argv[1]).read_text()
+check = "if (!feedback || !(feedback->flags & VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT)) {"
+assert source.count(check) == 1
+Path(sys.argv[2]).write_text(source.replace(check, "if (!feedback) {"))
+PYNEG
+    src[1]="$out/pipe_creation_feedback_mutant.c"
+fi
+# 管线缓存夹具与独立回放入口各有自己的链接期替身；保持后者的既有链接参数。
 pc_wrap=(-Wl,--wrap=vkCreatePipelineCache -Wl,--wrap=vkGetPipelineCacheData
          -Wl,--wrap=vkCreateGraphicsPipelines -Wl,--wrap=vkCreateComputePipelines)
-# --gs-core / --separate-* 档的测试源没有这四个 __wrap 定义（只有默认档的 t_backend_vk.c 有），带上会链接失败
 case "$mode" in --gs-core|--separate-core|--separate-neg-sampler|--tbuf-*) pc_wrap=() ;; esac
+# t_backend_vk.c 也被多个独立夹具直接包含。枚举替身定义与链接参数只在运行三形态时成对加入。
+case "$mode" in
+    ""|--pipe-creation-feedback*) cflags+=(-DS2A_PIPE_CREATION_FEEDBACK_TEST=1); pc_wrap+=(-Wl,--wrap=vkEnumerateDeviceExtensionProperties) ;;
+esac
 if [ "$mode" = "--shown-only" ]; then pc_wrap+=(-Wl,--wrap=vkGetDeviceProcAddr); fi
 case "$mode" in --gs-core|--separate-core|--separate-neg-sampler|--tbuf-*) ;;
     *) cflags+=(-DS2A_CMDPOOL_TEST=1); pc_wrap+=(-Wl,--wrap=vkBeginCommandBuffer -Wl,--wrap=vkAllocateCommandBuffers -Wl,--wrap=vkFreeCommandBuffers -Wl,--wrap=vkDestroyCommandPool -Wl,--wrap=vkResetCommandPool) ;;
@@ -550,6 +565,23 @@ if [ "$mode" != "--tsan" ]; then
         S2A_TEST_LOGICOP_ONLY=1 timeout 60 "$out/t_backend_vk" "$out/shaders" --pipe-call-lifetime 2>&1 | tee "$out/pipe-call-lifetime.log"
         exit 0
     fi
+
+if [[ "$mode" == --pipe-creation-feedback* ]]; then
+    log="$out/${mode#--}.log"
+    set +e
+    S2A_TEST_LOGICOP_ONLY=1 timeout 60 "$out/t_backend_vk" "$out/shaders" --pipe-creation-feedback 2>&1 | tee "$log"
+    rc=${PIPESTATUS[0]}
+    set -e
+    if grep -qE 'Validation Error|VUID-|SYNC-HAZARD-' "$log"; then exit 1; fi
+    if [ "$mode" = "--pipe-creation-feedback-neg-valid" ]; then
+        [ "$rc" -eq 1 ] &&
+            grep -q 'PSO feedback bucket 0 (supported): created=2 valid=2 no_feedback=0 app_hit=2' "$log" &&
+            grep -q 'PSO feedback bucket 3 (supported): created=1 valid=1 no_feedback=0' "$log" &&
+            grep -q '^PSO feedback failures=2$' "$log"
+        exit $?
+    fi
+    exit "$rc"
+fi
 
 if [ "$mode" = "--cmdpool-only" ] || [ "$mode" = "--cmdpool-neg" ]; then
     bad=0

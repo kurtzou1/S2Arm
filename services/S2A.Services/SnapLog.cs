@@ -20,15 +20,24 @@ namespace S2A.Services
         [DllImport("s2a_native")] private static extern int s2a_snap_saving();
         [DllImport("s2a_native")] private static extern int s2a_snap_mode();
         [DllImport("s2a_native")] private static extern int s2a_snap_logging();
-        internal static readonly bool CanSave;   // 起局带了存档开关（恢复局也可以带：回到那一刻之后还能再存）
-        internal static readonly bool Any;       // 存档或恢复
+        // 能存 / 存档或恢复：每次现读原生层（snapsw.c）。原先是静态只读、进程里第一局定死——第一局因地址关了快照（s2a_snap_disable）时，
+        //   同一进程里之后的恢复局（游戏库「回到这一刻」、进程内重启）读到的仍是「关」，服务层数据根（DataRoot）没登记，
+        //   恢复核对报「服务层数据根与快照时不同（当前 空）」停下（11-22 实测）。开关只在每局起服务层 / 重建时读，现读不在热路径上
+        internal static bool CanSave => Read(s2a_snap_saving);   // 起局带了存档开关（恢复局也可以带：回到那一刻之后还能再存）
+        internal static bool Any => Read(s2a_snap_mode);         // 存档或恢复
+        private static bool Read(Func<int> f)
+        {
+            try { return f() != 0; }
+            catch (DllNotFoundException) { return false; }
+            catch (EntryPointNotFoundException) { return false; }
+        }
         // 正在记请求日志：普通局开局即记；恢复局重放时不记，重放完把快照里的日志接上当开头后再记（SnapLog.Replay 末尾置）。热路径每条请求读一次
         internal static volatile bool Save;
 
         // 没链原生层（服务层单测用托管假原生层，没有 s2a_native 库 / 入口）：存不了快照，开关按关
         static SnapSwitch()
         {
-            try { CanSave = s2a_snap_saving() != 0; Any = s2a_snap_mode() != 0; Save = s2a_snap_logging() != 0; }
+            try { Save = s2a_snap_logging() != 0; }
             catch (DllNotFoundException) { }
             catch (EntryPointNotFoundException) { }
         }

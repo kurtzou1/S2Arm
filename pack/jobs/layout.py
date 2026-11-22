@@ -638,10 +638,11 @@ def launcher_free_in_use(rec):
 
 
 def install_record(c, gid):
-    """这款最近一次装机签名的记录 {at, free, device, deviceKey, [expires, expiresKnown]}（游戏库页「还有几天到期 / 续签」）：各台手机记录里带这款的取最新一次；没装过 → None。
+    """这款最近一次装机签名的记录 {at, free, device, deviceKey, [deviceKind], [expires, expiresKnown]}（游戏库页「还有几天到期 / 续签」）：各台手机记录里带这款的取最新一次；没装过 → None。
     free 只在那台手机现在用的就是启动器免费签的那份时为 True（launcher_free_in_use）：玩家换成别的工具装、换签名方式后不再给，提醒自动消失。
     free 时带到期时刻 expires：签好的包里读到的真值（signed.expires，expiresKnown=True）；没有才按 7 天估（expiresKnown=False）。前端直接用，不再自己加天数"""
     gid = gid.upper()
+    # deviceKind：装的是 iPad 还是 iPhone（#1962，游戏库「已推到 {0}」；0.6.9 前的记录没有，前端填「iPhone / iPad」）。
     # deviceKey：那台设备的记录键（UDID）。续签 / 重装装回当初那台，不替玩家换一台（维护者 11-11：续签时 iPad 被装上）
     recs = [(dict(r["signed"], deviceKey=k), r) for k, r in devices(c) if gid in (r.get("games") or {}) and isinstance(r.get("signed"), dict)]
     if not recs:

@@ -25,7 +25,8 @@ import shutil
 import struct
 import sys
 
-PROG_MAGIC, PROG_VERSION, PROG_HDR, PROG_ENTRY = 0x31575053, 1, 60, 844
+PROG_MAGIC, PROG_VERSION, PROG_HDR, PROG_ENTRY = 0x31575053, 2, 60, 88   # 同 android/native/nvn/nvn_vk_prog_warm.c：版本 2 = 变长条目（88 字节头 + 有效阶段的 c1 整段，各补齐到 4）
+PROG_C1_MIN, PROG_C1_MAX = 0x100, 0x10000   # NVK_PROG_REC_C1_MIN / MAX
 PIPE_MAGIC, PIPE_FORMAT, PIPE_DESC, PIPE_HDR = b'S2APW1\0\0', 1, 352, 32
 PIPE_ENTRY = 32 + PIPE_DESC + 4
 PIPE_NAME = f'pipes-v{PIPE_FORMAT}-{PIPE_DESC}.bin'
@@ -52,11 +53,22 @@ def prog_check(name, b):
     if ver != PROG_VERSION: raise ValueError('版本不符')
     if ent != PROG_ENTRY: raise ValueError('条目大小不符')
     if cnt > PROG_MAX: raise ValueError('条数超过硬顶')
-    if len(b) != PROG_HDR + cnt * PROG_ENTRY + 8: raise ValueError('长度与条数不符')
+    end, off, ids = len(b) - 8, PROG_HDR, set()
+    for _ in range(cnt):   # 变长条目：逐条走，c1 长度与有效位相符、在 [MIN, MAX]、合计正好落到校验和之前
+        if off + PROG_ENTRY > end: raise ValueError('长度与条数不符')
+        e = b[off:off + PROG_ENTRY]; off += PROG_ENTRY; ids.add(e[:32])
+        for st in range(3):
+            cl = struct.unpack_from('<I', e, 64 + 4 * st)[0]
+            if not (e[60] >> st) & 1:
+                if cl: raise ValueError('条目 c1 长度与有效位不符')
+                continue
+            if not PROG_C1_MIN <= cl <= PROG_C1_MAX: raise ValueError('条目 c1 长度越界')
+            off += (cl + 3) & ~3
+    if off != end: raise ValueError('长度与条数不符')
     if struct.unpack_from('<Q', b, len(b) - 8)[0] != fnv1a64(b[:-8]): raise ValueError('FNV 校验不符')
     closure, profile = b[52:60].hex(), b[16:24].hex()
     if name != f'{PROG_PREFIX}{closure}.bin': raise ValueError(f'文件名与文件头的闭包摘要 {closure} 不符')
-    return closure, profile, {b[PROG_HDR + i * PROG_ENTRY:PROG_HDR + i * PROG_ENTRY + 32] for i in range(cnt)}
+    return closure, profile, ids
 
 
 def pipe_check(b):

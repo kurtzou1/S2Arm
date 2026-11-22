@@ -141,6 +141,19 @@ void nvk_pipe_warm_diag_flush(void);   // 立刻输出当前窗口一行并开�
 void nvn_gpu_pipe_warm_scope(int on);
 uint64_t nvn_gpu_pipe_warm_hits(void);      // 真实 draw 命中预建对象的次数
 uint64_t nvn_gpu_pipe_warm_created(void);   // 预建出来的对象数
+
+// 实际 guest 管线创建调用，含失败；draw 桶包括首用后台线程和计算 dispatch。
+enum nvk_pipe_creation_bucket {
+    NVK_PIPE_GFX_WARM, NVK_PIPE_COMPUTE_WARM, NVK_PIPE_GFX_DRAW, NVK_PIPE_COMPUTE_DRAW, NVK_PIPE_CREATION_BUCKETS
+};
+enum nvk_pipe_feedback_mode { NVK_PIPE_FEEDBACK_UNAVAILABLE, NVK_PIPE_FEEDBACK_OFF, NVK_PIPE_FEEDBACK_ON };
+struct nvk_pipe_creation_stats {
+    uint64_t created, valid, no_feedback, app_hit;
+    uint64_t driver_ns, driver_p95_le_ns, wall_ns;
+};
+// 会话累计快照，可在预热/停局取读；有创建在途时各字段可能来自相邻时刻。p95 为桶上界，valid=0 时无样本。
+enum nvk_pipe_feedback_mode nvn_vk_pipe_creation_stats(struct nvk_pipe_creation_stats out[NVK_PIPE_CREATION_BUCKETS]);
+
 // 清单标签：存在后端管线对象上的一个 64 位值（低 32 位 = 槽号 + 1，高 32 位 = 槽代号；0 = 没设过）。
 // 原子读写、不加锁；标签随管线对象一起销毁（后端局内不淘汰管线），所以不会指到别的管线。
 uint64_t nvn_gpu_pipe_warm_tag(nvn_gpu_pipe p);

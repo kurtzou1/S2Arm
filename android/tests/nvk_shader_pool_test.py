@@ -224,6 +224,24 @@ def main():
         print(f'PASS: {len(cases)} graphics image negative controls')
         return 0
 
+    if sys.argv[1:] == ['--cs-ubo-sampler-mutants']:
+        # 负对照（#1594 片 10）：计算程序装载时把游戏 UBO 形态的类型 3 句柄放进程序的 usrc 表（build_compute 的 usrc_put），撤掉 / 改成对所有项都放，默认流程里的用例必红
+        code = original.read_text()
+        guard = '        if (le->src_kind == NVN_RB_TEXU && !usrc_put(&e->prog, b, le)) { red1("too_many_uniform_handles", "cs"); e->failed = 1; break; }\n'
+        for name, new, expected in (
+            ('no-usrc-put', '', 'compute UBO constant sampler layout entry'),
+            ('usrc-put-for-all', '        if (!usrc_put(&e->prog, b, le)) { red1("too_many_uniform_handles", "cs"); e->failed = 1; break; }\n',
+             'the c2 constant sampler entry of the same program stays a plain TEX entry'),
+        ):
+            assert code.count(guard) == 1, (name, 'mutation anchor')
+            path = out / ('cs-ubo-sampler-mutant-' + name + '.c')
+            path.write_text(code.replace(guard, new))
+            result = run('cs-ubo-sampler-' + name, path)
+            assert result.returncode != 0 and expected in result.stderr, (name, result.stdout, result.stderr)
+            print(f'{name}: expected assertion failure: {expected}', flush=True)
+        print('PASS: 2 compute UBO constant sampler negative controls')
+        return 0
+
     if len(sys.argv) in (3, 4) and sys.argv[1] == '--tbuf-layout':
         exe = out/'tbuf-layout'
         src = [ROOT/'android/tests/tbuf_layout_test.c', *libs]
@@ -382,10 +400,10 @@ def main():
             # 结果合并（#1355）前台路径：每一道判据撤一次，对应的用例必须变红
             ('alias-fg-disabled', '    if (alias_on()) {\n        int a_adopted = 0;', '    if (0 && alias_on()) {\n        int a_adopted = 0;', 1,
              'same result -> same program object'),
-            ('alias-result-ignored', 'memcpy(buf, res, 32); n += 32;', 'memset(buf, 0, 32); n += 32;', 1,
+            ('alias-result-ignored', 'memcpy(head, res, 32); n += 32;', 'memset(head, 0, 32); n += 32;', 1,
              'different result is not merged'),
-            ('alias-c1-ignored', 'if (k->c1_ok & (1u << st)) { memcpy(buf + n, k->c1[st], 0x100); n += 0x100; }',
-             'if (0) { memcpy(buf + n, k->c1[st], 0x100); n += 0x100; }', 1, 'different c1 is not merged'),
+            ('alias-c1-ignored', 's2a_sha256_update(&h, len4, 4); s2a_sha256_update(&h, k->c1[st], k->c1_len[st]);',
+             '(void)len4;', 1, 'different c1 is not merged'),
             ('alias-fact-registration-omitted', 'if (reusable && ae->fact_ok) fact_cache_keep_mask(&id, fact_base, ae->fact_mask, &ae->prog);',
              '(void)ae->fact_mask;', 1, 'reuses the program (no live compile'),
             # 预热线程建的那份也要算事实掩码：撤掉后，合并命中它的前台身份登记不上事实复用（真机现编 3 → 198 次的另一半）
@@ -464,7 +482,7 @@ def main():
         print(f'PASS: {len(changes)} negative controls')
         return 0
     if sys.argv[1:]:
-        raise ValueError('usage: nvk_shader_pool_test.py [--withdraw | --gs-libpack-mutants | --cs-libpack-mutants | --compute-warm-mutants | --diag-mutants | --live-compile-mutants | --graphics-image-mutants]'
+        raise ValueError('usage: nvk_shader_pool_test.py [--withdraw | --gs-libpack-mutants | --cs-libpack-mutants | --compute-warm-mutants | --diag-mutants | --live-compile-mutants | --graphics-image-mutants | --cs-ubo-sampler-mutants]'
                          '（其余参数是 gs_compiler_chain_test.py / tbuf_compiler_chain_test.py 的子命令）')
     # 存储图像的声明（数值类 + SPIR-V Image Format）落程序记录：生产 sampled_decl，手搭 SPIR-V
     exe = out/'image-decl'

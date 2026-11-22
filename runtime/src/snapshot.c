@@ -207,7 +207,9 @@ void s2a_snap_handout_id(uint64_t v, const char *id) {
 // 交给游戏的宿主数据段（游戏拿着指向它内部的指针，如视频同步点槽里的系统事件结构）：按名字登记，恢复时段内的值按「同名段的新起点 + 段内偏移」换算
 static struct { uint64_t lo, n; char name[32]; } g_hor[64]; static int g_nhor;
 void s2a_snap_handout_range(uint64_t lo, uint64_t n, const char *name) {
-    if (!s2a_snap_mode()) return;
+    // 不看开关、一律登记（至多 64 段，只是名字与地址范围）：静态区在构造函数里登记，那时开关可能还没定——这一局因地址关了快照
+    //   （vawin.c s2a_snap_disable），游戏库照样给恢复（snapsw.c s2a_snap_restore_offered），恢复时按名字找新起点；原先关着就不登记，
+    //   恢复走到一半报「交出的宿主数据段 vk.pdev 在本版没有」失败（11-22 真机 r1：朋友收集 CAP 30000、快照关着，库里点恢复）
     pthread_mutex_lock(&g_ho_mu); if (g_nhor < 64) { g_hor[g_nhor].lo = lo; g_hor[g_nhor].n = n; snprintf(g_hor[g_nhor].name, sizeof g_hor[0].name, "%s", name); g_nhor++; } pthread_mutex_unlock(&g_ho_mu);
 }
 // 交给游戏的宿主内存块（本进程里的拷贝，游戏把它的地址存进自己的数据）：如 Switch 2 程序对象里的控制段自持拷贝（graphics/nvn/gfx/nvn/hle_nvn.c ctl_intern，
@@ -696,6 +698,10 @@ static void *snap_restart_timer(void *arg) {
         sleep((unsigned)sec);
         while (atomic_load(&g_snap_busy)) usleep(100000);   // 正在存就等存完
         LOG("即时存档：游戏起来后 %ld 秒到点，回到快照（进程内重启，第 %ld / %ld 次）%s", sec, i + 1, rep, dir);
+        int s2a_snap_fits_inplace(const char *);   // 同游戏内菜单（ios/vpad.m snapRestore）：落点不同就不重启，界面那边会让玩家回游戏库
+        if (!s2a_snap_fits_inplace(dir)) {   // 同菜单：iPhone 让玩家回游戏库；Mac 原地重新起这一局按快照原址占（snaprelaunch.c，成功不返回）
+            int s2a_snap_relaunch(const char *, int); s2a_snap_relaunch(dir, 0);   // 非 Mac 是空实现、直接回 -1
+            LOG("即时存档：游戏里接不上这个快照（落点不同），不进程内重启——玩家路径是回游戏库恢复"); break; }
         setenv("S2A_SNAP_RESTORE", dir, 1);
         int rc = s2a_host_restart(snap_restart_cb, NULL); if (rc) LOG("【红】即时存档：进程内重启请求被拒 %d", rc);
     }
@@ -722,15 +728,18 @@ static int man_get(const char *dir, const char *key, char *out, size_t n) {
 }
 // 回 0 = 全部一致可以恢复；否则打红、说清哪一项不符，调用方立刻退出（此刻还没起服务层、没碰存档目录）
 // 恢复不成时给玩家的说法（0.6.0 做界面入口时读这个文件；不靠日志）：文档根下 snap_result.tsv，「结果 / 分类 / 给玩家的话」三行
-static int g_snap_old, g_snap_save_moved;
+static int g_snap_old, g_snap_save_moved, g_snap_where;   // g_snap_where：清单「窗口」与这一局不同（落点不同，快照本身是好的）
 static int g_snap_save_rollback;   // 玩家已确认退回存档（当前存档已备份或本来没有）：恢复时重放之前先把存档树写回快照那一刻
 void s2a_snap_mark_old(void) { g_snap_old = 1; }
 void s2a_snap_result_note(int ok) {
     char p[2048]; s2a_docs_path(p, sizeof p, "snap_result.tsv"); FILE *f = fopen(p, "w"); if (!f) return;
     if (ok) fprintf(f, "结果\t恢复成功\n");
     else if (g_snap_save_moved) fprintf(f, "结果\t需要确认\n分类\t存档已变\n给玩家\t存这个快照之后，游戏又存过档；恢复会把游戏存档退回到快照那一刻（现在的存档会先备份）。确认后再恢复\n");
-    else if (g_snap_old) { fprintf(f, "结果\t拒绝\n分类\t旧版快照\n给玩家\t这个快照是旧版 S2Arm 存的，新版接不上，已删掉；游戏自己的存档不受影响\n");
-        const char *d = s2a_snap_path(getenv("S2A_SNAP_RESTORE")); if (d && *d) { rmtree(d); LOG("即时存档恢复：旧版快照接不上，已删掉 %s", d); } }
+    // 11-22 起快照文件任何情况下都不删（拒绝时也留着：之后修好的版本能恢复；原先旧版快照接不上就整目录删掉）
+    // 模块排布变了（补丁区变长、改写器换版）：快照里的游戏内存接不上这一版的代码。玩家能做的：取消这款的社区补丁打入、重新出包，模块回到存档时那样再恢复
+    else if (g_snap_old) fprintf(f, "结果\t拒绝\n分类\t旧版快照\n给玩家\t这个快照存的时候，这款的程序和现在打的包不一样（多半是社区补丁打进了包），这一版接不上。在出包页取消这款的「出包时打入」、重新出包后再恢复；恢复后可以再打开。快照留着没删，游戏自己的存档不受影响\n");
+    // 落点不同：游戏里（进程内重启）搬不了窗口；游戏库那条路起宿主前按清单重占（vawin.c snap_retake），原址被占时重开 App 再点一次
+    else if (g_snap_where) fprintf(f, "结果\t拒绝\n分类\t落点不同\n给玩家\t这一刻存的时候，游戏的内存位置和现在不同，这里接不上。回到游戏库（必要时重开 S2Arm），长按这款点「回到上次存下的这一刻」即可恢复；快照还在，没有删\n");
     else fprintf(f, "结果\t失败\n分类\t快照不完整或损坏\n给玩家\t这个快照读不了（可能存的时候没存完）；游戏自己的存档不受影响\n");
     fclose(f);
 }
@@ -846,6 +855,7 @@ int s2a_snap_restore_check(const char *dir) {
                 if (lstat(root, &rs) && errno == ENOENT) { LOG("即时存档恢复：存快照之后存档变过，玩家已确认退回；当前没有存档目录（%s），不用备份", root); g_snap_save_rollback = 1; continue; }
                 if (clonefile(root, bk, 0)) { LOG("【红】即时存档恢复：玩家确认退回存档，但备份当前存档失败（errno %d，%s），不恢复", errno, bk); bad++; continue; }
                 LOG("即时存档恢复：存快照之后存档变过，玩家已确认退回；当前存档已备份到 %s", bk); g_snap_save_rollback = 1; continue; }
+            if (i == 3) g_snap_where = 1;
             LOG("【红】即时存档恢复：%s不符（快照 %s，当前 %s），拒绝恢复", it[i].key, v, it[i].cur); bad++; }
     }
     if (!bad) {   // 游戏时间接着快照那一刻走（同 Switch 挂起 / 唤醒，#495）：在服务层起来之前就接上，之后谁也看不到时间倒退；恢复期间照常往前走几秒
@@ -860,6 +870,21 @@ int s2a_snap_restore_check(const char *dir) {
         else if (!g_fp_bad) LOG("即时存档恢复：宿主结构布局指纹 %d 个全部一致", g_fp_n); }
     if (!bad) LOG("即时存档恢复：清单六项全部一致（构建号 %s、程序号 %s、窗口 %s、存档目录 %d 个文件）", id.build, id.prog, id.win, id.save_n);
     return bad ? -1 : 0;
+}
+
+// 进程内「回到这一刻」能不能就地接上（ios/vpad.m 在重启之前问）：进程内重启不换窗口 / 命令记录区（窗口里有游戏的签名代码页，进程内搬不了），
+//   快照清单记的落点与这一局不同就一定接不上——回 0，界面不拆这一局、直接让玩家回游戏库恢复（那条路起宿主前按清单重占，vawin.c snap_retake）。
+//   1 = 落点相同（照常重启恢复，其余各项由恢复前核对判）；-1 = 清单读不出（照旧重启，核对说原因）
+int s2a_snap_fits_inplace(const char *dir) {
+    void s2a_snap_arena_get(uint64_t *, uint64_t *, uint64_t *); uint64_t s2a_snap_arena_len(void);
+    char v[256], cur[64]; uint64_t b = 0, s = 0; s2a_window_get(&b, &s); snprintf(cur, sizeof cur, "%#llx+%#llx", (unsigned long long)b, (unsigned long long)s);
+    if (!dir || man_get(dir, "窗口", v, sizeof v)) return -1;
+    if (strcmp(v, cur)) { LOG("即时存档恢复：快照窗口 %s 与这一局 %s 不同，游戏里接不上，请玩家回游戏库恢复（不重启这一局）", v, cur); return 0; }
+    if (!man_get(dir, "命令记录区", v, sizeof v)) { char *e; uint64_t at = strtoull(v, &e, 10), len = e && *e == '\t' ? strtoull(e + 1, NULL, 10) : 0, cb = 0, cu = 0, vu = 0;
+        s2a_snap_arena_get(&cb, &cu, &vu);
+        if (at && (cb != at || s2a_snap_arena_len() != len)) { LOG("即时存档恢复：快照命令记录区 %#llx +%llu MB 与这一局 %#llx +%llu MB 不同，游戏里接不上，请玩家回游戏库恢复（不重启这一局）",
+            (unsigned long long)at, (unsigned long long)(len >> 20), (unsigned long long)cb, (unsigned long long)(s2a_snap_arena_len() >> 20)); return 0; } }
+    return 1;
 }
 
 // ---------- 恢复本体 ----------

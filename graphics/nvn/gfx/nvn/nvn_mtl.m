@@ -9828,11 +9828,31 @@ static uint64_t arena_waits(void) { return g_arena_waits; }
 static int arena_free(NvArena *it, size_t minimum) {
     return it->len >= minimum && ((it->fence && it->fence <= g_done) || (it->sfence && it->sfence <= g_seg_done));
 }
+// Blocks only ever came back for reuse, never left: big one-off requests (#2062 D-ASC8, a racing game on a 7.5 GB iPad: 75–188 MB each) made big blocks,
+//   every wait that timed out made another, and the total climbed to 2.6–3.7 GB until Metal refused the next one (FATAL cannot allocate … frame scratch).
+//   Now: reuse the smallest free block that fits (first fit handed a 200 MB block to a 4 MB request and the next big request had to make a new one);
+//   above ARENA_CAP, give back blocks the GPU is done with that cannot serve this request, biggest first, before making a new one; and when Metal
+//   refuses a block, give back every block the GPU is done with and try once more before giving up. A block given back has no live contents
+//   (its submission or segment finished; caches keyed by g_arena_gen dropped it when that generation ended).
+static uint64_t g_arena_dropped, g_arena_drop_bytes;
+static int arena_idle(NvArena *it) { return arena_free(it, 0); }
+static void arena_drop(NvArena *it) {
+    res_remove(it->buf); g_arena_bytes -= it->len; g_arena_dropped++; g_arena_drop_bytes += it->len; [g_arenas removeObject:it];
+    if (g_arena_dropped == 1) MLOG("frame scratch: over %llu MB of blocks, gave back an idle %llu MB block (first case; %llu MB of blocks left)",
+                                   (unsigned long long)(ARENA_CAP >> 20), (unsigned long long)(it->len >> 20), (unsigned long long)(g_arena_bytes >> 20));
+}
 static NvArena *arena_new(size_t minimum) {   // caller holds g_mu
+    const size_t need = MAX(minimum, 4u << 20);
     for (int waited = 0;; waited = 1) {
         // The for-in loop variable does not retain the object: take a strong reference first and then remove it from the array, otherwise what is returned after the array releases it is a dangling pointer
-        for (NvArena *it in g_arenas) if (arena_free(it, minimum)) { NvArena *r = it; [g_arenas removeObject:r]; r->fence = r->sfence = 0; r->used = 0; return r; }
-        if (waited || g_arena_bytes + MAX(minimum, 4u << 20) <= ARENA_CAP) break;
+        NvArena *best = nil; for (NvArena *it in g_arenas) if (arena_free(it, minimum) && (!best || it->len < best->len)) best = it;   // best fit
+        if (best) { NvArena *r = best; [g_arenas removeObject:r]; r->fence = r->sfence = 0; r->used = 0; return r; }
+        while (g_arena_bytes + need > ARENA_CAP) {   // over the cap: free blocks here are all too small for this request; give them back, biggest first
+            NvArena *big = nil; for (NvArena *it in g_arenas) if (arena_idle(it) && (!big || it->len > big->len)) big = it;
+            if (!big) break;
+            NvArena *d = big; arena_drop(d);
+        }
+        if (waited || g_arena_bytes + need <= ARENA_CAP) break;
         uint64_t wf = UINT64_MAX, ws = UINT64_MAX;   // the oldest block still with the GPU: by submission, by segment
         for (NvArena *it in g_arenas) { if (it->fence > g_done && it->fence < wf) wf = it->fence; if (it->sfence > g_seg_done && it->sfence < ws) ws = it->sfence; }
         if (wf == UINT64_MAX && ws == UINT64_MAX) break;   // all blocks are this segment's own: nothing to wait for
@@ -9840,7 +9860,14 @@ static NvArena *arena_new(size_t minimum) {   // caller holds g_mu
         while (!(wf != UINT64_MAX && g_done >= wf) && !(ws != UINT64_MAX && g_seg_done >= ws)) if (pthread_cond_timedwait(&g_cv, &g_mu, &dl)) { late = 1; break; }
         g_arena_waits++; if (late && !g_arena_wait_late++) MLOG("【红】 frame scratch: waited %d s for the GPU to give a block back, made a new one (%llu MB of blocks; first case)", ARENA_WAIT_S, (unsigned long long)(g_arena_bytes >> 20));
     }
-    NvArena *a = [NvArena new]; a->buf = [g_dev newBufferWithLength:MAX(minimum, 4u << 20) options:MTLResourceStorageModeShared];
+    NvArena *a = [NvArena new]; a->buf = [g_dev newBufferWithLength:need options:MTLResourceStorageModeShared];
+    if (!a->buf) {   // Metal refused: give back every block the GPU is done with and try once more
+        NSMutableArray<NvArena *> *idle = [NSMutableArray array]; for (NvArena *it in g_arenas) if (arena_idle(it)) [idle addObject:it];
+        uint64_t before = g_arena_bytes; for (NvArena *it in idle) arena_drop(it);
+        a->buf = [g_dev newBufferWithLength:need options:MTLResourceStorageModeShared];
+        MLOG("【红】 frame scratch: Metal refused a %zu-byte block; gave back %lu idle blocks (%llu → %llu MB of blocks), retry %s", need, (unsigned long)idle.count,
+             (unsigned long long)(before >> 20), (unsigned long long)(g_arena_bytes >> 20), a->buf ? "made it" : "failed too");
+    }
     if (!a->buf) MDIE("cannot allocate %zu bytes of frame scratch (%llu MB of blocks)", minimum, (unsigned long long)(g_arena_bytes >> 20));
     a->gpu = a->buf.gpuAddress; a->cpu = (uint8_t *)a->buf.contents; a->len = a->buf.length; res_add(a->buf); g_arena_made++; g_arena_bytes += a->len; return a;
 }
@@ -18703,9 +18730,13 @@ void nvn_be_exec(const uint8_t *p) {
         // A GPU-side event signal / value write (SignalEvent, ReportValue; not WaitEvent) stays inside the run too: it encodes nothing either, mtl_sub_event queues a write applied once the
         //   submission completes, and a queue parked on that event resumes only when the submission ends (nvn_xqueue.inc). 0100B8E016F76000 (#1449, 0.6.7, D-CQG6) follows each
         //   occlusion report with a ReportValue: once the report stayed in the run, these ended 534000 runs of 1.02 draws, 867 passes a frame, 6 fps. A wait still ends the run
-        if (g_gr.active && !geo_run_keeps(h.op) && !(h.op == OP_REPORT_COUNTER && h.size >= 16 && *(const uint64_t *)a == NVN_COUNTER_TYPE_SAMPLES_PASSED)
+        // An occlusion-query reset (SAMPLES_PASSED) stays inside the run as well, unless it would split the pass (the first reset inside a pass begun without a visibility buffer, below):
+        //   it encodes nothing either, it empties the slot table (vis_clear) and the next draw takes a new slot in order, as after a report. 0100B8E016F76000 (#1449, main 11-22) resets
+        //   before every geometry draw: once reports and signals stayed in the run, these ended 4,295,710 runs of 1.008 draws in a 17,100-frame Mac run
+        if (g_gr.active && !geo_run_keeps(h.op) && !((h.op == OP_REPORT_COUNTER || (h.op == OP_RESET_COUNTER && !(g_enc && !g_enc_has_vis)))
+                                                      && h.size >= 16 && *(const uint64_t *)a == NVN_COUNTER_TYPE_SAMPLES_PASSED)
             && !(h.op == OP_SIGNAL_EVENT && h.size >= 24 && !(*(const uint32_t *)((const uint8_t *)a + 8) & NVN_EV_WAIT))) {
-            g_gr_why = GEO_END_OP; g_gr_why_op = (int)h.op; geo_run_flush(); }   // only state settings, draws, occlusion reports and event signals stay inside a geometry run (nvn_geometry.inc ①)
+            g_gr_why = GEO_END_OP; g_gr_why_op = (int)h.op; geo_run_flush(); }   // only state settings, draws, occlusion reports / resets and event signals stay inside a geometry run (nvn_geometry.inc ①)
         switch (h.op) {
             case OP_END: g_exec_cur = NULL;
                 if (g_ret_n > base) { g_ret_n--; p = g_cstk_ret[g_ret_n]; list = g_cstk_list[g_ret_n]; prev = NULL; continue; }   // 子列表结束：回调用方 CALL 之后

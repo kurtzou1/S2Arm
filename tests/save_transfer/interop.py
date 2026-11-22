@@ -469,4 +469,49 @@ with tempfile.TemporaryDirectory(prefix="s2arm-public-save-interop-") as tempora
     left = subdirs()
     assert left == dirs_before and snapshot(tx_root) == before, (dirs_before, left, snapshot(tx_root) == before)
     print("PASS 恢复记录写出前失败：事务 / 备份目录不残留、活存档根不变（审计 P2-177）")
+    # #2070：iPad「存档管理」导入其他模拟器 / 工具的存档（请求带 saveFolder 才走这条；期望手写）
+    #   ① 访达压的 zip（两个裸存档文件 + __MACOSX/._*）：检查认出、2 个文件 5 + 3 = 8 字节；恢复后存档位置里只有这两个文件（旧内容整份换掉、
+    #      没有 __MACOSX），当前存档先备份成 before-restore.s2asave，活存档根不动（下次起局才读入）
+    community = scratch / "community"
+    community.mkdir()
+    melonx = community / "melonx.zip"
+    with zipfile.ZipFile(melonx, "w") as z:
+        z.writestr("0.celeste", b"slot0")
+        z.writestr("settings.celeste", b"cfg")
+        z.writestr("__MACOSX/._0.celeste", b"junk")
+    folder = scratch / "Documents" / "SaveData"
+    folder.mkdir(parents=True)
+    (folder / "save").mkdir()
+    (folder / "save" / "old.bin").write_bytes(b"old")
+    com_root = scratch / "community-root"
+    shutil.copytree(source, com_root)
+    live = snapshot(com_root)
+    seen = csharp_call("inspect", melonx, root=com_root, saveFolder=str(folder))
+    assert (seen["community"], seen["fileCount"], seen["totalBytes"]) == (True, 2, 8), seen
+    done = csharp_call("restore", melonx, root=com_root, saveFolder=str(folder),
+                       archiveSha256=seen["archiveSha256"], targetFingerprint=seen["targetFingerprint"])
+    assert done["pending"] and done["hadOriginal"] and Path(done["previousBackup"]).name == "before-restore.s2asave", done
+    assert sorted(p.relative_to(folder).as_posix() for p in folder.rglob("*")) == ["0.celeste", "settings.celeste"]
+    assert (folder / "0.celeste").read_bytes() == b"slot0" and snapshot(com_root) == live
+    assert not (folder.parent / "SaveData.next").exists() and not (folder.parent / "SaveData.old").exists()
+    print("PASS #2070 社区 zip：认出 2 个文件 8 字节，恢复前备份、整份放进存档位置、不带 __MACOSX、活存档根不动")
+    # ② 不带 saveFolder（Mac / iCloud 同步等别的调用方）：照旧只收 .s2asave
+    csharp_call("inspect", melonx, root=com_root, expected_code="save_invalid")
+    # ③ 只选了单个存档文件 → save_single_file；④ 认不出（只有金手指）→ save_not_recognized；⑤ 检查后来源变了 → save_changed
+    single = community / "0.celeste"
+    single.write_bytes(b"slot0")
+    csharp_call("inspect", single, root=com_root, saveFolder=str(folder), expected_code="save_single_file")
+    cheats = community / "cheats.zip"
+    with zipfile.ZipFile(cheats, "w") as z:
+        z.writestr("cheats/a.txt", b"[x]")
+    csharp_call("inspect", cheats, root=com_root, saveFolder=str(folder), expected_code="save_not_recognized")
+    seen = csharp_call("inspect", melonx, root=com_root, saveFolder=str(folder))
+    with zipfile.ZipFile(melonx, "a") as z:
+        z.writestr("1.celeste", b"slot1")
+    csharp_call("restore", melonx, root=com_root, saveFolder=str(folder), archiveSha256=seen["archiveSha256"],
+                targetFingerprint=seen["targetFingerprint"], expected_code="save_changed")
+    # ⑥ 带 saveFolder 选我方备份：照旧走 .s2asave（有 manifest、没有 community 标记）
+    own = csharp_call("inspect", python_archive, root=com_root, saveFolder=str(folder))
+    assert "manifest" in own and "community" not in own, own
+    print("PASS #2070 不带 saveFolder 照旧拒、单个文件 / 认不出 / 检查后变了各有原因码、我方备份照旧")
     print("Public-file G05/G06 interoperability passed; no game or player progress was tested.")

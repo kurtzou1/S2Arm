@@ -394,6 +394,32 @@ int main(void) {
                slot_of[3] == 3 && slot_of[4] == -1);   // 第 5 只丢弃
         assert(s2a_slot_plan(none, five, 0, 4, slot_of) == 1);   // 没有手柄：1 格（触屏 / 键盘）
     }
+    // 按顺序表排在线手柄（s2a_pad_order_arrange，Mac / iOS 共用）：期望值按「表里的按表顺序在前、没列的照原顺序接在后、没分配的去掉、系统手柄按名字 + 同名第几只认」手算
+    {
+        s2a_pad_order order = {0};
+        order.count = 2;
+        order.entry[0].ns2_player = -1; strcpy(order.entry[0].name, "Xbox"); order.entry[0].index = 1;   // P1 = 第 2 只 Xbox
+        order.entry[1].ns2_player = 0;                                                                     // P2 = NS2 通道玩家 0
+        order.dropped_count = 1;
+        order.dropped[0].ns2_player = -1; strcpy(order.dropped[0].name, "Pad X"); order.dropped[0].index = 0;
+        int ns2[5] = {-1, -1, 0, -1, -1};
+        const char *group[5] = {"Xbox", "Xbox", NULL, "Pad X", "8BitDo"};
+        int keep[5], rank[5];
+        assert(s2a_pad_order_arrange(&order, 5, ns2, group, NULL, keep, rank) == 4);   // Pad X 没分配：去掉
+        assert(keep[0] == 1 && rank[0] == 0);                                // 第 2 只 Xbox 是 P1
+        assert(keep[1] == 2 && rank[1] == 1);                                // NS2 玩家 0 是 P2
+        assert(keep[2] == 0 && rank[2] == S2A_PAD_ORDER_UNLISTED);           // 第 1 只 Xbox 没列：照原顺序接在后
+        assert(keep[3] == 4 && rank[3] == S2A_PAD_ORDER_UNLISTED);
+        // 没有表：一个不去、顺序不动（= 改前照连接顺序）
+        assert(s2a_pad_order_arrange(NULL, 5, ns2, group, NULL, keep, rank) == 5);
+        for (int k = 0; k < 5; k++) assert(keep[k] == k && rank[k] == S2A_PAD_ORDER_UNLISTED);
+        // 一代按设备：key 代替名字去比，同名的两只照设备 id 分开
+        s2a_pad_order g1 = {0};
+        g1.count = 1; g1.entry[0].ns2_player = S2A_PAD_ORDER_GEN1; strcpy(g1.entry[0].name, "dev-B");
+        int gn[2] = {S2A_PAD_ORDER_GEN1, S2A_PAD_ORDER_GEN1};
+        const char *gg[2] = {"Joy-Con (L)", "Joy-Con (L)"}, *gk[2] = {"dev-A", "dev-B"};
+        assert(s2a_pad_order_arrange(&g1, 2, gn, gg, gk, keep, rank) == 2 && keep[0] == 1 && rank[0] == 0 && keep[1] == 0);
+    }
     // #1428：iPhone 上 NS2 Pro（BLE）和系统手柄一起分槽（ios/controller.m 给 NS2 Pro 一个固定身份 N），期望按「先连先占、不重排、断开留空」手算
     {
         static const char X, Y, N;

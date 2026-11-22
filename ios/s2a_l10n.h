@@ -14,9 +14,16 @@
 //   ios/app.m 起进程时据此设本 App 的 AppleLanguages，字符串表 / 游戏库 / 系统弹框都按同一种语言出。进程内只取一次（换语言重开 App 生效）
 #include "../runtime/include/s2a_ui_lang.h"   // 按本文件位置找：引用 s2a_l10n.h 的原生单测（vpad_* / cpatch_settings 等）不带 runtime/include
 #define S2AUILanguageKey @"S2AUILanguage"
-static inline NSString *s2a_l10n_system_tag(void) {   // 系统首选语言第一项：玩家选过语言时 AppleLanguages 是本 App 的覆盖值，要读全局域那份
-    NSArray *g = [[NSUserDefaults standardUserDefaults] persistentDomainForName:NSGlobalDomain][@"AppleLanguages"];
-    return [g isKindOfClass:NSArray.class] && g.count ? g.firstObject : NSLocale.preferredLanguages.firstObject;
+#define S2AUILanguageOursKey @"S2AUILanguageWroteAppleLanguages"
+static inline NSString *s2a_l10n_first(NSArray *a) { return [a isKindOfClass:NSArray.class] && a.count && [a.firstObject isKindOfClass:NSString.class] ? a.firstObject : nil; }
+// 「跟随系统」时的系统语言：本 App 域的 AppleLanguages 不是我们写的（玩家在 iOS「设置 → S2Arm → 语言」选的）就用它，同字符串表；
+//   是我们写的（App 内选过语言时的覆盖值）或没有才读全局域（#2069，取法 s2a_ui_lang_system_tag，单测 t_ui_lang）
+static inline NSString *s2a_l10n_system_tag(void) {
+    NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+    NSString *app = s2a_l10n_first([d persistentDomainForName:NSBundle.mainBundle.bundleIdentifier ?: @""][@"AppleLanguages"]);
+    NSString *global = s2a_l10n_first([d persistentDomainForName:NSGlobalDomain][@"AppleLanguages"]) ?: NSLocale.preferredLanguages.firstObject;
+    const char *t = s2a_ui_lang_system_tag(app.UTF8String, [d boolForKey:S2AUILanguageOursKey], global.UTF8String);
+    return t ? @(t) : nil;
 }
 static inline NSString *s2a_l10n_lang(void) {
     static NSString *l; static dispatch_once_t once;
@@ -26,7 +33,6 @@ static inline NSString *s2a_l10n_lang(void) {
 // 起进程时调一次（ios/app.m 构造期、输入工作台 main 开头），在任何本地化查表之前：玩家选过语言就把本 App 的 AppleLanguages 设成它
 //   （字符串表 / 游戏库 / 系统弹框随之），并记下「是我们写的」；跟随系统时只清我们写的那份（s2a_ui_lang_clear_override，#971）——
 //   玩家在 iOS「设置 → S2Arm → 首选语言」里选的（存的是同一个键）照留，游戏语言缺省读本 App 首选语言列表也就跟它。返回最终生效的界面语言
-#define S2AUILanguageOursKey @"S2AUILanguageWroteAppleLanguages"
 static inline NSString *s2a_l10n_apply_choice(void) {
     NSUserDefaults *d = NSUserDefaults.standardUserDefaults; NSString *c = [d stringForKey:S2AUILanguageKey];
     if ([@[@"zh-Hans", @"zh-Hant", @"en", @"ja", @"es", @"fr"] containsObject:c]) { [d setObject:@[c] forKey:@"AppleLanguages"]; [d setBool:YES forKey:S2AUILanguageOursKey]; }

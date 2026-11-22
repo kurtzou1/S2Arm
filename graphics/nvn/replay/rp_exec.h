@@ -60,6 +60,7 @@ void rp_pass_barrier(uint32_t bits);
 uint32_t rp_pass_take_barrier(void);   // 通道外的计算派发前调：取走待发的游戏屏障位（取完清零），由调用方交给后端
 void rp_pass_prepare_draw(nvn_gpu_cmd c, uint32_t color_write_mask);   // 有效颜色写掩码（含片元输出映射）与像素区域；附件集合变了或区域超出时重开
 int rp_pass_begin(nvn_gpu_cmd c);     // 绘制前调：1 = 通道开着；0 = 开不了（已记账），跳过这笔
+void rp_pass_want_layered(nvn_gpu_cmd c, int layered);   // 绘制前调（prepare_draw 之前）：程序的顶点 / 几何阶段写层号 = 1，按分层通道开；与开着的通道不同就收掉重开
 // 被读之前必须落地（rp_pass.c）：ts 里这些贴图要以「采样贴图 / 图像 / 拷贝端点 / 上屏」身份被用到之前先调一次，
 // 把还挂着它们的待折清除落地（挂起见 rp_pass.c 的 park）。按贴图序号匹配：读的是整张图，级 / 层不参与匹配。
 void rp_pass_land_reads(nvn_gpu_cmd c, const tex_t *const *ts, int n);

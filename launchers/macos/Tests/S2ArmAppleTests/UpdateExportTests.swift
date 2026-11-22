@@ -75,6 +75,28 @@ import XCTest
         XCTAssertNil(model.gameUpdate(try game("0100B")), "没做过 iPhone 版的款不发 updateGame")
     }
 
+    // #1961：原料和原件都不在（诊断 facts.action = relinkSource）→ 黄字下给「重新添加原件…」；选了原件发 import、只认这一款（expectGameId），
+    //   成了标「已找回」、不再给按钮；别的黄字（没 action）不给按钮。期望手写
+    func testRelinkSourceOfferedOnlyWhenOriginalGone() async throws {
+        let g = try game("0100A")
+        runner.updateDiagnostics = [["severity": "warning", "code": "update_incomplete", "summary": "原件也不在", "facts": ["action": "relinkSource"]],
+                                    ["severity": "warning", "code": "update_incomplete", "summary": "没装工具"]]
+        model.updateGame(g)
+        for _ in 0..<300 where model.gameUpdate(g)?.running != false { try? await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(model.gameUpdate(g)?.incomplete, ["原件也不在", "没装工具"])
+        XCTAssertEqual(model.gameUpdate(g)?.relinkSource, true)
+        let source = FileManager.default.temporaryDirectory.appendingPathComponent("甲.nsp")
+        model.relinkSource(g, source: source)
+        let reqs = await waitRequests("import", count: 1)
+        XCTAssertEqual(reqs.first?["expectGameId"] as? String, "0100A")
+        XCTAssertEqual(reqs.first?["paths"] as? [String], [source.path])
+        for _ in 0..<300 where model.gameUpdate(g)?.relinking != false { try? await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(model.gameUpdate(g)?.relinked, true)
+        XCTAssertEqual(model.gameUpdate(g)?.relinkSource, false, "找回后不再给按钮")
+        XCTAssertNil(model.gameUpdate(g)?.failure)
+        XCTAssertFalse(UpdateGameResult(outcome: [:], diagnostics: [["code": "update_incomplete", "summary": "没装工具"]]).relinkSource, "没 action 的黄字不给按钮")
+    }
+
     // ---- 导出确认页：设备行 ----
 
     private func phone(_ device: String, installed: Bool = true, by: PhoneOverview.InstalledBy? = nil, shellCurrent: Bool = true, online: String? = "usb",

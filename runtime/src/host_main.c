@@ -143,6 +143,7 @@ static void load_session_modules(void *unused) {
 #if defined(__APPLE__)
     { void s2a_test_ballast_commit(void); s2a_test_ballast_commit(); }   // 测试压舱（S2A_TEST_BALLAST_MB，vawin.c）：布局排完、装模块前才真占
     { int s2a_guest_file_retry(void); s2a_guest_file_retry(); }   // 起局时空间不够没接上文件后备的，解包完、装模块前再试一次（vawin.c，#483）
+    { void s2a_guest_lowram_ask(void); s2a_guest_lowram_ask(); }   // 兜底后物理内存仍装不下：本机本款问一次「仍要启动」（vawin.c，D-YDKK；构造期在主线程问不了，挪到这里）
 #endif
     load_modules(g_module_dir, (const char **)g_module_names, g_module_count);
     if (g_program_switched >= 0) {   // 多程序合集：模块（含 main.npdm 程序号）换好后，直连图形层的着色器库 / 映射表 / 每款参数换到该序号（graphics/nvn/host_adapt.m）；

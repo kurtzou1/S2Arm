@@ -3142,10 +3142,32 @@ internal static unsafe class Program
                 DirectProgram progCs4 = DirectProgram.Parse(docCs4.RootElement.GetProperty("program"), "program", p3);
                 DirectStage csStage4 = progCs4.StageOf("cs");
                 var fcs4 = new DirectGpuAccessor(p3, progCs4, csStage4, 0, new DirectAllocator(p3), new List<DirectQuery>());
-                string compute4 = Resolve3(fcs4, csStage4, "cs", ShaderStage.Compute, Const3(40, 260), Slots4(5), 1, out DirectBinding boundCs4);
-                Check(compute4 == "UNSUPPORTED_PROGRAM cs: texture handle from cbuf slot 65541 is not implemented (constant sampler, compute)" + Tail4(40, 260, 5) &&
-                      boundCs4.Slot == -1 && boundCs4.UboSlot == -1 && boundCs4.ConstSampler == -1,
-                    "a compute-stage type-3 UBO handle is rejected by name and binds nothing: " + compute4);
+                // 片 10：计算阶段与图形阶段同一份合同——取到同字事实后编成 uboSlot / uboOffset + constSampler，不填 slot / samp_slot
+                foreach (var (what, word, sampler, cbuf, ubo, off) in new[] {
+                    ("the handle read on the device", 40, 260, 5, 2, 160) })
+                {
+                    string c4 = Resolve3(fcs4, csStage4, "cs", ShaderStage.Compute, Const3(word, sampler), Slots4(cbuf), 1, out DirectBinding bCs4);
+                    Check(c4 == "bound" && bCs4.Slot == -1 && bCs4.UboSlot == ubo && bCs4.UboOffset == off && bCs4.ConstSampler == sampler && bCs4.SamplerSlot == -1,
+                        "compute-stage type-3 UBO " + what + " binds like the graphics stage: " + c4 + " slot=" + bCs4.Slot + " ubo=" + bCs4.UboSlot + "/" + bCs4.UboOffset + " const=" + bCs4.ConstSampler + " samp=" + bCs4.SamplerSlot);
+                }
+                // 计算阶段的负控：与图形阶段同一批拒绝，前缀不变（宿主按前缀归类），什么都不填
+                string csOver4 = Resolve3(fcs4, csStage4, "cs", ShaderStage.Compute, Const3(40, 4096), Slots4(5), 1, out DirectBinding bCsOver4);
+                Check(csOver4 == "UNSUPPORTED_PROGRAM cs: texture handle from cbuf slot 65541 is not implemented (constant sampler index above 4095)" + Tail4(40, 4096, 5) &&
+                      bCsOver4.Slot == -1 && bCsOver4.UboSlot == -1 && bCsOver4.ConstSampler == -1,
+                    "a compute-stage sampler index the 12-bit handle field cannot hold is rejected by name and binds nothing: " + csOver4);
+                foreach (var (what, count, length) in new[] { ("binding count above 1", 2, 2), ("descriptor array length above 1 alone", 1, 2) })
+                {
+                    string ca4 = Resolve3(fcs4, csStage4, "cs", ShaderStage.Compute, Const3(40, 260), Slots4(5), count, out DirectBinding bCsArr4, length);
+                    Check(ca4 == "UNSUPPORTED_PROGRAM cs: texture handle from cbuf slot 65541 is not implemented (constant sampler array)" + Tail4(40, 260, 5, count, length) &&
+                          bCsArr4.Slot == -1 && bCsArr4.UboSlot == -1 && bCsArr4.ConstSampler == -1,
+                        "a compute-stage type-3 UBO handle with " + what + " is rejected by name and binds nothing: " + ca4);
+                }
+                string csNoFact4 = Resolve3(fcs4, csStage4, "cs", ShaderStage.Compute, Const3(41, 260), Slots4(5), 1, out DirectBinding bCsNo4);
+                Check(csNoFact4.StartsWith("UNSUPPORTED_PROGRAM cs: texture handle from cbuf slot 65541 is not implemented (handle=" + Const3(41, 260) +
+                                           ", arrayLength=1, count=1, request=", StringComparison.Ordinal) &&
+                      csNoFact4.EndsWith(") [kind=texture word=41 word2=260 type=3 cbuf=5/0 key=const-sampler]", StringComparison.Ordinal) &&
+                      !csNoFact4.Contains("constant sampler", StringComparison.Ordinal) && bCsNo4.Slot == -1 && bCsNo4.UboSlot == -1 && bCsNo4.ConstSampler == -1,
+                    "a compute-stage type-3 UBO handle without a same-word fact keeps the generic rejection: " + csNoFact4);
                 foreach (var (what, word) in new[] { ("no same-word fact", 41), ("the same-word fact is a texel buffer", 44), ("the same-word fact is separate", 48) })
                 {
                     string n4 = Bound4(word, 260, 5, out DirectBinding bNo4);

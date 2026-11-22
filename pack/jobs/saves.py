@@ -28,7 +28,7 @@ import save_formats
 import layout
 import layout as _lay   # external_archive 里有同名局部变量 layout（存档结构），那里用这个别名
 
-OPERATIONS = {"saveStatus", "saveBackup", "saveInspect", "saveRestore", "savePrevious", "saveRestorePrevious"}
+OPERATIONS = {"saveStatus", "saveBackup", "saveInspect", "saveRestore", "savePrevious", "saveRestorePrevious", "saveDiscardSeed"}
 TREES = ("bis/user/save", "bis/system/save")
 PROFILE = "system/Profiles.json"
 SAVE_INDEX = "bis/system/save/8000000000000000/0/imkvdb.arc"
@@ -726,6 +726,7 @@ def status(c):
             )
         else:
             result = dict(hasSave=False, fileCount=0, totalBytes=0)
+        result |= pending_seed_info(c, game["id"])
         copies = (
             sorted(
                 backups.glob("*/before-restore.s2asave"),
@@ -1078,7 +1079,8 @@ def checked_archive(c, game, root):
         fail(c, "备份损坏、格式不支持或包含不安全路径，已拒绝恢复。", "invalid")
 
 
-SEED_NOTICE = "这款游戏在这台电脑上还没玩过：存档会在下次启动游戏时放进去。"
+# #2066：说清是「这台电脑」、什么时候生效，推到 iPhone / iPad 的不带它（玩家原先以为恢复到了 iPad 上）
+SEED_NOTICE = "这款游戏在这台电脑上还没玩过：存档会在下次在这台电脑上启动这款时放进去；推到 iPhone / iPad 的这款不带这份存档。"
 # 服务层 SeedFrom 每一类都灌入后才打这一句（services/S2A.Services/Saves.cs SeedAllDoneLine，两边一字不差；审计 P1-156：
 #   原先认「S2A 带存档起局：」，它在真正灌入前的「当前用户」行和每一类成功行都有，前一类成功、后一类失败也删了种子）
 SEED_DONE_LINE = "S2A 带存档起局完成："  # 非玩家句
@@ -1087,6 +1089,26 @@ SEED_DONE_LINE = "S2A 带存档起局完成："  # 非玩家句
 def pending_seed(c, gid):
     """没玩过的游戏没有存档位置：社区存档先放这里，下次启动时由运行时建好存档再灌入（S2A_SAVE_DIR，同内部带存档起局）"""
     return safe_path(c.library, c.library / "save-imports" / gid / "pending-seed")
+
+
+def pending_seed_info(c, gid):
+    """待放区里等着的存档（#2066：存档页「当前存档」写已放好几个文件、什么时候放进去，不再说「还没有存档」）：{pendingSeed: {fileCount, totalBytes}}；没有 → {}"""
+    pending = claim_seed(c, gid)
+    if pending is None:
+        return {}
+    try:
+        files, _ = scan(c, pending)
+    except ValueError:
+        return {}
+    return dict(pendingSeed=dict(fileCount=len(files), totalBytes=sum(v[2] for v in files.values())))
+
+
+def discard_seed(c):
+    """存档页「不要了」：删掉待放区里这款的存档（#2066）；没有也算成"""
+    c.begin("删掉待放入的存档")
+    with stopped(c, tolerate=True) as (game, _, _):
+        shutil.rmtree(pending_seed(c, game["id"]), ignore_errors=True)
+        return dict(discarded=True)
 
 
 def has_save_target(c, game, root):
@@ -1167,7 +1189,7 @@ def seed_restore(c, game, root, source):
         copy_tree(c, Path(data), stage / seed_kind(c, game, kind))
     shutil.rmtree(pending, ignore_errors=True)
     os.replace(stage, pending)
-    return dict(committed=True, hadOriginal=False, outputPath=str(pending), previousBackup="", cleanupWarning="")
+    return dict(committed=True, hadOriginal=False, pending=True, outputPath=str(pending), previousBackup="", cleanupWarning="")   # pending：放进了待放区，还没进存档（#2066）
 
 
 def claim_seed(c, gid):

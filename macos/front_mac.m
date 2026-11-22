@@ -48,6 +48,7 @@ __attribute__((constructor)) static void cheats_register_host(void) { void (*f)(
 int s2a_ui_zh(void) { return [NSLocale.preferredLanguages.firstObject hasPrefix:@"zh"]; }
 #include "../ios/haptic_retry.h"
 #include "../ios/haptic_safe.h"
+#include "../ios/pad_order_file.h"
 int s2a_screen_fit(int pw, int ph);   // runtime/src/widen.c：按窗口像素跟屏
 
 void s2a_host_shutdown(const char *why);
@@ -545,6 +546,7 @@ __attribute__((visibility("default"), used)) void s2a_pad_set_motion_enabled(int
     // Framework-recognized Pro uses public sensor control plus passive HID data;
     // Joy-Con / framework-unrecognized Pro retain their existing raw control path.
     s2a_joycon_imu_set_enabled(want);
+    s2a_mac_hid_pad_set_motion_enabled(want);   // 兜底 HID 手柄（第三方 Switch 模式 / GameController 不认的 Pro，#1383）同一开关
 }
 // P1（槽 0）是一代 Joy-Con 单元时（#520，同 Joy-Con 2：P1 的体感 / 震动跟占 P1 的那只走）：定义在槽位表后面
 static int p1_gen1_motion(s2a_pad_motion out[2]);
@@ -1253,29 +1255,12 @@ static BOOL pad_order_refresh(void) {
     if (stat(path.fileSystemRepresentation, &st)) { if (!g_order_loaded) return NO; g_order_loaded = 0; return YES; }
     if (g_order_loaded && st.st_mtimespec.tv_sec == stamp.tv_sec && st.st_mtimespec.tv_nsec == stamp.tv_nsec) return NO;
     stamp = st.st_mtimespec;
-    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:[NSData dataWithContentsOfFile:path] ?: [NSData data] options:0 error:nil];
-    s2a_pad_order order = {0};
-    void (^fill)(id, s2a_pad_order_entry *, int *) = ^(id list, s2a_pad_order_entry *out, int *count) {
-        for (NSDictionary *e in [list isKindOfClass:NSArray.class] ? list : @[]) {
-            if (*count >= S2A_PAD_ORDER_MAX || ![e isKindOfClass:NSDictionary.class]) break;
-            s2a_pad_order_entry *x = &out[(*count)++];
-            BOOL ns2 = [e[@"type"] isEqual:@"ns2"], keyboard = [e[@"type"] isEqual:@"keyboard"], gen1 = [e[@"type"] isEqual:@"gen1"], gen1pair = [e[@"type"] isEqual:@"gen1pair"], empty = [e[@"type"] isEqual:@"empty"];
-            x->ns2_player = empty ? S2A_PAD_ORDER_EMPTY : keyboard ? S2A_PAD_ORDER_KEYBOARD : gen1 ? S2A_PAD_ORDER_GEN1 : gen1pair ? S2A_PAD_ORDER_GEN1_PAIR : ns2 ? [e[@"player"] intValue] : -1;
-            if (empty || keyboard) continue;
-            if (gen1 || gen1pair) {   // 一代按设备：单只 id、一对「左 id|右 id」
-                NSString *key = gen1 ? [e[@"id"] description] : [NSString stringWithFormat:@"%@|%@", e[@"left"], e[@"right"]];
-                [key getCString:x->name maxLength:sizeof x->name encoding:NSUTF8StringEncoding];
-                continue;
-            }
-            x->index = [e[@"index"] intValue];
-            if (!ns2) [[e[@"name"] description] getCString:x->name maxLength:sizeof x->name encoding:NSUTF8StringEncoding];
-        }
-    };
-    if ([json isKindOfClass:NSDictionary.class]) { fill(json[@"order"], order.entry, &order.count); fill(json[@"dropped"], order.dropped, &order.dropped_count); }
+    id json = [NSJSONSerialization JSONObjectWithData:[NSData dataWithContentsOfFile:path] ?: [NSData data] options:0 error:nil];
+    s2a_pad_order order; long generation;
+    int loaded = s2a_pad_order_from_json(json, &order, &generation);   // 解析与 iOS 共用（ios/pad_order_file.h）
     BOOL was = g_order_loaded;
-    long generation = [json isKindOfClass:NSDictionary.class] ? [json[@"generation"] longValue] : -1;
     BOOL reassign = !was || generation != g_order_generation;
-    g_order = order; g_order_loaded = [json isKindOfClass:NSDictionary.class]; g_order_generation = generation;
+    g_order = order; g_order_loaded = loaded; g_order_generation = generation;
     fprintf(stderr, "[s2a] 分配玩家顺序表：%d 位%s，没分配的 %d 只不给玩家位%s\n", order.count, g_order_loaded ? "" : "（读不懂，照连接顺序）", order.dropped_count,
             reassign ? "；重新分配过，照表重排" : "；只是接上 / 断开手柄，已在玩的留原位");
     return (g_order_loaded || was) && reassign;
@@ -1475,20 +1460,17 @@ static void sample_input(void) {
     int live_rank[S2A_LIVE_MAX];   // 顺序表里排第几（没登记 = S2A_PAD_ORDER_UNLISTED）：下面 s2a_slot_pin 照它把登记过的钉在自己那格
     for (int j = 0; j < S2A_LIVE_MAX; j++) live_rank[j] = S2A_PAD_ORDER_UNLISTED;
     if (g_order_loaded) {
-        int rank[S2A_LIVE_MAX], m = 0; NSMutableDictionary<NSString *, NSNumber *> *seen = [NSMutableDictionary new];
+        const char *group[S2A_LIVE_MAX]; int keep[S2A_LIVE_MAX], kept_rank[S2A_LIVE_MAX];
         for (int j = 0; j < n; j++) {
             NSString *name = live_ctrls[j] ? (live_ctrls[j].vendorName ?: live_ctrls[j].productCategory) : live_hid[j] ? @(live_hid[j]->name) : nil;
-            int index = name ? seen[name].intValue : 0;
-            if (name) seen[name] = @(index + 1);
-            rank[j] = s2a_pad_order_rank(&g_order, live_ble[j], live_key[j] ?: name.UTF8String, index);   // 一代按设备：照设备 id 认
+            group[j] = name.UTF8String;
         }
-        int order_idx[S2A_LIVE_MAX]; for (int j = 0; j < n; j++) order_idx[j] = j;
-        for (int a = 1; a < n; a++) for (int b = a; b > 0 && rank[order_idx[b]] < rank[order_idx[b - 1]]; b--) { int t = order_idx[b]; order_idx[b] = order_idx[b - 1]; order_idx[b - 1] = t; }   // 稳定排序
+        // 排位、稳定排序、去掉没分配的（同原机断开：系统手柄 S2Arm 断不了蓝牙，游戏不读它）与 iOS 共用 pad.c；一代按设备照 live_key 认
+        int m = s2a_pad_order_arrange(&g_order, n, live_ble, group, live_key, keep, kept_rank);
         const void *ids[S2A_LIVE_MAX]; GCExtendedGamepad *pads[S2A_LIVE_MAX]; GCController *ctrls[S2A_LIVE_MAX]; int bles[S2A_LIVE_MAX]; const char *keys2[S2A_LIVE_MAX]; const s2a_hid_pad *hids[S2A_LIVE_MAX];
-        for (int k = 0; k < n; k++) {
-            int j = order_idx[k];
-            if (rank[j] == S2A_PAD_ORDER_DROPPED) continue;   // 分配时没登记：同原机断开（系统手柄 S2Arm 断不了蓝牙，游戏不读它）
-            ids[m] = live_ids[j]; pads[m] = live_pads[j]; ctrls[m] = live_ctrls[j]; bles[m] = live_ble[j]; keys2[m] = live_key[j]; hids[m] = live_hid[j]; live_rank[m] = rank[j]; m++;
+        for (int k = 0; k < m; k++) {
+            int j = keep[k];
+            ids[k] = live_ids[j]; pads[k] = live_pads[j]; ctrls[k] = live_ctrls[j]; bles[k] = live_ble[j]; keys2[k] = live_key[j]; hids[k] = live_hid[j]; live_rank[k] = kept_rank[k];
         }
         for (int k = 0; k < m; k++) { live_ids[k] = ids[k]; live_pads[k] = pads[k]; live_ctrls[k] = ctrls[k]; live_ble[k] = bles[k]; live_key[k] = keys2[k]; live_hid[k] = hids[k]; }
         for (int k = m; k < n; k++) live_ctrls[k] = nil;
@@ -2064,6 +2046,13 @@ static void snap_mac_restart(int result, const char *detail, void *ctx) {
     dispatch_async(dispatch_get_main_queue(), ^{ [g_snap_mac snapNote:[(s2a_ui_zh() ? @"这次回不去：" : @"Couldn’t go back: ") stringByAppendingString:why]]; });
 }
 - (void)snapRestoreNow:(NSString *)dir rollback:(BOOL)rollback {
+    // 落点接不上（快照存的时候窗口 / 命令记录区与这一局不同）：进程内重启必然拒绝，原先还会先拆掉这一局。Mac 没有游戏库恢复入口——
+    //   原地重新起这一局、构造期按快照清单原址占（runtime/src/snaprelaunch.c，成功不返回）；玩家看到游戏重开一下就回到那一刻，不另弹选项
+    int s2a_snap_fits_inplace(const char *), s2a_snap_relaunch(const char *, int);
+    if (s2a_snap_fits_inplace(dir.fileSystemRepresentation) == 0) {
+        [self snapNote:s2a_ui_zh() ? @"正在回到那一刻（游戏会重开一下）…" : @"Going back (the game will reopen)…"];
+        s2a_snap_relaunch(dir.fileSystemRepresentation, rollback);
+        [self snapNote:s2a_ui_zh() ? @"这次回不去，稍后再试（快照还在）" : @"Couldn’t go back right now (the snapshot is kept)"]; return; }
     setenv("S2A_SNAP_RESTORE", dir.fileSystemRepresentation, 1);
     if (rollback) setenv("S2A_SNAP_SAVE_ROLLBACK", "1", 1); else unsetenv("S2A_SNAP_SAVE_ROLLBACK");
     g_snap_mac = self; int s2a_host_restart(void (*)(int, const char *, void *), void *);   // 进程内重启（runtime/include/s2a_session.h）

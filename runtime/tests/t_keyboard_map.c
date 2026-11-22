@@ -206,6 +206,12 @@ int main(int argc, char **argv) {
     check(ctl && kbd, "读得到 controller.m 与 keyboard.m");
     if (ctl && kbd) {
         check(count_in(ctl, "s2a_kbd_merge(&buttons, axes, kb_buttons, kb_sticks)") >= 2, "controller.m：系统手柄与 NS2 Pro 玩家 1 都并进键盘（同 Mac 槽 0）");
+        {   // 手柄改键接线（#1606 ④）：sample_extended 出口按这一款键位映射一次（玩家 1 与槽 1–3 共用这一个出口）
+            char *se = body_of(ctl, "static void sample_extended(");
+            check(se && count_in(se, "s2a_pad_map(s2a_ios_pad_map_config(), &buttons, axes)") == 1, "controller.m：sample_extended 出口照这一款键位做手柄改键");
+            check(count_in(kbd, "const s2a_input_config *s2a_ios_pad_map_config(void)") == 1 && count_in(kbd, "return &g_map;") == 1, "keyboard.m：手柄改键读的是改键页同一份 g_map");
+            free(se);
+        }
         check(count_in(ctl, "s2a_pad_update(S2A_PAD_TOUCH, 1, buttons, sticks)") == 1, "controller.m：没有手柄时键盘按触屏源发布（同 Mac publish_pad_state）");
         check(count_in(ctl, "s2a_pad_update(S2A_PAD_SYSTEM, 0, 0, NULL)") == 1, "controller.m：系统手柄清零仍只在 clearSystem 一处（t_pad_liveness 的约束不破）");
         check(count_in(ctl, "s2a_vpad_touch_only() == 1") >= 1, "controller.m：触屏模式下手指不结束键盘接管");
@@ -230,7 +236,8 @@ int main(int argc, char **argv) {
         check(count_in(page, "initForOpeningContentTypes:@[UTTypeJSON] asCopy:YES") == 1, "导入：选文件面板只认 JSON、以副本方式读（同触屏布局页）");
         check(count_in(page, "s2a_kbd_import(") == 1, "导入：读进来的内容交 s2a_kbd_import（先查大小再解析）");
         check(count_in(page, "initForExportingURLs:") == 1, "导出：用选文件面板导出（同触屏布局页，不走分享面板）");
-        check(count_in(page, "s2a_kbd_config_json(") == 2, "导出与存盘写的是同一份 schema 1 JSON");
+        check(count_in(page, "s2a_kbd_config_json(") == 1 && count_in(page, "s2a_kbd_store_save(game, app, &_map)") == 1,
+              "导出写 schema 1 JSON；存盘交 keyboard_store（写的是同一份 JSON，t_keyboard_store ② 核逐字相同）");
         char *cancel = body_of(page, "- (void)documentPickerWasCancelled:");
         check(cancel && count_in(cancel, "cleanExport") == 1, "导出取消也清掉临时目录");
         free(cancel);
@@ -242,8 +249,67 @@ int main(int argc, char **argv) {
         check(refresh && count_in(refresh, "kManageSection") >= 1, "refreshVisibleRows 跳过「管理键位」组");
         check(select && count_in(select, "kManageSection") >= 1, "点「管理键位」组的行走导入 / 导出，不进录键");
         free(refresh); free(select);
+        // #2071：每行「…」菜单的清除交 s2a_kbd_clear_target（键盘、鼠标一起清），不再只置键盘那半
+        check(count_in(page, "s2a_kbd_clear_target(&page->_map, target)") == 1, "行内「清除按键设置」交 s2a_kbd_clear_target");
+        check(count_in(page, "_map.keyboard[target] = (s2a_input_key){-1, 0}") == 0, "行内清除不再只置键盘那半");
     }
     free(page);
+
+    // ⑪ 清除一个按键位（#2071）：同一行显示的键盘键和鼠标键一起清；别的按键位、手柄、鼠标选项不动。期望值手推
+    {
+        s2a_input_config d; s2a_kbd_default(&d);   // 缺省：Y = F + 左键（鼠标 0），ZL = Z + 右键（鼠标 1）
+        s2a_input_config c = d;
+        c.keyboard[0].modifiers = 1;                // A = ⇧E：带修饰键也要一起清掉
+        s2a_kbd_clear_target(&c, 3);
+        check(c.keyboard[3].code == -1 && c.keyboard[3].modifiers == 0 && c.mouse[3] == -1, "清除 Y：键盘 F 和鼠标左键都清掉");
+        s2a_kbd_clear_target(&c, 0);
+        check(c.keyboard[0].code == -1 && c.keyboard[0].modifiers == 0 && c.mouse[0] == -1, "清除 A：键盘 ⇧E 清掉、修饰键归零");
+        s2a_input_config want = d;
+        want.keyboard[3] = (s2a_input_key){-1, 0}; want.mouse[3] = -1; want.keyboard[0] = (s2a_input_key){-1, 0};
+        check(kbd_same(&c, &want), "其余按键位（ZL 的右键、手柄、摇杆轴）与鼠标选项不动");
+        s2a_input_config edge = d;
+        s2a_kbd_clear_target(&edge, -1); s2a_kbd_clear_target(&edge, S2A_INPUT_TARGET_COUNT);
+        check(kbd_same(&edge, &d), "按键位号越界：什么都不改");
+    }
+
+    // 实体手柄改键 s2a_pad_map（#1606 ④，同 Mac map_pad_inputs）：期望值手推
+    {
+        s2a_input_config d; s2a_kbd_default(&d);
+        int same = 1;
+        for (int i = 0; i < 16; i++) {
+            uint32_t b = 1u << i; int32_t st[4] = {1000, -2000, 3000, -4000};
+            s2a_pad_map(&d, &b, st);
+            same &= b == (1u << i) && st[0] == 1000 && st[1] == -2000 && st[2] == 3000 && st[3] == -4000;
+        }
+        check(same, "手柄改键：缺省配置 16 个键逐个按、摇杆四轴都原样出来");
+        uint32_t home = (1u << 16) | 1u; int32_t z[4] = {0};
+        s2a_pad_map(&d, &home, z);
+        check(home == ((1u << 16) | 1u), "手柄改键：Home 扩展位 bit16 原样保留");
+
+        s2a_input_config swap = d; swap.gamepad[0] = 1; swap.gamepad[1] = 0;   // 目标 A ← 物理 south、目标 B ← 物理 east
+        uint32_t e = 1u << 0, so = 1u << 1; int32_t s1[4] = {0}, s2[4] = {0};
+        s2a_pad_map(&swap, &e, s1); s2a_pad_map(&swap, &so, s2);
+        check(e == (1u << 1) && so == (1u << 0), "手柄改键：A / B 对调后按 east 出 B、按 south 出 A");
+
+        s2a_input_config up = d; up.gamepad[13] = -1; up.gamepad[17] = 13;   // 目标 UP 不绑；目标 LS_UP ← 物理 dpadUp
+        uint32_t du = 1u << 13; int32_t s3[4] = {0};
+        s2a_pad_map(&up, &du, s3);
+        check(du == 0 && s3[0] == 0 && s3[1] == 32767, "手柄改键：十字键上改成左摇杆上 → 不出按键位、左摇杆 Y = +32767");
+
+        s2a_input_config inv = d; inv.axes[1].invert = 1; inv.axes[0].source = -1;
+        uint32_t nb = 0; int32_t s4[4] = {5000, -2000, 0, 0};
+        s2a_pad_map(&inv, &nb, s4);
+        check(s4[0] == 0 && s4[1] == 2000, "手柄改键：左 X 不绑 → 0；左 Y 取反 -2000 → 2000");
+
+        s2a_input_config right = d; right.gamepad[18] = 14;   // 目标 LS_RIGHT ← 物理 dpadRight（十字键右照旧也出按键位）
+        uint32_t dr = 1u << 14; int32_t s5[4] = {30000, 0, 0, 0};
+        s2a_pad_map(&right, &dr, s5);
+        check(dr == (1u << 14) && s5[0] == 32767, "手柄改键：按键绑摇杆方向与源轴叠加，夹到 +32767");
+
+        uint32_t keep = 0x5; int32_t s6[4] = {7, 8, 9, 10};
+        s2a_pad_map(NULL, &keep, s6);
+        check(keep == 0x5 && s6[0] == 7 && s6[3] == 10, "手柄改键：没有配置原样不动");
+    }
 
     if (failures) { fprintf(stderr, "✗ t_keyboard_map：%d/%d 项不通\n", failures, checks); return 1; }
     printf("✓ t_keyboard_map：%d 项（键码表与 Mac 逐项相同、iPad 缺省、按键 / 摇杆 / 组合键同 Mac、并进手柄、键盘区、schema 1 往返、导入 / 导出、接线）\n", checks);

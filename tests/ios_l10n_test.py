@@ -33,7 +33,8 @@ SRCS = ['ios/diagzip.m', 'ios/ea_rumble.m', 'ios/extdisplay.m', 'ios/input_confi
         'ios/app.m', 'ios/app_settings.m', 'ios/controller.m', 'ios/diag.m', 'ios/diagcollect.m', 'ios/diagredact.m', 'ios/dprompt.m', 'ios/hud.m', 'ios/iml_probe.m',
         'ios/lan_permission.m', 'ios/ldn_lan.m', 'ios/loadpage.m', 'ios/notice.m', 'ios/phone_motion.m', 'ios/save_transfer.m', 'ios/settings.m',
         'ios/textinput.m', 'ios/touch_config.m', 'ios/game_options.m', 'ios/sgrade_style.m', 'ios/sgrade_line.m', 'ios/cert_import.m', 'ios/cert_callback.m', 'ios/sign_state.m',
-        'ios/keyboard.m', 'ios/keyboard_settings.m']   # iPad 外接键盘（#1869）
+        'ios/keyboard.m', 'ios/keyboard_settings.m',   # iPad 外接键盘（#1869）
+        'ios/player_assign.m']   # 游戏内「分配玩家」（#1606 ④）
 # 语言按目录自己找（11-13 加繁中 zh-Hant，维护者「任何一种语言缺键就报红」）：ios/l10n/<语言>.lproj 每一种都要有两张表；en 是基准（开发区域），别的语言逐项与 en 比
 LANGS = sorted(d.name[:-len('.lproj')] for d in (H / 'ios/l10n').glob('*.lproj'))
 TABLES = {l: f'ios/l10n/{l}.lproj/S2ArmHost.strings' for l in LANGS}

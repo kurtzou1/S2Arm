@@ -57,6 +57,9 @@ static int g_shown_timing_test;
 void nvn_plat_safepoint(void) {}
 static int g_upscale_flag = -1;   // -1 = 后端缺省（关），>= 0 = 读成这个值
 static int g_compute_warm = -1;
+#ifdef S2A_PIPE_CREATION_FEEDBACK_TEST
+static int g_creation_feedback_off;
+#endif
 static int g_plc_flag_off;   // C88：1 = 调试开关 nvk_pipe_cache 读成 0（管线缓存关）
 // C207：诊断读数互不清零。g_c207_gputime = 1 时调试开关 nvk_gputime 读成 1（开会话之后才置，免得会话开着 GPU 时间戳）；
 // g_c207_cap = 1 时 nvn_plat_log 把「近 300 帧」读数里的描述符行存下来（g_c207_win），并核每一行「每笔读数」的每笔描述符条数 / 组数（g_c207_nlog、g_c207_badlog）。
@@ -85,6 +88,9 @@ int nvn_plat_flag(const char *name, int dflt) {
     if (!strcmp(name, "nvk_fbdrop") && g_fbdrop_flag != -2) return g_fbdrop_flag >= 0 ? g_fbdrop_flag : 2;   // -2 = 读成生产缺省（C201 核缺省档的行为）
     if (!strcmp(name, "nvk_stg_std") && g_stg_std_flag >= 0) return g_stg_std_flag;
     if (!strcmp(name, "nvk_pipe_cache") && g_plc_flag_off) return 0;
+#ifdef S2A_PIPE_CREATION_FEEDBACK_TEST
+    if (!strcmp(name, "nvk_pipe_creation_feedback") && g_creation_feedback_off) return 0;
+#endif
     if (!strcmp(name, "nvk_gputime") && atomic_load_explicit(&g_c207_gputime, memory_order_relaxed)) return 1;
     if (!strcmp(name, "nvk_upscale") && g_upscale_flag >= 0) return g_upscale_flag;
     if (!strcmp(name, "nvk_plc_new") && g_plc_thr_new >= 0) return g_plc_thr_new;
@@ -268,11 +274,69 @@ VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkGetPipelineCacheData(VkDevice device, Vk
     if (w == rs && fill == extra) { __atomic_store_n(&g_plc_rec.last_data, *size, __ATOMIC_RELAXED); return VK_SUCCESS; }
     return VK_INCOMPLETE;   // 容量不够（取大小之后又有新管线）：按规范只写放得下的部分
 }
+#ifdef S2A_PIPE_CREATION_FEEDBACK_TEST
+// Only the isolated no-extension arm changes what the application sees. All devices and
+// pipelines are still created by lavapipe through the active validation layer.
+static int g_hide_creation_feedback;
+VKAPI_ATTR VkResult VKAPI_CALL __real_vkEnumerateDeviceExtensionProperties(VkPhysicalDevice, const char *, uint32_t *, VkExtensionProperties *);
+VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkEnumerateDeviceExtensionProperties(VkPhysicalDevice physical, const char *layer, uint32_t *count, VkExtensionProperties *props) {
+    if (!g_hide_creation_feedback || layer)
+        return __real_vkEnumerateDeviceExtensionProperties(physical, layer, count, props);
+    uint32_t total = 0;
+    VkResult r = __real_vkEnumerateDeviceExtensionProperties(physical, NULL, &total, NULL);
+    if (r != VK_SUCCESS) return r;
+    VkExtensionProperties *all = calloc(total ? total : 1, sizeof *all);
+    if (!all) return VK_ERROR_OUT_OF_HOST_MEMORY;
+    r = __real_vkEnumerateDeviceExtensionProperties(physical, NULL, &total, all);
+    if (r == VK_SUCCESS) {
+        uint32_t found = 0, cap = props ? *count : 0;
+        for (uint32_t i = 0; i < total; i++) {
+            if (!strcmp(all[i].extensionName, VK_EXT_PIPELINE_CREATION_FEEDBACK_EXTENSION_NAME)) continue;
+            if (props && found < cap) props[found] = all[i];
+            found++;
+        }
+        *count = props && found > cap ? cap : found;
+        if (props && found > cap) r = VK_INCOMPLETE;
+    }
+    free(all);
+    return r;
+}
+
+static int g_inspect_creation_feedback;
+static unsigned g_creation_feedback_chained[2];
+static unsigned g_creation_feedback_real_valid[2];
+static VkPipelineCreationFeedback *find_creation_feedback(const void *next) {
+    for (const VkBaseInStructure *p = next; p; p = p->pNext) {
+        if (p->sType == VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO)
+            return ((const VkPipelineCreationFeedbackCreateInfo *)p)->pPipelineCreationFeedback;
+    }
+    return NULL;
+}
+// Keep the real Vulkan result and object. Replace only returned feedback for deterministic
+// accounting assertions; an invalid sample's other flag bits and duration are undefined.
+static void inspect_creation_feedback(unsigned compute, const void *next, VkPipelineCache cache) {
+    VkPipelineCreationFeedback *feedback = find_creation_feedback(next);
+    if (!feedback) return;
+    g_creation_feedback_real_valid[compute] += !!(feedback->flags & VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT);
+    const VkPipelineCreationFeedbackFlags valid = VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT;
+    const VkPipelineCreationFeedbackFlags hit = cache ? VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT : 0;
+    const VkPipelineCreationFeedback gfx[] = {{valid | hit, 100}, {hit, 1000000}, {valid, 20}, {valid | hit, 40}};
+    const VkPipelineCreationFeedback cs[] = {{valid, 80}, {0, 2000000}};
+    const unsigned idx = g_creation_feedback_chained[compute]++;
+    if (!compute && idx < sizeof gfx / sizeof gfx[0]) *feedback = gfx[idx];
+    if (compute && idx < sizeof cs / sizeof cs[0]) *feedback = cs[idx];
+}
+#endif
 VKAPI_ATTR VkResult VKAPI_CALL __real_vkCreateGraphicsPipelines(VkDevice, VkPipelineCache, uint32_t, const VkGraphicsPipelineCreateInfo *, const VkAllocationCallbacks *, VkPipeline *);
 VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkCreateGraphicsPipelines(VkDevice device, VkPipelineCache cache, uint32_t n, const VkGraphicsPipelineCreateInfo *ci, const VkAllocationCallbacks *a, VkPipeline *out) {
     __atomic_fetch_add(&g_plc_rec.gp, n, __ATOMIC_RELAXED);   // C89 ⑩：两个线程同时建管线
     if (cache != VK_NULL_HANDLE && cache == g_plc_rec.last_cache) __atomic_fetch_add(&g_plc_rec.gp_cached, n, __ATOMIC_RELAXED);
-    return __real_vkCreateGraphicsPipelines(device, cache, n, ci, a, out);
+    const VkResult r = __real_vkCreateGraphicsPipelines(device, cache, n, ci, a, out);
+#ifdef S2A_PIPE_CREATION_FEEDBACK_TEST
+    if (g_inspect_creation_feedback && r == VK_SUCCESS)
+        for (uint32_t i = 0; i < n; i++) inspect_creation_feedback(0, ci[i].pNext, cache);
+#endif
+    return r;
 }
 VKAPI_ATTR VkResult VKAPI_CALL __real_vkCreateComputePipelines(VkDevice, VkPipelineCache, uint32_t, const VkComputePipelineCreateInfo *, const VkAllocationCallbacks *, VkPipeline *);
 static pthread_mutex_t g_cs_gate_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -287,7 +351,12 @@ VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkCreateComputePipelines(VkDevice device, 
     pthread_mutex_unlock(&g_cs_gate_mu);
     __atomic_fetch_add(&g_plc_rec.cp, n, __ATOMIC_RELAXED);
     if (cache != VK_NULL_HANDLE && cache == g_plc_rec.last_cache) __atomic_fetch_add(&g_plc_rec.cp_cached, n, __ATOMIC_RELAXED);
-    return __real_vkCreateComputePipelines(device, cache, n, ci, a, out);
+    const VkResult r = __real_vkCreateComputePipelines(device, cache, n, ci, a, out);
+#ifdef S2A_PIPE_CREATION_FEEDBACK_TEST
+    if (g_inspect_creation_feedback && r == VK_SUCCESS)
+        for (uint32_t i = 0; i < n; i++) inspect_creation_feedback(1, ci[i].pNext, cache);
+#endif
+    return r;
 }
 
 // 限定注入：真实 R32_UINT 支持不变，仅模拟驱动只报告单一 texel 能力。
@@ -8785,6 +8854,69 @@ static void c88_make_pipes(const char *sdir) {
     free(vm); free(fm); free(vm2); free(fm2);
 }
 
+#ifdef S2A_PIPE_CREATION_FEEDBACK_TEST
+static void creation_feedback_arm(const char *sdir, struct s2a_vk_device *dev, enum nvk_pipe_feedback_mode mode) {
+    const int expected = mode == NVK_PIPE_FEEDBACK_ON;
+    g_desc.host_device = dev;
+    g_creation_feedback_off = mode == NVK_PIPE_FEEDBACK_OFF;
+    if (!open_backend()) {
+        CHECK(0, "PSO feedback open");
+    } else {
+        memset(g_creation_feedback_chained, 0, sizeof g_creation_feedback_chained);
+        memset(g_creation_feedback_real_valid, 0, sizeof g_creation_feedback_real_valid);
+        g_inspect_creation_feedback = 1;
+        nvn_gpu_pipe_warm_scope(1);
+        c88_make_pipes(sdir);
+        nvn_gpu_pipe_warm_scope(0);
+        c88_make_pipes(sdir);
+        g_inspect_creation_feedback = 0;
+        const char *arm = expected ? "supported" : g_creation_feedback_off ? "switch-off" : "unavailable";
+        printf("PSO feedback arm=%s chained gfx=%u compute=%u (expected %u/%u), real valid=%u/%u\n",
+               arm, g_creation_feedback_chained[0], g_creation_feedback_chained[1],
+               expected ? 4u : 0u, expected ? 2u : 0u, g_creation_feedback_real_valid[0], g_creation_feedback_real_valid[1]);
+        CHECK(g_creation_feedback_chained[0] == (expected ? 4u : 0u) &&
+              g_creation_feedback_chained[1] == (expected ? 2u : 0u), "PSO feedback pNext count");
+        struct nvk_pipe_creation_stats stats[NVK_PIPE_CREATION_BUCKETS];
+        CHECK(nvn_vk_pipe_creation_stats(stats) == mode, "PSO feedback latched mode (%s)", arm);
+        static const struct nvk_pipe_creation_stats wanted[NVK_PIPE_CREATION_BUCKETS] = {
+            [NVK_PIPE_GFX_WARM] = {.created = 2, .valid = 1, .app_hit = 1, .driver_ns = 100, .driver_p95_le_ns = 103},
+            [NVK_PIPE_COMPUTE_WARM] = {.created = 1, .valid = 1, .driver_ns = 80, .driver_p95_le_ns = 87},
+            [NVK_PIPE_GFX_DRAW] = {.created = 2, .valid = 2, .app_hit = 1, .driver_ns = 60, .driver_p95_le_ns = 43},
+            [NVK_PIPE_COMPUTE_DRAW] = {.created = 1},
+        };
+        for (unsigned i = 0; i < NVK_PIPE_CREATION_BUCKETS; i++) {
+            const struct nvk_pipe_creation_stats got = stats[i], want = wanted[i];
+            const uint64_t valid = expected ? want.valid : 0;
+            CHECK(got.created == want.created && got.no_feedback == want.created - valid &&
+                  got.valid == valid && got.app_hit == (expected ? want.app_hit : 0) &&
+                  got.driver_ns == (expected ? want.driver_ns : 0) &&
+                  got.driver_p95_le_ns == (expected ? want.driver_p95_le_ns : 0) && got.wall_ns > 0,
+                  "PSO feedback bucket %u (%s): created=%llu valid=%llu no_feedback=%llu app_hit=%llu driver_ns=%llu p95_le_ns=%llu wall_ns=%llu",
+                  i, arm, (unsigned long long)got.created, (unsigned long long)got.valid, (unsigned long long)got.no_feedback,
+                  (unsigned long long)got.app_hit, (unsigned long long)got.driver_ns,
+                  (unsigned long long)got.driver_p95_le_ns, (unsigned long long)got.wall_ns);
+        }
+        nvn_gpu_err e = {0};
+        CHECK(OK(nvn_gpu_close(5000000000ull, &e)), "PSO feedback close: %s", e.why);
+    }
+    g_creation_feedback_off = 0;
+    g_desc.host_device = &g_dev;
+}
+
+static void creation_feedback_test(const char *sdir) {
+    creation_feedback_arm(sdir, &g_dev, NVK_PIPE_FEEDBACK_ON);
+    creation_feedback_arm(sdir, &g_dev, NVK_PIPE_FEEDBACK_OFF);
+    struct s2a_vk_device without = {0};
+    char why[256] = {0};
+    g_hide_creation_feedback = 1;
+    const int rc = s2a_vk_device_create(&without, why, sizeof why);
+    g_hide_creation_feedback = 0;
+    CHECK(rc == 0, "PSO feedback device without extension: %s", why);
+    if (rc == 0) creation_feedback_arm(sdir, &without, NVK_PIPE_FEEDBACK_UNAVAILABLE);
+    s2a_vk_device_destroy(&without, 1);
+}
+
+#endif
 // 开一个会话（cache_dir 可为 NULL）→ 建 3 条管线 → 读统计 → close。记下这一段里包装函数看到的调用。
 static struct c88_run c88_session(const char *sdir, const char *cache_dir) {
     struct c88_run o; memset(&o, 0, sizeof o);
@@ -10824,6 +10956,16 @@ int main(int argc, char **argv) {
         return g_fail ? 1 : 0;
     }
 #endif
+#ifdef S2A_PIPE_CREATION_FEEDBACK_TEST
+    if (argc > 2 && !strcmp(argv[2], "--pipe-creation-feedback")) {
+        g_desc.host_device = &g_dev;
+        g_desc.app_label = "pipe-creation-feedback-test";
+        creation_feedback_test(argv[1]);
+        s2a_vk_device_destroy(&g_dev, 1);
+        printf("PSO feedback failures=%d\n", g_fail);
+        return g_fail ? 1 : 0;
+    }
+#endif
     if (argc > 2 && !strcmp(argv[2], "--clear-capacity")) {
         memset(&g_desc, 0, sizeof g_desc); g_desc.host_device = &g_dev; g_desc.app_label = "clear-capacity-test";
         c1501_clear_capacity(argv[1]);
@@ -11441,6 +11583,9 @@ int main(int argc, char **argv) {
 
     c1501_clear_capacity(argv[1]);
     c88_pipe_cache(argv[1]);   // 每个会话自己开 / 关（带不同的 cache_dir）
+#ifdef S2A_PIPE_CREATION_FEEDBACK_TEST
+    creation_feedback_test(argv[1]);   // 三形态各用自己的后端会话
+#endif
     c89_midrun_save(argv[1]);  // 同上；还会起子进程（被 SIGKILL 的那一局）
     c658_suite(argv[1],0);   // Independently opens/closes; absent count capability is a negative control.
     c907_retained_flush(argv[1]);   // 停局保留会话时的管线缓存落盘（#907 合入补）

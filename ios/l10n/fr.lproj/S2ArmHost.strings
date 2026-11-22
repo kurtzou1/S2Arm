@@ -272,8 +272,8 @@
 "app.fpsCap.retry" = "Réessayer 60 FPS";
 "app.os180.title" = "Cette version du système peut planter";
 "app.os180.body" = "iOS / iPadOS 18.0 a un problème système qui peut fermer l’app dès que l’image du jeu apparaît ; 18.1 le corrige. Mettez à jour dans Réglages > Général > Mise à jour logicielle vers 18.1 ou plus récent (gratuit) et le plantage disparaîtra.";
-"app.lowRam.title" = "Cet appareil n'a peut-être pas assez de mémoire";
-"app.lowRam.body" = "Ce jeu nécessite plus de mémoire que cet appareil n'en dispose. Il démarrera quand même, mais il pourrait ralentir ou être fermé par le système.";
+"app.lowRam.title" = "Mémoire peut-être insuffisante";
+"app.lowRam.body" = "Ce jeu a besoin d'environ %1$@ Go de mémoire, cet appareil en a %2$@ Go. Le stockage compense : vous pouvez jouer, mais le jeu peut ralentir ou se fermer en cours de partie. Affiché une seule fois.";
 "app.gpuStop.body" = "Fermez cette app depuis le sélecteur d'apps puis rouvrez-la : vous pourrez généralement reprendre depuis le dernier enregistrement du jeu. Pour nous aider à trouver la cause, touchez « Signaler un problème » pour nous envoyer le diagnostic.";
 "app.gpuStop.title" = "Le jeu s'est bloqué et a été arrêté en toute sécurité";
 "app.library.broken.title" = "Les fichiers d'origine du jeu sont incomplets";
@@ -452,7 +452,7 @@
 "save.exported" = "Sauvegarde exportée.";
 "save.import" = "Choisir une sauvegarde à vérifier…";
 "save.inspected" = "Sauvegarde vérifiée. En attente de confirmation.";
-"save.intro" = "Le jeu n'a pas encore démarré. Vous pouvez exporter votre sauvegarde vers Fichiers, ou importer une sauvegarde .s2asave depuis un Mac ou un autre appareil. La sauvegarde actuelle est conservée avant la restauration.";
+"save.intro" = "Le jeu n'a pas encore démarré. Vous pouvez exporter votre sauvegarde vers Fichiers, importer une sauvegarde .s2asave depuis un Mac ou un autre appareil, ou importer un dossier ou un zip de sauvegarde d’un autre émulateur ou outil (JKSV, Checkpoint, Ryujinx, yuzu, etc.). La sauvegarde actuelle est conservée avant la restauration.";
 "save.journalUnreadable" = "Impossible de lire le dossier des enregistrements d'opérations de sauvegarde (%@) ; impossible de déterminer si le dernier import / restauration s'est terminé.\n%@";
 "save.location" = "Emplacement des sauvegardes : ouvrez l'app Fichiers → Sur mon iPhone (Sur mon iPad sur iPad) → %@ → %@\n\nPlacez-y un dossier de sauvegarde dans son format d'origine (exporté depuis une console, via JKSV / Checkpoint ou des outils similaires, ou copié depuis SaveData du même jeu sur votre ordinateur) et le jeu l'utilisera au prochain démarrage. À la fermeture, il est mis à jour avec votre progression ; copiez l'intégralité du dossier au même emplacement sur votre ordinateur ou un autre appareil pour continuer à jouer.\n\nCopier depuis un ordinateur : sur un Mac, sélectionnez cet appareil dans la barre latérale du Finder → Fichiers, faites glisser le dossier sur « %@ », puis utilisez l'app Fichiers pour le déplacer vers l'emplacement ci-dessus.";
 "save.location.problem" = "La sauvegarde placée là la dernière fois n'a pas été chargée : %@. La sauvegarde actuelle est inchangée.";
@@ -483,6 +483,8 @@
 "save.restore.title" = "Restaurer cette sauvegarde ?";
 "save.restoreCancelled" = "Restauration annulée.";
 "save.restored" = "Sauvegarde restaurée. Vous pouvez démarrer le jeu pour vérifier votre progression. Une sauvegarde préalable à la restauration a été conservée (aucune n'est créée s'il n'y avait pas de sauvegarde avant).";
+"save.community.message" = "Sauvegarde d’un autre émulateur ou outil : %@ fichiers, %@.\n\nAprès confirmation, votre sauvegarde actuelle est d’abord copiée, puis cette sauvegarde est placée dans le dossier de sauvegarde du jeu ; elle sera chargée au prochain démarrage du jeu.";
+"save.community.done" = "C’est fait : cette sauvegarde sera chargée au prochain démarrage du jeu. Votre sauvegarde précédente a été copiée (aucune copie s’il n’y avait pas de sauvegarde).";
 "save.serviceInvalid" = "Le service de sauvegarde n'a pas renvoyé de résultat valide. Fermez puis rouvrez l'app ; vos données existantes sont conservées.";
 "save.previous.ask.title" = "Ce jeu n’a pas pu charger sa sauvegarde la dernière fois. Revenir à la sauvegarde précédente ?";
 "save.previous.ask.crash" = "La dernière session s’est fermée dès le début. Vous pourrez revenir en arrière à tout moment.";
@@ -613,6 +615,8 @@
 "vpad.snap.notSaved" = "Sauvegarde impossible cette fois. Réessayez dans un instant";
 "vpad.snap.busy" = "La sauvegarde précédente est en cours";
 "vpad.snap.restoreFailed" = "Retour impossible : %@";
+"vpad.snap.useLibrary.title" = "Retour impossible depuis le jeu";
+"vpad.snap.useLibrary.body" = "Cet instant a été sauvegardé avec la mémoire du jeu placée ailleurs que dans cette partie : il ne peut pas être repris depuis le jeu. Revenez à la bibliothèque, appuyez longuement sur ce jeu et touchez « Revenir à l’instant sauvegardé » pour le restaurer. L’instantané est toujours là.";
 "vpad.snap.saveChanged.title" = "Revenir à l’instant sauvegardé ?";
 "vpad.snap.saveChanged.body" = "Le jeu a sauvegardé depuis. Revenir ramène aussi sa sauvegarde à cet instant ; la sauvegarde actuelle est d’abord copiée.";
 "vpad.snap.saveChanged.go" = "Revenir";
@@ -673,7 +677,7 @@
 "kbd.section.sticks" = "Sticks";
 "kbd.record" = "Appuyez sur une touche, Esc pour annuler";
 "kbd.common" = "Touches courantes";
-"kbd.clear" = "Effacer la touche clavier";
+"kbd.clear" = "Effacer l’assignation";
 "kbd.unbound" = "Non défini";
 "kbd.restoreDefault" = "Restaurer les valeurs par défaut";
 "kbd.rebind.title" = "Réaffecter cette touche ?";
@@ -702,6 +706,12 @@
 "kbd.manage.note" = "Les fichiers d’affectation exportés peuvent être importés dans d’autres jeux. Le fichier input.json de chaque jeu du lanceur Mac utilise le même format et peut aussi être importé. L’importation ne modifie que ce jeu.";
 "kbd.import" = "Importer une affectation des touches…";
 "kbd.export" = "Exporter l’affectation actuelle…";
+"kbd.setDefault" = "Définir par défaut pour tous les jeux";
+"kbd.default.done" = "Définie par défaut pour tous les jeux";
+"kbd.default.undo" = "Annuler";
+"kbd.source.custom" = "Affectation actuelle : personnalisée";
+"kbd.source.default" = "Affectation actuelle : par défaut";
+"kbd.manage.noteAll" = "Les fichiers d’affectation exportés peuvent être importés dans d’autres jeux. Le fichier input.json de chaque jeu du lanceur Mac utilise le même format et peut aussi être importé. L’importation ne modifie que ce jeu.\n« Définir par défaut pour tous les jeux » fait de l’affectation actuelle celle par défaut pour tous les jeux. Les jeux que vous avez personnalisés séparément ne changent pas, et les jeux ajoutés plus tard l’utilisent aussi. « Restaurer les valeurs par défaut » revient à cette affectation.";
 "kbd.export.fileName" = "Affectation des touches S2Arm";
 "kbd.export.err.title" = "Impossible d’exporter l’affectation";
 "kbd.import.err.title" = "Impossible d’importer l’affectation";
@@ -711,3 +721,14 @@
 "kbd.import.err.schema" = "Ce fichier n’est pas une affectation des touches S2Arm, ou sa version n’est pas prise en charge. Votre affectation actuelle n’a pas changé.";
 "kbd.import.err.duplicate" = "Le fichier affecte la même touche à plusieurs boutons. Votre affectation actuelle n’a pas changé.";
 "kbd.import.err.invalid" = "L’affectation de ce fichier est incomplète ou contient des valeurs non valides. Votre affectation actuelle n’a pas changé.";
+
+/* 游戏内「分配玩家」（ios/player_assign.m，#1606 ④）：叫法同 Mac 启动器「分配玩家」 */
+"assign.menu" = "Attribuer les joueurs…";
+"assign.title" = "Attribuer les joueurs";
+"assign.hint" = "En commençant par P1, appuyez sur un bouton de la manette de chaque joueur, à tour de rôle. Les manettes non attribuées restent connectées mais n’ont pas de joueur.";
+"assign.waiting" = "Appuyez sur un bouton d’une manette";
+"assign.restart" = "Recommencer";
+"assign.automatic" = "Revenir à l’automatique (ordre de connexion)";
+"assign.ns2pro" = "Manette Pro Switch 2";
+"assign.saveFailed" = "Impossible d’enregistrer l’attribution. Réessayez.";
+"assign.ok" = "OK";

@@ -145,6 +145,7 @@ struct nvn_gpu_view_s {
     VkComponentMapping components; // 反馈快照保持采样视图的通道映射
     uint32_t att_layer;          // 当附件时取的层 / 3D 深度切片（视图没设层范围 = 0）
     VkImageView att;             // 附件形态（一级一层的 2D 视图），第一次当附件时建（view_attachment）
+    VkImageView att_n; uint32_t att_nl;   // 分层通道的附件形态（起始层起 att_nl 层的 2D 阵列视图，一级），第一次当分层附件时建
     VkImageView img;             // 图像形态（恒等通道映射），第一次当存储图像时建：存储图像视图必须恒等映射（view_image_form）
     VkImageView depth_blit[2];   // 辅助深度模板拷贝的恒等单级单层采样视图，随本视图保活与释放
     // 反查表：这个视图当过附件的帧缓冲（帧缓冲缓存槽位 + 代 + 句柄）。视图销毁时只拆这几项，
@@ -402,6 +403,13 @@ static void es_reset(struct nvn_gpu_cmd_s *c) { memset(&c->es, 0, sizeof c->es);
 
 
 
+// 每个 2 的幂区间分八档，0–7 ns 精确。固定内存，覆盖 uint64_t 全范围。
+enum { PIPE_DURATION_SUB_BUCKETS = 8, PIPE_DURATION_BUCKETS = PIPE_DURATION_SUB_BUCKETS * 62 };
+struct pipe_creation_counters {
+    _Atomic uint64_t no_feedback, app_hit, driver_ns, wall_ns;
+    _Atomic uint64_t duration[PIPE_DURATION_BUCKETS];
+};
+
 struct nvn_gpu_vk {
     struct s2a_vk_device *dev;
     struct nvn_vk_bcdec *bc;
@@ -452,6 +460,25 @@ struct nvn_gpu_vk {
     uint64_t wsi_seq;    // 已提交的呈现段序号（g_submit_mu 下分配，与入队同序）
     uint64_t wsi_done;   // worker 已等到栅栏的最后一个呈现段序号（g_mu 下改；段按入队顺序处理，单调）
 };
+
+// Stop 可在后端还在 open 时报告；计数清零也走原子操作，不与 g 的 memset 共用内存。
+static _Atomic enum nvk_pipe_feedback_mode g_pipe_feedback;
+static struct pipe_creation_counters g_pipe_creation[NVK_PIPE_CREATION_BUCKETS];
+static void pipe_creation_open(const struct s2a_vk_device *dev) {
+    enum nvk_pipe_feedback_mode mode = NVK_PIPE_FEEDBACK_UNAVAILABLE;
+    if (dev->pipeline_creation_feedback_enabled)
+        mode = nvn_plat_flag("nvk_pipe_creation_feedback", 1) ? NVK_PIPE_FEEDBACK_ON : NVK_PIPE_FEEDBACK_OFF;
+    for (unsigned i = 0; i < NVK_PIPE_CREATION_BUCKETS; i++) {
+        struct pipe_creation_counters *c = &g_pipe_creation[i];
+        atomic_store_explicit(&c->no_feedback, 0, memory_order_relaxed);
+        atomic_store_explicit(&c->app_hit, 0, memory_order_relaxed);
+        atomic_store_explicit(&c->driver_ns, 0, memory_order_relaxed);
+        atomic_store_explicit(&c->wall_ns, 0, memory_order_relaxed);
+        for (unsigned b = 0; b < PIPE_DURATION_BUCKETS; b++)
+            atomic_store_explicit(&c->duration[b], 0, memory_order_relaxed);
+    }
+    atomic_store_explicit(&g_pipe_feedback, mode, memory_order_release);
+}
 
 static struct nvn_gpu_vk g;
 static _Atomic int g_open;   // 跨线程：close 置 0 后其他线程据此拒收
@@ -1203,6 +1230,7 @@ static void destroy_view_locked(struct nvn_gpu_vk *vk, struct nvn_gpu_view_s *v)
     LIFE_T0;
     pc_drop_view_fast(v, v->att); pc_drop_view_fast(v, v->img); pc_drop_view_fast(v, v->view); LIFE_ADD(6);
     if (v->att) vkDestroyImageView(vk->d, v->att, NULL);
+    if (v->att_n) vkDestroyImageView(vk->d, v->att_n, NULL);
     if (v->img) vkDestroyImageView(vk->d, v->img, NULL);
     for (unsigned i = 0; i < 2; i++) if (v->depth_blit[i]) vkDestroyImageView(vk->d, v->depth_blit[i], NULL);
     if (v->view) vkDestroyImageView(vk->d, v->view, NULL);
@@ -2316,6 +2344,7 @@ nvn_gpu_rc nvn_gpu_open(const nvn_gpu_open_desc *d, nvn_gpu_err *err) {
 
     memset(&g, 0, sizeof g);
     g.dev = dev;
+    pipe_creation_open(dev);
     { int mb = nvn_plat_flag("nvk_feedback_pool_mb", 256); g_fbpool_cap = mb > 0 ? (uint64_t)mb << 20 : 0; }   // 反馈快照池上限（0 = 关）
     g.vbuf_batch = nvn_plat_flag("nvk_replay_cpu_cuts", 1) != 0;
     {   // 诊断（nvk_mem_types，缺省 0）：打印显存类型表，判「有没有 HOST_CACHED 的可见类型」——
@@ -2563,6 +2592,7 @@ nvn_gpu_rc nvn_gpu_close(uint64_t timeout_ns, nvn_gpu_err *err) {
     while (vw) {
         struct nvn_gpu_view_s *vn = vw->all_next;
         if (vw->att) vkDestroyImageView(g.d, vw->att, NULL);
+        if (vw->att_n) vkDestroyImageView(g.d, vw->att_n, NULL);
         if (vw->view) vkDestroyImageView(g.d, vw->view, NULL);
         free(vw);
         vw = vn;
@@ -3893,6 +3923,70 @@ static uint64_t g_warm_hits, g_warm_created, g_pipe_dup;
 void nvn_gpu_pipe_warm_scope(int on) { t_warm_scope = on ? 1 : 0; }
 uint64_t nvn_gpu_pipe_warm_hits(void) { return __atomic_load_n(&g_warm_hits, __ATOMIC_RELAXED); }
 uint64_t nvn_gpu_pipe_warm_created(void) { return __atomic_load_n(&g_warm_created, __ATOMIC_RELAXED); }
+static unsigned pipe_duration_bucket(uint64_t ns) {
+    if (ns < PIPE_DURATION_SUB_BUCKETS) return (unsigned)ns;
+    const unsigned exponent = 63u - (unsigned)__builtin_clzll(ns);
+    const unsigned shift = exponent - 3;
+    return PIPE_DURATION_SUB_BUCKETS * shift + (unsigned)(ns >> shift);
+}
+
+static uint64_t pipe_duration_bucket_end(unsigned bucket) {
+    if (bucket < PIPE_DURATION_SUB_BUCKETS) return bucket;
+    const unsigned shift = bucket / PIPE_DURATION_SUB_BUCKETS - 1;
+    const uint64_t mantissa = PIPE_DURATION_SUB_BUCKETS + bucket % PIPE_DURATION_SUB_BUCKETS;
+    return (mantissa << shift) | ((UINT64_C(1) << shift) - 1);
+}
+
+// 只从实际 vkCreate 调用回来时记录；不进对象命中路径，不在驱动调用两侧加锁。
+static void pipe_creation_note(int compute, uint64_t wall_ns, const VkPipelineCreationFeedback *feedback) {
+    const unsigned bucket = (t_warm_scope ? NVK_PIPE_GFX_WARM : NVK_PIPE_GFX_DRAW) + compute;
+    struct pipe_creation_counters *c = &g_pipe_creation[bucket];
+    atomic_fetch_add_explicit(&c->wall_ns, wall_ns, memory_order_relaxed);
+    if (!feedback || !(feedback->flags & VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT)) {
+        atomic_fetch_add_explicit(&c->no_feedback, 1, memory_order_relaxed);
+        return;
+    }
+    if (feedback->flags & VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT)
+        atomic_fetch_add_explicit(&c->app_hit, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&c->driver_ns, feedback->duration, memory_order_relaxed);
+    atomic_fetch_add_explicit(&c->duration[pipe_duration_bucket(feedback->duration)], 1, memory_order_relaxed);
+}
+
+enum nvk_pipe_feedback_mode nvn_vk_pipe_creation_stats(struct nvk_pipe_creation_stats out[NVK_PIPE_CREATION_BUCKETS]) {
+    const enum nvk_pipe_feedback_mode mode = atomic_load_explicit(&g_pipe_feedback, memory_order_acquire);
+    for (unsigned i = 0; i < NVK_PIPE_CREATION_BUCKETS; i++) {
+        const struct pipe_creation_counters *c = &g_pipe_creation[i];
+        uint64_t hist[PIPE_DURATION_BUCKETS];
+        uint64_t valid = 0;
+        for (unsigned b = 0; b < PIPE_DURATION_BUCKETS; b++) {
+            hist[b] = atomic_load_explicit(&c->duration[b], memory_order_relaxed);
+            valid += hist[b];
+        }
+        uint64_t p95 = 0;
+        if (valid) {
+            uint64_t rank = valid - valid / 20; // ceil(0.95 * valid)
+            for (unsigned b = 0; b < PIPE_DURATION_BUCKETS; b++) {
+                if (rank <= hist[b]) {
+                    p95 = pipe_duration_bucket_end(b);
+                    break;
+                }
+                rank -= hist[b];
+            }
+        }
+        const uint64_t unavailable = atomic_load_explicit(&c->no_feedback, memory_order_relaxed);
+        out[i] = (struct nvk_pipe_creation_stats){
+            .created = valid + unavailable,
+            .valid = valid,
+            .no_feedback = unavailable,
+            .app_hit = atomic_load_explicit(&c->app_hit, memory_order_relaxed),
+            .driver_ns = atomic_load_explicit(&c->driver_ns, memory_order_relaxed),
+            .driver_p95_le_ns = p95,
+            .wall_ns = atomic_load_explicit(&c->wall_ns, memory_order_relaxed),
+        };
+    }
+    return mode;
+}
+
 // 清单标签（管线预热清单把「这条管线对应哪一槽」存在对象上，换回同一条管线时只加计数）。后端管线局内不淘汰、
 // 不复用指针（销毁只在会话收尾整批做），所以标签随对象生灭；读写不加锁（单个 64 位原子）。
 uint64_t nvn_gpu_pipe_warm_tag(nvn_gpu_pipe p) { return p ? __atomic_load_n(&((struct nvn_gpu_pipe_s *)p)->warm_tag, __ATOMIC_RELAXED) : 0; }
@@ -4428,17 +4522,28 @@ static nvn_gpu_rc pipe_build(const nvn_gpu_pipe_desc *d, struct nvn_gpu_pipe_s *
     gp.layout = p->layout;
     gp.renderPass = p->pass;
     gp.subpass = 0;
+    VkPipelineCreationFeedback feedback = {0};
+    VkPipelineCreationFeedbackCreateInfo feedback_info = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO,
+        .pNext = gp.pNext,
+        .pPipelineCreationFeedback = &feedback,
+    };
+    const int want_feedback = atomic_load_explicit(&g_pipe_feedback, memory_order_relaxed) == NVK_PIPE_FEEDBACK_ON;
+    if (want_feedback) gp.pNext = &feedback_info;
     const uint64_t pl_t0 = now_ns();   // 驱动编译管线是同步的：超过 3 毫秒就打一行（走路/进新场景时会集中出现）
     const VkResult gvr = vkCreateGraphicsPipelines(g.d, g_plc, 1, &gp, NULL, &p->pipe);
+    const uint64_t wall_ns = now_ns() - pl_t0;
+    pipe_creation_note(0, wall_ns, gvr == VK_SUCCESS && want_feedback ? &feedback : NULL);
     if (gvr != VK_SUCCESS) {
         nvn_gpu_rc bad = fail(err, pipe_vk_res_code(gvr, NVN_GPU_E_COMPILE), "vkCreateGraphicsPipelines 失败（%s %d）", pipe_vk_res_name(gvr), (int)gvr);
         destroy_pipe_objects(p);
         return bad;
     }
     plc_created();
-    { const uint64_t dt = now_ns() - pl_t0;   // 编译耗时：>3 毫秒单独记一行（正常建管线在 0.2–1 毫秒）
+    { // 原有长帧读数也含 plc_created 的局中补写；PSO feedback 的墙钟只量 vkCreate。
       static int slow = -1; if (slow < 0) slow = nvn_plat_flag("nvk_hitch_log", 0) != 0;
-      if (slow && dt > 3000000ull) { char b[160]; snprintf(b, sizeof b, "图形管线编译 %.1f 毫秒", (double)dt / 1e6); nvn_plat_log(NVN_PLAT_LOG_INFO, "pipe", b); } }
+      const uint64_t dt = slow ? now_ns() - pl_t0 : 0;
+      if (dt > 3000000ull) { char b[160]; snprintf(b, sizeof b, "图形管线编译 %.1f 毫秒", (double)dt / 1e6); nvn_plat_log(NVN_PLAT_LOG_INFO, "pipe", b); } }
     for (int st = 0; st < 5; st++) {
         struct nvn_gpu_shader_s *sh = d->st[st].sh;
         if (!sh) continue;
@@ -4740,16 +4845,27 @@ static nvn_gpu_rc cpipe_build(const nvn_gpu_stage_desc *cs, int mode, nvn_gpu_pi
     cp.stage.module = sh->mod;
     cp.stage.pName = sh->entry;
     cp.layout = p->layout;
+    VkPipelineCreationFeedback feedback = {0};
+    VkPipelineCreationFeedbackCreateInfo feedback_info = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO,
+        .pNext = cp.pNext,
+        .pPipelineCreationFeedback = &feedback,
+    };
+    const int want_feedback = atomic_load_explicit(&g_pipe_feedback, memory_order_relaxed) == NVK_PIPE_FEEDBACK_ON;
+    if (want_feedback) cp.pNext = &feedback_info;
     const uint64_t pc_t0 = now_ns();   // 同图形管线：超过 3 毫秒打一行，用来对长帧
     VkResult cpvr = vkCreateComputePipelines(g.d, g_plc, 1, &cp, NULL, &p->pipe);
+    const uint64_t wall_ns = now_ns() - pc_t0;
+    pipe_creation_note(1, wall_ns, cpvr == VK_SUCCESS && want_feedback ? &feedback : NULL);
     if (cpvr != VK_SUCCESS) {
         destroy_pipe_objects(p);
         return fail(err, NVN_GPU_E_COMPILE, "vkCreateComputePipelines 失败（VkResult %d，%u 项资源）", (int)cpvr, sh->nent);
     }
     plc_created();
-    { const uint64_t dt = now_ns() - pc_t0;
+    {
       static int slowc = -1; if (slowc < 0) slowc = nvn_plat_flag("nvk_hitch_log", 0) != 0;
-      if (slowc && dt > 3000000ull) { char b[160]; snprintf(b, sizeof b, "计算管线编译 %.1f 毫秒", (double)dt / 1e6); nvn_plat_log(NVN_PLAT_LOG_INFO, "pipe", b); } }
+      const uint64_t dt = slowc ? now_ns() - pc_t0 : 0;
+      if (dt > 3000000ull) { char b[160]; snprintf(b, sizeof b, "计算管线编译 %.1f 毫秒", (double)dt / 1e6); nvn_plat_log(NVN_PLAT_LOG_INFO, "pipe", b); } }
     p->cshader = sh;   // 两条安装路径都保留实际计算阶段的身份
     if (sh->precompiled) p->lib_stages = 1u << NVN_GPU_SH_CS;
     p->stage_nent[NVN_GPU_SH_CS] = sh->nent;
@@ -4868,12 +4984,36 @@ static const void *view_usage_next(const struct nvn_gpu_tex_s *t, VkFormat vf, V
 // 附件形态的视图：一级一层的 2D 视图，深度模板格式两个面都在（对照 nvn_mtl.m attach @4928：附件 = 基底 + 视图设了才取的
 // level / slice，没设就是首级首层）。采样用的视图可以是多级 / 多层 / 立方体 / 只取深度面，都不能直接挂到帧缓冲上：
 // 第一次当附件时另建一个，随视图销毁。建不出来回空。
-static VkImageView view_attachment(struct nvn_gpu_view_s *v) {
+// nl = 所在通道的层数（nvn_gpu_pass_desc.layers）。分层通道（nl > 1，程序的顶点 / 几何阶段写层号）要起始层起 nl 层的 2D 阵列视图，
+// 图元按层号落到对应层（3D 贴图：深度切片，要 2D_ARRAY_COMPATIBLE）；单层形态只有第 0 层，写到更高层的图元全丢（八方旅人调色 LUT 32 片只剩第 0 片）。
+// 视图自己的层数不够 nl 时回空（回放核心按附件可给的层数定 nl，正常走不到）。
+static VkImageView view_attachment(struct nvn_gpu_view_s *v, uint32_t nl) {
     struct nvn_gpu_tex_s *t = v->tex;
     if (v->p16_remap) return VK_NULL_HANDLE;   // #975：恒等形态会按退回格式的分量顺序写，调用方具名报红
+    int image3d = t->target == NVN_TEXTURE_TARGET_3D && t->depth > 1;
+    if (nl > 1) {
+        if (v->layers < nl || (image3d && !t->array_compatible)) return VK_NULL_HANDLE;
+        gmu_lock_rt();
+        if (v->att_n && v->att_nl != nl) { pc_drop_view(v->att_n); vkDestroyImageView(g.d, v->att_n, NULL); v->att_n = VK_NULL_HANDLE; }
+        if (!v->att_n) {
+            VkImageViewCreateInfo ci;
+            memset(&ci, 0, sizeof ci);
+            ci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            ci.image = t->image;
+            ci.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+            ci.format = v->format ? v->format : t->format;
+            ci.subresourceRange = (VkImageSubresourceRange){t->aspect, v->base_level, 1, image3d ? v->att_layer : v->base_layer, nl};
+            VkImageViewUsageCreateInfo vu; ci.pNext = view_usage_next(t, ci.format, &vu);
+            OC(OC_VIEW);
+            { LIFE_T0; if (vkCreateImageView(g.d, &ci, NULL, &v->att_n) != VK_SUCCESS) v->att_n = VK_NULL_HANDLE; LIFE_ADD(4); }
+            v->att_nl = v->att_n ? nl : 0;
+        }
+        VkImageView r = v->att_n;
+        pthread_mutex_unlock(&g_mu);
+        return r;
+    }
     if (!v->swizzled && v->levels == 1 && v->layers == 1 && v->type == VK_IMAGE_VIEW_TYPE_2D && v->aspect == t->aspect) return v->view;
     gmu_lock_rt();
-    int image3d = t->target == NVN_TEXTURE_TARGET_3D && t->depth > 1;
     if (!v->att && !(image3d && !t->array_compatible)) {
         VkImageViewCreateInfo ci;
         memset(&ci, 0, sizeof ci);
@@ -5092,7 +5232,7 @@ static VkRenderPass make_pass(const nvn_gpu_pass_desc *d, VkImageView fb_views[9
         att[a].finalLayout = att_lay[a];
         col[ncol].attachment = a;
         col[ncol].layout = att_lay[a];
-        fb_views[a] = view_attachment(v);
+        fb_views[a] = view_attachment(v, d->layers);
         if (!fb_views[a]) return VK_NULL_HANDLE;
         ncol++; a++;
     }
@@ -5119,7 +5259,7 @@ static VkRenderPass make_pass(const nvn_gpu_pass_desc *d, VkImageView fb_views[9
         att[a].finalLayout = att_lay[a];
         dref->attachment = a;
         dref->layout = att_lay[a];
-        fb_views[a] = view_attachment(v);
+        fb_views[a] = view_attachment(v, d->layers);
         if (!fb_views[a]) return VK_NULL_HANDLE;
         *has_depth = 1;
         a++;
@@ -6671,7 +6811,6 @@ nvn_gpu_rc nvn_gpu_tex_create(const nvn_gpu_tex_desc *d, nvn_gpu_tex *out, nvn_g
     if (!g_open) return fail(err, NVN_GPU_E_STOPPED, "后端未打开");
     if (!d) return fail(err, NVN_GPU_E_ARG, "描述为空");
     if (d->host_w || d->host_h) return fail(err, NVN_GPU_E_UNSUPPORTED, "宽屏宿主尺寸（host_w/h）：本段未实现");
-    if (d->stencil_view) return fail(err, NVN_GPU_E_UNSUPPORTED, "模板视图：本段未实现");
     uint32_t target = (uint32_t)d->d.target;
     uint32_t depth = d->d.depth ? (uint32_t)d->d.depth : 1;
     uint32_t layers = 1;

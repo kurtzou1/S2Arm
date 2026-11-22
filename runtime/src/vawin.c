@@ -85,17 +85,26 @@ uint64_t s2a_guest_anon_budget(const char *e, uint64_t room, uint64_t margin, ui
 //   ③ 有本机记录（上局预算 prev_b、上局溢出模式下心跳读到的离上限剩余最小值 hmin）→ prev_b + (hmin − margin) − GCHUNK，限在 [0, room − margin]：
 //      hmin < 余量就收紧，> 余量就放宽（每局最多放宽 hmin − margin − 一块）；④ 没有记录（首局）→ room − margin − first_host（首局宿主开销，缺省 4096 = 全库 P90）。
 //   *src：0 显式 / 1 上局死掉 / 2 按上局实测 / 3 首局估计
-uint64_t s2a_guest_next_budget(const char *e, uint64_t room, uint64_t margin, uint64_t first_host, int died, int have, uint64_t prev_b, uint64_t hmin, int *src) {
+// 11-22 往上抬要有证据（一台 iPhone，池 9216 MB 的 Switch 2 大款）：上局 61 秒就停、剩余最小 6012 MB 是开局那段的读数，预算 3521 → 7676 一次抬了一倍多，
+//   下一局约 5.8 分钟（帧 10622）进场景剩余从 2797 掉到 930、帧 18226 掉到 183 MB 被系统收掉。剩余最小只会随局变长而变小，短局读到的是上界：
+//   只能证明「该收紧」，不能证明「能放宽」。所以：long_run（上局溢出模式心跳 ≥ GMEM_BEATS_MIN 次 = 5 分钟）才许往上抬，每局最多抬 BUDGET_STEP；
+//   短局只许持平或收紧。那局到 5.8 分钟才掉，5 分钟门槛单独兜不住，所以再加 ceil：被系统收掉那局的预算 − BUDGET_STEP 记成天花板，之后不再越过（0 = 没有）
+#define BUDGET_STEP (1024ull << 20)
+uint64_t s2a_guest_next_budget(const char *e, uint64_t room, uint64_t margin, uint64_t first_host, int died, int have, uint64_t prev_b, uint64_t hmin, int long_run, uint64_t ceil, int *src) {
     if (e && *e) { *src = 0; return strtoull(e, NULL, 10) << 20; }
     if (died) { *src = 1; return 0; }
-    uint64_t cap = room > margin ? room - margin : 0;
+    uint64_t cap = room > margin ? room - margin : 0, v;
+    if (ceil && ceil < cap) cap = ceil;
     if (have) {
         *src = 2;
-        __int128 v = (__int128)prev_b + (__int128)hmin - (__int128)margin - (__int128)GCHUNK;
-        return v <= 0 ? 0 : (uint64_t)v > cap ? cap : (uint64_t)v;
+        __int128 w = (__int128)prev_b + (__int128)hmin - (__int128)margin - (__int128)GCHUNK;
+        v = w <= 0 ? 0 : (uint64_t)w;
+        if (v > prev_b) v = long_run ? (v - prev_b > BUDGET_STEP ? prev_b + BUDGET_STEP : v) : prev_b;
+        return v > cap ? cap : v;
     }
     *src = 3;
-    return room > margin + first_host ? room - margin - first_host : 0;
+    v = room > margin + first_host ? room - margin - first_host : 0;
+    return v > cap ? cap : v;
 }
 // 开不开（纯函数，t_guest_file_auto 测）：e = S2A_GUEST_FILE；pool = 本款应用内存池；room = 起局时离系统给本进程的内存上限还剩多少（os_proc_available_memory，
 //   0 = 不知道上限，Mac 恒传 0）；host = 宿主自身开销估计；margin = 余量。设了按设的（"0" 关、其余开）；没设 → 上限已知且「池 + 宿主开销 + 余量」装不下才开。
@@ -125,6 +134,14 @@ int s2a_guest_file_wanted(const char *e, uint64_t pool, uint64_t room) { return 
 //   池 > 剩余且物理内存 ≥ 池 + 宿主估计 开；物理内存也装不下 → 照样开并 *low = 1（起局提示玩家这台设备内存可能不够这款）。
 //     两种都可能坏时按「能玩下去」选：那台 iPad（7.5 GB）上文件后备 8 局每局都玩到约 30 分钟（27000–41000 帧）才掉帧卡死；匿名内存这款要约 7.9 GB、
 //     比它的物理内存还大，没有实测，按 iPhone 首局约 8 分钟就被系统结束看更早出局（11-13 维护者定：都装不下时提示 + 照样开文件后备）
+// 判据用的「剩余」（纯函数，t_guest_file_auto 测）：离单进程上限的剩余与「物理内存 − 余量」取小。D-YDKK（iPad14,3，物理 7536 MB，带提高内存上限权限、剩余 8189 MB）：
+//   单进程上限比物理内存还大，只比上限剩余就会把装不下判成装得下——实测峰值 7625 + 512 ≤ 8189 判关文件后备、物理映射区按「剩余 8189 ≥ 7168」挖回匿名，
+//   两局都在开局被系统结束。上限未知（0，Mac）照旧 0；读不到物理内存（0）只按上限
+uint64_t s2a_guest_room_eff(uint64_t room, uint64_t phys, uint64_t margin) {
+    if (!room || !phys) return room;
+    uint64_t cap = phys > margin ? phys - margin : 0;
+    return cap < room ? cap : room;
+}
 int s2a_guest_file_wanted6(const char *e, uint64_t pool, uint64_t room, uint64_t phys, uint64_t seen, uint64_t host, uint64_t margin, int died, int *low) {
     *low = 0;
     if (e && *e) return strcmp(e, "0") != 0;
@@ -133,12 +150,15 @@ int s2a_guest_file_wanted6(const char *e, uint64_t pool, uint64_t room, uint64_t
     // 安全阀收窄（#2f79dd，11-15）：上局前台死掉本为兜「判了不开、实际超单进程上限被杀」——心跳 10 秒一次，最后那段涨幅可能没记进实测。
     //   本款有实测、且实测 + 两份余量（多一份给漏记的涨幅）仍不超剩余：那次死掉不是超上限（标记被别的原因留下，D-C73M 那次原因未定），不强制开，按实测判关。
     //   D-C73M 6 GB iPhone：实测 2372 + 1024 ≤ 4093 却被强制开，开局写盘 2.6 GB 后卡死在缺页
-    if (died && !(seen && seen + 2 * margin <= room)) return 1;
-    if (seen) return seen + margin > room;
-    if (pool <= room) return 0;
-    if (phys && phys >= pool + host) return 1;
-    *low = 1; return 1;
+    int on = seen == UINT64_MAX ? 1 : died && !(seen && seen + 2 * margin <= room) ? 1 : seen ? seen + margin > room : pool > room;
+    // 物理内存也装不下那档（起局提示一次、物理映射区也走文件）：按本款要多少判（s2a_guest_need：有实测按实测 + 余量，没实测按池 + 宿主估计）。
+    //   11-22 D-9R4S：原先只在「没实测、池 > 剩余」那支判这档，有实测就直接按实测回、不判——6 GB iPad 上一款 Switch 2 大款实测 8877 MB，
+    //   物理只有 5914，却从不提示（一局往闪存写 66–118 GB、换场景卡住 / GPU 超时黑屏）。读不到物理内存（0）不判这档
+    if (on && phys) *low = seen && seen != UINT64_MAX ? seen + margin > phys : pool + host > phys;
+    return on;
 }
+// 本款要多少（提示玩家「约需」用）：有实测（不是坏记录）按实测，否则按池 + 宿主估计
+uint64_t s2a_guest_need(uint64_t pool, uint64_t host, uint64_t seen) { return seen && seen != UINT64_MAX ? seen : pool + host; }
 static uint64_t phys_mem(void) { uint64_t ph = 0; size_t n = sizeof ph; return sysctlbyname("hw.memsize", &ph, &n, NULL, 0) ? 0 : ph; }
 // 三档判定的一句理由（日志用）
 static const char *tier_why(int on, int low, uint64_t seen, int died) {
@@ -147,11 +167,31 @@ static const char *tier_why(int on, int low, uint64_t seen, int died) {
          : low ? "池大于剩余、物理内存也装不下池 + 宿主估计：照样开（能玩下去优先），提示玩家内存可能不够"
          : on ? "池大于剩余、物理内存装得下：开" : "池不大于剩余：装得下、保持匿名内存";
 }
-static int g_low_tier;   // 这一局判在「物理内存也装不下」那档（s2a_guest_file_carve 只在这档挖物理映射区）
+static int g_low_tier;   // 这一局判在「物理内存也装不下」那档（文件后备开、物理映射区也走文件，s2a_guest_carve_wanted）
+static uint64_t g_lowram_need, g_lowram_phys;   // 待问玩家的「本款约需 / 本机物理内存」（s2a_guest_lowram_ask 问完清零）
 static void low_ram_notice(uint64_t phys, uint64_t need) {
-    g_low_tier = 1;
-    LOG("【黄】客体内存：这台设备物理内存 %llu MB，装不下这款要的约 %llu MB（池 + 宿主估计），照样开局；可能卡顿或被系统结束", (unsigned long long)(phys >> 20), (unsigned long long)(need >> 20));
-    void (*f)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "s2a_ios_low_ram_notice"); if (f) f();   // ios/app.m：游戏内提示条；单测 / 安卓没有
+    g_low_tier = 1; g_lowram_need = need; g_lowram_phys = phys;
+    LOG("【黄】客体内存：这台设备物理内存 %llu MB，装不下这款要的约 %llu MB（有实测按实测，没有按池 + 宿主估计），文件后备兜底照样开局；可能卡顿或被系统结束", (unsigned long long)(phys >> 20), (unsigned long long)(need >> 20));
+}
+// 「已问过」记号（纯文件操作，t_guest_file_auto 测）：同 mem_peak_anon 的目录下 lowram_asked。没有 → 写上、返回 0（这次要问）；有 → 返回 1（问过，不再弹）；路径取不到 → 1（不弹）
+static int mem_peak_path(char *out, size_t n);
+int s2a_guest_lowram_once(void) {
+    char p[1100]; if (!mem_peak_path(p, sizeof p)) return 1;
+    char *sl = strrchr(p, '/'); if (!sl) return 1; snprintf(sl + 1, sizeof p - (size_t)(sl + 1 - p), "lowram_asked");
+    struct stat st; if (!stat(p, &st)) return 1;
+    { char d[1100]; snprintf(d, sizeof d, "%s", p); char *s2 = strrchr(d, '/'); if (s2) { *s2 = 0; mkdir(d, 0755); } }
+    FILE *f = fopen(p, "w"); if (f) { fputs("1\n", f); fclose(f); }
+    return 0;
+}
+// 兜底之后物理上仍装不下（low 档）：起局前问一次「本款约需 X GB，这台 Y GB，可能中途退出」+「仍要启动」，本机本款只问一次（D-YDKK，11-22 维护者定：能玩就别拦）。
+//   构造期在主线程、问不了（s2a_ios_ask_continue 主线程直接回 0），所以判定时只记下，装模块前在宿主线程上问（host_main.c load_session_modules，多款容器的再判也在那之前）
+void s2a_guest_lowram_ask(void) {
+    uint64_t need = g_lowram_need, phys = g_lowram_phys; g_lowram_need = 0;
+    if (!need) return;
+    { int (*un)(void) = (int (*)(void))dlsym(RTLD_DEFAULT, "s2a_unattended"); if (un && un()) { LOG("客体内存：无人值守局，不问「内存可能不够」"); return; } }   // 测试 / 普查局不停在提示页，也不写记号
+    if (s2a_guest_lowram_once()) { LOG("客体内存：本机这款已问过一次「内存可能不够」，不再弹"); return; }
+    int (*f)(uint64_t, uint64_t) = (int (*)(uint64_t, uint64_t))dlsym(RTLD_DEFAULT, "s2a_ios_low_ram_ask");   // ios/app.m；Mac / 单测 / 安卓没有
+    if (f && f(need >> 20, phys >> 20)) LOG("客体内存：玩家看过「内存可能不够」，点了仍要启动");
 }
 int s2a_guest_file_wanted5(const char *e, uint64_t room, uint64_t seen, uint64_t margin, int died) {
     if (e && *e) return strcmp(e, "0") != 0;
@@ -228,7 +268,9 @@ uint64_t s2a_guest_mem_seen(void) {
 //     ① 上一局在前台死掉、且需求 + 两份余量 > 剩余（像是撞了单进程上限）：记录取大、标「死过」——死过的记录只认够长的匿名局往下改，
 //        文件后备局在内存紧的机器上页被逐出、量小了，不许它往下改，免得「改小 → 匿名被杀 → 开 → 又改小」来回；
 //     ② 上一局干净（或死掉但离上限远，不是内存杀的）且够长（心跳 ≥ 30 次 = 5 分钟）：记录换成这一局的需求，可以往下改（一局异常下一局就纠正）；
-//     ③ 太短的局：只往上改（菜单里待 30 秒的局代表不了进场景要多少）。
+//     ③ 太短的局：只往上改（菜单里待 30 秒的局代表不了进场景要多少）。量出的只是下限：只能证明「装不下」，不能证明「装得下」——
+//        没有记录时，短局需求 + 余量不超剩余就不建记录（留着「没实测」按三档判）。D-9XY8（iPad 物理 7908 MB，一款 Switch 2 大款池 9216 MB）：
+//        首局开着文件后备在菜单待 8 次心跳量出 2817 MB，记录 0 → 2817，下一局按 2817 + 512 ≤ 6132 判关文件后备，进场景涨到 5509 MB 被系统结束
 //   记录格式「字节[ died]」，旧记录（只有字节）读作没死过
 enum { GMEM_BEATS_MIN = 30 };
 static int run_peak_path(char *out, size_t n) {
@@ -254,6 +296,10 @@ const char *s2a_guest_mem_settle(int died, uint64_t room, uint64_t margin) {
     uint64_t v; int vs; const char *how;
     if (mem_kill) { v = need > rec ? need : rec; vs = 1; how = "上一局在前台死掉、需求逼近上限：取大、记「死过」"; }
     else if (longrun && !(sticky && file)) { v = need; vs = 0; how = need < rec ? "上一局够长：换成它的需求（往下改）" : "上一局够长：换成它的需求"; }
+    else if (!rec && need + margin <= room) {
+        snprintf(why, sizeof why, "上一局太短、本款还没记录：量出的只是下限，不当「装得下」的实测，不建记录（上一局需求 %llu MB、%llu 次心跳%s）",
+                 need >> 20, beats, file ? "、文件后备" : "");
+        return why; }
     else { v = need > rec ? need : rec; vs = sticky; how = sticky && file && longrun ? "记录死过、上一局开着文件后备：不往下改" : "上一局太短：只往上改"; }
     char line[64]; snprintf(line, sizeof line, vs ? "%llu died\n" : "%llu\n", (unsigned long long)v); write_line(pp, line);
     snprintf(why, sizeof why, "%s（上一局需求 %llu MB、%llu 次心跳%s；记录 %llu → %llu MB）", how, need >> 20, beats, file ? "、文件后备" : "", (unsigned long long)(rec >> 20), (unsigned long long)(v >> 20));
@@ -288,6 +334,15 @@ int s2a_guest_budget_rec_read(uint64_t *b, uint64_t *hmin) {   // 两项都读�
     return ok;
 }
 static uint64_t g_budget_room;   // 本局定预算时的起局剩余（写进记录第三项）
+static uint64_t g_budget_ceil;   // 本款预算天花板（写进记录第五项；0 = 没有，s2a_guest_next_budget）
+static uint64_t g_bbeats;        // 本局溢出模式下的心跳次数（写进记录第四项：上局够不够长）
+// 记录第四、五项（11-22）：上局溢出模式心跳次数、天花板 MB。旧记录没有 → 0（当短局：只许收紧；没有天花板）
+static void budget_rec_ext(uint64_t *beats, uint64_t *ceil) {
+    *beats = *ceil = 0; char p[1100]; if (!budget_rec_path(p, sizeof p)) return;
+    FILE *f = fopen(p, "r"); if (!f) return;
+    unsigned long long x, y, z, b = 0, c = 0; int n = fscanf(f, "%llu %llu %llu %llu %llu", &x, &y, &z, &b, &c); fclose(f);
+    if (n == 5) { *beats = b; *ceil = (uint64_t)c << 20; }
+}
 uint64_t s2a_guest_budget_rec_room(void) {   // 记录第三项（字节）；没有 / 旧记录回 0
     char p[1100]; if (!budget_rec_path(p, sizeof p)) return 0;
     FILE *f = fopen(p, "r"); if (!f) return 0;
@@ -299,18 +354,24 @@ static int budget_rec_write(uint64_t b, uint64_t hmin) {
     char p[1100], t[1200]; if (!budget_rec_path(p, sizeof p)) return 0;
     { char d[1100]; snprintf(d, sizeof d, "%s", p); char *sl = strrchr(d, '/'); if (sl) { *sl = 0; mkdir(d, 0755); } }
     snprintf(t, sizeof t, "%s.tmp", p); FILE *f = fopen(t, "w"); if (!f) return 0;
-    fprintf(f, "%llu %llu %llu\n", (unsigned long long)(b >> 20), (unsigned long long)(hmin >> 20), (unsigned long long)(g_budget_room >> 20)); fclose(f);
+    fprintf(f, "%llu %llu %llu %llu %llu\n", (unsigned long long)(b >> 20), (unsigned long long)(hmin >> 20), (unsigned long long)(g_budget_room >> 20),
+            (unsigned long long)g_bbeats, (unsigned long long)(g_budget_ceil >> 20)); fclose(f);
     return !rename(t, p);
 }
 // 起局（iOS）定溢出模式预算：读记录、上一局死掉就清，交 s2a_guest_next_budget；*pb / *ph 回读到的上局记录（日志用）。单测在 Mac 上直接调
 uint64_t s2a_guest_overflow_budget_ios(const char *e, uint64_t room, uint64_t margin, int died, int *src, uint64_t *pb, uint64_t *ph) {
-    *pb = *ph = 0; int have = !died && s2a_guest_budget_rec_read(pb, ph);
+    *pb = *ph = 0; uint64_t rb = 0, rh = 0, beats = 0; int rec = s2a_guest_budget_rec_read(&rb, &rh), have = !died && rec;
+    budget_rec_ext(&beats, &g_budget_ceil);
+    if (have) { *pb = rb; *ph = rh; }
     uint64_t pr = have ? s2a_guest_budget_rec_room() : 0;
     if (have && pr > room) *ph = *ph > pr - room ? *ph - (pr - room) : 0;   // 这局上限比上局低：上局的剩余最小值按差额扣（*ph 回扣过的值，日志用）
-    if (died) budget_rec_clear();
-    g_budget_room = room;
+    g_budget_room = room; g_bbeats = 0;
+    if (died) {   // 上局按 rb 的预算被系统收掉：rb − 一步记成天花板（只降不升）；rb 不到一步（整段 / 预算很小时死掉，不是预算的事）不动天花板
+        if (rec && rb >= BUDGET_STEP && (!g_budget_ceil || rb - BUDGET_STEP < g_budget_ceil)) g_budget_ceil = rb - BUDGET_STEP;
+        budget_rec_clear(); if (g_budget_ceil) budget_rec_write(0, 0);
+    }
     { const char *v = getenv("S2A_GUEST_FILE_OVERFLOW_HOST_MB"); uint64_t fh = (v && *v ? strtoull(v, NULL, 10) : 4096ull) << 20;
-      return s2a_guest_next_budget(e, room, margin, fh, died, have, *pb, *ph, src); }
+      return s2a_guest_next_budget(e, room, margin, fh, died, have, *pb, *ph, beats >= GMEM_BEATS_MIN, g_budget_ceil, src); }
 }
 static uint64_t g_hmin = UINT64_MAX;   // 本局开着文件后备时心跳读到的离上限剩余最小值
 static int g_rec_off;   // 1 = 显式设 S2A_GUEST_FILE_ANON_BUDGET_MB=0 的对照局：不写记录
@@ -318,17 +379,22 @@ static int g_rec_off;   // 1 = 显式设 S2A_GUEST_FILE_ANON_BUDGET_MB=0 的对�
 //   整段模式（预算 0）也写（B 记 0）：上局死掉清了记录、这局整段，照写 B = 0 与 Hmin，下一局按整段模式下的实测余量回升（0 + Hmin − 余量 − 一块）；
 //   否则算出 0 后不再有新记录，永远卡在整段。显式设 0 的对照局不写
 void s2a_guest_budget_note(uint64_t avail) {
-    if (g_gfd < 0 || !g_gchunk || g_rec_off || avail >= g_hmin) return;
-    if (budget_rec_write(g_anon_budget, avail)) g_hmin = avail;
+    if (g_gfd < 0 || !g_gchunk || g_rec_off) return;
+    g_bbeats++;
+    if (avail < g_hmin) { if (budget_rec_write(g_anon_budget, avail)) g_hmin = avail; }
+    else if (g_bbeats == GMEM_BEATS_MIN) budget_rec_write(g_anon_budget, g_hmin);   // 够长了：记一笔次数（往上抬要它）
 }
-// 本款本机学到的地址跨度（#783）：同目录 span_peak，一行十进制字节数 = 局中碰到的最高地址 − 窗口基址（svc_mem.c s2a_mem_span_now，心跳每 10 秒比大才写）。
+// 记录文件名（11-22 span_peak → span_peak2）：起改按贴顶规则记（s2a_span_learn_ok），旧 span_peak 里混着贴顶的假跨度（分不出真假、没记越界 / 远端），一律不读、重学；
+//   首局知识由同规则重生成的种子表（tools/span_seed.py）给
+#define SPAN_FILE "span_peak2"
+// 本款本机学到的地址跨度（#783）：同目录 span_peak2，一行十进制字节数 = 局中碰到的最高地址 − 窗口基址（svc_mem.c s2a_mem_span_now，心跳每 10 秒比大才写）。
 //   窗口放不下标准布局时按它给窗口、其余留给宿主（s2a_window_host_below）；没记录 / 读不出 = 0（照旧只留 HOST_BELOW）
 static uint64_t read_u64(const char *p) { FILE *f = fopen(p, "r"); if (!f) return 0; unsigned long long v = 0; int ok = fscanf(f, "%llu", &v) == 1; fclose(f); return ok ? v : 0; }
 static int span_path(char *out, size_t n, uint64_t pid) {   // pid = 0：按局中当前程序号（同 mem_peak 目录）
     const char *ov = getenv("S2A_WIN_SPAN_PEAK"); if (ov && *ov) { snprintf(out, n, "%s", ov); return 1; }   // 单测 / 诊断指定
-    if (pid) { s2a_docs_path(out, n, "wire/%016llX/span_peak", (unsigned long long)pid); return 1; }
+    if (pid) { s2a_docs_path(out, n, "wire/%016llX/" SPAN_FILE, (unsigned long long)pid); return 1; }
     if (!mem_peak_path(out, n)) return 0;
-    char *sl = strrchr(out, '/'); if (!sl) return 0; snprintf(sl + 1, n - (size_t)(sl + 1 - out), "span_peak"); return 1;
+    char *sl = strrchr(out, '/'); if (!sl) return 0; snprintf(sl + 1, n - (size_t)(sl + 1 - out), SPAN_FILE); return 1;
 }
 // 各款实测最高地址的种子表（tools/span_seed.py 从诊断报告生成，随宿主下发）：本机还没玩过 / 没记下的款，第一局就按别人设备上碰到过的最高值判
 //   （窗口给多大、快照区放不放得下、弹不弹「地址空间不够」）。只收放不下标准布局的局，每款取最大值、样本 ≥ 2
@@ -387,9 +453,14 @@ static uint64_t g_need, g_fit;   // 定义见下（占窗口时定）；记跨�
 //   否则它只增不减、每局宿主都只剩 3 GB。fit = 0（还没占窗口 / 单测）不判。纯函数，t_vawin_learned 测
 int s2a_window_span_rec_ok(uint64_t rec, uint64_t fit) { return rec && (!fit || rec < fit); }
 int s2a_window_span_worth(uint64_t presents) { return presents >= SPAN_MIN_PRESENTS; }   // 纯函数，t_vawin_learned 测
-static void span_note(void) {   // s2a_mem_span_now 在 svc_mem.c、mtl_present_count 在直连图形层：按名字取（只链 vawin.c 的单测没有它们；取不到 = 不记）
+// 学跨度只记「游戏真要的」（11-22 宿主下限复核，同 tools/span_seed.py 贴顶规则）：跨度离窗口末不到 512 MB = 贴顶——别名区报到窗口末、游戏的静态大区
+//   贴着顶映射，跨度跟着窗口走（异度神剑3 窗口 62464 时记 62080、53248 时远端缺页 0 次），记下来下一局窗口更小时会误弹「地址空间不够」、快照区判反。
+//   例外：本局有越界映射（映射落到宿主没占到的地址）或远端缺页——游戏真碰到了窗口外，贴顶也记。纯函数，t_vawin_learned 测
+#define SPAN_TOP_MARGIN (512ull << 20)
+int s2a_span_learn_ok(uint64_t span, uint64_t win_size, uint64_t oob, uint64_t far) { return span && (span + SPAN_TOP_MARGIN < win_size || oob || far); }
+static void span_note(void) {   // s2a_mem_span_learn 在 svc_mem.c、mtl_present_count 在直连图形层：按名字取（只链 vawin.c 的单测没有它们；取不到 = 不记）
     static uint64_t (*spanf)(void), (*presf)(void); static int looked;
-    if (!looked) { spanf = (uint64_t (*)(void))dlsym(RTLD_DEFAULT, "s2a_mem_span_now"); presf = (uint64_t (*)(void))dlsym(RTLD_DEFAULT, "mtl_present_count"); looked = 1; }
+    if (!looked) { spanf = (uint64_t (*)(void))dlsym(RTLD_DEFAULT, "s2a_mem_span_learn"); presf = (uint64_t (*)(void))dlsym(RTLD_DEFAULT, "mtl_present_count"); looked = 1; }
     if (!presf || !s2a_window_span_worth(presf())) return;
     uint64_t now = spanf ? spanf() : 0; if (!now) return;
     char p[1024], t[1100]; if (!span_path(p, sizeof p, 0)) return;
@@ -412,7 +483,7 @@ static uint64_t (*g_span_crash_f)(void);
 void s2a_window_span_arm(void) {
     char p[1024]; if (!span_path(p, sizeof p, 0)) return;
     { char d[1024]; snprintf(d, sizeof d, "%s", p); char *sl = strrchr(d, '/'); if (sl) { *sl = 0; mkdir(d, 0755); } }
-    g_span_crash_f = (uint64_t (*)(void))dlsym(RTLD_DEFAULT, "s2a_mem_span_now");
+    g_span_crash_f = (uint64_t (*)(void))dlsym(RTLD_DEFAULT, "s2a_mem_span_learn");
     snprintf(g_span_crash_t, sizeof g_span_crash_t, "%s.tmp", p); snprintf(g_span_crash_p, sizeof g_span_crash_p, "%s", p);
 }
 uint64_t s2a_window_span_crash(uint64_t low_largest) {   // 返回记下的跨度（没记 = 0）
@@ -507,6 +578,8 @@ static void guest_file_attach_(void) {
     // 余量缺省 512 MB（S2A_GUEST_FILE_MARGIN_MB）；池只作日志里的上界，不作判据（#783，见 s2a_guest_file_wanted5）
     if (ballast) { room = room > ballast ? room - ballast : 1; LOG("【黄】测试压舱：文件后备判定按余量少 %llu MB 算（S2A_TEST_BALLAST_MB，装模块前才真占）", (unsigned long long)(ballast >> 20)); }
     uint64_t margin = env_mb("S2A_GUEST_FILE_MARGIN_MB", 512), host = env_mb("S2A_GUEST_FILE_HOST_MB", 2048), phys = phys_mem();
+    { uint64_t r0 = room; room = s2a_guest_room_eff(room, phys, margin);   // 下面判开、预算、挖区、记录全按这个剩余（s2a_guest_room_eff）
+      if (room != r0) LOG("客体内存文件后备：离单进程上限还剩 %llu MB，比物理内存 %llu MB − 余量 %llu MB 大，判据按 %llu MB", (unsigned long long)(r0 >> 20), (unsigned long long)(phys >> 20), (unsigned long long)(margin >> 20), (unsigned long long)(room >> 20)); }
     int died = room && s2a_guest_run_died(), low = 0;
     { const char *st = room ? s2a_guest_mem_settle(died, room, margin) : NULL; if (st) LOG("客体内存实测记录：%s", st); }
     uint64_t seen = s2a_guest_mem_seen();
@@ -522,7 +595,7 @@ static void guest_file_attach_(void) {
     LOG("客体内存文件后备：%s——%s；本款应用内存池 %llu MB、离单进程内存上限还剩 %llu MB%s、物理内存 %llu MB、宿主估计 %llu MB、本机本款实测峰值 %llu MB（0 = 没有）%s", on ? "开" : "关", why,
         (unsigned long long)(pool >> 20), (unsigned long long)(room >> 20), room ? "" : "（0 = 未知）", (unsigned long long)(phys >> 20), (unsigned long long)(host >> 20),
         (unsigned long long)(seen == UINT64_MAX ? 0 : seen >> 20), s2a_process_prewarmed() ? "；预热进程" : "");
-    if (low && !late) low_ram_notice(phys, pool + host);
+    if (low && !late) low_ram_notice(phys, s2a_guest_need(pool, host, seen));
     g_gfile_room = room; g_gfile_died = died;
     if (late) { g_gfile_late = 1; g_gfile_room0 = room; return; }
     if (!on) return;
@@ -568,13 +641,15 @@ static void guest_file_map(uint64_t room) {
     unlink(path);
     if (ftruncate(fd, (off_t)g_size)) { LOG("【红】客体内存文件后备：文件定长 %llu MB 失败（errno=%d），照旧用匿名内存", (unsigned long long)(g_size >> 20), errno); close(fd); return; }
     const char *be = getenv("S2A_GUEST_FILE_ANON_BUDGET_MB");
-    uint64_t margin = env_mb("S2A_GUEST_FILE_MARGIN_MB", 512), budget; char why[200];
+    uint64_t margin = env_mb("S2A_GUEST_FILE_MARGIN_MB", 512), budget; char why[512];
 #ifdef __IPHONE_OS_VERSION_MIN_REQUIRED   // iOS 有单进程上限：按本机本款实测定（s2a_guest_next_budget）
     { int src = 0; uint64_t pb = 0, ph = 0; budget = s2a_guest_overflow_budget_ios(be, room, margin, g_gfile_died, &src, &pb, &ph);
       if (src == 0) snprintf(why, sizeof why, "按 S2A_GUEST_FILE_ANON_BUDGET_MB 显式设定");
-      else if (src == 1) snprintf(why, sizeof why, "上一局在前台死掉：退回整段进文件，清掉本款预算记录");
-      else if (src == 2) snprintf(why, sizeof why, "按上局实测余量：上局预算 %llu MB + (上局离上限剩余最小 %llu MB（已按两局起局剩余之差扣过）− 余量 %llu MB) − 一块 %llu MB，上限 剩余 %llu − 余量",
-                                  (unsigned long long)(pb >> 20), (unsigned long long)(ph >> 20), (unsigned long long)(margin >> 20), (unsigned long long)(GCHUNK >> 20), (unsigned long long)(room >> 20));
+      else if (src == 1) snprintf(why, sizeof why, "上一局在前台死掉：退回整段进文件，清掉本款预算记录，天花板 %llu MB（0 = 没有）", (unsigned long long)(g_budget_ceil >> 20));
+      else if (src == 2) snprintf(why, sizeof why, "按上局实测余量：上局预算 %llu MB + (上局离上限剩余最小 %llu MB（已按两局起局剩余之差扣过）− 余量 %llu MB) − 一块 %llu MB，上限 剩余 %llu − 余量；"
+                                  "上局不到 5 分钟只许收紧、够长每局最多抬 1024 MB，天花板 %llu MB（0 = 没有）",
+                                  (unsigned long long)(pb >> 20), (unsigned long long)(ph >> 20), (unsigned long long)(margin >> 20), (unsigned long long)(GCHUNK >> 20), (unsigned long long)(room >> 20),
+                                  (unsigned long long)(g_budget_ceil >> 20));
       else { const char *v = getenv("S2A_GUEST_FILE_OVERFLOW_HOST_MB");
           snprintf(why, sizeof why, "首局估计：剩余 %llu MB − 余量 %llu MB − 首局宿主开销 %llu MB（S2A_GUEST_FILE_OVERFLOW_HOST_MB）", (unsigned long long)(room >> 20),
                    (unsigned long long)(margin >> 20), v && *v ? strtoull(v, NULL, 10) : 4096ull); } }
@@ -624,7 +699,7 @@ int s2a_guest_file_retry(void) {
         LOG("客体内存文件后备（装游戏前按本款再判）：%s——%s；本款应用内存池 %llu MB、起局时离单进程内存上限还剩 %llu MB、物理内存 %llu MB、宿主估计 %llu MB、本机本款实测峰值 %llu MB（0 = 没有）",
             on ? "开" : "关", tier_why(on, low, seen, died), (unsigned long long)(pool >> 20), (unsigned long long)(g_gfile_room0 >> 20), (unsigned long long)(phys >> 20),
             (unsigned long long)(host >> 20), (unsigned long long)(seen == UINT64_MAX ? 0 : seen >> 20));
-        if (low) low_ram_notice(phys, pool + host);
+        if (low) low_ram_notice(phys, s2a_guest_need(pool, host, seen));
         // 补写「本局在跑」标记（died 已在上面读过，不会读到自己）：标记按程序号放目录，App 到前台时（ios/app.m）多款容器还没选游戏、程序号是 0，
         //   路径取不到就没写——诊断 D-4PMS（6 GB iPhone，多款容器）一款 Switch 2 大款连着 5 局都在前台被内存上限杀，每局再判仍是「实测峰值装得下、关」，
         //   安全阀一次没触发。此刻已选定游戏、程序号确定，在这里补；进后台 / 将终止时删照旧（那时也认得程序号）
@@ -684,30 +759,30 @@ int s2a_guest_map_fixed(uint64_t a, uint64_t len) {
 //   11-13 Duo 正式游戏实测窗口脏页约 1.3 GB，最脏的 4 段里两段在别名区（各 130–185 MB）。放在文件里，物理内存小的机器（iPad 7.5 GB）脏页超回写阈值后
 //   这些每帧都被改写的页会被反复刷盘（那台 iPad 文件后备局每 10 秒写 2–3 GB）。别名区保持匿名：热页不进文件，只有游戏堆走文件后备。
 //   代价是这段的常驻页计进进程实占（Duo 正式游戏约 1.0–1.7 GB），iPad 档单进程上限 8 GB 装得下。下面两个口子按它分段：在这段里一律当「不在文件里」
-//   （svc_mem.c 的懒清零与还页就走匿名那套）。S2A_GUEST_FILE_CARVE=0 不挖、=1 强制挖（对照用）；缺省只在「物理内存也装不下」那档挖
+//   （svc_mem.c 的懒清零与还页就走匿名那套）。S2A_GUEST_FILE_CARVE=0 不挖、=1 强制挖（对照用）；缺省按剩余挖（s2a_guest_carve_wanted），「物理内存也装不下」那档不挖
 static uint64_t g_anon_lo, g_anon_hi;
 static int reserve_hole(uint64_t lo, uint64_t hi) {   // [lo, hi) 放回不可访问的匿名占位（空洞补占位；MAP_FIXED 也盖掉原映射）；空段回 0；不成返回非 0
     return lo < hi && mmap((void *)(uintptr_t)lo, hi - lo, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0) != (void *)(uintptr_t)lo;
 }
 static int in_anon(uint64_t a, uint64_t n) { return g_anon_hi > g_anon_lo && a < g_anon_hi && a + n > g_anon_lo; }
 // 布局定下别名区后调（svc_mem.c，那时这段还没放开过）：与窗口的交集按宿主页向内取整，逐块确认仍是不可访问的保留（没有内容）才换成匿名占位
-// 挖不挖（纯函数，单测直接测）：S2A_GUEST_FILE_CARVE=0 / 1 按设的；「物理内存也装不下」那档挖；离单进程上限剩余 ≥ S2A_GUEST_FILE_CARVE_ROOM_MB（缺省 7168）也挖——
+// 挖不挖（纯函数，单测直接测）：S2A_GUEST_FILE_CARVE=0 / 1 按设的；「物理内存也装不下」那档不挖；剩余（s2a_guest_room_eff：上限剩余与物理内存 − 余量取小）≥ S2A_GUEST_FILE_CARVE_ROOM_MB（缺省 7168）挖——
 //   11-14 实测：写盘几乎全来自物理映射区，而且写回的大多是游戏已经释放、内容作废的页（释放不打洞、重新给出时 memset 清零，内存一紧整段写回）：每次起局加载时一次写 7–17 GB
 //   （一台测试 iPhone 两局 16.7 / 6.7 GB；Duo 挖 0 写 9.4 GB、挖 1 写 33 MB）。挖的代价是这段常驻计实占（Duo 15 分钟：实占峰 3370 → 6101 MB，离上限最少还剩 2122 MB）。挖了的实占峰是绝对量（约 6.1 GB = 文件后备峰约 3.4 GB + 挖区约 2.7 GB），门槛再留约 1 GB：起局剩余 ≥ 7 GB 才挖——
 //   17 Pro Max 那档剩余约 6.1 GB，挖了会贴着上限，不挖（曾按 4 GB 定，算错）。剩余未知（0，Mac）不挖
 int s2a_guest_carve_wanted(const char *e, int low, uint64_t room, uint64_t room_min) {
     if (e && *e) return *e != '0';
-    if (low) return 1;
+    if (low) return 0;   // 物理内存也装不下那档：不挖，物理映射区也走文件（D-YDKK，11-22 维护者定：装不下先让文件兜底、能玩下去；挖了这段常驻计实占，那台 iPad 开局 6.7 GB 就被结束）
     return room && room >= room_min;
 }
 void s2a_guest_file_carve(uint64_t a, uint64_t n) {
     if (g_gfd < 0 || !n) return;
     const char *e = getenv("S2A_GUEST_FILE_CARVE");
     if (e && *e == '0') { LOG("客体内存文件后备：物理映射区照旧进文件（S2A_GUEST_FILE_CARVE=0，对照用）"); return; }
-    // 挖不挖按 s2a_guest_carve_wanted（上面）：「物理内存也装不下」那档挖；起局时离单进程上限剩余 ≥ S2A_GUEST_FILE_CARVE_ROOM_MB（缺省 7168）也挖；
+    // 挖不挖按 s2a_guest_carve_wanted（上面）：「物理内存也装不下」那档不挖；起局时的剩余（与物理内存 − 余量取小）≥ S2A_GUEST_FILE_CARVE_ROOM_MB（缺省 7168）挖；
     //   S2A_GUEST_FILE_CARVE=1 / 0 强制。挖与不挖都写一行带剩余与原因（看玩家单用）
     uint64_t room_min = env_mb("S2A_GUEST_FILE_CARVE_ROOM_MB", 7168);
-    if (!s2a_guest_carve_wanted(e, g_low_tier, g_gfile_room, room_min)) { LOG("客体内存文件后备：物理映射区照旧进文件（不是内存不够那档，离单进程上限剩余 %llu MB < %llu MB：挖了常驻会贴近上限）", (unsigned long long)(g_gfile_room >> 20), (unsigned long long)(room_min >> 20)); return; }
+    if (!s2a_guest_carve_wanted(e, g_low_tier, g_gfile_room, room_min)) { LOG("客体内存文件后备：物理映射区照旧进文件（%s，剩余 %llu MB、门槛 %llu MB）", g_low_tier ? "物理内存也装不下那档：先让文件兜底" : "剩余不到门槛：挖了常驻会贴近上限", (unsigned long long)(g_gfile_room >> 20), (unsigned long long)(room_min >> 20)); return; }
     const uint64_t pg = 0x4000;
     uint64_t lo = a > g_base ? a : g_base, hi = a + n < g_base + g_size ? a + n : g_base + g_size;
     lo = (lo + pg - 1) & ~(pg - 1); hi &= ~(pg - 1);
@@ -735,7 +810,7 @@ void s2a_guest_file_carve(uint64_t a, uint64_t n) {
         for (uint64_t i = (lo - g_base + GCHUNK - 1) / GCHUNK; i < g_gchunk_n && g_base + (i + 1) * GCHUNK <= hi; i++) if (g_gchunk[i] != GC_ANON) gc_set(i, GC_CARVE);
         pthread_mutex_unlock(&g_gchunk_mu); }
     LOG("客体内存文件后备：物理映射区 %#llx +%llu MB 保持匿名内存（%s；游戏反复映射 / 释放的就是这段，进文件的话作废页也要写回闪存；游戏堆照旧走文件）", (unsigned long long)lo, (unsigned long long)((hi - lo) >> 20),
-        e && *e ? "S2A_GUEST_FILE_CARVE=1 强制" : g_low_tier ? "物理内存也装不下那档" : "离单进程上限剩余够");
+        e && *e ? "S2A_GUEST_FILE_CARVE=1 强制" : "剩余够");
     if (!(e && *e) && !g_low_tier) LOG("客体内存文件后备：挖区判据 离单进程上限剩余 %llu MB ≥ %llu MB", (unsigned long long)(g_gfile_room >> 20), (unsigned long long)(room_min >> 20));
 }
 // 一块的窗口范围 [*lo, *hi)
@@ -1005,12 +1080,21 @@ uint64_t s2a_window_for_span(uint64_t learned) {
     uint64_t win = (learned + learned / 4 + 2 * G + G - 1) & ~(G - 1);
     return win < MIN_WIN ? MIN_WIN : win;
 }
+// 宿主下限（11-22 D-R2VX / D-NK6Y，诊断#0c13d3 61 次）：放不下标准布局时窗口下方至少留给宿主多少。固定 3 GiB 时宿主开局低区空洞约 3.5 GB
+//   （= 下限 + 低区约 0.4 GB），而玩家诊断 7601 局（去重）里宿主开局后在低区额外吃掉的峰值 p50 861 / p90 2519 / p99 4967 MB（时之笛 Switch 2 版
+//   783 局 p99 5422 MB）；碰底（最低空洞 < 512 MB）的 345 局起点空洞中位 3499 MB、其中时之笛 230 局：开局约 30 秒低区只剩 342 MB，纹理登记表 /
+//   命令录制 2 MB 块 mmap errno 12，视频解码提交的 malloc 回空先踩到（15 GB 内存的 iPad 一样崩：耗尽的是地址范围不是物理内存）。
+//   下限取 6 GiB：起点空洞约 6.4 GB ≥ p99 + 1 GB 余量；GC 上限仍落按需档（分堆档要低区最大一块 ≥ 7808 MB，gclimit.c），不会被 GC 吃回去。
+//   只对放得下 6 GiB 宿主 + 16 GiB 窗口的空洞（≥ 22 GiB）生效；更小的空洞（4–8 GB 机）照旧 3 GiB，那里窗口本来就紧（按应用池另算，见下）
+#define HOST_FLOOR (6ull << 30)
+#define HOST_FLOOR_FIT (22ull << 30)
+uint64_t s2a_window_host_floor(uint64_t fit) { return fit >= HOST_FLOOR_FIT ? HOST_FLOOR : HOST_BELOW; }
 uint64_t s2a_window_host_below(uint64_t fit, uint64_t learned) {
-    const uint64_t G = 1ull << 30;
-    if (!learned) return HOST_BELOW;
+    const uint64_t G = 1ull << 30, floor = s2a_window_host_floor(fit);
+    if (!learned) return floor;
     uint64_t win = s2a_window_for_span(learned);
     uint64_t host = fit > win ? (fit - win) & ~(G - 1) : 0;
-    return host > HOST_BELOW ? host : HOST_BELOW;
+    return host > floor ? host : floor;
 }
 // 小内存 iPad（4 GB 机，2^39 以下只有 6 GB 空洞）上 HOST_BELOW 固定 3 GiB 把窗口压到 3 GiB；
 //   Switch 1 的 SDK 开局按应用池 3285 MB 调 SetHeapSize（不是按游戏文件大小，Ryujinx KSystemControl.GetApplicationPoolSize），
@@ -1033,9 +1117,9 @@ uint64_t s2a_window_host_below_for_pool(uint64_t fit, uint64_t learned, uint64_t
 //   布局重算、本局照常起。原先只删记录、本局照样失败，玩家第二次打开才好（v0.3.3 已记下坏记录的玩家装新版后头一次仍失败）。
 //   放宽的那段 [新起点, 窗口底) 起局后可能已被宿主映射占了一部分（lp_map 带提示往这里放直连库段等）：新起点取「已占映射末端（1 GiB 向上取整）」与「留宿主底 + HOST_BELOW」的大者，
 //   不盖别人；放不宽（新起点到不了窗口底以下）回 0，照旧失败（记录已删，下一局按缺省）。纯函数部分 s2a_window_widen_lo，t_vawin_learned 测；端到端 t_vawin_widen 测
-uint64_t s2a_window_widen_lo(uint64_t keep_lo, uint64_t base, uint64_t used_end) {
+uint64_t s2a_window_widen_lo(uint64_t keep_lo, uint64_t base, uint64_t used_end, uint64_t host) {
     const uint64_t G = 1ull << 30;
-    uint64_t lo = keep_lo + HOST_BELOW, u = (used_end + G - 1) & ~(G - 1);
+    uint64_t lo = keep_lo + host, u = (used_end + G - 1) & ~(G - 1);
     if (u > lo) lo = u;
     return lo < base ? lo : 0;
 }
@@ -1059,7 +1143,7 @@ int s2a_window_span_widen(void) {
         if (a + sz > used) used = a + sz;
         a += sz;
     }
-    uint64_t lo = s2a_window_widen_lo(g_keep_lo, g_base, used), end = g_base + g_size;
+    uint64_t lo = s2a_window_widen_lo(g_keep_lo, g_base, used, s2a_window_host_floor(g_fit)), end = g_base + g_size;
     if (!lo) { LOG("【红】地址窗口：想当场放宽，但窗口下方 %#llx 起已被宿主映射占到 %#llx，放不宽", (unsigned long long)g_keep_lo, (unsigned long long)used); return 0; }
     void *p = mmap((void *)lo, g_base - lo, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);   // 不带 MAP_FIXED：核对落点，不盖别人
     if (p != (void *)lo) { if (p != MAP_FAILED) munmap(p, g_base - lo);
@@ -1209,7 +1293,7 @@ uint64_t s2a_window_container_need(const char *bundle, const char *home) {
         //   原先按 Documents/wire/... 读，永远读不到：多款容器从来学不到跨度，窗口下方一直只留 3 GB（11-13 0400486024DEC000 三台设备开局约 2–4 分钟宿主地址耗尽崩溃）。
         //   这款文档根下没有时再看旧位置（单款包时代留下的记录）
         { uint64_t pid = strtoull(gid, NULL, 16), sl = 0, sg = 0; char sp[1400];
-          if (pid) { s2a_docs_path(sp, sizeof sp, "games/%s/wire/%016llX/span_peak", gid, (unsigned long long)pid); sl = read_u64(sp); }
+          if (pid) { s2a_docs_path(sp, sizeof sp, "games/%s/wire/%016llX/" SPAN_FILE, gid, (unsigned long long)pid); sl = read_u64(sp); }
           sg = s2a_window_span_seen(pid); if (sg > sl) sl = sg;   // 旧位置的记录、种子表取大
           { char pre[64]; snprintf(pre, sizeof pre, "games/%s/", gid); sl = s2a_window_span_trust(pre, pid, sl); }   // 这款收窄过、那局没到首帧：按不知道（选定后 svc_mem.c 同样不收）
           // 这款本机没记录、种子表也没有：跨度不知道。不再拿整份标准布局 ni 顶（必然不小于空洞、被当成「学到的跨度不对」作废，日志还说成旧版记错）：
@@ -1349,9 +1433,9 @@ static void vawin_reserve(void) {
     if (!sz && g_fit >= MIN_WIN + HOST_BELOW) {
         uint64_t pool = s2a_window_container_pool();   // 多款容器在构造期逐款读过 NPDM；单款 0 = 不知道，照旧 3 GiB
         uint64_t below = s2a_window_host_below_for_pool(g_fit, g_span_learned, pool);
-        if (!g_ctr && g_span_learned && below > HOST_BELOW) s2a_window_cap_try(NULL, g_ctor_pid, g_span_learned);   // 单款按已知跨度收窄了：记标记（多款容器选定游戏后按那款记，svc_mem.c）
-        if (pool && below != HOST_BELOW) LOG("地址窗口：按本款应用池 %llu MB 定宿主保留 %llu MB（固定 %llu MB 时窗口放不下 SDK 开局要的堆）",
-            (unsigned long long)(pool >> 20), (unsigned long long)(below >> 20), (unsigned long long)(HOST_BELOW >> 20));
+        if (!g_ctr && g_span_learned && below > s2a_window_host_floor(g_fit)) s2a_window_cap_try(NULL, g_ctor_pid, g_span_learned);   // 单款按已知跨度收窄了：记标记（多款容器选定游戏后按那款记，svc_mem.c）
+        if (pool && below != s2a_window_host_floor(g_fit)) LOG("地址窗口：按本款应用池 %llu MB 定宿主保留 %llu MB（固定 %llu MB 时窗口放不下 SDK 开局要的堆）",
+            (unsigned long long)(pool >> 20), (unsigned long long)(below >> 20), (unsigned long long)(s2a_window_host_floor(g_fit) >> 20));
 #if !TARGET_OS_OSX
         // 即时存档：命令记录区 1 GB + 虚拟池区 2 GB。先放窗口所在空洞之外（[4 GB, 空洞起点) 里整块 ≥3 GB 的空洞顶端）；再放窗口下方宿主保留段底部。
         //   宿主段不够时按游戏实际要多少判（s2a_snap_arena_place2）：本款已知的最高跨度（本机记录 / 种子表）加余量放得进「空洞 − 宿主 3 GB − 快照 3 GB」，
@@ -1363,7 +1447,7 @@ static void vawin_reserve(void) {
           if (!(rec && *rec) && s2a_snap_mode() && !s2a_snap_restoring()) {
               uint64_t oa = 0, os = 0, of = 0, ofa = 0, ol = 0;
               pick_hole_in(0x100000000ull, fat, A, &oa, &os, &of, &ofa, 0, &ol);
-              uint64_t below0 = below; int where = s2a_snap_arena_place2(os, g_fit, &below, A, HOST_BELOW, span_known, SNAP_SPAN_MARGIN);
+              uint64_t below0 = below; int where = s2a_snap_arena_place2(os, g_fit, &below, A, s2a_window_host_floor(g_fit), span_known, SNAP_SPAN_MARGIN);
               if (where == 2 && below != below0) LOG("即时存档：宿主保留段 %llu MB 加长到 %llu MB 放命令记录区与虚拟池区，窗口少 %llu MB（本款已知最高跨度 %llu MB，0 = 还不知道、按需起局）",
                   (unsigned long long)(below0 >> 20), (unsigned long long)(below >> 20), (unsigned long long)((below - below0) >> 20), (unsigned long long)(span_known >> 20));
               if (where == 1) { g_snap_out = oa + os - A;
@@ -1373,7 +1457,7 @@ static void vawin_reserve(void) {
                       (unsigned long long)(A >> 20), (unsigned long long)(of >> 20), (unsigned long long)(below >> 20), (unsigned long long)((below - A) >> 20)); }
               else { s2a_snap_disable(S2A_SNAP_OFF_ADDRESS);
                   LOG("【黄】即时存档：本款已知最高跨度 %llu MB 加余量 %llu MB 放不进空洞 %llu MB 减去宿主与快照区的 %llu MB，窗口外也没有整块 %llu MB 的空洞（最大 %llu MB）——这台设备的地址空间不够同时放下这款与快照，这一局不开快照，游戏照常玩",
-                      (unsigned long long)(span_known >> 20), (unsigned long long)(SNAP_SPAN_MARGIN >> 20), (unsigned long long)(g_fit >> 20), (unsigned long long)((A + HOST_BELOW) >> 20),
+                      (unsigned long long)(span_known >> 20), (unsigned long long)(SNAP_SPAN_MARGIN >> 20), (unsigned long long)(g_fit >> 20), (unsigned long long)((A + s2a_window_host_floor(g_fit)) >> 20),
                       (unsigned long long)(A >> 20), (unsigned long long)(of >> 20)); } } }
 #endif
         at = fat + below; want = g_fit - below; g_keep_lo = fat;
@@ -1419,7 +1503,17 @@ void s2a_window_reserve(void) {
 //   按同一套取法占。构造期算出过跨度的（不论占没占成）不重来，已有游戏的进程照旧只在构造期占
 // 构造期占过、但只够当时那几款的（窗口按它们的最大跨度占）：启动后又导入了一款要得更多的，起宿主前放掉旧窗口、按现在的最大值重占。
 //   这时窗口里还什么都没放（布局、模块、尾部分配都在自检之后），放掉不碰任何东西。按需档（窗口已是本机最大一块、比要的小）重占也大不了，不动
+static int snap_retake(void);
+static int reserve_late_(void);
+// 即时存档恢复（游戏库长按「回到上次存下的这一刻」）：构造期还不知道要恢复（玩家在库里点了才设 S2A_SNAP_RESTORE），窗口 / 命令记录区按普通局占；
+//   起宿主前（这里）按快照清单里记的落点核一次，不同就就地重占（snap_retake）。补占 / 重占本身照旧
 int s2a_window_reserve_late(void) {
+    int ok = reserve_late_();
+    if (g_noreserve) return ok;
+    snap_retake();
+    return g_ok;
+}
+static int reserve_late_(void) {
     if (g_noreserve) return g_ok;
     // 构造期按占位占的窗口（容器当时还没有游戏）：按现在导入的款核一次。放得进就留着，只把需求换成真实的（自检、日志按它说）；
     //   36 位款、或真实应用池要窗口下方少留宿主（小内存 iPad）→ 放掉按真实的款重占（同改动前的补占）；占位那次没占成 → 按真实的款补占
@@ -1486,6 +1580,76 @@ static int cmd_arena_at_snapshot(void) {
     if (m != (void *)at) { if (m != MAP_FAILED) munmap(m, len); LOG("【红】即时存档恢复：命令记录区占不到快照时的地址 %#llx +%llu MB", (unsigned long long)at, (unsigned long long)(len >> 20)); return 0; }
     g_ca_base = at; g_ca_cut = 1; g_va_cap = len - CMD_ARENA;
     LOG("即时存档恢复：命令记录区按快照占在 %#llx +%llu MB（其后虚拟池区 +%llu GB）", (unsigned long long)at, (unsigned long long)(CMD_ARENA >> 20), (unsigned long long)(g_va_cap >> 30));
+    return 1;
+}
+// 恢复局起宿主前，当前窗口 / 命令记录区与快照清单对不上哪几样（纯函数，t_vawin_snap_retake 测）：1 = 窗口（基址或长度不同），2 = 命令记录区；清单里没记的那样不算
+int s2a_snap_retake_plan(uint64_t wb, uint64_t ws, uint64_t cb, uint64_t cl, uint64_t mwb, uint64_t mws, uint64_t mcb, uint64_t mcl) {
+    return (mwb && mws && (wb != mwb || ws != mws) ? 1 : 0) | (mcb && mcl > CMD_ARENA && (cb != mcb || cl != mcl) ? 2 : 0);
+}
+static int window_all_none(uint64_t b, uint64_t n) {   // [b, b+n) 里全是不可访问的保留（还没放开过任何一段）
+    for (vm_address_t a = (vm_address_t)b, end = (vm_address_t)(b + n); a < end; ) {
+        vm_address_t ra = a; vm_size_t sz = 0; vm_region_basic_info_data_64_t bi; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj = MACH_PORT_NULL;
+        if (vm_region_64(mach_task_self(), &ra, &sz, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&bi, &cnt, &obj) != KERN_SUCCESS || ra >= end) break;
+        if (bi.protection != VM_PROT_NONE) return 0;
+        a = ra + sz;
+    }
+    return 1;
+}
+// 即时存档恢复：窗口与命令记录区按快照清单原址重占。快照里全是游戏地址（窗口）和命令句柄 / 虚拟池地址（命令记录区），落点不同恢复必拒（清单「窗口」项、图形恢复核基址）。
+//   构造期只有启动时就带 S2A_SNAP_RESTORE 的局（测试 / 开发工具）按清单占；游戏库里点恢复是构造期之后，窗口按普通局的规则占：
+//   跨版本（11-22 宿主下限 3 → 6 GiB：0.6.8 存的窗口 0x7180000000 +23856 MB，新版普通局占 0x7240000000 +20784 MB）、同版本两局之间学到的跨度不同，落点都会变。
+//   这时窗口里还什么都没放（布局、模块、尾部分配都在自检之后）：整段还是不可访问的保留才放掉重占；原址被别人占了 / 窗口已放开过 → 不动、打红行（恢复照旧按清单拒绝，快照不删）
+static int snap_retake(void) {
+    if (!s2a_snap_restoring()) return 0;
+    uint64_t mwb = 0, mws = 0, mcb = 0, mcl = 0;
+    if (s2a_snap_manifest_win(&mwb, &mws)) mwb = mws = 0;
+    if (s2a_snap_manifest_u64("命令记录区", &mcb, &mcl)) mcb = mcl = 0;
+    uint64_t cl = g_ca_base ? CMD_ARENA + g_va_cap : 0;
+    int plan = s2a_snap_retake_plan(g_ok ? g_base : 0, g_ok ? g_size : 0, g_ca_base, cl, mwb, mws, mcb, mcl);
+    if (!plan) return 0;
+    const char *why = NULL;
+    if ((plan & 1) && g_ok && g_size != g_res) why = "窗口已收过尾";
+    else if ((plan & 1) && g_gextra) why = "文件后备已往窗口外接长";
+    else if ((plan & 1) && g_ok && !window_all_none(g_base, g_size)) why = "窗口里已有放开过的映射";
+    else if ((plan & 1) && g_gfd >= 0 && !g_gwhole && g_gchunk) { for (uint64_t i = 0; i < g_gchunk_n && !why; i++) if (gc_get(i) != GC_UNDEC) why = "文件后备已有定过后备的块"; }
+    if (!why && (plan & 2) && (g_ca_used || g_va_used)) why = "命令记录区已切过";
+    if (why) { LOG("【红】即时存档恢复：窗口 / 命令记录区与快照时不同（当前 %#llx +%llu MB / %#llx，快照 %#llx +%llu MB / %#llx），%s，不能按快照重占，恢复会拒绝（快照不删）",
+                   (unsigned long long)g_base, (unsigned long long)(g_size >> 20), (unsigned long long)g_ca_base, (unsigned long long)mwb, (unsigned long long)(mws >> 20), (unsigned long long)mcb, why);
+               return -1; }
+    uint64_t ob = g_base, os = g_res, oc = g_ca_base; int had = g_ok;
+    if ((plan & 1) && had) munmap((void *)ob, os);
+    if ((plan & 2) && oc) munmap((void *)oc, cl);
+    int bad = 0; void *p;
+    if (plan & 1) { p = mmap((void *)mwb, mws, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0); if (p != (void *)mwb) { if (p != MAP_FAILED) munmap(p, mws); bad |= 1; } }   // 不带 MAP_FIXED：核对落点，不盖别人
+    if (plan & 2) { p = mmap((void *)mcb, mcl, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0); if (p != (void *)mcb) { if (p != MAP_FAILED) munmap(p, mcl); bad |= 2; } }
+    if (bad) {   // 原址占不到：新占到的那样放掉，旧落点原样占回（刚放掉的是自己的，照旧起局；恢复按清单拒绝）
+        if ((plan & 1) && !(bad & 1)) munmap((void *)mwb, mws);
+        if ((plan & 2) && !(bad & 2)) munmap((void *)mcb, mcl);
+        int back = 1;
+        if ((plan & 1) && had) { p = mmap((void *)ob, os, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0); if (p != (void *)ob) { if (p != MAP_FAILED) munmap(p, os); back = 0; g_ok = 0; } }
+        if ((plan & 2) && oc) { p = mmap((void *)oc, cl, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0); if (p != (void *)oc) { if (p != MAP_FAILED) munmap(p, cl); back = 0; g_ca_base = 0; } }
+        LOG("【红】即时存档恢复：按快照原址重占%s占不到（快照窗口 %#llx +%llu MB、命令记录区 %#llx +%llu MB），旧落点%s，恢复会拒绝（快照不删）",
+            bad == 3 ? "窗口与命令记录区都" : bad & 1 ? "窗口" : "命令记录区", (unsigned long long)mwb, (unsigned long long)(mws >> 20), (unsigned long long)mcb, (unsigned long long)(mcl >> 20),
+            back ? "已占回" : "【红】没占回");
+        return -1;
+    }
+    if (plan & 1) {
+        LOG("即时存档恢复：窗口按快照原址重占 %#llx +%llu MB（本局按普通局占在 %#llx +%llu MB）", (unsigned long long)mwb, (unsigned long long)(mws >> 20), (unsigned long long)ob, (unsigned long long)(g_size >> 20));
+        g_ok = 1; g_base = mwb; g_size = g_res = mws; g_span_learned = 0;   // 恢复局不按学到的跨度当场放宽（s2a_window_span_widen）
+        if (g_gfd >= 0 && g_gwhole) {   // 文件后备整段进文件：整段重映射成文件（窗口还没有内容）
+            void *q = ftruncate(g_gfd, (off_t)mws) ? MAP_FAILED : mmap((void *)mwb, mws, PROT_NONE, MAP_FIXED | MAP_SHARED, g_gfd, 0);
+            if (q != (void *)mwb) { int er = errno; mmap((void *)mwb, mws, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0); close(g_gfd); g_gfd = -1;
+                LOG("【红】客体内存文件后备：按快照重占窗口后重映射成文件失败（errno=%d），照旧用匿名内存", er); } }
+        else if (g_gfd >= 0 && ftruncate(g_gfd, (off_t)mws)) { LOG("【红】客体内存文件后备：按快照重占窗口后文件定长失败（errno=%d），照旧用匿名内存", errno); close(g_gfd); g_gfd = -1; }
+        if (g_gfd >= 0 && !gchunk_alloc(g_gwhole ? GC_FILE : GC_UNDEC)) die("客体内存文件后备：按快照重占窗口后块状态表分配失败");
+        if (g_gfd < 0) { free(g_gchunk); g_gchunk = NULL; free(g_gtouch); g_gtouch = NULL; g_gchunk_n = 0; }
+    }
+    if (plan & 2) {
+        LOG("即时存档恢复：命令记录区按快照原址重占 %#llx +%llu MB（本局按普通局占在 %#llx），其后虚拟池区 +%llu GB", (unsigned long long)mcb, (unsigned long long)(CMD_ARENA >> 20),
+            (unsigned long long)oc, (unsigned long long)((mcl - CMD_ARENA) >> 30));
+        g_ca_base = mcb; g_ca_cut = 1; g_va_cap = mcl - CMD_ARENA;
+    }
+    { void (*gc)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "s2a_gc_limit_reapply"); if (gc) gc(); }   // 低区变了：GC 上限按现在的重选
     return 1;
 }
 static void cmd_arena_reserve(void) {   // 占窗口那一步在围栏前调；窗口没占到提前返回的路径由 vawin_boot 补调（只占一次）

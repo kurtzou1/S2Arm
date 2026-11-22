@@ -373,7 +373,10 @@ def phone_overview(c):
             ext = rec.get("externalBundleId") if who == "external" else None
         external = who == "external"
         choose = who == "choose"
-        phone = dict(device=key, name=signed.get("device") or names.get(key) or "", **({"kind": kinds[key]} if kinds.get(key) else {}), installed=who in ("launcher", "external", "choose") if who else bool(rec.get("shellId")),
+        # kind：现查认出的为准；只读记录（首页卡片不现查）时退回装机记录存的 signed.deviceKind（#1967：原先没现查就没有，首页先画 iPhone、
+        #   点进去才变 iPad）。不在这里写回设备记录：总览是只读作业，和装机作业同时跑会整份覆盖对方的改动（save_device 不加锁）
+        kind = kinds.get(key) or {"ipad": "iPad", "iphone": "iPhone"}.get(str(signed.get("deviceKind") or "").lower(), "")
+        phone = dict(device=key, name=signed.get("device") or names.get(key) or "", **({"kind": kind} if kind else {}), installed=who in ("launcher", "external", "choose") if who else bool(rec.get("shellId")),
                      installedBy=who if who in ("launcher", "external") else None, bundleId=ext if external else rec.get("bundleId") or "",
                      shellCurrent=None if external else bool(sid) and rec.get("shellId") == sid, signedAt=at, free=free,
                      signMode="external" if external else _sign_mode(c, rec, signed),

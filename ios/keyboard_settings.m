@@ -9,6 +9,9 @@
 //   页面开着时键盘 / 鼠标不进游戏（keyboard.m 静音）。入口：齿轮菜单第一层，「编辑虚拟按键」旁（vpad.m）
 //   「管理键位」组（#1987）：导入 / 导出这一款的键位文件，做法同触屏布局页（vpad_settings.m）——选文件面板只认 JSON，导出先写临时目录再交面板；
 //   文件就是按款存的那份 schema 1 JSON（与 Mac 启动器每款的 input.json 同格式），导入只改这一款
+//   「设为所有游戏的默认」（#1987 第 2 条，维护方定：立即生效 + 约 5 秒内可撤销）：存取规则在 keyboard_store.m（两层：本款 / App 级 = 所有游戏的默认）。
+//   点了就写 App 级，页底出提示条「已设为所有游戏的默认」带「撤销」，撤销把覆盖前的旧默认和这款原来的记录原样写回；开着旁白时提示条一直停到玩家自己关。
+//   「恢复默认」回到所有游戏的默认（没设过就是标准键位）；页顶标这款用的是「自定义」还是「默认」，初始状态不标；单款壳不出这一行
 #import <UIKit/UIKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import "s2a_l10n.h"
@@ -16,12 +19,14 @@
 #include "keyboard_map.h"
 #include "mouse_map.h"
 #include "settings.h"
+#import "keyboard_store.h"
 
 static const int kButtons[] = {0, 1, 2, 3, 6, 7, 8, 9, 4, 5, 10, 11, 13, 15, 12, 14};   // A B X Y L R ZL ZR 按下左右摇杆 + - 十字键上下左右
 static const int kSticks[] = {17, 19, 16, 18, 21, 23, 20, 22};                         // 左摇杆上下左右、右摇杆上下左右
 static const int kCommonKeys[] = {36, 53, 49, 48, 56, 59, 58};                         // 同 Mac InputSettingsSheet.commonKeys
 // 组：0 按键、1 摇杆、2 鼠标、3 管理键位（导入 / 导出）
 static const NSInteger kMouseSection = 2, kManageSection = 3;
+static const NSTimeInterval kUndoSeconds = 5;   // 「设为所有游戏的默认」提示条停多久（#1987 维护方定约 5 秒；开着旁白时不自动收）
 
 // 按键位显示名（同 Mac InputNames.target：A / B / X / Y / L / R / ZL / ZR 各语言相同，其余走文案）
 static NSString *target_name(int t) {
@@ -72,10 +77,9 @@ static NSString *key_name(s2a_input_key b) {
     if (!cap) cap = [NSString stringWithFormat:S2AL(@"kbd.key.code"), @(b.code).stringValue];
     return [mods stringByAppendingString:cap];
 }
-static void load_saved(s2a_input_config *out) {
-    NSData *data = [[s2a_ios_settings_defaults() stringForKey:S2AKeyboardMapKey] dataUsingEncoding:NSUTF8StringEncoding];
-    if (!data.length || s2a_input_config_parse(data.bytes, data.length, out) != S2A_INPUT_CONFIG_OK) s2a_kbd_default(out);
-}
+// 本款那一层 / App 级（= 所有游戏的默认；单款壳为 nil），见 keyboard_store.h
+static NSUserDefaults *game_layer(NSUserDefaults *__strong *app) { NSUserDefaults *g = nil, *a = nil; s2a_ios_settings_layers(&g, &a); *app = a; return g; }
+static void load_saved(s2a_input_config *out) { NSUserDefaults *app; NSUserDefaults *game = game_layer(&app); s2a_kbd_store_load(game, app, out); }
 int s2a_ios_keyboard_customized(void) { return [s2a_ios_settings_defaults() stringForKey:S2AKeyboardMapKey].length > 0; }
 
 // 导入没成：每类原因一句话（解析器的 s2a_input_config_error_message 是英文、给日志用，不上屏）
@@ -90,6 +94,14 @@ static NSString *import_error(int code) {
     }
 }
 
+// 页底「已设为所有游戏的默认」提示条：没有关闭按钮，旁白的「擦除」手势（双指 Z）关掉它（开着旁白时提示条不自动收）
+@interface S2AKbdToast : UIVisualEffectView
+@property(nonatomic, copy) void (^escape)(void);
+@end
+@implementation S2AKbdToast
+- (BOOL)accessibilityPerformEscape { if (self.escape) self.escape(); return YES; }
+@end
+
 @interface S2AKeyboardSettings : UITableViewController <UIDocumentPickerDelegate>
 @property(nonatomic, copy) void (^closed)(void);
 @end
@@ -98,6 +110,9 @@ static NSString *import_error(int code) {
     int _recording;   // 在录的按键位；-1 = 没在录
     NSURL *_exportDirectory;   // 导出时写文件的临时目录（面板关掉就删）
     BOOL _importing;           // 选文件面板这次是导入（否则是导出）
+    NSDictionary *_undoSnapshot;   // 「设为所有游戏的默认」覆盖前的旧值（撤销用；提示条关掉就丢）
+    UIView *_toast;                // 页底提示条「已设为所有游戏的默认」+「撤销」
+    NSTimer *_toastTimer;
 }
 - (instancetype)init {
     if (!(self = [super initWithStyle:UITableViewStyleInsetGrouped])) return nil;
@@ -108,11 +123,12 @@ static NSString *import_error(int code) {
     self.navigationItem.rightBarButtonItem.accessibilityIdentifier = @"kbd.restoreDefault";
     return self;
 }
-- (void)viewWillAppear:(BOOL)animated { [super viewWillAppear:animated]; s2a_ios_keyboard_set_muted(1); }
+- (void)viewWillAppear:(BOOL)animated { [super viewWillAppear:animated]; s2a_ios_keyboard_set_muted(1); [self updateSource]; }
 - (void)viewDidDisappear:(BOOL)animated {
     [super viewDidDisappear:animated];
     if (self.navigationController.isBeingDismissed || !self.navigationController.presentingViewController) {
         s2a_ios_keyboard_record(NULL);
+        [self dismissToast];
         if (self.closed) self.closed();
         self.closed = nil;
         s2a_ios_keyboard_set_muted(0);   // 虚拟按键先复位（closed），键盘再接着发
@@ -122,13 +138,13 @@ static NSString *import_error(int code) {
 - (int)targetAt:(NSIndexPath *)path { return path.section == 0 ? kButtons[path.row] : kSticks[path.row]; }
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 4; }
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    return section == 0 ? 16 : section == 1 ? 8 : section == kMouseSection ? 6 : 2;
+    return section == 0 ? 16 : section == 1 ? 8 : section == kMouseSection ? 6 : [self hasAllGames] ? 3 : 2;
 }
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     return section == 0 ? S2AL(@"kbd.section.buttons") : section == 1 ? S2AL(@"kbd.section.sticks") : section == kMouseSection ? S2AL(@"kbd.mouse") : S2AL(@"kbd.section.manage");
 }
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
-    return section == 1 ? S2AL(@"kbd.footer") : section == kMouseSection ? S2AL(@"kbd.mouse.note") : section == kManageSection ? S2AL(@"kbd.manage.note") : nil;
+    return section == 1 ? S2AL(@"kbd.footer") : section == kMouseSection ? S2AL(@"kbd.mouse.note") : section == kManageSection ? ([self hasAllGames] ? S2AL(@"kbd.manage.noteAll") : S2AL(@"kbd.manage.note")) : nil;
 }
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)path {
     if (path.section == kMouseSection) return [self mouseCell:path.row];
@@ -146,7 +162,7 @@ static NSString *import_error(int code) {
     }
     UIAction *clear = [UIAction actionWithTitle:S2AL(@"kbd.clear") image:[UIImage systemImageNamed:@"xmark.circle"] identifier:nil handler:^(UIAction *a) {
         (void)a; S2AKeyboardSettings *page = weakSelf; if (!page) return;
-        [page stopRecording]; page->_map.keyboard[target] = (s2a_input_key){-1, 0}; [page save];
+        [page stopRecording]; s2a_kbd_clear_target(&page->_map, target); [page save];   // 键盘、鼠标一起清（#2071）
     }];
     clear.attributes = UIMenuElementAttributesDestructive;
     // 鼠标键（同 Mac 启动器每个按键位的「鼠标」下拉：未绑定 + 0–4）
@@ -277,7 +293,7 @@ static NSString *import_error(int code) {
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)path {
     [tableView deselectRowAtIndexPath:path animated:YES];
     if (path.section == kMouseSection) return;   // 鼠标组用行内的开关 / 滑块 / 菜单
-    if (path.section == kManageSection) { [self stopRecording]; if (path.row == 0) [self importKeys]; else [self exportKeys]; return; }
+    if (path.section == kManageSection) { [self stopRecording]; if (path.row == 0) [self importKeys]; else if (path.row == 1) [self exportKeys]; else [self setAllGamesDefault]; return; }
     int target = [self targetAt:path];
     if (_recording == target) { [self stopRecording]; return; }
     [self stopRecording];
@@ -316,16 +332,126 @@ static NSString *import_error(int code) {
     }]];
     [self presentViewController:alert animated:YES completion:nil];
 }
-// ---- 「管理键位」组：0 导入键位…、1 导出当前键位… ----
+// ---- 「管理键位」组：0 导入键位…、1 导出当前键位…、2 设为所有游戏的默认（多款容器才有） ----
 - (UITableViewCell *)manageCell:(NSInteger)row {
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
     UIListContentConfiguration *c = [UIListContentConfiguration cellConfiguration];
-    c.text = row == 0 ? S2AL(@"kbd.import") : S2AL(@"kbd.export");
+    c.text = row == 0 ? S2AL(@"kbd.import") : row == 1 ? S2AL(@"kbd.export") : S2AL(@"kbd.setDefault");   // 文案键写字面量（ios_l10n_test 按字面量核对）
     c.textProperties.color = self.view.tintColor;
-    c.image = [UIImage systemImageNamed:row == 0 ? @"square.and.arrow.down" : @"square.and.arrow.up"];
+    c.image = [UIImage systemImageNamed:row == 0 ? @"square.and.arrow.down" : row == 1 ? @"square.and.arrow.up" : @"square.stack.3d.up"];
     cell.contentConfiguration = c;
-    cell.accessibilityIdentifier = row == 0 ? @"kbd.import" : @"kbd.export";
+    cell.accessibilityIdentifier = row == 0 ? @"kbd.import" : row == 1 ? @"kbd.export" : @"kbd.setDefault";
     return cell;
+}
+// 有没有「所有游戏」：多款容器选了游戏才有；单款壳 / 没选游戏（输入工作台）只有这一款，不出「设为所有游戏的默认」
+- (BOOL)hasAllGames { NSUserDefaults *app; game_layer(&app); return app != nil; }
+// 页顶标这款用的是哪一套：自定义 / 默认；初始状态（标准键位）不标
+- (void)updateSource {
+    NSUserDefaults *app; NSUserDefaults *game = game_layer(&app);
+    S2AKbdSource source = s2a_kbd_store_source(game, app);
+    NSString *text = source == S2AKbdSourceCustom ? S2AL(@"kbd.source.custom") : source == S2AKbdSourceDefault ? S2AL(@"kbd.source.default") : nil;
+    if (!text) { self.tableView.tableHeaderView = nil; return; }
+    UIView *box = [[UIView alloc] initWithFrame:CGRectMake(0, 0, MAX(self.tableView.bounds.size.width, 1), 36)];
+    UILabel *label = [[UILabel alloc] initWithFrame:CGRectInset(box.bounds, 20, 6)];
+    label.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote]; label.adjustsFontForContentSizeCategory = YES;
+    label.textColor = UIColor.secondaryLabelColor; label.text = text;
+    [box addSubview:label];
+    box.accessibilityIdentifier = @"kbd.source";
+    self.tableView.tableHeaderView = box;
+}
+// 设为所有游戏的默认：立即生效，页底提示条带「撤销」（#1987 维护方定）
+- (void)setAllGamesDefault {
+    NSUserDefaults *app; NSUserDefaults *game = game_layer(&app);
+    if (!app) return;
+    NSDictionary *snapshot = s2a_kbd_store_set_default(game, app, &_map);
+    [self reloadFromStore];
+    [self showUndo:snapshot];
+}
+- (void)undoAllGamesDefault {
+    NSUserDefaults *app; NSUserDefaults *game = game_layer(&app);
+    s2a_kbd_store_undo(game, app, _undoSnapshot);
+    [self dismissToast];
+    [self reloadFromStore];
+}
+// 存储变了（设默认 / 撤销 / 恢复默认）：重读这一款生效的键位，当场生效
+- (void)reloadFromStore {
+    [self stopRecording];
+    load_saved(&_map);
+    s2a_ios_keyboard_reload();
+    [self refreshVisibleRows];
+    [self updateSource];
+}
+- (void)showUndo:(NSDictionary *)snapshot {
+    [self dismissToast];
+    _undoSnapshot = snapshot;
+    UIView *host = self.navigationController.view ?: self.view;
+    UIColor *tint = self.view.tintColor;
+    S2AKbdToast *toast = [[S2AKbdToast alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThickMaterial]];
+    toast.layer.cornerRadius = 14; toast.clipsToBounds = YES;
+    toast.translatesAutoresizingMaskIntoConstraints = NO; toast.accessibilityIdentifier = @"kbd.default.toast";
+    __weak S2AKeyboardSettings *weakSelf = self;
+    toast.escape = ^{ [weakSelf dismissToast]; };   // 没有关闭按钮：旁白用户用「擦除」手势（双指 Z）关
+    UILabel *label = [UILabel new];
+    label.text = S2AL(@"kbd.default.done"); label.numberOfLines = 2;   // 一行短句（同系统底部提示）；只在字号调得很大、一行放不下时折第二行
+    label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline]; label.adjustsFontForContentSizeCategory = YES;
+    // 「撤销」：浅蓝底 + 一层深一点的蓝，kUndoSeconds 内从右往左缩到零（看得出还剩多久能撤销），到点提示条收起
+    UIButton *undo = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIButtonConfiguration *cfg = [UIButtonConfiguration plainButtonConfiguration];
+    cfg.title = S2AL(@"kbd.default.undo");
+    cfg.baseForegroundColor = tint;
+    cfg.contentInsets = NSDirectionalEdgeInsetsMake(6, 12, 6, 12);
+    cfg.titleTextAttributesTransformer = ^NSDictionary<NSAttributedStringKey, id> *(NSDictionary<NSAttributedStringKey, id> *attrs) {
+        NSMutableDictionary *m = [attrs mutableCopy]; m[NSFontAttributeName] = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline]; return m;
+    };
+    undo.configuration = cfg;
+    undo.backgroundColor = [tint colorWithAlphaComponent:0.14];
+    undo.layer.cornerRadius = 10; undo.clipsToBounds = YES;
+    undo.accessibilityIdentifier = @"kbd.default.undo";
+    [undo addTarget:self action:@selector(undoAllGamesDefault) forControlEvents:UIControlEventTouchUpInside];
+    [undo setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [undo setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];   // 按字宽，不吃一行里多出来的宽度
+    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[label, undo]];
+    row.spacing = 16; row.alignment = UIStackViewAlignmentCenter; row.translatesAutoresizingMaskIntoConstraints = NO;
+    // 文字先占满一行要的宽度（原先压缩优先级低，多行标签被挤成窄条、折成三行）；比整条的宽度上限（必须满足）低一级，放不下才折行
+    [label setContentCompressionResistancePriority:UILayoutPriorityRequired - 1 forAxis:UILayoutConstraintAxisHorizontal];
+    [label setContentHuggingPriority:UILayoutPriorityRequired - 1 forAxis:UILayoutConstraintAxisHorizontal];
+    [toast.contentView addSubview:row];
+    [host addSubview:toast];
+    UILayoutGuide *safe = host.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [row.leadingAnchor constraintEqualToAnchor:toast.contentView.leadingAnchor constant:18],
+        [row.trailingAnchor constraintEqualToAnchor:toast.contentView.trailingAnchor constant:-10],
+        [row.topAnchor constraintEqualToAnchor:toast.contentView.topAnchor constant:10],
+        [row.bottomAnchor constraintEqualToAnchor:toast.contentView.bottomAnchor constant:-10],
+        [toast.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
+        [toast.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-16],
+        [toast.widthAnchor constraintLessThanOrEqualToAnchor:safe.widthAnchor constant:-32],
+        [toast.widthAnchor constraintLessThanOrEqualToConstant:520],
+    ]];
+    [host layoutIfNeeded];   // 拿到「撤销」的实际大小，再铺那层蓝
+    BOOL countdown = !UIAccessibilityIsVoiceOverRunning();   // 开着旁白：不自动收，那层蓝铺满不缩
+    CGSize size = undo.bounds.size;
+    CALayer *fill = [CALayer layer];
+    fill.backgroundColor = [tint colorWithAlphaComponent:0.38].CGColor;
+    fill.anchorPoint = CGPointMake(0, 0.5);   // 左边钉住，宽度缩 = 从右往左缩
+    fill.position = CGPointMake(0, size.height / 2);
+    fill.bounds = CGRectMake(0, 0, countdown ? 0 : size.width, size.height);
+    [undo.layer insertSublayer:fill atIndex:0];
+    if (countdown) {
+        CABasicAnimation *shrink = [CABasicAnimation animationWithKeyPath:@"bounds.size.width"];
+        shrink.fromValue = @(size.width); shrink.toValue = @0; shrink.duration = kUndoSeconds;
+        [fill addAnimation:shrink forKey:@"countdown"];
+    }
+    _toast = toast;
+    // 约 5 秒后自己收起；开着旁白时不自动收，停到玩家点「撤销」、用擦除手势关、或接着改键位（读完之前不该消失）
+    if (countdown) _toastTimer = [NSTimer scheduledTimerWithTimeInterval:kUndoSeconds target:self selector:@selector(dismissToast) userInfo:nil repeats:NO];
+    UIAccessibilityPostNotification(UIAccessibilityScreenChangedNotification, label);
+}
+- (void)dismissToast {
+    [_toastTimer invalidate]; _toastTimer = nil;
+    [_toast removeFromSuperview]; _toast = nil;
+    _undoSnapshot = nil;
 }
 - (void)showImportError:(NSString *)reason {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:S2AL(@"kbd.import.err.title") message:reason preferredStyle:UIAlertControllerStyleAlert];
@@ -380,21 +506,21 @@ static NSString *import_error(int code) {
     [self save];   // 只写这一款，当场生效
 }
 - (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller { [self cleanExport]; }
+// 恢复默认：删掉这款的记录，回到所有游戏的默认（没设过就是标准键位）
 - (void)restoreDefault {
-    [self stopRecording];
-    s2a_kbd_default(&_map);
-    [self save];
+    [self dismissToast];   // 接着改了：撤销不能再把这次的改动一起撤掉
+    NSUserDefaults *app; NSUserDefaults *game = game_layer(&app); (void)app;
+    s2a_kbd_store_restore(game);
+    [self reloadFromStore];
 }
-// 存：与缺省相同就删掉（这款回到缺省，以后缺省改了跟着走）；否则按款存 schema 1 JSON。存完当场生效
+// 存：和生效的缺省（所有游戏的默认，没设过是 iPad 缺省）相同就删掉这款的记录（以后跟着默认走）；否则按款存 schema 1 JSON。存完当场生效
 - (void)save {
-    s2a_input_config def; s2a_kbd_default(&def);
-    NSUserDefaults *defaults = s2a_ios_settings_defaults();
-    char json[4096];
-    int n = memcmp(&def, &_map, sizeof def) ? s2a_kbd_config_json(&_map, json, sizeof json) : 0;
-    if (n > 0) [defaults setObject:[[NSString alloc] initWithBytes:json length:(NSUInteger)n encoding:NSUTF8StringEncoding] forKey:S2AKeyboardMapKey];
-    else [defaults removeObjectForKey:S2AKeyboardMapKey];
+    [self dismissToast];   // 接着改了键位：撤销快照里没有这次的改动，提示条收起（不然撤销会把它一起抹掉）
+    NSUserDefaults *app; NSUserDefaults *game = game_layer(&app);
+    s2a_kbd_store_save(game, app, &_map);
     s2a_ios_keyboard_reload();
     [self refreshVisibleRows];
+    [self updateSource];
 }
 @end
 

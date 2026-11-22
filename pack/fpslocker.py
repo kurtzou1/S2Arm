@@ -230,7 +230,11 @@ def convert(doc, code_room, var_room):
             return ['MAIN', syms[str(a[1]).lstrip('$')]] + a[2:]
         if a[0] not in ('MAIN', 'HEAP', 'ALIAS'): raise Unsupported(f'地址区 {a[0]}')
         return a
-    rt = []
+    # 声明变量带 evaluate（#2053：旷野之息 1.9.0 的 min_delta = 30 / FPS_TARGET、dr_factor = (FPS_TARGET / 30) * 100）：FPSLocker 按目标帧率求值写进变量，
+    #   原先只取 default_value，60 帧档下步长仍按 30 帧算、游戏两倍速。转成一条 evaluate_write（地址就是排好的变量偏移），与 ALL_FPS 同一套运行时写法：
+    #   选中按选中档写、退回原帧率时按 30 写（services/S2A.Services/FpsLocker.cs）。没写 evaluate 的变量（运行中由声明代码改的）照旧只放初值
+    rt = [dict(type='evaluate_write', address=['MAIN', syms[d['name']]], value_type=d.get('value_type', 'uint32'), value=str(d['evaluate']))
+          for d in decl if d.get('type') == 'variable' and d.get('evaluate') is not None]
     for e in doc.get('ALL_FPS') or []:
         e = dict(e); t = e.get('type')
         if t in ('write', 'evaluate_write', 'compare', 'evaluate_compare'):

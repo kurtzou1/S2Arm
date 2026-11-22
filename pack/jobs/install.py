@@ -1131,6 +1131,13 @@ EXPORT_UNSIGNED = "没读到登录的 Apple ID，这份游戏包未签名，导�
 EXPORT_UNSIGNED_NO_ID = "没读到登录的 Apple ID，这份游戏包未签名；手机上的 S2Arm 还没拿到签名身份，导入后签不了。用 AltStore 或 SideStore 装的 S2Arm：在它们的设置里导出签名证书，到手机上 S2Arm 齿轮 →「签名证书」→「导入 .p12…」导入。用启动器装的：在启动器里登录 Apple ID（或选用自己的证书），连上手机推一次游戏，把签名身份交给它。"
 
 
+TEAM_NO_DEVICES = "has no devices from which to generate"   # plumesign 转述的 Apple Developer API 8220 原文
+EXPORT_NO_DEVICE = "你的 Apple ID 团队里还没登记任何 iPhone / iPad，电脑上签不了，这份游戏包未签名，导入后由手机上的 S2Arm 签名。"
+EXPORT_NO_DEVICE_NO_ID = ("你的 Apple ID 团队里还没登记任何 iPhone / iPad，电脑上签不了，这份游戏包未签名；手机上的 S2Arm 还没拿到签名身份，导入后签不了。"
+                          "用 AltStore 或 SideStore 装的 S2Arm：在它们的设置里导出签名证书，到手机上 S2Arm 齿轮 →「签名证书」→「导入 .p12…」导入。")
+EXPORT_NO_DEVICE_ADVICE = "想在电脑上签：用数据线把 iPhone 连上这台电脑、解锁并点「信任」，在启动器里推一次游戏（会把这台登记进你的团队），再导出。"
+
+
 def any_phone_identity(c):
     """这台电脑交过签名身份的手机有没有（设备记录 identity，deliver_identity 写）：导出未签名的 .s2arm 时按它说导入后能不能签"""
     return any((rec or {}).get("identity") for _, rec in layout.devices(c))
@@ -1414,9 +1421,20 @@ def export_s2arm(c, gid, *, folder=None, sign=True, step=0, total=3):
                 c.diagnostic(EXPORT_UNSIGNED if any_phone_identity(c) else EXPORT_UNSIGNED_NO_ID, code="apple_not_signed_in", severity="warning", internal=str(e))   # 下一步同没登录：想在电脑上签就去登录
                 team = None
             if team:
-                pkg = Path(program_pack.sign(c, gid, team, bundle, signer, pkg=pkg))
-                image = pkg / program_pack.image_name(gid)
-                signed_with = dict(mode=mode, name=who, team=team)
+                try:
+                    signed = Path(program_pack.sign(c, gid, team, bundle, signer, pkg=pkg))
+                except Exception as e:   # noqa: BLE001 —— 只认团队没设备这一种，别的照旧抛
+                    # D-VX6J：本机还没有这个团队的私钥时退到 plumesign 签，它要先拿团队描述文件，团队里一台设备都没登记（Apple 8220）就拿不到。
+                    #   签程序库本身不需要设备，导出也不加拦截（11-19 维护者）：同没登录，照样导出未签名的，照实说为什么、怎么让电脑能签
+                    if TEAM_NO_DEVICES not in str(e) or mode != "appleId":
+                        raise
+                    c.diagnostic(EXPORT_NO_DEVICE if any_phone_identity(c) else EXPORT_NO_DEVICE_NO_ID, code="device_not_visible", severity="warning",
+                                 internal=str(e)[-600:], advice=EXPORT_NO_DEVICE_ADVICE)
+                    signed = None
+                if signed:
+                    pkg = signed
+                    image = pkg / program_pack.image_name(gid)
+                    signed_with = dict(mode=mode, name=who, team=team)
         cat = json.loads((pkg / program_pack.CATALOGUE).read_text(encoding="utf-8")) if signed_with else program_pack.catalogue(gid, meta, image, None)
         c.begin("打包 .s2arm", step + 2, total)
         files = [("program/" + p.relative_to(pkg).as_posix(), p) for p in sorted(pkg.rglob("*"))
@@ -2783,7 +2801,7 @@ def external_identity_gap(c, ph):
     if team and got and got != team:
         return "phone_identity_team_mismatch", EXTERNAL_IDENTITY_TEAM.format(got, team)
     return None
-PROGRAM_WAIT = "等 iPhone 上的 S2Arm 装好这款的程序"
+PROGRAM_WAIT = "等 {0} 上的 S2Arm 装好这款的程序"   # 阶段名会显示给玩家（导出页设备行）：{0} 按这次作业认出的设备类型填（#1962）
 IMPORT_WAIT_S = (300, 20)   # App 开着：等它导入的上限（大游戏 1.6 GB 程序包在手机上解开、校验）；查不清开没开（Windows 没有 devicectl）：只看这么久
 
 
@@ -2823,7 +2841,11 @@ def await_import(c, ph, gid, want):
 
 
 # 「更新这款」做不齐时照实说（11-21：原先静默跳过，「建议更新」点了还在，玩家不知道为什么）
-UPDATE_SHADER_NOT_REBUILT = "这款的着色器库这次没能重编（电脑上没有这款的游戏文件，或这台电脑没装 Metal 开发工具），「建议更新」会继续显示：补上游戏文件或装好工具后再点「更新这款」。"
+# 着色器库重编不了分三种说（#1961：原先一句「补上游戏文件」，界面上却没地方补）：没装 Metal 工具 → 装工具；重编的原料（游戏库里已出好的
+#   iPhone 包 / Mac 版）不在、原件还在 → 出包页重新出包；原件也不在 → 黄字带「重新添加原件…」（facts.action = relinkSource，前端画按钮）
+UPDATE_SHADER_NO_TOOLS = "这款的着色器库这次没能重编：这台电脑没装 Metal 开发工具。在「准备这台电脑」装好后再点「更新这款」；「建议更新」会继续显示。"
+UPDATE_NEEDS_REPACK_SOURCE = "这款的着色器库这次没能重编：游戏库里重编要用的游戏文件不在了（比如清理空间时删了已出好的 iPhone 包）。原件还在：在出包页对这款重新出包。"
+UPDATE_NEEDS_SOURCE = "这款的着色器库这次没能重编：游戏库里重编要用的游戏文件和这款的原件都不在了。点「重新添加原件…」选这款的原件，再在出包页对这款重新出包。"
 UPDATE_MAC_BUSY = "这款在这台 Mac 上正在运行，Mac 版的着色器库这次没更新：退出游戏后再点一次「更新这款」。"
 UPDATE_NEEDS_REPACK = "这款要整款重新出包才能更新完（运行环境的约定变了，只换着色器库不够）：在出包页对这款重新出包。"
 SHELL_INSTALL_FIRST = "手机上还没装 S2Arm：先点「安装 S2Arm」，装好后再把这款推到 iPhone。"
@@ -3328,7 +3350,7 @@ def phone_identity(c):
     """作业 phoneIdentity（总控台「把证书交给 App」，证书签名用户）：连着的这台手机，把证书交给 App 保存，以后手机上自己签游戏。
     交过了（同一张证书、手机上已导入或还等着导入）不重交，delivered = False；请求带 force 照样重交。通用壳开关关着 → {enabled: False}"""
     with packer_phone_lock(c):   # 装机类作业一次一个（ipa.phone_lock）
-        c.begin("把证书交给 iPhone 上的 S2Arm", 1, 1)
+        c.begin(on_device("把证书交给 {0} 上的 S2Arm", device_of(c)), 1, 1)   # 阶段名显示给玩家；这时还没认设备，多半填「iPhone / iPad」（#1962）
         ph = phone_for(c)
         src = _identity_source(c, ph)
         if src:   # 别的工具装的 S2Arm（包名被改过）也交：按手机上实际装着、团队对得上的那个（identity_target）
@@ -3352,6 +3374,20 @@ def update_mac_lib(c, gid):
         return bool(sgrade_bf.upgrade_mac(c, gid, runtime))
 
 
+def sources_present(c, gid):
+    """这款登记的原件里有没有还在原位的（#1961：缺原料时判该指去重新出包，还是先重新添加原件）"""
+    import library
+    game = next((g for g in c.catalog()["games"] if g["id"].upper() == gid.upper()), None)
+    for package in (game or {}).get("packages") or []:
+        try:
+            path = library.source_path(c, package)
+        except (Failure, OSError, ValueError):
+            continue
+        if path.is_file() or path.is_dir():
+            return True
+    return False
+
+
 def refresh_local(c, gid):
     """把这款在电脑上的 iPhone 程序与着色器库补到本版（「更新这款」updateGame 与推到设备前共用，调用方拿着这款的程序锁）：
     着色器链变了只重编这款的着色器库（游戏库里的 game.img / 借 Mac 版），不重出整款；按本版改写器重核程序。
@@ -3360,9 +3396,15 @@ def refresh_local(c, gid):
     from rewrite_refresh import refresh_ios
     if (layout.program_info(c, gid) or {}).get("hostAbi", 1) != host_update.HOST_ABI:
         c.diagnostic(UPDATE_NEEDS_REPACK, code="update_incomplete", severity="warning")   # 约定号变了：换库 / 刷程序消不掉这条原因，照实说
-    if sgrade_bf.rechain_ios(c, gid) == "unavailable":
+    rechain = sgrade_bf.rechain_ios(c, gid)
+    if rechain in ("no_source", "no_tools"):
         trace(c, f"{gid} 着色器链更新了，这次没重编着色器库（原因见上一行；「建议更新」照旧提示）")  # 非玩家句
-        c.diagnostic(UPDATE_SHADER_NOT_REBUILT, code="update_incomplete", severity="warning")
+        if rechain == "no_tools":
+            c.diagnostic(UPDATE_SHADER_NO_TOOLS, code="update_incomplete", severity="warning")
+        elif sources_present(c, gid):
+            c.diagnostic(UPDATE_NEEDS_REPACK_SOURCE, code="update_incomplete", severity="warning")
+        else:
+            c.diagnostic(UPDATE_NEEDS_SOURCE, code="update_incomplete", severity="warning", facts={"action": "relinkSource"})
     refresh_ios(c, [gid])
 
 
@@ -3437,7 +3479,7 @@ def push_game(c, gid, ph, steps=True):
                                            at=time.time()))
     pull_shader_counts(c, ph, [gid])
     if progs[gid] != old.get("program") and not ph.pending:   # 这次推了程序包（没推的原样带回）：App 导入换上了才算装好
-        if steps: c.begin(PROGRAM_WAIT, 3, 3)
+        if steps: c.begin(on_device(PROGRAM_WAIT, device_of(c)), 3, 3)
         ph.pending = await_import(c, ph, gid, progs[gid]["dir"])
     gap = external_identity_gap(c, ph) if ext else None   # 导入不签名、起局才签：没身份就别报「装好了」
     if gap:
@@ -3811,7 +3853,8 @@ def install_shell(c, ph, steps=True):
     rec = layout.load_device(c, ph.key)
     if ph.bid and rec.get("apps"):   # 显式描述文件只有一个包名：装壳顶掉了装成同包名的独立 App
         rec = dict(rec, apps={k: v for k, v in rec["apps"].items() if str((v or {}).get("bundleId") or "").lower() != ph.bid.lower()})
-    signed = dict(signed=dict(at=time.time(), free=bool(ph.info["free"]), device=ph.info["device"], mode=sign_mode(c),
+    # deviceKind：游戏库状态写「已推到 iPad」（#1962）；旧记录没有，前端填「iPhone / iPad」
+    signed = dict(signed=dict(at=time.time(), free=bool(ph.info["free"]), device=ph.info["device"], deviceKind=ph.info.get("deviceKind") or "", mode=sign_mode(c),
                               **({"expires": ph.info["expires"]} if ph.info.get("expires") else {}))) if "free" in ph.info else {}
     # 换了签名方式后第一次装（Mac 从 Xcode 钥匙串换到 plumesign、证书 ↔ Apple ID）：结果带 signerSwitched，完成页写「这一次要重新装一下」，只这一次
     now = signer_kind(c, ph)
@@ -3895,7 +3938,14 @@ def phone_updates(c):
                           games=[dict(gameId=g, name=names.get(g, g)) for g in sorted(rec.get("games") or {})] if rec.get("shellId") else [], stale=[])
             out.append(dict(device=key, name=(rec.get("signed") or {}).get("device") or "", **st, kept=[dict(gameId=g, name=g) for g in kept],
                             apps=[dict(gameId=g, name=names[g.upper()]) for g in old]))
-    return out
+    # D-XYNG：两个启动器的「更新」按钮都取第一条。连着的那台排前（稳定排序，其余照原顺序）：原先按记录文件名排，游戏库里留着一台
+    #   不在线的旧设备时，按钮永远去找它、报「没列出来」，连着的这台也旧却轮不到。键比较同 win_udid（设备服务的写法可能差在短横 / 大小写）
+    online = {_udid_cmp(u) for u in online_devices(c)} if len(out) > 1 else set()   # 本机回环查设备服务，毫秒级；只有一条时不用排
+    return sorted(out, key=lambda u: _udid_cmp(u["device"]) not in online) if online else out
+
+
+def _udid_cmp(u):
+    return str(u or "").replace("-", "").upper()
 
 
 PLAYING_WINDOW_S = 45   # 游玩时间心跳：游戏在前台时每 10 秒写一次 playtime.json（runtime/src/playtime.c，平台壳 10 秒定时器）；最近 45 秒内写过 = 正在玩

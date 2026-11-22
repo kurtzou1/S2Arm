@@ -410,7 +410,7 @@ namespace S2A.DirectCompiler
                     //   绝不只填 slot：宿主会把「没有 samp_slot」读成采样器取同字高位（= 池里第 0 项），静默错绑。
                     //   所以表达不了的形态——数组、池下标超出句柄里 12 位的范围——具名报未接，什么都不填。
                     //   计算阶段（#1594 片 7）与图形阶段同一份合同：宿主计算侧解析与回放派发都按同一个 const_samp_id 取采样器。
-                    //   计算阶段的游戏 UBO 来源（下一个分支）仍报未接。
+                    //   计算阶段的游戏 UBO 来源是下一个分支（#1594 片 10）。
                     string shape = binding.Count != 1 || resolved.ArrayLength > 1 ? "constant sampler array" :
                                    constSampler > MaxConstSampler ? "constant sampler index above 4095" : null;
                     if (shape != null)
@@ -427,10 +427,11 @@ namespace S2A.DirectCompiler
                     // #1594 片 3：贴图字在游戏 UBO（c3..c18）、采样器是着色器里的立即数采样器池下标（类型 3）。结果给游戏 UBO 来源 uboSlot（NVN UBO 号 = cbuf − 3）/
                     //   uboOffset（贴图字的字节偏移 = 字 × 4）、没有 slot，再加 constSampler = 池下标（可选字段，按 v2 写）。
                     //   绝不只给 uboSlot / uboOffset：宿主对这种写法按「组合句柄」把采样器取成同一个字的高 12 位（那里不是采样器号），静默错绑。
-                    //   形态判据同 c2 的类型 3：数组、计算阶段（宿主计算侧没接）、池下标超出句柄里 12 位的范围，具名报未接，什么都不填。
+                    //   形态判据同 c2 的类型 3：数组、池下标超出句柄里 12 位的范围，具名报未接，什么都不填。
+                    //   计算阶段（#1594 片 10）与图形阶段同一份合同：宿主计算侧解析（compute_const_sampler）与回放派发（rp_dispatch 的 NVN_RB_TEXU）
+                    //   都按同一个 const_samp_id 取采样器；游戏 UBO 来源的组合句柄（非类型 3）在计算阶段仍由宿主具名拒，这里不碰。
                     //   字偏移不用另查 64 KiB：类型 3 句柄的字只有 14 位（0..16383 = 字节 0..65532），装不下 64 KiB 以外的字。
                     string shape = binding.Count != 1 || resolved.ArrayLength > 1 ? "constant sampler array" :
-                                   binding.Stage == "cs" ? "constant sampler, compute" :
                                    constUboSampler > MaxConstSampler ? "constant sampler index above 4095" : null;
                     if (shape != null)
                         throw new DirectCompileException("UNSUPPORTED_PROGRAM",

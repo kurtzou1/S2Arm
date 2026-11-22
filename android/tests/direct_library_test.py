@@ -475,7 +475,7 @@ class LibraryTest(unittest.TestCase):
     def test_v2_const_sampler_contract(self):
         # #1594：类型 3 句柄的 constSampler（采样器池下标 0..4095）：与宿主解析同一份合同——v2、单个贴图；贴图字来源二选一：
         #   c2 分离贴图表（slot 90..345 偶数）或游戏 UBO（平铺 uboSlot 0..15 + uboOffset 4 的倍数，没有 slot）；
-        #   不能同时有 samp_slot / uboHandle / sampler 对象；计算结果只收 c2 形态（片 7，宿主计算侧同一份合同），游戏 UBO 形态计算侧不接。
+        #   不能同时有 samp_slot / uboHandle / sampler 对象；计算结果两种形态都收（c2 形态片 7、游戏 UBO 形态片 10，宿主计算侧同一份合同）。
         #   下标 0 与 4095 都是真下标。
         #   build 的 program_kind 是程序类型（graphics / compute）；fields 里的 kind 是绑定自己的种类（texture / uniform ...）。
         def build(program_kind='graphics', drop=(), **fields):
@@ -578,8 +578,20 @@ class LibraryTest(unittest.TestCase):
                 direct_library.validate_result(raw(), f'UBO form: {name}')
         _, raw = build(drop=('slot', 'uboOffset'), uboSlot=2)
         with self.assertRaises(direct_library.LibraryError, msg='UBO form: no uboOffset'): direct_library.validate_result(raw(), 'UBO form: no uboOffset')
-        _, raw = build(program_kind='compute', drop=('slot',), uboSlot=2, uboOffset=160)
-        with self.assertRaises(direct_library.LibraryError, msg='UBO form: compute'): direct_library.validate_result(raw(), 'UBO form: compute')
+        # 片 10：计算结果也收游戏 UBO 形态（宿主计算解析同一份合同）——典型值、两端；反例与图形的 UBO 形态同一张表
+        for ubo, offset, sampler in ((2, 160, 260), (0, 0, 0), (15, 65532, 4095)):
+            _, raw = build(program_kind='compute', drop=('slot',), uboSlot=ubo, uboOffset=offset, constSampler=sampler)
+            direct_library.validate_result(raw(), f'compute UBO const sampler {ubo}/{offset}/{sampler}')
+        for name, change in bad_ubo.items():
+            _, raw = build(program_kind='compute', drop=() if 'slot' in change else ('slot',), **{'uboSlot': 2, 'uboOffset': 160, **change})
+            with self.assertRaises(direct_library.LibraryError, msg=f'compute UBO form: {name}'):
+                direct_library.validate_result(raw(), f'compute UBO form: {name}')
+        _, raw = build(program_kind='compute', drop=('slot', 'uboOffset'), uboSlot=2)
+        with self.assertRaises(direct_library.LibraryError, msg='compute UBO form: no uboOffset'): direct_library.validate_result(raw(), 'compute UBO form: no uboOffset')
+        result, raw = build(program_kind='compute', drop=('slot',), uboSlot=2, uboOffset=160)
+        result['schema'] = 's2a-direct-program-v1'
+        result['content']['contract'] = 's2a-direct-program-content-v1'
+        with self.assertRaises(direct_library.LibraryError, msg='compute UBO form: v1'): direct_library.validate_result(raw(), 'compute UBO form: v1')
         result, raw = build(drop=('slot',), uboSlot=2, uboOffset=160)
         result['schema'] = 's2a-direct-program-v1'
         result['content']['contract'] = 's2a-direct-program-content-v1'

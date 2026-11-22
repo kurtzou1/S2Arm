@@ -97,7 +97,7 @@ GL(eglQueryString, const char *, EGLDisplay d, EGLint name) {
     switch (name) {
     case 0x3053: return "S2Arm";
     case 0x3054: return "1.5 S2Arm";
-    case 0x3055: return ""; // Do not advertise unimplemented KHR context attributes / sync extensions.
+    case 0x3055: return "EGL_KHR_create_context"; // 上下文属性（eglCreateContext 认的那几个）；同步等别的扩展没实现，不报
     case 0x308D: return "OpenGL OpenGL_ES";
     default: g_err = EGL_BAD_PARAMETER; return NULL;
     }
@@ -219,7 +219,21 @@ GL(eglQuerySurface, EGLBoolean, EGLDisplay d, EGLSurface sf, EGLint attr, EGLint
     return 1;
 }
 GL(eglCreateContext, EGLContext, EGLDisplay d, EGLConfig c, EGLContext share, const EGLint *attrib) {
-    (void)d; (void)c; (void)attrib;
+    (void)d; (void)c;
+    // 上下文属性（EGL 1.5 §3.7.1 / EGL_KHR_create_context）：每个上下文都是同一份实现（ES 3.2 / 桌面 4.5，同 eglQueryContext 0x3098），
+    //   版本要求不超出就建、超出回 EGL_BAD_MATCH；标志 / 配置档 / 重置策略只是提示，认得就接受；认不出的属性回 EGL_BAD_ATTRIBUTE。
+    //   #2057 王国保卫战：复仇：SDL 要 ES 3 上下文时先查显示的扩展名，没有 EGL_KHR_create_context 就报「context attributes are not supported」、不建上下文，游戏随即崩在开局
+    EGLint maj = 1, min = 0;
+    for (const EGLint *a = attrib; a && a[0] != EGL_NONE; a += 2) switch (a[0]) {
+        case 0x3098: maj = a[1]; break;   // EGL_CONTEXT_MAJOR_VERSION（= EGL_CONTEXT_CLIENT_VERSION）
+        case 0x30FB: min = a[1]; break;   // EGL_CONTEXT_MINOR_VERSION
+        case 0x30FC: if (a[1] & ~7) { g_err = EGL_BAD_ATTRIBUTE; return NULL; } break;   // EGL_CONTEXT_FLAGS_KHR：调试 1 / 向前兼容 2 / 鲁棒访问 4
+        case 0x30FD: if (g_api == EGL_OPENGL_API && (!a[1] || (a[1] & ~3))) { g_err = EGL_BAD_ATTRIBUTE; return NULL; } break;   // 配置档：核心 1 / 兼容 2，ES 上下文忽略（KHR 规定）
+        case 0x31B0: case 0x31B1: case 0x31B2: if (a[1] != 0 && a[1] != 1) { g_err = EGL_BAD_ATTRIBUTE; return NULL; } break;   // EGL 1.5 调试 / 向前兼容 / 鲁棒访问（布尔）
+        case 0x31BD: if (a[1] != 0x31BE && a[1] != 0x31BF) { g_err = EGL_BAD_ATTRIBUTE; return NULL; } break;   // 重置通知策略：不通知 / 丢上下文
+        default: g_err = EGL_BAD_ATTRIBUTE; return NULL;
+    }
+    if (g_api == EGL_OPENGL_ES_API ? maj > 3 || (maj == 3 && min > 2) : maj > 4 || (maj == 4 && min > 5)) { g_err = EGL_BAD_MATCH; return NULL; }
     if (share && ((context_t *)share)->dead) { g_err = EGL_BAD_CONTEXT; return NULL; }   // 共享组：对象名字表全进程一张（文件头），无须另建
     context_t *x = calloc(1, sizeof *x); if (!x) die("[gl] 上下文分配失败");
     x->st.api = g_api; x->st.depth_mask = 1; x->st.default_draw[0] = 0x0405; /* GL_BACK */

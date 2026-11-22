@@ -68,6 +68,13 @@ internal static class LibraryJobCases
         check(signedGames[0].FreeSignDaysLeft(at) == 3 && signedGames[0].IphoneExpires == 1216000, "free sign: days from backend expires");
         check(signedGames[1].FreeSignDaysLeft(at) is null, "free sign: not the launcher's free copy, no reminder");
         check(signedGames[2].FreeSignDaysLeft(at) == 0, "free sign: expired reads 0");
+        // #1962 复测：设备记录里的 deviceKind 读进 IphoneInstallKind，游戏库状态按它写「已推到 iPad」；旧记录没有 → 空 →「iPhone / iPad」（期望手写）
+        const string kinds = """
+        {"schema":1,"jobId":"catalog-test","taskId":"catalog-test","seq":1,"type":"result","operation":"catalog","state":"succeeded","message":"操作完成","result":{"games":[{"id":"0100000000000004","name":"Pad","display":"","cover":"","hidden":false,"missing":[],"iphoneInstall":{"at":1,"free":false,"deviceKey":"U1","deviceKind":"iPad"}},{"id":"0100000000000005","name":"Old","display":"","cover":"","hidden":false,"missing":[],"iphoneInstall":{"at":1,"free":false,"deviceKey":"U1"}}],"keys":{"ready":true,"verified":true,"message":""}}}
+        """;
+        var kindGames = LibraryCatalog.Parse(LibraryJobResult.Parse(kinds, 0, "catalog-test", "catalog").Result).Games;
+        check(SharedText.DeviceKind(kindGames[0].IphoneInstallKind) == "iPad", "library status: pushed device kind is read from the install record");
+        check(kindGames[1].IphoneInstallKind == "" && SharedText.DeviceKind(kindGames[1].IphoneInstallKind) == "iPhone / iPad", "library status: old install record without kind reads iPhone / iPad");
         var prefs = Path.Combine(Path.GetTempPath(), "s2a-remind-" + Guid.NewGuid().ToString("N"));
         try
         {

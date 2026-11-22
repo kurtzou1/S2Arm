@@ -64,7 +64,7 @@ struct fd_binding {
     //   FD_SAMP_SLOT = NVN 采样器槽 samp_val；FD_SAMP_NONE = 着色器没有采样器半边
     // kind==2 且 tex_ubo = 0、tex_slot >= 128、samp_src = FD_SAMP_ID（#1594，v2 的 constSampler）：贴图字在 c2 分离贴图表，
     //   采样器池下标 samp_val（0..4095）是着色器里的立即数；samp_slot 仍为 -1。回放的采样器号 = 贴图字高 12 位 | 池下标（Ryujinx ReadPackedId，字高位为 0 时就是池下标）。
-    //   计算阶段（#1594 片 7）也只接这一种形态（samp_pool = 1）；游戏 UBO 来源的类型 3 句柄计算侧仍不接。
+    //   计算阶段（#1594 片 7）也接这一种形态（samp_pool = 1）；片 10 起计算阶段也接游戏 UBO 来源的类型 3 句柄（下一条的形态：tex_ubo = 1，同图形）。
     // kind==2 且 pool != 0：整池数组（追不到槽的句柄回退，编译结果 "pool"）。1 = 贴图池（只是贴图半边）、2 = 采样器池（只是采样器半边），
     //   count = 池长（2..65534，不受 FD_MAX_ARRAY_ELEMENTS 限制），slot / tex_slot / samp_slot 都没有。宿主映射到 NVN_RB_TEXP / NVN_RB_SAMPP。
     //   图形阶段与计算阶段（stage "cs"，stage_idx 5）同一份合同

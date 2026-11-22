@@ -77,9 +77,10 @@ RES 是「调用开始之前世界已经有的东西」：程序快照、着色�
 ### 4.3 nvn_gpu_tex_desc（`tex_create`）
 
 `nvn_gpu_tex_desc` 原样（`nvn_backend.h`）＝`nvn_texdesc d`（40B）+ `{u32 usage,
-u32 host_w, u32 host_h, u16 swz, u8 stencil_view, u8 rsv}`，再跟 `{i32 rc, u32 hid}`。
+u32 host_w, u32 host_h, u16 swz, u8 rsv[2]}`，再跟 `{i32 rc, u32 hid}`。
 usage 取 `NVN_GPU_TEX_*` 位（RENDER / SAMPLED / CPU_UPLOAD …）；swz 恒等写 0；
-host_w/host_h = 0 表示同 d。
+host_w/host_h = 0 表示同 d；`rsv[2]` 恒 0（归一，与 §4.2 的 `_rsv` 同一做法；这两字节原先是
+`u8 stencil_view, u8 rsv`，模板模式改为只由视图记录表达后 `stencil_view` 不再有写入方，字节位置保留以免动已提交的金样）。
 
 ### 4.4 layout（`shader_load` / RES SHADER）
 

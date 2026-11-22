@@ -18,6 +18,9 @@ extern char **environ;
 static char g_mac_slot[1024];
 /* token：维护方工具 的令牌文件（0ffb77921 起）；不删则 rmdir 失败、槽漏到持有者死后才被收回 */
 static void mac_slot_drop(void) { if (!g_mac_slot[0]) return; char h[1100]; snprintf(h, sizeof h, "%s/holder", g_mac_slot); unlink(h); snprintf(h, sizeof h, "%s/token", g_mac_slot); unlink(h); rmdir(g_mac_slot); g_mac_slot[0] = 0; }
+// 快照恢复原地重开本进程（snaprelaunch.c，同一个 pid）之前调：槽是按 pid 记的持有者，新映像再去排队就是自己等自己（11-22 本机实测卡在「排队拿槽」）。
+//   拿着槽就告诉新映像「已拿着」（S2A_MAC_SLOT_HELD=1）；槽随这个 pid 结束由仲裁脚本收（ms_busy 按持有者死活清）
+void s2a_mac_slot_keep_across_exec(void) { if (g_mac_slot[0]) setenv("S2A_MAC_SLOT_HELD", "1", 1); }
 void s2a_mac_slot_hold(const char *what) {
     const char *held = getenv("S2A_MAC_SLOT_HELD"), *rr = getenv("S2A_RUN_ROOT"), *home = getenv("HOME"), *b = getenv("S2A_MAC_SLOT_BIN");
     if (held && *held == '1') return;

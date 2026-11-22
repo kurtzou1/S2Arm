@@ -1,0 +1,293 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Proxy/OfflineSocket.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Proxy/OfflineSocket.cs
+index 8c9d55b2ddc87992f5d1d43b50534e2311cf8b0e..c8ac0ee1da58c862c8aff1eca43010e3720d973a 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Proxy/OfflineSocket.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Proxy/OfflineSocket.cs
+@@ -15,7 +15,10 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
+     /// loopback UDP is delivered locally, and anything that needs a route to another host fails the way FreeBSD fails without a route
+     /// (connect / sendto: ENETUNREACH). No host socket is ever opened, so the host OS sees no network activity
+     /// (on iOS the first network access raises the "allow wireless data" prompt over the game).
+-    /// TCP over loopback is not modelled: a loopback connect is refused (ECONNREFUSED) as if nothing listened on the port.
++    /// TCP over loopback works between sockets of the same console (S2Arm, D-BE82: asio's select interrupter listens on 127.0.0.1, connects to
++    /// itself and accepts, then wakes its own select by writing a byte; a refused connect made a racing game assert at start): a connect to a
++    /// listening local port makes a connected pair (the server end waits in the listener's accept queue), and each end's writes are the other
++    /// end's byte stream. A loopback connect to a port nobody listens on is refused (ECONNREFUSED), as FreeBSD does.
+     /// </summary>
+     class OfflineSocket : ISocketImpl
+     {
+@@ -48,6 +51,13 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
+         private int _queuedBytes;
+         private readonly Dictionary<SocketOptionName, int> _options = new();
+         private bool _listening;
++        private int _backlog;
++        // TCP over loopback: the other end of this connection, the bytes written to this end by the peer, and (listening) the connected
++        //   server ends waiting for Accept
++        private const int StreamBufferBytes = 0x40000;
++        private OfflineSocket _peer;
++        private readonly List<byte> _stream = new();
++        private readonly Queue<OfflineSocket> _acceptQueue = new();
+         private bool _readShutdown;
+         private bool _writeShutdown;
+         private bool _closed;
+@@ -74,7 +84,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
+             {
+                 lock (_network)
+                 {
+-                    return _receiveQueue.Count > 0 ? _receiveQueue.Peek().Data.Length : 0;
++                    return SocketType == SocketType.Stream ? _stream.Count : _receiveQueue.Count > 0 ? _receiveQueue.Peek().Data.Length : 0;
+                 }
+             }
+         }
+@@ -96,11 +106,18 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
+             ProtocolType = protocolType;
+         }
+ 
+-        // Readable: a datagram is queued, or the read side is shut down / closed (a read returns at once)
+-        public bool Readable => _receiveQueue.Count > 0 || _readShutdown || _closed;
++        // The peer of a loopback TCP connection closed or shut down its sending side: reads return end of stream once the bytes are drained
++        private bool PeerGone => _peer != null && (_peer._closed || _peer._writeShutdown);
+ 
+-        // Writable: a UDP socket always has send buffer space; a TCP socket only once connected (which never happens offline)
+-        public bool Writable => SocketType == SocketType.Dgram ? !_writeShutdown : Connected;
++        // Readable: a datagram is queued / stream bytes are waiting / the peer is gone (end of stream) / a connection waits to be accepted,
++        //   or the read side is shut down / closed (a read returns at once)
++        public bool Readable => _closed || _readShutdown ||
++            (_listening ? _acceptQueue.Count > 0 : SocketType == SocketType.Stream ? _stream.Count > 0 || PeerGone : _receiveQueue.Count > 0);
++
++        // Writable: a UDP socket always has send buffer space; a TCP socket once connected and while the peer's buffer has room
++        //   (a peer that is gone reports writable too, so the write returns its error at once)
++        public bool Writable => SocketType == SocketType.Dgram ? !_writeShutdown :
++            Connected && (_writeShutdown || _peer == null || _peer._closed || _peer._readShutdown || _peer._stream.Count < StreamBufferBytes);
+ 
+         private static bool IsLocal(IPAddress address)
+         {
+@@ -200,7 +217,34 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
+ 
+                     if (IsLocal(remote.Address))
+                     {
+-                        Logger.Info?.PrintMsg(LogClass.ServiceBsd, $"Offline: TCP loopback connect to port {remote.Port} refused");
++                        // FreeBSD queues up to 3/2 of the backlog (sonewconn: so_qlen > 3 * so_qlimit / 2 refuses)
++                        if (_ports.TryGetValue((ProtocolType, remote.Port), out OfflineSocket listener) && listener._listening && !listener._closed &&
++                            listener._acceptQueue.Count <= 3 * Math.Max(listener._backlog, 1) / 2)
++                        {
++                            EnsureBoundLocked();
++
++                            IPAddress loopback = IPAddress.IsLoopback(remote.Address) ? remote.Address : (AddressFamily == AddressFamily.InterNetworkV6 ? IPAddress.IPv6Loopback : IPAddress.Loopback);
++                            OfflineSocket server = new(listener.AddressFamily, SocketType.Stream, ProtocolType)
++                            {
++                                LocalEndPoint = new IPEndPoint(loopback, remote.Port),
++                                RemoteEndPoint = new IPEndPoint(loopback, ((IPEndPoint)LocalEndPoint).Port),
++                                IsBound = true,
++                                Connected = true,
++                                _peer = this,
++                            };
++
++                            _peer = server;
++                            RemoteEndPoint = new IPEndPoint(loopback, remote.Port);
++                            Connected = true;
++                            listener._acceptQueue.Enqueue(server);
++
++                            Monitor.PulseAll(_network);
++                            S2ABsdWake.Signal();
++
++                            return;
++                        }
++
++                        Logger.Info?.PrintMsg(LogClass.ServiceBsd, $"Offline: TCP loopback connect to port {remote.Port} refused (nobody listens there)");
+ 
+                         throw Error(SocketError.ConnectionRefused);
+                     }
+@@ -239,6 +283,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
+ 
+                 EnsureBoundLocked();
+                 _listening = true;
++                _backlog = backlog;
+             }
+         }
+ 
+@@ -251,14 +296,14 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
+                     throw Error(SocketError.InvalidArgument);
+                 }
+ 
+-                // Nobody can connect to an offline console (and loopback TCP is refused): accept never completes
+-                if (!Blocking)
++                // Only sockets of this console connect (over loopback): accept takes the next of those, or waits for one
++                while (_acceptQueue.Count == 0 && !_closed && !S2AShutdown.Requested)
+                 {
+-                    throw Error(SocketError.WouldBlock);
+-                }
++                    if (!Blocking)
++                    {
++                        throw Error(SocketError.WouldBlock);
++                    }
+ 
+-                while (!_closed && !S2AShutdown.Requested)
+-                {
+                     Monitor.Wait(_network);
+                 }
+ 
+@@ -267,6 +312,11 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
+                     throw Error(SocketError.Interrupted);
+                 }
+ 
++                if (_acceptQueue.Count > 0)
++                {
++                    return _acceptQueue.Dequeue();
++                }
++
+                 throw Error(SocketError.ConnectionAborted);
+             }
+         }
+@@ -294,7 +344,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
+                     return -1;
+                 }
+ 
+-                return SendToLocked(buffer, (IPEndPoint)RemoteEndPoint, out socketError);
++                return SocketType == SocketType.Stream ? StreamSendLocked(buffer, out socketError) : SendToLocked(buffer, (IPEndPoint)RemoteEndPoint, out socketError);
+             }
+         }
+ 
+@@ -313,6 +363,66 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
+             }
+         }
+ 
++        // Caller holds _network. TCP over loopback: append to the peer's stream; a blocking send waits for room until everything is written,
++        //   a non-blocking one writes what fits (WouldBlock when nothing fits). A peer that closed or stopped reading: connection reset (EPIPE side)
++        private int StreamSendLocked(ReadOnlySpan<byte> buffer, out SocketError socketError)
++        {
++            int sent = 0;
++
++            while (true)
++            {
++                if (_writeShutdown)
++                {
++                    socketError = SocketError.Shutdown;
++
++                    return -1;
++                }
++
++                if (_peer == null || _peer._closed || _peer._readShutdown)
++                {
++                    socketError = SocketError.ConnectionReset;
++
++                    return sent > 0 ? sent : -1;
++                }
++
++                int room = StreamBufferBytes - _peer._stream.Count;
++
++                if (room > 0)
++                {
++                    int n = Math.Min(room, buffer.Length - sent);
++
++                    _peer._stream.AddRange(buffer.Slice(sent, n).ToArray());
++                    sent += n;
++
++                    Monitor.PulseAll(_network);
++                    S2ABsdWake.Signal();
++                }
++
++                if (sent == buffer.Length)
++                {
++                    socketError = SocketError.Success;
++
++                    return sent;
++                }
++
++                if (!Blocking)
++                {
++                    socketError = sent > 0 ? SocketError.Success : SocketError.WouldBlock;
++
++                    return sent > 0 ? sent : -1;
++                }
++
++                if (S2AShutdown.Requested)
++                {
++                    socketError = SocketError.Interrupted;
++
++                    return sent > 0 ? sent : -1;
++                }
++
++                Monitor.Wait(_network);
++            }
++        }
++
+         // Caller holds _network. UDP only.
+         private int SendToLocked(ReadOnlySpan<byte> buffer, IPEndPoint remote, out SocketError socketError)
+         {
+@@ -395,12 +505,58 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
+         {
+             lock (_network)
+             {
++                int timeout = _options.GetValueOrDefault(SocketOptionName.ReceiveTimeout);
++                long sdeadline = timeout > 0 ? Environment.TickCount64 + timeout : long.MaxValue;
++
+                 if (SocketType == SocketType.Stream)
+                 {
+-                    throw Error(SocketError.NotConnected);
+-                }
++                    if (_listening || !Connected)
++                    {
++                        throw Error(SocketError.NotConnected);
++                    }
+ 
+-                int timeout = _options.GetValueOrDefault(SocketOptionName.ReceiveTimeout);
++                    // TCP over loopback: wait for bytes, end of stream (peer gone: 0) or our own shutdown / close
++                    while (_stream.Count == 0 && !PeerGone && !_readShutdown && !_closed && !S2AShutdown.Requested)
++                    {
++                        if (!Blocking)
++                        {
++                            throw Error(SocketError.WouldBlock);
++                        }
++
++                        long sleft = sdeadline - Environment.TickCount64;
++
++                        if (sleft <= 0)
++                        {
++                            throw Error(SocketError.WouldBlock);
++                        }
++
++                        Monitor.Wait(_network, sdeadline == long.MaxValue ? Timeout.Infinite : (int)Math.Min(sleft, int.MaxValue));
++                    }
++
++                    if (S2AShutdown.Requested)
++                    {
++                        throw Error(SocketError.Interrupted);
++                    }
++
++                    int got = Math.Min(_stream.Count, buffer.Length);
++
++                    for (int i = 0; i < got; i++)
++                    {
++                        buffer[i] = _stream[i];
++                    }
++
++                    if (!flags.HasFlag(SocketFlags.Peek) && got > 0)
++                    {
++                        _stream.RemoveRange(0, got);
++
++                        Monitor.PulseAll(_network);   // room for a blocked sender
++                        S2ABsdWake.Signal();
++                    }
++
++                    remoteEP = RemoteEndPoint;
++
++                    return got;
++                }
+                 long deadline = timeout > 0 ? Environment.TickCount64 + timeout : long.MaxValue;
+ 
+                 while (_receiveQueue.Count == 0 && !_readShutdown && !_closed && !S2AShutdown.Requested)
+@@ -572,6 +728,15 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
+ 
+                 _receiveQueue.Clear();
+                 _queuedBytes = 0;
++                _stream.Clear();
++
++                // Connections nobody accepted are reset (their connecting ends see end of stream / reset)
++                while (_acceptQueue.Count > 0)
++                {
++                    OfflineSocket pending = _acceptQueue.Dequeue();
++
++                    pending._closed = true;
++                }
+ 
+                 Monitor.PulseAll(_network);
+                 S2ABsdWake.Signal();

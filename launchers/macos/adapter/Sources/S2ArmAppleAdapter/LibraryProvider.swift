@@ -82,6 +82,8 @@ public struct GameSummary: Identifiable, Equatable {
     public let iphoneFree: Bool
     /// 上次装的那台设备（设备记录键，UDID）：「续签」装回当初那台，不换别的（pack/jobs/layout.py install_record 的 deviceKey）
     public var iphoneInstallDevice: String? = nil
+    /// 上次装的那台是 iPad 还是 iPhone（install_record 的 deviceKind，#1962 游戏库「已推到 {0}」）；0.6.9 前的记录没有 → nil，BackendText.deviceKind 填「iPhone / iPad」
+    public var iphoneInstallKind: String? = nil
     /// 免费签名的到期时刻（秒；pack/jobs/layout.py install_record 的 expires：签好的包里的真值，读不到时作业层按 7 天估）。
     ///   作业层只在那台手机现在用的就是启动器免费签的那份时给（换成别的工具装 / 换签名方式后不给，提醒随之消失）
     public var iphoneExpires: Double? = nil
@@ -138,6 +140,7 @@ public struct GameSummary: Identifiable, Equatable {
                   hostUpdate: g["hostUpdate"] as? String ?? "none", location: GameLocation(catalog: g["location"] as? [String: Any] ?? [:]), iphoneRestorable: g["iphoneRestorable"] as? Bool ?? false,
                   sizes: GameSizes(catalog: g["sizes"] as? [String: Any] ?? [:]))
         self.iphoneInstallDevice = (g["iphoneInstall"] as? [String: Any])?["deviceKey"] as? String
+        self.iphoneInstallKind = (g["iphoneInstall"] as? [String: Any])?["deviceKind"] as? String
         self.iphoneExpires = ((g["iphoneInstall"] as? [String: Any])?["expires"] as? NSNumber)?.doubleValue
         self.iphoneExportable = g["iphoneExportable"] as? Bool ?? false
         self.appleTvReady = g["appleTvReady"] as? Bool ?? false

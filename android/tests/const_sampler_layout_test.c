@@ -7,7 +7,8 @@
 // 片 3：贴图字在游戏 UBO 里的类型 3 句柄（平铺 uboSlot / uboOffset + constSampler）：布局项是 TEXU，采样器来源由生产 usrc_put 进程序的 usrc 表
 //   （SAMPI + samp_pool = 1 = 立即数采样器池下标，回放要加池起点）；离线库写法的 {"source":"id"}（登记号原值，含 >= 0x8000 的号）samp_pool 仍为 0。
 // 片 7：计算阶段（cs 贴图绑定的 c2 形态）走真实计算解析（nvn_vk_program_parse_compute）+ 同一个 layout_ent，布局项与图形侧一字不差；
-//   cs 的 UBO 句柄形态仍具名拒绝。
+//   cs 的 slot + UBO 并存、没有 constSampler 的 UBO 形态仍具名拒绝。
+// 片 10：计算阶段的游戏 UBO 形态（平铺 uboSlot / uboOffset + constSampler，贴图字在游戏常量缓冲里）：布局项 TEXU + 程序 usrc 表项，与图形侧（片 3）一字不差。
 #include "../native/gfx_plat/nvk_shader.c"
 #include "tbuf_spirv_fixtures.h"
 
@@ -43,7 +44,8 @@ static int map_json(const char *fields, nvn_gpu_layout_ent *e, struct rp_prog *p
 static int map_one(const char *fields, nvn_gpu_layout_ent *e, char *why, size_t cap) { return map_json(fields, e, NULL, why, cap); }
 
 // 片 7：同一条 cs 贴图绑定走真实计算解析（nvn_vk_program_parse_compute）+ 同一个生产 layout_ent。返回 1 = 解析并映射成功
-static int map_cs(const char *fields, nvn_gpu_layout_ent *e, char *why, size_t cap) {
+//   pg 非空时，TEXU 项再经生产 usrc_put 放进程序的 usrc 表（片 10；build_compute 同一条路）
+static int map_cs_pg(const char *fields, nvn_gpu_layout_ent *e, struct rp_prog *pg, char *why, size_t cap) {
     char json[4096];
     int n = snprintf(json, sizeof json,
         "{\"schema\":\"s2a-direct-program-v2\",\"content\":{\"contract\":\"s2a-direct-program-content-v2\",\"kind\":\"compute\","
@@ -57,9 +59,11 @@ static int map_cs(const char *fields, nvn_gpu_layout_ent *e, char *why, size_t c
     if (n <= 0 || (size_t)n >= sizeof json) return 0;
     int rc = nvn_vk_program_parse_compute((const uint8_t *)json, (size_t)n, &p, why, cap);
     int ok = !rc && p.binding_count == 1 && layout_ent(&p.bindings[0], e);
+    if (ok && pg && e->src_kind == NVN_RB_TEXU) ok = usrc_put(pg, &p.bindings[0], e);
     nvn_vk_program_free_compute(&p);
     return ok;
 }
+static int map_cs(const char *fields, nvn_gpu_layout_ent *e, char *why, size_t cap) { return map_cs_pg(fields, e, NULL, why, cap); }
 
 int main(void) {
     nvn_gpu_layout_ent e;
@@ -91,7 +95,44 @@ int main(void) {
     CHECK(map_cs("\"slot\":90", &e, why, sizeof why) && e.src_kind == NVN_RB_TEX && e.src_reg == 128 && e.src_reg2 == UINT16_MAX,
           "compute direct separate texture keeps 'no second source'");
     CHECK(!map_cs("\"slot\":90,\"uboSlot\":1,\"uboOffset\":1024,\"constSampler\":7", &e, why, sizeof why) && strstr(why, "constant sampler"),
-          "compute UBO-handle constant sampler stays rejected by name");
+          "compute: c2 slot and UBO word together stay rejected by name");
+    CHECK(!map_cs("\"uboSlot\":1,\"uboOffset\":1024", &e, why, sizeof why),
+          "compute UBO-word texture without a constant sampler stays rejected");
+    // 片 10：计算阶段的游戏 UBO 形态：布局项仍是 TEXU（src_reg / src_off = 贴图字所在的 UBO 号 / 字节偏移），src_reg2 是 usrc 表下标，采样器来源在表项里
+    //   （SAMPI + 池下标 + samp_pool = 1）。下标 0 / 4095 是真下标。与图形侧（片 3）同一个 layout_ent / usrc_put，逐字段一致
+    {
+        static const struct { int ubo, off, sampler; } ub[] = {{2, 160, 260}, {0, 0, 0}, {15, 65532, 4095}};
+        for (unsigned k = 0; k < sizeof ub / sizeof ub[0]; k++) {
+            struct rp_prog pg, gpg; memset(&pg, 0, sizeof pg); memset(&gpg, 0, sizeof gpg);
+            nvn_gpu_layout_ent ge;
+            char f[128], what[320];
+            snprintf(f, sizeof f, "\"uboSlot\":%d,\"uboOffset\":%d,\"constSampler\":%d", ub[k].ubo, ub[k].off, ub[k].sampler);
+            int ok = map_cs_pg(f, &e, &pg, why, sizeof why);
+            int gok = map_json(f, &ge, &gpg, why, sizeof why);
+            snprintf(what, sizeof what, "compute UBO %d +%d with constant sampler %d maps to a TEXU entry + usrc[0] (why=%s)", ub[k].ubo, ub[k].off, ub[k].sampler, why);
+            CHECK(ok && e.cls == NVN_GPU_RES_TEX_SAMP && e.src_kind == NVN_RB_TEXU && e.src_reg == ub[k].ubo && (int)e.src_off == ub[k].off && e.count == 1 &&
+                  e.src_reg2 == 0 && pg.nusrc == 1, what);
+            const struct rp_usrc *u = &pg.usrc[0];
+            snprintf(what, sizeof what, "compute usrc[0]: texture word at UBO %d +%d, sampler = immediate pool index %d (SAMPI, samp_pool 1)", ub[k].ubo, ub[k].off, ub[k].sampler);
+            CHECK(u->tex.reg == ub[k].ubo && u->tex.off == ub[k].off && !u->tex.sid && !u->tex.pair &&
+                  u->samp_kind == NVN_RB_SAMPI && u->samp_reg == ub[k].sampler && u->samp_pool == 1, what);
+            snprintf(what, sizeof what, "compute UBO %d +%d layout entry and usrc entry equal the graphics ones", ub[k].ubo, ub[k].off);
+            CHECK(gok && ge.cls == e.cls && ge.src_kind == e.src_kind && ge.src_reg == e.src_reg && ge.src_off == e.src_off && ge.src_reg2 == e.src_reg2 && ge.count == e.count &&
+                  gpg.usrc[0].tex.reg == u->tex.reg && gpg.usrc[0].tex.off == u->tex.off && gpg.usrc[0].samp_kind == u->samp_kind &&
+                  gpg.usrc[0].samp_reg == u->samp_reg && gpg.usrc[0].samp_pool == u->samp_pool, what);
+        }
+        // 同一个计算程序里两条：各取各的表项，src_reg2 = 各自的表下标
+        struct rp_prog two; memset(&two, 0, sizeof two);
+        nvn_gpu_layout_ent e0, e1;
+        CHECK(map_cs_pg("\"uboSlot\":2,\"uboOffset\":160,\"constSampler\":260", &e0, &two, why, sizeof why) &&
+              map_cs_pg("\"uboSlot\":3,\"uboOffset\":164,\"constSampler\":262", &e1, &two, why, sizeof why) &&
+              e0.src_reg2 == 0 && e1.src_reg2 == 1 && two.nusrc == 2 && two.usrc[0].samp_reg == 260 && two.usrc[1].samp_reg == 262 &&
+              two.usrc[0].tex.reg == 2 && two.usrc[1].tex.reg == 3 && two.usrc[1].tex.off == 164, "two compute constant-sampler UBO textures keep their own usrc entries");
+        // 对照：c2 形态的计算项不进 usrc 表（口径不混）
+        struct rp_prog c2; memset(&c2, 0, sizeof c2);
+        CHECK(map_cs_pg("\"slot\":90,\"constSampler\":257", &e, &c2, why, sizeof why) && e.src_kind == NVN_RB_TEX && c2.nusrc == 0,
+              "a compute c2 constant sampler entry does not use the usrc table");
+    }
 
     // 没有 constSampler 的条目：src_reg2 不变
     CHECK(map_one("\"slot\":90,\"samp_slot\":3", &e, why, sizeof why) && e.src_kind == NVN_RB_TEX && e.src_reg == 128 && e.src_reg2 == 3,

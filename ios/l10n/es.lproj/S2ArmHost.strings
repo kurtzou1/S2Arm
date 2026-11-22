@@ -272,8 +272,8 @@
 "app.fpsCap.retry" = "Probar 60 FPS de nuevo";
 "app.os180.title" = "Esta versión del sistema puede cerrarse inesperadamente";
 "app.os180.body" = "iOS / iPadOS 18.0 tiene un problema del sistema que puede cerrar la app en cuanto aparece la imagen del juego; 18.1 lo corrige. Actualiza en Ajustes > General > Actualización de software a 18.1 o posterior (gratis) y dejará de ocurrir.";
-"app.lowRam.title" = "Es posible que este dispositivo no tenga suficiente memoria";
-"app.lowRam.body" = "Este juego necesita más memoria de la que tiene este dispositivo. Seguirá iniciándose, pero puede ralentizarse o ser cerrado por el sistema.";
+"app.lowRam.title" = "Puede que falte memoria";
+"app.lowRam.body" = "Este juego necesita unos %1$@ GB de memoria y este dispositivo tiene %2$@ GB. El almacenamiento compensa la diferencia: puedes jugar, pero puede ir lento o cerrarse a mitad. Solo se muestra una vez.";
 "app.gpuStop.body" = "Cierra esta app desde el selector de apps y vuelve a abrirla; normalmente podrás seguir jugando desde el último guardado del juego. Para ayudarnos a encontrar la causa, toca «Informar de un problema» y envíanos el diagnóstico.";
 "app.gpuStop.title" = "El juego se quedó bloqueado y se detuvo de forma segura";
 "app.library.broken.title" = "Los archivos del juego están incompletos";
@@ -452,7 +452,7 @@
 "save.exported" = "Copia de seguridad exportada.";
 "save.import" = "Elige una copia de seguridad para comprobar…";
 "save.inspected" = "Copia de seguridad comprobada. Esperando confirmación.";
-"save.intro" = "El juego aún no ha iniciado. Puedes exportar tu partida guardada a Archivos o importar una copia de seguridad .s2asave desde un Mac u otro dispositivo. La partida guardada actual se conserva antes de restaurar.";
+"save.intro" = "El juego aún no ha iniciado. Puedes exportar tu partida guardada a Archivos, importar una copia .s2asave desde un Mac u otro dispositivo, o importar una carpeta o un zip de partida de otro emulador o herramienta (JKSV, Checkpoint, Ryujinx, yuzu, etc.). La partida guardada actual se conserva antes de restaurar.";
 "save.journalUnreadable" = "No se puede leer la carpeta de registros de operaciones de guardado (%@), por lo que no es posible saber si la última importación o restauración terminó correctamente.\n%@";
 "save.location" = "Ubicación de partidas guardadas: abre la app Archivos → En mi iPhone (En mi iPad en iPad) → %@ → %@\n\nColoca una carpeta de partida guardada en su formato original (exportada desde una consola, con JKSV, Checkpoint u otras herramientas similares, o copiada desde la carpeta SaveData del mismo juego en tu ordenador) y el juego la usará la próxima vez que lo inicies. Al salir, se actualiza con tu progreso más reciente; copia toda la carpeta al mismo lugar en tu ordenador u otro dispositivo para seguir jugando.\n\nCopiar desde un ordenador: en un Mac, selecciona este dispositivo en la barra lateral del Finder → Archivos, arrastra la carpeta a «%@» y luego usa la app Archivos para moverla a la ubicación indicada.";
 "save.location.problem" = "La partida guardada que colocaste la última vez no se cargó: %@. La partida guardada actual no ha cambiado.";
@@ -483,6 +483,8 @@
 "save.restore.title" = "¿Restaurar esta copia de seguridad?";
 "save.restoreCancelled" = "Restauración cancelada.";
 "save.restored" = "Partida guardada restaurada. Puedes iniciar el juego para comprobar tu progreso. Se conservó una copia previa a la restauración (no se crea si no había partida guardada antes).";
+"save.community.message" = "Es una partida de otro emulador o herramienta: %@ archivos, %@.\n\nAl confirmar, primero se hace una copia de tu partida actual y luego esta partida se coloca en la carpeta de partidas del juego; se cargará la próxima vez que inicies el juego.";
+"save.community.done" = "Listo: esta partida se cargará la próxima vez que inicies el juego. Se hizo una copia de tu partida anterior (no se crea si no había partida guardada).";
 "save.serviceInvalid" = "El servicio de partidas guardadas no devolvió un resultado válido. Cierra y vuelve a abrir la app; se conservan los datos existentes.";
 "save.previous.ask.title" = "Este juego no pudo cargar su partida la última vez. ¿Volver a la partida guardada anterior?";
 "save.previous.ask.crash" = "La última sesión se cerró justo al empezar. Puedes volver a cambiar en cualquier momento.";
@@ -613,6 +615,8 @@
 "vpad.snap.notSaved" = "No se pudo guardar esta vez. Inténtalo de nuevo en un momento";
 "vpad.snap.busy" = "Aún se está guardando el anterior";
 "vpad.snap.restoreFailed" = "No se pudo volver: %@";
+"vpad.snap.useLibrary.title" = "No se puede volver desde el juego";
+"vpad.snap.useLibrary.body" = "Este momento se guardó con la memoria del juego en otro lugar que en esta partida, así que no se puede reanudar desde dentro del juego. Vuelve a la biblioteca, mantén pulsado este juego y toca «Volver al momento guardado» para restaurarlo. La instantánea sigue ahí.";
 "vpad.snap.saveChanged.title" = "¿Volver al momento guardado?";
 "vpad.snap.saveChanged.body" = "El juego guardó después de ese momento. Volver también devuelve su partida a ese momento; la partida actual se copia antes.";
 "vpad.snap.saveChanged.go" = "Volver";
@@ -673,7 +677,7 @@
 "kbd.section.sticks" = "Sticks";
 "kbd.record" = "Pulsa una tecla, Esc para cancelar";
 "kbd.common" = "Teclas comunes";
-"kbd.clear" = "Borrar tecla del teclado";
+"kbd.clear" = "Borrar asignación";
 "kbd.unbound" = "Sin configurar";
 "kbd.restoreDefault" = "Restaurar valores predeterminados";
 "kbd.rebind.title" = "¿Reasignar esta tecla?";
@@ -702,6 +706,12 @@
 "kbd.manage.note" = "Los archivos de asignación exportados se pueden importar en otros juegos. El input.json de cada juego del lanzador de Mac usa el mismo formato y también se puede importar. Importar solo cambia este juego.";
 "kbd.import" = "Importar asignación de teclas…";
 "kbd.export" = "Exportar asignación actual…";
+"kbd.setDefault" = "Usar como predeterminada en todos los juegos";
+"kbd.default.done" = "Ahora es la predeterminada en todos los juegos";
+"kbd.default.undo" = "Deshacer";
+"kbd.source.custom" = "Asignación actual: personalizada";
+"kbd.source.default" = "Asignación actual: predeterminada";
+"kbd.manage.noteAll" = "Los archivos de asignación exportados se pueden importar en otros juegos. El input.json de cada juego del lanzador de Mac usa el mismo formato y también se puede importar. Importar solo cambia este juego.\n«Usar como predeterminada en todos los juegos» hace que la asignación actual sea la predeterminada en todos los juegos. Los juegos que hayas personalizado por separado no cambian, y los juegos que añadas después también la usan. «Restaurar valores predeterminados» vuelve a esta asignación.";
 "kbd.export.fileName" = "Asignación de teclas S2Arm";
 "kbd.export.err.title" = "No se pudo exportar la asignación";
 "kbd.import.err.title" = "No se pudo importar la asignación";
@@ -711,3 +721,14 @@
 "kbd.import.err.schema" = "Este archivo no es una asignación de teclas de S2Arm o su versión no es compatible. Tu asignación actual no ha cambiado.";
 "kbd.import.err.duplicate" = "El archivo asigna la misma tecla a más de un botón. Tu asignación actual no ha cambiado.";
 "kbd.import.err.invalid" = "La asignación del archivo está incompleta o tiene valores no válidos. Tu asignación actual no ha cambiado.";
+
+/* 游戏内「分配玩家」（ios/player_assign.m，#1606 ④）：叫法同 Mac 启动器「分配玩家」 */
+"assign.menu" = "Asignar jugadores…";
+"assign.title" = "Asignar jugadores";
+"assign.hint" = "Empezando por P1, pulsa cualquier botón en el mando de cada jugador por turnos. Los mandos que no asignes siguen conectados, pero no tendrán jugador.";
+"assign.waiting" = "Pulsa cualquier botón de un mando";
+"assign.restart" = "Volver a empezar";
+"assign.automatic" = "Volver a automático (orden de conexión)";
+"assign.ns2pro" = "Mando Pro de Switch 2";
+"assign.saveFailed" = "No se pudo guardar la asignación. Inténtalo de nuevo.";
+"assign.ok" = "Aceptar";

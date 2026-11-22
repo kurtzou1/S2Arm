@@ -287,6 +287,23 @@ int s2a_pad_order_rank(const s2a_pad_order *order, int ns2_player, const char *n
     for (int i = 0; i < order->dropped_count && i < S2A_PAD_ORDER_MAX; i++) if (order_match(&order->dropped[i], ns2_player, name, index)) return S2A_PAD_ORDER_DROPPED;
     return S2A_PAD_ORDER_UNLISTED;
 }
+int s2a_pad_order_arrange(const s2a_pad_order *order, int count, const int *ns2_player, const char *const *group, const char *const *key, int *keep, int *rank) {
+    if (count > S2A_PAD_ARRANGE_MAX) count = S2A_PAD_ARRANGE_MAX;
+    int r[S2A_PAD_ARRANGE_MAX], idx[S2A_PAD_ARRANGE_MAX];
+    for (int j = 0; j < count; j++) {
+        int index = 0;   // 同名第几只：只数前面同名的（名字为空不数）
+        if (group[j]) for (int k = 0; k < j; k++) if (group[k] && !strcmp(group[k], group[j])) index++;
+        r[j] = s2a_pad_order_rank(order, ns2_player[j], key && key[j] ? key[j] : group[j], index);
+        idx[j] = j;
+    }
+    for (int a = 1; a < count; a++) for (int b = a; b > 0 && r[idx[b]] < r[idx[b - 1]]; b--) { int t = idx[b]; idx[b] = idx[b - 1]; idx[b - 1] = t; }   // 稳定：同排位照原顺序
+    int m = 0;
+    for (int k = 0; k < count; k++) {
+        if (r[idx[k]] == S2A_PAD_ORDER_DROPPED) continue;   // 分配时没登记：不进槽位
+        keep[m] = idx[k]; rank[m] = r[idx[k]]; m++;
+    }
+    return m;
+}
 void s2a_slot_pin(const void **prev, const void *const *live, const int *rank, int count, int max) {
     for (int j = 0; j < count; j++) {
         int r = rank[j];

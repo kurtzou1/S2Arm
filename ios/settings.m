@@ -124,6 +124,8 @@ NSString *s2a_ios_game_language_note_with(NSUserDefaults *defaults, NSArray<NSSt
 }
 @interface S2AGameLayeredDefaults : NSUserDefaults
 - (instancetype)initWithGame:(NSUserDefaults *)game app:(NSUserDefaults *)app keys:(NSSet<NSString *> *)keys;
+- (NSUserDefaults *)gameLayer;
+- (NSUserDefaults *)appLayer;
 @end
 @implementation S2AGameLayeredDefaults {
     NSUserDefaults *_game, *_app; NSSet<NSString *> *_keys;
@@ -132,6 +134,8 @@ NSString *s2a_ios_game_language_note_with(NSUserDefaults *defaults, NSArray<NSSt
     if ((self = [super initWithSuiteName:nil])) { _game = game; _app = app; _keys = [keys copy]; }
     return self;
 }
+- (NSUserDefaults *)gameLayer { return _game; }
+- (NSUserDefaults *)appLayer { return _app; }
 - (NSUserDefaults *)writerFor:(NSString *)key { return [_keys containsObject:key] ? _game : _app; }
 - (id)objectForKey:(NSString *)key { return ([_keys containsObject:key] ? [_game objectForKey:key] : nil) ?: [_app objectForKey:key]; }
 - (void)setObject:(id)value forKey:(NSString *)key { [[self writerFor:key] setObject:value forKey:key]; }
@@ -162,6 +166,12 @@ NSUserDefaults *s2a_ios_settings_defaults_for(NSString *gid) {
 }
 static NSString *current_gid(void) { const char *g = getenv("S2A_LAUNCH_GAME_ID"); return g && *g ? @(g) : nil; }
 NSUserDefaults *s2a_ios_settings_defaults(void) { return s2a_ios_settings_defaults_for(current_gid()); }
+void s2a_ios_settings_layers(NSUserDefaults *__strong *game, NSUserDefaults *__strong *app) {
+    NSUserDefaults *d = s2a_ios_settings_defaults();
+    BOOL layered = [d isKindOfClass:S2AGameLayeredDefaults.class];
+    *game = layered ? [(S2AGameLayeredDefaults *)d gameLayer] : d;
+    *app = layered ? [(S2AGameLayeredDefaults *)d appLayer] : nil;
+}
 
 // 某款的随行目录（s2a_caps.tsv / widen_verified.tsv / cpatch.tsv 所在）：正在跑的这款 = 启动上下文的 caps_dir；
 //   游戏库里还没进游戏的那款 = 多款容器 <App 包>/Games/<游戏号>（runtime/src/launchctx.c 同一约定）

@@ -358,6 +358,9 @@ struct lp_stage_contract {
     char key[17], json_name[12], spv_name[12];
 };
 
+#define LP_NVN_STAGES 6   // NVN 阶段号 vs..cs = 0..5；s2a_libpack_program_v1 的 keys[6][8] 与逐阶段合同都按它定长
+_Static_assert(LP_NVN_STAGES == 6, "keys[6][8] in s2a_libpack_program_v1 is indexed by NVN stage count");
+
 static void lp_record_binding(struct lp_emitted_bindings *bindings, uint32_t number, enum lp_binding_owner owner) {
     if (bindings->count < LP_STAGE_BINDINGS)
         bindings->entry[bindings->count] = (struct lp_emitted_binding){number, owner};
@@ -369,6 +372,8 @@ static void lp_emit_support(struct jw *binds, int *sep, uint32_t number, int com
            *sep ? "," : "", number, compute ? ",\"count\":1" : "");
     *sep = 1;
 }
+
+static int lp_spv_binding_is_set0_ubo(const uint8_t *spv, size_t n, uint32_t binding);
 
 // 一个键的 _b.json bindings[] → content.bindings[]（追加进 jw；sep 管逗号）。
 // stage_no = 本段 StageNo（绑定号换算用它），v1_stage = v1 阶段名标签
@@ -468,7 +473,17 @@ static int lp_emit_bindings(struct jw *j, struct s2a_jv top, const char *lib_sta
             // 计算：bank 是 NVN cbuf 号本身（Dsh.cs Reflect：fp_c<n>，n∉{1,3..16} 记 drvcb+bank）。c0 = 驱动常量段，
             //   v1 槽 0（现编结果同号，消费端 NVN_RB_DRV0）；c2 = 句柄表，槽 2 交给解析器如实拒；其余 bank 不挂槽
             uint32_t bank = 0;
-            if (compute && !jf_u32(b, "bank", &bank) && (bank == 0 || bank == 2)) { slot = bank; has_slot = 1; }
+            int has_bank = !jf_u32(b, "bank", &bank);
+            if (compute && has_bank && (bank == 0 || bank == 2)) { slot = bank; has_slot = 1; }
+            // 图形：只映射 bank 0（c0 = 驱动常量段，消费端 layout_ent 同样 slot 0 → NVN_RB_DRV0，rp_draw 按完整 0xA00 驱动段供数：
+            //   各阶段存储缓冲表 + 0x610 / 0x644 等宿主字）。出处（_b.json drvcb bank 0）之外还要 .spv 证实同一绑定号是 set 0 的
+            //   Uniform Block，对不上就具名拒、不出死绑定；bank 2（句柄表）等其余 bank 照旧无槽、落到下面的「无来源」拒。
+            else if (!compute && has_bank && bank == 0) {
+                if (!lp_spv_binding_is_set0_ubo(spv, spv_size, binding))
+                    return lp_fail(why, why_size, "%s bindings[%u] %s drvcb bank 0 binding %u is not a set 0 Uniform Block in the SPIR-V",
+                                   lib_stage, i, msl, binding);
+                slot = 0; has_slot = 1;
+            }
         } else if (!strcmp(kind, "geometry") || !strcmp(kind, "sbuf") || !strcmp(kind, "sbuf_ubo")
                    || !strcmp(kind, "ubo_ptr") || !strcmp(kind, "gmem_map") || !strcmp(kind, "gmem_log") || !strcmp(kind, "sbuf_push")) {
             v1kind = "storage";
@@ -530,8 +545,9 @@ static int lp_emit_bindings(struct jw *j, struct s2a_jv top, const char *lib_sta
     return 0;
 }
 
-// Dsh.cs 以原名 support_buffer 标记支撑缓冲。v2 同时要求 SPIR-V 的实际变量是 set 0 Uniform Block。
-static int lp_spv_support_is_ubo(const uint32_t *w, size_t nw, uint32_t id) {
+// 变量 id 是 set 0 的 Uniform Block（Uniform 存储类、直接指向 Block 结构体、恰一个 DescriptorSet 0）。
+//   支撑缓冲（Dsh.cs 以原名 support_buffer 标记，v2 要求它是这种变量）与图形 c0 驱动常量段共用这一判据。
+static int lp_spv_var_is_set0_ubo(const uint32_t *w, size_t nw, uint32_t id) {
     const uint32_t *var = lp_spv_decl(w, nw, 59, 2, id);   // OpVariable，StorageClass Uniform = 2
     if (!var || (var[0] >> 16) != 4 || var[3] != 2) return 0;
     const uint32_t *ptr = lp_spv_decl(w, nw, 32, 1, var[1]);   // OpTypePointer Uniform
@@ -553,6 +569,22 @@ static int lp_spv_support_is_ubo(const uint32_t *w, size_t nw, uint32_t id) {
         i += wc;
     }
     return blocks == 1 && sets == 1;
+}
+
+// 绑定号 binding 在 .spv 里恰有一个变量带 Binding 装饰，且它是 set 0 的 Uniform Block（lp_spv_var_is_set0_ubo）。
+//   0 = 没有 / 不止一个 / 类型不对（StorageBuffer、无 Block、数组、非 set 0 都在内）。
+static int lp_spv_binding_is_set0_ubo(const uint8_t *spv, size_t n, uint32_t binding) {
+    const uint32_t *w = (const uint32_t *)spv; size_t nw = n / 4;
+    uint32_t id = 0; unsigned found = 0;
+    if (nw < 5) return 0;
+    for (size_t i = 5; i < nw; ) {
+        uint32_t op = w[i] & 0xffff, wc = w[i] >> 16;
+        if (!wc || wc > nw - i) return 0;
+        if (op == 54) break;   // OpFunction：装饰都在函数体之前
+        if (op == 71 && wc >= 4 && w[i + 2] == 33 && w[i + 3] == binding) { id = w[i + 1]; found++; }   // OpDecorate <id> Binding
+        i += wc;
+    }
+    return found == 1 && lp_spv_var_is_set0_ubo(w, nw, id);
 }
 
 // 一个阶段：取键的 _b.json + _b.spv → 校验 → 往 jw 写 stage 项与 bindings 项。
@@ -587,7 +619,7 @@ static int lp_spv_read_bindings(const uint8_t *spv, size_t n, struct lp_spv_bind
             i += wc;
         }
     if (out->support >= 0 && !ambiguous_support)
-        out->support_is_ubo = lp_spv_support_is_ubo(w, nw, sid);
+        out->support_is_ubo = lp_spv_var_is_set0_ubo(w, nw, sid);
     return 0;
 }
 // 片元输出映射（同现编结果 info.fragmentOutputMap：每个颜色目标 4 位，第 c 分量 = 位 4×location + c）：按 .spv 的 Output 变量推。
@@ -952,8 +984,10 @@ int s2a_libpack_program_v1(const struct s2a_libpack *lp_c, const uint8_t keys[6]
     int worst = S2A_LIBPACK_HIT;
     struct jw st = {0}, bd = {0};
     int sep = 0, uses_v2 = 0; uint32_t got = 0, support = 0;
-    struct lp_stage_contract contracts[3] = {0};
-    for (unsigned nvn = 0, idx = 0; nvn < 6 && idx < 6; nvn++) {
+    // 按 NVN 阶段号（vs=0 fs=1 gs=2 tcs=3 tes=4 cs=5）定长取下标：keys[] 与 contracts[] 同为全部阶段号一份，
+    //   循环上界取自数组本身，阶段号永远在界内（原 contracts[3] 遇 tcs/tes 位会传出越界指针）
+    struct lp_stage_contract contracts[LP_NVN_STAGES] = {0};
+    for (unsigned nvn = 0, idx = 0; nvn < sizeof contracts / sizeof contracts[0] && idx < LP_NVN_STAGES; nvn++) {
         if (!(stages & (1u << nvn))) continue;
         char sw[192] = "";
         int rc = lp_stage_emit(lp, keys[idx], nvn, 0, gs_topology, 0, &st, &bd, &sep, &got, &support, &uses_v2,

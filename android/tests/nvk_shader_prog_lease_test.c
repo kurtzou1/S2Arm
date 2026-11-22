@@ -202,7 +202,8 @@ static int publish_c1(unsigned seed, unsigned nst, int c1_ok) {
     ident_fill(rec.identity, seed);
     rec.stage_mask = nst >= 3 ? 7u : (nst == 2 ? 3u : 1u);
     rec.c1_ok = (uint8_t)c1_ok;
-    if (c1_ok) for (int st = 0; st < 3; st++) if (c1_ok & (1 << st)) memset(rec.c1[st], (uint8_t)(seed + st), NVK_PROG_REC_C1_BYTES);
+    static uint8_t c1buf[3][NVK_PROG_REC_C1_MIN];   // c1 整段：记录只带指针（nvk_prog_warm_build 当场拷进程序对象）
+    if (c1_ok) for (int st = 0; st < 3; st++) if (c1_ok & (1 << st)) { memset(c1buf[st], (uint8_t)(seed + st), NVK_PROG_REC_C1_MIN); rec.c1[st] = c1buf[st]; rec.c1_len[st] = NVK_PROG_REC_C1_MIN; }
     g_fake_nst = nst;
     return nvk_prog_warm_build(&rec);
 }

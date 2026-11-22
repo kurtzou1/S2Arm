@@ -40,9 +40,9 @@ def sha8(s): return hashlib.sha256(s.encode()).digest()[:8]
 
 
 def prog_file(ids, profile='profile-A', closure='closure-A', corrupt=False):
-    hdr = struct.pack('<IIII', 0x31575053, 1, 844, len(ids)) + hashlib.sha256(profile.encode()).digest() + struct.pack('<i', 7) + sha8(closure)
+    hdr = struct.pack('<IIII', 0x31575053, 2, 88, len(ids)) + hashlib.sha256(profile.encode()).digest() + struct.pack('<i', 7) + sha8(closure)
     assert len(hdr) == 60
-    body = b''.join(ident(n) + struct.pack('<I', 3) + bytes(24) + b'\x03\x02\x00\x00' + bytes([n]) * 768 + struct.pack('<IQ', 9, 1) for n in ids)
+    body = b''.join(ident(n) + struct.pack('<I', 3) + bytes(24) + b'\x03\x02\x00\x00' + struct.pack('<IIIIQ', 0x100, 0x100, 0, 9, 1) + bytes([n]) * 0x200 for n in ids)   # 88 字节头 + 两段 0x100 的 c1
     b = hdr + body
     return b + struct.pack('<Q', fnv(b) ^ (1 if corrupt else 0)), 'programs-v1-' + sha8(closure).hex() + '.bin'
 

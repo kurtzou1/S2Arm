@@ -29,13 +29,16 @@ struct rp_prog {
     uint32_t support_bytes;                                   // NVN_RB_SUPPORT 那一项的缓冲长度
     uint32_t attr_mask;                                       // 顶点着色器实际读的属性位
     uint32_t color_out_mask;                                  // 片元着色器写了哪些输出分量：每个颜色目标 4 位（RGBA）。没有片元阶段 / 不知道 = 全 1
-    uint8_t c1[RP_PROG_STAGES][0x100]; uint8_t c1_ok;         // NVN_RB_C1：着色器自带的常量段（位 i = 阶段 i 有）
+    const uint8_t *c1[RP_PROG_STAGES]; uint32_t c1_len[RP_PROG_STAGES]; uint8_t c1_ok;   // NVN_RB_C1：着色器自带的常量段，整段（位 i = 阶段 i 有；长度至少 0x100，
+                                                              //   着色器按 vec4 下标可读到整段末尾——八方旅人调色 LUT 读到 2304 字节；iOS nvn_mtl.m c1_store 同样整段，专用缓冲 64 KB）
+                                                              //   存储至少有 c1_len 向上补齐到 16 字节那么长（补齐部分为 0），绑定按补齐后的长度
     uint32_t spill_bytes;                                     // 计算：共享内存溢出缓冲每个线程组的字节数（NVN_RB_SPILL 项）；0 = 没有
     uint8_t is_compute;                                       // 计算程序：只有 sh[0] / ent[0]，绑定取 NVN 阶段 5 的状态
     uint8_t binst_unread;                                     // 位 i = 阶段 i 已证不读 c0 + 0x644（编译器 c0Reads）：间接绘制不用把 GPU 侧的 base instance 拷进它的驱动段。0 = 读或未知（照旧拷）
     uint8_t z_raw;                                            // 顶点出口 z 原样（不随深度模式改写，出包预编库的程序）：near = -w 时管线设裁剪深度 [-1, 1]
     uint8_t lib_sourced;                                      // 来自出包预编库（libpack）。绑定核对发现声明与实际绑定不符时，rp_shader_lib_reject 据此走现编回退
     uint8_t lib_bad;                                          // 这份程序身份已按绑定核对拒收：解析路径（含事实复用 / 结果合并）绕过它，下次取现编版
+    uint8_t layer_out;                                        // 顶点 / 几何阶段写渲染目标层号（BuiltIn Layer）：这笔按分层通道画，图元按层号落到附件对应层（iOS nvn_mtl.m layer_out → renderTargetArrayLength）
     struct rp_usrc usrc[RP_PROG_USRC_MAX]; uint32_t nusrc;    // NVN_RB_TEXU / TBUFU 项的句柄来源（布局项 src_reg2 指向这里）
     // 内容身份：S2AI1 v3 规范输入的 SHA-256，也就是来源缓存（g_progs）的键。管线配方与跨会话预热清单
     // 用它跨会话定位「同一份程序」；全 0 = 没有身份（失败项 / 还没算出来），这种程序不进任何清单。

@@ -21,6 +21,7 @@
 #include "direct/source_store.h"
 #include "direct/texture_facts.h"
 #include "spirv_sampler_use.h"
+#include "spirv_layer_out.h"
 #include "direct/offline_library.h"
 #include "direct/libpack_vk.h"
 #include "../../../graphics/nvn/gfx/nvn/dmsh_chain.h"   // b-<DMSH_CHAIN>-vk：出包预编库目录名（同 nvn_vk_draw.c）
@@ -200,7 +201,27 @@ static uint64_t mono_ms(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONI
 static void entry_free(struct entry *e) {
     if (!e) return;
     for (int st = 0; st < RP_PROG_STAGES; st++) if (e->prog.sh[st]) { nvn_gpu_shader_release(e->prog.sh[st]); e->prog.sh[st] = NULL; }
+    for (int st = 0; st < RP_PROG_STAGES; st++) free((void *)e->prog.c1[st]);
     free(e);
+}
+// 程序对象拷一份阶段 st 的 c1 常量段（整段；不足 0x100 的不算捕获，同 source_store / 预热清单的判据）。
+// 只截前 0x100 字节时，读到后段的着色器全读 0（八方旅人调色 LUT 读到第 2304 字节 → LUT 全 0 → 场景整幅黑）。
+static void prog_c1_take(struct rp_prog *p, int st, const uint8_t *c1, uint32_t bytes) {
+    if (!c1 || bytes < 0x100 || p->c1[st]) return;
+    uint8_t *x = calloc(1, ((size_t)bytes + 15u) & ~(size_t)15u);   // 存储补齐到 16 字节：回放核心按 16 字节补齐整段绑定（rp_draw NVN_RB_C1），补齐部分是 0
+    if (!x) return;
+    memcpy(x, c1, bytes); p->c1[st] = x; p->c1_len[st] = bytes; p->c1_ok |= (uint8_t)(1u << st);
+    if (bytes > 0x100) {   // 读数：超过 0x100 的 c1（修前后段读 0 的那类）本局出现了几份，前 4 份各打一行
+        static _Atomic uint32_t said; uint32_t k = atomic_fetch_add(&said, 1);
+        if (k < 4) { char m[96]; snprintf(m, sizeof m, "c1 常量段整段 %u 字节（阶段 %d，本局第 %u 份超过 256 字节）", (unsigned)bytes, st, (unsigned)k + 1); nvn_plat_log(NVN_PLAT_LOG_INFO, "shader", m); }
+    }
+}
+// 预热记录带上阶段 st 的 c1 整段（指针只在 nvk_prog_warm_note 调用期间读，清单自己存一份只读副本）。
+//   不足 0x100（没捕获）不记，同 build 的判据。返回 1 = 记上。
+static int rec_c1_put(struct nvk_prog_rec *rec, int st, const uint8_t *c1, uint32_t bytes) {
+    if (!c1 || bytes < NVK_PROG_REC_C1_MIN || bytes > NVK_PROG_REC_C1_MAX) return 0;
+    rec->c1[st] = c1; rec->c1_len[st] = bytes; rec->c1_ok |= (uint8_t)(1u << st);
+    return 1;
 }
 static struct entry *progs_get_locked(const uint8_t identity[32]) { return (struct entry *)nvn_hm_get(&g_progs, identity); }
 // 锁内取已发布项；预建对象第一次被真实 draw 采用时置 warm_hit 并回报。
@@ -283,26 +304,30 @@ static int progs_publish(const uint8_t identity[32], struct entry *e, int from_w
 //   · c1：每个阶段的 c1 常量段 + 「有没有」（来自请求方的源快照；c1 不在身份里——身份的源摘要只覆盖 control‖code——所以不能靠「身份相同」推出它相同）。
 // 其余字段（着色器句柄、绑定表 / 反射、贴图声明、支持缓冲长度、属性 / 片元输出掩码、c0 读集、base instance 判定）全由负载字节唯一决定，
 // z_raw 只由设备能力决定（本局内是常数）；出包预编库 / 离线库来的程序不带结果摘要，永远不进结果表。
-struct alias_key { int nst; uint8_t c1_ok; const uint8_t *c1[RP_PROG_STAGES]; };   // c1[st] 仅当 c1_ok 的位 st 为 1 时有效（长度 0x100）
-// 比对键 = SHA-256(结果摘要 ‖ 负载长度 ‖ 阶段数 ‖ c1 有无位 ‖ 各有 c1 阶段的 c1[0x100])。键里每一项都改一下 → 键就变 → 不合并（见 nvk_shader_alias_test.c 的逐项负对照）。
-// 有无位单独编进去：否则「只有阶段 0 有这段 c1」与「只有阶段 1 有同样的 c1」字节流相同。
+struct alias_key { int nst; uint8_t c1_ok; const uint8_t *c1[RP_PROG_STAGES]; uint32_t c1_len[RP_PROG_STAGES]; };   // c1[st] / c1_len[st] 仅当 c1_ok 的位 st 为 1 时有效（整段）
+// 比对键 = SHA-256(结果摘要 ‖ 负载长度 ‖ 阶段数 ‖ c1 有无位 ‖ 各有 c1 阶段的（c1 长度 ‖ c1 整段）)。键里每一项都改一下 → 键就变 → 不合并（见 nvk_shader_alias_test.c 的逐项负对照）。
+// 有无位单独编进去：否则「只有阶段 0 有这段 c1」与「只有阶段 1 有同样的 c1」字节流相同；长度编进去：否则前段相同、长短不同的两段 c1 拼出同一串。
 static void alias_key_hash(const uint8_t res[32], uint64_t rlen, const struct alias_key *k, uint8_t out[32]) {
-    uint8_t buf[32 + 8 + 2 + RP_PROG_STAGES * 0x100];
-    size_t n = 0;
-    memcpy(buf, res, 32); n += 32;
-    for (int i = 0; i < 8; i++) buf[n++] = (uint8_t)(rlen >> (8 * i));
-    buf[n++] = (uint8_t)k->nst;
+    s2a_sha256 h; s2a_sha256_init(&h);
+    uint8_t head[32 + 8 + 2]; size_t n = 0;
+    memcpy(head, res, 32); n += 32;
+    for (int i = 0; i < 8; i++) head[n++] = (uint8_t)(rlen >> (8 * i));
+    head[n++] = (uint8_t)k->nst;
     const uint8_t mask = (uint8_t)((1u << k->nst) - 1u);
-    buf[n++] = (uint8_t)(k->c1_ok & mask);
+    head[n++] = (uint8_t)(k->c1_ok & mask);
+    s2a_sha256_update(&h, head, n);
     for (int st = 0; st < k->nst; st++)
-        if (k->c1_ok & (1u << st)) { memcpy(buf + n, k->c1[st], 0x100); n += 0x100; }
-    sha256(buf, n, out);
+        if (k->c1_ok & (1u << st)) {
+            const uint8_t len4[4] = {(uint8_t)k->c1_len[st], (uint8_t)(k->c1_len[st] >> 8), (uint8_t)(k->c1_len[st] >> 16), (uint8_t)(k->c1_len[st] >> 24)};
+            s2a_sha256_update(&h, len4, 4); s2a_sha256_update(&h, k->c1[st], k->c1_len[st]);
+        }
+    s2a_sha256_final(&h, out);
 }
 // 建好的程序挂上自己的比对键（结果摘要来自缓存文件头已校验的值 / 现编结果现算；阶段数与 c1 取自程序对象本身，与 build 用的是同一份）。
 static void entry_set_res(struct entry *e, const uint8_t rsha[32], uint64_t rlen, int nst) {
     struct alias_key k; memset(&k, 0, sizeof k);
     k.nst = nst; k.c1_ok = e->prog.c1_ok;
-    for (int st = 0; st < nst && st < RP_PROG_STAGES; st++) k.c1[st] = e->prog.c1[st];
+    for (int st = 0; st < nst && st < RP_PROG_STAGES; st++) { k.c1[st] = e->prog.c1[st]; k.c1_len[st] = e->prog.c1_len[st]; }
     alias_key_hash(rsha, rlen, &k, e->res_key);
     e->res_ok = 1;
 }
@@ -974,6 +999,9 @@ static struct entry *build(const uint8_t *bytes, size_t len, const struct s2a_so
       } }
     e->prog.z_raw = depth_clip_cap() == 1;   // 同 fill_facts：有管线裁剪深度时所有图形程序都不改写 z（预编库的程序另在取用处置 1）
     e->prog.color_out_mask = nst >= 2 && fp.stage[1].present ? fp.stage[1].fragment_output_map : 0xffffffffu;
+    // 顶点 / 几何阶段写层号：回放核心按分层通道开（八方旅人的 32x32x32 调色 LUT 每个实例写一层，单层通道只剩第 0 层 → 整幅画面黑）
+    for (int st = 0; st < nst && st < FD_MAX_STAGES; st += 2)
+        if (fp.stage[st].present && s2a_spirv_writes_layer((const uint32_t *)fp.stage[st].spirv, fp.stage[st].spirv_bytes)) e->prog.layer_out = 1;
     // 出包预编库按阶段分别取、拼成一份，拼时不过链接（现编走 linked 请求、缺的输出由编译器补）：片元读了上一段没写的
     //   位置，驱动按规范拒建管线（Adreno：input v_locN not declared in output from previous stage）。这份不用库，调用方
     //   libpack_mark_bad 后走现编——同「状态 / 声明对得上才用预编库」。
@@ -1027,7 +1055,7 @@ static struct entry *build(const uint8_t *bytes, size_t len, const struct s2a_so
         nvn_gpu_err err = {0};
         nvn_gpu_rc lr = nvn_gpu_shader_load(&src, &e->prog.sh[st], &err);
         if (!nvn_gpu_ok(lr)) { red_load(lr, &src, "shader_load_failed", err.why); e->failed = 1; }
-        if (views[st].c1 && views[st].c1_bytes >= 0x100) { memcpy(e->prog.c1[st], views[st].c1, 0x100); e->prog.c1_ok |= (uint8_t)(1u << st); }
+        prog_c1_take(&e->prog, st, views[st].c1, views[st].c1_bytes);
     }
     nvn_vk_program_free(&fp);
     if (e->failed) for (int st = 0; st < RP_PROG_STAGES; st++) if (e->prog.sh[st]) { nvn_gpu_shader_release(e->prog.sh[st]); e->prog.sh[st] = NULL; }
@@ -1613,7 +1641,7 @@ static struct entry *warm_work_run(const struct nvk_prog_rec *rec, int nst) {
     memset(views, 0, sizeof views);
     for (int st = 0; st < nst && st < 3; st++) {
         views[st].key = rec->keys[st];   // 拒收 / 合规核对行要靠它打程序键
-        if (rec->c1_ok & (1u << st)) { views[st].c1 = rec->c1[st]; views[st].c1_bytes = NVK_PROG_REC_C1_BYTES; }
+        if (rec->c1_ok & (1u << st)) { views[st].c1 = rec->c1[st]; views[st].c1_bytes = rec->c1_len[st]; }
     }
     // 预热清单不记绘制图元：几何程序这里取不到（topology 传 NULL → miss），等提交线程按本笔图元取
     if (!bytes && libpack_fetch(rec->identity, compute ? NULL : (const uint8_t (*)[8])rec->keys,
@@ -1915,7 +1943,7 @@ static struct entry *alias_try_fg(const uint8_t sha[32], const struct s2a_input_
     for (; got < nst; got++) {
         if (!s2a_source_acquire(id->keys[got], &v[got])) break;
         if (!v[got].complete) { s2a_source_release(v[got].ref); break; }
-        if (v[got].c1 && v[got].c1_bytes >= NVK_PROG_REC_C1_BYTES) { k.c1_ok |= (uint8_t)(1u << got); k.c1[got] = v[got].c1; }   // 与 build() 的 c1 判据同源
+        if (v[got].c1 && v[got].c1_bytes >= NVK_PROG_REC_C1_MIN) { k.c1_ok |= (uint8_t)(1u << got); k.c1[got] = v[got].c1; k.c1_len[got] = v[got].c1_bytes; }   // 与 build() 的 c1 判据同源（整段）
     }
     struct entry *e = got == nst ? alias_try(sha, 0, &k, adopted) : NULL;
     for (int st = 0; st < got; st++) s2a_source_release(v[st].ref);
@@ -1930,25 +1958,23 @@ static struct entry *alias_try_fg(const uint8_t sha[32], const struct s2a_input_
 static void prog_note_use(const uint8_t sha[32], uint32_t stages, int nst, const struct s2a_input_identity *id, const struct facts *f, const struct rp_prog *prog) {
     struct nvk_prog_rec rec; memset(&rec, 0, sizeof rec); memcpy(rec.identity, sha, 32); rec.stage_mask = stages; rec.lp_ok = libpack_state_ok(&f->gfx) ? 2 : 0;
     for (int st = 0; st < nst; st++) memcpy(rec.keys[st], id->keys[st], 8);
-    rec.c1_ok = (uint8_t)(prog->c1_ok & (uint8_t)((1u << nst) - 1u));
     for (int st = 0; st < nst; st++)
-        if (rec.c1_ok & (1u << st)) memcpy(rec.c1[st], prog->c1[st], NVK_PROG_REC_C1_BYTES);
+        if (prog->c1_ok & (1u << st)) (void)rec_c1_put(&rec, st, prog->c1[st], prog->c1_len[st]);
     // 程序对象本身也没有 c1（例如它是上一局按残缺清单预热出来的）：这一笔手上正好有源快照，补采一次，
     // 让清单在下一次落盘时被修好（这一局仍会跳过该笔，下一局不再跳）。
+    // 源快照钉到记完清单才放：记录里只带指针，清单在 note 里拷自己的副本。
+    struct s2a_source_entry_view v[RP_PROG_STAGES]; int held[RP_PROG_STAGES] = {0};
     if ((rec.c1_ok & (uint8_t)((1u << nst) - 1u)) != (uint8_t)((1u << nst) - 1u)) {
-        for (int st = 0; st < nst; st++) {
+        for (int st = 0; st < nst && st < RP_PROG_STAGES; st++) {
             if (rec.c1_ok & (1u << st)) continue;
-            struct s2a_source_entry_view v;
-            if (s2a_source_acquire(id->keys[st], &v)) {
-                if (v.complete && v.c1 && v.c1_bytes >= NVK_PROG_REC_C1_BYTES) {
-                    memcpy(rec.c1[st], v.c1, NVK_PROG_REC_C1_BYTES);
-                    rec.c1_ok |= (uint8_t)(1u << st);
-                }
-                s2a_source_release(v.ref);
+            if (s2a_source_acquire(id->keys[st], &v[st])) {
+                held[st] = 1;
+                if (v[st].complete) (void)rec_c1_put(&rec, st, v[st].c1, v[st].c1_bytes);
             }
         }
     }
     nvk_prog_warm_note(&rec);
+    for (int st = 0; st < RP_PROG_STAGES; st++) if (held[st]) s2a_source_release(v[st].ref);
 }
 
 // [提交线程] 三段式的第二、三段：先查已发布与在途（不重复准备），否则捕获快照 → 工作 → 发布。
@@ -2025,9 +2051,8 @@ static int resolve_slow(const struct rp_shader_req *q, const struct rp_prog **ou
         // 同一处的 c1 记账（原因见 prog_note_use）：预建对象里有 c1 就记进清单。
         { struct nvk_prog_rec rec; memset(&rec, 0, sizeof rec); memcpy(rec.identity, sha, 32); rec.stage_mask = stages; rec.lp_ok = libpack_state_ok(&f.gfx) ? 2 : 0;
           for (int st = 0; st < nst; st++) memcpy(rec.keys[st], id.keys[st], 8);
-          rec.c1_ok = (uint8_t)(win->prog.c1_ok & (uint8_t)((1u << nst) - 1u));
           for (int st = 0; st < nst; st++)
-              if (rec.c1_ok & (1u << st)) memcpy(rec.c1[st], win->prog.c1[st], NVK_PROG_REC_C1_BYTES);
+              if (win->prog.c1_ok & (1u << st)) (void)rec_c1_put(&rec, st, win->prog.c1[st], win->prog.c1_len[st]);
           nvk_prog_warm_note(&rec); }
         return 0;
     }
@@ -2077,12 +2102,6 @@ static int resolve_slow(const struct rp_shader_req *q, const struct rp_prog **ou
     }
     idg_work(group, atomic_load(&g_n_compiled) > dg_c0);   // 身份粒度诊断：这份身份是现场编出来的还是读盘/离线库拿到的
     idg_log();
-    // 快照里的 c1 逐字节抄进记录：预热产品必须与这次真实解析的程序逐位一致（rp_draw 对 c1 不齐直接跳过绘制）。
-    for (int st = 0; st < nst; st++)
-        if (snap->views[st].c1 && snap->views[st].c1_bytes >= NVK_PROG_REC_C1_BYTES) {
-            rec.c1_ok |= (uint8_t)(1u << st);
-            memcpy(rec.c1[st], snap->views[st].c1, NVK_PROG_REC_C1_BYTES);
-        }
     snap_free(snap);
     struct entry *have = NULL;
     int failed = 0;
@@ -2103,7 +2122,11 @@ static int resolve_slow(const struct rp_shader_req *q, const struct rp_prog **ou
     }
     *out = &use->prog;
     if (reusable && use->fact_ok) fact_cache_keep_mask(&id, fact_base, use->fact_mask, &use->prog);
-    nvk_prog_warm_note(&rec);   // 真实 resolve 成功：记身份 + uses（含 c1）
+    // c1 整段从发布出去的程序对象抄（它就是按这次快照建的，逐字节一致；对象归缓存、活到会话收尾，快照已经放了）：
+    //   预热产品必须与这次真实解析的程序逐位一致（rp_draw 对 c1 不齐直接跳过绘制）。
+    for (int st = 0; st < nst; st++)
+        if (use->prog.c1_ok & (1u << st)) (void)rec_c1_put(&rec, st, use->prog.c1[st], use->prog.c1_len[st]);
+    nvk_prog_warm_note(&rec);   // 真实 resolve 成功：记身份 + uses（含 c1 整段）
     prog_tally_log();
     return 0;
 }
@@ -2152,6 +2175,9 @@ static struct entry *build_compute(const uint8_t *bytes, size_t len, const struc
             snprintf(nm, sizeof nm, "compute_binding_kind_%d_slot_%d_map_%d", b->kind, b->slot, b->kind == 1 ? (int)cp.storage[i].mapping : 0);
             with_program_key(wy, sizeof wy, "cs", k);
             red1(nm, wy); e->failed = 1; break; }
+        // 贴图字在游戏用户常量缓冲里的类型 3 句柄（#1594 片 10）：同图形阶段，贴图字所在的常量槽 / 偏移和常量采样器来源进程序的 usrc 表（src_reg2 = 表下标），
+        //   回放派发时从计算阶段绑的常量缓冲读贴图字（rp_draw.c rp_dispatch）
+        if (le->src_kind == NVN_RB_TEXU && !usrc_put(&e->prog, b, le)) { red1("too_many_uniform_handles", "cs"); e->failed = 1; break; }
         if (le->cls == NVN_GPU_RES_TBUF && le->src_kind != NVN_RB_TBUF) { red1("texture_buffer_replay_unsupported", "cs"); e->failed = 1; break; }
         le->stages = 1u << NVN_GPU_SH_CS;
         if (b->kind == 2 || b->kind == 3) sampled_decl(cp.stage.spirv, cp.stage.spirv_bytes, (uint32_t)b->set, (uint32_t)b->binding,   // 3 = 存储图像：数值类与声明格式给回放选视图格式
@@ -2177,7 +2203,7 @@ static struct entry *build_compute(const uint8_t *bytes, size_t len, const struc
         nvn_gpu_err err = {0};
         nvn_gpu_rc lr = nvn_gpu_shader_load(&ss, &e->prog.sh[0], &err);
         if (!nvn_gpu_ok(lr)) { red_load(lr, &ss, "compute_shader_load_failed", err.why); e->failed = 1; }
-        if (src->c1 && src->c1_bytes >= 0x100) { memcpy(e->prog.c1[0], src->c1, 0x100); e->prog.c1_ok |= 1; }
+        prog_c1_take(&e->prog, 0, src->c1, src->c1_bytes);
     }
     nvn_vk_program_free_compute(&cp);
     return e;
@@ -2212,8 +2238,7 @@ static void compute_warm_note(const struct rp_prog *p, const struct s2a_direct_c
     struct nvk_prog_rec rec = {0};
     memcpy(rec.identity, p->identity, 32); rec.stage_mask = 32;
     memcpy(rec.keys[0], rp_S.skey[5], 8);
-    rec.c1_ok = p->c1_ok & 1;
-    if (rec.c1_ok) memcpy(rec.c1[0], p->c1[0], NVK_PROG_REC_C1_BYTES);
+    if (p->c1_ok & 1) (void)rec_c1_put(&rec, 0, p->c1[0], p->c1_len[0]);
     int unaligned = 0;
     for (int i = 0; i < 16; i++)
         if (rp_S.ssbo[5][i].addr && pc->storage_buffer_offset_alignment &&
@@ -2572,7 +2597,7 @@ int nvk_prog_warm_build(const struct nvk_prog_rec *rec) {
     if (rec->stage_mask != 32u && alias_on()) {   // 结果合并目前只覆盖图形程序
         struct alias_key ak; memset(&ak, 0, sizeof ak);
         ak.nst = nst; ak.c1_ok = (uint8_t)(rec->c1_ok & (uint8_t)((1u << nst) - 1u));
-        for (int st = 0; st < nst; st++) ak.c1[st] = rec->c1[st];
+        for (int st = 0; st < nst; st++) { ak.c1[st] = rec->c1[st]; ak.c1_len[st] = rec->c1_len[st]; }
         if (alias_try(rec->identity, 1, &ak, NULL)) { nvk_prog_warm_stat_build(0); return 0; }
     }
     uint64_t epoch;

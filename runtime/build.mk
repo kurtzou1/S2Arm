@@ -92,9 +92,9 @@ endif
 #   （纯 Python，Windows / Mac 同一份；镜像包 ios/embed.py，运行时 runtime/src/imgpack.c 映射，见 docs/接口_原生层.md「外置镜像包」）。
 #   出壳（含渲染器内部辅助库、主程序 ad-hoc 签名带内存权限、壳清单）走 pack/shell_build.sh。各目录在自己的 build.mk 里往 IOS_SRCS / IOS_LIBS 追加（C# 静态库、渲染器等）。
 # Apple TV（S2A_APPLE_OS=tvos，11-15）：电视上没有的 iPhone 界面整文件不编（触屏虚拟手柄与它的设置 / 金手指 / Mod 页、「文件」App 存档导入导出、
-#   外接屏、手机当手柄、外接键盘改键页（入口在 vpad.m 齿轮菜单）、触控板 / 鼠标（指针锁定 tvOS 没有）），它们被别处调到的入口由 ios/tv_host.m 给电视版；iOS 不编 tv_host.m
+#   外接屏、手机当手柄、外接键盘改键页（含它的两层存取 keyboard_store.m）/ 分配玩家（入口在 vpad.m 齿轮菜单）、触控板 / 鼠标（指针锁定 tvOS 没有）），它们被别处调到的入口由 ios/tv_host.m 给电视版；iOS 不编 tv_host.m
 TVOS_EXCLUDE := ios/vpad.m ios/vpad_settings.m ios/vpad_mods.m ios/vpad_cheats.m ios/vpad_shell.m ios/app_settings.m ios/cpatch_settings.m \
-  ios/touch_config.m ios/save_transfer.m ios/extdisplay.m ios/phone_motion.m ios/keyboard_settings.m ios/mouse.m
+  ios/touch_config.m ios/save_transfer.m ios/extdisplay.m ios/phone_motion.m ios/keyboard_settings.m ios/keyboard_store.m ios/mouse.m ios/player_assign.m
 IOS_SRCS   += $(HOST_SRCS) $(filter-out $(if $(filter tvos,$(S2A_APPLE_OS)),$(TVOS_EXCLUDE),ios/tv_host.m),$(sort $(wildcard ios/*.m)))
 # 桌面显示名（pack/ipa.sh 传「<游戏自带名> S2Arm[ 后缀]」，取名见 pack/display_name.py；注释单独成行：make 会把值后到 # 前的空格算进值）
 IOS_DISPLAY ?= S2Arm

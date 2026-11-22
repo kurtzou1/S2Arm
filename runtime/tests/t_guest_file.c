@@ -46,11 +46,11 @@ int main(void) {
         if (x != MAP_FAILED) { long long g0 = fp(); for (size_t i = 0; i < (64u << 20); i += 64) x[i] = 3; long long dg = fp() - g0;
             CHECK(dg < (8ll << 20) && x[12345 * 64] == 3, "⑤ 写满 64 MB：实占 +%lld KB（期望 < 8192 KB）", dg >> 10); }
     }
-    {   // ⑥' 挖不挖（s2a_guest_carve_wanted，11-14）：期望按规则手写——显式设的照办；内存不够那档挖；剩余 ≥ 门槛挖；剩余未知（0）/ 不够不挖
+    {   // ⑥' 挖不挖（s2a_guest_carve_wanted，11-14）：期望按规则手写——显式设的照办；内存不够那档不挖；剩余 ≥ 门槛挖；剩余未知（0）/ 不够不挖
         int s2a_guest_carve_wanted(const char *, int, uint64_t, uint64_t); const uint64_t G = 1ull << 30, MIN = 7 * G;
         CHECK(s2a_guest_carve_wanted("0", 1, 8 * G, MIN) == 0, "⑥' S2A_GUEST_FILE_CARVE=0：不挖（哪怕内存不够那档、剩余够）");
         CHECK(s2a_guest_carve_wanted("1", 0, 0, MIN) == 1, "⑥' S2A_GUEST_FILE_CARVE=1：挖（哪怕剩余未知）");
-        CHECK(s2a_guest_carve_wanted(NULL, 1, 1 * G, MIN) == 1, "⑥' 内存不够那档：挖");
+        CHECK(s2a_guest_carve_wanted(NULL, 1, 8 * G, MIN) == 0, "⑥' 内存不够那档：不挖（物理映射区走文件兜底，D-YDKK），哪怕剩余够");
         CHECK(s2a_guest_carve_wanted(NULL, 0, 8189ull << 20, MIN) == 1, "⑥' Duo 档剩余 8189 MB ≥ 7168：挖");
         CHECK(s2a_guest_carve_wanted(NULL, 0, 6141ull << 20, MIN) == 0, "⑥' 17 Pro Max 档剩余 6141 MB < 7168：不挖（挖了实占峰约 6.1 GB，贴着上限）");
         CHECK(s2a_guest_carve_wanted(NULL, 0, 3000ull << 20, MIN) == 0, "⑥' 剩余 3000 MB < 7168：不挖");

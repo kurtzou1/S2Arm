@@ -88,7 +88,7 @@ int main(void) { @autoreleasepool {
     char version[16]; snprintf(version, sizeof version, "%d.%d", major, minor);
     CHECK(!strncmp(eglQueryString(d, 0x3054), version, strlen(version)));
     CHECK(!strcmp(eglQueryString(d, 0x308D), "OpenGL OpenGL_ES"));
-    CHECK(!strstr(eglQueryString(d, 0x3055), "EGL_KHR_create_context"));
+    CHECK(strstr(eglQueryString(d, 0x3055), "EGL_KHR_create_context"));   // #2057：SDL 要 ES 3 上下文先查它
     CHECK(!eglQueryString(d, 0xDEAD) && eglGetError() == 0x300C);
     CHECK(eglQueryAPI() == 0x30A0 && eglBindAPI(0x30A2));
     CHECK(!eglBindAPI(0x30A1)); // Pending main-thread error survives another thread.
@@ -113,6 +113,21 @@ int main(void) { @autoreleasepool {
     CHECK(!eglWaitNative(0xDEAD) && eglGetError() == 0x300C);
     CHECK(eglWaitNative(0x305B) && eglWaitGL()); // No current context is a specified no-op.
     CHECK(eglBindAPI(0x30A0));
+    {   // 上下文属性（#2057）：版本不超出 ES 3.2 就建；超出回 EGL_BAD_MATCH；认不出的属性 / 标志位回 EGL_BAD_ATTRIBUTE
+        EGLint es30[] = {0x3098,3,0x30FB,0,0x30FC,1,0x31BD,0x31BE,0x3038}, es33[] = {0x3098,3,0x30FB,3,0x3038}, es4[] = {0x3098,4,0x3038};
+        EGLint bad_attr[] = {0xDEAD,1,0x3038}, bad_flags[] = {0x30FC,8,0x3038}, bad_reset[] = {0x31BD,7,0x3038};
+        EGLContext ok = eglCreateContext(d, cfg, NULL, es30); CHECK(ok); CHECK(eglDestroyContext(d, ok));
+        CHECK(!eglCreateContext(d, cfg, NULL, es33) && eglGetError() == 0x3009);
+        CHECK(!eglCreateContext(d, cfg, NULL, es4) && eglGetError() == 0x3009);
+        CHECK(!eglCreateContext(d, cfg, NULL, bad_attr) && eglGetError() == 0x3004);
+        CHECK(!eglCreateContext(d, cfg, NULL, bad_flags) && eglGetError() == 0x3004);
+        CHECK(!eglCreateContext(d, cfg, NULL, bad_reset) && eglGetError() == 0x3004);
+        CHECK(eglBindAPI(0x30A2));   // 桌面 GL：4.5 核心配置档建得了，4.6 / 配置档 0 不行
+        EGLint gl45[] = {0x3098,4,0x30FB,5,0x30FD,1,0x3038}, gl46[] = {0x3098,4,0x30FB,6,0x3038}, gl_noprof[] = {0x30FD,0,0x3038};
+        ok = eglCreateContext(d, cfg, NULL, gl45); CHECK(ok); CHECK(eglDestroyContext(d, ok));
+        CHECK(!eglCreateContext(d, cfg, NULL, gl46) && eglGetError() == 0x3009);
+        CHECK(!eglCreateContext(d, cfg, NULL, gl_noprof) && eglGetError() == 0x3004);
+        CHECK(eglBindAPI(0x30A0)); }
     EGLContext c = eglCreateContext(d, cfg, NULL, NULL); CHECK(c);
     EGLint size[] = {0x3057,37,0x3056,19,0x3038};
     EGLSurface s = eglCreatePbufferSurface(d, cfg, size); CHECK(s);

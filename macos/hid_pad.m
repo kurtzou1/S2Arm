@@ -14,6 +14,7 @@
 #include "hid_pad.h"
 #include "xbox_gip_relay.h"
 #include <pthread.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -772,13 +773,16 @@ int s2a_mac_hid_betop_left(uint64_t entry, int16_t left[2]) {
     return fresh;
 }
 
+static _Atomic int g_motion_enabled = 1;   // 启动设置「体感」：front_mac.m s2a_pad_set_motion_enabled 设
+void s2a_mac_hid_pad_set_motion_enabled(int enabled) { atomic_store(&g_motion_enabled, enabled != 0); }
+int s2a_mac_hid_pad_motion_enabled(void) { return atomic_load(&g_motion_enabled); }
 int s2a_mac_hid_pad_motion(const void *id, s2a_pad_motion *out) {
     int ok = 0;
     pthread_mutex_lock(&g_mu);
     for (int i = 0; i < S2A_HID_PAD_MAX; i++) {
         hp_dev *d = &g_dev[i];
         if (id != (const void *)d || (!d->dev && !d->is_xbox) || !d->motion_us) continue;
-        if (hp_now_us() - d->motion_us < 200000) { *out = d->motion; ok = 1; }
+        if (s2a_hid_pad_motion_ok(atomic_load(&g_motion_enabled), hp_now_us(), d->motion_us)) { *out = d->motion; ok = 1; }
         break;
     }
     pthread_mutex_unlock(&g_mu);

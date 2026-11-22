@@ -646,6 +646,15 @@ uint64_t s2a_mem_span_now(void) {
     if (mm) e[n++] = mtop;
     return s2a_span_pick(L.win_base, g_span_lim, e, n);
 }
+// 本局该记下的跨度（vawin.c 心跳 span_note / 碰底崩溃 s2a_window_span_crash 按名字取）：s2a_mem_span_now 过一遍贴顶规则（vawin.c s2a_span_learn_ok），贴顶且
+//   没碰过窗口外 = 0（不记）。越界映射数 g_va_short；远端缺页数 far.c。两者按名字取（同 s2a_window_span_seen 的取法）：只链 svc_mem.c 的单测 /
+//   不编远端的平台取不到 → 规则取不到照原值、远端按 0
+uint64_t s2a_mem_span_learn(void) {
+    static int (*ok)(uint64_t, uint64_t, uint64_t, uint64_t); static uint64_t (*farf)(void); static int looked;
+    if (!looked) { ok = (int (*)(uint64_t, uint64_t, uint64_t, uint64_t))dlsym(RTLD_DEFAULT, "s2a_span_learn_ok"); farf = (uint64_t (*)(void))dlsym(RTLD_DEFAULT, "s2a_far_faults_total"); looked = 1; }
+    uint64_t s = s2a_mem_span_now();
+    return !ok || ok(s, L.win_size, atomic_load(&g_va_short), farf ? farf() : 0) ? s : 0;
+}
 // 本款标准布局的窗口大小（vawin.c 构造函数占窗口用，早于 s2a_mem_init）：读不到 0
 uint64_t s2a_npdm_window_need(const char *npdm) {
     uint32_t t, ms; uint64_t sr, pid;

@@ -40,7 +40,16 @@ ssize_t nvk_warm_transaction_test_read(int fd,void *data,size_t size) {
 }
 static struct nvk_prog_rec record(unsigned id) {
  struct nvk_prog_rec r;memset(&r,0,sizeof r);memset(r.identity,(int)id,sizeof r.identity);
- r.stage_mask=1;r.c1_ok=1;memset(r.c1[0],(int)(id+10),sizeof r.c1[0]);r.uses=1;return r;
+ static uint8_t c1buf[256][NVK_PROG_REC_C1_MIN];   /* c1 整段：记录只带指针，按 id 各用一块，note 时清单拷自己的副本 */
+ memset(c1buf[id&255],(int)(id+10),NVK_PROG_REC_C1_MIN);
+ r.stage_mask=1;r.c1_ok=1;r.c1[0]=c1buf[id&255];r.c1_len[0]=NVK_PROG_REC_C1_MIN;r.uses=1;return r;
+}
+/* 记录里的 c1 是清单自己的副本：比长度与内容，不比指针。 */
+static int same_c1(const struct nvk_prog_rec *a,const struct nvk_prog_rec *b){
+ if(a->c1_ok!=b->c1_ok)return 0;
+ for(int st=0;st<NVK_PROG_REC_STAGES;st++)if(a->c1_ok&(1u<<st)){
+  if(a->c1_len[st]!=b->c1_len[st]||!a->c1[st]||!b->c1[st]||memcmp(a->c1[st],b->c1[st],a->c1_len[st]))return 0;}
+ return 1;
 }
 static void remove_file(void) { if(unlink(file_path)) require(errno==ENOENT,"remove owned cache file"); }
 static void write_trusted(const struct nvk_prog_rec *disk) {
@@ -86,7 +95,8 @@ static void test_duplicate(int live_uses) {
  struct nvk_prog_rec disk=record(22),live=record(22),out;
  disk.uses=5;write_trusted(&disk);
  live.uses=(uint32_t)live_uses;live.stage_mask=3;live.c1_ok=3;live.lp_ok=1;
- memset(live.keys,77,sizeof live.keys);memset(live.c1,99,sizeof live.c1);
+ static uint8_t c99[NVK_PROG_REC_C1_MIN];memset(c99,99,sizeof c99);
+ memset(live.keys,77,sizeof live.keys);for(int st=0;st<2;st++){live.c1[st]=c99;live.c1_len[st]=sizeof c99;}
  nvk_prog_warm_note(&live);
  check(nvk_prog_warm_load()==1,"one disk record accepted");
  int have=nvk_prog_warm_take(&out);check(have==1,"one merged record planned");
@@ -96,7 +106,7 @@ static void test_duplicate(int live_uses) {
   check(out.stage_mask==live.stage_mask && out.c1_ok==live.c1_ok && out.lp_ok==live.lp_ok,
         "current session metadata retained");
   check(!memcmp(out.keys,live.keys,sizeof live.keys),"current keys retained");
-  check(!memcmp(out.c1,live.c1,sizeof live.c1),"current constants retained");
+  check(same_c1(&out,&live),"current constants retained");
  }
  check(nvk_prog_warm_take(&out)==0,"duplicate scheduled only once");
  struct nvk_prog_warm_stats stats;nvk_prog_warm_stats(&stats);
@@ -116,10 +126,10 @@ static void test_disk_plan(void) {
  check(nvk_prog_warm_pending()==2,"plan excludes live-only note");
  /* Neither new notes nor metadata updates may rewrite the frozen plan. */
  nvk_prog_warm_note(&late);struct nvk_prog_rec updated=hot;
- memset(updated.c1[0],88,sizeof updated.c1[0]);nvk_prog_warm_note(&updated);
+ static uint8_t c88[NVK_PROG_REC_C1_MIN];memset(c88,88,sizeof c88);updated.c1[0]=c88;updated.c1_len[0]=sizeof c88;nvk_prog_warm_note(&updated);
  int have=nvk_prog_warm_take(&out);check(have==1,"first plan entry exists");
  if(have){check(!memcmp(out.identity,hot.identity,32),"disk hot entry first");
- check(out.uses==9 && !memcmp(out.c1,hot.c1,sizeof hot.c1),"plan unchanged by later note");}
+ check(out.uses==9 && same_c1(&out,&hot),"plan unchanged by later note");}
  have=nvk_prog_warm_take(&out);check(have==1,"second plan entry exists");
  if(have)check(!memcmp(out.identity,cold.identity,32),"disk cold entry second");
  check(nvk_prog_warm_take(&out)==0,"no live-only or late note in plan");

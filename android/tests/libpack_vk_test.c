@@ -19,6 +19,7 @@
 #include "direct/libpack_vk.h"
 #include "nvn/nvn_vk_program_result.h"
 #include "libpack_texture_spirv.h"
+#include "../../graphics/nvn/gfx/nvn/include/nvn.h"
 
 static int fails;
 #define CHECK(cond, what) do { if (!(cond)) { printf("FAIL: %s\n", (what)); fails++; } } while (0)
@@ -164,6 +165,83 @@ static const uint32_t CAP_I64A_SPV[] = { 0x07230203u, 0x00010000u, 0u, 3u, 0u, 0
 static const char *CS_F64_JSON =
     "{\"key\":\"f0f1f2f3f4f5f6f7_b\",\"stage\":\"cs\",\"dm_ctl\":\"f0f1f2f3f4f5f6f7\",\"bindings\":[]}";
 
+// 图形 c0（驱动常量段）夹具：glslang 编出的真 SPIR-V（-V --target-env vulkan1.1），变量 c0 = set 0 的 std140 Uniform Block { uvec4 data[160] }（0xA00 字节，
+//   同回放给的驱动段大小）。片元读 data[96].x（0x600）、binding 22 = arg_id 3 × 6 + 片元阶段号 4；顶点读 data[96].x、binding 6 = arg_id 1 × 6 + 阶段号 0。
+static const uint32_t libpack_c0_frag_spv[] = {
+    0x07230203, 0x00010300, 0x0008000b, 0x00000019, 0x00000000, 0x00020011,
+    0x00000001, 0x0006000b, 0x00000001, 0x4c534c47, 0x6474732e, 0x3035342e,
+    0x00000000, 0x0003000e, 0x00000000, 0x00000001, 0x0006000f, 0x00000004,
+    0x00000004, 0x6e69616d, 0x00000000, 0x00000009, 0x00030010, 0x00000004,
+    0x00000007, 0x00030003, 0x00000002, 0x000001c2, 0x00040005, 0x00000004,
+    0x6e69616d, 0x00000000, 0x00030005, 0x00000009, 0x0000006f, 0x00030005,
+    0x0000000e, 0x00003043, 0x00050006, 0x0000000e, 0x00000000, 0x61746164,
+    0x00000000, 0x00030005, 0x00000010, 0x00003063, 0x00040047, 0x00000009,
+    0x0000001e, 0x00000000, 0x00040047, 0x0000000d, 0x00000006, 0x00000010,
+    0x00030047, 0x0000000e, 0x00000002, 0x00050048, 0x0000000e, 0x00000000,
+    0x00000023, 0x00000000, 0x00040047, 0x00000010, 0x00000021, 0x00000016,
+    0x00040047, 0x00000010, 0x00000022, 0x00000000, 0x00020013, 0x00000002,
+    0x00030021, 0x00000003, 0x00000002, 0x00030016, 0x00000006, 0x00000020,
+    0x00040017, 0x00000007, 0x00000006, 0x00000004, 0x00040020, 0x00000008,
+    0x00000003, 0x00000007, 0x0004003b, 0x00000008, 0x00000009, 0x00000003,
+    0x00040015, 0x0000000a, 0x00000020, 0x00000000, 0x00040017, 0x0000000b,
+    0x0000000a, 0x00000004, 0x0004002b, 0x0000000a, 0x0000000c, 0x000000a0,
+    0x0004001c, 0x0000000d, 0x0000000b, 0x0000000c, 0x0003001e, 0x0000000e,
+    0x0000000d, 0x00040020, 0x0000000f, 0x00000002, 0x0000000e, 0x0004003b,
+    0x0000000f, 0x00000010, 0x00000002, 0x00040015, 0x00000011, 0x00000020,
+    0x00000001, 0x0004002b, 0x00000011, 0x00000012, 0x00000000, 0x0004002b,
+    0x00000011, 0x00000013, 0x00000060, 0x0004002b, 0x0000000a, 0x00000014,
+    0x00000000, 0x00040020, 0x00000015, 0x00000002, 0x0000000a, 0x00050036,
+    0x00000002, 0x00000004, 0x00000000, 0x00000003, 0x000200f8, 0x00000005,
+    0x00070041, 0x00000015, 0x00000016, 0x00000010, 0x00000012, 0x00000013,
+    0x00000014, 0x0004003d, 0x0000000a, 0x00000017, 0x00000016, 0x0006000c,
+    0x00000007, 0x00000018, 0x00000001, 0x00000040, 0x00000017, 0x0003003e,
+    0x00000009, 0x00000018, 0x000100fd, 0x00010038,
+};
+static const uint32_t libpack_c0_vert_spv[] = {
+    0x07230203, 0x00010300, 0x0008000b, 0x00000022, 0x00000000, 0x00020011,
+    0x00000001, 0x0006000b, 0x00000001, 0x4c534c47, 0x6474732e, 0x3035342e,
+    0x00000000, 0x0003000e, 0x00000000, 0x00000001, 0x0006000f, 0x00000000,
+    0x00000004, 0x6e69616d, 0x00000000, 0x0000000d, 0x00030003, 0x00000002,
+    0x000001c2, 0x00040005, 0x00000004, 0x6e69616d, 0x00000000, 0x00060005,
+    0x0000000b, 0x505f6c67, 0x65567265, 0x78657472, 0x00000000, 0x00060006,
+    0x0000000b, 0x00000000, 0x505f6c67, 0x7469736f, 0x006e6f69, 0x00070006,
+    0x0000000b, 0x00000001, 0x505f6c67, 0x746e696f, 0x657a6953, 0x00000000,
+    0x00070006, 0x0000000b, 0x00000002, 0x435f6c67, 0x4470696c, 0x61747369,
+    0x0065636e, 0x00070006, 0x0000000b, 0x00000003, 0x435f6c67, 0x446c6c75,
+    0x61747369, 0x0065636e, 0x00030005, 0x0000000d, 0x00000000, 0x00030005,
+    0x00000013, 0x00003043, 0x00050006, 0x00000013, 0x00000000, 0x61746164,
+    0x00000000, 0x00030005, 0x00000015, 0x00003063, 0x00030047, 0x0000000b,
+    0x00000002, 0x00050048, 0x0000000b, 0x00000000, 0x0000000b, 0x00000000,
+    0x00050048, 0x0000000b, 0x00000001, 0x0000000b, 0x00000001, 0x00050048,
+    0x0000000b, 0x00000002, 0x0000000b, 0x00000003, 0x00050048, 0x0000000b,
+    0x00000003, 0x0000000b, 0x00000004, 0x00040047, 0x00000012, 0x00000006,
+    0x00000010, 0x00030047, 0x00000013, 0x00000002, 0x00050048, 0x00000013,
+    0x00000000, 0x00000023, 0x00000000, 0x00040047, 0x00000015, 0x00000021,
+    0x00000006, 0x00040047, 0x00000015, 0x00000022, 0x00000000, 0x00020013,
+    0x00000002, 0x00030021, 0x00000003, 0x00000002, 0x00030016, 0x00000006,
+    0x00000020, 0x00040017, 0x00000007, 0x00000006, 0x00000004, 0x00040015,
+    0x00000008, 0x00000020, 0x00000000, 0x0004002b, 0x00000008, 0x00000009,
+    0x00000001, 0x0004001c, 0x0000000a, 0x00000006, 0x00000009, 0x0006001e,
+    0x0000000b, 0x00000007, 0x00000006, 0x0000000a, 0x0000000a, 0x00040020,
+    0x0000000c, 0x00000003, 0x0000000b, 0x0004003b, 0x0000000c, 0x0000000d,
+    0x00000003, 0x00040015, 0x0000000e, 0x00000020, 0x00000001, 0x0004002b,
+    0x0000000e, 0x0000000f, 0x00000000, 0x00040017, 0x00000010, 0x00000008,
+    0x00000004, 0x0004002b, 0x00000008, 0x00000011, 0x000000a0, 0x0004001c,
+    0x00000012, 0x00000010, 0x00000011, 0x0003001e, 0x00000013, 0x00000012,
+    0x00040020, 0x00000014, 0x00000002, 0x00000013, 0x0004003b, 0x00000014,
+    0x00000015, 0x00000002, 0x0004002b, 0x0000000e, 0x00000016, 0x00000060,
+    0x0004002b, 0x00000008, 0x00000017, 0x00000000, 0x00040020, 0x00000018,
+    0x00000002, 0x00000008, 0x0004002b, 0x00000006, 0x0000001d, 0x00000000,
+    0x0004002b, 0x00000006, 0x0000001e, 0x3f800000, 0x00040020, 0x00000020,
+    0x00000003, 0x00000007, 0x00050036, 0x00000002, 0x00000004, 0x00000000,
+    0x00000003, 0x000200f8, 0x00000005, 0x00070041, 0x00000018, 0x00000019,
+    0x00000015, 0x0000000f, 0x00000016, 0x00000017, 0x0004003d, 0x00000008,
+    0x0000001a, 0x00000019, 0x000500c7, 0x00000008, 0x0000001b, 0x0000001a,
+    0x00000009, 0x00040070, 0x00000006, 0x0000001c, 0x0000001b, 0x00070050,
+    0x00000007, 0x0000001f, 0x0000001c, 0x0000001d, 0x0000001d, 0x0000001e,
+    0x00050041, 0x00000020, 0x00000021, 0x0000000d, 0x0000000f, 0x0003003e,
+    0x00000021, 0x0000001f, 0x000100fd, 0x00010038,
+};
 static int has(const uint8_t *j, const char *sub) { return j && strstr((const char *)j, sub) != NULL; }
 
 // 原生几何阶段（DshVk.CompileGeometry 的 _vg<t>.json / _vg<t>.spv，种类 112+t / 120+t）：三角输入（t = 3）。
@@ -273,6 +351,42 @@ static const uint32_t FO2_SPV[] = {
     0x00000011u, 0x00000002u, 0x00000003u, 0x00050036u, 0x00000006u, 0x00000001u, 0x00000000u, 0x00000007u,
     0x000200f8u, 0x00000012u, 0x000100fdu, 0x00010038u,
 };
+// 图形 c0 用例：写一份 vs+fs 容器（g_dir）→ 打开 → 合成 vs+fs 程序 → 关。返回 s2a_libpack_program_v1 的 rc。
+static int c0_program(const char *vs_json, const void *vs_spv, size_t vs_n, const char *ps_json, const void *ps_spv, size_t ps_n,
+                      uint8_t **j, size_t *jl, char *why, size_t why_size) {
+    struct trec r[4] = {
+        { .key = 0x0123456789abcdef, .kind = 1,  .len = (uint32_t)strlen(vs_json) },
+        { .key = 0x0123456789abcdef, .kind = 52, .len = (uint32_t)vs_n },
+        { .key = 0x1032547698badcfe, .kind = 1,  .len = (uint32_t)strlen(ps_json) },
+        { .key = 0x1032547698badcfe, .kind = 52, .len = (uint32_t)ps_n },
+    };
+    const uint8_t *p[4] = { (const uint8_t *)vs_json, vs_spv, (const uint8_t *)ps_json, ps_spv };
+    size_t n[4] = { strlen(vs_json), vs_n, strlen(ps_json), ps_n };
+    uint8_t keys[6][8] = {{0}};
+    const uint8_t kv[8] = { 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef }, kp[8] = { 0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe };
+    memcpy(keys[0], kv, 8); memcpy(keys[1], kp, 8);
+    if (mk_pack(r, 4, p, n, 1)) return -9;
+    struct s2a_libpack *lp = NULL;
+    if (s2a_libpack_open(&lp, g_dir) != 1 || !lp) return -9;
+    *j = NULL; *jl = 0;
+    int rc = s2a_libpack_program_v1(lp, keys, 0x3, NULL, 1, "h", "c", j, jl, why, why_size);
+    s2a_libpack_close(lp);
+    return rc;
+}
+// 把 c0 片元 SPIR-V 改成「不能证实」的几种：0 = Block 改 BufferBlock（旧式存储缓冲）、1 = Uniform 存储类改 StorageBuffer、2 = 描述符集改 1、
+//   3 = 输出变量 o 也带 Binding 22（同一绑定号两个变量，指不出是哪一个）
+static void c0_patch_spv(uint32_t *w, size_t nw, int what) {
+    for (size_t i = 5; i < nw; ) {
+        uint32_t op = w[i] & 0xffff, wc = w[i] >> 16;
+        if (what == 0 && op == 71 && wc == 3 && w[i + 2] == 2) w[i + 2] = 3;
+        if (what == 1 && op == 32 && w[i + 2] == 2) w[i + 2] = 12;
+        if (what == 1 && op == 59 && w[i + 3] == 2) w[i + 3] = 12;
+        if (what == 2 && op == 71 && wc == 4 && w[i + 2] == 34) w[i + 3] = 1;
+        if (what == 3 && op == 71 && wc == 4 && w[i + 2] == 30) { w[i + 2] = 33; w[i + 3] = 22; }   // OpDecorate %o Location 0 → Binding 22
+        i += wc;
+    }
+}
+
 int main(void) {
     const char *tmp = getenv("TMPDIR"); if (!tmp || !*tmp) tmp = "/tmp";
     char tmpl[TMPL_CAP];
@@ -699,6 +813,26 @@ int main(void) {
         CHECK(s2a_libpack_misses() == m0 + 4, "miss counter +4");
     }
 
+    // The existing VS and FS keys are present. A tessellation stage must make the whole program miss.
+    {
+        const uint8_t keys[6][8] = {
+            {0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef},
+            {0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe},
+            {0x11}, {0x22},
+        };
+        const uint32_t vf = NVN_SHADER_STAGE_VERTEX_BIT | NVN_SHADER_STAGE_FRAGMENT_BIT;
+        const uint32_t tcs = NVN_SHADER_STAGE_TESS_CONTROL_BIT, tes = NVN_SHADER_STAGE_TESS_EVALUATION_BIT;
+        const uint32_t masks[] = {vf | tcs, vf | tes, vf | tcs | tes};
+        const uint64_t m0 = s2a_libpack_misses();
+        for (size_t i = 0; i < sizeof masks / sizeof masks[0]; i++) {
+            uint8_t *j = NULL; size_t jl = 1; char w[192] = "";
+            int rc = s2a_libpack_program_v1(lp, keys, masks[i], NULL, 1, "h", "c", &j, &jl, w, sizeof w);
+            CHECK(rc == S2A_LIBPACK_MISS && !j && !jl, "tessellation stage → MISS, no partial program");
+            free(j);
+        }
+        CHECK(s2a_libpack_misses() == m0 + 3, "tessellation masks count as three misses");
+    }
+
     // ---- reject：dm_ctl 不符 / spv 头坏 / 记录越界（vs 键是好的，坏在 fs 键——一段坏整个程序 reject）----
     {
         char w[192] = "";
@@ -1067,13 +1201,13 @@ int main(void) {
             free(j);
         }
         s2a_libpack_close(dl);
-        // 图形侧：drvcb（无 guest 槽）与 img reg≥8 同样出库即拒——用 vs 塞死绑定 + 正常 fs 的程序对验证整程序 REJECT
+        // 图形侧：drvcb bank 2（句柄表，图形只映射 bank 0）与 img reg≥8 同样出库即拒——用 vs 塞死绑定 + 正常 fs 的程序对验证整程序 REJECT
         static const char *VS_DRVCB_JSON =
             "{\"key\":\"0123456789abcdef_b\",\"stage\":\"vs\",\"dm_ctl\":\"0123456789abcdef\",\"bindings\":["
             "{\"msl_name\":\"vp_c3\",\"kind\":\"cbuf\",\"reg\":0,\"arg_id\":0},"
-            "{\"msl_name\":\"vp_cb\",\"kind\":\"drvcb\",\"bank\":0,\"arg_id\":1},"
+            "{\"msl_name\":\"vp_cb\",\"kind\":\"drvcb\",\"bank\":2,\"arg_id\":1},"
             "{\"msl_name\":\"vp_t0\",\"kind\":\"tex\",\"reg\":0,\"arg_id\":2},"
-            "{\"msl_name\":\"vp_c4\",\"kind\":\"cbuf\",\"reg\":1,\"arg_id\":4}]}";   // 绑定 12/24 各有覆盖——死点只剩 drvcb
+            "{\"msl_name\":\"vp_c4\",\"kind\":\"cbuf\",\"reg\":1,\"arg_id\":4}]}";   // 绑定 12/24 各有覆盖——死点只剩 drvcb bank 2
         static const char *VS_IMG9_JSON =
             "{\"key\":\"0123456789abcdef_b\",\"stage\":\"vs\",\"dm_ctl\":\"0123456789abcdef\",\"bindings\":["
             "{\"msl_name\":\"vp_c3\",\"kind\":\"cbuf\",\"reg\":0,\"arg_id\":0},"
@@ -1100,6 +1234,80 @@ int main(void) {
             if (!(rc == -1 && !j && strstr(w, "no consumable guest source"))) printf("  graphics dead binding %d: rc=%d why=%s\n", t, rc, w);
             CHECK(rc == -1 && !j && strstr(w, "no consumable guest source"), "graphics dead binding → REJECT");
             free(j); s2a_libpack_close(dl);
+        }
+        char path[400]; snprintf(path, sizeof path, "%s/lib.idx", g_dir); unlink(path);
+        snprintf(path, sizeof path, "%s/lib.000.pak", g_dir); unlink(path); rmdir(g_dir);
+        snprintf(g_dir, sizeof g_dir, "%s", tmpl);
+    }
+
+    // ---- 图形 c0 驱动常量段（drvcb bank 0）：_b.json 出处（bank 0）+ .spv 证实（同一绑定号是 set 0 的 Uniform Block）才映射成 slot 0（消费端 NVN_RB_DRV0）----
+    // 期望（手算）：fp_c0 arg_id 3 → 绑定 3×6+4 = 22；vp_c0 arg_id 1 → 绑定 1×6+0 = 6。
+    //   正例：出 {kind uniform, stage fs, binding 22, slot 0}，解析后 slot 0、非 support。
+    //   负控：bank 2 / bank 3（图形只映射 bank 0）→ REJECT「no consumable guest source」；arg_id 4（绑定 28，.spv 没有）、
+    //   StorageBuffer 存储类、BufferBlock（非 Block）、描述符集 1、同一绑定号两个变量 → REJECT「not a set 0 Uniform Block」；都不出半个程序。
+    {
+        snprintf(g_dir, sizeof g_dir, "%s/c0", tmpl);
+        CHECK(mkdir(g_dir, 0700) == 0, "create graphics c0 pack directory");
+        static const char *PS_C0_FMT =
+            "{\"key\":\"1032547698badcfe_b\",\"stage\":\"ps\",\"dm_ctl\":\"1032547698badcfe\",\"bindings\":["
+            "{\"msl_name\":\"fp_c%u\",\"kind\":\"drvcb\",\"bank\":%u,\"arg_id\":%u}]}";
+        static const char *VS_C0_JSON =
+            "{\"key\":\"0123456789abcdef_b\",\"stage\":\"vs\",\"dm_ctl\":\"0123456789abcdef\",\"bindings\":["
+            "{\"msl_name\":\"vp_c0\",\"kind\":\"drvcb\",\"bank\":0,\"arg_id\":1}]}";
+        char ps[512];
+        uint8_t *j = NULL; size_t jl = 0; char w[192] = "";
+        snprintf(ps, sizeof ps, PS_C0_FMT, 0u, 0u, 3u);
+        int rc = c0_program(VS_JSON, libpack_vert_spv, sizeof libpack_vert_spv, ps, libpack_c0_frag_spv, sizeof libpack_c0_frag_spv, &j, &jl, w, sizeof w);
+        if (rc != 0) printf("  fs c0 bank 0: rc=%d why=%s\n", rc, w);
+        CHECK(rc == 0 && j, "graphics fs c0 bank 0 + Uniform Block at binding 22 → HIT");
+        CHECK(has(j, "\"kind\":\"uniform\",\"stage\":\"fs\",\"set\":0,\"binding\":22,\"slot\":0}"), "fs c0 → uniform binding 22 slot 0");
+        if (j) {
+            struct fd_program prog; char pw[192] = ""; memset(&prog, 0, sizeof prog);
+            int found = 0;
+            CHECK(nvn_vk_program_parse_graphics(j, jl, &prog, pw, sizeof pw) == 0, "fs c0 program parses");
+            for (int i = 0; i < prog.binding_count; i++)
+                if (prog.bindings[i].binding == 22) {
+                    found = 1;
+                    CHECK(prog.bindings[i].kind == 0 && prog.bindings[i].slot == 0 && !prog.bindings[i].is_support &&
+                          !strcmp(prog.bindings[i].stage, "fs"), "parsed c0 binding: uniform, slot 0 (→ NVN_RB_DRV0), fs, not support");
+                }
+            CHECK(found, "parsed program has the c0 binding 22");
+            nvn_vk_program_free(&prog);
+        }
+        free(j); j = NULL;
+        // 顶点阶段同口径
+        rc = c0_program(VS_C0_JSON, libpack_c0_vert_spv, sizeof libpack_c0_vert_spv, PS_JSON, libpack_frag_spv, sizeof libpack_frag_spv, &j, &jl, w, sizeof w);
+        if (rc != 0) printf("  vs c0 bank 0: rc=%d why=%s\n", rc, w);
+        CHECK(rc == 0 && has(j, "\"kind\":\"uniform\",\"stage\":\"vs\",\"set\":0,\"binding\":6,\"slot\":0}"), "graphics vs c0 bank 0 → uniform binding 6 slot 0");
+        free(j); j = NULL;
+        // 负控：异 bank
+        for (unsigned bank = 2; bank <= 3; bank++) {
+            snprintf(ps, sizeof ps, PS_C0_FMT, bank, bank, 3u);
+            w[0] = 0;
+            rc = c0_program(VS_JSON, libpack_vert_spv, sizeof libpack_vert_spv, ps, libpack_c0_frag_spv, sizeof libpack_c0_frag_spv, &j, &jl, w, sizeof w);
+            if (!(rc == -1 && !j && strstr(w, "no consumable guest source"))) printf("  fs drvcb bank %u: rc=%d why=%s\n", bank, rc, w);
+            CHECK(rc == -1 && !j && strstr(w, "no consumable guest source"), "graphics drvcb bank != 0 → REJECT (no consumable guest source)");
+            free(j); j = NULL;
+        }
+        // 负控：错绑定号（_b.json 说 arg_id 4 = 绑定 28，.spv 在 28 没有声明）
+        snprintf(ps, sizeof ps, PS_C0_FMT, 0u, 0u, 4u);
+        w[0] = 0;
+        rc = c0_program(VS_JSON, libpack_vert_spv, sizeof libpack_vert_spv, ps, libpack_c0_frag_spv, sizeof libpack_c0_frag_spv, &j, &jl, w, sizeof w);
+        if (!(rc == -1 && !j && strstr(w, "not a set 0 Uniform Block"))) printf("  wrong binding: rc=%d why=%s\n", rc, w);
+        CHECK(rc == -1 && !j && strstr(w, "not a set 0 Uniform Block"), "c0 at a binding the SPIR-V does not declare → REJECT");
+        free(j); j = NULL;
+        // 负控：绑定号对、类型不对
+        snprintf(ps, sizeof ps, PS_C0_FMT, 0u, 0u, 3u);
+        const char *what[4] = { "BufferBlock (not a Block)", "StorageBuffer storage class", "descriptor set 1", "two variables on binding 22" };
+        for (int t = 0; t < 4; t++) {
+            uint32_t bad[sizeof libpack_c0_frag_spv / sizeof(uint32_t)];
+            memcpy(bad, libpack_c0_frag_spv, sizeof bad);
+            c0_patch_spv(bad, sizeof bad / sizeof bad[0], t);
+            w[0] = 0;
+            rc = c0_program(VS_JSON, libpack_vert_spv, sizeof libpack_vert_spv, ps, bad, sizeof bad, &j, &jl, w, sizeof w);
+            if (!(rc == -1 && !j && strstr(w, "not a set 0 Uniform Block"))) printf("  wrong type %s: rc=%d why=%s\n", what[t], rc, w);
+            CHECK(rc == -1 && !j && strstr(w, "not a set 0 Uniform Block"), "c0 binding the SPIR-V cannot prove (type / set / ambiguous) → REJECT");
+            free(j); j = NULL;
         }
         char path[400]; snprintf(path, sizeof path, "%s/lib.idx", g_dir); unlink(path);
         snprintf(path, sizeof path, "%s/lib.000.pak", g_dir); unlink(path); rmdir(g_dir);

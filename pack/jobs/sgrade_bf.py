@@ -383,7 +383,8 @@ def rechain_ios(c, gid):
     原料同 upgrade_ios（ios_inputs：游戏库里的 game.img；没有就借同款 Mac 运行版本；都没有才要原件），按出包同一套阶段重出（rebuild），
     新库（b-<新链>）整份换掉资源包里的 shaders/direct，改资源包清单（add_to_pack），记新链号与本代 _bf（整份重出已含）。
     资源包号随之变，推送按机上清单只推变了的文件。由玩家对这一款「推到 iPhone」时前台调（install.push_game），不进后台。
-    → 'skip'（链号已是本引擎的 / 读不到本引擎链号 / 不是直连包）| 'unavailable'（没原料：调用方记一行，不挡推送）| 'updated'"""
+    → 'skip'（链号已是本引擎的 / 读不到本引擎链号 / 不是直连包）| 'no_source'（游戏库里没有重编的原料，也没有 Mac 版可借）|
+      'no_tools'（这台电脑没装 Metal 开发工具）| 'updated'。做不了的两种调用方分开说（#1961：前者要重新出包 / 重新添加原件，后者要装工具），都不挡推送"""
     import host_update
     import tempfile
     want = host_update.engine_compat(c)
@@ -399,12 +400,12 @@ def rechain_ios(c, gid):
         src, where = ios_inputs(c, gid, Path(tmp))
         if src is None:
             c.emit("message", f"{gid}：着色器链更新了，但游戏库里没有 game.img、也没有 Mac 版可借：这次没重编着色器库")  # 非玩家句
-            return "unavailable"
+            return "no_source"
         c.emit("message", f"{gid}：着色器链更新了，正在用{where}重编这款的着色器库（不重出整款；首次要几分钟到几十分钟）")  # 非玩家句
         new = rebuild(c, gid, src, "ios", Path(tmp) / "w")
         if new is None:   # Windows 没装 Metal 开发工具（同 Windows 出包不带着色器库）：照推旧库，游戏里首次遇到的画面现编
             c.emit("message", f"{gid}：着色器链更新了，但这台电脑没装 Metal 开发工具：这次没重编着色器库（在「准备这台电脑」装好后再推一次就换上新库）")  # 非玩家句
-            return "unavailable"
+            return "no_tools"
         if lib_dir(new) is None:
             raise Failure("重编的直连着色器库不完整")  # 非玩家句
         staged, old = pack / "shaders/.direct-new", pack / "shaders/.direct-old"

@@ -593,6 +593,9 @@ static NSString *vp_running_gid(void) { const char *g = getenv("S2A_LAUNCH_GAME_
     // 外接键盘的改键页（keyboard_settings.m，#1869）：与「编辑虚拟按键」并排放第一层；接着键盘或这款改过键位才列（拔了键盘还能回来看 / 恢复默认）
     if (s2a_ios_keyboard_connected() || s2a_ios_mouse_connected() || s2a_ios_keyboard_customized())
         [items addObject:vp_act(S2AL(@"kbd.menu"), @"keyboard", NO, ^{ [ws afterMenu:^{ [ws openKeyboard]; }]; })];
+    // 分配玩家（player_assign.m，#1606 ④）：连着两只以上手柄或分配过才列，同 Mac 启动器「分配玩家」
+    if (s2a_ios_player_assign_wanted())
+        [items addObject:vp_act(S2AL(@"assign.menu"), @"person.2", NO, ^{ [ws afterMenu:^{ [ws openPlayerAssign]; }]; })];
     // 按键布局（选方案：菜单不收，选中的打勾；「编辑虚拟按键」在切到仅触屏后变灰要等下次打开菜单）
     NSMutableArray<UIMenuElement *> *lay = [NSMutableArray array];
     void (^addLayout)(NSString *, NSString *, NSString *) = ^(NSString *lid, NSString *name, NSString *note) {
@@ -825,8 +828,16 @@ static void snap_restart_result(int result, const char *detail, void *context) {
     int rc = s2a_host_restart(snap_restart_result, NULL);
     if (rc) { unsetenv("S2A_SNAP_RESTORE"); unsetenv("S2A_SNAP_SAVE_ROLLBACK"); [self snapToast:[NSString stringWithFormat:S2AL(@"vpad.snap.restoreFailed"), @""]]; }
 }
+// 弱链接[lab]：s2a_snap_fits_inplace（即时快照：runtime/src/snapshot.c 提供；输入工作台不链原生核，取不到就不预检、照旧走重启）
 - (void)snapRestore:(NSString *)dir {
-    int s2a_snap_save_changed(const char *) __attribute__((weak));
+    int s2a_snap_save_changed(const char *) __attribute__((weak)); int s2a_snap_fits_inplace(const char *) __attribute__((weak));
+    // 游戏里回不去（快照存的时候窗口 / 命令记录区落点与这一局不同，进程内重启搬不了窗口）：先问引擎，接不上就不重启、不拆这一局，
+    //   直接告诉玩家去游戏库恢复（那条路起宿主前按快照清单原址重占，runtime/src/vawin.c snap_retake）
+    if (s2a_snap_fits_inplace && s2a_snap_fits_inplace(dir.fileSystemRepresentation) == 0) {
+        UIAlertController *n = [UIAlertController alertControllerWithTitle:S2AL(@"vpad.snap.useLibrary.title") message:S2AL(@"vpad.snap.useLibrary.body") preferredStyle:UIAlertControllerStyleAlert];
+        [n addAction:[UIAlertAction actionWithTitle:S2AL(@"common.ok") style:UIAlertActionStyleDefault handler:nil]];
+        UIViewController *q = self.window.rootViewController; while (q.presentedViewController) q = q.presentedViewController; [q presentViewController:n animated:YES completion:nil];
+        return; }
     // 存快照之后游戏又存过档：回去会把游戏存档退回那一刻——先问玩家（当前存档会先整棵备份）；没变过就直接回
     if (!(s2a_snap_save_changed && s2a_snap_save_changed(dir.fileSystemRepresentation) == 1)) { [self snapRestoreNow:dir rollback:NO]; return; }
     UIAlertController *a = [UIAlertController alertControllerWithTitle:S2AL(@"vpad.snap.saveChanged.title") message:S2AL(@"vpad.snap.saveChanged.body") preferredStyle:UIAlertControllerStyleAlert];
@@ -1240,6 +1251,18 @@ static NSString *const kSlideSwitchKey = @"S2AVPadSlideSwitch";   // 滑动切�
     _settingsOpen = YES; [self clearTouches];
     __weak S2AVPadView *weakSelf = self;
     [controller presentViewController:s2a_ios_keyboard_settings(^{
+        S2AVPadView *view = weakSelf; if (!view) return;
+        view->_settingsOpen = NO; [view clearTouches]; [view wake];
+    }) animated:YES completion:nil];
+}
+// 分配玩家面板（player_assign.m）：同 openKeyboard，开着时触屏输入停住
+- (void)openPlayerAssign {
+    UIViewController *controller = self.window.rootViewController;
+    if (!controller || _settingsOpen) return;
+    controller = s2a_top_presenter(controller);
+    _settingsOpen = YES; [self clearTouches];
+    __weak S2AVPadView *weakSelf = self;
+    [controller presentViewController:s2a_ios_player_assign(^{
         S2AVPadView *view = weakSelf; if (!view) return;
         view->_settingsOpen = NO; [view clearTouches]; [view wake];
     }) animated:YES completion:nil];

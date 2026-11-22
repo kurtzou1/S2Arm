@@ -33,6 +33,20 @@ import LauncherPadBridge
         XCTAssertEqual(make().freeSignDaysLeft(game, now: now), 3, "重新打开后恢复显示，且存下来")
     }
 
+    // #1962 复测：推到 iPad 后游戏库状态写「已推到 iPad」、导出页等待提示写「等 iPad 上的 S2Arm…」（期望手写）
+    func testInstalledStatusNamesDeviceKind() throws {
+        let ipad = try XCTUnwrap(GameSummary(catalog: ["id": "0100000000010000", "name": "Alpha",
+            "iphoneInstall": ["at": 1.0, "free": false, "deviceKey": "U1", "deviceKind": "iPad"]]))
+        let old = try XCTUnwrap(GameSummary(catalog: ["id": "0100000000020000", "name": "Beta",
+            "iphoneInstall": ["at": 1.0, "free": false, "deviceKey": "U1"]]))   // 0.6.9 前的记录没有 deviceKind
+        XCTAssertEqual(BackendText.launcherText("library.status.installedPaid", language: "zh-Hans")
+            .replacingOccurrences(of: "{0}", with: BackendText.deviceKind(ipad.iphoneInstallKind)), "已推到 iPad")
+        XCTAssertEqual(BackendText.launcherText("library.status.installedPaid", language: "zh-Hans")
+            .replacingOccurrences(of: "{0}", with: BackendText.deviceKind(old.iphoneInstallKind)), "已推到 iPhone / iPad")
+        XCTAssertEqual(BackendText.translate("等 iPad 上的 S2Arm 装好这款的程序", language: "en"), "Waiting for S2Arm on the iPad to install this game's program")
+        XCTAssertEqual(BackendText.translate("把证书交给 iPhone / iPad 上的 S2Arm", language: "en"), "Handing the certificate to S2Arm on your iPhone / iPad")
+    }
+
     // 新主题漏掉的补回来：每张卡片上的 iPhone 签名角标（还剩几天 / 已过期）
     func testHomeCardsShowExpiryBadges() async throws {
         _ = NSApplication.shared

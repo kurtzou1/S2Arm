@@ -74,7 +74,8 @@ public sealed record LibraryGame(string Id, string Name, string Version, string 
     bool IphoneFree = false, IReadOnlyList<GamePackage>? Packages = null, bool CustomName = false, bool CustomCover = false,
     GameLocation? Location = null, bool IphoneRestorable = false, GameSizes? Sizes = null, bool NeedsKeys = false, string IphoneInstallDevice = "",
     bool OnPhone = false, string Banner = "", bool SGrade = false, bool IphoneExportable = false, DownstreamOffer? Downstream = null,
-    bool SGradeUpgrading = false, bool SGradeIncomplete = false, string? SGradeState = null, double? SGradeProgress = null, double? IphoneExpires = null)   // S 级优化单款升级正在跑 / 上次中途退出没做完（catalog sgradeUpgrading / sgradeIncomplete，11-18）   // SGrade：已打上 S 级优化（catalog sgrade，pack/jobs/library.py sgrade_badge）→ 封面左上角金色 S（同 Mac）
+    bool SGradeUpgrading = false, bool SGradeIncomplete = false, string? SGradeState = null, double? SGradeProgress = null, double? IphoneExpires = null,
+    string IphoneInstallKind = "")   // S 级优化单款升级正在跑 / 上次中途退出没做完（catalog sgradeUpgrading / sgradeIncomplete，11-18）   // SGrade：已打上 S 级优化（catalog sgrade，pack/jobs/library.py sgrade_badge）→ 封面左上角金色 S（同 Mac）
 {
     /// <summary>免费签名还剩几天（到期 = 0）：只在作业层判出「那台手机现在用的就是启动器免费签的那份」（free）且给了到期时刻 expires 时有，
     /// expires 是签好的包里的真值、读不到时作业层按 7 天估（pack/jobs/layout.py install_record），这里不再自己加天数；其余为 null。同 Mac GameSummary.iphoneDaysLeft</summary>
@@ -227,13 +228,15 @@ public sealed record LibraryCatalog(IReadOnlyList<LibraryGame> Games, bool KeysR
                     }
                 // iphoneInstall: { at, free, deviceKey, expires } — matches the Mac adapter's LibraryProvider；deviceKey = 当初装的那台（续签装回它，不换别的）；
                 //   expires = 免费签名到期时刻（只在 free 时有）
-                double? iphoneAt = null, iphoneExpires = null; var iphoneFree = false; var iphoneDevice = "";
+                //   deviceKind = 装的是 iPad 还是 iPhone（#1962：游戏库「已推到 {0}」；旧记录没有 → 空，SharedText.DeviceKind 填「iPhone / iPad」）
+                double? iphoneAt = null, iphoneExpires = null; var iphoneFree = false; var iphoneDevice = ""; var iphoneKind = "";
                 if (game.TryGetProperty("iphoneInstall", out var inst) && inst.ValueKind == JsonValueKind.Object)
                 {
                     if (inst.TryGetProperty("at", out var at) && at.ValueKind == JsonValueKind.Number) iphoneAt = at.GetDouble();
                     if (inst.TryGetProperty("free", out var fr) && fr.GetBoolean()) iphoneFree = true;
                     if (inst.TryGetProperty("deviceKey", out var dk) && dk.ValueKind == JsonValueKind.String) iphoneDevice = dk.GetString() ?? "";
                     if (inst.TryGetProperty("expires", out var ex) && ex.ValueKind == JsonValueKind.Number) iphoneExpires = ex.GetDouble();
+                    if (inst.TryGetProperty("deviceKind", out var dkind) && dkind.ValueKind == JsonValueKind.String) iphoneKind = dkind.GetString() ?? "";
                 }
                 var iphoneReady = game.TryGetProperty("iphoneReady", out var ir) && ir.GetBoolean();
                 games.Add(new(id, LibraryJobResult.Text(game, "name"),
@@ -253,7 +256,7 @@ public sealed record LibraryCatalog(IReadOnlyList<LibraryGame> Games, bool KeysR
                     game.TryGetProperty("sgradeUpgrading", out var sgu) && sgu.ValueKind == JsonValueKind.True,
                     game.TryGetProperty("sgradeIncomplete", out var sgi) && sgi.ValueKind == JsonValueKind.True,
                     game.TryGetProperty("sgradeState", out var sgs) && sgs.ValueKind == JsonValueKind.String ? sgs.GetString() : null,
-                    game.TryGetProperty("sgradeProgress", out var sgp) && sgp.ValueKind == JsonValueKind.Number ? sgp.GetDouble() : null, iphoneExpires));
+                    game.TryGetProperty("sgradeProgress", out var sgp) && sgp.ValueKind == JsonValueKind.Number ? sgp.GetDouble() : null, iphoneExpires, iphoneKind));
             }
             var keys = result.GetProperty("keys");
             return new(games.AsReadOnly(), keys.GetProperty("ready").GetBoolean(),

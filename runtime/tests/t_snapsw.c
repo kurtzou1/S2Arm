@@ -43,6 +43,11 @@ int main(void) {
     g_pref = -1; reset(NULL, NULL); s2a_snap_disable(S2A_SNAP_OFF_ADDRESS);
     eq("⑩ 放不下关掉：依据写放不下", 1, !strcmp(s2a_snap_source(), "本局放不下快照区"));
     eq("⑩ 重开", 1, s2a_snap_reenable(S2A_SNAP_OFF_ADDRESS)); eq("⑩ 重开后：依据回到缺省", 1, !strcmp(s2a_snap_source(), "缺省"));
+    // ⑪ 游戏库给不给「回到这一刻」（s2a_snap_restore_offered）：有快照 + 开着 → 给；有快照 + 本局因地址关 → 照样给；有快照 + 玩家设置关 → 不给；没快照 → 不给
+    g_pref = -1; reset(NULL, NULL); eq("⑪ 开着、有快照：给", 1, s2a_snap_restore_offered(1)); eq("⑪ 开着、没快照：不给", 0, s2a_snap_restore_offered(0));
+    g_pref = -1; reset(NULL, NULL); s2a_snap_disable(S2A_SNAP_OFF_ADDRESS); eq("⑪ 本局因地址关、有快照：照样给", 1, s2a_snap_restore_offered(1)); eq("⑪ 本局因地址关、没快照：不给", 0, s2a_snap_restore_offered(0));
+    g_pref = 1; reset(NULL, NULL); eq("⑪ 玩家设置关、有快照：不给", 0, s2a_snap_restore_offered(1));
+    g_pref = -1; reset("0", NULL); eq("⑪ 启动环境关、有快照：不给", 0, s2a_snap_restore_offered(1));
     if (g_fail) printf("✗ t_snapsw：%d 项不符（共 %d 项）\n", g_fail, g_ok + g_fail); else printf("✓ t_snapsw：0 处不符（共 %d 项）\n", g_ok);
     return g_fail ? 1 : 0;
 }

@@ -64,6 +64,11 @@ typedef struct { int ns2_player; char name[64]; int index; } s2a_pad_order_entry
 typedef struct { int count, dropped_count; s2a_pad_order_entry entry[S2A_PAD_ORDER_MAX], dropped[S2A_PAD_ORDER_MAX]; } s2a_pad_order;
 // 一只手柄排第几（0 起）；表里没有 → S2A_PAD_ORDER_UNLISTED（排在表里的后面，彼此照原顺序）；被 dropped → S2A_PAD_ORDER_DROPPED（不进槽位）
 int s2a_pad_order_rank(const s2a_pad_order *order, int ns2_player, const char *name, int index);   // 键盘：ns2_player = S2A_PAD_ORDER_KEYBOARD；一代：GEN1 / GEN1_PAIR + name
+// 按顺序表排一拍里在线的手柄（Mac front_mac.m 与 iOS ios/controller.m 共用）：第 j 只的身份 = ns2_player[j]（NS2 通道玩家号 / KEYBOARD / GEN1… / -1 = 系统手柄）
+//   + group[j]（系统手柄名字，用来数「同名第几只」，可 NULL）+ key[j]（一代按设备的 id，非 NULL 时代替名字去比；key 整个可传 NULL）。
+//   keep[k] = 排好后第 k 只是原来的第几只（表里的按表顺序在前，没列的照原顺序接在后面，没分配的去掉），rank[k] = 它排第几（没列 = UNLISTED）；返回留下几只
+enum { S2A_PAD_ARRANGE_MAX = 32 };
+int s2a_pad_order_arrange(const s2a_pad_order *order, int count, const int *ns2_player, const char *const *group, const char *const *key, int *keep, int *rank);
 
 // 原子快照，固定 56 字节。epoch 在切源/前后台切换时变化，旧短按不得跨 epoch 回放。
 typedef struct {

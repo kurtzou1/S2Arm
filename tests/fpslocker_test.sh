@@ -8,6 +8,7 @@
 #   ④ DECLARATIONS：变量排在变量区（8 对齐）、初值非 0 才写；ALL_FPS 里 [VARIABLE, $名] 换成 [MAIN, 偏移]；block 丢弃
 #   ⑤ 调 FPSLocker 自带帮助函数 _fpsLock() → 不收（Unsupported）
 #   ⑥ 没有 clang / 汇编器进程起不来 → 这份不收（Unsupported），不冲垮补丁出表（#1173）
+#   ⑩ 声明变量带 evaluate（#2053 旷野之息 1.9.0）：转成 evaluate_write 写到变量偏移、排在 ALL_FPS 前；没写 evaluate 的变量不出运行时条目
 #   ⑦⑧ 见对应段落：_convertTickToTimeSpan() 我方实现；mov / movk 里的常量按 16 位片段
 set -u; H=$(cd "$(dirname "$0")/.." && pwd)
 python3 - "$H" <<'EOF'
@@ -106,6 +107,28 @@ else:
 w, rt = F.convert(dict(DECLARATIONS=doc['DECLARATIONS'], ALL_FPS=doc['ALL_FPS']), (0, 0), (0x1003, 0x2000))
 ck('④ 变量 8 对齐、初值 30.0 写进去', w == {0x1008: struct.pack('<f', 30.0)} and rt['variables']['fps_target']['offset'] == 0x1008)
 ck('④ VARIABLE 地址换成 MAIN 偏移、block 丢弃', rt['all_fps'] == [dict(type='evaluate_write', address=['MAIN', 0x1008], value_type='float', value='FPS_TARGET # 不是注释')])
+w10, rt10 = F.convert(miniyaml.load('''DECLARATIONS:
+  -
+    type: variable
+    name: min_delta
+    value_type: float
+    default_value: 1.0
+    evaluate: 30 / FPS_TARGET
+  -
+    type: variable
+    name: frame_tick
+    value_type: uint64
+    default_value: 0
+ALL_FPS:
+  -
+    type: write
+    address: [MAIN, 0x500]
+    value_type: uint8
+    value: 1
+'''), (0, 0), (0x1000, 0x2000))
+ck('⑩ 带 evaluate 的变量出 evaluate_write（地址 = 变量偏移 0x1000）、排在 ALL_FPS 前；frame_tick 没有运行时条目', rt10['all_fps'] == [
+    dict(type='evaluate_write', address=['MAIN', 0x1000], value_type='float', value='30 / FPS_TARGET'),
+    dict(type='write', address=['MAIN', 0x500], value_type='uint8', value=1)] and w10 == {0x1000: struct.pack('<f', 1.0)})
 try:
     F.convert(dict(MASTER_WRITE=[dict(type='asm_a64', main_offset=0x100, instructions=[['bl', '_fpsLock()']])]), (0, 0), (0x1000, 0x2000)); ok = False
 except F.Unsupported as e:

@@ -278,7 +278,7 @@
 "app.os180.title" = "这个系统版本会闪退";
 "app.os180.body" = "iOS / iPadOS 18.0 系统本身有个问题，游戏画面一出来就可能闪退，18.1 已经修好。请到「设置 > 通用 > 软件更新」把系统升到 18.1 或更新（免费），升级后就不会再这样闪退。";
 "app.lowRam.title" = "这台设备内存可能不够";
-"app.lowRam.body" = "这款游戏需要的内存比这台设备多。照样可以开始，但可能卡顿，或被系统关掉。";
+"app.lowRam.body" = "这款游戏约需 %1$@ GB 内存，这台设备只有 %2$@ GB。已自动用存储空间兜底，可以玩，但可能变慢，或玩到一半被系统结束。这个提示只出现这一次。";
 "app.gpuStop.body" = "从后台划掉本 App 再打开，一般能接着玩，存档停在游戏上次保存的地方。想让我们查原因，点「故障报修」把诊断发给我们。";
 "app.gpuStop.title" = "游戏卡住了，已经安全停下";
 "app.library.broken.title" = "游戏资源不完整";
@@ -457,7 +457,7 @@
 "save.exported" = "备份已导出。";
 "save.import" = "选择备份并检查…";
 "save.inspected" = "备份检查通过，等待确认。";
-"save.intro" = "游戏尚未启动。可导出存档到“文件”，或导入 Mac / 其他设备的 .s2asave 备份。恢复前会保留当前存档。";
+"save.intro" = "游戏尚未启动。可导出存档到“文件”，或导入 Mac / 其他设备的 .s2asave 备份，也能导入其他模拟器 / 工具（JKSV、Checkpoint、Ryujinx、yuzu 等）的存档文件夹或 zip。恢复前会保留当前存档。";
 "save.journalUnreadable" = "读不到存档操作记录目录（%@），没法确认上次的导入 / 恢复有没有做完。\n%@";
 "save.location" = "存档位置：打开“文件”App →“我的 iPhone”（iPad 为“我的 iPad”）→“%@”→ %@\n\n把原生格式的存档文件夹放进去（主机、JKSV / Checkpoint 等工具导出的，或电脑上同一款游戏 SaveData 里拷来的都行），下次开始游戏就用它；退出游戏后这里会更新成最新进度，整个文件夹拷到电脑或另一台设备的同一位置就能接着玩。\n\n从电脑拷过来：Mac 在访达侧边栏选中这台设备 →“文件”，把文件夹拖到“%@”上，再到“文件”App 里挪进上面的位置。";
 "save.location.problem" = "上次放进来的存档没读进来：%@。当前存档没有改动。";
@@ -488,6 +488,8 @@
 "save.restore.title" = "恢复这份备份？";
 "save.restoreCancelled" = "已取消恢复。";
 "save.restored" = "存档已恢复。可开始游戏检查进度；恢复前备份已保留（此前无存档时不生成备份）。";
+"save.community.message" = "认出了其他模拟器 / 工具的存档：%@ 个文件，%@。\n\n确认后先备份当前存档，再把这份存档放进这款的存档位置，下次开始游戏时读入。";
+"save.community.done" = "已放好：下次开始游戏时读入这份存档。恢复前的存档已备份（此前无存档时不生成备份）。";
 "save.serviceInvalid" = "存档服务未返回有效结果。请关闭后重新打开 App，保留现有数据。";
 "save.previous.ask.title" = "这款上次没能正常读存档，要回到上一份存档吗？";
 "save.previous.ask.crash" = "上一局一开始就退出了。回到上一份后也能随时换回来。";
@@ -619,6 +621,8 @@
 "vpad.snap.notSaved" = "这次没存成，稍后再试一次";
 "vpad.snap.busy" = "还在存上一次，稍等";
 "vpad.snap.restoreFailed" = "这次回不去：%@";
+"vpad.snap.useLibrary.title" = "游戏里回不到这一刻";
+"vpad.snap.useLibrary.body" = "这一刻存的时候，游戏的内存位置和现在这一局不同，在游戏里接不上。回到游戏库，长按这款点「回到上次存下的这一刻」即可恢复。快照还在，没有删。";
 "vpad.snap.saveChanged.title" = "回到存下的那一刻？";
 "vpad.snap.saveChanged.body" = "存下那一刻之后游戏又存过档。回去会把游戏存档也退回那一刻；现在的存档会先备份。";
 "vpad.snap.saveChanged.go" = "回去";
@@ -679,7 +683,7 @@
 "kbd.section.sticks" = "摇杆";
 "kbd.record" = "请按新键，Esc 取消";
 "kbd.common" = "常用键";
-"kbd.clear" = "清除键盘按键";
+"kbd.clear" = "清除按键设置";
 "kbd.unbound" = "未设置";
 "kbd.restoreDefault" = "恢复默认";
 "kbd.rebind.title" = "改绑这个键？";
@@ -708,6 +712,12 @@
 "kbd.manage.note" = "导出的键位文件可以在别的游戏里导入；Mac 启动器每款游戏的 input.json 格式相同，也能导入。导入只改这款游戏的键位。";
 "kbd.import" = "导入键位…";
 "kbd.export" = "导出当前键位…";
+"kbd.setDefault" = "设为所有游戏的默认";
+"kbd.default.done" = "已设为所有游戏的默认";
+"kbd.default.undo" = "撤销";
+"kbd.source.custom" = "当前键位：自定义";
+"kbd.source.default" = "当前键位：默认";
+"kbd.manage.noteAll" = "导出的键位文件可以在别的游戏里导入；Mac 启动器每款游戏的 input.json 格式相同，也能导入。导入只改这款游戏的键位。\n「设为所有游戏的默认」把当前键位设为所有游戏的默认：已经单独调过键位的游戏不受影响，以后新加的游戏也用这套。「恢复默认」回到这套默认。";
 "kbd.export.fileName" = "S2Arm 键位";
 "kbd.export.err.title" = "没能导出键位";
 "kbd.import.err.title" = "没能导入键位";
@@ -717,3 +727,14 @@
 "kbd.import.err.schema" = "这个文件不是 S2Arm 的键位文件，或版本不支持。当前键位没有改动。";
 "kbd.import.err.duplicate" = "文件里同一个键绑给了不止一个按键。当前键位没有改动。";
 "kbd.import.err.invalid" = "文件里的键位不完整或有无效的值。当前键位没有改动。";
+
+/* 游戏内「分配玩家」（ios/player_assign.m，#1606 ④）：叫法同 Mac 启动器「分配玩家」 */
+"assign.menu" = "分配玩家…";
+"assign.title" = "分配玩家";
+"assign.hint" = "从 P1 开始，依次在每位玩家的手柄上按任意键。没登记的手柄连着也不会成为玩家。";
+"assign.waiting" = "在手柄上按任意键";
+"assign.restart" = "重新开始";
+"assign.automatic" = "恢复自动（按连接顺序）";
+"assign.ns2pro" = "Switch 2 Pro 手柄";
+"assign.saveFailed" = "没能保存分配结果，请再试一次。";
+"assign.ok" = "好";

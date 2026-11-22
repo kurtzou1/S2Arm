@@ -73,10 +73,10 @@ int main(int argc, char **argv) {
     CHECK(!s2a_far_has(room_before, 1), "malloc 房间不能属于远端");
     CHECK(reserved_none(512 * GB) && reserved_none(576 * GB - 0x4000) && reserved_none(576 * GB + 512 * MB), "原房间、房间前后高区仍受围栏约束");
     if (maximum) CHECK(s2a_far_has(576 * GB - 0x4000, 0x4000) && !s2a_far_has(576 * GB, 1), "超长远端须截到 576 GiB，不侵入房间");
-    if (!maximum) {   // 宿主高位区（乙：窗口放不下标准布局，赤痕 / 轩辕剑柒同形）= 窗口下方留给宿主的 3 GiB（HOST_BELOW，11-06 由 1 GiB 改）；不碰远端、不进窗口。
+    if (!maximum) {   // 宿主高位区（乙：窗口放不下标准布局，赤痕 / 轩辕剑柒同形）= 窗口下方留给宿主的 6 GiB（宿主下限，11-06 由 1 GiB 改 3 GiB、11-22 改 6 GiB）；不碰远端、不进窗口。
         //   直连库段（graphics/nvn/lib_pack.inc lp_map）带提示映射落在这里；对照 mmap(NULL) 落 0x1_8000_0000 以下的低区（GC 新段只能落那里，11-05 托管 OOM 的根因）
         uint64_t hl = 0, hh = 0; int hr = s2a_host_hi_range(&hl, &hh);
-        CHECK(hr == 1 && hh == base && hh - hl == 3 * GB, "乙布局高位区应为窗口下方 3 GiB [%#llx, %#llx)，得 rc=%d [%#llx, %#llx)", (unsigned long long)(base - 3 * GB), (unsigned long long)base, hr, (unsigned long long)hl, (unsigned long long)hh);
+        CHECK(hr == 1 && hh == base && hh - hl == 6 * GB, "乙布局高位区应为窗口下方 6 GiB [%#llx, %#llx)，得 rc=%d [%#llx, %#llx)", (unsigned long long)(base - 6 * GB), (unsigned long long)base, hr, (unsigned long long)hl, (unsigned long long)hh);
         CHECK(hh <= lo && !s2a_far_has(hl, hh - hl), "高位区不与远端 / 窗口重叠");
         char tf[] = "/tmp/t_vawin_far_f.XXXXXX"; int fd = mkstemp(tf); const size_t L = 4 * MB;
         CHECK(fd >= 0 && !ftruncate(fd, L), "建临时文件");

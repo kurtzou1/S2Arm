@@ -812,6 +812,7 @@ static void cv_h264_decode(cvdec *d, const cv_in *in, int64_t pts, int gen) {
     size_t nal[64][2]; int nn = nvn2_h264_nals(in->p, in->n, nal, 64);
     if (nn < 0) { CV_RED(h264bad, "Switch 2 视频：H.264 包既不是起始码分隔、长度前缀也对不上（%zu 字节）：这一包没有画面", in->n); return; }
     uint8_t *s = malloc(in->n + 4 * (size_t)nn + 4); size_t sn = 0; int changed = 0;
+    if (!s) { CV_RED(h264mem, "Switch 2 视频：H.264 样本缓冲 %zu 字节分配不出（宿主地址 / 内存耗尽），这一包没有画面", in->n); return; }   // 兜底，根修见 cv_submit
     for (int i = 0; i < nn; i++) {
         const uint8_t *q = in->p + nal[i][0]; size_t l = nal[i][1] - nal[i][0]; int ty = q[0] & 0x1f;
         if (ty == 7 || ty == 8) {
@@ -983,6 +984,7 @@ static void cv_decode(cvdec *d, const cv_in *in, int gen) {
             // 同时看包里有没有帧数据（帧头 3、分块组 4、帧 6、冗余帧头 7）：只有时间分隔 / 填充 / 元数据的包本来就没有画面，
             //   原先照样送 VideoToolbox，回 -12903（数据坏）并报红（诊断 #4ddff2：3 字节的包）。这种包直接跳过、不报红；解析不了的尾巴按有帧数据送去
             uint8_t *s = malloc(in->n); size_t sn = 0; uint64_t t0 = now_ns(); int frame = 0;
+            if (!s) { CV_RED(av1mem, "Switch 2 视频：AV1 样本缓冲 %zu 字节分配不出（宿主地址 / 内存耗尽），这一包没有画面", in->n); return; }   // 兜底，根修见 cv_submit
             for (size_t o = 0; o < in->n;) {
                 uint8_t h = in->p[o]; size_t hl = 1 + (h >> 2 & 1); uint64_t sz = in->n - o - hl; int ll = 0, ty = h >> 3 & 15;
                 if (h >> 1 & 1) ll = leb128(in->p + o + hl, in->n - o - hl, &sz);
@@ -1130,7 +1132,10 @@ static Result cv_flush(void *t, int stop) {
 static Result cv_submit(uint64_t *id, void *t, const void *p, uint64_t n, int64_t pts_ns, uint32_t eos) {
     cvdec *d = cv_of(t);
     cv_in in = { n ? malloc(n) : NULL, n, pts_ns, (int)(eos & 1) };
-    if (n) memcpy(in.p, p, n);
+    // 兜底（D-R2VX / D-NK6Y：宿主低区地址耗尽时 malloc 回空，原先直接 memcpy 到 0 崩）：这一包当空包排进去（没有画面、流照走），打红行。
+    //   根修是宿主下限（vawin.c s2a_window_host_floor），这里只是耗尽时不崩在这儿
+    if (n && !in.p) { CV_RED(submem, "Switch 2 视频：提交的包缓冲 %llu 字节分配不出（宿主地址 / 内存耗尽），这一包当空包、没有画面", (unsigned long long)n); in.n = 0; }
+    if (in.n) memcpy(in.p, p, n);
     pthread_mutex_lock(&d->mu);
     // 游戏不看可提交事件也提交：队列加长，不丢包
     if (d->qn == d->qcap) {

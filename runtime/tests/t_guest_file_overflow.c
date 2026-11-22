@@ -18,6 +18,11 @@
 //      D-JETP（剩余 6141、余量 512）：首局 6141 − 512 − 4096 = 1533；设那局 Hmin 2600 → 第二局 1533 + 2088 − 32 = 3589；
 //      收紧 3589 + (300 − 512) − 32 = 3345；下限 100 + (0 − 512) − 32 < 0 → 0；上限 5000 + 3488 − 32 = 8456 > 6141 − 512 = 5629 → 5629；
 //      12 GB 机（剩余 8189）首局 8189 − 512 − 4096 = 3581；剩余 4000 首局不够 → 0；上局整段（B 0）Hmin 3000 → 3000 − 512 − 32 = 2456
+//      11-22 往上抬要证据（上局够长 long_run，每局最多抬 1024；被收掉那局预算 − 1024 作天花板 ceil）：上面往上抬的几条按够长局算——
+//      第二局 1533 + 2056 > 一步 → 1533 + 1024 = 2557；上限那条 5000 + 1024 = 6024 仍夹到 5629；整段回升 0 + 1024 = 1024。
+//      短局：1533 / 2600 → 持平 1533；3589 / 300 → 照样收紧 3345。一台 iPhone（剩余 8188）：上局 61 秒、预算 3521、剩余最小 6012 →
+//      旧算法 3521 + 6012 − 544 = 8989 夹到 7676（真机日志就是 7676）；新：短局持平 3521；同读数够长 → 4545。
+//      天花板：6000 / 4000 够长、剩余 8188、ceil 6652 → min(7024, 7676, 6652) = 6652；首局估计 3580 遇 ceil 2000 → 2000
 //   ⑫ 预算记录（同 mem_peak_anon 目录 anon_budget）：心跳值 3000 → 记「64 3000」；3500 不更小不写；2600 → 「64 2600」；
 //      据此起局 = 64 + (2600 − 512) − 32 = 2120（按上局实测）；上局死掉 → 0 且记录删掉；再起局没记录 → 首局 1533；S2A_GUEST_FILE_OVERFLOW_HOST_MB=3000 → 6141 − 512 − 3000 = 2629
 #include "../src/native.h"
@@ -32,7 +37,7 @@ __attribute__((constructor(100))) static void need(void) {   // 先于 vawin.c �
     unsetenv("S2A_GUEST_FILE_CARVE");
 }
 uint64_t s2a_guest_anon_budget(const char *e, uint64_t room, uint64_t margin, uint64_t host);
-uint64_t s2a_guest_next_budget(const char *e, uint64_t room, uint64_t margin, uint64_t first_host, int died, int have, uint64_t prev_b, uint64_t hmin, int *src);
+uint64_t s2a_guest_next_budget(const char *e, uint64_t room, uint64_t margin, uint64_t first_host, int died, int have, uint64_t prev_b, uint64_t hmin, int long_run, uint64_t ceil, int *src);
 uint64_t s2a_guest_overflow_budget_ios(const char *e, uint64_t room, uint64_t margin, int died, int *src, uint64_t *pb, uint64_t *ph);
 int s2a_guest_budget_rec_read(uint64_t *b, uint64_t *hmin); void s2a_guest_budget_note(uint64_t avail);
 void s2a_guest_commit(uint64_t a, uint64_t n); void s2a_guest_file_carve(uint64_t a, uint64_t n); int s2a_window_session_reset(void); void s2a_guest_backing_log(void); void s2a_guest_backing_sum(uint64_t sum[4]); void s2a_window_trim(uint64_t size);
@@ -120,19 +125,27 @@ int main(void) {
     }
     {   // ⑪
         int src = -1; const uint64_t M = 512 * MB, H = 4096 * MB;
-#define NB(e, room, died, have, pb, ph) s2a_guest_next_budget(e, (room) * MB, M, H, died, have, (pb) * MB, (ph) * MB, &src)
+#define NB(e, room, died, have, pb, ph) s2a_guest_next_budget(e, (room) * MB, M, H, died, have, (pb) * MB, (ph) * MB, 1, 0, &src)
+#define NB2(room, have, pb, ph, lr, ceil) s2a_guest_next_budget(NULL, (room) * MB, M, H, 0, have, (pb) * MB, (ph) * MB, lr, (ceil) * MB, &src)
         uint64_t v;
         v = NB("100", 6141, 1, 1, 1533, 2600); CHECK(v == 100 * MB && src == 0, "⑪ 显式 100 最优先（哪怕上局死掉）：%llu MB", (unsigned long long)(v / MB));
         v = NB(NULL, 6141, 1, 1, 1533, 2600); CHECK(v == 0 && src == 1, "⑪ 上局死掉 → 0（整段进文件）：%llu MB", (unsigned long long)(v / MB));
         v = NB(NULL, 6141, 0, 0, 0, 0); CHECK(v == 1533 * MB && src == 3, "⑪ D-JETP 首局 6141 − 512 − 4096 = 1533：%llu MB", (unsigned long long)(v / MB));
-        v = NB(NULL, 6141, 0, 1, 1533, 2600); CHECK(v == 3589 * MB && src == 2, "⑪ D-JETP 第二局（Hmin 2600）1533 + 2088 − 32 = 3589：%llu MB", (unsigned long long)(v / MB));
+        v = NB(NULL, 6141, 0, 1, 1533, 2600); CHECK(v == 2557 * MB && src == 2, "⑪ D-JETP 第二局（Hmin 2600、够长）1533 + 2056 超一步 → 1533 + 1024 = 2557：%llu MB", (unsigned long long)(v / MB));
         v = NB(NULL, 6141, 0, 1, 3589, 300); CHECK(v == 3345 * MB, "⑪ Hmin 300 < 余量 收紧 3589 − 212 − 32 = 3345：%llu MB", (unsigned long long)(v / MB));
         v = NB(NULL, 6141, 0, 1, 100, 0); CHECK(v == 0, "⑪ 下限 0：%llu MB", (unsigned long long)(v / MB));
         v = NB(NULL, 6141, 0, 1, 5000, 4000); CHECK(v == 5629 * MB, "⑪ 上限 剩余 − 余量 = 5629：%llu MB", (unsigned long long)(v / MB));
         v = NB(NULL, 8189, 0, 0, 0, 0); CHECK(v == 3581 * MB, "⑪ 12 GB 机首局 8189 − 512 − 4096 = 3581：%llu MB", (unsigned long long)(v / MB));
         v = NB(NULL, 4000, 0, 0, 0, 0); CHECK(v == 0, "⑪ 剩余 4000 首局不够 → 0：%llu MB", (unsigned long long)(v / MB));
-        v = NB(NULL, 6141, 0, 1, 0, 3000); CHECK(v == 2456 * MB && src == 2, "⑪ 上局整段（B 0、Hmin 3000）回升 0 + 3000 − 512 − 32 = 2456：%llu MB", (unsigned long long)(v / MB));
+        v = NB(NULL, 6141, 0, 1, 0, 3000); CHECK(v == 1024 * MB && src == 2, "⑪ 上局整段（B 0、Hmin 3000、够长）回升 2456 超一步 → 1024：%llu MB", (unsigned long long)(v / MB));
+        v = NB2(6141, 1, 1533, 2600, 0, 0); CHECK(v == 1533 * MB, "⑪ 短局 1533 / 2600 只许持平：%llu MB（期望 1533）", (unsigned long long)(v / MB));
+        v = NB2(6141, 1, 3589, 300, 0, 0); CHECK(v == 3345 * MB, "⑪ 短局照样收紧 3345：%llu MB", (unsigned long long)(v / MB));
+        v = NB2(8188, 1, 3521, 6012, 0, 0); CHECK(v == 3521 * MB, "⑪ 一台 iPhone 上局 61 秒（3521 / 6012）：%llu MB（期望 3521，旧算法 7676）", (unsigned long long)(v / MB));
+        v = NB2(8188, 1, 3521, 6012, 1, 0); CHECK(v == 4545 * MB, "⑪ 同读数够长局：3521 + 1024 = %llu MB（期望 4545）", (unsigned long long)(v / MB));
+        v = NB2(8188, 1, 6000, 4000, 1, 6652); CHECK(v == 6652 * MB, "⑪ 天花板 6652：%llu MB（期望 6652）", (unsigned long long)(v / MB));
+        v = NB2(8188, 0, 0, 0, 0, 2000); CHECK(v == 2000 * MB && src == 3, "⑪ 首局估计 3580 遇天花板 2000：%llu MB", (unsigned long long)(v / MB));
 #undef NB
+#undef NB2
     }
     {   // ⑫
         char d[] = "/tmp/t_gfo_recXXXXXX", pk[300], rp[300];
@@ -147,7 +160,7 @@ int main(void) {
             s2a_guest_budget_note(2600 * MB); ok = s2a_guest_budget_rec_read(&rb, &rh);
             CHECK(ok && rb == 64 * MB && rh == 2600 * MB, "⑫ 心跳 2600 → 记录「%llu %llu」（期望 64 2600）", (unsigned long long)(rb / MB), (unsigned long long)(rh / MB));
             uint64_t pb, ph, v = s2a_guest_overflow_budget_ios(NULL, 6141 * MB, 512 * MB, 0, &src, &pb, &ph);
-            CHECK(v == 2120 * MB && src == 2 && pb == 64 * MB && ph == 2600 * MB, "⑫ 起局按上局实测：64 + 2088 − 32 = 2120（得 %llu MB，来源 %d）", (unsigned long long)(v / MB), src);
+            CHECK(v == 64 * MB && src == 2 && pb == 64 * MB && ph == 2600 * MB, "⑫ 起局按上局实测：64 + 2088 − 32 = 2120 往上抬，但上局只 3 次心跳（短局）→ 持平 64（得 %llu MB，来源 %d）", (unsigned long long)(v / MB), src);
             v = s2a_guest_overflow_budget_ios(NULL, 6141 * MB, 512 * MB, 1, &src, &pb, &ph);
             CHECK(v == 0 && src == 1 && access(rp, F_OK) != 0, "⑫ 上局死掉 → 0、记录已删（得 %llu MB，记录%s）", (unsigned long long)(v / MB), access(rp, F_OK) ? "没了" : "还在");
             v = s2a_guest_overflow_budget_ios(NULL, 6141 * MB, 512 * MB, 0, &src, &pb, &ph);
@@ -156,17 +169,38 @@ int main(void) {
             CHECK(v == 2629 * MB, "⑫ S2A_GUEST_FILE_OVERFLOW_HOST_MB=3000 → 2629（得 %llu MB）", (unsigned long long)(v / MB));
             {   // ⑫b 两局上限不同（11-16 真机：8189 → 6141）：上局起局剩余 8189、预算 3581、剩余最小 4835；这局剩余 6141 → 剩余最小按差 2048 扣成 2787，
                 //   预算 3581 + 2787 − 512 − 32 = 5824，夹到 6141 − 512 = 5629；这局剩余 8189 → 不扣：3581 + 4835 − 512 − 32 = 7872，夹到 7677
-                FILE *f = fopen(rp, "w"); fprintf(f, "3581 4835 8189\n"); fclose(f);
+                FILE *f = fopen(rp, "w"); fprintf(f, "3581 4835 8189\n"); fclose(f);   // 旧三项记录：当短局
                 uint64_t v1 = s2a_guest_overflow_budget_ios(NULL, 6141 * MB, 512 * MB, 0, &src, &pb, &ph);
-                CHECK(v1 == 5629 * MB && ph == 2787 * MB, "⑫b 上限低 2048：剩余最小扣成 %llu（期望 2787）、预算 %llu（期望 5629）", (unsigned long long)(ph / MB), (unsigned long long)(v1 / MB));
-                f = fopen(rp, "w"); fprintf(f, "1000 3000 8189\n"); fclose(f);
+                CHECK(v1 == 3581 * MB && ph == 2787 * MB, "⑫b 旧三项记录（当短局）上限低 2048：剩余最小扣成 %llu（期望 2787）、预算 %llu（期望持平 3581）", (unsigned long long)(ph / MB), (unsigned long long)(v1 / MB));
+                f = fopen(rp, "w"); fprintf(f, "3581 4835 8189 30 0\n"); fclose(f);
+                v1 = s2a_guest_overflow_budget_ios(NULL, 6141 * MB, 512 * MB, 0, &src, &pb, &ph);
+                CHECK(v1 == 4605 * MB && ph == 2787 * MB, "⑫b 够长局上限低 2048：剩余最小扣成 %llu（期望 2787）、预算 %llu（期望 5824 超一步 → 4605）", (unsigned long long)(ph / MB), (unsigned long long)(v1 / MB));
+                f = fopen(rp, "w"); fprintf(f, "1000 3000 8189 30 0\n"); fclose(f);
                 v1 = s2a_guest_overflow_budget_ios(NULL, 6141 * MB, 512 * MB, 0, &src, &pb, &ph);
                 CHECK(v1 == 1000 * MB + 952 * MB - 512 * MB - 32 * MB && ph == 952 * MB, "⑫b 不夹时：1000 + (3000 − 2048) − 512 − 32 = 1408（得 %llu）", (unsigned long long)(v1 / MB));
-                f = fopen(rp, "w"); fprintf(f, "1000 3000 6141\n"); fclose(f);
+                f = fopen(rp, "w"); fprintf(f, "1000 3000 6141 30 0\n"); fclose(f);
                 v1 = s2a_guest_overflow_budget_ios(NULL, 8189 * MB, 512 * MB, 0, &src, &pb, &ph);
-                CHECK(v1 == 3456 * MB && ph == 3000 * MB, "⑫b 上限高了不加：1000 + 3000 − 512 − 32 = 3456（得 %llu）", (unsigned long long)(v1 / MB));
+                CHECK(v1 == 2024 * MB && ph == 3000 * MB, "⑫b 上限高了不加：1000 + 3000 − 512 − 32 = 3456 超一步 → 2024（得 %llu）", (unsigned long long)(v1 / MB));
                 s2a_guest_budget_note(1234 * MB); unsigned long long x = 0, y = 0, z = 0; f = fopen(rp, "r"); int n3 = f ? fscanf(f, "%llu %llu %llu", &x, &y, &z) : 0; if (f) fclose(f);
                 CHECK(n3 == 3 && z == 8189, "⑫b 记录第三项写这局起局剩余 %llu（期望 8189）", z);
+            }
+            {   // ⑫c 天花板与次数（11-22）：上局「7676 6012 8188 6 0」被系统收掉 → 这局 0、记录换成「0 0 8188 0 6652」（7676 − 1024）；
+                //   下一局（没死）读到 0 / 0 → 0；够长局「6000 4000 8188 30 6652」→ 6000 + 3456 − 32 超一步 7024，夹到天花板 6652；
+                //   心跳第 30 次（剩余没更小）照写一笔，第四项 = 30
+                unsigned long long r[5] = {0}; int n5; FILE *f;
+                f = fopen(rp, "w"); fprintf(f, "7676 6012 8188 6 0\n"); fclose(f);
+                uint64_t v1 = s2a_guest_overflow_budget_ios(NULL, 8188 * MB, 512 * MB, 1, &src, &pb, &ph);
+                f = fopen(rp, "r"); n5 = f ? fscanf(f, "%llu %llu %llu %llu %llu", &r[0], &r[1], &r[2], &r[3], &r[4]) : 0; if (f) fclose(f);
+                CHECK(v1 == 0 && src == 1 && n5 == 5 && r[0] == 0 && r[1] == 0 && r[2] == 8188 && r[3] == 0 && r[4] == 6652,
+                      "⑫c 被收掉：预算 %llu（期望 0）、记录「%llu %llu %llu %llu %llu」（期望 0 0 8188 0 6652）", (unsigned long long)(v1 / MB), r[0], r[1], r[2], r[3], r[4]);
+                v1 = s2a_guest_overflow_budget_ios(NULL, 8188 * MB, 512 * MB, 0, &src, &pb, &ph);
+                CHECK(v1 == 0 && src == 2, "⑫c 死后下一局读到 0 / 0：%llu（期望 0）", (unsigned long long)(v1 / MB));
+                f = fopen(rp, "w"); fprintf(f, "6000 4000 8188 30 6652\n"); fclose(f);
+                v1 = s2a_guest_overflow_budget_ios(NULL, 8188 * MB, 512 * MB, 0, &src, &pb, &ph);
+                CHECK(v1 == 6652 * MB, "⑫c 够长局夹到天花板：%llu（期望 6652）", (unsigned long long)(v1 / MB));
+                for (int i = 0; i < 30; i++) s2a_guest_budget_note(9000 * MB);
+                f = fopen(rp, "r"); n5 = f ? fscanf(f, "%llu %llu %llu %llu %llu", &r[0], &r[1], &r[2], &r[3], &r[4]) : 0; if (f) fclose(f);
+                CHECK(n5 == 5 && r[3] == 30 && r[4] == 6652, "⑫c 第 30 次心跳记一笔：第四项 %llu（期望 30）、天花板 %llu（期望 6652）", r[3], r[4]);
             }
             unlink(rp); rmdir(d); unsetenv("S2A_GUEST_MEM_PEAK");
         }

@@ -86,6 +86,7 @@ void rp_op_draw_tex(nvn_gpu_cmd c, const p_draw_tex *o, const void *rec) {
     d.samp = d.src ? rp_samp_for_tex(sid, tid) : NULL;
     if (!d.src || !d.samp) { rp_view_pin_end(); nvn_unimpl("draw_tex", d.src ? "sampler_unresolved" : "texture_view", rec); return; }
 
+    rp_pass_want_layered(c, 0);   // 我们自己的拷贝程序不写层号：不进分层通道
     rp_pass_prepare_draw(c, cmask);   // 只写颜色 0：通道按这一槽开（同 rp_draw 的有效写掩码口径）
     if (!rp_pass_begin(c)) { rp_view_pin_end(); nvn_unimpl("draw_tex", "pass_begin_failed", rec); return; }
     if (!rp_pass_slot_attached(0)) { rp_view_pin_end(); nvn_unimpl("draw_tex", "no_color0_target", rec); return; }

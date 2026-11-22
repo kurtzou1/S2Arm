@@ -26,6 +26,12 @@ static inline const char *s2a_ui_lang_pick(const char *choice, const char *syste
     for (size_t i = 0; choice && i < sizeof ours / sizeof *ours; i++) if (!strcmp(choice, ours[i])) return ours[i];
     return s2a_ui_lang_of_tag(system);
 }
+// 「跟随系统」时的系统语言取哪一份（#2069）：iOS「设置 → S2Arm → 语言」给单个 App 选的语言存在本 App 域的 AppleLanguages，
+//   字符串表（NSBundle）按它出；这里原先一律读全局域（系统语言），两边不一致——界面中文、按 s2a_l10n_zh 选的报错 / 提示却是英文。
+//   本 App 域有值且不是我们自己写的（ours = 0）→ 用它；是我们写的或没有 → 全局域。app_first / global_first = 两个域 AppleLanguages 的第一项（没有为 NULL）
+static inline const char *s2a_ui_lang_system_tag(const char *app_first, int ours, const char *global_first) {
+    return app_first && *app_first && !ours ? app_first : global_first;
+}
 // 界面语言选「跟随系统」时，本 App 的 AppleLanguages 清不清（#971）：它同时是 iOS「设置 → S2Arm → 首选语言」（单 App 语言）存值的地方，
 //   原先一律清掉，玩家在系统设置里给 S2Arm 选的法语每次启动都被抹，游戏语言缺省（读本 App 首选语言列表）也就落不到法语。
 //   只清我们自己写进去的：记过「是我们写的」（ours = 1）就清；没记过（旧版写的）只认「恰好一项、是我们三种界面语言之一」——那是旧版 App 设置写的，

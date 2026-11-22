@@ -844,6 +844,7 @@ namespace S2A.Services.Tests
                 Check("手柄设置小程序：只收单只 Joy-Con → 配成单只（右只 JoyRight=16，只收左只时 JoyLeft=8）", "true 16 / true 16 / true 8",
                     $"{z.ToString().ToLower()} {zs} / {h.ToString().ToLower()} {hs} / {l.ToString().ToLower()} {ls}");
             }
+            ControllerAppletStalledPumpTest();   // 采样泵卡住时小程序也当场写进共享内存（11-22 根修，见 ControllerAppletStalledPumpTest.cs）
             // 游戏只声明 Player1、不含掌机格（11-02 七龙珠电光炸裂ZERO：掌机格被断开，触屏手柄全无反应）：主手柄从掌机格改到 Player1；游戏再声明掌机格时挪回
             {
                 var npads = Host.Device.Hid.Npads;

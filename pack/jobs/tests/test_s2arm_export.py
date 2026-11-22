@@ -170,6 +170,28 @@ class S2armExport(unittest.TestCase):
                 install.export_s2arm(self.c, self.A)
         self.assertEqual(e.exception.code, "devcert_missing")
 
+    def test_team_without_devices_still_exports_unsigned(self):
+        # D-VX6J：plumesign 签程序库要先拿团队描述文件，团队里一台设备都没有（Apple 8220）→ 修前整次导出报通用「本地任务失败」；
+        #   期望同没登录：照样导出未签名的，黄字照实说团队里没设备、怎么让电脑能签（码 device_not_visible）；别的签名失败照旧抛
+        self.fixture()
+        self.c.r.update(gameId=self.A, mode="export")
+        def no_devices(dylib, team, bundle):
+            raise RuntimeError("签名装机失败（device_not_connected）：r team has no devices from which to generate a provisioning profile. Connect a device")
+        with patch.object(program_pack, "build", lambda c, g, **k: self.pkg), patch.object(rewrite_refresh, "refresh_ios", lambda c, games, **k: []), \
+                patch.object(install, "export_signer", lambda c, mode: ("TEAMX", "io.example.app", no_devices, "测试账号")):
+            r = install.export_s2arm(self.c, self.A)
+        _, data, _ = self.members(r["s2armPath"])
+        self.assertEqual((json.loads(data["s2arm.json"])["signer"], r["signedWith"]), (None, dict(mode="none", name="", team=None)))
+        self.assertEqual(data[f"program/{program_pack.image_name(self.A)}"], DYLIB, "程序库原样、没签")
+        warn = [d for d in self.c.job["diagnostics"] if d.get("code") == "device_not_visible"]
+        self.assertEqual([(d["severity"], d["summary"]) for d in warn], [("warning", install.EXPORT_NO_DEVICE_NO_ID)])
+        def other(dylib, team, bundle):
+            raise RuntimeError("签名装机失败（signing_server_unreachable）：os error 11001")
+        with patch.object(program_pack, "build", lambda c, g, **k: self.pkg), patch.object(rewrite_refresh, "refresh_ios", lambda c, games, **k: []), \
+                patch.object(install, "export_signer", lambda c, mode: ("TEAMX", "io.example.app", other, "测试账号")):
+            with self.assertRaises(RuntimeError):
+                install.export_s2arm(self.c, self.A)
+
     def test_export_brings_game_to_current_like_update(self):
         # #1162：导出 .s2arm 原先只重核程序（refresh_ios）、不重编着色器库，玩家导出装好后电脑上「建议更新」照亮。
         #   期望和「更新这款」同一份定义（refresh_local）：着色器库重编在打包之前、在这款的程序锁里

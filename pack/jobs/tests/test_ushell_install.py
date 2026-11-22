@@ -175,19 +175,25 @@ class PushGameTests(JobCase):
                 install.update_game(self.c)
 
     def test_update_incomplete_is_said_not_silent(self):
-        """11-21：「更新这款」做不齐时照实给黄字（update_incomplete），不静默：没原料重编不了着色器库 / 宿主约定号变了要整款重出。期望手写"""
+        """11-21：「更新这款」做不齐时照实给黄字（update_incomplete），不静默。#1961：着色器库重编不了分三种说——没装工具 / 原料不在但原件在
+        （去出包页重出）/ 原件也不在（黄字带 facts.action = relinkSource，前端画「重新添加原件…」）；宿主约定号变了要整款重出。期望手写"""
         import sgrade_bf, host_update
         layout.save_device(self.c, self.ph.key, dict(shellId="S1", bundleId=self.ph.bid, games={GID: dict(pack="P1")}))
-        for label, rechain, abi, want in (("没原料", "unavailable", host_update.HOST_ABI, [install.UPDATE_SHADER_NOT_REBUILT]),
-                                          ("约定号变了", "skip", host_update.HOST_ABI + 1, [install.UPDATE_NEEDS_REPACK]),
-                                          ("都齐", "updated", host_update.HOST_ABI, [])):
+        for label, rechain, have, abi, want, action in (
+                ("没装工具", "no_tools", True, host_update.HOST_ABI, [install.UPDATE_SHADER_NO_TOOLS], None),
+                ("没原料·原件在", "no_source", True, host_update.HOST_ABI, [install.UPDATE_NEEDS_REPACK_SOURCE], None),
+                ("没原料·原件也不在", "no_source", False, host_update.HOST_ABI, [install.UPDATE_NEEDS_SOURCE], "relinkSource"),
+                ("约定号变了", "skip", True, host_update.HOST_ABI + 1, [install.UPDATE_NEEDS_REPACK], None),
+                ("都齐", "updated", True, host_update.HOST_ABI, [], None)):
             with self.subTest(label), mock.patch.object(sgrade_bf, "rechain_ios", lambda c, g, r=rechain: r), \
+                    mock.patch.object(install, "sources_present", lambda c, g, h=have: h), \
                     mock.patch.object(layout, "program_info", lambda c, g, a=abi: dict(hostAbi=a)), \
                     mock.patch.object(install, "update_mac_lib", lambda c, g: False):
                 self.c.job["diagnostics"] = []
                 install.push_game(self.c, GID, self.ph, steps=False)
                 got = [d for d in self.c.job["diagnostics"] if d.get("code") == "update_incomplete"]
                 self.assertEqual([d.get("message") or d.get("summary") for d in got], want)
+                self.assertEqual([(d.get("facts") or {}).get("action") for d in got], [action] if want else [])
 
     def test_pushes_this_game_only_never_installs(self):
         layout.save_device(self.c, self.ph.key, dict(shellId="S1", bundleId=self.ph.bid, games={"0100000000020000": dict(pack="Q")}))
@@ -214,7 +220,7 @@ class PushGameTests(JobCase):
         # 11-17 维护者定：着色器链变了在玩家推这一款时只重编着色器库（sgrade_bf.rechain_ios），在改写核对与推程序之前；没原料不挡推送
         import sgrade_bf
         layout.save_device(self.c, self.ph.key, dict(shellId="S1", bundleId=self.ph.bid, games={}))
-        for result in ("updated", "unavailable"):
+        for result in ("updated", "no_source"):
             order = []
             with mock.patch.object(sgrade_bf, "rechain_ios", lambda c, g, r=result: order.append(("rechain", g)) or r), \
                     mock.patch("rewrite_refresh.refresh_ios", lambda c, gs: order.append(("refresh", list(gs)))), \

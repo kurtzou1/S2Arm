@@ -40,6 +40,11 @@ static void load_map(void) {
     s2a_input_config def; s2a_kbd_default(&def);
     s2a_ios_mouse_config(&g_map, !memcmp(&def, &g_map, sizeof def));   // 鼠标那几项（模式 / 灵敏度 / 左键绑没绑 / 是不是缺省）同步给 mouse.m
 }
+// 这一款的键位（含手柄 gamepad / axes 段）：实体系统手柄改键也用这一份（controller.m sample_extended，#1606 ④）。只在输入队列上调（同 g_map 的其余读写）
+const s2a_input_config *s2a_ios_pad_map_config(void) {
+    if (!g_map_loaded) load_map();
+    return &g_map;
+}
 // 现在按着的键：照键码表逐个问系统（⌘ 不进按键，同 Mac）
 static void poll_keys(GCKeyboardInput *input, s2a_kbd_keys *now) {
     memset(now, 0, sizeof *now);

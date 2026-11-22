@@ -1111,7 +1111,8 @@ public final class S2ArmLauncherModel: ObservableObject {
     var installTargetIsPad: Bool { Self.padLike(selectedDevice?["productType"] as? String) }
     /// iPad，以及按 iPad 兼容装的 Apple Vision Pro（机型号 RealityDevice*；理论支持、未真机验证）：入口和文案写 iPad
     /// 总控台卡片与页顶画的设备轮廓（#1967）：作业认出 iPad 画 iPad，其余（iPhone / 还没连过 / 读不到类型）画 iPhone；两处同一个符号，matchedGeometryEffect 才接得上
-    static func deviceSymbol(_ kind: String?) -> String { kind == "iPad" ? "ipad" : "iphone" }
+    /// #1967：不知道类型（旧记录、还没现查）画不分机型的设备图标，不再默认 iPhone
+    static func deviceSymbol(_ kind: String?) -> String { kind == "iPad" ? "ipad" : kind == "iPhone" ? "iphone" : "ipad.and.iphone" }
 
     static func padLike(_ productType: String?) -> Bool {
         guard let t = productType else { return false }

@@ -152,7 +152,8 @@ def extracted(src, tid=None, layout=None, ref=None):
                 n, size = len(z.infolist()), sum(i.file_size for i in z.infolist())
                 if n > MAX_FILES or size > MAX_BYTES:
                     raise ValueError(f"zip 解压后太大：{n} 个文件、{size >> 20} MB（上限 {MAX_FILES} 个、{MAX_BYTES >> 30} GB）")
-                z.extractall(tmp)
+                # 访达「压缩」带的 __MACOSX/（里面只有 ._ 附属文件）不是存档：不解出来，免得空目录进存档、多一层目录扰乱布局判断（#2066）
+                z.extractall(tmp, members=[i for i in z.infolist() if i.filename.replace("\\", "/").split("/")[0] != "__MACOSX"])
             src = tmp
         if not os.path.isdir(src):
             raise ValueError("来源不是目录或 zip")

@@ -401,8 +401,8 @@ public sealed partial class EnvironmentWindow
                 if (game.IphoneInstalledAt is not null)
                 {
                     if (freeDays is { } daysLeft)
-                        parts.Add(daysLeft == 0 ? T("library.status.expired") : T("library.status.installed").Replace("{0}", daysLeft.ToString()));
-                    else parts.Add(T("library.status.installedPaid"));
+                        parts.Add(daysLeft == 0 ? T("library.status.expired") : T("library.status.installed").Replace("{0}", daysLeft.ToString()).Replace("{1}", SharedText.DeviceKind(game.IphoneInstallKind)));
+                    else parts.Add(T("library.status.installedPaid").Replace("{0}", SharedText.DeviceKind(game.IphoneInstallKind)));   // #1962：推到的是 iPad 就写 iPad
                 }
                 else parts.Add(T("library.status.iphone"));
             }

@@ -969,11 +969,10 @@ namespace S2A.Services
                 InputPump.SetPrimary(Host.Device, player, type);
             }
 
-            // 等采样泵（约 16 ms 一拍）把新样式写进共享内存，小程序的重验读的是那里
-            for (int i = 0; i < 20 && ((uint)Host.Device.Hid.SharedMemory.Npads[(int)player].InternalState.StyleSet & ~Joycon2Bits) != expectedStyle; i++)
-            {
-                System.Threading.Thread.Sleep(10);
-            }
+            // 当场把配置写进共享内存（同一把锁里 Remap，同 InputPump.FollowNow / 审计 P1-192）：小程序的重验读的是那里。
+            //   原先等采样泵（约 16 ms 一拍）最多 200 ms：本机负载 7 倍核数时泵线程 200 ms 内没被调度，回 true 时共享内存仍是旧样式（0），
+            //   游戏重验判不满足；服务层单测「只收单只 Joy-Con」随负载时红时绿（11-22）
+            Host.Device.Hid.Npads.S2AApplyConfiguration();
 
             string pads = InputPump.SecondPlayer != PlayerIndex.Unknown ? $"两个手柄配到 {InputPump.Player} + {InputPump.SecondPlayer}" : $"唯一手柄配到 {player}";
             Console.Error.WriteLine($"S2A 手柄设置小程序自动应答：{pads}（{type}）；游戏要 人数 {args.PlayerCountMin}–{args.PlayerCountMax} 样式 {args.SupportedStyles}");

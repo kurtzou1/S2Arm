@@ -45,6 +45,10 @@ int s2a_snap_reenable(int why) {
     snap_sw(); g_snap_sw |= 1; g_snap_off = 0; atomic_store(&g_snap_live, -1); return 1;
 }
 // 本局构造期因放不下关掉（s2a_snap_disable）：「能存」这一位的依据就是它，不再报设置来源（11-21 真机：前一行黄字说放不下，这行却写「依据 缺省」）
+// 游戏库长按卡片给不给「回到这一刻」（ios/app.m s2a_shell_snapshot_available；exists = 这款快照目录里有完整清单）：
+//   玩家开着快照 → 给；这一局只是因地址放不下关了快照（s2a_snap_disable 的原因码，只有 S2A_SNAP_OFF_ADDRESS = 1）→ 照样给（11-22：已有快照不能变成看不见的文件，
+//   恢复局按快照清单原址重占窗口与命令记录区，vawin.c snap_retake，不靠这一局的快照区）；玩家在设置里关了快照 → 不给（同改动前）
+int s2a_snap_restore_offered(int exists) { snap_sw(); return exists && ((g_snap_sw & 1) || g_snap_off == 1); }
 const char *s2a_snap_source(void) { snap_sw(); return g_snap_off ? "本局放不下快照区" : g_snap_src; }   // 原因码现在只有 S2A_SNAP_OFF_ADDRESS（native.h）
 int s2a_snap_saving(void) { return snap_sw() & 1; }
 // 恢复中：每次现读 S2A_SNAP_RESTORE。进程内「回到这一刻」在宿主重启前才设它、恢复完 unsetenv，开局缓存的那一位跟不上——

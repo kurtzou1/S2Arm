@@ -19,13 +19,24 @@ static int bad;
 #define MB (1ull << 20)
 #define GB (1ull << 30)
 static uint64_t g_test_span;
-__attribute__((used, visibility("default"))) uint64_t s2a_mem_span_now(void) { return g_test_span; }   // vawin.c 按名字取（dlsym），这里冒充 svc_mem.c
+__attribute__((used, visibility("default"))) uint64_t s2a_mem_span_learn(void) { return g_test_span; }   // vawin.c 按名字取（dlsym），这里冒充 svc_mem.c
 extern uint64_t s2a_span_seed(uint64_t);
 int main(void) {
-    CHECK(s2a_window_host_below(64 * GB, 0) == 3 * GB, "① 没学到跨度：宿主照旧 3 GiB");
+    {   // ⓪ 学跨度的贴顶规则（s2a_span_learn_ok）：跨度 + 512 MB < 窗口才记；贴顶但有越界映射 / 远端缺页照记。期望手算：窗口 62464 MB
+        extern int s2a_span_learn_ok(uint64_t, uint64_t, uint64_t, uint64_t);
+        CHECK(!s2a_span_learn_ok(62080 * MB, 62464 * MB, 0, 0), "⓪ 异度3 贴顶 62080（窗口末 −384 MB）、没碰窗口外：不记");
+        CHECK(s2a_span_learn_ok(61951 * MB, 62464 * MB, 0, 0) && !s2a_span_learn_ok(61952 * MB, 62464 * MB, 0, 0), "⓪ 边界：61951 + 512 = 62463 < 62464 记，61952 不记");
+        CHECK(s2a_span_learn_ok(62400 * MB, 62464 * MB, 3, 0) && s2a_span_learn_ok(62300 * MB, 62464 * MB, 0, 12), "⓪ 贴顶但越界映射 3 次 / 远端缺页 12 次：记");
+        CHECK(!s2a_span_learn_ok(0, 62464 * MB, 5, 5), "⓪ 跨度 0：不记"); }
+    CHECK(s2a_window_host_below(64 * GB, 0) == 6 * GB, "① 没学到跨度、空洞 64 GiB：宿主下限 6 GiB（11-22 起；原 3 GiB，宿主峰值 p99 约 5 GB 碰底）");
+    {   // ①b 宿主下限按空洞定（s2a_window_host_floor）：≥ 22 GiB（6 GiB 宿主 + 16 GiB 窗口）给 6 GiB，更小的空洞照旧 3 GiB
+        extern uint64_t s2a_window_host_floor(uint64_t);
+        CHECK(s2a_window_host_floor(22 * GB) == 6 * GB && s2a_window_host_floor(22 * GB - 1) == 3 * GB && s2a_window_host_floor(6 * GB) == 3 * GB,
+              "①b 空洞 22 GiB → 6 GiB；差 1 字节 → 3 GiB；6 GB 小 iPad → 3 GiB");
+        CHECK(s2a_window_host_below(6 * GB, 0) == 3 * GB, "①b 6 GB 空洞没学到跨度：宿主照旧 3 GiB"); }
     uint64_t h = s2a_window_host_below(64 * GB, 16395 * MB);
     CHECK(h == 41 * GB && h + 16395 * MB <= 64 * GB, "② 学到 16395 MB、空洞 64 GiB：宿主 41 GiB（实得 %llu MB），宿主 + 跨度不超空洞", (unsigned long long)(h / MB));
-    CHECK(s2a_window_host_below(64 * GB, 70 * GB) == 3 * GB, "③ 学到的跨度比空洞还大：宿主至少 3 GiB");
+    CHECK(s2a_window_host_below(64 * GB, 70 * GB) == 6 * GB, "③ 学到的跨度比空洞还大：宿主至少下限 6 GiB");
     CHECK(s2a_window_host_below(64 * GB, 100 * MB) == 61 * GB, "④ 学到 100 MB：窗口 3 GiB、宿主 61 GiB");
     // 按学到的跨度该给的窗口（s2a_window_for_span，多款容器选定游戏后收窗口用，#55248c）。期望手算：跨度 × 1.25 + 2 GiB、1 GiB 向上取整、至少 2 GiB
     CHECK(s2a_window_for_span(0) == 0, "④b 没学到：0 = 不限");
@@ -50,11 +61,12 @@ int main(void) {
     { extern void s2a_window_span_forget(void); char q[] = "/tmp/s2a_span_keep_XXXXXX"; int qd = mkstemp(q); dprintf(qd, "123\n"); close(qd);
       setenv("S2A_WIN_SPAN_PEAK", q, 1); s2a_window_span_forget(); CHECK(access(q, F_OK) == 0, "⑦ 没收窄过：forget 不删记录"); unlink(q); }
     // ⑧ 当场放宽的新起点（s2a_window_widen_lo，手算）：留宿主底 0x70_0000_0000、窗口底 0x7B_0000_0000（下方留了 44 GiB）
-    //   下方没别人：0x70_C000_0000（底 + 3 GiB）；已占到 0x75_0000_1000：向上取整 0x75_4000_0000；已占到窗口底：0（放不宽）
-    { extern uint64_t s2a_window_widen_lo(uint64_t, uint64_t, uint64_t); const uint64_t K = 0x7000000000ull, B = 0x7B00000000ull;
-      CHECK(s2a_window_widen_lo(K, B, K) == 0x70C0000000ull, "⑧ 下方空着：新起点 = 留宿主底 + 3 GiB");
-      CHECK(s2a_window_widen_lo(K, B, 0x7500001000ull) == 0x7540000000ull, "⑧ 下方已占到 0x7500001000：新起点取整到 0x7540000000、不盖");
-      CHECK(s2a_window_widen_lo(K, B, B) == 0, "⑧ 下方占满到窗口底：放不宽（0）"); }
+    //   宿主下限 6 GiB 时下方没别人：0x71_8000_0000（底 + 6 GiB；3 GiB 时 0x70_C000_0000）；已占到 0x75_0000_1000：向上取整 0x75_4000_0000；已占到窗口底：0（放不宽）
+    { extern uint64_t s2a_window_widen_lo(uint64_t, uint64_t, uint64_t, uint64_t); const uint64_t K = 0x7000000000ull, B = 0x7B00000000ull;
+      CHECK(s2a_window_widen_lo(K, B, K, 6 * GB) == 0x7180000000ull, "⑧ 下方空着：新起点 = 留宿主底 + 宿主下限 6 GiB");
+      CHECK(s2a_window_widen_lo(K, B, K, 3 * GB) == 0x70C0000000ull, "⑧ 小空洞下限 3 GiB：新起点 = 留宿主底 + 3 GiB");
+      CHECK(s2a_window_widen_lo(K, B, 0x7500001000ull, 6 * GB) == 0x7540000000ull, "⑧ 下方已占到 0x7500001000：新起点取整到 0x7540000000、不盖");
+      CHECK(s2a_window_widen_lo(K, B, B, 6 * GB) == 0, "⑧ 下方占满到窗口底：放不宽（0）"); }
     {   // ⑨ 低区碰底死的局记跨度（s2a_window_span_arm / s2a_window_span_crash）
         extern int s2a_window_span_crash_worth(uint64_t); extern void s2a_window_span_arm(void); extern uint64_t s2a_window_span_crash(uint64_t);
         CHECK(s2a_window_span_crash_worth(6 * MB) && s2a_window_span_crash_worth(64 * MB - 1) && !s2a_window_span_crash_worth(64 * MB) && !s2a_window_span_crash_worth(512 * MB),
@@ -77,10 +89,10 @@ int main(void) {
         CHECK(!s2a_window_span_rec_ok(73086 * MB, 49152 * MB) && !s2a_window_span_rec_ok(76030 * MB, 65536 * MB), "⑩ 记录 ≥ 空洞：不算数");
         CHECK(s2a_window_span_rec_ok(16408 * MB, 49152 * MB) && !s2a_window_span_rec_ok(0, 49152 * MB) && s2a_window_span_rec_ok(73086 * MB, 0), "⑩ 空洞内的算数、0 不算、空洞未知不判"); }
     {   // ⑪ 小内存 iPad（4 GB 机，2^39 以下 6 GB 空洞）：按游戏应用池给窗口，宿主至少 2 GiB。期望手算，不拿实现输出当期望：
-        //    Switch 1 池 3285 MB + 堆起点约 380 MB → 窗口 4 GiB、宿主 2 GiB；64 GB 空洞仍留 3 GiB；已学到更大跨度不被池压小
+        //    Switch 1 池 3285 MB + 堆起点约 380 MB → 窗口 4 GiB、宿主 2 GiB；64 GB 空洞留宿主下限 6 GiB；已学到更大跨度不被池压小
         extern uint64_t s2a_window_host_below_for_pool(uint64_t, uint64_t, uint64_t);
         CHECK(s2a_window_host_below_for_pool(6 * GB, 0, 3285 * MB) == 2 * GB, "⑪ 6 GB 空洞 + 3285 MB 池：宿主 2 GiB（窗口 4 GiB）");
-        CHECK(s2a_window_host_below_for_pool(64 * GB, 0, 3285 * MB) == 3 * GB, "⑫ 64 GB 空洞：宿主照旧 3 GiB");
+        CHECK(s2a_window_host_below_for_pool(64 * GB, 0, 3285 * MB) == 6 * GB, "⑫ 64 GB 空洞：宿主下限 6 GiB（池要的 4 GiB 窗口远小于空洞，不压）");
         CHECK(s2a_window_host_below_for_pool(4 * GB, 0, 3285 * MB) == 2 * GB, "⑬ 4 GB 空洞：宿主不低于 2 GiB，放不下如实失败");
         CHECK(s2a_window_host_below_for_pool(6 * GB, 0, 9 * GB) == 2 * GB, "⑭ Switch 2 池 9 GiB 也压到下限，仍放不下由失败页说清");
         CHECK(s2a_window_host_below_for_pool(64 * GB, 16395 * MB, 3285 * MB) == 41 * GB, "⑮ 学到更大跨度时不被池需求反向压小");
@@ -109,7 +121,7 @@ int main(void) {
         char d[] = "/tmp/s2a_captry_XXXXXX"; if (!mkdtemp(d)) { CHECK(0, "⑱ 建临时文档根"); } setenv("S2A_DOCS", d, 1);
         char bp[512], tp[512], rp[512];
         snprintf(bp, sizeof bp, "%s/wire/%016llX/span_cap_bad", d, (unsigned long long)A); snprintf(tp, sizeof tp, "%s/wire/%016llX/span_cap_try", d, (unsigned long long)A);
-        snprintf(rp, sizeof rp, "%s/wire/%016llX/span_peak", d, (unsigned long long)A);
+        snprintf(rp, sizeof rp, "%s/wire/%016llX/span_peak2", d, (unsigned long long)A);
         CHECK(s2a_window_span_seen(A) == s2a_span_seed(A), "⑱ 第一局：没有标记，按种子值收");
         pid_t c = fork(); if (!c) { s2a_window_cap_try(NULL, A, s2a_window_span_seen(A)); _exit(s2a_window_span_seen(A) == s2a_span_seed(A) ? 0 : 3); }   // 早夭局：收窄、不报首帧就退出
         int st = 0; waitpid(c, &st, 0);

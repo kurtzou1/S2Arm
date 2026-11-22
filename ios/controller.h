@@ -3,6 +3,9 @@
 #include <stdlib.h>
 // s2a_controller_attach 只在主线程调用；触控回调也在主线程。
 void s2a_controller_attach(UIView *root, void (^touchEnabled)(BOOL enabled));
+// 游戏内「分配玩家」（ios/player_assign.m，#1606 ④）：齿轮菜单列不列这一项；面板本身（主线程，closed 在面板关掉后调）
+BOOL s2a_ios_player_assign_wanted(void);
+UIViewController *s2a_ios_player_assign(void (^closed)(void));
 // 任何线程都可调：不在主线程时排到主队列再改手柄 / 虚拟手柄（v0.3.0 起挂起 / 恢复在串行队列 s2a.ios-lifecycle 上调它）
 void s2a_controller_set_foreground(int foreground);
 // 只许主线程的 UIKit 入口（11-11 v0.3.0 局中失焦崩溃：生命周期队列上改 UIImageView 触发 UIKit 主线程断言、App 被系统中止）：

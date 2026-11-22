@@ -48,7 +48,8 @@ int main(void) {
     CHECK(s2a_guest_file_wanted3(NULL, S1, 4096 * MB, 3000 * MB, H2, G) == 0, "㉑ 剩余 4096、实测 3000 + 512 = 3512 ≤ 4096：关");
     CHECK(s2a_guest_file_wanted3(NULL, S1, R, R - G, H2, G) == 0 && s2a_guest_file_wanted3(NULL, S1, R, R - G + 1, H2, G) == 1, "㉒ 边界：实测 + 余量 = 剩余 关，多 1 字节 开");
     {   // ㉓ 每局记需求、起局按上一局结算（#1634 11-19：原「只增不减 + 文件后备局不记」一局异常就永远判开）。期望按规则手写（余量 512、剩余 6141）：
-        //   a 没记录、本局心跳记 900 / 700 → 本局文件「900 MB 2 次 匿名」；结算（短局）→ 记录 900
+        //   a 没记录、本局心跳记 900 / 700 → 本局文件「900 MB 2 次 匿名」；结算（短局、900 + 512 ≤ 6141）→ 不建记录（短局只是下限，D-9XY8）
+        //   a' 没记录、短局（8 次、文件后备）需求 2817、剩余 6132 → 不建记录（D-9XY8 原样）；没记录、短局需求 5700（+512 > 6141，证明装不下）→ 记录 5700
         //   b 记录 5835、上一局开文件后备够长（40 次）需求 4300 → 换成 4300（往下改：#1634 帖主那种一局异常就纠正）
         //   c 记录 4300、上一局太短（5 次）需求 2000 → 不降，4300
         //   d 记录 4300、上一局前台死掉、需求 6000（+1024 > 6141，像撞上限）→ 6000、记「死过」
@@ -63,7 +64,10 @@ int main(void) {
         uint64_t a0 = s2a_guest_mem_seen(); s2a_guest_mem_note(900 * MB); s2a_guest_mem_note(700 * MB);
         unsigned long long rn = 0, rb = 0; int rf = -1; { FILE *f = fopen(rk, "r"); if (f) { if (fscanf(f, "%llu %llu %d", &rn, &rb, &rf) != 3) rn = 0; fclose(f); } }
         settle(0, R, G); uint64_t a1 = s2a_guest_mem_seen(); int gone = access(rk, F_OK) != 0;
-        CHECK(a0 == 0 && rn == 900 * MB && rb == 2 && rf == 0 && a1 == 900 * MB && gone, "㉓a 本局文件 %llu MB / %llu 次 / 文件后备 %d（期望 900 / 2 / 0），结算后记录 %llu MB（期望 900）、本局文件删掉 %d", rn >> 20, rb, rf, a1 >> 20, gone);
+        CHECK(a0 == 0 && rn == 900 * MB && rb == 2 && rf == 0 && a1 == 0 && gone, "㉓a 本局文件 %llu MB / %llu 次 / 文件后备 %d（期望 900 / 2 / 0），结算后记录 %llu MB（期望 0，短局不建）、本局文件删掉 %d", rn >> 20, rb, rf, a1 >> 20, gone);
+        PUT(rk, "%llu 8 1\n", 2817 * MB); settle(0, 6132 * MB, G); uint64_t a2 = s2a_guest_mem_seen();
+        PUT(rk, "%llu 8 1\n", 5700 * MB); settle(0, R, G); uint64_t a3 = s2a_guest_mem_seen();
+        CHECK(a2 == 0 && a3 == 5700 * MB, "㉓a' 没记录短局 2817（剩余 6132）：记录 %llu MB（期望 0）；没记录短局 5700（+512 > 6141）：记录 %llu MB（期望 5700）", a2 >> 20, a3 >> 20);
         PUT(pk, "%llu\n", 5835 * MB); PUT(rk, "%llu 40 1\n", 4300 * MB); settle(0, R, G);
         CHECK(s2a_guest_mem_seen() == 4300 * MB, "㉓b 记录 5835、上一局文件后备够长需求 4300：记录 %llu MB（期望 4300，往下改）", s2a_guest_mem_seen() >> 20);
         PUT(rk, "%llu 5 0\n", 2000 * MB); settle(0, R, G);
@@ -156,6 +160,29 @@ int main(void) {
       CHECK(s2a_guest_file_wanted6(NULL, S1, 4093 * MB, 5667 * MB, 3700 * MB, H2, G, 1, &low) == 1 && s2a_guest_file_wanted6(NULL, S1, 4093 * MB, 5667 * MB, 3700 * MB, H2, G, 0, &low) == 1,
             "58 实测 3700 + 512 > 4093：死没死都开");
       CHECK(s2a_guest_file_wanted6("1", S1, RP, PI, 0, H2, G, 0, &low) == 1 && s2a_guest_file_wanted6("0", S2, R, PD, 0, H2, G, 1, &low) == 0, "54 显式 1 / 0 压过一切"); }
+    {   // 63–67 判据剩余按物理内存封顶（s2a_guest_room_eff，D-YDKK：iPad14,3 物理 7536 MB、带提高内存上限权限剩余 8189 MB）。期望手算：min(剩余, 物理 − 余量 512)
+        uint64_t s2a_guest_room_eff(uint64_t, uint64_t, uint64_t); int s2a_guest_carve_wanted(const char *, int, uint64_t, uint64_t); int low = -1;
+        CHECK(s2a_guest_room_eff(8189 * MB, 7536 * MB, 512 * MB) == 7024 * MB, "63 iPad 物理 7536、剩余 8189：判据按 7536 − 512 = 7024 MB");
+        CHECK(s2a_guest_room_eff(8189 * MB, 11570 * MB, 512 * MB) == 8189 * MB && s2a_guest_room_eff(6141 * MB, 7680 * MB, 512 * MB) == 6141 * MB, "64 物理 − 余量不小于剩余（Duo 11570 / 8 GB iPhone 剩余 6141）：照旧按剩余");
+        CHECK(s2a_guest_room_eff(0, 7536 * MB, 512 * MB) == 0 && s2a_guest_room_eff(8189 * MB, 0, 512 * MB) == 8189 * MB, "65 剩余未知（Mac 0）仍 0；物理读不到只按剩余");
+        uint64_t r = s2a_guest_room_eff(8189 * MB, 7536 * MB, 512 * MB);
+        CHECK(s2a_guest_file_wanted6(NULL, S2, r, 7536 * MB, 7625 * MB, H2, G, 0, &low) == 1, "66 D-YDKK 第 2 局：实测 7625 + 512 = 8137 > 7024 → 开（原先比 8189 判关）");
+        CHECK(s2a_guest_carve_wanted(NULL, 0, r, 7168 * MB) == 0 && s2a_guest_carve_wanted(NULL, 1, 8189 * MB, 7168 * MB) == 0,
+              "66 D-YDKK 第 3 局：剩余 7024 < 7168 不挖；物理内存也装不下那档（low）也不挖，物理映射区走文件"); }
+    {   // 68–71 有实测时也判「物理内存也装不下」那档（D-9R4S：6 GB iPad，Switch 2 大款实测 8877 MB，原先有实测就不判、从不提示）。期望手算：on 且 实测 + 余量 512 > 物理
+        int low = -1; uint64_t s2a_guest_need(uint64_t, uint64_t, uint64_t);
+        CHECK(s2a_guest_file_wanted6(NULL, S2, 4092 * MB, 5914 * MB, 8877 * MB, H2, G, 0, &low) == 1 && low == 1, "68 D-9R4S：实测 8877 + 512 > 剩余 4092 开、> 物理 5914 提示（low %d，期望 1）", low);
+        CHECK(s2a_guest_file_wanted6(NULL, S2, 7024 * MB, 7536 * MB, 7625 * MB, H2, G, 0, &low) == 1 && low == 1, "69 D-YDKK：实测 7625 + 512 = 8137 > 物理 7536：提示（low %d，期望 1）", low);
+        CHECK(s2a_guest_file_wanted6(NULL, S2, 8189 * MB, 11570 * MB, 7800 * MB, H2, G, 0, &low) == 1 && low == 0, "70 Duo：实测 7800 + 512 ≤ 物理 11570：开、不提示（low %d，期望 0）", low);
+        CHECK(s2a_guest_file_wanted6(NULL, S2, 8189 * MB, 11570 * MB, 2118 * MB, H2, G, 0, &low) == 0 && low == 0, "71 实测装得下：关、不提示（low %d）", low);
+        CHECK(s2a_guest_need(9216 * MB, 2048 * MB, 8877 * MB) == 8877 * MB && s2a_guest_need(9216 * MB, 2048 * MB, 0) == 11264 * MB && s2a_guest_need(9216 * MB, 2048 * MB, UINT64_MAX) == 11264 * MB,
+              "71 「约需」：有实测 8877、没实测 / 坏记录 9216 + 2048 = 11264"); }
+    {   // 67 「内存可能不够」只问一次（s2a_guest_lowram_once）：记号在 mem_peak_anon 同目录 lowram_asked；第一次 0（要问）、之后 1
+        int s2a_guest_lowram_once(void); char d[] = "/tmp/t_lowram_XXXXXX"; if (!mkdtemp(d)) { CHECK(0, "67 建临时目录"); return 1; }
+        char pk[256]; snprintf(pk, sizeof pk, "%s/w/mem_peak_anon", d); setenv("S2A_GUEST_MEM_PEAK", pk, 1);
+        int a = s2a_guest_lowram_once(), b = s2a_guest_lowram_once(); char m[300]; snprintf(m, sizeof m, "%s/w/lowram_asked", d);
+        CHECK(a == 0 && b == 1 && access(m, F_OK) == 0, "67 第一次要问（%d，期望 0）、第二次不问（%d，期望 1）、记号写在 lowram_asked", a, b);
+        unlink(m); snprintf(m, sizeof m, "%s/w", d); rmdir(m); rmdir(d); unsetenv("S2A_GUEST_MEM_PEAK"); }
     printf("%s t_guest_file_auto：%d 项不符\n", bad ? "✗" : "✓", bad);
     return bad != 0;
 }

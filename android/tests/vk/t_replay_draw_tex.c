@@ -38,7 +38,7 @@ int rp_pass_parked(void) { return 0; }
 void rp_pass_land_reads(nvn_gpu_cmd c, const tex_t *const *ts, int n) { (void)c; (void)ts; (void)n; }
 void rp_view_pin_begin(void) {}
 void rp_view_pin_end(void) {}
-void rp_pass_prepare_draw(nvn_gpu_cmd c, uint32_t m) { (void)c; (void)m; }
+void rp_pass_prepare_draw(nvn_gpu_cmd c, uint32_t m) { (void)c; (void)m; } void rp_pass_want_layered(nvn_gpu_cmd c, int layered) { (void)c; (void)layered; }
 int rp_pass_begin(nvn_gpu_cmd c) {   // 替身：颜色 0 = 目标，按 LOAD 开（保留底色），只开一次
     if (g_open) return 1;
     nvn_gpu_pass_desc p; memset(&p, 0, sizeof p);

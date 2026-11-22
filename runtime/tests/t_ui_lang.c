@@ -39,6 +39,12 @@ int main(void) {
       ck("旧版 App 设置写的 en（恰好一项、我们的三种之一）→ 清", "1", s2a_ui_lang_clear_override(en, 1, 0) ? "1" : "0");
       ck("旧版写的 zh-Hant → 清", "1", s2a_ui_lang_clear_override(hant, 1, 0) ? "1" : "0");
       ck("两项（系统那边的列表）没记过 → 不清", "0", s2a_ui_lang_clear_override(two, 2, 0) ? "1" : "0"); }
+    // ⑤ 跟随系统时系统语言取哪一份（#2069）：期望手写
+    ck("iOS 设置里给 S2Arm 选了简中、系统英文、App 内没选 → 本 App 域", "zh-Hans", s2a_ui_lang_system_tag("zh-Hans", 0, "en"));
+    ck("同上，最终界面语言 → 中文", "zh-Hans", s2a_ui_lang_pick(NULL, s2a_ui_lang_system_tag("zh-Hans", 0, "en-US")));
+    ck("本 App 域是我们写的覆盖值 → 全局域", "en-US", s2a_ui_lang_system_tag("zh-Hans", 1, "en-US"));
+    ck("本 App 域没有 → 全局域", "fr-FR", s2a_ui_lang_system_tag(NULL, 0, "fr-FR"));
+    ck("本 App 域空串 → 全局域", "ja-JP", s2a_ui_lang_system_tag("", 0, "ja-JP"));
     printf("共 %d 项\n", n);
     return S2A_T_RESULT("t_ui_lang", bad);
 }

@@ -1374,6 +1374,16 @@ class AssembleTests(unittest.TestCase):
         with um.patch.object(packer, "current_shell_id", return_value="SID1"):
             self.assertEqual(install.phone_updates(self.c), [])
 
+    def test_phone_updates_connected_one_first(self):
+        """D-XYNG：游戏库里两台壳都旧（dev1 不在线、dev2 连着）→ 连着的那台排第一（两个启动器的更新按钮都取第一条，原先按文件名排、永远去找不在线的 dev1）；
+        设备服务给的写法与记录键差在短横 / 大小写也认（同 win_udid 的 udid_key）；没有在线的 → 原顺序"""
+        self._update()
+        layout.save_device(self.c, "dev2", dict(layout.load_device(self.c, "dev1"), shellId="SID1"))
+        with um.patch.object(install, "online_devices", return_value={"DEV2"}):
+            self.assertEqual([u["device"] for u in install.phone_updates(self.c)], ["dev2", "dev1"])
+        with um.patch.object(install, "online_devices", return_value=set()):
+            self.assertEqual([u["device"] for u in install.phone_updates(self.c)], ["dev1", "dev2"])
+
     def test_phone_updates_lists_kept_modules_on_current_shell(self):
         """壳是本版、但甲有运行时留下、已收回还没补进 iPhone 件的 NRO（#8be819）→ 照样列这台，kept = [甲]；没有留下的 → 空"""
         A = self.A

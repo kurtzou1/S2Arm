@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 S2Arm contributors
+import AppKit
 import SwiftUI
 import NXCore
 import NXModel
@@ -60,6 +61,9 @@ extension LauncherView {
                     if !headerShown {
                         Image(systemName: S2ArmLauncherModel.deviceSymbol(model.consolePhone?.kind)).font(.system(size: artworkSide * 0.34, weight: .thin)).foregroundStyle(.white.opacity(0.9))
                             .matchedGeometryEffect(id: "console.phone", in: consoleSpace).offset(y: -artworkSide * 0.08)
+                    } else {   // #1967：设备图标升到页顶后卡片不空着，放 S2Arm 的 App 图标
+                        Image(nsImage: NSApplication.shared.applicationIconImage).resizable().interpolation(.high)
+                            .frame(width: artworkSide * 0.4, height: artworkSide * 0.4).offset(y: -artworkSide * 0.08).accessibilityHidden(true)
                     }
                     Text("S2Arm").font(.manrope(artworkSide * 0.1, .bold)).foregroundStyle(.white).offset(y: artworkSide * 0.25)
                     if case .updating(let done, let total) = status {   // 动画 3 / 4：外圈进度环（更新所选 / 装 App 时）

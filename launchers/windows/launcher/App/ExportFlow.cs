@@ -11,6 +11,7 @@ using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using S2Arm.Launcher.Protocol;
 
@@ -28,6 +29,8 @@ public sealed partial class EnvironmentWindow
     /// <summary>最近一次更新的结局：成没成、没成的原因（作业原句）、做不齐的黄字（诊断 update_incomplete 的玩家句）</summary>
     private readonly Dictionary<string, (bool Ok, string Message, IReadOnlyList<string> Warnings)> gameUpdated = new(StringComparer.OrdinalIgnoreCase);
     private bool GameUpdating(string? gameId) => gameId is not null && gameUpdating.ContainsKey(gameId);
+    /// <summary>黄字带「重新添加原件…」的款（#1961，诊断 facts.action = relinkSource）：offer = 给按钮；checking = 正在核对；done = 已找回；其余 = 核对没过的原句</summary>
+    private readonly Dictionary<string, string> gameRelink = new(StringComparer.OrdinalIgnoreCase);
 
     private ExportChoice.Update UpdateStateOf(LibraryGame game) => ExportChoice.UpdateState(game.IphoneReady, UpdateReasons(game));
 
@@ -36,7 +39,7 @@ public sealed partial class EnvironmentWindow
     {
         if (GameUpdating(game.Id) || connectedFolder is null || libraryId is null) return;
         var front = BeginJob(JobKind.Update, game.Id);
-        gameUpdating[game.Id] = (null, ""); gameUpdated.Remove(game.Id);
+        gameUpdating[game.Id] = (null, ""); gameUpdated.Remove(game.Id); gameRelink.Remove(game.Id);
         Render();
         try
         {
@@ -69,6 +72,11 @@ public sealed partial class EnvironmentWindow
                     if (d.TryGetProperty("code", out var c) && c.GetString() == "update_incomplete" &&
                         (d.TryGetProperty("summary", out var s) || d.TryGetProperty("message", out s)) && s.GetString() is { Length: > 0 } line && !warnings.Contains(line))
                         warnings.Add(line);
+            if (job.Report.Diagnostics.ValueKind == System.Text.Json.JsonValueKind.Array &&
+                job.Report.Diagnostics.EnumerateArray().Any(d => d.TryGetProperty("code", out var c) && c.GetString() == "update_incomplete" &&
+                    d.TryGetProperty("facts", out var f) && f.ValueKind == System.Text.Json.JsonValueKind.Object &&
+                    f.TryGetProperty("action", out var a) && a.GetString() == "relinkSource"))
+                gameRelink[game.Id] = "offer";
             if (job.Report.Succeeded && job.Report.Result.TryGetProperty("reasons", out var rs) && rs.ValueKind == System.Text.Json.JsonValueKind.Array)
             {
                 var left = rs.EnumerateArray().Select(r => r.GetString() ?? "").Where(r => UpdateReasonKey(r) is not null).ToArray();
@@ -151,8 +159,42 @@ public sealed partial class EnvironmentWindow
         if (!done.Ok) box.Children.Add(new TextBlock { Text = "✕ " + B(done.Message), Foreground = Brush.Parse("#FF9F0A"), FontSize = 13, TextWrapping = TextWrapping.Wrap });
         foreach (var w in done.Warnings)
             box.Children.Add(new TextBlock { Text = "⚠ " + B(w), Foreground = Brush.Parse("#FFD60A"), FontSize = 13, TextWrapping = TextWrapping.Wrap });
+        // #1961：原料和原件都不在 → 黄字下补原件；找回后指去出包页重新出包；选错了写作业层原句
+        if (gameRelink.TryGetValue(game.Id, out var relink))
+        {
+            if (relink is "offer" or "checking")
+                box.Children.Add(InlineButton(relink == "checking" ? "update.relink.checking" : "update.relink", () => _ = RelinkSourceAsync(game), "update.relink", relink == "offer"));
+            else if (relink == "done")
+                box.Children.Add(new TextBlock { Text = "✓ " + T("update.relink.done"), Foreground = Ink, FontSize = 13, TextWrapping = TextWrapping.Wrap });
+            else
+            {
+                box.Children.Add(new TextBlock { Text = "✕ " + B(relink), Foreground = Brush.Parse("#FF9F0A"), FontSize = 13, TextWrapping = TextWrapping.Wrap });
+                box.Children.Add(InlineButton("update.relink", () => _ = RelinkSourceAsync(game), "update.relink"));
+            }
+        }
         AutomationId(box, "update.outcome");
         return box;
+    }
+
+    /// <summary>「重新添加原件…」（#1961）：选这款的原件 → import 作业只认这一款（expectGameId）→ 记下新位置（不动已有出包）；
+    /// 选错了作业层拒（input_wrong_game）、不记进库。找回后不自动重新出包（整款重出要几分钟到几十分钟），提示去出包页</summary>
+    private async Task RelinkSourceAsync(LibraryGame game)
+    {
+        if (connectedFolder is null || libraryId is null) return;
+        var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions { AllowMultiple = false, Title = T("update.relink.pick") });
+        var path = files.Select(f => f.TryGetLocalPath()).FirstOrDefault(p => !string.IsNullOrEmpty(p));
+        if (path is null) return;
+        gameRelink[game.Id] = "checking"; Render();
+        try
+        {
+            var job = await LibraryJobClient.RunAsync(paths, privateRoot, connectedFolder, libraryId, "import", [path], CancellationToken.None,
+                fields: new Dictionary<string, object?> { ["expectGameId"] = game.Id });
+            gameRelink[game.Id] = job.Report.Succeeded ? "done" : job.Report.Message.Length > 0 ? job.Report.Message : job.Report.State;
+        }
+        catch (Exception error) when (error is LibraryProtocolException or IOException or UnauthorizedAccessException or ArgumentException or
+            InvalidOperationException or OperationCanceledException or PlatformNotSupportedException or System.ComponentModel.Win32Exception)
+        { gameRelink[game.Id] = error.Message.Length > 0 ? error.Message : error.GetType().Name; }
+        Render();
     }
 
     // ---- 导出（导出确认页 → 逐台结果）----

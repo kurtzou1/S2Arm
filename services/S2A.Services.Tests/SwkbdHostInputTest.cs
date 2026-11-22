@@ -316,10 +316,25 @@ namespace S2A.Services.Tests
                 Push(103, Calc(KeyboardCalcFlags.SetCursorPos));   // 键盘开着时游戏照常每帧 Calc
                 waiting = $"{Drain()}；弹框 {begun.Count}";
                 TextInput.Answer(begun[0], true, "李雷abc");
-                Thread.Sleep(30);
-                changed = Drain();
-                Thread.Sleep(1000);
-                answered = $"{Drain()}；开框 {TextInput.Open}";
+                // 等条件、不等固定时间（11-22 根修：原先睡 30 ms 收改字、再睡 1000 ms 收确定；TextInput.Answer 按设计转线程池交回，
+                //   本机负载 7 倍核数时 30 ms 内改字还没推上来 → 这批空、下一批「2@3 5@4…」，单测随负载时红时绿）。
+                //   改字：收到第一批为止（2 ms 一查、上限 5 秒）；确定：再收到 3 条为止。产品保证确定在改字后 150 ms 才推（DecidedAfterChangedMs），
+                //   只要本线程两次查之间没被饿满 150 ms，两批就分得开（原先是晚 30 ms 就落空）
+                string Await(Func<string, bool> done)
+                {
+                    var acc = new List<string>();
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    while (sw.ElapsedMilliseconds < 5000)
+                    {
+                        string d = Drain();
+                        if (d != "无") acc.Add(d);   // Drain 空 = 「无」
+                        if (done(string.Join(" ", acc))) break;
+                        Thread.Sleep(2);
+                    }
+                    return acc.Count == 0 ? "无" : string.Join(" ", acc);
+                }
+                changed = Await(x => x.Length > 0);
+                answered = $"{Await(x => x.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length >= 3)}；开框 {TextInput.Open}";
                 Push(103, Bytes(0xCu));            // UnsetCustomizedDictionaries
                 unset = Drain();
 

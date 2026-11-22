@@ -14,7 +14,7 @@ import SaveSync
 /// 弹窗里正在跑的存档作业、它的进度，和最近一次的结果 / 失败。
 @MainActor
 final class SaveSheetState: ObservableObject {
-    enum Op: String { case status, backup, inspect, restore }
+    enum Op: String { case status, backup, inspect, restore, discard }
 
     @Published private(set) var running: Op?
     @Published private(set) var progress = JobProgress()
@@ -80,6 +80,13 @@ struct SaveManageSheet: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 4) {
                 LauncherSheetHeading(t("save.title"), subtitle: gameName)
+                // #2066：这一页只管这台 Mac 上的存档；推到过 iPhone / iPad 的这款，指一句去设备上导入的路
+                Text(t("save.scope")).font(LauncherTheme.TypeStyle.detail.weight(.semibold)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true).padding(.top, 6)
+                if game?.iphoneInstalledAt != nil {
+                    Text(t("save.phoneHint"))   // #2066 / #2070：设备上「存档管理」的导入收 .s2asave 和其他工具的存档
+                        .fixedSize(horizontal: false, vertical: true).padding(.top, 4)
+                }
                 Text(t("save.hint")).font(LauncherTheme.TypeStyle.detail).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true).padding(.top, 6)
                 // 存档位置 SaveData：原生存档放进去下次起局就用（services SaveFolder.cs）；上次没读进来的原因写在这里
@@ -169,6 +176,11 @@ struct SaveManageSheet: View {
                     CardRow(t("save.size")) {
                         Text(FreeSpaceView.size(s.totalBytes)).font(LauncherTheme.TypeStyle.section).monospacedDigit()
                     }
+                } else if let pending = s.pendingFiles {   // #2066：待放区有存档，不说「还没有存档」
+                    CardRow(t("save.pending").replacingOccurrences(of: "{0}", with: "\(pending)"), dot: LauncherPalette.building) {
+                        Button(t("save.pendingDiscard")) { discard() }.controllerButtonStyle(LauncherSecondaryButtonStyle()).disabled(blocked)
+                            .accessibilityIdentifier("save.pendingDiscard")
+                    }
                 } else {
                     CardRow(t("save.none"), dot: LauncherPalette.unbuilt) { EmptyView() }
                 }
@@ -254,6 +266,14 @@ struct SaveManageSheet: View {
         }
     }
 
+    /// 「不要了」：删掉待放区里等着的存档，再重读状态（#2066）
+    private func discard() {
+        state.run(.discard, failed: reason) { [model, gameID, state] events in
+            try await model.saveDiscardSeed(gameID, events: events)
+            state.setStatus(try await model.saveStatus(gameID))
+        }
+    }
+
     /// 备份完重读一次状态（文件数可能变了）；失败时原存档不动，作业层原话留在弹窗里。
     private func backup() {
         let panel = NSSavePanel()
@@ -303,13 +323,13 @@ struct SaveManageSheet: View {
     /// 恢复成了清掉预览（同一份备份要再恢复得重新检查），再重读状态；事务记录没清完用作业层原话、按警告显示。
     private func restore() {
         guard let preview = state.preview else { return }
-        let kept = t("save.restoreDone"), plain = t("save.restoreDoneNoOriginal")
+        let kept = t("save.restoreDone"), plain = t("save.restoreDoneNoOriginal"), waiting = t("save.restoreDonePending")
         state.run(.restore, failed: reason) { [model, gameID, state, loc] events in
             let r = try await model.saveRestore(gameID, preview: preview, events: events)
             state.setPreview(nil)
             if let s = try? await model.saveStatus(gameID) { state.setStatus(s) }
             if !r.cleanupWarning.isEmpty { state.setResult(loc.backend(r.cleanupWarning), warns: true) }
-            else { state.setResult(r.hadOriginal ? kept : plain) }
+            else { state.setResult(r.pending ? waiting : r.hadOriginal ? kept : plain) }   // #2066：只放进了待放区，不说「恢复好了」
         }
     }
 

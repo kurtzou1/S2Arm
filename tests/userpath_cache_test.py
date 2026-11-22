@@ -16,7 +16,7 @@
 #   ⑧ 行为：C 改写器固定依赖全缺时报错列出实际查过的路径（在 S2A_RUN_ROOT 下）并指向一键准备 prepare_build.py，不出现「$HOME」字面量
 #   扫描范围 = refresh.sh 及它真正调到的脚本（runtime/run_mac.sh 经直连抽取的 Vulkan 抓取局、维护方工具 / mac_save / 维护方工具 经 run_mac.sh、维护方工具 经出包入口的盘判定、
 #     mem_admit 经 dsh_batch.py build、csproj_closure 经 shader_pack.sh）+ 从源码构建（launchers/macos 的 build_app / bundle_* / runtime/rewriter / pack/fonts / tools/doctor.sh）
-import os, re, subprocess, sys, tempfile
+import os, re, shutil, subprocess, sys, tempfile
 from pathlib import Path
 R = Path(__file__).resolve().parent.parent
 bad = 0
@@ -107,10 +107,14 @@ with tempfile.TemporaryDirectory() as t:
     clean = dict(base, HOME=str(home), S2A_MACHINE_NO_LOCAL='1')
     got = subprocess.run(['bash', '-c', 'source "$1/pack/stage_keyfiles.sh"; _sd_py', '_', str(R)], env=clean, capture_output=True, text=True).stdout.strip()
     ml = T / 'm.local'; ml.write_text('S2A_PY=$HOME/from-machine-local\nS2A_CPU_LEDGER=1\n')
-    def mget(extra):
-        return subprocess.run(['bash', str(R / 'tools/machine.sh'), 'get', 'S2A_PY'], env=dict(base, HOME=str(home), **extra), capture_output=True, text=True).stdout.strip()
+    # machine.sh 显式路径不存在时会继续找同目录 / 主检出（git 公共目录）/ 当前目录的 machine.local（开发机上这几处有真文件）：
+    # 「没声明」一项必须把脚本拷到没有 machine.local、不在任何 git 检出里的孤立目录去跑，否则结果随跑测试的机器而变
+    iso = T / 'iso'; (iso / 'tools').mkdir(parents=True); shutil.copy(R / 'tools/machine.sh', iso / 'tools/machine.sh')
+    def mget(extra, isolated=False):
+        sh, cwd = (iso / 'tools/machine.sh', iso) if isolated else (R / 'tools/machine.sh', None)
+        return subprocess.run(['bash', str(sh), 'get', 'S2A_PY'], cwd=cwd, env=dict(base, HOME=str(home), **extra), capture_output=True, text=True).stdout.strip()
     m_env, m_file, m_no, m_none = (mget(dict(S2A_PY='/env/py', S2A_MACHINE_LOCAL=str(ml))), mget(dict(S2A_MACHINE_LOCAL=str(ml))),
-                                   mget(dict(S2A_MACHINE_LOCAL=str(ml), S2A_MACHINE_NO_LOCAL='1')), mget(dict(S2A_MACHINE_LOCAL=str(T / 'none'))))
+                                   mget(dict(S2A_MACHINE_LOCAL=str(ml), S2A_MACHINE_NO_LOCAL='1')), mget(dict(S2A_MACHINE_LOCAL=str(T / 'none')), isolated=True))
     idx = subprocess.run([sys.executable, '-c', 'import sys; sys.path.insert(0, sys.argv[1]); import community; print(len(community._indexes()))', str(R / 'pack/jobs')],
                          env=clean, capture_output=True, text=True)
     ck(got == 'python3' and m_env == '/env/py' and m_file == str(home / 'from-machine-local') and m_no == '' and m_none == '' and idx.stdout.strip() == '0',
