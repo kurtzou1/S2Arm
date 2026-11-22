@@ -238,7 +238,7 @@ struct InstallView: View {
     /// 装好以后的附加提示：只传到手机、要打开 S2Arm 才装完 / 第一次打开前信任开发者 / 免费 Apple ID 7 天到期
     /// 信任开发者那一步：读到证书名就写「点「<名字>」→ 信任」，读不到退回原来不带名字的说法
     private var trustNote: String {
-        model.installTrustName.isEmpty ? text("install.done.trust") : text("install.done.trustNamed").replacingOccurrences(of: "{0}", with: model.installTrustName)
+        model.installTrustName.isEmpty ? text("install.done.trust") : model.trustNamedText(language: loc.lang.sharedCode)
     }
 
     private var doneNotes: [String] {

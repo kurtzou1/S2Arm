@@ -558,7 +558,21 @@ NVN(nvnTextureBuilderSetHeight, void, NVNtextureBuilder *b, int v) { TB(b)->d.he
 NVN(nvnTextureBuilderSetDepth, void, NVNtextureBuilder *b, int v) { TB(b)->d.depth = v; }
 NVN(nvnTextureBuilderSetSize1D, void, NVNtextureBuilder *b, int w) { TB(b)->d.width = w; TB(b)->d.height = TB(b)->d.depth = 1; }
 NVN(nvnTextureBuilderSetLevels, void, NVNtextureBuilder *b, int v) { TB(b)->d.levels = v; }
-NVN(nvnTextureBuilderSetFormat, void, NVNtextureBuilder *b, NVNformat f) { TB(b)->d.format = f; }
+// 诊断（#1969 / D-7HMX：一款游戏传进来 0x47a，不在格式表里，那张贴图当了渲染目标、深度附件建不出、3D 主画面黑）：不认的格式记一次是游戏哪里设的（模块 + 偏移）
+//   和这个生成器此刻的描述；格式表认不认按 nvn_tex_layout 的每块字节数（同 GetStorageSize 的判法），前 4 种不同的值各记一次
+NVN(nvnTextureBuilderSetFormat, void, NVNtextureBuilder *b, NVNformat f) {
+    TB(b)->d.format = f;
+    nvn_texdesc d = TB(b)->d; d.width = d.width ? d.width : 1; d.height = d.height ? d.height : 1; d.depth = d.depth ? d.depth : 1; d.levels = d.levels ? d.levels : 1;
+    nvn_texlayout L; nvn_tex_layout(&d, &L);
+    if (L.bpb) return;
+    static uint32_t seen[4]; static int nseen; for (int i = 0; i < nseen; i++) if (seen[i] == (uint32_t)f) return;
+    if (nseen >= 4) return;
+    seen[nseen++] = (uint32_t)f;
+    uint64_t ra = (uint64_t)__builtin_return_address(0); module_t *m = module_of((void *)ra);
+    LOG("【红】 TextureBuilderSetFormat: format %#x is not an NVN format we know; set from %s+%#llx (builder so far: target %d flags %#x %ux%ux%u levels %u samples %d)",
+        (unsigned)f, m ? m->name : "?", m ? (unsigned long long)(ra - (uint64_t)m->base) : (unsigned long long)ra,
+        TB(b)->d.target, TB(b)->d.flags, TB(b)->d.width, TB(b)->d.height, TB(b)->d.depth, TB(b)->d.levels, TB(b)->d.samples);
+}
 NVN(nvnTextureBuilderSetSamples, void, NVNtextureBuilder *b, int s) { TB(b)->d.samples = s; }
 NVN(nvnTextureBuilderSetStride, void, NVNtextureBuilder *b, ptrdiff_t s) { TB(b)->d.stride = (uint32_t)s; }
 NVN(nvnTextureBuilderSetStorage, void, NVNtextureBuilder *b, NVNmemoryPool *p, ptrdiff_t off) { TB(b)->pool = (pool_t *)p; TB(b)->off = off; }
@@ -655,7 +669,8 @@ static void log_layout(const tex_builder_t *b, const nvn_texlayout *L) {
 }
 NVN(nvnTextureBuilderGetStorageSize, size_t, const NVNtextureBuilder *b) {
     nvn_texlayout L; nvn_tex_layout(&((const tex_builder_t *)b)->d, &L);
-    if (!L.bpb) LOG("【红】 TextureBuilderGetStorageSize unknown format %#x", ((const tex_builder_t *)b)->d.format);
+    if (!L.bpb) { const nvn_texdesc *d = &((const tex_builder_t *)b)->d;   // 带上描述：哪种目标、什么标志、多大（#1969：一张不认格式的贴图后来当了深度附件）
+        LOG("【红】 TextureBuilderGetStorageSize unknown format %#x (target %d flags %#x %ux%ux%u levels %u samples %d)", d->format, d->target, d->flags, d->width, d->height, d->depth, d->levels, d->samples); }
     log_layout((const tex_builder_t *)b, &L);
     qlog_tex("size", &((const tex_builder_t *)b)->d, L.size);
     return L.size;
@@ -3381,6 +3396,7 @@ static void rt_comp_tick(uint64_t period_ns);
 static double g_rt_comp_ms;   // Currently declared real-time computation amount (ms; 0 = not declared)
 static double g_rt_period_ms;
 static _Atomic mach_port_t g_rt_port;   // the acquire thread that holds the time-constraint declaration (set_time_constraint_comp); the 300-frame status line reads it
+static int g_rt_off;   // 本局放弃了实时声明（被系统降级两次，rt_demote.h）：之后不再声明，取图线程走标准策略 + USER_INTERACTIVE
 static void sleep_until_ns(uint64_t dl);
 // 只读计数（单测按事件判、不量墙钟，t_fps_limit）：本线程进入节拍等待的次数——sleep_until_ns 真睡了，或取图里去等显示链接拍。
 //   单测在上屏前后各读一次，判「上屏只入队、不承担限帧等待」；只增不减，不改行为
@@ -3800,7 +3816,7 @@ static void slow_emit(uint64_t f) {
 // DM_RT=0 leaves the acquire thread on the standard policy (its QoS only), for power A/B: the real-time declaration is how the performance controller learns the frame deadline, and it may hold the clock up for it
 static int rt_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_RT"); v = !(e && !strcmp(e, "0")); if (!v) LOG("[nvn] DM_RT=0: the present thread gets no time-constraint policy (QoS only)"); } return v; }
 static void set_time_constraint_comp(uint64_t period_ns, uint64_t comp_ns) {
-    if (!rt_on()) return;
+    if (!rt_on() || g_rt_off) return;
     static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
     if (comp_ns < 1000000ull) comp_ns = 1000000ull; if (comp_ns > period_ns * 9 / 10) comp_ns = period_ns * 9 / 10;
     thread_time_constraint_policy_data_t p = {
@@ -3818,7 +3834,45 @@ static int rt_comp_fixed_ms(void) { static int v = -2; if (v == -2) { const char
 // The fixed value, or in auto mode the computation declared so far (auto's starting value of 2 ms only the first time): a reset to 2 ms at each period change under-declared the thread until the next p90
 static void set_time_constraint(uint64_t period_ns) { int f = rt_comp_fixed_ms(); set_time_constraint_comp(period_ns, f > 0 ? (uint64_t)f * 1000000ull : g_rt_comp_ms > 0 ? (uint64_t)(g_rt_comp_ms * 1e6) : 2000000ull); }
 // Called every frame at acquire: records this thread's CPU time since the last call; in auto mode re-declares based on p90
+#include "rt_demote.h"
+// 每 30 帧核一次本线程是不是还在实时档（被降级的对策见 rt_demote.h）；取图线程上调，只看自己
+static void rt_demote_tick(uint64_t period_ns) {
+#if defined(__ANDROID__) || defined(__OHOS__)
+    (void)period_ns;   // 「实时声明被降级回落优先级 0」是 XNU 的行为；安卓 / 鸿蒙走 mach 兼容层（android/native/nvn/compat/mach），没有标准 / 优先策略，不做
+#else
+    static int k; static uint64_t last_ns[2];   // 最近两次处理降级的时刻（判「60 秒内第几次」）
+    if (!rt_on() || g_rt_off || !g_rt_comp_ms || ++k % 30) return;
+    // 测试钩子（缺省关）：DM_RT_TEST_DEMOTE=<第几次检查>[,<第几次>]——到点先把本线程改成标准策略，模拟系统降级（真降级要每帧超出申报，内核把申报至少抬到半个周期，局里逼不出来）
+    { static int hooks[2] = {-1, -1}; if (hooks[0] == -1) { const char *e = getenv("DM_RT_TEST_DEMOTE"); hooks[0] = hooks[1] = 0; if (e && *e) sscanf(e, "%d,%d", &hooks[0], &hooks[1]); }
+      if (k / 30 == hooks[0] || k / 30 == hooks[1]) { thread_standard_policy_data_t tsp = {0}; thread_policy_set(pthread_mach_thread_np(pthread_self()), THREAD_STANDARD_POLICY, (thread_policy_t)&tsp, THREAD_STANDARD_POLICY_COUNT);
+        LOG("[nvn] 测试钩子：第 %d 次检查前把取图线程改成标准策略（模拟系统降级，DM_RT_TEST_DEMOTE）", k / 30); } }
+    thread_extended_info_data_t xi; mach_msg_type_number_t xc = THREAD_EXTENDED_INFO_COUNT;
+    if (thread_info(pthread_mach_thread_np(pthread_self()), THREAD_EXTENDED_INFO, (thread_info_t)&xi, &xc) != KERN_SUCCESS) return;
+    uint64_t now = now_ns(); int recent = last_ns[0] && now - last_ns[0] < 60000000000ull;
+    int a = rt_demote_action(1, xi.pth_policy != POLICY_TIMESHARE, recent);
+    if (a == RT_DEMOTE_NONE) return;
+    last_ns[0] = now;
+    if (a == RT_DEMOTE_REDECLARE) {
+        LOG("【红】[nvn] 取图线程的实时声明被系统降级（当前优先级 %d、基础 %d、策略 %d，申报计算量 %.2f ms / 周期 %.2f ms）：当场重新声明",
+            xi.pth_curpri, xi.pth_priority, xi.pth_policy, g_rt_comp_ms, g_rt_period_ms);
+        double c = g_rt_comp_ms; g_rt_comp_ms = 0; set_time_constraint_comp(period_ns, (uint64_t)(c * 1e6)); return;
+    }
+    // 改标准策略后再抬优先级：线程一旦用 thread_policy_set 设过策略，pthread_set_qos_class_self_np 就返回 EPERM（本机小程序实测：实时 → 标准后设
+    //   USER_INTERACTIVE 回 1、QoS 仍 0）；THREAD_PRECEDENCE_POLICY 仍可用，importance 相对任务基础优先级，按读回的基础优先级算到 47（USER_INTERACTIVE 那一档）
+    mach_port_t me = pthread_mach_thread_np(pthread_self());
+    thread_standard_policy_data_t sp = {0};
+    kern_return_t kr = thread_policy_set(me, THREAD_STANDARD_POLICY, (thread_policy_t)&sp, THREAD_STANDARD_POLICY_COUNT);
+    thread_extended_info_data_t yi; mach_msg_type_number_t yc = THREAD_EXTENDED_INFO_COUNT; int base = thread_info(me, THREAD_EXTENDED_INFO, (thread_info_t)&yi, &yc) == KERN_SUCCESS ? yi.pth_priority : 31;
+    thread_precedence_policy_data_t pp = {.importance = base < 47 ? 47 - base : 0};
+    kern_return_t kp = thread_policy_set(me, THREAD_PRECEDENCE_POLICY, (thread_policy_t)&pp, THREAD_PRECEDENCE_POLICY_COUNT);
+    yc = THREAD_EXTENDED_INFO_COUNT; int after = thread_info(me, THREAD_EXTENDED_INFO, (thread_info_t)&yi, &yc) == KERN_SUCCESS ? yi.pth_priority : -1;
+    g_rt_off = 1; g_rt_comp_ms = 0;
+    LOG("【红】[nvn] 取图线程的实时声明 60 秒内第二次被系统降级（当前优先级 %d、策略 %d）：本局不再声明，改标准策略并抬到优先级 47（标准策略 %s，基础 %d → 抬后 %d、precedence %s），"
+        "免得降级后回落到优先级 0、整个进程被搬到能效核", xi.pth_curpri, xi.pth_policy, kr == KERN_SUCCESS ? "已设" : "设置失败", base, after, kp == KERN_SUCCESS ? "已设" : "设置失败");
+#endif
+}
 static void rt_comp_tick(uint64_t period_ns) {
+    rt_demote_tick(period_ns);
     if (rt_comp_fixed_ms() > 0 || !period_ns || !g_rt_comp_ms) return;
     static uint64_t last; static double win[120]; static int n;
     uint64_t c = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID); if (!last) { last = c; return; }

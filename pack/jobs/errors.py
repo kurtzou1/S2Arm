@@ -110,15 +110,15 @@ RECOVERY = {
     "device_not_ready": "按上面的提示做完，再点一次安装。",
     "device_not_connected": "让你选的那台 iPhone / iPad 连上这台电脑：插上数据线，或解锁后和电脑连同一个 Wi-Fi；第一次连要在设备上点「信任」，并在「设置 → 隐私与安全性 → 开发者模式」打开开发者模式，然后再试。",
     "device_required": "在导出确认页勾上要装到的那台 iPhone / iPad，再点「开始」。",
-    "signing_failed": "查看本任务日志里签名那一步的报错；确认 Xcode 能用你的账号给这台 iPhone 签名，或改用 AltStore 安装。",
-    "device_tunnel_unavailable": "电脑连不上这台 iPhone 的开发者通道（手机通过 Wi-Fi 连着时最常见，不是没解锁）：用数据线把手机直接插到这台电脑（别经过扩展坞或集线器），解锁停在主屏幕，再点一次；还不行就重启一次手机，插上后在手机上重新点「信任」。",
+    "signing_failed": "查看本任务日志里签名那一步的报错；确认 Xcode 能用你的账号给这台 {0} 签名，或改用 AltStore 安装。",
+    "device_tunnel_unavailable": "电脑连不上这台 {0} 的开发者通道（通过 Wi-Fi 连着时最常见，不是没解锁）：用数据线把它直接插到这台电脑（别经过扩展坞或集线器），解锁停在主屏幕，再点一次；还不行就把它重启一次，插上后在设备上重新点「信任」。",
     "device_locked": "解锁这台设备（保持亮屏、停在主屏幕），再点这台的「重试」；装的过程中别锁屏。",
     "shell_install_required": "先在首位「S2Arm」卡把 App 装到这台设备，装好后点这台的「重试」。",   # 通用壳「推到 iPhone」：手机上还没装壳（install.push_game）
-    "phone_app_choice_required": "在 iPhone 总控台里选好这台手机用哪一个 S2Arm（AltStore / SideStore 装的，还是启动器装的），再推游戏；选一次就记住。",   # 同机装着不止一个 S2Arm（install.s2arm_owner choose）
-    "phone_app_gone": "在 iPhone 总控台里重新选一次用哪一个 S2Arm：选过的那个已经不在这台 iPhone 上了。",   # phoneChooseApp 选的包不在手机上
+    "phone_app_choice_required": "点游戏库最前面的「S2Arm」，选好这台 {0} 用哪一个 S2Arm（AltStore / SideStore 装的，还是启动器装的），再推游戏；选一次就记住。",   # 同机装着不止一个 S2Arm（install.s2arm_owner choose）
+    "phone_app_gone": "点游戏库最前面的「S2Arm」，重新选一次用哪一个 S2Arm：选过的那个已经不在这台 {0} 上了。",   # phoneChooseApp 选的包不在手机上
     "shell_update_required": "先在首位「S2Arm」卡把这台上的 App 更新到这一版，再点这台的「重试」。",   # 通用壳「推到 iPhone」：手机上的壳不是本版
-    "device_not_visible": "用数据线把这台 iPhone 连到这台 Mac，解锁后在手机上点「信任」；打开开发者模式（设置 → 隐私与安全性 → 开发者模式，开了要重启手机）；等 Xcode 菜单「窗口 → 设备与模拟器」里出现这台，再点一次「推到 iPhone」。",   # pack/ensure_profile.sh：Xcode 看不到这台、账号上也没登记过它（D-44DP 兜底的盲区，11-16）
-    "free_app_limit": "免费 Apple ID 在每台设备上最多同时装 3 个自签 App，这台 iPhone 已经装满：在 iPhone 上长按删掉一个不再玩的自签 App 后重试；或改用付费 Apple 开发者账号（没有这个上限）。",
+    "device_not_visible": "用数据线把这台 {0} 连到这台 Mac，解锁后在设备上点「信任」；打开开发者模式（设置 → 隐私与安全性 → 开发者模式，开了要重启）；等 Xcode 菜单「窗口 → 设备与模拟器」里出现这台，再点一次「推到 iPhone」。",   # pack/ensure_profile.sh：Xcode 看不到这台、账号上也没登记过它（D-44DP 兜底的盲区，11-16）
+    "free_app_limit": "免费 Apple ID 在每台设备上最多同时装 3 个自签 App，这台 {0} 已经装满：在设备上长按删掉一个不再玩的自签 App 后重试；或改用付费 Apple 开发者账号（没有这个上限）。",
     "free_appid_limit": "这是 Apple 对免费 Apple ID 的限制：7 天内最多注册 10 个包名，这个账号已经用满；在手机上删 App 不会退还额度。办法：等几天，最早那批包名注册满 7 天就会恢复；或换一个 Apple ID 登录后再装（Mac 在 S2Arm 里登录，Windows 在 Impactor 里登录）；或改用付费 Apple 开发者账号（没有这个限制）。",   # Apple 错误 9120；与 free_app_limit（设备上同时 3 个）是两件事，删 App 无效
     "app_id_taken": "苹果拒绝注册这个包名（Apple 错误 9401：同一个包名在苹果那边已被占用）。请在 Impactor（Mac 上是 Xcode）里确认登录的是当初装 S2Arm 用的那个 Apple ID 再装；付费开发者账号也可以到 developer.apple.com 的「Certificates, Identifiers & Profiles → Identifiers」删掉 io.s2arm.games 开头的旧包名后重试。还不行请导出诊断包反馈。",   # Apple 错误 9401；Windows 装机先用大小写两种包名各试一次（install_win.install_app），都被拒才报这个码
     "app_other_signer": "手机上已经有一个用别的签名装的 S2Arm（包名相同、签名不同），系统不让覆盖。二选一：继续用你原来的签名工具更新它；或者在 iPhone 上长按 S2Arm 删掉它（里面的存档会一起删，先在 S2Arm 里导出存档），再点「推到 iPhone」。",   # 玩家先自签装过同包名的 S2Arm（11-11 反馈）：installation_proxy MismatchedApplicationIdentifierEntitlement
@@ -144,7 +144,7 @@ RECOVERY = {
     "sibling_clone_failed": "已改从解包目录准备，本次照常完成，只是多花一些时间；游戏库放在 APFS 格式的磁盘上（Mac 内置盘或格式化为 APFS 的外接盘）时，各平台导出可以共用已准备好的游戏数据。",
     "iml_missing": "按你装 S2Arm 的方式补上：\n· 电脑上的 S2Arm（免费或付费 Apple ID）：点游戏库第一格「S2Arm」里的「续签 S2Arm」重装一次；重装后还看到这条提示，就用下面的 GetMoreRam 补上，再点一次「续签 S2Arm」。\n· 自己的开发者证书（.p12 + 描述文件）：在苹果开发者网站给 S2Arm 的 App ID（苹果给每个 App 登记的身份）打开「Increased Memory Limit」，重新生成描述文件，用新描述文件重签再装。\n· AltStore：用 AltStore Classic 2.2 或更新版重装（不是刷新）。\n· SideStore 0.7.0：签名会丢这项权限，用下面的 GetMoreRam 补上后，在 SideStore 里重装。\n· Sideloadly：暂不支持，它没说免费账号会保留这项权限，自定义权限要付费开发者账号。\n· GetMoreRam：用装 S2Arm 的同一个 Apple ID 把它自签装到手机（占免费账号一个 App 名额，用完可删），登录后打开 App IDs、点刷新、选 S2Arm、点「Add Increased Memory Limit」，再用原来的方式重装 S2Arm。",
     "export_dir_busy": "用新文件夹里的 S2Arm.ipa 和 .img 自签安装；关掉占用旧文件夹的程序后，可以把旧的那个删掉。",
-    "manual_unpack_required": "资源包已经在手机上，不用重推：在 iPhone 上打开 S2Arm，选这款游戏，保持在前台别锁屏，等它导入完就能玩。",
+    "manual_unpack_required": "资源包已经在 {0} 上，不用重推：在设备上打开 S2Arm，选这款游戏，保持在前台别锁屏，等它导入完就能玩。",
     "usb_slow": "换一根支持 USB 3 的 USB-C 数据线，直接插 Mac 上的 USB-C / 雷雳口（不经扩展坞、集线器、显示器上的口），再装下一款；iPhone 15 Pro 及更新的 Pro 机型才支持 USB 3，其它机型只能 USB 2.0。",
     "devcert_password": "重新输入导出 .p12 时设的密码（区分大小写）；还不行就重新导出一份 .p12 再导入。",   # 开发者证书签名（pack/jobs/devcert.py，v0.2.4）
     "devcert_invalid": "选导出的 .p12 证书和开发者网站下载的 .mobileprovision 描述文件，再导入一次。",   # 开发者证书签名（pack/jobs/devcert.py，v0.2.4）
@@ -192,7 +192,7 @@ RECOVERY = {
     'save_no_target': '这款游戏尚未建立存档目录；先启动游戏并正常保存退出，再恢复备份。',
     'save_recovery': '存档回退没完成：事务记录与副本都保留着。可以先在存档页备份当前存档；确认可能丢掉没做完的导入 / 恢复后，可选「仍要启动」。不要删除事务目录。',
     'container_would_drop': '确认后再点一次：点名的游戏会暂时打不开（存档和资源包留在手机上）。别的电脑装的，到那台电脑上再「推到 iPhone」一次就回来；已从游戏库删除的，重新加回、「打 iPhone 包」再装就回来。不想这样就先别装。',
-    'phone_app_running': '在 iPhone 上从后台划掉 S2Arm（或回到主屏后等几秒），再点一次还原。',
+    'phone_app_running': '在 {0} 上从后台划掉 S2Arm（或回到主屏后等几秒），再点一次还原。',
     'save_backup_failed': '确认后再点一次就照装：存档没备份，万一覆盖出问题可能丢档；想先备份就把手机解锁、数据线插稳后再点一次。',
     'cert_revoke_confirm': '点「仍然继续」会新建证书照签。不想动现有证书的话，点「改用已有证书」，把在 AltStore / SideStore 导出的 .p12 导进来，就不用新建。',
     'app_bundle_replace_confirm': '点「仍然继续」照装。不想顶掉的话，换一份通配描述文件（App ID 以 .* 结尾），或改用 Apple ID 签名，或把几款都装进通用 S2Arm。',
@@ -251,14 +251,31 @@ TV_RECOVERY = {
 }
 
 
-def recovery(code, *, packaged, windows=None, tv=False):
+# 指代「这一台」设备的玩家句用 {0} 占位设备类型（#1962，同 install.S_OFFLINE）：填这次认出的 iPad / iPhone（install.device_kind、
+#   装机对象 info["deviceKind"]，作业上下文 c.device_kind），认不出填 DEVICE_ANY；不写死 iPhone
+DEVICE_ANY = "iPhone / iPad"
+
+
+def device_of(c):
+    """这次作业认出的设备类型（MacPhone / WinPhone 认出时记在 c.device_kind）；没认出 → 空串"""
+    kind = getattr(c, "device_kind", "")
+    return kind if isinstance(kind, str) else ""
+
+
+def on_device(text, kind=""):
+    """玩家句里的 {0} 填设备类型；kind 为空（认不出 / 还没连）填 DEVICE_ANY"""
+    return text.replace("{0}", kind or DEVICE_ANY)
+
+
+def recovery(code, *, packaged, windows=None, tv=False, device=""):
+    """这个码的「下一步」；指代这一台的句子里的 {0} 填 device（认不出填 DEVICE_ANY）"""
     if tv and code in TV_RECOVERY:
         return TV_RECOVERY[code]
     if not packaged and code in DEVELOPMENT_RECOVERY:
-        return DEVELOPMENT_RECOVERY[code]
+        return on_device(DEVELOPMENT_RECOVERY[code], device)
     if (os.name == "nt" if windows is None else windows) and code in WINDOWS_RECOVERY:
-        return WINDOWS_RECOVERY[code]
-    return RECOVERY.get(code, RECOVERY["job_failed"])
+        return on_device(WINDOWS_RECOVERY[code], device)
+    return on_device(RECOVERY.get(code, RECOVERY["job_failed"]), device)
 
 
 class Failure(Exception):
@@ -388,7 +405,7 @@ PLAYER_REASON = {
     "tool_missing": "缺少工具：这条链上有个工具没装。",
     "content_invalid": "文件内容不对：文件结构校验没通过，可能没下完整。",
     "volume_ops_unsupported": "存放位置所在磁盘格式不支持：这块盘不支持出包需要的文件操作（常见于 exFAT / FAT 格式的外接盘）。",
-    "signing_failed": "签名没成：用你的 Apple ID 给这台 iPhone 签名没成功。",
+    "signing_failed": "签名没成：用你的 Apple ID 给这台 {0} 签名没成功。",   # 出包链拿不到是哪台：player_reason 填「iPhone / iPad」
     "configuration_failed": "配置推导失败。",
     "shader_extract_failed": "着色器抽取失败。",
     "compilation_failed": "编译失败。",
@@ -404,7 +421,7 @@ PLAYER_REASON = {
 
 
 def player_reason(code):
-    return PLAYER_REASON.get(code, PLAYER_REASON["package_failed"])
+    return on_device(PLAYER_REASON.get(code, PLAYER_REASON["package_failed"]))
 
 
 # 按日志确凿字样归因，先于阶段映射：按本表顺序，证据里第一个命中的码胜出（盘满最先：写盘失败后面常跟一串连带错误）。

@@ -27,7 +27,7 @@ import threading
 import time
 import uuid
 from progress_activity import BatchActivity
-from errors import Failure, explain, failure_summary, last_output_lines, recovery, library_lock_failure
+from errors import Failure, device_of, explain, failure_summary, last_output_lines, recovery, library_lock_failure
 
 
 def default_developer_dir():
@@ -991,7 +991,7 @@ class Context:
         failure = explain(error, **self.failure_roots())
         code = failure.code
         result = dict(code=code, severity=severity, summary=self.redact(failure),
-                      suggestion=getattr(failure, "advice", None) or recovery(code, packaged=bool(self.r.get("engineBundle")), tv=str(getattr(self, "operation", "")).startswith("tv")), detail="", stage=self.stage,
+                      suggestion=getattr(failure, "advice", None) or recovery(code, packaged=bool(self.r.get("engineBundle")), tv=str(getattr(self, "operation", "")).startswith("tv"), device=device_of(self)), detail="", stage=self.stage,
                       component="S2Arm", logPath=str(self.last_log) if self.last_log else None)
         if exit_code is not None:
             result["exitCode"] = exit_code

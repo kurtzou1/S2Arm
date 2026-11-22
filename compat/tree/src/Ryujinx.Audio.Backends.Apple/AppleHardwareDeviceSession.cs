@@ -141,10 +141,11 @@ namespace Ryujinx.Audio.Backends.Apple
         private const int VerifyMaxMs = 30000;
         private long _verifyTicks, _verifyPlayed0, _verifySeq;
         private int _verifyFails;
-        // 测试钩子：S2A_AUDIO_TEST_SLOW_AFTER_HEAL=<n> —— 第 n 次重启之后、下一次重启之前，看门狗每拍轮流「播 1 拍、停 3 拍」（AudioQueuePause / Start），
-        //   设备有回调但只播约四分之一（恢复时会先补播一段，实测 2 秒窗口约 48% → 原「停 2 拍」离一半太近），最长停 750 ms（< StallMs，没回调兜底不触发）；服务层单测 --apple-audio-recover-verify
+        // 测试钩子：S2A_AUDIO_TEST_SLOW_AFTER_HEAL=<n> —— 第 n 次重启之后、下一次重启之前，设备每交还 4 块只有 1 块记成「播完」，另外 3 块当作没播就交还
+        //   （iOS 队列时间轴跑前就是这个样子：有回调、交还速率正常，声音没出来）。按交还事件数，不按看门狗拍点：11-21 门禁机负载高时原先「看门狗每拍轮流播 1 停 3」
+        //   拍点漂移、没压住（2174 ms 交还 100800 帧，应约 104397），重启后核对误判「已恢复」。服务层单测 --apple-audio-recover-verify
         private static readonly int _testSlowAfterHeal = int.TryParse(Environment.GetEnvironmentVariable("S2A_AUDIO_TEST_SLOW_AFTER_HEAL"), out int sh) ? sh : 0;
-        private int _testSlowTick;
+        private int _testSlowTick, _testSlowSaid;
         private static readonly int _testStallAtS = int.TryParse(Environment.GetEnvironmentVariable("S2A_AUDIO_TEST_STALL_AT"), out int s) ? s : 0;
         private static readonly AppleHardwareDeviceSession[] _watched = new AppleHardwareDeviceSession[8];
         private static int _watchdogStarted;
@@ -347,12 +348,9 @@ namespace Ryujinx.Audio.Backends.Apple
                 S2AAudioNotes.PostForTest("AVAudioSessionInterruptionNotification", 0);
             }
 
-            if (_testSlowAfterHeal > 0 && _heals == _testSlowAfterHeal)
+            if (_testSlowAfterHeal > 0 && _heals == _testSlowAfterHeal && Interlocked.Exchange(ref _testSlowSaid, 1) == 0)
             {
-                int phase = _testSlowTick++ % 4;
-                if (phase == 0) AudioQueueStart(_audioQueue, nint.Zero);
-                else if (phase == 1) AudioQueuePause(_audioQueue);
-                if (_testSlowTick == 1) Console.Error.WriteLine($"[声] 测试钩子：输出 #{_diag.Index} 第 {_testSlowAfterHeal} 次重启后轮流播 1 拍、停 3 拍（设备有回调但只播约四分之一）");
+                Console.Error.WriteLine($"[声] 测试钩子：输出 #{_diag.Index} 第 {_testSlowAfterHeal} 次重启后每交还 4 块只记 1 块播完（设备有回调、交还照常，只算播了约四分之一）");
             }
 
             if (_testResetAtS > 0 && !_testResetDone && since >= (long)_testResetAtS * Stopwatch.Frequency)
@@ -920,6 +918,11 @@ namespace Ryujinx.Audio.Backends.Apple
             protected override void OnReturned(int bytes, long inFlightAfter)
             {
                 _s._diag.OnReturned(bytes, inFlightAfter);
+                if (_testSlowAfterHeal > 0 && _s._heals == _testSlowAfterHeal && (++_s._testSlowTick & 3) != 0)
+                {
+                    _s._diag.TestUnplay(bytes);   // 测试钩子（见 _testSlowAfterHeal）：4 块里 3 块不记成播完
+                }
+
                 Interlocked.Add(ref _s._returnedBytes, bytes);
 
                 if (inFlightAfter == 0)

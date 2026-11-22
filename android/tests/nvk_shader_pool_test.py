@@ -170,6 +170,43 @@ def main():
         print('PASS: 1 libpack CS unaligned-gate negative control')
         return 0
 
+    if sys.argv[1:] == ['--graphics-image-mutants']:
+        # 负对照（#999）：图形阶段存储图像的接线各改坏一处，graphics_image_layout_test 必红。
+        #   解析的几处改的是 nvn_vk_program_result.c（拷贝顶替原文件进链接）；声明那处改的是 nvk_shader.c（测试里的 #include 指到拷贝）
+        test_c = ROOT/'android/tests/graphics_image_layout_test.c'
+        parse_text = (native/'nvn/nvn_vk_program_result.c').read_text(encoding='utf-8')
+        shader_text = original.read_text(encoding='utf-8')
+        gate = ('if (dst->kind == 3 && dst->count == 1 && dst->slot >= 72 && dst->slot < 88 && !(dst->slot & 1))\n'
+                '                dst->tex_slot = (int16_t)((dst->slot - 72) / 2);')
+        decl = 'if (le->src_kind == NVN_RB_IMG) sampled_decl('
+        cases = [
+            ('parse-slot-unset', 'parse', gate, 'if (0)\n                dst->tex_slot = (int16_t)((dst->slot - 72) / 2);', 'maps to image slot 0'),
+            ('parse-slot-formula', 'parse', gate, gate.replace('(dst->slot - 72) / 2', '(dst->slot - 70) / 2'), 'maps to image slot 0'),
+            ('parse-odd-word', 'parse', gate, gate.replace(' && !(dst->slot & 1)', ''), 'odd word 73: tex_slot stays -1'),
+            ('parse-table-widened', 'parse', gate, gate.replace('dst->slot < 88', 'dst->slot < 90'), 'word 88 above the image table: tex_slot stays -1'),
+            ('parse-array-accepted', 'parse', gate, gate.replace(' && dst->count == 1', ''), 'image array at word 72: tex_slot stays -1'),
+            ('build-decl-tbuf-only', 'shader', decl, 'if (le->cls == NVN_GPU_RES_IMAGE_TBUF) sampled_decl(', 'image 0: cls 5 reg 0 target 0 class 0 format 0'),
+        ]
+        for name, which, old, new, expected in cases:
+            text = parse_text if which == 'parse' else shader_text
+            assert text.count(old) == 1, (name, 'mutation anchor')
+            mutated = out/('gfx-image-mutant-' + name + '.c')
+            mutated.write_text(text.replace(old, new), encoding='utf-8')
+            exe = out/('gfx-image-' + name)
+            if which == 'parse':
+                files = [test_c, mutated, *libs]
+            else:
+                fixture = out/('gfx-image-mutant-' + name + '-test.c')
+                fixture.write_text(test_c.read_text(encoding='utf-8').replace('#include "../native/gfx_plat/nvk_shader.c"', '#include "' + str(mutated) + '"')
+                                   .replace('#include "tbuf_spirv_fixtures.h"', '#include "' + str(ROOT/'android/tests/tbuf_spirv_fixtures.h') + '"'), encoding='utf-8')
+                files = [fixture, *libs]
+            host_link.run(base + [str(p) for p in files] + [strip, '-lm', '-o', str(exe)], check=True, timeout=120)
+            result = subprocess.run([str(exe)], capture_output=True, text=True, timeout=30)
+            assert result.returncode != 0 and expected in result.stderr, (name, result.stdout, result.stderr)
+            print(f'{name}: expected assertion failure: {expected}', flush=True)
+        print(f'PASS: {len(cases)} graphics image negative controls')
+        return 0
+
     if len(sys.argv) in (3, 4) and sys.argv[1] == '--tbuf-layout':
         exe = out/'tbuf-layout'
         src = [ROOT/'android/tests/tbuf_layout_test.c', *libs]
@@ -410,7 +447,7 @@ def main():
         print(f'PASS: {len(changes)} negative controls')
         return 0
     if sys.argv[1:]:
-        raise ValueError('usage: nvk_shader_pool_test.py [--withdraw | --gs-libpack-mutants | --cs-libpack-mutants | --compute-warm-mutants | --diag-mutants | --live-compile-mutants]'
+        raise ValueError('usage: nvk_shader_pool_test.py [--withdraw | --gs-libpack-mutants | --cs-libpack-mutants | --compute-warm-mutants | --diag-mutants | --live-compile-mutants | --graphics-image-mutants]'
                          '（其余参数是 gs_compiler_chain_test.py / tbuf_compiler_chain_test.py 的子命令）')
     # 存储图像的声明（数值类 + SPIR-V Image Format）落程序记录：生产 sampled_decl，手搭 SPIR-V
     exe = out/'image-decl'
@@ -426,6 +463,13 @@ def main():
     sys.stdout.write(csl.stdout); sys.stderr.write(csl.stderr)
     if csl.returncode:
         return csl.returncode
+    # #999：图形阶段的存储图像：真实结果解析 + 生产 layout_ent + 生产 build（句柄字 → 图像槽 / 声明）；负对照在 --graphics-image-mutants
+    exe = out/'graphics-image-layout'
+    host_link.run(base + [str(ROOT/'android/tests/graphics_image_layout_test.c'), *[str(p) for p in libs]] + [strip, '-lm', '-o', str(exe)], check=True, timeout=120)
+    gil = subprocess.run([str(exe)], capture_output=True, text=True, timeout=30)
+    sys.stdout.write(gil.stdout); sys.stderr.write(gil.stderr)
+    if gil.returncode:
+        return gil.returncode
     diag = run('diag-compile', original, args=('--diag-compile',))
     sys.stdout.write(diag.stdout); sys.stderr.write(diag.stderr)
     if diag.returncode:

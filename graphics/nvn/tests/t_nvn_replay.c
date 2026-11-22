@@ -1930,6 +1930,19 @@ static void t_linear_reject(void) {
       CHECK(g_nup == n0 + 1 && g_up[n0].img == 4 * 4 * 1 && g_up[n0].first[0] == 0);   // 新建存储清零一次
       nvn_be_tex_release(&b); }
     res_fresh();
+    { // 只有 LINEAR_RT、游戏用 WriteTexels 写了它（CPU 贴图）：按线性排布逐行拷进来，不报红——同苹果端 nvn_mtl.m 上传口径。
+      //   原先 upload_all 里拒掉、报 linear_render_target_unsupported，内容一次都传不上去（11-21 真机每帧约 2 张、整屏黑）。
+      //   行距 8、每行只有 4 字节有效，padding 填毒值：上传缓冲只能是 4x4 的紧凑行
+      tex_t b2 = mk_tex(54, 0x1000, NVN_FORMAT_R8, 4, 4, 1, NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET);
+      b2.d.stride = 8; nvn_tex_layout(&b2.d, &b2.L); b2.mem = g_tmem + b2.off;
+      for (int y = 0; y < 4; y++) { for (int x = 0; x < 4; x++) b2.mem[y * 8 + x] = (uint8_t)(0x40 + y * 4 + x); memset(b2.mem + y * 8 + 4, 0xEE, 4); }
+      nvn_be_tex_cpu_written(&b2);
+      int n0 = g_nup;
+      CHECK(rp_tex_resolve(&b2, &g_fake_cmd) != NULL && nvn_unimpl_count("tex", "linear_render_target_unsupported") == 0);
+      CHECK(g_nup == n0 + 1 && g_up[n0].pitch == 4 && g_up[n0].img == 16);
+      CHECK(g_up[n0].first[0] == 0x40 && g_up[n0].first[3] == 0x43 && g_up[n0].first[4] == 0x44 && g_up[n0].first[15] == 0x4F);   // 逐行拷、padding 不进缓冲
+      nvn_be_tex_release(&b2); }
+    res_fresh();
     { tex_t c = mk_tex(53, (int64_t)sizeof g_tmem - 0x10, NVN_FORMAT_R8, 64, 64, 1, NVN_TEXTURE_FLAGS_LINEAR);   // 源范围出池（池大小跟着 g_tmem 走）
       CHECK(rp_tex_resolve(&c, &g_fake_cmd) != NULL && nvn_unimpl_count("tex", "linear_range_outside_pool") == 1);
       nvn_be_tex_release(&c); }

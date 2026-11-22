@@ -100,6 +100,14 @@ static class T {
     static void ImageChecks() {
         var normal = new Fixture(); var nr = Image(normal, "img-normal");
         Check(ImageExact(normal, "img-normal") && !nr.Bypassed && nr.Files == 3 && normal.None == 0, "镜像形态：与目录建镜像逐字节相同、目录里只有 romfs.std、严格通过");
+        // #1970：8 路读、块小到十几块，写入偏移必须从 0 起一块接一块往后（Windows 上往有效数据之后跳着写要先补零，慢盘一单几小时）
+        var order = new List<(long Off, int Len)>(); var seq = new Fixture();
+        RomfsExtraction.ImageWriteObserved = (off, len) => { lock (order) order.Add((off, len)); };
+        try { RomfsExtraction.ExtractImage(seq.Open, Path.Combine(Root, "img-ordered", "romfs.std"), true, chunkSize: 0x1000, parallelism: 8); }
+        finally { RomfsExtraction.ImageWriteObserved = null; }
+        long at = 0; bool contiguous = true; foreach (var (off, len) in order) { contiguous &= off == at; at += len; }
+        Check(order.Count > 8 && contiguous && at == new FileInfo(Path.Combine(Root, "img-ordered", "romfs.std")).Length && ImageExact(seq, "img-ordered"),
+            $"镜像形态·8 路读：{order.Count} 块按偏移从前到后连续写、写满整个镜像、逐字节相同");
         var bad = new Fixture(); bad.TamperData(0x4321); var br = Image(bad, "img-tampered");
         Check(br.Bypassed && ImageExact(bad, "img-tampered") && br.FirstBad != null && br.FirstBad.StartsWith("文件 romfs/big.bin，文件内偏移 "),
             "镜像形态·更新分区数据篡改：降级重读、镜像逐字节等于篡改后内容建的镜像、点名第一处坏块");

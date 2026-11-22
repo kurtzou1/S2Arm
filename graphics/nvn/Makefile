@@ -141,6 +141,9 @@ test: $(OUT)/tests/t_nvn_m3
 	# 存储缓冲大小表（nvn_refl.h nvn_sbsz_fill）：几何辅助缓冲按本笔临时区段长进表（11-06 鬼灭 #37 脸空白 / 手缺失）
 	clang $(PFX) -std=gnu11 -O1 -Wall -o $(OUT)/tests/t_sbsz tests/t_sbsz.c
 	timeout 30 $(OUT)/tests/t_sbsz
+	# 取图线程实时声明被降级的对策（gfx/nvn/rt_demote.h，D-7YPC / D-5JYW：降级后回落优先级 0、整进程搬能效核）
+	clang $(PFX) -std=gnu11 -O1 -Wall -o $(OUT)/tests/t_rt_demote tests/t_rt_demote.c
+	timeout 30 $(OUT)/tests/t_rt_demote
 	# 直连库打包容器的读法（lib_pack.inc）：两个小 metallib 现编，测试按格式手造容器；客体输入（种类 56）用 zlib 库压块、读端用 Foundation 解
 	xcrun -sdk macosx metal tests/t_lib_pack_a.metal -o $(OUT)/tests/t_lib_pack_a.metallib && xcrun -sdk macosx metal tests/t_lib_pack_b.metal -o $(OUT)/tests/t_lib_pack_b.metallib
 	clang $(PFX) -std=gnu11 -O1 -g -fobjc-arc -mmacosx-version-min=$(MACOSX_DEPLOYMENT_TARGET) -Wall -o $(OUT)/tests/t_lib_pack tests/t_lib_pack.m -framework Metal -framework Foundation -lz

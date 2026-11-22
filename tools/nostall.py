@@ -23,7 +23,7 @@
 #    抽取失败现场按 *.log 留进 .failed，这份栈跟着留下）。没有被盯目录就不抓
 #   命令自己退出就原样交它的退出码。收到 TERM / INT 转给整棵树。不另开进程组（外层按进程组 / 进程树停出包时连同命令一起停，不留孤儿）
 #   <无进展秒> 由调用方给（缺省口径：S2A_NOSTALL_S，出包链各处统一 600）
-import ctypes, os, re, signal, stat, subprocess, sys, time
+import atexit, ctypes, os, re, signal, stat, subprocess, sys, tempfile, time
 
 COMPILER = re.compile(r'^(xcrun|metal[-\w.]*|metallib|air[-\w.]*|clang(\+\+)?(-\d+)?|spirv-[-\w.]+|glslc|glslangValidator|dxc)$')
 OUT_X = 6   # 产出上限 = <无进展秒> × OUT_X（出包链缺省 600 → 3600 秒）：正常最慢的一步（满载换页、缺页读）也在几百秒内写出东西
@@ -179,7 +179,13 @@ def main():
     if len(a) < 3 or a[1] != '--': sys.exit('用法：nostall.py [--watch <目录或文件>]… <无进展秒> -- <命令…>')
     limit, cmd = float(a[0]), a[2:]
     poll = float(os.environ.get('S2A_NOSTALL_POLL', '30'))
-    if os.environ.get('S2A_PROGRESS'): watch.append(os.environ['S2A_PROGRESS'])
+    # 出包进度文件：调用方没设 S2A_PROGRESS 就自己建一份交给子进程并盯着（0400A3A01EE4C000：一台 Windows 出包机上由测试车道直接起出包、没设它，dsh_batch 编批库
+    #   一小时一行进度都不写，被盯目录与日志也没动，正常在编被判挂死；玩家走作业层有它、不会这样）。放系统临时目录（不混进被盯的产物目录），退出时删掉
+    if not os.environ.get('S2A_PROGRESS'):
+        own = os.path.join(tempfile.gettempdir(), f'nostall_progress.{os.getpid()}.tsv')
+        open(own, 'a').close(); os.environ['S2A_PROGRESS'] = own
+        atexit.register(lambda: os.path.exists(own) and os.unlink(own))
+    watch.append(os.environ['S2A_PROGRESS'])
     for fd in (1, 2):   # 标准输出 / 错误是日志文件就一并盯
         try:
             if stat.S_ISREG(os.fstat(fd).st_mode):

@@ -22,8 +22,9 @@ extension LauncherView {
         switch s {
         case .introduce: return sx("console.status.introduce")
         case .updating(let done, let total): return sx("console.status.updating", done + 1 > total ? total : done + 1, total)
-        case .notConnected(let seen):
-            return seen.map { sx("console.status.notConnected", $0.formatted(.relative(presentation: .named))) } ?? sx("console.status.notConnectedNever")
+        case .notConnected(let seen):   // 写这台的类型（#1962：iPad 不写 iPhone），读不到写「iPhone / iPad」
+            let kind = BackendText.deviceKind(model.consolePhone?.kind)
+            return seen.map { sx("console.status.notConnected", $0.formatted(.relative(presentation: .named)), kind) } ?? sx("console.status.notConnectedNever", kind)
         case .chooseApp: return sx("console.status.chooseApp")
         case .externalApp: return sx("console.status.externalApp")
         case .notInstalled: return sx("console.status.notInstalled")
@@ -55,11 +56,12 @@ extension LauncherView {
             HomeCardSurface(selected: selected, focused: focused) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 15).fill(LinearGradient(colors: [Color(white: 0.16), Color(white: 0.07)], startPoint: .top, endPoint: .bottom))
+                    // 图标在上、字在下（#1967：原先「S2Arm」叠在轮廓正中，比手机屏宽，两边压在边框上看不清）；只挪位置不改视图结构（套 VStack 离屏渲染崩在 HomeCardSurface）
                     if !headerShown {
-                        Image(systemName: "iphone").font(.system(size: artworkSide * 0.46, weight: .thin)).foregroundStyle(.white.opacity(0.9))
-                            .matchedGeometryEffect(id: "console.phone", in: consoleSpace)
+                        Image(systemName: S2ArmLauncherModel.deviceSymbol(model.consolePhone?.kind)).font(.system(size: artworkSide * 0.34, weight: .thin)).foregroundStyle(.white.opacity(0.9))
+                            .matchedGeometryEffect(id: "console.phone", in: consoleSpace).offset(y: -artworkSide * 0.08)
                     }
-                    Text("S2Arm").font(.manrope(artworkSide * 0.1, .bold)).foregroundStyle(.white).offset(y: artworkSide * 0.02)
+                    Text("S2Arm").font(.manrope(artworkSide * 0.1, .bold)).foregroundStyle(.white).offset(y: artworkSide * 0.25)
                     if case .updating(let done, let total) = status {   // 动画 3 / 4：外圈进度环（更新所选 / 装 App 时）
                         Circle().trim(from: 0, to: CGFloat(done) / CGFloat(max(total, 1))).stroke(.orange, style: StrokeStyle(lineWidth: 3, lineCap: .round))
                             .rotationEffect(.degrees(-90)).padding(artworkSide * 0.12)
@@ -110,7 +112,7 @@ extension LauncherView {
         let allLatest = phone.installed && phone.shellCurrent && !phone.games.isEmpty && phone.games.allSatisfy { $0.state == .latest }
         return HStack(alignment: .center, spacing: 18) {
             ZStack {
-                Image(systemName: "iphone").font(.system(size: 64, weight: .thin)).foregroundStyle(.white)
+                Image(systemName: S2ArmLauncherModel.deviceSymbol(phone.kind)).font(.system(size: 64, weight: .thin)).foregroundStyle(.white)
                     .matchedGeometryEffect(id: "console.phone", in: consoleSpace)
                 if allLatest {
                     Text(sx("console.allLatest")).font(.manrope(9, .bold)).foregroundStyle(.green).shadow(color: .green.opacity(0.7), radius: 6)
@@ -141,7 +143,7 @@ extension LauncherView {
 
     private var consoleOffline: Bool { if case .some(.none) = model.consolePhone?.online { return true }; return false }
     private func offlineReason(_ phone: PhoneOverview.Phone) -> some View {
-        Text(sx("console.offline", phone.name.isEmpty ? "iPhone" : phone.name)).font(.manrope(12)).foregroundStyle(.orange)
+        Text(sx("console.offline", phone.name.isEmpty ? BackendText.deviceKind(phone.kind) : phone.name, BackendText.deviceKind(phone.kind))).font(.manrope(12)).foregroundStyle(.orange)
     }
 
     /// 按钮文案键（动作名 → 共享文案；动作集合与控制口 phoneConsole 同一个来源 model.consoleActions）
@@ -229,7 +231,7 @@ extension LauncherView {
     ///   点了跑作业 phoneChooseApp，记住后刷新总览；选过的再点「换一个」也到这里
     @ViewBuilder private func consoleChooser(_ phone: PhoneOverview.Phone) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(sx("console.choose.title")).font(.manrope(12.5)).foregroundStyle(.white.opacity(0.8)).fixedSize(horizontal: false, vertical: true)
+            Text(sx("console.choose.title", BackendText.deviceKind(phone.kind))).font(.manrope(12.5)).foregroundStyle(.white.opacity(0.8)).fixedSize(horizontal: false, vertical: true)
             ForEach(phone.candidates, id: \.bundleId) { c in
                 let label = S2ArmLauncherModel.candidateLabelKeys(c).map { sx($0) }.joined(separator: " · ")
                 Button { model.runConsoleAction(.chooseApp, device: phone.device, bundleId: c.bundleId, language: loc.lang.sharedCode) } label: {

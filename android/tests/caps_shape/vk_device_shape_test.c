@@ -90,16 +90,15 @@ int main(int argc, char **argv) {
     const int di = cs_has_ext(s, "VK_EXT_descriptor_indexing") && s->props.apiVersion >= VK_API_VERSION_1_1 &&
                    s->diRuntimeArray && s->diPartiallyBound && s->diSampledNonUniform && s->diStorageNonUniform;
     EXPECT(d.descriptor_indexing_enabled == di, "descriptor_indexing_enabled=%d，期望 %d", d.descriptor_indexing_enabled, di);
-    // BC 路由（C6）：逐格式查原生采样位，缺的走计算解码；两者互补
-    static const VkFormat bc[] = { VK_FORMAT_BC1_RGBA_UNORM_BLOCK, VK_FORMAT_BC1_RGBA_SRGB_BLOCK, VK_FORMAT_BC2_UNORM_BLOCK, VK_FORMAT_BC2_SRGB_BLOCK,
-                                   VK_FORMAT_BC3_UNORM_BLOCK, VK_FORMAT_BC3_SRGB_BLOCK, VK_FORMAT_BC4_UNORM_BLOCK, VK_FORMAT_BC4_SNORM_BLOCK,
-                                   VK_FORMAT_BC5_UNORM_BLOCK, VK_FORMAT_BC5_SNORM_BLOCK, VK_FORMAT_BC6H_UFLOAT_BLOCK, VK_FORMAT_BC6H_SFLOAT_BLOCK,
-                                   VK_FORMAT_BC7_UNORM_BLOCK, VK_FORMAT_BC7_SRGB_BLOCK };
-    int bc_sampled = 0;
-    for (size_t i = 0; i < sizeof bc / sizeof *bc; i++) bc_sampled += !!(cs_format(s, bc[i]).optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
-    const int bc_all = bc_sampled == (int)(sizeof bc / sizeof *bc), bc_none = bc_sampled == 0;
-    EXPECT(bc_all || bc_none, "形态档的 BC 格式一半有一半没有（%d/14），本测试的期望只覆盖全有 / 全无", bc_sampled);
-    EXPECT(d.bc_native_mask == (bc_all ? 0xffffu : 0u), "bc_native_mask=0x%04x，形态档 BC %s", d.bc_native_mask, bc_all ? "全有" : "全无");
+    // BC 路由（C6，#1199）：bit i ↔ NVN 格式 0x41+i，逐格式查原生采样位，缺的走计算解码；两者互补。
+    //   期望按 NVN 格式映射（nvn_vk_format.c）逐位由形态档的 optimal 采样位推出，不另抄 vk_device.c 的表；半有半无（拼装档 Xclipse 920 的 BC1–3）也覆盖
+    uint32_t bc_want = 0;
+    for (uint32_t i = 0; i < 16; i++) {
+        const VkFormat vf = nvn_vk_format(0x41u + i);
+        EXPECT(vf >= VK_FORMAT_BC1_RGB_UNORM_BLOCK && vf <= VK_FORMAT_BC7_SRGB_BLOCK, "NVN 格式 0x%02x 映射到 %d，不是 BC 格式", 0x41u + i, (int)vf);
+        if (cs_format(s, vf).optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) bc_want |= 1u << i;
+    }
+    EXPECT(d.bc_native_mask == bc_want, "bc_native_mask=0x%04x，期望 0x%04x（形态档逐格式采样位）", d.bc_native_mask, bc_want);
     EXPECT(d.bc_decode_mask == (~d.bc_native_mask & 0xffffu) && popcount16(d.bc_native_mask) + popcount16(d.bc_decode_mask) == 16,
            "bc_decode_mask=0x%04x 不是原生位的补集", d.bc_decode_mask);
     // 深度替换（C1）：D24S8 不能当深度模板附件、D32S8 能 → 换 D32S8

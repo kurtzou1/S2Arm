@@ -58,7 +58,8 @@ struct ExportFlow: Equatable {
         var id: String { device }
     }
     /// 一句手机上的下一步：作业层原句（界面经 loc.backend 翻）或共享文案键 + 参数
-    enum Step: Equatable { case backend(String), key(String, String) }
+    /// key(文案键, {0}, {1})：{1} 只有指代这一台的句子用（设备类型，#1962），不用的留空
+    enum Step: Equatable { case backend(String), key(String, String, String = "") }
     let gameID: String
     let sign: String?
     var rows: [Row]
@@ -179,10 +180,17 @@ extension S2ArmLauncherModel {
         if let app = phoneOutcome?.app, !app.exported { n.append(.key("exportsheet.phone.openApp", app.name)) }
         else if installOpenToFinish { n.append(.key("install.done.open", "")) }
         else { n.append(.key("exportsheet.phone.openShell", "")) }
-        if !installTrustName.isEmpty { n.append(.key("install.done.trustNamed", installTrustName)) }
+        if !installTrustName.isEmpty { n.append(.key("install.done.trustNamed", installTrustName, BackendText.deviceKind(installTrustKind))) }
         else if sign == "appleId" { n.append(.key("install.done.trust", "")) }
         if sign == "appleId", games.first(where: { $0.id == gameID })?.iphoneFree == true { n.append(.key("install.done.free", "")) }
         return n
+    }
+
+    /// 导出页这一行要不要就地列「选用哪个 S2Arm」的候选（#1966）：这一行停在 phone_app_choice_required、且记下的候选就是这台。
+    ///   选好后 chooseApp 调 install 失败时记下的重推，完成回调仍是这一行的 exportRowEnded，结果照常落回这一行
+    func exportRowChoice(_ row: ExportFlow.Row) -> PushChoice? {
+        guard row.state == .failed, row.code == PhoneOverview.choiceRequiredCode, let c = pushChoice, c.device == row.device else { return nil }
+        return c
     }
 
     /// 失败的那台单独重试（不重做已成功的、不重做电脑上那一步）；失败码是可确认的（会挤掉别处装的游戏…）就带上确认参数 =「仍然继续」

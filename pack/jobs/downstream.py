@@ -524,7 +524,7 @@ def install_ios_win(c, game, scheme):
         try:
             bid = W.install_app(ns, say=lambda m: inst.win_say(c, m))
         except W.Fail as e:
-            raise inst.win_install_failure(e) from e
+            raise inst.win_install_failure(e, c) from e
     finally:
         shutil.rmtree(stage, ignore_errors=True)
     c.begin("把游戏资源推进 iPhone（只推变了的文件；第一次要几分钟）", 4, 4)

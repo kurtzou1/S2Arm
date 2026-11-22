@@ -357,6 +357,7 @@ public final class S2ArmLauncherModel: ObservableObject {
     @Published var installDone: String?
     /// 刚装完的那次是单一 IMG：成功页多写一句「打开 S2Arm 会自动完成安装」
     @Published var installOpenToFinish = false
+    @Published var installTrustKind = ""   // 这次装上的那台的类型（装机 / 更新结果 deviceKind）：「在 iPad 上：设置 → …信任」那句按它写（#1962）
     @Published var installTrustName = ""   // 这次签名的证书名（装机 / 更新结果 trustName）：完成页「点「<名字>」→ 信任」；空 = 退回不带名字的说法
     /// 最近一次手机作业（装到 iPhone / 从手机删 / 装回上一版）的结局，玩家还没回去看：顶部胶囊「已装好 · 查看结果」靠它（#308：关掉装机弹窗后找不回结果）。
     /// 新的手机作业开始、或打开这款的装机弹窗时清掉。
@@ -1087,8 +1088,21 @@ public final class S2ArmLauncherModel: ObservableObject {
     /// 正在装 / 要装的那台的称呼（进度胶囊用）：选中且连着 → 类型 + 名字；否则「iPhone / iPad」
     var installTargetLabel: String {
         guard let d = selectedDevice else { return "iPhone / iPad" }
-        let pad = Self.padLike(d["productType"] as? String)
-        return Self.deviceLabel(kind: pad ? "iPad" : "iPhone", name: d["name"] as? String ?? "")
+        return Self.deviceLabel(kind: installTargetKind, name: d["name"] as? String ?? "")
+    }
+    /// 「第一次打开前，在 <设备> 上：…点「<证书名>」→ 信任」：{0} 证书名，{1} 这次装上的那台的类型（读不到写「iPhone / iPad」，#1962）
+    func trustNamedText(language: String) -> String {
+        BackendText.launcherText("install.done.trustNamed", language: language)
+            .replacingOccurrences(of: "{0}", with: installTrustName).replacingOccurrences(of: "{1}", with: BackendText.deviceKind(installTrustKind))
+    }
+    /// 正在装 / 要装的那台的类型（指代这一台的文案里填 {0}，#1962）：选中且连着 → iPad / iPhone；否则「iPhone / iPad」
+    var installTargetKind: String {
+        guard let d = selectedDevice else { return "iPhone / iPad" }
+        return Self.padLike(d["productType"] as? String) ? "iPad" : "iPhone"
+    }
+    /// 某一台（设备号）的类型：总控台读到的 kind 优先，没有退回要装的那台（installTargetKind）
+    func deviceKind(of device: String?) -> String {
+        phoneOverview?.phones.first { $0.device == device }?.kind.map { BackendText.deviceKind($0) } ?? installTargetKind
     }
 
     var selectedDevice: [String: Any]? { Self.pickDevice(connectedDevices, chosen: chosenDevice) }
@@ -1096,6 +1110,9 @@ public final class S2ArmLauncherModel: ObservableObject {
     /// 选中的设备是 iPad 时，「推到 iPhone」这几处入口文字换成「装到 iPad」（#487）；没连设备照旧写 iPhone
     var installTargetIsPad: Bool { Self.padLike(selectedDevice?["productType"] as? String) }
     /// iPad，以及按 iPad 兼容装的 Apple Vision Pro（机型号 RealityDevice*；理论支持、未真机验证）：入口和文案写 iPad
+    /// 总控台卡片与页顶画的设备轮廓（#1967）：作业认出 iPad 画 iPad，其余（iPhone / 还没连过 / 读不到类型）画 iPhone；两处同一个符号，matchedGeometryEffect 才接得上
+    static func deviceSymbol(_ kind: String?) -> String { kind == "iPad" ? "ipad" : "iphone" }
+
     static func padLike(_ productType: String?) -> Bool {
         guard let t = productType else { return false }
         return t.hasPrefix("iPad") || t.hasPrefix("RealityDevice")
@@ -1318,6 +1335,7 @@ public final class S2ArmLauncherModel: ObservableObject {
                     }
                     self?.installOpenToFinish = r?.openToFinish ?? false
                     self?.installTrustName = r?.trustName ?? ""
+                    self?.installTrustKind = r?.deviceKind ?? ""
                 }
                 catch let f as JobFailure where ask && Self.confirmCodes[f.code ?? ""] != nil {
                     self?.dropConfirm = DropConfirm(kind: .install, game: game, message: f.errorDescription ?? "", code: f.code ?? "",

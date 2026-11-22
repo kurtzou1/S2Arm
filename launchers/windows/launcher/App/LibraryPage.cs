@@ -914,7 +914,7 @@ public sealed partial class EnvironmentWindow
                 if (diagnostic.TryGetProperty("code", out var code))
                 {
                     var value = code.GetString();
-                    libraryDiagnostics += "\n" + T("errors." + value + ".title") + "\n" + T("errors." + value + ".detail");
+                    libraryDiagnostics += "\n" + text.Error(value, "title", language) + "\n" + text.Error(value, "detail", language);
                 }
                 foreach (var key in new[] { "summary", "suggestion" })
                     if (diagnostic.TryGetProperty(key, out var message) && message.ValueKind == JsonValueKind.String)

@@ -663,3 +663,4 @@
 20261121-0733-ios-queue-clock-ahead.patch
 20261121-1035-sfdnsres-socktype-from-hints.patch
 20261121-1216-audio-depth-catch-up.patch
+20261121-1552-audio-recover-hook-by-event.patch

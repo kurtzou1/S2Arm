@@ -135,7 +135,7 @@ import XCTest
         try home("1_10_做好了_接着装到勾的设备")
         model.exportAfterPack[Self.gid] = nil
         var f = flow(sign: "appleId", [("U1", "iPhone", "小明的 iPhone", .done)])
-        f.rows[0].next = [.key("install.done.open", ""), .key("install.done.trustNamed", "Apple Development: xiaoming@example.com (TEAM-XM)"), .key("install.done.free", "")]
+        f.rows[0].next = [.key("install.done.open", ""), .key("install.done.trustNamed", "Apple Development: xiaoming@example.com (TEAM-XM)", "iPhone"), .key("install.done.free", "")]
         model.exportFlows[Self.gid] = f; model.session = nil
         try sheet("1_11_右上角胶囊点开_已装到这台", sign: "appleId", results: true)
     }

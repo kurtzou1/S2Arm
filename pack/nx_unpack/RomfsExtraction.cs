@@ -186,7 +186,8 @@ static class RomfsExtraction {
             if (File.Exists(stage)) File.Delete(stage);
         }
     }
-    const long ImageChunk = 64L << 20;
+    // 8 MB 一块：读的路数 × 2 块在途，28 路也只占约 450 MB
+    const long ImageChunk = 8L << 20;
 
     // 同 services/S2A.Services/RomFsIndex.cs IsHostJunk：目录形态下这些名字不进镜像，这里也不进，两种形态才逐字节相同
     internal static bool IsHostJunk(string path) {
@@ -194,6 +195,12 @@ static class RomfsExtraction {
         return name == ".DS_Store" || name.StartsWith("._", StringComparison.Ordinal);
     }
 
+    // 测试钩子：每写一块报（偏移、长度）；产品里为 null
+    internal static Action<long, int> ImageWriteObserved;
+
+    // 读多路并行、写按偏移从前到后（#1970）：原先每路各写自己那段，一个 13 GB 文件同时在十几处往后写。Windows NTFS 在有效数据长度之后写时
+    //   要先把中间补零，慢盘（移动硬盘）上退化成十几路寻道 + 补零，0100F3400332C000 一单 4.5 小时没写完；同一台机器旧的散文件形态 50 分钟。
+    //   块号按顺序领（领号即占一个缓冲），写的一侧总在等最小的未写块、它一定已被领走在读，所以不会互相等死；在途最多「读的路数 × 2」块
     static Result AttemptImage(Func<IntegrityCheckLevel, IStorage> open, string stage, IntegrityCheckLevel level,
                                long chunkSize, int parallelism) {
         var files = (open == null ? new List<Entry>() : ListEntries(open, level)).Where(e => !IsHostJunk(e.Path))
@@ -206,17 +213,62 @@ static class RomfsExtraction {
             image.GetSize(out long total).ThrowIfFailure();
             int parts = checked((int)Math.Max(1, (total + chunkSize - 1) / chunkSize));
             int workers = Math.Min(parts, parallelism <= 0 ? Environment.ProcessorCount : parallelism);
-            using (var handle = File.OpenHandle(stage, FileMode.CreateNew, FileAccess.Write, FileShare.None, FileOptions.None, total)) {
-                Parallel.For(0, parts, new ParallelOptions { MaxDegreeOfParallelism = workers }, k => {
-                    long lo = k * chunkSize, hi = Math.Min(total, lo + chunkSize);
-                    byte[] buffer = new byte[4 << 20];
-                    for (long p = lo; p < hi;) {
-                        int n = (int)Math.Min(buffer.Length, hi - p);
-                        image.Read(p, buffer.AsSpan(0, n)).ThrowIfFailure();
-                        RandomAccess.Write(handle, buffer.AsSpan(0, n), p); p += n;
+            int window = Math.Min(parts, workers * 2);
+            var free = new System.Collections.Concurrent.ConcurrentBag<byte[]>();
+            for (int i = 0; i < window; i++) free.Add(new byte[(int)Math.Min(chunkSize, total)]);
+            var slots = new SemaphoreSlim(window);
+            var done = new (byte[] Buf, int Len)?[parts];
+            var errors = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
+            var gate = new object();
+            using var cts = new CancellationTokenSource();
+            int next = -1;
+            bool big = total >= 1L << 30;
+            if (big) Console.WriteLine($"资源镜像：{total >> 20} MB，{workers} 路读、按顺序写");
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var readers = Enumerable.Range(0, workers).Select(_ => Task.Run(() => {
+                try {
+                    while (true) {
+                        slots.Wait(cts.Token);
+                        int k = Interlocked.Increment(ref next);
+                        if (k >= parts) { slots.Release(); return; }
+                        free.TryTake(out byte[] buffer);
+                        long lo = k * chunkSize; int n = (int)Math.Min(chunkSize, total - lo);
+                        for (int at = 0; at < n;) {
+                            int m = Math.Min(4 << 20, n - at);
+                            image.Read(lo + at, buffer.AsSpan(at, m)).ThrowIfFailure(); at += m;
+                        }
+                        lock (gate) { done[k] = (buffer, n); Monitor.PulseAll(gate); }
                     }
-                });
+                } catch (OperationCanceledException) when (cts.IsCancellationRequested) {
+                } catch (Exception e) {
+                    errors.Enqueue(e); cts.Cancel();
+                    lock (gate) Monitor.PulseAll(gate);
+                }
+            })).ToArray();
+            try {
+                using var handle = File.OpenHandle(stage, FileMode.CreateNew, FileAccess.Write, FileShare.None, FileOptions.None, total);
+                int shown = 0;
+                for (int k = 0; k < parts; k++) {
+                    (byte[] Buf, int Len) got;
+                    lock (gate) {
+                        while (done[k] == null && errors.IsEmpty) Monitor.Wait(gate);
+                        if (done[k] == null) break;
+                        got = done[k].Value; done[k] = null;
+                    }
+                    long lo = k * chunkSize;
+                    RandomAccess.Write(handle, got.Buf.AsSpan(0, got.Len), lo);
+                    ImageWriteObserved?.Invoke(lo, got.Len);
+                    free.Add(got.Buf); slots.Release();
+                    int pct = big ? (int)((lo + got.Len) * 10 / total) : 0;
+                    if (pct > shown) { shown = pct; double sec = clock.Elapsed.TotalSeconds;
+                        Console.WriteLine($"资源镜像：已写 {(lo + got.Len) >> 20} / {total >> 20} MB（{pct * 10}%，{sec:F0} 秒，{((lo + got.Len) >> 20) / Math.Max(sec, 0.001):F1} MB/s）"); }
+                }
+            } finally {
+                cts.Cancel();
+                lock (gate) Monitor.PulseAll(gate);
+                Task.WaitAll(readers.Select(t => t.ContinueWith(_ => { })).ToArray());
             }
+            if (!errors.IsEmpty) throw new AggregateException(errors);
             return new Result(files.Count, files.Sum(e => e.Size), workers, false);
         } finally { foreach (var fs in views.Values) fs.Dispose(); }
     }

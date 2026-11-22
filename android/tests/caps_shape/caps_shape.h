@@ -10,12 +10,15 @@ struct cs_shape {
     VkPhysicalDeviceFeatures features;
     // 扩展特性结构里的位（shapes.py EXT_FEATURES；di* = 描述符索引支持位）
     int shaderDrawParameters, timelineSemaphore, indexTypeUint8, customBorderColors, customBorderColorWithoutFormat,
-        vertexAttributeInstanceRateDivisor, formatA4B4G4R4, depthClipControl, swapchainMaintenance1,
+        vertexAttributeInstanceRateDivisor, vertexAttributeInstanceRateZeroDivisor, formatA4B4G4R4, formatA4R4G4B4, depthClipControl, swapchainMaintenance1,
         diRuntimeArray, diPartiallyBound, diSampledNonUniform, diStorageNonUniform, diVariableCount, diSampledUpdateAfterBind;
     int driver_id;
     const char *driver_name;
     uint64_t max_alloc;
-    uint32_t max_per_set, subgroup_size, subgroup_stages, subgroup_ops;
+    uint32_t max_per_set, subgroup_size, subgroup_stages, subgroup_ops, subgroup_quad;
+    // 扩展属性（设备列出对应扩展时才答；档案里 null = 0）
+    uint32_t border_max, minmax_single, minmax_mapping, vdiv_max;
+    uint64_t host_align;
     uint32_t n_heap; struct { uint64_t size; uint32_t flags; } heaps[VK_MAX_MEMORY_HEAPS];
     uint32_t n_type; struct { uint32_t flags, heap; } types[VK_MAX_MEMORY_TYPES];
     uint32_t n_queue; struct { uint32_t flags, count, timestamp_bits; } queues[8];

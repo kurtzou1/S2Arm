@@ -20,7 +20,8 @@ import subprocess
 import tempfile
 import zlib
 
-RECORD = struct.Struct("<QBBHIQ")
+RECORD = struct.Struct("<QBBHIQ")   # key、kind、分片号低 8 位、分片号高 16 位、len、off
+SHARD_COUNT_MAX = 65536   # 同 lib_pack_core.inc LP_SHARD_MAX
 
 
 def digest(data):
@@ -35,17 +36,18 @@ class Library:
             raise ValueError("Not a direct library container")
         version, self.count, self.shards = struct.unpack_from("<III", self.index, 8)
         self.base = 48 + self.shards * 16
-        if version != 1 or not 0 < self.shards <= 256 or len(self.index) != self.base + self.count * RECORD.size:
+        if version != 1 or not 0 < self.shards <= SHARD_COUNT_MAX or len(self.index) != self.base + self.count * RECORD.size:
             raise ValueError("Unsupported library container version, shard count or length")
         self.records = {}
         for i in range(self.count):
-            key, kind, shard, reserved, length, offset = RECORD.unpack_from(self.index, self.base + i * RECORD.size)
+            key, kind, lo, hi, length, offset = RECORD.unpack_from(self.index, self.base + i * RECORD.size)
+            shard = lo | hi << 8   # 分片号低 8 位 + 高 16 位（lib_pack_core.inc lp_shard，#1960）
             if shard >= self.shards or offset + length > struct.unpack_from("<Q", self.index, 48 + shard * 16)[0] or (key, kind) in self.records:
                 raise ValueError("Invalid library record")
-            self.records[key, kind] = (i, shard, reserved, length, offset)
+            self.records[key, kind] = (i, shard, length, offset)
 
     def read(self, key, kind):
-        _, shard, _, length, offset = self.records[key, kind]
+        _, shard, length, offset = self.records[key, kind]
         path = self.path / f"lib.{shard:03}.pak"
         if path.stat().st_size != struct.unpack_from("<Q", self.index, 48 + shard * 16)[0]:
             raise ValueError("Library shard size changed")
@@ -216,8 +218,8 @@ def write_replacements(library, work, replacements):
                     raise ValueError("Repair exceeds one library shard; rebuild the shader library instead")
                 offset = shard.tell()
                 shard.write(payload)
-                i, _, reserved, _, _ = library.records[key, kind]
-                RECORD.pack_into(records, i * RECORD.size, key, kind, library.shards, reserved, len(payload), offset)
+                i = library.records[key, kind][0]
+                RECORD.pack_into(records, i * RECORD.size, key, kind, library.shards & 0xff, library.shards >> 8, len(payload), offset)
         size = shard.tell()
     header = bytearray(library.index[:48])
     struct.pack_into("<I", header, 16, library.shards + 1)
@@ -232,7 +234,7 @@ def prepare(options, library, work):
     if (work / "repair.json").exists():
         raise ValueError("Repair already prepared; use --apply/--rollback, or choose a new work directory")
     work.mkdir(parents=True, exist_ok=True)
-    if library.shards == 256:
+    if library.shards >= SHARD_COUNT_MAX:
         raise ValueError("Library has no free shard slots; rebuild the shader library instead")
     wanted = {}
     for key, kind in library.records:

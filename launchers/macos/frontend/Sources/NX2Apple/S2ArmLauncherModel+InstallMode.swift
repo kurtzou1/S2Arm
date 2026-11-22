@@ -75,6 +75,7 @@ extension S2ArmLauncherModel {
                 let r = try await self?.provider.updatePhone(acceptStale: acceptStale, accept: accept, mode: mode, sgradeUpgrade: sgradeUpgrade, device: device, events: sink) ?? [:]
                 let names = Dictionary((self?.games ?? []).map { ($0.id.uppercased(), $0.name) }, uniquingKeysWith: { a, _ in a })
                 self?.installTrustName = r["trustName"] as? String ?? ""   // 重装了 App（换团队 / 续签）：完成页同样说要点哪一项信任
+                self?.installTrustKind = r["deviceKind"] as? String ?? ""
                 self?.phoneOutcome = PhoneOutcome(device: Self.deviceLabel(kind: r["deviceKind"] as? String ?? "", name: r["deviceName"] as? String ?? ""),
                                                   packFiles: (r["packFiles"] as? NSNumber)?.intValue, packBytes: (r["packBytes"] as? NSNumber)?.int64Value,
                                                   skipped: (r["skipped"] as? [String] ?? []).map { names[$0.uppercased()] ?? $0 },

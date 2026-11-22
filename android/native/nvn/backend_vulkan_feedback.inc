@@ -256,11 +256,31 @@ static int feedback_restart(struct nvn_gpu_cmd_s *c, uint16_t read_mask, int cop
     if (cont_ok && rc_is(c->sticky, NVN_GPU_OK)) occl_spare_begin(c, occ, &cont);   // 新通道里接着数
     return rc_is(c->sticky, NVN_GPU_OK);
 }
+// 这一笔绑着的存储图像（图形阶段）与本通道的某个附件是同一张图的同一段子资源？只看当前管线布局认得的绑定，口径同 feedback_prepare 的主循环。
+// 一笔绘制表达不了这种读写：存储写进采样快照等于丢掉，直接用原图则存储访问与附件写的先后没有定义。放在主循环之前单独扫一遍：
+// 命中就在动任何快照链表之前整笔跳过，同一段里后面的笔接着用没被动过的状态。
+static int feedback_image_overlap(struct nvn_gpu_cmd_s *c) {
+    for (int st = 0; st < 5; st++)
+        for (uint32_t i = 0; i < c->nbinds[st]; i++) {
+            const nvn_gpu_binding *b = &c->binds[st][i].b;
+            if (b->cls != NVN_GPU_RES_IMAGE || b->ent >= c->pipe->stage_nent[st]) continue;
+            if (c->pipe->stage_ents[st][b->ent].cls != b->cls) continue;
+            if (feedback_attached(c, b->u.view)) return 1;
+        }
+    return 0;
+}
 static int feedback_prepare(struct nvn_gpu_cmd_s *c, int compute) {
     // 退出反馈或进入计算时，恢复原视图描述符。原绑定表永不被快照改写。
     if (c->feedback != c->feedback_stop) c->desc_dirty = 0xfu;
     c->feedback_stop = c->feedback;
     if (compute || !c->feedback_on || !c->in_pass) return 1;
+    // 图形阶段的存储图像与附件重叠：具名跳过这一笔并计数（同 graphics_image_unresolved 一类），不设粘性错误——粘性错误会让整段提交失败、
+    // 时间线进终态，而这里只是这一笔画不了；同一段里后面的笔照常画。真正支持这种重叠（附件与存储写共用 GENERAL 加同步，
+    // 或反馈环布局）另立卡（#999）。
+    if (feedback_image_overlap(c)) {
+        nvn_unimpl("draw", "graphics_image_feedback_overlap", NULL);
+        return 0;
+    }
     uint16_t writes = feedback_writes(c);
     // 每笔由实际采样集合重建：不再采样（包括没有描述符组）就退出 NONE。
     // 不遗留旧槽位的只读状态，避免另一附件别名到同一范围并开始写时漏恢复。
@@ -274,9 +294,6 @@ static int feedback_prepare(struct nvn_gpu_cmd_s *c, int compute) {
             if (e->cls != b->cls) continue;
             struct nvn_gpu_view_s *v = b->cls == NVN_GPU_RES_TEX_SAMP ? b->u.ts.view :
                 (b->cls == NVN_GPU_RES_TEX || b->cls == NVN_GPU_RES_IMAGE) ? b->u.view : NULL;
-            if (b->cls == NVN_GPU_RES_IMAGE && feedback_attached(c, v)) {
-                set_sticky(c, NVN_GPU_E_UNSUPPORTED, "feedback storage image writes cannot use a sampled snapshot"); return 0;
-            }
             if (b->cls != NVN_GPU_RES_IMAGE && !feedback_add(c, v, e->set, writes, &read_mask, 0, &pool_skipped)) return 0;
         }
         if (c->pool_active) for (uint32_t i = 0; i < c->pipe->stage_nent[st] && i < 64; i++) {

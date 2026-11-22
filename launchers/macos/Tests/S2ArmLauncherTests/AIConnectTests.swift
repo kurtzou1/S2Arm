@@ -82,8 +82,8 @@ import SwiftUI
         Localization.preference = .english
         for text in InstallGuideView.pendingItems + ["下面几项齐了就能装，这里每隔几秒自动检查一次。", "齐了会自动开始装", "开始装", "其他安装方式：AltStore",
                      "还没做好：先做 iPhone 版，做好后这里自动打勾。", "打开 Xcode →「设置」→「账户」，点左下角「+」，登录你的 Apple ID（免费的就可以）。",
-                     "连着不止一台 iPhone / iPad：只留要装的那一台。", "用数据线把 iPhone 连到这台 Mac，并解锁手机。", "在 iPhone 上点「信任」，再输入手机的锁屏密码。",
-                     "在 iPhone 上打开「设置 → 隐私与安全性 → 开发者模式」，按提示重启手机；重启后解锁，这里会自动打勾。"] {
+                     "连着不止一台 iPhone / iPad：只留要装的那一台。", "用数据线把 iPhone 连到这台 Mac，并解锁手机。", "在 iPad 上点「信任」，再输入锁屏密码。",
+                     "在 iPhone 上打开「设置 → 隐私与安全性 → 开发者模式」，按提示重启；重启后解锁，这里会自动打勾。"] {
             XCTAssertNotEqual(L(text), text)
         }
     }

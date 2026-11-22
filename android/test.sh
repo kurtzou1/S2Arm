@@ -324,6 +324,8 @@ s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py" --cs-libpack-mu
 s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py" --compute-warm-mutants
 s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py" --diag-mutants
 s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py" --live-compile-mutants
+# 图形阶段存储图像（#999）：句柄字 72..86 偶 → 图像槽 / 表外·奇字·数组不猜 / 声明落程序记录；解析与声明各改坏一处，graphics_image_layout_test 必红
+s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py" --graphics-image-mutants
 # Workgroup 共享字节核算的宿主件：OpTypeFloat/Int 词数分校、位宽负控、无共享变量零计数
 s2a_gate_step "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -I "$android_dir/native/direct" -I "$repo_dir/graphics/third_party/spirv_cross" \
     "$android_dir/tests/t_spv_workgroup_bytes.c" -o "$out/spv-workgroup-bytes-test"

@@ -96,14 +96,14 @@ def fixture(work, batch, replacement, chain):
 def restore_shared_identity(library, report, original_metadata):
     # Negative control changes only A's fn_lib; the compiled functions and B's metadata stay intact.
     current = repair.Library(library)
-    record, shard, reserved, _, _ = current.records[KEY_A, 1]
+    record, shard, _, _ = current.records[KEY_A, 1]
     path = library / report["shard"]
     data = path.read_bytes()
     metadata = json.dumps(original_metadata).encode()
     path.write_bytes(data + metadata)
     index = bytearray(current.index)
     struct.pack_into("<Q", index, 48 + shard * 16, len(data) + len(metadata))
-    struct.pack_into("<QBBHIQ", index, current.base + record * 24, KEY_A, 1, shard, reserved, len(metadata), len(data))
+    struct.pack_into("<QBBHIQ", index, current.base + record * 24, KEY_A, 1, shard & 0xff, shard >> 8, len(metadata), len(data))   # 分片号低 8 位 + 高 16 位（#1960）
     (library / "lib.idx").write_bytes(index)
 
 

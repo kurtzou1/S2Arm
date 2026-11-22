@@ -23,7 +23,7 @@ def scan(b):
     if len(h) < 48 or h[:8] != b'S2ALIB\0\0': return 0, 0, [], 'lib.idx 头不对（魔数不是 S2ALIB 或不足 48 字节）'
     ver, n, ns = struct.unpack_from('<III', h, 8)
     if ver != 1: return n, ns, [], f'lib.idx 版本 {ver} 不是 1'
-    if ns > 256 or len(h) != 48 + 16 * ns + 24 * n: return n, ns, [], f'lib.idx 长度 {len(h)} 与记录数 {n} / 分片数 {ns} 不符'
+    if ns > 65536 or len(h) != 48 + 16 * ns + 24 * n: return n, ns, [], f'lib.idx 长度 {len(h)} 与记录数 {n} / 分片数 {ns} 不符'
     bad = []
     for i in range(ns):
         want = struct.unpack_from('<Q', h, 48 + 16 * i)[0]; f = f'lib.{i:03d}.pak'; path = os.path.join(b, f)

@@ -140,6 +140,7 @@ public sealed partial class EnvironmentWindow
     /// <summary>上一次装机失败的错误码（apple_session_expired 时失败页给「打开 Impactor 重新登录」，重新登录完自动再装）</summary>
     private string? installCode;
     private bool installOpenToFinish;   // 刚装完的那次是单一 IMG：成功卡片多写一句「打开 S2Arm 会自动完成安装」（作业结果 openToFinish）
+    private string installTrustKind = "";   // 这次装上的那台的类型（作业结果 deviceKind）：「在 iPad 上：…信任」那句按它写，读不到写「iPhone / iPad」（#1962）
     private string installTrustName = "";   // 这次签名的证书名（作业结果 trustName）：成功卡片「点「<名字>」→ 信任」；Windows 上作业读不到时为空，退回不带名字的说法
     private string revealProblem = "";   // 「显示 IPA」「打开游戏文件夹」找不到目标时的提示（不打开空的资源管理器）
     // 当前 / 最近一次手机作业属于哪一款（#308：原先只有一份「当前安装」状态、没记是哪款，回游戏库再点别的游戏，进度会画到那款上）。
@@ -1065,7 +1066,7 @@ public sealed partial class EnvironmentWindow
             foreach (var diagnostic in job.Report.Diagnostics.EnumerateArray())
             {
                 if (diagnostic.TryGetProperty("code", out var code) && code.ValueKind == JsonValueKind.String)
-                { Add(T("errors." + code.GetString() + ".title")); Add(T("errors." + code.GetString() + ".detail")); }
+                { Add(text.Error(code.GetString(), "title", language, readiness?.DeviceKind)); Add(text.Error(code.GetString(), "detail", language, readiness?.DeviceKind)); }
                 foreach (var key in new[] { "summary", "suggestion" })
                     if (diagnostic.TryGetProperty(key, out var message) && message.ValueKind == JsonValueKind.String) Add(message.GetString());
             }
@@ -1749,7 +1750,7 @@ public sealed partial class EnvironmentWindow
         else if (installState == "succeeded" && installTrack.Kind == "install" && installOpenToFinish) notes.Add(T("install.done.open"));
         // 第一次打开前信任开发者（同 Mac InstallView doneNotes）：读到证书名就写要点哪一项，读不到退回不带名字的说法；导出模式不连手机，不写
         if (installState == "succeeded" && installTrack.Kind == "install" && !installExport)
-            notes.Add(installTrustName.Length > 0 ? T("install.done.trustNamed").Replace("{0}", installTrustName) : T("install.done.trust"));
+            notes.Add(installTrustName.Length > 0 ? T("install.done.trustNamed").Replace("{0}", installTrustName).Replace("{1}", SharedText.DeviceKind(installTrustKind)) : T("install.done.trust"));
         var state = new StackPanel { Spacing = 16 };
         // 单款装机（不是导出）没走成：「重试」原样重发这一单（同样的确认参数、同一台）；独立 App 成功页的「完成」收起结局卡
         var retry = installState is "failed" or "interrupted" or "invalid" && !installExport && installTrack.Kind == "install" && lastInstall is { } again && installGameId == game.Id
@@ -1808,7 +1809,7 @@ public sealed partial class EnvironmentWindow
     private IReadOnlyDictionary<string, string> ConfirmCodes => text.ConfirmFlags;
 
     /// <summary>可确认的停装码要问的那句标题：文案表有 errors.&lt;码&gt;.title 就用它，没有用通用的 install.drop_title</summary>
-    private string ConfirmTitle(string? code) => code is { Length: > 0 } && text.Has("errors." + code + ".title") ? T("errors." + code + ".title") : T("install.drop_title");
+    private string ConfirmTitle(string? code) => code is { Length: > 0 } && text.Has("errors." + code + ".title") ? text.Error(code, "title", language, readiness?.DeviceKind) : T("install.drop_title");
 
     /// <summary>控制口请求里带的确认参数（acceptDropped / acceptNoBackup / acceptStale）</summary>
     private HashSet<string> AcceptFlags(ControlRequest r) => ConfirmCodes.Values.Where(r.Flag).ToHashSet();
@@ -1851,6 +1852,7 @@ public sealed partial class EnvironmentWindow
             { installState = "needsPlayer"; installMessage = pending.GetString() ?? ""; }
             installOpenToFinish = job.Report.Succeeded && job.Report.Result.TryGetProperty("openToFinish", out var open) && open.ValueKind == JsonValueKind.True;
             installTrustName = job.Report.Succeeded && job.Report.Result.TryGetProperty("trustName", out var trust) && trust.ValueKind == JsonValueKind.String ? trust.GetString() ?? "" : "";
+            installTrustKind = job.Report.Result.ValueKind == JsonValueKind.Object && job.Report.Result.TryGetProperty("deviceKind", out var dk) && dk.ValueKind == JsonValueKind.String ? dk.GetString() ?? "" : "";
             installDiagnostics = JobDiagnostics(job);
             installTrack.Finish(job, GameName);
             // 导出自签包：打开放好的文件夹。独立 App 导出不自动开（成功页 B 有「在资源管理器中显示」「打开说明」）

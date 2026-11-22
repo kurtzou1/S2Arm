@@ -78,16 +78,16 @@ int s2a_libpack_get(const struct s2a_libpack *lp, const uint8_t key[8], unsigned
     *bytes = NULL; *len = 0;
     const lp_rec *r = lp_find(&lp->p, lp_key8(key), kind);
     if (!r) return S2A_LIBPACK_MISS;
-    if (r->shard >= lp->p.nshard || r->off + r->len > lp->p.ssize[2 * r->shard]) {
+    if (lp_shard(r) >= lp->p.nshard || r->off + r->len > lp->p.ssize[2 * lp_shard(r)]) {
         if (why && why_size) snprintf(why, why_size, "record points outside shard table (%u/%u off=%llu len=%u)",
-                                      r->shard, lp->p.nshard, (unsigned long long)r->off, r->len);
+                                      lp_shard(r), lp->p.nshard, (unsigned long long)r->off, r->len);
         return S2A_LIBPACK_REJECT;
     }
-    char path[1100]; snprintf(path, sizeof path, "%s/lib.%03u.pak", lp->p.dir, r->shard);
+    char path[1100]; snprintf(path, sizeof path, "%s/lib.%03u.pak", lp->p.dir, lp_shard(r));
     int fd = open(path, O_RDONLY); struct stat st;
-    if (fd < 0 || fstat(fd, &st) || (uint64_t)st.st_size != lp->p.ssize[2 * r->shard]) {
+    if (fd < 0 || fstat(fd, &st) || (uint64_t)st.st_size != lp->p.ssize[2 * lp_shard(r)]) {
         if (why && why_size) snprintf(why, why_size, "shard %s is %s (index says %llu bytes)", path,
-                                      fd < 0 ? "missing" : "the wrong size", (unsigned long long)lp->p.ssize[2 * r->shard]);
+                                      fd < 0 ? "missing" : "the wrong size", (unsigned long long)lp->p.ssize[2 * lp_shard(r)]);
         if (fd >= 0) close(fd);
         return S2A_LIBPACK_REJECT;
     }

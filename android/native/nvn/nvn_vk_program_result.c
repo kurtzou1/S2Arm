@@ -420,6 +420,10 @@ static int parse_graphics(const uint8_t *bytes, size_t length, struct fd_program
             } else if (v2 && dst->kind == 2 && !dst->tex_ubo && !(dst->count > 1 && dst->slot == 0)) {
                 return fail(why, why_size, "invalid texture source");
             }
+            // 存储图像（#999）：句柄字在 c2 图像句柄表 72..86（偶），NVN 图像槽 = (字 − 72) / 2，放进 tex_slot（同计算阶段，见 parse_compute）；
+            //   回放按这一阶段 BindImage 的槽取（rp_draw NVN_RB_IMG）。表外 / 奇字 / 数组 / 没有字不填，保持 -1：layout_ent 具名拒（binding_kind_3_slot_N），不猜槽位。
+            if (dst->kind == 3 && dst->count == 1 && dst->slot >= 72 && dst->slot < 88 && !(dst->slot & 1))
+                dst->tex_slot = (int16_t)((dst->slot - 72) / 2);
             if (dst->kind == 2 && texture_classify(b,
                     dst->stage_idx >= 0 && dst->stage_idx < FD_MAX_STAGES ? &out->stage[dst->stage_idx] : NULL,
                     dst, why, why_size)) return -1;

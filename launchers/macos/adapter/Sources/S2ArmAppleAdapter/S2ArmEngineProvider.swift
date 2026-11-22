@@ -356,7 +356,7 @@ public final class S2ArmEngineProvider: EngineProvider {
         return out
     }
     /// 「更新这款」（0.6.4，作业 updateGame）：只在电脑上按原因做齐这一款（重编 iPhone 与 Mac 两份着色器库、按本版改写器刷新程序），不找设备、不推、不签名。
-    ///   结果 reasons = 做完后还剩的建议更新原因（空 = 已是最新）；做不齐的项作业照常成功、另给 warning 诊断 update_incomplete（message 是玩家句），原样带回
+    ///   结果 reasons = 做完后还剩的建议更新原因（空 = 已是最新）；做不齐的项作业照常成功、另给 warning 诊断 update_incomplete（summary 是玩家句），原样带回
     public func updateGame(gameId: String, events: EventSink = .discard) async throws -> UpdateGameResult {
         let o = try await client.perform("updateGame", extra: ["gameId": gameId], events: events)
         return UpdateGameResult(outcome: o.result, diagnostics: o.diagnostics)
@@ -393,6 +393,7 @@ public struct UpdateGameResult: Equatable {
     public init(reasons: [String], incomplete: [String]) { self.reasons = reasons; self.incomplete = incomplete }
     public init(outcome r: [String: Any], diagnostics: [[String: Any]]) {
         reasons = r["reasons"] as? [String] ?? []
-        incomplete = diagnostics.filter { $0["code"] as? String == "update_incomplete" }.compactMap { ($0["message"] as? String).flatMap { $0.isEmpty ? nil : $0 } }
+        // 玩家句在诊断的 summary（作业层 c.diagnostic 的形状，没有 message 字段；#1961）；suggestion 是通用句，不拼进来（整句才能按翻译表译）
+        incomplete = diagnostics.filter { $0["code"] as? String == "update_incomplete" }.compactMap { ($0["summary"] as? String).flatMap { $0.isEmpty ? nil : $0 } }
     }
 }

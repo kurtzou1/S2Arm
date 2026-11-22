@@ -35,7 +35,9 @@ INSTANCE_EXTS = ('VK_KHR_get_physical_device_properties2', 'VK_KHR_surface', 'VK
 EXT_FEATURES = (('shaderDrawParameters', 'shaderDrawParameters'), ('timelineSemaphore', 'timelineSemaphore'),
                 ('indexTypeUint8', 'indexTypeUint8'), ('customBorderColors', 'customBorderColors'),
                 ('customBorderColorWithoutFormat', 'customBorderColorWithoutFormat'),
-                ('vertexAttributeInstanceRateDivisor', 'vertexAttributeInstanceRateDivisor'), ('formatA4B4G4R4', 'formatA4B4G4R4'),
+                ('vertexAttributeInstanceRateDivisor', 'vertexAttributeInstanceRateDivisor'),
+                ('vertexAttributeInstanceRateZeroDivisor', 'vertexAttributeInstanceRateZeroDivisor'), ('formatA4B4G4R4', 'formatA4B4G4R4'),
+                ('formatA4R4G4B4', 'formatA4R4G4B4'),
                 ('depthClipControl', 'depthClipControl'), ('swapchainMaintenance1', 'swapchainMaintenance1'),
                 ('runtimeDescriptorArray', 'diRuntimeArray'), ('descriptorBindingPartiallyBound', 'diPartiallyBound'),
                 ('shaderSampledImageArrayNonUniformIndexing', 'diSampledNonUniform'),
@@ -95,7 +97,11 @@ def header(out):
         lines.append('  .driver_id = %d, .driver_name = %s, .max_alloc = %dull, .max_per_set = %d, .subgroup_size = %d,' % (
             z(i['driverId']), c_str(z(i['driverName'], '')), z(pr.get('maxMemoryAllocationSize')), z(pr.get('maxPerSetDescriptors'), 1024),
             z(pr.get('subgroupSize'))))
-        lines.append('  .subgroup_stages = %du, .subgroup_ops = %du,' % (z(pr.get('subgroupSupportedStages')), z(pr.get('subgroupSupportedOperations'))))
+        lines.append('  .subgroup_stages = %du, .subgroup_ops = %du, .subgroup_quad = %du,' % (
+            z(pr.get('subgroupSupportedStages')), z(pr.get('subgroupSupportedOperations')), z(pr.get('subgroupQuadOperationsInAllStages'))))
+        lines.append('  .border_max = %du, .minmax_single = %du, .minmax_mapping = %du, .vdiv_max = %du, .host_align = %dull,' % (
+            z(pr.get('maxCustomBorderColorSamplers')), z(pr.get('filterMinmaxSingleComponentFormats')), z(pr.get('filterMinmaxImageComponentMapping')),
+            z(pr.get('maxVertexAttribDivisor')), z(pr.get('minImportedHostPointerAlignment'))))
         mem = v['memory']
         lines.append('  .n_heap = %d, .heaps = { %s }, .n_type = %d, .types = { %s },' % (
             len(mem['heaps']), ', '.join('{%dull, %d}' % (h['size'], h['flags']) for h in mem['heaps']),

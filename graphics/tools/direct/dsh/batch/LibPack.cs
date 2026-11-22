@@ -221,7 +221,7 @@ static partial class LibPack
     }
 
     // ---------------- lib_pack.py ----------------
-    const int VER = 1, ALIGN = 16; const long SHARD_MAX = 64L << 20;   // 分片上限 64 MB（运行时按需映射，iOS 虚拟地址紧）
+    const int VER = 1, ALIGN = 16; const long SHARD_MAX = 64L << 20; const int SHARD_COUNT_MAX = 65536;   // 分片上限 64 MB（运行时按需映射，iOS 虚拟地址紧）
     static readonly byte[] MAGIC = Encoding.ASCII.GetBytes("S2ALIB\0\0");
     static readonly Regex NAME = new(@"\A([0-9a-f]{16})_(b\.metallib|b\.json|b\.spv|bf\.metallib|bv\.metallib|ft\.metallib|se\.metallib|vp\.metallib|bp\.metallib|b_t([0-2])\.metallib|bg(\d+)\.(metallib|json)|bgv\.(metallib|json)|bgs(\d+)\.(metallib|json)|bgc\.(metallib|json)|vg([0-4])\.(json|spv))$", RegexOptions.CultureInvariant);
     static readonly Regex VKFP = new(@"\A[0-9a-f]{16}\z", RegexOptions.CultureInvariant);
@@ -381,7 +381,7 @@ static partial class LibPack
                 cur.Write(b);
             }
             sizes.Add(cur.Position); cur.Dispose(); cur = null;
-            if (sh > 255) return (new() { $"分片 {sh + 1} 个，超过 256" }, "");
+            if (sh >= SHARD_COUNT_MAX) return (new() { $"分片 {sh + 1} 个，超过 {SHARD_COUNT_MAX}" }, "");   // #1960：分片号占记录的 u8 + 原保留的 u16（lib_pack_core.inc lp_shard），原上限 256 时大款出库被拒
             for (int i = 0; i < shards.Count; i++) sizes[i] = new FileInfo(shards[i]).Length;   // 同 Python os.path.getsize
             idx = new byte[48 + 16 * shards.Count + 24 * recs.Count];
             var w = idx.AsSpan();
@@ -390,7 +390,7 @@ static partial class LibPack
             if (vkfp != null) W64(w, 36, Convert.ToUInt64(vkfp, 16));   // Vulkan 库：36–43 = Vulkan 侧指纹（u64），44–47 仍为 0
             for (int i = 0; i < shards.Count; i++) W64(w, 48 + 16 * i, (ulong)sizes[i]);
             int o = 48 + 16 * shards.Count;
-            foreach (var r in recs) { W64(w, o, r.Key); w[o + 8] = (byte)r.K; w[o + 9] = (byte)r.S; W32(w, o + 12, r.Len); W64(w, o + 16, r.Off); o += 24; }
+            foreach (var r in recs) { W64(w, o, r.Key); w[o + 8] = (byte)r.K; w[o + 9] = (byte)(r.S & 0xff); W16(w, o + 10, (ushort)(r.S >> 8)); W32(w, o + 12, r.Len); W64(w, o + 16, r.Off); o += 24; }
             File.WriteAllBytes(idxTmp, idx);
             // 回读核验：按索引从分片取每段，与原字节的摘要比；每段只核一次。逐片读（一片至多 SHARD_MAX）、核完就丢——
             //   审计 #1417 P1-87：原先把全部分片一次读进一个列表，大库发布段的常驻再涨出一整份库
@@ -422,6 +422,7 @@ static partial class LibPack
         string gl = guest == null ? "" : $"；客体输入 {guest.Keys.Count} 键 {guest.Blocks.Count} 块（原样 {Fmt(guest.Raw, 1048576, 1)} MB → {Fmt(guest.Packed, 1048576, 1)} MB）";
         return (new(), $"[直连库] 打包：{nk} 键 {recs.Count} 段（其中 {src.Count} 个键的 _b 库来自 {put.Count} 个批库；另有 {dup} 段与已存的段字节相同、只存一次）→ {shards.Count} 个分片 {Fmt(sizes.Sum(), 1048576, 1)} MB + lib.idx {Fmt(idx.Length, 1024, 0)} KB（回读逐段相符）{gl}");
     }
+    static void W16(Span<byte> w, int o, ushort v) => System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(w[o..], v);
     static void W32(Span<byte> w, int o, uint v) => System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(w[o..], v);
     static void W64(Span<byte> w, int o, ulong v) => System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(w[o..], v);
 
@@ -563,7 +564,7 @@ static partial class LibPack
             if (b.Length != 48 + 16 * (long)ns + 24 * (long)n) throw new InvalidDataException($"{dir}/lib.idx 长度与记录数不符");
             Chain = Encoding.ASCII.GetString(b, 24, 12).TrimEnd('\0');
             ssize = new long[ns]; for (int i = 0; i < ns; i++) ssize[i] = (long)BitConverter.ToUInt64(b, 48 + 16 * i);
-            for (int i = 0, at = 48 + 16 * (int)ns; i < n; i++, at += 24) Rec[(BitConverter.ToUInt64(b, at), b[at + 8])] = (b[at + 9], BitConverter.ToUInt64(b, at + 16), BitConverter.ToUInt32(b, at + 12));
+            for (int i = 0, at = 48 + 16 * (int)ns; i < n; i++, at += 24) Rec[(BitConverter.ToUInt64(b, at), b[at + 8])] = (b[at + 9] | BitConverter.ToUInt16(b, at + 10) << 8, BitConverter.ToUInt64(b, at + 16), BitConverter.ToUInt32(b, at + 12));
         }
         public byte[] Get(ulong key, int k)
         {

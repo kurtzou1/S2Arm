@@ -63,6 +63,15 @@ ck('①b 单行注释段名照旧、两段各自取名', [x['name'] for x in s7]
 _, ec = cpatch.parse_cheats('[A]\n04000000 00000AFCC4\u202c 52800020\n[B]\n04000000 0000ZZZZ 52800020\n[C]\n\ufeff04000000 00000100 d503201f\n')
 ec = {e['name']: e['writes'] for e in ec}
 ck('①c 金手指：去掉 U+202C / BOM 照常编进包；看不懂的那条交运行时、不抛错', ec == {'A': [(720068, bytes.fromhex('20008052'))], 'B': None, 'C': [(0x100, bytes.fromhex('1f2003d5'))]})
+# ①d 偏移寄存器按「主代码 + 本条自己」判（D-99H5 超级马力欧 RPG nxcheats：有一条给 E 装常量，别的拿 E 当偏移的开关条目原先整份判成交运行时、在苹果上被停用）。
+#   期望手算（同我们运行时：每条一套寄存器、起始 0；主代码跟着跑）：A、C 自己不写 E、主代码也不写 → 编进包（0x100 / 0x108 + E=0）；B 自己写 E → 交运行时；
+#   第二份：主代码写了 E → 文件里所有拿 E 当偏移的条目都交运行时
+_, er = cpatch.parse_cheats('{M}\n080E0000 00000200 00000000 00000000\n[A]\n040E0000 00000100 00000001\n[B]\n400E0000 00000000 000000CC\n040E0000 00000300 00000002\n[C]\n040E0000 00000108 00000003\n')
+er = {e['name']: e['writes'] for e in er}
+ck('①d 寄存器：A、C（自己不写 E）编进包，B（自己写 E）交运行时，主代码编进包',
+   er == {'M': [(0x200, bytes(8))], 'A': [(0x100, bytes.fromhex('01000000'))], 'B': None, 'C': [(0x108, bytes.fromhex('03000000'))]})
+_, em = cpatch.parse_cheats('{M}\n400E0000 00000000 00000010\n[D]\n040E0000 00000100 00000001\n')
+ck('①d 主代码写了 E：拿 E 当偏移的条目交运行时', {e['name']: e['writes'] for e in em} == {'M': None, 'D': None})
 _, sc = cpatch.parse_pchtxt('@nsobid-AB\n@enabled\n00000200\u200b 1F2003D5\n')
 ck('①c pchtxt：地址后的零宽空格去掉，偏移照算（0x200 − 0x100 = 0x100）', sc and sc[0]['writes'] == [(0x100, bytes.fromhex('1F2003D5'))] and not sc[0]['bad'])
 

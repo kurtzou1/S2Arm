@@ -520,8 +520,8 @@ public sealed partial class EnvironmentWindow : Window
                 row.Children.Add(heading);
                 if (item.Code is not null && !advisory)
                 {
-                    row.Children.Add(Label(T("errors." + item.Code + ".title")));
-                    row.Children.Add(Label(T("errors." + item.Code + ".detail")));
+                    row.Children.Add(Label(text.Error(item.Code, "title", language)));
+                    row.Children.Add(Label(text.Error(item.Code, "detail", language)));
                 }
                 // Observed names/messages and recovery text remain backend data.
                 row.Children.Add(Label(item.Message));

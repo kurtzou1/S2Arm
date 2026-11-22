@@ -299,7 +299,9 @@ struct ExportSheetView: View {
                 case .cancelled: Text(t("exportsheet.row.cancelled")).font(LauncherTheme.TypeStyle.caption).foregroundStyle(.secondary)
                 case .failed:
                     Text(loc.backend(row.message)).font(LauncherTheme.TypeStyle.caption).foregroundStyle(LauncherPalette.danger).fixedSize(horizontal: false, vertical: true)
-                    if !row.suggestion.isEmpty {
+                    if let choice = model.exportRowChoice(row) {
+                        chooser(choice)   // #1966：就在这一行选用哪个 S2Arm，选好自动接着推这一台（原先只给「重试」，点了必然再失败）
+                    } else if !row.suggestion.isEmpty {
                         Text(loc.backend(row.suggestion)).font(LauncherTheme.TypeStyle.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -311,13 +313,40 @@ struct ExportSheetView: View {
                         .controllerButtonStyle(LauncherSecondaryButtonStyle())
                 }
                 let confirm = row.code.flatMap { S2ArmLauncherModel.confirmCodes[$0] } != nil
-                Button(t(confirm ? "install.drop_confirm" : "phone.retry")) { model.retryExportRow(id, device: row.device) }
-                    .controllerButtonStyle(LauncherSecondaryButtonStyle()).accessibilityIdentifier("exportsheet.retry." + row.device)
+                if model.exportRowChoice(row) == nil {   // 要选用哪个 S2Arm 时不给「重试」：没选之前重试必然再失败
+                    Button(t(confirm ? "install.drop_confirm" : "phone.retry")) { model.retryExportRow(id, device: row.device) }
+                        .controllerButtonStyle(LauncherSecondaryButtonStyle()).accessibilityIdentifier("exportsheet.retry." + row.device)
+                }
             }
         }
         .padding(12)
         .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
         .accessibilityElement(children: .contain).accessibilityIdentifier("exportsheet.row." + row.device)
+    }
+
+    /// 导出页这一行停在「装着不止一个 S2Arm、还没选」：就地列候选（同推送失败页 / 总控台：只写事实、不推荐），点一个记住并接着推这一台
+    private func chooser(_ choice: S2ArmLauncherModel.PushChoice) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(t("console.choose.title").replacingOccurrences(of: "{0}", with: model.deviceKind(of: choice.device)))
+                .font(LauncherTheme.TypeStyle.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            ForEach(choice.candidates, id: \.bundleId) { c in
+                Button { model.chooseApp(device: choice.device, bundleId: c.bundleId) } label: {
+                    HStack(spacing: 8) {
+                        if model.consoleChoosing == c.bundleId { ProgressView().controlSize(.small) } else { Image(systemName: "app.badge.checkmark") }
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(S2ArmLauncherModel.candidateLabelKeys(c).map { t($0) }.joined(separator: " · ")).font(LauncherTheme.TypeStyle.caption)
+                            Text(c.bundleId + (c.team.isEmpty ? "" : " · " + t("console.choose.team").replacingOccurrences(of: "{0}", with: c.team)))
+                                .font(.manrope(11)).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .controllerButtonStyle(LauncherSecondaryButtonStyle()).disabled(model.consoleChoosing != nil || model.phoneBusy)
+                .accessibilityIdentifier("exportsheet.chooseApp." + c.bundleId)
+            }
+            if let why = model.consoleChooseError {
+                Text(loc.backend(why)).font(LauncherTheme.TypeStyle.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+            }
+        }.accessibilityIdentifier("exportsheet.chooseApp." + choice.device)
     }
 
     // ---- 底栏 ----
@@ -347,7 +376,7 @@ struct ExportSheetView: View {
     private func stepText(_ s: ExportFlow.Step) -> String {
         switch s {
         case .backend(let line): return loc.backend(line)
-        case .key(let key, let arg): return t(key).replacingOccurrences(of: "{0}", with: arg)
+        case .key(let key, let arg, let more): return t(key).replacingOccurrences(of: "{0}", with: arg).replacingOccurrences(of: "{1}", with: more)
         }
     }
 

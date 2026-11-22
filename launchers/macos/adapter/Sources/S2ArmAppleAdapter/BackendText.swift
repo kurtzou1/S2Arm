@@ -116,8 +116,18 @@ public enum BackendText {
         }, uniquingKeysWith: { first, _ in first })
     }()
 
-    public static func errorTitle(_ code: String, language: String) -> String? {
-        errorTitles[code]?[language]
+    /// 指代「这一台」的共享文案用 {0} 占位设备类型（#1962，同作业层 errors.on_device）：iPad / iPhone 照填，认不出（空、nil）填「iPhone / iPad」
+    public static func deviceKind(_ kind: String?) -> String {
+        switch kind?.lowercased() {
+        case "ipad": return "iPad"
+        case "iphone": return "iPhone"
+        default: return "iPhone / iPad"
+        }
+    }
+
+    /// 错误码的标题（共享规格 errors.items）；指代这一台的标题里 {0} 填 device（作业结果 deviceKind / 总控台 kind），不知道是哪台填「iPhone / iPad」
+    public static func errorTitle(_ code: String, language: String, device: String? = nil) -> String? {
+        errorTitles[code]?[language]?.replacingOccurrences(of: "{0}", with: deviceKind(device))
     }
 
     /// 两端共用的表只在共享体验表一处（11-19 结构 9：Mac / Windows 原先各写一份，Mac 缺 cert_revoke_confirm、两端缺 shaderMiss）：

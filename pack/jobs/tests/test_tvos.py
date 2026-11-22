@@ -259,7 +259,7 @@ class TvRecoveryTest(TvCase):
                     self.assertIn("Apple TV", got, (op, code))
                     for w in ("手机", "iPhone", "数据线", "锁屏", "解锁", "AltStore"): self.assertNotIn(w, got, (op, code))
                 else:
-                    self.assertEqual(got, errors.RECOVERY[code], (op, code))
+                    self.assertEqual(got, errors.RECOVERY[code].replace("{0}", "iPhone / iPad"), (op, code))   # 指代这一台的句子：上下文没认出设备，填「iPhone / iPad」（#1962）
         self.c.operation = "tvInstall"
         self.assertEqual(self.c.describe_failure(Failure("x", code="stage_timeout"))["suggestion"], errors.RECOVERY["stage_timeout"])
 

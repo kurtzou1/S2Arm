@@ -48,6 +48,13 @@ import S2ArmAppleAdapter
         return host
     }
 
+    func testConsoleDeviceSymbolFollowsKind() {
+        // #1967：期望手写——作业认出 iPad 画 iPad；iPhone、读不到类型都画 iPhone
+        XCTAssertEqual(S2ArmLauncherModel.deviceSymbol("iPad"), "ipad")
+        XCTAssertEqual(S2ArmLauncherModel.deviceSymbol("iPhone"), "iphone")
+        XCTAssertEqual(S2ArmLauncherModel.deviceSymbol(nil), "iphone")
+    }
+
     func testConsolePanelFitsWindowWidth() async throws {
         for lang in ["zh-Hans", "en"] {
             // 设置里的语言选择只放进本进程参数域（不写盘），同 TestLanguage 固定系统语言的做法
@@ -85,7 +92,8 @@ extension ConsoleLayoutTests {
         var other: [String: Any] = ["device": "00008140-FIXTUREPHONE0000", "name": "", "installed": false, "shellCurrent": false, "bundleId": "",
                                     "free": true, "online": "00008140-FIXTUREPHONE0000", "signMode": "appleId", "games": games("notPushed")]
         other["games"] = games("needsData")
-        let scenes: [(String, [[String: Any]])] = [("intro", []), ("latest", [ok]), ("external", [external]), ("choose", [choose]), ("twoPhones", [ok, other])]
+        var pad = ok; pad["name"] = "我的 iPad Pro"; pad["kind"] = "iPad"   // #1967：接 iPad 时卡片和页顶画 iPad
+        let scenes: [(String, [[String: Any]])] = [("intro", []), ("latest", [ok]), ("external", [external]), ("choose", [choose]), ("twoPhones", [ok, other]), ("ipad", [pad])]
         for lang in ["zh-Hans", "en"] {
             let d = UserDefaults.standard
             var args = d.volatileDomain(forName: UserDefaults.argumentDomain)

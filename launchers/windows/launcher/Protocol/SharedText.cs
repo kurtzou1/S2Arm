@@ -44,6 +44,13 @@ public sealed class SharedText
     /// <summary>清单动作的按钮文案键（install_landing.actions）；表里没有 / 写 null（那一端自画）→ null，不画按钮</summary>
     public string? InstallActionLabel(string action) => installActionLabels.TryGetValue(action, out var key) ? key : null;
 
+    /// <summary>指代「这一台」的共享文案用 {0} 占位设备类型（#1962，同作业层 errors.on_device、Mac BackendText.deviceKind）：
+    /// "ipad" / "iPad" → iPad，"iphone" / "iPhone" → iPhone，认不出（空 / null）→「iPhone / iPad」</summary>
+    public static string DeviceKind(string? kind) => kind?.ToLowerInvariant() switch { "ipad" => "iPad", "iphone" => "iPhone", _ => "iPhone / iPad" };
+
+    /// <summary>错误码的标题 / 正文（errors.&lt;码&gt;.title / .detail）；指代这一台的句子里 {0} 填 kind（作业结果 deviceKind / 清单 DeviceKind），不知道填「iPhone / iPad」</summary>
+    public string Error(string? code, string part, string language, string? kind = null) => Get("errors." + code + "." + part, language).Replace("{0}", DeviceKind(kind));
+
     /// <summary>规格里有没有这个键（没有时 Get 返回「[键]」原样，界面不该显示它）。</summary>
     public bool Has(string key) => texts.ContainsKey(key);
 

@@ -384,7 +384,7 @@ struct PhoneJobPanel: View {
     /// 推送停在「装着不止一个 S2Arm、还没选」：就在失败页列出候选（同总控台「选用哪个 S2Arm」：只写事实、不推荐），点一个记住并自动重推刚才那一次
     private func chooser(_ choice: S2ArmLauncherModel.PushChoice) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(t("console.choose.title")).font(.manrope(13)).foregroundStyle(.white.opacity(0.8)).fixedSize(horizontal: false, vertical: true)
+            Text(t("console.choose.title").replacingOccurrences(of: "{0}", with: model.deviceKind(of: choice.device))).font(.manrope(13)).foregroundStyle(.white.opacity(0.8)).fixedSize(horizontal: false, vertical: true)
             ForEach(choice.candidates, id: \.bundleId) { c in
                 Button { model.chooseApp(device: choice.device, bundleId: c.bundleId) } label: {
                     HStack(spacing: 10) {
@@ -416,7 +416,7 @@ struct PhoneJobPanel: View {
     //   标题取这个码在体验规格表里的 title（作业层那边写），正文是作业层的原句（说清是哪几款 / 为什么）
     private var dropAsk: some View {
         let code = pendingConfirm?.code ?? "container_would_drop"
-        let title = BackendText.errorTitle(code, language: language) ?? t("install.drop_title")
+        let title = BackendText.errorTitle(code, language: language, device: model.installTargetKind) ?? t("install.drop_title")
         return VStack(alignment: .leading, spacing: 24) {
             headline(seal: AnyView(StatusSeal(symbol: "exclamationmark", color: LauncherPalette.building)), title: title, subtitle: loc.backend(session.message))
             HStack(spacing: 12) {

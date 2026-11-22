@@ -82,6 +82,8 @@ public sealed partial class EnvironmentWindow
     private string ConsoleStatusText()
     {
         var (key, args) = PhoneOverview.Status(ConsolePhone, DateTimeOffset.Now, consoleDone, ConsoleUpdating ? Math.Max(consoleTotal, 1) : 0);
+        // 「没连 iPhone」那两句写这台的类型（#1962：iPad 不写 iPhone），类型接在参数最后（notConnected 的 {1}、notConnectedNever 的 {0}）
+        if (key.StartsWith("console.status.notConnected", StringComparison.Ordinal)) args = [.. args, SharedText.DeviceKind(ConsolePhone?.Kind)];
         return Tf(key, args);
     }
 
@@ -191,7 +193,7 @@ public sealed partial class EnvironmentWindow
     private Control ConsoleChooser(PhoneOverview.Phone phone, bool offline, Action<string>? pick = null)
     {
         var box = new StackPanel { Spacing = 8, Margin = new Thickness(0, 4, 0, 0) };
-        box.Children.Add(WrappedMuted(T("console.choose.title"), 12.5));
+        box.Children.Add(WrappedMuted(Tf("console.choose.title", SharedText.DeviceKind(phone.Kind)), 12.5));
         foreach (var c in phone.Candidates ?? [])
         {
             var text = new StackPanel { Spacing = 2 };
@@ -204,7 +206,7 @@ public sealed partial class EnvironmentWindow
             Avalonia.Automation.AutomationProperties.SetAutomationId(button, "console.chooseApp." + bid);
             box.Children.Add(button);
         }
-        if (offline) box.Children.Add(new TextBlock { Text = Tf("console.offline", phone.Name.Length > 0 ? phone.Name : "iPhone"), Foreground = Brush.Parse("#FF9F0A"), FontSize = 12 });
+        if (offline) box.Children.Add(new TextBlock { Text = Tf("console.offline", phone.Name.Length > 0 ? phone.Name : SharedText.DeviceKind(phone.Kind), SharedText.DeviceKind(phone.Kind)), Foreground = Brush.Parse("#FF9F0A"), FontSize = 12 });
         if (consoleChooseError.Length > 0) box.Children.Add(new TextBlock { Text = B(consoleChooseError), Foreground = Brush.Parse("#FF9F0A"), FontSize = 12, TextWrapping = TextWrapping.Wrap });
         if (!phone.NeedsChoice) box.Children.Add(Action("console.choose.cancel", () => { consoleRechoose = false; consoleChooseError = ""; Render(); }));
         Avalonia.Automation.AutomationProperties.SetAutomationId(box, "console.chooseApp");
@@ -345,7 +347,7 @@ public sealed partial class EnvironmentWindow
             return Card(page, 24);
         }
         var offline = phone.KnownOffline;
-        Control Offline() => new TextBlock { Text = Tf("console.offline", phone.Name.Length > 0 ? phone.Name : "iPhone"), Foreground = Brush.Parse("#FF9F0A"), FontSize = 12, VerticalAlignment = VerticalAlignment.Center };
+        Control Offline() => new TextBlock { Text = Tf("console.offline", phone.Name.Length > 0 ? phone.Name : SharedText.DeviceKind(phone.Kind), SharedText.DeviceKind(phone.Kind)), Foreground = Brush.Parse("#FF9F0A"), FontSize = 12, VerticalAlignment = VerticalAlignment.Center };
 
         // 页顶：手机切换（多台）+ 状态；全部最新
         var head = new StackPanel { Spacing = 4 };

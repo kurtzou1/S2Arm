@@ -1,6 +1,6 @@
 // S2Arm 直连库打包容器的共用核（#1434 拆 lib_pack.inc：容器格式、lib.idx 打开与核头、按键二分——两端同源）。
 //   b-<链版本>/lib.idx：头 48 字节（偏移 0 "S2ALIB\0\0"、8 u32 ver = 1、12 u32 n、16 u32 nshard、20 u32 flags（位 0：全部计算程序为 tensor ABI 1）、24 char chain[12]、36–47 为 0）+ nshard × 16 字节分片表（u64 size、u64 0）
-//   + n × 24 字节记录 {u64 key; u8 kind; u8 shard; u16 0; u32 len; u64 off;}，按 (key, kind) 升序；b-<链版本>/lib.NNN.pak：各段原样字节。
+//   + n × 24 字节记录 {u64 key; u8 kind; u8 shard 低 8 位; u16 shard 高 16 位; u32 len; u64 off;}，按 (key, kind) 升序；b-<链版本>/lib.NNN.pak：各段原样字节。
 //   kind：0 _b.metallib、1 _b.json、2 _bf.metallib、3 _bv.metallib、4+d _b_t<d>.metallib（曲面外壳的另外几种域，d = 0–2）、16+i _bg<i>.metallib、32+i _bg<i>.json、48 _bgv.metallib、49 _bgv.json、50 _ft.metallib（片元输出类型变体，入口 main0_t<u>_<s>）、
 //   52 _b.spv（#783 安卓 Vulkan 产物，与种类 1 同键成对）、54 _vp.metallib（顶点并集补齐变体）、56 客体输入（出包时交给翻译器的控制段 + 代码区，同阶段 16 键一块 zlib，
 //   同块的键指向同一段；块格式见 graphics/tools/direct/dsh/batch/LibPack.cs GuestBlocks，Apple 读法 lib_pack.inc lp_guest_get）、
@@ -17,8 +17,10 @@
 enum { LP_K_B = 0, LP_K_BJSON = 1, LP_K_BF = 2, LP_K_BV = 3, LP_K_BT = 4, LP_K_BG = 16, LP_K_BGJSON = 32, LP_K_BGV = 48, LP_K_BGVJSON = 49, LP_K_FT = 50, LP_K_SE = 51,
        LP_K_BSPV = 52, LP_K_VP = 54, LP_K_BP = 55,   // 54 _vp.metallib：顶点着色器的并集补齐变体（0.6.0 出包着色器全覆盖，Build.cs VpFinish；53 留给 _bme）；55 _bp.metallib：拉取式顶点输入变体（Build.cs PullBuild，入口与槽见 _b.json 的 pull）
        LP_K_GUEST = 56,   // 56 客体输入：设备侧现做补齐 / 采样模拟变体、宿主自跑任务阶段时翻基础源码用（graphics/nvn/host/dsh_miss.inc）
-       LP_K_BGS = 64, LP_K_BGSJSON = 80, LP_K_BGC = 96, LP_K_BGCJSON = 97, LP_K_VGJSON = 112, LP_K_VGSPV = 120, LP_SHARD_MAX = 256 };   // 64+i / 80+i / 96 / 97: the passthrough-geometry fast path's <key>_bgs<i> (side-effect-only kernel) and <key>_bgc (capture reader)   // 51: a shader's sampler-emulation variant <key>_se, precompiled by the package (nvn_mtl.m se_packed)   // 52: per-key Vulkan SPIR-V beside _b.json (graphics/tools/direct/vklib)
-typedef struct { uint64_t key; uint8_t kind, shard; uint16_t z; uint32_t len; uint64_t off; } lp_rec;
+       LP_K_BGS = 64, LP_K_BGSJSON = 80, LP_K_BGC = 96, LP_K_BGCJSON = 97, LP_K_VGJSON = 112, LP_K_VGSPV = 120, LP_SHARD_MAX = 65536 };   // 64+i / 80+i / 96 / 97: the passthrough-geometry fast path's <key>_bgs<i> (side-effect-only kernel) and <key>_bgc (capture reader)   // 51: a shader's sampler-emulation variant <key>_se, precompiled by the package (nvn_mtl.m se_packed)   // 52: per-key Vulkan SPIR-V beside _b.json (graphics/tools/direct/vklib)
+typedef struct { uint64_t key; uint8_t kind, shard_lo; uint16_t shard_hi; uint32_t len; uint64_t off; } lp_rec;
+// 分片号 = shard_lo | shard_hi << 8（#1960：原先只有 u8，库超过 256 片出库就拒；shard_hi 原是恒 0 的保留位，256 片以内的库逐字节不变）
+static inline uint32_t lp_shard(const lp_rec *r) { return r->shard_lo | (uint32_t)r->shard_hi << 8; }
 _Static_assert(sizeof(lp_rec) == 24, "lib.idx record is 24 bytes");
 typedef struct {
     const uint8_t *idx; size_t idx_len; uint32_t n, nshard; const lp_rec *rec; const uint64_t *ssize;

@@ -149,6 +149,8 @@ namespace Ryujinx.Audio.Backends.Apple
         private long _framesPlayed;
         // 已交还（播完）帧数，回调线程写；看门狗重启后核对读（AppleHardwareDeviceSession.S2AVerifyRecover）
         public long FramesPlayed => Volatile.Read(ref _framesPlayed);
+        // 测试钩子用（AppleHardwareDeviceSession S2A_AUDIO_TEST_SLOW_AFTER_HEAL）：刚记的这块不算播完。只在回调线程上、紧跟 OnReturned 调
+        internal void TestUnplay(int bytes) => _framesPlayed -= bytes / _bytesPerFrame;
         private long _underruns;
         private long _pauses;
         private long _maxStarveTicks;

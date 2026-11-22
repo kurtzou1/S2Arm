@@ -146,7 +146,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         uint64_t k3[3] = {0xc1, 0xc2, 0xc3}; uint8_t kd3[3] = {0, 0, 0}, sh3[3] = {0, 0, 1};
         write_pack(d3, "abcdef012345", @[la, la, lb], sh3, k3, kd3, 3, -1);
         lp_pack t; int o3 = lp_open(&t, d3, "abcdef012345");
-        CHECK(o3 == 1 && t.rec[0].off == t.rec[1].off && t.rec[0].shard == t.rec[1].shard && t.rec[2].shard == 1, "共用段容器：C1、C2 记录同分片同偏移，C3 在分片 1");
+        CHECK(o3 == 1 && t.rec[0].off == t.rec[1].off && lp_shard(&t.rec[0]) == lp_shard(&t.rec[1]) && lp_shard(&t.rec[2]) == 1, "共用段容器：C1、C2 记录同分片同偏移，C3 在分片 1");
         uint64_t b0 = atomic_load(&g_lp_lib_built), s0 = atomic_load(&g_lp_lib_shared); int ly1 = -1, ly2 = -1; NSError *e3 = nil;
         uintptr_t w1 = 0;
         @autoreleasepool {
@@ -237,6 +237,28 @@ int main(int argc, char **argv) { @autoreleasepool {
         lp_pack bad; CHECK(lp_open(&bad, dov, "000000000000") == -1, "覆盖层链版本不符：判格式错（宿主不开它，只用主容器）");
     }
     guest_cases();
+    {   // #1960：分片号超过 255（记录里 u8 低位 + 原保留的 u16 高位，lp_shard）。手造 300 片（各 16 字节占位，只有 3 号、299 号放真段），
+        //   期望（手写）：打开、分片数 300；键 A 种类 0 在 299 号片 = a.metallib 原字节、能建库取到 fa；键 B 种类 1 在 3 号片 = json 原字节。
+        //   反证：读端只取 u8 低位时 299 → 43（43 号片只有 16 字节占位），取回的字节不等、建库失败
+        char d3[] = "/tmp/t_lib_pack_300.XXXXXX"; if (!mkdtemp(d3)) return 2;
+        enum { NS = 300 }; NSMutableData *pk[NS];
+        for (int k = 0; k < NS; k++) pk[k] = [NSMutableData dataWithLength:16];
+        uint64_t off_a = pk[299].length; [pk[299] appendData:la]; uint64_t off_j = pk[3].length; [pk[3] appendData:ja];
+        for (int k = 0; k < NS; k++) [pk[k] writeToFile:[NSString stringWithFormat:@"%s/lib.%03d.pak", d3, k] atomically:YES];
+        NSMutableData *ix = [NSMutableData data]; uint32_t ver = 1, nn = 2, ns = NS, z = 0; char ch[12] = "abcdef012345"; uint64_t z64 = 0;
+        [ix appendBytes:"S2ALIB\0\0" length:8]; [ix appendBytes:&ver length:4]; [ix appendBytes:&nn length:4]; [ix appendBytes:&ns length:4]; [ix appendBytes:&z length:4]; [ix appendBytes:ch length:12];
+        [ix appendBytes:&z length:4]; [ix appendBytes:&z64 length:8];
+        for (int k = 0; k < NS; k++) { uint64_t sz = pk[k].length; [ix appendBytes:&sz length:8]; [ix appendBytes:&z64 length:8]; }
+        struct { uint64_t key; uint8_t kind, lo; uint16_t hi; uint32_t len; uint64_t off; } r3[2] = {
+            {0xaa, 0, 299 & 0xff, 299 >> 8, (uint32_t)la.length, off_a}, {0xbb, 1, 3, 0, (uint32_t)ja.length, off_j}};
+        [ix appendBytes:r3 length:sizeof r3]; [ix writeToFile:[NSString stringWithFormat:@"%s/lib.idx", d3] atomically:YES];
+        lp_pack p3; CHECK(lp_open(&p3, d3, "abcdef012345") == 1 && p3.nshard == NS, "#1960 300 片：容器打开、分片数 %u（期望 300）", p3.nshard);
+        dispatch_data_t a3 = lp_get(&p3, "00000000000000aa_b", 0), j3 = lp_get(&p3, "00000000000000bb_b", 1);
+        CHECK(a3 && [(NSData *)a3 isEqualToData:la], "#1960 键 A 种类 0 在 299 号片：取回 = a.metallib 原字节");
+        CHECK(j3 && [(NSData *)j3 isEqualToData:ja], "#1960 键 B 种类 1 在 3 号片：取回 = json 原字节");
+        NSError *e3 = nil; id<MTLLibrary> L3 = lp_library(&p3, dev, "00000000000000aa_b", 0, NULL, &e3);
+        CHECK(L3 && [L3 newFunctionWithName:@"fa"], "#1960 299 号片的段建库取到入口 fa（%s）", e3.localizedDescription.UTF8String ?: "-");
+    }
     printf("%s t_lib_pack：%d 项，不通 %d\n", fails ? "✗" : "✓", checks, fails);
     return fails ? 1 : 0;
 } }

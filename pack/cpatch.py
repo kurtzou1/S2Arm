@@ -955,19 +955,19 @@ def parse_cheats(text):
     """→ (文件头里的 BID 或 '', [{name, master, writes:[(偏移, 字节)] 或 None（有不能编进包的行）}])"""
     text = visible(text)
     m = re.search(r'BID\s*=\s*([0-9A-Fa-f]{16,64})', text.split('\n', 1)[0])
-    bid, out, cur, written = (m.group(1).upper() if m else ''), [], None, set()   # written：整份文件里有指令写的寄存器
+    bid, out, cur = (m.group(1).upper() if m else ''), [], None
     for line in text.splitlines():
         s = line.strip()
         h = re.match(r'^([\[{])(.*)[\]}]$', s)
-        if h: cur = {'name': h.group(2).strip(), 'master': h.group(1) == '{', 'writes': [], 'other': False}; out.append(cur); continue
+        if h: cur = {'name': h.group(2).strip(), 'master': h.group(1) == '{', 'writes': [], 'other': False, 'wr': set()}; out.append(cur); continue
         if cur is None or not s or s.startswith('//') or s.startswith('#'): continue
         w = s.split()
         if len(w) == 1 and re.fullmatch(r'20[0-9A-Fa-f]{6}', w[0]): continue   # 条件块结束（Atmosphere 只看第 2 位：0 = 结束；有的文件写 20000001），在没有条件块的条目里是空操作
         c = CHEAT_RE.match(w[0]) if len(w) in (3, 4) else None
         if not c or c.group(2) != '0':   # 区域 0 = 主程序；别的类型 / 区域交运行时
             cur['other'] = True
-            if not re.fullmatch(r'[0-9A-Fa-f]{8}', w[0]): written |= set(range(16))
-            elif w[0][0] != '0': written |= _reg_writes(w[0])
+            if not re.fullmatch(r'[0-9A-Fa-f]{8}', w[0]): cur['wr'] |= set(range(16))
+            elif w[0][0] != '0': cur['wr'] |= _reg_writes(w[0])
             continue
         try:
             regs = int(c.group(3), 16); width = int(c.group(1)); off = int(c.group(4) + w[1], 16); val = int(''.join(w[2:]), 16)
@@ -976,7 +976,13 @@ def parse_cheats(text):
         if regs: cur.setdefault('regs', set()).add(regs)
         if val >> (8 * width): cur['other'] = True; continue
         cur['writes'].append((off, val.to_bytes(width, 'little')))
-    return bid, [dict(e, writes=None if e['other'] or (e.get('regs', set()) & written) else e['writes']) for e in out if e['writes'] or e['other']]
+    # 偏移寄存器的值要在出包时确定才能编进包。编进包的行为跟我们运行时一致：运行时（Ryujinx Tamper，services/S2A.Services/Cheats.cs）每条一套寄存器、
+    #   起始为 0，别的条目写不到它；主代码在任一条开着时都跟着跑（真 Atmosphere 还和各条共用寄存器），所以只看「主代码 + 本条自己」写没写过它。
+    #   D-99H5（11-21，超级马力欧 RPG nxcheats）：原先按整份文件算，有一条给 E 装了常量，别的只拿 E 当偏移（= 0）的开关条目全被判成交运行时，
+    #   运行时又写不了代码页，开了也被停用（81 条里编进包 0 条）
+    master_wr = set().union(*(e['wr'] for e in out if e['master']))
+    return bid, [{k: v for k, v in e.items() if k != 'wr'} | {'writes': e['writes'] if not e['other'] and not (e.get('regs', set()) & (master_wr | e['wr'])) else None}
+                 for e in out if e['writes'] or e['other']]
 
 
 def module_layout(path):

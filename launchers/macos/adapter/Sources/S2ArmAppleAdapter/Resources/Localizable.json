@@ -5044,8 +5044,8 @@
   "en": "Content rejected. The file structure did not validate; the copy may be incomplete."
  },
  {
-  "source": "签名没成：用你的 Apple ID 给这台 iPhone 签名没成功。",
-  "en": "Signing failed. Signing for this iPhone with your Apple ID did not succeed."
+  "source": "签名没成：用你的 Apple ID 给这台 {0} 签名没成功。",
+  "en": "Signing failed. Signing for this {0} with your Apple ID did not succeed."
  },
  {
   "source": "配置推导失败。",
@@ -5200,8 +5200,8 @@
   "en": "This backup belongs to another user. Select the matching user or their own backup and retry."
  },
  {
-  "source": "免费 Apple ID 在每台设备上最多同时装 3 个自签 App，这台 iPhone 已经装满：在 iPhone 上长按删掉一个不再玩的自签 App 后重试；或改用付费 Apple 开发者账号（没有这个上限）。",
-  "en": "A free Apple ID can have at most 3 self-signed apps installed on a device at the same time, and this iPhone is full. Touch and hold a self-signed app you no longer play on the iPhone, remove it, and retry; or use a paid Apple Developer account, which has no such limit."
+  "source": "免费 Apple ID 在每台设备上最多同时装 3 个自签 App，这台 {0} 已经装满：在设备上长按删掉一个不再玩的自签 App 后重试；或改用付费 Apple 开发者账号（没有这个上限）。",
+  "en": "A free Apple ID can have at most 3 self-signed apps installed on a device at the same time, and this {0} is full. Touch and hold a self-signed app you no longer play on the device, remove it, and retry; or use a paid Apple Developer account, which has no such limit."
  },
  {
   "source": "让你选的那台 iPhone / iPad 连上这台电脑：插上数据线，或解锁后和电脑连同一个 Wi-Fi；第一次连要在设备上点「信任」，并在「设置 → 隐私与安全性 → 开发者模式」打开开发者模式，然后再试。",
@@ -5212,8 +5212,8 @@
   "en": "On the export page, tick the iPhone / iPad to install to, then click \"Start\"."
  },
  {
-  "source": "查看本任务日志里签名那一步的报错；确认 Xcode 能用你的账号给这台 iPhone 签名，或改用 AltStore 安装。",
-  "en": "Check the signing error in the job log. Confirm that Xcode can sign for this iPhone with your account, or install with AltStore."
+  "source": "查看本任务日志里签名那一步的报错；确认 Xcode 能用你的账号给这台 {0} 签名，或改用 AltStore 安装。",
+  "en": "Check the signing error in the job log. Confirm that Xcode can sign for this {0} with your account, or install with AltStore."
  },
  {
   "source": "本体已出好，照常安装即可；没解出的追加内容不在包里，游戏里用不到那部分内容。请导出诊断反馈，解码支持后重新打包即可带上。",
@@ -5224,8 +5224,8 @@
   "en": "Preparation continued from the unpacked game data, so this export still finishes, only a little slower. When the game library is on an APFS disk (the Mac's internal disk or an external disk formatted as APFS), exports for different platforms can share the prepared game data."
  },
  {
-  "source": "资源包已经在手机上，不用重推：在 iPhone 上打开 S2Arm，选这款游戏，保持在前台别锁屏，等它导入完就能玩。",
-  "en": "The resource pack is already on your iPhone, so there is no need to send it again. Open S2Arm on your iPhone, choose this game, keep it in the foreground with the screen on, and it will be ready once the import finishes."
+  "source": "资源包已经在 {0} 上，不用重推：在设备上打开 S2Arm，选这款游戏，保持在前台别锁屏，等它导入完就能玩。",
+  "en": "The resource pack is already on your {0}, so there is no need to send it again. Open S2Arm on the device, choose this game, keep it in the foreground with the screen on, and it will be ready once the import finishes."
  },
  {
   "source": "换一根支持 USB 3 的 USB-C 数据线，直接插 Mac 上的 USB-C / 雷雳口（不经扩展坞、集线器、显示器上的口），再装下一款；iPhone 15 Pro 及更新的 Pro 机型才支持 USB 3，其它机型只能 USB 2.0。",
@@ -5724,16 +5724,16 @@
   "en": "iPhone trusts this Mac"
  },
  {
-  "source": "在 iPhone 上点「信任」，再输入手机的锁屏密码。",
-  "en": "On your iPhone, tap Trust and enter your passcode."
+  "source": "在 {0} 上点「信任」，再输入锁屏密码。",
+  "en": "On your {0}, tap Trust and enter your passcode."
  },
  {
   "source": "iPhone 已打开开发者模式",
   "en": "Developer Mode is on"
  },
  {
-  "source": "在 iPhone 上打开「设置 → 隐私与安全性 → 开发者模式」，按提示重启手机；重启后解锁，这里会自动打勾。",
-  "en": "On your iPhone, turn on Settings → Privacy & Security → Developer Mode and restart when asked. After it restarts, unlock it and this will tick itself."
+  "source": "在 {0} 上打开「设置 → 隐私与安全性 → 开发者模式」，按提示重启；重启后解锁，这里会自动打勾。",
+  "en": "On your {0}, turn on Settings → Privacy & Security → Developer Mode and restart when asked. After it restarts, unlock it and this will tick itself."
  },
  {
   "source": "先做 iPhone 版",
@@ -8884,8 +8884,8 @@
   "en": "This game doesn't have that patch."
  },
  {
-  "source": "资源包已传到 iPhone，但手机上解开失败：{0}",
-  "en": "The resource pack reached the iPhone, but unpacking it on the phone failed: {0}"
+  "source": "资源包已传到 {0}，但设备上解开失败：{1}",
+  "en": "The resource pack reached the {0}, but unpacking it on the device failed: {1}"
  },
  {
   "source": "资源包已传完，但{0}：请打开这款游戏，保持在前台等它导入完，会自动进入游戏。",
@@ -8928,8 +8928,8 @@
   "en": "There's no iPhone version in the library to export yet. Build an iPhone package for a game first."
  },
  {
-  "source": "这个包是用 iOS {0}.{1} 的 Xcode 出的，这台 iPhone 是 iOS {2}：iOS {3} 新出的机型（如 iPhone Duo）上整个 App 会按旧 iPhone 尺寸缩小在屏幕中间",
-  "en": "This package was built with the Xcode for iOS {0}.{1}, and this iPhone runs iOS {2}. On models new in iOS {3} (such as iPhone Duo) the whole app will be shown at an older iPhone size in the middle of the screen"
+  "source": "这个包是用 iOS {0}.{1} 的 Xcode 出的，这台 {2} 是 iOS {3}：iOS {4} 新出的机型（如 iPhone Duo）上整个 App 会按旧 iPhone 尺寸缩小在屏幕中间",
+  "en": "This package was built with the Xcode for iOS {0}.{1}, and this {2} runs iOS {3}. On models new in iOS {4} (such as iPhone Duo) the whole app will be shown at an older iPhone size in the middle of the screen"
  },
  {
   "source": "连不上本机苹果设备服务（{0}）：从 Microsoft Store 装「Apple Devices」后重试。",
@@ -8940,8 +8940,8 @@
   "en": "Impactor has several Apple IDs saved, but none is selected. Click \"Open Impactor\", select the one you want in Settings, click \"Remove account\", then \"Add account\" to sign in again (the added one becomes selected). It will be checked here automatically when you come back."
  },
  {
-  "source": "这台 iPhone 现在按 USB 2.0（{0} Mb/s）连着：资源包 {1} GB 第一次全拷约 {2} 分钟，换 USB 3 能快约 10 倍（以后重装只推变了的文件）",
-  "en": "This iPhone is connected at USB 2.0 ({0} Mb/s). The first full copy of the {1} GB resource pack takes about {2} minutes; USB 3 is about 10 times faster (later reinstalls only push changed files)"
+  "source": "这台 {0} 现在按 USB 2.0（{1} Mb/s）连着：资源包 {2} GB 第一次全拷约 {3} 分钟，换 USB 3 能快约 10 倍（以后重装只推变了的文件）",
+  "en": "This {0} is connected at USB 2.0 ({1} Mb/s). The first full copy of the {2} GB resource pack takes about {3} minutes; USB 3 is about 10 times faster (later reinstalls only push changed files)"
  },
  {
   "source": "（Impactor 原话：{0}）",
@@ -10072,12 +10072,12 @@
   "en": "This save backup was not found: pick another one in the list."
  },
  {
-  "source": "先在 iPhone 上退出 S2Arm，再还原存档。",
-  "en": "Close S2Arm on the iPhone first, then restore the saves."
+  "source": "先在 {0} 上退出 S2Arm，再还原存档。",
+  "en": "Close S2Arm on the {0} first, then restore the saves."
  },
  {
-  "source": "在 iPhone 上从后台划掉 S2Arm（或回到主屏后等几秒），再点一次还原。",
-  "en": "Close S2Arm on the iPhone (swipe it away from the app switcher), then restore again."
+  "source": "在 {0} 上从后台划掉 S2Arm（或回到主屏后等几秒），再点一次还原。",
+  "en": "Close S2Arm on the {0} (swipe it away from the app switcher), then restore again."
  },
  {
   "source": "这份文件要 master_key_{0}，你的 prod.keys 只到 master_key_{1}：不够新。",
@@ -10160,24 +10160,24 @@
   "en": "Please provide an Apple Development certificate (.p12, with its password) and a matching iOS App Development provisioning profile. Profile requirements: use an explicit App ID (not a wildcard *), include my device UDID: <your device UDID>, and enable these entitlements: Debugging (get-task-allow), Increased Memory Limit (com.apple.developer.kernel.increased-memory-limit), Extended Virtual Addressing (com.apple.developer.kernel.extended-virtual-addressing)."
  },
  {
-  "source": "证书里的私钥读不出来，没能交给 iPhone 上的 S2Arm：在设置里重新导入一次证书。",
-  "en": "Couldn't read the private key in your certificate, so it wasn't handed to S2Arm on your iPhone. Import the certificate again in Settings."
+  "source": "证书里的私钥读不出来，没能交给 {0} 上的 S2Arm：在设置里重新导入一次证书。",
+  "en": "Couldn't read the private key in your certificate, so it wasn't handed to S2Arm on your {0}. Import the certificate again in Settings."
  },
  {
   "source": "把证书交给 iPhone 上的 S2Arm",
   "en": "Handing the certificate to S2Arm on your iPhone"
  },
  {
-  "source": "现在没在用你自己的开发者证书签名，没有要交给 iPhone 的证书：先在设置里导入并选用你的证书。",
-  "en": "You're not signing with your own developer certificate, so there's no certificate to hand to your iPhone. Import and select your certificate in Settings first."
+  "source": "现在没在用你自己的开发者证书签名，没有要交给 {0} 的证书：先在设置里导入并选用你的证书。",
+  "en": "You're not signing with your own developer certificate, so there's no certificate to hand to your {0}. Import and select your certificate in Settings first."
  },
  {
-  "source": "苹果的证书列表里找不到这台电脑签名用的那张证书，没能交给 iPhone 上的 S2Arm：先在电脑上「安装 S2Arm」一次。",
-  "en": "Apple's certificate list doesn't have the certificate this computer signs with, so it wasn't handed to S2Arm on your iPhone. Run “Install S2Arm” on this computer once first."
+  "source": "苹果的证书列表里找不到这台电脑签名用的那张证书，没能交给 {0} 上的 S2Arm：先在电脑上「安装 S2Arm」一次。",
+  "en": "Apple's certificate list doesn't have the certificate this computer signs with, so it wasn't handed to S2Arm on your {0}. Run “Install S2Arm” on this computer once first."
  },
  {
-  "source": "没能把证书写进 iPhone 上的 S2Arm：确认 iPhone 连着、已解锁，再试一次。",
-  "en": "Couldn't write the certificate into S2Arm on your iPhone. Make sure the iPhone is connected and unlocked, then try again."
+  "source": "没能把证书写进 {0} 上的 S2Arm：确认它连着、已解锁，再试一次。",
+  "en": "Couldn't write the certificate into S2Arm on your {0}. Make sure it is connected and unlocked, then try again."
  },
  {
   "source": "这款游戏正在升级 S 级优化，升级完成后就能开始。",
@@ -10260,8 +10260,8 @@
   "en": "The S2Arm signed this time is missing the \"Increased Memory Limit\" entitlement: it installs and runs, but large games may run out of memory and stop at launch."
  },
  {
-  "source": "电脑连不上这台 iPhone 的开发者通道（手机通过 Wi-Fi 连着时最常见，不是没解锁）：用数据线把手机直接插到这台电脑（别经过扩展坞或集线器），解锁停在主屏幕，再点一次；还不行就重启一次手机，插上后在手机上重新点「信任」。",
-  "en": "This Mac can't reach the iPhone's developer connection (most common when the phone is connected over Wi-Fi; it isn't about being locked): plug the phone straight into this Mac with a cable (not through a dock or hub), unlock it to the Home Screen, and try again. If it still fails, restart the phone, plug it back in and tap \"Trust\" again on the phone."
+  "source": "电脑连不上这台 {0} 的开发者通道（通过 Wi-Fi 连着时最常见，不是没解锁）：用数据线把它直接插到这台电脑（别经过扩展坞或集线器），解锁停在主屏幕，再点一次；还不行就把它重启一次，插上后在设备上重新点「信任」。",
+  "en": "This Mac can't reach the {0}'s developer connection (most common when it is connected over Wi-Fi; it isn't about being locked): plug it straight into this Mac with a cable (not through a dock or hub), unlock it to the Home Screen, and try again. If it still fails, restart it, plug it back in and tap \"Trust\" again on the device."
  },
  {
   "source": "Xbox GIP 本机通道设置无效。",
@@ -10308,12 +10308,12 @@
   "en": "Can't tell the bundle ID of S2Arm on the iPhone (it was never installed from this computer and the current signing account can't be read). Click \"Install S2Arm\" once on this computer, then delete again."
  },
  {
-  "source": "先在 iPhone 上退出 S2Arm，再删这款。",
-  "en": "Quit S2Arm on the iPhone first, then delete this game."
+  "source": "先在 {0} 上退出 S2Arm，再删这款。",
+  "en": "Quit S2Arm on the {0} first, then delete this game."
  },
  {
-  "source": "没能删掉手机上这款的数据：确认 iPhone 连着、已解锁，再试一次。",
-  "en": "Couldn't delete this game's data on the iPhone. Make sure the iPhone is connected and unlocked, then try again."
+  "source": "没能删掉 {0} 上这款的数据：确认它连着、已解锁，再试一次。",
+  "en": "Couldn't delete this game's data on the {0}. Make sure it is connected and unlocked, then try again."
  },
  {
   "source": "安卓出包还没开放：等新版本开放后再出。",
@@ -10460,8 +10460,8 @@
   "en": "This computer cannot reach Apple's servers (Impactor needs them to sign in and to sign). This is not a problem with your Apple ID or password. Check this computer's network: if a browser can open appleid.apple.com, click Push to iPhone again; if it cannot, switch DNS (for example 1.1.1.1) or turn your proxy on or off, then install again. Your phone, installed apps and saves were not touched."
  },
  {
-  "source": "用数据线把这台 iPhone 连到这台 Mac，解锁后在手机上点「信任」；打开开发者模式（设置 → 隐私与安全性 → 开发者模式，开了要重启手机）；等 Xcode 菜单「窗口 → 设备与模拟器」里出现这台，再点一次「推到 iPhone」。",
-  "en": "Connect this iPhone to this Mac with a cable, unlock it and tap \"Trust\" on the phone. Turn on Developer Mode (Settings → Privacy & Security → Developer Mode; the phone restarts). Once it appears in Xcode under Window → Devices and Simulators, retry installation."
+  "source": "用数据线把这台 {0} 连到这台 Mac，解锁后在设备上点「信任」；打开开发者模式（设置 → 隐私与安全性 → 开发者模式，开了要重启）；等 Xcode 菜单「窗口 → 设备与模拟器」里出现这台，再点一次「推到 iPhone」。",
+  "en": "Connect this {0} to this Mac with a cable, unlock it and tap \"Trust\" on the device. Turn on Developer Mode (Settings → Privacy & Security → Developer Mode; the device restarts). Once it appears in Xcode under Window → Devices and Simulators, retry installation."
  },
  {
   "source": "先试这两步：①在 iPhone 上打开一次 S2Arm，等游戏库界面出来；②回电脑对这款游戏再点一次「推到 iPhone」，会接着已传的部分继续，不用从头来。还是写不进，就要删掉 iPhone 上的 S2Arm App 再重装：先在游戏菜单「存档管理」里导出存档，存到 S2Arm 文件夹以外（比如 iCloud 云盘）；再在 iPhone 桌面长按 S2Arm，删除 App；然后在电脑上的 S2Arm 里对这款游戏再点一次「推到 iPhone」；装好后在「存档管理」里导回存档。电脑上的游戏和 S2Arm 都不用删。",
@@ -10600,24 +10600,24 @@
   "en": ": copy failed ("
  },
  {
-  "source": "在 iPhone 总控台里选好这台手机用哪一个 S2Arm（AltStore / SideStore 装的，还是启动器装的），再推游戏；选一次就记住。",
-  "en": "In the iPhone console, choose which S2Arm this phone should use (the one installed with AltStore / SideStore, or the one installed by the launcher), then send the game again. Your choice is remembered."
+  "source": "点游戏库最前面的「S2Arm」，选好这台 {0} 用哪一个 S2Arm（AltStore / SideStore 装的，还是启动器装的），再推游戏；选一次就记住。",
+  "en": "Click “S2Arm” at the top of the game library and choose which S2Arm this {0} should use (the one installed with AltStore / SideStore, or the one installed by the launcher), then send the game again. Your choice is remembered."
  },
  {
-  "source": "在 iPhone 总控台里重新选一次用哪一个 S2Arm：选过的那个已经不在这台 iPhone 上了。",
-  "en": "Choose again in the iPhone console which S2Arm to use: the one you chose is no longer on this iPhone."
+  "source": "点游戏库最前面的「S2Arm」，重新选一次用哪一个 S2Arm：选过的那个已经不在这台 {0} 上了。",
+  "en": "Click “S2Arm” at the top of the game library and choose again which S2Arm to use: the one you chose is no longer on this {0}."
  },
  {
-  "source": "这台 iPhone 上装着不止一个 S2Arm：先在 iPhone 总控台选好用哪一个，再推游戏。",
-  "en": "This iPhone has more than one S2Arm installed: first choose which one to use in the iPhone console, then send the game."
+  "source": "这台 {0} 上装着不止一个 S2Arm：先点游戏库最前面的「S2Arm」选好用哪一个，再推游戏。",
+  "en": "This {0} has more than one S2Arm installed: first click “S2Arm” at the top of the game library and choose which one to use, then send the game."
  },
  {
-  "source": "选的这个 S2Arm 不在这台 iPhone 上了：在总控台重新选一次。",
-  "en": "The S2Arm you chose is no longer on this iPhone: choose again in the console."
+  "source": "选的这个 S2Arm 不在这台 {0} 上了：点游戏库最前面的「S2Arm」重新选一次。",
+  "en": "The S2Arm you chose is no longer on this {0}: click “S2Arm” at the top of the game library and choose again."
  },
  {
-  "source": "读不出这台 iPhone 上装了哪些 App：确认 iPhone 连着、已解锁，再试一次。",
-  "en": "Couldn't read which apps are installed on this iPhone: make sure the iPhone is connected and unlocked, then try again."
+  "source": "读不出这台 {0} 上装了哪些 App：确认它连着、已解锁，再试一次。",
+  "en": "Couldn't read which apps are installed on this {0}: make sure it is connected and unlocked, then try again."
  },
  {
   "source": "这台 iPhone 上装着不止一个 S2Arm",
@@ -10756,12 +10756,12 @@
   "en": "Choose “Standalone app” as the way games go to your iPhone and this certificate works as usual. To use the S2Arm app instead, click “Sign In with Apple ID Instead” to sign with your Apple ID, or click “Copy Message for Certificate Issuer” and send it to them, then import the development certificate and profile you get back."
  },
  {
-  "source": "先在 iPhone 上退出这款游戏，再删。",
-  "en": "Quit this game on the iPhone first, then remove it."
+  "source": "先在 {0} 上退出这款游戏，再删。",
+  "en": "Quit this game on the {0} first, then remove it."
  },
  {
-  "source": "没能从 iPhone 上卸掉这款的独立 App：确认 iPhone 连着、已解锁，再试一次。",
-  "en": "Couldn't remove this game's standalone app from the iPhone. Make sure the iPhone is connected and unlocked, then try again."
+  "source": "没能从 {0} 上卸掉这款的独立 App：确认它连着、已解锁，再试一次。",
+  "en": "Couldn't remove this game's standalone app from the {0}. Make sure it is connected and unlocked, then try again."
  },
  {
   "source": "从 iPhone 上卸掉这款的独立 App",

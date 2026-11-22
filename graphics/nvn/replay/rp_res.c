@@ -313,11 +313,15 @@ const uint8_t *rp_tex_src(const tex_t *t, uint8_t **part) {
 // LINEAR 贴图（CPU 写入的字体 / UI 图集；iOS 同名语义见 nvn_mtl.m tex_linear @3756 / tex_linear_needs_upload @3777）。
 // 返回 0 = 不是线性族；1 = 第一批准入（走 CPU 内容路径）；-1 = 线性族但第一批不收（*why 是未接名，调用方记账）。
 // 准入只看排布 / 可访问性 / 真实来源，不看“现在有没有非零字节”——字体引擎可以建图之后才填字形。
-static int linear_class(const tex_t *t, const char **why) {
+// for_upload = 1：upload_all 真要传这张图。LINEAR_RENDER_TARGET 也按线性排布逐行拷——同苹果端 nvn_mtl.m 上传口径
+//   （LINEAR / LINEAR_RENDER_TARGET 一概「线性排布只有 CPU 逐行拷」）。线性渲染目标只会经「WriteTexels 写过」（cpu_content 首句）走到这里：
+//   游戏明确用 CPU 写了它。原先在这里拒掉、报红，内容一次都传不上去（11-21 一款 2D-HD 游戏带存档加载后每帧约 2 张、整屏黑）。
+//   for_upload = 0（cpu_content 判「要不要当 CPU 贴图持续跟踪」、upload_linear_dirty 判「能不能按脏行传」）照旧：只有 LINEAR_RENDER_TARGET 的内容归 GPU。
+static int linear_class(const tex_t *t, const char **why, int initial) {
     *why = NULL;
     if (!(t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_SPARSE))) return 0;
-    if (!(t->d.flags & NVN_TEXTURE_FLAGS_LINEAR)) { *why = "linear_render_target_unsupported"; return -1; }   // 只有 LINEAR_RENDER_TARGET：内容通常归 GPU
-    if (t->d.flags & NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET) { *why = "linear_render_target_and_linear_unsupported"; return -1; }
+    if (!initial && !(t->d.flags & NVN_TEXTURE_FLAGS_LINEAR)) { *why = "linear_render_target_unsupported"; return -1; }   // 只有 LINEAR_RENDER_TARGET：内容通常归 GPU
+    if (!initial && (t->d.flags & NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) { *why = "linear_render_target_and_linear_unsupported"; return -1; }
     if (t->d.flags & NVN_TEXTURE_FLAGS_SPARSE) { *why = "linear_sparse_unsupported"; return -1; }
     if (!t->mem || !t->pool) { *why = "linear_no_cpu_memory"; return -1; }
     if (t->has_layout) { *why = "linear_packaged_unsupported"; return -1; }
@@ -422,7 +426,7 @@ static int cpu_content(const tex_t *t, int *sparse) {
     int unc = !fmt_compressed(t->d.format) && t->d.target != NVN_TEXTURE_TARGET_3D;
     if (unc && (fmt_depth(t->d.format) || (t->d.flags & (NVN_TEXTURE_FLAGS_DISPLAY | NVN_TEXTURE_FLAGS_VIDEO_DECODE)) || nvn_hm_get(&g_pool_gpu, &pk))) return 0;
     if (t->pool->flags & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL)) return 0;
-    { const char *why = NULL; int lc = linear_class(t, &why);
+    { const char *why = NULL; int lc = linear_class(t, &why, 0);
         if (lc > 0) return 1;                 // 线性准入：初始全零也进入持续观察（首用之后 CPU 再写也会被脏页跟踪接住）
         if (lc < 0) {
             if (!strcmp(why, "linear_render_target_unsupported")) return 0;   // 只有 LINEAR_RENDER_TARGET：内容归 GPU（可能由 copy_b2t 写入），不按 CPU 内容传、不报红
@@ -477,7 +481,7 @@ static int tex_content_dirty(struct rp_tex *x, const tex_t *t) {
 
 static int upload_all(const tex_t *t, struct rp_tex *x, nvn_gpu_cmd c, int track) {
     rp_perf_add(RP_PERF_TEX_UP_N, 1); rp_perf_add(RP_PERF_TEX_UP_KB, t->L.size / 1024);
-    { const char *why = NULL; int lc = x->sparse ? 0 : linear_class(t, &why);   // 线性：走下面 nvn_deswizzle 的逐行拷贝（源行距由公共布局解释）；虚拟池里的 SPARSE 标志不是线性族
+    { const char *why = NULL; int lc = x->sparse ? 0 : linear_class(t, &why, 1);   // 真要传：线性渲染目标也按线性逐行拷（见 linear_class）   // 线性：走下面 nvn_deswizzle 的逐行拷贝（源行距由公共布局解释）；虚拟池里的 SPARSE 标志不是线性族
         if (lc < 0) { nvn_unimpl("tex", why, t); return -1; }
         uint64_t lo, hi;
         if (lc > 0 && (!t->pool || !tex_window(t, &lo, &hi))) { nvn_unimpl("tex", "linear_range_outside_pool", t); return -1; } }
@@ -557,7 +561,7 @@ done:
 //   返回 0 = 已按行传完；-1 = 不适用（没传过 / 不是线性单级二维 / 不被跟踪 / 脏行过半），调用方整张传；1 = 失败。
 static int upload_linear_dirty(const tex_t *t, struct rp_tex *x, nvn_gpu_cmd c) {
     const char *why = NULL;
-    if (!x->uploaded || !x->span || t->d.levels > 1 || t->L.layers > 1 || t->d.target != NVN_TEXTURE_TARGET_2D || linear_class(t, &why) <= 0) return -1;
+    if (!x->uploaded || !x->span || t->d.levels > 1 || t->L.layers > 1 || t->d.target != NVN_TEXTURE_TARGET_2D || linear_class(t, &why, 0) <= 0) return -1;
     int bw = 1, bh = 1; int bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     if (bpb <= 0 || bw != 1 || bh != 1) return -1;
     const uint32_t w = t->d.width, rows = t->d.height;

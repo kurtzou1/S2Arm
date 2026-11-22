@@ -27,6 +27,10 @@ T=$(mktemp -d); trap 'rm -rf "$T"' EXIT; mkdir "$T/out"; : > "$T/log"
 # ⑧ 真进程：命令睡 120 秒，看门狗不停它就睡满退 0 → 红；不核停了几秒（停树 + 抓栈的耗时随负载变，与要证的「没人写就判挂死」无关）
 o=$(python3 "$H/tools/nostall.py" --watch "$T/out" 2 -- sh -c "sleep 120" 2>&1 >> "$T/log"); r8=$?
 ck "⑧ 反证（真进程）：盯着目录和日志但没人写、无编译器 → rc=${r8}（124）、打【红】" '[ $r8 = 124 ] && grep -q "【红】无进展看门狗" <<< "$o"'
+# ⑫ 0400A3A01EE4C000：调用方没设 S2A_PROGRESS，子进程照出包进度协议往 $S2A_PROGRESS 每秒写一行、别的什么都不动（不吃 CPU、不写被盯目录 / 日志、无编译器），
+#   总时长 14 秒 > 窗口 2 × 6 → 看门狗自己建的进度文件在涨 = 在前进 → 不杀、退 0；反证（旧实现：变量没设、写不出去）2 秒就停、退 124
+o=$(env -u S2A_PROGRESS python3 "$H/tools/nostall.py" --watch "$T/out" 2 -- sh -c 'i=0; while [ $i -lt 14 ]; do echo "$(date +%s)	x	$i	14" >> "$S2A_PROGRESS"; sleep 1; i=$((i+1)); done' 2>&1 >> "$T/log"); r12=$?
+ck "⑫ 没设 S2A_PROGRESS、子进程只写出包进度 14 秒 → rc=${r12}（0）" '[ $r12 = 0 ]'
 rm -f "$T/out"/nostall_stacks.*.log; mkdir "$T/st"
 o=$(python3 "$H/tools/nostall.py" --watch "$T/st" 2 -- sh -c "sleep 30; true" 2>&1); r8b=$?   # 「; true」让 sh 不直接 exec 成 sleep：树里两个进程
 SF=$(ls "$T/st"/nostall_stacks.*.log 2> /dev/null | head -1)

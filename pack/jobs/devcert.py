@@ -34,6 +34,7 @@ import zipfile
 from pathlib import Path
 
 from core import Failure, atomic, read, replace_retrying
+from errors import device_of, on_device
 
 # S2Arm 要的权限：提高内存上限（大游戏必需，Apple ID 模式也带）+ 扩展寻址（付费账号才有，大地址窗口）；描述文件没开就不带、提示大游戏可能闪退
 WANT = ("com.apple.developer.kernel.increased-memory-limit", "com.apple.developer.kernel.extended-virtual-addressing")
@@ -50,6 +51,8 @@ DISTRIBUTION_HEAD = "这是分发（发布）证书的描述文件，缺下面�
 DISTRIBUTION_TAIL = "要用通用 S2Arm：改用 Apple ID 登录签名，或复制下面这段话发给证书发放人，换成开发证书和开发描述文件后再导入。"
 ENTITLEMENTS_HEAD = "描述文件缺下面的权限，小游戏照常，大游戏可能起不来："
 ENTITLEMENTS_TAIL = "可以复制下面这段话发给证书发放人，补开后重新下载描述文件再导入。"
+# 交身份时读不出 p12 私钥（_read_p12 / identity）：「{0}」填这次认出的设备类型（#1962，errors.on_device）
+PRIVATE_KEY_UNREADABLE = "证书里的私钥读不出来，没能交给 {0} 上的 S2Arm：在设置里重新导入一次证书。"
 NO_UDID_HINT = "没连着 iPhone：复制后把「<你的设备 UDID>」换成你手机的 UDID。"
 # 给证书发放人的话：权限清单写全部三项（不只写缺的，照单开最省事）；按能力开的权限只能开在显式 App ID 上（苹果 QA1713），通配描述文件不带后两项
 REQUEST_TEXT = ("请提供 Apple Development 开发证书（.p12，附密码）和对应的 iOS App Development 开发描述文件。描述文件要求：用显式 App ID（不要通配 *），"
@@ -773,7 +776,7 @@ def _read_p12(c, p12, password):
               "$o|ConvertTo-Json -Compress")
         r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], env=env, capture_output=True, text=True, errors="replace")
         if r.returncode:
-            raise Failure("证书里的私钥读不出来，没能交给 iPhone 上的 S2Arm：在设置里重新导入一次证书。", code="devcert_invalid", internal=r.stderr.strip()[-400:])
+            raise Failure(on_device(PRIVATE_KEY_UNREADABLE, device_of(c)), code="devcert_invalid", internal=r.stderr.strip()[-400:])
         import json
         got = json.loads(r.stdout)
         return _pkcs1_from_params(got), base64.b64decode(got["cert"])
@@ -784,7 +787,7 @@ def _read_p12(c, p12, password):
     cert = re.search(r"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----", pem, re.S)
     der = _orch(c).pkcs1_der(key.group(0)) if key else None
     if r.returncode or len(keys) != 1 or not cert or der is None:
-        raise Failure("证书里的私钥读不出来，没能交给 iPhone 上的 S2Arm：在设置里重新导入一次证书。", code="devcert_invalid",
+        raise Failure(on_device(PRIVATE_KEY_UNREADABLE, device_of(c)), code="devcert_invalid",
                       internal=r.stderr.decode(errors="replace").strip()[-400:])
     return der, base64.b64decode("".join(cert.group(1).split()))
 
@@ -799,7 +802,7 @@ def identity(c):
     key, cert = _read_p12(c, p12, pw)
     mod, created = _orch(c).cert_modulus_and_start(cert)
     if mod is None or mod != _key_modulus(c, key):
-        raise Failure("证书里的私钥读不出来，没能交给 iPhone 上的 S2Arm：在设置里重新导入一次证书。", code="devcert_invalid", internal="私钥与证书公钥对不上")  # 非玩家句（internal 只进日志）
+        raise Failure(on_device(PRIVATE_KEY_UNREADABLE, device_of(c)), code="devcert_invalid", internal="私钥与证书公钥对不上")  # 非玩家句（internal 只进日志）
     return dict(key=key, cert=cert, created=created, key_fp=hashlib.sha256(Path(p12).read_bytes()).hexdigest()[:16], team=team(c)["id"])
 
 

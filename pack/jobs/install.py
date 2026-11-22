@@ -29,7 +29,7 @@ import time
 from pathlib import Path
 
 from core import Failure, atomic, contained, read
-from errors import recovery
+from errors import device_of, on_device, recovery
 import devcert
 import layout
 
@@ -331,8 +331,8 @@ S_MANY_NETWORK = "同一网络上有多台配对过的 iPhone / iPad：用数据
 S_DEVICE_REQUIRED = "没说要装到哪台设备：在装机页选好 iPhone / iPad 再装。"
 S_OFFLINE = "{0}「{1}」现在不在线：插上数据线，或让它和这台电脑连同一个 Wi-Fi 并解锁，再试一次。"
 S_PICK_LISTED = "要装的那台（{0}）这次没列出来；这台电脑现在看得到：{1}——在装机页选其中一台再装。"
-S_TRUST = "在 iPhone 上点「信任」，再输入手机的锁屏密码。"
-S_DEV_MODE = "在 iPhone 上打开「设置 → 隐私与安全性 → 开发者模式」，按提示重启手机；重启后解锁，这里会自动打勾。"
+S_TRUST = "在 {0} 上点「信任」，再输入锁屏密码。"
+S_DEV_MODE = "在 {0} 上打开「设置 → 隐私与安全性 → 开发者模式」，按提示重启；重启后解锁，这里会自动打勾。"
 S_TUNNEL = "和手机建立开发连接失败：解锁手机后再试；走无线的话换成数据线。"
 S_DDI = "手机的开发者服务没准备好：解锁手机后再试；还不行就重启手机。"
 PREPARE_COOLDOWN = 30   # 清单几秒问一次：配对框、更新映像这类有动静的步骤隔一会儿才重试
@@ -367,6 +367,11 @@ def device_kind(d):
     from diag import is_vision
     h = d.get("hardwareProperties", {})
     return "iPad" if h.get("platform") == "iPadOS" or (h.get("productType") or "").startswith("iPad") or is_vision(d) else "iPhone"
+
+
+def row_kind(row):
+    """target._row 设备行（phone(c) / MacPhone.dev）→「iPad」或「iPhone」，同 device_kind；Apple Vision Pro（RealityDevice*）按 iPad 兼容装，写 iPad"""
+    return "iPad" if (row.get("productType") or "").startswith(("iPad", "RealityDevice")) else "iPhone"
 
 
 def _pick_device(devices, want, install=False):
@@ -482,7 +487,7 @@ def device_link(c, want="", polling=False, install=False):
             _, _, raw = step("manage pair", "manage", "pair", "--device", dev["identifier"], timeout=limits[0])
             devices, why, fresh = again(dev)
             dev = fresh or dev
-        if _link(dev).get("pairingState") != "paired" and (r := hold("trusted", _with_raw(S_TRUST, raw))):
+        if _link(dev).get("pairingState") != "paired" and (r := hold("trusted", _with_raw(on_device(S_TRUST, device_kind(dev)), raw))):
             return r
     def services_ready(d):
         return d.get("deviceProperties", {}).get("ddiServicesAvailable") is not False
@@ -506,7 +511,7 @@ def device_link(c, want="", polling=False, install=False):
         problem = refresh_details()
         if problem and (r := hold("prepare", problem)):
             return r
-    if dev.get("deviceProperties", {}).get("developerModeStatus") == "disabled" and (r := hold("developerMode", S_DEV_MODE)):
+    if dev.get("deviceProperties", {}).get("developerModeStatus") == "disabled" and (r := hold("developerMode", on_device(S_DEV_MODE, device_kind(dev)))):
         return r
     if not services_ready(dev):
         raw = ""
@@ -516,7 +521,7 @@ def device_link(c, want="", polling=False, install=False):
             problem = refresh_details()
             if problem and (r := hold("prepare", problem)):
                 return r
-            if dev.get("deviceProperties", {}).get("developerModeStatus") == "disabled" and (r := hold("developerMode", S_DEV_MODE)):
+            if dev.get("deviceProperties", {}).get("developerModeStatus") == "disabled" and (r := hold("developerMode", on_device(S_DEV_MODE, device_kind(dev)))):
                 return r
         if not services_ready(dev) and (r := hold("prepare", _with_raw(S_DDI, raw))):
             return r
@@ -719,7 +724,7 @@ def push_pack(c, ident, bid, pack, udid=None, docs=None, ctx=None, pack_root=Non
         text = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
         m = APPLY_FAILED.search(text)   # tools/push_pack.py apply：App 自己写的解开失败原因（如 #569 目录写不进），原样上屏，不说「推不进」「没有开始」
         if m:
-            raise Failure(f"资源包已传到 iPhone，但手机上解开失败：{m.group(1)}", code="job_failed") from e
+            raise Failure(on_device("资源包已传到 {0}，但设备上解开失败：{1}", device_of(c)).replace("{1}", m.group(1)), code="job_failed") from e
         m = re.search(r"资源包推进去了，但(机上解包 \d+ 秒没有新进展[^：\n]*|起 App 后 \d+ 秒机上解包没有开始)", text)   # tools/push_pack.py apply：按进度判停住（11-07）  # 非玩家句
         if m:   # 旧口径的「停住」（推包工具现在报成下面的「还差最后一步」）：同样按传输成功 + 提醒（装机原则 11-11）
             c.diagnostic(f"资源包已传完，但{m.group(1)}：请打开这款游戏，保持在前台等它导入完，会自动进入游戏。", code="manual_unpack_required", severity="warning")
@@ -1592,10 +1597,10 @@ def readiness(c):
     item("connected", one, "{0}「{1}」已连上（{2}）".replace("{0}", kind).replace("{1}", name).replace("{2}", how) if one else "选的设备已连上（数据线或同一 Wi-Fi）",
          link["problem"] if stage == "connected" else "", note=S_NETWORK if one and how != "数据线" else "", action="pickDevice")   # 只靠网络连着：能装，但提醒插线更稳（玩家反馈 11-11）
     paired = bool(one) and stage != "trusted"
-    item("trusted", paired, "{0} 已信任这台 Mac".replace("{0}", kind), link["problem"] if stage == "trusted" else S_TRUST, waiting=not one, action="trustHelp")
+    item("trusted", paired, "{0} 已信任这台 Mac".replace("{0}", kind), link["problem"] if stage == "trusted" else on_device(S_TRUST, kind), waiting=not one, action="trustHelp")
     mode_pending = paired and stage == "prepare" and one.get("deviceProperties", {}).get("developerModeStatus") not in ("enabled", None)
     dev_mode = paired and stage != "developerMode" and not mode_pending
-    item("developerMode", dev_mode, "{0} 已打开开发者模式".replace("{0}", kind), S_DEV_MODE, waiting=not paired or mode_pending, action="developerModeHelp")
+    item("developerMode", dev_mode, "{0} 已打开开发者模式".replace("{0}", kind), on_device(S_DEV_MODE, kind), waiting=not paired or mode_pending, action="developerModeHelp")
     item("deviceReady", dev_mode and stage == "", "{0} 已准备好安装".replace("{0}", kind), link["problem"] if stage == "prepare" else "", who="app", waiting=not paired or stage == "developerMode")
     account = (cert or {}).get("teamName") or "" if use_cert else (team["name"] or team["id"]) if team else ""
     return dict(gameId=gid, items=items, ready=not any(i["blocking"] for i in items), device=name, deviceKind=kind.lower() if one else "", account=account, ipaPath=ipa_path, imgPath=phone_img_path(c, gid), shaderCachePath=phone_shader_cache(c, gid),
@@ -1636,7 +1641,7 @@ def check_shell_sdk(c, app, dev):
         return
     sdk, os_major = linked_sdk(exe), str(dev.get("os") or "").split(".")[0]
     if sdk and os_major.isdigit() and int(os_major) > sdk[0]:
-        c.diagnostic(f"这个包是用 iOS {sdk[0]}.{sdk[1]} 的 Xcode 出的，这台 iPhone 是 iOS {dev.get('os')}：iOS {os_major} 新出的机型（如 iPhone Duo）"
+        c.diagnostic(f"这个包是用 iOS {sdk[0]}.{sdk[1]} 的 Xcode 出的，这台 {row_kind(dev)} 是 iOS {dev.get('os')}：iOS {os_major} 新出的机型（如 iPhone Duo）"
                      "上整个 App 会按旧 iPhone 尺寸缩小在屏幕中间", code="shell_sdk_old", severity="warning")
 
 
@@ -1853,7 +1858,7 @@ def sign_with_apple_id(c, app, team, bid, ents, udid, log, steps, vision=False, 
         from errors import recovery, tool_reason
         text = log.read_text(errors="replace")[-8000:] if log.is_file() else ""
         code = classify(text)
-        raise Failure("签名没成：" + tool_reason(log) + "；" + recovery(code, packaged=bool(c.r.get("engineBundle"))), code=code) from e  # 非玩家句
+        raise Failure("签名没成：" + tool_reason(log) + "；" + recovery(code, packaged=bool(c.r.get("engineBundle")), device=device_of(c)), code=code) from e  # 非玩家句
 
 
 def sign_with_widget(c, app, team, bid, ents, udid, log, steps, vision):
@@ -2004,8 +2009,8 @@ class MacPhone:
         self.key = self.udid or self.dev["id"]   # devices/<设备>.json 的键
         # deviceKind / deviceName：完成页、诊断写「已装到 iPad「名字」」，不写死 iPhone
         self.info = dict(device=self.dev["name"], deviceName=self.dev["name"],
-                         deviceKind="iPad" if (self.dev.get("productType") or "").startswith(("iPad", "RealityDevice")) else "iPhone",   # Apple Vision Pro 按 iPad 兼容装
-                         team=self.team["name"], free=self.team["free"])
+                         deviceKind=row_kind(self.dev), team=self.team["name"], free=self.team["free"])
+        c.device_kind = self.info["deviceKind"]   # 这次作业的报错 / 下一步里的「这台 {0}」按它填（errors.device_of）
         self.pending = None   # 资源传完但没拉起 App 解开时的那句（put_game 带进结果 unpackPending）
 
     def app_running(self):
@@ -2062,7 +2067,7 @@ class MacPhone:
             gb = sum(f.stat().st_size for p in packs.values() for f in p.rglob("*") if f.is_file()) / 2**30
             if not packs or gb <= 0:   # 这次一个资源包都不推（只换壳更新、续签）：不说「第一次全拷约 N 分钟」（11-11 维护者截图：0.0 GB 也照报，误导）
                 return
-            self.c.diagnostic(f"这台 iPhone 现在按 USB 2.0（{mbps} Mb/s）连着：资源包 {gb:.1f} GB 第一次全拷约 {max(1, round(gb * 1024 / 31 / 60))} 分钟，"
+            self.c.diagnostic(f"这台 {self.info['deviceKind']} 现在按 USB 2.0（{mbps} Mb/s）连着：资源包 {gb:.1f} GB 第一次全拷约 {max(1, round(gb * 1024 / 31 / 60))} 分钟，"
                               "换 USB 3 能快约 10 倍（以后重装只推变了的文件）", code="usb_slow", severity="warning")
 
     def push(self, g, pack):
@@ -2103,16 +2108,17 @@ def win_cert_gate(c, W, exe):
         raise Failure(text, code="cert_revoke_confirm")
 
 
-def win_install_failure(e):
+def win_install_failure(e, c=None):
     """Windows plumesign 签名装机失败（install_win.Fail）→ 作业失败。有对应处理建议的码（free_appid_limit = Apple 9120 等）：上屏说人话的原因与办法，
     plumesign 英文原文只进诊断（Windows 实机：原先整句英文「Developer API error 9120 …」直接上屏，玩家只看到签名失败）；没有专门建议的照旧上屏原文。
-    容器装机（WinPhone.install）与下游独立 App 装机（downstream.install_ios_win）同用"""
+    容器装机（WinPhone.install）与下游独立 App 装机（downstream.install_ios_win）同用；c 给了就按这次认出的设备类型填「这台 {0}」"""
     code = e.err or "device_install_failed"
+    kind = device_of(c)
     from errors import RECOVERY
     if code in RECOVERY and code not in ("device_install_failed", "job_failed"):
         # 连不上签名服务器：plumesign 那句是系统的本地化原话（如「不知道这样的主机。 (os error 11001)」），一并上屏，玩家 / 帮他的人能照着查网络
         said = f"（Impactor 原话：{str(e).split('：', 1)[-1].strip()}）" if code == "signing_server_unreachable" else ""
-        return Failure("签名装机没成：" + RECOVERY[code] + said, code=code, internal=str(e))  # 非玩家句
+        return Failure("签名装机没成：" + on_device(RECOVERY[code], kind) + said, code=code, internal=str(e))  # 非玩家句
     return Failure(str(e), code=code)
 
 
@@ -2143,6 +2149,7 @@ class WinPhone:
             except Exception:
                 kind = ""
         self.info = dict(device=self.udid, deviceName="", deviceKind=kind)
+        c.device_kind = kind   # 这次作业的报错 / 下一步里的「这台 {0}」按它填，认不出（空）填「iPhone / iPad」（errors.device_of）
         self.pending = None   # 资源传完但没拉起 App 解开时的那句（put_game 带进结果 unpackPending）
 
     def pull_kept(self, games):   # 留下的 NRO（#8be819）：Windows 不收（0.5.0 维护者定：从手机收回只保留 Mac 已发版的那条，Windows 端这次不上）
@@ -2216,14 +2223,14 @@ class WinPhone:
                 installed = self.W.install_app(ns, say=self.say)
             except self.W.Fail as e:
                 if not had:
-                    raise win_install_failure(e) from e
-                first = win_install_failure(e)
+                    raise win_install_failure(e, self.c) from e
+                first = win_install_failure(e, self.c)
                 print(f"[装机] 带小组件签名装机没成（{e.err or ''}：{e}），去掉小组件重来", file=sys.stderr, flush=True)  # 非玩家句
                 ns.ipa = str(plain)
                 try:
                     installed = self.W.install_app(ns, say=self.say)
                 except self.W.Fail as e2:
-                    raise win_install_failure(e2) from e2
+                    raise win_install_failure(e2, self.c) from e2
                 why = WIDGET_QUOTA if e.err == "free_appid_limit" else str(first)
                 self.c.diagnostic(f"这次没装小组件：{why}", code="widget_skipped", severity="warning")
             got = getattr(ns, "signed_expiry", None)
@@ -2407,6 +2414,7 @@ def push_phone(c):
             ph.bid, ph.external = bid, True
         return ph
     dev = phone(c)
+    c.device_kind = row_kind(dev)   # 「这台 {0} 上装着不止一个 S2Arm」在装机对象之前就可能报（owner_for_push）
     udid = udid_of(c, dev["id"])
     who, bid = owner_for_push(c, udid, udid or dev["id"])
     return ExternalPhone(c, bid, dev, udid) if who == "external" else mac_phone(c, dev=dev, udid=udid)
@@ -2421,7 +2429,7 @@ def owner_for_push(c, udid, key):
     if who == "choose":
         cands = s2arm_candidates(c, udid, rec)
         layout.save_device(c, key, dict(rec, pendingChoice=dict(candidates=cands, at=time.time())))
-        raise Failure(PHONE_APP_CHOICE, code="phone_app_choice_required", facts=dict(device=key, candidates=cands))
+        raise Failure(on_device(PHONE_APP_CHOICE, device_of(c)), code="phone_app_choice_required", facts=dict(device=key, candidates=cands))
     if who is not None and "pendingChoice" in rec:
         layout.save_device(c, key, {k: v for k, v in rec.items() if k != "pendingChoice"})
     return who, bid
@@ -2903,7 +2911,7 @@ def restore_phone_save(c):
     except Exception:   # noqa: BLE001 —— 判不清照常还原
         running = None
     if running is True:
-        raise Failure("先在 iPhone 上退出 S2Arm，再还原存档。", code="phone_app_running")
+        raise Failure(on_device("先在 {0} 上退出 S2Arm，再还原存档。", device_of(c)), code="phone_app_running")
     now = snapshot_phone_saves(c, ph, [gid]).get(gid)   # 还原前手机上的存档也留一份（内容和已有的一样就不多存）
     have = {p.relative_to(root / now).as_posix() for p in (root / now).rglob("*") if p.is_file() and p.name != PHONE_SAVE_MARK} if now else set()
     files = sorted(p for p in src.rglob("*") if p.is_file() and p.name != PHONE_SAVE_MARK)
@@ -3122,8 +3130,8 @@ def s2arm_candidates(c, udid, rec):
     return out
 
 
-PHONE_APP_CHOICE = "这台 iPhone 上装着不止一个 S2Arm：先在 iPhone 总控台选好用哪一个，再推游戏。"
-PHONE_APP_GONE = "选的这个 S2Arm 不在这台 iPhone 上了：在总控台重新选一次。"
+PHONE_APP_CHOICE = "这台 {0} 上装着不止一个 S2Arm：先点游戏库最前面的「S2Arm」选好用哪一个，再推游戏。"
+PHONE_APP_GONE = "选的这个 S2Arm 不在这台 {0} 上了：点游戏库最前面的「S2Arm」重新选一次。"
 
 
 def phone_choose_app(c):
@@ -3136,10 +3144,10 @@ def phone_choose_app(c):
     rec = layout.load_device(c, udid)
     apps = installed_s2arm_on(c, udid, rec)
     if apps is None:
-        raise Failure("读不出这台 iPhone 上装了哪些 App：确认 iPhone 连着、已解锁，再试一次。", code="device_not_ready")
+        raise Failure(on_device("读不出这台 {0} 上装了哪些 App：确认它连着、已解锁，再试一次。", device_of(c)), code="device_not_ready")
     hit = next((a["bundleId"] for a in apps if a["bundleId"].lower() == want.lower()), None)
     if not hit:
-        raise Failure(PHONE_APP_GONE, code="phone_app_gone")
+        raise Failure(on_device(PHONE_APP_GONE, device_of(c)), code="phone_app_gone")
     rec = {k: v for k, v in rec.items() if k != "pendingChoice"}   # 选好了：推送时记下的「待选」作废
     layout.save_device(c, udid, dict(rec, chosenBundleId=hit))
     return dict(device=udid, bundleId=hit)
@@ -3197,7 +3205,7 @@ def deliver_identity(c, ph, strict=False, force=False):
             if strict and hasattr(ph, "W"):   # Apple ID 方式、这台电脑上没有可交的证书：不为此新建（会顶掉玩家 AltStore / SideStore 的证书，11-19 实测），引导手机上导入证书
                 raise Failure(IDENTITY_NOT_HERE, code="identity_unavailable")
             if strict:
-                raise Failure("现在没在用你自己的开发者证书签名，没有要交给 iPhone 的证书：先在设置里导入并选用你的证书。", code="devcert_missing")
+                raise Failure(on_device("现在没在用你自己的开发者证书签名，没有要交给 {0} 的证书：先在设置里导入并选用你的证书。", device_of(c)), code="devcert_missing")
             return None
         team, fp, get, source = src
         done = layout.load_device(c, ph.key).get("identity") or {}
@@ -3206,7 +3214,7 @@ def deliver_identity(c, ph, strict=False, force=False):
         ident = get()
         if not ident:
             if strict:
-                raise Failure("苹果的证书列表里找不到这台电脑签名用的那张证书，没能交给 iPhone 上的 S2Arm：先在电脑上「安装 S2Arm」一次。", code="job_failed")
+                raise Failure(on_device("苹果的证书列表里找不到这台电脑签名用的那张证书，没能交给 {0} 上的 S2Arm：先在电脑上「安装 S2Arm」一次。", device_of(c)), code="job_failed")
             trace(c, "私钥没交给 App：苹果列表里没有本机私钥对应的证书（或列不出），照旧在电脑签")  # 非玩家句
             return None
         sha1 = hashlib.sha1(ident["cert"]).hexdigest()
@@ -3236,7 +3244,7 @@ def deliver_identity(c, ph, strict=False, force=False):
         return None
     except Exception as e:   # 推送工具的失败类型在 tools/push_pack.py，作业层不单独 import
         if strict:
-            raise Failure("没能把证书写进 iPhone 上的 S2Arm：确认 iPhone 连着、已解锁，再试一次。", code="job_failed", internal=f"{type(e).__name__} {str(e)[:300]}") from e
+            raise Failure(on_device("没能把证书写进 {0} 上的 S2Arm：确认它连着、已解锁，再试一次。", device_of(c)), code="job_failed", internal=f"{type(e).__name__} {str(e)[:300]}") from e
         trace(c, f"私钥没交给 App（照旧在电脑签）：{type(e).__name__} {str(e)[:200]}")  # 非玩家句
         return None
 
@@ -3831,14 +3839,14 @@ def _remove_app(c, ph, gid, app):
     except Exception:   # noqa: BLE001 —— 判不清照常删
         running = None
     if running is True:
-        raise Failure("先在 iPhone 上退出这款游戏，再删。", code="phone_app_running")
+        raise Failure(on_device("先在 {0} 上退出这款游戏，再删。", device_of(c)), code="phone_app_running")
     c.begin("备份这款的存档", 2, 3)
     backup = ap.backup(gid)
     c.begin("从 iPhone 上卸掉这款的独立 App", 3, 3)
     with tempfile.TemporaryDirectory(dir=c.private) as w:
         rc, out = ap.client(w).call("uninstall", "-")
     if rc and "ApplicationLookupFailed" not in out and "not installed" not in out.lower():
-        raise Failure("没能从 iPhone 上卸掉这款的独立 App：确认 iPhone 连着、已解锁，再试一次。", code="container_purge_failed", internal=out[-300:])
+        raise Failure(on_device("没能从 {0} 上卸掉这款的独立 App：确认它连着、已解锁，再试一次。", device_of(c)), code="container_purge_failed", internal=out[-300:])
     rec = layout.load_device(c, ph.key)
     layout.save_device(c, ph.key, dict(rec, apps={g: v for g, v in (rec.get("apps") or {}).items() if g != gid}))
     return dict(games=sorted(rec.get("games") or {}), bundleId=app["bundleId"], removed=gid, saveBackup=str(backup) if backup else "", dataRemoved=True,
@@ -4202,13 +4210,13 @@ def _remove_from_phone(c):
     except Exception:   # noqa: BLE001 —— 判不清照常删
         running = None
     if running is True:
-        raise Failure("先在 iPhone 上退出 S2Arm，再删这款。", code="phone_app_running")
+        raise Failure(on_device("先在 {0} 上退出 S2Arm，再删这款。", device_of(c)), code="phone_app_running")
     c.begin("备份这款的存档", 2, 3)
     backup = ph.backup(gid)
     c.begin("删除手机上这款", 3, 3)
     ok, out = ph.purge(gid)
     if not ok:
-        raise Failure("没能删掉手机上这款的数据：确认 iPhone 连着、已解锁，再试一次。", code="container_purge_failed", internal=out[-300:])
+        raise Failure(on_device("没能删掉 {0} 上这款的数据：确认它连着、已解锁，再试一次。", device_of(c)), code="container_purge_failed", internal=out[-300:])
     rec = layout.load_device(c, ph.key)
     left = {g: v for g, v in (rec.get("games") or {}).items() if g != gid}
     layout.save_device(c, ph.key, dict(rec, games=left))

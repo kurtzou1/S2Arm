@@ -992,8 +992,9 @@ static struct entry *build(const uint8_t *bytes, size_t len, const struct s2a_so
             le->stages = b->is_support ? (1u << nst) - 1u : 1u << st;
             if (b->kind == 2) sampled_decl(fp.stage[st].spirv, fp.stage[st].spirv_bytes, (uint32_t)b->set, (uint32_t)b->binding,
                 &e->prog.dtt[st][e->prog.nent[st]], &e->prog.dcls[st][e->prog.nent[st]], NULL);
-            // 图形阶段的 imageBuffer：回放要声明的数值类与格式选缓冲视图格式（同计算阶段）；普通图形存储图像口径不动
-            if (le->cls == NVN_GPU_RES_IMAGE_TBUF) sampled_decl(fp.stage[st].spirv, fp.stage[st].spirv_bytes, (uint32_t)b->set, (uint32_t)b->binding,
+            // 图形阶段的存储图像（含 imageBuffer）：回放按着色器声明的目标 / 数值类 / 格式选视图（image_resolve / image_tbuf_resolve，同计算阶段 build_compute）；
+            //   声明没解析出来（目标记录为 0）时回放照旧用贴图自己的格式
+            if (le->src_kind == NVN_RB_IMG) sampled_decl(fp.stage[st].spirv, fp.stage[st].spirv_bytes, (uint32_t)b->set, (uint32_t)b->binding,
                 &e->prog.dtt[st][e->prog.nent[st]], &e->prog.dcls[st][e->prog.nent[st]], &e->prog.difmt[st][e->prog.nent[st]]);
             if (le->cls == NVN_GPU_RES_TBUF && e->prog.dtt[st][e->prog.nent[st]] != NVN_TEXTURE_TARGET_BUFFER + 1) {
                 red1("tbuf_shader_type_unproven", b->stage); e->failed = 1; break;

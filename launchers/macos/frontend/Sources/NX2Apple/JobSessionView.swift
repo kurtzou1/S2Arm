@@ -55,7 +55,7 @@ struct JobSessionView: View {
         guard session.kind == .installUpdate, finished == .completed, model.shellFirstInstall else { return [] }
         let lang = loc.lang.sharedCode
         let trust = model.installTrustName.isEmpty ? BackendText.launcherText("install.done.trust", language: lang)
-            : BackendText.launcherText("install.done.trustNamed", language: lang).replacingOccurrences(of: "{0}", with: model.installTrustName)
+            : model.trustNamedText(language: lang)
         return [trust, BackendText.launcherText("exportsheet.shell.next", language: lang)]
     }
 

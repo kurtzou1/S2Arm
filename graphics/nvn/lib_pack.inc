@@ -50,12 +50,12 @@ static void *lp_map(size_t len, int fd, off_t at, int *hi) {
 static dispatch_data_t lp_get(lp_pack *p, const char *name, unsigned kind) {
     int ok; uint64_t key = lp_key(name, &ok); if (!ok || !p->idx) return NULL;
     const lp_rec *r = lp_find(p, key, kind); if (!r) return NULL;
-    if (r->shard >= p->nshard) { LP_LOG("【红】 direct library container: %.16s kind %u points at shard %u of %u", name, kind, r->shard, p->nshard); return NULL; }
-    if (r->off + r->len > p->ssize[2 * r->shard]) { LP_LOG("【红】 direct library container: %.16s kind %u runs past the end of shard %u", name, kind, r->shard); return NULL; }
-    char path[1100]; snprintf(path, sizeof path, "%s/lib.%03u.pak", p->dir, r->shard);
+    if (lp_shard(r) >= p->nshard) { LP_LOG("【红】 direct library container: %.16s kind %u points at shard %u of %u", name, kind, lp_shard(r), p->nshard); return NULL; }
+    if (r->off + r->len > p->ssize[2 * lp_shard(r)]) { LP_LOG("【红】 direct library container: %.16s kind %u runs past the end of shard %u", name, kind, lp_shard(r)); return NULL; }
+    char path[1100]; snprintf(path, sizeof path, "%s/lib.%03u.pak", p->dir, lp_shard(r));
     int fd = open(path, O_RDONLY); struct stat st;
-    if (fd < 0 || fstat(fd, &st) || (uint64_t)st.st_size != p->ssize[2 * r->shard]) {
-        LP_LOG("【红】 direct library container: shard %s is %s (index says %llu bytes)", path, fd < 0 ? "missing" : "the wrong size", (unsigned long long)p->ssize[2 * r->shard]);
+    if (fd < 0 || fstat(fd, &st) || (uint64_t)st.st_size != p->ssize[2 * lp_shard(r)]) {
+        LP_LOG("【红】 direct library container: shard %s is %s (index says %llu bytes)", path, fd < 0 ? "missing" : "the wrong size", (unsigned long long)p->ssize[2 * lp_shard(r)]);
         if (fd >= 0) close(fd); return NULL; }
     const uint64_t pg = (uint64_t)getpagesize(), at = r->off & ~(pg - 1), delta = r->off - at; const size_t mlen = (size_t)(delta + (r->len ? r->len : 1));
     int hi; void *m = lp_map(mlen, fd, (off_t)at, &hi); int e = errno;
@@ -88,9 +88,9 @@ __attribute__((unused)) static int lp_guest_get(const lp_pack *p, uint64_t key, 
     const lp_rec *r = p && p->idx ? lp_find(p, key, LP_K_GUEST) : NULL; if (!r) return 1;
     enum { HEAD = 8, ZHEAD = 2, ZTAIL = 4, RAW_MAX = 64u << 20 };
     const char *why = NULL; uint8_t *seg = NULL, *raw = NULL; uint32_t rawlen = 0; int rc = -1;
-    char path[1100]; snprintf(path, sizeof path, "%s/lib.%03u.pak", p->dir, r->shard);
+    char path[1100]; snprintf(path, sizeof path, "%s/lib.%03u.pak", p->dir, lp_shard(r));
     int fd = -1;
-    if (r->shard >= p->nshard || r->off + r->len > p->ssize[2 * r->shard]) why = "points past the end of its shard";
+    if (lp_shard(r) >= p->nshard || r->off + r->len > p->ssize[2 * lp_shard(r)]) why = "points past the end of its shard";
     else if (r->len < HEAD + ZHEAD + ZTAIL) why = "is shorter than its header";
     else if (!(seg = malloc(r->len))) why = "cannot be read (out of memory)";
     else if ((fd = open(path, O_RDONLY)) < 0 || pread(fd, seg, r->len, (off_t)r->off) != (ssize_t)r->len) why = "cannot be read from its shard";
@@ -143,7 +143,7 @@ static id<MTLLibrary> lp_library(lp_pack *p, id<MTLDevice> dev, const char *name
     int ok; uint64_t key = lp_key(name, &ok); const lp_rec *r = ok && p->idx ? lp_find(p, key, kind) : NULL;
     if (!r) { if (err) *err = [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOENT userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"%s is not in the library container", name]}];
               return nil; }
-    NSString *bk = [NSString stringWithFormat:@"%p/%u/%llx", (void *)p->idx, r->shard, (unsigned long long)r->off];
+    NSString *bk = [NSString stringWithFormat:@"%p/%u/%llx", (void *)p->idx, lp_shard(r), (unsigned long long)r->off];
     os_unfair_lock_lock(&g_lp_lib_mu);
     if (!g_lp_libs) { g_lp_libs = [NSMapTable strongToWeakObjectsMapTable]; g_lp_layer = [NSMutableDictionary dictionary]; }
     id<MTLLibrary> lib = [g_lp_libs objectForKey:bk]; int ly = g_lp_layer[bk].intValue;

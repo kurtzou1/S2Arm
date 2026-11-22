@@ -55,7 +55,8 @@ struct fd_binding {
     char stage[16];
     // 下面这些只由 program 内容决定，加载时算一次；逐笔 draw 不再做 strcmp / 除法。
     int8_t stage_idx;         // 0=vs 1=fs 2=gs 3=tcs 4=tes 5=cs，-1 = 其它/未知
-    int16_t tex_slot;         // 组合槽 0..31 或分离贴图槽 128..255；-1 = 未解析
+    int16_t tex_slot;         // 组合槽 0..31 或分离贴图槽 128..255；-1 = 未解析。kind==3（存储图像，图形与计算阶段同一形态）：NVN 图像槽 0..7 = (句柄字 − 72) / 2，
+                              //   图形阶段只在 count == 1 且字为 72..86 偶数时给，其余保持 -1（layout_ent 具名拒，不猜槽位）
     int16_t samp_slot;        // -1 = 组合句柄；0..127 = 分离采样器来源槽
     uint8_t texel_buffer;     // kind==2：真实 SPIR-V 证明该 texture 是只读 Buffer（不是普通采样图像）；kind==3：存储图像是 imageBuffer（Dim=Buffer，存储纹素缓冲）
     // kind==2 且 tex_ubo = 1：贴图句柄不在槽里，在用户常量缓冲 tex_u 处（_b.json tex_ubo / tbuf_ubo）。此时 tex_slot = -1。

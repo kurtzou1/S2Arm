@@ -13,11 +13,12 @@ namespace S2A.Services.Tests
 {
     // #1632 / #1598：重启输出队列只看返回码、不确认设备真的重新播。玩家 M2 局重启后 10 秒回调 994 / 653 次（正常约 2000），回调没断，
     //   「设备 1 秒没回调」那条兜底接不住。真声卡（本机 AudioQueue），钩子 S2A_AUDIO_TEST_STALL_AT=1（开播后第 1 秒外部暂停 → 没回调兜底重启第 1 次）
-    //   + S2A_AUDIO_TEST_SLOW_AFTER_HEAL=1（第 1 次重启后看门狗每拍轮流播 1 拍、停 3 拍：有回调、只播约四分之一，最长停 750 ms < 1 秒）。期望按语义手算：
-    // ① 第 1 次重启（没回调兜底）在开播后 4 秒内，重新开播 rc=0
-    // ② 第 1 次重启后 2 秒窗口核对：交还不到应播的一半（约四分之一）→ 打「重启后设备没恢复播放…再重启」，重新开播 rc=0，4 秒内出现
-    // ③ 钩子只管第 1 次之后，第 2 次重启后设备照常播；4 秒窗口核对 → 打「重启后设备恢复播放…此前连续 1 次没恢复」，7 秒内出现
-    // ④ 之后 1.5 秒里播完 ≥ 24000 帧（0.5 秒声音）
+    //   + S2A_AUDIO_TEST_SLOW_AFTER_HEAL=1（第 1 次重启后每交还 4 块只记 1 块播完：有回调、交还照常，只算播了约四分之一）。期望按语义手算，
+    //   按事件判、不按墙钟（11-21：原先钩子靠看门狗拍点轮流暂停 / 开播，门禁机负载高时拍点漂移没压住，② 误判已恢复；等待上限只是兜底，不是判据）：
+    // ① 出现第 1 次重启（没回调兜底），重新开播 rc=0
+    // ② 第 1 次重启后的核对：交还记成播完的不到应播的一半（约四分之一）→ 打「重启后设备没恢复播放…再重启」，重新开播 rc=0
+    // ③ 钩子只管第 1 次之后，第 2 次重启后设备照常播；核对 → 打「重启后设备恢复播放…此前连续 1 次没恢复」
+    // ④ 之后设备照常播：等到播完 24000 帧（0.5 秒声音）
     //   负控：同一单测在没有重启后核对的代码上跑（改前的 #1598 分支），② ③ 红
     static class AppleAudioRecoverVerifyTest
     {
@@ -73,21 +74,21 @@ namespace S2A.Services.Tests
                 session.QueueBuffer(b);
             }
 
-            bool h1 = WaitLog("没有回调", 4000);
-            Row("① 第 1 次重启（没回调兜底）", "4 秒内、重新开播 rc=0", h1 ? Line("没有回调") : "没重启", h1 && Line("没有回调").Contains("重新开播 rc=0"));
+            bool h1 = WaitLog("没有回调", 15000);
+            Row("① 第 1 次重启（没回调兜底）", "出现、重新开播 rc=0", h1 ? Line("没有回调") : "没重启", h1 && Line("没有回调").Contains("重新开播 rc=0"));
 
-            bool h2 = WaitLog("重启后设备没恢复播放", 4000);
+            bool h2 = WaitLog("重启后设备没恢复播放", 20000);
             string l2 = Line("重启后设备没恢复播放");
-            Row("② 2 秒窗口核出没恢复、再重启", "4 秒内、不到一半、重新开播 rc=0", h2 ? l2 : "没核出", h2 && l2.Contains("不到一半") && l2.Contains("重新开播 rc=0"));
+            Row("② 核出没恢复、再重启", "不到一半、重新开播 rc=0", h2 ? l2 : "没核出", h2 && l2.Contains("不到一半") && l2.Contains("重新开播 rc=0"));
 
-            bool ok3 = WaitLog("重启后设备恢复播放", 7000);
+            bool ok3 = WaitLog("重启后设备恢复播放", 30000);
             string l3 = Line("重启后设备恢复播放");
-            Row("③ 4 秒窗口核出已恢复", "7 秒内、此前连续 1 次没恢复", ok3 ? l3 : "没核出", ok3 && l3.Contains("此前连续 1 次没恢复"));
+            Row("③ 核出已恢复", "此前连续 1 次没恢复", ok3 ? l3 : "没核出", ok3 && l3.Contains("此前连续 1 次没恢复"));
 
-            ulong p0 = session.GetPlayedSampleCount();
-            Thread.Sleep(1500);
-            ulong played = session.GetPlayedSampleCount() - p0;
-            Row("④ 之后设备照常播", "1.5 秒里播完 ≥ 24000 帧", $"{played} 帧", played >= 24000);
+            ulong p0 = session.GetPlayedSampleCount(), played = 0;
+            var sw4 = Stopwatch.StartNew();
+            while ((played = session.GetPlayedSampleCount() - p0) < 24000 && sw4.ElapsedMilliseconds < 10000) Thread.Sleep(20);
+            Row("④ 之后设备照常播", "播完 24000 帧（等事件，10 秒兜底）", $"{played} 帧，用时 {sw4.ElapsedMilliseconds} ms", played >= 24000);
 
             session.Dispose(); driver.Dispose();
             Console.SetError(err);
