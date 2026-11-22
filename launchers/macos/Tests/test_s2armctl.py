@@ -645,6 +645,25 @@ class DeviceBundleTests(unittest.TestCase):
         for other in ("io.s2arm.gamesx", "io.s2arm", "com.example.app", ""):
             self.assertFalse(ctl.container_match(other, bid), other)
 
+    def test_device_reports_selected_livecontainer_guest_and_game_state(self):
+        dev = {"hardwareProperties": {"udid": "U1"}, "deviceProperties": {"name": "手机"}}
+        apps = {"result": {"apps": [{"name": "LiveContainer", "bundleIdentifier": "com.example.host"}]}}
+        def fake_dctl(args):
+            Path(args[args.index("--json-output") + 1]).write_text(json.dumps(apps))
+            return subprocess.CompletedProcess(args, 0, "", "")
+        gid = "0100000000000000"
+        for status, text in (("present", "已在手机上"), ("unknown", "暂时无法确认"), ("pending", "待导入")):
+            snapshot = {"phoneConsole": [{"device": "U1", "installed": {"bundleId": "lc:guest"},
+                                          "games": [{"gameId": gid, "state": status}]}]}
+            buf = io.StringIO()
+            with mock.patch.object(ctl, "game_bundle", return_value=("x.ipa", "io.s2arm.games")), \
+                 mock.patch.object(ctl, "iphone", return_value=[dev]), mock.patch.object(ctl, "dctl", side_effect=fake_dctl), \
+                 mock.patch.object(ctl, "call", return_value=snapshot), contextlib.redirect_stdout(buf), self.assertRaises(SystemExit):
+                ctl.device(gid)
+            self.assertIn("已装 LiveContainer 内部 S2Arm", buf.getvalue())
+            self.assertIn(text, buf.getvalue())
+            self.assertNotIn("没装", buf.getvalue())
+
     def test_device_reports_installed_team_bundle(self):
         dev = {"hardwareProperties": {"udid": "U1"}, "deviceProperties": {"name": "玩家的手机"}}
         apps = {"result": {"apps": [{"bundleIdentifier": "com.example.app"}, {"bundleIdentifier": "io.s2arm.games.7r5l7ty4r7"}]}}

@@ -4,6 +4,7 @@
 //   * 编译结果的 nvnSlot / uboSlot+uboOffset / uboPtr / rw 被读成明确的运行时来源；
 //   * 越界 nvnSlot、非布尔 rw 准确拒绝；
 //   * 没有映射的 storage binding 保持 kind=0，运行时必须报红而不是猜槽位。
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -39,6 +40,52 @@ static int parse_v2(const char *bindings, struct fd_program *p, char *why, size_
     if (n <= 0 || (size_t)n >= sizeof json) return -2;
     memset(p, 0, sizeof *p);
     return nvn_vk_program_parse_graphics((const uint8_t *)json, (size_t)n, p, why, cap);
+}
+
+// ---- 两段接口核对（nvn_vk_spirv_link_ok）用的最小 SPIR-V：只含核对要读的指令，不是可装载的模块 ----
+struct spv { uint32_t w[256]; size_t n; };
+static void spv_begin(struct spv *m) { m->n = 0; uint32_t h[5] = {0x07230203u, 0x00010300u, 0, 64, 0}; for (int i = 0; i < 5; i++) m->w[m->n++] = h[i]; }
+static void spv_op(struct spv *m, uint32_t op, int nargs, const uint32_t *a) { m->w[m->n++] = ((uint32_t)(nargs + 1) << 16) | op; for (int i = 0; i < nargs; i++) m->w[m->n++] = a[i]; }
+// 一个用户接口变量：Location loc、存储类 storage（1 Input / 3 Output）。id 由调用方给，类型指针 %2（指向标量 / 向量 %1）
+static void spv_var(struct spv *m, uint32_t id, uint32_t storage, int loc) {
+    if (loc >= 0) { uint32_t d[3] = {id, 30, (uint32_t)loc}; spv_op(m, 71, 3, d); }
+    uint32_t v[3] = {storage == 3 ? 2u : 3u, id, storage}; spv_op(m, 59, 3, v);
+}
+static void spv_types(struct spv *m) {   // %2 = 指向 %1 的 Output 指针，%3 = 指向 %1 的 Input 指针
+    uint32_t p2[3] = {2, 3, 1}, p3[3] = {3, 1, 1}; spv_op(m, 32, 3, p2); spv_op(m, 32, 3, p3);
+}
+static void spv_perv(struct spv *m, uint32_t storage) {   // gl_PerVertex：结构体 %20 成员 0 带 BuiltIn Position，变量 %22 不带 Location
+    uint32_t md[4] = {20, 0, 11, 0}; spv_op(m, 72, 4, md);
+    uint32_t st[2] = {20, 1}; spv_op(m, 30, 2, st);
+    uint32_t pt[3] = {21, storage, 20}; spv_op(m, 32, 3, pt);
+    uint32_t v[3] = {21, 22, storage}; spv_op(m, 59, 3, v);
+}
+static int link(const struct spv *pre, const struct spv *fs, uint64_t *miss) {
+    return nvn_vk_spirv_link_ok((const uint8_t *)pre->w, pre->n * 4, (const uint8_t *)fs->w, fs->n * 4, miss);
+}
+static void t_link(void) {
+    struct spv vs, fs; uint64_t miss;
+    // 对得上：顶点写 0、3（另有 gl_PerVertex 与 BuiltIn 变量），片元读 0、3
+    spv_begin(&vs); { uint32_t b[3] = {12, 11, 0}; spv_op(&vs, 71, 3, b); } spv_types(&vs); spv_perv(&vs, 3); spv_var(&vs, 10, 3, 0); spv_var(&vs, 11, 3, 3);
+    { uint32_t v[3] = {2, 12, 3}; spv_op(&vs, 59, 3, v); }   // %12 BuiltIn 输出，不带 Location
+    spv_begin(&fs); spv_types(&fs); spv_var(&fs, 10, 1, 0); spv_var(&fs, 11, 1, 3);
+    CHECK(link(&vs, &fs, &miss) == 1 && miss == 0, "两段对得上（内建块 / 内建变量不算用户接口）");
+    // 片元多读一个 5：缺 5
+    spv_var(&fs, 13, 1, 5);
+    CHECK(link(&vs, &fs, &miss) == 0 && miss == (1ull << 5), "片元读了顶点没写的位置 5");
+    // #2008 那种：顶点没有任何用户输出（只有 gl_PerVertex），片元读 0..6
+    struct spv v0, f7; spv_begin(&v0); spv_types(&v0); spv_perv(&v0, 3);
+    spv_begin(&f7); spv_types(&f7); for (int l = 0; l < 7; l++) spv_var(&f7, 30 + (uint32_t)l, 1, l);
+    CHECK(link(&v0, &f7, &miss) == 0 && miss == 0x7f, "顶点没写用户输出、片元读 0..6");
+    // 片元不读任何用户输入：对得上
+    struct spv fe; spv_begin(&fe); spv_types(&fe); spv_perv(&fe, 1);
+    CHECK(link(&v0, &fe, &miss) == 1 && miss == 0, "片元不读用户输入");
+    // 认不全不下结论：片元有不带 Location 的用户输入 / 顶点读不了
+    struct spv fu; spv_begin(&fu); spv_types(&fu); spv_var(&fu, 40, 1, -1); spv_var(&fu, 41, 1, 4);
+    CHECK(link(&v0, &fu, &miss) == 1 && miss == 0, "片元有不带 Location 的用户输入：不下结论");
+    CHECK(link(&v0, &f7, NULL) == 0, "missing 可为空");
+    uint32_t junk[4] = {1, 2, 3, 4};
+    CHECK(nvn_vk_spirv_link_ok((const uint8_t *)junk, sizeof junk, (const uint8_t *)f7.w, f7.n * 4, &miss) == 1, "上一段读不了：不下结论");
 }
 
 int main(void) {
@@ -436,6 +483,7 @@ int main(void) {
         }
     }
 
+    t_link();
     if (fails) { printf("direct nvn program result test: %d FAILED\n", fails); return 1; }
     printf("direct nvn program result test: ok\n");
     return 0;

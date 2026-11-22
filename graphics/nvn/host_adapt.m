@@ -793,8 +793,13 @@ static void *fail_watch(void *arg) {
         sleep(1);
         // 客机冻结（Mac 失焦暂停 / iOS 后台 / 重启屏障，runtime/src/thread.c s2a_guest_frozen）按设计不出帧，不算停住
         //   （11-15 v0.4.2 候选一局：窗口失焦冻结 45 秒被报「出帧停住 45 秒」假红；停帧救场 runtime/src/ap_host.c 早已同口径）
-        static int (*frozen)(void); static int looked; if (!looked) { frozen = (int (*)(void))dlsym(RTLD_DEFAULT, "s2a_guest_frozen"); looked = 1; }
-        if (atomic_load(&g_suspended) || (frozen && frozen())) { idle = 0; base = 0; continue; }
+        //   宿主失焦 / 睡眠同样不算（D-T324，Mac 0.6.7：窗口失焦但没冻结——失焦暂停关——游戏收到失焦通知自己停画 53 秒，被记成「出帧停住 45 秒」直连失败）。
+        //   外因判定与出图停住看门同一条（ap_host.c s2a_ap_stall_external：冻结 / 焦点=0 / 睡眠=1 任一成立；取不到的符号记 -1、不冒充外因，t_ap_host ⑥d 测）
+        static int (*frozen)(void), (*focused)(void), (*sleeping)(void), (*external)(int, int, int); static int looked;
+        if (!looked) { frozen = (int (*)(void))dlsym(RTLD_DEFAULT, "s2a_guest_frozen"); focused = (int (*)(void))dlsym(RTLD_DEFAULT, "s2a_host_focused");
+                       sleeping = (int (*)(void))dlsym(RTLD_DEFAULT, "s2a_host_sleeping"); external = (int (*)(int, int, int))dlsym(RTLD_DEFAULT, "s2a_ap_stall_external"); looked = 1; }
+        { int fz = frozen ? frozen() : -1, fo = focused ? focused() : -1, sl = sleeping ? sleeping() : -1;
+          if (atomic_load(&g_suspended) || (external ? external(fz, fo, sl) : fz == 1)) { idle = 0; base = 0; continue; } }
         unsigned long long f = direct_frames();
         if (!f) {
             if (++wait_first != 90) continue;   // 只在第 90 秒报一次、打一次现场，之后照常等首帧

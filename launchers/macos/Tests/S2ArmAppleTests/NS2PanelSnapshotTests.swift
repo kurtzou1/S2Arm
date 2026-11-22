@@ -398,23 +398,80 @@ import XCTest
         XCTAssertEqual(g1.combinedHalves[c0], ["L1", "R1"]); XCTAssertEqual(g1.combinedHalves[c1], ["L2", "R2"])
         XCTAssertEqual(g1.units.count, 2, "按 L + R 只是学，不多登记")
         g1.gen1(id: "R1", side: 1, gesture: 2, at: 5, present: jc, system: two)
-        XCTAssertEqual(g1.units, [.gen1(id: "R1", side: 1), .gen1(id: "L1", side: 0), .system(name: combined, index: 1)], "第一套右只 SL + SR：只拆这一套，按的留原位、同套左只排后面；第二套照旧合成")
+        XCTAssertEqual(g1.slots, [.gen1(id: "R1", side: 1), .system(name: combined, index: 1), .gen1(id: "L1", side: 0)], "第一套右只 SL + SR：只拆这一套，按的留原位、第二套留在 P2 不被挤动、同套左只进空槽 P3")
         XCTAssertFalse(g1.reconcile(devices: [], mergedPair: false, system: two, gen1: jc), "拆开的那一位不再自动排回来")
         let g1File = g1.orderFile()
-        XCTAssertEqual((g1File["order"] as? [[String: Any]])?.map { $0["type"] as? String }, ["gen1", "gen1", "system"])
+        XCTAssertEqual((g1File["order"] as? [[String: Any]])?.map { $0["type"] as? String }, ["gen1", "system", "gen1"])
         XCTAssertTrue(((g1File["dropped"] as? [[String: Any]]) ?? []).contains { $0["type"] as? String == "system" && $0["index"] as? Int == 0 }, "拆开的那一位列进 dropped：宿主不读它")
         g1.gen1(id: "L1", side: 0, gesture: 3, at: 6, present: jc, system: two); g1.system(name: combined, index: 0, at: 6.05); g1.gen1(id: "R1", side: 1, gesture: 3, at: 6.1, present: jc, system: two)
-        XCTAssertEqual(g1.units, [.gen1Pair(left: "L1", right: "R1"), .system(name: combined, index: 1)], "两位单只各按 L / R：合成一位、占前面那位；系统那一位不重复登记")
+        XCTAssertEqual(g1.slots, [.gen1Pair(left: "L1", right: "R1"), .system(name: combined, index: 1)], "两位单只各按 L / R：合成一位、占前面那位；第二套仍留原位")
         XCTAssertEqual((g1.orderFile()["order"] as? [[String: Any]])?.first?["left"] as? String, "L1")
         g1.gen1(id: "R1", side: 1, gesture: 2, at: 8, present: jc, system: two)
-        XCTAssertEqual(g1.units, [.gen1(id: "R1", side: 1), .gen1(id: "L1", side: 0), .system(name: combined, index: 1)], "一对里一只 SL + SR：再拆开")
+        XCTAssertEqual(g1.slots, [.gen1(id: "R1", side: 1), .system(name: combined, index: 1), .gen1(id: "L1", side: 0)], "一对里一只 SL + SR：再拆开，不挤动 P2")
         g1.reconcile(devices: [], mergedPair: false, system: two, gen1: jc.filter { $0.id != "L1" })
-        XCTAssertEqual(g1.units, [.gen1(id: "R1", side: 1), .system(name: combined, index: 1)], "断开一只只拿掉那一只，别人不动")
+        XCTAssertEqual(g1.slots, [.gen1(id: "R1", side: 1), .system(name: combined, index: 1)], "断开一只只拿掉那一只，别人不动")
         g1.remove(at: 0, keepConnectedWithoutSlot: true)
         XCTAssertFalse(g1.reconcile(devices: [], mergedPair: false, system: two, gen1: jc.filter { $0.id != "L1" }), "× 掉的那只连着、不自动排回来")
         XCTAssertEqual((g1.orderFile()["dropped"] as? [[String: Any]])?.last?["id"] as? String, "R1")
         let saved = try JSONDecoder().decode(PlayerAssignment.self, from: JSONEncoder().encode(g1))
         XCTAssertEqual(saved, g1, "按设备的分配也存偏好、下次照用")
+
+        // 断连保槽 / 重连回原槽 / 指定空槽分配 / 满 8 槽时合体 Joy-Con 不强拆
+        var keep = PlayerAssignment()
+        let k1 = PlayerAssignment.SystemKey(name: "DualSense", index: 0)
+        let k2 = PlayerAssignment.SystemKey(name: "Xbox", index: 0)
+        let k3 = PlayerAssignment.SystemKey(name: "Pro Controller", index: 0)
+        keep.reconcile(devices: [], mergedPair: false, system: [k1, k2])
+        XCTAssertEqual(keep.slots, [.system(name: "DualSense", index: 0), .system(name: "Xbox", index: 0)])
+        // P1 断开：P2 留在槽 1（不往前递补），顺序表槽 0 写 empty，P2 灯号仍为 2
+        keep.reconcile(devices: [], mergedPair: false, system: [k2])
+        XCTAssertEqual(keep.slots, [nil, .system(name: "Xbox", index: 0)], "P1 断开时 P2 保持在原槽 1")
+        XCTAssertEqual(keep.systemPlayers()[k2], 2, "P2 玩家灯仍为 P2")
+        XCTAssertEqual((keep.orderFile()["order"] as? [[String: Any]])?.map { $0["type"] as? String }, ["empty", "system"])
+        // 新手柄 P3 接入：不抢 P1 预留槽 0，排进槽 2
+        keep.reconcile(devices: [], mergedPair: false, system: [k2, k3])
+        XCTAssertEqual(keep.slots, [nil, .system(name: "Xbox", index: 0), .system(name: "Pro Controller", index: 0)], "新手柄不抢断连手柄的预留槽")
+        // P1 重连：回到原槽 0
+        keep.reconcile(devices: [], mergedPair: false, system: [k2, k3, k1])
+        XCTAssertEqual(keep.slots, [.system(name: "DualSense", index: 0), .system(name: "Xbox", index: 0), .system(name: "Pro Controller", index: 0)], "P1 重连恢复到原槽 0")
+
+        // 指定空槽分配（例如点选 P8，中间 P4 等为空时 slots.count 仍为 8，不隐藏 P8；P8 移除后尾部空槽自动省略）
+        var target = PlayerAssignment()
+        target.system(name: "DualSense", index: 0, targetSlot: 0)
+        target.system(name: "Xbox", index: 0, targetSlot: 7)
+        XCTAssertEqual(target.slots.count, 8, "P8 有玩家时保留到槽 7（P8），中间空槽不隐藏后面玩家")
+        XCTAssertEqual(target.slots[0], .system(name: "DualSense", index: 0))
+        XCTAssertNil(target.slots[3])
+        XCTAssertEqual(target.slots[7], .system(name: "Xbox", index: 0))
+        // 已分配的手柄再按不换槽，必须先 × 才能换到其他槽
+        target.system(name: "Xbox", index: 0, targetSlot: 2)
+        XCTAssertNil(target.slots[2], "已分配手柄不直接换槽")
+        XCTAssertEqual(target.slots[7], .system(name: "Xbox", index: 0))
+        target.remove(at: 7, keepConnectedWithoutSlot: false)
+        XCTAssertEqual(target.slots.count, 1, "确认后面全空后尾部空槽省略")
+        target.system(name: "Xbox", index: 0, targetSlot: 2)
+        XCTAssertEqual(target.slots, [.system(name: "DualSense", index: 0), nil, .system(name: "Xbox", index: 0)], "× 清除后再分配可进指定槽 P3")
+
+        // Joy-Con 合 -> 分需要有空槽才可拆；满 8 槽时不拆，空出一槽后再拆不挤动其他玩家
+        var full8 = PlayerAssignment()
+        full8.ns2(id: "JL", kind: 2, gesture: 3, at: 0)
+        full8.ns2(id: "JR", kind: 3, gesture: 3, at: 0.1)
+        for i in 1..<8 { full8.system(name: "Pad\(i)", index: 0) }
+        XCTAssertEqual(full8.slots.count, 8)
+        full8.ns2(id: "JL", kind: 2, gesture: 2, at: 1)
+        XCTAssertEqual(full8.slots[0], .pair(left: "JL", right: "JR"), "满 8 槽无空位时不拆合体 Joy-Con")
+        full8.remove(at: 3, keepConnectedWithoutSlot: false)   // 空出槽 3（P4）
+        full8.ns2(id: "JL", kind: 2, gesture: 2, at: 2)
+        XCTAssertEqual(full8.slots[0], .single(id: "JL", kind: 2), "有空槽时拆分成功，原只留槽 0")
+        XCTAssertEqual(full8.slots[3], .single(id: "JR", kind: 3), "另一只放进空槽 3，不挤动其他玩家")
+        XCTAssertEqual(full8.slots[1], .system(name: "Pad1", index: 0))
+        XCTAssertEqual(full8.slots[7], .system(name: "Pad7", index: 0))
+        // 分 -> 合：空出后面那槽，不移动其他玩家
+        full8.ns2(id: "JL", kind: 2, gesture: 3, at: 3)
+        full8.ns2(id: "JR", kind: 3, gesture: 3, at: 3.1)
+        XCTAssertEqual(full8.slots[0], .pair(left: "JL", right: "JR"))
+        XCTAssertNil(full8.slots[3], "分 -> 合空出原高槽位，后面玩家不动")
+        XCTAssertEqual(full8.slots[7], .system(name: "Pad7", index: 0))
         // 只连一套、没学过：认得出（只有一位合成的），同套另一只就是另一侧那只
         var one1 = PlayerAssignment()
         one1.reconcile(devices: [], mergedPair: false, system: [c0], gen1: Array(jc.prefix(2)))
@@ -519,7 +576,7 @@ import XCTest
         let g1Four: [PlayerAssignment.Gen1Device] = [.init(id: "aL", side: 0), .init(id: "aR", side: 1), .init(id: "bL", side: 0), .init(id: "bR", side: 1)]
         twoPairs.reconcile(devices: [], mergedPair: false, system: [p0, p1], gen1: g1Four)
         twoPairs.gen1(id: "aL", side: 0, gesture: 2, at: 1, present: g1Four, system: [p0, p1])
-        XCTAssertEqual(twoPairs.units, [U.gen1(id: "aL", side: 0), U.gen1(id: "aR", side: 1), U.system(name: p1.name, index: 1)])
+        XCTAssertEqual(twoPairs.slots, [U.gen1(id: "aL", side: 0), U.system(name: p1.name, index: 1), U.gen1(id: "aR", side: 1)])
         twoPairs.reconcile(devices: [], mergedPair: false, system: [p0, p1], gen1: g1Four)
         XCTAssertEqual(twoPairs.units.count, 3, "拆完不多出一只")
         // Joy-Con 2 对照：一对断一只剩单只、接回拼回原位
@@ -625,7 +682,7 @@ import XCTest
         // C 两套合成的一对，第 1 套左只 SL + SR → 拆的是第 1 套
         var c = PlayerAssignment(); var kc = [Kit(l: "a1", r: "b1"), Kit(l: "a2", r: "b2")]
         step(&c, kc); XCTAssertEqual(show(c), ["Joy-Con (L/R)#0", "Joy-Con (L/R)#1"])
-        press(&c, kc, "a1", 0, 2, at: 1); step(&c, kc); XCTAssertEqual(show(c), ["a1", "b1", "Joy-Con (L/R)#1"], "C 拆第 1 套")
+        press(&c, kc, "a1", 0, 2, at: 1); step(&c, kc); XCTAssertEqual(show(c), ["a1", "Joy-Con (L/R)#1", "b1"], "C 拆第 1 套（不挤动 P2）")
         // E 接着两只右只都断开 → 第 1 套剩 a1（按设备）、第 2 套剩系统的左只；不重复、不少
         kc[0].r = nil; kc[1].r = nil; step(&c, kc); step(&c, kc); XCTAssertEqual(show(c), ["a1", "Joy-Con (L)#1"], "E 两只右只断开")
         // K 两套，拆第 2 套
@@ -656,13 +713,13 @@ import XCTest
         var km = [Kit(l: "1L", r: "1R"), Kit(l: "2L", r: "2R"), Kit(l: "3L", r: "3R"), Kit(l: "4L", r: "4R")]
         step(&m, km); XCTAssertEqual(show(m), ["Joy-Con (L/R)#0", "Joy-Con (L/R)#1", "Joy-Con (L/R)#2", "Joy-Con (L/R)#3"], "L 四套各一位")
         press(&m, km, "3R", 1, 2, at: 1); step(&m, km)
-        XCTAssertEqual(show(m), ["Joy-Con (L/R)#0", "Joy-Con (L/R)#1", "3R", "3L", "Joy-Con (L/R)#3"], "L 拆第 3 套（按的那只留原位、另一只接在后面；系统仍列着第 3 套合成的那一位，第 4 套还是 #3）")
+        XCTAssertEqual(show(m), ["Joy-Con (L/R)#0", "Joy-Con (L/R)#1", "3R", "Joy-Con (L/R)#3", "3L"], "L 拆第 3 套（按的那只留原位、第 4 套仍留 P4 不被挤动、另一只进空槽 P5）")
         press(&m, km, "1L", 0, 2, at: 2); step(&m, km)
-        XCTAssertEqual(show(m), ["1L", "1R", "Joy-Con (L/R)#1", "3R", "3L", "Joy-Con (L/R)#3"], "L 再拆第 1 套")
+        XCTAssertEqual(show(m), ["1L", "Joy-Con (L/R)#1", "3R", "Joy-Con (L/R)#3", "3L", "1R"], "L 再拆第 1 套（另一只进空槽 P6）")
         km[1].r = nil; step(&m, km); step(&m, km)   // 第 2 套断右只（没拆过）
-        XCTAssertEqual(show(m), ["1L", "1R", "Joy-Con (L)#0", "3R", "3L", "Joy-Con (L/R)#2"], "L 第 2 套断右只：原位剩左只；第 4 套号码挪成 #2 也跟着走")
+        XCTAssertEqual(show(m), ["1L", "Joy-Con (L)#0", "3R", "Joy-Con (L/R)#2", "3L", "1R"], "L 第 2 套断右只：原位剩左只；第 4 套号码挪成 #2 也跟着走")
         km[0].r = nil; step(&m, km); step(&m, km)   // 第 1 套断右只（拆过）
-        XCTAssertEqual(show(m), ["1L", "Joy-Con (L)#1", "3R", "3L", "Joy-Con (L/R)#1"], "L 第 1 套断右只")
+        XCTAssertEqual(show(m), ["1L", "Joy-Con (L)#1", "3R", "Joy-Con (L/R)#1", "3L"], "L 第 1 套断右只")
         km[1].r = "2R"; step(&m, km); step(&m, km)   // 第 2 套接回
         XCTAssertEqual(Set(show(m)).count, show(m).count, "L 不重复")
         XCTAssertEqual(show(m).count, 5, "L 第 2 套接回：1L、2 一对、3R、3L、4 一对")
@@ -683,7 +740,7 @@ import XCTest
         var mm = PlayerAssignment(); var km2 = [Kit(l: "1L", r: "1R"), Kit(l: "2L", r: "2R")]
         step(&mm, km2); press(&mm, km2, "1L", 0, 2, at: 1)
         do { let (s0, g0) = feed(km2); mm.finish(presentSystem: s0, devices: [], gen1: g0) }
-        step(&mm, km2); XCTAssertEqual(show(mm), ["1L", "1R", "Joy-Con (L/R)#1"], "M 拆完按完成")
+        step(&mm, km2); XCTAssertEqual(show(mm), ["1L", "Joy-Con (L/R)#1", "1R"], "M 拆完按完成")
         km2[0] = Kit(l: nil, r: nil); step(&mm, km2); step(&mm, km2); XCTAssertEqual(show(mm), ["Joy-Con (L/R)#0"], "M 第 1 套断开：第 2 套号码挪成 #0 跟着走")
         km2[0] = Kit(l: "1L", r: "1R"); step(&mm, km2); step(&mm, km2)
         XCTAssertEqual(show(mm).count, 2, "M 第 1 套接回：两套都在，现在是 \(show(mm))")
@@ -697,7 +754,7 @@ import XCTest
             }
             lag(kn); press(&n, kn, "1L", 0, 2, at: 1)
             do { let (s0, g0) = feed(kn); n.finish(presentSystem: s0, devices: [], gen1: g0) }
-            lag(kn); XCTAssertEqual(show(n), ["1L", "1R", "Joy-Con (L/R)#1"], "N\(systemFirst) 拆完")
+            lag(kn); XCTAssertEqual(show(n), ["1L", "Joy-Con (L/R)#1", "1R"], "N\(systemFirst) 拆完")
             var k1 = kn; k1[0].l = nil; lag(k1)
             k1[0].r = nil; lag(k1); XCTAssertEqual(show(n), ["Joy-Con (L/R)#0"], "N\(systemFirst) 第 1 套两只都断开")
             k1[0].l = "1L"; lag(k1)
@@ -716,7 +773,7 @@ import XCTest
             do { let (s0, g0) = feed(ko); o.finish(presentSystem: s0, devices: [], gen1: g0) }
             lag(ko); XCTAssertEqual(show(o), ["Joy-Con (L/R)#0", "2L", "2R"], "O\(systemFirst) 拆第 2 套")
             var k2 = ko; k2[1].l = nil; lag(k2); XCTAssertEqual(show(o), ["Joy-Con (L/R)#0", "2R"], "O\(systemFirst) 左只断开")
-            k2[1].l = "2L"; lag(k2); XCTAssertEqual(show(o), ["Joy-Con (L/R)#0", "2R", "2L"], "O\(systemFirst) 左只接回自己一位")
+            k2[1].l = "2L"; lag(k2); XCTAssertEqual(show(o), ["Joy-Con (L/R)#0", "2L", "2R"], "O\(systemFirst) 左只接回原槽 P2")
         }
         // P 11-20 日志重现：拆开后又按 L + R 合回一对（按设备读的一对），右只断开 → 剩左只；右只接回 → 原位并回一对（没重新配对也一样，同 Joy-Con 2）
         for systemFirst in [true, false] {
@@ -759,7 +816,7 @@ import XCTest
             func step() { let d = devices(kits); a.reconcile(devices: d.devs, mergedGroups: d.merged, system: []) }
             step(); XCTAssertEqual(show(a), ["1L+1R", "2L+2R"])
             a.ns2(id: "1L", kind: 2, gesture: 2, at: 1); a.ns2(id: "2R", kind: 3, gesture: 2, at: 2); step()
-            XCTAssertEqual(show(a), ["1L", "1R", "2R", "2L"], "两套都拆开")
+            XCTAssertEqual(show(a), ["1L", "2R", "1R", "2L"], "两套都拆开（不挤动已有玩家位）")
             let n = Int(String(victim.first!))! - 1, left = victim.hasSuffix("L")
             if left { kits[n].l = false } else { kits[n].r = false }; step()
             if left { kits[n].l = true } else { kits[n].r = true }; step()

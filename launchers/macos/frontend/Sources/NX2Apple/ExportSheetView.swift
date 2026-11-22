@@ -162,7 +162,15 @@ struct ExportSheetView: View {
     }
 
     private func gameStateText(_ s: ExportDeviceRow.GameState) -> String {
-        switch s { case .latest: return t("exportsheet.game.latest"); case .old: return t("exportsheet.game.old"); case .none: return t("exportsheet.game.none") }
+        switch s {
+        case .latest: return t("exportsheet.game.latest")
+        case .old: return t("exportsheet.game.old")
+        case .none: return t("exportsheet.game.none")
+        case .present: return t("console.game.present")
+        case .unknown: return t("console.game.unknown")
+        case .pending: return t("console.game.pending")
+        case .removed: return t("console.game.removed")
+        }
     }
 
     private func noteText(_ n: ExportDeviceRow.Note) -> String {
@@ -173,6 +181,7 @@ struct ExportSheetView: View {
         case .noShell: return t(sign == "none" ? "exportsheet.note.noShellSelfSign" : "exportsheet.note.noShell")
         case .shellOld: return t("exportsheet.note.shellOld")
         case .standaloneSelfSign: return t("exportsheet.note.standaloneSelfSign")
+        case .deviceAccess(let error): return loc.backend(error)
         }
     }
 

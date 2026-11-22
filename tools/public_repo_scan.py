@@ -433,10 +433,13 @@ def scan(repo, ref, paths, list_only=False, base=None):
                     # Hash verification is not content coverage. A changed pinned
                     # archive must fail too, rather than becoming a delta warning.
                     (uncovered_allowed if verified else uncovered_blocking).append(item)
-                elif base is None:
+                elif base is None or (path in changed and path not in baseline and path not in renames
+                                      and decision != 'excluded_credentials'):
                     # Reuse the one reviewed policy table, without opening the
                     # blob or changing its coverage classification. Protected
                     # material cannot be waived by even a matching rule.
+                    # 增量门禁里「新加的文件」与全量同一口径（11-22：#1749 新加 4 个 .golden 文本，增量只记黄、放行，
+                    #   整仓扫描却判未读阻挡）；已在基线里的存量文件、改名过来的不追溯，仍只记黄
                     protected = decision in ('excluded_credentials', 'excluded_payload', 'non_regular')
                     if not protected and allowed('uncovered_' + decision, '', '', path, rules):
                         uncovered_allowed.append(item)
@@ -451,7 +454,7 @@ def scan(repo, ref, paths, list_only=False, base=None):
     incomplete = [f for f in uncovered if f['status'] == 'changed' and
                   f['reason'] == 'excluded_credentials']
     warnings = [f for f in uncovered if f['status'] == 'changed' and
-                f['reason'] != 'excluded_credentials']
+                f['reason'] != 'excluded_credentials' and f not in uncovered_blocking]
     return {'commit': commit, 'base': base_commit, 'scope': 'committed_git_inventory',
             'requested_paths': [safe_path(p, rules) for p in paths], 'list_only': list_only,
             'coverage': dict(sorted(counts.items())), 'findings': findings,
@@ -531,6 +534,11 @@ def main():
             print('【黄】{}:uncovered: {}'.format(json.dumps(f['path'], ensure_ascii=True), f['reason']))
         for f in report['uncovered_blocking']:
             print('{}:uncovered: {}'.format(json.dumps(f['path'], ensure_ascii=True), f['reason']))
+        if args.base is not None and report['uncovered_blocking']:
+            exts = sorted({('.' + PurePosixPath(f['path']).name.rsplit('.', 1)[-1]) if '.' in PurePosixPath(f['path']).name
+                           else PurePosixPath(f['path']).name for f in report['uncovered_blocking']})
+            print('新加文件的类型扫描器没审过（{}）：若是文本，登记进 tools/public_repo_scan_rules.json 的 reviewed_text_globs'
+                  '（先例 e06413126）后重入；二进制按 binary_ascii_globs / build_artifact_allow_globs 登记'.format('、'.join(exts)))
         for f in report['uncovered_allowed']:
             if 'reviewed_archive' in f:
                 print('{}:reviewed_archive: SHA-256 已核对（仍未扫描正文）'.format(
@@ -539,9 +547,9 @@ def main():
             print('全量公开仓扫描：候选 {}，未读阻挡 {}，有理由保留未读 {}（仍未扫描正文）'.format(
                 report['blocking_count'], len(report['uncovered_blocking']), len(report['uncovered_allowed'])))
         else:
-            print('公开仓扫描：增量命中 {}，存量命中 {}，增量未覆盖 {}，增量未审类型 {}；全量清单含未覆盖边界'.format(
+            print('公开仓扫描：增量命中 {}，存量命中 {}，增量未覆盖 {}，新加未读阻挡 {}，增量未审类型 {}；全量清单含未覆盖边界'.format(
                 report['blocking_count'], sum(f['status'] == 'existing' for f in report['findings']),
-                len(report['incomplete_changed']),
+                len(report['incomplete_changed']), len(report['uncovered_blocking']),
                 sum(f['reason'] == 'unreviewed_type' for f in report['warnings_changed'])))
     if report['blocking_count'] or report['uncovered_blocking']:
         return 1

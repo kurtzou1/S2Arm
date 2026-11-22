@@ -5,6 +5,10 @@
 # ② 原字写错（deadbeef）：0x100 原样、记缺口 fix、退出码 3
 # ③ 别的模块（sdk）的行：不碰 main（0x100 原样、0 缺口、退出码 0）
 # ④ 不给表：产物与 ③ 逐字节相同（没有修补行 = 改写产物不变）
+# ⑤ veneer 行（11-22 奥日 2 全局表加锁）：c main 104 veneer f9400101 <锁体字> bl:10c <放锁体字>：0x104 原位改成 B 跳板，跳板逐条是
+#   adrp x16,键页 / sub x16,x16,#0x10 / sevl / wfe / ldaxr w17,[x16] / cbnz w17,跳板+0xc / mov w17,#1 / stxr w9,w17,[x16] / cbnz w9,跳板+0x10 /
+#   bl 0x10c / adrp x16,键页 / sub x16,x16,#0x10 / stlr wzr,[x16] / b 0x108（体字按 AArch64 编码手算），日志有「游戏缺陷修补：main+0x104 跳板」、0 缺口、退出码 0
+# ⑥ veneer 行原字写错（deadbeef）：0x104 原样、记缺口 fix、退出码 3
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); trap 'rm -rf "$T"' EXIT; bad=0
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
 PY=${S2A_PY:-$HOME/.s2arm/venv/bin/python3}; [ -x "$PY" ] || PY=python3
@@ -39,6 +43,28 @@ r2=$(run bad "$T/bad.tsv"); w2=$(w "$T/bad")
 ck "② 原字写错：0x100 原样、记缺口 fix、退出码 3（实：${w2}，rc ${r2}）" '[ "${w2}" = "f9400008 f9400101 d61f0020" ] && grep -q "fix" "$T/bad/main.gaps.tsv" && [ "${r2}" = 3 ]'
 r3=$(run other "$T/other.tsv"); w3=$(w "$T/other")
 ck "③ 别的模块的行不碰 main（实：${w3}，缺口 $(gaps "$T/other")，rc ${r3}）" '[ "${w3}" = "f9400008 f9400101 d61f0020" ] && [ "$(gaps "$T/other")" = 0 ] && [ "${r3}" = 0 ]'
+LOCK='adrp:x16 d1004210 d50320bf d503205f 885ffe11 35ffffd1 52800031 88097e11 35ffff89 bl:10c adrp:x16 d1004210 889ffe1f'
+printf 'c\tmain\t104\tveneer\tf9400101\t%s\t# 加锁调用\n' "$LOCK" | tr ' ' '\t' > "$T/ven.tsv"
+printf 'c\tmain\t104\tveneer\tdeadbeef\t%s\n' "$LOCK" | tr ' ' '\t' > "$T/venbad.tsv"
+r5=$(run ven "$T/ven.tsv")
+g5=$($PY - "$T/ven" <<'EOF5'
+import struct, sys
+from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
+d = sys.argv[1]; key = next(int(l.split('\t')[1], 16) for l in open(d + '/main.fixups.tsv') if l.startswith('# KEY_PAGE_OFF\t'))
+b = open(d + '/main.patched.bin', 'rb').read(); md = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+w, = struct.unpack_from('<I', b, 0x104); assert w >> 26 == 0b000101, f'0x104 不是 B：{w:#x}'
+imm = w & 0x3ffffff; t = 0x104 + 4 * (imm - (1 << 26) if imm >> 25 else imm)
+def norm(i):
+    s = f'{i.mnemonic} {i.op_str}'.strip().replace(f'#{key:#x}', '#键页')
+    if i.mnemonic in ('cbnz', 'cbz'): r, a = i.op_str.split(', #'); s = f'{i.mnemonic} {r}, 跳板+{int(a, 16) - t:#x}'
+    return s
+print(';'.join(norm(i) for i in md.disasm(b[t:t + 56], t)))
+EOF5
+)
+want5='adrp x16, #键页;sub x16, x16, #0x10;sevl;wfe;ldaxr w17, [x16];cbnz w17, 跳板+0xc;mov w17, #1;stxr w9, w17, [x16];cbnz w9, 跳板+0x10;bl #0x10c;adrp x16, #键页;sub x16, x16, #0x10;stlr wzr, [x16];b #0x108'
+ck "⑤ veneer 行：0x104 改成 B 跳板、跳板逐条如期、日志有修补行、0 缺口、退出码 0（实：${g5}，缺口 $(gaps "$T/ven")，rc ${r5}）" '[ "${g5}" = "${want5}" ] && grep -q "游戏缺陷修补：main+0x104 跳板" "$T/ven.log" && [ "$(gaps "$T/ven")" = 0 ] && [ "${r5}" = 0 ]'
+r6=$(run venbad "$T/venbad.tsv"); w6=$(w "$T/venbad")
+ck "⑥ veneer 原字写错：0x104 原样、记缺口 fix、退出码 3（实：${w6}，rc ${r6}）" '[ "${w6}" = "f9400008 f9400101 d61f0020" ] && grep -q "fix" "$T/venbad/main.gaps.tsv" && [ "${r6}" = 3 ]'
 r4=$(run none ""); 
 ck "④ 不给表：产物与 ③ 逐字节相同（rc ${r4}）" '[ "${r4}" = 0 ] && cmp -s "$T/none/main.patched.bin" "$T/other/main.patched.bin"'
 [ $bad = 0 ] && echo "✓ fix_rewrite_test" || { echo "✗ fix_rewrite_test"; exit 1; }

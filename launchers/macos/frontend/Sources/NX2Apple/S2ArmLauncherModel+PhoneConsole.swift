@@ -179,7 +179,9 @@ extension S2ArmLauncherModel {
     /// 这款在当前这台上的状态（② 一行）；表里没有的款按没推过
     func consoleGame(_ game: GameSummary) -> PhoneOverview.Game {
         consolePhone?.games.first { $0.gameId == game.id.uppercased() }
-            ?? PhoneOverview.Game(gameId: game.id.uppercased(), state: .notPushed, reasons: [], dataOnComputer: nil)
+            ?? PhoneOverview.Game(gameId: game.id.uppercased(),
+                                  state: consolePhone?.bundleId.hasPrefix("lc:") == true ? .unknown : .notPushed,
+                                  reasons: [], dataOnComputer: nil)
     }
 
     /// 建议更新的默认勾上（每次读到新总览时补勾新出现的建议更新款；玩家取消的不重勾，直到它的状态变了）

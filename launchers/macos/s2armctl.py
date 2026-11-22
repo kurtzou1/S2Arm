@@ -427,6 +427,21 @@ def device(gid):
         ds = parts[parts.index('downstream') + 1] if 'downstream' in parts[:-1] else None
         got = sorted(a.get('bundleIdentifier', '') for a in apps if container_match(a.get('bundleIdentifier', ''), bid)
                      or ds and a.get('bundleIdentifier', '').lower().startswith(f'io.s2arm.ds.{ds}.'.lower()))
+        import re
+        if any(re.fullmatch(r"LiveContainer\d*", a.get("name") or "", re.I) for a in apps):
+            phone = next((p for p in call('GET', '/state').get('phoneConsole') or [] if p.get('device') == u), {})
+            target = (phone.get('installed') or {}).get('bundleId') or ""
+            if target.startswith("lc:"):
+                game = next((g for g in phone.get('games') or [] if g.get('gameId') == gid.upper()), {})
+                status = {"present": "已在手机上", "latest": "已是最新", "suggested": "建议更新",
+                          "notPushed": "未在此容器安装", "pending": "已发送，待导入"}.get(game.get("state"), "暂时无法确认")
+                if "removed" in (game.get("reasons") or []):
+                    status = "已从手机删除"
+                print(f'iPhone「{name}」（{u}）：已装 LiveContainer 内部 S2Arm；这款游戏：{status}')
+                continue
+            if phone.get("needsChoice") or not got:
+                print(f'iPhone「{name}」（{u}）：检测到 LiveContainer；请在 S2Arm 总控台刷新并选择内部 App，当前未确认客体状态。')
+                continue
         print(f'iPhone「{name}」（{u}）：' + (f'已装 {"、".join(got)}' if got else f'没装 {bid}——请玩家用 AltStore 装（要登录 Apple ID，AI 不代做）'))
     sys.exit(0)
 

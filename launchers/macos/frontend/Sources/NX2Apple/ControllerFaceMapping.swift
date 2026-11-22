@@ -143,7 +143,7 @@ struct ControllerFaceMapping: Equatable {
 extension PlayerAssignment {
     /// The assignment, rather than the last device to produce input, owns hints.
     func primarySystem(in pads: [GCController]) -> GCController? {
-        guard let unit = units.first else { return pads.first }
+        guard let unit = slots.first ?? nil else { return units.isEmpty ? pads.first : nil }
         guard case let .system(name, index) = unit else { return nil }
         let matches = pads.filter { ($0.vendorName ?? $0.productCategory) == name }
         return matches.indices.contains(index) ? matches[index] : nil
@@ -153,15 +153,14 @@ extension PlayerAssignment {
     }
     func pad(forPlayer player: Int, in pads: [SystemControllers.Pad]) -> SystemControllers.Pad? {
         guard !units.isEmpty else { return pads.indices.contains(player) ? pads[player] : nil }
-        guard units.indices.contains(player) else { return nil }
-        let unit = units[player]
+        guard slots.indices.contains(player), let unit = slots[player] else { return nil }
         guard case let .system(name, index) = unit else { return nil }
         let matches = pads.filter { $0.name == name }
         return matches.indices.contains(index) ? matches[index] : nil
     }
     var primaryIsNintendo: Bool { isNintendo(player: 0) }
     func isNintendo(player: Int) -> Bool {
-        guard units.indices.contains(player) else { return false }
-        switch units[player] { case .pair, .single, .whole, .gen1, .gen1Pair: return true; default: return false }
+        guard slots.indices.contains(player), let unit = slots[player] else { return false }
+        switch unit { case .pair, .single, .whole, .gen1, .gen1Pair: return true; default: return false }
     }
 }

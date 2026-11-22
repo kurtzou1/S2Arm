@@ -683,11 +683,15 @@ static uint32_t movz_hi(int reg, uint32_t value) {
   return 0x52a00000 | ((value >> 16) << 5) | reg;
 }
 /* 游戏缺陷修补表（S2A_FIX_TSV = 仓库 runtime/fix/<main 构建号前 16 位>.tsv，11-16）：游戏自己代码里的缺陷、宿主调度挡不住的，按构建号精确改字。
- * 改写器别处只认代码形状、不认具体游戏；这里是例外，所以只许最窄的一种：行格式同帧率表 c 行，只收 word 种类——
- *   c <模块> <偏移> word <原字> <新字>    # 理由
- * 原字不符（不是这一版）、点不在代码段 → 记缺口不改。分析前改（后面的分析看到的就是改好的代码）。与帧率表分开放：帧率表的存在本身有含义
+ * 改写器别处只认代码形状、不认具体游戏；这里是例外，所以只收两种最窄的（行格式同帧率表 c 行）——
+ *   c <模块> <偏移> word <原字> <新字>    # 理由          原位换一条指令；分析前改（phase 0，后面的分析看到的就是改好的代码）
+ *   c <模块> <偏移> veneer <原字> <体字…>  # 理由          原位改成 B 跳板，体字与记号同帧率表 veneer（veneer_row）；同宽屏点在生成之后（phase 1）。
+ *                                                          用途：游戏自己无锁的并发改，按调用点包一把客体自旋锁（锁字 = 本模块键页前 FIX_LOCK_TAIL 字节处，
+ *                                                          体字 adrp:x16 + sub x16, x16, #0x10 取到；pack/cpatch.py 给 FPSLocker 变量的区间不含这 16 字节）
+ * 原字不符（不是这一版）、点不在代码段 → 记缺口不改。与帧率表分开放：帧率表的存在本身有含义
  * （「本款已有我方帧率表」→ 社区帧率补丁不收，pack/cpatch.py），修补表不该带上它。以后与按款旋钮表并成一套时按同一格式合并 */
-static void fix_rows(void) {
+static int veneer_row(A off, char* a1, char* a2, char* a3, const char* tag);
+static void fix_rows(int phase) {
   const char* path = g->r.fix_tsv;
   if (!path || !*path)
     return;
@@ -708,10 +712,14 @@ static void fix_rows(void) {
          *origs = strtok(NULL, " \t\r\n"), *news = strtok(NULL, " \t\r\n");
     if (!t0 || !eq(t0, "c") || !mod || !eq(mod, g->r.module))
       continue;
-    if (!offs || !kind || !eq(kind, "word") || !origs || !news) {
-      gap(0, "fix", "游戏缺陷修补表行不全或不是 word 种类");
+    int ven = kind && eq(kind, "veneer");
+    if (!offs || !kind || !(ven || eq(kind, "word")) || !origs || !news) {
+      if (phase == 0)
+        gap(0, "fix", "游戏缺陷修补表行不全或种类不是 word / veneer");
       continue;
     }
+    if (ven != (phase == 1))
+      continue;
     A off = strtoll(offs, NULL, 16);
     uint32_t orig = (uint32_t)strtoul(origs, NULL, 16), nw = (uint32_t)strtoul(news, NULL, 16), w = 0;
     if (off < 0 || off % 4 || off + 4 > (A)g->text) {
@@ -721,6 +729,14 @@ static void fix_rows(void) {
     memcpy(&w, g->img + off, 4);
     if (w != orig) {
       gap(off, "fix", "修补点原字 0x%x，表里写的是 0x%x（不是这一版）", w, orig);
+      continue;
+    }
+    if (ven) {
+      char *a2 = strtok(NULL, " \t\r\n"), *a3 = a2 ? strtok(NULL, " \t\r\n") : NULL;
+      if (veneer_row(off, news, a2, a3, "fix")) {
+        bump("game_fix_veneer");
+        msg("游戏缺陷修补：%s+%#llx 跳板\n", g->r.module, (unsigned long long)off);
+      }
       continue;
     }
     memcpy(g->img + off, &nw, 4);
@@ -2316,13 +2332,24 @@ static void data_in_text(void) {
   msg("%s 内嵌数据判定：启用；代码段 %zu 字节，真实代码 %zu（函数范围 %zu、动态符号 %zu 个、分支闭包 %zu），排除 %zu 字节；异常类指令 %zu 条（范围外 %zu）；缺口 %zu → %zu，改写点 %zu → %zu\n",
       g->r.module, (size_t)g->text, code, fde, syms, walked, (size_t)g->text - code, exc, outside, gaps0, g->gaps.n, sites0, g->sites.n);
 }
+/* 社区补丁写进代码段尾巴（代码段结尾到 ro 开头之间的填充）的新代码字（#1628：FPSLocker 在旷野之息 1.9.0 主程序末尾放新函数，里面读计时器）。
+   这段不在代码段里，分析不覆盖；scan() 把这里的字也当代码看，要改写的（读计时器 / svc / 线程寄存器 / ctr）照常记成改写点，生成时同代码段里的点 */
+static A g_cptail[4096];
+static int g_ncptail;
+static int cp_tail(A a) {
+  for (int i = 0; i < g_ncptail; i++)
+    if (g_cptail[i] == a) return 1;
+  return 0;
+}
 static void scan(void) {
   /* NRO（romfs 里 nn::ro 装的模块，runtime/rewriter/nro_to_nso.py 转来）：text 段开头 [4, 0x80) 是 NRO 头（MOD0 偏移、
      'NRO0'、大小、段表、构建号），是数据不是指令，不扫（构建号字节会被认成 hvc 等缺口）；NSO 没有这个标记，扫描范围不变（与 patch_nso.py 同口径） */
   const A hdr = g->text >= 0x80 && !memcmp(g->img + 0x10, "NRO0", 4) ? 0x80 : 0;
-  for (A a = 0; a < (A)g->text; a += 4) {
+  A hi = (A)g->text;
+  for (int i = 0; i < g_ncptail; i++) if (g_cptail[i] + 4 > hi) hi = g_cptail[i] + 4;
+  for (A a = 0; a < hi; a += 4) {
     if (a >= 4 && a < hdr) continue;
-    if (!in_code(a)) continue;
+    if (a < (A)g->text ? !in_code(a) : !cp_tail(a)) continue;   /* 代码段外只看社区补丁写进尾巴的字（#1628） */
     uint32_t w = iw(a);
     const char* k = NULL;
     int arg = 0;
@@ -2367,6 +2394,10 @@ static void scan(void) {
       Ins x;
       if (decode(w, a, &x) && has18(&x))
         k = "x18";
+    }
+    if (k && a >= (A)g->text && eq(k, "x18")) {   /* 尾巴新代码不在任何函数里，x18 改写要靠函数分析（窗口 / 跳转），做不了：记缺口，那份补丁不进包 */
+      gap(a, "cpatch", "代码段尾巴新代码 0x%x 用到 x18，改写不了", w);
+      continue;
     }
     if (k) {
       Site s = {a, k, arg, 0};
@@ -3962,6 +3993,41 @@ static int fps_reg(const char* s, char kind) {
   long r = strtol(s + 1, &e, 10);
   return *e || r < 0 || r > 30 ? -1 : (int)r;
 }
+/* veneer 行（帧率表 / 游戏缺陷修补表共用）：解析体字与记号、核能否原样搬进跳板、在补丁区生成；失败记缺口（tag 为缺口类别）返回 0 */
+static int veneer_row(A off, char* a1, char* a2, char* a3, const char* tag) {
+  FpsVeneer v = {off, 0, {0}, {0}};
+  const char* why = NULL;
+  for (char* t = a1; t && !why; t = v.n == 1 ? a2 : v.n == 2 ? a3 : strtok(NULL, " \t\r\n")) {
+    if (v.n == FPS_VEN_MAX) { why = "体字超过 16 条"; break; }
+    char* e;
+    if (!strncmp(t, "adrp:", 5)) {
+      int x = fps_reg(t + 5, 'x');
+      if (x < 0) { why = "adrp: 后寄存器不认"; break; }
+      v.kind[v.n] = 'a'; v.w[v.n++] = (uint32_t)x; continue;
+    }
+    if (!strncmp(t, "bl:", 3)) {
+      unsigned long x = strtoul(t + 3, &e, 16);
+      if (*e || e == t + 3 || x % 4 || x + 4 > (unsigned long)g->text) { why = "bl: 目标不在代码段"; break; }
+      v.kind[v.n] = 'l'; v.w[v.n++] = (uint32_t)x; continue;
+    }
+    unsigned long x = strtoul(t, &e, 16);
+    if (*e || x > 0xffffffffUL) { why = "体字不是 8 位十六进制"; break; }
+    v.w[v.n++] = (uint32_t)x;
+  }
+  if (!why && !v.n) why = "没有体字";
+  if (why) { gap(off, tag, "veneer %s", why); return 0; }
+  int bad = -1;
+  for (int i = 0; i < v.n && bad < 0; i++)
+    if (!v.kind[i] && (why = fps_ven_check(v.w[i], i, v.n))) bad = i;
+  if (bad >= 0) { gap(off, tag, "veneer 第 %d 条体字 0x%08x 不能原样搬进跳板（%s）", bad + 1, v.w[bad], why); return 0; }
+  if (site_at(off) || consumed(off)) { gap(off, tag, "veneer 点已是改写点"); return 0; }
+  g->guarding = 1;
+  int ok = unit_run(off, gen_fps_veneer, &v, NULL);
+  g->guarding = 0;
+  if (!ok) { gap(off, tag, "AssertionError: %s", g->error); return 0; }
+  done(off);
+  return 1;
+}
 /* 改前先核本模块所有 c 行原字（在原始代码上、一次）：同表的行成组配合（word 跳过两条 + adrp_slot / ldr_slot 读槽），只改一半会拿游戏原来的寄存器当基址读、
  * 或步长读到垃圾值，所以全有或全无（原生层线 10-26 审出）。有一行不符：本模块的 c 行一行都不改，打一行 [黄] 列出不符的偏移、计 fps_orig_skip、不算缺口；
  * 表的运行时行（w / slot 等，runtime/src/fps.c）照常生效（维护者 10-26：版本对不上也要试，不整款放弃） */
@@ -4026,38 +4092,7 @@ static void fps_rows(int phase) {
       if (st < 0 || x < 0 || slot < FPS_SLOT_LO || slot > FPS_SLOT_HI) { gap(off, "fps", "ldr_slot 参数不认或槽 %d 不在 %d–%d", slot, FPS_SLOT_LO, FPS_SLOT_HI); continue; }
       nw = 0xbd400000u | ((uint32_t)(slot * 2) << 10) | ((uint32_t)x << 5) | (uint32_t)st; /* LDR St, [Xn, #slot*8]（imm12 按 4 字节缩放） */
     } else if (eq(kind, "veneer")) {
-      FpsVeneer v = {off, 0, {0}, {0}};
-      const char* why = NULL;
-      for (char* t = a1; t && !why; t = v.n == 1 ? a2 : v.n == 2 ? a3 : strtok(NULL, " \t\r\n")) {
-        if (v.n == FPS_VEN_MAX) { why = "体字超过 16 条"; break; }
-        char* e;
-        if (!strncmp(t, "adrp:", 5)) {
-          int x = fps_reg(t + 5, 'x');
-          if (x < 0) { why = "adrp: 后寄存器不认"; break; }
-          v.kind[v.n] = 'a'; v.w[v.n++] = (uint32_t)x; continue;
-        }
-        if (!strncmp(t, "bl:", 3)) {
-          unsigned long x = strtoul(t + 3, &e, 16);
-          if (*e || e == t + 3 || x % 4 || x + 4 > (unsigned long)g->text) { why = "bl: 目标不在代码段"; break; }
-          v.kind[v.n] = 'l'; v.w[v.n++] = (uint32_t)x; continue;
-        }
-        unsigned long x = strtoul(t, &e, 16);
-        if (*e || x > 0xffffffffUL) { why = "体字不是 8 位十六进制"; break; }
-        v.w[v.n++] = (uint32_t)x;
-      }
-      if (!why && !v.n) why = "没有体字";
-      if (why) { gap(off, "fps", "veneer %s", why); continue; }
-      int bad = -1;
-      for (int i = 0; i < v.n && bad < 0; i++)
-        if (!v.kind[i] && (why = fps_ven_check(v.w[i], i, v.n))) bad = i;
-      if (bad >= 0) { gap(off, "fps", "veneer 第 %d 条体字 0x%08x 不能原样搬进跳板（%s）", bad + 1, v.w[bad], why); continue; }
-      if (site_at(off) || consumed(off)) { gap(off, "fps", "veneer 点已是改写点"); continue; }
-      g->guarding = 1;
-      int ok = unit_run(off, gen_fps_veneer, &v, NULL);
-      g->guarding = 0;
-      if (!ok) { gap(off, "fps", "AssertionError: %s", g->error); continue; }
-      done(off);
-      bump("fps_veneer");
+      if (veneer_row(off, a1, a2, a3, "fps")) bump("fps_veneer");
       continue;
     } else if (tramp) {
       int wt = fps_reg(a1, 'w'), slot = a2 ? atoi(a2) : -1;
@@ -4183,7 +4218,7 @@ static int cp_claimed(A off, A n) {
 }
 static void cpatch_rows(int phase) {
   const char* path = g->r.cpatch_tsv;
-  if (phase == 0) g_ncpclaim = 0;
+  if (phase == 0) g_ncpclaim = g_ncptail = 0;
   if (!path || !*path) return;
   FILE* f = fopen(path, "rb");
   if (!f) {
@@ -4207,7 +4242,8 @@ static void cpatch_rows(int phase) {
     uint32_t orig = (uint32_t)strtoul(origs, NULL, 16), nw = (uint32_t)strtoul(news, NULL, 16);
     if (phase == 0) {
       /* 代码段结尾到 ro 开头之间的填充（同在代码段末页，装载器按宿主页封成只读可执行）也收：金手指往这里写新代码（暗黑 3 0xC72Fxx）。
-         只收原字是全 0 / udf 的字、不越过 ro 开头；这里的字本改写器不分析不翻译，要翻译的指令（x18 / svc / tpidr）由 pack/cpatch.py 先挡掉 */
+         只收原字是全 0 / udf 的字、不越过 ro 开头；这里的新代码不进分析，scan() 按 g_cptail 逐字看：读计时器 / svc / 线程寄存器 / ctr 照常改写（#1628），
+         改写不了的（x18 / 系统寄存器 / brk 0xB000–0xBFFF）由 pack/cpatch.py tail_hazard 先挡掉 */
       int tail = off >= (A)g->text && off + 4 <= (A)g->ro && (orig == 0 || orig >> 16 == 0);
       if (off < 0 || off % 4 || (off + 4 > (A)g->text && !tail)) { gap(off, "cpatch", "w 点不在代码段"); continue; }
       if (iw(off) != orig) { gap(off, "cpatch", "w 点原字 0x%x，表里 0x%x", iw(off), orig); continue; }
@@ -4216,6 +4252,7 @@ static void cpatch_rows(int phase) {
         nw = adrp((int)(nw & 31), off, g->key);
       }
       put(off, nw);
+      if (tail && g_ncptail < (int)(sizeof g_cptail / sizeof g_cptail[0])) g_cptail[g_ncptail++] = off;
       bump("cpatch_w");
       continue;
     }
@@ -5633,7 +5670,7 @@ static int attempt(const s2a_rewrite_request* r, const s2a_rewrite_options* opti
     g->one = cs_malloc(g->cs);
     REQUIRE(g->one);
     load();
-    fix_rows();
+    fix_rows(0);
     fps_rows(0);
     cpatch_rows(0);
     code_rows();
@@ -5649,6 +5686,7 @@ static int attempt(const s2a_rewrite_request* r, const s2a_rewrite_options* opti
     sdk_sainit();
     sdk_as36_ranges();
     widen();
+    fix_rows(1);
     fps_rows(1);
     cpatch_rows(1);
     spins();

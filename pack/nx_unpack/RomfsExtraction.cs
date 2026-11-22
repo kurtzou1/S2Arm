@@ -248,6 +248,11 @@ static class RomfsExtraction {
             try {
                 using var handle = File.OpenHandle(stage, FileMode.CreateNew, FileAccess.Write, FileShare.None, FileOptions.None, total);
                 int shown = 0;
+                // 出包进度（S2A_PROGRESS，同 RomfsImageList 的「解包·资源镜像（MB）」）：每秒至多一行、写完补满。D-H35J（mac 0.6.8，15.8 GB 镜像约 12 MB/s 写了 20 多分钟）：
+                //   这条路原先只往控制台打每 10% 一行，作业层收不到，界面 22 分钟只有心跳，玩家以为卡死、在 90% 处取消
+                long totalMb = Math.Max(1, (total + (1 << 20) - 1) >> 20), tick = -1;
+                void Report(long mb) { var s = clock.ElapsedMilliseconds / 1000; if (mb < totalMb && s == tick) return; tick = s; ProgressLine($"解包·资源镜像（MB）\t{Math.Min(mb, totalMb)}\t{totalMb}"); }
+                Report(0);
                 for (int k = 0; k < parts; k++) {
                     (byte[] Buf, int Len) got;
                     lock (gate) {
@@ -259,6 +264,7 @@ static class RomfsExtraction {
                     RandomAccess.Write(handle, got.Buf.AsSpan(0, got.Len), lo);
                     ImageWriteObserved?.Invoke(lo, got.Len);
                     free.Add(got.Buf); slots.Release();
+                    Report(k == parts - 1 ? totalMb : (lo + got.Len) >> 20);
                     int pct = big ? (int)((lo + got.Len) * 10 / total) : 0;
                     if (pct > shown) { shown = pct; double sec = clock.Elapsed.TotalSeconds;
                         Console.WriteLine($"资源镜像：已写 {(lo + got.Len) >> 20} / {total >> 20} MB（{pct * 10}%，{sec:F0} 秒，{((lo + got.Len) >> 20) / Math.Max(sec, 0.001):F1} MB/s）"); }
@@ -271,6 +277,15 @@ static class RomfsExtraction {
             if (!errors.IsEmpty) throw new AggregateException(errors);
             return new Result(files.Count, files.Sum(e => e.Size), workers, false);
         } finally { foreach (var fs in views.Values) fs.Dispose(); }
+    }
+
+    // 往出包进度文件追加一行「时刻<TAB>阶段<TAB>已完成<TAB>总数」（tools/progress.py 协议）。别的写者（作业层 Python、看门狗读）同时开着它：
+    //   允许共享读写地追加（File.AppendAllText 只给读共享，Windows 上撞上就抛，同 #2034）；写不进只丢这一行，不影响解包
+    static void ProgressLine(string row) {
+        var path = Environment.GetEnvironmentVariable("S2A_PROGRESS"); if (string.IsNullOrEmpty(path)) return;
+        try { using var f = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
+              var b = System.Text.Encoding.UTF8.GetBytes($"{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}\t{row}\n"); f.Write(b, 0, b.Length); }
+        catch (IOException) { } catch (UnauthorizedAccessException) { }
     }
 
     // 镜像里一个文件的数据：每个线程从自己的那份 RomFS 视图按路径读（LibHac 的读视图带缓存、不跨线程共用）；读坏块时同目录形态包上位置

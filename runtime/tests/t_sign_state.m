@@ -1,5 +1,5 @@
 // 签名证书进游戏状态（ios/sign_state.m）单测，Mac 上跑。期望照 cmdr 走查「第 2 支期望」表手写，不跑被测实现算：
-//   每款签名状态 s2a_sign_state_at（情形 1–15；14 / 15 = LiveContainer 里，15 = 它那张 S2Arm 解不开）、挑现用证书 s2a_cert_settle（导入别的团队的证书不顶掉能用的）、
+//   每款签名状态 s2a_sign_state_at（情形 1–16；14 / 15 = LiveContainer 里，15 = 它那张 S2Arm 解不开；16 = 登记着、钥匙串里没有身份）、挑现用证书 s2a_cert_settle（导入别的团队的证书不顶掉能用的）、
 //   证书登记表 certs.tsv（runtime/src/selfsign.c 导入成功时记：同一张不重复；钥匙串换成桩，不碰本机钥匙串）
 #import <Foundation/Foundation.h>
 #import <Security/Security.h>
@@ -14,6 +14,9 @@ int s2a_cert_health(const char *home);
 int s2a_identity_import_p12(const char *home, const void *p12, size_t n, const char *password, const char *source, char *team, size_t team_n, char *why, size_t why_n);
 void s2a_identity_test_store(int (*f)(SecKeyRef, SecCertificateRef, char *, size_t));
 void s2a_lc_cert_test(int (*f)(NSData **, NSString **));
+void s2a_sign_state_test_keychain(int (*f)(const char *));
+static NSString *g_kc_missing;   // 钥匙串桩：这张没有签名身份（nil = 张张都有）
+static int kc_stub(const char *sha) { return !(g_kc_missing && !strcasecmp(sha, g_kc_missing.UTF8String)); }
 static NSData *g_lc_p12;   // LiveContainer 共享偏好里那张（桩）：解得开的真 p12，或解不开的一段字节
 static int lc_ok(NSData **p, NSString **w) { if (p) *p = g_lc_p12; if (w) *w = @"t"; return 1; }
 
@@ -49,6 +52,7 @@ int main(void) { @autoreleasepool {
     NSString *rowA1 = [NSString stringWithFormat:@"%@\tTEAMAAAAAA\tp12\t100\n", A1], *rowA2 = [NSString stringWithFormat:@"%@\tTEAMAAAAAA\tsidestore\t300\n", A2],
              *rowB1 = [NSString stringWithFormat:@"%@\tTEAMBBBBBB\tp12\t200\n", B1];
 
+    s2a_sign_state_test_keychain(kc_stub);   // 不碰本机钥匙串：缺省张张都有身份，16 例再挖掉一张
     printf("每款签名状态\n");
     reset(); cat(unsigned_); ck(st(0) == 0, @"1 app.json 没有（ad-hoc 包）→ 0 可玩");
     reset(); app(@"TEAMAAAAAA", @[A1]); cat(pc_team); ck(st(0) == 0, @"2 电脑按 App 团队签好、手机 0 张 → 0");
@@ -105,6 +109,18 @@ int main(void) { @autoreleasepool {
     certs(rowA1); ck(st(0) == 0, @"15 解不开、但 S2Arm 导入了同团队能用的 → 0");
     certs(rowB1); ck(st(0) == 2, @"15 解不开、S2Arm 只导入了别的团队的 → 2");
     s2a_lc_cert_test(NULL);
+    // 16 登记表 / current.json 记着、钥匙串里却没有它的签名身份（11-22 D-4GCZ：起局重签「钥匙串里没有证书 … 的签名身份」，原先判 5「只能回电脑重装」，回电脑重下两遍无效）
+    g_kc_missing = A1;
+    reset(); app(@"TEAMAAAAAA", @[A1]); certs(rowA1); cat(unsigned_); ck(st(0) == 1, @"16 能用的那张钥匙串里没有身份 → 1 需要签名证书（原 0）");
+    ck(st(1) == 1, @"16 同上、点开始被拒过 → 1（原 5 只能回电脑，D-4GCZ）");
+    reset(); app(@"TEAMAAAAAA", @[A1]); put([ID stringByAppendingPathComponent:@"current.json"], [NSString stringWithFormat:@"{\"schema\": 1, \"team\": \"TEAMAAAAAA\", \"cert_sha1\": \"%@\", \"imported\": 50, \"source\": \"pc\"}\n", A1]);
+    cat(unsigned_); ck(st(1) == 1, @"16 老数据只有 current.json、钥匙串里没有它 → 1");
+    reset(); app(@"TEAMAAAAAA", @[A1, A2]); certs([rowA1 stringByAppendingString:rowA2]); cat(unsigned_);
+    put([ID stringByAppendingPathComponent:@"current.json"], [NSString stringWithFormat:@"{\"schema\": 1, \"team\": \"TEAMAAAAAA\", \"cert_sha1\": \"%@\", \"imported\": 100, \"source\": \"p12\"}\n", A1]);
+    ck(st(0) == 0, @"16 A1 没身份、A2 有 → 0（起局用 A2）");
+    ck(s2a_cert_settle(H.fileSystemRepresentation) == 0 && [cur_sha() isEqualToString:A2], @"16 settle 把现用证书从没身份的 A1 换成 A2");
+    reset(); app(@"TEAMAAAAAA", @[A1]); certs(rowA1); cat(unsigned_); g_kc_missing = nil; certs(rowA1);   // 重新导入（登记表改写）后身份回来了
+    ck(st(0) == 0, @"16 重新导入后钥匙串有身份 → 0（缓存随登记表改写作废）");
     [NSFileManager.defaultManager removeItemAtPath:dir error:nil];
     return S2A_T_RESULT("t_sign_state", bad);
 } }

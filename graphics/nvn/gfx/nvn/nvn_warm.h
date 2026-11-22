@@ -5,7 +5,7 @@
 //   宿主读 s2a_warm_progress（任何线程，读的是原子量和一个小环，O(1)，不碰出图线程）；玩家点「先开始玩」调 s2a_warm_play_now：剩下的清单转后台继续，
 //   之后首遇的管线按现有的首遇路径（后台编、编好前这笔绘制跳过，同 #800 B 的近似顶替）。
 //   预热缺省编完整张清单（去掉 10-26 的 15 秒硬上限）；护栏：长时间没有进展（DM_PSO_PREPARE_STALL_MS，缺省 20 秒）或总时长超过宽松上限
-//   （DM_PSO_PREPARE_MAX_MS，11-05 起缺省 15 秒〔维护者 判据：首装 loading ≤ 15 s〕，有前端也到点必放行；0 = 不设）就交还宿主（剩下的转后台 DM_PSO_BG_THREADS 路 utility）
+//   （DM_PSO_PREPARE_MAX_MS，缺省 30 秒；11-22 #502 起只管没有前端的宿主，有加载页前端时只由玩家「先开始玩」或前端的无进展护栏放行；0 = 不设）就交还宿主（剩下的转后台 DM_PSO_BG_THREADS 路 utility）
 #pragma once
 #include <stdint.h>
 

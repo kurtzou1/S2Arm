@@ -328,6 +328,11 @@ def same_file(rb, ru, limit=64):
 CONTENT_DIRS = ('romfs', 'exefs')   # 版本目录里的游戏内容分区：找控制分区时不进
 
 
+def aoc_base(nacp, tid):   # DLC 号段基准号：NACP 0x3070 的 AddOnContentBaseId，为 0 / 没有控制分区按应用号 + 0x1000（同 ns2_nup.aoc_base 与运行时；本脚本可被单独按路径加载，不 import ns2_nup）
+    b = struct.unpack_from('<Q', nacp, 0x3070)[0] if nacp and len(nacp) >= 0x3078 else 0
+    return b or (tid & ~0xF) + 0x1000
+
+
 def find_control(dirs):
     """版本目录（先最新更新、后本体）里 romfs 之外、两层以内名为 control.nacp 的文件（0x4000 字节）→ (内容, [icon_*.dat…])；都没有 → None。
     导出工具若带了控制分区，这里就是游戏自带的标题 / 显示版本 / 图标；11-04 金刚、raiders 的导出都没带。"""
@@ -420,7 +425,9 @@ def convert(dump, out, name=None, base=None):
         for rel, a in rom.items():
             clone(a, os.path.join(tmp, 'romfs', rel))
 
-    # DLC
+    # DLC：序号 = DLC 标题号 − 控制分区里的 AddOnContentBaseId（ns2_nup.aoc_base，运行时同口径；没带控制分区按应用号 + 0x1000）
+    real = find_control([upd, base] if upd else [base])
+    first = aoc_base(real[0] if real else None, tid)
     aoc_rows, aoc_idx = [], []
     dlc = os.path.join(dump, 'dlc')
     for d in sorted(os.listdir(dlc)) if os.path.isdir(dlc) else []:
@@ -428,7 +435,7 @@ def convert(dump, out, name=None, base=None):
             atid = int(d, 16)
         except ValueError:
             continue
-        idx = atid - (tid & ~0xF) - 0x1000   # 按应用号（程序号去掉末位）：单独导出的程序 n（#1567）的 DLC 也是应用号 + 0x1000 + 序号
+        idx = atid - first
         if not 0 < idx < 0x1000:
             print(f'🟡 DLC {d} 不属于程序号 {tid:016x}，跳过')
             continue
@@ -447,7 +454,6 @@ def convert(dump, out, name=None, base=None):
         f.write('idx\ttitle_id\tversion\tfiles\tbytes\n' + ''.join(r + '\n' for r in aoc_rows))
 
     os.makedirs(os.path.join(tmp, 'ctl'))
-    real = find_control([upd, base] if upd else [base])
     if real:   # 导出带了控制分区：用原件，标题 / 显示版本 / 图标都是游戏自带的
         nacp, icons = real
         nacp, filled = fill_fixed(nacp, tid, save_kinds(os.path.join(tmp, 'exefs'))[0])

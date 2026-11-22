@@ -401,6 +401,43 @@ int main(void) { @autoreleasepool {
                quiet, gone150, pin, kept, (unsigned long long)dn, out4[0]);
         atomic_store(&g_mem_avail_fake, -1); g_tex_idle_subs = TEX_IDLE_SUBS;
     }
+    // ⑯ #674：池表同提交滞留哑图 + 在途 GPU 缓冲原地覆写竞态（画面隔帧亮暗闪烁）
+    if (cs) {
+        for (int k = 0; k < POOL_TABS; k++) if (g_ptab[k].used && g_ptab[k].rw) pool_tab_drop(k);   // 隔离前面 ⑬ 的可写图像池表
+        texture(160, 4, 4, NVN_TEXTURE_FLAGS_COMPRESSIBLE);
+        texture(161, 4, 4, NVN_TEXTURE_FLAGS_COMPRESSIBLE);
+        read4(cs, 160u | 1u << 20, 3u | 1u << 20, 3u | 1u << 20, 3u | 1u << 20);   // 标记 160 为着色器已读
+        // ⑯a 同提交内：先登记未写目标 → 池表先落哑图；随后同提交建图（模拟渲染遍写入，抬 g_ser_gen）→ 再次 pool_gpu 必须立刻换回真贴图
+        nvn_be_sub_begin();
+        nvn_be_reg_tex(160, &texs[161], NULL);
+        uint64_t e_before = table_entry(160, 0, NULL);
+        REQUIRE(tex_mtl(&texs[161]));
+        uint64_t e_after = table_entry(160, 0, NULL);
+        { uint64_t f = nvn_be_sub_commit(); REQUIRE(nvn_be_wait(f, 10000000000ull)); }
+        uint64_t dum = g_ptab[0].dummy;
+        VERIFY(e_before == dum && e_after != dum, "⑯a 同提交内目标写入后池表立刻更新：写前=%#llx(哑=%#llx) 写后=%#llx", (unsigned long long)e_before, (unsigned long long)dum, (unsigned long long)e_after);
+        // ⑯b 在途 GPU 读池表期间改登记：旧表缓冲里的项不能被原地改成哑图，应写时拷贝出新缓冲
+        texture(162, 4, 4, 0); texture(163, 4, 4, NVN_TEXTURE_FLAGS_COMPRESSIBLE);
+        REQUIRE(tex_mtl(&texs[162]));
+        nvn_be_sub_begin();
+        os_unfair_lock_lock(&g_rmu);
+        __unsafe_unretained id<MTLBuffer> b_old = nil, b_new = nil;
+        pool_gpu(0, (int)MTLTextureType2D, NVN_DPF_FLOAT, 0, 0, &b_old);
+        id<MTLBuffer> b_old_keep = b_old;
+        uint64_t rid_old = ((uint64_t *)((uint8_t *)b_old_keep.contents + DMSH_POOL_HEAD))[162];
+        os_unfair_lock_unlock(&g_rmu);
+        // 不等提交完成（GPU 仍在途），改登记 162 成未写目标 163 并再次 pool_gpu
+        nvn_be_reg_tex(162, &texs[163], NULL);
+        os_unfair_lock_lock(&g_rmu);
+        pool_gpu(0, (int)MTLTextureType2D, NVN_DPF_FLOAT, 0, 0, &b_new);
+        uint64_t rid_old_after = ((uint64_t *)((uint8_t *)b_old_keep.contents + DMSH_POOL_HEAD))[162];
+        uint64_t rid_new_after = ((uint64_t *)((uint8_t *)b_new.contents + DMSH_POOL_HEAD))[162];
+        os_unfair_lock_unlock(&g_rmu);
+        { uint64_t f = nvn_be_sub_commit(); REQUIRE(nvn_be_wait(f, 10000000000ull)); }
+        VERIFY(rid_old != dum && b_new != b_old_keep && rid_old_after == rid_old && rid_new_after == dum,
+               "⑯b 在途池表写时拷贝：旧表保留真图(%d) 新表换缓冲(%d) 新表为哑图(%d)",
+               rid_old_after == rid_old, b_new != b_old_keep, rid_new_after == dum);
+    }
     printf("%s t_nvn_pool_tex：%u 项，%u 项失败（追不到槽的句柄按编号读池：池表 + 已读位图 + 未写渲染目标不建 + 小贴图预建 + 表复用）\n", fails ? "✗" : "✓", checks, fails);
     return fails != 0;
 } }

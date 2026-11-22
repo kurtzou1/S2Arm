@@ -101,6 +101,11 @@ int nvn_vk_program_parse_graphics(const uint8_t *bytes, size_t length, struct fd
 // 同上，allow_vs_only = 1 时也接受只有顶点阶段的程序（只写深度的绘制；新回放层用）。
 int nvn_vk_program_parse_graphics_stages(const uint8_t *bytes, size_t length, struct fd_program *out, int allow_vs_only, char *why, size_t why_size);
 void nvn_vk_program_free(struct fd_program *program);
+/* 两段着色器接口对不对得上（出包预编库按阶段分别取、拼成一份程序，拼时不过链接）：
+ *   上一段（顶点，或几何）带 Location 的 Output 位置集合，必须包含片元带 Location 的 Input 位置集合。
+ *   返回 1 = 对得上，或认不全不下结论（有不带 Location 的用户接口变量、位置 ≥ 64、数组 / 矩阵 / 结构体接口、读不了 SPIR-V）；
+ *   0 = 片元确定读了上一段没写的位置，*missing 回填这些位置（位 i = Location i）。驱动按规范拒建这种管线（Adreno：input v_locN not declared）。 */
+int nvn_vk_spirv_link_ok(const uint8_t *producer, size_t producer_bytes, const uint8_t *fragment, size_t fragment_bytes, uint64_t *missing);
 #ifdef __cplusplus
 }
 #endif

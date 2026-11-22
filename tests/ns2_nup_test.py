@@ -178,7 +178,9 @@ def rd(p):   # 不存在返回 None（负对照下给出「不通」行，而不
         return None
 
 
-NACP = bytes(range(256)) * 64   # 0x4000 字节，可辨认的内容
+NACP = bytearray(bytes(range(256)) * 64)   # 0x4000 字节，可辨认的内容
+struct.pack_into('<Q', NACP, 0x3070, APP + 0x1000)   # AddOnContentBaseId：真游戏的控制分区都写（DLC 号段基准号），同 Ryujinx
+NACP = bytes(NACP)
 ICON = b'\xff\xd8\xff\xe0JPGICON'
 MAIN_B, MAIN_U = b'\x01' * 300, b'\x02' * 500
 BIG = os.urandom(70000)
@@ -416,6 +418,23 @@ with tempfile.TemporaryDirectory() as t:
     tsv = (rd(os.path.join(x12, 'aoc.tsv')) or b'').decode()
     chk('⑫ 程序 1：ns2_dump 退出 0、程序号、DLC 序号 1 / 标题号', (r.returncode if r else None, f'title_id\t{P1:016x}' in (rd(os.path.join(x12, 'unpack.tsv')) or b'').decode(),
         [l.split('\t')[:2] for l in tsv.splitlines()[1:]]), (0, True, [['1', f'{APP + 0x1001:016x}']]))
+
+# ⑬ D-533D：Switch 2 版程序 1（0400…8001）与 Switch 1 本体共用 DLC 号段——控制分区 AddOnContentBaseId 写的是 Switch 1 号段 0100…9000，DLC 0100…9001：
+#    照收，aoc.tsv 序号 = 1（运行时同口径）；同一容器不带控制分区（无从知道号段）：照旧按应用号 + 0x1000 判，拒收
+with tempfile.TemporaryDirectory() as t:
+    S2 = 0x0400E95004038001; S1_AOC = 0x0100E95004039000
+    n13 = bytearray(NACP); struct.pack_into('<Q', n13, 0x3070, S1_AOC); n13 = bytes(n13)
+    pk = lambda meta: [(0, S2, 0, 0, {'main': MAIN_B, 'main.npdm': npdm(S2)}, {'a.bin': b'p1'}, meta), (2, S1_AOC + 1, 0, 0, None, {'dlc.bin': b'DLC1'}, {})]
+    s13, d13, x13 = os.path.join(t, 's2.nup'), os.path.join(t, 'dump'), os.path.join(t, 'extract')
+    build(s13, pk({2: n13}))
+    r = run(NUP, s13, d13)
+    chk('⑬ Switch 2 版共用 Switch 1 DLC 号段（控制分区写明）：展开退出 0、DLC 写出', (r.returncode, rd(os.path.join(d13, f'dlc/{S1_AOC + 1:016X}/0/romfs/dlc.bin'))), (0, b'DLC1'))
+    r = run(DUMP, d13, x13) if os.path.isdir(d13) else None
+    tsv = (rd(os.path.join(x13, 'aoc.tsv')) or b'').decode()
+    chk('⑬ ns2_dump 按控制分区号段：DLC 序号 1', (r.returncode if r else None, [l.split('\t')[:2] for l in tsv.splitlines()[1:]]), (0, [['1', f'{S1_AOC + 1:016x}']]))
+    s13b = os.path.join(t, 's2-noctl.nup'); build(s13b, pk({}))
+    r = run(NUP, s13b, os.path.join(t, 'dump-b'))
+    chk('⑬ 反证：不带控制分区 → 按应用号 + 0x1000 判，拒收', (r.returncode != 0, '不是 0400E95004038001 的 DLC' in (r.stdout + r.stderr)), (True, True))
 
 print(f'{"✓" if not bad else "✗"} ns2_nup：{ok} 过 / {bad} 不过')
 sys.exit(1 if bad else 0)

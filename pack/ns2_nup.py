@@ -259,6 +259,15 @@ class Nup:
         return bytes(b)
 
 
+def aoc_base(nacp, app):
+    """DLC 号段的基准号：控制分区（NACP，0x4000 字节）0x3070 的 AddOnContentBaseId，DLC 标题号 = 基准号 + 序号（1…2000）。
+    运行时同一个口径（Ryujinx IAddOnContentManager.GetAddOnContentBaseIdFromTitleId：读 NACP 的这个字段，为 0 才退回程序号 + 0x1000）。
+    D-533D（mac 0.6.8）：Switch 2 版程序 0400E95004038001 的 DLC 是 Switch 1 本体号段的 0100E95004039001——Switch 2 版和 Switch 1 本体共用一套 DLC，
+    NACP 里写的就是 Switch 1 的号段。没带控制分区或字段为 0：按应用号（程序号去掉末位，#1567）+ 0x1000"""
+    b = struct.unpack_from('<Q', nacp, 0x3070)[0] if nacp and len(nacp) >= 0x3078 else 0
+    return b or (app & ~0xF) + 0x1000
+
+
 def program_id(npdm, where):   # NPDM 的 ACI0 程序号
     if npdm[:4] != b'META':
         raise Error(f'{where}：不是 NPDM')
@@ -305,6 +314,10 @@ def scan(n):
     app = ids.pop()
     if app & 0xFF0:   # 末位是多程序应用里的程序序号：单独导出的程序 n（如 Switch 2 版程序 1，#1567）照收，DLC 按应用号（去掉末位）认
         raise Error(f'{n.path}：程序号 {app:016X} 不是本体标题号')
+    # DLC 归属按控制分区的 AddOnContentBaseId（aoc_base）：最新更新的控制分区优先（运行时用的就是它），没有再看本体
+    ctl = [k for k in sorted(n.packages, key=lambda k: (k.kind != UPDATE, -k.version)) if k.kind in (BASE, UPDATE)]
+    nacp = next((m for m in (k.meta().get(T_NACP) for k in ctl) if m and len(m) == 0x4000), None)
+    first = aoc_base(nacp, app)
     vers, dlc = {}, {}
     for k in n.packages:
         if k.kind == UPDATE:
@@ -314,8 +327,8 @@ def scan(n):
                 raise Error(f'{n.path}：版本 0 的更新')
             vers[k.version] = k
         elif k.kind == ADDON:
-            if not 0 < k.title_id - (app & ~0xF) - 0x1000 <= 2000:
-                raise Error(f'{n.path}：{k.title_id:016X} 不是 {app:016X} 的 DLC')
+            if not 0 < k.title_id - first <= 2000:
+                raise Error(f'{n.path}：{k.title_id:016X} 不是 {app:016X} 的 DLC（DLC 号段从 {first + 1:016X} 起）')
             if k.romfs == NO_DIR:
                 raise Error(f'{n.path}：DLC {k.title_id:016X} 没有 romfs/')
             if k.title_id in dlc:

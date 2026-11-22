@@ -1727,6 +1727,8 @@
   "s2arm.controller.assignPlayers": "プレイヤーを割り当て",
   "s2arm.controller.howPair": "2つをペア / フルパッド",
   "s2arm.controller.howPairKeys": "L + R を同時に押す",
+  "s2arm.controller.howOther": "その他のコントローラー",
+  "s2arm.controller.howOtherKeys": "接続すると自動で参加",
   "s2arm.controller.howSingle": "単体 Joy-Con",
   "s2arm.controller.howSingleKeys": "SL + SR を同時に押す",
   "s2arm.controller.clear": "クリア",

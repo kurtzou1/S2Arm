@@ -600,6 +600,7 @@
       "pack/jobs/tests/fixtures/extract_hash_mismatch_1411.log",
       "compat/tree/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/Resources/*.svg",
       "launchers/macos/adapter/Sources/S2ArmAppleAdapter/Resources/*.json",
+      "android/tests/devprofiles/*.policy.golden",
       "ohos/app/AppScope/resources/base/element/*.json",
       "ohos/app/AppScope/resources/base/media/*.svg",
       "ohos/app/entry/src/main/resources/base/element/*.json",

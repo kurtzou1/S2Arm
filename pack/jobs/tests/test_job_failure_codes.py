@@ -440,6 +440,13 @@ class FreeAccountLimits(unittest.TestCase):
                  "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace")
         self.assertEqual(impactor.explain(panic), "signing_server_unreachable")
         self.assertEqual(impactor.explain("Anisette error: -80046 Apple rejected"), "login_identity_rejected")
+        # D-G3PT / #2050 玩家原文（mac 0.6.8）：登录辅助服务器回来的不是 JSON、或回 502——同归连不上签名服务器，不把 serde 原句上屏
+        for raw in ("Error: Anisette error: Request Error error decoding response body\n\nCaused by:\n    0: Request Error error decoding response body\n"
+                    "    1: error decoding response body\n    2: expected value at line 1 column 1",
+                    "Error: Anisette error: Provisioning socket error HTTP error: 502 Bad Gateway\n\nCaused by:\n    1: HTTP error: 502 Bad Gateway"):
+            with self.subTest(raw=raw[:60]):
+                self.assertEqual(impactor.explain(raw), "signing_server_unreachable")
+        self.assertNotEqual(impactor.explain("Error: invalid JSON in config: expected value at line 1 column 1"), "signing_server_unreachable")   # 不是 anisette 的 JSON 错误不归这里
         # #edc5f5 拆三种（期望手写）：没登录 / 没选中 → apple_not_signed_in；连不上 *.apple.com → apple_server_unreachable；1100 仍是过期。
         #   连不上 anisette 服务器（jkcoxson）仍归 signing_server_unreachable，不被新的那条吞掉；各处都登记
         for raw, code in (("Error: No account selected. Please login first using 'plumesign account login'", "apple_not_signed_in"),

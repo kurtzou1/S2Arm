@@ -440,8 +440,8 @@ struct InputNames {
     }
 }
 
-/// 录键：录入时接本窗口的按键（同旧启动器 EventRecorder 的规则）。Esc 取消（交回 nil）；带 ⌘ 的不收；左右修饰键并成一个；
-/// 单按 Shift / Ctrl / Option 录成那个键，同时按着修饰键再按别的键录成组合。录入时按键不再往下传（不触发弹窗的快捷键）。
+/// 录键：录入时接本窗口的按键，规则在 InputKeyCapture（Esc 取消交回 nil；带 ⌘ 的不收；左右修饰键并成一个；
+/// 单按 Shift / Ctrl / Option 松开时录成那个键，按着修饰键再按别的键录成组合）。录入时按键不再往下传（不触发弹窗的快捷键）。
 struct InputKeyRecorder: NSViewRepresentable {
     var active: Bool
     var onKey: (KeyBinding?) -> Void
@@ -451,6 +451,7 @@ struct InputKeyRecorder: NSViewRepresentable {
     static func dismantleNSView(_ view: NSView, coordinator: Coordinator) { coordinator.remove() }
 
     final class Coordinator {
+        var capture = InputKeyCapture()
         var parent: InputKeyRecorder
         var monitor: Any?
         weak var view: NSView?
@@ -458,17 +459,14 @@ struct InputKeyRecorder: NSViewRepresentable {
         func install(_ v: NSView) {
             view = v
             monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp, .flagsChanged]) { [weak self] e in
-                guard let self, self.parent.active, NSApp.isActive, self.view?.window?.isKeyWindow == true else { return e }
+                guard let self else { return e }
+                guard self.parent.active, NSApp.isActive, self.view?.window?.isKeyWindow == true else { self.capture.reset(); return e }
                 if e.type == .keyUp { return nil }
-                if e.modifierFlags.contains(.command) { return e }
-                let code = [60: 56, 62: 59, 61: 58][Int(e.keyCode)] ?? Int(e.keyCode)
-                var mods = (e.modifierFlags.contains(.shift) ? 1 : 0) | (e.modifierFlags.contains(.control) ? 2 : 0) | (e.modifierFlags.contains(.option) ? 4 : 0)
-                if e.type == .flagsChanged {
-                    let bit = code == 56 ? 1 : code == 59 ? 2 : code == 58 ? 4 : 0
-                    if bit == 0 || mods & bit == 0 { return e }   // 松开修饰键不算
-                    mods = 0
-                }
-                let key: KeyBinding? = e.type == .keyDown && code == 53 ? nil : KeyBinding(code: code, modifiers: mods)
+                if e.modifierFlags.contains(.command) { self.capture.reset(); return e }
+                let mods = (e.modifierFlags.contains(.shift) ? 1 : 0) | (e.modifierFlags.contains(.control) ? 2 : 0) | (e.modifierFlags.contains(.option) ? 4 : 0)
+                guard let result = self.capture.event(code: Int(e.keyCode), modifiers: mods, flagsChanged: e.type == .flagsChanged,
+                                                      repeatKey: e.type == .keyDown && e.isARepeat) else { return nil }
+                let key: KeyBinding? = { if case let .bind(k) = result { return k }; return nil }()
                 DispatchQueue.main.async { self.parent.onKey(key) }
                 return nil
             }

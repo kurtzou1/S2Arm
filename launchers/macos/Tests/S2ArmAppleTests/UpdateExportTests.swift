@@ -104,6 +104,30 @@ import XCTest
         XCTAssertFalse(offline.selectable); XCTAssertEqual(offline.note, .offline, "没连着：置灰")
     }
 
+    func testHostProbeFailureShowsActualReasonAndSuccessfulProbeIsSelectable() throws {
+        let error = "iPhone 已锁屏，宿主文件通道无法准备；请解锁手机后重试。"
+        let failed = try XCTUnwrap(PhoneOverview(result: ["phones": [
+            ["device": "PHONE", "online": "network", "installed": false, "liveContainerProbeError": error]
+        ]])?.phones.first)
+        let row = S2ArmLauncherModel.exportDeviceRow(failed, gameId: "0100A", sign: "none", layout: "shell")
+        XCTAssertFalse(row.selectable)
+        XCTAssertEqual(row.note, .deviceAccess(error), "读取失败不应写成没装 S2Arm")
+        XCTAssertFalse(row.hasLink, "解锁问题不应该引导玩家重新安装")
+        let ready = try XCTUnwrap(PhoneOverview(result: ["phones": [
+            ["device": "PHONE", "online": "network", "installed": true,
+             "installedBy": "external", "bundleId": "lc:synthetic"]
+        ]])?.phones.first)
+        let available = S2ArmLauncherModel.exportDeviceRow(ready, gameId: "0100A", sign: "none", layout: "shell")
+        XCTAssertTrue(available.selectable)
+        XCTAssertNil(available.note)
+        XCTAssertTrue(S2ArmLauncherModel.exportDeviceRow(failed, gameId: "0100A", sign: "devCert", layout: "standalone").selectable,
+                      "独立 App 不使用宿主容器")
+        var native = phone("NATIVE", by: .external, cert: true)
+        native.liveContainerProbeError = error
+        XCTAssertTrue(S2ArmLauncherModel.exportDeviceRow(native, gameId: "0100A", sign: "none", layout: "shell").selectable,
+                      "另一个宿主读不到，不阻止已识别的原生 S2Arm")
+    }
+
     func testSignedDeviceRowsAllSelectable() {
         let row = { (p: PhoneOverview.Phone) in S2ArmLauncherModel.exportDeviceRow(p, gameId: "0100A", sign: "appleId", layout: "shell") }
         XCTAssertEqual(row(phone("A", by: .launcher)).note, nil)

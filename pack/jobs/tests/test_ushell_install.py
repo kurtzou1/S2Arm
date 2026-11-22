@@ -85,6 +85,69 @@ class PushGameTests(JobCase):
         self.assertEqual(e.exception.code, "shell_update_required")
         self.assertEqual((self.ph.calls, self.pushed), ([], []), "不推、不装")
 
+    def test_external_older_app(self):
+        """#1842：别的电脑 / 别的工具装的 S2Arm（push_phone 判 external，原先不核任何版本）比启动器旧。不堵门（维护者：物理上做得下去的不拦）：
+          ① 接口兼容只是旧 → phone_app_outdated、不推；玩家确认（acceptOldApp）后照推、决定记进日志；
+          ② 早于接口起始版（COMPAT_SINCE，读不了这一版的程序包）→ phone_app_incompatible，确认了也不推；
+          ③ 同版 / 更新、读不到版本、开发树没有版本 → 不提示照推。
+        做法按包名分两种（期望手写）：启动器那种包名 → 这台电脑点「更新 S2Arm」；改过包名的 → 用原工具重装 ipa"""
+        import cheats
+        import host_update
+        self.ph.external = True
+        layout.save_device(self.c, self.ph.key, dict(games={}))
+        def run(have, bid, accept=False, since="0.1.0"):
+            self.ph.app_version, self.ph.bid, self.pushed[:] = have, bid, []
+            self.c.r = dict(self.c.r, acceptOldApp=accept)
+            with mock.patch.object(cheats, "app_version", lambda c: "0.6.7"), mock.patch.object(host_update, "COMPAT_SINCE", since), \
+                    mock.patch.object(install, "push_pack", lambda *a, **k: None, create=True), mock.patch.object(install, "put_game", lambda *a, **k: None, create=True):
+                try:
+                    install.push_game(self.c, GID, self.ph, steps=False)
+                    return None, ""
+                except install.Failure as e:
+                    return e.code, str(e)
+        for have, bid, words in [("0.6.2", "io.s2arm.games.qb6bcfamys", "更新 S2Arm"), ("0.6.4", "com.kdt.livecontainer.ABC", "重新装一次")]:
+            code, msg = run(have, bid)
+            self.assertEqual(code, "phone_app_outdated", have); self.assertIn(words, msg); self.assertIn(have, msg); self.assertIn("0.6.7", msg)
+            self.assertEqual(self.pushed, [], f"{have} 没确认不推")
+            code, msg = run(have, bid, accept=True)
+            self.assertNotIn(code, ("phone_app_outdated", "phone_app_incompatible"), f"{have} 确认后照推：{msg}")
+            self.assertEqual([g for g, *_ in self.pushed], [[GID]], f"{have} 确认后推了这一款")
+        code, msg = run("0.6.2", "io.s2arm.games.qb6bcfamys", accept=True, since="0.6.5")
+        self.assertEqual(code, "phone_app_incompatible", "早于接口起始版：确认了也拦"); self.assertIn("读不了", msg)
+        self.assertEqual(self.pushed, [], "不兼容不推")
+        for have in ("0.6.7", "0.6.8", None):
+            self.ph.app_version = have
+            with mock.patch.object(cheats, "app_version", lambda c: "0.6.7"):
+                self.assertIsNone(install.external_app_outdated(self.c, self.ph), f"{have} 不提示")
+        with mock.patch.object(cheats, "app_version", lambda c: ""):
+            self.ph.app_version = "0.1"
+            self.assertIsNone(install.external_app_outdated(self.c, self.ph), "开发树没有版本：比不了，不提示")
+
+    def test_app_version_from_listing(self):
+        """push_phone 取 external App 版本：读本次判归属时列过的那份（installed_s2arm_on 记在作业上），不为取版本再调一次设备；
+        本次没列过 → None（照旧推）。期望手写：列表第四列 0.6.2 → 0.6.2；旧工具三列 → None；换一台没列过的 → None"""
+        rows = [("io.s2arm.games.qb6bcfamys", "S2Arm", "QB6", "0.6.2"), ("com.kdt.livecontainer.ABC", "LiveContainer", "", "")]
+        with mock.patch.object(install, "devpush_client", lambda c, u, b, w: SimpleNamespace(apps=lambda: rows)), \
+                mock.patch.object(install, "main_executable", lambda c: "S2Arm"):
+            apps = install.installed_s2arm_on(self.c, "U1", {})
+        self.assertEqual([a["version"] for a in apps], ["0.6.2"], "LiveContainer 主程序名不是 S2Arm、包名也不是前缀：不算")
+        self.assertEqual(install.app_version_on(self.c, "U1", "IO.S2ARM.GAMES.QB6BCFAMYS"), "0.6.2", "包名不分大小写")
+        self.assertIsNone(install.app_version_on(self.c, "U2", "io.s2arm.games.qb6bcfamys"), "这台本次没列过")
+        rows[0] = ("io.s2arm.games.qb6bcfamys", "S2Arm", "QB6")
+        with mock.patch.object(install, "devpush_client", lambda c, u, b, w: SimpleNamespace(apps=lambda: rows)), \
+                mock.patch.object(install, "main_executable", lambda c: "S2Arm"):
+            install.installed_s2arm_on(self.c, "U1", {})
+        self.assertIsNone(install.app_version_on(self.c, "U1", "io.s2arm.games.qb6bcfamys"), "旧工具三列：没有版本")
+
+    def test_compat_since_follows_interface(self):
+        """接口起始版跟着接口走：HOST_ABI / 直连链号还是 v0.1.0 那一对时 COMPAT_SINCE = 0.1.0；谁改了接口号没改它，这里红"""
+        import host_update
+        known = {(1, host_update.LEGACY_CHAIN): "0.1.0"}
+        now = host_update.engine_compat(SimpleNamespace(engine=Path(install.__file__).resolve().parents[2]))
+        key = (now["hostAbi"], now["dmshChain"])
+        self.assertIn(key, known, f"接口变成 {key}：把 host_update.COMPAT_SINCE 改成第一个带这套接口的版本号，并在这里登记")
+        self.assertEqual(host_update.COMPAT_SINCE, known[key])
+
     def test_update_game_stays_on_computer(self):
         """作业 updateGame（11-21 维护者定：游戏页只有「更新」「导出」）：只在电脑上重编 / 刷新，不碰设备、不签名、不推；
         做完回这款还剩的原因（host_update.game_reasons）。期望手写：调用顺序 = 刷新本地 → Mac 着色器库，手机对象一次都没碰"""

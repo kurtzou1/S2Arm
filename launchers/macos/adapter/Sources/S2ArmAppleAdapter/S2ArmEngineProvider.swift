@@ -346,6 +346,7 @@ public final class S2ArmEngineProvider: EngineProvider {
     ///   device：总控台当前这台（随现查请求带上）
     public func phoneOverview(probe: Bool = false, device: String? = nil) async throws -> PhoneOverview? {
         var extra: [String: Any] = probe ? ["probe": true] : [:]
+        extra["liveContainer"] = true
         if probe, let device, !device.isEmpty { extra["device"] = device }
         return PhoneOverview(result: try await client.perform("phoneOverview", extra: extra).result)
     }

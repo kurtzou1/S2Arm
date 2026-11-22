@@ -108,6 +108,12 @@ def main():
                        "--update-export-probe", str(Path(temporary) / "out"), "--data-root=" + str(Path(temporary) / "data")], env)
             if "✓ 更新 / 导出两件事" not in out.stdout:
                 raise RuntimeError("update/export probe did not report success")
+        # 推游戏遇到手机上旧 App（#1842）：phone_app_outdated 走通用确认「仍然继续」、不兼容的不是确认码（UI.Snapshots/ConfirmProbe.cs）
+        with tempfile.TemporaryDirectory(prefix="s2arm-confirm-probe-") as temporary:
+            out = run([dotnet, "run", "--project", str(probe), "--no-build", "--configuration", "Release", "--",
+                       "--confirm-probe", str(Path(temporary) / "out"), "--data-root=" + str(Path(temporary) / "data")], env)
+            if "✓ 推游戏遇到旧 App 的确认页" not in out.stdout:
+                raise RuntimeError("confirm probe did not report success")
         if args.negative_controls:
             with tempfile.TemporaryDirectory(prefix="s2arm-ui-negative-") as temporary:
                 target = Path(temporary).resolve()

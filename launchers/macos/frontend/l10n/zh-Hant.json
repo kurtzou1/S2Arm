@@ -1730,6 +1730,8 @@
   "s2arm.controller.assignPlayers": "分配玩家",
   "s2arm.controller.howPair": "兩隻合併 / 整隻手把",
   "s2arm.controller.howPairKeys": "同時按 L + R",
+  "s2arm.controller.howOther": "其他手把",
+  "s2arm.controller.howOtherKeys": "接上即自動加入",
   "s2arm.controller.howSingle": "單隻 Joy-Con",
   "s2arm.controller.howSingleKeys": "同時按 SL + SR",
   "s2arm.controller.clear": "清空",

@@ -18,4 +18,8 @@
   <ItemGroup>
     <ProjectReference Include="../S2A.Dsh.csproj" />
   </ItemGroup>
+  <!-- 两张表的算法指纹（Build.C1CbFp）取这份源码的 sha256：缓存仓里两张表的条目只随 C1Cb.cs 变，别处改动（含发版换新工具）照旧命中 -->
+  <ItemGroup>
+    <EmbeddedResource Include="C1Cb.cs" LogicalName="c1cb.source" />
+  </ItemGroup>
 </Project>

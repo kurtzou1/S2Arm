@@ -256,8 +256,10 @@ static class SwshXlate
             {
                 if (t.ArrayLength != 1) reasons.Add($"unsupported_scaled_access:descriptor_array:binding={t.Binding}:length={t.ArrayLength}");
                 if (t.Set != 0) reasons.Add($"unsupported_scaled_access:descriptor_set:binding={t.Binding}:set={t.Set}");
-                if ((t.Type & SamplerType.Mask) != SamplerType.Texture2D) reasons.Add($"unsupported_scaled_access:non_2d_resource:binding={t.Binding}:type={t.Type}");
-                if ((t.Flags & TextureUsageFlags.ImageStore) != 0) reasons.Add($"unsupported_scaled_access:image_write:binding={t.Binding}");
+                // 1D / 3D / 立方体 / 缓冲：宿主从不缩放这类存储（nvn_rscale.inc rs_eligible），单独记成 never_scaled_resource（内部分辨率按它放行，见 SpirvFetchScale）；类型认不出（None）照旧
+                if ((t.Type & SamplerType.Mask) != SamplerType.Texture2D)
+                    reasons.Add((t.Type & SamplerType.Mask) == SamplerType.None ? $"unsupported_scaled_access:non_2d_resource:binding={t.Binding}:type={t.Type}" : $"unsupported_scaled_access:never_scaled_resource:binding={t.Binding}:type={t.Type}");
+                // 写图像不再记原因（11-22）：宿主对存储图像槽一律保持原尺寸（nvn_rscale_ops.inc rs_pre_images / rs_pre_draw），写的坐标按游戏纹素就对，见 SpirvFetchScale OpImageWrite
                 if ((t.Flags & TextureUsageFlags.ResScaleUnsupported) != 0) reasons.Add($"unsupported_scaled_access:resource_scale_unsupported:binding={t.Binding}");
             }
         SetResolutionMetadata(res, reasons);

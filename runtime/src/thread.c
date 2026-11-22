@@ -406,6 +406,13 @@ static void __attribute__((unused)) ev_expose(event_t *e) {   // 持 G；确定�
 #endif
 }
 static event_t *evmap_get(uint32_t did) { for (uint32_t i = did % EVMAP, k = 0; k < EVMAP; i = (i + 1) % EVMAP, k++) if (g_evmap[i] && g_evmap[i]->did == did) return g_evmap[i]; return NULL; }
+// 句柄来源（gate.c s2a_gate_handle_origin：IPC 应答交出这个句柄的会话 / 命令）→「（来自 服务名 会话 0x.. 命令 N）」；按名字取（只链 thread.c 的单测没有 gate.c）→ 取不到空串
+static void horig_desc(uint32_t h, char *out, size_t n) {
+    static int (*f)(uint32_t, uint32_t *, int *, const char **); static int looked;
+    if (!looked) { f = (int (*)(uint32_t, uint32_t *, int *, const char **))dlsym(RTLD_DEFAULT, "s2a_gate_handle_origin"); looked = 1; }
+    uint32_t sess = 0; int cmd = -1; const char *nm = "?"; out[0] = 0;
+    if (f && f(h, &sess, &cmd, &nm)) snprintf(out, n, "（来自 %s 会话 %#x 命令 %d）", nm, sess, cmd);
+}
 static int h_idx(uint32_t h) {   // 持 G；无效返回 0
     unsigned i = h & 0x7fff, gen = h >> 15;
     if (!i || i >= MAX_H || !g_h[i].kind || g_h[i].gen != gen) return 0;
@@ -3122,13 +3129,13 @@ int svc_thread(int num, uint64_t *regs) {
     }
     if (diag) { source_svc = g_wd_source_svc; g_wd_source_svc = num; }
     uint32_t *sv_addr = sync_svc_addr(num, regs), sv_k = me->sv_n % 8;
-    if (sv_addr || num == 0x1D) {
+    if (sv_addr || num == 0x1D || num == 0x17) {   // 0x17 ResetSignal：空转线程反复清一个事件时，现场要看是哪个句柄（D-PZJQ）
         me->sv_ring[sv_k].num = (uint32_t)num; me->sv_ring[sv_k].lr = regs[30];
         for (int i = 0; i < 4; i++) me->sv_ring[sv_k].a[i] = regs[i];
         me->sv_ring[sv_k].pre = sv_addr ? __atomic_load_n(sv_addr, __ATOMIC_RELAXED) : 0;
     }
     int r = svc_thread_impl(me, num, regs);
-    if (sv_addr || num == 0x1D) { me->sv_ring[sv_k].ret = (uint32_t)regs[0]; me->sv_ring[sv_k].post = sv_addr ? __atomic_load_n(sv_addr, __ATOMIC_RELAXED) : 0; me->sv_n++; }
+    if (sv_addr || num == 0x1D || num == 0x17) { me->sv_ring[sv_k].ret = (uint32_t)regs[0]; me->sv_ring[sv_k].post = sv_addr ? __atomic_load_n(sv_addr, __ATOMIC_RELAXED) : 0; me->sv_n++; }
     if (diag) g_wd_source_svc = source_svc;
     if (wait_trace) {
         glock(); wait_diag_end_locked(me, regs); pthread_mutex_unlock(&G);
@@ -3840,9 +3847,10 @@ void s2a_thread_dump(void) {
             uint32_t n = t->sv_n < 8 ? t->sv_n : 8;
             for (uint32_t i = 0; i < n; i++) {
                 const typeof(t->sv_ring[0]) *e = &t->sv_ring[(t->sv_n - n + i) % 8]; module_t *em = module_of((void *)e->lr);
-                LOG("    同步调用 %u/%u：svc %#x 参数 %#llx %#llx %#llx %#llx，地址处值 调前 %#x 调后 %#x，返回 %#x，lr %s+%#llx", i + 1, n, e->num,
+                char og[96] = ""; if (e->num == 0x17) horig_desc((uint32_t)e->a[0], og, sizeof og);
+                LOG("    同步调用 %u/%u：svc %#x 参数 %#llx %#llx %#llx %#llx，地址处值 调前 %#x 调后 %#x，返回 %#x，lr %s+%#llx%s", i + 1, n, e->num,
                     (unsigned long long)e->a[0], (unsigned long long)e->a[1], (unsigned long long)e->a[2], (unsigned long long)e->a[3], e->pre, e->post, e->ret,
-                    em ? em->name : "?", (unsigned long long)(em ? e->lr - (uint64_t)em->base : e->lr));
+                    em ? em->name : "?", (unsigned long long)(em ? e->lr - (uint64_t)em->base : e->lr), og);
             }
         }
 #if defined(__APPLE__)
@@ -3944,7 +3952,8 @@ void s2a_thread_dump(void) {
             static const char *const kn[] = {"无", "线程", "事件读", "事件写", "会话", "共享内存", "传输内存", "端口", "C#", "进程"};
             char b[512]; size_t k = 0;
             for (int j = 0; j < t->wn && j < 16 && k < sizeof b - 64; j++) { int i = h_idx(t->wh[j]); unsigned kd = i ? g_h[i].kind : 0;
-                k += (size_t)snprintf(b + k, sizeof b - k, " %#x=%s%s", t->wh[j], kd < 10 ? kn[kd] : "?", i && kd == S2A_OBJ_EVENT_R && ((event_t *)g_h[i].obj)->signaled ? "(已触发)" : ""); }
+                char og[96] = ""; horig_desc(t->wh[j], og, sizeof og);
+                k += (size_t)snprintf(b + k, sizeof b - k, " %#x=%s%s%s", t->wh[j], kd < 10 ? kn[kd] : "?", i && kd == S2A_OBJ_EVENT_R && ((event_t *)g_h[i].obj)->signaled ? "(已触发)" : "", og); }
             LOG("    等同步句柄 %d 个：%s", t->wn, b);
         }
     }

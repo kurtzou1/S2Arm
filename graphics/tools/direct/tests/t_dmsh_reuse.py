@@ -97,14 +97,14 @@ rc, o, mac, ios, chain, inp = build('a', 'cas_a', progress=progress)
 bj = json.load(open(os.path.join(mac, '_b_build.json'))) if os.path.exists(os.path.join(mac, '_b_build.json')) else []
 check(rc == 0 and all(names(mac, e) == ALL for e in ('metal', 'metallib', 'json')) and all(names(ios, e) == ALL for e in ('metallib', 'json')),
       f'① 两份冷出：退出 {rc}，Mac 三样 / iOS 两样各 3 键')
-check(hits(o) == (0, 3) and metal(o, 'mac') == (0, 1) and metal(o, 'ios') == (0, 1) and store(o) == (7, 0) and astmem(o) == (0, 0, 3, 0),
-      f'① 命中 / 重编 {hits(o)}（期望 (0, 3)），#1429 计数行 {astmem(o)}（期望 (0, 0, 3, 0)），Metal mac {metal(o, "mac")} / ios {metal(o, "ios")}（期望各 (0, 1)：三支同 MSL 共用一份），仓 {store(o)}（期望 (7, 0)：含每侧 1 条批成员索引）')
+check(hits(o) == (0, 3) and metal(o, 'mac') == (0, 1) and metal(o, 'ios') == (0, 1) and store(o) == (10, 0) and astmem(o) == (0, 0, 3, 0),
+      f'① 命中 / 重编 {hits(o)}（期望 (0, 3)），#1429 计数行 {astmem(o)}（期望 (0, 0, 3, 0)），Metal mac {metal(o, "mac")} / ios {metal(o, "ios")}（期望各 (0, 1)：三支同 MSL 共用一份），仓 {store(o)}（期望 (10, 0)：含每侧 1 条批成员索引）')
 def zform(p):   # 11-08 仓条目整条压缩：文件 = b'DSZ1' + zlib(原 DSE1 整串)
     import zlib; d = open(p, 'rb').read()
     try: return d[:4] == b'DSZ1' and zlib.decompress(d[4:])[:4] == b'DSE1'
     except zlib.error: return False
 ez = list(entries('cas_a'))
-check(len(ez) == 7 and all(zform(p) for p in ez), f'① 仓条目 {len(ez)} 条（期望 7）全是 DSZ1 + zlib(DSE1)：{sum(zform(p) for p in ez)} 条')
+check(len(ez) == 10 and all(zform(p) for p in ez), f'① 仓条目 {len(ez)} 条（期望 10：含每支一条两张表）全是 DSZ1 + zlib(DSE1)：{sum(zform(p) for p in ez)} 条')
 import dmsh_chain   # 期望值由本树源码另算（xlate_fp 与 C# 编译期 Xfp 同清单同算法，tests/xfp_single_source_test.sh 守二者相等），不读被测程序
 XFP, LOCKFP = dmsh_chain.xlate_fp(), dmsh_chain.lock_fp()
 check(sorted((x['key'], x['st']) for x in bj) == [(k, 'ok') for k in sorted(ALL)] and stamp(mac) == stamp(ios) == {'game': TID, 'inputs': inp, 'xfp': XFP, 'lock': LOCKFP},
@@ -148,9 +148,9 @@ check(re.search(r'every key tried 3\): built 0 \(0 of them in 0 batches, 0 built
 before = snap(mac, ios); e0 = entries('cas_a')
 # ② 原地再出
 rc, o, _, _, _, _ = build('a', 'cas_a')
-check(rc == 0 and hits(o) == (3, 0) and metal(o, 'mac') == (1, 0) and metal(o, 'ios') == (1, 0) and snap(mac, ios) == before and store(o) == (7, 0) and astmem(o) == (0, 0, 3, 0),
-      f'② 原地再出没变：命中 / 重编 {hits(o)}（期望 (3, 0)），#1429 计数行 {astmem(o)}（期望 (0, 0, 3, 0)：命中缓存的键照样计到），Metal mac {metal(o, "mac")} / ios {metal(o, "ios")}（期望各 (1, 0)），{len(before)} 个按键文件逐字节不变，仓 {store(o)}（期望 (7, 0)：含每侧 1 条批成员索引）')
-check(len(e0) == 7 and entries('cas_a') == e0, f'② 全命中不改写条目：仓 {len(e0)} 条（期望 7，含两条批成员索引）修改时间全不变')
+check(rc == 0 and hits(o) == (3, 0) and metal(o, 'mac') == (1, 0) and metal(o, 'ios') == (1, 0) and snap(mac, ios) == before and store(o) == (10, 0) and astmem(o) == (0, 0, 3, 0),
+      f'② 原地再出没变：命中 / 重编 {hits(o)}（期望 (3, 0)），#1429 计数行 {astmem(o)}（期望 (0, 0, 3, 0)：命中缓存的键照样计到），Metal mac {metal(o, "mac")} / ios {metal(o, "ios")}（期望各 (1, 0)），{len(before)} 个按键文件逐字节不变，仓 {store(o)}（期望 (10, 0)：含每侧 1 条批成员索引）')
+check(len(e0) == 10 and entries('cas_a') == e0, f'② 全命中不改写条目：仓 {len(e0)} 条（期望 10，含两条批成员索引、每支一条两张表）修改时间全不变')
 # ③ 改 K2、去 K3
 tables({K1: 16, K2: 128})
 rc, o, _, _, _, inp3 = build('a', 'cas_a')
@@ -160,8 +160,8 @@ tg2 = json.load(open(os.path.join(mac, K2 + '_b.json'))).get('threadgroup_size')
 gone3 = not any(n.startswith(K3) for n in ls(mac) + ls(ios))
 check(rc == 0 and hits(o) == (1, 1) and same1 and tg2 == [128, 1, 1] and metal(o, 'mac') == (1, 0) and metal(o, 'ios') == (1, 0),
       f'③ 改 K2：命中 / 重编 {hits(o)}（期望 (1, 1)），K1 文件不变 {same1}，K2 线程组 {tg2}（期望 [128, 1, 1]），Metal mac {metal(o, "mac")} / ios {metal(o, "ios")}（期望各 (1, 0)）')
-check(gone3 and names(mac, 'metallib') == {K1, K2} == names(ios, 'metallib') and store(o) == (8, 0) and stamp(mac).get('inputs') == inp3 != inp,
-      f'③ K3 移出：两侧 K3 文件全删 {gone3}，仓 {store(o)}（期望 (8, 0)：含两条批成员索引；出库不删仓条目，旧 K2 / K3 翻译留着——11-02 起淘汰按容量预算 LRU 另做（tools/direct_cache_lru.py），'
+check(gone3 and names(mac, 'metallib') == {K1, K2} == names(ios, 'metallib') and store(o) == (11, 0) and stamp(mac).get('inputs') == inp3 != inp,
+      f'③ K3 移出：两侧 K3 文件全删 {gone3}，仓 {store(o)}（期望 (11, 0)：含两条批成员索引、每支一条两张表；出库不删仓条目，旧 K2 / K3 翻译留着——11-02 起淘汰按容量预算 LRU 另做（tools/direct_cache_lru.py），'
       f'原先「本次没用到的全删」让交替出包的两边互删），印章摘要换成新的 {stamp(mac).get("inputs") == inp3 != inp}')
 # ④ 工具指纹变了
 tables({K1: 16, K2: 32, K3: 64})
@@ -246,6 +246,32 @@ for avail, jobs, want in (('6000', '8', 5), ('1000', '8', 1), ('6000', '3', 3)):
     u = re.search(r'编批库：(\d+) 路编', o)   # 只有第一次冷编有批要编；后两次批全拿缓存，这段不读内存、不打行
     check((u is not None and int(u.group(1)) == want) if (avail, jobs) == ('6000', '8') else u is None,
           f'⑬ 空闲 {avail} MB、本单 {jobs} 核：编批库 {u.group(1) + " 路" if u else "没打（批全拿缓存）"}（期望 {str(want) + " 路" if (avail, jobs) == ("6000", "8") else "没打"}）')
+
+# ⑭ 两张表逐支进缓存仓（11-22「更新这款」后台遍 903 秒）：同一份输入、同一个缓存仓连出两次，第一次全算、第二次全从缓存仓取（算了 0 支），
+#    两次的两张表（第二行起）逐字节相同；换一个空缓存仓又全算（反证：不是从别处带过来的）
+def c1row(o):
+    m = re.search(r'两张表后台遍：(\d+) 支（缓存仓里有 (\d+) 支，算了 (\d+) 支）', o); return tuple(map(int, m.groups())) if m else None
+def tables(): return {tb: body(P, tb) for tb in ('c1_full.tsv', 'cb_extent.tsv')}
+rc1, o1, _, _, _, _ = build('c1a', 'cas_c1'); t1 = tables(); r1 = c1row(o1)
+pg2 = os.path.join(t, 'c1b_progress.tsv'); rc2, o2, _, _, _, _ = build('c1b', 'cas_c1', progress=pg2); t2 = tables(); r2 = c1row(o2)
+rc3, o3, _, _, _, _ = build('c1c', 'cas_c1_fresh'); r3 = c1row(o3)
+n_ = r1[0] if r1 else -1
+check(rc1 == rc2 == rc3 == 0 and n_ > 0 and r1 == (n_, 0, n_) and r2 == (n_, n_, 0) and r3 == (n_, 0, n_) and t1 == t2,
+      f'⑭ 两张表进缓存仓：第一次 {r1}、同仓第二次 {r2}、空仓 {r3}（期望 (N, 0, N) / (N, N, 0) / (N, 0, N)），两次表相同 {t1 == t2}')
+#    热仓那次查缓存仓也计进「直连库·两张表」（11-22 0400486024DEC000 热仓查仓 225 秒进度不动）：首行 0/N、末行 N/N。反证：修前子进程只拿到 0 支，这一段一行不写
+def c1tick(f):
+    try: rows = [l.rstrip('\n').split('\t')[1:] for l in open(f, encoding='utf-8') if not l.startswith('#')]
+    except OSError: return None
+    rows = [(int(d), int(n)) for st, d, n in rows if st == '直连库·两张表']; return (rows[0], rows[-1]) if rows else None
+k2 = c1tick(pg2)
+check(k2 == ((0, n_), (n_, n_)), f'⑭ 热仓查缓存仓计进度：「直连库·两张表」首末行 {k2}（期望 ((0, {n_}), ({n_}, {n_}))）')
+# ⑮ 两张表缓存键里的算法指纹只看 C1Cb.cs 源码（嵌入资源 sha256 前 16 位）：期望值在这里直接按文件算，不经被测实现。
+#    11-22 热仓实测：原先取 IL 字节，Build.cs 加几行指纹就变、41984 支命中 0
+import hashlib
+src = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'dsh', 'batch', 'C1Cb.cs')
+want_fp = hashlib.sha256(open(src, 'rb').read()).hexdigest()[:16]
+p_ = subprocess.run(CMD + ['--c1cb-fp'], capture_output=True, text=True); got_fp = p_.stdout.strip()
+check(p_.returncode == 0 and got_fp == want_fp, f'⑮ 两张表算法指纹 = C1Cb.cs 源码 sha256：期望 {want_fp} → 真结果 {got_fp or p_.stderr.strip()[:200]}')
 
 shutil.rmtree(t, ignore_errors=True)
 print(f't_dmsh_reuse：{"全符" if not fails else f"{len(fails)} 例不符"}')

@@ -48,7 +48,11 @@ struct Switch2ProConnectionPopover: View {
         if let pad = systems.pads.first { return ControllerFaceFamily(pad.family) }
         return controller.allDevices.isEmpty ? .other : .nintendo
     }
-    private var currentPlayer: Int { controller.assignment.units.indices.contains(selectedPlayer) ? selectedPlayer : 0 }
+    private var currentPlayer: Int {
+        let slots = controller.assignment.slots
+        if slots.indices.contains(selectedPlayer), slots[selectedPlayer] != nil { return selectedPlayer }
+        return slots.firstIndex(where: { $0 != nil }) ?? 0
+    }
 
     private func unitGlyph(_ unit: PlayerAssignment.Unit) -> ControllerIcon.Glyph {
         switch unit {
@@ -83,10 +87,10 @@ struct Switch2ProConnectionPopover: View {
         !controller.allDevices.isEmpty || !systems.pads.isEmpty || !systems.fallback.isEmpty || !systems.gen1.isEmpty
     }
 
-    /// 「玩家」列表 = 现在的分配（接上手柄自动排进来；PlayerAssignment.reconcile），最多 8 位
+    /// 「玩家」列表 = 现在的分配槽位（含中间空槽，尾端无玩家时自动省略），最多 8 位
     @ObservedObject private var colorSim = ControllerColorSimulator.shared   // 模拟彩色手柄（本地 / 自测构建的 App 菜单），接在真的后面
-    private var playerRows: [(glyph: ControllerIcon.Glyph, name: String, colors: ControllerColors)] {
-        controller.assignment.units.map { (unitGlyph($0), unitName($0), unitColors($0)) }
+    private var playerRows: [(glyph: ControllerIcon.Glyph, name: String, colors: ControllerColors)?] {
+        controller.assignment.slots.map { unit in unit.map { (unitGlyph($0), unitName($0), unitColors($0)) } }
     }
     /// 这一位的手柄颜色（图示动态上色）：一代 Joy-Con 用读到的出厂颜色；其余（含第三方、还没读到）用缺省色
     private func unitColors(_ unit: PlayerAssignment.Unit) -> ControllerColors {
@@ -186,13 +190,22 @@ struct Switch2ProConnectionPopover: View {
                     HStack(spacing: 8) {
                         HowToTile(title: t("howPair"), keys: t("howPairKeys"))
                         HowToTile(title: t("howSingle"), keys: t("howSingleKeys"))
+                        HowToTile(title: t("howOther"), keys: t("howOtherKeys"))   // #1151：其他手柄（含 HID 兜底）接上即加入，不用按 L + R
                     }
                     VStack(spacing: 8) {
-                        let units = controller.assignment.units
-                        // 至少 4 行（同稿），登记到第 4 位起每多一位再露一行「等待中」，最多 8 行（同原机最多 8 位）
-                        ForEach(0..<min(PlayerAssignment.maxPlayers, max(4, units.count + 1)), id: \.self) { i in
-                            if i < units.count { PlayerRow(number: i + 1, glyph: unitGlyph(units[i]), colors: unitColors(units[i]), name: unitName(units[i]), flashing: controller.flashingPlayers.contains(i), clearLabel: t("clear")) { controller.removePlayer(at: i) } }
-                            else { WaitingRow(number: i + 1, label: t("waiting")) }
+                        let slots = controller.assignment.slots
+                        // 至少 4 行（同稿），有更高槽位玩家（如 P8）时一直显示到该槽位（未满 8 时多露一行「等待中」）；确认后面全空才省略 P5–P8
+                        ForEach(0..<min(PlayerAssignment.maxPlayers, max(4, slots.count + 1)), id: \.self) { i in
+                            if i < slots.count, let unit = slots[i] {
+                                PlayerRow(number: i + 1, glyph: unitGlyph(unit), colors: unitColors(unit), name: unitName(unit), flashing: controller.flashingPlayers.contains(i), clearLabel: t("clear")) { controller.removePlayer(at: i) }
+                            } else {
+                                Button { controller.toggleAssignTargetSlot(i) } label: {
+                                    WaitingRow(number: i + 1, label: t("waiting"), selected: controller.assignTargetSlot == i)
+                                }
+                                .controllerButtonStyle(.plain)
+                                .controllerID("controller.assign.slot.\(i)")
+                                .controllerRingRadius(LauncherTheme.Metrics.controlRadius)
+                            }
                         }
                     }
                     HStack(spacing: 8) {
@@ -226,36 +239,43 @@ struct Switch2ProConnectionPopover: View {
                 PanelSection {
                     if !rows.isEmpty {
                         SectionHeader(text: t("players"))
+                        let firstOccupied = rows.firstIndex(where: { $0 != nil }) ?? 0
                         VStack(spacing: 8) {
                             ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
-                                // 点一行选中这一位（框线变奶油色）；按键时名字亮绿 + 按键小框照旧。平时不给 ×，分配中才有
-                                //   最右边一颗四键布局钮（键盘那一位没有）：盖在行上、不包进行的按钮里，点它不会先选中整行；
-                                //   任天堂手柄（Switch 2 / Switch Pro / Joy-Con）使用独立的四键配置，不与其他手柄共用
-                                let faceMappable = controller.assignment.units.indices.contains(index) && faceMappable(controller.assignment.units[index])
-                                ZStack(alignment: .trailing) {
-                                Button { selectedPlayer = index } label: {
-                                    PlayerRow(number: index + 1, glyph: row.glyph, colors: row.colors, name: row.name, selected: currentPlayer == index,
-                                              flashing: controller.flashingPlayers.contains(index), showKey: true, key: controller.flashingKeys[index],
-                                              reserve: faceMappable ? 32 : 0)
-                                }
-                                .controllerButtonStyle(.plain)
-                                .controllerID("controller.player.\(index)")
-                                .controllerRingRadius(LauncherTheme.Metrics.controlRadius)   // 玩家行圆角同主题控件
-                                // 面板一开手柄焦点先落在 P1，不落在主按钮：连着时主按钮是「断开」，按 A 认手柄会把手柄断掉
-                                .controllerPreferredFocus(index == 0)
-                                .accessibilityLabel("P\(index + 1) \(row.name)")
-                                .accessibilityAddTraits(currentPlayer == index ? .isSelected : [])
-                                if faceMappable {
-                                    Button { selectedPlayer = index; setFaceMap(!(showFaceMap && currentPlayer == index)) } label: {
-                                        Image(systemName: "circle.grid.cross").font(.system(size: 13, weight: .semibold))
+                                if let row {
+                                    // 点一行选中这一位（框线变奶油色）；按键时名字亮绿 + 按键小框照旧。平时不给 ×，分配中才有
+                                    //   最右边一颗四键布局钮（键盘那一位没有）：盖在行上、不包进行的按钮里，点它不会先选中整行；
+                                    //   任天堂手柄（Switch 2 / Switch Pro / Joy-Con）使用独立的四键配置，不与其他手柄共用
+                                    let unit = controller.assignment.slots.indices.contains(index) ? controller.assignment.slots[index] : nil
+                                    let faceMappable = unit.map(faceMappable) ?? false
+                                    ZStack(alignment: .trailing) {
+                                    Button { selectedPlayer = index } label: {
+                                        PlayerRow(number: index + 1, glyph: row.glyph, colors: row.colors, name: row.name, selected: currentPlayer == index,
+                                                  flashing: controller.flashingPlayers.contains(index), showKey: true, key: controller.flashingKeys[index],
+                                                  reserve: faceMappable ? 32 : 0)
                                     }
-                                    .controllerButtonStyle(LauncherIconButtonStyle(size: 28, cornerRadius: 8))
-                                    .help(faceMapTitle)
-                                    .accessibilityLabel("P\(index + 1) \(faceMapTitle)")
-                                    .controllerID("controller.player.\(index).faceMap")
-                                    .anchorPreference(key: FaceMapAnchorKey.self, value: .bounds) { index == currentPlayer ? $0 : nil }
-                                    .padding(.trailing, 8)
-                                }
+                                    .controllerButtonStyle(.plain)
+                                    .controllerID("controller.player.\(index)")
+                                    .controllerRingRadius(LauncherTheme.Metrics.controlRadius)   // 玩家行圆角同主题控件
+                                    // 面板一开手柄焦点先落在第一个在线玩家，不落在主按钮：连着时主按钮是「断开」，按 A 认手柄会把手柄断掉
+                                    .controllerPreferredFocus(index == firstOccupied)
+                                    .accessibilityLabel("P\(index + 1) \(row.name)")
+                                    .accessibilityAddTraits(currentPlayer == index ? .isSelected : [])
+                                    if faceMappable {
+                                        Button { selectedPlayer = index; setFaceMap(!(showFaceMap && currentPlayer == index)) } label: {
+                                            Image(systemName: "circle.grid.cross").font(.system(size: 13, weight: .semibold))
+                                        }
+                                        .controllerButtonStyle(LauncherIconButtonStyle(size: 28, cornerRadius: 8))
+                                        .help(faceMapTitle)
+                                        .accessibilityLabel("P\(index + 1) \(faceMapTitle)")
+                                        .controllerID("controller.player.\(index).faceMap")
+                                        .anchorPreference(key: FaceMapAnchorKey.self, value: .bounds) { index == currentPlayer ? $0 : nil }
+                                        .padding(.trailing, 8)
+                                    }
+                                    }
+                                } else {
+                                    // 中间空槽（如 P1 或 P4 暂时断开、后面仍有玩家）：原位保留等待行，不隐藏后面的玩家槽
+                                    WaitingRow(number: index + 1, label: t("waiting"))
                                 }
                             }
                         }
@@ -526,9 +546,10 @@ private struct HowToTile: View {
 private struct WaitingRow: View {
     let number: Int
     let label: String
+    var selected: Bool = false
     var body: some View {
         HStack(spacing: 8) {
-            Text("P\(number)").font(.manrope(12, .bold)).foregroundStyle(.secondary).frame(width: 20, alignment: .leading)
+            Text("P\(number)").font(.manrope(12, .bold)).foregroundStyle(selected ? .primary : .secondary).frame(width: 20, alignment: .leading)
             HStack(spacing: 4) {
                 ForEach(0..<4, id: \.self) { i in
                     RoundedRectangle(cornerRadius: 2, style: .continuous)
@@ -536,12 +557,16 @@ private struct WaitingRow: View {
                         .frame(width: 8, height: 8)
                 }
             }
-            Text(label).font(.manrope(13, .semibold)).foregroundStyle(.secondary)
+            Text(label).font(.manrope(13, .semibold)).foregroundStyle(selected ? .primary : .secondary)
             Spacer(minLength: 0)
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 12)
-        .overlay(RoundedRectangle(cornerRadius: LauncherTheme.Metrics.controlRadius, style: .continuous).strokeBorder(LauncherTheme.Colors.border, style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
+        .overlay(
+            RoundedRectangle(cornerRadius: LauncherTheme.Metrics.controlRadius, style: .continuous)
+                .strokeBorder(selected ? LauncherPalette.cream.opacity(0.7) : LauncherTheme.Colors.border,
+                              style: selected ? StrokeStyle(lineWidth: 1.5) : StrokeStyle(lineWidth: 1, dash: [4, 3]))
+        )
     }
 }
 

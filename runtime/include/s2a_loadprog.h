@@ -1,12 +1,11 @@
 // 首次进游戏的加载页：进度模型（平台无关；iOS 页面 ios/loadpage.m 只读它画，10-30 维护者 批准）。
 // 三段：准备游戏数据（起局到预热开始）→ 为你的设备优化画面（直连管线预热，已编 / 总数）→ 进入游戏（预热完到首帧上屏）。
 // 剩余时间按本机实测速率估：进度只进不退；显示的剩余时间每次至多按流逝时间往下走，实测持续变慢（新估计比显示值高 25% 以上连续 3 秒）才往上修正。
-// 「什么时候不再等」由这里定（直连层 nvn_mtl.m 每 50 ms 调 s2a_front_warm_tick 问）：玩家点了「先开始玩」、长时间没有进展、超过宽松上限 → 返回 1，
-//   剩下的管线转后台继续编（#800 B 近似顶替 + 后台编译）。默认编完直接进游戏，没有硬上限；护栏只防异常，绝不卡死。
+// 「什么时候不再等」由这里定（直连层 nvn_mtl.m 每 50 ms 调 s2a_front_warm_tick 问）：玩家点了「先开始玩」、长时间没有进展 → 返回 1，
+//   剩下的管线转后台继续编（#800 B 近似顶替 + 后台编译）。默认编完直接进游戏，没有总时长上限（11-22 #502：编译还在往前走就等，等不等由玩家定）；无进展护栏只防异常，绝不卡死。
 // 时间由调用方传（纳秒，单调时钟）；配置走环境变量，缺省值等真机实测后定：
-//   S2A_LOAD_SKIP_S（缺省 8）  预热进行多少秒后出现「先开始玩，后台继续优化」（剩余估计不到 5 秒时不出）
 //   S2A_LOAD_STALL_S（缺省 30）已编数多少秒没涨就自动进游戏
-//   S2A_LOAD_MAX_S（缺省 = 直连层首帧上限 DM_PSO_PREPARE_MAX_MS，30 秒） 预热总共等多少秒就自动进游戏；剩余时间也按它封顶
+//   「先开始玩，后台继续优化」在完整加载页的优化画面段一直可点
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
@@ -14,7 +13,7 @@
 extern "C" {
 #endif
 enum { S2A_LOAD_DATA = 0, S2A_LOAD_OPTIMIZE = 1, S2A_LOAD_ENTER = 2, S2A_LOAD_DONE = 3 };   // 阶段；DONE = 首帧已上屏，页面收起
-enum { S2A_LOAD_GO_NONE = 0, S2A_LOAD_GO_DONE, S2A_LOAD_GO_USER, S2A_LOAD_GO_STALL, S2A_LOAD_GO_MAX, S2A_LOAD_GO_HOST };   // HOST（11-06）：直连层自己放行（s2a_front_warm_released）；为什么不再等预热
+enum { S2A_LOAD_GO_NONE = 0, S2A_LOAD_GO_DONE, S2A_LOAD_GO_USER, S2A_LOAD_GO_STALL, S2A_LOAD_GO_HOST };   // HOST（11-06）：直连层自己放行（s2a_front_warm_released，清单全部领走、只剩在编的几条）；为什么不再等预热
 typedef struct {
     int stage;            // S2A_LOAD_*
     int first_run;        // 1 = 首次（完整加载页）；0 = 之后的启动（简短启动画面）
@@ -41,7 +40,7 @@ void s2a_load_eta_text(int eta_s, char *out, size_t n);
 // 直连层调的入口（画面线 wire-c/warm-progress：开始一次 (0, total)、预热等待循环里周期调、全部编完时 (total, total) 一次，后者可能在后台队列线程）：
 //   只回 0（继续等）/ 1（现在进游戏）；nvn_mtl.m 的弱定义回 -1 = 没链前端、直连层自己兜底。内部取单调时钟转给 s2a_load_warm_tick，加锁极短、不阻塞
 int s2a_front_warm_tick(long done, long total);
-// 直连层自己不再等了（上限到点，或清单全部领走、只剩在编的几条；不是这里的节拍说的）：页面转「进入游戏」，首帧已到过就直接收起
+// 直连层自己不再等了（清单全部领走、只剩在编的几条；不是这里的节拍说的）：页面转「进入游戏」，首帧已到过就直接收起
 void s2a_front_warm_released(void);
 // 前台激活门（11-19 定因：系统弹框「允许使用无线数据？」「Apple 账户验证」盖在 App 上时，场景一直「前台但未激活」，宿主原先停在「等待前台」，
 //   玩家应答弹框期间一点没加载）：场景进前台（未激活）就开始起宿主——C# 运行时、装模块、建内存、着色器预热这些不上屏的工作照做；

@@ -26,7 +26,18 @@ struct PlayerAssignment: Equatable, Codable {
     static let maxPlayers = 8   // 同原机最多 8 位玩家
     static let pairWindow: TimeInterval = 0.5   // 两只各按 L / R 算「同时」的间隔
 
-    private(set) var units: [Unit] = []
+    /// 玩家槽位（下标 0..7 = P1..P8，nil = 该槽手柄暂时断开 / 空位；尾部的 nil 自动裁掉）
+    private(set) var slots: [Unit?] = []
+    /// 当前在线的玩家单元（不含空槽；供只需看在线列表与人数的调用方使用）
+    var units: [Unit] { slots.compactMap { $0 } }
+    /// 断开手柄的身份 → 断开前占的玩家槽（不存偏好）：重连回到原槽，不把其他玩家挤乱
+    private enum SlotIdentity: Hashable {
+        case ns2(String)
+        case system(String, Int)
+        case gen1(String)
+        case keyboard
+    }
+    private var disconnectedSlots: [SlotIdentity: Int] = [:]
     /// 分配完成时在线却没登记的手柄：保持连接、只是没有玩家位（下次分配直接按键加入，不用重连）；
     ///   它断开再连上时拿掉，照常自动排进来。系统手柄按名字 + 第几只、NS2 手柄按设备 id
     private(set) var dropped: [SystemKey] = []
@@ -54,21 +65,97 @@ struct PlayerAssignment: Equatable, Codable {
     /// 同上，Joy-Con 2：一对（含跨套按 L + R 拼的）断了一只，剩下那只 → 断开的那只；那只接回来原位并回（不限同一组）
     private var ns2Partner: [String: String] = [:]
 
-    /// 横握记号（sideways）不存偏好：只管这次开着的期间（拆开的一对断开重连不拼回）；重开 App 后第一次连上照常拼成一对
+    /// 横握记号（sideways）与断连原槽记忆（disconnectedSlots）不存偏好：只管这次开着的期间；重开 App 后第一次连上照常排
     ///   （11-20：存进偏好后，模拟手柄重开 App 后同样的 id 第一次连上也不拼了）
-    enum CodingKeys: String, CodingKey { case units, dropped, droppedDevices, droppedGen1, splitCombined, generation }
+    enum CodingKeys: String, CodingKey { case slots, units, dropped, droppedDevices, droppedGen1, splitCombined, generation }
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        units = try c.decodeIfPresent([Unit].self, forKey: .units) ?? []
+        if let decodedSlots = try c.decodeIfPresent([Unit?].self, forKey: .slots) {
+            slots = decodedSlots
+        } else {
+            slots = (try c.decodeIfPresent([Unit].self, forKey: .units) ?? []).map { Optional($0) }
+        }
+        trimTrailingEmptySlots()
         dropped = try c.decodeIfPresent([SystemKey].self, forKey: .dropped) ?? []
         droppedDevices = try c.decodeIfPresent([String].self, forKey: .droppedDevices) ?? []
         droppedGen1 = try c.decodeIfPresent([String].self, forKey: .droppedGen1) ?? []
         splitCombined = try c.decodeIfPresent([SystemKey].self, forKey: .splitCombined) ?? []
         generation = try c.decodeIfPresent(Int.self, forKey: .generation) ?? 0
     }
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(slots, forKey: .slots)
+        try c.encode(units, forKey: .units)
+        try c.encode(dropped, forKey: .dropped)
+        try c.encode(droppedDevices, forKey: .droppedDevices)
+        try c.encode(droppedGen1, forKey: .droppedGen1)
+        try c.encode(splitCombined, forKey: .splitCombined)
+        try c.encode(generation, forKey: .generation)
+    }
     static func == (a: PlayerAssignment, b: PlayerAssignment) -> Bool {
-        a.units == b.units && a.dropped == b.dropped && a.droppedDevices == b.droppedDevices && a.droppedGen1 == b.droppedGen1 && a.splitCombined == b.splitCombined && a.generation == b.generation   // sideways 只管这次开着的期间、不存偏好，不算在比对里
+        a.slots == b.slots && a.dropped == b.dropped && a.droppedDevices == b.droppedDevices && a.droppedGen1 == b.droppedGen1 && a.splitCombined == b.splitCombined && a.generation == b.generation   // sideways / disconnectedSlots 只管这次开着的期间、不存偏好，不算在比对里
+    }
+
+    private mutating func trimTrailingEmptySlots() {
+        while slots.last == Optional<Unit>.none { slots.removeLast() }
+    }
+    private static func identities(of unit: Unit) -> [SlotIdentity] {
+        switch unit {
+        case let .pair(l, r): return [.ns2(l), .ns2(r)]
+        case let .single(id, _), let .whole(id, _): return [.ns2(id)]
+        case let .system(name, index): return [.system(name, index)]
+        case .keyboard: return [.keyboard]
+        case let .gen1(id, _): return [.gen1(id)]
+        case let .gen1Pair(l, r): return [.gen1(l), .gen1(r)]
+        }
+    }
+    private mutating func rememberDisconnected(_ unit: Unit, at slot: Int) {
+        guard slot >= 0, slot < Self.maxPlayers else { return }
+        for id in Self.identities(of: unit) { disconnectedSlots[id] = slot }
+    }
+    private mutating func forgetDisconnected(_ unit: Unit) {
+        for id in Self.identities(of: unit) { disconnectedSlots[id] = nil }
+    }
+    private mutating func setSlot(_ index: Int, _ unit: Unit) {
+        guard index >= 0, index < Self.maxPlayers else { return }
+        if index >= slots.count { slots.append(contentsOf: repeatElement(nil, count: index - slots.count + 1)) }
+        slots[index] = unit
+        forgetDisconnected(unit)
+        // 该槽已被新的在线单元占用：清掉占着同槽的旧断连记忆（其他槽不动）
+        disconnectedSlots = disconnectedSlots.filter { $0.value != index }
+    }
+    /// 放进玩家槽：优先回到断开前的原槽；否则挑最小空闲且未被断开手柄预留的槽；全满再复用空槽
+    private mutating func place(_ unit: Unit) {
+        for id in Self.identities(of: unit) {
+            if let preferred = disconnectedSlots[id], preferred >= 0, preferred < Self.maxPlayers,
+               preferred >= slots.count || slots[preferred] == nil {
+                setSlot(preferred, unit)
+                return
+            }
+        }
+        let reserved = Set(disconnectedSlots.values)
+        if let free = (0..<Self.maxPlayers).first(where: { ($0 >= slots.count || slots[$0] == nil) && !reserved.contains($0) }) {
+            setSlot(free, unit)
+            return
+        }
+        if let free = (0..<Self.maxPlayers).first(where: { $0 >= slots.count || slots[$0] == nil }) {
+            setSlot(free, unit)
+        }
+    }
+    /// 找一个空槽：若指定了 preferred 且为空则优先用它；否则取最小空槽；8 槽全满返回 nil
+    private func freeSlot(preferring preferred: Int? = nil) -> Int? {
+        if let preferred, preferred >= 0, preferred < Self.maxPlayers,
+           preferred >= slots.count || slots[preferred] == nil {
+            return preferred
+        }
+        return (0..<Self.maxPlayers).first { $0 >= slots.count || slots[$0] == nil }
+    }
+    /// 拆分一对 Joy-Con 时给另一只找空槽：优先用紧挨着的空槽，否则找最小空槽；绝不挤动其他玩家，8 槽全满返回 nil（不拆）
+    private func splitSlot(after index: Int) -> Int? {
+        let next = index + 1
+        if next < Self.maxPlayers, next >= slots.count || slots[next] == nil { return next }
+        return (0..<Self.maxPlayers).first { $0 != index && ($0 >= slots.count || slots[$0] == nil) }
     }
 
     /// 两只 Joy-Con 要不要拆开：没登记成一对、又连着两只 Joy-Con（各一位，或一只没分配）
@@ -96,8 +183,18 @@ struct PlayerAssignment: Equatable, Codable {
         gen1Partner = gen1Partner.filter { g1.contains($0.key) }
         for unit in units { if case let .pair(l, r) = unit, ids.contains(l) != ids.contains(r) { ns2Partner[ids.contains(l) ? l : r] = ids.contains(l) ? r : l } }
         ns2Partner = ns2Partner.filter { ids.contains($0.key) }
-        units = units.compactMap { reconciled($0, ids: ids, keys: keys, g1: g1) }
+        for i in slots.indices {
+            guard let unit = slots[i] else { continue }
+            if let kept = reconciled(unit, ids: ids, keys: keys, g1: g1) {
+                slots[i] = kept
+            } else {
+                rememberDisconnected(unit, at: i)
+                slots[i] = nil
+            }
+        }
+        trimTrailingEmptySlots()
         reconcileRest(devices: devices, mergedGroups: mergedGroups, system: system, gen1: gen1, ids: ids, keys: keys, g1: g1)
+        trimTrailingEmptySlots()
         gen1Last = gen1Owners(system: system, gen1: gen1).mapValues { Set($0.values) }
         return self != before
     }
@@ -136,15 +233,20 @@ struct PlayerAssignment: Equatable, Codable {
             return old.isDisjoint(with: present) ? .some(nil) : nil
         }
         var taken = Set<SystemKey>()
-        units = units.compactMap { unit in
-            guard case let .system(name, index) = unit else { return unit }
+        for i in slots.indices {
+            guard case let .system(name, index) = slots[i] else { continue }
             let key = SystemKey(name: name, index: index)
             switch follow(key) {
-            case .none: taken.insert(key); return unit
-            case .some(.none): return nil
-            case .some(.some(let next)): return taken.insert(next).inserted ? .system(name: next.name, index: next.index) : nil
+            case .none: taken.insert(key)
+            case .some(.none):
+                rememberDisconnected(.system(name: name, index: index), at: i)
+                slots[i] = nil
+            case .some(.some(let next)):
+                if taken.insert(next).inserted { slots[i] = .system(name: next.name, index: next.index) }
+                else { slots[i] = nil }
             }
         }
+        trimTrailingEmptySlots()
         dropped = dropped.compactMap { key in
             switch follow(key) { case .none: return key; case .some(.none): return nil; case .some(.some(let next)): return next }
         }
@@ -158,16 +260,19 @@ struct PlayerAssignment: Equatable, Codable {
     }
     /// 已经排着、但里面的一代已按设备登记的系统那一位：整位都登记了就拿掉；只登记了一侧（例如左只按过 SL + SR，右只后来接上）就在原位换成另一侧自己一位
     private mutating func dropGen1Duplicates(owners: [SystemKey: [Int: String]]) {
-        var i = 0
-        while i < units.count {
-            guard case let .system(name, index) = units[i], Self.isGen1JoyCon(name) else { i += 1; continue }
+        for i in slots.indices {
+            guard case let .system(name, index) = slots[i], Self.isGen1JoyCon(name) else { continue }
             let key = SystemKey(name: name, index: index)
             let (covered, free) = gen1Split(key, owners: owners)
-            guard covered else { i += 1; continue }
-            units.remove(at: i)
-            for d in free { units.insert(.gen1(id: d.id, side: d.side), at: i); i += 1 }
+            guard covered else { continue }
+            slots[i] = nil
+            if let first = free.first {
+                setSlot(i, .gen1(id: first.id, side: first.side))
+                for d in free.dropFirst() { place(.gen1(id: d.id, side: d.side)) }
+            }
             if !free.isEmpty && !splitCombined.contains(key) { splitCombined.append(key) }
         }
+        trimTrailingEmptySlots()
     }
     private func reconciled(_ unit: Unit, ids: Set<String>, keys: Set<SystemKey>, g1: Set<String>) -> Unit? {
             switch unit {
@@ -198,8 +303,8 @@ struct PlayerAssignment: Equatable, Codable {
         // 断开过的那只接回：原来跟它一对的那只还是单只，就原位并回一对（跨套拼的也一样）
         for d in fresh where d.kind == 2 || d.kind == 3 {
             guard let host = ns2Partner.first(where: { $0.value == d.id })?.key,
-                  let i = units.firstIndex(where: { if case let .single(x, k) = $0 { return x == host && k != d.kind }; return false }) else { continue }
-            units[i] = d.kind == 2 ? .pair(left: d.id, right: host) : .pair(left: host, right: d.id)
+                  let i = slots.firstIndex(where: { if case let .single(x, k) = $0 { return x == host && k != d.kind }; return false }) else { continue }
+            setSlot(i, d.kind == 2 ? .pair(left: d.id, right: host) : .pair(left: host, right: d.id))
             ns2Partner[host] = nil
             fresh.removeAll { $0.id == d.id }
         }
@@ -208,16 +313,16 @@ struct PlayerAssignment: Equatable, Codable {
             // 一对连着、合成一位：登记过单只的那只配上同组新来的另一只，原位并成一对——
             //   那只若是按 SL + SR 登记的横握单只（sideways）就不拼：新来的自己排一位，传输层照分配拆开（wantsSplit → sendPlan）
             if let other = fresh.first(where: { $0.group == group && ($0.kind == 2 || $0.kind == 3) && !sideways.contains($0.id) }),
-               let at = units.firstIndex(where: { if case let .single(id, k) = $0 { return k != other.kind && (k == 2 || k == 3) && inGroup.contains { $0.id == id } && !sideways.contains(id) }; return false }),
-               case let .single(id, _) = units[at] {
-                units[at] = other.kind == 2 ? .pair(left: other.id, right: id) : .pair(left: id, right: other.id)
+               let at = slots.firstIndex(where: { if case let .single(id, k) = $0 { return k != other.kind && (k == 2 || k == 3) && inGroup.contains { $0.id == id } && !sideways.contains(id) }; return false }),
+               case let .single(id, _) = slots[at] {
+                setSlot(at, other.kind == 2 ? .pair(left: other.id, right: id) : .pair(left: id, right: other.id))
                 fresh.removeAll { $0.id == other.id }
             }
             if let l = fresh.first(where: { $0.group == group && $0.kind == 2 && !sideways.contains($0.id) }), let r = fresh.first(where: { $0.group == group && $0.kind == 3 && !sideways.contains($0.id) }) {
-                append(.pair(left: l.id, right: r.id)); fresh.removeAll { $0.id == l.id || $0.id == r.id }
+                place(.pair(left: l.id, right: r.id)); fresh.removeAll { $0.id == l.id || $0.id == r.id }
             }
         }
-        for d in fresh { append(d.kind == 1 ? .whole(id: d.id, kind: 1) : .single(id: d.id, kind: d.kind)) }
+        for d in fresh { place(d.kind == 1 ? .whole(id: d.id, kind: 1) : .single(id: d.id, kind: d.kind)) }
         let owners = gen1Owners(system: system, gen1: gen1)
         dropGen1Duplicates(owners: owners)
         // 一代的「拆开过」照这次谁按设备登记了重算（不留旧号码；给游戏的顺序表照它不读系统那一位）
@@ -230,23 +335,25 @@ struct PlayerAssignment: Equatable, Codable {
                 let (covered, free) = gen1Split(key, owners: owners)
                 if covered {
                     for d in free {
-                        // 原来跟它一对、只是断开过的那只：原位并回一对；否则自己排一位
+                        // 原来跟它一对、只是断开过的那只：原位并回一对；否则放进空槽（断开重连回原槽）
                         if let host = gen1Partner.first(where: { $0.value == d.id })?.key,
-                           let i = units.firstIndex(where: { if case let .gen1(x, _) = $0 { return x == host }; return false }) {
-                            units[i] = d.side == 1 ? .gen1Pair(left: host, right: d.id) : .gen1Pair(left: d.id, right: host)
+                           let i = slots.firstIndex(where: { if case let .gen1(x, _) = $0 { return x == host }; return false }) {
+                            setSlot(i, d.side == 1 ? .gen1Pair(left: host, right: d.id) : .gen1Pair(left: d.id, right: host))
                             gen1Partner[host] = nil
-                        } else if units.count < Self.maxPlayers { units.append(.gen1(id: d.id, side: d.side)) }
+                        } else { place(.gen1(id: d.id, side: d.side)) }
                     }
                     continue
                 }
             }
-            append(.system(name: key.name, index: key.index))
+            place(.system(name: key.name, index: key.index))
         }
     }
-    /// 清掉一位（玩家列表的 ×，#520 讨论）：分配中只是空出这一位；平时还要记成 dropped——手柄保持连接、没有玩家位、不再自动排回来（下次分配按键加入）
+    /// 清掉一位（玩家列表的 ×，#520 讨论）：分配中只是空出这一位（其他玩家留原位）；平时还要记成 dropped——手柄保持连接、没有玩家位、不再自动排回来（下次分配按键加入）
     mutating func remove(at index: Int, keepConnectedWithoutSlot: Bool) {
-        guard units.indices.contains(index) else { return }
-        let unit = units.remove(at: index)
+        guard slots.indices.contains(index), let unit = slots[index] else { return }
+        slots[index] = nil
+        forgetDisconnected(unit)
+        trimTrailingEmptySlots()
         guard keepConnectedWithoutSlot else { return }
         switch unit {
         case let .pair(l, r): droppedDevices += [l, r]
@@ -268,13 +375,20 @@ struct PlayerAssignment: Equatable, Codable {
         case let .gen1Pair(l, r): droppedGen1.removeAll { $0 == l || $0 == r }
         }
     }
-    private mutating func register(_ unit: Unit) { undrop(unit); units.append(unit) }
+    private mutating func register(_ unit: Unit, preferredSlot: Int? = nil) {
+        undrop(unit)
+        forgetDisconnected(unit)
+        if let free = freeSlot(preferring: preferredSlot) {
+            setSlot(free, unit)
+        }
+    }
     private mutating func markSideways(_ id: String) { if !sideways.contains(id) { sideways.append(id) } }
-    private mutating func append(_ unit: Unit) { if units.count < Self.maxPlayers { units.append(unit) } }
 
-    /// 分配完成：在线却没登记的记成 dropped（保持连接、没有玩家位）
+    /// 分配完成：在线却没登记的记成 dropped（保持连接、没有玩家位）；显式重分配清掉旧的断连原槽记忆
     mutating func finish(presentSystem: [SystemKey], devices: [Device], gen1: [Gen1Device] = []) {
         generation += 1
+        disconnectedSlots.removeAll()
+        trimTrailingEmptySlots()
         // 拆开过的一代合成那一位不算「拿掉」：它照「谁按设备登记了」自己不排（splitCombined）；记成拿掉的话，
         //   之后同一套断一只再接回，接回的那只就永远排不进来（11-20 日志：拆第 2 套、按完成、左只断开再接回，左只消失）
         dropped = presentSystem.filter { !units.contains(.system(name: $0.name, index: $0.index)) && !(Self.isGen1JoyCon($0.name) && splitCombined.contains($0)) }
@@ -304,17 +418,17 @@ struct PlayerAssignment: Equatable, Codable {
 
 
     /// NS2 手柄的一次手势（连接程序 assign 行）
-    mutating func ns2(id: String, kind: Int, gesture: Int, at time: TimeInterval) {
+    mutating func ns2(id: String, kind: Int, gesture: Int, at time: TimeInterval, targetSlot: Int? = nil) {
         guard !id.isEmpty else { return }
         if registeredIDs.contains(id) { regroup(id: id, kind: kind, gesture: gesture, at: time); return }
-        guard units.count < Self.maxPlayers else { return }
+        guard freeSlot(preferring: targetSlot) != nil else { return }
         switch gesture {
-        case 1: register(.whole(id: id, kind: kind))
-        case 2: register(.single(id: id, kind: kind)); markSideways(id)
+        case 1: register(.whole(id: id, kind: kind), preferredSlot: targetSlot)
+        case 2: register(.single(id: id, kind: kind), preferredSlot: targetSlot); markSideways(id)
         case 3:
             if let half = pendingHalf, half.id != id, half.kind != kind, time - half.at <= Self.pairWindow, !registeredIDs.contains(half.id) {
                 let (left, right) = kind == 2 ? (id, half.id) : (half.id, id)
-                register(.pair(left: left, right: right))
+                register(.pair(left: left, right: right), preferredSlot: targetSlot)
                 pendingHalf = nil
             } else {
                 pendingHalf = (id, kind, time)
@@ -323,28 +437,29 @@ struct PlayerAssignment: Equatable, Codable {
         }
     }
 
-    /// 已经有玩家位的 Joy-Con 2 再按（#520 讨论：不用先 ×）：一对里的一只同按 SL + SR → 拆开，这只留原位、另一只排在它后面；
-    ///   两位单只左只按 L、右只按 R（0.5 秒内）→ 合成一对，占两位里前面那一位。其他手势照旧不动
+    /// 已经有玩家位的 Joy-Con 2 再按（#520 讨论：不用先 ×）：一对里的一只同按 SL + SR → 需要有空槽才拆开（这只留原位、另一只放空槽，不挤动其他玩家；满 8 位时不拆）；
+    ///   两位单只左只按 L、右只按 R（0.5 秒内）→ 合成一对，占两位里前面那一位、空出后面那一位。其他手势照旧不动
     private mutating func regroup(id: String, kind: Int, gesture: Int, at time: TimeInterval) {
         switch gesture {
         case 2:
             ns2Partner[id] = nil   // 明确要横握单只：断开过的另一只接回来不再并
             // 已经是单只的再按 SL + SR：位置不动，记成横握（之后另一侧接上不自动拼）
             if units.contains(where: { if case let .single(sid, _) = $0 { return sid == id }; return false }) { markSideways(id); return }
-            guard let i = units.firstIndex(where: { if case let .pair(l, r) = $0 { return l == id || r == id }; return false }),
-                  case let .pair(l, r) = units[i] else { return }
+            guard let i = slots.firstIndex(where: { if case let .pair(l, r) = $0 { return l == id || r == id }; return false }),
+                  case let .pair(l, r) = slots[i] else { return }
+            guard let otherSlot = splitSlot(after: i) else { return }   // 无空槽不拆：需先 × 清除该对再单只按 SL + SR 加入
             let other = l == id ? r : l
             // 两只都记成横握：明确拆开的一对，哪一只断开再接回都不自动拼回（11-20：只记按的那只时，按的那只断开重连会和另一只并回一组）
-            units[i] = .single(id: id, kind: kind); markSideways(id); markSideways(other)
-            if units.count < Self.maxPlayers { units.insert(.single(id: other, kind: l == id ? 3 : 2), at: i + 1) }
-            else { droppedDevices.append(other) }   // 满 8 位：另一只连着、没有玩家位
+            setSlot(i, .single(id: id, kind: kind)); markSideways(id); markSideways(other)
+            setSlot(otherSlot, .single(id: other, kind: l == id ? 3 : 2))
         case 3:
-            func singleAt(_ x: String) -> Int? { units.firstIndex { if case let .single(sid, _) = $0 { return sid == x }; return false } }
+            func singleAt(_ x: String) -> Int? { slots.firstIndex { if case let .single(sid, _) = $0 { return sid == x }; return false } }
             if let half = pendingHalf, half.id != id, half.kind != kind, time - half.at <= Self.pairWindow,
                let a = singleAt(half.id), let b = singleAt(id) {
                 let (left, right) = kind == 2 ? (id, half.id) : (half.id, id)
-                units[min(a, b)] = .pair(left: left, right: right)
-                units.remove(at: max(a, b))
+                setSlot(min(a, b), .pair(left: left, right: right))
+                slots[max(a, b)] = nil
+                trimTrailingEmptySlots()
                 sideways.removeAll { $0 == left || $0 == right }   // 又按 L + R 拼回一对
                 pendingHalf = nil
             } else if singleAt(id) != nil {
@@ -386,16 +501,17 @@ struct PlayerAssignment: Equatable, Codable {
     ///   系统合成的那一位按 L + R（L1 + R1，system）的同一刻 HID 看到的左只 L、右只 R 就是它里面的两只（learnHalves），拆的时候认得出是哪一套。
     ///   present：现在连着的一代（按设备）；system：现在连着的系统手柄
     private var pendingGen1: (id: String, side: Int, at: TimeInterval)?
-    mutating func gen1(id: String, side: Int, gesture: Int, at time: TimeInterval, present: [Gen1Device], system: [SystemKey] = []) {
-        func pairAt(_ x: String) -> Int? { units.firstIndex { if case let .gen1Pair(l, r) = $0 { return l == x || r == x }; return false } }
-        func singleAt(_ x: String) -> Int? { units.firstIndex { if case let .gen1(sid, _) = $0 { return sid == x }; return false } }
+    mutating func gen1(id: String, side: Int, gesture: Int, at time: TimeInterval, present: [Gen1Device], system: [SystemKey] = [], targetSlot: Int? = nil) {
+        func pairAt(_ x: String) -> Int? { slots.firstIndex { if case let .gen1Pair(l, r) = $0 { return l == x || r == x }; return false } }
+        func singleAt(_ x: String) -> Int? { slots.firstIndex { if case let .gen1(sid, _) = $0 { return sid == x }; return false } }
         switch gesture {
         case 2:
             gen1Partner[id] = nil   // 明确要横握单只：断开过的另一只接回来不再并
-            if let i = pairAt(id), case let .gen1Pair(l, r) = units[i] {
+            if let i = pairAt(id), case let .gen1Pair(l, r) = slots[i] {
+                guard let otherSlot = splitSlot(after: i) else { return }   // 无空槽不拆
                 let other = l == id ? r : l
-                units[i] = .gen1(id: id, side: side)
-                if units.count < Self.maxPlayers { units.insert(.gen1(id: other, side: 1 - side), at: i + 1) } else { droppedGen1.append(other) }
+                setSlot(i, .gen1(id: id, side: side))
+                setSlot(otherSlot, .gen1(id: other, side: 1 - side))
                 return
             }
             guard singleAt(id) == nil else { return }
@@ -403,17 +519,27 @@ struct PlayerAssignment: Equatable, Codable {
             // 这只在系统的哪一位里、同一套的另一只是谁：都照对应表（gen1Owners）
             let owners = gen1Owners(system: system, gen1: present)
             guard let k = owners.first(where: { $0.value.values.contains(id) })?.key else {   // 对不上（两张表还没对齐）：只登记这只，日志记一笔
-                if units.count < Self.maxPlayers { units.append(.gen1(id: id, side: side)) }
+                register(.gen1(id: id, side: side), preferredSlot: targetSlot)
                 NSLog("[分配玩家] 一代 Joy-Con %@ 认不出在系统的哪一位里，只登记这一只", id)
                 return
             }
-            if !splitCombined.contains(k) { splitCombined.append(k) }
             let partner = owners[k]?[1 - side]
-            if let i = units.firstIndex(of: .system(name: k.name, index: k.index)) { units[i] = .gen1(id: id, side: side) }
-            else if units.count < Self.maxPlayers { units.append(.gen1(id: id, side: side)) }
-            else { return }
-            if let partner, let i = singleAt(id), !registeredGen1.contains(partner) {
-                if units.count < Self.maxPlayers { units.insert(.gen1(id: partner, side: 1 - side), at: i + 1) } else { droppedGen1.append(partner) }
+            if let i = slots.firstIndex(of: .system(name: k.name, index: k.index)) {
+                if let partner, !registeredGen1.contains(partner) {
+                    guard let otherSlot = splitSlot(after: i) else { return }   // 无空槽不拆
+                    if !splitCombined.contains(k) { splitCombined.append(k) }
+                    setSlot(i, .gen1(id: id, side: side))
+                    setSlot(otherSlot, .gen1(id: partner, side: 1 - side))
+                } else {
+                    if !splitCombined.contains(k) { splitCombined.append(k) }
+                    setSlot(i, .gen1(id: id, side: side))
+                }
+            } else if freeSlot(preferring: targetSlot) != nil {
+                if !splitCombined.contains(k) { splitCombined.append(k) }
+                register(.gen1(id: id, side: side), preferredSlot: targetSlot)
+                if let partner, let i = singleAt(id), !registeredGen1.contains(partner), let otherSlot = splitSlot(after: i) {
+                    setSlot(otherSlot, .gen1(id: partner, side: 1 - side))
+                }
             }
         case 3:
             recentShoulder.append((id, side, time)); learnHalves(now: time)
@@ -422,7 +548,7 @@ struct PlayerAssignment: Equatable, Codable {
             func singleSlot(_ x: String, _ s: Int) -> (index: Int, key: SystemKey?)? {
                 if let i = singleAt(x) { return (i, nil) }
                 guard let k = owners.first(where: { $0.value == [s: x] })?.key,
-                      let i = units.firstIndex(of: .system(name: k.name, index: k.index)) else { return nil }
+                      let i = slots.firstIndex(of: .system(name: k.name, index: k.index)) else { return nil }
                 return (i, k)
             }
             guard let half = pendingGen1, half.id != id, half.side != side, time - half.at <= Self.pairWindow,
@@ -430,8 +556,9 @@ struct PlayerAssignment: Equatable, Codable {
                 pendingGen1 = (id, side, time); return
             }
             let unit = side == 0 ? Unit.gen1Pair(left: id, right: half.id) : .gen1Pair(left: half.id, right: id)
-            units[min(a.index, b.index)] = unit
-            units.remove(at: max(a.index, b.index))
+            setSlot(min(a.index, b.index), unit)
+            slots[max(a.index, b.index)] = nil
+            trimTrailingEmptySlots()
             for k in [a.key, b.key].compactMap({ $0 }) where !splitCombined.contains(k) { splitCombined.append(k) }   // 这两只改按设备读，系统那一位不再排进来
             pendingGen1 = nil
         default: break
@@ -458,24 +585,28 @@ struct PlayerAssignment: Equatable, Codable {
     mutating func autoFit(_ wants: GameWants, devices: [Device]) -> Bool {
         let minimum = Swift.max(wants.min, 1), maximum = wants.max > 0 ? wants.max : Self.maxPlayers
         func splitOne() -> Bool {
-            guard let i = units.firstIndex(where: { if case .pair = $0 { return true }; if case .gen1Pair = $0 { return true }; return false }) else { return false }
-            switch units[i] {
-            case let .pair(l, r): units[i] = .single(id: l, kind: 2); units.insert(.single(id: r, kind: 3), at: i + 1)
-            case let .gen1Pair(l, r): units[i] = .gen1(id: l, side: 0); units.insert(.gen1(id: r, side: 1), at: i + 1)
+            guard let i = slots.firstIndex(where: { if case .pair = $0 { return true }; if case .gen1Pair = $0 { return true }; return false }),
+                  let otherSlot = splitSlot(after: i) else { return false }
+            switch slots[i] {
+            case let .pair(l, r): setSlot(i, .single(id: l, kind: 2)); setSlot(otherSlot, .single(id: r, kind: 3))
+            case let .gen1Pair(l, r): setSlot(i, .gen1(id: l, side: 0)); setSlot(otherSlot, .gen1(id: r, side: 1))
             default: return false
             }
             return true
         }
         func mergeOne() -> Bool {
             let group = Dictionary(devices.map { ($0.id, $0.group) }, uniquingKeysWith: { a, _ in a })
-            for (a, ua) in units.enumerated() {
-                for (b, ub) in units.enumerated() where b != a {
+            for (a, ua) in slots.enumerated() {
+                guard let ua else { continue }
+                for (b, ub) in slots.enumerated() where b != a {
+                    guard let ub else { continue }
                     var merged: Unit?
                     if case let .single(l, 2) = ua, case let .single(r, 3) = ub, group[l] == group[r] { merged = .pair(left: l, right: r) }
                     if case let .gen1(l, 0) = ua, case let .gen1(r, 1) = ub { merged = .gen1Pair(left: l, right: r) }
                     guard let merged else { continue }
-                    units[Swift.min(a, b)] = merged
-                    units.remove(at: Swift.max(a, b))
+                    setSlot(Swift.min(a, b), merged)
+                    slots[Swift.max(a, b)] = nil
+                    trimTrailingEmptySlots()
                     return true
                 }
             }
@@ -489,17 +620,17 @@ struct PlayerAssignment: Equatable, Codable {
     }
 
     /// 键盘：分配中按任一键（#520 讨论，不用提示）
-    mutating func keyboard() {
-        guard units.count < Self.maxPlayers, !units.contains(.keyboard) else { return }
-        register(.keyboard)
+    mutating func keyboard(targetSlot: Int? = nil) {
+        guard freeSlot(preferring: targetSlot) != nil, !units.contains(.keyboard) else { return }
+        register(.keyboard, preferredSlot: targetSlot)
     }
 
     /// 系统手柄同按 L1 + R1
-    mutating func system(name: String, index: Int, at time: TimeInterval = 0) {
+    mutating func system(name: String, index: Int, at time: TimeInterval = 0, targetSlot: Int? = nil) {
         if Self.isGen1JoyCon(name) { recentCombined = (SystemKey(name: name, index: index), time); learnHalves(now: time) }   // 认它里面是哪几只
         // 拆开过的那一位不再登记：两只已按设备读，各按 L / R 时 HID 那一路自己合成一位（同原机），这里再登记就重复了
-        guard units.count < Self.maxPlayers, !units.contains(.system(name: name, index: index)), !splitCombined.contains(SystemKey(name: name, index: index)) else { return }
-        register(.system(name: name, index: index))
+        guard freeSlot(preferring: targetSlot) != nil, !units.contains(.system(name: name, index: index)), !splitCombined.contains(SystemKey(name: name, index: index)) else { return }
+        register(.system(name: name, index: index), preferredSlot: targetSlot)
     }
 
     /// 给连接程序的计划（`assign done {json}`，macos/ns2_connection_helper.m apply_assignment）：拼 / 拆、谁是玩家 1；
@@ -527,7 +658,8 @@ struct PlayerAssignment: Equatable, Codable {
     /// 每只手柄该亮的灯型（设备 id → 灯型）：Joy-Con 2 / NS2 Pro 与按设备读的一代 Joy-Con（一对两只同一位）；系统手柄另走 systemPlayers
     func lightMasks() -> [String: Int] {
         var out: [String: Int] = [:]
-        for (i, unit) in units.enumerated() {
+        for (i, unit) in slots.enumerated() {
+            guard let unit else { continue }
             let mask = Self.lightMask(player: i + 1)
             switch unit {
             case let .pair(l, r), let .gen1Pair(l, r): out[l] = mask; out[r] = mask
@@ -540,17 +672,18 @@ struct PlayerAssignment: Equatable, Codable {
     /// 系统手柄（GameController）各是第几位（1 起）
     func systemPlayers() -> [SystemKey: Int] {
         var out: [SystemKey: Int] = [:]
-        for (i, unit) in units.enumerated() { if case let .system(name, index) = unit { out[SystemKey(name: name, index: index)] = i + 1 } }
+        for (i, unit) in slots.enumerated() { if case let .system(name, index) = unit { out[SystemKey(name: name, index: index)] = i + 1 } }
         return out
     }
 
     /// 给游戏的顺序表：NS2 手柄按通道玩家号（登记了的照顺序 0、1…，没分配的排在后面、列进 dropped）、系统手柄按名字 + 第几只；
-    ///   dropped 的游戏不读（保持连接、没有玩家位）
+    ///   空槽写 type = "empty" 占位，保持后面玩家在原位不变；dropped 的游戏不读（保持连接、没有玩家位）
     /// playerOf：设备 id → 通道玩家号（连接程序报的、第二个连接程序的 +2）；没给时照登记顺序 0、1…（只有一组时两者相同）
     func orderFile(playerOf: [String: Int] = [:]) -> [String: Any] {
         var player = 0
         func number(_ id: String) -> Int { if let p = playerOf[id] { return p }; defer { player += 1 }; return player }
-        let order: [[String: Any]] = units.map { unit in
+        let order: [[String: Any]] = slots.map { unit in
+            guard let unit else { return ["type": "empty"] }
             switch unit {
             case .system(let name, let index): return ["type": "system", "name": name, "index": index]
             case .keyboard: return ["type": "keyboard"]

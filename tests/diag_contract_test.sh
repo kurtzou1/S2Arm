@@ -97,10 +97,13 @@ for rel in ("host.log", "logs/host-20261116-120000.log", "logs/host-20261115-090
             f"games/{A}/wire/{A}/shader_miss/index.tsv", f"games/{A}/wire/{A}/shader_miss/0123456789abcdef.ctl", f"games/{A}/wire/{A}/shader_miss/0123456789abcdef.code",
             f"wire/{B}/shader_miss/index.tsv", f"wire/{B}/shader_miss/fedcba9876543210.ctl", f"wire/{B}/shader_miss/fedcba9876543210.code"):
     put(rel)
+# 远端缺页点表（runtime/src/far.c 的格式）：Documents 根下一份（单款包）、多款容器每款文档根下一份（原先漏收）；包里各留前 200 个点
+FAR = "# 模块\t偏移\t次数\t类别\t代执行失败\nmain\t0x10\t5\t1\t0\n"
+put("far_sites.tsv", FAR); put(f"games/{A}/far_sites.tsv", FAR)
 # 超长慢管线源：真经 diagcollect.m 截到 4 MB 并插截断标记，成品略超 4 MB（v0.4.3 起客户端实发，11-16 曾被收件整包拒）
 put(f"games/{A}/wire/{A}/shaders/cccccccccccccccc_b.slow.metal", ("// msl line\n" * 500000).encode())
 ios_want = ["manifest.json", "logs/host.log", "logs/host-20261116-120000.log", "logs/host-20261115-090000.log", "logs/frames.tsv", "logs/threads.txt",
-            "logs/unpack.log", "logs/far_sites.tsv", f"logs/unpack_{A}.log", "metrickit/crash-1.json", "metrickit/hang-2.json", "metrickit/x-exit.json",
+            "logs/unpack.log", "logs/far_sites.tsv", f"logs/far_sites_{A}.tsv", f"logs/unpack_{A}.log", "metrickit/crash-1.json", "metrickit/hang-2.json", "metrickit/x-exit.json",
             f"shaders/{A}_aaaaaaaaaaaaaaaa.inflight.ctl", f"shaders/{A}_aaaaaaaaaaaaaaaa.inflight.code", f"shaders/{A}_bbbbbbbbbbbbbbbb.fail.ctl",
             f"shaders/{A}_bbbbbbbbbbbbbbbb.fail.code", f"shaders/{A}_cccccccccccccccc_b.slow.metal", f"shaders/{B}_dddddddddddddddd_b.slow.metal",
             "diagrun/app_shot.png", f"diagrun/{A}_frame.PNG", f"pso/{A}.tsv", f"pso/{B}.tsv", f"shader_miss/{A}.tar", f"shader_miss/{B}.tar"]

@@ -18,6 +18,8 @@ typedef struct { uint32_t buttons; int16_t lx, ly, rx, ry; const void *id; char 
 void s2a_mac_hid_pad_start(void);
 // 当前在线的兜底手柄，按接上顺序填进 out，返回只数；通用手柄第一次按键之前不列（s2a_hidg_joined）
 int s2a_mac_hid_pad_read(s2a_hid_pad out[S2A_HID_PAD_MAX]);
+// 补给系统手柄槽位的北通左摇杆；只按同一个 IORegistry 设备匹配，过期或缺样返回 0。
+int s2a_mac_hid_betop_left(uint64_t entry, int16_t left[2]);
 // 兜底手柄的体感（11-16，第三方 Switch 模式手柄：八位堂 / 盖世小鸡等自带陀螺仪、GameController 不认的）：id = s2a_hid_pad.id；
 //   有近 200 ms 内的六轴样本回 1（从 0x30 完整报告的 IMU 解出，同一代 Pro 的 Switch Pro 协议），否则回 0
 int s2a_mac_hid_pad_motion(const void *id, s2a_pad_motion *out);

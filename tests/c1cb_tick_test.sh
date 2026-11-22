@@ -27,5 +27,15 @@ ck "不写活动记录（旁路工作不改界面路数）" 0 "$(grep -c '^#dsh_
 ck "不带 --tick：退出 0" 0 "$r"
 ck "反证：不带 --tick 不写进度" 0 "$(wc -c < "$T/p0" | tr -d ' ')"
 ck "结果三行、带不带 --tick 逐字节相同" "3 1" "$(grep -c '_b.metal	' <<< "$o1") $([ "$o1" = "$o0" ] && echo 1 || echo 0)"
-ck "Build.C1CbFill 后台遍按「直连库·两张表」接力计数" 1 "$(grep -c 'C1CbChild(names, "bg", sigs, "直连库·两张表")' "$H/graphics/tools/direct/dsh/batch/Build.cs")"
+# 进度文件被另一个写者开着（#2034：Windows 上父进程 / 接力子进程 / 并跑的 Ticker 同时追加，File.AppendAllText 只给读共享 → IOException、出包退出码 -1）：
+#   另起一个进程以追加方式开着它（Windows 上 Python 的 open 不拒共享写），期间带 --tick 跑：期望照常退出 0、末行照写 8/8。Mac 没有强制共享锁，这条在 Mac 上修前也过，Windows 上修前红
+: > "$T/p2"; python3 -c 'import sys, time; f = open(sys.argv[1], "a"); open(sys.argv[2], "w").close(); time.sleep(30)' "$T/p2" "$T/held" & HP=$!
+for _ in $(seq 1 100); do [ -f "$T/held" ] && break; sleep 0.1; done
+o2=$(S2A_PROGRESS=$T/p2 $CMD --c1cb "$T/a" -j 1 --tick 直连库·两张表 5 8 2> "$T/e2"); r=$?; kill $HP 2> /dev/null; wait $HP 2> /dev/null
+ck "进度文件被另一进程开着写：退出 0" 0 "$r"
+ck "进度文件被另一进程开着写：末行照写 8/8" "直连库·两张表	8	8" "$(grep -v '^#' "$T/p2" | tail -1 | cut -f2-)"
+B=$H/graphics/tools/direct/dsh/batch/Build.cs
+ck "Build.C1CbFill 查缓存仓按「直连库·两张表」逐支计（热仓全命中时这段也走）" 1 "$(grep -c 'new Ticker(C1CbTick, names.Count, 0, activity: false)' "$B")"
+ck "Build.C1CbFill 后台遍子进程从命中数接着计到全遍支数" 1 "$(grep -c 'C1CbChild(todo, "bg", null, C1CbTick, tickBase: r.Count, tickTotal: names.Count)' "$B")"
+ck "阶段名仍是「直连库·两张表」" 1 "$(grep -c 'const string C1CbTick = "直连库·两张表";' "$B")"
 [ $bad = 0 ] && echo "c1cb_tick：全过" || echo "c1cb_tick：有失败"; exit $bad

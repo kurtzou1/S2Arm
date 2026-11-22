@@ -156,6 +156,7 @@ int nvn_vk_program_parse_graphics_stages(const uint8_t *bytes, size_t length, st
     return 0;
 }
 void nvn_vk_program_free(struct fd_program *program) { (void)program; }
+int nvn_vk_spirv_link_ok(const uint8_t *a, size_t an, const uint8_t *b, size_t bn, uint64_t *missing) { (void)a; (void)an; (void)b; (void)bn; if (missing) *missing = 0; return 1; }
 int nvn_vk_program_parse_compute(const uint8_t *bytes, size_t length, struct nvn_vk_compute_program *out,
                                  char *why, size_t why_size) {
     (void)bytes; (void)length; (void)out; (void)why; (void)why_size;

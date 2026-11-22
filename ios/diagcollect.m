@@ -53,6 +53,9 @@ static NSDictionary *copy_text(NSString *src, NSString *dst, NSUInteger cap, NSS
 }
 
 // 进文件名的款名：空白和路径 / 命令行不友好的字符换成下划线（显示名「空洞骑士 丝之歌」→「空洞骑士_丝之歌」；manifest 里仍写原名）
+#include "far_top.h"
+enum { FAR_TOP = 200 };   // 诊断包带远端点表的前多少个点
+static NSString *far_sites_top(NSString *path, int top) { char *c = s2a_far_top(path.fileSystemRepresentation, top); if (!c) return nil; NSString *r = [NSString stringWithUTF8String:c]; free(c); return r; }
 static NSString *file_safe(NSString *s) {
     NSMutableString *o = [NSMutableString string];
     [s enumerateSubstringsInRange:NSMakeRange(0, s.length) options:NSStringEnumerationByComposedCharacterSequences usingBlock:^(NSString *c, NSRange r, NSRange er, BOOL *stop) {
@@ -85,8 +88,22 @@ BOOL s2a_diag_collect(NSString *D, NSString *W, NSUInteger cap, BOOL slim, NSStr
         if (s) [sessions addObject:s];
         add(src, [@"logs/" stringByAppendingString:l.lastPathComponent], cap);
     }
-    NSArray *extra = slim ? @[@"unpack.log"] : @[@"frames.tsv", @"threads.txt", @"unpack.log", @"far_sites.tsv"];   // far_sites.tsv：远端缺页点表（far.c，地址根修的读数）
+    NSArray *extra = slim ? @[@"unpack.log"] : @[@"frames.tsv", @"threads.txt", @"unpack.log"];
     for (NSString *f in extra) { NSString *src = [D stringByAppendingPathComponent:f]; if ([fm fileExistsAtPath:src]) add(src, [@"logs/" stringByAppendingString:f], cap); }
+    // 远端缺页点表（runtime/src/far.c 收局 / 崩溃时写在本款文档根，多款容器 = Documents/games/<游戏号>/far_sites.tsv；原先只在 Documents/ 下找、只进完整包，
+    //   诊断库里一份都没有）：精简包也带，按次数取前 FAR_TOP 个点（只有模块名、偏移、次数，不含个人信息），定「热点访存点改写成翻译跳板」值不值
+    {   NSMutableArray *srcs = [NSMutableArray array]; NSString *G = [D stringByAppendingPathComponent:@"games"];
+        if ([fm fileExistsAtPath:[D stringByAppendingPathComponent:@"far_sites.tsv"]]) [srcs addObject:@[@"", [D stringByAppendingPathComponent:@"far_sites.tsv"]]];
+        for (NSString *gid in [[fm contentsOfDirectoryAtPath:G error:nil] sortedArrayUsingSelector:@selector(compare:)]) {
+            NSString *src = [[G stringByAppendingPathComponent:gid] stringByAppendingPathComponent:@"far_sites.tsv"];
+            if ([fm fileExistsAtPath:src]) [srcs addObject:@[[@"_" stringByAppendingString:file_safe(gid)], src]]; }
+        for (NSArray *e in srcs) {
+            NSString *txt = far_sites_top(e[1], FAR_TOP); if (!txt) continue;
+            NSString *rel = [NSString stringWithFormat:@"logs/far_sites%@.tsv", e[0]];
+            [fm createDirectoryAtPath:[W stringByAppendingPathComponent:@"logs"] withIntermediateDirectories:YES attributes:nil error:nil];
+            if ([txt writeToFile:[W stringByAppendingPathComponent:rel] atomically:NO encoding:NSUTF8StringEncoding error:nil])
+                [files addObject:@{@"path": rel, @"bytes": @([txt lengthOfBytesUsingEncoding:NSUTF8StringEncoding]), @"truncated": @NO}];
+        } }
     // 多款容器：每款的解包日志在本款文档根 Documents/games/<游戏号>/unpack.log（runtime/src/pack_apply.c 的 logp），上面只收进程级那份、永远收不到
     //   （D-4VAX「装不上」：解小文件 -4 的现场 errno 只在这里，诊断包里一行都没有）。每款一份，放 logs/unpack_<游戏号>.log
     {   NSString *G = [D stringByAppendingPathComponent:@"games"];

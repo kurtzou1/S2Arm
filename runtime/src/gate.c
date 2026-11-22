@@ -194,13 +194,32 @@ static void ipc_note_before(int num, const uint64_t *regs, const uint32_t *msg, 
     else { r->cmd = cmif_cmd(msg, name, &r->dom); if (r->cmd != 1) name[0] = 0; }   // CMIF：只有命令 1（GetService）的那 8 字节是服务名
     if (!svc_name_ok(name)) name[0] = 0;
 }
+static void horig_note(const ipc_rec *r, const uint32_t *msg);
 static void ipc_note_after(const uint64_t *regs, const uint32_t *msg, const char *name) {
     ipc_rec *r = &t_ipc[(t_ipc_n - 1) & 15]; r->rc = (uint32_t)regs[0];
     if (msg && (msg[0] & 0xffff) < 16) cmif_result(msg, &r->res);
+    if (!regs[0] && !r->res) horig_note(r, msg);
     if (msg && name[0] && !regs[0] && (msg[1] >> 31)) {   // GetService 成功：应答里转移来的第一个句柄就是这个服务的会话
         uint32_t hd = msg[2]; int ncopy = (hd >> 1) & 15, nmove = (hd >> 5) & 15; const uint32_t *h = msg + 3 + ((hd & 1) ? 2 : 0);
         if (ncopy + nmove) { unsigned k = atomic_fetch_add(&g_hname_n, 1) & 511; memcpy(g_hname[k].nm, name, 9); atomic_store(&g_hname[k].h, h[0]); }
     }
+}
+// 句柄来源（11-22 D-PZJQ 风花雪月卡死：工作线程反复 ResetSignal 一个事件、等不到，现场只看得出是「事件读」，看不出是哪个服务给的）：
+//   IPC 应答成功且带复制 / 转移句柄时，逐个记下「来自哪个会话（服务名，认不出打 ?）、哪条命令」。只追加、现场倒查（thread.c 打「等同步句柄」与同步调用环时用）
+static struct { _Atomic uint32_t h; uint32_t sess; int cmd; } g_horig[1024]; static _Atomic unsigned g_horig_n;
+static void horig_note(const ipc_rec *r, const uint32_t *msg) {
+    if (!msg || !(msg[1] >> 31)) return;
+    uint32_t hd = msg[2]; int ncopy = (hd >> 1) & 15, nmove = (hd >> 5) & 15; const uint32_t *h = msg + 3 + ((hd & 1) ? 2 : 0);
+    for (int i = 0; i < ncopy + nmove && i < 8; i++) {
+        unsigned k = atomic_fetch_add(&g_horig_n, 1) & 1023; g_horig[k].sess = r->handle; g_horig[k].cmd = r->cmd; atomic_store(&g_horig[k].h, h[i]); }
+}
+static const char *ipc_name(uint32_t h);
+// 句柄 h 是哪个会话的哪条命令给的：找到回 1，*sess = 会话句柄、*cmd = 命令号、*nm = 会话的服务名（认不出 "?"）
+int s2a_gate_handle_origin(uint32_t h, uint32_t *sess, int *cmd, const char **nm) {
+    unsigned n = atomic_load(&g_horig_n), lim = n < 1024 ? n : 1024;
+    for (unsigned i = 0; i < lim; i++) { unsigned k = (n - 1 - i) & 1023;
+        if (atomic_load(&g_horig[k].h) == h) { *sess = g_horig[k].sess; *cmd = g_horig[k].cmd; *nm = ipc_name(g_horig[k].sess); return 1; } }
+    return 0;
 }
 static const char *ipc_name(uint32_t h) {
     unsigned n = atomic_load(&g_hname_n), lim = n < 512 ? n : 512;

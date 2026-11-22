@@ -89,6 +89,7 @@ int s2a_gip_parse(const uint8_t *r, size_t n, uint32_t *buttons, int16_t ax[4]) 
 typedef struct { IOHIDDeviceRef dev; uint32_t buttons, hat; int16_t ax[4]; char name[96];
     int pro, vid, gc_hint, joined, is_xbox, xbox_relay; uint8_t relay_slot; uint64_t entry, attach_us; s2a_hidg g;   // pro：走 Switch Pro 协议那一支；g：通用手柄的状态（hid_generic.h）；joined：通用手柄按过键；is_xbox：走 Xbox GIP 协议；xbox_relay：由 S2Arm 启动器中继
     int full; uint8_t cnt, rep[64]; s2a_pro_cal cl, cr;
+    int betop_ns, betop_left_logged; int16_t betop_left[2]; uint64_t betop_left_us;
     s2a_pad_motion motion; uint64_t motion_us; int imu_said; uint32_t logged; } hp_dev;   // motion：0x30 报告里的最后一组 IMU（motion_us = 收到时刻，0 = 没有）   // full：已收到 0x30 报告（之后不再用 HID 元素那一路）；cnt：子命令包序号
 static hp_dev g_dev[S2A_HID_PAD_MAX];
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -170,7 +171,12 @@ static void report_cb(void *ctx, IOReturn r, void *sender, IOHIDReportType type,
         uint32_t bt; int16_t ax[4];
         if (s2a_pro_parse(b, m, &d->cl, &d->cr, &bt, ax)) {
             if (id == 0x30 && !d->full) { d->full = 1; d->hat = 0; fprintf(stderr, "[输入] 兜底手柄 %s：收到完整报告 0x30，改按 Switch Pro 协议读（摇杆 12 位、按校准换算）\n", d->name); }
-            if (d->full) { d->buttons = bt; memcpy(d->ax, ax, sizeof ax); } }
+            if (d->full) { d->buttons = bt; memcpy(d->ax, ax, sizeof ax); }
+            if (d->betop_ns && id == 0x30) {
+                memcpy(d->betop_left, ax, sizeof d->betop_left);
+                d->betop_left_us = hp_now_us();
+            }
+        }
         s2a_pad_motion mo;
         if (id == 0x30 && s2a_pro_imu(b, m, &mo) && (mo.acceleration_x != 0 || mo.acceleration_y != 0 || mo.acceleration_z != 0)) {   // 全 0 = 手柄没开 IMU / 不带陀螺仪
             mo.host_timestamp_us = hp_now_us(); d->motion = mo; d->motion_us = mo.host_timestamp_us;
@@ -198,7 +204,12 @@ static void attach(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
     int vid = 0, pid = 0; CFNumberRef n;
     if ((n = IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDVendorIDKey)))) CFNumberGetValue(n, kCFNumberIntType, &vid);
     if ((n = IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDProductIDKey)))) CFNumberGetValue(n, kCFNumberIntType, &pid);
-    int pro = s2a_hidg_is_pro(name);
+    NSString *transport = (__bridge id)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDTransportKey));
+    NSString *address = (__bridge id)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDSerialNumberKey));
+    int betop_ns = [transport isKindOfClass:NSString.class] && [address isKindOfClass:NSString.class] &&
+        s2a_hidg_is_betop_ns(vid, pid, transport.UTF8String, address.UTF8String) &&
+        IOHIDDeviceGetProperty(dev, CFSTR("GCSyntheticDevice")) != kCFBooleanTrue;
+    int pro = betop_ns || s2a_hidg_is_pro(name);
     // 微软 / 索尼 / 任天堂的通用手柄系统自己认（名字未必等于 HID 产品名，按名字让位认不出同一只），这里不接；记一行便于诊断（#1276）
     if (!pro && s2a_hidg_native_vendor(vid)) { fprintf(stderr, "[输入] HID 游戏手柄：%s（厂商 / 产品号 0x%x / 0x%x）是系统原生认得的厂商，交给 GameController\n", name[0] ? name : "（没名字）", vid, pid); return; }
     // IOHIDManager 按每条匹配条件各给一次、每次是新的 IOHIDDeviceRef：按 I/O Registry 条目认同一只（同参考实现），不变成两个玩家
@@ -210,7 +221,7 @@ static void attach(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
     for (int i = 0; i < S2A_HID_PAD_MAX && !d; i++) if (!g_dev[i].dev && !g_dev[i].is_xbox) d = &g_dev[i];
     if (!d) { pthread_mutex_unlock(&g_mu); fprintf(stderr, "[输入] 兜底手柄：已满 %d 只，%s 不接\n", S2A_HID_PAD_MAX, name); return; }
     memset(d, 0, sizeof *d); d->dev = dev; snprintf(d->name, sizeof d->name, "%s", name);
-    d->pro = pro; d->vid = vid; d->gc_hint = gc_hint; d->entry = entry; d->attach_us = hp_now_us();
+    d->betop_ns = betop_ns; d->pro = pro; d->vid = vid; d->gc_hint = gc_hint; d->entry = entry; d->attach_us = hp_now_us();
     if (!pro) {
         const char *map = getenv("S2A_HID_MAP"); if (!map) map = getenv("DM_HID_MAP");   // 也认参考实现的变量名
         s2a_hidg_init(&d->g, map);
@@ -225,6 +236,7 @@ static void attach(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
                 getenv("S2A_HID_MAP") || getenv("DM_HID_MAP") ? "，已按 S2A_HID_MAP 覆盖（开发 / 对照用：玩家从启动器起游戏时这个变量带不进来）" : "");
         return;
     }
+    if (betop_ns) fprintf(stderr, "[输入] 北通宙斯 NS：匹配蓝牙前缀 00:90:E0（057E:2009）\n");
     s2a_pro_cal_default(&d->cl); s2a_pro_cal_default(&d->cr);
     IOHIDDeviceRegisterInputValueCallback(dev, value_cb, d);
     IOHIDDeviceRegisterInputReportCallback(dev, d->rep, sizeof d->rep, report_cb, d);
@@ -737,6 +749,27 @@ int s2a_mac_hid_pad_read(s2a_hid_pad out[S2A_HID_PAD_MAX]) {
     }
     pthread_mutex_unlock(&g_mu);
     return n;
+}
+
+int s2a_mac_hid_betop_left(uint64_t entry, int16_t left[2]) {
+    if (!entry) return 0;
+    int fresh = 0;
+    pthread_mutex_lock(&g_mu);
+    for (int i = 0; i < S2A_HID_PAD_MAX; i++) {
+        hp_dev *d = &g_dev[i];
+        if (!d->dev || !d->betop_ns || d->entry != entry) continue;
+        fresh = d->betop_left_us && hp_now_us() - d->betop_left_us < 200000;
+        if (fresh) {
+            memcpy(left, d->betop_left, sizeof d->betop_left);
+            if (!d->betop_left_logged) {
+                d->betop_left_logged = 1;
+                fprintf(stderr, "[输入] 北通宙斯 NS：已按设备匹配，左摇杆使用 HID 0x30\n");
+            }
+        }
+        break;
+    }
+    pthread_mutex_unlock(&g_mu);
+    return fresh;
 }
 
 int s2a_mac_hid_pad_motion(const void *id, s2a_pad_motion *out) {

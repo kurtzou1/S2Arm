@@ -1771,11 +1771,12 @@ static class T
         {
             // %1 float、%2 int、%3/%4/%5/%6 int 常量 0/1/5/2、%9 support_buffer（绑定 0、Uniform）、%40 2D 图像类型、%41 采样图像类型、%42 贴图变量（绑定 130）、
             // %43 缓冲图像类型（Dim Buffer）、%44 缓冲贴图变量（绑定 131）、%50 取图缩放（3 参）、%70 尺寸反缩放（2 参）、%81.. 局部变量、%100.. 值
-            List<uint> Build(bool scaleFetch, bool bufferFetch, bool addOffset = false)
+            List<uint> Build(bool scaleFetch, bool bufferFetch, bool addOffset = false, bool imageWrite = false)
             {
                 var v = new List<uint> { 0x07230203, 0x00010000, 0, 200, 0 };
                 void J(int op, params uint[] a) { v.Add((uint)((a.Length + 1) << 16 | op)); v.AddRange(a); }
                 J(71, 9, 33, 0); J(71, 42, 33, 130); J(71, 44, 33, 131);
+                if (imageWrite) { J(71, 46, 33, 132); J(25, 45, 1, 1, 0, 0, 0, 2, 1); J(59, 31, 46, 0); }   // 二维存储图像 %45（Rgba32f）、变量 %46（绑定 132）
                 J(22, 1, 32); J(21, 2, 32, 1);
                 J(43, 2, 3, 0); J(43, 2, 4, 1); J(43, 2, 5, 5); J(43, 2, 6, 2);
                 J(25, 40, 1, 1, 0, 0, 0, 1, 0); J(27, 41, 40); J(25, 43, 1, 5, 0, 0, 0, 1, 0);
@@ -1805,6 +1806,7 @@ static class T
                 J(62, 89, 119); J(62, 92, 6); J(57, 2, 121, 70, 89, 92);
                 J(62, 93, 120); J(57, 2, 122, 70, 93, 92);
                 if (bufferFetch) { J(61, 43, 123, 44); J(95, 91, 124, 123, 100); }   // 缓冲贴图整数取图（Ryujinx 不缩放、与屏幕无关）
+                if (imageWrite) { J(61, 45, 125, 46); J(99, 125, 100, 117); }   // imageStore(图像 132, 游戏坐标 %100, 取到的值)
                 J(56);
                 return v;
             }
@@ -1825,6 +1827,20 @@ static class T
             Check("缓冲贴图整数取图不影响 exact", true, ex3);
             SpirvFetchScale.PatchY(B2(Build(true, false, true)), 5, out var sc4, out _, out bool ex4);
             Check("缩放后再加运行时偏移（OpIAdd）仍 exact、缩放项照记", "True 1", $"{ex4} {sc4.Length}");
+            // 尺寸表证明（内部分辨率 ABI2）：缓冲贴图（Dim Buffer）宿主从不缩放，取图单独记 never_scaled（内部分辨率放行）；类型认不出的（%44 改指一个没声明的类型）照旧是原因
+            SpirvFetchScale.AnalyzeSizeTable(B2(Build(true, true)), 5, out _, out var rsBuf);
+            var unk = Build(true, true); { int k = unk.LastIndexOf(43u); unk[k] = 199; }   // 缓冲贴图那次 OpLoad 的结果类型 %43 → 没声明的 %199
+            SpirvFetchScale.AnalyzeSizeTable(B2(unk), 5, out _, out var rsUnk);
+            Check("尺寸表证明：缓冲贴图取图记 never_scaled、不记 non_2d / 类型认不出的照记 non_2d", "True False True",
+                  $"{Array.IndexOf(rsBuf, "never_scaled_image_type") >= 0} {Array.IndexOf(rsBuf, "non_2d_or_unknown_image_type") >= 0} {Array.IndexOf(rsUnk, "non_2d_or_unknown_image_type") >= 0}");
+            // 写二维图像（11-22 D-ZR6V 计算着色器）：宽屏旧约定照旧不 exact（Ryujinx 不缩放写图像）；尺寸表证明不因写图像多记原因（宿主图像槽一律原尺寸）——
+            //   同一程序加一次 imageStore 前后，尺寸表的原因集合逐项相同、没有 image_write（这个夹具用旧式缩放辅助函数，本身另有原因；修前多一条 image_write）
+            SpirvFetchScale.PatchY(B2(Build(true, false)), 5, out _, out _, out bool exW0);
+            SpirvFetchScale.PatchY(B2(Build(true, false, imageWrite: true)), 5, out _, out _, out bool exW);
+            SpirvFetchScale.AnalyzeSizeTable(B2(Build(true, false)), 5, out _, out var rsW0);
+            SpirvFetchScale.AnalyzeSizeTable(B2(Build(true, false, imageWrite: true)), 5, out _, out var rsWr);
+            Check("写二维图像：旧约定由 exact 变不 exact；尺寸表原因不变、无 image_write", "True False True False",
+                  $"{exW0} {exW} {string.Join(",", rsW0) == string.Join(",", rsWr)} {Array.IndexOf(rsWr, "image_write") >= 0}");
         }
 
         // ---------- 游戏自己出宽图（GameWide）：不放宽贴图、按视口判原生宽、界面原尺寸居中在视口区域 ----------

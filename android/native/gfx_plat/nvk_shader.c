@@ -940,6 +940,7 @@ static void with_program_key(char *out, size_t cap, const char *why, const uint8
 }
 // lib = 这份结果字节来自出包预编库（shader_src.precompiled=1）：装载闸对表外声明按拒收，
 //   调用方照旧 mark_bad 退回现编。离线库 / 跨局缓存 / 现编结果传 0。
+static _Atomic uint64_t g_lp_link_refused;   // 出包预编程序因两段接口对不上退回现编的份数（本局）
 static struct entry *build(const uint8_t *bytes, size_t len, const struct s2a_source_entry_view views[3], int nst,
                            const uint8_t identity[32], int lib) {
     struct entry *e = calloc(1, sizeof *e);
@@ -973,6 +974,19 @@ static struct entry *build(const uint8_t *bytes, size_t len, const struct s2a_so
       } }
     e->prog.z_raw = depth_clip_cap() == 1;   // 同 fill_facts：有管线裁剪深度时所有图形程序都不改写 z（预编库的程序另在取用处置 1）
     e->prog.color_out_mask = nst >= 2 && fp.stage[1].present ? fp.stage[1].fragment_output_map : 0xffffffffu;
+    // 出包预编库按阶段分别取、拼成一份，拼时不过链接（现编走 linked 请求、缺的输出由编译器补）：片元读了上一段没写的
+    //   位置，驱动按规范拒建管线（Adreno：input v_locN not declared in output from previous stage）。这份不用库，调用方
+    //   libpack_mark_bad 后走现编——同「状态 / 声明对得上才用预编库」。
+    if (lib && nst >= 2) {
+        const struct fd_stage *pre = nst >= 3 && fp.stage[2].present ? &fp.stage[2] : &fp.stage[0];
+        uint64_t miss = 0;
+        if (!nvn_vk_spirv_link_ok(pre->spirv, pre->spirv_bytes, fp.stage[1].spirv, fp.stage[1].spirv_bytes, &miss)) {
+            uint64_t k = atomic_fetch_add(&g_lp_link_refused, 1);
+            if (k < 4) { char m[200]; snprintf(m, sizeof m, "出包预编程序两段接口对不上：片元读的位置 %#llx 上一段没写（身份 %02x%02x%02x%02x…），这份退回现编",
+                (unsigned long long)miss, identity[0], identity[1], identity[2], identity[3]); nvn_plat_log(NVN_PLAT_LOG_INFO, "shader", m); }
+            nvn_vk_program_free(&fp); e->failed = 1; return e;
+        }
+    }
     { static _Atomic int said; if (nst >= 2 && nvn_plat_flag("nvk_drawlog", 0) && atomic_fetch_add(&said, 1) < 40) { char m[96]; snprintf(m, sizeof m, "片元输出映射 %#x（片元代码 %zu 字节）", (unsigned)e->prog.color_out_mask, fp.stage[1].spirv_bytes); nvn_plat_log(NVN_PLAT_LOG_INFO, "shader", m); } }
     for (int st = 0; st < nst && !e->failed; st++) {
         if (!fp.stage[st].present) { red1("stage_missing_in_result", st ? "fs" : "vs"); e->failed = 1; break; }

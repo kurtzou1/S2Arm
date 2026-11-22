@@ -221,7 +221,9 @@ class DevpushApps(unittest.TestCase):
         import push_pack as P
         d = P.Devpush("x", "U", "-", tempfile.mkdtemp())
         with patch.object(d, "call", lambda *a: (0, "a.b\tA\tT1\nio.s2arm.games.t\tS2Arm\t\n\n")):
-            self.assertEqual(d.apps(), [("a.b", "A", "T1"), ("io.s2arm.games.t", "S2Arm", "")])
+            self.assertEqual(d.apps(), [("a.b", "A", "T1", ""), ("io.s2arm.games.t", "S2Arm", "", "")], "旧工具只有三列：版本留空")
+        with patch.object(d, "call", lambda *a: (0, "io.s2arm.games.qb6bcfamys\tS2Arm\tQB6\t0.6.2\n")):
+            self.assertEqual(d.apps(), [("io.s2arm.games.qb6bcfamys", "S2Arm", "QB6", "0.6.2")], "新工具第四列是版本（#1842）")
         with patch.object(d, "call", lambda *a: (1, "不认识的操作 apps")):
             self.assertIsNone(d.apps(), "工具太旧：None，调用方照旧用启动器的包名")
 

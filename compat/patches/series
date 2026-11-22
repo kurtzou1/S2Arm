@@ -670,3 +670,5 @@
 20261121-1603-local-player-order-not-hide.patch
 20261121-2020-ldn-route-select-by-system-route.patch
 20261120-2222-direct-link-map-diag.patch
+20261122-0047-audio-effect-state-restore.patch
+20261122-0129-audio-interrupt-virtual-playback.patch

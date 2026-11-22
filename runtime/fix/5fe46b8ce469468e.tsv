@@ -1,0 +1,15 @@
+# 01008DD013200000（奥日 2 精灵意志）1.1.0 main 5fe46b8ce469468e610f5993b1f5f6a9（Unity，渲染线程模式 4 = 多线程渲染 + 图形作业）
+# 签名 B（加载期 pc main+0x3def0 / 0x3df80 / 0x3df30 读空节点；玩家 1.2.x 是 main+0x3e540 / 0x3e580）：真图形设备（全局 [main+0x7e39aa0]，0x4b80 字节，
+#   第 0 份不带锁标志 +0x2f88）上的有序表 +0x3068（0x28 字节元素、各带一个 std::map）由 main+0x2d1c0「二分查找、查不到就插入」维护，第 0 份不加锁。
+#   渲染线程 nx-94 执行命令流（main+0xbba20 虚调 +0x208 → 0x24960 → 0x24bb0）与主线程 nx-81 加载资源（GetRealGfxDevice 0x13a290 → 虚调 +0x210 → 0x34b20
+#   → 0x34f3c）都调它；设备线程所有权（[main+0x7e63e78]）整局属于渲染线程，主线程这条路不取所有权。两线程同读 end、各自追加 → 末元素没构造（全 0），
+#   下一次 insert 拷末元素崩。Mac 写监视实测：同一槽位被两线程在 3–14 µs 内各写一次（pc 0x3de5c / lr 0x35854）；每局 2 次争用，基线 1/16 局崩。
+# 修法：0x2d1c0 的全部 5 个调用点改成跳板，用本模块映像结尾可写空余的最后 16 字节（键页前 0x10，pack/cpatch.py FIX_LOCK_TAIL）做客体自旋锁
+#   （ldaxr / stxr 取、stlr 放，等的时候 wfe），锁里原样调 0x2d1c0 再回下一条。x9 / x16 / x17 是调用点上的临时寄存器（调用约定里被调方可改、不传参），
+#   0x2d1c0 不递归回到这些调用点（直接调用链 105 个函数可达不到；Mac 实测锁里同线程重入 0 次）。不改任何功能，只让两线程依次登记。
+# 验证（Mac，同写监视配置）：不加锁 5/5 开局崩 → 加锁 0/5，每局锁争用 2 次、出帧正常
+c	main	24410	veneer	9400236c	adrp:x16	d1004210	d50320bf	d503205f	885ffe11	35ffffd1	52800031	88097e11	35ffff89	bl:2d1c0	adrp:x16	d1004210	889ffe1f	# bl 0x2d1c0 加锁：调用方一
+c	main	24bb0	veneer	94002184	adrp:x16	d1004210	d50320bf	d503205f	885ffe11	35ffffd1	52800031	88097e11	35ffff89	bl:2d1c0	adrp:x16	d1004210	889ffe1f	# bl 0x2d1c0 加锁：渲染线程命令流（nx-94）
+c	main	2cebc	veneer	940000c1	adrp:x16	d1004210	d50320bf	d503205f	885ffe11	35ffffd1	52800031	88097e11	35ffff89	bl:2d1c0	adrp:x16	d1004210	889ffe1f	# bl 0x2d1c0 加锁：调用方三
+c	main	34f3c	veneer	97ffe0a1	adrp:x16	d1004210	d50320bf	d503205f	885ffe11	35ffffd1	52800031	88097e11	35ffff89	bl:2d1c0	adrp:x16	d1004210	889ffe1f	# bl 0x2d1c0 加锁：主线程加载（nx-81）
+c	main	352e4	veneer	97ffdfb7	adrp:x16	d1004210	d50320bf	d503205f	885ffe11	35ffffd1	52800031	88097e11	35ffff89	bl:2d1c0	adrp:x16	d1004210	889ffe1f	# bl 0x2d1c0 加锁：调用方五

@@ -41,7 +41,7 @@ DEVICECTL_TIMEOUT = 124   # devicectl 超时的返回码（同 coreutils timeout
 DEVICECTL_NOSPACE = 28    # 这台 Mac 磁盘满、devicectl 的结果文件写不下（同 errno ENOSPC）
 
 
-def devicectl(c, *args, timeout=120):
+def devicectl(c, *args, timeout=120, trailing_args=()):
     exe = COREDEVICE / "Resources/bin/devicectl"
     if not (exe.is_file() and os.access(exe, os.X_OK)):
         return 127, {}, NO_COREDEVICE
@@ -50,7 +50,7 @@ def devicectl(c, *args, timeout=120):
     try:
         with tempfile.NamedTemporaryFile(suffix=".json", dir=c.private) as out:
             try:
-                p = subprocess.run([str(exe), *args, "--json-output", out.name], env=c.env(), capture_output=True, text=True, timeout=timeout)
+                p = subprocess.run([str(exe), *args, "--json-output", out.name, *trailing_args], env=c.env(), capture_output=True, text=True, timeout=timeout)
             except subprocess.TimeoutExpired:
                 # devicectl 会一直挂到超时（#333）：转成非零退出，不再裸 traceback 收场。原因如实只说「等了多久没返回」，不猜锁屏
                 #   （启动器剃刀 H21：推送链实测锁屏照样能写，一律说「可能锁屏了」会把玩家指错方向）；要不要提示解锁由调用方按它知道的事实判

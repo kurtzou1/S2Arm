@@ -1,0 +1,65 @@
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/Command/DelayCommand.cs b/src/Ryujinx.Audio/Renderer/Dsp/Command/DelayCommand.cs
+index 295278dc6249f1ee8af65d65543f02fde93b4e9e..7a164fe2dada35d366432b2b8f536722c582cc53 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/Command/DelayCommand.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/Command/DelayCommand.cs
+@@ -271,7 +271,7 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
+ 
+             if (IsEffectEnabled)
+             {
+-                if (Parameter.Status == UsageState.Invalid)
++                if (Parameter.Status == UsageState.Invalid || state.DelayLines == null)   // S2Arm：DSP 状态没建过（即时存档恢复 / 进程内重启后宿主侧效果器状态是空的，游戏内存里的参数状态却已是「已更新」）也按新建处理，否则首个采样读 null 数组崩（D-WP4X）
+                 {
+                     state = new DelayState(ref _parameter, WorkBuffer);
+                 }
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/Command/LimiterCommandVersion1.cs b/src/Ryujinx.Audio/Renderer/Dsp/Command/LimiterCommandVersion1.cs
+index 115f494d281bcc4fd84ed14229e8d7a5bc731464..b199da3ee7fdd6a81d5ef58620db794a8d275470 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/Command/LimiterCommandVersion1.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/Command/LimiterCommandVersion1.cs
+@@ -59,7 +59,7 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
+ 
+             if (IsEffectEnabled)
+             {
+-                if (_parameter.Status == UsageState.Invalid)
++                if (_parameter.Status == UsageState.Invalid || state.DetectorAverage == null)   // S2Arm：DSP 状态没建过（即时存档恢复 / 进程内重启后宿主侧效果器状态是空的，游戏内存里的参数状态却已是「已更新」）也按新建处理，否则首个采样读 null 数组崩（D-WP4X）
+                 {
+                     state = new LimiterState(ref _parameter, WorkBuffer);
+                 }
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/Command/LimiterCommandVersion2.cs b/src/Ryujinx.Audio/Renderer/Dsp/Command/LimiterCommandVersion2.cs
+index f00529925643008ed25ad03f38c57f02134854ef..252c9dd66b4e1e37facf68f31105feced346d347 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/Command/LimiterCommandVersion2.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/Command/LimiterCommandVersion2.cs
+@@ -70,7 +70,7 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
+ 
+             if (IsEffectEnabled)
+             {
+-                if (_parameter.Status == UsageState.Invalid)
++                if (_parameter.Status == UsageState.Invalid || state.DetectorAverage == null)   // S2Arm：DSP 状态没建过（即时存档恢复 / 进程内重启后宿主侧效果器状态是空的，游戏内存里的参数状态却已是「已更新」）也按新建处理，否则首个采样读 null 数组崩（D-WP4X）
+                 {
+                     state = new LimiterState(ref _parameter, WorkBuffer);
+                 }
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/Command/Reverb3dCommand.cs b/src/Ryujinx.Audio/Renderer/Dsp/Command/Reverb3dCommand.cs
+index 56b5ef313fb5aada9c699d32af9d8adcfccbd200..e30d2119528e4658c2496c35816b0aeb561ccb19 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/Command/Reverb3dCommand.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/Command/Reverb3dCommand.cs
+@@ -254,7 +254,7 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
+ 
+             if (IsEffectEnabled)
+             {
+-                if (Parameter.ParameterStatus == UsageState.Invalid)
++                if (Parameter.ParameterStatus == UsageState.Invalid || state.FdnDelayLines == null)   // S2Arm：DSP 状态没建过（即时存档恢复 / 进程内重启后宿主侧效果器状态是空的，游戏内存里的参数状态却已是「已更新」）也按新建处理，否则首个采样读 null 数组崩（D-WP4X）
+                 {
+                     state = new Reverb3dState(ref _parameter, WorkBuffer);
+                 }
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/Command/ReverbCommand.cs b/src/Ryujinx.Audio/Renderer/Dsp/Command/ReverbCommand.cs
+index b99cb551ba314953f800c0c4b4748b51b2c38ab4..d99253d71cb4b051c2b1825600c347c6986de9c9 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/Command/ReverbCommand.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/Command/ReverbCommand.cs
+@@ -278,7 +278,7 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
+ 
+             if (IsEffectEnabled)
+             {
+-                if (Parameter.Status == UsageState.Invalid)
++                if (Parameter.Status == UsageState.Invalid || state.FdnDelayLines == null)   // S2Arm：DSP 状态没建过（即时存档恢复 / 进程内重启后宿主侧效果器状态是空的，游戏内存里的参数状态却已是「已更新」）也按新建处理，否则首个采样读 null 数组崩（D-WP4X）
+                 {
+                     state = new ReverbState(ref _parameter, WorkBuffer, IsLongSizePreDelaySupported);
+                 }

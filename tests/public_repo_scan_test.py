@@ -382,16 +382,28 @@ class ScanTests(unittest.TestCase):
             with self.assertRaisesRegex(self.mod.ScanError, 'git_blob_read_failed'):
                 self.mod.scan(self.root, 'HEAD', ['.'])
 
-    def test_gate_summary_counts_unreviewed_types_without_blocking(self):
+    def test_gate_new_unreviewed_types_block_with_hint(self):
+        # 11-22：增量门禁里新加的未审类型文件与全量同一口径（原先只记黄放行，#1749 的 .golden 进了 main、整仓扫描才红）
         base = self.commit({'safe.md': 'safe\n'})
         self.commit({'binary': b'\0synthetic', 'unknown.xyz': b'synthetic'})
         proc = subprocess.run([sys.executable, str(TOOL), '--repo', str(self.root),
                                '--path', '.', '--base', base, '--format', 'gate'],
                               capture_output=True, text=True)
-        self.assertEqual(proc.returncode, 0)
-        self.assertIn('增量未审类型 2', proc.stdout)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn('新加未读阻挡 2', proc.stdout)
         self.assertIn('"binary":uncovered: unreviewed_type', proc.stdout)
         self.assertIn('"unknown.xyz":uncovered: unreviewed_type', proc.stdout)
+        self.assertIn('reviewed_text_globs（先例 e06413126）后重入', proc.stdout)
+        self.assertIn('.xyz', proc.stdout)
+
+    def test_existing_unreviewed_changed_stays_warning(self):
+        # 只拦新加文件：基线里已有的未审类型文件改了内容，照旧只记黄、不追溯
+        base = self.commit({'safe.md': 'safe\n', 'unknown.xyz': b'synthetic'})
+        self.commit({'unknown.xyz': b'synthetic changed'})
+        p, r = self.scan('--base', base)
+        self.assertEqual(p.returncode, 0)
+        self.assertEqual(r['uncovered_blocking'], [])
+        self.assertEqual([f['path'] for f in r['warnings_changed']], ['unknown.xyz'])
 
     def test_all_categories_no_values(self):
         values = ['fixtureperson', '11223344-5566778899AABBCC', 'F1X2T3U4R5', 'human@private.test']
@@ -732,14 +744,15 @@ class ScanTests(unittest.TestCase):
         self.assertEqual(unread['coverage'].get('excluded_payload'), 1)
         self.assertEqual([row['path'] for row in unread['uncovered_blocking']], [other])
 
-    def test_unread_payload_and_unknown_are_warning_only(self):
+    def test_new_unread_payload_and_unknown_block(self):
         base = self.commit({'safe.md': 'safe\n'})
         self.commit({'game.nsp': b'synthetic', 'unknown.xyz': b'synthetic',
                      'binary.txt': b'\0synthetic'})
         p, r = self.scan('--base', base)
-        self.assertEqual(p.returncode, 0)
+        self.assertEqual(p.returncode, 1)
         self.assertEqual(r['incomplete_changed'], [])
-        self.assertEqual(len(r['warnings_changed']), 3)
+        self.assertEqual(sorted(f['path'] for f in r['uncovered_blocking']), ['binary.txt', 'game.nsp', 'unknown.xyz'])
+        self.assertEqual(r['warnings_changed'], [])
 
     def test_metadata_new_and_renamed_only(self):
         base = self.commit({'old.png': b'synthetic', 'old.mme': b'synthetic'})

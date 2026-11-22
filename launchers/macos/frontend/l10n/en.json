@@ -1727,6 +1727,8 @@
   "s2arm.controller.assignPlayers": "Assign players",
   "s2arm.controller.howPair": "Pair two / Full pad",
   "s2arm.controller.howPairKeys": "Press L + R together",
+  "s2arm.controller.howOther": "Other controllers",
+  "s2arm.controller.howOtherKeys": "Join when connected",
   "s2arm.controller.howSingle": "Single Joy-Con",
   "s2arm.controller.howSingleKeys": "Press SL + SR together",
   "s2arm.controller.clear": "Clear",

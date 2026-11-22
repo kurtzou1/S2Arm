@@ -103,8 +103,14 @@ static class T {
         // #1970：8 路读、块小到十几块，写入偏移必须从 0 起一块接一块往后（Windows 上往有效数据之后跳着写要先补零，慢盘一单几小时）
         var order = new List<(long Off, int Len)>(); var seq = new Fixture();
         RomfsExtraction.ImageWriteObserved = (off, len) => { lock (order) order.Add((off, len)); };
+        string prog = Path.Combine(Root, "img-ordered.progress"); File.WriteAllText(prog, ""); var oldProg = Environment.GetEnvironmentVariable("S2A_PROGRESS");
+        Environment.SetEnvironmentVariable("S2A_PROGRESS", prog);
         try { RomfsExtraction.ExtractImage(seq.Open, Path.Combine(Root, "img-ordered", "romfs.std"), true, chunkSize: 0x1000, parallelism: 8); }
-        finally { RomfsExtraction.ImageWriteObserved = null; }
+        finally { RomfsExtraction.ImageWriteObserved = null; Environment.SetEnvironmentVariable("S2A_PROGRESS", oldProg); }
+        // D-H35J：按顺序写这条路也往出包进度文件报「解包·资源镜像（MB）」：首行 0、末行满（夹具不到 1 MB，总数按 1 MB 计）
+        var rows = File.ReadAllLines(prog).Select(l => l.Split('\t')).ToArray();
+        Check(rows.Length >= 2 && rows.All(r => r.Length == 4 && r[1] == "解包·资源镜像（MB）") && rows[0][2] == "0" && rows[^1][2] == rows[^1][3] && rows[^1][3] == "1",
+            $"镜像形态·按顺序写：出包进度文件首行 0、末行写满（实得 {rows.Length} 行，末行 {(rows.Length > 0 ? string.Join(' ', rows[^1].Skip(1)) : "无")}）");
         long at = 0; bool contiguous = true; foreach (var (off, len) in order) { contiguous &= off == at; at += len; }
         Check(order.Count > 8 && contiguous && at == new FileInfo(Path.Combine(Root, "img-ordered", "romfs.std")).Length && ImageExact(seq, "img-ordered"),
             $"镜像形态·8 路读：{order.Count} 块按偏移从前到后连续写、写满整个镜像、逐字节相同");

@@ -11,6 +11,7 @@
 //   - 通用手柄首次按下（按键 / 十字键 / 扳机过半）才占玩家位：声明成 GamePad 的键盘接收器从不按，不占位（参考实现 #1657）
 #ifndef S2A_MAC_HID_GENERIC_H
 #define S2A_MAC_HID_GENERIC_H
+#include <ctype.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -78,6 +79,17 @@ static inline void s2a_hidg_sticks(const s2a_hidg *h, int16_t s[4]) {
 
 // 走 Switch Pro 协议那一支（hid_pad.m 切 0x30 完整报告、体感）：名字带「Pro Controller」，大小写不敏感
 static inline int s2a_hidg_is_pro(const char *name) { return name && strcasestr(name, "Pro Controller") != NULL; }
+// 北通宙斯 NS 模式上报 Nintendo 的 VID/PID。完整蓝牙地址只用于核对前缀。
+static inline int s2a_hidg_is_betop_ns(int vid, int pid, const char *transport, const char *address) {
+    if (vid != 0x057e || pid != 0x2009 || !transport || strcasecmp(transport, "Bluetooth") ||
+        !address || strlen(address) != 17) return 0;
+    const char separator = address[2];
+    if (separator != ':' && separator != '-') return 0;
+    for (int i = 0; i < 17; i++) {
+        if (i % 3 == 2 ? address[i] != separator : !isxdigit((unsigned char)address[i])) return 0;
+    }
+    return !strncasecmp(address, "00:90:E0", 8) || !strncasecmp(address, "00-90-E0", 8);
+}
 // 一代机身认法（joycon_imu.m 六轴轴向、拆不拆单只都照它）：产品号报左 / 右 Joy-Con（0x2006 / 0x2007）、名字却是「Pro Controller」且不带 Joy-Con 的
 //   是冒用 Joy-Con 产品号的第三方 Pro（D-52Z8：0x2006 + 「Pro Controller」被按左只侧握换算六轴，体感瞄准反向）：按 Pro（0x2009）认；其余照产品号
 static inline int s2a_hidg_jc_body_pid(int pid, const char *name) {

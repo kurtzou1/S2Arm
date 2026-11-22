@@ -44,8 +44,8 @@ int main(int argc, char **argv) {
     check(strstr(t, "pad.buttonHome") != NULL, "front_mac.m 读手柄 Home");
     check(strstr(t, "s2a_hq_step(") != NULL, "front_mac.m 用 s2a_hq_step 决策");
     check(strstr(t, "case S2A_HQ_QUIT: [g_delegate shutdown]") != NULL, "A 退出走 shutdown（同 ⌘Q / 关窗）");
-    // 本地多手柄（#282）后按槽位采样：确认条开着 = muted，各槽清零，再由同一处 publish_input 发出（旧 ABI 与 pad.c 两份状态都发 0），多手柄槽位也是 0
-    check(strstr(t, "BOOL muted = !focused || g_hq.open;") != NULL && strstr(t, "memset(slot_buttons, 0, sizeof slot_buttons)") != NULL &&
+    // 本地多手柄（#282）后按槽位采样：确认条开着 = muted（手柄这一路看 pads_live，关了失焦暂停时失焦不静音手柄；键鼠 kbd_muted 照旧看焦点），各槽清零，再由同一处 publish_input 发出（旧 ABI 与 pad.c 两份状态都发 0），多手柄槽位也是 0
+    check(strstr(t, "BOOL muted = !pads_live() || g_hq.open, kbd_muted = !focused || g_hq.open;") != NULL && strstr(t, "memset(slot_buttons, 0, sizeof slot_buttons)") != NULL &&
           strstr(t, "publish_input(slot_buttons[0], slot_sticks[0]);") != NULL, "确认期间游戏不收手柄输入（旧 ABI、pad.c 与多手柄槽位都发 0）");
     if (failures) { fprintf(stderr, "t_home_quit：%d/%d 项不符\n", failures, checks); return 1; }
     printf("✓ t_home_quit：%d 项（按住 2 秒弹、松手重计、A 退出、B / Home / 30 秒取消、+ - 同按、接线）\n", checks);

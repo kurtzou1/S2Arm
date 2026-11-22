@@ -220,7 +220,7 @@ def scan(index_dirs, exefs, log=None):
                 text_end, ro, ln, key = module_layout(os.path.join(exefs, 'main'))
                 M = ((ln + 15) & ~15) + MIRROR_FPSL
                 try:
-                    w, rt = fpslocker.convert(miniyaml.load(open(full, encoding='utf-8', errors='replace').read()), (text_end, ro), (M, key))
+                    w, rt = fpslocker.convert(miniyaml.load(open(full, encoding='utf-8', errors='replace').read()), (text_end, ro), (M, key - FIX_LOCK_TAIL))
                 except (fpslocker.Unsupported, ValueError) as e:
                     skipped['FPSLocker：' + str(e)[:40]] = skipped.get('FPSLocker：' + str(e)[:40], 0) + 1
                     # 进补丁打入记录（11-15 #934：原先只打一行「跳过」，完成页、S 级页都看不出这款的帧率补丁没打进去、开关显示成开着）
@@ -999,6 +999,7 @@ KEY_TAIL_MIN = 0x1000   # 映像结尾到键页至少留的可写空余（同 ru
 
 
 MIRROR_FPSL = 0x400   # 映像结尾可写空余的分区：前 0x400 字节给金手指空洞开关表，之后给 FPSLocker 变量（各管各的，不重叠）
+FIX_LOCK_TAIL = 0x10   # 空余的最后 16 字节（键页前）留给游戏缺陷修补表的客体锁字（runtime/fix/README.md；跳板 adrp 键页再减 0x10），FPSLocker 变量不进
 
 
 def _cheat_mirror(entries, text_end, ro, ln, key, why):
@@ -1529,10 +1530,19 @@ def flow_hazard(im, text_end, mod, changed, text_cache):
     return ''
 
 
+# 改写器在代码段尾巴新代码里也改写的系统指令（runtime/rewriter/rewriter.c scan() 扫 g_cptail，#1628）：读计时器 cntpct / cntvct、读 ctr、
+#   读写线程寄存器 tpidr_el0 / 读 tpidrro_el0（掩码去掉目标寄存器那 5 位），与 svc #imm
+TAIL_REWRITTEN = (0xd53be020, 0xd53be040, 0xd53b0020, 0xd53bd040, 0xd51bd040, 0xd53bd060)
+
+
 def tail_hazard(word):
-    """代码段结尾到 ro 开头之间（末页尾巴）的新代码改写器不扫不翻（runtime/rewriter/rewriter.c cpatch_rows phase 0），
-    这里挡掉改写器在代码段里会改写 / 报缺口的指令（同 rewriter.c scan()：svc / 线程寄存器 / 计时器 / ctr / 系统寄存器 / brk 0xB000–0xBFFF / x18）→ 原因或 ''"""
-    if (word & 0xff000000) == 0xd4000000 and (word & 3):   # svc / hvc / smc
+    """代码段结尾到 ro 开头之间（末页尾巴）的新代码：改写器按 g_cptail 逐字扫（不在任何函数里、不做函数分析），能改写的照常改写；
+    这里只挡改写器在尾巴里改写不了的（rewriter.c scan()）：hvc / smc、别的系统寄存器读写、brk 0xB000–0xBFFF、x18 → 原因或 ''"""
+    if (word & 0xffe0001f) == 0xd4000001:   # svc #imm：改写器照常走系统调用门
+        return ''
+    if (word & 0xffffffe0) in TAIL_REWRITTEN:   # 计时器 / ctr / 线程寄存器（#1628：FPSLocker 新函数读计时器）
+        return ''
+    if (word & 0xff000000) == 0xd4000000 and (word & 3):   # hvc / smc
         return f'{word:08x} 是系统调用'
     if (word & 0xffe0001f) == 0xd4200000 and 0xb000 <= (word >> 5) & 0xffff <= 0xbfff:
         return f'{word:08x} 是 brk #0x{(word >> 5) & 0xffff:x}（macOS 截走）'

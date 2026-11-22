@@ -16,6 +16,15 @@ static uint32_t press(const char *map, int usage) {   // 只按 HID 按键号 us
 }
 
 int main(void) {
+    CHECK(s2a_hidg_is_betop_ns(0x057e, 0x2009, "Bluetooth", "00:90:E0:12:34:56"), "北通样本按蓝牙前缀识别");
+    CHECK(s2a_hidg_is_betop_ns(0x057e, 0x2009, "Bluetooth", "00-90-e0-12-34-56"), "兼容蓝牙地址大小写和分隔符");
+    CHECK(!s2a_hidg_is_betop_ns(0x057e, 0x2009, "Bluetooth", "98:B6:E9:12:34:56"), "同 VID/PID 的不同地址前缀");
+    CHECK(!s2a_hidg_is_betop_ns(0x057e, 0x2009, "USB", "00:90:E0:12:34:56"), "USB 设备沿用现有路径");
+    CHECK(!s2a_hidg_is_betop_ns(0x057e, 0x2007, "Bluetooth", "00:90:E0:12:34:56"), "同前缀的非 Pro 设备");
+    CHECK(!s2a_hidg_is_betop_ns(0x057e, 0x2009, "Bluetooth", "00:90:E0") &&
+          !s2a_hidg_is_betop_ns(0x057e, 0x2009, "Bluetooth", "00:90:E0:ZZ:34:56") &&
+          !s2a_hidg_is_betop_ns(0x057e, 0x2009, "Bluetooth", NULL), "缺失和无效地址");
+
     // 缺省按钮：八位堂 D-input 编号 1 A、2 B、4 X、5 Y、7 / 8 L / R、9 / 10 ZL / ZR、11 −、12 +、14 / 15 摇杆按下；按位置给（右 A 下 B 上 X 左 Y）
     //   1 号是八位堂的 A（下）→ 位置 B；2 号（右）→ A；4 号（左）→ Y；5 号（上）→ X
     CHECK(press(NULL, 2) == A && press(NULL, 1) == B && press(NULL, 5) == X && press(NULL, 4) == Y, "缺省四颗面键按位置");

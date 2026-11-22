@@ -1727,6 +1727,8 @@
   "s2arm.controller.assignPlayers": "Asignar jugadores",
   "s2arm.controller.howPair": "Unir dos / Mando completo",
   "s2arm.controller.howPairKeys": "Pulsa L + R a la vez",
+  "s2arm.controller.howOther": "Otros mandos",
+  "s2arm.controller.howOtherKeys": "Se unen al conectarse",
   "s2arm.controller.howSingle": "Joy-Con individual",
   "s2arm.controller.howSingleKeys": "Pulsa SL + SR a la vez",
   "s2arm.controller.clear": "Borrar",

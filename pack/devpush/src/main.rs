@@ -331,7 +331,7 @@ async fn run(a: &[String]) -> Result<(), String> {
         println!("launch {bundle} pid {}", pid.map(|p| p.to_string()).unwrap_or_else(|| "?".into()));
         return Ok(());
     }
-    if op == "apps" {   // 手机上装的用户 App：每行「包名<TAB>可执行文件名<TAB>团队号」（团队号取签名权限 com.apple.developer.team-identifier，没有留空）。
+    if op == "apps" {   // 手机上装的用户 App：每行「包名<TAB>可执行文件名<TAB>团队号<TAB>版本」（团队号取签名权限 com.apple.developer.team-identifier，版本取 CFBundleShortVersionString，没有留空）。
         //   交签名身份前认手机上的 S2Arm 用：AltStore / SideStore / ESign 装的会改包名，不能只按启动器自己的包名找
         let mut ip = idevice::installation_proxy::InstallationProxyClient::connect(&provider).await.map_err(|e| format!("installation_proxy 连不上：{e}"))?;
         let apps = ip.get_apps(Some("User"), None).await.map_err(|e| format!("列不出手机上的 App：{e}"))?;
@@ -340,7 +340,9 @@ async fn run(a: &[String]) -> Result<(), String> {
             let exe = d.and_then(|d| d.get("CFBundleExecutable")).and_then(|x| x.as_string()).unwrap_or("");
             let team = d.and_then(|d| d.get("Entitlements")).and_then(|e| e.as_dictionary())
                 .and_then(|e| e.get("com.apple.developer.team-identifier")).and_then(|t| t.as_string()).unwrap_or("");
-            format!("{id}\t{exe}\t{team}")
+            // 版本：推游戏前比别的工具 / 别的电脑装的 S2Arm 是不是旧版（install.push_game，#1842：旧 App 收新程序包、断音修复没到手）
+            let ver = d.and_then(|d| d.get("CFBundleShortVersionString")).and_then(|x| x.as_string()).unwrap_or("");
+            format!("{id}\t{exe}\t{team}\t{ver}")
         }).collect();
         rows.sort();
         for r in rows { println!("{r}"); }

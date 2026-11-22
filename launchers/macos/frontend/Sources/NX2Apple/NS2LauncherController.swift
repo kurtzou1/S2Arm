@@ -682,7 +682,7 @@ final class NS2LauncherController: ObservableObject {
             var fitted = assignment
             let wants = PlayerAssignment.GameWants(styles: styles, min: (object["min"] as? NSNumber)?.intValue ?? 1, max: (object["max"] as? NSNumber)?.intValue ?? 0)
             if fitted.autoFit(wants, devices: allDevices) {
-                let changed = fitted.units != assignment.units
+                let changed = fitted.slots != assignment.slots
                 assignment = fitted
                 if changed {
                     assignment.finish(presentSystem: systemKeys, devices: allDevices, gen1: gen1Devices)
@@ -728,7 +728,7 @@ final class NS2LauncherController: ObservableObject {
     }
     /// 这一位按了键：亮 0.6 秒（连按就从最后一下再算），key = 按的哪个键
     func flashPlayer(key: String? = nil, where match: (PlayerAssignment.Unit) -> Bool) {
-        guard let index = assignment.units.firstIndex(where: match) else { return }
+        guard let index = assignment.slots.firstIndex(where: { $0.map(match) == true }) else { return }
         let token = UUID()
         flashTokens[index] = token
         flashingPlayers.insert(index)
@@ -812,8 +812,22 @@ final class NS2LauncherController: ObservableObject {
         }
     }
 
+    /// 分配玩家时选中的目标空槽（nil = 默认放入最小空槽；点击空槽可指定分配到该槽）
+    @Published private(set) var assignTargetSlot: Int?
+    func toggleAssignTargetSlot(_ slot: Int) {
+        guard assigning, slot >= 0, slot < PlayerAssignment.maxPlayers else { return }
+        if slot < assignment.slots.count, assignment.slots[slot] != nil { return }
+        assignTargetSlot = assignTargetSlot == slot ? nil : slot
+    }
+    private func consumeAssignTargetSlot() {
+        if let target = assignTargetSlot, target < assignment.slots.count, assignment.slots[target] != nil {
+            assignTargetSlot = nil
+        }
+    }
+
     func startAssign() {
         beforeAssign = assignment
+        assignTargetSlot = nil
         assigning = true
         if process == nil { startProcess() }   // 没连着也能分配：先起连接程序搜手柄
         send("assign start\n")
@@ -829,6 +843,7 @@ final class NS2LauncherController: ObservableObject {
     func cancelAssign() {
         guard assigning else { return }
         assigning = false
+        assignTargetSlot = nil
         assignment = beforeAssign
         send("assign cancel\n")
         extras.forEach { $0.send("assign cancel\n") }
@@ -839,6 +854,7 @@ final class NS2LauncherController: ObservableObject {
     func finishAssign() {
         guard assigning else { return }
         assigning = false
+        assignTargetSlot = nil
         assignment.finish(presentSystem: systemKeys, devices: allDevices, gen1: gen1Devices)
         sendPlan()
         persist()
@@ -847,19 +863,23 @@ final class NS2LauncherController: ObservableObject {
     }
     func registerGen1(id: String, side: Int, gesture: Int, at time: TimeInterval = ProcessInfo.processInfo.systemUptime) {
         guard assigning else { return }
-        assignment.gen1(id: id, side: side, gesture: gesture, at: time, present: gen1Devices, system: systemKeys)
+        assignment.gen1(id: id, side: side, gesture: gesture, at: time, present: gen1Devices, system: systemKeys, targetSlot: assignTargetSlot)
+        consumeAssignTargetSlot()
     }
     func registerKeyboard() {
         guard assigning else { return }
-        assignment.keyboard()
+        assignment.keyboard(targetSlot: assignTargetSlot)
+        consumeAssignTargetSlot()
     }
     func registerSystem(name: String, index: Int, at time: TimeInterval = ProcessInfo.processInfo.systemUptime) {
         guard assigning else { return }
-        assignment.system(name: name, index: index, at: time)
+        assignment.system(name: name, index: index, at: time, targetSlot: assignTargetSlot)
+        consumeAssignTargetSlot()
     }
     func receiveAssign(_ event: [String: Any], at time: TimeInterval = ProcessInfo.processInfo.systemUptime) {
         guard assigning, let id = event["id"] as? String else { return }
-        assignment.ns2(id: id, kind: (event["kind"] as? NSNumber)?.intValue ?? 0, gesture: (event["gesture"] as? NSNumber)?.intValue ?? 0, at: time)
+        assignment.ns2(id: id, kind: (event["kind"] as? NSNumber)?.intValue ?? 0, gesture: (event["gesture"] as? NSNumber)?.intValue ?? 0, at: time, targetSlot: assignTargetSlot)
+        consumeAssignTargetSlot()
     }
     nonisolated static func writeOrderFile(_ object: [String: Any], to url: URL = PlayerAssignment.orderFileURL) {
         guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]) else { return }

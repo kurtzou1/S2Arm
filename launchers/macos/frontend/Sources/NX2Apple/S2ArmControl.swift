@@ -462,7 +462,8 @@ import S2ArmAppleAdapter
             let candidates = p.candidates.map { c in ["bundleId": c.bundleId, "team": c.team, "byThisLauncher": c.byThisLauncher,
                                                       "identityTeam": c.identityTeam.map { $0 as Any } ?? NSNull()] as [String: Any] }
             return ["device": p.device, "installed": ["bundleId": bundle, "by": by] as [String: Any], "actions": m.consoleActions(p).map(\.rawValue),
-                    "needsChoice": p.needsChoice, "candidates": candidates]
+                    "needsChoice": p.needsChoice, "candidates": candidates,
+                    "games": p.games.map { ["gameId": $0.gameId, "state": $0.state.rawValue, "reasons": $0.reasons] as [String: Any] }]
         }
     }
 

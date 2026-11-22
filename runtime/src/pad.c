@@ -275,6 +275,7 @@ float s2a_pad_axis_deadzone(float v, float dz) {
 //   slot_of[j] 写第 j 只该占的槽（-1 = 超过 max 只，不参与）；返回占用到的最高槽位 + 1（至少 1：槽 0 总留给键盘 / 鼠标）。
 //   断开的手柄下一轮不在 live 里 → 槽空出来；重连时按「最小空槽」占回去（中间没插别的就回到原槽）。
 static int order_match(const s2a_pad_order_entry *e, int ns2_player, const char *name, int index) {
+    if (e->ns2_player == S2A_PAD_ORDER_EMPTY) return 0;   // 空槽占位，不匹配任何在线手柄
     if (ns2_player == S2A_PAD_ORDER_GEN1 || ns2_player == S2A_PAD_ORDER_GEN1_PAIR)   // 一代单只 / 按设备的一对：照设备 id 比
         return e->ns2_player == ns2_player && name && !strcmp(e->name, name);
     if (ns2_player != -1) return e->ns2_player == ns2_player;   // 通道玩家号、键盘：照号比

@@ -793,8 +793,8 @@ private struct ControllerToolbarButton: View {
             Switch2ProConnectionPopover(controller: controller, systems: systems, lang: lang, onClose: { show = false })
                 .environment(\.padControls, padControls)
         })
-        // 蓝牙手柄接上 / 断开：分配跟着整理（新连上的自动排进玩家位，#520 E）
-        .onReceive(systems.$pads) { pads in controller.updateSystem(SystemControllers.keys(for: pads)) }
+        // 蓝牙手柄接上 / 断开：分配跟着整理（新连上的自动排进玩家位，#520 E）；HID 兜底手柄同样（#1151）
+        .onReceive(systems.$pads.combineLatest(systems.$hidNames)) { pads, hid in controller.updateSystem(SystemControllers.assignmentKeys(pads: pads, hidNames: hid)) }
         .onReceive(controller.$assignment) { systems.applyPlayerLights($0) }
         .onAppear {   // 模拟手柄（本地 / 自测构建）：按键送进分配；Joy-Con 2 连上 / 断开要重对分配（一代走 systems 的表，上面两行已接）
             guard ControllerColorSimulator.allowed, ControllerColorSimulator.shared.controller == nil else { return }   // 只接一次（onAppear 会来好几次）

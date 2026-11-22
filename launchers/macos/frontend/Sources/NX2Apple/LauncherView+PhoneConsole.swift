@@ -239,7 +239,7 @@ extension LauncherView {
                         if model.consoleChoosing == c.bundleId { ProgressView().controlSize(.small) } else { Image(systemName: "app.badge.checkmark") }
                         VStack(alignment: .leading, spacing: 2) {
                             Text(label).font(.manrope(13, .medium))
-                            Text(c.bundleId + (c.team.isEmpty ? "" : " · " + sx("console.choose.team", c.team))).font(.manrope(11)).foregroundStyle(.white.opacity(0.55))
+                            Text((c.displayName ?? c.bundleId) + (c.team.isEmpty ? "" : " · " + sx("console.choose.team", c.team))).font(.manrope(11)).foregroundStyle(.white.opacity(0.55))
                         }
                     }
                 }
@@ -339,13 +339,23 @@ extension LauncherView {
         switch g.state {
         case .latest: return sx("console.game.latest")
         case .suggested: return sx("update.hint.badge") + " · " + g.reasons.compactMap(S2ArmLauncherModel.updateReasonKey).map(sx).joined(separator: " ")
-        case .notPushed: return sx(g.dataOnComputer == false ? "console.game.notPushedNoData" : "console.game.notPushed")
+        case .notPushed:
+            if g.reasons.contains("removed") { return sx("console.game.removed") }
+            return sx(g.dataOnComputer == false ? "console.game.notPushedNoData" : "console.game.notPushed")
         case .needsData: return sx(g.dataOnComputer == false ? "console.game.needsDataOriginal" : "console.game.needsData")
+        case .present: return sx("console.game.present")
+        case .unknown: return sx("console.game.unknown")
+        case .pending: return sx("console.game.pending")
         }
     }
     private func consoleGameColor(_ g: PhoneOverview.Game) -> Color {
         if g.isLegacy { return LauncherPalette.building }
-        switch g.state { case .latest: return .green; case .suggested: return .orange; case .notPushed: return .white.opacity(0.6); case .needsData: return .yellow }
+        switch g.state {
+        case .latest, .present: return .green
+        case .suggested, .pending: return .orange
+        case .notPushed, .unknown: return .white.opacity(0.6)
+        case .needsData: return .yellow
+        }
     }
 
     /// ⑥ 帮助：重看第一次的引导（欢迎页）、故障报修（同顶栏那颗：全局「上传给开发者」）

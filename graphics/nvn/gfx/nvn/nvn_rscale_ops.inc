@@ -179,22 +179,34 @@ static void rs_image_first(int tid, id<MTLTexture> t) {
     if (g_treg[tid].t.d.flags & NVN_TEXTURE_FLAGS_COMPRESSIBLE) rs_why_note(g_rs_skip_why, "先当存储图像用");
     rs_set_info(t, RS_BLACK, 0, 0, 1.0);
 }
-// 绑定时：这张图在这里读写不支持缩放（顶点 / 计算等非片元阶段、不精确的片元着色器、句柄数组、存储图像槽）→ 记进待退回（只对已缩的起作用）
+// 计算着色器读缩放图（11-22 D-ZR6V：Mac 2 倍局主场景的深度被计算阶段读、整遍退回原尺寸，2 倍看不出）：同 Ryujinx（取图倍率片元与计算两个阶段都支持），
+//   ABI2 尺寸表精确的计算程序（size_exact，清单没截断）照常读缩放图——整数取图坐标与尺寸查询按尺寸表里这张图的「游戏 ÷ 存储」换算（nvn_size_abi.inc size_abi_texture，
+//   计算阶段同样逐绑定填表），普通取图本来与尺寸无关。只放行按槽号绑的贴图（NVN_RB_TEX）：尺寸表只认它，经统一缓冲句柄取的（TEXU）照旧退回。
+//   存储图像槽不在此列：读写图像的仍在派发前换回原尺寸（rs_pre_images），写的图像坐标因此不用换算（翻译器 ABI2 判定不再因写图像判不精确）
+//   张量核网络顶替（tensor == 1，nvn_tensor.inc）不在此列：它不派发、按游戏尺寸的有效区域读写，读的放大图照旧先退回
+static inline int rs_compute_ok(const NvShader *sh) { return sh && sh->size_abi && sh->size_exact && !sh->ts_lost && sh->tensor != 1; }
+// 绑定时：这张图在这里读写不支持缩放（顶点等非片元阶段、尺寸表不精确的计算着色器、不精确的片元着色器、句柄数组、存储图像槽）→ 记进待退回（只对已缩的起作用）
+//   kind：0 = 按槽号绑的贴图，3 = 经统一缓冲句柄取的贴图（TEXU），1 = 句柄数组，2 = 存储图像槽
 static inline void rs_bind_check(id<MTLTexture> t, const NvShader *sh, int nvn_stage, int kind) {
     if (!t || !rs_on()) return;
     if (kind == 2) rs_bad(t, "绑在存储图像槽");
     else if (kind == 1) rs_bad(t, "被句柄数组读");
-    else if (nvn_stage != 1) rs_bad(t, "被顶点 / 计算等非片元阶段读");
-    else if (sh->exact != 1 || sh->ts_lost || (sh->size_abi && !sh->size_exact)) rs_bad(t, "被取图倍率不精确的片元着色器读");   // ABI2 非 exact（legacy_1x）同不精确
+    else if (nvn_stage == 5 && (kind != 0 || !rs_compute_ok(sh))) rs_bad(t, "被计算阶段读（尺寸表不精确 / 句柄取图）");
+    else if (nvn_stage != 1 && nvn_stage != 5) rs_bad(t, "被顶点 / 几何等非片元阶段读");
+    // 二维存储被当成立方体 / 3D 等非二维视图读：着色器对非二维访问一律按原尺寸（不缩放，rs_never 的放行也以此为前提，SpirvFetchScale NeverScaled），缩过的存储在这里退回
+    else if (t.textureType != MTLTextureType2D && t.textureType != MTLTextureType2DArray && t.textureType != MTLTextureType2DMultisample) rs_bad(t, "被非二维视图读");
+    else if (nvn_stage == 1 && (sh->exact != 1 || sh->ts_lost || (sh->size_abi && !sh->size_exact && !sh->rs_never))) rs_bad(t, "被取图倍率不精确的片元着色器读");   // ABI2 非 exact（legacy_1x）同不精确；只因读宿主从不缩放的种类而 legacy_1x 的（rs_never）照旧走取图倍率
 }
-// 计算派发前（dispatch，此时没有开着的遍）：这次派发要读写的缩放图当场换回原尺寸，这次派发就读到对的（绑定时的检查只能等下一个安全点）
+// 计算派发前（dispatch，此时没有开着的遍）：这次派发要读写的缩放图当场换回原尺寸，这次派发就读到对的（绑定时的检查只能等下一个安全点）。
+//   尺寸表精确的计算程序（rs_compute_ok）按槽号读的贴图不换（同 rs_bind_check）；图像槽、句柄取图照换
 static void rs_pre_compute(NvShader *sh) {
     if (!rs_on() || !sh) return;
+    int read_ok = rs_compute_ok(sh);
     __strong id<MTLTexture> q[32]; int n = 0;
     os_unfair_lock_lock(&g_rmu);
     for (int i = 0; i < sh->rf.nb && n < 32; i++) {
         const nvn_rbind *b = &sh->rf.b[i]; int reg = b->reg, tid = 0;
-        if (b->kind == NVN_RB_TEX) tid = (int)(tex_slot_h(S.tex[5], S.img[5], reg) & 0xfffff);
+        if (b->kind == NVN_RB_TEX) { if (read_ok) continue; tid = (int)(tex_slot_h(S.tex[5], S.img[5], reg) & 0xfffff); }
         else if (b->kind == NVN_RB_TEXU) tid = b->n ? ubo_tex_id(ubo_handle(5, reg, b->off)) : ubo_tex_id(ubo_packed(5, b));
         else if (b->kind == NVN_RB_IMG || b->kind == NVN_RB_IMGU) tid = img_tid(b, 5);
         else continue;

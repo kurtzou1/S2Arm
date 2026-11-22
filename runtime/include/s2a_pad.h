@@ -58,7 +58,8 @@ void s2a_slot_pin(const void **prev, const void *const *live, const int *rank, i
 enum { S2A_PAD_ORDER_MAX = 8, S2A_PAD_ORDER_UNLISTED = 100, S2A_PAD_ORDER_DROPPED = -1 };
 // 键盘也能当一位玩家（分配时按任一键登记）：entry 的 ns2_player 写 S2A_PAD_ORDER_KEYBOARD；排第几同手柄
 // 一代 Joy-Con 按设备当玩家（D2）：单只 name = 设备 id（序列号，蓝牙地址）；按设备读的一对 name = 「左 id|右 id」。几套都行，各占一位
-enum { S2A_PAD_ORDER_KEYBOARD = -2, S2A_PAD_ORDER_GEN1 = -3, S2A_PAD_ORDER_GEN1_PAIR = -4 };
+// 空槽占位（S2A_PAD_ORDER_EMPTY）：该槽手柄暂时断开，保持后面玩家在原位不变
+enum { S2A_PAD_ORDER_KEYBOARD = -2, S2A_PAD_ORDER_GEN1 = -3, S2A_PAD_ORDER_GEN1_PAIR = -4, S2A_PAD_ORDER_EMPTY = -5 };
 typedef struct { int ns2_player; char name[64]; int index; } s2a_pad_order_entry;
 typedef struct { int count, dropped_count; s2a_pad_order_entry entry[S2A_PAD_ORDER_MAX], dropped[S2A_PAD_ORDER_MAX]; } s2a_pad_order;
 // 一只手柄排第几（0 起）；表里没有 → S2A_PAD_ORDER_UNLISTED（排在表里的后面，彼此照原顺序）；被 dropped → S2A_PAD_ORDER_DROPPED（不进槽位）

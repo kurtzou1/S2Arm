@@ -43,6 +43,9 @@ EXE = APP + "/Contents/MacOS/s2arm-host"
 # iPhone 容器（pack/ship_ext.py container）：s2a_catalogue.json 每款记 host_abi / chain，装机时壳变了但兼容的款原样带进新壳（ipa.assemble）。
 #   本字段之前的容器条目按 1 / LEGACY_CHAIN：v0.1.0 起 graphics/nvn/gfx/nvn/dmsh_chain.h 的 DMSH_CHAIN 一直是它（git log v0.1.0.. 该文件无改动）
 LEGACY_CHAIN = "0be3f28548fd"
+# 第一个与本版接口一致（HOST_ABI + 直连链号 DMSH_CHAIN 都相同）的 App 版本：比它旧的 App 加载不了这一版出的程序包（install.external_app_outdated 拦）。
+#   改了 HOST_ABI 或 DMSH_CHAIN 就把它改成那一版的版本号（tests/test_ushell_install.py 守着：接口一变、这里没改就红）。v0.1.0 起两项都没变过（逐个 tag 核过 v0.5.4–v0.6.7）
+COMPAT_SINCE = "0.1.0"
 
 
 def engine_compat(c):
@@ -387,6 +390,9 @@ def phone_overview(c):
         if online is not None:
             phone["online"] = online.get(key)
         phones.append(phone)
+    if c.r.get("liveContainer") is True and sys.platform == "darwin":
+        import livecontainer
+        phones = livecontainer.overview(c, phones)
     return dict(phones=phones)
 
 

@@ -232,6 +232,23 @@ raise SystemExit(main.main())
         self.assertEqual(explain(Failure("No space left on device")).code, "job_failed")
         self.assertEqual(explain(ValueError("Check keys")).code, "job_failed")
 
+    def test_disk_io_error_named(self):
+        # D-2NH2（Windows 0.6.8）：installUpdate 读游戏库遇 WinError 483「设备硬件出现致命错误」，原先落笼统的「本地任务失败」。
+        #   期望手写：WinError 483 / 23 / 1117、POSIX EIO → disk_io_error，原文与路径进 internal；工具日志里同样的原文 → disk_io_error；
+        #   反证：同一路径的 WinError 5（拒绝访问）不归它
+        lib = self.root / "d2nh2-lib"; lib.mkdir()
+        for win in (483, 23, 1117):
+            with self.subTest(winerror=win):
+                e = OSError(errno.EINVAL, "localized", str(lib / "games/x/a.bin")); e.winerror = win
+                got = explain(e, library=lib)
+                self.assertEqual(got.code, "disk_io_error"); self.assertIn(f"WinError {win}", got.internal)
+        self.assertEqual(explain(OSError(errno.EIO, "Input/output error", str(lib / "a"))).code, "disk_io_error")
+        deny = OSError(errno.EACCES, "denied", str(lib / "a")); deny.winerror = 5
+        self.assertNotEqual(explain(deny, library=lib).code, "disk_io_error")
+        import errors
+        code, why = errors.classify_failure("ipa", None, ["OSError: [WinError 483] 由于设备硬件出现致命错误，请求失败。: 'D:\\lib\\a.bin'"])
+        self.assertEqual(code, "disk_io_error", why)
+
     def test_windows_app_control_block_named(self):
         # #0745b9：Windows 应用控制（4551 智能应用控制 / WDAC、1260 组策略、225 / 226 杀毒软件）拦下我们自带的工具 → app_control_blocked，
         #   上屏点名被拦的工具（winproc.popen 补的文件名）；原先落到「本地任务失败，请检查日志和输入」。errno 写成 EACCES 也先认应用控制
@@ -290,6 +307,33 @@ raise SystemExit(main.main())
         with patch.dict(os.environ, env):
             self.assertNotEqual(errors.classify_failure("ipa", None, ["light.log：rc=75；【黄】winenv：自动源码改写器固定依赖/CMake 未就绪；不下载"])[0], "app_control_blocked")
         self.assertEqual(errors.missing_prebuilt({}), [])
+
+    def test_disk_full_beats_missing_prebuilt(self):
+        # D-6ZDD（Windows 0.6.7）：写 game.img 时 [Errno 28]，同时随包 rcodesign 大小不对。盘满能让解出来的随包件大小不对，反过来不成立：
+        #   日志确凿写满 → disk_full（随包件缺照记进说明）；只有随包件缺 → 照旧 app_control_blocked。期望按构造手写
+        import errors
+        tools = self.root / "Prepare"; (tools / "signing").mkdir(parents=True)
+        (tools / "signing" / "rcodesign.exe").write_bytes(b"ab")          # 清单记 4 字节
+        (tools / "prepare.json").write_text(json.dumps({"schema": 1, "source": "x", "files": {"signing/rcodesign.exe": [4, "0" * 64]}}))
+        env = {"S2A_PREBUILT_TOOLS": str(tools)}
+        full = 'Traceback (most recent call last):\n  File "romfs_image.py", line 88, in write\nOSError: [Errno 28] No space left on device'
+        with patch.dict(os.environ, env):
+            code, why = errors.classify_failure("ipa", None, [full])
+            self.assertEqual(code, "disk_full", why)
+            self.assertIn("rcodesign.exe", why)
+            code2, why2 = errors.classify_failure("ipa", None, ["light.log：rc=1；没有别的原因"])
+            self.assertEqual(code2, "app_control_blocked", why2)
+
+    def test_nostall_watchdog_is_build_stalled(self):
+        # D-PD33（Windows 0.6.7）：直连库编批库 15 分钟没有一批编完，无进展看门狗停掉 dsh_batch（rc=124），原先落「package_failed，按阶段 未识别」。
+        #   期望手写：只有看门狗那行 → build_stalled，上屏句是它自己的；同段还有写满 → disk_full（看门狗只是结果）
+        import errors
+        stalled = "[直连库] 🔴 出库失败 rc=124：【红】无进展看门狗：python dsh_batch.py build --pkg x 900 秒产出没有前进"
+        code, why = errors.classify_failure("direct", None, [stalled])
+        self.assertEqual(code, "build_stalled", why)
+        self.assertNotEqual(errors.player_reason("build_stalled"), errors.player_reason("package_failed"))
+        code2, why2 = errors.classify_failure("direct", None, ["OSError: [Errno 28] No space left on device\n" + stalled])
+        self.assertEqual(code2, "disk_full", why2)
 
     def test_windows_metal_version_unreadable(self):
         # D-TYCN（Windows 0.6.3）：编着色器库前核工具读不到 metal.exe 版本，原先落笼统的 package_failed + 开发者口吻的 --update-lock 提示。

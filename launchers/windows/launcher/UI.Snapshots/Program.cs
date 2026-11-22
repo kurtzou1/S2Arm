@@ -40,9 +40,11 @@ var detailsProbe = args.Length > 0 && args[0] == "--details-probe";
 var consoleProbe = args.Length > 0 && args[0] == "--console-probe";
 // --update-export-probe <目录>：游戏库「更新 / 导出」两件事（0.6.4 改版：大卡三态、导出确认页设备行、开始后起的单、逐台结果，UpdateExportProbe.cs）
 var updateExportProbe = args.Length > 0 && args[0] == "--update-export-probe";
+// --confirm-probe <目录>：推游戏遇到手机上旧 App 的确认页（#1842，phone_app_outdated 带 accept，ConfirmProbe.cs）
+var confirmProbe = args.Length > 0 && args[0] == "--confirm-probe";
 // --walk-probe <目录>：玩家走查截图（6 个角色从打开启动器走到手机上玩，每步整页 PNG + 屏幕文字，WalkProbe.cs）
 var walkProbe = args.Length > 0 && args[0] == "--walk-probe";
-if (reportProbe || buildRouteProbe || dismissProbe || installActionProbe || detailsProbe || consoleProbe || updateExportProbe || walkProbe) args = args[1..];
+if (reportProbe || buildRouteProbe || dismissProbe || installActionProbe || detailsProbe || consoleProbe || updateExportProbe || walkProbe || confirmProbe) args = args[1..];
 var outDir = args.Length > 0 ? args[0] : Path.Combine(
     Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
     ".s2arm/run/s2arm/cmdr/evidence/launcher/win");
@@ -62,6 +64,7 @@ if (settingsProbe) { Environment.Exit(SettingsProbe.Run(outDir)); }
 if (reportProbe) { Environment.Exit(ReportProbe.Run(outDir)); }
 if (buildRouteProbe) { Environment.Exit(BuildRouteProbe.Run(outDir)); }
 if (dismissProbe) { Environment.Exit(DismissProbe.Run(outDir)); }
+if (confirmProbe) { Environment.Exit(ConfirmProbe.Run(outDir)); }
 if (installActionProbe) { Environment.Exit(InstallActionProbe.Run(outDir)); }
 if (detailsProbe) { Environment.Exit(DetailsProbe.Run(outDir)); }
 if (consoleProbe) { Environment.Exit(ConsoleProbe.Run(outDir)); }

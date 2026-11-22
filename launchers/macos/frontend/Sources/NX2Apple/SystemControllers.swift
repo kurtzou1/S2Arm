@@ -299,6 +299,16 @@ final class SystemControllers: ObservableObject {
         var seen: [String: Int] = [:]
         return pads.map { pad in let i = seen[pad.name, default: 0]; seen[pad.name] = i + 1; return PlayerAssignment.SystemKey(name: pad.name, index: i) }
     }
+    /// 分配玩家认的「系统手柄」（纯函数，单测）：GameController 的手柄 + HID 兜底手柄（#1151：PowerA 这类 GameController 认不出、
+    ///   宿主 macos/hid_pad.m 按 HID 读的）。兜底手柄同样按「名字 + 同名第几只」认——宿主排顺序表时对兜底手柄也是这一套（front_mac.m
+    ///   s2a_pad_order_rank：名字取 HID 产品名，同 HIDFallbackPads），接上即自动排进玩家位，同系统手柄；GameController 已列出的同名手柄不重复
+    nonisolated static func assignmentKeys(pads: [Pad], hidNames: [String]) -> [PlayerAssignment.SystemKey] {
+        var seen: [String: Int] = [:]
+        let fallback = HIDFallbackPads.listed(hid: hidNames, system: pads.map(\.name)).map { name in
+            let i = seen[name, default: 0]; seen[name] = i + 1; return PlayerAssignment.SystemKey(name: name, index: i)
+        }
+        return keys(for: pads) + fallback
+    }
 
     static func openBluetoothSettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.BluetoothSettings") { NSWorkspace.shared.open(url) }

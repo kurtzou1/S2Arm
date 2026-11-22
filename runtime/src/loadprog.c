@@ -35,8 +35,6 @@ void s2a_load_begin(uint64_t now, int first_run) {
 void s2a_load_user_skip(void) { atomic_store(&g_skip, 1); }
 
 static void mark_warm_done(void);
-static double prepare_cap_s(void) { const char *e = getenv("DM_PSO_PREPARE_MAX_MS"); return e && atof(e) > 0 ? atof(e) / 1000.0 : 30.0; }   // 直连层首帧上限（nvn_mtl.m prepare_max_ms，11-06 维护者 放宽到 30 秒）
-static double page_cap_s(void) { return env_s("S2A_LOAD_MAX_S", prepare_cap_s()); }   // 页面到点进游戏的上限（同一个数：剩余时间也按它封顶）
 int s2a_load_warm_tick(uint64_t now, long done, long total) {
     // 全部编完（直连层保证 (total, total) 只发一次：首帧前编完，或先进了游戏、后台编完时）：管线已进系统缓存，记本包已完整预热
     if (total > 0 && done >= total) mark_warm_done();
@@ -56,14 +54,13 @@ int s2a_load_warm_tick(uint64_t now, long done, long total) {
     if (done >= total) { g_go = S2A_LOAD_GO_DONE; go = 1; }
     else if (atomic_load(&g_skip)) { g_go = S2A_LOAD_GO_USER; go = 1; }
     else if (now - g_last_up >= (uint64_t)(env_s("S2A_LOAD_STALL_S", 30) * S)) { g_go = S2A_LOAD_GO_STALL; go = 1; }
-    // 上限缺省跟直连层的首帧上限一致（DM_PSO_PREPARE_MAX_MS，缺省 30 秒；11-06 维护者：15 秒冷装编不完，放宽到 30 秒，8 秒后可「先开始玩」照旧）：11-06 马车8 测试设备1，直连层 15 秒放行、转后台后不再报进度，页面这道上限原先缺省 600 秒，
-    //   页面停在「为你的设备优化画面 已优化 18,205 / 19,077」直到首帧（18.3 秒），维护者 看到的是卡住。到点页面自己转「正在进入游戏，剩余的优化在后台继续」
-    else if (now - g_warm_t0 >= (uint64_t)(page_cap_s() * S)) { g_go = S2A_LOAD_GO_MAX; go = 1; }
+    // 没有总时长上限（11-22 #502 玩家：「我没点就别进游戏，等是我的选择」）：编译还在往前走就一直等，玩家随时可点「先开始玩」；原先 30 秒到点硬进（11-06 马车8 页面看着卡住才加），
+    //   那次的「看着卡住」由上面的无进展护栏和逐秒剩余时间兜住；直连层有前端时同样不再到点放行（nvn_mtl.m warm_prepare）
     if (go) g_stage = g_ff ? S2A_LOAD_DONE : S2A_LOAD_ENTER;   // 首帧早已到过（直连层先过首帧回调、后在首次提交里等预热）：预热一结束就收页
     int reason = g_go; long d = g_done, t = g_total;
     pthread_mutex_unlock(&g_mu);
     if (go && reason != S2A_LOAD_GO_DONE)
-        LOG("加载页：不再等预热（%s），已编 %ld / %ld，剩下的转后台", reason == S2A_LOAD_GO_USER ? "玩家点了先开始玩" : reason == S2A_LOAD_GO_STALL ? "长时间没有进展" : "超过宽松上限", d, t);
+        LOG("加载页：不再等预热（%s），已编 %ld / %ld，剩下的转后台", reason == S2A_LOAD_GO_USER ? "玩家点了先开始玩" : "长时间没有进展", d, t);
     return go && reason != S2A_LOAD_GO_DONE ? 1 : 0;   // 全部编完：直连层自己正常收尾（返回 0 不转后台）
 }
 
@@ -120,13 +117,9 @@ void s2a_load_snapshot(uint64_t now, s2a_load_view *v) {
             if (g_slow_since && now - g_slow_since >= 3 * S) g_slow_since = 0;
         }
         g_eta_t = now;
-        // 页面到上限就进游戏（剩下的转后台）：剩余时间不超过离上限还剩的秒数（11-06 维护者：原先冷装估算四五十秒、15 秒就进了游戏，显示的数对不上）
-        double cap_left = page_cap_s() - (double)(now - g_warm_t0) / S;
-        if (cap_left < 0) cap_left = 0;
-        double shown = g_eta_shown < cap_left ? g_eta_shown : cap_left;
-        v->eta_s = (int)(shown + 0.999);
+        v->eta_s = (int)(g_eta_shown + 0.999);   // 不再按上限封顶（没有上限了，11-22 #502）：显示的就是按已编 / 总数和近段速率估的剩余时间
     }
-    v->can_skip = g_stage == S2A_LOAD_OPTIMIZE && g_first_run && now - g_warm_t0 >= (uint64_t)(env_s("S2A_LOAD_SKIP_S", 8) * S) && !(v->eta_s >= 0 && v->eta_s < 5) && !atomic_load(&g_skip);
+    v->can_skip = g_stage == S2A_LOAD_OPTIMIZE && g_first_run && !atomic_load(&g_skip);   // 优化画面一开始就可点、一直可点（11-22 #502：等不等由玩家定；只有完整加载页有这个按钮）
     pthread_mutex_unlock(&g_mu);
 }
 
@@ -146,7 +139,7 @@ void s2a_front_warm_released(void) {
     int go = g_stage < S2A_LOAD_ENTER; long d = g_done, t = g_total;
     if (go) { g_go = S2A_LOAD_GO_HOST; g_stage = g_ff ? S2A_LOAD_DONE : S2A_LOAD_ENTER; }
     pthread_mutex_unlock(&g_mu);
-    if (go) LOG("加载页：直连层已放行（清单全部领走只剩在编的几条，或到上限），已编 %ld / %ld，剩下的转后台", d, t);
+    if (go) LOG("加载页：直连层已放行（清单全部领走、只剩在编的几条），已编 %ld / %ld，剩下的转后台", d, t);
 }
 
 // 前台激活门（见 s2a_loadprog.h）

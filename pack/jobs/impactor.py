@@ -154,6 +154,10 @@ EXPLAIN = (
     # 连不上签名要用的 anisette 服务器（#3fc02b，Windows 玩家 3 次上传：「Anisette error … dns error … 不知道这样的主机。 (os error 11001)」）：
     #   Impactor v2.7.2 的 omnisette 本机取不到就走远程 v3，地址写死 mac-ani.jkcoxson.com（3rdparty/omnisette/src/lib.rs DEFAULT_ANISETTE_URL_V3）。原先落到 device_install_failed，建议写「检查设备连接」，方向全错
     (r'anisette error[\s\S]{0,600}?(?:dns error|os error 1100[1-4]|client error \(connect\)|error sending request|connection (?:refused|reset)|timed out)', 'signing_server_unreachable'),
+    # 连上了但回来的不是登录辅助服务器的正常回应（D-G3PT / #2050，mac 0.6.8 一位玩家 10 次：「Anisette error: Request Error error decoding response body …
+    #   expected value at line 1 column 1」= 回来的不是 JSON；「Provisioning socket error HTTP error: 502 Bad Gateway」= 服务器或中间的代理回 5xx）：
+    #   同一台服务器同一个处理办法（检查网络 / 代理、再试），原先落 job_failed、把 serde 原句「2: expected value at line 1 column 1」直接上屏
+    (r'anisette error[\s\S]{0,600}?(?:error decoding response body|provisioning socket error|http error: 5\d\d)', 'signing_server_unreachable'),
     # 远程 Anisette 返回异常响应时，旧版 plumesign/omnisette 可能把请求错误变成 Rust panic；仍应归到签名辅助服务器不可达，不能把 panic 细节直接显示给玩家。
     (r'panicked at 3rdparty/omnisette/src/remote_anisette_v3\.rs:[0-9]+:[0-9]+:[\s\S]{0,500}?note: run with [`\']rust_backtrace=1', 'signing_server_unreachable'),
     # 保存的 Apple ID 会话过期（Apple 开发者接口 1100「Your session has expired. Please log in.」，plumesign 恢复会话时报，玩家反馈 v0.2.7）：

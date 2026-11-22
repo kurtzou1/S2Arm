@@ -3,6 +3,7 @@
 # 期望按规则手写：点开头的真文件进包、macOS 垃圾不进；--check 最新退 0、源变了退 1；重打只重算变了的 1 个；删源文件包里也删；
 # 包里改字节 / 多文件 / 源不一致 → 核对黄字（退 0 照常出包、原因写 pack.verify_warn.txt、不写核对记录；单测里 vf 把黄记成 3）；清单读不了 / 版本不对 → 照旧红；产物根：提交后现行指向新版、新版写入不影响旧版（克隆独立）、同版本不许重开、只留 3 版、现行里有软链拒绝开新版
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); bad=0
+python3 "$H/tests/pack_empty_romfs_test.py" || bad=1
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
 source "$H/pack/ipa_key.sh"
 # 包键（审计 P1-54）：进包输入 romfs / aoc / 系统数据变了键必须变；CFLAGS 不设与设成空同键（旧口径）。夹具是最小产物根，期望按「变没变」判，不复述键的拼法

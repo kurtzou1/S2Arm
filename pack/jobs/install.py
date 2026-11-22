@@ -2439,12 +2439,53 @@ def push_phone(c):
         who, bid = owner_for_push(c, ph.udid, ph.key)
         if who == "external":
             ph.bid, ph.external = bid, True
+            ph.app_version = app_version_on(c, ph.udid, bid)
         return ph
     dev = phone(c)
     c.device_kind = row_kind(dev)   # 「这台 {0} 上装着不止一个 S2Arm」在装机对象之前就可能报（owner_for_push）
     udid = udid_of(c, dev["id"])
     who, bid = owner_for_push(c, udid, udid or dev["id"])
-    return ExternalPhone(c, bid, dev, udid) if who == "external" else mac_phone(c, dev=dev, udid=udid)
+    if who != "external":
+        return mac_phone(c, dev=dev, udid=udid)
+    ph = ExternalPhone(c, bid, dev, udid)
+    ph.app_version = app_version_on(c, udid, bid)
+    return ph
+
+
+def app_version_on(c, udid, bid):
+    """手机上包名 bid 那个 S2Arm 的版本（CFBundleShortVersionString；s2a-devpush apps 第四列）：读本次作业判归属时（s2arm_owner → installed_s2arm_on）
+    已列过的那份，不再调设备。工具旧 / 列不出 / 没这一列 / 本次没列过 → None（照旧推，不提示）"""
+    apps = (getattr(c, "_s2arm_apps", None) or {}).get(udid) or []
+    return next((a.get("version") for a in apps if a["bundleId"].lower() == (bid or "").lower()), None)
+
+
+def _ver(v):
+    try:
+        return tuple(int(x) for x in str(v).split("."))
+    except ValueError:
+        return None
+
+
+def external_app_outdated(c, ph):
+    """别的工具 / 别的电脑装的 S2Arm 比这个启动器旧（#1842；启动器自己装的走壳号核对，见 push_game）→ (错误码, 那句话)；不旧 / 比不了 → None。
+    原先 external 完全不核版本，旧 App 照样收这一版的程序包、玩家一直玩旧 App 却不知道。不堵门（维护者：物理上做得下去的不拦）：
+      App 早于接口起始版（host_update.COMPAT_SINCE，加载不了这一版的程序包、必定打不开）→ phone_app_incompatible，拦；
+      接口兼容、只是旧（缺 App 侧的修复，如 #1842 断音）→ phone_app_outdated，玩家点「仍然继续」（acceptOldApp）就照推
+    比不了（开发树没有版本、手机上读不到）→ None，照旧推"""
+    import cheats
+    import host_update
+    want, have = cheats.app_version(c), getattr(ph, "app_version", None) or ""
+    mine, theirs = _ver(want), _ver(have)
+    if not mine or not theirs or theirs >= mine:
+        return None
+    dev, ours = device_of(c), (ph.bid or "").lower().startswith(S2ARM_BID_PREFIX)   # 包名是启动器那种：多半是另一台电脑的启动器装的（这台电脑没有它的装机记录）；否则 LiveContainer / SideStore 等改过包名的
+    if theirs < (_ver(host_update.COMPAT_SINCE) or (0,)):
+        if ours:
+            return "phone_app_incompatible", f"这台 {dev} 上的 S2Arm 是 {have}，太旧了，读不了这个启动器（{want}）出的游戏程序，推进去也打不开：先在这台电脑的游戏库最前面「S2Arm」卡点「更新 S2Arm」装成 {want}，或回到当初装它的那台电脑更新，再推游戏。"
+        return "phone_app_incompatible", f"这台 {dev} 上的 S2Arm 是 {have}，太旧了，读不了这个启动器（{want}）出的游戏程序，推进去也打不开：先在游戏库最前面「S2Arm」卡导出 {want} 的 S2Arm.ipa，用你当初装它的工具（LiveContainer / SideStore 等）重新装一次，再推游戏。"
+    if ours:
+        return "phone_app_outdated", f"这台 {dev} 上的 S2Arm 是 {have}，比电脑上的 {want} 旧，部分修复要更新 App 才生效：在这台电脑的游戏库最前面「S2Arm」卡点「更新 S2Arm」装成 {want}（之后这台电脑就认它），或回到当初装它的那台电脑更新。也可以先照旧推。"
+    return "phone_app_outdated", f"这台 {dev} 上的 S2Arm 是 {have}，比电脑上的 {want} 旧，部分修复要更新 App 才生效：在游戏库最前面「S2Arm」卡导出 {want} 的 S2Arm.ipa，用你当初装它的工具（LiveContainer / SideStore 等）重新装一次。也可以先照旧推。"
 
 
 def owner_for_push(c, udid, key):
@@ -3118,8 +3159,10 @@ def installed_s2arm_on(c, udid, rec=None):
         return None
     main = main_executable(c)
     skip = standalone_bids(rec)
-    return [dict(bundleId=b, team=t or None) for b, e, t in rows
+    apps = [dict(bundleId=b, team=t or None, version=v or None) for b, e, t, *rest in rows for v in [(rest or [""])[0]]
             if (b.lower().startswith(S2ARM_BID_PREFIX) or e == main) and b.lower() not in skip and not STANDALONE_BID.fullmatch(b.lower())]
+    c.__dict__.setdefault("_s2arm_apps", {})[udid] = apps   # 本次作业里记下（app_version_on 读，推送前不为取版本再列一次设备）
+    return apps
 
 
 def s2arm_owner(c, udid, rec):
@@ -3164,6 +3207,9 @@ PHONE_APP_GONE = "选的这个 S2Arm 不在这台 {0} 上了：点游戏库最�
 def phone_choose_app(c):
     """作业 phoneChooseApp（总控台「选用哪个 S2Arm」，11-20 维护者：玩家自选优先）：请求带 device（UDID）与 bundleId；核实它现在装在这台手机上，
     记进设备记录 chosenBundleId，之后推送 / 总控台都用它，直到它不在了再问。→ {device, bundleId}"""
+    if str(c.r.get("bundleId") or "").startswith("lc:"):
+        import livecontainer
+        return livecontainer.choose(c)
     udid = (c.r.get("device") or "").strip()
     want = (c.r.get("bundleId") or "").strip()
     if not udid or not want:
@@ -3176,6 +3222,8 @@ def phone_choose_app(c):
     if not hit:
         raise Failure(on_device(PHONE_APP_GONE, device_of(c)), code="phone_app_gone")
     rec = {k: v for k, v in rec.items() if k != "pendingChoice"}   # 选好了：推送时记下的「待选」作废
+    rec.pop("liveContainerTarget", None)
+    rec.pop("chosenLCHostId", None)
     layout.save_device(c, udid, dict(rec, chosenBundleId=hit))
     return dict(device=udid, bundleId=hit)
 
@@ -3342,7 +3390,15 @@ def push_game(c, gid, ph, steps=True):
     pack = ios_pack(c, gid)
     rec = layout.load_device(c, ph.key)
     ext = getattr(ph, "external", False)   # 别的工具装的 S2Arm（push_phone）：不查启动器的壳号、不签名、不交身份，推进它自己的包名
-    if not ext:
+    if ext:   # 不查壳号，但比 App 版本（#1842）：接口不兼容拦；只是旧就提示一次，玩家确认（acceptOldApp）后照推
+        old = external_app_outdated(c, ph)
+        if old and old[0] == "phone_app_incompatible":
+            raise Failure(old[1], code="phone_app_incompatible")
+        if old and c.r.get("acceptOldApp") is not True:
+            raise Failure(old[1], code="phone_app_outdated")
+        if old:
+            note(c, f"手机上的 S2Arm 比启动器旧（{getattr(ph, 'app_version', '?')}），玩家确认照推：{old[1]}")   # 非玩家句
+    else:
         if not rec.get("shellId") or not ph.bid:
             raise Failure(SHELL_INSTALL_FIRST, code="shell_install_required")
         if rec["shellId"] != packer.current_shell_id(c):
@@ -3664,6 +3720,11 @@ def push_selected(c):
     每推完一款记一次进度：请求带 resume: true 就从上一轮没推成的（没推到的 + 失败的）接着推；带 gameIds 就开新一轮。
     → {games: [{gameId, ok, code?, message?}], done, failed, remaining}；开关关着 → {enabled: False}"""
     from core import Cancelled
+    if os.name != "nt":
+        import livecontainer
+        if livecontainer.selected(c):
+            with packer_phone_lock(c):
+                return livecontainer.push(c, c.r.get("gameIds") or [])
     state_path = c.private / PUSH_SELECTED
     with packer_phone_lock(c):
         c.begin("找签名账号与 iPhone", 1, 1)
@@ -4162,6 +4223,10 @@ def _install(c):
             return export_app(c, gid)
         shell = ensure_shell_ipa(c)   # 先放 S2Arm.ipa 再出 .s2arm：说明文件按文件夹里有没有 S2Arm.ipa 写「先签好装上」那句
         return dict(export_s2arm(c, gid), shellIpa=str(shell))
+    if os.name != "nt" and chosen_layout(c, gid) != "standalone":
+        import livecontainer
+        if livecontainer.selected(c):
+            return livecontainer.push(c, [gid])
     c.begin("找签名账号与 iPhone", 1, 6)
     if chosen_layout(c, gid) == "standalone":   # 独立 App（一 App 一游戏）：这款自己签一个 App 装上
         return put_app(c, gid, phone_for(c))

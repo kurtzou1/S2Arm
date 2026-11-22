@@ -99,6 +99,7 @@ def main():
     STATE = out.rstrip('/') + '.state.tsv'
     files = []   # (包内路径, 源路径, 字节数, 源 mtime 纳秒, 源 inode, 源 ctime 纳秒)
     ck = {}   # 按全内容进包键的文件：包内路径 → 源路径（沿用要比内容，见文件头）
+    empty_stds = {}   # 空镜像没有文件条目，但核对仍要读取它的根目录元数据
     for name, root in roots:
         if os.path.isfile(root):   # 单个文件：包内路径就是参数里的名字（如 exefs/main.npdm）
             st = os.stat(root); files.append((name, root, st.st_size, st.st_mtime_ns, st.st_ino, st.st_ctime_ns))
@@ -108,6 +109,7 @@ def main():
         #   修改时间 / inode / ctime 取镜像文件的（镜像换了全部重算）；包里放一份镜像克隆 <前缀>.std，不拆成散文件，index.tsv 照旧逐文件记
         tree = romfs_list.scan(root, stat_entries=False); im = tree.image
         spans, ist = (im.files(), os.stat(im.path)) if im is not None else (None, None)
+        if im is not None and not spans: empty_stds[name + '.std'] = im.path
         for d, ds, fs in tree.walk():
             ds.sort()
             for f in sorted(fs):
@@ -127,6 +129,10 @@ def main():
     files = merged; ck = {rel: merged[pos[rel]][1] for rel in ck}
     held = {rel: p[3] for rel, p, *_ in files if isinstance(p, tuple)}   # 从镜像来的文件 → 包里那份镜像（<前缀>.std）的包内路径
     stds = {p[3]: p[0] for _, p, *_ in files if isinstance(p, tuple)}   # 包里那份镜像 → 源镜像
+    stds.update(empty_stds)
+    def empty_fresh(rel, source):
+        target = os.path.join(out, rel)
+        return os.path.isfile(target) and os.path.getsize(target) == os.path.getsize(source) and sha_file(target) == sha_file(source)
     state = {}
     try:
         for l in open(STATE, encoding='utf-8'):
@@ -151,11 +157,13 @@ def main():
     if CHECK:
         try:
             m = json.load(open(os.path.join(out, 'manifest.json'), encoding='utf-8'))
-            ok = m.get('version') == 2 and all(fresh(r, s, t) for r, _, s, t, *_ in files) and \
+            ok = m.get('version') == 2 and all(empty_fresh(r, p) for r, p in empty_stds.items()) and all(fresh(r, s, t) for r, _, s, t, *_ in files) and \
                  m.get('index_sha256') == hashlib.sha256(index_text({r: state[r][2] for r, *_ in files}).encode()).hexdigest()
         except (OSError, ValueError, KeyError): ok = False
         print('资源包已是最新' if ok else '资源包缺或过期'); sys.exit(0 if ok else 1)
     os.makedirs(out, exist_ok=True)
+    for rel, source in empty_stds.items():
+        if not empty_fresh(rel, source): clone(source, os.path.join(out, rel))
     todo = [(rel, p) for rel, p, sz, mt, *_ in files if not fresh(rel, sz, mt)]
     tk = Ticker('资源包', 2 * len(todo))
     copied = {}   # 拷贝时已算出 SHA 的（Windows 克隆不了的那些）：不再回头读源

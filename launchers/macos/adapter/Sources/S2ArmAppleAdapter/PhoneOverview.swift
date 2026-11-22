@@ -8,7 +8,7 @@ public struct PhoneOverview: Equatable {
     public enum SignMode: String { case appleId, devCert, external }
     /// 手机上的 S2Arm 是谁装的（作业 installedBy）：启动器装的 / 别的工具（AltStore、SideStore…）装的；nil = 没装或判不出（旧作业不带这个键也是 nil）
     public enum InstalledBy: String { case launcher, external }
-    public enum GameState: String { case latest, suggested, notPushed, needsData }
+    public enum GameState: String { case latest, suggested, notPushed, needsData, present, unknown, pending }
     /// 同一台手机上装着不止一个 S2Arm 时让玩家选的候选（作业 candidates，install.s2arm_candidates）：byThisLauncher = 这台电脑的启动器装的；
     ///   identityTeam = 这个 S2Arm 导入的签名证书的团队（没导入为 nil）
     public struct Candidate: Equatable {
@@ -16,8 +16,10 @@ public struct PhoneOverview: Equatable {
         public let team: String
         public let byThisLauncher: Bool
         public let identityTeam: String?
-        public init(bundleId: String, team: String, byThisLauncher: Bool, identityTeam: String?) {
+        public let displayName: String?
+        public init(bundleId: String, team: String, byThisLauncher: Bool, identityTeam: String?, displayName: String? = nil) {
             self.bundleId = bundleId; self.team = team; self.byThisLauncher = byThisLauncher; self.identityTeam = identityTeam
+            self.displayName = displayName
         }
         /// 导入的签名证书团队与 App 团队对得上（界面追加「已导入签名证书」）
         public var certImported: Bool { identityTeam.map { !$0.isEmpty && $0 == team } ?? false }
@@ -71,6 +73,8 @@ public struct PhoneOverview: Equatable {
         public var kind: String? = nil
         /// 手机上的 S2Arm 导入了签名证书没有（作业 certImported）；作业不带为 nil，导出确认页再看候选里同包名那一个的 certImported
         public var certImported: Bool? = nil
+        /// 宿主探测失败的实际原因；不能将暂时无法读取当成未安装。
+        public var liveContainerProbeError: String? = nil
         /// 这台的 S2Arm 有没有导入签名证书：作业直给的 > 候选里同包名那一个 > 不知道（nil）
         public var signCertImported: Bool? {
             certImported ?? candidates.first(where: { $0.bundleId == bundleId && !bundleId.isEmpty })?.certImported
@@ -114,6 +118,7 @@ public struct PhoneOverview: Equatable {
             phone.apps = apps
             phone.kind = (p["kind"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             phone.certImported = p["certImported"] as? Bool
+            phone.liveContainerProbeError = p["liveContainerProbeError"] as? String
             return phone
         }
     }
@@ -123,7 +128,7 @@ public struct PhoneOverview: Equatable {
         (v as? [[String: Any]] ?? []).compactMap { c in
             guard let bid = c["bundleId"] as? String, !bid.isEmpty else { return nil }
             return Candidate(bundleId: bid, team: c["team"] as? String ?? "", byThisLauncher: c["byThisLauncher"] as? Bool == true,
-                             identityTeam: (c["identityTeam"] as? String).flatMap { $0.isEmpty ? nil : $0 })
+                             identityTeam: (c["identityTeam"] as? String).flatMap { $0.isEmpty ? nil : $0 }, displayName: c["displayName"] as? String)
         }
     }
 

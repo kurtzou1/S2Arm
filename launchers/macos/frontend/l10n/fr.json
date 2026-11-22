@@ -1727,6 +1727,8 @@
   "s2arm.controller.assignPlayers": "Attribuer les joueurs",
   "s2arm.controller.howPair": "Associer deux / Manette complète",
   "s2arm.controller.howPairKeys": "Appuyez simultanément sur L + R",
+  "s2arm.controller.howOther": "Autres manettes",
+  "s2arm.controller.howOtherKeys": "Rejoignent à la connexion",
   "s2arm.controller.howSingle": "Joy-Con seul",
   "s2arm.controller.howSingleKeys": "Appuyez simultanément sur SL + SR",
   "s2arm.controller.clear": "Effacer",

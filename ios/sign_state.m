@@ -4,11 +4,12 @@
 //   App  identity/app.json（ios/prov_expiry.m 启动时写）：team = 装这个 App 的团队，cert_sha1[] = 包里描述文件 DeveloperCertificates 各张的 sha1
 //   证书 identity/certs.tsv（runtime/src/selfsign.c 每导入成功一张记一行：sha1、团队、来源、时刻）＋ identity/current.json（现在用哪张；老数据只有它，也算一张）
 //   程序 <根>/<号>/program/catalogue.json：signer{team, cert_sha1} = 手机签过；没有 signer 时 team = 电脑按哪个团队签的（null = 没签，起局时手机签）
-// 「能用的证书」= 团队与 App 相同，且 sha1 在 App 描述文件的证书里（列表读不到时不看这一条）。描述文件里没有它 = 装 App 用的证书已换或吊销
+// 「能用的证书」= 钥匙串里有它的签名身份、团队与 App 相同，且 sha1 在 App 描述文件的证书里（列表读不到时不看这一条）。描述文件里没有它 = 装 App 用的证书已换或吊销
 //   （另一台电脑上的 AltServer 刷新过），用它签的程序系统不认
 #import <Foundation/Foundation.h>
 #include <string.h>
 #include <time.h>
+#include <sys/stat.h>
 
 enum { S2A_SIGN_OK = 0, S2A_SIGN_NO_CERT = 1, S2A_SIGN_OTHER_TEAM = 2, S2A_SIGN_REPLACED = 3, S2A_SIGN_OLD_FORMAT = 4, S2A_SIGN_COMPUTER = 5 };
 
@@ -83,13 +84,41 @@ static int lc_usable(void) {
 
 static BOOL usable(NSDictionary *r, app_t app) { return [r[@"team"] isEqualToString:app.team] && (!app.certs.count || [app.certs containsObject:r[@"sha"]]); }
 
-// 挑起局签名用哪张：0 = 有能用的（sha / team 带回最新一张能用的）；1 = 手机上没有证书；2 = 只有别的团队的；3 = 有同团队的但都不在描述文件里（已换 / 吊销）。
+// 登记表里的这张在钥匙串里还有没有签名身份（私钥 + 证书）。没有就不算手机上的证书（11-22 D-4GCZ：current.json / certs.tsv 记着 c74b6e9c…，
+//   钥匙串里却没有它的身份，起局重签必失败〔ios/program_resign.m「钥匙串里没有证书 … 的签名身份」〕；原先挑证书只比团队与描述文件，
+//   判成「有能用的证书、重签了仍被拒」= 5「只能回电脑重装」，玩家照做两遍无效——缺的是手机上的证书，该判 1 让玩家重新导入）。
+//   游戏库每款判一次：结果按登记表与 current.json 的修改时间缓存（导入证书必改登记表，缓存随之作废）
+int s2a_identity_keychain(const char *sha, SecKeyRef *key, SecCertificateRef *cert);   // runtime/src/selfsign.c
+static int kc_has_real(const char *sha) {
+    SecKeyRef k = NULL; SecCertificateRef c = NULL; int ok = !s2a_identity_keychain(sha, &k, &c) && k && c;
+    if (k) CFRelease(k);
+    if (c) CFRelease(c);
+    return ok;
+}
+static int (*g_kc_has)(const char *) = kc_has_real;
+#ifdef S2A_UNIT_TEST
+void s2a_sign_state_test_keychain(int (*f)(const char *)) { g_kc_has = f ? f : kc_has_real; }   // 单测换掉钥匙串
+#endif
+static double mtime(NSString *p) { struct stat st; return stat(p.fileSystemRepresentation, &st) ? 0 : st.st_mtimespec.tv_sec + st.st_mtimespec.tv_nsec / 1e9; }
+static BOOL in_keychain(const char *home, NSString *sha) {
+    static NSMutableDictionary<NSString *, NSNumber *> *seen; static NSString *stamp;
+    NSString *s = [NSString stringWithFormat:@"%s|%.6f|%.6f|%p", home, mtime([idir(home) stringByAppendingPathComponent:@"certs.tsv"]),
+                   mtime([idir(home) stringByAppendingPathComponent:@"current.json"]), (void *)g_kc_has];
+    @synchronized (NSDictionary.class) {
+        if (![s isEqualToString:stamp]) { seen = [NSMutableDictionary dictionary]; stamp = s; }
+        NSNumber *v = seen[sha]; if (!v) seen[sha] = v = @(g_kc_has(sha.UTF8String) != 0);
+        return v.boolValue;
+    }
+}
+
+// 挑起局签名用哪张（只看钥匙串里还有签名身份的那几张）：0 = 有能用的（sha / team 带回最新一张能用的）；1 = 手机上没有证书；2 = 只有别的团队的；3 = 有同团队的但都不在描述文件里（已换 / 吊销）。
 //   App 团队读不到：最新一张就算能用（判不了不拦）
 int s2a_cert_pick(const char *home, char *sha, size_t sha_n, char *team, size_t team_n) {
     @autoreleasepool {
         if (sha && sha_n) sha[0] = 0; if (team && team_n) team[0] = 0;
         if (!home) return 1;
-        NSArray<NSDictionary *> *rows = certs_read(home); if (!rows.count) return 1;
+        NSArray<NSDictionary *> *rows = [certs_read(home) filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSDictionary *r, NSDictionary *b) { (void)b; return in_keychain(home, r[@"sha"]); }]];
+        if (!rows.count) return 1;   // 登记过、钥匙串里却没有身份的不算（D-4GCZ）：一张都不剩 = 手机上没有证书
         app_t app = app_read(home); NSDictionary *pick = nil; BOOL same_team = NO;
         for (NSDictionary *r in rows) {
             if (!app.team || usable(r, app)) pick = r;

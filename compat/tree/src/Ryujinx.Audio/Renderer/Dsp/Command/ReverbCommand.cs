@@ -278,7 +278,7 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
 
             if (IsEffectEnabled)
             {
-                if (Parameter.Status == UsageState.Invalid)
+                if (Parameter.Status == UsageState.Invalid || state.FdnDelayLines == null)   // S2Arm：DSP 状态没建过（即时存档恢复 / 进程内重启后宿主侧效果器状态是空的，游戏内存里的参数状态却已是「已更新」）也按新建处理，否则首个采样读 null 数组崩（D-WP4X）
                 {
                     state = new ReverbState(ref _parameter, WorkBuffer, IsLongSizePreDelaySupported);
                 }

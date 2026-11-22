@@ -1491,6 +1491,8 @@ static int cmd_arena_at_snapshot(void) {
 static void cmd_arena_reserve(void) {   // 占窗口那一步在围栏前调；窗口没占到提前返回的路径由 vawin_boot 补调（只占一次）
     static int done; if (done++) return;
 #if !TARGET_OS_OSX
+    // 开关读数放在最前（11-22 0.6.8 候选冒烟 ③f）：下面「窗口外 / 宿主段底部」两条放法都提前返回，原先这行只在通用路径打，快照真开着的局反而没有读数
+    LOG("即时存档：开关 %s（依据 %s）", s2a_snap_mode() ? "开" : "关", s2a_snap_source());
     // 即时存档（不录帧）、窗口放不下标准布局：占窗口时已在宿主段最底部多留了命令记录区（g_snap_below，见 vawin_reserve），这里就地占上。
     //   不取「最高空洞」：那时最高空洞就是窗口下方的宿主保留段，1 GB + 2 GB 正好把它占满，Metal 没处放着色器库、首帧前 NSMallocException
     //   （一款大游戏的 iPhone 实测：「下方 3072 MB 留宿主」与「0x7000000000 +1024 MB、其后 +2 GB」严丝合缝）。也不能从窗口顶端切：窗口之上是别名区伸出段，
@@ -1537,7 +1539,6 @@ static void cmd_arena_reserve(void) {   // 占窗口那一步在围栏前调；�
     //   iOS 地址空间小（上限 2^39），虚拟池区按空洞剩余给，最多 16 GB；占不到就照旧不占（块回到 mmap(NULL)，回放可能放不回）
     //   即时存档：存档 / 恢复同样要命令记录区（命令句柄落点固定）；两次进程起来区落在同一地址才放得回（图形恢复核基址，不同即拒绝）
     const char *rec = getenv("S2A_FRAME_REC");
-    LOG("即时存档：开关 %s（依据 %s）", s2a_snap_mode() ? "开" : "关", s2a_snap_source());
     if (!(rec && *rec) && !s2a_snap_mode()) return;
     // 虚拟池区：帧录按空洞剩余给，最多 16 GB（Mac 回放要把整局的虚拟池放回原地址）；只为即时存档（不录帧）给 2 GB，同放不下标准布局时的两条放法（vawin_reserve）。
     //   11-21 #f0490a（3 台 iPad、iOS 18、空洞 52224 MB、一款要 32824 MB 的游戏）：存档也按 16 GB 给，命令记录区 + 15 GB 正好占掉窗口上方整段 16 GB 空洞，

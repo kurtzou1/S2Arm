@@ -137,9 +137,9 @@ int main(int argc, char **argv) {
       { uint64_t s2a_span_seed(uint64_t); uint64_t sa = s2a_span_seed(strtoull(A, NULL, 16)), want = sa ? (sa > 18446744073ull ? sa : 18446744073ull) : 0;
         ck(s2a_window_span_learned() == want, "⑦ 容器 {A, B}：A 本机没记录 → 有种子表值就按它与 B 的 18446744073 取大，没有就整容器跨度不知道 = 0（11-21 前拿 A 的布局需求 32770 MB 顶）"); }
       snprintf(f, sizeof f, "%s/Documents/wire", home); mkdir(f, 0755); snprintf(f, sizeof f, "%s/Documents/wire/%s", home, A); mkdir(f, 0755);
-      snprintf(f, sizeof f, "%s/Documents/wire/%s/span_peak", home, A); put(f, "2000000000\n", 11);
+      snprintf(f, sizeof f, "%s/Documents/wire/%s/span_peak", home, A); put(f, "549755813887\n", 13);   // 512 GB：比种子表任何一款都大（829a4d0f9 起占位号 A 进了种子表，31296 MB），取大后只能是它 = 旧位置确实被读到
       ctr(b, tmp);
-      ck(s2a_window_span_learned() == 18446744073ull, "⑦ A 只有旧位置（单款包时代）的记录 2000000000 也认（不再按需求 32770 MB 算）：{A, B} 取最大 18446744073");
+      ck(s2a_window_span_learned() == 549755813887ull, "⑦ A 只有旧位置（单款包时代）的记录 549755813887 也认：{A, B} 取最大 549755813887（与种子表内容无关）");
       if (oh) { setenv("HOME", oh, 1); free(oh); } snprintf(g_home, sizeof g_home, "%s/nohome", tmp); }
     // ⑧ 通用壳：程序只在程序包里（<家目录>/Library/Application Support/S2Arm/games/<号>/program/：catalogue.json + Games/<号>/ + 镜像包），App 包里没有这款。
     //   构造期要把它算进来，且同一款两边都有时取程序包那份（与起局 s2a_launch_ctx_resolve_game 同一取法）。期望按 ① 的手算：D 75876、B 69944、A 32770

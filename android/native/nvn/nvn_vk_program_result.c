@@ -502,6 +502,58 @@ static int parse_graphics(const uint8_t *bytes, size_t length, struct fd_program
     return 0;
 }
 
+// SPIR-V 里某种存储类（1 Input / 3 Output）的用户接口变量占的 Location 位（位 i = Location i）。0 = 认得全；-1 = 认不全。
+//   内建（变量自己带 BuiltIn，或指向的结构体成员带 BuiltIn，如 gl_PerVertex）不算用户接口。
+static int spv_io_locations(const uint8_t *spv, size_t bytes, uint32_t storage, uint64_t *mask) {
+    enum { OP_TYPE_MATRIX = 24, OP_TYPE_ARRAY = 28, OP_TYPE_RTARRAY = 29, OP_TYPE_STRUCT = 30, OP_TYPE_POINTER = 32,
+           OP_VARIABLE = 59, OP_DECORATE = 71, OP_MEMBER_DECORATE = 72, DEC_BUILTIN = 11, DEC_LOCATION = 30 };
+    *mask = 0;
+    if (!spv || bytes < 20 || bytes % 4) return -1;
+    const size_t n = bytes / 4;
+    uint32_t w0; memcpy(&w0, spv, 4);
+    if (w0 != 0x07230203u) return -1;
+    uint32_t bound; memcpy(&bound, spv + 12, 4);
+    if (!bound || bound > (1u << 22)) return -1;
+    // 每个 id 一个字节的性质：位 0 BuiltIn，位 1 带内建成员的结构体，位 2 数组 / 矩阵 / 结构体（复合接口），位 3 有 Location；loc 存位置号
+    uint8_t *f = calloc(bound, 1); uint32_t *loc = calloc(bound, sizeof *loc); uint32_t *pointee = calloc(bound, sizeof *pointee);
+    if (!f || !loc || !pointee) { free(f); free(loc); free(pointee); return -1; }
+    int rc = 0;
+    for (size_t i = 5; i < n;) {
+        uint32_t ins; memcpy(&ins, spv + 4 * i, 4);
+        uint32_t wc = ins >> 16, op = ins & 0xffffu;
+        if (!wc || i + wc > n) { rc = -1; break; }
+        uint32_t a[4] = {0, 0, 0, 0};
+        for (uint32_t k = 1; k < wc && k <= 4; k++) memcpy(&a[k - 1], spv + 4 * (i + k), 4);
+        if (op == OP_DECORATE && wc >= 3 && a[0] < bound) {
+            if (a[1] == DEC_BUILTIN) f[a[0]] |= 1;
+            else if (a[1] == DEC_LOCATION && wc >= 4) { f[a[0]] |= 8; loc[a[0]] = a[2]; }
+        } else if (op == OP_MEMBER_DECORATE && wc >= 4 && a[0] < bound && a[2] == DEC_BUILTIN) f[a[0]] |= 2;
+        else if ((op == OP_TYPE_ARRAY || op == OP_TYPE_RTARRAY) && wc >= 3 && a[0] < bound && a[1] < bound) {
+            f[a[0]] |= 4 | (f[a[1]] & 2); pointee[a[0]] = a[1];
+        } else if ((op == OP_TYPE_STRUCT || op == OP_TYPE_MATRIX) && wc >= 2 && a[0] < bound) f[a[0]] |= 4;
+        else if (op == OP_TYPE_POINTER && wc >= 4 && a[0] < bound && a[2] < bound) pointee[a[0]] = a[2];
+        else if (op == OP_VARIABLE && wc >= 4 && a[0] < bound && a[1] < bound && a[2] == storage) {
+            const uint32_t var = a[1], ty = pointee[a[0]];
+            if (f[var] & 1) { i += wc; continue; }                          // 内建变量
+            if (ty && ty < bound && (f[ty] & 2)) { i += wc; continue; }    // 内建块（gl_PerVertex，含其数组）
+            if (!(f[var] & 8) || loc[var] >= 64 || (ty && ty < bound && (f[ty] & 4))) { rc = -1; break; }   // 没位置号 / 超范围 / 复合接口：认不全
+            *mask |= 1ull << loc[var];
+        }
+        i += wc;
+    }
+    free(f); free(loc); free(pointee);
+    return rc;
+}
+
+int nvn_vk_spirv_link_ok(const uint8_t *producer, size_t producer_bytes, const uint8_t *fragment, size_t fragment_bytes, uint64_t *missing) {
+    uint64_t out = 0, in = 0;
+    if (missing) *missing = 0;
+    if (spv_io_locations(producer, producer_bytes, 3, &out) || spv_io_locations(fragment, fragment_bytes, 1, &in)) return 1;
+    if (!(in & ~out)) return 1;
+    if (missing) *missing = in & ~out;
+    return 0;
+}
+
 void nvn_vk_program_free(struct fd_program *p) {
     for (int i = 0; i < FD_MAX_STAGES; i++) { free(p->stage[i].spirv); p->stage[i].spirv = NULL; }
 }

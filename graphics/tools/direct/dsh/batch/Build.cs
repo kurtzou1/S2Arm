@@ -672,15 +672,16 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
     //   按累计字节切批（缺省 256 MB，S2A_C1CB_CHUNK_MB，0 = 每支一批），一批跑完删目录，临时盘峰值 = 一批。原缺省 4 GB 对玩家等于不切：怪猎崛起后台遍
     //   整份 2.08 GB 一次落盘、正叠在编批库的盘峰值上（v0.2.4 出包空间）；后台遍与编批库并发，多起几次子进程不进墙钟
     //   进度（11-20 010015100B514000：后台遍比编批库 / 两类变体晚完 85 秒，「等两张表」期间进度不动）：给了 tick = 阶段名，子进程每算完一支按全遍累计计一次
-    static Dictionary<string, (string C1, string Row)> C1CbChild(IReadOnlyList<string> names, string tag, Dictionary<string, string> sigs, string tick = null)
+    //   tickBase / tickTotal：同一段进度里此前已计的支数与全段支数（后台遍先查缓存仓、命中的已计，子进程只算没命中的，接着计到全遍支数）
+    static Dictionary<string, (string C1, string Row)> C1CbChild(IReadOnlyList<string> names, string tag, Dictionary<string, string> sigs, string tick = null, int tickBase = 0, int tickTotal = -1)
     {
         var res = new Dictionary<string, (string C1, string Row)>(StringComparer.Ordinal);
         long limit = long.TryParse(Environment.GetEnvironmentVariable("S2A_C1CB_CHUNK_MB"), out var mb) && mb >= 0 ? mb * 1000000 : 256000000L;
         var cur = new List<string>(); long bytes = 0; int part = 0;
-        int done = 0; using var tk = tick == null ? null : new Ticker(tick, names.Count, 0, activity: false);
-        void Flush() { if (cur.Count == 0) return; foreach (var kv in C1CbChunk(cur, tag + part++, sigs, tick == null ? null : new[] { tick, done.ToString(), names.Count.ToString() })) res[kv.Key] = kv.Value; done += cur.Count; cur = new List<string>(); bytes = 0; }
+        int total = tickTotal < 0 ? names.Count : tickTotal, done = tickBase; using var tk = tick == null ? null : new Ticker(tick, total, done, activity: false);
+        void Flush() { if (cur.Count == 0) return; foreach (var kv in C1CbChunk(cur, tag + part++, sigs, tick == null ? null : new[] { tick, done.ToString(), total.ToString() })) res[kv.Key] = kv.Value; done += cur.Count; cur = new List<string>(); bytes = 0; }
         foreach (var n in names) { var m = MAC.Get(n); if (m == null) continue; if (cur.Count > 0 && bytes + m.Length > limit) Flush(); cur.Add(n); bytes += m.Length; }
-        Flush(); tk?.Step(names.Count);   // 收满（没有 Mac 侧产物的那几支不进子进程）
+        Flush(); tk?.Step(total);   // 收满（没有 Mac 侧产物的那几支不进子进程）
         return res;
     }
     static Dictionary<string, (string C1, string Row)> C1CbChunk(IReadOnlyList<string> names, string tag, Dictionary<string, string> sigs, string[] tick)
@@ -713,16 +714,51 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
         finally { try { Directory.Delete(dir, true); } catch { } }
     }
     static List<string> C1CbNames() => MAC.Names().Where(n => n.EndsWith(".metal", StringComparison.Ordinal)).OrderBy(n => n, StringComparer.Ordinal).ToList();   // = C1Cb.BothJobs 的任务与次序
+    // 两张表逐支的结果进缓存仓（11-22「更新这款」：41984 支的后台遍 903 秒，是更新里最长的一步；翻译器一改只动 70 支，其余每次照算）：
+    //   一支的两行只由它的键名、MSL 与反射（C1Cb.SigOf）和 C1Cb 的算法决定，键 = c1cb/<算法指纹>/<键名>/<签名>。算法指纹取 C1Cb 及其嵌套类型全部方法体的 IL：
+    //   改了两张表的算法才变（整份重算），出包编排等别处代码改了不变；链号 / 翻译器指纹都不覆盖 batch/*.cs，不能拿它们当版本
+    // 两张表的算法指纹：C1Cb.cs 源码（编进程序的嵌入资源 c1cb.source）的 sha256。11-22 前取 C1Cb 各方法的 IL 字节，IL 里的元数据编号随整个程序集变，
+    //   别的文件加几行（发版换新工具同理）指纹就变、缓存仓全不命中（热仓实测 41984 支命中 0）。两张表只由 C1Cb.cs 自己的代码算（外部只用到异常类型与进度条）
+    static string _c1cbFp;
+    static string C1CbFp()
+    {
+        if (_c1cbFp != null) return _c1cbFp;
+        using var s = typeof(Build).Assembly.GetManifestResourceStream("c1cb.source") ?? throw new InvalidDataException("dsh_batch: embedded resource c1cb.source missing (dsh_batch.csproj)");
+        return _c1cbFp = Convert.ToHexString(SHA256.HashData(s)).ToLowerInvariant()[..16];
+    }
+    internal static string C1CbFpPublic() => C1CbFp();
+    static string C1CbKey(string name, string sig) => "c1cb/" + C1CbFp() + "/" + name + "/" + sig;   // 键名也进键：SigOf 不含它，行里带它、算法按名字后缀分支
+    static byte[] Bytes(string s) => s == null ? null : Encoding.UTF8.GetBytes(s);
+    const string C1CbTick = "直连库·两张表";
     static void C1CbFill()
     {
         double t0 = Clock.Elapsed.TotalSeconds;
         var names = C1CbNames(); var sigs = new Dictionary<string, string>(StringComparer.Ordinal);
-        Dictionary<string, (string C1, string Row)> r;
+        var r = new Dictionary<string, (string C1, string Row)>(StringComparer.Ordinal); var todo = new List<string>();
+        // 查缓存仓也计进「直连库·两张表」（11-22 0400486024DEC000 热仓：41984 支全命中，查仓 225 秒，原先这段进度不动）
+        using (var tk = new Ticker(C1CbTick, names.Count, 0, activity: false))
+        foreach (var n in names)
+        {
+            var m = MAC.Get(n); if (m == null) continue;
+            var sig = sigs[n] = C1Cb.SigOf(n, m, MAC.Get(C1CbJson(n)));
+            var e = Cas != null ? Store.Get(C1CbKey(n, sig)) : null;
+            if (e != null && e.ContainsKey("ok")) { r[n] = (e.TryGetValue("c1", out var c1) ? Encoding.UTF8.GetString(c1) : null, e.TryGetValue("row", out var row) ? Encoding.UTF8.GetString(row) : null); tk.Step(); }
+            else todo.Add(n);
+        }
+        Count("c1cb cached", r.Count);
         // 后台遍只是预算，失败不算整次失败（同 Python 打黄字、收尾全算）：快照置空，收尾遍按最终产物重算（合入线 11-02 对照 #4）
-        try { r = C1CbChild(names, "bg", sigs, "直连库·两张表"); }
+        try
+        {
+            var got = C1CbChild(todo, "bg", null, C1CbTick, tickBase: r.Count, tickTotal: names.Count);
+            foreach (var (n, v) in got)
+            {
+                r[n] = v;
+                if (Cas != null) Store.Put(C1CbKey(n, sigs[n]), new Dictionary<string, byte[]> { ["ok"] = new byte[] { 1 }, ["c1"] = Bytes(v.C1), ["row"] = Bytes(v.Row) }.Where(kv => kv.Value != null).ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.Ordinal));
+            }
+        }
         catch (Exception e) { C1CbSnap = null; Say($"[YELLOW] c1 / cb tables: the background pass failed, the final pass computes them all: {Trunc(e.Message, 300)}"); return; }
         C1CbSnap = names.Where(r.ContainsKey).ToDictionary(n => n, n => (sigs[n], r[n]), StringComparer.Ordinal);
-        Say($"[分段] 两张表后台遍：{names.Count} 支，第 {t0:F1} 秒起、用 {Clock.Elapsed.TotalSeconds - t0:F1} 秒");
+        Say($"[分段] 两张表后台遍：{names.Count} 支（缓存仓里有 {names.Count - todo.Count} 支，算了 {todo.Count} 支），第 {t0:F1} 秒起、用 {Clock.Elapsed.TotalSeconds - t0:F1} 秒");
     }
     static void C1CbFinal()
     {
@@ -1119,7 +1155,7 @@ sealed class Ticker : IDisposable
         {
             if (disposed) return;
             if (!force && now - last < 1) return;
-            last = now; File.AppendAllText(path, $"{now}\t{stage}\t{Math.Min(done, total)}\t{total}\n");
+            last = now; Append(path, $"{now}\t{stage}\t{Math.Min(done, total)}\t{total}\n");
         }
     }
     void PublishActivity(bool ending)
@@ -1132,20 +1168,58 @@ sealed class Ticker : IDisposable
             // so an idle/deadlocked child cannot keep nostall alive by writing its own heartbeat.
             var data = new DshActivity(schema: 1, pid: Environment.ProcessId, stage: stage, target: Build.Jobs,
                 pool: Build.Jobs * 2, state: ending ? "ended" : "active");   // 具名 record + 源码生成（DshActivity.cs）：dsh_batch 是 NativeAOT 单文件，没有反射序列化
-            try { File.AppendAllText(path, "#dsh_activity\t" + System.Text.Json.JsonSerializer.Serialize(data, DshActivityJson.Default.DshActivity) + "\n"); }
-            catch (IOException) { }   // Optional telemetry must not change compilation results.
-            catch (UnauthorizedAccessException) { }
+            Append(path, "#dsh_activity\t" + System.Text.Json.JsonSerializer.Serialize(data, DshActivityJson.Default.DshActivity) + "\n");   // Optional telemetry must not change compilation results.
         }
     }
     public void Dispose()
     {
         lock (this) { if (disposed) return; disposed = true; PublishActivity(true); }
     }
+    // 进度文件同时有好几个写者：本进程里并跑的几个 Ticker（主段与两张表这类旁路段）、接力计数的子进程（dsh_batch --c1cb --tick）、父进程的 Python（tools/progress.py）。
+    //   File.AppendAllText 只给别人留读共享（FileShare.Read）：Windows 上只要另一个句柄开着写，这里就抛 IOException「being used by another process」，
+    //   没人接住 → dsh_batch 退出码 -1、整次出包失败（#2034，0.6.7 时之笛 Windows 每次 88%）。Mac 没有强制共享锁，所以只在 Windows 出。
+    //   改为允许别人同时读写 / 删除地追加，进程内一把锁串起来（一行一次写完，不交错）；仍写不进（被占、盘满、没权限）就重试两次后丢这一行：进度少一行不该让出包失败
+    static readonly object AppendLock = new();
+    internal static void Append(string path, string line)
+    {
+        var bytes = System.Text.Encoding.UTF8.GetBytes(line);
+        lock (AppendLock)
+            for (int i = 0; i < 3; i++)
+            {
+                try
+                {
+                    using var f = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
+                    f.Write(bytes, 0, bytes.Length); return;
+                }
+                catch (IOException) { if (i < 2) Thread.Sleep(20); }
+                catch (UnauthorizedAccessException) { return; }
+            }
+    }
 }
 
 class CompileError : Exception { public CompileError(string m) : base(m) { } }
 /// <summary>编译器超过限时没结束（Metal.Limit），已整组杀掉</summary>
 sealed class CompileTimeout : CompileError { public CompileTimeout(string m) : base(m) { } }
+
+/// <summary>Windows 作业对象（平台例外：只在 Windows 上建）：把起的编译器放进去，到限时终止整个作业，连它起的子孙（本体退出后父进程号找不回来的孤儿）一起停。
+/// 其他平台 Adopt 回 IntPtr.Zero，调用方照旧按进程树杀。建不出 / 放不进（进程已退出、所在作业不许嵌套）也回 Zero，退回原做法</summary>
+static class WinJob
+{
+    [DllImport("kernel32", SetLastError = true)] static extern IntPtr CreateJobObjectW(IntPtr attributes, IntPtr name);   // 平台例外：Windows 作业对象
+    [DllImport("kernel32", SetLastError = true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);   // 平台例外：Windows 作业对象
+    [DllImport("kernel32", SetLastError = true)] static extern bool TerminateJobObject(IntPtr job, uint exitCode);   // 平台例外：Windows 作业对象
+    [DllImport("kernel32", SetLastError = true)] static extern bool CloseHandle(IntPtr handle);   // 平台例外：Windows 作业对象
+    public static IntPtr Adopt(Process p)
+    {
+        if (!OperatingSystem.IsWindows()) return IntPtr.Zero;   // 平台例外：Windows 作业对象
+        IntPtr job = CreateJobObjectW(IntPtr.Zero, IntPtr.Zero);
+        if (job == IntPtr.Zero) return IntPtr.Zero;
+        try { if (AssignProcessToJobObject(job, p.Handle)) return job; } catch (InvalidOperationException) { }
+        CloseHandle(job); return IntPtr.Zero;
+    }
+    public static void Kill(IntPtr job) { if (job != IntPtr.Zero) TerminateJobObject(job, 1); }
+    public static void Close(IntPtr job) { if (job != IntPtr.Zero) CloseHandle(job); }
+}
 
 /// <summary>Metal 编译（同原 dmsh_mtlcache.py：按「编译约定 + 编译器身份 + MSL」内容寻址；并发闸限同时在编的路数；编不过先查环境、再重试一次）</summary>
 static class Metal
@@ -1394,10 +1468,28 @@ static class Metal
         if (WinBin != null && args.Any(WinUnsafe)) { args = WinRelative(args, Work); psi.WorkingDirectory = Work; }
         foreach (var x in args) psi.ArgumentList.Add(x);
         using var p = Process.Start(psi);
-        bool killed = false; string err;
-        using (new Timer(_ => { try { if (!p.HasExited) { p.Kill(entireProcessTree: true); killed = true; } } catch { } }, null, limitS * 1000L, Timeout.Infinite))   // 杀整棵树：stderr 管道被子孙进程拿着时 ReadToEnd 才能返回
-        { err = p.StandardError.ReadToEnd(); p.StandardError.Dispose(); p.WaitForExit(); }   // 显式关管道：Process.Dispose 不关重定向的流，每次漏一个描述符等 GC（实测 1000 次 25→1059），mk8d 编到上限 Too many open files
-        if (killed) throw TimedOut(a, limitS);
+        // 到限时停的是编译器起的整组进程，不只看本体还在不在（同 macOS Spawn.Run 杀整个进程组）。D-PD33（Windows 0.6.7，0100ABF008968000）：编批库 600 秒整棵进程树
+        //   CPU / 读写都不涨、在跑的 metal 进程 0 个，看门狗停掉出包。原先限时器只在本体没退出时杀进程树：本体已退、它起的子进程还拿着 stderr 管道时，
+        //   ReadToEnd 等不到结束，限时器又因本体已退不动手，这个编译线程连同它占的闸位永远挂住；孤儿子进程按父进程号也找不回来。
+        //   Windows 上起完就把它放进一个作业对象（WinJob），到限时终止整个作业——之后它起的子孙都在作业里，本体退没退都停得掉。
+        //   本体已正常退出、只是管道被子孙拿着到限时：照本体的退出码交回（编成就是编成），打一行黄字（计数），不当这一支超时
+        var job = WinJob.Adopt(p);
+        int expired = 0; bool alive = false; string err;
+        using (var tm = new Timer(_ =>
+        {
+            if (Interlocked.Exchange(ref expired, 1) != 0) return;
+            try { alive = !p.HasExited; } catch { }
+            if (job != IntPtr.Zero) WinJob.Kill(job);
+            else if (alive) try { p.Kill(entireProcessTree: true); } catch { }
+        }, null, limitS * 1000L, Timeout.Infinite))
+        {
+            err = p.StandardError.ReadToEnd(); p.StandardError.Dispose(); p.WaitForExit();   // 显式关管道：Process.Dispose 不关重定向的流，每次漏一个描述符等 GC（实测 1000 次 25→1059），mk8d 编到上限 Too many open files
+            using var done = new ManualResetEvent(false); tm.Dispose(done); done.WaitOne();   // 等可能正在跑的回调跑完，再关作业句柄
+        }
+        WinJob.Close(job);
+        if (expired == 1 && alive) throw TimedOut(a, limitS);
+        if (expired == 1 && St.AddOrUpdate("metal pipe held", 1, (_, v) => v + 1) == 1)
+            Note($"🟡 {Path.GetFileName(a[0])} 已退出，它起的子进程拿着输出管道到 {limitS} 秒限时，已连同整组停掉，按退出码 {p.ExitCode} 交回（之后同类只计数，见汇总 metal pipe held）");
         return (p.ExitCode, err);
     }
     static CompileTimeout TimedOut(string[] a, int limitS) => new($"metal timeout: {Path.GetFileName(a[0])} 超过 {limitS} 秒没结束，已终止（{Path.GetFileName(a.FirstOrDefault(x => x.EndsWith(".metal", StringComparison.Ordinal) || x.EndsWith(".air", StringComparison.Ordinal)) ?? "")}）");

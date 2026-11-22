@@ -3872,6 +3872,18 @@
   "en": "The task disk has insufficient space."
  },
  {
+  "source": "这块盘读写出错",
+  "en": "This drive had a read/write error"
+ },
+ {
+  "source": "这块盘读写出错：系统报告硬件或连接故障。",
+  "en": "This drive had a read/write error: the system reported a hardware or connection fault."
+ },
+ {
+  "source": "这块盘读写出了错（硬件或连接问题）：插稳数据线、换个接口，或用系统自带的磁盘检查工具查一下这块盘；也可以把游戏库搬到别的盘再试。存档和已出好的版本不受影响。",
+  "en": "This drive had a read/write error (hardware or connection problem): reseat the cable, try another port, or check the drive with the system's disk check tool; you can also move the game library to another drive and try again. Your saves and finished builds are not affected."
+ },
+ {
   "source": "文件或目录不可访问或不可写。",
   "en": "A file or folder cannot be accessed or written."
  },
@@ -10696,6 +10708,18 @@
   "en": "Windows Mandatory ASLR is on: the packing tools can't start child processes."
  },
  {
+  "source": "出包卡住了",
+  "en": "Export got stuck"
+ },
+ {
+  "source": "出包卡住了：有一步很久没有任何进展，S2Arm 已把它停下。",
+  "en": "Export got stuck: one step made no progress for a long time, so S2Arm stopped it."
+ },
+ {
+  "source": "点「重试」，已完成的阶段会核对后跳过；同一步反复卡住就导出诊断包发给我们，并关掉其他占内存的程序再试。",
+  "en": "Click Retry; finished stages are checked and skipped. If the same step keeps getting stuck, export a diagnostic package and send it to us, and close other memory-hungry apps before trying again."
+ },
+ {
   "source": "打开「Windows 安全中心 → 应用和浏览器控制 → 漏洞利用保护设置 → 系统设置」，把「强制映像随机化（强制性 ASLR）」改回「使用默认值（关）」，再打一次包。",
   "en": "Open Windows Security → App & browser control → Exploit protection settings → System settings, set \"Force randomization for images (Mandatory ASLR)\" back to \"Use default (Off)\", then package again."
  },
@@ -10910,5 +10934,93 @@
  {
   "source": "备份手机上各款的存档",
   "en": "Backing up saves for the games on the device"
+ },
+ {
+  "source": "iPhone 已锁屏，宿主文件通道无法准备；请解锁手机后重试。",
+  "en": "The iPhone is locked, so the host file channel can't be prepared. Unlock the phone and try again."
+ },
+ {
+  "source": "LiveContainer 文件访问失败：",
+  "en": "LiveContainer file access failed: "
+ },
+ {
+  "source": "选的 LiveContainer 内部 S2Arm 已不在这台设备上，请重新选择。",
+  "en": "The S2Arm you chose inside LiveContainer is no longer on this device. Choose again."
+ },
+ {
+  "source": "请先选择这台手机内要使用的 S2Arm 容器。",
+  "en": "First choose which S2Arm container on this phone to use."
+ },
+ {
+  "source": "LiveContainer 内部 S2Arm 容器已改变，请重新选择设备。",
+  "en": "The S2Arm container inside LiveContainer has changed. Choose the device again."
+ },
+ {
+  "source": "S2Arm 还没建立导入目录，请在手机上打开它的游戏库后重试。",
+  "en": "S2Arm hasn't created its import folder yet. Open its game library on the phone, then try again."
+ },
+ {
+  "source": "上次推送的设备或容器已改变，请重新选择游戏后推送。",
+  "en": "The device or container from the last push has changed. Choose the game again, then push."
+ },
+ {
+  "source": "游戏号无效，无法定位要推送的游戏。",
+  "en": "The game ID is invalid, so the game to push can't be found."
+ },
+ {
+  "source": "准备推送到 LiveContainer 内部 S2Arm",
+  "en": "Preparing to push to S2Arm inside LiveContainer"
+ },
+ {
+  "source": "正在推送到 LiveContainer：",
+  "en": "Pushing to LiveContainer: "
+ },
+ {
+  "source": "正在同步 Mod：",
+  "en": "Syncing mods: "
+ },
+ {
+  "source": "文件已发送到 LiveContainer 内部 S2Arm；回到游戏库完成导入，Mod 下次启动游戏时生效。",
+  "en": "Files sent to S2Arm inside LiveContainer. Go back to its game library to finish importing; mods take effect the next time you start the game."
+ },
+ {
+  "source": "手机上的游戏状态文件读不懂，请打开 S2Arm 游戏库后重试。",
+  "en": "The game status file on the phone can't be read. Open the S2Arm game library, then try again."
+ },
+ {
+  "source": "手机上的游戏状态格式暂不支持，请打开 S2Arm 游戏库后重试。",
+  "en": "The game status format on the phone isn't supported yet. Open the S2Arm game library, then try again."
+ },
+ {
+  "source": "手机上的游戏状态记录不完整，请打开 S2Arm 游戏库后重试。",
+  "en": "The game status record on the phone is incomplete. Open the S2Arm game library, then try again."
+ },
+ {
+  "source": "文件已发送，正在等待手机游戏库确认导入。",
+  "en": "Files sent. Waiting for the phone's game library to confirm the import."
+ },
+ {
+  "source": "这台 {0} 上的 S2Arm 是 {1}，太旧了，读不了这个启动器（{2}）出的游戏程序，推进去也打不开：先在这台电脑的游戏库最前面「S2Arm」卡点「更新 S2Arm」装成 {3}，或回到当初装它的那台电脑更新，再推游戏。",
+  "en": "S2Arm on this {0} is {1}, too old to read game programs prepared by this launcher ({2}); they would not open. First, in the S2Arm card at the front of the library on this computer, click Update S2Arm to install {3}, or update it on the computer that installed it, then push the game."
+ },
+ {
+  "source": "这台 {0} 上的 S2Arm 是 {1}，太旧了，读不了这个启动器（{2}）出的游戏程序，推进去也打不开：先在游戏库最前面「S2Arm」卡导出 {3} 的 S2Arm.ipa，用你当初装它的工具（LiveContainer / SideStore 等）重新装一次，再推游戏。",
+  "en": "S2Arm on this {0} is {1}, too old to read game programs prepared by this launcher ({2}); they would not open. First export the {3} S2Arm.ipa from the S2Arm card at the front of the library and reinstall it with the tool you used before (LiveContainer, SideStore and so on), then push the game."
+ },
+ {
+  "source": "这台 {0} 上的 S2Arm 是 {1}，比电脑上的 {2} 旧，部分修复要更新 App 才生效：在这台电脑的游戏库最前面「S2Arm」卡点「更新 S2Arm」装成 {3}（之后这台电脑就认它），或回到当初装它的那台电脑更新。也可以先照旧推。",
+  "en": "S2Arm on this {0} is {1}, older than {2} on this computer, and some fixes only take effect after updating the app: in the S2Arm card at the front of the library on this computer, click Update S2Arm to install {3} (this computer then recognizes it), or update it on the computer that installed it. You can also push anyway."
+ },
+ {
+  "source": "这台 {0} 上的 S2Arm 是 {1}，比电脑上的 {2} 旧，部分修复要更新 App 才生效：在游戏库最前面「S2Arm」卡导出 {3} 的 S2Arm.ipa，用你当初装它的工具（LiveContainer / SideStore 等）重新装一次。也可以先照旧推。",
+  "en": "S2Arm on this {0} is {1}, older than {2} on this computer, and some fixes only take effect after updating the app: export the {3} S2Arm.ipa from the S2Arm card at the front of the library and reinstall it with the tool you used before (LiveContainer, SideStore and so on). You can also push anyway."
+ },
+ {
+  "source": "想马上用上新版修复就照上面说的先更新这台 {0} 上的 S2Arm；不急的话点「仍然继续」照旧推。",
+  "en": "To get the newer fixes now, update S2Arm on this {0} as described above; otherwise click Continue Anyway to push as before."
+ },
+ {
+  "source": "照上面说的把这台 {0} 上的 S2Arm 更新到这一版，再点这台的「重试」。",
+  "en": "Update S2Arm on this {0} to this version as described above, then click Retry for this device."
  }
 ]

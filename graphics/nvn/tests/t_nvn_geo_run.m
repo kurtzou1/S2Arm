@@ -24,6 +24,8 @@
 //      段里有按预测记的写，段末把段里的读写区间交给 g_gsr（预测漏学时 gml_read 按同一口径查）。反证：geo_run_hazard_fw 去掉重叠查 → ⑬ ③ 红；geo_fs_writes 恢复 GMEM 一律排除 → ⑬ ① 红
 //   ⑭ 段内遮挡查询上报（#1449：0100B8E016F76000 每笔几何绘制后报一次 SAMPLES_PASSED，每笔断段、断主遍）：[上报 SAMPLES_PASSED][结束] 段不结束；
 //      [上报 时间戳][结束] 照旧结束段、原因记「状态之外的操作」操作码 5。反证：执行循环去掉 SAMPLES_PASSED 例外 → ⑭ 第一条红
+//   ⑮ 段内事件信号 / 写值（#1449 0.6.7 D-CQG6：同款每次遮挡上报后跟一笔 ReportValue，⑭ 之后改成每笔都被它断段）：[信号 写值][结束] 段不结束、
+//      收尾后事件按写值落地（提交完成后由 CPU 写）；[等事件][结束] 照旧结束段、原因记操作码 4。反证：执行循环去掉信号例外 → ⑮ 第一条红
 //   ⑨ 直通几何快路选择（geo_pt_pick）：几何核标直通（json geometry.passthrough）、单实例、单次调用、三角 → 换成 <键>_bgs3 与 <键>_bgc；
 //      没标直通 → 不走、一次表都不查；两实例 / 邻接三角（拓扑 4）/ 开变换反馈 / 几何核两次调用 / DM_NVN_GEO_PT=0 → 不走；缺 _bgc → 不走、几何核与读取器保持原样
 #include "../gfx/nvn/nvn_mtl.m"
@@ -119,6 +121,20 @@ int main(void) { @autoreleasepool {
         g_on = 0; put(OP_REPORT_COUNTER, rt, sizeof rt); put(OP_END, NULL, 0); nvn_be_exec(g_ops);
         int ended = !g_gr.active, why = g_gr_end[GEO_END_OP] - e_op == 1 && g_gr_end_op[OP_REPORT_COUNTER] - e_rc == 1; finish();
         CHECK(ended && why, "⑭ [上报 时间戳][结束] 照旧结束段（%d，期望 1），原因记「状态之外的操作」操作码 5（%d，期望 1）", ended, why); }
+
+    // ⑮ 段内事件信号 / 写值：不结束段、完成后照写；等事件照旧结束段
+    {   static volatile uint32_t ev15; ev15 = 7; volatile uint32_t *evp = &ev15;
+        uint8_t rs[16]; uint32_t mw = NVN_EVENT_SIGNAL_MODE_WRITE, v15 = 42; memcpy(rs, &evp, 8); memcpy(rs + 8, &mw, 4); memcpy(rs + 12, &v15, 4);
+        reset_mem(); nvn_be_sub_begin(); geo_run_begin(); lane_kernel(1);
+        g_on = 0; put(OP_SIGNAL_EVENT, rs, sizeof rs); put(OP_END, NULL, 0); nvn_be_exec(g_ops);
+        int kept = g_gr.active; finish();
+        CHECK(kept && count() == 1 && outv(0) == 1 && ev15 == 42, "⑮ [信号 写值][结束] 之后段仍开着（%d，期望 1）；收尾后几何核照常执行（计数 %u，期望 1）、事件写成 42（%u）", kept, count(), (unsigned)ev15);
+        ev15 = 1; uint32_t mwait = NVN_EV_WAIT | 0u, v1 = 1; memcpy(rs + 8, &mwait, 4); memcpy(rs + 12, &v1, 4);   // 等「等于 1」：已满足，不停队列
+        reset_mem(); nvn_be_sub_begin(); geo_run_begin(); lane_kernel(1);
+        uint64_t e_op = g_gr_end[GEO_END_OP], e_se = g_gr_end_op[OP_SIGNAL_EVENT];
+        g_on = 0; put(OP_SIGNAL_EVENT, rs, sizeof rs); put(OP_END, NULL, 0); nvn_be_exec(g_ops);
+        int ended = !g_gr.active, why = g_gr_end[GEO_END_OP] - e_op == 1 && g_gr_end_op[OP_SIGNAL_EVENT] - e_se == 1; finish();
+        CHECK(ended && why, "⑮ [等事件][结束] 照旧结束段（%d，期望 1），原因记「状态之外的操作」操作码 4（%d，期望 1）", ended, why); }
 
     // ② 段外工作：先结束段，几何核排在它前面
     reset_mem(); nvn_be_sub_begin(); geo_run_begin(); lane_kernel(1);

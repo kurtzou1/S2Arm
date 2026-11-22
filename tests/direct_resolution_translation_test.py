@@ -56,8 +56,9 @@ def verify(root, jobs, xlate):
         for index, binding, image in res['tex_scales']:
             if not 0 < index < 73 or not any(t['binding'] == binding for t in res['images' if image else 'textures']):
                 raise AssertionError('scale table index or binding is unproven')
-        if exact and any(t['array'] > 1 or t['flags'] & 4 for t in res['textures'] + res['images']):
-            raise AssertionError('unsupported descriptor array or image write is exact')
+        # Image writes may be exact (11-22): the host keeps every storage-image slot at its own size (rs_pre_images / rs_pre_draw).
+        if exact and any(t['array'] > 1 for t in res['textures'] + res['images']):
+            raise AssertionError('unsupported descriptor array is exact')
         path = root / (job['key'] + '.spv')
         if not any(op == 72 and operands[1:] == (12, 35, 2608) for op, operands in instructions(path.read_bytes())):
             raise AssertionError('SPIR-V member 12 is not at ABI2 offset 2608')

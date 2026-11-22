@@ -19,6 +19,7 @@ namespace S2Arm.Gfx.Widen
             OpVariable = 59, OpLoad = 61, OpStore = 62, OpAccessChain = 65, OpInBoundsAccessChain = 66, OpDecorate = 71, OpCompositeConstruct = 80, OpCompositeExtract = 81,
             OpCopyObject = 83, OpSampledImage = 86, OpIAdd = 128, OpISub = 130, OpImageFetch = 95, OpImageRead = 98, OpImageWrite = 99, OpImage = 100, OpImageQuerySizeLod = 103, OpImageQuerySize = 104, OpBitcast = 124;
         const int DecBinding = 33, StorageUniform = 2, Dim2D = 1;
+        const int DimNeverScaled1D = 0, DimNeverScaled3D = 2, DimNeverScaledCube = 3, DimNeverScaledBuffer = 5, DimNeverScaledSubpass = 6;   // SPIR-V Dim：宿主从不缩放的几类（Rect = 4 不在内）
         // 标签（值或指针）：取图缩放的结果分量（缩放下标、分量号）、由它拼成的坐标向量（缩放下标）、尺寸查询结果向量（绑定号）、取出的尺寸分量（绑定号、分量号）
         enum T : byte { None, FetchComp, FetchVec, SizeVec, SizeComp }
         readonly record struct Tag(T Kind, int A, int B, uint Origin = 0);
@@ -108,11 +109,17 @@ namespace S2Arm.Gfx.Widen
             var extractedSizes = new HashSet<uint>();
             void AddScale(int index, int b, bool image) { if (!outScales.Contains((index, b, image))) outScales.Add((index, b, image)); }
             bool Is2D(uint type) => imgDim.TryGetValue(type, out int d) && (d & 0xff) == Dim2D;
+            bool NeverScaled(uint type) => imgDim.TryGetValue(type, out int d) && (d & 0xff) is DimNeverScaled1D or DimNeverScaled3D or DimNeverScaledCube or DimNeverScaledBuffer or DimNeverScaledSubpass;
             void CheckImage(uint value, bool storage = false)
             {
                 if (!requireSizeTable) return;
                 if (!img.TryGetValue(value, out var fact)) { Reason("unknown_or_dynamic_image_binding"); return; }
                 if (fact.Set != 0) Reason("unsupported_or_unknown_descriptor_set");
+                // 认得出的非二维（1D / 3D / 立方体 / 缓冲 / 子遍输入）：宿主从不缩放这类存储（nvn_rscale.inc rs_eligible 只缩二维 / 二维数组 / 矩形），按原尺寸访问就是对的。
+                //   单独记成 never_scaled_image_type（照旧不进尺寸表、照旧 legacy_1x：1 倍时绑定逐字节不变）；内部分辨率按它判这支的取图倍率路径可用（nvn_mtl.m rs_ok）。
+                //   矩形（Dim Rect）宿主会缩，照旧要证；类型认不出的照旧记 non_2d_or_unknown_image_type
+                if (!imgDim.ContainsKey(fact.Type)) { Reason("non_2d_or_unknown_image_type"); return; }
+                if (NeverScaled(fact.Type)) { Reason("never_scaled_image_type"); return; }
                 if (!Is2D(fact.Type)) Reason("non_2d_or_unknown_image_type");
                 if (!imageFacts.TryGetValue(fact.Type, out var image) || !scalarTypes.Contains(image.SampleType)
                     || image.Format > 41 || image.Sampled is < 1 or > 2 || storage && image.Format == 0)
@@ -160,7 +167,7 @@ namespace S2Arm.Gfx.Widen
                         if (n >= 4) CheckImage(w[i + 3]);
                         if (n >= 4 && img.TryGetValue(w[i + 3], out var qi) && (!requireSizeTable || Is2D(qi.Type))) tag[w[i + 2]] = new Tag(T.SizeVec, qi.Binding, 0);
                         else if (requireSizeTable && n >= 4 && !img.ContainsKey(w[i + 3])) exact = false;
-                        if (requireSizeTable && n >= 4) queriedSizes.Add(w[i + 2]);
+                        if (requireSizeTable && n >= 4 && !(img.TryGetValue(w[i + 3], out var qn) && NeverScaled(qn.Type))) queriedSizes.Add(w[i + 2]);   // 宿主从不缩放的类型：尺寸查询返回的就是原尺寸，不要求分量证明
                         break;
                     case OpCompositeExtract:
                         if (n == 5 && tag.TryGetValue(w[i + 3], out Tag sv) && sv.Kind == T.SizeVec)
@@ -229,8 +236,11 @@ namespace S2Arm.Gfx.Widen
                         else if (n >= 5 && !img.ContainsKey(w[i + 3])) exact = false;   // 认不出图像来源
                         break;
                     case OpImageWrite:
-                        if (requireSizeTable) Reason("image_write");
-                        if (n >= 4 && (!img.TryGetValue(w[i + 1], out var wi) || Is2D(wi.Type))) exact = false;   // Ryujinx 不缩放写图像
+                        // 宽屏旧约定（scale_exact）照旧：Ryujinx 不缩放写图像，写 2D 图像的程序按真实像素画。
+                        //   尺寸表判定（requireSizeTable）不因写图像判不精确：宿主对存储图像槽一律保持原尺寸（nvn_rscale_ops.inc rs_pre_images / rs_pre_draw：
+                        //   绑上图像槽的缩放图在用它的绘制 / 派发之前换回原尺寸），写的坐标按游戏纹素就是对的；读的贴图照旧逐次要证（11-22 D-ZR6V：计算着色器几乎都写图像，
+                        //   原先整支 legacy_1x，读到放大的深度就整遍退回原尺寸）
+                        if (!requireSizeTable && n >= 4 && (!img.TryGetValue(w[i + 1], out var wi) || Is2D(wi.Type))) exact = false;   // Ryujinx 不缩放写图像
                         break;
                     case 87: case 88: case 89: case 90: case 91: case 92: case 93: case 94: // sampled image operations
                     case 96: case 97: // gathers

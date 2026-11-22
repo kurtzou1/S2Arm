@@ -76,6 +76,7 @@ RECOVERY = {
     "downstream_export_unsupported": "这款选的下游方案是独立 App，资源要由电脑推进去：连上手机后点「推到 iPhone」；想导出自签包就在确认页改选「仍用原版方案」。",
     "download_failed": "检查这台电脑的网络（能打开 s2arm.com）后再点一次；下了一半的不会被当成好的用。",
     "diag_upload_failed": "导出诊断包，手动发到 GitHub 帖子或群里；网络恢复后也可以再点一次「故障报修」。",   # 上传诊断没成（服务没开通 / 连不上 / 被拒收，diag_upload.py）：界面退回导出
+    "disk_io_error": "这块盘读写出了错（硬件或连接问题）：插稳数据线、换个接口，或用系统自带的磁盘检查工具查一下这块盘；也可以把游戏库搬到别的盘再试。存档和已出好的版本不受影响。",
     "disk_full": "释放任务所在磁盘的空间，检查游戏库和应用数据所在磁盘后重试；不要删除存档或上次成功的运行版本。",
     "out_of_memory": "关掉其它占内存的程序（浏览器、游戏等）后重试；还不行就在 Windows 设置里调大虚拟内存（页面文件），或换一台内存更大的电脑出包。已做完的步骤下次会复用。",
     "permission_denied": "检查文件和目录权限；若位于桌面、文稿、下载或外接磁盘，请在「系统设置 → 隐私与安全性 → 文件与文件夹」允许 S2Arm 访问，再重试。",
@@ -116,7 +117,9 @@ RECOVERY = {
     "shell_install_required": "先在首位「S2Arm」卡把 App 装到这台设备，装好后点这台的「重试」。",   # 通用壳「推到 iPhone」：手机上还没装壳（install.push_game）
     "phone_app_choice_required": "点游戏库最前面的「S2Arm」，选好这台 {0} 用哪一个 S2Arm（AltStore / SideStore 装的，还是启动器装的），再推游戏；选一次就记住。",   # 同机装着不止一个 S2Arm（install.s2arm_owner choose）
     "phone_app_gone": "点游戏库最前面的「S2Arm」，重新选一次用哪一个 S2Arm：选过的那个已经不在这台 {0} 上了。",   # phoneChooseApp 选的包不在手机上
-    "shell_update_required": "先在首位「S2Arm」卡把这台上的 App 更新到这一版，再点这台的「重试」。",   # 通用壳「推到 iPhone」：手机上的壳不是本版
+    "shell_update_required": "先在首位「S2Arm」卡把这台上的 App 更新到这一版，再点这台的「重试」。",
+    "phone_app_outdated": "想马上用上新版修复就照上面说的先更新这台 {0} 上的 S2Arm；不急的话点「仍然继续」照旧推。",   # #1842：别的工具 / 别的电脑装的 S2Arm 比启动器旧、接口兼容（install.external_app_outdated）
+    "phone_app_incompatible": "照上面说的把这台 {0} 上的 S2Arm 更新到这一版，再点这台的「重试」。",   # 同上，App 早于接口起始版（host_update.COMPAT_SINCE），推进去打不开   # 通用壳「推到 iPhone」：手机上的壳不是本版
     "device_not_visible": "用数据线把这台 {0} 连到这台 Mac，解锁后在设备上点「信任」；打开开发者模式（设置 → 隐私与安全性 → 开发者模式，开了要重启）；等 Xcode 菜单「窗口 → 设备与模拟器」里出现这台，再点一次「推到 iPhone」。",   # pack/ensure_profile.sh：Xcode 看不到这台、账号上也没登记过它（D-44DP 兜底的盲区，11-16）
     "free_app_limit": "免费 Apple ID 在每台设备上最多同时装 3 个自签 App，这台 {0} 已经装满：在设备上长按删掉一个不再玩的自签 App 后重试；或改用付费 Apple 开发者账号（没有这个上限）。",
     "free_appid_limit": "这是 Apple 对免费 Apple ID 的限制：7 天内最多注册 10 个包名，这个账号已经用满；在手机上删 App 不会退还额度。办法：等几天，最早那批包名注册满 7 天就会恢复；或换一个 Apple ID 登录后再装（Mac 在 S2Arm 里登录，Windows 在 Impactor 里登录）；或改用付费 Apple 开发者账号（没有这个限制）。",   # Apple 错误 9120；与 free_app_limit（设备上同时 3 个）是两件事，删 App 无效
@@ -202,6 +205,7 @@ RECOVERY = {
     'game_files_mismatch': '用原版游戏文件重新导入这款：先在游戏库里移除它，再把原版文件拖进来。',
     'container_purge_failed': '手机解锁、数据线插稳后再删一次；不影响其他游戏。',
     'keychain_prompt': '在这台 Mac 屏幕上的钥匙串弹窗里点「始终允许」（需要的话输入 Mac 登录密码），再点一次「推到 iPhone」。',
+    'build_stalled': '点「重试」，已完成的阶段会核对后跳过；同一步反复卡住就导出诊断包发给我们，并关掉其他占内存的程序再试。',
     'windows_mandatory_aslr': '打开「Windows 安全中心 → 应用和浏览器控制 → 漏洞利用保护设置 → 系统设置」，把「强制映像随机化（强制性 ASLR）」改回「使用默认值（关）」，再打一次包。',
     'windows_path_too_long': '路径太长：把游戏库搬到盘符根目录附近的短路径（比如 D:\\S2Arm），再打一次包；反馈时请带上错误摘要。',
     'pack_missing': '没找到这款的资源包目录：重新「打 iPhone 包」后再装到 iPhone。',
@@ -327,6 +331,7 @@ def _is_directory(path):
         return None
 
 
+DISK_IO_WINERRORS = (483, 23, 1117)   # ERROR_DEVICE_HARDWARE_ERROR / ERROR_CRC / ERROR_IO_DEVICE
 APP_CONTROL_BLOCKED = (4551, 1260, 225, 226)   # 同 winproc.APP_CONTROL_BLOCKED：应用控制策略 / 组策略 / 杀毒软件拦下要起的程序（#0745b9）
 
 
@@ -344,6 +349,10 @@ def explain(error, sources=(), library=None):
         paths = [p for p in (error.filename, error.filename2) if p]
         winerror = getattr(error, "winerror", None)
         internal = f"{type(error).__name__} errno {error.errno}" + (f" WinError {winerror}" if winerror else "") + f"：{error.strerror or error}" + ("；路径 " + " → ".join(map(str, paths)) if paths else "")  # 非玩家句
+        # 盘读写出了硬件 / 连接故障（D-2NH2 Windows 0.6.8：installUpdate 读游戏库 WinError 483「设备硬件出现致命错误」，原先落笼统的「本地任务失败」）：
+        #   同 disk_full 是确凿的环境原因。WinError 483 设备硬件错、23 CRC 数据错、1117 设备 I/O 错；POSIX EIO（移动硬盘掉线 / 坏道）
+        if winerror in DISK_IO_WINERRORS or error.errno == errno.EIO:
+            return Failure("这块盘读写出错：系统报告硬件或连接故障。", code="disk_io_error", internal=internal)
         if winerror in APP_CONTROL_BLOCKED:   # 先于 EACCES：4551 / 1260 也会被映射成拒绝访问，原因不同、办法不同
             tool = __import__("ntpath").basename(str(error.filename)) if error.filename else "S2Arm 自带的工具"   # ntpath：\\ 与 / 都认
             who = {4551: "Windows 的「智能应用控制」", 1260: "这台电脑的组策略（公司 / 学校管理的电脑常见）"}.get(winerror, "杀毒软件")
@@ -392,6 +401,7 @@ STAGE_CODES = {
 #   否则「title：detail」（单测 test_job_failure_codes.PlayerSummary 逐条对照；英文在 Mac 启动器 Localizable.json）。
 PLAYER_REASON = {
     "disk_full": "磁盘空间不够：准备这个游戏需要更多空余空间。",
+    "disk_io_error": "这块盘读写出错：系统报告硬件或连接故障。",
     "out_of_memory": "电脑内存不够：出包时内存用完了。",
     "rewrite_gap": "暂时出不了包：这款游戏里有程序代码我们的改写器还不支持，我们正在修。",
     "glslc_windows_unavailable": "着色器编译暂不支持：这款游戏的着色器编译目前只能在 Mac 上完成。",
@@ -415,6 +425,7 @@ PLAYER_REASON = {
     "package_failed": "出包未完成。",
     "input_missing": "找不到游戏文件：选中的游戏文件已不在原处。",
     "windows_mandatory_aslr": "Windows 的强制 ASLR 开着：出包工具起不了子进程。",
+    "build_stalled": "出包卡住了：有一步很久没有任何进展，S2Arm 已把它停下。",
     "app_control_blocked": "被 Windows 拦下：Windows 的应用控制或杀毒软件没让 S2Arm 自带的工具运行。",
     "win_metal_missing": "缺少Windows版Metal工具：未找到能报告有效版本的官方Windows版Metal编译器。",
 }
@@ -445,6 +456,8 @@ LOG_CAUSES = (
     (r"No space left on device|\bENOSPC\b|\[Errno 28\]|\berrno\s*[=:]?\s*28\b"          # POSIX / Python OSError / .NET IOException（Mac）  # 非玩家句
      r"|There is not enough space on the disk|\bDisk full\b|WinError 112|ERROR_DISK_FULL|0x80070070"   # Windows / .NET
      r"|STATUS_DISK_FULL|磁盘空间不足|【写满】", "disk_full"),                                       # Windows 退出码注（direct_lib.py 127）/ 我方字样
+    # 盘读写硬件 / 连接故障（D-2NH2）：Windows 原文（WinError 483 / 23 / 1117）、POSIX EIO 原文
+    (r"WinError 483\b|WinError 23\b|WinError 1117\b|\[Errno 5\] Input/output error|STATUS_DEVICE_HARDWARE_ERROR|设备硬件出现致命错误|数据错误（循环冗余检查）", "disk_io_error"),  # 非玩家句
     # 内存用完（#711：Windows 16 GB 抽取按核数开满进程池，Python 子进程 MemoryError）：Python / .NET / Windows 提交上限原样字样
     (r"(?m:^\s*MemoryError\b)|OutOfMemoryException|\[WinError 1455\]|paging file is too small|页面文件太小|Cannot allocate memory|\bENOMEM\b", "out_of_memory"),  # 非玩家句
     # 盘不支持某种文件操作（exFAT 外接盘不支持原子改名 / 克隆 / 硬链接，实测 errno 45）：出包写入的这块盘格式不对，说清换 APFS 盘（11-10 网友：存放位置设到外接盘写入失败）
@@ -480,6 +493,9 @@ LOG_CAUSES = (
      r"|【红】环境缺件 metal：", "metal_unavailable"),   # 后者：Windows 出包预检（pack/orch/oneclick_win.py env_items）找不到 Metal Developer Tools
     (r"is not installed\. (?:To use with Xcode, first download and install the platform|Please download and install the platform)", "ios_platform_missing"),   # xcodebuild 原文（11-07 gate-host Xcode 26.6）
     (r"unable to find utility \"|: command not found|is not recognized as an internal or external command", "tool_missing"),
+    # 无进展看门狗把某一步停了（tools/nostall.py，退 124）：放在最后——同一段证据里有写满 / 内存用完等确凿原因时那才是真因，看门狗只是结果。
+    #   D-PD33（Windows 0.6.7）：编批库 15 分钟没有一批编完被停，原先落「package_failed，按阶段 未识别」，玩家只看到「这一步的失败还没归类」
+    (r"【红】无进展看门狗：", "build_stalled"),  # 非玩家句
 )
 _RED = ("【红】", "🔴", "[RED]")  # 非玩家句
 # 红行里点名的子日志（如直连库 <缓存>/work.stage.N/build.log）：绝对路径（可含空格，如「Application Support」），以 .log / .out 结尾
@@ -735,9 +751,14 @@ def classify_failure(phase, log, texts=()):
     chunks = gather_evidence(log, texts)
     read = "；".join("%s（尾 %d 字节）" % (label, len(text.encode("utf-8"))) for label, text in chunks if label != "原因") or "无日志"  # 非玩家句
     gone = missing_prebuilt()
+    hit = log_cause(chunks, log)
+    # 日志确凿是写满（log_cause 已按写满当时的量数 / 回溯末行 / 剩余空间核实）：认它，随包件缺只记进说明——盘满能让解出来的随包件大小不对，
+    #   随包件缺却写不满盘（D-6ZDD Windows 0.6.7：写 game.img 时 [Errno 28]，随包 rcodesign 大小不对，原先先认随包件、玩家看到「被 Windows 拦下」）
+    if gone and hit[0] == "disk_full":
+        code, label, line, why = hit
+        return code, "归因 disk_full：%s 里「%s」%s；随包预编件同时缺 / 大小不对 %d 个（%s），按盘满的连带记；读过 %s" % (label, line, "（" + why + "）" if why else "", len(gone), "、".join(gone[:6]), read)  # 非玩家句
     if gone:   # 随包工具不见了：后面各阶段的报错（退回现编缺编译器、起不来）都是它的连带，先认它
         return "app_control_blocked", "归因 app_control_blocked：随包预编件缺 / 大小不对 %d 个（%s），多半被杀毒软件隔离；读过 %s" % (len(gone), "、".join(gone[:6]), read)  # 非玩家句
-    hit = log_cause(chunks, log)
     if hit[0]:
         code, label, line, why = hit
         return code, "归因 %s：%s 里「%s」%s；读过 %s" % (code, label, line, "（" + why + "）" if why else "", read)  # 非玩家句
