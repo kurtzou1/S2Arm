@@ -107,6 +107,24 @@ PY
   -I "$android/native/nvn" -o "$tmp/t_once" \
   "$android/tests/nvn_vk_pipe_once_test.c" "$android/native/nvn/nvn_vk_pipe_once.c"
 "$tmp/t_once"
+# 计算管线现建慢行文本（带阶段键与出库标记）+ 负控：出库 / 现编标记取反必须红
+"$cc" -std=gnu11 -O1 -Wall -Wextra -Werror -pthread -D_GNU_SOURCE \
+  -I "$android/native/nvn" -o "$tmp/t_diag" "$android/tests/nvn_vk_pipe_diag_test.c"
+"$tmp/t_diag"
+python3 - "$repo" "$tmp" <<'PY'
+import os, pathlib, subprocess, sys
+repo, tmp = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+hdr = (repo/'android/native/nvn/nvn_vk_pipe_diag.h').read_text()
+old = 'lib ? " 出库 摘要'
+assert hdr.count(old) == 1, 'diag mutation anchor'
+mut = tmp/'diag_mutant'; mut.mkdir(exist_ok=True)
+(mut/'nvn_vk_pipe_diag.h').write_text(hdr.replace(old, '!lib ? " 出库 摘要'))
+exe = mut/'t_diag'
+subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-O1', '-Wall', '-Wextra', '-Werror', '-I', str(mut), '-o', str(exe), str(repo/'android/tests/nvn_vk_pipe_diag_test.c')], check=True)
+r = subprocess.run([str(exe)], capture_output=True, text=True)
+assert r.returncode != 0 and 'FAIL' in r.stderr and 'live line' in r.stderr, r.stderr
+print('计算管线慢行文本 负对照 lib-flag-inverted：红在 live line')
+PY
 # 首局预热随包种子（nvn_vk_{prog,pipe}_warm.h「随包种子」）：两个模块一起链，本机清单为空读种子 / 本机优先 / 坏种子打黄不用 / 坏条目逐条跳过 /
 #   程序没定时管线稍后重试 / 种子配方逐字段对上手写字节
 "$cc" -std=gnu11 -O1 -Wall -Wextra -Werror -pthread -D_GNU_SOURCE \

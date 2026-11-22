@@ -43,6 +43,7 @@
 #include "nvn_vk_bcdec.h"
 #include "nvn_vk_pipe_once.h"     // 装缓存的双检去重（纯逻辑，宿单测用假创建驱动）
 #include "nvn_vk_pipe_warm.h"     // 预热清单：warm 标记 / 命中计数的口径
+#include "nvn_vk_pipe_diag.h"     // 计算管线现建慢行的文本（带阶段键与出库标记）
 #include "nvn_vk_driver_cache.h"   // 驱动管线缓存的落盘文件层（见「驱动管线缓存」一节）
 #include "nvn_fmt_info.h"
 #include "nvn_vk_border.h"   // 没有 VK_EXT_custom_border_color 时边框色就近取内置三档（纯逻辑，宿主单测）
@@ -163,6 +164,7 @@ struct nvn_gpu_shader_s {
     nvn_gpu_stage stage;
     uint8_t precompiled;
     uint8_t stage_key[8], spirv_digest[32];  // 库阶段键与实际交给 Vulkan 的模块摘要
+    uint8_t src_key[8];          // 装载时调用方给的阶段键（现编 / 出库都有，只作日志；stage_key 只在出库件上填）
     nvn_gpu_layout_ent *ents;
     VkFormat *tfmt;              // 与 ents 平行：TBUF / IMAGE_TBUF 项的 texel 视图格式（自 blob 反射）；非 texel 项 UNDEFINED
     uint32_t nent;
@@ -3604,6 +3606,7 @@ nvn_gpu_rc nvn_gpu_shader_load(const nvn_gpu_shader_src *s, nvn_gpu_shader *out,
     struct nvn_gpu_shader_s *sh = calloc(1, sizeof *sh);
     if (!sh) return fail(err, NVN_GPU_E_OOM, "着色器结构分配失败");
     sh->stage = s->stage;
+    memcpy(sh->src_key, s->key, sizeof sh->src_key);
     snprintf(sh->entry, sizeof sh->entry, "%s", s->entry && s->entry[0] ? s->entry : "main");
     if (s->layout) {
         sh->nent = s->layout->nent;
@@ -4865,7 +4868,7 @@ static nvn_gpu_rc cpipe_build(const nvn_gpu_stage_desc *cs, int mode, nvn_gpu_pi
     {
       static int slowc = -1; if (slowc < 0) slowc = nvn_plat_flag("nvk_hitch_log", 0) != 0;
       const uint64_t dt = slowc ? now_ns() - pc_t0 : 0;
-      if (dt > 3000000ull) { char b[160]; snprintf(b, sizeof b, "计算管线编译 %.1f 毫秒", (double)dt / 1e6); nvn_plat_log(NVN_PLAT_LOG_INFO, "pipe", b); } }
+      if (dt > 3000000ull) { char b[200]; nvn_vk_compute_pipe_line(b, sizeof b, (double)dt / 1e6, sh->src_key, sh->precompiled, sh->spirv_digest); nvn_plat_log(NVN_PLAT_LOG_INFO, "pipe", b); } }
     p->cshader = sh;   // 两条安装路径都保留实际计算阶段的身份
     if (sh->precompiled) p->lib_stages = 1u << NVN_GPU_SH_CS;
     p->stage_nent[NVN_GPU_SH_CS] = sh->nent;

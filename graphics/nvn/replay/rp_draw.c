@@ -38,6 +38,7 @@
 // 弱链接[replay]：nvk_fu_item_ms
 // 弱链接[replay]：nvk_fu_unsafe_ms
 // 弱链接[replay]：nvk_pipe_warm_note_prog
+// 弱链接[replay]：nvk_shader_cs_lib_note
 // 弱链接[replay]：nvn_vk_pipe_demand_kick
 // 弱链接[replay]：nvn_vk_pipe_demand_mark
 // 弱链接[replay]：nvn_vk_pipe_demand_marks
@@ -80,6 +81,7 @@ extern int s2a_nvn_rast_flip;   // hle_nvn.c：当前提交队列的正面光栅
 // 没有身份（失败项 / 还没算出来）就不记。np 是刚取到的后端管线：清单在它上面存一个标签，之后换回同一条
 // 管线只加计数（不序列化、不散列、不查表）。
 int nvk_pipe_warm_note_prog(const nvn_gpu_pipe_desc *d, const struct rp_prog *p, nvn_gpu_pipe np) __attribute__((weak));
+const char *nvk_shader_cs_lib_note(const uint8_t key[8]) __attribute__((weak));   // 计算阶段键没走出包预编库的原因（诊断；苹果侧没有这个符号）
 
 // 句柄放在游戏用户常量缓冲里的贴图（NVN_RB_TEXU；语义照 iOS nvn_mtl.m ubo_read / ubo_handle / ubo_packed / ubo_tex_id / ubo_samp_id / bind_sid）。
 // 一个字：常量槽 reg 的字节 off 处，编码这一刻从游戏内存读（同 NVN_RB_CBUF 绑的就是这一刻的内容）；槽没绑、越界、不在登记过的池里读作 0（iOS：空槽）
@@ -2370,9 +2372,11 @@ cs_rebind:
         if (!nvn_gpu_ok(arc)) { arena_fail_detail(arc, &err, bytes); skip("compute_spill_alloc_failed", rec); goto done; }
         g_spill_len = bytes;
         if (g_spill_said < 64) {
-            g_spill_said++; char m[200]; uint64_t key = 0; for (int b = 0; b < 8; b++) key = key << 8 | rp_S.skey[5][b];
-            snprintf(m, sizeof m, "spill 派发 #%d：程序键 %016llx，%s %llu 组 × %u 字节 = %llu 字节", g_spill_said, (unsigned long long)key,
-                     dp->ind ? "间接" : "直接", (unsigned long long)groups, pg->spill_bytes, (unsigned long long)bytes);
+            g_spill_said++; char m[280]; uint64_t key = 0; for (int b = 0; b < 8; b++) key = key << 8 | rp_S.skey[5][b];
+            const char *why = nvk_shader_cs_lib_note ? nvk_shader_cs_lib_note(rp_S.skey[5]) : NULL;
+            snprintf(m, sizeof m, "spill 派发 #%d：程序键 %016llx，%s %llu 组 × %u 字节 = %llu 字节；%s", g_spill_said, (unsigned long long)key,
+                     dp->ind ? "间接" : "直接", (unsigned long long)groups, pg->spill_bytes, (unsigned long long)bytes,
+                     pg->lib_sourced ? "出库版" : why ? why : "没有出库记录");
             nvn_plat_log(NVN_PLAT_LOG_INFO, "replay", m);
         }
     }

@@ -1213,6 +1213,34 @@ static struct work_snap *snap_capture(const struct facts *f, const struct s2a_in
 static pthread_mutex_t g_lp_mu = PTHREAD_MUTEX_INITIALIZER;
 static nvn_hmap g_lp_bad; static int g_lp_bad_init;
 static _Atomic uint64_t g_n_libpack, g_n_libpack_bad, g_lp_unaligned_refused;
+// 计算程序「为什么没走出包预编库」的备忘（只作诊断，不影响取程序）：按计算阶段键记最近 64 个，回放层的 spill 派发行与调查用。
+//   命中库的键撤掉旧备忘；备忘满了按轮转覆盖。查表的是回放线程、写表的是提交线程 / 预热线程，一把小锁。
+enum { CSN_NONE, CSN_UNALIGNED, CSN_SHARED, CSN_MISS, CSN_REJECT };
+#define CS_NOTE_N 64
+static pthread_mutex_t g_cs_note_mu = PTHREAD_MUTEX_INITIALIZER;
+static struct { uint8_t key[8]; uint8_t why; } g_cs_note[CS_NOTE_N];
+static unsigned g_cs_note_next;
+static void cs_note_set(const uint8_t key[8], int why) {
+    pthread_mutex_lock(&g_cs_note_mu);
+    int at = -1;
+    for (int i = 0; i < CS_NOTE_N; i++) if (g_cs_note[i].why && !memcmp(g_cs_note[i].key, key, 8)) { at = i; break; }
+    if (!why) { if (at >= 0) g_cs_note[at].why = 0; }
+    else {
+        if (at < 0) at = (int)(g_cs_note_next++ % CS_NOTE_N);
+        memcpy(g_cs_note[at].key, key, 8); g_cs_note[at].why = (uint8_t)why;
+    }
+    pthread_mutex_unlock(&g_cs_note_mu);
+}
+// 回放层（rp_draw.c，弱链接）用：这个计算阶段键最近一次没走库的原因；没有记录 / 已命中库返回 NULL
+const char *nvk_shader_cs_lib_note(const uint8_t key[8]);
+const char *nvk_shader_cs_lib_note(const uint8_t key[8]) {
+    static const char *const text[] = {NULL, "库闸：存储缓冲非对齐（只有对齐变体）", "库闸：共享内存超设备上限（出库拒，只能现编改写 spill）", "库里没有这一键", "库件被拒收"};
+    int why = 0;
+    pthread_mutex_lock(&g_cs_note_mu);
+    for (int i = 0; i < CS_NOTE_N; i++) if (g_cs_note[i].why && !memcmp(g_cs_note[i].key, key, 8)) { why = g_cs_note[i].why; break; }
+    pthread_mutex_unlock(&g_cs_note_mu);
+    return text[why];
+}
 // 库状态（「程序累计」行的「库」列）：没查过 / 已打开 / 不在 / 坏。目录不在原先静默返回，读数只剩「命中 0 / 没有 0」，
 // 分不出「资源包没带这一层」和「库里没有这个键」（offline-shader-miss 调查：测试包全是前者）。
 enum { LP_ST_UNSEEN, LP_ST_OPEN, LP_ST_MISSING, LP_ST_BAD };
@@ -1251,14 +1279,22 @@ static int libpack_fetch(const uint8_t identity[32], const uint8_t (*gkeys)[8], 
         //   真机直接看到闸生效。每次取程序都可能撞上：一行一个事件只打前 8 条防日志洪泛，之后只累计。
         if (root && ckey && !state_ok) {
             uint64_t n = atomic_fetch_add_explicit(&g_lp_unaligned_refused, 1, memory_order_relaxed);
+            cs_note_set(ckey, CSN_UNALIGNED);
+            char kh[17]; for (int i = 0; i < 8; i++) snprintf(kh + 2 * i, 3, "%02x", ckey[i]);
             if (n < 8) {
-                char kh[17]; for (int i = 0; i < 8; i++) snprintf(kh + 2 * i, 3, "%02x", ckey[i]);
-                char b[224]; snprintf(b, sizeof b,
-                    "libpack_cs_unaligned_refused 键 %s：计算取库因存储缓冲非对齐被对齐闸拒——库件只有对齐变体，退回现编", kh);
+                char b[256]; snprintf(b, sizeof b,
+                    "libpack_cs_unaligned_refused 键 %s：计算取库因存储缓冲非对齐被对齐闸拒——库件只有对齐变体，退回现编（身份 %02x%02x%02x%02x…）",
+                    kh, identity[0], identity[1], identity[2], identity[3]);
                 nvn_plat_log(NVN_PLAT_LOG_INFO, "shader", b);
             } else if (n == 8)
                 nvn_plat_log(NVN_PLAT_LOG_INFO, "shader",
-                    "libpack_cs_unaligned_refused 行已截断（只打前 8 条），之后只累计不发");
+                    "libpack_cs_unaligned_refused 行已截断（前 8 条逐条，之后每 64 条一行带最近键与身份的汇总）");
+            else if (!((n + 1) & 63)) {   // 第 64、128… 次：一行汇总（累计次数 + 最近一次的键与身份），长局里仍能看到这个闸在咬哪些程序
+                char b[256]; snprintf(b, sizeof b,
+                    "libpack_cs_unaligned_refused 累计 %llu 次（最近一次：键 %s，身份 %02x%02x%02x%02x…）",
+                    (unsigned long long)(n + 1), kh, identity[0], identity[1], identity[2], identity[3]);
+                nvn_plat_log(NVN_PLAT_LOG_INFO, "shader", b);
+            }
         }
         return 0;
     }
@@ -1288,6 +1324,8 @@ static int libpack_fetch(const uint8_t identity[32], const uint8_t (*gkeys)[8], 
     }
     pthread_mutex_unlock(&g_lp_mu);
     if (!lp) return 0;
+    if (ckey) cs_note_set(ckey, lrc == S2A_LIBPACK_HIT ? CSN_NONE : strstr(lw, "exceeds device limit") ? CSN_SHARED :
+                                lrc == S2A_LIBPACK_MISS ? CSN_MISS : CSN_REJECT);
     if (lrc != S2A_LIBPACK_HIT) {   // 没找到 / 容器里这一键坏：前几条把原因打出来（键 = 每阶段 8 字节控制键）
         static _Atomic int nm; if (atomic_fetch_add(&nm, 1) < 6) {
             const uint8_t *k = ckey ? ckey : gkeys[0];

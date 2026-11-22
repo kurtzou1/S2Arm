@@ -177,6 +177,11 @@ def main():
             ('unaligned-gate', 'if (!root || !state_ok || (!ckey && stages != 0x3u && stages != 0x7u) || nvn_plat_flag("no_libpack", 0)) {',
              'if (!root || (!ckey && ((stages != 0x3u && stages != 0x7u) || !state_ok)) || nvn_plat_flag("no_libpack", 0)) {',
              'unaligned CS storage refuses the library'),
+            # 诊断（对齐闸拒查日志 / 没走库原因备忘）：各撤一处，--cs-libpack 必红在对应断言
+            ('no-summary-line', 'else if (!((n + 1) & 63)) {', 'else if (0) {', '141 refusals log two summary lines'),
+            ('no-unaligned-note', '            cs_note_set(ckey, CSN_UNALIGNED);\n', '', 'unaligned refuse is remembered'),
+            ('shared-not-named', 'strstr(lw, "exceeds device limit") ? CSN_SHARED :', '0 ? CSN_SHARED :', 'shared-memory gate refusal is remembered'),
+            ('hit-keeps-note', 'if (ckey) cs_note_set(ckey, lrc == S2A_LIBPACK_HIT ? CSN_NONE :', 'if (ckey) cs_note_set(ckey, lrc == S2A_LIBPACK_HIT ? CSN_UNALIGNED :', 'a library hit clears the remembered reason'),
         ):
             assert code.count(old) == 1, (name, 'mutation anchor')
             path = out / ('cs-libpack-mutant-' + name + '.c')
@@ -184,7 +189,7 @@ def main():
             result = run('cs-libpack-' + name, path, args=('--cs-libpack',))
             assert result.returncode != 0 and expected in result.stderr, (name, result.stdout, result.stderr)
             print(f'{name}: expected assertion failure: {expected}', flush=True)
-        print('PASS: 1 libpack CS unaligned-gate negative control')
+        print('PASS: 5 libpack CS negative controls')
         return 0
 
     if sys.argv[1:] == ['--graphics-image-mutants']:
