@@ -73,7 +73,18 @@ static int fi_wanted_now(void) {
     if (patch != was) { if (patch || was == 1) MLOG("present frame interpolation: %s", patch ? "paused, a community frame-rate patch is active (patch > interpolation)" : "resumed, no active frame-rate patch"); was = patch; }
     return !patch;
 }
-static void fi_off(const char *why) { g_fi_state = 0; g_fi = nil; MLOG("【红】 present frame interpolation turned off: %s; presenting as before", why); fi_link_follow(0); }   // 整段回退：显示链设回（审计 P1-188）
+// 放掉一份插值器自己进驻留集的贴图 / 缓冲（fi_tex、uv、运动矢量那几块）：驻留集持有它们，只把对象置空不会释放。
+//   诊断#D-YVDD（11-22 #2111，杀戮尖塔 iPhone）：游戏每帧把画面尺寸在 1263–1295 × 715–720 之间微调（屏幕震动），插值器跟着「画面比例变了、整个重建」几百次，
+//   旧的一套（两张输入、补出帧、深度、运动 + 运动矢量各块）一直挂在驻留集里，GPU 占用一路涨到约 10 GB 后被系统杀。出集在下一次 res_commit 生效，在途 GPU 工作由命令缓冲持有
+API_AVAILABLE(macos(26.0), ios(26.0))
+static void fi_release(NvPresentFI *f) {
+    if (!f) return;
+    id<MTLResource> rs[] = { f->in_tex[0], f->in_tex[1], f->mid_tex, f->depth, f->motion, f->fsr_in, f->luma[0], f->luma[1], f->luma16[0], f->luma16[1],
+                             f->mvBlocks, f->mvCoarse, f->mvSad, f->mvFlag, f->mvArgs, f->uv[0], f->uv[1], f->uv[2], f->uv[3] };
+    for (size_t i = 0; i < sizeof rs / sizeof *rs; i++) if (rs[i]) res_remove(rs[i]);
+    res_commit();
+}
+static void fi_off(const char *why) { if (@available(macOS 26.0, iOS 26.0, *)) fi_release(g_fi); g_fi_state = 0; g_fi = nil; MLOG("【红】 present frame interpolation turned off: %s; presenting as before", why); fi_link_follow(0); }   // 整段回退：显示链设回（审计 P1-188）
 
 API_AVAILABLE(macos(26.0), ios(26.0))
 static id<MTLTexture> fi_tex(MTLPixelFormat pf, int w, int h, MTLTextureUsage u) {
@@ -231,7 +242,7 @@ static NvPresentFI *fi_get(CAMetalLayer *layer, NSUInteger cw, NSUInteger ch) {
     if (f && f->hw == hw && f->hh == hh && f->hpf == layer.pixelFormat && f->w == iw && f->h == ih) return f;
     if (f && (f->w != iw || f->h != ih)) {   // 画面比例变了（11-13 iPhone 实机：开局竖屏、几秒后转横屏）：插值器的输入尺寸是建时定死的，整个重建（旧对象的在途 GPU 工作由命令缓冲持有）
         MLOG("present frame interpolation: the game picture changed to %lux%lu (input %dx%d → %dx%d), rebuilding", (unsigned long)cw, (unsigned long)ch, f->w, f->h, iw, ih);
-        g_fi = nil; f = nil;
+        fi_release(f); g_fi = nil; f = nil;
     }
     // 不链 MetalFX 框架（同 nvn_present_fx.inc）：类按名字从运行时取，首次用时 dlopen 系统框架
     static Class dc; static int looked; if (!looked) { looked = 1; dlopen("/System/Library/Frameworks/MetalFX.framework/MetalFX", RTLD_LAZY); dc = NSClassFromString(@"MTLFXFrameInterpolatorDescriptor"); }
@@ -252,7 +263,7 @@ static NvPresentFI *fi_get(CAMetalLayer *layer, NSUInteger cw, NSUInteger ch) {
         f->mid_tex = fi_tex(MTLPixelFormatBGRA8Unorm, iw, ih, fb.outputTextureUsage | MTLTextureUsageShaderRead);
         f->depth = fi_tex(MTLPixelFormatR32Float, mw, mh, fb.depthTextureUsage | MTLTextureUsageRenderTarget);
         f->motion = fi_tex(MTLPixelFormatRG16Float, mw, mh, fb.motionTextureUsage | MTLTextureUsageRenderTarget | MTLTextureUsageShaderWrite);
-        if (!f->in_tex[0] || !f->in_tex[1] || !f->mid_tex || !f->depth || !f->motion) { fi_off("cannot create the interpolation textures"); return nil; }
+        if (!f->in_tex[0] || !f->in_tex[1] || !f->mid_tex || !f->depth || !f->motion) { fi_release(f); fi_off("cannot create the interpolation textures"); return nil; }
         {   // 常数深度 1、零运动：清一次（建时一次性，用一条临时 Metal 3 队列、等它做完）
             id<MTLCommandBuffer> c = [[g_dev newCommandQueue] commandBuffer]; MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor new];
             rp.colorAttachments[0].texture = f->depth; rp.colorAttachments[0].loadAction = MTLLoadActionClear; rp.colorAttachments[0].storeAction = MTLStoreActionStore; rp.colorAttachments[0].clearColor = MTLClearColorMake(1, 0, 0, 0);
@@ -260,11 +271,11 @@ static NvPresentFI *fi_get(CAMetalLayer *layer, NSUInteger cw, NSUInteger ch) {
             [[c renderCommandEncoderWithDescriptor:rp] endEncoding]; [c commit]; [c waitUntilCompleted];
         }
         NSError *te = nil;
-        for (int i = 0; i < 4; i++) { f->uv[i] = [g_dev newBufferWithLength:16 * sizeof(float) options:MTLResourceStorageModeShared]; res_add(f->uv[i]); f->tab[i] = tab_new(i == 2 ? 2 : 1, i == 2 ? 2 : 1, 1, &te); if (!f->uv[i] || !f->tab[i]) { fi_off("cannot create the blit tables"); return nil; } }   // PR3b：16 浮点（uv[2]/uv[3] 也喂 present_blit_m4 的共享着色器，Crop 全量读；fi_pass 自家 fsCopy/fsMid 的 32 字节 Crop 不变）
-        for (int i = 0; i < 3; i++) { f->alloc[i] = [g_dev newCommandAllocator]; f->cb[i] = [g_dev newCommandBuffer]; f->slot_free[i] = dispatch_semaphore_create(1); if (!f->alloc[i] || !f->cb[i]) { fi_off("cannot create the command buffers"); return nil; } }
+        for (int i = 0; i < 4; i++) { f->uv[i] = [g_dev newBufferWithLength:16 * sizeof(float) options:MTLResourceStorageModeShared]; res_add(f->uv[i]); f->tab[i] = tab_new(i == 2 ? 2 : 1, i == 2 ? 2 : 1, 1, &te); if (!f->uv[i] || !f->tab[i]) { fi_release(f); fi_off("cannot create the blit tables"); return nil; } }   // PR3b：16 浮点（uv[2]/uv[3] 也喂 present_blit_m4 的共享着色器，Crop 全量读；fi_pass 自家 fsCopy/fsMid 的 32 字节 Crop 不变）
+        for (int i = 0; i < 3; i++) { f->alloc[i] = [g_dev newCommandAllocator]; f->cb[i] = [g_dev newCommandBuffer]; f->slot_free[i] = dispatch_semaphore_create(1); if (!f->alloc[i] || !f->cb[i]) { fi_release(f); fi_off("cannot create the command buffers"); return nil; } }
         f->last_seq = f->last_pair_seq = UINT64_MAX; atomic_store(&f->cut_seq, UINT64_MAX);
-        if (!fi_copy_setup(f)) { fi_off("cannot create the copy pipeline"); return nil; }
-        if (fi_mv_mode() && !fi_mv_setup(f)) { fi_off("cannot create the motion-vector pipelines"); return nil; }
+        if (!fi_copy_setup(f)) { fi_release(f); fi_off("cannot create the copy pipeline"); return nil; }
+        if (fi_mv_mode() && !fi_mv_setup(f)) { fi_release(f); fi_off("cannot create the motion-vector pipelines"); return nil; }
         if (f->mvFlag) tab_buf(f->tab[2], f->mvFlag, 0, 1);   // 上补出帧那一遍读切镜头标志
         res_commit();
         MLOG("present frame interpolation: MetalFX, input %dx%d (game picture %lux%lu), constant depth, zero motion", f->w, f->h, (unsigned long)cw, (unsigned long)ch);

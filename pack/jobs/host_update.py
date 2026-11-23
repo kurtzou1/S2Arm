@@ -497,7 +497,7 @@ def install_host(c, app, sha=None):
         try:
             clone_tree(c, Path(app), temporary / APP)
             if dest.exists():
-                shutil.rmtree(dest)
+                layout.remove_tree(dest)
             temporary.rename(dest)
         finally:
             shutil.rmtree(temporary, ignore_errors=True)

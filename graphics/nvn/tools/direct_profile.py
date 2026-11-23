@@ -251,8 +251,7 @@ def input_facts(root, manifest=None, title=None):
     for key, value in facts["romfs"].items():
         if isinstance(value, collections.Counter):
             facts["romfs"][key] = collections.Counter(dict(sorted(value.items())))
-    unsupported(all(not any(c.isspace() or c == "=" for c in d) for d in facts["romfs"]["dirs"]),
-            "unsupported RomFS top-level name for shader_groups")
+    # 顶层目录名带空格或「=」写不进 shader_groups：profile_write 跳过它们（归 other），不整款拒（D-PVCK）
     unsupported("main" in facts["mods"], "main is not an NSO")
     # 图形接口与出包分流同一判法（gfx_api.py，单一来源）：NVN 不一定由 main 导入——引擎可在 subsdk 或 romfs 的 NRO 里（11-02 EA SPORTS FC 26），
     #   只认 main 会把这类 NVN 款拒掉；不是 NVN 时报出实际接口与依据（GL / Vulkan / 判不出），普查按这行归「非 NVN 款」

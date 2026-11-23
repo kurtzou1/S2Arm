@@ -9,7 +9,7 @@ PY=${S2A_PY:-$HOME/.s2arm/venv/bin/python3}; [ -x "$PY" ] || PY=python3
 for t in glslangValidator spirv-cross; do command -v $t > /dev/null || { echo "✗ t_gl_api：没有 ${t}（brew install glslang spirv-cross）"; exit 1; }; done
 SRC=${GL_API_SRC:-$NV/gfx/gl}
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT; mkdir -p "$T/cap" "$T/lib" "$T/o"
-for name in tri api_inst api_uni api_vol texture api_es300 api_samparr api_bool; do
+for name in tri api_inst api_uni api_vol texture api_es300 api_desk120 api_samparr api_bool; do
     for s in vert frag; do k=$(shasum -a 256 "$H/$name.$s" | cut -c1-16); cp "$H/$name.$s" "$T/cap/$k.$s"; done
 done
 "$PY" "$NV/../../translator/gl_shaders.py" "$T/cap" "$T/lib" > "$T/lib.log" 2>&1 || { echo "✗ t_gl_api：出库失败"; cat "$T/lib.log"; exit 1; }

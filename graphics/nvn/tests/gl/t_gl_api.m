@@ -35,6 +35,8 @@
 //   长 0 / 越界 → INVALID_VALUE，读 + 作废 / 读写位都没有 / 显式刷新不带写 / 已映射 → INVALID_OPERATION；显式刷新：映射内无错、越过映射长 → INVALID_VALUE、映射没带显式刷新位 → INVALID_OPERATION。
 // O GLSL ES 3.00（11-03 火影羁绊：Scaleform 着色器全是「#version 300 es」，出包 gl_shaders.py 交给 glslang 前没升版本，glslang -V 不收 ES 3.10 以下，421 支全翻不出）：
 //   api_es300.* 与 tri.* 同一份程序、只是 #version 300 es；出库后能链接，四边形盖住左半画 (1, 0, 0) → 左 255 0 0 255、右保持清除色蓝 0 0 255 255。
+// O′ 桌面 GLSL 1.20（D-45J6 / #852：暗黑地牢的着色器是桌面 1xx，glslang 出 SPIR-V 拒收 140 以下的桌面版本，整支编不过、有声无画）：
+//   api_desk120.* 与 tri.* 同一份程序、写成桌面 1.20（attribute / varying / gl_FragColor）；出库后能链接，同 O 组：左 255 0 0 255、右清除色蓝 0 0 255 255。
 // P 采样器数组（11-03 火影羁绊：Scaleform 129 段片元着色器用 uniform sampler2D tex[2]，GL 库表口径 1 没有数组项、宿主一个名字只认一个槽，全部进不了库）：
 //   api_samparr.frag 取 tex[0] 画左半、tex[1] 画右半；单元 3 绑纯红 1×1、单元 5 绑纯绿 1×1，glUniform1iv(「tex」, 2, {3, 5}) →
 //   左 255 0 0 255、右 0 255 0 255；「tex[1]」位置 = 「tex」位置 + 1，单设它为 3 后右半变红；活动 uniform 里数组算一个，名字「tex[0]」、大小 2。
@@ -749,6 +751,18 @@ static void t_es300(void) {
     glBindFramebuffer(0x8D40, 0); glDeleteFramebuffers(1, &fb); glDeleteProgram(p);
 }
 
+// ---------- O′ 桌面 GLSL 1.20 程序 ----------
+static void t_desk120(void) {
+    printf("O′ 桌面 GLSL 1.20 程序\n");
+    char v[] = "api_desk120.vert", f[] = "api_desk120.frag"; GLuint p = glCreateProgram(); glAttachShader(p, shader(0x8B31, v)); glAttachShader(p, shader(0x8B30, f)); glLinkProgram(p);
+    GLint ok = 0; glGetProgramiv(p, 0x8B82, &ok); CHECK(ok == 1, "#version 120 程序在离线库里、链接成功"); if (!ok) return;
+    GLuint fb = fbo_rb(64, 64, NULL); glClearColor(0, 0, 1, 1); glClear(0x4000);
+    GLuint saved = g_tri; g_tri = p; const float q[] = {QUAD(-1, -1, 0, 1, 1, 0, 0)}; tri_use(q, 6); glDrawArrays(4, 0, 6); glFinish(); g_tri = saved;
+    char a[32], b[32]; pxs(16, 32, a); pxs(48, 32, b);
+    CHECK(px_is(16, 32, 255, 0, 0, 255) && px_is(48, 32, 0, 0, 255, 255) && !glGetError(), "左半红（%s）、右半清除色蓝（%s）", a, b);
+    glBindFramebuffer(0x8D40, 0); glDeleteFramebuffers(1, &fb); glDeleteProgram(p);
+}
+
 // ---------- P 采样器数组 ----------
 static void t_sampler_array(void) {
     printf("P 采样器数组\n");
@@ -974,6 +988,6 @@ int main(void) { alarm(120); @autoreleasepool {
     g_sf = eglCreateWindowSurface(g_dpy, cfg, NULL, NULL); EGLContext ctx = eglCreateContext(g_dpy, cfg, NULL, ctx_attr);
     if (!eglMakeCurrent(g_dpy, g_sf, g_sf, ctx)) { printf("✗ 建上下文失败\n"); return 1; }
     g_tri = program("tri"); glGenVertexArrays(1, &g_tri_vao); glGenBuffers(1, &g_tri_vbo);
-    t_queries(); t_sync(); t_readback(); t_fb_query(); t_volume(); t_msaa(); t_map(); t_instanced(); t_packed_attr(); t_raster_read(); t_uniforms(); t_names_programs(); t_threads(); t_frame_storage(); t_core_stub(); t_tex_storage3d(); t_tex_swizzle(); t_bool_uniform(); t_api_version(); t_egl_current(); t_map_range(); t_pack_buffer(); t_unpack_buffer(); t_es300(); t_sampler_array(); t_shader_iv(); t_love();
+    t_queries(); t_sync(); t_readback(); t_fb_query(); t_volume(); t_msaa(); t_map(); t_instanced(); t_packed_attr(); t_raster_read(); t_uniforms(); t_names_programs(); t_threads(); t_frame_storage(); t_core_stub(); t_tex_storage3d(); t_tex_swizzle(); t_bool_uniform(); t_api_version(); t_egl_current(); t_map_range(); t_pack_buffer(); t_unpack_buffer(); t_es300(); t_desk120(); t_sampler_array(); t_shader_iv(); t_love();
     printf("%s t_gl_api：%d 项，失败 %d\n", fails ? "✗" : "✓", checks, fails); return fails != 0;
 }}

@@ -173,7 +173,7 @@ def import_paths(c, game, paths):
                 dst = home / name
                 for old in (dst, home / (OFF + name)):   # 同名整份替换：关着的那份也换掉，新导入的是开着的
                     if old.exists():
-                        shutil.rmtree(old)
+                        layout.remove_tree(old)
                 tmp.rename(dst)
                 imported.append(name)
     return dict(imported=imported, notes=notes)
@@ -209,7 +209,7 @@ def remove(c, game, names):
     for n in names:
         if n not in have:
             raise Failure("没有这个 mod：%s。" % n, code="job_failed")
-        shutil.rmtree(have[n][0])
+        layout.remove_tree(have[n][0])
 
 
 def set_enabled(c, game, want):

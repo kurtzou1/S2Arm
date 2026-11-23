@@ -21,6 +21,7 @@ __attribute__((weak)) int s2a_ui_zh(void) { return 1; }   // 界面语言（s2a_
 #include <time.h>
 #include <unistd.h>
 static int img_whole_or_absent(const char *root);   // 本体 game.img 在就核长度（定义在游戏库快判旁）
+static int ext_img(const char *root); static void ext_unlink(const char *root, const char *why);   // 外部游戏来源（定义在 came_from_import 旁）
 #include <string.h>
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
@@ -281,6 +282,7 @@ static int img_unzst(const char *root, const char *inc, const char *logp, unsign
     if (!nk) return 0;
     for (int i = 1; i < nk; i++) for (int j = i; j > 0 && ks[j - 1] > ks[j]; j--) { unsigned t = ks[j]; ks[j] = ks[j - 1]; ks[j - 1] = t; }
     char ip[2200]; snprintf(ip, sizeof ip, "%s/game.img", root);
+    if (ext_img(root)) ext_unlink(root, "电脑推来这款的本体");   // 玩家从电脑装 = 以电脑为准，写进 App；不能顺着软链接写外部文件
     PHASE(1, 0, (uint64_t)nk);
     for (int i = 0; i < nk && !rc; i++) {
         char p[2400]; snprintf(p, sizeof p, "%s/game.img.%s.%04u.zst", inc, want, ks[i]);
@@ -417,6 +419,21 @@ static void mark_imported(const char *root, const char *mf) {
 static int came_from_import(const char *root) {
     char p[2400], a[160], b[160]; snprintf(p, sizeof p, "%s/.imported", root); if (manifest_sha(p, a, sizeof a)) return 0;
     snprintf(p, sizeof p, "%s/manifest.json", root); return !manifest_sha(p, b, sizeof b) && !strcmp(a, b);
+}
+// 外部游戏来源（11-22 维护者「游戏库设置可以指定其他目录也作为游戏来源」）：资源包根照旧在 App 内，只有本体 game.img 是指向来源文件夹里导出 .img 的软链接
+//   （s2a_img_link），旁边 .game.img.source 记「来源号 \t 来源内相对路径 \t 资源包号」。读者（本文件、服务层 RomFsIndex）经软链接照常读；
+//   外部文件只读——本文件凡是写 game.img 的地方先判 ext_img：截派生件不做、套着色器更新包不整理本体、电脑推同一款先拆掉软链接再写进 App
+#define S2A_EXT_MARK ".game.img.source"   // 点开头：解开时「删掉不在 index.tsv 里的旧文件」不删它（prune 跳过点开头的记账文件）
+static int ext_img(const char *root) { char p[2300]; struct stat st; snprintf(p, sizeof p, "%s/game.img", root); return !lstat(p, &st) && S_ISLNK(st.st_mode); }
+static int ext_offline(const char *root) {   // 软链接在、却打不开 = 来源离线（外接盘拔了 / 文件夹被挪走 / 本进程没拿到访问权）
+    if (!ext_img(root)) return 0;
+    char p[2300]; snprintf(p, sizeof p, "%s/game.img", root); int fd = open(p, O_RDONLY); if (fd >= 0) { close(fd); return 0; }
+    return 1;
+}
+static void ext_unlink(const char *root, const char *why) {   // 拆掉软链接与来源记录（外部文件不动）
+    char p[2300]; snprintf(p, sizeof p, "%s/game.img", root);
+    if (ext_img(root)) { unlink(p); LOG("外部游戏来源：%s，拆掉 %s 指向外部文件的软链接（外部文件不动）", why, root); }
+    snprintf(p, sizeof p, "%s/" S2A_EXT_MARK, root); unlink(p);
 }
 // 玩家导入（s2a_import_gate）用：每批解完回调一次（已解批数、总批数），失败原因留给提示页
 void (*s2a_pack_apply_progress)(int done, int total);
@@ -786,7 +803,7 @@ static uint8_t *upd_toc_bytes(upd_ent *e, size_t n, size_t *len) {   // 同 pack
 // 摘掉本体 game.img 目录表里的派生件条目：新目录表先写在旧派生件占的那段里（和旧目录表不重叠），再一笔改头（目录表位置 / 长度 / 整长），最后截短。
 //   改头前断电：头还指着旧目录表、旧表完好；改头后断电：截短没做只是文件长一点，头里整长已对（读法按头）。→ 新整长；没有派生件条目时原样返回旧整长
 static int64_t upd_strip_base(const char *base) {
-    int fd = open(base, O_RDWR); if (fd < 0) return -1;
+    int fd = open(base, O_RDWR | O_NOFOLLOW); if (fd < 0) return -1;   // 外部来源的本体是软链接：只读，不顺着改外部文件（ELOOP）
     uint8_t h[136]; int64_t rc = -1; upd_ent *e = NULL; size_t n = 0;
     if (pread(fd, h, sizeof h, 0) != (ssize_t)sizeof h) goto out;
     uint64_t ro, rl, to, tl, total; memcpy(&ro, h + 96, 8); memcpy(&rl, h + 104, 8); memcpy(&to, h + 112, 8); memcpy(&tl, h + 120, 8); memcpy(&total, h + 128, 8);
@@ -835,7 +852,7 @@ static uint64_t index_img_len(const char *root) {   // index.tsv 里 game.img �
     fclose(f); return v;
 }
 static void img_shed(const char *root, const char *logp) {   // 导入来的本体截掉已解成文件的派生件（0.6.0 起通用壳是唯一装法，不再有开关）
-    if (!came_from_import(root)) return;
+    if (!came_from_import(root) || ext_img(root)) return;   // 外部来源的本体只读：重复的派生件留在外部文件里（只占外接盘；运行时读的是解出来的那份，game.imgmap 头里的整长也就是外部文件全长）
     char ip[2400]; snprintf(ip, sizeof ip, "%s/game.img", root);
     int fd = open(ip, O_RDONLY); if (fd < 0) return;
     uint8_t h[136]; upd_ent *e = NULL; size_t n = 0; uint64_t to, tl, total0;
@@ -943,12 +960,12 @@ static int img_update(const char *proc_docs, const char *path, const uint8_t *h,
     int64_t nt = 0; tx_t *tx = calloc(1, sizeof *tx); if (!tx && !rc) { rc = -4; snprintf(g_img_err, sizeof g_img_err, "内存不够"); }
     // 本体目录表在副本上整理（APFS 克隆：不占空间、瞬间完成），换名进去时旧本体留作退路；克隆不了（非 APFS）才退回原地整理（失败时本体退不回去）
     char nb[1600]; snprintf(nb, sizeof nb, "%s.upd.tmp", base); unlink(nb);
-    int cloned = 0;
+    int cloned = 0, ext = ext_img(root);   // 外部来源的本体只读：不克隆、不整理，整长照外部文件全长（派生件照常写进 App）
 #if defined(__APPLE__)
-    if (!rc) cloned = !clonefile(base, nb, 0);
+    if (!rc && !ext) cloned = !clonefile(base, nb, 0);
 #endif
     if (!rc) { mf_aside(root, 0);   // 先作废（留退路）：写到一半断了不会判成就绪
-        nt = upd_strip_base(cloned ? nb : base);
+        struct stat es; nt = !ext ? upd_strip_base(cloned ? nb : base) : stat(base, &es) ? -1 : (int64_t)es.st_size;
         if (nt < 0) { rc = -4; snprintf(g_img_err, sizeof g_img_err, "整理本体 game.img 的目录表失败：%s", strerror(errno)); }
         else if (cloned && tx_swap(tx, nb, base, NULL)) { rc = -4; snprintf(g_img_err, sizeof g_img_err, "换上整理过的本体失败：%s", strerror(errno)); } }
     if (cloned && rc) unlink(nb);
@@ -1084,6 +1101,7 @@ static int img_place(const char *proc_docs, const char *path, int pass) {   // 0
     snprintf(p, sizeof p, "%s/manifest.json", root); snprintf(tp, sizeof tp, "%s.tmp", p);
     FILE *m = fopen(tp, "w"); if (!m || fputs(mf, m) < 0 || fclose(m) || rename(tp, p)) { snprintf(g_img_err, sizeof g_img_err, "写 manifest.json 失败：%s", strerror(errno)); unlink(tp); IMG_PLACE_FAIL(); }
     mark_imported(root, mf);
+    { char sp[2400]; snprintf(sp, sizeof sp, "%s/" S2A_EXT_MARK, root); unlink(sp); }   // 原先是外部来源的款：本体已换成 App 内这份（软链接被改名盖掉），来源记录作废
 #undef IMG_PLACE_FAIL
     tx_done(tx); tx_free(tx);
     mf_aside(root, 2);
@@ -1277,12 +1295,165 @@ static int img_scan_dir(const char *proc_docs, const char *dir, int depth, int p
 }
 // 认领只扫 Documents 下的导入文件夹（v0.3.0 起，原先扫整个 Documents）：名字按界面语言建（app.m），两种都认，切了语言照样认
 const char *const s2a_img_import_dirs[2] = {"放这里导入", "Import Here"};
+static pthread_mutex_t g_scan_mu = PTHREAD_MUTEX_INITIALIZER;   // 认领（导入文件夹）与外部来源链接共用：同一款的资源包根一次只一边改
 int s2a_img_scan(const char *proc_docs) {   // 回前台 / 「重新检查」可能同时调：一把锁串起来，免得两边抢着挪同一个文件
-    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
-    pthread_mutex_lock(&mu); int placed = 0; g_img_err[0] = 0; g_img_code[0] = 0; g_img_noshaders[0] = 0; g_img_skipped[0] = 0;
+    pthread_mutex_lock(&g_scan_mu); int placed = 0; g_img_err[0] = 0; g_img_code[0] = 0; g_img_noshaders[0] = 0; g_img_skipped[0] = 0;
     for (int pass = 0; pass < 2; pass++)   // 先完整包、后更新包（img_place）
         for (int i = 0; i < 2; i++) { char dir[2200]; snprintf(dir, sizeof dir, "%s/%s", proc_docs, s2a_img_import_dirs[i]); img_scan_dir(proc_docs, dir, 0, pass, &placed); }
-    pthread_mutex_unlock(&mu); return placed;
+    pthread_mutex_unlock(&g_scan_mu); return placed;
+}
+// ---- 外部游戏来源（11-22 维护者：游戏库设置里加的「游戏来源文件夹」，如外接硬盘）----
+//   壳（S2ArmShellHost GameSources.swift）解析书签、拿到访问权后把文件夹路径与来源号交进来。只认电脑「导出」的完整 .img（格式 1、头魔数 S2AIMG01、
+//   目录表读得出且列着 exefs/main.npdm = 拷完），文件名以 .img 结尾，往下最多两层（同导入文件夹、同 NX2Apple）。不挪、不改外部文件：本款资源包根照旧在 App 内，
+//   game.img 是指向它的软链接，.game.img.source 记「来源号 \t 相对路径 \t 资源包号」；之后同导入一样等游戏库解开（派生件解进 App）。
+//   来源里的 .s2arm（程序件）在扫描时导进 App（盘上的不删、同一个文件不重导，见 s2a_img_scan_source）。
+//   不认：着色器更新包（格式 2，放「放这里导入」照常套）、手机导出的 romfs 镜像。
+//   App 内已有这款的真本体（电脑推的 / 导入的）：以 App 内为准，不换成外部的（离线也能玩），记一行
+// 返回 0 = 新链好（等解开）；2 = 已是这份，没动；3 = 同一份换了位置（外接盘重新挂载路径变了），只改软链接；1 = 不是可认的 .img / 还在拷 / App 内已有（不动）；负数 = 失败
+int s2a_img_link(const char *proc_docs, const char *path, const char *srcid, const char *rel) {
+    int fd = open(path, O_RDONLY); if (fd < 0) return 1;
+    uint8_t h[136]; struct stat st; int ok = pread(fd, h, sizeof h, 0) == (ssize_t)sizeof h && !memcmp(h, "S2AIMG01", 8) && !fstat(fd, &st); close(fd);
+    if (!ok) return 1;
+    uint64_t total; uint32_t fmt; memcpy(&total, h + 128, 8); memcpy(&fmt, h + 8, 4);
+    if (fmt != 1 || total != (uint64_t)st.st_size) return 1;   // 更新包 / 还在拷
+    { img_ent *te; size_t tn; int has = 0; if (img_toc_file(path, &te, &tn)) return 1;
+      for (size_t i = 0; i < tn && !has; i++) has = !strcmp(te[i].rel, "exefs/main.npdm"); img_free(te, tn); if (!has) return 1; }
+    char gid[17], pid[65]; memcpy(gid, h + 16, 16); gid[16] = 0; memcpy(pid, h + 32, 64); pid[64] = 0;
+    for (int i = 0; i < 16; i++) if (!((gid[i] >= '0' && gid[i] <= '9') || (gid[i] >= 'A' && gid[i] <= 'F'))) { snprintf(g_img_err, sizeof g_img_err, "%s 头里的游戏号不对", path); return -10; }
+    if (!pid[0]) snprintf(pid, sizeof pid, "img-%llx", (unsigned long long)total);
+    char root[1400], gp[2400], sp[2400], gdocs[1200]; snprintf(gdocs, sizeof gdocs, "%s/games/%s", proc_docs, gid); s2a_pack_root(root, sizeof root, gdocs);
+    if (pack_in_bundle(root, "链接外部 IMG")) return 1;
+    snprintf(gp, sizeof gp, "%s/game.img", root); snprintf(sp, sizeof sp, "%s/" S2A_EXT_MARK, root);
+    struct stat ls; int have = !lstat(gp, &ls);
+    if (have && !S_ISLNK(ls.st_mode)) {   // App 内已有真本体：不换（同一款外接盘上也有，以 App 内为准）
+        static char said[8][17]; static int nsaid; int seen = 0; for (int i = 0; i < nsaid; i++) seen |= !strcmp(said[i], gid);
+        if (!seen) { if (nsaid < 8) snprintf(said[nsaid++], sizeof *said, "%s", gid); LOG("外部游戏来源：%s 在 App 内已有本体，以 App 内为准，不改用来源里的 %s", gid, rel); }
+        return 1; }
+    char line[1600]; snprintf(line, sizeof line, "%s\t%s\t%s\n", srcid, rel, pid);
+    if (have) {   // 已是软链接：同一份（来源号与资源包号都对）→ 目标路径没变不动，变了只改软链接（不重解）
+        char old[1600] = ""; FILE *f = fopen(sp, "r"); if (f) { size_t k = fread(old, 1, sizeof old - 1, f); fclose(f); old[k] = 0; }
+        char *t1 = strchr(old, '\t'), *t2 = t1 ? strchr(t1 + 1, '\t') : NULL;
+        if (t1 && t2 && (size_t)(t1 - old) == strlen(srcid) && !strncmp(old, srcid, strlen(srcid)) && !strncmp(t2 + 1, pid, strlen(pid)) && (t2[1 + strlen(pid)] == '\n' || !t2[1 + strlen(pid)])) {
+            char cur[2400]; ssize_t k = readlink(gp, cur, sizeof cur - 1); cur[k > 0 ? k : 0] = 0;
+            if (k > 0 && !strcmp(cur, path)) return 2;
+            char tl[2500]; snprintf(tl, sizeof tl, "%s.lnk.tmp", gp); unlink(tl);
+            if (symlink(path, tl) || rename(tl, gp)) { int e = errno; unlink(tl); snprintf(g_img_err, sizeof g_img_err, "改 %s 的软链接失败：%s", gid, strerror(e)); return -4; }
+            if (write_atomic(root, S2A_EXT_MARK, line)) LOG("【黄】外部游戏来源：%s 的来源记录没写成（%s），下次扫描再写", gid, strerror(errno));
+            LOG("外部游戏来源：%s 换了位置（%s → %s），只改软链接", gid, cur, path);
+            return 3; }
+        // 已链着别的一份、那份还打得开：别的来源里的同一款不抢（两个来源各有一份时，原先每次扫描来回改链、每次重解）；
+        //   同一来源里的另一份（扫描已只挑最新的那份）比现在链着的新才换。现在那份打不开（盘拔了 / 文件删了）就换成这份
+        { int cfd = open(gp, O_RDONLY); struct stat cs;
+          if (cfd >= 0) { int ok2 = !fstat(cfd, &cs); close(cfd);
+              int same = t1 && (size_t)(t1 - old) == strlen(srcid) && !strncmp(old, srcid, strlen(srcid));
+              if (ok2 && (!same || st_mtime_ns(&cs) >= st_mtime_ns(&st))) return 1; } }
+    }
+    if (mkdirs(gp)) { snprintf(g_img_err, sizeof g_img_err, "建 %s 失败：%s", root, g_untar_err); return -4; }
+    mf_aside(root, 0);   // 先作废（留退路）：链到一半断了不会判成就绪
+    char tl[2500]; snprintf(tl, sizeof tl, "%s.lnk.tmp", gp); unlink(tl);
+    if (symlink(path, tl) || rename(tl, gp)) { int e = errno; unlink(tl); mf_aside(root, 1); snprintf(g_img_err, sizeof g_img_err, "给 %s 建软链接失败：%s", gid, strerror(e)); return -4; }
+    // index.tsv / 清单：同 img_place（game.img 一行 + 原有的着色器库 / 覆盖层行；清单版本 3、资源包号取头）
+    char ip[2400], tp[2500]; snprintf(ip, sizeof ip, "%s/index.tsv", root); snprintf(tp, sizeof tp, "%s.tmp", ip);
+    FILE *o = fopen(tp, "w"), *in = fopen(ip, "r");
+    if (!o) { if (in) fclose(in); snprintf(g_img_err, sizeof g_img_err, "写 index.tsv 失败：%s", strerror(errno)); unlink(gp); mf_aside(root, 1); return -4; }
+    fprintf(o, "game.img\t%llu\t-\n", (unsigned long long)total);
+    if (in) { char l[4600]; while (fgets(l, sizeof l, in)) if (!strncmp(l, "shaders/", 8) || !strncmp(l, "romfs_overlay/", 14)) fputs(l, o); fclose(in); }
+    if (fclose(o) || rename(tp, ip)) { snprintf(g_img_err, sizeof g_img_err, "写 index.tsv 失败：%s", strerror(errno)); unlink(tp); unlink(gp); mf_aside(root, 1); return -4; }
+    char mf[600]; snprintf(mf, sizeof mf, "{\"version\": 3, \"format\": \"img\", \"imgFile\": \"game.img\", \"index_sha256\": \"%s\"}\n", pid);
+    if (write_atomic(root, "manifest.json", mf) || write_atomic(root, S2A_EXT_MARK, line)) { snprintf(g_img_err, sizeof g_img_err, "写 %s 的清单失败：%s", gid, strerror(errno)); unlink(gp); mf_aside(root, 1); return -4; }
+    mark_imported(root, mf);
+    mf_aside(root, 2);
+    LOG("外部游戏来源：%s → %s/game.img（软链接，%llu MB，外部文件不动），等游戏库解开", rel, root, (unsigned long long)(total >> 20));
+    return 0;
+}
+static int ends_with_ci(const char *s, const char *t) { size_t a = strlen(s), b = strlen(t); return a >= b && !strcasecmp(s + a - b, t); }
+// 一次扫描里认出的候选：同一款只链一份（同一来源里同款有两份 .img——老「S2Arm 自签导出」与「S2Arm 游戏包」各一份等——
+//   原先按读目录的次序逐个链，每次扫描都来回改链、每次重解）。取修改时间最新的；一样新取路径字典序小的，次次结果相同
+typedef struct { char *path; char gid[17]; long long mtime; } src_cand;
+typedef struct { char **p; int n, cap; } src_list;   // 来源里的 .s2arm（程序件，11-22 维护者「一块盘 Mac / iPhone 两端通用」：随 .img 一起放在盘上，扫描时导进 App）
+static void src_scan_dir(const char *dir, int depth, const char *skip, src_cand **c, int *nc, int *cap, src_list *progs) {
+    DIR *d = opendir(dir); if (!d) return;
+    char *names[512]; int nn = 0; struct dirent *e;
+    while ((e = readdir(d)) && nn < 512) { if (e->d_name[0] == '.') continue; names[nn++] = strdup(e->d_name); }
+    closedir(d);
+    for (int i = 0; i < nn; i++) {
+        char p[2400]; struct stat st; snprintf(p, sizeof p, "%s/%s", dir, names[i]);
+        if (!lstat(p, &st)) {
+            if (S_ISDIR(st.st_mode) && depth < 2) src_scan_dir(p, depth + 1, skip, c, nc, cap, progs);
+            else if (S_ISREG(st.st_mode) && ends_with_ci(names[i], ".s2arm")) {
+                if (progs->n == progs->cap) { progs->cap = progs->cap ? progs->cap * 2 : 8; progs->p = realloc(progs->p, (size_t)progs->cap * sizeof *progs->p); }
+                progs->p[progs->n++] = strdup(p); }
+            else if (S_ISREG(st.st_mode) && st.st_size >= 4096 && ends_with_ci(names[i], ".img")) {
+                // 只收拷完的完整包（格式 1、头里的整长 = 文件长）：拷到一半的同款不能因为更新就被挑中、把能用的那份挤掉
+                int fd = open(p, O_RDONLY); uint8_t gh[136]; uint32_t gf = 0; uint64_t gt = 0;
+                int got = fd >= 0 && pread(fd, gh, sizeof gh, 0) == (ssize_t)sizeof gh && !memcmp(gh, "S2AIMG01", 8) && (memcpy(&gf, gh + 8, 4), memcpy(&gt, gh + 128, 8), gf == 1 && gt == (uint64_t)st.st_size);
+                if (fd >= 0) close(fd);
+                if (got) { char g[17]; memcpy(g, gh + 16, 16); g[16] = 0; for (int k = 0; k < 16; k++) if (g[k] >= 'a' && g[k] <= 'f') g[k] -= 32;
+                    // 玩家在库里删过的款：例行扫描不再链回来（玩家主动加文件夹时壳不传，删过的回到库里）
+                    if (!(skip && *skip && strstr(skip, g))) {
+                        if (*nc == *cap) { *cap = *cap ? *cap * 2 : 16; *c = realloc(*c, (size_t)*cap * sizeof **c); }
+                        (*c)[*nc].path = strdup(p); snprintf((*c)[*nc].gid, 17, "%s", g); (*c)[*nc].mtime = st_mtime_ns(&st); (*nc)++; } } }
+        }
+        free(names[i]);
+    }
+}
+// 扫一个外部来源文件夹（壳已拿到访问权）：返回新链 / 改链的款数；文件夹打不开（离线）→ -1（不动已链的款，库里按软链接打不开显示离线）。
+//   skip：玩家在库里删过的游戏号（逗号隔开，大写；NULL / 空 = 不跳过）
+int s2a_img_scan_source(const char *proc_docs, const char *dir, const char *srcid, const char *skip) {
+    if (!proc_docs || !*proc_docs || !dir || !*dir || !srcid || !*srcid || strchr(srcid, '\t') || strchr(srcid, '\n')) return -1;
+    DIR *d = opendir(dir); if (!d) return -1; closedir(d);
+    pthread_mutex_lock(&g_scan_mu); int n = 0, nc = 0, cap = 0; src_cand *c = NULL; src_list progs = {0}; g_img_err[0] = 0;
+    src_scan_dir(dir, 0, skip, &c, &nc, &cap, &progs);
+    // 程序件 .s2arm：拷进 App（程序要在 App 里签、执行），盘上的不删；同一个文件（来源号 + 相对路径 + 大小 + 修改时间）导过就不再导，记在 .source-s2arm.tsv；
+    //   导失败的同一个文件本进程内不再重试（同导入文件夹，scan_failed_*）。.s2arm 在前：同一次扫描里它带来的派生件与清单先到，.img 再链（img_scan_dir 同一个次序）
+    { char base[1200], memo[1400]; if (s2a_pack_base(base, sizeof base, proc_docs) < 0) snprintf(base, sizeof base, "%s", proc_docs);
+      snprintf(memo, sizeof memo, "%s/.source-s2arm.tsv", base);
+      char *seen = NULL; { FILE *f = fopen(memo, "r"); if (f) { fseek(f, 0, SEEK_END); long len = ftell(f); fseek(f, 0, SEEK_SET);
+          if (len > 0 && len < (8 << 20) && (seen = malloc((size_t)len + 2))) { size_t k = fread(seen + 1, 1, (size_t)len, f); seen[0] = '\n'; seen[k + 1] = 0; } fclose(f); } }
+      for (int i = 0; i < progs.n; i++) { struct stat st; const char *rel = progs.p[i] + strlen(dir) + 1;
+          if (stat(progs.p[i], &st) || scan_failed_same(progs.p[i], &st)) { free(progs.p[i]); continue; }
+          char key[1800]; snprintf(key, sizeof key, "\n%s\t%s\t%lld\t%lld\n", srcid, rel, (long long)st.st_size, st_mtime_ns(&st));
+          if (seen && strstr(seen, key)) { free(progs.p[i]); continue; }
+          char g[17] = ""; int r = s2a_s2arm_import(proc_docs, progs.p[i], g, sizeof g);
+          if (!r) { FILE *f = fopen(memo, "a"); if (f) { fputs(key + 1, f); fclose(f); } n++; LOG("外部游戏来源：导入程序件 %s → %s（盘上的不删）", rel, g); }
+          else if (r < 0) { if (!strstr(g_s2arm_code, "space")) scan_failed_note(progs.p[i], &st); LOG("【红】外部游戏来源：程序件 %s 没导进（%s）：%s", rel, g_s2arm_code, g_s2arm_err); }
+          free(progs.p[i]); }
+      free(progs.p); free(seen); }
+    for (int i = 0; i < nc; i++) {
+        int best = 1; for (int j = 0; j < nc && best; j++) if (j != i && !strcmp(c[j].gid, c[i].gid))
+            best = c[i].mtime > c[j].mtime || (c[i].mtime == c[j].mtime && strcmp(c[i].path, c[j].path) < 0);
+        if (best) { int r = s2a_img_link(proc_docs, c[i].path, srcid, c[i].path + strlen(dir) + 1);
+            if (r == 0 || r == 3) n++;
+            else if (r < 0) LOG("【红】外部游戏来源：%s 没链上：%s", c[i].path + strlen(dir) + 1, g_img_err); }
+    }
+    for (int i = 0; i < nc; i++) free(c[i].path);
+    free(c);
+    pthread_mutex_unlock(&g_scan_mu);
+    if (n) LOG("外部游戏来源：%s 新链 / 改链 %d 款", dir, n);
+    return n;
+}
+// 玩家移除一个来源：从它链来的款删掉 App 内的资源包根（库里回到「需要游戏数据」），外部文件不动。返回拆了几款
+int s2a_pack_source_forget(const char *proc_docs, const char *srcid) {
+    if (!proc_docs || !*proc_docs || !srcid || !*srcid) return 0;
+    // 各款资源包根按 s2a_pack_root 取（容器里在 Library/…/S2Arm/games/<号>/资源包，别的文档根在 <文档根>/games/<号>/资源包）：两处的 games/ 都列游戏号
+    char dirs[2][1400]; int nd = 0, n = 0; char base[1200];
+    if (s2a_pack_base(base, sizeof base, proc_docs) >= 0) snprintf(dirs[nd++], sizeof dirs[0], "%s/games", base);
+    snprintf(dirs[nd++], sizeof dirs[0], "%s/games", proc_docs);
+    pthread_mutex_lock(&g_scan_mu);
+    for (int i = 0; i < nd; i++) { DIR *d = opendir(dirs[i]); if (!d) continue; struct dirent *e;
+        while ((e = readdir(d))) { if (e->d_name[0] == '.' || strlen(e->d_name) != 16) continue;
+            char gdocs[1200], root[1700], sp[1800], old[1600] = ""; snprintf(gdocs, sizeof gdocs, "%s/games/%s", proc_docs, e->d_name); s2a_pack_root(root, sizeof root, gdocs);
+            snprintf(sp, sizeof sp, "%s/" S2A_EXT_MARK, root);
+            FILE *f = fopen(sp, "r"); if (!f) continue; size_t k = fread(old, 1, sizeof old - 1, f); fclose(f); old[k] = 0;
+            if (!ext_img(root) || strncmp(old, srcid, strlen(srcid)) || old[strlen(srcid)] != '\t') continue;
+            // 整个资源包根删掉（App 内只有清单与解出来的派生件，再链上时从外部 .img 重解；不跟软链接，外部文件不动；存档、程序件不在这里）：
+            //   只拆软链接留着清单 / index.tsv，库会按「清单读不出、目录非空」判成传输中
+            ext_unlink(root, "玩家移除了这个游戏来源"); nftw(root, s2arm_rm_one, 16, FTW_DEPTH | FTW_PHYS);
+            n++; }
+        closedir(d); }
+    pthread_mutex_unlock(&g_scan_mu);
+    if (n) LOG("外部游戏来源：移除来源 %s，拆掉 %d 款的软链接", srcid, n);
+    return n;
 }
 // 资源还在传（11-02 维护者 测试设备2 暗黑3：推 21.7 GB 中途点开 App，已到的几批被解开、核对时 index.tsv 还没到，报「返回 -8」要玩家删文件夹重拷）。
 //   推送契约（tools/push_pack.py）：开推先把机上 manifest.json 置空，各批 tar 推进 .incoming/，index.tsv 与 manifest.json 最后推。所以下面任一条成立 = 这次推送还没完，不能开始解：
@@ -1389,7 +1560,7 @@ int s2a_import_state_game(const char *proc_docs, const char *gid) {
 //   头里 128 起的「整个文件长」不等于实际长度 = 没传完 / 被截断 → 不算就绪（同 init_fail.c 的判据）。只读 136 字节头；没有 game.img（散文件老包）照旧不管
 static int img_whole_or_absent(const char *root) {
     char p[2300]; snprintf(p, sizeof p, "%s/game.img", root);
-    int fd = open(p, O_RDONLY); if (fd < 0) return errno == ENOENT;
+    int fd = open(p, O_RDONLY); if (fd < 0) return errno == ENOENT && !ext_img(root);   // 外部来源的软链接打不开 = 来源离线，不算「没有本体的散文件包」
     uint8_t h[136]; struct stat st = {0}; uint64_t total = 0;
     int ok = pread(fd, h, sizeof h, 0) == (ssize_t)sizeof h && !memcmp(h, "S2AIMG01", 8) && !fstat(fd, &st) && (memcpy(&total, h + 128, 8), total == (uint64_t)st.st_size);
     close(fd);
@@ -1424,11 +1595,13 @@ int s2a_import_state_game_quick(const char *proc_docs, const char *gid) {
 //   2 传完了、只等解开——清单读得出、不在传（11-09 根修 Windows 装完游戏库空：推送开头把清单置空、最后才写，「清单读得出 + 包都写完」= 推送完整）。
 //     库在后台跑 s2a_pack_apply 解开（没有待解包时它只核对、写 .applied：只直写了镜像的推送、访达拷进来的也一样），显示「安装中」；核对不过报「安装没完成」；
 //   3 传输中——这次推送没完（清单还没写回，或还有包没写完）：有 .transfer 时库按它画进度，没有（老电脑端推的、被删了）时库按资源包里文件的改动判传断了；
+//   5 外部来源离线——本体是指向外部游戏来源的软链接、打不开（ext_offline）；
 //   0 没有（不显示）——只给「资源包」不在或是空的。原先清单读不出 / 在传又没有 .transfer 也给 0，有数据的款从库里静默消失（iOS 装机剃刀 #26 / #45）
 int s2a_game_install_state(const char *proc_docs, const char *gid) {
     if (!proc_docs || !*proc_docs || !gid || !*gid || strchr(gid, '/') || gid[0] == '.') return 0;
     char root[2200], mf[2300], want[200], why[256], gdocs[1200];
     snprintf(gdocs, sizeof gdocs, "%s/games/%s", proc_docs, gid); s2a_pack_root(root, sizeof root, gdocs); snprintf(mf, sizeof mf, "%s/manifest.json", root);
+    if (ext_offline(root)) return 5;   // 5 外部来源离线（外接盘没插 / 文件夹挪走）：库里留着、置灰、写「没有找到游戏所在位置」，插回自动恢复
     if (applied_ready(root)) return 1;
     if (partial_ready(root)) return 4;   // 部分可玩：库里显示可玩，点开始时闸门问一次（v0.3.1）
     if (manifest_sha(mf, want, sizeof want) || s2a_import_transferring(root, why, sizeof why)) {

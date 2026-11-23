@@ -1,0 +1,61 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
+index f55d22f824b5c15043bf8a1ffc8123170011f276..9a11ec9afd54d3946b0a39e640a7da20e9f4cf50 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
+@@ -43,9 +43,9 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+         // sensor：双 Joy-Con 左右各有读数时 0 = 左只、1 = 右只；-1 = 单一体感源（NpadImu.Push）
+         public void PushImu(PlayerIndex player, System.Numerics.Vector3 accelerationG, System.Numerics.Vector3 angularVelocityDegrees, ulong timestampUs, int sensor = -1)
+         {
+-            bool joyDual = player <= PlayerIndex.Handheld && Base(_device.Hid.SharedMemory.Npads[(int)player].InternalState.StyleSet) == NpadStyleTag.JoyDual;
++            NpadStyleTag style = player <= PlayerIndex.Handheld ? Base(_device.Hid.SharedMemory.Npads[(int)player].InternalState.StyleSet) : NpadStyleTag.None;
+ 
+-            Imu.Push(player, joyDual, accelerationG, angularVelocityDegrees, timestampUs, sensor);
++            Imu.Push(player, style, accelerationG, angularVelocityDegrees, timestampUs, sensor);
+         }
+ 
+         public void SetSixAxisActive(long userId, int handle, bool active)
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadImu.cs b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadImu.cs
+index d2d35291d1289b888a8826ad3ba99ae70c6a54e3..9d84a80dabaaa45ad350d17ccb2a13bb39a8dec0 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadImu.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadImu.cs
+@@ -1,3 +1,4 @@
++using Ryujinx.HLE.HOS.Services.Hid.Types.SharedMemory.Npad;
+ using Ryujinx.Memory;
+ using System;
+ using System.Numerics;
+@@ -77,8 +78,21 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+ 
+         // accelerationG：加速度（g），angularVelocityDegrees：角速度（度/秒），都是 NS2 原始坐标；timestampUs：读数的单调时间戳（微秒）
+         // sensor：双 Joy-Con 左右各有读数时 0 = 左只、1 = 右只各写各的；-1 = 单一体感源（双 Joy-Con 时左右写同一份，同改前）
+-        public void Push(PlayerIndex player, bool joyDual, Vector3 accelerationG, Vector3 angularVelocityDegrees, ulong timestampUs, int sensor = -1)
++        // style：这一格的样式（不含 Joy-Con 2 位）。
++        //   - Joy-Con（单只 / 一对）：读数按 Y 轴镜像（加速度 Y 取反，角速度 X、Z 取反）再写。实机（Joy-Con 2）：原始坐标写进 IMU，
++        //     两人各拿一只时手往左挥、画面往右；一对要求「立起握住」的检查一直不过。镜像后都对，左右两只同一口径。
++        //     只动 IMU 这一路：同一份读数走六轴（SixAxis）的项目照原始坐标是对的
++        //   - 单只右 Joy-Con 写右只那支传感器（传感器 1），同真机：游戏按样式读右只那格（改前一律写传感器 0，拿右只的玩家体感校准永远等不到读数）
++        internal void Push(PlayerIndex player, NpadStyleTag style, Vector3 accelerationG, Vector3 angularVelocityDegrees, ulong timestampUs, int sensor = -1)
+         {
++            bool joyDual = style == NpadStyleTag.JoyDual;
++            if (style is NpadStyleTag.JoyLeft or NpadStyleTag.JoyRight or NpadStyleTag.JoyDual)
++            {
++                accelerationG.Y = -accelerationG.Y;
++                angularVelocityDegrees.X = -angularVelocityDegrees.X;
++                angularVelocityDegrees.Z = -angularVelocityDegrees.Z;
++            }
++
+             lock (_lock)
+             {
+                 if (_memory == null)
+@@ -94,6 +108,12 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+                 {
+                     // 双 Joy-Con：左右各一支传感器（传感器 0 / 1）。左右各有读数时各写各的；单一体感源时左右同一份读数（同 NpadDevices.UpdateSixAxis 的 #55 做法）。
+                     //   左右同一份在手柄当车把一起倾斜时会被游戏当成两只反向转（左右两只坐标相反）、互相抵消
++                    if (style == NpadStyleTag.JoyRight)   // 单只右 Joy-Con：只有一路，写右只那支传感器
++                    {
++                        if (sensor != 1) Write(NpadSlotCount + (int)player, accelerationG, angularVelocityDegrees, timestampUs);
++                        return;
++                    }
++
+                     if (sensor != 1)   // 不是双 Joy-Con 样式时只认第一路（左只 / 单源），右只那份不写，免得一格里交错两只的读数
+                     {
+                         Write((int)player, accelerationG, angularVelocityDegrees, timestampUs);

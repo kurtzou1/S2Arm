@@ -19,7 +19,9 @@ namespace S2A.Services.Tests
     // ① 判定纯函数：时钟 1000 / 交付 1000 / 容差 480 → 不算跑前；1481 / 1000 → 跑前；500 / 1000 → 不算
     // ② 开播后（在途始终有数据）：时钟 − 交付量 = −（队列手上没播的帧）在 [−96000, 0]：不越过交付量；泵 32 槽最多交 1.6 秒 = 76800 帧，加设备延迟取 2 秒为界
     //   （11-21 首跑实测 −77549：在途满 32 槽）
-    // ③ 钩子 S2A_AUDIO_TEST_STALL_AT=1（开播第 1 秒外部暂停 → 没回调兜底重启），重启后 1.5 秒：仍在 [−96000, 0]。
+    // ③ 钩子 S2A_AUDIO_TEST_STALL_AT=1（开播第 1 秒外部暂停 → 没回调兜底重启），重启后再播 1.5 秒声音：仍在 [−96000, 0]。
+    //   等法（11-22 门禁偶发红）：「再播 1.5 秒」按队列自己播完的帧数涨 72000 判，不按墙钟睡 1.5 秒——本机负载高时（门禁里各模式并行、同用一个声卡）
+    //   重启后迟迟才重新开播，墙钟 1.5 秒里队列实际播得很少，读到的是调度。重启等 15 秒、再播等 15 秒为卡死上限
     //   若停队列后时间轴不归零，这时时钟 − 交付量 ≈ 重启前后已播的约 2.7 秒 − 满在途 1.6 秒 ≈ +52000 帧，判红
     //   负控：把 ② ③ 的判定换成「时钟 − 交付量 > 0」应全红（说明读数确实是负的在途，不是恒 0）——见行内 neg
     static class AppleAudioQueueClockTest
@@ -79,12 +81,17 @@ namespace S2A.Services.Tests
                 session.QueueBuffer(buf);
             }
 
-            Thread.Sleep(700);   // 第 1 秒钩子暂停前读一次（开播后约 0.7 秒）
-            long p2 = Past();
+            // 开播后读一次：等队列真播起来（播完 ≥ 4800 帧 = 0.1 秒）、且读得到时钟（队列在跑；停着时 Past 回 long.MinValue）。
+            //   原先墙钟睡 700 ms：调度慢时这一刻可能正落在钩子暂停 / 重启里，读到 long.MinValue 判红（11-22 后台 QoS 下复现）。15 秒为卡死上限
+            long p2 = long.MinValue;
+            var sw2 = Stopwatch.StartNew();
+            while (sw2.ElapsedMilliseconds < 15000 && (session.GetPlayedSampleCount() < 4800 || (p2 = Past()) == long.MinValue)) Thread.Sleep(10);
             Row("② 开播后正常播", "时钟 − 交付量 在 [−96000, 0]", past == null ? "会话上没有 S2AQueuePastSubmitted" : $"{p2} 帧", p2 != long.MinValue && p2 <= 0 && p2 >= -96000);
 
-            bool healed = WaitLog("没有回调", 4000);
-            Thread.Sleep(1500);
+            bool healed = WaitLog("没有回调", 15000);
+            ulong q0 = session.GetPlayedSampleCount();
+            var sw3 = Stopwatch.StartNew();
+            while (healed && session.GetPlayedSampleCount() - q0 < 72000 && sw3.ElapsedMilliseconds < 15000) Thread.Sleep(20);
             long p3 = Past();
             Row("③ 重启（停队列）后再播 1.5 秒", "重启发生，时钟 − 交付量 在 [−96000, 0]（时间轴与交付计数一起归零）", healed ? $"重启了，{p3} 帧" : "没重启", healed && p3 != long.MinValue && p3 <= 0 && p3 >= -96000);
             bool neg = p2 > 0 || p3 > 0;

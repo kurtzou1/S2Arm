@@ -6708,6 +6708,10 @@
   "en": "This game can't be packaged yet. Try an official game; if you are sure this is a retail game, click \"Copy error summary\" and send it to us."
  },
  {
+  "source": "这款还没适配，点「复制错误摘要」发给我们，我们按它补上。",
+  "en": "This game isn't supported yet. Click \"Copy error summary\" and send it to us, and we'll add support."
+ },
+ {
   "source": "正在传输资源",
   "en": "Transferring resources"
  },
@@ -7116,8 +7120,8 @@
   "en": "Run \"Build for iPhone\" once for each game named, then install on iPhone. Or confirm to install without them this time: their saves and resources stay on the phone, and they come back once you rebuild and install them."
  },
  {
-  "source": "这款游戏暂不支持：程序的结构我们还不认识，多见于自制或移植的程序。",
-  "en": "This game is not supported yet. We don't recognize how this program is built yet; this is common for homebrew or ported programs."
+  "source": "这款游戏暂不支持：出包工具还没适配这款游戏的程序结构。请把诊断发给我们，我们按它补上。",
+  "en": "This game is not supported yet. The packer doesn't handle how this game's program is built yet. Please send us a diagnostic and we'll add support."
  },
  {
   "source": "可以点「仍然用这里」照用这块盘（出包会多占空间）；想省空间就从下面列出的 NTFS 盘里选一块，点「放到这里」。",

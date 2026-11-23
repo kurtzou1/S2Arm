@@ -424,7 +424,7 @@
        "next_action": {"from": "pack/jobs/errors.py"}},
       {"code": "game_structure_unsupported", "severity": "error", "retryable": false, "recoverable": false,
        "title": {"zh-Hans": "这款游戏暂不支持", "en": "This game is not supported yet"},
-       "detail": {"zh-Hans": "程序的结构我们还不认识，多见于自制或移植的程序。", "en": "We don't recognize how this program is built yet; this is common for homebrew or ported programs."},
+       "detail": {"zh-Hans": "出包工具还没适配这款游戏的程序结构。请把诊断发给我们，我们按它补上。", "en": "The packer doesn't handle how this game's program is built yet. Please send us a diagnostic and we'll add support."},
        "next_action": {"from": "pack/jobs/errors.py"}},
       {"code": "engine_incomplete", "severity": "error", "retryable": false, "recoverable": true,
        "title": {"zh-Hans": "引擎文件不完整", "en": "Engine files incomplete"},

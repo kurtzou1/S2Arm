@@ -61,7 +61,7 @@ def rebuild(c, gid, src_root, plat, work):
     _clone(c, src_root, roots / tag)
     for stale_out in ("shaders/direct", ".stage_direct", ".stage_direct_seed", ".stage_direct_cpso"):   # 旧库与它的阶段键不带进来：键对得上会被当成「已是本树」跳过
         p = roots / tag / stale_out
-        shutil.rmtree(p) if p.is_dir() else p.unlink(missing_ok=True)
+        layout.remove_tree(p) if p.is_dir() else p.unlink(missing_ok=True)
     layout.set_current(c, roots, gid, tag)
     env = c.env()
     # 直连缓存用这款出包时那份（library.direct_cache_dir，同 _rebuild_win）：Metal 编译结果与批成员索引按内容寻址，翻译器改了没变的支整批沿用旧库。
@@ -124,13 +124,22 @@ def _rebuild_win(c, gid, src_root, work):
     root, work = Path(src_root), Path(work) / "win"
     for stale_out in ("shaders/direct", "extract"):   # 旧库 / 旧抽取不带进来：按本引擎重抽重翻
         p = root / stale_out
-        shutil.rmtree(p) if p.is_dir() else p.unlink(missing_ok=True)
+        layout.remove_tree(p) if p.is_dir() else p.unlink(missing_ok=True)
     _win_profile(c, root)
     work.mkdir(parents=True, exist_ok=True)
     env = c.env()
     env.update(S2A_PACK_PLAT="ios", S2A_TARGET="ios", S2A_PY=sys.executable, S2A_DIRECT_CACHE=str(library.direct_cache_dir(c, gid)))
     logs = Path(c.logs) / c.task; logs.mkdir(parents=True, exist_ok=True)
-    c.run([sys.executable, "-X", "utf8", "-c", WIN_DIRECT, str(root), str(work), gid.upper()], logs / "sgbf_win_direct.log", env, cwd=c.engine)
+    try:
+        c.run([sys.executable, "-X", "utf8", "-c", WIN_DIRECT, str(root), str(work), gid.upper()], logs / "sgbf_win_direct.log", env, cwd=c.engine)
+    except Failure:
+        # D-Z2VA：直连库那一步的日志（direct_lib.log 等，oneclick_win.Run.sh 写在工作目录下）随临时目录删掉、诊断包里没有，定不了崩因：失败时拷进本任务日志目录
+        keep = logs / "win-direct"
+        for p in sorted(work.glob("*.log")):
+            if p.is_file() and p.stat().st_size <= 8 << 20:
+                keep.mkdir(exist_ok=True)
+                shutil.copyfile(p, keep / p.name)
+        raise
     got = (work / "direct_result.txt").read_text(encoding="utf-8").strip() if (work / "direct_result.txt").is_file() else None
     if got is None:
         raise Failure("重出直连着色器库的进程没交回结果")  # 非玩家句

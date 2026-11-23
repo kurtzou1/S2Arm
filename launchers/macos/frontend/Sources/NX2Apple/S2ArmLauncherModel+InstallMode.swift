@@ -45,10 +45,28 @@ extension S2ArmLauncherModel {
     /// 游戏库右上角按钮对应的那台（多台时取第一台：按钮点下去装的是现在连着的那台，作业里按它自己的记录再判一遍）
     var phoneUpdate: PhoneUpdate? { phoneUpdates.first }
 
-    /// 点「更新 iPhone 上的 S2Arm」：没有要重新出包的款直接更新；有就先弹三选一
-    func requestPhoneUpdate(language: String) {
-        guard let u = phoneUpdate else { return }   // 手机槽忙也能点：更新排到手机槽空出来（updatePhone）
-        if u.stale.isEmpty { updatePhone(acceptStale: false, repack: [], language: language) } else { updateConfirm = u }
+    /// 玩家点默认入口时重查 catalog，避免界面仍拿着换线前的设备列表。
+    @discardableResult
+    func requestPhoneUpdate(language: String) -> Task<Void, Never> {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                self.phoneUpdates = try await self.provider.library.readPhoneUpdates()
+            } catch {
+                self.reportFailure("s2arm.fail.targets", error)
+                return
+            }
+            if let update = self.phoneUpdate { self.requestPhoneUpdate(update, language: language) }
+        }
+    }
+
+    /// 一次确认只对应一台设备，确认页打开后换线也沿用这个对象。
+    func requestPhoneUpdate(_ update: PhoneUpdate, language: String) {
+        if update.stale.isEmpty {
+            updatePhone(acceptStale: false, repack: [], language: language, device: update.device)
+        } else {
+            updateConfirm = update
+        }
     }
 
     /// 三选一的结果：repack = 更新完要排进批量出包的款（「更新并重新出这几款」），空 = 「只更新，其他稍后」

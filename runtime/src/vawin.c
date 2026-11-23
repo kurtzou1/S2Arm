@@ -1282,8 +1282,9 @@ static int ctr_add(char (*ids)[208], int *n, const char *gid) {
     if (*n >= CTR_MAX) return -1;
     snprintf(ids[(*n)++], 208, "%s", gid); return 0;
 }
+static char g_ctr_ok[CTR_MAX][208]; static int g_ctr_nok;   // 多款容器构造期算进窗口的各款
 uint64_t s2a_window_container_need(const char *bundle, const char *home) {
-    g_ctr_astype = -1; g_ctr_pool = 0;
+    g_ctr_astype = -1; g_ctr_pool = 0; g_ctr_nok = 0;
     int (*ppaths)(const char *, const char *, char *, char *, char *, size_t) = (int (*)(const char *, const char *, char *, char *, char *, size_t))dlsym(RTLD_DEFAULT, "s2a_program_game_paths");
     int (*proot)(char *, size_t, const char *) = (int (*)(char *, size_t, const char *))dlsym(RTLD_DEFAULT, "s2a_program_games_root");
     static char ids[CTR_MAX][208]; int nid = 0; struct dirent *e;
@@ -1345,6 +1346,7 @@ uint64_t s2a_window_container_need(const char *bundle, const char *home) {
           if (!sl) { span_unknown = 1; LOG("地址窗口：多款容器 %s 本机没记下跨度、种子表也没有：这款跨度不知道，按需起局、边玩边学", gid); }
           if (sl > span_max) span_max = sl; }
         if (ni > top) top = ni;
+        if (g_ctr_nok < CTR_MAX) snprintf(g_ctr_ok[g_ctr_nok++], sizeof g_ctr_ok[0], "%s", gid);   // 构造期给快照原址护栏逐款查快照（snap_guard_take）
         n++;
     }
     g_ctr_empty = ok && !n;
@@ -1408,6 +1410,7 @@ static void pick_hole(uint64_t hi, uint64_t want, uint64_t *at, uint64_t *sz, ui
     pick_hole_in(0, hi, want, at, sz, fit, fit_at, low_want, low_at);
 }
 static void cmd_arena_reserve(void);
+static void snap_guard_take(void), snap_guard_drop(void);
 static void vawin_reserve(void) {
     const char *e = getenv("S2A_VAWIN_NORESERVE"); g_noreserve = e && *e == '1';
     if (g_noreserve) { s2a_window_probe("构造函数（不占窗口）"); vaguard_release(); return; }
@@ -1528,6 +1531,7 @@ static void vawin_reserve(void) {
     if (cap) { uint64_t ft = 0; int fn = 0, fb = 0; fence_holes(at + want, 1ull << 39, &ft, &fn, &fb);   // 宿主保留段（窗口下方）由 iphone_va_fence 按低区规则处理
         LOG("地址窗口压到 %llu MB（S2A_VA_CAP_MB）：窗口之后到 2^39 的空洞 %d 段 %llu GB 已占死%s", (unsigned long long)(want >> 20), fn, (unsigned long long)(ft >> 30), fb ? "【红】有段没占上" : ""); }
     cmd_arena_reserve();   // 要在 iPhone 地址围栏之前：围栏把 2^39 之上的空洞几乎全占死（11-05 旷野之息录 / 放都报「2^39 之上没有 1024 MB 的空洞」）
+    snap_guard_take();     // 有快照的款：快照那局的窗口 / 命令记录区落点先占住，GC 与宿主的库进不去（要在 GC 上限重选之前）
 #if TARGET_OS_OSX
     iphone_va_fence();
 #endif
@@ -1555,6 +1559,7 @@ int s2a_window_reserve_late(void) {
     int ok = reserve_late_();
     if (g_noreserve) return ok;
     snap_retake();
+    snap_guard_drop();   // 普通局 / 恢复局都在起宿主前放（之后布局会按需 MAP_FIXED 铺别名区，不能留着自己的占位）
     return g_ok;
 }
 static int reserve_late_(void) {
@@ -1577,12 +1582,12 @@ static int reserve_late_(void) {
             npdm_astype(), (unsigned long long)(below_now >> 20), (unsigned long long)(below_real >> 20), g_ok ? "占位窗口占到了" : "占位窗口没占成");
         if (g_ok) munmap((void *)g_base, g_res);
         g_ok = 0; g_base = g_size = g_res = 0; g_need = 0;
-        vawin_reserve();
+        snap_guard_drop(); vawin_reserve();
         return g_ok;
     }
     if (!g_ok && !g_need) {
         LOG("地址窗口：构造期容器里没有可算的游戏（启动后才导入），起宿主前按现在的游戏补占");
-        vawin_reserve();
+        snap_guard_drop(); vawin_reserve();
         return g_ok;
     }
     if (g_ok && g_ctr && g_size >= g_need) {
@@ -1591,7 +1596,7 @@ static int reserve_late_(void) {
             LOG("地址窗口：构造期按 %llu MB 占的窗口 %#llx +%llu MB，启动后导入的款要 %llu MB，起宿主前放掉重占",
                 (unsigned long long)(was >> 20), (unsigned long long)g_base, (unsigned long long)(g_res >> 20), (unsigned long long)(now >> 20));
             munmap((void *)g_base, g_res); g_ok = 0; g_base = g_size = g_res = 0;
-            vawin_reserve();
+            snap_guard_drop(); vawin_reserve();
         }
     }
     return g_ok;
@@ -1615,6 +1620,58 @@ __attribute__((weak)) void s2a_snap_disable(int why) { (void)why; }   // snapsw.
 __attribute__((weak)) int s2a_snap_restoring(void) { return 0; }
 __attribute__((weak)) int s2a_snap_manifest_win(uint64_t *base, uint64_t *size) { (void)base; (void)size; return -1; }
 __attribute__((weak)) int s2a_snap_manifest_u64(const char *key, uint64_t *a, uint64_t *b) { (void)key; (void)a; (void)b; return -1; }
+__attribute__((weak)) int s2a_snap_layout_of(const char *gid, uint64_t *wb, uint64_t *ws, uint64_t *cb, uint64_t *cl) { (void)gid; *wb = *ws = *cb = *cl = 0; return -1; }
+// 快照原址护栏（11-22 0.6.9 候选：0.6.8 存的快照在 0.6.9 库里恢复，「按快照原址重占窗口占不到」）。
+//   恢复是玩家在游戏库里点的，构造期不知道：窗口按本局算的布局占，宿主保留段按本局学到的跨度定（0.6.9 学到 7284 MB → 宿主 18432 MB、窗口 0x7480000000 起），
+//   快照那局（没学到、宿主 6 GB）窗口从 0x7180000000 起。.NET GC 在游戏库界面起来时就在宿主段里保留约 10 GB，起宿主前按原址重占时那段已被占，只能拒绝。
+//   所以快照的布局要从构造期就赢：这台设备上有能用快照的各款（多款容器逐款、单款取本局），它们存档那局的窗口与命令记录区，凡不在本局自己占着的窗口 /
+//   命令记录区里的部分，构造期一并先占住（只占地址）。起宿主前（s2a_window_reserve_late）放掉：恢复局随即按原址占，普通局还给宿主。
+//   代价：这一进程里 GC 上限按护栏之后的低区选档（= 快照那局的宿主段大小，那局就是这样跑的）
+#define SG_MAX 64
+static struct { uint64_t b, e; } g_sg[SG_MAX]; static int g_sg_n;
+static void sg_add(uint64_t *v, int *n, uint64_t b, uint64_t e) { if (e > b && *n < 2 * SG_MAX) { v[(*n)++] = b; v[(*n)++] = e; } }
+// 区间 [b, e) 减去 [cb, ce)，剩下的（0–2 段）放进 v
+static void sg_sub(uint64_t *v, int *n, uint64_t b, uint64_t e, uint64_t cb, uint64_t ce) {
+    if (ce <= b || cb >= e || ce <= cb) { sg_add(v, n, b, e); return; }
+    sg_add(v, n, b, cb > b ? cb : b); sg_add(v, n, ce < e ? ce : e, e); }
+static int sg_cmp(const void *x, const void *y) { uint64_t a = *(const uint64_t *)x, b = *(const uint64_t *)y; return a < b ? -1 : a > b; }
+static void snap_guard_take(void) {
+    if (s2a_snap_restoring()) return;   // 构造期就知道要恢复：窗口已按清单原样占（vawin_reserve snap_win）
+#if TARGET_OS_OSX && !defined(S2A_UNIT_TEST)
+    return;   // Mac 的恢复（启动器 / 游戏里「回到这一刻」）都是新进程带 S2A_SNAP_RESTORE 起（snaprelaunch.c），构造期已知道，用不着护栏；普通局不白让宿主段
+#endif
+    uint64_t raw[4 * SG_MAX]; int nr = 0, ng = g_ctr ? g_ctr_nok : 1;
+    for (int i = 0; i < ng; i++) {
+        uint64_t wb, ws, cb, cl;
+        if (s2a_snap_layout_of(g_ctr ? g_ctr_ok[i] : NULL, &wb, &ws, &cb, &cl)) continue;
+        sg_add(raw, &nr, wb, wb + ws); sg_add(raw, &nr, cb, cb + cl);
+    }
+    if (!nr) return;
+    qsort(raw, (size_t)nr / 2, 2 * sizeof *raw, sg_cmp);   // 按起点排，合并重叠
+    uint64_t un[4 * SG_MAX]; int nu = 0;
+    for (int i = 0; i < nr; i += 2) { if (nu && raw[i] <= un[nu - 1]) { if (raw[i + 1] > un[nu - 1]) un[nu - 1] = raw[i + 1]; } else sg_add(un, &nu, raw[i], raw[i + 1]); }
+    // 减去本局自己占着的窗口与命令记录区（恢复时那两块是自己放、自己占的）
+    uint64_t ca_e = g_ca_base ? g_ca_base + CMD_ARENA + g_va_cap : 0;
+    for (int i = 0; i < nu; i += 2) {
+        uint64_t t1[8]; int n1 = 0; sg_sub(t1, &n1, un[i], un[i + 1], g_ok ? g_base : 0, g_ok ? g_base + g_res : 0);
+        for (int j = 0; j < n1; j += 2) {
+            uint64_t t2[4]; int n2 = 0; sg_sub(t2, &n2, t1[j], t1[j + 1], g_ca_base, ca_e);
+            for (int k = 0; k < n2 && g_sg_n < SG_MAX; k += 2) {
+                uint64_t b = t2[k], e = t2[k + 1];
+                void *p = mmap((void *)b, e - b, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);   // 不带 MAP_FIXED：核对落点，不盖别人
+                if (p != (void *)b) { if (p != MAP_FAILED) munmap(p, e - b);
+                    LOG("【黄】即时存档：快照那局的落点 %#llx +%llu MB 构造期占不到（已被占），恢复时按原址重占会拒绝", (unsigned long long)b, (unsigned long long)((e - b) >> 20)); continue; }
+                g_sg[g_sg_n].b = b; g_sg[g_sg_n++].e = e;
+                LOG("即时存档：快照那局的落点 %#llx +%llu MB 不在本局窗口 / 命令记录区里，构造期先占住（只占地址），起宿主前放：恢复按原址占、普通局还给宿主",
+                    (unsigned long long)b, (unsigned long long)((e - b) >> 20));
+            }
+        }
+    }
+}
+static void snap_guard_drop(void) {
+    for (int i = 0; i < g_sg_n; i++) munmap((void *)g_sg[i].b, g_sg[i].e - g_sg[i].b);
+    g_sg_n = 0;
+}
 // 即时存档恢复：命令记录区 / 虚拟池区的地址写在游戏内存里（命令句柄、贴图 / 缓冲地址），必须与存档时同址。按快照清单里记的基址与长度直接占，
 //   不靠两次进程「最高空洞」碰巧相同（跨版本时宿主的库与堆布局会变）。占到返回 1；清单里没有 / 占不到返回 0（走原来的选址，图形恢复核基址时会拒绝）
 static int cmd_arena_at_snapshot(void) {
@@ -1661,6 +1718,7 @@ static int snap_retake(void) {
                    (unsigned long long)g_base, (unsigned long long)(g_size >> 20), (unsigned long long)g_ca_base, (unsigned long long)mwb, (unsigned long long)(mws >> 20), (unsigned long long)mcb, why);
                return -1; }
     uint64_t ob = g_base, os = g_res, oc = g_ca_base; int had = g_ok;
+    snap_guard_drop();   // 构造期替快照占住的落点：放给下面按原址占
     if ((plan & 1) && had) munmap((void *)ob, os);
     if ((plan & 2) && oc) munmap((void *)oc, cl);
     int bad = 0; void *p;

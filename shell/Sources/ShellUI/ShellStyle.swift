@@ -382,7 +382,8 @@ struct CoverView: View {
     var body: some View {
         ArtView(game: game)
             .aspectRatio(16 / 9, contentMode: .fit)
-            .overlay { if case .installing(let stage) = game.state { InstallMask(stage: stage) } }
+            .grayscale(game.state == .sourceOffline ? 1 : 0)   // 外部来源离线：封面置灰，盖一层带外接盘标记的暗幕（同安装中「停住」那样一直在，插回自己恢复）
+            .overlay { if case .installing(let stage) = game.state { InstallMask(stage: stage) } else if game.state == .sourceOffline { SourceOfflineMask() } }
             .clipShape(RoundedRectangle(cornerRadius: radius))
             .overlay(RoundedRectangle(cornerRadius: radius).strokeBorder(.white.opacity(0.10)))
             .overlay(alignment: .topLeading) {
@@ -437,6 +438,20 @@ struct InstallMask: View {
                     .foregroundStyle(.white.opacity(0.9))
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+/// A game whose source folder can't be reached: a dark veil with a drive sign, until the folder is back.
+struct SourceOfflineMask: View {
+    var body: some View {
+        GeometryReader { geometry in
+            let side = min(geometry.size.width, geometry.size.height)
+            ZStack {
+                Color.black.opacity(0.5)
+                Image(systemName: "externaldrive.badge.questionmark").font(.system(size: side * 0.22, weight: .semibold)).foregroundStyle(.white.opacity(0.9))
+            }
         }
         .accessibilityHidden(true)
     }
@@ -498,6 +513,7 @@ extension GameState {
         case .needsGameUpdate: ShellStrings.text("Update on your computer")
         case .needsLegacyUpdate: ShellStrings.text("Needs its .s2arm once")
         case .needsProgram: ShellStrings.text("Needs its .s2arm file")
+        case .sourceOffline: ShellStrings.text("Game location not found")
         case .needsCertificate(let need):
             switch need {
             case .missing: ShellStrings.text("Needs a signing certificate")
@@ -536,7 +552,7 @@ extension GameState {
     var color: Color {
         switch self {
         case .playable: ShellPalette.ready
-        case .needsGameData, .needsAppUpdate, .needsGameUpdate, .needsLegacyUpdate, .needsCertificate, .needsProgram: ShellPalette.attention
+        case .needsGameData, .needsAppUpdate, .needsGameUpdate, .needsLegacyUpdate, .needsCertificate, .needsProgram, .sourceOffline: ShellPalette.attention
         case .broken: ShellPalette.muted
         case .installing(let stage): stage.phase == .interrupted || stage.phase == .failed ? ShellPalette.attention : ShellPalette.muted
         }
@@ -556,6 +572,7 @@ extension GameState {
             case .replaced: ShellStrings.text("The certificate S2Arm was installed with has been replaced or revoked, for example when another computer refreshed it, so the one on this iPhone no longer works. Export the current certificate from the app you installed S2Arm with and import it again.")
             case .oldSignature: ShellStrings.text("This game was signed in a way this iPhone doesn't accept. Import your signing certificate and S2Arm signs it again on this iPhone when you play.")
             }
+        case .sourceOffline: ShellStrings.text("This game is in a game source folder S2Arm can’t reach right now, such as an external drive that isn’t connected. Connect the drive or put the folder back, and the game is ready again by itself. Your saves are in this app and aren’t affected. To stop using that folder, remove it under Game sources in Settings.")
         case .broken(_, let detail, _): detail
         case .installing(let stage):
             switch stage.phase {
@@ -574,7 +591,7 @@ extension GameState {
         case .needsAppUpdate, .needsGameUpdate: ShellStrings.text("How to update")
         case .needsLegacyUpdate, .needsProgram: ShellStrings.text("Import .s2arm…")
         case .needsCertificate: ShellStrings.text("Get certificate…")
-        case .broken: ShellStrings.text("How to fix")
+        case .broken, .sourceOffline: ShellStrings.text("How to fix")
         case .installing(let stage):
             switch stage.phase {
             case .transferring, .installing: ShellStrings.text("Play")
@@ -591,6 +608,7 @@ extension GameState {
         case .needsLegacyUpdate, .needsProgram: "square.and.arrow.down"
         case .needsCertificate: "checkmark.seal"
         case .broken: "wrench.and.screwdriver"
+        case .sourceOffline: "externaldrive.badge.questionmark"
         case .installing(let stage):
             switch stage.phase {
             case .transferring, .installing: "play.fill"
@@ -680,14 +698,14 @@ extension GameState {
         case .needsAppUpdate, .needsGameUpdate: ShellStrings.text("How to update")
         case .needsLegacyUpdate, .needsProgram: ShellStrings.text("Import")
         case .needsCertificate: ShellStrings.text("Get certificate")
-        case .broken: ShellStrings.text("How to fix")
+        case .broken, .sourceOffline: ShellStrings.text("How to fix")
         case .installing: actionTitle
         }
     }
     /// Broken, needs-an-update and a stopped transfer are fixed on the computer. Their primary action explains how, instead of acting.
     var needsHelp: Bool {
         switch self {
-        case .broken, .needsAppUpdate, .needsGameUpdate: true
+        case .broken, .needsAppUpdate, .needsGameUpdate, .sourceOffline: true
         #if os(tvOS)
         case .needsLegacyUpdate, .needsProgram: true   // 电视上没有文件选择器：只展开说明
         #endif

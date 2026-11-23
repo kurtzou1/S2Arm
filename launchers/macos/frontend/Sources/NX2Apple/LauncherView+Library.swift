@@ -63,23 +63,6 @@ extension LauncherView {
         }
     }
 
-    /// 免费签名快到期 / 已到期的提醒（只提最急的一款）。「×」= 不再提醒（关掉设置里的「免费签名到期提醒」，重新打开恢复）
-    @ViewBuilder var renewBanner: some View {
-        if let game = model.games.filter({ (model.freeSignDaysLeft($0) ?? 9) <= 1 }).min(by: { (model.freeSignDaysLeft($0) ?? 9) < (model.freeSignDaysLeft($1) ?? 9) }), let days = model.freeSignDaysLeft(game) {
-            HStack(spacing: 12) {
-                Image(systemName: "clock.badge.exclamationmark").foregroundStyle(LauncherPalette.building)
-                Text((days == 0 ? txt("library.banner.expired") : txt("library.banner.renew")).replacingOccurrences(of: "{0}", with: game.name).replacingOccurrences(of: "{1}", with: "\(days)")).font(.manrope(13.5, .semibold))
-                Spacer(minLength: 12)
-                Button(txt("library.hero.renew")) { openRenew(game) }.controllerButtonStyle(LauncherSecondaryButtonStyle())
-                Button { model.freeSignReminder = false } label: { Image(systemName: "xmark").font(.system(size: 11, weight: .bold)).frame(width: 22, height: 22).contentShape(Rectangle()) }
-                    .controllerButtonStyle(.plain).foregroundStyle(.secondary)
-                    .launcherTooltip(txt("library.banner.dismiss"), placement: .above)
-                    .accessibilityLabel(txt("library.banner.dismiss")).accessibilityIdentifier("library.renew.dismiss")
-            }
-            .padding(.horizontal, LauncherTheme.Metrics.libraryInset).padding(.vertical, 10).background(LauncherPalette.building.opacity(0.10))
-        }
-    }
-
     func moreMenu(_ game: GameSummary) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             VStack(alignment: .leading, spacing: 6) {
@@ -153,7 +136,7 @@ extension LauncherView {
         if panel.runModal() == .OK, let url = panel.url { model.relinkGame(game, folder: url) }
     }
 
-    /// 卡片和大图上的状态：两端都算（原作者只看 Mac 版）。
+    /// 卡片和大图上的可用状态。设备签名的到期时间在设备操作区显示。
     func statusLine(_ game: GameSummary) -> (text: String, color: Color) {
         if model.playHolds(game.id) { return (loc.t("s2arm.library.running"), LauncherPalette.building) }   // 「运行中」按游戏槽判
         if model.mainBusy && model.session?.gameID == game.id { return (loc.t("s2arm.job.running"), LauncherPalette.building) }
@@ -166,17 +149,18 @@ extension LauncherView {
         }
         if game.location.state == "missing" { return (txt("library.location.missing"), LauncherPalette.danger) }
         var parts: [String] = []
-        var expired = false
-        if game.iphoneInstalledAt != nil {
-            if let days = model.freeSignDaysLeft(game) {
-                expired = days == 0
-                parts.append(expired ? txt("library.status.expired") : txt("library.status.installed").replacingOccurrences(of: "{0}", with: "\(days)")
-                    .replacingOccurrences(of: "{1}", with: BackendText.deviceKind(game.iphoneInstallKind)))
-            } else { parts.append(txt("library.status.installedPaid").replacingOccurrences(of: "{0}", with: BackendText.deviceKind(game.iphoneInstallKind))) }   // #1962：推到的是 iPad 就写 iPad
-        } else if game.iphoneReady { parts.append(txt("library.status.iphone")) }
+        // 正在显示专门的签名状态时，那里已经写明推到了哪种设备。
+        if game.iphoneInstalledAt != nil, model.freeSignDaysLeft(game) == nil {
+            parts.append(txt("library.status.installedPaid").replacingOccurrences(of: "{0}", with: BackendText.deviceKind(game.iphoneInstallKind)))
+        } else if game.iphoneReady, game.iphoneInstalledAt == nil {
+            parts.append(txt("library.status.iphone"))
+        }
         if game.playable { parts.append(loc.t("library.ready")) }
-        if parts.isEmpty { return (loc.t("s2arm.library.notPrepared"), LauncherPalette.unbuilt) }
-        return (parts.joined(separator: " · "), expired ? LauncherPalette.danger : LauncherPalette.ready)
+        if parts.isEmpty {
+            if game.iphoneReady { return (txt("library.status.iphone"), LauncherPalette.ready) }
+            return (loc.t("s2arm.library.notPrepared"), LauncherPalette.unbuilt)
+        }
+        return (parts.joined(separator: " · "), LauncherPalette.ready)
     }
 
     func status(_ game: GameSummary, prominent: Bool = false) -> some View {

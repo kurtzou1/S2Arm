@@ -15,7 +15,6 @@ extension LauncherView {
     func homeLibrary(size: CGSize) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             staleBanner
-            renewBanner
             homeControls(size: size).padding(.horizontal, LauncherTheme.Metrics.libraryInset).padding(.top, size.height < 740 ? 12 : 22).padding(.bottom, 18)
             if homeGames.isEmpty {
                 homeEmptyPreview
@@ -135,6 +134,7 @@ extension LauncherView {
                 .accessibilityLabel(loc.t(favorited ? "home.unfavorite" : "home.favorite"))
                 .accessibilityAddTraits(favorited ? .isSelected : [])
             }.padding(.top, compact ? 4 : 10)
+            deviceSigningStatus(game)
             HeroUpdateLines(model: model, game: game)
         }
         .frame(maxWidth: min(920, size.width * 0.78), alignment: .leading)
@@ -294,7 +294,6 @@ extension LauncherView {
                         }.padding(8)
                     }
                     .overlay { if model.sgradeUpgrading(game.id) { SGradeUpgradeRing(progress: model.sgradeProgress(game.id), side: artworkSide, queuedText: model.sgradeQueued(game.id) ? txt("sgrade.upgrade.queued") : nil) } }
-                    .overlay(alignment: .bottomLeading) { expiryBadge(game) }
                     .overlay(alignment: .bottomTrailing) {   // 导入时数据校验不过、照常导入的款（11-17）：黄色提示角标，悬停 / 读屏说明见卡片 help
                         if game.integritySkipped {
                             Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 11, weight: .semibold)).foregroundStyle(.yellow)
@@ -312,19 +311,24 @@ extension LauncherView {
             .modifier(CardDrop(targeted: cardTargeted(game.id), artwork: artworkSide + 10) { dropOnCard($0, game: game) })
     }
 
-    /// 卡片上的 iPhone 签名角标（旧版每张卡片下都有「还有 N 天 / 已过期」，新主题只在选中那款显示）：免费账号装过的款才有；
-    ///   还剩 1–2 天橙色、过期红色，其余白字深底——扫一眼就知道哪款要续签
-    @ViewBuilder func expiryBadge(_ game: GameSummary) -> some View {
-        if game.iphoneInstalledAt != nil, let days = model.freeSignDaysLeft(game) {
-            let color: Color = days == 0 ? LauncherPalette.danger : days <= 2 ? .orange : .white
-            Label(days == 0 ? loc.t("home.card.expired") : String(format: loc.t("home.card.daysLeft"), days), systemImage: "iphone")
-                .font(.manrope(11, .bold)).labelStyle(ConsoleBadgeLabelStyle())
-                .foregroundStyle(color)
-                .padding(.horizontal, 7).padding(.vertical, 4)
-                .background(.black.opacity(0.68), in: Capsule())
-                .overlay(Capsule().strokeBorder(color.opacity(days <= 2 ? 0.7 : 0.18)))
-                .padding(8)
-                .accessibilityIdentifier("card.expiry." + game.id)
+    /// 免费签名只影响设备上的副本。把到期提示和续签放在选中游戏的设备操作下方。
+    @ViewBuilder private func deviceSigningStatus(_ game: GameSummary) -> some View {
+        if let days = model.freeSignDaysLeft(game) {
+            let kind = BackendText.deviceKind(game.iphoneInstallKind)
+            let text = days == 0 ? kind + " · " + loc.t("home.card.expired")
+                : txt("library.status.installed").replacingOccurrences(of: "{0}", with: "\(days)")
+                    .replacingOccurrences(of: "{1}", with: kind)
+            HStack(spacing: 10) {
+                Label(text, systemImage: S2ArmLauncherModel.deviceSymbol(game.iphoneInstallKind))
+                    .font(.manrope(12, .medium))
+                    .foregroundStyle(days == 0 ? LauncherPalette.danger : days <= 2 ? .orange : .secondary)
+                    .accessibilityIdentifier("hero.deviceSigningStatus")
+                if days <= 1, Self.homePrimaryID(game) != "hero.renew" {
+                    Button(txt("library.hero.renew")) { openRenew(game) }
+                        .controllerButtonStyle(LauncherSecondaryButtonStyle())
+                        .controllerID("hero.deviceRenew")
+                }
+            }
         }
     }
 

@@ -6,7 +6,6 @@ using Ryujinx.Audio.Integration;
 using Ryujinx.Audio.Renderer.Dsp;
 using Ryujinx.Memory;
 using System;
-using System.Diagnostics;
 using System.Threading;
 
 namespace S2A.Services.Tests
@@ -14,6 +13,8 @@ namespace S2A.Services.Tests
     // 渲染按输出在途深度定节拍（AudioProcessor.S2ADepthWait，11-13 0400486024DEC000 Mac 局第 26 秒断音）。一拍 = 240 帧 = 5 ms，目标深度缺省 30 ms = 1440 帧。
     //   驱动链同宿主：兼容层（Ryujinx 自己包）→ 声音峰值包装（Exports.cs）→ 假设备（第一版只认直接会话，宿主里经两层包装深度读不到、整个修复没生效，Mac 局才看出来）。
     //   假设备按 48 kHz 墙钟消耗（在途 = 交过的 − 已播的，播不出没交的）。每「渲染」一次 = 真路径 HardwareDeviceImpl.AppendBuffer 交 240 帧，再调 Wait。
+    //   时钟（11-22 门禁偶发红：④ 在负载高时红、复跑不复现）：节拍与假设备都走同一个虚拟钟（AudioProcessor.S2ATestClock），时间只在节拍「睡」时拨过去，
+    //   测试线程被系统晚调度多久都不改变读数。原先用真墙钟：线程分不到 CPU 时假设备照墙钟吃帧、渲染跟不上，量到的是调度不是节拍逻辑。
     //   期望手算（不跑被测实现）。判法和墙钟长短无关（11-17：原先数 300 ms 里渲染了几次，本机负载 42 时测试线程分不到 CPU 只渲染 48 次、假红）：
     //   固定渲染次数，判「用时不少于设备吃掉这些帧要的时间」= 节拍没跑在设备前面、没空转。机器忙只会让用时更长，不会假红；空转会是零点几毫秒
     //   ① 稳态渲染 66 拍：先连续补到 1440 帧（6 拍），之后设备每 5 ms 吃 240 帧、补一拍 → 后 60 拍至少用 60 × 5 = 300 ms（取 ≥ 240 ms 留睡醒误差）；
@@ -25,11 +26,22 @@ namespace S2A.Services.Tests
     {
         private const int Rate = 48000;
 
+        // 虚拟钟：现在 = 累计拨过的纳秒；睡到某一刻 = 把现在拨到那一刻（只往前拨）
+        private sealed class VirtualClock : AudioProcessor.IS2AClock
+        {
+            private long _now = 1_000_000_000L;
+            public long NowNs() => Interlocked.Read(ref _now);
+            public void SleepUntilNs(long untilNs) { long cur; while ((cur = Interlocked.Read(ref _now)) < untilNs && Interlocked.CompareExchange(ref _now, untilNs, cur) != cur) { } }
+            public void Advance(long ns) => Interlocked.Add(ref _now, ns);
+        }
+
+        private static readonly VirtualClock Clock = new();
+
         private sealed class FakeSession : HardwareDeviceSessionOutputBase, IS2AOutputDepth
         {
             private readonly bool _dropAll;
             private readonly double _speed;   // 设备时钟比墙钟快多少倍（④ 1.01 = 快 1%，#1957 设备钟快于墙钟）
-            private readonly long _t0 = Stopwatch.GetTimestamp();
+            private readonly long _t0 = Clock.NowNs();
             private long _given;
 
             public FakeSession(bool dropAll, double speed = 1.0) : base(null, SampleFormat.PcmInt16, Rate, 2)
@@ -47,7 +59,7 @@ namespace S2A.Services.Tests
                         return 0;
                     }
 
-                    long played = (long)((Stopwatch.GetTimestamp() - _t0) * _speed * Rate / Stopwatch.Frequency);
+                    long played = (long)((Clock.NowNs() - _t0) * _speed * Rate / 1_000_000_000L);
 
                     lock (this)
                     {
@@ -59,7 +71,7 @@ namespace S2A.Services.Tests
 
             public override void QueueBuffer(AudioBuffer buffer)
             {
-                long played = (long)((Stopwatch.GetTimestamp() - _t0) * _speed * Rate / Stopwatch.Frequency);
+                long played = (long)((Clock.NowNs() - _t0) * _speed * Rate / 1_000_000_000L);
 
                 lock (this)
                 {
@@ -115,7 +127,7 @@ namespace S2A.Services.Tests
         // 渲染 n 拍 → 用时（毫秒）
         private static double RenderN(AudioProcessor p, int n, FakeSession s = null, System.Collections.Generic.List<long> depths = null)
         {
-            long t = Stopwatch.GetTimestamp();
+            long t = Clock.NowNs();
 
             for (int i = 0; i < n; i++)
             {
@@ -123,13 +135,14 @@ namespace S2A.Services.Tests
                 if (s != null) depths?.Add(s.S2ABufferedFrames);   // 每拍交完立刻记一次在途帧（判中位数，见 ①）
             }
 
-            return (Stopwatch.GetTimestamp() - t) * 1000.0 / Stopwatch.Frequency;
+            return (Clock.NowNs() - t) / 1e6;
         }
 
         [SoloTest("--audio-depth-pace")]
         private static int Check()
         {
             int bad = 0;
+            AudioProcessor.S2ATestClock = Clock;
 
             void Row(string name, string expect, string actual, bool ok)
             {
@@ -152,9 +165,9 @@ namespace S2A.Services.Tests
             Row("① 稳态渲染 66 拍用时（不跑在设备前面）", "≥ 240 ms", $"{ms1:F1} ms", ms1 >= 240);
             Row("① 稳态每拍交完的在途帧中位数", "960–1920", $"{b1}（{depths.Count} 拍，最小 {(depths.Count > 0 ? depths[0] : -1)}、最大 {(depths.Count > 0 ? depths[^1] : -1)}）", b1 >= 960 && b1 <= 1920);
 
-            Thread.Sleep(60);
+            Clock.Advance(60_000_000L);
             long b2 = drv.Session0.S2ABufferedFrames;
-            long t = Stopwatch.GetTimestamp();
+            long t = Clock.NowNs();
             int n2 = 0;
 
             while (drv.Session0.S2ABufferedFrames < 1440 && n2 < 100)
@@ -163,7 +176,7 @@ namespace S2A.Services.Tests
                 n2++;
             }
 
-            double fillMs = (Stopwatch.GetTimestamp() - t) * 1000.0 / Stopwatch.Frequency;
+            double fillMs = (Clock.NowNs() - t) / 1e6;
             Row("② 停 60 ms 后在途", "0", b2.ToString(), b2 == 0);
             Row("② 补满 1440 帧的渲染次数", "6–7", n2.ToString(), n2 >= 6 && n2 <= 7);
             Row("② 补满用时", "< 5 ms", $"{fillMs:F2} ms", fillMs < 5);
@@ -200,6 +213,7 @@ namespace S2A.Services.Tests
             p4.Stop();
             chain4.Dispose();
 
+            AudioProcessor.S2ATestClock = null;
             return bad == 0 ? 0 : 1;
         }
     }

@@ -37,7 +37,7 @@ import S2ArmAppleAdapter
         XCTAssertGreaterThan(runner.catalogs, 0, "发现有要更新的：重读游戏库，顶栏按 phoneUpdates 亮「更新 iPhone」")
     }
 
-    // 启动器升级后手机壳旧了（shellUpdate）：开关开 / 关、在玩 / 没在玩，循环都不发起装机（手动更新，11-16）；没碰过开关缺省开（只管首启准备与提示）
+    // 启动器升级后手机壳旧了（shellUpdate）：开关开 / 关、在玩 / 没在玩，循环都不发起装机（手动更新，11-16）；没碰过开关缺省开（控制壳版本更新提示）
     func testShellUpdateNeverAutoInstalls() async throws {
         _ = NSApplication.shared
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("s2arm-shell-" + UUID().uuidString)
@@ -130,39 +130,22 @@ import S2ArmAppleAdapter
         XCTAssertTrue(model.keptLoopStarted, "再读成功：不重复开（keptModulesLoop 自带只开一次）")
     }
 
-    // 新版启动器首次读到游戏库：有要更新的手机 → 后台 installUpdatePrepare 一次（不碰手机），准备完出横幅 准备好 / 没准备成（都是「点这里更新」，手动更新 11-16）；
-    //   开关关 → 不准备、不显示
-    func testPrepareBannerAfterLauncherUpdate() async throws {
-        _ = NSApplication.shared
-        pinIosAfterPackInstall()
-        let key = S2ArmLauncherModel.autoUpdatePhoneOffKey, before = UserDefaults.standard.object(forKey: key)
-        defer { UserDefaults.standard.set(before, forKey: key) }
-        func run(fails: Bool, on: Bool) async throws -> (S2ArmLauncherModel, KeptRunner) {
-            let root = FileManager.default.temporaryDirectory.appendingPathComponent("s2arm-prep-" + UUID().uuidString)
-            addTeardownBlock { try? FileManager.default.removeItem(at: root) }
-            try FileManager.default.createDirectory(at: root.appendingPathComponent("Jobs"), withIntermediateDirectories: true)
-            try Data().write(to: root.appendingPathComponent("Jobs/main.py"))
-            let runner = KeptRunner(); runner.prepareFails = fails
-            runner.catalog = ["games": [[String: Any]](), "phoneDevices": 1,
-                              "phoneUpdates": [["device": "dev1", "games": [["gameId": "0100C9C00E25C000", "name": "A"]], "stale": [[String: Any]]()]]]
-            S2ArmLauncherModel.setAutoUpdatePhone(on)
-            let model = S2ArmLauncherModel(client: JobClient(environment: JobEnvironment(
-                privateRoot: root, resources: root, library: root.appendingPathComponent("lib").path, libraryId: "fixture"), runner: runner))
-            model.refresh()
-            for _ in 0..<300 where !model.libraryLoaded || (on && model.phoneBanner == nil) { try? await Task.sleep(for: .milliseconds(10)) }
-            return (model, runner)
-        }
-        let (ok, okRunner) = try await run(fails: false, on: true)
-        XCTAssertEqual(okRunner.prepared, 1, "有要更新的手机：准备一次")
-        XCTAssertEqual(ok.phoneBanner, .ready)
-        XCTAssertEqual(ok.phoneBannerLine?.key, "phone.update.banner.ready")
-        ok.phoneUpdates = []
-        XCTAssertNil(ok.phoneBannerLine, "手机已是本版：横幅收起")
-        let (bad, _) = try await run(fails: true, on: true)
-        XCTAssertEqual(bad.phoneBannerLine?.key, "phone.update.banner.on_connect", "准备不了：连上时更新")
-        let (off, offRunner) = try await run(fails: false, on: false)
-        XCTAssertEqual(offRunner.prepared, 0, "开关关：不准备")
-        XCTAssertNil(off.phoneBannerLine)
+    func testPhoneUpdateBannerShowsOnlyActiveUpdateProgress() {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("s2arm-progress-" + UUID().uuidString)
+        let model = S2ArmLauncherModel(client: JobClient(environment: JobEnvironment(privateRoot: root, resources: root)))
+        XCTAssertNil(model.phoneUpdatePercent)
+        model.phoneSession = JobSession(kind: .install, gameID: nil, name: "推送游戏")
+        XCTAssertNil(model.phoneUpdatePercent)
+        model.phoneSession = JobSession(kind: .installUpdate, gameID: nil, name: "更新 S2Arm")
+        XCTAssertEqual(model.phoneUpdatePercent, 0)
+        model.selfSigning = true
+        XCTAssertNil(model.phoneUpdatePercent)
+        model.selfSigning = false
+        model.shellFirstInstall = true
+        XCTAssertNil(model.phoneUpdatePercent)
+        model.shellFirstInstall = false
+        model.phoneSession?.phase = .finished(.completed)
+        XCTAssertNil(model.phoneUpdatePercent)
     }
 }
 
@@ -172,8 +155,6 @@ private final class KeptRunner: JobProcessRunner {
     var kept: [String] = []
     var running = false
     var shellUpdate = false
-    var prepareFails = false
-    var prepared = 0
     var catalog: [String: Any] = [:]
     var catalogs = 0
     var catalogFails = false
@@ -188,12 +169,11 @@ private final class KeptRunner: JobProcessRunner {
            let request = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
             taskId = request["taskId"] as? String ?? ""; op = request["operation"] as? String ?? ""
             if op == "installUpdate" { updates.append(request) }
-            if op == "installUpdatePrepare" { prepared += 1 }
             if op == "catalog" { catalogs += 1 }
         }
         let result: [String: Any] = op == "phoneKeptPull" ? ["device": "00008160-FIXTURE", "new": kept.count, "kept": kept, "shellUpdate": shellUpdate, "stale": [String](), "running": running]
             : op == "catalog" ? catalog : [:]
-        let failed = (op == "installUpdatePrepare" && prepareFails) || (op == "catalog" && catalogFails)
+        let failed = op == "catalog" && catalogFails
         var event: [String: Any] = ["schema": 1, "taskId": taskId, "type": "result", "state": failed ? "failed" : "succeeded", "result": result, "message": failed ? "fixture" : ""]
         if failed, op == "catalog", let code = catalogFailCode { event["diagnostics"] = [["code": code, "message": "fixture"]] }
         DispatchQueue.main.async { onLine(try! JSONSerialization.data(withJSONObject: event)); onExit(0) }

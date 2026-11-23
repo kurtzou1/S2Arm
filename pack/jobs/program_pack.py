@@ -120,7 +120,8 @@ def build(c, gid, *, kit=None, shell=None, info=None, banner=None, platform="ios
                                                 image_sha256=_sha(out / image_name(gid))), ensure_ascii=False), encoding="utf-8")
         (out / KEY).write_text(key, encoding="utf-8")
         if dest.exists():
-            shutil.rmtree(dest)
+            import layout
+            layout.remove_tree(dest)   # 工具缓存可在 exFAT 盘上：删本体时 ._ 伴随文件跟着没了，裸 rmtree 报找不到（D-6P5D）
         os.replace(out, dest)
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -168,7 +169,8 @@ def sign(c, gid, team, bundle, signer, *, pkg=None, platform="ios", kit=None):
         os.replace(tmp, out / CATALOGUE)
         (out / KEY).write_text(key, encoding="utf-8")
         if dest.exists():
-            shutil.rmtree(dest)
+            import layout
+            layout.remove_tree(dest)   # 工具缓存可在 exFAT 盘上：删本体时 ._ 伴随文件跟着没了，裸 rmtree 报找不到（D-6P5D）
         os.replace(out, dest)
     finally:
         shutil.rmtree(work, ignore_errors=True)

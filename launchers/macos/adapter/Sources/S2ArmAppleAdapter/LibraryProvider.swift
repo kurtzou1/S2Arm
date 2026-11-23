@@ -207,10 +207,20 @@ public final class LibraryProvider {
 
     private func remember(_ result: [String: Any]) {
         let ready = (result["keys"] as? [String: Any])?["ready"] as? Bool
-        let phones = (result["phoneUpdates"] as? [[String: Any]] ?? []).map(PhoneUpdate.init(catalog:))
+        let phones = Self.phoneUpdates(in: result)
         let count = (result["phoneDevices"] as? NSNumber)?.intValue ?? 0
         let batch = (result["sgradeBatch"] as? [String: Any]).map(SGradeBatch.init(catalog:))
         lock.withLock { keys = ready; updates = phones; devices = count; sgradeBatchValue = batch }
+    }
+
+    private static func phoneUpdates(in result: [String: Any]) -> [PhoneUpdate] {
+        (result["phoneUpdates"] as? [[String: Any]] ?? []).map(PhoneUpdate.init(catalog:))
+    }
+
+    /// 仅取本次 catalog 的更新对象。顶栏重查连接时不需要重载整个游戏库界面。
+    public func readPhoneUpdates() async throws -> [PhoneUpdate] {
+        let outcome = try await client.perform("catalog")
+        return Self.phoneUpdates(in: outcome.result)
     }
 
     private var snapshotFile: URL { client.environment.privateRoot.appendingPathComponent("library-snapshot.json") }

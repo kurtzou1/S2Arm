@@ -242,6 +242,8 @@ def main():
             ('parse-table-widened', 'parse', gate, gate.replace('dst->slot < 88', 'dst->slot < 90'), 'word 88 above the image table: tex_slot stays -1'),
             ('parse-array-accepted', 'parse', gate, gate.replace(' && dst->count == 1', ''), 'image array at word 72: tex_slot stays -1'),
             ('build-decl-tbuf-only', 'shader', decl, 'if (le->cls == NVN_GPU_RES_IMAGE_TBUF) sampled_decl(', 'image 0: cls 5 reg 0 target 0 class 0 format 0'),
+            ('build-over16-unchecked', 'shader', 'if (binding_over_16bit(b, views[st].key ? views[st].key : identity, b->stage)) { e->failed = 1; break; }', '',
+             'binding 65536 is refused by the named over-16-bit check'),
         ]
         for name, which, old, new, expected in cases:
             text = parse_text if which == 'parse' else shader_text

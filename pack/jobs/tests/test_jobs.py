@@ -2597,6 +2597,18 @@ class JobsTests(unittest.TestCase):
             self.c.run([sys.executable, "-c", "raise SystemExit(17)"], log)
         self.assertEqual(self.c.job["diagnostics"][-1]["exitCode"], 17)
 
+    def test_tool_exit_reason_keeps_the_head_of_a_long_red_line(self):
+        # D-Z2VA：工具退出非 0 时原因取日志末尾的红行，原先截末 240 字，近 2 KB 的红行只剩调用栈尾巴（「at Build.UnityFlush…」），
+        #   开头的异常类型和消息丢了。期望：摘要里有红行开头的异常头，也有结尾的日志名
+        log = self.root / "red.log"
+        stack = " ⏎ ".join(f"   at Frame{i}() + 0x{i:x}" for i in range(40))
+        red = f"Fail: direct_lib.log：rc=1；🔴 出库失败 rc=1：Unhandled exception. System.IO.IOException: 读盘出错：{stack}（work/build.log）"
+        with self.assertRaises(Failure) as caught:
+            self.c.run([sys.executable, "-c", f"import sys; print({red!r}); sys.exit(1)"], log)
+        msg = str(caught.exception)
+        self.assertIn("Unhandled exception. System.IO.IOException: 读盘出错", msg)
+        self.assertTrue(msg.endswith("build.log）"), msg)
+
     @unittest.skipIf(os.name == "nt", "POSIX 信号")
     def test_signal_death_reports_shell_style_exit(self):
         # 宿主崩溃处理写完现场后按默认处置重抛（系统出 .ips），进程被信号结束、Python 给负数（SIGSEGV = -11）：摘要与诊断照旧报 128 + 信号（139）。

@@ -37,6 +37,8 @@ void s2a_shell_refresh(void) { if (g_refresh) g_refresh(g_refresh_ctx); }
 // 本款资源包：宿主（ios/app.m）有强定义时用它；本包单独编时按就绪、点了只记日志
 __attribute__((weak)) int s2a_shell_game_install_state(const char *game_id) { (void)game_id; return 1; }
 __attribute__((weak)) int s2a_shell_game_needs_host_update(const char *game_id) { (void)game_id; return 0; }
+__attribute__((weak)) int s2a_shell_scan_game_source(const char *dir, const char *source_id, const char *skip) { (void)dir; (void)source_id; (void)skip; return -1; }
+__attribute__((weak)) int s2a_shell_forget_game_source(const char *source_id) { (void)source_id; return 0; }
 __attribute__((weak)) int s2a_shell_game_sign_state(const char *game_id) { (void)game_id; return 0; }
 __attribute__((weak)) int s2a_shell_install_game(const char *game_id) { (void)game_id; return 0; }
 __attribute__((weak)) int s2a_shell_install_progress(const char *game_id, int *done, int *total) { (void)game_id; (void)done; (void)total; return 0; }

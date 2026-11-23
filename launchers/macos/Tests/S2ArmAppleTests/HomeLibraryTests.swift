@@ -8,7 +8,7 @@ import LauncherPadBridge
 @testable import S2ArmAppleAdapter
 
 @MainActor final class HomeLibraryTests: XCTestCase {
-    // 免费签名到期提醒（11-20）：剩余天数按作业层给的 expires 算；横幅「×」= 关掉设置开关 → 不再显示；设置里重新打开 → 恢复；开关存进偏好、重开启动器还在
+    // 免费签名到期提醒（11-20）：剩余天数按作业层给的 expires 算；关掉设置开关 → 不再显示；设置里重新打开 → 恢复；开关存进偏好、重开启动器还在
     func testFreeSignReminderDismissRestorePersist() throws {
         let suite = "s2arm-free-sign-" + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite)); defer { defaults.removePersistentDomain(forName: suite) }
@@ -24,7 +24,7 @@ import LauncherPadBridge
         XCTAssertTrue(model.freeSignReminder, "没碰过开关：缺省开")
         XCTAssertEqual(model.freeSignDaysLeft(game, now: now), 3)
         XCTAssertNil(model.freeSignDaysLeft(other, now: now))
-        model.freeSignReminder = false   // 横幅上的「×」
+        model.freeSignReminder = false
         XCTAssertNil(model.freeSignDaysLeft(game, now: now), "擦掉后不显示")
         let reopened = make()
         XCTAssertFalse(reopened.freeSignReminder, "重开启动器：仍是关")
@@ -47,8 +47,8 @@ import LauncherPadBridge
         XCTAssertEqual(BackendText.translate("把证书交给 iPhone / iPad 上的 S2Arm", language: "en"), "Handing the certificate to S2Arm on your iPhone / iPad")
     }
 
-    // 新主题漏掉的补回来：每张卡片上的 iPhone 签名角标（还剩几天 / 已过期）
-    func testHomeCardsShowExpiryBadges() async throws {
+    // 选中款的截图覆盖已过期签名和可游玩的 Mac 版。
+    func testHomeSelectedGameWithExpiredDeviceSignature() async throws {
         _ = NSApplication.shared
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("s2arm-home-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root.appendingPathComponent("Jobs"), withIntermediateDirectories: true)
@@ -69,10 +69,9 @@ import LauncherPadBridge
         window.isReleasedWhenClosed = false
         window.contentView = host
         window.orderBack(nil)
-        model.selectedID = String(format: "%016X", 3)
-        // 角标是卡片按钮里的装饰（无障碍信息合进卡片按钮），这里只核天数口径；样子看 S2A_SNAPSHOT_OUT 出的 home-cards.png
+        model.selectedID = String(format: "%016X", 1)
         XCTAssertEqual(model.games.first { $0.id == String(format: "%016X", 2) }?.iphoneDaysLeft(), 6)
-        XCTAssertNil(model.games.first { $0.id == String(format: "%016X", 3) }?.iphoneDaysLeft(), "没装过的款没有角标")
+        XCTAssertNil(model.games.first { $0.id == String(format: "%016X", 3) }?.iphoneDaysLeft(), "没装过的款没有到期提示")
         // 数据校验不过的款（11-17）：第 2、3 款标，其余不标；角标样子同看 home-cards.png（右下角黄色三角）
         XCTAssertEqual(model.games.filter(\.integritySkipped).map(\.id), [2, 3].map { String(format: "%016X", $0) })
         for _ in 0..<20 { host.layoutSubtreeIfNeeded(); try await Task.sleep(for: .milliseconds(30)) }

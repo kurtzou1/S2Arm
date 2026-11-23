@@ -305,6 +305,13 @@ static void case_reject_storage(void) {
     binding_json(b, sizeof b, 1, 0, "\"rw\":true,\"cbSlot\":3,\"cbOffset\":64,\"uboSlot\":0");
     reject_case("[B5] uboSlot 缺 uboOffset", b, "[]", "[]", keyword);
 
+    // 结果解析只认「非负 int」的绑定号；16 位上界在回放层建布局项前核（nvk_shader.c binding_number_over_16bit，graphics_image_layout_test 覆盖）
+    struct nvn_vk_compute_program ok16;
+    binding_json(b, sizeof b, 1, 65535, "\"rw\":true,\"cbSlot\":0,\"cbOffset\":784,\"nvnSlot\":0");
+    if (accept_case("[B6] 绑定号 65535 照收", b, "[]", "[]", &ok16) == 0) nvn_vk_program_free_compute(&ok16);
+    binding_json(b, sizeof b, 1, 4294967295u, "\"rw\":true,\"cbSlot\":0,\"cbOffset\":784,\"nvnSlot\":0");
+    reject_case("[B6] 绑定号 4294967295 不是非负 int", b, "[]", "[]", "binding number invalid");
+
     binding_json(b, sizeof b, 1, 0, "\"rw\":true,\"cbSlot\":3,\"cbOffset\":64,\"uboOffset\":64");
     reject_case("[B6] uboOffset 缺 uboSlot", b, "[]", "[]", keyword);
 

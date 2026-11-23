@@ -125,6 +125,21 @@ int main(void) { @autoreleasepool {
                   STEP, nbright, cx, want, old_a, old_b);
         }
         free(px); g_fi_state = 0; unsetenv("DM_PRESENT_FI");
+        // ⑥ D-YVDD（11-22 #2111）：游戏画面尺寸每帧来回微调 → 插值器每次「画面比例变了、整个重建」。期望：重建 20 次（1280x720 ↔ 1278x718 交替）后
+        //   驻留集里的对象数不涨（旧的一套出集、新的一套进集，数目持平）、第一套的输入贴图真的释放（弱引用变空）。修前旧的一套一直挂在驻留集里：数目每次涨一套、弱引用不空
+        { CAMetalLayer *l = [CAMetalLayer layer]; l.device = g_dev; l.pixelFormat = MTLPixelFormatBGRA8Unorm; l.drawableSize = CGSizeMake(1280, 720); l.framebufferOnly = NO;
+          g_fi = nil; __weak id<MTLTexture> w0 = nil; NSUInteger n0 = 0, n1 = 0;
+          @autoreleasepool { NvPresentFI *f0 = fi_get(l, 1280, 720); if (f0) w0 = f0->in_tex[0]; }
+          if (!g_fi) printf("SKIP ⑥ 本机做不了 MetalFX 补帧（fi_get 回空），跳过\n");
+          else {
+              pthread_mutex_lock(&g_res_mu); n0 = g_res_objects.count; pthread_mutex_unlock(&g_res_mu);
+              for (int i = 0; i < 20; i++) @autoreleasepool { fi_get(l, i & 1 ? 1280 : 1278, i & 1 ? 720 : 718); }
+              res_commit();
+              pthread_mutex_lock(&g_res_mu); n1 = g_res_objects.count; pthread_mutex_unlock(&g_res_mu);
+              CHECK(g_fi && n1 <= n0 && w0 == nil, "⑥ 画面尺寸来回变、插值器重建 20 次：驻留集对象 %lu → %lu（期望不涨）、第一套输入贴图%s（期望已释放）",
+                    (unsigned long)n0, (unsigned long)n1, w0 ? "还活着" : "已释放");
+              fi_release(g_fi); g_fi = nil;
+          } }
     }
     printf("%s t_fi_link：%u 项，%u 项不符\n", failures ? "✗" : "✓", checks, failures);
     return failures != 0;

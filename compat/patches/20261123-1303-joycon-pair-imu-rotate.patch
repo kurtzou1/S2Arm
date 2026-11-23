@@ -1,0 +1,53 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadImu.cs b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadImu.cs
+index 9d84a80dabaaa45ad350d17ccb2a13bb39a8dec0..b666248735f23b0e705485b4c9259e3b43802048 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadImu.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadImu.cs
+@@ -78,20 +78,27 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+ 
+         // accelerationG：加速度（g），angularVelocityDegrees：角速度（度/秒），都是 NS2 原始坐标；timestampUs：读数的单调时间戳（微秒）
+         // sensor：双 Joy-Con 左右各有读数时 0 = 左只、1 = 右只各写各的；-1 = 单一体感源（双 Joy-Con 时左右写同一份，同改前）
+-        // style：这一格的样式（不含 Joy-Con 2 位）。
+-        //   - Joy-Con（单只 / 一对）：读数按 Y 轴镜像（加速度 Y 取反，角速度 X、Z 取反）再写。实机（Joy-Con 2）：原始坐标写进 IMU，
+-        //     两人各拿一只时手往左挥、画面往右；一对要求「立起握住」的检查一直不过。镜像后都对，左右两只同一口径。
+-        //     只动 IMU 这一路：同一份读数走六轴（SixAxis）的项目照原始坐标是对的
++        // style：这一格的样式（不含 Joy-Con 2 位）。Joy-Con 2 原始坐标走六轴（SixAxis）是对的，写进 IMU 要先换口径（只动 IMU 这一路）：
++        //   - 单只（左只 / 右只）：按 Y 轴镜像（加速度 Y 取反，角速度 X、Z 取反）。实机：两人各拿一只，不换时手往左挥、画面往右，换后左右、发球都对
++        //   - 一对：绕 X 轴转 180°（加速度、角速度的 Y、Z 取反）。实机：不换时「立起握住」的检查一直不过；只照单只镜像时检查能过但左右闪躲反了，换这个都对
++        //   - 左右两只同一口径（实机量过：两只并排一起转，原始陀螺同轴同号）
+         //   - 单只右 Joy-Con 写右只那支传感器（传感器 1），同真机：游戏按样式读右只那格（改前一律写传感器 0，拿右只的玩家体感校准永远等不到读数）
+         internal void Push(PlayerIndex player, NpadStyleTag style, Vector3 accelerationG, Vector3 angularVelocityDegrees, ulong timestampUs, int sensor = -1)
+         {
+             bool joyDual = style == NpadStyleTag.JoyDual;
+-            if (style is NpadStyleTag.JoyLeft or NpadStyleTag.JoyRight or NpadStyleTag.JoyDual)
++            if (style is NpadStyleTag.JoyLeft or NpadStyleTag.JoyRight)
+             {
+                 accelerationG.Y = -accelerationG.Y;
+                 angularVelocityDegrees.X = -angularVelocityDegrees.X;
+                 angularVelocityDegrees.Z = -angularVelocityDegrees.Z;
+             }
++            else if (joyDual)
++            {
++                accelerationG.Y = -accelerationG.Y;
++                accelerationG.Z = -accelerationG.Z;
++                angularVelocityDegrees.Y = -angularVelocityDegrees.Y;
++                angularVelocityDegrees.Z = -angularVelocityDegrees.Z;
++            }
+ 
+             lock (_lock)
+             {
+@@ -134,7 +141,14 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+         private void Write(int slot, Vector3 accelerationG, Vector3 angularVelocityDegrees, ulong timestampUs)
+         {
+             ulong last = _lastTimestampUs[slot];
+-            ulong deltaNs = last != 0 && timestampUs > last ? (timestampUs - last) * 1000 : DefaultDeltaNs;
++            // 同一笔读数不重写（时间戳没往前）：服务层双 Joy-Con 每拍都推左右两路、不论有没有新样本，改前每次都当成隔 5 ms 的新样本写，
++            //   游戏的融合把同一份角速度积分好几遍，手一动就放大成好几倍（实机：一人拿一对的项目没挥也自己出拳）
++            if (last != 0 && timestampUs <= last)
++            {
++                return;
++            }
++
++            ulong deltaNs = last != 0 ? (timestampUs - last) * 1000 : DefaultDeltaNs;
+             _lastTimestampUs[slot] = timestampUs;
+ 
+             ulong index = _writeIndex[slot];

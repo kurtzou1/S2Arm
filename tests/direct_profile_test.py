@@ -467,13 +467,25 @@ class Profiles(unittest.TestCase):
         self.assertIn("【红】", p.stderr)
 
     def test_romfs_names_cannot_inject_profile_keys(self):
-        for name in ("bad\nrender_cond\ton", "bad group", "bad=group"):
-            with self.subTest(name=name):
-                directory = self.root / "romfs" / name
-                directory.mkdir()
-                (directory / "file").write_bytes(b"x")
-                self.reject()
-                shutil.rmtree(directory)
+        directory = self.root / "romfs" / "bad\nrender_cond\ton"
+        directory.mkdir()
+        (directory / "file").write_bytes(b"x")
+        self.reject()
+        shutil.rmtree(directory)
+
+    def test_romfs_names_with_space_or_equals_skip_group_not_game(self):
+        # D-PVCK：虚幻款 RomFS 顶层「Trials of Mana/」带空格，原先整款拒（配置推导不支持本款）。期望手写：照常推导；
+        #   带空格 / 「=」的目录不进 shader_groups，别的目录照常成组，每个词都是一对 前缀=组名
+        for name in ("Trials of Mana", "a=b"):
+            (self.root / "romfs" / name).mkdir()
+            (self.root / "romfs" / name / "file").write_bytes(b"x")
+        (self.root / "romfs" / "Good").mkdir()
+        (self.root / "romfs" / "Good" / "file").write_bytes(b"x")
+        g = dp.game.Game(self.generate()["profile"])
+        words = g.words("shader_groups")
+        self.assertIn("/Good/=good", words)
+        self.assertFalse([w for w in words if "Mana" in w or w.startswith("/a")], words)
+        self.assertTrue(all(len(p) == 2 for p in g.pairs("shader_groups")))
 
     def test_missing_romfs(self):
         shutil.rmtree(self.root / "romfs")

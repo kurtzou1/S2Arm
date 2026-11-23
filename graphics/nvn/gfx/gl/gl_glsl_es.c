@@ -2,7 +2,7 @@
 // 出包离线链（translator/gl_shaders.py，经本文件的命令行入口 S2A_GLSL_ES_MAIN）与宿主运行时兜底（gl_xlate.c，gl_prog.m 调）共用这一份实现，不写两遍。
 // 两步，与 gl_shaders.py translate() 的顺序一致：
 //   ① s2a_glsl_es_prefix（原文、预处理之前）：第一条「#version 300 / 310 / 320」没写 es → 补「 es」（NVIDIA 按 ES 读，glslang 照规范要求写 es；FINAL FANTASY VII 的 ff7/shaders/*.glsl）；
-//      后面跟注释的 es 插在注释前，跟 core / compatibility 的换成 es（#749）
+//      后面跟注释的 es 插在注释前，跟 core / compatibility 的换成 es（#749）；桌面「#version 110 / 120 / 130」→「#version 100」（D-45J6）
 //   ② s2a_glsl_es_rewrite（glslang 预处理之后的文本）：
 //      · 版本：没有 #version 或 #version 100 = GLSL ES 1.00 → 去掉版本行，头上加「#version 310 es」+ float / int 缺省精度 highp（ES 1.00 片元常只在 #ifdef GL_ES 下设精度，
 //        预处理时 GL_ES 没定义）；#version 300 es → 310 es（3.10 是 3.00 的超集，语义不变）；
@@ -98,6 +98,13 @@ char *s2a_glsl_es_prefix(const char *src, size_t n, size_t *out_n) {
                         sb_put(&o, src, g1); sb_str(&o, " es"); sb_put(&o, src + m + wl, n - m - wl); return sb_take(&o, out_n);
                     }
                     #undef WORD_AT
+                }
+                // D-45J6（#852）：桌面 GLSL 110 / 120 / 130 —— glslang 出 SPIR-V 拒收 140 以下的桌面版本（「Desktop shaders for Vulkan SPIR-V require version 140 or higher」，
+                //   整支编不过、有声无画）。版本号换成 100：按 ES 1.00 预处理，s2a_glsl_es_rewrite 再按 ES 1.00 升到 3.10（attribute / varying / gl_FragColor / texture2D 都在那条路上）。
+                //   桌面独有的写法（int 隐式转 float 等）ES 不收，遇到照旧由 glslang 报红（报错带原文版本行，gl_xlate.c）
+                if (k > j && k + 3 <= n && src[k] == '1' && (src[k + 1] == '1' || src[k + 1] == '2' || src[k + 1] == '3') && src[k + 2] == '0'
+                    && (k + 3 == n || !(src[k + 3] >= '0' && src[k + 3] <= '9'))) {
+                    sb o = {0}; sb_put(&o, src, k); sb_str(&o, "100"); sb_put(&o, src + k + 3, n - k - 3); return sb_take(&o, out_n);
                 }
                 break;   // 第一条 #version 已看过：不是要补的形态就原样
             }

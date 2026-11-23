@@ -3,6 +3,7 @@
 // (A2) used by services/InputPump.cs when the host exports it.
 #include <dlfcn.h>
 #import <AppKit/AppKit.h>
+
 #import <CoreGraphics/CoreGraphics.h>
 #import <GameController/GameController.h>
 #import <CoreHaptics/CoreHaptics.h>
@@ -49,6 +50,10 @@ int s2a_ui_zh(void) { return [NSLocale.preferredLanguages.firstObject hasPrefix:
 #include "../ios/haptic_retry.h"
 #include "../ios/haptic_safe.h"
 #include "../ios/pad_order_file.h"
+#include <stdatomic.h>
+// 游戏窗口可见（遮挡通知维护，主线程写、心跳读）：-1 = 窗口还没建；g_win_hidden_n = 变成不可见的次数（被挡 / 最小化 / 切到别的桌面）
+static _Atomic int g_win_visible = -1, g_win_hidden_n;
+int s2a_mac_window_visible(int *hidden_n) { if (hidden_n) *hidden_n = atomic_load(&g_win_hidden_n); return atomic_load(&g_win_visible); }
 int s2a_screen_fit(int pw, int ph);   // runtime/src/widen.c：按窗口像素跟屏
 
 void s2a_host_shutdown(const char *why);
@@ -1500,13 +1505,16 @@ static void sample_input(void) {
     // 断开清槽：整表重建，只有本轮还在的才写回（强引用随之释放，不会留悬空指针）
     GCController *owner_before[S2A_MAX_PADS];
     for (int i = 0; i < S2A_MAX_PADS; i++) owner_before[i] = pad_owner[i];
-    for (int i = 0; i < S2A_MAX_PADS; i++) { pad_id[i] = NULL; pad_owner[i] = nil; pad_slot_owner[i] = nil; }
+    // pad_id 别的线程不加锁就读（服务层按槽位读体感 / 鼠标 / 样式，s2a_pad_read_motion_slot 等）：新表先算在 next_id，算完逐格写回——
+    //   改前先整表清空再填，读的一方撞上清空的那一瞬就当这格没手柄，玩家 2 起的体感被整份丢掉重来（实机：两人各拿一只 Joy-Con，玩家 2 放平校准一直不过）
+    const void *next_id[S2A_MAX_PADS] = {0};
+    for (int i = 0; i < S2A_MAX_PADS; i++) { pad_owner[i] = nil; pad_slot_owner[i] = nil; }
     for (int j = 0; j < n; j++) {
         int s = slot_of[j];
         if (s < 0) continue;   // 超过 S2A_MAX_PADS 只：多出来的不参与
         NSDictionary *pad_cfg = slot_cfg(s);   // 槽 i = 玩家 i+1：照各玩家自己的键位映射采样（没给就照玩家 1 的那份）
         pad_cfg = face_mapping_cfg(pad_cfg);
-        pad_id[s] = live_ids[j];
+        next_id[s] = live_ids[j];
         if (live_ble[j] == S2A_PAD_ORDER_GEN1 || live_ble[j] == S2A_PAD_ORDER_GEN1_PAIR) {
             gen1_unit *u = gen1_of(live_ids[j]);
             sample_ns2_state(&gen1_state[u - g_gen1], pad_cfg, &slot_buttons[s], slot_sticks[s]);
@@ -1535,6 +1543,7 @@ static void sample_input(void) {
             }
         }
     }
+    for (int i = 0; i < S2A_MAX_PADS; i++) if (pad_id[i] != next_id[i]) pad_id[i] = next_id[i];
     s2a_mac_player_sheet_sample(sheet_buttons);
     int ns2_style[NS2_RELAY_PLAYERS] = {0};   // 玩家 2 起的单只 Joy-Con 照它占的那一格的样式整形（下一拍读时用；没占格 = 转横握）
     for (int i = 0; i < S2A_MAX_PADS; i++) for (int p = 0; p < NS2_RELAY_PLAYERS; p++) if (pad_id[i] == &ns2_slot_id[p]) ns2_style[p] = atomic_load(&g_slot_style[i]);
@@ -2282,6 +2291,9 @@ void s2a_front_run(void (*guest_main)(void)) {
             tick(); [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *t) { (void)t; tick(); }];
         }
         [view setNeedsLayout:YES]; [window center]; [window makeKeyAndOrderFront:nil]; [window makeFirstResponder:view];
+        // 窗口遮挡（D-JSGK 11-22：Mac 局整局线程在等、性能核几乎没用，判不了是不是窗口被挡 / 最小化后系统节流）：主线程上跟遮挡通知记下，心跳在后台队列只读原子量
+        { __weak NSWindow *w = window; void (^occ)(void) = ^{ int v = (w.occlusionState & NSWindowOcclusionStateVisible) ? 1 : 0; if (atomic_exchange(&g_win_visible, v) != v && !v) atomic_fetch_add(&g_win_hidden_n, 1); };
+          occ(); [NSNotificationCenter.defaultCenter addObserverForName:NSWindowDidChangeOcclusionStateNotification object:w queue:nil usingBlock:^(NSNotification *n) { (void)n; occ(); }]; }
         // 启动即全屏（#575，S2A_FULLSCREEN=1）：窗口出来后走系统原生全屏，同菜单「进入全屏幕」，退出后回到窗口。
         //   S2A_FULLSCREEN_DEFAULT 是启动器设置里「启动游戏时自动全屏」的全局缺省：这款显式给了 S2A_FULLSCREEN（含 =0）就照这款的，没给才用全局的
         { const char *fs = getenv("S2A_FULLSCREEN"); const char *from = "S2A_FULLSCREEN";

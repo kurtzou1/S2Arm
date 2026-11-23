@@ -272,7 +272,6 @@ public final class S2ArmLauncherModel: ObservableObject {
     @Published var dynamicAlert = false   // 手机作业失败 / 停下：橙色「!」一直留着，直到玩家点开看过
     @Published var phoneUpdates: [PhoneUpdate] = []
     @Published var phoneDevices = 0   // catalog phoneDevices：这台电脑往几台手机装过游戏（更新弹窗按钮写「更新启动器和 iPhone App」）
-    @Published var phoneBanner: PhoneBanner?   // 新版启动器首次启动后的「iPhone 版 S2Arm」横幅（S2ArmLauncherModel+PhoneBanner.swift）
     /// 点了更新、有要重新出包的款：三选一弹框；选「更新并重新出这几款」时更新完把它们排进批量出包（只出 iPhone），批次出完逐款装上
     @Published var updateConfirm: PhoneUpdate?
     /// 「S 级优化升级」页开着（v0.4.0；SGradeUpgradeView）
@@ -317,7 +316,7 @@ public final class S2ArmLauncherModel: ObservableObject {
         didSet { updateDefaults.set(!autoCheckUpdates, forKey: Self.autoCheckUpdatesOffKey) }
     }
     /// 免费签名到期提醒（缺省开；维护者 11-20：玩家换成自签或别的方式后提醒挂着取消不了）：游戏库顶部横幅点「×」即关、不再显示，设置里重新打开恢复。
-    ///   关着时横幅、卡片角标、状态行里的「还剩几天 / 已到期」都不出（freeSignDaysLeft）。存的是「关」，同 autoCheckUpdatesOffKey
+    ///   关着时不显示设备操作区里的「还剩几天 / 已到期」（freeSignDaysLeft）。存的是「关」，同 autoCheckUpdatesOffKey
     static let freeSignReminderOffKey = "S2AFreeSignReminderOff"
     @Published var freeSignReminder: Bool {
         didSet { updateDefaults.set(!freeSignReminder, forKey: Self.freeSignReminderOffKey) }
@@ -629,7 +628,7 @@ public final class S2ArmLauncherModel: ObservableObject {
                 self.phoneUpdates = self.provider.library.phoneUpdates
                 self.phoneDevices = self.provider.library.phoneDevices
                 if !self.startupLoopsStarted {
-                    self.startupLoopsStarted = true; self.resumeSGradeWatch(); self.keptModulesLoop(); self.devCertWatchLoop(); self.preparePhoneUpdate(); self.appleTVBackupLoop()
+                    self.startupLoopsStarted = true; self.resumeSGradeWatch(); self.keptModulesLoop(); self.devCertWatchLoop(); self.appleTVBackupLoop()
                     // 0.6.0（开关后面）：启动器打开时快速比对「建议更新」、读一次总控台（都只读，秒回）。之后只在出包 / 手机作业做完时再读（finish），
                     //   不跟着每次重读游戏库起：出包过程中会重读好几次，每次多起两个作业进程是浪费（ExportStreamTests）
                     self.refreshUpdateHints(); self.refreshPhoneOverview()
@@ -1274,7 +1273,6 @@ public final class S2ArmLauncherModel: ObservableObject {
     var sgradePolling = false
     var keptLoopStarted = false, keptAutoTried: Set<String> = []   // keptModulesLoop（#8be819）
     var phoneAutoFails: [String: Int] = [:]   // 自动更新后台作业连续失败次数（notePhoneAuto，+PhoneBanner.swift）
-    var phonePrepareStarted = false   // 首启在电脑侧准备 iPhone 更新只做一次（准备期间不出横幅，不能再靠横幅状态挡重复）
     /// Apple TV（tvOS 版，S2ArmLauncherModel+AppleTV）：配对过的电视、出包页选的那台、存档自动备份循环起没起
     /// 安卓（开关后，S2ArmLauncherModel+Android.swift）：androidDevices 作业回报的开关与已连接手机、玩家选的那台（nil = 只连一台就用它）
     @Published var androidEnabled = false

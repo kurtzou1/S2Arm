@@ -48,6 +48,7 @@ namespace S2A.Dsh
         public const int METAL_MAX_PAYLOAD = 0x4000;                           // Metal 对象→网格载荷（object_data）上限 16 KB
         public const int RELAY_SLOT = 27;                                      // 载荷中转缓冲的槽（对象 / 网格两表；同计算核溢出槽 SPILL_SLOT，网格表这一格是顶点流 11，宿主经 enc_r_vbuf 绑）
         public const int EMU_SLOT = 28;                                        // #770 宿主自跑任务阶段（S2A_MESH_EMU）：任务 compute 出口 / 纯网格入口读的交换缓冲槽（对象 / 网格两表都是这一格；网格表这一格是顶点流 12，宿主经 enc_r_vbuf 绑）
+        public const int EMU_SLICE = 23;                                       // 交换缓冲头里「网格阶段内存片区起点（字）」那一格：中转载荷的网格宿主自跑时阶段内存放这里，一个网格组一片（RelayWords 的片字数）
         public const int RELAY_HEAD = 8;                                       // 中转缓冲头（字，宿主写）：[0] 网格片起点（字），[1] 本次绘制任务组数，[2] 每个任务组的网格片数（= 任务线程数）
 
         /// <summary>载荷超 Metal 对象载荷上限：走设备内存中转（任务把载荷写进中转缓冲、object_data 只带任务组号；网格的阶段内存整段放中转缓冲里一片）。
@@ -209,12 +210,34 @@ namespace S2A.Dsh
                 start = $"    device spvUnsafeArray<uint, {words}>& {mem} = *(device spvUnsafeArray<uint, {words}>*)(dm_relay + dm_relay[0] + (dm_payload.tg * dm_relay[2] + {tg}) * {slicew}u);\n"
                       + $"    for (uint i = {lid}; i < {words}u; i += {thr}u) {mem}[i] = 0u;\n" + bar;
             }
+            // 宿主自跑（S2A_MESH_EMU）的网格入口：中转时阶段内存同样放设备内存，取交换缓冲 [EMU_SLICE] 起的片区里本网格组那一片（宿主按网格组上限留）；不中转照旧线程组内存
+            string startEmu = relay && kind == "ms"
+                ? $"    device spvUnsafeArray<uint, {words}>& {mem} = *(device spvUnsafeArray<uint, {words}>*)(dm_xo + dm_xo[{EMU_SLICE}] + (ulong){tg} * {slicew}u);\n"
+                  + $"    for (uint i = {lid}; i < {words}u; i += {thr}u) {mem}[i] = 0u;\n" + bar
+                : start;
             string sig = string.Join(", ", ps.Concat(extra));
             // 计算核入口（S2A_MESH_EMU）里线程位置一族的参数须同为标量或同维向量：计算核自带 uint3 的线程号时，包装补的线程组号 / 线程号也用 uint3，进门取 .x
             bool vec3 = ps.Any(p => { var t = s_thread.Match(p); return t.Success && t.Groups[1].Value == "uint3"; });
             string sigK = vec3 ? string.Join(", ", ps.Concat(extra.Select(x => x.StartsWith("uint dm_tg ") ? "uint3 dm_tg3 [[threadgroup_position_in_grid]]" : x.StartsWith("uint dm_lid ") ? "uint3 dm_lid3 [[thread_position_in_threadgroup]]" : x))) : sig;
             string preK = vec3 ? string.Concat(extra.Select(x => x.StartsWith("uint dm_tg ") ? "    uint dm_tg = dm_tg3.x;\n" : x.StartsWith("uint dm_lid ") ? "    uint dm_lid = dm_lid3.x;\n" : "")) : "";
             string first = $"constant uint* dm_first [[buffer({FIRST_SLOT})]]";   // 本次绘制起始工作组号，宿主绑（接口约定 3）
+            // #770：没有硬件网格着色的 GPU（M1 / M2）上驱动的软件网格在带任务的网格绘制上挂死（11-17 M1 Pro：任务交宿主、网格交驱动照挂）。这些 GPU 上任务与网格两段都由宿主跑：
+            //   任务按计算核跑（main0_tc，载荷与派生数写进交换缓冲），宿主排好每个网格组属于哪个任务组，网格也按计算核跑（main0_mc，顶点 / 索引写进交换缓冲），再用顶点函数 main0_mv
+            //   普通索引绘制。只在 S2A_MESH_EMU 下编进去（出包的库照旧，宿主现编时定义它）。
+            //   交换缓冲头（字）：[0] 派生数起点 [1] 载荷起点 [2] 网格组表起点 [3] 任务组上限 [4] 网格组上限 [5] 每份载荷字数 [6] 直接绘制的任务组数 [7] 每组索引上限，[8..10] 网格组数，
+            //   [11] 顶点区起点 [12] 索引区起点，[13..17] 索引绘制的间接参数，[18] / [19] 实际要的网格组 / 任务组数（宿主据此定下次的大小），[20..22] 钳过的任务组数，
+            //   [23] 网格阶段内存片区起点（只有中转载荷的网格用）；网格组表一项 = 任务组 << 10 | 组内序号。
+            //   载荷超 16 KB（Relay）也走这里：交换缓冲本来就是设备内存，载荷不受对象载荷上限；网格的阶段内存超 32 KB，放 [23] 起的片区（startEmu）
+            string emuArg = $"device uint* dm_xo [[buffer({EMU_SLOT})]]";
+            bool emuOk = !sig.Contains($"[[buffer({EMU_SLOT})]]");
+            if (kind == "ts" && emuOk)
+                src += "\n#ifdef S2A_MESH_EMU\n"
+                    + $"kernel void main0_tc({sigK}, {emuArg}, {first})\n{{\n{preK}{start}"
+                    + $"    if ({lid} == 0u) {mem}[{wg}] = dm_first[0] + {tg};\n"
+                    + $"    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {call}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+                    + $"    if ({tg} < dm_xo[3])\n    {{\n        device uint* dm_p = dm_xo + dm_xo[1] + {tg} * {Math.Max(pay, 1)}u;\n"
+                    + $"        for (uint i = {lid}; i < {pay}u; i += {thr}u) dm_p[i] = {mem}[{outw}u + i];\n"
+                    + $"        if ({lid} == 0u) dm_xo[dm_xo[0] + {tg}] = min({mem}[{outw + 1}], {METAL_MAX_GRID}u);\n    }}\n}}\n#endif\n";
             if (kind == "ts" && relay)
                 return src + "\n" + head
                     + $"[[object]] void main0({sig}, object_data dm_payload_t& dm_payload [[payload]], mesh_grid_properties dm_grid, {first}, {relayArg})\n{{\n{start}"
@@ -224,21 +247,6 @@ namespace S2A.Dsh
                     + $"    device uint* dm_p = dm_relay + {RELAY_HEAD}u + {tg} * {payw}u;\n"
                     + $"    if (dm_in) for (uint i = {lid}; i < {pay}u; i += {thr}u) dm_p[i] = {mem}[{outw}u + i];\n"
                     + $"    if ({lid} == 0u) {{ dm_payload.tg = {tg}; dm_grid.set_threadgroups_per_grid(uint3(dm_in ? min({mem}[{outw + 1}], {i.Threads}u) : 0u, 1u, 1u)); }}\n}}\n";
-            // #770：没有硬件网格着色的 GPU（M1 / M2）上驱动的软件网格在带任务的网格绘制上挂死（11-17 M1 Pro：任务交宿主、网格交驱动照挂）。这些 GPU 上任务与网格两段都由宿主跑：
-            //   任务按计算核跑（main0_tc，载荷与派生数写进交换缓冲），宿主排好每个网格组属于哪个任务组，网格也按计算核跑（main0_mc，顶点 / 索引写进交换缓冲），再用顶点函数 main0_mv
-            //   普通索引绘制。只在 S2A_MESH_EMU 下编进去（出包的库照旧，宿主现编时定义它）。
-            //   交换缓冲头（字）：[0] 派生数起点 [1] 载荷起点 [2] 网格组表起点 [3] 任务组上限 [4] 网格组上限 [5] 每份载荷字数 [6] 直接绘制的任务组数 [7] 每组索引上限，[8..10] 网格组数，
-            //   [11] 顶点区起点 [12] 索引区起点，[13..17] 索引绘制的间接参数，[18] / [19] 实际要的网格组 / 任务组数（宿主据此定下次的大小）；网格组表一项 = 任务组 << 10 | 组内序号
-            string emuArg = $"device uint* dm_xo [[buffer({EMU_SLOT})]]";
-            bool emuOk = !relay && !sig.Contains($"[[buffer({EMU_SLOT})]]");
-            if (kind == "ts" && emuOk)
-                src += "\n#ifdef S2A_MESH_EMU\n"
-                    + $"kernel void main0_tc({sigK}, {emuArg}, {first})\n{{\n{preK}{start}"
-                    + $"    if ({lid} == 0u) {mem}[{wg}] = dm_first[0] + {tg};\n"
-                    + $"    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {call}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
-                    + $"    if ({tg} < dm_xo[3])\n    {{\n        device uint* dm_p = dm_xo + dm_xo[1] + {tg} * {Math.Max(pay, 1)}u;\n"
-                    + $"        for (uint i = {lid}; i < {pay}u; i += {thr}u) dm_p[i] = {mem}[{outw}u + i];\n"
-                    + $"        if ({lid} == 0u) dm_xo[dm_xo[0] + {tg}] = min({mem}[{outw + 1}], {METAL_MAX_GRID}u);\n    }}\n}}\n#endif\n";
             if (kind == "ts")
                 return src + "\n" + head
                     + $"[[object]] void main0({sig}, object_data dm_payload_t& dm_payload [[payload]], mesh_grid_properties dm_grid, {first})\n{{\n{start}"
@@ -288,7 +296,9 @@ namespace S2A.Dsh
                     + $"    for (uint n = {lid}; n < np * 3u; n += {thr}u)\n    {{\n        uint at = {prim + 4}u + n;\n        dm_out.set_index(n, ({mem}[at >> 2] >> ((at & 3u) * 8u)) & 0xffu);\n    }}\n}}\n";
             }
             // 网格阶段也由宿主跑（M1 上驱动跑带任务的网格本身也挂：11-17 宿主跑任务、网格交驱动照挂）：计算核 main0_mc 把本组顶点写进交换缓冲 [11] 起的顶点区（每组 MaxV 个
-            //   dm_vertex_t）、索引写进 [12] 起的索引区（每组 MaxP × 3 个，不足的补成退化三角形），宿主用顶点函数 main0_mv 按顶点号读出、普通索引绘制画。逐图元属性没有承载处：不出
+            //   dm_vertex_t）、索引写进 [12] 起的索引区（每组 MaxP × 3 个，不足的补成退化三角形），宿主用顶点函数 main0_mv 按顶点号读出、普通索引绘制画。
+            //   带逐图元属性的网格（EntryMcX）：普通绘制只有逐顶点输出，把每个三角形展开成 3 个独立顶点（每组 MaxP × 3 个 dm_xvertex_t），三个角都带该三角形的逐图元属性
+            //   （同一份值，插值后不变），索引 = 本组展开顶点的顺序号。原先这类网格不出宿主入口、M1 / M2 上整笔跳过（岛上植被 192226654c410372 等 3 支）
             //   无任务阶段的网格（#1542：M1 上这类原先悄悄落回驱动网格）：没有载荷与排表，第几组就是派发的线程组号，工作组字 = 起始组号 + 组号（同驱动入口 Entry 的无任务分支）
             string EntryMc(string name, bool gl)
             {
@@ -297,7 +307,7 @@ namespace S2A.Dsh
                       + $"    for (uint i = {lid}; i < {pay}u; i += {thr}u) {mem}[{inp}u + i] = dm_xo[dm_xo[1] + dm_t * dm_xo[5] + i];\n"
                       + bar + $"    if ({lid} == 0u) {{ {mem}[{wg}] = dm_j; {mem}[{inp}] = dm_j; }}\n"
                     : $"    uint dm_j = {tg};\n    if ({lid} == 0u) {mem}[{wg}] = dm_first[0] + {tg};\n";
-                return $"kernel void {name}({sigK}, device uint* dm_xo [[buffer({EMU_SLOT})]]" + (i.Task ? "" : $", {first}") + $")\n{{\n{preK}{start}{fill}"
+                return $"kernel void {name}({sigK}, device uint* dm_xo [[buffer({EMU_SLOT})]]" + (i.Task ? "" : $", {first}") + $")\n{{\n{preK}{startEmu}{fill}"
                     + $"{bar}    {callEmu}\n{bar}"
                     + $"    uint np = min({mem}[{prim >> 2}] >> 24, {i.MaxP}u);\n"
                     + $"    device dm_vertex_t* dm_vb = (device dm_vertex_t*)(dm_xo + dm_xo[11]) + {tg} * {i.MaxV}u;\n"
@@ -311,9 +321,32 @@ namespace S2A.Dsh
                     + $"    for (uint n = {lid}; n < np * 3u; n += {thr}u)\n    {{\n        uint at = {prim + 4}u + n;\n"
                     + $"        dm_ib[n] = dm_v0 + min(({mem}[at >> 2] >> ((at & 3u) * 8u)) & 0xffu, {i.MaxV - 1}u);\n    }}\n}}\n";
             }
+            string xsets = string.Concat(pm.Select(x => $"        v.p{x.N} = {Component(Word(x.Idx))};\n"));
+            string EntryMcX(string name, bool gl)
+            {
+                string fill = i.Task
+                    ? $"    uint dm_e = dm_xo[dm_xo[2] + {tg}], dm_t = dm_e >> 10, dm_j = dm_e & 1023u;\n"
+                      + $"    for (uint i = {lid}; i < {pay}u; i += {thr}u) {mem}[{inp}u + i] = dm_xo[dm_xo[1] + dm_t * dm_xo[5] + i];\n"
+                      + bar + $"    if ({lid} == 0u) {{ {mem}[{wg}] = dm_j; {mem}[{inp}] = dm_j; }}\n"
+                    : $"    uint dm_j = {tg};\n    if ({lid} == 0u) {mem}[{wg}] = dm_first[0] + {tg};\n";
+                return $"kernel void {name}({sigK}, device uint* dm_xo [[buffer({EMU_SLOT})]]" + (i.Task ? "" : $", {first}") + $")\n{{\n{preK}{startEmu}{fill}"
+                    + $"{bar}    {callEmu}\n{bar}"
+                    + $"    uint np = min({mem}[{prim >> 2}] >> 24, {i.MaxP}u);\n"
+                    + $"    device dm_xvertex_t* dm_vb = (device dm_xvertex_t*)(dm_xo + dm_xo[11]) + {tg} * {i.MaxP * 3}u;\n"
+                    + $"    threadgroup uint dm_ibase;\n    if ({lid} == 0u) dm_ibase = atomic_fetch_add_explicit((device atomic_uint*)(dm_xo + 13), np * 3u, memory_order_relaxed);\n"
+                    + "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+                    + $"    device uint* dm_ib = dm_xo + dm_xo[12] + dm_ibase; uint dm_v0 = {tg} * {i.MaxP * 3}u;\n"
+                    + $"    for (uint n = {lid}; n < np * 3u; n += {thr}u)\n    {{\n        uint at = {prim + 4}u + n, dm_c = min(({mem}[at >> 2] >> ((at & 3u) * 8u)) & 0xffu, {i.MaxV - 1}u), dm_p = n / 3u;\n"
+                    + $"        dm_xvertex_t v;\n        uint b = {Block("dm_c")};\n{sets}"
+                    + (gl ? "        v.position.z = fma(v.position.z, 0.5, v.position.w * 0.5);\n" : "")
+                    + $"        b = {PBlock("dm_p")};\n{xsets}"
+                    + "        dm_vb[n] = v;\n        dm_ib[n] = dm_v0 + n;\n    }\n}\n";
+            }
+            string xhead = "struct dm_xvertex_t {\n    float4 position [[position]];\n" + string.Concat(vm.Where(x => x.N != null).Select(x => $"    float4 a{x.N} [[user(locn{x.N})]];\n"))
+                         + string.Concat(pm.Select(x => $"    float4 p{x.N} [[user(locn{x.N})]];\n")) + "};\n";
             string emuMc = pm.Count == 0
                 ? EntryMc("main0_mc", true) + "\n" + EntryMc("main0_mc_z", false) + "\nvertex dm_vertex_t main0_mv(const device dm_vertex_t* dm_vb [[buffer(" + EMU_SLOT + ")]], uint dm_vid [[vertex_id]]) { return dm_vb[dm_vid]; }\n"
-                : "";
+                : xhead + EntryMcX("main0_mc", true) + "\n" + EntryMcX("main0_mc_z", false) + "\nvertex dm_xvertex_t main0_mv(const device dm_xvertex_t* dm_vb [[buffer(" + EMU_SLOT + ")]], uint dm_vid [[vertex_id]]) { return dm_vb[dm_vid]; }\n";
             string emuMs = emuOk && emuMc.Length > 0 ? "\n#ifdef S2A_MESH_EMU\n" + emuMc + "#endif\n" : "";
             return src + "\n" + head + Entry("main0", true) + "\n" + Entry("main0_z", false) + emuMs;
         }

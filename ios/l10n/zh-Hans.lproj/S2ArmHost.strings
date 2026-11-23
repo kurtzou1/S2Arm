@@ -280,6 +280,8 @@
 "app.lowRam.title" = "这台设备内存可能不够";
 "app.lowRam.body" = "这款游戏约需 %1$@ GB 内存，这台设备只有 %2$@ GB。已自动用存储空间兜底，可以玩，但可能变慢，或玩到一半被系统结束。这个提示只出现这一次。";
 "app.gpuStop.body" = "从后台划掉本 App 再打开，一般能接着玩，存档停在游戏上次保存的地方。想让我们查原因，点「故障报修」把诊断发给我们。";
+"app.dataLost.title" = "游戏所在的位置读不到了，已经安全停下";
+"app.dataLost.body" = "多半是外接硬盘断开了，或游戏文件被挪走了。存档在 App 里，没有受影响。把硬盘插好后，从后台划掉本 App 再打开，接着玩。";
 "app.gpuStop.title" = "游戏卡住了，已经安全停下";
 "app.library.broken.title" = "游戏资源不完整";
 "app.library.cantOpen" = "这款游戏打不开";

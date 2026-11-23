@@ -564,6 +564,24 @@ void s2a_ios_gpu_stopped(const char *why) {
     });
     s2a_logcon_flush();
 }
+// 游戏数据读不到了的停局页（11-22 外部游戏来源：game.img 在外接盘上、玩到一半拔掉；服务层 RomFsIndex.SourceLost 经导出调，读线程随后停住不再返回）：
+//   同 GPU 挂死安全停页——冻游戏线程、盖 UIKit 原生页、复用渲染失败的终局标记（回前台不恢复本局）。存档在 App 内，不受影响；玩家插好盘、从后台划掉再开。
+//   多条读线程会先后进来：只画一次
+void s2a_ios_game_data_lost(const char *why) {
+    static _Atomic int once; if (atomic_exchange(&once, 1)) return;
+    LOG("【红】iOS 壳：游戏数据读不到了（%s）→ 冻结游戏线程、显示停局页，不再恢复本局", why ? why : "-");
+    dispatch_async(dispatch_get_main_queue(), ^{
+        atomic_store(&g_render_failed, 1);
+        s2a_controller_set_foreground(0); s2a_guest_freeze(1);
+        NSString *t = S2AL(@"app.dataLost.title"), *b = S2AL(@"app.dataLost.body");
+        g_msg = [NSString stringWithFormat:@"%@\n\n%@", t, b]; g_note = @[@"externaldrive.badge.xmark", t, b, @(-1.0f), @"", @YES];
+        g_note_go = nil; g_note_alt = nil; atomic_store(&g_gpu_stuck_page, 0);
+        [g_help removeFromSuperview]; g_help = nil; g_help_args = nil; note_build();
+        if (g_note_view) [g_root bringSubviewToFront:g_note_view];
+        LOG("游戏数据读不到的停局页：%s", g_note_view ? "已显示" : "窗口还没建，建好窗口再画");
+    });
+    s2a_logcon_flush();
+}
 // 初启失败页（host_main.c failed_session，宿主线程；审计 #1534 P1-4）：初启失败 = 本进程终局，不在本进程重试。
 //   原先直接 _exit，玩家只看到 App 自己消失；现在停在提示页：玩家话术一句 +「故障报修」，请玩家从后台划掉再打开（新进程是唯一干净的重置）。
 //   body 由 s2a_init_fail_screen 按错误码给（只含玩家话术），这里只负责显示；内部摘要只在 diag 里（11-02 维护者：内部词不上屏）。
@@ -735,6 +753,13 @@ static void audio_category_apply(void) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         AVAudioSession *s = AVAudioSession.sharedInstance;
         NSString *want = mix ? AVAudioSessionCategoryAmbient : play ? AVAudioSessionCategoryPlayback : AVAudioSessionCategorySoloAmbient;
+        // 每次（起局 / 回前台 / 改设置）记一行现状：「没声音」类诊断据此判是不是跟随静音键的类别、声音去了哪个输出、系统音量是不是 0
+        //   （D-N6G7 等：管线满、设备照常播完，看不出声音被谁吞了；静音拨片本身的状态系统不给读，类别 SoloAmbient / Ambient 才会被它静音）
+        { NSMutableString *outs = [NSMutableString string];
+          for (AVAudioSessionPortDescription *o in s.currentRoute.outputs) [outs appendFormat:@"%s%@", outs.length ? ", " : "", o.portType];
+          NSString *cat = s.category;
+          LOG("[声] 音频会话现状：类别 %s（%s）、输出 %s、系统音量 %.0f%%", cat.UTF8String ?: "?",
+              [cat isEqualToString:AVAudioSessionCategoryPlayback] ? "不跟随静音键" : "跟随静音键：拨到静音就没声音", outs.length ? outs.UTF8String : "无", s.outputVolume * 100.0); }
         if ([s.category isEqualToString:want]) return;
         NSError *e = nil; BOOL ok = [s setCategory:want error:&e];
         LOG("[声] 音频会话类别 → %s（%s）%s%s", mix ? "Ambient" : play ? "Playback" : "SoloAmbient", mix ? "与其他 App 混音、静音键只静音游戏" : play ? "静音键下照样出声" : "跟随静音键",
@@ -1106,6 +1131,9 @@ static void test_picker(void);
 void s2a_shell_library_appeared(void) { static int once; if (!once++) { BOOT_MARK("游戏库界面可操作"); test_picker(); } }
 int s2a_game_install_state(const char *proc_docs, const char *gid);   // pack_apply.c
 int s2a_shell_game_install_state(const char *gid) { char d[1024]; s2a_container_docs(d, sizeof d); return s2a_game_install_state(d, gid); }
+int s2a_img_scan_source(const char *proc_docs, const char *dir, const char *srcid, const char *skip); int s2a_pack_source_forget(const char *proc_docs, const char *srcid);   // pack_apply.c
+int s2a_shell_scan_game_source(const char *dir, const char *source_id, const char *skip) { char d[1024]; s2a_container_docs(d, sizeof d); return s2a_img_scan_source(d, dir, source_id, skip); }
+int s2a_shell_forget_game_source(const char *source_id) { char d[1024]; s2a_container_docs(d, sizeof d); return s2a_pack_source_forget(d, source_id); }
 // 程序约定号对不上本宿主（runtime s2a_launch_ctx_game_needs_update）：每款读一次清单后记下，点开被拒的（S2A_SELECT_NEEDS_UPDATE）也记上；
 //   库每秒重判只查这里。主线程（s2a_shell.h）
 int s2a_shell_game_needs_host_update(const char *gid) {

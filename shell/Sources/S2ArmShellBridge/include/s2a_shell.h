@@ -26,7 +26,7 @@ int s2a_shell_play(const char *game_id);
 void *s2a_shell_library_vc(const char *catalogue_json_path);
 
 // 本款装机阶段（11-07 Duo「游戏没能启动」：库里对资源包不在机上的款仍给 Play；v0.2.3 装机蒙版：传着的款要显示进度）：
-//   s2a_shell_game_install_state：1 就绪 / 2 传完了只等解开 / 3 传输中（推送没完：有 资源包/.transfer 按它画进度，没有按文件改动判传断了）/ 0 没有（资源包不在或是空的，库里不显示）。
+//   s2a_shell_game_install_state：1 就绪 / 2 传完了只等解开 / 3 传输中（推送没完：有 资源包/.transfer 按它画进度，没有按文件改动判传断了）/ 5 外部来源离线（本体是指向游戏来源文件夹的软链接、打不开）/ 0 没有（资源包不在或是空的，库里不显示）。
 //     实现在宿主 ios/app.m（按 Documents/games/<游戏号> 跑 pack_apply.c s2a_game_install_state，同起局导入闸门判据）；本包弱定义缺省 1（Swift 单测不链宿主）
 //   s2a_shell_install_game：库在后台解开阶段 2 的那款，解完宿主调 s2a_shell_refresh；同时只解一款，正在解（或游戏号不对）返回 0。弱缺省 0
 //   s2a_shell_install_progress：正在解的是这款 → 写已解开包数 / 总包数、返回 1；否则 0。弱缺省 0
@@ -125,6 +125,12 @@ void s2a_shell_restore_snapshot(const char *game_id);
 int s2a_shell_snapshot_dir(const char *game_id, char *out, unsigned long size);
 /// Deletes the game's snapshot with its picture and manifest, freeing the space: 0 done, -1 not (or nothing to delete). Weak stub -1.
 int s2a_shell_delete_snapshot(const char *game_id);
+// 外部游戏来源（11-22，游戏库设置里加的「游戏来源文件夹」，如外接硬盘；壳 GameSources.swift 解析书签、拿到访问权后调）：
+//   s2a_shell_scan_game_source：扫 dir（往下两层）里电脑导出的完整 .img，以软链接接进这款的资源包（外部文件不挪不改）；skip = 库里删过的游戏号（逗号隔开，NULL = 不跳过）。
+//     返回新链 / 改链的款数，文件夹打不开 → -1。实现在宿主 ios/app.m（pack_apply.c s2a_img_scan_source）；弱缺省 -1
+//   s2a_shell_forget_game_source：玩家移除这个来源 → 从它链来的款删掉 App 内的资源包根（外部文件不动），返回款数；弱缺省 0
+int s2a_shell_scan_game_source(const char *dir, const char *source_id, const char *skip);
+int s2a_shell_forget_game_source(const char *source_id);
 
 #ifdef __cplusplus
 }

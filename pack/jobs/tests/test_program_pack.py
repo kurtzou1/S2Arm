@@ -167,6 +167,34 @@ class ProgramPackTests(JobCase):
             self.assertTrue((out_b / f"S2AImages-{GID}.dylib").read_bytes().endswith(b"TEAMB"))
             self.assertFalse((pkg / f"S2AImages-{GID}.dylib").exists(), "签完照样删")
 
+    def test_rebuild_survives_exfat_companion_vanishing(self):
+        # D-6P5D（诊断#e178e8）：工具缓存在 exFAT 盘上，每个文件旁有 AppleDouble 伴随文件 ._<名>，删本体时系统连带删掉它，
+        #   rmtree 事先列出的 ._<名> 再删就是 FileNotFoundError → 换旧 package-tvos / signed 时整个装 Apple TV 失败。
+        #   期望（手写）：程序件变了照样重出、重签，新包换上；别的删除错误照抛。
+        #   随包运行时是 Python 3.12（它的 rmtree 遇到 FileNotFoundError 就抛，3.13 起自己容忍）：负对照要用 3.12 跑才红
+        real = os.unlink
+        def unlink(path, *a, **k):   # 模拟非 APFS 盘：删到 ._<名> 时它已随本体消失
+            real(path, *a, **k)
+            if Path(str(path)).name.startswith("._"):
+                raise FileNotFoundError(2, "No such file or directory", str(path))
+        pkg = program_pack.build(self.c, GID, kit=self.kit, shell=self.shell, info=INFO, banner="", platform="tvos")
+        out = program_pack.sign(self.c, GID, "T", "io.b", lambda d, t, bd: None, pkg=pkg, platform="tvos")
+        keys = [(d / ".key").read_text(encoding="utf-8") for d in (pkg, out)]
+        for d in (pkg, out):
+            (d / "._meta").write_bytes(b"x")
+        (self.kit / "addr_need.tsv").write_text("b\n")   # 程序件变了：要重出、重签，换掉旧目录
+        with mock.patch("os.unlink", unlink):
+            pkg2 = program_pack.build(self.c, GID, kit=self.kit, shell=self.shell, info=INFO, banner="", platform="tvos")
+            out2 = program_pack.sign(self.c, GID, "T", "io.b", lambda d, t, bd: None, pkg=pkg2, platform="tvos")
+        self.assertEqual((pkg2, out2), (pkg, out))
+        self.assertFalse((pkg / "._meta").exists() or (out / "._meta").exists(), "旧目录整个换掉")
+        self.assertTrue(all((d / ".key").read_text(encoding="utf-8") != k for d, k in zip((pkg, out), keys)), "新包已换上")
+        (self.kit / "addr_need.tsv").write_text("c\n")
+        def denied(path, *a, **k):
+            raise PermissionError(13, "Permission denied", str(path))
+        with mock.patch("os.unlink", denied), self.assertRaises(PermissionError):
+            program_pack.build(self.c, GID, kit=self.kit, shell=self.shell, info=INFO, banner="", platform="tvos")
+
     def test_need_reasons(self):
         want = dict(host_abi=7, rewriter_id="rw01", image_sha256="s1")
         ok = dict(sha="s1", team="T", cert="C", host_abi=7, rewriter_id="rw01")

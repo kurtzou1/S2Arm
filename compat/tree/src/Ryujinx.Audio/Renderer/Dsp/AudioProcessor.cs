@@ -82,7 +82,7 @@ namespace Ryujinx.Audio.Renderer.Dsp
 
             _mailbox = new Mailbox<MailboxMessage>();
             _sessionCommandList = new RendererSession[Constants.AudioRendererSessionCountMax];
-            _lastTime = PerformanceCounter.ElapsedNanoseconds;
+            _lastTime = S2ANowNs();
             _pauseEvent = deviceDriver.GetPauseEvent();
 
             if (S2AInline)
@@ -173,7 +173,7 @@ namespace Ryujinx.Audio.Renderer.Dsp
 
             long increment = Constants.AudioProcessorMaxUpdateTimeTarget;
 
-            long timeNow = PerformanceCounter.ElapsedNanoseconds;
+            long timeNow = S2ANowNs();
 
             // S2Arm (11-13 断音): pace by what the output still holds when it can tell (see S2ADepthWait); the wall clock below otherwise
             if (S2ADepthFrames > 0 && S2ADepthWait(increment, timeNow))
@@ -221,8 +221,7 @@ namespace Ryujinx.Audio.Renderer.Dsp
             // S2Arm: one sleep to the end of the period instead of polling WaitOne(1) (3.4 wakeups per 5 ms period → 1)
             if (timeNow < _lastTime + increment)
             {
-                Ryujinx.Common.PreciseSleep.PreciseSleepHelper.SleepUntilTimePointSingleWake(
-                    PerformanceCounter.ElapsedTicks + (_lastTime + increment - timeNow) * PerformanceCounter.TicksPerMillisecond / 1_000_000);
+                S2ASleepNs(timeNow, _lastTime + increment);
             }
 
             _lastTime += increment;
@@ -298,6 +297,34 @@ namespace Ryujinx.Audio.Renderer.Dsp
         private int _s2aCatchUp, _s2aCatchUpTick;
         public static long S2ACatchUps;   // 诊断：追设备的渲染次数（10 秒行读取清零）
 
+        // S2Arm (11-22 门禁偶发红): 节拍读的钟与睡的钟。单测（S2A.Services.Tests AudioDepthPaceTest）换成可控的虚拟钟：
+        //   原先单测用真墙钟，机器忙时测试线程分不到 CPU，假设备照墙钟吃帧、渲染跟不上，判据量到的是调度而不是节拍逻辑。
+        //   S2ATestClock 为 null（宿主恒为 null）= 真墙钟；设了就由它给「现在」、由它「睡到」某一刻（虚拟钟直接把时间拨过去）
+        public interface IS2AClock
+        {
+            long NowNs();
+            void SleepUntilNs(long untilNs);
+        }
+
+        public static IS2AClock S2ATestClock;
+
+        private static long S2ANowNs() => S2ATestClock?.NowNs() ?? PerformanceCounter.ElapsedNanoseconds;
+
+        private static void S2ASleepNs(long nowNs, long untilNs)
+        {
+            IS2AClock c = S2ATestClock;
+
+            if (c != null)
+            {
+                c.SleepUntilNs(untilNs);
+
+                return;
+            }
+
+            Ryujinx.Common.PreciseSleep.PreciseSleepHelper.SleepUntilTimePointSingleWake(
+                PerformanceCounter.ElapsedTicks + (untilNs - nowNs) * PerformanceCounter.TicksPerMillisecond / 1_000_000);
+        }
+
         // True: paced by depth (the next render may start now). False: no fed output can tell its depth: use the wall clock
         private bool S2ADepthWait(long increment, long timeNow)
         {
@@ -370,10 +397,9 @@ namespace Ryujinx.Audio.Renderer.Dsp
                     wake = Math.Min(wake, _s2aVirt);
                 }
 
-                Ryujinx.Common.PreciseSleep.PreciseSleepHelper.SleepUntilTimePointSingleWake(
-                    PerformanceCounter.ElapsedTicks + Math.Max(0, wake - timeNow) * PerformanceCounter.TicksPerMillisecond / 1_000_000);
+                S2ASleepNs(timeNow, Math.Max(timeNow, wake));
 
-                timeNow = PerformanceCounter.ElapsedNanoseconds;
+                timeNow = S2ANowNs();
                 buffered = Math.Max(0, S2AFedBufferedFrames(false));
             }
 

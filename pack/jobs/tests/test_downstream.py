@@ -63,6 +63,14 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual(s["id"], "d2r-mobile")
         self.assertIsNone(ds.match(dict(id="01006F8002326000"), schemes))
 
+    def test_real_registry_bundle_is_consistent(self):
+        # 换下游版本时 tag / 网址 / 摘要一起改（d2r-mobile #299 换 v2.3.4）：每个网址都指本 tag，下载站在前、GitHub 在后，摘要与提交号格式对
+        b = ds.load()["d2r-mobile"]["bundle"]
+        self.assertTrue(all(f"/{b['tag']}/" in u for u in b["urls"]), b["urls"])
+        self.assertEqual([u.split("/")[2] for u in b["urls"]], ["dl.s2arm.com", "github.com"])
+        self.assertRegex(b["sha256"], r"^[0-9a-f]{64}$")
+        self.assertRegex(b["commit"], r"^[0-9a-f]{40}$")
+
     def test_registry_text_has_no_game_name(self):
         # 公开仓文字不写游戏名：界面上的游戏名取玩家自己游戏包里的；登记表只写程序号与方案名
         text = ds.REGISTRY.read_text(encoding="utf-8")

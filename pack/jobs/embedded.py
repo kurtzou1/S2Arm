@@ -101,7 +101,8 @@ def _reinstall(c, source, manifest, root, destination, identity):
         os.rename(temporary, destination)
     finally:
         if temporary.exists():
-            shutil.rmtree(temporary)
+            import layout
+            layout.remove_tree(temporary)
 
 
 # ---- 引擎副本放哪、留几份（游戏库结构 P3）----

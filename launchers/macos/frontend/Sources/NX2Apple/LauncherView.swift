@@ -222,24 +222,15 @@ struct LauncherView: View {
         }
     }
 
-    /// 删除游戏 / 清除缓存的进行中与结果（S2ArmLauncherModel.libraryNotice）：点下就出现，成功几秒后自己收起，失败留着等玩家关
-    /// 新版启动器首次启动后的 iPhone 版 S2Arm 横幅（S2ArmLauncherModel+PhoneBanner.swift）：准备中 / 已准备好 / 连上自动更新 / 更新进度
+    /// 只有玩家发起更新后才显示进度。可用更新由顶栏的按钮提示。
     @ViewBuilder private var phoneUpdateBar: some View {
-        if let line = model.phoneBannerLine {
+        if let percent = model.phoneUpdatePercent {
             HStack(spacing: 10) {
-                if line.percent != nil || model.phoneBanner == .preparing { ProgressView().controlSize(.small) }
-                else { Image(systemName: "iphone.and.arrow.forward").foregroundStyle(LauncherPalette.cream) }
-                let label = Text(txt(line.key).replacingOccurrences(of: "{0}", with: "\(line.percent ?? 0)")).font(.manrope(13, .semibold)).monospacedDigit()
+                ProgressView().controlSize(.small)
+                Text(txt("phone.update.banner.progress").replacingOccurrences(of: "{0}", with: "\(percent)"))
+                    .font(.manrope(13, .semibold)).monospacedDigit()
                     .fixedSize(horizontal: false, vertical: true)
-                if line.percent == nil && model.phoneBanner != .preparing {   // 手动更新（11-16）：横幅文字点了 = 顶栏「更新 iPhone」，玩家点了才装
-                    Button { model.requestPhoneUpdate(language: model.provider.client.environment.uiLanguage ?? "zh-Hans") } label: { label }
-                        .controllerButtonStyle(.plain).accessibilityIdentifier("notice.phoneUpdate.open")
-                } else { label }
                 Spacer(minLength: 8)
-                if line.percent == nil {
-                    Button { model.phoneBanner = nil } label: { Image(systemName: "xmark") }.controllerButtonStyle(.plain).foregroundStyle(.secondary)
-                        .help(txt("notice.close")).accessibilityLabel(txt("notice.close")).accessibilityIdentifier("notice.phoneUpdate.close")
-                }
             }
             .padding(.horizontal, LauncherTheme.Metrics.libraryInset).padding(.vertical, 10)
             .background(LauncherPalette.cream.opacity(0.10))
@@ -247,6 +238,7 @@ struct LauncherView: View {
         }
     }
 
+    /// 删除游戏 / 清除缓存的进行中与结果。
     @ViewBuilder private var libraryNoticeBar: some View {
         if let n = model.libraryNotice {
             let text = loc.t(n.key + "." + { switch n.kind { case .running: "running"; case .done: "done"; case .failed: "failed" } }())

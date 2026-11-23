@@ -795,6 +795,7 @@ static void fill_facts(const struct rp_shader_req *q, const struct s2a_direct_co
 // fd_binding → 后端布局项（核心按 src_kind / src_reg 绑定）。0 = 这一项首版不支持
 static int layout_ent(const struct fd_binding *b, nvn_gpu_layout_ent *e) {
     memset(e, 0, sizeof *e);
+    if (b->binding < 0 || b->binding > UINT16_MAX) return 0;   // 布局项的绑定号是 16 位：超界不截断，按不支持的项具名拒
     e->src_reg2 = UINT16_MAX;
     e->set = (uint8_t)b->set; e->binding = (uint16_t)b->binding; e->count = 1; e->access = NVN_GPU_ACC_R;
     if (b->kind == 0) {
@@ -970,6 +971,15 @@ static void with_program_key(char *out, size_t cap, const char *why, const uint8
         snprintf(out + n, cap - (size_t)n, "（程序键 %02x%02x%02x%02x%02x%02x%02x%02x）",
                  key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7]);
 }
+// 布局项 / 线格式的绑定号是 16 位：超界单独具名拒（binding_number_over_16bit，原因带绑定号和程序键），不和「资源种类不支持」混成 binding_kind_*，也不截断。
+static int binding_over_16bit(const struct fd_binding *b, const uint8_t key[8], const char *stage) {
+    if (b->binding >= 0 && b->binding <= UINT16_MAX) return 0;
+    char why[96], wy[160];
+    snprintf(why, sizeof why, "绑定号 %d 超过 16 位（阶段 %s）", b->binding, stage && stage[0] ? stage : "?");
+    with_program_key(wy, sizeof wy, why, key);
+    red1("binding_number_over_16bit", wy);
+    return 1;
+}
 #ifdef S2A_ANDROID_DEBUG_ENV
 // 预热与提交线程走同一拒收点。按文件加锁，让追加与 1 MiB 上限在并发和跨局时仍成立。
 static void record_link_refusal(const struct s2a_source_entry_view views[3], int nst, uint64_t miss) {
@@ -1078,6 +1088,7 @@ static struct entry *build(const uint8_t *bytes, size_t len, const struct s2a_so
             if (!(b->is_support || b->stage_idx == st)) continue;
             if (e->prog.nent[st] == RP_PROG_ENT_MAX) { red1("too_many_bindings", ""); e->failed = 1; break; }
             nvn_gpu_layout_ent *le = &e->prog.ent[st][e->prog.nent[st]];
+            if (binding_over_16bit(b, views[st].key ? views[st].key : identity, b->stage)) { e->failed = 1; break; }
             if (!layout_ent(b, le)) {
                 char nm[40], wy[96]; const uint8_t *k = views[st].key ? views[st].key : identity;
                 snprintf(nm, sizeof nm, "binding_kind_%d_slot_%d", b->kind, b->slot);
@@ -2264,6 +2275,7 @@ static struct entry *build_compute(const uint8_t *bytes, size_t len, const struc
         const struct fd_binding *b = &cp.bindings[i];
         if (e->prog.nent[0] == RP_PROG_ENT_MAX) { red1("too_many_bindings", "cs"); e->failed = 1; break; }
         nvn_gpu_layout_ent *le = &e->prog.ent[0][e->prog.nent[0]]; int ok = 0;
+        if (binding_over_16bit(b, src && src->key ? src->key : identity, "cs")) { e->failed = 1; break; }
         if (b->kind == 1) {
             const struct nvn_vk_compute_storage *sg = &cp.storage[i];
             if (sg->index < 16) {

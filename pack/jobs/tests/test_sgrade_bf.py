@@ -455,5 +455,18 @@ class WindowsRebuildTests(unittest.TestCase):
         self.metal = False
         self.assertIsNone(self.rebuild())
 
+    def test_failure_keeps_direct_lib_log(self):
+        # D-Z2VA：直连库那一步失败时，它的日志 direct_lib.log 写在临时工作目录里（oneclick_win.Run.sh），随临时目录删掉、诊断包里没有，定不了崩因。
+        #   期望：失败照旧上抛，工作目录下的 *.log 拷进本任务的日志目录 <logs>/<任务>/win-direct/
+        def run(args, log, env, cwd=None, **k):
+            work = Path(args[-2]); work.mkdir(parents=True, exist_ok=True)
+            (work / "direct_lib.log").write_text("🔴 出库失败 rc=1：Unhandled exception. X\n", encoding="utf-8")
+            raise sgrade_bf.Failure("更新失败（退出码 1）")
+        self.c.run = run
+        with self.assertRaises(sgrade_bf.Failure):
+            self.rebuild()
+        kept = Path(self.c.logs) / "t" / "win-direct" / "direct_lib.log"
+        self.assertIn("Unhandled exception. X", kept.read_text(encoding="utf-8"))
+
 if __name__ == "__main__":
     unittest.main()

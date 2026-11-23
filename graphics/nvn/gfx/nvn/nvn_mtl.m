@@ -3106,6 +3106,7 @@ static void rp_flush(void);
 static void rt_keep_state(void);
 static void ghost_finish_submission(void);
 static void alias_dead_views(void);
+static void alias_wb_drain(int wait);
 static void tex_idle_reclaim(void);
 static void bcal_sweep_overwritten(void);
 int nvn_cmd_call_target(uint64_t h);   // hle_nvn.c：回放 CALL 核目标（#768338 安全阀）
@@ -3165,6 +3166,7 @@ uint64_t nvn_be_sub_commit(void) {
     tex_idle_reclaim();   // #1386: under memory pressure, idle live textures whose content the guest storage still holds (their views go in alias_dead_views below)
     alias_dead_views();   // likewise for the texture-ID views of textures dropped as overwritten
     bcal_sweep_overwritten();   // and the writer textures the block-compressed alias table keeps over storage since overwritten
+    alias_wb_drain(0);   // #674: write back GPU-written unreferenced shared textures queued by alias_orph_evict (those whose last GPU write has completed) before releasing them
     uint64_t fence = ++g_fence;
     rc_commit(fence);
     gw_commit(fence);
@@ -3371,9 +3373,26 @@ static void treg_drop_pool_views(const void *pool);
 static void pool_dirty(int samp, int id_);   // a registration changed what the ID names: a pool table entry is looked up again (pool_gpu)
 static void pool_gpuw_drop(const void *pool);   // with tex_cpu_content
 static void bcal_drop_pool(const void *pool);   // g_bcal (below, with gpw_mark)
+typedef struct { alias_key k; void *o; uint64_t wf; } alias_wb_e;   // #674: GPU-written unreferenced shared textures queued for writeback to guest pool memory before release; wf = fence of the last GPU write (g_alias_wrote), 0 = none known
+static alias_wb_e *g_alias_wb; static uint32_t g_alias_wb_n, g_alias_wb_cap;
+static _Atomic uint32_t g_alias_wb_cnt;
+static pthread_mutex_t g_wb_mu = PTHREAD_MUTEX_INITIALIZER;   // guards guest pool memory during alias_wb_drain swizzle against concurrent pool finalize (lock order: g_wb_mu -> g_smu)
+static uint64_t g_alias_pool_drop_gen;
+static uint64_t g_alias_orph_wb_ok, g_alias_orph_wb_b;
+static int alias_wb_eligible(const alias_key *k, id o);
 void nvn_be_alias_drop_pool(const void *pool) {
     if (!pool) return;
+    pthread_mutex_lock(&g_wb_mu);
     pthread_mutex_lock(&g_smu);
+    g_alias_pool_drop_gen++;
+    for (uint32_t i = 0; i < g_alias_wb_n; ) {
+        if (g_alias_wb[i].k.pool == (uint64_t)(uintptr_t)pool) {
+            id wo = CFBridgingRelease(g_alias_wb[i].o);
+            g_alias_wb[i] = g_alias_wb[--g_alias_wb_n];
+            defer_obj_release(wo);
+        } else i++;
+    }
+    atomic_store_explicit(&g_alias_wb_cnt, g_alias_wb_n, memory_order_release);
     uint32_t n = 0; alias_key *ks = NULL;
     for (uint32_t i = 0; i < g_alias.cap; i++) {
         if (!g_alias.vals[i]) continue;
@@ -3391,6 +3410,7 @@ void nvn_be_alias_drop_pool(const void *pool) {
     }
     if (n) { g_ser_gen++; g_alias_evicted += n; }
     pthread_mutex_unlock(&g_smu);
+    pthread_mutex_unlock(&g_wb_mu);
     free(ks);
     treg_drop_pool_views(pool);   // outside g_smu: the texture ID registry lock g_rmu is taken before g_smu
     bcal_drop_pool(pool);
@@ -3516,11 +3536,26 @@ static CFMutableSetRef alias_held(void) {   // caller holds g_rmu and g_smu: wha
 static uint64_t alias_orph_drop(const alias_key *k, int why) {   // caller holds g_smu; why 0 never GPU-written, 1 rewritten, 2 pressure; returns the bytes let go
     void *old = nvn_hm_del(&g_alias, k);
     if (!old) return 0;
+    uint64_t wf = (uint64_t)(uintptr_t)nvn_hm_get(&g_alias_wrote, k);   // #674: the writeback reads only after this fence is done (the write may still be on the main queue)
     nvn_hm_del(&g_alias_seen, k); nvn_hm_del(&g_alias_wrote, k);
     id o = CFBridgingRelease(old); uint64_t b = res_bytes(o);
     if (why == 0) { g_alias_orph_cache++; g_alias_orph_cache_b += b; } else if (why == 1) { g_alias_orph_rw++; g_alias_orph_rw_b += b; } else { g_alias_orph_valve++; g_alias_orph_valve_b += b; }
     if (g_alias_set) CFSetRemoveValue(g_alias_set, (__bridge const void *)o);
-    defer_obj_release(o); g_ser_gen++;
+    int queued = 0;
+    if (why == 2 && alias_wb_eligible(k, o)) {
+        if (g_alias_wb_n == g_alias_wb_cap) {
+            uint32_t nc = g_alias_wb_cap ? 2 * g_alias_wb_cap : 16;
+            alias_wb_e *q = realloc(g_alias_wb, nc * sizeof *q);
+            if (q) { g_alias_wb = q; g_alias_wb_cap = nc; }
+        }
+        if (g_alias_wb_n < g_alias_wb_cap) {
+            g_alias_wb[g_alias_wb_n++] = (alias_wb_e){*k, (void *)CFBridgingRetain(o), wf};
+            atomic_store_explicit(&g_alias_wb_cnt, g_alias_wb_n, memory_order_release);
+            queued = 1;
+        }
+    }
+    if (!queued) defer_obj_release(o);
+    g_ser_gen++;
     return b;
 }
 static uint64_t alias_orph_evict(void *ctx, uint64_t want) {   // the low-region ledger's give-back callback (it holds its own lock; g_rmu / g_smu may be held by the thread that asked: then nothing this time)
@@ -5441,6 +5476,129 @@ static int fill_nonfinite(const tex_t *t, const uint8_t *p, id<MTLTexture> mt) {
     return 0;
 }
 #include "nvn_texture_storage.inc"
+// #674: write back GPU-written unreferenced shared textures queued by alias_orph_evict (why=2) to their guest pool storage before releasing the Metal texture,
+//   so rebuilding a texture over the same untouched storage (e.g. cached terrain normal maps) reloads the GPU-computed content instead of all zeros, while still
+//   releasing the Metal texture under low-VA pressure (#357).
+static int alias_wb_eligible(const alias_key *k, id o) {
+    if (!k || !o || ![o conformsToProtocol:@protocol(MTLTexture)]) return 0;
+    id<MTLTexture> mt = o;
+    if (k->d.samples > 1 || k->d.target == NVN_TEXTURE_TARGET_BUFFER || (k->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET))) return 0;
+    if (mtl_fmt_depth(mt.pixelFormat) || rs_state(mt) == RS_SCALED) return 0;
+    uint32_t upf; int ubpp;
+    if (fmt_unpack(k->d.format, &upf, &ubpp)) return 0;
+    int bw = 1, bh = 1, bpb = nvn_fmt_bpb(k->d.format, &bw, &bh);
+    if (!bpb) return 0;
+    if (bw == 1 && bh == 1 && (int)mtl_pf_bytes(mt.pixelFormat) != bpb) return 0;
+    const pool_t *p = (const pool_t *)(uintptr_t)k->pool;
+    if (!p || !p->mem || (p->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) || nvn_sparse_pool(p) || k->off < 0) return 0;
+    if ((p->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) && (k->d.flags & NVN_TEXTURE_FLAGS_COMPRESSIBLE)) return 0;
+    nvn_texlayout L; nvn_tex_layout(&k->d, &L);
+    if (!L.size || (uint64_t)k->off + L.size > p->size) return 0;
+    unsigned nl = k->d.levels ? k->d.levels : 1;
+    if (mt.width != k->d.width || mt.height != k->d.height || mt.mipmapLevelCount < nl || mt.arrayLength < L.layers) return 0;
+    return 1;
+}
+// Order and cost (review on #2046): the evicted texture was GPU-written, and the writes may still be on the main queue g_cq while the readback goes on g_q (q_cb: no
+//   ordering between the two). So an entry is read back only once its last write fence (wf) is done — CPU-observed completion orders it before anything committed after.
+//   wait = 0 (each submission): entries whose write is still in flight stay queued for a later submission, nothing waits on the GPU for them.
+//   wait = 1 (tex_init_fill, a rebuild may sit over the evicted storage): wait for those fences first.
+//   All entries of one drain are copied in one command buffer and one staging buffer, waited once; at most ALIAS_WB_BATCH bytes per drain (the first entry always),
+//   the rest stay queued — eviction happens because the low region is short, so the staging allocation is kept bounded.
+#define ALIAS_WB_BATCH (16u << 20)
+static uint64_t g_alias_wb_deferred, g_alias_wb_drains;   // read-only counters (t_nvn_alias_orphan): entries left queued because their write was in flight; drains that encoded a batch
+static size_t alias_wb_bytes(const alias_key *k) {   // staging bytes for all levels and layers (0 = cannot be laid out)
+    nvn_texlayout L; nvn_tex_layout(&k->d, &L);
+    unsigned nl = k->d.levels ? k->d.levels : 1, layers = L.layers ? L.layers : 1; size_t tot = 0;
+    for (unsigned ly = 0; ly < layers; ly++) for (unsigned lv = 0; lv < nl; lv++) {
+        uint32_t rb, rows, slices, bpb; uint64_t base; unsigned th, td;
+        if (nvn_deswizzle_geom(&k->d, lv, ly, &rb, &rows, &slices, &base, &th, &td, &bpb)) return 0;
+        tot += (size_t)rb * (size_t)rows * (size_t)slices;
+    }
+    return tot;
+}
+static void alias_wb_drain(int wait) {
+    if (!atomic_load_explicit(&g_alias_wb_cnt, memory_order_acquire)) return;
+    if (!atomic_load(&g_sub_thread_set) || !on_sub_thread()) return;
+    pthread_mutex_lock(&g_mu); uint64_t done = g_done; pthread_mutex_unlock(&g_mu);
+    // take what this drain handles; the rest stays in g_alias_wb (in place, under g_smu)
+    pthread_mutex_lock(&g_smu);
+    uint32_t n = 0, keep = 0; alias_wb_e *list = g_alias_wb_n ? malloc(g_alias_wb_n * sizeof *list) : NULL; size_t *sz = g_alias_wb_n ? malloc(g_alias_wb_n * sizeof *sz) : NULL;
+    size_t tot = 0; uint64_t wmax = 0, gen0 = g_alias_pool_drop_gen;
+    for (uint32_t i = 0; i < g_alias_wb_n; i++) {
+        alias_wb_e e = g_alias_wb[i]; size_t b = list ? alias_wb_bytes(&e.k) : 0;
+        int ready = e.wf <= done || (wait && e.wf <= g_fence), fits = !n || tot + b <= ALIAS_WB_BATCH;   // a write in the submission still being recorded (wf = g_fence + 1) cannot be waited for here
+        if (list && ready && fits) { list[n] = e; sz[n++] = b; tot += b; if (e.wf > wmax) wmax = e.wf; }
+        else { if (!ready) g_alias_wb_deferred++; g_alias_wb[keep++] = e; }
+    }
+    g_alias_wb_n = keep;
+    atomic_store_explicit(&g_alias_wb_cnt, g_alias_wb_n, memory_order_release);
+    pthread_mutex_unlock(&g_smu);
+    if (!n) { free(list); free(sz); return; }
+    int ok = !wmax || wmax <= done || nvn_be_wait(wmax, 2000000000ull);   // wait = 1 only: the last write of every taken entry has completed
+    if (!ok) {   // the GPU did not get there (stopping session / hang): put them back for a later drain rather than read early
+        pthread_mutex_lock(&g_smu);
+        for (uint32_t i = 0; i < n; i++) {
+            if (g_alias_wb_n == g_alias_wb_cap) { uint32_t nc = g_alias_wb_cap ? 2 * g_alias_wb_cap : 16; alias_wb_e *q = realloc(g_alias_wb, nc * sizeof *q); if (!q) break; g_alias_wb = q; g_alias_wb_cap = nc; }
+            g_alias_wb[g_alias_wb_n++] = list[i]; list[i].o = NULL;
+        }
+        atomic_store_explicit(&g_alias_wb_cnt, g_alias_wb_n, memory_order_release);
+        pthread_mutex_unlock(&g_smu);
+        for (uint32_t i = 0; i < n; i++) if (list[i].o) defer_obj_release(CFBridgingRelease(list[i].o));
+        free(list); free(sz); return;
+    }
+    id<MTLBuffer> buf = ok && tot ? [g_dev newBufferWithLength:tot options:MTLResourceStorageModeShared] : nil;
+    if (buf) {
+        id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> b = enc_b_begin(cb);
+        size_t off = 0;
+        for (uint32_t i = 0; i < n; i++) {
+            if (!sz[i]) continue;
+            alias_key *k = &list[i].k; id<MTLTexture> mt = (__bridge id<MTLTexture>)list[i].o;
+            nvn_texlayout L; nvn_tex_layout(&k->d, &L);
+            unsigned nl = k->d.levels ? k->d.levels : 1, layers = L.layers ? L.layers : 1; int is3d = (k->d.target == NVN_TEXTURE_TARGET_3D);
+            for (unsigned ly = 0; ly < layers; ly++) for (unsigned lv = 0; lv < nl; lv++) {
+                uint32_t rb, rows, slices, bpb; uint64_t base; unsigned th, td;
+                nvn_deswizzle_geom(&k->d, lv, ly, &rb, &rows, &slices, &base, &th, &td, &bpb);
+                uint32_t lw = MAX(k->d.width >> lv, 1u), lh = (k->d.target == 0 || k->d.target == 3) ? 1u : MAX(k->d.height >> lv, 1u);
+                size_t img = (size_t)rb * (size_t)rows;
+                for (uint32_t z = 0; z < slices; z++)
+                    [b copyFromTexture:mt sourceSlice:is3d ? 0 : ly sourceLevel:lv sourceOrigin:MTLOriginMake(0, 0, is3d ? z : 0)
+                            sourceSize:MTLSizeMake(lw, lh, 1) toBuffer:buf destinationOffset:off + (size_t)z * img
+                    destinationBytesPerRow:rb destinationBytesPerImage:img];
+                off += img * (size_t)slices;
+            }
+        }
+        [b endEncoding]; DM_BLOCK_BEGIN(); ok = cb_run(cb); DM_BLOCK_END();   // one GPU round trip for the whole batch
+        g_alias_wb_drains++;
+    } else ok = 0;
+    size_t off = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        alias_key k = list[i].k; id<MTLTexture> mt = CFBridgingRelease(list[i].o);
+        if (ok && sz[i]) {
+            nvn_texlayout L; nvn_tex_layout(&k.d, &L);
+            unsigned nl = k.d.levels ? k.d.levels : 1, layers = L.layers ? L.layers : 1;
+            pthread_mutex_lock(&g_wb_mu);
+            const pool_t *p = (const pool_t *)(uintptr_t)k.pool;
+            if (g_alias_pool_drop_gen == gen0 && p && p->mem && (uint64_t)k.off + L.size <= p->size) {
+                uint8_t *dst = p->mem + k.off;
+                uint64_t *runs = NULL, sb = 0; int nr = gpw_stale(dst, L.size, &runs, &sb); free(runs);
+                if (nr > 0 && sb == L.size) {   // entire texture is still GPU-written and untouched by CPU: write back without clobbering any CPU writes
+                    size_t o2 = off; int swz_ok = 1;
+                    for (unsigned ly = 0; ly < layers && swz_ok; ly++) for (unsigned lv = 0; lv < nl && swz_ok; lv++) {
+                        uint32_t rb, rows, slices, bpb; uint64_t base; unsigned th, td;
+                        nvn_deswizzle_geom(&k.d, lv, ly, &rb, &rows, &slices, &base, &th, &td, &bpb);
+                        if (nvn_swizzle(&k.d, lv, ly, (const uint8_t *)buf.contents + o2, rb, dst)) swz_ok = 0;
+                        o2 += (size_t)rb * (size_t)rows * (size_t)slices;
+                    }
+                    if (swz_ok) { gpw_clear((uint64_t)(uintptr_t)dst, L.size); g_alias_orph_wb_ok++; g_alias_orph_wb_b += L.size; }
+                }
+            }
+            pthread_mutex_unlock(&g_wb_mu);
+        }
+        off += sz[i];
+        defer_obj_release(mt);
+    }
+    free(list); free(sz);
+}
 static int tex_init_fill(const tex_t *t, id<MTLTexture> mt) {
     if (!t->mem || !t->pool || (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) || t->has_layout) return 0;
     if (t->d.samples > 1 || ((int)mt.pixelFormat >= 250 && (int)mt.pixelFormat <= 262)) return 0;   // 250..262: Depth16Unorm … X24_Stencil8 (some names are macOS-only)
@@ -5451,6 +5609,7 @@ static int tex_init_fill(const tex_t *t, id<MTLTexture> mt) {
     static int flush_fill = -1; if (flush_fill < 0) { const char *e = getenv("DM_NVN_FLUSH_FILL"); flush_fill = !e || atoi(e) != 0; }
     if (!no_cpu && !flush_fill) return 0;
     if (!atomic_load(&g_sub_thread_set) || !on_sub_thread()) return 0;   // the upload batch belongs to the submit thread
+    if (atomic_load_explicit(&g_alias_wb_cnt, memory_order_acquire)) alias_wb_drain(1);   // a rebuild may be over evicted storage: write back now, waiting for pending writes
     if (g_cb && (pend_hits((uint64_t)t->mem, t->L.size) || sbw_hits((uint64_t)t->mem, (uint64_t)t->mem + t->L.size) || gw_live((uint64_t)t->mem, (uint64_t)t->mem + t->L.size))) {
         if (texture_storage_load(t, mt)) return 1;
         RED_ONCE(205, "GPU-written texture pool storage cannot be decoded (ser=%llu format %#x)", (unsigned long long)t->serial, t->d.format);
@@ -6206,7 +6365,22 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     // A finalized serial over storage the sharing table holds resolves to that texture with no ghost entry (S2Arm 11-05, after upstream PR #1299 commit 3, MIT, seedds/upstream ee9b7765):
     //   the game finalizes texture objects and keeps their descriptors registered over live storage, and each resolution went through the ring (an entry evicted, g_ser_gen moved, so
     //   every texture ID cache resolved again). The sharing table keeps the texture resident; once it leaves the table, the next resolution makes it anew, as for a live object
-    pthread_mutex_lock(&g_smu); __unsafe_unretained id shared = hm_get_id(&g_alias, &ak); if (shared) nvn_hm_put(&g_alias_seen, &ak, (void *)(uintptr_t)(g_fence + 1));
+    pthread_mutex_lock(&g_smu); __unsafe_unretained id shared = hm_get_id(&g_alias, &ak);
+    if (!shared && g_alias_wb_n) {
+        for (uint32_t i = 0; i < g_alias_wb_n; i++) {
+            if (!memcmp(&g_alias_wb[i].k, &ak, sizeof ak)) {
+                id wo = CFBridgingRelease(g_alias_wb[i].o);
+                g_alias_wb[i] = g_alias_wb[--g_alias_wb_n];
+                atomic_store_explicit(&g_alias_wb_cnt, g_alias_wb_n, memory_order_release);
+                if (!g_alias_set) g_alias_set = CFSetCreateMutable(NULL, 0, NULL);
+                hm_put_id(&g_alias, &ak, wo); CFSetAddValue(g_alias_set, (__bridge const void *)wo);
+                nvn_hm_put(&g_alias_wrote, &ak, (void *)(uintptr_t)(g_fence + 1));
+                shared = wo;
+                break;
+            }
+        }
+    }
+    if (shared) nvn_hm_put(&g_alias_seen, &ak, (void *)(uintptr_t)(g_fence + 1));
     int dead = t->serial < (1ull << 62) && !nvn_hm_get(&g_tex_live, &t->serial); pthread_mutex_unlock(&g_smu);
     if (shared && dead && !((t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) && !(((id<MTLTexture>)shared).usage & MTLTextureUsageShaderWrite))) { g_ghost_shared++; return shared; }
     if (shared) {
@@ -8266,9 +8440,12 @@ static void fb_compile_note(uint64_t ns, NSString *pc) {
 }
 // 测量开关 DM_SHLIB_KEEP=<键名单文件>（每行一个 16 位十六进制键，同 shader_seen.tsv 第一列；11-21 编批库方案）：名单外的键当成包里没有，
 //   走设备上的首遇现编（DM_MSL_FALLBACK）——量「出包只编名单上的」在玩家机上要现编多少、物体晚出现几帧。不设时行为不变
+// 线程（诊断#559828，0.6.8 iPhone19,4 宿主崩溃 objc_release 0x400000000000bad0 ← shlib_dropped ← mtl_shlib_has ← 预热线程 warm_task）：
+//   提交线程 / 游戏线程（ProgramSetShaders → mtl_shlib_has）和预热线程（GCD，shader_loadable）都会第一次调到这里；原先按 on < 0 懒初始化，
+//   两条线程同时进来各建一份、同时赋值静态强引用 keep（ARC 先放旧值）→ 同一个对象放两次。初始化改一次性（dispatch_once），之后只读
 static int shlib_dropped(const char *name) {
-    static NSSet<NSString *> *keep; static int on = -1;
-    if (on < 0) {
+    static NSSet<NSString *> *keep; static int on; static dispatch_once_t once;
+    dispatch_once(&once, ^{
         // 相对路径按 App 的 Documents 解析（真机局 dev_run 的 PUSH 推进 Documents/ 下，起局环境里写不出容器的绝对路径）
         const char *f = getenv("DM_SHLIB_KEEP"); NSString *fp = f && *f ? @(f) : nil;
         if (fp && !fp.absolutePath) { char d[1024]; fp = s2a_docs_root(d, sizeof d) >= 0 ? [@(d) stringByAppendingPathComponent:fp] : nil; }
@@ -8277,7 +8454,7 @@ static int shlib_dropped(const char *name) {
         for (NSString *l in [t componentsSeparatedByString:@"\n"]) if (l.length >= 16) [m addObject:[l substringToIndex:16].lowercaseString];
         keep = m; on = t != nil;
         if (on) MLOG("measurement: DM_SHLIB_KEEP keeps %lu packaged shaders, every other key compiles on this device at first use", (unsigned long)m.count);
-    }
+    });
     return on && strlen(name) >= 16 && ![keep containsObject:[[NSString alloc] initWithBytes:name length:16 encoding:NSASCIIStringEncoding].lowercaseString];
 }
 static NvShader *shader_build(NSString *pc, int stage, int layer, int depth_zero) {
@@ -8670,7 +8847,7 @@ int nvn_be_shader_key_canon(uint8_t key[8]) {
 // S2Arm 两段式出包（10-27）：映射表有键不等于库里有这支——热键版包的映射表是全键、库只带热键，缺的那支要照样走首遇现编（dsh_miss.inc），不能让 shader_load 失败去触发直连失败判据。
 // 只查索引不读数据（每次 ProgramSetShaders 都会问）：现编过的 / 内置的 → 有；有库容器 → 容器索引里有没有 <键>_b 的反射；没容器（Mac 开发树）→ <键>_b.json 文件在不在
 int mtl_shlib_has(const char *key) {
-    if (shmap_rt_get(@(key)) != nil || builtin_get(key) != NULL) return 1;
+    if (shmap_rt_get(@(key)) != nil || builtin_known(key)) return 1;   // 只比内嵌核表：builtin_get 会懒建库、改 g_builtin（不带锁），这里预热线程与游戏线程同时调
     if (shlib_dropped(key)) return 0;   // 测量开关：名单外当成包里没有
     char name[32]; snprintf(name, sizeof name, "%.16s_b", key);
     lp_pack *p = lp_pack_get();
@@ -10575,6 +10752,7 @@ static os_unfair_lock g_fz_fn_lock = OS_UNFAIR_LOCK_INIT;
 typedef struct { char key[24]; uint8_t fbmask, nfc; int8_t fx[32]; uint8_t lmap[8]; } bf_key;
 static nvn_hmap g_bf_fn = {.klen = sizeof(bf_key)}; static unsigned g_bf_libs;
 static nvn_hmap g_pso = {.klen = sizeof(pso_key)}, g_dss;
+static void pb_tick(void); static void pb_touch_r(const pso_key *k); static void pb_built_r(const pso_key *k); static int pb_warm_full(uint64_t built_unclaimed);   // 管线额度（nvn_pso_budget.inc）：先用到的几个
 static nvn_hmap g_pso_fail = {.klen = sizeof(pso_key)};   // pipelines that failed to build: remembered and never retried (previously every draw recompiled it, over 10,000 times in one iPhone session)
 static const char g_tf_mark;
 static char g_geo_mark;
@@ -11397,8 +11575,9 @@ static void *pso_get_vs_ptr(NvProg *pr, NvShader *vs) {   // borrowed: g_pso hol
       if (at > 0 && cf - f0 + 1 == at && skip_safe(vs, fs)) {
           static uint64_t n; if (!(++n & (n - 1))) MLOG("skip-safe test (DM_NVN_SKIP_SAFE_AT=%ld): %llu draws skipped; %llu steady answers so far came from the storage only", at, (unsigned long long)n, (unsigned long long)g_rt_steady_mem);
           g_first_skipped = 1; PSO_WHY("skip-safe test frame"); return NULL; } }
+    pb_tick();   // 管线额度：每帧第一次查表时检查、超额放掉久没用的（nvn_pso_budget.inc）
     __unsafe_unretained id<MTLRenderPipelineState> cached = hm_get_id(&g_pso, &k);
-    if (cached) return (__bridge void *)cached;
+    if (cached) { pb_touch_r(&k); return (__bridge void *)cached; }
     if (hm_get_id(&g_pso_fail, &k)) { PSO_WHY("on the failed list (its first build was refused; the red line then said why)"); return NULL; }
     { NSNumber *r = hm_get_id(&g_pso_retry, &k); if (r && pso_retry_frame(r.unsignedLongLongValue) > atomic_load(&g_cur_frame)) { g_first_skipped = 1; PSO_WHY("waiting to retry after a compiler service failure"); return NULL; } }   // waiting to retry (pso_err_transient)
     if (quar_has(vs, fs)) { hm_put_id(&g_pso_fail, &k, NSNull.null); PSO_WHY("quarantined after a GPU error"); return NULL; }   // a GPU error quarantined it (quar_fault)
@@ -11487,7 +11666,7 @@ static void *pso_get_vs_ptr(NvProg *pr, NvShader *vs) {   // borrowed: g_pso hol
         pso_record("R\t%s\n", shex);
         pso_user_record("R\t%s\n", shex); }
     quar_built(vs, fs);
-    hm_put_id(&g_pso, &k, ps);
+    hm_put_id(&g_pso, &k, ps); pb_built_r(&k);
     return (__bridge void *)ps;
 }
 static NSString *warm_key(const char *s, size_t n) {
@@ -11781,6 +11960,7 @@ static void warm_task_(WarmTask *t) {
             if (sh) { WarmItem *item = [WarmItem new]; item->kind = 0; item->key = t->key; item->shader = sh; warm_enqueue(item); g_warm_shaders++; }
             g_warm_done++; return;
         }
+        if ((t->kind == 1 || t->kind == 2) && pb_warm_full((g_warm_rps + g_warm_cps) - (g_warm_claim_rps + g_warm_claim_cps))) { g_warm_done += t->kind == 1 ? (long)t->rs.count : 1; return; }   // 管线额度：到预热线就停，剩下的首遇时建
         if (t->kind == 2) {
             NvShader *cs = warm_shader(t->key, 5); NSError *e = nil;
             if (cs && cs->tensor == 1) { g_warm_skip_fz++; g_warm_done++; return; }   // a tensor-core network program: never dispatched (nvn_tensor.inc), no pipeline
@@ -16463,7 +16643,7 @@ static void *tf_pso_ptr(NvShader *vs) {
     if (hm_get_id(&g_pso_fail, &k)) return NULL;
     NSError *e = nil; id<MTLRenderPipelineState> ps = [g_dev newRenderPipelineStateWithDescriptor:pso_desc(&k, vs, nil, nil, 0) error:&e];
     if (!ps) { MLOG("【红】 failed to create the transform feedback pipeline (vertex %s): %s", vs->key, e.localizedDescription.UTF8String); hm_put_id(&g_pso_fail, &k, NSNull.null); return NULL; }
-    hm_put_id(&g_pso, &k, ps);
+    hm_put_id(&g_pso, &k, ps); pb_built_r(&k);
     return (__bridge void *)ps;
 }
 // Instanced draws capture one instance at a time (the feedback stage writes instance j's vertices after instance j - 1's). Indexed draws capture each index in draw order: the
@@ -17428,6 +17608,7 @@ static void draw_emit(id en, MTLPrimitiveType mp, int prim, const p_draw *dw, co
 static nvn_hmap g_cps = {.klen = sizeof(void *)};
 typedef struct { const void *cs; uintptr_t fc; } cps_se_key;
 static nvn_hmap g_cps_se = {.klen = sizeof(cps_se_key)};   // S2Arm #800: compute pipelines of the sampler-emulation variant (se_want), by shader and SE_* bits: keyed apart from main0's
+#include "nvn_pso_budget.inc"   // 管线额度：常驻条数、按最后用到的帧淘汰、预热按额度停（S2Arm 11-22，AGX 编译变体额度）
 static void warm_claim(void) {
     if (!atomic_exchange_explicit(&g_warm_ready, 0, memory_order_acq_rel)) return;
     os_unfair_lock_lock(&g_warm_lock);
@@ -17442,11 +17623,11 @@ static void warm_claim(void) {
         } else if (item->kind == 4) {
             mtk_warm_claim(item->mkey, item->object);
         } else if (item->kind == 1) {
-            if (!hm_get_id(&g_pso, &item->pso)) { hm_put_id(&g_pso, &item->pso, item->object); g_warm_claim_rps++; }
+            if (!hm_get_id(&g_pso, &item->pso)) { hm_put_id(&g_pso, &item->pso, item->object); pb_built_r(&item->pso); g_warm_claim_rps++; }
         } else {
             const void *key = (__bridge const void *)item->shader; cps_se_key fk = {key, (uintptr_t)item->fc};   // S2Arm #800: an emulation variant's pipeline goes where dispatch looks for it
             nvn_hmap *cps = item->fc ? &g_cps_se : &g_cps; const void *ck = item->fc ? (const void *)&fk : (const void *)&key;
-            if (!hm_get_id(cps, ck)) { hm_put_id(cps, ck, item->object); g_warm_claim_cps++; }
+            if (!hm_get_id(cps, ck)) { hm_put_id(cps, ck, item->object); pb_built(item->fc ? &g_pb_use_s : &g_pb_use_c, item->fc ? &g_pb_gone_s : &g_pb_gone_c, ck); g_warm_claim_cps++; }
         }
     }
 }
@@ -17580,8 +17761,11 @@ static void dispatch(const p_dispatch *dp) {
     const void *k = (__bridge const void *)cs;
     int fc = se_want(S.cprog, cs, 5);   // S2Arm #800: this dispatch binds a sampler the GPU cannot reduce natively: the reduction variant (see se_bind)
     cps_se_key fk = {k, (uintptr_t)fc}; nvn_hmap *cps = fc ? &g_cps_se : &g_cps; const void *ck = fc ? (const void *)&fk : (const void *)&k;
+    pb_tick();   // 管线额度（nvn_pso_budget.inc）
+    nvn_hmap *pb_use = fc ? &g_pb_use_s : &g_pb_use_c, *pb_gone = fc ? &g_pb_gone_s : &g_pb_gone_c;
     id<MTLComputePipelineState> ps = hm_get_id(cps, ck);
     if ((id)ps == (id)NSNull.null) return;   // its pipeline failed before: built once, reported once (see below)
+    if (ps) pb_touch(pb_use, ck);
     if (!ps) {
         // #884：Metal 编译服务对一条计算管线现编一直不返回，提交线程跟着卡死（开场剧情固定定格）。至多等 DM_NVN_CPSO_WAIT_MS（缺省 60000，0 = 不限）：
         //   等不到就跳过这一次派发、不记失败，后台编完下一次派发直接用（pso_archive.h par_compute_wait）。缺省原为 10 秒，11-14 改 60 秒（#065090）：309 份诊断里编满 5 秒的
@@ -17604,10 +17788,10 @@ static void dispatch(const p_dispatch *dp) {
                                                     cs->key, fc ? " (sampler-emulation variant)" : "", (long long)(cwait / 1000000)); } return; }
         // A failure is remembered like a success: it was rebuilt at every dispatch (Monster Hunter Rise's 36,880-byte threadgroup memory, over Apple's 32,768: 2,472–6,450 builds in one
         // Mac run; on the test device the compiles kept the frame from ending for 45 s, 10-26 cold run, frame 1150)
-        if (!ps) { MLOG("【红】 failed to create compute pipeline %s%s: %s", cs->key, fc ? " (sampler-emulation variant)" : "", e.localizedDescription.UTF8String); hm_put_id(cps, ck, NSNull.null); return; }
+        if (!ps) { MLOG("【红】 failed to create compute pipeline %s%s: %s", cs->key, fc ? " (sampler-emulation variant)" : "", e.localizedDescription.UTF8String); hm_put_id(cps, ck, NSNull.null); pb_cfail_note(); return; }
         pso_record("C\t%s\n", cs->key);
         if (cs->key[0]) { if (fc) pso_user_record("C\t%s\t%x\n", cs->key, fc); else pso_user_record("C\t%s\n", cs->key); }   // a reduction variant's: its bits (warm_parse masks them per GPU)
-        hm_put_id(cps, ck, ps);
+        hm_put_id(cps, ck, ps); pb_built(pb_use, pb_gone, ck);
     }
     if (cs->builtin) {   // Built-in compute kernel: n = uniform buffer 0, src = storage buffer 0, dst = storage buffer 1
         const p_bind_buf *u = &S.ubo[5][0], *a0 = &S.ssbo[5][0], *a1 = &S.ssbo[5][1];

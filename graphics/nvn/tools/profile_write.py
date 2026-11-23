@@ -94,6 +94,7 @@ def write_profile(pdir, app, f):
     F = f['F']; G, R = pg.guess(F), F['romfs']
     groups, seen = [], {'main', 'other'}
     for d, _ in R['dirs'].most_common(24):   # shader package groups by RomFS top-level folder (this only names the package files; anything else goes to "other")
+        if any(c.isspace() or c == '=' for c in d): continue   # shader_groups is "prefix=name" words split on whitespace: a folder named with a space or "=" can't be a prefix, its shaders go to "other" (D-PVCK: an Unreal game's "Trials of Mana" folder; its groups come from profile_guess anyway)
         g = re.sub(r'[^a-z0-9]', '', d.lower())[:16] or 'g'
         while g in seen: g += 'x'
         seen.add(g); groups.append(f'/{d}/={g}')

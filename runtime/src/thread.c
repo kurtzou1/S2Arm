@@ -792,6 +792,17 @@ static qos_class_t guest_qos(int main_thread, uint64_t mask) {
     return s2a_qos(S2A_QOS_GAME_OTHER);   // 性能核 ≥ 4 USER_INTERACTIVE、< 4 USER_INITIATED（表内同一判法）
 }
 qos_class_t s2a_test_guest_qos(int main_thread, uint64_t mask) { return guest_qos(main_thread, mask); }   // 单测入口（t_thread.c）
+// 游戏主线程此刻的调度（Mac 心跳读，D-JSGK 11-22：Mac 局整局只用到 0.02–0.27 个性能核、游戏在等不在算，判不了是不是系统把线程降了档）：
+//   cur = 内核眼里的当前优先级（USER_INTERACTIVE 约 47；App Nap / 后台节流会压到个位数），base = 基础优先级；返回 0 = 取到
+static _Atomic mach_port_t g_main_mach;
+int s2a_guest_main_sched(int *cur, int *base) {
+    mach_port_t p = atomic_load(&g_main_mach); if (!p) return -1;
+    thread_basic_info_data_t bi; mach_msg_type_number_t n = THREAD_BASIC_INFO_COUNT;
+    if (thread_info(p, THREAD_BASIC_INFO, (thread_info_t)&bi, &n) != KERN_SUCCESS) return -1;
+    struct policy_timeshare_info ti; n = POLICY_TIMESHARE_INFO_COUNT;
+    if (bi.policy != POLICY_TIMESHARE || thread_info(p, THREAD_SCHED_TIMESHARE_INFO, (thread_info_t)&ti, &n) != KERN_SUCCESS) return -1;
+    *cur = ti.cur_priority; *base = ti.base_priority; return 0;
+}
 // 设 QoS 并读回核对：设不上（如 .NET 建的线程 EPERM）或读回不符就报红一次
 static void set_qos(qos_class_t want) {
     int rc = pthread_set_qos_class_self_np(want, 0); qos_class_t got = QOS_CLASS_UNSPECIFIED; int rp = 0;
@@ -1094,6 +1105,7 @@ uint32_t s2a_thread_main_init(void) {
     if (!t->handle) die("主线程句柄分配失败");
 #if defined(__APPLE__)
     set_qos(guest_qos(1, 7));
+    atomic_store(&g_main_mach, pthread_mach_thread_np(pthread_self()));   // 心跳读它的调度档 / 当前优先级（s2a_guest_main_sched）
     if (wg_on() && g_wg_mode != 2) wg_join_self("游戏主线程");
 #endif
     thread_bind_host(t);

@@ -43,7 +43,7 @@ public struct GameStateView: View {
         case .playable: actions.onPlay(game.id)
         case .needsGameData: actions.onPickGameData(game.id)
         case .needsAppUpdate: actions.onAppUpdate?()
-        case .needsGameUpdate: break   // needsHelp：上面已展开说明
+        case .needsGameUpdate, .sourceOffline: break   // needsHelp：上面已展开说明
         case .needsLegacyUpdate, .needsProgram: actions.onImportProgram?(game.id)   // 选这款的 .s2arm 导入（电脑「更新一次」是第二条路，写在说明里）
         case .needsCertificate: actions.onGetSigningCert?()   // 直接导证书（装了 SideStore 向它要，否则选 .p12），导好库自己回「可以玩」
         case .broken: actions.onShowLog?(game.id)
@@ -122,6 +122,7 @@ public struct StateHelpView: View {
         case .needsAppUpdate: ShellStrings.text("This game needs a newer version of this app. Update it with the Mac app on your Mac, then install it on this device again.")
         case .needsGameUpdate: ShellStrings.text("This game on your phone doesn't match S2Arm on this phone, so it can't open: it was built for another version, installed from another computer or Apple ID, or didn't finish installing. Connect your phone to your computer and click \"Push to iPhone\" for this game in S2Arm.")
         case .needsLegacyUpdate: ShellStrings.text("This game was installed with an older S2Arm. Its saves and game data are still on this iPhone; it only needs its program once. Import this game's .s2arm file here (exported from S2Arm on a computer, or shared by a friend), or update your older games once in S2Arm on your computer.")
+        case .sourceOffline: GameState.sourceOffline.explanation
         case .needsProgram: ShellStrings.text("This game's data is on this iPhone, but its program, the game's .s2arm file, isn't yet. Import the .s2arm here, or put it in the Import Here folder in Files. If your computer is sending it, it arrives on its own.")
         default: ""
         }

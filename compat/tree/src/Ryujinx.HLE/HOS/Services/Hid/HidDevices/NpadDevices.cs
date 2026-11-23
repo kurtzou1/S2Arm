@@ -43,9 +43,9 @@ namespace Ryujinx.HLE.HOS.Services.Hid
         // sensor：双 Joy-Con 左右各有读数时 0 = 左只、1 = 右只；-1 = 单一体感源（NpadImu.Push）
         public void PushImu(PlayerIndex player, System.Numerics.Vector3 accelerationG, System.Numerics.Vector3 angularVelocityDegrees, ulong timestampUs, int sensor = -1)
         {
-            bool joyDual = player <= PlayerIndex.Handheld && Base(_device.Hid.SharedMemory.Npads[(int)player].InternalState.StyleSet) == NpadStyleTag.JoyDual;
+            NpadStyleTag style = player <= PlayerIndex.Handheld ? Base(_device.Hid.SharedMemory.Npads[(int)player].InternalState.StyleSet) : NpadStyleTag.None;
 
-            Imu.Push(player, joyDual, accelerationG, angularVelocityDegrees, timestampUs, sensor);
+            Imu.Push(player, style, accelerationG, angularVelocityDegrees, timestampUs, sensor);
         }
 
         public void SetSixAxisActive(long userId, int handle, bool active)

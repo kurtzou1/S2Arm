@@ -9,6 +9,7 @@ using System.Threading;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using System.Runtime.InteropServices;
 using Path = System.IO.Path;
 
 namespace S2A.Services
@@ -504,6 +505,21 @@ namespace S2A.Services
         }
 
         // 文件句柄上的一段只读区间：RandomAccess 按偏移读，多线程安全、不经 FileStream 读位置（同 IndexedStorage 读镜像的做法）
+        // 外部游戏来源（11-22，iOS 游戏库设置里加的来源文件夹，如外接硬盘）：game.img 是指向外部文件的软链接，玩到一半拔盘 → 读盘抛 IOException（不是 EFAULT）。
+        //   不把读失败交回游戏（游戏拿着读失败往下跑会崩成乱象）：交宿主停局页（ios/app.m s2a_ios_game_data_lost：冻游戏线程、说清原因、存档在 App 里不受影响），
+        //   这条读线程停在这里不再返回（本局已终止，玩家从后台划掉再开）。宿主没有这个入口（Mac、单测）→ 回读失败，同原先
+        private static int _sourceLost;
+        internal static unsafe Result SourceLost(IOException e, string what)
+        {
+            if (Interlocked.Exchange(ref _sourceLost, 1) == 0) Console.Error.WriteLine($"[S2A RomFS] 【红】{what}读不到了（{e.Message}）：游戏数据所在的盘断开或文件被挪走");
+            if (NativeLibrary.TryGetExport(NativeLibrary.GetMainProgramHandle(), "s2a_ios_game_data_lost", out nint p))   // 平台例外：只有 iOS 壳（ios/app.m）有停局页，Mac 与单测没有这个导出
+            {
+                fixed (byte* m = Encoding.UTF8.GetBytes(e.Message + "\0")) ((delegate* unmanaged<byte*, void>)p)(m);
+                Thread.Sleep(Timeout.Infinite);
+            }
+            return ResultFs.HostFileDataCorrupted.Value;
+        }
+
         private sealed class HandleRange : IStorage
         {
             private readonly Microsoft.Win32.SafeHandles.SafeFileHandle _h; private readonly long _off, _len;
@@ -522,6 +538,7 @@ namespace S2A.Services
                         return LazyHostFile.ReadViaBounce(_h, left, _off + offset + got, "RomFS 镜像", out long bounced) && bounced == left.Length
                             ? Result.Success : ResultFs.HostFileDataCorrupted.Value;
                     }
+                    catch (IOException e) { return SourceLost(e, "RomFS 镜像"); }
                     if (n <= 0) return ResultFs.OutOfRange.Value;
                     got += n;
                 }
@@ -770,6 +787,7 @@ namespace S2A.Services
                             if (!LazyHostFile.ReadViaBounce(_image, left, at, "RomFS 镜像", out long got) || got != left.Length)
                                 return ResultFs.HostFileDataCorrupted.Value;
                         }
+                        catch (IOException e) { return SourceLost(e, "RomFS 镜像"); }
                     }
                     else if (_ref[i] >= 0)
                     {

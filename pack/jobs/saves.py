@@ -677,7 +677,7 @@ def recover_once(c, game):
         journal.unlink()
         fsync_dir(transactions)
         if transaction.exists():
-            shutil.rmtree(transaction)
+            layout.remove_tree(transaction)
         return record["phase"] != "committed"
     except (OSError, ValueError, KeyError, TypeError):
         raise RecoveryFailed(journal, seen) from None
@@ -1286,7 +1286,7 @@ def restore(c):
             for name in (*TREES, PROFILE):
                 p = new / name
                 if p.is_dir():
-                    shutil.rmtree(p)
+                    layout.remove_tree(p)
                 else:
                     p.unlink(missing_ok=True)
             with open_archive(c, source) as (z, checked):
@@ -1355,7 +1355,7 @@ def restore(c):
                 fsync_dir(transactions)
                 journal.unlink()
                 fsync_dir(transactions)
-                shutil.rmtree(transaction)
+                layout.remove_tree(transaction)
             except OSError:
                 cleanup_warning = "存档已恢复，事务清理尚未完成。原副本已保留，请重新检查。"
                 report(c, cleanup_warning, "cleanup", "warning")
@@ -1373,7 +1373,7 @@ def restore(c):
             raise
         finally:
             if not committed and transaction.exists() and not journal.exists():
-                shutil.rmtree(transaction)
+                layout.remove_tree(transaction)
             # The previous archive and original directory are intentionally kept.
             if not committed and not any(previous.iterdir()):
                 previous.rmdir()

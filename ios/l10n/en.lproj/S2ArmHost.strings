@@ -280,6 +280,8 @@
 "app.lowRam.title" = "This device may not have enough memory";
 "app.lowRam.body" = "This game needs about %1$@ GB of memory; this device has %2$@ GB. Storage makes up the difference, so you can play, but it may slow down or be closed mid-game. Shown only once.";
 "app.gpuStop.body" = "Swipe this app away in the app switcher and open it again — you can usually keep playing from where the game last saved. To help us find the cause, tap “Report a Problem” to send us diagnostics.";
+"app.dataLost.title" = "Can’t read the game’s location, so the game was stopped safely";
+"app.dataLost.body" = "The external drive was probably disconnected, or the game file was moved. Your saves are in the app and weren’t affected. Reconnect the drive, then swipe this app away in the app switcher and open it again to keep playing.";
 "app.gpuStop.title" = "The game got stuck and was stopped safely";
 "app.library.broken.title" = "Game files are incomplete";
 "app.library.cantOpen" = "This game can’t be opened";

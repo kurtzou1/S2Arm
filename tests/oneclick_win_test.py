@@ -255,6 +255,18 @@ class LogReason(unittest.TestCase):
     def test_no_exception_keeps_last_three_lines(self):
         self.assertEqual(oneclick_win.log_reason("a\nb\nc\nd\n"), "b / c / d")
 
+    def test_red_line_keeps_its_head(self):
+        # D-Z2VA：直连库出库失败的红行把 .NET 异常头放在前面、build.log 末尾的调用栈放在后面，一行近 2 KB。原先取末 3 行末 300 字，
+        #   玩家只看到一串「at Build.UnityFlush…」，异常类型和消息全丢。期望：取最后一条红行，开头的异常头保住，末尾的日志路径也在
+        stack = ' ⏎ '.join(f'   at Frame{i}() + 0x{i:x}' for i in range(40))
+        red = ('[直连库] 🔴 出库失败 rc=1：Unhandled exception. System.AggregateException: One or more errors occurred. (磁盘读错误)'
+               f'：dsh_batch.py 退出码 1：{stack}（F:/c/work.stage.1/build.log）')
+        got = oneclick_win.log_reason(f'[直连库] 第 1 步\n{red}\n[直连库] 收尾\n')
+        self.assertTrue(got.startswith('[直连库] 🔴 出库失败 rc=1：Unhandled exception. System.AggregateException'), got)
+        self.assertIn('磁盘读错误', got)
+        self.assertTrue(got.endswith('build.log）'), got)
+        self.assertLessEqual(len(got), 600)
+
 
 class Product(unittest.TestCase):
     @unittest.skipUnless(os.name == 'nt', 'UNC product behavior is Windows-only')

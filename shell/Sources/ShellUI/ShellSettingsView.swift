@@ -149,6 +149,28 @@ struct ShellSettingsView: View {
                                 }
                             }
                         }
+                        if let addSource = actions.onAddGameSource {
+                            // S2Arm: game source folders, such as one on an external drive. Games exported from the computer (.img) are read
+                            // from there in place; a folder that isn't reachable leaves its games greyed in the library until it is back.
+                            SettingsGroup(title: ShellStrings.text("Game sources")) {
+                                ForEach(store.gameSources, id: \.id) { source in
+                                    SourceRow(symbol: "externaldrive", title: source.name, note: "") {
+                                        if let remove = actions.onRemoveGameSource {
+                                            Button(ShellStrings.text("Remove")) { remove(source.id) }
+                                                .buttonStyle(ShellButtonStyle(fills: true)).accessibilityIdentifier("shellSettings.source.remove." + source.id)
+                                                .accessibilityLabel(ShellStrings.text("Remove") + " " + source.name)
+                                                .shellTarget("shs.source.remove." + source.id) { remove(source.id) }
+                                        }
+                                    }
+                                }
+                                SourceRow(symbol: "folder.badge.plus", title: ShellStrings.text("Add a folder"),
+                                          note: ShellStrings.text("Put games exported from the computer (their .s2arm and .img files) in a folder, for example on an external drive, and add it here. S2Arm plays them from that folder without copying the game data in. Saves stay in this app. Format the drive as APFS. After you update a game on the computer, export it again so this device gets the new version. When the drive isn’t connected, its games stay in the library, greyed out, and come back once it is.")) {
+                                    Button(ShellStrings.text("Choose folder…")) { addSource() }
+                                        .buttonStyle(ShellButtonStyle(fills: true)).accessibilityIdentifier("shellSettings.source.add")
+                                        .shellTarget("shs.source.add") { addSource() }
+                                }
+                            }
+                        }
                         if let pickCloud = actions.onPickShellCloud {
                             SettingsGroup(title: ShellStrings.text("Cloud saves")) {
                                 SourceRow(symbol: store.cloudSavesFolderName == nil ? "icloud.slash" : "icloud",

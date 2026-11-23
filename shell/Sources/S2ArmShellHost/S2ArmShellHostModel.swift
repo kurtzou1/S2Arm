@@ -52,6 +52,7 @@ public final class S2ArmShellHostModel {
     ///   没显示的款一开始传就出现（真机实测：App 先被拉起、推包随后才写传输清单），已经能玩的款重推 / 装更新时也立刻画上蒙版
     ///   （#399 真机验收：原先「全都能玩了就停」，开着库重推一款已装好的游戏，整个推送过程库里一直显示可玩、没有进度）。App 退到后台时计时器随之暂停
     @ObservationIgnored private var ticker: Timer?
+    @ObservationIgnored private var lastSourceScan = Date.distantPast
     /// 这一版的新功能介绍（App 包里 Feature/feature.json，出壳时 pack/feature_bundle.py 从 docs/site 取标了 ios 的页）；读一次留着
     @ObservationIgnored private let featureIntro: FeatureIntro?
     var watching: Bool { ticker != nil }
@@ -149,6 +150,7 @@ public final class S2ArmShellHostModel {
         for tile in catalogue.tiles { applyIdentity(tile.id) }
         for p in catalogue.problems { NSLog("S2Arm 游戏库：%@", p) }
         Self.sweepDeleting(gamesRoot)
+        rescanSources()
         let json = imlNotice.map { $0() } ?? { guard let p = s2a_shell_iml_notice() else { return nil }; defer { free(p) }; return String(cString: p) }()
         self.imlNotice = Self.imlNotice(json: json)
         refreshGameData()
@@ -212,6 +214,10 @@ public final class S2ArmShellHostModel {
     /// 重读清单：新出现的款加进游戏库（排在最后），已有的款（含原先按「别的电脑装的」列的）换成新条目；不删已有的款（删由清单 / 资源判据走 refreshGameData）。
     ///   之后照常 refreshGameData 重判资源与状态
     public func rescanCatalogue() {
+        rescanSources()   // 回前台：外部游戏来源也重扫（外接盘可能刚插上、文件夹里可能新放了游戏）
+        reloadListing()
+    }
+    private func reloadListing() {
         guard let reloadCatalogue else { refreshGameData(); return }
         let c = reloadCatalogue(); var added: [String] = []
         for tile in c.tiles {
@@ -236,6 +242,8 @@ public final class S2ArmShellHostModel {
         defer {
             if ledgerChanged { saveLedger() }
             if missing != notOnDevice { notOnDevice = missing; NSLog("S2Arm 游戏库：这台设备上 %d / %d 款可显示", allGames.count - missing.count, allGames.count) }
+            // 有款外部来源离线：每 5 秒重扫一次来源（外接盘插回来、挂载路径变了都靠这次扫把软链接接回去，库里自己恢复）
+            if allGames.contains(where: { $0.game.state == .sourceOffline }), Date().timeIntervalSince(lastSourceScan) >= 5 { rescanSources() }
             exportWidget()   // 主屏小组件的数据（WidgetExport.swift）：内容变了才写
             startTicker()
         }
@@ -246,6 +254,7 @@ public final class S2ArmShellHostModel {
             case 1, 4: want = listed != .playable ? listed : needsHostUpdate(id) ? .needsGameUpdate : Self.signed(listed, signState(id)); installTried.remove(id)   // 程序约定号对不上本宿主：「需要在电脑上更新」，点开只展开说明；签名：缺证书的各按原因「需要签名证书」（主按钮直接导），有证书仍被拒的才回电脑；4 = 只缺非核心文件：库里照样可玩，点开始时宿主问一次「仍要启动」（v0.3.1）
             case 2: want = .installing(unpackStage(id))
             case 3: want = .installing(transferStage(id))   // 断了也接着看：电脑重新插上续传时字节又涨
+            case 5: want = .sourceOffline   // 外部游戏来源离线（外接盘没插 / 文件夹挪走）：留在库里置灰，插回由 GameSources 重扫、自己回「可以玩」
             default:   // 资源不在：玩家删掉的不显示；没删过的留在库里显示「需要游戏数据」，Play 点到只给导入说明，不放行（审计 P1-155）
                 if isRemoved(id) { missing.insert(id) }
                 want = listed == .playable ? .needsGameData : listed
@@ -490,6 +499,11 @@ public final class S2ArmShellHostModel {
         actions.onImportProgram = { id in s2a_shell_pick_s2arm(id) }   // 库卡片「导入 .s2arm…」：还缺 .s2arm 的款、0.5 老款
         actions.onExportGame = { id in s2a_shell_export_game(id) }   // 长按「导出这一款…」（0.6.3）：生成 .s2arm + .img 交「文件」App
         actions.onAddToHome = { [weak self] id in self?.openHomeShortcut(id) }   // 长按「添加到主屏幕…」：引导后开官网启动页（HomeShortcut.swift）
+        // 游戏库设置「游戏来源」（GameSources.swift）：加文件夹 = 系统选择器选好后存书签、当场扫；移除 = 从它接来的款拿掉（外部文件不动）
+        #if canImport(UIKit)
+        actions.onAddGameSource = { [weak self] in GameSourcePicker.present { url in GameSources.add(url) { _ in self?.reloadListing() } } }
+        actions.onRemoveGameSource = { [weak self] id in GameSources.remove(id) { self?.reloadListing() } }
+        #endif
         #endif
         actions.featureIntro = featureIntro   // 新功能介绍（0.6.0 起 iPhone 两页）：有才在游戏库设置里出「再看一遍」那一行
         // 快照（0.6.0）：有完整快照的那款，长按卡片多一项「回到上次存下的这一刻」（宿主 ios/app.m；开关关着时宿主回 0，菜单里没有这一项）
@@ -499,6 +513,13 @@ public final class S2ArmShellHostModel {
             s2a_shell_restore_snapshot(id) }   // 故障报修（宿主 ios/diag.m：可不填的一句说明 + 打包上传、给短码）
         actions.onDeleteSnapshot = { [weak self] id in self?.deleteSnapshot(id) }   // 游戏库长按「删除这一刻」（玩家确认过）
         return actions
+    }
+
+    /// 外部游戏来源（GameSources.swift）：后台重扫各来源文件夹（库里删过的款不链回来）；接上 / 换了位置的款有了就重读清单，否则只重判状态
+    private func rescanSources() {
+        lastSourceScan = Date()
+        let removed = ledger.filter { $0.value.state == "removed" }.map(\.key)
+        GameSources.rescan(skip: removed) { [weak self] n in if n > 0 { self?.reloadListing() } else { self?.refreshGameData() } }
     }
 
     /// Native reordering supplies stable IDs and an insertion point after the drag finishes.

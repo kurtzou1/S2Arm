@@ -630,7 +630,7 @@ void s2a_snap_on_done(void (*cb)(int ok, const char *dir)) { g_snap_done_cb = cb
 //     游戏里（gid 为空）取本局文档根 s2a_docs_root；游戏库卡片上（还没起局）给 gid，按容器文档根 s2a_container_docs 拼 games/<gid>
 //   Mac 启动器：起局带 S2A_SNAPSHOT_DIR = 游戏库里这款文件夹下的 snapshot/（pack/jobs/build.py），游戏里调就用它
 //   其余（没经启动器起的 Mac 局、单测）：<文档根>/snapshot
-int s2a_snap_dir_for(const char *gid, char *out, size_t n) {
+static int snap_dir_for_(const char *gid, char *out, size_t n, int mk) {
     if (!out || !n) return -1;
     const char *e = getenv("S2A_SNAPSHOT_DIR");
     char base[2048];
@@ -647,10 +647,11 @@ int s2a_snap_dir_for(const char *gid, char *out, size_t n) {
         } else if (s2a_docs_root(docs, sizeof docs) >= (int)sizeof docs) return -1;
         if (snprintf(base, sizeof base, "%s/snapshot", docs) >= (int)sizeof base) return -1;
     }
-    for (char *q = base + 1; *q; q++) if (*q == '/') { *q = 0; mkdir(base, 0755); *q = '/'; }   // 建父目录（快照目录本身由存档时原子换上）
+    if (mk) for (char *q = base + 1; *q; q++) if (*q == '/') { *q = 0; mkdir(base, 0755); *q = '/'; }   // 建父目录（快照目录本身由存档时原子换上）
     if (snprintf(out, n, "%s", base) >= (int)n) return -1;
     return 0;
 }
+int s2a_snap_dir_for(const char *gid, char *out, size_t n) { return snap_dir_for_(gid, out, n, 1); }
 static int man_get(const char *dir, const char *key, char *out, size_t n);
 static void save_dir_hash(char *out, int *nfiles);
 // 存快照之后游戏又存过档没有（界面在「回到那一刻」之前问玩家用；只读，不改任何东西）：1 变过、0 没变、-1 判不了
@@ -832,6 +833,16 @@ int s2a_snap_manifest_win(uint64_t *base, uint64_t *size) {
     const char *dir = s2a_snap_path(getenv("S2A_SNAP_RESTORE")); char v[256], *e;
     if (!dir || !*dir || man_get(dir, "窗口", v, sizeof v)) return -1;
     *base = strtoull(v, &e, 16); if (!e || *e != '+') return -1; *size = strtoull(e + 1, NULL, 16); return *base && *size ? 0 : -1;
+}
+// 构造期（vawin.c snap_guard_take）：这一款有能用的快照时，它存档那局的窗口（十六进制 基址+长度）与命令记录区（十进制 基址、长度）。
+//   gid 为空 = 本局（单款）。只读：不建目录、不看 S2A_SNAP_RESTORE（玩家还没在库里点恢复）。有快照且窗口读得出回 0；命令记录区没记的回 0 长
+int s2a_snap_layout_of(const char *gid, uint64_t *wb, uint64_t *ws, uint64_t *cb, uint64_t *cl) {
+    char dir[2048], v[256], *e; *wb = *ws = *cb = *cl = 0;
+    if (snap_dir_for_(gid, dir, sizeof dir, 0) || !s2a_snap_exists(dir) || man_get(dir, "窗口", v, sizeof v)) return -1;
+    *wb = strtoull(v, &e, 16); if (!e || *e != '+') return -1; *ws = strtoull(e + 1, NULL, 16);
+    if (!*wb || !*ws) return -1;
+    if (!man_get(dir, "命令记录区", v, sizeof v)) { *cb = strtoull(v, &e, 10); *cl = e && *e == '\t' ? strtoull(e + 1, NULL, 10) : 0; if (!*cb || !*cl) *cb = *cl = 0; }
+    return 0;
 }
 int s2a_snap_restore_check(const char *dir) {
     if (!man_get(dir, "数据根", g_root_hint_v, sizeof g_root_hint_v) && g_root_hint_v[0]) root_expand(g_root_hint_v, g_root_hint, sizeof g_root_hint);

@@ -121,7 +121,8 @@ ck('④ 自有共享内存：STS 0x988 认出、STG 0x986 不认', r[11].get('ok
 ck('⑥ 中转任务：不留输入区 [0, 16, 16, 20496] / 20496 字节', r[13].get('ok') == [[0, 16, 16, 20496], 20496], r[13])
 # E 网格照常：输出 16 + 20480 = 20496；4 块 × 10 分量 × 128 = 5120 → 图元 25616；+ 384 → 26000
 ck('⑥ 中转网格：布局不变 [0, 16, 20496, 25616] / 26000 字节', r[14].get('ok') == [[0, 16, 20496, 25616], 26000], r[14])
-D, E = (x.get('ok') or '' for x in r[15:17])
+D0, E0 = (x.get('ok') or '' for x in r[15:17])
+D, E = base(D0), base(E0)
 ck('⑥ D：object_data 只带任务组号、中转缓冲在槽 27', 'struct dm_payload_t { uint tg; };' in D and 'device uint* dm_relay [[buffer(27)]]' in D and 'uint w[' not in D, D[-600:])
 ck('⑥ D：载荷 5120 字从字 4 写进中转（头 8 字后、每组 5120 字），越界组不写', 'device uint* dm_p = dm_relay + 8u + dm_tg * 5120u;' in D and 'bool dm_in = dm_tg < dm_relay[1];' in D
    and 'if (dm_in) for (uint i = dm_lid; i < 5120u; i += 32u) dm_p[i] = _35[4u + i];' in D)
@@ -141,13 +142,32 @@ with tempfile.TemporaryDirectory(prefix='t_meshstage_') as t:
 #   定义 S2A_MESH_EMU 后照出包编法编得过（宿主现编时定义它）
 ck('⑦ 有任务的网格：S2A_MESH_EMU 下有 main0_mc / main0_mc_z / main0_mv，读槽 28', all(k in A0 for k in ('kernel void main0_mc(', 'kernel void main0_mc_z(', 'vertex dm_vertex_t main0_mv(', '[[buffer(28)]]')) and 'kernel void main0_mc(' not in A)
 ck('⑦ 任务：S2A_MESH_EMU 下有 main0_tc，写载荷与派生数（钳 1024）', 'kernel void main0_tc(' in C0 and 'dm_xo[dm_xo[0] + dm_tg] = min(_35[805], 1024u);' in C0)
-ck('⑦ 无任务、带逐图元属性的网格（B）不出宿主入口（逐图元属性没有承载处）', 'main0_mc' not in B0 and 'S2A_MESH_EMU' not in B0)
+# ⑨ 带逐图元属性的网格（B：32 顶点 / 32 图元、逐图元属性 2）也出宿主入口：每个三角形展开成 3 个顶点记录 dm_xvertex_t，带该三角形的逐图元属性；
+#   原先不出（逐图元属性没有承载处），M1 / M2 上整笔跳过（一款体育游戏岛上植被等 3 支网格）
+B_EMU = B0.split('#ifdef S2A_MESH_EMU')[-1] if 'kernel void main0_mc(' in B0 else ''
+ck('⑨ B：S2A_MESH_EMU 下有 main0_mc / main0_mc_z / main0_mv，顶点记录 dm_xvertex_t 带逐图元属性 locn2',
+   all(k in B_EMU for k in ('kernel void main0_mc(', 'kernel void main0_mc_z(', 'vertex dm_xvertex_t main0_mv(', 'float4 p2 [[user(locn2)]];')), B0[-1500:])
+ck('⑨ B：每组 32 × 3 个展开记录，角的顶点属性按索引字节取、逐图元属性按三角形号取',
+   'device dm_xvertex_t* dm_vb = (device dm_xvertex_t*)(dm_xo + dm_xo[11]) + dm_tg * 96u;' in B_EMU and 'uint b = 4u + (dm_c / 32u) * 128u + dm_c % 32u;' in B_EMU
+   and 'b = 132u + (dm_p / 32u) * 32u + dm_p % 32u;' in B_EMU and 'v.p2 = float4(as_type<float>(_35[b + 0u]), 0.0, 0.0, 1.0);' in B_EMU, B_EMU[:2000])
+ck('⑨ B：索引 = 本组展开记录的顺序号', 'dm_ib[n] = dm_v0 + n;' in B_EMU and 'uint dm_v0 = dm_tg * 96u;' in B_EMU, B_EMU[-900:])
+ck('⑨ 对照：不带逐图元属性的 A 照旧按顶点存（dm_vertex_t、每组 MaxV 个）', 'dm_xvertex_t' not in A0, A0[-600:])
 # ⑦ 无任务、无逐图元属性的网格（F，#1542：M1 上这类原先没有宿主入口、悄悄落回驱动网格）：出 main0_mc / main0_mc_z / main0_mv；没有载荷与排表，
 #   组号 = 派发线程组号（dm_j = dm_tg），工作组字 = 起始组号 + 组号（读槽 29 的 dm_first，同驱动入口），交换缓冲仍在槽 28
 F0 = dshfn.fn('mesh_to_stage', kernel(189, False), ctl(7, 32, 0, mv=32, mp=32).hex(), area().hex())
 F_EMU = F0.split('#ifdef S2A_MESH_EMU')[-1] if 'kernel void main0_mc(' in F0 else ''
 ck('⑦ 无任务、无逐图元属性的网格（F）：S2A_MESH_EMU 下有 main0_mc / main0_mc_z / main0_mv',
    all(k in F_EMU for k in ('kernel void main0_mc(', 'kernel void main0_mc_z(', 'vertex dm_vertex_t main0_mv(', 'device uint* dm_xo [[buffer(28)]], constant uint* dm_first [[buffer(29)]]')), F0[-1500:])
+# ⑧ 载荷超 16 KB 的任务 / 网格也出宿主入口（原先中转时一律不出，M1 / M2 上这一对整笔跳过、水面发黑）：任务 main0_tc 载荷照写交换缓冲（设备内存、不受 16 KB），
+#   网格 main0_mc 的阶段内存（6500 字超线程组内存）放交换缓冲头字 23 起的片区、一个网格组一片，载荷从交换缓冲读
+ck('⑧ 中转任务（D）：S2A_MESH_EMU 下有 main0_tc，载荷 5120 字写交换缓冲、派生数钳 1024', 'kernel void main0_tc(' in D0 and 'device uint* dm_p = dm_xo + dm_xo[1] + dm_tg * 5120u;' in D0
+   and 'dm_xo[dm_xo[0] + dm_tg] = min(_35[5], 1024u);' in D0, D0[-1200:])
+E_EMU = E0.split('#ifdef S2A_MESH_EMU')[-1] if 'kernel void main0_mc(' in E0 else ''
+ck('⑧ 中转网格（E）：S2A_MESH_EMU 下有 main0_mc / main0_mc_z / main0_mv', all(k in E_EMU for k in ('kernel void main0_mc(', 'kernel void main0_mc_z(', 'vertex dm_vertex_t main0_mv(')), E0[-1500:])
+ck('⑧ E：阶段内存是交换缓冲字 23 起的一片（片号 = 网格组号）、不是线程组内存、不读中转槽 27',
+   'device spvUnsafeArray<uint, 6500>& _35 = *(device spvUnsafeArray<uint, 6500>*)(dm_xo + dm_xo[23] + (ulong)dm_tg * 6500u);' in E_EMU
+   and 'threadgroup spvUnsafeArray<uint, 6500>' not in E_EMU and 'dm_relay' not in E_EMU, E_EMU[:1500])
+ck('⑧ E：载荷从交换缓冲读进输入（字 4 起）', '_35[4u + i] = dm_xo[dm_xo[1] + dm_t * dm_xo[5] + i];' in E_EMU, E_EMU[:1500])
 ck('⑦ F：组号取派发线程组号、工作组字 = 起始组号 + 组号，不读排表 / 载荷', 'uint dm_j = dm_tg;' in F_EMU and '_35[0] = dm_first[0] + dm_tg;' in F_EMU and 'dm_xo[dm_xo[2]' not in F_EMU and 'dm_xo[dm_xo[1]' not in F_EMU, F_EMU[:1200])
 loop_kernel = kernel(1444, True).replace('    if (', '''    for (uint i = 0; i < 2u; i++)
     {
@@ -159,7 +179,7 @@ G0 = guarded_mesh.get('ok', '')
 ck('⑦ 核入口有循环：仍能提取阶段内存并保留循环护栏',
    all(s in G0 for s in ('    DM_LG_DECL()\n', '        DM_LG()\n', 'kernel void main0_mc_z(')), guarded_mesh.get('err'))
 with tempfile.TemporaryDirectory() as t:
-    for nm, src in (('A', A0), ('C', C0), ('F', F0), ('G', G0)):
+    for nm, src in (('A', A0), ('B', B0), ('C', C0), ('D', D0), ('E', E0), ('F', F0), ('G', G0)):
         f = os.path.join(t, nm + '.metal'); open(f, 'w').write(src)
         p = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-w', '-DS2A_MESH_EMU=1', '-fmetal-math-mode=relaxed', '-fpreserve-invariance', f, '-o', f + '.air'], capture_output=True, text=True)
         ck(f'⑦ {nm} 定义 S2A_MESH_EMU 交 xcrun metal（macosx）编过', bool(src) and p.returncode == 0, p.stderr.strip()[-300:])

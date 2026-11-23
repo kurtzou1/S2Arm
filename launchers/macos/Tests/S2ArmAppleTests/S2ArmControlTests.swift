@@ -68,6 +68,43 @@ import AppKit
         XCTAssertEqual(model.lastUpdateArgs?.device, "OLD-UDID")
     }
 
+    func testExplicitPhoneUsesOnlyItsOwnGamesForConfirmation() async {
+        let first = phoneUpdate("FIRST", game: "0100000000010000")
+        let second = phoneUpdate("SECOND", game: "0100000000020000")
+        model.phoneUpdates = [PhoneUpdate(catalog: first), PhoneUpdate(catalog: second)]
+
+        let (code, body) = await post("/update-phone", ["device": "SECOND", "ask": true])
+        XCTAssertEqual(code, 200)
+        XCTAssertEqual((body["stale"] as? [[String: String]])?.compactMap { $0["gameId"] }, ["0100000000020000"])
+        XCTAssertEqual(model.updateConfirm?.device, "SECOND")
+        XCTAssertNil(model.phoneSession)
+    }
+
+    func testToolbarRefreshesUpdateTargetBeforeConfirmation() async throws {
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("Jobs"), withIntermediateDirectories: true)
+        try Data().write(to: root.appendingPathComponent("Jobs/main.py"))
+        let replacement = phoneUpdate("NEW", game: "0100000000020000")
+        let runner = PhoneUpdateCatalogRunner(updates: [replacement])
+        let launcher = S2ArmLauncherModel(client: JobClient(environment: JobEnvironment(
+            privateRoot: root, resources: root, library: root.appendingPathComponent("lib").path, libraryId: "fixture"), runner: runner))
+        launcher.runAlert = { _ in XCTFail("应读到换线后的设备"); return .alertFirstButtonReturn }
+        launcher.phoneUpdates = [PhoneUpdate(catalog: phoneUpdate("OLD", game: "0100000000010000"))]
+        launcher.selectedID = S2ArmLauncherModel.consoleID
+
+        await launcher.requestPhoneUpdate(language: "zh-Hans").value
+
+        XCTAssertEqual(launcher.phoneUpdate?.device, "NEW")
+        XCTAssertEqual(launcher.updateConfirm?.stale.map(\.id), ["0100000000020000"])
+        XCTAssertEqual(launcher.updateConfirm?.device, "NEW")
+        XCTAssertEqual(launcher.selectedID, S2ArmLauncherModel.consoleID)
+        XCTAssertNil(launcher.phoneSession)
+    }
+
+    private func phoneUpdate(_ device: String, game: String) -> [String: Any] {
+        let games = [["gameId": game, "name": "Fixture"]]
+        return ["device": device, "name": device, "games": games, "stale": games]
+    }
+
     /// s2armctl dismiss（「关掉提示框」）要关得掉新功能大窗和更新弹窗，同玩家点关闭；修前只清报错、弹窗原样开着
     func testDismissClosesFeatureSpotlightAndUpdatePopup() async {
         for popup: [String: Any] in [["kind": "feature", "id": "v0.0.0-probe"], ["kind": "update", "version": "99.0.0"]] {
@@ -128,5 +165,25 @@ final class ExportDevicePickTests: XCTestCase {
         XCTAssertNil(S2ArmLauncherModel.pickDevice([phone, pad], chosen: "gone"))
         XCTAssertNil(S2ArmLauncherModel.pickDevice([phone], chosen: "gone"))
         XCTAssertNil(S2ArmLauncherModel.pickDevice([], chosen: "A"))
+    }
+}
+
+private struct PhoneUpdateCatalogRunner: JobProcessRunner {
+    final class Handle: JobProcessHandle { func terminate() {} }
+    let updates: [[String: Any]]
+
+    func start(executable: URL, arguments: [String], environment: [String: String],
+               onLine: @escaping (Data) -> Void, onStderr: @escaping (Data) -> Void,
+               onExit: @escaping (Int32) -> Void) throws -> JobProcessHandle {
+        let requestURL = URL(fileURLWithPath: try XCTUnwrap(arguments.last))
+        let request = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: requestURL)) as? [String: Any])
+        XCTAssertEqual(request["operation"] as? String, "catalog")
+        let task = try XCTUnwrap(request["taskId"] as? String)
+        let event = try JSONSerialization.data(withJSONObject: [
+            "schema": 1, "taskId": task, "type": "result", "state": "succeeded", "message": "",
+            "result": ["phoneUpdates": updates],
+        ])
+        DispatchQueue.main.async { onLine(event); onExit(0) }
+        return Handle()
     }
 }

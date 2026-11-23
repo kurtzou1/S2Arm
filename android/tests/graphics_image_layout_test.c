@@ -197,6 +197,28 @@ int main(void) {
         snprintf(what, sizeof what, "build refuses a program with an unmappable image (%s)", bb[k].what);
         CHECK(en && en->failed && !en->prog.sh[0] && !en->prog.sh[1], what);
     }
+    // 6) 绑定号 > 65535：布局项 / 线格式只有 16 位，回放层单独具名拒（binding_number_over_16bit，原因带绑定号和程序键），不截断、不混成 binding_kind_*；65535 照收
+    {
+        static const struct img_decl d[1] = {{1, 1, 33}};
+        static const int nums[2] = {65535, 65536};
+        for (int k = 0; k < 2; k++) {
+            char json[8192], bind[256];
+            int n = make_json(json, sizeof json, d, 1, img_binding(bind, sizeof bind, nums[k], 72, 1, ""));
+            struct s2a_source_entry_view views[3]; memset(views, 0, sizeof views);
+            uint8_t identity[32]; memset(identity, 11, sizeof identity);
+            g_last_red[0] = 0;
+            struct entry *en = build((const uint8_t *)json, (size_t)n, views, 2, identity, 0);
+            char what[160];
+            if (nums[k] == 65535) {
+                snprintf(what, sizeof what, "binding %d (the 16-bit ceiling) builds", nums[k]);
+                CHECK(en && !en->failed && g_got_ent[1][0].binding == 65535, what);
+            } else {
+                snprintf(what, sizeof what, "binding %d is refused by the named over-16-bit check, no backend shader", nums[k]);
+                CHECK(en && en->failed && !en->prog.sh[0] && !en->prog.sh[1] && strstr(g_last_red, "65536") && strstr(g_last_red, "超过 16 位") && strstr(g_last_red, "程序键"), what);
+                CHECK(!strstr(g_last_red, "binding_kind"), "the over-16-bit refusal is not reported as an unsupported binding kind");
+            }
+        }
+    }
 
     if (fails) { fprintf(stderr, "graphics image layout: %d FAILED\n", fails); return 1; }
     puts("PASS: graphics image layout (real parse + production layout_ent + production build)");

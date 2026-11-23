@@ -170,6 +170,12 @@ namespace Ryujinx.Audio.Backends.Apple
         private long _lastHealTicks;
         // S2Arm (#1384): 已处理过的客机冻结次数（S2AGuestFreeze.Seq）。建会话时取当前值，之前的冻结不算
         private long _thawSeq = Interlocked.Read(ref Ryujinx.Audio.Integration.S2AGuestFreeze.Seq);
+        // S2Arm (D-HTHG 11-22)：解冻宽限。iOS 局切后台 / 回前台：客机冻结期间进程多半被系统挂起、看门狗不跑，回前台第一拍拿「上次回调」算停播，
+        //   把整段后台时间（玩家局 26680 / 250589 / 1768335 ms）当成「设备没有回调」重启输出队列；回前台时系统重新激活音频会话，
+        //   一次交设备卡约 500 ms（三局 499 / 518 / 520 ms，都紧挨着回前台时间线）被当成 #1598 的「输出队列卡死」重启。两种都是一次多余的断音。
+        //   冻结中与解冻后 ThawGraceMs 内：停播起算点跟着刷新，交设备一次慢不重启（之后再慢照旧按 #1598 重启）。Mac 解冻本来就重启一次（#1384），不走这里
+        private const int ThawGraceMs = 1500;
+        private long _graceSeq = Interlocked.Read(ref Ryujinx.Audio.Integration.S2AGuestFreeze.Seq), _thawTicks;
         private int _heals;
         private bool _testStallDone;
         // 测试钩子：S2A_AUDIO_TEST_PRODUCER_STALL_AT=<秒>:<毫秒> —— 开播后到点在送声音的入口（QueueBuffer）睡一次，模拟 GC 停顿卡住生产方、吃光缓冲垫
@@ -441,6 +447,20 @@ namespace Ryujinx.Audio.Backends.Apple
             }
         }
 
+        // 解冻宽限的判定（纯函数，服务层单测 --apple-audio-thaw-grace 直接测）：frozen / seq = 客机冻结状态与冻结次数；graceSeq / thawTicks = 上次见到的冻结次数、
+        //   上次解冻时刻（调用方保存）。返回这一拍在不在宽限内（冻结中或解冻后 ThawGraceMs 内）；rebase = 停播起算点要刷新到 now（冻结中、或刚看到一次新的解冻）
+        internal static bool S2AThawGraceStep(bool frozen, long seq, ref long graceSeq, ref long thawTicks, long now, long freq, out bool rebase)
+        {
+            rebase = frozen || seq != graceSeq;
+            if (!frozen && seq != graceSeq)
+            {
+                graceSeq = seq;
+                thawTicks = now;
+            }
+
+            return frozen || (thawTicks != 0 && now - thawTicks < (long)ThawGraceMs * freq / 1000);
+        }
+
         // 兜底：开着播、在途有数据，设备却超过 StallMs 不回调。每次触发都打【红】，带上最近一条系统通知，免得悄悄盖住别的毛病
         private void S2ACheckStall(long now)
         {
@@ -458,8 +478,24 @@ namespace Ryujinx.Audio.Backends.Apple
                 return;
             }
 
+            bool grace = false;
+            if (!OperatingSystem.IsMacOS())   // 平台例外：苹果后端内部，Mac 解冻走 #1384 的重启（见下）
+            {
+                grace = S2AThawGraceStep(Ryujinx.Audio.Integration.S2AGuestFreeze.Frozen != 0, Interlocked.Read(ref Ryujinx.Audio.Integration.S2AGuestFreeze.Seq),
+                                         ref _graceSeq, ref _thawTicks, now, Stopwatch.Frequency, out bool rebase);
+                if (rebase)
+                {
+                    Volatile.Write(ref _lastCallbackTicks, now);   // 冻结 / 挂起的时间不算「设备没有回调」
+                }
+
+                if (grace && enq * 1000 >= (long)EnqueueStuckMs * Stopwatch.Frequency)
+                {
+                    Console.Error.WriteLine($"[声] 【黄】输出 #{_diag.Index}：解冻后 {(now - _thawTicks) * 1000 / Stopwatch.Frequency} ms 内一次交设备卡了 {enq * 1000 / Stopwatch.Frequency} ms（回前台时系统重新激活音频会话），按过渡处理、不重启输出队列");
+                }
+            }
+
             // #1598：交设备卡死（见 EnqueueStuckMs）→ 与解冻路径同一个动作：停队列、收回在途、重新开播。各平台都接，退避同下面的兜底
-            if (enq * 1000 >= (long)EnqueueStuckMs * Stopwatch.Frequency && _healOn && now - _lastHealTicks >= (long)HealBackoffMs * Stopwatch.Frequency / 1000)
+            if (!grace && enq * 1000 >= (long)EnqueueStuckMs * Stopwatch.Frequency && _healOn && now - _lastHealTicks >= (long)HealBackoffMs * Stopwatch.Frequency / 1000)
             {
                 _timeline.Reset();
                 S2ARecover($"兜底：一次交设备（AudioQueueEnqueueBuffer）卡了 {enq * 1000 / Stopwatch.Frequency} ms，输出队列卡死", false, now, true);

@@ -19,6 +19,9 @@ public enum GameState: Equatable, Sendable {
     /// S2Arm 0.6.0: the game's data is on this iPhone but its program (the game's .s2arm file) isn't yet, such as when only the
     /// .img was put in. Its primary action picks the .s2arm here (`ShellActions.onImportProgram`).
     case needsProgram
+    /// The game reads its data from a game source folder (Settings, Game sources), such as an external drive, and that folder
+    /// can't be reached right now. It stays in the library with a grey cover and comes back by itself once the folder is back.
+    case sourceOffline
     /// `reason` is one short line for under the title, such as "Game files damaged". `detail` is a plain sentence
     /// for the player (what happened, what to do), shown under the title and in the How to fix sheet. `technical`
     /// is the underlying message, shown only as small secondary Details in the sheet.
@@ -326,6 +329,10 @@ public struct ShellActions {
     public var onUseShellCloud: ((String) -> Void)?
     public var onClearShellData: (() -> Void)?
     public var onClearShellCloud: (() -> Void)?
+    /// S2Arm: settings → "Game sources": folders, such as one on an external drive, whose exported games are read in place.
+    /// Adding opens the folder picker; removing takes that folder's games off this device (the files in it stay). Nil hides the group.
+    public var onAddGameSource: (() -> Void)? = nil
+    public var onRemoveGameSource: ((_ sourceID: String) -> Void)? = nil
     /// S2Arm: settings → "Storage" (read-only breakdown of the space S2Arm's data uses on this device). Nil hides the row.
     public var onManageStorage: (() -> Void)?
     /// S2Arm: settings → "Report a problem" (the host packs the logs, uploads them and shows a short code). Nil hides the row.

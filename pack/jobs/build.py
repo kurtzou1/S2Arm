@@ -906,7 +906,7 @@ def seed_from_sibling(c, game, roots, kuan):
         roots.mkdir(parents=True, exist_ok=True)
         dst = roots / (kuan + "@sib-" + cur.name.split("@", 1)[-1])
         if dst.exists():
-            shutil.rmtree(dst)
+            layout.remove_tree(dst)
         log = c.logs / (c.task + "-sibling.log")
         log.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -1046,7 +1046,7 @@ def prepare(c):
         image = contained(layout.root_of(c, game["id"]), layout.image_mac(c, game["id"]))
         temporary = image.with_name("mac.partial")
         if temporary.exists():
-            shutil.rmtree(temporary)
+            layout.remove_tree(temporary)
         temporary.parent.mkdir(parents=True, exist_ok=True)
         temporary.mkdir()
         try:
@@ -1067,7 +1067,7 @@ def prepare(c):
             c.check()
             old = image.with_name("mac.old")
             if old.exists():
-                shutil.rmtree(old)
+                layout.remove_tree(old)
             if image.exists():
                 os.replace(image, old)
             os.replace(temporary, image)
@@ -1079,11 +1079,11 @@ def prepare(c):
             record_pack_usage(c, game)
             # 新运行版本已换上：以下只是省盘 / 记账 / 刷新显示，出错只提示、不把这次出包判失败（v0.2.3 清理，#343）
             if old.exists():
-                host_update.tidy(c, "删除上一版运行文件", shutil.rmtree, old)
+                host_update.tidy(c, "删除上一版运行文件", layout.remove_tree, old)
             host_update.tidy(c, "清理不再用的旧运行层", host_update.prune, c)
         finally:
             if temporary.exists():
-                shutil.rmtree(temporary)
+                layout.remove_tree(temporary)
         host_update.tidy(c, "记录出包里程碑用时", ms.record, c, size_gb)
         from library import _part_bytes, _rm
         # 解包和中间目录：运行版本整棵是克隆出来的（APFS 同卷，和产物根、解包同属一个克隆族）就保留——几乎不另占盘，下次出另一端的包不用重解（#329，

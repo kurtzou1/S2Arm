@@ -1,0 +1,28 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadImu.cs b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadImu.cs
+index b666248735f23b0e705485b4c9259e3b43802048..34b8981caa2caa4757eb773946f14cee13d27bb2 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadImu.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadImu.cs
+@@ -38,6 +38,7 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+         private readonly ulong[] _samplingNumber = new ulong[SlotTotal];
+         private readonly ulong[] _writeIndex = new ulong[SlotTotal];
+         private readonly ulong[] _lastTimestampUs = new ulong[SlotTotal];
++        private const ulong ClockJumpUs = 1_000_000;   // 时间戳往回跳这么多（微秒）以上 = 换了时钟，不当重推（见 Write）
+ 
+         public bool Active { get { lock (_lock) return _memory != null; } }
+ 
+@@ -143,12 +144,13 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+             ulong last = _lastTimestampUs[slot];
+             // 同一笔读数不重写（时间戳没往前）：服务层双 Joy-Con 每拍都推左右两路、不论有没有新样本，改前每次都当成隔 5 ms 的新样本写，
+             //   游戏的融合把同一份角速度积分好几遍，手一动就放大成好几倍（实机：一人拿一对的项目没挥也自己出拳）
+-            if (last != 0 && timestampUs <= last)
++            //   往回跳 1 秒以上不算重推，是换了时钟（这一格换了体感源，比如转成局域网另一台机器转发的读数）：照新样本写，否则这一格的体感从此一直写不进去
++            if (last != 0 && timestampUs <= last && last - timestampUs < ClockJumpUs)
+             {
+                 return;
+             }
+ 
+-            ulong deltaNs = last != 0 ? (timestampUs - last) * 1000 : DefaultDeltaNs;
++            ulong deltaNs = last != 0 && timestampUs > last ? (timestampUs - last) * 1000 : DefaultDeltaNs;
+             _lastTimestampUs[slot] = timestampUs;
+ 
+             ulong index = _writeIndex[slot];

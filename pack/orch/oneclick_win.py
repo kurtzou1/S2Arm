@@ -294,9 +294,22 @@ def log_reason(text, limit=600):
     lines = text.strip().splitlines()
     exc = max((i for i, l in enumerate(lines) if re.match(r'^[A-Za-z_][\w.]*(Error|Exception|Exit|Interrupt|Fail|Conflict|UnsafeRoot)\b.*', l)), default=None)
     if exc is None:
+        # D-Z2VA：没有 Python 异常行时取最后一条红行（失败那一步自己写的原因：直连库「🔴 出库失败 rc=1：<.NET 异常头>：dsh_batch.py 退出码 1：<调用栈>（<日志>）」）。
+        #   原先取末 3 行末 300 字，近 2 KB 的红行只剩调用栈尾巴，异常类型和消息全丢。超长时保住开头（原因）和结尾（日志路径），省中间
+        red = [l.strip() for l in lines if '【红】' in l or '🔴' in l]
+        if red:
+            return clip(red[-1], limit)
         return ' / '.join(lines[-3:])[-300:]
     head = ' / '.join(lines[exc:])
     return head if len(head) <= limit else head[:limit] + '…'
+
+
+def clip(text, limit):
+    """超过 limit 字的一行：留开头约三分之二、结尾其余，中间换成「 … 」"""
+    if len(text) <= limit:
+        return text
+    h = limit * 2 // 3
+    return text[:h] + ' … ' + text[-(limit - h - 3):]
 
 
 def nx_unpack_id():   # 源码身份（现编目录名与预编件 .src_digest 共用）

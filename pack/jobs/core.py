@@ -1353,7 +1353,11 @@ class Context:
                         self.diagnostic(str(failure), failure.code, exit_code=rc, internal=failure.internal, facts=failure.facts, advice=failure.advice)
                         raise failure
                     from errors import tool_reason
-                    message = f"{self.stage or '这一步'}失败（退出码 {rc}）：{self.redact(tool_reason(self.last_log), limit=240)}"
+                    # D-Z2VA：超长原因留头（异常类型与消息）和尾（日志名），省中间。原先只留末 240 字，长红行只剩调用栈尾巴
+                    reason = self.redact(tool_reason(self.last_log), limit=None)
+                    if len(reason) > 240:
+                        reason = reason[:160] + " … " + reason[-77:]
+                    message = f"{self.stage or '这一步'}失败（退出码 {rc}）：{reason}"
                     self.diagnostic(message, "tool_exit", exit_code=rc)
                     raise Failure(message, code="tool_exit")
             finally:

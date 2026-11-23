@@ -91,4 +91,11 @@ ck "㉖ 开了扩展、sample 当名字 → 改名" rewrite frag
 printf '#version 320 es\nprecision highp float;\nsample in vec4 v;\nout vec4 o;\nvoid main() { float sample = 0.5; o = v * sample; }\n' > "$T/in"
 printf '#version 320 es\nprecision highp float;\nsample in vec4 v;\nout vec4 o;\nvoid main() { float s2a_sample = 0.5; o = v * s2a_sample; }\n' > "$T/want"
 ck "㉗ 限定符留、名字改" rewrite frag
+# ㉕–㉘ D-45J6（#852）：桌面 GLSL 110 / 120 / 130 —— glslang 出 SPIR-V 拒收 140 以下的桌面版本（「Desktop shaders for Vulkan SPIR-V require version 140 or higher」）。
+#   第一条版本行的版本号换成 100，按 ES 1.00 预处理、再走 ES 1.00 → 3.10 的改写（attribute / varying / gl_FragColor / texture2D）；行里别的（行首空白、注释、\r）原样
+printf '#version 120\nvoid main() {}\n' > "$T/in"; printf '#version 100\nvoid main() {}\n' > "$T/want"; ck "㉕ 桌面 120 → 100" prefix
+printf ' # version 110 // engine\r\nvoid main() {}\n' > "$T/in"; printf ' # version 100 // engine\r\nvoid main() {}\n' > "$T/want"; ck "㉖ 桌面 110 带注释、\\r 原样" prefix
+printf '#version 130\n#version 120\n' > "$T/in"; printf '#version 100\n#version 120\n' > "$T/want"; ck "㉗ 桌面 130 → 100，只改第一条" prefix
+printf '#version 140\n#version 1200\n' > "$T/in"; cp "$T/in" "$T/want"; ck "㉘a 140 不动（glslang 收）" prefix
+printf '#version 1200\n' > "$T/in"; cp "$T/in" "$T/want"; ck "㉘b 1200 不动" prefix
 [ $bad = 0 ] && echo "✓ t_glsl_es：$n 项全过" || { echo "✗ t_glsl_es：$n 项，失败 $bad"; exit 1; }

@@ -310,7 +310,7 @@ static int parse_graphics(const uint8_t *bytes, size_t length, struct fd_program
             if (s2a_jv_obj_find(b, "kind", &kind) || s2a_jv_str(kind, kind_text, sizeof kind_text)) return fail(why, why_size, "binding kind missing");
             uint32_t set_v = 0, binding_v = 0, slot_v = 0;
             if (s2a_jv_obj_find(b, "set", &set) || s2a_jv_u32(set, &set_v) || set_v > 3) return fail(why, why_size, "binding set outside 0..3");
-            if (s2a_jv_obj_find(b, "binding", &binding) || s2a_jv_u32(binding, &binding_v) || binding_v > UINT16_MAX)
+            if (s2a_jv_obj_find(b, "binding", &binding) || s2a_jv_u32(binding, &binding_v) || binding_v > 0x7fffffffu)
                 return fail(why, why_size, "binding without binding");
             // slot 可以合法省略（support/storage 等没有 guest 槽位）；省略是“没有”，不是槽 0。
             // 写了但不是无符号整数则明确拒绝，不静默当省略。

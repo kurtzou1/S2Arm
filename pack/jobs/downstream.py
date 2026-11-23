@@ -308,7 +308,8 @@ def _downstream_input(c, extraction, work):
     rom = m.RomfsImage(std) if std.is_file() else m.RomfsImage.in_img(str(img))
     view = Path(work) / "downstream-input"
     if view.exists() or view.is_symlink():
-        shutil.rmtree(view)
+        import layout
+        layout.remove_tree(view)
     view.mkdir(parents=True)
     def link(a, b):   # 硬链接（同卷不另占盘；Windows 普通用户建不了软链、硬链接可以），建不了退成复制
         try:
@@ -346,7 +347,8 @@ def work_dir(out, scheme):
     work, sha = out / "work", scheme["bundle"]["sha256"]
     mark = work / ".bundle"
     if (work.exists() or work.is_symlink()) and not (mark.is_file() and mark.read_text().strip() == sha):
-        shutil.rmtree(work)
+        import layout
+        layout.remove_tree(work)
     work.mkdir(parents=True, exist_ok=True)
     mark.write_text(sha)
     return work

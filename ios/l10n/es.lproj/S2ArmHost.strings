@@ -275,6 +275,8 @@
 "app.lowRam.title" = "Puede que falte memoria";
 "app.lowRam.body" = "Este juego necesita unos %1$@ GB de memoria y este dispositivo tiene %2$@ GB. El almacenamiento compensa la diferencia: puedes jugar, pero puede ir lento o cerrarse a mitad. Solo se muestra una vez.";
 "app.gpuStop.body" = "Cierra esta app desde el selector de apps y vuelve a abrirla; normalmente podrás seguir jugando desde el último guardado del juego. Para ayudarnos a encontrar la causa, toca «Informar de un problema» y envíanos el diagnóstico.";
+"app.dataLost.title" = "No se puede leer la ubicación del juego, así que se detuvo de forma segura";
+"app.dataLost.body" = "Probablemente se desconectó el disco externo o se movió el archivo del juego. Tus partidas guardadas están en la app y no se han visto afectadas. Vuelve a conectar el disco, cierra esta app desde el selector de apps y ábrela de nuevo para seguir jugando.";
 "app.gpuStop.title" = "El juego se quedó bloqueado y se detuvo de forma segura";
 "app.library.broken.title" = "Los archivos del juego están incompletos";
 "app.library.cantOpen" = "No se puede abrir este juego";

@@ -1,6 +1,206 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "Add a folder": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add a folder"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "添加文件夹"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新增資料夾"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "フォルダを追加"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Añadir una carpeta"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ajouter un dossier"
+          }
+        }
+      }
+    },
+    "Game location not found": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Game location not found"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "没有找到游戏所在位置"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "找不到遊戲所在位置"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ゲームの保存場所が見つかりません"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No se encuentra la ubicación del juego"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Emplacement du jeu introuvable"
+          }
+        }
+      }
+    },
+    "Game sources": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Game sources"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "游戏来源"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "遊戲來源"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ゲームの取り込み元"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Orígenes de juegos"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sources de jeux"
+          }
+        }
+      }
+    },
+    "Put games exported from the computer (their .s2arm and .img files) in a folder, for example on an external drive, and add it here. S2Arm plays them from that folder without copying the game data in. Saves stay in this app. Format the drive as APFS. After you update a game on the computer, export it again so this device gets the new version. When the drive isn’t connected, its games stay in the library, greyed out, and come back once it is.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Put games exported from the computer (their .s2arm and .img files) in a folder, for example on an external drive, and add it here. S2Arm plays them from that folder without copying the game data in. Saves stay in this app. Format the drive as APFS. After you update a game on the computer, export it again so this device gets the new version. When the drive isn’t connected, its games stay in the library, greyed out, and come back once it is."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "把电脑导出的游戏（它的 .s2arm 和 .img 文件）放进一个文件夹，比如外接硬盘里的，再在这里添加它。S2Arm 直接从那个文件夹里玩，游戏数据不拷进来。存档留在本 App 里。硬盘要格式化成 APFS。在电脑上更新游戏后，再导出一次，这台设备才拿到新版。硬盘没接上时，它里面的游戏仍留在游戏库里、显示为灰色，接上后自己恢复。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "把電腦匯出的遊戲（它的 .s2arm 和 .img 檔案）放進一個資料夾，例如外接硬碟裡的，再在這裡新增它。S2Arm 直接從那個資料夾裡玩，遊戲資料不複製進來。存檔留在本 App 裡。硬碟要格式化成 APFS。在電腦上更新遊戲後，再匯出一次，這台裝置才拿到新版。硬碟沒接上時，它裡面的遊戲仍留在遊戲庫裡、顯示為灰色，接上後自己恢復。"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "パソコンから書き出したゲーム（.s2arm と .img ファイル）をフォルダ（外付けドライブ内など）に入れ、ここで追加してください。S2Arm はゲームデータをコピーせずにそのフォルダから直接遊びます。セーブデータはこの App 内に残ります。ドライブは APFS でフォーマットしてください。パソコンでゲームを更新したら、もう一度書き出すとこのデバイスに新しいバージョンが届きます。ドライブがつながっていないときも、そのゲームはグレー表示でライブラリに残り、つなぐと元に戻ります。"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pon los juegos exportados desde el ordenador (sus archivos .s2arm e .img) en una carpeta, por ejemplo en un disco externo, y añádela aquí. S2Arm los juega desde esa carpeta sin copiar los datos del juego. Las partidas guardadas se quedan en esta app. Formatea el disco como APFS. Después de actualizar un juego en el ordenador, vuelve a exportarlo para que este dispositivo reciba la nueva versión. Si el disco no está conectado, sus juegos siguen en la biblioteca, en gris, y vuelven cuando lo conectas."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Placez les jeux exportés depuis l’ordinateur (leurs fichiers .s2arm et .img) dans un dossier, par exemple sur un disque externe, puis ajoutez-le ici. S2Arm les lance depuis ce dossier sans copier les données du jeu. Les sauvegardes restent dans cette app. Formatez le disque en APFS. Après avoir mis à jour un jeu sur l’ordinateur, exportez-le à nouveau pour que cet appareil reçoive la nouvelle version. Si le disque n’est pas branché, ses jeux restent dans la bibliothèque, en gris, et reviennent une fois le disque branché."
+          }
+        }
+      }
+    },
+    "This game is in a game source folder S2Arm can’t reach right now, such as an external drive that isn’t connected. Connect the drive or put the folder back, and the game is ready again by itself. Your saves are in this app and aren’t affected. To stop using that folder, remove it under Game sources in Settings.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This game is in a game source folder S2Arm can’t reach right now, such as an external drive that isn’t connected. Connect the drive or put the folder back, and the game is ready again by itself. Your saves are in this app and aren’t affected. To stop using that folder, remove it under Game sources in Settings."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这款游戏在某个游戏来源文件夹里，S2Arm 现在打不开它，比如外接硬盘没有接上。接好硬盘或把文件夹放回原处，游戏会自己恢复可玩。存档在本 App 里，不受影响。不想再用这个文件夹，在设置的「游戏来源」里移除它。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "這款遊戲在某個遊戲來源資料夾裡，S2Arm 現在打不開它，例如外接硬碟沒有接上。接好硬碟或把資料夾放回原處，遊戲會自己恢復可玩。存檔在本 App 裡，不受影響。不想再用這個資料夾，在設定的「遊戲來源」裡移除它。"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このゲームはゲームの取り込み元フォルダにありますが、S2Arm からいま開けません（外付けドライブがつながっていないなど）。ドライブをつなぐか、フォルダを元の場所に戻すと、自動でまた遊べるようになります。セーブデータはこの App 内にあり、影響はありません。このフォルダを使わない場合は、設定の「ゲームの取り込み元」から削除してください。"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Este juego está en una carpeta de origen de juegos a la que S2Arm no puede acceder ahora, por ejemplo un disco externo que no está conectado. Conecta el disco o vuelve a poner la carpeta en su sitio y el juego estará listo otra vez por sí solo. Tus partidas guardadas están en esta app y no se ven afectadas. Para dejar de usar esa carpeta, quítala en Orígenes de juegos, en Ajustes."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ce jeu se trouve dans un dossier source de jeux auquel S2Arm n’a pas accès pour l’instant, par exemple un disque externe non branché. Branchez le disque ou remettez le dossier à sa place : le jeu redevient jouable tout seul. Vos sauvegardes sont dans cette app et ne sont pas touchées. Pour ne plus utiliser ce dossier, supprimez-le dans Sources de jeux, dans Réglages."
+          }
+        }
+      }
+    },
     "Storage": {
       "localizations": {
         "en": {

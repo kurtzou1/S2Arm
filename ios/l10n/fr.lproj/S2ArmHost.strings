@@ -275,6 +275,8 @@
 "app.lowRam.title" = "Mémoire peut-être insuffisante";
 "app.lowRam.body" = "Ce jeu a besoin d'environ %1$@ Go de mémoire, cet appareil en a %2$@ Go. Le stockage compense : vous pouvez jouer, mais le jeu peut ralentir ou se fermer en cours de partie. Affiché une seule fois.";
 "app.gpuStop.body" = "Fermez cette app depuis le sélecteur d'apps puis rouvrez-la : vous pourrez généralement reprendre depuis le dernier enregistrement du jeu. Pour nous aider à trouver la cause, touchez « Signaler un problème » pour nous envoyer le diagnostic.";
+"app.dataLost.title" = "Impossible de lire l’emplacement du jeu : il a été arrêté en toute sécurité";
+"app.dataLost.body" = "Le disque externe a probablement été déconnecté, ou le fichier du jeu a été déplacé. Vos sauvegardes sont dans l’app et n’ont pas été touchées. Rebranchez le disque, puis fermez cette app depuis le sélecteur d’apps et rouvrez-la pour continuer.";
 "app.gpuStop.title" = "Le jeu s'est bloqué et a été arrêté en toute sécurité";
 "app.library.broken.title" = "Les fichiers d'origine du jeu sont incomplets";
 "app.library.cantOpen" = "Ce jeu ne peut pas être ouvert";

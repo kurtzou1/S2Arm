@@ -250,6 +250,8 @@
 "app.lowRam.title" = "這台裝置記憶體可能不夠";
 "app.lowRam.body" = "這款遊戲約需 %1$@ GB 記憶體，這台裝置只有 %2$@ GB。已自動用儲存空間補足，可以玩，但可能變慢，或玩到一半被系統結束。這個提示只出現這一次。";
 "app.gpuStop.body" = "從背景滑掉本 App 再開啟，一般能接著玩，存檔停在遊戲上次儲存的地方。想讓我們查原因，點「故障報修」把診斷傳給我們。";
+"app.dataLost.title" = "遊戲所在的位置讀不到了，已經安全停下";
+"app.dataLost.body" = "多半是外接硬碟斷開了，或遊戲檔案被移走了。存檔在 App 裡，沒有受影響。把硬碟接好後，從背景滑掉本 App 再開啟，接著玩。";
 "app.gpuStop.title" = "遊戲卡住了，已經安全停下";
 "app.library.broken.title" = "遊戲資源不完整";
 "app.library.cantOpen" = "這款遊戲無法開啟";
