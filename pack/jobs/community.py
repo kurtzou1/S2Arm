@@ -536,6 +536,12 @@ def save(c):
     for key, value in want.items():
         item = table.get(key)
         if item is None or item.get("scope") not in ("game", "app") or item["type"] not in ("bool", "choice", "text"):
+            # D-778G：0.6.9 Mac 启动器交来 settings 里带 patches（定义表里是补丁一栏、不是可存的设置），读码没找到哪个入口发的、诊断里也没有请求体：
+            #   把这次请求带的设置键、取值类型与请求的其他字段记进任务日志（进诊断包），下一份诊断直接看得出来源
+            from core import trace
+            where = "没有" if item is None else "是 %s / %s" % (item.get("type"), item.get("scope"))  # 非玩家句
+            trace(c, "启动设置保存被拒：设置键 %s 不是可存的设置（定义表里%s）；这次请求的设置 %s；请求其他字段 %s" % (  # 非玩家句
+                key, where, {k: type(v).__name__ for k, v in want.items()}, sorted(k for k in c.r if k != "settings")))
             raise Failure("没有这个启动设置：%s。" % key, code="job_failed")
         target = shared if item["scope"] == "app" else data
         if value is None:

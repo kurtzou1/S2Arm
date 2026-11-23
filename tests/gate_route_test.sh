@@ -23,7 +23,7 @@ o=$(r tests graphics/metal/cs/NxTrack.cs); ck "C# NxTrack 改动 → 独立排�
 o=$(r tests compat/tree/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs); ck "C# ShaderCache 改动 → 垃圾代码与失败负缓存测试" '[[ "$o" == *tests/shader_garbage_guard_test.sh* ]] && [[ "$o" == *tests/shader_fault_cache_test.sh* ]]'
 o=$(r tests compat/tree/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs); ck "C# StateUpdater 改动 → 垃圾代码与失败负缓存测试" '[[ "$o" == *tests/shader_garbage_guard_test.sh* ]] && [[ "$o" == *tests/shader_fault_cache_test.sh* ]]'
 o=$(r tests compat/tree/src/Ryujinx.Graphics.Gpu/Shader/S2AShaderFaultCache.cs); ck "C# 负缓存自身改动 → 对应纯逻辑测试" '[[ "$o" == *tests/shader_fault_cache_test.sh* ]]'
-o=$(r tests docs/坑记录.md); ck "普通文档负对照 → 不跑三个C#目标测试" '[[ "$o" != *drain_readflush/build_run.sh* ]] && [[ "$o" != *shader_garbage_guard_test.sh* ]] && [[ "$o" != *shader_fault_cache_test.sh* ]]'
+o=$(r tests docs/常见问题.md); ck "普通文档负对照 → 不跑三个C#目标测试" '[[ "$o" != *drain_readflush/build_run.sh* ]] && [[ "$o" != *shader_garbage_guard_test.sh* ]] && [[ "$o" != *shader_fault_cache_test.sh* ]]'
 o=$(r tests graphics/metal/cs/NxTrack.cs.bak); ck "仅文件名近似 → 不选排空测试" '[[ "$o" != *drain_readflush/build_run.sh* ]]'
 # 改文档要跑的 = 「每次」单测 + 头部「门禁覆盖」点名 *.md 的单测（如 no_remote_exec_pipe：用户照抄的文档里不许「下载 + 执行」一步走；11-09 它加了 *.md 覆盖后本断言没跟上，main 已知红）
 #   + 列车入队预检固定跑的那组（shell_lint / shared_path / test_wired / shell_pyimports + 全部 *lint*_test，11-10 起门禁每次跑，见 gate_route.precheck_test）

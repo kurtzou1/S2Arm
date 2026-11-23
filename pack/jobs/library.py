@@ -178,6 +178,7 @@ def diagnostic_log_excerpt(source, size, head=None, tail=None):
 DIAGNOSTIC_JOB_LIMIT = 4 << 20
 PHONE_TEXT = (".log", ".txt", ".tsv", ".json", ".ips", ".csv")   # 拉回的手机诊断里按文本脱敏收的类型（host.log、logs/、frames.tsv、threads.txt、diag/*.json、metrickit 等）
 DIAG_RUN_FILE_LIMIT = 4 << 20    # 诊断局 PNG：单张上限
+PHONE_ZIP_LIMIT = 256 << 20      # 手机 App 自己导出的诊断包（diag/S2Arm-诊断-*.zip）：这么大以内的打开、按成员收（D-778G），更大的整份跳过
 DIAG_PSO_FILE_LIMIT = 4 << 20   # 本机管线记录 pso_user.tsv 单份上限（实测约 1 MB；收件单个成员上限 16 MB）
 DIAG_SALVAGE_GAME_LIMIT = (8 << 20) + (1 << 20)   # 着色器补料每款上限（运行时 S2A_SHADER_SALVAGE_MB 缺省 8 MB 的字节 + index.tsv 余量）
 DIAG_SALVAGE_TOTAL_LIMIT = 16 << 20   # 着色器补料整包上限（诊断包压缩后 ≤ 30 MB，给日志 / 截图留地方）
@@ -3494,6 +3495,60 @@ def diagnostics(c):
                     latest_fd = winproc.open_dir_nofollow(latest.name, pulls_fd) if os.name == "nt" else os.open(latest.name, flags, dir_fd=pulls_fd)
                     descriptors.append(latest_fd)
 
+                    def phone_unique(member):   # 脱敏后同名时加序号（同 write_file）
+                        stem, suffix = os.path.splitext(member)
+                        public, n = member, 1
+                        while public in archive.namelist() or public == "manifest.json":
+                            n += 1
+                            public = f"{stem} ({n}){suffix}"
+                        return public
+
+                    def phone_zip(directory_fd, name, member):
+                        # D-778G：手机 App「导出诊断」生成的 S2Arm-诊断-*.zip（宿主日志、崩溃报告、诊断 json 都在里面）原先按「别的类型」整份跳过，交上来的包里没有手机现场。
+                        #   打开它、按成员收：文本类型走同一套脱敏（成员可能是没脱敏的原文）、PNG 同上限原样收；别的成员与读不了的包记进 skipped（「包名!成员」）。
+                        #   成员路径去掉 ..、空段与绝对路径前缀，各段同样脱敏；单个成员按解开后的大小限长读（不信成员头里写的大小）
+                        with (winproc.open_file(name, directory_fd) if os.name == "nt"
+                              else os.fdopen(os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd), "rb")) as f:
+                            try:
+                                inner_zip = zipfile.ZipFile(f)
+                                entries = inner_zip.infolist()
+                            except (zipfile.BadZipFile, OSError, ValueError):
+                                phone["skipped"].append(member)
+                                return
+                            for entry in entries:
+                                c.check()
+                                if entry.is_dir():
+                                    continue
+                                parts = [x for x in entry.filename.replace("\\", "/").split("/") if x not in ("", ".", "..")]
+                                if not parts:
+                                    continue
+                                inner = member + "/" + "/".join(parts)
+                                public = phone_unique("phone/" + "/".join(redact_member_component(x) for x in inner.split("/")))
+                                ext = os.path.splitext(parts[-1])[1].lower()
+                                try:
+                                    if ext in PHONE_TEXT:
+                                        with inner_zip.open(entry) as source:
+                                            data = source.read(DIAGNOSTIC_LOG_LIMIT + 1)
+                                        if len(data) > DIAGNOSTIC_LOG_LIMIT:
+                                            truncated.append(dict(file=public, bytes=entry.file_size, kept=DIAGNOSTIC_LOG_LIMIT, omitted=max(entry.file_size, len(data)) - DIAGNOSTIC_LOG_LIMIT))
+                                            data = data[:DIAGNOSTIC_LOG_LIMIT]
+                                        text = redact(data.decode(errors="replace")).encode()
+                                        if not fits(public, packed(text)):
+                                            continue
+                                        archive.writestr(public, text)
+                                        phone["files"] += 1
+                                    elif ext == ".png" and 0 < entry.file_size <= DIAG_RUN_FILE_LIMIT:
+                                        with inner_zip.open(entry) as source:
+                                            data = source.read(DIAG_RUN_FILE_LIMIT + 1)
+                                        if len(data) > DIAG_RUN_FILE_LIMIT or not fits(public, packed(data)):
+                                            continue
+                                        archive.writestr(public, data)
+                                        phone["files"] += 1
+                                    else:
+                                        phone["skipped"].append(member + "!" + "/".join(parts))
+                                except (zipfile.BadZipFile, OSError, ValueError, RuntimeError, EOFError, zlib.error):
+                                    phone["skipped"].append(member + "!" + "/".join(parts))
+
                     def pulled(directory_fd, relative=""):
                         for name in sorted(winproc.listdir(directory_fd) if os.name == "nt" else os.listdir(directory_fd)):
                             c.check()
@@ -3515,6 +3570,8 @@ def diagnostics(c):
                             elif os.path.splitext(name)[1].lower() in PHONE_TEXT:
                                 write_file(directory_fd, name, "phone/" + member)
                                 phone["files"] += 1
+                            elif name.lower().endswith(".zip") and 0 < info.st_size <= PHONE_ZIP_LIMIT:
+                                phone_zip(directory_fd, name, member)
                             elif name.lower().endswith(".png") and 0 < info.st_size <= DIAG_RUN_FILE_LIMIT:
                                 with (winproc.open_file(name, directory_fd) if os.name == "nt"
                                       else os.fdopen(os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd), "rb")) as f:

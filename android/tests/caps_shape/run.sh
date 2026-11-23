@@ -93,7 +93,8 @@ PY
   if S2A_CAPS_SHAPE=$4 "$out/policy-neg" > "$out/policy-neg.log" 2>&1; then
     echo "FAIL: 策略负对照 $1 漏抓"; exit 1
   fi
-  if ! grep -F "$5" "$out/policy-neg.log"; then
+  echo '【负对照开始】'; neg_hit=0; grep -F "$5" "$out/policy-neg.log" || neg_hit=$?; echo '【负对照结束】'   # 反证按设计红出的 FAIL 不进门禁红步摘要（11-23）
+  if [ "$neg_hit" != 0 ]; then
     echo "FAIL: 策略负对照 $1 红因不符"; cat "$out/policy-neg.log"; exit 1
   fi
   echo "PASS: 策略负对照 $1 红在 $5"

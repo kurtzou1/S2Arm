@@ -3,8 +3,11 @@
 // 直接包含生产 nvn_mtl.m，调生产函数 flight_wait_locked。建造者 = BACKGROUND 队列上的线程，在等待开始前、等待中各读一次自己线程的基础调度优先级（THREAD_EXTENDED_INFO pth_priority，含借来的 override；不读随负载衰减的 pth_curpri）。
 // 期望（按 Darwin QoS 档位手写，与被测实现无关）：BACKGROUND 基础优先级 4；显式覆盖 pthread_override_qos_class_start_np 在本机实测封顶 DEFAULT（31：要 USER_INITIATED /
 //   USER_INTERACTIVE 都得 31，要 UTILITY 得 20，11-02 独立小程序量）。DEFAULT 已出后台档的 CPU 与 I/O 节流（节流 I/O 档只给 BACKGROUND / UTILITY），10 秒卡的正是节流
-//   ① 登记了建造者（生产路径 shader_load_depth 建 flight 时记 pthread_self）→ 等待中建造者优先级 ≥ 31（借到了、出了后台档），等待前 ≤ 20（确实是后台档）
-//   ② 没登记建造者（= 改前：dispatch_group_wait 干等，没人可借）→ 等待中仍 ≤ 20（反证：夹具真能测出没借到的情形）
+//   借来的档封顶等待者自己的档：进程被压了 QoS（11-23 门禁：本机门禁步有时按 UTILITY 起，taskpolicy -c utility 实测等待者 20、借到 20；
+//   -c background 等待者 4、借到 4），原先死判 ≥ 31，一台机器的门禁红、另一台绿。所以期望 = min(31, 等待者等待前自己的基础优先级)：
+//   ① 登记了建造者（生产路径 shader_load_depth 建 flight 时记 pthread_self）→ 等待中建造者优先级 ≥ 期望（借到了），等待前 ≤ 20（确实是后台档）
+//   ② 没登记建造者（= 改前：dispatch_group_wait 干等，没人可借）→ 等待中不高于等待前（反证：夹具真能测出没借到的情形）
+//   等待者自己就不比建造者高（进程被压到后台档）：没有更高的档可借，测不出，打一行 SKIP 写明、不算过也不算红
 #include "../gfx/nvn/nvn_mtl.m"
 #include <mach/mach.h>
 static unsigned checks, fails;
@@ -16,7 +19,8 @@ static int curpri(void) {
     //   负载高时 override 已生效也会读到 31 衰减后的 20（11-21 门禁 ① 假红）；判据要问的是「借到没有」，不是此刻调度器给了几
     return r == KERN_SUCCESS ? i.pth_priority : -1;
 }
-static void one(int register_builder, int *before, int *during) {
+static _Atomic int g_want = 31;   // ① 读到这一档就算借到（主线程在等待前按自己的档定）
+static void one(int register_builder, int *before, int *during, int *waiter) {
     dispatch_queue_t q = dispatch_queue_create("t.shwait.bg", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_BACKGROUND, 0));
     dispatch_semaphore_t ready = dispatch_semaphore_create(0), go = dispatch_semaphore_create(0);
     ShaderFlight *f = [ShaderFlight new]; f->done = dispatch_group_create(); dispatch_group_enter(f->done);
@@ -33,21 +37,29 @@ static void one(int register_builder, int *before, int *during) {
         // 借来的优先级按事件判：连续读，直到读到借到的档（≥ 31）或 5 秒上限（负载高时系统施加 override 可能晚于这一刻，11-21 门禁负载 70 下 ① 又假红一次）；
         //   ② 反证没人借，用短窗：200 ms 内一直 ≤ 20（负载高时只会漏检，不会假红）
         { uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW), lim = register_builder ? 5000000000ull : 200000000ull; int hi = -1;
-          for (;;) { int p = curpri(); if (p > hi) hi = p; if ((register_builder && p >= 31) || clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0 >= lim) break; usleep(1000); }
+          for (;;) { int p = curpri(); if (p > hi) hi = p; if ((register_builder && p >= g_want) || clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0 >= lim) break; usleep(1000); }
           b1 = hi; }
         os_unfair_lock_lock(&g_shader_lock); [g_shader_flights removeObjectForKey:@"t"]; dispatch_group_leave(f->done); os_unfair_lock_unlock(&g_shader_lock);
     });
     dispatch_semaphore_wait(ready, DISPATCH_TIME_FOREVER);
+    *waiter = curpri();   // 等待者（本线程）自己的基础优先级：能借出去的上限
+    g_want = *waiter < 31 ? *waiter : 31;
     os_unfair_lock_lock(&g_shader_lock); dispatch_semaphore_signal(go);
     (void)flight_wait_locked(f);   // 生产函数：持锁进入、内部解锁
     *before = b0; *during = b1;
 }
 int main(void) { @autoreleasepool {
     setvbuf(stdout, NULL, _IOLBF, 0); alarm(30);
-    int b0, b1; one(1, &b0, &b1);
-    VERIFY(b0 >= 0 && b0 <= 20 && b1 >= 31, "① 登记了建造者：建造者优先级 等待前 %d（期望 ≤ 20，后台档）→ 等待中 %d（期望 ≥ 31，借到 DEFAULT、出了节流档）", b0, b1);
-    one(0, &b0, &b1);
-    VERIFY(b0 >= 0 && b0 <= 20 && b1 >= 0 && b1 <= 20, "② 反证 没登记建造者（改前干等）：等待中 %d（期望 ≤ 20，没借到）", b1);
+    int b0, b1, w; one(1, &b0, &b1, &w);
+    int want = w < 31 ? w : 31;
+    if (want <= b0) {
+        printf("SKIP ①② 等待者自己的基础优先级只有 %d、不比建造者（%d）高（进程被压到后台档）：没有更高的档可借，这一环境测不出优先级借用\n", w, b0);
+        printf("✓ t_nvn_shwait：0 项，0 项失败（跳过：等待者 %d ≤ 建造者 %d）\n", w, b0);
+        return 0;
+    }
+    VERIFY(b0 >= 0 && b0 <= 20 && b1 >= want, "① 登记了建造者：建造者优先级 等待前 %d（期望 ≤ 20，后台档）→ 等待中 %d（期望 ≥ %d = min(31, 等待者自己的 %d)，借到了）", b0, b1, want, w);
+    int c0; one(0, &c0, &b1, &w);
+    VERIFY(c0 >= 0 && c0 <= 20 && b1 >= 0 && b1 <= c0, "② 反证 没登记建造者（改前干等）：等待前 %d → 等待中 %d（期望不高于等待前，没借到）", c0, b1);
     printf("%s t_nvn_shwait：%u 项，%u 项失败\n", fails ? "✗" : "✓", checks, fails);
     return fails != 0;
 } }

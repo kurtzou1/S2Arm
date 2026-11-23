@@ -39,28 +39,6 @@ BLOCK = '''<!-- S2ARM_POLICY:BEGIN -->
 <!-- S2ARM_POLICY:END -->'''
 
 
-class MarkdownTests(unittest.TestCase):
-    def test_fences_are_not_headings(self):
-        text = '## 真标题\n```python\n## 示例\n```\n~~~\n## 示例\n~~~~\n### 子节\n'
-        self.assertEqual(list(lint.headings(text)), [('真标题', 1)])
-
-    def test_short_or_different_fence_does_not_close(self):
-        text = '````\n```\n## 示例\n~~~\n## 示例\n````\n## 真\n'
-        self.assertEqual(list(lint.headings(text)), [('真', 7)])
-
-    def test_fence_with_info_is_not_a_closing_fence(self):
-        self.assertEqual(list(lint.headings('```\n```not-close\n## 示例\n```\n## 真')), [('真', 5)])
-
-    def test_duplicate_lines_and_closing_hash(self):
-        self.assertEqual(lint.duplicate_headings('## 标题\n正文\n## 标题 ##\n'), {'标题': [1, 3]})
-
-    def test_normalized_whitespace_and_unicode(self):
-        self.assertEqual(lint.duplicate_headings('## cafe\u0301  规则\n## café\t规则\n'), {'café 规则': [1, 2]})
-
-    def test_only_level_two_entries(self):
-        self.assertEqual(lint.duplicate_headings('# 顶\n# 顶\n### 小\n### 小\n'), {})
-
-
 class PolicyTests(unittest.TestCase):
     def test_handwritten_values_and_split_semantics(self):
         self.assertEqual(lint.policy_block(TRAIN, CONTRIB), BLOCK)
@@ -104,7 +82,6 @@ class RepositoryTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.repo = Path(self.tmp.name)
         for name, value in {'tools/train.sh': TRAIN, 'tools/contrib_check.sh': CONTRIB,
-                            'docs/坑记录.md': '# 记录\n## 唯一\n原创正文\n',
                             'CONTRIBUTING.md': '# 贡献\n' + BLOCK + '\n'}.items():
             self.write(name, value)
 
@@ -120,11 +97,6 @@ class RepositoryTests(unittest.TestCase):
         self.write('CONTRIBUTING.md', BLOCK.replace('缺省 7 支', '缺省 8 支'))
         self.assertEqual(len(lint.check(self.repo)), 1)
         self.assertIn('文档规则与脚本不一致', lint.check(self.repo)[0])
-
-    def test_duplicates_report_both_lines(self):
-        self.write('docs/坑记录.md', '## 原创\n甲\n## 原创\n乙\n')
-        self.assertEqual(len(lint.check(self.repo)), 1)
-        self.assertIn('行 1, 3', lint.check(self.repo)[0])
 
     def test_missing_and_multiple_markers_are_rejected(self):
         for value in ['普通文档', BLOCK + '\n' + BLOCK]:
@@ -145,12 +117,12 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(hashes(), before)
 
     def test_cli_non_utf8_mode_is_explicit_utf8_and_red(self):
-        self.write('docs/坑记录.md', '## 中文\n## 中文\n')
+        self.write('CONTRIBUTING.md', BLOCK.replace('缺省 7 支', '缺省 8 支'))
         result = subprocess.run([sys.executable, '-X', 'utf8=0', '-I', '-B',
                                  str(ROOT / 'tools/docs_consistency.py'), '--repo', str(self.repo)],
                                 capture_output=True, encoding='utf-8')
         self.assertEqual(result.returncode, 1)
-        self.assertIn('重复标题 中文', result.stdout)
+        self.assertIn('文档规则与脚本不一致', result.stdout)
 
     def test_missing_source_is_incomplete_not_green(self):
         (self.repo / 'tools/train.sh').unlink()

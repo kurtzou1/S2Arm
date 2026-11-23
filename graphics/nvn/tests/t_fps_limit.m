@@ -40,6 +40,9 @@ int dm_focus_now(void);
 uint64_t dm_focus_in_since(void);
 uint64_t now_ns(void);
 uint64_t s2a_nvn_pace_waits_self(void);   // hle_nvn.c 只读计数：本线程进入节拍等待（限帧睡眠 / 等显示链接拍）的次数
+void s2a_nvn_pace_stats(uint64_t *n, uint64_t *period_ns);   // hle_nvn.c 只读计数：取图里节拍器做过决定的次数、最近一次的节拍周期
+void s2a_gl_pace_stats(uint64_t out[5]);   // egl.m 只读计数：交换锁自己时钟一支的排拍次数 / 周期 / 重新对齐 / 真睡 / 单次最长要睡
+static uint64_t gl_pace0[5], gl_pace1[5], nv_pace0, nv_pace1, nv_period;   // 计时窗口（第 48 帧到第 48+samples 帧）两端的读数
 
 static int checked, failed, interval, windowed, check_hud, dynamic, return_one, deactivate, samples = 60;
 static int focus_probe, focus_lost, focus_restored, stall_probe, flap;
@@ -68,11 +71,16 @@ static void window_state(int phase, int frame) {
 }
 static void mark(int frame) {
     if (frame >= 48) stamp[frame - 48] = clock_s();
+    if (frame == 48 || frame == 48 + samples) { uint64_t p; s2a_nvn_pace_stats(frame == 48 ? &nv_pace0 : &nv_pace1, &p); if (frame > 48) nv_period = p; s2a_gl_pace_stats(frame == 48 ? gl_pace0 : gl_pace1); }
     if (windowed && frame == 48) nvn_be_link_sample(&link_start_n, &link_start_ns);
     if (windowed && frame == 48 + samples) nvn_be_link_sample(&link_end_n, &link_end_ns);
     if (windowed && (frame == 47 || frame == 48 + samples)) window_state(0, frame);
 }
+static int slow_ms(void) { static int v = -1; if (v < 0) { const char *e = getenv("FPS_TEST_SLOW_MS"); v = e ? atoi(e) : 0; } return v; }
 static void delay(int frame) {
+    // FPS_TEST_SLOW_MS=<毫秒>：计时窗口里每帧游戏自己多花这么久（慢机 / 高负载的确定性替身，不在共享主机上造满载）。
+    //   12 ms 复现 11-23 门禁机那次（GL 上限 120 均值 12.27 ms > 1.3 倍判红）：限帧器照样每帧排拍，只是帧本身比周期长
+    if (slow_ms() && frame > 48 && frame <= 48 + samples) { struct timespec s = {0, (long)slow_ms() * 1000000L}; nanosleep(&s, NULL); }
     // 停顿放在计时窗口（第 48 帧起）之前：仍在 HUD 的 10 秒环里产生慢帧，但不混进周期判据（#619：8.3 ms 周期下 60 个样本只有 0.5 秒，停顿 200 ms 会把均值撑出容差）
     if (check_hud && frame == 20) { struct timespec pause = {0, 200000000}; nanosleep(&pause, NULL); }
 }
@@ -377,7 +385,23 @@ static void run(void) {
             printf("UNTESTED 120 Hz 窗口场景：真实显示链接为 %.3f Hz，不能证明120支持\n", link_hz); exit(2);
         }
         double elapsed_ms = (stamp[samples] - stamp[0]) * 1000, mean = elapsed_ms / samples;
-        CHECK(target_ms ? mean >= target_ms * .90 && mean <= target_ms * 1.30 : mean < 5,
+        // 只有用户上限在限帧（GL 交换间隔 0 / NVN 无原生节拍 DM_PRESENT_HZ=0）、且没有显示链接时：节拍全靠我们自己的限帧器睡。墙钟均值的上沿量的是机器快不快
+        //   （11-23 门禁机负载下 GL 上限 120 均值 12.27 ms > 1.3 倍判红、时红时绿，守望误派），改按限帧器自己的决定判：窗口里每帧都排过节拍、
+        //   算出的周期 = 1/上限（期望按上限独立算，不读被测实现）、单次要睡不超过 1.5 个周期（正确实现 ≤ 1 个，睡两拍的错误是 2 个）；
+        //   墙钟只留下沿（负载只会让它更慢，不会更快：限帧器被拿掉时均值远低于周期）
+        int cap = getenv("S2A_FPS") ? atoi(getenv("S2A_FPS")) : 0, hz = getenv("DM_PRESENT_HZ") ? atoi(getenv("DM_PRESENT_HZ")) : 60;
+        int gl0 = !strcmp(frontend, "gl") && interval == 0, nv0 = !strcmp(frontend, "nvn") && hz == 0;
+        if (target_ms > 0 && cap > 0 && (gl0 || nv0) && !nvn_be_link_active()) {
+            uint64_t want = (uint64_t)(1e9 / cap + .5);
+            uint64_t n = gl0 ? gl_pace1[0] - gl_pace0[0] : nv_pace1 - nv_pace0, per = gl0 ? gl_pace1[1] : nv_period;
+            CHECK(n == (uint64_t)samples, "%s 限帧器：计时窗口 %d 帧里排过节拍 %llu 帧（期望每帧都排）", frontend, samples, (unsigned long long)n);
+            CHECK(per + 1 >= want && per <= want + 1, "%s 限帧器算出的周期 %llu ns，期望 1/%d 秒 = %llu ns", frontend, (unsigned long long)per, cap, (unsigned long long)want);
+            if (gl0) CHECK(gl_pace1[4] * 2 <= per * 3, "GL 限帧器单次最长要睡 %.3f ms，期望 ≤ 1.5 个周期 %.3f ms（重新对齐 %llu 次、真睡 %llu 次）",
+                gl_pace1[4] / 1e6, per * 1.5 / 1e6, (unsigned long long)(gl_pace1[2] - gl_pace0[2]), (unsigned long long)(gl_pace1[3] - gl_pace0[3]));
+            CHECK(mean >= target_ms * .90, "%s 真实时钟：%d 周期 %.3f ms、均值 %.3f ms；期望 ≥ %.3f ms 的九成（只判下沿，上沿看限帧器读数）", frontend, samples, elapsed_ms, mean, target_ms);
+            // 慢调度注入那一格：先证注入真生效（均值确实超出旧判据的 1.3 倍上沿，旧判据在这里必红），上面的计数判据照样要绿
+            if (slow_ms()) CHECK(mean > target_ms * 1.30, "慢调度注入生效：每帧多花 %d ms，均值 %.3f ms > %.3f ms（旧墙钟上沿判据在这里会红）", slow_ms(), mean, target_ms * 1.30);
+        } else CHECK(target_ms ? mean >= target_ms * .90 && mean <= target_ms * 1.30 : mean < 5,
             "%s 真实时钟：%d 周期 %.3f ms、均值 %.3f ms；期望 %.3f ms（上限0/无原生节拍时 <5 ms）", frontend, samples, elapsed_ms, mean, target_ms);
         if (windowed) {
             CHECK(nvn_be_link_active() == (atoi(getenv("DM_PRESENT_LINK")) != 0), "生产显示链接选路");

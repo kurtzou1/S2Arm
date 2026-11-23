@@ -1,5 +1,5 @@
 #!/bin/bash
-# 门禁覆盖：tools/dotnet_lock.c
+# 门禁覆盖：tools/dotnet_lock.c graphics/gate.sh runtime/gate.sh
 # 同一棵树 C# 编译串行（tools/dotnet_lock.c，门禁开头现编；11-10 / 11-11）：假 dotnet 也是编出来的程序（记子命令、开始 / 结束时刻、两个环境变量，睡 NAP 秒），约 15 秒
 #   期望按规则手写：① 两份 build 同时起 → 运行区间不重叠；② 别人持锁时 dotnet x.dll 不等锁、1 秒内跑完；③ 持锁的 build 被 kill -9 → 下一份 3 秒内跑完；
 #   ⑥ env -i 只给 DOTNET（S2A_DOTNET_REAL 不在）：自己按 PATH 找真 dotnet、跳过自己（启动器作业环境单测 userenv ③，11-11）
@@ -56,4 +56,9 @@ ck "⑨b 显式 -m:2 不动" '[ "$(m9 "$D" build -m:2 p.csproj)" = "build -m:2 p
 ck "⑨c 显式 -maxcpucount:8 / /m 不动" '[ "$(m9 "$D" publish p.csproj -maxcpucount:8)" = "publish p.csproj -maxcpucount:8" ] && [ "$(m9 "$D" msbuild /m p.proj)" = "msbuild /m p.proj" ]'
 ck "⑨d S2A_DOTNET_M=0 不补、=6 补 -m:6" '[ "$(m9 env S2A_DOTNET_M=0 "$D" build p)" = "build p" ] && [ "$(m9 env S2A_DOTNET_M=6 "$D" test p)" = "test -m:6 p" ]'
 ck "⑨e restore / x.dll 不补；-- 之后的 -m 不算" '[ "$(m9 "$D" restore p)" = "restore p" ] && [ "$(m9 "$D" x.dll -m)" = "x.dll -m" ] && [ "$(m9 "$D" test p -- -m)" = "test -m:4 p -- -m" ]'
+# ⑩ 组内并行编 C# 的钩子单独跑时自己接锁（11-23：开发者单独跑 runtime/gate.sh，nxaot 与别的组同编 compat/tree 互踩、NU5026；门禁 tools/gate.sh 有锁）
+for hk in graphics/gate.sh runtime/gate.sh; do
+  ck "⑩ $hk 单独跑时接上 C# 编译锁（没有 S2A_DOTNET_LOCK 就自己编包装、导出 DOTNET / S2A_DOTNET_LOCK）" \
+     'grep -q "S2A_DOTNET_LOCK=\$PWD/build/.dotnet_build.lock DOTNET=\$PWD/build/dotnet_lock/dotnet" "$H/$hk"'
+done
 [ $bad = 0 ] && echo "C# 构建锁单测全过" || { echo "C# 构建锁单测有不通"; cat $T/log; exit 1; }

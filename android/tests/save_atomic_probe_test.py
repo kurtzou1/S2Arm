@@ -121,7 +121,10 @@ def main():
         if source.count(UNKNOWN_LINE) != 1:
             raise ValueError('expected exactly one production unknown-state line')
         mutant = '\n'.join(l for l in source.split('\n') if not l.startswith(UNKNOWN_LINE))
-        if not run(mutant, out / 'mutant', a.javac, a.java):
+        print('【负对照开始】', flush=True)   # 变异按设计红出的「✗ 未知 / 例不符」不进门禁红步摘要（11-23）
+        mutant_rc = run(mutant, out / 'mutant', a.javac, a.java)
+        print('【负对照结束】', flush=True)
+        if not mutant_rc:
             print('✗ save_atomic_probe 负对照：删掉负数处理后仍全绿')
             return 1
         print('✓ save_atomic_probe 负对照：删掉负数处理 → 未知用例红')

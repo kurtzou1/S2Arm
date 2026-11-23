@@ -10,8 +10,6 @@ docs/研究/Metal越界_iphone_读数_1019.txt -text
 docs/研究/免费账号_探针/读数_1019/*.log -text
 docs/研究/零分配与跨界_微基准/iphone_读数_1019.txt -text
 
-# 只往末尾追加的记录文件：两支各自在末尾追加时 git 合并两边都保留（10-22 维护者：列车被 docs/坑记录.md 末尾追加冲突退回 5 次）
-docs/坑记录.md merge=union
 # 10-25 维护者：docs/性能与开发测试经验.md 近 15 次改动 130 行增、3 行删，基本只追加；当天 nvn/fill-all、direct/lib-pack、gl/digimon-dev 都被它的末尾追加冲突退回
 docs/性能与开发测试经验.md merge=union
 # Ryujinx 补丁登记（10-28 维护者梳理步 10）：series 与改动清单都只在末尾追加（compat/patch_new.sh），补丁名带生成时刻不会撞；

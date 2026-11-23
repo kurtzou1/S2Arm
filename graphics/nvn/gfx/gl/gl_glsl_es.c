@@ -14,7 +14,8 @@
 //      · 把 gl_Position 重新声明成普通输出的一行删掉（数码宝贝 main 里内置精灵着色器 `out float4 vPosition;`，vPosition 宏成 gl_Position）；
 //      · textureOffset / textureLodOffset 的偏移不是常量（内置 FXAA、FINAL FANTASY VII 的 FXAA）：Metal 的采样偏移也必须是常量，改成在 P + 偏移 / 该级尺寸处采样。
 // 匹配口径照 Python re（gl_shaders.py 原来的正则）：\b 两侧按 [A-Za-z0-9_] 与非 ASCII 字节算单词字符（Python 按 Unicode 字母算；源码经预处理已去注释，GLSL 标识符只有 ASCII），\s = 空格 \t \n \r \f \v \x1c–\x1f。
-// 没覆盖（遇到照旧由 glslang 报红）：ES 1.00 里拿 3.x 关键字 / 内建函数名（texture、sample、flat …）当变量名的源码、gl_FragData 用变量下标。
+// ES 1.00 里拿 3.x 关键字 / 内建函数名当名字（texture、flat …）：升版前整词改名（es3_names，D-4ZBS）；sample 按用法判（sample_names）。
+// 没覆盖（遇到照旧由 glslang 报红）：gl_FragData 用变量下标。
 #include "gl_glsl_es.h"
 #include <stdlib.h>
 #include <string.h>
@@ -115,6 +116,29 @@ char *s2a_glsl_es_prefix(const char *src, size_t n, size_t *out_n) {
 }
 
 // GLSL ES 1.00 → 3.10 文本（gl_shaders.py 原 es100）：顶点 attribute / varying、片元 varying / gl_FragColor / gl_FragData、缺省精度
+// D-4ZBS（11-23，krkrz 引擎 GL 款）：ES 1.00 源码里拿 ES 3.x 才有的内建函数名 / 关键字当自己的名字（「uniform sampler2D texture;」），
+//   升到 3.10 并把 texture2D 改写成 texture 之后撞内建名，glslang 报「'texture' : redefinition」整支编不过（链接程序没有片元，游戏随后读空指针崩）。
+//   ES 1.00 里这些词不是内建名，出现就只可能是游戏自己的标识符：升版前整词改成「s2a_<名>」，全文一致，语义不变；
+//   之后 fixups 改写出来的 texture( / textureLod( 才是内建调用。sample 另有按用法判的 sample_names，不在这张表里
+static const char *const k_es3_names[] = {
+    "texture", "textureLod", "textureProj", "textureProjLod", "textureGrad", "textureProjGrad", "textureSize", "texelFetch", "textureOffset",
+    "texelFetchOffset", "textureLodOffset", "textureProjOffset", "textureGradOffset", "textureProjGradOffset", "textureProjLodOffset",
+    "flat", "smooth", "centroid", "layout", "uint", "uvec2", "uvec3", "uvec4", "patch", "buffer", "shared", "coherent", "volatile", "restrict",
+    "readonly", "writeonly", "precise", "round", "trunc", "roundEven", "modf", "isnan", "isinf", "inverse", "transpose", "determinant",
+    "outerProduct", "floatBitsToInt", "floatBitsToUint", "intBitsToFloat", "uintBitsToFloat", "packSnorm2x16", "unpackSnorm2x16",
+    "packUnorm2x16", "unpackUnorm2x16", "packHalf2x16", "unpackHalf2x16", "sinh", "cosh", "tanh", "asinh", "acosh", "atanh",
+};
+static char *es3_names(const char *t, size_t n, size_t *on) {
+    sb o = {0}; size_t last = 0;
+    for (size_t i = 0; i < n; ) {
+        if (!is_word((unsigned char)t[i]) || (i && is_word((unsigned char)t[i - 1]))) { i++; continue; }
+        size_t e = i; while (e < n && is_word((unsigned char)t[e])) e++;
+        for (size_t k = 0; k < sizeof k_es3_names / sizeof *k_es3_names; k++)
+            if (strlen(k_es3_names[k]) == e - i && !memcmp(t + i, k_es3_names[k], e - i)) { sb_put(&o, t + last, i - last); sb_str(&o, "s2a_"); sb_put(&o, t + i, e - i); last = e; break; }
+        i = e;
+    }
+    sb_put(&o, t + last, n - last); return sb_take(&o, on);
+}
 static char *es100(const char *t, size_t n, char stage, size_t *on) {
     sb head = {0}; sb_str(&head, "#version 310 es\nprecision highp float;\nprecision highp int;\n");
     char *cur = malloc(n + 1); size_t cn = n; if (!cur) return NULL; memcpy(cur, t, n); cur[n] = 0;
@@ -383,13 +407,14 @@ char *s2a_glsl_es_rewrite(const char *pre, size_t n, char stage, size_t *out_n, 
     if (at && v100) {   // 去掉版本行（到第一个换行为止，含换行），按 ES 1.00 改写
         sb o = {0}; sb_put(&o, pre, (size_t)(at - pre)); if (nl) sb_put(&o, nl + 1, n - (size_t)(nl + 1 - pre));
         size_t tn; char *tt = sb_take(&o, &tn); if (!tt) return NULL;
-        body = es100(tt, tn, stage, &bn); free(tt);
+        size_t rn; char *rt = es3_names(tt, tn, &rn); free(tt); if (!rt) return NULL;
+        body = es100(rt, rn, stage, &bn); free(rt);
     } else if (at) {   // 从 #version 起（之前的空行丢掉）；300 es 的版本行换成 310 es
         sb o = {0};
         if (v300) { sb_str(&o, "#version 310 es"); if (nl) sb_put(&o, nl, n - (size_t)(nl - pre)); }
         else sb_put(&o, at, rest);
         body = sb_take(&o, &bn);
-    } else body = es100(pre, n, stage, &bn);
+    } else { size_t rn; char *rt = es3_names(pre, n, &rn); if (!rt) return NULL; body = es100(rt, rn, stage, &bn); free(rt); }
     if (!body) { if (errn && !err[0]) snprintf(err, errn, "out of memory"); return NULL; }
     // 「sample」在 GLSL ES 3.00 / 3.10 是保留字，3.20 或开了 GL_OES_shader_multisample_interpolation 才是插值限定符；ES 1.00 里是普通名字。
     //   游戏拿它当变量名（ES 1.00 原文、或 NVIDIA 编译器放过的 3.x），升到 3.10 后 glslang 报「'sample' : Reserved word」整支编不过，

@@ -45,6 +45,9 @@ static int q[DEM_MAX], qh, qn;
 static struct dem_job g_jobs[DEM_MAX];
 static struct nvn_pipe_demand_stats g_st;   // 原子累加
 static _Atomic uint64_t g_start_lock_denials;
+// 停局走了哪条路（只计数，供宿主测试按事件判，不按墙钟）：
+//   busy = 另一个 stop 正持着生命周期锁，本次只关入口、不再排第二次有界等待；timeout = 有界等待到点、worker 还没退，保留归属
+static _Atomic uint64_t g_stop_busy_returns, g_stop_timeouts;
 #if defined(S2A_NVN_PIPE_DEMAND_TEST)
 static _Atomic int g_test_on = -1;
 #endif
@@ -197,7 +200,7 @@ void nvn_vk_pipe_demand_stop(void) {
     pthread_mutex_unlock(&g_q_mu);
     int running = atomic_load_explicit(&g_running, memory_order_acquire);
     pthread_mutex_unlock(&g_life_mu);
-    if (!owns_wait) return;
+    if (!owns_wait) { atomic_fetch_add_explicit(&g_stop_busy_returns, 1, memory_order_relaxed); return; }
     if (!running) { pthread_mutex_unlock(&g_stop_mu); return; }
     // 有界等待：超时后保留 joinable worker，直到之后确认退出再回收。
     int done = 0;
@@ -209,7 +212,7 @@ void nvn_vk_pipe_demand_stop(void) {
         pthread_mutex_lock(&g_life_mu);
         dem_reap_locked();
         pthread_mutex_unlock(&g_life_mu);
-    }
+    } else atomic_fetch_add_explicit(&g_stop_timeouts, 1, memory_order_relaxed);
     pthread_mutex_unlock(&g_stop_mu);
 }
 
@@ -233,6 +236,14 @@ int nvn_vk_pipe_demand_worker_count(void) {
 
 uint64_t nvn_vk_pipe_demand_test_start_lock_denials(void) {
     return atomic_load_explicit(&g_start_lock_denials, memory_order_acquire);
+}
+
+uint64_t nvn_vk_pipe_demand_test_stop_busy_returns(void) {
+    return atomic_load_explicit(&g_stop_busy_returns, memory_order_acquire);
+}
+
+uint64_t nvn_vk_pipe_demand_test_stop_timeouts(void) {
+    return atomic_load_explicit(&g_stop_timeouts, memory_order_acquire);
 }
 
 void nvn_vk_pipe_demand_test_set_on(int on) {

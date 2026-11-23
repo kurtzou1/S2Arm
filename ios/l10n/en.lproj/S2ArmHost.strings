@@ -275,6 +275,9 @@
 "app.fpsCap.ladder" = "This session can't hold 60 FPS steadily, so the game is back at its native frame rate for now. It starts at 60 FPS again the next time you open the game.";
 "app.fpsCap.restored" = "60 FPS is back.";
 "app.fpsCap.retry" = "Try 60 FPS again";
+"app.mic.title" = "Microphone";
+"app.mic.denied" = "The game wants the microphone, but S2Arm has no microphone permission, so the game only hears silence. Turn on S2Arm in Settings › Privacy & Security › Microphone, then reopen the game.";
+"app.mic.failed" = "The game wants the microphone, but the microphone couldn't be opened, so the game only hears silence.";
 "app.os180.title" = "This system version crashes more often";
 "app.os180.body" = "On iOS / iPadOS 18.0, the app closes right as the game picture appears much more often than on 18.1 and later. Updating in Settings > General > Software Update to 18.1 or later (free) can reduce these crashes.";
 "app.lowRam.title" = "This device may not have enough memory";

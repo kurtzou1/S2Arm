@@ -110,4 +110,12 @@ ck "㉚ 已声明的不重复、相似名字不算" rewrite frag
 printf 'attribute vec4 a;\nuniform sampler3D t;\nvoid main() { gl_Position = a; }\n' > "$T/in"
 printf '#version 310 es\nprecision highp sampler3D;\nprecision highp float;\nprecision highp int;\nin vec4 a;\nuniform sampler3D t;\nvoid main() { gl_Position = a; }\n' > "$T/want"
 ck "㉛ ES 1.00 升版路同样补" rewrite vert
+#   ㉜ D-4ZBS：ES 1.00 片元拿 3.x 内建名当名字（「uniform sampler2D texture;」、函数 round、变量 flat）→ 升版前整词改 s2a_<名>；
+#       texture2D 照旧改成内建 texture；「texture2D」「textures」「mytexture」不算这个词、不动
+printf '#version 100\nprecision mediump float;\nvarying vec2 v;\nuniform sampler2D texture;\nfloat round(float x) { return floor(x + 0.5); }\nvoid main() { float flat = round(v.x); float textures = 1.0; float mytexture = 2.0; gl_FragColor = texture2D(texture, v) * flat * textures * mytexture; }\n' > "$T/in"
+printf '#version 310 es\nprecision highp float;\nprecision highp int;\nlayout(location = 0) out vec4 s2a_FragColor;\nprecision mediump float;\nin vec2 v;\nuniform sampler2D s2a_texture;\nfloat s2a_round(float x) { return floor(x + 0.5); }\nvoid main() { float s2a_flat = s2a_round(v.x); float textures = 1.0; float mytexture = 2.0; s2a_FragColor = texture(s2a_texture, v) * s2a_flat * textures * mytexture; }\n' > "$T/want"
+ck "㉜ ES 1.00 拿 3.x 内建名当名字：升版前改名" rewrite frag
+#   ㉝ 反证：3.10 原文里的 texture 是内建调用，不改名
+printf '#version 310 es\nprecision highp float;\nuniform sampler2D t;\nin vec2 v;\nout vec4 o;\nvoid main() { o = texture(t, v); }\n' > "$T/in"; cp "$T/in" "$T/want"
+ck "㉝ 3.10 原文的 texture 是内建、不动" rewrite frag
 [ $bad = 0 ] && echo "✓ t_glsl_es：$n 项全过" || { echo "✗ t_glsl_es：$n 项，失败 $bad"; exit 1; }

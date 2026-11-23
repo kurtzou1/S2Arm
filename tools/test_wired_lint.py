@@ -541,11 +541,30 @@ def verdict(okl, okp):
         elif p in wired: stale.append(f'{lab} {p} 已经有门禁脚本调它了，可以删掉这一行')   # 只提示不算红（10-29 列车线：白名单 merge=union 后两支并行删相邻行会把删掉的行合回来，过期行不掩盖任何没接线的单测）
         else: ok[p] = why   # 不合格的行不豁免
     miss = [t for t in tests if t not in wired and t not in ok]
+    bad += negctl_bad; stale += negctl_stale
     for t in miss: bad.append(f'{t} 没有门禁脚本调它（graphics/gate.sh 等登记一行；跑不了的在它文件头写「门禁手动：<原因>」）')
     out = ['  ✗ ' + b for b in bad] + ['  · 提示：' + b for b in stale]
     out.append(f'期望 0 处没接线 / 白名单不对 → 真结果 {len(bad)} 处（扫 {len(tests)} 支单测：门禁调到 {len(wired)}、白名单 {len(ok)}、没接线 {len(miss)}）')
     return out, (1 if bad else 0)
 
+
+# 负对照标记（11-23 维护者：反证输出混进门禁红步摘要，误导两轮定位）：单测入口里做负对照 / 变异（文中提到 负对照 / negative control / mutant）的，
+#   反证那次的输出要包在「【负对照开始】」「【负对照结束】」之间（tools/gate.sh red_view、gate2 red_reason 据此剔除，按设计红出的行不进摘要与签名）。
+#   存量在 tools/negctl_unmarked.tsv（11-23 生成，只减不增：改到哪支顺手加标记、删这一行）；新单测不在表里又没标记 → 红
+NEGCTL = re.compile(r'负对照|negative control|mutant', re.I)
+negctl_base = {l.split('\t', 1)[0] for l in open(os.path.join(root, 'tools/negctl_unmarked.tsv'), encoding='utf-8') if l.strip() and not l.startswith('#')} \
+    if os.path.exists(os.path.join(root, 'tools/negctl_unmarked.tsv')) else set()
+negctl_bad, negctl_stale, negctl_unmarked = [], [], []
+NEGCTL_FILE = re.compile(r'(^|/)(t_[^/]+|[^/]+_test)\.(sh|py)$')   # 所有单测脚本（含顶层 tests/*_test.sh 自动入口、android/tools/*_test.sh 这类不在 tests 目录的）
+for t in sorted(set(t for t in tests if t.endswith(('.sh', '.py'))) | {p for p in files if NEGCTL_FILE.search(p) and p not in PAYLOAD}):
+    try: txt = open(os.path.join(root, t), encoding='utf-8', errors='replace').read()
+    except OSError: continue
+    if NEGCTL.search(txt) and '【负对照开始】' not in txt:
+        negctl_unmarked.append(t)
+        if t not in negctl_base: negctl_bad.append(f'{t} 做了负对照但反证输出没包进「【负对照开始】」「【负对照结束】」（门禁红步摘要靠它剔除按设计红出的行）')
+negctl_stale = [f'tools/negctl_unmarked.tsv 里的 {t} 已加标记 / 已不在，可以删掉这一行' for t in sorted(negctl_base - set(negctl_unmarked))]
+if os.environ.get('S2A_NEGCTL_LIST'):   # 生成存量表用：只打没标记的单测、不出结论
+    print('\n'.join(negctl_unmarked)); sys.exit(0)
 
 # 白名单 = 各单测文件头「门禁手动：<原因>」（tools/gate_decl.py manual；原 tests/test_wired_ok.tsv 中央表已拆回各文件，10-30 维护者批）；S2A_WIRED_OK：换一份白名单文件（单测反证用）
 okp = os.environ.get('S2A_WIRED_OK')

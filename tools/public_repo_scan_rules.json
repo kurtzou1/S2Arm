@@ -113,6 +113,13 @@
   ],
   "metadata_rules": [
     {
+      "category": "internal_doc",
+      "reason_note": "11-23：坑记录这类维护方内部过程文档不进公开仓（11-08 维护者定；正本在维护方私有仓）。只拦新增 / 改名进来的文件；排查经验写进 PR 正文或代码注释",
+      "globs": [
+        "*坑记录*"
+      ]
+    },
+    {
       "category": "game_macro",
       "globs": [
         "*.mme",

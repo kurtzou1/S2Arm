@@ -19,4 +19,9 @@ JAVAC=$(bash android/tools/jdk17.sh || true)
 JAVA_HOME=$("$JAVAC" -J-XshowSettings:properties -version 2>&1 | sed -n 's/^[[:space:]]*java.home = //p')
 [ -n "$JAVA_HOME" ] && [ -x "$JAVA_HOME/bin/javac" ] || { echo "🔴 选中的 javac（${JAVAC}）没有返回完整 JDK Home" >&2; exit 1; }
 export JAVA_HOME PATH="$JAVA_HOME/bin:$PATH"
-exec bash android/test.sh
+# 子项隔离（android/tools/gate_step.sh）：整套里每个子项失败都记下它自己的红行，结尾成段给 tools/gate.sh 的红步摘要
+#   （11-23：原先 exec 直接跑整套、没 s2a_gate_init，隔离从没生效，通过的子项按设计打的负对照红行进了摘要，误导两轮定位）
+source android/tools/gate_step.sh
+s2a_gate_init
+trap 's2a_gate_finish $?' EXIT
+bash android/test.sh

@@ -684,3 +684,4 @@
 20261123-0537-ldn-auto-platform-discovery.patch
 20261123-0742-bsd-sockaddr-buffer-len.patch
 20261123-0822-applet-open-stall-watch.patch
+20261123-0947-audio-ns2-input-stream.patch

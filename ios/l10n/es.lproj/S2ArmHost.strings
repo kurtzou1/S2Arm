@@ -270,6 +270,9 @@
 "app.fpsCap.ladder" = "En esta partida no se pueden mantener 60 FPS de forma estable, así que el juego vuelve por ahora a su velocidad de fotogramas nativa. La próxima vez que abras el juego empezará de nuevo a 60 FPS.";
 "app.fpsCap.restored" = "60 FPS restablecidos.";
 "app.fpsCap.retry" = "Probar 60 FPS de nuevo";
+"app.mic.title" = "Micrófono";
+"app.mic.denied" = "El juego quiere usar el micrófono, pero S2Arm no tiene permiso de micrófono, así que el juego solo oye silencio. Activa S2Arm en Ajustes › Privacidad y seguridad › Micrófono y vuelve a abrir el juego.";
+"app.mic.failed" = "El juego quiere usar el micrófono, pero no se pudo abrir el micrófono, así que el juego solo oye silencio.";
 "app.os180.title" = "Esta versión del sistema se cierra con más frecuencia";
 "app.os180.body" = "En iOS / iPadOS 18.0, la app se cierra justo al aparecer la imagen del juego con mucha más frecuencia que en 18.1 o posterior. Actualizar en Ajustes > General > Actualización de software a 18.1 o posterior (gratis) puede reducir estos cierres.";
 "app.lowRam.title" = "Puede que falte memoria";

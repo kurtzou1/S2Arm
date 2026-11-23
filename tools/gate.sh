@@ -499,12 +499,18 @@ gl_put() {   # gl_put <结果文件> <显示名> <退出码> <秒数>：台账�
   printf '{"t":%s,"run":"%s","step":"%s","key":"%s","host":"%s","rc":"%s","sec":%s,"wait":%s,"hit":%s,"role":"%s","tier":"%s","layer":"%s","rev":"%s"}\n' \
     "$(date +%s)" "${GLRUN:-}" "$n" "$k" "$h" "$3" "${4:-0}" "${w:-0}" "$([ -f "$f.hit" ] && echo 1 || echo 0)" "${GLROLE:-}" "${TIER:-}" "${LAYER:-}" "${GLREV:-}" >> "$GL" 2> /dev/null
   return 0; }
+red_view() {   # red_view <日志>：红步摘要的取材（11-23 维护者：反证输出混进红行摘要，误导两轮定位）——
+  #   ① 「【负对照开始】」到「【负对照结束】」之间的行是反证按设计打出的红，一律不算；② 日志里有「【失败子项摘要开始】…【失败子项摘要结束】」
+  #   （聚合钩子在结尾给出失败子项自己的红行，见 android/tools/gate_step.sh）就只取最后那段——通过的子项打的红字不进摘要
+  awk '/^【失败子项摘要开始】/ { d = 1; buf = ""; next } /^【失败子项摘要结束】/ { d = 0; got = 1; out = buf; next } d { buf = buf $0 "\n"; next }
+       /【负对照开始】/ { n = 1; next } /【负对照结束】/ { n = 0; next } !n { all = all $0 "\n" } END { printf "%s", got ? out : all }' "$1" 2> /dev/null
+}
 show() {   # show <行首> <结果文件（$L 下，不带后缀）> <显示名> <上限>：打一行（红时带细节）；返回 0 绿 / 1 红 / 2 没跑完 / 3 这一步自报环境未就绪（退出 75） / 4 被早停
   local f=$L/$2 rc sec last
   [ -f "$f.rc" ] || { gl_put "$2" "$3" 无 0; if [ -f "$f.started" ]; then echo "${1}🔴 ${3}：没跑完（无退出码：步已起、被强杀（KILL）或门禁先于它退出）"; else echo "${1}🔴 ${3}：没跑完（无退出码：步没起来）"; fi; return 2; }
   read -r rc sec < "$f.rc"; gl_put "$2" "$3" "$rc" "$sec"; last=$(grep -v '^[[:space:]]*$' "$f.log" | grep -av '^\(待宿主证\|已证宿主项\)	' | tail -1 | cut -c1-200)
   # 红步的一句话结论优先取第一条失败行（11-15 gate2：python 单测全文末尾是「OK」——那是别的子单测的，红因在中间，回执只写个 OK，属主看不出）
-  [ "$rc" != 0 ] && { fl=$(grep -a -m1 -E '^(不通|✗|FAIL: |ERROR: )|AssertionError|【红】' "$f.log" 2> /dev/null | cut -c1-200); [ -n "$fl" ] && last=$fl; }
+  [ "$rc" != 0 ] && { red_view "$f.log" > "$f.red"; fl=$(grep -a -m1 -E '^(不通|✗|FAIL: |ERROR: )|AssertionError|【红】' "$f.red" 2> /dev/null | cut -c1-200); [ -n "$fl" ] && last=$fl; }
   # 宿主项（10-30 维护者：与「待 Mac 证」对称）：步 / 子项在本宿主做不了的项打「待宿主证<TAB>类别<TAB>项」、在具备的宿主上做过且绿打「已证宿主项<TAB>类别<TAB>项」，
   #   不影响本步红绿；这里按「类别<TAB>项<TAB>步名」收进 $L/hostlines，结论里列出（列车凭它核宿主证明，见 tools/train.sh hostproof）
   grep -a '^\(待宿主证\|已证宿主项\)	' "$f.log" 2> /dev/null | awk -F'\t' -v n="$CUR" 'NF >= 3 { print $1 "\t" $2 "\t" $3 "\t" n }' >> "$L/hostlines"
@@ -524,7 +530,7 @@ show() {   # show <行首> <结果文件（$L 下，不带后缀）> <显示名>
   #   ↑ 步自己被停时点名的「哪几组还在跑、各跑多久、输出尾巴」（runtime/gate.sh hung_report，11-19）一并摘进来：原先只摘看门狗那两行，点名写了也看不到
   set -- "$1" "$2" "$3" "$hard"
   if [ "$rc" = 124 ] && [ "$sec" -ge $(($4 - 2)) ]; then echo "${1}🟡 $3 $sec 秒（超时未判：跑满 ${4} 秒上限被杀，负载 $(sysctl -n vm.loadavg 2> /dev/null | awk '{print $2}')；不算本支红）：$last"; echo "$3" >> "$L/timeouts"; return 3; fi
-  echo "${1}🔴 $3 $sec 秒（rc=$rc$([ "$rc" = 124 ] && { [ "$sec" -ge $(($4 - 2)) ] && echo "，超 ${4} 秒" || echo "，没到 ${4} 秒上限：是这一步自己退出 124（它内部的 timeout 到点）"; })）：$last"; { grep -E '^(不通|✗)' "$f.log" | head -10; grep -a -E '^(FAIL: |ERROR: )|AssertionError|^  File "[^"]+", line [0-9]+|【红】' "$f.log" | head -5; grep -a '^  ┊' "$f.log" | head -400; grep -v '^[[:space:]]*$' "$f.log" | grep -av '^  ┊' | tail -12; } | sed 's/^/    | /'   # 先列「不通 / ✗」行，再列 python 单测的 FAIL / ERROR / 断言 / 出错文件行号与【红】行（各至多 5 行）：单测全文长时末尾看不到是哪条（✗ 是 python 单测与 widen 系列的写法，10-31 widen_auto_pkg 红行被截掉）
+  echo "${1}🔴 $3 $sec 秒（rc=$rc$([ "$rc" = 124 ] && { [ "$sec" -ge $(($4 - 2)) ] && echo "，超 ${4} 秒" || echo "，没到 ${4} 秒上限：是这一步自己退出 124（它内部的 timeout 到点）"; })）：$last"; { grep -E '^(不通|✗)' "$f.red" | head -10; grep -a -E '^(FAIL: |ERROR: )|AssertionError|^  File "[^"]+", line [0-9]+|【红】' "$f.red" | head -5; grep -a '^  ┊' "$f.red" | head -400; grep -v '^[[:space:]]*$' "$f.red" | grep -av '^  ┊' | tail -12; } | sed 's/^/    | /'   # 先列「不通 / ✗」行，再列 python 单测的 FAIL / ERROR / 断言 / 出错文件行号与【红】行（各至多 5 行）：单测全文长时末尾看不到是哪条（✗ 是 python 单测与 widen 系列的写法，10-31 widen_auto_pkg 红行被截掉）
   return 1
 }
 # <<< show

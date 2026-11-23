@@ -637,13 +637,23 @@ class ScanTests(unittest.TestCase):
         self.assertNotIn(prefix, result.stdout + result.stderr)
         self.assertNotIn('device_id', self.mod.categories(prefix))  # filename mask only
 
+    def test_internal_doc_blocks_new_files_only(self):
+        # 11-23：坑记录这类内部过程文档不进公开仓。期望手写：新增 docs/坑记录.md、任意目录下名字含「坑记录」的文件 → internal_doc 拦；
+        #   基底里已有的同名文件只改不新增 → 不拦（存量不挡车）；名字不含「坑记录」的文档不拦
+        base = self.commit({'docs/base.md': 'clean\n', 'old/坑记录.md': 'clean\n'})
+        self.commit({'docs/坑记录.md': 'clean\n', 'graphics/坑记录_续.md': 'clean\n', 'old/坑记录.md': 'clean\nmore\n', 'docs/常见问题.md': 'clean\n'})
+        p, r = self.scan('--base', base)
+        hit = {f['path'] for f in r['findings'] if f['category'] == 'internal_doc' and f.get('status') == 'changed'}
+        self.assertEqual(hit, {'docs/坑记录.md', 'graphics/坑记录_续.md'})
+        self.assertEqual(p.returncode, 1)
+
     def test_windows_illegal_path_blocks_new_files_only(self):
         # 11-05 天眼：误提交的 'R:\\s2a\\work\\lane/me.need' 让 Windows 端整仓检出报 invalid path。
         # 期望（按 Windows 命名规则手写）：每段含 < > : " | ? * \\ 或控制字符、是设备保留名（不论扩展名）、以空格或点结尾即非法
         bad = ['R:\\s2a\\work\\lane/me.need', 'docs/a?b.md', 'docs/a*b.md', 'docs/a<b.md', 'docs/a>b.md',
                'docs/a|b.md', 'docs/a"b.md', 'docs/a:b.md', 'docs/a\x01b.md', 'aux/x.md', 'docs/CON',
                'docs/nul.txt', 'docs/Com1.md', 'docs/lpt9.md', 'docs/dot.', 'docs/sp ', 'trail. /x.md']
-        good = ['docs/坑记录.md', 'docs/console.md', 'docs/com0.md', 'docs/conx.md', 'docs/.hidden.md',
+        good = ['docs/常见问题.md', 'docs/console.md', 'docs/com0.md', 'docs/conx.md', 'docs/.hidden.md',
                 'docs/a b.md', 'docs/a.b.c.md']
         base = self.commit({'docs/base.md': 'clean\n'})
         self.commit({n: 'clean\n' for n in bad + good})

@@ -200,7 +200,7 @@ namespace S2A.Services.Tests
                     ("AcquireStreamDataEvent 方式 1（流未开）", () => D(Msg.Cmif(7, Bytes(1u, 100)), stream2).Result),
                     ("外部流 11 PurgeStream（未实现）", () => D(Msg.Cmif(11, Bytes(0)), stream2).Result),
                     ("auddmg 300 PcmInt24", () => { Msg m = Msg.Cmif(300, Bytes(3u, 2, 48000, 1u)); m.A.Add(((ulong)buf, (ulong)devLen)); return Call(dev, m).Result; }),
-                    ("auddmg 401 功能 2（输入）", () => { Msg m = Msg.Cmif(401, Bytes(2u)); m.B.Add(((ulong)profile, 0x228)); m.A.Add(((ulong)buf, (ulong)devLen)); return Call(dev, m).Result; }),
+                    ("auddmg 401 功能 2 配输出设备名（输入设备只有 BuiltInHeadset）", () => { Msg m = Msg.Cmif(401, Bytes(2u)); m.B.Add(((ulong)profile, 0x228)); m.A.Add(((ulong)buf, (ulong)devLen)); return Call(dev, m).Result; }),
                     ("auddmg 700 流未打开", () => { Msg m = Msg.Cmif(700, Bytes(*(uint*)cs2r.Data, 1u)); m.A.Add(((ulong)buf, (ulong)devLen)); return Call(dev, m).Result; }),
                 ];
 

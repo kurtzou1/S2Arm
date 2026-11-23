@@ -1740,6 +1740,7 @@
   "s2arm.controller.toolbar": "Manette",
   "s2arm.punct.list": ", ",
   "bluetooth.usage": "Sert à connecter les manettes Switch 2.",
+  "microphone.usage": "Permet aux jeux qui utilisent le micro (par exemple fredonner ou souffler) de vous entendre.",
   "s2arm.controller.status.bluetoothDenied": "Bluetooth non autorisé",
   "s2arm.controller.button.allowBluetooth": "Autoriser le Bluetooth",
   "s2arm.controller.settings": "Réglages",

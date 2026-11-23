@@ -32,6 +32,8 @@ int  nvn_vk_pipe_demand_quiescent(void);
 #if defined(S2A_NVN_PIPE_DEMAND_TEST)
 int  nvn_vk_pipe_demand_worker_count(void);
 uint64_t nvn_vk_pipe_demand_test_start_lock_denials(void);
+uint64_t nvn_vk_pipe_demand_test_stop_busy_returns(void);   // stop 因另一个 stop 在等而直接返回的次数
+uint64_t nvn_vk_pipe_demand_test_stop_timeouts(void);       // stop 有界等待到点、worker 未退的次数
 void nvn_vk_pipe_demand_test_set_on(int on);
 int  nvn_vk_pipe_demand_test_lifecycle_busy(void);
 int  nvn_vk_pipe_demand_test_lock_lifecycle(void);

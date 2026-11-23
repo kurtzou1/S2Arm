@@ -85,6 +85,13 @@ const char *nvk_shader_cs_lib_note(const uint8_t key[8]) __attribute__((weak)); 
 
 // 句柄放在游戏用户常量缓冲里的贴图（NVN_RB_TEXU；语义照 iOS nvn_mtl.m ubo_read / ubo_handle / ubo_packed / ubo_tex_id / ubo_samp_id / bind_sid）。
 // 一个字：常量槽 reg 的字节 off 处，编码这一刻从游戏内存读（同 NVN_RB_CBUF 绑的就是这一刻的内容）；槽没绑、越界、不在登记过的池里读作 0（iOS：空槽）
+// 用户常量缓冲的有效长度：NVN 声明为 64 KiB（MAX_UNIFORM_BUFFER_SIZE、Ryujinx ConstantBufferSize），
+// 超出按 64 KiB 截短。准备阶段（预解析镜像）与发绑定两处必须用同一个值，否则镜像长度与绑定长度各算各的。
+static inline uint64_t cbuf_len(const p_bind_buf *ub) {
+    enum { CBUF_SHADER_BYTES = 0x10000 };
+    return ub->size < CBUF_SHADER_BYTES ? ub->size : CBUF_SHADER_BYTES;
+}
+
 static uint32_t ubo_word(int st, unsigned reg, unsigned off) {
     if (st < 0 || st >= 6 || reg >= 16) return 0;
     const p_bind_buf *u = &rp_S.ubo[st][reg];
@@ -930,6 +937,9 @@ static nvn_gpu_buf g_disp_ind; static uint64_t g_disp_ind_off;
 // 本笔绘制在开通道之前解析好的图形阶段存储缓冲（[阶段][布局项]）；只在 rp_draw 里填、在同一笔的发绑定里用
 static nvn_gpu_buf g_sb_buf[RP_PROG_STAGES][RP_PROG_ENT_MAX]; static uint64_t g_sb_off[RP_PROG_STAGES][RP_PROG_ENT_MAX];
 static uint8_t g_sb_ok[RP_PROG_STAGES][RP_PROG_ENT_MAX];
+// 常量缓冲的 GPU 待写回镜像：同存储缓冲，开通道之前解析好，发绑定只消费结果（见 rp_draw 的准备阶段）。
+static nvn_gpu_buf g_ub_buf[RP_PROG_STAGES][RP_PROG_ENT_MAX]; static uint64_t g_ub_off[RP_PROG_STAGES][RP_PROG_ENT_MAX];
+static uint8_t g_ub_ok[RP_PROG_STAGES][RP_PROG_ENT_MAX];
 // 存储缓冲槽「没有可绑的真实内存」：地址 0，或地址不在任何池里（sb_len 返回 0）。绑 64 KiB 空缓冲、这一笔照画（不是整笔跳过）。
 //   「地址有效、长度 0」不在此列：按硬件语义绑到真实内存（见 sb_len）。只管 NVN 存储缓冲槽（SBUFP）；
 //   计算阶段把统一缓冲当存储读（UBOP）的没绑仍具名跳过。
@@ -1346,8 +1356,7 @@ static int bind_stage_at(nvn_gpu_cmd c, const struct rp_prog *pg, int pi, int st
                 const p_bind_buf *ub = &rp_S.ubo[st][e->src_reg];
                 if (!ub->addr || !ub->size) return skip("uniform_buffer_unbound", rec);
                 // 用户常量缓冲声明为 64 KiB（MAX_UNIFORM_BUFFER_SIZE、Ryujinx ConstantBufferSize）。
-                enum { CBUF_SHADER_BYTES = 0x10000 };
-                const uint64_t len = ub->size < CBUF_SHADER_BYTES ? ub->size : CBUF_SHADER_BYTES;
+                const uint64_t len = cbuf_len(ub);   // 与准备阶段同一个有效长度
                 const nvn_gpu_caps *cp = caps_cached();
                 // 设备范围不能作为裁剪上限，否则着色器仍可能访问被截掉的字节。
                 // 在交给后端前具名跳过此笔，避免后端的范围错误使整段作废。
@@ -1357,7 +1366,19 @@ static int bind_stage_at(nvn_gpu_cmd c, const struct rp_prog *pg, int pi, int st
                 if (rp_buf_gpu_pending(ub->addr, len)) {   // 尚未落地的 GPU 写（#1022）：游戏内存是旧内容，直接绑镜像
                     const uint64_t al = cp->min_ubo_align ? cp->min_ubo_align : 256;
                     nvn_gpu_buf mb; uint64_t mo;
-                    if (rp_buf_resolve(c, ub->addr, len, &mb, &mo) && !(mo & (al - 1))) {
+                    const int have = st < RP_PROG_STAGES && i < RP_PROG_ENT_MAX && g_ub_ok[st][i];
+                    int mok = 0;
+                    if (have) { mb = g_ub_buf[st][i]; mo = g_ub_off[st][i]; mok = 1; }   // 图形：开通道前已解析，这里不再解析
+                    else if (st >= RP_PROG_STAGES) {                                   // 计算：本来就在通道外，现场解析安全
+                        mok = rp_buf_resolve(c, ub->addr, len, &mb, &mo);
+                    } else {
+                        // 图形阶段而准备阶段没给出镜像：**绝不在这里解析**——同一次提交里的第二次同步要录成传输
+                        // （rp_xfer_cmd），那个函数结束当前通道，绑定与绘制就落在通道外（真机：整屏黑、每帧 2 笔）。
+                        // 照旧走下面的暂存路径（内容是游戏内存里的旧值）并记账；不具名跳过是因为这一笔本身是合法绘制，
+                        // 缺一段常量比缺整笔轻，也与相邻的「镜像偏移不对齐」那条保持同一处置。
+                        nvn_unimpl("draw", "uniform_gpu_pending_unprepared", rec);
+                    }
+                    if (mok && !(mo & (al - 1))) {
                         rp_perf_add(RP_PERF_UBO_MIRROR_N, 1);
                         o->u.b.buf = mb; o->u.b.off = mo; o->u.b.len = len; if (btm) g_bt[4] += dt_now() - cbuf_t0; break;
                     }
@@ -1649,6 +1670,24 @@ draw_rebind:   // 出库回退落地：g_prog 已换现编版（pso_dirty 已置
             rp_buf_resolve_multi(nb, ba, bl, bb, bo, bok);
             for (int k = 0; k < nb; k++) if (bok[k]) { g_sb_buf[bs[k]][bi[k]] = bb[k]; g_sb_off[bs[k]][bi[k]] = bo[k]; g_sb_ok[bs[k]][bi[k]] = 1; }
         }
+    }
+    // 常量缓冲（NVN_RB_CBUF）的 GPU 待写回镜像同理，而且这条比存储缓冲更要命：
+    // 在发绑定阶段才发现「有 GPU 待写回」再解析，会同步池页；同一次提交里第二次同步要录成传输（rp_xfer_cmd），
+    // 那个函数会结束当前通道——通道一结束，这一笔后面的绑定与绘制就落在通道外，后端置首错
+    // 「bind 在通道外（非计算管线）」→ 整段提交失败 → 时间线失败终态（真机表现：起局整屏黑，每帧 2 笔重复帧）。
+    // 这里的解析发生在开通道之前，绑定阶段只消费结果（不解析、不传输、不切通道）。
+    memset(g_ub_ok, 0, sizeof g_ub_ok);
+    for (int st = 0; st < RP_PROG_STAGES; st++) for (uint32_t i = 0; i < g_prog->nent[st] && i < RP_PROG_ENT_MAX; i++) {
+        const nvn_gpu_layout_ent *e = &g_prog->ent[st][i];
+        if (e->src_kind != NVN_RB_CBUF || e->src_reg >= 16) continue;
+        const p_bind_buf *ub = &rp_S.ubo[st][e->src_reg];
+        if (!ub->addr || !ub->size) continue;
+        const uint64_t len = cbuf_len(ub);   // 与发绑定同一口径（#2125：声明 64 KiB，超出按它截短）
+        const nvn_gpu_caps *cp = caps_cached();
+        if (cp->max_ubo_range && len > cp->max_ubo_range) continue;   // 这一笔在 bind_stage_at 开头会被具名跳过，不用预解析
+        if (!rp_buf_gpu_pending(ub->addr, len)) continue;   // 没有 GPU 待写回：照旧暂存，不需要镜像
+        nvn_gpu_buf mb; uint64_t mo;
+        if (rp_buf_resolve(c, ub->addr, len, &mb, &mo)) { g_ub_buf[st][i] = mb; g_ub_off[st][i] = mo; g_ub_ok[st][i] = 1; }
     }
     nvn_gpu_draw_args a; memset(&a, 0, sizeof a);
     uint64_t indirect_bytes = 0, index_bytes = 0;

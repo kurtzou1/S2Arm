@@ -128,6 +128,13 @@ namespace Ryujinx.Audio.Backends.CompatLayer
                 throw new NotImplementedException();
             }
 
+            // S2Arm（#2151）：收音没有格式 / 声道转换（下面原先选硬件格式后对不上就整条退成 Dummy，单声道收音永远拿不到真麦克风）：
+            //   支持收音的后端照游戏要的格式原样开（Apple 收音会话由 AudioQueue 按游戏格式出数、系统自己重采样）
+            if (direction == Direction.Input)
+            {
+                return _realDriver.OpenDeviceSession(direction, memoryManager, sampleFormat, sampleRate, channelCount);
+            }
+
             SampleFormat hardwareSampleFormat = SelectHardwareSampleFormat(sampleFormat);
             uint hardwareChannelCount = SelectHardwareChannelCount(channelCount);
 
@@ -146,16 +153,6 @@ namespace Ryujinx.Audio.Backends.CompatLayer
                 {
                     Logger.Warning?.Print(LogClass.Audio, $"{hardwareSampleFormat} has lower quality than {sampleFormat}, expect some loss in audio fidelity.");
                 }
-            }
-
-            if (direction == Direction.Input)
-            {
-                Logger.Warning?.Print(LogClass.Audio, "The selected audio backend doesn't support the requested audio input configuration, fallback to dummy...");
-
-                // TODO: We currently don't support audio input upsampling/downsampling, implement this.
-                realSession.Dispose();
-
-                return new DummyHardwareDeviceSessionInput(this, memoryManager);
             }
 
             // It must be a HardwareDeviceSessionOutputBase.

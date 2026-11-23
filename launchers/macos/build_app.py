@@ -309,6 +309,8 @@ def main():
                 CFBundleIconFile="S2Arm", LSMinimumSystemVersion=declared_min,
                 NSHighResolutionCapable=True, CFBundleDevelopmentRegion="en", CFBundleLocalizations=["en", "zh-Hans", "zh-Hant", "ja", "es", "fr"],   # 同界面语言（frontend/l10n）；系统语言不在其中时照 CFBundleDevelopmentRegion 用英文
                 NSBluetoothAlwaysUsageDescription=json.loads((ROOT / "launchers/macos/frontend/l10n/en.json").read_text())["bluetooth.usage"],
+                # 麦克风（#2151）：游戏宿主由启动器拉起，系统把收音授权记在哪个包上没实测；宿主包（pack/jobs/build.py）与启动器两处都写这键，记在哪边都有说明
+                NSMicrophoneUsageDescription=json.loads((ROOT / "launchers/macos/frontend/l10n/en.json").read_text())["microphone.usage"],
                 **release_identity(resources / "Engine/engine.json"))
     # Sparkle：appcast 地址、验签公钥（Ed25519，私钥只在发版机 ~/.s2arm/.secrets/sparkle_ed25519）；不开定时检查（查新版走启动时的公告 / 消息）
     info.update(SUFeedURL=SPARKLE_FEED, SUPublicEDKey=SPARKLE_PUBLIC_KEY, SUEnableAutomaticChecks=False, SUAutomaticallyUpdate=False)
@@ -318,9 +320,10 @@ def main():
     # 蓝牙授权框的说明文字：每种界面语言一份 <lproj>/InfoPlist.strings（文字取 frontend/l10n 的 bluetooth.usage）。
     #   授权框由系统画、整个框跟系统语言走（11-15 实机：App 设中文、系统英文 → 整框英文），App 改不了；说明文字随系统挑同一种语言
     for lproj, l10n in (("en", "en"), ("zh-Hans", "zh"), ("zh-Hant", "zh-Hant"), ("es", "es"), ("fr", "fr"), ("ja", "ja")):
-        text = json.loads((ROOT / f"launchers/macos/frontend/l10n/{l10n}.json").read_text())["bluetooth.usage"]
+        strings = json.loads((ROOT / f"launchers/macos/frontend/l10n/{l10n}.json").read_text())
         (resources / f"{lproj}.lproj").mkdir(exist_ok=True)
-        (resources / f"{lproj}.lproj/InfoPlist.strings").write_text(f"NSBluetoothAlwaysUsageDescription = {json.dumps(text, ensure_ascii=False)};\n", encoding="utf-8")
+        (resources / f"{lproj}.lproj/InfoPlist.strings").write_text(f"NSBluetoothAlwaysUsageDescription = {json.dumps(strings['bluetooth.usage'], ensure_ascii=False)};\n"
+                                                                    f"NSMicrophoneUsageDescription = {json.dumps(strings['microphone.usage'], ensure_ascii=False)};\n", encoding="utf-8")
     # 启动器本体同样去掉调试映射（见 bundle_engine.strip_debug_maps），再签整个 App
     exe = app / "Contents/MacOS" / front["executable"]
     if os.environ.get("S2A_SYMBOLS_OUT"):   # 未去符号原件随发版存档（同 bundle_engine.strip_debug_maps）

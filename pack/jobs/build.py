@@ -586,6 +586,8 @@ def compile_host(c, fingerprint, env, log_root):
     plist = dict(CFBundleIdentifier="org.s2arm.macos.host", CFBundleName="S2Arm Game",
                  CFBundleExecutable="s2arm-host", CFBundlePackageType="APPL", LSMinimumSystemVersion="15.0",
                  NSBluetoothAlwaysUsageDescription="连接 Switch 2 Pro 手柄，接收按键与体感并发送游戏震动。",  # 非玩家句
+                 # 游戏开输入流（麦克风，#2151）时收音；没有这键系统拒绝收音。授权记在宿主还是启动器上没实测，两处都写（launchers/macos/build_app.py）
+                 NSMicrophoneUsageDescription="Lets games that use the microphone (such as humming or blowing into it) hear you.",  # 非玩家句
                  NSHighResolutionCapable=True, LSSupportsGameMode=False,
                  LSApplicationCategoryType="public.app-category.games",
                  # 本地联机·同一 Wi-Fi（ios/ldn_lan.m 编进 Mac 宿主）：系统的「本地网络」授权框读这句；Bonjour 服务名与 iOS App 同一个（runtime/build.mk）

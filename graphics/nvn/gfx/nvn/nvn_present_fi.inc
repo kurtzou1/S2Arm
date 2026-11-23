@@ -75,10 +75,30 @@ static int fi_wanted_now(void) {
 }
 // 放掉一份插值器自己进驻留集的贴图 / 缓冲（fi_tex、uv、运动矢量那几块）：驻留集持有它们，只把对象置空不会释放。
 //   诊断#D-YVDD（11-22 #2111，杀戮尖塔 iPhone）：游戏每帧把画面尺寸在 1263–1295 × 715–720 之间微调（屏幕震动），插值器跟着「画面比例变了、整个重建」几百次，
-//   旧的一套（两张输入、补出帧、深度、运动 + 运动矢量各块）一直挂在驻留集里，GPU 占用一路涨到约 10 GB 后被系统杀。出集在下一次 res_commit 生效，在途 GPU 工作由命令缓冲持有
+//   旧的一套（两张输入、补出帧、深度、运动 + 运动矢量各块）一直挂在驻留集里，GPU 占用一路涨到约 10 GB 后被系统杀。出集在下一次 res_commit 生效；出集前先等在途的命令槽做完（fi_drain：Metal 4 命令缓冲不拉住资源）
+// 旧插值器还在 GPU 上跑的命令槽做完之前不能出驻留集、不能放：Metal 4 的命令缓冲不拉住它用到的资源，原先重建（画面尺寸变了，fi_get）当场出集、放掉，
+//   在途那一槽读到已放 / 不驻留的贴图 → GPU 缺页（MTL4 kIOGPUCommandBufferCallbackErrorPageFault），同队列别的命令缓冲连带被丢
+//   （11-23 iPhone：一款开放世界游戏开局 1920→1280 重建那一刻；#1449 同一处）。等三个槽各自的「做完」信号（fi_commit 的完成回调发），最多 2 秒；
+//   等不到（GPU 已挂死）就不出集、把整套对象留在墓地里不放：宁可漏一套，不让 GPU 读放掉的内存
+API_AVAILABLE(macos(26.0), ios(26.0))
+static int fi_drain(NvPresentFI *f) {   // 1 = 三个槽都做完了、可以出集放掉；0 = 等不到，整套已留进墓地
+    static NSMutableArray *graveyard;
+    for (int i = 0; i < 3; i++) {
+        if (!f->slot_free[i]) continue;
+        if (dispatch_semaphore_wait(f->slot_free[i], dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC))) {
+            MLOG("【红】 frame interpolation: command slot %d of the interpolator being replaced did not finish within 2 s; its textures stay resident and are kept (not freed)", i);
+            if (!graveyard) graveyard = [NSMutableArray array];
+            [graveyard addObject:f];
+            return 0;
+        }
+        dispatch_semaphore_signal(f->slot_free[i]);
+    }
+    return 1;
+}
 API_AVAILABLE(macos(26.0), ios(26.0))
 static void fi_release(NvPresentFI *f) {
     if (!f) return;
+    if (!fi_drain(f)) return;
     id<MTLResource> rs[] = { f->in_tex[0], f->in_tex[1], f->mid_tex, f->depth, f->motion, f->fsr_in, f->luma[0], f->luma[1], f->luma16[0], f->luma16[1],
                              f->mvBlocks, f->mvCoarse, f->mvSad, f->mvFlag, f->mvArgs, f->uv[0], f->uv[1], f->uv[2], f->uv[3] };
     for (size_t i = 0; i < sizeof rs / sizeof *rs; i++) if (rs[i]) res_remove(rs[i]);
@@ -240,7 +260,7 @@ static NvPresentFI *fi_get(CAMetalLayer *layer, NSUInteger cw, NSUInteger ch) {
     double s = ch > (NSUInteger)maxh ? (double)maxh / ch : 1;
     int iw = (int)(cw * s) & ~1, ih = (int)(ch * s) & ~1;
     if (f && f->hw == hw && f->hh == hh && f->hpf == layer.pixelFormat && f->w == iw && f->h == ih) return f;
-    if (f && (f->w != iw || f->h != ih)) {   // 画面比例变了（11-13 iPhone 实机：开局竖屏、几秒后转横屏）：插值器的输入尺寸是建时定死的，整个重建（旧对象的在途 GPU 工作由命令缓冲持有）
+    if (f && (f->w != iw || f->h != ih)) {   // 画面比例变了（11-13 iPhone 实机：开局竖屏、几秒后转横屏）：插值器的输入尺寸是建时定死的，整个重建（旧对象等在途的命令槽做完再出集、放掉，fi_release）
         MLOG("present frame interpolation: the game picture changed to %lux%lu (input %dx%d → %dx%d), rebuilding", (unsigned long)cw, (unsigned long)ch, f->w, f->h, iw, ih);
         fi_release(f); g_fi = nil; f = nil;
     }

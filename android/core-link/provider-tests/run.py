@@ -37,8 +37,13 @@ def main():
         commands.append({"argv": [str(x) for x in command], "cwd": str(cwd)})
         result = subprocess.run(command, cwd=cwd, env=env, text=True, capture_output=True)
         (output / f"{name}.log").write_text(result.stdout + result.stderr)
+        # 通过的场景里打出的【红】是按设计的（缺导出场景 Red.Report「原生层没有 s2a_…」）：包进负对照标记，门禁红步摘要不收（11-23）；
+        #   场景失败时原样打，失败细节照进摘要
+        ok = result.returncode == 0
+        print("【负对照开始】" if ok else "", end="\n" if ok else "")
         print(result.stdout, end="")
         print(result.stderr, end="")
+        print("【负对照结束】" if ok else "", end="\n" if ok else "")
         result.check_returncode()
 
     variants = {

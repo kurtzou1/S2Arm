@@ -2524,6 +2524,9 @@ def external_app_outdated(c, ph):
     原先 external 完全不核版本，旧 App 照样收这一版的程序包、玩家一直玩旧 App 却不知道。不堵门（维护者：物理上做得下去的不拦）：
       App 早于接口起始版（host_update.COMPAT_SINCE，加载不了这一版的程序包、必定打不开）→ phone_app_incompatible，拦；
       接口兼容、只是旧（缺 App 侧的修复，如 #1842 断音）→ phone_app_outdated，玩家点「仍然继续」（acceptOldApp）就照推
+    提示一律指向「导出 S2Arm.ipa」、用当初装它的工具重装（D-8MVS）：只有别的工具装的（external）才走到这里，这台电脑的总控台对它们只给
+      导出 S2Arm.ipa / 推 / 导出 .s2arm / 交身份，绝不出「更新 S2Arm」。原先按包名前缀 io.s2arm.games 判成「启动器装的」、叫玩家去点「更新 S2Arm」——
+      AltStore / SideStore 装的也保留这个前缀，玩家找不到那颗按钮
     比不了（开发树没有版本、手机上读不到）→ None，照旧推"""
     import cheats
     import host_update
@@ -2531,13 +2534,9 @@ def external_app_outdated(c, ph):
     mine, theirs = _ver(want), _ver(have)
     if not mine or not theirs or theirs >= mine:
         return None
-    dev, ours = device_of(c), (ph.bid or "").lower().startswith(S2ARM_BID_PREFIX)   # 包名是启动器那种：多半是另一台电脑的启动器装的（这台电脑没有它的装机记录）；否则 LiveContainer / SideStore 等改过包名的
+    dev = device_of(c)
     if theirs < (_ver(host_update.COMPAT_SINCE) or (0,)):
-        if ours:
-            return "phone_app_incompatible", f"这台 {dev} 上的 S2Arm 是 {have}，太旧了，读不了这个启动器（{want}）出的游戏程序，推进去也打不开：先在这台电脑的游戏库最前面「S2Arm」卡点「更新 S2Arm」装成 {want}，或回到当初装它的那台电脑更新，再推游戏。"
         return "phone_app_incompatible", f"这台 {dev} 上的 S2Arm 是 {have}，太旧了，读不了这个启动器（{want}）出的游戏程序，推进去也打不开：先在游戏库最前面「S2Arm」卡导出 {want} 的 S2Arm.ipa，用你当初装它的工具（LiveContainer / SideStore 等）重新装一次，再推游戏。"
-    if ours:
-        return "phone_app_outdated", f"这台 {dev} 上的 S2Arm 是 {have}，比电脑上的 {want} 旧，部分修复要更新 App 才生效：在这台电脑的游戏库最前面「S2Arm」卡点「更新 S2Arm」装成 {want}（之后这台电脑就认它），或回到当初装它的那台电脑更新。也可以先照旧推。"
     return "phone_app_outdated", f"这台 {dev} 上的 S2Arm 是 {have}，比电脑上的 {want} 旧，部分修复要更新 App 才生效：在游戏库最前面「S2Arm」卡导出 {want} 的 S2Arm.ipa，用你当初装它的工具（LiveContainer / SideStore 等）重新装一次。也可以先照旧推。"
 
 

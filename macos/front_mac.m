@@ -10,6 +10,7 @@
 #import <IOKit/IOKitLib.h>
 #import <IOKit/hidsystem/IOHIDServiceClient.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import <QuartzCore/CAMetalLayer.h>
 #include "../runtime/include/s2a_pad.h"
 #include "../runtime/include/s2a_qos.h"
@@ -1968,6 +1969,45 @@ void s2a_ios_fps_capped(int reason) {
         b.onAnswer = ^(BOOL accept) { if (accept) { fprintf(stderr, "[s2a] 档位梯子：玩家点了再试 60 帧\n"); s2a_ql_retry60(); } };
         [b showTitle:title body:zh ? @S2A_DPROMPT_FPS_CAP_BODY : @S2A_DPROMPT_FPS_CAP_BODY_EN accept:zh ? @S2A_DPROMPT_FPS_CAP_RETRY : @S2A_DPROMPT_FPS_CAP_RETRY_EN
               decline:zh ? @S2A_DPROMPT_OK : @S2A_DPROMPT_OK_EN seconds:15]; });
+}
+// 麦克风（#2151，C# AppleHardwareDeviceSessionInput 调，任意线程）：录音权限查 / 申请走 AVAudioApplication（macOS 14+）。
+//   运行时载 AVFAudio 不链：链了要改宿主与几份链 front_mac.m 的单测的框架列表；没有该类（载不上）按已授权，交给 AudioQueue 自己报错。
+//   Mac 不切会话类别（没有 AVAudioSession）；TCC 拒绝时 AudioQueue 照常起、只给静音，所以拒绝要在这里先判出来告诉玩家
+static id mac_audio_app(void) {
+    static id app; static dispatch_once_t once;
+    dispatch_once(&once, ^{ dlopen("/System/Library/Frameworks/AVFAudio.framework/AVFAudio", RTLD_LAZY);
+        Class c = NSClassFromString(@"AVAudioApplication"); app = c ? ((id (*)(id, SEL))objc_msgSend)(c, @selector(sharedInstance)) : nil; });
+    return app;
+}
+int s2a_mic_state(void) {   // 0 已授权 / 1 拒绝 / 2 还没问；AVAudioApplicationRecordPermission 取值 'grnt' / 'deny' / 'undt'
+    id app = mac_audio_app(); if (!app) return 0;
+    NSInteger p = ((NSInteger (*)(id, SEL))objc_msgSend)(app, @selector(recordPermission));
+    return p == 'grnt' ? 0 : p == 'deny' ? 1 : 2;
+}
+void s2a_mic_notice(int reason);
+int s2a_mic_begin(void) {
+    int st = s2a_mic_state();
+    if (st == 1) s2a_mic_notice(1);
+    if (st == 2) {
+        void (^done)(BOOL) = ^(BOOL granted) { fprintf(stderr, "[声] 麦克风权限询问：玩家%s\n", granted ? "允许" : "拒绝"); if (!granted) s2a_mic_notice(1); };
+        ((void (*)(id, SEL, id))objc_msgSend)(NSClassFromString(@"AVAudioApplication"), @selector(requestRecordPermissionWithCompletionHandler:), done);
+    }
+    return st;
+}
+void s2a_mic_end(void) {}
+// 收不到声音时横幅告诉玩家（各原因每次启动只说一次）：1 没有麦克风权限、2 收音设备打不开；横幅被别的提示占着就 5 秒后再试
+void s2a_mic_notice(int reason) {
+    static atomic_int said;
+    if (atomic_fetch_or(&said, 1 << reason) & (1 << reason)) return;
+    fprintf(stderr, "[声] 麦克风不可用：%s\n", reason == 1 ? "没有麦克风权限" : "收音设备打不开");
+    __block void (^show)(void);
+    show = ^{
+        S2APromptBanner *b = g_delegate.banner; if (!b) return;
+        if (!b.hidden) { dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), show); return; }
+        int zh = s2a_ui_zh();
+        NSString *body = reason == 1 ? (zh ? @S2A_DPROMPT_MIC_DENIED : @S2A_DPROMPT_MIC_DENIED_EN) : (zh ? @S2A_DPROMPT_MIC_FAILED : @S2A_DPROMPT_MIC_FAILED_EN);
+        b.onAnswer = nil; [b showTitle:zh ? @S2A_DPROMPT_MIC_TITLE : @S2A_DPROMPT_MIC_TITLE_EN body:body accept:nil decline:nil seconds:12]; show = nil; };
+    dispatch_async(dispatch_get_main_queue(), show);
 }
 @implementation S2AMacDelegate
 - (void)connectNS2:(id)sender {

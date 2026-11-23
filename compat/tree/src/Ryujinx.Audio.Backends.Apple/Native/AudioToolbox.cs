@@ -116,6 +116,17 @@ namespace Ryujinx.Audio.Backends.Apple.Native
             uint flags,
             out nint audioQueue);
 
+        // S2Arm（#2151）：收音队列（AppleHardwareDeviceSessionInput）；回调 = AudioQueueInputCallback(userData, 队列, 缓冲, 起始时刻, 包数, 包描述)
+        [LibraryImport("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox")]   // 平台例外：Apple 后端平台实现的 AudioToolbox P/Invoke 声明（收音）
+        internal static partial int AudioQueueNewInput(
+            ref AudioStreamBasicDescription format,
+            nint callback,
+            nint userData,
+            nint callbackRunLoop,
+            nint callbackRunLoopMode,
+            uint flags,
+            out nint audioQueue);
+
         [LibraryImport("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox")]
         internal static partial int AudioQueueSetProperty(
             nint audioQueue,

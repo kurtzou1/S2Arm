@@ -1773,6 +1773,7 @@
   "s2arm.install.teamGuide.step3": "After it runs, return and click Check again to refresh the signing status",
   "s2arm.install.teamGuide.failed": "Could not open the helper project: {0}",
   "bluetooth.usage": "Used to connect Switch 2 controllers.",
+  "microphone.usage": "Lets games that use the microphone (such as humming or blowing into it) hear you.",
   "s2arm.controller.status.bluetoothDenied": "Bluetooth not allowed",
   "s2arm.controller.button.allowBluetooth": "Allow Bluetooth",
   "s2arm.controller.settings": "Settings",

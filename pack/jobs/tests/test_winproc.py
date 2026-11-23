@@ -135,6 +135,35 @@ class WindowsBoundaries(OriginalContracts):
         import winproc
         self.w = winproc
 
+    def test_read_shared_reads_whole_file_across_chunks(self):
+        # 直接 ReadFile 按 1 MiB 一块读（D-2QSE / D-EX8J）：3 MiB + 7 字节、空文件都整份读回，逐字节同写入
+        d = Path(tempfile.mkdtemp())
+        data = bytes(range(256)) * (3 * 4096) + b"tail\x00\x01\x02"
+        (d / "big.bin").write_bytes(data); (d / "empty.bin").write_bytes(b"")
+        self.assertEqual(self.w.read_shared(d / "big.bin"), data)
+        self.assertEqual(self.w.read_shared(d / "empty.bin"), b"")
+
+    def test_read_shared_reports_real_windows_error(self):
+        # ReadFile 失败时报 GetLastError 原码（不再被 CRT 换成 errno 22）：替身 ReadFile 置 1117（ERROR_IO_DEVICE）后返回失败
+        import ctypes
+        f = Path(tempfile.mkdtemp()) / "catalog.json"; f.write_text("{}")
+        real = self.w._api
+        def fake(dll, name, *sig):
+            if name != "ReadFile":
+                return real(dll, name, *sig)
+            def read(*a):
+                ctypes.set_last_error(1117)
+                return 0
+            return read
+        self.w._api = fake
+        try:
+            with self.assertRaises(OSError) as got:
+                self.w.read_shared(f)
+        finally:
+            self.w._api = real
+        self.assertEqual((got.exception.winerror, got.exception.filename), (1117, str(f)))
+        os.remove(f)   # 句柄已关：文件删得掉（读失败也不漏句柄）
+
     def test_access_denied_carries_file_facts(self):
         # #3c209a：拒绝访问时报错带上这份文件的属性与 SDDL（诊断里才定得了因）。造法：给文件加一条拒绝本人读的规则
         import getpass

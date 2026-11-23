@@ -24,3 +24,10 @@ void S2A_AudioSetVolume(int percent) {
     atomic_store_explicit(&g_vol, v, memory_order_relaxed);
     LOG("游戏音量：%d%%（局中设置）", v);
 }
+
+// 麦克风（#2151，Switch 2 游戏开输入流：C# AppleHardwareDeviceSessionInput 经 s2a_native 调）：真实现在两端壳（macos/front_mac.m、ios/app.m，
+//   查 / 申请权限、iOS 切可收音的会话类别、给玩家横幅）。这里是弱定义：没有壳的宿主（单测、命令行宿主）视为已授权、不提示
+__attribute__((weak)) int s2a_mic_begin(void) { return 0; }   // 0 已授权 / 1 拒绝 / 2 正在问
+__attribute__((weak)) int s2a_mic_state(void) { return 0; }
+__attribute__((weak)) void s2a_mic_end(void) {}
+__attribute__((weak)) void s2a_mic_notice(int reason) { LOG("[声] 麦克风不可用（原因 %d），没有壳可提示", reason); }

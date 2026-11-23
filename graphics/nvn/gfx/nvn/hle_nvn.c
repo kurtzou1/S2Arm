@@ -3450,6 +3450,9 @@ static void sleep_until_ns(uint64_t dl);
 //   单测在上屏前后各读一次，判「上屏只入队、不承担限帧等待」；只增不减，不改行为
 static _Thread_local uint64_t t_pace_waits;
 uint64_t s2a_nvn_pace_waits_self(void) { return t_pace_waits; }
+// 只读计数（同上，t_fps_limit）：取图里节拍器做过决定的次数、最近一次用的节拍周期（ns，已含用户帧率上限 nvn_fps_period_ns）。只增 / 只记最近，不改行为
+static _Atomic uint64_t g_pace_dec_n, g_pace_dec_period;
+void s2a_nvn_pace_stats(uint64_t *n, uint64_t *period_ns) { *n = atomic_load_explicit(&g_pace_dec_n, memory_order_relaxed); *period_ns = atomic_load_explicit(&g_pace_dec_period, memory_order_relaxed); }
 static uint64_t present_period(const win_t *o);
 static uint64_t rt_period_ns(const win_t *o, uint64_t period);
 static int present_itv(const win_t *o);
@@ -3597,6 +3600,7 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     uint64_t at = *idx < 4 ? o->avail[*idx] : 0, now = dm_detclock_enabled() ? guest_ns() : now_ns(), wait = at > now ? at - now : 0, pace_ns = 0;
     if (!dm_detclock_enabled()) {   // Register the acquire thread as a time-constraint thread (no longer registered only when it "arrived early": it must also declare itself when it is constantly behind in the hot state)
         static uint64_t rt_period; uint64_t period = present_period(o), rtp = rt_period_ns(o, period);
+        atomic_fetch_add_explicit(&g_pace_dec_n, 1, memory_order_relaxed); atomic_store_explicit(&g_pace_dec_period, period, memory_order_relaxed);
         if (rtp && rt_period != rtp) { rt_period = rtp; set_time_constraint(rtp); }
         rt_comp_tick(rtp);
         uint64_t p0 = now_ns();

@@ -155,7 +155,11 @@ int s2a_cert_settle(const char *home) {
 int s2a_sign_state_at(const char *home, const char *catalogue, int rejected) {
     @autoreleasepool {
         if (!home || !catalogue) return S2A_SIGN_OK;
-        app_t app = app_read(home); if (!app.team) return rejected ? S2A_SIGN_COMPUTER : S2A_SIGN_OK;   // 判不了团队：不预判，被拒的照旧回电脑
+        app_t app = app_read(home);
+        // LiveContainer 里没有 app.json（App 是 LiveContainer 装的、不经电脑），团队判不了；它存的证书又用不上时（#502 / D-92TD：-1 / -26275），
+        //   起局只能用导入进 S2Arm 的那张：一张都没有就是 1「需要签名证书」（卡片上直接导入），原先这里一律判 5「去电脑更新」，玩家照做无效
+        if (!app.team && lc_usable() < 0 && s2a_cert_pick(home, NULL, 0, NULL, 0) == 1) return S2A_SIGN_NO_CERT;
+        if (!app.team) return rejected ? S2A_SIGN_COMPUTER : S2A_SIGN_OK;   // 判不了团队：不预判，被拒的照旧回电脑
         NSDictionary *cat = read_json(@(catalogue)); if (!cat) return rejected ? S2A_SIGN_COMPUTER : S2A_SIGN_OK;
         NSDictionary *signer = [cat[@"signer"] isKindOfClass:NSDictionary.class] ? cat[@"signer"] : nil;
         NSString *ssha = str(signer[@"cert_sha1"]).lowercaseString, *steam = str(signer[@"team"]) ?: str(cat[@"team"]);

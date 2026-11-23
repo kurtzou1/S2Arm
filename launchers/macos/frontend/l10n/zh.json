@@ -1774,6 +1774,7 @@
   "s2arm.install.teamGuide.step3": "运行成功后返回，点击「重新检查」更新签名状态",
   "s2arm.install.teamGuide.failed": "未能打开引导项目：{0}",
   "bluetooth.usage": "用于连接 Switch 2 手柄。",
+  "microphone.usage": "游戏要用麦克风（如哼唱、吹气）时收音。",
   "s2arm.controller.status.bluetoothDenied": "蓝牙权限未允许",
   "s2arm.controller.button.allowBluetooth": "允许蓝牙",
   "s2arm.controller.settings": "设置",

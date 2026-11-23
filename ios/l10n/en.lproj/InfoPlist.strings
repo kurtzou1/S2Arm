@@ -1,3 +1,4 @@
 /* Info.plist 权限说明的译文（#316）：Info.plist 主值英文（runtime/build.mk），中文系统读 zh-Hans。出包写本地化显示名时只换 / 补 CFBundleDisplayName 一行（pack/app_bundle.py），这里的键原样保留；两表键一致由 tests/ios_l10n_test.sh 核 */
 "NSLocalNetworkUsageDescription" = "Local multiplayer: find other devices on the same Wi-Fi and join the same room.";
 "NSBluetoothAlwaysUsageDescription" = "Connect a Switch 2 Pro Controller when enabled in Settings.";
+"NSMicrophoneUsageDescription" = "Lets games that use the microphone (such as humming or blowing into it) hear you.";

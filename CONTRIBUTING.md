@@ -10,7 +10,7 @@
 
 从最新 `origin/main` 创建自己的分支，名称可用 `docs/<主题>`、`runtime/<主题>` 等。Android 也从最新 `origin/main` 开始；旧 `android/integration` 已于 10-27 冻结。不要直接推送 `main`，也不要修改他人的分支。
 
-动手前阅读[仓库规范](docs/standards/repository.md)、[代码风格](docs/standards/style.md)和相关模块设计，按问题检索[坑记录](docs/坑记录.md)与研究目录。AI 代理还应先读 [AGENTS.md](AGENTS.md)。性能、能耗或稳定性改动须遵守测量与开发经验。
+动手前阅读[仓库规范](docs/standards/repository.md)、[代码风格](docs/standards/style.md)和相关模块设计，按问题检索研究目录。排查经验写进 PR 正文或代码注释，不另建坑记录、复盘一类的经验文档（仓库不收内部过程文档，公开仓扫描会拒收）。AI 代理还应先读 [AGENTS.md](AGENTS.md)。性能、能耗或稳定性改动须遵守测量与开发经验。
 
 ## 开发环境与构建
 

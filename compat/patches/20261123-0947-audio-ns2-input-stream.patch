@@ -1,0 +1,1113 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceDriver.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceDriver.cs
+index 76998c86f8f7af1d2fc3d016876e0dc1419f6801..4df89823d5e739dcc4a137c00ccac131de622f10 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceDriver.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceDriver.cs
+@@ -284,9 +284,10 @@ namespace Ryujinx.Audio.Backends.Apple
+                     sampleRate = Constants.TargetSampleRate;
+                 }
+ 
+-                if (direction != Direction.Output)
++                // S2Arm（#2151）：收音（Switch 2 外部输入流 / audin:u）：AudioQueue 输入，Mac 与 iOS 同一份
++                if (direction == Direction.Input)
+                 {
+-                    throw new NotImplementedException("Input direction is currently not implemented on Apple backend!");
++                    return new AppleHardwareDeviceSessionInput(this, memoryManager, sampleFormat, sampleRate, channelCount);   // 平台例外：Apple 后端平台实现（收音会话，#2151）
+                 }
+ 
+                 AppleHardwareDeviceSession session = new(this, memoryManager, sampleFormat, sampleRate, channelCount);
+@@ -379,7 +380,7 @@ namespace Ryujinx.Audio.Backends.Apple
+         }
+ 
+         public bool SupportsDirection(Direction direction)
+-            => direction != Direction.Input;
++            => direction is Direction.Input or Direction.Output;
+ 
+         public bool SupportsSampleRate(uint sampleRate) => true;
+ 
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSessionInput.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSessionInput.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..6ce06c78c5b3895a9413b568cbb21500fe762640
+--- /dev/null
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSessionInput.cs
+@@ -0,0 +1,348 @@
++using Ryujinx.Audio.Common;
++using Ryujinx.Audio.Integration;
++using Ryujinx.Memory;
++using System;
++using System.Collections.Generic;
++using System.Runtime.InteropServices;
++using System.Threading;
++using static Ryujinx.Audio.Backends.Apple.Native.AudioToolbox;   // 平台例外：Apple 后端平台实现（收音会话，#2151）
++
++namespace Ryujinx.Audio.Backends.Apple   // 平台例外：Apple 后端平台实现（收音会话，#2151）
++{
++    // S2Arm（#2151）：Apple 收音会话，Mac 与 iOS 同一份。AudioQueue 输入按游戏要的格式出数（系统自己从设备采样率重采样到 48000 Hz），
++    //   回调里把样本按交来的顺序抄进游戏缓冲，一块写满就算「已消费」（调用方 ExternalInputStream / AudioInputSystem 据此推写指针）。
++    //   麦克风权限、iOS 音频会话类别、给玩家的横幅交给本机壳（s2a_mic_*：macos/front_mac.m、ios/app.m；runtime/src/game_volume.c 弱定义 = 视为已授权）：
++    //     没授权（拒绝 / 还在问）或建队失败时按静音跑：交来的块立即算写满（内容是调用方交出前清的零），授权到了再起队列；
++    //     拒绝由壳自己提示，建队 / 起队失败本会话请壳提示，玩家都看得到「麦克风不可用」，不是悄悄没声
++    sealed class AppleHardwareDeviceSessionInput : IHardwareDeviceSession   // 平台例外：Apple 后端平台实现（收音会话，#2151）
++    {
++        private const int NumBuffers = 4;
++        private const int BufferMilliseconds = 10;
++
++        // s2a_mic_begin / s2a_mic_state 的取值
++        private const int MicGranted = 0;
++        private const int MicDenied = 1;
++
++        // s2a_mic_notice 的原因
++        private const int NoticeOpenFailed = 2;
++
++        [DllImport("s2a_native")]
++        private static extern int s2a_mic_begin();   // 开始用麦克风：iOS 切到可收音的会话类别；没问过权限就发起询问。回 0 已授权 / 1 拒绝 / 2 正在问
++
++        [DllImport("s2a_native")]
++        private static extern int s2a_mic_state();   // 同上取值，只读不发起
++
++        [DllImport("s2a_native")]
++        private static extern void s2a_mic_end();    // 不再用麦克风：iOS 切回原会话类别
++
++        [DllImport("s2a_native")]
++        private static extern void s2a_mic_notice(int reason);   // 请壳给玩家一条「麦克风不可用」横幅
++
++        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
++        private delegate void AudioQueueInputCallback(nint userData, nint audioQueue, nint buffer, nint startTime, uint numPackets, nint packetDescs);
++
++        private readonly Lock _lock = new();
++        private readonly AppleHardwareDeviceDriver _driver;   // 平台例外：Apple 后端平台实现（收音会话，#2151）
++        private readonly IVirtualMemoryManager _memory;
++        private readonly SampleFormat _sampleFormat;
++        private readonly uint _sampleRate;
++        private readonly uint _channelCount;
++        private readonly int _bytesPerFrame;
++        private readonly Queue<AudioBuffer> _pending = new();
++        private readonly HashSet<AudioBuffer> _consumed = new();
++        private readonly AudioQueueInputCallback _callback;
++        private GCHandle _handle;
++
++        private ulong _filledBytes;     // _pending 队首已写入的字节数
++        private ulong _capturedFrames;
++        private nint _queue;
++        private bool _started;
++        private bool _failed;
++        private float _volume = 1f;
++
++        public AppleHardwareDeviceSessionInput(AppleHardwareDeviceDriver driver, IVirtualMemoryManager memory, SampleFormat sampleFormat, uint sampleRate, uint channelCount)   // 平台例外：Apple 后端平台实现（收音会话，#2151）
++        {
++            if (!IsSupported(sampleFormat, channelCount))
++            {
++                throw new NotSupportedException($"Apple 收音会话：{sampleFormat}、{channelCount} 声道（只收 PcmInt16 / PcmInt32 / PcmFloat、1 或 2 声道）");
++            }
++
++            _driver = driver;
++            _memory = memory;
++            _sampleFormat = sampleFormat;
++            _sampleRate = sampleRate;
++            _channelCount = channelCount;
++            _bytesPerFrame = (sampleFormat == SampleFormat.PcmInt16 ? 2 : 4) * (int)channelCount;
++            _callback = InputCallback;
++            _handle = GCHandle.Alloc(this);
++        }
++
++        public static bool IsSupported(SampleFormat sampleFormat, uint channelCount)
++        {
++            return channelCount is 1 or 2 && sampleFormat is SampleFormat.PcmInt16 or SampleFormat.PcmInt32 or SampleFormat.PcmFloat;
++        }
++
++        public bool RegisterBuffer(AudioBuffer buffer)
++        {
++            return buffer.DataPointer != 0;
++        }
++
++        public void QueueBuffer(AudioBuffer buffer)
++        {
++            bool startQueue = false;
++
++            lock (_lock)
++            {
++                // 还没起队列：权限刚给到就起；否则（拒绝 / 正在问 / 建队失败）这一块按静音算写满
++                if (_queue == 0 && _started && !_failed && s2a_mic_state() == MicGranted)
++                {
++                    startQueue = true;
++                }
++                else if (_queue == 0)
++                {
++                    _consumed.Add(buffer);
++                    _driver.GetUpdateRequiredEvent().Set();
++
++                    return;
++                }
++
++                _pending.Enqueue(buffer);
++            }
++
++            if (startQueue)
++            {
++                StartQueue();
++            }
++        }
++
++        public bool WasBufferFullyConsumed(AudioBuffer buffer)
++        {
++            lock (_lock)
++            {
++                return _consumed.Contains(buffer);
++            }
++        }
++
++        public void UnregisterBuffer(AudioBuffer buffer)
++        {
++            lock (_lock)
++            {
++                if (_consumed.Remove(buffer))
++                {
++                    return;
++                }
++
++                // 没写满就撤回（调用方摘流）：从待写队列里去掉，队首换人时已写字节清零
++                if (_pending.Count > 0 && _pending.Peek() == buffer)
++                {
++                    _filledBytes = 0;
++                }
++
++                int count = _pending.Count;
++
++                for (int i = 0; i < count; i++)
++                {
++                    AudioBuffer b = _pending.Dequeue();
++
++                    if (b != buffer)
++                    {
++                        _pending.Enqueue(b);
++                    }
++                }
++            }
++        }
++
++        public void Start()
++        {
++            int state = s2a_mic_begin();
++
++            lock (_lock)
++            {
++                _started = true;
++            }
++
++            Console.Error.WriteLine($"[声] 收音：开始（{_sampleFormat}、{_channelCount} 声道、{_sampleRate} Hz），麦克风权限 {(state == MicGranted ? "已授权" : state == MicDenied ? "被拒绝，按静音给游戏" : "正在询问，授权前按静音给游戏")}");
++
++            if (state == MicGranted)
++            {
++                StartQueue();
++            }
++        }
++
++        private void StartQueue()
++        {
++            AudioStreamBasicDescription format = AppleHardwareDeviceDriver.GetAudioFormat(_sampleFormat, _sampleRate, _channelCount);   // 平台例外：Apple 后端平台实现（收音会话，#2151）
++            nint queue = nint.Zero;
++            int rc = AudioQueueNewInput(ref format, Marshal.GetFunctionPointerForDelegate(_callback), GCHandle.ToIntPtr(_handle), nint.Zero, nint.Zero, 0, out queue);
++            string step = "AudioQueueNewInput";
++            uint bytes = (uint)(_sampleRate * BufferMilliseconds / 1000 * _bytesPerFrame);
++
++            for (int i = 0; rc == 0 && i < NumBuffers; i++)
++            {
++                step = "AudioQueueAllocateBuffer";
++                rc = AudioQueueAllocateBuffer(queue, bytes, out nint buffer);
++
++                if (rc == 0)
++                {
++                    step = "AudioQueueEnqueueBuffer";
++                    rc = AudioQueueEnqueueBuffer(queue, buffer, 0, nint.Zero);
++                }
++            }
++
++            lock (_lock)
++            {
++                if (rc == 0 && _started)
++                {
++                    _queue = queue;
++                }
++            }
++
++            if (rc == 0 && _queue == queue)
++            {
++                step = "AudioQueueStart";
++                rc = AudioQueueStart(queue, nint.Zero);
++            }
++
++            if (rc == 0 && _queue == queue)
++            {
++                Console.Error.WriteLine("[声] 收音：麦克风队列已起");
++
++                return;
++            }
++
++            lock (_lock)
++            {
++                if (_queue == queue)
++                {
++                    _queue = nint.Zero;
++                }
++
++                _failed = rc != 0;
++
++                // 已交来的块按静音算写满，调用方照常推进
++                while (_pending.TryDequeue(out AudioBuffer b))
++                {
++                    _consumed.Add(b);
++                }
++
++                _filledBytes = 0;
++            }
++
++            if (queue != nint.Zero)
++            {
++                AudioQueueDispose(queue, true);
++            }
++
++            if (rc != 0)
++            {
++                Console.Error.WriteLine($"[声] 【红】收音：{step} 失败 rc={rc}（没有可用的收音设备或被系统拒绝），按静音给游戏");
++                s2a_mic_notice(NoticeOpenFailed);
++            }
++        }
++
++        private static void InputCallback(nint userData, nint audioQueue, nint buffer, nint startTime, uint numPackets, nint packetDescs)
++        {
++            if (GCHandle.FromIntPtr(userData).Target is AppleHardwareDeviceSessionInput session)   // 平台例外：Apple 后端平台实现（收音会话，#2151）
++            {
++                session.OnInput(audioQueue, buffer);
++            }
++        }
++
++        private unsafe void OnInput(nint audioQueue, nint buffer)
++        {
++            AudioQueueBuffer* aq = (AudioQueueBuffer*)buffer;
++            ReadOnlySpan<byte> data = new((void*)aq->AudioData, (int)aq->AudioDataByteSize);
++            bool filledAny = false;
++
++            lock (_lock)
++            {
++                if (audioQueue != _queue)
++                {
++                    return;   // 队列已停（Stop 里正在拆），不再写也不再交回
++                }
++
++                // 按交来的顺序抄进游戏缓冲；没有待写的块（游戏不读、环满）时多出来的样本丢掉
++                while (!data.IsEmpty && _pending.TryPeek(out AudioBuffer target))
++                {
++                    int n = (int)Math.Min((ulong)data.Length, target.DataSize - _filledBytes);
++                    _memory.Write(target.DataPointer + _filledBytes, data[..n]);
++                    data = data[n..];
++                    _filledBytes += (ulong)n;
++
++                    if (_filledBytes == target.DataSize)
++                    {
++                        _pending.Dequeue();
++                        _consumed.Add(target);
++                        _capturedFrames += target.DataSize / (ulong)_bytesPerFrame;
++                        _filledBytes = 0;
++                        filledAny = true;
++                    }
++                }
++
++                AudioQueueEnqueueBuffer(audioQueue, buffer, 0, nint.Zero);
++            }
++
++            if (filledAny)
++            {
++                _driver.GetUpdateRequiredEvent().Set();
++            }
++        }
++
++        public void Stop()
++        {
++            nint queue;
++            bool started;
++
++            lock (_lock)
++            {
++                queue = _queue;
++                started = _started;
++                _queue = nint.Zero;
++                _started = false;
++            }
++
++            // 锁外拆队列：AudioQueueStop(立即) 要等回调线程退出，回调要拿同一把锁
++            if (queue != nint.Zero)
++            {
++                AudioQueueStop(queue, true);
++                AudioQueueDispose(queue, true);
++            }
++
++            if (started)
++            {
++                s2a_mic_end();
++                Console.Error.WriteLine($"[声] 收音：停止（本会话共收 {_capturedFrames} 帧）");
++            }
++        }
++
++        public void SetVolume(float volume)
++        {
++            _volume = volume;
++        }
++
++        public float GetVolume()
++        {
++            return _volume;
++        }
++
++        public ulong GetPlayedSampleCount()
++        {
++            lock (_lock)
++            {
++                return _capturedFrames;
++            }
++        }
++
++        public void PrepareToClose() { }
++
++        public void Dispose()
++        {
++            Stop();
++
++            if (_handle.IsAllocated)
++            {
++                _handle.Free();
++            }
++        }
++    }
++}
+diff --git a/src/Ryujinx.Audio.Backends.Apple/Native/AudioToolbox.cs b/src/Ryujinx.Audio.Backends.Apple/Native/AudioToolbox.cs
+index 9efd1f8cf11b148b5b9fbbdde66f0f9370ac8643..a0301fa32e615e01423fec0bb729f7e8db515efc 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/Native/AudioToolbox.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/Native/AudioToolbox.cs
+@@ -116,6 +116,17 @@ namespace Ryujinx.Audio.Backends.Apple.Native
+             uint flags,
+             out nint audioQueue);
+ 
++        // S2Arm（#2151）：收音队列（AppleHardwareDeviceSessionInput）；回调 = AudioQueueInputCallback(userData, 队列, 缓冲, 起始时刻, 包数, 包描述)
++        [LibraryImport("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox")]   // 平台例外：Apple 后端平台实现的 AudioToolbox P/Invoke 声明（收音）
++        internal static partial int AudioQueueNewInput(
++            ref AudioStreamBasicDescription format,
++            nint callback,
++            nint userData,
++            nint callbackRunLoop,
++            nint callbackRunLoopMode,
++            uint flags,
++            out nint audioQueue);
++
+         [LibraryImport("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox")]
+         internal static partial int AudioQueueSetProperty(
+             nint audioQueue,
+diff --git a/src/Ryujinx.Audio/Backends/CompatLayer/CompatLayerHardwareDeviceDriver.cs b/src/Ryujinx.Audio/Backends/CompatLayer/CompatLayerHardwareDeviceDriver.cs
+index 4b6492d4d6a4b17c1c9ebc889f5c79d96ce9d375..2358e51275cba68d16c0024eda91380adb401d08 100644
+--- a/src/Ryujinx.Audio/Backends/CompatLayer/CompatLayerHardwareDeviceDriver.cs
++++ b/src/Ryujinx.Audio/Backends/CompatLayer/CompatLayerHardwareDeviceDriver.cs
+@@ -128,6 +128,13 @@ namespace Ryujinx.Audio.Backends.CompatLayer
+                 throw new NotImplementedException();
+             }
+ 
++            // S2Arm（#2151）：收音没有格式 / 声道转换（下面原先选硬件格式后对不上就整条退成 Dummy，单声道收音永远拿不到真麦克风）：
++            //   支持收音的后端照游戏要的格式原样开（Apple 收音会话由 AudioQueue 按游戏格式出数、系统自己重采样）
++            if (direction == Direction.Input)
++            {
++                return _realDriver.OpenDeviceSession(direction, memoryManager, sampleFormat, sampleRate, channelCount);
++            }
++
+             SampleFormat hardwareSampleFormat = SelectHardwareSampleFormat(sampleFormat);
+             uint hardwareChannelCount = SelectHardwareChannelCount(channelCount);
+ 
+@@ -148,16 +155,6 @@ namespace Ryujinx.Audio.Backends.CompatLayer
+                 }
+             }
+ 
+-            if (direction == Direction.Input)
+-            {
+-                Logger.Warning?.Print(LogClass.Audio, "The selected audio backend doesn't support the requested audio input configuration, fallback to dummy...");
+-
+-                // TODO: We currently don't support audio input upsampling/downsampling, implement this.
+-                realSession.Dispose();
+-
+-                return new DummyHardwareDeviceSessionInput(this, memoryManager);
+-            }
+-
+             // It must be a HardwareDeviceSessionOutputBase.
+             if (realSession is not HardwareDeviceSessionOutputBase realSessionOutputBase)
+             {
+diff --git a/src/Ryujinx.Horizon/Audio/AudioUserIpcServer.cs b/src/Ryujinx.Horizon/Audio/AudioUserIpcServer.cs
+index ac6458537188d4c400ad52537ff856a7e1868025..9487f31899fc9f136dea33d1cdf7e485dfcbf4d1 100644
+--- a/src/Ryujinx.Horizon/Audio/AudioUserIpcServer.cs
++++ b/src/Ryujinx.Horizon/Audio/AudioUserIpcServer.cs
+@@ -46,7 +46,8 @@ namespace Ryujinx.Horizon.Audio
+             _serverManager.RegisterObjectForServer(new NativeAudioManager(audioInManager, audioOutManager, audioRendererManager), ServiceName.Encode("aud:u"), MaxSessionsCount);
+             // S2Arm：Switch 2 的虚拟音频设备管理 auddmg:u（Sdk/Audio/Detail/AudioDeviceManager.cs）与系统混音器外部流 audsmx:u
+             //   （Sdk/Audio/Detail/AudioSystemMixer.cs），两边按流号共用一份登记；外部流的声音交宿主声音输出（同 audout:u 的输出管理）
+-            ExternalStreamRegistry externalStreams = new(_managers.AudioOutputManager);
++            //   输入流（麦克风，#2151）向宿主声音驱动直接要收音会话（同一个驱动，经兼容层：不支持收音的后端给静音）
++            ExternalStreamRegistry externalStreams = new(_managers.AudioOutputManager, HorizonStatic.Options.AudioDeviceDriver);
+             _serverManager.RegisterObjectForServer(new AudioDeviceManagerUserSessionManager(externalStreams), ServiceName.Encode("auddmg:u"), MaxSessionsCount);
+             _serverManager.RegisterObjectForServer(new AudioSystemMixerUserSessionManager(externalStreams), ServiceName.Encode("audsmx:u"), MaxSessionsCount);
+         }
+diff --git a/src/Ryujinx.Horizon/Sdk/Audio/Detail/AudioDeviceManager.cs b/src/Ryujinx.Horizon/Sdk/Audio/Detail/AudioDeviceManager.cs
+index d850133ff18257a938c3276cbd4ae1a19913088e..77e9553d1094125fa3830908844ae1840d8f4150 100644
+--- a/src/Ryujinx.Horizon/Sdk/Audio/Detail/AudioDeviceManager.cs
++++ b/src/Ryujinx.Horizon/Sdk/Audio/Detail/AudioDeviceManager.cs
+@@ -1,3 +1,4 @@
++using Ryujinx.Audio.Input;
+ using Ryujinx.Audio.Output;
+ using Ryujinx.Horizon.Common;
+ using Ryujinx.Horizon.Sdk.Applet;
+@@ -14,8 +15,9 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+     //   sdk 的客户端反推（时之笛 / 金刚 / Raiders / Pokopia / 火纹五款 sdk 的 CmifProxy 虚表 + 组包函数 + 调用方，见 compat/改动清单.md 本条）。
+     //   时之笛：nn::audio::GetDefaultVirtualOutputDevice → devmgr::Initialize 连不上 auddmg:u 即 Abort。
+     //   外部输出流（OpenOutputStream / Start / Stop）还走 300 / 401 / 700 / 800，流本身在 audsmx:u（AudioSystemMixer.cs），两边经 ExternalStreamRegistry 按流号对上。
+-    //   只实现语义能定死的命令：虚拟输出设备就是宿主那一个声音输出（与 audout:u ListAudioOuts 同一来源），其余命令不进命令表、按未知命令报红；
+-    //   已实现的命令遇到 SDK 从不发的取值（输入设备、未知设备名、未知标志）也报红，不回成功兜底。
++    //   外部输入流（麦克风，OpenInputStream / Start / Stop，#2151）同一组命令、功能 = 2。
++    //   只实现语义能定死的命令：虚拟输出设备就是宿主那一个声音输出（与 audout:u ListAudioOuts 同一来源），虚拟输入设备就是宿主那一个收音
++    //   （与 audin:u ListAudioIns 同一来源）；其余命令不进命令表、按未知命令报红；已实现的命令遇到 SDK 从不发的取值（未知功能、未知设备名、未知标志）也报红，不回成功兜底。
+     partial class AudioDeviceManagerUserSessionManager : IServiceObject
+     {
+         private readonly ExternalStreamRegistry _registry;
+@@ -44,13 +46,15 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+     partial class AudioDeviceManagerUserSession : IServiceObject, IDisposable
+     {
+         // nn::audio::devmgr::DeviceFunctionality：1 = 输出（GetDefaultVirtualOutputDevice / ListVirtualOutputDevices 发 1），
+-        //   2 = 输入（输入 / 注入设备发 2）。宿主声音后端不接收音（AppleHardwareDeviceDriver 只支持输出）：列输入设备回 0 个，其余带输入功能的命令报红
++        //   2 = 输入（输入 / 注入设备发 2；InputStreamImpl::Open / Start 发 2）。#2151 前宿主不收音、列输入设备回 0 个，
++        //   时之笛开局查到 0 个仍照开输入流（PurgeInputStream 不判空直接用）→ 崩；现列宿主那一个收音设备
+         private const uint FunctionalityOutput = 1;
+         private const uint FunctionalityInput = 2;
+ 
+-        // 虚拟输出设备档案（401）+0x220 的 u32：OutputStreamImpl::Open 原样交给 sysmix CreateStream 当设备参数。
+-        //   真机的取值语义不知道；它只在本机 devmgr 与本机 audsmx:u 之间往返，取值是我方定的（同设备名 "DeviceOut"）
++        // 虚拟设备档案（401）+0x220 的 u32：OutputStreamImpl::Open / InputStreamImpl::Open 原样交给 sysmix CreateStream 当设备参数。
++        //   真机的取值语义不知道；它只在本机 devmgr 与本机 audsmx:u 之间往返，取值是我方定的（输出 1、输入 2）
+         public const uint VirtualOutputDeviceToken = 1;
++        public const uint VirtualInputDeviceToken = 2;
+ 
+         private const int VirtualDeviceProfileSize = 0x228;
+         private const int ProfileLatencyOffset = 0x218;
+@@ -76,19 +80,11 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+                 throw new NotImplementedException("auddmg:u IUserSession 0：bool 参数为 true（SDK 公开入口只发 false，true 的语义不明）");
+             }
+ 
+-            // 列输入设备（功能 2）：宿主不收音，没有虚拟输入设备，回 0 个。SDK ListVirtualInputDevices 拿到 0 个，游戏不再开输入流（麦克风这一路直接返回）
+-            if (functionality == FunctionalityInput)
+-            {
+-                count = 0;
+-
+-                return Result.Success;
+-            }
+-
+-            RequireOutput(0, functionality);
++            RequireFunctionality(0, functionality);
+ 
+             count = 0;
+ 
+-            foreach (string name in AudioOutputManager.ListAudioOuts())
++            foreach (string name in DeviceNames(functionality))
+             {
+                 if (count >= names.Length)
+                 {
+@@ -105,14 +101,14 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+         [CmifCommand(100)]
+         public Result GetDefaultVirtualDeviceName([Buffer(HipcBufferFlags.Out | HipcBufferFlags.MapAlias)] Span<DeviceName> name, uint functionality)
+         {
+-            RequireOutput(100, functionality);
++            RequireFunctionality(100, functionality);
+ 
+             if (name.Length == 0)
+             {
+                 throw new NotImplementedException("auddmg:u IUserSession 100：设备名缓冲不足 0x100 字节");
+             }
+ 
+-            name[0] = new DeviceName(AudioOutputManager.ListAudioOuts()[0]);
++            name[0] = new DeviceName(DeviceNames(functionality)[0]);
+ 
+             return Result.Success;
+         }
+@@ -121,28 +117,28 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+         [CmifCommand(200)]
+         public Result IsVirtualDeviceAvailable([Buffer(HipcBufferFlags.In | HipcBufferFlags.MapAlias)] ReadOnlySpan<byte> name, uint functionality)
+         {
+-            RequireOutputDevice(200, name, functionality);
++            RequireDevice(200, name, functionality);
+ 
+             return Result.Success;
+         }
+ 
+         // 300 IsVirtualDeviceStreamFormatSupported：A 缓冲（设备名）；in StreamFormat @0（12 字节）、u32 功能 @0xc；只回结果码（成功 = 支持）。
+-        //   宿主能播的格式（ExternalOutputStream.IsHostSupported）回成功；不支持时真机回哪个结果码不知道 → 报红（游戏的 Open 随之失败，红行带着格式）
++        //   宿主能播 / 能收的格式（ExternalOutputStream / ExternalInputStream.IsHostSupported）回成功；不支持时真机回哪个结果码不知道 → 报红（游戏的 Open 随之失败，红行带着格式）
+         [CmifCommand(300)]
+         public Result IsVirtualDeviceStreamFormatSupported([Buffer(HipcBufferFlags.In | HipcBufferFlags.MapAlias)] ReadOnlySpan<byte> name, StreamFormat format, uint functionality)
+         {
+-            RequireOutputDevice(300, name, functionality);
++            RequireDevice(300, name, functionality);
+ 
+-            if (!ExternalOutputStream.IsHostSupported(format))
++            if (!(functionality == FunctionalityInput ? ExternalInputStream.IsHostSupported(format) : ExternalOutputStream.IsHostSupported(format)))
+             {
+-                throw new NotImplementedException($"auddmg:u IUserSession 300：{format} 宿主不能播，不知道真机回哪个结果码");
++                throw new NotImplementedException($"auddmg:u IUserSession 300：{format} 宿主不能{(functionality == FunctionalityInput ? "收" : "播")}，不知道真机回哪个结果码");
+             }
+ 
+             return Result.Success;
+         }
+ 
+         // 401 GetVirtualDeviceProfile：B 缓冲（档案 0x228 字节，客户端先清零）+ A 缓冲（设备名）；in u32 功能 @0；只回结果码。
+-        //   SDK 只读档案三处：+0x218 u64 = 设备延迟 ns（OutputStreamImpl::Open 要求缓冲帧数 ≥ 延迟 × 采样率 ÷ 1e9，否则拒绝；
++        //   SDK 只读档案三处：+0x218 u64 = 设备延迟 ns（OutputStreamImpl::Open / InputStreamImpl::Open 要求缓冲帧数 ≥ 延迟 × 采样率 ÷ 1e9，否则拒绝（输入回 0x899）；
+         //   GetVirtualOutputDeviceProperties 抄到属性 +0x100）、+0x220 u32（交 sysmix CreateStream）、+0x108 u32（抄到属性 +0x108）。
+         //   填前两处；+0x108 语义不知道、时之笛不读属性，不填（保持客户端的清零）。其余字节 SDK 不读
+         [CmifCommand(401)]
+@@ -151,7 +147,7 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+             [Buffer(HipcBufferFlags.In | HipcBufferFlags.MapAlias)] ReadOnlySpan<byte> name,
+             uint functionality)
+         {
+-            RequireOutputDevice(401, name, functionality);
++            RequireDevice(401, name, functionality);
+ 
+             if (profile.Length < VirtualDeviceProfileSize)
+             {
+@@ -159,17 +155,17 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+             }
+ 
+             BitConverter.TryWriteBytes(profile[ProfileLatencyOffset..], ExternalOutputStream.MinimumLatencyNs);
+-            BitConverter.TryWriteBytes(profile[ProfileDeviceTokenOffset..], VirtualOutputDeviceToken);
++            BitConverter.TryWriteBytes(profile[ProfileDeviceTokenOffset..], functionality == FunctionalityInput ? VirtualInputDeviceToken : VirtualOutputDeviceToken);
+ 
+             return Result.Success;
+         }
+ 
+         // 500 AcquireVirtualDeviceStateChangeEvent：A 缓冲（设备名）；in u32 功能 @0、u64 @8（客户端自己的 SystemEventType 地址，作领取凭据，Release 发同一个）；
+-        //   回复制句柄（客户端按手动清除挂上）。宿主只有一个声音输出、状态从不变化，事件不触发
++        //   回复制句柄（客户端按手动清除挂上）。宿主只有一个声音输出、一个收音设备，状态从不变化，事件不触发
+         [CmifCommand(500)]
+         public Result AcquireVirtualDeviceStateChangeEvent([CopyHandle] out int eventHandle, [Buffer(HipcBufferFlags.In | HipcBufferFlags.MapAlias)] ReadOnlySpan<byte> name, uint functionality, ulong cookie)
+         {
+-            RequireOutputDevice(500, name, functionality);
++            RequireDevice(500, name, functionality);
+ 
+             if (!_stateChangeCookies.Add(cookie))
+             {
+@@ -191,7 +187,7 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+         [CmifCommand(600)]
+         public Result ReleaseVirtualDeviceStateChangeEvent([Buffer(HipcBufferFlags.In | HipcBufferFlags.MapAlias)] ReadOnlySpan<byte> name, uint functionality, ulong cookie)
+         {
+-            RequireOutputDevice(600, name, functionality);
++            RequireDevice(600, name, functionality);
+ 
+             if (!_stateChangeCookies.Remove(cookie))
+             {
+@@ -202,17 +198,18 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+         }
+ 
+         // 700 AttachStream：A 缓冲（设备名）；in u32 流号 @0（sysmix CreateStream 回的）、u32 功能 @4；只回结果码。
+-        //   OutputStreamImpl::Start 调它（不走 sysmix Engage）：挂上 = 宿主开始从环里取样本播
++        //   OutputStreamImpl::Start / InputStreamImpl::Start 调它（不走 sysmix Engage）：挂上 = 宿主开始从环里取样本播 / 开始收音往环里写。
++        //   功能与流的方向对不上（输出流挂输入设备）报红
+         [CmifCommand(700)]
+         public Result AttachStream([Buffer(HipcBufferFlags.In | HipcBufferFlags.MapAlias)] ReadOnlySpan<byte> name, uint streamId, uint functionality)
+         {
+-            RequireOutputDevice(700, name, functionality);
++            RequireDevice(700, name, functionality);
+ 
+-            ExternalOutputStream stream = _registry.Get(streamId);
++            IExternalStream stream = _registry.Get(streamId);
+ 
+-            if (stream == null || !stream.IsOpen || stream.IsAttached)
++            if (stream == null || !stream.IsOpen || stream.IsAttached || stream.IsInput != (functionality == FunctionalityInput))
+             {
+-                throw new NotImplementedException($"auddmg:u IUserSession 700：流号 {streamId}{(stream == null ? " 没有" : stream.IsOpen ? " 已挂上" : " 没打开")}（不知道真机回哪个结果码）");
++                throw new NotImplementedException($"auddmg:u IUserSession 700：流号 {streamId}{(stream == null ? " 没有" : !stream.IsOpen ? " 没打开" : stream.IsAttached ? " 已挂上" : $" 是{(stream.IsInput ? "输入" : "输出")}流、功能却是 {functionality}")}（不知道真机回哪个结果码）");
+             }
+ 
+             stream.Attach();
+@@ -220,11 +217,11 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+             return Result.Success;
+         }
+ 
+-        // 800 DetachStream：in u32 流号 @0；只回结果码。OutputStreamImpl::Stop / Close 调它（失败客户端 Abort）
++        // 800 DetachStream：in u32 流号 @0；只回结果码。OutputStreamImpl / InputStreamImpl 的 Stop / Close 调它（失败客户端 Abort）
+         [CmifCommand(800)]
+         public Result DetachStream(uint streamId)
+         {
+-            ExternalOutputStream stream = _registry.Get(streamId);
++            IExternalStream stream = _registry.Get(streamId);
+ 
+             if (stream == null || !stream.IsAttached)
+             {
+@@ -236,22 +233,28 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+             return Result.Success;
+         }
+ 
+-        private static void RequireOutput(int command, uint functionality)
++        private static void RequireFunctionality(int command, uint functionality)
+         {
+-            if (functionality != FunctionalityOutput)
++            if (functionality != FunctionalityOutput && functionality != FunctionalityInput)
+             {
+-                throw new NotImplementedException($"auddmg:u IUserSession {command}：功能 {functionality}（只实现了输出 = 1；宿主不收音）");
++                throw new NotImplementedException($"auddmg:u IUserSession {command}：功能 {functionality}（只实现了输出 = 1、输入 = 2）");
+             }
+         }
+ 
+-        private static void RequireOutputDevice(int command, ReadOnlySpan<byte> name, uint functionality)
++        // 本机虚拟设备：输出 = 宿主声音输出（audout:u 同源），输入 = 宿主收音（audin:u 同源，"BuiltInHeadset"）
++        private static string[] DeviceNames(uint functionality)
++        {
++            return functionality == FunctionalityInput ? AudioInputManager.ListAudioIns(false) : AudioOutputManager.ListAudioOuts();
++        }
++
++        private static void RequireDevice(int command, ReadOnlySpan<byte> name, uint functionality)
+         {
+-            RequireOutput(command, functionality);
++            RequireFunctionality(command, functionality);
+ 
+             int length = name.IndexOf((byte)0);
+             string text = Encoding.ASCII.GetString(length < 0 ? name : name[..length]);
+ 
+-            if (Array.IndexOf(AudioOutputManager.ListAudioOuts(), text) < 0)
++            if (Array.IndexOf(DeviceNames(functionality), text) < 0)
+             {
+                 throw new NotImplementedException($"auddmg:u IUserSession {command}：设备名「{text}」不是本机虚拟设备（不知道真机对未知设备回哪个结果码）");
+             }
+diff --git a/src/Ryujinx.Horizon/Sdk/Audio/Detail/AudioSystemMixer.cs b/src/Ryujinx.Horizon/Sdk/Audio/Detail/AudioSystemMixer.cs
+index 1317ab89c957300528b4ebad36825f9d715271e3..f77c03804e73dfc29298a12029f229a172626f2e 100644
+--- a/src/Ryujinx.Horizon/Sdk/Audio/Detail/AudioSystemMixer.cs
++++ b/src/Ryujinx.Horizon/Sdk/Audio/Detail/AudioSystemMixer.cs
+@@ -1,5 +1,6 @@
+ using Ryujinx.Audio;
+ using Ryujinx.Audio.Common;
++using Ryujinx.Audio.Integration;
+ using Ryujinx.Audio.Output;
+ using Ryujinx.Common;
+ using Ryujinx.Horizon.Common;
+@@ -23,6 +24,8 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+     //   声音数据不走 IPC：客户端把游戏给的工作缓冲排成「控制块 + 环形缓冲」，WriteOutputStream 只往环里抄样本、推写指针；
+     //   服务端从同一块游戏内存读、推读指针（ExternalOutputStream）。
+     //   只实现输出流开局路径要的命令；其余命令不进命令表（按未知命令报红），已实现的命令遇到 SDK 输出路径从不发的取值也报红，不回成功兜底。
++    //   输入流（麦克风，#2151）同一套命令、方向相反：nn::audio::InputStreamImpl::Open = devmgr 300 / 401（功能 2）→ CreateStream（标志 2）→ OpenStream
++    //   →（有事件时）AcquireStreamDataEvent；Start / Stop = devmgr 700 / 800；服务端往环里写、推写指针（ExternalInputStream）。
+ 
+     // nn::audio::StreamFormat（12 字节）：+0 采样格式（1..5，与 Ryujinx SampleFormat 同号）、+4 声道数、+8 采样率。
+     //   依据：sysmix::detail::OpenStreamImpl 拿 +0 减 1 查每样本字节表 {1,2,4,4,4}、+4 乘进帧长；OutputStreamImpl::Open 拿 +8 × 设备延迟 ÷ 1e9 算最少帧数
+@@ -36,21 +39,38 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+         public override readonly string ToString() => $"格式 {SampleFormat}、{ChannelCount} 声道、{SampleRate} Hz";
+     }
+ 
++    // 一条外部流（输出 / 输入）对 devmgr 与 sysmix 命令的公共面
++    interface IExternalStream : IDisposable
++    {
++        bool IsInput { get; }
++        bool IsOpen { get; }
++        bool IsAttached { get; }
++        AudioEvent DataEvent { get; set; }
++        void Open(StreamFormat format, int frameCount);
++        void Attach();
++        void Detach();
++        void Close();
++    }
++
+     // devmgr 与 sysmix 共用的流登记：sysmix CreateStream 发流号，devmgr 700 / 800 按流号挂上 / 摘下虚拟设备
+     sealed class ExternalStreamRegistry
+     {
+         private readonly Lock _lock = new();
+-        private readonly Dictionary<uint, ExternalOutputStream> _streams = new();
++        private readonly Dictionary<uint, IExternalStream> _streams = new();
+         private uint _nextId;
+ 
+         public AudioOutputManager OutputManager { get; }
+ 
+-        public ExternalStreamRegistry(AudioOutputManager outputManager)
++        // 输入流直接向宿主声音驱动要收音会话（AudioInputManager / AudioInputSystem 把单声道改成立体声，外部输入流要游戏给的声道数原样）
++        public IHardwareDeviceDriver InputDriver { get; }
++
++        public ExternalStreamRegistry(AudioOutputManager outputManager, IHardwareDeviceDriver inputDriver)
+         {
+             OutputManager = outputManager;
++            InputDriver = inputDriver;
+         }
+ 
+-        public uint Add(ExternalOutputStream stream)
++        public uint Add(IExternalStream stream)
+         {
+             lock (_lock)
+             {
+@@ -68,7 +88,7 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+             }
+         }
+ 
+-        public ExternalOutputStream Get(uint id)
++        public IExternalStream Get(uint id)
+         {
+             lock (_lock)
+             {
+@@ -85,7 +105,7 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+     //     B+0x1040 环：容量 = OpenStream 的帧数 + 1 帧，帧长 = 每样本字节 × 声道数，交错存放
+     //   （OpenStream 标志位 0 置位时环前还有 0x80 字节的时间戳表、写入走另一套带时间戳的协议，本实现不支持、报红）
+     //   可写帧数 = 容量 − 1 − ((写 − 读) mod 容量)：读指针只在宿主交还（播完）后推进，游戏不会改写还在宿主手里的样本。
+-    sealed class ExternalOutputStream : IDisposable
++    sealed class ExternalOutputStream : IExternalStream
+     {
+         public const ulong ServerBlockOffset = 0x40;
+         public const ulong ClientBlockOffset = 0x1000;
+@@ -118,6 +138,7 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+         public ulong Buffer { get; }
+         public ulong Size { get; }
+         public string Name { get; }
++        public bool IsInput => false;
+         public bool IsOpen => _output != null;
+         public bool IsAttached => _attached;
+ 
+@@ -350,6 +371,264 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+         }
+     }
+ 
++    // 一条外部输入流（麦克风，#2151）的服务端：宿主收音会话把样本直接写进游戏工作缓冲的环，一块写满就推写指针、触发数据事件。
++    //   输入方向两块控制块的角色与输出相反（时之笛 sdk 反推：GetStreamFilledFrameCountImpl 0x2b21d0 输入方向作废 B+0x1000 的缓存、
++    //   读环公共段 0x2b4760 读 B+0x1000+4 为写、B+0x40+4 为读，读完回写 B+0x40）：
++    //     B+0x1000 归服务端：+4 = 写指针（本类写）；+8 位 0 置位时客户端把环当空（本类不置）
++    //     B+0x0040 归客户端：+4 = 读指针（ReadStream 读完推）；+0 客户端累加「要读没读到」的帧数
++    //     环同输出流：B+0x1040 起、容量 = OpenStream 的帧数 + 1、帧长 = 每样本字节 × 声道数；已填 = (写 − 读) mod 容量
++    //   清空（PurgeInputStream）在客户端本地推读指针，不走 IPC。
++    //   节奏按墙钟：每 5 ms 至多交出墙钟应得的帧数。真麦克风按实时写满交还；没麦克风 / 没授权时宿主给的是立即交还的会话（兼容层的 Dummy、
++    //   Apple 会话的静音模式），按墙钟限速后游戏照样按实时读到帧，不会被一口气灌满。每块交出前先清零：会话没写到的是静音，不是上一轮的旧声音
++    sealed class ExternalInputStream : IExternalStream
++    {
++        // 同时交给宿主会话的块数上限：8 × 5 ms = 40 ms，够吸收搬运线程个别周期的调度延迟
++        private const int MaxInFlight = 8;
++
++        private readonly Lock _lock = new();
++        private readonly IHardwareDeviceDriver _driver;
++        private readonly IVirtualMemoryManager _memory;
++        private readonly Queue<(AudioBuffer Buffer, int Frames)> _inFlight = new();
++
++        private IHardwareDeviceSession _session;
++        private int _capacity;
++        private int _frameBytes;
++        private int _chunkFrames;
++        private int _sampleRate;
++        private int _write;
++        private int _queued;
++        private long _startNs;
++        private long _grantedFrames;
++        private ulong _tag;
++        private bool _attached;
++        private bool _broken;
++        private Thread _pump;
++        private volatile bool _stopPump;
++
++        public ulong Buffer { get; }
++        public ulong Size { get; }
++        public string Name { get; }
++        public bool IsInput => true;
++        public bool IsOpen => _session != null;
++        public bool IsAttached => _attached;
++        public AudioEvent DataEvent { get; set; }
++
++        public ExternalInputStream(IHardwareDeviceDriver driver, IVirtualMemoryManager memory, ulong buffer, ulong size, string name)
++        {
++            _driver = driver;
++            _memory = memory;
++            Buffer = buffer;
++            Size = size;
++            Name = name;
++        }
++
++        // 宿主收音能给的格式（Apple 收音会话：AudioQueue 输入按游戏格式出数，系统自己重采样）：48000 Hz、1 或 2 声道、PcmInt16 / PcmInt32 / PcmFloat
++        public static bool IsHostSupported(StreamFormat format)
++        {
++            return format.SampleRate == Constants.TargetSampleRate && format.ChannelCount is 1 or 2 &&
++                (SampleFormat)format.SampleFormat is SampleFormat.PcmInt16 or SampleFormat.PcmInt32 or SampleFormat.PcmFloat;
++        }
++
++        public void Open(StreamFormat format, int frameCount)
++        {
++            if (!IsHostSupported(format))
++            {
++                throw new NotImplementedException($"audsmx:u IExternalStreamSession 0（输入流）：{format}（宿主收音只给 PcmInt16 / 32 / Float、48000 Hz、1 或 2 声道）");
++            }
++
++            int frameBytes = ((SampleFormat)format.SampleFormat == SampleFormat.PcmInt16 ? 2 : 4) * format.ChannelCount;
++            ulong ringEnd = ExternalOutputStream.RingOffset + (ulong)(frameCount + 1) * (ulong)frameBytes;
++
++            if (frameCount < 1 || (Buffer & 0xFFF) != 0 || ringEnd > Size)
++            {
++                throw new NotImplementedException($"audsmx:u IExternalStreamSession 0（输入流）：{frameCount} 帧的环放不进工作缓冲 0x{Buffer:X} + 0x{Size:X}（客户端自己会先拒绝，到这里说明布局没对上）");
++            }
++
++            IHardwareDeviceSession session = _driver.OpenDeviceSession(IHardwareDeviceDriver.Direction.Input, _memory, (SampleFormat)format.SampleFormat, (uint)format.SampleRate, (uint)format.ChannelCount);
++
++            lock (_lock)
++            {
++                _session = session;
++                _capacity = frameCount + 1;
++                _frameBytes = frameBytes;
++                _sampleRate = format.SampleRate;
++                _chunkFrames = format.SampleRate * ExternalOutputStream.PumpPeriodMs / 1000;
++                _write = 0;
++                _queued = 0;
++                // 写指针归服务端：从 0 起（客户端读指针也从 0 起：OpenStream 的写指针初值参数输入方向恒 0）
++                _memory.Write(Buffer + ExternalOutputStream.ClientBlockOffset + ExternalOutputStream.IndexOffset, 0u);
++            }
++        }
++
++        public void Attach()
++        {
++            lock (_lock)
++            {
++                _broken = false;
++                _queued = _write;
++                _startNs = PerformanceCounter.ElapsedNanoseconds;
++                _grantedFrames = 0;
++                _session.Start();
++                _attached = true;
++            }
++
++            _stopPump = false;
++            _pump = new Thread(PumpLoop) { Name = "S2A.audsmx.InPump", IsBackground = true };
++            _pump.Start();
++        }
++
++        public void Detach()
++        {
++            _stopPump = true;
++            _pump?.Join();
++            _pump = null;
++
++            lock (_lock)
++            {
++                if (!_attached)
++                {
++                    return;
++                }
++
++                CollectFilled();
++                _session.Stop();
++
++                // 没写满的块作废：写指针停在已写满处，下次挂上从那里接着写
++                while (_inFlight.TryDequeue(out (AudioBuffer Buffer, int Frames) block))
++                {
++                    _session.UnregisterBuffer(block.Buffer);
++                }
++
++                _queued = _write;
++                _attached = false;
++            }
++        }
++
++        private void PumpLoop()
++        {
++            // 与输出流搬运线程同一套：实时调度、5 ms 绝对时限网格（ExternalOutputStream.PumpLoop）
++            long periodNs = ExternalOutputStream.PumpPeriodMs * 1_000_000L;
++            Ryujinx.Common.S2ARealtime.Promote("audsmx 收音搬运线程", periodNs, periodNs / 2, periodNs);
++
++            long next = PerformanceCounter.ElapsedNanoseconds;
++
++            while (!_stopPump)
++            {
++                Pump();
++
++                next += periodNs;
++                long now = PerformanceCounter.ElapsedNanoseconds;
++
++                if (now < next)
++                {
++                    Ryujinx.Common.PreciseSleep.PreciseSleepHelper.SleepUntilTimePointSingleWake(
++                        PerformanceCounter.ElapsedTicks + (next - now) * PerformanceCounter.TicksPerMillisecond / 1_000_000);
++                }
++                else
++                {
++                    next = now;
++                }
++            }
++        }
++
++        // 一轮搬运：收宿主写满的块 → 推写指针、触发数据事件；按游戏读指针与墙钟应得帧数 → 清零后交新块给宿主写
++        public void Pump()
++        {
++            Pump(PerformanceCounter.ElapsedNanoseconds);
++        }
++
++        public void Pump(long nowNs)
++        {
++            lock (_lock)
++            {
++                if (!_attached || _broken)
++                {
++                    return;
++                }
++
++                CollectFilled();
++
++                uint read = _memory.Read<uint>(Buffer + ExternalOutputStream.ServerBlockOffset + ExternalOutputStream.IndexOffset);
++
++                if (read >= (uint)_capacity)
++                {
++                    _broken = true;
++                    Console.Error.WriteLine($"[声] 【红】audsmx:u 外部输入流「{Name}」：读指针 {read} 不在环里（容量 {_capacity} 帧），停止收音");
++                    return;
++                }
++
++                // 墙钟应得帧数；游戏不读（环满）时欠账封顶一环，不攒成之后一口气灌满
++                long due = (nowNs - _startNs) * _sampleRate / 1_000_000_000L - _grantedFrames;
++
++                if (due > _capacity)
++                {
++                    _grantedFrames += due - _capacity;
++                    due = _capacity;
++                }
++
++                int free = _capacity - 1 - ((_queued - (int)read + _capacity) % _capacity);
++
++                while (free > 0 && due > 0 && _inFlight.Count < MaxInFlight)
++                {
++                    int frames = (int)Math.Min(Math.Min(free, _capacity - _queued), Math.Min(_chunkFrames, due));
++                    ulong address = Buffer + ExternalOutputStream.RingOffset + (ulong)_queued * (ulong)_frameBytes;
++                    ulong bytes = (ulong)frames * (ulong)_frameBytes;
++
++                    _memory.Fill(address, bytes, 0);
++
++                    AudioBuffer buffer = new() { BufferTag = ++_tag, DataPointer = address, DataSize = bytes };
++
++                    if (!_session.RegisterBuffer(buffer))
++                    {
++                        break;
++                    }
++
++                    _session.QueueBuffer(buffer);
++                    _inFlight.Enqueue((buffer, frames));
++                    _queued = (_queued + frames) % _capacity;
++                    _grantedFrames += frames;
++                    free -= frames;
++                    due -= frames;
++                }
++            }
++        }
++
++        private void CollectFilled()
++        {
++            int frames = 0;
++
++            while (_inFlight.TryPeek(out (AudioBuffer Buffer, int Frames) block) && _session.WasBufferFullyConsumed(block.Buffer))
++            {
++                _inFlight.Dequeue();
++                _session.UnregisterBuffer(block.Buffer);
++                frames += block.Frames;
++            }
++
++            if (frames > 0)
++            {
++                _write = (_write + frames) % _capacity;
++                _memory.Write(Buffer + ExternalOutputStream.ClientBlockOffset + ExternalOutputStream.IndexOffset, (uint)_write);
++                DataEvent?.Signal();
++            }
++        }
++
++        public void Close()
++        {
++            Detach();
++
++            lock (_lock)
++            {
++                _session?.Dispose();
++                _session = null;
++            }
++        }
++
++        public void Dispose()
++        {
++            Close();
++        }
++    }
++
+     partial class AudioSystemMixerUserSessionManager : IServiceObject
+     {
+         private readonly ExternalStreamRegistry _registry;
+@@ -388,6 +667,10 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+         private const uint FlagClientWrites = 0x4;
+         private const uint FlagKnownMask = 0x24;
+ 
++        // 输入流（InputStreamImpl::Open 0x1f6984：CreateStream 标志恒 2）：低 3 位 = 2 是「服务端写、客户端读」（客户端 ReadStream 只认输入方向）。
++        //   时之笛只发 2；别的位语义不知道 → 报红
++        private const uint FlagServerWrites = 0x2;
++
+         private readonly ExternalStreamRegistry _registry;
+         private readonly IVirtualMemoryManager _memory;
+         private int _processHandle;
+@@ -413,18 +696,20 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+             ulong size,
+             [ClientProcessId] ulong pid)
+         {
+-            if (device != AudioDeviceManagerUserSession.VirtualOutputDeviceToken)
+-            {
+-                throw new NotImplementedException($"audsmx:u IUserSession 1：设备 {device} 不是 devmgr 401 回给客户端的本机虚拟输出设备");
+-            }
++            bool output = device == AudioDeviceManagerUserSession.VirtualOutputDeviceToken && (flags & 7) == FlagClientWrites && (flags & ~FlagKnownMask) == 0;
++            bool input = device == AudioDeviceManagerUserSession.VirtualInputDeviceToken && flags == FlagServerWrites;
+ 
+-            if ((flags & 7) != FlagClientWrites || (flags & ~FlagKnownMask) != 0)
++            if (!output && !input)
+             {
+-                throw new NotImplementedException($"audsmx:u IUserSession 1：标志 0x{flags:X}（只认输出流 0x4 / 0x24，其余位语义不知道）");
++                throw new NotImplementedException($"audsmx:u IUserSession 1：设备 {device}、标志 0x{flags:X}（只认 devmgr 401 回的本机虚拟输出设备 {AudioDeviceManagerUserSession.VirtualOutputDeviceToken} + 输出流 0x4 / 0x24、" +
++                    $"虚拟输入设备 {AudioDeviceManagerUserSession.VirtualInputDeviceToken} + 输入流 0x2，其余组合语义不知道）");
+             }
+ 
+             int length = name.IndexOf((byte)0);
+-            ExternalOutputStream impl = new(_registry.OutputManager, _memory, buffer, size, Encoding.ASCII.GetString(length < 0 ? name : name[..length]));
++            string streamName = Encoding.ASCII.GetString(length < 0 ? name : name[..length]);
++            IExternalStream impl = output
++                ? new ExternalOutputStream(_registry.OutputManager, _memory, buffer, size, streamName)
++                : new ExternalInputStream(_registry.InputDriver, _memory, buffer, size, streamName);
+ 
+             streamId = _registry.Add(impl);
+             stream = new AudioSystemMixerExternalStreamSession(_registry, streamId, impl);
+@@ -445,21 +730,21 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+     partial class AudioSystemMixerExternalStreamSession : IServiceObject, IDisposable
+     {
+         // AcquireStreamDataEvent 的通知方式：输出流 / 输入流 / 注入都发 2，OutputRecorder 发 1
+-        private const uint NotificationModeOutput = 2;
++        private const uint NotificationModeStream = 2;
+ 
+         private readonly ExternalStreamRegistry _registry;
+         private readonly uint _id;
+-        private readonly ExternalOutputStream _impl;
++        private readonly IExternalStream _impl;
+         private bool _disposed;
+ 
+-        public AudioSystemMixerExternalStreamSession(ExternalStreamRegistry registry, uint id, ExternalOutputStream impl)
++        public AudioSystemMixerExternalStreamSession(ExternalStreamRegistry registry, uint id, IExternalStream impl)
+         {
+             _registry = registry;
+             _id = id;
+             _impl = impl;
+         }
+ 
+-        // 0 OpenStream：in StreamFormat @0、s32 帧数 @0xc（环容量 − 1）、s32 @0x10（客户端拿它当写指针初值，输出流恒 0）、u32 标志 @0x14；只回结果码
++        // 0 OpenStream：in StreamFormat @0、s32 帧数 @0xc（环容量 − 1）、s32 @0x10（客户端拿它当写指针初值，输出 / 输入流都恒 0）、u32 标志 @0x14；只回结果码
+         [CmifCommand(0)]
+         public Result OpenStream(StreamFormat format, int frameCount, int initialWriteIndex, uint flags)
+         {
+@@ -494,13 +779,14 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+ 
+         // 7 AcquireStreamDataEvent：in u32 通知方式 @0、s32 @4（OutputStreamImpl::Open 传游戏给的第 2 个帧数，游戏都给「缓冲帧数 − 1~5 ms」）；回复制句柄 1 个。
+         //   方式 2 的确切触发条件不知道（可写帧数到阈值？每消费阈值帧？）。本实现：服务端每推进一次读指针就触发——是任一种真机条件的超集：
+-        //   等它的游戏（时之笛音频框架线程无超时 WaitSystemEvent 后查可写帧数）只会多醒、不会少醒。别的方式报红
++        //   等它的游戏（时之笛音频框架线程无超时 WaitSystemEvent 后查可写帧数）只会多醒、不会少醒。输入流同样发方式 2（InputStreamImpl::Open 0x1f69c0），
++        //   本实现每推进一次写指针就触发。别的方式报红
+         [CmifCommand(7)]
+         public Result AcquireStreamDataEvent([CopyHandle] out int eventHandle, uint mode, int threshold)
+         {
+-            if (mode != NotificationModeOutput || !_impl.IsOpen || _impl.DataEvent != null)
++            if (mode != NotificationModeStream || !_impl.IsOpen || _impl.DataEvent != null)
+             {
+-                throw new NotImplementedException($"audsmx:u IExternalStreamSession 7：方式 {mode}、阈值 {threshold}、流{(_impl.IsOpen ? "" : "没")}打开、{(_impl.DataEvent != null ? "已领过事件" : "未领事件")}（只实现输出流的方式 2）");
++                throw new NotImplementedException($"audsmx:u IExternalStreamSession 7：方式 {mode}、阈值 {threshold}、流{(_impl.IsOpen ? "" : "没")}打开、{(_impl.DataEvent != null ? "已领过事件" : "未领事件")}（只实现输出 / 输入流的方式 2）");
+             }
+ 
+             _impl.DataEvent = new AudioEvent();

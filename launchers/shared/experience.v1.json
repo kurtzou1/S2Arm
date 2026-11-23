@@ -790,6 +790,9 @@
       {"id": "fps_cap_body", "macro": "S2A_DPROMPT_FPS_CAP_BODY", "zh-Hans": "这一局跑不稳 60 帧，已先回到原生帧率；下次开游戏会重新从 60 帧开始。", "en": "This session can't hold 60 FPS steadily, so the game is back at its native frame rate for now. It starts at 60 FPS again the next time you open the game."},
       {"id": "fps_cap_retry", "macro": "S2A_DPROMPT_FPS_CAP_RETRY", "zh-Hans": "再试 60 帧", "en": "Try 60 FPS again"},
       {"id": "fps_cap_back", "macro": "S2A_DPROMPT_FPS_CAP_BACK", "zh-Hans": "60 帧已恢复。", "en": "60 FPS is back."},
+      {"id": "mic_title", "macro": "S2A_DPROMPT_MIC_TITLE", "zh-Hans": "麦克风", "en": "Microphone"},
+      {"id": "mic_denied", "macro": "S2A_DPROMPT_MIC_DENIED", "zh-Hans": "游戏想用麦克风，但 S2Arm 没有麦克风权限，游戏只会收到静音。可到「系统设置 › 隐私与安全性 › 麦克风」打开 S2Arm，重开游戏后生效。", "en": "The game wants the microphone, but S2Arm has no microphone permission, so the game only hears silence. Turn on S2Arm in System Settings › Privacy & Security › Microphone, then reopen the game."},
+      {"id": "mic_failed", "macro": "S2A_DPROMPT_MIC_FAILED", "zh-Hans": "游戏想用麦克风，但这台电脑上没有能用的收音设备，游戏只会收到静音。", "en": "The game wants the microphone, but no usable input device was found on this computer, so the game only hears silence."},
       {"id": "nopic_title", "macro": "S2A_DPROMPT_NOPIC_TITLE", "zh-Hans": "画面没出来", "en": "No picture"},
       {"id": "nopic_body", "macro": "S2A_DPROMPT_NOPIC_BODY", "zh-Hans": "这款游戏的图形组件不完整。在电脑上用启动器重新出包并推送到手机就能解决。", "en": "This game's graphics data is incomplete. Export it again on your computer and send it to your iPhone to fix it."}
     ]

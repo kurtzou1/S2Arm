@@ -270,6 +270,9 @@
 "app.fpsCap.ladder" = "Cette session ne peut pas maintenir 60 FPS de façon stable ; le jeu revient pour l'instant à sa fréquence native. Il repartira à 60 FPS la prochaine fois que vous ouvrirez le jeu.";
 "app.fpsCap.restored" = "60 FPS est rétabli.";
 "app.fpsCap.retry" = "Réessayer 60 FPS";
+"app.mic.title" = "Micro";
+"app.mic.denied" = "Le jeu veut utiliser le micro, mais S2Arm n'a pas l'autorisation d'accès au micro : le jeu n'entend que du silence. Activez S2Arm dans Réglages › Confidentialité et sécurité › Micro, puis rouvrez le jeu.";
+"app.mic.failed" = "Le jeu veut utiliser le micro, mais le micro n'a pas pu être ouvert : le jeu n'entend que du silence.";
 "app.os180.title" = "Cette version du système plante plus souvent";
 "app.os180.body" = "Sous iOS / iPadOS 18.0, l’app se ferme dès que l’image du jeu apparaît bien plus souvent qu’en 18.1 ou plus récent. Mettre à jour dans Réglages > Général > Mise à jour logicielle vers 18.1 ou plus récent (gratuit) peut réduire ces plantages.";
 "app.lowRam.title" = "Mémoire peut-être insuffisante";

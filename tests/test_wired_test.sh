@@ -339,5 +339,18 @@ printf 'raise RuntimeError("must not execute")\n' > "$F/tests/t_unwired.py"
 o=$(fixture_lint "$F/tools/test_wired_lint.py" "$F" 2>&1); r=$?
 ck "⑪ 路由入口缺失明确报红" '[ $r = 1 ] && grep -Fq "门禁钩子发现失败" <<< "$o"'
 
+# ⑮ 负对照标记（11-23）：做负对照的单测，反证输出要包进「【负对照开始】」「【负对照结束】」（门禁红步摘要靠它剔除按设计红出的行）。期望手写：
+#   新单测提到负对照却没标记 → 报红点名；有标记 → 不报；在存量表 tools/negctl_unmarked.tsv 里 → 不报；存量表里已加标记的 → 只提示可删
+N=$T/negctl; mkdir -p "$N/tools" "$N/tests"; cp "$H/tools/test_wired_lint.py" "$H/tools/gate_decl.py" "$H/tools/gate_route.py" "$N/tools/"
+printf 'printf "【负对照开始】\\n"; echo neg; printf "【负对照结束】\\n"  # 负对照\n' > $N/tests/neg_marked_test.sh
+printf '# 负对照：变异后必须红\necho mutant\n' > $N/tests/neg_new_test.sh
+printf '# negative control\necho x\n' > $N/tests/neg_old_test.sh
+printf 'tests/neg_old_test.sh\t存量\ntests/neg_marked_test.sh\t存量（已加标记）\n' > $N/tools/negctl_unmarked.tsv
+o=$(fixture_lint "$N/tools/test_wired_lint.py" "$N" 2>&1)
+ck "⑮ 新单测做负对照没标记 → 报红点名" 'grep -q "tests/neg_new_test.sh 做了负对照但反证输出没包进" <<< "$o"'
+ck "⑮ 有标记的不报" '! grep -q "tests/neg_marked_test.sh 做了负对照" <<< "$o"'
+ck "⑮ 存量表里的不报" '! grep -q "tests/neg_old_test.sh 做了负对照" <<< "$o"'
+ck "⑮ 存量表里已加标记的只提示可删" 'grep -q "negctl_unmarked.tsv 里的 tests/neg_marked_test.sh 已加标记" <<< "$o"'
+
 [ $bad = 0 ] && echo "test_wired 单测全过" || { echo "$o" | head -20; echo "test_wired 单测有不通"; }
 exit $bad

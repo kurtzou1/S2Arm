@@ -52,6 +52,13 @@ extern "C" {
 #define S2A_DPROMPT_FPS_CAP_RETRY_EN "Try 60 FPS again"
 #define S2A_DPROMPT_FPS_CAP_BACK    "60 帧已恢复。"
 #define S2A_DPROMPT_FPS_CAP_BACK_EN "60 FPS is back."
+// 麦克风不可用（#2151，macos/front_mac.m s2a_mic_notice；iOS 用 ios/l10n 的 app.mic.*）：游戏要用麦克风（如吹奏 / 哼唱识别），收不到声音时说清原因与去处
+#define S2A_DPROMPT_MIC_TITLE       "麦克风"
+#define S2A_DPROMPT_MIC_TITLE_EN    "Microphone"
+#define S2A_DPROMPT_MIC_DENIED      "游戏想用麦克风，但 S2Arm 没有麦克风权限，游戏只会收到静音。可到「系统设置 › 隐私与安全性 › 麦克风」打开 S2Arm，重开游戏后生效。"
+#define S2A_DPROMPT_MIC_DENIED_EN   "The game wants the microphone, but S2Arm has no microphone permission, so the game only hears silence. Turn on S2Arm in System Settings › Privacy & Security › Microphone, then reopen the game."
+#define S2A_DPROMPT_MIC_FAILED      "游戏想用麦克风，但这台电脑上没有能用的收音设备，游戏只会收到静音。"
+#define S2A_DPROMPT_MIC_FAILED_EN   "The game wants the microphone, but no usable input device was found on this computer, so the game only hears silence."
 // 实体手柄退出游戏（#276，macos/front_mac.m；按住 Home 2 秒或「+」「-」同按 2 秒弹出，按 A 退出、按 B 回到游戏）
 #define S2A_DPROMPT_HOME_QUIT_TITLE   "退出游戏？"
 #define S2A_DPROMPT_HOME_QUIT_TITLE_EN "Quit game?"

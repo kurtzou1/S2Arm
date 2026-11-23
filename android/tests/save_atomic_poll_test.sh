@@ -34,5 +34,5 @@ build mutant "$out/mutant.c" -I "$repo/runtime/src"
 if "$out/mutant" > "$out/mutant.log" 2>&1; then
     cat "$out/mutant.log"; echo "✗ save_atomic_poll 负对照：缺出口答 0 仍全绿"; exit 1
 fi
-grep '不符' "$out/mutant.log" | head -3
+echo '【负对照开始】'; grep '不符' "$out/mutant.log" | head -3; echo '【负对照结束】'   # 变异按设计红出的「例不符」不进门禁红步摘要（11-23）
 echo "✓ save_atomic_poll 负对照：缺出口答 0 → 缺出口用例红"

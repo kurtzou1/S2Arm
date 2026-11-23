@@ -1,5 +1,5 @@
 // 签名证书进游戏状态（ios/sign_state.m）单测，Mac 上跑。期望照 cmdr 走查「第 2 支期望」表手写，不跑被测实现算：
-//   每款签名状态 s2a_sign_state_at（情形 1–16；14 / 15 = LiveContainer 里，15 = 它那张 S2Arm 解不开；16 = 登记着、钥匙串里没有身份）、挑现用证书 s2a_cert_settle（导入别的团队的证书不顶掉能用的）、
+//   每款签名状态 s2a_sign_state_at（情形 1–17；17 = LiveContainer 里没有 app.json；14 / 15 = LiveContainer 里，15 = 它那张 S2Arm 解不开；16 = 登记着、钥匙串里没有身份）、挑现用证书 s2a_cert_settle（导入别的团队的证书不顶掉能用的）、
 //   证书登记表 certs.tsv（runtime/src/selfsign.c 导入成功时记：同一张不重复；钥匙串换成桩，不碰本机钥匙串）
 #import <Foundation/Foundation.h>
 #import <Security/Security.h>
@@ -108,7 +108,14 @@ int main(void) { @autoreleasepool {
     ck(st(1) == 1, @"15 同上、点开始被拒过 → 仍是 1（不是 5）");
     certs(rowA1); ck(st(0) == 0, @"15 解不开、但 S2Arm 导入了同团队能用的 → 0");
     certs(rowB1); ck(st(0) == 2, @"15 解不开、S2Arm 只导入了别的团队的 → 2");
+    // 17 LiveContainer 里没有 app.json（App 是 LiveContainer 装的，团队判不了；#502 / D-92TD）：它的证书解不开、S2Arm 没导 → 1（原 5「去电脑更新」）；
+    //   导了一张 → 照旧不预判（0，被拒 5）；它的证书解得开 → 照旧 0
+    reset(); cat(unsigned_); ck(st(0) == 1 && st(1) == 1, @"17 LiveContainer、没有 app.json、它的证书解不开、S2Arm 没导 → 1（被拒也是 1）");
+    certs(rowA1); ck(st(0) == 0 && st(1) == 5, @"17 同上但 S2Arm 导了一张 → 0、被拒 5");
+    g_lc_p12 = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:@"a1.p12"]];
+    reset(); cat(unsigned_); ck(st(0) == 0 && st(1) == 5, @"17 LiveContainer、没有 app.json、它的证书解得开 → 0、被拒 5（不变）");
     s2a_lc_cert_test(NULL);
+    reset(); cat(unsigned_); ck(st(1) == 5, @"17 不在 LiveContainer 里、没有 app.json、被拒 → 5（不变）");
     // 16 登记表 / current.json 记着、钥匙串里却没有它的签名身份（11-22 D-4GCZ：起局重签「钥匙串里没有证书 … 的签名身份」，原先判 5「只能回电脑重装」，回电脑重下两遍无效）
     g_kc_missing = A1;
     reset(); app(@"TEAMAAAAAA", @[A1]); certs(rowA1); cat(unsigned_); ck(st(0) == 1, @"16 能用的那张钥匙串里没有身份 → 1 需要签名证书（原 0）");

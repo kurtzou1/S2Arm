@@ -105,15 +105,17 @@ class PushGameTests(JobCase):
                     return None, ""
                 except install.Failure as e:
                     return e.code, str(e)
-        for have, bid, words in [("0.6.2", "io.s2arm.games.qb6bcfamys", "更新 S2Arm"), ("0.6.4", "com.kdt.livecontainer.ABC", "重新装一次")]:
+        # D-8MVS：包名带 io.s2arm.games 前缀的（AltStore / SideStore 装的也保留这个前缀）同样指向总控台上真有的「导出 S2Arm.ipa」，不再叫玩家点不存在的「更新 S2Arm」
+        for have, bid in [("0.6.2", "io.s2arm.games.qb6bcfamys"), ("0.6.4", "com.kdt.livecontainer.ABC")]:
             code, msg = run(have, bid)
-            self.assertEqual(code, "phone_app_outdated", have); self.assertIn(words, msg); self.assertIn(have, msg); self.assertIn("0.6.7", msg)
+            self.assertEqual(code, "phone_app_outdated", have); self.assertIn("重新装一次", msg); self.assertIn("S2Arm.ipa", msg); self.assertNotIn("更新 S2Arm", msg)
+            self.assertIn(have, msg); self.assertIn("0.6.7", msg)
             self.assertEqual(self.pushed, [], f"{have} 没确认不推")
             code, msg = run(have, bid, accept=True)
             self.assertNotIn(code, ("phone_app_outdated", "phone_app_incompatible"), f"{have} 确认后照推：{msg}")
             self.assertEqual([g for g, *_ in self.pushed], [[GID]], f"{have} 确认后推了这一款")
         code, msg = run("0.6.2", "io.s2arm.games.qb6bcfamys", accept=True, since="0.6.5")
-        self.assertEqual(code, "phone_app_incompatible", "早于接口起始版：确认了也拦"); self.assertIn("读不了", msg)
+        self.assertEqual(code, "phone_app_incompatible", "早于接口起始版：确认了也拦"); self.assertIn("读不了", msg); self.assertNotIn("更新 S2Arm", msg)
         self.assertEqual(self.pushed, [], "不兼容不推")
         for have in ("0.6.7", "0.6.8", None):
             self.ph.app_version = have

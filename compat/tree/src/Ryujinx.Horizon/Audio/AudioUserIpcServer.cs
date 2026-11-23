@@ -46,7 +46,8 @@ namespace Ryujinx.Horizon.Audio
             _serverManager.RegisterObjectForServer(new NativeAudioManager(audioInManager, audioOutManager, audioRendererManager), ServiceName.Encode("aud:u"), MaxSessionsCount);
             // S2Arm：Switch 2 的虚拟音频设备管理 auddmg:u（Sdk/Audio/Detail/AudioDeviceManager.cs）与系统混音器外部流 audsmx:u
             //   （Sdk/Audio/Detail/AudioSystemMixer.cs），两边按流号共用一份登记；外部流的声音交宿主声音输出（同 audout:u 的输出管理）
-            ExternalStreamRegistry externalStreams = new(_managers.AudioOutputManager);
+            //   输入流（麦克风，#2151）向宿主声音驱动直接要收音会话（同一个驱动，经兼容层：不支持收音的后端给静音）
+            ExternalStreamRegistry externalStreams = new(_managers.AudioOutputManager, HorizonStatic.Options.AudioDeviceDriver);
             _serverManager.RegisterObjectForServer(new AudioDeviceManagerUserSessionManager(externalStreams), ServiceName.Encode("auddmg:u"), MaxSessionsCount);
             _serverManager.RegisterObjectForServer(new AudioSystemMixerUserSessionManager(externalStreams), ServiceName.Encode("audsmx:u"), MaxSessionsCount);
         }

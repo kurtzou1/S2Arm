@@ -63,6 +63,9 @@ static int fails;
 #define CHECK(c, m) do { if (!(c)) { printf("FAIL: %s (line %d)\n", m, __LINE__); fails++; } } while (0)
 
 static void set_ident(uint8_t *id, uint8_t v) { memset(id, v, 32); }
+// 墙钟只用两种方式：下沿（定时器不会提前到）和防挂死的期限。期限只在事件一直不来时才触发，
+// 负载再重也只会让等待变长、不会让它误红；「有没有排进第二次等待」「是不是走了超时返回」这类上沿一律按事件计数判。
+enum { HANG_MS = 60000 };
 static uint64_t mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
 static int wait_gate_entered(uint32_t ms) {
     struct timespec until; clock_gettime(CLOCK_REALTIME, &until);
@@ -222,9 +225,9 @@ int main(void) {
     pthread_mutex_lock(&g_mu); g_fail_next = 0; g_has_inst = 0; g_gate_hold = 1; g_gate_entered = 0; pthread_mutex_unlock(&g_mu);
     k = nvn_vk_pipe_demand_kick(&slow, idSlow, &cached);
     CHECK(k == NVK_DEMAND_PENDING, "gated build kick PENDING");
-    if (!wait_gate_entered(2000)) {
+    if (!wait_gate_entered(HANG_MS)) {
         CHECK(0, "fake build reaches deterministic gate");
-        gate_release(); nvn_vk_pipe_demand_stop(); wait_demand_idle(2000);
+        gate_release(); nvn_vk_pipe_demand_stop(); wait_demand_idle(HANG_MS);
         printf("%s (%d failures, builds=%d)\n", fails ? "RED" : "GREEN", fails, g_build_calls);
         return fails ? 1 : 0;
     }
@@ -239,33 +242,46 @@ int main(void) {
     CHECK(before.published == 0, "held generation has no published result before stop");
     int lifecycle_lock = nvn_vk_pipe_demand_test_lock_lifecycle();
     CHECK(lifecycle_lock == 0, "test holds lifecycle serialization for busy-stop case");
-    uint64_t busy_stop_start = mono_ns();
-    nvn_vk_pipe_demand_stop();
-    uint64_t busy_stop_ms = (mono_ns() - busy_stop_start) / 1000000ull;
+    const uint64_t busy_before = nvn_vk_pipe_demand_test_stop_busy_returns();
+    struct stop_thread_arg busy_arg = {0};
+    pthread_t busy_thread;
+    int busy_started = pthread_create(&busy_thread, NULL, stop_thread_main, &busy_arg) == 0;
+    CHECK(busy_started, "create busy-lifecycle stop thread");
+    if (busy_started) {
+        // 锁还在测试手里时 stop 就必须返回：排队等锁的实现在这里一直等不到 done
+        for (uint64_t end = mono_ns() + (uint64_t)HANG_MS * 1000000ull;
+             !atomic_load_explicit(&busy_arg.done, memory_order_acquire) && mono_ns() < end;) {
+            struct timespec ts = {0, 1000000L}; nanosleep(&ts, NULL);
+        }
+        CHECK(atomic_load_explicit(&busy_arg.done, memory_order_acquire), "stop returns while lifecycle serialization is still held");
+    }
     if (lifecycle_lock == 0) nvn_vk_pipe_demand_test_unlock_lifecycle();
-    CHECK(busy_stop_ms < 100, "stop publishes without waiting when lifecycle serialization is busy");
+    if (busy_started) pthread_join(busy_thread, NULL);
+    CHECK(nvn_vk_pipe_demand_test_stop_busy_returns() == busy_before + 1, "stop publishes without waiting when lifecycle serialization is busy");
     CHECK(nvn_vk_pipe_demand_kick(&queued, idQueued, &cached) == NVK_DEMAND_NONE, "busy-lifecycle stop closes queue admission");
 
+    const uint64_t timeouts0 = nvn_vk_pipe_demand_test_stop_timeouts();
     struct stop_thread_arg stop_arg = {0};
     pthread_t stop_thread;
     uint64_t stop_ms;
     if (pthread_create(&stop_thread, NULL, stop_thread_main, &stop_arg) == 0) {
-        int lifecycle_busy = wait_lifecycle_busy(1000);
+        int lifecycle_busy = wait_lifecycle_busy(HANG_MS);
         CHECK(lifecycle_busy, "first stop holds lifecycle serialization while waiting");
         if (lifecycle_busy) {
-            uint64_t call_start = mono_ns();
+            const uint64_t busy0 = nvn_vk_pipe_demand_test_stop_busy_returns(), deny0 = nvn_vk_pipe_demand_test_start_lock_denials();
             nvn_vk_pipe_demand_stop();
-            CHECK((mono_ns() - call_start) / 1000000ull < 100, "concurrent stop returns instead of queuing another bounded wait");
-            call_start = mono_ns();
+            CHECK(nvn_vk_pipe_demand_test_stop_busy_returns() == busy0 + 1, "concurrent stop returns instead of queuing another bounded wait");
             nvn_vk_pipe_demand_start();
-            CHECK((mono_ns() - call_start) / 1000000ull < 100, "start returns instead of queuing behind stop");
+            CHECK(nvn_vk_pipe_demand_test_start_lock_denials() == deny0 + 1, "start returns instead of queuing behind stop");
             CHECK(!nvn_vk_pipe_demand_quiescent(), "quiescence is conservatively false while lifecycle serialization is busy");
             CHECK(nvn_vk_pipe_demand_worker_count() == 1, "concurrent lifecycle calls retain the single worker");
         }
-        for (int i = 0; i < 1200 && !atomic_load_explicit(&stop_arg.done, memory_order_acquire); i++) {
+        for (uint64_t end = mono_ns() + (uint64_t)HANG_MS * 1000000ull;
+             !atomic_load_explicit(&stop_arg.done, memory_order_acquire) && mono_ns() < end;) {
             struct timespec ts = {0, 1000000L}; nanosleep(&ts, NULL);
         }
         CHECK(atomic_load_explicit(&stop_arg.done, memory_order_acquire), "first bounded stop completes while build is held");
+        if (!atomic_load_explicit(&stop_arg.done, memory_order_acquire)) gate_release();   // 等待无界的实现：放开 build 才能回收线程，不让测试挂死
         pthread_join(stop_thread, NULL);
         stop_ms = stop_arg.elapsed_ms;
     } else {
@@ -274,7 +290,11 @@ int main(void) {
         nvn_vk_pipe_demand_stop();
         stop_ms = (mono_ns() - stop_start) / 1000000ull;
     }
-    CHECK(stop_ms >= 450 && stop_ms < 1000, "stop stays bounded near 500ms while build is held");
+    // 下沿：有界等待至少等足 500 次 1 ms（定时器不会提前到）。上沿不看墙钟：build 一直被扣住，
+    //   stop 能返回本身就说明等待有界；返回的路径必须是「到点未退、保留归属」那一条（超时计数 +1）。
+    CHECK(stop_ms >= 450, "bounded stop waits for the build before giving up");
+    CHECK(nvn_vk_pipe_demand_test_stop_timeouts() == timeouts0 + 1, "stop stays bounded while build is held (takes the timeout path)");
+    printf("held-build stop: %llu ms (reading only)\n", (unsigned long long)stop_ms);
     CHECK(!nvn_vk_pipe_demand_quiescent(), "timed-out stop retains live worker ownership");
     CHECK(nvn_vk_pipe_demand_worker_count() == 1, "timed-out worker remains active");
     int builds_held = g_build_calls;
@@ -287,7 +307,7 @@ int main(void) {
 
     pthread_mutex_lock(&g_mu); g_fail_next = 1; pthread_mutex_unlock(&g_mu);
     gate_release();
-    CHECK(wait_demand_idle(2000), "late worker completion is joined before close/restart");
+    CHECK(wait_demand_idle(HANG_MS), "late worker completion is joined before close/restart");
     pthread_mutex_lock(&g_mu); int builds_after_stop = g_build_calls; pthread_mutex_unlock(&g_mu);
     CHECK(builds_after_stop == builds_held, "busy-lifecycle stop discards queued work behind active build");
     CHECK(nvn_vk_pipe_demand_worker_count() == 0, "reaped worker count returns to zero");

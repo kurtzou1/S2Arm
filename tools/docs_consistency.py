@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 S2Arm contributors
-"""Read-only checks for knowledge headings and generated collaboration policy.
+"""Read-only check that the collaboration policy in CONTRIBUTING matches the scripts.
 
 Policy values come from train.sh / contrib_check.sh, never from a second table.
 Use --render to print the block used in CONTRIBUTING.
@@ -11,11 +11,9 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
-from collections import defaultdict
 from pathlib import Path
 import re
 import sys
-import unicodedata
 
 BEGIN = '<!-- S2ARM_POLICY:BEGIN -->'
 END = '<!-- S2ARM_POLICY:END -->'
@@ -24,31 +22,6 @@ DOCUMENTS = ('CONTRIBUTING.md',)
 
 class PolicyError(ValueError):
     pass
-
-
-def headings(text):
-    """Yield level-two entry titles and one-based lines, outside code fences."""
-    fence = None
-    for number, line in enumerate(text.splitlines(), 1):
-        marker = re.match(r'^ {0,3}(`{3,}|~{3,})', line)
-        if marker:
-            token = marker[1]
-            if fence is None:
-                fence = token
-            elif token[0] == fence[0] and len(token) >= len(fence) and not line[marker.end():].strip():
-                fence = None
-            continue
-        match = re.match(r'^ {0,3}##[ \t]+(.+?)\s*$', line)
-        if fence is None and match:
-            title = re.sub(r'\s+#+\s*$', '', match[1])
-            yield ' '.join(unicodedata.normalize('NFC', title).split()), number
-
-
-def duplicate_headings(text):
-    locations = defaultdict(list)
-    for title, number in headings(text):
-        locations[title].append(number)
-    return {title: rows for title, rows in locations.items() if len(rows) > 1}
 
 
 def train_source(repo):
@@ -97,9 +70,6 @@ def policy_block(train, contrib):
 
 def check(repo):
     problems = []
-    pit = repo / 'docs/坑记录.md'
-    for title, rows in duplicate_headings(pit.read_text(encoding='utf-8')).items():
-        problems.append(f'docs/坑记录.md:{rows[0]}: 重复标题 {title}（行 {", ".join(map(str, rows))}）')
     train = train_source(repo)
     try:
         # Public checkout has no train script: markers are still checked, block content is checked by maintainers
@@ -137,7 +107,7 @@ def main():
         return 2
     for problem in problems:
         print(problem)
-    print(f'文档一致性：重复标题/规则问题 {len(problems)} 处（1份坑记录、2份规则文档）')
+    print(f'文档一致性：规则问题 {len(problems)} 处（{len(DOCUMENTS)} 份规则文档）')
     return 1 if problems else 0
 
 

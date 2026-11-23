@@ -61,6 +61,6 @@ description: S2Arm 画面问题分诊与根修：拿到「花屏 / 贴图错 / �
 - 失败记录被缓存时，一次基础设施失败可能被冻结成「判据不过」。
 
 ## 6. 交付
-PR 写清问题、根因、改动、实测（期望 → 实测表）、限制，并贴 `bash tools/contrib_check.sh` 摘要。新踩的坑按 AGENTS.md 追加到 `docs/坑记录.md`。
+PR 写清问题、根因、改动、实测（期望 → 实测表）、限制，并贴 `bash tools/contrib_check.sh` 摘要。新踩的坑按 AGENTS.md 写进 PR 正文或代码注释。
 
 NVN 接线（给一款新游戏做直连接线）另见 [nvn-wire](../nvn-wire/SKILL.md)。

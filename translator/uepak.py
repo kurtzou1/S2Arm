@@ -167,7 +167,7 @@ class OodleHost:
         try:
             self.p.stdin.write(struct.pack('<QQ', len(comp), n)); self.p.stdin.write(comp); self.p.stdin.flush()
             got = struct.unpack('<Q', self.p.stdout.read(8))[0]
-        except (BrokenPipeError, struct.error): got = None
+        except (OSError, struct.error): got = None   # 宿主已退：POSIX 报 BrokenPipe，Windows 往已关的管道写报 EINVAL（[Errno 22]）；都按宿主没了、带它的输出报
         if got == 0 and n: return None
         if got != n: raise ValueError(f'the game\'s decoder in the Mac host failed on a {len(comp)} → {n} byte stream; ---- host output ----\n' + self.output())
         self.n += 1
@@ -180,7 +180,10 @@ class OodleHost:
     def _close(p, priv):
         import shutil
         if p.poll() is None:
-            p.stdin.close()
+            # 宿主恰在 poll 之后退出时，关 stdin 冲缓冲会撞上已关的管道（Windows 报 EINVAL、POSIX 报 BrokenPipe）：收尾不能抛，
+            #   否则盖掉真正的错（D-66PR / D-C4FW 等 5 张：报错只剩 _close 里的 [Errno 22]，宿主为什么退看不到）
+            try: p.stdin.close()
+            except OSError: pass
             try: p.wait(10)
             except Exception: p.kill()
         shutil.rmtree(priv, ignore_errors=True)

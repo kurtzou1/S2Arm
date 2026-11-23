@@ -647,16 +647,25 @@ def access_facts(path):
 
 
 def read_shared(path):
-    """整份读出文件字节，打开时带 FILE_SHARE_DELETE：读的同时作业可以照常替换这份记录（读到的是替换前或替换后的完整一份）"""
-    import msvcrt
+    """整份读出文件字节，打开时带 FILE_SHARE_DELETE：读的同时作业可以照常替换这份记录（读到的是替换前或替换后的完整一份）。
+    直接 ReadFile、不经 CRT：CRT 的 _read 把它不认识的 Windows 错误码一律换成 errno 22「Invalid argument」，真因丢了
+    （D-2QSE / D-EX8J：读 catalog.json 只剩 [Errno 22]，定不了因）；这里读失败按 GetLastError 原码报（WinError 带码与系统原话、文件名）"""
     handle = _open_shared(path, _GENERIC_READ)
+    read = _api('kernel32', 'ReadFile', W.BOOL, W.HANDLE, C.c_void_p, W.DWORD, C.POINTER(W.DWORD), C.c_void_p)
+    chunk = C.create_string_buffer(1 << 20)
+    got = W.DWORD()
+    out = bytearray()
     try:
-        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
-    except BaseException:
+        while True:
+            if not read(handle, chunk, len(chunk), C.byref(got), None):
+                error = C.WinError(C.get_last_error())
+                error.filename = str(path)
+                raise error
+            if got.value == 0:   # 同步读到文件尾
+                return bytes(out)
+            out += chunk.raw[:got.value]
+    finally:
         _close(handle)
-        raise
-    with os.fdopen(fd, 'rb') as f:   # CRT 接管句柄，关文件即关句柄
-        return f.read()
 
 
 def _rename_posix(src, dst):

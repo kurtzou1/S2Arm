@@ -9,6 +9,7 @@
 //      只把两帧混合（零运动矢量）时两处各半亮、没有 > 0.8 的像素（红）。同样再跑一遍每帧右移 96 像素（超出单层搜索的 ±64，两层金字塔才追得上；单层时红）。
 //      这两遍判成切镜头 0 次。第三遍：前 8 帧同上（右移 32），第 8 帧起换成一张固定的噪点图（与竖条场景毫不相干）：判成切镜头正好 1 次（第 7→8 帧那一对），补成仍是 11
 //      第四遍（11-18）：同第一遍，倒数第二帧的交帧间隔给 1 秒、按规则不补（不补 1、补成 10，那一帧照样编码插值、不上屏，GPU 读数 11 次）；最后一对照样补出中间位置。
+//   ⑦ 旧插值器还有在途命令槽时重建：等它做完再出驻留集、放掉；2 秒还不完就留着不放（详见用例处）
 //      原先不补的帧不编码，下一对重置 MetalFX 历史，出的是这一帧原图（中心 464）；只去掉重置、不编码，又偏向前一帧（中心 435、前一帧原位全亮）。
 //      各帧交帧间隔都由单测给定（一个周期），不看墙钟：满载门禁机上墙钟间隔超 1.25 倍周期会判不补，原先时有时无地红。
 //      间隔经生产的时钟缝 FI_NOW_NS（nvn_present_fi.inc）注入：fi_frame 读的就是单测推进的假时钟；原先单测先写 last_in_ns = 墙钟 − 周期，
@@ -139,6 +140,30 @@ int main(void) { @autoreleasepool {
               CHECK(g_fi && n1 <= n0 && w0 == nil, "⑥ 画面尺寸来回变、插值器重建 20 次：驻留集对象 %lu → %lu（期望不涨）、第一套输入贴图%s（期望已释放）",
                     (unsigned long)n0, (unsigned long)n1, w0 ? "还活着" : "已释放");
               fi_release(g_fi); g_fi = nil;
+          } }
+        // ⑦ 11-23（#1449）：重建时旧插值器还有在 GPU 上跑的命令槽。模拟：占住旧对象第 1 槽（同 fi_commit 交出、完成回调还没来），
+        //   300 ms 后在别的线程放开。期望：换尺寸重建（fi_get）等到放开才返回（≥ 250 ms），返回时旧输入贴图已出驻留集；
+        //   占住一直不放（GPU 挂死）：2 秒后返回、旧输入贴图仍在驻留集、旧对象留着（弱引用不空）。修前当场出集放掉：返回 < 50 ms、贴图已出集（红）
+        { CAMetalLayer *l = [CAMetalLayer layer]; l.device = g_dev; l.pixelFormat = MTLPixelFormatBGRA8Unorm; l.drawableSize = CGSizeMake(1280, 720); l.framebufferOnly = NO;
+          g_fi = nil; NvPresentFI *f0 = fi_get(l, 1280, 720);
+          if (!f0) printf("SKIP ⑦ 本机做不了 MetalFX 补帧（fi_get 回空），跳过\n");
+          else {
+              id<MTLTexture> old_in = f0->in_tex[0]; dispatch_semaphore_t s1 = f0->slot_free[1];
+              dispatch_semaphore_wait(s1, DISPATCH_TIME_FOREVER);
+              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ dispatch_semaphore_signal(s1); });
+              f0 = nil; uint64_t t0 = now_ns();
+              @autoreleasepool { fi_get(l, 1278, 718); }
+              double ms = (now_ns() - t0) / 1e6;
+              pthread_mutex_lock(&g_res_mu); int still = [g_res_objects containsObject:old_in]; pthread_mutex_unlock(&g_res_mu);
+              CHECK(ms >= 250 && !still, "⑦ 旧插值器第 1 槽在途 300 ms：重建等了 %.0f ms（期望 ≥ 250）、旧输入贴图%s驻留集（期望已出）", ms, still ? "仍在" : "已出");
+              NvPresentFI *f1 = g_fi; old_in = f1->in_tex[0]; __weak NvPresentFI *w1 = f1; dispatch_semaphore_t s2 = f1->slot_free[1];
+              dispatch_semaphore_wait(s2, DISPATCH_TIME_FOREVER); f1 = nil; t0 = now_ns();
+              @autoreleasepool { fi_get(l, 1280, 720); }
+              ms = (now_ns() - t0) / 1e6;
+              pthread_mutex_lock(&g_res_mu); still = [g_res_objects containsObject:old_in]; pthread_mutex_unlock(&g_res_mu);
+              CHECK(ms >= 1900 && ms < 5000 && still && w1 != nil, "⑦ 旧插值器第 1 槽一直不完：重建等了 %.0f ms（期望约 2000）、旧输入贴图%s驻留集（期望仍在）、旧对象%s（期望留着）",
+                    ms, still ? "仍在" : "已出", w1 ? "留着" : "已放");
+              dispatch_semaphore_signal(s2); fi_release(g_fi); g_fi = nil;
           } }
     }
     printf("%s t_fi_link：%u 项，%u 项不符\n", failures ? "✗" : "✓", checks, failures);

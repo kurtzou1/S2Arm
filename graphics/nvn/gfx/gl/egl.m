@@ -35,6 +35,10 @@ static uint32_t g_seq_surf, g_seq_ctx;   // 表面 / 上下文的建立序号（
 static void snap_ho(const void *p, const char *fmt, ...);   // 文件尾：交给游戏的句柄按身份登记（即时存档）
 static void snap_tb_note(void);
 int nvn_gl_game_fps(void) { return __atomic_load_n(&g_gl_game_fps, __ATOMIC_RELAXED); }
+// 只读计数（单测按事件判、不量墙钟，t_fps_limit）：交换锁自己时钟这一支（没有显示链接）的限帧决定。
+//   [0] 排过节拍的交换次数 [1] 最近一次的节拍周期（ns） [2] 落后超过一拍、从现在重新对齐的次数 [3] 真睡了的次数 [4] 单次要睡的最长时长（ns）。只增不减（[1][4] 记最近 / 最大），不改行为
+static uint64_t g_gl_pace[5];
+void s2a_gl_pace_stats(uint64_t out[5]) { for (int i = 0; i < 5; i++) out[i] = __atomic_load_n(&g_gl_pace[i], __ATOMIC_RELAXED); }
 static __thread EGLenum g_api = EGL_OPENGL_ES_API;   // 当前 API 与错误码都按线程（EGL 1.5 §3.1 / §3.7）
 static __thread EGLint g_err = EGL_SUCCESS;
 static _Atomic int g_initialized;
@@ -373,9 +377,11 @@ GLB(eglSwapBuffers, EGLBoolean, EGLDisplay d, EGLSurface sf) { @autoreleasepool 
     if (per > 0 && nvn_be_link_active()) nvn_be_link_wait_tick(s->interval ? (int)s->interval : nvn_fps_limit() > 60 ? 0 : 1, (uint64_t)(2e9 * per));
     else if (per > 0) {
         struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); double now = ts.tv_sec + ts.tv_nsec * 1e-9;
-        if (s->next_swap <= 0 || now - s->next_swap > per) s->next_swap = now;
+        __atomic_fetch_add(&g_gl_pace[0], 1, __ATOMIC_RELAXED); __atomic_store_n(&g_gl_pace[1], (uint64_t)(per * 1e9 + 0.5), __ATOMIC_RELAXED);
+        if (s->next_swap <= 0 || now - s->next_swap > per) { if (s->next_swap > 0) __atomic_fetch_add(&g_gl_pace[2], 1, __ATOMIC_RELAXED); s->next_swap = now; }
         s->next_swap += per;
         double wait = s->next_swap - now;
+        if (wait > 0) { uint64_t w = (uint64_t)(wait * 1e9); __atomic_fetch_add(&g_gl_pace[3], 1, __ATOMIC_RELAXED); if (w > __atomic_load_n(&g_gl_pace[4], __ATOMIC_RELAXED)) __atomic_store_n(&g_gl_pace[4], w, __ATOMIC_RELAXED); }
         if (wait > 0) s2a_sleep_ns((int64_t)(wait * 1e9));   // 不用 nanosleep：游戏线程 utility 下定时器余量放宽、多睡上百毫秒（同 Vulkan 层 vkAcquireNextImageKHR）
     }
     // 每 300 帧一行拆账（真机定位用，10-25 测试设备2 标题页 12–16 帧/秒）：两次交换之间的墙钟 = 游戏自己（含等 GPU）+ 交换里提交 + 等上屏 + 节拍等待

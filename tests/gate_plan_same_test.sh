@@ -17,7 +17,7 @@ gc=$(git -C "$H" rev-parse --path-format=absolute --git-common-dir 2> /dev/null)
 (cd "$H" && git diff HEAD) | git apply --whitespace=nowarn 2> /dev/null
 printf '#!/bin/bash\necho "✅ 工具齐全（单测桩）"\n' > tools/doctor.sh; g add -A; g commit -q -m base --allow-empty; BASE=$(git rev-parse HEAD)
 # 改动集：文档 + 工具 + 单测 + graphics/gate.sh 负责的画面代码（会路由到钩子 graphics/gate.sh，第二层）+ tests/visual（另一个第二层钩子）
-echo x >> docs/坑记录.md; echo '# x' >> tools/gate_plan.sh; echo '# x' >> tests/gate_plan_same_test.sh
+echo x >> docs/常见问题.md; echo '# x' >> tools/gate_plan.sh; echo '# x' >> tests/gate_plan_same_test.sh
 f=$(git ls-files 'graphics/nvn/gfx/gl/*.inc' | head -1); [ -n "$f" ] && echo '// x' >> "$f"
 v=$(git ls-files 'tests/visual/*.sh' | head -1); [ -n "$v" ] && echo '# x' >> "$v"
 g add -A; g commit -q -m change
@@ -79,7 +79,7 @@ SH
   ck "Linux gfx / visual 缺数据属于第二层，不计为第一层缺工具" '[[ "$SECOND" == *"钩子 graphics/gate.sh"* && "$SECOND" == *"钩子 tests/visual/gate.sh"* && "$SKIPPED" != *"钩子 graphics/gate.sh"* && "$SKIPPED" != *"钩子 tests/visual/gate.sh"* ]]'
 fi
 # 只改文档的改动集（列车推送被拒后补跑「main 新增改动路由到的步」就这样调）：清单只有公开仓扫描，不能出现结论行（10-28 18:20 补跑把结论行当步跑、整批重做）
-DL=$(GATE_LIST=1 GATE_TIER=full GATE_CHANGED="docs/坑记录.md README.md" bash tools/gate.sh 2> /dev/null | grep -v '^路由：' | grep .)
+DL=$(GATE_LIST=1 GATE_TIER=full GATE_CHANGED="docs/常见问题.md README.md" bash tools/gate.sh 2> /dev/null | grep -v '^路由：' | grep .)
 ck "只改文档的清单只有公开仓扫描（实得 $(grep -c . <<< "$DL") 行：${DL:0:60}）" '[ "$DL" = "公开仓扫描" ]'
 # #949：期望按属主路径规则手写。读取真实列车 tier 定义，直接调用；不运行列车/队列。
 # $0 指回生产 train.sh，保证其中的同目录 source 与正式/冻结副本语义相同。
@@ -129,7 +129,7 @@ check_tier 'docs/排查/花屏与贴图错.md' tool
 check_tier 'docs/排查/notes.txt' tool
 check_tier 'skills/gfx-triage/SKILL.md' tool
 check_tier 'skills/native-triage/rules.json' tool
-check_tier 'docs/坑记录.md' doc
+check_tier 'docs/常见问题.md' doc
 check_tier 'README.md' doc
 check_tier '.github/ISSUE_TEMPLATE/bug.yml' doc
 check_tier '.github/ISSUE_TEMPLATE/request.yaml' doc
@@ -154,7 +154,7 @@ check_explicit() {
 check_explicit full 'docs/名单_60帧.tsv' full
 check_explicit doc 'docs/名单_60帧.tsv' doc
 check_explicit tool 'runtime/src/example.c' tool
-check_explicit full 'docs/坑记录.md' doc
+check_explicit full 'docs/常见问题.md' doc
 check_explicit tool '' tool
 check_explicit full '' full
 # 缺省层（11-05 门禁精简）：自检不设 GATE_LAYER = 合入前层，与列车（导出 GATE_LAYER=pre）同一清单

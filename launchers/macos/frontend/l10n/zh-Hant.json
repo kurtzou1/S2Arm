@@ -1776,6 +1776,7 @@
   "s2arm.install.teamGuide.step3": "執行成功後返回，點選「重新檢查」更新簽名狀態",
   "s2arm.install.teamGuide.failed": "未能開啟引導專案：{0}",
   "bluetooth.usage": "用於連線 Switch 2 手把。",
+  "microphone.usage": "遊戲要用麥克風（如哼唱、吹氣）時收音。",
   "s2arm.controller.status.bluetoothDenied": "未允許藍牙",
   "s2arm.controller.button.allowBluetooth": "允許藍牙",
   "s2arm.controller.settings": "設定",

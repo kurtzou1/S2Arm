@@ -746,13 +746,14 @@ int s2a_ios_mouse_lock_wanted(void);   // ios/mouse.m
 //   「与其他 App 混音」（#896，S2AMixWithOthers，缺省关）开 = Ambient：别的 App 的音乐 / 播客照放、和游戏混在一起，静音键只静音游戏；优先于「静音键下照样出声」
 //   游戏库设置页（S2ArmShellHost ShellSettingsView「声音」）也能改：库与游戏同一进程，改完不经过回前台，听偏好变更即设（只在这两个值真变了才设）
 static atomic_int g_audio_play = -1;   // 上次按哪组值设的（静音键下出声 | 混音 << 1；-1 = 还没设过）
+// 正在用麦克风的收音会话数（#2151，s2a_mic_begin / s2a_mic_end）：> 0 时类别 = PlayAndRecord（只有它能收音；外放走扬声器、不走听筒，
+//   混音开关照旧带上），用完回到上面三选一。收音期间静音键不静音游戏（PlayAndRecord 不跟随静音键）
+static atomic_int g_mic_users;
 static int audio_choice(void) { NSUserDefaults *d = NSUserDefaults.standardUserDefaults; return [d boolForKey:@"S2APlayInSilentMode"] | [d boolForKey:@"S2AMixWithOthers"] << 1; }
-static void audio_category_apply(void) {
-    int choice = audio_choice(); BOOL play = choice & 1, mix = (choice >> 1) & 1;
-    atomic_store(&g_audio_play, choice);
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+static void audio_category_set(int choice) {
+        BOOL play = choice & 1, mix = (choice >> 1) & 1, mic = atomic_load(&g_mic_users) > 0;
         AVAudioSession *s = AVAudioSession.sharedInstance;
-        NSString *want = mix ? AVAudioSessionCategoryAmbient : play ? AVAudioSessionCategoryPlayback : AVAudioSessionCategorySoloAmbient;
+        NSString *want = mic ? AVAudioSessionCategoryPlayAndRecord : mix ? AVAudioSessionCategoryAmbient : play ? AVAudioSessionCategoryPlayback : AVAudioSessionCategorySoloAmbient;
         // 每次（起局 / 回前台 / 改设置）记一行现状：「没声音」类诊断据此判是不是跟随静音键的类别、声音去了哪个输出、系统音量是不是 0
         //   （D-N6G7 等：管线满、设备照常播完，看不出声音被谁吞了；静音拨片本身的状态系统不给读，类别 SoloAmbient / Ambient 才会被它静音）
         { NSMutableString *outs = [NSMutableString string];
@@ -761,11 +762,54 @@ static void audio_category_apply(void) {
           LOG("[声] 音频会话现状：类别 %s（%s）、输出 %s、系统音量 %.0f%%", cat.UTF8String ?: "?",
               [cat isEqualToString:AVAudioSessionCategoryPlayback] ? "不跟随静音键" : "跟随静音键：拨到静音就没声音", outs.length ? outs.UTF8String : "无", s.outputVolume * 100.0); }
         if ([s.category isEqualToString:want]) return;
-        NSError *e = nil; BOOL ok = [s setCategory:want error:&e];
-        LOG("[声] 音频会话类别 → %s（%s）%s%s", mix ? "Ambient" : play ? "Playback" : "SoloAmbient", mix ? "与其他 App 混音、静音键只静音游戏" : play ? "静音键下照样出声" : "跟随静音键",
+        NSError *e = nil;
+#if TARGET_OS_TV   // 电视不收音（g_mic_users 恒 0），也没有「外放走扬声器」这个选项
+        BOOL ok = [s setCategory:want error:&e];
+#else
+        BOOL ok = mic ? [s setCategory:want withOptions:AVAudioSessionCategoryOptionDefaultToSpeaker | AVAudioSessionCategoryOptionAllowBluetoothA2DP |
+                                                        (mix ? AVAudioSessionCategoryOptionMixWithOthers : 0) error:&e]
+                      : [s setCategory:want error:&e];
+#endif
+        LOG("[声] 音频会话类别 → %s（%s）%s%s", mic ? "PlayAndRecord" : mix ? "Ambient" : play ? "Playback" : "SoloAmbient",
+            mic ? "游戏在用麦克风" : mix ? "与其他 App 混音、静音键只静音游戏" : play ? "静音键下照样出声" : "跟随静音键",
             ok ? "" : "，设不上：", ok ? "" : e.localizedDescription.UTF8String ?: "?");
-    });
 }
+static void audio_category_apply(void) {
+    int choice = audio_choice();
+    atomic_store(&g_audio_play, choice);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ audio_category_set(choice); });
+}
+#if !TARGET_OS_TV   // 电视没有麦克风收音：走 runtime/src/game_volume.c 的弱定义
+// 麦克风（#2151，C# AppleHardwareDeviceSessionInput 调，任意线程）：查 / 申请录音权限，收音期间会话类别切到 PlayAndRecord（同步切：调用方随后就建收音队列）。
+//   权限：0 已授权 / 1 拒绝 / 2 还没问（发起询问，系统弹窗；答复前收音会话按静音给游戏、每个缓冲重查一次，给了就起队列）
+int s2a_mic_state(void) {
+    switch (AVAudioApplication.sharedInstance.recordPermission) {
+        case AVAudioApplicationRecordPermissionGranted: return 0;
+        case AVAudioApplicationRecordPermissionDenied: return 1;
+        default: return 2;
+    }
+}
+void s2a_mic_notice(int reason);
+int s2a_mic_begin(void) {
+    atomic_fetch_add(&g_mic_users, 1);
+    audio_category_set(audio_choice());
+    int st = s2a_mic_state();
+    if (st == 1) s2a_mic_notice(1);
+    if (st == 2) [AVAudioApplication requestRecordPermissionWithCompletionHandler:^(BOOL granted) {
+        LOG("[声] 麦克风权限询问：玩家%s", granted ? "允许" : "拒绝"); if (!granted) s2a_mic_notice(1); }];
+    return st;
+}
+void s2a_mic_end(void) {
+    if (atomic_fetch_sub(&g_mic_users, 1) == 1) audio_category_set(audio_choice());
+}
+// 收不到声音时告诉玩家（各原因每次启动只说一次）：1 没有麦克风权限（去「设置 › 隐私与安全性 › 麦克风」）、2 收音设备打不开
+void s2a_mic_notice(int reason) {
+    static atomic_int said;
+    if (atomic_fetch_or(&said, 1 << reason) & (1 << reason)) return;
+    LOG("[声] 麦克风不可用：%s", reason == 1 ? "没有麦克风权限" : "收音设备打不开");
+    dispatch_async(dispatch_get_main_queue(), ^{ s2a_dprompt_notice(S2AL(@"app.mic.title"), reason == 1 ? S2AL(@"app.mic.denied") : S2AL(@"app.mic.failed"), 0, 10); });
+}
+#endif
 - (BOOL)application:(UIApplication *)app didFinishLaunchingWithOptions:(NSDictionary *)opts {
     display_focus_publish(app.applicationState == UIApplicationStateActive);
     // 壳号进起局日志（冒烟与真机局据此核「跑的是不是本版壳」：机上 App 包的 Info.plist 外部读不到，devicectl 只给版本号）

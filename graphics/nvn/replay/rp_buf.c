@@ -572,7 +572,12 @@ static int resolve_locked(uint64_t addr, uint64_t len, const uint8_t *mem, uint6
     }
     return ok;
 }
+// 宿主用例的替身钩子（弱符号，生产里没有实现）：返回非 0 时解析一律失败，
+// 用来构造「准备阶段给不出镜像」这条只能靠故障注入覆盖的路径。
+int rp_test_buf_resolve_block(void) __attribute__((weak));
+
 int rp_buf_resolve(nvn_gpu_cmd c, uint64_t addr, uint64_t len, nvn_gpu_buf *buf, uint64_t *off) {
+    if (rp_test_buf_resolve_block && rp_test_buf_resolve_block()) return 0;
     (void)c;
     const uint8_t *mem; uint64_t size;
     if (!len || !rp_pool_find(addr, len, &mem, &size)) { nvn_unimpl("buf", "address_outside_pools", (const void *)(uintptr_t)addr); return 0; }

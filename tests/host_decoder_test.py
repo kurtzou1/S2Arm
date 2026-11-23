@@ -121,6 +121,29 @@ with tempfile.TemporaryDirectory() as t:
     os.environ['DM_OODLE_HOST'] = str(Path(t, 'bin/s2arm-host')); Path(t, 'bin/s2arm-host').write_bytes(b'')
     chk('⑪ oodle_host_find：Mac 宿主照旧要 main.fixups.tsv', True, uepak.oodle_host_find(str(x / 'romfs'))[0] is None)
     del os.environ['DM_OODLE_HOST']
+    # ⑭ 宿主先退（D-66PR 等：Windows 往已关的管道写 / 冲缓冲报 EINVAL [Errno 22]，POSIX 报 BrokenPipe）：收尾不抛、私有目录照删；
+    #   解码报「宿主解码失败 + 宿主输出」而不是裸 OSError。替身管道按 Windows 的报法抛 OSError(22)
+    import tempfile as _tf
+    class DeadPipe:
+        def write(self, b): raise OSError(22, 'Invalid argument')
+        def flush(self): raise OSError(22, 'Invalid argument')
+        def close(self): raise OSError(22, 'Invalid argument')
+    class Proc:
+        def __init__(self): self.stdin, self.waited, self.killed = DeadPipe(), False, False
+        def poll(self): return None
+        def wait(self, t): self.waited = True
+        def kill(self): self.killed = True
+    proc, priv = Proc(), _tf.mkdtemp(prefix='oodle-host-test-')
+    try: uepak.OodleHost._close(proc, priv); got = 'ok'
+    except OSError as e: got = f'OSError {e.errno}'
+    chk('⑭ 宿主已退时收尾：不抛 / 仍等进程 / 私有目录删掉', ('ok', True, False), (got, proc.waited, os.path.isdir(priv)))
+    h = uepak.OodleHost.__new__(uepak.OodleHost); h.p, h.err, h.n = Proc(), _tf.TemporaryFile(), 0
+    h.err.write('宿主最后一行：模块加载失败'.encode()); h.err.flush()
+    try: h.decode(b'x' * 16, 64); got = 'ok'
+    except ValueError as e: got = ('ValueError', 'failed on a 16 → 64 byte stream' in str(e), '宿主最后一行' in str(e))
+    except OSError as e: got = f'OSError {e.errno}'
+    chk('⑭ 宿主已退时解码：报解码失败并带宿主输出（不是裸 OSError）', ('ValueError', True, True), got)
+    h.err.close()
 
 class FakeG:   # glslc_offline 替身：need() / all_sources() 的答案由夹具给，记下 all_sources 被调过没有
     def __init__(self, mod, srcs): self.mod, self.srcs, self.asked = mod, srcs, False

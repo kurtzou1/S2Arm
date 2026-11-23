@@ -1740,6 +1740,7 @@
   "s2arm.controller.toolbar": "コントローラー",
   "s2arm.punct.list": ", ",
   "bluetooth.usage": "Switch 2 コントローラーの接続に使用します。",
+  "microphone.usage": "マイクを使うゲーム(ハミングや息の吹きかけなど)があなたの声を聞けるようにします。",
   "s2arm.controller.status.bluetoothDenied": "Bluetooth が許可されていません",
   "s2arm.controller.button.allowBluetooth": "Bluetooth を許可",
   "s2arm.controller.settings": "設定",

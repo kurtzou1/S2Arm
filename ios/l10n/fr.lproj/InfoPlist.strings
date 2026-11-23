@@ -1,3 +1,4 @@
 /* S2Arm 宿主界面文字（Français）：tools/l10n_translate.py ios fr 由 en.lproj 经 Claude 翻译、按 glossary.json 固定译法、占位符逐条核对 */
 "NSLocalNetworkUsageDescription" = "Multijoueur local : trouvez d'autres appareils sur le même Wi-Fi et rejoignez la même salle.";
 "NSBluetoothAlwaysUsageDescription" = "Connectez une manette Switch 2 Pro lorsque l'option est activée dans les Réglages.";
+"NSMicrophoneUsageDescription" = "Permet aux jeux qui utilisent le micro (par exemple fredonner ou souffler) de vous entendre.";

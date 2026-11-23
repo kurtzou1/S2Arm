@@ -284,9 +284,10 @@ namespace Ryujinx.Audio.Backends.Apple
                     sampleRate = Constants.TargetSampleRate;
                 }
 
-                if (direction != Direction.Output)
+                // S2Arm（#2151）：收音（Switch 2 外部输入流 / audin:u）：AudioQueue 输入，Mac 与 iOS 同一份
+                if (direction == Direction.Input)
                 {
-                    throw new NotImplementedException("Input direction is currently not implemented on Apple backend!");
+                    return new AppleHardwareDeviceSessionInput(this, memoryManager, sampleFormat, sampleRate, channelCount);   // 平台例外：Apple 后端平台实现（收音会话，#2151）
                 }
 
                 AppleHardwareDeviceSession session = new(this, memoryManager, sampleFormat, sampleRate, channelCount);
@@ -379,7 +380,7 @@ namespace Ryujinx.Audio.Backends.Apple
         }
 
         public bool SupportsDirection(Direction direction)
-            => direction != Direction.Input;
+            => direction is Direction.Input or Direction.Output;
 
         public bool SupportsSampleRate(uint sampleRate) => true;
 

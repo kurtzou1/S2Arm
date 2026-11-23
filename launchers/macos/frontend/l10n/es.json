@@ -1740,6 +1740,7 @@
   "s2arm.controller.toolbar": "Mando",
   "s2arm.punct.list": ", ",
   "bluetooth.usage": "Se usa para conectar mandos de Switch 2.",
+  "microphone.usage": "Permite que los juegos que usan el micrófono (por ejemplo, tararear o soplar) te oigan.",
   "s2arm.controller.status.bluetoothDenied": "Bluetooth no permitido",
   "s2arm.controller.button.allowBluetooth": "Permitir Bluetooth",
   "s2arm.controller.settings": "Ajustes",

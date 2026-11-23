@@ -52,6 +52,7 @@ internal static unsafe class Program
         (nint)Native.ClockUnseen, (nint)Native.ClockRegisterCatchup,   // 10-29 #863 补时两槽
         (nint)Native.HostFocused, (nint)Native.FocusSuspendSet, (nint)Native.ConsoleMode, (nint)Native.HostSleeping,   // 接口 v2.15 焦点 / 掌机主机 / 睡眠四槽（ad04aa664、31dc875e5）
         (nint)Native.GuestFrozen,   // 接口 v2.17 客机冻结槽（49db64562 #1489）
+        (nint)Native.AppletOpenAdd,   // 接口 v2.18 系统小程序开着的个数（6032e66d9）
     ];
 
     private static uint OldHandleNew(uint kind, ulong cookie) => 88;

@@ -2733,6 +2733,47 @@ class JobsTests(unittest.TestCase):
             self.assertNotIn("合成甲", json.dumps(m, ensure_ascii=False)); self.assertNotIn("U1", json.dumps(m))   # 不记设备名、设备号
             self.assertEqual(m["files"], 3); self.assertTrue(any(x.endswith("diag/blob.bin") for x in m["skipped"]))
 
+    def test_diagnostics_export_opens_phone_diag_zips(self):
+        """D-778G：手机 App「导出诊断」生成的 diag/S2Arm-诊断-*.zip 原先整份记进 skipped（交上来的包里没有手机现场）。期望手写：
+        包里的 host.log / 崩溃报告 .ips 按成员收进 phone/…/<包名>/…、走同一套脱敏；PNG 原样收；别的成员记「包名!成员」进 skipped；
+        成员名里的 .. 去掉、不跑出 phone/；坏 zip 整份记进 skipped，不影响别的文件；files 计数 = 收进的成员数"""
+        import unittest.mock as um, diag, io as _io
+        buf = _io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("host.log", "svc_thread SIGSEGV for synth@example.invalid DEVELOPMENT_TEAM = ABCDE12345\n")
+            z.writestr("crash/S2Arm-2026-11-24.ips", '{"exception": "EXC_BAD_ACCESS", "path": "/Users/Synthetic/x"}')
+            z.writestr("shot.png", b"\x89PNG\r\n\x1a\nfake")
+            z.writestr("blob.bin", b"\0\1")
+            z.writestr("../../evil.log", "escaped?\n")
+        good, bad = buf.getvalue(), b"PK\x03\x04 not really a zip"
+        devices = {"result": {"devices": [{"identifier": "D1", "hardwareProperties": {"platform": "iOS", "udid": "U1", "marketingName": "iPhone 18 Pro Max"},
+                                           "deviceProperties": {"name": "合成乙的iPhone", "osVersionNumber": "27.3"}, "connectionProperties": {"tunnelState": "connected"}}]}}
+        apps = {"result": {"apps": [{"bundleIdentifier": "io.s2arm.games.abcde12345", "name": "S2Arm"}]}}
+        def fake(c, *args, timeout=120):
+            if args[:2] == ("list", "devices"): return 0, devices, ""
+            if args[:3] == ("device", "info", "apps"): return 0, apps, ""
+            source, target = args[args.index("--source") + 1], Path(args[args.index("--destination") + 1])
+            if source.endswith("Documents/diag"):
+                target.mkdir(); (target / "S2Arm-诊断-1124-0143.zip").write_bytes(good); (target / "S2Arm-诊断-1124-0149.zip").write_bytes(bad); return 0, {}, ""
+            return 1, {}, ""
+        with um.patch.object(diag, "devicectl", fake):
+            diag.pull(self.c)
+        destination = self.root / "diagnostics.zip"; self.c.r["path"] = str(destination)
+        library.diagnostics(self.c)
+        with zipfile.ZipFile(destination) as archive:
+            names = archive.namelist()
+            inner = [n for n in names if "S2Arm-诊断-1124-0143.zip/" in n]
+            self.assertEqual(sorted(n.split("S2Arm-诊断-1124-0143.zip/")[1] for n in inner), ["crash/S2Arm-2026-11-24.ips", "evil.log", "host.log", "shot.png"], names)
+            self.assertTrue(all(n.startswith("phone/") and ".." not in n for n in inner))
+            text = archive.read(next(n for n in inner if n.endswith("/host.log"))).decode()
+            self.assertIn("svc_thread SIGSEGV", text); self.assertNotIn("synth@example.invalid", text); self.assertNotIn("ABCDE12345", text)
+            self.assertNotIn("/Users/Synthetic", archive.read(next(n for n in inner if n.endswith(".ips"))).decode())
+            self.assertEqual(archive.read(next(n for n in inner if n.endswith("/shot.png"))), b"\x89PNG\r\n\x1a\nfake")
+            m = json.loads(archive.read("manifest.json"))["phone_diagnostics"]
+            self.assertEqual(m["files"], 4)
+            self.assertTrue(any(x.endswith("S2Arm-诊断-1124-0143.zip!blob.bin") for x in m["skipped"]), m["skipped"])
+            self.assertTrue(any(x.endswith("S2Arm-诊断-1124-0149.zip") for x in m["skipped"]), m["skipped"])   # 坏 zip 整份跳过
+
     def test_diagnostics_collect_recent_mac_crash_reports(self):
         """诊断#43f7d3：宿主起局 1 秒内 SIGTRAP、没走到写日志，包里没现场。导出时收本机 ~/Library/Logs/DiagnosticReports 里我们进程的 .ips。
         期望手写：收 s2arm-host / S2ArmApple 近 7 天的两份（脱敏）；8 天前的、别的 App 的不收；超 4 MB 的跳过并写名字；manifest 计数对"""

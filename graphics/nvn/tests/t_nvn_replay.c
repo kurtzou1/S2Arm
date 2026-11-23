@@ -7800,6 +7800,64 @@ static void t_pool_stats_shutdown(void) {
     CHECK(nvn_be_shutdown_session() == 0 && g_ps_n == 1);  // 收尾后已关：再收尾不重复打
 }
 
+static int g_block_buf_resolve;   // 用例替身：非 0 时让 rp_buf_resolve 一律失败（构造「准备阶段给不出镜像」）
+int rp_test_buf_resolve_block(void) { return g_block_buf_resolve; }
+
+static void t_graphics_cbuf_prep_before_pass(void) {
+    // #2100：图形阶段常量缓冲「有 GPU 待写回」的镜像解析必须落在准备阶段（开通道之前）。
+    // 构造真机那条路：上一段提交用过镜像、GPU 还没跑完；这一段在通道里换常量缓冲再画一笔。
+    // 解析若发生在发绑定之后，同一次提交里的第二次同步要录成传输（rp_xfer_cmd 结束当前通道），
+    // 绑定与绘制就落在通道外——真机表现是整屏黑、每帧 2 笔重复帧。
+    pass_fresh(); memset(g_pmem, 0, sizeof g_pmem); nvn_be_pool_add(g_pmem, sizeof g_pmem);
+    const uint64_t base = (uint64_t)(uintptr_t)g_pmem, ub = base + PG;
+    memset(g_pmem + PG, 0x11, 512);
+    prog_t pg; memset(&pg, 0, sizeof pg); pg.magic = MAGIC('P','R','O','G'); pg.serial = 2201; pg.nstage = 2;
+    g_snap_prog = &pg; g_snap_ok = 3; memset(g_snap_keys, 0, sizeof g_snap_keys); memset(g_snap_stage, 0xff, sizeof g_snap_stage);
+    for (int i = 0; i < 2; i++) { g_snap_stage[i] = (uint8_t)i; g_snap_keys[i][0] = (uint8_t)(i + 0x41); }
+    uint64_t key = 0;
+    CHECK(rp_buf_gpu_write_note(ub, 256, &key) != 0);
+    CHECK(rp_buf_gpu_pending(ub, 256));
+    {   stream a = {0}; q_env(&a);   // 第一段：镜像被用上，GPU 还没跑完
+        g_fprog.nent[1] = 1; g_fprog.ent[1][0].cls = NVN_GPU_RES_UBO; g_fprog.ent[1][0].src_kind = NVN_RB_CBUF;
+        p_bind_program_id *id = put(&a, OP_BIND_PROGRAM, sizeof *id); id->prog = &pg; id->serial = pg.serial; id->stages = 0x1f;
+        p_bind_buf *b = put(&a, OP_BIND_UBO, sizeof *b); b->stage = 1; b->index = 0; b->addr = ub; b->size = 256;
+        q_draw(&a); end(&a); submit1(&a); }
+    g_gdraws = 0; g_bind_outside = 0; g_draw_outside = 0; g_pass_ends = 0; g_arena_used = 0;
+    {   stream s = {0}; q_env(&s);   // 第二段：通道里换常量缓冲
+        g_fprog.nent[1] = 1; g_fprog.ent[1][0].cls = NVN_GPU_RES_UBO; g_fprog.ent[1][0].src_kind = NVN_RB_CBUF;
+        p_bind_program_id *id = put(&s, OP_BIND_PROGRAM, sizeof *id); id->prog = &pg; id->serial = pg.serial; id->stages = 0x1f;
+        q_draw(&s);
+        p_bind_buf *b = put(&s, OP_BIND_UBO, sizeof *b); b->stage = 1; b->index = 0; b->addr = ub; b->size = 256;
+        q_draw(&s); end(&s);
+        submit1(&s); fake_complete(NVN_GPU_DONE_OK); }
+    CHECK(g_bind_outside == 0);                     // 没有任何绑定落在通道外（修前这里是 1）
+    CHECK(g_draw_outside == 0);
+    CHECK(g_gdraws == 2);
+    CHECK(nvn_unimpl_count("draw", "uniform_gpu_pending_unprepared") == 0);   // 准备阶段给了镜像
+
+    // 兜底：准备阶段解析失败（替身钩子）时，图形阶段不许在通道内解析，只能暂存 + 具名记账。
+    // 修前的写法会在这里现场解析，兜底场景就没有这笔账了。
+    {   g_gdraws = 0; g_bind_outside = 0; g_draw_outside = 0; g_pass_ends = 0; g_arena_used = 0;
+        pass_fresh(); memset(g_pmem, 0, sizeof g_pmem); nvn_be_pool_add(g_pmem, sizeof g_pmem);
+        memset(g_pmem + PG, 0x11, 512);
+        uint64_t k2 = 0; CHECK(rp_buf_gpu_write_note(ub, 256, &k2) != 0);
+        stream s = {0}; q_env(&s);
+        g_fprog.nent[1] = 1; g_fprog.ent[1][0].cls = NVN_GPU_RES_UBO; g_fprog.ent[1][0].src_kind = NVN_RB_CBUF;
+        p_bind_program_id *id = put(&s, OP_BIND_PROGRAM, sizeof *id); id->prog = &pg; id->serial = pg.serial; id->stages = 0x1f;
+        q_draw(&s);   // 让通道先开着
+        p_bind_buf *b = put(&s, OP_BIND_UBO, sizeof *b); b->stage = 1; b->index = 0; b->addr = ub; b->size = 256;
+        q_draw(&s); end(&s);
+        g_block_buf_resolve = 1;
+        submit1(&s);
+        g_block_buf_resolve = 0;
+        fake_complete(NVN_GPU_DONE_OK);
+        CHECK(nvn_unimpl_count("draw", "uniform_gpu_pending_unprepared") == 1);   // 具名记账：图形阶段不现场解析
+        CHECK(g_bind_outside == 0 && g_draw_outside == 0); }
+
+    g_snap_prog = NULL; pass_fresh();
+}
+
+
 int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "--dirtylog-off")) { g_dirtylog_dflt = g_flag_buf_dirtylog = 0; argc--; argv++; }   // 关那一档：整套用例走逐页退回路径
 #ifdef S2A_GPU_LAND_TEST
@@ -7961,6 +8019,7 @@ int main(int argc, char **argv) {
     t_fps_target_segments();
     t_pool_stats();
     t_frame_take_delta();
+    t_graphics_cbuf_prep_before_pass();   // 图形阶段常量缓冲的 GPU 待写回必须在开通道前解析（本 PR）
     if (argc > 1 && t_table(argv[1])) g_fail++;
     t_tex_linear_dirty_rows();   // 放在倒数第二：它推高全局上传计数，前面有用例按「从 0 起」断言
     t_pool_stats_shutdown();   // 会话收尾会复位整个回放核心：必须是最后一个用例（不看上传计数）

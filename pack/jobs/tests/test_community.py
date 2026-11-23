@@ -205,6 +205,19 @@ class CommunityTests(unittest.TestCase):
             self.c.r.update(settings=change)
             with self.assertRaises(Failure): community.save(self.c)
 
+    def test_unknown_setting_logs_request_keys(self):
+        # D-778G：settings 里带定义表里不可存的键（patches 是补丁一栏）照旧拒收；任务日志记下这次请求的设置键与取值类型、请求其他字段，诊断里看得出是哪个入口发的。期望手写
+        self.c.logs, self.c.task = self.t / "logs", "t778g"
+        self.c.r = {"gameId": GID, "settings": {"patches": {"gfx:bb": True}, "fps60": True}, "graphics": {"gfx:bb": True}}
+        with self.assertRaises(Failure) as got: community.save(self.c)
+        self.assertIn("没有这个启动设置：patches", str(got.exception))
+        log = (self.c.logs / "t778g-decisions.log").read_text(encoding="utf-8")
+        self.assertIn("设置键 patches 不是可存的设置（定义表里是 patches / game）", log)
+        self.assertIn("{'patches': 'dict', 'fps60': 'bool'}", log); self.assertIn("['gameId', 'graphics']", log)
+        self.c.r = {"gameId": GID, "settings": {"noSuchKey": 1}}
+        with self.assertRaises(Failure): community.save(self.c)
+        self.assertIn("设置键 noSuchKey 不是可存的设置（定义表里没有）", (self.c.logs / "t778g-decisions.log").read_text(encoding="utf-8"))
+
     def test_game_language(self):
         # 游戏语言（启动设置页）：跟随系统不设变量（宿主读系统首选语言）；选了哪种就把宿主枚举名交给 S2A_SYSTEM_LANGUAGE；不在表里的值拒收
         self.c.r.update(settings={"language": "system"}); community.save(self.c)
