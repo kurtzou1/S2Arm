@@ -3,7 +3,7 @@
 // iPad 触控板 / 鼠标（#1869 PR 2）：GCMouse 采按键与位移 → ios/mouse_map.h（规则同 Mac macos/front_mac.m）。
 //   鼠标键与键盘一起映射（keyboard.m publish 调 s2a_mouse_map，走同一条发布路），位移在 vpad.m 的两个读导出里加进右摇杆（同 Mac take_mouse_delta）。
 //   「转动视角」：按键模式下虚拟按键收起时，点左键请求系统指针锁定（游戏页 prefersPointerLocked 问这里），系统给了才收位移；
-//   Esc / 切后台 / 碰屏幕交回 / 切仅触屏 / 改成「不起作用」 / 开改键页都释放，回来要再点一下（同 Mac 失焦释放）。
+//   Esc / 切后台 / 碰屏幕交回 / 切仅触屏 / 改成「不起作用」 / 开改键页 / 关掉「使用鼠标 / 触控板」都释放，回来要再点一下（同 Mac 失焦释放）。
 //   不加 UIApplicationSupportsIndirectInputEvents：11-21 真机（iPadOS 27.3，妙控键盘）没有这个键时触控板点击照样是 UITouchTypeIndirectPointer、
 //   带 buttonMask，GCMouse 也照样认得出触控板，所以不碰全局开关（游戏库 / 设置等界面的触摸不受影响）。
 #import <UIKit/UIKit.h>
@@ -24,6 +24,7 @@ static _Atomic unsigned g_raw;              // 按着的鼠标键（位 i = 按�
 static _Atomic unsigned g_counted;          // 按着、算数的鼠标键（交给 keyboard.m 映射）
 static _Atomic int g_wanted, g_locked;      // 想锁 / 系统给锁了
 static _Atomic int g_camera = 1, g_left_bound = 1, g_map_default = 1, g_recenter = 1;   // keyboard.m 装键位时同步（主线程也要读）
+static _Atomic int g_off;                   // 改键页「使用鼠标 / 触控板」关掉了（#2072，同上由 keyboard.m 同步）
 static double g_sens_x = 1, g_sens_y = 1; static int g_inv_x, g_inv_y;   // 只在输入队列上读写
 static _Atomic int64_t g_acc_x, g_acc_y, g_hold_x, g_hold_y;              // 攒下的位移 / 不回中的保持量（HID 读线程消费）
 
@@ -35,6 +36,7 @@ static s2a_mouse_state current_state(void) {
         .camera = atomic_load(&g_camera),
         .declared_default = s2a_ios_touch_declared && s2a_ios_touch_declared() && atomic_load(&g_map_default),
         .left_bound = atomic_load(&g_left_bound),
+        .off = atomic_load(&g_off),
     };
     return s;
 }
@@ -90,7 +92,7 @@ static void button_changed(int b, BOOL down) {
     s2a_ios_keyboard_mouse_changed(1);
 }
 static void moved(float dx, float dy) {
-    if (!atomic_load(&g_locked) || !atomic_load(&g_camera)) return;   // 同 Mac mouseMoved：锁定且转动视角才收
+    if (!atomic_load(&g_locked) || !atomic_load(&g_camera) || atomic_load(&g_off)) return;   // 同 Mac mouseMoved：锁定且转动视角才收；关了鼠标后系统收回锁定前的几拍也不收
     s2a_input_config c = {0};
     c.sensitivity_x = g_sens_x; c.sensitivity_y = g_sens_y; c.invert_x = g_inv_x; c.invert_y = g_inv_y;
     int64_t ox, oy;
@@ -148,14 +150,18 @@ void s2a_ios_mouse_attach(UIView *root) {
 int s2a_ios_mouse_connected(void) { return atomic_load(&g_mice) > 0; }
 int s2a_ios_mouse_lock_wanted(void) { return atomic_load(&g_wanted); }
 unsigned s2a_ios_mouse_buttons(void) { return atomic_load(&g_counted); }
-// keyboard.m 装好键位时（输入队列）：同步鼠标那几项
-void s2a_ios_mouse_config(const s2a_input_config *c, int is_default) {
+// keyboard.m 装好键位时（输入队列）：同步鼠标那几项和「使用鼠标 / 触控板」开关；is_default = 没动过鼠标的用法（mouse_map.h s2a_mouse_use_default）
+void s2a_ios_mouse_config(const s2a_input_config *c, int is_default, int off) {
     int left_bound = 0;
     for (int t = 0; t < S2A_INPUT_TARGET_COUNT; t++) if (c->mouse[t] == 0) left_bound = 1;
     atomic_store(&g_camera, c->mouse_camera != 0); atomic_store(&g_left_bound, left_bound);
     atomic_store(&g_map_default, is_default); atomic_store(&g_recenter, c->recenter != 0);
     g_sens_x = c->sensitivity_x; g_sens_y = c->sensitivity_y; g_inv_x = c->invert_x; g_inv_y = c->invert_y;
-    if (!c->mouse_camera) unlock("改成不起作用");
+    atomic_store(&g_off, off != 0);
+    if (off) {   // 关掉：锁着就当场释放，按着的鼠标键放开（keyboard.m 装完键位紧接着重算一份发布）
+        unlock("关了鼠标 / 触控板");
+        atomic_store(&g_counted, 0);
+    } else if (!c->mouse_camera) unlock("改成不起作用");
 }
 // HID 读线程（vpad.m 两个读导出）：攒下的位移加进右摇杆，读一次消费一次（同 Mac take_mouse_delta）
 void s2a_ios_mouse_take(int32_t sticks[4]) {

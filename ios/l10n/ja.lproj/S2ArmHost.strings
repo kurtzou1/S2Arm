@@ -668,6 +668,8 @@
 "kbd.mouse.invertX" = "水平反転";
 "kbd.mouse.invertY" = "垂直反転";
 "kbd.mouse.recenter" = "マウス停止時に中央に戻す";
+"kbd.mouse.use" = "マウス／トラックパッドを使用";
+"kbd.mouse.offNote" = "オフ：トラックパッドのクリックは画面へのタッチと同じ扱いになり、画面上のボタンと歯車を表示できます。マウスのボタンと動きはゲームに送られません。";
 "kbd.mouseButton.0" = "左ボタン";
 "kbd.mouseButton.1" = "右ボタン";
 "kbd.mouseButton.2" = "中ボタン";

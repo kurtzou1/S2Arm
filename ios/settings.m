@@ -65,7 +65,8 @@ NSArray *s2a_ios_per_game_keys(void) {
     return @[@"S2AResolutionScale", @"S2AAntiAliasing", @"S2AScalingFilter", @"S2AFrameRateLimit", @"S2AWidescreen", @"S2AFps60",
              @"S2AFps60Manual", @"S2ADockedMode", @"S2ACommunityPatches", @"S2AWidescreenAsked", @"S2AFps60Asked", @"S2AFpsNative60", @"S2AFpsPick", S2AGameLanguageKey, @"S2AFrameInterp", @"S2AGameVolume",
              @"S2AAudioDevice", @"S2AAudioVsSpeakers", @"S2AAudioVsHeadphones",   // 输出设备类型 + 两个虚拟环绕开关（#189 后续，5.1 虚拟环绕第二片，按游戏存）
-             @"S2AKeyboardMap"];   // 外接键盘键位（ios/keyboard_settings.m，#1869）：按款存，同 Mac 启动器每款一份 input.json
+             @"S2AKeyboardMap",   // 外接键盘键位（ios/keyboard_settings.m，#1869）：按款存，同 Mac 启动器每款一份 input.json
+             @"S2AMouseOff"];     // 改键页「使用鼠标 / 触控板」关掉（#2072）：按款存，同键位一起设为所有游戏的默认
 }
 NSArray<NSString *> *s2a_ios_game_languages(void) {
     return @[@"system", @"SimplifiedChinese", @"TraditionalChinese", @"AmericanEnglish", @"BritishEnglish", @"Japanese", @"Korean", @"French", @"CanadianFrench", @"German",

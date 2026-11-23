@@ -86,6 +86,7 @@ class PickTests(unittest.TestCase):
         self.assertEqual(install.classify("The maximum number of apps for free development profiles has been reached."), "free_app_limit")   # 较早 iOS 的装机原文：说的是装上的 apps
         self.assertEqual(install.classify("This device has reached the maximum number of installed apps using a free developer profile"), "free_app_limit")   # 11-06 iOS 27 原文
         self.assertEqual(install.classify('error: No Account for Team "TEAM1".'), "xcode_account_missing")
+        self.assertEqual(install.classify("ERROR: Application verification failed: Failed to verify code signature of /var/installd/Library/Caches/com.apple.mobile.installd.staging/temp.lPRCKA/extracted/S2Arm.app : 0xe8008018 (The identity used to sign the executable is no longer valid.)"), "signing_identity_invalid")   # D-7VBE：手机不认签名证书（0xe8008018）
         # #897 免费个人团队申请了付费团队才有的权限（Xcode 原文，第一条 error；后面跟的「No profiles … were found」不该盖过它）
         self.assertEqual(install.classify('error: Cannot create a iOS App Development provisioning profile for "io.s2arm.ds.x". Personal development teams, including "T", do not support the Extended Virtual Addressing capability.'), "free_team_capability")
         self.assertEqual(install.classify("error: something else"), "signing_failed")
@@ -179,6 +180,9 @@ class ShellSdkTests(unittest.TestCase):
 
 
 _phone_games = install.phone_games   # 真的那份：下面的夹具把 install.phone_games 换成「手机上没有别的游戏」，要走真读法的用例再换回来
+
+
+_ONLINE_DEVICES = install.online_devices   # AssembleTests 的夹具把它换成空集；测它本身用原件
 
 
 def _jobs_setup_no_phone_games(self):
@@ -1144,8 +1148,13 @@ class SaveBackupTests(unittest.TestCase):
 
 class AssembleTests(unittest.TestCase):
     """现组容器（assemble）/ put_game / 手机侧 S2Arm.ipa 与上一版（commit_phone_ipa、restore_previous）/ remove_from_phone 的细粒度测试（游戏库结构 v3）"""
-    setUp = _jobs_setup_no_phone_games; tearDown = tj.JobsTests.tearDown
+    tearDown = tj.JobsTests.tearDown
     A, B, C = "0100000000010000", "0100000000020000", "0100000000030000"
+
+    def setUp(self):
+        _jobs_setup_no_phone_games(self)
+        p = um.patch.object(install, "online_devices", return_value=set())   # 不碰本机真连着的手机（Mac 走 devicectl）
+        p.start(); self.addCleanup(p.stop)
     COMPAT = dict(hostAbi=1, dmshChain="aaaa")   # 替身：本版引擎（新宿主）的兼容判据
 
     def _library(self, *games):
@@ -1374,15 +1383,30 @@ class AssembleTests(unittest.TestCase):
         with um.patch.object(packer, "current_shell_id", return_value="SID1"):
             self.assertEqual(install.phone_updates(self.c), [])
 
-    def test_phone_updates_connected_one_first(self):
-        """D-XYNG：游戏库里两台壳都旧（dev1 不在线、dev2 连着）→ 连着的那台排第一（两个启动器的更新按钮都取第一条，原先按文件名排、永远去找不在线的 dev1）；
-        设备服务给的写法与记录键差在短横 / 大小写也认（同 win_udid 的 udid_key）；没有在线的 → 原顺序"""
+    def test_phone_updates_connected_only(self):
+        """D-XYNG / D-Z622：游戏库里两台壳都旧（dev1 不在线、dev2 连着）→ 只列连着的 dev2（两个启动器的更新按钮都取第一条、提示看列表空不空：
+        原先按文件名排、永远去找不在线的 dev1）；连着的那台已是本版、旧的那台不在线 → 空（不再一直提示更新）；
+        设备服务给的写法与记录键差在短横 / 大小写也认（同 win_udid 的 udid_key）；一台都没连 → 照旧全列"""
         self._update()
         layout.save_device(self.c, "dev2", dict(layout.load_device(self.c, "dev1"), shellId="SID1"))
         with um.patch.object(install, "online_devices", return_value={"DEV2"}):
-            self.assertEqual([u["device"] for u in install.phone_updates(self.c)], ["dev2", "dev1"])
+            self.assertEqual([u["device"] for u in install.phone_updates(self.c)], ["dev2"])
+        layout.save_device(self.c, "dev2", dict(layout.load_device(self.c, "dev1"), shellId="SID2"))
+        with um.patch.object(install, "online_devices", return_value={"DEV2"}):
+            self.assertEqual(install.phone_updates(self.c), [])
         with um.patch.object(install, "online_devices", return_value=set()):
-            self.assertEqual([u["device"] for u in install.phone_updates(self.c)], ["dev1", "dev2"])
+            self.assertEqual([u["device"] for u in install.phone_updates(self.c)], ["dev1"])
+
+    def test_online_devices_mac_reads_devicectl(self):
+        """D-Z622：Mac 也读在线设备（原先直接给空集，连着的排前 / 只列连着的在 Mac 上全不生效）：有线或隧道通的算，同一台的另一条不在线行不冲掉；读挂了 → 空集"""
+        import target
+        rows = [dict(udid="U1", wired=True, tunnel=False), dict(udid="U1", wired=False, tunnel=False),
+                dict(udid="U2", wired=False, tunnel=True), dict(udid="U3", wired=False, tunnel=False)]
+        with um.patch.object(install.os, "name", "posix"), um.patch.object(target, "devices", return_value=rows) as dv:
+            self.assertEqual(_ONLINE_DEVICES(self.c), {"U1", "U2"})
+            self.assertEqual(dv.call_args.kwargs.get("timeout"), 10, "游戏库每次都读：超时要短，不能卡 60 秒")
+        with um.patch.object(install.os, "name", "posix"), um.patch.object(target, "devices", side_effect=OSError("no xcode")):
+            self.assertEqual(_ONLINE_DEVICES(self.c), set())
 
     def test_phone_updates_lists_kept_modules_on_current_shell(self):
         """壳是本版、但甲有运行时留下、已收回还没补进 iPhone 件的 NRO（#8be819）→ 照样列这台，kept = [甲]；没有留下的 → 空"""

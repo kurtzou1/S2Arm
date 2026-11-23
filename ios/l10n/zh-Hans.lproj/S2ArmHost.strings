@@ -674,6 +674,8 @@
 "kbd.mouse.invertX" = "左右反过来";
 "kbd.mouse.invertY" = "上下反过来";
 "kbd.mouse.recenter" = "停手后视角回正";
+"kbd.mouse.use" = "使用鼠标 / 触控板";
+"kbd.mouse.offNote" = "已关闭：点按触控板就像手指碰屏幕，可以叫出虚拟按键和设置齿轮；鼠标按键和移动都不传给游戏。";
 "kbd.mouseButton.0" = "左键";
 "kbd.mouseButton.1" = "右键";
 "kbd.mouseButton.2" = "中键";

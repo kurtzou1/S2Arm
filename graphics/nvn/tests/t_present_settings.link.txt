@@ -157,6 +157,7 @@ hdr runtime/ns2pro/include/NS2Transport.h
 hdr runtime/src/as_type.h
 hdr runtime/src/det_mring.h
 hdr runtime/src/dev_facilities.h
+hdr runtime/src/far_slow.h
 hdr runtime/src/guest_main.h
 hdr runtime/src/imgpack.h
 hdr runtime/src/loader.h

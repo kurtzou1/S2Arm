@@ -325,13 +325,13 @@ static void set_mouse_capture(BOOL capture) {
 // ---- 鼠标左键点画面 = 触屏（11-04 维护者定，对齐 Ryujinx Ryujinx.Input/HLE/TouchScreenManager：按下 Start、拖动跟点、抬起 End，坐标落在游戏画面里）----
 //   脑锻炼（010062200D392000）标题页「开始」只认点按，Mac 原先鼠标只当视角 / 按键，开不了局。
 //   什么时候接管左键（11-04 维护者定，开箱即用）：
-//     ① 游戏声明了触屏 / 手写笔配置（hid SetTouchScreenConfiguration，服务层经 s2a_vpad_touch_configured 告知），且玩家没改过键位 → 左键当触屏，
+//     ① 游戏声明了触屏 / 手写笔配置（hid SetTouchScreenConfiguration，服务层经 s2a_vpad_touch_configured 告知），且玩家没动过鼠标的用法 → 左键当触屏，
 //        缺省键位里左键 = Y、鼠标模式 = 转动视角，这两样在这里让给触屏（不发 Y、不锁鼠标）；
 //     ② 否则只在左键没映射成按键、鼠标模式不是「转动视角」时接管（玩家自己的设置里左键没别的用途）。
-//   「玩家改过键位」判据（mapping_is_default）：本局生效的映射（S2A_INPUT_CONFIG 的快照，或没给时的内置缺省）与内置缺省 default_config() 按值比，
-//     不同 = 改过。不看文件在不在：启动器首启的键位引导卡会把未改动的标准映射也当 launchInputConfig 写成快照（pack/jobs/build.py runtime_env），
-//     文件存在不等于玩家改过；启动器的标准映射 InputConfig.standard（Models.swift）与 default_config() 逐项同值，只是 JSON 多写了缺省字段
-//     （schema、modifiers 0、invert false、recenter true），比较前按 Models.swift 的解码缺省补齐（mapping_norm）。
+//   「玩家动过鼠标的用法」判据（mouse_use_is_default，#1987 维护方 11-22 定）：只比两样——左键绑在哪个按键位上、鼠标模式，
+//     和内置缺省 default_config() 一样（左键 = Y、转动视角）就当没动过；别的键改没改不算。原先整份按值比（mapping_norm），
+//     设了所有游戏的默认（default-input.json）只改了一个手柄键、或某款单独改了个按键，都会判成「改过」，脑锻炼这类游戏又点不了开始。
+//     不看文件在不在：启动器首启的键位引导卡会把未改动的标准映射也当 launchInputConfig 写成快照（pack/jobs/build.py runtime_env）。
 //   触点经 s2a_vpad_read_touch 交给服务层 InputPump.PushTouch（与 iOS 壳仅触屏方案同一导出、同一写法），主线程写、HID 线程读，锁保护。
 //   画面矩形与上屏同一套算式：通用模式取渲染层这一帧（nxgal_present_frame + gal_present.m dst_rect），直连模式取出图比例
 //   （graphics/nvn/host_adapt.m out_aspect 同式）按 nvn_present_fit.h pf_viewport 放进窗口。触点空间同 iOS vpad.m switchPoint：
@@ -361,10 +361,12 @@ __attribute__((visibility("default"), used)) void s2a_vpad_set_style(int style) 
 static _Atomic int g_slot_style[8];
 __attribute__((visibility("default"), used)) void s2a_vpad_set_slot_style(int slot, int style) { if (slot >= 0 && slot < 8) atomic_store(&g_slot_style[slot], style); }
 __attribute__((visibility("default"), used)) int s2a_vpad_touch_configured(int mode) {
-    if (atomic_exchange(&touch_declared, mode) < 0) fprintf(stderr, "[s2a] Mac：游戏声明了触屏配置（模式 %d）；键位没改过时左键点画面当触屏\n", mode);
+    if (atomic_exchange(&touch_declared, mode) < 0) fprintf(stderr, "[s2a] Mac：游戏声明了触屏配置（模式 %d）；左键和鼠标模式没改过时左键点画面当触屏\n", mode);
     return 1;
 }
-static NSDictionary *mapping_norm(NSDictionary *c) {   // 只取影响输入的字段，缺省字段按 Models.swift 解码缺省补齐
+// 只取影响输入的字段，缺省字段按 Models.swift 解码缺省补齐（启动器标准映射与 default_config() 逐项同值、只是 JSON 多写缺省字段）；
+//   运行时不再用它判「改过」（见上），单测 launchers/macos/Tests/input_test.m 拿它核缺省映射的语义没变
+__attribute__((unused)) static NSDictionary *mapping_norm(NSDictionary *c) {
     NSMutableDictionary *k = [NSMutableDictionary dictionary], *a = [NSMutableDictionary dictionary];
     NSDictionary *kb = [c[@"keyboard"] isKindOfClass:NSDictionary.class] ? c[@"keyboard"] : @{};
     for (NSString *n in kb) k[n] = @[kb[n][@"code"] ?: @(-1), kb[n][@"modifiers"] ?: @0];
@@ -376,9 +378,15 @@ static NSDictionary *mapping_norm(NSDictionary *c) {   // 只取影响输入的�
     double dz = c[@"deadzone"] ? [c[@"deadzone"] doubleValue] : .15;
     return @{@"k": k, @"m": c[@"mouse"] ?: @{}, @"g": c[@"gamepad"] ?: @{}, @"a": a, @"o": opt, @"d": @(llround(dz * 1000))};
 }
-static BOOL mapping_is_default(void) { return [mapping_norm(config) isEqual:mapping_norm(default_config())]; }
+static NSSet *left_targets(NSDictionary *c) {   // 绑着左键（鼠标键 0）的按键位
+    NSDictionary *m = [c[@"mouse"] isKindOfClass:NSDictionary.class] ? c[@"mouse"] : @{};
+    return [m keysOfEntriesPassingTest:^BOOL(id key, id value, BOOL *stop) { (void)key; (void)stop; return [value isEqual:@0]; }];
+}
+static BOOL mouse_use_is_default(void) {
+    return camera_mouse() && [left_targets(config) isEqualToSet:left_targets(default_config())];
+}
 static BOOL left_click_touches(void) {
-    if (atomic_load(&touch_declared) >= 0 && mapping_is_default()) return YES;
+    if (atomic_load(&touch_declared) >= 0 && mouse_use_is_default()) return YES;
     if (camera_mouse()) return NO;
     NSDictionary *m = config[@"mouse"];
     for (NSString *name in m) if ([m[name] isEqual:@0]) return NO;

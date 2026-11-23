@@ -191,12 +191,19 @@ static int jf_bool(struct s2a_jv o, const char *name, uint32_t *v) {
     if (s2a_jv_bool(f, &b)) return -1;
     *v = (uint32_t)b; return 0;
 }
-static int lp_fail(char *why, size_t why_size, const char *fmt, ...) {
+// 拒收原因码（enum s2a_libpack_why，.h）：每个失败点按「第一处失败」写进线程本地，公开入口（program_v1 / compute_v1）进门清零、
+//   出门读出。取库在提交线程和预热线程并发，所以按线程存；文本（why）只给人看，诊断分类读这个码，改文案不会把原因归错类。
+static _Thread_local int g_lp_why;
+static int lp_fail_code(int code, char *why, size_t why_size, const char *fmt, ...) {
+    if (!g_lp_why) g_lp_why = code;
     if (why && why_size) {
         va_list ap; va_start(ap, fmt); vsnprintf(why, why_size, fmt, ap); va_end(ap);
     }
     return -1;
 }
+// 没有具名原因的拒收一律记「其它」；SPIR-V 反射 / 能力核（lp_fail_reflect）和共享内存超限（lp_fail_code 直接给码）各有自己的码
+#define lp_fail(why, why_size, ...) lp_fail_code(S2A_LIBPACK_WHY_OTHER, why, why_size, __VA_ARGS__)
+#define lp_fail_reflect(why, why_size, ...) lp_fail_code(S2A_LIBPACK_WHY_REFLECT, why, why_size, __VA_ARGS__)
 
 // 句柄放在游戏用户常量缓冲里的绑定（_b.json tex_ubo / tbuf_ubo / samp_ubo，iOS nvn_refl.h NVN_RB_TEXU / TBUFU / SAMPU）：
 //   句柄字 = 用户常量槽 reg 的字节 off 处的 32 位字；sid = 这个字是采样器号（SAMPU，Ryujinx SeparateSamplerId，读出后左移 20）；
@@ -416,7 +423,7 @@ static int lp_emit_bindings(struct jw *j, struct s2a_jv top, const char *lib_sta
                 if (!half && !jf_str(sb, "kind", sk, sizeof sk) && !strcmp(sk, "samp") &&
                     !jf_u32(sb, "reg", &sampler_slot) && lp_separate_c2(msl, handle, slot, sampler_slot)) {
                     if (arg_id > (UINT32_MAX - (uint32_t)stage_no) / 6 || !lp_spv_single_combined(spv, spv_size, binding))
-                        return lp_fail(why, why_size, "%s %s: expected a single combined image sampler at set 0 binding %u", lib_stage, msl, binding);
+                        return lp_fail_reflect(why, why_size, "%s %s: expected a single combined image sampler at set 0 binding %u", lib_stage, msl, binding);
                     emitted->uses_v2 = has_sampler_slot = 1;
                 } else if (handle >> 28 || (!half && strcmp(sk, "samp_tex"))) has_slot = 0;
             }
@@ -480,7 +487,7 @@ static int lp_emit_bindings(struct jw *j, struct s2a_jv top, const char *lib_sta
             //   Uniform Block，对不上就具名拒、不出死绑定；bank 2（句柄表）等其余 bank 照旧无槽、落到下面的「无来源」拒。
             else if (!compute && has_bank && bank == 0) {
                 if (!lp_spv_binding_is_set0_ubo(spv, spv_size, binding))
-                    return lp_fail(why, why_size, "%s bindings[%u] %s drvcb bank 0 binding %u is not a set 0 Uniform Block in the SPIR-V",
+                    return lp_fail_reflect(why, why_size, "%s bindings[%u] %s drvcb bank 0 binding %u is not a set 0 Uniform Block in the SPIR-V",
                                    lib_stage, i, msl, binding);
                 slot = 0; has_slot = 1;
             }
@@ -683,10 +690,10 @@ static int lp_is_interlock_ext(const uint32_t *w, uint32_t wc) {   // OpExtensio
 int s2a_libpack_spv_admit_caps(uint8_t *spv, size_t *n, char *why, size_t why_size) {
     uint32_t *w = (uint32_t *)spv; size_t nw = *n / 4;
     int f64 = 0, i64 = 0, ilk = 0;
-    if (nw < 5 || w[0] != 0x07230203u) { lp_fail(why, why_size, "not a SPIR-V module"); return -1; }
+    if (nw < 5 || w[0] != 0x07230203u) { lp_fail_reflect(why, why_size, "not a SPIR-V module"); return -1; }
     for (size_t i = 5; i < nw; ) {
         uint32_t op = w[i] & 0xffff, wc = w[i] >> 16;
-        if (!wc || i + wc > nw) { lp_fail(why, why_size, "truncated instruction at word %zu", i); return -1; }
+        if (!wc || i + wc > nw) { lp_fail_reflect(why, why_size, "truncated instruction at word %zu", i); return -1; }
         if (op == 22 && wc >= 3 && w[i + 2] == 64) f64 = 1;          // OpTypeFloat 64
         if (op == 21 && wc >= 4 && w[i + 2] == 64) i64 = 1;          // OpTypeInt 64
         if ((op == 5364 || op == 5365) && wc == 1) ilk = 1;           // OpBegin / OpEndInvocationInterlockEXT
@@ -697,7 +704,7 @@ int s2a_libpack_spv_admit_caps(uint8_t *spv, size_t *n, char *why, size_t why_si
         if (op == 17 && wc == 2) {                                    // OpCapability
             const uint32_t cap = w[i + 1];
             if (cap == 12 || (cap == 10 && f64) || (cap == 11 && i64)) {
-                lp_fail(why, why_size, "%s: uses %s, which the Vulkan device does not enable",
+                lp_fail_reflect(why, why_size, "%s: uses %s, which the Vulkan device does not enable",
                         cap == 10 ? "fp64_type_used" : cap == 11 ? "int64_type_used" : "int64_atomics_used",
                         cap == 10 ? "Float64" : cap == 11 ? "Int64" : "Int64Atomics");
                 return -1;
@@ -740,18 +747,18 @@ static int lp_finish_v2_bindings(const struct lp_stage_contract *stage, struct j
     const struct lp_emitted_bindings *emitted = &stage->emitted;
     const struct lp_spv_bindings *declared = &stage->declared;
     if (emitted->count > LP_STAGE_BINDINGS || declared->overflow)
-        return lp_fail(why, why_size, "%s %s has too many descriptor bindings", stage->key, stage->spv_name);
+        return lp_fail_reflect(why, why_size, "%s %s has too many descriptor bindings", stage->key, stage->spv_name);
     if (declared->uses_nonzero_set)
-        return lp_fail(why, why_size, "%s %s declares a descriptor outside set 0", stage->key, stage->spv_name);
+        return lp_fail_reflect(why, why_size, "%s %s declares a descriptor outside set 0", stage->key, stage->spv_name);
     if (declared->support >= 0 && !declared->support_is_ubo)
-        return lp_fail(why, why_size, "%s %s support_buffer is not a set 0 uniform block",
+        return lp_fail_reflect(why, why_size, "%s %s support_buffer is not a set 0 uniform block",
                        stage->key, stage->spv_name);
     // 仅有 UBO 类型无法证明用途。反射的显式支撑缓冲须匹配 Dsh 命名的 SPIR-V 变量。
     for (int i = 0; i < emitted->count; i++) {
         const struct lp_emitted_binding *entry = &emitted->entry[i];
         if (entry->owner == LP_BINDING_SUPPORT &&
             (declared->support < 0 || entry->number != (uint32_t)declared->support))
-            return lp_fail(why, why_size, "%s %s binding %u is not declared as support_buffer",
+            return lp_fail_reflect(why, why_size, "%s %s binding %u is not declared as support_buffer",
                            stage->key, stage->spv_name, entry->number);
     }
     int add_support = 0, support_declarations = 0;
@@ -761,20 +768,20 @@ static int lp_finish_v2_bindings(const struct lp_stage_contract *stage, struct j
         for (int j = 0; j < emitted->count; j++) {
             if (emitted->entry[j].number != binding) continue;
             if (owner != LP_BINDING_ABSENT)
-                return lp_fail(why, why_size, "%s %s binding %u has multiple emitted descriptors",
+                return lp_fail_reflect(why, why_size, "%s %s binding %u has multiple emitted descriptors",
                                stage->key, stage->spv_name, binding);
             owner = emitted->entry[j].owner;
         }
         if (declared->support >= 0 && binding == (uint32_t)declared->support) {
             if (++support_declarations > 1)
-                return lp_fail(why, why_size, "%s %s binding %u has multiple SPIR-V declarations for support_buffer",
+                return lp_fail_reflect(why, why_size, "%s %s binding %u has multiple SPIR-V declarations for support_buffer",
                                stage->key, stage->spv_name, binding);
             if (owner == LP_BINDING_GUEST)
-                return lp_fail(why, why_size, "%s %s binding %u is owned by support_buffer",
+                return lp_fail_reflect(why, why_size, "%s %s binding %u is owned by support_buffer",
                                stage->key, stage->spv_name, binding);
             add_support = owner == LP_BINDING_ABSENT;
         } else if (owner == LP_BINDING_ABSENT) {
-            return lp_fail(why, why_size, "%s %s binding %u has no mappable %s binding",
+            return lp_fail_reflect(why, why_size, "%s %s binding %u has no mappable %s binding",
                            stage->key, stage->spv_name, binding, stage->json_name);
         }
     }
@@ -842,9 +849,9 @@ static int lp_stage_emit(struct s2a_libpack *lp, const uint8_t key[8], unsigned 
         if (gs && (jf_u32(top, "gs_input_topology", &gt) || gt != (uint32_t)gs_topology))
             { lp_fail(why, why_size, "%s %s gs_input_topology is not %d", khex, jname, gs_topology); goto done; }
         if (sn < 20 || (sn & 3) || *(const uint32_t *)spv != 0x07230203u)
-            { lp_fail(why, why_size, "%s %s is not a SPIR-V module", khex, sname); goto done; }
+            { lp_fail_reflect(why, why_size, "%s %s is not a SPIR-V module", khex, sname); goto done; }
         {   char cw[128] = ""; const size_t sn0 = sn; const uint64_t il0 = s2a_libpack_interlock_dropped();
-            if (s2a_libpack_spv_admit_caps(spv, &sn, cw, sizeof cw)) { lp_fail(why, why_size, "%s %s %s", khex, sname, cw); goto done; }
+            if (s2a_libpack_spv_admit_caps(spv, &sn, cw, sizeof cw)) { lp_fail_reflect(why, why_size, "%s %s %s", khex, sname, cw); goto done; }
             if (s2a_libpack_interlock_dropped() != il0 && !atomic_exchange(&lp->ilk_said, 1))   // 每局首次一行具名红，之后只计数
                 LP_RED("libpack_interlock_dropped: program %s %s uses a fragment interlock critical section; the device has no "
                        "VK_EXT_fragment_shader_interlock, drawing without it (fragment ordering not guaranteed); counted per module, first one this session",
@@ -884,10 +891,10 @@ static int lp_stage_emit(struct s2a_libpack *lp, const uint8_t key[8], unsigned 
                 uint32_t sps = 0; uint64_t wg = 0;
                 if (jf_u32(top, "spill", &sps) || !sps) { lp_fail(why, why_size, "%s %s spill field invalid", khex, jname); goto done; }
                 const char *werr = s2a_spv_workgroup_bytes(spv, sn, &wg);
-                if (werr) { lp_fail(why, why_size, "%s %s: %s", khex, sname, werr); goto done; }
+                if (werr) { lp_fail_reflect(why, why_size, "%s %s: %s", khex, sname, werr); goto done; }
                 if (wg > shared_limit) {
-                    lp_fail(why, why_size, "%s %s compute shared memory %llu exceeds device limit %u",
-                            khex, sname, (unsigned long long)wg, shared_limit);
+                    lp_fail_code(S2A_LIBPACK_WHY_SHARED_LIMIT, why, why_size, "%s %s compute shared memory %llu exceeds device limit %u",
+                                 khex, sname, (unsigned long long)wg, shared_limit);
                     goto done;
                 }
             }
@@ -898,7 +905,7 @@ static int lp_stage_emit(struct s2a_libpack *lp, const uint8_t key[8], unsigned 
         struct lp_spv_bindings *declared = &contract->declared;
         if (lp_emit_bindings(binds, top, st, stage_no, v1_stage, compute, spv, sn, bind_sep, emitted, why, why_size)) goto done;
         if (lp_spv_read_bindings(spv, sn, declared)) {
-            lp_fail(why, why_size, "%s %s decorations unreadable", khex, sname);
+            lp_fail_reflect(why, why_size, "%s %s decorations unreadable", khex, sname);
             goto done;
         }
         if (!emitted->uses_v2) {
@@ -912,7 +919,7 @@ static int lp_stage_emit(struct s2a_libpack *lp, const uint8_t key[8], unsigned 
                     lp_record_binding(emitted, binding, LP_BINDING_SUPPORT);
                     continue;
                 }
-                lp_fail(why, why_size, "%s %s binding %u has no %s%s binding", khex, sname, binding, skipped ? "mappable " : "", jname);
+                lp_fail_reflect(why, why_size, "%s %s binding %u has no %s%s binding", khex, sname, binding, skipped ? "mappable " : "", jname);
                 goto done;
             }
         }
@@ -956,12 +963,14 @@ int s2a_libpack_program_v1(const struct s2a_libpack *lp_c, const uint8_t keys[6]
                            uint32_t direct_abi, const char *profile_hash, const char *translator_closure,
                            uint8_t **json, size_t *json_len, char *why, size_t why_size) {
     struct s2a_libpack *lp = (struct s2a_libpack *)lp_c;
+    g_lp_why = S2A_LIBPACK_WHY_NONE;
     if (!lp || !lp->p.idx || !keys || !json || !json_len || !stages) return S2A_LIBPACK_INVALID;
     *json = NULL; *json_len = 0;
-    // 图形接受口径同现编（DirectProgram.Parse）：vs+fs，或 vs+gs+fs（几何走原生几何阶段）；
-    //   别的形状（单阶段 / 带 tcs|tes / cs 走 compute 线）本函数产不出可采纳结果，按 miss 如实回。
-    if (stages != 0x3 && stages != 0x7) {
-        if (why && why_size) snprintf(why, why_size, "stages=0x%x is not a vs+fs or vs+gs+fs program", stages);
+    // 图形接受口径同现编（DirectProgram.Parse）：vs+fs，或 vs+gs+fs（几何走原生几何阶段），或只有 vs（只写深度的绘制：
+    //   深度预通道、阴影图；解析侧 allow_vs_only、后端 C76 管线都已支持，不造 fs）；别的形状（只有 fs / 带 tcs|tes / cs 走
+    //   compute 线）本函数产不出可采纳结果，按 miss 如实回。
+    if (stages != 0x1 && stages != 0x3 && stages != 0x7) {
+        if (why && why_size) snprintf(why, why_size, "stages=0x%x is not a vs, vs+fs or vs+gs+fs program", stages);
         atomic_fetch_add(&g_misses, 1);
         return S2A_LIBPACK_MISS;
     }
@@ -1048,9 +1057,11 @@ out:
 int s2a_libpack_compute_v1(const struct s2a_libpack *lp_c, const uint8_t key[8],
                            uint32_t direct_abi, const char *profile_hash, const char *translator_closure,
                            uint32_t shared_limit,
-                           uint8_t **json, size_t *json_len, char *why, size_t why_size) {
+                           uint8_t **json, size_t *json_len, char *why, size_t why_size, int *reason) {
     struct s2a_libpack *lp = (struct s2a_libpack *)lp_c;
-    if (!lp || !lp->p.idx || !key || !json || !json_len) return S2A_LIBPACK_INVALID;
+    g_lp_why = S2A_LIBPACK_WHY_NONE;
+    if (reason) *reason = S2A_LIBPACK_WHY_NONE;
+    if (!lp || !lp->p.idx || !key || !json || !json_len) { if (reason) *reason = S2A_LIBPACK_WHY_OTHER; return S2A_LIBPACK_INVALID; }
     *json = NULL; *json_len = 0;
     struct jw st = {0}, bd = {0};
     int sep = 0, uses_v2 = 0; uint32_t got = 0;
@@ -1077,5 +1088,6 @@ int s2a_libpack_compute_v1(const struct s2a_libpack *lp_c, const uint8_t key[8],
     if (rc == S2A_LIBPACK_HIT) atomic_fetch_add(&g_hits, 1);
     else if (rc == S2A_LIBPACK_MISS) atomic_fetch_add(&g_misses, 1);
     else atomic_fetch_add(&g_rejects, 1);
+    if (reason && rc == S2A_LIBPACK_REJECT) *reason = g_lp_why ? g_lp_why : S2A_LIBPACK_WHY_OTHER;
     return rc;
 }

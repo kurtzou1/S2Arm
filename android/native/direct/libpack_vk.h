@@ -26,6 +26,19 @@ enum {
     S2A_LIBPACK_INVALID = -2, // 调用方参数错
 };
 
+// 没走出库 / 拒收的原因码（计算取库诊断按码分类，不再从报错文本里找字眼：改文案不会把原因悄悄归错类）。
+//   UNALIGNED：存储缓冲非对齐被对齐闸拒（闸在调用方，库件只有对齐变体；库本身不会返回它）；
+//   SHARED_LIMIT：spill 程序的 Workgroup 字节数超设备 maxComputeSharedMemorySize，出库拒；
+//   REFLECT：SPIR-V 反射 / 能力核拒（不是 SPIR-V、用了设备不开的能力、描述符与声明对不上、装饰读不出）；
+//   OTHER：其余拒收（_b.json 损坏 / 键不符 / 绑定种类译不出 / 内存不足等）。
+enum s2a_libpack_why {
+    S2A_LIBPACK_WHY_NONE = 0,
+    S2A_LIBPACK_WHY_UNALIGNED = 1,
+    S2A_LIBPACK_WHY_SHARED_LIMIT = 2,
+    S2A_LIBPACK_WHY_REFLECT = 3,
+    S2A_LIBPACK_WHY_OTHER = 4,
+};
+
 struct s2a_libpack;   // 不透明句柄（lp_pack 本体在 .c 里，句柄由 open 分配/close 释放）
 
 // 打开 <dir>（应形如 …/shaders/direct/b-<DMSH_CHAIN>-vk）：lib.idx 核头 + 链版本核（dmsh_chain.h）。
@@ -41,7 +54,7 @@ void s2a_libpack_close(struct s2a_libpack *lp);
 int s2a_libpack_get(const struct s2a_libpack *lp, const uint8_t key[8], unsigned kind,
                     uint8_t **bytes, size_t *len, char *why, size_t why_size);
 
-// 程序命中：keys[6][8] + stages 位图（vs+fs 0x3 或 vs+fs+gs 0x7）→ 合成的 s2a-direct-program-v1/v2 字节（malloc，调用方 free）。
+// 程序命中：keys[6][8] + stages 位图（只有 vs 0x1、vs+fs 0x3 或 vs+fs+gs 0x7）→ 合成的 s2a-direct-program-v1/v2 字节（malloc，调用方 free）。
 //   每阶段取 _b.json + _b.spv：绑定号 = arg_id×6+阶段号（与 .spv 内烘焙的一致），kind 桶照
 //   _b.json 的语义种类译：cbuf→uniform、tex/samp_tex→texture、img→image、sbuf 系→storage、
 //   support→support(stage="program")；…Smplr / samp* 不另出描述符行。独立 c2 采样器按 v2 附在纹理的 samp_slot；
@@ -72,10 +85,12 @@ int s2a_libpack_program_v1(const struct s2a_libpack *lp, const uint8_t keys[6][8
 //   hasUnalignedStorageBuffer 写 false（批翻链按缺省 false 翻）。返回码与计数口径同 program_v1。
 //   shared_limit = 本设备 maxComputeSharedMemorySize：_b.json 带 spill 标记（批翻链 MSL 侧 32K 阈值溢出事实）
 //   时核 _b.spv 的 Workgroup 字节数，超出的程序出库即拒（其 .spv 未做溢出改写，建不出计算管线）。
+//   reason（可空）：没取到 / 拒收的原因码（enum s2a_libpack_why）。诊断只按码分类，why 文本只给人看、改文案不影响归类；
+//   命中（返回 S2A_LIBPACK_HIT）和「库里没有这一键」（MISS）时是 S2A_LIBPACK_WHY_NONE，只有拒收（REJECT）才带码。
 int s2a_libpack_compute_v1(const struct s2a_libpack *lp, const uint8_t key[8],
                            uint32_t direct_abi, const char *profile_hash, const char *translator_closure,
                            uint32_t shared_limit,
-                           uint8_t **json, size_t *json_len, char *why, size_t why_size);
+                           uint8_t **json, size_t *json_len, char *why, size_t why_size, int *reason);
 
 uint64_t s2a_libpack_hits(void);
 uint64_t s2a_libpack_misses(void);

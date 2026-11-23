@@ -1610,6 +1610,26 @@ import S2ArmAppleAdapter
     ///   点某款「升级」只交那一款；页脚「批量升级所选（N 款）」N 跟勾选走、没勾时不可点；正在升级的那款勾选框和按钮都不可用；
     ///   批量进行中页脚换成「第 i 款 / 共 n 款」+「停止」；没有可升级的款不出行按钮；进度环 / 进度条四种状态出图
     /// #2066：没在这台 Mac 上玩过的这款，恢复只放进待放区——状态读出等着的文件数（不再当「还没有存档」）、恢复结果标 pending；旧作业层不给时照旧（期望手写）
+    /// #2081：键位弹窗读作业层 loadInput 的结果（同起局的规则）：存坏了标 problem、显示回落后的那份；玩家 2 沿用玩家 1 标 inherited；没有配置（null）= 标准键位。期望手写
+    func testInputPopupReadsJobLayerRule() async throws {
+        let fixture = try SettingsFixture()
+        defer { fixture.remove() }
+        let fallback: [String: Any] = ["schema": 1, "keyboard": ["A": ["code": 19]], "mouse": [String: Any](), "gamepad": ["A": "east"], "axes": [String: Any](),
+                                       "deadzone": 0.15, "mouseOptions": ["mode": "off", "sensitivityX": 1, "sensitivityY": 1]]
+        fixture.runner.loadInputPlayers = [["player": 1, "config": fallback, "source": "default", "problem": true],
+                                           ["player": 2, "config": fallback, "source": "player1", "problem": false],
+                                           ["player": 3, "config": NSNull(), "source": "standard", "problem": false],
+                                           ["player": 4, "config": NSNull(), "source": "standard", "problem": false]]
+        let all = try await fixture.model.loadInputs(gameID: "fixture")
+        XCTAssertEqual(fixture.runner.requests.filter { $0["operation"] as? String == "loadInput" }.count, 1, "四位玩家一次读")
+        XCTAssertEqual(all[1]?.problem, true)
+        XCTAssertEqual(all[1]?.config.keyboard["A"]?.code, 19, "显示回落后的那份（19 ≠ 标准键位的 14，解码失败落回标准会被看出来）")
+        XCTAssertEqual(all[2]?.inherited, true)
+        XCTAssertEqual(all[2]?.config, all[1]?.config)
+        XCTAssertEqual(all[3]?.config, .standard)
+        XCTAssertEqual(all[3]?.problem, false)
+    }
+
     func testSaveStatusReadsPendingSeed() throws {
         let waiting = try XCTUnwrap(SaveStatusInfo(["hasSave": false, "fileCount": 0, "totalBytes": 0, "pendingSeed": ["fileCount": 3, "totalBytes": 45056]]))
         XCTAssertEqual(waiting.pendingFiles, 3)
@@ -2425,6 +2445,12 @@ private final class SettingsRunner: JobProcessRunner {
     }
     private var trouble = ""
     private var swapped = false
+    /// loadInput 回的四位玩家（#2081）：缺省四位都是标准键位（config = null），要测回落的用例自己设
+    private var inputRows: [[String: Any]] = (1...4).map { ["player": $0, "config": NSNull(), "source": "standard", "problem": false] }
+    var loadInputPlayers: [[String: Any]] {
+        get { lock.withLock { inputRows } }
+        set { lock.withLock { inputRows = newValue } }
+    }
     /// 回到上一份存档：savePrevious 回的 trouble；saveRestorePrevious 每次把「已换到上一份」翻转一次（作业层的交换是可逆的）
     var previousTrouble: String {
         get { lock.withLock { trouble } }
@@ -2469,6 +2495,7 @@ private final class SettingsRunner: JobProcessRunner {
         if request["operation"] as? String == "preflight" {
             result = ["checks": preflightChecks]
         }
+        if request["operation"] as? String == "loadInput" { result = ["players": inputRows] }   // #2081：缺省四位标准键位
         if request["operation"] as? String == "savePrevious" { result = ["hasPrevious": true, "saveIds": ["0000000000000001"], "trouble": previousTrouble] }
         if request["operation"] as? String == "saveRestorePrevious" { lock.withLock { swapped.toggle() }; result = ["restored": 1] }
         if request["operation"] as? String == "saveStatus" {

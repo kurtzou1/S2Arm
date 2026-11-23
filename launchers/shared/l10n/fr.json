@@ -3492,6 +3492,7 @@
   "无效鼠标选项。": "Options de souris invalides.",
   "鼠标灵敏度必须在 0.1 到 10 之间。": "La sensibilité de la souris doit être entre 0,1 et 10.",
   "无效的玩家序号。": "Numéro de joueur invalide.",
+  "所有游戏的默认只有玩家 1 的一份。": "Le réglage par défaut pour tous les jeux ne concerne que le joueur 1.",
   "诊断包请选择应用数据和游戏库以外的位置。": "Enregistrez le paquet de diagnostic ailleurs que dans les données d'application et la bibliothèque.",
   "诊断目录在导出期间发生变化，请重试。": "Le dossier de diagnostic a changé pendant l'export. Réessayez.",
   "诊断临时文件在导出期间发生变化，请重试。": "Les fichiers de diagnostic temporaires ont changé pendant l'export. Réessayez.",

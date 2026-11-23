@@ -237,11 +237,11 @@ def _idevice_product_type(udid):
     return p.stdout.strip() if p.returncode == 0 else ""
 
 
-def devices(dd=None):
+def devices(dd=None, timeout=60):
     """连着（physical + 隧道通 / 有线已配对）的 iPhone / iPad —— 与 connected() 同一筛选：
     [{id, udid, name, productType, model, os, gpuArch, tunnel, wired}]"""
     dd = dd or developer_dir()
-    data = _devicectl("list", "devices") or {}
+    data = _devicectl("list", "devices", timeout=timeout) or {}
     return [_row(d, dd, with_link=True) for d in data.get("result", {}).get("devices", []) if _keep_device(d)]
 
 

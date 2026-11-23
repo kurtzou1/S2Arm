@@ -799,7 +799,18 @@ class ToolCrashTest(unittest.TestCase):
     def test_python_tool_crash_reports_python_stack(self):
         # D-FVSY：阶段里的 Python 工具崩在原生代码，报红原先只有「退出 3221225477；末尾：（无输出）」。
         #   现在子进程开 faulthandler，报红带崩溃那段（Fatal Python error + 最近的调用帧）
-        script = "import ctypes\ndef deep():\n    ctypes.string_at(0)\ndeep()\n"
+        script = "import ctypes\ndef deep():\n    ctypes.string_at(0)\n"
+        if sys.platform == 'darwin':
+            # macOS 上进程死于信号会交给系统崩溃报告；Homebrew 等框架版 Python 实际跑的是 Python.app，每跑一次就弹「Python 意外退出」。
+            #   faulthandler 打完调用栈后交回它之前的那个处理：把那个换成 _exit，进程以退出码结束、不算崩溃，报红里的调用栈不变
+            #   只在 stages.run 已经开了 faulthandler 时重开，不替它开：没开时报红里没有调用栈，本用例照样红
+            script += ("import faulthandler, signal\nlibc = ctypes.CDLL(None)\n"
+                       "libc.signal.argtypes = (ctypes.c_int, ctypes.c_void_p)\non = faulthandler.is_enabled()\n"
+                       "faulthandler.disable()\n"
+                       "for s in (signal.SIGSEGV, signal.SIGBUS):\n"
+                       "    libc.signal(s, ctypes.cast(libc._exit, ctypes.c_void_p))\n"
+                       "if on:\n    faulthandler.enable()\n")
+        script += "deep()\n"
         with self.assertRaises(stages.StageError) as error:
             stages.run([sys.executable, '-c', script])
         text = str(error.exception)

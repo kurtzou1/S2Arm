@@ -368,6 +368,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
             Result result = S2ASaveShare.OpenShared(key, ref fileSystem.Ref, (ref SharedRef<IFileSystem> fs) => _baseFileSystemProxy.Get.OpenSaveDataFileSystem(ref fs, spaceId, in attribute));
             if (result.IsFailure())
             {
+                S2AFsFail.Extra = S2AFsFail.SaveAttr(spaceId, in attribute);   // S2Arm: which save it asked for (S2AFsFail)
                 return (ResultCode)result.Value;
             }
 
@@ -387,6 +388,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
             Result result = _baseFileSystemProxy.Get.OpenSaveDataFileSystemBySystemSaveDataId(ref fileSystem.Ref, spaceId, in attribute);
             if (result.IsFailure())
             {
+                S2AFsFail.Extra = S2AFsFail.SaveAttr(spaceId, in attribute);   // S2Arm: which save it asked for (S2AFsFail)
                 return (ResultCode)result.Value;
             }
 
@@ -406,6 +408,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
             Result result = _baseFileSystemProxy.Get.OpenReadOnlySaveDataFileSystem(ref fileSystem.Ref, spaceId, in attribute);
             if (result.IsFailure())
             {
+                S2AFsFail.Extra = S2AFsFail.SaveAttr(spaceId, in attribute);   // S2Arm: which save it asked for (S2AFsFail)
                 return (ResultCode)result.Value;
             }
 

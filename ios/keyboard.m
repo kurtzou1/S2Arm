@@ -37,8 +37,8 @@ static void load_map(void) {
         s2a_kbd_default(&g_map);
     }
     g_map_loaded = 1;
-    s2a_input_config def; s2a_kbd_default(&def);
-    s2a_ios_mouse_config(&g_map, !memcmp(&def, &g_map, sizeof def));   // 鼠标那几项（模式 / 灵敏度 / 左键绑没绑 / 是不是缺省）同步给 mouse.m
+    // 鼠标那几项（模式 / 灵敏度 / 左键绑没绑 / 鼠标用法是不是缺省）和「使用鼠标 / 触控板」开关（#2072，分层读取：本款没设过看所有游戏的默认）同步给 mouse.m
+    s2a_ios_mouse_config(&g_map, s2a_mouse_use_default(&g_map), [s2a_ios_settings_defaults() boolForKey:S2AMouseOffKey]);
 }
 // 这一款的键位（含手柄 gamepad / axes 段）：实体系统手柄改键也用这一份（controller.m sample_extended，#1606 ④）。只在输入队列上调（同 g_map 的其余读写）
 const s2a_input_config *s2a_ios_pad_map_config(void) {

@@ -2201,6 +2201,14 @@ namespace S2A.Services.Tests
                     string redLine = fsLines.Skip(fsAt1).FirstOrDefault(l => l.StartsWith("【红】fs 失败：IFileSystem.OpenFile")) ?? "无";
                     Check("fs 失败上报：开不存在的文件 / 打开模式 0", "结果 0x202、普通一行、不报红 / 结果非 0、【红】带路径 /s2a_wtest.bin",
                         $"结果 0x{onr.Result:X}、{(noteLine ? "普通一行" : "没有普通行")}、{(noteRed ? "报了红" : "不报红")} / 结果{(omr.Result != 0 ? "非 0" : " 0")}、{(redLine.Contains("路径 /s2a_wtest.bin") ? "【红】带路径 /s2a_wtest.bin" : redLine)}");
+                    // 开存档失败要说清开的是哪个存档（11-23 D-HR6A：游戏连开 7 次存档都 2002-1002，随后崩，日志只有结果码）：
+                    //   开 01006F8002326000 的缓存存储（类型 Cache=5）序号 7，本局没建过 → 普通一行，带类型 / 空间 / 程序号 / 用户 / 序号 / 系统存档号（期望按请求字段手写）
+                    int fsAt2 = fsLines.Count;
+                    byte[] cattr = new byte[0x40]; BitConverter.GetBytes(0x01006F8002326000UL).CopyTo(cattr, 0); cattr[0x20] = 5; BitConverter.GetBytes((ushort)7).CopyTo(cattr, 0x22);
+                    Reply cmr = Call(fsp, Msg.Cmif(51, Bytes(1L, cattr)));
+                    string saveLine = fsLines.Skip(fsAt2).FirstOrDefault(l => l.StartsWith("[fs] 没有 IFileSystemProxy 命令 51")) ?? "无";
+                    Check("fs 失败上报：开不存在的存档带存档属性", "结果非 0、[fs] 没有 IFileSystemProxy 命令 51：2002-1002，存档 类型 Cache、空间 User、程序号 01006F8002326000、用户 00000000000000000000000000000000、序号 7、系统存档号 0000000000000000",
+                        $"结果{(cmr.Result != 0 ? "非 0" : " 0")}、{saveLine}");
                     Red.Log = logWas;
                     Call(sdfs, del);
 

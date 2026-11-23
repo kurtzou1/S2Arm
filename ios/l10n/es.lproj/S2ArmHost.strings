@@ -668,6 +668,8 @@
 "kbd.mouse.invertX" = "Invertir horizontal";
 "kbd.mouse.invertY" = "Invertir vertical";
 "kbd.mouse.recenter" = "Recentrar al detener el ratón";
+"kbd.mouse.use" = "Usar ratón o trackpad";
+"kbd.mouse.offNote" = "Desactivado: hacer clic en el trackpad equivale a tocar la pantalla y muestra los botones en pantalla y el menú del engranaje. Los botones y el movimiento del ratón no se envían al juego.";
 "kbd.mouseButton.0" = "Botón izquierdo";
 "kbd.mouseButton.1" = "Botón derecho";
 "kbd.mouseButton.2" = "Botón central";

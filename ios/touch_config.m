@@ -31,7 +31,7 @@ int s2a_touchcfg_apply(int mode) {
 // 服务层 InputPump 按符号查（HID 线程，每次提交至多一次，直到返回 1）：mode = 游戏传的 TouchScreenModeForNx（0 跟系统 / 1 手指 / 2 手写笔）。
 //   0 = 还没出首帧（加载页盖着，提示看不见），下一拍再问；1 = 收下了（派回主线程切），之后不再调
 static _Atomic int g_declared;   // 游戏声明过触屏配置（本局）
-// ios/mouse.m 问（任意线程）：游戏声明过触屏配置 → 键位没改过时触控板左键当触屏点（同 Mac left_click_touches 规则 ①）
+// ios/mouse.m 问（任意线程）：游戏声明过触屏配置 → 左键和鼠标模式没改过时触控板左键当触屏点（同 Mac left_click_touches 规则 ①）
 int s2a_ios_touch_declared(void) { return atomic_load(&g_declared); }
 __attribute__((visibility("default"), used)) int s2a_vpad_touch_configured(int mode) {
     if (!s2a_ap_frames()) return 0;

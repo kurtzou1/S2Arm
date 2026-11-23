@@ -922,6 +922,11 @@ namespace S2A.Dsh
         /// 贴图池的置位是写内存，Metal 会把这支片元改成着色后再测深度（失去隐藏面剔除，且与预深度遍差一个 ulp 时 EQUAL 沿轮廓失败，上游实测）：置位是宿主自己加的，
         /// 不该改测试时机，所以改成早测——除非着色器自己丢弃 / 写深度 / 写样本掩码或模板 / 写内存（那时早测会错，保持晚测，只多付着色）。
         /// 改写覆盖不到的用法（整个数组当参数传）抛 DshError</summary>
+        // 名字是不是这种回退数组：贴图 / 采样器以 _cb0_40000000 收尾；图像在句柄后面还拼着格式后缀（compat ResourceManager：<前缀>_cb<槽>_<句柄>_<格式>，
+        //   格式认不出时是空串，名字以「_」收尾，如 cp_ib_cb0_40000000_；格式本身可带下划线，如 rgb10_a2）。11-22 #2051 0100AD80208A8000：8 支计算着色器的图像缓冲池
+        //   cp_ib_cb0_40000000_ / _r32ui 原先只按 _cb0_40000000 收尾判，没改成池指针，反射成没有槽号的 img，宿主「has no resolved slot number」整支拒载
+        static readonly Regex s_poolImgName = new(@"^[a-z]+_i\w*?_cb0_40000000_[a-z0-9_]*$", RegexOptions.CultureInvariant);
+        internal static bool IsPoolName(string name) => name.EndsWith("_cb0_40000000", StringComparison.Ordinal) || s_poolImgName.IsMatch(name);
         internal static string PoolArrays(string src)
         {
             var body = Search(@"struct spvDescriptorSetBuffer0\s*\{(.*?)\};", src, RegexOptions.Singleline);
@@ -929,7 +934,7 @@ namespace S2A.Dsh
             var pools = new List<(string Name, string Elem)>();
             string members = s_poolArr.Replace(body.Groups[1].Value, m =>
             {
-                if (Int(m.Groups[3].Value) < POOL_MIN || !m.Groups[4].Value.EndsWith("_cb0_40000000", StringComparison.Ordinal)) return m.Value;
+                if (Int(m.Groups[3].Value) < POOL_MIN || !IsPoolName(m.Groups[4].Value)) return m.Value;
                 pools.Add((m.Groups[4].Value, m.Groups[2].Value));
                 return m.Groups[1].Value + "constant spvPool_" + m.Groups[4].Value + "* " + m.Groups[4].Value + " [[id(";
             });

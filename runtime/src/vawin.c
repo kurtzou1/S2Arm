@@ -150,7 +150,11 @@ int s2a_guest_file_wanted6(const char *e, uint64_t pool, uint64_t room, uint64_t
     // 安全阀收窄（#2f79dd，11-15）：上局前台死掉本为兜「判了不开、实际超单进程上限被杀」——心跳 10 秒一次，最后那段涨幅可能没记进实测。
     //   本款有实测、且实测 + 两份余量（多一份给漏记的涨幅）仍不超剩余：那次死掉不是超上限（标记被别的原因留下，D-C73M 那次原因未定），不强制开，按实测判关。
     //   D-C73M 6 GB iPhone：实测 2372 + 1024 ≤ 4093 却被强制开，开局写盘 2.6 GB 后卡死在缺页
-    int on = seen == UINT64_MAX ? 1 : died && !(seen && seen + 2 * margin <= room) ? 1 : seen ? seen + margin > room : pool > room;
+    // 没实测时（11-22 D-D4AK）：池 ≤ 剩余也不一定装得下——6 GB iPhone 剩余约 4092 MB，一款 Switch 1 游戏池 3285 + 宿主约 800 就贴上限，
+    //   纯匿名首局玩到约 9 分钟被系统收掉，靠「死一次、下一局开」兜底（每台 6 GB 机、每款 Switch 1 游戏的首局都这样）。
+    //   池 + 宿主估计 + 余量 > 剩余就开，池本身装得下的局溢出模式首局按宿主估计定预算（s2a_guest_soft_tier，guest_file_map）：
+    //   没超预算的块就是匿名内存、不写盘，不回到 11-07 那种一律整段进文件；8 GB 以上机型（剩余 ≥ 6141）这档判不到，照旧关
+    int on = seen == UINT64_MAX ? 1 : died && !(seen && seen + 2 * margin <= room) ? 1 : seen ? seen + margin > room : pool + host + margin > room;
     // 物理内存也装不下那档（起局提示一次、物理映射区也走文件）：按本款要多少判（s2a_guest_need：有实测按实测 + 余量，没实测按池 + 宿主估计）。
     //   11-22 D-9R4S：原先只在「没实测、池 > 剩余」那支判这档，有实测就直接按实测回、不判——6 GB iPad 上一款 Switch 2 大款实测 8877 MB，
     //   物理只有 5914，却从不提示（一局往闪存写 66–118 GB、换场景卡住 / GPU 超时黑屏）。读不到物理内存（0）不判这档
@@ -159,13 +163,21 @@ int s2a_guest_file_wanted6(const char *e, uint64_t pool, uint64_t room, uint64_t
 }
 // 本款要多少（提示玩家「约需」用）：有实测（不是坏记录）按实测，否则按池 + 宿主估计
 uint64_t s2a_guest_need(uint64_t pool, uint64_t host, uint64_t seen) { return seen && seen != UINT64_MAX ? seen : pool + host; }
+// 判开的这一局池本身是不是装得下（Switch 1 款；纯函数，t_guest_file_auto 测）：是 → 溢出模式首局预算按宿主估计（S2A_GUEST_FILE_HOST_MB）算，
+//   不按首局宿主开销 4096 算——4096 是全库文件后备局（Switch 2 大款为主）的 P90，6 GB 机 剩余约 4090 − 512 − 4096 不到 0 = 整段进文件：
+//   D-D4AK（没实测、池 + 宿主估计 + 余量超剩余）首局就整段；D-F5PT（6 GB iPhone，一款 Switch 1 游戏实测 3874 + 512 > 剩余 4085）每局整段进文件，
+//   进程实占只有 0.5–1.2 GB，却 10 秒写盘约 3 GB、帧时 p99 0.2–2 秒。上局在前台死掉照旧整段（s2a_guest_next_budget ②）；坏记录也不算这档
+int s2a_guest_soft_tier(int on, const char *e, uint64_t pool, uint64_t room, uint64_t seen, int died) {
+    return on && !(e && *e) && room && !died && seen != UINT64_MAX && pool <= room;
+}
 static uint64_t phys_mem(void) { uint64_t ph = 0; size_t n = sizeof ph; return sysctlbyname("hw.memsize", &ph, &n, NULL, 0) ? 0 : ph; }
 // 三档判定的一句理由（日志用）
-static const char *tier_why(int on, int low, uint64_t seen, int died) {
+static const char *tier_why(int on, int low, uint64_t seen, int died, int soft) {
     return died && on ? "上一局在前台时死掉，这一局开" : died ? "上一局在前台时死掉，但本款实测峰值 + 两份余量远不到上限（那次不是超上限），保持匿名内存" : seen == UINT64_MAX ? "实测记录读不出（坏记录），保守开"
          : seen ? (on ? "实测峰值 + 余量大于剩余，装不下" : "实测峰值 + 余量不大于剩余，装得下、保持匿名内存")
          : low ? "池大于剩余、物理内存也装不下池 + 宿主估计：照样开（能玩下去优先），提示玩家内存可能不够"
-         : on ? "池大于剩余、物理内存装得下：开" : "池不大于剩余：装得下、保持匿名内存";
+         : soft ? "没实测，池不大于剩余但池 + 宿主估计 + 余量大于剩余：首局开溢出模式（预算内匿名、超出的块才进文件）"
+         : on ? "池大于剩余、物理内存装得下：开" : "池 + 宿主估计 + 余量不大于剩余：装得下、保持匿名内存";
 }
 static int g_low_tier;   // 这一局判在「物理内存也装不下」那档（文件后备开、物理映射区也走文件，s2a_guest_carve_wanted）
 static uint64_t g_lowram_need, g_lowram_phys;   // 待问玩家的「本款约需 / 本机物理内存」（s2a_guest_lowram_ask 问完清零）
@@ -336,6 +348,7 @@ int s2a_guest_budget_rec_read(uint64_t *b, uint64_t *hmin) {   // 两项都读�
 static uint64_t g_budget_room;   // 本局定预算时的起局剩余（写进记录第三项）
 static uint64_t g_budget_ceil;   // 本款预算天花板（写进记录第五项；0 = 没有，s2a_guest_next_budget）
 static uint64_t g_bbeats;        // 本局溢出模式下的心跳次数（写进记录第四项：上局够不够长）
+static uint64_t g_soft_host;     // 本局判开且池本身装得下（s2a_guest_soft_tier）：首局预算用的宿主估计（字节）；0 = 不是，首局宿主开销照 4096
 // 记录第四、五项（11-22）：上局溢出模式心跳次数、天花板 MB。旧记录没有 → 0（当短局：只许收紧；没有天花板）
 static void budget_rec_ext(uint64_t *beats, uint64_t *ceil) {
     *beats = *ceil = 0; char p[1100]; if (!budget_rec_path(p, sizeof p)) return;
@@ -370,7 +383,7 @@ uint64_t s2a_guest_overflow_budget_ios(const char *e, uint64_t room, uint64_t ma
         if (rec && rb >= BUDGET_STEP && (!g_budget_ceil || rb - BUDGET_STEP < g_budget_ceil)) g_budget_ceil = rb - BUDGET_STEP;
         budget_rec_clear(); if (g_budget_ceil) budget_rec_write(0, 0);
     }
-    { const char *v = getenv("S2A_GUEST_FILE_OVERFLOW_HOST_MB"); uint64_t fh = (v && *v ? strtoull(v, NULL, 10) : 4096ull) << 20;
+    { const char *v = getenv("S2A_GUEST_FILE_OVERFLOW_HOST_MB"); uint64_t fh = v && *v ? strtoull(v, NULL, 10) << 20 : g_soft_host ? g_soft_host : 4096ull << 20;
       return s2a_guest_next_budget(e, room, margin, fh, died, have, *pb, *ph, beats >= GMEM_BEATS_MIN, g_budget_ceil, src); }
 }
 static uint64_t g_hmin = UINT64_MAX;   // 本局开着文件后备时心跳读到的离上限剩余最小值
@@ -591,12 +604,12 @@ static void guest_file_attach_(void) {
                     : late ? "自动：还没选游戏（多款容器），先用匿名内存，装游戏前按本款实测再判"
                     : died && on ? "自动：上一局在前台时死掉（「在跑」标记还在：被内存上限杀 / 崩溃 / 测试局在前台被 devicectl 结束），这一局开"
                     : seen == UINT64_MAX ? "自动：本款实测峰值记录读不出（坏记录），保守开"
-                    : tier_why(on, low, seen, died);
+                    : tier_why(on, low, seen, died, s2a_guest_soft_tier(on, e, pool, room, seen, died));
     LOG("客体内存文件后备：%s——%s；本款应用内存池 %llu MB、离单进程内存上限还剩 %llu MB%s、物理内存 %llu MB、宿主估计 %llu MB、本机本款实测峰值 %llu MB（0 = 没有）%s", on ? "开" : "关", why,
         (unsigned long long)(pool >> 20), (unsigned long long)(room >> 20), room ? "" : "（0 = 未知）", (unsigned long long)(phys >> 20), (unsigned long long)(host >> 20),
         (unsigned long long)(seen == UINT64_MAX ? 0 : seen >> 20), s2a_process_prewarmed() ? "；预热进程" : "");
     if (low && !late) low_ram_notice(phys, s2a_guest_need(pool, host, seen));
-    g_gfile_room = room; g_gfile_died = died;
+    g_gfile_room = room; g_gfile_died = died; g_soft_host = s2a_guest_soft_tier(on && !late, e, pool, room, seen, died) ? host : 0;
     if (late) { g_gfile_late = 1; g_gfile_room0 = room; return; }
     if (!on) return;
     guest_file_map(room);
@@ -651,8 +664,9 @@ static void guest_file_map(uint64_t room) {
                                   (unsigned long long)(pb >> 20), (unsigned long long)(ph >> 20), (unsigned long long)(margin >> 20), (unsigned long long)(GCHUNK >> 20), (unsigned long long)(room >> 20),
                                   (unsigned long long)(g_budget_ceil >> 20));
       else { const char *v = getenv("S2A_GUEST_FILE_OVERFLOW_HOST_MB");
-          snprintf(why, sizeof why, "首局估计：剩余 %llu MB − 余量 %llu MB − 首局宿主开销 %llu MB（S2A_GUEST_FILE_OVERFLOW_HOST_MB）", (unsigned long long)(room >> 20),
-                   (unsigned long long)(margin >> 20), v && *v ? strtoull(v, NULL, 10) : 4096ull); } }
+          snprintf(why, sizeof why, "首局估计：剩余 %llu MB − 余量 %llu MB − 首局宿主开销 %llu MB（%s）", (unsigned long long)(room >> 20),
+                   (unsigned long long)(margin >> 20), v && *v ? strtoull(v, NULL, 10) : g_soft_host ? g_soft_host >> 20 : 4096ull,
+                   v && *v ? "S2A_GUEST_FILE_OVERFLOW_HOST_MB" : g_soft_host ? "池本身装得下：按宿主估计 S2A_GUEST_FILE_HOST_MB" : "缺省 = 全库 P90"); } }
 #else   // Mac：没有单进程上限，剩余 = 物理内存 − 预留，宿主开销按 S2A_GUEST_FILE_HOST_MB（缺省 2048）
     { uint64_t host = env_mb("S2A_GUEST_FILE_HOST_MB", 2048); budget = s2a_guest_anon_budget(be, room, margin, host);
       if (be && *be) snprintf(why, sizeof why, "按 S2A_GUEST_FILE_ANON_BUDGET_MB 显式设定");
@@ -697,9 +711,10 @@ int s2a_guest_file_retry(void) {
         int on = s2a_guest_file_wanted6(NULL, pool, g_gfile_room0, phys, seen, host, margin, died, &low);
         if (s2a_guest_run_crashed()) LOG("客体内存文件后备：上一局在前台闪退（我们的崩溃处理记过现场，不是被内存上限杀），不强制开、按实测判");
         LOG("客体内存文件后备（装游戏前按本款再判）：%s——%s；本款应用内存池 %llu MB、起局时离单进程内存上限还剩 %llu MB、物理内存 %llu MB、宿主估计 %llu MB、本机本款实测峰值 %llu MB（0 = 没有）",
-            on ? "开" : "关", tier_why(on, low, seen, died), (unsigned long long)(pool >> 20), (unsigned long long)(g_gfile_room0 >> 20), (unsigned long long)(phys >> 20),
+            on ? "开" : "关", tier_why(on, low, seen, died, s2a_guest_soft_tier(on, NULL, pool, g_gfile_room0, seen, died)), (unsigned long long)(pool >> 20), (unsigned long long)(g_gfile_room0 >> 20), (unsigned long long)(phys >> 20),
             (unsigned long long)(host >> 20), (unsigned long long)(seen == UINT64_MAX ? 0 : seen >> 20));
         if (low) low_ram_notice(phys, s2a_guest_need(pool, host, seen));
+        g_soft_host = s2a_guest_soft_tier(on, NULL, pool, g_gfile_room0, seen, died) ? host : 0;
         // 补写「本局在跑」标记（died 已在上面读过，不会读到自己）：标记按程序号放目录，App 到前台时（ios/app.m）多款容器还没选游戏、程序号是 0，
         //   路径取不到就没写——诊断 D-4PMS（6 GB iPhone，多款容器）一款 Switch 2 大款连着 5 局都在前台被内存上限杀，每局再判仍是「实测峰值装得下、关」，
         //   安全阀一次没触发。此刻已选定游戏、程序号确定，在这里补；进后台 / 将终止时删照旧（那时也认得程序号）
@@ -1161,6 +1176,35 @@ int s2a_window_span_widen(void) {
     if (g_gfd < 0) { free(g_gchunk); g_gchunk = NULL; free(g_gtouch); g_gtouch = NULL; g_gchunk_n = 0; }
     { void (*gc)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "s2a_gc_limit_reapply"); if (gc) gc(); }   // GC 上限是按放宽前的低区选的（gclimit.c），按现在的重选
     return 1;
+}
+// Mac：别名区伸出窗口的那段直接并进窗口（svc_mem.c layout_prepare 在开远端前调）。窗口顶在 2^39，其上在 Mac 上是空的（内核保护区在窗口下方），
+//   伸出段原本走远端：地址占成不可访问、游戏一碰就缺页代执行（far.c）。这里把 [窗口末, end) 也占成窗口的不可访问保留，游戏映射照常放开成真内存，
+//   不再缺页代执行。游戏碰到的地址不变（远端本来就是这些地址）；2^39 以上的 IPC 缓冲照旧由 s2a_ipc_addr39 补回第 39 位。
+//   占不到（被宿主映射占了 / iPhone 地址约束开着、那段被围栏占死）、文件后备已往窗口外接长或已有定过后备的块：回 0，调用方照旧开远端
+int s2a_window_extend_up(uint64_t end) {
+#if TARGET_OS_OSX
+    if (!g_ok || g_size != g_res) return 0;   // 窗口已收过尾部：尾部那段可能已还给系统，不在这里接
+    uint64_t lo = g_base + g_res; end = (end + 0x3fff) & ~0x3fffull;
+    if (end <= lo) return 0;
+    if (g_gextra) { LOG("地址窗口：文件后备已往窗口外接长（%llu MB），伸出段不并进窗口，照旧走远端", (unsigned long long)(g_gextra >> 20)); return 0; }
+    if (g_gfd >= 0 && !g_gwhole && g_gchunk) for (uint64_t i = 0; i < g_gchunk_n; i++) if (gc_get(i) != GC_UNDEC) {
+        LOG("地址窗口：文件后备已有定过后备的块（%#llx），伸出段不并进窗口，照旧走远端", (unsigned long long)(g_base + i * GCHUNK)); return 0; }
+    void *p = mmap((void *)lo, end - lo, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);   // 不带 MAP_FIXED：核对落点，不盖别人
+    if (p != (void *)lo) { if (p != MAP_FAILED) munmap(p, end - lo);
+        LOG("地址窗口：伸出段 %#llx +%llu MB 占不到（%s），照旧走远端", (unsigned long long)lo, (unsigned long long)((end - lo) >> 20), p == MAP_FAILED ? "失败" : "已有映射"); return 0; }
+    if (g_gfd >= 0 && ftruncate(g_gfd, (off_t)(end - g_base))) {
+        LOG("地址窗口：文件后备接长到 %llu MB 失败（errno=%d），伸出段不并进窗口，照旧走远端", (unsigned long long)((end - g_base) >> 20), errno); munmap(p, end - lo); return 0; }
+    if (g_gfd >= 0 && g_gwhole && mmap((void *)lo, end - lo, PROT_NONE, MAP_FIXED | MAP_SHARED, g_gfd, (off_t)(lo - g_base)) != (void *)lo) {   // 整段进文件：接上的这段也进文件（同偏移 = 地址 − 窗口基址）
+        int er = errno; munmap((void *)lo, end - lo); if (ftruncate(g_gfd, (off_t)g_size)) {}
+        LOG("地址窗口：伸出段映射成文件失败（errno=%d），不并进窗口，照旧走远端", er); return 0; }
+    uint64_t old = g_size; g_size = g_res = end - g_base;
+    if (g_gfd >= 0 && !gchunk_alloc(g_gwhole ? GC_FILE : GC_UNDEC)) die("客体内存文件后备：窗口接长后块状态表分配失败");
+    LOG("地址窗口：别名区伸出段 %#llx +%llu MB 并进窗口（Mac 上 2^39 之上是空的），窗口 %llu MB → %llu MB，不开远端、不缺页代执行",
+        (unsigned long long)lo, (unsigned long long)((end - lo) >> 20), (unsigned long long)(old >> 20), (unsigned long long)(g_size >> 20));
+    return 1;
+#else
+    (void)end; return 0;
+#endif
 }
 static uint64_t g_need, g_fit;   // 本款要的跨度；2^39 以下最大能放的一块（1 GB 对齐后）——自检提示「本款需要 N GB，本机最多 M GB」用
 void s2a_window_need(uint64_t *need, uint64_t *fit) { *need = g_need; *fit = g_fit; }

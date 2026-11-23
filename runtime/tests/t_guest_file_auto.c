@@ -144,7 +144,7 @@ int main(void) {
       CHECK(s2a_guest_file_wanted6(NULL, S2, R, PD, 0, H2, G, 0, &low) == 1 && low == 0, "㊻ 这款 Duo 首局（剩余 6141、物理 11570）：开（得 low %d）", low);
       CHECK(s2a_guest_file_wanted6(NULL, S2, RP, PD, 0, H2, G, 0, &low) == 1 && low == 0, "㊼ 同上、干净起局剩余 8189：池 9216 仍大于剩余，开");
       CHECK(s2a_guest_file_wanted6(NULL, S2, RP, PI, 0, H2, G, 0, &low) == 1 && low == 1, "㊽ 这款 iPad 首局（物理 7535 < 11264）：开、提示内存可能不够");
-      CHECK(s2a_guest_file_wanted6(NULL, S1, 4096 * MB, 6144 * MB, 0, H2, G, 0, &low) == 0 && low == 0, "㊾ Switch 1 款小内存机（池 3285 ≤ 剩余 4096）：关、不提示（守 ㊹）");
+      CHECK(s2a_guest_file_wanted6(NULL, S1, 4096 * MB, 6144 * MB, 0, H2, G, 0, &low) == 1 && low == 0, "㊾ Switch 1 款小内存机（池 3285 + 2048 + 512 > 剩余 4096）：开（溢出模式那档，见 72）、不提示（物理 6144 ≥ 5333）");
       { int l1 = -1, l2 = -1; int a = s2a_guest_file_wanted6(NULL, S2, RP, S2 + H2, 0, H2, G, 0, &l1), b = s2a_guest_file_wanted6(NULL, S2, RP, S2 + H2 - 1, 0, H2, G, 0, &l2);
         CHECK(a == 1 && l1 == 0 && b == 1 && l2 == 1, "㊿ 边界：物理 = 池 + 宿主估计 开不提示，少 1 字节 开并提示（得 %d/%d %d/%d）", a, l1, b, l2); }
       CHECK(s2a_guest_file_wanted6(NULL, S2, RP, PI, 0, H2, G, 1, &low) == 1 && s2a_guest_file_wanted6(NULL, S2, RP, PI, UINT64_MAX, H2, G, 0, &low) == 1, "51 上局在前台死掉 / 坏记录：开（物理内存不够也开，安全阀）");
@@ -177,6 +177,27 @@ int main(void) {
         CHECK(s2a_guest_file_wanted6(NULL, S2, 8189 * MB, 11570 * MB, 2118 * MB, H2, G, 0, &low) == 0 && low == 0, "71 实测装得下：关、不提示（low %d）", low);
         CHECK(s2a_guest_need(9216 * MB, 2048 * MB, 8877 * MB) == 8877 * MB && s2a_guest_need(9216 * MB, 2048 * MB, 0) == 11264 * MB && s2a_guest_need(9216 * MB, 2048 * MB, UINT64_MAX) == 11264 * MB,
               "71 「约需」：有实测 8877、没实测 / 坏记录 9216 + 2048 = 11264"); }
+    {   // 72 D-D4AK（6 GB iPhone15,3：物理 5636、剩余 4092，一款 Switch 1 游戏池 3285，没实测）：原先池 ≤ 剩余判关、纯匿名首局到 4093 MB 被系统收掉。
+        //   期望手算：3285 + 2048 + 512 = 5845 > 4092 → 开；5845 ≤ 物理 5636？否，但 low 按池 + 宿主 = 5333 ≤ 5636 → 不提示；这档是 soft（首局溢出预算按宿主估计 2048）。
+        //   溢出首局预算 = 4092 − 512 − 2048 = 1532 MB（大款缺省 4096 会得 0 = 整段进文件）。8 GB 机（剩余 6141）5845 ≤ 6141 → 照旧关
+        int low = -1, src = -1; int s2a_guest_soft_tier(int, const char *, uint64_t, uint64_t, uint64_t, int);
+        uint64_t s2a_guest_next_budget(const char *, uint64_t, uint64_t, uint64_t, int, int, uint64_t, uint64_t, int, uint64_t, int *);
+        int on = s2a_guest_file_wanted6(NULL, S1, 4092 * MB, 5636 * MB, 0, H2, G, 0, &low);
+        CHECK(on == 1 && low == 0 && s2a_guest_soft_tier(on, NULL, S1, 4092 * MB, 0, 0) == 1, "72 D-D4AK 首局：开（%d）、不提示（low %d）、溢出那档", on, low);
+        CHECK(s2a_guest_next_budget(NULL, 4092 * MB, G, H2, 0, 0, 0, 0, 0, 0, &src) == 1532 * MB && src == 3, "72 这档首局预算 4092 − 512 − 2048 = 1532 MB");
+        CHECK(s2a_guest_next_budget(NULL, 4092 * MB, G, 4096 * MB, 0, 0, 0, 0, 0, 0, &src) == 0, "72 反证：按大款首局宿主 4096 算是 0（整段进文件），所以这档要另给宿主估计");
+        CHECK(s2a_guest_file_wanted6(NULL, S1, 6141 * MB, 7800 * MB, 0, H2, G, 0, &low) == 0, "72 8 GB 机剩余 6141：5845 ≤ 6141 照旧关");
+        CHECK(s2a_guest_file_wanted6(NULL, S1, 5844 * MB, 7800 * MB, 0, H2, G, 0, &low) == 1 && s2a_guest_file_wanted6(NULL, S1, 5845 * MB, 7800 * MB, 0, H2, G, 0, &low) == 0, "72 边界：剩余 5844 开、5845 关");
+        CHECK(s2a_guest_soft_tier(1, NULL, S1, 4092 * MB, 0, 1) == 0 && s2a_guest_soft_tier(1, NULL, S2, 4092 * MB, 0, 0) == 0 && s2a_guest_soft_tier(1, NULL, S1, 4092 * MB, UINT64_MAX, 0) == 0
+              && s2a_guest_soft_tier(1, "1", S1, 4092 * MB, 0, 0) == 0 && s2a_guest_soft_tier(0, NULL, S1, 4092 * MB, 0, 0) == 0,
+              "72 不按宿主估计：上局死掉（整段）/ 池 > 剩余（Switch 2）/ 坏记录 / 显式设 / 没开"); }
+    {   // 73 D-F5PT（6 GB iPhone14,2：物理 5670、剩余 4085，一款 Switch 1 游戏池 3285、实测 3874，上局没死）：3874 + 512 > 4085 → 开；
+        //   原先首局预算按 4096 算 = 0，整段进文件（实占 0.5–1.2 GB，10 秒写盘约 3 GB、p99 帧时 0.2–2 秒）。期望：池装得下 → 按宿主 2048：4085 − 512 − 2048 = 1525 MB
+        int low = -1, src = -1; int s2a_guest_soft_tier(int, const char *, uint64_t, uint64_t, uint64_t, int);
+        uint64_t s2a_guest_next_budget(const char *, uint64_t, uint64_t, uint64_t, int, int, uint64_t, uint64_t, int, uint64_t, int *);
+        int on = s2a_guest_file_wanted6(NULL, S1, 4085 * MB, 5670 * MB, 3874 * MB, H2, G, 0, &low);
+        CHECK(on == 1 && low == 0 && s2a_guest_soft_tier(on, NULL, S1, 4085 * MB, 3874 * MB, 0) == 1, "73 D-F5PT：开（%d）、不提示（low %d）、池装得下按宿主估计", on, low);
+        CHECK(s2a_guest_next_budget(NULL, 4085 * MB, G, H2, 0, 0, 0, 0, 0, 0, &src) == 1525 * MB && src == 3, "73 首局预算 4085 − 512 − 2048 = 1525 MB（原先 0 = 整段）"); }
     {   // 67 「内存可能不够」只问一次（s2a_guest_lowram_once）：记号在 mem_peak_anon 同目录 lowram_asked；第一次 0（要问）、之后 1
         int s2a_guest_lowram_once(void); char d[] = "/tmp/t_lowram_XXXXXX"; if (!mkdtemp(d)) { CHECK(0, "67 建临时目录"); return 1; }
         char pk[256]; snprintf(pk, sizeof pk, "%s/w/mem_peak_anon", d); setenv("S2A_GUEST_MEM_PEAK", pk, 1);

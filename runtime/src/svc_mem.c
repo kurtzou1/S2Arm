@@ -5,6 +5,7 @@
 #include <dlfcn.h>
 #include "s2a_init_fail.h"
 #include "native.h"
+#include "far_slow.h"
 #include "s2a_selfcheck_page.h"
 #include "s2a_unattended.h"
 #include "as_type.h"
@@ -528,6 +529,11 @@ static void alias_report_overrun(uint64_t a, uint64_t size) {
 //   那是游戏真碰到过、这台设备给不了的。不知道（0：这款本机没玩过、种子表也没有）不弹（11-21：原先不知道也弹，拿静态大区的末端（整份标准布局）
 //   与窗口比，带提高内存上限权限的 12 GB iPhone 开一款 63 GB 静态大区、实际最高只碰到 40.8 GB 的游戏也让玩家「换一台设备」）：按需起局，边玩边学
 int s2a_addr_note_needed(uint64_t learned, uint64_t win_size) { return learned && learned > win_size; }
+// Mac：远端缺页持续偏高（far.c 逐秒账按 far_slow.h 判，只调一次）——打「地址空间不够这款」黄行，启动器认这行开头出提示条（pack/jobs/build.py ADDR_SHORT_MARK）
+__attribute__((visibility("default"), used)) void s2a_addr_short_far_slow(uint64_t sec, uint64_t per_sec) {
+    LOG("【黄】地址空间不够这款：第 %llu 秒，远端缺页每秒 ≥ %llu 次已连续 %d 秒（这一秒 %llu 次），别名区伸出窗口（%llu MB）的那段走缺页代执行，可能非常卡",
+        (unsigned long long)sec, (unsigned long long)S2A_FAR_SLOW_PER_SEC, S2A_FAR_SLOW_SECS, (unsigned long long)per_sec, (unsigned long long)(L.win_size >> 20));
+}
 static void addr_short_note(int alias_gb) {
     int s2a_alias_big_tops_window(uint64_t, int, uint64_t);
     uint64_t we = L.win_base + L.win_size;
@@ -544,6 +550,11 @@ static void addr_short_note(int alias_gb) {
           LOG("地址空间：静态大区 %d GB 顶到窗口末，但这款已知的最高跨度 %llu MB（本机记录 / 种子表，0 = 还不知道、按需起局）不超出窗口 %llu MB，不弹「仍要启动」",
               alias_gb < 0 ? -alias_gb : alias_gb, (unsigned long long)(seen >> 20), (unsigned long long)(L.win_size >> 20));
           return; } }
+#if TARGET_OS_OSX   // Mac：起局不提示，等远端缺页持续偏高（far.c 逐秒账，far_slow.h）再打那条黄行——跨度大不等于卡（11-22 一款格斗游戏：伸出段第 1 秒缺页 2368 次、之后 0 次，提示却让玩家以为跑不了）
+    LOG("地址空间：静态大区 %d GB，伸出窗口（%llu MB）的那段走远端；Mac 上远端缺页每秒 ≥ %llu 次连续 %d 秒才提示「地址空间不够这款」",
+        alias_gb < 0 ? -alias_gb : alias_gb, (unsigned long long)(L.win_size >> 20), (unsigned long long)S2A_FAR_SLOW_PER_SEC, S2A_FAR_SLOW_SECS);
+    return;
+#endif
     LOG("【黄】地址空间不够这款：这款碰到过的最高跨度比这台设备给得出的窗口（%llu MB）还大，静态大区 %d GB，游戏其余地址区会落在窗口外走远端，可能非常卡或停在开头",
         (unsigned long long)(L.win_size >> 20), alias_gb < 0 ? -alias_gb : alias_gb);
 #if TARGET_OS_IPHONE
@@ -552,6 +563,11 @@ static void addr_short_note(int alias_gb) {
     if (s2a_ios_ask_continue_l10n && s2a_ios_ask_continue_l10n("addrshort"))
         LOG("地址空间不够这款：玩家点了「仍要启动」，照常起局");
 #endif
+}
+// 伸出段并进窗口（Mac）的开关：缺省开，S2A_FAR_DIRECT=0 关（对照局：照旧走远端缺页代执行）
+static int far_direct_on(void) {
+    const char *e = getenv("S2A_FAR_DIRECT"); if (e && *e == '0') { LOG("地址窗口：伸出段不并进窗口（S2A_FAR_DIRECT=0），照旧走远端"); return 0; }
+    return 1;
 }
 static void layout_prepare(const char *npdm) {
     if (g_lay_ok) return;
@@ -605,6 +621,13 @@ static void layout_prepare(const char *npdm) {
             (unsigned long long)(mod >> 20), (unsigned long long)sr, (unsigned long long)(g_lay_need >> 20));
         s2a_init_failed(S2A_INIT_FAIL_E_DEVICE_ADDRESS);   // 宿主里不返回
         die("窗口放不下（没链宿主的失败出口）");
+    }
+    // Mac：别名区伸出窗口（乙）时先试把伸出段并进窗口（vawin.c s2a_window_extend_up）：成了就没有远端，游戏在那段的访存是真内存、不缺页代执行。
+    //   布局本身不变（仍按 2^39 以下的空洞排，小区在前），只是窗口末从 2^39 接到别名区末。iOS / 安卓 / 单测没有这个就照旧开远端
+    if (g_shadow_base && far_direct_on()) {
+        int (*ext)(uint64_t) = (int (*)(uint64_t))dlsym(RTLD_DEFAULT, "s2a_window_extend_up");
+        uint64_t ae = L.alias_base + L.alias_size;
+        if (ext && ext(ae)) { s2a_window_get(&wb, &ws); L.win_size = ws; g_shadow_base = 0; }
     }
     if (L.win_size < g_lay_need && L.alias_base + L.alias_size <= L.win_base + L.win_size)   // 甲，或别名优先的乙放得下静态大区 + 余量（别名区收到窗口末，layout.c）
         LOG("地址按需：标准布局要 %llu MB，宿主占到 %llu MB——别名区 %llu MB 整段在窗口内（静态大区 %d GB），不伸出、不开远端",

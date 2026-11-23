@@ -40,6 +40,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifdef S2A_ANDROID_DEBUG_ENV
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/file.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 // One atomic linearizes session stop with shader admission. The low bits
 // retain every active resolver until it has finished using the session, not
@@ -963,6 +970,51 @@ static void with_program_key(char *out, size_t cap, const char *why, const uint8
         snprintf(out + n, cap - (size_t)n, "（程序键 %02x%02x%02x%02x%02x%02x%02x%02x）",
                  key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7]);
 }
+#ifdef S2A_ANDROID_DEBUG_ENV
+// 预热与提交线程走同一拒收点。按文件加锁，让追加与 1 MiB 上限在并发和跨局时仍成立。
+static void record_link_refusal(const struct s2a_source_entry_view views[3], int nst, uint64_t miss) {
+    if (!nvn_plat_flag("nvk_link_refused_file", 0)) return;
+    const char *root = nvn_plat_dir(NVN_PLAT_DIR_CACHE);
+    char path[1200], row[128], keys[3][17] = {"", "", "-"};
+    int fd = -1;
+    const char *warning = "预编接口拒绝清单写入失败，本次采集可能不完整";
+    if (!root || !*root || nst < 2 || nst > 3) goto failed;
+    int len = snprintf(path, sizeof path, "%s/libpack-link-refused-v1.tsv", root);
+    if (len < 0 || (size_t)len >= sizeof path) goto failed;
+    for (int st = 0; st < nst; st++) {
+        if (!views[st].key) goto failed;
+        for (int i = 0; i < 8; i++)
+            snprintf(&keys[st][2 * i], 3, "%02x", views[st].key[i]);
+    }
+    len = snprintf(row, sizeof row, "%s\t%s\t0x%016llx\t%s\t%s\n",
+                   keys[0], keys[1], (unsigned long long)miss, DMSH_CHAIN, keys[2]);
+    if (len <= 0 || (size_t)len >= sizeof row) goto failed;
+    fd = open(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600);
+    if (fd < 0) goto failed;
+    while (flock(fd, LOCK_EX) < 0) {
+        if (errno != EINTR) goto failed;
+    }
+    struct stat st;
+    if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode)) goto failed;
+    if (st.st_size > 1024 * 1024 - len) {
+        warning = "预编接口拒绝清单达到 1 MiB 上限，后续拒绝未收录";
+        goto failed;
+    }
+    ssize_t wrote;
+    do { wrote = write(fd, row, (size_t)len); } while (wrote < 0 && errno == EINTR);
+    if (wrote != len) {
+        if (wrote > 0) (void)ftruncate(fd, st.st_size);
+        goto failed;
+    }
+    close(fd);
+    return;
+failed:
+    if (fd >= 0) close(fd);
+    static _Atomic int warned;
+    if (!atomic_exchange(&warned, 1)) nvn_plat_log(NVN_PLAT_LOG_WARN, "shader", warning);
+}
+#endif
+
 // lib = 这份结果字节来自出包预编库（shader_src.precompiled=1）：装载闸对表外声明按拒收，
 //   调用方照旧 mark_bad 退回现编。离线库 / 跨局缓存 / 现编结果传 0。
 static _Atomic uint64_t g_lp_link_refused;   // 出包预编程序因两段接口对不上退回现编的份数（本局）
@@ -1009,6 +1061,9 @@ static struct entry *build(const uint8_t *bytes, size_t len, const struct s2a_so
         const struct fd_stage *pre = nst >= 3 && fp.stage[2].present ? &fp.stage[2] : &fp.stage[0];
         uint64_t miss = 0;
         if (!nvn_vk_spirv_link_ok(pre->spirv, pre->spirv_bytes, fp.stage[1].spirv, fp.stage[1].spirv_bytes, &miss)) {
+#ifdef S2A_ANDROID_DEBUG_ENV
+            record_link_refusal(views, nst, miss);
+#endif
             uint64_t k = atomic_fetch_add(&g_lp_link_refused, 1);
             if (k < 4) { char m[200]; snprintf(m, sizeof m, "出包预编程序两段接口对不上：片元读的位置 %#llx 上一段没写（身份 %02x%02x%02x%02x…），这份退回现编",
                 (unsigned long long)miss, identity[0], identity[1], identity[2], identity[3]); nvn_plat_log(NVN_PLAT_LOG_INFO, "shader", m); }
@@ -1211,11 +1266,12 @@ static struct work_snap *snap_capture(const struct facts *f, const struct s2a_in
 // 取到的 v1 程序走同一个 build；build 不过（绑定映射 / 解析不认）记进不可用表、退回现编——不把失败记成这份输入的终态。
 // 跨局缓存排在它前面：那是本机按现场事实编的，比出包推导的准。开关 debug.s2a.no_libpack=1 关掉（对照用）
 static pthread_mutex_t g_lp_mu = PTHREAD_MUTEX_INITIALIZER;
-static nvn_hmap g_lp_bad; static int g_lp_bad_init;
+static nvn_hmap g_lp_bad; static int g_lp_bad_init;   // 值 = 记坏原因（LPBAD_*，非 0；表里的指针位只当整数用）
+enum { LPBAD_BUILD = 1 };   // 取到了库程序、build 不过（绑定映射 / 解析不认 / 绑定数超限 / 绑定核对回退）
 static _Atomic uint64_t g_n_libpack, g_n_libpack_bad, g_lp_unaligned_refused;
 // 计算程序「为什么没走出包预编库」的备忘（只作诊断，不影响取程序）：按计算阶段键记最近 64 个，回放层的 spill 派发行与调查用。
 //   命中库的键撤掉旧备忘；备忘满了按轮转覆盖。查表的是回放线程、写表的是提交线程 / 预热线程，一把小锁。
-enum { CSN_NONE, CSN_UNALIGNED, CSN_SHARED, CSN_MISS, CSN_REJECT };
+enum { CSN_NONE, CSN_UNALIGNED, CSN_SHARED, CSN_MISS, CSN_REJECT, CSN_REFLECT, CSN_BUILD };
 #define CS_NOTE_N 64
 static pthread_mutex_t g_cs_note_mu = PTHREAD_MUTEX_INITIALIZER;
 static struct { uint8_t key[8]; uint8_t why; } g_cs_note[CS_NOTE_N];
@@ -1231,10 +1287,22 @@ static void cs_note_set(const uint8_t key[8], int why) {
     }
     pthread_mutex_unlock(&g_cs_note_mu);
 }
+// 库返回的原因码 → 备忘类别：诊断只读码（enum s2a_libpack_why），不读 why 文本；库里没有这一键（MISS）不带码，由返回值定。
+static int cs_note_of_lib(int lrc, int reason) {
+    if (lrc == S2A_LIBPACK_HIT) return CSN_NONE;
+    if (lrc == S2A_LIBPACK_MISS) return CSN_MISS;
+    switch (reason) {
+    case S2A_LIBPACK_WHY_UNALIGNED: return CSN_UNALIGNED;
+    case S2A_LIBPACK_WHY_SHARED_LIMIT: return CSN_SHARED;
+    case S2A_LIBPACK_WHY_REFLECT: return CSN_REFLECT;
+    default: return CSN_REJECT;
+    }
+}
 // 回放层（rp_draw.c，弱链接）用：这个计算阶段键最近一次没走库的原因；没有记录 / 已命中库返回 NULL
 const char *nvk_shader_cs_lib_note(const uint8_t key[8]);
 const char *nvk_shader_cs_lib_note(const uint8_t key[8]) {
-    static const char *const text[] = {NULL, "库闸：存储缓冲非对齐（只有对齐变体）", "库闸：共享内存超设备上限（出库拒，只能现编改写 spill）", "库里没有这一键", "库件被拒收"};
+    static const char *const text[] = {NULL, "库闸：存储缓冲非对齐（只有对齐变体）", "库闸：共享内存超设备上限（出库拒，只能现编改写 spill）", "库里没有这一键", "库件被拒收",
+                                       "库件被拒收：SPIR-V 反射 / 能力核不过", "库件 build 失败（取到但建不出程序，已记坏、退回现编）"};
     int why = 0;
     pthread_mutex_lock(&g_cs_note_mu);
     for (int i = 0; i < CS_NOTE_N; i++) if (g_cs_note[i].why && !memcmp(g_cs_note[i].key, key, 8)) { why = g_cs_note[i].why; break; }
@@ -1265,7 +1333,7 @@ static struct s2a_libpack *libpack_for_locked(const char *root) {
     }
     return lp;
 }
-// 取一份（图形：stages 是 vs+fs 0x3 或 vs+fs+gs 0x7，keys 按 NVN 位序紧排 vs / fs / gs；计算：ckey 非空）。1 = 取到（*bytes 归调用方 free）
+// 取一份（图形：stages 是只有 vs 0x1、vs+fs 0x3 或 vs+fs+gs 0x7，keys 按 NVN 位序紧排 vs / fs / gs；计算：ckey 非空）。1 = 取到（*bytes 归调用方 free）
 //   topology：本笔绘制的输入图元名（fill_facts 的 topology()，快照里已算好——工作线程不碰 rp_S）；几何程序按它挑离线库里同图元那份，
 //   没有来源（NULL）几何程序 miss。本局 profile 的 geometryShader 没开时 libpack 照旧 miss（与现编同一字段）
 static int libpack_fetch(const uint8_t identity[32], const uint8_t (*gkeys)[8], uint32_t stages, const uint8_t *ckey, int state_ok,
@@ -1274,12 +1342,12 @@ static int libpack_fetch(const uint8_t identity[32], const uint8_t (*gkeys)[8], 
     // state_ok 对计算同样生效：ckey 路径传 !unaligned（慢路）/ rec->lp_ok==2（暖路径），含义同图形 lp_ok。库件只有
     //   对齐变体（libpack_vk.c 恒写 hasUnalignedStorageBuffer:false，c0 钳制补偿只有现编能出），非对齐 sbuf 绑定下
     //   出库 = 无钳制的对齐码跑非对齐缓冲 → 设备越界丢局（9000 日包 DeviceLost 元凶 = cs 50c91227a1082f2c 库版此机制）。
-    if (!root || !state_ok || (!ckey && stages != 0x3u && stages != 0x7u) || nvn_plat_flag("no_libpack", 0)) {
+    if (!root || !state_ok || (!ckey && stages != 0x1u && stages != 0x3u && stages != 0x7u) || nvn_plat_flag("no_libpack", 0)) {
         // 计算侧对齐闸的拒查有界具名（程序键 + 原因）：库根在、ckey 非空、state_ok 假 = 非对齐 sbuf 拒查，
         //   真机直接看到闸生效。每次取程序都可能撞上：一行一个事件只打前 8 条防日志洪泛，之后只累计。
         if (root && ckey && !state_ok) {
             uint64_t n = atomic_fetch_add_explicit(&g_lp_unaligned_refused, 1, memory_order_relaxed);
-            cs_note_set(ckey, CSN_UNALIGNED);
+            cs_note_set(ckey, cs_note_of_lib(S2A_LIBPACK_REJECT, S2A_LIBPACK_WHY_UNALIGNED));
             char kh[17]; for (int i = 0; i < 8; i++) snprintf(kh + 2 * i, 3, "%02x", ckey[i]);
             if (n < 8) {
                 char b[256]; snprintf(b, sizeof b,
@@ -1298,10 +1366,14 @@ static int libpack_fetch(const uint8_t identity[32], const uint8_t (*gkeys)[8], 
         }
         return 0;
     }
-    char lw[192] = ""; int lrc = S2A_LIBPACK_MISS;
+    char lw[192] = ""; int lrc = S2A_LIBPACK_MISS, lwhy = S2A_LIBPACK_WHY_NONE;
     pthread_mutex_lock(&g_lp_mu);
     if (!g_lp_bad_init) { nvn_hm_init(&g_lp_bad, 32); g_lp_bad_init = 1; }
-    struct s2a_libpack *lp = nvn_hm_get(&g_lp_bad, identity) ? NULL : libpack_for_locked(root);
+    // 这个身份取过库程序但 build 不过、已记坏：不再取，但把原因写进备忘（原先这里直接返回，备忘还是上次命中时的「没有」，
+    //   spill 派发行会报「没有出库记录」）。按记坏原因归类，不是按文本。
+    void *bad = nvn_hm_get(&g_lp_bad, identity);
+    if (bad && ckey) cs_note_set(ckey, (uintptr_t)bad == LPBAD_BUILD ? CSN_BUILD : CSN_REJECT);
+    struct s2a_libpack *lp = bad ? NULL : libpack_for_locked(root);
     if (lp) {
         if (ckey) {
             // 出库共享内存闸要设备 maxComputeSharedMemorySize 真值：取本局 provider profile（现编同一来源）；
@@ -1309,23 +1381,22 @@ static int libpack_fetch(const uint8_t identity[32], const uint8_t (*gkeys)[8], 
             struct nvk_compute_profile_facts pf; char pw[160] = "";
             if (nvk_compute_profile_parse(pc, &pf, pw, sizeof pw)) {
                 snprintf(lw, sizeof lw, "compute profile: %s", pw[0] ? pw : "invalid");
-                lrc = S2A_LIBPACK_REJECT;
+                lrc = S2A_LIBPACK_REJECT; lwhy = S2A_LIBPACK_WHY_OTHER;
             } else {
                 lrc = s2a_libpack_compute_v1(lp, ckey, (uint32_t)pc->direct_abi, pc->profile_hash,
-                                             pc->translator_closure, pf.max_shared, bytes, len, lw, sizeof lw);
+                                             pc->translator_closure, pf.max_shared, bytes, len, lw, sizeof lw, &lwhy);
             }
         }
         else {
             uint8_t keys[6][8]; memset(keys, 0, sizeof keys);
-            for (int st = 0; st < (stages == 0x7u ? 3 : 2); st++) memcpy(keys[st], gkeys[st], 8);
+            for (int st = 0; st < (stages == 0x7u ? 3 : stages == 0x3u ? 2 : 1); st++) memcpy(keys[st], gkeys[st], 8);
             const struct s2a_libpack_gfx g = { topology, pc->profile_json, pc->profile_bytes };
             lrc = s2a_libpack_program_v1(lp, keys, stages, &g, (uint32_t)pc->direct_abi, pc->profile_hash, pc->translator_closure, bytes, len, lw, sizeof lw);
         }
     }
     pthread_mutex_unlock(&g_lp_mu);
     if (!lp) return 0;
-    if (ckey) cs_note_set(ckey, lrc == S2A_LIBPACK_HIT ? CSN_NONE : strstr(lw, "exceeds device limit") ? CSN_SHARED :
-                                lrc == S2A_LIBPACK_MISS ? CSN_MISS : CSN_REJECT);
+    if (ckey) cs_note_set(ckey, cs_note_of_lib(lrc, lwhy));
     if (lrc != S2A_LIBPACK_HIT) {   // 没找到 / 容器里这一键坏：前几条把原因打出来（键 = 每阶段 8 字节控制键）
         static _Atomic int nm; if (atomic_fetch_add(&nm, 1) < 6) {
             const uint8_t *k = ckey ? ckey : gkeys[0];
@@ -1336,12 +1407,13 @@ static int libpack_fetch(const uint8_t identity[32], const uint8_t (*gkeys)[8], 
     return 1;
 }
 // 取到但 build 不过：记住，下次直接走现编（不再取一遍、拼一遍）
-static void libpack_mark_bad(const uint8_t identity[32]) {
+static void libpack_mark_bad(const uint8_t identity[32], const uint8_t *ckey) {
     uint64_t n = atomic_fetch_add(&g_n_libpack_bad, 1) + 1;
     pthread_mutex_lock(&g_lp_mu);
     if (!g_lp_bad_init) { nvn_hm_init(&g_lp_bad, 32); g_lp_bad_init = 1; }
-    if (!nvn_hm_get(&g_lp_bad, identity)) nvn_hm_put(&g_lp_bad, identity, (void *)1);
+    if (!nvn_hm_get(&g_lp_bad, identity)) nvn_hm_put(&g_lp_bad, identity, (void *)(uintptr_t)LPBAD_BUILD);
     pthread_mutex_unlock(&g_lp_mu);
+    if (ckey) cs_note_set(ckey, CSN_BUILD);   // 计算：当场写进备忘（调用方知道阶段键）；不知道键的路径由下一次取库命中记坏表时补
     if (n <= 4) { char b[200]; snprintf(b, sizeof b, "出包预编程序不可用、退回现编（第 %llu 个，身份 %02x%02x%02x%02x…）", (unsigned long long)n,
         identity[0], identity[1], identity[2], identity[3]); nvn_plat_log(NVN_PLAT_LOG_INFO, "shader", b); }
 }
@@ -1558,7 +1630,7 @@ static struct entry *work_run(const struct work_snap *s, const struct rp_shader_
         free(bytes); bytes = NULL; len = 0;
         if (le && !le->failed) { libpack_note_hit(); return le; }
         if (le) entry_free(le);
-        libpack_mark_bad(s->identity);
+        libpack_mark_bad(s->identity, NULL);
     }
     if (!bytes) {
         // 现场编译只读取已捕获的请求，回到原 owner 处理事实学习和结果发布。
@@ -1689,7 +1761,7 @@ static struct entry *warm_work_run(const struct nvk_prog_rec *rec, int nst) {
         free(bytes); bytes = NULL; len = 0;
         if (le && !le->failed) { libpack_note_hit(); return le; }
         if (le) entry_free(le);
-        libpack_mark_bad(rec->identity);
+        libpack_mark_bad(rec->identity, compute ? rec->keys[0] : NULL);
     }
     if (!bytes) {
         warm_diag("程序预热：结果字节取不到（身份 %02x%02x%02x%02x…，离线库 %s，跨局缓存 %s「%s」，缓存目录 %s）",
@@ -2392,7 +2464,7 @@ static int resolve_compute_slow(const struct rp_prog **out, const struct s2a_dir
             lpe = build_compute(bytes, len, &rq.source, rq.identity, rp_S.skey[5], 1);
             free(bytes); bytes = NULL; len = 0;
             if (lpe && !lpe->failed) { lpe->prog.lib_sourced = 1; libpack_note_hit(); }
-            else { entry_free(lpe); lpe = NULL; libpack_mark_bad(rq.identity); }
+            else { entry_free(lpe); lpe = NULL; libpack_mark_bad(rq.identity, rp_S.skey[5]); }
         }
         if (!bytes && !lpe) {
             struct s2a_compile_outcome oc; memset(&oc, 0, sizeof oc);
@@ -2465,7 +2537,7 @@ static _Atomic uint64_t g_n_lib_reject;
 // 不在这里释放，由收尾的借用判据统一回收。
 int rp_shader_lib_reject(const struct rp_prog *p) {
     if (!p || !p->lib_sourced) return 0;
-    libpack_mark_bad(p->identity);
+    libpack_mark_bad(p->identity, NULL);
     pthread_mutex_lock(&g_progs_mu);
     ((struct rp_prog *)p)->lib_bad = 1;
     pthread_mutex_unlock(&g_progs_mu);

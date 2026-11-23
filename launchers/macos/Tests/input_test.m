@@ -1185,17 +1185,44 @@ static void test_mouse_touch_declared(void) {
     expect(n == 1 && x == 320 && y == 360 && a == 1 && !mouse_captured && s2a_vpad_read(sticks) == 0, "声明配置 + 缺省键位（启动器标准映射）：左键 = 触点 Start (320,360)、不发 Y、不锁鼠标");
     [view mouseUp:left_event(NSEventTypeLeftMouseUp, in, 720)];
     expect(read_touch(&x, &y, &a) == 1 && a == 2, "声明配置 + 缺省键位：抬起 = End");
+    // #1987 维护方定（11-22）：「玩家改没改过」只看左键的绑定和鼠标模式，别的键改了不算（所有游戏的默认改了一个手柄键、某款单独改了个按键都照样让给触屏）
     NSMutableDictionary *changed = [launcher_standard_json() mutableCopy]; NSMutableDictionary *kb = [changed[@"keyboard"] mutableCopy];
     kb[@"A"] = @{@"code": @36, @"modifiers": @0}; changed[@"keyboard"] = kb;   // 玩家把 A 改到回车
     config = changed; reset_input(); while (read_touch(&x, &y, &a)) {}
     [view mouseDown:left_event(NSEventTypeLeftMouseDown, in, 720)];
-    expect(mouse_captured && read_touch(&x, &y, &a) == 0, "声明配置 + 玩家改过键位：按玩家设置（视角模式锁鼠标、不写触点）");
+    n = read_touch(&x, &y, &a);
+    expect(n == 1 && a == 1 && !mouse_captured && s2a_vpad_read(sticks) == 0, "声明配置 + 只改了键盘键（A → 回车）：左键和鼠标模式没动，仍当触屏、不发 Y、不锁鼠标");
+    [view mouseUp:left_event(NSEventTypeLeftMouseUp, in, 720)]; while (read_touch(&x, &y, &a)) {}
+    NSMutableDictionary *pad = [launcher_standard_json() mutableCopy]; NSMutableDictionary *gp = [pad[@"gamepad"] mutableCopy];
+    gp[@"A"] = @"south"; gp[@"B"] = @"east"; pad[@"gamepad"] = gp;   // 所有游戏的默认只换了一组手柄键（A / B 对调）
+    config = pad; reset_input(); while (read_touch(&x, &y, &a)) {}
+    [view mouseDown:left_event(NSEventTypeLeftMouseDown, in, 720)];
+    n = read_touch(&x, &y, &a);
+    expect(n == 1 && a == 1 && !mouse_captured && s2a_vpad_read(sticks) == 0, "声明配置 + 默认只改了手柄键：左键仍当触屏");
+    [view mouseUp:left_event(NSEventTypeLeftMouseUp, in, 720)]; while (read_touch(&x, &y, &a)) {}
+    NSMutableDictionary *rebound = [launcher_standard_json() mutableCopy];
+    rebound[@"mouse"] = @{@"ZR": @0, @"ZL": @1};   // 左键改绑到 ZR（鼠标模式仍是转动视角）
+    config = rebound; reset_input(); while (read_touch(&x, &y, &a)) {}
+    [view mouseDown:left_event(NSEventTypeLeftMouseDown, in, 720)];
+    expect(mouse_captured && read_touch(&x, &y, &a) == 0, "声明配置 + 左键改绑成别的键：不接管（视角模式锁鼠标、不写触点）");
     [view mouseUp:left_event(NSEventTypeLeftMouseUp, in, 720)];
     [view mouseDown:left_event(NSEventTypeLeftMouseDown, in, 720)];
-    expect(read_touch(&x, &y, &a) == 0 && s2a_vpad_read(sticks) == (1u << 3), "声明配置 + 玩家改过键位：锁住后左键照旧发 Y");
+    expect(read_touch(&x, &y, &a) == 0 && s2a_vpad_read(sticks) == (1u << 9), "声明配置 + 左键改绑成 ZR：锁住后左键发 ZR（0x200）");
     [view mouseUp:left_event(NSEventTypeLeftMouseUp, in, 720)]; set_mouse_capture(NO);
+    NSMutableDictionary *off = [launcher_standard_json() mutableCopy];
+    off[@"mouse"] = @{@"ZL": @1}; off[@"mouseOptions"] = @{@"mode": @"off", @"sensitivityX": @1.0, @"sensitivityY": @1.0, @"invertX": @NO, @"invertY": @NO, @"recenter": @YES};
+    config = off; reset_input(); while (read_touch(&x, &y, &a)) {}   // 鼠标模式改成「不起作用」、左键没绑
+    [view mouseDown:left_event(NSEventTypeLeftMouseDown, in, 720)];
+    n = read_touch(&x, &y, &a);
+    expect(n == 1 && a == 1 && !mouse_captured && s2a_vpad_read(sticks) == 0, "声明配置 + 鼠标模式不是转动视角、左键没绑：按规则 ② 接管（当触屏）");
+    [view mouseUp:left_event(NSEventTypeLeftMouseUp, in, 720)]; while (read_touch(&x, &y, &a)) {}
+    NSMutableDictionary *offBound = [off mutableCopy]; offBound[@"mouse"] = @{@"Y": @0, @"ZL": @1};
+    config = offBound; reset_input(); while (read_touch(&x, &y, &a)) {}   // 鼠标模式改了、左键仍是 Y：玩家动过鼠标用法 → 照映射发 Y
+    [view mouseDown:left_event(NSEventTypeLeftMouseDown, in, 720)];
+    expect(read_touch(&x, &y, &a) == 0 && !mouse_captured && s2a_vpad_read(sticks) == (1u << 3), "声明配置 + 鼠标模式改成不起作用、左键仍绑 Y：按玩家设置发 Y、不写触点");
+    [view mouseUp:left_event(NSEventTypeLeftMouseUp, in, 720)];
     atomic_store(&touch_declared, -1); config = default_config(); reset_input(); fake_frame_w = 0;
-    puts("Mac mouse touch declared: declared + default mapping touches without Y/capture; changed mapping and undeclared keep camera/Y passed");
+    puts("Mac mouse touch declared: declared + default left button/mode touches (other keys changed too); rebound left / changed mode follow player; undeclared keeps camera/Y passed");
 }
 static NSDictionary *frozen_original_config(void) {
     return @{@"keyboard": @{@"A": @{@"code": @14}, @"B": @{@"code": @56}, @"X": @{@"code": @49},

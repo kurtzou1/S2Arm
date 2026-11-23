@@ -34,6 +34,7 @@ class Explain(unittest.TestCase):
                 ('HTTP request error 503 attempting to connect to https://example.org/x', 'device_install_failed'),   # 负对照：不是苹果的服务器
                 ('Error: Idevice error: device does not have pairing file\n  /lib/sl/b-8967bb05a539/092fae66d35d311c_b.json', 'device_pairing_required'),   # D-EH49：十六进制里的 2fa 不算两步验证
                 ('2FA code was rejected', 'two_factor_wrong'),   # 整词 2FA 照认
+                ('Error: Idevice error: Application verification failed: Failed to verify code signature of /var/installd/Library/Caches/com.apple.mobile.installd.staging/temp.lPRCKA/extracted/S2Arm.app : 0xe8008018 (The identity used to sign the executable is no longer valid.)', 'signing_identity_invalid'),   # D-7VBE Windows plumesign 装机原文：手机不认签名证书
                 ('完全看不懂的报错', 'device_install_failed')):
             with self.subTest(text=text): self.assertEqual(impactor.explain(text), code)
 

@@ -109,10 +109,11 @@ struct InputSettingsSheet: View {
             if let target = recording, let key { setKey(key, for: target) }
             recording = nil
         })
-        .onAppear {
+        .task {   // #2081：四位玩家的键位交作业层 loadInput 读（同起局的规则），读完才算 loaded
             guard !loaded else { return }
+            let all = (try? await model.loadInputs(gameID: gameID)) ?? [:]
             for p in 1...4 {
-                let input = model.loadInput(gameID: gameID, player: p)
+                let input = all[p] ?? LoadedInput(config: .standard, problem: false, inherited: p > 1)
                 configs[p] = input.config; baselines[p] = input.config; inheritedFlags[p] = input.inherited; problems[p] = input.problem
             }
             config = configs[player] ?? .standard; baseline = baselines[player] ?? .standard

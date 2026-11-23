@@ -236,8 +236,13 @@ int main(int argc, char **argv) {
         check(count_in(page, "initForOpeningContentTypes:@[UTTypeJSON] asCopy:YES") == 1, "导入：选文件面板只认 JSON、以副本方式读（同触屏布局页）");
         check(count_in(page, "s2a_kbd_import(") == 1, "导入：读进来的内容交 s2a_kbd_import（先查大小再解析）");
         check(count_in(page, "initForExportingURLs:") == 1, "导出：用选文件面板导出（同触屏布局页，不走分享面板）");
-        check(count_in(page, "s2a_kbd_config_json(") == 1 && count_in(page, "s2a_kbd_store_save(game, app, &_map)") == 1,
+        check(count_in(page, "s2a_kbd_config_json(") == 1 && count_in(page, "s2a_kbd_store_save(game, app, &_map, _mouseOff)") == 1,
               "导出写 schema 1 JSON；存盘交 keyboard_store（写的是同一份 JSON，t_keyboard_store ② 核逐字相同）");
+        // 「使用鼠标 / 触控板」开关（#2072）：存、设为默认都带上；读进来、恢复默认 / 撤销后重读；关了鼠标时「…」里的鼠标键置灰
+        check(count_in(page, "s2a_kbd_store_set_default(game, app, &_map, _mouseOff)") == 1 && count_in(page, "_mouseOff = load_mouse_off()") == 2,
+              "鼠标开关：存与设为默认都交 keyboard_store；进页面、恢复默认 / 设默认 / 撤销后都重读");
+        check(count_in(page, "if (_mouseOff) pick.attributes = UIMenuElementAttributesDisabled;") == 1 && count_in(page, "((UIControl *)cell.accessoryView).enabled = !_mouseOff;") == 1,
+              "鼠标开关关掉：「…」里的鼠标键和鼠标组下面几行置灰");
         char *cancel = body_of(page, "- (void)documentPickerWasCancelled:");
         check(cancel && count_in(cancel, "cleanExport") == 1, "导出取消也清掉临时目录");
         free(cancel);

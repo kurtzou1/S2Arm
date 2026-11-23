@@ -18,7 +18,7 @@ import community
 import host_update
 import layout
 from core import Cancelled, Failure, atomic, clone, contained, digest, read, resolve_path, tree_hash
-from library import input_identity, require_game, selected_packages, source_path, stage_sources, validate_input
+from library import effective_input, input_identity, require_game, selected_packages, source_path, stage_sources, validate_input
 import milestones as ms
 import toolchain
 
@@ -268,14 +268,18 @@ def runtime_env(c, game, runtime, input_ok=True):
     # Freeze exactly what the pre-launch card showed. Never rewrite another run's snapshot.
     # input_ok = False：宿主不认键位映射（launch 判的）→ 这局不带映射、用默认键位（v0.3.1：认不出照常玩，不让玩家先去重新打包）
     config = c.r.get("launchInputConfig") if input_ok else None
-    if config is None and input_ok:
-        config = read(layout.path(c, game["id"], "input.json", create=False)) or read(c.private / "default-input.json")
     if config is not None:
         try:
             validate_input(config)
         except Failure as e:   # 映射不合规（旧版本 / 手改坏了）：用默认键位照常起局，日志记一笔，不挡（v0.3.1 装机原则：认不出的直接做）
             print(f"[起局] 键位映射不合规（{e}），这局用默认键位", file=sys.stderr, flush=True)
             config = None
+    elif input_ok:
+        # #2081：和键位弹窗（loadInput）同一条规则——input.json 不在 / 读不出 / 不合规都往 default-input.json、再往标准键位走
+        picked = effective_input(c, game["id"], 1)
+        config = picked["config"]
+        if picked["problem"]:
+            print(f"[起局] 这款存的键位读不出或不合规，这局用{'所有游戏的默认键位' if picked['source'] == 'default' else '标准键位'}", file=sys.stderr, flush=True)  # 非玩家句
     if config is not None:
         path = c.private / "runtime-input" / game["id"] / (c.task + ".json")
         atomic(path, config)
@@ -285,14 +289,12 @@ def runtime_env(c, game, runtime, input_ok=True):
     #   input_ok = False（宿主不认键位映射）时不带，同玩家 1 的口径
     if input_ok:
         for player in (2, 3, 4):
-            player_config = read(layout.path(c, game["id"], f"input-p{player}.json", create=False))
-            if not player_config:
+            picked = effective_input(c, game["id"], player)   # #2081：同弹窗的规则；读不出（含非 JSON）/ 不合规 → 这位照玩家 1 的键位，不挡
+            if picked["source"] != "game":
+                if picked["problem"]:
+                    print(f"[起局] 玩家 {player} 的键位读不出或不合规，这位照玩家 1 的键位", file=sys.stderr, flush=True)  # 非玩家句
                 continue
-            try:
-                validate_input(player_config)
-            except Failure as e:   # 映射不合规（旧版本 / 手改坏了）：这位照玩家 1 的键位照常玩，不挡
-                print(f"[起局] 玩家 {player} 的键位映射不合规（{e}），这位照玩家 1 的键位", file=sys.stderr, flush=True)
-                continue
+            player_config = picked["config"]
             path = c.private / "runtime-input" / game["id"] / f"{c.task}-player{player}.json"
             atomic(path, player_config)
             env[f"S2A_INPUT_CONFIG_P{player}"] = str(path)

@@ -674,6 +674,8 @@
 "kbd.mouse.invertX" = "左右反過來";
 "kbd.mouse.invertY" = "上下反過來";
 "kbd.mouse.recenter" = "停手後視角回正";
+"kbd.mouse.use" = "使用滑鼠 / 觸控式軌跡板";
+"kbd.mouse.offNote" = "已關閉：按一下觸控式軌跡板就像手指碰螢幕，可以叫出虛擬按鍵和設定齒輪；滑鼠按鍵和移動都不會傳給遊戲。";
 "kbd.mouseButton.0" = "左鍵";
 "kbd.mouseButton.1" = "右鍵";
 "kbd.mouseButton.2" = "中鍵";

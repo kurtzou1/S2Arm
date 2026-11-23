@@ -23,7 +23,7 @@ void s2a_vpad_pointer_touch(UITouch *touch, int phase) { (void)touch; (void)phas
 void s2a_ios_mouse_attach(UIView *root) { (void)root; }
 int s2a_ios_mouse_lock_wanted(void) { return 0; }
 unsigned s2a_ios_mouse_buttons(void) { return 0; }
-void s2a_ios_mouse_config(const s2a_input_config *c, int is_default) { (void)c; (void)is_default; }
+void s2a_ios_mouse_config(const s2a_input_config *c, int is_default, int off) { (void)c; (void)is_default; (void)off; }
 int s2a_ios_mouse_escape(void) { return 0; }
 void s2a_ios_mouse_sync(void) {}
 void s2a_ios_mouse_background(void) {}

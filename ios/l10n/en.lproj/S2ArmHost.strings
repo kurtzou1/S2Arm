@@ -674,6 +674,8 @@
 "kbd.mouse.invertX" = "Invert horizontal";
 "kbd.mouse.invertY" = "Invert vertical";
 "kbd.mouse.recenter" = "Recenter when the mouse stops";
+"kbd.mouse.use" = "Use Mouse / Trackpad";
+"kbd.mouse.offNote" = "Off: clicking the trackpad works like touching the screen and brings up the on-screen buttons and the gear menu. Mouse buttons and movement are not sent to the game.";
 "kbd.mouseButton.0" = "Left button";
 "kbd.mouseButton.1" = "Right button";
 "kbd.mouseButton.2" = "Middle button";

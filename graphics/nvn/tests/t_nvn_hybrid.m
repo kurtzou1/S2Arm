@@ -121,6 +121,9 @@ static int run(int hybrid) {
     // ② 同一对、换画布格式：新键
     g_pass.cfmt[0] = (uint32_t)MTLPixelFormatRGBA16Float;
     pso_key k2; pso_key_fill(&k2, vs, fs, g_pass.cfmt, 0, 0, 1, 0);
+    // 精确那条后台编译先闸住（g_pp_test_hold）：② / ③ 判「精确那条还在编」时它一定没编完。原先靠编译慢：门禁机上归档 / 系统缓存热时 kick 后几微秒就编好，
+    //   ② 不走拉取管线判红（11-22 main d354d4f0a / b577e8c1c 两次，本机冷缓存 3/3 绿）
+    if (hybrid) g_pp_test_hold = dispatch_semaphore_create(0);
     uint64_t made0 = g_hy_made; id ps2 = pso_get_(pr, nil); int pull2 = g_pso_pull, st2 = pso_pend_state(&k2);
     if (!hybrid) { VERIFY(ps2 && !pull2, "反证 DM_PSO_HYBRID=0：② 拿到精确管线 %d、g_pso_pull %d（期望 0）", ps2 != nil, pull2); return 0; }
     VERIFY(ps2 && pull2 && ps2 != ps1 && (st2 == 1 || st2 == 2) && g_hy_made - made0 == 1, "② 基础管线已建好的首遇：拉取管线 g_pso_pull %d（期望 1）、精确那条在后台表里（状态 %d，期望 1 / 2）、特化 +%llu（期望 1）",
@@ -128,6 +131,8 @@ static int run(int hybrid) {
     // ③ 同键再取：精确那条编好前同一条拉取管线、编好后精确的
     id ps3 = pso_get_(pr, nil); int pull3 = g_pso_pull;
     if (pull3) VERIFY(ps3 == ps2 && g_hy_made - made0 == 1, "③ 精确那条还在编：同一条拉取管线、不再特化（特化 +%llu）", (unsigned long long)(g_hy_made - made0));
+    VERIFY(pull3, "③ 闸住期间同键再取：仍给拉取管线（g_pso_pull %d，期望 1）", pull3);
+    dispatch_semaphore_signal(g_pp_test_hold); g_pp_test_hold = nil;   // 放行：精确那条开始编
     for (int i = 0; i < 3000 && pso_pend_state(&k2) != 2; i++) usleep(10000);   // 等精确那条后台编好，兜底 30 秒（原 5 秒）；等不到下一行判红
     id ps4 = pso_get_(pr, nil);
     VERIFY(ps4 && !g_pso_pull && ps4 != ps2, "③ 精确那条编好后：给精确管线（g_pso_pull %d，期望 0）", g_pso_pull);

@@ -4038,6 +4038,9 @@ static id<MTLBuffer> up_cpu_stage(size_t n, const tex_t *t) {
 // and if the pool memory on the game side no longer changes it will never be re-uploaded. Record this batch of target textures, and the next time any of them is fetched treat it as dirty and re-upload once.
 // DM_TEST_UP_LOST=<batch index> (for testing): treat that batch of uploads as dropped, to verify the re-upload path.
 static NSHashTable *g_up_lost; static os_unfair_lock g_up_lost_lk = OS_UNFAIR_LOCK_INIT; static _Atomic int g_up_lost_n; static _Atomic uint64_t g_up_lost_redo;   // Weak-reference table: if a texture in the record is never fetched again and is released normally, this table does not keep it alive
+static int up_lost_has(id tex) {   // 只看不取（即时存档 nvn_snap.inc 用：这张的显卡内容已经没了、等着下次取用重传，不存）
+    if (!tex || !atomic_load_explicit(&g_up_lost_n, memory_order_relaxed)) return 0; os_unfair_lock_lock(&g_up_lost_lk); int hit = [g_up_lost containsObject:tex]; os_unfair_lock_unlock(&g_up_lost_lk); return hit;
+}
 static int up_lost_take(id tex) {   // This texture's upload was dropped: take it out of the record and return 1
     if (!tex) return 0; os_unfair_lock_lock(&g_up_lost_lk); int hit = [g_up_lost containsObject:tex]; if (hit) { [g_up_lost removeObject:tex]; atomic_store(&g_up_lost_n, (int)g_up_lost.allObjects.count); atomic_fetch_add(&g_up_lost_redo, 1); } os_unfair_lock_unlock(&g_up_lost_lk); return hit;
 }
@@ -6290,6 +6293,11 @@ static void audit_probe_report(uint64_t frame);   // audit #1534 passive probes 
 //   回前台、放开闸门之前（dm_gfx_suspend(0)）标回不可清除：没被清的原样接着用；被清的登记进 g_up_lost——打包贴图下次取用整张从客体内存重新上传（同上传被丢的
 //   处理）。只标打包贴图：纯 GPU 贴图（渲染目标、GPU 写进去的）内容只在 GPU 上，被清了找不回（11-16 起不标，见下面 bg 分支）。不碰：零拷贝池缓冲（就是客体内存）、视图、缓冲背着的贴图、MTLHeap 分出来的（可清除按整堆算）、
 //   各种缓冲（参数表、转换缓存等跨帧保留，被清了会错）。S2A_BG_PURGE=0 关
+static void snap_test_zero(id<MTLTexture> t);   // nvn_snap.inc，测试开关 DM_TEST_BG_LOSE 用
+static int g_test_bg_lose;   // 测试开关 DM_TEST_BG_LOSE 到点置 1（present_enqueue），下面进后台那一次用掉
+// 标可清除 / 标回这两段，与即时存档读打包贴图时「钉成不可清除 → 读 → 标回」（nvn_snap.inc snap_tex_gone，存档线程，不经图形闸门）互斥：
+//   不互斥的话，存档钉住一张的当口回前台标回，这张看着已是不可清除、不登记，存档读完又把它标回可清除——之后没人再标回，被清了也不登记重传
+static pthread_mutex_t g_bg_purge_mu = PTHREAD_MUTEX_INITIALIZER;
 static NSMutableArray<id<MTLTexture>> *g_bg_purged;   // 只在挂起 / 恢复的那一刻碰（闸门关着，提交线程停在闸门外）
 static uint64_t bg_fp_mb(void) { task_vm_info_data_t v; mach_msg_type_number_t n = TASK_VM_INFO_COUNT; return task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&v, &n) == KERN_SUCCESS ? v.phys_footprint >> 20 : 0; }
 void nvn_be_background_purge(int bg) {
@@ -6301,6 +6309,7 @@ void nvn_be_background_purge(int bg) {
     if (bg) bg_in = bg_fp_mb();
     else if (bg_in) { LOG("[nvn] 回前台那刻实占 %llu MB（进后台时 %llu MB，切后台瘦身%s）", (unsigned long long)bg_fp_mb(), (unsigned long long)bg_in, off ? "关" : "开"); bg_in = 0; }   // 起局时的放闸不算
     if (off) return;
+    pthread_mutex_lock(&g_bg_purge_mu);
     @autoreleasepool {
         if (bg) {
             uint64_t f0 = bg_fp_mb(), bytes = 0;
@@ -6328,6 +6337,10 @@ void nvn_be_background_purge(int bg) {
                 [marked addObject:t]; bytes += t.allocatedSize;
             }
             g_bg_purged = marked;
+            // 测试开关（见 present_enqueue）：当作系统在后台把这次标的全清了。iOS 上被清掉的贴图读出来是全零；Mac 上标成已清后原内容还读得到
+            //   （11-23 M 系列 Mac 实测 256² / 2048² 两张 RGBA8 私有贴图：标已清、标回后读回，全零 0 字节、原内容 100%），所以先把内容写成全零再标
+            if (g_test_bg_lose) for (id<MTLTexture> t in marked) { [t setPurgeableState:MTLPurgeableStateNonVolatile]; snap_test_zero(t); [t setPurgeableState:MTLPurgeableStateVolatile]; [t setPurgeableState:MTLPurgeableStateEmpty]; }
+            g_test_bg_lose = 0;
             LOG("[nvn] 切后台瘦身：%lu 张打包贴图 %llu MB 标成可清除（系统缺内存时直接清掉、不计实占，回前台按需重传）；纯 GPU 内容的 %llu 张 %llu MB 不标（清了找不回）；实占 %llu → %llu MB",
                 (unsigned long)marked.count, (unsigned long long)(bytes >> 20), (unsigned long long)kept_n, (unsigned long long)(kept_b >> 20), (unsigned long long)f0, (unsigned long long)bg_fp_mb());
         } else if (g_bg_purged) {
@@ -6344,6 +6357,7 @@ void nvn_be_background_purge(int bg) {
             g_bg_purged = nil;
         }
     }
+    pthread_mutex_unlock(&g_bg_purge_mu);
 }
 void nvn_be_mem_kinds(uint64_t *priv_tex, uint64_t *priv_buf, uint64_t *pool_len, uint64_t *pool_touched, uint64_t *shared_other, uint64_t *objects) {
     *priv_tex = *priv_buf = *pool_len = *pool_touched = *shared_other = *objects = 0;
@@ -11112,6 +11126,8 @@ static void spec_probe(MTLRenderPipelineDescriptor *d, NvShader *vs, NvShader *f
     } } });
 }
 #include "nvn_hybrid.inc"   // 混合管线：拉取式顶点 + 特化（hybrid_get、pull_bind）
+// 单测闸门（t_nvn_hybrid）：非空时后台精确编译开始前先等它放行，单测据此让「精确那条还在编」这一刻确定成立，判据不随编译快慢 / 归档冷热变；产品里恒为空
+static dispatch_semaphore_t g_pp_test_hold;
 static void pso_pend_kick(const pso_key *k, NvShader *vs, NvShader *fs) {   // Called by the submit thread: kick only if it is neither in the cache nor in the table
     if (hm_get_id(&g_pso, k) || !pso_pair_ok(vs, fs, 0)) return;
     pthread_mutex_lock(&g_pp_mu);
@@ -11127,7 +11143,9 @@ static void pso_pend_kick(const pso_key *k, NvShader *vs, NvShader *fs) {   // C
     g_pp_kicked++; NSString *pkey = par_rkey(k, vs, fs, 0, nil); pso_key kc = *k;
     // The descriptor is made in the block, off the submit thread: picking the fragment entry can specialize it (fs_atms_fn: output types, alpha test; #427), and the draw's wait
     //   (pso_pend_take, fu_take) then counts that time instead of the submit thread spending it before the wait starts (the first-use split showed "built here 0.6 ms" for 90–157 ms)
+    dispatch_semaphore_t hold = g_pp_test_hold;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        if (hold) { dispatch_semaphore_wait(hold, DISPATCH_TIME_FOREVER); dispatch_semaphore_signal(hold); }
         MTLRenderPipelineDescriptor *d = pso_desc(&kc, vs, fs, nil, 0);
         if (spec_probe_on()) spec_probe(d, vs, fs);   // #1001 diagnostic, off by default
         NSError *e = nil; id<MTLRenderPipelineState> ps = par_render(d, pkey, &e);
@@ -20567,6 +20585,13 @@ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4]
         if (at < 0) { at = 0; const char *e = getenv("DM_TEST_LINK_STALL"); if (e && sscanf(e, "%lf,%lf", &at, &dur) == 2 && at > 0 && dur > 0) { t0 = now; st = 1; } else at = 0; }
         if (st == 1 && link_on() && now - t0 >= at) { st = 2; mtl_link_pause(1); MLOG("DM_TEST_LINK_STALL: pausing the display link for %.1f s (frame %llu)", dur, (unsigned long long)atomic_load(&g_cur_frame)); }
         else if (st == 2 && now - t0 >= at + dur) { st = 3; mtl_link_pause(0); MLOG("DM_TEST_LINK_STALL: resuming the display link (frame %llu)", (unsigned long long)atomic_load(&g_cur_frame)); }
+    }
+    {   // 测试开关 DM_TEST_BG_LOSE=<秒>：第一次上屏起算，到点在旁路线程走一遍「进后台（关闸、排空、切后台瘦身）→ 回前台」，并把瘦身标成可清除的贴图当场清空
+        //   （nvn_be_background_purge 里认 g_test_bg_lose），复现「系统在后台清掉打包贴图」——Mac 上没有这条路径、iOS 上清不清看系统。产品里不设
+        static double t0, at = -1; static int st; double now = CACurrentMediaTime();
+        if (at < 0) { at = 0; const char *e = getenv("DM_TEST_BG_LOSE"); if (e && (at = atof(e)) > 0) { t0 = now; st = 1; } else at = 0; }
+        if (st == 1 && now - t0 >= at) { st = 2; MLOG("DM_TEST_BG_LOSE: suspending, emptying the purgeable textures, resuming (frame %llu)", (unsigned long long)atomic_load(&g_cur_frame));
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ g_test_bg_lose = 1; dm_gfx_suspend(1); dm_gfx_suspend_drain(); dm_gfx_suspend(0); }); }
     }
     pthread_mutex_lock(&g_pq_mu);
     if (g_pq_in - g_pq_done >= PQ) { pthread_mutex_unlock(&g_pq_mu); DM_BLOCK_BEGIN(); pthread_mutex_lock(&g_pq_mu); while (g_pq_in - g_pq_done >= PQ && !atomic_load(&g_present_discard)) pthread_cond_wait(&g_pq_cv, &g_pq_mu); pthread_mutex_unlock(&g_pq_mu); DM_BLOCK_END(); pthread_mutex_lock(&g_pq_mu); }

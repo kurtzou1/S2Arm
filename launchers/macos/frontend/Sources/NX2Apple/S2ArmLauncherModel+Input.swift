@@ -99,24 +99,21 @@ struct InputConfig: Codable, Equatable {
 struct LoadedInput { let config: InputConfig; let problem: Bool; var inherited = false }
 
 extension S2ArmLauncherModel {
-    /// 这款现在的键位：玩家 1 = 这款文件夹里的 input.json，没有就用私有目录的 default-input.json，再没有用标准键位（同起局 build.py 的取法）；
-    ///   玩家 2–4 = 这款文件夹里的 input-pN.json（键位设置按玩家保存），没存过 / 存坏了就沿用玩家 1 的键位——
-    ///   起局时这几位没存就是照玩家 1 的那份进游戏（build.py 不带、宿主落回全局映射），弹窗显示要跟实际玩的一致。
-    /// 游戏库结构 v3 起键位在每款自己的文件夹（作业层 layout 把旧的 mappings/<号>.json 搬进去了）；原先还读 mappings/ 永远读不到，存过的键位重开显示成默认
-    func loadInput(gameID: String, player: Int = 1) -> LoadedInput {
-        let env = provider.client.environment
-        var problem = false
-        let file = player == 1 ? "input.json" : "input-p\(player).json"
-        if let path = games.first(where: { $0.id == gameID })?.location.file(file) {
-            if let data = try? Data(contentsOf: path) {
-                if let config = try? JSONDecoder().decode(InputConfig.self, from: data) { return LoadedInput(config: config, problem: false) }
-                problem = true
-            }
+    /// 这款四位玩家实际生效的键位（#2081：读取与「能不能用」交作业层 loadInput，和起局 build.py 同一条规则——
+    ///   玩家 1：这款的 input.json → default-input.json → 标准键位，读不出或不合规都往下一份走；玩家 2–4：自己的 input-pN.json 能用就用，否则沿用玩家 1 的）。
+    ///   原先这里自己解码文件，只看结构不看 validate_input，弹窗显示的和游戏里实际用的会不是同一套
+    func loadInputs(gameID: String) async throws -> [Int: LoadedInput] {
+        guard !provider.client.environment.library.isEmpty else { throw JobClientError(LibraryProvider.noLibraryMessage) }
+        let r = try await provider.client.perform("loadInput", extra: ["gameId": gameID]).result
+        var out: [Int: LoadedInput] = [:]
+        for row in r["players"] as? [[String: Any]] ?? [] {
+            guard let player = (row["player"] as? NSNumber)?.intValue else { continue }
+            var config = InputConfig.standard
+            if let object = row["config"], !(object is NSNull), let data = try? JSONSerialization.data(withJSONObject: object),
+               let decoded = try? JSONDecoder().decode(InputConfig.self, from: data) { config = decoded }
+            out[player] = LoadedInput(config: config, problem: row["problem"] as? Bool ?? false, inherited: row["source"] as? String == "player1")
         }
-        if player > 1 { return LoadedInput(config: loadInput(gameID: gameID, player: 1).config, problem: problem, inherited: true) }
-        if let data = try? Data(contentsOf: env.privateRoot.appendingPathComponent("default-input.json")),
-           let config = try? JSONDecoder().decode(InputConfig.self, from: data) { return LoadedInput(config: config, problem: problem) }
-        return LoadedInput(config: .standard, problem: problem)
+        return out
     }
 
     /// 存这款的键位（saveInput 作业，player 1–4：1 = input.json，2–4 = input-pN.json，作业层校验后原子写）。

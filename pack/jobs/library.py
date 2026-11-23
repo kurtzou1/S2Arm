@@ -3123,19 +3123,136 @@ def validate_input(config):
     return config
 
 
+def _usable_input(path):
+    """这份键位文件能不能用：在、是 JSON、过 validate_input → (配置, 有没有问题)。不在 → (None, False)；在但读不出 / 不合规 → (None, True)"""
+    if not path.is_file():
+        return None, False
+    try:
+        return validate_input(read(path)), False
+    except (Failure, ValueError, OSError):   # ValueError 含 JSONDecodeError（core.read 只接编码问题，非 JSON 原样抛）
+        return None, True
+
+
+def effective_input(c, gid, player=1):
+    """某位玩家这款实际生效的键位（#2081：起局 build.py 与键位弹窗 loadInput 作业都只调它，两边判同一份）→
+    dict(config=配置或 None（标准键位）, source=game / default / standard / player1, problem=存过的那份读不出或不合规)。
+    玩家 1：这款的 input.json → 私有目录 default-input.json → 标准键位，每一份都要读得出且过 validate_input，不行就往下一份走；
+    玩家 2–4：这款的 input-pN.json 能用就用，否则沿用玩家 1 实际生效的那套（source=player1）"""
+    if player != 1:
+        config, problem = _usable_input(layout.path(c, gid, f"input-p{player}.json", create=False))
+        if config is not None:
+            return dict(config=config, source="game", problem=False)
+        first = effective_input(c, gid, 1)
+        return dict(config=first["config"], source="player1", problem=problem)
+    config, problem = _usable_input(layout.path(c, gid, "input.json", create=False))
+    if config is not None:
+        return dict(config=config, source="game", problem=False)
+    fallback, _ = _usable_input(c.private / "default-input.json")
+    return dict(config=fallback, source="default" if fallback is not None else "standard", problem=problem)
+
+
+def load_input(c):
+    """作业 loadInput（#2081）：键位弹窗读四位玩家实际生效的键位，规则同起局（effective_input）；config 为 None = 标准键位"""
+    gid = c.game()["id"]
+    return dict(players=[dict(player=p, **effective_input(c, gid, p)) for p in (1, 2, 3, 4)])
+
+
+# 标准键位（#1987）：没设所有游戏的默认时，「生效的缺省」就是它。同 Mac 启动器 InputConfig.standard（S2ArmLauncherModel+Input.swift）
+#   与宿主 s2a_input_config_default（runtime/src/input_config.c）；test_jobs 读 Swift 原文逐项核对，改一边记得改另一边。
+#   gamepad：前 16 个按键位依次对 16 个手柄键；axes：四轴各照各的源
+STANDARD_INPUT = dict(
+    schema=1,
+    keyboard={t: {"code": k} for t, k in dict(A=14, B=56, X=49, L=12, R=5, ZR=15, LS=59, RS=8, PLUS=48, MINUS=46, LEFT=123, UP=126,
+                                                 RIGHT=124, DOWN=125, LS_UP=13, LS_DOWN=1, LS_LEFT=0, LS_RIGHT=2).items()},
+    mouse=dict(Y=0, ZL=1),
+    gamepad=dict(zip(("A", "B", "X", "Y", "LS", "RS", "L", "R", "ZL", "ZR", "PLUS", "MINUS", "LEFT", "UP", "RIGHT", "DOWN"),
+                     ("east", "south", "north", "west", "leftStick", "rightStick", "leftShoulder", "rightShoulder", "leftTrigger",
+                      "rightTrigger", "menu", "options", "dpadLeft", "dpadUp", "dpadRight", "dpadDown"))),
+    axes=dict(LX={"source": "leftX"}, LY={"source": "leftY"}, RX={"source": "rightX"}, RY={"source": "rightY"}),
+    deadzone=.15,
+    mouseOptions=dict(mode="camera", sensitivityX=1, sensitivityY=1, invertX=False, invertY=False, recenter=True))
+
+
+def _input_norm(config):
+    """两份键位「是不是同一套」（#1987 存时和生效的缺省比）：按宿主的读法比——省略的 modifiers / invert / invertX / invertY 记缺省值，
+    recenter 省略记开，没有 backButtons 与空的一样，数值按大小比（1 与 1.0 相同）；schema 与契约外的多余字段不参与"""
+    o = config.get("mouseOptions") or {}
+    return (
+        {t: (b["code"], b.get("modifiers", 0)) for t, b in config["keyboard"].items()},
+        dict(config["mouse"]), dict(config["gamepad"]),
+        {t: (a["source"], a.get("invert", False)) for t, a in config["axes"].items()},
+        dict(config.get("backButtons") or {}), float(config["deadzone"]),
+        (o.get("mode"), float(o.get("sensitivityX", 1)), float(o.get("sensitivityY", 1)),
+         o.get("invertX", False), o.get("invertY", False), o.get("recenter", True)))
+
+
+def _same_input(a, b):
+    return _input_norm(a) == _input_norm(b)
+
+
+def effective_default_input(c):
+    """生效的缺省（#1987）：「恢复默认」回到的、这款「和它一样就不单独存」比的那一套。
+    私有目录 default-input.json 读得出且合规就是它（同 effective_input 的回落），否则标准键位"""
+    config, _ = _usable_input(c.private / "default-input.json")
+    return config if config is not None else STANDARD_INPUT
+
+
+def _input_player(c, need_game=False):
+    """键位作业的玩家序号（1–4；没给 = 1）。玩家 2–4 的键位只存在这款文件夹里，必须带 gameId；need_game：这个作业只对某一款"""
+    player = c.r.get("player", 1)
+    if type(player) is not int or not 1 <= player <= 4 or ((player != 1 or need_game) and not c.r.get("gameId")):
+        raise Failure("无效的玩家序号。")
+    return player
+
+
+def _game_input_path(c, player):
+    c.game()
+    return layout.path(c, c.r["gameId"], "input.json" if player == 1 else f"input-p{player}.json")
+
+
 def save_input(c):
     config = validate_input(c.r["config"])
     # player：键位设置的玩家（1–4；1 / 没给 = 玩家 1 的 input.json，2–4 = 这款文件夹的 input-pN.json）。
     #   起局时 build.py 读这些文件交给宿主（S2A_INPUT_CONFIG_P2..P4，槽位各照各玩家的映射采样）
-    player = c.r.get("player", 1)
-    if type(player) is not int or not 1 <= player <= 4 or (player != 1 and not c.r.get("gameId")):
-        raise Failure("无效的玩家序号。")
+    # #1987（同 iPad #2079 s2a_kbd_store_save）：玩家 1 存这款时和生效的缺省比，相同就删掉这款的 input.json、以后跟着所有游戏的默认走；
+    #   不带 gameId 存的就是所有游戏的默认，和标准键位相同就删掉 default-input.json（= 没设过）。玩家 2–4 照旧写自己的文件。
+    #   返回 followsDefault：存完是不是跟着生效的缺省走（没单独存文件）
+    player = _input_player(c)
     if c.r.get("gameId"):
-        c.game()
-        target = layout.path(c, c.r["gameId"], "input.json" if player == 1 else f"input-p{player}.json")
+        target = _game_input_path(c, player)
+        follows = player == 1 and _same_input(config, effective_default_input(c))
     else:
         target = c.private / "default-input.json"
-    atomic(target, config)
+        follows = _same_input(config, STANDARD_INPUT)
+    if follows:
+        target.unlink(missing_ok=True)
+    else:
+        atomic(target, config)
+    return dict(followsDefault=follows)
+
+
+def reset_input(c):
+    """作业 resetInput（#1987「恢复默认」，同 iPad s2a_kbd_store_restore）：删掉这款这位玩家单独存的键位。
+    玩家 1 → 回到所有游戏的默认（没设过就是标准键位）；玩家 2–4 → 回到沿用玩家 1（同起局 effective_input）。没存过也算成功"""
+    _game_input_path(c, _input_player(c, need_game=True)).unlink(missing_ok=True)
+    return {}
+
+
+def set_default_input(c):
+    """作业 setDefaultInput（#1987「设为所有游戏的默认」，同 iPad #2079 s2a_kbd_store_set_default）：只对玩家 1。
+    写 default-input.json，和标准键位相同就删掉它（= 没设过）；带 gameId 时这款这时和默认相同，删掉这款的 input.json。
+    Mac 键位弹窗点「保存」时才调它，没有撤销（#1987 维护方定：弹窗按「保存才写」一种规矩），所以不留覆盖前的快照"""
+    config = validate_input(c.r["config"])
+    if c.r.get("player", 1) != 1:
+        raise Failure("所有游戏的默认只有玩家 1 的一份。")
+    dflt = c.private / "default-input.json"
+    mine = _game_input_path(c, 1) if c.r.get("gameId") else None
+    if _same_input(config, STANDARD_INPUT):
+        dflt.unlink(missing_ok=True)
+    else:
+        atomic(dflt, config)
+    if mine:
+        mine.unlink(missing_ok=True)
     return {}
 
 

@@ -5,6 +5,7 @@
 //   游戏线程、宿主线程都能走（影子页本身可读写，不要别名槽）。同时记下每个访存点（模块 + 偏移、次数、类别）——出包期静态改写的依据。
 #include "native.h"
 #include "s2a_emul_st.h"
+#include "far_slow.h"
 #include <errno.h>
 #include <stdatomic.h>
 #include <sys/mman.h>
@@ -247,13 +248,17 @@ uint64_t s2a_far_tick_seen(void) { return atomic_load(&g_tick_seen); }
 uint64_t s2a_far_tick_n(void) { return atomic_load(&g_tick_n); }
 static void *far_tick(void *arg) {
     (void)arg; pthread_setname_np("s2a-far-tick");
-    uint64_t pf = 0, pe = 0, ps = 0, pfl = 0, pn = 0, sec = 0;
+    uint64_t pf = 0, pe = 0, ps = 0, pfl = 0, pn = 0, sec = 0; int streak = 0, said = 0;
     for (;;) {
         sleep(1); sec++;
         uint64_t f = atomic_load(&g_faults), e = atomic_load(&g_emul), s = atomic_load(&g_skip), fl = atomic_load(&g_fail), n = atomic_load(&g_nsite);
         if (f != pf)
             LOG("远端每秒 第 %llu 秒：缺页 %llu、代执行 %llu、跳过 %llu、失败 %llu、新访存点 %llu（累计缺页 %llu、访存点 %llu）", (unsigned long long)sec,
                 (unsigned long long)(f - pf), (unsigned long long)(e - pe), (unsigned long long)(s - ps), (unsigned long long)(fl - pfl), (unsigned long long)(n - pn), (unsigned long long)f, (unsigned long long)n);
+#if TARGET_OS_OSX   // Mac 的「地址空间不够这款」提示条：远端缺页持续偏高才出（svc_mem.c s2a_addr_short_far_slow 打那条黄行，启动器认它）；iOS 起局时就弹确认页，不走这里
+        if (!said && s2a_far_slow_step(&streak, f - pf)) { said = 1;
+            void (*slow)(uint64_t, uint64_t) = (void (*)(uint64_t, uint64_t))dlsym(RTLD_DEFAULT, "s2a_addr_short_far_slow"); if (slow) slow(sec, f - pf); }
+#endif
         pf = f; pe = e; ps = s; pfl = fl; pn = n; atomic_store(&g_tick_seen, f); atomic_fetch_add(&g_tick_n, 1);
     }
     return NULL;

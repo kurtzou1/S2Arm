@@ -12,6 +12,8 @@
 //   「设为所有游戏的默认」（#1987 第 2 条，维护方定：立即生效 + 约 5 秒内可撤销）：存取规则在 keyboard_store.m（两层：本款 / App 级 = 所有游戏的默认）。
 //   点了就写 App 级，页底出提示条「已设为所有游戏的默认」带「撤销」，撤销把覆盖前的旧默认和这款原来的记录原样写回；开着旁白时提示条一直停到玩家自己关。
 //   「恢复默认」回到所有游戏的默认（没设过就是标准键位）；页顶标这款用的是「自定义」还是「默认」，初始状态不标；单款壳不出这一行
+//   「鼠标」组第一行「使用鼠标 / 触控板」（#2072，iPad 独有，缺省打开同 Mac）：关掉时下面几行和每行「…」里的鼠标键置灰、行上不显示鼠标键，
+//   点按触控板当手指（mouse_map.h）。单独存 S2AMouseOff、按款存，和键位一起恢复默认 / 设为所有游戏的默认 / 撤销（keyboard_store.m）；导入导出不带它
 #import <UIKit/UIKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import "s2a_l10n.h"
@@ -80,7 +82,11 @@ static NSString *key_name(s2a_input_key b) {
 // 本款那一层 / App 级（= 所有游戏的默认；单款壳为 nil），见 keyboard_store.h
 static NSUserDefaults *game_layer(NSUserDefaults *__strong *app) { NSUserDefaults *g = nil, *a = nil; s2a_ios_settings_layers(&g, &a); *app = a; return g; }
 static void load_saved(s2a_input_config *out) { NSUserDefaults *app; NSUserDefaults *game = game_layer(&app); s2a_kbd_store_load(game, app, out); }
-int s2a_ios_keyboard_customized(void) { return [s2a_ios_settings_defaults() stringForKey:S2AKeyboardMapKey].length > 0; }
+static BOOL load_mouse_off(void) { NSUserDefaults *app; NSUserDefaults *game = game_layer(&app); return s2a_kbd_store_mouse_off(game, app) != 0; }
+int s2a_ios_keyboard_customized(void) {   // 改过键位或关了鼠标（#2072）：拔了键盘也列出改键页，能回来打开 / 恢复默认
+    NSUserDefaults *d = s2a_ios_settings_defaults();
+    return [d stringForKey:S2AKeyboardMapKey].length > 0 || [d boolForKey:S2AMouseOffKey];
+}
 
 // 导入没成：每类原因一句话（解析器的 s2a_input_config_error_message 是英文、给日志用，不上屏）
 static NSString *import_error(int code) {
@@ -107,6 +113,7 @@ static NSString *import_error(int code) {
 @end
 @implementation S2AKeyboardSettings {
     s2a_input_config _map;
+    BOOL _mouseOff;   // 「使用鼠标 / 触控板」关掉了（#2072）
     int _recording;   // 在录的按键位；-1 = 没在录
     NSURL *_exportDirectory;   // 导出时写文件的临时目录（面板关掉就删）
     BOOL _importing;           // 选文件面板这次是导入（否则是导出）
@@ -116,7 +123,7 @@ static NSString *import_error(int code) {
 }
 - (instancetype)init {
     if (!(self = [super initWithStyle:UITableViewStyleInsetGrouped])) return nil;
-    load_saved(&_map); _recording = -1;
+    load_saved(&_map); _mouseOff = load_mouse_off(); _recording = -1;
     self.title = S2AL(@"kbd.title");
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:S2AL(@"common.done") style:UIBarButtonItemStyleDone target:self action:@selector(done)];
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:S2AL(@"kbd.restoreDefault") style:UIBarButtonItemStylePlain target:self action:@selector(restoreDefault)];
@@ -138,13 +145,13 @@ static NSString *import_error(int code) {
 - (int)targetAt:(NSIndexPath *)path { return path.section == 0 ? kButtons[path.row] : kSticks[path.row]; }
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 4; }
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    return section == 0 ? 16 : section == 1 ? 8 : section == kMouseSection ? 6 : [self hasAllGames] ? 3 : 2;
+    return section == 0 ? 16 : section == 1 ? 8 : section == kMouseSection ? 7 : [self hasAllGames] ? 3 : 2;
 }
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     return section == 0 ? S2AL(@"kbd.section.buttons") : section == 1 ? S2AL(@"kbd.section.sticks") : section == kMouseSection ? S2AL(@"kbd.mouse") : S2AL(@"kbd.section.manage");
 }
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
-    return section == 1 ? S2AL(@"kbd.footer") : section == kMouseSection ? S2AL(@"kbd.mouse.note") : section == kManageSection ? ([self hasAllGames] ? S2AL(@"kbd.manage.noteAll") : S2AL(@"kbd.manage.note")) : nil;
+    return section == 1 ? S2AL(@"kbd.footer") : section == kMouseSection ? (_mouseOff ? S2AL(@"kbd.mouse.offNote") : S2AL(@"kbd.mouse.note")) : section == kManageSection ? ([self hasAllGames] ? S2AL(@"kbd.manage.noteAll") : S2AL(@"kbd.manage.note")) : nil;
 }
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)path {
     if (path.section == kMouseSection) return [self mouseCell:path.row];
@@ -170,6 +177,7 @@ static NSString *import_error(int code) {
     for (int b = -1; b < S2A_MOUSE_BUTTONS; b++) {
         UIAction *pick = [UIAction actionWithTitle:mouse_name(b) image:nil identifier:nil handler:^(UIAction *a) { (void)a; [weakSelf bindMouse:b to:target]; }];
         if (_map.mouse[target] == b) pick.state = UIMenuElementStateOn;
+        if (_mouseOff) pick.attributes = UIMenuElementAttributesDisabled;   // 关了鼠标：鼠标键置灰（绑定留着，打开回来照旧）
         [mouse addObject:pick];
     }
     UIButton *more = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -188,7 +196,7 @@ static NSString *import_error(int code) {
     c.text = target_name(target);
     BOOL recording = _recording == target;
     NSString *keys = key_name(_map.keyboard[target]);
-    if (_map.mouse[target] >= 0) keys = [NSString stringWithFormat:@"%@ · %@", keys, mouse_name(_map.mouse[target])];   // 同时绑了鼠标键：一起显示
+    if (_map.mouse[target] >= 0 && !_mouseOff) keys = [NSString stringWithFormat:@"%@ · %@", keys, mouse_name(_map.mouse[target])];   // 同时绑了鼠标键：一起显示（关了鼠标就不显示，不进游戏）
     c.secondaryText = recording ? S2AL(@"kbd.record") : keys;
     if (recording) c.secondaryTextProperties.color = self.view.tintColor;
     cell.contentConfiguration = c;
@@ -206,16 +214,30 @@ static NSString *import_error(int code) {
             if (children.count == 3) {
                 int target = [self targetAt:path];
                 UIMenu *m = children[1]; NSArray *picks = m.children;
-                for (NSUInteger i = 0; i < picks.count; i++) ((UIAction *)picks[i]).state = _map.mouse[target] == (int)i - 1 ? UIMenuElementStateOn : UIMenuElementStateOff;
+                for (NSUInteger i = 0; i < picks.count; i++) {
+                    ((UIAction *)picks[i]).state = _map.mouse[target] == (int)i - 1 ? UIMenuElementStateOn : UIMenuElementStateOff;
+                    ((UIAction *)picks[i]).attributes = _mouseOff ? UIMenuElementAttributesDisabled : 0;
+                }
                 more.menu = [menu menuByReplacingChildren:children];
             }
         }
     }
 }
-// ---- 「鼠标」组（同 Mac 启动器 mouseOptions 卡片）：0 移动鼠标时、1 左右灵敏度、2 上下灵敏度、3 左右反过来、4 上下反过来、5 停手后视角回正 ----
-- (UITableViewCell *)mouseCell:(NSInteger)row {
+// ---- 「鼠标」组：行 0「使用鼠标 / 触控板」（#2072，iPad 独有）；行 1–6 同 Mac 启动器 mouseOptions 卡片——
+//   项 0 移动鼠标时、1 左右灵敏度、2 上下灵敏度、3 左右反过来、4 上下反过来、5 停手后视角回正（项 = 行 - 1，控件 tag 用项号）----
+- (UITableViewCell *)mouseCell:(NSInteger)rowInSection {
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    if (rowInSection == 0) {
+        UISwitch *use = [UISwitch new];
+        use.on = !_mouseOff;
+        use.accessibilityIdentifier = @"kbd.mouse.use";
+        [use addTarget:self action:@selector(mouseUseChanged:) forControlEvents:UIControlEventValueChanged];
+        cell.accessoryView = use;
+        [self configureMouse:cell row:rowInSection];
+        return cell;
+    }
+    NSInteger row = rowInSection - 1;
     __weak S2AKeyboardSettings *weakSelf = self;
     if (row == 0) {
         UIButton *mode = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -240,11 +262,18 @@ static NSString *import_error(int code) {
         [toggle addTarget:self action:@selector(toggleChanged:) forControlEvents:UIControlEventValueChanged];
         cell.accessoryView = toggle;
     }
-    [self configureMouse:cell row:row];
+    [self configureMouse:cell row:rowInSection];
     return cell;
 }
-- (void)configureMouse:(UITableViewCell *)cell row:(NSInteger)row {
+- (void)configureMouse:(UITableViewCell *)cell row:(NSInteger)rowInSection {
     UIListContentConfiguration *c = [UIListContentConfiguration valueCellConfiguration];
+    if (rowInSection == 0) {
+        c.text = S2AL(@"kbd.mouse.use");
+        cell.contentConfiguration = c;
+        ((UISwitch *)cell.accessoryView).on = !_mouseOff;
+        return;
+    }
+    NSInteger row = rowInSection - 1;
     switch (row) {
         case 0: c.text = S2AL(@"kbd.mouse.mode"); break;
         case 1: c.text = S2AL(@"kbd.mouse.sensX"); c.secondaryText = [NSString stringWithFormat:@"%.1f", _map.sensitivity_x]; break;
@@ -253,7 +282,9 @@ static NSString *import_error(int code) {
         case 4: c.text = S2AL(@"kbd.mouse.invertY"); break;
         default: c.text = S2AL(@"kbd.mouse.recenter"); break;
     }
+    if (_mouseOff) { c.textProperties.color = UIColor.tertiaryLabelColor; c.secondaryTextProperties.color = UIColor.tertiaryLabelColor; }   // 关了鼠标：这几行置灰
     cell.contentConfiguration = c;
+    ((UIControl *)cell.accessoryView).enabled = !_mouseOff;
     if (row == 0) { UIButton *mode = (UIButton *)cell.accessoryView; [mode setTitle:_map.mouse_camera ? S2AL(@"kbd.mouse.mode.camera") : S2AL(@"kbd.mouse.mode.off") forState:UIControlStateNormal]; [mode sizeToFit]; }
     else if (row <= 2) ((UISlider *)cell.accessoryView).value = (float)(row == 1 ? _map.sensitivity_x : _map.sensitivity_y);
     else ((UISwitch *)cell.accessoryView).on = row == 3 ? _map.invert_x : row == 4 ? _map.invert_y : _map.recenter;
@@ -263,7 +294,7 @@ static NSString *import_error(int code) {
 - (void)sensitivityMoved:(UISlider *)slider {
     double v = MAX(0.1, MIN(10, round(slider.value * 10) / 10));
     if (slider.tag == 1) _map.sensitivity_x = v; else _map.sensitivity_y = v;
-    UITableViewCell *cell = [self.tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:slider.tag inSection:kMouseSection]];
+    UITableViewCell *cell = [self.tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:slider.tag + 1 inSection:kMouseSection]];   // tag 是项号，行 = 项 + 1
     UIListContentConfiguration *c = (UIListContentConfiguration *)cell.contentConfiguration;
     c.secondaryText = [NSString stringWithFormat:@"%.1f", v]; cell.contentConfiguration = c;
 }
@@ -272,6 +303,17 @@ static NSString *import_error(int code) {
     [self stopRecording];
     if (toggle.tag == 3) _map.invert_x = toggle.on; else if (toggle.tag == 4) _map.invert_y = toggle.on; else _map.recenter = toggle.on;
     [self save];
+}
+// 「使用鼠标 / 触控板」（#2072）：当场存、当场生效（keyboard.m 重装键位时 mouse.m 释放锁定、放开鼠标键）；组下说明换成关掉后的样子
+- (void)mouseUseChanged:(UISwitch *)toggle {
+    [self stopRecording];
+    _mouseOff = !toggle.on;
+    [self save];
+    [self reloadMouseFooter];
+}
+// 鼠标组的说明随开关换：只重排这一组（整表重建会让列表跳，见 refreshVisibleRows）
+- (void)reloadMouseFooter {
+    [UIView performWithoutAnimation:^{ [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:kMouseSection] withRowAnimation:UITableViewRowAnimationNone]; }];
 }
 // 绑鼠标键：别的按键位已经用了这个键就先问（同 Mac 启动器 bind("mouse", …)）
 - (void)bindMouse:(int)button to:(int)target {
@@ -364,7 +406,7 @@ static NSString *import_error(int code) {
 - (void)setAllGamesDefault {
     NSUserDefaults *app; NSUserDefaults *game = game_layer(&app);
     if (!app) return;
-    NSDictionary *snapshot = s2a_kbd_store_set_default(game, app, &_map);
+    NSDictionary *snapshot = s2a_kbd_store_set_default(game, app, &_map, _mouseOff);
     [self reloadFromStore];
     [self showUndo:snapshot];
 }
@@ -378,7 +420,9 @@ static NSString *import_error(int code) {
 - (void)reloadFromStore {
     [self stopRecording];
     load_saved(&_map);
+    BOOL wasOff = _mouseOff; _mouseOff = load_mouse_off();
     s2a_ios_keyboard_reload();
+    if (wasOff != _mouseOff) [self reloadMouseFooter];
     [self refreshVisibleRows];
     [self updateSource];
 }
@@ -517,7 +561,7 @@ static NSString *import_error(int code) {
 - (void)save {
     [self dismissToast];   // 接着改了键位：撤销快照里没有这次的改动，提示条收起（不然撤销会把它一起抹掉）
     NSUserDefaults *app; NSUserDefaults *game = game_layer(&app);
-    s2a_kbd_store_save(game, app, &_map);
+    s2a_kbd_store_save(game, app, &_map, _mouseOff);
     s2a_ios_keyboard_reload();
     [self refreshVisibleRows];
     [self updateSource];

@@ -54,10 +54,10 @@ def main():
     base += ['-I'+str(p) for p in inc]
     original = native/'gfx_plat/nvk_shader.c'
 
-    def run(name, source, extra_libs=None, args=(), env=None):
+    def run(name, source, extra_libs=None, args=(), env=None, extra_flags=()):
         exe = out/name
         src = [ROOT/'android/tests/nvk_shader_pool_test.c', source, *(extra_libs if extra_libs is not None else libs)]
-        host_link.run(base + [str(p) for p in src] + [strip, '-lm', '-o', str(exe)], check=True, timeout=60)
+        host_link.run(base + list(extra_flags) + [str(p) for p in src] + [strip, '-lm', '-o', str(exe)], check=True, timeout=60)
         return subprocess.run([str(exe), *args], capture_output=True, text=True, timeout=30, env=env)
 
     live_modes = ('--live-compile-thread', '--live-compile-pending', '--live-compile-stop', '--cs-libpack')
@@ -66,6 +66,22 @@ def main():
         sys.stdout.write(result.stdout)
         sys.stderr.write(result.stderr)
         return result.returncode
+
+    if sys.argv[1:] == ['--link-refused-file']:
+        for mode, flags in [('player', []), ('debug', ['-DS2A_ANDROID_DEBUG_ENV=1'])]:
+            # 编译实际生产翻译单元。夹具也知道开关和文件名，整份测试可执行文件不能用于这个判据。
+            obj = out / ('link-refused-' + mode + '.o')
+            subprocess.run(base + flags + ['-c', str(original), '-o', str(obj)], check=True, timeout=60)
+            code = obj.read_bytes()
+            for marker in (b'nvk_link_refused_file', b'libpack-link-refused-v1.tsv'):
+                if (marker in code) != (mode == 'debug'):
+                    raise AssertionError(f'{mode} shader object has unexpected diagnostic marker {marker!r}')
+            result = run('link-refused-' + mode, original, args=('--link-refused-file',), extra_flags=flags)
+            sys.stdout.write(result.stdout)
+            sys.stderr.write(result.stderr)
+            if result.returncode:
+                return result.returncode
+        return 0
 
     if sys.argv[1:] == ['--live-compile-mutants']:
         text = original.read_text()
@@ -150,7 +166,7 @@ def main():
         return 0
 
     if sys.argv[1:] == ['--gs-libpack-mutants']:
-        # 负对照：三段程序查出包预编库的两处接线各撤一处，--gs-libpack 必红
+        # 负对照：图形（三段 / 只有顶点）程序查出包预编库的接线各撤一处，--gs-libpack 必红
         code = original.read_text()
         for name, old, new, expected in (
             ('mask-0x3', 'lrc = s2a_libpack_program_v1(lp, keys, stages, &g,', 'lrc = s2a_libpack_program_v1(lp, keys, 0x3, &g,',
@@ -158,8 +174,12 @@ def main():
             ('no-topology', 'const struct s2a_libpack_gfx g = { topology, pc->profile_json, pc->profile_bytes };',
              'const struct s2a_libpack_gfx g = { NULL, pc->profile_json, pc->profile_bytes }; (void)topology;',
              'hit from the library, compiler not called'),
-            ('vs-fs-only', '(!ckey && stages != 0x3u && stages != 0x7u)', '(!ckey && stages != 0x3u)',
+            # 取库入口的闸（nvk_shader.c libpack_fetch）：放 0x1 / 0x3 / 0x7。去掉 0x7u：三段（含几何）程序被挡在库外，必须红；
+            #   去掉 0x1u：只有顶点的深度程序被挡在库外，必须红在 VS-only 那一例
+            ('vs-fs-only', '(!ckey && stages != 0x1u && stages != 0x3u && stages != 0x7u)', '(!ckey && stages != 0x1u && stages != 0x3u)',
              'hit from the library, compiler not called'),
+            ('no-vs-only', '(!ckey && stages != 0x1u && stages != 0x3u && stages != 0x7u)', '(!ckey && stages != 0x3u && stages != 0x7u)',
+             'libpack VS-only: hit from the library, compiler not called'),
         ):
             assert code.count(old) == 1, (name, 'mutation anchor')
             path = out / ('gs-libpack-mutant-' + name + '.c')
@@ -167,21 +187,26 @@ def main():
             result = run('gs-libpack-' + name, path, args=('--gs-libpack',))
             assert result.returncode != 0 and expected in result.stderr, (name, result.stdout, result.stderr)
             print(f'{name}: expected assertion failure: {expected}', flush=True)
-        print('PASS: 3 libpack GS negative controls')
+        print('PASS: 4 libpack GS negative controls')
         return 0
 
     if sys.argv[1:] == ['--cs-libpack-mutants']:
         # 负对照：计算出库的非对齐闸撤掉（state_ok 对 ckey 不生效），--cs-libpack 必红
         code = original.read_text()
         for name, old, new, expected in (
-            ('unaligned-gate', 'if (!root || !state_ok || (!ckey && stages != 0x3u && stages != 0x7u) || nvn_plat_flag("no_libpack", 0)) {',
-             'if (!root || (!ckey && ((stages != 0x3u && stages != 0x7u) || !state_ok)) || nvn_plat_flag("no_libpack", 0)) {',
+            ('unaligned-gate', 'if (!root || !state_ok || (!ckey && stages != 0x1u && stages != 0x3u && stages != 0x7u) || nvn_plat_flag("no_libpack", 0)) {',
+             'if (!root || (!ckey && ((stages != 0x1u && stages != 0x3u && stages != 0x7u) || !state_ok)) || nvn_plat_flag("no_libpack", 0)) {',
              'unaligned CS storage refuses the library'),
             # 诊断（对齐闸拒查日志 / 没走库原因备忘）：各撤一处，--cs-libpack 必红在对应断言
             ('no-summary-line', 'else if (!((n + 1) & 63)) {', 'else if (0) {', '141 refusals log two summary lines'),
-            ('no-unaligned-note', '            cs_note_set(ckey, CSN_UNALIGNED);\n', '', 'unaligned refuse is remembered'),
-            ('shared-not-named', 'strstr(lw, "exceeds device limit") ? CSN_SHARED :', '0 ? CSN_SHARED :', 'shared-memory gate refusal is remembered'),
-            ('hit-keeps-note', 'if (ckey) cs_note_set(ckey, lrc == S2A_LIBPACK_HIT ? CSN_NONE :', 'if (ckey) cs_note_set(ckey, lrc == S2A_LIBPACK_HIT ? CSN_UNALIGNED :', 'a library hit clears the remembered reason'),
+            ('no-unaligned-note', '            cs_note_set(ckey, cs_note_of_lib(S2A_LIBPACK_REJECT, S2A_LIBPACK_WHY_UNALIGNED));\n', '', 'unaligned refuse is remembered'),
+            # 原因按码分类（libpack_vk.h enum s2a_libpack_why）：映射表里各撤一处 / 命中不清备忘 / 记坏路径各撤一处，--cs-libpack 必红在对应断言
+            ('shared-code-unmapped', '    case S2A_LIBPACK_WHY_SHARED_LIMIT: return CSN_SHARED;\n', '', 'shared-memory gate refusal is remembered'),
+            ('reflect-code-unmapped', '    case S2A_LIBPACK_WHY_REFLECT: return CSN_REFLECT;\n', '', 'SPIR-V capability refusal is remembered as a reflection refusal'),
+            ('hit-keeps-note', '    if (lrc == S2A_LIBPACK_HIT) return CSN_NONE;\n', '    if (lrc == S2A_LIBPACK_HIT) return CSN_UNALIGNED;\n', 'a library hit clears the remembered reason'),
+            ('mark-bad-no-note', '    if (ckey) cs_note_set(ckey, CSN_BUILD);', '    (void)ckey;', 'a marked-bad library program is remembered as a build failure'),
+            ('bad-hit-no-note', '    if (bad && ckey) cs_note_set(ckey, (uintptr_t)bad == LPBAD_BUILD ? CSN_BUILD : CSN_REJECT);\n', '', 'a bad-table hit is reported as a build failure'),
+            ('bad-reason-dropped', '(void *)(uintptr_t)LPBAD_BUILD);', '(void *)(uintptr_t)99);', 'a bad-table hit is reported as a build failure'),
         ):
             assert code.count(old) == 1, (name, 'mutation anchor')
             path = out / ('cs-libpack-mutant-' + name + '.c')
@@ -189,7 +214,16 @@ def main():
             result = run('cs-libpack-' + name, path, args=('--cs-libpack',))
             assert result.returncode != 0 and expected in result.stderr, (name, result.stdout, result.stderr)
             print(f'{name}: expected assertion failure: {expected}', flush=True)
-        print('PASS: 5 libpack CS negative controls')
+        # 正控：把 why 文本清空（模拟改了报错文案 / 文案消失）备忘仍归对类——分类读的是码，不是文本
+        text_gone = code.replace('pc->translator_closure, pf.max_shared, bytes, len, lw, sizeof lw, &lwhy);',
+                                 'pc->translator_closure, pf.max_shared, bytes, len, lw, sizeof lw, &lwhy); lw[0] = 0;')
+        assert text_gone != code, 'text-independence anchor'
+        path = out / 'cs-libpack-text-gone.c'
+        path.write_text(text_gone)
+        result = run('cs-libpack-text-gone', path, args=('--cs-libpack',))
+        assert result.returncode == 0 and ' 0 failures' in result.stdout, ('text-independence control', result.stdout, result.stderr)
+        print('text-gone: PASS with the why text blanked (classification is by code)', flush=True)
+        print('PASS: 9 libpack CS negative controls + 1 text-independence control')
         return 0
 
     if sys.argv[1:] == ['--graphics-image-mutants']:

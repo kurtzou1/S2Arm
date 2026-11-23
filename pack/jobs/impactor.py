@@ -177,6 +177,8 @@ EXPLAIN = (
     # 还没登录 / 存了账号却没选中（D-ZM37 plumesign 原文「No account selected. Please login first」）：原先归「登录已过期」，
     #   对从没登录成功过的玩家措辞不对（#edc5f5）。添加即选中（v2.7.2 accounts_add 设 selected_account）；只存了一个的在签名前已替玩家选上（select_only_account）
     (r'no account selected|please log ?in first|not logged in', 'apple_not_signed_in'),
+    # D-7VBE：手机装机时说签名证书已失效（installd 0xe8008018）：别的工具新建 / 撤销证书把这张顶掉，或手机日期时间不对。排最前，原文里的「verification failed」不让别的条先吃
+    (r'0xe8008018|identity used to sign the executable is no longer valid', 'signing_identity_invalid'),
     # 验证码不对排在「incorrect」前：苹果这句是「Incorrect verification code」（-21669），原先先命中账号密码那条，玩家被叫去重输密码
     # 2fa 要整词（D-EH49：Windows 签名日志里着色器文件名 092fae66…_b.json 的十六进制撞上裸 2fa，真报错「device does not have pairing file」被判成验证码不对）
     (r'-21669|verification code|two.?factor|\b2fa\b', 'two_factor_wrong'),

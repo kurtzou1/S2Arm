@@ -1,0 +1,73 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs b/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs
+index 0d4575d5a8afaf6a7c154ef3a0361a487dc860c7..41057fab4572adf02ee60e513b62a1a79ae61001 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs
+@@ -368,6 +368,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
+             Result result = S2ASaveShare.OpenShared(key, ref fileSystem.Ref, (ref SharedRef<IFileSystem> fs) => _baseFileSystemProxy.Get.OpenSaveDataFileSystem(ref fs, spaceId, in attribute));
+             if (result.IsFailure())
+             {
++                S2AFsFail.Extra = S2AFsFail.SaveAttr(spaceId, in attribute);   // S2Arm: which save it asked for (S2AFsFail)
+                 return (ResultCode)result.Value;
+             }
+ 
+@@ -387,6 +388,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
+             Result result = _baseFileSystemProxy.Get.OpenSaveDataFileSystemBySystemSaveDataId(ref fileSystem.Ref, spaceId, in attribute);
+             if (result.IsFailure())
+             {
++                S2AFsFail.Extra = S2AFsFail.SaveAttr(spaceId, in attribute);   // S2Arm: which save it asked for (S2AFsFail)
+                 return (ResultCode)result.Value;
+             }
+ 
+@@ -406,6 +408,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
+             Result result = _baseFileSystemProxy.Get.OpenReadOnlySaveDataFileSystem(ref fileSystem.Ref, spaceId, in attribute);
+             if (result.IsFailure())
+             {
++                S2AFsFail.Extra = S2AFsFail.SaveAttr(spaceId, in attribute);   // S2Arm: which save it asked for (S2AFsFail)
+                 return (ResultCode)result.Value;
+             }
+ 
+diff --git a/src/Ryujinx.HLE/HOS/Services/Fs/S2AFsFail.cs b/src/Ryujinx.HLE/HOS/Services/Fs/S2AFsFail.cs
+index 80499c31fcacc7bf678d65bd10927e4ecaab969b..fc59c5262ae99bf95b2102aa5520b70cd06b28ae 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Fs/S2AFsFail.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Fs/S2AFsFail.cs
+@@ -1,3 +1,4 @@
++using LibHac.Fs;
+ using System;
+ using System.Text;
+ 
+@@ -20,6 +21,13 @@ namespace Ryujinx.HLE.HOS.Services.Fs
+ 
+         private static readonly string[] FileCommands = { "Read", "Write", "Flush", "SetSize", "GetSize", "OperateRange", "OperateRangeWithBuffer" };
+ 
++        // A command that failed on a save it parsed (OpenSaveDataFileSystem and kin) leaves what it asked for here; Report appends and clears it.
++        //   11-23 D-HR6A: seven failing OpenSaveDataFileSystem (2002-1002) right before a crash, with nothing saying which save it was
++        [ThreadStatic] public static string Extra;
++
++        public static string SaveAttr(SaveDataSpaceId spaceId, in SaveDataAttribute a) =>
++            $"存档 类型 {a.Type}、空间 {spaceId}、程序号 {a.ProgramId.Value:X16}、用户 {a.UserId.Id.High:X16}{a.UserId.Id.Low:X16}、序号 {a.Index}、系统存档号 {a.StaticSaveDataId:X16}";
++
+         public static bool IsProbe(uint result)
+         {
+             uint module = result & 0x1ff, desc = (result >> 9) & 0x1fff;
+@@ -43,6 +51,9 @@ namespace Ryujinx.HLE.HOS.Services.Fs
+ 
+         public static void Report(IpcService service, int commandId, ServiceCtx context, uint result)
+         {
++            string extra = Extra;
++            Extra = null;
++
+             if (S2AHooks.FsFailed == null)
+             {
+                 return;
+@@ -68,6 +79,11 @@ namespace Ryujinx.HLE.HOS.Services.Fs
+                 detail.Append(i == 0 ? "，路径 " : " → ").Append(Encoding.UTF8.GetString(raw, 0, end < 0 ? len : end));
+             }
+ 
++            if (extra != null)
++            {
++                detail.Append("，").Append(extra);
++            }
++
+             S2AHooks.FsFailed(CommandName(service, commandId), detail.ToString(), !IsProbe(result));
+         }
+     }

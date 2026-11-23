@@ -668,6 +668,8 @@
 "kbd.mouse.invertX" = "Inverser l'horizontal";
 "kbd.mouse.invertY" = "Inverser le vertical";
 "kbd.mouse.recenter" = "Recentrer quand la souris s'arrête";
+"kbd.mouse.use" = "Utiliser la souris ou le trackpad";
+"kbd.mouse.offNote" = "Désactivé : cliquer sur le trackpad équivaut à toucher l’écran et affiche les boutons à l’écran et l’engrenage des réglages. Les boutons et les mouvements de la souris ne sont pas transmis au jeu.";
 "kbd.mouseButton.0" = "Bouton gauche";
 "kbd.mouseButton.1" = "Bouton droit";
 "kbd.mouseButton.2" = "Bouton central";

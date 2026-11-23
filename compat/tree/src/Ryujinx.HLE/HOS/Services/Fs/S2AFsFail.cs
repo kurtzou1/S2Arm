@@ -1,3 +1,4 @@
+using LibHac.Fs;
 using System;
 using System.Text;
 
@@ -19,6 +20,13 @@ namespace Ryujinx.HLE.HOS.Services.Fs
         };
 
         private static readonly string[] FileCommands = { "Read", "Write", "Flush", "SetSize", "GetSize", "OperateRange", "OperateRangeWithBuffer" };
+
+        // A command that failed on a save it parsed (OpenSaveDataFileSystem and kin) leaves what it asked for here; Report appends and clears it.
+        //   11-23 D-HR6A: seven failing OpenSaveDataFileSystem (2002-1002) right before a crash, with nothing saying which save it was
+        [ThreadStatic] public static string Extra;
+
+        public static string SaveAttr(SaveDataSpaceId spaceId, in SaveDataAttribute a) =>
+            $"存档 类型 {a.Type}、空间 {spaceId}、程序号 {a.ProgramId.Value:X16}、用户 {a.UserId.Id.High:X16}{a.UserId.Id.Low:X16}、序号 {a.Index}、系统存档号 {a.StaticSaveDataId:X16}";
 
         public static bool IsProbe(uint result)
         {
@@ -43,6 +51,9 @@ namespace Ryujinx.HLE.HOS.Services.Fs
 
         public static void Report(IpcService service, int commandId, ServiceCtx context, uint result)
         {
+            string extra = Extra;
+            Extra = null;
+
             if (S2AHooks.FsFailed == null)
             {
                 return;
@@ -66,6 +77,11 @@ namespace Ryujinx.HLE.HOS.Services.Fs
                 context.Memory.Read(buff.Position, raw);
                 int end = Array.IndexOf(raw, (byte)0);
                 detail.Append(i == 0 ? "，路径 " : " → ").Append(Encoding.UTF8.GetString(raw, 0, end < 0 ? len : end));
+            }
+
+            if (extra != null)
+            {
+                detail.Append("，").Append(extra);
             }
 
             S2AHooks.FsFailed(CommandName(service, commandId), detail.ToString(), !IsProbe(result));

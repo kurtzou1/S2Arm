@@ -11054,5 +11054,13 @@
  {
   "source": "想在电脑上签：用数据线把 iPhone 连上这台电脑、解锁并点「信任」，在启动器里推一次游戏（会把这台登记进你的团队），再导出。",
   "en": "To sign on this computer: connect the iPhone with a cable, unlock it and tap “Trust”, push a game once from the launcher (this registers the device to your team), then export again."
+ },
+ {
+  "source": "这台 {0} 不认这次签名用的开发证书（手机说它已失效）。常见原因：在 AltStore、SideStore、iloader 等别的工具里新建或撤销过这个 Apple ID 的证书，把 S2Arm 在用的那张顶掉了；或者这台 {0} 的日期时间不对。办法：在 {0} 上打开「设置 → 通用 → 日期与时间」里的「自动设置」，再点一次重试：S2Arm 签名前会重新向 Apple 核这张证书，已被撤掉的会换一张新的（要撤别的工具的证书时会先问你）。手机上已装的 App 和存档都不受影响。",
+  "en": "This {0} doesn't accept the development certificate used for this signature (it says the certificate is no longer valid). Common causes: another tool such as AltStore, SideStore or iloader created or revoked certificates for this Apple ID and pushed out the one S2Arm was using, or the date and time on this {0} are wrong. To fix it: on the {0}, turn on “Set Automatically” in Settings → General → Date & Time, then retry. Before signing, S2Arm checks the certificate with Apple again and replaces one that was revoked (it asks you first if another tool's certificate would be revoked). Apps and saves already on the phone are not affected."
+ },
+ {
+  "source": "所有游戏的默认只有玩家 1 的一份。",
+  "en": "The default for all games applies to player 1 only."
  }
 ]

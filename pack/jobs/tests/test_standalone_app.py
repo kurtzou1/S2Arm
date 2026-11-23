@@ -453,6 +453,7 @@ class AppsOnlyPhone(unittest.TestCase):
     def test_update_button_lists_old_apps(self):
         import ipa as packer
         import rewrite_refresh
+        p = patch.object(install, "online_devices", return_value=set()); p.start(); self.addCleanup(p.stop)   # 不碰本机真连着的手机（Mac 走 devicectl）
         with patch.object(packer, "current_shell_id", lambda c: "SID2"), patch.object(rewrite_refresh, "kept_todo", lambda *a: self.fail("没装通用壳不查程序补推")):
             out = install.phone_updates(self.c)
         self.assertEqual(out, [dict(device="UDID1", name="", fromShell="SID1", toShell="SID2", games=[], stale=[], kept=[], apps=[dict(gameId=G1, name="甲")])])

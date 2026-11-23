@@ -22,6 +22,7 @@ void s2a_ios_keyboard_foreground(void);       // 回前台：键盘已不在就�
 int s2a_ios_keyboard_connected(void);         // 现在接着外接键盘（任意线程）
 // 改键页用（主线程）
 #define S2AKeyboardMapKey @"S2AKeyboardMap"   // 按款存（s2a_ios_per_game_keys）：schema 1 JSON，同 Mac 启动器 input.json 格式
+#define S2AMouseOffKey @"S2AMouseOff"         // 按款存：改键页「使用鼠标 / 触控板」关掉（#2072，BOOL，没有 = 打开；不进 schema 1）
 void s2a_ios_keyboard_reload(void);           // 存了新键位：当场生效
 void s2a_ios_keyboard_set_muted(int muted);   // 改键页开着：键盘不进游戏
 // 录一个键：下一次按下的键交回（Mac 键码 + 修饰键位 Shift 1 / Control 2 / Option 4），Esc 交回 code = -1；
@@ -33,7 +34,7 @@ void s2a_ios_keyboard_mouse_changed(int pressed);   // mouse.m：算数的鼠标
 int s2a_ios_mouse_connected(void);            // 接着鼠标 / 触控板（任意线程）
 int s2a_ios_mouse_lock_wanted(void);          // 游戏页 prefersPointerLocked 问这里（主线程）
 unsigned s2a_ios_mouse_buttons(void);         // 按着、算数的鼠标键（位 i = 按键 i；输入队列）
-void s2a_ios_mouse_config(const s2a_input_config *c, int is_default);   // keyboard.m 装好键位时同步鼠标那几项（输入队列）
+void s2a_ios_mouse_config(const s2a_input_config *c, int is_default, int off);   // keyboard.m 装好键位时同步鼠标那几项与开关（输入队列）
 void s2a_ios_mouse_take(int32_t sticks[4]);   // HID 读线程：攒下的位移加进右摇杆（vpad.m 两个读导出）
 int s2a_ios_mouse_escape(void);               // Esc 按下：锁着就只释放、回 1（这一下不进游戏）；输入队列
 void s2a_ios_mouse_sync(void);                // 虚拟按键显示 / 收起、方案切换后：不该锁着就释放（主线程）
