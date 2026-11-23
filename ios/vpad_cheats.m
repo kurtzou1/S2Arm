@@ -235,6 +235,8 @@ static NSString *cheat_status_text(NSString *st) {
 }
 - (void)tableView:(UITableView *)t didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [t deselectRowAtIndexPath:ip animated:YES];
+    // 第 0 组是「分享给其他玩家」开关那一行（cellForRow 单做）：点到行本身（不是开关）也会进这里，没有金手指文件时 _files[-1] 越界崩（诊断#c84d01，0.6.1）
+    if (ip.section == 0) return;
     S2ACheatFile *f = _files[ip.section - 1];
     if (ip.row < (NSInteger)(f.bad ? 0 : f.rows.count)) return;
     UIAlertController *a = [UIAlertController alertControllerWithTitle:[NSString stringWithFormat:S2AL(@"cheats.delete.title"), f.file] message:S2AL(@"cheats.delete.message") preferredStyle:UIAlertControllerStyleAlert];
