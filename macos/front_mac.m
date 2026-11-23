@@ -560,6 +560,10 @@ __attribute__((visibility("default"), used)) void s2a_pad_set_motion_enabled(int
     // Joy-Con / framework-unrecognized Pro retain their existing raw control path.
     s2a_joycon_imu_set_enabled(want);
     s2a_mac_hid_pad_set_motion_enabled(want);   // 兜底 HID 手柄（第三方 Switch 模式 / GameController 不认的 Pro，#1383）同一开关
+    // 开关实际值进日志（#1383 D-MR7D：玩家说关不掉，诊断里看不出这一局启动设置关没关）：每次变化记一行
+    static int last = -1;
+    if (want != last) { last = want; fprintf(stderr, "[输入] 体感：游戏%s要六轴、启动设置 S2A_MOTION=%s → 手柄六轴%s\n", enabled ? "" : "不",
+                                             off ? off : "(没设：缺省开)", want ? "交给游戏" : "不交给游戏"); }
 }
 // P1（槽 0）是一代 Joy-Con 单元时（#520，同 Joy-Con 2：P1 的体感 / 震动跟占 P1 的那只走）：定义在槽位表后面
 static int p1_gen1_motion(s2a_pad_motion out[2]);
@@ -1274,7 +1278,8 @@ static BOOL pad_order_refresh(void) {
     BOOL was = g_order_loaded;
     BOOL reassign = !was || generation != g_order_generation;
     g_order = order; g_order_loaded = loaded; g_order_generation = generation;
-    fprintf(stderr, "[s2a] 分配玩家顺序表：%d 位%s，没分配的 %d 只不给玩家位%s\n", order.count, g_order_loaded ? "" : "（读不懂，照连接顺序）", order.dropped_count,
+    char who[400]; s2a_pad_order_describe(&order, who, sizeof who);
+    fprintf(stderr, "[s2a] 分配玩家顺序表：%d 位%s%s%s%s，没分配的 %d 只不给玩家位%s\n", order.count, g_order_loaded ? "" : "（读不懂，照连接顺序）", who[0] ? "（" : "", who, who[0] ? "）" : "", order.dropped_count,
             reassign ? "；重新分配过，照表重排" : "；只是接上 / 断开手柄，已在玩的留原位");
     return (g_order_loaded || was) && reassign;
 }

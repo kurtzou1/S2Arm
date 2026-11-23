@@ -36,7 +36,7 @@
 "cheats.status.badInstruction" = "指令有誤";
 "cheats.status.execError" = "執行出錯";
 "cheats.status.gameNotLoaded" = "遊戲未載入";
-"cheats.status.modifiesCode" = "要修改遊戲程式碼，手機上匯入的用不了：在電腦上的 S2Arm 裡匯入這份 txt，再更新手機上的 S2Arm 就能用";
+"cheats.status.modifiesCode" = "要修改遊戲程式碼，手機上匯入的用不了：在出包的電腦上 S2Arm 裡匯入這份 txt，對這款重新出 iPhone 包並推到手機後就能用";
 "cheats.status.notPacked" = "要修改遊戲程式碼，這次出包沒編進去（同一模組的補丁太多等，原因見電腦上出包完成頁）";
 "cheats.status.off" = "關";
 "cheats.status.pending" = "等待生效…";

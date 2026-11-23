@@ -25,6 +25,25 @@ static inline void s2a_pad_order_fill(id list, s2a_pad_order_entry *out, int *co
     }
 }
 
+// 诊断用：表里每一位是什么（D-A2X6：玩家「手柄没反应」，日志只有「2 位」，看不出玩家 1 是键盘还是别的手柄）。
+//   只写种类与系统手柄名，不写一代 Joy-Con 的设备号（蓝牙地址）。例：「P1 键盘、P2 Joy-Con (L/R)」
+static inline void s2a_pad_order_describe(const s2a_pad_order *o, char *out, size_t n) {
+    size_t k = 0; out[0] = 0;
+    for (int i = 0; i < o->count && k + 1 < n; i++) {
+        const s2a_pad_order_entry *e = &o->entry[i];
+        char what[80];
+        if (e->ns2_player == S2A_PAD_ORDER_KEYBOARD) snprintf(what, sizeof what, "键盘");
+        else if (e->ns2_player == S2A_PAD_ORDER_EMPTY) snprintf(what, sizeof what, "空位");
+        else if (e->ns2_player == S2A_PAD_ORDER_GEN1) snprintf(what, sizeof what, "一代 Joy-Con 单只");
+        else if (e->ns2_player == S2A_PAD_ORDER_GEN1_PAIR) snprintf(what, sizeof what, "一代 Joy-Con 一对");
+        else if (e->ns2_player >= 0) snprintf(what, sizeof what, "Switch 2 手柄（通道玩家 %d）", e->ns2_player);
+        else snprintf(what, sizeof what, "%s", e->name);
+        int w = snprintf(out + k, n - k, "%sP%d %s", i ? "、" : "", i + 1, what);
+        if (w < 0) break;
+        k += (size_t)w < n - k ? (size_t)w : n - k - 1;
+    }
+}
+
 // json 不是字典（读不到 / 读不懂）→ 回 0，out 清空、generation = -1：调用方照连接顺序分槽（同没有表）
 static inline int s2a_pad_order_from_json(id json, s2a_pad_order *out, long *generation) {
     memset(out, 0, sizeof *out);
@@ -32,6 +51,9 @@ static inline int s2a_pad_order_from_json(id json, s2a_pad_order *out, long *gen
     if (![json isKindOfClass:NSDictionary.class]) return 0;
     s2a_pad_order_fill(json[@"order"], out->entry, &out->count);
     s2a_pad_order_fill(json[@"dropped"], out->dropped, &out->dropped_count);
+    // 一位玩家都没登记（分配时谁都没按就完成了）：「没分配的不给玩家位」会让在线的手柄全都没有玩家位，游戏里按什么都没反应（D-A2X6）。
+    //   没人能玩不是谁要的结果：这种表的「没分配」名单不作数，照连接顺序排（第一只进玩家 1）；generation 照读，重排时机不变
+    if (!out->count) out->dropped_count = 0;
     id g = json[@"generation"];
     *generation = [g respondsToSelector:@selector(longValue)] ? [g longValue] : 0;   // 字典里没有 generation 记 0（同抽出前 Mac 的 [nil longValue]）
     return 1;

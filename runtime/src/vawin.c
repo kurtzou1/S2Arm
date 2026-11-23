@@ -1365,7 +1365,10 @@ static uint64_t need_from_npdm(void) {
 #if TARGET_OS_IPHONE
     // iOS：main.npdm 在启动上下文的模块目录（单款兼容 = 可执行文件同目录，同改造前）
     // 多款容器（launchctx.c ③）：构造期玩家还没选游戏、上下文不冻结——对包内每一款算，取最大（s2a_window_container_need）
-    if (s2a_launch_ctx_container()) { g_ctr = 1; return s2a_window_container_need(s2a_launch_ctx_bundle_dir(), getenv("HOME")); }   // 空容器的占位在 vawin_reserve
+    //   选了游戏之后（起宿主前补占 / 重占，s2a_window_reserve_late）只按选中的这一款算：同一个容器里混装 39 位（类型 3）与 36 位（类型 1）两款时，
+    //   整容器取法判「地址空间类型不一致、不占窗口」，选中的那款也起不来，自检随后报成「读不到 main.npdm（包不完整）」
+    //   （D-SE5E：iPad 0.6.9 同装一款 39 位、一款 36 位，选 36 位那款三局都起不来）。选中之前（构造期）照旧整容器取最大
+    if (s2a_launch_ctx_container()) { g_ctr = 1; if (!s2a_launch_ctx_get()) return s2a_window_container_need(s2a_launch_ctx_bundle_dir(), getenv("HOME")); }   // 空容器的占位在 vawin_reserve
     const s2a_launch_ctx *lc = s2a_launch_ctx_get();
     if (!lc) { LOG("【红】地址窗口：启动上下文不可用（%s）", s2a_launch_ctx_error()); return 0; }
     strlcpy(dir, lc->module_dir, sizeof dir);

@@ -95,5 +95,7 @@ const char *s2a_launch_ctx_begin(void);
 const char *s2a_launch_ctx_game_env_dir(const char *proc_docs);
 // 构造期读 env.txt 用的进程级文档目录（envfile.c 定义；放这里不放 native.h：native.h 在出包 extract 阶段键里，改它 = 冷改动）
 const char *s2a_envfile_process_docs(void);
+// 诊断码（#1449）：<docs>/diag_once.txt 读一次即作废（先改名 diag_once.used），只收 DM_ 开头的诊断开关 → 生效条数（envfile.c）
+int s2a_envfile_apply_once(const char *docs);
 
 #endif

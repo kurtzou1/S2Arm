@@ -5,6 +5,8 @@
 // ③ 同局交替开关（alt.c）从 MARK 起算：MARK 行调 s2a_alt_mark 1 次，别的行 0 次。
 // ④ 出图停住看门（S2A_STALL_DUMP_S=1，桩线程表计次；按看门自己走的格数等、不按墙钟）：停 7 格 → 打 1 次；继续停 → 不重打；上屏一帧后再停 → 2 次；
 //    冻结中停 → 不打；解冻后停 → 3 次；再上屏再停 → 仍 3 次（每局至多 3 次）。
+// ④c 系统小程序开着（D-Z96G：输名字 53 秒被判停住）：小程序开着停 12 格 → 现场 0 份（修前 1 份）；关掉后再停 2 格 → 仍 0 份（计时从零重新计，
+//    不是接着开着之前的格数）；再停 7 格 → 1 份（关掉后真停住照样抓）。
 // ⑤ 标称帧率（s2a_nominal_fps_set → s2a_ap_nominal_fps）：没报过 = 0；报 0 / 负数不收仍 0、不打日志；报 60 → 60 并打一行「标称帧率：60 帧/秒」；
 //    再报 60 → 不重打；报 30 → 30 并打一行带「运行中变了」；报 -5 不收仍 30。期望按函数约定手写（读 fps 与日志行）。
 // ⑧ 开发设施开关：s2a_dev_on 桩 0（玩家口径）→ 首帧上屏后看门只救场（审计 P1-191）、停 1.6 秒现场 0 份；桩 1（开发包）→ 1 份。各在 fork 子进程里从零开始。
@@ -52,6 +54,8 @@ static _Atomic int g_host_focused = 1, g_focus_suspend = 1, g_host_sleeping;
 int s2a_host_focused(void) { return atomic_load(&g_host_focused); }
 int s2a_focus_suspend(void) { return atomic_load(&g_focus_suspend); }
 int s2a_host_sleeping(void) { return atomic_load(&g_host_sleeping); }
+static _Atomic int g_applet;   // ④c 系统小程序开着的个数（os.c s2a_applet_open 的桩）
+int s2a_applet_open(void) { return atomic_load(&g_applet); }
 static _Atomic int g_nhost;
 int s2a_dump_threads(const char *why) { (void)why; g_nhost++; return 0; }   // 桩：宿主线程栈
 // 等看门线程在「现在」之后再走满 k 格（s2a_ap_stall_ticks 圈首计）：按看门自己的格数同步，不按墙钟睡（11-19：负载高时固定睡 1.6 秒格数不够，
@@ -192,6 +196,28 @@ int main(void) {
             bad += !(ok1 && ok2);
         } else { printf("✗ ④b 起不了子进程（fork/pipe 失败）\n"); bad++; }
     }
+    {   // ④c 系统小程序开着期间不计停住、关掉后重新计。期望手算（DUMP_S=1 → lim 4 格）：开着停 12 格 → 0 份（修前看门照计，12 ≥ 4 → 1 份）；
+        //    关掉后 2 格 → idle ≤ 3 < 4 → 0 份（若接着开着前的格数计，早已过 4 → 1 份）；再 7 格 → 1 份。同 ④b 在首帧上屏前 fork
+        int pfd[2]; pid_t pid = -1;
+        if (!pipe(pfd)) {
+            pid = fork();
+            if (pid == 0) {
+                close(pfd[0]); setenv("S2A_STALL_DUMP_S", "1", 1); atomic_store(&g_fz, 0); atomic_store(&g_host_focused, 1);
+                atomic_store(&g_applet, 1); s2a_frame_presented(); wait_ticks(12);
+                char b[3]; b[0] = (char)atomic_load(&g_ndump);
+                atomic_store(&g_applet, 0); wait_ticks(2); b[1] = (char)atomic_load(&g_ndump);
+                wait_ticks(7); b[2] = (char)atomic_load(&g_ndump);
+                ssize_t w = write(pfd[1], b, 3); (void)w; _exit(0);
+            }
+            close(pid > 0 ? pfd[1] : pfd[0]);
+        }
+        if (pid > 0) {
+            char rb[3] = {-1, -1, -1}; ssize_t k = read(pfd[0], rb, 3); close(pfd[0]); int st = 0; waitpid(pid, &st, 0);
+            int ok = k == 3 && rb[0] == 0 && rb[1] == 0 && rb[2] == 1;
+            printf("%s ④c 系统小程序开着停 12 格现场 %d 份、关掉后 2 格 %d 份、再 7 格 %d 份（期望 0 / 0 / 1）\n", ok ? "✓" : "✗", rb[0], rb[1], rb[2]);
+            bad += !ok;
+        } else { printf("✗ ④c 起不了子进程（fork/pipe 失败）\n"); bad++; }
+    }
     setenv("S2A_STALL_DUMP_S", "1", 1);   // 首帧前设：看门在首帧起线程时读阈值
     for (int i = 0; i < 3; i++) s2a_frame_presented();
     uint64_t s2a_ap_frames(void); if (s2a_ap_frames() != 3) { printf("✗ 上屏帧数 %llu，期望 3\n", (unsigned long long)s2a_ap_frames()); bad++; }
@@ -239,12 +265,14 @@ int main(void) {
         }
         // ⑥d 停帧救场窗口的外因（#1857：Mac 切后台、宿主焦点=0 时 30 秒 0 帧，被当停帧关了帧率补丁）。期望手写（冻结 / 焦点 / 睡眠，-1 = 取不到符号）：
         //   前台正常 (0,1,0) → 否；切后台 (0,0,0) → 是；冻结 (1,1,0) → 是；睡眠 (0,1,1) → 是；全取不到 (-1,-1,-1) → 否（不冒充外因）
-        int s2a_ap_stall_external(int, int, int);
-        struct { int fz, fo, sl, want; } xc[] = {{0, 1, 0, 0}, {0, 0, 0, 1}, {1, 1, 0, 1}, {0, 1, 1, 1}, {-1, -1, -1, 0}};
+        //   第 4 列系统小程序开着的个数（D-Z96G）：前台正常但 1 个 / 2 个开着 → 是；0 个 → 否；取不到 -1 → 否
+        int s2a_ap_stall_external(int, int, int, int);
+        struct { int fz, fo, sl, ap, want; } xc[] = {{0, 1, 0, 0, 0}, {0, 0, 0, 0, 1}, {1, 1, 0, 0, 1}, {0, 1, 1, 0, 1}, {-1, -1, -1, -1, 0},
+                                                    {0, 1, 0, 1, 1}, {0, 1, 0, 2, 1}, {0, 1, 0, -1, 0}};
         for (unsigned i = 0; i < sizeof xc / sizeof *xc; i++) {
-            int got = s2a_ap_stall_external(xc[i].fz, xc[i].fo, xc[i].sl);
-            if (got != xc[i].want) { printf("✗ ⑥d 救场窗口外因 冻结=%d 焦点=%d 睡眠=%d → %d（期望 %d）\n", xc[i].fz, xc[i].fo, xc[i].sl, got, xc[i].want); bad++; }
-            else printf("✓ ⑥d 救场窗口外因 冻结=%d 焦点=%d 睡眠=%d → %d\n", xc[i].fz, xc[i].fo, xc[i].sl, got);
+            int got = s2a_ap_stall_external(xc[i].fz, xc[i].fo, xc[i].sl, xc[i].ap);
+            if (got != xc[i].want) { printf("✗ ⑥d 救场窗口外因 冻结=%d 焦点=%d 睡眠=%d 小程序=%d → %d（期望 %d）\n", xc[i].fz, xc[i].fo, xc[i].sl, xc[i].ap, got, xc[i].want); bad++; }
+            else printf("✓ ⑥d 救场窗口外因 冻结=%d 焦点=%d 睡眠=%d 小程序=%d → %d\n", xc[i].fz, xc[i].fo, xc[i].sl, xc[i].ap, got);
         }
         // ⑥b 第 2 档提示时刻：退出时退出前 NOTICE_S 秒，但不早于「打完现场」（钳位）；不退出（s=0，缺省）时停满 NOTICE_IDLE_S 秒（q）提示（审计 P1-4），q=0 关
         int s2a_ap_stall_notice_after(int, int, int, int, int, int);

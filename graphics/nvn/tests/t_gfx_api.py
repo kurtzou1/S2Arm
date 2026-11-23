@@ -44,6 +44,17 @@ for name, f, want in CASES:
 got, why = classify(F(evidence=dict(imports=812, ro_lookup=True, nvn_name=True, nvn_like=['nvnPrivate0'], mods=['main', 'main.npdm', 'rtld', 'sdk'])))
 want_why = '没有 NVN / Vulkan / OpenGL 任一接口的证据；依据：main 导入 812 个、按名查找（nn::ro::LookupSymbol）有、映像里 nvnBootstrapLoader 名字串有、带 nvn 的导入 nvnPrivate0、ExeFS 模块 main main.npdm rtld sdk'
 ok = (got, why) == ('unknown', want_why); fails += not ok; CASES.append(None)
+# D-TW4Z：判不出时再打 nn:: 命名空间个数与其余导入（期望手写）；旧依据（没有这两项）照上一条原样
+got2, why2 = classify(F(evidence=dict(imports=253, ro_lookup=False, nvn_name=False, nvn_like=[], mods=['main', 'main.npdm', 'rtld', 'sdk'],
+                                      ns=[('os', 40), ('vi', 3)], others=['vkFoo', 'glBar'])))
+want2 = '没有 NVN / Vulkan / OpenGL 任一接口的证据；依据：main 导入 253 个、按名查找（nn::ro::LookupSymbol）无、映像里 nvnBootstrapLoader 名字串无、带 nvn 的导入 无、ExeFS 模块 main main.npdm rtld sdk、nn 命名空间 os×40 vi×3、其余导入（前 30）vkFoo glBar'
+ok2 = (got2, why2) == ('unknown', want2); fails += not ok2; CASES.append(None)
+print(('  过 ' if ok2 else '  ✗ ') + '判不出时打 nn 命名空间与其余导入' + ('' if ok2 else f'：{why2!r}'))
+from gfx_api import nn_namespaces, other_imports
+ns = nn_namespaces({'_ZN2nn2os10SleepThreadE', '_ZN2nn2os9LockMutexE', '_ZN2nn2vi11OpenDisplayE', 'memcpy', '_ZNSt3__14coutE'})
+oi = other_imports({'_ZN2nn2os10SleepThreadE', 'memcpy', '_ZNSt3__14coutE', 'nvnFoo', 'vkCreateInstance'})
+ok3 = ns == [('os', 2), ('vi', 1)] and oi == ['nvnFoo', 'vkCreateInstance']; fails += not ok3; CASES.append(None)
+print(('  过 ' if ok3 else '  ✗ ') + f'命名空间计数 {ns}、其余导入 {oi}')
 print(f'  {"过" if ok else "败"} 判不出时依据写进结果：{why}')
 # features 读 main.npdm 判位宽（META 头 0xC 字节 bit0 = 64 位指令集）：flags 0 → 32 位，不碰 main；flags 1 → 照旧看 main（这里 main 不是 NSO → None）
 for flags, want in ((0x00, {'arm32': True}), (0x01, None), (0x3F, None)):

@@ -173,16 +173,28 @@ static UILabel *label(CGFloat size, UIFontWeight w, UIColor *c) {
 @end
 
 static S2ALoadPage *g_page;
+static void page_build(UIView *root, int first);
 // 场景连上、根视图建好时调（ios/app.m）：首次与否取模型（host_main.c main 里 s2a_load_begin 定）
 void s2a_loadpage_attach(UIView *root) {
     if (g_page || !root) return;
     s2a_load_view v; s2a_load_snapshot(now_ns(), &v);
     if (v.stage == S2A_LOAD_DONE) return;
-    g_page = [[S2ALoadPage alloc] initWithFrame:root.bounds firstRun:v.first_run];
+    page_build(root, v.first_run);
+}
+// 建页面、挂上、起 0.25 秒刷新。简短启动画面期间模型把这一局升成首次（loadprog.c：之后的启动却还要编很久，11-23 #2133）时，
+//   换成完整加载页（进度 + 先开始玩），同一个根视图、同一套刷新
+static void page_build(UIView *root, int first) {
+    g_page = [[S2ALoadPage alloc] initWithFrame:root.bounds firstRun:first];
     [root addSubview:g_page]; [g_page refresh];
-    { void s2a_report_gear_attach(UIView *); s2a_report_gear_attach(g_page); }   // 左上角小齿轮：故障报修（加载 / 解包时也找得到上传入口）
+    { void s2a_report_gear_attach(UIView *); s2a_report_gear_attach(g_page); }   // 左上角「故障报修」按钮（加载 / 解包时也找得到上传入口）
     __weak S2ALoadPage *w = g_page;
-    g_page.timer = [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *t) { (void)t; [w refresh]; }];
+    g_page.timer = [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *t) { (void)t;
+        S2ALoadPage *pg = w; if (!pg) return;
+        if (!pg.firstRun && pg.superview) { s2a_load_view v; s2a_load_snapshot(now_ns(), &v);
+            if (v.first_run && v.stage != S2A_LOAD_DONE) { UIView *r = pg.superview; [pg.timer invalidate]; pg.timer = nil; [pg removeFromSuperview];
+                if (g_page == pg) g_page = nil;
+                page_build(r, 1); return; } }
+        [pg refresh]; }];
 }
 // 根视图上后挂的视图（虚拟手柄、开发浮层）挂完后调：加载页压回它们上面
 void s2a_loadpage_front(void) { if (g_page.superview) [g_page.superview bringSubviewToFront:g_page]; }

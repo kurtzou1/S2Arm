@@ -250,6 +250,18 @@ int mtl_gpu_err_fatal(NSError *e) {
     if (fatal & 1) return 1;            // 有本进程的 Hang / Timeout / PageFault 原因名
     return fatal && !victim;            // 只有 Metal 3 错误码：被牵连 / 被拒收的那几种不算
 }
+// 这条错误是不是只有「GPU 内存用满」。链上有 IOGPU 原因名时以原因名为准（外层错误码可能是别的，如 Timeout），没有原因名才看错误码；
+//   带挂死 / 超时 / 缺页、被牵连 / 被拒收的都不算。11-23 iPad 原文：MTLCommandBufferErrorDomain Code=8 "Insufficient Memory (…kIOGPUCommandBufferCallbackErrorOutOfMemory)"，里层 IOGPUCommandQueueErrorDomain Code=8
+static void gpu_err_kinds(NSError *e, int depth, int *name_oom, int *name_other, int *code_oom, int *code_other) {
+    if (!e || depth > 6) return;
+    NSString *d = [NSString stringWithFormat:@"%@ %@", e.localizedDescription ?: @"", e.userInfo[NSLocalizedDescriptionKey] ?: @""];
+    if ([d containsString:@"CallbackErrorOutOfMemory"]) *name_oom = 1;
+    if ([d containsString:@"CallbackErrorHang"] || [d containsString:@"CallbackErrorTimeout"] || [d containsString:@"PageFault"] || [d containsString:@"InnocentVictim"] || [d containsString:@"SubmissionsIgnored"]) *name_other = 1;
+    if ([e.domain isEqualToString:MTLCommandBufferErrorDomain]) { if (e.code == MTLCommandBufferErrorOutOfMemory) *code_oom = 1; else if (e.code == MTLCommandBufferErrorTimeout || e.code == MTLCommandBufferErrorPageFault) *code_other = 1; }
+    id u = e.userInfo[NSUnderlyingErrorKey]; if ([u isKindOfClass:NSError.class]) gpu_err_kinds(u, depth + 1, name_oom, name_other, code_oom, code_other);
+    id m = e.userInfo[@"NSMultipleUnderlyingErrorsKey"]; if ([m isKindOfClass:NSArray.class]) for (id x in (NSArray *)m) if ([x isKindOfClass:NSError.class]) gpu_err_kinds(x, depth + 1, name_oom, name_other, code_oom, code_other);
+}
+static int gpu_err_only_oom(NSError *e) { int no = 0, nx = 0, co = 0, cx = 0; gpu_err_kinds(e, 0, &no, &nx, &co, &cx); return no || nx ? no && !nx : co && !cx; }
 static void res_drop_all(void);
 // 安全停：唯一置位处。why = 第一条错误原文
 void mtl_gpu_halt(const char *why) {
@@ -789,7 +801,7 @@ static void pidx_removing(int i) {   // before g_pools[i] = g_pools[--g_npool]: 
 //   块之间重叠，GPU 地址跨块不连续，所以查找要说读多远；不知道（长度 1：间接绘制的索引缓冲、原始存储地址）给 BIG_UNKNOWN。原始全局内存表（着色器自己查池表）要整池：big_full（gmem_map）。
 //   只为 CPU 读（addr_cpu）或只问在不在（pool_known）的查询不建块：块是 GPU 用的
 enum { BIG_MIN = 512u << 20, BIG_S = 16u << 20, BIG_UNKNOWN = 64u << 20, BIG_MAX = 32 };
-typedef struct { uintptr_t lo, hi, a, b; const void *mem; int *chunk, full; NSMutableArray *old; uint64_t dead; } big_pool;   // dead：游戏已释放、到这次提交序号才回收（同池条目的 dead，pool_reap）   // chunk：步长 → g_pools 下标 + 1；full：整池那条 + 1；old：被加长替换下来的缓冲，随池走
+typedef struct { uintptr_t lo, hi, a, b; const void *mem; int *chunk, full; NSMutableArray *old; uint64_t dead; uint64_t made; int nofull; } big_pool;   // made：给这个池建过的零拷贝缓冲长度合计（块、加长替下的旧块都算：都活到池走）；nofull：整池缓冲建不出来过，不再试   // dead：游戏已释放、到这次提交序号才回收（同池条目的 dead，pool_reap）   // chunk：步长 → g_pools 下标 + 1；full：整池那条 + 1；old：被加长替换下来的缓冲，随池走
 static big_pool g_big[BIG_MAX]; static int g_nbig; static uint64_t g_big_chunks;   // g_big_chunks：建过的块（读数）
 // 池表删一条时（gone 走、末尾那条 from 改名为 gone）大池块表里的下标跟着改：块表记的是池表下标，别的池被删、挪进空位的若是某个大池的块，
 //   不改就指着别人的条目（GPU 地址落到别的缓冲上）；走的若正是块，块表那格清掉（下次查到再包）。调用方持 g_mu
@@ -1348,7 +1360,7 @@ static int big_new(big_pool *b, uintptr_t lo, uintptr_t hi, uintptr_t end) {   /
     g_plast = -1; atomic_fetch_add(&g_pool_gen, 1);
     g_pools[g_npool++] = (pool_ent){lo < b->lo ? b->lo : lo, end > b->hi ? b->hi : end, lo, buf, buf.gpuAddress, b->mem, 0, lo}; pidx_added();   // hi = 缓冲真盖到的地方（别的查找照常按它判装不装得下）
     g_pools[g_npool - 1].dead = b->dead;   // 释放后、回收前包出的块随池一起到期
-    [g_keep addObject:buf]; g_big_chunks++;
+    [g_keep addObject:buf]; g_big_chunks++; b->made += end - lo;
     (void)hi; return g_npool - 1;
 }
 // 大池里 [addr, addr + len) 的条目：所在步长的块，没有就建、不够长就加长（加长：旧块已经编进去的命令照用，旧缓冲随池走）；超出池尾 -1。调用方持 g_mu
@@ -1359,6 +1371,17 @@ static int big_lookup(big_pool *b, uint64_t addr, uint64_t len) {
     uint64_t want = len > 1 ? len : BIG_UNKNOWN; uintptr_t end = (addr + want + BIG_S - 1) & ~(uintptr_t)(BIG_S - 1); end += BIG_S; if (end > b->b || end < lo) end = b->b;
     int i = b->chunk[k] - 1;
     if (i >= 0 && (g_pools[i].hi >= b->hi || g_pools[i].hi >= addr + want)) return i;
+    // 一个大池的缓冲合计有上限。块互相重叠（每块盖到要读的末尾再多一个步长，不知道读多远的给 64 MB：一块 32～96 MB，步长才 16 MB），加长替下的旧块也活到池走；
+    //   设备的 GPU 已分配对每个缓冲按整块长度记，重叠的部分记多次。896 MB 的池 56 个步长各查一次（长度 1）记 5136 MB；同一步长读 16、32 … 480 MB 记 3840 MB（t_nvn_big_pool ㉒ ㉓）。
+    //   iPad Pro M4（建议上限 5461 MB）读档后玩 520 秒，驻留的内存池 1249 → 3979 MB、GPU 已分配 2381 → 5353 MB（98%），下一条命令缓冲报内存不足、整局安全停。
+    //   再建这一块就超过池长的一半时，改包整池一个缓冲（同 gmem_map 那条 full）：之后所有查找都落到它，不再建块。合计 ≤ 池长的 1.5 倍。
+    //   不改的三种：整池超过单个缓冲上限（包不住）；游戏已释放、等回收的池（至多再活两次提交）；整池缓冲建不出来过（只试一次，记一条红，之后照旧建块、没有上限）
+    if (!b->nofull && !b->dead && b->made + (end - lo) > (uint64_t)(b->b - b->a) / 2 && (uint64_t)(b->b - b->a) <= ((uint64_t)g_dev.maxBufferLength & ~(uint64_t)(getpagesize() - 1))) {
+        uint64_t had = b->made; int w = big_new(b, b->a, b->b, b->b);
+        if (w >= 0) { b->full = w + 1; MLOG("memory pool %p+%llu MB: its chunks came to %llu MB (they overlap and each counts in full), one buffer over the whole pool from here on", b->mem, (unsigned long long)((b->hi - b->lo) >> 20), (unsigned long long)(had >> 20)); return w; }
+        b->nofull = 1;
+        MLOG("【红】 memory pool %p+%llu MB: its chunks came to %llu MB and the one buffer over the whole pool could not be made: chunks go on without a cap (GPU allocated counts each of them in full)", b->mem, (unsigned long long)((b->hi - b->lo) >> 20), (unsigned long long)(had >> 20));
+    }
     int n = big_new(b, lo, lo + BIG_S, end); if (n < 0) return i >= 0 && addr + len <= g_pools[i].hi ? i : -1;
     if (i >= 0) {   // 加长：新条目挪进旧位（地址起点不变，下标索引仍有序），旧缓冲留到池走
         [b->old addObject:g_pools[i].buf]; [g_keep removeObject:g_pools[i].buf]; int gs = g_pools[i].gslot; if (g_pools[i].res) g_pool_res_n--;   // 旧缓冲仍在驻留集里，随池走时放
@@ -3244,11 +3267,13 @@ int nvn_be_wait(uint64_t fence, uint64_t timeout_ns) {
 void *nvn_be_fence_event(void) { mtl_init(); return (__bridge void *)g_ev; }   // NVN 提交的共享事件：值 = 已完成的栅栏号（提交时 signal）
 // NVN 队列在 GPU 上等别的队列的共享事件到 v：此后提交到本层队列的全部工作（主命令缓冲、上传批）都排在它后面。先等录制线程把已录的提交交出去，再下等待：
 //   Metal 4 是队列级 waitForEvent；Metal 3 是只含一条 encodeWaitForEvent 的命令缓冲（同一队列后续命令缓冲都被它挡住，11-01 本机实测）。此前还没提交的工作也会一起等（只多等不少等）
-static void *g_qw_ev; static uint64_t g_qw_v, g_qw_n, g_qw_frame;   // the last wait put on the queue (mtl_wait_state_dump: a queue that stops moving is waiting for it)
+// the last wait put on the queue (mtl_wait_state_dump: a queue that stops moving is waiting for it). 持有引用（11-23 D-8MVA）：原先是不持有的 void*，事件释放后那块内存被别的对象复用，
+//   停帧转储读 signaledValue 抛「unrecognized selector」把 App 打崩（这一局本来 16 秒后自己恢复）。回放线程写、看门狗线程读，经 g_qw_mu
+static id<MTLSharedEvent> g_qw_ev; static os_unfair_lock g_qw_mu = OS_UNFAIR_LOCK_INIT; static uint64_t g_qw_v, g_qw_n, g_qw_frame;
 static void queue_wait_event(void *ev, uint64_t v) {   // the wait itself; the replay calls it while encoding a submission (OP_WAIT_SYNC), whose command buffer commits after it
     id<MTLSharedEvent> e = (__bridge id<MTLSharedEvent>)ev;
     if (e.signaledValue >= v) return;
-    g_qw_ev = ev; g_qw_v = v; g_qw_n++; g_qw_frame = atomic_load(&g_cur_frame);
+    os_unfair_lock_lock(&g_qw_mu); g_qw_ev = e; g_qw_v = v; g_qw_n++; g_qw_frame = atomic_load(&g_cur_frame); os_unfair_lock_unlock(&g_qw_mu);
     if (mtl_gpu_halted()) return;   // GPU 安全停后不再往队列放东西
     if (g_m3) { id<MTLCommandBuffer> cb = m3_cb(); [cb encodeWaitForEvent:e value:v]; [cb commit]; }
     else [g_q4 waitForEvent:e value:v];
@@ -6632,6 +6657,16 @@ void nvn_be_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
         MLOG("residency set by kind up to frame %llu: textures %llu, %llu MB; GPU-private buffers %llu, %llu MB; shared buffers (mostly zero-copy memory pools: the game's own memory) %llu, %llu MB; other %llu, %llu MB",
              frame, (unsigned long long)k[0], (unsigned long long)(k[1] >> 20), (unsigned long long)k[2], (unsigned long long)(k[3] >> 20),
              (unsigned long long)k[4], (unsigned long long)(k[5] >> 20), (unsigned long long)k[6], (unsigned long long)(k[7] >> 20)); }
+    {   // 大池的块互相重叠，各自整块记进 GPU 已分配：每个大池报块数、块长合计、其中驻留的、块盖住的不重复范围、加长替下还活着的旧缓冲
+        pthread_mutex_lock(&g_mu);
+        for (int q = 0; q < g_nbig; q++) { big_pool *b = &g_big[q]; size_t nk = ((b->b - b->a) >> 24) + 1; uint64_t sum = 0, rs = 0, uni = 0, ob = 0; uintptr_t top = b->a; int nc = 0;
+            for (size_t k = 0; k < nk; k++) { int i = b->chunk[k] - 1; if (i < 0 || i >= g_npool) continue; pool_ent *e = &g_pools[i]; uint64_t sz = e->hi - e->lo; nc++; sum += sz; if (e->res) rs += sz;
+                uintptr_t from = e->lo > top ? e->lo : top; if (e->hi > from) { uni += e->hi - from; top = e->hi; } }
+            for (id<MTLBuffer> o in b->old) ob += o.length;
+            int fi = b->full - 1; const char *fs = fi < 0 || fi >= g_npool ? (b->nofull ? "refused" : "no") : g_pools[fi].res ? "yes, resident" : "yes, not resident";
+            MLOG("big pool %#lx+%llu MB up to frame %llu: %d chunks, %llu MB in all (%llu MB resident) over %llu MB of the pool; whole-pool buffer %s; replaced chunk buffers still alive %lu, %llu MB; buffers made for it so far %llu MB", (unsigned long)b->lo, (unsigned long long)((b->hi - b->lo) >> 20), frame, nc,
+                 (unsigned long long)(sum >> 20), (unsigned long long)(rs >> 20), (unsigned long long)(uni >> 20), fs, (unsigned long)b->old.count, (unsigned long long)(ob >> 20), (unsigned long long)(b->made >> 20)); }
+        pthread_mutex_unlock(&g_mu); }
     {   // What the memory pools put in the residency set (on a phone: wired), and the uploads read from pools that hold only textures without putting them there (up_tex_src)
         uint64_t pall = 0, pres_b = 0; int pn = 0;
         pthread_mutex_lock(&g_mu); for (int i = 0; i < g_npool; i++) { uint64_t sz = g_pools[i].hi - g_pools[i].lo; pall += sz; if (g_pools[i].res) pres_b += sz; } pn = g_npool; pthread_mutex_unlock(&g_mu);
@@ -10165,7 +10200,9 @@ static uint64_t vbuf_limit(int s, uint64_t ext, int64_t lo, int64_t hi, NvShader
     if (lo < 0) return 0;   // a vertex id below zero (a negative base vertex): Metal does not fetch it either
     uint64_t start = (uint64_t)lo * stride, n = (uint64_t)(hi - lo) * stride + ext;
     for (int i = 0; i < 16; i++) if (g_vlim[i].serial == g_arena_gen && g_vlim[i].addr == addr && g_vlim[i].size == size && g_vlim[i].stride == stride && g_vlim[i].lo == lo && g_vlim[i].hi == hi) return g_vlim[i].gpu;
-    if (n > (4u << 20)) { RED_ONCE(209, "vertex stream %d: the draw reads vertices %lld-%lld past its bound range (%llu bytes, stride %u), %llu bytes are over the staging size: bound as it is, past the range it reads the memory after it", s, (long long)lo, (long long)hi, (unsigned long long)size, stride, (unsigned long long)n); return 0; }
+    // 限长副本上限 32 MB（原 4 MB）：11-23 一款像素风 RPG（Unity，2D 光照）一笔绘制读第 1764–67070 个顶点、步长 76，跨度 4.96 MB，超 4 MB 照原样绑、读到绑定范围后面的内存，
+    //   场景边缘出边缘笔直的黑块（同 #1783 地面黑带的形状）。成本是这一笔在提交里一次 memset（同提交同参数复用 g_vlim），32 MB 以内都比画错划算
+    if (n > (32u << 20)) { RED_ONCE(209, "vertex stream %d: the draw reads vertices %lld-%lld past its bound range (%llu bytes, stride %u), %llu bytes are over the staging size: bound as it is, past the range it reads the memory after it", s, (long long)lo, (long long)hi, (unsigned long long)size, stride, (unsigned long long)n); return 0; }
     if (pend_hits(addr, size)) { RED_ONCE(210, "vertex stream %d: the draw reads vertices %lld-%lld past its bound range (%llu bytes, stride %u), and a GPU write on the stream is queued in this submission: bound as it is (a copy taken now would miss that write)", s, (long long)lo, (long long)hi, (unsigned long long)size, stride); return 0; }
     uint64_t copy = start < size ? MIN(size - start, n) : 0; const uint8_t *src = NULL;
     if (copy) { void *mb; uint64_t mo, g, pav; if (!gpu_addr_want(addr + start, 1, copy, &mb, &mo, &g, &pav)) return 0; src = (const uint8_t *)((__bridge id<MTLBuffer>)mb).contents + mo; }
@@ -12164,8 +12201,10 @@ static void warm_announce(void) {
     int r = s2a_front_warm_tick(0, n);
     MLOG("pipeline prepare: announced before the first frame (%ld list lines; front end %s)", n, r < 0 ? "absent" : "told");
 }
+static void mtk_emu_prebuild(void);   // nvn_geometry.inc：宿主自跑任务 / 网格阶段的库按上一局清单开局后台先编
 static void warm_start(void) {
     if (g_warm_started++) return;
+    mtk_emu_prebuild();
     // 混合管线的随包首查预热（nvn_hybrid.inc hybrid_pkg_warm）：进程里第一次从 Metal 4 归档查中有一次性初始化，开局在后台付掉，不落在提交线程的第一次首遇上
     if (@available(macOS 26.0, iOS 26.0, *)) if (hybrid_on()) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ @autoreleasepool { if (@available(macOS 26.0, iOS 26.0, *)) hybrid_pkg_warm(); } });
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ pso_user_seen_load(); });   // the record's dedupe set, off the submit thread (pso_user_seen_load)
@@ -19455,6 +19494,17 @@ int mtl_grab_inflight(void) { return atomic_load(&g_grab_busy); }
 static uint64_t g_grab_tk;   // under g_pq_mu: ticket of the present whose texture is still being copied (0 = none); nvn_be_present_wait waits on it
 static uint64_t g_ext_cur;   // present thread: the external producer value ext_wait was given for the present being made (0 = none)
 static id<MTLSharedEvent> g_ext_ev;
+// 测试开关 DM_TEST_SHOT_OOM=1：下一张截图的命令缓冲当作报了 GPU 内存用满。单测直接写 g_test_shot_err（1 = 内存用满、2 = 挂死），用一次就清
+static _Atomic int g_test_shot_err = -1;
+static NSError *grab_test_err(NSError *e) {
+    int v = atomic_load(&g_test_shot_err);
+    if (v < 0) { int want = -1; const char *t = getenv("DM_TEST_SHOT_OOM"); v = t && atoi(t) ? 1 : 0; atomic_compare_exchange_strong(&g_test_shot_err, &want, v); }
+    if (!v) return e;
+    v = atomic_exchange(&g_test_shot_err, 0);
+    if (v == 1) return [NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorOutOfMemory userInfo:@{NSLocalizedDescriptionKey: @"Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)"}];
+    if (v == 2) return [NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorTimeout userInfo:@{NSLocalizedDescriptionKey: @"Caused GPU Hang Error (00000003:kIOGPUCommandBufferCallbackErrorHang)"}];
+    return e;
+}
 static void grab_present(id<MTLTexture> src, const int crop[4], CGSize sz, uint64_t ticket) {
     if (atomic_load(&g_grab_busy)) return;
     pthread_mutex_lock(&g_shotq_mu); void (^cb)(const uint8_t *, size_t, size_t, size_t) = g_grab_cb; g_grab_cb = nil; pthread_mutex_unlock(&g_shotq_mu);
@@ -19463,7 +19513,7 @@ static void grab_present(id<MTLTexture> src, const int crop[4], CGSize sz, uint6
     // S2Arm: the offscreen texture and readback buffer are kept for the next grab of the same size. The autoplayer asks about 20 times a second; a fresh full-window texture and buffer
     //   each time showed up as 707 of 1844 samples of the main thread in IOKit (Breath of the Wild, 10 s Time Profiler, botw_1025095845_2). Only the present path calls this (one thread)
     static id<MTLTexture> out; static id<MTLBuffer> buf;
-    if (!out || out.width != w || out.height != h) {
+    if (!out || !buf || out.width != w || out.height != h) {   // !buf：显存不足放掉后，上次只建成离屏图时也要重建
         MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:w height:h mipmapped:NO];
         d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate;
         out = w && h ? [g_dev newTextureWithDescriptor:d] : nil; buf = out ? [g_dev newBufferWithLength:row * h options:MTLResourceStorageModeShared] : nil; }
@@ -19482,7 +19532,11 @@ static void grab_present(id<MTLTexture> src, const int crop[4], CGSize sz, uint6
     [cb2 addCompletedHandler:^(id<MTLCommandBuffer> c) {
         pthread_mutex_lock(&g_pq_mu); g_grab_tk = 0; pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);   // the copy is done: src may be handed back (nvn_be_present_wait)
         // S2Arm: the bytes as they are (BGRA8, sRGB), valid during the call; the caller copies them once. buf stays ours until the callback returns
-        if (c.error) { if (!mtl_gpu_cb_error(c.error, "screenshot", 0)) MLOG("【红】 full-window screenshot: copy failed: %s", c.error.description.UTF8String); cb(NULL, 0, 0, 0); }
+        NSError *ce = grab_test_err(c.error);
+        // 截图是额外的一笔（一张离屏图 + 一块读回缓冲），它撞上 GPU 内存上限只丢这张图，不停整局：11-23 iPad 显存 98% 时自动快照取图报内存用满，整局安全停、快照也没存成。
+        //   游戏自己的命令缓冲再报内存用满，照旧当场安全停（#327）。这两个对象留着也是占显存：放掉，下一张再建（g_grab_busy 还是 1，出图线程碰不到）
+        if (ce && !mtl_gpu_halted() && gpu_err_only_oom(ce)) { static int said; if (said++ < 8) MLOG("【黄】 full-window screenshot: out of GPU memory, this picture is dropped and the game goes on"); out = nil; buf = nil; cb(NULL, 0, 0, 0); }
+        else if (ce) { if (!mtl_gpu_cb_error(ce, "screenshot", 0)) MLOG("【红】 full-window screenshot: copy failed: %s", ce.description.UTF8String); cb(NULL, 0, 0, 0); }
         else { g_fj_tok_now = tok; cb((const uint8_t *)bb.contents, w, h, row); g_fj_tok_now = 0; }
         atomic_store(&g_grab_busy, 0);
     }];
@@ -21067,10 +21121,11 @@ void mtl_wait_state_dump(void) {
           MLOG("wait points: upload batch seq %u NOT completed: committed after segment %llu (frame %llu), %d copies, %d GPU block decodes, %d textures", g_upb[i].seq, (unsigned long long)g_upb[i].after_seg,
                (unsigned long long)g_upb[i].frame, g_upb[i].blits, g_upb[i].decs, g_upb[i].texs);
       MLOG("wait points: segments handed %llu / completed %llu; frame now %llu, pass %llu, draws %llu", (unsigned long long)sent, (unsigned long long)done, (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)g_stat_pass, (unsigned long long)g_stat_draw); }
-    if (g_qw_ev) { id<MTLSharedEvent> e = (__bridge id<MTLSharedEvent>)g_qw_ev;
-        MLOG("wait points: queue waits on another queue's event %llu so far; the last (frame %llu) waits for event %p to reach %llu, it is at %llu now%s%s", (unsigned long long)g_qw_n, (unsigned long long)g_qw_frame,
-             g_qw_ev, (unsigned long long)g_qw_v, (unsigned long long)e.signaledValue, e.signaledValue < g_qw_v ? " -- NOT REACHED: the queue is held behind it" : "",
-             g_qw_ev == (__bridge void *)g_ev ? " (this layer's own fence event)" : g_qw_ev == (__bridge void *)g_ext_ev ? " (the external producer's event)" : ""); }
+    { os_unfair_lock_lock(&g_qw_mu); id<MTLSharedEvent> e = g_qw_ev; uint64_t qv = g_qw_v, qn = g_qw_n, qf = g_qw_frame; os_unfair_lock_unlock(&g_qw_mu);   // 取一份强引用再读（转储期间被换掉也不悬空）
+      if (e) { uint64_t at = e.signaledValue;
+        MLOG("wait points: queue waits on another queue's event %llu so far; the last (frame %llu) waits for event %p to reach %llu, it is at %llu now%s%s", (unsigned long long)qn, (unsigned long long)qf,
+             (__bridge void *)e, (unsigned long long)qv, (unsigned long long)at, at < qv ? " -- NOT REACHED: the queue is held behind it" : "",
+             e == g_ev ? " (this layer's own fence event)" : e == g_ext_ev ? " (the external producer's event)" : ""); } }
 }
 void nvn_be_alloc_stats(uint64_t *waits, uint64_t *grown, int *n) { *waits = g_alloc_waits; *grown = g_alloc_grown; *n = g_alloc_n; }   // Main submit allocator pool: how many times it waited, how many times it grew, how many exist now
 #include "nvn_session.inc"

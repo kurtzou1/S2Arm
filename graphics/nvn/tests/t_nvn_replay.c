@@ -49,6 +49,7 @@ static int g_flag_state_keep = 1, g_flag_rt_cont = 1, g_flag_clear_park = 1, g_f
 static int g_flag_pool_memo = 1;   // 用例设：开关 nvk_pool_memo 的值（缺省同产品：开）；备忘每 4096 次查找才重读一次，换值后要用 pm_flag() 推一下
 static int g_flag_land_merge = 1;  // 用例设：开关 nvk_land_merge 的值（缺省同产品：开）；每 256 次登记才重读一次，换值后要用 rp_test_gw_merge_reload() 推一下
 static int g_flag_buf_dirtylog = -1, g_dirtylog_dflt = -1;   // 用例设：开关 nvk_buf_dirtylog（-1 = 没设，取产品写的缺省；--dirtylog-off 整套以 0 跑一遍）。受跟踪的池都有替身日志，见「脏页追加日志替身」
+static int g_flag_land_noresync = -1;
 static int g_flag_vf_key = 1;      // 用例设：开关 nvk_vf_key 的值（缺省同产品：视图表按存储认视图）；每 256 次取视图重读一次，换值后要用 vf_push() 推一下
 static int g_flag_ub_steal = -1;   // 用例设：开关 nvk_ub_fill_steal（-1 = 缺省）；rp_draw 缓存它，换值后要 pass_fresh（会话重开清缓存）
 static int g_flag_split_pass = -1, g_flag_diag_load_dc, g_flag_diag_store_dc;   // 用例设：开关 nvk_split_pass（-1 = 缺省）、诊断开关 nvk_diag_load_dontcare / nvk_diag_store_dontcare
@@ -58,6 +59,7 @@ void s2a_direct_diag_frame(void) { g_diag_frames++; }
 int nvn_plat_flag(const char *name, int dflt) {
     if (!strcmp(name, "nvk_tex_reupload_diag")) return g_flag_tdiag;
     if (!strcmp(name, "nvk_buf_dirtylog")) return g_flag_buf_dirtylog < 0 ? dflt : g_flag_buf_dirtylog;
+    if (!strcmp(name, "nvk_land_noresync")) return g_flag_land_noresync < 0 ? dflt : g_flag_land_noresync;
     if (!strcmp(name, "pool_stats")) return g_flag_pool_stats;
     if (!strcmp(name, "nvk_spill")) return g_flag_spill;
     if (!strcmp(name, "nvk_pool_memo")) return g_flag_pool_memo;
@@ -543,7 +545,7 @@ static int g_pipe_rc; static const char *g_pipe_why;   // 替身建管线的返�
 static int g_pipe_gets, g_set_pipes, g_set_dyns, g_gdraws; static nvn_gpu_pipe_desc g_last_pdesc; static nvn_gpu_dyn g_last_dyn; static nvn_gpu_draw_args g_last_da;
 static struct { uint32_t stream; uint64_t off; } g_vb[4]; static int g_nvb;
 static nvn_gpu_binding g_fb[3][16]; static uint32_t g_nfb[3];
-static _Alignas(16) uint8_t g_arena[1 << 16]; static uint64_t g_arena_used; static struct nvn_gpu_buf_s g_arena_buf = { .bytes = sizeof g_arena, .cpu = g_arena };
+static _Alignas(16) uint8_t g_arena[1 << 18]; static uint64_t g_arena_used; static struct nvn_gpu_buf_s g_arena_buf = { .bytes = sizeof g_arena, .cpu = g_arena };
 nvn_gpu_rc nvn_gpu_pipe_get(const nvn_gpu_pipe_desc *d, int mode, nvn_gpu_pipe *out, nvn_gpu_err *err) { (void)mode; g_pipe_gets++; g_last_pdesc = *d; *out = g_pipe_rc ? NULL : &g_fpipe; if (err) { memset(err, 0, sizeof *err); err->rc.code = g_pipe_rc; if (g_pipe_rc && g_pipe_why) snprintf(err->why, sizeof err->why, "%s", g_pipe_why); } return (nvn_gpu_rc){g_pipe_rc}; }
 void nvn_gpu_set_pipe(nvn_gpu_cmd c, nvn_gpu_pipe p) { (void)c; (void)p; g_set_pipes++; }
 static struct nvn_gpu_pipe_s g_fcpipe;
@@ -607,7 +609,13 @@ nvn_gpu_rc nvn_gpu_arena_alloc(nvn_gpu_cmd c, uint64_t bytes, uint32_t align, nv
             memset(err->why,'X',sizeof err->why);char prefix[48];snprintf(prefix,sizeof prefix,"first-bind-outside-pass-%d ",g_arena697_fail);
             memcpy(err->why,prefix,strlen(prefix));err->why[sizeof err->why-1]=0; }
         return err->rc; }
-    g_arena_used = (g_arena_used + align - 1) / align * align; out->buf = &g_arena_buf; out->off = g_arena_used; out->cpu = g_arena + g_arena_used; out->va = 0; g_arena_used += bytes; return (nvn_gpu_rc){NVN_GPU_OK}; }
+    g_arena_used = (g_arena_used + align - 1) / align * align;
+    if (g_arena_used > sizeof g_arena || bytes > sizeof g_arena - g_arena_used) {
+        memset(out, 0, sizeof *out);
+        if (err) { memset(err, 0, sizeof *err); err->rc.code = NVN_GPU_E_OOM; }
+        return (nvn_gpu_rc){NVN_GPU_E_OOM};
+    }
+    out->buf = &g_arena_buf; out->off = g_arena_used; out->cpu = g_arena + g_arena_used; out->va = 0; g_arena_used += bytes; return (nvn_gpu_rc){NVN_GPU_OK}; }
 
 static const uint64_t *g_fake_occ; static uint32_t g_fake_nocc;   // 下一次完成时交给回调的各槽样本数
 static void fake_complete(uint32_t status) {
@@ -4854,6 +4862,97 @@ static void t_gpu_land_concurrent(void) {
     CHECK(bad == 0); CHECK(g_pmem[128] == 0xee && g_pmem[143] == 0xee);
     nvn_be_sub_commit(); fake_complete(NVN_GPU_DONE_OK); nvn_be_pool_del(g_pmem); g_pg_tracked = 1; g_buf_cpu_auto = 0; pass_fresh();
 }
+// 在开着的通道里解析两页。单段从锁外 memcpy 拷到一半时解析，另测两段
+// 在同一页内首尾拼接，以及一页未完全归 GPU 时必须同步的 CPU 字节。
+static void t_land_noresync(void) {
+    for (int log = 0; log < 2; log++) for (int scene = 0; scene < 4; scene++) {
+        pass_fresh(); g_buf_cpu_auto = g_pg_tracked = 1; g_flag_buf_dirtylog = log;
+        g_flag_land_noresync = scene == 0 ? 0 : -1;
+        g_log_fake_on = 1; g_log_fake_bad = 0; g_log_head = 0; g_log_ident++;
+        memset(g_log_unarmed, 0, sizeof g_log_unarmed);
+        g_block_mem = (uint8_t *)(((uintptr_t)g_block_arena + BLOCK_TEST_ALIGN - 1) & ~(uintptr_t)(BLOCK_TEST_ALIGN - 1));
+        memset(g_block_mem, 0x11, BLOCK_TEST_PAGES * PG); memset(g_block_gen, 0, sizeof g_block_gen);
+        g_dirty_now = 100; ++g_dirty_map; g_block_unreliable = 0;
+        const uint64_t base = (uint64_t)(uintptr_t)g_block_mem;
+        const size_t offset = 63 * PG, gpu_offset = offset + (scene == 3 ? PG / 2 : 0);
+        const size_t gpu_bytes = offset + 2 * PG - gpu_offset;
+        nvn_be_pool_add(g_block_mem, BLOCK_TEST_PAGES * PG);
+        nvn_be_sub_begin();
+        nvn_gpu_buf mirror = NULL;
+        CHECK(rp_buf_resolve(&g_fake_cmd, base, BLOCK_TEST_PAGES * PG, &mirror, NULL) && mirror && mirror->cpu);
+        if (!mirror || !mirror->cpu) return;
+        memset(mirror->cpu + gpu_offset, 0xd4, gpu_bytes);
+        struct land_args a = {0}; uint64_t id2 = 0;
+        a.id = rp_buf_gpu_write_note(base + gpu_offset, scene == 2 ? PG / 2 : gpu_bytes, &a.key);
+        CHECK(a.id && a.key == base);
+        if (scene == 2) {
+            id2 = rp_buf_gpu_write_note(base + gpu_offset + PG / 2, gpu_bytes - PG / 2, &a.key);
+            CHECK(id2 && id2 != a.id);
+        }
+        stream first = {0}; q_env(&first); q_draw(&first); end(&first); nvn_be_exec(first.b);
+        CHECK(g_pass_open);
+        // 落地前这两页已经可写，此次锁外 memcpy 不会另发新的脏页事件。
+        fake_log_write(63, 0x77); fake_log_write(64, 0x88);
+        g_log_unarmed[63] = g_log_unarmed[64] = 1;
+        pthread_t thread;
+        if (scene == 1) {
+            g_land_pause = 1; g_land_half = g_land_resume = 0;
+            int started = pthread_create(&thread, NULL, land_thread, &a);
+            CHECK(started == 0);
+            if (started) return;
+            pthread_mutex_lock(&g_land_mu);
+            while (!g_land_half) pthread_cond_wait(&g_land_cv, &g_land_mu);
+            pthread_mutex_unlock(&g_land_mu);
+            CHECK(g_block_mem[offset] == 0xd4 && g_block_mem[offset + PG] == 0x88);
+        }
+        const uint64_t sb = sync_bytes_now(); const int prot = g_protects;
+        uint64_t pf[RP_PERF_N]; rp_perf_take(pf);
+        g_nbw = 0;
+        nvn_gpu_buf actual = NULL;
+        CHECK(rp_buf_resolve(&g_fake_cmd, base + offset, 2 * PG, &actual, NULL) && actual == mirror);
+        rp_perf_take(pf);
+        const uint64_t moved = sync_bytes_now() - sb, cuts = pf[RP_PERF_P_CUT_XFER];
+        const uint64_t expected_bytes = scene == 0 ? 2 * PG : scene == 3 ? PG : 0;
+        const uint64_t expected_cuts = scene == 0 || scene == 3;
+        printf("land in-flight %s scene=%d moved=%llu cuts=%llu protects=%d expected=%llu/%llu\n",
+               log ? "log" : "plain", scene, (unsigned long long)moved, (unsigned long long)cuts,
+               g_protects - prot, (unsigned long long)expected_bytes, (unsigned long long)expected_cuts);
+        CHECK(moved == expected_bytes && cuts == expected_cuts);
+        CHECK(pf[RP_PERF_BUF_SYNC_GW_KB] == (2 * PG - expected_bytes) / 1024);
+        CHECK(expected_bytes || g_protects == prot);
+        CHECK(mirror->cpu[gpu_offset] == 0xd4 && mirror->cpu[offset + PG] == 0xd4);
+        if (log && scene == 1) {
+            CHECK(rp_buf_resolve(&g_fake_cmd, base + offset, 2 * PG, &actual, NULL));
+            rp_perf_take(pf);
+            CHECK(sync_bytes_now() == sb && pf[RP_PERF_BUF_SYNC_GW_KB] == 0);
+        }
+        if (scene == 3) {
+            CHECK(g_nbw && g_bw[g_nbw - 1].off == offset && g_bw[g_nbw - 1].len == PG / 2 &&
+                  g_bw[g_nbw - 1].head[0] == 0x77);
+        }
+        if (scene == 1) {
+            pthread_mutex_lock(&g_land_mu); g_land_resume = 1; pthread_cond_broadcast(&g_land_cv); pthread_mutex_unlock(&g_land_mu);
+            CHECK(pthread_join(thread, NULL) == 0); g_land_pause = 0;
+        } else {
+            rp_buf_gpu_write_land(a.key, a.id, 1);
+            if (id2) rp_buf_gpu_write_land(a.key, id2, 1);
+        }
+        CHECK(g_block_mem[gpu_offset] == 0xd4 && g_block_mem[offset + 2 * PG - 1] == 0xd4);
+        nvn_be_sub_commit(); fake_complete(NVN_GPU_DONE_OK);
+        nvn_be_sub_begin();
+        const uint64_t after = sync_bytes_now();
+        CHECK(rp_buf_resolve(&g_fake_cmd, base + offset, 2 * PG, &actual, NULL));
+        if (scene == 1 || scene == 2 || (log && scene == 3)) CHECK(sync_bytes_now() - after == 2 * PG);
+        fake_log_write(64, 0x6e);
+        nvn_be_sub_commit(); fake_complete(NVN_GPU_DONE_OK);
+        nvn_be_sub_begin();
+        CHECK(rp_buf_resolve(&g_fake_cmd, base + 64 * PG, PG, &actual, NULL) && actual->cpu[64 * PG] == 0x6e);
+        nvn_be_sub_commit(); fake_complete(NVN_GPU_DONE_OK);
+        nvn_be_pool_del(g_block_mem); g_block_mem = NULL;
+        g_flag_buf_dirtylog = g_dirtylog_dflt; g_flag_land_noresync = -1;
+        g_log_fake_on = g_buf_cpu_auto = 0; pass_fresh();
+    }
+}
 extern int rp_test_gw_live(void);
 static void t_gpu_land_count_cleanup(void) {
     pass_fresh(); g_buf_cpu_auto = 1; g_pg_tracked = 0;
@@ -5127,6 +5226,89 @@ static void put_bind(stream *s, uint32_t op, int stage, int index, uint64_t addr
     p_bind_buf *b = put(s, op, sizeof *b); b->stage = stage; b->index = index; b->addr = addr; b->size = size;
 }
 static void put_dispatch1(stream *s) { p_dispatch *dp = put(s, OP_DISPATCH, sizeof *dp); dp->x = 1; dp->y = 1; dp->z = 1; }
+
+// CBUF 声明长 64 KiB，设备上限更小时只拒绝超限的那笔。截取后的长度也用于池范围和镜像解析。
+static _Alignas(4096) uint8_t g_cbig[0x20000];
+static void t_cbuf_device_range(void) {
+    pass_fresh();
+    for (unsigned i = 0; i < sizeof g_cbig; i++) g_cbig[i] = (uint8_t)(i * 7u + (i >> 12));
+    nvn_be_pool_add(g_cbig, sizeof g_cbig);
+    const uint64_t base = (uint64_t)(uintptr_t)g_cbig;
+    const char *oversized = "uniform_buffer_exceeds_device_range";
+    const struct { uint64_t off, size, max_ubo, want; } cases[] = {
+        {0,       0x18000, 0x10000, 0x10000},   // 96 KiB → 64 KiB
+        {0x1000,  0x8000,  0x10000, 0x8000},    // 32 KiB 原样
+        {0x2000,  0x10000, 0x10000, 0x10000},   // 恰好 64 KiB
+        {0x10000, 0x18000, 0x10000, 0x10000},   // 只读的前 64 KiB 正好在池里
+        {0x3000,  0x18000, 0,       0x10000},   // 后端没有报告上限
+    };
+    for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        g_caps_max_ubo = cases[i].max_ubo;
+        rp_draw_reset();
+        g_arena_used = 0;
+        stream s = {0};
+        q_env(&s);
+        g_fprog.nent[0] = 1;
+        g_fprog.ent[0][0].cls = NVN_GPU_RES_UBO;
+        g_fprog.ent[0][0].src_kind = NVN_RB_CBUF;
+        g_fprog.ent[0][0].src_reg = 2;
+        put_bind(&s, OP_BIND_UBO, 0, 2, base + cases[i].off, cases[i].size);
+        q_draw(&s); end(&s);
+        const int draws = g_gdraws;
+        submit1(&s); fake_complete(NVN_GPU_DONE_OK);
+        CHECK(g_gdraws == draws + 1 && g_nfb[0] == 1 && g_fb[0][0].u.b.buf == &g_arena_buf);
+        CHECK(g_fb[0][0].u.b.len == cases[i].want);
+        CHECK(!memcmp(g_arena + g_fb[0][0].u.b.off, g_cbig + cases[i].off, (size_t)cases[i].want));
+    }
+    CHECK(nvn_unimpl_count("draw", oversized) == 0);
+    CHECK(nvn_unimpl_count("draw", "uniform_buffer_outside_pools") == 0);
+
+    g_caps_max_ubo = 0x4000;
+    rp_draw_reset();
+    g_arena_used = 0;
+    stream low = {0};
+    q_env(&low);
+    g_fprog.nent[0] = 1;
+    g_fprog.ent[0][0].cls = NVN_GPU_RES_UBO;
+    g_fprog.ent[0][0].src_kind = NVN_RB_CBUF;
+    g_fprog.ent[0][0].src_reg = 2;
+    put_bind(&low, OP_BIND_UBO, 0, 2, base + 0x4000, 0x18000);
+    q_draw(&low);
+    put_bind(&low, OP_BIND_UBO, 0, 2, base + 0x5000, 0x2000);
+    q_draw(&low); end(&low);
+    const int draws = g_gdraws;
+    submit1(&low); fake_complete(NVN_GPU_DONE_OK);
+    CHECK(nvn_unimpl_count("draw", oversized) == 1);
+    CHECK(g_gdraws == draws + 1 && g_fb[0][0].u.b.len == 0x2000);
+    CHECK(!memcmp(g_arena + g_fb[0][0].u.b.off, g_cbig + 0x5000, 0x2000));
+
+    // 首次派发通过 SSBO 写前段，第二次派发的超长 CBUF 应读仍在途的镜像。
+    g_caps_max_ubo = 0x10000;
+    rp_draw_reset();
+    g_arena_used = 0;
+    g_cresolves = g_cresolve_rc = g_ndisp = 0;
+    memset(&g_cprog, 0, sizeof g_cprog);
+    g_cprog.is_compute = 1;
+    g_cprog.sh[0] = &g_fsh[0];
+    g_cprog.nent[0] = 2;
+    ubop_ent(0, NVN_RB_UBOP, 2, NVN_GPU_ACC_RW);
+    g_cprog.ent[0][1] = (nvn_gpu_layout_ent){.cls = NVN_GPU_RES_UBO, .src_kind = NVN_RB_CBUF, .src_reg = 3};
+    stream compute = {0};
+    put_bind(&compute, OP_BIND_UBO, 5, 2, base + 0x4000, 0x10000);
+    put_bind(&compute, OP_BIND_UBO, 5, 3, base, 0x2000);
+    put_dispatch1(&compute);
+    put_bind(&compute, OP_BIND_UBO, 5, 3, base + 0x4000, 0x18000);
+    put_dispatch1(&compute);
+    end(&compute);
+    submit1(&compute);
+    CHECK(g_ndisp == 2 && g_ncb == 2);
+    CHECK(g_cb[1].u.b.buf && g_cb[1].u.b.buf == g_cb[0].u.b.buf);
+    CHECK(g_cb[1].u.b.off == 0x4000 && g_cb[1].u.b.len == 0x10000);
+    fake_complete(NVN_GPU_DONE_OK);
+    g_caps_max_ubo = 0;
+    g_arena_used = 0;
+    pass_fresh();
+}
 
 // #1022 / #697：计算派发写了池里一段（还没落地）之后，同一次提交里 CPU 改 / 拷游戏内存的三条命令和常量缓冲读取要按 GPU 顺序看到它。
 // 池 g_pmem 起手全 0x11；派发把统一缓冲槽 2 那段 W = [2*PG+32, +96) 当可写存储缓冲（登记一次 GPU 写）。之后同一次提交：
@@ -7621,11 +7803,13 @@ static void t_pool_stats_shutdown(void) {
 int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "--dirtylog-off")) { g_dirtylog_dflt = g_flag_buf_dirtylog = 0; argc--; argv++; }   // 关那一档：整套用例走逐页退回路径
 #ifdef S2A_GPU_LAND_TEST
+    if (argc > 1 && !strcmp(argv[1], "--land-noresync")) { t_land_noresync(); printf("land noresync: %d checks, %d failures\n", g_checks, g_fail); return g_fail != 0; }
     if (argc > 1 && !strcmp(argv[1], "--gpu-land-count")) { t_gpu_land_count_cleanup(); printf("gpu land count: %d checks, %d failures\n", g_checks, g_fail); return g_fail != 0; }
     if (argc > 1 && !strcmp(argv[1], "--gpu-land-destroy")) { t_gpu_land_destroy(); printf("gpu land destroy: %d checks, %d failures\n", g_checks, g_fail); return g_fail != 0; }
     if (argc > 1 && !strcmp(argv[1], "--gpu-land")) { t_gpu_land_concurrent(); printf("gpu land: %d checks, %d failures\n", g_checks, g_fail); return g_fail != 0; }
     if (argc > 1 && !strcmp(argv[1], "--gpu-land-merge")) { t_gpu_land_merge(); printf("gpu land merge: %d checks, %d failures\n", g_checks, g_fail); return g_fail != 0; }
 #endif
+    if (argc > 1 && !strcmp(argv[1], "--cbuf-device-range")) { t_cbuf_device_range(); printf("CBUF range: %d checks, %d failures\n", g_checks, g_fail); return g_fail != 0; }
     if (argc > 1 && !strcmp(argv[1], "--sync-reuse")) { t_sync_reuse_after_gpu_write(); printf("sync reuse: %d checks, %d failures\n", g_checks, g_fail); return g_fail != 0; }
     t_invalidated_attachment_pin();
     t_registered_view_pin();
@@ -7673,6 +7857,7 @@ int main(int argc, char **argv) {
 #ifdef S2A_GPU_LAND_TEST
     t_gpu_land_concurrent();
     t_gpu_land_destroy();
+    t_land_noresync();
     t_gpu_land_count_cleanup();
     t_gpu_land_merge();
 #endif
@@ -7719,6 +7904,7 @@ int main(int argc, char **argv) {
     t_dispatch_barrier();
     t_dispatch_indirect_gpu();
     t_dispatch_ubop_rw(); t_bufops_gpu_order();
+    t_cbuf_device_range();
     t_dispatch_spill();
     t_dispatch_ubop_ro_skip();
     t_compute_image();

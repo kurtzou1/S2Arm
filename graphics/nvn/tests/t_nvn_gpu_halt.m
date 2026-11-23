@@ -16,6 +16,11 @@
 //      「开始早于提交」计数 = 100（期望按构造手算）
 //   ⓪c 一帧 10 段同队列排队、回报的开始都是第一段开始那一刻（跨度层层包含）：跨度和 3.3 秒、独占 600 ms → 不停；
 //      两段首尾相接各 0.6 秒 → 独占 1.2 秒 → 慢帧记一次（独占没把真活算少；不停）
+//   ⑤ 截图的显存不足不停整局：照 11-23 iPad 那局的错误结构。判定：只有 OutOfMemory（Metal 4 嵌套 / Metal 3 错误码 8）算；同时带 Hang 的、单独的 Hang / 超时 / 牵连都不算。
+//      流程走真实截图入口（grab_present + nvn_snap_grab）：截图命令缓冲报内存用满 → nvn_snap_grab 回 -1、不写文件、不安全停、不通知宿主；下一张截图照常取到、写出文件
+//   ⑥ 负对照：截图命令缓冲报挂死 → 照旧安全停、通知宿主
+//   ⑦ 快照读回显卡内容读不成（这里用安全停造出「命令缓冲没交」）：snap_dump_tex 记一次 g_fr_read_lost（nvn_snap_save_body 据此判这份快照没存成，不拿缺贴图的新快照盖旧的）；负对照：正常读回不记、存下 1 张
+//      反证：去掉 grab_present 里显存不足那一支 → ⑤ 红（安全停）；nvn_snap_grab 不判空 → ⑤ 回 0、写空文件；fr_blit_planes 换回 cb_run && !cb.error → ⑦ 红
 #include "../gfx/nvn/nvn_mtl.m"
 #include "s2a_t_result.h"
 
@@ -41,6 +46,15 @@ static int legacy_judge(NSError *e) {   // 原 s2a_gpu_timeout_check 的判法�
     return d && (strstr(d, "kIOGPUCommandBufferCallbackErrorTimeout") || strstr(d, "kIOGPUCommandBufferCallbackErrorHang"));
 }
 
+// 走真实入口取一张：另一条线程调 nvn_snap_grab（请求后等回调），这边像出图线程那样反复过 grab_present
+static int grab_driven(id<MTLTexture> src, const char *path) {
+    __block int rc = 99; dispatch_semaphore_t s = dispatch_semaphore_create(0); char *pp = strdup(path);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{ rc = nvn_snap_grab(pp); dispatch_semaphore_signal(s); });
+    int crop[4] = {0, 0, 64, 64};
+    for (int i = 0; i < 6000; i++) { grab_present(src, crop, CGSizeMake(64, 64), 1); if (!dispatch_semaphore_wait(s, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_MSEC))) { free(pp); return rc; } }
+    return 98;   // 超时：那条线程可能还在用 pp，不放
+}
+static long file_size(const char *p) { struct stat st; return stat(p, &st) ? -1 : (long)st.st_size; }
 int main(void) {
     @autoreleasepool {
         char map[] = "/tmp/t_gpu_halt_map_XXXXXX"; int fd = mkstemp(map); if (fd < 0) return 2; close(fd); setenv("DM_NVN_SHMAP", map, 1);
@@ -50,6 +64,44 @@ int main(void) {
         NSError *victim = mtl4_err(1, @"Discarded (victim of GPU error/recovery) (00000005:kIOGPUCommandBufferCallbackErrorInnocentVictim)", 5);
         NSError *ignored = mtl4_err(5, @"Ignored (for causing prior/excessive GPU errors) (00000004:kIOGPUCommandBufferCallbackErrorSubmissionsIgnored)", 4);
         NSError *m3_to = [NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorTimeout userInfo:nil];
+        {   // ⑤ ⑥ ⑦ 放在最前面，这时设备干净、没停过
+            NSError *o4 = mtl4_err(1, @"Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)", 8);
+            NSError *o3 = [NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorOutOfMemory userInfo:nil];
+            NSError *mix = [NSError errorWithDomain:@"MTL4CommandQueueErrorDomain" code:1 userInfo:@{@"NSMultipleUnderlyingErrorsKey": @[o4, hang]}];
+            NSError *real = [NSError errorWithDomain:MTLCommandBufferErrorDomain code:8 userInfo:@{NSLocalizedDescriptionKey: @"Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)", NSUnderlyingErrorKey: [NSError errorWithDomain:@"IOGPUCommandQueueErrorDomain" code:8 userInfo:nil]}];   // 11-23 iPad 那局的原文结构
+            NSError *to_oom = [NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorTimeout userInfo:@{NSUnderlyingErrorKey: o4}];   // 外层错误码是超时、原因名是内存用满：以原因名为准
+            NSError *ig_oom = [NSError errorWithDomain:@"MTL4CommandQueueErrorDomain" code:1 userInfo:@{@"NSMultipleUnderlyingErrorsKey": @[o4, ignored]}];
+            VERIFY(gpu_err_only_oom(o4) && gpu_err_only_oom(o3) && gpu_err_only_oom(real) && gpu_err_only_oom(to_oom), "⑤ 只有内存用满：Metal 4 嵌套、Metal 3 错误码 8、真机原文结构、外层超时里层内存用满都算");
+            VERIFY(!gpu_err_only_oom(ig_oom), "⑤ 内存用满同链带被拒收：不算（照旧安全停）");
+            VERIFY(!gpu_err_only_oom(mix) && !gpu_err_only_oom(hang) && !gpu_err_only_oom(victim) && !gpu_err_only_oom(m3_to), "⑤ 带挂死的、单独挂死 / 牵连 / 超时都不算");
+            MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:64 height:64 mipmapped:NO];
+            td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModePrivate;
+            id<MTLTexture> src = [g_dev newTextureWithDescriptor:td];
+            char p[512]; snprintf(p, sizeof p, "%s/t_gpu_halt_shot.%d.png", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp", getpid()); unlink(p);
+            atomic_store(&g_test_shot_err, 1); int r1 = grab_driven(src, p); long z1 = file_size(p); int h1 = mtl_gpu_halted(), n1 = g_notified;
+            VERIFY(r1 == -1 && z1 < 0, "⑤ 截图报内存用满：nvn_snap_grab 回 %d（期望 -1）、文件 %ld 字节（期望没有 = -1）", r1, z1);
+            VERIFY(!h1 && !n1, "⑤ 截图报内存用满：安全停 %d、通知宿主 %d 次（期望 0、0）", h1, n1);
+            atomic_store(&g_gpu_halt, 0); g_notified = 0; unlink(p);
+            int r2 = grab_driven(src, p); long z2 = file_size(p);
+            VERIFY(r2 == 0 && z2 > 0, "⑤ 下一张截图照常：回 %d（期望 0）、文件 %ld 字节（期望 > 0）", r2, z2); unlink(p);
+            atomic_store(&g_test_shot_err, 2); (void)grab_driven(src, p); int h3 = mtl_gpu_halted(), n3 = g_notified;
+            VERIFY(h3 && n3 == 1 && strstr(g_note, "screenshot"), "⑥ 负对照：截图报挂死 → 安全停 %d、通知 %d 次（期望 1、1）", h3, n3);
+            unlink(p);
+            FILE *tf = tmpfile(); uint64_t bytes = 0; g_fr_read_lost = 0;
+            int r4 = snap_dump_tex(tf, 1, src, &bytes);   // 此刻还在 ⑥ 的安全停里：命令缓冲不交
+            int lost = g_fr_read_lost;
+            VERIFY(r4 == 0 && lost == 1, "⑦ 读回没读成：存 %d 张（期望 0）、记没读成 %d 次（期望 1）", r4, lost);
+            atomic_store(&g_gpu_halt, 0); g_notified = 0; g_note[0] = 0; g_fr_read_lost = 0;
+            int r5 = snap_dump_tex(tf, 2, src, &bytes);
+            VERIFY(r5 == 1 && g_fr_read_lost == 0, "⑦ 负对照：正常读回存 %d 张（期望 1）、记没读成 %d 次（期望 0）", r5, g_fr_read_lost);
+            NSError *rv = victim; g_fr_read_lost = 0;
+            int c0 = fr_read_check(1, nil), l0 = g_fr_read_lost, c1 = fr_read_check(1, o3), l1 = g_fr_read_lost, c2 = fr_read_check(1, rv), l2 = g_fr_read_lost, c3 = fr_read_check(0, nil), l3 = g_fr_read_lost;
+            VERIFY(c0 == 1 && l0 == 0 && !c1 && l1 == 1 && !c2 && l2 == 2 && !c3 && l3 == 3, "⑦ 读回结果：成功不记（%d）、内存用满记（%d）、被牵连记（%d）、没交记（%d）（期望 0、1、2、3）", l0, l1, l2, l3);
+            uint64_t by0 = bytes; g_fr_read_lost = 1; g_fr_read_stop = 1;
+            int r6 = snap_dump_tex(tf, 3, src, &bytes); g_fr_read_stop = 0;
+            VERIFY(r6 == 0 && bytes == by0 && g_fr_read_lost == 1, "⑦ 这次存档已有没读成的：后面的贴图不再读回（存 %d 张、多写 %llu 字节，期望 0、0）", r6, (unsigned long long)(bytes - by0));
+            g_fr_read_lost = 0; fclose(tf);
+        }
         NSError *m3_pf = [NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorPageFault userInfo:nil];
         NSError *m3_victim = [NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorTimeout userInfo:@{NSUnderlyingErrorKey:
             [NSError errorWithDomain:@"IOGPUCommandQueueErrorDomain" code:5 userInfo:@{NSLocalizedDescriptionKey: @"Discarded (victim of GPU error/recovery) (00000005:kIOGPUCommandBufferCallbackErrorInnocentVictim)"}]}];

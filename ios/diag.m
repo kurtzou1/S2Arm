@@ -10,6 +10,7 @@
 //   脱敏：App 数据目录 / 安装目录换成 <APP> / <BUNDLE>，设备名、UDID 去掉；存档（bis/user/save）、资源包、密钥都不放。
 //   交出（11-13 起）：入口②③④是「上传给开发者」——传到 diag.s2arm.com，玩家拿到短码、只复制短码；上传失败退回系统分享面板（AirDrop / 存到文件 / 微信）。
 //         入口①仍直接弹分享面板。包同时留在 Documents/diag/（只留最近 3 个，Mac 前端「拉回诊断」能拉到）。
+#include <dlfcn.h>
 #import <UIKit/UIKit.h>
 #include "s2a_docs.h"   // s2a_container_docs：容器文档根（Apple TV 在 Library/Caches/S2Arm）
 #import "s2a_l10n.h"
@@ -236,6 +237,9 @@ static void build_async(void (^done)(NSURL *zip, NSString *err)) {
     g_exporting = YES;
     [NSNotificationCenter.defaultCenter postNotificationName:@"S2ADiagExportChanged" object:nil];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        // 打包前记一份游戏线程表（同崩溃现场那份 s2a_thread_dump：各线程停在哪个系统调用 / 等什么地址 / 客体回溯）。游戏照跑：表只拿全局锁、逐条短暂停住在跑的线程读寄存器。
+        //   #2130：卡在加载界面、画面照常出、游戏线程空着——出帧不停，停住现场（开发设施）也不起，玩家包里原先拿不到任何线程状态
+        { void (*td)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "s2a_thread_dump"); if (td) { LOG("诊断包：打包前的游戏线程表（游戏照跑）："); td(); } }
         NSString *err = nil; NSURL *zip = nil; unsigned long long sz = 0;
         struct { NSUInteger cap; BOOL slim; } tiers[] = {{8u << 20, NO}, {4u << 20, YES}, {1u << 20, YES}};
         for (int i = 0; i < 3; i++) {
@@ -415,15 +419,15 @@ void s2a_diag_report(void) {
     present_over(host, a);
 }
 void s2a_shell_report_problem(void) { s2a_diag_report(); }   // 游戏库设置页「故障报修」（shell/Sources/S2ArmShellBridge/include/s2a_shell.h，壳里有空的弱定义）
-// 页面左上角的小齿轮（加载页 / 提示页 / 帮助页；游戏中用虚拟按键自己的齿轮、游戏库用库界面的齿轮）：菜单最下面「故障报修」
+// 页面左上角的「故障报修」按钮（加载页 / 提示页 / 帮助页；游戏中用虚拟按键里齿轮旁那颗、游戏库用库设置里的）：点一下直接报修。
+//   原先是一颗齿轮、菜单里只有「故障报修」一项，玩家认不出它能报修（11-23 维护者：卡在加载页「这个页面咋没有故障报修按钮」）；
+//   改成与游戏内同一颗按钮（11-19 定：从齿轮菜单里拿出来），图标同 vpad.m _reportBtn
 void s2a_report_gear_attach(UIView *page) {
     if (!page) return;
-    UIButton *g = [UIButton buttonWithType:UIButtonTypeSystem]; g.accessibilityIdentifier = @"page.gear"; g.accessibilityLabel = S2AL(@"diag.report.title");
-    [g setImage:[UIImage systemImageNamed:@"gearshape.fill"] forState:UIControlStateNormal]; g.tintColor = UIColor.whiteColor;
+    UIButton *g = [UIButton buttonWithType:UIButtonTypeSystem]; g.accessibilityIdentifier = @"page.report"; g.accessibilityLabel = S2AL(@"diag.report.title");
+    [g setImage:[UIImage systemImageNamed:@"exclamationmark.bubble.fill"] forState:UIControlStateNormal]; g.tintColor = UIColor.whiteColor;
     g.backgroundColor = [UIColor colorWithWhite:0 alpha:0.45]; g.layer.cornerRadius = 18; g.alpha = 0.9; g.translatesAutoresizingMaskIntoConstraints = NO;
-    g.showsMenuAsPrimaryAction = YES;
-    g.menu = [UIMenu menuWithTitle:@"" children:@[[UIAction actionWithTitle:S2AL(@"diag.report.title") image:[UIImage systemImageNamed:@"exclamationmark.bubble"] identifier:nil
-        handler:^(__unused UIAction *x) { dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ s2a_diag_report(); }); }]]];
+    [g addAction:[UIAction actionWithHandler:^(__unused UIAction *x) { s2a_diag_report(); }] forControlEvents:UIControlEventTouchUpInside];
     [page addSubview:g];
     [NSLayoutConstraint activateConstraints:@[[g.widthAnchor constraintEqualToConstant:36], [g.heightAnchor constraintEqualToConstant:36],
         [g.leadingAnchor constraintEqualToAnchor:page.safeAreaLayoutGuide.leadingAnchor constant:12], [g.topAnchor constraintEqualToAnchor:page.safeAreaLayoutGuide.topAnchor constant:12]]];

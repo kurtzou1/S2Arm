@@ -3503,8 +3503,39 @@ static int pace_follow_take(const win_t *o) {   // 用一次就清：两次上�
     if (atomic_load_explicit(&g_pace_follow[k].w, memory_order_acquire) != (const void *)o) return 0;
     return atomic_exchange_explicit(&g_pace_follow[k].follow, 0, memory_order_relaxed);
 }
+// 即时存档恢复后，窗口对象里的节拍时刻（avail[] / pace）从现在重新起算。它们是存档那个进程读的单调钟（开机以来的纳秒），跟着游戏内存进快照、
+//   原样回来。同一次开机里恢复，这些时刻已经过去，取图不用等、节拍器也照「落后一个周期以上」重新起拍，清不清结果一样；设备重启后单调钟从零起，
+//   它们成了几十小时以后，取图里「睡到可取用时刻」（sleep_until_ns）一睡不醒：游戏画完恢复后的第一帧就停住，声音照常
+//   （11-23 iPad：存档时开机 61.1 小时，重启后第 536 秒读档，出帧线程停在 mach_wait_until，截止 = 开机后 219956 秒）。
+//   窗口对象没有登记表，读档那一刻找不到它们：读档只抬一个代数，窗口在这一代里第一次取图 / 上屏时清。旁挂小表记「这一代清过的窗口」，
+//   理由同 g_pace_follow（win_t 在游戏内存里、登记了即时存档的布局指纹，不加字段）。没读过档的进程代数是 0，进来就返回
+static _Atomic uint64_t g_win_clock_gen;
+static struct { _Atomic(const void *) w; _Atomic uint64_t gen; } g_win_clock[8];
+static pthread_mutex_t g_win_clock_mu = PTHREAD_MUTEX_INITIALIZER;   // 清和登记串行：取图、上屏可以在两条线程上，后到的要等先到的清完才读
+void hle_snap_win_clock_restored(void) { atomic_fetch_add_explicit(&g_win_clock_gen, 1, memory_order_release); }   // hle_snap_restore 调；单测直接调
+static void win_clock_fresh(win_t *o) {
+    uint64_t g = atomic_load_explicit(&g_win_clock_gen, memory_order_acquire); if (!g) return;
+    for (int k = 0; k < 8; k++) if (atomic_load_explicit(&g_win_clock[k].w, memory_order_acquire) == (const void *)o && atomic_load_explicit(&g_win_clock[k].gen, memory_order_acquire) == g) return;
+    pthread_mutex_lock(&g_win_clock_mu);
+    int at = -1, empty = -1;
+    for (int k = 0; k < 8; k++) { const void *w = atomic_load_explicit(&g_win_clock[k].w, memory_order_relaxed); if (w == (const void *)o) { at = k; break; } if (!w && empty < 0) empty = k; }
+    if (at < 0) at = empty >= 0 ? empty : (int)(((uintptr_t)o >> 4) & 7);   // 表满（8 个以上活窗口交替用）：按地址挤掉一个，被挤的下次再清一遍（多一帧不受节拍限制）
+    if (atomic_load_explicit(&g_win_clock[at].w, memory_order_relaxed) != (const void *)o || atomic_load_explicit(&g_win_clock[at].gen, memory_order_relaxed) != g) {
+        static double back = -1; if (back < 0) { const char *e = getenv("DM_TEST_SNAP_CLOCK_BACK"); back = e ? atof(e) : 0; if (back < 0) back = 0; }
+        // 测试开关 DM_TEST_SNAP_CLOCK_BACK=<秒>：把读回来的时刻往后拨这么多，等于「单调钟比存档时小了这么多秒」（设备重启过）。产品里不设。
+        //   下面紧接着就清零，所以在这份代码上它只改日志里那个读数（确认恢复路径看到了未来的时刻）；要复现卡死，去掉清零那一行再跑
+        if (back > 0) { uint64_t d = (uint64_t)(back * 1e9); for (int i = 0; i < 4; i++) if (o->avail[i]) o->avail[i] += d; if (o->pace) o->pace += d; }
+        uint64_t now = now_ns(), mx = o->pace; for (int i = 0; i < 4; i++) if (o->avail[i] > mx) mx = o->avail[i];
+        if (mx) LOG("即时存档恢复：窗口 %p 的节拍时刻是存档进程的钟，最晚的一个%s %.3f 秒，清掉、从现在重新起拍", (void *)o, mx > now ? "在这之后" : "已过去", (mx > now ? mx - now : now - mx) / 1e9);   // 全 0 = 读档后才建的窗口，不报
+        memset(o->avail, 0, sizeof o->avail); o->pace = 0;
+        // 先清、再写窗口、最后写代数（都带 release）：快路径先读窗口再读代数，读到「是我、是这一代」时清零一定已经可见（空槽 / 同一窗口新一代 / 挤掉别人三种都成立）
+        atomic_store_explicit(&g_win_clock[at].w, (const void *)o, memory_order_release); atomic_store_explicit(&g_win_clock[at].gen, g, memory_order_release);
+    }
+    pthread_mutex_unlock(&g_win_clock_mu);
+}
 NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsync *s, int *idx) {
     win_t *o = (win_t *)w;
+    win_clock_fresh(o);   // 读档后第一次取图前清
     int nact = __atomic_load_n(&o->nactive, __ATOMIC_RELAXED);
     if (nact <= 0) { static int n; if (n++ < 4) LOG("【红】 [nvn] WindowAcquireTexture: the window has no active texture (%d of %d): no texture handed out", nact, o->ntex); *idx = -1; return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_NATIVE_ERROR; }
     *idx = (int)((unsigned)__atomic_fetch_add(&o->next, 1, __ATOMIC_RELAXED) % (unsigned)nact);
@@ -4208,6 +4239,7 @@ static void fstep_tick(const win_t *o) {
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     if (dm_gfx_session_stopping()) return;
     win_t *o = (win_t *)w; o->presents++; nat_itv_sync(o);
+    win_clock_fresh(o);   // 读档后没取图先上屏（读档前已取在手里的那张）同样先清，不然节拍器拿旧目标排槽
     if (q) { pthread_mutex_lock(&g_sub_mu); nvn_be_xq_flush(q, "a present on it"); pthread_mutex_unlock(&g_sub_mu); }   // 上屏排在这条队列的工作后面：停在跨队列等待上的部分先放行（nvn_xqueue.inc）
     nvn_be_set_present_lower_left(o->present_ll);   // 这扇窗口建时的原点定上屏翻转（见 nvnWindowInitialize）
     if (q && dev_ok(((queue_t *)q)->dev) && atomic_load(&g_cur_dev) != ((queue_t *)q)->dev) { pthread_mutex_lock(&g_sub_mu); dev_follow(((queue_t *)q)->dev); pthread_mutex_unlock(&g_sub_mu); }   // 上屏翻转跟上屏队列的设备
@@ -6108,6 +6140,7 @@ int hle_snap_save(FILE *f) {
 static uint64_t *g_snap_ft_ser; static uint64_t g_snap_nft;   // 恢复时：CPU 后填贴图的序号（nvn_snap.inc 按地址表找到对象后再登记）
 int hle_snap_restore(FILE *f) {
     uint32_t mg; if (hs_r(f, &mg, 4) || mg != 0x31534C48u) return -1;
+    hle_snap_win_clock_restored();
     pthread_mutex_lock(&g_dpool_mu);
     int nt, ns; int e = hs_r(f, &nt, 4);
     while (!e && g_cap_tpb < nt) e |= dpool_grow(&g_tpb, &g_cap_tpb) ? -1 : 0;

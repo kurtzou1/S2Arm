@@ -1981,13 +1981,15 @@ static int diag_compile_test(void) {
     printf("compile diagnostic: %d checks, %d failures\n", checks, failures); return failures ? 1 : 0;
 }
 
-static int live_compile_thread_test(void) {
-    fixture_live_compile = -1;   // simulate an unset property and exercise the production default
+static int live_compile_thread_test(int asynchronous) {
+    fixture_live_compile = asynchronous ? 1 : -1;   // explicit opt-in or an unset property
     fixture_live_slots = 2;
     CHECK(nvk_shader_open() == 0, "open shader session");
     struct s2a_compile_worker_stats slots;
     s2a_compile_worker_stats(&slots);
-    CHECK(slots.slots == 2, "session passes its configured slot count to the compiler worker");
+    const unsigned expected_slots = asynchronous ? 2 : 0;
+    CHECK(slots.slots == expected_slots, "%s must start %u compiler workers (got %u)",
+          asynchronous ? "explicit async opt-in" : "unset async property", expected_slots, slots.slots);
     rp_state_reset(); source(); bind_pools(64);
     fake_array_count = 64;
     fake_cs_success = 1;
@@ -1996,21 +1998,25 @@ static int live_compile_thread_test(void) {
     int rc = rp_shader_resolve(&q, &graphics);
     CHECK(rc == 0 && graphics && !graphics->is_compute && compiler_calls == 1,
           "graphics first use publishes the real compiled program (rc=%d calls=%d)", rc, compiler_calls);
-    if (compiler_calls == 1)
-        CHECK(!pthread_equal(last_compiler_thread, pthread_self()),
-              "graphics live compiler ran on the submitting thread");
+    if (compiler_calls == 1) {
+        const int on_submit = pthread_equal(last_compiler_thread, pthread_self()) != 0;
+        CHECK(on_submit == !asynchronous, "graphics live compiler %s on the submitting thread",
+              on_submit ? "ran" : "did not run");
+    }
     rc = rp_shader_resolve_compute(&compute);
     CHECK(rc == 0 && compute && compute->is_compute && compiler_calls == 2,
           "compute first use publishes the real compiled program (rc=%d calls=%d)", rc, compiler_calls);
-    if (compiler_calls == 2)
-        CHECK(!pthread_equal(last_compiler_thread, pthread_self()),
-              "compute live compiler ran on the submitting thread");
+    if (compiler_calls == 2) {
+        const int on_submit = pthread_equal(last_compiler_thread, pthread_self()) != 0;
+        CHECK(on_submit == !asynchronous, "compute live compiler %s on the submitting thread",
+              on_submit ? "ran" : "did not run");
+    }
     CHECK(rp_shader_resolve(&q, &again) == 0 && again == graphics && compiler_calls == 2,
           "second graphics lookup reuses the published program");
     CHECK(rp_shader_resolve_compute(&again) == 0 && again == compute && compiler_calls == 2,
           "second compute lookup reuses the published program");
     nvk_shader_stop(); rp_shader_reset(); s2a_source_clear();
-    printf("live-compile-thread checks=%d failures=%d\n", checks, failures);
+    printf("live-compile-%s checks=%d failures=%d\n", asynchronous ? "thread" : "default", checks, failures);
     return failures ? 1 : 0;
 }
 
@@ -2075,7 +2081,8 @@ static int live_compile_pending_test(int stop) {
 }
 
 int main(int argc, char **argv) {
-    if (argc == 2 && !strcmp(argv[1], "--live-compile-thread")) return live_compile_thread_test();
+    if (argc == 2 && !strcmp(argv[1], "--live-compile-default")) return live_compile_thread_test(0);
+    if (argc == 2 && !strcmp(argv[1], "--live-compile-thread")) return live_compile_thread_test(1);
     if (argc == 2 && !strcmp(argv[1], "--live-compile-pending")) return live_compile_pending_test(0);
     if (argc == 2 && !strcmp(argv[1], "--live-compile-stop")) return live_compile_pending_test(1);
     if (argc == 2 && !strcmp(argv[1], "--diag-compile")) return diag_compile_test();

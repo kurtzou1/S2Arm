@@ -32,21 +32,29 @@ def write(path, text):
 class LdnEnvTests(unittest.TestCase):
     def test_default_and_explicit_auto_preserve_legacy_environment(self):
         self.assertEqual(community.ldn_env({}), {})
-        self.assertEqual(community.ldn_env({"ldnMode": "auto", "ldnHost": True}), {})
+        self.assertEqual(community.ldn_env({"ldnMode": "auto", "ldnHost": True}),
+                         {"S2A_LDN_AUTO": "1", "S2A_LDN_MITM": "0"})
+        self.assertEqual(community.ldn_env({"ldnMode": "auto"}, {"S2A_LDN_SERVER": "10.0.0.5"}),
+                         {"S2A_LDN_AUTO": "0", "S2A_LDN_MITM": "0"})
 
     def test_manual_host_and_client(self):
         self.assertEqual(community.ldn_env({"ldnMode": "manual", "ldnHost": True}),
-                         {"S2A_LDN_SERVER": "127.0.0.1", "S2A_LDN_RELAY": "1", "S2A_LDN_LISTEN": "0.0.0.0"})
+                         {"S2A_LDN_AUTO": "0", "S2A_LDN_MITM": "0",
+                          "S2A_LDN_SERVER": "127.0.0.1", "S2A_LDN_RELAY": "1", "S2A_LDN_LISTEN": "0.0.0.0"})
         self.assertEqual(community.ldn_env({"ldnMode": "manual", "ldnAddress": " 192.168.1.21 "}),
-                         {"S2A_LDN_SERVER": "192.168.1.21", "S2A_LDN_RELAY": "0"})
+                         {"S2A_LDN_AUTO": "0", "S2A_LDN_MITM": "0",
+                          "S2A_LDN_SERVER": "192.168.1.21", "S2A_LDN_RELAY": "0"})
         self.assertEqual(community.ldn_env({"ldnMode": "manual", "ldnAddress": ""}),
-                         {"S2A_LDN_SERVER": "0.0.0.0", "S2A_LDN_RELAY": "0"})
+                         {"S2A_LDN_AUTO": "0", "S2A_LDN_MITM": "0",
+                          "S2A_LDN_SERVER": "0.0.0.0", "S2A_LDN_RELAY": "0"})
 
     def test_switch_mode_only_enables_ldn_mitm(self):
-        # 「与 Switch 联机」只开 ldn_mitm，不混入中继变量；其余模式不开它（缺省不变）
-        self.assertEqual(community.ldn_env({"ldnMode": "switch", "ldnHost": True, "ldnAddress": "192.168.1.21"}), {"S2A_LDN_MITM": "1"})
+        # 「与 Switch 联机」只开 ldn_mitm，不混入中继变量；其余模式显式关掉强制开关
+        self.assertEqual(community.ldn_env({"ldnMode": "switch", "ldnHost": True, "ldnAddress": "192.168.1.21"}),
+                         {"S2A_LDN_AUTO": "0", "S2A_LDN_MITM": "1"})
         for s in ({}, {"ldnMode": "auto"}, {"ldnMode": "manual", "ldnHost": True}):
-            self.assertNotIn("S2A_LDN_MITM", community.ldn_env(s))
+            env = community.ldn_env(s)
+            self.assertNotEqual(env.get("S2A_LDN_MITM"), "1")
 
     def test_shared_settings_save_and_launch_wiring(self):
         from types import SimpleNamespace
@@ -72,12 +80,16 @@ class LdnEnvTests(unittest.TestCase):
             self.assertEqual(writes["game"]["settings"], {})
             self.assertEqual(writes["app"]["settings"], context.r["settings"])
             self.assertEqual(community.mac_settings(context, GID)["ldnAddress"]["value"], "192.168.1.21")
-            self.assertEqual(community.launch_env(context, GID), {"S2A_LDN_SERVER": "192.168.1.21", "S2A_LDN_RELAY": "0"})
-            self.assertEqual(community.launch_env(context, GID, {"S2A_LDN_SERVER": "10.0.0.5"}), {})
+            self.assertEqual(community.launch_env(context, GID),
+                             {"S2A_LDN_AUTO": "0", "S2A_LDN_MITM": "0",
+                              "S2A_LDN_SERVER": "192.168.1.21", "S2A_LDN_RELAY": "0"})
+            self.assertEqual(community.launch_env(context, GID, {"S2A_LDN_SERVER": "10.0.0.5"}),
+                             {"S2A_LDN_AUTO": "0", "S2A_LDN_MITM": "0"})
 
     def test_explicit_server_wins_as_a_whole(self):
         for server in ("10.0.0.5", ""):
-            self.assertEqual(community.ldn_env({"ldnMode": "manual", "ldnHost": True}, {"S2A_LDN_SERVER": server}), {})
+            self.assertEqual(community.ldn_env({"ldnMode": "manual", "ldnHost": True}, {"S2A_LDN_SERVER": server}),
+                             {"S2A_LDN_AUTO": "0", "S2A_LDN_MITM": "0"})
 
 
 class CommunityTests(unittest.TestCase):
@@ -175,17 +187,20 @@ class CommunityTests(unittest.TestCase):
         self.assertEqual(ldn(), {})
         self.c.r.update(settings={"ldnMode": "manual", "ldnHost": True, "ldnAddress": "192.168.1.20"})
         community.save(self.c)
-        self.assertEqual(ldn(), {"S2A_LDN_SERVER": "127.0.0.1", "S2A_LDN_RELAY": "1", "S2A_LDN_LISTEN": "0.0.0.0"})
+        self.assertEqual(ldn(), {"S2A_LDN_AUTO": "0", "S2A_LDN_MITM": "0",
+                                 "S2A_LDN_SERVER": "127.0.0.1", "S2A_LDN_RELAY": "1", "S2A_LDN_LISTEN": "0.0.0.0"})
         self.assertNotIn("ldnMode", community.load_launch(self.c, GID)["settings"])
         self.assertEqual(community.mac_settings(self.c, GID)["ldnAddress"]["value"], "192.168.1.20")
         self.c.r.update(settings={"ldnHost": False, "ldnAddress": " 192.168.1.21 "})
         community.save(self.c)
-        self.assertEqual(ldn(), {"S2A_LDN_SERVER": "192.168.1.21", "S2A_LDN_RELAY": "0"})
+        self.assertEqual(ldn(), {"S2A_LDN_AUTO": "0", "S2A_LDN_MITM": "0",
+                                 "S2A_LDN_SERVER": "192.168.1.21", "S2A_LDN_RELAY": "0"})
         # 未填写不能回到发现 / 选举；保留游戏启动，把连接失败交给宿主。
         self.c.r.update(settings={"ldnAddress": ""}); community.save(self.c)
-        self.assertEqual(ldn(), {"S2A_LDN_SERVER": "0.0.0.0", "S2A_LDN_RELAY": "0"})
+        self.assertEqual(ldn(), {"S2A_LDN_AUTO": "0", "S2A_LDN_MITM": "0",
+                                 "S2A_LDN_SERVER": "0.0.0.0", "S2A_LDN_RELAY": "0"})
         self.c.r.update(settings={"ldnMode": "auto"}); community.save(self.c)
-        self.assertEqual(ldn(), {})
+        self.assertEqual(ldn(), {"S2A_LDN_AUTO": "1", "S2A_LDN_MITM": "0"})
         for change in ({"ldnMode": "other"}, {"ldnHost": "true"}, {"ldnAddress": 123}):
             self.c.r.update(settings=change)
             with self.assertRaises(Failure): community.save(self.c)

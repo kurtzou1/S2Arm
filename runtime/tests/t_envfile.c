@@ -10,6 +10,8 @@
 
 // envfile.c 里 LOG → s2a_log_line；native.h 已给 static inline 实现，单测不需要额外桩
 
+int s2a_envfile_apply_once(const char *docs);   // 诊断码（s2a_launch_ctx.h；本单测只引 native.h）
+
 static int fails = 0;
 static void ck(int ok, const char *what) { if (!ok) { printf("✗ %s\n", what); fails++; } else printf("✓ %s\n", what); }
 
@@ -104,6 +106,22 @@ int main(int argc, char **argv) {
     s2a_envfile_log_flush();
     ck(read(fd[0], log, sizeof log) == -1 && errno == EAGAIN, "省略摘要也不重复输出");
     g_s2a_logfd = oldfd; close(fd[0]); close(fd[1]);
+
+    // 诊断码一次性文件（#1449）：只收 DM_ 开头、读一次即改名作废、没有文件什么都不做
+    {
+        char once[1024], used[1024]; snprintf(once, sizeof once, "%s/diag_once.txt", dir); snprintf(used, sizeof used, "%s/diag_once.used", dir);
+        unsetenv("DM_T_SCAN"); unsetenv("T_NOT_DIAG");
+        ck(s2a_envfile_apply_once(dir) == 0, "没有诊断码文件 → 0 项");
+        FILE *f = fopen(once, "w"); fputs("DM_T_SCAN=30c6f0c2aa7c3e79:30:600\nT_NOT_DIAG=1\n", f); fclose(f);
+        ck(s2a_envfile_apply_once(dir) == 1, "诊断码生效 1 项（DM_ 开头那条）");
+        ck(getenv("DM_T_SCAN") && !strcmp(getenv("DM_T_SCAN"), "30c6f0c2aa7c3e79:30:600"), "DM_ 开关值原样");
+        ck(!getenv("T_NOT_DIAG"), "不是 DM_ 开头的不设");
+        ck(access(once, F_OK) != 0 && access(used, F_OK) == 0, "读过即改名成 diag_once.used");
+        unsetenv("DM_T_SCAN");
+        ck(s2a_envfile_apply_once(dir) == 0 && !getenv("DM_T_SCAN"), "下一局不再开");
+        s2a_envfile_log_flush();
+        unlink(used);
+    }
 
     // 清理
     char p[1024]; snprintf(p, sizeof p, "%s/env.txt", dir); unlink(p); rmdir(dir);

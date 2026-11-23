@@ -80,7 +80,7 @@ class BatchActivity:
                 else:
                     names = [str(value[1]).lower().removesuffix('.exe') for value in rows.values()]
                     self.in_flight = sum(name in ['metal', 'metallib'] for name in names)
-            except (OSError, ValueError, ImportError):
+            except Exception:   # 进度采样只是遥测：任何读不到（含 ctypes 参数错，D-TW4Z）都按「未知」，绝不打断出包
                 self.in_flight = None  # Unavailable is not a measured zero.
         return self.data | {'inFlight': self.in_flight}
 

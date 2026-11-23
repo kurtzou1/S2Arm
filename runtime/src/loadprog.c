@@ -47,10 +47,16 @@ int s2a_load_warm_tick(uint64_t now, long done, long total) {
         double r = (double)(g_done - g_rate_done) / ((double)(now - g_rate_t) / S);
         g_rate = g_rate > 0 ? 0.7 * g_rate + 0.3 * r : r; g_rate_t = now; g_rate_done = g_done;
     }
-    int go = 0;
+    int go = 0, up = 0;
     // 编完按这一 tick 自己的参数判（done ≥ total）：直连层开头的 (0, n) 一定 n > 0（warm_announce / warm_prepare 只在有条目时发），done ≥ total 只出现在完成那一下——
     //   包括没有可预热的条目时的 (0, 0)（11-02 维护者 魔界战记5 首启：后台预热 0 条、0.6 ms 就收尾发了 (0, 0)，原先按「g_total 非 0」判，0 条永远不算编完，
     //   阶段停在「优化画面」、首帧来了也只记不收，之后再没有 tick、30 秒无进展护栏也跑不到，页面「已优化 0 / 0」卡死）
+    // 简短启动画面（之后的启动）还在优化画面里编了 3 秒仍没编完 = 这次其实要重编一大批（存进管线存档的只是一部分，或系统清了缓存）：
+    //   升成完整加载页，显示进度、给「先开始玩」（11-23 #2133：时之笛 4.7 万条，第二次打开在只有小转圈的画面后面重编，玩家看着卡死）。
+    //   「之后的启动」只是上次的预测，页面样式按这次实际要做的定
+    if (!g_first_run && done < total && now - g_warm_t0 >= (uint64_t)(env_s("S2A_LOAD_UPGRADE_S", 3) * S)) {
+        g_first_run = 1; up = 1;
+    }
     if (done >= total) { g_go = S2A_LOAD_GO_DONE; go = 1; }
     else if (atomic_load(&g_skip)) { g_go = S2A_LOAD_GO_USER; go = 1; }
     else if (now - g_last_up >= (uint64_t)(env_s("S2A_LOAD_STALL_S", 30) * S)) { g_go = S2A_LOAD_GO_STALL; go = 1; }
@@ -59,6 +65,7 @@ int s2a_load_warm_tick(uint64_t now, long done, long total) {
     if (go) g_stage = g_ff ? S2A_LOAD_DONE : S2A_LOAD_ENTER;   // 首帧早已到过（直连层先过首帧回调、后在首次提交里等预热）：预热一结束就收页
     int reason = g_go; long d = g_done, t = g_total;
     pthread_mutex_unlock(&g_mu);
+    if (up) LOG("加载页：之后的启动却还要编 %ld / %ld 条，换成完整加载页（进度 + 先开始玩）", t - d, t);
     if (go && reason != S2A_LOAD_GO_DONE)
         LOG("加载页：不再等预热（%s），已编 %ld / %ld，剩下的转后台", reason == S2A_LOAD_GO_USER ? "玩家点了先开始玩" : "长时间没有进展", d, t);
     return go && reason != S2A_LOAD_GO_DONE ? 1 : 0;   // 全部编完：直连层自己正常收尾（返回 0 不转后台）

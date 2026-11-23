@@ -324,7 +324,7 @@ static void note_build(void) {
         [bs addObject:s2a_notice_button(S2AL(@"diag.report.title"), primary, ^(UIButton *b) { (void)b; s2a_diag_report(); })]; }
     g_note_view = s2a_notice_page(g_root.bounds, g_note[0], g_note[1], g_note[2], [g_note[3] floatValue], [g_note[4] length] ? g_note[4] : nil, bs);
     [g_root addSubview:g_note_view];
-    { void s2a_report_gear_attach(UIView *); s2a_report_gear_attach(g_note_view); }   // 左上角小齿轮：故障报修
+    { void s2a_report_gear_attach(UIView *); s2a_report_gear_attach(g_note_view); }   // 左上角「故障报修」按钮
 }
 // C 层递来的规格文案（起局自检提示页 host_main.c → s2a_selfcheck_page、初启失败页正文 init_fail.c）是 runtime/include 里的中文原宏；
 //   英文 App 按逐字相等换成同名 <宏>_EN（#316）。不在表里的原样显示
@@ -450,7 +450,7 @@ static void help_build(NSString *title, NSString *detail, NSString *app) {
     UIButton *btn = s2a_notice_button(S2AL(@"app.packHelp.recheckPlaced"), YES, ^(UIButton *b) { b.enabled = NO; [b setTitle:S2AL(@"app.packHelp.checking") forState:UIControlStateDisabled];
         void (*f)(void) = g_help_recheck; if (f) f(); });
     g_help = s2a_notice_help_page(g_root.bounds, title, detail, app, btn); [g_root addSubview:g_help];
-    { void s2a_report_gear_attach(UIView *); s2a_report_gear_attach(g_help); }   // 左上角小齿轮：故障报修
+    { void s2a_report_gear_attach(UIView *); s2a_report_gear_attach(g_help); }   // 左上角「故障报修」按钮
     // 测试开关（真机验收没法点屏）：S2A_PACK_RECHECK_AUTO=<秒> 每隔这么久代按一次「重新检查」，说明页收起即停
     { static int armed; const char *e = getenv("S2A_PACK_RECHECK_AUTO"); double sec = e ? atof(e) : 0;
       if (sec > 0 && !armed) { armed = 1; LOG("说明页：测试开关 S2A_PACK_RECHECK_AUTO=%s，每 %.0f 秒代按「重新检查」", e, sec);

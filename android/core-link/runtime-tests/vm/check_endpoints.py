@@ -33,7 +33,7 @@ SYSTEM_EXTERNALS = {
     # libc / libdl / pthread
     "abort", "bzero", "calloc", "clock_gettime", "dlsym", "fclose", "fgets",
     "fopen", "fread", "fscanf", "fseek", "free", "getenv", "getline", "madvise",
-    "malloc", "memcpy", "memset", "mmap", "mprotect", "munmap", "mremap",
+    "malloc", "memcpy", "memset", "mkdir", "mmap", "mprotect", "munmap", "mremap",
     "nanosleep", "pause", "pthread_create", "pthread_detach",
     "pthread_mutex_lock", "pthread_mutex_trylock", "pthread_mutex_unlock",
     "pthread_self", "snprintf", "sscanf", "strcmp", "strrchr", "strstr",

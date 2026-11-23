@@ -122,3 +122,21 @@ MPL-2.0（`../LICENSE-apple-codesign-MPL-2.0.txt`）。
 可重复编译的做法同 s2a1（同一台机器、两个工作目录各编一次，Mac 先清空固定编译目录，11-18 核过逐字节相同）；s2a3 两端各只编了一次，没有重做这项核对。
 s2a5 只在 Windows 实机重编：0004 不碰 plumesign，Windows plumesign 编出来与 s2a4 逐字节相同（同一 SHA-256），Mac plumesign 沿用 s2a4 的产物。
 两端编之前补丁检查程序（login_fallback_check、srp_protocol_check、two_factor_check）均全过。
+
+## 0006-reuse-cert-by-key.patch
+
+- 现象（#2015）：手机上用 SideStore / AltStore 装过 App 的免费 Apple ID 玩家，用 S2Arm 签名时被提示「要新建证书，满了会撤掉 SideStore 那张」。
+  玩家从 SideStore 导出了那张证书的 .p12（私钥在手），S2Arm 仍然没法复用它：免费 Apple ID 拿不到描述文件，开发者证书导入路径走不通；
+  Apple ID 签名路径里 plumesign 只认自己建的证书。
+- 原因：`crates/plume_core/src/utils/certificate.rs` 的 `find_certificate` 要求两样都对上：证书公钥 = keys/<团队>/key.pem 的公钥，**且**机器名 == `"AltStore"`。
+  SideStore 在手机上建的证书机器名是「SideStore - <设备名>」之类，即使把它的私钥放进 key.pem 也认不出，plumesign 就去新建一张；账号满了，苹果撤列表第一张。
+- 改法：
+  1. `certificate.rs`：认证书只比公钥（新增 `CertificateIdentity::find_by_key`，`find_certificate` 改用它），不看机器名。手里有私钥就是能用的证书。
+     描述文件本来就按 App ID 申请团队描述文件（`qh_get_profile` → downloadTeamProvisioningProfile），不点名证书，不用改。
+  2. `apps/plumesign/src/commands/mod.rs`：`--version` 输出带 `+s2a-keycert`。启动器（`pack/orch/install_win.py keycert`）据此判这个 plumesign 会不会复用导入的证书：
+     原版只认 AltStore 机器名，启动器的撤证书检查（cert_check）和手机自签身份（plume_identity）按原版口径；带标记的按公钥口径，三处与 plumesign 自己选的证书一致。
+- 启动器侧：证书导入弹窗只选 .p12（不选描述文件）时，作业层（`pack/jobs/devcert.py adopt`）核这张证书在当前登录的 Apple ID 证书列表里，
+  把私钥换成 PKCS#8 写进 keys/<团队>/key.pem（原来那把不同就先留 key.pem.bak-<时刻>），之后 Apple ID 签名复用它、不新建、不撤。
+- 检查：`check/keycert_check.rs`（`tools/plumesign_build.py` 编之前跑）。现场造 RSA 私钥和证书，核：机器名 SideStore / AltStore 公钥对上都认、公钥对不上不认、
+  几张里认出的是公钥对上的那张（不是第一张）、版本号带标记。没打本补丁时检查程序编不过（没有 `find_by_key`）。
+- 没有在真账号上实测（要账号本人登录）。

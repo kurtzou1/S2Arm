@@ -19,7 +19,10 @@
 #       dmsh_chain.py --check-tools   verify that the actual tools match the lock file; on mismatch print [RED] lines and exit 1
 #       dmsh_chain.py --xfp           print the translation fingerprint xlate_fp() computed from this tree's sources
 #       dmsh_chain.py --check-stamp D verify that library D's stamp names this tree's translator (tree_xfp) and tool lock; on mismatch print [RED] and exit 1
-#       dmsh_chain.py --update-lock   rewrite the lock file from the actual tools (run after changing Ryujinx / spirv-cross / Xcode; committed to the repo)
+#       dmsh_chain.py --update-lock   rewrite the translator lines of the lock file (translator dlls + source fingerprint) from this tree's build; the tool lines are kept
+#                                     (run after rebuilding dmsh_xlate; committed to the repo)
+#       dmsh_chain.py --update-tools  rewrite the tool lines (spirv-cross, metal_macosx, metal_iphoneos) from this Mac's tools; refuses a tool it cannot identify
+#                                     (run on the gate machine after changing spirv-cross / Xcode; committed to the repo)
 # Environment: XLATE_DEBUG / XLATE_REDUCED (same meaning as in dmsh_build.py, default gs,cs / 1 since 11-07 (DebugMode on for geometry and compute only; debug was 1 before); non-default options yield a different V, which the host will not load)
 import shutil, os, re, sys, json, hashlib, subprocess
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
@@ -45,6 +48,7 @@ def xfp_files():   # → 翻译器指纹输入的仓库相对路径（排好序�
         _XFP_FILES = sorted(os.path.relpath(f, ROOT).replace(os.sep, '/') for f in full)
     return _XFP_FILES
 INPUT_TABLES = ['shader_facts.tsv', 'shader_map.tsv', 'shader_map.tsv.conflicts.tsv', 'shader_pairs.tsv', 'bf_want.tsv', 'fout_want.tsv', 'se_want.tsv']   # in the game profile folder
+TOOL_KEYS = ('spirv-cross', 'metal_macosx', 'metal_iphoneos')   # 锁里的工具行（环境事实，--update-tools 才改）
 LOCK = os.path.join(HERE, 'dmsh_chain.lock'); HEADER = os.path.join(GFX, 'nvn/dmsh_chain.h')
 STAMP = 'inputs.tsv'   # in the library directory b-<V>/
 # the translator defaults to the in-repo build that matches the lock file (a rebuilt dll has different fingerprints)
@@ -217,11 +221,23 @@ def header_text(v):
 
 if __name__ == '__main__':
     a = sys.argv[1:]
-    if a == ['--update-lock']:
+    if a in (['--update-lock'], ['--update-tools']):
+        # 工具版本是环境事实、不是源码（11-23 维护者定）：--update-lock 只改翻译器那几行（dll 指纹、源码指纹），工具三行照锁里原样留；工具三行只有 --update-tools 改，
+        #   认不出的工具（unknown: …）一律拒写。#2134 外部贡献者在自己机器上 --update-lock，spirv-cross 记成「unknown: /usr/local/bin/spirv-cross」、metal 记成他的
+        #   Xcode，门禁机 --build-env 核工具对不上就拒，main 直连钩子连红
         t = tools_now()
         if t['xlate_source'] != xlate_source_sha(): sys.exit(f'[RED] the translator was not built from the in-repo source (embedded {t["xlate_source"]} / in repo {xlate_source_sha()}): rebuild dmsh_xlate first')
-        open(LOCK, 'w').write('# Translation chain tool fingerprints (written by dmsh_chain.py --update-lock; regenerate after changing tools and commit it)\n' + ''.join(f'{k}\t{v}\n' for k, v in t.items()))
-        print('wrote', LOCK)
+        old_lock = dict(l.rstrip('\n').split('\t', 1) for l in open(LOCK) if '\t' in l and not l.startswith('#')) if os.path.exists(LOCK) else {}
+        tools = a == ['--update-tools']
+        if tools:
+            bad = [f'{k}: {t[k]}' for k in TOOL_KEYS if t.get(k, '').startswith('unknown') or t.get(k, '').startswith('missing')]
+            if bad: sys.exit('[RED] refusing to write tool lines this Mac cannot identify: ' + '; '.join(bad))
+        else:
+            miss = [k for k in TOOL_KEYS if k not in old_lock]
+            if miss: sys.exit('[RED] the lock has no tool lines for ' + ', '.join(miss) + ': run dmsh_chain.py --update-tools on the gate machine first')
+            for k in TOOL_KEYS: t[k] = old_lock[k]
+        open(LOCK, 'w').write('# Translation chain tool fingerprints (translator lines: dmsh_chain.py --update-lock; tool lines: --update-tools on the gate machine; commit it)\n' + ''.join(f'{k}\t{v}\n' for k, v in t.items()))
+        print('wrote', LOCK, '(tool lines rewritten)' if tools else '(translator lines; tool lines kept)')
     elif a == ['--check-tools']:
         bad = check_tools()
         for b in bad: print('[RED] translation chain tools do not match the lock file: ' + b)

@@ -144,6 +144,9 @@ void s2a_console_mode_set(int docked);  // 平台壳：运行中切掌机 / 主�
 int  s2a_console_mode(void);            // 服务层：-1 没设过、0 掌机、1 主机；变了调 ChangeDockedModeState
 void s2a_host_sleep_set(int sleeping);  // 平台壳：iOS 进后台 / Mac 系统睡眠 = 1（切窗口不算）
 int  s2a_host_sleeping(void);           // 服务层：变了就向 psc 模块发休眠 / 唤醒请求
+// 接口 v2.18：系统小程序（键盘 / 错误弹窗 / 手柄设置等）开着的个数。服务层写、停帧看门读（开着期间不计停帧）
+void s2a_applet_open_add(int d);        // 服务层：小程序拉起 +1、结束 -1（不会减到负）
+int  s2a_applet_open(void);             // 停帧看门：> 0 = 有小程序开着
 // 接口 v2.17：客机冻结状态（Mac 失焦暂停 / iOS 后台 / 重启屏障）。服务层据此暂停或恢复声音渲染。
 int  s2a_guest_frozen(void);            // runtime/src/thread.c；0 运行、非 0 冻结
 

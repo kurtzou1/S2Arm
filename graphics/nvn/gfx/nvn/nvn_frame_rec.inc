@@ -244,14 +244,21 @@ static id<MTLLibrary> fr_ms_lib(void) {
 }
 static int fr_ms_ok(id<MTLTexture> t) { return t.textureType == MTLTextureType2DMultisample && (t.usage & MTLTextureUsageShaderRead) && fr_ms_class(t.pixelFormat) >= 0 && fr_ms_lib(); }
 static uint64_t fr_ms_bytes(id<MTLTexture> t) { return (uint64_t)t.width * t.height * t.sampleCount * (fr_ms_class(t.pixelFormat) == 3 ? 4 : 16); }
-static int fr_ms_read(id<MTLTexture> t, id<MTLBuffer> b) {
+// 即时存档读回显卡内容没读成的次数（缓冲建不出、命令缓冲报错、安全停没交）。这些贴图只在显卡上有，缺了的快照恢复后画面是错的：nvn_snap_save 开存时清零并置 g_fr_read_stop，
+//   第一次没读成后这次存档不再读回（显存已满时接着建缓冲、接着交只会更满，#327），存完判没存成、上一份原样保留。帧录不置 g_fr_read_stop，行为不变
+static int g_fr_read_lost, g_fr_read_stop;
+#define FR_READ_STOPPED (g_fr_read_stop && g_fr_read_lost)
+static void fr_read_lost(const char *why) { if (g_fr_read_stop && !g_fr_read_lost) MLOG("【红】 即时存档：读回显卡内容没读成：%s", why); g_fr_read_lost++; }
+static int fr_read_check(int ran, NSError *e) { if (!ran) fr_read_lost("GPU 已安全停，命令没交"); else if (e) fr_read_lost(e.description.UTF8String); return ran && !e; }
+static int fr_cb_read(id<MTLCommandBuffer> cb) { int ran = cb_run(cb); return fr_read_check(ran, cb.error); }
+static int fr_ms_read(id<MTLTexture> t, id<MTLBuffer> b) { @autoreleasepool {   // 自动释放池：命令缓冲逐张放，不攒到存档结束
     int c = fr_ms_class(t.pixelFormat); NSError *e = nil;
     id<MTLComputePipelineState> ps = [g_dev newComputePipelineStateWithFunction:[fr_ms_lib() newFunctionWithName:[NSString stringWithFormat:@"rd%d", c]] error:&e]; if (!ps) return 0;
     id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
     [ce setComputePipelineState:ps]; [ce setTexture:t atIndex:0]; [ce setBuffer:b offset:0 atIndex:0];
     [ce dispatchThreads:MTLSizeMake(t.width, t.height, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)]; [ce endEncoding];
-    return cb_run(cb) && !cb.error;   // cb_run：GPU 安全停后不交（nvn_mtl.m）
-}
+    return fr_cb_read(cb);   // cb_run：GPU 安全停后不交（nvn_mtl.m）
+} }
 static int fr_ms_write(id<MTLTexture> t, id<MTLBuffer> b) {
     int c = fr_ms_class(t.pixelFormat); NSError *e = nil;
     MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
@@ -282,12 +289,12 @@ static void fr_blit_planes_enc(id<MTLBlitCommandEncoder> be, id<MTLTexture> t, c
             off += (uint64_t)bpi * d;
         } }
 }
-static int fr_blit_planes(id<MTLTexture> t, const fr_tex_hd *hd, id<MTLBuffer> b, int to_buf) {
+static int fr_blit_planes(id<MTLTexture> t, const fr_tex_hd *hd, id<MTLBuffer> b, int to_buf) { @autoreleasepool {   // 同 fr_ms_read
     id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
     fr_blit_planes_enc(be, t, hd, b, to_buf);
     [be endEncoding];
-    return cb_run(cb) && !cb.error;
-}
+    return fr_cb_read(cb);
+} }
 static NSUInteger fr_slices(id<MTLTexture> t) { NSUInteger s = t.arrayLength ? t.arrayLength : 1; return t.textureType == MTLTextureTypeCube || t.textureType == MTLTextureTypeCubeArray ? s * 6 : s; }
 // gpu.bin：[FR_GPU_MAGIC][fr_tex_hd, 内容]…；返回存了几张。*skipped 只剩：缓冲 / 父贴图视图之外、确实存不了的（含模板的多重采样、多重采样数组、没有 ShaderRead 的多重采样、> 256 MB、不认的格式）
 static int fr_dump_gpu(const char *path, uint64_t *bytes, int *skipped) {
@@ -315,8 +322,9 @@ static int fr_dump_gpu(const char *path, uint64_t *bytes, int *skipped) {
                 tot += fr_plane_bytes(&hd.pl[q], MAX(1, t.width >> l), MAX(1, t.height >> l), MAX(1, t.depth >> l)) * hd.layers;   // 3D：每级整块 w×h×d（双人成行体积雾的历史贴图跨帧累积）
         }
         if (tot > (256ull << 20)) { (*skipped)++; continue; }
+        if (FR_READ_STOPPED) { (*skipped)++; continue; }
         id<MTLBuffer> b = [g_dev newBufferWithLength:tot options:MTLResourceStorageModeShared];
-        if (!b) { (*skipped)++; continue; }
+        if (!b) { fr_read_lost("读回缓冲建不出来"); (*skipped)++; continue; }
         int ok = hd.kind == FR_TK_MS ? fr_ms_read(t, b) : fr_blit_planes(t, &hd, b, 1);
         if (!ok) { (*skipped)++; continue; }
         if (!fr_w_tex(f, &hd, b.contents, tot)) { fclose(f); return -1; }

@@ -225,6 +225,7 @@ struct EnvironmentView: View {
                     .accessibilityIdentifier("settings.freeSignReminder")
             }
         }
+        DiagCodeView(model: model)   // 诊断码（#1449）：帖子里给的码粘这里，下次推那款生效一局
         // iCloud 存档同步（S2ArmLauncherModel+CloudSaves）：选 iCloud 云盘里的文件夹，iPhone / iPad 上选同一个
         CardGroup(loc.t("s2arm.env.cloud.group")) {
             CardRow(loc.t("s2arm.env.cloud.title"), detail: loc.t(model.cloudFolder == nil ? "s2arm.env.cloud.off" : "s2arm.env.cloud.on"),

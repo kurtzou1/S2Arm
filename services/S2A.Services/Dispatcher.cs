@@ -144,6 +144,7 @@ namespace S2A.Services
             S2AHooks.MakeSession = &MakeSessionHook;
             S2AHooks.EventSignal = &EventSignalHook;
             S2AHooks.EventClear = &EventClearHook;
+            S2AHooks.AppletOpenNative = Native.AppletOpenAdd;   // 系统小程序开着的个数报给原生停帧看门（接口 v2.18，D-Z96G）
 
             Instance = this;
         }

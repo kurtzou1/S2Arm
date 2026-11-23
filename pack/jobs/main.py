@@ -31,6 +31,7 @@ import apple_login
 import awake
 import community
 import devcert
+import diagcode
 import diag
 import diag_upload
 import downstream
@@ -67,7 +68,60 @@ def app_installed_result(c):
     return dict(appInstalled=got) if c.operation == "install" and got else None
 
 
+class StderrGuard:
+    """作业进程的标准错误（D-FPQ8 等 34 份，Windows 0.6.0–0.6.9）：启动器只经 stderr 读作业的文字输出，读端不在了（启动器被关 / 崩了、读循环出错）
+    再写，Windows 上 Python 抛 OSError [Errno 22]（ERROR_NO_DATA 映射成 EINVAL），从装机 note()、[s2a] 日志、patches.py 等任何一处 print 冒上来，整单崩掉。
+    写不进只是看不到日志，不该让任务失败：第一次写失败起改写进本任务日志目录的 <任务>-stderr.log，之后不再碰原句柄；
+    子进程要继承标准错误时（fileno）给的也是这个文件，不接着用断掉的管道。断的那一刻正写的那一行多半已进原流的缓冲、到冲刷才失败，取不回来（只丢这一行）"""
+
+    def __init__(self, stream, fallback):
+        self._stream, self._fallback, self._file, self.broken = stream, Path(fallback), None, None
+
+    def _spill(self):
+        if self._file is None:
+            self._fallback.parent.mkdir(parents=True, exist_ok=True)
+            self._file = open(self._fallback, "a", encoding="utf-8", errors="replace")
+            self._file.write(f"[s2a] 标准错误写不进了（{self.broken}），之后的输出改写这里\n")  # 非玩家句
+        return self._file
+
+    def write(self, text):
+        if self.broken is None:
+            try:
+                return self._stream.write(text)
+            except (OSError, ValueError) as error:   # ValueError：流已关（I/O operation on closed file）
+                self.broken = f"{type(error).__name__}: {error}"
+        try:
+            return self._spill().write(text)
+        except OSError:
+            return len(text)
+
+    def flush(self):
+        if self.broken is None:
+            try:
+                return self._stream.flush()
+            except (OSError, ValueError) as error:
+                self.broken = f"{type(error).__name__}: {error}"
+        try:
+            self._spill().flush()
+        except OSError:
+            pass
+
+    def fileno(self):
+        return self._stream.fileno() if self.broken is None else self._spill().fileno()
+
+    def __getattr__(self, name):   # encoding / isatty / buffer 等照原流
+        return getattr(self._stream, name)
+
+
 def run_request(request_path, *, context_class=Context, operation_overrides=None):
+    saved = sys.stderr   # 下面换成 StderrGuard；同一进程里连跑几单（单测）时每单用自己的那份，跑完换回
+    try:
+        return _run_request(request_path, context_class=context_class, operation_overrides=operation_overrides)
+    finally:
+        sys.stderr = saved
+
+
+def _run_request(request_path, *, context_class=Context, operation_overrides=None):
     # 开发者证书密码（devCert 导入那一次由启动器经环境变量给，devcert.py ⑤）：先从环境摘掉，任何子进程都拿不到；请求文件里从不放
     devcert_password = os.environ.pop(devcert.PASSWORD_ENV, None)
     apple_password = os.environ.pop(apple_login.PASSWORD_ENV, None)   # Mac 通用壳 Apple ID 登录（appleLogin）那一次：同上，只写进 plumesign 的标准输入
@@ -87,6 +141,7 @@ def run_request(request_path, *, context_class=Context, operation_overrides=None
         # The job cannot even register its record (full disk, read-only volume): say why and come back non-zero instead of a traceback (J10)
         print(f"[s2a] 【红】任务记录写不进磁盘，任务未开始：{error}", file=sys.stderr, flush=True)
         return 1
+    sys.stderr = StderrGuard(sys.stderr, Path(c.logs) / f"{c.task}-stderr.log")
     c.devcert_password = devcert_password
     c.apple_password = apple_password
     signal.signal(signal.SIGTERM, lambda *_: c.stop())
@@ -119,7 +174,7 @@ def run_request(request_path, *, context_class=Context, operation_overrides=None
                   "signModeSet": install.sign_mode_set,
                   "layoutSet": install.layout_set,   # 出法：通用 S2Arm / 独立 App（一 App 一游戏，0.6.3）
                   "saveStatus": saves.status, "saveBackup": saves.backup, "saveInspect": saves.inspect, "saveRestore": saves.restore, "savePrevious": save_previous.status, "saveRestorePrevious": save_previous.restore, "saveDiscardSeed": saves.discard_seed,
-                  "community": community.listing, "communitySave": community.save, "patchMatch": patches.match, "sgradeScan": sgrade.scan, "sgradeUpgradeGame": sgrade.upgrade_one, "sgradeUpgradeBatch": sgrade.upgrade_batch, "sgradeUpgradeStop": sgrade.upgrade_stop, "sgradeUpgradeStatus": sgrade.upgrade_status, "updateHints": host_update.update_hints, "phoneOverview": host_update.phone_overview, "sgradeMac": sgrade.mac_all, "sgradeReenable": sgrade.reenable, "devCert": devcert.operation, "export": export_plan.export,
+                  "community": community.listing, "communitySave": community.save, "patchMatch": patches.match, "sgradeScan": sgrade.scan, "sgradeUpgradeGame": sgrade.upgrade_one, "sgradeUpgradeBatch": sgrade.upgrade_batch, "sgradeUpgradeStop": sgrade.upgrade_stop, "sgradeUpgradeStatus": sgrade.upgrade_status, "updateHints": host_update.update_hints, "phoneOverview": host_update.phone_overview, "sgradeMac": sgrade.mac_all, "sgradeReenable": sgrade.reenable, "devCert": devcert.operation, "diagCode": diagcode.operation, "export": export_plan.export,
                   "android": android_export.build_job, "androidDevices": android_export.devices_job}
     if operation_overrides:
         operations.update(operation_overrides)

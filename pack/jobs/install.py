@@ -767,6 +767,25 @@ def push_cheats(c, device, bid, gid, docs, mkdir=None):
         print(f"[装机] 金手指文件 {len(files) - bad}/{len(files)} 份拷进手机{'（有拷不进的，游戏内菜单里会缺几份）' if bad else ''}", file=sys.stderr, flush=True)  # 非玩家句
 
 
+def push_diag_code(c, ph, gid):
+    """诊断码（#1449，pack/jobs/diagcode.py）：玩家粘过、对得上这款的那条写进机上本款文档根 diag_once.txt，宿主下一局读到即作废（envfile.c）。
+    写进去了就清掉电脑上的待用码；写不进只记黄、码留着下次推再写，不挡装机"""
+    import diagcode
+    env = diagcode.pending(c, gid)
+    if not env:
+        return
+    try:
+        with tempfile.TemporaryDirectory(dir=c.private) as w:
+            f = Path(w) / diagcode.ONCE
+            f.write_text(diagcode.once_text(env), encoding="utf-8")
+            ph.client(w).put(str(f), f"{game_docs(gid)}/{diagcode.ONCE}")
+    except Exception as e:
+        c.diagnostic(f"诊断码没写进 iPhone，下次「推到 iPhone」会再写：{str(e)[:200]}", code="resource_transfer_failed", severity="warning")  # 非玩家句
+        return
+    diagcode.used(c, f"写进 {ph.key} 的 {gid}")  # 非玩家句
+    c.emit("message", diagcode.PUSHED)
+
+
 def push_mods(c, ph, gid, had):
     """资源替换类 mod（11-15）：这款游戏文件夹 mods/<名字>/romfs 推进机上本款文档根 mods/（服务层 RomFsMods.cs 起局叠上）。
     had = 上次推过的 {名字: 内容记号}（设备记录 games.<款>.mods）：记号变了的整份重推、电脑上删了的机上也删；玩家在手机上自己放的别的 mod 不碰。
@@ -1014,8 +1033,8 @@ def save_backup_stuck(c, gid, why, nospace=False):
 
 
 def backup_saves(c, ident, bid, gid, docs="Documents"):
-    """覆盖装前把机上这款的整个存档目录（bis/user/save）逐文件拉回游戏库 games/<程序号>/save_backup/<时刻>/（10-27 运维线：
-    斯普拉遁3 体感包覆盖装后进了选形象页，原档没有备份、无从比对）。第一次装 / 机上没有存档 = 不备份；拉失败报红停装，宁可不装也不冒丢档的险"""
+    """覆盖装前把机上这款的整个存档目录（bis/user/save）一次拉回游戏库 games/<程序号>/save_backup/<时刻>/（10-27：
+    有一款覆盖装后进了选形象页，原档没有备份、无从比对）。第一次装 / 机上没有存档 = 不备份；拉失败报红停装，宁可不装也不冒丢档的险"""
     from diag import DEVICECTL_NOSPACE, devicectl
     save_dir = f"{docs}/{SAVE_REL}"
     rc, data, err = wait_unlocked(c, lambda: devicectl(c, "device", "info", "files", "--device", ident, "--domain-type", "appDataContainer",
@@ -1044,21 +1063,36 @@ def backup_saves(c, ident, bid, gid, docs="Documents"):
         return None
     if not files:
         return None
-    dest = layout.path(c, gid, "save_backup", time.strftime("%Y%m%d-%H%M%S"))
-    for index, rel in enumerate(files, 1):
-        try:
-            (dest / rel).parent.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            if e.errno != errno.ENOSPC:
-                raise
-            return save_backup_stuck(c, gid, str(e), nospace=True)
+    # 整个存档目录一次拉回（11-23：原先逐文件各起一次 devicectl 约 0.3 秒，一款 1513 个存档文件备份 442 秒，装壳本身只要 17 秒）。
+    #   先拉进同目录下的隐藏暂存目录 .pulling-<时刻>，按清单逐个核对都在、去掉点开头的文件（同原先逐文件口径：清单里本来就不收）后才改名成 <时刻>；
+    #   拉失败 / 缺文件整份删掉、照实报，不留半份（原先逐文件拉到一半失败会留下半份备份目录）
+    root = layout.path(c, gid, "save_backup")
+    for old in root.glob(".pulling-*"):   # 上次拉到一半被杀（拔线、作业被停）留下的暂存
+        shutil.rmtree(old, ignore_errors=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    stamp = next(s for s in [stamp] + [f"{stamp}-{i}" for i in range(2, 100)] if not (root / s).exists())   # 同一秒第二份另起名，不并进上一份
+    dest, stage = root / stamp, root / f".pulling-{stamp}"
+    if getattr(c, "stage_key", None) == "phone_save_backup":
+        c.emit("progress", f"{gid} · 0/{len(files)}", done=0, total=len(files), unit="files")
+    try:
         rc, _, err = devicectl(c, "device", "copy", "from", "--device", ident, "--domain-type", "appDataContainer", "--domain-identifier", bid,
-                               "--source", f"{save_dir}/{rel}", "--destination", str(dest / rel), timeout=120)
-        if rc or not (dest / rel).is_file():
-            return save_backup_stuck(c, gid, f"拉存档失败（{rel}）：" + (err.splitlines()[-1] if err else f"devicectl 退出 {rc}"),  # 非玩家句
-                                     nospace=rc == DEVICECTL_NOSPACE)
-        if getattr(c, "stage_key", None) == "phone_save_backup":
-            c.emit("progress", f"{gid} · {index}/{len(files)}", done=index, total=len(files), unit="files")
+                               "--source", save_dir, "--destination", str(stage), timeout=600)
+        missing = [] if rc else [r for r in files if not (stage / r).is_file()]
+        if rc or missing:
+            why = (f"拉回的存档缺 {len(missing)} 个文件（如 {missing[0]}）" if missing and not rc  # 非玩家句
+                   else "拉存档失败：" + (err.splitlines()[-1] if err else f"devicectl 退出 {rc}"))  # 非玩家句
+            shutil.rmtree(stage, ignore_errors=True)
+            return save_backup_stuck(c, gid, why, nospace=rc == DEVICECTL_NOSPACE)
+        for p in [p for p in stage.rglob(".*") if p.is_file() or p.is_symlink()]:
+            p.unlink()
+        os.replace(stage, dest)
+    except OSError as e:
+        shutil.rmtree(stage, ignore_errors=True)
+        if e.errno != errno.ENOSPC:
+            raise
+        return save_backup_stuck(c, gid, str(e), nospace=True)
+    if getattr(c, "stage_key", None) == "phone_save_backup":
+        c.emit("progress", f"{gid} · {len(files)}/{len(files)}", done=len(files), total=len(files), unit="files")
     return dest
 
 
@@ -2968,7 +3002,7 @@ def phone_saves(c):
             continue
         root = layout.path(c, gid, "save_backup", create=False)
         rows = []
-        for d in sorted((x for x in root.iterdir() if x.is_dir()), key=lambda x: x.name, reverse=True) if root.is_dir() else []:
+        for d in sorted((x for x in root.iterdir() if x.is_dir() and not x.name.startswith(".")), key=lambda x: x.name, reverse=True) if root.is_dir() else []:   # .pulling-* 是还没拉完的暂存
             m = _marked(d)
             if m:
                 rows.append(dict(id=d.name, device=m.get("device"), at=m.get("at"), files=m.get("files"), bytes=m.get("bytes"), legacy=False,
@@ -3474,6 +3508,7 @@ def push_game(c, gid, ph, steps=True):
         files, size = ph.push(gid, pack)
         pushed = pack_id(pack)
         mods = push_mods(c, ph, gid, mods)
+        push_diag_code(c, ph, gid)
     finally:
         rec = layout.load_device(c, ph.key)
         layout.save_device(c, ph.key, dict(rec, games=dict(rec.get("games") or {}, **{gid: dict(program=progs[gid], pack=pushed, **({"mods": mods} if mods else {}))}),
@@ -3691,6 +3726,7 @@ def put_app(c, gid, ph, steps=True):
         pushed_files, size = ap.push(g, pack)
         pushed = pack_id(pack)
         mods = push_mods(c, ap, g, mods)
+        push_diag_code(c, ap, g)
     finally:
         rec = layout.load_device(c, ph.key)
         apps = dict(rec.get("apps") or {})

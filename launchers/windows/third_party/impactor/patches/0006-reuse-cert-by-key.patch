@@ -1,0 +1,71 @@
+diff --git a/apps/plumesign/src/commands/mod.rs b/apps/plumesign/src/commands/mod.rs
+index b418c48..a04719b 100644
+--- a/apps/plumesign/src/commands/mod.rs
++++ b/apps/plumesign/src/commands/mod.rs
+@@ -9,7 +9,8 @@ pub mod sign;
+ #[command(
+     name = "plumesign",
+     author,
+-    version,
++    // S2Arm: "+s2a-keycert" tells the launcher this build reuses any account certificate whose key it has (patch 0006)
++    version = concat!(env!("CARGO_PKG_VERSION"), "+s2a-keycert"),
+     about = "iOS code signing and inspection tool",
+     disable_help_subcommand = true,
+     arg_required_else_help = true
+diff --git a/crates/plume_core/src/utils/certificate.rs b/crates/plume_core/src/utils/certificate.rs
+index 1e673e7..7210f0c 100644
+--- a/crates/plume_core/src/utils/certificate.rs
++++ b/crates/plume_core/src/utils/certificate.rs
+@@ -247,28 +247,38 @@ impl CertificateIdentity {
+ }
+ 
+ impl CertificateIdentity {
++    // S2Arm: the certificate is ours when we hold its private key, whatever machine name it was created under.
++    // Upstream also required machine_name == "AltStore", so a certificate made by SideStore / AltStore on the phone
++    // ("SideStore - iPhone" and the like) never matched even with its key in key.pem: plumesign requested a new one,
++    // and on a full account Apple revoked the first in the list -- often that same SideStore certificate.
+     async fn find_certificate(
+         &mut self,
+         certs: Vec<Cert>,
+         priv_key: &RsaPrivateKey,
+-        machine_name: &str,
++        _machine_name: &str,
+     ) -> Result<Option<Cert>, Error> {
+-        let pub_key_der_obj = priv_key.to_public_key().to_pkcs1_der()?.as_bytes().to_vec();
++        let Some(cert) = Self::find_by_key(&certs, priv_key)?.cloned() else {
++            return Ok(None);
++        };
++        // We need to save the machine_id for our P12
++        if let Some(ref machine_id) = cert.machine_id {
++            self.set_machine_id(machine_id.clone());
++        }
+ 
+-        for cert in certs {
+-            if cert.machine_name.as_deref() == Some(machine_name) {
+-                if let Some(cert_content) = &cert.cert_content {
+-                    let parsed_cert = X509Certificate::from_der(&cert_content)?;
+-                    if pub_key_der_obj == parsed_cert.public_key_data().as_ref() {
+-                        // We need to save the machine_id for our P12
+-                        if let Some(ref machine_id) = cert.machine_id {
+-                            self.set_machine_id(machine_id.clone());
+-                        }
++        self.set_serial_number(cert.serial_number.clone());
+ 
+-                        self.set_serial_number(cert.serial_number.clone());
++        Ok(Some(cert))
++    }
+ 
+-                        return Ok(Some(cert));
+-                    }
++    /// S2Arm: the account certificate whose public key is this private key's (machine name not looked at).
++    pub fn find_by_key<'a>(certs: &'a [Cert], priv_key: &RsaPrivateKey) -> Result<Option<&'a Cert>, Error> {
++        let pub_key_der_obj = priv_key.to_public_key().to_pkcs1_der()?.as_bytes().to_vec();
++
++        for cert in certs {
++            if let Some(cert_content) = &cert.cert_content {
++                let parsed_cert = X509Certificate::from_der(&cert_content)?;
++                if pub_key_der_obj == parsed_cert.public_key_data().as_ref() {
++                    return Ok(Some(cert));
+                 }
+             }
+         }

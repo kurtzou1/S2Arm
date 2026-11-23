@@ -24,7 +24,10 @@ sys.path.insert(0, str(REPO / "pack/jobs"))
 import layout
 import saves
 
-DOTNET, DRIVER, AOT_DRIVER, *space_faults = sys.argv[1:]
+# 第一个参数选段：jit = 托管（JIT）互操作全部断言，不含 NativeAOT；aot = 只跑到 NativeAOT 两组断言为止（它们要的存档夹具在此之前建好）。
+#   两段由 save_transfer_interop_test.sh / save_transfer_aot_test.sh 各跑一次，单段各自守在单测预算内（11-23 拆开前合在一起 59～81 秒）。
+MODE, DOTNET, DRIVER, AOT_DRIVER, *space_faults = sys.argv[1:]
+assert MODE in ("jit", "aot"), MODE
 GAME_ID = "0100000000000000"
 USER = "00000000000000010000000000000000"
 OTHER_USER = "00000000000000020000000000000000"
@@ -251,13 +254,16 @@ with tempfile.TemporaryDirectory(prefix="s2arm-public-save-interop-") as tempora
     ):
         csharp_call("inspect", archive, expected_code=code, **(android | overrides))
     preview = csharp_call("inspect", python_archive, **android)
-    aot_preview = csharp_call("inspect", python_archive, native_aot=True, **android)
-    assert aot_preview == preview and len(aot_preview["warnings"]) == 1, aot_preview
-    print("PASS NativeAOT Android inspect accepts a valid archive and returns the version warning")
-    for archive, options in ((bad, {}), (python_archive, {"root": other})):
-        aot_warning = csharp_call("inspect", archive, native_aot=True, **options)
-        assert len(aot_warning["warnings"]) == 1 and aot_warning == csharp_call("inspect", archive, **options)
-    print("PASS NativeAOT inspect returns the actual damaged-file and different-owner warnings")
+    if MODE == "aot":
+        aot_preview = csharp_call("inspect", python_archive, native_aot=True, **android)
+        assert aot_preview == preview and len(aot_preview["warnings"]) == 1, aot_preview
+        print("PASS NativeAOT Android inspect accepts a valid archive and returns the version warning")
+        for archive, options in ((bad, {}), (python_archive, {"root": other})):
+            aot_warning = csharp_call("inspect", archive, native_aot=True, **options)
+            assert len(aot_warning["warnings"]) == 1 and aot_warning == csharp_call("inspect", archive, **options)
+        print("PASS NativeAOT inspect returns the actual damaged-file and different-owner warnings")
+        print("NativeAOT inspect interoperability passed; no game or player progress was tested.")
+        sys.exit(0)
     confirmation = dict(archiveSha256=preview["archiveSha256"], targetFingerprint=preview["targetFingerprint"])
     if os.geteuid() != 0:
         lock_file = Path(android["workRoot"]) / "save-transfer.lock"

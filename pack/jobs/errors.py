@@ -153,6 +153,7 @@ RECOVERY = {
     "usb_slow": "换一根支持 USB 3 的 USB-C 数据线，直接插 Mac 上的 USB-C / 雷雳口（不经扩展坞、集线器、显示器上的口），再装下一款；iPhone 15 Pro 及更新的 Pro 机型才支持 USB 3，其它机型只能 USB 2.0。",
     "devcert_password": "重新输入导出 .p12 时设的密码（区分大小写）；还不行就重新导出一份 .p12 再导入。",   # 开发者证书签名（pack/jobs/devcert.py，v0.2.4）
     "devcert_invalid": "选导出的 .p12 证书和开发者网站下载的 .mobileprovision 描述文件，再导入一次。",   # 开发者证书签名（pack/jobs/devcert.py，v0.2.4）
+    "diag_code_invalid": "从帖子里完整复制那一整串诊断码（以 S2A-DIAG1- 开头）再粘一次；还不行就在帖子里回复，请维护者重发一条。",   # 诊断码（pack/jobs/diagcode.py，#1449）
     "devcert_mismatch": "在开发者网站重新生成描述文件并勾上这张证书，下载后和证书一起重新导入。",   # 开发者证书签名（pack/jobs/devcert.py，v0.2.4）
     "devcert_distribution": "推到 iPhone 的方式选「独立 App」，用这张证书照常能玩；要用通用 S2Arm：点「改用 Apple ID 登录」用 Apple ID 签名，或点「复制给证书发放人的话」发给对方，换成开发证书和开发描述文件后重新导入。",   # 分发描述文件没有 get-task-allow：通用 S2Arm 里游戏打不开，独立 App 能用（pack/jobs/devcert.py inspect）
     "devcert_missing": "在出包页「我的开发者证书」里重新导入证书和描述文件，或切回「Apple ID 签名」。",   # 开发者证书签名（pack/jobs/devcert.py，v0.2.4）
@@ -446,6 +447,8 @@ LOG_CAUSES = (
     #   归 app_control_blocked，玩家拿到「去安全中心 / 杀毒软件放行安装文件夹」那句，而不是笼统的「出包未完成」。编排层子进程里出的错只剩文字，按回溯原文认：
     #   起进程（subprocess _execute_child）被拒，或建目录链接（roots._junction）被拒
     (r"in _execute_child\b[\s\S]{0,400}?\[WinError (?:5|4551|1260|225|226)\]|in _junction\b[\s\S]{0,400}?\[WinError 5\]", "app_control_blocked"),  # 非玩家句
+    # 回溯没落在读到的日志里、只剩编排中止那一行时（D-QNJQ）：roots._junction 把「在 _junction」附在异常上，同一行里认
+    (r"编排中止：\[WinError 5\][^\n]{0,200}在 _junction", "app_control_blocked"),  # 非玩家句
     # 编着色器库前核工具读不到 Windows 版 metal.exe 的版本（translator/dmsh_chain.py tools_now，D-TYCN）：起进程被拒 → 被 Windows 拦下；
     #   文件不在 / 起来了没打版本 → 缺少 Windows 版 Metal 工具（去苹果开发者下载页装 / 重装）。原先落笼统的「出包未完成」加一句开发者口吻的 --update-lock 提示
     (r"metal_(?:macosx|iphoneos): lock .{0,120}? / actual missing \(start blocked", "app_control_blocked"),  # 非玩家句
@@ -747,20 +750,38 @@ def missing_prebuilt(env=None):
     return gone
 
 
+UNRELATED_TO_PREBUILT = ("disk_full", "graphics_api_unsupported")   # 日志里有这些确凿结论时，随包件缺不抢归因（classify_failure）
+
+
+def prebuilt_reason(rel, env=None):
+    """随包件缺的一项写清是哪种：「<路径>（不在）」/「<路径>（大小 实际 / 应为 字节）」；读不到清单就只写路径（诊断说明用）"""
+    tools = (env or os.environ).get("S2A_PREBUILT_TOOLS")
+    try:
+        want = json.loads((Path(tools) / "prepare.json").read_text(encoding="utf-8"))["files"][rel][0]
+        path = Path(tools) / str(rel).replace("\\", "/")
+        return f"{rel}（大小 {path.stat().st_size} / 应为 {want} 字节）" if path.is_file() else f"{rel}（不在）"  # 非玩家句
+    except (OSError, ValueError, KeyError, TypeError, IndexError):
+        return str(rel)
+
+
 def classify_failure(phase, log, texts=()):
     """Mac 准备（build_tool_failure）与 iPhone 打包（ipa.oneclick_failure，Mac / Windows 同一份）共用：
     日志确凿根因优先，其次阶段映射，判不出 package_failed。返回 (码, 写进 internal 的归因说明)。"""
     chunks = gather_evidence(log, texts)
     read = "；".join("%s（尾 %d 字节）" % (label, len(text.encode("utf-8"))) for label, text in chunks if label != "原因") or "无日志"  # 非玩家句
     gone = missing_prebuilt()
+    shown = "、".join(prebuilt_reason(rel) for rel in gone[:6])
     hit = log_cause(chunks, log)
-    # 日志确凿是写满（log_cause 已按写满当时的量数 / 回溯末行 / 剩余空间核实）：认它，随包件缺只记进说明——盘满能让解出来的随包件大小不对，
-    #   随包件缺却写不满盘（D-6ZDD Windows 0.6.7：写 game.img 时 [Errno 28]，随包 rcodesign 大小不对，原先先认随包件、玩家看到「被 Windows 拦下」）
-    if gone and hit[0] == "disk_full":
+    # 日志确凿的结论与随包件无关时认日志，随包件缺只记进说明：
+    #   ① 写满（log_cause 已按写满当时的量数 / 回溯末行 / 剩余空间核实）——盘满能让解出来的随包件大小不对，随包件缺却写不满盘
+    #     （D-6ZDD Windows 0.6.7：写 game.img 时 [Errno 28]，随包 rcodesign 大小不对，原先先认随包件、玩家看到「被 Windows 拦下」）
+    #   ② 判不出图形接口（纯 Python 的 gfx_api.py 读游戏程序得出的结论，不经任何随包工具）——D-TW4Z Windows 0.6.9：日志写着
+    #     「unsupported graphics API: unknown」，同时 rcodesign 记成缺，原先归 app_control_blocked，玩家去安全中心找不到任何拦截记录
+    if gone and hit[0] in UNRELATED_TO_PREBUILT:
         code, label, line, why = hit
-        return code, "归因 disk_full：%s 里「%s」%s；随包预编件同时缺 / 大小不对 %d 个（%s），按盘满的连带记；读过 %s" % (label, line, "（" + why + "）" if why else "", len(gone), "、".join(gone[:6]), read)  # 非玩家句
+        return code, "归因 %s：%s 里「%s」%s；随包预编件同时缺 / 大小不对 %d 个（%s），与这条结论无关，只记下；读过 %s" % (code, label, line, "（" + why + "）" if why else "", len(gone), shown, read)  # 非玩家句
     if gone:   # 随包工具不见了：后面各阶段的报错（退回现编缺编译器、起不来）都是它的连带，先认它
-        return "app_control_blocked", "归因 app_control_blocked：随包预编件缺 / 大小不对 %d 个（%s），多半被杀毒软件隔离；读过 %s" % (len(gone), "、".join(gone[:6]), read)  # 非玩家句
+        return "app_control_blocked", "归因 app_control_blocked：随包预编件缺 / 大小不对 %d 个（%s），多半被杀毒软件隔离；读过 %s" % (len(gone), shown, read)  # 非玩家句
     if hit[0]:
         code, label, line, why = hit
         return code, "归因 %s：%s 里「%s」%s；读过 %s" % (code, label, line, "（" + why + "）" if why else "", read)  # 非玩家句

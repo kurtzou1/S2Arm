@@ -14,6 +14,8 @@ int s2a_motion_pick(int input_source, int ns2_known, int gc_known, int phone_kno
 #include <stdint.h>
 #define S2A_MOTION_STALE_MS 500
 int s2a_motion_fresh(int ever, uint64_t sample_us, uint64_t now_us);
+// 空样本：加速度、角速度六个值全是精确 0 → 1。真传感器静止也有 1 g 重力和噪声，做不到；是传感器没开时系统照样回调的空样本（#2142 D-Q99N），不算新鲜样本
+int s2a_motion_blank(const float accel[3], const float gyro[3]);
 // 提示用：系统给了体感对象（capable = 1），却从 last_ok_us 起超过 S2A_MOTION_SILENT_MS 没有新鲜样本 → 1（当作这只手柄没体感，提示一次）。
 //   last_ok_us = 最近一次有新鲜样本、或开始等样本（游戏刚要六轴 / 刚换手柄）的时刻；宽限期内不判，免得传感器刚开的一瞬误报
 #define S2A_MOTION_SILENT_MS 2000

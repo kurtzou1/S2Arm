@@ -99,7 +99,8 @@ def check(src, work, offline=False):
         (member / "Cargo.toml").write_text('[package]\nname = "s2a-patch-check"\nversion = "0.1.0"\nedition = "2024"\n[dependencies]\n'
                                           'plume_core = { path = "../../crates/plume_core", features = ["tweaks"] }\n'
                                           'omnisette = { path = "../../3rdparty/omnisette", features = ["remote-anisette-v3"] }\n'
-                                          'tokio = { workspace = true }\n', encoding="utf-8")
+                                          'tokio = { workspace = true }\n'
+                                          'rsa = "0.9"\nrcgen = "0.12"\nrand = { workspace = true }\nplist = { workspace = true }\n', encoding="utf-8")   # keycert_check 造证书用（版本同 plume_core）
         (src / "Cargo.toml").write_text(ws.replace('    "crates/plume_utils",\n]', '    "crates/plume_utils",\n    "apps/s2acheck",\n]', 1), encoding="utf-8")
         env = dict(os.environ, CARGO_TARGET_DIR=str(work / "target-check"))
         for c in checks:

@@ -77,7 +77,9 @@ int nvk_shader_open(void) {
     g_live_spent_ns = 0;
     struct rp_shader_live_compile_stats discarded;
     rp_shader_live_compile_take(&discarded);
-    if (nvn_plat_flag("nvk_live_compile_async", 1)) {
+    // 9400 冷局开启后前推帧率下降 9.2%，按 #1501 决议缺省关。
+    // https://github.com/jhaizhou-ops/S2Arm/issues/1501#issuecomment-7101654735
+    if (nvn_plat_flag("nvk_live_compile_async", 0)) {
         const int frame_ms = nvn_plat_flag("fu_frame_ms", 100);
         const int unsafe_ms = nvn_plat_flag("fu_unsafe_ms", 10000);
         g_live_frame_ms = frame_ms > 0 ? (uint32_t)frame_ms : 0;

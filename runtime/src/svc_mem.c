@@ -2,6 +2,7 @@
 // vawin.c + layout.c 持有宿主地址窗口；Apple 可用远端影子，Android 暂沿用窗口内布局。
 // 4 KB 游戏页按 16 KB 分组记账；Android 映射原语使用实际宿主页，Apple 共享内存保留 16 KB 对齐。
 // 随包表：addr_need.tsv（出包组装 pack/ship_ext.py 从产物根拷进 App，runtime/build.mk 按这行自动收清单）
+#include <sys/stat.h>
 #include <dlfcn.h>
 #include "s2a_init_fail.h"
 #include "native.h"
@@ -479,9 +480,17 @@ static uint64_t heap_need_read(uint64_t pid) {
     if (f) { if (fscanf(f, "%llu", &v) != 1) v = 0; fclose(f); }
     return v;
 }
+// 写本款学到的记录（wire/<程序号>/heap_need、alias_full）：这款第一次起局时 wire/<程序号>/ 还没人建（别的写手在局中才建），fopen 直接失败，
+//   原先报「记录写不进」、不进程内重开，游戏随后自己 Abort（D-96J2：第一局堆区 192 MB、游戏要 2.6 GB）。打不开就建上两级目录再开一次
+static FILE *wire_open_w(const char *p) {
+    FILE *f = fopen(p, "w"); if (f) return f;
+    char d[1024]; snprintf(d, sizeof d, "%s", p); char *sl = strrchr(d, '/'); if (!sl) return NULL; *sl = 0;
+    char *up = strrchr(d, '/'); if (up) { *up = 0; mkdir(d, 0755); *up = '/'; }
+    mkdir(d, 0755); return fopen(p, "w");
+}
 static int heap_need_note(uint64_t pid, uint64_t size) {   // → 1 = 记下了（比原记录大才写）
     if (size <= heap_need_read(pid)) return 1;
-    char p[1024]; FILE *f = heap_need_path(p, sizeof p, pid) ? fopen(p, "w") : NULL;
+    char p[1024]; FILE *f = heap_need_path(p, sizeof p, pid) ? wire_open_w(p) : NULL;
     return f && fprintf(f, "%llu\n", (unsigned long long)size) > 0 && !fclose(f);
 }
 static _Atomic int g_heap_noted;   // 这一局 SetHeapSize 超出堆区、已记下要的堆
@@ -508,7 +517,7 @@ void s2a_alias_alloc_failed(uint32_t rc) {
     if (!g_alias_report || g_alias_report >= L.alias_size) return;
     static _Atomic int said; if (atomic_exchange(&said, 1)) return;
     char p[1024]; int ok = 0;
-    if (alias_full_path(p, sizeof p, g_lay_pid)) { FILE *f = fopen(p, "w"); if (f) ok = !fclose(f); }
+    if (alias_full_path(p, sizeof p, g_lay_pid)) { FILE *f = wire_open_w(p); if (f) ok = !fclose(f); }
     uint64_t (*pc)(void) = (uint64_t (*)(void))dlsym(RTLD_DEFAULT, "mtl_present_count"); uint64_t frames = pc ? pc() : 0;   // 直连图形层；单测 / 安卓没有 = 按开局算
     LOG("【红】收小后%s申请地址区失败：报给游戏的别名区 %llu MB（内部 %llu MB），SDK AllocateAddressRegion 回 %#x（已出 %llu 帧）；%s", frames ? "局中" : "开局",
         (unsigned long long)(g_alias_report >> 20), (unsigned long long)(L.alias_size >> 20), rc, (unsigned long long)frames, ok ? "已记下本款，下一局别名区恢复原值" : "记录写不进，下一局仍会收小");
@@ -518,7 +527,7 @@ void s2a_alias_alloc_failed(uint32_t rc) {
 static void alias_report_overrun(uint64_t a, uint64_t size) {
     static _Atomic int said; if (atomic_exchange(&said, 1)) return;
     char p[1024]; int ok = 0;
-    if (alias_full_path(p, sizeof p, g_lay_pid)) { FILE *f = fopen(p, "w"); if (f) ok = !fclose(f); }   // 空文件即标记；越界地址在下面这行红里
+    if (alias_full_path(p, sizeof p, g_lay_pid)) { FILE *f = wire_open_w(p); if (f) ok = !fclose(f); }   // 空文件即标记；越界地址在下面这行红里
     LOG("【红】别名区收小后游戏仍映射到收掉的那段（%#llx +%#llx，报给游戏的别名区到 %#llx）：这局照常走远端，%s", (unsigned long long)a, (unsigned long long)size,
         (unsigned long long)(L.alias_base + g_alias_report), ok ? "已记下本款，下次起局别名区恢复原值" : "记录写不进，下次起局仍会收小");
 }

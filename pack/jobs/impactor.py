@@ -29,14 +29,14 @@ PRODUCT = 'plumeimpactor'
 BUNDLE_DIR = 'ThirdParty/Impactor'
 IMPACTOR_EXE = 'Impactor-windows-x86_64-portable.exe'
 PLUMESIGN_EXE = 'plumesign-windows-x86_64.exe'
-BUNDLED = {IMPACTOR_EXE: '188e49ea40f0384c0a32988909efc3fe95dbd05842a3293db28917b23ada212f',   # 自编 v2.7.3-s2a6（Windows 实机，rustc 1.99.1；补丁 0001～0005；s2a6：0005 开通 anisette 用登录同一份本机身份，修 SRP -22410）
-           PLUMESIGN_EXE: '0fd734c19fe9fa47f7a2605ce7f227437f6b9df6f7835b8bb0c777015d26c31f'}   # s2a6 重编（0005 改 omnisette 开通身份与 plume_core 身份来源）
+BUNDLED = {IMPACTOR_EXE: '1fba984d8f384b742edf1ef84a45be27d24f625073b06bbb881073d3b6429a44',   # 自编 v2.7.3-s2a7（Windows 实机，rustc 1.99.1；补丁 0001～0006；s2a7：0006 按公钥复用证书，不看机器名，#2015）
+           PLUMESIGN_EXE: '532a7b6c3ebdb267584448c39e56255f9a2cf2213017c432c62a8b231a1f3dd7'}   # s2a7 重编（0006 改 plume_core 认证书 + plumesign 版本标记 +s2a-keycert）
 # Mac 启动器随包同版 plumesign（0.6.0 通用壳：Mac 的 Apple ID 改用它登录、签名，自管私钥，免费团队也能签程序库）。
-#   自编 v2.7.3-s2a6 通用版（补丁 0001～0005；0005 开通 anisette 用登录同一份本机身份，修 -22410）（Mac 实机，rustc 1.94.0，固定目标目录）；Mac 发版要公证，随包时由 sign_release.sh 用我们的开发者身份重签外层签名，内容不改
+#   自编 v2.7.3-s2a7 通用版（补丁 0001～0006；0006 按公钥复用证书，导入的 SideStore 证书也认，#2015）（Mac 实机，rustc 1.94.0，固定目标目录）；Mac 发版要公证，随包时由 sign_release.sh 用我们的开发者身份重签外层签名，内容不改
 PLUMESIGN_MAC = 'plumesign-macos-universal'
-BUNDLED_MAC = {PLUMESIGN_MAC: 'a4c94b2132a7b6bc8e583d03b10831ca48aa91187ff2f5a61a39534ec1bfc19a'}
+BUNDLED_MAC = {PLUMESIGN_MAC: 'cf8aef77a9289d59565d808fd46291029f7c9d4c35cf60ee4992b55cfbe93578'}
 PLUME_HOME_ENV = 'S2A_PLUME_HOME'   # 设了就是 plumesign 的数据目录（XDG_CONFIG_HOME，下面 PlumeImpactor/）：Mac 通用壳放启动器私有目录，不碰玩家 ~/.config
-OWN_BUILD = 's2a6'   # 自编版号（补丁或 Rust 版本变了加一，产物缓存目录 v{TESTED}-{OWN_BUILD}）
+OWN_BUILD = 's2a7'   # 自编版号（补丁或 Rust 版本变了加一，产物缓存目录 v{TESTED}-{OWN_BUILD}）
 SOURCE_TREE = f'https://github.com/claration/impactor/tree/v{TESTED}'
 # 自编产物的固定来源：我们公开仓的一个 Release（标签 impactor-v{TESTED}-{OWN_BUILD}，预发布、不进「最新版」，附补丁原文与许可）。
 #   打包时本机缓存没有（或哈希不对）就从这里下，按 BUNDLED / BUNDLED_MAC 钉的 SHA-256 校验，不符直接失败；缓存只是加速，任何一台机器都能打包

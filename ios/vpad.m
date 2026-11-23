@@ -718,7 +718,7 @@ static unsigned long long s2a_snap_bytes(NSString *dir);
 - (void)snapTapped { [self wakeGear]; [self snapSave:_snapDir]; }
 // 故障报修（11-19 维护者定：从齿轮菜单拿出来放齿轮右边）：写清哪款游戏、做了什么、看到了什么（必填）→ 打包上传、给短码（diag.m s2a_diag_report）
 - (void)reportTapped { [self wakeGear]; void s2a_diag_report(void); s2a_diag_report(); }
-// 快照的缩略图与存下的时间：先用快照里的小图 thumb.png，没有就用存档那一刻的整帧 a_last.png；时间取图的修改时间（存下那一刻写的）
+// 快照的缩略图与存下的时间：先用快照里的小图 thumb.png，没有就用存档那一刻的整帧 a_last.png；时间取图的修改时间（存下那一刻写的）；存的时候没取到画面的快照没有图，时间取清单 manifest.tsv 的修改时间
 static UIImage *snap_thumb(NSString *dir, CGFloat w, NSDate **when) {
     for (NSString *n in @[@"thumb.png", @"a_last.png"]) {
         NSString *p = [dir stringByAppendingPathComponent:n];
@@ -729,6 +729,7 @@ static UIImage *snap_thumb(NSString *dir, CGFloat w, NSDate **when) {
         UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:sz];
         return [r imageWithActions:^(__unused UIGraphicsImageRendererContext *c) { [im drawInRect:(CGRect){CGPointZero, sz}]; }];
     }
+    if (when) *when = [NSFileManager.defaultManager attributesOfItemAtPath:[dir stringByAppendingPathComponent:@"manifest.tsv"] error:nil].fileModificationDate;
     return nil;
 }
 static NSString *snap_when_text(NSDate *d) {

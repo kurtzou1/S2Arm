@@ -1159,7 +1159,7 @@ static int s2arm_copy_out(int fd, uint64_t off, uint64_t size, const char *dst) 
     if (!ok || rename(tmp, dst)) { if (ok) e = errno; unlink(tmp); errno = e; return -1; }
     return 0;
 }
-int s2a_s2arm_import(const char *proc_docs, const char *src, char *gid_out, size_t gid_n) {
+static int s2arm_import(const char *proc_docs, const char *src, char *gid_out, size_t gid_n) {
     g_s2arm_err[0] = g_s2arm_code[0] = 0; if (gid_out && gid_n) gid_out[0] = 0;
     char base[1200]; if (s2a_pack_base(base, sizeof base, proc_docs) <= 0) return s2arm_fail(-3, "ios_install_dir_unwritable", "文档根 %s 不是 …/Documents，找不到资源位置", proc_docs);
     char tarp[1400]; snprintf(tarp, sizeof tarp, "%s/.s2arm-import.%d.tar", base, (int)getpid());
@@ -1244,6 +1244,15 @@ int s2a_s2arm_import(const char *proc_docs, const char *src, char *gid_out, size
     if (gid_out && gid_n) snprintf(gid_out, gid_n, "%s", gid);
     LOG(".s2arm 导入：%s → 程序 %s（%u 个文件）、资源包派生件 %u 个；%s照常放「放这里导入」认领", gid, vdir, nprog, npack, romfs ? "romfs 镜像（.img）" : "game.img ");
     return 0;
+}
+// 导入与解开（s2a_pack_apply）同一把锁（D-WN2G）：导入一开始撤掉这款的 .applied / manifest.json，游戏库随即判「要解开」起后台解开；
+//   解开按旧 index.tsv 清旧文件，把导入正写着的 <库>.pak.<pid>.part 当旧文件删掉，导入改名时 ENOENT（三款各一次「写 …lib.00N.pak 失败：No such file or directory」）。
+//   导入写完、新的派生件都落盘之后解开才动这一款。锁序：g_scan_mu（扫描导入文件夹）→ g_apply_mu；解开从不拿 g_scan_mu
+int s2a_s2arm_import(const char *proc_docs, const char *src, char *gid_out, size_t gid_n) {
+    pthread_mutex_lock(&g_apply_mu);
+    int rc = s2arm_import(proc_docs, src, gid_out, gid_n);
+    pthread_mutex_unlock(&g_apply_mu);
+    return rc;
 }
 // 导入文件夹里认领 / 导入失败过的文件（0.6.0 自签走查 B1）：原先失败的文件原样留着、每次扫描（回前台、文件夹有写入、「重新检查」）都整份重新解压 / 读一遍。
 //   按「路径 + 大小 + 修改时间」记住，没变就跳过；玩家换了文件、或文件还在拷而变大，下次照常再试。进程内表（重开 App 会再试一次、再报一次）。持 s2a_img_scan 的锁用

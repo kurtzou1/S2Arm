@@ -45,6 +45,11 @@ int main(void) {
                 }
     // ⑥ 手柄体感按新鲜样本判（S2A_MOTION_STALE_MS = 500）：期望按「收到过、且最近一帧不超过 500 ms」手算
     const uint64_t T = 10000000;   // 任取的「现在」：10 秒（微秒）
+    { const float z[3] = {0, 0, 0}, g1[3] = {0, 0, 1}, tiny[3] = {0, 0.0001f, 0}, neg[3] = {-0.0f, -0.0f, -0.0f};
+      expect("⑦ 六个值全 0 → 空样本（传感器没开）", s2a_motion_blank(z, z), 1);
+      expect("⑦ -0.0 也是 0 → 空样本（日志里的 (-0.00, -0.00, -0.00)）", s2a_motion_blank(neg, neg), 1);
+      expect("⑦ 平放静止（重力 1 g、角速度 0）→ 不是空样本", s2a_motion_blank(g1, z), 0);
+      expect("⑦ 只有一点角速度 → 不是空样本", s2a_motion_blank(z, tiny), 0); }
     expect("⑥ 从没收到过样本 → 没有", s2a_motion_fresh(0, 0, T), 0);
     expect("⑥ 10 ms 前的样本 → 有", s2a_motion_fresh(1, T - 10000, T), 1);
     expect("⑥ 正好 500 ms 前 → 有（边界含）", s2a_motion_fresh(1, T - 500000, T), 1);
@@ -68,6 +73,6 @@ int main(void) {
     expect("⑧ 空槽（capable = 0）→ 不判", s2a_motion_pad_silent(0, 0, T), 0);
     if (bad) { printf("✗ t_motion_pick：%d 处不符\n", bad); return 1; }
     printf("✓ t_motion_pick：%d 组手算 + 全表 64 组一致性全符（有手柄体感就用手柄、不看触屏；手柄都没样本才用手机；无样本→NONE；"
-           "手柄样本超过 500 ms 不新鲜就当没有：不出样本 / 出一帧就停的手柄都回到手机）\n", 17 + 15);
+           "手柄样本超过 500 ms 不新鲜就当没有：不出样本 / 出一帧就停的手柄都回到手机）\n", 17 + 15 + 4);
     return 0;
 }

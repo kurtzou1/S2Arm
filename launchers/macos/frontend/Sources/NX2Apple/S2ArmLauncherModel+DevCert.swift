@@ -71,17 +71,19 @@ extension S2ArmLauncherModel {
     }
 
     /// 导入：成功即切到证书签名，回 nil；失败回原因句、失败码和给证书发放人的话（弹窗里显示；码 / 那段话决定同一页给不给出路按钮）。
+    ///   只选了 .p12（profile 空，#2015）成了：交给 Apple ID 签名沿用这张证书，回那句说明、adopted = true（弹窗留着显示，不是失败）
     ///   add = true：加一张，只有选证书窗给 device（顺手给那台选它）——出包页「再导入一张」不带设备，不改任何一台的选择；
     ///   false = 旧义「换一个」：顶掉选中那台在用的
-    func importDevCert(p12: String, profile: String, password: String, add: Bool = false, device: String? = nil) async -> (text: String, code: String?, request: String)? {
+    func importDevCert(p12: String, profile: String, password: String, add: Bool = false, device: String? = nil) async -> (text: String, code: String?, request: String, adopted: Bool)? {
         do {
-            _ = try await provider.devCertImport(p12: p12, profile: profile, password: password, device: add ? device : (device ?? selectedDevice?["udid"] as? String), add: add)
+            let info = try await provider.devCertImport(p12: p12, profile: profile, password: password, device: add ? device : (device ?? selectedDevice?["udid"] as? String), add: add)
+            if !info.adoptedMessage.isEmpty { return (info.adoptedMessage, nil, "", true) }
             if add, device != nil { devCertChoice = nil }
             await reloadDevCert()
             return nil
         } catch {
             let facts = (error as? JobFailure)?.outcome.failureDiagnostic?["facts"] as? [String: Any]
-            return (error.localizedDescription, (error as? JobFailure)?.code, facts?["requestText"] as? String ?? "")
+            return (error.localizedDescription, (error as? JobFailure)?.code, facts?["requestText"] as? String ?? "", false)
         }
     }
 

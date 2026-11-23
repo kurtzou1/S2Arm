@@ -27,76 +27,57 @@ static NSString *g_par_dir, *g_par_bdir;                                // g_par
 static NSMutableSet<NSString *> *g_par_bhave;                             // keys with a package file
 static int g_par_on;
 // #756（iPad Pro M1、iOS 18.3.1：每次起局预热后，后台写管线归档时在 Metal 里 objc_retain 崩，之后每次打开都闪退）：写归档只是「下次起得快」的优化，
-//   写不成不影响玩。每批写之前在归档目录留 .writing、写完删掉；起局发现它还在 = 上次进程死在写归档里 → 这台设备这个系统版本不再写（照常读已有的、照常编），
-//   记一行黄字。标记留着不删，之后每次起局都不写；系统 / GPU / 翻译链一变，identity.json 对不上，整个目录连标记一起删掉、重新开写
-//   #618 诊断包（v0.3.2，Mac）：一局 91 s 优雅退出时写线程正在写，收局 _exit(0) 把它连同标记一起留下，下一局误判成 #756、从此不写，每局重编管线、卡顿。
-//   根修：标记只表示「进程死在写里」，正常收局不算——收局一开头调 s2a_pso_archive_exit：停写（g_par_closing）并删标记（见那里）。
-//   标记内容带版本行 PAR_WRITING_TAG；修之前的版本留下的标记（没有这行）分不清是崩还是正常收局，删掉、重新写一次（真崩的设备会再崩一次、留下新标记，之后不再写）
+//   写不成不影响玩。哪台设备哪个系统版本不再写，只认两条（下面 ①②）：iOS 18.0–18.3 版本先验；崩溃处理器在崩溃线程正写归档时记下的全机标记。
+//   原先另有一条「每批写之前在归档目录留 .writing、写完删掉，起局见到它就不再写」：进程死在写里就算——可被划掉、内存超限被杀、挂起时被系统杀
+//   （0xdead10cc）也都死在写里、也留下它（11-23 诊断库 2194 份里 338 份报「the last run died while writing it」），这些设备从此每次起局重编全部管线。
+//   它分不清真崩和被杀，真崩已由崩溃处理器记全机标记，这条去掉：不再留标记；老版本留下的标记起局时删掉、照常写（par_check_dead_write）
 static int g_par_nowrite;
 static _Atomic int g_par_closing;   // 进程在收局：不再起新的一批写（s2a_pso_archive_exit）
-static pthread_mutex_t g_par_mkmu = PTHREAD_MUTEX_INITIALIZER;   // 留标记与收局删标记互斥（只包住一次 open / write / fsync，不包 Metal）
-#define PAR_WRITING @".writing"
-#define PAR_WRITING_TAG "s2a-pso-writing 2"
-// 写一批之前留标记：版本行 + 进程号 + 批文件名。已在收局返回 0、不留（与 s2a_pso_archive_exit 在 g_par_mkmu 下互斥：
-//   收局先置位再删，持锁期间留下的标记一定在它删之前，之后留的一定看到收局，标记不会留到 _exit 之后）
-static int par_mark_writing(const char *path, NSString *batch) {
+static pthread_mutex_t g_par_mkmu = PTHREAD_MUTEX_INITIALIZER;   // 起一批写与收局互斥：收局置位之后不再起新的一批
+#define PAR_WRITING @".writing"   // 老版本（11-23 之前）写归档时留的标记文件名：只认来删
+// 起一批写之前问：已在收局返回 0、不写（#618：收局 _exit 时写线程正写在 Metal 里也无妨，丢一批下次再写）
+static int par_may_write(void) {
     pthread_mutex_lock(&g_par_mkmu);
     int go = !atomic_load(&g_par_closing);
-    if (go) { int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-              if (fd >= 0) { dprintf(fd, PAR_WRITING_TAG " pid=%d %s\n", getpid(), batch.UTF8String); fsync(fd); close(fd); } }
     pthread_mutex_unlock(&g_par_mkmu);
     return go;
 }
 // #756 进阶（11-16）：每款各自的 .writing 标记要每款先崩一次才学会，且用户划掉 / 内存杀也会留下它（玩家诊断 27.x 上 3214 局里 143 局），不能直接全机共享。另加两道：
 //   ① 版本先验：iOS 18.0–18.3.x 不写。依据玩家诊断：崩溃线程栈在归档写入器里的 7 局全在 18.1.1 / 18.3.2，18.2 / 18.3.2 有 18 局「上次死在写里」、0 局写成；18.4、18.7.x 共 13 局写成、0 崩
-//   ② 全机学习：只在崩溃线程正在写归档（g_par_in_write）时由崩溃处理器（runtime/src/crash.c）记一行系统版本串进全机标记（Application Support/S2Arm/pso_archive_dead.txt）；
-//      起局读到本系统版本串就不写。版本串含构建号，系统升级后自动不再命中、重新判
-static __thread int g_par_in_write;
-static char g_par_dead_path[1024], g_par_os_key[192];
+//   ② 原有的「全机学习」（崩溃线程正在写归档时由崩溃处理器记系统版本串进 Application Support/S2Arm/pso_archive_dead.txt，起局读到就整机不写）去掉（11-23 维护者：要根修）：
+//      唯一留下崩溃现场的那次（iPhone18,2 iOS 26.0、0.6.7，写进 1852 条后崩）对上符号 = serializeToURL:error: 失败返回后，ARC 立刻 retain 它写回的 NSError
+//      时总线错——Metal 在序列化失败路径上交回的 error 指针是失效的（返回那一刻就坏，不是我们自动释放池排空后才读）。根修：写归档的几个调用不取 error（见 par_write_batch），
+//      失败只看返回值；全机标记不再记、不再读，老版本留下的标记起局删掉（这台机从此照常写）。全机标记涉及 macOS 15.1 / 15.3、iOS 26.0 / 27.2 / 27.2.1 共 6 个构建，不是某一版独有
+static char g_par_os_key[192];
 static int par_os_gate(int ios, long major, long minor) { return ios && major == 18 && minor < 4; }
-void s2a_pso_archive_crash_note(void);
-void s2a_pso_archive_crash_note(void) {   // 崩溃处理器在崩溃线程上调（信号处理里：只用 open / write / close）
-    if (!g_par_in_write || !g_par_dead_path[0] || !g_par_os_key[0]) return;
-    int fd = open(g_par_dead_path, O_WRONLY | O_CREAT | O_APPEND, 0644); if (fd < 0) return;
-    (void)!write(fd, g_par_os_key, strlen(g_par_os_key)); (void)!write(fd, "\n", 1); close(fd);
-}
-static int par_dead_global_has(void) {   // 全机标记里有本系统版本串
-    if (!g_par_dead_path[0] || !g_par_os_key[0]) return 0;
-    NSString *s = [NSString stringWithContentsOfFile:@(g_par_dead_path) encoding:NSUTF8StringEncoding error:nil];
-    for (NSString *ln in [s componentsSeparatedByString:@"\n"]) if ([ln isEqualToString:@(g_par_os_key)]) return 1;
-    return 0;
+static int par_dead_cleanup(NSString *as_dir) {   // 老版本的全机标记删掉；删了回 1（单测直接调，传临时目录）
+    NSString *dead = [[as_dir stringByAppendingPathComponent:@"S2Arm"] stringByAppendingPathComponent:@"pso_archive_dead.txt"];
+    if (unlink(dead.fileSystemRepresentation) != 0) return 0;
+    MLOG("【黄】 pipeline archive: removed the device-wide \"crashed inside the archive writer\" marker from an older build: the crash was reading the error Metal returns from a failed serialize, which this build no longer reads; writing again (#756)");
+    return 1;
 }
 static void par_global_init(void) {
     NSString *osk = NSProcessInfo.processInfo.operatingSystemVersionString ?: @""; snprintf(g_par_os_key, sizeof g_par_os_key, "%s", osk.UTF8String);
     NSURL *as = [NSFileManager.defaultManager URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
-    if (!as) return;
-    NSString *dir = [as.path stringByAppendingPathComponent:@"S2Arm"];
-    [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-    snprintf(g_par_dead_path, sizeof g_par_dead_path, "%s", [dir stringByAppendingPathComponent:@"pso_archive_dead.txt"].fileSystemRepresentation);
+    if (as) par_dead_cleanup(as.path);
 }
-// ①② 之一命中返回 1（并打一行原因）。单测直接调
+// ① 命中返回 1（并打一行原因）。单测直接调
 static int par_gate_or_learned(int ios, long major, long minor) {
     if (par_os_gate(ios, major, minor)) { MLOG("【黄】 pipeline archive: iOS %ld.%ld: Metal's archive writer crashes on iOS 18.0–18.3 (#756, player diagnoses): reading it as usual, writing nothing", major, minor); return 1; }
-    if (par_dead_global_has()) { MLOG("【黄】 pipeline archive: a game on this device crashed inside the archive writer on this OS version (%s, #756): reading it as usual, writing nothing", g_par_os_key); return 1; }
     return 0;
 }
-static void par_check_dead_write(void) {   // 起局（打开归档目录时）调：上次进程死在写归档里 → 这个系统版本不再写
+static void par_check_dead_write(void) {   // 起局（打开归档目录时）调：版本先验或崩溃处理器记过真崩 → 这个系统版本不再写；老版本的 .writing 标记删掉
     { NSOperatingSystemVersion v = NSProcessInfo.processInfo.operatingSystemVersion;
       if (par_gate_or_learned(TARGET_OS_IPHONE, (long)v.majorVersion, (long)v.minorVersion)) { g_par_nowrite = 1; return; } }
+    // 老版本留下的 .writing（进程死在写里就留：被划掉 / 内存超限 / 挂起被杀都算，分不清真崩）：没有崩溃处理器的真崩记录佐证（上面全机标记没命中），删掉、照常写。
+    //   被它停写过的设备由此自己恢复，不用玩家做什么
     NSString *path = [g_par_dir stringByAppendingPathComponent:PAR_WRITING];
-    NSData *d = [NSData dataWithContentsOfFile:path]; if (!d) return;
-    NSString *s = [[[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] ?: @"";
-    if (![s hasPrefix:@PAR_WRITING_TAG " "]) {   // 修之前的标记：正常收局也会留下（#618），不当崩溃
-        unlink(path.fileSystemRepresentation);
-        MLOG("【黄】 pipeline archive: removed a .writing marker from an older build (it was also left by a normal exit then, #618): writing again; a real crash in the writer leaves a new one");
-        return;
-    }
-    g_par_nowrite = 1;
-    MLOG("【黄】 pipeline archive: the last run died while writing it (%s; #756: Metal crashed inside the archive writer on iOS 18): reading it as usual, writing nothing more on this OS version",
-         [s substringFromIndex:strlen(PAR_WRITING_TAG " ")].UTF8String);
+    if (unlink(path.fileSystemRepresentation) == 0)
+        MLOG("【黄】 pipeline archive: removed a .writing marker from an older build (left by any death while writing: a swipe, a memory kill, a suspension kill — not proof of a crash in Metal): writing again; a real crash in the writer is recorded by the crash handler (#756)");
 }
 static const char *g_par_harvest;                                        // S2A_PSO_HARVEST: the folder the harvest writes into (nvn_pso_harvest); writes at once instead of noting
 static _Atomic uint64_t g_par_hits, g_par_misses, g_par_written, g_par_write_failed, g_par_stale, g_par_ga_removed;
+static _Atomic uint64_t g_par_ser_failed;   // 序列化没成的批（Metal 返回失败；它的 error 不读，见 par_write_batch）
 static __thread int par_write_in_place;                                  // the prewarm's threads: what they compile is noted for writing (par_flush_bg)
 static NSMutableArray *g_par_todo;                                       // @[key, descriptor] noted by the prewarm, written beside it (par_writer)
 
@@ -150,8 +131,14 @@ static NSSet<NSString *> *par_ga_list(int own_only) {
 //   gpuarchiver-* 也算成 A 新建的被删掉，B 的序列化找不到自己的临时目录（11-01 普查 93 款里 12 款报 cannot remove、6 款报 cannot write …
 //   Failed to generate machO: cannot pack / cannot read …/C//…），存档没写成、下一局重编。写存档整段（列目录、建、序列化、再列、删）在这把锁里串行，
 //   前后两次列目录之间多出的只会是本进程的。锁文件放在第一个 gpuarchiver 目录的上一级（同一用户的宿主看到同一路径）；打不开锁照旧只用进程内锁
+//   iPhone / iPad / Apple TV 不拿这把文件锁：App 容器里只有本进程一个宿主（没有别的进程会碰同一个 gpuarchiver 目录），进程内的 g_par_wmu 已经串行；
+//   而存档写手在后台低优先级跑、一批可写几秒，切到后台时系统发现挂起的 App 还拿着文件锁就直接杀掉（RunningBoard 0xdead10cc，诊断 D-7NAV 11-23 iPhone19,2：
+//   符号化后第 156 号线程正停在 par_write_batch → serializeToURL，锁就是这一把），玩家看到的是「切出去回来游戏没了」
 #include <sys/file.h>
 static int par_ga_lock(void) {
+#if TARGET_OS_IPHONE
+    return -1;
+#else
     static int fd = -2; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
     pthread_mutex_lock(&mu);
     if (fd == -2) { NSArray *d = par_ga_dirs(); fd = -1;
@@ -160,6 +147,7 @@ static int par_ga_lock(void) {
     pthread_mutex_unlock(&mu);
     if (fd >= 0) while (flock(fd, LOCK_EX) != 0 && errno == EINTR) {}
     return fd;
+#endif
 }
 static void par_ga_unlock(int fd) { if (fd >= 0) flock(fd, LOCK_UN); }
 static void par_ga_remove_new(NSSet<NSString *> *before) {
@@ -272,14 +260,16 @@ static void par_write(NSString *key, id desc) {
     NSSet<NSString *> *before = par_ga_list(0);
     @autoreleasepool {
         id<MTLBinaryArchive> a = [g_dev newBinaryArchiveWithDescriptor:[MTLBinaryArchiveDescriptor new] error:&e];
-        ok = a && ([desc isKindOfClass:MTLRenderPipelineDescriptor.class] ? [a addRenderPipelineFunctionsWithDescriptor:desc error:&e]
-                                                                          : [a addComputePipelineFunctionsWithDescriptor:desc error:&e]);
-        if (ok) ok = [a serializeToURL:[NSURL fileURLWithPath:temp] error:&e] && rename(temp.fileSystemRepresentation, path.fileSystemRepresentation) == 0;
+        // 加管线 / 序列化不取 error（见 par_write_batch：Metal 失败路径交回的 error 是失效指针，读它就崩）
+        ok = a && ([desc isKindOfClass:MTLRenderPipelineDescriptor.class] ? [a addRenderPipelineFunctionsWithDescriptor:desc error:nil]
+                                                                          : [a addComputePipelineFunctionsWithDescriptor:desc error:nil]);
+        if (ok && ![a serializeToURL:[NSURL fileURLWithPath:temp] error:nil]) { ok = NO; atomic_fetch_add(&g_par_ser_failed, 1); }
+        if (ok) ok = rename(temp.fileSystemRepresentation, path.fileSystemRepresentation) == 0;
     }
     par_ga_remove_new(before);
     par_ga_unlock(lk); pthread_mutex_unlock(&g_par_wmu);
     if (!ok) { unlink(temp.fileSystemRepresentation);
-               if (atomic_fetch_add(&g_par_write_failed, 1) < 4) MLOG("【红】 pipeline archive: cannot write %s: %s", path.UTF8String, e ? e.localizedDescription.UTF8String : "rename failed"); return; }
+               if (atomic_fetch_add(&g_par_write_failed, 1) < 4) MLOG("【红】 pipeline archive: cannot write %s: %s", path.UTF8String, e ? e.localizedDescription.UTF8String : "adding / serializing failed (Metal's error not read) or rename failed"); return; }
     pthread_mutex_lock(&g_par_mu); [g_par_have addObject:key]; pthread_mutex_unlock(&g_par_mu);
     atomic_fetch_add(&g_par_written, 1);
 }
@@ -303,19 +293,18 @@ static void par_write_batch(NSArray<NSArray *> *items) {
     NSMutableArray<NSString *> *keys = [NSMutableArray array]; NSError *e = nil; BOOL ok = NO;
     pthread_mutex_lock(&g_par_wmu); int lk = par_ga_lock();
     NSSet<NSString *> *before = par_ga_list(0);
-    // #756：写之前留标记、写完（成不成都算）删掉；进程死在这一段里，标记留下，下次起局就不再写。#618：已在收局就不留、不写（par_mark_writing）
-    const char *writing = [g_par_dir stringByAppendingPathComponent:PAR_WRITING].fileSystemRepresentation;
-    if (!par_mark_writing(writing, name)) { par_ga_unlock(lk); pthread_mutex_unlock(&g_par_wmu); return; }
-    g_par_in_write = 1;   // 崩在这一段里：崩溃处理器记全机标记（s2a_pso_archive_crash_note）
+    // #618：已在收局就不写（par_may_write）
+    if (!par_may_write()) { par_ga_unlock(lk); pthread_mutex_unlock(&g_par_wmu); return; }
     @autoreleasepool {
         id<MTLBinaryArchive> a = [g_dev newBinaryArchiveWithDescriptor:[MTLBinaryArchiveDescriptor new] error:&e];
-        for (NSArray *it in todo) { NSError *e1 = nil; id desc = it[1];
-            BOOL one = a && ([desc isKindOfClass:MTLRenderPipelineDescriptor.class] ? [a addRenderPipelineFunctionsWithDescriptor:desc error:&e1] : [a addComputePipelineFunctionsWithDescriptor:desc error:&e1]);
-            if (one) [keys addObject:it[0]]; else { e = e1; atomic_fetch_add(&g_par_write_failed, 1); } }
-        if (keys.count) ok = [a serializeToURL:[NSURL fileURLWithPath:temp] error:&e] && rename(temp.fileSystemRepresentation, path.fileSystemRepresentation) == 0;
+        // 加管线与序列化不取 error（11-23 #756 根修）：唯一留下现场的那次真崩 = serializeToURL:error: 失败返回后 ARC retain 写回的 NSError 时总线错——
+        //   Metal 在失败路径交回的 error 指针返回那一刻就已失效，读它（哪怕只是 ARC 的写回 retain）就崩。失败只看返回值、计数（g_par_ser_failed），这一批下次再写
+        for (NSArray *it in todo) { id desc = it[1];
+            BOOL one = a && ([desc isKindOfClass:MTLRenderPipelineDescriptor.class] ? [a addRenderPipelineFunctionsWithDescriptor:desc error:nil] : [a addComputePipelineFunctionsWithDescriptor:desc error:nil]);
+            if (one) [keys addObject:it[0]]; else atomic_fetch_add(&g_par_write_failed, 1); }
+        if (keys.count && ![a serializeToURL:[NSURL fileURLWithPath:temp] error:nil]) atomic_fetch_add(&g_par_ser_failed, 1);
+        else if (keys.count) ok = rename(temp.fileSystemRepresentation, path.fileSystemRepresentation) == 0;
     }
-    g_par_in_write = 0;
-    unlink(writing);
     par_ga_remove_new(before);
     if (ok) {   // the index after the file: a line always names a file that is there
         NSMutableString *lines = [NSMutableString string]; for (NSString *k in keys) [lines appendFormat:@"%@\t%@\n", k, name];
@@ -324,7 +313,7 @@ static void par_write_batch(NSArray<NSArray *> *items) {
     }
     par_ga_unlock(lk); pthread_mutex_unlock(&g_par_wmu);
     if (!ok) { unlink(temp.fileSystemRepresentation);
-               if (atomic_fetch_add(&g_par_write_failed, 1) < 4) MLOG("【红】 pipeline archive: cannot write the batch %s (%lu pipelines): %s", name.UTF8String, (unsigned long)keys.count, e ? e.localizedDescription.UTF8String : "rename or index failed"); return; }
+               if (atomic_fetch_add(&g_par_write_failed, 1) < 4) MLOG("【红】 pipeline archive: cannot write the batch %s (%lu pipelines): %s (serializations failed so far %llu)", name.UTF8String, (unsigned long)keys.count, e ? e.localizedDescription.UTF8String : "serializing failed (Metal's error not read), or rename / index failed", (unsigned long long)atomic_load(&g_par_ser_failed)); return; }
     pthread_mutex_lock(&g_par_mu); for (NSString *k in keys) { g_par_bmap[k] = name; [g_par_have addObject:k]; } pthread_mutex_unlock(&g_par_mu);
     atomic_fetch_add(&g_par_written, keys.count);
 }
@@ -350,15 +339,12 @@ static void par_note(NSString *key, id desc) {
     pthread_mutex_unlock(&g_par_mu);
     if (start) dispatch_async(s2a_qos_global(S2A_QOS_IO_BG), ^{ par_writer(); });
 }
-// #618：进程正常收局（runtime/src/lifecycle.c s2a_host_shutdown 一开头经 dlsym 调，两个 _exit(0) 出口之前）：不再起新的一批写，删掉本进程留的 .writing。
-//   本局起局就见到标记（g_par_nowrite，上次真死在写里）时不删：那是 #756 的持久判定，本局没写过、标记不是本局的。
-//   正在写的那一批不等（收局有 1.5 s 兜底，丢一批下次再写），它随 _exit 结束不算「死在写里」。之后写线程若真在 Metal 里崩，这一次漏记，
-//   下一局再写再崩时照样留下标记（#756 是每局都崩）
+// #618：进程正常收局（runtime/src/lifecycle.c s2a_host_shutdown 一开头经 dlsym 调，两个 _exit(0) 出口之前）：不再起新的一批写。
+//   正在写的那一批不等（收局有 1.5 s 兜底，丢一批下次再写），它随 _exit 结束；不留任何标记，下一局照常写
 void s2a_pso_archive_exit(void);
 void s2a_pso_archive_exit(void) {
     pthread_mutex_lock(&g_par_mkmu);
     atomic_store(&g_par_closing, 1);
-    NSString *dir = g_par_dir; if (dir && !g_par_nowrite) unlink([dir stringByAppendingPathComponent:PAR_WRITING].fileSystemRepresentation);
     pthread_mutex_unlock(&g_par_mkmu);
 }
 // After the prewarm: how far the writer is (it goes on until what the prewarm noted is written)

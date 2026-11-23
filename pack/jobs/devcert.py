@@ -852,9 +852,47 @@ def _renewal(c, s, sha, prof):
     return None
 
 
+# 只选了 .p12（#2015：免费 Apple ID 拿不到描述文件，例如从 SideStore 导出的证书）：交给 Apple ID 签名当这个团队的证书，描述文件由 plumesign 用账号自己申请
+ADOPT_NO_LOGIN = ("只选了 .p12 证书时，S2Arm 用你登录的 Apple ID 自己申请描述文件：先用 Apple ID 登录再导入；"
+                  "不用 Apple ID 的话，请再选上这张证书配套的描述文件（.mobileprovision）。")
+ADOPT_OLD_TOOL = "这个版本的签名工具还不能沿用导入的证书：更新 S2Arm 后再导入，或者再选上这张证书配套的描述文件（.mobileprovision）。"
+ADOPT_ABSENT = ("这张证书不在当前登录的 Apple ID（团队 {0}）的证书列表里：它可能属于别的 Apple ID，或已被撤销。"
+                "改用这张证书所属的 Apple ID 登录后再导入，或者再选上这张证书配套的描述文件（.mobileprovision）。")
+ADOPT_UNLISTED = "没能列出这个 Apple ID 的证书（网络不通或登录已过期），这次什么都没改：检查网络、必要时重新登录 Apple ID，再导入一次。"
+ADOPT_DONE = ("已改用这张证书：之后用 Apple ID 签名时，S2Arm 用它签名、用你的 Apple ID 自己申请描述文件，不新建证书，"
+              "也不会撤销 SideStore / AltStore 正在用的证书。回到装机页再装一次即可。")
+
+
+def adopt(c, src, password):
+    """只给了 .p12：私钥交给 Apple ID 签名用的 plumesign（keys/<团队>/key.pem，install_win.adopt_key），之后签名复用这张证书、描述文件用账号现申请。
+    不动开发者证书签名的存档、不切签名方式。没登录 / 工具不认 / 证书不在这个账号里 / 列不出 → Failure（说清下一步，什么都没改）"""
+    import install
+    if os.name != "nt":
+        install.plume_home(c)
+    W = install.win_install_mod(c)
+    team = W.impactor.selected_team()
+    if not team:
+        raise Failure(ADOPT_NO_LOGIN, code="apple_not_signed_in")
+    exe = install.plumesign_exe(c, W)
+    if not exe or not W.keycert(exe):
+        raise Failure(ADOPT_OLD_TOOL, code="devcert_invalid")
+    c.begin("读取证书", 1, 2)
+    with tempfile.TemporaryDirectory(dir=folder(c)) as t:
+        norm = Path(t) / "cert.p12"
+        normalize_p12(src, norm, password)   # 密码不对 / 文件坏 → devcert_password
+        key, _ = _read_p12(c, norm, password)
+    c.begin("核对 Apple ID 里的证书", 2, 2)
+    got = W.adopt_key(exe, team, key, log=c.logs / (c.task + "-adopt.log"))
+    if got is None:
+        raise Failure(ADOPT_UNLISTED)
+    if got == "absent":
+        raise Failure(ADOPT_ABSENT.format(team), code="devcert_invalid")
+    return dict(adopted=True, team=team, certName=got["name"], machine=got["machine"], created=got["created"], message=ADOPT_DONE)
+
+
 def operation(c):
     """作业 devCert：
-    import（p12Path + profilePath，密码走环境变量）：add = true 加一张（新 Mac 选证书窗 / 再导入一张；带 device = 顺手给这台选它）；
+    import（p12Path + profilePath，密码走环境变量；只给 p12Path = 交给 Apple ID 签名沿用这张证书，见 adopt）：add = true 加一张（新 Mac 选证书窗 / 再导入一张；带 device = 顺手给这台选它）；
            不带 add = 旧义「换一个」：顶掉这台（没设备 = 缺省）那张，选过它的设备跟着换；这台还没有能用的（要玩家选）就加一张给它，不顶别的台的；
     status（带 device：这台用哪张、要不要问）；choose（device + cert = 条目号）；use（active 布尔）；delete（cert = 删这一条；不带 = 全删）"""
     action = c.r.get("action") or "status"
@@ -865,6 +903,8 @@ def operation(c):
         if password is None:
             raise Failure("没收到证书密码。", code="devcert_password")
         src, prof_src = Path(c.r.get("p12Path") or ""), Path(c.r.get("profilePath") or "")
+        if src.is_file() and not c.r.get("profilePath"):
+            return adopt(c, src, password)
         for p, text in ((src, "找不到 .p12 证书：{0}"), (prof_src, "找不到 .mobileprovision 描述文件：{0}")):
             if not p.is_file():
                 raise Failure(text.format(p), code="devcert_invalid")

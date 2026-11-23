@@ -1,0 +1,996 @@
+diff --git a/src/Ryujinx.Common/Utilities/NetworkHelpers.cs b/src/Ryujinx.Common/Utilities/NetworkHelpers.cs
+index 3df23cf622fd947229433c3fc3dc16cf5ebd5c69..9753bf67bbfdb2e845ccd153d46c076a2d05f765 100644
+--- a/src/Ryujinx.Common/Utilities/NetworkHelpers.cs
++++ b/src/Ryujinx.Common/Utilities/NetworkHelpers.cs
+@@ -93,48 +93,33 @@ namespace Ryujinx.Common.Utilities
+                 : Array.Find(interfaces, adapter => adapter.Id == lanInterfaceId);
+             UnicastIPAddressInformation preferredAddress = GetIpv4Unicast(preferred);
+ 
+-            if (remoteAddress != null)
+-            {
+-                IPAddress source = ProbeRouteSource(remoteAddress, preferredAddress?.Address);
+-                if (source != null)
+-                {
+-                    var routed = FindInterfaceByAddress(source);
+-                    NetworkInterface routedAdapter = FindAdapterByAddress(source);
+-                    if (routed.properties != null && (!IsLocalTarget(remoteAddress) || !IsTunnel(routedAdapter)))
+-                    {
+-                        return routed;
+-                    }
+-                }
+-
+-                // An explicit interface remains authoritative while it is active. This also covers
+-                // targets for which a connect-only UDP probe cannot expose a source address.
+-                if (preferredAddress != null && preferred is { OperationalStatus: OperationalStatus.Up })
+-                {
+-                    return (preferred.GetIPProperties(), preferredAddress);
+-                }
+-            }
+-            else if (preferredAddress != null && preferred is { OperationalStatus: OperationalStatus.Up })
++            // An explicitly configured interface is authoritative while it is active.
++            if (preferredAddress != null && preferred is { OperationalStatus: OperationalStatus.Up })
+             {
+                 return (preferred.GetIPProperties(), preferredAddress);
+             }
+ 
+-            // A route probe resolves the usual "which adapter wins?" ambiguity without sending
+-            // traffic. Before a peer is known, the system default route is the strongest signal,
+-            // but a VPN source must be rejected for a LAN room. If there is no usable default
+-            // route, score every physical gateway source instead of trusting enumeration order.
++            // Which adapter carries LAN traffic is decided by scoring every usable adapter, never
++            // by a single default-route probe: VPN clients and split-tunnel rules install specific
++            // routes (for example 192.0.2.0/24) that hijack such a probe onto a tunnel or an
++            // unrelated adapter. Likewise, probing a shared gateway without binding a source
++            // collapses every same-subnet adapter onto one kernel-chosen address. Both failure
++            // modes are independent of adapter count or enumeration order.
+             IPAddress defaultSource = null;
+             if (remoteAddress == null)
+             {
+-                IPAddress routedSource = ProbeRouteSource(DefaultRouteProbeTarget, null);
+-                if (!IsTunnel(FindAdapterByAddress(routedSource)))
+-                {
+-                    defaultSource = routedSource;
+-                }
+-
+-                defaultSource ??= ProbeLanGatewaySource(interfaces);
++                // No peer yet (room host): score each adapter's own address independently.
++                defaultSource = ProbeLanGatewaySource(interfaces);
++            }
++            else if (IsLocalTarget(remoteAddress))
++            {
++                // LAN peer (joining a room): score every adapter against the peer's subnet so a
++                // second same-subnet adapter cannot be hidden by one kernel-chosen source.
++                defaultSource = ProbeLanRouteSource(interfaces, remoteAddress);
+             }
+             else
+             {
++                // Non-LAN target: the OS route probe is meaningful and cannot be a LAN VPN trap.
+                 defaultSource = ProbeRouteSource(remoteAddress, null);
+             }
+ 
+@@ -154,11 +139,11 @@ namespace Ryujinx.Common.Utilities
+             return SelectBestLocalInterface(interfaces, remoteAddress, preferredAddress?.Address);
+         }
+ 
+-        // The probe must use a non-zero destination port: macOS rejects connect() on a UDP socket
+-        // whose destination port is 0 (EADDRNOTAVAIL). Any non-zero port performs the same route
+-        // lookup without sending a packet.
++        // macOS rejects connect() on a UDP socket whose destination port is 0 (EADDRNOTAVAIL), so a
++        // port-0 probe returned null there and selection silently fell back to enumeration order —
++        // precisely the multi-homed machines this helper exists for. Any non-zero port performs the
++        // same route lookup without sending a packet.
+         private const int RouteProbePort = 9;
+-        private static readonly IPAddress DefaultRouteProbeTarget = new(new byte[] { 192, 0, 2, 1 });
+ 
+         internal readonly record struct LanRouteCandidate(
+             IPAddress Source,
+@@ -171,8 +156,10 @@ namespace Ryujinx.Common.Utilities
+ 
+         // Rank every discovered source deterministically. A machine can have an arbitrary number
+         // of wired, wireless, virtual and tunnel adapters; the first one enumerated is not a
+-        // reliable answer. The default-route probe remains authoritative when it yields a LAN
+-        // adapter, while this score handles machines whose default route is a VPN.
++        // reliable answer. A wired LAN adapter wins decisively over Wi-Fi on the same subnet —
++        // a common laptop dock layout where the cable is the real path to a console/AP — while
++        // tunnels, virtual and link-local sources are rejected. Scores are widely separated so
++        // that a weaker signal (for example gateway subnet) can never overturn a stronger one.
+         internal static IPAddress SelectBestLanRouteCandidate(IReadOnlyList<LanRouteCandidate> candidates)
+         {
+             LanRouteCandidate best = default;
+@@ -190,11 +177,11 @@ namespace Ryujinx.Common.Utilities
+ 
+                 int score = 0;
+                 score += candidate.IsUp ? 1000 : -10000;
+-                score += candidate.IsTunnel ? -5000 : 0;
++                score += candidate.IsTunnel ? -100000 : 0;
+                 score += candidate.IsPhysical ? 100 : 0;
+-                score += candidate.IsWired ? 20 : 0;
++                score += candidate.IsWired ? 20000 : 0;
+                 score += candidate.SharesGatewaySubnet ? 400 : 0;
+-                score += candidate.IsLinkLocal ? -2000 : 0;
++                score += candidate.IsLinkLocal ? -50000 : 0;
+ 
+                 if (!hasBest ||
+                     score > bestScore ||
+@@ -244,6 +231,12 @@ namespace Ryujinx.Common.Utilities
+         // The OS route to a LAN gateway says which adapter carries local traffic while no peer
+         // address is known yet. Collect and rank all candidates so the result does not depend on
+         // the number of adapters or the order NetworkInterface happens to enumerate them in.
++        //
++        // Crucially, bind EACH adapter's own address as the probe source. Probing a gateway with a
++        // null source asks the kernel for "the" source address, and when several adapters share a
++        // subnet (Ethernet + Wi-Fi on 192.168.x) they all report the same one — collapsing the
++        // candidate list onto a single, often wrong, adapter. Binding pins the answer to this
++        // adapter so every real NIC is represented and the score can pick the wired one.
+         private static IPAddress ProbeLanGatewaySource(NetworkInterface[] interfaces)
+         {
+             List<LanRouteCandidate> candidates = [];
+@@ -257,6 +250,18 @@ namespace Ryujinx.Common.Utilities
+                     continue;
+                 }
+ 
++                UnicastIPAddressInformation local = GetIpv4Unicast(adapter);
++                if (local == null || IPAddress.IsLoopback(local.Address))
++                {
++                    continue;
++                }
++
++                NetworkInterfaceType type = adapter.NetworkInterfaceType;
++                bool isPhysical = IsPhysicalLanAdapter(type);
++                bool isWired = type is NetworkInterfaceType.Ethernet or
++                    NetworkInterfaceType.GigabitEthernet;
++                bool sharesGatewaySubnet = false;
++
+                 foreach (GatewayIPAddressInformation gatewayInfo in adapter.GetIPProperties().GatewayAddresses)
+                 {
+                     IPAddress gateway = gatewayInfo.Address;
+@@ -265,33 +270,61 @@ namespace Ryujinx.Common.Utilities
+                         continue;
+                     }
+ 
+-                    IPAddress source = ProbeRouteSource(gateway, null);
+-                    if (source == null)
++                    if (IsSameSubnet(local, gateway))
+                     {
+-                        continue;
++                        sharesGatewaySubnet = true;
+                     }
++                }
+ 
+-                    NetworkInterface sourceAdapter = FindAdapterByAddress(source);
+-                    UnicastIPAddressInformation sourceAddress = FindIpv4Unicast(sourceAdapter, source);
+-                    if (sourceAddress == null)
+-                    {
+-                        continue;
+-                    }
++                candidates.Add(new LanRouteCandidate(
++                    local.Address,
++                    true,
++                    false,
++                    isPhysical,
++                    isWired,
++                    sharesGatewaySubnet,
++                    local.Address.ToString().StartsWith("169.254.", StringComparison.Ordinal)));
++            }
++
++            return SelectBestLanRouteCandidate(candidates);
++        }
+ 
+-                    NetworkInterfaceType type = sourceAdapter.NetworkInterfaceType;
+-                    bool isPhysical = IsPhysicalLanAdapter(type);
+-                    bool isWired = type is NetworkInterfaceType.Ethernet or
+-                        NetworkInterfaceType.GigabitEthernet;
+-
+-                    candidates.Add(new LanRouteCandidate(
+-                        source,
+-                        sourceAdapter.OperationalStatus == OperationalStatus.Up,
+-                        IsTunnel(sourceAdapter),
+-                        isPhysical,
+-                        isWired,
+-                        IsSameSubnet(sourceAddress, gateway),
+-                        sourceAddress.Address.ToString().StartsWith("169.254.", StringComparison.Ordinal)));
++        // A peer is known (joining an existing room). Rank every adapter by the route to THAT
++        // peer with each adapter's own address bound as source. This replaces the single
++        // ProbeRouteSource(remote, null) call, which otherwise reports one kernel-chosen source
++        // — the one a VPN's specific routes hijacked onto Wi-Fi — no matter how many NICs exist.
++        private static IPAddress ProbeLanRouteSource(NetworkInterface[] interfaces, IPAddress remoteAddress)
++        {
++            List<LanRouteCandidate> candidates = [];
++
++            foreach (NetworkInterface adapter in interfaces)
++            {
++                if (adapter.OperationalStatus != OperationalStatus.Up ||
++                    adapter.NetworkInterfaceType == NetworkInterfaceType.Loopback ||
++                    IsTunnel(adapter))
++                {
++                    continue;
+                 }
++
++                UnicastIPAddressInformation local = GetIpv4Unicast(adapter);
++                if (local == null || IPAddress.IsLoopback(local.Address))
++                {
++                    continue;
++                }
++
++                NetworkInterfaceType type = adapter.NetworkInterfaceType;
++                bool isPhysical = IsPhysicalLanAdapter(type);
++                bool isWired = type is NetworkInterfaceType.Ethernet or
++                    NetworkInterfaceType.GigabitEthernet;
++
++                candidates.Add(new LanRouteCandidate(
++                    local.Address,
++                    true,
++                    false,
++                    isPhysical,
++                    isWired,
++                    IsSameSubnet(local, remoteAddress),
++                    local.Address.ToString().StartsWith("169.254.", StringComparison.Ordinal)));
+             }
+ 
+             return SelectBestLanRouteCandidate(candidates);
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
+index cf0cc4b1d9cf96d6977760c783b752000811faae..bae8375691ae307fa3922c3254f6e9bd5f54118e 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
+@@ -30,6 +30,34 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+         private const string DefaultSubnetMask = "255.255.255.0";
+         private const bool IsDevelopment = false;
+ 
++        private static bool LdnAutoRequested =>
++            !string.Equals(Environment.GetEnvironmentVariable("S2A_LDN_MITM"), "1", StringComparison.Ordinal) &&
++            string.IsNullOrEmpty(Environment.GetEnvironmentVariable("S2A_LDN_SERVER")) &&
++            !string.Equals(Environment.GetEnvironmentVariable("S2A_LDN_AUTO"), "0", StringComparison.Ordinal);
++
++        internal static MultiplayerMode SelectAutoMode(MultiplayerMode mode, Func<bool> switchRoomFound)
++        {
++            if (!LdnAutoRequested || mode == MultiplayerMode.LdnMitm)
++            {
++                return mode;
++            }
++
++            if (mode == MultiplayerMode.Disabled)
++            {
++                return MultiplayerMode.LdnMitm;
++            }
++
++            try
++            {
++                return switchRoomFound() ? MultiplayerMode.LdnMitm : mode;
++            }
++            catch (Exception ex)
++            {
++                Logger.Warning?.Print(LogClass.ServiceLdn, $"Auto LDN Switch probe failed, keeping RyuLDN: {ex.Message}");
++                return mode;
++            }
++        }
++
+         private readonly KEvent _stateChangeEvent;
+         private int _stateChangeEventHandle;
+ 
+@@ -1253,7 +1281,8 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+ 
+                     // S2Arm: with multiplayer disabled the service reports unavailable without touching
+                     // the network, so the host's interfaces are not queried either
+-                    if (mode == MultiplayerMode.Disabled || System.Net.NetworkInformation.NetworkInterface.GetIsNetworkAvailable())
++                    if ((mode == MultiplayerMode.Disabled && !LdnAutoRequested) ||
++                        System.Net.NetworkInformation.NetworkInterface.GetIsNetworkAvailable())
+                     {
+                         Logger.Info?.PrintMsg(LogClass.ServiceLdn, $"Initializing with multiplayer mode: {mode}");
+ 
+@@ -1285,7 +1314,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+         {
+             S2ANetworkClientServer = null;
+ 
+-            if (mode == MultiplayerMode.Disabled)
++            if (!LdnAutoRequested && mode == MultiplayerMode.Disabled)
+             {
+                 // S2Arm: local wireless discovery / multiplayer is unavailable. Return
+                 // the service's own result code and report once, instead of handing a
+@@ -1306,6 +1335,29 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+                 return ResultCode.InvalidState;
+             }
+ 
++            if (LdnAutoRequested)
++            {
++                try
++                {
++                    Logger.Info?.PrintMsg(
++                        LogClass.ServiceLdn,
++                        $"Auto LDN branch: envAuto={Environment.GetEnvironmentVariable("S2A_LDN_AUTO")}, " +
++                        $"envMitm={Environment.GetEnvironmentVariable("S2A_LDN_MITM")}, " +
++                        $"envServer={Environment.GetEnvironmentVariable("S2A_LDN_SERVER")}, " +
++                        $"mode={mode}, configServer={context.Device.Configuration.MultiplayerLdnServer}");
++                    NetworkClient = new LdnAutoClient(context.Device.Configuration);
++                    S2ANetworkClientServer = context.Device.Configuration.MultiplayerLdnServer;
++                    NetworkClient.SetGameVersion(controlProperty.DisplayVersion);
++                    return ResultCode.Success;
++                }
++                catch (Exception ex)
++                {
++                    Logger.Error?.Print(LogClass.ServiceLdn, $"Could not initialize automatic LDN: {ex.Message}");
++                    S2AHooks.Red?.Invoke($"ldn: automatic LAN is unavailable, {ex.Message}");
++                    return ResultCode.DeviceNotAvailable;
++                }
++            }
++
+             switch (mode)
+             {
+                 case MultiplayerMode.LdnRyu:
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnAutoClient.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnAutoClient.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..5807bf1b45d93f7d8c13bd213d2ae48e7d7f2265
+--- /dev/null
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnAutoClient.cs
+@@ -0,0 +1,352 @@
++using Ryujinx.Common.Logging;
++using Ryujinx.Common.Configuration.Multiplayer;
++using Ryujinx.HLE.HOS.Services.Ldn.Types;
++using Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm;
++using Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnRyu;
++using Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.Types;
++using System;
++using System.Collections.Generic;
++using System.Runtime.InteropServices;
++using System.Threading.Tasks;
++
++namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
++{
++    /// <summary>
++    /// Keeps both LAN transports available in automatic mode. Room scans identify the protocol
++    /// that can reach each peer before the game connects.
++    /// </summary>
++    internal sealed class LdnAutoClient : INetworkClient
++    {
++        private readonly HleConfiguration _configuration;
++        private readonly INetworkClient _mitm;
++        private readonly INetworkClient _ryu;
++        private readonly object _sync = new();
++        private readonly Dictionary<string, INetworkClient> _roomSources = new();
++
++        private INetworkClient _selected;
++
++        public LdnAutoClient(HleConfiguration configuration)
++            : this(
++                configuration,
++                new LdnMitmClient(configuration),
++                new LdnMasterProxyClient(
++                    ResolveRyuServer(configuration?.MultiplayerLdnServer),
++                    S2AHooks.LdnPort,
++                    configuration))
++        {
++        }
++
++        // Automatic mode can start before a LAN relay has been elected, in which case
++        // MultiplayerLdnServer is the empty string (not null). `??` does not cover that,
++        // and LdnMasterProxyClient treats an empty address as invalid and throws while
++        // constructing, taking the whole dual-protocol client down. Fall back on any
++        // null/empty value so automatic mode can always construct both channels.
++        internal static string ResolveRyuServer(string server)
++        {
++            return string.IsNullOrEmpty(server) ? "127.0.0.1" : server;
++        }
++
++        internal LdnAutoClient(
++            HleConfiguration configuration,
++            INetworkClient mitm,
++            INetworkClient ryu)
++        {
++            _configuration = configuration;
++            _mitm = mitm;
++            _ryu = ryu;
++
++            _mitm.NetworkChange += ForwardNetworkChange;
++            _ryu.NetworkChange += ForwardNetworkChange;
++        }
++
++        public ProxyConfig Config
++        {
++            get
++            {
++                lock (_sync)
++                {
++                    return _selected?.Config ?? default;
++                }
++            }
++        }
++
++        public bool NeedsRealId => true;
++
++        public event EventHandler<NetworkChangeEventArgs> NetworkChange;
++
++        public void DisconnectNetwork()
++        {
++            lock (_sync)
++            {
++                if (_selected != null)
++                {
++                    _selected.DisconnectNetwork();
++                    return;
++                }
++            }
++
++            _mitm.DisconnectNetwork();
++            _ryu.DisconnectNetwork();
++        }
++
++        public void DisconnectAndStop()
++        {
++            _mitm.DisconnectAndStop();
++            _ryu.DisconnectAndStop();
++        }
++
++        public NetworkError Connect(ConnectRequest request)
++        {
++            INetworkClient target = SourceFor(request.NetworkInfo);
++            Select(target);
++
++            NetworkError error = target.Connect(request);
++            if (error == NetworkError.None)
++            {
++                return error;
++            }
++
++            INetworkClient fallback = Other(target);
++            Logger.Warning?.PrintMsg(
++                LogClass.ServiceLdn,
++                $"Auto LDN {Name(target)} connect failed ({error}); retrying with {Name(fallback)}");
++
++            target.DisconnectNetwork();
++            Select(fallback);
++            return fallback.Connect(request);
++        }
++
++        public NetworkError ConnectPrivate(ConnectPrivateRequest request)
++        {
++            INetworkClient target = PreferredHostClient();
++            Select(target);
++            return target.ConnectPrivate(request);
++        }
++
++        public ResultCode Reject(DisconnectReason disconnectReason, uint nodeId)
++        {
++            lock (_sync)
++            {
++                return (_selected ?? _mitm).Reject(disconnectReason, nodeId);
++            }
++        }
++
++        public NetworkInfo[] Scan(ushort channel, ScanFilter scanFilter)
++        {
++            Task<NetworkInfo[]> mitmTask = Task.Run(() => SafeScan(_mitm, channel, scanFilter, "ldn_mitm"));
++            Task<NetworkInfo[]> ryuTask = Task.Run(() => SafeScan(_ryu, channel, scanFilter, "RyuLDN"));
++
++            Task.WaitAll(mitmTask, ryuTask);
++
++            NetworkInfo[] mitmRooms = mitmTask.Result;
++            NetworkInfo[] ryuRooms = ryuTask.Result;
++            List<NetworkInfo> merged = [];
++            HashSet<string> seen = [];
++
++            lock (_sync)
++            {
++                _roomSources.Clear();
++
++                AddRooms(merged, seen, mitmRooms, _mitm);
++                AddRooms(merged, seen, ryuRooms, _ryu);
++
++            }
++
++            Logger.Info?.PrintMsg(
++                LogClass.ServiceLdn,
++                $"Auto LDN scan: ldn_mitm={mitmRooms.Length}, RyuLDN={ryuRooms.Length}, merged={merged.Count}");
++
++            return merged.ToArray();
++        }
++
++        public void SetGameVersion(ReadOnlySpan<byte> versionString)
++        {
++            _mitm.SetGameVersion(versionString);
++            _ryu.SetGameVersion(versionString);
++        }
++
++        public void SetStationAcceptPolicy(AcceptPolicy acceptPolicy)
++        {
++            _mitm.SetStationAcceptPolicy(acceptPolicy);
++            _ryu.SetStationAcceptPolicy(acceptPolicy);
++        }
++
++        public void SetAdvertiseData(byte[] data)
++        {
++            _mitm.SetAdvertiseData(data);
++            _ryu.SetAdvertiseData(data);
++        }
++
++        public bool CreateNetwork(CreateAccessPointRequest request, byte[] advertiseData)
++        {
++            INetworkClient target = PreferredHostClient();
++            Select(target);
++            Logger.Info?.PrintMsg(
++                LogClass.ServiceLdn,
++                $"Auto LDN host selection: target={Name(target)}");
++            Console.Error.WriteLine($"[S2A 联机] Auto LDN host selection: target={Name(target)}");
++
++            if (target.CreateNetwork(request, advertiseData))
++            {
++                return true;
++            }
++
++            INetworkClient fallback = Other(target);
++            Logger.Warning?.PrintMsg(
++                LogClass.ServiceLdn,
++                $"Auto LDN {Name(target)} host creation failed; retrying with {Name(fallback)}");
++
++            target.DisconnectNetwork();
++            Select(fallback);
++            return fallback.CreateNetwork(request, advertiseData);
++        }
++
++        public bool CreateNetworkPrivate(CreateAccessPointPrivateRequest request, byte[] advertiseData)
++        {
++            INetworkClient target = PreferredHostClient();
++            Select(target);
++
++            if (target.CreateNetworkPrivate(request, advertiseData))
++            {
++                return true;
++            }
++
++            INetworkClient fallback = Other(target);
++            Logger.Warning?.PrintMsg(
++                LogClass.ServiceLdn,
++                $"Auto LDN {Name(target)} private host creation failed; retrying with {Name(fallback)}");
++
++            target.DisconnectNetwork();
++            Select(fallback);
++            return fallback.CreateNetworkPrivate(request, advertiseData);
++        }
++
++        public void Dispose()
++        {
++            _mitm.NetworkChange -= ForwardNetworkChange;
++            _ryu.NetworkChange -= ForwardNetworkChange;
++            _mitm.Dispose();
++            _ryu.Dispose();
++        }
++
++        private static NetworkInfo[] SafeScan(
++            INetworkClient client,
++            ushort channel,
++            ScanFilter scanFilter,
++            string name)
++        {
++            try
++            {
++                return client.Scan(channel, scanFilter);
++            }
++            catch (Exception ex)
++            {
++                Logger.Warning?.PrintMsg(LogClass.ServiceLdn, $"Auto LDN {name} scan failed: {ex.Message}");
++                return [];
++            }
++        }
++
++        private void AddRooms(
++            List<NetworkInfo> merged,
++            HashSet<string> seen,
++            NetworkInfo[] rooms,
++            INetworkClient source)
++        {
++            foreach (NetworkInfo room in rooms)
++            {
++                string key = RoomKey(room);
++                if (seen.Add(key))
++                {
++                    merged.Add(room);
++                }
++
++                _roomSources.TryAdd(key, source);
++            }
++        }
++
++        private INetworkClient SourceFor(in NetworkInfo networkInfo)
++        {
++            string key = RoomKey(networkInfo);
++
++            lock (_sync)
++            {
++                if (_roomSources.TryGetValue(key, out INetworkClient source))
++                {
++                    return source;
++                }
++
++                return PreferredHostClientLocked();
++            }
++        }
++
++        private INetworkClient PreferredHostClient()
++        {
++            lock (_sync)
++            {
++                return PreferredHostClientLocked();
++            }
++        }
++
++        private INetworkClient PreferredHostClientLocked()
++        {
++            return _mitm;
++        }
++
++        private INetworkClient Other(INetworkClient target)
++        {
++            return target == _mitm ? _ryu : _mitm;
++        }
++
++        private string Name(INetworkClient client)
++        {
++            return client == _mitm ? "ldn_mitm" : "RyuLDN";
++        }
++
++        private void Select(INetworkClient target)
++        {
++            lock (_sync)
++            {
++                _selected = target;
++
++                if (_configuration == null)
++                {
++                    return;
++                }
++
++                if (target == _mitm)
++                {
++                    _configuration.MultiplayerMode = MultiplayerMode.LdnMitm;
++                    _configuration.MultiplayerLdnServer = string.Empty;
++                }
++                else
++                {
++                    _configuration.MultiplayerMode = MultiplayerMode.LdnRyu;
++                    if (string.IsNullOrEmpty(_configuration.MultiplayerLdnServer))
++                    {
++                        _configuration.MultiplayerLdnServer = "127.0.0.1";
++                    }
++                }
++            }
++        }
++
++        private void ForwardNetworkChange(object sender, NetworkChangeEventArgs args)
++        {
++            lock (_sync)
++            {
++                if (_selected != sender)
++                {
++                    return;
++                }
++            }
++
++            NetworkChange?.Invoke(this, args);
++        }
++
++        private static string RoomKey(in NetworkInfo networkInfo)
++        {
++            Span<byte> bytes = stackalloc byte[Marshal.SizeOf<NetworkId>()];
++            MemoryMarshal.Write(bytes, in networkInfo.NetworkId);
++            return Convert.ToHexString(bytes);
++        }
++    }
++}
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LanDiscovery.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LanDiscovery.cs
+index 6b76796c13eb39c495ae7bd637272cd650c0771b..77ddd904ff618f735e8cf5f95a2fecb75e70bf10 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LanDiscovery.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LanDiscovery.cs
+@@ -109,6 +109,10 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+             Logger.Info?.PrintMsg(LogClass.ServiceLdn,
+                 $"Initialize LanDiscovery using IP: {LocalAddr}, broadcast: {LocalBroadcastAddr}");
+ 
++            // [DIAG] 建房/入房时立刻打印一行：不依赖 Switch 接入即可判断新宿主是否在跑、选的是哪张网卡。
++            Logger.Info?.PrintMsg(LogClass.ServiceLdn,
++                $"[DIAG] LanDiscovery init: ifaceId={_lanInterfaceId ?? "(null)"}, local={LocalAddr}, broadcast={LocalBroadcastAddr}");
++
+             _fakeSsid = new Ssid
+             {
+                 Length = LdnConst.SsidLengthMax,
+@@ -215,9 +219,11 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+             lock (_lock)
+             {
+                 station.NodeId = LocateEmptyNode();
++                Logger.Info?.PrintMsg(LogClass.ServiceLdn, $"[DIAG] OnAccept: assigned node={station.NodeId}, stationsBefore={_stations.Count}");
+ 
+                 if (_stations.Count > LdnConst.StationCountMax || station.NodeId == -1)
+                 {
++                    Logger.Warning?.PrintMsg(LogClass.ServiceLdn, $"[DIAG] OnAccept REJECTED: node={station.NodeId}, stations={_stations.Count}");
+                     station.Disconnect();
+                     station.Dispose();
+ 
+@@ -225,11 +231,13 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+                 }
+ 
+                 _stations.Add(station);
++                Logger.Info?.PrintMsg(LogClass.ServiceLdn, $"[DIAG] OnAccept added station node={station.NodeId}, stationsAfter={_stations.Count}");
+             }
+         }
+ 
+         protected void OnStationConnected(LdnProxyTcpSession station)
+         {
++            Logger.Info?.PrintMsg(LogClass.ServiceLdn, $"[DIAG] OnStationConnected node={station.NodeId} inStations={_stations.Contains(station)}");
+             lock (_lock)
+             {
+                 if (_stations.Contains(station))
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LanProtocol.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LanProtocol.cs
+index 6c5c6f5bf3d828c8a8c95ace05db75981ca71a07..fb639cc8ee2ca520bcd61b5427da6ddcc201d711 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LanProtocol.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LanProtocol.cs
+@@ -31,7 +31,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+         public event Action<EndPoint, LanPacketType, byte[]> Scan;
+         public event Action<NetworkInfo> ScanResponse;
+         public event Action<NetworkInfo> SyncNetwork;
+-        public event Action<NodeInfo, EndPoint> Connect;
++        public event Action<NodeInfo, EndPoint, LdnProxyTcpSession> Connect;
+         public event Action<LdnProxyTcpSession> StationConnected;
+         public event Action<LdnProxyTcpSession> DisconnectStation;
+         public event Action<LdnProxyTcpClient> ClientDisconnected;
+@@ -61,7 +61,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+             ClientDisconnected?.Invoke(client);
+         }
+ 
+-        private void DecodeAndHandle(LanPacketHeader header, byte[] data, EndPoint endPoint = null)
++        private void DecodeAndHandle(LanPacketHeader header, byte[] data, EndPoint endPoint = null, LdnProxyTcpSession via = null)
+         {
+             switch (header.Type)
+             {
+@@ -83,7 +83,8 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+                     break;
+                 case LanPacketType.Connect:
+                     // TCP Session / Station
+-                    HandleConnect(MemoryMarshal.Cast<byte, NodeInfo>(data)[0], endPoint);
++                    Logger.Info?.PrintMsg(LogClass.ServiceLdn, $"[DIAG] DecodeAndHandle got Connect from {endPoint}, via={(via != null ? $"session#{via.NodeId}" : "null")}, dataLen={data.Length}");
++                    HandleConnect(MemoryMarshal.Cast<byte, NodeInfo>(data)[0], endPoint, via);
+                     break;
+                 default:
+                     Logger.Error?.PrintMsg(LogClass.ServiceLdn, $"Decode error: Unhandled type {header.Type}");
+@@ -93,15 +94,39 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+ 
+         // Kept separate from DecodeAndHandle so the per-connection routing invariant can be tested
+         // without binding the production discovery sockets to a fixed LAN port.
+-        internal void HandleConnect(NodeInfo info, EndPoint endPoint)
++        internal void HandleConnect(NodeInfo info, EndPoint endPoint, LdnProxyTcpSession via = null)
+         {
+-            Connect?.Invoke(info, endPoint);
++            // Connect is shared by every accepted station. When the frame arrived on a known TCP
++            // session (via != null) it belongs to that session alone — deliver by identity and stop.
++            // Dispatch each handler inside its own try so one disposed session cannot silence the
++            // rest of the multicast chain (a throwing handler aborts the remaining invocation list).
++            Action<NodeInfo, EndPoint, LdnProxyTcpSession> handlers = Connect;
++            if (handlers == null)
++            {
++                return;
++            }
++
++            foreach (Action<NodeInfo, EndPoint, LdnProxyTcpSession> handler in handlers.GetInvocationList())
++            {
++                try
++                {
++                    handler(info, endPoint, via);
++                }
++                catch (Exception e)
++                {
++                    Logger.Error?.PrintMsg(LogClass.ServiceLdn, $"[DIAG] Connect handler threw: {e}");
++                }
++            }
+         }
+ 
+-        public void Read(scoped ref byte[] buffer, scoped ref int bufferEnd, byte[] data, int offset, int size, EndPoint endPoint = null)
++        public void Read(scoped ref byte[] buffer, scoped ref int bufferEnd, byte[] data, int offset, int size, EndPoint endPoint = null, LdnProxyTcpSession via = null)
+         {
+-            if (endPoint != null && _discovery.LocalAddr.Equals(((IPEndPoint)endPoint).Address))
++            // Own-broadcast echo suppression applies to UDP only. A TCP station whose source
++            // address happens to equal LocalAddr (same-machine emulator instance, or a VPN that
++            // NATs the peer into our own address) must still be allowed to complete the handshake.
++            if (via == null && endPoint != null && _discovery.LocalAddr.Equals(((IPEndPoint)endPoint).Address))
+             {
++                Logger.Warning?.PrintMsg(LogClass.ServiceLdn, $"[DIAG] Read DROPPED (UDP source == LocalAddr {_discovery.LocalAddr}): {endPoint}");
+                 return;
+             }
+ 
+@@ -172,7 +197,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+                             ldnData = decompressedLdnData;
+                         }
+ 
+-                        DecodeAndHandle(header, ldnData, endPoint);
++                        DecodeAndHandle(header, ldnData, endPoint, via);
+ 
+                         bufferEnd = 0;
+                     }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/Proxy/LdnProxyTcpSession.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/Proxy/LdnProxyTcpSession.cs
+index 25c7efc11286d11eb21ad3cb40b974445cdb790f..9509ecc4a639765d0a1a609f457a41f766757456 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/Proxy/LdnProxyTcpSession.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/Proxy/LdnProxyTcpSession.cs
+@@ -33,14 +33,30 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm.Proxy
+             NodeInfo.IsConnected = (byte)(HandshakeComplete && IsConnected ? 1 : 0);
+         }
+ 
++        // Socket.RemoteEndPoint throws ObjectDisposedException once the socket is gone; every
++        // diagnostic line must go through here so logging can never take down the receive thread.
++        private string SafeRemoteEp()
++        {
++            try
++            {
++                return Socket.RemoteEndPoint?.ToString() ?? "(null)";
++            }
++            catch (System.ObjectDisposedException)
++            {
++                return "(disposed)";
++            }
++        }
++
+         protected override void OnConnected()
+         {
+             Logger.Info?.PrintMsg(LogClass.ServiceLdn, "LdnProxyTCPSession connected!");
++            Logger.Info?.PrintMsg(LogClass.ServiceLdn, $"[DIAG] TCP OnConnected remote={SafeRemoteEp()}");
+             _protocol.InvokeAccept(this);
+         }
+ 
+         protected override void OnDisconnected()
+         {
++            Logger.Info?.PrintMsg(LogClass.ServiceLdn, $"[DIAG] TCP OnDisconnected remote={SafeRemoteEp()} handshake={HandshakeComplete} node={NodeId}");
+             Logger.Info?.PrintMsg(LogClass.ServiceLdn, "LdnProxyTCPSession disconnected!");
+ 
+             _protocol.InvokeDisconnectStation(this);
+@@ -48,7 +64,8 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm.Proxy
+ 
+         protected override void OnReceived(byte[] buffer, long offset, long size)
+         {
+-            _protocol.Read(ref _buffer, ref _bufferEnd, buffer, (int)offset, (int)size, this.Socket.RemoteEndPoint);
++            Logger.Info?.PrintMsg(LogClass.ServiceLdn, $"[DIAG] TCP OnReceived {size} bytes from {SafeRemoteEp()}");
++            _protocol.Read(ref _buffer, ref _bufferEnd, buffer, (int)offset, (int)size, this.Socket.RemoteEndPoint, this);
+         }
+ 
+         protected override void OnError(SocketError error)
+@@ -64,19 +81,39 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm.Proxy
+             base.Dispose(disposingManagedResources);
+         }
+ 
+-        private void OnConnect(NodeInfo info, EndPoint endPoint)
++        private void OnConnect(NodeInfo info, EndPoint endPoint, LdnProxyTcpSession via)
+         {
++            Logger.Info?.PrintMsg(LogClass.ServiceLdn, $"[DIAG] OnConnect fired on node={NodeId}: frameEP={endPoint} sessionEP={SafeRemoteEp()} via={(via != null ? $"session#{via.NodeId}" : "null")}");
+             try
+             {
+-                // LanProtocol.Connect is shared by every accepted station. A Connect frame belongs
+-                // only to the TCP connection whose remote endpoint sent it.
+-                if (endPoint == null || !endPoint.Equals(Socket.RemoteEndPoint))
++                // LanProtocol.Connect is shared by every accepted station. A frame that arrived on
++                // a known TCP session (via != null) belongs to that session alone — route by object
++                // identity. Endpoint equality is only the fallback for callers that pass no session
++                // (unit tests, UDP-originated frames); compare values, tolerating IPv4-mapped IPv6
++                // spellings of the same peer that a dual-stack socket can report.
++                bool mine;
++                if (via != null)
+                 {
++                    mine = ReferenceEquals(via, this);
++                }
++                else if (endPoint != null)
++                {
++                    mine = EndPointMatches(endPoint, Socket.RemoteEndPoint);
++                }
++                else
++                {
++                    mine = false;
++                }
++
++                if (!mine)
++                {
++                    Logger.Warning?.PrintMsg(LogClass.ServiceLdn, $"[DIAG] OnConnect DROPPED (not this session's frame): frameEP={endPoint} sessionEP={SafeRemoteEp()}");
+                     return;
+                 }
+ 
+                 NodeInfo = info;
+                 HandshakeComplete = true;
++                Logger.Info?.PrintMsg(LogClass.ServiceLdn, $"[DIAG] OnConnect ACCEPTED node={NodeId}: handshake complete, invoking StationConnected");
+                 _protocol.InvokeStationConnected(this);
+             }
+             catch (System.ObjectDisposedException)
+@@ -86,5 +123,43 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm.Proxy
+                 _protocol.InvokeDisconnectStation(this);
+             }
+         }
++
++        // Value comparison of two endpoints, treating IPv4-mapped IPv6 (::ffff:a.b.c.d) and plain
++        // IPv4 (a.b.c.d) as the same peer. EndPoint.Equals is strict about address family, so a
++        // dual-stack accept socket could report the same client in two spellings across calls.
++        private static bool EndPointMatches(EndPoint a, EndPoint b)
++        {
++            if (a == null || b == null)
++            {
++                return false;
++            }
++
++            if (a is not IPEndPoint ipa || b is not IPEndPoint ipb)
++            {
++                return a.Equals(b);
++            }
++
++            return ipa.Port == ipb.Port && AddressMatches(ipa.Address, ipb.Address);
++        }
++
++        private static bool AddressMatches(IPAddress a, IPAddress b)
++        {
++            if (a.Equals(b))
++            {
++                return true;
++            }
++
++            if (a.IsIPv4MappedToIPv6 && b.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
++            {
++                return a.MapToIPv4().Equals(b);
++            }
++
++            if (b.IsIPv4MappedToIPv6 && a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
++            {
++                return b.MapToIPv4().Equals(a);
++            }
++
++            return false;
++        }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Proxy/DefaultSocket.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Proxy/DefaultSocket.cs
+index f1040e799567e9867a35ff02e9b38b6352df8b15..8521c41cfba5ce939af05d5f6872f85bb15246e0 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Proxy/DefaultSocket.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Proxy/DefaultSocket.cs
+@@ -44,13 +44,35 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
+             BaseSocket = new Socket(domain, type, protocol);
+         }
+ 
+-        private void EnsureNetworkInterfaceBound()
++        private void EnsureNetworkInterfaceBound(EndPoint remoteEndPoint = null)
+         {
+-            if (_lanInterfaceId != "0" && !BaseSocket.IsBound)
++            if (BaseSocket.IsBound)
++            {
++                return;
++            }
++
++            if (remoteEndPoint is IPEndPoint remote &&
++                remote.Address.AddressFamily == AddressFamily.InterNetwork)
++            {
++                (_, UnicastIPAddressInformation ipInfo) =
++                    NetworkHelpers.GetLocalInterfaceForTarget(_lanInterfaceId, remote.Address);
++
++                if (ipInfo != null)
++                {
++                    BaseSocket.Bind(new IPEndPoint(ipInfo.Address, 0));
++                }
++
++                return;
++            }
++
++            if (_lanInterfaceId != "0")
+             {
+                 (_, UnicastIPAddressInformation ipInfo) = NetworkHelpers.GetLocalInterface(_lanInterfaceId);
+ 
+-                BaseSocket.Bind(new IPEndPoint(ipInfo.Address, 0));
++                if (ipInfo != null)
++                {
++                    BaseSocket.Bind(new IPEndPoint(ipInfo.Address, 0));
++                }
+             }
+         }
+ 
+@@ -74,7 +96,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
+ 
+         public void Connect(EndPoint remoteEP)
+         {
+-            EnsureNetworkInterfaceBound();
++            EnsureNetworkInterfaceBound(remoteEP);
+ 
+             BaseSocket.Connect(remoteEP);
+         }
+@@ -145,7 +167,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
+ 
+         public int SendTo(ReadOnlySpan<byte> buffer, SocketFlags flags, EndPoint remoteEP)
+         {
+-            EnsureNetworkInterfaceBound();
++            EnsureNetworkInterfaceBound(remoteEP);
+ 
+             return BaseSocket.SendTo(buffer, flags, remoteEP);
+         }

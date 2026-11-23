@@ -143,8 +143,10 @@ int s2a_ap_crawl_due(uint64_t frames_in_30s) { return frames_in_30s <= 15; }
 // 停帧救场的 30 秒窗口在「外因」下清空重来（#1857：Mac 王国之泪切到后台 67 / 114 秒，宿主焦点=0、后台 30 秒上屏 0 帧，被当成帧率补丁停住画面，
 //   关掉帧率补丁还记成下次也关，回前台一直 30 帧）。外因：客机冻结=1、宿主焦点=0（窗口在后台，本来就不出帧）、宿主睡眠=1。
 //   取不到符号（-1）不算外因，同现场那行的口径。纯函数，t_ap_host ⑥d 测
-int s2a_ap_stall_external(int frozen, int focused, int sleeping);
-int s2a_ap_stall_external(int frozen, int focused, int sleeping) { return frozen == 1 || focused == 0 || sleeping == 1; }
+//   系统小程序开着（applet > 0，os.c s2a_applet_open，接口 v2.18）也是外因：键盘 / 错误弹窗 / 手柄设置占着画面，游戏本来就不出新帧
+//   （D-Z96G：iPad 上输名字 53 秒，被判停住、屏上弹「卡住」、记【红】直连异常）
+int s2a_ap_stall_external(int frozen, int focused, int sleeping, int applet);
+int s2a_ap_stall_external(int frozen, int focused, int sleeping, int applet) { return frozen == 1 || focused == 0 || sleeping == 1 || applet > 0; }
 // 看门线程走过的格数（每格 250 ms 一圈，圈首加一）：单测按「动作之后又走了几格」等，不按墙钟睡（11-19：负载高时线程分不到 CPU，
 //   固定睡 1.6 秒后格数不够、现场份数对不上，测的是机器负载不是看门逻辑）。只读计数，产品行为不变
 static _Atomic uint64_t g_stall_ticks;
@@ -157,6 +159,7 @@ static void *stall_watch(void *a) { s2a_thread_name("s2a-ap-stall");
     int (*focused)(void) = (int (*)(void))dlsym(RTLD_DEFAULT, "s2a_host_focused");       // runtime/src/os.c
     int (*suspend)(void) = (int (*)(void))dlsym(RTLD_DEFAULT, "s2a_focus_suspend");      // runtime/src/os.c
     int (*sleeping)(void) = (int (*)(void))dlsym(RTLD_DEFAULT, "s2a_host_sleeping");     // runtime/src/os.c
+    int (*applet)(void) = (int (*)(void))dlsym(RTLD_DEFAULT, "s2a_applet_open");        // runtime/src/os.c：系统小程序开着的个数（接口 v2.18）
     void (*td)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "s2a_thread_dump");
     int (*hd)(const char *) = (int (*)(const char *))dlsym(RTLD_DEFAULT, "s2a_dump_threads");   // tdump.c：宿主线程调用栈（10-24 xc3 停住靠它定出实化互等）
     void (*msg)(const char *) = (void (*)(const char *))dlsym(RTLD_DEFAULT, "s2a_ios_show_message");   // 第 2 档：屏幕上给玩家一句话（见 s2a_ap_stall_notice_after）
@@ -171,7 +174,7 @@ static void *stall_watch(void *a) { s2a_thread_name("s2a-ap-stall");
         usleep(250000); uint64_t f = s2a_ap_frames();
         if (atomic_load(&g_stall_stop)) break;
         if (++rt % 4 == 0) {
-            if (s2a_ap_stall_external(frozen ? frozen() : -1, focused ? focused() : -1, sleeping ? sleeping() : -1)) rn = 0;
+            if (s2a_ap_stall_external(frozen ? frozen() : -1, focused ? focused() : -1, sleeping ? sleeping() : -1, applet ? applet() : -1)) rn = 0;
             else {
                 if (!crawled && rn >= 30 && s2a_ap_crawl_due(f - ring[rn % 30])) {
                     crawled = 1;   // 每局只判一次：救场本身也只救一次
@@ -191,7 +194,8 @@ static void *stall_watch(void *a) { s2a_thread_name("s2a-ap-stall");
             if (n) s2a_dguard_evidence(NULL, 1);   // 直连安全网：停住的证据撤回（自己活过来了）
             last = f; idle = 0; armed = 1; noticed = 0; continue;
         }
-        if (frozen && frozen()) { idle = 0; continue; }
+        // 冻结 / 系统小程序开着期间不计停住：计时清零，关掉后从零重新计（小程序开着时游戏本来不出新帧，D-Z96G）
+        if ((frozen && frozen()) || (applet && applet() > 0)) { idle = 0; continue; }
         ++idle;
         // 第 2 档先于第 3 档：退出前让用户知道「是卡住了要重开」，而不是看到闪退去猜是不是 bug。
         //   不阻塞（dispatch_async 回主线程），所以卡住的是游戏线程也不影响它显示

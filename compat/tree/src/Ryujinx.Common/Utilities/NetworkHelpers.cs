@@ -93,48 +93,33 @@ namespace Ryujinx.Common.Utilities
                 : Array.Find(interfaces, adapter => adapter.Id == lanInterfaceId);
             UnicastIPAddressInformation preferredAddress = GetIpv4Unicast(preferred);
 
-            if (remoteAddress != null)
-            {
-                IPAddress source = ProbeRouteSource(remoteAddress, preferredAddress?.Address);
-                if (source != null)
-                {
-                    var routed = FindInterfaceByAddress(source);
-                    NetworkInterface routedAdapter = FindAdapterByAddress(source);
-                    if (routed.properties != null && (!IsLocalTarget(remoteAddress) || !IsTunnel(routedAdapter)))
-                    {
-                        return routed;
-                    }
-                }
-
-                // An explicit interface remains authoritative while it is active. This also covers
-                // targets for which a connect-only UDP probe cannot expose a source address.
-                if (preferredAddress != null && preferred is { OperationalStatus: OperationalStatus.Up })
-                {
-                    return (preferred.GetIPProperties(), preferredAddress);
-                }
-            }
-            else if (preferredAddress != null && preferred is { OperationalStatus: OperationalStatus.Up })
+            // An explicitly configured interface is authoritative while it is active.
+            if (preferredAddress != null && preferred is { OperationalStatus: OperationalStatus.Up })
             {
                 return (preferred.GetIPProperties(), preferredAddress);
             }
 
-            // A route probe resolves the usual "which adapter wins?" ambiguity without sending
-            // traffic. Before a peer is known, the system default route is the strongest signal,
-            // but a VPN source must be rejected for a LAN room. If there is no usable default
-            // route, score every physical gateway source instead of trusting enumeration order.
+            // Which adapter carries LAN traffic is decided by scoring every usable adapter, never
+            // by a single default-route probe: VPN clients and split-tunnel rules install specific
+            // routes (for example 192.0.2.0/24) that hijack such a probe onto a tunnel or an
+            // unrelated adapter. Likewise, probing a shared gateway without binding a source
+            // collapses every same-subnet adapter onto one kernel-chosen address. Both failure
+            // modes are independent of adapter count or enumeration order.
             IPAddress defaultSource = null;
             if (remoteAddress == null)
             {
-                IPAddress routedSource = ProbeRouteSource(DefaultRouteProbeTarget, null);
-                if (!IsTunnel(FindAdapterByAddress(routedSource)))
-                {
-                    defaultSource = routedSource;
-                }
-
-                defaultSource ??= ProbeLanGatewaySource(interfaces);
+                // No peer yet (room host): score each adapter's own address independently.
+                defaultSource = ProbeLanGatewaySource(interfaces);
+            }
+            else if (IsLocalTarget(remoteAddress))
+            {
+                // LAN peer (joining a room): score every adapter against the peer's subnet so a
+                // second same-subnet adapter cannot be hidden by one kernel-chosen source.
+                defaultSource = ProbeLanRouteSource(interfaces, remoteAddress);
             }
             else
             {
+                // Non-LAN target: the OS route probe is meaningful and cannot be a LAN VPN trap.
                 defaultSource = ProbeRouteSource(remoteAddress, null);
             }
 
@@ -154,11 +139,11 @@ namespace Ryujinx.Common.Utilities
             return SelectBestLocalInterface(interfaces, remoteAddress, preferredAddress?.Address);
         }
 
-        // The probe must use a non-zero destination port: macOS rejects connect() on a UDP socket
-        // whose destination port is 0 (EADDRNOTAVAIL). Any non-zero port performs the same route
-        // lookup without sending a packet.
+        // macOS rejects connect() on a UDP socket whose destination port is 0 (EADDRNOTAVAIL), so a
+        // port-0 probe returned null there and selection silently fell back to enumeration order —
+        // precisely the multi-homed machines this helper exists for. Any non-zero port performs the
+        // same route lookup without sending a packet.
         private const int RouteProbePort = 9;
-        private static readonly IPAddress DefaultRouteProbeTarget = new(new byte[] { 192, 0, 2, 1 });
 
         internal readonly record struct LanRouteCandidate(
             IPAddress Source,
@@ -171,8 +156,10 @@ namespace Ryujinx.Common.Utilities
 
         // Rank every discovered source deterministically. A machine can have an arbitrary number
         // of wired, wireless, virtual and tunnel adapters; the first one enumerated is not a
-        // reliable answer. The default-route probe remains authoritative when it yields a LAN
-        // adapter, while this score handles machines whose default route is a VPN.
+        // reliable answer. A wired LAN adapter wins decisively over Wi-Fi on the same subnet —
+        // a common laptop dock layout where the cable is the real path to a console/AP — while
+        // tunnels, virtual and link-local sources are rejected. Scores are widely separated so
+        // that a weaker signal (for example gateway subnet) can never overturn a stronger one.
         internal static IPAddress SelectBestLanRouteCandidate(IReadOnlyList<LanRouteCandidate> candidates)
         {
             LanRouteCandidate best = default;
@@ -190,11 +177,11 @@ namespace Ryujinx.Common.Utilities
 
                 int score = 0;
                 score += candidate.IsUp ? 1000 : -10000;
-                score += candidate.IsTunnel ? -5000 : 0;
+                score += candidate.IsTunnel ? -100000 : 0;
                 score += candidate.IsPhysical ? 100 : 0;
-                score += candidate.IsWired ? 20 : 0;
+                score += candidate.IsWired ? 20000 : 0;
                 score += candidate.SharesGatewaySubnet ? 400 : 0;
-                score += candidate.IsLinkLocal ? -2000 : 0;
+                score += candidate.IsLinkLocal ? -50000 : 0;
 
                 if (!hasBest ||
                     score > bestScore ||
@@ -244,6 +231,12 @@ namespace Ryujinx.Common.Utilities
         // The OS route to a LAN gateway says which adapter carries local traffic while no peer
         // address is known yet. Collect and rank all candidates so the result does not depend on
         // the number of adapters or the order NetworkInterface happens to enumerate them in.
+        //
+        // Crucially, bind EACH adapter's own address as the probe source. Probing a gateway with a
+        // null source asks the kernel for "the" source address, and when several adapters share a
+        // subnet (Ethernet + Wi-Fi on 192.168.x) they all report the same one — collapsing the
+        // candidate list onto a single, often wrong, adapter. Binding pins the answer to this
+        // adapter so every real NIC is represented and the score can pick the wired one.
         private static IPAddress ProbeLanGatewaySource(NetworkInterface[] interfaces)
         {
             List<LanRouteCandidate> candidates = [];
@@ -257,6 +250,18 @@ namespace Ryujinx.Common.Utilities
                     continue;
                 }
 
+                UnicastIPAddressInformation local = GetIpv4Unicast(adapter);
+                if (local == null || IPAddress.IsLoopback(local.Address))
+                {
+                    continue;
+                }
+
+                NetworkInterfaceType type = adapter.NetworkInterfaceType;
+                bool isPhysical = IsPhysicalLanAdapter(type);
+                bool isWired = type is NetworkInterfaceType.Ethernet or
+                    NetworkInterfaceType.GigabitEthernet;
+                bool sharesGatewaySubnet = false;
+
                 foreach (GatewayIPAddressInformation gatewayInfo in adapter.GetIPProperties().GatewayAddresses)
                 {
                     IPAddress gateway = gatewayInfo.Address;
@@ -265,33 +270,61 @@ namespace Ryujinx.Common.Utilities
                         continue;
                     }
 
-                    IPAddress source = ProbeRouteSource(gateway, null);
-                    if (source == null)
+                    if (IsSameSubnet(local, gateway))
                     {
-                        continue;
+                        sharesGatewaySubnet = true;
                     }
-
-                    NetworkInterface sourceAdapter = FindAdapterByAddress(source);
-                    UnicastIPAddressInformation sourceAddress = FindIpv4Unicast(sourceAdapter, source);
-                    if (sourceAddress == null)
-                    {
-                        continue;
-                    }
-
-                    NetworkInterfaceType type = sourceAdapter.NetworkInterfaceType;
-                    bool isPhysical = IsPhysicalLanAdapter(type);
-                    bool isWired = type is NetworkInterfaceType.Ethernet or
-                        NetworkInterfaceType.GigabitEthernet;
-
-                    candidates.Add(new LanRouteCandidate(
-                        source,
-                        sourceAdapter.OperationalStatus == OperationalStatus.Up,
-                        IsTunnel(sourceAdapter),
-                        isPhysical,
-                        isWired,
-                        IsSameSubnet(sourceAddress, gateway),
-                        sourceAddress.Address.ToString().StartsWith("169.254.", StringComparison.Ordinal)));
                 }
+
+                candidates.Add(new LanRouteCandidate(
+                    local.Address,
+                    true,
+                    false,
+                    isPhysical,
+                    isWired,
+                    sharesGatewaySubnet,
+                    local.Address.ToString().StartsWith("169.254.", StringComparison.Ordinal)));
+            }
+
+            return SelectBestLanRouteCandidate(candidates);
+        }
+
+        // A peer is known (joining an existing room). Rank every adapter by the route to THAT
+        // peer with each adapter's own address bound as source. This replaces the single
+        // ProbeRouteSource(remote, null) call, which otherwise reports one kernel-chosen source
+        // — the one a VPN's specific routes hijacked onto Wi-Fi — no matter how many NICs exist.
+        private static IPAddress ProbeLanRouteSource(NetworkInterface[] interfaces, IPAddress remoteAddress)
+        {
+            List<LanRouteCandidate> candidates = [];
+
+            foreach (NetworkInterface adapter in interfaces)
+            {
+                if (adapter.OperationalStatus != OperationalStatus.Up ||
+                    adapter.NetworkInterfaceType == NetworkInterfaceType.Loopback ||
+                    IsTunnel(adapter))
+                {
+                    continue;
+                }
+
+                UnicastIPAddressInformation local = GetIpv4Unicast(adapter);
+                if (local == null || IPAddress.IsLoopback(local.Address))
+                {
+                    continue;
+                }
+
+                NetworkInterfaceType type = adapter.NetworkInterfaceType;
+                bool isPhysical = IsPhysicalLanAdapter(type);
+                bool isWired = type is NetworkInterfaceType.Ethernet or
+                    NetworkInterfaceType.GigabitEthernet;
+
+                candidates.Add(new LanRouteCandidate(
+                    local.Address,
+                    true,
+                    false,
+                    isPhysical,
+                    isWired,
+                    IsSameSubnet(local, remoteAddress),
+                    local.Address.ToString().StartsWith("169.254.", StringComparison.Ordinal)));
             }
 
             return SelectBestLanRouteCandidate(candidates);

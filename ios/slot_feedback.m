@@ -180,9 +180,19 @@ __attribute__((visibility("default"), used)) void s2a_pad_set_rumble_slot(int sl
 }
 
 // ---------- 体感（每只手柄自己的 GCMotion）----------
+// 开关手柄传感器一律在主线程做（#2142 D-Q99N）：GameController 的对象按约定只在主线程用。游戏开六轴是服务层线程调到这里
+//   （controller.m s2a_pad_set_motion_enabled），原先就地设 sensorsActive：iPhone + Switch Pro 有的局整局只来全 0 样本（传感器没开），
+//   手柄重连（主线程上再设一次）的局才有真值。开完打一行：系统要不要手动开、开后的状态，下一份诊断能直接核
 static void motion_activate(GCController *c, BOOL on) {
-    GCMotion *m = c.motion;
-    if (m.sensorsRequireManualActivation) m.sensorsActive = on;
+    if (!c) return;
+    void (^go)(void) = ^{
+        GCMotion *m = c.motion;
+        if (!m) return;
+        if (m.sensorsRequireManualActivation) m.sensorsActive = on;
+        LOG("玩家手柄体感：%s 传感器%s（系统要手动开 %s，现在 %s）", c.vendorName.UTF8String ?: "?", on ? "开" : "关",
+            m.sensorsRequireManualActivation ? "是" : "否", m.sensorsActive ? "开着" : "关着");
+    };
+    if (NSThread.isMainThread) go(); else dispatch_async(dispatch_get_main_queue(), go);
 }
 // 手柄给的加速度：正常路径是 gravity + userAcceleration；但 DualSense / Switch Pro 在 iOS 上实测只有 hasRotationRate
 //   （hasGravityAndUserAcceleration = NO、hasAttitude = NO，2026-11-14 真机日志），那两项恒为 0。此时退到「总加速度
@@ -256,8 +266,11 @@ void s2a_ios_slot_feedback_owner(int slot, GCController *c) {
         s2a_gc_motion_axes(gravity, user, rotation, acceleration, gyro);
         s2a_pad_motion sample = {up_ns() / 1000, acceleration[0], acceleration[1], acceleration[2], gyro[0], gyro[1], gyro[2]};
         GCController *owner = weakC;
+        // 六个值全是精确 0：真传感器静止也有 1 g 重力和噪声，做不到——是传感器没开时系统照样回调的空样本（D-Q99N 整局如此）。
+        //   不算新鲜样本：s2a_motion_fresh 过 500 ms 判「没有」，仲裁退回手机陀螺仪，不再整局给游戏喂 0
+        int blank = s2a_motion_blank(acceleration, gyro);
         pthread_mutex_lock(&g_mu);
-        for (int s = 0; s < SLOT_PADS; s++) if (owner && g_owner[s] == owner) { g_motion[s] = sample; g_motion_known[s] = 1; }
+        if (!blank) for (int s = 0; s < SLOT_PADS; s++) if (owner && g_owner[s] == owner) { g_motion[s] = sample; g_motion_known[s] = 1; }
         int first = atomic_exchange(&g_motion_first_logged, 1);
         pthread_mutex_unlock(&g_mu);
         if (!first)   // 首个样本：哪条加速度兜底、数值长什么样，一条日志看全（真机排查体感不灵用它）

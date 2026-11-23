@@ -454,11 +454,36 @@ static BOOL pad_order_refresh(void) {   // 回 YES = 表换了（或没了），
     int loaded = s2a_pad_order_from_json(json, &order, &generation);
     BOOL was = g_order_loaded, reassign = !was || generation != g_order_generation;
     g_order = order; g_order_loaded = loaded; g_order_generation = generation;
-    LOG("分配玩家顺序表：%d 位%s，没分配的 %d 只不给玩家位%s", order.count, loaded ? "" : "（读不懂，照连接顺序）", order.dropped_count,
+    char who[400]; s2a_pad_order_describe(&order, who, sizeof who);
+    LOG("分配玩家顺序表：%d 位%s%s%s%s，没分配的 %d 只不给玩家位%s", order.count, loaded ? "" : "（读不懂，照连接顺序）", who[0] ? "（" : "", who, who[0] ? "）" : "", order.dropped_count,
         reassign ? "；重新分配过，照表重排" : "；只是接上 / 断开手柄，已在玩的留原位");
     return (loaded || was) && reassign;
 }
 // 系统扩展手柄 → Switch 按键位（0..15 + Home 扩展位 16）与摇杆。玩家 1（publishSystem）与槽 1–3 共用
+// 逐键输入记录（诊断开关 DM_INPUT_TRACE=1，经诊断码开一局；#2144 背键乱动：日志只有变化次数，看不出手柄到底报了什么）：
+//   每只手柄的键位一变就记一行：系统报上来的全部按下元素（含方向键各向、Home、Xbox 背键 paddle 1–4 这些我们不映射的），
+//   以及改键前 / 后交给游戏的位。只在输入队列上调（同 sample_extended）
+static void input_trace(GCExtendedGamepad *pad, uint32_t raw, uint32_t mapped) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("DM_INPUT_TRACE"); on = e && *e == '1'; if (on) LOG("逐键输入记录：开（DM_INPUT_TRACE）"); }
+    if (!on || !pad) return;
+    GCPhysicalInputProfile *prof = pad.controller.physicalInputProfile;
+    NSMutableArray<NSString *> *down = [NSMutableArray array];
+    for (NSString *name in prof.buttons) if (prof.buttons[name].isPressed) [down addObject:name];
+    // 方向键 / 摇杆：偏移过半记方向 U / D / L / R（固件把背键换成摇杆偏移时，按键位不变，只看这里）
+    for (NSString *name in prof.dpads) {
+        GCControllerDirectionPad *d = prof.dpads[name]; float x = d.xAxis.value, y = d.yAxis.value;
+        if (fabsf(x) > 0.5f || fabsf(y) > 0.5f) [down addObject:[NSString stringWithFormat:@"%@ %s%s", name, y > 0.5f ? "U" : y < -0.5f ? "D" : "", x > 0.5f ? "R" : x < -0.5f ? "L" : ""]];
+    }
+    [down sortUsingSelector:@selector(compare:)];
+    NSString *sig = [NSString stringWithFormat:@"%x/%x/%@", raw, mapped, [down componentsJoinedByString:@","]];
+    static NSMapTable<GCExtendedGamepad *, NSString *> *last;
+    if (!last) last = [NSMapTable weakToStrongObjectsMapTable];
+    if ([[last objectForKey:pad] isEqualToString:sig]) return;
+    [last setObject:sig forKey:pad];
+    LOG("逐键输入：%s 按着 [%s]，交给游戏 原 0x%x → 改键后 0x%x", pad.controller.vendorName.UTF8String ?: "?",
+        [down componentsJoinedByString:@", "].UTF8String, raw, mapped);
+}
 static void sample_extended(GCExtendedGamepad *pad, uint32_t *out_buttons, int32_t axes[4]) {
     // GameController 的 ABXY 通常按物理方位定义（南/东/西/北 → Nintendo B/A/Y/X）；任天堂手柄按键帽字母上报（#40），判断同 Mac 侧 front_mac.m。
     // buttonOptions（「-」）在部分手柄上为 nil；位序不能动，bit11 留给它，nil 时该位恒 0（与 Mac 侧 front_mac.m 一致）。
@@ -477,7 +502,9 @@ static void sample_extended(GCExtendedGamepad *pad, uint32_t *out_buttons, int32
     s2a_pad_stick(pad.rightThumbstick.xAxis.value, pad.rightThumbstick.yAxis.value, axes + 2);
     // 改键（#1606 ④）：这一款键位的 gamepad / axes 段，同 Mac map_pad_inputs（keyboard_map.h s2a_pad_map）；缺省配置原样不动。
     //   只在输入队列上跑（玩家 1 与槽 1–3 的回调都排在 inputQueue），与 keyboard.m 改键页换表同一队列。NS2 Pro 走 ble_input（另一线程），这一版不改键
+    uint32_t raw = buttons;
     s2a_pad_map(s2a_ios_pad_map_config(), &buttons, axes);
+    input_trace(pad, raw, buttons);
     *out_buttons = buttons;
 }
 // 接一只系统手柄（玩家 1 与槽 1–3 同一套）：回调放输入队列；「-」「Home」关系统手势。

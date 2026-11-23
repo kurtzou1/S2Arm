@@ -680,3 +680,7 @@
 20261123-1303-joycon-pair-imu-rotate.patch
 20261122-2108-npad-imu-clock-jump.patch
 20261122-2344-fs-fail-mount.patch
+20261123-0435-ldn-session-route-multihomed-auto.patch
+20261123-0537-ldn-auto-platform-discovery.patch
+20261123-0742-bsd-sockaddr-buffer-len.patch
+20261123-0822-applet-open-stall-watch.patch

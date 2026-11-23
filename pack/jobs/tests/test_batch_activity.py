@@ -91,7 +91,10 @@ class BatchActivity(JobCase):
     def test_unavailable_sampling_is_unknown_not_zero_or_ended(self):
         def denied(pid):
             raise PermissionError('synthetic denied enumeration')
-        for tree in [denied, lambda pid: {pid: (0, '')}]:
+        def ctypes_bad(pid):   # D-TW4Z：Windows 进程快照的 ctypes 参数错（ArgumentError）原先冒上去打断了出包
+            import ctypes
+            raise ctypes.ArgumentError('argument 1: OverflowError: int too long to convert')
+        for tree in [denied, ctypes_bad, lambda pid: {pid: (0, '')}]:
             with self.subTest(tree=tree):
                 activity = Activity(tree=tree, alive=lambda pid: True)
                 activity.accept(self.meta())

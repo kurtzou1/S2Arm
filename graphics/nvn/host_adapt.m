@@ -32,6 +32,7 @@
 #include <objc/runtime.h>  // 无头局屏能力探针（headless_edr_note）按名取 NSScreen：objc_getClass / sel_registerName
 #include <objc/message.h>  // objc_msgSend（不链 AppKit、无头探针按名调方法；double 返回 arm64 下同一入口）
 #include <stdatomic.h>
+#include <os/lock.h>
 #include <errno.h>
 int dm_gfx_session_stopping(void);
 #if TARGET_OS_IPHONE
@@ -392,17 +393,26 @@ static void hdr_tick_ios(void) {
 // Mac：启动器起的游戏窗口（macos/front_mac.m）有出图层就画上去；无头局（mac_run / 门禁）没有窗口，返回 NULL，直连层按无窗口只计数、照常服务截图
 //   跨层可选符号按名字取（dlsym 一次，同 3e21c138；弱引用在 dylib 单独链接时找不到符号）
 //   层的 device / 像素格式同 iOS 分支（通用模式由 NxGal 初始化时设，直连不起 NxGal：不设则 layer.residencySet 为空，直连层上屏登记常驻集抛异常）
+//   多线程取层（出图线程、游戏线程 nvn_be_has_window / nvn_be_display_hz、主线程 HDR tick）：配置块在锁里只进一次。
+//   已配置的层号原子发布，快路径只比原子号、不读强引用 set——两个线程同时给静态强引用赋值时，系统 objc_storeStrong 在 retain 期间
+//   往变量里临时写哨兵 0x400000000000bad0，另一线程把它当旧值 release 即崩（Mac 0.6.9 出图线程首帧取层）。
+//   配置块里 s2a_hdr_layer_apply 会重入本函数：层号先于它发布，重入走快路径、不再拿锁
 void *front_metal_layer(void) {
-    static void *(*f)(void); static dispatch_once_t once; static CAMetalLayer *set;
+    static void *(*f)(void); static dispatch_once_t once; static CAMetalLayer *set; static _Atomic(void *) set_id; static os_unfair_lock mu = OS_UNFAIR_LOCK_INIT;
     dispatch_once(&once, ^{ f = (void *(*)(void))dlsym(RTLD_DEFAULT, "s2a_mac_front_layer"); });
     CAMetalLayer *l = f ? (__bridge CAMetalLayer *)f() : nil;
-    if (l && l != set) {
-        l.device = MTLCreateSystemDefaultDevice(); l.pixelFormat = MTLPixelFormatBGRA8Unorm; l.framebufferOnly = !fb_readback(); set = l;
-        g_out_w = (int)l.drawableSize.width; g_out_h = (int)l.drawableSize.height;
-        LOG("直连：出图层取 Mac 游戏窗口的层 %.0fx%.0f 像素", l.drawableSize.width, l.drawableSize.height);
-        s2a_hdr_layer_apply();   // PR4：取用即按快照层态应用配置（§4 PR4 ①——创建点；预挂过的 Switch 2 游戏直接 PQ，否则显式 sRGB tag 的 S0）。
-                                 // set 已先赋值：包装内再调 front_metal_layer 不重入本块。首个取用可能在 present 线程（present_now 首帧）——
-                                 // 与上面同块的 l.device / l.pixelFormat 直设同一口径（先于任何 drawable 的属性配置），applied 态用原子防并发重算
+    if (l && (__bridge void *)l != atomic_load_explicit(&set_id, memory_order_acquire)) {
+        os_unfair_lock_lock(&mu);
+        if ((__bridge void *)l != atomic_load_explicit(&set_id, memory_order_relaxed)) {
+            l.device = MTLCreateSystemDefaultDevice(); l.pixelFormat = MTLPixelFormatBGRA8Unorm; l.framebufferOnly = !fb_readback(); set = l;
+            g_out_w = (int)l.drawableSize.width; g_out_h = (int)l.drawableSize.height;
+            atomic_store_explicit(&set_id, (__bridge void *)l, memory_order_release);
+            LOG("直连：出图层取 Mac 游戏窗口的层 %.0fx%.0f 像素", l.drawableSize.width, l.drawableSize.height);
+            s2a_hdr_layer_apply();   // PR4：取用即按快照层态应用配置（§4 PR4 ①——创建点；预挂过的 Switch 2 游戏直接 PQ，否则显式 sRGB tag 的 S0）。
+                                     // 层号已先发布：包装内再调 front_metal_layer 走快路径、不重入本块。首个取用可能在 present 线程（present_now 首帧）——
+                                     // 与上面同块的 l.device / l.pixelFormat 直设同一口径（先于任何 drawable 的属性配置），applied 态用原子防并发重算
+        }
+        os_unfair_lock_unlock(&mu);
     }
     return (__bridge void *)l;
 }
@@ -794,12 +804,14 @@ static void *fail_watch(void *arg) {
         // 客机冻结（Mac 失焦暂停 / iOS 后台 / 重启屏障，runtime/src/thread.c s2a_guest_frozen）按设计不出帧，不算停住
         //   （11-15 v0.4.2 候选一局：窗口失焦冻结 45 秒被报「出帧停住 45 秒」假红；停帧救场 runtime/src/ap_host.c 早已同口径）
         //   宿主失焦 / 睡眠同样不算（D-T324，Mac 0.6.7：窗口失焦但没冻结——失焦暂停关——游戏收到失焦通知自己停画 53 秒，被记成「出帧停住 45 秒」直连失败）。
-        //   外因判定与出图停住看门同一条（ap_host.c s2a_ap_stall_external：冻结 / 焦点=0 / 睡眠=1 任一成立；取不到的符号记 -1、不冒充外因，t_ap_host ⑥d 测）
-        static int (*frozen)(void), (*focused)(void), (*sleeping)(void), (*external)(int, int, int); static int looked;
+        //   外因判定与出图停住看门同一条（ap_host.c s2a_ap_stall_external：冻结 / 焦点=0 / 睡眠=1 / 系统小程序开着 任一成立；取不到的符号记 -1、不冒充外因，t_ap_host ⑥d 测）
+        //   系统小程序开着（键盘 / 错误弹窗 / 手柄设置）同样不算（D-Z96G，iPad 0.6.9：输名字 53 秒被记成「出帧停住 45 秒」）
+        static int (*frozen)(void), (*focused)(void), (*sleeping)(void), (*applet)(void), (*external)(int, int, int, int); static int looked;
         if (!looked) { frozen = (int (*)(void))dlsym(RTLD_DEFAULT, "s2a_guest_frozen"); focused = (int (*)(void))dlsym(RTLD_DEFAULT, "s2a_host_focused");
-                       sleeping = (int (*)(void))dlsym(RTLD_DEFAULT, "s2a_host_sleeping"); external = (int (*)(int, int, int))dlsym(RTLD_DEFAULT, "s2a_ap_stall_external"); looked = 1; }
-        { int fz = frozen ? frozen() : -1, fo = focused ? focused() : -1, sl = sleeping ? sleeping() : -1;
-          if (atomic_load(&g_suspended) || (external ? external(fz, fo, sl) : fz == 1)) { idle = 0; base = 0; continue; } }
+                       sleeping = (int (*)(void))dlsym(RTLD_DEFAULT, "s2a_host_sleeping"); applet = (int (*)(void))dlsym(RTLD_DEFAULT, "s2a_applet_open");
+                       external = (int (*)(int, int, int, int))dlsym(RTLD_DEFAULT, "s2a_ap_stall_external"); looked = 1; }
+        { int fz = frozen ? frozen() : -1, fo = focused ? focused() : -1, sl = sleeping ? sleeping() : -1, ap = applet ? applet() : -1;
+          if (atomic_load(&g_suspended) || (external ? external(fz, fo, sl, ap) : fz == 1)) { idle = 0; base = 0; continue; } }
         unsigned long long f = direct_frames();
         if (!f) {
             if (++wait_first != 90) continue;   // 只在第 90 秒报一次、打一次现场，之后照常等首帧

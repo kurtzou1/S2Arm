@@ -61,6 +61,9 @@ void s2a_vp8_close(void *h) __attribute__((weak));
 // 弱链接[nvntest]：s2a_vpx_linked（真 libvpx 回 1 / 空垫片 services/vpx/stub.c 回 0；宿主与 iOS 链二者之一，
 //   = 0 时 VP9 默认走系统（见 vp9_system_enabled）；NVN 单测两样都不链：弱引用 NULL，调用前判）
 int s2a_vpx_linked(void) __attribute__((weak));
+// 弱链接[nvntest]：s2a_host_mem_avail（宿主还能给多少内存，平台层实现 runtime/src/hostmem_apple.c；iPhone 是离系统给本 App 的上限还剩多少。
+//   先解队列按它定格数；NVN 单测不链原生核：弱引用 NULL，调用前判）
+uint64_t s2a_host_mem_avail(void) __attribute__((weak));
 // services/dav1d 的垫片（libs2a_dav1d.a：同上一起链）
 void *s2a_av1_open(int threads) __attribute__((weak));
 int s2a_av1_decode(void *h, const uint8_t *data, uint32_t len, uint8_t **planes, int32_t *strides, int32_t *info) __attribute__((weak));
@@ -655,7 +658,15 @@ typedef struct cvdec {
     _Atomic int ntr;
     // 写进图像的耗时（YUV 转 RGBA / 拷 NV12 / 交换 BGRA）
     uint64_t wr_n, wr_ns;
+    // 先解几帧（ah）：游戏只登记 2 个缓冲（一个在显示、一个在填），解码线程原本最多领先 1 帧；dav1d 一包偶尔 100+ ms（关键帧、和编译服务抢核），
+    //   游戏就重复上一帧、影片越放越慢，声音照真实时间放、跑到前面（一款动作冒险游戏：154 s 的片子多放约 9 s）。
+    //   解码线程把转好格式的帧放进宿主内存的先解队列（按图像布局，最多 CV_AHEAD_BYTES），出帧线程（eth）有空缓冲就拷进去、照旧发同步点
+    struct cv_ahead { uint8_t *p; size_t cap, size; uint16_t fw, fh; int64_t pts; int eos, gen, has; } ah[32]; int ah_h, ah_n, ah_cap, ah_epoch; size_t ah_frame; pthread_t eth;
+    uint64_t ah_peak, ah_low;   // 队列最深 / 出帧线程取到时队列已空（解码跟不上）的次数
+    uint64_t props_wait_n, props_wait_ns;   // 游戏取帧属性时那一格还没帧、等了的次数 / 合计
 } cvdec;
+#define CV_AHEAD_MAX 32
+#define CV_AHEAD_BYTES (96u << 20)
 static pthread_mutex_t g_dec_mu = PTHREAD_MUTEX_INITIALIZER;
 static cvdec *g_dec[64];
 static cvdec *cv_of(const void *t) {
@@ -666,7 +677,8 @@ static cvdec *cv_of(const void *t) {
 // 持 mu
 static void cv_ready_signal(cvdec *d) { if (d->started && d->qn < CV_MAXQ) s2a_event_signal(d->ready_ev); }
 // 把一帧交给填充次序里的下一张缓冲：wr(图像, 参数) 写像素（NULL = 上一帧原样再给一次，带流结束标记用）；0 = 先来了 Flush / Stop / Finalize
-static int cv_emit(cvdec *d, void (*wr)(const cv_img *, void *), void *arg, uint16_t fw, uint16_t fh, int64_t pts_ns, int eos, int gen) {
+static void wr_ahead(const cv_img *im, void *a);
+static int cv_emit_now(cvdec *d, void (*wr)(const cv_img *, void *), void *arg, uint16_t fw, uint16_t fh, int64_t pts_ns, int eos, int gen) {
     pthread_mutex_lock(&d->mu);
     while (!d->quit && d->gen == gen && !d->fn) pthread_cond_wait(&d->cv, &d->mu);
     if (d->quit || d->gen != gen) { pthread_mutex_unlock(&d->mu); return 0; }
@@ -678,7 +690,7 @@ static int cv_emit(cvdec *d, void (*wr)(const cv_img *, void *), void *arg, uint
     cv_img im, lm;
     if (cv_img_get(img, &im)) {
         dm_guest_write_prepare(im.mem, im.size);
-        if (wr) { uint64_t t0 = now_ns(); wr(&im, arg); d->wr_ns += now_ns() - t0; d->wr_n++; }
+        if (wr) { uint64_t t0 = now_ns(); wr(&im, arg); if (wr != wr_ahead) { d->wr_ns += now_ns() - t0; d->wr_n++; } }
         else if (limg && limg != img && cv_img_get(limg, &lm) && lm.size == im.size) memcpy(im.host, lm.host, im.size);
     }
     pthread_mutex_lock(&d->mu);
@@ -707,6 +719,74 @@ static void wr_pb(const cv_img *im, void *a) {
         }
     } else bgra_to_img(CVPixelBufferGetBaseAddress(pb), CVPixelBufferGetBytesPerRow(pb), w, h, im);
     CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+}
+static void wr_ahead(const cv_img *im, void *a) { const struct cv_ahead *x = a; memcpy(im->host, x->p, x->size < im->size ? x->size : im->size); }
+// 已登记缓冲的图像布局（同一个池，布局一样）；0 = 还没有登记的
+static int cv_tpl_locked(cvdec *d, cv_img *out) { for (int i = 0; i < CV_BUFS; i++) if (d->buf[i].reg && cv_img_get(d->buf[i].img, out)) return 1; return 0; }
+// 先解队列格数：上限 CV_AHEAD_BYTES；iOS 再按当时剩余内存（平台层 s2a_host_mem_avail）压到 / 8（读 0 就只开 1 格），
+//   装不下就少开几格，最少 1 格、最多 CV_AHEAD_MAX。每格内存到解码器销毁才放，整段影片都占着。DM_NVN_AVAIL_MB 可代替读数（测试 / 在 Mac 上看读数）
+static int cv_ahead_slots(cvdec *d, size_t frame) {
+    uint64_t lim = CV_AHEAD_BYTES, avail = 0; int have_avail = 0;
+    const char *e = getenv("DM_NVN_AVAIL_MB");
+    if (e && *e && atoll(e) >= 0) { avail = (uint64_t)atoll(e) << 20; have_avail = 1; }
+#if TARGET_OS_IPHONE
+    else if (s2a_host_mem_avail) { avail = s2a_host_mem_avail(); have_avail = 1; }
+#endif
+    if (have_avail && avail / 8 < lim) lim = avail / 8;
+    uint64_t c = frame ? lim / frame : 1;
+    int n = (int)(c < 1 ? 1 : c > CV_AHEAD_MAX ? CV_AHEAD_MAX : c);
+    char av[48] = ""; if (have_avail) snprintf(av, sizeof av, "，剩余内存 %.0f MB", avail / 1048576.0);
+    LOG("视频解码：先解队列 %d 格 × %zu 字节 = %.1f MB（上限 %.1f MB%s）", n, frame, n * (double)frame / 1048576.0, lim / 1048576.0, av);
+    d->ah_frame = frame;
+    return n;
+}
+// 解码线程：转好的一帧进先解队列（满了等出帧线程取走）；0 = 解码器要退 / 换代（同 cv_emit_now）
+static int cv_emit(cvdec *d, void (*wr)(const cv_img *, void *), void *arg, uint16_t fw, uint16_t fh, int64_t pts_ns, int eos, int gen) {
+    cv_img tpl;
+    pthread_mutex_lock(&d->mu);
+    int have = cv_tpl_locked(d, &tpl);
+    if (wr && !have) { pthread_mutex_unlock(&d->mu); return cv_emit_now(d, wr, arg, fw, fh, pts_ns, eos, gen); }   // 还没登记缓冲：照旧直接等
+    if (!d->ah_cap && have) d->ah_cap = cv_ahead_slots(d, tpl.size);
+    int cap = d->ah_cap ? d->ah_cap : 1;   // 还没登记缓冲时进队的只有不带图像的帧（不占内存）
+    while (!d->quit && d->gen == gen && d->ah_n >= cap) pthread_cond_wait(&d->cv, &d->mu);
+    if (d->quit || d->gen != gen) { pthread_mutex_unlock(&d->mu); return 0; }
+    struct cv_ahead *a = &d->ah[(d->ah_h + d->ah_n) % CV_AHEAD_MAX];
+    pthread_mutex_unlock(&d->mu);
+    a->has = 0;
+    if (wr) {
+        if (a->cap < tpl.size) { free(a->p); a->p = malloc(tpl.size); a->cap = a->p ? tpl.size : 0; }
+        if (!a->p) { CV_RED(ahmem, "视频解码：先解队列 %zu 字节分配不出，这一帧直接等空缓冲（不先解）", tpl.size); return cv_emit_now(d, wr, arg, fw, fh, pts_ns, eos, gen); }
+        cv_img tmp = tpl; tmp.host = tmp.mem = a->p;
+        uint64_t t0 = now_ns(); wr(&tmp, arg); d->wr_ns += now_ns() - t0; d->wr_n++;
+        a->size = tpl.size; a->has = 1;
+    }
+    a->fw = fw; a->fh = fh; a->pts = pts_ns; a->eos = eos; a->gen = gen;
+    pthread_mutex_lock(&d->mu);
+    d->ah_n++; if ((uint64_t)d->ah_n > d->ah_peak) d->ah_peak = (uint64_t)d->ah_n;
+    pthread_cond_broadcast(&d->cv);
+    pthread_mutex_unlock(&d->mu);
+    return 1;
+}
+// 出帧线程：先解队列 → 游戏的空缓冲（拷贝 + 读栅栏 + 同步点，同原先解码线程做的）
+static void *cv_emitter(void *arg) {
+    cvdec *d = arg;
+    pthread_setname_np("s2a video emit");
+    pthread_mutex_lock(&d->mu);
+    for (;;) {
+        if (!d->ah_n && !d->quit) d->ah_low++;
+        while (!d->quit && !d->ah_n) pthread_cond_wait(&d->cv, &d->mu);
+        if (d->quit) break;
+        struct cv_ahead *a = &d->ah[d->ah_h]; int ep = d->ah_epoch;
+        if (a->gen == d->gen) {
+            pthread_mutex_unlock(&d->mu);
+            cv_emit_now(d, a->has ? wr_ahead : NULL, a, a->fw, a->fh, a->pts, a->eos, a->gen);
+            pthread_mutex_lock(&d->mu);
+        }
+        if (ep == d->ah_epoch && d->ah_n) { d->ah_h = (d->ah_h + 1) % CV_AHEAD_MAX; d->ah_n--; }   // 即时存档恢复清过队列（ah_epoch 变了）：不再出队
+        pthread_cond_broadcast(&d->cv);
+    }
+    pthread_mutex_unlock(&d->mu);
+    return NULL;
 }
 static void cv_vt_drop(cvdec *d) {
     if (d->vt) { VTDecompressionSessionInvalidate(d->vt); CFRelease(d->vt); d->vt = NULL; }
@@ -1067,6 +1147,7 @@ static Result cv_init(void *t, int codec, uint32_t w, uint32_t h) {
     pthread_mutex_unlock(&g_dec_mu);
     pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 4 << 20);
     if (pthread_create(&d->th, &a, cv_worker, d)) die("Switch 2 视频：解码线程起不来");
+    if (pthread_create(&d->eth, &a, cv_emitter, d)) die("视频解码：出帧线程起不来");
     pthread_attr_destroy(&a);
     LOG("Switch 2 视频：%s 解码器 %ux%u（宿主线程解码，不进 gsv）", cv_name[codec], w, h);
     return RES_OK;
@@ -1081,8 +1162,9 @@ static void cv_fini(void *t) {
 static void cv_teardown(cvdec *d, int guest_event) {
     void *t = d->guest;
     pthread_mutex_lock(&d->mu); d->quit = 1; pthread_cond_broadcast(&d->cv); pthread_mutex_unlock(&d->mu);
-    DM_BLOCK_BEGIN(); pthread_join(d->th, NULL); DM_BLOCK_END();
+    DM_BLOCK_BEGIN(); pthread_join(d->th, NULL); pthread_join(d->eth, NULL); DM_BLOCK_END();
     cv_reset_codec(d); cv_drop_inputs(d); free(d->q); free(d->vt_u); free(d->vt_v);
+    for (int i = 0; i < CV_AHEAD_MAX; i++) free(d->ah[i].p);
     sp_free(d->ctr);
     static void (*destroy)(void *);
     if (guest_event) {
@@ -1090,6 +1172,8 @@ static void cv_teardown(cvdec *d, int guest_event) {
         destroy((uint8_t *)t + 8);   // 托管句柄随之关掉
     }
     s2a_event_release(d->ready_ev);
+    LOG("视频解码：先解队列 %d 格（%.1f MB）、最深 %llu 帧，出帧线程取到空队列 %llu 次；游戏取帧属性时那格还没帧 %llu 次、合计等 %.1f ms", d->ah_cap, d->ah_cap * (double)d->ah_frame / 1048576.0, (unsigned long long)d->ah_peak,
+        (unsigned long long)d->ah_low, (unsigned long long)d->props_wait_n, d->props_wait_ns / 1e6);
     LOG("Switch 2 视频：%s 解码器结束，出帧 %llu；解码 %llu 包，每包平均 %.2f ms、最长 %.2f ms；写进图像每帧平均 %.2f ms（%s）", cv_name[d->codec], (unsigned long long)d->frames, (unsigned long long)d->dec_n,
         d->dec_n ? d->dec_ns / 1e6 / (double)d->dec_n : 0.0, d->dec_max / 1e6, d->wr_n ? d->wr_ns / 1e6 / (double)d->wr_n : 0.0,
         d->codec == CV_AV1 ? (d->av1_soft ? "dav1d 软件解码" : "VideoToolbox") : d->codec == CV_H264 ? "VideoToolbox" : d->codec == CV_VP9 && d->vp9_vt_used && !d->vp9_no_vt ? "VideoToolbox" : "libvpx");
@@ -1192,10 +1276,12 @@ static Result cv_props(uint16_t *w, uint16_t *h, uint16_t *w2, uint16_t *h2, int
     pthread_mutex_lock(&d->mu);
     // SDK 也等服务的下一帧（一般已经在了）
     struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_sec += 1;
+    uint64_t w0 = d->buf[i].reg && !d->buf[i].filled && !d->quit ? (d->props_wait_n++, now_ns()) : 0;
     while (d->buf[i].reg && !d->buf[i].filled && !d->quit) {
         DM_BLOCK_BEGIN(); int r = pthread_cond_timedwait(&d->cv, &d->mu, &dl); DM_BLOCK_END();
         if (r == ETIMEDOUT) break;
     }
+    if (w0) d->props_wait_ns += now_ns() - w0;
     if (!d->buf[i].filled) { pthread_mutex_unlock(&d->mu); LOG("【红】Switch 2 视频：取缓冲 %u 的帧属性，它还没有帧", i); return CV_NOT_READY; }
     *w = *w2 = d->buf[i].fw; *h = *h2 = d->buf[i].fh; *pts = d->buf[i].pts_ns; *eos = (uint8_t)d->buf[i].eos;
     pthread_mutex_unlock(&d->mu);
@@ -1558,6 +1644,7 @@ int nvn2_snap_codec_restore(FILE *f) {
         e = fread(d->buf, sizeof d->buf, 1, f) != 1 || fread(d->ring, sizeof d->ring, 1, f) != 1 || fread(&d->rh, sizeof(int), 1, f) != 1 || fread(&d->rn, sizeof(int), 1, f) != 1
           || fread(d->fill, sizeof d->fill, 1, f) != 1 || fread(&d->fh, sizeof(int), 1, f) != 1 || fread(&d->fn, sizeof(int), 1, f) != 1
           || fread(&d->started, sizeof(int), 1, f) != 1 || fread(&d->gen, sizeof(int), 1, f) != 1 || fread(&d->last, sizeof(int), 1, f) != 1 || fread(&d->nsub, 8, 1, f) != 1;
+        d->ah_h = (d->ah_h + d->ah_n) % CV_AHEAD_MAX; d->ah_n = 0; d->ah_epoch++; pthread_cond_broadcast(&d->cv);   // 先解队列是存档之后解的帧，不跟着恢复
         pthread_mutex_unlock(&d->mu); if (e) return -1; }
     pthread_mutex_lock(&g_img_mu);
     e = fread(g_img, sizeof g_img, 1, f) != 1 || fread(g_img_used, sizeof g_img_used, 1, f) != 1 || fread(&g_img_next, sizeof g_img_next, 1, f) != 1 || fread(g_cvp, sizeof g_cvp, 1, f) != 1;

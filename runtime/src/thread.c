@@ -1128,8 +1128,13 @@ void s2a_thread_main_stack(uint64_t top) { thr_t *t = cur(); if (t && t->is_main
 static pthread_cond_t g_pause_cv = PTHREAD_COND_INITIALIZER;
 // 进后台冻结（iOS 失去前台，app.m）：全部游戏线程在系统调用出入口停住，回前台放开。与游戏自己的 SetThreadActivity 暂停（t->pause）各管各的，互不覆盖；
 // 正在游戏代码里算的线程跑到下一次系统调用才停（不 Mach 挂起：停在宿主代码里可能持 malloc 锁，卡住主线程）
+//   g_frz 是合成的「现在冻着」：生命周期冻结（g_life_frz：前后台 / 失焦 / 提示页，s2a_guest_freeze）或即时存档冻结（g_snap_frz）任一在就冻；
+//   两方各自只放自己那份（持 G 改、改完重算 g_frz）。原先 s2a_guest_freeze(0) 直接清 g_frz：存档冻结期间回到焦点，游戏线程半途被放开、
+//   和存档改内存权限撞上（游戏代码里页对齐地址 SIGBUS）；反过来存档存完也会把进了后台的游戏放开
 static _Atomic int g_frz;
+static _Atomic int g_life_frz;   // 生命周期冻结（s2a_guest_freeze）
 static _Atomic int g_snap_frz;   // 即时存档冻结中（只在门里停：入口 / 出口 / 等待 / 睡眠）
+static void frz_recalc_locked(void) { int on = atomic_load(&g_life_frz) || atomic_load(&g_snap_frz); atomic_store(&g_frz, on); if (!on) pthread_cond_broadcast(&g_pause_cv); }   // 持 G 调
 static void preempt_init(void);   // 时钟抢占（S2A_CORES）：cores_on 首次开时注册信号 + 起核抢占看门狗
 // ---------- 虚拟核（S2A_CORES=1，修干净清单 #1；帧率能耗线 10-20，底本旧库 sw/host/hle_thread.c:148）----------
 // Horizon 上同一个核同一时刻只跑一条线程，换人只在阻塞 / 让出 / 被高优先级抢占时发生；任天堂系引擎依赖它（同核线程轮流用不带锁的数据）。
@@ -2025,7 +2030,7 @@ void s2a_android_memory_svc_finish(void) {
 }
 #endif
 int s2a_guest_frozen(void) { return atomic_load(&g_frz); }   // ap_host.c 出图停住看门：iOS 进后台冻结期间不算停住
-void s2a_guest_freeze(int on) { glock(); atomic_store(&g_frz, on ? 1 : 0); if (!on) pthread_cond_broadcast(&g_pause_cv); pthread_mutex_unlock(&G); }
+void s2a_guest_freeze(int on) { glock(); atomic_store(&g_life_frz, on ? 1 : 0); frz_recalc_locked(); pthread_mutex_unlock(&G); }
 
 // ---------- 同步对象 ----------
 static int sig_obj(uint32_t h, int *bad) {   // 1 = 已触发（持 G）
@@ -2379,7 +2384,7 @@ void s2a_snap_thaw(void) {
     // 冻结时代放过核的（off_guest 标着）：放开前先挂抢占信号，回游戏代码执行任何指令前先进 tramp 按优先级取核（同 thr_unpause）
     glock(); for (thr_t *t = g_all; t; t = t->all) if (t->snap_run) { t->snap_run = 0; snap_run_resume(t); } pthread_mutex_unlock(&G);
 #endif
-    glock(); atomic_store(&g_frz, 0); atomic_store(&g_snap_frz, 0); pthread_cond_broadcast(&g_pause_cv); pthread_mutex_unlock(&G);
+    glock(); atomic_store(&g_snap_frz, 0); frz_recalc_locked(); pthread_mutex_unlock(&G);
 }
 #if !defined(S2A_UNIT_TEST)
 void s2a_where(uint64_t a, char *b, size_t n); int s2a_frames_of(uint64_t fp, uint64_t *lr, int max);   // crash.c
@@ -2888,7 +2893,7 @@ void s2a_snap_unfreeze(void) {
         t->snap_run = 0; snap_run_resume(t); nrun++; }
     if (nrun || nbad) LOG("%s即时存档恢复：停在游戏代码里的线程 %d 条按快照现场接着跑（失败 %d）", nbad ? "【红】" : "", nrun, nbad);
 #endif
-    glock(); atomic_store(&g_frz, 0); atomic_store(&g_snap_frz, 0); pthread_cond_broadcast(&g_pause_cv); pthread_mutex_unlock(&G); LOG("即时存档恢复：放开冻结，游戏接着跑"); }
+    glock(); atomic_store(&g_snap_frz, 0); frz_recalc_locked(); pthread_mutex_unlock(&G); LOG("即时存档恢复：放开冻结%s", atomic_load(&g_frz) ? "（生命周期冻结还在：等回前台再跑）" : "，游戏接着跑"); }
 static uint32_t thr_unpause(thr_t *t) {
     glock();
     if (!atomic_load(&t->pause)) { pthread_mutex_unlock(&G); return R_BAD_STATE; }

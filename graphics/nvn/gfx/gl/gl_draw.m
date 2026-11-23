@@ -855,6 +855,28 @@ GLB(glWaitSync, void, GLsync sync, GLbitfield flags, GLuint64 timeout) { @autore
     gl_end_enc(); [gl_cmd() encodeWaitForEvent:e value:f->val];
 }}
 
+// 查同步对象属性（GL 4.6 §4.1.3）：类型 = SYNC_FENCE、条件 = GPU_COMMANDS_COMPLETE、标志 = 0、状态 = 到没到。
+//   状态只查不等；栅栏还在当前命令缓冲里就先提交（同 glClientWaitSync：游戏轮询状态不 flush 的话永远等不到）。
+//   原先落在空实现上什么都不写，游戏读到自己栈上的旧值
+GLB(glGetSynciv, void, GLsync sync, GLenum what, GLsizei count, GLsizei *length, GLint *values) { @autoreleasepool {
+    CTX(); gl_sync *f = gl_name_get(&g_syncs, (GLuint)(uintptr_t)sync);
+    if (!f) { gl_set_error(GL_INVALID_VALUE); return; }
+    if (count < 0) { gl_set_error(GL_INVALID_VALUE); return; }
+    GLint v;
+    switch (what) {
+        case 0x9112: v = 0x9116; break;                       // OBJECT_TYPE → SYNC_FENCE
+        case 0x9113: v = GL_SYNC_GPU_COMMANDS_COMPLETE; break; // SYNC_CONDITION
+        case 0x9115: v = 0; break;                            // SYNC_FLAGS
+        case 0x9114: {                                        // SYNC_STATUS → SIGNALED 0x9119 / UNSIGNALED 0x9118
+            int done;
+            if (f->ev) done = ((__bridge id<MTLSharedEvent>)f->ev).signaledValue >= f->val;
+            else { if (gl_seq_busy(f->seq) && f->seq >= gl_seq_ref()) gl_commit(); done = !gl_seq_busy(f->seq) || gl_ev.signaledValue >= f->seq; }   // 同 glClientWaitSync：事件到了就算到（完成回调记 g_done 稍后）
+            v = done ? 0x9119 : 0x9118; break; }
+        default: GLRED1("glGetSynciv 参数 %#x 没实现", what); gl_set_error(GL_INVALID_ENUM); return;
+    }
+    if (count >= 1 && values) { values[0] = v; if (length) *length = 1; } else if (length) *length = 0;
+}}
+
 // ---------- 即时存档：排空 + 查询 / 同步对象 ----------
 int gl_snap_drain(void) {
     if (!g_q) return 1;

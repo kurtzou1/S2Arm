@@ -332,7 +332,21 @@ static MTLPixelFormat rb_format(GLenum f) {
     }
     return MTLPixelFormatInvalid;
 }
-// 渲染缓冲查询（FINAL FANTASY VII 建帧缓冲后读回宽高 / 格式）：宽、高、内部格式、采样数；其它参数报红
+// 渲染缓冲各分量位数（GL 4.6 §9.2.6 RENDERBUFFER_{RED..STENCIL}_SIZE）：按建存储时要的内部格式报（深度 24 实存 32 位浮点，报游戏要的 24）；
+//   没建存储 / 不认的格式全 0（规范初值）。顺序 红 绿 蓝 alpha 深度 模板
+static void rb_bits(GLenum f, int b[6]) {
+    static const struct { GLenum f; uint8_t b[6]; } t[] = {
+        {0x8058, {8, 8, 8, 8, 0, 0}}, {0x1908, {8, 8, 8, 8, 0, 0}}, {0x8051, {8, 8, 8, 0, 0, 0}}, {0x1907, {8, 8, 8, 0, 0, 0}},
+        {0x8C43, {8, 8, 8, 8, 0, 0}}, {0x881A, {16, 16, 16, 16, 0, 0}}, {0x8814, {32, 32, 32, 32, 0, 0}},
+        {0x822D, {16, 0, 0, 0, 0, 0}}, {0x822E, {32, 0, 0, 0, 0, 0}}, {0x8C3A, {11, 11, 10, 0, 0, 0}}, {0x8059, {10, 10, 10, 2, 0, 0}},
+        {0x81A5, {0, 0, 0, 0, 16, 0}}, {0x1902, {0, 0, 0, 0, 24, 0}}, {0x81A6, {0, 0, 0, 0, 24, 0}}, {0x81A7, {0, 0, 0, 0, 32, 0}}, {0x8CAC, {0, 0, 0, 0, 32, 0}},
+        {0x84F9, {0, 0, 0, 0, 24, 8}}, {0x88F0, {0, 0, 0, 0, 24, 8}}, {0x8CAD, {0, 0, 0, 0, 32, 8}}, {0x8D48, {0, 0, 0, 0, 0, 8}},
+    };
+    for (int k = 0; k < 6; k++) b[k] = 0;
+    for (size_t i = 0; i < sizeof t / sizeof *t; i++) if (t[i].f == f) { for (int k = 0; k < 6; k++) b[k] = t[i].b[k]; return; }
+}
+// 渲染缓冲查询（FINAL FANTASY VII 建帧缓冲后读回宽高 / 格式）：宽、高、内部格式、采样数、各分量位数；其它参数报红。
+//   报错时 *v 不写（规范），游戏不查 glGetError 就读到自己栈上的旧值——所以游戏会问的都要答
 GL(glGetRenderbufferParameteriv, void, GLenum target, GLenum what, GLint *v) {
     CTX(); if (target != GL_RENDERBUFFER) { gl_set_error(GL_INVALID_ENUM); return; }
     gl_renderbuffer *r = gl_name_get(&renderbuffers, gl_cur->rb_bound); if (!r) { gl_set_error(GL_INVALID_OPERATION); return; }
@@ -341,6 +355,8 @@ GL(glGetRenderbufferParameteriv, void, GLenum target, GLenum what, GLint *v) {
         case 0x8D43: *v = r->tex ? (GLint)r->tex.height : 0; return;             // RENDERBUFFER_HEIGHT
         case 0x8D44: *v = r->format ? (GLint)r->format : 0x8056; return;          // RENDERBUFFER_INTERNAL_FORMAT（没建存储 = RGBA4，GL 缺省）
         case 0x8CAB: *v = r->tex ? (GLint)(r->tex.sampleCount > 1 ? r->tex.sampleCount : 0) : 0; return;   // RENDERBUFFER_SAMPLES
+        case 0x8D50: case 0x8D51: case 0x8D52: case 0x8D53: case 0x8D54: case 0x8D55: {   // RENDERBUFFER_RED / GREEN / BLUE / ALPHA / DEPTH / STENCIL_SIZE
+            int b[6]; rb_bits(r->tex ? r->format : 0, b); *v = b[what - 0x8D50]; return; }
     }
     GLRED1("glGetRenderbufferParameteriv 参数 %#x 没实现", what); gl_set_error(GL_INVALID_ENUM);
 }

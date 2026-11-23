@@ -943,8 +943,11 @@ class SaveBackupTests(unittest.TestCase):
             if a[:3] == ("device", "info", "files"):
                 return 0, {"result": {"files": [dict(relativePath=r, resources=dict(isDirectory=d)) for r, d in files]}}, ""
             src = a[a.index("--source") + 1]; got.append(src)
-            if fail and src.endswith(fail): return 1, {}, "Device locked"
-            Path(a[a.index("--destination") + 1]).write_text("内容:" + src); return 0, {}, ""
+            dst = Path(a[a.index("--destination") + 1])
+            for r, d in files:   # 假设备：整目录拷贝 = 把存档目录下的每个文件（含点开头的）落到 --destination 下
+                if d or r == fail: continue
+                (dst / r).parent.mkdir(parents=True, exist_ok=True); (dst / r).write_text("内容:" + src + "/" + r)
+            return (1, {}, "Device locked") if fail == "*" else (0, {}, "")
         import diag
         with um.patch.object(diag, "devicectl", devicectl):
             return install.backup_saves(self.c, "C891", "s2arm.z.0100c2500fc20000", "0100C2500FC20000"), got
@@ -952,16 +955,19 @@ class SaveBackupTests(unittest.TestCase):
     def test_backs_up_every_file(self):
         d, got = self._run([("0000000000000001", True), ("0000000000000001/0", True), ("0000000000000001/0/save.dat", False),
                             ("0000000000000001/1/save.dat", False), ("0000000000000001/.lock", False)])
-        self.assertEqual(got, [install.SAVE_DIR + "/0000000000000001/0/save.dat", install.SAVE_DIR + "/0000000000000001/1/save.dat"])   # 目录与 .lock 不拷
-        self.assertEqual((d / "0000000000000001/0/save.dat").read_text(), "内容:" + got[0])
+        self.assertEqual(got, [install.SAVE_DIR])   # 整个存档目录一次拉回，不再逐文件起 devicectl
+        self.assertEqual((d / "0000000000000001/0/save.dat").read_text(), "内容:" + install.SAVE_DIR + "/0000000000000001/0/save.dat")
+        self.assertEqual(sorted(p.relative_to(d).as_posix() for p in d.rglob("*") if p.is_file()),
+                         ["0000000000000001/0/save.dat", "0000000000000001/1/save.dat"])   # .lock 不留（同原先逐文件口径）
         self.assertEqual(d.parent, self.c.library / "games/0100C2500FC20000/save_backup")
+        self.assertEqual([x.name for x in d.parent.iterdir()], [d.name])   # 暂存目录已改名转正，不留 .pulling-*
 
     def test_update_backup_reports_completed_files(self):
         self.c.begin("备份这款的存档", 2, 4, key="phone_save_backup")
         with um.patch.object(self.c, "emit") as emit:
             self._run([("a", False), ("b", False)])
         counts = [call.kwargs for call in emit.call_args_list if call.args[0] == "progress"]
-        self.assertEqual(counts, [dict(done=1, total=2, unit="files"), dict(done=2, total=2, unit="files")])
+        self.assertEqual(counts, [dict(done=0, total=2, unit="files"), dict(done=2, total=2, unit="files")])
 
     def test_list_entry_without_relative_path_asks_not_crash(self):
         # #908：Xcode 16.0 的 devicectl 有条目不带 relativePath，原先 KeyError 让整个装机作业崩成「本地任务失败」。
@@ -971,7 +977,8 @@ class SaveBackupTests(unittest.TestCase):
             def devicectl(c, *a, timeout=0):
                 if a[:3] == ("device", "info", "files"):
                     return 0, {"result": {"files": entries}}, ""
-                Path(a[a.index("--destination") + 1]).write_text("x"); return 0, {}, ""
+                f = Path(a[a.index("--destination") + 1]) / "0000000000000001/0/save.dat"
+                f.parent.mkdir(parents=True, exist_ok=True); f.write_text("x"); return 0, {}, ""
             with um.patch.object(diag, "devicectl", devicectl):
                 return install.backup_saves(self.c, "C891", "s2arm.z.0100c2500fc20000", "0100C2500FC20000")
         d = run([dict(path="0000000000000001/0/save.dat", resources=dict(isDirectory=False))])
@@ -981,6 +988,38 @@ class SaveBackupTests(unittest.TestCase):
         self.assertEqual(e.exception.code, "save_backup_failed"); self.assertIn("读不懂 iPhone 返回的存档文件清单", e.exception.internal)
         self._accept()
         self.assertIsNone(run([dict(name="save.dat", resources=dict(isDirectory=False))]))
+
+    def test_same_files_as_per_file_backup_including_prev(self):
+        """11-23 维护者：一次拉回后备份内容要与原先逐文件拉回逐文件一致，含提交护栏的上一份 .s2a_prev。期望手写：
+        机上 5 个文件（存档 2 个、.s2a_prev 里 2 个、点开头的锁文件 1 个）→ 备份里 4 个，每个内容与机上那份相同，点开头的锁文件不在"""
+        tree = [("0000000000000001/0/save.dat", False), ("0000000000000001/0/.s2a_prev/save.dat", False),
+                ("0000000000000001/0/.s2a_prev/meta", False), ("0000000000000001/1/x.bin", False), ("0000000000000001/0/.lock", False)]
+        d, got = self._run(tree)
+        self.assertEqual(len(got), 1)
+        have = {p.relative_to(d).as_posix(): p.read_text() for p in d.rglob("*") if p.is_file()}
+        want = {r: "内容:" + install.SAVE_DIR + "/" + r for r in ("0000000000000001/0/save.dat", "0000000000000001/0/.s2a_prev/save.dat",
+                                                                 "0000000000000001/0/.s2a_prev/meta", "0000000000000001/1/x.bin")}
+        self.assertEqual(have, want)
+
+    def test_failed_or_short_pull_leaves_no_half_backup(self):
+        """拔线 / 失败：devicectl 报错（已落下一部分文件），或报成功却缺了清单里的文件 → 停在 save_backup_failed 照实说，
+        save_backup/ 下既没有 <时刻> 目录也没有 .pulling-* 暂存（原先逐文件拉到一半失败会留下半份）"""
+        tree = [("a/save.dat", False), ("b/save.dat", False)]
+        root = self.c.library / "games/0100C2500FC20000/save_backup"
+        for fail, text in (("*", "拉存档失败"), ("b/save.dat", "拉回的存档缺 1 个文件（如 b/save.dat）")):
+            with self.assertRaises(Failure) as e:
+                self._run(tree, fail=fail)
+            self.assertEqual(e.exception.code, "save_backup_failed", fail)
+            self.assertIn(text, e.exception.internal)
+            self.assertEqual(list(root.iterdir()) if root.is_dir() else [], [], fail)
+
+    def test_stale_pulling_dir_is_cleared_and_never_listed(self):
+        # 上次拉到一半被杀留下的 .pulling-*：下次备份先清掉；备份列表（phoneSaves）也不把它当成一份备份
+        root = layout.path(self.c, "0100C2500FC20000", "save_backup"); (root / ".pulling-20261101-000000/a").mkdir(parents=True)
+        with um.patch.object(self.c, "catalog", return_value={"games": [{"id": "0100C2500FC20000"}]}):
+            self.assertEqual(install.phone_saves(self.c)["games"], [dict(gameId="0100C2500FC20000", backups=[])])
+        d, _ = self._run([("a/save.dat", False)])
+        self.assertEqual(sorted(x.name for x in root.iterdir()), [d.name])
 
     def test_nothing_on_device(self):
         self.assertEqual(self._run([])[0], None)                       # 第一次装：机上没有存档，不备份不报错
@@ -1087,7 +1126,7 @@ class SaveBackupTests(unittest.TestCase):
                         return 1, {}, LOCK
                     return 0, {"result": {"files": [dict(relativePath="0000000000000001/0/a.bin")]}}, ""
                 if a[:3] == ("device", "copy", "from"):
-                    d = Path(a[a.index("--destination") + 1]); d.parent.mkdir(parents=True, exist_ok=True); d.write_bytes(b"s"); return 0, {}, ""
+                    d = Path(a[a.index("--destination") + 1]) / "0000000000000001/0/a.bin"; d.parent.mkdir(parents=True, exist_ok=True); d.write_bytes(b"s"); return 0, {}, ""
                 if a[:3] == ("device", "info", "apps"):
                     return 0, {"result": {"apps": [{"bundleIdentifier": "s2arm.z.games"}]}}, ""
                 raise AssertionError(a)
@@ -1138,10 +1177,10 @@ class SaveBackupTests(unittest.TestCase):
 
     def test_copy_failure_asks_then_continues(self):
         with self.assertRaises(Failure) as e:
-            self._run([("0000000000000001/0/save.dat", False)], fail="save.dat")
+            self._run([("0000000000000001/0/save.dat", False)], fail="*")
         self.assertEqual(e.exception.code, "save_backup_failed")
         self._accept()
-        self.assertIsNone(self._run([("0000000000000001/0/save.dat", False)], fail="save.dat")[0])
+        self.assertIsNone(self._run([("0000000000000001/0/save.dat", False)], fail="*")[0])
 
 
 

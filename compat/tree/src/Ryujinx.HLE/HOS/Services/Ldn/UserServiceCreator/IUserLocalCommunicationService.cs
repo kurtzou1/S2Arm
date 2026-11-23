@@ -30,6 +30,35 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
         private const string DefaultSubnetMask = "255.255.255.0";
         private const bool IsDevelopment = false;
 
+        private static bool LdnAutoRequested =>
+            !string.Equals(Environment.GetEnvironmentVariable("S2A_LDN_MITM"), "1", StringComparison.Ordinal) &&
+            string.IsNullOrEmpty(Environment.GetEnvironmentVariable("S2A_LDN_SERVER")) &&
+            !string.Equals(Environment.GetEnvironmentVariable("S2A_LDN_AUTO"), "0", StringComparison.Ordinal) &&
+            !S2AHooks.LdnPlatformDiscovery;   // 宿主这一局走了平台局域网发现（iOS）：照旧 RyuLDN，不建双协议自动客户端
+
+        internal static MultiplayerMode SelectAutoMode(MultiplayerMode mode, Func<bool> switchRoomFound)
+        {
+            if (!LdnAutoRequested || mode == MultiplayerMode.LdnMitm)
+            {
+                return mode;
+            }
+
+            if (mode == MultiplayerMode.Disabled)
+            {
+                return MultiplayerMode.LdnMitm;
+            }
+
+            try
+            {
+                return switchRoomFound() ? MultiplayerMode.LdnMitm : mode;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning?.Print(LogClass.ServiceLdn, $"Auto LDN Switch probe failed, keeping RyuLDN: {ex.Message}");
+                return mode;
+            }
+        }
+
         private readonly KEvent _stateChangeEvent;
         private int _stateChangeEventHandle;
 
@@ -1253,7 +1282,8 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
 
                     // S2Arm: with multiplayer disabled the service reports unavailable without touching
                     // the network, so the host's interfaces are not queried either
-                    if (mode == MultiplayerMode.Disabled || System.Net.NetworkInformation.NetworkInterface.GetIsNetworkAvailable())
+                    if ((mode == MultiplayerMode.Disabled && !LdnAutoRequested) ||
+                        System.Net.NetworkInformation.NetworkInterface.GetIsNetworkAvailable())
                     {
                         Logger.Info?.PrintMsg(LogClass.ServiceLdn, $"Initializing with multiplayer mode: {mode}");
 
@@ -1285,7 +1315,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
         {
             S2ANetworkClientServer = null;
 
-            if (mode == MultiplayerMode.Disabled)
+            if (!LdnAutoRequested && mode == MultiplayerMode.Disabled)
             {
                 // S2Arm: local wireless discovery / multiplayer is unavailable. Return
                 // the service's own result code and report once, instead of handing a
@@ -1304,6 +1334,29 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
             if (!TryGetControlProperty(context, out ApplicationControlProperty controlProperty))
             {
                 return ResultCode.InvalidState;
+            }
+
+            if (LdnAutoRequested)
+            {
+                try
+                {
+                    Logger.Info?.PrintMsg(
+                        LogClass.ServiceLdn,
+                        $"Auto LDN branch: envAuto={Environment.GetEnvironmentVariable("S2A_LDN_AUTO")}, " +
+                        $"envMitm={Environment.GetEnvironmentVariable("S2A_LDN_MITM")}, " +
+                        $"envServer={Environment.GetEnvironmentVariable("S2A_LDN_SERVER")}, " +
+                        $"mode={mode}, configServer={context.Device.Configuration.MultiplayerLdnServer}");
+                    NetworkClient = new LdnAutoClient(context.Device.Configuration);
+                    S2ANetworkClientServer = context.Device.Configuration.MultiplayerLdnServer;
+                    NetworkClient.SetGameVersion(controlProperty.DisplayVersion);
+                    return ResultCode.Success;
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error?.Print(LogClass.ServiceLdn, $"Could not initialize automatic LDN: {ex.Message}");
+                    S2AHooks.Red?.Invoke($"ldn: automatic LAN is unavailable, {ex.Message}");
+                    return ResultCode.DeviceNotAvailable;
+                }
             }
 
             switch (mode)

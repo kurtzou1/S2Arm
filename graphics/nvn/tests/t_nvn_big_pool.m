@@ -19,6 +19,9 @@
 //   ⑯ 零拷贝缓冲只有一个建法：nvn_mtl.m 里 newBufferWithBytesNoCopy: 只出现 1 次（nocopy_buf 里），hle_vk.m、vk_snap.inc 里 0 次
 //   ⑱ 状态表存取（子进程；快照 gfx_state.bin / 帧录 state.bin）：640 MB 池查出两块 → fr_dump_state → 会话销毁 → fr_restore_state →
 //      大池记录 1（整池）、池表 0 条；存之前没查到过的 500 MB 处按长度 1 查：查到、往后可读 ≥ 64 MB、不走地址兜底。反证：nvn_frame_rec.inc 照块写 → 两项红
+//   ㉒ ㉓ 一个大池的零拷贝缓冲合计有上限（子进程）：块互相重叠、加长替下的旧缓冲也活着，设备的 GPU 已分配对每个按整块长度记。再建一块就超过池长一半时改包整池一个缓冲。
+//      ㉒ 896 MB 池 56 个步长跳着各查一次（长度 1）：4 块 + 整池 = 1280 MB；㉓ 640 MB 池同一步长读 16、32 … 480 MB：块 128 + 整池 640 + 旧缓冲 192 = 960 MB。
+//      反证：去掉 big_lookup 里改整池那段 → ㉒ 56 个 5136 MB、㉓ 480 + 3360 MB，两项红
 //   反证：s2a_gpu_alloc_bytes 改回只读 currentAllocatedSize → ⑬ ⑮ 红（涨 96 / 48 MB）；nocopy_buf 的 deallocator 不减 → ⑭ ⑮ 红；hle_vk.m 改回直接建 → ⑯ 红
 //   反证：去掉 nvn_be_pool_add_body 里登记大池那段 → ① ② ③ ④ 红（整池一个缓冲）；去掉注销时把旧块缓冲算进被放掉的那两行 → ⑨ 注销后 1 条红；去掉 big_new 建块前的 dm_guest_write_prepare → ⑫ 红
 #include "../gfx/nvn/nvn_mtl.m"
@@ -38,6 +41,34 @@ static int child(int chunks) {
     mtl_init();
     const uint64_t SZ = 640 * MB; uint8_t *mem = NULL; REQUIRE(!posix_memalign((void **)&mem, 16*MB, SZ));   // 16 MB 对齐：块按绝对地址取步长，期望好手算
     nvn_be_pool_add(mem, SZ);
+    if (chunks == 3) {   // ㉒ ㉓ 一个大池的零拷贝缓冲合计有上限（块互相重叠、加长替下的旧缓冲也活着，各自整块记进设备的 GPU 已分配）
+        const uint64_t P = 896 * MB; uint8_t *m = NULL; REQUIRE(!posix_memalign((void **)&m, 16*MB, P)); memset(m, 0, 16384); nvn_be_pool_add(m, P);
+        uint64_t dev0 = (uint64_t)g_dev.currentAllocatedSize; int wrong = 0, miss = 0; void *bp; uint64_t off, gpu;
+        for (int j = 0; j < 56; j++) { int k = j * 23 % 56;   // 56 个步长各查一次步长中间、不知道读多远；每次跳开 368 MB（23 与 56 互质：每个步长正好一次），不落在上一次查到的那块里
+            uint64_t a = (uint64_t)(uintptr_t)m + (uint64_t)k * 16*MB + 8*MB;
+            if (!mtl_gpu_addr(a, 1, &bp, &off, &gpu)) { miss++; continue; }
+            id<MTLBuffer> bb = (__bridge id<MTLBuffer>)bp; wrong += (uintptr_t)bb.contents + off != (uintptr_t)a || gpu != bb.gpuAddress + off || bb.length - off < (P - ((uint64_t)k * 16*MB + 8*MB) < 64*MB ? P - ((uint64_t)k * 16*MB + 8*MB) : 64*MB);
+        }
+        uint64_t sum = 0, olds = 0; int n = 0; pthread_mutex_lock(&g_mu); for (int i=0;i<g_npool;i++) if (g_pools[i].key==m) { n++; sum += g_pools[i].buf.length; }
+        int full = 0; for (int q=0;q<g_nbig;q++) if (g_big[q].mem==m) { full = g_big[q].full; for (id<MTLBuffer> o in g_big[q].old) olds += o.length; } pthread_mutex_unlock(&g_mu);
+        uint64_t dd = (uint64_t)g_dev.currentAllocatedSize - dev0;
+        CHECK(!miss && !wrong,"㉒ 896 MB 池 56 个步长各查一次（长度 1）：查不到 %d、地址不对或往后读不到 64 MB 的 %d（期望 0、0）",miss,wrong);
+        // 手算：前 4 次各建一块 96 MB（384 MB），第 5 块会到 480 > 448（池的一半）→ 改整池：4 块 + 整池 1 个 = 5 个、384 + 896 = 1280 MB。设备总量是全局量，只报不判
+        CHECK(sum + olds == 1280*MB && n == 5 && full,"㉒ 查完：这个池的零拷贝缓冲 %d 个合计 %llu MB + 旧缓冲 %llu MB、整池缓冲 %s（期望 5 个 1280 MB、有；不设上限是 56 个 5136 MB）；设备总量涨 %llu MB",n,(unsigned long long)(sum/MB),(unsigned long long)(olds/MB),full?"有":"无",(unsigned long long)(dd/MB));
+        const uint64_t P2 = 640 * MB; uint8_t *m2 = NULL; REQUIRE(!posix_memalign((void **)&m2, 16*MB, P2)); nvn_be_pool_add(m2, P2);   // ㉓ 同一步长越读越远：每次加长都替下一个旧缓冲
+        dev0 = (uint64_t)g_dev.currentAllocatedSize; miss = wrong = 0;
+        for (int j = 1; j <= 30; j++) { uint64_t a = (uint64_t)(uintptr_t)m2, len = (uint64_t)j * 16*MB;
+            if (!mtl_gpu_addr(a, len, &bp, &off, &gpu)) { miss++; continue; }
+            id<MTLBuffer> bb = (__bridge id<MTLBuffer>)bp; wrong += (uintptr_t)bb.contents + off != (uintptr_t)a || bb.length - off < len; }
+        sum = olds = 0; n = 0; pthread_mutex_lock(&g_mu); for (int i=0;i<g_npool;i++) if (g_pools[i].key==m2) { n++; sum += g_pools[i].buf.length; }
+        full = 0; for (int q=0;q<g_nbig;q++) if (g_big[q].mem==m2) { full = g_big[q].full; for (id<MTLBuffer> o in g_big[q].old) olds += o.length; } pthread_mutex_unlock(&g_mu);
+        dd = (uint64_t)g_dev.currentAllocatedSize - dev0;
+        // 手算（块长 = 要读的长度向上取步长再多一个步长；已有的块够长就用它）：读 16 MB 建 32 MB，读 32 MB 用它；读 48 MB 建 64 MB（32 被替下），读 64 MB 用它；读 80 MB 建 96 MB；
+        //   读 112 MB 建 128 MB（合计 32 + 64 + 96 + 128 = 320，没超过一半 320，照建）；读 144 MB 要 160 MB、到 480 > 320 → 改整池。
+        //   留在表里：128 MB 的块 + 整池 640 = 768 MB；旧缓冲 32 + 64 + 96 = 192 MB；合计 960 MB = 池的 1.5 倍（正好压在上限：块的取整规则一动这里就变）
+        CHECK(!miss && !wrong && sum == 768*MB && olds == 192*MB && n == 2 && full,"㉓ 640 MB 池同一步长读 16、32 … 480 MB：查不到 %d、不对 %d；缓冲 %d 个合计 %llu MB + 旧缓冲 %llu MB、整池缓冲 %s（期望 2 个 768 MB + 192 MB、有；不设上限是 480 + 3360 MB）；设备总量涨 %llu MB",miss,wrong,n,(unsigned long long)(sum/MB),(unsigned long long)(olds/MB),full?"有":"无",(unsigned long long)(dd/MB));
+        printf("%s t_nvn_big_pool 子进程（缓冲合计上限）：%u 项，%u 项失败\n",failures?"✗":"✓",checks,failures); return failures!=0;
+    }
     if (chunks == 2) {   // ⑱ 状态表（快照 gfx_state.bin / 帧录 state.bin）存取大池：存整池一条、不存块
         g_adhoc_win = t_win;
         void *bp0; uint64_t off0, gpu0; REQUIRE(mtl_gpu_addr((uint64_t)(uintptr_t)mem + 100*MB + 16, 64, &bp0, &off0, &gpu0));
@@ -148,13 +179,13 @@ static int child(int chunks) {
 int main(int argc, char **argv) { @autoreleasepool {
     setvbuf(stdout,NULL,_IOLBF,0);
     if (argc==3 && !strcmp(argv[1],"--child")) return child(atoi(argv[2]));
-    unsigned bad=0; static const char *const modes[3]={"1","0","2"};
-    for (int m=0; m<3; m++) {
+    unsigned bad=0; static const char *const modes[4]={"1","0","2","3"};   // "3" = ㉒ ㉓
+    for (int m=0; m<4; m++) {
         fflush(NULL); pid_t pid=fork(); REQUIRE(pid>=0);
         if (!pid) { execl(argv[0],argv[0],"--child",modes[m],(char *)NULL); _exit(127); }
         int st=0; pid_t w; do { w=waitpid(pid,&st,0); } while (w<0 && errno==EINTR); REQUIRE(w==pid);
         bad+=!(WIFEXITED(st) && WEXITSTATUS(st)==0);
     }
-    printf("%s t_nvn_big_pool：缺省 / DM_NVN_POOL_CHUNKS=0 / 状态表存取三个子进程，%u 个不过（大内存池按块用到才包）\n",bad?"✗":"✓",bad);
+    printf("%s t_nvn_big_pool：缺省 / DM_NVN_POOL_CHUNKS=0 / 状态表存取 / 缓冲合计上限四个子进程，%u 个不过（大内存池按块用到才包）\n",bad?"✗":"✓",bad);
     return bad!=0;
 } }

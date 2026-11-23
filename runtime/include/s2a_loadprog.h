@@ -5,6 +5,7 @@
 //   剩下的管线转后台继续编（#800 B 近似顶替 + 后台编译）。默认编完直接进游戏，没有总时长上限（11-22 #502：编译还在往前走就等，等不等由玩家定）；无进展护栏只防异常，绝不卡死。
 // 时间由调用方传（纳秒，单调时钟）；配置走环境变量，缺省值等真机实测后定：
 //   S2A_LOAD_STALL_S（缺省 30）已编数多少秒没涨就自动进游戏
+//   S2A_LOAD_UPGRADE_S（缺省 3）简短启动画面在优化画面里编了这么久还没编完，就升成完整加载页（first_run 0 → 1）
 //   「先开始玩，后台继续优化」在完整加载页的优化画面段一直可点
 #pragma once
 #include <stddef.h>
@@ -16,7 +17,7 @@ enum { S2A_LOAD_DATA = 0, S2A_LOAD_OPTIMIZE = 1, S2A_LOAD_ENTER = 2, S2A_LOAD_DO
 enum { S2A_LOAD_GO_NONE = 0, S2A_LOAD_GO_DONE, S2A_LOAD_GO_USER, S2A_LOAD_GO_STALL, S2A_LOAD_GO_HOST };   // HOST（11-06）：直连层自己放行（s2a_front_warm_released，清单全部领走、只剩在编的几条）；为什么不再等预热
 typedef struct {
     int stage;            // S2A_LOAD_*
-    int first_run;        // 1 = 首次（完整加载页）；0 = 之后的启动（简短启动画面）
+    int first_run;        // 1 = 首次（完整加载页）；0 = 之后的启动（简短启动画面）。只会 0 → 1：之后的启动却要编很久时升成完整页（S2A_LOAD_UPGRADE_S）
     long done, total;     // 预热已编 / 总数（阶段 OPTIMIZE 起有效）
     double frac;          // 总进度 0..1，只进不退（三段按 5% / 90% / 5% 摊）
     int eta_s;            // 剩余秒数；-1 = 还在估算 / 不显示

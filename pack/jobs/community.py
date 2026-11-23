@@ -599,18 +599,29 @@ def save(c):
 
 
 def ldn_env(settings, existing=None):
-    """手动中继的整套环境；自动不写变量，显式服务器优先且不混入托管 / 监听。
-    「与 Switch 联机」（switch）：只开 S2A_LDN_MITM=1，走 Switch 自制系统的 ldn_mitm 局域网协议（services/S2A.Services/Host.cs LdnMitmRequested），
-    玩家选了才开——它不走原有的发现 / 中继，和 iPhone / 另一台 Mac 的原有联机不通，不能做缺省"""
+    """三种联机模式互斥落成环境：自动探测 Switch / 指定中继地址 / 强制 ldn_mitm。"""
     if settings.get("ldnMode") == "switch":
-        return {"S2A_LDN_MITM": "1"}
-    if settings.get("ldnMode") != "manual" or "S2A_LDN_SERVER" in (existing or {}):
+        return {"S2A_LDN_AUTO": "0", "S2A_LDN_MITM": "1"}
+    if settings.get("ldnMode") == "manual":
+        env = {"S2A_LDN_AUTO": "0", "S2A_LDN_MITM": "0"}
+        if "S2A_LDN_SERVER" in (existing or {}):
+            return env
+        if settings.get("ldnHost") is True:
+            env.update({"S2A_LDN_SERVER": "127.0.0.1", "S2A_LDN_RELAY": "1", "S2A_LDN_LISTEN": "0.0.0.0"})
+            return env
+        # 与 iOS 一致：空地址也不回到发现 / 选举，不阻止玩家启动游戏。
+        address = settings.get("ldnAddress", "").strip() or "0.0.0.0"
+        env.update({"S2A_LDN_SERVER": address, "S2A_LDN_RELAY": "0"})
+        return env
+    if settings.get("ldnMode") != "auto":
         return {}
-    if settings.get("ldnHost") is True:
-        return {"S2A_LDN_SERVER": "127.0.0.1", "S2A_LDN_RELAY": "1", "S2A_LDN_LISTEN": "0.0.0.0"}
-    # 与 iOS 一致：空地址也不回到发现 / 选举，不阻止玩家启动游戏。
-    address = settings.get("ldnAddress", "").strip() or "0.0.0.0"
-    return {"S2A_LDN_SERVER": address, "S2A_LDN_RELAY": "0"}
+
+    # 显式服务器（例如开发 / 外部注入）仍是整套优先；普通自动模式关掉强制
+    # ldn_mitm，由宿主探测 Switch 房间或走原有 RyuLDN / 平台局域网发现。
+    env = {"S2A_LDN_AUTO": "1", "S2A_LDN_MITM": "0"}
+    if "S2A_LDN_SERVER" in (existing or {}):
+        env = {"S2A_LDN_AUTO": "0", "S2A_LDN_MITM": "0"}
+    return env
 
 
 def launch_env(c, gid, existing=None):
@@ -703,6 +714,11 @@ def launch_env(c, gid, existing=None):
         env["S2A_FOCUS_PAUSE"] = "0"      # 切到别的窗口不暂停：游戏要求失焦暂停时也照常跑（macos/front_mac.m，#989）
     if s.get("diagRun") is True:
         env.update(diag_run_env(c, gid))  # 诊断局（#438）：只管这一局，用掉就关
+    import diagcode
+    code_env = diagcode.pending(c, gid)
+    if code_env:   # 诊断码（#1449）：在这台 Mac 上起这款，直接并进这一局的环境，用掉就清
+        env.update(code_env)
+        diagcode.used(c, f"Mac 起局 {gid}")  # 非玩家句
     return env
 
 

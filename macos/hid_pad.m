@@ -154,6 +154,7 @@ int s2a_pro_imu(const uint8_t *r, size_t n, s2a_pad_motion *out) {
     out->gyro_x = -gy; out->gyro_y = gx; out->gyro_z = gz;
     return 1;
 }
+static _Atomic int g_motion_enabled;   // 体感开关（定义与说明在 s2a_mac_hid_pad_set_motion_enabled 那里）：报告回调打日志时读
 static uint64_t hp_now_us(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000; }
 
 // 原始输入报告（报告号在首字节）：0x30 = 完整报告（按键 + 12 位摇杆）；0x21 = 子命令应答（同样带按键摇杆，SPI 读应答带校准数据）
@@ -181,7 +182,7 @@ static void report_cb(void *ctx, IOReturn r, void *sender, IOHIDReportType type,
         s2a_pad_motion mo;
         if (id == 0x30 && s2a_pro_imu(b, m, &mo) && (mo.acceleration_x != 0 || mo.acceleration_y != 0 || mo.acceleration_z != 0)) {   // 全 0 = 手柄没开 IMU / 不带陀螺仪
             mo.host_timestamp_us = hp_now_us(); d->motion = mo; d->motion_us = mo.host_timestamp_us;
-            if (!d->imu_said) { d->imu_said = 1; fprintf(stderr, "[输入] 兜底手柄 %s：报告里有六轴（陀螺仪 / 加速度），按玩家体感交给游戏\n", d->name); } }
+            if (!d->imu_said) { d->imu_said = 1; fprintf(stderr, "[输入] 兜底手柄 %s：报告里有六轴（陀螺仪 / 加速度）；交不交给游戏看体感开关（现在%s）\n", d->name, atomic_load(&g_motion_enabled) ? "开" : "关"); } }
     }
     pthread_mutex_unlock(&g_mu);
 }

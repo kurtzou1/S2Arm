@@ -112,9 +112,13 @@ namespace S2A.Services
         // need the native provider that Mac hosts do not register.
         internal static bool LdnMitmRequested =>
             string.Equals(Environment.GetEnvironmentVariable("S2A_LDN_MITM"), "1", StringComparison.Ordinal);
+        internal static bool LdnAutoRequested =>
+            !LdnMitmRequested &&
+            LdnServer == null &&
+            !string.Equals(Environment.GetEnvironmentVariable("S2A_LDN_AUTO"), "0", StringComparison.Ordinal);
 
         // 游戏初始化 ldn:u：按需启动已登记的平台发现；显式中继地址不自动发现。
-        internal static void OnLdnInitializing()
+        internal static unsafe void OnLdnInitializing()
         {
             lock (_lanLock)
             {
@@ -126,6 +130,15 @@ namespace S2A.Services
                     return;
                 }
 
+                // 自动模式（#2134 起缺省开）：宿主有平台局域网发现（iOS 登记了 provider）时照旧「发现 → RyuLDN 中继」，iPhone 之间的局域网联机走这条；
+                //   没有平台发现（Mac 不登记 provider）、或发现起不来时才用 Switch ldn_mitm 协议。#2134 原先自动模式一律 ldn_mitm，
+                //   iOS 的发现 / 选举 / 托管中继整条不走了（services/gate.sh LdnRelayTest 8 项不符）
+                if (LdnAutoRequested && Native.LanDiscovery == null)
+                {
+                    UseAutoMitm("宿主没有平台局域网发现");
+                    return;
+                }
+
                 if (_lanSessionStopped || LdnAutoTried || LdnServer != null)
                 {
                     return;
@@ -133,13 +146,32 @@ namespace S2A.Services
 
                 LdnAutoTried = true;
 
-                if (!StartLanDiscovery()) return;
+                if (!StartLanDiscovery())
+                {
+                    if (LdnAutoRequested) UseAutoMitm("平台局域网发现起不来");
+                    return;
+                }
+                Ryujinx.HLE.S2AHooks.LdnPlatformDiscovery = true;   // ldn:u 照旧建 RyuLDN 中继客户端（不建双协议自动客户端）
 
                 Logger.SetEnable(LogLevel.NetLog, true);
                 StartLdnRelay();
                 ApplyLanSelection();
                 Console.Error.WriteLine($"[S2A 联机] 游戏初始化 ldn:u：自动进入局域网模式，先用中继 {Device.Configuration.MultiplayerLdnServer}（Bonjour 选举结果在建房 / 加入时生效）");
             }
+        }
+
+        // 自动模式退到 Switch ldn_mitm 协议（UDP/TCP 11452）：调用方持 _lanLock
+        private static void UseAutoMitm(string why)
+        {
+            LdnAutoTried = true;
+            Ryujinx.HLE.S2AHooks.LdnPlatformDiscovery = false;
+            Logger.SetEnable(LogLevel.NetLog, true);
+            if (Device != null)
+            {
+                Device.Configuration.MultiplayerMode = MultiplayerMode.LdnMitm;
+                Device.Configuration.MultiplayerLdnServer = string.Empty;
+            }
+            Console.Error.WriteLine($"[S2A 联机] 游戏初始化 ldn:u：自动模式使用 ldn_mitm（UDP/TCP 11452）：{why}");
         }
 
         // Host session retirement is terminal even though the platform provider
@@ -151,6 +183,7 @@ namespace S2A.Services
                 if (_lanStopping || _lan) throw new InvalidOperationException("上一联机会话未停止");
                 _lanSessionStopped = false;
                 LdnAutoTried = false;
+                Ryujinx.HLE.S2AHooks.LdnPlatformDiscovery = false;
             }
         }
 
@@ -241,7 +274,8 @@ namespace S2A.Services
             lock (_ldnSelectionLock)
             {
                 if (Device == null) return;
-                if (LdnMitmRequested)
+                if (LdnMitmRequested ||
+                    (LdnAutoRequested && Device.Configuration.MultiplayerMode == MultiplayerMode.LdnMitm))
                 {
                     Device.Configuration.MultiplayerMode = MultiplayerMode.LdnMitm;
                     Device.Configuration.MultiplayerLdnServer = string.Empty;
@@ -683,7 +717,7 @@ namespace S2A.Services
             Logger.SetEnable(LogLevel.Debug, false);
             Logger.SetEnable(LogLevel.Stub, true);   // 上游 Logger 缺省不建 Stub 级（Logger.Stub 为 null），不开就一条桩都收不到、汇总行假空
             Logger.SetEnable(LogLevel.Guest, true);  // 游戏经 lm 写的日志（八方2 SDK 初始化自退的原因就写在里面），排查常要，量小
-            Logger.SetEnable(LogLevel.NetLog, LdnMitmRequested || LdnServer != null);   // 开了联机才打：RyuLdn 客户端连上 / 断开 / 出错只在这一级（排查中继连不上、扫描没结果）
+            Logger.SetEnable(LogLevel.NetLog, LdnMitmRequested || LdnAutoRequested || LdnServer != null);   // 开了联机才打：RyuLdn 客户端连上 / 断开 / 出错只在这一级（排查中继连不上、扫描没结果）
             if (!_loggerInstalled)
             {
                 Logger.Updated += static (_, e) =>

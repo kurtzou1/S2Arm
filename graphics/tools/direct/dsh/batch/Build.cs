@@ -872,7 +872,7 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
         // 进度：这一段在「编批库」计数满了之后才跑，没计数器时界面停在 100% 像卡住（0.6.0 实测 1 万多键单核十几分钟）。按键计：改写完一键不计，编完（成或败）才计
         int lanes = LiveLanes("采样模拟变体"); using var wide = Metal.Widen(lanes, "采样模拟变体");
         using var tk = new Ticker("直连库·采样模拟变体", all.Count);
-        var vs = new ConcurrentDictionary<string, string>(StringComparer.Ordinal);
+        var vs = new VarTexts();   // 改写好的变体源码落盘（Spill），不常驻：D-3AYB 9.9 万键款全放内存要 50 多 GB
         Parallel.ForEach(InOrder(all), new ParallelOptions { MaxDegreeOfParallelism = Pool(lanes) }, k =>
         {
             bool done = true;
@@ -882,7 +882,7 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
                 try { v = DshCompiler.FsRd(s0); }
                 catch (Exception e) { Count("se failed"); Say($"[RED] {k}: no sampler-emulation variant (S2A.Dsh FsRd: {e.GetType().Name}: {e.Message.Split('\n')[0]}): the device compiles it at first use"); return; }
                 if (v == s0) { Count("se nothing to emulate"); return; }
-                vs[k] = v; done = false;
+                vs.Set(k, v); done = false;
             }
             finally { if (done) tk.Step(); }
         });
@@ -892,7 +892,7 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
     // 变体按批合编（_se / _vp 共用，11-20 出包提速）：按全局声明相同切批、每批源码封顶 DMSH_UNITY_BATCH_MB（缺省 0.5 MB，同编批库），
     //   源码出自 Unity.VarSrc（函数前缀 s<着色器键>_），同批各键 <键><sfx>.metallib 指向同一份字节；一批编不过退回逐键（VarLib，入口不改名），单键批照旧逐键。
     //   计数「<tag> batches / <tag> batched keys / <tag> batch fallback keys」；每批编完（成或败）按键数计进度
-    static void VarBatches(string sfx, string tag, List<string> order, ConcurrentDictionary<string, string> vs, int lanes, Ticker tk, Action<string> ok, Action<string, string> fail)
+    static void VarBatches(string sfx, string tag, List<string> order, VarTexts vs, int lanes, Ticker tk, Action<string> ok, Action<string, string> fail)
     {
         long cap = Unity.VinBatchMax(Environment.GetEnvironmentVariable("DMSH_UNITY_BATCH_MB") ?? "0.5");
         var batches = new List<List<string>>();
@@ -901,8 +901,8 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
             List<string> cur = null; long sz = 0;
             foreach (var k in g)
             {
-                if (cur == null || (cap > 0 && sz > 0 && sz + vs[k].Length > cap)) { batches.Add(cur = new()); sz = 0; }
-                cur.Add(k); sz += vs[k].Length;
+                if (cur == null || (cap > 0 && sz > 0 && sz + vs.Len(k) > cap)) { batches.Add(cur = new()); sz = 0; }
+                cur.Add(k); sz += vs.Len(k);
             }
         }
         Count(tag + " batches", batches.Count);
@@ -951,7 +951,7 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
         if (union == 0) return;
         int lanes = LiveLanes("顶点补齐变体"); using var wide = Metal.Widen(lanes, "顶点补齐变体");
         using var tk = new Ticker("直连库·顶点补齐变体", vs.Count);   // 进度：同 SeFinish，先逐键补齐（只吃 CPU），再按批合编（VarBatches），编完才计
-        var src = new ConcurrentDictionary<string, string>(StringComparer.Ordinal); var masks = new ConcurrentDictionary<string, (uint Got, int N)>(StringComparer.Ordinal);
+        var src = new VarTexts(); var masks = new ConcurrentDictionary<string, (uint Got, int N)>(StringComparer.Ordinal);
         Parallel.ForEach(InOrder(vs), new ParallelOptions { MaxDegreeOfParallelism = Pool(lanes) }, k =>
         {
             bool done = true;
@@ -964,7 +964,7 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
                 var (v, added) = DshCompiler.VsPadMask(s0, mask);
                 if (added.Count == 0) { Count("vp nothing to pad"); return; }
                 uint got = 0; foreach (long l in added) got |= 1u << (int)l;
-                src[k] = v + $"\nvertex float4 dm_vp_mask_{got:x}() {{ return float4(0.0); }}\n";   // 掩码随库带：宿主从函数名读（nvn_mtl.m vp_pack；批库里是 s<键>_main0_vpmask_<十六进制>）
+                src.Set(k, v + $"\nvertex float4 dm_vp_mask_{got:x}() {{ return float4(0.0); }}\n");   // 掩码随库带：宿主从函数名读（nvn_mtl.m vp_pack；批库里是 s<键>_main0_vpmask_<十六进制>）
                 masks[k] = (got, added.Count); done = false;
             }
             finally { if (done) tk.Step(); }
@@ -1109,6 +1109,18 @@ sealed class Side
         public IEnumerator<KeyValuePair<string, byte[]>> GetEnumerator() { foreach (var k in s.f.Keys) yield return new(k, s.Get(k)); }
         System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
     }
+}
+
+/// <summary>变体源码（_se / _vp，Build.SeFinish / VpFinish → VarBatches）：文本落 Build.Spill（压缩、按需读回），内存只留长度（切批按它算）。
+/// D-3AYB / #2131：原先 ConcurrentDictionary&lt;string, string&gt; 把全部变体放内存，0400A3A01EE4C000（9.9 万键、MSL 原文约 23 GB）的采样模拟变体
+/// 一段主进程从 6 GB 涨到 58 GB（UTF-16 两倍），36 GB 的 Mac 被系统杀掉</summary>
+sealed class VarTexts
+{
+    readonly TextStore text = new(); readonly ConcurrentDictionary<string, int> len = new(StringComparer.Ordinal);
+    public void Set(string k, string v) { text[k] = v; len[k] = v.Length; }
+    public bool ContainsKey(string k) => len.ContainsKey(k);
+    public string this[string k] => text[k];
+    public int Len(string k) => len[k];
 }
 
 /// <summary>键 → 源码文本（可为 null），文本以 UTF-8 存在 Build.Spill（同 Python 的 str 每字符 1 字节，且不常驻）；取值才读回解码</summary>

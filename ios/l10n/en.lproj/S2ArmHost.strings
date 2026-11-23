@@ -37,7 +37,7 @@
 "cheats.status.badInstruction" = "Invalid instruction";
 "cheats.status.execError" = "Execution error";
 "cheats.status.gameNotLoaded" = "Game not loaded";
-"cheats.status.modifiesCode" = "Changes game code, so it can't run when imported on the phone: import this txt in S2Arm on your computer, then update S2Arm on the phone";
+"cheats.status.modifiesCode" = "Changes game code, so it can't run when imported on the phone: import this txt in S2Arm on the computer you build with, rebuild this game's iPhone package and send it to the phone";
 "cheats.status.notPacked" = "Changes game code and wasn't built into this package (too many patches for the module, etc.; see the export results on your computer)";
 "cheats.status.packed" = "Active";
 "cheats.status.off" = "Off";

@@ -36,7 +36,7 @@
 "cheats.status.badInstruction" = "命令が不正です";
 "cheats.status.execError" = "実行エラー";
 "cheats.status.gameNotLoaded" = "ゲーム未読込";
-"cheats.status.modifiesCode" = "ゲームコードを変更するため、iPhone 上でインポートしても動作しません：コンピュータ上の S2Arm でこの txt をインポートしてから、iPhone 上の S2Arm を更新してください";
+"cheats.status.modifiesCode" = "ゲームコードを変更するため、iPhone 上でインポートしても動作しません：パッケージを作るコンピュータ上の S2Arm でこの txt をインポートし、このゲームの iPhone パッケージを作り直して iPhone に送ってください";
 "cheats.status.notPacked" = "ゲームコードを変更するため、今回のパッケージには入りませんでした（同じモジュールのパッチが多すぎる等。理由はコンピュータのエクスポート結果を参照）";
 "cheats.status.packed" = "有効";
 "cheats.status.off" = "オフ";

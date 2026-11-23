@@ -321,8 +321,16 @@ def translate(src, stage, key, tmp):
     )
 
 
+TEMPLATE_LINE = re.compile(rb"^[ \t]*#[ \t]*line[ \t]+(?![0-9])", re.M)
+
+
 def one(task, temp, components):
     index, (src, stage, where) = task
+    # 引擎模板（#852：散 .glsl 里顶点 / 片元同装一个文件、「#line ....」占位，引擎运行时拆开、填行号再交 glShaderSource）：#line 后面不是数字的源码
+    #   任何驱动都不收，游戏交给驱动的一定是改过的文本，按文件原文算的键永远对不上运行时，离线出了也是死条目。同没有 main 的片段（#518）记跳过、不计失败；
+    #   运行时收到的完整源码由宿主首遇现编
+    if TEMPLATE_LINE.search(src):
+        return [], [], 1
     work = Path(temp) / f"source-{index}"
     work.mkdir()
     key, rows, errors = hashlib.sha256(src).hexdigest()[:16], [], []

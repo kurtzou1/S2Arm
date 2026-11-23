@@ -13,6 +13,7 @@
 单测 apple_audio_lifecycle_test	.NET 10 SDK
 单测 sysdata_synth_test	.NET 10 SDK
 单测 save_transfer_interop_test	.NET 10 SDK,Xcode
+单测 save_transfer_aot_test	.NET 10 SDK,Xcode
 单测 vpx_patch_identity_test	Xcode
 iOS 全量编译	Xcode
 钩子 runtime/gate.sh	Xcode

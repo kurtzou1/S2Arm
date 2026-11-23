@@ -254,6 +254,7 @@ public sealed partial class EnvironmentWindow
         }
         body.Children.Add(Pick("sheet.p12", ["*.p12", "*.pfx"], "p12", p => p12 = p));
         body.Children.Add(Pick("sheet.profile", ["*.mobileprovision"], "profile", p => profile = p));
+        body.Children.Add(Muted(S("sheet.profileNote"), 12));   // #2015：免费 Apple ID 没有描述文件，只选 .p12 也能导入
         body.Children.Add(Label(S("sheet.password"), 13));
         var password = new TextBox { PasswordChar = '•', RevealPassword = false };
         AutomationId(password, "export.sign.sheet.password");
@@ -262,6 +263,9 @@ public sealed partial class EnvironmentWindow
         var failure = new TextBlock { FontSize = 12.5, TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#E5675F"), IsVisible = false };
         AutomationId(failure, "export.sign.sheet.failure");
         body.Children.Add(failure);
+        var done = new TextBlock { FontSize = 12.5, TextWrapping = TextWrapping.Wrap, Foreground = Ink, IsVisible = false };   // 只选 .p12、交给 Apple ID 签名成了
+        AutomationId(done, "export.sign.sheet.adopted");
+        body.Children.Add(done);
         var fix = new ContentControl { IsVisible = false };   // 导入被拒且缺权限：复制给证书发放人的话 / 改用 Apple ID 登录
         body.Children.Add(fix);
         var working = Muted(S("sheet.working"), 12.5); working.IsVisible = false;
@@ -272,13 +276,19 @@ public sealed partial class EnvironmentWindow
         Button? go = null;
         go = DialogButton(S("sheet.import"), true, async () =>
         {
-            if (p12.Length == 0 || profile.Length == 0) return;
+            done.IsVisible = false;
+            if (p12.Length == 0) { failure.Text = S("sheet.needP12"); failure.IsVisible = true; fix.IsVisible = false; return; }
             go!.IsEnabled = false; working.IsVisible = true; failure.IsVisible = false; fix.IsVisible = false;
+            // 只选了 .p12（没有描述文件）：作业层交给 Apple ID 签名沿用这张证书（devcert.adopt），成了留在弹窗里说清，不切签名方式
             var r = await DevCertJobAsync(new() { ["action"] = "import", ["p12Path"] = p12, ["profilePath"] = profile },
                 new Dictionary<string, string> { ["S2A_DEVCERT_PASSWORD"] = password.Text ?? "" });
             working.IsVisible = false; go.IsEnabled = true;
+            if (r is { Succeeded: true } && Flag(r.Result, "adopted"))
+            {
+                password.Text = ""; done.Text = B(Str(r.Result, "message")); done.IsVisible = true; go.IsVisible = false; return;
+            }
             if (r is { Succeeded: true }) { password.Text = ""; dialog.Close(); return; }
-            failure.Text = r?.Message is { Length: > 0 } m ? m : T("export.sign.sheet.title");
+            failure.Text = r?.Message is { Length: > 0 } m ? B(m) : T("export.sign.sheet.title");
             failure.IsVisible = true;
             var request = r is null ? "" : FailureFact(r.Diagnostics, "requestText");
             if (r?.FailureCode == "devcert_distribution" || request.Length > 0) { fix.Content = FixActions(request, "export.sign.sheet", dialog); fix.IsVisible = true; }

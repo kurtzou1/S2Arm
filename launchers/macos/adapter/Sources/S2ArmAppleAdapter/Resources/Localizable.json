@@ -10176,6 +10176,38 @@
   "en": "Please provide an Apple Development certificate (.p12, with its password) and a matching iOS App Development provisioning profile. Profile requirements: use an explicit App ID (not a wildcard *), include my device UDID: <your device UDID>, and enable these entitlements: Debugging (get-task-allow), Increased Memory Limit (com.apple.developer.kernel.increased-memory-limit), Extended Virtual Addressing (com.apple.developer.kernel.extended-virtual-addressing)."
  },
  {
+  "source": "只选了 .p12 证书时，S2Arm 用你登录的 Apple ID 自己申请描述文件：先用 Apple ID 登录再导入；不用 Apple ID 的话，请再选上这张证书配套的描述文件（.mobileprovision）。",
+  "en": "With only a .p12 certificate, S2Arm requests the provisioning profile itself using the Apple ID you're signed in with: sign in with your Apple ID first, then import. If you don't use an Apple ID, also choose the provisioning profile (.mobileprovision) that goes with this certificate."
+ },
+ {
+  "source": "这个版本的签名工具还不能沿用导入的证书：更新 S2Arm 后再导入，或者再选上这张证书配套的描述文件（.mobileprovision）。",
+  "en": "This version of the signing tool can't reuse an imported certificate yet: update S2Arm and import again, or also choose the provisioning profile (.mobileprovision) that goes with this certificate."
+ },
+ {
+  "source": "这张证书不在当前登录的 Apple ID（团队 {0}）的证书列表里：它可能属于别的 Apple ID，或已被撤销。改用这张证书所属的 Apple ID 登录后再导入，或者再选上这张证书配套的描述文件（.mobileprovision）。",
+  "en": "This certificate isn't in the certificate list of the Apple ID you're signed in with (team {0}): it may belong to another Apple ID, or it has been revoked. Sign in with the Apple ID it belongs to and import again, or also choose the provisioning profile (.mobileprovision) that goes with this certificate."
+ },
+ {
+  "source": "没能列出这个 Apple ID 的证书（网络不通或登录已过期），这次什么都没改：检查网络、必要时重新登录 Apple ID，再导入一次。",
+  "en": "Couldn't list this Apple ID's certificates (no network, or the sign-in has expired), so nothing was changed: check the network, sign in to your Apple ID again if needed, and import once more."
+ },
+ {
+  "source": "已改用这张证书：之后用 Apple ID 签名时，S2Arm 用它签名、用你的 Apple ID 自己申请描述文件，不新建证书，也不会撤销 SideStore / AltStore 正在用的证书。回到装机页再装一次即可。",
+  "en": "Now using this certificate: when signing with your Apple ID, S2Arm signs with it and requests provisioning profiles with your Apple ID itself. No new certificate is created, and the one SideStore / AltStore is using won't be revoked. Go back to the install page and install again."
+ },
+ {
+  "source": "读取证书",
+  "en": "Reading the certificate"
+ },
+ {
+  "source": "核对 Apple ID 里的证书",
+  "en": "Checking the certificates in your Apple ID"
+ },
+ {
+  "source": "从帖子里完整复制那一整串诊断码（以 S2A-DIAG1- 开头）再粘一次；还不行就在帖子里回复，请维护者重发一条。",
+  "en": "Copy the whole diagnostic code from the post again (it starts with S2A-DIAG1-) and paste it once more. If it still fails, reply in the post and ask the maintainer to send a new one."
+ },
+ {
   "source": "证书里的私钥读不出来，没能交给 {0} 上的 S2Arm：在设置里重新导入一次证书。",
   "en": "Couldn't read the private key in your certificate, so it wasn't handed to S2Arm on your {0}. Import the certificate again in Settings."
  },
@@ -11066,5 +11098,29 @@
  {
   "source": "所有游戏的默认只有玩家 1 的一份。",
   "en": "The default for all games applies to player 1 only."
+ },
+ {
+  "source": "诊断码不对：请从帖子里完整复制那一整串（以 S2A-DIAG1- 开头），再粘一次。",
+  "en": "That diagnostic code isn't right: copy the whole string from the post (it starts with S2A-DIAG1-) and paste it again."
+ },
+ {
+  "source": "已收下诊断码（游戏 {0}）：下次把这款推到 iPhone（或在这台 Mac 上开它）时生效一局，玩完自动失效。",
+  "en": "Diagnostic code saved (game {0}): it takes effect for one session the next time you push this game to your iPhone (or open it on this Mac), then expires."
+ },
+ {
+  "source": "已收下诊断码：下次推到 iPhone（或在这台 Mac 上开）的那一款生效一局，玩完自动失效。",
+  "en": "Diagnostic code saved: it takes effect for one session in the next game you push to your iPhone (or open on this Mac), then expires."
+ },
+ {
+  "source": "诊断码已清掉。",
+  "en": "Diagnostic code cleared."
+ },
+ {
+  "source": "诊断码已写进 iPhone：下一局生效一次，玩完请在 S2Arm 里导出诊断包。",
+  "en": "Diagnostic code written to your iPhone: it takes effect once in the next session. Afterwards, export a diagnostic package in S2Arm."
+ },
+ {
+  "source": "不支持的诊断码操作。",
+  "en": "Unsupported diagnostic code action."
  }
 ]

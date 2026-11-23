@@ -65,7 +65,7 @@ namespace S2A.Services.Tests
             LanProtocol readProtocol = new(null!);
             NodeInfo received = default;
             int connectPackets = 0;
-            readProtocol.Connect += (info, _) =>
+            readProtocol.Connect += (info, _, _) =>
             {
                 received = info;
                 Interlocked.Increment(ref connectPackets);

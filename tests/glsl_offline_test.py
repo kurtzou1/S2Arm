@@ -291,6 +291,12 @@ def main():
     mixed = run([sys.executable, CLI, header, FIX / "es.vert", out / "header-mixed"])
     assert "GLSL 汇总：成功 1、失败 0、跳过 1" in mixed.stdout, mixed.stdout + mixed.stderr
     assert (out / "header-mixed/gl/gl_shaders.metallib").stat().st_size > 0
+    # 引擎模板（#852：顶点 / 片元同一文件、「#line ....」占位）：记跳过、不计失败；和完整着色器同在时照常出库
+    tpl = out / "blur_horiz.glsl"
+    tpl.write_text("//\n//##Vertex//\n//\n#version 120\n#line ....\nuniform mat4 mvp;\nattribute vec4 p;\nvoid main(){gl_Position=mvp*p;}\n"
+                   "//##Fragment//\n#version 120\n#line ....\nvoid main(){gl_FragColor=vec4(1.0);}\n")
+    tmix = run([sys.executable, CLI, tpl, FIX / "es.vert", out / "tpl-mixed"])
+    assert "GLSL 汇总：成功 1、失败 0、跳过 1" in tmix.stdout, tmix.stdout + tmix.stderr
     # 新主线必须保留输入附件和固定 / 特化工作组两种计算行为。
     extra_cases = {
         "subpass.frag": "#version 450\nlayout(input_attachment_index=0,set=0,binding=7) uniform subpassInput attachment;\nlayout(location=0) out vec4 color;\nvoid main(){color=subpassLoad(attachment);}\n",

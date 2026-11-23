@@ -200,25 +200,112 @@ static id<MTLComputePipelineState> mxe_pso(int w) {   // the host stages' own ke
     return ps[w];
 }
 static id<MTLComputePipelineState> mxe_scan_pso(void) { return mxe_pso(MXE_SCAN); }
+// 宿主自跑阶段的库：同一份基础源码（键 + 阶段）只编一次，网格的 main0_mc / main0_mv 共用；用过的记进 mesh_emu.tsv（pso_user.tsv 旁），下一局开局在后台先编
+//   （一款动作冒险游戏：首个 3D 场景 103 次现编合计约 70 s 都落在提交线程上，影片后一帧停 55 s，每局一样；Metal 不替 newLibraryWithSource 留跨局缓存）。
+//   g_mxl 值：@[库, 源码]、NSNull（做不了）或在编的 dispatch_group（别的线程等它，不重编）；g_mxp：键/入口 → 后台预建好的计算管线
+static NSMutableDictionary *g_mxl, *g_mxp; static os_unfair_lock g_mxl_lock = OS_UNFAIR_LOCK_INIT;
+static NSMutableSet *g_mxl_listed; static _Atomic uint64_t g_mxl_wait_ns, g_mxl_hits, g_mxl_built_bg;
+static NSString *mxl_list_path(void) { NSString *p = pso_user_path(); return p ? [p.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"mesh_emu.tsv"] : nil; }
+static NSArray *mxl_build(const char *key, int st, char *why, size_t nw) {
+    uint8_t md[8] = {0}; for (int i = 0; i < 8; i++) { unsigned b = 0; if (sscanf(key + 2 * i, "%2x", &b) != 1) break; md[i] = (uint8_t)b; }
+    char path[1200];
+    if (dm_shader_base_cached(md, st, path, sizeof path)) { snprintf(why, nw, "no translation of it on this device"); return nil; }
+    NSString *src = [NSString stringWithContentsOfFile:@(path) encoding:NSUTF8StringEncoding error:nil];
+    if (!src) { snprintf(why, nw, "its translation could not be read"); return nil; }
+    MTLCompileOptions *co = dm_msl_opts(); co.preprocessorMacros = @{@"S2A_MESH_EMU": @1};
+    NSError *e = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:src options:co error:&e];
+    if (!lib) { snprintf(why, nw, "failed to build: %s", e.localizedDescription.UTF8String); return nil; }
+    return @[lib, src];
+}
+// (键, 阶段) 的库与源码：后台编好的直接拿；在编的等它；都没有就在这里编（首局照旧）。bg：开局预编调的——编不成不记失败，留给绘制时照原路再试
+static NSArray *mxl_get(const char *key, int st, char *why, size_t nw, int bg) {
+    NSString *k = [NSString stringWithFormat:@"%s/%d", key, st];
+    os_unfair_lock_lock(&g_mxl_lock); if (!g_mxl) g_mxl = [NSMutableDictionary dictionary];
+    id v = g_mxl[k];
+    if (!v) {
+        dispatch_group_t g = dispatch_group_create(); dispatch_group_enter(g); g_mxl[k] = g;
+        os_unfair_lock_unlock(&g_mxl_lock);
+        NSArray *r = mxl_build(key, st, why, nw);
+        os_unfair_lock_lock(&g_mxl_lock); if (r || !bg) g_mxl[k] = r ?: (id)NSNull.null; else [g_mxl removeObjectForKey:k]; os_unfair_lock_unlock(&g_mxl_lock);
+        dispatch_group_leave(g);
+        if (bg && r) atomic_fetch_add(&g_mxl_built_bg, 1);
+        return r;
+    }
+    os_unfair_lock_unlock(&g_mxl_lock);
+    if (![v isKindOfClass:NSArray.class] && v != NSNull.null) {   // 在编：等它
+        uint64_t t0 = bp_now(); dispatch_group_wait((dispatch_group_t)v, DISPATCH_TIME_FOREVER); atomic_fetch_add(&g_mxl_wait_ns, bp_now() - t0);
+        os_unfair_lock_lock(&g_mxl_lock); v = g_mxl[k]; os_unfair_lock_unlock(&g_mxl_lock);
+    } else if (!bg) atomic_fetch_add(&g_mxl_hits, 1);
+    if (!v && !bg) return mxl_get(key, st, why, nw, 0);   // 等的是一次没编成的预编（已撤掉）：自己编
+    if (v == NSNull.null || ![v isKindOfClass:NSArray.class]) { if (!why[0]) snprintf(why, nw, "no translation of it on this device"); return nil; }
+    return v;
+}
+static void mxl_record(const char *key, int st, NSString *entry) {
+    NSString *path = mxl_list_path(); if (!path) return;
+    NSString *line = [NSString stringWithFormat:@"%s\t%d\t%@", key, st, entry];
+    os_unfair_lock_lock(&g_mxl_lock);
+    if (!g_mxl_listed) g_mxl_listed = [NSMutableSet set];
+    BOOL seen = [g_mxl_listed containsObject:line]; if (!seen) [g_mxl_listed addObject:line];
+    os_unfair_lock_unlock(&g_mxl_lock);
+    if (seen) return;
+    FILE *f = fopen(path.fileSystemRepresentation, "a"); if (!f) return;
+    fprintf(f, "%s\n", line.UTF8String); fclose(f);
+}
+static int mtk_emu_on(void);
+// 开局（warm_start）：按上一局记下的清单在后台两路先编库、预建计算管线
+static void mtk_emu_prebuild(void) {
+    NSString *path = mxl_list_path(); if (!path) return;
+    NSString *txt = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil]; if (!txt.length) return;
+    if (!mtk_emu_on()) return;
+    NSMutableArray *rows = [NSMutableArray array]; NSMutableSet *libs = [NSMutableSet set];
+    for (NSString *l in [txt componentsSeparatedByString:@"\n"]) {
+        NSArray *c = [l componentsSeparatedByString:@"\t"]; if (c.count != 3 || [c[0] length] < 16) continue;
+        [rows addObject:c]; [libs addObject:[NSString stringWithFormat:@"%@/%@", c[0], c[1]]];
+    }
+    os_unfair_lock_lock(&g_mxl_lock);   // warm_start 不一定在提交线程上（换目录时重起预热），跟 mxl_record 共用一把锁
+    if (!g_mxl_listed) g_mxl_listed = [NSMutableSet set];
+    for (NSArray *c in rows) [g_mxl_listed addObject:[c componentsJoinedByString:@"\t"]];
+    os_unfair_lock_unlock(&g_mxl_lock);
+    if (!rows.count) return;
+    uint64_t t0 = bp_now(); NSUInteger nrows = rows.count, nlibs = libs.count;
+    MLOG("task / mesh host stages: prebuilding %lu libraries (%lu entries) from %s in the background", (unsigned long)nlibs, (unsigned long)nrows, path.UTF8String);
+    dispatch_group_t g = dispatch_group_create(); dispatch_semaphore_t sem = dispatch_semaphore_create(2);
+    dispatch_queue_t q = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
+    __block _Atomic int nlib = 0, npso = 0;
+    for (NSArray *c in rows) dispatch_group_async(g, q, ^{ @autoreleasepool {
+        dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+        if (!dm_gfx_session_stopping()) {
+            char why[300] = ""; const char *key = [c[0] UTF8String]; int st = [c[1] intValue]; NSString *entry = c[2];
+            NSArray *r = mxl_get(key, st, why, sizeof why, 1);
+            if (r) { atomic_fetch_add(&nlib, 1);
+                if (st == 4 || [entry hasPrefix:@"main0_mc"]) { id<MTLFunction> f = lib_entry(r[0], entry); NSError *e = nil;
+                    id<MTLComputePipelineState> ps = f ? [g_dev newComputePipelineStateWithFunction:f error:&e] : nil;
+                    if (ps) { os_unfair_lock_lock(&g_mxl_lock); if (!g_mxp) g_mxp = [NSMutableDictionary dictionary]; g_mxp[[NSString stringWithFormat:@"%@/%@", c[0], entry]] = ps; os_unfair_lock_unlock(&g_mxl_lock); atomic_fetch_add(&npso, 1); } } }
+        }
+        dispatch_semaphore_signal(sem);
+    } });
+    dispatch_group_notify(g, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        MLOG("task / mesh host stages: prebuild done in %.1f s: %lu entries, %d with a library, %d compute pipelines ready (libraries built in the background %llu)",
+             (bp_now() - t0) / 1e9, (unsigned long)nrows, (int)nlib, (int)npso, (unsigned long long)atomic_load(&g_mxl_built_bg));
+    });
+}
 static NSMutableDictionary *g_mxe_vs;   // mesh shader key → its vertex record's bytes
 static NSMutableDictionary *g_mxe;   // shader key + entry → MTLFunction (task: its compute pipeline) or NSNull (cannot); submit thread
 static id mtk_emu_get(NvShader *sh, int st, NSString *entry) {
     NSString *k = [NSString stringWithFormat:@"%s/%@", sh->key, entry];
     if (!g_mxe) g_mxe = [NSMutableDictionary dictionary];
     id got = g_mxe[k]; if (got) return got == NSNull.null ? nil : got;
-    uint8_t md[8] = {0}; for (int i = 0; i < 8; i++) { unsigned b = 0; if (sscanf(sh->key + 2 * i, "%2x", &b) != 1) break; md[i] = (uint8_t)b; }
-    char path[1200], why[300] = ""; id r = nil; uint64_t t0 = bp_now();
+    char why[300] = ""; id r = nil; uint64_t t0 = bp_now(); NSError *e = nil;
     do {
-        if (dm_shader_base_cached(md, st, path, sizeof path)) { snprintf(why, sizeof why, "no translation of it on this device"); break; }
-        NSString *src = [NSString stringWithContentsOfFile:@(path) encoding:NSUTF8StringEncoding error:nil];
+        NSArray *ls = mxl_get(sh->key, st, why, sizeof why, 0); if (!ls) break;
+        id<MTLLibrary> lib = ls[0]; NSString *src = ls[1];
         if (![src containsString:entry]) { snprintf(why, sizeof why, "its translation has no %s (a relayed payload, or the exchange slot is taken)", entry.UTF8String); break; }
-        MTLCompileOptions *co = dm_msl_opts(); co.preprocessorMacros = @{@"S2A_MESH_EMU": @1};
-        NSError *e = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:src options:co error:&e];
-        if (!lib) { snprintf(why, sizeof why, "failed to build: %s", e.localizedDescription.UTF8String); break; }
         id<MTLFunction> f = lib_entry(lib, entry);
         NSUInteger al = f && sh->rf.nb && ![entry isEqualToString:@"main0_mv"] ? [f newArgumentEncoderWithBufferIndex:sh->rf.abi].encodedLength : sh->arg_len;   // main0_mv takes the vertex records alone
         if (!f || al != sh->arg_len) { snprintf(why, sizeof why, "%s", f ? "it takes another argument buffer than the library's" : "no such entry"); break; }
-        if (st == 4 || [entry hasPrefix:@"main0_mc"]) { r = [g_dev newComputePipelineStateWithFunction:f error:&e]; if (!r) snprintf(why, sizeof why, "its compute pipeline failed: %s", e.localizedDescription.UTF8String); }
+        if (st == 4 || [entry hasPrefix:@"main0_mc"]) {
+            os_unfair_lock_lock(&g_mxl_lock); r = g_mxp[k]; os_unfair_lock_unlock(&g_mxl_lock);   // 开局后台预建的（mtk_emu_prebuild）
+            if (!r) { r = [g_dev newComputePipelineStateWithFunction:f error:&e]; if (!r) snprintf(why, sizeof why, "its compute pipeline failed: %s", e.localizedDescription.UTF8String); } }
         else r = f;
         if (r && st == 5) {   // the vertex record's stride: the float4 members of dm_vertex_t, or of dm_xvertex_t (per-primitive outputs: one record a triangle corner) (S2A.Dsh MeshStage)
             int x = [src containsString:@"struct dm_xvertex_t {"];
@@ -228,7 +315,9 @@ static id mtk_emu_get(NvShader *sh, int st, NSString *entry) {
         }
     } while (0);
     g_mxe[k] = r ?: NSNull.null;
-    if (r) MLOG("task / mesh host stages: %s %s %s ready in %.1f ms", st == 4 ? "task" : "mesh", sh->key, entry.UTF8String, (bp_now() - t0) / 1e6);
+    if (r) { mxl_record(sh->key, st, entry);
+        MLOG("task / mesh host stages: %s %s %s ready in %.1f ms (prebuilt libraries used %llu, waited for the background %.1f ms in all)", st == 4 ? "task" : "mesh", sh->key, entry.UTF8String, (bp_now() - t0) / 1e6,
+             (unsigned long long)atomic_load(&g_mxl_hits), atomic_load(&g_mxl_wait_ns) / 1e6); }
     else MLOG("【黄】 task / mesh host stages: %s %s %s: %s; its draws stay on the driver's mesh pipeline (#770)", st == 4 ? "task" : "mesh", sh->key, entry.UTF8String, why);
     return r;
 }

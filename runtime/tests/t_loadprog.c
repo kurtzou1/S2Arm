@@ -30,6 +30,16 @@ int main(void) {
     CASE("剩余时间文案逐秒：-1 估算中、3 不到 5 秒、42 → 42 秒、61 → 1 分 1 秒、80 → 1 分 20 秒、120 → 2 分钟", {
         WANT(eq(-1, "正在估算剩余时间")); WANT(eq(3, "不到 5 秒")); WANT(eq(42, "42 秒")); WANT(eq(61, "1 分 1 秒"));
         WANT(eq(80, "1 分 20 秒")); WANT(eq(120, "2 分钟")); });
+    CASE("之后的启动要重编（#2133）：优化画面开始后 2.9 秒仍是简短画面、不给先开始玩；满 3 秒还没编完 → 升成完整页、给先开始玩；之后不再降回", {
+        s2a_load_begin(0, 0); WANT(s2a_load_warm_tick(1 * S, 0, 46995) == 0);
+        { s2a_load_view v = V(1 * S); WANT(v.first_run == 0 && v.can_skip == 0); }
+        WANT(s2a_load_warm_tick(1 * S + 2900000000ull, 300, 46995) == 0); { s2a_load_view v = V(1 * S + 2900000000ull); WANT(v.first_run == 0 && v.can_skip == 0); }
+        WANT(s2a_load_warm_tick(4 * S, 400, 46995) == 0); { s2a_load_view v = V(4 * S); WANT(v.first_run == 1 && v.can_skip == 1 && v.stage == S2A_LOAD_OPTIMIZE); }
+        WANT(s2a_load_warm_tick(5 * S, 46995, 46995) == 0); WANT(V(5 * S).first_run == 1); });
+    CASE("之后的启动 3 秒内编完：一直是简短画面（不升级、不给先开始玩）", {
+        s2a_load_begin(0, 0); WANT(s2a_load_warm_tick(1 * S, 0, 500) == 0);
+        WANT(s2a_load_warm_tick(3 * S, 500, 500) == 0); { s2a_load_view v = V(3 * S); WANT(v.first_run == 0 && v.can_skip == 0 && v.stage == S2A_LOAD_ENTER); }
+        WANT(s2a_load_warm_tick(9 * S, 500, 500) == 0); WANT(V(9 * S).first_run == 0); });
     CASE("阶段：起局 = 准备数据，第一次 tick = 优化画面，编完 = 进入游戏，首帧 = 收起", {
         s2a_load_begin(0, 1); WANT(V(1 * S).stage == S2A_LOAD_DATA);
         WANT(s2a_load_warm_tick(2 * S, 0, 100) == 0); WANT(V(2 * S).stage == S2A_LOAD_OPTIMIZE);
@@ -82,8 +92,8 @@ int main(void) {
         WANT(V(10 * S).eta_s < 5 && V(10 * S).can_skip);
         s2a_load_user_skip(); WANT(s2a_load_warm_tick(10 * S + S / 20, 950, 1000) == 1);
         { s2a_load_view v = V(11 * S); WANT(v.go_reason == S2A_LOAD_GO_USER && v.stage == S2A_LOAD_ENTER && !v.can_skip); } });
-    CASE("之后的启动（非首次，简短启动画面没有按钮）不出「先开始玩」", {
-        s2a_load_begin(0, 0); for (uint64_t t = 0; t <= 10 * S; t += S / 2) { s2a_load_warm_tick(t, (long)(t / (S / 10)), 1000); WANT(!V(t).can_skip); } });
+    CASE("之后的启动（简短启动画面没有按钮）：优化画面前 3 秒不出「先开始玩」；满 3 秒还没编完升成完整页才出（#2133）；第 10 秒编完不再出", {
+        s2a_load_begin(0, 0); for (uint64_t t = 0; t <= 10 * S; t += S / 2) { s2a_load_warm_tick(t, (long)(t / (S / 100)), 1000); WANT(V(t).can_skip == (t >= 3 * S && t < 10 * S)); } });
     CASE("护栏：已编数 30 秒没涨 → 返回 1、原因 = 无进展；29.5 秒时还在等", {
         s2a_load_begin(0, 1); s2a_load_warm_tick(0, 0, 1000); s2a_load_warm_tick(1 * S, 10, 1000);
         WANT(s2a_load_warm_tick(30 * S + S / 2, 10, 1000) == 0);

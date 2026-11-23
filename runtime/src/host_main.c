@@ -276,6 +276,7 @@ static int host_run(int argc, char **argv) {
     const s2a_launch_ctx *lc = s2a_launch_ctx_get();   // main 开头已冻结并核过可用
     // 进程级 env.txt 已在构造期应用；上下文文件给的本款文档根另有 env.txt 时此刻补读（只补缺）。日志 fd 就绪且正式会话开始后，只输出一次暂存的诊断。
     { const char *gd = s2a_launch_ctx_game_env_dir(s2a_envfile_process_docs()); if (gd) s2a_envfile_apply(gd); }
+    if (lc) s2a_envfile_apply_once(lc->docs);   // 诊断码（#1449）：电脑启动器推进来的一次性诊断开关，只管这一局
     s2a_envfile_log_flush();
 #if TARGET_OS_IPHONE
     s2a_ios_load_graphics_settings();

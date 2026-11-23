@@ -872,6 +872,32 @@ static void t_love(void) {
 //   核心名（结尾不是两个以上大写字母）没实现 → 非空、调用回 0；带厂商后缀的没实现 → 空；FRAMEBUFFER_SRGB 缺省关、开了查得到开、全程无错
 //   #601 起空实现按调用来源给：查表 gl_lookup 只回真实现（装载器先问直连层，层里交了空实现，游戏模块自己导出的同名函数就轮不到）；
 //   游戏运行时按名要（eglGetProcAddress）查表没有时才给空实现。所以下面空实现各项从 eglGetProcAddress 取，查表另核回空
+// ---------- 渲染缓冲位数 + 同步对象属性查询（游戏不查 glGetError、报错不写输出时读到自己栈上的旧值）----------
+//   期望照 GL 4.6 §9.2.6 / §4.1.3 手写：RGBA8 = 8/8/8/8/0/0、DEPTH24_STENCIL8 = 0/0/0/0/24/8、没建存储全 0；
+//   同步对象：类型 SYNC_FENCE 0x9116、条件 0x9117、标志 0、等到后状态 SIGNALED 0x9119；count 0 不写值、length 报 0
+static void t_rb_sync_query(void) {
+    printf("渲染缓冲位数 / 同步对象属性\n");
+    GLuint rb[3]; glGenRenderbuffers(3, rb);
+    static const struct { GLenum f; GLint b[6]; } want[] = {{0x8058, {8, 8, 8, 8, 0, 0}}, {0x88F0, {0, 0, 0, 0, 24, 8}}, {0, {0, 0, 0, 0, 0, 0}}};
+    for (int i = 0; i < 3; i++) {
+        glBindRenderbuffer(0x8D41, rb[i]); if (want[i].f) glRenderbufferStorage(0x8D41, want[i].f, 16, 16);
+        GLint got[6]; int ok = 1; for (int k = 0; k < 6; k++) { got[k] = -7; glGetRenderbufferParameteriv(0x8D41, 0x8D50 + k, &got[k]); ok &= got[k] == want[i].b[k]; }
+        GLenum e = glGetError();
+        CHECK(ok && !e, "渲染缓冲 %#x 各分量位数 %d/%d/%d/%d/%d/%d（期望 %d/%d/%d/%d/%d/%d），错误 %#x", want[i].f, got[0], got[1], got[2], got[3], got[4], got[5],
+              want[i].b[0], want[i].b[1], want[i].b[2], want[i].b[3], want[i].b[4], want[i].b[5], e);
+    }
+    glBindRenderbuffer(0x8D41, 0); glDeleteRenderbuffers(3, rb);
+    G(glGetSynciv, void, GLsync, GLenum, GLsizei, GLsizei *, GLint *) G(glFenceSync, GLsync, GLenum, GLbitfield) G(glClientWaitSync, GLenum, GLsync, GLbitfield, GLuint64) G(glDeleteSync, void, GLsync)
+    GLsync f = glFenceSync(0x9117, 0); glClientWaitSync(f, 1, 5000000000ull);
+    GLint v[4] = {-7, -7, -7, -7}; GLsizei n[4] = {-7, -7, -7, -7};
+    glGetSynciv(f, 0x9112, 1, &n[0], &v[0]); glGetSynciv(f, 0x9113, 1, &n[1], &v[1]); glGetSynciv(f, 0x9115, 1, &n[2], &v[2]); glGetSynciv(f, 0x9114, 1, &n[3], &v[3]);
+    CHECK(v[0] == 0x9116 && v[1] == 0x9117 && v[2] == 0 && v[3] == 0x9119 && n[0] == 1 && n[3] == 1 && !glGetError(),
+          "同步对象属性：类型 %#x 条件 %#x 标志 %d 状态 %#x（期望 0x9116 0x9117 0 0x9119），length %d", v[0], v[1], v[2], v[3], n[0]);
+    GLint z = -7; GLsizei zl = -7; glGetSynciv(f, 0x9114, 0, &zl, &z);
+    CHECK(z == -7 && zl == 0 && !glGetError(), "count 0：不写值（%d）、length 0（%d）", z, zl);
+    glGetSynciv(f, 0x1234, 1, NULL, &z); GLenum e1 = glGetError(); glDeleteSync(f); glGetSynciv(f, 0x9114, 1, NULL, &z); GLenum e2 = glGetError();
+    CHECK(e1 == INVALID_ENUM && e2 == INVALID_VALUE, "未知参数 INVALID_ENUM、已删的同步对象 INVALID_VALUE（%#x %#x）", e1, e2);
+}
 static void t_core_stub(void) {
     void *(*egpa)(const char *) = gpa("eglGetProcAddress"); CHECK(egpa != NULL, "eglGetProcAddress 查得到"); if (!egpa) return;
     CHECK(gpa("glS2aNoSuchCore") == NULL, "查表（gl_lookup）对没实现的核心名回空（空实现不从查表给，#601）");
@@ -988,6 +1014,6 @@ int main(void) { alarm(120); @autoreleasepool {
     g_sf = eglCreateWindowSurface(g_dpy, cfg, NULL, NULL); EGLContext ctx = eglCreateContext(g_dpy, cfg, NULL, ctx_attr);
     if (!eglMakeCurrent(g_dpy, g_sf, g_sf, ctx)) { printf("✗ 建上下文失败\n"); return 1; }
     g_tri = program("tri"); glGenVertexArrays(1, &g_tri_vao); glGenBuffers(1, &g_tri_vbo);
-    t_queries(); t_sync(); t_readback(); t_fb_query(); t_volume(); t_msaa(); t_map(); t_instanced(); t_packed_attr(); t_raster_read(); t_uniforms(); t_names_programs(); t_threads(); t_frame_storage(); t_core_stub(); t_tex_storage3d(); t_tex_swizzle(); t_bool_uniform(); t_api_version(); t_egl_current(); t_map_range(); t_pack_buffer(); t_unpack_buffer(); t_es300(); t_desk120(); t_sampler_array(); t_shader_iv(); t_love();
+    t_queries(); t_sync(); t_readback(); t_fb_query(); t_volume(); t_msaa(); t_map(); t_instanced(); t_packed_attr(); t_raster_read(); t_uniforms(); t_names_programs(); t_threads(); t_frame_storage(); t_core_stub(); t_rb_sync_query(); t_tex_storage3d(); t_tex_swizzle(); t_bool_uniform(); t_api_version(); t_egl_current(); t_map_range(); t_pack_buffer(); t_unpack_buffer(); t_es300(); t_desk120(); t_sampler_array(); t_shader_iv(); t_love();
     printf("%s t_gl_api：%d 项，失败 %d\n", fails ? "✗" : "✓", checks, fails); return fails != 0;
 }}

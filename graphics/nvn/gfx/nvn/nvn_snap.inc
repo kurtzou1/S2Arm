@@ -21,7 +21,8 @@ static int snap_dump_tex(FILE *f, uint64_t ser, id<MTLTexture> t, uint64_t *byte
     uint64_t tot = 0;
     for (uint32_t q = 0; q < hd.nplane; q++) for (NSUInteger l = 0; l < t.mipmapLevelCount; l++) tot += fr_plane_bytes(&hd.pl[q], MAX(1, t.width >> l), MAX(1, t.height >> l), MAX(1, t.depth >> l)) * hd.layers;
     if (!tot || tot > (256ull << 20)) return 0;
-    id<MTLBuffer> b = [g_dev newBufferWithLength:tot options:MTLResourceStorageModeShared]; if (!b || !fr_blit_planes(t, &hd, b, 1)) return 0;
+    if (FR_READ_STOPPED) return 0;
+    id<MTLBuffer> b = [g_dev newBufferWithLength:tot options:MTLResourceStorageModeShared]; if (!b) fr_read_lost("读回缓冲建不出来"); if (!b || !fr_blit_planes(t, &hd, b, 1)) return 0;
     if (!fr_w_tex(f, &hd, b.contents, tot)) return -1;
     *bytes += tot; return 1;
 }
@@ -221,7 +222,8 @@ static int snap_al_dump(FILE *f, id<MTLTexture> t, uint64_t *bytes) {   // 1 存
     uint64_t tot = 0;
     for (uint32_t q = 0; q < hd.nplane; q++) for (NSUInteger l = 0; l < t.mipmapLevelCount; l++) tot += fr_plane_bytes(&hd.pl[q], MAX(1, t.width >> l), MAX(1, t.height >> l), MAX(1, t.depth >> l)) * hd.layers;
     if (!tot || tot > (256ull << 20)) return 0;
-    id<MTLBuffer> b = [g_dev newBufferWithLength:tot options:MTLResourceStorageModeShared]; if (!b || !fr_blit_planes(t, &hd, b, 1)) return 0;
+    if (FR_READ_STOPPED) return 0;
+    id<MTLBuffer> b = [g_dev newBufferWithLength:tot options:MTLResourceStorageModeShared]; if (!b) fr_read_lost("读回缓冲建不出来"); if (!b || !fr_blit_planes(t, &hd, b, 1)) return 0;
     if (!fr_w(f, &x, sizeof x) || !fr_w_tex(f, &hd, b.contents, tot)) return -1;
     *bytes += tot; return 1;
 }
@@ -372,7 +374,7 @@ void nvn_snap_fps(snap_fp_cb cb) {
 void s2a_snap_progress(const char *layer) __attribute__((weak));
 #define SNAP_AT(s) do { if (s2a_snap_progress) s2a_snap_progress(s); } while (0)
 static int nvn_snap_save_body(const char *dir);
-int nvn_snap_save(const char *dir) { @autoreleasepool { return nvn_snap_save_body(dir); } }   // 同 nvn_snap_restore，存的时候读回贴图建的对象也当场放
+int nvn_snap_save(const char *dir) { @autoreleasepool { g_fr_read_lost = 0; g_fr_read_stop = 1; int r = nvn_snap_save_body(dir); g_fr_read_stop = 0; return r; } }   // 同 nvn_snap_restore，存的时候读回贴图建的对象也当场放
 static int nvn_snap_save_body(const char *dir) {
     if (!s2a_snap_arena_get) { MLOG("【红】 即时存档：宿主没有命令记录区接口"); return -1; }
     // GL 出图层（外部生产者）：先排空那一层、存它的对象与上下文（gfx/gl egl.m gl_snap_save）；Vulkan 层另做
@@ -431,6 +433,8 @@ static int nvn_snap_save_body(const char *dir) {
       if (g_snap_pkg_gone) MLOG("即时存档：预排布贴图 %d 张的显卡内容已经没了（系统在后台清掉，或上传被丢）、还没重传，不存（恢复后第一次取用从客体内存上传）", g_snap_pkg_gone); }
     SNAP_AT("图形 gfx_alias");
     { snprintf(p, sizeof p, "%s/gfx_alias.bin", dir); ok &= snap_alias_save(p) == 0; }
+    { const char *t = getenv("DM_TEST_SNAP_READ_LOST"); if (t && atoi(t)) fr_read_lost("测试开关 DM_TEST_SNAP_READ_LOST"); }
+    if (g_fr_read_lost) { MLOG("【红】 即时存档：读回显卡内容没读成（%d 次），这份不算存成，上一份原样保留", g_fr_read_lost); ok = 0; }
     SNAP_AT("图形 gfx_mtl");
     { snprintf(p, sizeof p, "%s/gfx_mtl.bin", dir); FILE *f = fopen(p, "wb"); ok &= f && snap_mtl_save(f) == 0; if (f) ok &= fclose(f) == 0; }
     SNAP_AT("图形 gfx_codec");
@@ -595,11 +599,12 @@ int nvn_snap_grab(const char *path) {
     for (int attempt = 1; attempt <= 3; attempt++) {
         __block int done = 0; char *pp = strdup(path); int at = attempt;
         mtl_grab_next_present(^(const uint8_t *bgra, size_t w, size_t h, size_t row) {
+            if (!bgra) { MLOG("【黄】 即时存档：验证截图 %s 没取到，这份快照不带画面", pp); free(pp); __atomic_store_n(&done, 2, __ATOMIC_RELEASE); return; }   // 截图失败回调给的是空指针，原先照常写空文件、算取到
             uint8_t *cp = malloc(row * h); if (cp) { memcpy(cp, bgra, row * h); fr_png(pp, cp, w, h, row); free(cp); }
             MLOG("即时存档：验证截图 %s 取自第 %llu 帧（第 %d 次请求）", pp, (unsigned long long)atomic_load(&g_cur_frame), at);
             free(pp); __atomic_store_n(&done, 1, __ATOMIC_RELEASE); });
         for (int i = 0; i < 300 && !__atomic_load_n(&done, __ATOMIC_ACQUIRE); i++) usleep(10000);
-        if (done) return 0;
+        { int d = __atomic_load_n(&done, __ATOMIC_ACQUIRE); if (d) return d == 1 ? 0 : -1; }
         MLOG("【黄】 即时存档：验证截图 %s 第 %d 次请求 3 秒内没等到（取图槽可能被别的请求占了），重新请求", path, attempt);
     }
     return -1;

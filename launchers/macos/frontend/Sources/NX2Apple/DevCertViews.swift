@@ -139,17 +139,23 @@ struct DevCertSheet: View {
     @State private var failure: String?
     @State private var failureCode: String?
     @State private var failureRequest = ""
+    @State private var adopted: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             LauncherSheetHeading(sx(loc, "sheet.title"))
             pick(sx(loc, "sheet.p12"), path: $p12, types: ["p12", "pfx"], id: "p12")
             pick(sx(loc, "sheet.profile"), path: $profile, types: ["mobileprovision"], id: "profile")
+            Text(sx(loc, "sheet.profileNote")).font(LauncherTheme.TypeStyle.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)   // #2015：只选 .p12 也能导入
             VStack(alignment: .leading, spacing: 6) {
                 Text(sx(loc, "sheet.password")).font(LauncherTheme.TypeStyle.section)
                 SecureField("", text: $password).textFieldStyle(LauncherTextFieldStyle())
                     .accessibilityLabel(sx(loc, "sheet.password")).accessibilityIdentifier("export.sign.sheet.password")
                 Text(sx(loc, "sheet.passwordNote")).font(LauncherTheme.TypeStyle.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            if let adopted {   // 只选 .p12、交给 Apple ID 签名成了：留在弹窗里说清（不切签名方式）
+                Text(loc.backend(adopted)).font(LauncherTheme.TypeStyle.detail).fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("export.sign.sheet.adopted")
             }
             if let failure {
                 Text(loc.backend(failure)).font(LauncherTheme.TypeStyle.detail).foregroundStyle(LauncherPalette.danger).fixedSize(horizontal: false, vertical: true)
@@ -168,7 +174,7 @@ struct DevCertSheet: View {
                 Button(sx(loc, "sheet.cancel")) { dismiss() }.controllerButtonStyle(LauncherSecondaryButtonStyle()).keyboardShortcut(.cancelAction).controllerShortcut(.back)
                 Button(sx(loc, "sheet.import")) { start() }
                     .controllerButtonStyle(LauncherPrimaryButtonStyle()).keyboardShortcut(.defaultAction).controllerShortcut(.rightTrigger)
-                    .disabled(working || p12.isEmpty || profile.isEmpty)
+                    .disabled(working || p12.isEmpty || adopted != nil)
                     .accessibilityIdentifier("export.sign.sheet.import")
             }
         }
@@ -177,11 +183,12 @@ struct DevCertSheet: View {
     }
 
     private func start() {
-        working = true; failure = nil; failureCode = nil; failureRequest = ""
+        working = true; failure = nil; failureCode = nil; failureRequest = ""; adopted = nil
         Task {
             let why = await model.importDevCert(p12: p12, profile: profile, password: password, add: add, device: device)
             working = false
-            if let why { failure = why.text; failureCode = why.code; failureRequest = why.request } else { password = ""; dismiss() }
+            if let why, why.adopted { adopted = why.text; password = "" }
+            else if let why { failure = why.text; failureCode = why.code; failureRequest = why.request } else { password = ""; dismiss() }
         }
     }
 

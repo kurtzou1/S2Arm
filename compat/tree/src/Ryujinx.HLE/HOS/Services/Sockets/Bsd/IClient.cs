@@ -159,8 +159,16 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
             return WriteBsdResult(context, newSockFd, errno);
         }
 
-        private void WriteSockAddr(ServiceCtx context, ulong bufferPosition, ISocket socket, bool isRemote)
+        // S2Arm: returns the bytes written (the addrlen the caller reports). A null or short addr buffer is not written
+        //   (Horizon / BSD: accept / getpeername / getsockname with addr NULL leave it alone): writing 16 bytes to a
+        //   zero-length buffer raised InvalidMemoryRegionException and the game aborted in nn::socket::Accept
+        private int WriteSockAddr(ServiceCtx context, ulong bufferPosition, ulong bufferSize, ISocket socket, bool isRemote)
         {
+            if (bufferPosition == 0 || bufferSize < (ulong)Unsafe.SizeOf<BsdSockAddr>())
+            {
+                return 0;
+            }
+
             IPEndPoint endPoint = isRemote ? socket.RemoteEndPoint : socket.LocalEndPoint;
 
             if (endPoint != null)
@@ -171,6 +179,8 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
             {
                 context.Memory.Write(bufferPosition, new BsdSockAddr());
             }
+
+            return Unsafe.SizeOf<BsdSockAddr>();
         }
 
         [CommandCmif(0)]
@@ -770,9 +780,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
         {
             int socketFd = context.RequestData.ReadInt32();
 
-#pragma warning disable IDE0059 // Remove unnecessary value assignment
             (ulong bufferPos, ulong bufferSize) = context.Request.GetBufferType0x22();
-#pragma warning restore IDE0059
 
             LinuxError errno = LinuxError.EBADF;
             ISocket socket = Context(context).RetrieveSocket(socketFd);
@@ -789,18 +797,20 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
                 {
                     int newSockFd = Context(context).RegisterFileDescriptor(newSocket);
 
+                    int addrLen = 0;
+
                     if (newSockFd == -1)
                     {
                         errno = LinuxError.EBADF;
                     }
                     else
                     {
-                        WriteSockAddr(context, bufferPos, newSocket, true);
+                        addrLen = WriteSockAddr(context, bufferPos, bufferSize, newSocket, true);
                     }
 
                     WriteBsdResult(context, newSockFd, errno);
 
-                    context.ResponseData.Write(0x10);
+                    context.ResponseData.Write(addrLen);
 
                     return ResultCode.Success;
                 }
@@ -861,9 +871,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
         {
             int socketFd = context.RequestData.ReadInt32();
 
-#pragma warning disable IDE0059 // Remove unnecessary value assignment
             (ulong bufferPosition, ulong bufferSize) = context.Request.GetBufferType0x22();
-#pragma warning restore IDE0059
 
             LinuxError errno = LinuxError.EBADF;
             ISocket socket = Context(context).RetrieveSocket(socketFd);
@@ -875,9 +883,9 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
                 {
                     errno = LinuxError.SUCCESS;
 
-                    WriteSockAddr(context, bufferPosition, socket, true);
+                    int addrLen = WriteSockAddr(context, bufferPosition, bufferSize, socket, true);
                     WriteBsdResult(context, 0, errno);
-                    context.ResponseData.Write(Unsafe.SizeOf<BsdSockAddr>());
+                    context.ResponseData.Write(addrLen);
                 }
             }
 
@@ -890,9 +898,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
         {
             int socketFd = context.RequestData.ReadInt32();
 
-#pragma warning disable IDE0059 // Remove unnecessary value assignment
             (ulong bufferPos, ulong bufferSize) = context.Request.GetBufferType0x22();
-#pragma warning restore IDE0059
 
             LinuxError errno = LinuxError.EBADF;
             ISocket socket = Context(context).RetrieveSocket(socketFd);
@@ -901,9 +907,9 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
             {
                 errno = LinuxError.SUCCESS;
 
-                WriteSockAddr(context, bufferPos, socket, false);
+                int addrLen = WriteSockAddr(context, bufferPos, bufferSize, socket, false);
                 WriteBsdResult(context, 0, errno);
-                context.ResponseData.Write(Unsafe.SizeOf<BsdSockAddr>());
+                context.ResponseData.Write(addrLen);
             }
 
             return WriteBsdResult(context, 0, errno);

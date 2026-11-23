@@ -229,6 +229,11 @@ int s2a_console_mode(void) { return atomic_load(&g_console_mode); }         // �
 static _Atomic int g_host_sleep;
 void s2a_host_sleep_set(int sleeping) { atomic_store(&g_host_sleep, sleeping ? 1 : 0); }
 int s2a_host_sleeping(void) { return atomic_load(&g_host_sleep); }         // 导出给 C#（接口 v2.15）
+// 系统小程序开着（接口 v2.18）：系统键盘、错误弹窗、手柄设置等小程序占着画面时游戏本来就不出新帧（D-Z96G：输名字 53 秒被停帧看门判成卡住、弹「卡住」提示）。
+//   服务层是唯一写者：小程序拉起 +1、结束 -1（Ryujinx.HLE S2AHooks.AppletOpenAdd，含宿主输入框）；停帧看门（ap_host.c、直连 host_adapt.m）读它，开着期间暂停计时
+static _Atomic int g_applet_open;
+void s2a_applet_open_add(int d) { int v = atomic_load(&g_applet_open), n; do { n = v + d < 0 ? 0 : v + d; } while (!atomic_compare_exchange_weak(&g_applet_open, &v, n)); }
+int s2a_applet_open(void) { return atomic_load(&g_applet_open); }
 // 系统计数器：Switch 19.2 MHz；Switch 2 31.25 MHz（svc_mem.c 按 NPDM 起局时设，游戏线程起来前只设一次）
 static uint64_t g_tick_hz = 19200000;
 void s2a_guest_tick_hz_set(uint64_t hz) { g_tick_hz = hz; }

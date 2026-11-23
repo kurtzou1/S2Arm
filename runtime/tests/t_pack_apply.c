@@ -187,6 +187,17 @@ static void s2arm_pack(const char *T, const char *out, const char *first, const 
     CHECK(zcomp(tp, out) == 0, "压 .s2arm 失败");
 }
 static int s2arm_read_is(const char *p, const char *want) { char b[256] = ""; FILE *f = fopen(p, "rb"); if (!f) return 0; size_t n = fread(b, 1, sizeof b - 1, f); fclose(f); b[n] = 0; return !strcmp(b, want); }
+#include <pthread.h>
+#include <stdatomic.h>
+static char g_ser_docs[1200], g_ser_src[1200], g_ser_gdocs[1300]; static pthread_t g_ser_imp, g_ser_app; static int g_ser_imp_rc = -100, g_ser_apply_after;
+static atomic_int g_ser_apply_done, g_ser_imp_done;
+static void *ser_imp(void *a) { (void)a; char g[17]; g_ser_imp_rc = s2a_s2arm_import(g_ser_docs, g_ser_src, g, sizeof g); atomic_store(&g_ser_imp_done, 1); return NULL; }
+static void *ser_app(void *a) { (void)a; s2a_pack_apply(g_ser_gdocs); g_ser_apply_after = atomic_load(&g_ser_imp_done); atomic_store(&g_ser_apply_done, 1); return NULL; }
+static void ser_go(const char *docs, const char *src, const char *gdocs) {
+    snprintf(g_ser_docs, sizeof g_ser_docs, "%s", docs); snprintf(g_ser_src, sizeof g_ser_src, "%s", src); snprintf(g_ser_gdocs, sizeof g_ser_gdocs, "%s", gdocs);
+    pthread_create(&g_ser_imp, NULL, ser_imp, NULL); usleep(200000);   // 导入先拿到锁、停在打开管道
+    pthread_create(&g_ser_app, NULL, ser_app, NULL);
+}
 static void s2arm_cases(const char *T) {
     if (!zstd_pick()) { printf("（跳过 .s2arm 导入：本机既没有 zstd 命令行也没有 Python zstd 模块）\n"); return; }
     char docs[1024], c[2400], src[1200], g[17], base[1200], p[2400]; snprintf(docs, sizeof docs, "%s/s2h/Documents", T);
@@ -229,6 +240,20 @@ static void s2arm_cases(const char *T) {
     s2a_img_scan(docs);
     CHECK(s2a_img_scan_code()[0] && strstr(s2a_img_scan_failure(), "bad.s2arm"), "⑥ 改了再扫：重试、再报（码「%s」）", s2a_img_scan_code());
     unlink(src);
+    // ⑦ 导入与解开串行（D-WN2G：导入撤掉 .applied 后游戏库起后台解开，解开清旧文件删掉导入正写着的 lib.NNN.pak.<pid>.part，导入改名 ENOENT）。
+    //   导入的源文件是命名管道：导入停在读它这一步（已持锁），这时另起一路解开同一款——期望它等着，300 毫秒内不返回；喂完管道两路都做完、导入成功。
+    //   旧实现里解开不等导入，立刻返回
+    { char fifo[1200], gdocs[1300]; snprintf(fifo, sizeof fifo, "%s/pipe.s2arm", T); unlink(fifo); CHECK(mkfifo(fifo, 0600) == 0, "⑦ 建命名管道");
+      snprintf(src, sizeof src, "%s/e.s2arm", T); s2arm_pack(T, src, "s2arm.json", NULL);
+      snprintf(gdocs, sizeof gdocs, "%s/games/0100ABCDE0000000", docs);
+      ser_go(docs, fifo, gdocs);
+      usleep(300000);
+      CHECK(!atomic_load(&g_ser_apply_done), "⑦ 导入还在进行时，解开同一款应等着（300 毫秒内已返回 = 没串行）");
+      snprintf(c, sizeof c, "cat '%s' > '%s'", src, fifo); CHECK(sh(c) == 0, "⑦ 喂管道");
+      pthread_join(g_ser_imp, NULL); pthread_join(g_ser_app, NULL);
+      CHECK(g_ser_imp_rc == 0, "⑦ 导入成功（返回 %d）", g_ser_imp_rc);
+      CHECK(atomic_load(&g_ser_apply_done) && g_ser_apply_after, "⑦ 解开在导入做完之后才返回");
+      unlink(fifo); unlink(src); }
 }
 // 两路同时解同一款（11-19 Duo：游戏库与资源导入闸门各起一路，后一路打开已被前一路解完删掉的 tar 回 errno 2、按失败收场）。
 //   A 解完第 1 个包时（进度回调）起 B，A 再停 300 毫秒：串行时 B 等 A 做完、见待解包已空且 .applied = 清单号 → 直接成功；

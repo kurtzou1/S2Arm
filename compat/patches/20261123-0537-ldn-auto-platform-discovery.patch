@@ -1,0 +1,28 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
+index bae8375691ae307fa3922c3254f6e9bd5f54118e..7b6c525c890e6cf18f1c68f25acff9597f36c86a 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
+@@ -33,7 +33,8 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+         private static bool LdnAutoRequested =>
+             !string.Equals(Environment.GetEnvironmentVariable("S2A_LDN_MITM"), "1", StringComparison.Ordinal) &&
+             string.IsNullOrEmpty(Environment.GetEnvironmentVariable("S2A_LDN_SERVER")) &&
+-            !string.Equals(Environment.GetEnvironmentVariable("S2A_LDN_AUTO"), "0", StringComparison.Ordinal);
++            !string.Equals(Environment.GetEnvironmentVariable("S2A_LDN_AUTO"), "0", StringComparison.Ordinal) &&
++            !S2AHooks.LdnPlatformDiscovery;   // 宿主这一局走了平台局域网发现（iOS）：照旧 RyuLDN，不建双协议自动客户端
+ 
+         internal static MultiplayerMode SelectAutoMode(MultiplayerMode mode, Func<bool> switchRoomFound)
+         {
+diff --git a/src/Ryujinx.HLE/S2AHooks.cs b/src/Ryujinx.HLE/S2AHooks.cs
+index b4d41be6cf4d3d743aecf4811cca4e6a298a5d20..4ebc681a986245dc22fc67f7ad4e6e35a188c8e0 100644
+--- a/src/Ryujinx.HLE/S2AHooks.cs
++++ b/src/Ryujinx.HLE/S2AHooks.cs
+@@ -58,6 +58,9 @@ namespace Ryujinx.HLE
+ 
+         // Upstream silently defaulted on missing data in a few places; those now report through here (S2Arm red list)
+         public static System.Action<string> Red;
++        // 联机自动模式这一局走平台局域网发现（iOS：发现 → RyuLDN 中继）：宿主在 LdnInitializing 里定、置位；置位时 ldn:u 不建双协议自动客户端（LdnAutoClient），
++        //   照旧按 MultiplayerMode（LdnRyu）建中继客户端。没有平台发现（Mac）或发现起不来时为 false，走双协议自动
++        public static bool LdnPlatformDiscovery;
+ 
+         // Platform JPEG encoding; null preserves the existing Skia implementation on default hosts.
+         public static Ryujinx.HLE.UI.ScreenshotJpegEncoder EncodeScreenshotJpeg;

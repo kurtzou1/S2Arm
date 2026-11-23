@@ -189,6 +189,14 @@ int main(void) {
             unsigned long long vw = 0; hf = fopen(hn, "r"); if (hf) { if (fscanf(hf, "%llu", &vw) != 1) vw = 0; fclose(hf); }
             CHECK(r[0] == 0xD001 && vw == 8388608, "窗口越界的堆请求：期望 回 0xd001 且记下 8388608 → 实 %#llx / %llu",
                   (unsigned long long)r[0], vw);
+            // D-96J2：这款第一次起局，wire/<程序号>/ 两级目录都还没有 → 照样记下（建目录再写）。期望手写：回 0xd001、记下 8388608
+            { char dd[] = "/tmp/s2a_t_hn_dir_XXXXXX"; char hp[256] = "";
+              if (mkdtemp(dd)) { snprintf(hp, sizeof hp, "%s/wire/0100CD3010AE2000/heap_need", dd); setenv("S2A_HEAP_NEED", hp, 1);
+                  memset(r, 0, sizeof r); r[1] = 8 * MB; svc_mem(0x01, r, 0);
+                  unsigned long long vd = 0; hf = fopen(hp, "r"); if (hf) { if (fscanf(hf, "%llu", &vd) != 1) vd = 0; fclose(hf); }
+                  CHECK(r[0] == 0xD001 && vd == 8388608, "目录还没有时记下要的堆：期望 回 0xd001 且记下 8388608 → 实 %#llx / %llu", (unsigned long long)r[0], vd);
+                  char c[600]; snprintf(c, sizeof c, "rm -rf '%s'", dd); if (system(c)) {}
+                  setenv("S2A_HEAP_NEED", hn, 1); } }
         }
         unsetenv("S2A_HEAP_NEED"); unlink(hn);
         munmap(R, RS + 2 * MB);

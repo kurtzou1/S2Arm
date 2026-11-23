@@ -120,7 +120,7 @@ namespace S2A.Services.Tests
         }
 
         // 本地联机按需自动开（10-28 双人成行：玩家不该先去设置里找开关）：没给 S2A_LDN_SERVER、缺省离线 → 游戏第一次初始化 ldn:u 时
-        //   ① 原生层没有局域网发现（Mac，弱符号回 0）：保持 Disabled，只打一行；
+        //   ① 原生层没有局域网发现（Mac，弱符号回 0）：自动模式回退到 ldn_mitm，让 Mac 也能连 Switch；
         //   ② 有（iOS ldn_lan.m）：局域网发现被调（程序号 = 游戏的）、联机模式切 LdnRyu、中继先指本机 127.0.0.1、本进程托管中继（全部网卡，产品 30456、单测临时端口）；
         //   ③ 之后局域网选举改指（S2A_LdnSetServer）→ 建房（OpenAccessPoint）时客户端换到新中继，不等下一次 Initialize；
         //   ④ 本机中继建房 / 解散 → 原生层收到「有房间」标记 1 / 0（Bonjour 发布名加 / 去「!」，选举优先有房间的中继）。
@@ -185,8 +185,8 @@ namespace S2A.Services.Tests
             long red0 = Red.Total;
             Reply i1 = Call(svc, Init());
             Reply oap0 = Call(svc, Msg.Cmif(200));   // OpenAccessPoint：初始化失败后的后续调用
-            Check("联机自动开：原生层provider 返回负 errno → Initialize 回「本地联机不可用」、仍 Disabled、发现被调 1 次、后续调用同回不可用码、发现失败 + 联机不可用各报红一次（不把空客户端往后传）",
-                "0x20CB、Disabled、1 次、0x20CB、+2",
+            Check("联机自动开：原生层provider 返回负 errno → 自动模式回退 ldn_mitm、发现被调 1 次、后续调用成功（不把空客户端往后传）",
+                "0x0、LdnMitm、1 次、0x0、+1",
                 $"0x{i1.Result:X}、{cfg.MultiplayerMode}、{FakeNative.LdnLanStarts} 次、0x{oap0.Result:X}、+{Red.Total - red0}");
             Call(svc, Msg.Cmif(401));   // Finalize
 

@@ -331,14 +331,25 @@ def parse_certs(text):
 
 
 PLUME_MACHINE_NAME = 'AltStore'   # plumesign v2.7.2 sign 不传机器名时的缺省（crates/plume_core/src/utils/certificate.rs MACHINE_NAME）
+KEYCERT_MARK = '+s2a-keycert'   # 自编补丁 0006 的版本标记：带它的 plumesign 只按公钥认自己的证书、不看机器名（SideStore 建的证书私钥给它也认）
 
 
-def cert_check(exe, team, appdata=None, log=None, run=subprocess.run):
-    """签名前核：要不要问玩家（见上）→ None（不用问）| {name, machine, created}（plumesign 这次会新建证书、列表里有别人的；满了会撤的那张 = 第一张）。
-    列不出来（没联网 / 会话过期 / 工具旧）→ None：照原来签（判不了就不加阻碍，记日志）"""
-    base = impactor.data_base(appdata)
-    key = Path(base) / 'PlumeImpactor' / 'keys' / team / 'key.pem'
-    mine = key_modulus(key.read_text(encoding='utf-8')) if key.is_file() else None
+def keycert(exe, run=subprocess.run):
+    """这个 plumesign 是否按公钥复用证书（补丁 0006，--version 带 KEYCERT_MARK）。不带 = 上游原版：只认机器名 AltStore 的那张"""
+    try:
+        p = run([exe, '--version'], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return KEYCERT_MARK in (p.stdout or '')
+
+
+def _ours(c, m, mine, by_key):
+    """列表里这张是不是 plumesign 会复用的那张：公钥 = 本机私钥的；原版另要机器名 AltStore（certificate.rs find_certificate），补丁 0006 起不看机器名"""
+    return mine is not None and m == mine and (by_key or c['machine'] == PLUME_MACHINE_NAME)
+
+
+def _list_certs(exe, team, log=None, run=subprocess.run):
+    """plumesign account certificates --team → [{name, machine, der}]；列不出（没联网 / 会话过期 / 工具旧）→ None（原文进 log）"""
     try:
         p = run([exe, 'account', 'certificates', '--team', team], capture_output=True, text=True, encoding='utf-8', errors='replace', env=plumesign_env(), timeout=120)
     except (OSError, subprocess.SubprocessError) as e:
@@ -346,12 +357,21 @@ def cert_check(exe, team, appdata=None, log=None, run=subprocess.run):
         return None
     text = (p.stdout or '') + (p.stderr or '')
     if log: Path(log).write_text(re.sub(r'\[(?:\s*\d+,){20,}[\s\d,]*\]', '[…]', text), encoding='utf-8')
-    if p.returncode: return None
-    certs = parse_certs(text)
+    return None if p.returncode else parse_certs(text)
+
+
+def cert_check(exe, team, appdata=None, log=None, run=subprocess.run):
+    """签名前核：要不要问玩家（见上）→ None（不用问）| {name, machine, created}（plumesign 这次会新建证书、列表里有别人的；满了会撤的那张 = 第一张）。
+    列不出来（没联网 / 会话过期 / 工具旧）→ None：照原来签（判不了就不加阻碍，记日志）"""
+    key = plume_key_path(team, appdata)
+    mine = key_modulus(key.read_text(encoding='utf-8')) if key.is_file() else None
+    certs = _list_certs(exe, team, log, run)
+    if certs is None: return None
     rows = [(c, *cert_modulus_and_start(c['der'])) for c in certs]
-    # 本机这把私钥的证书还在、且机器名是 plumesign 找的那个：不新建、不撤。plumesign 认「自己的」要两样都对上
-    #   （certificate.rs find_certificate：machine_name == MACHINE_NAME 且公钥相同），只比公钥会漏掉「公钥对、名字不对 → 它照样新建」
-    if mine is not None and any(m == mine and c['machine'] == PLUME_MACHINE_NAME for c, m, _ in rows): return None
+    # 本机这把私钥的证书还在、且是 plumesign 会复用的那张：不新建、不撤。原版 plumesign 认「自己的」要公钥与机器名两样都对上
+    #   （certificate.rs find_certificate），只比公钥会漏掉「公钥对、名字不对 → 它照样新建」；补丁 0006 起只比公钥（导入的 SideStore 证书）
+    by_key = keycert(exe, run)
+    if any(_ours(c, m, mine, by_key) for c, m, _ in rows): return None
     others = [(c, d) for c, m, d in rows if m is not None and m != mine]
     if not others: return None   # 一张别人的都没有：新建也撤不到别人
     first, created = rows[0][0], rows[0][2]
@@ -384,8 +404,8 @@ def pkcs1_der(pem):
 
 
 def plume_identity(exe, team, appdata=None, log=None, run=subprocess.run):
-    """手机自签要的身份（0.6.0 通用壳，「私钥怎么交给 App」）：本机 plumesign 私钥 + 苹果列表里它的那张证书（公钥对上、机器名 AltStore，
-    就是 plumesign 自己会复用的那张，同 cert_check）→ {key: PKCS#1 DER, cert: DER, created, key_fp}；没有私钥 / 列不出 / 列表里没有对应证书 → None。
+    """手机自签要的身份（0.6.0 通用壳，「私钥怎么交给 App」）：本机 plumesign 私钥 + 苹果列表里它的那张证书（plumesign 自己会复用的那张，
+    同 cert_check：公钥对上；原版 plumesign 另要机器名 AltStore）→ {key: PKCS#1 DER, cert: DER, created, key_fp}；没有私钥 / 列不出 / 列表里没有对应证书 → None。
     只读：只列证书，不新建、不撤。key_fp = 私钥文件的 SHA-256 前 16 位（调用方据此判「交过了」，不必每次联网列证书）"""
     import hashlib
     key = plume_key_path(team, appdata)
@@ -395,16 +415,13 @@ def plume_identity(exe, team, appdata=None, log=None, run=subprocess.run):
     mine, der = key_modulus(pem), pkcs1_der(pem)
     if mine is None or der is None:
         return None
-    try:
-        p = run([exe, 'account', 'certificates', '--team', team], capture_output=True, text=True, encoding='utf-8', errors='replace', env=plumesign_env(), timeout=120)
-    except (OSError, subprocess.SubprocessError) as e:
-        if log: Path(log).write_text(f'列证书失败：{e}\n', encoding='utf-8')
+    certs = _list_certs(exe, team, log, run)
+    if certs is None:
         return None
-    if p.returncode:
-        return None
-    for c in parse_certs((p.stdout or '') + (p.stderr or '')):
+    by_key = keycert(exe, run)
+    for c in certs:
         m, created = cert_modulus_and_start(c['der'])
-        if m == mine and c['machine'] == PLUME_MACHINE_NAME:
+        if _ours(c, m, mine, by_key):
             return dict(key=der, cert=c['der'], created=created, key_fp=hashlib.sha256(pem.encode('utf-8')).hexdigest()[:16])
     return None
 
@@ -414,6 +431,45 @@ def key_fingerprint(team, appdata=None):
     import hashlib
     key = plume_key_path(team, appdata)
     return hashlib.sha256(key.read_text(encoding='utf-8').encode('utf-8')).hexdigest()[:16] if key.is_file() else None
+
+
+def pkcs8_pem(pkcs1):
+    """RSAPrivateKey（PKCS#1）DER → PKCS#8 PEM（BEGIN PRIVATE KEY），plumesign keys/<团队>/key.pem 的格式（certificate.rs from_pkcs8_pem）"""
+    import base64
+    def tlv(tag, body):
+        n = len(body)
+        ln = bytes([n]) if n < 0x80 else bytes([0x80 | ((n.bit_length() + 7) // 8)]) + n.to_bytes((n.bit_length() + 7) // 8, 'big')
+        return bytes([tag]) + ln + body
+    rsa_alg = tlv(0x30, bytes.fromhex('06092a864886f70d0101010500'))   # rsaEncryption + NULL
+    der = tlv(0x30, bytes.fromhex('020100') + rsa_alg + tlv(0x04, pkcs1))
+    b = base64.b64encode(der).decode('ascii')
+    return '-----BEGIN PRIVATE KEY-----\n' + '\n'.join(b[i:i + 64] for i in range(0, len(b), 64)) + '\n-----END PRIVATE KEY-----\n'
+
+
+def adopt_key(exe, team, pkcs1, appdata=None, log=None, run=subprocess.run, now=None):
+    """玩家导入的证书私钥（例如 SideStore 导出的 .p12，#2015）交给 plumesign 当这个团队的私钥：之后 Apple ID 签名复用这张证书、自己申请描述文件，
+    不新建证书、不撤别的。要补丁 0006 的 plumesign（按公钥认证书）。
+    → {name, machine, created}（账号里公钥对上的那张）；账号列表里没有这张 → 'absent'；列不出 → None。
+    原有 key.pem 和这把不同就先留一份 key.pem.bak-<时刻>（私钥丢了找不回），再原子换上新的"""
+    import hashlib
+    pem = pkcs8_pem(pkcs1)
+    mine = key_modulus(pem)
+    certs = _list_certs(exe, team, log, run)
+    if certs is None or mine is None:
+        return None
+    hit = next(((c, d) for c in certs for m, d in [cert_modulus_and_start(c['der'])] if m == mine), None)
+    if not hit:
+        return 'absent'
+    key = plume_key_path(team, appdata)
+    key.parent.mkdir(parents=True, exist_ok=True)
+    if key.is_file() and key.read_text(encoding='utf-8') != pem:
+        stamp = time.strftime('%Y%m%d-%H%M%S', time.localtime(now))
+        shutil.copy2(key, key.with_name(f'key.pem.bak-{stamp}'))
+    tmp = key.with_name(f'key.pem.{hashlib.sha256(pem.encode()).hexdigest()[:8]}.part')
+    tmp.write_text(pem, encoding='utf-8')
+    if os.name != 'nt': os.chmod(tmp, 0o600)
+    os.replace(tmp, key)
+    return dict(name=hit[0]['name'], machine=hit[0]['machine'], created=hit[1])
 
 
 def sign_dylibs(exe, shell_root, dylibs, bundle, log):

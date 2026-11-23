@@ -109,6 +109,10 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
             Logger.Info?.PrintMsg(LogClass.ServiceLdn,
                 $"Initialize LanDiscovery using IP: {LocalAddr}, broadcast: {LocalBroadcastAddr}");
 
+            // [DIAG] 建房/入房时立刻打印一行：不依赖 Switch 接入即可判断新宿主是否在跑、选的是哪张网卡。
+            Logger.Info?.PrintMsg(LogClass.ServiceLdn,
+                $"[DIAG] LanDiscovery init: ifaceId={_lanInterfaceId ?? "(null)"}, local={LocalAddr}, broadcast={LocalBroadcastAddr}");
+
             _fakeSsid = new Ssid
             {
                 Length = LdnConst.SsidLengthMax,
@@ -215,9 +219,11 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
             lock (_lock)
             {
                 station.NodeId = LocateEmptyNode();
+                Logger.Info?.PrintMsg(LogClass.ServiceLdn, $"[DIAG] OnAccept: assigned node={station.NodeId}, stationsBefore={_stations.Count}");
 
                 if (_stations.Count > LdnConst.StationCountMax || station.NodeId == -1)
                 {
+                    Logger.Warning?.PrintMsg(LogClass.ServiceLdn, $"[DIAG] OnAccept REJECTED: node={station.NodeId}, stations={_stations.Count}");
                     station.Disconnect();
                     station.Dispose();
 
@@ -225,11 +231,13 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
                 }
 
                 _stations.Add(station);
+                Logger.Info?.PrintMsg(LogClass.ServiceLdn, $"[DIAG] OnAccept added station node={station.NodeId}, stationsAfter={_stations.Count}");
             }
         }
 
         protected void OnStationConnected(LdnProxyTcpSession station)
         {
+            Logger.Info?.PrintMsg(LogClass.ServiceLdn, $"[DIAG] OnStationConnected node={station.NodeId} inStations={_stations.Contains(station)}");
             lock (_lock)
             {
                 if (_stations.Contains(station))

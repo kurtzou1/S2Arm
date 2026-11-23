@@ -38,6 +38,9 @@ namespace Ryujinx.HLE.HOS.Applets
 
         private bool _isBackground = false;
 
+        // S2Arm：内嵌键盘（游戏自己画、照常出帧）不算「小程序开着」（ILibraryAppletAccessor → S2AHooks.AppletOpenAdd）
+        internal bool IsBackground => _isBackground;
+
         private AppletSession _normalSession;
         private AppletSession _interactiveSession;
 

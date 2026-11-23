@@ -7,7 +7,7 @@
 #   ③ 删掉这行 include、豁免还留着 → 红「豁免过时」（只减不增）
 #   ④ 核心 .c 包含 <mach/mach.h> → 红 R-02；核心目录里的测试文件（tests/ 下、t_*.c）包含安卓头 → 不算
 #   ⑤ 安卓壳包含图形内部头 nvn_mtl.h → 红 R-05；包含公开头 nvn_backend.h → 不红
-#   ⑥ 真仓库：未登记 0、豁免过时 0（rc=0），墙钟 < 10 秒
+#   ⑥ 真仓库：未登记 0、豁免过时 0（rc=0）；墙钟只打读数、不当判据（门禁把这一步当确定性步：结果只由内容定，负载高时计时会随机挡车）
 #   ⑦ 门禁路由：改 runtime/src/ 下的文件会选中本单测；只改 docs/ 不选中
 set -u
 H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); bad=0
@@ -40,7 +40,7 @@ printf '#include "../graphics/nvn/gfx/nvn/nvn_backend.h"\n#include "../graphics/
 o5=$(chk); r5=$?
 ck "⑤ 壳含图形内部头 nvn_mtl.h → 红 R-05；公开头 nvn_backend.h 不红（rc=${r5}）" '[ $r5 = 1 ] && grep -q "【红】android/shim.c:2 平台壳包含图形内部头 graphics/nvn/gfx/nvn/nvn_mtl.h（R-05" <<< "$o5" && ! grep -q "nvn_backend.h" <<< "$o5"'
 s0=$(python3 -c 'import time;print(time.time())'); o6=$(cd "$H" && python3 tools/layer_edge.py check 2>&1); r6=$?; el=$(python3 -c "import time;print(round(time.time()-$s0,1))")
-ck "⑥ 真仓库：未登记 0、豁免过时 0、${el} 秒 < 10（$(grep '^分层边' <<< "$o6")）" '[ $r6 = 0 ] && grep -q "未登记 0、豁免过时 0" <<< "$o6" && python3 -c "import sys;sys.exit(0 if $el < 10 else 1)"'
+ck "⑥ 真仓库：未登记 0、豁免过时 0（用时 ${el} 秒，只作读数）（$(grep '^分层边' <<< "$o6")）" '[ $r6 = 0 ] && grep -q "未登记 0、豁免过时 0" <<< "$o6"'
 q1=$(cd "$H" && GATE_TIER=full python3 tools/gate_route.py tests runtime/src/os.c 2> /dev/null); q2=$(cd "$H" && GATE_TIER=full python3 tools/gate_route.py tests docs/贡献指南.md 2> /dev/null)
 ck "⑦ 路由：改 runtime/src/os.c 选中本单测、只改 docs 不选中" 'grep -qx "tests/layer_edge_test.sh" <<< "$q1" && ! grep -qx "tests/layer_edge_test.sh" <<< "$q2"'
 [ $bad = 0 ] && echo "layer_edge 单测全过"; exit $bad

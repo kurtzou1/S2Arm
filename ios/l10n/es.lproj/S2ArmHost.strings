@@ -36,7 +36,7 @@
 "cheats.status.badInstruction" = "Instrucción incorrecta";
 "cheats.status.execError" = "Error de ejecución";
 "cheats.status.gameNotLoaded" = "Juego no cargado";
-"cheats.status.modifiesCode" = "Modifica el código del juego, por lo que no puede ejecutarse al importarse en el teléfono: importa este txt en S2Arm en tu computadora y luego actualiza S2Arm en el teléfono";
+"cheats.status.modifiesCode" = "Modifica el código del juego, por lo que no puede ejecutarse al importarse en el teléfono: importa este txt en S2Arm en la computadora con la que creas los paquetes, vuelve a crear el paquete de iPhone de este juego y envíalo al teléfono";
 "cheats.status.notPacked" = "Modifica el código del juego y no se incluyó en este paquete (demasiados parches para el módulo, etc.; consulta los resultados de exportación en tu computadora)";
 "cheats.status.packed" = "Activo";
 "cheats.status.off" = "Desactivado";

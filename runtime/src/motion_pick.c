@@ -21,3 +21,8 @@ int s2a_motion_fresh(int ever, uint64_t sample_us, uint64_t now_us) {
 int s2a_motion_pad_silent(int capable, uint64_t last_ok_us, uint64_t now_us) {
     return capable == 1 && now_us > last_ok_us && now_us - last_ok_us > (uint64_t)S2A_MOTION_SILENT_MS * 1000;
 }
+
+int s2a_motion_blank(const float accel[3], const float gyro[3]) {
+    for (int i = 0; i < 3; i++) if (accel[i] != 0.0f || gyro[i] != 0.0f) return 0;
+    return 1;
+}

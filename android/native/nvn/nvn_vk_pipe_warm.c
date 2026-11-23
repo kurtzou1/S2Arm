@@ -6,6 +6,7 @@
 // 同一条后端管线第二次起按管线标签只加计数（nvk_pipe_warm_note_prog：不序列化、不散列、不查表）；
 // 标签对不上的才走完整路径——先算散列、拿最近 4 条 memo 挡掉重复，只有新配方才整份拷进清单。
 #define _GNU_SOURCE 1
+#include "direct/installed_seed.h"
 #include "nvn_vk_pipe_warm.h"
 
 #include <errno.h>
@@ -897,9 +898,9 @@ static int pw_write_atomic(const char *path, const uint8_t *buf, size_t bytes) {
 }
 
 // 整份读（有界）。*enoent = 1 表示目录里还没有旧文件（不是错误）。
-static int pw_read_file(const char *path, uint8_t **out, size_t *bytes, int *enoent) {
+static int pw_read_file(const char *path, int installed, uint8_t **out, size_t *bytes, int *enoent) {
     *out = NULL; *bytes = 0; *enoent = 0;
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    int fd = installed ? s2a_installed_seed_open(path) : open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (fd < 0) { if (errno == ENOENT) { *enoent = 1; return 0; } return -1; }
     struct stat st;
     if (fstat(fd, &st) != 0 || st.st_size < 0 || (uint64_t)st.st_size > (uint64_t)NVK_PW_FILE_MAX) { close(fd); return -1; }
@@ -930,7 +931,7 @@ int nvk_pipe_warm_load(void) {
     uint8_t *buf = NULL;
     size_t bytes = 0;
     int enoent = 0;
-    if (pw_read_file(path, &buf, &bytes, &enoent) != 0) {
+    if (pw_read_file(path, 0, &buf, &bytes, &enoent) != 0) {
         pw_log(1, "管线预热清单读失败：%s", path);
         return -1;   // 读不动：让预热线程稍后重试，不把「读失败」当「清单是空的」
     }
@@ -944,7 +945,7 @@ int nvk_pipe_warm_load(void) {
         if (s < 0) return -1;   // 程序清单本局还没定（它先载入）：稍后重试，不把「还不知道」当「没有种子」
         if (s == 1 && snprintf(seed_path, sizeof seed_path, "%s/pipes-v%u-%u.bin", sd, (unsigned)NVK_PW_FORMAT, (unsigned)NVK_PW_DESC_BYTES) < (int)sizeof seed_path) {
             int se = 0;
-            if (pw_read_file(seed_path, &buf, &bytes, &se) != 0) pw_log(2, "【黄】管线预热清单随包种子读不动：%s，本局不用种子", seed_path);
+            if (pw_read_file(seed_path, 1, &buf, &bytes, &se) != 0) pw_log(2, "【黄】管线预热清单随包种子读不动：%s，本局不用种子", seed_path);
             else if (!se) { from_seed = 1; enoent = 0; }
         }
     }

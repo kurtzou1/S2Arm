@@ -1,8 +1,8 @@
 #!/bin/bash
 # 门禁覆盖：services/S2A.Services/SaveTransfer*.cs tests/save_transfer/ pack/jobs/saves.py pack/jobs/core.py pack/jobs/library.py pack/jobs/main.py
-# 门禁预算：240
-# JIT 验证 Python 与托管存档互操作，NativeAOT 验证关闭反射序列化后的正式包预检路径。
-# 同一 Apple Silicon 宿主两轮完整运行 67 / 81 秒，含两次独立构建和真实 LibHac 合成档；门禁两台历史 63～104 秒，上限取约 2.3 倍防负载下超时误红。
+# 门禁预算：120
+# JIT 验证 Python 与托管存档互操作（NativeAOT 那段拆到 save_transfer_aot_test.sh：发布一步就约 28 秒，合在一起 59～81 秒超单测 60 秒预算，#1832 后续）。
+# 同一 Apple Silicon 宿主一次构建 + 互操作约 31 秒，含真实 LibHac 合成档；上限取约 4 倍防负载下超时误红。
 # Real LibHac creates/commits public repository files; no game, keys or player saves.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -12,11 +12,7 @@ dotnet="${DOTNET:-$HOME/.dotnet/dotnet}"
 T=$(mktemp -d "${TMPDIR:-/tmp}/s2a-save-interop.XXXXXXXX")
 trap 'rm -rf "$T"' EXIT
 "$dotnet" build tests/save_transfer/SaveTransferInterop.csproj -c Release --nologo --artifacts-path "$T/artifacts" -p:GeneratePackageOnBuild=false
-# Run inspect inside NativeAOT with reflection serialization disabled, as in the APK.
-"$dotnet" publish tests/save_transfer/SaveTransferInterop.csproj -c Release --nologo \
-    --artifacts-path "$T/aot-artifacts" -o "$T/aot" \
-    -p:S2ASaveAotTests=1 -p:GeneratePackageOnBuild=false
-args=("$dotnet" "$T/artifacts/bin/SaveTransferInterop/release/SaveTransferInterop.dll" "$T/aot/SaveTransferInterop")
+args=(jit "$dotnet" "$T/artifacts/bin/SaveTransferInterop/release/SaveTransferInterop.dll" none)
 if [ "$(uname -s)" = Darwin ]; then
     "${CC:-cc}" -Wall -Wextra -Werror -dynamiclib tests/save_transfer/space_faults.c -o "$T/space_faults.dylib"
     args+=("$T/space_faults.dylib")

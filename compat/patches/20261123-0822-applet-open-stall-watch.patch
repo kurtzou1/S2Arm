@@ -1,0 +1,109 @@
+diff --git a/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardApplet.cs b/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardApplet.cs
+index 75a4ca6c3dd456b21588097685233c4ac042b6a5..f3592ccabf485af2cc69986abd6adc9cabb2394c 100644
+--- a/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardApplet.cs
++++ b/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardApplet.cs
+@@ -38,6 +38,9 @@ namespace Ryujinx.HLE.HOS.Applets
+ 
+         private bool _isBackground = false;
+ 
++        // S2Arm：内嵌键盘（游戏自己画、照常出帧）不算「小程序开着」（ILibraryAppletAccessor → S2AHooks.AppletOpenAdd）
++        internal bool IsBackground => _isBackground;
++
+         private AppletSession _normalSession;
+         private AppletSession _interactiveSession;
+ 
+diff --git a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/LibraryAppletCreator/ILibraryAppletAccessor.cs b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/LibraryAppletCreator/ILibraryAppletAccessor.cs
+index bd1887af72c8f7f3cb701dfc22ddbec7343d5042..641e541a66054d8961594720d4b785a9477a873c 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/LibraryAppletCreator/ILibraryAppletAccessor.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/LibraryAppletCreator/ILibraryAppletAccessor.cs
+@@ -1,11 +1,13 @@
+ using Ryujinx.Common.Logging;
+ using Ryujinx.HLE.Exceptions;
+ using Ryujinx.HLE.HOS.Applets;
++using Ryujinx.HLE.HOS.Applets.SoftwareKeyboard;
+ using Ryujinx.HLE.HOS.Ipc;
+ using Ryujinx.HLE.HOS.Kernel;
+ using Ryujinx.HLE.HOS.Kernel.Threading;
+ using Ryujinx.Horizon.Common;
+ using System;
++using System.Threading;
+ 
+ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.LibraryAppletCreator
+ {
+@@ -31,6 +33,9 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Lib
+         private readonly KEvent _cmd170Event;
+         private int _cmd170EventHandle;
+ 
++        // S2Arm：这个小程序记在「小程序开着」里没有（S2AHooks.AppletOpenAdd）：拉起时记上，结束（状态变了）/ 拉起失败 / 内嵌键盘 / 会话关掉时撤，只撤一次
++        private int _s2aOpen;
++
+         public ILibraryAppletAccessor(AppletId appletId, Horizon system)
+         {
+             _kernelContext = system.KernelContext;
+@@ -54,6 +59,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Lib
+ 
+         private void OnAppletStateChanged(object sender, EventArgs e)
+         {
++            S2AOpenEnd();
+             _stateChangedEvent.WritableEvent.Signal();
+         }
+ 
+@@ -88,7 +94,23 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Lib
+         // Start()
+         public ResultCode Start(ServiceCtx context)
+         {
+-            return (ResultCode)_applet.Start(_normalSession.GetConsumer(), _interactiveSession.GetConsumer());
++            // S2Arm：先记上再拉起——同步的小程序（错误弹窗、手柄设置）在 Start 里就结束、发状态变了；内嵌键盘不占画面（游戏照常出帧），拉起后就撤
++            if (Interlocked.Exchange(ref _s2aOpen, 1) == 0) S2AHooks.AppletOpenAdd(1);
++            ResultCode rc = ResultCode.Success;
++            try
++            {
++                rc = (ResultCode)_applet.Start(_normalSession.GetConsumer(), _interactiveSession.GetConsumer());
++                return rc;
++            }
++            finally
++            {
++                if (rc != ResultCode.Success || _applet is SoftwareKeyboardApplet { IsBackground: true }) S2AOpenEnd();
++            }
++        }
++
++        private void S2AOpenEnd()
++        {
++            if (Interlocked.Exchange(ref _s2aOpen, 0) == 1) S2AHooks.AppletOpenAdd(-1);
+         }
+ 
+         [CommandCmif(20)]
+@@ -279,6 +301,8 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Lib
+ 
+         protected override void Dispose(bool isDisposing)
+         {
++            S2AOpenEnd();   // S2Arm：游戏没等结束就关了会话
++
+             if (isDisposing)
+             {
+                 if (_stateChangedEventHandle != 0)
+diff --git a/src/Ryujinx.HLE/S2AHooks.cs b/src/Ryujinx.HLE/S2AHooks.cs
+index 4ebc681a986245dc22fc67f7ad4e6e35a188c8e0..f73a91cb3de09d6ed49f6ab5ee7ef550e24e5919 100644
+--- a/src/Ryujinx.HLE/S2AHooks.cs
++++ b/src/Ryujinx.HLE/S2AHooks.cs
+@@ -142,6 +142,20 @@ namespace Ryujinx.HLE
+         // S2Arm multi-user: record that a user profile was selected/bound in PlayerSelectApplet during this session.
+         public static System.Action<Ryujinx.HLE.HOS.Services.Account.Acc.UserId> UserSelected;
+ 
++        // 系统小程序开着的个数（接口 v2.18，原生 runtime/src/os.c s2a_applet_open）。键盘、错误弹窗、手柄设置等小程序占着画面时游戏本来就不出新帧，
++        //   停帧看门（runtime/src/ap_host.c、graphics/nvn/host_adapt.m）开着期间暂停计时、关掉后重新计（D-Z96G：输名字 53 秒被判卡住）。
++        //   写者两处，各自 +1 / -1 成对：小程序会话拉起到结束（ILibraryAppletAccessor；内嵌键盘不算，它不占画面）、宿主输入框开着（S2A.Services TextInput）。
++        //   AppletOpenNative 由 services Dispatcher 接到原生 s2a_applet_open_add（单测为 null，只读 AppletOpenCount）
++        public static delegate*<int, void> AppletOpenNative;
++        private static int _appletOpen;
++        public static int AppletOpenCount => System.Threading.Volatile.Read(ref _appletOpen);
++
++        public static void AppletOpenAdd(int delta)
++        {
++            System.Threading.Interlocked.Add(ref _appletOpen, delta);
++            if (AppletOpenNative != null) AppletOpenNative(delta);
++        }
++
+         public static string SystemDataDir(ulong id)
+         {
+             if (SystemDataRoot != null)

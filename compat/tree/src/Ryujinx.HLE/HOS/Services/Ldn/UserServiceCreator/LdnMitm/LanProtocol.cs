@@ -31,7 +31,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
         public event Action<EndPoint, LanPacketType, byte[]> Scan;
         public event Action<NetworkInfo> ScanResponse;
         public event Action<NetworkInfo> SyncNetwork;
-        public event Action<NodeInfo, EndPoint> Connect;
+        public event Action<NodeInfo, EndPoint, LdnProxyTcpSession> Connect;
         public event Action<LdnProxyTcpSession> StationConnected;
         public event Action<LdnProxyTcpSession> DisconnectStation;
         public event Action<LdnProxyTcpClient> ClientDisconnected;
@@ -61,7 +61,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
             ClientDisconnected?.Invoke(client);
         }
 
-        private void DecodeAndHandle(LanPacketHeader header, byte[] data, EndPoint endPoint = null)
+        private void DecodeAndHandle(LanPacketHeader header, byte[] data, EndPoint endPoint = null, LdnProxyTcpSession via = null)
         {
             switch (header.Type)
             {
@@ -83,7 +83,8 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
                     break;
                 case LanPacketType.Connect:
                     // TCP Session / Station
-                    HandleConnect(MemoryMarshal.Cast<byte, NodeInfo>(data)[0], endPoint);
+                    Logger.Info?.PrintMsg(LogClass.ServiceLdn, $"[DIAG] DecodeAndHandle got Connect from {endPoint}, via={(via != null ? $"session#{via.NodeId}" : "null")}, dataLen={data.Length}");
+                    HandleConnect(MemoryMarshal.Cast<byte, NodeInfo>(data)[0], endPoint, via);
                     break;
                 default:
                     Logger.Error?.PrintMsg(LogClass.ServiceLdn, $"Decode error: Unhandled type {header.Type}");
@@ -93,15 +94,39 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
 
         // Kept separate from DecodeAndHandle so the per-connection routing invariant can be tested
         // without binding the production discovery sockets to a fixed LAN port.
-        internal void HandleConnect(NodeInfo info, EndPoint endPoint)
+        internal void HandleConnect(NodeInfo info, EndPoint endPoint, LdnProxyTcpSession via = null)
         {
-            Connect?.Invoke(info, endPoint);
+            // Connect is shared by every accepted station. When the frame arrived on a known TCP
+            // session (via != null) it belongs to that session alone — deliver by identity and stop.
+            // Dispatch each handler inside its own try so one disposed session cannot silence the
+            // rest of the multicast chain (a throwing handler aborts the remaining invocation list).
+            Action<NodeInfo, EndPoint, LdnProxyTcpSession> handlers = Connect;
+            if (handlers == null)
+            {
+                return;
+            }
+
+            foreach (Action<NodeInfo, EndPoint, LdnProxyTcpSession> handler in handlers.GetInvocationList())
+            {
+                try
+                {
+                    handler(info, endPoint, via);
+                }
+                catch (Exception e)
+                {
+                    Logger.Error?.PrintMsg(LogClass.ServiceLdn, $"[DIAG] Connect handler threw: {e}");
+                }
+            }
         }
 
-        public void Read(scoped ref byte[] buffer, scoped ref int bufferEnd, byte[] data, int offset, int size, EndPoint endPoint = null)
+        public void Read(scoped ref byte[] buffer, scoped ref int bufferEnd, byte[] data, int offset, int size, EndPoint endPoint = null, LdnProxyTcpSession via = null)
         {
-            if (endPoint != null && _discovery.LocalAddr.Equals(((IPEndPoint)endPoint).Address))
+            // Own-broadcast echo suppression applies to UDP only. A TCP station whose source
+            // address happens to equal LocalAddr (same-machine emulator instance, or a VPN that
+            // NATs the peer into our own address) must still be allowed to complete the handshake.
+            if (via == null && endPoint != null && _discovery.LocalAddr.Equals(((IPEndPoint)endPoint).Address))
             {
+                Logger.Warning?.PrintMsg(LogClass.ServiceLdn, $"[DIAG] Read DROPPED (UDP source == LocalAddr {_discovery.LocalAddr}): {endPoint}");
                 return;
             }
 
@@ -172,7 +197,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
                             ldnData = decompressedLdnData;
                         }
 
-                        DecodeAndHandle(header, ldnData, endPoint);
+                        DecodeAndHandle(header, ldnData, endPoint, via);
 
                         bufferEnd = 0;
                     }

@@ -58,6 +58,9 @@ namespace Ryujinx.HLE
 
         // Upstream silently defaulted on missing data in a few places; those now report through here (S2Arm red list)
         public static System.Action<string> Red;
+        // 联机自动模式这一局走平台局域网发现（iOS：发现 → RyuLDN 中继）：宿主在 LdnInitializing 里定、置位；置位时 ldn:u 不建双协议自动客户端（LdnAutoClient），
+        //   照旧按 MultiplayerMode（LdnRyu）建中继客户端。没有平台发现（Mac）或发现起不来时为 false，走双协议自动
+        public static bool LdnPlatformDiscovery;
 
         // Platform JPEG encoding; null preserves the existing Skia implementation on default hosts.
         public static Ryujinx.HLE.UI.ScreenshotJpegEncoder EncodeScreenshotJpeg;
@@ -138,6 +141,20 @@ namespace Ryujinx.HLE
 
         // S2Arm multi-user: record that a user profile was selected/bound in PlayerSelectApplet during this session.
         public static System.Action<Ryujinx.HLE.HOS.Services.Account.Acc.UserId> UserSelected;
+
+        // 系统小程序开着的个数（接口 v2.18，原生 runtime/src/os.c s2a_applet_open）。键盘、错误弹窗、手柄设置等小程序占着画面时游戏本来就不出新帧，
+        //   停帧看门（runtime/src/ap_host.c、graphics/nvn/host_adapt.m）开着期间暂停计时、关掉后重新计（D-Z96G：输名字 53 秒被判卡住）。
+        //   写者两处，各自 +1 / -1 成对：小程序会话拉起到结束（ILibraryAppletAccessor；内嵌键盘不算，它不占画面）、宿主输入框开着（S2A.Services TextInput）。
+        //   AppletOpenNative 由 services Dispatcher 接到原生 s2a_applet_open_add（单测为 null，只读 AppletOpenCount）
+        public static delegate*<int, void> AppletOpenNative;
+        private static int _appletOpen;
+        public static int AppletOpenCount => System.Threading.Volatile.Read(ref _appletOpen);
+
+        public static void AppletOpenAdd(int delta)
+        {
+            System.Threading.Interlocked.Add(ref _appletOpen, delta);
+            if (AppletOpenNative != null) AppletOpenNative(delta);
+        }
 
         public static string SystemDataDir(ulong id)
         {

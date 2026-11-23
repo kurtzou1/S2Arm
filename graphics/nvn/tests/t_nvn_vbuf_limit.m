@@ -111,6 +111,31 @@ static int child(int metal3) {
     run(vs, NULL, 0, 0, 0, 4);
     for (int v = 0; v < 4; v++) expect(v, 1, "direct inside");
     VERIFY(g_vlim_n == n0, "a direct draw inside the range binds the stream as it is");
+    // 跨度超过原 4 MB 上限的直接绘制（11-23 一款 2D 光照游戏：读第 1764–67070 个顶点、步长 76，4.96 MB）：绑定范围后面照样读 0，不是读到后面的内存（MARK）。
+    //   输入池、输出池都按这笔的顶点数开（MARK 填满），期望手写：0..3 是原值，4 及以后（含末尾）全 0
+    { enum { NBIG = 300000 };   // 300000 × 16 = 4.8 MB
+      uint32_t *big = NULL, *bout = NULL; size_t bb = (size_t)NBIG * STRIDE;
+      REQUIRE(!posix_memalign((void **)&big, 16384, bb)); REQUIRE(!posix_memalign((void **)&bout, 16384, bb));
+      for (size_t i = 0; i < bb / 4; i++) big[i] = MARK;
+      for (int v = 0; v < NVERT; v++) for (int c = 0; c < 4; c++) big[v * 4 + c] = (uint32_t)(v * 10 + 1 + c);
+      nvn_be_pool_add(big, bb); nvn_be_pool_add(bout, bb);
+      S.vbuf[0] = (NVNbufferRange){.address = (uint64_t)(uintptr_t)big, .size = NVERT * STRIDE};
+      uint32_t *save_out = g_out; g_out = bout;
+      for (size_t i = 0; i < bb / 4; i++) bout[i] = 0x11111111u;
+      nvn_be_sub_begin();
+      MTL4RenderPassDescriptor *pass = pass_desc(); pass.renderTargetWidth = 1; pass.renderTargetHeight = 1; pass.defaultRasterSampleCount = 1;
+      id<MTL4RenderCommandEncoder> en = enc_r_begin(pass); REQUIRE(en); enc_r_pso(en, g_ps);
+      p_draw dw = {.prim = 0, .first = 0, .count = NBIG, .instances = 1}; uint64_t n1 = g_vlim_n;
+      bind_vbufs(en, vs, &dw, NULL);
+      void *ob; uint64_t oo, og; REQUIRE(mtl_gpu_addr((uint64_t)(uintptr_t)bout, bb, &ob, &oo, &og)); enc_r_vbuf(en, TF_SLOT, og);
+      enc_r_draw(en, MTLPrimitiveTypePoint, 0, NBIG); enc_r_end(en);
+      REQUIRE(nvn_be_wait(nvn_be_sub_commit(), 10000000000ull));
+      VERIFY(!mtl_last_commit_error(), "4.8 MB span: submission completes without command-buffer error");
+      VERIFY(g_vlim_n == n1 + 1, "4.8 MB span: one limited copy bound (%llu)", (unsigned long long)(g_vlim_n - n1));
+      for (int v = 0; v < 4; v++) expect(v, 1, "4.8 MB span");
+      unsigned nz = 0; for (size_t v = NVERT; v < NBIG; v++) for (int c = 0; c < 4; c++) nz += bout[v * 4 + c] != 0;
+      VERIFY(!nz, "4.8 MB span: vertices 4..%d past the range read 0 (%u words not 0; the old 4 MB cap bound it as it is and read the marker after it)", NBIG - 1, nz);
+      g_out = save_out; S.vbuf[0] = (NVNbufferRange){.address = (uint64_t)(uintptr_t)input, .size = NVERT * STRIDE}; }
     unsigned mark_bad = 0; for (size_t i = NVERT * 4; i < POOL_BYTES / 4; i++) mark_bad += input[i] != MARK;
     VERIFY(!mark_bad, "the pool's bytes after the range are untouched (%u changed)", mark_bad);
     nvn_be_drain();

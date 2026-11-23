@@ -37,8 +37,17 @@ def win_procs():   # Windows（#1100 W6）：没有 ps；Toolhelp 快照取 进�
     class PE(ctypes.Structure):
         _fields_ = [('dwSize', w.DWORD), ('cntUsage', w.DWORD), ('th32ProcessID', w.DWORD), ('th32DefaultHeapID', ctypes.c_size_t), ('th32ModuleID', w.DWORD),
                     ('cntThreads', w.DWORD), ('th32ParentProcessID', w.DWORD), ('pcPriClassBase', ctypes.c_long), ('dwFlags', w.DWORD), ('szExeFile', ctypes.c_wchar * 260)]
-    k = ctypes.windll.kernel32; k.CreateToolhelp32Snapshot.restype = w.HANDLE; k.OpenProcess.restype = w.HANDLE
+    k = ctypes.windll.kernel32
+    # 句柄是指针宽度：参数类型都要声明，否则 ctypes 按 C int 传（D-TW4Z：快照失败回 INVALID_HANDLE_VALUE，Python 里是 2**64-1，
+    #   传给 Process32FirstW 报 OverflowError 冒上去打断了出包）。快照失败照 OSError 报，调用方（进度采样）按「读不到」处理
+    k.CreateToolhelp32Snapshot.restype = w.HANDLE; k.CreateToolhelp32Snapshot.argtypes = [w.DWORD, w.DWORD]
+    k.Process32FirstW.argtypes = k.Process32NextW.argtypes = [w.HANDLE, ctypes.POINTER(PE)]; k.Process32FirstW.restype = k.Process32NextW.restype = w.BOOL
+    k.OpenProcess.restype = w.HANDLE; k.OpenProcess.argtypes = [w.DWORD, w.BOOL, w.DWORD]
+    k.GetProcessTimes.argtypes = [w.HANDLE] + [ctypes.POINTER(w.FILETIME)] * 4; k.GetProcessTimes.restype = w.BOOL
+    k.CloseHandle.argtypes = [w.HANDLE]; k.CloseHandle.restype = w.BOOL
     snap = k.CreateToolhelp32Snapshot(2, 0); out = []; e = PE(); e.dwSize = ctypes.sizeof(PE)
+    if not snap or snap == ctypes.c_void_p(-1).value:   # INVALID_HANDLE_VALUE
+        raise OSError(ctypes.GetLastError(), "CreateToolhelp32Snapshot 失败")  # 非玩家句
     ok = k.Process32FirstW(snap, ctypes.byref(e))
     while ok:
         s = 0.0; h = k.OpenProcess(0x1000, False, e.th32ProcessID)   # PROCESS_QUERY_LIMITED_INFORMATION

@@ -182,8 +182,13 @@ def build(private, task, extra=None):
     if isinstance(record.get("attemptNo"), int) and record["attemptNo"] > 1:
         lines.append(f"第 {record['attemptNo']} 次尝试")
     diagnostics = [d for d in record.get("diagnostics") or [] if isinstance(d, dict)]
+    # 真正让这单失败的（error 级）排前面、写「错误码」；开工前的估算 / 警告等写「提醒」、排后面（D-433E #2150：空间预估的 warning 先出现，
+    #   玩家在标题下先看到「磁盘空间不够」，实际失败是没认出图形接口）。同级照出现顺序
+    remind = lambda d: d.get("severity") in ("warning", "info")   # 没写级别的按 error（core.diagnostic 缺省）
+    diagnostics.sort(key=remind)
     for item in diagnostics:
-        lines.append(f"错误码：{item.get('code') or '-'}（{item.get('component') or '-'}，阶段 {item.get('stage') or '-'}" +  # 非玩家句
+        label = "提醒" if remind(item) else "错误码"  # 非玩家句
+        lines.append(f"{label}：{item.get('code') or '-'}（{item.get('component') or '-'}，阶段 {item.get('stage') or '-'}" +  # 非玩家句
                      (f"，退出码 {item['exitCode']}" if item.get("exitCode") is not None else "") + "）")  # 非玩家句
         lines.append("  说明：" + str(item.get("summary") or "-"))  # 非玩家句
         if item.get("code") == "package_failed" and item.get("detail"):   # 没归类的失败：带上失败原文（errors.cause_line），摘要里不能只剩「出包未完成。」（#1725 / #1730 / #1744）

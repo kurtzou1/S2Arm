@@ -464,6 +464,7 @@ public sealed partial class EnvironmentWindow : Window
                 Action("library.import_keys", () => BeginPicker(ChooseKeysAsync), !libraryBusy))));
 
         body.Children.Add(InstallModeCard());   // 装到 iPhone 的方式（v0.3.0，InstallModePage.cs）
+        body.Children.Add(DiagCodeCard());      // 诊断码（#1449，DiagCodeCard.cs）
 
         var remindRow = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };   // 免费签名到期提醒（11-20，缺省开）：游戏库状态行「×」关掉后在这里重新打开
         var remindText = new StackPanel { Spacing = 4 };

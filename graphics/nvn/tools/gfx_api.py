@@ -51,7 +51,8 @@ def features(exefs, romfs=None):
          # 判不出时写进依据（11-20 D-Z6WZ：一款 Switch 2 第一方游戏判成 unknown，没原件，日志里得有能定因的读数）：main 导入总数、
          #   是否导入按名查找（nn::ro::LookupSymbol）、映像里有没有 nvnBootstrapLoader 名字串、导入里带 nvn 的名字、ExeFS 模块
          'evidence': dict(imports=len(imp), ro_lookup=RO_LOOKUP in imp, nvn_name=b'nvnBootstrapLoader\0' in img,
-                          nvn_like=sorted(n for n in imp if 'nvn' in n.lower())[:6], mods=sorted(os.listdir(exefs)))}
+                          nvn_like=sorted(n for n in imp if 'nvn' in n.lower())[:6], mods=sorted(os.listdir(exefs)),
+                          ns=nn_namespaces(imp), others=other_imports(imp))}
     if not f['vk'] and not f['nvn']: f['vk_lookup'] = vk_lookup(imp, VK_NAME in img, lambda: exefs_defs(exefs))   # main 静态判不出才看按名取
     if f['egl_window'] and not f['nvn'] and (f['gl_source'] or f['egl_proc']):   # GL 驱动在别的模块的候选才读其它模块（subsdk 解压几十 MB）
         f['gl_driver'] = gl_driver(exefs_syms(exefs))
@@ -158,6 +159,17 @@ def vulkan_why(vk, nvn, lookup):
     if lookup: return f'main 不导入 vk* / nvnBootstrapLoader，经 nn::ro::LookupSymbol 按名取 {VK_ENTRY}（{lookup} 定义它）'
     return None
 
+# 判不出时多打两样（11-23 D-TW4Z：一款 Switch 2 款 main 只导入 253 个、没有 NVN / Vulkan / GL 任何痕迹，没原件、问不到玩家）：
+#   main 导入的 nn:: 命名空间与各自个数（nn::vi 显示、nn::os … 看得出走了哪些系统接口），和去掉 C++ 标准库 / 运行时 / libc 后的其余导入前 30 个
+_BORING = re.compile(r'^(_ZNSt|_ZNKSt|_ZSt|__cxa|__gxx|_Unwind|__aeabi|_Znw|_Zdl|_Zna|_Zda|_ZTI|_ZTV|__stack_chk|operator)|^(mem|str|malloc|free|calloc|realloc|abort|exit|printf|snprintf|vsnprintf|sprintf|fprintf|puts|qsort|bsearch|abs|atoi|strtol|strtoul|strtod|time|clock|pthread_|sqrt|pow|sin|cos|tan|floor|ceil|fmod|log|exp|atan|acos|asin|round|fabs|isnan)')
+def nn_namespaces(imp):
+    c = {}
+    for n in imp:
+        m = re.match(r'_ZN(?:K)?2nn(\d+)', n)
+        if m: k = int(m.group(1)); ns = n[m.end():m.end() + k]; c[ns] = c.get(ns, 0) + 1
+    return sorted(c.items(), key=lambda x: (-x[1], x[0]))
+def other_imports(imp, n=30):
+    return sorted(x for x in imp if not x.startswith('_ZN2nn') and not x.startswith('_ZNK2nn') and not _BORING.match(x))[:n]
 def classify(f):
     """f：features() 的结果（单测直接给）→ (接口, 依据)"""
     if f is None: return 'unknown', '没有 exefs/main 或它不是 NSO，判不了'
@@ -179,6 +191,8 @@ def classify(f):
     e = f.get('evidence')
     tail = ('；依据：main 导入 %d 个、按名查找（nn::ro::LookupSymbol）%s、映像里 nvnBootstrapLoader 名字串%s、带 nvn 的导入 %s、ExeFS 模块 %s' %
             (e['imports'], '有' if e['ro_lookup'] else '无', '有' if e['nvn_name'] else '无', '、'.join(e['nvn_like']) or '无', ' '.join(e['mods']))) if e else ''
+    if e and (e.get('ns') or e.get('others')):
+        tail += '、nn 命名空间 %s、其余导入（前 30）%s' % (' '.join('%s×%d' % x for x in e.get('ns') or []) or '无', ' '.join(e.get('others') or []) or '无')
     return 'unknown', '没有 NVN / Vulkan / OpenGL 任一接口的证据' + tail
 
 def gl_also(f):

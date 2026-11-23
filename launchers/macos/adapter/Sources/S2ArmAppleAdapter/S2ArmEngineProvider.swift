@@ -319,6 +319,7 @@ public final class S2ArmEngineProvider: EngineProvider {
     public func devCertChoose(device: String, cert: String) async throws { try await installer.devCertChoose(device: device, cert: cert) }
     public func devCertDelete(cert: String? = nil) async throws { try await installer.devCertDelete(cert: cert) }
     public func signModeSet(_ mode: String) async throws -> String { try await installer.signModeSet(mode) }
+    public func diagCodeSet(_ code: String) async throws -> String { try await installer.diagCodeSet(code) }
     public func layoutSet(_ layout: String?, gameId: String? = nil) async throws -> String { try await installer.layoutSet(layout, gameId: gameId) }
     public func appleLogin(account: String, password: String, events: EventSink = .discard) async throws -> AppleAccount {
         try await installer.appleLogin(account: account, password: password, events: events)

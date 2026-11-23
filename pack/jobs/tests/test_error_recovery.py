@@ -324,6 +324,32 @@ raise SystemExit(main.main())
             code2, why2 = errors.classify_failure("ipa", None, ["light.log：rc=1；没有别的原因"])
             self.assertEqual(code2, "app_control_blocked", why2)
 
+    def test_graphics_api_verdict_beats_missing_prebuilt(self):
+        # D-TW4Z（Windows 0.6.9）：日志写着「unsupported graphics API: unknown」（gfx_api.py 读游戏程序的结论，不经随包工具），
+        #   同时随包 rcodesign 记成缺 → 原先归 app_control_blocked。期望手写：归 graphics_api_unsupported，说明里写清 rcodesign 缺的是哪种
+        import errors
+        tools = self.root / "Prepare"; (tools / "rcodesign").mkdir(parents=True)
+        (tools / "rcodesign" / "rcodesign.exe").write_bytes(b"ab")          # 清单记 4 字节
+        (tools / "prepare.json").write_text(json.dumps({"schema": 1, "source": "x", "files": {"rcodesign/rcodesign.exe": [4, "0" * 64]}}))
+        env = {"S2A_PREBUILT_TOOLS": str(tools)}
+        gap = "light.log：rc=3；【黄】直连缺口：配置推导不支持本款：unsupported graphics API: unknown（没有 NVN / Vulkan / OpenGL 任一接口的证据）"
+        with patch.dict(os.environ, env):
+            code, why = errors.classify_failure("ipa", None, [gap])
+            self.assertEqual(code, "graphics_api_unsupported", why)
+            self.assertIn("rcodesign/rcodesign.exe（大小 2 / 应为 4 字节）", why)
+            (tools / "rcodesign" / "rcodesign.exe").unlink()
+            code2, why2 = errors.classify_failure("ipa", None, ["light.log：rc=1；没有别的原因"])
+            self.assertEqual(code2, "app_control_blocked", why2)
+            self.assertIn("rcodesign/rcodesign.exe（不在）", why2)
+
+    def test_junction_denied_from_abort_line(self):
+        # D-QNJQ（Windows 0.6.9）：建目录联接被拒的回溯只在编排的刷新日志里，作业主日志尾巴只剩「编排中止」一行，原先归 package_failed。
+        #   roots._junction 把「在 _junction」附在异常上（编排中止拼 __notes__）→ 同一行认成 app_control_blocked；不带附注的 WinError 5 不归它。期望手写
+        import errors
+        line = "light.log：rc=1；【红】编排中止：[WinError 5] 拒绝访问。 （在 _junction 建目录联接被拒：current）"
+        self.assertEqual(errors.classify_failure("ipa", None, [line])[0], "app_control_blocked")
+        self.assertNotEqual(errors.classify_failure("ipa", None, ["light.log：rc=1；【红】编排中止：[WinError 5] 拒绝访问。"])[0], "app_control_blocked")
+
     def test_nostall_watchdog_is_build_stalled(self):
         # D-PD33（Windows 0.6.7）：直连库编批库 15 分钟没有一批编完，无进展看门狗停掉 dsh_batch（rc=124），原先落「package_failed，按阶段 未识别」。
         #   期望手写：只有看门狗那行 → build_stalled，上屏句是它自己的；同段还有写满 → disk_full（看门狗只是结果）

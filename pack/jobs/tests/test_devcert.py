@@ -578,6 +578,75 @@ class StateUnreadable(unittest.TestCase):
         self.assertIn("按 Apple ID 签名", diags[0][0])
 
 
+class AdoptP12Only(unittest.TestCase):
+    """#2015：只选了 .p12（免费 Apple ID 没有描述文件，例如 SideStore 导出的证书）→ 交给 Apple ID 签名沿用这张证书（devcert.adopt）。
+    不动开发者证书的存档、不切签名方式；没登录 / 工具不认 / 证书不在账号里 / 列不出 → 失败说清下一步，私钥交接一次都不发生。"""
+    def setUp(self):
+        self.t = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.t, True)
+        (self.t / "in.p12").write_bytes(b"p12")
+        self.handed = []
+        for name, fake in (("normalize_p12", lambda src, dest, pw: Path(dest).write_bytes(Path(src).read_bytes())),
+                           ("_read_p12", lambda c, p12, pw: (b"PKCS1-KEY", b"CERT"))):
+            q = patch.object(devcert, name, fake); q.start(); self.addCleanup(q.stop)
+        import install
+        self.homes = []
+        for name, fake in (("plume_home", lambda c: self.homes.append(1)), ("win_install_mod", lambda c: self.W),
+                           ("plumesign_exe", lambda c, W: "plumesign")):
+            q = patch.object(install, name, fake); q.start(); self.addCleanup(q.stop)
+        self.team, self.mark, self.result = TEAM, True, dict(name="Apple Development: x", machine="SideStore - iPhone", created="2025-11-01")
+        self.W = types.SimpleNamespace(impactor=types.SimpleNamespace(selected_team=lambda: self.team), keycert=lambda exe: self.mark,
+                                       adopt_key=lambda exe, team, key, log=None: self.handed.append((exe, team, key)) or self.result)
+
+    def run_import(self):
+        c = types.SimpleNamespace(r=dict(action="import", p12Path=str(self.t / "in.p12"), profilePath=""), private=self.t / "private", engine=self.t,
+                                  devcert_secrets=Secrets(), devcert_password="", begin=lambda *a: None, logs=self.t, task="t1")
+        return devcert.operation(c), c
+
+    def test_adopts_and_leaves_devcert_store_alone(self):
+        r, c = self.run_import()
+        self.assertEqual(self.handed, [("plumesign", TEAM, b"PKCS1-KEY")])
+        self.assertEqual((r["adopted"], r["team"], r["machine"]), (True, TEAM, "SideStore - iPhone"))
+        self.assertIn("不会撤销 SideStore / AltStore 正在用的证书", r["message"])
+        self.assertFalse(devcert.active(c))   # 签名方式没被切到开发者证书
+        self.assertEqual(self.homes, [] if os.name == "nt" else [1])   # Mac 先定 plumesign 数据目录
+
+    def failure(self):
+        with self.assertRaises(Failure) as e:
+            self.run_import()
+        return e.exception
+
+    def test_not_signed_in(self):
+        self.team = None
+        e = self.failure()
+        self.assertEqual((e.code, self.handed), ("apple_not_signed_in", []))
+        self.assertIn("先用 Apple ID 登录再导入", str(e)); self.assertIn("描述文件（.mobileprovision）", str(e))
+
+    def test_upstream_tool_refused(self):
+        self.mark = False
+        e = self.failure()
+        self.assertEqual((e.code, self.handed), ("devcert_invalid", []))
+        self.assertIn("还不能沿用导入的证书", str(e))
+
+    def test_not_in_account(self):
+        self.result = "absent"
+        e = self.failure()
+        self.assertEqual(e.code, "devcert_invalid")
+        self.assertIn(f"团队 {TEAM}", str(e))
+
+    def test_unlisted(self):
+        self.result = None
+        self.assertIn("这次什么都没改", str(self.failure()))
+
+    def test_both_files_still_import_devcert(self):
+        # 两个都选了：照旧导入成开发者证书签名，不走 Apple ID 交接
+        (self.t / "in.mobileprovision").write_bytes(profile())
+        with patch.object(devcert, "cert_info", lambda rcs, p12, pw: cert()), patch.object(devcert, "rcodesign_path", lambda c: "rcs"):
+            c = types.SimpleNamespace(r=dict(action="import", p12Path=str(self.t / "in.p12"), profilePath=str(self.t / "in.mobileprovision")),
+                                      private=self.t / "private", engine=self.t, devcert_secrets=Secrets(), devcert_password="pw", begin=lambda *a: None)
+            self.assertTrue(devcert.operation(c)["active"])
+        self.assertEqual(self.handed, [])
+
+
 class PasswordNeverInRequest(unittest.TestCase):
     def test_run_request_takes_password_from_env(self):
         # 启动器经环境变量给密码：run_request 一开始就摘掉（之后起的子进程都拿不到），交给作业；请求文件里没有

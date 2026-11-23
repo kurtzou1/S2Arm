@@ -39,6 +39,17 @@ class ReportTests(unittest.TestCase):
                          "Metal：缺", "fatal: bad nca", "密钥：没有", "反馈："):
             self.assertIn(expected, text)
 
+    def test_failure_listed_before_warnings(self):
+        # D-433E（#2150）：开工前的空间预估是 warning、先出现，真正的失败（没认出图形接口）在后；原先摘要按出现顺序都写「错误码」，
+        #   玩家在标题下先看到「磁盘空间不够」。期望手写：error 级排前写「错误码」，warning 排后写「提醒」
+        self.job("t9", diagnostics=[
+            {"code": "disk_full", "severity": "warning", "component": "S2Arm", "stage": "检查游戏输入", "summary": "磁盘空间不够：这是预估，照常开工"},
+            {"code": "graphics_api_unsupported", "severity": "error", "component": "S2Arm", "stage": "分析画面", "summary": "没认出它用的图形接口"}])
+        text = report.build(self.private, "t9")
+        a, b = text.find("错误码：graphics_api_unsupported（S2Arm，阶段 分析画面）"), text.find("提醒：disk_full（S2Arm，阶段 检查游戏输入）")
+        self.assertTrue(0 <= a < b, text)
+        self.assertNotIn("错误码：disk_full", text)
+
     def test_killed_job_says_there_was_no_diagnosis(self):
         self.job("t2", state="interrupted")
         text = report.build(self.private, "t2")

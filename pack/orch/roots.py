@@ -109,6 +109,10 @@ def _junction(target, link):
             if not f(h, 0x900A4, buf, len(data), None, 0, C.byref(done), None):
                 raise C.WinError(C.get_last_error())
     except BaseException as e:
+        # 失败处写进异常附注（D-QNJQ）：编排中止那一行（refresh.py 拼 __notes__）自带「在 _junction」，作业主日志里只留这一行时
+        #   失败归因也认得出（errors.LOG_CAUSES，同回溯里的 in _junction），不靠回溯落在读到的那段日志里
+        if isinstance(e, OSError) and hasattr(e, 'add_note'):
+            e.add_note(f'（在 _junction 建目录联接被拒：{link.name}）')
         cleanup_after(e, link.rmdir)
         raise
 

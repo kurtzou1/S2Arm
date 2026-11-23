@@ -35,12 +35,13 @@ namespace S2A.Services
             long id = Interlocked.Increment(ref _nextId);
             string json = Json(args);
             Pending[id] = done;   // 先登记再发起：原生回调可能在发起返回前就到
+            Ryujinx.HLE.S2AHooks.AppletOpenAdd(1);   // 输入框开着算「小程序开着」（停帧看门暂停计时，D-Z96G）；登记 +1、撤登记 -1，成对（Drop / Answer）
             int rc;
             try { rc = BeginHook != null ? BeginHook(id, json) : NativeBegin(id, json); }
-            catch { Pending.TryRemove(id, out _); throw; }   // 发起失败不留登记（否则开框标记一直立着，输入泵一直静音手柄）
+            catch { Drop(id); throw; }   // 发起失败不留登记（否则开框标记一直立着，输入泵一直静音手柄）
             if (rc != 1)
             {
-                Pending.TryRemove(id, out _);
+                Drop(id);
                 return null;
             }
 
@@ -52,8 +53,14 @@ namespace S2A.Services
         internal static void Answer(long id, bool ok, string text)
         {
             if (!Pending.TryRemove(id, out Action<bool, string> done)) return;   // 已收起 / 已答过
+            Ryujinx.HLE.S2AHooks.AppletOpenAdd(-1);
             Console.Error.WriteLine($"S2A 系统键盘：{(ok ? "确定" : "取消")}（#{id}，{text?.Length ?? 0} 字）");
             ThreadPool.QueueUserWorkItem(_ => done(ok, ok ? text ?? string.Empty : null));
+        }
+
+        private static void Drop(long id)
+        {
+            if (Pending.TryRemove(id, out _)) Ryujinx.HLE.S2AHooks.AppletOpenAdd(-1);
         }
 
         // 会话停 / 重启：还开着的一律按取消交回（原生同时收框）

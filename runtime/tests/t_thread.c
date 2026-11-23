@@ -622,6 +622,27 @@ static __attribute__((noinline)) void fz_spin(uint64_t arg) {
 static void fz_taker(uint64_t arg) { (void)arg; FZ_FRAME(r); svc_thread(0x25, r); atomic_store(&g_fz_tdone, 1); FZ_FRAME(e); svc_thread(0x0A, e); }
 static void *fz_freezer(void *a) {   // 宿主线程发起冻结（同产品：存档线程不是游戏线程）
     (void)a; int n = 0, nst[8] = {0}; int rc = s2a_snap_freeze(30000, &n, nst); atomic_store(&g_fz_rc, rc); if (rc >= 0) s2a_snap_thaw(); return NULL; }   // 冻结时限只当兜底（原 3 秒：负载高时同核线程到安全点慢 → 假红）
+// ---- 两方冻结互不放开（生命周期 s2a_guest_freeze 与即时存档 s2a_snap_freeze）：C 反复进门计数。期望按语义手写：
+//   A 存档冻结中，生命周期放开（iOS 回到焦点）→ 200 ms 计数不动；存档解冻后才涨。
+//   B 生命周期冻结中（进后台），存档冻结再解冻 → 200 ms 计数不动；生命周期放开后才涨。
+//   修前：s2a_guest_freeze(0) 与 s2a_snap_thaw 都直接清总冻结标志，A、B 各自的 200 ms 里计数都涨
+void s2a_guest_freeze(int on);
+static _Atomic int g_fo_stop, g_fo_done, g_fo_ready, g_fo_rc_a = 99, g_fo_rc_b = 99; static _Atomic uint64_t g_fo_n, g_fo_a, g_fo_a2, g_fo_b, g_fo_b2;
+static void fo_counter(uint64_t arg) { (void)arg; atomic_store(&g_fo_ready, 1);
+    while (!atomic_load(&g_fo_stop)) { FZ_FRAME(r); svc_thread(0x25, r); atomic_fetch_add(&g_fo_n, 1); }
+    FZ_FRAME(e); svc_thread(0x0A, e); }
+static uint64_t fo_settle(void) { uint64_t a = atomic_load(&g_fo_n), b; for (;;) { usleep(50000); b = atomic_load(&g_fo_n); if (a == b) return b; a = b; } }   // 停住后读数不再变
+static uint64_t fo_grow(uint64_t n0) { for (int k = 0; k < WAIT_LONG; k++) { uint64_t n = atomic_load(&g_fo_n); if (n > n0) return n; usleep(1000); } return n0; }
+static void *fo_driver(void *p) { (void)p; int n = 0, nst[8] = {0};
+    int rc = s2a_snap_freeze(30000, &n, nst); atomic_store(&g_fo_rc_a, rc);
+    if (rc >= 0) { uint64_t n0 = fo_settle(); s2a_guest_freeze(0); usleep(200000); atomic_store(&g_fo_a, atomic_load(&g_fo_n) - n0);
+        s2a_snap_thaw(); atomic_store(&g_fo_a2, fo_grow(atomic_load(&g_fo_n)) > n0); }
+    s2a_guest_freeze(1); uint64_t n1 = fo_settle();
+    rc = s2a_snap_freeze(30000, &n, nst); atomic_store(&g_fo_rc_b, rc);
+    if (rc >= 0) s2a_snap_thaw();
+    usleep(200000); atomic_store(&g_fo_b, atomic_load(&g_fo_n) - n1);
+    s2a_guest_freeze(0); atomic_store(&g_fo_b2, fo_grow(n1) > n1);
+    atomic_store(&g_fo_done, 1); return NULL; }
 #endif
 // ---- ⑩ yield 同优先级轮转：A/B 同优先级、同一单核（掩码 0x1）；A 持核空转，B 等核；A SleepThread(0) 让核 → 同优先级的 B 拿到核（Switch yield 轮转）。
 //      旧代码（yield 后立即重取、同优先级不让）B 拿不到 → 反证不过 ----
@@ -1020,6 +1041,21 @@ int main(void) {
         CHECK(n2 > n1, "冻结代放核：解冻后忙等线程没接着跑（计数 %llu → %llu）", (unsigned long long)n1, (unsigned long long)n2);
         atomic_store(&g_fz_stop, 1);
         CHECK(wait_flag(&g_fz_tdone, WAIT_LONG), "冻结代放核：同核等核线程解冻后 30 秒没拿到核走完");
+    }
+    {   // 两方冻结互不放开（见 fo_driver 处说明）
+        g_case = "存档冻结与生命周期冻结互不放开";
+        void s2a_core_leave(void);
+        spawn(fo_counter, 0, NULL); s2a_core_leave();
+        CHECK(wait_flag(&g_fo_ready, WAIT_LONG), "两方冻结：计数线程没起来");
+        pthread_t fo; pthread_create(&fo, NULL, fo_driver, NULL);
+        while (!atomic_load(&g_fo_done)) { FZ_FRAME(sl); sl[0] = 20000000ull; svc_thread(0x0B, sl); }   // W 在门里睡（安全点），驱动线程走完两段
+        pthread_join(fo, NULL);
+        CHECK(atomic_load(&g_fo_rc_a) >= 0 && atomic_load(&g_fo_rc_b) >= 0, "两方冻结：存档冻结没判齐（rc %d / %d）", atomic_load(&g_fo_rc_a), atomic_load(&g_fo_rc_b));
+        CHECK(atomic_load(&g_fo_a) == 0, "两方冻结 A：存档冻结中回到焦点，游戏线程 200 ms 里又进门 %llu 次（期望 0：存档没存完不放）", (unsigned long long)atomic_load(&g_fo_a));
+        CHECK(atomic_load(&g_fo_a2), "两方冻结 A：存档解冻后计数线程没接着跑");
+        CHECK(atomic_load(&g_fo_b) == 0, "两方冻结 B：后台冻结中存完一次档，游戏线程 200 ms 里又进门 %llu 次（期望 0：还在后台不放）", (unsigned long long)atomic_load(&g_fo_b));
+        CHECK(atomic_load(&g_fo_b2), "两方冻结 B：回前台后计数线程没接着跑");
+        atomic_store(&g_fo_stop, 1);
     }
 #endif
     {   // 理想核 -1 / -3（照 Ryujinx KThread.SetCoreAndAffinityMask；Blade II 起局：设（-1, 0x2）后把读回值原样设给新线程，原先 -1 记成 0 → 读回（0, 0x2）→ InvalidCombination、Break）

@@ -1,11 +1,13 @@
 using Ryujinx.Common.Logging;
 using Ryujinx.HLE.Exceptions;
 using Ryujinx.HLE.HOS.Applets;
+using Ryujinx.HLE.HOS.Applets.SoftwareKeyboard;
 using Ryujinx.HLE.HOS.Ipc;
 using Ryujinx.HLE.HOS.Kernel;
 using Ryujinx.HLE.HOS.Kernel.Threading;
 using Ryujinx.Horizon.Common;
 using System;
+using System.Threading;
 
 namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.LibraryAppletCreator
 {
@@ -31,6 +33,9 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Lib
         private readonly KEvent _cmd170Event;
         private int _cmd170EventHandle;
 
+        // S2Arm：这个小程序记在「小程序开着」里没有（S2AHooks.AppletOpenAdd）：拉起时记上，结束（状态变了）/ 拉起失败 / 内嵌键盘 / 会话关掉时撤，只撤一次
+        private int _s2aOpen;
+
         public ILibraryAppletAccessor(AppletId appletId, Horizon system)
         {
             _kernelContext = system.KernelContext;
@@ -54,6 +59,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Lib
 
         private void OnAppletStateChanged(object sender, EventArgs e)
         {
+            S2AOpenEnd();
             _stateChangedEvent.WritableEvent.Signal();
         }
 
@@ -88,7 +94,23 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Lib
         // Start()
         public ResultCode Start(ServiceCtx context)
         {
-            return (ResultCode)_applet.Start(_normalSession.GetConsumer(), _interactiveSession.GetConsumer());
+            // S2Arm：先记上再拉起——同步的小程序（错误弹窗、手柄设置）在 Start 里就结束、发状态变了；内嵌键盘不占画面（游戏照常出帧），拉起后就撤
+            if (Interlocked.Exchange(ref _s2aOpen, 1) == 0) S2AHooks.AppletOpenAdd(1);
+            ResultCode rc = ResultCode.Success;
+            try
+            {
+                rc = (ResultCode)_applet.Start(_normalSession.GetConsumer(), _interactiveSession.GetConsumer());
+                return rc;
+            }
+            finally
+            {
+                if (rc != ResultCode.Success || _applet is SoftwareKeyboardApplet { IsBackground: true }) S2AOpenEnd();
+            }
+        }
+
+        private void S2AOpenEnd()
+        {
+            if (Interlocked.Exchange(ref _s2aOpen, 0) == 1) S2AHooks.AppletOpenAdd(-1);
         }
 
         [CommandCmif(20)]
@@ -279,6 +301,8 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Lib
 
         protected override void Dispose(bool isDisposing)
         {
+            S2AOpenEnd();   // S2Arm：游戏没等结束就关了会话
+
             if (isDisposing)
             {
                 if (_stateChangedEventHandle != 0)

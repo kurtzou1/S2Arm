@@ -60,7 +60,8 @@ def main():
         host_link.run(base + list(extra_flags) + [str(p) for p in src] + [strip, '-lm', '-o', str(exe)], check=True, timeout=60)
         return subprocess.run([str(exe), *args], capture_output=True, text=True, timeout=30, env=env)
 
-    live_modes = ('--live-compile-thread', '--live-compile-pending', '--live-compile-stop', '--cs-libpack')
+    live_modes = ('--live-compile-default', '--live-compile-thread', '--live-compile-pending',
+                  '--live-compile-stop', '--cs-libpack')
     if len(sys.argv) == 2 and sys.argv[1] in live_modes:
         result = run(sys.argv[1][2:], original, args=(sys.argv[1],))
         sys.stdout.write(result.stdout)
@@ -86,8 +87,8 @@ def main():
     if sys.argv[1:] == ['--live-compile-mutants']:
         text = original.read_text()
         mutants = [
-            ('default-off', 'nvn_plat_flag("nvk_live_compile_async", 1)', 'nvn_plat_flag("nvk_live_compile_async", 0)',
-             '--live-compile-thread', 'compiler ran on the submitting thread'),
+            ('default-on', 'nvn_plat_flag("nvk_live_compile_async", 0)', 'nvn_plat_flag("nvk_live_compile_async", 1)',
+             '--live-compile-default', 'unset async property must start 0 compiler workers'),
             ('inline', '    if (g_live_compile != 1) {', '    if (1) {',
              '--live-compile-thread', 'compiler ran on the submitting thread'),
             ('request-bytes-ignored', '    s2a_sha256_update(&hash, json, len);', '    (void)json; (void)len;',

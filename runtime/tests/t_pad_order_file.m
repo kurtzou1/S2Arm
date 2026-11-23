@@ -38,6 +38,14 @@ int main(int argc, char **argv) {
         check(o.dropped[0].ns2_player == -1 && !strcmp(o.dropped[0].name, "DualSense Wireless Controller") && o.dropped[0].index == 0, "没分配的：系统手柄名字 + index");
 
         check(s2a_pad_order_from_json(parse(@"{\"order\":[{\"type\":\"keyboard\"}]}"), &o, &g) == 1 && g == 0 && o.count == 1, "没写 generation：读到、记 0");
+        check(s2a_pad_order_from_json(parse(@"{\"generation\":3,\"order\":[],\"dropped\":[{\"type\":\"system\",\"name\":\"Joy-Con (L/R)\",\"index\":0}]}"), &o, &g) == 1 && g == 3
+              && o.count == 0 && o.dropped_count == 0, "一位都没登记：没分配名单不作数（手柄照连接顺序进玩家位），generation 照读");
+        check(s2a_pad_order_from_json(parse(@"{\"order\":[{\"type\":\"keyboard\"}],\"dropped\":[{\"type\":\"system\",\"name\":\"X\",\"index\":0}]}"), &o, &g) == 1
+              && o.count == 1 && o.dropped_count == 1, "登记了人：没分配名单照旧作数");
+        { char who[400];
+          s2a_pad_order_from_json(parse(@"{\"order\":[{\"type\":\"keyboard\"},{\"type\":\"system\",\"name\":\"Joy-Con (L/R)\",\"index\":0},{\"type\":\"gen1\",\"id\":\"aa-bb-cc\"}]}"), &o, &g);
+          s2a_pad_order_describe(&o, who, sizeof who);
+          check(!strcmp(who, "P1 键盘、P2 Joy-Con (L/R)、P3 一代 Joy-Con 单只"), "日志描述：种类与系统手柄名、不带一代设备号"); }
 
         NSMutableString *many = [NSMutableString stringWithString:@"{\"generation\":1,\"order\":["];
         for (int i = 0; i < 10; i++) [many appendFormat:@"%@{\"type\":\"ns2\",\"player\":%d}", i ? @"," : @"", i];

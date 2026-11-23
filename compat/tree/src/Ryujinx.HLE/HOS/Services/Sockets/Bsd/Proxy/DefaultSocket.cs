@@ -44,13 +44,35 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
             BaseSocket = new Socket(domain, type, protocol);
         }
 
-        private void EnsureNetworkInterfaceBound()
+        private void EnsureNetworkInterfaceBound(EndPoint remoteEndPoint = null)
         {
-            if (_lanInterfaceId != "0" && !BaseSocket.IsBound)
+            if (BaseSocket.IsBound)
+            {
+                return;
+            }
+
+            if (remoteEndPoint is IPEndPoint remote &&
+                remote.Address.AddressFamily == AddressFamily.InterNetwork)
+            {
+                (_, UnicastIPAddressInformation ipInfo) =
+                    NetworkHelpers.GetLocalInterfaceForTarget(_lanInterfaceId, remote.Address);
+
+                if (ipInfo != null)
+                {
+                    BaseSocket.Bind(new IPEndPoint(ipInfo.Address, 0));
+                }
+
+                return;
+            }
+
+            if (_lanInterfaceId != "0")
             {
                 (_, UnicastIPAddressInformation ipInfo) = NetworkHelpers.GetLocalInterface(_lanInterfaceId);
 
-                BaseSocket.Bind(new IPEndPoint(ipInfo.Address, 0));
+                if (ipInfo != null)
+                {
+                    BaseSocket.Bind(new IPEndPoint(ipInfo.Address, 0));
+                }
             }
         }
 
@@ -74,7 +96,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
 
         public void Connect(EndPoint remoteEP)
         {
-            EnsureNetworkInterfaceBound();
+            EnsureNetworkInterfaceBound(remoteEP);
 
             BaseSocket.Connect(remoteEP);
         }
@@ -145,7 +167,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
 
         public int SendTo(ReadOnlySpan<byte> buffer, SocketFlags flags, EndPoint remoteEP)
         {
-            EnsureNetworkInterfaceBound();
+            EnsureNetworkInterfaceBound(remoteEP);
 
             return BaseSocket.SendTo(buffer, flags, remoteEP);
         }
