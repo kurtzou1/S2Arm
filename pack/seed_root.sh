@@ -26,22 +26,22 @@ done
 # RomFS 镜像（romfs.std，标准 RomFS，与 romfs/ 同级，graphics/nvn/tools/romfs_list.py image_of）：源只有镜像、没有 romfs/ 时克隆这一个文件（APFS 不占新空间）；
 #   RomFS 只留源的那一种形态：播镜像就删现行克隆来的 romfs（存储软链），播目录就删现行克隆来的旧镜像
 if [ -f "$SRC/romfs.std" ] && [ ! -d "$SRC/romfs" ]; then
-  _root_rm "$W/romfs"; _root_rm "$W/romfs.std"; _root_cp "$SRC/romfs.std" "$W/romfs.std" || { root_abort "$G" "$TAG"; echo "【红】克隆 romfs.std 失败"; exit 1; }
+  _root_rm "$W/romfs"; _root_rm "$W/romfs.std"; root_copy 播种 "$SRC/romfs.std" "$W/romfs.std" || { root_abort "$G" "$TAG"; echo "【红】克隆 romfs.std 失败：$(printf '%s' "$COPY_ERR" | tr '\n' ' ')"; exit 1; }
 elif [ -d "$SRC/romfs" ]; then _root_rm "$W/romfs.std"; fi
 if [ "${S2A_SEED_AOC:-0}" = 1 ] && [ -f "$SRC/aoc.tsv" ]; then
-  _root_cp "$SRC/aoc.tsv" "$W/aoc.tsv" || { root_abort "$G" "$TAG"; exit 1; }
+  root_copy 播种 "$SRC/aoc.tsv" "$W/aoc.tsv" || { root_abort "$G" "$TAG"; echo "【红】拷 aoc.tsv 失败：$(printf '%s' "$COPY_ERR" | tr '\n' ' ')"; exit 1; }
 fi
-if [ -f "$SRC/ctl/control.nacp" ]; then mkdir -p "$W/ctl" && _root_cp "$SRC/ctl/control.nacp" "$W/ctl/" || { root_abort "$G" "$TAG"; echo "【红】拷 control.nacp 失败"; exit 1; }   # 游戏元数据（标题 / 存档参数），服务层读；ctl/ 里别的不带
+if [ -f "$SRC/ctl/control.nacp" ]; then mkdir -p "$W/ctl" && root_copy 播种 "$SRC/ctl/control.nacp" "$W/ctl/" || { root_abort "$G" "$TAG"; echo "【红】拷 control.nacp 失败：$(printf '%s' "$COPY_ERR" | tr '\n' ' ')"; exit 1; }   # 游戏元数据（标题 / 存档参数），服务层读；ctl/ 里别的不带
 else echo "【黄】$SRC/ctl/control.nacp 没有：服务层读不到 NACP 会报红"; fi
 # 游戏图标：nx_unpack 解在源目录顶层的 icon.jpg 也要播进产物根。不播的话 pack/ipa.sh 的两条图标来源（S2A_ICONS/<款>.jpg、
 #   产物根 icon.jpg）都落空，app_bundle.py write_icons 跳过，包内没有 AppIcon*.png 也没有 CFBundleIcons，装出来是系统缺省白图标
-[ -s "$SRC/icon.jpg" ] && { _root_cp "$SRC/icon.jpg" "$W/" 2> /dev/null || { [ "$(uname -s)" = Darwin ] && cp "$SRC/icon.jpg" "$W/"; } || { root_abort "$G" "$TAG"; echo "【红】拷 icon.jpg 失败"; exit 1; }; } \
+[ -s "$SRC/icon.jpg" ] && { root_copy 播种 "$SRC/icon.jpg" "$W/" || { root_abort "$G" "$TAG"; echo "【红】拷 icon.jpg 失败：$(printf '%s' "$COPY_ERR" | tr '\n' ' ')"; exit 1; }; } \
   || echo "【黄】$SRC/icon.jpg 没有：出包不带 App 图标（补：tools/game_icons.sh ${G}）"
 # #172 build-stage metadata: do not inherit an old extraction's identity/version.
 # unpack.tsv（解包写的程序号 / 名称 / 版本，#459）与直连零配置推导要的元数据（direct-profile-input.json）
-rm -f "$W/unpack.tsv"; [ ! -f "$SRC/unpack.tsv" ] || _root_cp "$SRC/unpack.tsv" "$W/unpack.tsv" || { root_abort "$G" "$TAG"; exit 1; }
+rm -f "$W/unpack.tsv"; [ ! -f "$SRC/unpack.tsv" ] || root_copy 播种 "$SRC/unpack.tsv" "$W/unpack.tsv" || { root_abort "$G" "$TAG"; echo "【红】拷 unpack.tsv 失败：$(printf '%s' "$COPY_ERR" | tr '\n' ' ')"; exit 1; }
 rm -f "$W/direct-profile-input.json" "$W/.stage_direct_profile"
-[ ! -f "$SRC/direct-profile-input.json" ] || _root_cp "$SRC/direct-profile-input.json" "$W/direct-profile-input.json" || { root_abort "$G" "$TAG"; exit 1; }
+[ ! -f "$SRC/direct-profile-input.json" ] || root_copy 播种 "$SRC/direct-profile-input.json" "$W/direct-profile-input.json" || { root_abort "$G" "$TAG"; echo "【红】拷 direct-profile-input.json 失败：$(printf '%s' "$COPY_ERR" | tr '\n' ' ')"; exit 1; }
 rm -f "$W/.stage_uilayout" "$W/.stage_romfsidx" "$W/.stage_pkg" "$W/ui_overlay.tsv" "$W/romfs.s2aidx"   # 原始输入重播了：覆盖在 romfs 上的阶段与包都要重做
 _root_rm "$W/ui_overlay"   # 界面布局覆盖层（pack/stage_uilayout.sh）同清单一起作废：原先就地改的 romfs 随重播换掉，覆盖层同理
 # 原始模块 / NRO 已换新：旧补丁、返回点/入口表和索引不能再配这份输入；其他阶段与 exefs/romfs 原件保留。

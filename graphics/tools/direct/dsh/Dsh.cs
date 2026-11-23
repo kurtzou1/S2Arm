@@ -429,6 +429,7 @@ namespace S2A.Dsh
                 if (stage == "ps" || stage == "cs") src = FsLb(src);   // #800 采样器偏置进主体，在整数输出入口复制前
                 var first = new List<(string Name, long Word, long Value)>();
                 if (stage == "cs") (src, first) = FirstStore(src, j["local"] as JsonArray);   // 只有第一个调用做的存储挪给宿主（见 FirstStore）
+                if (stage == "cs") src = MaxThreads(src, j["local"] as JsonArray);   // 线程组大的计算核声明线程数上限（见 MaxThreads）
                 string colorAnalysis = src;
                 if (stage == "ps") src = NxgalSpvCross.ColorRound(src);
                 var pad = new List<object>();
@@ -767,6 +768,17 @@ namespace S2A.Dsh
         const string FirstStoreOne = @"(?:\(\*\w+\.(?<n>\w+)\)\._m0\[(?<w>\d+)\] = (?<v>\d+u|uint\(\w+\));"
             + @"|uint (?<i>\w+) = uint\((?<w>\d+)\);\s*if \(\k<i> < \w+\)\s*\{\s*\(\*\w+\.(?<n>\w+)\)\._m0\[min\(\k<i>, \w+\)\] = (?<v>\d+u|uint\(\w+\));\s*\})";
         static readonly Regex s_firstOne = R(FirstStoreOne);
+        // #2118（11-23，玩家在 M1 Pro 实测）：SPIRV-Cross 出的计算核不带线程数上限，Metal 编译器按寄存器压力自定管线上限——游戏要 1024×1×1 的实例剔除核
+        //   管线只给 640，宿主照样按 1024 派发（未定义行为），剔除结果不对、场景物件不显示；核前加 [[max_total_threads_per_threadgroup(1024)]] 后上限 1024、物件恢复。
+        //   线程组 > 256 的核按本地尺寸声明（≤ 256 的不改源码：库键不动）；属性单独一行，「kernel void main0(」行首不变（Outline.Entry 按行首认入口）
+        internal static string MaxThreads(string msl, JsonArray local)
+        {
+            long n = local is { Count: 3 } ? local.Aggregate(1L, (a, v) => a * v.GetValue<long>()) : 0;
+            if (n <= 256 || n > 1024) return msl;
+            int at = msl.StartsWith("kernel void main0(", StringComparison.Ordinal) ? 0 : msl.IndexOf("\nkernel void main0(", StringComparison.Ordinal) + 1;
+            if (at <= 0 && !msl.StartsWith("kernel void main0(", StringComparison.Ordinal)) return msl;
+            return msl.Insert(at, $"[[max_total_threads_per_threadgroup({n})]]\n");
+        }
         internal static (string Src, List<(string Name, long Word, long Value)> Stores) FirstStore(string msl, JsonArray local)
         {
             var none = (msl, new List<(string, long, long)>());

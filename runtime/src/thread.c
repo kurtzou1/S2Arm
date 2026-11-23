@@ -1120,6 +1120,9 @@ uint32_t s2a_thread_main_init(void) {
 #endif
     return t->handle;
 }
+// 主线程的客体栈顶：主线程不经 CreateThread，栈顶由 guest_main 交给切栈槽，线程对象原先一直是 0。即时存档把它记成 0，恢复后切栈槽 gtop = 0，
+//   sw_xstack_stop_boundary 恒为假：会话停止（打开存档管理 / 退回游戏库）取消它的等待后它停不下来，带着 0xEC01 回游戏，游戏 Abort（D-2T89）
+void s2a_thread_main_stack(uint64_t top) { thr_t *t = cur(); if (t && t->is_main) t->stack_top = top; }
 
 // ---------- 系统调用出入口（门帧登记、SetThreadActivity 的挂起点）----------
 static pthread_cond_t g_pause_cv = PTHREAD_COND_INITIALIZER;
@@ -2811,7 +2814,8 @@ static void *snap_thread_main(void *arg) {
     { void **blk = calloc(3, sizeof *blk); blk[0] = (void *)(uintptr_t)r->own_tls; blk[1] = (void *)(uintptr_t)r->own_obj; blk[2] = (void *)1; pthread_setspecific(g_own_key, blk); }
     uint64_t F[832 / 8] __attribute__((aligned(16)));
     uint64_t here = ((uint64_t)__builtin_frame_address(0) - 0x400) & ~0xfull;   // 门帧 F 在本帧里、比 here 高；切栈游标从 here 往下用
-    sw_xstack_thread_init(here, t->stack_top);
+    // 旧快照里主线程栈顶是 0（见 s2a_thread_main_stack）：主线程一定在客体栈上跑，按「有客体栈、栈顶不限」登记（拷栈参数不封顶，同 0），会话停止才能在门上停住它
+    sw_xstack_thread_init(here, t->stack_top ? t->stack_top : t->is_main ? UINT64_MAX : 0);
     memcpy(F, r->frame, sizeof F);
     uint64_t *slot = sw_xstack_slot();
     if (F[816 / 8]) { F[808 / 8] = slot[0]; F[816 / 8] = (uint64_t)(uintptr_t)slot; slot[0] = (uint64_t)(uintptr_t)F; }

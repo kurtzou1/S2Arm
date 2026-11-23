@@ -21,6 +21,7 @@ void s2a_program_resign_test_identity(int (*f)(const char *, SecKeyRef *, SecCer
 void s2a_program_resign_test_prov(int (*f)(char *, size_t, char *, size_t));
 void s2a_lc_cert_test(int (*f)(NSData **, NSString **));
 int s2a_program_resign_force(const char *home, const char *game_data, const char *gid, char *module_dir, char *images, size_t n, char *why, size_t why_n);
+int s2a_bundle_image_resign_lc(const char *home, const char *game_data, const char *gid, char *images, size_t n, char *why, size_t why_n);
 
 static int bad;
 static void ck(int ok, NSString *what) { printf("%s %s\n", ok ? "  通" : "  【红】", what.UTF8String); if (!ok) bad++; }
@@ -39,6 +40,7 @@ static NSBundle *g_host_bundle;
 @end
 static int lc_ok(NSData **p, NSString **w) { if (p) *p = g_p12; if (w) *w = @"t"; return 1; }
 static int lc_nocert(NSData **p, NSString **w) { (void)p; (void)w; return -1; }
+static int lc_none(NSData **p, NSString **w) { (void)p; (void)w; return 0; }   // 不在 LiveContainer 里
 static int lc_garbled(NSData **p, NSString **w) { if (p) *p = [@"not a p12" dataUsingEncoding:NSUTF8StringEncoding]; if (w) *w = @"t"; return 1; }   // LiveContainer 存了证书、系统解不开（#502 的 -26275）
 static NSString *sha_file(NSString *p) { NSData *d = [NSData dataWithContentsOfFile:p]; uint8_t h[32]; CC_SHA256(d.bytes, (CC_LONG)d.length, h);
     NSMutableString *s = [NSMutableString string]; for (int i = 0; i < 32; i++) [s appendFormat:@"%02x", h[i]]; return s; }
@@ -156,6 +158,44 @@ int main(void) { @autoreleasepool {
     ARGS(); rc = s2a_program_resign_if_needed(home.fileSystemRepresentation, gd.fileSystemRepresentation, G.UTF8String, md, im, sizeof md, why, sizeof why);
     ck(rc == -1 && [json(catp)[@"dir"] isEqualToString:@"v-0000000000000000-pc"] && strstr(why, "读不出来") && strstr(why, "导入 .p12"),
        [NSString stringWithFormat:@"⑦e 解不开、也没导入过：返回 %d（期望 -1）、清单不动、原因「%@」写出怎么导", rc, @(why)]);
+    // ⑨ 程序在 App 包里的款（独立 App 导出、LiveContainer 装；D-HF6H / D-RG9V）：原先只有程序包款起局重签，包内款在 LiveContainer 里用的是
+    //   原样的程序库（不是 LiveContainer 的证书签的），映射代码段被系统拒（EPERM）。期望：
+    //   ⑨a 在 LiveContainer 里 → 1：images 改指 <资源包上一级>/program-lc/v-<签后 sha256 前 16 位>-lc/<程序库名>（单测自己算 sha），codesign 读到测试身份、团队 ABCDE12345，
+    //       包里那份原样（sha 不变）；⑨b 再起（包里那份没变）→ 1、同一路径、不重签（文件修改时间不变）；⑨c 包里那份换了 → 重签出新目录、旧目录清掉；
+    //   ⑨d 不在 LiveContainer 里 → 0、images 不动；⑨e LiveContainer 没导入证书 → -1、images 不动、原因提 LiveContainer
+    {   NSString *bdir = [home stringByAppendingPathComponent:@"Bundle/S2Arm.app/Frameworks"], *bimg = [bdir stringByAppendingPathComponent:img];
+        [fm createDirectoryAtPath:bdir withIntermediateDirectories:YES attributes:nil error:nil];
+        ck([sh([NSString stringWithFormat:@"cd '%@' && cc -arch arm64 -dynamiclib -o '%@' a.c && codesign -f -s - '%@' 2>/dev/null && echo OK", dir, bimg, bimg]) containsString:@"OK"],
+           @"⑨ 备好 App 包里的 ad-hoc 程序库");
+        NSString *bsha = sha_file(bimg), *plc = [[gd stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"program-lc"];
+        char bi[2048];
+        s2a_lc_cert_test(lc_ok); s2a_program_resign_test_identity(id_none); s2a_program_resign_test_prov(prov_other);
+        snprintf(bi, sizeof bi, "%s", bimg.fileSystemRepresentation);
+        rc = s2a_bundle_image_resign_lc(home.fileSystemRepresentation, gd.fileSystemRepresentation, G.UTF8String, bi, sizeof bi, why, sizeof why);
+        NSString *got = @(bi), *want_dir = [NSString stringWithFormat:@"v-%@-lc", [sha_file(got) substringToIndex:16]];
+        NSString *a9 = sh([NSString stringWithFormat:@"codesign -dvvv '%@' 2>&1", got]);
+        ck(rc == 1 && [got isEqualToString:[[plc stringByAppendingPathComponent:want_dir] stringByAppendingPathComponent:img]] && [sha_file(bimg) isEqualToString:bsha],
+           [NSString stringWithFormat:@"⑨a LiveContainer 里包内款：返回 %d（期望 1）、改指 %@（期望 program-lc/%@/%@）、包里那份原样", rc, got, want_dir, img]);
+        ck([a9 containsString:@"Authority=t_program_resign"] && [a9 containsString:@"TeamIdentifier=ABCDE12345"], @"⑨a 副本是 LiveContainer 交的证书签的、团队号 ABCDE12345（codesign 读）");
+        NSDate *m0 = [fm attributesOfItemAtPath:got error:nil].fileModificationDate;
+        snprintf(bi, sizeof bi, "%s", bimg.fileSystemRepresentation);
+        rc = s2a_bundle_image_resign_lc(home.fileSystemRepresentation, gd.fileSystemRepresentation, G.UTF8String, bi, sizeof bi, why, sizeof why);
+        ck(rc == 1 && [@(bi) isEqualToString:got] && [[fm attributesOfItemAtPath:got error:nil].fileModificationDate isEqual:m0],
+           [NSString stringWithFormat:@"⑨b 再起：返回 %d（期望 1）、同一路径、不重签", rc]);
+        sh([NSString stringWithFormat:@"cd '%@' && printf 'int f(void){return 2;}' > b.c && cc -arch arm64 -dynamiclib -o '%@' b.c && codesign -f -s - '%@' 2>/dev/null", dir, bimg, bimg]);
+        snprintf(bi, sizeof bi, "%s", bimg.fileSystemRepresentation);
+        rc = s2a_bundle_image_resign_lc(home.fileSystemRepresentation, gd.fileSystemRepresentation, G.UTF8String, bi, sizeof bi, why, sizeof why);
+        NSArray *left = [fm contentsOfDirectoryAtPath:plc error:nil];
+        ck(rc == 1 && ![@(bi) isEqualToString:got] && ![left containsObject:want_dir] && [@(bi) hasPrefix:plc],
+           [NSString stringWithFormat:@"⑨c 包里那份换了：返回 %d（期望 1）、新路径 %s、旧目录清掉（剩 %@）", rc, bi, left]);
+        s2a_lc_cert_test(lc_none);
+        snprintf(bi, sizeof bi, "%s", bimg.fileSystemRepresentation);
+        rc = s2a_bundle_image_resign_lc(home.fileSystemRepresentation, gd.fileSystemRepresentation, G.UTF8String, bi, sizeof bi, why, sizeof why);
+        ck(rc == 0 && [@(bi) isEqualToString:bimg], [NSString stringWithFormat:@"⑨d 不在 LiveContainer 里：返回 %d（期望 0）、images 不动", rc]);
+        s2a_lc_cert_test(lc_nocert);
+        rc = s2a_bundle_image_resign_lc(home.fileSystemRepresentation, gd.fileSystemRepresentation, G.UTF8String, bi, sizeof bi, why, sizeof why);
+        ck(rc == -1 && [@(bi) isEqualToString:bimg] && strstr(why, "LiveContainer"), [NSString stringWithFormat:@"⑨e LiveContainer 没导入证书：返回 %d（期望 -1）、images 不动、原因「%@」", rc, @(why)]);
+    }
     s2a_lc_cert_test(NULL); s2a_program_resign_test_identity(id_ok);
     s2a_program_resign_test_prov(NULL);
     [fm removeItemAtPath:dir error:nil];

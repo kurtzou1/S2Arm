@@ -84,8 +84,8 @@ fi
 #   把原版放进覆盖层、记进清单（同 Windows pack/orch/stages.py _uilayout restore），读到的与原先「就地恢复原版」相同；相同的不进覆盖层
 RST=$(printf '%s\n' "$PREV" | grep -v '^$' | while read -r f; do printf '%s\n' "$FL" | grep -qxF -- "$f" || echo "$f"; done)
 n=0; m=$(printf '%s\n' "$RST" | grep -c .); RSO=
-# 原版一个文件拷到 $2：原版是目录照旧 _root_cp；只有镜像 romfs.std 时从镜像按字节写（graphics/nvn/tools/romfs_list.py read_file）
-orig_cp() { if [ -d "$ORIG" ]; then _root_cp "$ORIG/$1" "$2"; else /usr/bin/python3 -c 'import sys; sys.path[:0] = [sys.argv[1]]; import romfs_list
+# 原版一个文件拷到 $2：原版是目录照 root_copy（跨卷克隆不了退回普通复制）；只有镜像 romfs.std 时从镜像按字节写（graphics/nvn/tools/romfs_list.py read_file）
+orig_cp() { if [ -d "$ORIG" ]; then root_copy 宽屏布局 "$ORIG/$1" "$2"; else /usr/bin/python3 -c 'import sys; sys.path[:0] = [sys.argv[1]]; import romfs_list
 open(sys.argv[3], "wb").write(romfs_list.read_file(sys.argv[2]))' "$R/graphics/nvn/tools" "$ORIG/$1" "$2"; fi; }
 if [ -n "$LEGACY" ]; then
   while read -r f; do [ -n "$f" ] || continue; rm -f "$W/romfs/$f" && orig_cp "$f" "$W/romfs/$f" || { root_abort "$G" "$TAG"; echo "【红】恢复原版 $f 失败"; exit 1; }; done <<< "$PREV"
@@ -94,7 +94,7 @@ elif [ -n "$RST" ]; then
 for r in rels: ro(r) == rb(r) or print(r)" "$R/graphics/nvn/tools" "$R/pack" "$ORIG" "$W/romfs") || { root_abort "$G" "$TAG"; echo "【红】$G 比不了上一版覆盖文件与原版"; exit 1; }
 fi
 _root_rm "$W/ui_overlay" || { root_abort "$G" "$TAG"; echo "【红】清旧覆盖层失败"; exit 1; }
-while read -r f; do [ -n "$f" ] || continue; mkdir -p "$(dirname "$W/ui_overlay/romfs/$f")" && _root_cp "$OV/romfs/$f" "$W/ui_overlay/romfs/$f" || { root_abort "$G" "$TAG"; echo "【红】覆盖 $f 失败"; exit 1; }; n=$((n + 1)); done < <(printf '%s\n' "$FL")
+while read -r f; do [ -n "$f" ] || continue; mkdir -p "$(dirname "$W/ui_overlay/romfs/$f")" && root_copy 宽屏布局 "$OV/romfs/$f" "$W/ui_overlay/romfs/$f" || { root_abort "$G" "$TAG"; echo "【红】覆盖 $f 失败：$(printf '%s' "$COPY_ERR" | tr '\n' ' ')"; exit 1; }; n=$((n + 1)); done < <(printf '%s\n' "$FL")
 while read -r f; do [ -n "$f" ] || continue; mkdir -p "$(dirname "$W/ui_overlay/romfs/$f")" && orig_cp "$f" "$W/ui_overlay/romfs/$f" || { root_abort "$G" "$TAG"; echo "【红】恢复原版 $f 失败"; exit 1; }; done < <(printf '%s\n' "$RSO")
 FL=$(printf '%s\n%s\n' "$FL" "$RSO" | grep -v '^$' | LC_ALL=C sort -u)
 # 读到的 RomFS 变了，RomFS 索引要重出（索引按覆盖层的大小建，pack/stages/romfsidx.sh）

@@ -58,11 +58,11 @@
 | E.1 | 高通私有驱动上附件清除命令（CmdClearAttachments）的执行次序会乱，完全不用它；通道内清除一律画（`PipelineFull.cs ClearRenderTargetColor`） | 原先带裁剪的清除用的就是它 | 已改（11-11）：通道内清除一律画一笔三角形，所有设备同一条路 |
 | E.2 | 写掩码与片元输出映射相与（`StateUpdater.S2AOmapColorMask`，#468：分块渲染的 GPU 上没输出的目标会写进垃圾） | 见 1.1 | 已补 |
 | E.3 | 高通上关掉光栅化丢弃后视口状态会坏，强制把动态状态全部重发（`PipelineBase.SetRasterizerDiscard`） | 每笔绘制都重发全部动态状态 | 无 |
-| E.4 | 高通 / MoltenVK 不支持渲染通道内的屏障（`SupportsRenderPassBarrier`） | 不在通道内发屏障 | 无 |
+| E.4 | 高通 / MoltenVK 不支持渲染通道内的屏障（`SupportsRenderPassBarrier`）：游戏发了屏障、当前程序有着色器写时，先结束渲染通道再发屏障（`BarrierBatch.cs Flush` → `endRenderPass`） | 不在通道内发屏障，但只记位、不结束通道：通道里顶点着色器写存储缓冲（蒙皮结果）、后面的绘制读它，分块渲染的 GPU 读到旧数据（Adreno 840 上天空出现黑色块，见坑记录「通道内着色器写之后的游戏屏障」） | 已补：开着的通道里已有绘制的着色器写了存储缓冲 / 存储图像、其后游戏发了带顺序位的屏障（ORDER_PRIMITIVES / FRAGMENTS / FRAGMENTS_TILED / INDIRECT_DATA）→ 下一笔绘制前结束该通道（`rp_pass_barrier`，同 iOS `nvn_mtl.m` OP_BARRIER 的 `g_pass_swrite`）。还差：写后写 / 读后写没有单独证据，未拆；Ryujinx 按「当前程序的写阶段」逐阶段算，这里按「通道里有没有着色器写」一刀切 |
 | E.5 | 高通上带缓冲贴图的程序不用描述符更新模板（`ShaderCollection.UpdateTexturesWithoutTemplate`） | 不用更新模板 | 无 |
 | E.6 | 整屏全掩码清除在高通上走「对存储直接清」的传输路径（`TryClearColorByTransfer`） | 整屏清除折成通道的 load = CLEAR | 待核：两种做法是否等效 |
 
-模拟器后端还没对的：格式表（`FormatTable.cs`）逐项、帧缓冲与图像视图的建法（`FramebufferParams.cs`、`TextureView.cs`）、屏障（`BarrierBatch.cs`）、描述符更新（`DescriptorSetUpdater.cs`）。
+模拟器后端还没对的：格式表（`FormatTable.cs`）逐项、帧缓冲与图像视图的建法（`FramebufferParams.cs`、`TextureView.cs`）、屏障（`BarrierBatch.cs`：通道里着色器写之后的屏障结束通道已对，见 E.4；按资源逐个累计访问掩码再合并发屏障还没对）、描述符更新（`DescriptorSetUpdater.cs`）。
 
 ## 4. 贴图内容的来源与采样事实（iOS：`tex_mtl_` @4113、`tex_cpu_content` @3900、`tex_init_fill` @3670、`tex_zero_fill` @3345、`nvn_unnorm.inc`、每款参数 `host/game_tsv.h`）——**11-11 过了「内容从哪来」这一半，视图的级 / 层 / 深度模板取面还没过**
 

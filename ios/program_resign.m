@@ -64,6 +64,17 @@ static int lc_identity(SecKeyRef *key, SecCertificateRef *leaf, NSString **sha, 
     return 1;
 }
 static NSString *str(id v) { return [v isKindOfClass:NSString.class] && [v length] ? v : nil; }
+// LiveContainer 用宿主包名签 Mach-O；客体 mainBundle 已被替换，要取它保留的 lcMainBundle。取不到 → nil（沿用程序库原标识）
+static NSString *lc_host_id(void) {
+    NSString *id_ = nil; SEL selector = NSSelectorFromString(@"lcMainBundle");
+    if ([NSUserDefaults respondsToSelector:selector]) {
+        NSBundle *(*get_host_bundle)(id, SEL) = (NSBundle *(*)(id, SEL))[NSUserDefaults methodForSelector:selector];
+        id_ = get_host_bundle(NSUserDefaults.class, selector).bundleIdentifier;
+    }
+    if (id_.length) RLOG("LiveContainer 重签标识：用宿主包名 %s（不添加程序库权限）", id_.UTF8String);
+    else RLOG("【黄】LiveContainer 重签标识：取不到宿主包名，沿用程序库原标识");
+    return id_.length ? id_ : nil;
+}
 
 // 1 = 重签了（module_dir / images 改指新版本目录，各 n 字节）；0 = 不用签（没有手机身份、签名身份已是现在这张、电脑按同团队签好的）；
 // -1 = 要签但没签成（why 写原因，调用方照旧用原程序库）
@@ -126,19 +137,7 @@ static int program_resign(const char *home, const char *game_data, const char *g
         const char *steam = pr >= 0 ? pteam : cur_team.UTF8String, *sappid = pr >= 0 ? pappid : NULL;
         NSData *in = [NSData dataWithContentsOfFile:@(images)];
         uint8_t *out = NULL; size_t on = 0; char w[256] = "";
-        NSString *lc_sign_id = nil;
-        if (in_lc || lc_fb) {
-            // LiveContainer 用宿主包名签 Mach-O；客体 mainBundle 已被替换，要取它保留的 lcMainBundle。
-            SEL selector = NSSelectorFromString(@"lcMainBundle");
-            if ([NSUserDefaults respondsToSelector:selector]) {
-                NSBundle *(*get_host_bundle)(id, SEL) = (NSBundle *(*)(id, SEL))[NSUserDefaults methodForSelector:selector];
-                lc_sign_id = get_host_bundle(NSUserDefaults.class, selector).bundleIdentifier;
-            }
-            if (lc_sign_id.length)
-                RLOG("LiveContainer 重签标识：用宿主包名 %s（不添加程序库权限）", lc_sign_id.UTF8String);
-            else
-                RLOG("【黄】LiveContainer 重签标识：取不到宿主包名，沿用程序库原标识");
-        }
+        NSString *lc_sign_id = in_lc || lc_fb ? lc_host_id() : nil;
         int rc = in ? s2a_selfsign_macho(in.bytes, in.length, lc_sign_id.length ? lc_sign_id.UTF8String : NULL, steam, sappid, key, chain, &out, &on, w, sizeof w) : -1;
         RELEASE_ID(); if (chain) CFRelease(chain);
         if (!in) FAIL("程序库 %s 读不了", images);
@@ -163,6 +162,73 @@ static int program_resign(const char *home, const char *game_data, const char *g
         if (write_json(catp, nc)) FAIL("程序包清单写不进 %s", catp.UTF8String);
         if (snprintf(module_dir, n, "%s", mdst.fileSystemRepresentation) >= (int)n || snprintf(images, n, "%s", idst.fileSystemRepresentation) >= (int)n) FAIL("路径太长");
         RLOG("起局重签：游戏 %s %s，已用%s（团队 %s）签好 → %s，%.0f ms", gid, why_sign.UTF8String, src, steam ? steam : "?", dir.UTF8String, (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1e6);
+        return 1;
+#undef FAIL
+#undef RELEASE_ID
+    }
+}
+
+// 程序在 App 包里的款（独立 App：导出包 / 装到 iPhone 的独立 App，镜像包在 <App>/Frameworks/S2AImages-<游戏号>.dylib）在 LiveContainer 里起局（D-HF6H / D-RG9V）：
+//   进程的签名身份是 LiveContainer 的，系统只许映射同团队签的代码页；LiveContainer 装 App 时只重签「签名无效」的 Mach-O，导出包里 ad-hoc 签的镜像包它照原样留着，
+//   映射代码段就被拒（EPERM，image_exec_lc）。程序包款早由 program_resign 用 LiveContainer 的证书重签（#63639b，真机已验），包内款原先不走这一步。
+//   做法同程序包款：用 LiveContainer 的证书（解不开就用导入进 S2Arm 的那张）签一份副本，放 <资源包上一级>/program-lc/v-<签后 sha256 前 16 位>-lc/，images 改指它；
+//   App 包里那份不动（LiveContainer 管的目录）。副本按「包里那份的路径 + 大小 + 修改时间 + 证书」记在 program-lc/lc.json，没变就直接用、不重签；变了重签并清掉旧副本。
+//   不在 LiveContainer 里 → 0（App 包是装它的工具整包签的，照原样用）。1 = images 改指副本；-1 = 要签没签成（why 写原因，照旧用包里那份，系统真不认时由装载器报 image_exec_lc）
+int s2a_bundle_image_resign_lc(const char *home, const char *game_data, const char *gid, char *images, size_t n, char *why, size_t why_n) {
+    @autoreleasepool {
+        if (why && why_n) why[0] = 0;
+        if (!home || !game_data || !gid || !images || !images[0]) return 0;
+        SecKeyRef key = NULL; SecCertificateRef leaf = NULL; NSString *cur_sha = nil, *cur_team = nil, *lc_why = nil;
+        int in_lc = lc_identity(&key, &leaf, &cur_sha, &cur_team, &lc_why), lc_fb = 0;
+        if (!in_lc) { RLOG("起局重签：游戏 %s 的程序在 App 包里、不在 LiveContainer 里：用装 App 时的签名，不重签", gid); return 0; }
+#define RELEASE_ID() do { if (key) CFRelease(key); if (leaf) CFRelease(leaf); key = NULL; leaf = NULL; } while (0)
+#define FAIL(...) do { RELEASE_ID(); if (why && why_n) snprintf(why, why_n, __VA_ARGS__); RLOG("【黄】起局重签：游戏 %s 的程序在 App 包里、在 LiveContainer 里，要用%s签一份副本，没签成：%s；照旧用包里那份", gid, src, why); return -1; } while (0)
+        const char *src = "LiveContainer 的证书";
+        if (in_lc == -2) {   // 同程序包款：LiveContainer 的证书解不开 → 用导入进 S2Arm 的那张（同团队就行）
+            s2a_cert_settle(home);
+            NSDictionary *cur = read_json([@(home) stringByAppendingPathComponent:@"Library/Application Support/S2Arm/identity/current.json"]);
+            cur_sha = str(cur[@"cert_sha1"]).lowercaseString; cur_team = str(cur[@"team"]);
+            if (cur_sha) { lc_fb = 1; src = "导入进 S2Arm 的证书（LiveContainer 存的那张解不开）"; }
+            else lc_why = [lc_why stringByAppendingString:@"：在 S2Arm 齿轮 →「签名证书」→「导入 .p12…」导入同一张证书（SideStore / AltStore 的设置里能导出），S2Arm 会改用它签"];
+        }
+        if (in_lc < 0 && !lc_fb) FAIL("%s", lc_why.UTF8String);
+        if (lc_fb && (g_get_identity(cur_sha.UTF8String, &key, &leaf) || !key || !leaf)) FAIL("钥匙串里没有证书 %s 的签名身份", cur_sha.UTF8String);
+        NSFileManager *fm = NSFileManager.defaultManager;
+        NSString *img = @(images).lastPathComponent, *plc = [[@(game_data) stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"program-lc"];
+        NSString *markp = [plc stringByAppendingPathComponent:@"lc.json"];
+        struct stat st; if (stat(images, &st)) FAIL("包里的程序库 %s 不在（errno %d）", images, errno);
+        NSNumber *size = @((long long)st.st_size), *mtime = @((long long)st.st_mtimespec.tv_sec * 1000000000LL + st.st_mtimespec.tv_nsec);
+        NSDictionary *mark = read_json(markp);
+        NSString *have = str(mark[@"dir"]) ? [[plc stringByAppendingPathComponent:mark[@"dir"]] stringByAppendingPathComponent:img] : nil;
+        if (have && [mark[@"src"] isEqual:@(images)] && [mark[@"size"] isEqual:size] && [mark[@"mtime_ns"] isEqual:mtime] && [str(mark[@"cert_sha1"]) isEqualToString:cur_sha]
+            && [fm fileExistsAtPath:have]) {
+            RELEASE_ID();
+            if (snprintf(images, n, "%s", have.fileSystemRepresentation) >= (int)n) FAIL("路径太长");
+            RLOG("起局重签：游戏 %s 的程序在 App 包里、在 LiveContainer 里：沿用已用%s签好的副本 %s", gid, src, str(mark[@"dir"]).UTF8String);
+            return 1;
+        }
+        uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        NSString *sign_id = lc_host_id();
+        CFArrayRef chain = s2a_selfsign_chain_for(leaf);
+        NSData *in = [NSData dataWithContentsOfFile:@(images)];
+        uint8_t *out = NULL; size_t on = 0; char w[256] = "";
+        int rc = in ? s2a_selfsign_macho(in.bytes, in.length, sign_id.UTF8String, cur_team.UTF8String, NULL, key, chain, &out, &on, w, sizeof w) : -1;
+        if (chain) CFRelease(chain);
+        if (!in) FAIL("包里的程序库 %s 读不了", images);
+        if (rc) FAIL("签名失败：%s", w);
+        uint8_t h[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(out, (CC_LONG)on, h); NSString *sha = hex(h, sizeof h);
+        NSString *dir = [NSString stringWithFormat:@"v-%@-lc", [sha substringToIndex:16]], *dst = [plc stringByAppendingPathComponent:dir];
+        for (NSString *e in [fm contentsOfDirectoryAtPath:plc error:nil]) if ([e hasPrefix:@"v-"]) [fm removeItemAtPath:[plc stringByAppendingPathComponent:e] error:nil];   // 旧副本（包里那份换过 / 证书换过）：本进程这时还没映射任何一份
+        if (![fm createDirectoryAtPath:dst withIntermediateDirectories:YES attributes:nil error:nil]) { free(out); FAIL("建不了副本目录 %s", dst.UTF8String); }
+        NSString *idst = [dst stringByAppendingPathComponent:img], *itmp = [idst stringByAppendingString:@".tmp"];
+        FILE *f = fopen(itmp.fileSystemRepresentation, "wb"); int ok = f && fwrite(out, 1, on, f) == on; if (f && fclose(f)) ok = 0; free(out);
+        if (!ok || rename(itmp.fileSystemRepresentation, idst.fileSystemRepresentation)) FAIL("签好的副本写不进 %s", idst.UTF8String);
+        if (write_json(markp, @{@"src": @(images), @"size": size, @"mtime_ns": mtime, @"cert_sha1": cur_sha ?: @"", @"team": cur_team ?: @"", @"dir": dir}))
+            RLOG("【黄】起局重签：副本记录 %s 写不进，下次起局再签一次", markp.UTF8String);
+        RELEASE_ID();
+        if (snprintf(images, n, "%s", idst.fileSystemRepresentation) >= (int)n) FAIL("路径太长");
+        RLOG("起局重签：游戏 %s 的程序在 App 包里、在 LiveContainer 里，已用%s（团队 %s）签好副本 → program-lc/%s，%.0f ms", gid, src, cur_team.UTF8String ?: "?", dir.UTF8String,
+             (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1e6);
         return 1;
 #undef FAIL
 #undef RELEASE_ID

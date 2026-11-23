@@ -185,6 +185,17 @@ static int rp_fu_storage_write(void) {
                 if (g_prog->ent[st][i].src_kind == NVN_RB_IMG) return 1;
     return 0;
 }
+// 程序的着色器会不会写存储缓冲 / 存储图像（布局项的写访问位；同 iOS nvn_mtl.m swrite_note 的判据）。回放层按它记「通道里有着色器写」（rp_pass_note_draw），
+// 游戏随后发顺序屏障时据此在下一笔绘制前拆通道（rp_pass.c rp_pass_barrier）。
+static int prog_shader_writes(const struct rp_prog *pg) {
+    if (!pg) return 0;
+    for (int st = 0; st < RP_PROG_STAGES; st++)
+        for (uint32_t i = 0; i < pg->nent[st]; i++) {
+            const nvn_gpu_layout_ent *e = &pg->ent[st][i];
+            if ((e->access & NVN_GPU_ACC_W) && (e->src_kind == NVN_RB_IMG || e->src_kind == NVN_RB_IMGU || e->src_kind == NVN_RB_IMGA || e->src_kind == NVN_RB_SBUFP || e->src_kind == NVN_RB_GMEM)) return 1;
+        }
+    return 0;
+}
 // iOS skip_safe：无 storage 写 + 每个颜色/深度目标本帧 fresh + 近两帧 steady。任一不满足就不许跳。
 // 出库版程序（lib_sourced）在绑定核对里发现声明与实际绑定不符：身份标坏（rp_shader_lib_reject），按当前状态取现编版。
 //   出包预编库按苹果端约定翻译（缺类型答案时一维取数译成二维行读，宿主侧按行绑缓冲贴图，nvn_mtl.m tbuf_as_2d），
@@ -2038,7 +2049,7 @@ draw_rebind:   // 出库回退落地：g_prog 已换现编版（pso_dirty 已置
         if (rt->depth) { const tex_t *t = rt->depth;
             s2a_fu_rt_mark_seen(t->serial, t->mem ? (uint64_t)(uintptr_t)t->mem : 0, (uint64_t)t->d.format, ff); }
     }
-    rp_pass_note_draw(rp_S.ds.dt || rp_S.ds.dw || rp_S.ds.st);
+    rp_pass_note_draw((rp_S.ds.dt || rp_S.ds.dw || rp_S.ds.st ? RP_NOTE_DS : 0) | (prog_shader_writes(g_prog) ? RP_NOTE_SHADER_WRITE : 0));
     DT(RP_PERF_D_DRAW);
     if (g_log_left) {
         g_log_left--;

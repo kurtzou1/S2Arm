@@ -771,7 +771,7 @@ int nvn2_hdr_present(float p[8], int src_pf, int dst_pt) {   // PR3b 出图热�
     pthread_mutex_lock(&g_hdr_mu); declared = g_hdr.hi; pthread_mutex_unlock(&g_hdr_mu);   // PR1 存储的声明范围 hi（同一把锁）
     double headroom = 0;
     pthread_mutex_lock(&g_hdr_snap_mu); headroom = g_hdr_snap.current_headroom; pthread_mutex_unlock(&g_hdr_snap_mu);   // mode 4 的 target = 纸白 × 当前净空
-    return hdr_present_fill(p, src_pf, dst_pt, answered, headroom, (int)declared, told, nvn2_hdr_sdr_gamma());
+    return hdr_present_fill(p, src_pf, dst_pt, answered, headroom, (int)declared, told, nvn2_hdr_sdr_gamma(), 0.0, 0.0);   // PR-A（#625 第二阶段）：S4 扩张双参恒 0,0——开关解析在 PR-B（S2A_HDR_SDR_MAP 族）；无 setter ⇒ 门不过 ⇒ p[2]=p[3]=0，off 不变量结构性成立（直连与 gal 两路都经本入口取参）
 }
 
 // PR3d：AA/FX/FI 旁路判定的存储侧（评审稿 v3 §2.5 / §3 A3 / §4 PR3d）：出图热路径（nvn_mtl.m present 族）经它读已算好的

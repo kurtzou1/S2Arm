@@ -45,6 +45,8 @@ static class Fn
                     "vs_layer" => DshCompiler.VsLayer(S(0)),
                     "precise" => DshCompiler.Precise(S(0)),
                     // 只有第一个调用做的存储（Dsh.cs FirstStore）：MSL、线程组尺寸 [x, y, z] 或 null → [改写后的 MSL, [[存储缓冲名, 字号, 值], …]]（t_first_store.py）
+                    // 计算核线程数声明（Dsh.cs MaxThreads，#2118）：MSL、线程组尺寸 [x, y, z] 或 null → 改写后的 MSL（t_max_threads.py）
+                    "max_threads" => DshCompiler.MaxThreads(S(0), a[1] as JsonArray),
                     "first_store" => DshCompiler.FirstStore(S(0), a[1] as JsonArray) is var (fs, st) ? new List<object> { fs, st.Select(x => (object)new List<object> { x.Name, x.Word, x.Value }).ToList() } : null,
                     "color_round" => NxgalSpvCross.ColorRound(S(0)),
                     "fs_uint" => DshCompiler.FsUint(S(0), a.Count > 1 ? S(1) : null) is (string fs, uint um) && fs != null ? new List<object> { fs, (long)um } : null,

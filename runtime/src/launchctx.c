@@ -497,6 +497,10 @@ const char *s2a_launch_ctx_select(const char *gid) {
         int (*rs)(const char *, const char *, const char *, char *, char *, size_t, char *, size_t) =
             (int (*)(const char *, const char *, const char *, char *, char *, size_t, char *, size_t))dlsym(RTLD_DEFAULT, "s2a_program_resign_if_needed");
         if (rs) rs(getenv("HOME"), c.game_data, gid, c.module_dir, c.images, sizeof c.images, rsw, sizeof rsw);
+    } else {   // 程序在 App 包里的款（独立 App）：在 LiveContainer 里同样要用它的证书签一份副本（D-HF6H，ios/program_resign.m s2a_bundle_image_resign_lc），不在里面原样用
+        int (*rb)(const char *, const char *, const char *, char *, size_t, char *, size_t) =
+            (int (*)(const char *, const char *, const char *, char *, size_t, char *, size_t))dlsym(RTLD_DEFAULT, "s2a_bundle_image_resign_lc");
+        if (rb) rb(getenv("HOME"), c.game_data, gid, c.images, sizeof c.images, rsw, sizeof rsw);
     }
     {   // 程序签名（通用壳 11-16）：程序库要能被本机这份 App 注册签名 + 库校验（同团队）——物理上必须，进程只认登记过签名的代码页。
         //   原先这里还给整份程序库算 SHA-256 和清单 image_sha256 比（每次起局读完一两百 MB），核不过也只是黄字照常进，只剩花时间：11-19 维护者定

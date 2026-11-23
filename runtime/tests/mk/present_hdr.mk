@@ -19,4 +19,12 @@ native-test-present_hdr: $(PRESENT_HDR_BINARY)
 	$(PRESENT_HDR_BINARY)
 	S2A_HDR_SDR_GAMMA=0 T_PRESENT_HDR_GAMMA0=1 $(PRESENT_HDR_BINARY)
 TEST_TARGETS += native-test-present_hdr
+# 三态门禁可靠重建（PR-A #625 第二阶段，上游 PR #2080 评审第 2 轮实测踩坑）：门禁在 tag 间 checkout
+#   （git 把改动文件的 mtime 置为 checkout 当刻）再 make，checkout 与前一态的构建同秒时，make 按 1 秒 mtime
+#   粒度判「二进制不过期」，会跑错态的陈旧二进制（实测 final→negctl 同秒：gal 单测跑了 final 二进制假绿；
+#   反向同秒则绿门禁跑红二进制假红）。门禁先清两份单测二进制、再让测试目标重建（make 多目标按序执行）——
+#   二进制不在了必重建，mtime 比较被绕开，每态必得对应树的新鲜二进制。开发直跑单测不经本目标，行为不变。
+.PHONY: clean-present-hdr-tests
+clean-present-hdr-tests:
+	rm -f $(PRESENT_HDR_BINARY) $(CURDIR)/build/gal/t_present_hdr
 endif

@@ -221,15 +221,26 @@ static inline int hdr_present_rolloff(double *knee, double *target, double *sour
     return 1;
 }
 
+// ---------- PR-A（#625 第二阶段）：S4「SDR 转 HDR」扩张参数（设计稿 §2.3/§2.4；mode 2 参数化扩展——不新增模式号，模式选择只看格式与 latch 的治理原则不动）----------
+//   sdr/target nits 双参（gamescope --hdr-itm-sdr-nits/--hdr-itm-target-nits 形态）经 hdr_present_fill 进 p[2]/p[3]（mode 2 专属槽，
+//   mode 1/4 在各自分支另有语义、互不影响）；≤0 = off。engage 门（函数内按 headroom 算）：S4 双参 >0 ∧ 净空读数有效
+//   （>0 且有限，mode 4 门同款口径）∧ effective target = min(设置, 纸白×净空) > max(sdr, 地板 1.25×纸白 = 125 nit)——严格大于：
+//   target ≤ sdr 会压暗/重塑而非扩张（设计稿 §2.2 实测：target=sdr 下灰 0.5 → 0.366）。门不过 ⇒ p[2]=p[3]=0
+//   ⇒ 着色器守卫短路 ⇒ 纯 mode 2（off 不变量结构性成立）。PR-A 期生产调用方（nvn2_hdr_present）恒传 0,0——
+//   开关解析在 PR-B（S2A_HDR_SDR_MAP 族），无 setter 即无扩张。
+#define HDR_SDR_MAP_FILL 1   // 本组扩张入参在位标记：单测特征检测（t_present_hdr——红态无此宏 → 门用例显式红）
+
 // present 出图参数包（UV 常量缓冲 p[0..7]，照 nxnative present.metal 的 mode/xf 两组并一行）：
 //   p[0] = 着色器模式号（0–4；平凡直通与 PQ 直通都 0）；p[1] = 纸白（nit，mode 1/2/3 的 PQ/SDR 白锚）；
-//   p[2] = knee（mode 1 是纸白倍数 0.75；mode 4 是 nit）；p[3] = target（mode 1 是纸白倍数 1；mode 4 是 nit）；
+//   p[2] = knee（mode 1 是纸白倍数 0.75；mode 4 是 nit）；PR-A 起 mode 2 是 SDR 参考白 sdr nits（0 = 不扩张——off 判定槽之一）；
+//   p[3] = target（mode 1 是纸白倍数 1；mode 4 是 nit）；PR-A 起 mode 2 是 effective target nits（0 = 不扩张——off 判定槽之二）；
 //   p[4] = 源峰（mode 1 是纸白倍数——肩部精确落 target 的锚；mode 4 是 nit）；
 //   p[5] = 膝点 PQ 码值（mode 4：归一化 0–1，各通道都 ≤ 它的像素逐位直通）；
 //   p[6] = SDR gamma（mode 1/2：>0 纯幂曲线（缺省 2.2，Q13 留可调）；0 = 分段 sRGB 曲线——会抬暗部）。
 //   返回六态模式；直通两态全 0（mode 0 = 原样采样，逐字节同改前）。纯函数，全分支合成参数单测 + 着色器对拍（t_present_hdr）
 static inline int hdr_present_fill(float p[8], int src_pf, int dst_pt, int vi_answered,
-                                   double headroom, int declared_hi, int told_peak, double sdr_gamma) {
+                                   double headroom, int declared_hi, int told_peak, double sdr_gamma,
+                                   double sdr_map_nits, double sdr_map_target) {
     int pv = hdr_present_mode(src_pf, dst_pt, vi_answered);
     if (!p) return pv;
     for (int i = 0; i < 8; i++) p[i] = 0.0f;
@@ -244,8 +255,14 @@ static inline int hdr_present_fill(float p[8], int src_pf, int dst_pt, int vi_an
         p[0] = 1.0f; p[1] = (float)HDR_PAPER_WHITE_NITS; p[2] = 0.75f; p[3] = 1.0f;
         p[4] = (float)((double)hdr_source_peak_nits(declared_hi, told_peak) / HDR_PAPER_WHITE_NITS);
         p[6] = (float)sdr_gamma;
-    } else if (pv == HDR_PV_TO_PQ) {   // mode 2：SDR 源按 gamma 解码、纸白 100 nit 编进 PQ 层
+    } else if (pv == HDR_PV_TO_PQ) {   // mode 2：SDR 源按 gamma 解码、纸白 100 nit 编进 PQ 层（PR-A：S4 扩张参数——engage 门过才填 p[2]/p[3]）
         p[0] = 2.0f; p[1] = (float)HDR_PAPER_WHITE_NITS; p[6] = (float)sdr_gamma;
+        if (sdr_map_nits > 0.0 && sdr_map_target > 0.0 && headroom > 0.0 && isfinite(headroom)) {   // S4 双参（≤0 = off）∧ 净空读数有效（mode 4 门同款口径）
+            double ceiling = HDR_PAPER_WHITE_NITS * headroom;   // 净空物理上限（mode 4 target 同源：纸白 × 当前净空）
+            double target = sdr_map_target < ceiling ? sdr_map_target : ceiling;   // effective target = min(设置, 净空顶)——设置是目标、净空只夹顶
+            if (target > sdr_map_nits && target > HDR_PEAK_FLOOR_TIMES * HDR_PAPER_WHITE_NITS)   // engage 门：严格大于 max(sdr, 地板 125 nit)
+                { p[2] = (float)sdr_map_nits; p[3] = (float)target; }   // engage ⇒ p[2]=sdr、p[3]=effective target（逐帧随净空走）；门不过 ⇒ 双零 = 纯 mode 2
+        }
     } else if (pv == HDR_PV_FLOAT) {   // mode 3：float 线性源（已线性，无 gamma 参数）
         p[0] = 3.0f; p[1] = (float)HDR_PAPER_WHITE_NITS;
     }

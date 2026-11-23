@@ -182,7 +182,7 @@ with tempfile.TemporaryDirectory(prefix='s2arm-aoc-publish-') as tmp:
 if sys.platform == 'darwin':
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp); src = base / 'main'; src.write_bytes(b'NSO0' + bytes(range(256)))
-        fake = 'source "$1"; _root_cp() { echo "cp: $2: clonefile failed: Cross-device link" >&2; return 1; }; G=0100AAAA00000000; aoc_cp "$2" "$3"'
+        fake = 'source "${1%/stages/aoc.sh}/roots.sh"; source "$1"; _root_cp() { echo "cp: $2: clonefile failed: Cross-device link" >&2; return 1; }; G=0100AAAA00000000; aoc_cp "$2" "$3"'
         proc = subprocess.run(['bash', '-c', fake, '_', source, str(src), str(base / 'out')], capture_output=True, text=True)
         check(proc.returncode == 0, 'aoc_cp 克隆失败退回普通复制 rc0: ' + proc.stderr)
         check((base / 'out').is_file() and (base / 'out').read_bytes() == src.read_bytes(), 'aoc_cp 退回后内容一致')

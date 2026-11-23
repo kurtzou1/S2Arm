@@ -61,28 +61,9 @@ fonts_ok "$CUR" && tz_up "$CUR" && [ "$tz_stale" = 0 ] && [ -z "$CP$SY" ] \
   && { echo "🟢 $G 系统数据已齐，跳过"; exit 0; }
 TAG=sys-$(cd "$F" && ls *.bfttf | xargs shasum -a 256 | shasum -a 256 | cut -c1-8)-tz${TZ_KEY}${CP:+-sd}${SY:+-syn}
 TAG=$(root_tag "$G" "$TAG"); W=$(root_begin "$G" "$TAG") || exit 1
-# 先按宿主惯例复制。macOS 上克隆失败就以 -X 普通复制一次，避免扩展属性再次阻止复制。
-# 递归克隆失败可能留下目标目录。清掉它再重试，避免把源目录嵌进目标。
-clone_or_copy() {
-  local label=$1 dst=${!#} clone_err copy_err
-  shift
-  clone_err=$(_root_cp "$@" 2>&1) && return 0
-  COPY_ERR=$clone_err
-  [ "$(uname -s)" = Darwin ] || return 1
-  if [ "$1" = -R ] && ! copy_err=$(_root_rm_red "$dst" 2>&1); then
-    COPY_ERR="$clone_err / 清理克隆残留：$copy_err"
-    return 1
-  fi
-  if copy_err=$(cp -X "$@" 2>&1 || exit $?); then
-    echo "【黄】$G $label 克隆复制失败，已改用普通复制：$(printf '%s' "$clone_err" | tr '\n' ' ')"
-    return 0
-  fi
-  COPY_ERR="$clone_err / 普通复制：$copy_err"
-  return 1
-}
 _root_rm "$W/systemdata/fonts"
 COPY_ERR=
-if ! mkdir -p "$W/systemdata/fonts" || ! clone_or_copy 字体 "$F"/*.bfttf "$W/systemdata/fonts/"; then
+if ! mkdir -p "$W/systemdata/fonts" || ! root_copy 字体 "$F"/*.bfttf "$W/systemdata/fonts/"; then
   root_abort "$G" "$TAG"
   echo "【红】拷字体失败：$(printf '%s' "${COPY_ERR:-建字体目录失败}" | tr '\n' ' ')"
   exit 1
@@ -101,7 +82,7 @@ while IFS=$'\t' read -r id src; do
   dst=$W/systemdata/$id
   _root_rm "$dst"
   rm -f "$dst.synth"
-  if ! clone_or_copy "系统数据 $id" -R "$src" "$dst"; then
+  if ! root_copy "系统数据 $id" -R "$src" "$dst"; then
     root_abort "$G" "$TAG"
     echo "【红】拷系统数据 $id 失败：$(printf '%s' "$COPY_ERR" | tr '\n' ' ')"
     exit 1

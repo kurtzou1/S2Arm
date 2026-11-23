@@ -352,6 +352,9 @@ s2a_gate_step "$PY" "$repo_dir/graphics/nvn/tests/storage_unmapped_mutation_test
 s2a_gate_step "$PY" "$repo_dir/graphics/nvn/tests/cs_ubo_sampler_mutation_test.py"
 # ReadTexels 读 GPU 内容（rp_read_texels.inc / 旁路段 / rp_entry 分支）：等之前的活、提交锁、行距片距、READBACK 与块对齐、栅栏推进、提交内拒绝、修前，各撤一处必红（纯宿主 C）
 s2a_gate_step "$PY" "$repo_dir/graphics/nvn/tests/read_texels_gpu_mutation_test.py"
+# 通道里着色器写之后的游戏屏障（rp_pass.c rp_pass_barrier / rp_pass_prepare_draw，rp_draw.c prog_shader_writes）：开着的通道里已有绘制写了存储缓冲 / 存储图像、其后游戏发了带顺序位的屏障 → 下一笔绘制前结束该通道；
+#   没有写 / 只有缓存失效位 / 屏障在写之前 / 拆过之后的新通道，不拆；14 个点变异各撤一处必红（纯宿主 C）
+s2a_gate_step "$PY" "$repo_dir/graphics/nvn/tests/shader_write_barrier_mutation_test.py"
 # 原创 Maxwell 经生产请求、真实编译器与生产结果解析；GPU 像素由 Vulkan 门禁另验。
 s2a_gate_step "$PY" "$android_dir/tests/gs_compiler_chain_test.py"
 # BUFFER texture: real producer, Maxwell compiler and SPIR-V parser.

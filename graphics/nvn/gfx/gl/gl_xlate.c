@@ -298,7 +298,20 @@ int s2a_gl_xlate(const char *src, size_t n, int frag, const char *key, char **ms
     char *fixed = s2a_glsl_es_prefix(src, n, &pn); if (!fixed) { snprintf(err, errcap, "out of memory"); return 1; }
     if (!(pre = glsl_preprocess(fixed, st, err, errcap))) goto out;
     if (!(glsl = s2a_glsl_es_rewrite(pre, strlen(pre), stc, &rn, err, errcap))) { if (!err[0]) snprintf(err, errcap, "out of memory"); goto out; }
-    if (!(w = glsl_spirv(glsl, st, &nw, err, errcap))) goto out;
+    if (!(w = glsl_spirv(glsl, st, &nw, err, errcap))) {
+        // D-TTP7 / #852（11-23，Darkest Dungeon）：ES 不许 int 隐式转 float（「uniform highp float - const int」：wrong operand types … no acceptable
+        //   conversion），NVIDIA 驱动放过。只在因此编不过时，版本行后加 GL_EXT_shader_implicit_conversions（ES 3.10 起、glslang 支持；放开的就是
+        //   桌面 GLSL 那套隐式转换）重编一次：本来编得过的着色器文本一字不变，运行时缓存与出包表不受影响
+        if (!strstr(err, "no acceptable conversion")) goto out;
+        const char *nl = strchr(glsl, '\n'); if (!nl || strncmp(glsl, "#version", 8)) goto out;
+        static const char ext[] = "#extension GL_EXT_shader_implicit_conversions : enable\n";
+        size_t hl = (size_t)(nl + 1 - glsl), gl = strlen(glsl); char *g2 = malloc(gl + sizeof ext);
+        if (!g2) goto out;
+        memcpy(g2, glsl, hl); memcpy(g2 + hl, ext, sizeof ext - 1); memcpy(g2 + hl + sizeof ext - 1, glsl + hl, gl - hl + 1);
+        char e2[1]; w = glsl_spirv(g2, st, &nw, e2, 0);
+        if (!w) { free(g2); goto out; }   // 加了扩展还不行：报原来的错
+        free(glsl); glsl = g2; err[0] = 0;
+    }
     rc = spv_to_msl(w, nw, frag, key, glsl, msl, fields, err, errcap);
 out:
     // #749 / D-45J6：报错说的是版本（「要写 es」「#version: …」）= 改写层没认出这种版本行。把原文第一条 #version 行带进报错

@@ -280,6 +280,8 @@ namespace S2A.Services
             if (StateGetterQueryRulesOn && n.EndsWith("ICommonStateGetter") && (c == 5 || c == 6 || c == 8 || c == 9 || c == 60 || c == 62 || c == 68 || c == 91 || c == 300)) return true;
             if (n.EndsWith("DatabaseServiceImpl") && c == 0) return true;                                 // 头像库 IsUpdated：纯查询
             if (n.Contains("IHidServer") && (c == 201 || c == 206)) return true;                          // 发震动（单 / 多）：只输出
+            // 取握持方式 GetNpadJoyHoldType（121）：纯查询，只往回复写值。有的游戏每帧都查（D-3F4A：一款动作游戏 110002 条、32 MB，占请求日志 99%）；设握持方式（120）照常记
+            if (n.Contains("IHidServer") && c == 121) return true;
             if (n.EndsWith("HardwareOpusDecoder") && c != 1 && c != 3 && c <= 9) return true;            // Opus 解码：只解这一段，留下的只有解码器内部预测（下一段自愈）；建 / 设上下文（1 / 3）照常
             //   ↑ 只认解码器对象本身：原先按「名字含」判，把解码器管理器（HardwareOpusDecoderManager，4 / 8 号建解码器）也丢了，恢复后游戏解码时对象找不到、自己中止（一款 Switch 2 游戏）
             // 网络套接字的等待 / 读取（Select 5、Poll 6、Recv 8、RecvFrom 9、Read 25）：不改服务状态，网络连接也没法跨进程接上；进了日志，恢复时在全新的
@@ -311,8 +313,12 @@ namespace S2A.Services
             if (n.Contains("AudioRenderer") && !n.Contains("Manager") && (uint)cmd == 4)
             {
                 // 渲染器 RequestUpdate：每会话只留最后一条（恢复时先重放它把效果 / 混音的托管对象建出来，再整块拷回渲染器缓冲）
-                byte[] e = Serialize(-1, num, cookie, cmd, n, msg, size);
-                lock (_lock) { _lastUpdate[cookie] = e; _dropped++; }
+                //   每秒约 200 次、每条约 100 KB：序列化进本会话复用的流、原地覆盖（11-23 Mac 实测快照开时托管分配 50 MB/s 里 99.7% 是这一类，GC 二代每秒约 1 次）
+                lock (_lock)
+                {
+                    if (!_lastUpdate.TryGetValue(cookie, out MemoryStream ms)) _lastUpdate[cookie] = ms = new MemoryStream();
+                    Serialize(-1, num, cookie, cmd, n, msg, size, ms); _dropped++;
+                }
                 s2a_snap_hctx(-3); return -1;
             }
             if (n.StartsWith("mm:") && ((uint)cmd == 2 || (uint)cmd == 6) && MmRequestId(msg, size) is uint rid)
@@ -348,7 +354,7 @@ namespace S2A.Services
                 return seq;
             }
         }
-        private static readonly Dictionary<ulong, byte[]> _lastUpdate = new();
+        private static readonly Dictionary<ulong, MemoryStream> _lastUpdate = new();   // 会话 → 最后一条 RequestUpdate（复用流，长度 = 条目长）
         private static readonly Dictionary<(ulong, uint, uint), byte[]> _lastMm = new();
         private static readonly Dictionary<(ulong, uint, uint), byte[]> _lastNvWait = new();   // (会话, fd, 事件槽) → 最后一次 EventWaitAsync
         private static readonly HashSet<int> _nvMapped = new();                                 // 已有一条留在日志里的 MapCommandBuffer 映射过的 nvmap 句柄
@@ -443,11 +449,38 @@ namespace S2A.Services
             for (int o = 8; o + 16 + 4 <= size; o += 4) if (*(uint*)(msg + o) == 0x49434653u) return *(uint*)(msg + o + 16);
             return null;
         }
-        private static byte[] Serialize(int seq, uint num, ulong cookie, long cmd, string n, byte* msg, int size)
+        // 分配账（每 30 秒结一次，请求序列化分配满 64 MB 才报一行【黄】）：每类请求序列化实际分配的字节（含只留最后一条 / 规则不记但先序列化的），对照进程托管总分配
+        private static readonly Dictionary<string, (long B, int C)> _allocBy = new(); private static readonly object _allocLock = new();
+        private static long _allocT0, _allocG0;
+        // into 给了：写进这个流（先清空、复用它的缓冲），回 null；没给：回新数组
+        private static byte[] Serialize(int seq, uint num, ulong cookie, long cmd, string n, byte* msg, int size, MemoryStream into = null)
+        {
+            long a0 = GC.GetAllocatedBytesForCurrentThread();
+            byte[] e = SerializeCore(seq, num, cookie, cmd, n, msg, size, into);
+            long a = GC.GetAllocatedBytesForCurrentThread() - a0, now = System.Diagnostics.Stopwatch.GetTimestamp();
+            string k = n + "#" + (uint)cmd; string line = null;
+            lock (_allocLock)
+            {
+                var v = _allocBy.GetValueOrDefault(k); _allocBy[k] = (v.B + a, v.C + 1);
+                if (_allocT0 == 0) { _allocT0 = now; _allocG0 = GC.GetTotalAllocatedBytes(); }
+                else if (now - _allocT0 >= 30 * System.Diagnostics.Stopwatch.Frequency)
+                {
+                    long g = GC.GetTotalAllocatedBytes(), sum = 0; double sec = (now - _allocT0) / (double)System.Diagnostics.Stopwatch.Frequency;
+                    var top = new List<KeyValuePair<string, (long B, int C)>>(_allocBy); top.Sort((x, y) => y.Value.B.CompareTo(x.Value.B));
+                    foreach (var kv in top) sum += kv.Value.B;
+                    var sb = new StringBuilder(); for (int i = 0; i < Math.Min(5, top.Count); i++) sb.Append($"{top[i].Key} {top[i].Value.B >> 10} KB×{top[i].Value.C}；");
+                    if (sum >= 64L << 20) line = $"[s2a] 【黄】即时存档分配账：近 {sec:F0} 秒托管总分配 {(g - _allocG0) >> 20} MB，其中请求序列化 {sum >> 20} MB（门槛 64 MB）；前 5 类：{sb}";
+                    _allocBy.Clear(); _allocT0 = now; _allocG0 = g;
+                }
+            }
+            if (line != null) Console.Error.WriteLine(line);
+            return e;
+        }
+        private static byte[] SerializeCore(int seq, uint num, ulong cookie, long cmd, string n, byte* msg, int size, MemoryStream into)
         {
             List<Desc> ds = ParseDescs(msg, size);
             AddRawPointers(ds, n, cmd, msg, size);
-            var ms = new MemoryStream(); var w = new BinaryWriter(ms);
+            var ms = into ?? new MemoryStream(); ms.SetLength(0); var w = new BinaryWriter(ms);
             w.Write(EntReq); w.Write(seq); w.Write(num); w.Write(cookie); w.Write(cmd); w.Write(n);
             w.Write(size); w.Write(new ReadOnlySpan<byte>(msg, size));
             w.Write(ds.Count);
@@ -465,7 +498,7 @@ namespace S2A.Services
                 w.Write(x.Kind); w.Write(x.Off); w.Write(x.Addr); w.Write(x.Size); w.Write(len);
                 if (len > 0 && x.Addr != 0) w.Write(new ReadOnlySpan<byte>((void*)x.Addr, len)); else if (len > 0) w.Write(new byte[len]);
             }
-            w.Flush(); return ms.ToArray();
+            w.Flush(); return into != null ? null : ms.ToArray();
         }
         internal static void End() { s2a_snap_hctx(-2); _connectSeq = 0; }
         internal static void OutObjects(List<int> ids)
@@ -588,7 +621,7 @@ namespace S2A.Services
                 {
                     var outLog = new ReqLog();
                     foreach (var kv in _tab.InOrder()) outLog.W.Write(kv.Value);
-                    foreach (var kv in _lastUpdate) { byte[] e = (byte[])kv.Value.Clone(); BitConverter.TryWriteBytes(new Span<byte>(e, 4, 4), _seq++); outLog.W.Write(e); }
+                    foreach (var kv in _lastUpdate) { byte[] e = kv.Value.ToArray(); BitConverter.TryWriteBytes(new Span<byte>(e, 4, 4), _seq++); outLog.W.Write(e); }
                     foreach (var kv in _lastMm) { byte[] e = (byte[])kv.Value.Clone(); BitConverter.TryWriteBytes(new Span<byte>(e, 4, 4), _seq++); outLog.W.Write(e); }
                     foreach (var kv in _lastNvWait) { byte[] e = (byte[])kv.Value.Clone(); BitConverter.TryWriteBytes(new Span<byte>(e, 4, 4), _seq++); outLog.W.Write(e); }
                     outLog.W.Write(EntMeta); outLog.W.Write(0); _tab.WriteMeta(outLog.W);
@@ -829,7 +862,7 @@ namespace S2A.Services
                     NvMapped(hs);
                 }
                 if (targets.TryGetValue(kv.Key, out var tc)) { _tab.Add(kv.Key, bytes, tc.T); continue; }
-                if (n.Contains("AudioRenderer") && !n.Contains("Manager") && c == 4) { _lastUpdate[kv.Value.Cookie] = bytes; continue; }
+                if (n.Contains("AudioRenderer") && !n.Contains("Manager") && c == 4) { var ms = new MemoryStream(); ms.Write(bytes); _lastUpdate[kv.Value.Cookie] = ms; continue; }
                 if (n.StartsWith("mm:") && (c == 2 || c == 6) && bytes.Length > 0 && MmRequestIdOf(bytes) is uint rid) { _lastMm[(kv.Value.Cookie, c, rid)] = bytes; continue; }
                 _tab.Add(kv.Key, bytes, new ReqTable.Key(0, 0));   // 旧快照（没有元数据）：挂在根上，不收（大小定在快照那一刻）
             }

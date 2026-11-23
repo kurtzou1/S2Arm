@@ -156,6 +156,7 @@ root_abort() { rm -rf "$S2A_ROOTS/$1@$2.tmp"; }
 root_stage_done() { if [ -n "${S2A_STAGE_KEYS:-}" ]; then printf '%s\t%s\n' "$2" "$3" >> "$S2A_STAGE_KEYS"; return 0; fi; [ "$(cat "$1/.stage_$2" 2>/dev/null)" = "$3" ]; }
 _root_rm() { rm -rf "$1"; }
 _root_cp() { cp "$@"; }
+root_copy() { shift; _root_cp "$@"; }   # 真 roots.sh 的共用拷贝（克隆不了退回普通复制，D-F9WY）；这里只测时区
 root_commit() { mv "$S2A_ROOTS/$1@$2.tmp" "$S2A_ROOTS/$1@$2"; printf '%s\n' "$1@$2" > "$S2A_ROOTS/$1@现行"; }
 ROOTS
 printf '#!/usr/bin/env python3\n' > "$T/repo/pack/sysdata_need.py"

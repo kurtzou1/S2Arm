@@ -56,7 +56,7 @@ int nvn_be_shutdown_session(void);   // 放掉全部后端对象、状态回到 
 void rp_pass_set_rt(nvn_gpu_cmd c, const p_set_rt *r);
 void rp_pass_clear_color(nvn_gpu_cmd c, const p_clear_color *cc, const void *rec);
 void rp_pass_clear_ds(nvn_gpu_cmd c, const p_clear_ds *cd, const void *rec);
-void rp_pass_barrier(uint32_t bits);
+void rp_pass_barrier(uint32_t bits);   // 游戏的屏障：记下位，下一个通道前交给后端；带「顺序」位、且开着的通道里已有着色器写的，下一笔绘制前结束该通道（见 rp_pass.c）
 uint32_t rp_pass_take_barrier(void);   // 通道外的计算派发前调：取走待发的游戏屏障位（取完清零），由调用方交给后端
 void rp_pass_prepare_draw(nvn_gpu_cmd c, uint32_t color_write_mask);   // 有效颜色写掩码（含片元输出映射）与像素区域；附件集合变了或区域超出时重开
 int rp_pass_begin(nvn_gpu_cmd c);     // 绘制前调：1 = 通道开着；0 = 开不了（已记账），跳过这笔
@@ -131,6 +131,7 @@ enum { RP_PERF_SUBMIT_NS, RP_PERF_COMMIT_NS, RP_PERF_SUBS, RP_PERF_WAIT_NS, RP_P
        RP_PERF_BINST_HZ, RP_PERF_BINST_ONE, RP_PERF_BINST_CUT, RP_PERF_BINST_SCAN, RP_PERF_BINST_WASTE,   // 间接绘制 base instance 拷贝：批量前移供上的笔数 / 逐笔拷的笔数 / 其中为它收了开着的通道 / 前移扫描次数 / 前移了没用上的笔数（rp_draw.c 通道级批量拷）
        RP_PERF_TM_FRAMES,      // 分时抽样：窗口里逐步计时过的帧数（#1103）；绘制各步 / 开通道细分 / 贴图解析等锁持锁按它求每帧值
        RP_PERF_GW_REG_N, RP_PERF_GW_REG_KB, RP_PERF_GW_MERGED_N, RP_PERF_GW_MERGED_KB,   // 显卡写登记：收到的登记条数 / 千字节；同段合并掉的条数 / 因重叠省下的千字节（落地拷贝按合并后的条数算，见 rp_buf.c rp_buf_gpu_write_note2）
+       RP_PERF_P_CUT_BAR,      // 通道里有着色器写、其后游戏发了带顺序位的屏障，因此在下一笔绘制前结束的通道数（见 rp_pass.c rp_pass_barrier）
        RP_PERF_N };   // P_CONT：同目标续接命中的 SET_RT 次数；P_CLEARONLY：一笔绘制都没有的通道数；P_PARK：记进挂起表的待折清除条数；BIND_FAST：整组绑定直接沿用没重建；TEX_EPOCH：贴图内容检查按纪元跳过的次数；PC_HIT/MISS：后端开通道缓存命中 / 新建   /* FX_*：做完时要写回游戏内存的提交数，和各类回写的个数（事件 / 计数器报告 / 遮挡事件 / 显卡写缓冲） */   // TEX_UP_*：贴图整张上传的次数与千字节；BUF_SYNC_KB：池镜像同步的千字节   // P_*：通道的构成（见 rp_pass.c rp_pass_end）   // D_*：一笔绘制里各步（见 rp_draw.c）
 void rp_perf_add(int i, uint64_t v);
 // 分时读数抽样（#1103）：一笔绘制取 10 次时钟 + 9 次原子加、一次贴图解析取 3 次、一个通道取 5 次，世界稳态每帧合计约 2.2 万次取时钟，占回放线程约 3%。
@@ -193,7 +194,8 @@ uint64_t rp_buf_gpu_write_note(uint64_t addr, uint64_t len, uint64_t *pool_key);
 // 同段合并版登记（merged 非空才合并，开关 nvk_land_merge）：本次提交里相交 / 首尾相接的已有登记并成一条，*merged = 1、返回已有那条的登记号（不要再记新落地项）。
 uint64_t rp_buf_gpu_write_note2(uint64_t addr, uint64_t len, uint64_t *pool_key, int *merged);
 int rp_rc_skip(void);                   // 条件渲染判成不画的那一段里
-void rp_pass_note_draw(int uses_ds);   // 一笔绘制进了当前通道（uses_ds：这笔开着深度测试 / 深度写 / 模板测试）
+enum { RP_NOTE_DS = 1, RP_NOTE_SHADER_WRITE = 2 };   // rp_pass_note_draw 的位
+void rp_pass_note_draw(int note);   // 一笔绘制进了当前通道（RP_NOTE_DS：这笔开着深度测试 / 深度写 / 模板测试；RP_NOTE_SHADER_WRITE：这笔的着色器写存储缓冲 / 存储图像）
 int rp_pass_slot_attached(int i);   // 当前目标的颜色槽 i 真的挂了附件（有图，且不是重复挂的同一张）：管线描述按它给格式
 void rp_pass_slot_size(int i, uint32_t *w, uint32_t *h);   // 颜色槽 i 的视图尺寸（像素；块压缩基底配一块当一个像素的视图时按块数）
 void rp_pass_noatt_size(uint32_t *w, uint32_t *h);   // 当前是无附件通道时给它的帧缓冲尺寸（缺省视口 / 裁剪夹取用）；不是就不动 *w *h

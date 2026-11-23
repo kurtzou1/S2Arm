@@ -8,9 +8,11 @@
 //     「Lights[1].color」有位置、「Lights[2].color」没有（−1）；Lights[0] = 红 × 0.5、Lights[1] = 绿 × 0.5，再乘 uSel.x / uSel.y（glUniform2i 设 (2, 2) = 1）
 //     → 左半 (0.5, 0.5, 0, 1) = 128 128 0 255（±1）。glUniform2i 没写进去（修前是空实现）时 uSel = (0, 0)，0 / 0 画不出这个颜色。
 //     元素偏移错（第 1 个元素写进第 0 个的位置）会读成 0 128 0 128 一类的值；翻不过（修前「类型 / 数组尚未接入运行时」）则链接失败
+//   G D-TTP7 / #852：顶点里 uniform float 减 const int（ES 不许 int 隐式转 float，NVIDIA 放过，Darkest Dungeon 一支顶点因此编不过）：
+//     api_conv.vert + api_es300.frag 现编（片元已缓存，只新翻顶点 1 支）→ 编译 / 链接成；z = uZero − K = 0，画面同 tri：左红、右蓝
 //   C 翻译失败照旧报红：调未声明函数的片元 → 编译状态 0、日志以「翻译失败」开头、链接失败、坏计数 +1、直连异常计数 gl_bad_err +1；同一源码再编一次不重翻（坏计数不变）
 // 第 2 遍（T_GL_RT_PASS=2，同一缓存目录、新进程）：
-//   D 第二次命中缓存：开机预编上次 5 支（B 的 4 支 + F 的片元 1 支），api_es300 / texture100 编译状态 1，首遇计数 0、读缓存计数 4；两个程序画出同第 1 遍的颜色
+//   D 第二次命中缓存：开机预编上次 6 支（B 的 4 支 + F 的片元 1 支 + G 的顶点 1 支），api_es300 / texture100 编译状态 1，首遇计数 0、读缓存计数 4；两个程序画出同第 1 遍的颜色
 // 两遍都核 E 直连就绪判定（s2a_gl_lib_ready，gfxmode 选直连靠它）：只有表头（gl_shaders.py 离线 0 支的产物，第 3 行工具版本超 256 字节）→ 1；
 //   离线库（tri 两行 + metallib）→ 1；同一张两行表、拿走 metallib → 0（11-03 AM2R 真机：长表头后半截被数成 1 行、判「有行没库」走了通用）
 // 期望都按着色器写法与 GL 规范手算（纯色四边形、1×1 贴图），不跑被测实现。
@@ -132,13 +134,17 @@ int main(void) { alarm(120); @autoreleasepool {
         glUniform4f(glGetUniformLocation(sa, "Lights[0].color"), 1, 0, 0, 1); glUniform1f(glGetUniformLocation(sa, "Lights[0].scale"), 0.5f);
         glUniform4f(l1, 0, 1, 0, 1); glUniform1f(glGetUniformLocation(sa, "Lights[1].scale"), 0.5f); glUniform2i(glGetUniformLocation(sa, "uSel"), 2, 2);
         draw_left_red(sa, l, r, ls, rs); CHECK(is(l, 128, 128, 0, 255) && is(r, 0, 0, 255, 255) && !glGetError(), "左 (0.5, 0.5, 0, 1)（%s）、右蓝（%s）", ls, rs);
+        printf("G float 减 const int 的顶点\n");
+        uint64_t g0 = st[0]; GLuint cv = program("api_conv.vert", "api_es300.frag", &vok, &fok, &lok); stats();
+        CHECK(vok == 1 && fok == 1 && lok == 1 && st[0] == g0 + 1, "编译 %d / %d、链接 %d、首遇 +%llu（期望 1）", vok, fok, lok, (unsigned long long)(st[0] - g0));
+        draw_left_red(cv, l, r, ls, rs); CHECK(is(l, 255, 0, 0, 255) && is(r, 0, 0, 255, 255) && !glGetError(), "左红（%s）、右蓝（%s）", ls, rs);
     } else {
         printf("D 第二次命中缓存\n");
         GLuint es3 = program("api_es300.vert", "api_es300.frag", &vok, &fok, &lok); GLint vok1 = 0, fok1 = 0, lok1 = 0;
         GLuint es1 = program("texture100.vs", "texture100.fs", &vok1, &fok1, &lok1);
         draw_left_red(es3, l, r, ls, rs); draw_tex_green(es1, m, ms); stats();
-        CHECK(vok == 1 && fok == 1 && vok1 == 1 && fok1 == 1 && lok == 1 && lok1 == 1 && st[0] == 0 && st[3] == 5 && st[1] == 0,
-              "编译 / 链接全成；首遇 %llu（期望 0）、读缓存 %llu（期望 5）、新翻 %llu（期望 0）", (unsigned long long)st[0], (unsigned long long)st[3], (unsigned long long)st[1]);
+        CHECK(vok == 1 && fok == 1 && vok1 == 1 && fok1 == 1 && lok == 1 && lok1 == 1 && st[0] == 0 && st[3] == 6 && st[1] == 0,
+              "编译 / 链接全成；首遇 %llu（期望 0）、读缓存 %llu（期望 6）、新翻 %llu（期望 0）", (unsigned long long)st[0], (unsigned long long)st[3], (unsigned long long)st[1]);
         CHECK(is(l, 255, 0, 0, 255) && is(r, 0, 0, 255, 255) && is(m, 0, 255, 0, 255) && !glGetError(), "ES 3.00 左红（%s）右蓝（%s）；ES 1.00 中心绿（%s）", ls, rs, ms);
     }
     printf("E 直连就绪判定\n");

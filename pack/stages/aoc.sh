@@ -86,20 +86,9 @@ with open(os.path.join(dst, 'aoc.tsv'), 'w', encoding='utf-8') as f:
     f.write(head + ''.join(rows[k] + '\n' for k in sorted(rows)))
 PY
 }
-# 单个文件进 / 出追加内容缓存：先按宿主惯例克隆（_root_cp），克隆不了就在 Mac 上普通复制一次、打【黄】带克隆的原话（同 pack/stages/sysdata.sh clone_or_copy）。
-#   缓存在游戏库 tool-cache、现行在这款游戏的存放位置，两边可能不在同一卷（诊断 D-GHJC：游戏刚换存放位置，cp -c 报「clonefile failed: Cross-device link」整单停）。
-#   只用于文件（不递归），不会留下半份目录；普通复制也失败才算失败，报两次的原话
-aoc_cp() {
-  local clone_err copy_err
-  clone_err=$(_root_cp "$@" 2>&1) && return 0
-  [ "$(uname -s)" = Darwin ] || { printf '%s\n' "$clone_err" >&2; return 1; }
-  if copy_err=$(cp -X "$@" 2>&1 || exit $?); then
-    echo "【黄】${G:-?} 追加内容：克隆复制失败，已改用普通复制：$(printf '%s' "$clone_err" | tr '\n' ' ')"
-    return 0
-  fi
-  printf '%s / 普通复制：%s\n' "$clone_err" "$copy_err" >&2
-  return 1
-}
+# 单个文件进 / 出追加内容缓存：缓存在游戏库 tool-cache、现行在这款游戏的存放位置，两边可能不在同一卷（诊断 D-GHJC）。
+#   走共用的 root_copy（pack/roots.sh：克隆不了就普通复制、打【黄】）；两次都失败把原话打到 stderr
+aoc_cp() { root_copy 追加内容 "$@" || { printf '%s\n' "$COPY_ERR" >&2; return 1; }; }
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then return 0; fi
 
 set -u

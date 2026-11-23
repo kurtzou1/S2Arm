@@ -83,6 +83,16 @@ ck "②–⑨ 产物根 romfs 一直是 ① 那份原版身份（$(readlink "$(c
 v=$(c); chmod -R u+w "$(cd -P "$v/romfs" && pwd)"; printf drift-b > "$v/romfs/Layout/b.zs"; printf 'Layout/a.zs\nLayout/b.zs\n' > "$v/ui_overlay.tsv"; echo stale > "$v/.stage_uilayout"
 o=$(S 2>&1); r=$?
 ck "⑪ 底下与原版不同的上一版文件 → 读到原版 orig-b（$(rd b.zs)）、清单 a + b、a.zs 照覆盖（$(rd a.zs)）" '[ $r = 0 ] && [ "$(rd b.zs)" = orig-b ] && [ "$(cat "$(c)/ui_overlay.tsv" | tr "\n" " ")" = "Layout/a.zs Layout/b.zs " ] && [ "$(rd a.zs)" = v7:new-a ]'
+# ⑫ 克隆复制跨卷失败（D-F9WY：游戏换了存放位置，覆盖包缓存与现行不在同一卷，cp -c 报「clonefile failed: Cross-device link」整单停）：
+#   假 cp 遇 -c 就报玩家原话、其余照真 cp → 期望退出 0、覆盖照写（a.zs = v12:new-a）、打一行【黄】带克隆原话。修前：【红】覆盖 Layout/a.zs 失败、退出 1
+mkdir -p $T/fakebin; cat > $T/fakebin/cp <<'EOF2'
+#!/bin/bash
+for a in "$@"; do [ "$a" = -c ] && { echo "cp: ${@: -1}: clonefile failed: Cross-device link" >&2; exit 1; }; done
+exec /bin/cp "$@"
+EOF2
+chmod +x $T/fakebin/cp; gen v12
+o=$(PATH=$T/fakebin:$PATH S 2>&1); r=$?
+ck "⑫ 克隆跨卷失败 → 退回普通复制：退出 ${r}、a.zs = v12:new-a（$(rd a.zs)）、黄行带原话" '[ $r = 0 ] && [ "$(rd a.zs)" = v12:new-a ] && [[ "$o" == *【黄】*Cross-device\ link* ]] && [[ "$o" != *【红】* ]]'
 # ⑩ 镜像形态：现行只有 romfs.std（同一份原版建的标准 RomFS，LibHac；去掉 Layout/c.zs，好核「镜像没有的覆盖文件跳过」）
 export DOTNET_ROOT=${DOTNET_ROOT:-$HOME/.dotnet}; export PATH=$DOTNET_ROOT:$PATH
 if command -v dotnet > /dev/null; then

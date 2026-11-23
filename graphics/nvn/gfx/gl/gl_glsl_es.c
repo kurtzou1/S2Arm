@@ -323,6 +323,48 @@ static char *sample_names(const char *t, size_t n, size_t *on) {
     }
     sb_put(&o, t + last, n - last); return sb_take(&o, on);
 }
+// D-TTP7（11-23，Darkest Dungeon GL 款）：GLSL ES 3.x 里只有 float / int / sampler2D / samplerCube 有缺省精度，其余采样器 / 图像类型（sampler3D、
+//   sampler2DShadow、sampler2DArray、isampler* / usampler*、image* …）用到就必须先声明缺省精度，glslang 照规范报「'sampler/image' : type requires
+//   declaration of default precision qualifier」整支编不过；NVIDIA 驱动放过。正文用到这些类型、又没写对应 precision 语句的，在版本行后补
+//   「precision highp <类型>;」（只补用到的，没用到的源码一字不变）
+static const char *const k_prec_types[] = {
+    "sampler3D", "samplerCubeShadow", "sampler2DShadow", "sampler2DArray", "sampler2DArrayShadow", "sampler2DMS",
+    "isampler2D", "isampler3D", "isamplerCube", "isampler2DArray", "isampler2DMS", "usampler2D", "usampler3D", "usamplerCube", "usampler2DArray", "usampler2DMS",
+    "image2D", "iimage2D", "uimage2D", "image3D", "iimage3D", "uimage3D", "imageCube", "iimageCube", "uimageCube", "image2DArray", "iimage2DArray", "uimage2DArray",
+};
+static int prec_has_word(const char *t, size_t n, const char *w) {
+    size_t wl = strlen(w);
+    for (size_t i = 0; i + wl <= n; i++) if (!memcmp(t + i, w, wl) && boundary_before(t, i) && (i + wl == n || !is_word((unsigned char)t[i + wl]))) return 1;
+    return 0;
+}
+static int has_prec_decl(const char *t, size_t n, const char *w) {   // precision\s+(lowp|mediump|highp)\s+w\b
+    for (size_t i = 0; i + 9 <= n; i++) {
+        if (memcmp(t + i, "precision", 9) || !boundary_before(t, i)) continue;
+        size_t j = skip_space(t, n, i + 9); if (j == i + 9) continue;
+        size_t q = j; while (q < n && is_word((unsigned char)t[q])) q++;
+        if (!(q - j == 4 && !memcmp(t + j, "lowp", 4)) && !(q - j == 7 && !memcmp(t + j, "mediump", 7)) && !(q - j == 5 && !memcmp(t + j, "highp", 5))) continue;
+        size_t k = skip_space(t, n, q); size_t wl = strlen(w);
+        if (k > q && starts(t, n, k, w) && (k + wl == n || !is_word((unsigned char)t[k + wl]))) return 1;
+    }
+    return 0;
+}
+static char *sampler_precision(char *t, size_t n, size_t *on) {   // t 以「#version …」行开头（es100 / 310 es 两条路都是）
+    sb add = {0};
+    for (size_t i = 0; i < sizeof k_prec_types / sizeof *k_prec_types; i++)
+        if (prec_has_word(t, n, k_prec_types[i]) && !has_prec_decl(t, n, k_prec_types[i])) { sb_str(&add, "precision highp "); sb_str(&add, k_prec_types[i]); sb_str(&add, ";\n"); }
+    if (add.oom) { free(add.p); return NULL; }
+    if (!add.n) { *on = n; return t; }
+    // 插在开头连续的预处理行（#version / #extension / #pragma …，及其间空行）之后：#extension 必须在任何非预处理记号之前
+    size_t cut = 0;
+    for (;;) {
+        size_t j = skip_space(t, n, cut); if (j >= n) { cut = n; break; }
+        if (t[j] != '#' && t[j] != '\n') break;
+        const char *nl = memchr(t + j, '\n', n - j); if (!nl) { cut = n; break; }
+        cut = (size_t)(nl + 1 - t);
+    }
+    sb o = {0}; sb_put(&o, t, cut); if (cut && t[cut - 1] != '\n') sb_str(&o, "\n"); sb_put(&o, add.p, add.n); sb_put(&o, t + cut, n - cut); free(add.p); free(t);
+    return sb_take(&o, on);
+}
 char *s2a_glsl_es_rewrite(const char *pre, size_t n, char stage, size_t *out_n, char *err, size_t errn) {
     if (errn) err[0] = 0;
     if (stage != 'v' && stage != 'f' && stage != 'c') { snprintf(err, errn, "stage %c is not v / f / c", stage); return NULL; }
@@ -355,6 +397,7 @@ char *s2a_glsl_es_rewrite(const char *pre, size_t n, char stage, size_t *out_n, 
     //   11-20 D-45CD：原先只在「结果不是 3.20、也没开扩展」时改名——游戏写「#version 320」（NVIDIA 放过不写 es，s2a_glsl_es_prefix 补成 320 es）
     //   又拿 sample 当名字，照样报 Reserved word。改成按用法判，不按版本判：sample 后面紧跟 in / out / 插值 / 精度限定词才是限定符（原样），其余一律是名字、改 s2a_sample
     { size_t sn; char *x = sample_names(body, bn, &sn); free(body); if (!x) { if (errn && !err[0]) snprintf(err, errn, "out of memory"); return NULL; } body = x; bn = sn; }
+    { size_t pn; char *x = sampler_precision(body, bn, &pn); if (!x) { free(body); if (errn && !err[0]) snprintf(err, errn, "out of memory"); return NULL; } body = x; bn = pn; }
     size_t fn; char *fx = fixups(body, bn, &fn, err, errn);
     if (!fx) return NULL;
     return flatten_blocks(fx, fn, stage, out_n);

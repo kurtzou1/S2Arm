@@ -84,6 +84,9 @@ void *s2a_guest_main(void *a) {
     if (fault_error) die("Android 主线程 fault 状态初始化失败 errno=%d", fault_error);
 #endif
     sw_xstack_thread_init(((uint64_t)__builtin_frame_address(0) - 0x400) & ~0xfull, g_start->stack_top);
+#if defined(__APPLE__) && !defined(__ANDROID__) && !defined(__OHOS__)
+    { void s2a_thread_main_stack(uint64_t); s2a_thread_main_stack(g_start->stack_top); }   // 即时存档记下主线程栈顶（D-2T89）
+#endif
 #if defined(__ANDROID__) || defined(__OHOS__)
     // 借用原 xstack host cursor，不能在独立 mmap 栈上调用 NativeAOT。
     if (!s2a_android_fault_thread_ready()) die("Android 主线程 fault/xstack 尚未就绪");

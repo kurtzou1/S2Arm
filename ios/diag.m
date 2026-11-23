@@ -348,7 +348,8 @@ static void post_zip(NSURL *zip, int attempt, CFAbsoluteTime started, void (^don
         else if (status == 429) fail = S2AL(@"diag.upload.fail.busy");
         else if (status == 400 || status == 413) fail = s2a_l10n_zh() && msg.length ? msg : [NSString stringWithFormat:S2AL(@"diag.upload.fail.rejected"), why];
         else fail = [NSString stringWithFormat:S2AL(@"diag.upload.fail.server"), status];
-        LOG("【红】诊断包：上传失败（HTTP %d %s %s），退回导出", status, why.UTF8String, e ? e.localizedDescription.UTF8String : "");
+        LOG("【红】诊断包：上传失败（HTTP %d %s %s%s%s），退回导出", status, why.UTF8String, e ? e.localizedDescription.UTF8String : "",
+            msg.length ? " 服务端：" : "", msg.length ? msg.UTF8String : "");   // 服务端 message 带被拒的文件名（400 forbidden_file，D-CJSN）：原先只记错误码，查不出是哪个文件
         dispatch_async(dispatch_get_main_queue(), ^{ g_upload_task = nil; done(nil, fail); });
     }];
     dispatch_async(dispatch_get_main_queue(), ^{ if (!g_upload_cancelled) { g_upload_task = task; [NSNotificationCenter.defaultCenter postNotificationName:@"S2ADiagExportChanged" object:nil]; [task resume]; } else { [task cancel]; } });

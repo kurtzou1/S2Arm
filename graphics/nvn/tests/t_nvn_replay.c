@@ -4465,6 +4465,81 @@ static void t_pass_layered(void) {
     pass_fresh();
 }
 
+// 游戏的顺序屏障落在「通道里已有着色器写」之后：屏障后的第一笔绘制另开通道（rp_pass.c rp_pass_barrier / rp_pass_prepare_draw）。
+// 真机形态（Title ID 010074F013262000，Adreno 840）：一帧里顶点着色器写存储缓冲（蒙皮结果）的绘制与随后读它的绘制夹在同一个通道里，游戏在写段之后发屏障
+// （ORDER_PRIMITIVES | INVALIDATE_SHADER = 0x21），回放层原先只记位、不拆通道；分块渲染的 GPU 先给整个通道的绘制做分块归属，读到写之前的旧数据，天空出现黑色块。
+// 对齐：iOS nvn_mtl.m OP_BARRIER（通道里有着色器写 + ORDER_* 位 → 结束通道）；Ryujinx BarrierBatch.Flush（高通私有驱动不支持通道内屏障 → 结束通道）。
+// 期望值手算（W = 程序对存储缓冲有写访问位的一笔，R = 只读的一笔，bXX = 游戏屏障、位 0xXX）：
+//   W b21 R → 2 个通道，屏障位 0x21 在第二个通道开始前交后端（此前已开 1 个），通道被屏障结束 1 次；
+//   负对照：W R → 1；R b21 R → 1（读不算写）；R b21 W → 1（屏障前通道里没有写）；b21 W R → 1（屏障在所有绘制之前）；
+//   W b20 R / W b10 R / W bC0 R → 1（只有缓存失效位、没有顺序位：INVALIDATE_SHADER 0x20、INVALIDATE_TEXTURE 0x10、INVALIDATE_TEXTURE_DESCRIPTOR | INVALIDATE_ZCULL 0xC0）；
+//   W bX R → 2，X = ORDER_PRIMITIVES 1 / ORDER_FRAGMENTS 2 / ORDER_FRAGMENTS_TILED 4 / ORDER_INDIRECT_DATA 8；
+//   W b1 b20 R、W b20 b1 R → 2（两次屏障合起来只拆一次，位并起来 0x21，顺序位在前在后都算）；W b1 R b1 R → 2（拆开后新通道里没有写，第二次屏障不再拆）；W b1 W b1 R → 3（每个写后面的屏障各拆一次）。
+//   同一张表跑两种「写」：img = 0 顶点阶段的存储缓冲（NVN_RB_SBUFP，槽没绑 → 64 KiB 空缓冲照画，见 t_storage_null_binding）；img = 1 片元阶段的存储图像（NVN_RB_IMG，见 t_graphics_image）。
+struct sw_op { char k; int32_t bits; };   // k：'W' / 'R' 一笔绘制，'b' 一次游戏屏障
+static void sw_run(int img, const struct sw_op *ops, int n, int *passes, uint64_t *cuts, uint32_t *bar_bits, int *bar_at, int *draws) {
+    static struct rp_prog wp, rd; static tex_t it;
+    q_env(&(stream){0});   // 只为把 g_fprog 复位成固定布局（流丢弃）
+    wp = g_fprog;
+    if (img) { wp.nent[1] = 1; wp.ent[1][0].cls = NVN_GPU_RES_IMAGE; wp.ent[1][0].src_kind = NVN_RB_IMG; wp.ent[1][0].src_reg = 2; wp.ent[1][0].count = 1; wp.ent[1][0].access = NVN_GPU_ACC_RW; }
+    else     { wp.nent[0] = 1; wp.ent[0][0].cls = NVN_GPU_RES_SSBO; wp.ent[0][0].src_kind = NVN_RB_SBUFP; wp.ent[0][0].src_reg = 0; wp.ent[0][0].access = NVN_GPU_ACC_RW; }
+    rd = wp; rd.ent[img][0].access = NVN_GPU_ACC_R;   // 同一布局、只读：两种程序除了写访问位一模一样
+    pass_fresh(); g_resolve_rc = 0; g_gdraws = 0;
+    if (img) { it = mk_tex(669, 0, NVN_FORMAT_RGBA8, 8, 8, 1, NVN_TEXTURE_FLAGS_IMAGE); nvn_be_reg_tex(3, &it, NULL); nvn_be_set_tex_pool_n(8); memset(rp_S.img[1], 0, sizeof rp_S.img[1]); rp_S.img[1][2] = 3; }   // pass_fresh 会清登记：在它之后登
+    int nd = 0; for (int i = 0; i < n; i++) if (ops[i].k != 'b') { CHECK(nd < 4); g_resolve_seq[nd++] = ops[i].k == 'W' ? &wp : &rd; }
+    g_resolve_seq_n = nd; g_resolve_seq_i = 0;
+    uint64_t pf[RP_PERF_N]; rp_perf_take(pf);
+    stream s = {0}; q_env(&s);
+    nd = 0;
+    for (int i = 0; i < n; i++) {
+        if (ops[i].k == 'b') { uint8_t *b = put(&s, OP_BARRIER, 8); memcpy(b, &ops[i].bits, 4); continue; }
+        p_draw *d = put(&s, OP_DRAW, sizeof *d); d->prim = nd++ & 1 ? 5 : 4; d->count = 3; d->instances = 1;   // 换图元 = 换管线，逐笔重新解析程序（同 lay_run）
+    }
+    end(&s); submit1(&s); fake_complete(NVN_GPU_DONE_OK);
+    rp_perf_take(pf);
+    g_resolve_seq_n = 0;
+    *passes = g_npd; *cuts = pf[RP_PERF_P_CUT_BAR]; *bar_bits = g_barrier_bits; *bar_at = g_barrier_at; *draws = g_gdraws;
+    CHECK(nvn_unimpl_kinds() == 0);
+}
+static void t_shader_write_barrier_split(void) {
+    enum { BB_P = NVN_BARRIER_ORDER_PRIMITIVES_BIT, BB_F = NVN_BARRIER_ORDER_FRAGMENTS_BIT, BB_FT = NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT, BB_IND = NVN_BARRIER_ORDER_INDIRECT_DATA_BIT,
+           BB_ITEX = NVN_BARRIER_INVALIDATE_TEXTURE_BIT, BB_ISH = NVN_BARRIER_INVALIDATE_SHADER_BIT, BB_ITD = NVN_BARRIER_INVALIDATE_TEXTURE_DESCRIPTOR_BIT, BB_IZ = NVN_BARRIER_INVALIDATE_ZCULL_BIT };
+    struct { const char *name; struct sw_op ops[6]; int n, passes; uint64_t cuts; } t[] = {
+        { "W b21 R",       { {'W', 0}, {'b', BB_P | BB_ISH}, {'R', 0} },                           3, 2, 1 },
+        { "W R",           { {'W', 0}, {'R', 0} },                                                 2, 1, 0 },
+        { "R b21 R",       { {'R', 0}, {'b', BB_P | BB_ISH}, {'R', 0} },                           3, 1, 0 },
+        { "R b21 W",       { {'R', 0}, {'b', BB_P | BB_ISH}, {'W', 0} },                           3, 1, 0 },
+        { "b21 W R",       { {'b', BB_P | BB_ISH}, {'W', 0}, {'R', 0} },                           3, 1, 0 },
+        { "W b20 R",       { {'W', 0}, {'b', BB_ISH}, {'R', 0} },                                  3, 1, 0 },
+        { "W b10 R",       { {'W', 0}, {'b', BB_ITEX}, {'R', 0} },                                 3, 1, 0 },
+        { "W bC0 R",       { {'W', 0}, {'b', BB_ITD | BB_IZ}, {'R', 0} },                          3, 1, 0 },
+        { "W b01 R",       { {'W', 0}, {'b', BB_P}, {'R', 0} },                                    3, 2, 1 },
+        { "W b02 R",       { {'W', 0}, {'b', BB_F}, {'R', 0} },                                    3, 2, 1 },
+        { "W b04 R",       { {'W', 0}, {'b', BB_FT}, {'R', 0} },                                   3, 2, 1 },
+        { "W b08 R",       { {'W', 0}, {'b', BB_IND}, {'R', 0} },                                  3, 2, 1 },
+        { "W b01 b20 R",   { {'W', 0}, {'b', BB_P}, {'b', BB_ISH}, {'R', 0} },                     4, 2, 1 },
+        { "W b20 b01 R",   { {'W', 0}, {'b', BB_ISH}, {'b', BB_P}, {'R', 0} },                     4, 2, 1 },
+        { "W b01 R b01 R", { {'W', 0}, {'b', BB_P}, {'R', 0}, {'b', BB_P}, {'R', 0} },             5, 2, 1 },
+        { "W b01 W b01 R", { {'W', 0}, {'b', BB_P}, {'W', 0}, {'b', BB_P}, {'R', 0} },             5, 3, 2 },
+    };
+    for (int img = 0; img < 2; img++) {
+        for (unsigned i = 0; i < sizeof t / sizeof *t; i++) {
+            int passes, bar_at, draws; uint64_t cuts; uint32_t bar_bits; int nd = 0;
+            for (int k = 0; k < t[i].n; k++) if (t[i].ops[k].k != 'b') nd++;
+            sw_run(img, t[i].ops, t[i].n, &passes, &cuts, &bar_bits, &bar_at, &draws);
+            if (passes != t[i].passes || cuts != t[i].cuts || draws != nd) printf("t_shader_write_barrier_split img=%d %s：通道 %d（期望 %d）被屏障结束 %llu（期望 %llu）画 %d（期望 %d）\n", img, t[i].name, passes, t[i].passes, (unsigned long long)cuts, (unsigned long long)t[i].cuts, draws, nd);
+            CHECK(passes == t[i].passes && cuts == t[i].cuts && draws == nd);
+        }
+        // 拆开的那一次：屏障位在第二个通道开始前交后端（此前只开过 1 个），合并后的位 0x21
+        { int passes, bar_at, draws; uint64_t cuts; uint32_t bar_bits;
+          struct sw_op ops[] = { {'W', 0}, {'b', BB_P}, {'b', BB_ISH}, {'R', 0} };
+          sw_run(img, ops, 4, &passes, &cuts, &bar_bits, &bar_at, &draws);
+          CHECK(passes == 2 && bar_bits == (BB_P | BB_ISH) && bar_at == 1); }
+    }
+    memset(rp_S.img[1], 0, sizeof rp_S.img[1]);
+    pass_fresh();
+}
+
 // 程序自带常量段 c1 整段绑定（八方旅人调色 LUT 的片元读 c1 到第 2304 字节；原先只绑前 0x100，后段读 0 → LUT 全 0 → 场景整幅黑）。
 // 期望值手算：① 2304 字节的 c1 → 绑定长 2304，暂存区内容与 c1 逐字节相同；② 2300 字节 → 按 16 字节补齐成 2304，前 2300 字节相同、末 4 字节 0；
 // ③ 设备 maxUniformBufferRange = 2048 < 2304 → 这一笔具名跳过 c1_segment_over_ubo_range 一次、不画。
@@ -7693,6 +7768,7 @@ int main(int argc, char **argv) {
     t_view_storage_pixels();
     t_pass_3d_slice_view();
     t_pass_layered();
+    t_shader_write_barrier_split();
     t_draw_c1_full();
     t_bind_reuse();
     t_begin_fail();

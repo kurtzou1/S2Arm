@@ -33,6 +33,7 @@ static struct {
     uint8_t layered, want_layered; // 当前通道 / 下一笔绘制是不是分层通道（程序的顶点 / 几何阶段写层号，见 rp_pass_want_layered）
     uint8_t na_from_rt;            // 全零掩码：无附件，但光栅范围仍受逻辑目标尺寸限制
     uint32_t barrier_bits;    // 游戏发过的屏障位：下一个通道前交给后端
+    int sw_pend, sw_split;    // 当前通道里有绘制的着色器写了存储缓冲 / 存储图像；其后游戏发过带顺序位的屏障 = 下一笔绘制前要结束通道（见 rp_pass_barrier）
     int has_ds, ds_used, ndraw;   // 当前通道：挂了深度模板附件、有绘制 / 清除用到它、绘制笔数（读数用）
     uint32_t cur_kpix;            // 当前通道的千像素（读数用：0–1 笔通道各吃掉多少像素）
     // 渲染区域（开关 debug.s2a.nvk_pass_area）：附件只在区域内载入 / 保存。区域只按「裁剪矩形」收缩——后端把裁剪矩形原样交给
@@ -230,7 +231,7 @@ static const view_t *att_view_n(const tex_t *t, int has_v, const view_t *v, view
     tmp->set_target = 1; tmp->target = NVN_TEXTURE_TARGET_2D_ARRAY;
     return tmp;
 }
-void rp_pass_note_draw(int uses_ds) { P.ndraw++; if (uses_ds) P.ds_used = 1; }
+void rp_pass_note_draw(int note) { P.ndraw++; if (note & RP_NOTE_DS) P.ds_used = 1; if (note & RP_NOTE_SHADER_WRITE) P.sw_pend = 1; }
 void rp_pass_slot_size(int i, uint32_t *w, uint32_t *h) { level_size(P.rt.color[i], &P.rt.cview[i], P.rt.has_cview[i], w, h); }
 void rp_pass_noatt_size(uint32_t *w, uint32_t *h) { if (P.na_w && P.na_h) { *w = P.na_w; *h = P.na_h; } }
 
@@ -475,6 +476,7 @@ static uint64_t pb_now(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC
 // 绘制前调（rp_draw 在 rp_pass_begin 之前）：把这一笔要求的像素区域交给下一步开通道；通道已经开着而这一笔超出当前区域，
 // 收通道并按并集重开（重开用 LOAD：上一遍只保存过它自己的区域，区域外内容本来就是原样；带清除负载的通道区域必是整张，走不到这里）。
 void rp_pass_prepare_draw(nvn_gpu_cmd c, uint32_t color_write_mask) {
+    if (P.open && P.sw_split) { rp_perf_add(RP_PERF_P_CUT_BAR, 1); rp_pass_end(c); }   // 通道里的着色器写之后游戏发过屏障：这一笔另开通道（见 rp_pass_barrier）
     uint8_t wanted = 0;
     for (int i = 0; i < 8; i++) if (color_write_mask >> (4 * i) & 0xf) wanted |= (uint8_t)(1u << i);
     wanted = select_colors(wanted);
@@ -599,7 +601,7 @@ static int pass_begin_colors(nvn_gpu_cmd c, uint8_t colors, int layered) {
     if (P.barrier_bits) { nvn_gpu_barrier(c, P.barrier_bits); P.barrier_bits = 0; }
     PB(RP_PERF_PB_BAR);
     d.occlusion = (uint8_t)rp_occl_want();
-    P.has_ds = d.depth.view || d.stencil.view; P.ds_used = pcd || pcs; P.ndraw = 0;
+    P.has_ds = d.depth.view || d.stencil.view; P.ds_used = pcd || pcs; P.ndraw = 0; P.sw_pend = P.sw_split = 0;
     for (int i = 0; i < P.rt.n && i < 8; i++) if (d.color[i].view && d.color[i].load == NVN_GPU_LOAD_LOAD) rp_perf_add(RP_PERF_P_LOADC, 1);
     rp_perf_add(RP_PERF_P_KPIX, (uint64_t)d.w * d.h / 1000);
     P.cur_kpix = (uint32_t)((uint64_t)d.w * d.h / 1000);
@@ -843,8 +845,17 @@ void rp_pass_clear_ds(nvn_gpu_cmd c, const p_clear_ds *cd, const void *rec) {
     park_put_depth(c, do_d, depth_value(cd->depth), do_s, cd->stencil);   // 挂起：深度 / 模板两面合成一项
 }
 
-// 游戏的屏障：不拆通道，记下位，下一个通道前交给后端（nvn_mtl.m:14646 的缺省路径；通道内着色器写图像后要求片元顺序的拆通道随图像绑定一起接）
-void rp_pass_barrier(uint32_t bits) { P.barrier_bits |= bits; }
+// 游戏的屏障：记下位，下一个通道前交给后端（nvn_mtl.m:14646 的缺省路径）。
+// 例外：开着的通道里已经有绘制的着色器写了存储缓冲 / 存储图像（rp_pass_note_draw），游戏又发了带顺序位的屏障（ORDER_PRIMITIVES 管顶点 / 几何阶段的写，
+// ORDER_FRAGMENTS / ORDER_FRAGMENTS_TILED 管片元阶段的写，ORDER_INDIRECT_DATA 管间接参数）：同一个通道里分块渲染的 GPU（Adreno / Mali / Apple）不保证
+// 着色器写先于后面绘制的读——先给整个通道的全部绘制做一遍分块归属 / 低分辨率深度，再逐块重放；后面绘制的分块归属读到的是写之前的旧数据。
+// 所以屏障之后的第一笔绘制另开通道（rp_pass_prepare_draw 结束这个通道），屏障位在新通道开头交给后端。
+// 对齐：iOS nvn_mtl.m OP_BARRIER（g_pass_swrite + ORDER_FRAGMENTS*，rp_end）；Ryujinx BarrierBatch.Flush（高通私有驱动 SupportsRenderPassBarrier = false → endRenderPass）。
+// 只有「屏障之前通道里已经有着色器写」才拆：没有写、或写在屏障之后的，屏障照旧只记位、不拆通道。
+void rp_pass_barrier(uint32_t bits) {
+    P.barrier_bits |= bits;
+    if (P.open && P.sw_pend && (bits & (NVN_BARRIER_ORDER_PRIMITIVES_BIT | NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT | NVN_BARRIER_ORDER_INDIRECT_DATA_BIT))) P.sw_split = 1;
+}
 // 通道外的计算派发开工前取走待发的游戏屏障位（#978）：调用方交给后端，之后的通道开头不再重发
 uint32_t rp_pass_take_barrier(void) { uint32_t b = P.barrier_bits; P.barrier_bits = 0; return b; }
 

@@ -154,6 +154,28 @@ _root_trash() {
   ( ( _root_rm "$t" ) > /dev/null 2>&1 & )   # 两层子 shell：删的进程不是调用方的子进程，调用方的 wait 不等它
 }
 _root_rm_red() { local e; e=$(_root_rm "$1" 2>&1 > /dev/null | awk 'NR == 1 {f = $0} END {if (NR) print NR " 条报错，首条：" f}'); [ -e "$1" ] || [ -L "$1" ] || return 0; echo "【红】${2:+$2：}删不掉 ${1}（${e:-rm 没报原因}）"; return 1; }
+# root_copy <说明> [cp 参数…]：拷文件 / 目录进产物根（只要内容到位、克隆只是省空间的那些地方用它）。先按宿主惯例克隆（_root_cp）；
+#   macOS 上克隆不了（源和目标跨卷「clonefile failed: Cross-device link」、卷不支持克隆、扩展属性挡住）就 cp -X 普通复制一次，打一行【黄】带克隆原话。
+#   递归（-R）克隆失败可能留下半份目标目录：先清掉再复制，免得把源目录嵌进目标。两次都失败 → 返回非 0，COPY_ERR = 两次的原话（调用方报红时带上）。
+#   诊断 D-GHJC（追加内容）/ D-F9WY（宽屏布局覆盖）：游戏换了存放位置，缓存与现行不在同一卷，整单停。_root_cp 本身不改（要「克隆失败就返回非 0」的照旧直接用它）
+root_copy() {
+  local label=$1 dst=${!#} clone_err copy_err
+  shift
+  COPY_ERR=
+  clone_err=$(_root_cp "$@" 2>&1) && return 0
+  COPY_ERR=$clone_err
+  [ "$(uname -s)" = Darwin ] || return 1
+  if [ "$1" = -R ] && ! copy_err=$(_root_rm_red "$dst" 2>&1); then
+    COPY_ERR="$clone_err / 清理克隆残留：$copy_err"
+    return 1
+  fi
+  if copy_err=$(cp -X "$@" 2>&1 || exit $?); then
+    echo "【黄】${G:-?} ${label}：克隆复制失败，已改用普通复制：$(printf '%s' "$clone_err" | tr '\n' ' ')"
+    return 0
+  fi
+  COPY_ERR="$clone_err / 普通复制：$copy_err"
+  return 1
+}
 _root_dir() { echo "$S2A_ROOTS/$1@$2"; }
 _ROOT_STORE=.romfs_store
 # _root_romfs_link <版本目录>：romfs 是合规的存储软链 → 打印链接原文（../.romfs_store/<本款>/<身份>）；是真目录 / 没有 → 不打印、返回 0；
