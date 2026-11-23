@@ -12,6 +12,9 @@ namespace Ryujinx.HLE.HOS.Services.Fs.FileSystemProxy
         private SharedRef<LibHac.FsSrv.Sf.IFileSystem> _fileSystem;
         private readonly string _s2aSaveKey;   // S2Arm: save data mount shared through S2ASaveShare (null for other file systems)
         private readonly bool _s2aGameSave;    // S2Arm: the application's account / device save: its Commit is a save point (11-01 全量审计 P1-20)
+        // S2Arm: what this file system is (the command that opened it; for a save, its attributes), appended to fs failure lines (S2AFsFail).
+        //   #2107 (11-23): a game probed and failed CreateFile on /EA SPORTS FC 27/mainmenuconfig.json and the line did not say on which mount
+        public string S2AMount;
 
         public IFileSystem(ref SharedRef<LibHac.FsSrv.Sf.IFileSystem> provider, string s2aSaveKey = null, bool s2aGameSave = false)
         {

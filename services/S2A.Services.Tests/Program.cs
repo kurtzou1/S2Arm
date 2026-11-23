@@ -2191,7 +2191,8 @@ namespace S2A.Services.Tests
                     Encoding.UTF8.GetBytes("/s2a_nofile.bin\0").CopyTo(new Span<byte>(wpath, 0x301));
                     Msg on = Msg.Cmif(8, Bytes(1u)); on.X.Add(((ulong)wpath, 0x301));
                     Reply onr = Call(sdfs, on);
-                    bool noteLine = fsLines.Skip(fsAt0).Any(l => l == "[fs] 没有 IFileSystem.OpenFile：2002-0001，路径 /s2a_nofile.bin");
+                    // #2107（11-23）：行尾带上路径在哪个挂载上（开这块文件系统的命令；存档带属性）：这里是 01006F8002326000 的设备存档
+                    bool noteLine = fsLines.Skip(fsAt0).Any(l => l.StartsWith("[fs] 没有 IFileSystem.OpenFile：2002-0001，路径 /s2a_nofile.bin，挂载 存档 类型 Device、空间 User、程序号 01006F8002326000"));
                     bool noteRed = fsLines.Skip(fsAt0).Any(l => l.StartsWith("【红】"));
                     Encoding.UTF8.GetBytes("/s2a_wtest.bin\0").CopyTo(new Span<byte>(wpath, 0x301));
                     Call(sdfs, cf);
@@ -2199,8 +2200,8 @@ namespace S2A.Services.Tests
                     Msg om = Msg.Cmif(8, Bytes(0u)); om.X.Add(((ulong)wpath, 0x301));
                     Reply omr = Call(sdfs, om);
                     string redLine = fsLines.Skip(fsAt1).FirstOrDefault(l => l.StartsWith("【红】fs 失败：IFileSystem.OpenFile")) ?? "无";
-                    Check("fs 失败上报：开不存在的文件 / 打开模式 0", "结果 0x202、普通一行、不报红 / 结果非 0、【红】带路径 /s2a_wtest.bin",
-                        $"结果 0x{onr.Result:X}、{(noteLine ? "普通一行" : "没有普通行")}、{(noteRed ? "报了红" : "不报红")} / 结果{(omr.Result != 0 ? "非 0" : " 0")}、{(redLine.Contains("路径 /s2a_wtest.bin") ? "【红】带路径 /s2a_wtest.bin" : redLine)}");
+                    Check("fs 失败上报：开不存在的文件 / 打开模式 0", "结果 0x202、普通一行（带挂载：设备存档 01006F8002326000）、不报红 / 结果非 0、【红】带路径 /s2a_wtest.bin",
+                        $"结果 0x{onr.Result:X}、{(noteLine ? "普通一行（带挂载：设备存档 01006F8002326000）" : "没有带挂载的普通行：" + (fsLines.Skip(fsAt0).FirstOrDefault(l => l.Contains("/s2a_nofile.bin")) ?? "无"))}、{(noteRed ? "报了红" : "不报红")} / 结果{(omr.Result != 0 ? "非 0" : " 0")}、{(redLine.Contains("路径 /s2a_wtest.bin") ? "【红】带路径 /s2a_wtest.bin" : redLine)}");
                     // 开存档失败要说清开的是哪个存档（11-23 D-HR6A：游戏连开 7 次存档都 2002-1002，随后崩，日志只有结果码）：
                     //   开 01006F8002326000 的缓存存储（类型 Cache=5）序号 7，本局没建过 → 普通一行，带类型 / 空间 / 程序号 / 用户 / 序号 / 系统存档号（期望按请求字段手写）
                     int fsAt2 = fsLines.Count;

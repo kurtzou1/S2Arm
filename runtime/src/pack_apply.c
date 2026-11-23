@@ -563,7 +563,8 @@ static int pack_apply_locked(const char *docs) {
     if (!rc) { char np[2100]; struct stat ns; snprintf(np, sizeof np, "%s/exefs/main.npdm", root);
         if (stat(np, &ns) || !S_ISREG(ns.st_mode) || ns.st_size <= 0) { rc = -8; snprintf(what, sizeof what, "核对：程序描述 exefs/main.npdm %s，不记已应用，请回电脑重新装到设备", stat(np, &ns) ? "不在" : !S_ISREG(ns.st_mode) ? "不是文件" : "是空的"); } }
     // 本体 game.img 在就核长度（D-YGEC：本体只剩 5 MB 也照写 .applied，游戏库判就绪、点开服务层才报没传完）：同快判 img_whole_or_absent，核不过按缺文件失败
-    if (!rc && !img_whole_or_absent(root)) { rc = -8; snprintf(what, sizeof what, "核对：本体 game.img 不完整（实际长度与头里写的整个文件长不符），不记已应用，请回电脑重新装到设备"); }
+    if (!rc && !img_whole_or_absent(root)) { char gp[2100]; struct stat gs; snprintf(gp, sizeof gp, "%s/game.img", root);
+        rc = -8; snprintf(what, sizeof what, "核对：本体 game.img %s，不记已应用，请回电脑重新装到设备", lstat(gp, &gs) ? "不在（清单说本体是它）" : "不完整（实际长度与头里写的整个文件长不符）"); }
     if (!rc) { unsigned nd = 0; uint64_t db = 0; int r2 = prune(root, &nd, &db);   // 清旧文件：资源包下不在 index.tsv 里的（旧版分卷等）
         if (r2) { rc = r2; snprintf(what, sizeof what, "清旧文件（读 index.tsv）"); }
         else if (nd) log_line(logp, "进度：清掉不在 index.tsv 里的旧文件 %u 个 %llu MB", nd, (unsigned long long)(db >> 20)); }
@@ -1557,10 +1558,18 @@ int s2a_import_state_game(const char *proc_docs, const char *gid) {
 //   库界面在主线程、每次回前台都判，逐文件 stat 一款 10 万文件的游戏要 2.5 秒以上（冷缓存更久，玩家「每次打开都要等」）；
 //   完整核对仍在点 Play 后的导入闸门（s2a_import_state）做
 // 本体 game.img 在就核长度（D-YGEC 11-17 iOS 0.5.1：本体只剩 5 MB、头里写 3.47 GB，.applied 照样等于清单，快判说就绪，点开服务层报「IMG 没传完」崩）：
-//   头里 128 起的「整个文件长」不等于实际长度 = 没传完 / 被截断 → 不算就绪（同 init_fail.c 的判据）。只读 136 字节头；没有 game.img（散文件老包）照旧不管
+//   头里 128 起的「整个文件长」不等于实际长度 = 没传完 / 被截断 → 不算就绪（同 init_fail.c 的判据）。只读 136 字节头。
+//   没有 game.img：只有散文件老包（清单没写 imgFile）才不管；清单写着本体是 game.img（pack/img.py convert、手机认领都这么写）却不在 = 核心件丢了，不算就绪
+//   （D-FQ5H 诊断#6470b4：解开过、.applied 等于清单，之后本体不在了，快判照判就绪，起局报「游戏数据缺 romfs/」、游戏 Break）
+static int manifest_names_img(const char *root) {   // manifest.json 的 "imgFile" 是 "game.img" → 1
+    char p[2300], b[4096]; snprintf(p, sizeof p, "%s/manifest.json", root); FILE *f = fopen(p, "r"); if (!f) return 0;
+    size_t k = fread(b, 1, sizeof b - 1, f); fclose(f); b[k] = 0;
+    char *v = strstr(b, "\"imgFile\""); if (!v || !(v = strchr(v + 9, ':')) || !(v = strchr(v, '"'))) return 0;
+    return !strncmp(v, "\"game.img\"", 10);
+}
 static int img_whole_or_absent(const char *root) {
     char p[2300]; snprintf(p, sizeof p, "%s/game.img", root);
-    int fd = open(p, O_RDONLY); if (fd < 0) return errno == ENOENT && !ext_img(root);   // 外部来源的软链接打不开 = 来源离线，不算「没有本体的散文件包」
+    int fd = open(p, O_RDONLY); if (fd < 0) return errno == ENOENT && !ext_img(root) && !manifest_names_img(root);   // 外部来源的软链接打不开 = 来源离线，不算「没有本体的散文件包」
     uint8_t h[136]; struct stat st = {0}; uint64_t total = 0;
     int ok = pread(fd, h, sizeof h, 0) == (ssize_t)sizeof h && !memcmp(h, "S2AIMG01", 8) && !fstat(fd, &st) && (memcpy(&total, h + 128, 8), total == (uint64_t)st.st_size);
     close(fd);

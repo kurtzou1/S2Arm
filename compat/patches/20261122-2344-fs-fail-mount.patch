@@ -1,0 +1,164 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Fs/FileSystemProxy/FileSystemProxyHelper.cs b/src/Ryujinx.HLE/HOS/Services/Fs/FileSystemProxy/FileSystemProxyHelper.cs
+index 53904369b5538f1fa07d3baaa92ff91b52f4b5a1..0a5a55e0e7b5d6b6abd67b3a2028bb10b5fe265e 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Fs/FileSystemProxy/FileSystemProxyHelper.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Fs/FileSystemProxy/FileSystemProxyHelper.cs
+@@ -34,7 +34,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs.FileSystemProxy
+ 
+                 using SharedRef<LibHac.FsSrv.Sf.IFileSystem> adapter = FileSystemInterfaceAdapter.CreateShared(ref nsp.Ref, true);
+ 
+-                openedFileSystem = new IFileSystem(ref adapter.Ref);
++                openedFileSystem = new IFileSystem(ref adapter.Ref) { S2AMount = "NSP " + System.IO.Path.GetFileName(pfsPath) };
+             }
+             catch (HorizonResultException ex)
+             {
+@@ -62,7 +62,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs.FileSystemProxy
+ 
+                 using SharedRef<LibHac.FsSrv.Sf.IFileSystem> adapter = FileSystemInterfaceAdapter.CreateShared(ref sharedFs.Ref, true);
+ 
+-                openedFileSystem = new IFileSystem(ref adapter.Ref);
++                openedFileSystem = new IFileSystem(ref adapter.Ref) { S2AMount = "NCA " + System.IO.Path.GetFileName(ncaPath) };
+             }
+             catch (HorizonResultException ex)
+             {
+diff --git a/src/Ryujinx.HLE/HOS/Services/Fs/FileSystemProxy/IFileSystem.cs b/src/Ryujinx.HLE/HOS/Services/Fs/FileSystemProxy/IFileSystem.cs
+index 1c8b3ebec2fbefc37804696aa3281f6b0ad3740f..69cfb944a9e9fa5971899c0d59cd10e01ed018a0 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Fs/FileSystemProxy/IFileSystem.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Fs/FileSystemProxy/IFileSystem.cs
+@@ -12,6 +12,9 @@ namespace Ryujinx.HLE.HOS.Services.Fs.FileSystemProxy
+         private SharedRef<LibHac.FsSrv.Sf.IFileSystem> _fileSystem;
+         private readonly string _s2aSaveKey;   // S2Arm: save data mount shared through S2ASaveShare (null for other file systems)
+         private readonly bool _s2aGameSave;    // S2Arm: the application's account / device save: its Commit is a save point (11-01 全量审计 P1-20)
++        // S2Arm: what this file system is (the command that opened it; for a save, its attributes), appended to fs failure lines (S2AFsFail).
++        //   #2107 (11-23): a game probed and failed CreateFile on /EA SPORTS FC 27/mainmenuconfig.json and the line did not say on which mount
++        public string S2AMount;
+ 
+         public IFileSystem(ref SharedRef<LibHac.FsSrv.Sf.IFileSystem> provider, string s2aSaveKey = null, bool s2aGameSave = false)
+         {
+diff --git a/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs b/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs
+index 41057fab4572adf02ee60e513b62a1a79ae61001..235350f9a139f5bc94038fd22ce7c61136946f38 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs
+@@ -118,7 +118,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
+                 return (ResultCode)result.Value;
+             }
+ 
+-            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref));
++            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref) { S2AMount = "OpenBisFileSystem" });
+ 
+             return ResultCode.Success;
+         }
+@@ -160,7 +160,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
+                 return (ResultCode)result.Value;
+             }
+ 
+-            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref));
++            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref) { S2AMount = "OpenSdCardFileSystem" });
+ 
+             return ResultCode.Success;
+         }
+@@ -287,7 +287,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
+                 return (ResultCode)result.Value;
+             }
+ 
+-            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref));
++            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref) { S2AMount = "OpenGameCardFileSystem" });
+ 
+             return ResultCode.Success;
+         }
+@@ -372,7 +372,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
+                 return (ResultCode)result.Value;
+             }
+ 
+-            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref, key, attribute.Type is SaveDataType.Account or SaveDataType.Device));
++            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref, key, attribute.Type is SaveDataType.Account or SaveDataType.Device) { S2AMount = S2AFsFail.SaveAttr(spaceId, in attribute) });
+ 
+             return ResultCode.Success;
+         }
+@@ -392,7 +392,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
+                 return (ResultCode)result.Value;
+             }
+ 
+-            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref));
++            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref) { S2AMount = "系统存档 " + S2AFsFail.SaveAttr(spaceId, in attribute) });
+ 
+             return ResultCode.Success;
+         }
+@@ -412,7 +412,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
+                 return (ResultCode)result.Value;
+             }
+ 
+-            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref));
++            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref) { S2AMount = "只读 " + S2AFsFail.SaveAttr(spaceId, in attribute) });
+ 
+             return ResultCode.Success;
+         }
+@@ -537,7 +537,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
+                 return (ResultCode)result.Value;
+             }
+ 
+-            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref));
++            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref) { S2AMount = "OpenSaveDataInternalStorageFileSystem" });
+ 
+             return ResultCode.Success;
+         }
+@@ -716,7 +716,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
+                 return (ResultCode)result.Value;
+             }
+ 
+-            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref));
++            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref) { S2AMount = "OpenImageDirectoryFileSystem" });
+ 
+             return ResultCode.Success;
+         }
+@@ -733,7 +733,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
+                 return (ResultCode)result.Value;
+             }
+ 
+-            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref));
++            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref) { S2AMount = "OpenBaseFileSystem" });
+ 
+             return ResultCode.Success;
+         }
+@@ -750,7 +750,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
+                 return (ResultCode)result.Value;
+             }
+ 
+-            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref));
++            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref) { S2AMount = "OpenContentStorageFileSystem" });
+ 
+             return ResultCode.Success;
+         }
+@@ -776,7 +776,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
+                 return (ResultCode)result.Value;
+             }
+ 
+-            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref));
++            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref) { S2AMount = "OpenCustomStorageFileSystem" });
+ 
+             return ResultCode.Success;
+         }
+@@ -1337,7 +1337,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
+                 return (ResultCode)result.Value;
+             }
+ 
+-            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref));
++            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref) { S2AMount = "OpenRegisteredUpdatePartition" });
+ 
+             return ResultCode.Success;
+         }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Fs/S2AFsFail.cs b/src/Ryujinx.HLE/HOS/Services/Fs/S2AFsFail.cs
+index fc59c5262ae99bf95b2102aa5520b70cd06b28ae..ab7d5b52fde7b8a095caca922155cac455902cfa 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Fs/S2AFsFail.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Fs/S2AFsFail.cs
+@@ -84,6 +84,11 @@ namespace Ryujinx.HLE.HOS.Services.Fs
+                 detail.Append("，").Append(extra);
+             }
+ 
++            if (service is FileSystemProxy.IFileSystem fs && fs.S2AMount != null)   // which mount the path is on (#2107)
++            {
++                detail.Append("，挂载 ").Append(fs.S2AMount);
++            }
++
+             S2AHooks.FsFailed(CommandName(service, commandId), detail.ToString(), !IsProbe(result));
+         }
+     }

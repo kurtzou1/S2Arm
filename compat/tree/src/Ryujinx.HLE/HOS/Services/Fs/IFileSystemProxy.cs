@@ -118,7 +118,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
                 return (ResultCode)result.Value;
             }
 
-            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref));
+            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref) { S2AMount = "OpenBisFileSystem" });
 
             return ResultCode.Success;
         }
@@ -160,7 +160,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
                 return (ResultCode)result.Value;
             }
 
-            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref));
+            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref) { S2AMount = "OpenSdCardFileSystem" });
 
             return ResultCode.Success;
         }
@@ -287,7 +287,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
                 return (ResultCode)result.Value;
             }
 
-            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref));
+            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref) { S2AMount = "OpenGameCardFileSystem" });
 
             return ResultCode.Success;
         }
@@ -372,7 +372,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
                 return (ResultCode)result.Value;
             }
 
-            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref, key, attribute.Type is SaveDataType.Account or SaveDataType.Device));
+            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref, key, attribute.Type is SaveDataType.Account or SaveDataType.Device) { S2AMount = S2AFsFail.SaveAttr(spaceId, in attribute) });
 
             return ResultCode.Success;
         }
@@ -392,7 +392,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
                 return (ResultCode)result.Value;
             }
 
-            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref));
+            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref) { S2AMount = "系统存档 " + S2AFsFail.SaveAttr(spaceId, in attribute) });
 
             return ResultCode.Success;
         }
@@ -412,7 +412,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
                 return (ResultCode)result.Value;
             }
 
-            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref));
+            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref) { S2AMount = "只读 " + S2AFsFail.SaveAttr(spaceId, in attribute) });
 
             return ResultCode.Success;
         }
@@ -537,7 +537,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
                 return (ResultCode)result.Value;
             }
 
-            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref));
+            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref) { S2AMount = "OpenSaveDataInternalStorageFileSystem" });
 
             return ResultCode.Success;
         }
@@ -716,7 +716,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
                 return (ResultCode)result.Value;
             }
 
-            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref));
+            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref) { S2AMount = "OpenImageDirectoryFileSystem" });
 
             return ResultCode.Success;
         }
@@ -733,7 +733,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
                 return (ResultCode)result.Value;
             }
 
-            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref));
+            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref) { S2AMount = "OpenBaseFileSystem" });
 
             return ResultCode.Success;
         }
@@ -750,7 +750,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
                 return (ResultCode)result.Value;
             }
 
-            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref));
+            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref) { S2AMount = "OpenContentStorageFileSystem" });
 
             return ResultCode.Success;
         }
@@ -776,7 +776,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
                 return (ResultCode)result.Value;
             }
 
-            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref));
+            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref) { S2AMount = "OpenCustomStorageFileSystem" });
 
             return ResultCode.Success;
         }
@@ -1337,7 +1337,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
                 return (ResultCode)result.Value;
             }
 
-            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref));
+            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref) { S2AMount = "OpenRegisteredUpdatePartition" });
 
             return ResultCode.Success;
         }

@@ -598,6 +598,15 @@ int main(void) {
           snprintf(qc, sizeof qc, "{ printf S2AIMG01; head -c 120 /dev/zero; printf '\\210\\0\\0\\0\\0\\0\\0\\0'; } > '%s/game.img'", qr); sh(qc);
           IS(1, "D-YGEC：本体补回完整（头写 136、实际 136）→ 1 就绪");
           snprintf(qc, sizeof qc, "rm '%s/game.img'", qr); sh(qc);
+          IS(1, "散文件老包（清单没写 imgFile）没有 game.img → 照旧就绪");
+          // D-FQ5H（诊断#6470b4，iOS 0.6.7）：IMG 形态（清单 imgFile = game.img）解开过、.applied 等于清单，之后本体 game.img 不在了。
+          //   期望：快判、装机阶段都不判就绪（本体是核心件，起局物理上读不到 RomFS）。改前：「没有 game.img」一律当散文件老包放行，起局报「游戏数据缺 romfs/」后游戏 Break
+          snprintf(qc, sizeof qc, "printf '{\"version\": 3, \"format\": \"img\", \"imgFile\": \"game.img\", \"index_sha256\": \"abc123\"}' > '%s/manifest.json'", qr); sh(qc);
+          IS(2, "D-FQ5H：清单说本体是 game.img、本体不在 → 不就绪，落到 2 由库重新解开核对（报缺 game.img）");
+          CHECK(s2a_import_state_game_quick(pd, "0100FD70134FA000") != 0, "D-FQ5H：快判也不判就绪（实际 %d）", s2a_import_state_game_quick(pd, "0100FD70134FA000"));
+          snprintf(qc, sizeof qc, "{ printf S2AIMG01; head -c 120 /dev/zero; printf '\\210\\0\\0\\0\\0\\0\\0\\0'; } > '%s/game.img'", qr); sh(qc);
+          IS(1, "D-FQ5H：本体放回（完整）→ 1 就绪");
+          snprintf(qc, sizeof qc, "rm '%s/game.img' && printf '{\"version\":2,\"index_sha256\":\"abc123\"}' > '%s/manifest.json'", qr, qr); sh(qc);
           snprintf(qc, sizeof qc, "rm '%s/exefs/main.npdm'", qr); sh(qc);
           // 推送包齐了只等解开（11-09 根修 Windows 装完游戏库空：推完起 App 解包没成，.applied 仍是推送开头清空的空文件）
           snprintf(qc, sizeof qc, "mkdir -p '%s/.incoming' && head -c 1024 /dev/zero > '%s/.incoming/1_000.tar' && touch '%s/index.tsv' && printf '' > '%s/.applied'", qr, qr, qr, qr); CHECK(sh(qc) == 0, "造待解开夹具失败");

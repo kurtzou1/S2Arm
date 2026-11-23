@@ -270,8 +270,8 @@
 "app.fpsCap.ladder" = "En esta partida no se pueden mantener 60 FPS de forma estable, así que el juego vuelve por ahora a su velocidad de fotogramas nativa. La próxima vez que abras el juego empezará de nuevo a 60 FPS.";
 "app.fpsCap.restored" = "60 FPS restablecidos.";
 "app.fpsCap.retry" = "Probar 60 FPS de nuevo";
-"app.os180.title" = "Esta versión del sistema puede cerrarse inesperadamente";
-"app.os180.body" = "iOS / iPadOS 18.0 tiene un problema del sistema que puede cerrar la app en cuanto aparece la imagen del juego; 18.1 lo corrige. Actualiza en Ajustes > General > Actualización de software a 18.1 o posterior (gratis) y dejará de ocurrir.";
+"app.os180.title" = "Esta versión del sistema se cierra con más frecuencia";
+"app.os180.body" = "En iOS / iPadOS 18.0, la app se cierra justo al aparecer la imagen del juego con mucha más frecuencia que en 18.1 o posterior. Actualizar en Ajustes > General > Actualización de software a 18.1 o posterior (gratis) puede reducir estos cierres.";
 "app.lowRam.title" = "Puede que falte memoria";
 "app.lowRam.body" = "Este juego necesita unos %1$@ GB de memoria y este dispositivo tiene %2$@ GB. El almacenamiento compensa la diferencia: puedes jugar, pero puede ir lento o cerrarse a mitad. Solo se muestra una vez.";
 "app.gpuStop.body" = "Cierra esta app desde el selector de apps y vuelve a abrirla; normalmente podrás seguir jugando desde el último guardado del juego. Para ayudarnos a encontrar la causa, toca «Informar de un problema» y envíanos el diagnóstico.";

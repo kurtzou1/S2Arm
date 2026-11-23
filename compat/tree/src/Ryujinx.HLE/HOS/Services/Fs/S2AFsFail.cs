@@ -84,6 +84,11 @@ namespace Ryujinx.HLE.HOS.Services.Fs
                 detail.Append("，").Append(extra);
             }
 
+            if (service is FileSystemProxy.IFileSystem fs && fs.S2AMount != null)   // which mount the path is on (#2107)
+            {
+                detail.Append("，挂载 ").Append(fs.S2AMount);
+            }
+
             S2AHooks.FsFailed(CommandName(service, commandId), detail.ToString(), !IsProbe(result));
         }
     }

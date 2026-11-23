@@ -34,7 +34,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs.FileSystemProxy
 
                 using SharedRef<LibHac.FsSrv.Sf.IFileSystem> adapter = FileSystemInterfaceAdapter.CreateShared(ref nsp.Ref, true);
 
-                openedFileSystem = new IFileSystem(ref adapter.Ref);
+                openedFileSystem = new IFileSystem(ref adapter.Ref) { S2AMount = "NSP " + System.IO.Path.GetFileName(pfsPath) };
             }
             catch (HorizonResultException ex)
             {
@@ -62,7 +62,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs.FileSystemProxy
 
                 using SharedRef<LibHac.FsSrv.Sf.IFileSystem> adapter = FileSystemInterfaceAdapter.CreateShared(ref sharedFs.Ref, true);
 
-                openedFileSystem = new IFileSystem(ref adapter.Ref);
+                openedFileSystem = new IFileSystem(ref adapter.Ref) { S2AMount = "NCA " + System.IO.Path.GetFileName(ncaPath) };
             }
             catch (HorizonResultException ex)
             {

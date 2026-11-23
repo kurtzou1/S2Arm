@@ -679,3 +679,4 @@
 20261123-1237-joycon-imu-mirror.patch
 20261123-1303-joycon-pair-imu-rotate.patch
 20261122-2108-npad-imu-clock-jump.patch
+20261122-2344-fs-fail-mount.patch
