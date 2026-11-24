@@ -93,9 +93,13 @@ judge() {   # judge <键>：按 $OUT 里这一组的结果判，绿 G+1 / 红 R+
 # 红组的输出摘录（11-21 维护者：原先判据不符只取顶格「✗ / FAIL」行、其余只给末尾 10 行，单测缩进打的逐项「FAIL ①…」、崩溃行、
 #   超时组被杀前打的取证都丢了，门禁日志只剩「11 项里 2 项不符」这类汇总，查因要本机连跑碰运气）：
 #   按原顺序取「判据 / 红 / 崩溃」特征行 ∪ 末尾 20 行（不重复），封顶约 4 KB、按字节截后去掉截断的半个字。只用于红组，绿组日志不变
+#   判据行（FAIL / ✗ / 不通）排最前：11-23 nvn_hybrid「19 项 1 项不符」三次红，前面几十行【红】环境噪声（地址窗口、着色器库没建）先占满 4 KB，
+#   那条 FAIL 被截掉，留存日志里查不到是哪一项不符。其余特征行与末尾 20 行照原顺序跟在后面
 red_excerpt() {
-  awk '{ L[NR] = $0 } END { s = NR - 19; for (i = 1; i <= NR; i++)
-         if (i >= s || L[i] ~ /FAIL|✗|【红】|不通|unrecognized selector|[Aa]ssertion|[Aa]ssert\(|signal|SIG[A-Z]+|Terminating app|uncaught exception|libc\+\+abi|Abort trap|Segmentation fault|Bus error|EXC_[A-Z_]+|panic|Killed/) print L[i] }' \
+  awk '{ L[NR] = $0 } END { s = NR - 19
+         for (i = 1; i <= NR; i++) if (L[i] ~ /FAIL|✗|不通/) { print L[i]; P[i] = 1 }
+         for (i = 1; i <= NR; i++)
+           if (!(i in P) && (i >= s || L[i] ~ /【红】|unrecognized selector|[Aa]ssertion|[Aa]ssert\(|signal|SIG[A-Z]+|Terminating app|uncaught exception|libc\+\+abi|Abort trap|Segmentation fault|Bus error|EXC_[A-Z_]+|panic|Killed/)) print L[i] }' \
     | head -c 4096 | iconv -c -f UTF-8 -t UTF-8
 }
 uses_pre() { grep -qs 'NVN_TEST_LIB\|NVN_TEST_HOST_OBJS' "runtime/tests/mk/$1.mk"; }   # 这组用 NVN 共用前置（库 / 宿主目标文件）

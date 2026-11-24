@@ -1,5 +1,5 @@
 #!/bin/bash
-# 门禁覆盖：tools/gate.sh android/tools/gate_step.sh android/gate.sh graphics/gate.sh
+# 门禁覆盖：tools/gate.sh android/tools/gate_step.sh android/gate.sh graphics/gate.sh runtime/gate.sh
 # 红步摘要只取失败子项自己的结论行、反证段不算（11-23 维护者：反证输出混进红行摘要，误导两轮定位）。期望手写：
 #   ① 243e72aa 那局的形状（android/gate.sh 聚合钩子：provider 缺导出场景的【红】、save_atomic 变异的 ✗、caps_shape 策略反证的 FAIL、
 #      pipe_pend 负对照的 FAIL 都出自通过的子项；唯一失败子项是 demand 的「stop stays bounded near 500ms」）→ 红步摘要的首行与明细只剩 demand 那条，
@@ -7,6 +7,8 @@
 #   ③ 反证：layer_edge ⑥ 那条真红日志（没有标记、没有失败子项摘要）重算仍是红、首行仍是「不通 ⑥ 真仓库」
 #   ⑤ graphics/gate.sh 红项证据：子项日志里带缩进的「  ✗ ⑦ …」进「判红行」段（11-23：dmsh_reuse 1 例不符，末 30 行全是 ✓、不符条目没留下）；
 #      反证：全 ✓ 的日志不出「判红行」段
+#   ⑥ runtime/gate.sh 红组摘录：前面 80 行【红】环境噪声（> 4 KB）、后面一行「FAIL ⑦ …」→ 摘录里有这行 FAIL，且排第一（11-23 nvn_hybrid 三次红都被截掉）；
+#      反证：没有 FAIL 的输出摘录照旧有【红】行和末尾行
 set -uo pipefail
 H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d "${TMPDIR:-/tmp}/t_red_sum.XXXXXX"); trap 'rm -rf "$T"' EXIT; bad=0
 ok() { echo "通 $1"; }; no() { echo "不通 $1"; bad=1; }
@@ -55,4 +57,13 @@ o=$(REDLOGS=" $T/sub.log"; evidence)
 { echo "  ✓ ① 好"; echo "t_y：0 例不符"; } > "$T/ok.log"
 o=$(REDLOGS=" $T/ok.log"; evidence)
 grep -q "判红行" <<< "$o" && no "⑤ 反证：全 ✓ 的日志不该有判红行段：$o" || ok "⑤ 反证：全 ✓ 的日志没有判红行段"
+# ⑥ runtime/gate.sh 红组摘录：判据行排最前，不被前面的【红】噪声挤出 4 KB
+eval "$(sed -n '/^red_excerpt() {/,/^}/p' "$H/runtime/gate.sh")"
+{ for i in $(seq 1 80); do echo "[dm] [nvn-mtl] 【红】 shader library directory /w/homes/1/dm-work/build/cache/metal_shader_cache/b-0be3f28548fd does not exist（第 $i 行）"; done
+  echo "PASS ⑥ 随包有这一对"; echo "FAIL ⑦ 只有 .lzfse：第一次首遇就拿到拉取管线 0（期望 1）"; for i in $(seq 1 25); do echo "尾 $i"; done; } > "$T/rt.out"
+o=$(red_excerpt < "$T/rt.out")
+{ [ "$(head -1 <<< "$o")" = "FAIL ⑦ 只有 .lzfse：第一次首遇就拿到拉取管线 0（期望 1）" ] && [ "$(wc -c <<< "$o")" -le 4100 ]; } && ok "⑥ 判据行排第一、摘录不超 4 KB" || no "⑥ 摘录首行：$(head -1 <<< "$o" | cut -c1-120)"
+{ echo "[x] 【红】 环境"; for i in $(seq 1 25); do echo "尾 $i"; done; } > "$T/rt2.out"
+o=$(red_excerpt < "$T/rt2.out")
+{ grep -q "【红】 环境" <<< "$o" && grep -q "尾 25" <<< "$o"; } && ok "⑥ 反证：没有判据行时照旧留【红】行与末尾" || no "⑥ 反证实得：$o"
 [ $bad = 0 ] && echo "red_summary 单测全过" || echo "red_summary 单测有不通"; exit $bad
