@@ -114,6 +114,12 @@ def main():
                        "--cover-probe", str(Path(temporary) / "out"), "--data-root=" + str(Path(temporary) / "data")], env)
             if "✓ 坏封面与没画出的设置框" not in out.stdout:
                 raise RuntimeError("cover probe did not report success")
+        # #2191：出包客户端抛 catch 列表之外的异常，收尾照样先撤作业登记、按钮不永远灰（UI.Snapshots/EndJobProbe.cs）
+        with tempfile.TemporaryDirectory(prefix="s2arm-endjob-probe-") as temporary:
+            out = run([dotnet, "run", "--project", str(probe), "--no-build", "--configuration", "Release", "--",
+                       "--endjob-probe", str(Path(temporary) / "out"), "--data-root=" + str(Path(temporary) / "data")], env)
+            if "✓ 出包异常收尾撤登记" not in out.stdout:
+                raise RuntimeError("endjob probe did not report success")
         # 推游戏遇到手机上旧 App（#1842）：phone_app_outdated 走通用确认「仍然继续」、不兼容的不是确认码（UI.Snapshots/ConfirmProbe.cs）
         with tempfile.TemporaryDirectory(prefix="s2arm-confirm-probe-") as temporary:
             out = run([dotnet, "run", "--project", str(probe), "--no-build", "--configuration", "Release", "--",

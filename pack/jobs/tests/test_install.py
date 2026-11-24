@@ -938,9 +938,12 @@ class SaveBackupTests(unittest.TestCase):
                 if apps_rc:
                     return apps_rc, {}, "devicectl 等了 60 秒没有返回，已停止等待"
                 return 0, {"result": {"apps": [{"bundleIdentifier": "s2arm.z.0100c2500fc20000"}] if installed else []}}, ""
-            if a[:3] == ("device", "info", "files") and list_rc:
-                return list_rc, {}, "The operation couldn’t be completed"
             if a[:3] == ("device", "info", "files"):
+                subdir = a[a.index("--subdirectory") + 1]
+                if "SaveData" in subdir:
+                    return 1, {}, "no such directory"   # 旧夹具：机上没有 SaveData，正常
+                if list_rc:
+                    return list_rc, {}, "The operation couldn’t be completed"
                 return 0, {"result": {"files": [dict(relativePath=r, resources=dict(isDirectory=d)) for r, d in files]}}, ""
             src = a[a.index("--source") + 1]; got.append(src)
             dst = Path(a[a.index("--destination") + 1])
@@ -949,7 +952,8 @@ class SaveBackupTests(unittest.TestCase):
                 (dst / r).parent.mkdir(parents=True, exist_ok=True); (dst / r).write_text("内容:" + src + "/" + r)
             return (1, {}, "Device locked") if fail == "*" else (0, {}, "")
         import diag
-        with um.patch.object(diag, "devicectl", devicectl):
+        with um.patch.object(diag, "devicectl", devicectl), \
+             um.patch.object(install, "save_dir_absent", lambda c, ident, bid, path: "SaveData" in path):   # 机上没有 SaveData；SAVE_REL 的缺席判断保持真实逻辑
             return install.backup_saves(self.c, "C891", "s2arm.z.0100c2500fc20000", "0100C2500FC20000"), got
 
     def test_backs_up_every_file(self):
@@ -1121,6 +1125,9 @@ class SaveBackupTests(unittest.TestCase):
             calls = []
             def devicectl(c, *a, timeout=0):
                 if a[:3] == ("device", "info", "files"):
+                    subdir = a[a.index("--subdirectory") + 1]
+                    if "SaveData" in subdir:
+                        return 1, {}, "no such directory"   # 机上没有 SaveData，不计入锁屏重试次数
                     calls.append(1)
                     if len(calls) <= locked_times:
                         return 1, {}, LOCK
@@ -1132,6 +1139,7 @@ class SaveBackupTests(unittest.TestCase):
                 raise AssertionError(a)
             said = []
             with um.patch.object(diag, "devicectl", devicectl), um.patch.object(install, "UNLOCK_POLL_S", 0), um.patch.object(install.time, "sleep", lambda s: None), \
+                 um.patch.object(install, "save_dir_absent", lambda c, ident, bid, path: "SaveData" in path), \
                  um.patch.object(self.c, "emit", lambda kind, text="", **kw: said.append(text), create=True):
                 return install.backup_saves(self.c, "C891", "s2arm.z.games", "0100C2500FC20000"), calls, said
         dest, calls, said = run(2)
@@ -1181,6 +1189,191 @@ class SaveBackupTests(unittest.TestCase):
         self.assertEqual(e.exception.code, "save_backup_failed")
         self._accept()
         self.assertIsNone(self._run([("0000000000000001/0/save.dat", False)], fail="*")[0])
+
+    # ── SaveData 新增用例 ──────────────────────────────────────────────────
+
+    def _run_with_savedata(self, save_files, sd_files, fail_save=None, fail_sd=None, sd_absent=False):
+        """Mac backup_saves 替身：save_files = bis/user/save 下的文件列表，sd_files = SaveData 下的文件列表。
+        fail_save = "*" 令存档拷贝失败，fail_sd = "*" 令 SaveData 拷贝失败，sd_absent = True 令 SaveData 目录列出 rc=1 且 save_dir_absent 判不在"""
+        got_copies = []
+        def devicectl(c, *a, timeout=0):
+            subcmd = a[:3]
+            if subcmd == ("device", "info", "apps"):
+                return 0, {"result": {"apps": [{"bundleIdentifier": "s2arm.z.0100c2500fc20000"}]}}, ""
+            if subcmd == ("device", "info", "files"):
+                subdir = a[a.index("--subdirectory") + 1]
+                if "SaveData" in subdir:
+                    if sd_absent:
+                        return 1, {}, "no such directory"
+                    return 0, {"result": {"files": [dict(relativePath=r, resources=dict(isDirectory=False)) for r in sd_files]}}, ""
+                # bis/user/save
+                return 0, {"result": {"files": [dict(relativePath=r, resources=dict(isDirectory=False)) for r in save_files]}}, ""
+            # copy from
+            src = a[a.index("--source") + 1]
+            dst = Path(a[a.index("--destination") + 1])
+            is_sd = "SaveData" in src
+            fail = fail_sd if is_sd else fail_save
+            if fail == "*":
+                return 1, {}, "Device locked"
+            files_to_write = sd_files if is_sd else save_files
+            for r in files_to_write:
+                (dst / r).parent.mkdir(parents=True, exist_ok=True)
+                (dst / r).write_text(f"内容:{src}/{r}")
+            got_copies.append(src)
+            return 0, {}, ""
+        import diag
+        with um.patch.object(diag, "devicectl", devicectl), \
+             um.patch.object(install, "save_dir_absent", lambda *a, **k: sd_absent):
+            return install.backup_saves(self.c, "C891", "s2arm.z.0100c2500fc20000", "0100C2500FC20000"), got_copies
+
+    def test_savedata_included_in_backup(self):
+        """① Mac：bis/user/save 有 2 个文件 + SaveData 有 1 个文件 → 备份里两部分都在。
+        期望：backup目录下有 0000000000000001/0/save.dat、0000000000000001/1/save.dat（存档），
+        以及 _savedata_/game.sav（SaveData）。"""
+        d, _ = self._run_with_savedata(
+            ["0000000000000001/0/save.dat", "0000000000000001/1/save.dat"],
+            ["game.sav"],
+        )
+        self.assertIsNotNone(d)
+        self.assertTrue((d / "0000000000000001/0/save.dat").is_file(), "存档文件在备份里")
+        self.assertTrue((d / "0000000000000001/1/save.dat").is_file(), "存档文件2在备份里")
+        self.assertTrue((d / "_savedata_" / "game.sav").is_file(), "SaveData 文件在备份 _savedata_/ 里")
+
+    def test_savedata_missing_from_old_code(self):
+        """① 旧码对照（手工撤实现核过）：旧码下 SaveData 文件不在备份里（此用例在 git stash 后应红）。
+        此用例验证新码已把 _savedata_/ 加进去，直接断言 _savedata_/ 存在且有内容。"""
+        d, _ = self._run_with_savedata(
+            ["0000000000000001/0/save.dat"],
+            ["game.sav"],
+        )
+        sd_dir = d / "_savedata_"
+        self.assertTrue(sd_dir.is_dir() and any(sd_dir.rglob("*")),
+                        "新码：_savedata_/ 子目录存在且有内容；旧码此断言失败（红）")
+
+    def test_savedata_missing_file_stops_backup(self):
+        """② Mac：SaveData 清单里有、拉回后缺一个 → 停下（save_backup_stuck），不留半份。"""
+        with self.assertRaises(Failure) as e:
+            self._run_with_savedata(["0000000000000001/0/save.dat"], ["game.sav"], fail_sd="*")
+        self.assertEqual(e.exception.code, "save_backup_failed")
+        self.assertIn("SaveData", e.exception.internal)
+        root = self.c.library / "games/0100C2500FC20000/save_backup"
+        self.assertEqual(list(root.iterdir()) if root.is_dir() else [], [], "不留半份")
+
+    def test_savedata_absent_on_device_succeeds(self):
+        """③ 机上没有 SaveData 目录 → 照旧成功，备份只有存档部分（和旧格式一致），_savedata_/ 不存在。"""
+        d, _ = self._run_with_savedata(["0000000000000001/0/save.dat"], [], sd_absent=True)
+        self.assertIsNotNone(d)
+        self.assertTrue((d / "0000000000000001/0/save.dat").is_file())
+        self.assertFalse((d / "_savedata_").exists(), "_savedata_/ 不存在（机上没有 SaveData）")
+
+
+class WinSaveDataBackupTests(unittest.TestCase):
+    """④ Windows WinPhone.backup：SaveData 也拉进备份。"""
+    setUp = tj.JobsTests.setUp; tearDown = tj.JobsTests.tearDown
+    G = "0100C2500FC20000"
+
+    def _make_phone(self, save_files, sd_files, fail_sd=False):
+        """返回 (ph, calls)：ph 是 WinPhone 替身，calls 记录 get_tree 的调用路径。"""
+        calls = []
+        class FakeCl:
+            def get_tree(self_, src, dest):
+                calls.append(src)
+                if fail_sd and "SaveData" in src:
+                    return False, "transfer error"
+                # 按 src 分流：SaveData 目录用 sd_files，否则用 save_files
+                files = sd_files if "SaveData" in src else save_files
+                dest = Path(dest)
+                for r in files:
+                    (dest / r).parent.mkdir(parents=True, exist_ok=True)
+                    (dest / r).write_text(f"内容:{src}/{r}")
+                return True, ""
+        ph = object.__new__(install.WinPhone)
+        ph.c = self.c
+        ph.udid = "USB-WIN"
+        ph.bid = "s2arm.z.0100c2500fc20000"
+        ph.bundle_for_signing = lambda: ph.bid
+
+        def devpush(c, udid, bid, work):
+            return FakeCl()
+
+        self._patch = um.patch.object(install, "devpush_client", devpush)
+        self._patch.start()
+        self.addCleanup(self._patch.stop)
+        return ph, calls
+
+    def test_win_savedata_included_in_backup(self):
+        """④ Windows：bis/user/save 有 1 个文件 + SaveData 有 1 个文件 → 备份里两部分都在。"""
+        ph, _ = self._make_phone(["0000000000000001/0/save.dat"], ["game.sav"])
+        d = ph.backup(self.G)
+        self.assertIsNotNone(d)
+        self.assertTrue((Path(d) / "0000000000000001/0/save.dat").is_file(), "存档文件在备份里")
+        self.assertTrue((Path(d) / "_savedata_" / "game.sav").is_file(), "SaveData 文件在 _savedata_/ 里")
+
+    def test_win_savedata_missing_from_old_code(self):
+        """④ 旧码对照（手工撤实现核过）：旧码下 _savedata_/ 不存在（git stash 后此用例应红）。"""
+        ph, _ = self._make_phone(["0000000000000001/0/save.dat"], ["game.sav"])
+        d = ph.backup(self.G)
+        sd_dir = Path(d) / "_savedata_"
+        self.assertTrue(sd_dir.is_dir() and any(sd_dir.rglob("*")),
+                        "新码：_savedata_/ 存在且有内容；旧码此断言失败（红）")
+
+
+class SaveDataRestoreTests(unittest.TestCase):
+    """⑤ 恢复：带 SaveData 的备份 restore / write_phone_save 时，SaveData 文件不写进 SAVE_REL；旧格式备份照旧恢复。"""
+    setUp = tj.JobsTests.setUp; tearDown = tj.JobsTests.tearDown
+
+    G = "0100000000010000"
+
+    def _write(self, src_files, drop=()):
+        """直接调 write_phone_save，记录所有 put/rm 操作。"""
+        ops = []
+        class FakeCl:
+            def put(self_, p, dest): ops.append(("put", dest))
+            def rm(self_, path): ops.append(("rm", path)); return True, ""
+        class FakePh:
+            bid = "s2arm.z"
+            def client(self_, w): return FakeCl()
+        src = self.c.private / "bk"
+        src.mkdir(exist_ok=True)
+        for rel, content in src_files.items():
+            (src / rel).parent.mkdir(parents=True, exist_ok=True)
+            (src / rel).write_bytes(content)
+        import types
+        with um.patch.object(install, "game_docs", lambda g: f"Documents/games/{g}"):
+            install.write_phone_save(self.c, FakePh(), self.G, src, drop)
+        return ops
+
+    def test_restore_drop_never_touches_savedata(self):
+        """还原一份旧备份时差集里出现 _savedata_/x（现备份有、要还原的那份没有）：不对手机发删除；SAVE_REL 下的差集照删。
+        期望手写：rm 只有一条 Documents/games/<号>/<SAVE_REL>/0000000000000001/0/old.dat，没有任何带 _savedata_ 或 SaveData 的 rm"""
+        ops = self._write({"0000000000000001/0/save.dat": b"save"}, drop={"_savedata_/mine.sav", "0000000000000001/0/old.dat"})
+        rms = [dest for op, dest in ops if op == "rm"]
+        self.assertEqual(rms, [f"Documents/games/{self.G}/{install.SAVE_REL}/0000000000000001/0/old.dat"])
+
+    def test_savedata_written_to_SaveData_not_SAVE_REL(self):
+        """带 _savedata_/ 子目录的备份：_savedata_/game.sav → Documents/games/.../SaveData/game.sav，不写进 SAVE_REL。"""
+        ops = self._write({
+            "0000000000000001/0/save.dat": b"save",
+            "_savedata_/game.sav": b"sd",
+        })
+        base_save = f"Documents/games/{self.G}/{install.SAVE_REL}"
+        base_sd = f"Documents/games/{self.G}/SaveData"
+        put_dests = [dest for op, dest in ops if op == "put"]
+        self.assertIn(f"{base_save}/0000000000000001/0/save.dat", put_dests, "存档写进 SAVE_REL")
+        self.assertIn(f"{base_sd}/game.sav", put_dests, "SaveData 写进 SaveData/")
+        self.assertFalse(any("_savedata_" in d for d in put_dests), "_savedata_/ 前缀不写进手机")
+        self.assertFalse(any(f"{base_save}/_savedata_" in d for d in put_dests), "SaveData 文件不写进 SAVE_REL")
+
+    def test_legacy_backup_restores_unchanged(self):
+        """旧格式备份（没有 _savedata_/）照旧恢复到 SAVE_REL，兼容性不变。"""
+        ops = self._write({
+            "0000000000000001/0/save.dat": b"save",
+        })
+        base_save = f"Documents/games/{self.G}/{install.SAVE_REL}"
+        put_dests = [dest for op, dest in ops if op == "put"]
+        self.assertEqual(put_dests, [f"{base_save}/0000000000000001/0/save.dat"])
+
+
 
 
 

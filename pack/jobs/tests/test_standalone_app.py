@@ -380,7 +380,8 @@ class ShellOwner(unittest.TestCase):
 
     def test_bid_shape_covers_unsigned_export(self):
         """导出未签名包的包名（每款 io.s2arm.games.app.<号>）和侧载工具接「.团队号」后的样子都认成独立 App；通用壳的包名（含换过的 .s2）不认"""
-        for b in ("io.s2arm.games.app.0100000000010000", "io.s2arm.games.app.0100000000010000.abcde12345", APP1, "com.x.s2arm.0100000000010000"):
+        for b in ("io.s2arm.games.app.0100000000010000", "io.s2arm.games.app.0100000000010000.abcde12345", APP1, "com.x.s2arm.0100000000010000",
+                  APP1 + ".s2.abcde12345", "io.s2arm.games.app.0100000000010000.s2.abcde12345"):   # 撞号换「.s2」后又被侧载工具接「.团队号」：两段后缀
             self.assertTrue(install.STANDALONE_BID.fullmatch(b), b)
         for b in (SHELL_BID, SHELL_BID + ".s2", "io.s2arm.games", "io.s2arm.games.abcde12345.mysuffix"):
             self.assertFalse(install.STANDALONE_BID.fullmatch(b), b)
@@ -389,6 +390,29 @@ class ShellOwner(unittest.TestCase):
         """0.6.4 导出包经 AltStore / SideStore 签成 io.s2arm.games.app.<号>.<团队>，设备记录里没有：按包名形状排除，只剩通用壳、不让玩家选"""
         with patch.object(self, "ROWS", [(SHELL_BID, "S2Arm", TEAM), (f"io.s2arm.games.app.{G1}.{TEAM}", "S2Arm", TEAM), (APP1, "S2Arm", TEAM)]):
             self.assertEqual(self.owner(dict(shellId="S1", bundleId=SHELL_BID)), ("launcher", SHELL_BID))
+
+    def test_kind_marker_decides(self):
+        """新包按 App 自己写的类别（Info.plist S2AKind，apps 第五列）认，不看包名（期望手写）：
+          正例（要排除）：别的电脑用显式描述文件出的独立 App（包名任意 com.acme.one、主程序 S2Arm、设备记录里没有）带 standalone；
+                          撞号「.s2」后又接团队号的独立 App（两段后缀）带 standalone；
+          反例（要保留）：改了包名的通用壳（com.esign.anything，主程序 S2Arm）带 container；实验包 io.s2arm-exp.*（没有类别、没有壳号）；
+          老包没有类别：带壳号、主屏名是纯游戏名的（多半是老独立 App）照列，标 looksStandalone 推之前说明；主屏名带 S2Arm 的（通用壳、实验容器）不标"""
+        rows = [(SHELL_BID, "S2Arm", TEAM, "0.6.11", "container", "1", "S2Arm"),
+                ("com.acme.one", "S2Arm", TEAM, "0.6.11", "standalone", "1", "Game One"),
+                (APP1 + ".s2." + TEAM.lower(), "S2Arm", TEAM, "0.6.11", "standalone", "1", "Game One"),
+                ("com.esign.anything", "S2Arm", "OTHER", "0.6.11", "container", "1", "S2Arm"),
+                ("io.s2arm-exp.imltest", "S2Arm", TEAM, "0.1", "", "", "Hollow Knight Silksong S2Arm"),
+                ("io.s2arm-exp.t01006a800016e000", "S2Arm", "", "", "", "1", "Super Smash Bros Ultimate S2Arm"),   # 真机实测行：带壳号的实验容器，主屏名带 S2Arm
+                ("com.old.one", "S2Arm", TEAM, "0.6.9", "", "1", "Game Two"),
+                ("com.old.shell", "S2Arm", TEAM, "0.6.9", "", "1", "S2Arm")]
+        with tempfile.TemporaryDirectory() as d:
+            c = types.SimpleNamespace(private=d)
+            cl = types.SimpleNamespace(apps=lambda: rows)
+            with patch.object(install, "devpush_client", lambda c, udid, bid, w: cl), patch.object(install, "main_executable", lambda c: "S2Arm"):
+                got = install.installed_s2arm_on(c, "UDID1", dict(shellId="S1", bundleId=SHELL_BID))
+        self.assertEqual(sorted(a["bundleId"] for a in got), sorted([SHELL_BID, "com.esign.anything", "io.s2arm-exp.imltest", "io.s2arm-exp.t01006a800016e000", "com.old.one", "com.old.shell"]))
+        self.assertEqual({a["bundleId"] for a in got if a.get("looksStandalone")}, {"com.old.one"})
+        self.assertEqual(next(a for a in got if a["bundleId"] == "com.old.one")["name"], "Game Two")
 
     def test_standalone_apps_not_counted(self):
         rec = dict(shellId="S1", bundleId=SHELL_BID)

@@ -689,3 +689,4 @@
 20261123-1339-audio-returns-never-stop.patch
 20261123-2031-audsmx-stream-setgain.patch
 20261124-0303-armeilleure-uco-funcptr.patch
+20261124-0911-audout-flush-keep-released-absorb-appended.patch

@@ -9,7 +9,7 @@
 //   s2a-devpush <udid> - install <ipa>               装已签名的 ipa（AFC 传到 PublicStaging + installation_proxy；测试台经转发的设备服务装机用，玩家装机走 Impactor）
 //   s2a-devpush <udid> <包名> uninstall -               卸 App（连容器）：免费账号一台手机最多 3 个 App，测试台腾位用
 //   s2a-devpush - - devices                              连着的设备（USB 在前）：每行一个 UDID
-//   s2a-devpush <udid> - apps                          手机上装的用户 App：每行「包名<TAB>可执行文件名<TAB>团队号」（认别的工具装的 S2Arm）
+//   s2a-devpush <udid> - apps                          手机上装的用户 App：每行「包名<TAB>可执行文件名<TAB>团队号<TAB>版本<TAB>类别<TAB>有壳号<TAB>主屏名」（认别的工具装的 S2Arm）
 //   s2a-devpush <udid> - pair [电脑名]                 和手机配对并把配对记录存进本机设备服务（#1973）：设备服务里已有这台的记录且能用 → 打「pair 已配对」；
 //     没有 → 向手机发起配对（手机弹「要信任此电脑吗」，等玩家点，最多 PAIR_WAIT_SECONDS 秒）→ 用新记录试开一次会话 → SavePairRecord → 打「pair 已配对（新）」。
 //     Windows 上只有 iTunes / Apple Devices 会发起配对；它们没开时手机点了「信任」也没有记录，签名工具报「device does not have pairing file」
@@ -331,7 +331,7 @@ async fn run(a: &[String]) -> Result<(), String> {
         println!("launch {bundle} pid {}", pid.map(|p| p.to_string()).unwrap_or_else(|| "?".into()));
         return Ok(());
     }
-    if op == "apps" {   // 手机上装的用户 App：每行「包名<TAB>可执行文件名<TAB>团队号<TAB>版本」（团队号取签名权限 com.apple.developer.team-identifier，版本取 CFBundleShortVersionString，没有留空）。
+    if op == "apps" {   // 手机上装的用户 App：每行「包名<TAB>可执行文件名<TAB>团队号<TAB>版本<TAB>类别<TAB>有壳号<TAB>主屏名」（团队号取签名权限 com.apple.developer.team-identifier，版本取 CFBundleShortVersionString，没有留空）。
         //   交签名身份前认手机上的 S2Arm 用：AltStore / SideStore / ESign 装的会改包名，不能只按启动器自己的包名找
         let mut ip = idevice::installation_proxy::InstallationProxyClient::connect(&provider).await.map_err(|e| format!("installation_proxy 连不上：{e}"))?;
         let apps = ip.get_apps(Some("User"), None).await.map_err(|e| format!("列不出手机上的 App：{e}"))?;
@@ -342,7 +342,13 @@ async fn run(a: &[String]) -> Result<(), String> {
                 .and_then(|e| e.get("com.apple.developer.team-identifier")).and_then(|t| t.as_string()).unwrap_or("");
             // 版本：推游戏前比别的工具 / 别的电脑装的 S2Arm 是不是旧版（install.push_game，#1842：旧 App 收新程序包、断音修复没到手）
             let ver = d.and_then(|d| d.get("CFBundleShortVersionString")).and_then(|x| x.as_string()).unwrap_or("");
-            format!("{id}\t{exe}\t{team}\t{ver}")
+            // 类别：Info.plist S2AKind（container 通用壳 / standalone 独立 App，pack/ship_ext.py 组装时写）；老包没有这个键留空，电脑按包名形状兜底（install.installed_s2arm_on）
+            let kind = d.and_then(|d| d.get("S2AKind")).and_then(|x| x.as_string()).unwrap_or("");
+            // 壳号在不在（S2AShellId，通用壳与独立 App 都有）+ 主屏名：老独立 App 没有 S2AKind，但带壳号、主屏名是游戏名而不是 S2Arm，推之前要说明
+            let shell = if d.and_then(|d| d.get("S2AShellId")).is_some() { "1" } else { "" };
+            let name: String = d.and_then(|d| d.get("CFBundleDisplayName").or_else(|| d.get("CFBundleName"))).and_then(|x| x.as_string()).unwrap_or("")
+                .chars().map(|ch| if ch.is_control() { ' ' } else { ch }).collect();
+            format!("{id}\t{exe}\t{team}\t{ver}\t{kind}\t{shell}\t{name}")
         }).collect();
         rows.sort();
         for r in rows { println!("{r}"); }

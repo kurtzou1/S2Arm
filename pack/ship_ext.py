@@ -509,8 +509,11 @@ def cmd_container(a):
                 icon = r / "icon.jpg"
         app = app_bundle.assemble(shell, work / "S2Arm.app", bundle_id=a.bundle_id, display_name=name, icon=icon, localized_names=loc,
                                   metadata={**({"CFBundleShortVersionString": a.version} if a.version else {}),
-                                            **({"S2ADisplayVersion": a.display_version} if a.display_version else {}), "S2AShellId": sid})
+                                            **({"S2ADisplayVersion": a.display_version} if a.display_version else {}), "S2AShellId": sid,
+                                            "S2AKind": "standalone" if a.standalone else "container"})
         # 发版号：同电脑上的 S2Arm（三端同号）；S2ADisplayVersion：界面上的版本字（v0.3.0 / v0.2.6-dev+ba0ef07，设置页与游戏库顶部读，玩家截图定版）；S2AShellId：壳号（同 s2a_catalogue.json shell_id），电脑读手机上装的 App 信息就知道壳旧没旧（「更新 iPhone 上的 S2Arm」）
+        # S2AKind：这个 App 是通用壳（container，推哪款都收）还是独立 App（standalone，只玩自带那一款）。电脑认手机上的 S2Arm 按它分（install.installed_s2arm_on），
+        #   不靠包名猜：别的工具改过包名的通用壳、别的电脑用显式描述文件出的独立 App，包名都是任意的。两种都带 S2AShellId，所以它分不了这两种
         (app / TABLES).unlink()
         for e in games:
             gid = e["title_id"]; gd = app / GAMES / gid

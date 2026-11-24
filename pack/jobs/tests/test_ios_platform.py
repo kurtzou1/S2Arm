@@ -1,6 +1,7 @@
 """Xcode 的 iOS 平台组件自检与一键补（11-07 维护者：启动器零配置；pack/jobs/toolchain.py ios_platform / download_ios_platform）。
 期望按 11-07 两台机器对照写死：本机 Xcode 26.6（iOS SDK 26.5，构建 23F81a）装了运行时 23F77 → 编得过；
 gate-host 同版只装了 iOS 27.1 运行时（24A94425）→ xcodebuild 报「iOS 26.5 is not installed」。配套表（SDKToSimulatorIndexMapping.plist）里 23F81a 只配 23F77。"""
+import time
 import plistlib
 import subprocess
 import unittest
@@ -203,6 +204,26 @@ class IosPlatform(JobCase):
                                     toolchain.download_metal)
         self.assertEqual([e["done"] for e in got], [46.2, 47.1, 100.0])
         self.assertEqual([e["unit"] for e in got], ["%"] * 3)
+
+    def _metal_quiet(self, lines):
+        """xcodebuild 先打 lines、然后不出声 0.3 秒（说明门槛调成 0.1 秒）→ 收到的 message 事件文字"""
+        said = []
+        def run(args, on_line=None, **kw):
+            for text in lines: on_line(text)
+            time.sleep(0.3)
+        def emit(*a, **k):
+            if a and a[0] == "message": said.append(k.get("message") or (a[1] if len(a) > 1 else ""))
+        with patch.object(self.c, "run", run), patch.object(self.c, "emit", emit), patch.object(toolchain, "METAL_QUIET_S", 0.1):
+            toolchain.download_metal(self.c)
+        return said
+
+    def test_metal_download_quiet_says_why(self):
+        # D-6M7D（Mac 0.6.9，Xcode 27.2）：xcodebuild 只打「Beginning asset download...」就不出声，玩家只见转圈、等几分钟自己取消。
+        #   期望（手写）：过了门槛还没进度 → 上屏一次说明（不报进度、近 1 GB、可去 Xcode → 设置 → Components 手动下）；报过进度的不说
+        said = self._metal_quiet(["Beginning asset download..."])
+        self.assertEqual(said, [toolchain.METAL_QUIET])
+        self.assertIn("Xcode → 设置 → Components", said[0]); self.assertIn("近 1 GB", said[0])
+        self.assertEqual(self._metal_quiet(["Beginning asset download...", "Downloading: 3%"]), [])
 
     def _metal_download_fails(self, tail):
         """xcodebuild -downloadComponent 退出 70、日志末尾是 tail（诊断#f5eae9 三件的原文）→ 返回 download_metal 抛出的 Failure"""

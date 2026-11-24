@@ -125,6 +125,27 @@ class PushGameTests(JobCase):
             self.ph.app_version = "0.1"
             self.assertIsNone(install.external_app_outdated(self.c, self.ph), "开发树没有版本：比不了，不提示")
 
+    def test_external_looks_standalone(self):
+        """推送目标是兜底认出的「多半是老独立 App」（installed_s2arm_on 标 looksStandalone）：推之前说明、不推（phone_app_standalone）；
+        同一台上别的包名不受影响照推（期望手写）"""
+        self.ph.external, self.ph.app_version = True, None
+        layout.save_device(self.c, self.ph.key, dict(games={}))
+        self.c._s2arm_apps = {"UDID1": [dict(bundleId="com.old.one", team="T", version=None, looksStandalone=True, name="Game Two"),
+                                        dict(bundleId="com.old.shell", team="T", version=None)]}
+        def run(bid):
+            self.ph.bid, self.pushed[:] = bid, []
+            with mock.patch.object(install, "push_pack", lambda *a, **k: None, create=True), mock.patch.object(install, "put_game", lambda *a, **k: None, create=True):
+                try:
+                    install.push_game(self.c, GID, self.ph, steps=False)
+                    return None, ""
+                except install.Failure as e:
+                    return e.code, str(e)
+        code, msg = run("COM.OLD.ONE")
+        self.assertEqual(code, "phone_app_standalone"); self.assertIn("「Game Two」", msg); self.assertIn("独立 App", msg); self.assertNotIn("{1}", msg)
+        self.assertEqual(self.pushed, [], "说明了、不推")
+        code, msg = run("com.old.shell")
+        self.assertIsNone(code, msg); self.assertEqual([g for g, *_ in self.pushed], [[GID]])
+
     def test_app_version_from_listing(self):
         """push_phone 取 external App 版本：读本次判归属时列过的那份（installed_s2arm_on 记在作业上），不为取版本再调一次设备；
         本次没列过 → None（照旧推）。期望手写：列表第四列 0.6.2 → 0.6.2；旧工具三列 → None；换一台没列过的 → None"""

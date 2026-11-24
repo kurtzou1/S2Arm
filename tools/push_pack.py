@@ -242,11 +242,12 @@ class Devpush:
         rc, out = self.call("ls", rel)
         return out.splitlines() if rc == 0 else None
 
-    def apps(self):   # 手机上装的用户 App → [(包名, 可执行文件名, 团队号, 版本)]（团队号 / 版本读不到为 ""，旧工具只有前三列）；工具太旧（不认 apps）/ 断开 → None
+    def apps(self):   # 手机上装的用户 App → [(包名, 可执行文件名, 团队号, 版本, 类别, 有壳号, 主屏名)]（读不到为 ""；旧工具只有前三 / 四列，后面补 ""）；
+        #   类别 = Info.plist S2AKind（container / standalone），有壳号 = "1" / ""。工具太旧（不认 apps）/ 断开 → None
         rc, out = self.call("apps")
         if rc:
             return None
-        return [tuple((line.split("\t") + ["", "", ""])[:4]) for line in out.splitlines() if line.strip() and "\t" in line]
+        return [tuple((line.split("\t") + [""] * 6)[:7]) for line in out.splitlines() if line.strip() and "\t" in line]
 
     def du(self, *rels):   # 量这几个目录的占用（只读文件信息）→ {目录: (字节, 文件数) | None（不在）}；工具太旧（没有 du）/ 断开 / 锁屏 → None
         rc, out = self.call("du", *rels)

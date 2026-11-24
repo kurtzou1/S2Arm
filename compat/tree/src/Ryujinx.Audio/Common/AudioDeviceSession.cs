@@ -499,7 +499,7 @@ namespace Ryujinx.Audio.Common
         /// <summary>
         /// Flush all buffers to the initial state.
         /// </summary>
-        /// <returns>True if any buffer was flushed</returns>
+        /// <returns>True if any buffer was flushed (a playing or an appended one)</returns>
         public bool FlushBuffers()
         {
             if (_state == AudioDeviceState.Stopped)
@@ -507,11 +507,12 @@ namespace Ryujinx.Audio.Common
                 return false;
             }
 
-            uint bufferCount = GetBufferCount();
-
-            while (TryPopReleasedBuffer(out AudioBuffer buffer))
+            // S2Arm (#2157 作者推演、维护者核实)：已放回、游戏还没取走的缓冲留在放回环里照常可取，只从硬件注销。
+            //   原先 TryPopReleasedBuffer 把它们弹掉、清空槽位：交 1、2、3，1 已放回未取、2 / 3 在播 → Flush 后游戏只取回 [2, 3]，1 永远回不来
+            for (uint i = 0; i < _bufferReleasedCount; i++)
             {
-                _hardwareDeviceSession.UnregisterBuffer(buffer);
+                uint index = (_releasedBufferIndex - _bufferReleasedCount + i + Constants.AudioDeviceBufferCountMax) % Constants.AudioDeviceBufferCountMax;
+                _hardwareDeviceSession.UnregisterBuffer(_buffers[index]);
             }
 
             // S2Arm: 在播缓冲按 Stop 路径的账目交还（ReleaseBuffer 推进 _releasedBufferIndex），并发放回事件。
@@ -519,36 +520,33 @@ namespace Ryujinx.Audio.Common
             //   [_releasedBufferIndex − _bufferReleasedCount, _releasedBufferIndex) 落后于在播区，之后再放回一个缓冲，
             //   GetReleasedBuffer / ContainsBuffer 就读到被清空的槽位（NullReferenceException，音频服务线程未捕获 → 宿主闪退）；
             //   被 Flush 的缓冲游戏也取不回
-            bool flushedPlaying = false;
+            bool flushed = false;
 
             while (TryGetPlayingBufferIndex(out uint playingIndex))
             {
                 _hardwareDeviceSession.UnregisterBuffer(_buffers[playingIndex]);
                 ReleaseBuffer(_buffers[playingIndex]);
-                flushedPlaying = true;
+                flushed = true;
             }
 
-            if (flushedPlaying)
+            // S2Arm (#2157)：已追加、还没交给硬件的缓冲（appended）也一并作废放回。原先这段要求「registered == 0 时 return false」在前，
+            //   而上面的循环总把 registered 耗到 0，这段永远走不到：刚追加的缓冲躲过 Flush、下一次 Update 照常交给硬件播出来，返回值也恒为 false。
+            //   返回值（游戏 FlushAudioOutBuffers 读到的 bool）= 这次有没有作废掉缓冲（在播的或已追加的），已放回的不算
+            if (_bufferAppendedCount > 0 && _bufferReleasedCount + _bufferAppendedCount <= Constants.AudioDeviceBufferCountMax)
+            {
+                _bufferReleasedCount += _bufferAppendedCount;
+                _releasedBufferIndex = (_releasedBufferIndex + _bufferAppendedCount) % Constants.AudioDeviceBufferCountMax;
+                _bufferAppendedCount = 0;
+                _hardwareBufferIndex = _serverBufferIndex;
+                flushed = true;
+            }
+
+            if (flushed)
             {
                 _bufferEvent.Signal();
             }
 
-            if (_bufferRegisteredCount == 0 || (_bufferReleasedCount + _bufferAppendedCount) > Constants.AudioDeviceBufferCountMax)
-            {
-                return false;
-            }
-
-            _bufferReleasedCount += _bufferAppendedCount;
-            _releasedBufferIndex = (_releasedBufferIndex + _bufferAppendedCount) % Constants.AudioDeviceBufferCountMax;
-            _bufferAppendedCount = 0;
-            _hardwareBufferIndex = _serverBufferIndex;
-
-            if (bufferCount > 0)
-            {
-                _bufferEvent.Signal();
-            }
-
-            return true;
+            return flushed;
         }
 
         /// <summary>

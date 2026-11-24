@@ -46,7 +46,9 @@ var confirmProbe = args.Length > 0 && args[0] == "--confirm-probe";
 var walkProbe = args.Length > 0 && args[0] == "--walk-probe";
 // --cover-probe <目录>：坏封面只让那一格用占位图、设置框没画出来时环境检查路径不变空（D-97FT，CoverProbe.cs）
 var coverProbe = args.Length > 0 && args[0] == "--cover-probe";
-if (reportProbe || buildRouteProbe || dismissProbe || installActionProbe || detailsProbe || consoleProbe || updateExportProbe || walkProbe || confirmProbe || coverProbe) args = args[1..];
+// --endjob-probe <目录>：出包客户端抛 catch 列表之外的异常时，收尾照样撤作业登记、按钮恢复（#2191，EndJobProbe.cs）
+var endJobProbe = args.Length > 0 && args[0] == "--endjob-probe";
+if (reportProbe || buildRouteProbe || dismissProbe || installActionProbe || detailsProbe || consoleProbe || updateExportProbe || walkProbe || confirmProbe || coverProbe || endJobProbe) args = args[1..];
 var outDir = args.Length > 0 ? args[0] : Path.Combine(
     Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
     ".s2arm/run/s2arm/cmdr/evidence/launcher/win");
@@ -72,6 +74,7 @@ if (detailsProbe) { Environment.Exit(DetailsProbe.Run(outDir)); }
 if (consoleProbe) { Environment.Exit(ConsoleProbe.Run(outDir)); }
 if (updateExportProbe) { Environment.Exit(UpdateExportProbe.Run(outDir)); }
 if (coverProbe) { Environment.Exit(CoverProbe.Run(outDir)); }
+if (endJobProbe) { Environment.Exit(EndJobProbe.Run(outDir)); }
 if (walkProbe) { Environment.Exit(WalkProbe.Run(outDir)); }
 
 // ── 统一夹具游戏（不用固定游戏名字符串以外的占位）────────────────────

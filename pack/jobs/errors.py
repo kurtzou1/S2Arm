@@ -119,6 +119,7 @@ RECOVERY = {
     "phone_app_choice_required": "点游戏库最前面的「S2Arm」，选好这台 {0} 用哪一个 S2Arm（AltStore / SideStore 装的，还是启动器装的），再推游戏；选一次就记住。",   # 同机装着不止一个 S2Arm（install.s2arm_owner choose）
     "phone_app_gone": "点游戏库最前面的「S2Arm」，重新选一次用哪一个 S2Arm：选过的那个已经不在这台 {0} 上了。",   # phoneChooseApp 选的包不在手机上
     "shell_update_required": "先在首位「S2Arm」卡把这台上的 App 更新到这一版，再点这台的「重试」。",
+    "phone_app_standalone": "装一个通用 S2Arm（游戏库最前面「S2Arm」卡）后再推；如果它其实就是通用 S2Arm，用当初装它的工具装一次这一版的 S2Arm.ipa，再点这台的「重试」。",   # 推送目标多半是老独立 App（install.standalone_target），推进去不会出现
     "phone_app_outdated": "想马上用上新版修复就照上面说的先更新这台 {0} 上的 S2Arm；不急的话点「仍然继续」照旧推。",   # #1842：别的工具 / 别的电脑装的 S2Arm 比启动器旧、接口兼容（install.external_app_outdated）
     "phone_app_incompatible": "照上面说的把这台 {0} 上的 S2Arm 更新到这一版，再点这台的「重试」。",   # 同上，App 早于接口起始版（host_update.COMPAT_SINCE），推进去打不开   # 通用壳「推到 iPhone」：手机上的壳不是本版
     "device_not_visible": "用数据线把这台 {0} 连到这台 Mac，解锁后在设备上点「信任」；打开开发者模式（设置 → 隐私与安全性 → 开发者模式，开了要重启）；等 Xcode 菜单「窗口 → 设备与模拟器」里出现这台，再点一次「推到 iPhone」。",   # pack/ensure_profile.sh：Xcode 看不到这台、账号上也没登记过它（D-44DP 兜底的盲区，11-16）

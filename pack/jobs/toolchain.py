@@ -418,13 +418,29 @@ def preflight(c):
                 canUninstallMetal=False)
 
 
+# 下载 Metal 编译组件时 xcodebuild 一直不出声多久，就上屏说明一次（D-6M7D：Xcode 27.2 只打「Beginning asset download...」，之后几分钟没有任何进度输出，
+#   玩家只看见转圈、等了 170 / 284 秒自己取消，分不清是网慢还是卡住）。组件大小按本机 Xcode 27.1 资产目录记的下载量 838,860,800 字节，写「近 1 GB」
+METAL_QUIET_S = 60
+METAL_QUIET = ("苹果的下载工具这一步不报进度：Metal 编译组件近 1 GB，网速慢时要十几分钟甚至更久，转圈就是还在下；"
+               "不想等可以在 Xcode → 设置 → Components 里手动下载 Metal Toolchain，下完回来点「重新检查」。")
+
+
 def download_metal(c):
     # 一键下载 Xcode 的 Metal 编译组件（xcodebuild -downloadComponent MetalToolchain，Xcode 26 起；不需要管理员密码）
     c.begin("下载 Metal 编译组件")
+    heard = threading.Event()   # xcodebuild 报过进度（或已结束）：不再说明
     def line(text):
         m = DOWNLOAD_PERCENT.search(text)
         if m:
+            heard.set()
             c.emit(done=float(m.group(1).replace(",", ".")), total=100.0, unit="%")
+    def quiet():
+        if not heard.wait(METAL_QUIET_S):
+            try:
+                c.emit("message", METAL_QUIET)
+            except Exception:   # noqa: BLE001 —— 作业已取消 / 已结束：不再说
+                pass
+    threading.Thread(target=quiet, name="metal-quiet", daemon=True).start()
     try:
         c.run(["xcodebuild", "-downloadComponent", "MetalToolchain"], on_line=line)
     except Failure as e:
@@ -439,6 +455,8 @@ def download_metal(c):
         if code:
             raise Failure(PLAYER_REASON.get(code) or str(e), code=code) from e
         raise
+    finally:
+        heard.set()
     return {}
 
 

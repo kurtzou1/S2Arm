@@ -25,6 +25,7 @@
 //   ㉔ 改整池后块与旧块按两次提交到期（D-3N8R）：过两次提交（g_sub_serial += 2、pool_reap）后 ㉒ ㉓ 两个池各只剩整池一个缓冲（896 / 640 MB）、旧缓冲 0，
 //      被放掉的 4 块 + 1 块 + 3 个旧缓冲 = 8 个进延后释放队列；查找照常落到整池缓冲。到期前（刚改整池）照旧 5 个 / 2 个 + 旧缓冲（㉒ ㉓ 本身）。
 //      反证：去掉 big_lookup 里改整池时标块到期、旧块 old_dead 那两行 → ㉔ 红（5 个 1280 MB、2 个 768 MB + 192 MB，延后释放 0）
+//   ㉕ 旧行为对照与上界：同样 56 次查找「不切换」（nofull，= 0.6.9）合计 5136 MB、没有上界；切换路 ≤ 它，再查一遍仍封顶在池长
 //   反证：s2a_gpu_alloc_bytes 改回只读 currentAllocatedSize → ⑬ ⑮ 红（涨 96 / 48 MB）；nocopy_buf 的 deallocator 不减 → ⑭ ⑮ 红；hle_vk.m 改回直接建 → ⑯ 红
 //   反证：去掉 nvn_be_pool_add_body 里登记大池那段 → ① ② ③ ④ 红（整池一个缓冲）；去掉注销时把旧块缓冲算进被放掉的那两行 → ⑨ 注销后 1 条红；去掉 big_new 建块前的 dm_guest_write_prepare → ⑫ 红
 #include "../gfx/nvn/nvn_mtl.m"
@@ -82,6 +83,22 @@ static int child(int chunks) {
         CHECK(n1 == 1 && s1 == P && o1 == 0 && n2 == 1 && s2 == P2 && o2 == 0 && d1 - d0 == 8 && hit1 && hit2,
               "㉔ 过两次提交：896 MB 池 %d 个 %llu MB + 旧 %llu MB、640 MB 池 %d 个 %llu MB + 旧 %llu MB、进延后释放 %lu 个、查找落到整池 %d %d（期望 1 个 896 + 0、1 个 640 + 0、8、1 1；不放是 5 个 1280、2 个 768 + 192、0）",
               n1,(unsigned long long)(s1/MB),(unsigned long long)(o1/MB),n2,(unsigned long long)(s2/MB),(unsigned long long)(o2/MB),d1 - d0,hit1,hit2);
+        // ㉕ 拿旧行为作对照（11-24 坑记录：只验新机制自洽会漏「改了反而更糟」）：同样 896 MB、同样 56 次查找，「不切换、只建块」（该池 nofull，等于 0.6.9 的行为）
+        //   每块盖到要读的末尾再多一个步长、不知道读多远的给 64 MB，跳开 368 MB 的 56 次查找各建一块（32～96 MB，
+        //   末尾不足按池尾截），合计照 ㉒ 注释的旧行为读数 5136 MB。断言：① 对照路合计 = 5136 MB（旧行为没有上界、随查找次数涨）；② 切换路（m，㉔ 到期后）合计 ≤ 对照路；
+        //   ③ 上界：切换路再把 56 个步长各查一遍、隔两次提交，缓冲个数与合计不变（= 池长 896 MB），不随游戏时长涨
+        const uint64_t P3 = 896 * MB; uint8_t *m3 = NULL; REQUIRE(!posix_memalign((void **)&m3, 16*MB, P3)); memset(m3, 0, 16384); nvn_be_pool_add(m3, P3);
+        pthread_mutex_lock(&g_mu); int nb3 = 0; for (int q=0;q<g_nbig;q++) if (g_big[q].mem==m3) { g_big[q].nofull = 1; nb3++; } pthread_mutex_unlock(&g_mu); REQUIRE(nb3 == 1);
+        for (int j = 0; j < 56; j++) { int k = j * 23 % 56; REQUIRE(mtl_gpu_addr((uint64_t)(uintptr_t)m3 + (uint64_t)k * 16*MB + 8*MB, 1, &bp, &off, &gpu)); }
+        uint64_t s3 = 0, o3 = 0; int n3 = 0; pthread_mutex_lock(&g_mu); for (int i=0;i<g_npool;i++) if (g_pools[i].key==m3) { n3++; s3 += g_pools[i].buf.length; }
+        for (int q=0;q<g_nbig;q++) if (g_big[q].mem==m3) for (id<MTLBuffer> o in g_big[q].old) o3 += o.length; pthread_mutex_unlock(&g_mu);
+        CHECK(n3 == 56 && s3 + o3 == 5136*MB,"㉕① 不切换对照（0.6.9 行为）：896 MB 池同样 56 次查找 %d 个 %llu MB + 旧 %llu MB（期望 56 个 5136 MB：没有上界）",n3,(unsigned long long)(s3/MB),(unsigned long long)(o3/MB));
+        CHECK(s1 + o1 <= s3 + o3,"㉕② 同一组查找：切换路合计 %llu MB ≤ 不切换 %llu MB",(unsigned long long)((s1 + o1)/MB),(unsigned long long)((s3 + o3)/MB));
+        for (int j = 0; j < 56; j++) { int k = j * 23 % 56; REQUIRE(mtl_gpu_addr((uint64_t)(uintptr_t)m + (uint64_t)k * 16*MB + 8*MB, 1, &bp, &off, &gpu)); }
+        pthread_mutex_lock(&g_mu); g_sub_serial += 2; pool_reap(0, 0); pthread_mutex_unlock(&g_mu);
+        uint64_t s1b = 0, o1b = 0; int n1b = 0; pthread_mutex_lock(&g_mu); for (int i=0;i<g_npool;i++) if (g_pools[i].key==m) { n1b++; s1b += g_pools[i].buf.length; }
+        for (int q=0;q<g_nbig;q++) if (g_big[q].mem==m) for (id<MTLBuffer> o in g_big[q].old) o1b += o.length; pthread_mutex_unlock(&g_mu);
+        CHECK(n1b == 1 && s1b == P && o1b == 0,"㉕③ 上界：切换路再查一遍 56 个步长、隔两次提交：%d 个 %llu MB + 旧 %llu MB（期望 1 个 896 MB + 0：封顶在池长、不随时长涨）",n1b,(unsigned long long)(s1b/MB),(unsigned long long)(o1b/MB));
         printf("%s t_nvn_big_pool 子进程（缓冲合计上限）：%u 项，%u 项失败\n",failures?"✗":"✓",checks,failures); return failures!=0;
     }
     if (chunks == 2) {   // ⑱ 状态表（快照 gfx_state.bin / 帧录 state.bin）存取大池：存整池一条、不存块

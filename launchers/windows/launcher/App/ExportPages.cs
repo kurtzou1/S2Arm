@@ -42,21 +42,90 @@ public sealed partial class EnvironmentWindow
         return log;
     }
 
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr window);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr window, int command);
+    private const int SwRestore = 9;
+
+    /// <summary>机器上在跑的 Impactor（进程名像 Impactor）：(判法用的数据, 进程)。路径读不到（别的用户的进程等）记空串</summary>
+    private static List<(ImpactorInstance.Running Info, Process Process)> RunningImpactors()
+    {
+        var found = new List<(ImpactorInstance.Running, Process)>();
+        foreach (var p in Process.GetProcesses())
+        {
+            if (!ImpactorInstance.IsImpactorName(p.ProcessName)) { p.Dispose(); continue; }
+            string path = ""; var window = IntPtr.Zero;
+            try { path = p.MainModule?.FileName ?? ""; } catch (Exception error) when (error is System.ComponentModel.Win32Exception or InvalidOperationException or NotSupportedException) { }
+            try { window = p.MainWindowHandle; } catch (InvalidOperationException) { }
+            found.Add((new ImpactorInstance.Running(path, window != IntPtr.Zero, p.ProcessName), p));
+        }
+        return found;
+    }
+
     private bool TryOpenBundledImpactor()
     {
         var ok = false;
+        // D-W2H5：Impactor 只许一个实例。已有一个在跑、窗口没出来时，新拉起的打「Another instance is already running; exiting.」就退，原先界面什么都不说
+        if (OperatingSystem.IsWindows())
+        {
+            var running = RunningImpactors();
+            try
+            {
+                var (step, target) = ImpactorInstance.Decide(running.Select(x => x.Info).ToList(), BundledImpactor);
+                var proc = running.FirstOrDefault(x => ReferenceEquals(x.Info, target)).Process;
+                if (step == ImpactorInstance.Step.Focus && proc is not null)
+                {
+                    ShowWindow(proc.MainWindowHandle, SwRestore); SetForegroundWindow(proc.MainWindowHandle);
+                    installDiagnostics = ""; Render(); return true;
+                }
+                if (step == ImpactorInstance.Step.AskClose && target is not null)
+                {
+                    installDiagnostics = string.Format(T("impactor.already_running"), target.Name); Render(); return false;
+                }
+                if (step == ImpactorInstance.Step.RestartOwn && proc is not null)   // 只结束随包那份（Decide 按完整路径认），窗口没出来的它本来就用不了
+                {
+                    try { proc.Kill(); proc.WaitForExit(5000); }
+                    catch (Exception error) when (error is System.ComponentModel.Win32Exception or InvalidOperationException)
+                    { installDiagnostics = string.Format(T("impactor.already_running"), target!.Name); Render(); return false; }
+                }
+            }
+            finally { foreach (var x in running) x.Process.Dispose(); }
+        }
         try
         {
             var start = new ProcessStartInfo(BundledImpactor) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(BundledImpactor)! };
             // 自编 Impactor 补丁 0004：窗口程序没有控制台，日志（登录提交 / 成功 / 失败原因）追加进这个文件，诊断包按 logs/*.log 收（同一套脱敏）
-            start.Environment["S2A_IMPACTOR_LOG"] = ImpactorLog();
-            using var p = Process.Start(start);
-            if (p is null) installDiagnostics = T("process.start_failed"); else ok = true;
+            var log = ImpactorLog();
+            start.Environment["S2A_IMPACTOR_LOG"] = log;
+            long before = 0; try { before = new FileInfo(log) is { Exists: true } f ? f.Length : 0; } catch (IOException) { }
+            var p = Process.Start(start);
+            if (p is null) installDiagnostics = T("process.start_failed");
+            else { ok = true; installDiagnostics = ""; _ = WatchImpactorStart(p, log, before); }
         }
         catch (Exception error) when (error is IOException or System.ComponentModel.Win32Exception or InvalidOperationException)
         { installDiagnostics = T("process.start_failed") + " " + error.Message; }
         Render();
         return ok;
+    }
+
+    /// <summary>刚拉起的 Impactor 几秒内自己退了、日志新增的那段说「已有实例」：前面没认出的那个实例（别的副本、读不到路径的）挡着，照实告诉玩家</summary>
+    private async Task WatchImpactorStart(Process p, string log, long before)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(3));
+            if (!p.HasExited) return;
+            string added = "";
+            try
+            {
+                using var stream = new FileStream(log, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                if (stream.Length > before) { stream.Seek(before, SeekOrigin.Begin); added = await new StreamReader(stream).ReadToEndAsync(); }
+            }
+            catch (IOException) { }
+            if (!ImpactorInstance.SaysAlreadyRunning(added)) return;
+            installDiagnostics = string.Format(T("impactor.already_running"), "Impactor");
+            Render();
+        }
+        finally { p.Dispose(); }
     }
 
     /// <summary>装机前清单当前呈现的落点（11-19 契约，同 Mac state.presented）：清单按钮 / 控制口 /install-action 做成了记 action 名；换页（Navigate）、/dismiss 清空</summary>
@@ -985,16 +1054,18 @@ public sealed partial class EnvironmentWindow
             // 事件还在排队：排在它们后面收尾
             Dispatcher.UIThread.Post(() =>
             {
+                // 收尾第一件事撤作业登记（EndJob 的约定）：下面读结局时再出什么异常，按钮也不会一直灰到重开启动器（#2191）
+                EndJob(front); if (packJob == front) packJob = null;
                 if (!exportStepEnded && packGame is not null && !batch)
                 {
-                    // 第一步还没结束编排作业就停了：整个作业的结局就是这一款的结局（被拒、已有一个在出、取消、起不来）
+                    // 第一步还没结束编排作业就停了：整个作业的结局就是这一款的结局（被拒、已有一个在出、取消、起不来）。
+                    //   出包客户端抛了上面 catch 列表之外的异常时 job 和 endState 都为空：按失败收
                     packTrack.Finish(Clock); packSeconds = (DateTime.UtcNow - packStarted).TotalSeconds;
-                    packState = endState ?? (job!.Report.State == "succeeded" ? "failed" : job.Report.State);
+                    packState = endState ?? (job is null || job.Report.State == "succeeded" ? "failed" : job.Report.State);
                     packSummary = job?.Report.Message ?? "";
                     packDiagnostics = job is not null ? JobDiagnostics(job) : error ?? "";
                     packFailureCode = job is not null ? DiagnosticCode(job.Report.Diagnostics) : null;
                 }
-                EndJob(front); if (packJob == front) packJob = null;
                 AfterArtifactJob(); Render();
                 if (batch) _ = BatchExportEndedAsync(job?.Report, error);
                 else if (exportAfterPack is { } run) { exportAfterPack = null; ContinueExportRun(run); }   // 导出确认页起的：iPhone 版做好了，接着导出 / 逐台推

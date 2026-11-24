@@ -928,6 +928,7 @@ def keep_nros(c, gid, names, fetch):
 
 
 SAVE_REL = "S2A/ryujinx/bis/user/save"   # 文档根下的存档目录（Ryujinx 数据根 = <文档根>/S2A/ryujinx）
+SAVE_DATA_SUBDIR = "_savedata_"   # 备份目录内 SaveData 存档的子目录名；以下划线开头，不与 bis/user/save 下的十六进制段冲突
 SAVE_INDEX_REL = "S2A/ryujinx/bis/system/save"   # 文档根下这款的存档索引（模拟器按「这款 + 用户 → 存档号」找存档；每款各一份，第一次起局时建）
 SAVE_PROFILE_REL = "S2A/ryujinx/system/Profiles.json"   # 文档根下这款的用户档案（同上；索引里的用户号指它）
 SAVE_DIR = "Documents/" + SAVE_REL
@@ -1032,19 +1033,27 @@ def save_backup_stuck(c, gid, why, nospace=False):
     return backup_failed(c, why)
 
 
+def _list_save_files(data):
+    """从 devicectl info files 结果里提取非点开头的文件相对路径列表，并返回读不懂的条目（无路径字段的非目录条目）。"""
+    entries = [f for f in ((data.get("result") or {}).get("files") or []) if isinstance(f, dict)]
+    unknown = [sorted(f) for f in entries if not (f.get("relativePath") or f.get("path")) and not (f.get("resources") or {}).get("isDirectory")]
+    files = [p for p in (f.get("relativePath") or f.get("path") for f in entries if not (f.get("resources") or {}).get("isDirectory"))
+             if p and not p.rsplit("/", 1)[-1].startswith(".")]
+    return files, unknown
+
+
 def backup_saves(c, ident, bid, gid, docs="Documents"):
-    """覆盖装前把机上这款的整个存档目录（bis/user/save）一次拉回游戏库 games/<程序号>/save_backup/<时刻>/（10-27：
-    有一款覆盖装后进了选形象页，原档没有备份、无从比对）。第一次装 / 机上没有存档 = 不备份；拉失败报红停装，宁可不装也不冒丢档的险"""
+    """覆盖装前把机上这款的整个存档目录（bis/user/save）以及玩家原生格式存档目录（SaveData）一次拉回
+    games/<程序号>/save_backup/<时刻>/（10-27：有一款覆盖装后进了选形象页，原档没有备份、无从比对）。
+    SaveData 文件备份在同一目录下的 _savedata_/ 子目录（SAVE_DATA_SUBDIR），恢复时写回 SaveData，不写进 SAVE_REL。
+    第一次装 / 机上两个目录都没有存档 = 不备份；拉失败报红停装，宁可不装也不冒丢档的险"""
     from diag import DEVICECTL_NOSPACE, devicectl
     save_dir = f"{docs}/{SAVE_REL}"
     rc, data, err = wait_unlocked(c, lambda: devicectl(c, "device", "info", "files", "--device", ident, "--domain-type", "appDataContainer",
                                                        "--domain-identifier", bid, "--subdirectory", save_dir, timeout=120))
     # 文件清单的路径字段（#908：玩家 Xcode 16.0 的 devicectl 有条目不带 relativePath，原先 f["relativePath"] 抛 KeyError、整个装机作业崩成
     #   「本地任务失败」，每次都装不上）：relativePath / path 都认；都没有的条目读不懂 → 走「备份不了存档、确认后照装」，条目字段名记进日志，不再崩
-    entries = [f for f in ((data.get("result") or {}).get("files") or []) if isinstance(f, dict)]
-    unknown = [sorted(f) for f in entries if not (f.get("relativePath") or f.get("path")) and not (f.get("resources") or {}).get("isDirectory")]   # 目录条目读不出路径不碍事
-    files = [p for p in (f.get("relativePath") or f.get("path") for f in entries if not (f.get("resources") or {}).get("isDirectory"))
-             if p and not p.rsplit("/", 1)[-1].startswith(".")]
+    files, unknown = _list_save_files(data)
     if not rc and unknown:
         print(f"[s2a] 存档文件清单有 {len(unknown)} 条读不出路径，字段：{unknown[0]}", file=sys.stderr)
         return save_backup_stuck(c, gid, f"读不懂 iPhone 返回的存档文件清单（{len(unknown)} 条没有路径字段，多半是 Xcode 版本不同）")
@@ -1061,8 +1070,20 @@ def backup_saves(c, ident, bid, gid, docs="Documents"):
             if not save_dir_absent(c, ident, bid, save_dir):
                 return save_backup_stuck(c, gid, "读不到 iPhone 上这款的存档目录：" + (err.splitlines()[-1] if err else f"devicectl 退出 {rc}"))  # 非玩家句
         return None
-    if not files:
-        return None
+    # 列出 SaveData（玩家可在装机前放进原生格式存档的目录，起局时导入）：没有或为空属正常，不算失败
+    sd_dir = f"{docs}/SaveData"
+    sd_rc, sd_data, sd_err = devicectl(c, "device", "info", "files", "--device", ident, "--domain-type", "appDataContainer",
+                                       "--domain-identifier", bid, "--subdirectory", sd_dir, timeout=120)
+    sd_files: list
+    if sd_rc:
+        if save_dir_absent(c, ident, bid, sd_dir):
+            sd_files = []   # 机上真的没有这个目录，正常
+        else:
+            return save_backup_stuck(c, gid, "读不到 iPhone 上这款的 SaveData 目录：" + (sd_err.splitlines()[-1] if sd_err else f"devicectl 退出 {sd_rc}"))  # 非玩家句
+    else:
+        sd_files, _ = _list_save_files(sd_data)   # SaveData 目录存在但内容读不懂的条目跳过，不阻断
+    if not files and not sd_files:
+        return None   # 两个目录都没存档：第一次装，不备份
     # 整个存档目录一次拉回（11-23：原先逐文件各起一次 devicectl 约 0.3 秒，一款 1513 个存档文件备份 442 秒，装壳本身只要 17 秒）。
     #   先拉进同目录下的隐藏暂存目录 .pulling-<时刻>，按清单逐个核对都在、去掉点开头的文件（同原先逐文件口径：清单里本来就不收）后才改名成 <时刻>；
     #   拉失败 / 缺文件整份删掉、照实报，不留半份（原先逐文件拉到一半失败会留下半份备份目录）
@@ -1075,14 +1096,28 @@ def backup_saves(c, ident, bid, gid, docs="Documents"):
     if getattr(c, "stage_key", None) == "phone_save_backup":
         c.emit("progress", f"{gid} · 0/{len(files)}", done=0, total=len(files), unit="files")
     try:
-        rc, _, err = devicectl(c, "device", "copy", "from", "--device", ident, "--domain-type", "appDataContainer", "--domain-identifier", bid,
-                               "--source", save_dir, "--destination", str(stage), timeout=600)
-        missing = [] if rc else [r for r in files if not (stage / r).is_file()]
-        if rc or missing:
-            why = (f"拉回的存档缺 {len(missing)} 个文件（如 {missing[0]}）" if missing and not rc  # 非玩家句
-                   else "拉存档失败：" + (err.splitlines()[-1] if err else f"devicectl 退出 {rc}"))  # 非玩家句
-            shutil.rmtree(stage, ignore_errors=True)
-            return save_backup_stuck(c, gid, why, nospace=rc == DEVICECTL_NOSPACE)
+        if files:
+            rc, _, err = devicectl(c, "device", "copy", "from", "--device", ident, "--domain-type", "appDataContainer", "--domain-identifier", bid,
+                                   "--source", save_dir, "--destination", str(stage), timeout=600)
+            missing = [] if rc else [r for r in files if not (stage / r).is_file()]
+            if rc or missing:
+                why = (f"拉回的存档缺 {len(missing)} 个文件（如 {missing[0]}）" if missing and not rc  # 非玩家句
+                       else "拉存档失败：" + (err.splitlines()[-1] if err else f"devicectl 退出 {rc}"))  # 非玩家句
+                shutil.rmtree(stage, ignore_errors=True)
+                return save_backup_stuck(c, gid, why, nospace=rc == DEVICECTL_NOSPACE)
+        if sd_files:
+            # SaveData 文件备份到 _savedata_/ 子目录，恢复时写回 SaveData，不写进 SAVE_REL（write_phone_save 按前缀分流）
+            stage_sd = stage / SAVE_DATA_SUBDIR
+            rc_sd, _, err_sd = devicectl(c, "device", "copy", "from", "--device", ident, "--domain-type", "appDataContainer", "--domain-identifier", bid,
+                                         "--source", sd_dir, "--destination", str(stage_sd), timeout=300)
+            missing_sd = [] if rc_sd else [r for r in sd_files if not (stage_sd / r).is_file()]
+            if rc_sd or missing_sd:
+                why = (f"拉回的 SaveData 缺 {len(missing_sd)} 个文件（如 {missing_sd[0]}）" if missing_sd and not rc_sd  # 非玩家句
+                       else "拉 SaveData 失败：" + (err_sd.splitlines()[-1] if err_sd else f"devicectl 退出 {rc_sd}"))  # 非玩家句
+                shutil.rmtree(stage, ignore_errors=True)
+                return save_backup_stuck(c, gid, why, nospace=rc_sd == DEVICECTL_NOSPACE)
+            for p in [p for p in stage_sd.rglob(".*") if p.is_file() or p.is_symlink()]:
+                p.unlink()
         for p in [p for p in stage.rglob(".*") if p.is_file() or p.is_symlink()]:
             p.unlink()
         os.replace(stage, dest)
@@ -2248,13 +2283,25 @@ class WinPhone:
             # 这台没记过包名、又读不到 Impactor 当前账号的团队号：定不了包名就查不了手机上有没有这款的存档。原先直接放行、交给 plumesign 自己定包名
             #   装上去，等于不备份就覆盖（审计 P2-253）。真实 accounts.json 每个账号都带十位 team_id（Windows 实机核过），读不到 = 存档坏了或没选账号，停装
             return backup_failed(self.c, "读不到 Impactor 当前账号的团队号，定不了要装的包名，查不了手机上这款的存档")
-        dest = layout.path(self.c, g, "save_backup", time.strftime("%Y%m%d-%H%M%S"))
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        dest = layout.path(self.c, g, "save_backup", stamp)
         with tempfile.TemporaryDirectory(dir=self.c.private) as w:
             ok, out = devpush_client(self.c, self.udid, bid, w).get_tree(f"{game_docs(g)}/{SAVE_REL}", dest)
         if not ok:
-            if "ApplicationLookupFailed" in out or "S2A_APP_MISSING" in out:   # 机上确实没装这个包名（Windows 实机核过的原文 / s2a-devpush 查 installation_proxy 的标记）
+            if "ApplicationLookupFailed" in out or "S2A_APP_MISSING" in out:
                 return None
             return backup_failed(self.c, "拉存档失败：" + out[-200:])  # 非玩家句
+        # SaveData（玩家原生格式存档目录）：没有或为空属正常，不算失败
+        with tempfile.TemporaryDirectory(dir=self.c.private) as w:
+            ok_sd, out_sd = devpush_client(self.c, self.udid, bid, w).get_tree(f"{game_docs(g)}/SaveData", dest / SAVE_DATA_SUBDIR)
+        if not ok_sd:
+            if "ApplicationLookupFailed" in out_sd or "S2A_APP_MISSING" in out_sd or "no such" in out_sd.lower() or "not found" in out_sd.lower():
+                pass   # SaveData 目录不存在，正常
+            else:
+                # 目录存在但拉失败：停装，宁可不装也不冒丢档的险
+                if dest.exists():
+                    shutil.rmtree(dest, ignore_errors=True)
+                return backup_failed(self.c, "拉 SaveData 失败：" + out_sd[-200:])  # 非玩家句
         return dest if dest.is_dir() else None
 
     def install(self, ipa, games, steps=True, bid=None):
@@ -2538,6 +2585,19 @@ def external_app_outdated(c, ph):
     if theirs < (_ver(host_update.COMPAT_SINCE) or (0,)):
         return "phone_app_incompatible", f"这台 {dev} 上的 S2Arm 是 {have}，太旧了，读不了这个启动器（{want}）出的游戏程序，推进去也打不开：先在游戏库最前面「S2Arm」卡导出 {want} 的 S2Arm.ipa，用你当初装它的工具（LiveContainer / SideStore 等）重新装一次，再推游戏。"
     return "phone_app_outdated", f"这台 {dev} 上的 S2Arm 是 {have}，比电脑上的 {want} 旧，部分修复要更新 App 才生效：在游戏库最前面「S2Arm」卡导出 {want} 的 S2Arm.ipa，用你当初装它的工具（LiveContainer / SideStore 等）重新装一次。也可以先照旧推。"
+
+
+PHONE_APP_STANDALONE = ("这台 {0} 上要推进去的「{1}」看起来是一款游戏的独立 App：它只玩自己带的那一款，推别的游戏进去不会出现，这次就不推了。"
+                        "请装一个通用 S2Arm（游戏库最前面「S2Arm」卡）再推；如果它其实就是通用 S2Arm，用当初装它的工具装一次这一版的 S2Arm.ipa 再推。")
+
+
+def standalone_target(c, ph):
+    """推送目标是兜底认不准、多半是老独立 App 的那个（installed_s2arm_on 标 looksStandalone：没有 S2AKind、带壳号、主屏名里没有 S2Arm）→ 推之前说明的那句话；不是 → None。
+    独立 App 起局只认包里自带的那一款，推别的进去等于白推，不能悄悄推"""
+    udid = getattr(ph, "udid", None)
+    apps = (getattr(c, "_s2arm_apps", None) or {}).get(udid) or []
+    hit = next((a for a in apps if a.get("looksStandalone") and a["bundleId"].lower() == (ph.bid or "").lower()), None)
+    return on_device(PHONE_APP_STANDALONE, device_of(c)).replace("{1}", hit["name"]) if hit else None
 
 
 def owner_for_push(c, udid, key):
@@ -3050,14 +3110,27 @@ def restore_phone_save(c):
 
 
 def write_phone_save(c, ph, gid, src, drop=()):
-    """把电脑上一份存档备份 src 的文件写进手机这个 App（ph.bid）里这款的存档目录；drop = 手机上要删掉的相对路径（还原时备份里没有的）"""
-    base = f"{game_docs(gid)}/{SAVE_REL}"
+    """把电脑上一份存档备份 src 的文件写进手机这个 App（ph.bid）里这款的存档目录。
+    _savedata_/ 子目录（SAVE_DATA_SUBDIR）下的文件写回 SaveData/，其余写进 SAVE_REL；
+    旧格式备份（没有 _savedata_/）照旧恢复。drop = 手机上要删掉的相对路径（还原时备份里没有的，仅针对 SAVE_REL）"""
+    base_save = f"{game_docs(gid)}/{SAVE_REL}"
+    base_sd = f"{game_docs(gid)}/SaveData"
+    src = Path(src)
     with tempfile.TemporaryDirectory(dir=c.private) as w:
         cl = ph.client(w)
-        for p in sorted(x for x in Path(src).rglob("*") if x.is_file() and x.name != PHONE_SAVE_MARK):
-            cl.put(p, f"{base}/{p.relative_to(src).as_posix()}")
+        for p in sorted(x for x in src.rglob("*") if x.is_file() and x.name != PHONE_SAVE_MARK):
+            rel = p.relative_to(src).as_posix()
+            first_seg = rel.split("/")[0]
+            if first_seg == SAVE_DATA_SUBDIR:
+                # SaveData 文件：写回 SaveData/，去掉 _savedata_/ 前缀
+                rel_sd = "/".join(rel.split("/")[1:])
+                cl.put(p, f"{base_sd}/{rel_sd}")
+            else:
+                cl.put(p, f"{base_save}/{rel}")
         for rel in sorted(drop):
-            cl.rm(f"{base}/{rel}")
+            if rel.split("/")[0] == SAVE_DATA_SUBDIR:
+                continue   # SaveData 是玩家放原生存档的地方：还原一份旧备份时不替玩家删那里的文件（差集里出现只说明那份备份没带它）
+            cl.rm(f"{base_save}/{rel}")
 
 
 SAVE_CARRIED = "这款的存档从手机上的另一个 S2Arm（{0}）复制进了新装的独立 App；那边的存档没动，在新 App 里确认进度没问题再删旧的。"
@@ -3198,9 +3271,10 @@ def installed_s2arm(c, ph):
     return installed_s2arm_on(c, ph.udid, layout.load_device(c, ph.key))
 
 
-# 独立 App 的包名形状（app_bundle_id、devcert.bundle_id 前缀通配那支、导出未签名包的 ipa.standalone_bundle）：别的电脑装的、这台设备记录里没有的也认得出，不算通用壳。
-#   导出包交 AltStore / SideStore 签时它们在包名后再接「.团队号」，带这一段也认
-STANDALONE_BID = re.compile(r"(?:io\.s2arm\.games\.[a-z0-9]+\.[0-9a-f]{16}|.+\.s2arm\.[0-9a-f]{16})(?:\.[a-z0-9]+)?")
+# 独立 App 的包名形状（app_bundle_id、devcert.bundle_id 前缀通配那支、导出未签名包的 ipa.standalone_bundle）：只给没有 S2AKind 的老包兜底（新包按 Info.plist 的
+#   S2AKind 认，见 installed_s2arm_on）。后面最多再接两段：撞号自动换的「.s2」（ALT_BUNDLE_SUFFIX）、AltStore / SideStore 签时接的「.团队号」，两段都在也认
+STANDALONE_BID = re.compile(r"(?:io\.s2arm\.games\.[a-z0-9]+\.[0-9a-f]{16}|.+\.s2arm\.[0-9a-f]{16})(?:\.[a-z0-9]+){0,2}")
+SHELL_BRAND = "S2Arm"   # 通用壳 / 多款容器的主屏名带它（缺省就叫 S2Arm，实验包「<游戏> S2Arm」）；独立 App 的主屏名是纯游戏名（ship_ext ascii_display_name brand=False）
 
 
 def standalone_bids(rec):
@@ -3209,8 +3283,10 @@ def standalone_bids(rec):
 
 
 def installed_s2arm_on(c, udid, rec=None):
-    """同 installed_s2arm，按 UDID 查（总控台逐台现查、推送前还没有手机对象时用）。rec = 这台的设备记录：apps 里的独立 App 包名排除
-    （它们也是 io.s2arm.games 前缀、主程序也叫 S2Arm，算进来会让通用壳判「装着不止一个、要选」）；包名形状是独立 App 的同样排除"""
+    """同 installed_s2arm，按 UDID 查（总控台逐台现查、推送前还没有手机对象时用）。先看 App 自己写的类别（Info.plist S2AKind，s2a-devpush apps 第五列）：
+    standalone（独立 App，只玩自带那一款）一律不列，container（通用壳）一律列，不管包名改成什么。没有这个键的老包按包名兜底：io.s2arm.games 前缀或主程序名
+    认成 S2Arm，再排除设备记录 apps 里的独立 App 包名（它们也是 io.s2arm.games 前缀、主程序也叫 S2Arm，算进来会让通用壳判「装着不止一个、要选」）和
+    包名形状是独立 App 的。兜底认不准的（带壳号、主屏名里却没有 S2Arm：多半是老独立 App）照列，标 looksStandalone，推之前说明（push_game）"""
     if not udid:
         return None
     with tempfile.TemporaryDirectory(dir=c.private) as w:
@@ -3219,8 +3295,18 @@ def installed_s2arm_on(c, udid, rec=None):
         return None
     main = main_executable(c)
     skip = standalone_bids(rec)
-    apps = [dict(bundleId=b, team=t or None, version=v or None) for b, e, t, *rest in rows for v in [(rest or [""])[0]]
-            if (b.lower().startswith(S2ARM_BID_PREFIX) or e == main) and b.lower() not in skip and not STANDALONE_BID.fullmatch(b.lower())]
+    apps = []
+    for b, e, t, *rest in rows:
+        v, kind, shell, name = (list(rest) + [""] * 4)[:4]
+        kind = kind.strip().lower()
+        if kind == "standalone":
+            continue
+        if kind != "container" and not ((b.lower().startswith(S2ARM_BID_PREFIX) or e == main) and b.lower() not in skip and not STANDALONE_BID.fullmatch(b.lower())):
+            continue
+        a = dict(bundleId=b, team=t or None, version=v or None)
+        if kind != "container" and shell and name.strip() and SHELL_BRAND.lower() not in name.lower():
+            a.update(looksStandalone=True, name=name.strip())
+        apps.append(a)
     c.__dict__.setdefault("_s2arm_apps", {})[udid] = apps   # 本次作业里记下（app_version_on 读，推送前不为取版本再列一次设备）
     return apps
 
@@ -3496,6 +3582,9 @@ def push_game(c, gid, ph, steps=True):
     rec = layout.load_device(c, ph.key)
     ext = getattr(ph, "external", False)   # 别的工具装的 S2Arm（push_phone）：不查启动器的壳号、不签名、不交身份，推进它自己的包名
     if ext:   # 不查壳号，但比 App 版本（#1842）：接口不兼容拦；只是旧就提示一次，玩家确认（acceptOldApp）后照推
+        looks = standalone_target(c, ph)
+        if looks:
+            raise Failure(looks, code="phone_app_standalone")
         old = external_app_outdated(c, ph)
         if old and old[0] == "phone_app_incompatible":
             raise Failure(old[1], code="phone_app_incompatible")

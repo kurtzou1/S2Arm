@@ -147,6 +147,26 @@ Check(defaults.Edited("", "  ", null) == defaults, "empty or whitespace settings
 var edited = defaults.Edited("D:\\E", null, "D:\\S");
 Check(edited == new LauncherPaths("D:\\E", defaults.Runtime, "D:\\S"), "filled settings boxes replace only their own path");
 Check(!string.IsNullOrEmpty(Path.GetFullPath(defaults.Edited("", "", "").Engine)), "edited paths stay usable by the environment check");
+// D-W2H5：已有 Impactor 在跑（新拉起的打「Another instance is already running; exiting.」就退）时怎么办。期望手写
+{
+    var own = Path.Combine(Path.GetTempPath(), "S2Arm", "ThirdParty", "Impactor", "Impactor-windows-x86_64-portable.exe");
+    var other = Path.Combine(Path.GetTempPath(), "Downloads", "Impactor.exe");
+    ImpactorInstance.Running R(string path, bool win, string name) => new(path, win, name);
+    Check(ImpactorInstance.Decide([], own).Step == ImpactorInstance.Step.Launch, "no Impactor running: launch");
+    Check(ImpactorInstance.Decide([R(own, true, "Impactor-windows-x86_64-portable")], own).Step == ImpactorInstance.Step.Focus, "own Impactor with a window: bring it to front");
+    var focusOwn = ImpactorInstance.Decide([R(other, true, "Impactor"), R(own, true, "Impactor-windows-x86_64-portable")], own);
+    Check(focusOwn.Step == ImpactorInstance.Step.Focus && focusOwn.Target!.Path == own, "two with windows: the bundled one is focused");
+    Check(ImpactorInstance.Decide([R(own.ToUpperInvariant(), false, "Impactor-windows-x86_64-portable")], own).Step == ImpactorInstance.Step.RestartOwn,
+        "only the bundled one, no window (case-insensitive path): restart it");
+    var ask = ImpactorInstance.Decide([R(other, false, "plumeimpactor")], own);
+    Check(ask.Step == ImpactorInstance.Step.AskClose && ask.Target!.Name == "plumeimpactor", "another copy without a window: ask the player to end it, never kill it");
+    Check(ImpactorInstance.Decide([R(own, false, "a"), R("", false, "plumeimpactor")], own).Step == ImpactorInstance.Step.AskClose,
+        "bundled plus an unreadable-path one, no windows: ask (do not kill what we cannot identify)");
+    Check(ImpactorInstance.IsImpactorName("plumeimpactor") && ImpactorInstance.IsImpactorName("Impactor-windows-x86_64-portable") && !ImpactorInstance.IsImpactorName("explorer"),
+        "process names that look like Impactor");
+    Check(ImpactorInstance.SaysAlreadyRunning("[2026-11-24T04:46:44.007Z INFO  plumeimpactor] Another instance is already running; exiting.\n")
+        && !ImpactorInstance.SaysAlreadyRunning("[x INFO  plumeimpactor] Setting locale to zh-CN...\n"), "the already-running log line is recognised");
+}
 LibraryJobCases.Run(Check);
 PhoneOverviewCases.Run(Check);
 ExportChoiceCases.Run(Check);

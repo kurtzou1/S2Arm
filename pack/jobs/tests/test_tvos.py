@@ -523,15 +523,25 @@ class BackupTest(TvCase):
         super().setUp()
         self.files = {"0000000000000001/0/save.dat": (b"AAAA", 1), "0000000000000001/0/meta": (b"m", 1)}
         self.copies, self.on_copy, self.stamps = 0, None, iter(f"20261115-1200{i:02d}" for i in range(60))
+        self.sd_files = None   # 电视上 SaveData 里的文件 {相对路径: (内容, 修改时刻)}；None = 没有这个目录（电视答 ActionError）；"silent" = 没回答
+    SD = f"Library/Caches/S2Arm/games/{G}/SaveData"
 
     def devicectl(self, c, *a, timeout=0):
         if a[:3] == ("device", "info", "files"):
-            if self.files is None:
+            sub = a[a.index("--subdirectory") + 1]
+            files = self.sd_files if sub == self.SD else self.files
+            if files == "silent":
+                return 1, {}, "timed out"
+            if files is None:
                 return 1, ACTION_ERROR, "no app"
             return 0, {"result": {"files": [dict(relativePath="0000000000000001", resources=dict(isDirectory=True))] +
-                                  [dict(relativePath=k, metadata=dict(size=len(v), lastModDate=t)) for k, (v, t) in self.files.items()]}}, ""
+                                  [dict(relativePath=k, metadata=dict(size=len(v), lastModDate=t)) for k, (v, t) in files.items()]}}, ""
         if a[:3] == ("device", "copy", "from"):
             src = a[a.index("--source") + 1]
+            if src.startswith(self.SD + "/"):
+                Path(a[a.index("--destination") + 1]).write_bytes(self.sd_files[src[len(self.SD) + 1:]][0])
+                self.copies += 1
+                return 0, {}, ""
             self.assertTrue(src.startswith(f"Library/Caches/S2Arm/games/{G}/{install.SAVE_REL}/"))
             Path(a[a.index("--destination") + 1]).write_bytes(self.files[src.split(install.SAVE_REL + "/", 1)[1]][0])
             self.copies += 1
@@ -549,6 +559,28 @@ class BackupTest(TvCase):
 
     def kept(self):
         return sorted(p.name for p in self.place().iterdir() if p.is_dir())
+
+    def test_savedata_in_backup(self):
+        """电视上存档目录 2 个文件 + SaveData 1 个 → 一份备份里存档照原路径、SaveData 在 _savedata_/ 下（期望手写）；
+        旧码只列存档目录：_savedata_/game.sav 不在备份里（红）"""
+        self.sd_files = {"game.sav": (b"SD", 1)}
+        r = self.round()
+        self.assertEqual((r["state"], r["files"]), ("backed-up", 3))
+        self.assertEqual((Path(r["folder"]) / "_savedata_/game.sav").read_bytes(), b"SD")
+        self.assertEqual((Path(r["folder"]) / "0000000000000001/0/save.dat").read_bytes(), b"AAAA")
+
+    def test_savedata_only(self):
+        """存档目录没有（电视答没有这个目录）、SaveData 有 1 个 → 照样备份这 1 个，不当成「电视上没有存档」；旧码回 none（红）"""
+        self.files, self.sd_files = None, {"game.sav": (b"SD", 1)}
+        r = self.round()
+        self.assertEqual((r["state"], r["files"]), ("backed-up", 1))
+        self.assertEqual((Path(r["folder"]) / "_savedata_/game.sav").read_bytes(), b"SD")
+
+    def test_savedata_unanswered_is_unavailable(self):
+        """SaveData 那一处电视没回答（超时）→ unavailable，不建备份、不当成没有"""
+        self.sd_files = "silent"
+        self.assertEqual(self.round()["state"], "unavailable")
+        self.assertEqual(self.kept(), [])
 
     def test_dedup_and_listing_shortcut(self):
         first = self.round()

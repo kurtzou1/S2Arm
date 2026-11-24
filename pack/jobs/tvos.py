@@ -541,11 +541,33 @@ KEEP = 10   # 每款（每槽）留最新几份自动备份（TVPort save_import
 LISTING = ".tv-listing.json"   # 备份里记着拉它时电视上的文件清单：清单一样下一轮就不拉
 
 
+def tv_savedata_dir(gid):
+    return f"{tv_docs(gid)}/SaveData"
+
+
+def save_source(gid, rel):
+    """备份里的相对路径 → 电视上的源路径：install.SAVE_DATA_SUBDIR/ 开头的是 SaveData（玩家放原生格式存档的文件夹），其余在存档目录下"""
+    head, _, rest = rel.partition("/")
+    return f"{tv_savedata_dir(gid)}/{rest}" if head == install.SAVE_DATA_SUBDIR and rest else f"{tv_save_dir(gid)}/{rel}"
+
+
 def save_listing(c, dev_id, bid, gid):
-    """电视上这款的存档文件 → {相对存档目录的路径: [大小, 修改时刻]}；电视回答了但没有这个 App / 目录 → {}；没回答（断开 / 超时）→ None"""
+    """电视上这款的存档文件 → {相对路径: [大小, 修改时刻]}：存档目录（bis/user/save）下的照原相对路径，SaveData 下的加
+    install.SAVE_DATA_SUBDIR/ 前缀（同 Mac / Windows 删款与覆盖装前备份，install.backup_saves；只拉存档目录时，玩家放进 SaveData
+    还没开局导入的那份删款就丢）。两处都是电视回答了但没有这个 App / 目录 → 那一处算空；任一处没回答（断开 / 超时）→ None"""
+    out = {}
+    for sub, prefix in ((tv_save_dir(gid), ""), (tv_savedata_dir(gid), install.SAVE_DATA_SUBDIR + "/")):
+        part = _listing(c, dev_id, bid, sub)
+        if part is None:
+            return None
+        out.update({prefix + k: v for k, v in part.items()})
+    return out
+
+
+def _listing(c, dev_id, bid, sub):
     from diag import devicectl
     rc, data, _ = devicectl(c, "device", "info", "files", "--device", dev_id, "--domain-type", "appDataContainer", "--domain-identifier", bid,
-                            "--subdirectory", tv_save_dir(gid), timeout=120)
+                            "--subdirectory", sub, timeout=120)
     if rc:   # CoreDevice.ActionError = 电视回答了：没有这个 App 或这个目录（TVPort save_listing）
         return {} if ((data or {}).get("error") or {}).get("domain") == "CoreDevice.ActionError" else None
     out = {}
@@ -603,7 +625,7 @@ def backup_game(c, dev_id, bid, gid):
                     dest = incoming / rel
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     rc, _, err = devicectl(c, "device", "copy", "from", "--device", dev_id, "--domain-type", "appDataContainer", "--domain-identifier", bid,
-                                           "--source", f"{tv_save_dir(gid)}/{rel}", "--destination", str(dest), timeout=120)
+                                           "--source", save_source(gid, rel), "--destination", str(dest), timeout=120)
                     if rc or not dest.is_file() or (size is not None and dest.stat().st_size != size):
                         raise Failure(f"从 Apple TV 拉存档没成（{rel}）：" + (err.splitlines()[-1] if err else f"devicectl 退出 {rc}" if rc else "大小对不上"),  # 非玩家句
                                       code="save_backup_failed")

@@ -330,6 +330,7 @@ class ContainerTest(unittest.TestCase):
         app = self.d / "s1/S2Arm.app"
         info = plistlib.loads((app / "Info.plist").read_bytes())
         self.assertEqual(info["CFBundleDisplayName"], "Game A")
+        self.assertEqual(info["S2AKind"], "standalone", "电脑认独立 App 按这个键，不靠包名（install.installed_s2arm_on）")
         self.assertEqual(info["CFBundleIcons"], {"CFBundlePrimaryIcon": {"CFBundleIconFiles": ["AppIcon60x60"]}})
         self.assertIn('"CFBundleDisplayName" = "甲游戏";', (app / "zh-Hans.lproj/InfoPlist.strings").read_text(encoding="utf-8"))
         self.assertIn('"CFBundleDisplayName" = "Game A";', (app / "en.lproj/InfoPlist.strings").read_text(encoding="utf-8"))
@@ -342,6 +343,7 @@ class ContainerTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         app = self.d / "s2/S2Arm.app"
         self.assertEqual(plistlib.loads((app / "Info.plist").read_bytes())["CFBundleDisplayName"], "S2Arm")
+        self.assertEqual(plistlib.loads((app / "Info.plist").read_bytes())["S2AKind"], "container")
         self.assertFalse((app / "zh-Hans.lproj/InfoPlist.strings").exists() and "甲游戏" in (app / "zh-Hans.lproj/InfoPlist.strings").read_text(encoding="utf-8"))
         with Image.open(app / f"AppIcon60x60@{3}x.png") as im:
             self.assertEqual(im.convert("RGB").getpixel((90, 90)), (1, 2, 3))
