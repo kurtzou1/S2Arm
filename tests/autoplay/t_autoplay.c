@@ -277,14 +277,26 @@ static void *game(void *a) {
     return NULL;
 }
 const char *sp_verdict(double foff, double q, double rho, double moff, const char **why);   // autoplay.c 同局 A/B 判一项
+const char *sp_ab_decide(double m[3][3], double f[3][3], int ok[3][3], const int use[3], int *kk, double rho[3], double q[3], double mon[3], double fon[3], const char *vk[3], const char *why[3]);   // autoplay.c 同局 A/B 合并（项：0 不按键、1 走、2 转镜头）
 int main(int argc, char **argv) {
     if (argc < 3) { fprintf(stderr, "用法：t_autoplay <输出目录> <场景>\n"); return 2; }
     if (!strcmp(argv[2], "pixmove")) { void s2a_ap_pix_selftest(void); s2a_ap_pix_selftest(); return 0; }   // 逐像素判据纯函数（不起游戏）：期望在 autoplay_test.sh 手写
     if (!strcmp(argv[2], "stseen")) { void s2a_ap_stseen_selftest(void); s2a_ap_stseen_selftest(); return 0; }   // 页内状态逐像素第三道纯函数（不起游戏）：期望在 autoplay_test.sh 手写
     if (!strcmp(argv[2], "verdict")) {   // 判据纯函数（不起游戏）：每行「关段帧率 q ρ 关段速度 → 结论 说明」，期望在 autoplay_test.sh 手写
         static const double c[][4] = {{60, 1.0, 1.0, 30}, {30, 1.05, 1.6, 30}, {30, 2.0, 1.0, 0.5}, {30, 2.0, 0.5, 30}, {30, 2.0, 1.2, 30}, {30, 2.0, 1.4, 30},
-                                      {30, 1.5, 1.2, 30}, {30, 1.5, 1.3, 30}, {30, 2.0, 2.0, 30}};
+                                      {30, 1.5, 1.2, 30}, {30, 1.5, 1.3, 30}, {30, 2.0, 2.0, 30}, {30, 2.0, 3.0, 30}, {30, 2.0, 3.01, 30}, {30, 2.0, 4.17, 17.8}};
         for (size_t i = 0; i < sizeof c / sizeof c[0]; i++) { const char *w = ""; const char *v = sp_verdict(c[i][0], c[i][1], c[i][2], c[i][3], &w); printf("%zu %s %s\n", i, v, w); }
+        return 0; }
+    if (!strcmp(argv[2], "abdecide")) {   // 同局 A/B 合并纯函数，喂 11-23 两款真实读数（[段 关 / 开① / 开②][项 不按键 / 走 / 转镜头]），期望在 autoplay_test.sh 手写
+        static const double D[2][2][3][3] = {   // [款][0 速度 / 1 帧率][段][项]
+            {{{0, 52.5, 80.9}, {0, 112.8, 121.4}, {0, 116.1, 87.5}}, {{0, 30, 30}, {0, 60, 60}, {0, 60, 33}}},   // 0：01007EF00011E000（开②转镜头只有 33 帧）
+            {{{0, 17.8, 124.9}, {0, 84.3, 113.8}, {0, 64.1, 108.9}}, {{0, 30, 30}, {0, 60, 60}, {0, 60, 60}}}};  // 1：0100F2C0115B6000（攀爬中量「走」）
+        for (int g = 0; g < 2; g++) {
+            double m[3][3], f[3][3], rho[3], q[3], mon[3], fon[3]; int ok[3][3], use[3] = {0, 1, 1}, k; const char *vk[3], *why[3];
+            for (int p = 0; p < 3; p++) for (int j = 0; j < 3; j++) { m[p][j] = D[g][0][p][j]; f[p][j] = D[g][1][p][j]; ok[p][j] = j > 0; }
+            const char *v = sp_ab_decide(m, f, ok, use, &k, rho, q, mon, fon, vk, why);
+            printf("%d %s 定于项%d｜走 %s ρ %.2f q %.2f｜转 %s ρ %.2f q %.2f\n", g, v, k, vk[1], rho[1], q[1], vk[2], rho[2], q[2]);
+        }
         return 0; }
     snprintf(g_dir, sizeof g_dir, "%s", argv[1]); g_scn = argv[2];
     char p[1100]; snprintf(p, sizeof p, "%s/host.log", g_dir); g_log = fopen(p, "w"); if (!g_log) return 2;

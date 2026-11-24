@@ -375,11 +375,12 @@ struct CopyReportButton: View {
     let gameID: String?
     let operations: [String]?
     let fallback: String
+    var size: LauncherTheme.ButtonSize = .regular
     @State private var showing = false
 
     var body: some View {
         Button(loc.t("s2arm.diagUpload.button")) { showing = true }
-            .controllerButtonStyle(LauncherSecondaryButtonStyle()).accessibilityIdentifier("diag.upload")
+            .controllerButtonStyle(LauncherSecondaryButtonStyle(size: size)).accessibilityIdentifier("diag.upload")
             .sheet(isPresented: $showing) {
                 UploadDiagnosticsSheet(model: model, gameID: gameID, operations: operations, fallback: fallback) { showing = false }
                     .environmentObject(loc)

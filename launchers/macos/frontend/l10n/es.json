@@ -1764,5 +1764,9 @@
   "s2arm.env.xcode.auto": "Buscar automáticamente",
   "s2arm.env.xcode.invalid": "No es un Xcode completo (necesita Contents/Developer/usr/bin/xcodebuild). No se cambió nada.",
   "s2arm.env.action.appleLogin": "Iniciar sesión con Apple ID",
-  "s2arm.fail.appleAccount": "No se pudo leer el Apple ID con sesión iniciada"
+  "s2arm.fail.appleAccount": "No se pudo leer el Apple ID con sesión iniciada",
+  "settings.tab.environment": "Entorno",
+  "settings.tab.general": "General",
+  "settings.tab.iphone": "iPhone y sincronización",
+  "settings.tab.updates": "Actualizaciones y más"
 }

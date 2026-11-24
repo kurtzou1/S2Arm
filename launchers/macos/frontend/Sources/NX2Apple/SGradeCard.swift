@@ -95,45 +95,58 @@ struct SGradeCardView: View {
     private var lit: Bool { ((match?.total ?? 0) > 0 || match?.port == true || match?.ownWiden == true) && on?.wrappedValue != false }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 16) {
-            Image(nsImage: sImage).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
-                .frame(width: lit ? 50 : 40, height: lit ? 50 : 40)
-                .shadow(color: Self.gold.opacity(lit ? 0.55 : 0.18), radius: lit ? 16 : 6)
-                .saturation(match == nil || lit ? 1 : 0.55)
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .center, spacing: 9) {
-                    Text(x("title")).font(.manrope(18, .bold))
-                        .foregroundStyle(LinearGradient(colors: [Self.goldHi, Self.gold, Self.rose], startPoint: .leading, endPoint: .trailing))
-                    Text("BETA").font(.manrope(9.5, .bold)).tracking(1.4).padding(.horizontal, 7).padding(.vertical, 2.5)
-                        .foregroundStyle(Self.gold).overlay(Capsule().strokeBorder(Self.gold.opacity(0.55), lineWidth: 1))
-                    if hasCollapsibleDetails {
-                        Button {
-                            withAnimation(.easeOut(duration: 0.2)) { detailsOpen.toggle() }
-                        } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: "info.circle").font(.system(size: 11, weight: .semibold))
-                                Text(x(detailsOpen ? "details.hide" : "details.show"))
-                                    .font(.manrope(11.5, .medium))
-                                Image(systemName: detailsOpen ? "chevron.up" : "chevron.down").font(.system(size: 9, weight: .semibold))
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 16) {
+                Image(nsImage: sImage).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
+                    .frame(width: lit ? 50 : 40, height: lit ? 50 : 40)
+                    .shadow(color: Self.gold.opacity(lit ? 0.55 : 0.18), radius: lit ? 16 : 6)
+                    .saturation(match == nil || lit ? 1 : 0.55)
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .center, spacing: 8) {
+                        Text(x("title")).font(.manrope(18, .bold)).lineLimit(1).minimumScaleFactor(0.8)
+                            .foregroundStyle(LinearGradient(colors: [Self.goldHi, Self.gold, Self.rose], startPoint: .leading, endPoint: .trailing))
+                        LauncherBadge("BETA", foreground: Self.gold, background: .clear, border: Self.gold.opacity(0.55),
+                                      font: .manrope(9.5, .bold), tracking: 1.4, horizontalPadding: 8, height: 20)
+                        if hasCollapsibleDetails {
+                            Button {
+                                withAnimation(.easeOut(duration: 0.2)) { detailsOpen.toggle() }
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "info.circle").font(.system(size: 11, weight: .semibold))
+                                    Text(x(detailsOpen ? "details.hide" : "details.show"))
+                                        .font(.manrope(11.5, .medium))
+                                    Image(systemName: detailsOpen ? "chevron.up" : "chevron.down").font(.system(size: 9, weight: .semibold))
+                                }
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 9)
+                                .frame(height: 20)
+                                .background(Color.white.opacity(0.06), in: Capsule(style: .circular))
                             }
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 8).padding(.vertical, 3.5)
-                            .background(Color.white.opacity(0.06), in: Capsule())
+                            .controllerButtonStyle(.plain).controllerRingRadius(.infinity)
+                            .controllerID("export.sgrade.details")
                         }
-                        .controllerButtonStyle(.plain).controllerRingRadius(.infinity)
-                        .controllerID("export.sgrade.details")
+                        Spacer(minLength: 12)
+                        if let on {
+                            Toggle(x("toggle"), isOn: on).toggleStyle(.checkbox).font(.manrope(12.5, .medium)).tint(Self.gold)
+                                .controllerControl(id: "export.sgrade.toggle", activate: { on.wrappedValue.toggle() })
+                                .accessibilityIdentifier("export.sgrade.toggle")
+                        }
                     }
-                    Spacer(minLength: 12)
-                    if let on {
-                        Toggle(x("toggle"), isOn: on).toggleStyle(.checkbox).font(.manrope(12.5, .medium)).tint(Self.gold)
-                            .controllerControl(id: "export.sgrade.toggle", activate: { on.wrappedValue.toggle() })
-                            .accessibilityIdentifier("export.sgrade.toggle")
-                    }
+                    if on?.wrappedValue == false { note(x("off")) } else { content }
                 }
-                if on?.wrappedValue == false { note(x("off")) } else { content }
+            }
+            if on?.wrappedValue != false, !failed, match != nil, let importMod {
+                Rectangle().fill(Color.white.opacity(0.08)).frame(height: 1)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Spacer(minLength: 0)
+                        modActionGroup(importMod)
+                    }
+                    ForEach(modNotes, id: \.self) { note($0) }
+                }
             }
         }
-        .padding(.horizontal, 22).padding(.vertical, 16)
+        .padding(.horizontal, 22).padding(.vertical, 18)
         .background {
             ZStack {
                 RoundedRectangle(cornerRadius: 16).fill(LauncherPalette.surface.opacity(0.92))
@@ -194,10 +207,8 @@ struct SGradeCardView: View {
         } else if let m = match {
             let chips = hitChips(m)
             if !chips.isEmpty {
-                HStack(alignment: .top, spacing: 12) {
-                    ForEach(chips) { chip in
-                        hitChipView(chip)
-                    }
+                LauncherFlowRow(spacing: 12, rowSpacing: 8) {
+                    ForEach(chips) { chip in hitChipView(chip) }
                 }
             } else {
                 VStack(alignment: .leading, spacing: 4) {
@@ -225,17 +236,15 @@ struct SGradeCardView: View {
                 .padding(.top, 2)
                 .transition(.opacity)
             }
-            if let importMod {
-                HStack(spacing: 8) {
-                    Spacer(minLength: 0)
-                    if let modHelp { ModHelpButton(text: modHelp.text, label: modHelp.label, id: "export.sgrade.mod.help") }
-                    Button(x("mod.import"), action: importMod).controllerButtonStyle(LauncherSecondaryButtonStyle()).controllerID("export.sgrade.mod.import")
-                }
-                .padding(.top, 2)
-                ForEach(modNotes, id: \.self) { note($0) }
-            }
         } else {
             HStack(spacing: 8) { ProgressView().controlSize(.small).tint(Self.gold); Text(x("loading")).font(.manrope(12.5)).foregroundStyle(.secondary) }
+        }
+    }
+
+    @ViewBuilder private func modActionGroup(_ importMod: @escaping () -> Void) -> some View {
+        HStack(spacing: 8) {
+            if let modHelp { ModHelpButton(text: modHelp.text, label: modHelp.label, id: "export.sgrade.mod.help") }
+            Button(x("mod.import"), action: importMod).controllerButtonStyle(LauncherSecondaryButtonStyle()).controllerID("export.sgrade.mod.import")
         }
     }
 
@@ -248,7 +257,7 @@ struct SGradeCardView: View {
                     Text(badge).font(.manrope(11.5, .bold)).monospacedDigit().foregroundStyle(Self.goldHi)
                         .lineLimit(1).fixedSize()
                         .padding(.horizontal, 6.5).padding(.vertical, 1)
-                        .background(Self.gold.opacity(0.22), in: Capsule())
+                        .background(Self.gold.opacity(0.22), in: Capsule(style: .circular))
                 }
             }
             Text(chip.status).font(.manrope(10.5, .medium)).foregroundStyle(LauncherTheme.Colors.secondary).lineLimit(1).fixedSize()

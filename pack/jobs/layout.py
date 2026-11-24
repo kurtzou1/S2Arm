@@ -5,7 +5,8 @@
       image/mac/          Mac 镜像（不含宿主）          saves/  save-backups/  shader-cache/
       image/ios/          iPhone 镜像：kit/（组容器的文件）+ pack/（资源包）
       build/              出包缓存（原 cache/<号>：两平台共用的解包 + Mac 各产物根；ios/ = iPhone 一键出包工作目录）  seen/  save_backup/（iPhone 存档备份）
-  <库>/hosts/mac/<宿主摘要前 12 位>/S2ArmGame.app      Mac 宿主，多款共用（只换宿主见 host_update.py）
+  <库>/hosts/mac.noindex/<宿主摘要前 12 位>/S2ArmGame.app   Mac 宿主，多款共用（只换宿主见 host_update.py）；
+      目录名带 .noindex：聚焦不收录里面的 .app，菜单 / 启动台不再出一排「S2Arm Game」（#1126 / #2024）
   <默认位置>/S2Arm.ipa  S2Arm.previous.ipa  devices/<设备>.json   iPhone 装机产物与每台手机的记录（只放默认位置）
 Windows 与 Mac 同一套（共用后端）。旧布局（按类型分：games/<号>/releases、cache/<号>、saves/<号>…）由 migrate() 一次性同盘改名过来，
 .s2arm-layout.json 记已迁完的款，中途被杀下次接着做。
@@ -24,7 +25,8 @@ from pathlib import Path
 from core import Failure, atomic, contained, read, resolve_path
 from errors import library_lock_failure
 
-VERSION = 4   # 2：每款进 games/<英文名>/；3：iPhone 产物进每款 image/ios、装机产物与设备记录进默认位置根（_upgrade_3）；4：库外的工具缓存 / 日志搬进默认位置（_upgrade_4）
+VERSION = 5   # 2：每款进 games/<英文名>/；3：iPhone 产物进每款 image/ios、装机产物与设备记录进默认位置根（_upgrade_3）；4：库外的工具缓存 / 日志搬进默认位置（_upgrade_4）；
+              # 5：hosts/mac → hosts/mac.noindex（_upgrade_5）
 GAME_JSON = "game.json"
 NAME_MAX = 48   # Windows 深路径预算：库根 + games\<名> + 镜像 / 出包缓存的深层目录要留在 260 以内（玩家路径见 pack/jobs/winenv.py 长路径检查）
 _WIN_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
@@ -58,8 +60,11 @@ def games_root(c, root=None):
     return Path(root or c.library) / "games"
 
 
+HOSTS_MAC = "mac.noindex"   # 聚焦跳过 .noindex 结尾的目录（#1126 / #2024）；引擎副本同理（embedded.engines_root）
+
+
 def hosts_mac(c):
-    return c.library / "hosts" / "mac"   # 公共件只在默认位置（游戏库结构 v3）
+    return c.library / "hosts" / HOSTS_MAC   # 公共件只在默认位置（游戏库结构 v3）
 
 
 # ---- 存放位置 + 索引表（游戏库结构 v3：像 Steam 的库文件夹）----
@@ -814,6 +819,9 @@ def migrate(c):
     if read(marker, {}).get("version", 0) < 4:
         _upgrade_4(c)   # 3→4，可重入
         atomic(marker, dict(read(marker, {}), version=4))
+    if read(marker, {}).get("version", 0) < 5:
+        _upgrade_5(c)   # 4→5，可重入
+        atomic(marker, dict(read(marker, {}), version=5))
     return True
 
 
@@ -969,6 +977,24 @@ def _upgrade_4(c):
             _absorb_rebuildable(c, old / name, new / name)
     with contextlib.suppress(OSError):
         (c.library / ".s2arm-work").rmdir()
+
+
+def _upgrade_5(c):
+    """hosts/mac → hosts/mac.noindex（#1126 / #2024：聚焦收录 hosts/mac 里的 S2ArmGame.app，系统随即登记，局后注销完一扫描又回来）。
+    同一父目录逐个子项改名（宿主不一定能重建：不兼容本版的款还用旧宿主，game.json 的 hostMac 按摘要找它）；新位置已有同名的留新位置的，
+    旧的那份删掉。中途被杀下次接着做"""
+    from library import _discard
+    old, new = c.library / "hosts" / "mac", hosts_mac(c)
+    if os.path.islink(old) or not old.is_dir():
+        return
+    new.mkdir(parents=True, exist_ok=True)
+    for child in sorted(old.iterdir()):
+        if os.path.lexists(new / child.name):
+            _discard(child)
+        else:
+            os.replace(child, new / child.name)
+    with contextlib.suppress(OSError):
+        old.rmdir()
 
 
 def _absorb_rebuildable(c, src, dst):

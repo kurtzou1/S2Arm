@@ -180,8 +180,8 @@ struct PhoneJobPanel: View {
                     }.toggleStyle(PadToggleStyle(.checkbox)).controllerID("phone.legacy." + g.id)
                 }
                 Button { model.updateSelected(ids: picked.map(\.id), device: o.legacyDevice.isEmpty ? nil : o.legacyDevice) } label: {
-                    LauncherHeroActionLabel(title: t("phone.legacy.button").replacingOccurrences(of: "{0}", with: "\(picked.count)"), symbol: "arrow.up.circle")
-                }.controllerButtonStyle(.plain).controllerRingRadius(.infinity, outset: 3).disabled(picked.isEmpty || model.phoneBusy).controllerID("phone.legacy.update").controllerShortcut(.rightTrigger)
+                    Label(t("phone.legacy.button").replacingOccurrences(of: "{0}", with: "\(picked.count)"), systemImage: "arrow.up.circle")
+                }.controllerButtonStyle(LauncherPrimaryButtonStyle(size: .prominent)).disabled(picked.isEmpty || model.phoneBusy).controllerID("phone.legacy.update").controllerShortcut(.rightTrigger)
             }
             if !o.legacyElsewhere.isEmpty {
                 Text(t("phone.legacy.elsewhere").replacingOccurrences(of: "{0}", with: "\(o.legacyElsewhere.count)").replacingOccurrences(of: "{1}", with: o.legacyElsewhere.joined(separator: "、")))
@@ -238,8 +238,8 @@ struct PhoneJobPanel: View {
                 }
             }
             HStack(spacing: 12) {
-                Button { NSWorkspace.shared.open(URL(fileURLWithPath: o.exportFolder)) } label: { LauncherHeroActionLabel(title: t("phone.export.open"), symbol: "folder") }
-                    .controllerButtonStyle(.plain).controllerRingRadius(.infinity, outset: 3).accessibilityIdentifier("phone.export.open")
+                Button { NSWorkspace.shared.open(URL(fileURLWithPath: o.exportFolder)) } label: { Label(t("phone.export.open"), systemImage: "folder") }
+                    .controllerButtonStyle(LauncherPrimaryButtonStyle(size: .prominent)).accessibilityIdentifier("phone.export.open")
             }
             SGradeResultView(results: o.sgrade, text: { t($0) })   // 补进 S 级优化的各款：打上 / 没打上（11-14）
         }
@@ -322,12 +322,12 @@ struct PhoneJobPanel: View {
                 }
                 .accessibilityIdentifier("app.export.next")
             }
-            HStack(spacing: 12) {
-                Button { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: a.ipaPath)]) } label: { LauncherHeroActionLabel(title: t("app.done.reveal"), symbol: "folder") }
-                    .controllerButtonStyle(.plain).controllerRingRadius(.infinity, outset: 3).disabled(a.ipaPath.isEmpty).controllerID("app.reveal").accessibilityIdentifier("app.reveal")
+            LauncherFlowRow(spacing: 12, rowSpacing: 10) {
+                Button { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: a.ipaPath)]) } label: { Label(t("app.done.reveal"), systemImage: "folder") }
+                    .controllerButtonStyle(LauncherPrimaryButtonStyle(size: .prominent)).disabled(a.ipaPath.isEmpty).controllerID("app.reveal").accessibilityIdentifier("app.reveal")
                 if a.exported, !a.readmePath.isEmpty {
-                    Button { NSWorkspace.shared.open(URL(fileURLWithPath: a.readmePath)) } label: { LauncherHeroActionLabel(title: t("app.export.openReadme"), symbol: "doc.text") }
-                        .controllerButtonStyle(.plain).controllerRingRadius(.infinity, outset: 3).controllerID("app.readme").accessibilityIdentifier("app.readme")
+                    Button { NSWorkspace.shared.open(URL(fileURLWithPath: a.readmePath)) } label: { Label(t("app.export.openReadme"), systemImage: "doc.text") }
+                        .controllerButtonStyle(LauncherSecondaryButtonStyle(size: .prominent)).controllerID("app.readme").accessibilityIdentifier("app.readme")
                 }
             }
             SGradeResultView(results: o.sgrade, text: { t($0) })
@@ -353,32 +353,32 @@ struct PhoneJobPanel: View {
                 chooser(choice)
             }
             ReportHint()
-            HStack(spacing: 12) {
+            LauncherFlowRow(spacing: 12, rowSpacing: 10) {
                 // 还没用 Apple ID 登录 / 登录过期（0.6.0 Mac：S2Arm 自己登录）：就在这里登录，登录好再点一次（RECOVERY 的「登录 Apple ID」指的就是它）
                 if let code = session.failureCode, let reason = S2ArmLauncherModel.appleLoginCodes[code] {
                     Button { model.openAppleLogin(host: model.installViewOpen != nil ? "install" : "main", reason: reason) } label: {
-                        LauncherHeroActionLabel(title: t("install.login.open"), symbol: "person.crop.circle")
+                        Label(t("install.login.open"), systemImage: "person.crop.circle")
                     }
-                    .controllerButtonStyle(.plain).controllerRingRadius(.infinity, outset: 3).controllerID("phone.appleLogin").controllerShortcut(.rightTrigger)
+                    .controllerButtonStyle(LauncherPrimaryButtonStyle(size: .prominent)).controllerID("phone.appleLogin").controllerShortcut(.rightTrigger)
                 }
                 if session.kind == .pushSelected {   // 「更新所选」有款没推成（#1756）：续推没推成的那几款
-                    Button { model.retryUpdateSelected() } label: { LauncherHeroActionLabel(title: t("phone.retry"), symbol: "arrow.clockwise") }
-                        .controllerButtonStyle(.plain).controllerRingRadius(.infinity, outset: 3).disabled(model.phoneBusy).controllerID("phone.retry").controllerShortcut(.rightTrigger)
+                    Button { model.retryUpdateSelected() } label: { Label(t("phone.retry"), systemImage: "arrow.clockwise") }
+                        .controllerButtonStyle(LauncherPrimaryButtonStyle(size: .prominent)).disabled(model.phoneBusy).controllerID("phone.retry").controllerShortcut(.rightTrigger)
                 }
                 if session.kind == .install, let retry = model.lastInstallRetry {   // 单款推到 iPhone / 导出没走成：同样的参数再来一次（0.6.4）
-                    Button { retry() } label: { LauncherHeroActionLabel(title: t("phone.retry"), symbol: "arrow.clockwise") }
-                        .controllerButtonStyle(.plain).controllerRingRadius(.infinity, outset: 3).disabled(model.phoneBusy).controllerID("phone.retry").controllerShortcut(.rightTrigger)
+                    Button { retry() } label: { Label(t("phone.retry"), systemImage: "arrow.clockwise") }
+                        .controllerButtonStyle(LauncherPrimaryButtonStyle(size: .prominent)).disabled(model.phoneBusy).controllerID("phone.retry").controllerShortcut(.rightTrigger)
                 }
                 if session.kind == .installUpdate {
-                    Button { model.retryPhoneUpdate() } label: { LauncherHeroActionLabel(title: t("phone.retry"), symbol: "arrow.clockwise") }
-                        .controllerButtonStyle(.plain).controllerRingRadius(.infinity, outset: 3).disabled(model.phoneBusy).controllerID("phone.retry").controllerShortcut(.rightTrigger)
+                    Button { model.retryPhoneUpdate() } label: { Label(t("phone.retry"), systemImage: "arrow.clockwise") }
+                        .controllerButtonStyle(LauncherPrimaryButtonStyle(size: .prominent)).disabled(model.phoneBusy).controllerID("phone.retry").controllerShortcut(.rightTrigger)
                 }
                 // 装到 iPhone / 更新没走成（没连手机、签不上…）：换另一条路——导出自签包，不连手机也能一步走完
                 if !exporting, session.kind == .install || session.kind == .installUpdate {
-                    Button { model.switchToSelfSign(session, language: language) } label: { LauncherHeroActionLabel(title: t("phone.switch_export"), symbol: "square.and.arrow.up") }
-                        .controllerButtonStyle(.plain).controllerRingRadius(.infinity, outset: 3).disabled(model.phoneBusy).controllerID("phone.switchExport")
+                    Button { model.switchToSelfSign(session, language: language) } label: { Label(t("phone.switch_export"), systemImage: "square.and.arrow.up") }
+                        .controllerButtonStyle(LauncherSecondaryButtonStyle(size: .prominent)).disabled(model.phoneBusy).controllerID("phone.switchExport")
                 }
-                CopyReportButton(model: model, gameID: session.gameID, operations: [session.kind.rawValue], fallback: session.message)
+                CopyReportButton(model: model, gameID: session.gameID, operations: [session.kind.rawValue], fallback: session.message, size: .prominent)
             }
         }
         .accessibilityIdentifier("phone.failed")
@@ -422,16 +422,16 @@ struct PhoneJobPanel: View {
         let title = BackendText.errorTitle(code, language: language, device: model.installTargetKind) ?? t("install.drop_title")
         return VStack(alignment: .leading, spacing: 24) {
             headline(seal: AnyView(StatusSeal(symbol: "exclamationmark", color: LauncherPalette.building)), title: title, subtitle: loc.backend(session.message))
-            HStack(spacing: 12) {
-                Button { if let d = model.dropConfirm { model.confirmDrop(d) } } label: { LauncherHeroActionLabel(title: t("install.drop_confirm"), symbol: "arrow.right") }
-                    .controllerButtonStyle(.plain).controllerRingRadius(.infinity, outset: 3).controllerID("phone.drop.confirm").controllerShortcut(.rightTrigger)
+            LauncherFlowRow(spacing: 12, rowSpacing: 10) {
+                Button { if let d = model.dropConfirm { model.confirmDrop(d) } } label: { Label(t("install.drop_confirm"), systemImage: "arrow.right") }
+                    .controllerButtonStyle(LauncherPrimaryButtonStyle(size: .prominent)).controllerID("phone.drop.confirm").controllerShortcut(.rightTrigger)
                 // 这个码有并列的另一条路（共享体验表 alternate，如新建证书确认的「改用已有证书」）：玩家自己选，点了不重发、去那个动作的落点
                 if let d = pendingConfirm, let alt = S2ArmLauncherModel.confirmAlternates[d.code] {
                     Button(t(alt.labelKey)) { model.takeConfirmAlternate(d) }
-                        .controllerButtonStyle(LauncherSecondaryButtonStyle()).accessibilityIdentifier("phone.drop.alternate")
+                        .controllerButtonStyle(LauncherSecondaryButtonStyle(size: .prominent)).accessibilityIdentifier("phone.drop.alternate")
                 }
                 Button(t("phone.drop.cancel")) { model.dropConfirm = nil; model.backFromPhone() }
-                    .controllerButtonStyle(LauncherSecondaryButtonStyle()).accessibilityIdentifier("phone.drop.cancel")
+                    .controllerButtonStyle(LauncherSecondaryButtonStyle(size: .prominent)).accessibilityIdentifier("phone.drop.cancel")
             }
         }
         .accessibilityIdentifier("phone.drop")

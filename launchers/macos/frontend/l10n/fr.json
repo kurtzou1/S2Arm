@@ -1764,5 +1764,9 @@
   "s2arm.env.xcode.auto": "Rechercher automatiquement",
   "s2arm.env.xcode.invalid": "Ce n’est pas un Xcode complet (Contents/Developer/usr/bin/xcodebuild est requis). Rien n’a été modifié.",
   "s2arm.env.action.appleLogin": "Se connecter avec l’identifiant Apple",
-  "s2arm.fail.appleAccount": "Impossible de lire l’identifiant Apple connecté"
+  "s2arm.fail.appleAccount": "Impossible de lire l’identifiant Apple connecté",
+  "settings.tab.environment": "Environnement",
+  "settings.tab.general": "Général",
+  "settings.tab.iphone": "iPhone et synchro",
+  "settings.tab.updates": "Mises à jour et plus"
 }

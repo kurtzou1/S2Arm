@@ -312,6 +312,8 @@ s2a_gate_step "$PY" "$android_dir/tests/direct_batch_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/direct_prepare_test.py"
 # 首局预热随包种子整理（android/tools/vk_warm_seed.py）：校验 / 配对 / 按程序身份滤管线 / 与来源先后无关；宿主读种子的用例在 nvk_warm_modules_test.sh
 s2a_gate_step "$PY" "$android_dir/tests/vk_warm_seed_test.py"
+# 普通程序（不带存储缓冲窗口）种子补件：真编译器端到端（真实请求 → 编译 → 调试采集 → 再编译 → 资源根种子）+ 补件各臂（关 / 开 / 别的 profile / 身份被改 / 摘要被改 / 文件缺失，只有「开且补件完好」免前台翻译）
+s2a_gate_step "$PY" "$android_dir/tests/vk_warm_nowindow_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/host_link_test.py"   # 宿主单测链接闭包：自动补链 / 弱引用放行 / 无提供方点名红 / 替身优先
 # 新回放层：真实图形/计算请求生产入口的贴图池容量、超限与调试读数。
 s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py"
@@ -320,6 +322,9 @@ s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py" --withdraw
 s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py" --gs-libpack-mutants
 # 计算程序出包预编库的非对齐闸负对照（#496085）：撤掉 state_ok 对 ckey 的生效，--cs-libpack 必红
 s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py" --cs-libpack-mutants
+# 图形程序出包预编库的六条状态闸与读数（正例 --lp-gate 在上面无参那一步里单独起进程跑）：六条闸各撤一位、直方图两处累加 / 快照落位 / 并列顺序各改一处，--lp-gate 必红；
+#   存储缓冲「非对齐」只看程序真用到的槽（用到的槽集合 / 逐阶段 / 逐槽 / 说不准退回旧口径 / 开关 / 快路摘要 / 三个读数）各改坏一处，同样必红
+s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py" --lp-gate-mutants
 # 计算程序预热（清单记账 / 阶段 / 从缓存建 / 开关）与现场编译诊断事件（图形 / 计算）的负对照：各撤一处，对应断言必红
 s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py" --compute-warm-mutants
 s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py" --diag-mutants
@@ -364,6 +369,8 @@ s2a_gate_step "$PY" "$android_dir/tests/tbuf_compiler_chain_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/libpack_tbuf_withdraw_test.py"
 # 计算取库的原因码（s2a_libpack_why）：正例 + 改坏 libpack_vk.c 的原因码各一处必红（诊断按码分类，不读报错文本）
 s2a_gate_step "$PY" "$android_dir/tests/libpack_reason_code_test.py"
+# 图形阶段「用到哪几个存储缓冲槽」（s2a_libpack_stage_sbuf_slots，引擎判断非对齐绑定是否影响程序的依据）：正例 + 改坏判据各一处必红（说不准一律不猜：少报会把按对齐翻的库件交给非对齐的绑定）
+s2a_gate_step "$PY" "$android_dir/tests/libpack_sbuf_slots_test.py"
 # Pool-backed TBUF replay: both stages, synchronization and three mutations.
 s2a_gate_step "$PY" "$android_dir/tests/tbuf_replay_core_test.py" --withdraw
 # W2 compute: real C components with synthetic input / Vulkan mocks, never GPU or device evidence.

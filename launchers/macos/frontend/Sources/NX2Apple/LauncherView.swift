@@ -512,7 +512,7 @@ struct LauncherView: View {
             Button { model.restartToUpdate() } label: {
                 Text(title)
             }
-            .controllerButtonStyle(LauncherSecondaryButtonStyle(capsule: true))
+            .controllerButtonStyle(LauncherSecondaryButtonStyle(size: .compact, shape: .capsule))
             .launcherTooltip(title, placement: .below).controllerID("top.update")
         case .ready:
             Image(systemName: "arrow.down.circle")
@@ -649,23 +649,22 @@ struct LauncherView: View {
         if let session = model.session, session.export == nil, !session.isPhoneJob, !model.isInline(session), model.sessionHidden || model.playVisible {
             Button { model.sessionHidden = false; model.playHidden = true } label: {
                 Label(loc.t("home.currentTask"), systemImage: "list.bullet.rectangle")
-                    .font(.manrope(12.5, .semibold))
-            }.controllerButtonStyle(LauncherSecondaryButtonStyle()).controllerID("top.currentTask")
+            }.controllerButtonStyle(LauncherSecondaryButtonStyle(size: .compact, shape: .capsule)).controllerID("top.currentTask")
                 .accessibilityLabel(loc.t("home.currentTask") + " · " + session.name)
         }
         // 收起的一局：回到它的页面（写游戏名，和主槽那颗「当前任务」分得清）
         if let play = model.playSession, model.playHidden {
             Button { model.playHidden = false } label: {
-                Label(play.name, systemImage: "gamecontroller").font(.manrope(12.5, .semibold)).lineLimit(1)
-            }.controllerButtonStyle(LauncherSecondaryButtonStyle()).controllerID("top.playTask")
+                Label(play.name, systemImage: "gamecontroller").lineLimit(1)
+            }.controllerButtonStyle(LauncherSecondaryButtonStyle(size: .compact, shape: .capsule)).controllerID("top.playTask")
                 .accessibilityLabel(loc.t("home.currentTask") + " · " + play.name)
         }
         // 收起的、或被主槽整页（出包进度等）/ 一局的页面压着的「更新 iPhone 上的 S2Arm」：回到它的进度页
         if let phone = model.phoneSession, phone.wholePage,
            model.phoneHidden || model.playVisible || (model.session.map { !model.sessionHidden && ($0.export != nil || !model.isInline($0)) } ?? false) {
             Button { model.phoneHidden = false; model.sessionHidden = true; model.playHidden = true } label: {
-                Label(phone.name, systemImage: "iphone").font(.manrope(12.5, .semibold)).lineLimit(1)
-            }.controllerButtonStyle(LauncherSecondaryButtonStyle()).controllerID("top.phoneTask")
+                Label(phone.name, systemImage: "iphone").lineLimit(1)
+            }.controllerButtonStyle(LauncherSecondaryButtonStyle(size: .compact, shape: .capsule)).controllerID("top.phoneTask")
         }
     }
 
@@ -673,14 +672,14 @@ struct LauncherView: View {
     @ViewBuilder private var batchPill: some View {
         if !model.batchShown, model.batchRunning || model.batchUnfinished > 0 {
             Button { model.batchShown = true } label: {
-                HStack(spacing: 7) {
+                HStack(spacing: 6) {
                     if model.batchRunning { ProgressView().controlSize(.mini) } else { Image(systemName: "list.bullet.rectangle") }
                     Text(model.batchRunning ? BackendText.launcherText("batch.title", language: uiLanguage)
                          : BackendText.launcherText("batch.unfinished", language: uiLanguage).replacingOccurrences(of: "{0}", with: "\(model.batchUnfinished)"))
-                        .font(.manrope(12.5, .semibold)).lineLimit(1)
+                        .lineLimit(1)
                 }
             }
-            .controllerButtonStyle(LauncherSecondaryButtonStyle()).accessibilityIdentifier("top.batch")
+            .controllerButtonStyle(LauncherSecondaryButtonStyle(size: .compact, shape: .capsule)).accessibilityIdentifier("top.batch")
         }
     }
 
@@ -688,15 +687,15 @@ struct LauncherView: View {
     @ViewBuilder private var exportPill: some View {
         if let session = model.session, session.export != nil, model.sessionHidden || model.playVisible {   // 被一局的页面压着也给入口
             Button { model.sessionHidden = false; model.playHidden = true } label: {
-                HStack(spacing: 7) {
+                HStack(spacing: 6) {
                     if model.mainBusy { ProgressView().controlSize(.mini) } else { Image(systemName: "checkmark.circle.fill").foregroundStyle(LauncherPalette.ready) }
-                    Text(txt(model.mainBusy ? "export.pill.running" : "export.pill.done").replacingOccurrences(of: "{0}", with: session.name)).font(.manrope(12.5, .semibold)).lineLimit(1)
+                    Text(txt(model.mainBusy ? "export.pill.running" : "export.pill.done").replacingOccurrences(of: "{0}", with: session.name)).lineLimit(1)
                     if !model.exportQueue.isEmpty {
                         Text(txt("export.pill.queue").replacingOccurrences(of: "{0}", with: "\(model.exportQueue.count)")).font(.manrope(12)).foregroundStyle(.secondary).lineLimit(1)
                     }
                 }
             }
-            .controllerButtonStyle(LauncherSecondaryButtonStyle())
+            .controllerButtonStyle(LauncherSecondaryButtonStyle(size: .compact, shape: .capsule))
         }
     }
 
@@ -706,22 +705,22 @@ struct LauncherView: View {
         if installFor == nil {
             if let s = model.phoneSession, S2ArmLauncherModel.phoneKinds.contains(s.kind), let id = s.gameID {
                 Button { openPhoneResult(id) } label: {
-                    HStack(spacing: 7) {
+                    HStack(spacing: 6) {
                         ProgressView().controlSize(.mini)
-                        Text(txt(model.selfSigning && s.kind == .install ? "install.pill.exporting" : "install.pill.running").replacingOccurrences(of: "{0}", with: s.name).replacingOccurrences(of: "{1}", with: pillTarget(id))).font(.manrope(12.5, .semibold)).lineLimit(1)
+                        Text(txt(model.selfSigning && s.kind == .install ? "install.pill.exporting" : "install.pill.running").replacingOccurrences(of: "{0}", with: s.name).replacingOccurrences(of: "{1}", with: pillTarget(id))).lineLimit(1)
                         if let f = s.progress.fraction { Text("\(Int(f * 100))%").font(.manrope(12)).monospacedDigit().foregroundStyle(.secondary) }
                     }
                 }
-                .controllerButtonStyle(LauncherSecondaryButtonStyle()).accessibilityIdentifier("install.pill")
+                .controllerButtonStyle(LauncherSecondaryButtonStyle(size: .compact, shape: .capsule)).accessibilityIdentifier("install.pill")
             } else if let r = model.phoneResult {
                 Button { openPhoneResult(r.gameID) } label: {
-                    HStack(spacing: 7) {
+                    HStack(spacing: 6) {
                         Image(systemName: r.ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill").foregroundStyle(r.ok ? LauncherPalette.ready : LauncherPalette.danger)
                         Text(txt(!r.ok ? (model.selfSigning ? "install.pill.exportFailed" : "install.pill.failed") : (model.phoneOutcome?.exportFolder ?? "").isEmpty ? "install.pill.done" : "install.pill.exported").replacingOccurrences(of: "{0}", with: r.name)
-                             .replacingOccurrences(of: "{1}", with: r.ok && !model.installedTo.isEmpty ? model.installedTo : model.installTargetLabel)).font(.manrope(12.5, .semibold)).lineLimit(1)
+                             .replacingOccurrences(of: "{1}", with: r.ok && !model.installedTo.isEmpty ? model.installedTo : model.installTargetLabel)).lineLimit(1)
                     }
                 }
-                .controllerButtonStyle(LauncherSecondaryButtonStyle()).accessibilityIdentifier("install.pill")
+                .controllerButtonStyle(LauncherSecondaryButtonStyle(size: .compact, shape: .capsule)).accessibilityIdentifier("install.pill")
             }
         }
     }

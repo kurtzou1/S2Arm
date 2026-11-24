@@ -1,4 +1,4 @@
-"""Install the app's immutable engine snapshot into a writable cache (the default location's hosts/engine, see engines_root).
+"""Install the app's immutable engine snapshot into a writable cache (the default location's hosts/engine.noindex, see engines_root).
 
 The snapshot carries no Git repository: the HEAD-based stage keys were computed when
 the app was packaged and are stored in engine.json (launchers/macos/bundle_engine.py).
@@ -22,7 +22,7 @@ def install(c):
         raise Failure("应用内置引擎不完整，请重新安装完整应用。")
     root = engines_root(c)
     destination = contained(root, root / identity)
-    _adopt_private_copy(c, root, identity)
+    _drop_old_copies(c, root)
     # 装好的副本直接用，不在每个作业开头逐文件复核（11-19 维护者：「每次启动都很慢……这种校验是不是自己给自己挖的坑」：原先每个作业——
     #   包括每次点开始——都对约 7600 个文件逐个 lstat，玩家机上冷缓存 / Windows 杀毒逐个扫要几秒）。只在没装过 / 没装完（无安装标记）时
     #   持锁从 App 包解一次；引擎号随每版变，更新 S2Arm 自然解新的一份。副本里个别文件被外部改了（#304 宿主 Info.plist）：
@@ -106,53 +106,61 @@ def _reinstall(c, source, manifest, root, destination, identity):
 
 
 # ---- 引擎副本放哪、留几份（游戏库结构 P3）----
-# 原来每版一份放 <私有目录>/engines/<引擎号>/、从不清（约 4 GB / 版）。现在放默认位置的 hosts/engine/<引擎号>/，只留在用的一份和上一份
-# （上一份给升级当口还在跑的旧版作业、以及回退旧版 App 时直接用，不用重解）。库还没建好（setup 之前）退回私有目录；建库后下次装引擎时
-# 同一卷的直接改名搬过去，跨卷的从 App 里重新解出，私有目录里的旧副本一律删掉。
+# 原来每版一份放 <私有目录>/engines/<引擎号>/、从不清（约 4 GB / 版）。现在放默认位置的 hosts/engine.noindex/<引擎号>/，只留在用的一份和上一份
+# （上一份给升级当口还在跑的旧版作业、以及回退旧版 App 时直接用，不用重解）。库还没建好（setup 之前）退回私有目录 engines.noindex/；
+# 建库后由 install 从 App 包解进新位置，旧位置的副本没人用了就删（_drop_old_copies）。
+# 目录名带 .noindex：副本里的 Binaries/S2ArmGame.app 不被聚焦收录，菜单 / 启动台不再出一排「S2Arm Game」（#1126 / #2024，宿主同理 layout.HOSTS_MAC）
 
 def engines_root(c):
     from core import default_home
     home = default_home(c.private, c.library)
-    return home / "engines" if home == c.private else home / "hosts" / "engine"
+    return home / "engines.noindex" if home == c.private else home / "hosts" / "engine.noindex"
 
 
-PRIVATE_STALE_SECONDS = 24 * 3600   # 私有目录里的旧副本多久没用才删：长出包也在这之内结束（出包 ≤30 分钟硬线）
+def _old_roots(c, root):
+    """以前放过引擎副本、现在不再用的位置：私有目录 engines/（P3 之前）、engines.noindex/（建库前解的），默认位置 hosts/engine/（#1126 之前）"""
+    from core import default_home
+    home = default_home(c.private, c.library)
+    return [p for p in (c.private / "engines", c.private / "engines.noindex", home / "hosts" / "engine") if p != root]
 
 
-def _adopt_private_copy(c, root, identity):
-    """库建好后，私有目录 engines/ 里的旧副本（库建好前解的）在没人用之后清掉；hosts/engine 没有这一版就由 install 从 App 包重解（APFS 克隆几秒）。
+STALE_SECONDS = 24 * 3600   # 旧位置里的副本多久没用才删：长出包也在这之内结束（出包 ≤30 分钟硬线）
+
+
+def _drop_old_copies(c, root):
+    """旧位置（_old_roots）里的副本在没人用之后清掉；新位置没有这一版就由 install 从 App 包重解（APFS 克隆几秒）。
     不改名搬、不当场删：同一时刻别的作业可能正用着那份副本，或者正把一份解到 <号>.<随机>.partial（v0.2.0 前回归：启动时 preflight 在库建好前开始解，
     紧接着建库后的 keys / catalog 作业把私有 engines/ 整个删了，preflight 核自己解到一半的副本报「缺失或大小不符：.git/COMMIT_EDITMSG」）。
-    只删最后一次用过（.installed.json / .last-used 的修改时刻）超过 PRIVATE_STALE_SECONDS 的完整副本；.partial / .broken 由解它的作业自己收拾，
+    只删最后一次用过（.installed.json / .last-used 的修改时刻）超过 STALE_SECONDS 的完整副本；.partial / .broken 由解它的作业自己收拾，
     崩溃留下的超过同样时长也删"""
     import time
-    old = c.private / "engines"
-    if root == old or not old.is_dir():
-        return
     now = time.time()
-    for d in old.iterdir():
-        if d.is_symlink() or not d.is_dir():
+    for old in _old_roots(c, root):
+        if old.is_symlink() or not old.is_dir():
             continue
+        for d in old.iterdir():
+            if d.is_symlink() or not d.is_dir():
+                continue
+            try:
+                used = max((p.stat().st_mtime for p in (d / ".installed.json", d / ".last-used", d) if p.exists()), default=0)
+            except OSError:
+                continue
+            if now - used > STALE_SECONDS:
+                shutil.rmtree(d, ignore_errors=True)
         try:
-            used = max((p.stat().st_mtime for p in (d / ".installed.json", d / ".last-used", d) if p.exists()), default=0)
+            old.rmdir()   # 空了才删
         except OSError:
-            continue
-        if now - used > PRIVATE_STALE_SECONDS:
-            shutil.rmtree(d, ignore_errors=True)
-    try:
-        old.rmdir()   # 空了才删
-    except OSError:
-        pass
+            pass
 
 
 def _retain(c, root, identity):
-    """hosts/engine 下只留在用的这份 + 上一份（按 .last-used 时刻取最近用过的另一份）；在用的这份每次装引擎时记一次时刻"""
+    """hosts/engine.noindex 下只留在用的这份 + 上一份（按 .last-used 时刻取最近用过的另一份）；在用的这份每次装引擎时记一次时刻"""
     stamp = root / identity / ".last-used"
     try:
-        stamp.touch()   # 私有目录里的副本也记：_adopt_private_copy 按它判断有没有人还在用
+        stamp.touch()   # 私有目录里的副本也记：_drop_old_copies 按它判断有没有人还在用
     except OSError:
         return
-    if root.name != "engine":
+    if root.name != "engine.noindex":
         return
     others = []
     for d in root.iterdir():

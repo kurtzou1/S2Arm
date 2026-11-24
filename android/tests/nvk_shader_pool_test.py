@@ -61,7 +61,7 @@ def main():
         return subprocess.run([str(exe), *args], capture_output=True, text=True, timeout=30, env=env)
 
     live_modes = ('--live-compile-default', '--live-compile-thread', '--live-compile-pending',
-                  '--live-compile-stop', '--cs-libpack')
+                  '--live-compile-stop', '--cs-libpack', '--lp-gate')
     if len(sys.argv) == 2 and sys.argv[1] in live_modes:
         result = run(sys.argv[1][2:], original, args=(sys.argv[1],))
         sys.stdout.write(result.stdout)
@@ -91,10 +91,22 @@ def main():
              '--live-compile-default', 'unset async property must start 0 compiler workers'),
             ('inline', '    if (g_live_compile != 1) {', '    if (1) {',
              '--live-compile-thread', 'compiler ran on the submitting thread'),
-            ('request-bytes-ignored', '    s2a_sha256_update(&hash, json, len);', '    (void)json; (void)len;',
+            ('request-bytes-ignored', '    s2a_sha256_update(&hash, &generation, sizeof generation);\n    s2a_sha256_update(&hash, json, len);',
+             '    s2a_sha256_update(&hash, &generation, sizeof generation);\n    (void)json; (void)len;',
              '--live-compile-thread', 'compute first use publishes the real compiled program'),
             ('pending-marked-failed', '        return LIVE_PENDING;', '        return LIVE_ABORT;',
              '--live-compile-pending', 'exhausted safe budget must defer'),
+            # 编译线程里一份编多久（现编帧读数的「编译线程跑完 N 份、合计、最长」）：份数 / 合计 / 最长各撤一处，--live-compile-pending 必红
+            ('compile-count-dropped', '        atomic_fetch_add_explicit(&g_live_cmp_n, 1, memory_order_relaxed);\n', '',
+             '--live-compile-pending', 'one finished compile is counted once'),
+            ('compile-ns-dropped', '        atomic_fetch_add_explicit(&g_live_cmp_ns, dt, memory_order_relaxed);\n', '',
+             '--live-compile-pending', 'one finished compile is counted once'),
+            ('compile-max-dropped', '        uint64_t mx = atomic_load_explicit(&g_live_cmp_max_ns, memory_order_relaxed);\n'
+             '        while (dt > mx && !atomic_compare_exchange_weak_explicit(&g_live_cmp_max_ns, &mx, dt, memory_order_relaxed, memory_order_relaxed)) {}\n', '',
+             '--live-compile-pending', 'one finished compile is counted once'),
+            ('compile-stats-not-cleared', '    s->compiled = atomic_exchange_explicit(&g_live_cmp_n, 0, memory_order_relaxed);',
+             '    s->compiled = atomic_load_explicit(&g_live_cmp_n, memory_order_relaxed);',
+             '--live-compile-pending', 'reading the compile timing clears it'),
         ]
         for name, old, new, mode, expected in mutants:
             assert text.count(old) == 1, (name, 'mutation anchor')
@@ -189,6 +201,112 @@ def main():
             assert result.returncode != 0 and expected in result.stderr, (name, result.stdout, result.stderr)
             print(f'{name}: expected assertion failure: {expected}', flush=True)
         print('PASS: 4 libpack GS negative controls')
+        return 0
+
+    if sys.argv[1:] == ['--lp-gate-mutants']:
+        # 负对照：出包预编库状态闸（libpack_gate_mask）与读数各撤一处，--lp-gate 必红。
+        #   六条闸各撤一位：被撤的那一条不再挡下，库里明明有的程序被取走，「库没被查」的断言红；
+        #   直方图的两处累加、闸位集合落到快照上、并列时取位集合小的在前，各撤 / 改一处：读数那一行红。
+        code = original.read_text()
+        gate_lines = (
+            ('depth', '    if (g->depth_mode && !depth_clip_cap()) m |= LPG_DEPTH;\n', "gate case 'depth mode' #0: library not used"),
+            ('origin', '    if (g->y_negate) m |= LPG_ORIGIN;\n', "gate case 'origin lower-left' #0: library not used"),
+            ('alpha', '    if (g->alpha_test_compare && strcmp(g->alpha_test_compare, "Always")) m |= LPG_ALPHA;\n', "gate case 'alpha test' #0: library not used"),
+            ('a2c', '    if (g->alpha_to_coverage_enable) m |= LPG_A2C;\n', "gate case 'alpha to coverage' #0: library not used"),
+            ('dual', '    if (g->dual_source_blend) m |= LPG_DUAL;\n', "gate case 'dual source blend' #0: library not used"),
+            ('unaligned', '    if (g->has_unaligned_ssbo && g->unaligned_ssbo) m |= LPG_UNALIGNED;', "gate case 'unaligned storage, slot the program uses (fs)' #0: library not used"),
+        )
+        cases = [(f'gate-{n}-dropped', old, ('    (void)0;' if n == 'unaligned' else ''), exp) for n, old, exp in gate_lines]
+        cases += [
+            ('snap-not-counted', '    atomic_fetch_add_explicit(&g_lp_gate_snap[s->lp_gate], 1, memory_order_relaxed);\n', '', 'gate readout line'),
+            ('live-not-counted', '        atomic_fetch_add_explicit(&g_lp_gate_live[s->lp_gate], 1, memory_order_relaxed);\n', '', 'gate readout line'),
+            ('gate-not-on-snapshot', '    s->lp_gate = libpack_gate_mask(&s->f.gfx); s->lp_ok = s->lp_gate == 0;',
+             '    s->lp_gate = 0; s->lp_ok = 1;', "library not used"),
+            ('ties-pick-larger-mask', 'for (unsigned m = 1; m < (1u << LPG_N); m++) if (v[m] > v[best]) best = m;',
+             'for (unsigned m = 1; m < (1u << LPG_N); m++) if (v[m] >= v[best] && v[m]) best = m;', 'gate readout line'),
+            # 「放开闸会怎样」的只读探测：缺省关、两样记录都要在、没有的不算有、探过的份数要记，各撤一处，探测读数那一行红。
+            ('probe-flag-ignored', ' || !nvn_plat_flag("nvk_gate_probe", 0)', '', 'gate probe line'),
+            ('probe-json-only', 'for (unsigned k = 0; k < 2 && has; k++) {', 'for (unsigned k = 0; k < 1 && has; k++) {', 'gate probe line'),
+            ('probe-miss-counted-as-has', 'sizeof w) != 0) has = 0;', 'sizeof w) != 0) (void)0;', 'gate probe line'),
+            ('probe-count-dropped', '    atomic_fetch_add_explicit(&g_lp_probe_n[s->lp_gate], 1, memory_order_relaxed);\n', '', 'gate probe line'),
+            # 存储缓冲「非对齐」只看程序真用到的槽（gfx_ssbo_align）：用到的槽集合、逐阶段、逐槽、说不准退回旧口径、开关、快路摘要、读数，各改坏一处，--lp-gate 必红。
+            #   「没用到」也放行 / 用到了也放行 / 说不准当没用到 / 阶段并在一起 / 槽并在一起 / 槽号错位 / 取错阶段 / 开关不管用 / 缺省改回开：库件被错放或错挡，对应用例红；
+            #   快路摘要不带这一位：槽翻成非对齐后还拿到按对齐翻的库件（「快路」用例红）；三个读数各少记一类、或每笔绘制都记：读数那一行红。
+            ('ssbo-any-known-stage-blocks',
+             '            else if (used & um[st]) used_unaligned = 1;', '            else used_unaligned = 1;',
+             "gate case 'unaligned storage, slot the program does not use': hit from the library"),
+            ('ssbo-used-slot-never-blocks',
+             '            else if (used & um[st]) used_unaligned = 1;', '            else if (0) used_unaligned = 1;',
+             "gate case 'unaligned storage, slot the program uses (fs)' #0: library not used"),
+            ('ssbo-unknown-as-unused',   # 库里没有的程序读不出用到哪几个槽：现编也必须按非对齐编（编出来的代码要对得上真实绑定）
+             'if (r != SBU_KNOWN) { unknown = 1; by_addr = r == SBU_PSB; }', 'if (r != SBU_KNOWN) { by_addr = r == SBU_PSB; }',
+             "gate case 'unaligned storage, program not in library' #0: live compile request carries hasUnalignedStorageBuffer=true"),
+            ('ssbo-fill-facts-unrefined',   # 程序身份（fill_facts）不跟新口径、快路摘要跟：身份说非对齐，库件放不出来
+             '    if (un && ssbo_used_slots_on()) {', '    if (un && !count && ssbo_used_slots_on()) {',
+             "gate case 'unaligned storage, slot the program does not use': hit from the library"),
+            ('ssbo-stages-merged',
+             '            else if (used & um[st]) used_unaligned = 1;', '            else if (used & (um[0] | um[1] | um[2])) used_unaligned = 1;',
+             "gate case 'unaligned storage, crossed between stages': hit from the library"),   # 「各段各算各的」要靠两段交叉的那一行才抓得到：只有一段有非对齐绑定时，另一段本来就不读库
+            ('ssbo-slots-merged',
+             '            else if (used & um[st]) used_unaligned = 1;', '            else if (used && um[st]) used_unaligned = 1;',
+             "gate case 'unaligned storage, another slot of the same stage': hit from the library"),
+            ('ssbo-slot-bit-shifted',
+             '{ un = 1; um[st] |= 1u << i; }', '{ un = 1; um[st] |= 1u << ((i + 1) & 15); }',
+             "gate case 'unaligned storage, slot the program uses (fs)' #0: library not used"),
+            ('ssbo-wrong-stage-read',
+             'sbu_stage_slots(stage_key((unsigned)st), (unsigned)st, q->prim, &used)', 'sbu_stage_slots(stage_key((unsigned)st), 0u, q->prim, &used)',
+             "gate case 'unaligned storage, slot the program does not use': hit from the library"),   # 片元段（有非对齐绑定才会被问）当成顶点段去读：stage 对不上 → 说不准 → 被挡下
+            ('ssbo-switch-ignored',
+             '    if (un && ssbo_used_slots_on()) {', '    if (un && (ssbo_used_slots_on() || 1)) {',
+             "gate case 'unaligned storage, switch off' #0: library not used"),
+            ('ssbo-default-on',   # 属性没设时读生产缺省（关 = 旧口径，玩家包就是这样）：缺省改回开，「属性没设」那一行放行、命中库而红
+             'nvn_plat_flag("nvk_lp_used_slots", 0) != 0', 'nvn_plat_flag("nvk_lp_used_slots", 1) != 0',
+             "gate case 'unaligned storage, property not set (production default)' #0: library not used"),
+            ('ssbo-quick-path-blind',
+             'MIX(any); MIX(un); MIX(pc->storage_buffer_offset_alignment);', 'MIX(any); MIX(pc->storage_buffer_offset_alignment);',
+             'quick path: used slot turning unaligned'),
+            ('ssbo-cleared-not-counted',
+             '            else atomic_fetch_add_explicit(&g_sbu_cleared, 1, memory_order_relaxed);', '            else (void)0;',
+             'ssbo readout line'),
+            ('ssbo-used-not-counted',
+             '            if (used_unaligned) atomic_fetch_add_explicit(&g_sbu_used, 1, memory_order_relaxed);', '            if (used_unaligned) (void)0;',
+             'ssbo readout line'),
+            ('ssbo-unknown-not-counted',
+             '                atomic_fetch_add_explicit(&g_sbu_unknown, 1, memory_order_relaxed);\n', '',
+             'ssbo readout line'),
+            ('ssbo-counted-on-every-call',
+             '        if (count) {\n            atomic_fetch_add_explicit(&g_sbu_calls,', '        if (count || 1) {\n            atomic_fetch_add_explicit(&g_sbu_calls,',
+             'ssbo readout line'),
+            # 只读真有非对齐绑定的阶段、按阶段键缓存、按地址访问内存的能力单列、判定本身的开销有读数：各撤一处，--lp-gate 必红。
+            #   没有非对齐绑定的阶段也去读（顶点键库里没有 → 读不出 → 退回旧口径）：「顶点段绑定全对齐」那一行红；
+            #   缓存永远不命中：每次判定都重读库，「按阶段键缓存」那几条红；读库次数 / 命中次数 / 读库耗时没记：读数行红
+            ('ssbo-unaligned-free-stage-read',
+             '            if (!um[st]) continue;   // 这个阶段没有非对齐的绑定：它用哪些槽都不受影响，不必读库\n', '',
+             "gate case 'unaligned storage, stage without unaligned binding is not in library' #0: live compile request carries hasUnalignedStorageBuffer=false"),
+            ('ssbo-psb-not-counted',
+             '                if (by_addr) atomic_fetch_add_explicit(&g_sbu_psb, 1, memory_order_relaxed);\n', '                (void)by_addr;\n',
+             'ssbo readout line'),
+            ('ssbo-cache-never-hits',
+             '    if (e && e->state) {\n        atomic_store_explicit(&g_sbu_hits,', '    if (0 && e && e->state) {\n        atomic_store_explicit(&g_sbu_hits,',
+             'stage-key cache: two stage keys read the library once each'),
+            ('ssbo-reads-not-counted',
+             '        atomic_fetch_add_explicit(&g_sbu_reads, 1, memory_order_relaxed);\n', '',
+             'ssbo readout line'),
+            ('ssbo-hits-not-counted',
+             '        atomic_store_explicit(&g_sbu_hits, atomic_load_explicit(&g_sbu_hits, memory_order_relaxed) + 1, memory_order_relaxed);   // 单写者：不用带锁的加法\n', '',
+             'ssbo readout line: cache hits cover every new program'),
+            ('ssbo-read-time-not-counted',
+             '        atomic_fetch_add_explicit(&g_sbu_read_ns, dt, memory_order_relaxed);\n', '',
+             'ssbo readout line: library read time is recorded'),
+        ]
+        for name, old, new, expected in cases:
+            assert code.count(old) == 1, (name, 'mutation anchor')
+            path = out / ('lp-gate-mutant-' + name + '.c')
+            path.write_text(code.replace(old, new))
+            result = run('lp-gate-' + name, path, args=('--lp-gate',))
+            assert result.returncode != 0 and expected in result.stderr, (name, result.stdout, result.stderr)
+            print(f'{name}: expected assertion failure: {expected}', flush=True)
+        print(f'PASS: {len(cases)} libpack state gate negative controls')
         return 0
 
     if sys.argv[1:] == ['--cs-libpack-mutants']:
@@ -290,6 +408,12 @@ def main():
         host_link.run(base + [str(p) for p in src] + [strip, '-lm', '-o', str(exe)], check=True, timeout=60)
         result = subprocess.run([str(exe), *sys.argv[2:]], capture_output=True, text=True, timeout=30)
         sys.stdout.write(result.stdout); sys.stderr.write(result.stderr)
+        return result.returncode
+
+    if len(sys.argv) == 6 and sys.argv[1] in ('--emit-nowindow', '--execute-nowindow', '--nowindow-arms'):
+        result = run('nowindow-real', original, args=sys.argv[1:], extra_flags=['-DS2A_ANDROID_DEBUG_ENV=1'])
+        sys.stdout.write(result.stdout)
+        sys.stderr.write(result.stderr)
         return result.returncode
 
     if len(sys.argv) == 6 and sys.argv[1] in ('--emit-high-slot', '--execute-high-slot', '--emit-reuse-texture', '--emit-reuse-rt', '--emit-reuse-inactive', '--emit-real', '--emit-real-tbuf', '--execute-tbuf', '--emit-compute-tbuf', '--execute-compute-tbuf', '--reject-graphics-tbufu', '--reject-compute-tbufu'):
@@ -524,7 +648,7 @@ def main():
         print(f'PASS: {len(changes)} negative controls')
         return 0
     if sys.argv[1:]:
-        raise ValueError('usage: nvk_shader_pool_test.py [--withdraw | --gs-libpack-mutants | --cs-libpack-mutants | --compute-warm-mutants | --diag-mutants | --live-compile-mutants | --graphics-image-mutants | --cs-ubo-sampler-mutants]'
+        raise ValueError('usage: nvk_shader_pool_test.py [--withdraw | --gs-libpack-mutants | --cs-libpack-mutants | --lp-gate-mutants | --compute-warm-mutants | --diag-mutants | --live-compile-mutants | --graphics-image-mutants | --cs-ubo-sampler-mutants]'
                          '（其余参数是 gs_compiler_chain_test.py / tbuf_compiler_chain_test.py 的子命令）')
     # 存储图像的声明（数值类 + SPIR-V Image Format）落程序记录：生产 sampled_decl，手搭 SPIR-V
     exe = out/'image-decl'

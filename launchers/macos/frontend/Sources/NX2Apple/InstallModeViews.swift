@@ -246,12 +246,9 @@ struct PhoneUpdateButton: View {
     var body: some View {
         if model.phoneUpdate != nil || model.updateConfirm != nil {
             Button { model.requestPhoneUpdate(language: language) } label: {
-                HStack(spacing: 7) {
-                    Image(systemName: "arrow.up.circle")
-                    Text(t("update.button.device")).font(.manrope(12.5, .semibold)).lineLimit(1)
-                }
+                Label(t("update.button.device"), systemImage: "arrow.up.circle")
             }
-            .controllerButtonStyle(LauncherSecondaryButtonStyle()).disabled(model.busy || model.phoneUpdate == nil)
+            .controllerButtonStyle(LauncherSecondaryButtonStyle(size: .compact, shape: .capsule)).disabled(model.busy || model.phoneUpdate == nil)
             .controllerID("top.phoneUpdate").controllerShortcut(.rightTrigger, focused: true)
             .alert(t("update.confirm.title"), isPresented: Binding(get: { model.updateConfirm != nil }, set: { if !$0 { model.updateConfirm = nil } }),
                    presenting: model.updateConfirm) { u in

@@ -283,6 +283,46 @@ int dm_shader_reuse(const char *k16) {
     for (int st = 0; st < 6; st++) if (dsh_json_eq(b, "stage", js[st])) { mtl_shmap_rt_add(k, dsh_nm[st]); atomic_fetch_add_explicit(&g_dsh_reused, 1, memory_order_relaxed); return 1; }
     return 0;
 }
+// 翻译器换了（S2Arm 更新）之后，本机现编过的键按单支重译（D-NJC8 / #2158：原先兜底 json 的翻译器指纹 xfp 一变就整批作废，预热当「别的游戏版本」全跳过，
+//   更新后第一局每支都在提交线程现编——包里不带着色器的款 616 支、14 次 0.3–2.6 秒停顿）。翻译便宜（玩家机中位 9.5 ms 一支）、编译贵：预热后台线程拿这支的客体输入
+//   （包里的 mtl_guest_input，否则补料 shader_miss/ 的 dsv_material）用本机翻译器重出一份，与旧 <键>_b.metal 逐字节比：
+//   没变 → 编好的库（Metal 按源码缓存）与管线库（pipelines/，按函数内容认）照样命中，只换 json 的指纹；变了 → 就是新源码，预热在后台照常编。
+//   → 1 本来就是本机翻译器的；2 重译后源码没变；3 重译后源码变了；0 做不了（本机没现编过 / 没有客体输入 / 翻译失败：留给首遇现编）
+static _Atomic uint64_t g_dsh_rf[4];   // 下标 = 上面的返回值（0 / 2 / 3 计数，1 不计）
+void dm_shader_refresh_stats(uint64_t out[3]) { out[0] = atomic_load(&g_dsh_rf[2]); out[1] = atomic_load(&g_dsh_rf[3]); out[2] = atomic_load(&g_dsh_rf[0]); }
+static uint8_t *dsh_slurp(const char *p, size_t *n) {
+    FILE *f = fopen(p, "rb"); if (!f) return NULL;
+    uint8_t *b = NULL; size_t cap = 0, len = 0, r;
+    do { if (len == cap) { uint8_t *nb = realloc(b, cap = cap ? cap * 2 : 65536); if (!nb) { free(b); fclose(f); return NULL; } b = nb; } r = fread(b + len, 1, cap - len, f); len += r; } while (r);
+    fclose(f); *n = len; return b;
+}
+static pthread_mutex_t g_dsh_rf_mu = PTHREAD_MUTEX_INITIALIZER;   // 预热几个工人会同时要同一支（一对着色器的多行管线）：整支重译串行，后来的见 dsh_have 直接回 1（不重复计数）
+static int dsh_refresh_locked(const char *k);
+int dm_shader_refresh(const char *k16) {
+    char k[17]; snprintf(k, sizeof k, "%.16s", k16);
+    pthread_mutex_lock(&g_dsh_rf_mu); int r = dsh_refresh_locked(k); pthread_mutex_unlock(&g_dsh_rf_mu);
+    return r;
+}
+static int dsh_refresh_locked(const char *k) {
+    static const char *const js[6] = {"vs", "ps", "cs", "gs", "ts", "ms"};
+    const char *out = getenv("DM_MSL_FALLBACK"); char p[1200], jb[8192];
+    if (!out || !*out || strlen(k) != 16 || !dsh_xfp()) return 0;
+    if (dsh_have(out, k)) return 1;
+    snprintf(p, sizeof p, "%s/%s_b.json", out, k); FILE *f = fopen(p, "r");
+    if (!f) return 0;   // 本机没现编过：不是「翻译器换了」，留给首遇
+    size_t jn = fread(jb, 1, sizeof jb - 1, f); fclose(f); jb[jn] = 0;
+    int st = -1; for (int i = 0; i < 6; i++) if (dsh_json_eq(jb, "stage", js[i])) { st = i; break; }
+    dsh_comp_fn comp = dsh_comp(); uint8_t key[8], *buf = NULL; uint32_t nctl = 0, ncode = 0;
+    for (int i = 0; i < 8; i++) { unsigned v; if (sscanf(k + 2 * i, "%2x", &v) != 1) return 0; key[i] = (uint8_t)v; }
+    if (!comp || st < 0 || (mtl_guest_input(key, st, &buf, &nctl, &ncode) && dsv_material(k, &buf, &nctl, &ncode))) { atomic_fetch_add(&g_dsh_rf[0], 1); return 0; }
+    uint32_t c2 = 0, n2 = 0; if ((size_t)nctl + ncode < 0x708 || dsh_stage_raw(buf + nctl, buf, &n2, &c2) != st || c2 > nctl || n2 > ncode) { free(buf); atomic_fetch_add(&g_dsh_rf[0], 1); return 0; }   // 补料文件被截断 / 不是这支的：不喂给翻译器
+    size_t on = 0; snprintf(p, sizeof p, "%s/%s_b.metal", out, k); uint8_t *old = dsh_slurp(p, &on);
+    int rc = dsh_comp_src_locked(comp, k, st, buf + nctl, ncode, buf, nctl, out); free(buf);   // 锁里再看一次：等锁期间首遇已重译好的不再编
+    size_t nn = 0; uint8_t *now = rc ? NULL : dsh_slurp(p, &nn);
+    int r = rc || !now || !dsh_have(out, k) ? 0 : old && on == nn && !memcmp(old, now, nn) ? 2 : 3;
+    free(old); free(now); atomic_fetch_add(&g_dsh_rf[r], 1);
+    return r;
+}
 // 第一次用到（提交线程建程序时库里没有这支）：待编表里有就现编，成功返回 1（映射已加，调用方再装载一次）；没登记过 / 现编失败返回 0。code：在用程序的代码区
 // control：在用程序的控制段。Switch 2 用：NVN2 的键到第一次用到才算（hle_nvn.c keys_hash），SetShaders 时没登记进待编表，这里按在用控制段登记（Switch 1 不走这里）。
 //   → 1 上局编过、映射已加（*e 不动）；0 *e = 新的待编项；-1 编不了（已报 / 已计数）

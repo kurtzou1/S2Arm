@@ -164,39 +164,46 @@ private struct LauncherRowControlFrame: ViewModifier {
 }
 
 package struct LauncherSecondaryButtonStyle: ButtonStyle {
-    package init(accent: Color? = nil, fill: Bool = false, prominent: Bool = false, capsule: Bool = false) {
-        self.accent = accent; self.fill = fill; self.prominent = prominent; self.capsule = capsule
+    package init(accent: Color? = nil, fill: Bool = false, prominent: Bool = false, capsule: Bool = false,
+                 size: LauncherTheme.ButtonSize? = nil, shape: LauncherTheme.ButtonShape? = nil) {
+        self.accent = accent
+        self.fill = fill
+        self.size = size ?? (prominent ? .prominent : .regular)
+        self.shape = shape ?? (capsule ? .capsule : .rounded)
     }
     /// Text and border in this colour (the build bar's Stop); plain white otherwise.
     package var accent: Color? = nil
     package var fill = false
-    package var prominent = false
-    package var capsule = false
+    package var size: LauncherTheme.ButtonSize = .regular
+    package var shape: LauncherTheme.ButtonShape = .rounded
+    package var prominent: Bool { size == .prominent }
+    package var capsule: Bool { shape == .capsule }
     /// Inside a setting row the button is exactly LauncherControl.width wide and LauncherControl.height high, its label centred on
     /// one line (a little smaller when it does not fit): the buttons of a page line up in one column and are equally high.
     @Environment(\.launcherControlWidth) private var width
     @Environment(\.isEnabled) private var enabled
     @State private var hovered = false
     package func makeBody(configuration: Configuration) -> some View {
-        let shape = LauncherControlShape(capsule: capsule)
+        let spec = LauncherTheme.buttonSpec(size, primary: false)
+        let controlShape = LauncherControlShape(capsule: capsule)
         configuration.label
-            .font(prominent ? .manrope(16, .semibold) : LauncherTheme.TypeStyle.button)
-            .labelStyle(LauncherLabelStyle())
+            .font(spec.font)
+            .labelStyle(LauncherLabelStyle(iconSize: spec.iconSize, spacing: spec.iconSpacing))
             .multilineTextAlignment(.center)
             .lineLimit(1)
-            .minimumScaleFactor(width == nil ? 1 : LauncherControl.minimumLabelScale)
-            .padding(.horizontal, LauncherTheme.Space.large)
-            .frame(width: width, height: prominent ? LauncherTheme.Metrics.prominentControlHeight : LauncherControl.height)
-            .frame(minWidth: width == nil ? LauncherTheme.Metrics.actionMinWidth : nil)
+            .minimumScaleFactor(LauncherControl.minimumLabelScale)
+            .padding(.horizontal, spec.horizontalPadding)
+            .frame(width: width, height: spec.height)
+            .frame(minWidth: width == nil ? spec.minWidth : nil)
             .frame(maxWidth: fill ? .infinity : nil)
             .background(configuration.isPressed ? LauncherTheme.Colors.pressed : hovered ? LauncherTheme.Colors.hover : LauncherTheme.Colors.control,
-                        in: shape)
-            .overlay(shape.strokeBorder(accent?.opacity(0.75) ?? LauncherTheme.Colors.border))
+                        in: controlShape)
+            .overlay(controlShape.strokeBorder(accent?.opacity(0.75) ?? LauncherTheme.Colors.border))
             .foregroundStyle(enabled ? (accent ?? Color.white.opacity(0.92)) : .gray)
             .opacity(enabled ? 1 : 0.55)
-            .contentShape(shape)
+            .contentShape(controlShape)
             .onHover { hovered = $0 }
-            .launcherMeasured(label: configuration.label.font(prominent ? .manrope(16, .semibold) : LauncherTheme.TypeStyle.button), room: LauncherControl.buttonLabelWidth)
+            .launcherMeasured(label: configuration.label.font(spec.font), room: LauncherControl.buttonLabelWidth)
     }
 }
 

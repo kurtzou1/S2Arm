@@ -56,6 +56,43 @@ package enum LauncherTheme {
         package static let plainRadius: CGFloat = 8
         package static let rowRadius: CGFloat = 8
     }
+    /// 按钮形状令牌：全站按钮与控件统一从此取用，避免同一排混用方按钮与胶囊
+    package enum ButtonShape: Equatable, Sendable {
+        case rounded
+        case capsule
+    }
+    /// 按钮尺寸档位令牌：集中管理高度、字号、内边距、图标尺寸、图标间距与最小宽度
+    package enum ButtonSize: Equatable, Sendable {
+        case compact
+        case regular
+        case prominent
+        case hero
+    }
+    package struct ButtonSpec: Sendable {
+        package let height: CGFloat
+        package let horizontalPadding: CGFloat
+        package let font: Font
+        package let iconSize: CGFloat
+        package let iconSpacing: CGFloat
+        package let minWidth: CGFloat
+    }
+    package static func buttonSpec(_ size: ButtonSize, primary: Bool = false) -> ButtonSpec {
+        switch size {
+        case .compact:
+            return ButtonSpec(height: 30, horizontalPadding: Space.medium,
+                              font: .manrope(12.5, .semibold), iconSize: 13, iconSpacing: 6, minWidth: 0)
+        case .regular:
+            return ButtonSpec(height: Metrics.controlHeight, horizontalPadding: Space.large,
+                              font: TypeStyle.button, iconSize: 14, iconSpacing: Space.small, minWidth: Metrics.actionMinWidth)
+        case .prominent:
+            return ButtonSpec(height: Metrics.prominentControlHeight, horizontalPadding: Space.large,
+                              font: .manrope(16, .semibold), iconSize: 16, iconSpacing: Space.small, minWidth: Metrics.actionMinWidth)
+        case .hero:
+            return ButtonSpec(height: 52, horizontalPadding: primary ? 24 : 20,
+                              font: primary ? .manrope(16, .bold) : .manrope(15, .semibold),
+                              iconSize: 17, iconSpacing: Space.small, minWidth: primary ? 92 : 0)
+        }
+    }
     package enum TypeStyle {
         package static let title = Font.manrope(26, .heavy)
         package static let panelTitle = Font.manrope(18, .bold)
@@ -337,12 +374,85 @@ package struct LauncherRowActions<Content: View>: View {
 
 /// Symbols of different intrinsic widths occupy an equal slot and share the text's visual centre.
 package struct LauncherLabelStyle: LabelStyle {
-    package init() {}
+    package var iconSize: CGFloat = 14
+    package var spacing: CGFloat = LauncherTheme.Space.small
+    package init(iconSize: CGFloat = 14, spacing: CGFloat = LauncherTheme.Space.small) {
+        self.iconSize = iconSize; self.spacing = spacing
+    }
     package func makeBody(configuration: Configuration) -> some View {
-        HStack(alignment: .center, spacing: LauncherTheme.Space.small) {
-            configuration.icon.frame(width: LauncherTheme.Metrics.icon, height: LauncherTheme.Metrics.icon)
+        HStack(alignment: .center, spacing: spacing) {
+            configuration.icon
+                .font(.system(size: iconSize, weight: .semibold))
+                .frame(width: iconSize + 2, height: iconSize + 2)
                 .accessibilityHidden(true)
             configuration.title
+        }
+    }
+}
+
+/// 胶囊标签（如「有新版」「BETA」）：统一使用 .circular 胶囊，避免 .continuous 在小高度下出现左右竖线破图。
+package struct LauncherBadge: View {
+    package let text: String
+    package var foreground: Color = LauncherPalette.cream
+    package var background: Color = Color.black.opacity(0.25)
+    package var border: Color = LauncherPalette.cream.opacity(0.4)
+    package var font: Font = LauncherTheme.TypeStyle.detail
+    package var tracking: CGFloat = 0
+    package var horizontalPadding: CGFloat = 10
+    package var height: CGFloat = 24
+    package init(_ text: String, foreground: Color = LauncherPalette.cream, background: Color = Color.black.opacity(0.25),
+                 border: Color = LauncherPalette.cream.opacity(0.4), font: Font = LauncherTheme.TypeStyle.detail,
+                 tracking: CGFloat = 0, horizontalPadding: CGFloat = 10, height: CGFloat = 24) {
+        self.text = text; self.foreground = foreground; self.background = background; self.border = border
+        self.font = font; self.tracking = tracking; self.horizontalPadding = horizontalPadding; self.height = height
+    }
+    package var body: some View {
+        Text(text)
+            .font(font).tracking(tracking).lineLimit(1).fixedSize()
+            .foregroundStyle(foreground)
+            .padding(.horizontal, horizontalPadding)
+            .frame(height: height)
+            .background(background, in: Capsule(style: .circular))
+            .overlay(Capsule(style: .circular).strokeBorder(border, lineWidth: 1))
+    }
+}
+
+/// 可自动换行的按钮行：多个长文案按钮并排时自动折行，杜绝超出容器挤压破图。
+package struct LauncherFlowRow: Layout {
+    package var spacing: CGFloat = LauncherTheme.Space.medium
+    package var rowSpacing: CGFloat = LauncherTheme.Space.small
+    package init(spacing: CGFloat = LauncherTheme.Space.medium, rowSpacing: CGFloat = LauncherTheme.Space.small) {
+        self.spacing = spacing; self.rowSpacing = rowSpacing
+    }
+
+    package func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        var x: CGFloat = 0, y: CGFloat = 0, rowH: CGFloat = 0, usedW: CGFloat = 0
+        for subview in subviews {
+            let s = subview.sizeThatFits(ProposedViewSize(width: maxWidth.isFinite ? maxWidth : nil, height: nil))
+            if x > 0 && x + s.width > maxWidth {
+                y += rowH + rowSpacing
+                x = 0; rowH = 0
+            }
+            x += (x > 0 ? spacing : 0) + s.width
+            usedW = max(usedW, x)
+            rowH = max(rowH, s.height)
+        }
+        return CGSize(width: usedW, height: y + rowH)
+    }
+
+    package func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX, y = bounds.minY, rowH: CGFloat = 0
+        for subview in subviews {
+            let s = subview.sizeThatFits(ProposedViewSize(width: bounds.width, height: nil))
+            if x > bounds.minX && x + s.width > bounds.maxX + 0.5 {
+                y += rowH + rowSpacing
+                x = bounds.minX; rowH = 0
+            }
+            subview.place(at: CGPoint(x: x, y: y), anchor: .topLeading,
+                          proposal: ProposedViewSize(width: min(s.width, bounds.width), height: s.height))
+            x += min(s.width, bounds.width) + spacing
+            rowH = max(rowH, s.height)
         }
     }
 }
@@ -358,7 +468,7 @@ package struct LauncherControlShape: InsettableShape {
     }
     package func path(in rect: CGRect) -> Path {
         if capsule {
-            return Capsule(style: .continuous).inset(by: insetAmount).path(in: rect)
+            return Capsule(style: .circular).inset(by: insetAmount).path(in: rect)
         }
         return RoundedRectangle(cornerRadius: LauncherTheme.Metrics.controlRadius, style: .continuous)
             .inset(by: insetAmount).path(in: rect)
@@ -366,27 +476,35 @@ package struct LauncherControlShape: InsettableShape {
 }
 
 package struct LauncherPrimaryButtonStyle: ButtonStyle {
-    package init(fill: Bool = false, prominent: Bool = false, capsule: Bool = false) {
-        self.fill = fill; self.prominent = prominent; self.capsule = capsule
+    package init(fill: Bool = false, prominent: Bool = false, capsule: Bool = false,
+                 size: LauncherTheme.ButtonSize? = nil, shape: LauncherTheme.ButtonShape? = nil) {
+        self.fill = fill
+        self.size = size ?? (prominent ? .prominent : .regular)
+        self.shape = shape ?? (capsule ? .capsule : .rounded)
     }
     package var fill = false
-    package var prominent = false
-    package var capsule = false
+    package var size: LauncherTheme.ButtonSize = .regular
+    package var shape: LauncherTheme.ButtonShape = .rounded
+    package var prominent: Bool { size == .prominent }
+    package var capsule: Bool { shape == .capsule }
     @Environment(\.isEnabled) private var enabled
     @Environment(\.launcherControlWidth) private var width
     @State private var hovered = false
     package func makeBody(configuration: Configuration) -> some View {
-        let shape = LauncherControlShape(capsule: capsule)
+        let spec = LauncherTheme.buttonSpec(size, primary: true)
+        let controlShape = LauncherControlShape(capsule: capsule)
         configuration.label
-            .font(prominent ? .manrope(16, .semibold) : LauncherTheme.TypeStyle.button).labelStyle(LauncherLabelStyle())
-            .lineLimit(1).minimumScaleFactor(width == nil ? 1 : LauncherControl.minimumLabelScale)
-            .padding(.horizontal, LauncherTheme.Space.large)
-            .frame(width: width, height: prominent ? LauncherTheme.Metrics.prominentControlHeight : LauncherTheme.Metrics.controlHeight)
-            .frame(minWidth: width == nil ? LauncherTheme.Metrics.actionMinWidth : nil)
+            .font(spec.font)
+            .labelStyle(LauncherLabelStyle(iconSize: spec.iconSize, spacing: spec.iconSpacing))
+            .lineLimit(1)
+            .minimumScaleFactor(LauncherControl.minimumLabelScale)
+            .padding(.horizontal, spec.horizontalPadding)
+            .frame(width: width, height: spec.height)
+            .frame(minWidth: width == nil ? spec.minWidth : nil)
             .frame(maxWidth: fill ? .infinity : nil)
             .foregroundStyle(LauncherPalette.background)
-            .background(LauncherPalette.cream.opacity(configuration.isPressed ? 0.8 : hovered ? 0.93 : 1), in: shape)
-            .contentShape(shape)
+            .background(LauncherPalette.cream.opacity(configuration.isPressed ? 0.8 : hovered ? 0.93 : 1), in: controlShape)
+            .contentShape(controlShape)
             .opacity(enabled ? 1 : 0.45)
             .onHover { hovered = $0 }
     }

@@ -1764,5 +1764,9 @@
   "s2arm.env.xcode.auto": "自動で探すに戻す",
   "s2arm.env.xcode.invalid": "完全な Xcode ではありません（Contents/Developer/usr/bin/xcodebuild が必要です）。変更していません。",
   "s2arm.env.action.appleLogin": "Apple ID でサインイン",
-  "s2arm.fail.appleAccount": "サインイン中の Apple ID を読み取れません"
+  "s2arm.fail.appleAccount": "サインイン中の Apple ID を読み取れません",
+  "settings.tab.environment": "実行環境",
+  "settings.tab.general": "一般",
+  "settings.tab.iphone": "iPhone と同期",
+  "settings.tab.updates": "更新と詳細"
 }

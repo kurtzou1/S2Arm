@@ -1,0 +1,30 @@
+diff --git a/src/Ryujinx.Audio/Common/AudioDeviceSession.cs b/src/Ryujinx.Audio/Common/AudioDeviceSession.cs
+index a4f81a3a651ce97f4b783b26432970cc2a22578c..9f6c63085734c8b52f60576409a42f582038d193 100644
+--- a/src/Ryujinx.Audio/Common/AudioDeviceSession.cs
++++ b/src/Ryujinx.Audio/Common/AudioDeviceSession.cs
+@@ -514,9 +514,23 @@ namespace Ryujinx.Audio.Common
+                 _hardwareDeviceSession.UnregisterBuffer(buffer);
+             }
+ 
+-            while (TryPopPlayingBuffer(out AudioBuffer buffer))
++            // S2Arm: 在播缓冲按 Stop 路径的账目交还（ReleaseBuffer 推进 _releasedBufferIndex），并发放回事件。
++            //   原 TryPopPlayingBuffer 只减 _bufferRegisteredCount、不推进 _releasedBufferIndex：放回环的取数区间
++            //   [_releasedBufferIndex − _bufferReleasedCount, _releasedBufferIndex) 落后于在播区，之后再放回一个缓冲，
++            //   GetReleasedBuffer / ContainsBuffer 就读到被清空的槽位（NullReferenceException，音频服务线程未捕获 → 宿主闪退）；
++            //   被 Flush 的缓冲游戏也取不回
++            bool flushedPlaying = false;
++
++            while (TryGetPlayingBufferIndex(out uint playingIndex))
+             {
+-                _hardwareDeviceSession.UnregisterBuffer(buffer);
++                _hardwareDeviceSession.UnregisterBuffer(_buffers[playingIndex]);
++                ReleaseBuffer(_buffers[playingIndex]);
++                flushedPlaying = true;
++            }
++
++            if (flushedPlaying)
++            {
++                _bufferEvent.Signal();
+             }
+ 
+             if (_bufferRegisteredCount == 0 || (_bufferReleasedCount + _bufferAppendedCount) > Constants.AudioDeviceBufferCountMax)

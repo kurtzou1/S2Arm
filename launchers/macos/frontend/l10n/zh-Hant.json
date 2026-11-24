@@ -1800,5 +1800,9 @@
   "s2arm.env.xcode.auto": "改回自動尋找",
   "s2arm.env.xcode.invalid": "選的不是完整的 Xcode（要有 Contents/Developer/usr/bin/xcodebuild），沒有變更。",
   "s2arm.env.action.appleLogin": "登入 Apple ID",
-  "s2arm.fail.appleAccount": "讀不出登入的 Apple ID"
+  "s2arm.fail.appleAccount": "讀不出登入的 Apple ID",
+  "settings.tab.environment": "運行環境",
+  "settings.tab.general": "通用",
+  "settings.tab.iphone": "iPhone 與同步",
+  "settings.tab.updates": "更新與進階"
 }

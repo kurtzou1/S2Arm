@@ -1,6 +1,6 @@
 """Mac 公共宿主与只换宿主（11-09 维护者定「升级后只换宿主」；游戏库结构双端统一后宿主多款共用，见 layout.py）。
 
-宿主放 <库>/hosts/mac/<可执行文件摘要前 12 位>/S2ArmGame.app，每款镜像 games/<英文名>/image/mac 不含宿主；game.json 的 hostMac 记这款在用的宿主。
+宿主放 <库>/hosts/mac.noindex/<可执行文件摘要前 12 位>/S2ArmGame.app（layout.hosts_mac），每款镜像 games/<英文名>/image/mac 不含宿主；game.json 的 hostMac 记这款在用的宿主。
 升级 S2Arm 后，新宿主认得旧镜像就直接换用，不用重新准备。判据两项，都对上才换：
   hostAbi    —— 宿主读每款产物的约定号，就是下面的 HOST_ABI（从 runtime/include/s2a_host_abi.h 读，宿主编的是同一个数）。改了宿主读产物的方式（改写器与运行时的约定：跳板 / 虚拟寄存器槽 / 门控表，
                 *.fixups / *.sites / *.gates / addr_need.tsv 等表的格式，镜像目录布局）就把它加 1；只修宿主自身的 bug 不动它。
@@ -213,7 +213,20 @@ def ios_lib_reasons(c, gid, ios=None, want=None):
         why.append("libGen")
     if shader_misses(c, gid)["ios"] > 0 and built_older(c, ios.get("builtBy")):
         why.append("shaderMiss")
+    if ios_runtime_only(c, gid) and built_older(c, ios.get("builtBy")):
+        why.append("shaderGap")
     return why
+
+
+def ios_runtime_only(c, gid):
+    """这款的 iPhone 资源包是抽取缺口出的空直连库（离线 0 支，graphics/tools/direct/runtime_only_lib.sh 写 shaders/direct/runtime_only.txt）。
+    #2158：0.6.0 / 0.6.5 出这款时 Unreal 着色器存档抽不出（那时宿主工具模式起不了），包里 0 支、全部在手机上现编；本版能抽出 7 万多支，
+    可链号、代数都没变，「更新这款」一直不重编，缺口留到现在。旧版出的空库算一条原因（shaderGap）：更新时按本版阶段重抽重编（sgrade_bf.rechain_ios，
+    记本版 builtBy）；本版重抽仍是 0 支的，builtBy 已是本版、不再标，下一版再试"""
+    try:
+        return (Path(layout.ios_pack(c, gid)) / "shaders/direct/runtime_only.txt").is_file()
+    except (Failure, OSError):
+        return False
 
 
 def _online(c, names=None, kinds=None):

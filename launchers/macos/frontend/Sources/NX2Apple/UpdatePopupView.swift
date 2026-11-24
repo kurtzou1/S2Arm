@@ -83,11 +83,11 @@ struct UpdatePopupView: View {
                         HStack(spacing: 10) {
                             Spacer()
                             Button(t("update.gate.confirm.cancel")) { model.updateGate = nil }
-                                .controllerButtonStyle(LauncherSecondaryButtonStyle())
+                                .controllerButtonStyle(LauncherSecondaryButtonStyle(shape: .capsule))
                                 .keyboardShortcut(.defaultAction)
                                 .accessibilityIdentifier("update.gate.cancel").controllerID("update.gate.cancel")
                             Button(t("update.gate.confirm.restart")) { model.restartToUpdate(confirmed: true) }
-                                .controllerButtonStyle(LauncherSecondaryButtonStyle())
+                                .controllerButtonStyle(LauncherSecondaryButtonStyle(shape: .capsule))
                                 .accessibilityIdentifier("update.gate.restart").controllerID("update.gate.restart")
                         }
                     }
@@ -105,12 +105,7 @@ struct UpdatePopupView: View {
         VStack(alignment: .leading, spacing: LauncherTheme.Space.small) {
             HStack(spacing: LauncherTheme.Space.medium) {
                 Text("S2Arm v" + version).font(LauncherTheme.TypeStyle.title)
-                Text(t("update.popup.kicker"))
-                    .font(LauncherTheme.TypeStyle.detail)
-                    .foregroundStyle(LauncherPalette.cream)
-                    .padding(.horizontal, 10).padding(.vertical, 4)
-                    .background(Color.black.opacity(0.25), in: Capsule())
-                    .overlay(Capsule().strokeBorder(LauncherPalette.cream.opacity(0.4)))
+                LauncherBadge(t("update.popup.kicker"))
                 Spacer()
                 Button { model.closeUpdatePopup() } label: {
                     Label(t("update.popup.close"), systemImage: "xmark")
@@ -233,7 +228,7 @@ struct UpdatePopupView: View {
                     }
                     Spacer(minLength: LauncherTheme.Space.medium)
                     Button(t(actions.secondary)) { model.closeUpdatePopup() }
-                        .controllerButtonStyle(LauncherSecondaryButtonStyle(capsule: true))
+                        .controllerButtonStyle(LauncherSecondaryButtonStyle(shape: .capsule))
                         .keyboardShortcut(.cancelAction).controllerID("update.popup.later").controllerShortcut(.back)
                     Button {
                         if model.updateState == .ready { model.restartToUpdate() }
@@ -246,7 +241,7 @@ struct UpdatePopupView: View {
                             Text(t(actions.primary))
                         }
                     }
-                    .controllerButtonStyle(LauncherPrimaryButtonStyle(capsule: true)).disabled(!actions.primaryEnabled || model.updateGate != nil)
+                    .controllerButtonStyle(LauncherPrimaryButtonStyle(shape: .capsule)).disabled(!actions.primaryEnabled || model.updateGate != nil)
                     .controllerID("update.popup.now").controllerPreferredFocus(true).controllerShortcut(.rightTrigger)
                 }
                 if actions.showsAutoRestart {

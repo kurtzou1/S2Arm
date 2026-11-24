@@ -40,6 +40,7 @@ def judge(a, b):
     if fl >= NATIVE: return 2, f'判不出：原生 60，低帧率局已 ≥ 55 帧（{what}）'
     if q < QMIN: return 2, f'判不出：开 60 帧帧率没涨，无倍速风险（{what}）'
     if rho < 1 / BAND: return 2, f'判不出：高帧率局反而变慢，两局场景不一致（{what}）'
+    if rho > q * 1.5: return 2, f'判不出：快过帧率倍数，两局量的不是同一种运动（同 tests/autoplay/autoplay.c SP_RHO_MAX，{what}）'
     if rho <= min(BAND, q ** 0.5): return 0, f'绿：逻辑速度不随帧率变（{what}）'
     return 1, f'红：按帧推进未补偿，高帧率下逻辑真快了（{what}）'
 

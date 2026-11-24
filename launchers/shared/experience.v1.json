@@ -868,7 +868,7 @@
   "update_reasons": {
     "note": "「建议更新」原因 → 文案键的唯一来源（11-19 结构 9：Mac / Windows 原先各写一份，Windows 缺 libGen、两端都缺 shaderMiss）。后端原因见 pack/jobs/host_update.py；pack/jobs/tests/test_shared_tables.py 核后端会发的原因都在这里。可确认停装码的续跑参数写在 errors 各码的 accept 字段（同一处）",
     "rewriter": "update.hint.reason.rewriter", "hostAbi": "update.hint.reason.hostAbi", "shader": "update.hint.reason.shader",
-    "libGen": "update.hint.reason.shader", "shaderMiss": "update.hint.reason.shader"
+    "libGen": "update.hint.reason.shader", "shaderMiss": "update.hint.reason.shader", "shaderGap": "update.hint.reason.shader"
   },
   "launcher": {
     "note": "启动器客户端界面文案（Windows Avalonia 客户端 #1629 起；Mac 新前端可复用）。键 = 客户端界面元素 id，zh-Hans / en 两份必填，客户端按界面语言取，缺键显示 [键名]、不在客户端存副本。环境检查项本身的名称 / 说明 / 下一步与官方页由后端给（pack/jobs/winenv.py checks[].name / message / action / url）；错误码的标题 / 说明用本文件 errors 段。加键：同一提交加 zh-Hans + en，revision +1（README「口径号」规则）。",

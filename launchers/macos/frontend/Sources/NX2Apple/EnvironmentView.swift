@@ -23,14 +23,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
         }
     }
 
-    func title(en: Bool) -> String {
-        switch self {
-        case .general: return en ? "General" : "通用"
-        case .iphone: return en ? "iPhone & Sync" : "iPhone 与同步"
-        case .environment: return en ? "Environment" : "运行环境"
-        case .updates: return en ? "Updates & More" : "更新与高级"
-        }
-    }
+    var titleKey: String { "settings.tab." + rawValue }
 }
 
 struct EnvironmentView: View {
@@ -47,7 +40,6 @@ struct EnvironmentView: View {
     private static let groups = ["system", "apple", "engine", "bundled", "storage"]
 
     var body: some View {
-        let en = loc.lang.sharedCode == "en"
         let failing = model.checks.filter { !$0.ok }
         let passed = model.checks.filter(\.ok)
         VStack(alignment: .leading, spacing: 0) {
@@ -56,7 +48,7 @@ struct EnvironmentView: View {
                 if model.checking { ProgressView().controlSize(.small) }
             }
             .padding(.horizontal, LauncherTheme.Space.page).padding(.top, LauncherTheme.Space.page).padding(.bottom, LauncherTheme.Space.large)
-            tabBar(en: en, failing: failing)
+            tabBar(failing: failing)
                 .padding(.horizontal, LauncherTheme.Space.page).padding(.bottom, LauncherTheme.Space.large)
             if let error = model.environmentError ?? (model.inlineFailure?.kind == .keys ? model.inlineFailure?.message : nil) {
                 Text(loc.backend(error)).font(LauncherTheme.TypeStyle.caption).foregroundStyle(LauncherPalette.danger)
@@ -107,7 +99,7 @@ struct EnvironmentView: View {
         .onExitCommand { dismiss() }
     }
 
-    private func tabBar(en: Bool, failing: [ToolCheck]) -> some View {
+    private func tabBar(failing: [ToolCheck]) -> some View {
         HStack(spacing: LauncherTheme.Space.small) {
             ForEach(SettingsTab.allCases) { tab in
                 let active = selectedTab == tab
@@ -115,7 +107,7 @@ struct EnvironmentView: View {
                 Button { selectedTab = tab } label: {
                     HStack(spacing: 6) {
                         Image(systemName: tab.symbol).font(.system(size: 12.5, weight: .semibold))
-                        Text(tab.title(en: en)).font(.manrope(13, active ? .bold : .medium)).lineLimit(1).fixedSize()
+                        Text(loc.t(tab.titleKey)).font(.manrope(13, active ? .bold : .medium)).lineLimit(1).fixedSize()
                         if tab == .environment, !failing.isEmpty {
                             Circle()
                                 .fill(model.environmentState == .missing ? LauncherPalette.danger : LauncherPalette.building)
@@ -124,9 +116,9 @@ struct EnvironmentView: View {
                     }
                     .foregroundStyle(active ? Color.black : (hovered ? LauncherTheme.Colors.text : LauncherTheme.Colors.secondary))
                     .padding(.horizontal, 14).frame(height: 32)
-                    .background(active ? LauncherPalette.cream : (hovered ? LauncherTheme.Colors.hover : LauncherTheme.Colors.control), in: Capsule())
-                    .overlay(Capsule().strokeBorder(active ? Color.clear : LauncherTheme.Colors.border, lineWidth: 1))
-                    .contentShape(Capsule())
+                    .background(active ? LauncherPalette.cream : (hovered ? LauncherTheme.Colors.hover : LauncherTheme.Colors.control), in: Capsule(style: .circular))
+                    .overlay(Capsule(style: .circular).strokeBorder(active ? Color.clear : LauncherTheme.Colors.border, lineWidth: 1))
+                    .contentShape(Capsule(style: .circular))
                 }
                 .controllerButtonStyle(.plain)
                 .controllerRingRadius(.infinity, outset: active ? LauncherTheme.Focus.creamOutset : 0)

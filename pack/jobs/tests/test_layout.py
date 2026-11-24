@@ -132,7 +132,7 @@ class MigrateTests(JobCase):
         self.assertEqual((a / "image/mac/romfs/data.bin").read_bytes(), b"k2-cur")      # 现行那份变成镜像
         self.assertFalse((a / "image/mac/S2ArmGame.app").exists())                     # 宿主拆出去了
         sha = hashlib.sha256(b"current host").hexdigest()[:12]
-        self.assertEqual((L / "hosts/mac" / sha / "S2ArmGame.app/Contents/MacOS/s2arm-host").read_bytes(), b"current host")
+        self.assertEqual((L / "hosts/mac.noindex" / sha / "S2ArmGame.app/Contents/MacOS/s2arm-host").read_bytes(), b"current host")
         self.assertEqual(json.loads((a / "game.json").read_text())["hostMac"], sha)
         self.assertEqual(json.loads((a / "image/mac/manifest.json").read_text())["files"], {"romfs/data.bin": [1, "x"]})
         self.assertFalse((a / "releases").exists()); self.assertFalse((a / "current").exists())   # 上一版删掉

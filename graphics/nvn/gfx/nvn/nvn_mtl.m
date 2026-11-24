@@ -11722,6 +11722,11 @@ static void warm_tick_full(long total);   // the front end's (total, total) tick
 // derived profile: Hollow Knight: Silksong's 1.0.30000 list named 16 shaders its base game 1.0.27776 does not have), or a device's pso_user.tsv kept across a game update.
 // A line with a key the shader map does not have is dropped quietly (counted in the "prewarm done" line); the game never draws with it
 static int fb_loadable(NSString *pc);
+static uint64_t g_warm_rf_cand;   // keys warm_stale kept for a retranslation (fb_retranslatable)
+static int fb_retranslatable(NSString *mk) {   // a 16-digit key this device translated before (its base json is in the fallback directory), whatever translator did it
+    const char *fb = getenv("DM_MSL_FALLBACK"); if (!fb || !*fb || mk.length != 16) return 0;
+    return !access([NSString stringWithFormat:@"%s/%@_b.json", fb, mk].fileSystemRepresentation, R_OK);
+}
 static NSMutableSet<NSString *> *g_warm_fb_ok;   // keys found current in the fallback directory (warm_stale reads each key's json once)
 static int warm_stale(NSString *key, NSMutableSet<NSString *> *stale) {
     // library names are <map key>_b; a geometry-emulation stage's are <map key>_bgv / _bg<i> (lp_kind_of): their map key is the same 16 digits. 11-05 Switch Sports: only _b was stripped,
@@ -11734,6 +11739,9 @@ static int warm_stale(NSString *key, NSMutableSet<NSString *> *stale) {
     if ([g_warm_fb_ok containsObject:key]) return 0;
     if (![stale containsObject:key]) {
         if (fb_loadable(key)) { if (!g_warm_fb_ok) g_warm_fb_ok = [NSMutableSet set]; [g_warm_fb_ok addObject:key]; return 0; }
+        // S2Arm D-NJC8 (#2158): translated on this device by an older translator (S2Arm updated since): this game's, not another version's. The prewarm task retranslates it (warm_shader →
+        //   dm_shader_refresh) and builds as usual; dropping them made the first run after every update compile each one on the submit thread (616 in a run, 14 stalls of 0.3-2.6 s)
+        if (fb_retranslatable(mk)) { if (!g_warm_fb_ok) g_warm_fb_ok = [NSMutableSet set]; [g_warm_fb_ok addObject:key]; g_warm_rf_cand++; return 0; }
         [stale addObject:key]; g_warm_skip_stale++;
     }
     return 1;
@@ -11749,6 +11757,8 @@ static int fb_loadable(NSString *pc) {   // translated on this device before, by
 }
 static int shader_loadable(NSString *pc) { return mtl_shlib_has(pc.UTF8String) || fb_loadable(pc); }
 static NvShader *warm_shader(NSString *key, int stage) {
+    // an older translator's translation (warm_stale kept it, fb_retranslatable): retranslated here, in the background, from its guest input (dsh_miss.inc dm_shader_refresh)
+    if (!shader_loadable(key) && key.length >= 16 && fb_retranslatable([key substringToIndex:16])) dm_shader_refresh([key substringToIndex:16].UTF8String);
     if (!shader_loadable(key)) { atomic_fetch_add_explicit(&g_cold_skips, 1, memory_order_relaxed); return nil; }
     return shader_load(key, stage, 0);
 }
@@ -12048,6 +12058,9 @@ static void warm_finish(void) {
     if (g_warm_mps) MLOG("pipeline prewarm: %llu task / mesh pipelines built (M lines)", (unsigned long long)g_warm_mps);
     MLOG("pipeline prewarm done: shaders %llu / render pipelines %llu (specialized fragment skipped %llu) / compute pipelines %llu, background time %.1f ms; shader keys not in the shader map (another game version) %llu; not in the library yet (compiled at their first use) %llu",
          (unsigned long long)g_warm_shaders, (unsigned long long)g_warm_rps, (unsigned long long)g_warm_skip_fz, (unsigned long long)g_warm_cps, (bp_now() - g_warm_t0) / 1e6, (unsigned long long)g_warm_skip_stale, (unsigned long long)atomic_load(&g_cold_skips));
+    if (g_warm_rf_cand) { uint64_t rf[3]; dm_shader_refresh_stats(rf);   // D-NJC8：与「别的游戏版本」分开数（原先都算进那一项）
+        MLOG("pipeline prewarm: %llu shader keys this device translated with an older translator (S2Arm updated since): retranslated here, source unchanged %llu (their compiled libraries and archived pipelines still hit), changed %llu (compiled in the background), not retranslated %llu (no guest input: compiled at their first use)",
+             (unsigned long long)g_warm_rf_cand, (unsigned long long)rf[0], (unsigned long long)rf[1], (unsigned long long)rf[2]); }
     if (g_par_on) MLOG("pipeline archive after the prewarm: %llu builds from the archive, %llu compiled (written beside it, in the background), %llu stale files dropped",
                        (unsigned long long)g_par_hits, (unsigned long long)g_par_misses, (unsigned long long)g_par_stale);
     atomic_store(&g_warm_running, 0); atomic_store(&g_wp_phase, WARM_DONE);   // the host's progress (nvn_warm.h)

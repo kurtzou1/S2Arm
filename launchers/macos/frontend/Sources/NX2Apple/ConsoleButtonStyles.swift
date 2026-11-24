@@ -45,17 +45,18 @@ struct ConsolePlayButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         let hot = enabled && hovered
+        let spec = LauncherTheme.buttonSpec(.hero, primary: true)
         configuration.label
-            .labelStyle(ConsoleLabelStyle())
-            .font(.manrope(16, .bold))
-            .lineLimit(1).fixedSize()
-            .padding(.horizontal, 24)
-            .frame(minWidth: 92, minHeight: 52, maxHeight: 52)
+            .labelStyle(LauncherLabelStyle(iconSize: spec.iconSize, spacing: spec.iconSpacing))
+            .font(spec.font)
+            .lineLimit(1)
+            .padding(.horizontal, spec.horizontalPadding)
+            .frame(minWidth: spec.minWidth, minHeight: spec.height, maxHeight: spec.height)
             .foregroundStyle(.black.opacity(0.85))
-            .background(LauncherPalette.cream.opacity(enabled ? (configuration.isPressed ? 0.78 : 1) : 0.4), in: Capsule())
+            .background(LauncherPalette.cream.opacity(enabled ? (configuration.isPressed ? 0.78 : 1) : 0.4), in: Capsule(style: .circular))
             .shadow(color: .black.opacity(0.18), radius: 16, y: 5)
             .scaleEffect(enabled && configuration.isPressed ? 0.985 : (hot ? 1.03 : 1))
-            .contentShape(Capsule())
+            .contentShape(Capsule(style: .circular))
             .animation(.easeOut(duration: 0.14), value: hovered)
             .onHover { hovered = $0 }
     }
@@ -68,20 +69,21 @@ struct ConsolePillButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         let hot = enabled && hovered
+        let spec = LauncherTheme.buttonSpec(.hero, primary: false)
         configuration.label
-            .labelStyle(ConsoleLabelStyle())
-            .font(.manrope(15, .semibold))
+            .labelStyle(LauncherLabelStyle(iconSize: spec.iconSize, spacing: spec.iconSpacing))
+            .font(spec.font)
             .lineLimit(1)
-            .padding(.horizontal, 20)
-            .frame(minHeight: 52, maxHeight: 52)
+            .padding(.horizontal, spec.horizontalPadding)
+            .frame(minHeight: spec.height, maxHeight: spec.height)
             .foregroundStyle(.white.opacity(enabled ? 0.95 : 0.35))
             .background {
-                Capsule()
+                Capsule(style: .circular)
                     .fill(.thinMaterial)
-                    .overlay(Capsule().fill(.white.opacity(configuration.isPressed ? 0.12 : (hot ? 0.06 : 0))))
+                    .overlay(Capsule(style: .circular).fill(.white.opacity(configuration.isPressed ? 0.12 : (hot ? 0.06 : 0))))
             }
-            .overlay(Capsule().strokeBorder(.white.opacity(hot ? 0.20 : 0.12)))
-            .contentShape(Capsule())
+            .overlay(Capsule(style: .circular).strokeBorder(.white.opacity(hot ? 0.20 : 0.12)))
+            .contentShape(Capsule(style: .circular))
             .animation(.easeOut(duration: 0.14), value: hovered)
             .onHover { hovered = $0 }
     }

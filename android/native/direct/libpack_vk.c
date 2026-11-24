@@ -962,6 +962,84 @@ int s2a_libpack_profile_geometry_shader(const char *profile_json, size_t profile
     return b != 0;
 }
 
+// _b.json 绑定的 kind → 存储类别：1 = sbuf（槽号 reg 的 NVN 存储缓冲）；0 = 已知的非存储种类（lp_emit_bindings 里逐个认得的那些）；
+//   -1 = 其余（geometry / sbuf_ubo / ubo_ptr / gmem_* / sbuf_push 等别的存储种类，以及这里不认得的种类）。
+//   不认得的种类按「可能是存储」处理：库以后加了新的存储类绑定，也不会被悄悄当成「没用存储缓冲」。
+static int lp_kind_storage_class(const char *kind) {
+    static const char *const non_storage[] = { "tex", "tbuf", "tex_pool", "tex_ubo", "tbuf_ubo", "tex_c2a", "samp", "samp_id", "samp_ubo",
+        "samp_c2a", "samp_pool", "samp_tex", "img", "img_ubo", "cbuf", "c1", "ubolen", "uvx", "lb", "sbsize", "drvcb", "support" };
+    if (!strcmp(kind, "sbuf")) return 1;
+    for (size_t i = 0; i < sizeof non_storage / sizeof non_storage[0]; i++) if (!strcmp(kind, non_storage[i])) return 0;
+    return -1;
+}
+
+// SPIR-V 模块里有没有声明某个 OpCapability：1 有 / 0 没有 / -1 读不懂（调用方按「说不准」处理）。
+//   整份模块按指令字数走一遍，不假定能力声明都排在最前面。
+static int lp_spv_has_capability(const uint8_t *spv, size_t n, uint32_t cap) {
+    if (!spv || n < 20 || (n & 3) || *(const uint32_t *)spv != SpvMagicNumber) return -1;
+    const uint32_t *w = (const uint32_t *)spv; const size_t nw = n / 4;
+    for (size_t i = 5; i < nw; ) {
+        const uint32_t op = w[i] & 0xffff, wc = w[i] >> 16;
+        if (!wc || wc > nw - i) return -1;
+        if (op == SpvOpCapability && wc >= 2 && w[i + 1] == cap) return 1;
+        i += wc;
+    }
+    return 0;
+}
+
+int s2a_libpack_stage_sbuf_slots(const struct s2a_libpack *lp_c, const uint8_t key[8], unsigned nvn, const char *topology, uint32_t *slots) {
+    struct s2a_libpack *lp = (struct s2a_libpack *)lp_c;
+    if (slots) *slots = 0;
+    if (!lp || !lp->p.idx || !key || !slots) return 1;
+    const char *lib_stage = lp_nvn_stage_name(nvn);
+    if (!lib_stage || !strcmp(lib_stage, "cs")) return 1;   // 图形三段（vs / ps / gs）；计算不走这里
+    const int gs = !strcmp(lib_stage, "gs");
+    int gt = -1;
+    if (gs && (gt = lp_input_topology(topology)) < 0) return 1;   // 邻接 / 没有来源：库里没有那一份
+    char khex[17];
+    for (int i = 0; i < 8; i++) snprintf(khex + 2 * i, 3, "%02x", key[i]);
+    uint8_t *jb = NULL; size_t jn = 0; char gw[64] = "";
+    if (s2a_libpack_get(lp, key, gs ? LP_K_VGJSON + (unsigned)gt : LP_K_BJSON, &jb, &jn, gw, sizeof gw) != S2A_LIBPACK_HIT) { free(jb); return 1; }
+    struct s2a_jv top = { (const char *)jb, jn }, arr;
+    uint32_t mask = 0;
+    int out = 1;
+    {   // 与 lp_stage_emit 同一套命中判据：整份语法完整、顶层是对象、dm_ctl == 键 hex、stage 是本段阶段
+        const char *jend = NULL;
+        char ctl[20] = "", st[8] = "";
+        if (!s2a_jv_is_object(top) || s2a_jv_scan((const char *)jb, (const char *)jb + jn, &jend) || jend != (const char *)jb + jn) goto done;
+        if (jf_str(top, "dm_ctl", ctl, sizeof ctl) || strcmp(ctl, khex)) goto done;
+        if (jf_str(top, "stage", st, sizeof st) || strcmp(st, lib_stage)) goto done;
+        uint32_t git = 0;
+        if (gs && (jf_u32(top, "gs_input_topology", &git) || git != (uint32_t)gt)) goto done;
+        if (s2a_jv_obj_find(top, "bindings", &arr) || !s2a_jv_is_array(arr)) goto done;
+        int n = s2a_jv_arr_count(arr);
+        if (n < 0) goto done;
+        for (int i = 0; i < n; i++) {
+            struct s2a_jv b; char kind[24] = ""; uint32_t reg = 0;
+            if (s2a_jv_arr_item(arr, i, &b) || jf_str(b, "kind", kind, sizeof kind)) goto done;
+            const int cls = lp_kind_storage_class(kind);
+            if (cls < 0) goto done;
+            if (cls == 0) continue;
+            if (jf_u32(b, "reg", &reg) || reg >= 16) goto done;
+            mask |= 1u << reg;
+        }
+        // 不经描述符的内存访问：这一段的 SPIR-V 声明了 PhysicalStorageBufferAddresses = 着色器可以按 64 位地址直接读写内存，
+        //   那条路不走 rp_S.ssbo 的槽，_b.json 的绑定表就不是它碰得到的全部存储 → 说不准（返回 2，与别的「说不准」分开计数）。
+        //   .spv 取不到 / 读不懂同样说不准（返回 1）：没有 .spv 的键本来也合成不出库程序。
+        uint8_t *spv = NULL; size_t sn = 0; char sw[64] = "";
+        const int got = s2a_libpack_get(lp, key, gs ? LP_K_VGSPV + (unsigned)gt : LP_K_BSPV, &spv, &sn, sw, sizeof sw);
+        const int psb = got == S2A_LIBPACK_HIT ? lp_spv_has_capability(spv, sn, SpvCapabilityPhysicalStorageBufferAddresses) : -1;
+        free(spv);
+        if (psb < 0) goto done;
+        if (psb) { out = 2; goto done; }
+        *slots = mask;
+        out = 0;
+    }
+done:
+    free(jb);
+    return out;
+}
+
 int s2a_libpack_program_v1(const struct s2a_libpack *lp_c, const uint8_t keys[6][8], uint32_t stages,
                            const struct s2a_libpack_gfx *gfx,
                            uint32_t direct_abi, const char *profile_hash, const char *translator_closure,

@@ -339,6 +339,8 @@ static int speed_probe_once(void) {   // 1 = 有一根摇杆推得动画面（�
 #define AB_DT_US 200000   // 两张之间的游戏时间（真宿主即真实时间；负载下按墙钟等，假宿主游戏只走了几十毫秒、位移不到 1 像素全是量化误差）：长一点位移大、整像素量化误差小（100 ms 时低速款只移 1–2 格，ρ 在量化上飘）
 #define AB_N 15
 #define AB_MIN 2.0
+#define SP_RHO_MAX 1.5   // 一项的 ρ 超过 q × 它：快过帧率倍数——按帧推进最多快 q 倍，再快只能是开 / 关两段量的不是同一种运动（11-23 一款攀爬中量「走」，ρ 4.16、q 2）
+#define SP_SEG_MIN 0.8   // 一段一项的出图帧率低于同类段目标（开段取各项开段最高、关段取各项关段最高）的这个比例：这段作废重测（11-23 一款开②转镜头只有 33 帧）
 #define AB_RETRY_S 20.0   // 第一轮量不出时，局内段随机动作跑多久再测（足球小将开球后 20 秒内已在踢）
 // 判一项：fon / foff 开 / 关段出图帧率、ρ 速度比、moff 关段速度 → "绿" / "红" / "判不出"，*why 是括号里的说明（同 tools/fps_speed_judge.py sp_verdict）
 const char *sp_verdict(double foff, double q, double rho, double moff, const char **why) {   // 不 static：假宿主 t_autoplay verdict 场景直接测
@@ -346,6 +348,7 @@ const char *sp_verdict(double foff, double q, double rho, double moff, const cha
     if (q < SP_QMIN) { *why = "（开 60 帧帧率没涨：q < 1.15，无倍速风险）"; return "判不出"; }
     if (moff < AB_MIN) { *why = "（画面几乎不动，量不出）"; return "判不出"; }
     if (rho < 1 / SP_BAND) { *why = "（开段反而变慢，两段场景不一致）"; return "判不出"; }
+    if (rho > q * SP_RHO_MAX) { *why = "（快过帧率倍数：ρ 超过 q × 1.5，开关两段量的不是同一种运动）"; return "判不出"; }
     double top = sqrt(q) < SP_BAND ? sqrt(q) : SP_BAND;
     if (rho <= top) { *why = "（逻辑按真实时间推进）"; return "绿"; }
     *why = "（按帧推进，开 60 帧游戏变快）"; return "红";
@@ -391,6 +394,30 @@ static int motion_probe(const char *tag, int kind, double *speed, double *fps) {
 //   开①段先各推一次，画面动得起来（≥ AB_MIN）的那几种在三段都量；都推不动才量不按键。每种各自出 ρ / q 判红 / 绿 / 判不出，
 //   合起来：任一种红 → 红；量得到的全绿 → 绿；其余判不出。末行按决定结论的那一种报数（普查 census.py 按末行入账）
 // 返回 1 = 帧率涨了（q ≥ SP_QMIN）却量不出 / 拍不到画面运动：MARK 那刻画面静止（开球等待、对话），局内段跑一阵再测更可能量得到
+// 一段一项的出图帧率够不够：低于同类段目标的 SP_SEG_MIN 就作废（掉帧段里量的速度不代表那一档，11-23 开②转镜头 33 帧）。不 static：t_autoplay 测
+int sp_seg_ok(double fps, double target) { return target > 0 && fps >= SP_SEG_MIN * target; }
+// 同局 A/B 合并（纯函数，t_autoplay abdecide 用今天的真实读数测）：m / f / ok 是 [段：0 关、1 开①、2 开②][项] 的速度、出图帧率、拍到没有；use 是量了哪几项。
+//   先按段作废：开段目标 = 各项两段开段出图最高，关段目标 = 各项关段出图最高，低于目标 SP_SEG_MIN 的那段那项当没拍到；
+//   再每项出 ρ / q 判（sp_verdict，含快过帧率倍数判不出）；合起来：任一项红 → 红，量到的全绿 → 绿，其余判不出（同原规则，异度3 那种走绿镜头红照判红）。
+//   回结论，*kk 是决定结论的那一项；rho / q / mon / fon / vk / why 按项填出（调用方打日志用）
+const char *sp_ab_decide(double m[3][K_N], double f[3][K_N], int ok[3][K_N], const int use[K_N], int *kk,
+                         double rho[K_N], double q[K_N], double mon[K_N], double fon[K_N], const char *vk[K_N], const char *why[K_N]) {
+    double ton = 0, toff = 0;
+    for (int k = 0; k < K_N; k++) if (use[k]) { for (int p = 1; p <= 2; p++) if (ok[p][k] && f[p][k] > ton) ton = f[p][k]; if (ok[0][k] && f[0][k] > toff) toff = f[0][k]; }
+    for (int k = 0; k < K_N; k++) if (use[k]) { if (ok[0][k] && !sp_seg_ok(f[0][k], toff)) ok[0][k] = 0; for (int p = 1; p <= 2; p++) if (ok[p][k] && !sp_seg_ok(f[p][k], ton)) ok[p][k] = 0; }
+    int red = -1, green = -1, ngreen = 0, first = -1, nuse = 0;
+    for (int k = 0; k < K_N; k++) {
+        rho[k] = q[k] = mon[k] = fon[k] = 0; vk[k] = why[k] = NULL;
+        if (!use[k]) continue; nuse++; if (first < 0) first = k;
+        if (!ok[0][k] || !(ok[1][k] || ok[2][k])) { vk[k] = "判不出"; why[k] = "（拍不到足够的画面，或这段出图掉帧作废）"; continue; }
+        mon[k] = ok[1][k] && ok[2][k] ? (m[1][k] + m[2][k]) / 2 : ok[1][k] ? m[1][k] : m[2][k]; fon[k] = ok[1][k] && ok[2][k] ? (f[1][k] + f[2][k]) / 2 : ok[1][k] ? f[1][k] : f[2][k];
+        q[k] = f[0][k] > 0 ? fon[k] / f[0][k] : 0; rho[k] = m[0][k] > 0 ? mon[k] / m[0][k] : 0;
+        vk[k] = sp_verdict(f[0][k], q[k], rho[k], m[0][k], &why[k]);
+        if (!strcmp(vk[k], "红") && red < 0) red = k; if (!strcmp(vk[k], "绿")) { ngreen++; if (green < 0) green = k; }
+    }
+    *kk = red >= 0 ? red : ngreen == nuse ? green : first;
+    return red >= 0 ? "红" : ngreen == nuse ? "绿" : "判不出";
+}
 static int speed_ab(void) {
     void (*ab)(int) = (void (*)(int))dlsym(RTLD_DEFAULT, "s2a_fps_ab_set");
     if (!ab) { LOG("逻辑速度同局 A/B：判不出：宿主没有 s2a_fps_ab_set（旧宿主）"); return 0; }
@@ -402,18 +429,19 @@ static int speed_ab(void) {
     if (!nuse) { ab(0); LOG("逻辑速度同局 A/B：判不出：拍不到足够的画面"); return 1; }
     ab(1); settle(2.0); for (int k = 0; k < K_N; k++) if (use[k]) ok[0][k] = motion_probe("（A/B 关）", k, &m[0][k], &f[0][k]);
     ab(2); settle(2.0); for (int k = 0; k < K_N; k++) if (use[k]) ok[2][k] = motion_probe("（A/B 开②）", k, &m[2][k], &f[2][k]);
-    ab(0);
-    int red = -1, green = -1, ngreen = 0, first = -1; double rho[K_N] = {0}, q[K_N] = {0}, mon[K_N] = {0}, fon[K_N] = {0}; const char *vk[K_N] = {0}, *why[K_N] = {0};
-    for (int k = 0; k < K_N; k++) {
-        if (!use[k]) continue; if (first < 0) first = k;
-        if (!ok[0][k] || !(ok[1][k] || ok[2][k])) { vk[k] = "判不出"; why[k] = "（拍不到足够的画面）"; LOG("逻辑速度分项（%s）：判不出：拍不到足够的画面", k_name[k]); continue; }
-        mon[k] = ok[1][k] && ok[2][k] ? (m[1][k] + m[2][k]) / 2 : ok[1][k] ? m[1][k] : m[2][k]; fon[k] = ok[1][k] && ok[2][k] ? (f[1][k] + f[2][k]) / 2 : ok[1][k] ? f[1][k] : f[2][k];
-        q[k] = f[0][k] > 0 ? fon[k] / f[0][k] : 0; rho[k] = m[0][k] > 0 ? mon[k] / m[0][k] : 0;
-        vk[k] = sp_verdict(f[0][k], q[k], rho[k], m[0][k], &why[k]);
-        LOG("逻辑速度分项（%s）：%s：关 %.1f → 开 %.1f 像素/秒、出图 %.1f → %.1f 帧/秒，ρ = %.2f、q = %.2f%s", k_name[k], vk[k], m[0][k], mon[k], f[0][k], fon[k], rho[k], q[k], why[k]);
-        if (!strcmp(vk[k], "红") && red < 0) red = k; if (!strcmp(vk[k], "绿")) { ngreen++; if (green < 0) green = k; }
+    {   // 掉帧段重测一次（同 sp_ab_decide 的段目标）：开段那项低于目标 SP_SEG_MIN 就在开档再量一次，关段同理在关档再量
+        double ton = 0, toff = 0;
+        for (int k = 0; k < K_N; k++) if (use[k]) { for (int p = 1; p <= 2; p++) if (ok[p][k] && f[p][k] > ton) ton = f[p][k]; if (ok[0][k] && f[0][k] > toff) toff = f[0][k]; }
+        for (int k = 0; k < K_N; k++) if (use[k]) for (int p = 2; p >= 0; p--) if (ok[p][k] && !sp_seg_ok(f[p][k], p ? ton : toff)) {
+            LOG("逻辑速度同局 A/B：%s %s段出图 %.1f 帧/秒低于目标 %.1f 的 %.0f%%，作废重测一次", k_name[k], p == 0 ? "关" : p == 1 ? "开①" : "开②", f[p][k], p ? ton : toff, SP_SEG_MIN * 100);
+            ab(p ? 2 : 1); settle(2.0); ok[p][k] = motion_probe(p == 0 ? "（A/B 关·重测）" : p == 1 ? "（A/B 开①·重测）" : "（A/B 开②·重测）", k, &m[p][k], &f[p][k]); }
     }
-    int k = red >= 0 ? red : ngreen == nuse ? green : first; const char *v = red >= 0 ? "红" : ngreen == nuse ? "绿" : "判不出";
+    ab(0);
+    int k; double rho[K_N], q[K_N], mon[K_N], fon[K_N]; const char *vk[K_N], *why[K_N];
+    const char *v = sp_ab_decide(m, f, ok, use, &k, rho, q, mon, fon, vk, why);
+    for (int j = 0; j < K_N; j++) if (use[j]) {
+        if (!mon[j]) LOG("逻辑速度分项（%s）：%s%s", k_name[j], vk[j], why[j] ? why[j] : "");
+        else LOG("逻辑速度分项（%s）：%s：关 %.1f → 开 %.1f 像素/秒、出图 %.1f → %.1f 帧/秒，ρ = %.2f、q = %.2f%s", k_name[j], vk[j], m[0][j], mon[j], f[0][j], fon[j], rho[j], q[j], why[j]); }
     LOG("逻辑速度同局 A/B：%s：%s画面运动 关 %.1f → 开 %.1f 像素/秒、出图 %.1f → %.1f 帧/秒，ρ = %.2f、q = %.2f%s", v, k_name[k], m[0][k], mon[k], f[0][k], fon[k], rho[k], q[k],
         !strcmp(v, vk[k] ? vk[k] : "") && why[k] ? why[k] : "（各项不一致：有的绿、有的判不出）");
     return !strcmp(v, "判不出") && why[k] && (strstr(why[k], "拍不到") || (q[k] >= SP_QMIN && strstr(why[k], "量不出")));

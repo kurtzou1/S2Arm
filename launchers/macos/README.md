@@ -403,9 +403,10 @@ For a no-game interactive native preview, run its built test binary with
 
 Jobs use their own cache/lock/output roots and never call the scheduler, train,
 device deployment, shared root refresh or a game-specific SDK hook. Engine resources
-are verified and cloned from the signed app to `hosts/engine/<bundle-content-id>/` in
+are verified and cloned from the signed app to `hosts/engine.noindex/<bundle-content-id>/` in
 the default library location (only the copy in use and the previous one are kept; before a library exists the
-copy goes to `engines/` in private application storage). The signed application and runtime stay immutable; the
+copy goes to `engines.noindex/` in private application storage). The `.noindex` suffix keeps Spotlight from
+indexing the embedded `S2ArmGame.app`, so it never shows up in Launchpad or the Open With menu. The signed application and runtime stay immutable; the
 precompiled preparation helpers run from that engine copy. The original source-checkout pipeline
 retains its default build behavior unless `S2A_PREBUILT_TOOLS` is explicitly set. The bundled preparation
 source closure contains a fresh local-only Git snapshot for the existing pipeline

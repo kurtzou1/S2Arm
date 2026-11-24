@@ -43,6 +43,18 @@ class ShaderMissHint(unittest.TestCase):
         layout.save_device(self.c, "PHONE-1", dict(shaderFallback={A: dict(count=12), B: dict(count=40)}))
         self.assertEqual(self.run_hints(), {A: ["shaderMiss"]}, "A 旧包且有计数 → 标；B 已是当前版打的 → 重出也没用，不标")
 
+    def test_runtime_only_gap_from_older_build(self):
+        """#2158：旧版出包时抽取缺口留下的空直连库（shaders/direct/runtime_only.txt，离线 0 支）→ shaderGap；本版出的空库不标（本版重抽也是 0 支，标了点不掉）；
+        有库的旧包不因它标。反证（手跑核过）：去掉 ios_lib_reasons 里 shaderGap 那两行 → A 不标、本例红"""
+        self.fixture()
+        C = "0100000000030000"
+        _, pc = ios_fixture(self.c, C, compat=dict(OK, builtBy=dict(version="0.5.4")))   # 旧版打的、有库
+        self.c.catalog = lambda: {"games": [{"id": g, "name": g} for g in (A, B, C)]}
+        for g in (A, B):
+            gap = Path(layout.ios_pack(self.c, g)) / "shaders/direct"; gap.mkdir(parents=True, exist_ok=True)
+            (gap / "runtime_only.txt").write_text("本款离线直连库为空（离线 0 支），运行时首遇现编\n直连库失败：Unreal 着色器存档抽不出\n")
+        self.assertEqual(self.run_hints(), {A: ["shaderGap"]}, "A 旧版空库 → 标；B 本版空库、C 旧版有库 → 不标")
+
     def test_no_built_by_counts_as_old(self):
         ios_fixture(self.c, A, compat=OK)   # 这条判据之前出的包：没有 builtBy
         self.c.catalog = lambda: {"games": [{"id": A, "name": "甲"}]}

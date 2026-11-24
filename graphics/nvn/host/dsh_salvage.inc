@@ -49,6 +49,20 @@ static int dsv_write(const char *k, const void *ctl, uint32_t nctl, const void *
     if (!ok) dsv_unlink(k);
     return ok;
 }
+// 补料里这个键的控制段 + 代码区（翻译器换了之后按单支重译用，dsh_miss.inc dm_shader_refresh）：0 取到（*buf = 控制段紧跟代码区，调用方 free），1 没有
+static int dsv_material(const char *k, uint8_t **buf, uint32_t *nctl, uint32_t *ncode) {
+    char dir[1100];
+    pthread_mutex_lock(&g_dsv.mu); if (!g_dsv.init) dsv_load(); int off = g_dsv.off; snprintf(dir, sizeof dir, "%s", g_dsv.dir); pthread_mutex_unlock(&g_dsv.mu);
+    if (off || !dir[0]) return 1;
+    char pc[1200], pd[1200]; struct stat a, b;
+    snprintf(pc, sizeof pc, "%s/%.16s.ctl", dir, k); snprintf(pd, sizeof pd, "%s/%.16s.code", dir, k);
+    if (stat(pc, &a) || stat(pd, &b) || !a.st_size || !b.st_size || a.st_size >= (1 << 20) || b.st_size >= (1 << 24)) return 1;
+    uint8_t *m = malloc((size_t)a.st_size + (size_t)b.st_size); if (!m) return 1;
+    FILE *f = fopen(pc, "rb"); size_t got = f ? fread(m, 1, (size_t)a.st_size, f) : 0; if (f) fclose(f);
+    f = fopen(pd, "rb"); size_t got2 = f ? fread(m + a.st_size, 1, (size_t)b.st_size, f) : 0; if (f) fclose(f);
+    if (got != (size_t)a.st_size || got2 != (size_t)b.st_size) { free(m); return 1; }   // 读的当口被淘汰了
+    *buf = m; *nctl = (uint32_t)a.st_size; *ncode = (uint32_t)b.st_size; return 0;
+}
 // k：16 位十六进制键；st：dsh_stage 的阶段号（< 0 = 认不出：只记索引不存字节）；ctl / code：此刻有效的控制段 / 代码区（调用方保证）；why：失败原文（可空）
 static void dsh_salvage_put(const char *k, int kind, int st, const void *ctl, uint32_t nctl, const void *code, uint32_t ncode, const char *why) {
     if (!k || strlen(k) < 16) return;

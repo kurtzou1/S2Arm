@@ -188,7 +188,7 @@ extension LauncherView {
                     // 导出 S2Arm.ipa 不连手机，没连也能点
                     Button { model.runConsoleAction(app, device: phone.device, language: loc.lang.sharedCode) } label: {
                         Label(consoleActionTitle(app), systemImage: app == .exportShellIpa ? "square.and.arrow.up" : "iphone.and.arrow.forward") }
-                        .controllerButtonStyle(ConsolePillButtonStyle()).controllerID("console.app").disabled(consoleOffline && app != .exportShellIpa)
+                        .controllerButtonStyle(LauncherPrimaryButtonStyle()).controllerID("console.app").disabled(consoleOffline && app != .exportShellIpa)
                     if consoleOffline && app != .exportShellIpa { offlineReason(phone) }
                 }
             }
@@ -212,7 +212,7 @@ extension LauncherView {
                     // 续签（0.6.4）= 这款再「推到 iPhone」一次：重签重装、资源只推变了的；打开这款的装机页看进度与结局（成功页 A / 失败页）
                     if let game {
                         Button(sx("console.app.renew")) { installFor = game.id; model.install(game, device: phone.device) }
-                            .controllerButtonStyle(ConsolePillButtonStyle()).controllerID("console.app.renew." + app.gameId)
+                            .controllerButtonStyle(LauncherSecondaryButtonStyle()).controllerID("console.app.renew." + app.gameId)
                             .disabled(consoleOffline || model.phonePushing(game.id) || model.phoneQueued(game.id))
                             .accessibilityIdentifier("console.app.renew." + app.gameId)
                     }
@@ -312,12 +312,14 @@ extension LauncherView {
             HStack(spacing: 12) {
                 if !model.consoleUpdating {
                     // 启动器装的：更新所选；别的工具装的：推所选到 iPhone + 导出所选 .s2arm（导出不连手机，没连也能点）
-                    ForEach(model.consoleActions(phone).filter { [.updateSelected, .pushS2arm, .exportS2arm].contains($0) }, id: \.self) { a in
-                        let push = a != .exportS2arm
-                        let button = Button { model.runConsoleAction(a, device: phone.device, language: loc.lang.sharedCode) } label: {
-                            Label(consoleActionTitle(a), systemImage: push ? "arrow.down.to.line" : "square.and.arrow.up") }
-                            .controllerID("console." + a.rawValue).disabled(model.consoleSelection.isEmpty || (push && consoleOffline))
-                        if push { button.controllerButtonStyle(ConsolePlayButtonStyle()) } else { button.controllerButtonStyle(LauncherSecondaryButtonStyle()) }
+                    LauncherFlowRow(spacing: 12, rowSpacing: 8) {
+                        ForEach(model.consoleActions(phone).filter { [.updateSelected, .pushS2arm, .exportS2arm].contains($0) }, id: \.self) { a in
+                            let push = a != .exportS2arm
+                            let button = Button { model.runConsoleAction(a, device: phone.device, language: loc.lang.sharedCode) } label: {
+                                Label(consoleActionTitle(a), systemImage: push ? "arrow.down.to.line" : "square.and.arrow.up") }
+                                .controllerID("console." + a.rawValue).disabled(model.consoleSelection.isEmpty || (push && consoleOffline))
+                            if push { button.controllerButtonStyle(LauncherPrimaryButtonStyle()) } else { button.controllerButtonStyle(LauncherSecondaryButtonStyle()) }
+                        }
                     }
                     if consoleOffline { offlineReason(phone) }
                 } else {
@@ -365,7 +367,7 @@ extension LauncherView {
     /// ⑥ 帮助：重看第一次的引导（欢迎页）、故障报修（同顶栏那颗：全局「上传给开发者」）
     private var consoleHelpSection: some View {
         consoleSection(sx("console.section.help")) {
-            HStack(spacing: 12) {
+            LauncherFlowRow(spacing: 12, rowSpacing: 8) {
                 Button(sx("console.help.guide")) { model.welcomeHome = true }.controllerButtonStyle(LauncherSecondaryButtonStyle()).accessibilityIdentifier("console.help.guide")
                 Button(sx("console.help.report")) { model.diagUploadFor = "" }.controllerButtonStyle(LauncherSecondaryButtonStyle()).accessibilityIdentifier("console.help.report")
             }

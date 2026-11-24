@@ -93,8 +93,8 @@ class Upgrade4Tests(JobCase):
         self.assertEqual((T / "cache" / "nxaot" / "osx-arm64-k" / "lib.a").read_text(), "new")
         self.assertFalse((L / ".s2arm-work").exists())
         self.assertFalse((P / "cache").exists())
-        self.assertEqual(json.loads((L / ".s2arm-layout.json").read_text())["version"], 4)
-        self.assertFalse(layout.migrate(self.c))   # 已是 4：不再动
+        self.assertEqual(json.loads((L / ".s2arm-layout.json").read_text())["version"], 5)   # 接着 4→5（宿主目录改名，test_host_noindex）
+        self.assertFalse(layout.migrate(self.c))   # 已是最新：不再动
 
     def test_cross_volume_tool_cache_is_deleted_not_copied(self):
         self.v3_library()
@@ -374,9 +374,9 @@ class EngineCopyTests(JobCase):
         return d
 
     def test_root_follows_library(self):
-        self.assertEqual(embedded.engines_root(self.c), self.c.library / "hosts" / "engine")
+        self.assertEqual(embedded.engines_root(self.c), self.c.library / "hosts" / "engine.noindex")
         fresh = Context(dict(self.request, taskId="t-e", operation="setup", library=str(self.root / "none")))
-        self.assertEqual(embedded.engines_root(fresh), fresh.private / "engines")
+        self.assertEqual(embedded.engines_root(fresh), fresh.private / "engines.noindex")
 
     def test_keeps_current_and_previous_only(self):
         root = embedded.engines_root(self.c)
@@ -392,17 +392,17 @@ class EngineCopyTests(JobCase):
     def test_private_copies_cleaned_only_when_stale_and_partials_left_alone(self):
         """库建好后私有 engines/ 的旧副本：24 小时没用过的删；刚用过的（可能有作业正用着）留；别的作业正在解的 .partial 不碰（启动时并发作业把它删掉过）"""
         old = self.c.private / "engines"
-        day = embedded.PRIVATE_STALE_SECONDS
+        day = embedded.STALE_SECONDS
         stale = self.fake(old, "a" * 64, time.time() - day - 60)
         fresh = self.fake(old, "b" * 64, time.time() - 60)
         partial = old / ("c" * 64 + ".x.partial"); (partial / ".git").mkdir(parents=True); touch(partial / ".git/COMMIT_EDITMSG")
         os.utime(stale / ".installed.json", (time.time() - day - 60,) * 2); os.utime(stale, (time.time() - day - 60,) * 2)
         root = embedded.engines_root(self.c)
-        embedded._adopt_private_copy(self.c, root, "b" * 64)
+        embedded._drop_old_copies(self.c, root)
         self.assertFalse(stale.exists())
         self.assertTrue((fresh / ".installed.json").is_file())
         self.assertTrue((partial / ".git/COMMIT_EDITMSG").is_file())
-        self.assertFalse((root / ("b" * 64)).exists())   # 不搬：hosts/engine 那份由 install 从 App 包解
+        self.assertFalse((root / ("b" * 64)).exists())   # 不搬：hosts/engine.noindex 那份由 install 从 App 包解
 
 
 class ToolKeyTests(unittest.TestCase):

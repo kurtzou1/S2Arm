@@ -24,6 +24,8 @@
 __attribute__((constructor)) static void cheats_register_host(void) { void (*f)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "s2a_cheats_host_enable"); if (f) f(); }
 #include "ns2_controller.h"
 #include "hid_pad.h"
+#include "pad_activity.h"
+#import <IOKit/pwr_mgt/IOPMLib.h>
 #include "ns2_relay.h"
 #include <stdatomic.h>
 #include <stdint.h>
@@ -1576,6 +1578,19 @@ static void sample_input(void) {
     }
     for (int s = 0; s < S2A_MAX_PADS; s++)
         for (int i = 0; i < 4; i++) slot_sticks[s][i] = MAX(-32767, MIN(32767, slot_sticks[s][i]));
+    // 手柄有动作就向系统声明一次用户活动（#2159，判据见 macos/pad_activity.h）：系统空闲计时看不到 S2Arm 自己读的手柄，只拿手柄玩到时间照样锁屏。
+    //   失焦 / 退出确认条开着不算（游戏停着，玩家在别处）。声明是一次进程间调用，放到后台队列，不在 g_compose_mu 里等
+    if (!muted) {
+        _Static_assert(S2A_MAX_PADS <= S2A_PAD_ACTIVITY_SLOTS, "pad_activity 槽数不够");
+        static s2a_pad_activity pad_act;
+        if (s2a_pad_activity_tick(&pad_act, S2A_MAX_PADS, slot_buttons, (const int32_t (*)[4])slot_sticks, s2a_pad_now_us()))
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                static IOPMAssertionID act = kIOPMNullAssertionID;   // 两次声明至少隔 5 秒，不会并发
+                IOReturn r = IOPMAssertionDeclareUserActivity(CFSTR("S2Arm controller input"), kIOPMUserActiveLocal, &act);
+                static int logged;
+                if (!logged) { logged = 1; fprintf(stderr, "[s2a] 手柄输入声明用户活动（防空闲锁屏）：%s\n", r == kIOReturnSuccess ? "成功" : "失败"); }
+            });
+    }
     int mask = 0;
     for (int s = 0; s < S2A_MAX_PADS; s++) if (pad_id[s]) mask |= 1 << s;
     if (!mask) mask = 1;   // 没有实体手柄时槽 0 留给键盘 / 鼠标

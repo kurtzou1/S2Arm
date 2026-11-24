@@ -70,6 +70,8 @@ int dm_shader_vpad(const uint8_t key[8], uint64_t code, const void *control, uin
 int dm_shader_vpad_cached(const uint8_t key[8], int st, uint32_t mask, char *path, size_t n);   // 顶点（st 0）/ 网格（st 5）着色器控制段过期时，用本机同链源码或包里的客体输入出补齐变体（dsh_miss.inc）
 int dm_shader_base_cached(const uint8_t key[8], int st, char *path, size_t n);   // #770 任务 / 网格着色器本机基础源码（dsh_miss.inc）
 int dm_shader_se_cached(const uint8_t key[8], int st, char *path, size_t n);   // 片元（st 1）/ 计算（st 2）控制段过期时，用本机同链源码或包里的客体输入出采样器模拟变体（dsh_miss.inc）
+int dm_shader_refresh(const char *k16);   // 翻译器换了之后本机现编过的键按单支重译（dsh_miss.inc）：1 本来就是本机的、2 重译后源码没变、3 变了、0 做不了
+void dm_shader_refresh_stats(uint64_t out[3]);   // 本局重译 [0] 源码没变、[1] 变了、[2] 做不了（预热收尾行）
 int mtl_guest_input(const uint8_t key[8], int st, uint8_t **buf, uint32_t *nctl, uint32_t *ncode);   // 包里这支的客体输入（nvn_mtl.m，库容器种类 56）：0 取到（调用方 free）、1 没有、-1 段坏了
 int dm_shader_se_fresh(const char *key16);
 void *dm_shader_snap(uint64_t code, const void *control, uint64_t *code_out, const void **control_out);
