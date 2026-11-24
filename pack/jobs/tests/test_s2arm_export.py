@@ -83,6 +83,21 @@ class S2armExport(unittest.TestCase):
         self.assertTrue(os.path.samefile(link, self.pack / "game.img"), "同一个文件（不占新空间）")
         self.assertEqual(os.stat(self.pack / "game.img").st_nlink, 2)
 
+    def test_steps_stay_steps(self):
+        # #2177：「写进『S2Arm 游戏包』文件夹」一步的总步数原先被 .s2arm 字节数盖掉（局部变量与参数 total 同名），界面算出「后面还有 12 亿步」。
+        #   期望（手写）：三步依次是 1/3、2/3、3/3；调用方给的位置（step=2, total=5）照样传到每一步
+        self.fixture()
+        for kw, want in ((dict(), [(1, 3), (2, 3), (3, 3)]), (dict(step=2, total=5), [(3, 5), (4, 5), (5, 5)])):
+            seen = []
+            real = self.c.begin
+            def begin(stage, index=None, count=None, *a, **k):
+                seen.append((index, count)); return real(stage, index, count, *a, **k)
+            self.c.r.update(gameId=self.A, mode="export")
+            with patch.object(self.c, "begin", begin), patch.object(program_pack, "build", lambda c, g, **k: self.pkg), \
+                    patch.object(rewrite_refresh, "refresh_ios", lambda c, games, **k: []), patch.object(install, "export_sign_mode", lambda c: "external"):
+                install.export_s2arm(self.c, self.A, **kw)
+            self.assertEqual(seen, want, kw)
+
     def test_resource_link_refresh_and_fallback(self):
         # 同名的是上次链的旧 game.img（后来换过）→ 换成现在这份；建不了硬链接（exFAT：os.link 报 EPERM / ENOTSUP）→ 给原位置、文件夹里不留东西
         self.fixture()
@@ -185,6 +200,15 @@ class S2armExport(unittest.TestCase):
         self.assertEqual(data[f"program/{program_pack.image_name(self.A)}"], DYLIB, "程序库原样、没签")
         warn = [d for d in self.c.job["diagnostics"] if d.get("code") == "device_not_visible"]
         self.assertEqual([(d["severity"], d["summary"]) for d in warn], [("warning", install.EXPORT_NO_DEVICE_NO_ID)])
+        # D-39W8：Windows 签程序库失败已转成作业失败（program_pack.win_signer → win_install_failure），8220 原文在 internal、上屏是说人话的那句：照样认出、导出未签名的
+        def wrapped(dylib, team, bundle):
+            raise install.Failure("签名装机没成：让你选的那台设备连上这台电脑", code="device_not_connected",
+                                  internal="签名装机失败（device_not_connected）：r team has no devices from which to generate a provisioning profile.")
+        self.c.job["diagnostics"].clear()
+        with patch.object(program_pack, "build", lambda c, g, **k: self.pkg), patch.object(rewrite_refresh, "refresh_ios", lambda c, games, **k: []), \
+                patch.object(install, "export_signer", lambda c, mode: ("TEAMX", "io.example.app", wrapped, "测试账号")):
+            r = install.export_s2arm(self.c, self.A)
+        self.assertEqual(r["signedWith"], dict(mode="none", name="", team=None), "转成作业失败的 8220 照样当团队没设备、导出未签名的")
         def other(dylib, team, bundle):
             raise RuntimeError("签名装机失败（signing_server_unreachable）：os error 11001")
         with patch.object(program_pack, "build", lambda c, g, **k: self.pkg), patch.object(rewrite_refresh, "refresh_ios", lambda c, games, **k: []), \

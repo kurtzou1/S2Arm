@@ -1,11 +1,12 @@
 using ARMeilleure.Instructions;
+using ARMeilleure.State;
 using System;
 using System.Collections.Generic;
 using System.Reflection;
 
 namespace ARMeilleure.Translation
 {
-    static class Delegates
+    static unsafe class Delegates
     {
         public static bool TryGetDelegateFuncPtrByIndex(int index, out nint funcPtr)
         {
@@ -33,6 +34,15 @@ namespace ARMeilleure.Translation
             return _delegates.Values[index].FuncPtr; // O(1).
         }
 
+        public static bool TryGetDelegateFuncPtr(MethodInfo info, out nint funcPtr)
+        {
+            int index = _delegates.IndexOfKey(GetKey(info)); // O(log(n)).
+
+            funcPtr = index >= 0 ? _delegates.Values[index].FuncPtr : default;
+
+            return index >= 0;
+        }
+
         public static int GetDelegateIndex(MethodInfo info)
         {
             ArgumentNullException.ThrowIfNull(info);
@@ -49,11 +59,14 @@ namespace ARMeilleure.Translation
             return index;
         }
 
-        private static void SetDelegateInfo(MethodInfo method)
+        // 函数指针取编译期的 &方法（delegate* unmanaged），不取 method.MethodHandle.GetFunctionPointer()：这些方法全是 [UnmanagedCallersOnly]，
+        //   NativeAOT 下经反射拿到的指针指向一个报「no code was generated」的桩（#2135：Windows 发版的 gamedec 抽取 0 支），& 才让编译器生成原生入口；
+        //   JIT 下两种取法是同一个入口。method 只用来起键名（GetDelegateIndex 按同一键查）。
+        private static void SetDelegateInfo(MethodInfo method, nint funcPtr)
         {
             string key = GetKey(method);
 
-            _delegates.Add(key, new DelegateInfo(method.MethodHandle.GetFunctionPointer())); // ArgumentException (key).
+            _delegates.Add(key, new DelegateInfo(funcPtr)); // ArgumentException (key).
         }
 
         private static string GetKey(MethodInfo info)
@@ -67,179 +80,179 @@ namespace ARMeilleure.Translation
         {
             _delegates = new SortedList<string, DelegateInfo>();
 
-            SetDelegateInfo(typeof(MathHelper).GetMethod(nameof(MathHelper.Abs)));
-            SetDelegateInfo(typeof(MathHelper).GetMethod(nameof(MathHelper.Ceiling)));
-            SetDelegateInfo(typeof(MathHelper).GetMethod(nameof(MathHelper.Floor)));
-            SetDelegateInfo(typeof(MathHelper).GetMethod(nameof(MathHelper.Round)));
-            SetDelegateInfo(typeof(MathHelper).GetMethod(nameof(MathHelper.Truncate)));
+            SetDelegateInfo(typeof(MathHelper).GetMethod(nameof(MathHelper.Abs)), (nint)(delegate* unmanaged<double, double>)&MathHelper.Abs);
+            SetDelegateInfo(typeof(MathHelper).GetMethod(nameof(MathHelper.Ceiling)), (nint)(delegate* unmanaged<double, double>)&MathHelper.Ceiling);
+            SetDelegateInfo(typeof(MathHelper).GetMethod(nameof(MathHelper.Floor)), (nint)(delegate* unmanaged<double, double>)&MathHelper.Floor);
+            SetDelegateInfo(typeof(MathHelper).GetMethod(nameof(MathHelper.Round)), (nint)(delegate* unmanaged<double, int, double>)&MathHelper.Round);
+            SetDelegateInfo(typeof(MathHelper).GetMethod(nameof(MathHelper.Truncate)), (nint)(delegate* unmanaged<double, double>)&MathHelper.Truncate);
 
-            SetDelegateInfo(typeof(MathHelperF).GetMethod(nameof(MathHelperF.Abs)));
-            SetDelegateInfo(typeof(MathHelperF).GetMethod(nameof(MathHelperF.Ceiling)));
-            SetDelegateInfo(typeof(MathHelperF).GetMethod(nameof(MathHelperF.Floor)));
-            SetDelegateInfo(typeof(MathHelperF).GetMethod(nameof(MathHelperF.Round)));
-            SetDelegateInfo(typeof(MathHelperF).GetMethod(nameof(MathHelperF.Truncate)));
+            SetDelegateInfo(typeof(MathHelperF).GetMethod(nameof(MathHelperF.Abs)), (nint)(delegate* unmanaged<float, float>)&MathHelperF.Abs);
+            SetDelegateInfo(typeof(MathHelperF).GetMethod(nameof(MathHelperF.Ceiling)), (nint)(delegate* unmanaged<float, float>)&MathHelperF.Ceiling);
+            SetDelegateInfo(typeof(MathHelperF).GetMethod(nameof(MathHelperF.Floor)), (nint)(delegate* unmanaged<float, float>)&MathHelperF.Floor);
+            SetDelegateInfo(typeof(MathHelperF).GetMethod(nameof(MathHelperF.Round)), (nint)(delegate* unmanaged<float, int, float>)&MathHelperF.Round);
+            SetDelegateInfo(typeof(MathHelperF).GetMethod(nameof(MathHelperF.Truncate)), (nint)(delegate* unmanaged<float, float>)&MathHelperF.Truncate);
 
-            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.Break)));
-            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.CheckSynchronization)));
-            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.EnqueueForRejit)));
-            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.GetCntfrqEl0)));
-            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.GetCntpctEl0)));
-            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.GetCntvctEl0)));
-            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.GetCtrEl0)));
-            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.GetDczidEl0)));
-            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.GetFunctionAddress)));
-            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.InvalidateCacheLine)));
-            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.ReadByte)));
-            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.ReadUInt16)));
-            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.ReadUInt32)));
-            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.ReadUInt64)));
-            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.ReadVector128)));
-            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.SignalMemoryTracking)));
-            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.SupervisorCall)));
-            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.ThrowInvalidMemoryAccess)));
-            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.Undefined)));
-            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.WriteByte)));
-            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.WriteUInt16)));
-            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.WriteUInt32)));
-            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.WriteUInt64)));
-            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.WriteVector128)));
+            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.Break)), (nint)(delegate* unmanaged<ulong, int, void>)&NativeInterface.Break);
+            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.CheckSynchronization)), (nint)(delegate* unmanaged<byte>)&NativeInterface.CheckSynchronization);
+            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.EnqueueForRejit)), (nint)(delegate* unmanaged<ulong, void>)&NativeInterface.EnqueueForRejit);
+            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.GetCntfrqEl0)), (nint)(delegate* unmanaged<ulong>)&NativeInterface.GetCntfrqEl0);
+            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.GetCntpctEl0)), (nint)(delegate* unmanaged<ulong>)&NativeInterface.GetCntpctEl0);
+            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.GetCntvctEl0)), (nint)(delegate* unmanaged<ulong>)&NativeInterface.GetCntvctEl0);
+            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.GetCtrEl0)), (nint)(delegate* unmanaged<ulong>)&NativeInterface.GetCtrEl0);
+            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.GetDczidEl0)), (nint)(delegate* unmanaged<ulong>)&NativeInterface.GetDczidEl0);
+            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.GetFunctionAddress)), (nint)(delegate* unmanaged<ulong, ulong>)&NativeInterface.GetFunctionAddress);
+            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.InvalidateCacheLine)), (nint)(delegate* unmanaged<ulong, void>)&NativeInterface.InvalidateCacheLine);
+            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.ReadByte)), (nint)(delegate* unmanaged<ulong, byte>)&NativeInterface.ReadByte);
+            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.ReadUInt16)), (nint)(delegate* unmanaged<ulong, ushort>)&NativeInterface.ReadUInt16);
+            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.ReadUInt32)), (nint)(delegate* unmanaged<ulong, uint>)&NativeInterface.ReadUInt32);
+            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.ReadUInt64)), (nint)(delegate* unmanaged<ulong, ulong>)&NativeInterface.ReadUInt64);
+            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.ReadVector128)), (nint)(delegate* unmanaged<ulong, V128>)&NativeInterface.ReadVector128);
+            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.SignalMemoryTracking)), (nint)(delegate* unmanaged<ulong, ulong, byte, void>)&NativeInterface.SignalMemoryTracking);
+            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.SupervisorCall)), (nint)(delegate* unmanaged<ulong, int, void>)&NativeInterface.SupervisorCall);
+            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.ThrowInvalidMemoryAccess)), (nint)(delegate* unmanaged<ulong, void>)&NativeInterface.ThrowInvalidMemoryAccess);
+            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.Undefined)), (nint)(delegate* unmanaged<ulong, int, void>)&NativeInterface.Undefined);
+            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.WriteByte)), (nint)(delegate* unmanaged<ulong, byte, void>)&NativeInterface.WriteByte);
+            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.WriteUInt16)), (nint)(delegate* unmanaged<ulong, ushort, void>)&NativeInterface.WriteUInt16);
+            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.WriteUInt32)), (nint)(delegate* unmanaged<ulong, uint, void>)&NativeInterface.WriteUInt32);
+            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.WriteUInt64)), (nint)(delegate* unmanaged<ulong, ulong, void>)&NativeInterface.WriteUInt64);
+            SetDelegateInfo(typeof(NativeInterface).GetMethod(nameof(NativeInterface.WriteVector128)), (nint)(delegate* unmanaged<ulong, V128, void>)&NativeInterface.WriteVector128);
 
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.CountLeadingSigns)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.CountLeadingZeros)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Crc32b)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Crc32cb)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Crc32ch)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Crc32cw)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Crc32cx)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Crc32h)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Crc32w)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Crc32x)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Decrypt)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Encrypt)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.FixedRotate)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.HashChoose)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.HashLower)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.HashMajority)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.HashParity)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.HashUpper)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.InverseMixColumns)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.MixColumns)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.PolynomialMult64_128)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.SatF32ToS32)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.SatF32ToS64)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.SatF32ToU32)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.SatF32ToU64)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.SatF64ToS32)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.SatF64ToS64)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.SatF64ToU32)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.SatF64ToU64)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Sha1SchedulePart1)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Sha1SchedulePart2)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Sha256SchedulePart1)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Sha256SchedulePart2)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.SignedShrImm64)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Tbl1)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Tbl2)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Tbl3)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Tbl4)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Tbx1)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Tbx2)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Tbx3)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Tbx4)));
-            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.UnsignedShrImm64)));
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.CountLeadingSigns)), (nint)(delegate* unmanaged<ulong, int, ulong>)&SoftFallback.CountLeadingSigns);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.CountLeadingZeros)), (nint)(delegate* unmanaged<ulong, int, ulong>)&SoftFallback.CountLeadingZeros);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Crc32b)), (nint)(delegate* unmanaged<uint, byte, uint>)&SoftFallback.Crc32b);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Crc32cb)), (nint)(delegate* unmanaged<uint, byte, uint>)&SoftFallback.Crc32cb);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Crc32ch)), (nint)(delegate* unmanaged<uint, ushort, uint>)&SoftFallback.Crc32ch);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Crc32cw)), (nint)(delegate* unmanaged<uint, uint, uint>)&SoftFallback.Crc32cw);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Crc32cx)), (nint)(delegate* unmanaged<uint, ulong, uint>)&SoftFallback.Crc32cx);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Crc32h)), (nint)(delegate* unmanaged<uint, ushort, uint>)&SoftFallback.Crc32h);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Crc32w)), (nint)(delegate* unmanaged<uint, uint, uint>)&SoftFallback.Crc32w);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Crc32x)), (nint)(delegate* unmanaged<uint, ulong, uint>)&SoftFallback.Crc32x);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Decrypt)), (nint)(delegate* unmanaged<V128, V128, V128>)&SoftFallback.Decrypt);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Encrypt)), (nint)(delegate* unmanaged<V128, V128, V128>)&SoftFallback.Encrypt);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.FixedRotate)), (nint)(delegate* unmanaged<uint, uint>)&SoftFallback.FixedRotate);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.HashChoose)), (nint)(delegate* unmanaged<V128, uint, V128, V128>)&SoftFallback.HashChoose);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.HashLower)), (nint)(delegate* unmanaged<V128, V128, V128, V128>)&SoftFallback.HashLower);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.HashMajority)), (nint)(delegate* unmanaged<V128, uint, V128, V128>)&SoftFallback.HashMajority);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.HashParity)), (nint)(delegate* unmanaged<V128, uint, V128, V128>)&SoftFallback.HashParity);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.HashUpper)), (nint)(delegate* unmanaged<V128, V128, V128, V128>)&SoftFallback.HashUpper);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.InverseMixColumns)), (nint)(delegate* unmanaged<V128, V128>)&SoftFallback.InverseMixColumns);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.MixColumns)), (nint)(delegate* unmanaged<V128, V128>)&SoftFallback.MixColumns);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.PolynomialMult64_128)), (nint)(delegate* unmanaged<ulong, ulong, V128>)&SoftFallback.PolynomialMult64_128);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.SatF32ToS32)), (nint)(delegate* unmanaged<float, int>)&SoftFallback.SatF32ToS32);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.SatF32ToS64)), (nint)(delegate* unmanaged<float, long>)&SoftFallback.SatF32ToS64);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.SatF32ToU32)), (nint)(delegate* unmanaged<float, uint>)&SoftFallback.SatF32ToU32);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.SatF32ToU64)), (nint)(delegate* unmanaged<float, ulong>)&SoftFallback.SatF32ToU64);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.SatF64ToS32)), (nint)(delegate* unmanaged<double, int>)&SoftFallback.SatF64ToS32);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.SatF64ToS64)), (nint)(delegate* unmanaged<double, long>)&SoftFallback.SatF64ToS64);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.SatF64ToU32)), (nint)(delegate* unmanaged<double, uint>)&SoftFallback.SatF64ToU32);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.SatF64ToU64)), (nint)(delegate* unmanaged<double, ulong>)&SoftFallback.SatF64ToU64);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Sha1SchedulePart1)), (nint)(delegate* unmanaged<V128, V128, V128, V128>)&SoftFallback.Sha1SchedulePart1);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Sha1SchedulePart2)), (nint)(delegate* unmanaged<V128, V128, V128>)&SoftFallback.Sha1SchedulePart2);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Sha256SchedulePart1)), (nint)(delegate* unmanaged<V128, V128, V128>)&SoftFallback.Sha256SchedulePart1);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Sha256SchedulePart2)), (nint)(delegate* unmanaged<V128, V128, V128, V128>)&SoftFallback.Sha256SchedulePart2);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.SignedShrImm64)), (nint)(delegate* unmanaged<long, long, int, long>)&SoftFallback.SignedShrImm64);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Tbl1)), (nint)(delegate* unmanaged<V128, int, V128, V128>)&SoftFallback.Tbl1);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Tbl2)), (nint)(delegate* unmanaged<V128, int, V128, V128, V128>)&SoftFallback.Tbl2);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Tbl3)), (nint)(delegate* unmanaged<V128, int, V128, V128, V128, V128>)&SoftFallback.Tbl3);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Tbl4)), (nint)(delegate* unmanaged<V128, int, V128, V128, V128, V128, V128>)&SoftFallback.Tbl4);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Tbx1)), (nint)(delegate* unmanaged<V128, V128, int, V128, V128>)&SoftFallback.Tbx1);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Tbx2)), (nint)(delegate* unmanaged<V128, V128, int, V128, V128, V128>)&SoftFallback.Tbx2);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Tbx3)), (nint)(delegate* unmanaged<V128, V128, int, V128, V128, V128, V128>)&SoftFallback.Tbx3);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.Tbx4)), (nint)(delegate* unmanaged<V128, V128, int, V128, V128, V128, V128, V128>)&SoftFallback.Tbx4);
+            SetDelegateInfo(typeof(SoftFallback).GetMethod(nameof(SoftFallback.UnsignedShrImm64)), (nint)(delegate* unmanaged<ulong, long, int, ulong>)&SoftFallback.UnsignedShrImm64);
 
-            SetDelegateInfo(typeof(SoftFloat16_32).GetMethod(nameof(SoftFloat16_32.FPConvert)));
-            SetDelegateInfo(typeof(SoftFloat16_64).GetMethod(nameof(SoftFloat16_64.FPConvert)));
+            SetDelegateInfo(typeof(SoftFloat16_32).GetMethod(nameof(SoftFloat16_32.FPConvert)), (nint)(delegate* unmanaged<ushort, float>)&SoftFloat16_32.FPConvert);
+            SetDelegateInfo(typeof(SoftFloat16_64).GetMethod(nameof(SoftFloat16_64.FPConvert)), (nint)(delegate* unmanaged<ushort, double>)&SoftFloat16_64.FPConvert);
 
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPAdd)));
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPAddFpscr))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPCompare)));
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPCompareEQ)));
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPCompareEQFpscr))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPCompareGE)));
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPCompareGEFpscr))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPCompareGT)));
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPCompareGTFpscr))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPCompareLE)));
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPCompareLEFpscr))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPCompareLT)));
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPCompareLTFpscr))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPDiv)));
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPMax)));
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPMaxFpscr))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPMaxNum)));
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPMaxNumFpscr))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPMin)));
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPMinFpscr))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPMinNum)));
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPMinNumFpscr))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPMul)));
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPMulFpscr))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPMulAdd)));
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPMulAddFpscr))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPMulSub)));
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPMulSubFpscr))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPMulX)));
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPNegMulAdd)));
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPNegMulSub)));
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPRecipEstimate)));
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPRecipEstimateFpscr))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPRecipStep))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPRecipStepFused)));
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPRecpX)));
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPRSqrtEstimate)));
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPRSqrtEstimateFpscr))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPRSqrtStep))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPRSqrtStepFused)));
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPSqrt)));
-            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPSub)));
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPAdd)), (nint)(delegate* unmanaged<float, float, float>)&SoftFloat32.FPAdd);
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPAddFpscr)), (nint)(delegate* unmanaged<float, float, byte, float>)&SoftFloat32.FPAddFpscr); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPCompare)), (nint)(delegate* unmanaged<float, float, byte, int>)&SoftFloat32.FPCompare);
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPCompareEQ)), (nint)(delegate* unmanaged<float, float, float>)&SoftFloat32.FPCompareEQ);
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPCompareEQFpscr)), (nint)(delegate* unmanaged<float, float, byte, float>)&SoftFloat32.FPCompareEQFpscr); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPCompareGE)), (nint)(delegate* unmanaged<float, float, float>)&SoftFloat32.FPCompareGE);
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPCompareGEFpscr)), (nint)(delegate* unmanaged<float, float, byte, float>)&SoftFloat32.FPCompareGEFpscr); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPCompareGT)), (nint)(delegate* unmanaged<float, float, float>)&SoftFloat32.FPCompareGT);
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPCompareGTFpscr)), (nint)(delegate* unmanaged<float, float, byte, float>)&SoftFloat32.FPCompareGTFpscr); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPCompareLE)), (nint)(delegate* unmanaged<float, float, float>)&SoftFloat32.FPCompareLE);
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPCompareLEFpscr)), (nint)(delegate* unmanaged<float, float, byte, float>)&SoftFloat32.FPCompareLEFpscr); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPCompareLT)), (nint)(delegate* unmanaged<float, float, float>)&SoftFloat32.FPCompareLT);
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPCompareLTFpscr)), (nint)(delegate* unmanaged<float, float, byte, float>)&SoftFloat32.FPCompareLTFpscr); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPDiv)), (nint)(delegate* unmanaged<float, float, float>)&SoftFloat32.FPDiv);
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPMax)), (nint)(delegate* unmanaged<float, float, float>)&SoftFloat32.FPMax);
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPMaxFpscr)), (nint)(delegate* unmanaged<float, float, byte, float>)&SoftFloat32.FPMaxFpscr); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPMaxNum)), (nint)(delegate* unmanaged<float, float, float>)&SoftFloat32.FPMaxNum);
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPMaxNumFpscr)), (nint)(delegate* unmanaged<float, float, byte, float>)&SoftFloat32.FPMaxNumFpscr); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPMin)), (nint)(delegate* unmanaged<float, float, float>)&SoftFloat32.FPMin);
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPMinFpscr)), (nint)(delegate* unmanaged<float, float, byte, float>)&SoftFloat32.FPMinFpscr); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPMinNum)), (nint)(delegate* unmanaged<float, float, float>)&SoftFloat32.FPMinNum);
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPMinNumFpscr)), (nint)(delegate* unmanaged<float, float, byte, float>)&SoftFloat32.FPMinNumFpscr); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPMul)), (nint)(delegate* unmanaged<float, float, float>)&SoftFloat32.FPMul);
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPMulFpscr)), (nint)(delegate* unmanaged<float, float, byte, float>)&SoftFloat32.FPMulFpscr); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPMulAdd)), (nint)(delegate* unmanaged<float, float, float, float>)&SoftFloat32.FPMulAdd);
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPMulAddFpscr)), (nint)(delegate* unmanaged<float, float, float, byte, float>)&SoftFloat32.FPMulAddFpscr); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPMulSub)), (nint)(delegate* unmanaged<float, float, float, float>)&SoftFloat32.FPMulSub);
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPMulSubFpscr)), (nint)(delegate* unmanaged<float, float, float, byte, float>)&SoftFloat32.FPMulSubFpscr); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPMulX)), (nint)(delegate* unmanaged<float, float, float>)&SoftFloat32.FPMulX);
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPNegMulAdd)), (nint)(delegate* unmanaged<float, float, float, float>)&SoftFloat32.FPNegMulAdd);
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPNegMulSub)), (nint)(delegate* unmanaged<float, float, float, float>)&SoftFloat32.FPNegMulSub);
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPRecipEstimate)), (nint)(delegate* unmanaged<float, float>)&SoftFloat32.FPRecipEstimate);
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPRecipEstimateFpscr)), (nint)(delegate* unmanaged<float, byte, float>)&SoftFloat32.FPRecipEstimateFpscr); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPRecipStep)), (nint)(delegate* unmanaged<float, float, float>)&SoftFloat32.FPRecipStep); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPRecipStepFused)), (nint)(delegate* unmanaged<float, float, float>)&SoftFloat32.FPRecipStepFused);
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPRecpX)), (nint)(delegate* unmanaged<float, float>)&SoftFloat32.FPRecpX);
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPRSqrtEstimate)), (nint)(delegate* unmanaged<float, float>)&SoftFloat32.FPRSqrtEstimate);
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPRSqrtEstimateFpscr)), (nint)(delegate* unmanaged<float, byte, float>)&SoftFloat32.FPRSqrtEstimateFpscr); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPRSqrtStep)), (nint)(delegate* unmanaged<float, float, float>)&SoftFloat32.FPRSqrtStep); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPRSqrtStepFused)), (nint)(delegate* unmanaged<float, float, float>)&SoftFloat32.FPRSqrtStepFused);
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPSqrt)), (nint)(delegate* unmanaged<float, float>)&SoftFloat32.FPSqrt);
+            SetDelegateInfo(typeof(SoftFloat32).GetMethod(nameof(SoftFloat32.FPSub)), (nint)(delegate* unmanaged<float, float, float>)&SoftFloat32.FPSub);
 
-            SetDelegateInfo(typeof(SoftFloat32_16).GetMethod(nameof(SoftFloat32_16.FPConvert)));
+            SetDelegateInfo(typeof(SoftFloat32_16).GetMethod(nameof(SoftFloat32_16.FPConvert)), (nint)(delegate* unmanaged<float, ushort>)&SoftFloat32_16.FPConvert);
 
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPAdd)));
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPAddFpscr))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPCompare)));
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPCompareEQ)));
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPCompareEQFpscr))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPCompareGE)));
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPCompareGEFpscr))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPCompareGT)));
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPCompareGTFpscr))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPCompareLE)));
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPCompareLEFpscr))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPCompareLT)));
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPCompareLTFpscr))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPDiv)));
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPMax)));
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPMaxFpscr))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPMaxNum)));
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPMaxNumFpscr))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPMin)));
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPMinFpscr))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPMinNum)));
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPMinNumFpscr))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPMul)));
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPMulFpscr))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPMulAdd)));
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPMulAddFpscr))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPMulSub)));
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPMulSubFpscr))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPMulX)));
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPNegMulAdd)));
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPNegMulSub)));
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPRecipEstimate)));
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPRecipEstimateFpscr))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPRecipStep))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPRecipStepFused)));
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPRecpX)));
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPRSqrtEstimate)));
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPRSqrtEstimateFpscr))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPRSqrtStep))); // A32 only.
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPRSqrtStepFused)));
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPSqrt)));
-            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPSub)));
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPAdd)), (nint)(delegate* unmanaged<double, double, double>)&SoftFloat64.FPAdd);
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPAddFpscr)), (nint)(delegate* unmanaged<double, double, byte, double>)&SoftFloat64.FPAddFpscr); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPCompare)), (nint)(delegate* unmanaged<double, double, byte, int>)&SoftFloat64.FPCompare);
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPCompareEQ)), (nint)(delegate* unmanaged<double, double, double>)&SoftFloat64.FPCompareEQ);
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPCompareEQFpscr)), (nint)(delegate* unmanaged<double, double, byte, double>)&SoftFloat64.FPCompareEQFpscr); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPCompareGE)), (nint)(delegate* unmanaged<double, double, double>)&SoftFloat64.FPCompareGE);
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPCompareGEFpscr)), (nint)(delegate* unmanaged<double, double, byte, double>)&SoftFloat64.FPCompareGEFpscr); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPCompareGT)), (nint)(delegate* unmanaged<double, double, double>)&SoftFloat64.FPCompareGT);
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPCompareGTFpscr)), (nint)(delegate* unmanaged<double, double, byte, double>)&SoftFloat64.FPCompareGTFpscr); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPCompareLE)), (nint)(delegate* unmanaged<double, double, double>)&SoftFloat64.FPCompareLE);
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPCompareLEFpscr)), (nint)(delegate* unmanaged<double, double, byte, double>)&SoftFloat64.FPCompareLEFpscr); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPCompareLT)), (nint)(delegate* unmanaged<double, double, double>)&SoftFloat64.FPCompareLT);
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPCompareLTFpscr)), (nint)(delegate* unmanaged<double, double, byte, double>)&SoftFloat64.FPCompareLTFpscr); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPDiv)), (nint)(delegate* unmanaged<double, double, double>)&SoftFloat64.FPDiv);
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPMax)), (nint)(delegate* unmanaged<double, double, double>)&SoftFloat64.FPMax);
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPMaxFpscr)), (nint)(delegate* unmanaged<double, double, byte, double>)&SoftFloat64.FPMaxFpscr); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPMaxNum)), (nint)(delegate* unmanaged<double, double, double>)&SoftFloat64.FPMaxNum);
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPMaxNumFpscr)), (nint)(delegate* unmanaged<double, double, byte, double>)&SoftFloat64.FPMaxNumFpscr); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPMin)), (nint)(delegate* unmanaged<double, double, double>)&SoftFloat64.FPMin);
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPMinFpscr)), (nint)(delegate* unmanaged<double, double, byte, double>)&SoftFloat64.FPMinFpscr); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPMinNum)), (nint)(delegate* unmanaged<double, double, double>)&SoftFloat64.FPMinNum);
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPMinNumFpscr)), (nint)(delegate* unmanaged<double, double, byte, double>)&SoftFloat64.FPMinNumFpscr); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPMul)), (nint)(delegate* unmanaged<double, double, double>)&SoftFloat64.FPMul);
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPMulFpscr)), (nint)(delegate* unmanaged<double, double, byte, double>)&SoftFloat64.FPMulFpscr); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPMulAdd)), (nint)(delegate* unmanaged<double, double, double, double>)&SoftFloat64.FPMulAdd);
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPMulAddFpscr)), (nint)(delegate* unmanaged<double, double, double, byte, double>)&SoftFloat64.FPMulAddFpscr); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPMulSub)), (nint)(delegate* unmanaged<double, double, double, double>)&SoftFloat64.FPMulSub);
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPMulSubFpscr)), (nint)(delegate* unmanaged<double, double, double, byte, double>)&SoftFloat64.FPMulSubFpscr); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPMulX)), (nint)(delegate* unmanaged<double, double, double>)&SoftFloat64.FPMulX);
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPNegMulAdd)), (nint)(delegate* unmanaged<double, double, double, double>)&SoftFloat64.FPNegMulAdd);
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPNegMulSub)), (nint)(delegate* unmanaged<double, double, double, double>)&SoftFloat64.FPNegMulSub);
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPRecipEstimate)), (nint)(delegate* unmanaged<double, double>)&SoftFloat64.FPRecipEstimate);
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPRecipEstimateFpscr)), (nint)(delegate* unmanaged<double, byte, double>)&SoftFloat64.FPRecipEstimateFpscr); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPRecipStep)), (nint)(delegate* unmanaged<double, double, double>)&SoftFloat64.FPRecipStep); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPRecipStepFused)), (nint)(delegate* unmanaged<double, double, double>)&SoftFloat64.FPRecipStepFused);
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPRecpX)), (nint)(delegate* unmanaged<double, double>)&SoftFloat64.FPRecpX);
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPRSqrtEstimate)), (nint)(delegate* unmanaged<double, double>)&SoftFloat64.FPRSqrtEstimate);
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPRSqrtEstimateFpscr)), (nint)(delegate* unmanaged<double, byte, double>)&SoftFloat64.FPRSqrtEstimateFpscr); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPRSqrtStep)), (nint)(delegate* unmanaged<double, double, double>)&SoftFloat64.FPRSqrtStep); // A32 only.
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPRSqrtStepFused)), (nint)(delegate* unmanaged<double, double, double>)&SoftFloat64.FPRSqrtStepFused);
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPSqrt)), (nint)(delegate* unmanaged<double, double>)&SoftFloat64.FPSqrt);
+            SetDelegateInfo(typeof(SoftFloat64).GetMethod(nameof(SoftFloat64.FPSub)), (nint)(delegate* unmanaged<double, double, double>)&SoftFloat64.FPSub);
 
-            SetDelegateInfo(typeof(SoftFloat64_16).GetMethod(nameof(SoftFloat64_16.FPConvert)));
+            SetDelegateInfo(typeof(SoftFloat64_16).GetMethod(nameof(SoftFloat64_16.FPConvert)), (nint)(delegate* unmanaged<double, ushort>)&SoftFloat64_16.FPConvert);
         }
     }
 }

@@ -15,6 +15,8 @@
     <Compile Include="../dsh/batch/PkgRead.cs" Link="PkgRead.cs" />
     <!-- 离线 Vulkan 库打进同一种容器（#783 合入线答 ①：复用 LibPack、只留一份实现）：只引这一个文件 -->
     <Compile Include="../dsh/batch/LibPack.cs" Link="LibPack.cs" />
+    <!-- 跨次复用（11-24）：与 dsh_batch 同一个内容寻址仓与原生工具身份算法（Store / ToolLib），只引这一个文件；它只管存取，不进 VkFp -->
+    <Compile Include="../dsh/batch/Store.cs" Link="Store.cs" />
   </ItemGroup>
   <!-- Vulkan 侧指纹（DshVk.cs + 本目录），生成 VkFp.V -->
   <Import Project="VkFp.targets" />

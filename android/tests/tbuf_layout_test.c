@@ -1,6 +1,9 @@
 // Exercise the production result parser and layout mapping with a real compiler result.
 #include "../native/gfx_plat/nvk_shader.c"
 
+// fact_cache_mask 读事实复用放宽开关（nvk_fact_wide，生产缺省 NVK_FACT_WIDE_DEFAULT）；本用例只验解析 / 布局 / 掩码，开关取缺省。
+int nvn_plat_flag(const char *name, int def) { (void)name; return def; }
+
 int main(int argc, char **argv) {
     if (argc != 2 && argc != 3) return 2;
     int compute = argc == 3 && !strcmp(argv[2], "--compute");

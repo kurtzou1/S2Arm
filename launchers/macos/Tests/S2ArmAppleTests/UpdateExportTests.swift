@@ -97,6 +97,53 @@ import XCTest
         XCTAssertFalse(UpdateGameResult(outcome: [:], diagnostics: [["code": "update_incomplete", "summary": "没装工具"]]).relinkSource, "没 action 的黄字不给按钮")
     }
 
+    // #1961：作业说「原件在、要整款重出」（诊断 facts.action = repack）→ 不等玩家自己去找出包页，当场把这款排进整款重出：
+    //   走的就是「更新并重新出这几款」那条（openBatch → createBatch），清单里只有这款、只出 iPhone 一份，不连手机
+    func testRepackActionQueuesWholeRebuildOfThisGame() async throws {
+        let g = try game("0100A")
+        runner.updateDiagnostics = [["severity": "warning", "code": "update_incomplete", "summary": "要整款重新出包", "facts": ["action": "repack"]]]
+        model.updateGame(g)
+        for _ in 0..<300 where model.gameUpdate(g)?.running != false { try? await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(model.gameUpdate(g)?.repack, true, "结果带 action = repack")
+        let reqs = await waitRequests("batch.create", count: 1)
+        XCTAssertEqual(reqs.count, 1, "排进了一次整款重出")
+        let items = reqs.first?["items"] as? [[String: Any]] ?? []
+        XCTAssertEqual(items.compactMap { $0["gameId"] as? String }, ["0100A"], "排进的正是这款")
+        XCTAssertEqual(items.first?["platforms"] as? [String], ["iphone"], "整款重出只出 iPhone 一份")
+        XCTAssertFalse(runner.requests.contains { $0["operation"] as? String == "install" }, "整款重出不连手机")
+    }
+
+    // #1961：找回原件成功 → 同样自动排这款整款重出（不再让玩家自己去出包页）；没找回之前不排
+    func testRelinkSuccessQueuesWholeRebuildOfThisGame() async throws {
+        let g = try game("0100A")
+        runner.updateDiagnostics = [["severity": "warning", "code": "update_incomplete", "summary": "原件也不在", "facts": ["action": "relinkSource"]]]
+        model.updateGame(g)
+        for _ in 0..<300 where model.gameUpdate(g)?.running != false { try? await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(model.gameUpdate(g)?.relinkSource, true)
+        XCTAssertFalse(runner.requests.contains { $0["operation"] as? String == "batch.create" }, "原件还没找回：不排重出")
+        model.relinkSource(g, source: FileManager.default.temporaryDirectory.appendingPathComponent("甲.nsp"))
+        let reqs = await waitRequests("batch.create", count: 1)
+        XCTAssertEqual(model.gameUpdate(g)?.relinked, true)
+        XCTAssertEqual((reqs.first?["items"] as? [[String: Any]] ?? []).compactMap { $0["gameId"] as? String }, ["0100A"], "找回原件后自动排这款整款重出")
+        XCTAssertFalse(runner.requests.contains { $0["operation"] as? String == "install" }, "整款重出不连手机")
+    }
+
+    // #1961：按钮下要不要写「要整款重新出包」：原因里有 hostAbi 就写；只缺着色器链不写；上一次 updateGame 回了 action = repack 同样写
+    func testRepackNoteNeededForHostAbiOrLastRepackAction() async throws {
+        let g = try game("0100A")
+        model.updateHints = ["0100A": ["shader"]]
+        XCTAssertFalse(model.repackNoteNeeded(g), "只缺着色器链：换库就够，不写要整款重出")
+        model.updateHints = ["0100A": ["hostAbi", "shader"]]
+        XCTAssertTrue(model.repackNoteNeeded(g), "宿主约定号变了：按钮下写「要整款重新出包」")
+        model.updateHints = [:]
+        XCTAssertFalse(model.repackNoteNeeded(g), "没原因：不写")
+        XCTAssertFalse(UpdateGameResult(outcome: [:], diagnostics: [["code": "update_incomplete", "summary": "没装工具"]]).repack, "没 action 的黄字不算重出")
+        runner.updateDiagnostics = [["severity": "warning", "code": "update_incomplete", "summary": "要整款重新出包", "facts": ["action": "repack"]]]
+        model.updateGame(g)
+        for _ in 0..<300 where model.gameUpdate(g)?.running != false { try? await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertTrue(model.repackNoteNeeded(g), "上一次 updateGame 回了 action = repack：同样写")
+    }
+
     // ---- 导出确认页：设备行 ----
 
     private func phone(_ device: String, installed: Bool = true, by: PhoneOverview.InstalledBy? = nil, shellCurrent: Bool = true, online: String? = "usb",
@@ -289,6 +336,18 @@ import XCTest
         XCTAssertNil(runner.requests.first { $0["operation"] as? String == "install" }, "出完之前不推")
         XCTAssertNil(r?["mode"], "要导入设备的：出包不带 mode = export")
     }
+
+    func testAfterPackContinuesWithoutRepacking() async throws {
+        // D-4V5Q：先出 iPhone 包、出完接着导出的款，出完那一刻游戏列表还是出包前的（iphoneExportable 仍 false）。
+        //   期望（手写）：installNextQueued 按计划直接导出到文件夹（install，mode = export），不再起出包作业
+        model.exportAfterPack["0100C"] = ExportPlan(sign: "none", devices: [])
+        model.installAfterQueue = ["0100C"]
+        model.installNextQueued()
+        let r = await waitRequests("install", count: 1).first
+        XCTAssertEqual(r?["mode"] as? String, "export", "出完接着导出到文件夹")
+        XCTAssertNil(runner.requests.first { $0["operation"] as? String == "export" }, "出完不再从头出一遍")
+        XCTAssertNil(model.exportAfterPack["0100C"], "计划用掉了")
+    }
 }
 
 /// 离屏出图（不进任何窗口、不上屏、不整屏截）：NSHostingView 排版后画进位图，appearance = darkAqua。S2A_UXMAC_SHOT=<目录> 时存 PNG 看样子（不给也照跑）；
@@ -442,6 +501,12 @@ private final class RecordingRunner: JobProcessRunner {
         var request: [String: Any] = [:]
         if let last = arguments.last, last.hasSuffix(".json"), let data = try? Data(contentsOf: URL(fileURLWithPath: last)),
            let r = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] { request = r }
+        // 批量出包（batch.py create|show ... --json <清单>）：清单直接是参数里的 JSON 串，不是文件；记成 batch.<子命令> 便于断言
+        if request.isEmpty, let i = arguments.firstIndex(of: "--json"), arguments.indices.contains(i + 1),
+           let obj = (try? JSONSerialization.jsonObject(with: Data(arguments[i + 1].utf8))) as? [String: Any] {
+            request = obj
+            request["operation"] = "batch." + (arguments.first { ["create", "show", "mark", "recover", "cancel", "resume", "retry", "clear"].contains($0) } ?? "")
+        }
         lock.lock(); seen.append(request); lock.unlock()
         let op = request["operation"] as? String ?? ""
         var event: [String: Any] = ["schema": 1, "taskId": request["taskId"] as? String ?? "", "type": "result", "state": "succeeded", "result": [String: Any](), "message": ""]
@@ -453,6 +518,8 @@ private final class RecordingRunner: JobProcessRunner {
         case "updateGame":
             event["result"] = ["gameId": request["gameId"] ?? "", "reasons": [String]()]
             event["diagnostics"] = updateDiagnostics
+        case "batch.create":
+            event["result"] = ["batch": ["items": [Any](), "summary": [String: Any]()], "summary": [String: Any]()]
         case "phoneChooseApp":
             choiceDevice = nil
         case "install" where request["device"] as? String == choiceDevice && choiceDevice != nil:

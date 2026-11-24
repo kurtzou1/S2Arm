@@ -1410,6 +1410,38 @@ def fill(im, o):
     w0 = o & ~3; v = int.from_bytes(im[w0:w0 + 4], 'little'); return v == 0 or v >> 16 == 0
 
 
+def literal_pool(im, words):
+    """本份补丁自带的字面量池（#1321 金手指常见写法：新代码里 ldr w8, [pc+N] 读紧跟在 b 后面的常量字，常量也写在同一块空隙里）。
+    空隙原来不是填充（全 0 / udf）时这些字都走 p 行双路：原代码照旧在内存里，补丁路里照搬的 LDR 读到的是原字、不是补丁写的常量；
+    常量字本身还被当指令解（「p 点补丁指令解不出」）。认出来以后：LDR 那行带「=值」（改写器直接把值装进 Rt，rewriter.c cp_lit），常量字不出行。
+    words：{字地址: 新的 4 字节}（本份补丁在代码段上改的字）→ ({LDR 地址: 值}, {常量字地址})。只认：
+      LDR (literal) 本身和它读的字都在原代码上（非填充）、读的 4 / 8 字节全由本份补丁写；
+      常量字前一字是本份补丁的无条件转移（b / br / ret）或同池的常量字，本份补丁里没有跳转落到它上面（不是会被执行到的指令）。
+    不合这些条件的 LDR 不按池处理：常量字照旧出 p 行，由改写器记缺口、整份不收（如常量前一条不是转移、会落进常量里执行的写法）"""
+    new = {w0: int.from_bytes(bytes(nb), 'little') for w0, nb in words.items()}
+    def size(w):
+        if w & 0x3B000000 != 0x18000000: return 0
+        opc, v = w >> 30, (w >> 26) & 1
+        return (8 if opc == 1 else 0 if opc == 3 else 4) if not v else (4 if opc == 0 else 8 if opc == 1 else 0)
+    def uncond(w): return w & 0xFC000000 == 0x14000000 or w & 0xFFFFFC1F in (0xD61F0000, 0xD65F0000)   # b / br / ret
+    targets = set()
+    for a, w in new.items():
+        if w & 0x7C000000 == 0x14000000: targets.add(a + (_sx(w & 0x3FFFFFF, 26) << 2))   # b / bl
+        elif w & 0xFF000010 == 0x54000000 or w & 0x7E000000 == 0x34000000: targets.add(a + (_sx((w >> 5) & 0x7FFFF, 19) << 2))   # b.cond / cbz / cbnz
+        elif w & 0x7E000000 == 0x36000000: targets.add(a + (_sx((w >> 5) & 0x3FFF, 14) << 2))   # tbz / tbnz
+    want = {}
+    for a, w in new.items():
+        n = size(w)
+        if not n or fill(im, a): continue
+        t = a + (_sx((w >> 5) & 0x7FFFF, 19) << 2)
+        cells = [t + 4 * k for k in range(n // 4)]
+        if all(c in new and not fill(im, c) and c not in targets for c in cells): want[a] = (t, cells)
+    pool = set(c for t, cells in want.values() for c in cells)
+    ok = {a: int.from_bytes(b''.join(new[c].to_bytes(4, 'little') for c in cells), 'little')
+          for a, (t, cells) in want.items() if t - 4 in new and (uncond(new[t - 4]) or (t - 4 in pool and t - 4 not in cells))}
+    return ok, set(c for a in ok for c in want[a][1])
+
+
 def flow_hazard(im, text_end, mod, changed, text_cache):
     """changed：{字地址: (原字, 新字)}（本份补丁代码段里真改了的字）→ 不收原因（空串 = 安全）"""
     # 把调用（bl / blr）改成 nop、整数返回值被换成调用前的 32 位参数（11-15 奥德赛 1.3.0「Disable Dynamic Resolution」，上游注明 not device-validated）：
@@ -1737,7 +1769,8 @@ def plan(root, default_on, index_dirs):
         needs_bit = not cheat or any(not fill(im, w0) and bytes(nb) != im[w0:w0 + 4] for w0, nb in words.items())
         if not why and needs_bit and not cheat and bits.get(mod, 0) >= 64: why = f'{mod} 已有 64 份补丁（槽 2046 位数用尽）'
         if not why:   # 数据流旁路（见 flow_hazard）：补丁设了又读的寄存器，原版有路从区间外跳进两者之间
-            ch = {w0: (int.from_bytes(im[w0:w0 + 4], 'little'), int.from_bytes(nb, 'little')) for w0, nb in words.items() if bytes(nb) != im[w0:w0 + 4]}
+            pool0 = literal_pool(im, words)[1]   # 字面量池的常量字是数据、不会被执行，不当指令查旁路
+            ch = {w0: (int.from_bytes(im[w0:w0 + 4], 'little'), int.from_bytes(nb, 'little')) for w0, nb in words.items() if bytes(nb) != im[w0:w0 + 4] and w0 not in pool0}
             if ch: why = flow_hazard(im, text_end, mod, ch, branch_cache)
         if why: log.append(f'不收\t{uid}\t{mod}\t{u["name"][:40]}\t{why}'); continue
         if cheat:   # 位等全部收完再按「共用这条改动的条目集合」分（见下）
@@ -1751,14 +1784,15 @@ def plan(root, default_on, index_dirs):
         for o in data: claim[(mod, o)] = (uid, False, None, False)
         for o, n, k in adata:
             for b in range(o, o + n): claim[(mod, b)] = (uid, False, None, False)
+        lits, pool = literal_pool(im, words)
         for w0, nb in sorted(words.items()):
             orig = int.from_bytes(im[w0:w0 + 4], 'little'); new = int.from_bytes(nb, 'little')
-            if new == orig: continue
+            if new == orig or w0 in pool: continue   # 字面量池的常量字不出行（读它的 LDR 带「=值」，见 literal_pool）
             if fill(im, w0):   # 填充（全 0 / udf #imm16）：常写；同处同值别的份已写过就不重复
                 r = f'w\t{mod}\t{w0:x}\t{orig:08x}\t{new:08x}' + ('\t@k' if marks.get(w0) == 'k' else '')
                 if not any(x.startswith(r + '\t') for x in rows): rows.append(f'{r}\t# {uid}')
             else:
-                rows.append(f'p\t{mod}\t{w0:x}\t{orig:08x}\t{new:08x}\t{bit}' + ('\t@k' if marks.get(w0) == 'kv' else '') + f'\t# {uid}')
+                rows.append(f'p\t{mod}\t{w0:x}\t{orig:08x}\t{new:08x}\t{bit}' + ('\t@k' if marks.get(w0) == 'kv' else f'\t={lits[w0]:x}' if w0 in lits else '') + f'\t# {uid}')
                 npath[(mod, w0)] = npath.get((mod, w0), 0) + 1
         runs, cur = [], None
         for o in sorted(data):
@@ -1784,12 +1818,12 @@ def plan(root, default_on, index_dirs):
     crows = []   # 金手指各条的行：倒序并进 rows（见上「后写的生效」）
     for uid, mod, u, words, data in cheats:
         if uid in dropped: log.append(f'不收\t{uid}\t{mod}\t{u["name"][:40]}\t{mod} 槽 2046 的 64 位用尽'); continue
-        im = img(mod)[0]; mine = []
+        im = img(mod)[0]; mine = []; lits, pool = literal_pool(im, words)
         for w0, nb in sorted(words.items()):
             orig = int.from_bytes(im[w0:w0 + 4], 'little'); new = int.from_bytes(nb, 'little')
-            if new == orig: continue
+            if new == orig or w0 in pool: continue   # 字面量池的常量字不出行（见 literal_pool）
             if fill(im, w0): r = f'w\t{mod}\t{w0:x}\t{orig:08x}\t{new:08x}'
-            else: r = f'p\t{mod}\t{w0:x}\t{orig:08x}\t{new:08x}\t{setbit[(mod, frozenset(owners[(mod, w0, bytes(nb))]))]}'
+            else: r = f'p\t{mod}\t{w0:x}\t{orig:08x}\t{new:08x}\t{setbit[(mod, frozenset(owners[(mod, w0, bytes(nb))]))]}' + (f'\t={lits[w0]:x}' if w0 in lits else '')
             mine.append((r, f'{r}\t# ' + ','.join(owners.get((mod, w0, bytes(nb)), [uid]))))
         crows.append(mine)
         runs, cur = [], None

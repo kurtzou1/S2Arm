@@ -12,6 +12,7 @@
 #import <GameController/GameController.h>
 #define S2A_XBOX_GIP_IOKIT 1
 #include "hid_pad.h"
+#include "imu_burst.h"
 #include "xbox_gip_relay.h"
 #include <pthread.h>
 #include <stdatomic.h>
@@ -91,7 +92,9 @@ typedef struct { IOHIDDeviceRef dev; uint32_t buttons, hat; int16_t ax[4]; char 
     int pro, vid, gc_hint, joined, is_xbox, xbox_relay; uint8_t relay_slot; uint64_t entry, attach_us; s2a_hidg g;   // pro：走 Switch Pro 协议那一支；g：通用手柄的状态（hid_generic.h）；joined：通用手柄按过键；is_xbox：走 Xbox GIP 协议；xbox_relay：由 S2Arm 启动器中继
     int full; uint8_t cnt, rep[64]; s2a_pro_cal cl, cr;
     int betop_ns, betop_left_logged; int16_t betop_left[2]; uint64_t betop_left_us;
-    s2a_pad_motion motion; uint64_t motion_us; int imu_said; uint32_t logged; } hp_dev;   // motion：0x30 报告里的最后一组 IMU（motion_us = 收到时刻，0 = 没有）   // full：已收到 0x30 报告（之后不再用 HID 元素那一路）；cnt：子命令包序号
+    s2a_pad_motion motion; uint64_t motion_us; int imu_said; uint32_t logged;
+    s2a_imu_burst burst;   // 补满采样：0x30 报告一包 3 组 IMU 按记账时钟入队（macos/imu_burst.h），服务层一拍取走逐笔写进游戏
+} hp_dev;   // motion：0x30 报告里的最后一组 IMU（motion_us = 收到时刻，0 = 没有）   // full：已收到 0x30 报告（之后不再用 HID 元素那一路）；cnt：子命令包序号
 static hp_dev g_dev[S2A_HID_PAD_MAX];
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 
@@ -145,13 +148,21 @@ static void generic_value_cb(void *ctx, IOReturn r, void *sender, IOHIDValueRef 
 static int16_t rd16le(const uint8_t *p) { return (int16_t)(p[0] | p[1] << 8); }
 // 0x30 完整报告：报告号 + 计时 + 电量 + 按键 3 + 摇杆 6 + 振动 1 = 13 字节后是 3 组 IMU（每组 12 字节：加速度 xyz、角速度 xyz，5 ms 一组），取最后一组。
 //   量程同一代 Pro 出厂（±8 g、±2000 度/秒）：加速度 0.000244 g / 计数、角速度 0.06103 度/秒 / 计数；轴向同 joycon_imu.m 的 Pro（参考 SDL3 hidapi_switch.c，zlib）
-int s2a_pro_imu(const uint8_t *r, size_t n, s2a_pad_motion *out) {
-    if (!r || n < 13 + 36 || r[0] != 0x30) return 0;
-    const uint8_t *s = r + 13 + 24;
+static void pro_imu_group(const uint8_t *s, s2a_pad_motion *out) {
     float ax = rd16le(s + 0) * 0.000244f, ay = rd16le(s + 2) * 0.000244f, az = rd16le(s + 4) * 0.000244f;
     float gx = rd16le(s + 6) * 0.06103f, gy = rd16le(s + 8) * 0.06103f, gz = rd16le(s + 10) * 0.06103f;
     out->acceleration_x = -ay; out->acceleration_y = ax; out->acceleration_z = az;
     out->gyro_x = -gy; out->gyro_y = gx; out->gyro_z = gz;
+}
+int s2a_pro_imu(const uint8_t *r, size_t n, s2a_pad_motion *out) {
+    if (!r || n < 13 + 36 || r[0] != 0x30) return 0;
+    pro_imu_group(r + 13 + 24, out);
+    return 1;
+}
+// 补满采样：3 组全取（g[0] 最旧、g[2] 最新，同上 13 字节起、每组 12 字节）；时间戳由 s2a_imu_burst_push 按记账时钟给
+static int s2a_pro_imu_burst(const uint8_t *r, size_t n, s2a_pad_motion out[3]) {
+    if (!r || n < 13 + 36 || r[0] != 0x30) return 0;
+    for (int i = 0; i < 3; i++) { out[i] = (s2a_pad_motion){0}; pro_imu_group(r + 13 + i * 12, &out[i]); }
     return 1;
 }
 static _Atomic int g_motion_enabled;   // 体感开关（定义与说明在 s2a_mac_hid_pad_set_motion_enabled 那里）：报告回调打日志时读
@@ -179,9 +190,13 @@ static void report_cb(void *ctx, IOReturn r, void *sender, IOHIDReportType type,
                 d->betop_left_us = hp_now_us();
             }
         }
-        s2a_pad_motion mo;
-        if (id == 0x30 && s2a_pro_imu(b, m, &mo) && (mo.acceleration_x != 0 || mo.acceleration_y != 0 || mo.acceleration_z != 0)) {   // 全 0 = 手柄没开 IMU / 不带陀螺仪
-            mo.host_timestamp_us = hp_now_us(); d->motion = mo; d->motion_us = mo.host_timestamp_us;
+        // 0x30 全报告里 3 组 IMU 按记账时钟入队（补满采样，macos/imu_burst.h）；全 0 = 手柄没开 IMU / 不带陀螺仪，整包丢掉
+        s2a_pad_motion mo[3];
+        if (id == 0x30 && s2a_pro_imu_burst(b, m, mo) &&
+            (mo[2].acceleration_x != 0 || mo[2].acceleration_y != 0 || mo[2].acceleration_z != 0)) {
+            uint64_t recv_us = hp_now_us();
+            mo[2].host_timestamp_us = recv_us; d->motion = mo[2]; d->motion_us = recv_us;
+            s2a_imu_burst_push(&d->burst, mo, recv_us);
             if (!d->imu_said) { d->imu_said = 1; fprintf(stderr, "[输入] 兜底手柄 %s：报告里有六轴（陀螺仪 / 加速度）；交不交给游戏看体感开关（现在%s）\n", d->name, atomic_load(&g_motion_enabled) ? "开" : "关"); } }
     }
     pthread_mutex_unlock(&g_mu);
@@ -788,4 +803,22 @@ int s2a_mac_hid_pad_motion(const void *id, s2a_pad_motion *out) {
     }
     pthread_mutex_unlock(&g_mu);
     return ok;
+}
+
+// 补满采样：一次取走这一拍累积的全部 IMU 样本（消费式、时间升序），返回 >=0 条数；
+//   -1 = 这个 id 不是兜底 HID 设备（宿主据此换下一条来源）。单笔接口仍读最新一份。
+int s2a_mac_hid_pad_motion_burst(const void *id, s2a_pad_motion *out, int max) {
+    if (!out || max <= 0 || !id) return 0;
+    int n = -1;
+    pthread_mutex_lock(&g_mu);
+    for (int i = 0; i < S2A_HID_PAD_MAX; i++) {
+        hp_dev *d = &g_dev[i];
+        if (id != (const void *)d || (!d->dev && !d->is_xbox)) continue;
+        n = 0;
+        uint64_t now = hp_now_us();
+        if (d->motion_us && s2a_hid_pad_motion_ok(atomic_load(&g_motion_enabled), now, d->motion_us)) n = s2a_imu_burst_drain(&d->burst, out, max, now);
+        break;
+    }
+    pthread_mutex_unlock(&g_mu);
+    return n;
 }

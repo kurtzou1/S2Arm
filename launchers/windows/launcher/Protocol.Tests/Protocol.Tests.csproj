@@ -18,5 +18,7 @@
     <None Include="../App/ExportPages.cs" Link="AppSource/ExportPages.cs" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../App/JobSlots.cs" Link="AppSource/JobSlots.cs" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../App/UpdateFlow.cs" Link="AppSource/UpdateFlow.cs" CopyToOutputDirectory="PreserveNewest" />
+    <!-- #1961「更新这款」要整款重出时接着重出：接线检查读 App 源码（UpdateRepackCases），只拷不编 -->
+    <None Include="../App/ExportFlow.cs" Link="AppSource/ExportFlow.cs" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

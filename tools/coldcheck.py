@@ -4,7 +4,7 @@
 #   ① 翻译指纹：取 main 与「main 合进分支」两版树，各跑一次 dmsh_chain.xlate_fp()（生产翻译缓存键里的 C# Xfp，S2A.Dsh.csproj DshXfpInput 单一来源），值变了才算
 #      （只看文件名会误判，如 DshVk.cs 早已剔出指纹）；树里没有 dmsh_chain.py / 着色器翻译器目录时两边都记「无」，不算变
 #   ② 直连 / 抽取阶段键：pack/stage_inputs/{direct,extract}.tsv「入」列的文件在合并前后有改动
-#   ③ libnxgal / spirv-cross 源码（graphics/metal/、graphics/third_party/spirv_cross/）：库内容（LibFp）进翻译缓存键
+#   ③ libnxgal / spirv-cross 源码（graphics/metal/、graphics/third_party/spirv_cross/）：库内容（ToolLib.Fp）进翻译缓存键
 #   shell.tsv 只决定重出壳，不算冷。
 #   ④ 宿主 ↔ 库接口号：translator/dmsh_chain.py 的 `ABI = N` 合并前后不同（按该文件头的约定，宿主读库方式一变就只升它）→ 冷且 ABI，
 #      列车强制归三级（ABI）、只在手动 cold-open 时合（11-06 维护者 批：冷窗口分级）

@@ -217,6 +217,67 @@ class IosInputsImage(unittest.TestCase):
             self.assertTrue(sgrade_bf._has_romfs(root))
 
 
+class IosInputsLoose(unittest.TestCase):
+    """#1961：旧版出包留下的散文件形态（.pack/romfs/ + index.tsv，没有 game.img）也是原料——原先回 (None, 'none')，「更新这款」误报「游戏文件不在了」"""
+
+    def _lay(self, t, *, loose=True, program=True, aoc=False):
+        pack, kit, exefs = t / "pack", t / "kit", t / "exefs"
+        for d in (pack, kit): d.mkdir()
+        if loose:
+            (pack / "romfs/Data").mkdir(parents=True)
+            (pack / "romfs/Data/a.bin").write_bytes(b"A" * 4096)
+            (pack / "index.tsv").write_text("romfs/Data/a.bin\t4096\tx\n", encoding="utf-8")
+            (pack / "ctl").mkdir(); (pack / "ctl/control.nacp").write_bytes(b"nacp")
+        if aoc:
+            (pack / "aoc/1").mkdir(parents=True); (pack / "aoc/1/data").write_bytes(b"dlc")
+            (pack / "aoc.tsv").write_text("1\n", encoding="utf-8")
+        (kit / "direct.tsv").write_text("k\n", encoding="utf-8")
+        if program:
+            exefs.mkdir(); (exefs / "main").write_bytes(b"main"); (exefs / "main.npdm").write_bytes(b"npdm")
+        return pack, kit, (exefs if program else None)
+
+    def _inputs(self, t, pack, kit, exefs):
+        c = types.SimpleNamespace(engine=Path(sgrade_bf.__file__).resolve().parents[2])
+        fake_sgrade = types.SimpleNamespace(saved_program=lambda c, g: exefs)
+        with patch.object(sgrade_bf.layout, "ios_pack", return_value=pack), patch.object(sgrade_bf.layout, "ios_kit", return_value=kit), \
+             patch.object(sgrade_bf.layout, "image_mac", return_value=t / "no-mac"), patch.dict("sys.modules", {"sgrade": fake_sgrade}):
+            return sgrade_bf.ios_inputs(c, "0100AAAA00000000", t / "work")
+
+    def test_loose_pack_is_a_source_and_romfs_is_linked_not_copied(self):
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t); pack, kit, exefs = self._lay(t, aoc=True)
+            root, how = self._inputs(t, pack, kit, exefs)
+            self.assertEqual(how, "romfs", "散文件形态认作原料（改前回 none）")
+            self.assertTrue((root / "romfs").is_symlink(), "romfs/ 只做链接，不拷几 GB")
+            self.assertEqual((root / "romfs").resolve(), (pack / "romfs").resolve())
+            self.assertEqual((root / "romfs/Data/a.bin").read_bytes(), b"A" * 4096, "经链接读到原文件")
+            self.assertEqual((root / "exefs/main").read_bytes(), b"main")
+            self.assertEqual((root / "ctl/control.nacp").read_bytes(), b"nacp")
+            self.assertEqual((root / "aoc/1/data").read_bytes(), b"dlc")
+            self.assertEqual((root / "aoc.tsv").read_text(encoding="utf-8"), "1\n")
+            self.assertEqual((root / "direct.tsv").read_text(encoding="utf-8"), "k\n")
+            self.assertTrue(sgrade_bf._has_romfs(root))
+
+    def test_removing_the_work_dir_leaves_the_library_romfs(self):
+        # 重出完临时目录整个删掉（TemporaryDirectory / rmtree）：只删链接，游戏库里的 .pack/romfs/ 一个字节不少
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t); pack, kit, exefs = self._lay(t)
+            root, _ = self._inputs(t, pack, kit, exefs)
+            sgrade_bf.layout.remove_tree(t / "work")
+            self.assertFalse((t / "work").exists())
+            self.assertEqual((pack / "romfs/Data/a.bin").read_bytes(), b"A" * 4096)
+
+    def test_loose_pack_without_program_or_index_is_not_a_source(self):
+        # 反证两条：没有原始程序（也没 Mac 版可借）→ 照旧 none；只有 romfs/ 没有 index.tsv（不是完整出好的包）→ none
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t); pack, kit, _ = self._lay(t, program=False)
+            self.assertEqual(self._inputs(t, pack, kit, None), (None, "none"))
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t); pack, kit, exefs = self._lay(t)
+            (pack / "index.tsv").unlink()
+            self.assertEqual(self._inputs(t, pack, kit, exefs), (None, "none"))
+
+
 
 
 class RechainIos(unittest.TestCase):

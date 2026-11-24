@@ -176,6 +176,9 @@ elif [[ "$high" == 0 ]]; then
     done
     # 慢机替身（11-23）：GL 上限 120、每帧游戏多花 12 ms（门禁机负载下实测均值 12.27 ms 那一格）。限帧器的计数判据照样绿，墙钟只判下沿
     FPS_TEST_SLOW_MS=12 run_case mtl4 0 gl 120 0 60 8.333333 0
+    # 慢帧落刻度（11-23）：GL 上限 60（周期 16.7 ms）、每帧多花 20 ms——帧长在 1～2 个周期之间，按刻度应落在第 2 个刻度（33.3 ms）；
+    #   旧做法「从现在重新起拍再整睡一周期」是帧长 + 16.7 ≈ 40 ms。判据看「每帧都多跨刻度」（计数），帧间隔中位作读数
+    FPS_TEST_SLOW_MS=20 run_case mtl4 0 gl 60 0 60 16.666667 0
     # 取图与上屏分在两个线程（11-02 牧场物语：主线程取图、渲染线程上屏）：节拍跟着出帧的取图线程，原生 60 帧不解除
     run_case mtl4 0 nvn 0 1 60 16.666667 0 0 0 0 0 0 0 1
     # 10个真实30Hz链接场景：interval1/2不叠加成15帧。
@@ -201,7 +204,7 @@ elif [[ "$high" == 0 ]]; then
         # 金刚形态：间隔 3 为主、每 30 帧一帧 2；不得 60↔20 Hz 来回换档，也不得留在 30 Hz 把 50 ms 取整成 67 ms
         run_case "$backend" 1 nvn 0 3 60 50 1 0 0 0 0 0 0 0 1
     done
-    expected_cases=60; [[ ${FPS_INTERVAL3_ONLY:-0} != 1 ]] || expected_cases=18   # 57：11-02 加分线程取图一例（牧场物语形态）
+    expected_cases=61; [[ ${FPS_INTERVAL3_ONLY:-0} != 1 ]] || expected_cases=18   # 57：11-02 加分线程取图一例（牧场物语形态）
     [[ "$cases" == "$expected_cases" ]] || { echo "核心场景数量错误：${cases}（应${expected_cases}）" >&2; exit 1; }
     printf 'fps limit core matrix: %d/%d passed (logs: %s)\n' "$((cases - bad))" "$expected_cases" "$out"
     echo '120 Hz专项未执行：有真实120Hz屏幕时另设 FPS_HIGH_REFRESH=1（仅运行26项）。'

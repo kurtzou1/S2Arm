@@ -12,6 +12,12 @@ void s2a_joycon_imu_set_enabled(int enabled);
 // 返回位掩码：bit0=左、bit1=右（含 Pro 当「右」单源）。out_l / out_r 可为 NULL。
 int s2a_joycon_imu_read(s2a_pad_motion *out_l, s2a_pad_motion *out_r);
 
+// 补满采样：0x30 报告一包 3 组 IMU（相隔 5 ms），真机三组全用。这里一次取走一拍累积的全部样本（时间升序，
+//   消费式），服务层逐笔写进游戏，对齐真机 200 Hz。返回条数；0 = 这一拍没有新样本。
+//   返回 >=0 = 取到的条数；-1 = 这一侧 / 这个 id 没有可用的 HID 体感设备（宿主据此换下一条来源）。
+int s2a_joycon_imu_read_burst(int side, s2a_pad_motion *out, int max);   // side：JC_L(0) / JC_R(1)，Pro 算右
+int s2a_joycon_imu_read_id_burst(const char *id, s2a_pad_motion *out, int max);
+
 // 一代 Joy-Con / Pro 的 HID 震动（GameController 不给 haptics 时）：which bit0 = 左只、bit1 = 右只、bit2 = Pro；pair = 左右两侧。返回实际发到的位
 int s2a_joycon_rumble(int which, const s2a_pad_vibration pair[2]);
 

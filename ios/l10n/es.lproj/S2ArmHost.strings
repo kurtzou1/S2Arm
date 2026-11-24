@@ -224,6 +224,8 @@
 "vpad.layouts.title" = "Diseño táctil";
 "vpad.layouts.touch.note" = "Para juegos con controles táctiles propios. Los botones en pantalla se ocultan; mantén cuatro dedos 1,5 s para volver.";
 "vpad.menu.editDisabled" = "No hay botones para editar en modo solo táctil";
+"vpad.menu.hideKeys" = "Ocultar botones";
+"vpad.menu.showKeys" = "Mostrar botones";
 "vpad.menu.face.auto" = "Botones: Automático";
 "vpad.menu.face.auto.note" = "Sigue las letras de tu mando: diseño Switch en mandos Nintendo, diseño Xbox en mandos Xbox";
 "vpad.menu.face.switch" = "Botones: Diseño Switch";

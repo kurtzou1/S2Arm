@@ -1230,6 +1230,54 @@ __attribute__((visibility("default"), used)) int s2a_pad_read_motion_slot(int sl
 static int p1_gen1_motion(s2a_pad_motion out[2]) { return gen1_of(pad_id[0]) ? gen1_motion(pad_id[0], out) : 0; }
 static int p1_hid_motion(s2a_pad_motion out[2]) { if (!s2a_mac_hid_pad_motion(pad_id[0], &out[0])) return 0; out[1] = (s2a_pad_motion){0}; return 1; }
 static int p1_gen1_rumble(const s2a_pad_vibration values[2]) { return gen1_rumble(pad_id[0], values); }
+
+// 补满采样（体感手感）：0x30 全报告一包 3 组 IMU（相隔 5 ms），真机三组全用。改前的单笔接口
+//   一拍（约 16 ms）只给一笔，而游戏每条六轴记录的 DeltaTime 固定 5 ms —— 时间轴被压成 1/3，
+//   体感瞄准的幅度偏小、微调不跟手。服务层每拍按「槽位 / 路」一次取走累积的样本，
+//   逐笔写进游戏（每笔 5 ms），对齐真机 200 Hz。
+// provider（s2a_pad_motion_burst_provider）：slot 0 = P1，1.. = 其他玩家（同 s2a_pad_read_motion_slot）；side 0 = 主路，1 = 另一路。
+//   返回 >=0 = 取到的样本条数（时间升序，0 = 这一拍没有新样本）；-1 = 这一格没有可批量的 HID 体感源，
+//   服务层回退到单笔接口。没有这个 provider 的宿主（host_main.c 弱定义回 NULL），行为完全不变。
+//   只接 0x30 全报告的 HID 通道（一代 Joy-Con / Pro、兜底 Switch 模式手柄）；
+//   GameController 已给出完整六轴、或 NS2 通道手柄时返回 -1，来源是单笔说了算。
+static int s2a_pad_read_motion_burst(int slot, int side, s2a_pad_motion *out, int max) {
+    if (!out || max <= 0 || slot < 0 || slot >= S2A_MAX_PADS || side < 0 || side > 1) return -1;
+    if (!atomic_load(&g_motion_wanted)) return -1;
+    if (ns2_leads()) return -1;
+    // 系统手柄（DualSense 等）的 GCMotion 自带完整六轴：不抢它的来源，交由单笔接口
+    pthread_mutex_lock(&g_motion_mu);
+    int gc_known = g_motion_known;
+    pthread_mutex_unlock(&g_motion_mu);
+    if (gc_known == 2) return -1;
+
+    const void *owner = pad_id[slot];
+    // 一代单元：一对时左右各按设备 id 取；单只只有主路
+    if (owner && gen1_of(owner)) {
+        char gl[64], gr[64];
+        if (gen1_ids(owner, gl, gr)) {
+            if (side == 1 && !gr[0]) return 0;
+            return s2a_joycon_imu_read_id_burst(side == 0 ? gl : gr, out, max);
+        }
+    }
+    // 兜底 HID（第三方 Switch 模式 / GameController 不认的 Pro）：0x30 报告同样一包 3 组。
+    //   先用单笔接口确认「这一格确实是有六轴数据的体感源」再接管：设备存在但没开 IMU / 数据超时 200 ms 时
+    //   不抢这一格，把机会留给下面的 Joy-Con HID 回退（同 p1_hid_motion 的优先级判定），否则会把真正的来源屏蔽掉。
+    if (side == 0 && owner) {
+        s2a_pad_motion probe;
+        if (s2a_mac_hid_pad_motion(owner, &probe)) {
+            int n = s2a_mac_hid_pad_motion_burst(owner, out, max);
+            return n >= 0 ? n : 0;   // 有效源但这一拍队列空 → 0（服务层保持上一份，不写伪样本）
+        }
+    }
+    // P1 的 Joy-Con / Pro HID 回退（GameController 无 motion 时）：优先右 / Pro，其次左
+    if (side == 0 && slot == 0) {
+        int n = s2a_joycon_imu_read_burst(1, out, max);
+        if (n < 0) n = s2a_joycon_imu_read_burst(0, out, max);
+        if (n >= 0) return n;
+    }
+    return -1;
+}
+s2a_pad_motion_burst_fn s2a_pad_motion_burst_provider(void) { return s2a_pad_read_motion_burst; }   // 登记给服务层（services/aot/Compose.cs → Native.RegisterMotionBurst）
 // 按槽位的 Joy-Con 2 鼠标（#520：P2 起各自的 Joy-Con 2，服务层写在各自的手柄号上，游戏靠它认 Joy-Con 2）：占这一格的是 NS2 手柄就照它这只报，否则回 0
 __attribute__((visibility("default"), used)) int s2a_pad_read_mouse_slot(int slot, s2a_pad_mouse out[2]) {
     if (!out) return 0;

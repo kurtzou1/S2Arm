@@ -11,6 +11,13 @@ public sealed record LauncherPaths(string Engine, string Runtime, string Shell)
     public static LauncherPaths Defaults(string executableDirectory) => new(
         Path.Combine(executableDirectory, "Engine"), Path.Combine(executableDirectory, "Runtime"),
         Path.Combine(executableDirectory, "Shell"));
+
+    /// <summary>设置页三个输入框的值换进来；空的（输入框还没画出来、或被清空）保留原路径。空路径从来不是有效设置：
+    /// 原先照抄空串，环境检查 Path.GetFullPath("") 抛 ArgumentException，检查作业还没起就悄悄失败（没人等那个任务），
+    /// 之后每次检查都一样，界面停在「正在检查这台电脑」（D-97FT）</summary>
+    public LauncherPaths Edited(string? engine, string? runtime, string? shell) => new(
+        string.IsNullOrWhiteSpace(engine) ? Engine : engine, string.IsNullOrWhiteSpace(runtime) ? Runtime : runtime,
+        string.IsNullOrWhiteSpace(shell) ? Shell : shell);
 }
 
 public sealed record ProbeOutput(int ExitCode, string StandardOutput, string StandardError);

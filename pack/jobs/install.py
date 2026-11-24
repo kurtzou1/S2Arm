@@ -1461,7 +1461,7 @@ def export_s2arm(c, gid, *, folder=None, sign=True, step=0, total=3):
                 except Exception as e:   # noqa: BLE001 —— 只认团队没设备这一种，别的照旧抛
                     # D-VX6J：本机还没有这个团队的私钥时退到 plumesign 签，它要先拿团队描述文件，团队里一台设备都没登记（Apple 8220）就拿不到。
                     #   签程序库本身不需要设备，导出也不加拦截（11-19 维护者）：同没登录，照样导出未签名的，照实说为什么、怎么让电脑能签
-                    if TEAM_NO_DEVICES not in str(e) or mode != "appleId":
+                    if TEAM_NO_DEVICES not in str(e) + str(getattr(e, "internal", "") or "") or mode != "appleId":   # 转成作业失败的（win_install_failure）原文在 internal
                         raise
                     c.diagnostic(EXPORT_NO_DEVICE if any_phone_identity(c) else EXPORT_NO_DEVICE_NO_ID, code="device_not_visible", severity="warning",
                                  internal=str(e)[-600:], advice=EXPORT_NO_DEVICE_ADVICE)
@@ -1478,11 +1478,11 @@ def export_s2arm(c, gid, *, folder=None, sign=True, step=0, total=3):
                    if p.is_file() and p.relative_to(pack).as_posix() != "game.img"]
         manifest = read(Path(pack) / "manifest.json", {})
         cat_bytes = json.dumps(cat, ensure_ascii=False, indent=1).encode("utf-8")
-        total = len(cat_bytes) + sum(p.stat().st_size for _, p in files + derived)   # 解压后其余条目内容字节合计（手机导入前看空间、显示进度）
+        nbytes = len(cat_bytes) + sum(p.stat().st_size for _, p in files + derived)   # 解压后其余条目内容字节合计（手机导入前看空间、显示进度）；不叫 total：那是参数里的步数，#2177 原先盖掉它，下一步报「后面还有 12 亿步」
         head = dict(format=S2ARM_FORMAT, schema=1, title_id=gid, name=cat["name"], display_version=cat["display_version"],
                     host_abi=cat["host_abi"], chain=cat["chain"], rewriter_id=cat["rewriter_id"], image=cat["image"],
                     image_sha256=cat["image_sha256"], source_sha256=source_sha, pack=(manifest or {}).get("index_sha256", ""),
-                    bytes=total, signer=dict(mode=signed_with["mode"], team=signed_with["team"]) if signed_with else None)
+                    bytes=nbytes, signer=dict(mode=signed_with["mode"], team=signed_with["team"]) if signed_with else None)
         buf = _io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w", format=tarfile.USTAR_FORMAT) as t:
             def add(name, data=None, path=None):
@@ -2877,12 +2877,15 @@ def await_import(c, ph, gid, want):
 
 # 「更新这款」做不齐时照实说（11-21：原先静默跳过，「建议更新」点了还在，玩家不知道为什么）
 # 着色器库重编不了分三种说（#1961：原先一句「补上游戏文件」，界面上却没地方补）：没装 Metal 工具 → 装工具；重编的原料（游戏库里已出好的
-#   iPhone 包 / Mac 版）不在、原件还在 → 出包页重新出包；原件也不在 → 黄字带「重新添加原件…」（facts.action = relinkSource，前端画按钮）
+#   iPhone 包 / Mac 版）不在、原件还在 → 前端接着从原件整款重出（facts.action = repack，复用「更新 iPhone」里重新出包那条作业）；
+#   原件也不在 → 黄字带「重新添加原件…」（facts.action = relinkSource，前端画按钮，找回后同样接着整款重出）。
+#   #1961（游戏页只有「更新」「导出」两件事）：「更新这款」要做什么就做什么，提示句不指向不存在的「出包页」
 UPDATE_SHADER_NO_TOOLS = "这款的着色器库这次没能重编：这台电脑没装 Metal 开发工具。在「准备这台电脑」装好后再点「更新这款」；「建议更新」会继续显示。"
-UPDATE_NEEDS_REPACK_SOURCE = "这款的着色器库这次没能重编：游戏库里重编要用的游戏文件不在了（比如清理空间时删了已出好的 iPhone 包）。原件还在：在出包页对这款重新出包。"
-UPDATE_NEEDS_SOURCE = "这款的着色器库这次没能重编：游戏库里重编要用的游戏文件和这款的原件都不在了。点「重新添加原件…」选这款的原件，再在出包页对这款重新出包。"
+UPDATE_NEEDS_REPACK_SOURCE = "这款的着色器库这次没能重编：游戏库里重编要用的游戏文件不在了。原件还在，正在从原件整款重新出包（约几分钟到几十分钟）。"
+UPDATE_NEEDS_SOURCE = "这款的着色器库这次没能重编：游戏库里重编要用的游戏文件和这款的原件都不在了。点「重新添加原件…」选这款的原件，找回后会自动从原件整款重新出包。"
 UPDATE_MAC_BUSY = "这款在这台 Mac 上正在运行，Mac 版的着色器库这次没更新：退出游戏后再点一次「更新这款」。"
-UPDATE_NEEDS_REPACK = "这款要整款重新出包才能更新完（运行环境的约定变了，只换着色器库不够）：在出包页对这款重新出包。"
+UPDATE_NEEDS_REPACK = "这款要整款重新出包才能更新完（运行环境的约定变了，只换着色器库不够）：正在从原件整款重新出包（约几分钟到几十分钟）。"
+UPDATE_NEEDS_REPACK_NO_SOURCE = "这款要整款重新出包才能更新完（运行环境的约定变了，只换着色器库不够），但这款的原件不在了。点「重新添加原件…」选这款的原件，找回后会自动从原件整款重新出包。"
 SHELL_INSTALL_FIRST = "手机上还没装 S2Arm：先点「安装 S2Arm」，装好后再把这款推到 iPhone。"
 SHELL_UPDATE_FIRST = "手机上的 S2Arm 不是这一版：先点「更新 S2Arm」，再把这款推到 iPhone。"
 
@@ -3447,15 +3450,22 @@ def refresh_local(c, gid):
     做不齐照实给黄字 update_incomplete（11-21：原先静默跳过，「建议更新」点了还在）：没原料重编不了 / 宿主约定号变了要整款重出"""
     import host_update, sgrade_bf
     from rewrite_refresh import refresh_ios
-    if (layout.program_info(c, gid) or {}).get("hostAbi", 1) != host_update.HOST_ABI:
-        c.diagnostic(UPDATE_NEEDS_REPACK, code="update_incomplete", severity="warning")   # 约定号变了：换库 / 刷程序消不掉这条原因，照实说
+    # 要整款重出时：原件在 → facts.action = repack（前端接着从原件整款重出）；原件不在 → relinkSource（先找回原件，找回后前端同样接着重出）。
+    #   一次作业只给一条要重出的黄字（约定号变了与着色器链没原料同时出现时，重出一次两样都解决）
+    repack = (layout.program_info(c, gid) or {}).get("hostAbi", 1) != host_update.HOST_ABI
+    if repack:   # 约定号变了：换库 / 刷程序消不掉这条原因
+        have = sources_present(c, gid)
+        c.diagnostic(UPDATE_NEEDS_REPACK if have else UPDATE_NEEDS_REPACK_NO_SOURCE, code="update_incomplete", severity="warning",
+                     facts={"action": "repack" if have else "relinkSource"})
     rechain = sgrade_bf.rechain_ios(c, gid)
     if rechain in ("no_source", "no_tools"):
         trace(c, f"{gid} 着色器链更新了，这次没重编着色器库（原因见上一行；「建议更新」照旧提示）")  # 非玩家句
         if rechain == "no_tools":
             c.diagnostic(UPDATE_SHADER_NO_TOOLS, code="update_incomplete", severity="warning")
+        elif repack:
+            pass   # 上面已给要整款重出的那条：重出会连着色器库一起出新的
         elif sources_present(c, gid):
-            c.diagnostic(UPDATE_NEEDS_REPACK_SOURCE, code="update_incomplete", severity="warning")
+            c.diagnostic(UPDATE_NEEDS_REPACK_SOURCE, code="update_incomplete", severity="warning", facts={"action": "repack"})
         else:
             c.diagnostic(UPDATE_NEEDS_SOURCE, code="update_incomplete", severity="warning", facts={"action": "relinkSource"})
     refresh_ios(c, [gid])

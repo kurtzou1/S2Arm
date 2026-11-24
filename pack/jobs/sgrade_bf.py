@@ -7,7 +7,8 @@
   翻译缓存键含翻译器指纹，必全未命中、要重翻；Metal 编译缓存按 MSL 内容寻址，没变的着色器多数命中。
   Mac：Mac 运行版本本身就是一份产物根（romfs / exefs / extract / 改写产物都在），克隆成临时产物根重出，新库整份换进运行版本。
   iPhone：从游戏库取材建临时产物根——game.img 标准 RomFS 段（原样 RomFS）+ 追加内容条目 + original-exefs（没有就借同款 Mac 运行版本的 exefs）；
-    没有 game.img 就整份借同款 Mac 运行版本；都没有 → 「需要原件」（返回 None，调用方点名，不静默）。重出后 overlay(旧库, 新库) 出覆盖层 <库目录>/bf/
+    没有 game.img 时，旧版出包的散文件形态（.pack/romfs/ + index.tsv）同样取材，romfs/ 只做目录链接不拷；
+    再没有就整份借同款 Mac 运行版本；都没有 → 「需要原件」（返回 None，调用方点名，不静默）。重出后 overlay(旧库, 新库) 出覆盖层 <库目录>/bf/
     （宿主 graphics/nvn/lib_pack.inc lp_pick 同键同种类先取覆盖层），加进资源包清单；「更新 iPhone」按机上清单只推变了的文件（010074F013262000 约 160 MB），主容器不动不推。"""
 from __future__ import annotations
 
@@ -258,7 +259,7 @@ def _clone_file(src, dst):
 # ---- iPhone ----
 
 def ios_inputs(c, gid, work):
-    """iPhone 款的重出原料 → (产物根形态目录, 来处 game.img / mac) 或 (None, 'none')。见文件头的取材顺序"""
+    """iPhone 款的重出原料 → (产物根形态目录, 来处 game.img / romfs / mac) 或 (None, 'none')。见文件头的取材顺序"""
     import sgrade
     img = _img(c)
     pack, kit = layout.ios_pack(c, gid), layout.ios_kit(c, gid)
@@ -288,9 +289,40 @@ def ios_inputs(c, gid, work):
         if (kit / "direct-profile").is_dir():
             shutil.copytree(kit / "direct-profile", root / "direct-profile")
         return root, "game.img"
+    if (pack / "romfs").is_dir() and (pack / "index.tsv").is_file() and exefs is not None:
+        # 旧版出包（约 11-20 前）留下的散文件形态：.pack/romfs/ 原目录树 + index.tsv（#1961：被当成「没原料」，误报「游戏文件不在了」）。
+        # romfs/ 有几 GB：只做目录链接、不拷；重出各阶段只读 romfs/，临时目录删掉时 rmtree 只删链接、不进原目录
+        root = Path(work) / "src"
+        root.mkdir(parents=True)
+        _link_dir(pack / "romfs", root / "romfs")
+        if (pack / "aoc").is_dir():
+            _link_dir(pack / "aoc", root / "aoc")
+        if (pack / "aoc.tsv").is_file():
+            shutil.copyfile(pack / "aoc.tsv", root / "aoc.tsv")
+        shutil.copytree(exefs, root / "exefs")
+        for d in ("ctl", "systemdata"):
+            if (pack / d).is_dir():
+                shutil.copytree(pack / d, root / d)
+        for p in kit.iterdir() if kit.is_dir() else ():
+            if p.is_file() and (p.name.startswith("direct") or p.suffix in (".tsv", ".bin")):
+                shutil.copyfile(p, root / p.name)
+        if (kit / "direct-profile").is_dir():
+            shutil.copytree(kit / "direct-profile", root / "direct-profile")
+        return root, "romfs"
     if _has_romfs(mac) and (mac / "exefs/main").is_file():
         return mac, "mac"
     return None, "none"
+
+
+def _link_dir(src, dst):
+    """只读引用一个大目录：符号链接；Windows 没有建符号链接的权限时退成目录联接（junction，不要权限，rmtree 同样只删联接）"""
+    try:
+        os.symlink(src, dst, target_is_directory=True)
+    except OSError:
+        if not WIN:
+            raise
+        import _winapi
+        _winapi.CreateJunction(str(src), str(dst))
 
 
 def _copy_range(f, off, size, dst):
@@ -408,7 +440,7 @@ def rechain_ios(c, gid):
     with tempfile.TemporaryDirectory(dir=_scratch(c, gid)) as tmp:
         src, where = ios_inputs(c, gid, Path(tmp))
         if src is None:
-            c.emit("message", f"{gid}：着色器链更新了，但游戏库里没有 game.img、也没有 Mac 版可借：这次没重编着色器库")  # 非玩家句
+            c.emit("message", f"{gid}：着色器链更新了，但游戏库里没有 game.img 或散文件形态的资源、也没有 Mac 版可借：这次没重编着色器库")  # 非玩家句
             return "no_source"
         c.emit("message", f"{gid}：着色器链更新了，正在用{where}重编这款的着色器库（不重出整款；首次要几分钟到几十分钟）")  # 非玩家句
         new = rebuild(c, gid, src, "ios", Path(tmp) / "w")

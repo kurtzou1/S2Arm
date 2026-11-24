@@ -94,6 +94,11 @@ typedef struct {
     float acceleration_x, acceleration_y, acceleration_z;
     float gyro_x, gyro_y, gyro_z;
 } s2a_pad_motion;
+// 补满采样（#2146）：一次取走一拍累积的全部 IMU 样本（时间升序、消费式）。slot 0 = P1；side 0 = 主路、1 = 另一路。
+//   返回 >=0 条数，-1 = 这一格没有可批量的体感源（服务层走单笔路径）。宿主装配取 provider 登记给服务层；
+//   没有批量源的宿主（runtime/src/host_main.c 弱定义）回 NULL。
+typedef int (*s2a_pad_motion_burst_fn)(int slot, int side, s2a_pad_motion *out, int max);
+s2a_pad_motion_burst_fn s2a_pad_motion_burst_provider(void);
 uint64_t s2a_pad_rumble_session(void); // 0 = 不可用；重连、前后台切换后会变化。
 // 与游戏 VibrationValue 同序，每侧 16 字节；一次提交左右完整帧。
 typedef struct {

@@ -71,13 +71,15 @@ int dm_shader_vpad_cached(const uint8_t key[8], int st, uint32_t mask, char *pat
 int dm_shader_base_cached(const uint8_t key[8], int st, char *path, size_t n);   // #770 任务 / 网格着色器本机基础源码（dsh_miss.inc）
 int dm_shader_se_cached(const uint8_t key[8], int st, char *path, size_t n);   // 片元（st 1）/ 计算（st 2）控制段过期时，用本机同链源码或包里的客体输入出采样器模拟变体（dsh_miss.inc）
 int dm_shader_refresh(const char *k16);   // 翻译器换了之后本机现编过的键按单支重译（dsh_miss.inc）：1 本来就是本机的、2 重译后源码没变、3 变了、0 做不了
-void dm_shader_refresh_stats(uint64_t out[3]);   // 本局重译 [0] 源码没变、[1] 变了、[2] 做不了（预热收尾行）
+enum { DM_RF_STATS = 6 };
+void dm_shader_refresh_stats(uint64_t out[DM_RF_STATS]);   // 本局重译 [0] 没变、[1] 变了；做不了按原因：[2] 没有客体输入、[3] 补料核不过、[4] 翻译失败、[5] 阶段认不出 / 没有翻译器（预热收尾行）
 int mtl_guest_input(const uint8_t key[8], int st, uint8_t **buf, uint32_t *nctl, uint32_t *ncode);   // 包里这支的客体输入（nvn_mtl.m，库容器种类 56）：0 取到（调用方 free）、1 没有、-1 段坏了
 int dm_shader_se_fresh(const char *key16);
 void *dm_shader_snap(uint64_t code, const void *control, uint64_t *code_out, const void **control_out);
 int dm_shader_retrans(const uint8_t key[8], uint64_t code, const void *control);   // 出包库计算着色器按本机翻译器重出源码 <键>_b.metal（dsh_miss.inc，v0.4.1 重译抢跑）：成功 0、做不了 1
 void mtl_se_stats(uint64_t out[2]);   // S2Arm（#800，nvn_mtl.m se_done）：采样器归约变体 [0] 本局在设备上编好的着色器数、[1] 编不出的（收局汇总行）
 void mtl_vp_stats(uint64_t out[2]);   // S2Arm（nvn_mtl.m vp_done）：顶点补齐变体 [0] 本局在设备上编好的、[1] 编不出的
+void mtl_libact_stats(uint64_t out[6]);   // D-92BW（nvn_mtl.m）：预热后放掉的着色器 / 之后补回次数 / 补回合计 ns / 最长 ns / 补回失败 / 库切片高位区在用字节
 void mtl_hybrid_pkg_stats(uint64_t out[7]);   // S2Arm（nvn_hybrid.inc hybrid_pkg_base）：随包拉取基础管线 [0] 命中、[1] 包里没有这一对、[2] 有文件查不中、[3] 当场解压的份数、[4] 解压合计纳秒、
                                                //   [5] 开局首查预热（hybrid_pkg_warm）0 没做 / 1 查中 / 2 没查中、[6] 预热耗时纳秒
 void mtl_shmap_rt_add(const char *key, const char *stage); int mtl_shmap_known(const char *key); int mtl_shlib_has(const char *key);

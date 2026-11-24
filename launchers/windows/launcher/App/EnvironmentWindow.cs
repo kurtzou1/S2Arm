@@ -217,7 +217,7 @@ public sealed partial class EnvironmentWindow : Window
 
     private void CapturePaths()
     {
-        if (page == "settings") paths = new(engine.Text ?? "", runtime.Text ?? "", shell.Text ?? "");
+        if (page == "settings") paths = paths.Edited(engine.Text, runtime.Text, shell.Text);
     }
 
     private void Render()

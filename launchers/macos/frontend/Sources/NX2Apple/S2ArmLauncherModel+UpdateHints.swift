@@ -9,8 +9,10 @@ struct GameUpdateRun: Equatable {
     var progress = JobProgress()
     var incomplete: [String] = []
     var failure: String?
-    /// 黄字带「重新添加原件…」（#1961，作业 facts.action = relinkSource）；relinking = 正在核对选的原件；relinked = 已找回，提示去出包页重新出包
+    /// 黄字带「重新添加原件…」（#1961，作业 facts.action = relinkSource）；relinking = 正在核对选的原件；relinked = 已找回（随即自动排进整款重出）
     var relinkSource = false
+    /// 上一次做完时作业要这款整款重出、原件在（facts.action = repack）：按钮下写「要整款重新出包」，并已自动排进批量出包
+    var repack = false
     var relinking = false
     var relinked = false
 }
@@ -42,7 +44,7 @@ extension S2ArmLauncherModel {
     func gameUpdate(_ game: GameSummary) -> GameUpdateRun? { gameUpdates[game.id.uppercased()] }
 
     /// 黄字旁「重新添加原件…」（#1961）：选这款的原件 → import 作业只认这一款（expectGameId）→ 记下新位置；选错了说清楚、不改记录。
-    ///   找回后不自动重新出包（整款重出要几分钟到几十分钟），黄字换成「原件已找回：在出包页对这款重新出包」
+    ///   找回后接着从原件整款重出（repackWholeGame 排进批量出包，约几分钟到几十分钟），黄字换成「原件已找回，正在从原件整款重新出包」
     func relinkSource(_ game: GameSummary, source: URL) {
         let id = game.id.uppercased()
         guard var run = gameUpdates[id], !run.running, !run.relinking else { return }
@@ -60,6 +62,8 @@ extension S2ArmLauncherModel {
             }
             run.relinking = false
             self.gameUpdates[id] = run
+            // #1961：原件找回来了 → 接着从原件整款重出（玩家不必自己去找出包页）
+            if run.relinked { self.repackWholeGame(game) }
         }
     }
 
@@ -81,6 +85,7 @@ extension S2ArmLauncherModel {
                 let r = try await self.provider.updateGame(gameId: game.id, events: sink)
                 run.incomplete = r.incomplete
                 run.relinkSource = r.relinkSource
+                run.repack = r.repack
                 if r.reasons.isEmpty { self.updateHints[id] = nil } else { self.updateHints[id] = r.reasons }
             } catch {
                 run.failure = (error as? JobFailure)?.errorDescription ?? error.localizedDescription
@@ -89,6 +94,24 @@ extension S2ArmLauncherModel {
             run.progress.finish()
             self.gameUpdates[id] = run
             self.refreshUpdateHints()
+            // #1961：作业说这款要整款重出、原件还在 → 当场排进整款重出，玩家不用再找别处
+            if run.repack { self.repackWholeGame(game) }
+        }
+    }
+
+    /// 要整款重新出包的那行字（按钮下）：这款的原因里有 hostAbi（宿主约定号变了、只换库不够），或上一次「更新这款」回了要整款重出
+    func repackNoteNeeded(_ game: GameSummary) -> Bool {
+        updateReasons(game).contains("hostAbi") || gameUpdate(game)?.repack == true
+    }
+
+    /// 把这款排进从原件整款重出（#1961）：复用「更新并重新出这几款」那条（update.confirm.repack → updatePhone(repack:) → phoneUpdateEnded 的 openBatch → createBatch），
+    ///   不新造出包流程、不连手机：只出 iPhone 一份，不设 installAfterDevice / batchInstallAfter（出完不装到设备）。
+    ///   弄不成（正在出别的批 / 正在玩）就把原因留在清单页上，不静默
+    func repackWholeGame(_ game: GameSummary) {
+        Task {
+            openBatch([game.id])
+            for i in batchDraft.indices { batchDraft[i].iphone = batchDraft[i].problem == nil; batchDraft[i].mac = false }
+            if let reason = await createBatch() { batchError = reason }
         }
     }
 

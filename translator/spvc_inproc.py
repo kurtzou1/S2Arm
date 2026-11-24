@@ -57,8 +57,8 @@ def _build(out):
         procs.append(subprocess.Popen([*cc, '-c', os.path.join(SHIM, 'win' if WIN else '', 'shim.cpp'), '-o', os.path.join(tmp, 'shim.o')]))
         if any(p.wait() for p in procs): raise RuntimeError('spirv-cross 进程内库编译失败（见上方编译器输出）')
         lib = os.path.join(tmp, LIB)
-        # Windows 链接带 /Brepro：库整文件哈希进翻译键（dsh/batch/Build.cs LibFp，PE 不拆节），lld-link 缺省写链接时刻，同源每编一次字节不同、
-        #   Windows 出包机每份新检出全部着色器翻译缓存作废；/Brepro 时间戳取内容哈希。Mac 照旧（LibFp 按 Mach-O 节内容算，不看文件头）
+        # Windows 链接带 /Brepro：库整文件哈希进翻译键（dsh/batch/Store.cs ToolLib.Fp，PE 不拆节），lld-link 缺省写链接时刻，同源每编一次字节不同、
+        #   Windows 出包机每份新检出全部着色器翻译缓存作废；/Brepro 时间戳取内容哈希。Mac 照旧（ToolLib.Fp 按 Mach-O 节内容算，不看文件头）
         # 只链接上面自己编出的目标文件。原先按「目录里所有 .o」收：引擎在 exFAT 盘上时 macOS 给每个 .o 另写一个 AppleDouble「._<名>.o」，
         #   一并交给 ld 报 unknown file type，直连库每次都出不来（#1529）。仍按目录列出的顺序链接：APFS 上这个顺序固定，库各节内容与原先相同
         subprocess.run([*_cxx(), *(['-shared', '-Wl,/Brepro'] if WIN else ['-dynamiclib']), '-o', lib, *_own_objects(tmp, [*UNITS, 'main', 'shim'])], check=True)

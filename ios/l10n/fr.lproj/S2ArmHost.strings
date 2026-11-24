@@ -224,6 +224,8 @@
 "vpad.layouts.title" = "Disposition tactile";
 "vpad.layouts.touch.note" = "Pour les jeux avec leurs propres commandes tactiles. Les boutons à l'écran s'éteignent ; maintenez quatre doigts pendant 1,5 s pour revenir.";
 "vpad.menu.editDisabled" = "Aucun bouton à modifier en mode tactile uniquement";
+"vpad.menu.hideKeys" = "Masquer les boutons";
+"vpad.menu.showKeys" = "Afficher les boutons";
 "vpad.menu.face.auto" = "Boutons : Automatique";
 "vpad.menu.face.auto.note" = "Suit les lettres sur votre manette : disposition Switch sur les manettes Nintendo, disposition Xbox sur les manettes Xbox";
 "vpad.menu.face.switch" = "Boutons : disposition Switch";

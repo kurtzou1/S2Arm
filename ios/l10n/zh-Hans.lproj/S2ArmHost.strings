@@ -225,6 +225,8 @@
 "vpad.layouts.title" = "触屏布局";
 "vpad.layouts.touch.note" = "游戏自己的触屏操作用这项；虚拟按键会关掉，四指长按 1.5 秒可切回";
 "vpad.menu.editDisabled" = "仅触屏操作时没有按键可编辑";
+"vpad.menu.hideKeys" = "隐藏按键";
+"vpad.menu.showKeys" = "显示按键";
 "vpad.menu.face.auto" = "手柄按键：自动";
 "vpad.menu.face.auto.note" = "按手柄键帽上印的字母：任天堂手柄用 Switch 布局，Xbox 手柄用 Xbox 布局";
 "vpad.menu.face.switch" = "手柄按键：Switch 布局";

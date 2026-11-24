@@ -62,7 +62,7 @@ static void pull_bind(id en, NvShader *vs) {   // en：Metal 4 渲染编码器�
 }
 
 // 拉取基础管线：按（拉取入口、片元函数、样本数、alpha 覆盖、拓扑类）认；颜色状态留空。后台串行队列建，建过的（成败）不再建
-typedef struct { const void *vf, *ff; uint32_t samples, a2c, a21, topo; } pbase_key;
+typedef struct { const void *vf, *ff; uint32_t samples, a2c, a21, topo; } pbase_key;   // vf / ff：顶点 / 片元着色器对象（NvShader，常驻）
 static nvn_hmap g_pbase = {.klen = sizeof(pbase_key)};   // → id<MTLRenderPipelineState>，失败 NSNull
 static nvn_hmap g_pso_hy = {.klen = sizeof(pso_key)};   // 特化好的拉取管线，按它顶替的精确管线的键（提交线程）
 static os_unfair_lock g_pbase_lock = OS_UNFAIR_LOCK_INIT;
@@ -151,7 +151,9 @@ static __unsafe_unretained id<MTLRenderPipelineState> hybrid_get(const pso_key *
         if (!hybrid_comp()) return nil;
         MTLRenderPipelineDescriptor *d = pso_desc(k, vs, fs, nil, 0);
         if (!hybrid_fits(d, vs, fs)) return nil;
-        pbase_key bk; memset(&bk, 0, sizeof bk); bk.vf = (__bridge const void *)vs->pfn; bk.ff = (__bridge const void *)fs->fn;
+        // 基底键认着色器对象（D-92BW）：原先认函数指针，预热后放掉的着色器补回后函数是新对象，旧键不再命中；放掉的旧函数地址还可能被别的新函数占去、撞出错的基底。
+        //   着色器对象常驻：同一对着色器 → 同一拉取入口（pull_fn 按 vs 的键与入口名载）与同一片元主入口
+        pbase_key bk; memset(&bk, 0, sizeof bk); bk.vf = (__bridge const void *)vs; bk.ff = (__bridge const void *)fs;
         bk.samples = (uint32_t)d.rasterSampleCount; bk.a2c = d.alphaToCoverageEnabled; bk.a21 = d.alphaToOneEnabled; bk.topo = (uint32_t)d.inputPrimitiveTopology;
         os_unfair_lock_lock(&g_pbase_lock); id base = hm_get_id(&g_pbase, &bk); if (!base) hm_put_id(&g_pbase, &bk, NSNull.null); os_unfair_lock_unlock(&g_pbase_lock);
         id bd = base ? nil : pull_desc4(d, vs, fs, 1);

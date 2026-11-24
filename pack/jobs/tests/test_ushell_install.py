@@ -178,14 +178,17 @@ class PushGameTests(JobCase):
 
     def test_update_incomplete_is_said_not_silent(self):
         """11-21：「更新这款」做不齐时照实给黄字（update_incomplete），不静默。#1961：着色器库重编不了分三种说——没装工具 / 原料不在但原件在
-        （去出包页重出）/ 原件也不在（黄字带 facts.action = relinkSource，前端画「重新添加原件…」）；宿主约定号变了要整款重出。期望手写"""
+        （facts.action = repack，前端接着从原件整款重出）/ 原件也不在（relinkSource，前端画「重新添加原件…」）；宿主约定号变了要整款重出，
+        原件在 → repack、不在 → relinkSource；约定号变了又没原料时只给一条要重出的（重出一次两样都解决）。期望手写"""
         import sgrade_bf, host_update
         layout.save_device(self.c, self.ph.key, dict(shellId="S1", bundleId=self.ph.bid, games={GID: dict(pack="P1")}))
         for label, rechain, have, abi, want, action in (
                 ("没装工具", "no_tools", True, host_update.HOST_ABI, [install.UPDATE_SHADER_NO_TOOLS], None),
-                ("没原料·原件在", "no_source", True, host_update.HOST_ABI, [install.UPDATE_NEEDS_REPACK_SOURCE], None),
+                ("没原料·原件在", "no_source", True, host_update.HOST_ABI, [install.UPDATE_NEEDS_REPACK_SOURCE], "repack"),
                 ("没原料·原件也不在", "no_source", False, host_update.HOST_ABI, [install.UPDATE_NEEDS_SOURCE], "relinkSource"),
-                ("约定号变了", "skip", True, host_update.HOST_ABI + 1, [install.UPDATE_NEEDS_REPACK], None),
+                ("约定号变了", "skip", True, host_update.HOST_ABI + 1, [install.UPDATE_NEEDS_REPACK], "repack"),
+                ("约定号变了·原件不在", "skip", False, host_update.HOST_ABI + 1, [install.UPDATE_NEEDS_REPACK_NO_SOURCE], "relinkSource"),
+                ("约定号变了·又没原料", "no_source", True, host_update.HOST_ABI + 1, [install.UPDATE_NEEDS_REPACK], "repack"),
                 ("都齐", "updated", True, host_update.HOST_ABI, [], None)):
             with self.subTest(label), mock.patch.object(sgrade_bf, "rechain_ios", lambda c, g, r=rechain: r), \
                     mock.patch.object(install, "sources_present", lambda c, g, h=have: h), \

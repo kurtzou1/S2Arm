@@ -225,6 +225,8 @@
 "vpad.layouts.title" = "Touch layout";
 "vpad.layouts.touch.note" = "For games with their own touch controls. The on-screen buttons turn off; hold four fingers for 1.5 s to switch back.";
 "vpad.menu.editDisabled" = "No buttons to edit in touch-only mode";
+"vpad.menu.hideKeys" = "Hide Buttons";
+"vpad.menu.showKeys" = "Show Buttons";
 "vpad.menu.face.auto" = "Buttons: Automatic";
 "vpad.menu.face.auto.note" = "Follows the letters on your controller: Switch layout on Nintendo controllers, Xbox layout on Xbox controllers";
 "vpad.menu.face.switch" = "Buttons: Switch layout";

@@ -1001,6 +1001,21 @@ static void t_bool_uniform(void) {
     glUniform1i(lf, 0); glUniform2iv(lp, 1, p00); glDrawArrays(4, 0, 6); glFinish(); pxs(4, 4, s);
     CHECK(px_is(4, 4, 255, 0, 0, 255) && !glGetError(), "uFlag=0、uPair=(0,0) → 红（%s）", s);
 }
+// ⓟ D-S6VQ：精度查询与读回格式查询（期望按规范与本层实际精度手算：32 位 float / int）
+static void t_precision(void) {
+    G(glGetShaderPrecisionFormat, void, GLenum, GLenum, GLint *, GLint *)
+    glGetError(); GLint r[2] = {-1, -1}, pr = -1;
+    glGetShaderPrecisionFormat(0x8B30, 0x8DF2, r, &pr);   // FRAGMENT / HIGH_FLOAT
+    CHECK(r[0] == 127 && r[1] == 127 && pr == 23 && !glGetError(), "highp float：range {%d, %d}、precision %d（应 127 127 23）", r[0], r[1], pr);
+    r[0] = r[1] = pr = -1; glGetShaderPrecisionFormat(0x8B31, 0x8DF0, r, &pr);   // VERTEX / LOW_FLOAT：本层不降精度，同 highp
+    CHECK(r[0] == 127 && r[1] == 127 && pr == 23, "lowp float 同 highp：{%d, %d} %d", r[0], r[1], pr);
+    r[0] = r[1] = pr = -1; glGetShaderPrecisionFormat(0x8B30, 0x8DF5, r, &pr);   // FRAGMENT / HIGH_INT
+    CHECK(r[0] == 31 && r[1] == 30 && pr == 0, "highp int：range {%d, %d}、precision %d（应 31 30 0）", r[0], r[1], pr);
+    r[0] = r[1] = pr = -1; glGetShaderPrecisionFormat(0x8B30, 0x1234, r, &pr);
+    CHECK(glGetError() == INVALID_ENUM && r[0] == -1 && pr == -1, "未知精度类型 → INVALID_ENUM、不写输出");
+    GLint fmt = 0, typ = 0; glGetIntegerv(0x8B9B, &fmt); glGetIntegerv(0x8B9A, &typ);
+    CHECK(fmt == 0x1908 && typ == 0x1401 && !glGetError(), "IMPLEMENTATION_COLOR_READ_FORMAT / TYPE = RGBA / UNSIGNED_BYTE（%#x / %#x）、不置错", fmt, typ);
+}
 int main(void) { alarm(120); @autoreleasepool {
 #define LOAD(name, ret, ...) name = (ret (*)(__VA_ARGS__))gpa(#name); if (!name) { printf("✗ 取不到已有入口 %s\n", #name); return 1; }
     BASE(LOAD)
@@ -1014,6 +1029,6 @@ int main(void) { alarm(120); @autoreleasepool {
     g_sf = eglCreateWindowSurface(g_dpy, cfg, NULL, NULL); EGLContext ctx = eglCreateContext(g_dpy, cfg, NULL, ctx_attr);
     if (!eglMakeCurrent(g_dpy, g_sf, g_sf, ctx)) { printf("✗ 建上下文失败\n"); return 1; }
     g_tri = program("tri"); glGenVertexArrays(1, &g_tri_vao); glGenBuffers(1, &g_tri_vbo);
-    t_queries(); t_sync(); t_readback(); t_fb_query(); t_volume(); t_msaa(); t_map(); t_instanced(); t_packed_attr(); t_raster_read(); t_uniforms(); t_names_programs(); t_threads(); t_frame_storage(); t_core_stub(); t_rb_sync_query(); t_tex_storage3d(); t_tex_swizzle(); t_bool_uniform(); t_api_version(); t_egl_current(); t_map_range(); t_pack_buffer(); t_unpack_buffer(); t_es300(); t_desk120(); t_sampler_array(); t_shader_iv(); t_love();
+    t_queries(); t_sync(); t_readback(); t_fb_query(); t_volume(); t_msaa(); t_map(); t_instanced(); t_packed_attr(); t_raster_read(); t_uniforms(); t_names_programs(); t_threads(); t_frame_storage(); t_precision(); t_core_stub(); t_rb_sync_query(); t_tex_storage3d(); t_tex_swizzle(); t_bool_uniform(); t_api_version(); t_egl_current(); t_map_range(); t_pack_buffer(); t_unpack_buffer(); t_es300(); t_desk120(); t_sampler_array(); t_shader_iv(); t_love();
     printf("%s t_gl_api：%d 项，失败 %d\n", fails ? "✗" : "✓", checks, fails); return fails != 0;
 }}

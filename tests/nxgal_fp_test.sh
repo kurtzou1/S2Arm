@@ -1,6 +1,6 @@
 #!/bin/bash
 # 门禁覆盖：graphics/tools/direct/dsh/batch/Build.cs graphics/tools/direct/dsh/batch/Program.cs
-# libnxgal 进翻译键的功能身份单测（dsh_batch --lib-fp，graphics/tools/direct/dsh/batch/Build.cs LibFp；约 1 分钟，含编 dsh_batch）：bash tests/nxgal_fp_test.sh
+# libnxgal 进翻译键的功能身份单测（dsh_batch --lib-fp，graphics/tools/direct/dsh/batch/Store.cs ToolLib.Fp；约 1 分钟，含编 dsh_batch）：bash tests/nxgal_fp_test.sh
 # 11-02 出包线：翻译键原先取 libnxgal.dylib 整文件哈希，而 clang 一步编译加链接时调试映射记随机临时目标文件名，UUID / 签名跟着变——
 #   同一份源码每编一次字节都不同，每换一棵工作树全部着色器翻译缓存作废（马力欧派对 82790 支 hit 0）。期望按规则手写：
 #   ① 同一份源码一步编两次（-g、临时 .o 名随机）→ 两份文件字节不同，--lib-fp 相同

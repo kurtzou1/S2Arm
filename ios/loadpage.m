@@ -6,6 +6,7 @@
 #import <UIKit/UIKit.h>
 #import "tv_compat.h"
 #import "s2a_l10n.h"
+#import "bundle_icon.h"
 #include "s2a_loadprog.h"
 uint64_t now_ns(void);
 
@@ -37,8 +38,8 @@ static NSString *nacp_title(void) {
 static UIImage *game_icon(void) {
     UIImage *im = [UIImage imageWithContentsOfFile:[game_data_dir() stringByAppendingPathComponent:@"icon.jpg"]];
     if (im) return im;
-    NSDictionary *icons = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleIcons"];   // 包里的 AppIcon（pack/app_bundle.py 用同一张游戏图标缩的）
-    NSString *name = [icons[@"CFBundlePrimaryIcon"][@"CFBundleIconFiles"] lastObject];
+    // 包里的 AppIcon（pack/app_bundle.py 用同一张游戏图标缩的；Apple TV 包是品牌资源名，见 bundle_icon.h）
+    NSString *name = s2a_bundle_icon_name([NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleIcons"]);
     return name ? [UIImage imageNamed:name] : nil;
 }
 

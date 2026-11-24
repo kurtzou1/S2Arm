@@ -107,6 +107,15 @@ namespace S2A.Services
         public static delegate* unmanaged<ulong, void*, ulong, void> DetHostWrite;   // 接口 v2.10：宿主写游戏内存（确定性档按序记 / 重放）   // 接口 v2.8：游戏读到的系统计数器（19.2 MHz，同 mrs cntpct 门 / svc GetSystemTick）
         // Registered by platform composition before Boot; table and callbacks live
         // until process exit. Same-pointer registration is idempotent, not replaceable.
+        // 补满采样（#2146）：宿主一次取走一拍累积的 IMU 样本（s2a_pad.h s2a_pad_motion_burst_fn）。平台装配在 Boot 前登记；
+        //   没登记（没有批量体感源的宿主、测试）= 0，ControllerFeedback 走单笔路径。只登记一次，不可替换
+        public static nint MotionBurst { get; private set; }
+        public static bool RegisterMotionBurst(nint fn)
+        {
+            if (fn == 0 || (MotionBurst != 0 && MotionBurst != fn)) { Red.Report("体感批量源登记无效", fn == 0 ? "空函数" : "不能替换已登记的", allowFailFast: false); return false; }
+            MotionBurst = fn;
+            return true;
+        }
         public static LanDiscoveryV1* LanDiscovery { get; private set; }
         private static readonly object _lanRegistrationLock = new();
         public static bool RegisterLanDiscovery(LanDiscoveryV1* provider)

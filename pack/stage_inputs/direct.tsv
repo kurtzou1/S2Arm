@@ -79,6 +79,7 @@
 入	graphics/tools/direct/dsh/batch/C1Cb.cs	c1 越界核查表与常量读范围表（原 c1_guard.py / cb_extent.py）
 入	graphics/tools/direct/dsh/batch/LibPack.cs	发布核验、库容器打包、ps_inputs（原 lib_swap.py / lib_pack.py / ps_inputs.py）
 入	graphics/tools/direct/dsh/batch/PkgRead.cs	读着色器包 / shader_map.tsv（Build 与出包 Vulkan 库工具 vklib 共用一份，#1419 审 2）
+入	graphics/tools/direct/dsh/batch/Store.cs	内容寻址缓存仓与出库工具原生库的功能身份（11-24 从 Build.cs 挪出，苹果出库与出包 Vulkan 库共用）
 入	graphics/tools/direct/dsh/batch/Unity.cs	编批库源码、切批与共享入口改写（原 dmsh_build.py unity_flush / dmsh_ushare.py）
 入	graphics/tools/direct/dsh/batch/dsh_batch.csproj	同上的工程文件
 入	graphics/tools/direct/compiler/Sha256.cs	S2A.Dsh.csproj 编进来的源码
@@ -92,7 +93,7 @@
 外	translator/xlock.py	跨平台文件锁（dsh_batch.py / spvc_inproc.py 编库时互斥用），不影响产物
 外	translator/spvc_cli/win/cli.h	只在 Windows 编 spirv-cross 命令行时预包含（输出按二进制写，与 Mac 逐字节同），Mac 出库不经过
 外	translator/spvc_cli/msl_upstream_helpers.txt	只在编 spirv-cross 命令行时用（把 spirv_msl.cpp 的本仓改动段换回上游原文，输出与 Mac Homebrew 版逐字节同），进程内库与 Mac 出库不经过
-外	translator/spvc_cli/win/shim.cpp	Windows 进程内库的输入输出搬运胶水（临时文件），不改 MSL（输出身份不含它，同 Mac 逐字节）；spvc_inproc.py 只用它算 Windows 上的库编号，库内容另由 dsh_batch 的 LibFp 进工具指纹
+外	translator/spvc_cli/win/shim.cpp	Windows 进程内库的输入输出搬运胶水（临时文件），不改 MSL（输出身份不含它，同 Mac 逐字节）；spvc_inproc.py 只用它算 Windows 上的库编号，库内容另由 dsh_batch 的 ToolLib.Fp 进工具指纹
 入	graphics/tools/direct/se_want.py	采样模拟变体预编请求表（se_want.tsv）：跑局见过的键进库
 入	graphics/tools/direct/merge_extract.py
 入	graphics/tools/direct/run_pairs.py

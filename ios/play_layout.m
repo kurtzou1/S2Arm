@@ -39,8 +39,16 @@ BOOL S2APlayPortrait(S2APlayOrientation orientation, BOOL split) { return orient
 static BOOL finite_rect(CGRect r) {
     return isfinite(r.origin.x) && isfinite(r.origin.y) && isfinite(r.size.width) && isfinite(r.size.height) && r.size.width>=0 && r.size.height>=0;
 }
+// 「自动」在不半折时也分屏的条件（#2179，iPhone 竖屏缺省「自动」不分屏，按键整屏叠在画面上）：竖着（高 > 宽），16:9 画面按安全区宽度等比放进上半区放得下
+//   ——即上半区（安全区顶到视图中线）高度 ≥ 安全区宽 × 9/16，下半区就整块留给按键、互不重叠。不按机型列名单：普通 iPhone、iPad 竖屏、Duo 外屏竖屏都按这一条判；
+//   横屏、近方的窗口放不下就不分（照旧整屏画面 + 叠加按键）。半折照旧由 half 判
+static BOOL play_auto_split_fits(CGRect b, CGRect safe) {
+    if (!finite_rect(b) || CGRectIsEmpty(b) || !(b.size.height>b.size.width)) return NO;
+    CGRect sg=CGRectIntersection(b,safe); if (CGRectIsNull(sg) || CGRectIsEmpty(sg)) return NO;
+    return CGRectGetMidY(b)-CGRectGetMinY(sg) >= sg.size.width*9.0/16.0;
+}
 S2APlayLayout S2APlayLayoutMake(CGRect b, CGRect safe, S2APlaySplitMode mode, BOOL half, CGRect division) {
-    BOOL split=S2APlaySplitEnabled(mode,half);
+    BOOL split=S2APlaySplitEnabled(mode,half) || (mode==S2APlaySplitAuto && play_auto_split_fits(b,safe));
     S2APlayLayout l={b,CGRectIntersection(b,safe),CGRectNull,split,NO};
     if (!finite_rect(b) || CGRectIsEmpty(b)) return (S2APlayLayout){CGRectZero,CGRectZero,CGRectNull,split,NO};
     if (!finite_rect(division)) division=CGRectNull;

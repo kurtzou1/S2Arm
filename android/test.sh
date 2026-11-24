@@ -318,6 +318,9 @@ s2a_gate_step "$PY" "$android_dir/tests/host_link_test.py"   # 宿主单测链�
 # 新回放层：真实图形/计算请求生产入口的贴图池容量、超限与调试读数。
 s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py" --withdraw
+# 事实复用放宽（#2166）：高槽直连事实不拆程序 / 请求开关依赖来源可复用；尾部事实判据、掩码越界、请求来源白名单、高槽句柄拦截、
+#   开关（含关闭态 --fact-wide-off、生产缺省档 --fact-wide-default 各单独起进程）与命中计数各撤一处，对应用例必红
+s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py" --fact-wide-mutants
 # 几何着色器走出包预编库的负对照（正例在上面无参那一步里单独起进程跑）：撤掉接线各一处，--gs-libpack 必红
 s2a_gate_step "$PY" "$android_dir/tests/nvk_shader_pool_test.py" --gs-libpack-mutants
 # 计算程序出包预编库的非对齐闸负对照（#496085）：撤掉 state_ok 对 ckey 的生效，--cs-libpack 必红

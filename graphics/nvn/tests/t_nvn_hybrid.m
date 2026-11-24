@@ -19,12 +19,17 @@
 //      首查预热（hybrid_pkg_warm，测试里直接调）：随包 s2a_warm.metallib + 别的片元的归档冒名 → 「没查中」（2）、一行【黄】；换成本对小库按同一描述出、压过的归档 →
 //      「查中」（1）、耗时 > 0、不计入「解压」
 //   反证：DM_PSO_HYBRID=0（子进程）→ ② 拿到的是精确管线、g_pso_pull 0
+//   ① ⑥ ⑦ 的首遇经 get_held 取：精确那条闸到这次首遇踢了基础管线或取完。反证（11-24 本机）：⑥ ⑦ 改回直接 pso_get_，并在生产 pso_get_ 踢出精确编译与再查状态之间
+//      临时插 100 ms → 5 项红，拉取 / 踢 / 命中全零，与门禁 11-19..11-21 留下的 FAIL 行逐字同形；带 get_held 插 100 / 300 ms 照旧 19 项全过
 #include "../gfx/nvn/nvn_mtl.m"
 #include <sys/wait.h>
 
 static unsigned failures, checks;
 #define REQUIRE(c) do { if (!(c)) { fprintf(stderr, "FAIL setup %s:%d: %s\n", __FILE__, __LINE__, #c); exit(2); } } while (0)
-#define VERIFY(c, ...) do { checks++; int ok_ = !!(c); if (!ok_) failures++; printf("%s ", ok_ ? "PASS" : "FAIL"); printf(__VA_ARGS__); putchar('\n'); fflush(stdout); } while (0)
+// 不符的项连同期望 / 实际记进 g_fail，子进程末行汇总里逐项列出：门禁红组摘录只留 ✗ 行与【红】行，中间的 FAIL 行会被挤掉（11-23 六次红定不了是哪一项）
+static char g_fail[8192];
+#define VERIFY(c, ...) do { checks++; int ok_ = !!(c); char m_[1024]; snprintf(m_, sizeof m_, __VA_ARGS__); printf("%s %s\n", ok_ ? "PASS" : "FAIL", m_); fflush(stdout); \
+    if (!ok_) { failures++; strlcat(g_fail, "\n  ✗ 不符：", sizeof g_fail); strlcat(g_fail, m_, sizeof g_fail); } } while (0)
 
 static NSString *const source = @"#include <metal_stdlib>\nusing namespace metal;\n"
 "struct VO { float4 p [[position]]; float4 a [[user(locn0)]]; };\n"
@@ -77,6 +82,14 @@ static NSString *capture_stderr(void (^fn)(void)) {
 }
 // 等后台建好基础管线，兜底 30 秒（原 5 秒：负载高时后台编得慢就假红）；等不到返回 0，调用处判红
 static int wait_bases(uint64_t want) { for (int i = 0; i < 3000 && g_hy_bases < want; i++) usleep(10000); return g_hy_bases >= want; }
+// 首遇取管线，精确那条的后台编译先闸住（g_pp_test_hold），直到这次首遇踢了基础管线（g_hy_kicked 变了：之后它要等精确那条，得放行）或取完返回才放行。
+//   不闸：pso_get_ 踢出精确编译后要再查一次状态，系统着色器缓存热时精确那条在这两步之间就编好（状态 2），混合那条路整条跳过，
+//   拉取 0、踢 0、命中 0 全零判红（门禁 11-19..11-23 ⑥ ⑦ 的红样；本机在两步之间插 100 ms 必现，① 同样中）
+static id get_held(NvProg *p) {
+    uint64_t k0 = g_hy_kicked; __block volatile int done = 0; dispatch_semaphore_t h = dispatch_semaphore_create(0); g_pp_test_hold = h;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{ for (int i = 0; i < 30000 && g_hy_kicked == k0 && !done; i++) usleep(1000); dispatch_semaphore_signal(h); });
+    id ps = pso_get_(p, nil); done = 1; g_pp_test_hold = nil; return ps;
+}
 
 static int run(int hybrid) {
     setenv("DM_NVN_FIRST_SKIP", "0", 1);   // 测的是不能跳的首遇（跳过那条路另有单测）
@@ -115,7 +128,7 @@ static int run(int hybrid) {
     memset(&g_pass, 0, sizeof g_pass); g_pass.cfmt[0] = (uint32_t)MTLPixelFormatRGBA32Float; g_pass.samples = 1;
 
     // ① 第一次首遇：基础管线还没有
-    uint64_t kick0 = g_hy_kicked; id ps1 = pso_get_(pr, nil); int pull1 = g_pso_pull;
+    uint64_t kick0 = g_hy_kicked; id ps1 = hybrid ? get_held(pr) : pso_get_(pr, nil); int pull1 = g_pso_pull;
     if (hybrid) VERIFY(ps1 && !pull1 && g_hy_kicked - kick0 == 1, "① 第一次首遇：拿到精确管线 %d、g_pso_pull %d（期望 0）、后台踢出基础管线 %llu 条（期望 1）", ps1 != nil, pull1, (unsigned long long)(g_hy_kicked - kick0));
     if (hybrid) REQUIRE(wait_bases(1));
     // ② 同一对、换画布格式：新键
@@ -126,16 +139,17 @@ static int run(int hybrid) {
     if (hybrid) g_pp_test_hold = dispatch_semaphore_create(0);
     uint64_t made0 = g_hy_made; id ps2 = pso_get_(pr, nil); int pull2 = g_pso_pull, st2 = pso_pend_state(&k2);
     if (!hybrid) { VERIFY(ps2 && !pull2, "反证 DM_PSO_HYBRID=0：② 拿到精确管线 %d、g_pso_pull %d（期望 0）", ps2 != nil, pull2); return 0; }
-    VERIFY(ps2 && pull2 && ps2 != ps1 && (st2 == 1 || st2 == 2) && g_hy_made - made0 == 1, "② 基础管线已建好的首遇：拉取管线 g_pso_pull %d（期望 1）、精确那条在后台表里（状态 %d，期望 1 / 2）、特化 +%llu（期望 1）",
-           pull2, st2, (unsigned long long)(g_hy_made - made0));
+    VERIFY(ps2 && pull2 && ps2 != ps1 && (st2 == 1 || st2 == 2) && g_hy_made - made0 == 1, "② 基础管线已建好的首遇：拉取管线 g_pso_pull %d（期望 1）、拿到管线 %d（期望 1）、与 ① 同一条 %d（期望 0）、精确那条在后台表里（状态 %d，期望 1 / 2）、特化 +%llu（期望 1）",
+           pull2, ps2 != nil, ps2 == ps1, st2, (unsigned long long)(g_hy_made - made0));
     // ③ 同键再取：精确那条编好前同一条拉取管线、编好后精确的
     id ps3 = pso_get_(pr, nil); int pull3 = g_pso_pull;
-    if (pull3) VERIFY(ps3 == ps2 && g_hy_made - made0 == 1, "③ 精确那条还在编：同一条拉取管线、不再特化（特化 +%llu）", (unsigned long long)(g_hy_made - made0));
+    if (pull3) VERIFY(ps3 == ps2 && g_hy_made - made0 == 1, "③ 精确那条还在编：与 ② 同一条拉取管线 %d（期望 1）、不再特化（特化 +%llu，期望 1）", ps3 == ps2, (unsigned long long)(g_hy_made - made0));
     VERIFY(pull3, "③ 闸住期间同键再取：仍给拉取管线（g_pso_pull %d，期望 1）", pull3);
     dispatch_semaphore_signal(g_pp_test_hold); g_pp_test_hold = nil;   // 放行：精确那条开始编
-    for (int i = 0; i < 3000 && pso_pend_state(&k2) != 2; i++) usleep(10000);   // 等精确那条后台编好，兜底 30 秒（原 5 秒）；等不到下一行判红
-    id ps4 = pso_get_(pr, nil);
-    VERIFY(ps4 && !g_pso_pull && ps4 != ps2, "③ 精确那条编好后：给精确管线（g_pso_pull %d，期望 0）", g_pso_pull);
+    int waited = 0; for (; waited < 3000 && pso_pend_state(&k2) != 2; waited++) usleep(10000);   // 等精确那条后台编好，兜底 30 秒（原 5 秒）；等不到下一行判红
+    int st4 = pso_pend_state(&k2); id ps4 = pso_get_(pr, nil);
+    VERIFY(ps4 && !g_pso_pull && ps4 != ps2, "③ 精确那条编好后：给精确管线（g_pso_pull %d，期望 0）、拿到管线 %d（期望 1）、仍是 ② 那条拉取管线 %d（期望 0）；取之前后台状态 %d（期望 2）、等了约 %d ms",
+           g_pso_pull, ps4 != nil, ps4 == ps2, st4, waited * 10);
     // ④ 布局块（手算）
     pull_layout L; pull_layout_fill(&L, vs);
     uint64_t gpu = 0; void *mb; uint64_t mo; REQUIRE(mtl_gpu_addr((uint64_t)(uintptr_t)vb, sizeof verts, &mb, &mo, &gpu));
@@ -193,15 +207,15 @@ static int run(int hybrid) {
         for (int i = 0; i < 3; i++) {
             NvProg *p6 = [NvProg new]; p6->sh[0] = vs; p6->sh[1] = fss[i];
             uint64_t st0[3], st1[3], k0 = g_hy_kicked; mtl_hybrid_pkg_stats(st0);
-            id ps = pso_get_(p6, nil); pulled[i] = ps && g_pso_pull; mtl_hybrid_pkg_stats(st1);
+            id ps = get_held(p6); pulled[i] = ps && g_pso_pull; mtl_hybrid_pkg_stats(st1);
             kicked[i] = g_hy_kicked - k0; hit[i] = st1[0] - st0[0]; nofile[i] = st1[1] - st0[1]; miss[i] = st1[2] - st0[2];
         }
-        VERIFY(pulled[0] && !kicked[0] && hit[0] == 1 && !nofile[0] && !miss[0], "⑥ 随包有这一对：第一次首遇就拿到拉取管线 %d（期望 1）、后台踢 %llu（期望 0）、随包命中 +%llu（期望 1）",
-               pulled[0], (unsigned long long)kicked[0], (unsigned long long)hit[0]);
-        VERIFY(!pulled[1] && kicked[1] == 1 && !hit[1] && nofile[1] == 1 && !miss[1], "⑥ 包里没有这一对：拉取管线 %d（期望 0）、后台踢 %llu（期望 1）、包里没有 +%llu（期望 1）",
-               pulled[1], (unsigned long long)kicked[1], (unsigned long long)nofile[1]);
-        VERIFY(!pulled[2] && kicked[2] == 1 && !hit[2] && !nofile[2] && miss[2] == 1, "⑥ 文件在、内容是别的片元的：拉取管线 %d（期望 0）、后台踢 %llu（期望 1）、有文件查不中 +%llu（期望 1）",
-               pulled[2], (unsigned long long)kicked[2], (unsigned long long)miss[2]);
+        VERIFY(pulled[0] && !kicked[0] && hit[0] == 1 && !nofile[0] && !miss[0], "⑥ 随包有这一对：第一次首遇就拿到拉取管线 %d（期望 1）、后台踢 %llu（期望 0）、随包命中 +%llu（期望 1）、包里没有 +%llu、有文件查不中 +%llu（期望都 0）",
+               pulled[0], (unsigned long long)kicked[0], (unsigned long long)hit[0], (unsigned long long)nofile[0], (unsigned long long)miss[0]);
+        VERIFY(!pulled[1] && kicked[1] == 1 && !hit[1] && nofile[1] == 1 && !miss[1], "⑥ 包里没有这一对：拉取管线 %d（期望 0）、后台踢 %llu（期望 1）、包里没有 +%llu（期望 1）、随包命中 +%llu、有文件查不中 +%llu（期望都 0）",
+               pulled[1], (unsigned long long)kicked[1], (unsigned long long)nofile[1], (unsigned long long)hit[1], (unsigned long long)miss[1]);
+        VERIFY(!pulled[2] && kicked[2] == 1 && !hit[2] && !nofile[2] && miss[2] == 1, "⑥ 文件在、内容是别的片元的：拉取管线 %d（期望 0）、后台踢 %llu（期望 1）、有文件查不中 +%llu（期望 1）、随包命中 +%llu、包里没有 +%llu（期望都 0）",
+               pulled[2], (unsigned long long)kicked[2], (unsigned long long)miss[2], (unsigned long long)hit[2], (unsigned long long)nofile[2]);
         // ⑦ 逐对 lzfse：D 对（fd，片元键 dddd…）只有压过的；C 对（fc，片元键 cccc…）压过的截掉后一半
         NSString *pd = [g_pkg_dir stringByAppendingPathComponent:pkg_name("aaaaaaaaaaaaaaaa_b", "dddddddddddddddd_b")], *pc = [g_pkg_dir stringByAppendingPathComponent:pkg_name("aaaaaaaaaaaaaaaa_b", "cccccccccccccccc_b")];
         REQUIRE(pkg_make(vlib, @"main0", flib, @"fd", pd) && sh([NSString stringWithFormat:@"compression_tool -encode -a lzfse -i '%@' -o '%@.lzfse' && rm -f '%@'", pd, pd, pd]));
@@ -212,13 +226,13 @@ static int run(int hybrid) {
         NvShader *fsd = shader(fl, @"fd", "dddddddddddddddd_b", 1), *fsc = shader(fl, @"fc", "cccccccccccccccc_b", 1);
         uint64_t s0[7], s1[7], s2[7]; mtl_hybrid_pkg_stats(s0);
         NvProg *pd7 = [NvProg new]; pd7->sh[0] = vs; pd7->sh[1] = fsd;
-        uint64_t kd0 = g_hy_kicked; id psd = pso_get_(pd7, nil); int pzd = psd && g_pso_pull; uint64_t kzd = g_hy_kicked - kd0; mtl_hybrid_pkg_stats(s1);
+        uint64_t kd0 = g_hy_kicked; id psd = get_held(pd7); int pzd = psd && g_pso_pull; uint64_t kzd = g_hy_kicked - kd0; mtl_hybrid_pkg_stats(s1);
         uint64_t hitd = s1[0] - s0[0], unzd = s1[3] - s0[3], nsd = s1[4] - s0[4];
         VERIFY(pzd && !kzd && hitd == 1 && unzd == 1 && nsd > 0 && !tmp_left(), "⑦ 只有 .lzfse：第一次首遇就拿到拉取管线 %d（期望 1）、后台踢 %llu（期望 0）、随包命中 +%llu（期望 1）、解压 +%llu（期望 1）、"
                "解压耗时 %.3f ms（期望 > 0）、临时目录留下的解压副本 %d 份（期望 0）", pzd, (unsigned long long)kzd, (unsigned long long)hitd, (unsigned long long)unzd, nsd / 1e6, tmp_left());
         NvProg *pc7 = [NvProg new]; pc7->sh[0] = vs; pc7->sh[1] = fsc;
         __block int pzc = 0; __block uint64_t kzc = 0;
-        NSString *err = capture_stderr(^{ uint64_t k0 = g_hy_kicked; id ps = pso_get_(pc7, nil); pzc = ps && g_pso_pull; kzc = g_hy_kicked - k0; });
+        NSString *err = capture_stderr(^{ uint64_t k0 = g_hy_kicked; id ps = get_held(pc7); pzc = ps && g_pso_pull; kzc = g_hy_kicked - k0; });
         mtl_hybrid_pkg_stats(s2);
         uint64_t missc = s2[2] - s1[2], unzc = s2[3] - s1[3];
         int yellow = [err rangeOfString:@"【黄】 hybrid pipelines: the package's pulling base of vertex aaaaaaaaaaaaaaaa_b fragment cccccccccccccccc_b did not serve"].location != NSNotFound;
@@ -244,7 +258,7 @@ static int run(int hybrid) {
 }
 int main(int argc, char **argv) { @autoreleasepool {
     setvbuf(stdout, NULL, _IOLBF, 0);
-    if (argc == 3 && !strcmp(argv[1], "--child")) { run(atoi(argv[2])); printf("%s t_nvn_hybrid 子进程（DM_PSO_HYBRID=%s）：%u 项，%u 项不符\n", failures ? "✗" : "✓", argv[2], checks, failures); return failures != 0; }
+    if (argc == 3 && !strcmp(argv[1], "--child")) { run(atoi(argv[2])); printf("%s t_nvn_hybrid 子进程（DM_PSO_HYBRID=%s）：%u 项，%u 项不符%s\n", failures ? "✗" : "✓", argv[2], checks, failures, g_fail); return failures != 0; }
     unsigned bad = 0; static const char *const modes[2] = {"1", "0"};
     for (int m = 0; m < 2; m++) {
         fflush(NULL); pid_t pid = fork(); REQUIRE(pid >= 0);

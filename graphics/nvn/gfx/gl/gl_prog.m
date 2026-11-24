@@ -246,6 +246,16 @@ GL(glGetShaderiv, void, GLuint name, GLenum what, GLint *v) {
         default: gl_set_error(GL_INVALID_ENUM); break;
     }
 }
+// glGetShaderPrecisionFormat（ES 3.2 §7.13；D-S6VQ 开局调它，原先是核心函数空实现、range / precision 不写）：本层着色器一律按 Metal 32 位 float / int 编，
+//   精度限定符不降精度，所以 LOW / MEDIUM / HIGH 三档同值——浮点 range {127, 127}、precision 23（IEEE 单精度），整数 range {31, 30}、precision 0。
+//   着色器类型只收 VERTEX / FRAGMENT、精度类型只收 0x8DF0–0x8DF5，别的置 INVALID_ENUM 且不写输出
+GL(glGetShaderPrecisionFormat, void, GLenum stype, GLenum ptype, GLint *range, GLint *precision) {
+    CTX();
+    if ((stype != GL_VERTEX_SHADER && stype != GL_FRAGMENT_SHADER) || ptype < 0x8DF0 || ptype > 0x8DF5) { gl_set_error(GL_INVALID_ENUM); return; }
+    int flt = ptype <= 0x8DF2;   // LOW / MEDIUM / HIGH_FLOAT；其后三个是 LOW / MEDIUM / HIGH_INT
+    if (range) { range[0] = flt ? 127 : 31; range[1] = flt ? 127 : 30; }
+    if (precision) *precision = flt ? 23 : 0;
+}
 GL(glGetShaderInfoLog, void, GLuint name, GLsizei cap, GLsizei *len, GLchar *log) {
     CTX(); gl_shader *s = gl_name_get(&gl_shaders, name); int n = 0;
     if (cap > 0) n = snprintf(log, (size_t)cap, "%s", s && !shader_ok(s) ? (s->rt && s->rt->why[0] ? s->rt->why : SHADER_LOG) : "");

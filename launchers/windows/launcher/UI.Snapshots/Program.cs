@@ -44,7 +44,9 @@ var updateExportProbe = args.Length > 0 && args[0] == "--update-export-probe";
 var confirmProbe = args.Length > 0 && args[0] == "--confirm-probe";
 // --walk-probe <目录>：玩家走查截图（6 个角色从打开启动器走到手机上玩，每步整页 PNG + 屏幕文字，WalkProbe.cs）
 var walkProbe = args.Length > 0 && args[0] == "--walk-probe";
-if (reportProbe || buildRouteProbe || dismissProbe || installActionProbe || detailsProbe || consoleProbe || updateExportProbe || walkProbe || confirmProbe) args = args[1..];
+// --cover-probe <目录>：坏封面只让那一格用占位图、设置框没画出来时环境检查路径不变空（D-97FT，CoverProbe.cs）
+var coverProbe = args.Length > 0 && args[0] == "--cover-probe";
+if (reportProbe || buildRouteProbe || dismissProbe || installActionProbe || detailsProbe || consoleProbe || updateExportProbe || walkProbe || confirmProbe || coverProbe) args = args[1..];
 var outDir = args.Length > 0 ? args[0] : Path.Combine(
     Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
     ".s2arm/run/s2arm/cmdr/evidence/launcher/win");
@@ -69,6 +71,7 @@ if (installActionProbe) { Environment.Exit(InstallActionProbe.Run(outDir)); }
 if (detailsProbe) { Environment.Exit(DetailsProbe.Run(outDir)); }
 if (consoleProbe) { Environment.Exit(ConsoleProbe.Run(outDir)); }
 if (updateExportProbe) { Environment.Exit(UpdateExportProbe.Run(outDir)); }
+if (coverProbe) { Environment.Exit(CoverProbe.Run(outDir)); }
 if (walkProbe) { Environment.Exit(WalkProbe.Run(outDir)); }
 
 // ── 统一夹具游戏（不用固定游戏名字符串以外的占位）────────────────────

@@ -7,6 +7,7 @@ namespace S2A.Aot
     static unsafe class Compose
     {
         [DllImport("s2a_native")] private static extern S2A.Services.LanDiscoveryV1* s2a_ldn_lan_provider();
+        [DllImport("s2a_native")] private static extern nint s2a_pad_motion_burst_provider();   // 补满采样（#2146）：没有批量体感源的宿主回 0
 
         private static S2Arm.Gfx.Widen.Gal.WidenRenderer s_widen;
         private static RyuJudge.GalRec.GalRecorder s_rec;
@@ -88,6 +89,8 @@ namespace S2A.Aot
             S2A.Apple.Capture.AppleScreenshotEncoder.Register();
             var lan = s2a_ldn_lan_provider();
             if (lan != null) S2A.Services.Native.RegisterLanDiscovery(lan);
+            var burst = s2a_pad_motion_burst_provider();
+            if (burst != 0) S2A.Services.Native.RegisterMotionBurst(burst);
             // 存档原子提交的宿主目录原语（平台 adapter P6，#1072）：苹果实现在 platform/apple/cs/savecommit
             Ryujinx.HLE.FileSystem.S2AHostFileSystem.Transaction = new S2A.Apple.SaveCommit.AppleHostDirectoryTransaction();
             // 视频按片源帧率出图：Ryujinx Nvdec 每解一帧报给直连出图节拍（通用模式不读，记下无副作用）

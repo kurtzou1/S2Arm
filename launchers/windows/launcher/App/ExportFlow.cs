@@ -31,6 +31,8 @@ public sealed partial class EnvironmentWindow
     private bool GameUpdating(string? gameId) => gameId is not null && gameUpdating.ContainsKey(gameId);
     /// <summary>黄字带「重新添加原件…」的款（#1961，诊断 facts.action = relinkSource）：offer = 给按钮；checking = 正在核对；done = 已找回；其余 = 核对没过的原句</summary>
     private readonly Dictionary<string, string> gameRelink = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>上一次「更新这款」回了要整款重出、原件在（#1961，诊断 facts.action = repack）：按钮下写小字，且已排进整款重出</summary>
+    private readonly Dictionary<string, bool> gameRepack = new(StringComparer.OrdinalIgnoreCase);
 
     private ExportChoice.Update UpdateStateOf(LibraryGame game) => ExportChoice.UpdateState(game.IphoneReady, UpdateReasons(game));
 
@@ -39,7 +41,7 @@ public sealed partial class EnvironmentWindow
     {
         if (GameUpdating(game.Id) || connectedFolder is null || libraryId is null) return;
         var front = BeginJob(JobKind.Update, game.Id);
-        gameUpdating[game.Id] = (null, ""); gameUpdated.Remove(game.Id); gameRelink.Remove(game.Id);
+        gameUpdating[game.Id] = (null, ""); gameUpdated.Remove(game.Id); gameRelink.Remove(game.Id); gameRepack.Remove(game.Id);
         Render();
         try
         {
@@ -66,29 +68,64 @@ public sealed partial class EnvironmentWindow
                 if (gameUpdating.ContainsKey(game.Id)) gameUpdating[game.Id] = (fraction ?? was.Fraction, message.Length > 0 ? message : was.Message);
                 RefreshLive();   // 只换按钮那一格（大卡按钮放在活格子里）
             }), front.Token, front.Next());
-            var warnings = new List<string>();
-            if (job.Report.Diagnostics.ValueKind == System.Text.Json.JsonValueKind.Array)
-                foreach (var d in job.Report.Diagnostics.EnumerateArray())
-                    if (d.TryGetProperty("code", out var c) && c.GetString() == "update_incomplete" &&
-                        (d.TryGetProperty("summary", out var s) || d.TryGetProperty("message", out s)) && s.GetString() is { Length: > 0 } line && !warnings.Contains(line))
-                        warnings.Add(line);
-            if (job.Report.Diagnostics.ValueKind == System.Text.Json.JsonValueKind.Array &&
-                job.Report.Diagnostics.EnumerateArray().Any(d => d.TryGetProperty("code", out var c) && c.GetString() == "update_incomplete" &&
-                    d.TryGetProperty("facts", out var f) && f.ValueKind == System.Text.Json.JsonValueKind.Object &&
-                    f.TryGetProperty("action", out var a) && a.GetString() == "relinkSource"))
-                gameRelink[game.Id] = "offer";
-            if (job.Report.Succeeded && job.Report.Result.TryGetProperty("reasons", out var rs) && rs.ValueKind == System.Text.Json.JsonValueKind.Array)
-            {
-                var left = rs.EnumerateArray().Select(r => r.GetString() ?? "").Where(r => UpdateReasonKey(r) is not null).ToArray();
-                if (left.Length > 0) updateHints[game.Id] = left; else updateHints.Remove(game.Id);
-            }
-            gameUpdated[game.Id] = (job.Report.Succeeded, job.Report.Succeeded ? "" : job.Report.Message.Length > 0 ? job.Report.Message : job.Report.State, warnings);
+            await AcceptUpdateReportAsync(game, job.Report);
         }
         catch (Exception error) when (error is LibraryProtocolException or IOException or UnauthorizedAccessException or ArgumentException or
             InvalidOperationException or OperationCanceledException or PlatformNotSupportedException or System.ComponentModel.Win32Exception)
         { gameUpdated[game.Id] = (false, error.Message.Length > 0 ? error.Message : error.GetType().Name, []); }
         finally { EndJob(front); gameUpdating.Remove(game.Id); gameUpdateCount.Remove(game.Id); Render(); }
         await RefreshUpdateHintsAsync();   // 判据照旧以 updateHints 为准（只读指纹、秒回）
+    }
+
+    /// <summary>收下 updateGame 的结局：黄字（诊断 update_incomplete 的玩家句）、原件不在给「重新添加原件…」、
+    /// 要整款重出（#1961，facts.action = repack）就当场把这款排进整款重出；成没成、结果里还剩的原因照旧。</summary>
+    private async Task AcceptUpdateReportAsync(LibraryGame game, LibraryJobResult report)
+    {
+        var warnings = new List<string>();
+        if (report.Diagnostics.ValueKind == System.Text.Json.JsonValueKind.Array)
+            foreach (var d in report.Diagnostics.EnumerateArray())
+                if (d.TryGetProperty("code", out var c) && c.GetString() == "update_incomplete" &&
+                    (d.TryGetProperty("summary", out var s) || d.TryGetProperty("message", out s)) && s.GetString() is { Length: > 0 } line && !warnings.Contains(line))
+                    warnings.Add(line);
+        if (UpdateRepack.NeedsSource(report.Diagnostics)) gameRelink[game.Id] = "offer";
+        if (report.Succeeded && report.Result.TryGetProperty("reasons", out var rs) && rs.ValueKind == System.Text.Json.JsonValueKind.Array)
+        {
+            var left = rs.EnumerateArray().Select(r => r.GetString() ?? "").Where(r => UpdateReasonKey(r) is not null).ToArray();
+            if (left.Length > 0) updateHints[game.Id] = left; else updateHints.Remove(game.Id);
+        }
+        gameUpdated[game.Id] = (report.Succeeded, report.Succeeded ? "" : report.Message.Length > 0 ? report.Message : report.State, warnings);
+        var repack = UpdateRepack.Requested(report.Diagnostics);
+        gameRepack[game.Id] = repack;
+        Render();
+        // #1961：工件形态变了、原件还在 → 不等玩家自己去找出包页，接着从原件整款重出
+        if (repack) await RepackWholeGameAsync(game);
+    }
+
+    /// <summary>把这款排进从原件整款重出（#1961）：复用「更新并重新出这几款」那条（OpenBatch → 只出 iPhone → StartBatchAsync），
+    /// 不新造出包流程、不连手机：出完不装设备。弄不成（正在出别的批、建批次失败）把原因照实写在按钮下，不静默。</summary>
+    private async Task RepackWholeGameAsync(LibraryGame game)
+    {
+        var plan = UpdateRepack.Plan(game.Id);
+        if (batchRunning || PackBusy)
+        {
+            AddUpdateWarning(game.Id, "正在出别的批次，这款的整款重出还没排上：等这一批出完，再点一次「更新这款」。");
+            Render(); return;
+        }
+        OpenBatch(plan.GameIds, []);
+        batchControlPlatforms = new Dictionary<string, string[]>(plan.Platforms, StringComparer.OrdinalIgnoreCase);
+        if (!await StartBatchAsync(plan.InstallAfterDevice) && batchError.Length == 0)
+        {
+            AddUpdateWarning(game.Id, "整款重出没排上：这款现在没有可出的平台。");
+            Render();
+        }
+    }
+
+    /// <summary>按钮下的黄字再多一条（同一次更新的诊断黄字一起显示）：同一句不重复堆</summary>
+    private void AddUpdateWarning(string gameId, string line)
+    {
+        var done = gameUpdated.TryGetValue(gameId, out var d) ? d : (Ok: true, Message: "", Warnings: []);
+        if (done.Warnings.Contains(line)) return;
+        gameUpdated[gameId] = (done.Ok, done.Message, [.. done.Warnings, line]);
     }
 
     /// <summary>大卡上的更新按钮（活格子：进度事件只换它）：没做过 iPhone 版 → null；更新中 → 不可点的进度；有原因 → 主色「更新这款」；全对上 → 灰色「无需更新」</summary>
@@ -149,6 +186,17 @@ public sealed partial class EnvironmentWindow
         return box;
     }
 
+    /// <summary>按钮下的一行小字（#1961）：要整款重新出包（原因含 hostAbi，或上一次更新回了 repack）→ T("update.repackNote")。
+    /// 不只在「建议更新」时写：做完整款重出的那次更新后原因可能已清空、按钮变「无需更新」，这句照样要在。样式同 update.hint.tail 的说明小字</summary>
+    private Control? UpdateRepackNote(LibraryGame game)
+    {
+        if (!game.IphoneReady || GameUpdating(game.Id)) return null;
+        if (!UpdateRepack.NoteNeeded(UpdateReasons(game), gameRepack.GetValueOrDefault(game.Id))) return null;
+        var line = new TextBlock { Text = T("update.repackNote"), Foreground = Brush.Parse("#A0A0A8"), FontSize = 12, TextWrapping = TextWrapping.Wrap };
+        AutomationId(line, "update.repackNote");
+        return line;
+    }
+
     /// <summary>按钮下方：上次更新做不齐的黄字（不当失败）、没做成的原因</summary>
     private Control? UpdateOutcomeLines(LibraryGame game)
     {
@@ -177,7 +225,7 @@ public sealed partial class EnvironmentWindow
     }
 
     /// <summary>「重新添加原件…」（#1961）：选这款的原件 → import 作业只认这一款（expectGameId）→ 记下新位置（不动已有出包）；
-    /// 选错了作业层拒（input_wrong_game）、不记进库。找回后不自动重新出包（整款重出要几分钟到几十分钟），提示去出包页</summary>
+    /// 选错了作业层拒（input_wrong_game）、不记进库。找回后接着从原件整款重出（整款重出要几分钟到几十分钟）</summary>
     private async Task RelinkSourceAsync(LibraryGame game)
     {
         if (connectedFolder is null || libraryId is null) return;
@@ -189,12 +237,20 @@ public sealed partial class EnvironmentWindow
         {
             var job = await LibraryJobClient.RunAsync(paths, privateRoot, connectedFolder, libraryId, "import", [path], CancellationToken.None,
                 fields: new Dictionary<string, object?> { ["expectGameId"] = game.Id });
-            gameRelink[game.Id] = job.Report.Succeeded ? "done" : job.Report.Message.Length > 0 ? job.Report.Message : job.Report.State;
+            await AcceptRelinkReportAsync(game, job.Report);
         }
         catch (Exception error) when (error is LibraryProtocolException or IOException or UnauthorizedAccessException or ArgumentException or
             InvalidOperationException or OperationCanceledException or PlatformNotSupportedException or System.ComponentModel.Win32Exception)
         { gameRelink[game.Id] = error.Message.Length > 0 ? error.Message : error.GetType().Name; }
         Render();
+    }
+
+    /// <summary>收下「重新添加原件…」的结局：成功（done）就接着把这款排进整款重出；没成功写作业层原句，不排</summary>
+    private async Task AcceptRelinkReportAsync(LibraryGame game, LibraryJobResult report)
+    {
+        gameRelink[game.Id] = report.Succeeded ? "done" : report.Message.Length > 0 ? report.Message : report.State;
+        Render();
+        if (report.Succeeded) await RepackWholeGameAsync(game);   // #1961：原件找回来了 → 接着从原件整款重出
     }
 
     // ---- 导出（导出确认页 → 逐台结果）----
@@ -332,7 +388,7 @@ public sealed partial class EnvironmentWindow
     private void OpenConsoleFor(string device)
     {
         consoleDevice = device;
-        selectedGame = ConsoleId;
+        ChangeSelectedGame(ConsoleId, "rowConsole");
         Navigate("library");
         _ = RefreshPhoneOverviewAsync(probe: true);
     }

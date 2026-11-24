@@ -33,6 +33,18 @@ namespace S2A.Services.Tests
             expect(LanHosting == 1 && LanStops == 2 && p->Start(7, 54321) == 0 && LanProgram == 7 && LanPort == 54321, "hosting / 重复 stop / restart 调用契约");
         }
 
+        // 补满采样（#2146）的批量体感源：平台装配登记，同 LAN 的规则（空报红、同指针幂等、不可替换）；不按名找导出
+        private static void MotionBurstRegistrationTest(Action<bool, string> expect)
+        {
+            expect(Native.MotionBurst == 0, "批量体感源缺省未登记（ControllerFeedback 走单笔路径）");
+            long red = Red.Total;
+            expect(!Native.RegisterMotionBurst(0) && Red.Total == red + 1 && Native.MotionBurst == 0, "空登记报红且不发布");
+            nint a = (nint)0x1000, b = (nint)0x2000;
+            expect(Native.RegisterMotionBurst(a) && Native.RegisterMotionBurst(a) && Native.MotionBurst == a, "登记发布且同指针幂等");
+            red = Red.Total;
+            expect(!Native.RegisterMotionBurst(b) && Red.Total == red + 1 && Native.MotionBurst == a, "替换拒绝、报红且保留原登记");
+        }
+
         private static int NativeLegacyProviderTest()
         {
             Native.UseLinked();
@@ -128,6 +140,7 @@ namespace S2A.Services.Tests
                 Native.GuestTick != null && Native.GuestTick() == 0xABC && Native.Far != null && Native.Far->Lo == 0x5000 && Native.Far->Dir == (nint)0x9876,
                 "同一 provider 的 tick、确定性和远端描述符发布；重复绑定幂等");
             LanRegistrationTest(Expect);
+            MotionBurstRegistrationTest(Expect);
             bool changedRejected = false;
             try { Native.UseLinked(empty); } catch (InvalidOperationException) { changedRejected = true; }
             Expect(changedRejected && Native.GuestTick != null && Native.GuestTick() == 0xABC && Native.Far != null &&

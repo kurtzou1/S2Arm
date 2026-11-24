@@ -51,7 +51,7 @@ REDACT = '诊断包脱敏（diag.m redact / diagredact.m）的匹配式与替换
 IDENT = {   # 文件 → {字面量（源码里的原样，含转义）: 不改的理由}
     'ios/app.m': {k: '快照恢复结果文件 snap_result.tsv 的键 / 值（runtime/src/snapshot.c s2a_snap_result_note 写），比对用、不显示' for k in ('结果', '给玩家', '恢复成功', '需要确认')},
     'ios/save_transfer.m': {'S2A 应用登记：程序号 ': '在上一局 host.log 里查服务层登记行（services/S2A.Services/Application.cs 原文），比对用、不显示'},
-    'ios/vpad.m': {'提示条': 'setTouchOnly:why: 的原因串，只进日志「触屏布局：切到…」', '未注明': 's2a_vpad_set_touch_only 的原因缺省值，只进日志'},
+    'ios/vpad.m': {'提示条': 'setTouchOnly:why: 的原因串，只进日志「触屏布局：切到…」', '齿轮菜单': 'setTouchOnly:why: 的原因串，只进日志「触屏布局：切到…」', '未注明': 's2a_vpad_set_touch_only 的原因缺省值，只进日志'},
     'ios/cheats_parse.m': {s: CHEATS_CS for s in ('未命名', '主代码')},
     'ios/vpad_cheats.m': {s: CHEATS_CS for s in ('未命名', '生效中', '生效中（编进游戏）', '地址未就绪', '执行出错', '改代码，不支持', '改代码，没编进包', '格式不对', '版本不符', '关', '游戏未装载', '指令有误')},
     'ios/diag.m': {'资源包': '单款包资源目录的真实文件夹名 Documents/资源包（pack_root 拼路径，launchctx / pack_apply 同一个名字）',

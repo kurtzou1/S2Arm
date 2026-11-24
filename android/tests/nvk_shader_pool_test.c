@@ -58,6 +58,10 @@ static int link_map_flag;   // nvk_link_map_diag 开关替身
 static int fake_gs_success, fake_gs_result_mode, gs_loads[6], fake_geometry_enabled = 1, fake_depth_clip;
 static size_t gs_blob_bytes[6];   // 每个阶段最后一次装载的 SPIR-V 字节数（出包预编库命中时认出是哪一份）
 static int fake_gs_fact_deps;
+// 与 fake_gs_fact_deps 一起用：结果的依赖清单末尾再多一条（真编译器的形状）：1 = 请求开关 requiresLinkedVaryingInterface；
+//   2 = 句柄 72 的查询、来源 unbound（没有这条事实）；3 = 句柄 72 的查询、来源 texture-fact:fs:72:-1（找到了）；4 = 不认得的 request:* 来源
+static int fake_gs_dep_extra;
+static int fixture_fact_wide = -1;    // 事实复用放宽开关（debug.s2a.nvk_fact_wide）：-1 = 取生产缺省（NVK_FACT_WIDE_DEFAULT），1 = 开，0 = 关
 static int fixture_alias_flag = -1;   // 结果合并开关（debug.s2a.nvk_alias）：-1 = 取生产缺省，0 = 关
 static int fake_gs_result_tag;        // 非 0：结果里多带一个无关字段，同一份输入的结果字节（摘要）就不同
 static int fixture_depth_zero, fixture_origin_lower_left, shader_load_count, shader_release_count;
@@ -130,6 +134,7 @@ int nvn_plat_flag(const char *name, int dflt) {
     if (!strcmp(name, "nvk_link_map_diag")) return link_map_flag;
     if (!strcmp(name, "nvk_gate_probe")) return fixture_gate_probe;
     if (fixture_used_slots >= 0 && !strcmp(name, "nvk_lp_used_slots")) return fixture_used_slots;
+    if (fixture_fact_wide >= 0 && !strcmp(name, "nvk_fact_wide")) return fixture_fact_wide;
     return dflt;
 }
 static int link_map_lines; static char last_link_map[700];   // 配对接口表诊断行（nvk_link_map_diag）
@@ -283,18 +288,22 @@ static int32_t fake_compile(uint64_t session, uint64_t gen, s2a_direct_bytes req
         return emit(sink, payload);
     }
     if (fake_gs_success) {
-        char result[1536];
+        char result[2048];
         const char *extra = fake_gs_result_mode == 1 ? "" :
             fake_gs_result_mode == 2 ? ",{\"stage\":\"gs\",\"spirv\":\"AwIjBwABAwAAAAAAAQAAAAAAAAA=\"},{\"stage\":\"gs\",\"spirv\":\"AwIjBwABAwAAAAAAAQAAAAAAAAA=\"}" :
             fake_gs_result_mode == 3 ? ",{\"stage\":\"gs\",\"spirv\":\"AwIjBwABAwAAAAAAAQAAAAAAAAA=\"},{\"stage\":\"tcs\",\"spirv\":\"AwIjBwABAwAAAAAAAQAAAAAAAAA=\"}" :
             ",{\"stage\":\"gs\",\"spirv\":\"AwIjBwABAwAAAAAAAQAAAAAAAAA=\"}";
-        char depbuf[768] = "";
+        char depbuf[1024] = "";
         const char *source = fake_gs_fact_deps == 2 ? "texture-fact:zz:8:-1" :
             fake_gs_fact_deps == 3 ? "texture-fact:vs:71:-1" :
             fake_gs_fact_deps == 4 ? "texture-fact:vs:8:99" :
             fake_gs_fact_deps == 5 ? "future-texture-state" : "texture-fact:vs:8:-1";
+        const char *extra_dep = fake_gs_dep_extra == 1 ? ",{\"source\":\"request:requiresLinkedVaryingInterface\",\"method\":\"QueryHostRequiresLinkedVaryingInterface\",\"value\":\"true\"}" :
+            fake_gs_dep_extra == 2 ? ",{\"source\":\"unbound\",\"method\":\"QueryS2ASampledTextureFormat\",\"arguments\":\"handle=72,cbufSlot=-1\"}" :
+            fake_gs_dep_extra == 3 ? ",{\"source\":\"texture-fact:fs:72:-1\",\"method\":\"QueryS2ASampledTextureFormat\",\"arguments\":\"handle=72,cbufSlot=-1\"}" :
+            fake_gs_dep_extra == 4 ? ",{\"source\":\"request:futureFlag\",\"method\":\"QueryHostFutureFlag\"}" : "";
         if (fake_gs_fact_deps) snprintf(depbuf, sizeof depbuf,
-            ",\"contract\":\"s2a-direct-program-content-v1\",\"dependencies\":[{\"source\":\"code:sha256:synthetic\",\"method\":\"GetCode\"},{\"source\":\"%s\",\"method\":\"QuerySamplerType\"},{\"source\":\"texture-fact:fs:10:2\",\"method\":\"QueryTextureCoordNormalized\"},{\"source\":\"code:sha256:synthetic#cbUse\",\"method\":\"QueryConstantBufferUse\",\"arguments\":\"stage=vs\"}]", source);
+            ",\"contract\":\"s2a-direct-program-content-v1\",\"dependencies\":[{\"source\":\"code:sha256:synthetic\",\"method\":\"GetCode\"},{\"source\":\"%s\",\"method\":\"QuerySamplerType\"},{\"source\":\"texture-fact:fs:10:2\",\"method\":\"QueryTextureCoordNormalized\"},{\"source\":\"code:sha256:synthetic#cbUse\",\"method\":\"QueryConstantBufferUse\",\"arguments\":\"stage=vs\"}%s]", source, extra_dep);
         if (fake_gs_result_tag) { size_t dn = strlen(depbuf); snprintf(depbuf + dn, sizeof depbuf - dn, ",\"fixtureTag\":%d", fake_gs_result_tag); }
         if (fixture_warm_capture) {
             size_t used = strlen(depbuf);
@@ -968,6 +977,162 @@ static void graphics_fact_array_length_test(void) {
     CHECK(!rp_shader_resolve(&q, &p) && compiler_calls == 3, "queried 2d-array layer count stays in the key and recompiles");
     fake_gs_success = fake_gs_fact_deps = 0; separate_fixture = 0; fake_reg_changes = 1;
     rp_shader_reset(); rp_state_reset();
+}
+
+// ---------- 事实复用放宽（#2166）：高槽直连事实不拆程序；请求开关依赖来源可复用；该拦的仍然拦 ----------
+// 真游戏里挡住复用的两道闸：① 完整组合表后面多出的高槽直连事实（如 fs 句柄 72，c2 字 72..86）让身份形状不合；
+// ② vs+fs 配对程序的依赖里带 request:requiresLinkedVaryingInterface，来源不在白名单。夹具：编译器只查过 vs 槽 0
+// （texture-fact:vs:8:-1）与 fs 槽 1（texture-fact:fs:10:2，c2 回退），其余组合槽与所有高槽都没问过。
+// pair=1：两段程序（VS+FS；请求开关只在这个形状里出现，input_identity.c）；pair=0：三段程序。dep_extra 见 fake_gs_dep_extra。
+static void fact_wide_begin(int pair, int dep_extra, uint64_t serial) {
+    rp_shader_reset(); s2a_source_clear(); rp_state_reset(); nvn_unimpl_reset();
+    const unsigned nst = pair ? 2 : 3;
+    uint8_t keys[3][8]; for (unsigned st = 0; st < nst; st++) gs_source(st, 0, keys[st]);
+    memset(&gs_program, 0, sizeof gs_program); gs_program.magic = MAGIC('P','R','O','G');
+    gs_program.serial = serial; gs_program.nstage = nst;
+    memset(gs_stages, 0xff, sizeof gs_stages); memset(gs_keys, 0, sizeof gs_keys);
+    for (unsigned st = 0; st < nst; st++) { gs_stages[st] = (uint8_t)st; memcpy(gs_keys[st], keys[st], 8); }
+    gs_keys_ok = pair ? 3 : 7; p_bind_program_id bind = {&gs_program, gs_program.serial, 0x1f, 0};
+    CHECK(rp_state_op(OP_BIND_PROGRAM, &bind, sizeof bind + 8), "fact wide program binds (pair=%d)", pair);
+    bind_pools(100); separate_fixture = 1; fake_reg_changes = 0;
+    fake_gs_success = fake_gs_fact_deps = 1; fake_gs_dep_extra = dep_extra; fake_gs_result_mode = pair ? 1 : 0;
+    compiler_calls = 0;
+}
+static void fact_wide_end(void) {
+    fake_gs_success = fake_gs_fact_deps = fake_gs_dep_extra = fake_gs_result_mode = 0; fake_ubo_missing = 0;
+    separate_fixture = 0; fake_reg_changes = 1; memset(&rp_S.ubo[1][0], 0, sizeof rp_S.ubo[1][0]);
+    rp_shader_reset(); rp_state_reset();
+}
+// 「程序累计」行里的「事实复用 命中 N」：新身份被已编程序接走的次数（没有这段文字 = ~0）
+static unsigned long long fact_hits_now(void) {
+    extern void nvk_shader_test_tally_line(char *out, size_t n);
+    char tl[640]; nvk_shader_test_tally_line(tl, sizeof tl);
+    const char *h = strstr(tl, "事实复用 命中 ");
+    return h ? strtoull(h + strlen("事实复用 命中 "), NULL, 10) : ~0ull;
+}
+static void graphics_fact_wide_test(void) {
+    struct rp_shader_req q = {0}; q.prim = 4; const struct rp_prog *p = NULL, *first = NULL;
+    // 1) vs+fs 配对、依赖里带请求开关：没查过的组合槽、各种高槽事实都不拆程序（真游戏 4,416 份 vs+fs 的形状）
+    fact_wide_begin(1, 1, 960);
+    const unsigned long long hits0 = fact_hits_now();
+    CHECK(!rp_shader_resolve(&q, &p) && p && compiler_calls == 1, "fact wide: pair initial compile (calls=%d)", compiler_calls);
+    first = p;
+    rp_S.tex[0][2] = 77;    // 没查过的组合槽（77 带矩形视图，事实不同）
+    CHECK(!rp_shader_resolve(&q, &p) && p == first && compiler_calls == 1, "fact wide: vs+fs program naming the request flag reuses for an unqueried slot (calls=%d)", compiler_calls);
+    rp_S.tex[1][32] = 78;   // fs 高槽 0（c2 字 72）：身份多出 1 条编译器没问过的直连事实
+    CHECK(!rp_shader_resolve(&q, &p) && p == first && compiler_calls == 1, "fact wide: a trailing fs high-slot fact does not split the program (calls=%d)", compiler_calls);
+    rp_S.tex[1][32] = 77;   // 同一高槽换一张事实不同的贴图
+    CHECK(!rp_shader_resolve(&q, &p) && p == first && compiler_calls == 1, "fact wide: a different trailing fact still reuses (calls=%d)", compiler_calls);
+    rp_S.tex[0][34] = 78;   // vs 高槽 2（c2 字 76）：两段各有高槽事实
+    CHECK(!rp_shader_resolve(&q, &p) && p == first && compiler_calls == 1, "fact wide: trailing facts in both stages still reuse (calls=%d)", compiler_calls);
+    CHECK(fact_hits_now() - hits0 == 4, "fact wide: tally counts the 4 new identities served by reuse (got %llu)", fact_hits_now() - hits0);
+    // 负对照：编译器查过的槽整条事实仍在键里（相对计数：不依赖前面有几次复用，主线上同样成立）
+    int before = compiler_calls;
+    rp_S.tex[0][0] = 77;    // 查过的 vs 槽 0
+    CHECK(!rp_shader_resolve(&q, &p) && p && p != first && compiler_calls == before + 1, "fact wide: a queried slot stays in the key (calls=%d)", compiler_calls - before);
+    before = compiler_calls;
+    rp_S.tex[0][0] = 0; rp_S.tex[1][1] = 77;   // 查过的 fs 槽 1（c2 回退）
+    CHECK(!rp_shader_resolve(&q, &p) && p && p != first && compiler_calls == before + 1, "fact wide: the queried c2 fallback slot stays in the key (calls=%d)", compiler_calls - before);
+    fact_wide_end();
+
+    // 2) 先带高槽事实编、再不带：口径对称（掩码键从不含高槽事实）
+    fact_wide_begin(1, 1, 961);
+    rp_S.tex[1][32] = 78; rp_S.tex[0][34] = 77;
+    CHECK(!rp_shader_resolve(&q, &p) && p && compiler_calls == 1, "fact wide: pair compiled with trailing facts (calls=%d)", compiler_calls);
+    first = p;
+    rp_S.tex[1][32] = 0; rp_S.tex[0][34] = 0;   // 高槽事实全撤：身份只剩完整组合表
+    CHECK(!rp_shader_resolve(&q, &p) && p == first && compiler_calls == 1, "fact wide: an identity without trailing facts reuses a program compiled with them (calls=%d)", compiler_calls);
+    rp_S.tex[1][33] = 78;   // 换另一个高槽（fs 高槽 1，c2 字 74）
+    CHECK(!rp_shader_resolve(&q, &p) && p == first && compiler_calls == 1, "fact wide: another high slot reuses too (calls=%d)", compiler_calls);
+    fact_wide_end();
+
+    // 3) 三段程序：完整组合表 96 条，高槽事实排第 97 条（下标 96）。掩码第 4 个字是「常量缓冲使用位」（QueryConstantBufferUse stage=vs
+    //    置了第 0 位），不是贴图事实掩码：按掩码挑事实时若越过 96 条，下标 96 会被它选进键里，换一张高槽贴图就不复用了
+    fact_wide_begin(0, 0, 962);
+    rp_S.tex[2][32] = 78;
+    CHECK(!rp_shader_resolve(&q, &p) && p && compiler_calls == 1, "fact wide: 3-stage initial compile (calls=%d)", compiler_calls);
+    first = p;
+    rp_S.tex[2][32] = 77;
+    CHECK(!rp_shader_resolve(&q, &p) && p == first && compiler_calls == 1, "fact wide: the 97th fact is outside the key although a constant-buffer bit is set (calls=%d)", compiler_calls);
+    rp_S.tex[1][33] = 78;
+    CHECK(!rp_shader_resolve(&q, &p) && p == first && compiler_calls == 1, "fact wide: 3-stage with trailing facts in two stages reuses (calls=%d)", compiler_calls);
+    fact_wide_end();
+
+    // 4) 编译器问过高槽句柄（没有这条事实 / 找到了）的程序不进复用：高槽事实不在键里，之后这条事实冒出来就该重编
+    fact_wide_begin(1, 2, 963);   // QueryS2ASampledTextureFormat handle=72 → unbound
+    CHECK(!rp_shader_resolve(&q, &p) && p && compiler_calls == 1, "fact wide: program that queried handle 72 (unbound) compiles (calls=%d)", compiler_calls);
+    first = p;
+    rp_S.tex[1][32] = 78;   // 句柄 72 的事实现在存在了
+    CHECK(!rp_shader_resolve(&q, &p) && compiler_calls == 2 && p != first, "fact wide: a handle-72 query is never answered from another identity (unbound; calls=%d)", compiler_calls);
+    fact_wide_end();
+    fact_wide_begin(1, 3, 964);   // handle=72 → texture-fact:fs:72:-1（找到了）
+    rp_S.tex[1][32] = 78;
+    CHECK(!rp_shader_resolve(&q, &p) && p && compiler_calls == 1, "fact wide: program that queried handle 72 (found) compiles (calls=%d)", compiler_calls);
+    rp_S.tex[0][2] = 77;
+    CHECK(!rp_shader_resolve(&q, &p) && compiler_calls == 2, "fact wide: a handle-72 query is never answered from another identity (found; calls=%d)", compiler_calls);
+    fact_wide_end();
+
+    // 5) 不认得的 request:* 来源仍走完整身份（只认请求开关 requiresLinkedVaryingInterface 这一个）
+    fact_wide_begin(1, 4, 965);
+    CHECK(!rp_shader_resolve(&q, &p) && p && compiler_calls == 1, "fact wide: program with another request:* source compiles (calls=%d)", compiler_calls);
+    rp_S.tex[0][2] = 77;
+    CHECK(!rp_shader_resolve(&q, &p) && compiler_calls == 2, "fact wide: another request:* source keeps the exact identity path (calls=%d)", compiler_calls);
+    fact_wide_end();
+
+    // 6) 分离表事实（c2 字 90 起，cbuf 2）仍走完整身份
+    fact_wide_begin(1, 1, 966);
+    bind_separate(1, 0, 1, 77);
+    CHECK(!rp_shader_resolve(&q, &p) && p && compiler_calls == 1, "fact wide: pair with a separate-table fact compiles (calls=%d)", compiler_calls);
+    rp_S.tex[0][2] = 77;
+    CHECK(!rp_shader_resolve(&q, &p) && compiler_calls == 2, "fact wide: a separate-table fact keeps the exact identity path (calls=%d)", compiler_calls);
+    fact_wide_end();
+
+    // 7) 高槽里的缓冲贴图事实仍走完整身份
+    fact_wide_begin(1, 1, 967); separate_fixture = 3;
+    rp_S.tex[1][32] = 77;
+    CHECK(!rp_shader_resolve(&q, &p) && p && compiler_calls == 1, "fact wide: pair with a trailing buffer-texture fact compiles (calls=%d)", compiler_calls);
+    rp_S.tex[1][33] = 77;
+    CHECK(!rp_shader_resolve(&q, &p) && compiler_calls == 2, "fact wide: a trailing buffer-texture fact keeps the exact identity path (calls=%d)", compiler_calls);
+    fact_wide_end();
+
+    // 8) 句柄在用户常量缓冲里的贴图（#999 第 4 片学来的事实，c3）仍走完整身份
+    fact_wide_begin(1, 1, 968); fake_ubo_missing = 1;
+    memset(ubo_mem, 0, sizeof ubo_mem); ubo_mem[92] = 78;
+    rp_S.ubo[1][0].addr = (uint64_t)(uintptr_t)ubo_mem; rp_S.ubo[1][0].size = sizeof ubo_mem;
+    CHECK(!rp_shader_resolve(&q, &p) && p && compiler_calls == 2, "fact wide: UBO handle fact is learned and compiled in one draw (calls=%d)", compiler_calls);
+    rp_S.tex[0][2] = 77;
+    CHECK(!rp_shader_resolve(&q, &p) && compiler_calls == 3, "fact wide: a UBO-learned fact keeps the exact identity path (calls=%d)", compiler_calls);
+    fact_wide_end();
+}
+
+// 关闭态（debug.s2a.nvk_fact_wide=0）：fact_wide() 进程内只读一次，单独起进程。要证「关 = 原来的两道闸，一个字节不差」
+static void graphics_fact_wide_off_test(void) {
+    struct rp_shader_req q = {0}; q.prim = 4; const struct rp_prog *p = NULL, *first = NULL;
+    fact_wide_begin(1, 1, 970);   // 闸②：请求开关来源不在白名单 → 配对程序不进复用
+    CHECK(!rp_shader_resolve(&q, &p) && p && compiler_calls == 1, "fact wide off: pair initial compile (calls=%d)", compiler_calls);
+    rp_S.tex[0][2] = 77;
+    CHECK(!rp_shader_resolve(&q, &p) && compiler_calls == 2, "fact wide off: the request-flag source still blocks reuse (calls=%d)", compiler_calls);
+    fact_wide_end();
+    fact_wide_begin(0, 0, 971);   // 严格形状、白名单内的来源：老路径照常复用
+    const unsigned long long hits0 = fact_hits_now();
+    CHECK(!rp_shader_resolve(&q, &p) && p && compiler_calls == 1, "fact wide off: strict-shape initial compile (calls=%d)", compiler_calls);
+    first = p;
+    rp_S.tex[0][2] = 77;
+    CHECK(!rp_shader_resolve(&q, &p) && p == first && compiler_calls == 1, "fact wide off: strict shape still reuses (calls=%d)", compiler_calls);
+    CHECK(fact_hits_now() - hits0 == 1, "fact wide off: tally still counts the reuse (got %llu)", fact_hits_now() - hits0);
+    fact_wide_end();
+    fact_wide_begin(0, 0, 972);   // 闸①：完整组合表后面多一条高槽事实 → 整个身份走完整路径
+    rp_S.tex[1][32] = 78;
+    CHECK(!rp_shader_resolve(&q, &p) && p && compiler_calls == 1, "fact wide off: trailing-fact initial compile (calls=%d)", compiler_calls);
+    rp_S.tex[0][2] = 77;
+    CHECK(!rp_shader_resolve(&q, &p) && compiler_calls == 2, "fact wide off: a trailing high-slot fact still blocks reuse (calls=%d)", compiler_calls);
+    fact_wide_end();
+    fact_wide_begin(0, 2, 973);   // 高槽句柄的查询：关闭态不加这条拦截（严格形状下原来就复用）
+    CHECK(!rp_shader_resolve(&q, &p) && p && compiler_calls == 1, "fact wide off: handle-72 query initial compile (calls=%d)", compiler_calls);
+    first = p;
+    rp_S.tex[0][2] = 77;
+    CHECK(!rp_shader_resolve(&q, &p) && p == first && compiler_calls == 1, "fact wide off: no extra handle guard, old behavior unchanged (calls=%d)", compiler_calls);
+    fact_wide_end();
 }
 static void graphics_high_slot_test(void) {
     rp_shader_reset(); s2a_source_clear(); rp_state_reset(); nvn_unimpl_reset();
@@ -2611,9 +2776,28 @@ int main(int argc, char **argv) {
         printf("nvk shader pool (alias off): %d checks, %d failures\n", checks, failures);
         return failures ? 1 : 0;
     }
+    if (argc == 2 && !strcmp(argv[1], "--fact-wide-off")) {
+        // 事实复用放宽关闭（debug.s2a.nvk_fact_wide=0）：fact_wide() 进程内只读一次，关闭态单独起一个进程
+        fixture_fact_wide = 0;
+        graphics_fact_wide_off_test();
+        printf("nvk shader pool (fact wide off): %d checks, %d failures\n", checks, failures);
+        return failures ? 1 : 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--fact-wide-default")) {
+        // 生产缺省：不强制开关，fact_wide() 取 NVK_FACT_WIDE_DEFAULT；按缺省那一档跑对应的一组用例（改缺省只动宏，不用改这里）
+        extern int nvk_shader_test_fact_wide(int *dflt);
+        int dflt = -1;
+        const int eff = nvk_shader_test_fact_wide(&dflt);
+        CHECK(eff == dflt, "fact wide default: production default flows into fact_wide() (got %d, want %d)", eff, dflt);
+        if (eff) graphics_fact_wide_test(); else graphics_fact_wide_off_test();
+        printf("nvk shader pool (fact wide default=%d): %d checks, %d failures\n", dflt, checks, failures);
+        return failures ? 1 : 0;
+    }
     if (argc != 1) return 2;
+    fixture_fact_wide = 1;   // 本进程其余用例都在「放宽开」下跑（开 / 关 / 缺省三档各有单独进程）
     graphics_fact_reuse_test();
     graphics_fact_array_length_test();
+    graphics_fact_wide_test();
     graphics_high_slot_test();
     graphics_active_ubo_test();
     graphics_c1_full_test();

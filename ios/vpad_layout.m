@@ -664,4 +664,16 @@ static BOOL key_style_valid(S2AVPadKeyStyle s) {
     }
     return [self selectIdentifier:[self lastKeysIdentifier] error:error] ? 1 : -1;
 }
+- (int)switchTouchOnly:(BOOL)on source:(S2AVPadTouchSwitch)source session:(int *)sessionTouch error:(NSError **)error {
+    BOOL (^touchNow)(void) = ^BOOL{ return *sessionTouch || [self.selectedIdentifier isEqualToString:S2AVPadLayoutTouchIdentifier]; };
+    BOOL before = touchNow();
+    if (source == S2AVPadTouchSaved) {
+        if ([self setTouchOnly:on error:error] < 0) return -1;
+        *sessionTouch = 0; [self markManual:nil];
+    } else {
+        if (source == S2AVPadTouchAuto && self.manualChosen) return 0;
+        *sessionTouch = on ? 1 : 0;
+    }
+    return touchNow() != before;
+}
 @end

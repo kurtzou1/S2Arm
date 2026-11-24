@@ -8,7 +8,11 @@
 //   与翻译器指纹 DshCompiler.Xfp（S2A.Dsh 的 DshXfpInput：翻译器本体）合成的 16 位十六进制，翻译器一变它就变；汇总行带上，dsh_vklib --fp 只打印它。
 // 离线 Vulkan 库容器（#783 直连线答 a、合入线答 ①）：给了 --lib <目录> --chain <链号> 就把逐键产物打成 LibPack 容器（lib.idx + lib.NNN.pak，_b.json 种类 1 / _b.spv 种类 52，
 //   几何的 _vg<t>.json 种类 112+t / _vg<t>.spv 种类 120+t，头部 36–43 记 VkLib.Fp），写进 <目录>（出包时是 shaders/direct/b-<链号>-vk/）；逐键产物与 vk_build.tsv 仍在 --out。
-// 用法：dsh_vklib --pkg <包目录> --profile <配置档目录> --out <输出目录> --spirv-cross <命令行> --dsx <libdsx> [--work <工作目录>] [--lib <库目录> --chain <链号>]；dsh_vklib --fp
+// 跨次复用（11-24）：给了 --cas <缓存仓根> 就把逐键成功产物存进与苹果整份出库同一个内容寻址仓（dsh/batch/Store.cs，仓根 <缓存仓根>/dshb，键前缀 vk/），
+//   同一款重出包时键对上就直接取、不再翻译（原先每次出包整款逐键重翻，旷野之息约 17 分钟）。键 = 本工具身份 × 本键记录字节，本工具身份含：
+//   完整指纹 VkLib.Fp（Vulkan 侧源码 + 翻译器 Xfp）、链号 DshChain、图像读档位、两个改产物的环境开关、配置档目录全部文件内容、libdsx 与 SPIRV-Cross 的功能身份（ToolLib.Fp）。
+//   配置档整目录进键（不挑表）：DshVk 读哪张表都兜得住，代价只是改任一表全款重翻。只存 ok 的键，failed / skipped 每次照判。
+// 用法：dsh_vklib --pkg <包目录> --profile <配置档目录> --out <输出目录> --spirv-cross <命令行> --dsx <libdsx> [--work <工作目录>] [--lib <库目录> --chain <链号>] [--cas <缓存仓根>]；dsh_vklib --fp
 using S2A.Dsh;
 using System;
 using System.Collections.Generic;
@@ -35,14 +39,40 @@ namespace S2A.DshVkLib
 
         public sealed class Row { public string Key, Stage, Status, Why; }
 
+        /// <summary>本次复用计数：命中 = 从缓存仓取出、没翻译；翻译 = 实际翻了的键（含翻译失败的）</summary>
+        public static int CacheHits, CacheMisses;
+
+        static string Sha(byte[] b) => Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(b));
+        static string Sha(string s) => Sha(Encoding.UTF8.GetBytes(s));
+
+        /// <summary>配置档目录全部文件（不含点文件）按相对路径排序，逐个「路径 \0 内容摘要」拼起来取摘要</summary>
+        public static string ProfileDigest(string profile)
+        {
+            var sb = new StringBuilder("profile 1\0");
+            foreach (var f in Directory.EnumerateFiles(profile, "*", SearchOption.AllDirectories)
+                         .Select(f => (Rel: Path.GetRelativePath(profile, f).Replace('\\', '/'), Full: f))
+                         .Where(x => !x.Rel.Split('/').Any(c => c.StartsWith('.')))
+                         .OrderBy(x => x.Rel, StringComparer.Ordinal))
+                sb.Append(f.Rel).Append('\0').Append(Sha(File.ReadAllBytes(f.Full))).Append('\n');
+            return Sha(sb.ToString());
+        }
+
+        /// <summary>本工具身份（同一款重出包时键对上的前提，任一项变就全款重翻）；tools = 调用方给的原生工具身份（libdsx、SPIRV-Cross 的 ToolLib.Fp）</summary>
+        public static string ToolId(string profile, bool imgLoadRaw, string tools) => Sha(string.Join("\0", "dshvk-cache 1", Fp, DshCompiler.Chain, imgLoadRaw ? "1" : "0",
+            "strip_interlock=" + Environment.GetEnvironmentVariable("S2A_DIRECT_STRIP_INTERLOCK"), "bf=" + Environment.GetEnvironmentVariable("DMSH_BF"),
+            ProfileDigest(profile), tools ?? ""));
+
         /// <summary>整批：返回逐键结果（ok / skipped / failed），产物写进 outDir。
         /// imgLoadRaw = 出库目标档案的 shaderStorageImageReadWithoutFormat：false = 最低档案（只读非缓冲图像声明具体格式，
         /// 任何设备都合法的 SPIR-V；不配设备的库取件在绑定核被拒、退回现编——#1850）。</summary>
-        public static List<Row> Build(string pkg, string profile, string outDir, ISpvCross xc, string work, bool imgLoadRaw = false)
+        public static List<Row> Build(string pkg, string profile, string outDir, ISpvCross xc, string work, bool imgLoadRaw = false, string cas = null, string tools = null)
         {
             Directory.CreateDirectory(outDir); Directory.CreateDirectory(work);
             var packs = new Dictionary<string, List<byte[]>>(StringComparer.Ordinal); var rows = new List<Row>();
             bool pack0 = DshCompiler.PackOut; DshCompiler.PackOut = true;
+            CacheHits = CacheMisses = 0;
+            string tid = null;
+            if (cas != null) { Store.Open(Path.Combine(cas, "dshb")); tid = ToolId(profile, imgLoadRaw, tools); }
             try
             {
                 foreach (var (key, (pk, idx)) in Map(profile))
@@ -54,16 +84,28 @@ namespace S2A.DshVkLib
                     if (cc == null) { row.Status = "failed"; row.Why = $"record {pk}#{idx} missing or truncated"; continue; }
                     if (stage is "hs" or "ds") { row.Status = "skipped"; row.Why = stage + " 不出 .spv（DshVk）"; continue; }
                     if (stage == "gs" && DshVk.GeometrySkip(cc.Value.Code, cc.Value.Ctl) is string gskip) { row.Status = "skipped"; row.Why = "gs: " + gskip; continue; }
+                    // 仓键：本工具身份 × 键名 × 包文件名 × 本键整条记录（代码 + 控制段）
+                    string ck = tid == null ? null : "vk/" + Sha(tid + "\0" + key + "\0" + pk + "\0" + Sha(recs[idx]));
+                    var hit = ck == null ? null : Store.Get(ck);
+                    if (hit != null && hit.Count > 0)
+                    {
+                        foreach (var (name, bytes) in hit.OrderBy(x => x.Key, StringComparer.Ordinal)) Write(outDir, name, bytes);
+                        CacheHits++; continue;
+                    }
+                    CacheMisses++;
+                    var made = new Dictionary<string, byte[]>(StringComparer.Ordinal);
                     try
                     {
                         if (stage == "gs")
-                            foreach (var (name, bytes) in DshVk.CompileGeometry(key, cc.Value.Code, cc.Value.Ctl, xc, profile, imgLoadRaw, work)) Write(outDir, name, bytes);
+                            foreach (var (name, bytes) in DshVk.CompileGeometry(key, cc.Value.Code, cc.Value.Ctl, xc, profile, imgLoadRaw, work)) made[name] = bytes;
                         else
                         {
                             DshVk.CompileWithSpv(key, stage, cc.Value.Code, cc.Value.Ctl, outDir, xc, profile, imgLoadRaw, work);
-                            Write(outDir, key + "_b.json", Encoding.UTF8.GetBytes(DshCompiler.PackFiles[key + "_b.json"]));
-                            Write(outDir, key + "_b.spv", DshVk.PackSpv[key + "_b.spv"]);
+                            made[key + "_b.json"] = Encoding.UTF8.GetBytes(DshCompiler.PackFiles[key + "_b.json"]);
+                            made[key + "_b.spv"] = DshVk.PackSpv[key + "_b.spv"];
                         }
+                        foreach (var (name, bytes) in made) Write(outDir, name, bytes);
+                        if (ck != null && made.Count > 0) Store.Put(ck, made);
                     }
                     catch (DshError e) { row.Status = "failed"; row.Why = (e.Status + ": " + e.Detail).Replace('\t', ' ').Replace('\n', ' '); }
                     // 同 dsh_batch Translate：其它异常（如 libdsx 少导出、DllImport 找不到入口）也只记这一键失败，不中止整批
@@ -71,6 +113,7 @@ namespace S2A.DshVkLib
                 }
             }
             finally { DshCompiler.PackOut = pack0; }
+            if (cas != null) Store.Compact();   // 给本次用到的条目刷新修改时间（容量预算 LRU 认它），不删条目
             File.WriteAllLines(Path.Combine(outDir, "vk_build.tsv"), rows.Select(r => $"{r.Key}\t{r.Stage}\t{r.Status}\t{r.Why}"));
             return rows;
         }
@@ -113,8 +156,11 @@ namespace S2A.DshVkLib
             string dsx = a["--dsx"];
             NativeLibrary.SetDllImportResolver(typeof(NxgalSpvCross).Assembly, (name, asm, path) => name == "dsx" ? NativeLibrary.Load(dsx) : IntPtr.Zero);
             string work = a.GetValueOrDefault("--work", Path.Combine(a["--out"], ".work"));
-            var rows = VkLib.Build(a["--pkg"], a["--profile"], a["--out"], new CliSpvCross(a["--spirv-cross"], work), work, imgLoadRaw);
+            string cas = a.GetValueOrDefault("--cas");
+            string tools = cas == null ? null : "dsx " + ToolLib.Fp(dsx) + "\0spirv-cross " + ToolLib.Fp(a["--spirv-cross"]);
+            var rows = VkLib.Build(a["--pkg"], a["--profile"], a["--out"], new CliSpvCross(a["--spirv-cross"], work), work, imgLoadRaw, cas, tools);
             Console.WriteLine(VkLib.Summary(rows));
+            if (cas != null) Console.WriteLine($"dsh_vklib cache: hit {VkLib.CacheHits}, translated {VkLib.CacheMisses} (store {Path.Combine(cas, "dshb")})");
             // 个别键翻不了不拒绝整库：失败的键记在 vk_build.tsv（出库脚本按它报 🟡 缺口、keys.tsv 不列它们），运行时对缺的键现编；成功的照常打库发布。
             // 原先只要有 1 键失败就整库不出，手机上上万支全部退回现编（010028600EBDA000 的 11194 键里 17 键失败就是这样）
             int failed = rows.Count(row => row.Status == "failed");

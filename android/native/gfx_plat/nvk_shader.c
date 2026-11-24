@@ -120,6 +120,12 @@ static nvn_hmap g_progs = {.klen = 32};   // 内容身份（SHA-256）→ struct
 static nvn_hmap g_res_tab = {.klen = 32};
 static _Atomic uint64_t g_n_alias_fg, g_n_alias_bg, g_n_alias_probe, g_n_alias_nores, g_n_alias_nofile, g_n_alias_badfile;   // 合并（前台 / 预热带）/ 读头次数 / 头好但没有比对键一致的常驻程序 / 没有缓存文件 / 缓存文件坏
 static int alias_on(void) { static int v = -1; if (v < 0) v = nvn_plat_flag("nvk_alias", 1) ? 1 : 0; return v; }
+// 事实复用放宽（nvk_shader_fact_cache.h 头注释）：完整组合表后面允许带高槽直连事实、认请求开关 requiresLinkedVaryingInterface 这个依赖来源。
+// 缺省关（#2166 定案：缺省开不开按 #2044 判，天玑 / Mali 第二台设备判过才开）；改缺省只动 NVK_FACT_WIDE_DEFAULT 这一行，测试跟着宏走。
+// debug.s2a.nvk_fact_wide=1 / 0 在调试包里强制开 / 关（出包版恒走缺省）；关 = 原来的两道闸。g_n_fact：事实复用命中的新身份数（「程序累计」读数）。
+#define NVK_FACT_WIDE_DEFAULT 0
+static _Atomic uint64_t g_n_fact;
+static int fact_wide(void) { static int v = -1; if (v < 0) v = nvn_plat_flag("nvk_fact_wide", NVK_FACT_WIDE_DEFAULT) ? 1 : 0; return v; }
 // g_progs 与「同身份在途」表共用一把锁：nvn_hm 不是线程安全的，而预热带（[后台]）与提交线程都会查找/发布。
 // 锁只覆盖表结构与 entry 标志；parse、建后端着色器、编译都在锁外（否则预热带持锁建对象会挡住回放线程）。
 static pthread_mutex_t g_progs_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -1623,6 +1629,8 @@ static void prog_tally_text(char *b, size_t bn) {
             (unsigned long long)atomic_load(&g_n_alias_fg), (unsigned long long)atomic_load(&g_n_alias_bg), (unsigned long long)atomic_load(&g_n_alias_probe),
             (unsigned long long)atomic_load(&g_n_alias_nores), (unsigned long long)atomic_load(&g_n_alias_nofile), (unsigned long long)atomic_load(&g_n_alias_badfile), (unsigned)resn);
     }
+    const size_t used = strnlen(b, bn);   // 事实复用读数：命中的新身份数（不进「合计」节拍：命中不发布新程序）
+    if (used + 1 < bn) snprintf(b + used, bn - used, "、事实复用 命中 %llu", (unsigned long long)atomic_load(&g_n_fact));
 }
 // 状态闸读数一行（与「程序累计」同一节拍）：哪几条闸把程序挡在出包预编库之外。
 //   闸位集合 → 「透明测试+存储缓冲不对齐」这样的名字；直方图按「被挡下」的份数取前 5 名（并列按位集合小的在前），0 号格是放行。
@@ -1688,6 +1696,8 @@ static void prog_tally_log(void) {
 }
 // 测试读数：当下的「程序累计」行（不受每 50 个打一次的节拍限制）；结果合并读头的三个计数（读头 / 没有缓存文件 / 缓存文件坏）
 void nvk_shader_test_tally_line(char *out, size_t n) { if (out && n) prog_tally_text(out, n); }
+// 测试读数：事实复用放宽开关当下的取值（进程内首次读取），*dflt 回生产缺省——缺省值不在测试里写死，--fact-wide-default 进程只比对两者是否一致
+int nvk_shader_test_fact_wide(int *dflt) { if (dflt) *dflt = NVK_FACT_WIDE_DEFAULT ? 1 : 0; return fact_wide(); }
 void nvk_shader_test_gate_line(char *out, size_t n) { if (out && n) lp_gate_text(out, n); }
 void nvk_shader_test_gate_probe_line(char *out, size_t n) { if (out && n && !lp_gate_probe_text(out, n)) out[0] = 0; }
 void nvk_shader_test_ssbo_line(char *out, size_t n) { if (out && n && !lp_ssbo_text(out, n)) out[0] = 0; }
@@ -2499,7 +2509,11 @@ static int resolve_slow(const struct rp_shader_req *q, const struct rp_prog **ou
       if (fa && !fa->lib_bad) { *out = fa; return 0; } }
     uint8_t fact_base[32];
     const int reusable = fact_cache_shape(&id) && fact_cache_hash(&id, NULL, fact_base);
-    if (reusable && (*out = fact_cache_find(&id, fact_base)) && !(*out)->lib_bad) { nvn_hm_put(&g_fact_aliases, sha, (void *)*out); return 0; }
+    if (reusable && (*out = fact_cache_find(&id, fact_base)) && !(*out)->lib_bad) {
+        nvn_hm_put(&g_fact_aliases, sha, (void *)*out);
+        atomic_fetch_add_explicit(&g_n_fact, 1, memory_order_relaxed);
+        return 0;
+    }
     *out = NULL;   // lib_bad 命中不算：落到取库 / 现编链
     // 1c) 结果合并（#1355）：这个身份的缓存文件头里记的结果摘要，已经有常驻程序 → 登记成别名直接用（只读 88 字节头，不读负载、不建后端）。
     if (alias_on()) {

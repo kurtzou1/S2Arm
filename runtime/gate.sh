@@ -4,6 +4,9 @@
 # 原生层门禁钩子（tools/gate.sh 在仓库根调）：宿主能构建 + 原生层单测全绿。末行「期望 → 真结果」。
 # 子项键（tools/gate.sh 分派 gate-host 用，见本文件头「# 门禁本机：」）：runtime/tests 或 graphics/nvn/tests 下 C / Objective-C 单测的键（如 vawin / nvn_copy_stride），须有 native-test-<键> 构建目标。
 #   GATE_SKIP="<键…>"：不跑这几组（别处另跑），应跑组数相应减少、末行写明；GATE_ONLY="<键…>"：只编跑这几组单测，不构建宿主。键对不上单测文件 = 红。
+#   GATE_BUILD_ONLY=1（11-24 只编步）：每组只构建 native-test-<键> 的先决目标、不运行；构建过 = 绿，编译 / 链接错 = 红；宿主照常构建。
+#     门禁把它作为合入前必跑步（整钩子慢、挪到合入后）：D-92BW 漏桩（dsh_stats 隐式声明、front_layer_race 缺符号）几秒就能编出来，原先跟着整钩子推到合入后、2 小时后才被守望定位。
+#     做法：make 的规则外壳换成 tools/build_only_shell.sh，编 / 链照常、「运行 build/tests/t_<名>」那一行跳过；退出非 0 但没有编译 / 链接报错的组记「只编判不了」，不算红
 # 逐组单独 make、逐组判（10-25）：原先一次 make 全部目标、只数「✓ t_」行，某组没出结果只记成「少一组」、红数 0、看不出是哪组，
 #   且 make 遇第一处错就停、后面的组全没跑。现在每组一个 make（超时 GT 秒），没出结论的组也算红并点名原因：
 #   构建失败（编译 / 链接报错）、超时、判据不符（有「✗ t_」行）、异常退出（rc 非 0、没有判据行）、没打结论行（rc=0 但没有「✓ t_」行）、没有构建目标（有单测文件、build.mk 没登记）。
@@ -24,7 +27,7 @@ has_file() { [ -f "runtime/tests/t_$1.c" ] || [ -f "runtime/tests/t_$1.m" ] || [
 is_key() { has_file "$1" || [ -f "runtime/tests/mk/$1.mk" ]; }
 for k in ${GATE_SKIP:-} ${GATE_ONLY:-}; do is_key "$k" || { echo "原生层：子项键 $k 在 runtime/tests 或 graphics/nvn/tests 下没有对应的 C / Objective-C 单测 → 红"; exit 1; }; done
 # 跑一组并判：绿 → G+1；红 → R+1、记「键 原因」进 WHY、把细节行攒进 DET
-G=0; R=0; WHY=; DET=; TM=
+G=0; R=0; WHY=; DET=; TM=; BON=0
 # 组并行（10-28 质量线门禁提速：100 组逐个跑本机 212 秒、gate-host 276 秒，单组最慢 13 秒，瓶颈是串行）：每组一个 make 进后台，同时至多 NATIVE_GATE_J 组
 #   （缺省核数一半），各组输出进临时目录，跑完按原顺序判。NVN 组共用的前置（宿主对象 / libnvn / 宽屏核心）先由 native-test-prereq 建一次，
 #   各组带 NVN_TEST_PREBUILT=1 不再各自 FORCE 重入（并行时会同时写同一个库）。对负载 / 计时敏感、偶发过的组（SER）放最后串行跑
@@ -46,11 +49,14 @@ TF=${S2A_NATIVE_GATE_TIMES:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/cache/native
 # 工具链目录解析一次传给每组的 make（11-14 门禁提速：没设时顶层 Makefile 每次解析都起 bash 跑 tools/toolchain.sh，350 组各一次）。
 #   值就是 make 自己会解出的那个（取自 make -p），与不设时逐字相同
 #   make -p 的变量 / 目标表只取一次，下面的组清单（TG）也从它取；GATE_ONLY 只跑点名的几组，不取
-MP=; [ -n "${GATE_ONLY:-}" ] || MP=$(make -pn 2> /dev/null)
+MP=; { [ -z "${GATE_ONLY:-}" ] || [ "${GATE_BUILD_ONLY:-}" = 1 ]; } && MP=$(make -pn 2> /dev/null)
 [ -n "${S2A_DEVELOPER_DIR:-}${DEVELOPER_DIR:-}" ] || [ -z "$MP" ] || { d=$(sed -n 's/^DEVELOPER_DIR := //p' <<< "$MP" | head -1); [ -n "$d" ] && export DEVELOPER_DIR=$d; }
 exec_group() {   # exec_group <键>：跑一组，输出 / 退出码 / 秒数写进 $OUT
   local k=$1 t0=$SECONDS rc
   date +%s > "$OUT/$k.start"
+  if [ "${GATE_BUILD_ONLY:-}" = 1 ]; then   # 只编：规则照常编 / 链，「运行单测程序」那一行由 tools/build_only_shell.sh 跳过（多数组在规则里才编，没有先决目标可单独构建）
+    NVN_TEST_PREBUILT=${NVN_TEST_PREBUILT:-} timeout -k 15 "$((GT * GHX))" make -s "native-test-$k" SHELL="$PWD/tools/build_only_shell.sh" > "$OUT/$k.out" 2>&1; rc=$?
+    echo "$rc $((SECONDS - t0))" > "$OUT/$k.rc"; return; fi
   # -k 15：到时限先 TERM、15 秒后还没退就 KILL（单测进程收不掉时不拖到门禁看门狗把整步停了）
   if [ -f tools/nostall.py ]; then   # 无进展看门狗（门禁步一级早已在用，tools/gate.sh）；每组一个取证目录：挂死时 nostall 在这里留各进程调用栈
     mkdir -p "$OUT/$k.ns"; NVN_TEST_PREBUILT=${NVN_TEST_PREBUILT:-} timeout -k 15 "$((GT * GHX))" "${S2A_PY:-python3}" tools/nostall.py --watch "$OUT/$k.ns" "$GT" -- make -s "native-test-$k" > "$OUT/$k.out" 2>&1; rc=$?
@@ -61,6 +67,12 @@ judge() {   # judge <键>：按 $OUT 里这一组的结果判，绿 G+1 / 红 R+
   local k=$1 o rc sec why=
   o=$(cat "$OUT/$k.out" 2> /dev/null); read -r rc sec < "$OUT/$k.rc" 2> /dev/null || { rc=1; sec=0; o="（没有结果：这一组没跑起来）"; }
   TM="${TM}${sec} ${k}"$'\n'   # 每组墙钟（10-28 梳理：原先只判红绿、不知道慢在哪组）
+  if [ "${GATE_BUILD_ONLY:-}" = 1 ]; then   # 只编：编过 = 绿；只编不了单列；其余 = 构建失败（列报错行）
+    [ "$rc" = 0 ] && { G=$((G + 1)); return; }
+    # 退出非 0 但没有编译 / 链接报错（规则里别的步骤失败、运行行没认出被跑了）：只编判不了，不算红（只编只证编不编得过，不当运行判据用）
+    grep -av '^ld: warning:' < <(printf '%s\n' "$o") | grep -aqE ': (fatal )?error:|^clang: error:|^ld: |^Undefined symbols' || { BON=$((BON + 1)); return; }
+    R=$((R + 1)); WHY="${WHY}、${k} 构建失败（只编）"
+    DET="${DET}✗ 组 ${k}：构建失败（只编）"$'\n'"$(grep -av '^ld: warning:' < <(printf '%s\n' "$o") | grep -aE ': (fatal )?error:|^clang: error:|^ld: |^Undefined symbols|^  "_|referenced from' | head -16)"$'\n'; return; fi
   if [ $rc = 124 ] && grep -aq "无进展看门狗" < <(printf '%s\n' "$o"); then why="挂死（连续 ${GT} 秒无进展：日志不长、进程树 CPU / 磁盘不涨）"
   elif [ $rc = 124 ] && [ -d "$OUT/$k.ns" ]; then why="超时（墙钟保底 $((GT * GHX)) 秒仍没跑完，期间一直有进展）"
   elif [ $rc = 124 ]; then why="超时（${GT} 秒）"
@@ -151,14 +163,15 @@ depskip() {   # depskip <键…>：可跳过的组（空格分隔）；不跳就
   local out=; for k in "$@"; do case $rec in *" $k "*) continue;; esac; [ -s "$cd/$k.txt" ] || continue; grep -qxFf <(printf '%s\n' "${c[@]}") "$cd/$k.txt" || out="$out $k"; done
   echo "${out# }"
 }
-summary() { [ $R = 0 ] && echo "绿 $G 组" || echo "绿 $G 组、红 $R 组（${WHY#、}）"; }
+summary() { local b=; [ "$BON" -gt 0 ] && b="；只编判不了 $BON 组"; [ $R = 0 ] && echo "绿 $G 组$b" || echo "绿 $G 组、红 $R 组（${WHY#、}）$b"; }
+BOT=; [ "${GATE_BUILD_ONLY:-}" = 1 ] && BOT="（只编）"
 slowest() { printf '%s' "$TM" | sort -rn | head -5 | awk '{printf "%s%s %s 秒", (NR > 1 ? "、" : ""), $2, $1}'; }
 # 最慢 5 组单独一行，打在末行之前（末行格式 tools/gate.sh 要解析，不动）
 timing() { [ -n "$TM" ] && echo "原生层单测最慢 5 组：$(slowest)；宿主构建 ${HB:-0} 秒"; }
 if [ -n "${GATE_ONLY:-}" ]; then
   n=0; for k in $GATE_ONLY; do n=$((n + 1)); done; run_groups $GATE_ONLY
-  [ $R = 0 ] || { printf '%s' "$DET"; timing; echo "原生层单测（只跑 ${GATE_ONLY}）期望 $n 组全绿 → $(summary)"; exit 1; }
-  timing; echo "原生层单测（只跑 ${GATE_ONLY}）期望 $n 组全绿 → $(summary)"; exit 0
+  [ $R = 0 ] || { printf '%s' "$DET"; timing; echo "原生层单测${BOT}（只跑 ${GATE_ONLY}）期望 $n 组全绿 → $(summary)"; exit 1; }
+  timing; echo "原生层单测${BOT}（只跑 ${GATE_ONLY}）期望 $n 组全绿 → $(summary)"; exit 0
 fi
 # 宿主构建与单测组并行（11-14 门禁提速：原先先串行编完宿主再开组）：只编宿主、不跑它，组不用它的产物；两边都要的地址护栏库先建好，免得同时写同一个文件
 [ "$(uname -s)" = Darwin ] && make -s "${BUILD:-build}/tests/libs2a_vaguard.dylib" > /dev/null 2>&1
@@ -184,5 +197,5 @@ for f in runtime/tests/t_*.c runtime/tests/t_*.m graphics/nvn/tests/t_*.c; do
   n=$((n + 1)); R=$((R + 1)); WHY="${WHY}、${k} 没有构建目标（有 ${f}，build.mk 没登记 native-test-${k}）"
 done
 ex=; [ -n "${GATE_SKIP:-}" ] && ex="（${GATE_SKIP} 另跑）"; [ -n "${NDS:-}" ] && ex="${ex}（本批只改 C 源，按源文件清单跳过 $(wc -w <<< "$NDS" | tr -d ' ') 组）"
-[ $R = 0 ] || { printf '%s' "$DET"; timing; echo "原生层单测 期望 $n 组全绿 → $(summary)$ex"; exit 1; }
-timing; echo "原生层：宿主构建成功；单测 期望 $n 组全绿 → $(summary)$ex"
+[ $R = 0 ] || { printf '%s' "$DET"; timing; echo "原生层单测${BOT} 期望 $n 组全绿 → $(summary)$ex"; exit 1; }
+timing; echo "原生层：宿主构建成功；单测${BOT} 期望 $n 组全绿 → $(summary)$ex"

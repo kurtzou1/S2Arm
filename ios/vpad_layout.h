@@ -143,6 +143,15 @@ static const NSInteger kS2AVPadKeyThemeCount = 5;   // 0 = 默认描线，1–4 
 // 玩家手动选过方案（切换钮 / 提示条「切到触屏」/ 设置里的触屏布局）：.manual 标记，持久化；自动切（游戏声明触屏配置）见到它就不切
 @property(nonatomic, readonly) BOOL manualChosen;
 - (BOOL)markManual:(NSError **)error;
+// 切「仅触屏 / 按键」的来源（vpad.m 切方案入口与 s2a_vpad_set_touch_only 的 manual 参数同值）：
+//   Auto 0 = 自动（游戏声明触屏配置）：玩家手动选过方案就不切；否则只改本局覆盖，不写盘、不记手动
+//   Saved 1 = 玩家手动、保存（齿轮「显示 / 隐藏按键」、设置页）：写持久化选择 + 记手动，清掉本局覆盖
+//   Session 2 = 玩家手动、只这一局（提示条「切到触屏」）：手动选过也照切；只改本局覆盖，不写盘、不记手动
+typedef NS_ENUM(int, S2AVPadTouchSwitch) { S2AVPadTouchAuto = 0, S2AVPadTouchSaved = 1, S2AVPadTouchSession = 2 };
+// 按来源切方案。*sessionTouch 是调用方持有的本局覆盖（1 = 本局按仅触屏跑，0 = 没有），这里按来源改写；本局是否仅触屏 = *sessionTouch || 选中 touch。
+//   覆盖只往「仅触屏」方向盖：Auto / Session 切回按键只清覆盖，存下的就是 touch 时仍是仅触屏。
+//   返回 1 = 本局仅触屏与否变了，0 = 没变（含 Auto 遇手动选过），-1 = 写盘失败（覆盖和持久化都不动）。单测 t_vpad_touch_switch
+- (int)switchTouchOnly:(BOOL)on source:(S2AVPadTouchSwitch)source session:(int *)sessionTouch error:(NSError **)error;
 /// 旧版 App 级「我的布局」接进这款（11-15 维护者「每款游戏记住自己的触屏布局」）：11-07 以前布局存在 App 级 VPadLayouts，按游戏存以后没人读。
 ///   打开一款时把 App 级目录里玩家自己的布局（*.json，内置名除外、读得通的）复制进这款的布局目录，只复制不替玩家选上（每款从默认布局开始，
 ///   默认布局所有游戏都能用；旧布局可能没有摇杆，不能当所有游戏的缺省）。这款已有同名文件不覆盖；每款只做一次（.legacy_adopted），玩家删了不再冒出来。

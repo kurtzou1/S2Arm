@@ -109,6 +109,7 @@ hdr ios/pad_order_file.h
 hdr macos/controller_view.h
 hdr macos/hid_generic.h
 hdr macos/hid_pad.h
+hdr macos/imu_burst.h
 hdr macos/input_guide.h
 hdr macos/joycon_imu.h
 hdr macos/motion_power.h

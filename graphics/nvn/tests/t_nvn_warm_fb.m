@@ -10,7 +10,11 @@
 //   ⑤ 11-06 预热收尾单核（异度3 一对着色器 73 行串行）：同一对着色器 2 行（渲染状态不同）→ 2 个任务、各 1 行（修前按对合成 1 个任务 2 行）
 //   ⑥–⑧ D-NJC8（#2158，S2Arm 更新后首局 616 支全在提交线程现编）：兜底目录里旧翻译器指纹的 <键>_b + 补料（shader_miss/<键>.ctl / .code）→ 预热 warm_shader
 //      用补料按本机翻译器重译（dsh_miss.inc dm_shader_refresh）再载：⑥ 重译出同样源码 → 载出、json 指纹换成本机的、计「源码没变」1；
-//      ⑦ 重译出不同源码 → 载出、计「变了」1；⑧ 没有补料 → 不载、翻译器不被调、计「做不了」1
+//      ⑦ 重译出不同源码 → 载出、计「变了」1；⑧ 没有补料 → 不载、翻译器不被调、计「做不了·没有客体输入」1
+//   ⑨–⑪ #2158 B（真机那 1 支）：只写层的几何着色器设计上只有 <键>_b.json（带 gs_slice）、没有 .metal：⑨ 旧指纹的 gs json + 几何补料 → 重译成功、计「没变」1
+//      （按 gs_slice 前后比）、之后 dm_shader_reuse 认得它（跨局复用不重编）；⑩ 重译出不同的 gs_slice → 计「变了」1；
+//      ⑪ 做不了按原因分开计：补料是顶点的、json 说几何 → 计「补料核不过」1、不计「没有客体输入」
+//   反证（#2158 B 修前，dsh_have 要 .metal）：⑨ 计成「做不了」、reuse 不认，⑩ 同样计成「做不了」
 // 反证（修前）：同一单测编改前的 nvn_mtl.m（-DNVN_WARM_FB_SOURCE=...）→ ① F_b 算过期、② 只剩 0 个任务、③ 交接表没有 F_b
 //   （D-NJC8 修前）：① O_b 算过期、⑥ ⑦ 载不出（旧翻译器译过的整批作废）
 #ifndef NVN_WARM_FB_SOURCE
@@ -44,21 +48,28 @@ static WarmItem *handed(NSString *key) {
     os_unfair_lock_unlock(&g_warm_lock);
     return found;
 }
-// 本测扮演 S2A.Dsh 现编入口（dsh_miss.inc dlsym s2a_dsh_compile）：把 retrans_src 写成 <键>_b.metal，json 记本机指纹
-static NSString *retrans_src; static int retrans_calls;
+// 本测扮演 S2A.Dsh 现编入口（dsh_miss.inc dlsym s2a_dsh_compile）：把 retrans_src 写成 <键>_b.metal，json 记本机指纹；
+//   几何（阶段 3）照 S2A.Dsh 只写层的那一支：只写 json（gs_slice 的 comp 取 gs_comp），不写 .metal
+static NSString *retrans_src; static int retrans_calls; static NSString *gs_comp = @"x";
+static NSDictionary *gs_json(NSString *xfp, NSString *comp) { return @{@"chain": @DMSH_CHAIN, @"xfp": xfp, @"route": @"B", @"stage": @"gs", @"gs_slice": @{@"loc": @0, @"comp": comp}, @"bindings": @[]}; }
 int s2a_dsh_compile(const char *key, int stage, const void *code, size_t nc, const void *ctl, size_t nt, const char *out) {
-    (void)stage; (void)code; (void)nc; (void)ctl; (void)nt; retrans_calls++;
+    (void)code; (void)nc; (void)ctl; (void)nt; retrans_calls++;
     NSString *k = [@(key) stringByAppendingString:@"_b"], *o = @(out);
+    if (stage == 3) return [[NSJSONSerialization dataWithJSONObject:gs_json(@"0123456789abcdef", gs_comp) options:NSJSONWritingSortedKeys error:nil] writeToFile:[o stringByAppendingPathComponent:[k stringByAppendingString:@".json"]] atomically:YES] ? 0 : 1;
     if (![retrans_src writeToFile:[o stringByAppendingPathComponent:[k stringByAppendingString:@".metal"]] atomically:YES encoding:NSUTF8StringEncoding error:nil]) return 1;
     NSDictionary *j = @{@"chain": @DMSH_CHAIN, @"xfp": @"0123456789abcdef", @"route": @"B", @"stage": @"vs", @"bindings": @[], @"entry": @"plain", @"entry_z": @"zero"};
     return [[NSJSONSerialization dataWithJSONObject:j options:0 error:nil] writeToFile:[o stringByAppendingPathComponent:[k stringByAppendingString:@".json"]] atomically:YES] ? 0 : 1;
 }
-// 补料：一支 Switch 1 顶点着色器的控制段（0x710 字节，+0x20 自报长度、+0x704 代码长）+ 代码区（NVN 头魔数、SPH 字 0 阶段 1 = 顶点）
-static void salvage(NSString *dir, NSString *key) {
-    uint8_t ctl[0x710] = {0}, code[0x80] = {0}; uint32_t nctl = sizeof ctl, ncode = sizeof code, w = (1u << 10) | 1;
+// 补料：一支 Switch 1 着色器的控制段（0x710 字节，+0x20 自报长度、+0x704 代码长）+ 代码区（NVN 头魔数、SPH 字 0 阶段字段 t：1 = 顶点、4 = 几何）
+static void salvage_t(NSString *dir, NSString *key, uint32_t t) {
+    uint8_t ctl[0x710] = {0}, code[0x80] = {0}; uint32_t nctl = sizeof ctl, ncode = sizeof code, w = (t << 10) | 1;
     memcpy(ctl + 0x20, &nctl, 4); memcpy(ctl + 0x704, &ncode, 4); memcpy(code, "\x78\x56\x34\x12", 4); memcpy(code + 0x30, &w, 4);
     REQUIRE([[NSData dataWithBytes:ctl length:sizeof ctl] writeToFile:[dir stringByAppendingPathComponent:[key stringByAppendingString:@".ctl"]] atomically:YES]);
     REQUIRE([[NSData dataWithBytes:code length:sizeof code] writeToFile:[dir stringByAppendingPathComponent:[key stringByAppendingString:@".code"]] atomically:YES]);
+}
+static void salvage(NSString *dir, NSString *key) { salvage_t(dir, key, 1); }
+static void gs_fixture(NSString *key, NSString *xfp, NSString *comp) {
+    REQUIRE([[NSJSONSerialization dataWithJSONObject:gs_json(xfp, comp) options:NSJSONWritingSortedKeys error:nil] writeToFile:[fallback stringByAppendingPathComponent:[key stringByAppendingString:@"_b.json"]] atomically:YES]);
 }
 static void key_md(NSString *k, uint8_t md[8]) { for (int i = 0; i < 8; i++) { unsigned v; REQUIRE(sscanf(k.UTF8String + 2 * i, "%2x", &v) == 1); md[i] = (uint8_t)v; } }
 
@@ -120,7 +131,7 @@ int main(void) { @autoreleasepool {
         NSString *P = @"5a5a5a5a5a5a5a5a", *Q = @"3c3c3c3c3c3c3c3c";
         fixture([P stringByAppendingString:@"_b"], @"fedcba9876543210"); fixture([Q stringByAppendingString:@"_b"], @"fedcba9876543210");
         salvage(miss, O); salvage(miss, P);   // Q 没有补料
-        uint64_t r0[3], r1[3]; dm_shader_refresh_stats(r0);
+        uint64_t r0[DM_RF_STATS], r1[DM_RF_STATS]; dm_shader_refresh_stats(r0);
         retrans_src = vertex_source; NvShader *so = warm_shader([O stringByAppendingString:@"_b"], 0); dm_shader_refresh_stats(r1);
         NSDictionary *jo = [NSJSONSerialization JSONObjectWithData:[NSData dataWithContentsOfFile:[fallback stringByAppendingPathComponent:[O stringByAppendingString:@"_b.json"]]] options:0 error:nil];
         VERIFY(so && so->fn && [jo[@"xfp"] isEqual:@"0123456789abcdef"] && r1[0] - r0[0] == 1 && r1[1] == r0[1],
@@ -130,8 +141,25 @@ int main(void) { @autoreleasepool {
         VERIFY(sp && sp->fn && r0[1] - r1[1] == 1 && r0[0] == r1[0], "⑦ P_b 重译出不同源码：载出 %s、计 变了 +%llu / 没变 +%llu（期望 有 / +1 / +0）",
                sp && sp->fn ? "有" : "无", (unsigned long long)(r0[1] - r1[1]), (unsigned long long)(r0[0] - r1[0]));
         int calls = retrans_calls; NvShader *sq = warm_shader([Q stringByAppendingString:@"_b"], 0); dm_shader_refresh_stats(r1);
-        VERIFY(!sq && retrans_calls == calls && r1[2] - r0[2] == 1, "⑧ Q_b 没有补料：载出 %s、翻译器调用 +%d、计 做不了 +%llu（期望 无 / +0 / +1）",
+        VERIFY(!sq && retrans_calls == calls && r1[2] - r0[2] == 1, "⑧ Q_b 没有补料：载出 %s、翻译器调用 +%d、计 做不了·没有客体输入 +%llu（期望 无 / +0 / +1）",
                sq ? "有" : "无", retrans_calls - calls, (unsigned long long)(r1[2] - r0[2]));
+
+        // ⑨–⑪ 只写层的几何着色器（只有 json）
+        NSString *GS = @"6b6b6b6b6b6b6b6b", *GC = @"7c7c7c7c7c7c7c7c", *GB = @"8d8d8d8d8d8d8d8d";
+        gs_fixture(GS, @"fedcba9876543210", @"x"); salvage_t(miss, GS, 4);
+        gs_comp = @"x"; dm_shader_refresh_stats(r0); int rs = dm_shader_refresh(GS.UTF8String); dm_shader_refresh_stats(r1);
+        int reused = dm_shader_reuse(GS.UTF8String);
+        VERIFY(rs == 2 && r1[0] - r0[0] == 1 && r1[2] == r0[2] && r1[4] == r0[4] && reused == 1,
+               "⑨ 只写层几何 GS 重译、gs_slice 不变：返回 %d、计 没变 +%llu / 没有客体输入 +%llu / 翻译失败 +%llu，之后跨局复用 %d（期望 2 / +1 / +0 / +0 / 1）",
+               rs, (unsigned long long)(r1[0] - r0[0]), (unsigned long long)(r1[2] - r0[2]), (unsigned long long)(r1[4] - r0[4]), reused);
+        gs_fixture(GC, @"fedcba9876543210", @"x"); salvage_t(miss, GC, 4);
+        gs_comp = @"y"; dm_shader_refresh_stats(r0); int rc2 = dm_shader_refresh(GC.UTF8String); dm_shader_refresh_stats(r1);
+        VERIFY(rc2 == 3 && r1[1] - r0[1] == 1 && r1[0] == r0[0], "⑩ 只写层几何 GC 重译出不同 gs_slice：返回 %d、计 变了 +%llu / 没变 +%llu（期望 3 / +1 / +0）",
+               rc2, (unsigned long long)(r1[1] - r0[1]), (unsigned long long)(r1[0] - r0[0]));
+        gs_fixture(GB, @"fedcba9876543210", @"x"); salvage_t(miss, GB, 1);   // 补料是顶点的，json 说几何：不是这支
+        calls = retrans_calls; dm_shader_refresh_stats(r0); int rb = dm_shader_refresh(GB.UTF8String); dm_shader_refresh_stats(r1);
+        VERIFY(rb == 0 && retrans_calls == calls && r1[3] - r0[3] == 1 && r1[2] == r0[2], "⑪ GB 补料阶段对不上：返回 %d、翻译器调用 +%d、计 补料核不过 +%llu / 没有客体输入 +%llu（期望 0 / +0 / +1 / +0）",
+               rb, retrans_calls - calls, (unsigned long long)(r1[3] - r0[3]), (unsigned long long)(r1[2] - r0[2]));
     }
 
     [NSFileManager.defaultManager removeItemAtPath:root error:nil];

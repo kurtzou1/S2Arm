@@ -228,6 +228,65 @@ static class UpdateExportProbe
             Set(w, "selectedGame", stale.Id); Navigate(w, "library"); Settle(w);
             Check(fails, "更新完成：黄字列在按钮下", Ids(w).Contains("update.outcome") && Texts(w).Any(t => t.StartsWith("⚠ 这款电脑上没有游戏原件")));
             Save(w, Path.Combine(outDir, "hero_5_update_done_warning.png"));
+
+            // ---- #1961：要整款重出时接着重出（作业 update_incomplete 诊断的 facts.action）----
+            // 期望值手写自作业层（pack/jobs/install.py refresh_local）与 Mac 前端同一口径：repack → 这款排进「只出 iPhone、出完不装设备」的批量出包；
+            //   relinkSource → 先给「重新添加原件…」、不排；找回原件成功 → 同样排进重出。
+            // 本机没有真后端：造一个假的 batch.py（POSIX 脚本），把 create 的 --json 清单写进日志，只核前端排进去的是什么。
+            var fake = OperatingSystem.IsWindows() ? null : FakeBatch.Create();
+            var batchAfter = (bool)Get(w, "batchInstallAfter")!;
+            LibraryJobResult UpdateReport(string action, string summary) =>
+                new("succeeded", "", JsonDocument.Parse("""{"gameId":"IGNORED","reasons":[]}""").RootElement.Clone(),
+                    JsonDocument.Parse("""[{"severity":"warning","code":"update_incomplete","summary":"SUMMARY","facts":{"action":"ACTION"}}]"""
+                        .Replace("SUMMARY", summary).Replace("ACTION", action)).RootElement.Clone());
+            bool AcceptUpdate(string action, string summary)
+            {
+                var report = UpdateReport(action, summary);
+                var task = (Task)w.GetType().GetMethod("AcceptUpdateReportAsync", F)!.Invoke(w, [stale, report])!;
+                Await(w, task);
+                return fake is not null && fake.Created(stale.Id, "iphone");
+            }
+            if (fake is null)
+            {
+                Console.WriteLine("  NOT RUN：整款重出的接力（无真后端；本机需要 POSIX 假引擎，Windows 上不跑）");
+            }
+            else
+            {
+                Set(w, "paths", fake.Paths); Set(w, "privateRoot", fake.Root);
+                ((Dictionary<string, string[]>)Get(w, "updateHints")!).Remove(stale.Id);
+                ((System.Collections.IDictionary)Get(w, "gameUpdated")!).Remove(stale.Id);
+                Check(fails, "更新回了 relinkSource：先给「重新添加原件…」，不排重出",
+                    !AcceptUpdate("relinkSource", "原件也不在") && ((Dictionary<string, string>)Get(w, "gameRelink")!).TryGetValue(stale.Id, out var rl) && rl == "offer");
+                fake.Clear();
+                Check(fails, "更新回了 repack：这款排进整款重出（只出 iPhone、不装设备）",
+                    AcceptUpdate("repack", "要整款重新出包") && !batchAfter && (bool)Get(w, "batchInstallAfter")! == false
+                    && !Jobs(w, "Phone") && ((Dictionary<string, bool>)Get(w, "gameRepack")!)[stale.Id]);
+                Check(fails, "更新回了 repack：排进出包页且清单只有这一款", (string?)Get(w, "page") == "batch"
+                    && ((System.Collections.IList)Get(w, "batchDraft")!).Cast<object>().Count(x => (string)Prop(x, "Id")! == stale.Id) == 1);
+                fake.Clear();
+                var relinkReport = new LibraryJobResult("succeeded", "", JsonDocument.Parse("""{"imports":[]}""").RootElement.Clone(), default);
+                Await(w, (Task)w.GetType().GetMethod("AcceptRelinkReportAsync", F)!.Invoke(w, [stale, relinkReport])!);
+                Check(fails, "找回原件成功：同样排这款整款重出（只出 iPhone、不连手机）",
+                    fake.Created(stale.Id, "iphone") && (bool)Get(w, "batchInstallAfter")! == false && !Jobs(w, "Phone")
+                    && ((Dictionary<string, string>)Get(w, "gameRelink")!)[stale.Id] == "done");
+            }
+            // 小字 update.repackNote：原因含 hostAbi、或上一次更新回了 repack → 按钮下有一行；只缺着色器链且没回 repack → 没有
+            var repackFlag = (Dictionary<string, bool>)Get(w, "gameRepack")!;
+            var hintMap = (Dictionary<string, string[]>)Get(w, "updateHints")!;
+            bool NoteShown()
+            {
+                Set(w, "selectedGame", stale.Id); Navigate(w, "library"); Settle(w);
+                return Ids(w).Contains("update.repackNote");
+            }
+            hintMap[stale.Id] = ["shader"]; repackFlag.Remove(stale.Id);
+            Check(fails, "repackNote：只缺着色器链、上次没回 repack → 不显示", !NoteShown());
+            hintMap[stale.Id] = ["hostAbi", "shader"];
+            Check(fails, "repackNote：原因含 hostAbi → 显示", NoteShown()
+                && Texts(w).Contains("要整款重新出包，约几分钟到几十分钟"));
+            hintMap.Remove(stale.Id); repackFlag[stale.Id] = true;
+            Check(fails, "repackNote：上次更新回了 repack → 原因清空后照样显示", NoteShown());
+            Save(w, Path.Combine(outDir, "hero_6_repack_note.png"));
+            repackFlag.Remove(stale.Id); hintMap.Remove(stale.Id);
         }
         catch (Exception error) { fails.Add("探针异常：" + (error.InnerException ?? error)); }
         finally { w.Close(); Dispatcher.UIThread.RunJobs(); }
@@ -245,6 +304,59 @@ static class UpdateExportProbe
     static void Click(Window w, string id) =>
         (Buttons(w).FirstOrDefault(b => Id(b) == id) ?? throw new InvalidOperationException("找不到按钮 " + id)).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
     static void Navigate(EnvironmentWindow w, string page) => w.GetType().GetMethod("Navigate", F)!.Invoke(w, [page]);
+
+    /// <summary>等一个界面任务收尾（它自己会等后端进程）：期间继续跑界面队列，超时算失败</summary>
+    static void Await(Window w, Task task)
+    {
+        var until = DateTime.UtcNow.AddSeconds(30);
+        while (!task.IsCompleted && DateTime.UtcNow < until) { Dispatcher.UIThread.RunJobs(); Thread.Sleep(20); }
+        if (task.IsFaulted) throw task.Exception!;
+        Settle(w);
+    }
+
+    /// <summary>作业登记处里有没有这一类作业在跑（整款重出不许连手机 → 断言没有 Phone）</summary>
+    static bool Jobs(Window w, string kind) =>
+        ((System.Collections.IEnumerable)Get(w, "jobs")!).Cast<object>().Any(j => Prop(j, "Kind")?.ToString() == kind);
+
+    /// <summary>假引擎（只给探针用）：Runtime/python/python.exe 是 POSIX 脚本，把 batch.py 的参数逐行记进 create.log，
+    /// 打印一行 {error}（本机没有真后端，只核前端排进去的清单）；Engine/pack/jobs/batch.py 只是占位。</summary>
+    sealed class FakeBatch
+    {
+        public required string Root { get; init; }
+        public required LauncherPaths Paths { get; init; }
+        private string Log => Path.Combine(Root, "create.log");
+
+        public static FakeBatch Create()
+        {
+            var root = Path.Combine(Path.GetTempPath(), "s2arm-fake-batch-" + Guid.NewGuid().ToString("N"));
+            var runtime = Path.Combine(root, "Runtime"); var engine = Path.Combine(root, "Engine");
+            Directory.CreateDirectory(Path.Combine(runtime, "python"));
+            Directory.CreateDirectory(Path.Combine(engine, "pack", "jobs"));
+            File.WriteAllText(Path.Combine(engine, "pack", "jobs", "batch.py"), "");
+            var log = Path.Combine(root, "create.log");
+            var python = Path.Combine(runtime, "python", "python.exe");
+            File.WriteAllText(python, "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"" + log + "\"\n" +
+                "echo '{\"error\":\"fake batch (probe): the host gate has no real backend\"}'\n");
+            if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(python, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            return new FakeBatch { Root = root, Paths = new LauncherPaths(engine, runtime, Path.Combine(root, "Shell")) };
+        }
+
+        public void Clear() { try { File.Delete(Log); } catch (IOException) { } }
+
+        /// <summary>这一次 create 的清单恰好是这一款、这些平台（多次调用最后一次为准）</summary>
+        public bool Created(string gameId, params string[] platforms)
+        {
+            if (!File.Exists(Log)) return false;
+            var args = File.ReadAllLines(Log);
+            var at = Array.IndexOf(args, "--json");
+            if (at < 0 || at + 1 >= args.Length) return false;
+            using var doc = JsonDocument.Parse(args[at + 1]);
+            if (!doc.RootElement.TryGetProperty("items", out var items) || items.GetArrayLength() != 1) return false;
+            var item = items[0];
+            return item.GetProperty("gameId").GetString() == gameId &&
+                   item.GetProperty("platforms").EnumerateArray().Select(p => p.GetString()).SequenceEqual(platforms);
+        }
+    }
     static void Save(Window w, string path)
     {
         var bmp = w.CaptureRenderedFrame();

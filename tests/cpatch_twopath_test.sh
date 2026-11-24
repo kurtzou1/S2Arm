@@ -131,6 +131,27 @@ rcU, gU = rew([('p', 0x108, words[0x108], 0x3F800000, 5)], T + '/undec')
 wU = struct.unpack_from('<I', open(T + '/undec/main.patched.bin', 'rb').read(), 0x108)[0] if os.path.exists(T + '/undec/main.patched.bin') else None
 ck(f'⑩ 补丁新字解不出 → 退出码 3、缺口 cpatch「解不出」、0x108 保持原字（实得 rc={rcU} {wU and hex(wU)} 缺口「{gU.strip()[:80]}」）',
    rcU == 3 and 'cpatch' in gU and '解不出' in gU and wU == words[0x108])
+# ⑪ #1321 补丁自带字面量池（pack/cpatch.py literal_pool）：p 行第 7 列「=值」——补丁指令是 LDR (literal)，这一路直接把值装进 Rt。
+#   0x110 位 3：ldr w3,0x184 带 =0098967f → 掩码 0x8：w3 = 0x0098967F（不是内存里的 0x22222222；掩码 0：原路 0x11111111）；
+#   0x100 位 0：ldr s1,0x184 带 =4479c000（1000.0f）→ 掩码 0x1：s1 位型 0x4479C000；两路 x16 / sp 进出不变；
+#   0x114 位 4：带 =值 但补丁指令不是字面量 ldr（mov w4,#9）→ 缺口 cpatch
+def ldrs(pc, t, rt): return 0x1C000000 | ((((t - pc) >> 2) & 0x7FFFF) << 5) | rt
+lit = [('p', 0x110, words[0x110], ldrw(0x110, 0x184, 3), '3\t=98967f'), ('p', 0x100, words[0x100], ldrs(0x100, 0x184, 1), '0\t=4479c000')]
+rcL, gL = rew(lit, T + '/lit')
+imgL = open(T + '/lit/main.patched.bin', 'rb').read(); keyL = next(int(l.split('\t')[1], 16) for l in open(T + '/lit/main.fixups.tsv') if l.startswith('# KEY_PAGE_OFF\t'))
+from unicorn.arm64_const import UC_ARM64_REG_S1
+def run_s1(mask):
+    u = Uc(UC_ARCH_ARM64, UC_MODE_ARM); size = (len(imgL) + keyL + 0x10000 + 0xFFFF) & ~0xFFFF
+    u.mem_map(BASE, size); u.mem_write(BASE, imgL); u.mem_write(BASE + keyL + 2046 * 8, struct.pack('<Q', mask))
+    u.mem_map(STK, 0x10000); u.mem_map(END, 0x1000); u.mem_write(END, struct.pack('<I', 0xD503201F))
+    u.reg_write(UC_ARM64_REG_X16, 0xdead); u.reg_write(UC_ARM64_REG_SP, STK + 0x8000); u.reg_write(UC_ARM64_REG_LR, END); u.reg_write(UC_ARM64_REG_S1, 0)
+    u.emu_start(BASE + 0x100, END, count=500)
+    return u.reg_read(UC_ARM64_REG_X3) & 0xffffffff, u.reg_read(UC_ARM64_REG_S1) & 0xffffffff, u.reg_read(UC_ARM64_REG_X16), u.reg_read(UC_ARM64_REG_SP) - STK, u.reg_read(UC_ARM64_REG_PC)
+l0, l8, l1 = run_s1(0), run_s1(0x8), run_s1(0x1)
+ck(f'⑪ 字面量池 =值：rc=0 无缺口；掩码 0 w3=0x11111111、0x8 w3=0x98967f、0x1 s1=0x4479c000；x16 / sp 不变（实得 rc={rcL} {l0[0]:#x} {l8[0]:#x} {l1[1]:#x} {[(hex(x[2]), hex(x[3])) for x in (l0, l8, l1)]}）',
+   rcL == 0 and 'cpatch' not in gL and l0[0] == 0x11111111 and l8[0] == 0x0098967F and l1[1] == 0x4479C000 and all(x[2] == 0xdead and x[3] == 0x8000 and x[4] == END for x in (l0, l8, l1)))
+rcN, gN = rew([('p', 0x114, words[0x114], 0x52800124, '4\t=9')], T + '/lit_bad')
+ck(f'⑪ =值 配非字面量 ldr → 缺口 cpatch（rc={rcN}）', rcN != 0 and 'cpatch' in gN and '字面量 ldr' in gN)
 sys.exit(bad)
 EOF
 rc=$?; [ $rc = 0 ] && echo "✅ cpatch_twopath_test 全过" || { echo "🔴 cpatch_twopath_test 有不通项"; exit 1; }

@@ -35,6 +35,7 @@ public sealed partial class EnvironmentWindow
     private Task? libraryOperation;
     private TextBox libraryFolderBox = new();
     private readonly Dictionary<string, Bitmap> covers = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> badImages = new(StringComparer.OrdinalIgnoreCase);   // 解不开的图（CachedImage）
     private readonly string privateRoot = ResolvePrivateRoot();
 
     private void Navigate(string destination)
@@ -62,6 +63,7 @@ public sealed partial class EnvironmentWindow
     /// </summary>
     private void ClearCovers()
     {
+        badImages.Clear();
         if (covers.Count == 0) return;
         retiredCovers.Add((Content, covers.Values.ToList()));
         covers.Clear();
@@ -105,15 +107,31 @@ public sealed partial class EnvironmentWindow
         {
             if (new FileInfo(path).Length > 16 * 1024 * 1024) return null;
             // 缓存键另起：没有自带图标的款 cover 也指向 banner.jpg，封面卡片按 240 宽解码的那份不能拿来铺大图
-            if (!covers.TryGetValue(path + "#hero", out var image))
-            {
-                using var file = File.OpenRead(path);
-                image = Bitmap.DecodeToWidth(file, 1600);
-                covers.Add(path + "#hero", image);
-            }
-            return image;
+            return CachedImage(path + "#hero", path, 1600);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { return null; }
+    }
+
+    /// <summary>解码这款文件夹里的一张图并缓存（键 key）；解不开 → null，并记下这个键，之后的重画不再解它（重新连库 / 刷新时 ClearCovers 一并清掉再试）。
+    /// 坏图（空文件、截断、不是图片）Skia 解出空图，Avalonia ImmutableBitmap 构造里抛 NullReferenceException，不在 IO 类异常里：原先一路抛出 RenderLibrary，
+    /// 整页重画中断、出错后的重画又炸，界面停在上一页（D-97FT：Windows 0.6.9 一分钟 15 次 NullReferenceException）。一张图解不开只该让那一格用占位图</summary>
+    private Bitmap? CachedImage(string key, string path, int width)
+    {
+        if (covers.TryGetValue(key, out var image)) return image;
+        if (badImages.Contains(key)) return null;
+        try
+        {
+            using var file = File.OpenRead(path);
+            image = Bitmap.DecodeToWidth(file, width);
+        }
+        catch (Exception error)   // noqa：玩家文件夹里的图，任何解码失败都只回落占位图，不能拖垮整页
+        {
+            badImages.Add(key);
+            LauncherCrash.Log(null, $"图片解不开，用占位图：{path}（{error.GetType().Name}: {error.Message}）");
+            return null;
+        }
+        covers.Add(key, image);
+        return image;
     }
 
     /// <summary>封面 + 已打上 S 级优化的左上角金色 S（同 Mac LauncherView+Library SGradeBadge：只有 S、没有框和底色，叠三层更实、加投影）</summary>
@@ -160,13 +178,8 @@ public sealed partial class EnvironmentWindow
             // 只认这款自己文件夹里的封面（LibraryGame.CoverFile：按 catalog 给的文件夹认，英文名文件夹也行，#330）
             if (connectedFolder is not null && game.CoverFile() is { } path && new FileInfo(path).Length <= 16 * 1024 * 1024)
             {
-                if (!covers.TryGetValue(path, out var image))
-                {
-                    using var file = File.OpenRead(path);
-                    image = Bitmap.DecodeToWidth(file, 240);
-                    covers.Add(path, image);
-                }
-                return new Image { Source = image, Width = size, Height = size, Stretch = Stretch.UniformToFill };
+                if (CachedImage(path, path, 240) is { } image)
+                    return new Image { Source = image, Width = size, Height = size, Stretch = Stretch.UniformToFill };
             }
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { }
@@ -257,6 +270,7 @@ public sealed partial class EnvironmentWindow
             if (SGradeLine(hero) is { } sgNote) overlay.Children.Add(sgNote);
             if (UpdateReasonLines(hero) is { } heroHint) overlay.Children.Add(heroHint);
             overlay.Children.Add(HeroActions(hero));   // 有横图时按钮也叠在底部渐变上（v0.4.5 修：说明写着「常驻」，之前只画了大图）
+            if (UpdateRepackNote(hero) is { } heroRepack) overlay.Children.Add(heroRepack);   // #1961：按钮下一行「要整款重新出包」
             if (UpdateOutcomeLines(hero) is { } heroDone) overlay.Children.Add(heroDone);
             art.Children.Add(overlay);
             body.Children.Add(new Border { CornerRadius = new CornerRadius(16), ClipToBounds = true, Child = art });
@@ -273,6 +287,7 @@ public sealed partial class EnvironmentWindow
             if (SGradeLine(hero) is { } sgNote) title.Children.Add(sgNote);
             if (UpdateReasonLines(hero) is { } heroHint) title.Children.Add(heroHint);
             title.Children.Add(HeroActions(hero));
+            if (UpdateRepackNote(hero) is { } heroRepack) title.Children.Add(heroRepack);   // #1961：按钮下一行「要整款重新出包」
             if (UpdateOutcomeLines(hero) is { } heroDone) title.Children.Add(heroDone);
             Grid.SetColumn(title, 1); banner.Children.Add(title); body.Children.Add(Card(banner, 20));
         }
@@ -663,7 +678,7 @@ public sealed partial class EnvironmentWindow
         finally
         { EndJob(front); Render(); }
         if (!succeeded || closingLibrary) return;
-        if ((operation == "forgetGame" || operation == "delete") && selectedGame == game.Id) selectedGame = null;
+        if ((operation == "forgetGame" || operation == "delete") && selectedGame == game.Id) ClearSelectedGame(operation);
         locationsFor = null;   // 位置表的剩余空间 / 这款的位置变了：出包页下次重读
         await RunLibraryAsync("catalog", null);
     }
@@ -826,6 +841,16 @@ public sealed partial class EnvironmentWindow
         libraryOperation = RunLibraryAsync(operation, null);
     }
 
+    /// <summary>清空选中（顶部大卡回退到第一款）：每处清空都先在 logs/launcher-crash.log 记一行 library.select.clear（#1392）——
+    /// 选中的款、为什么清（absent / hidden = 目录刷新后缺席或被隐藏；forgetGame / delete = 遗忘 / 删除这款；setup = 选库或换库整段清空）、
+    /// 当时目录总款数、出包款与状态。没选中就什么都不做。</summary>
+    private void ClearSelectedGame(string reason)
+    {
+        if (selectedGame is null) return;
+        LauncherCrash.Log(null, $"library.select.clear selected={selectedGame} state={reason} catalog={catalog?.Games.Count.ToString() ?? "null"} pack={packGame?.Id ?? "null"}/{(packState == "" ? "null" : packState)} result=cleared");
+        selectedGame = null;
+    }
+
     /// <summary>游戏库作业在跑时又要刷新（出包 / 装机完、换页）：记一笔，这一轮结束后补刷一次（剃刀 W8：原先直接丢掉，刚出好的状态要等下一次别的刷新）。</summary>
     private bool catalogAgain;
 
@@ -849,7 +874,8 @@ public sealed partial class EnvironmentWindow
         {
             if (operation == "setup")
             {
-                connectedFolder = null; libraryId = null; catalog = null; selectedGame = null; ClearCovers();
+                ClearSelectedGame("setup");   // 选库 / 换库：整段清空，先记一行（#1392）
+                connectedFolder = null; libraryId = null; catalog = null; ClearCovers();
                 var folder = Path.GetFullPath(libraryFolder);
                 var accept = new HashSet<string>();
                 var setup = await LibraryJobClient.RunAsync(paths, privateRoot, folder, null, "setup", null, front.Token, jobId: front.Next());
@@ -872,10 +898,7 @@ public sealed partial class EnvironmentWindow
             catalog = LibraryCatalog.Parse(listing.Report.Result); ClearCovers();
             if (selectedGame is not null && !catalog.Games.Any(g => g.Id == selectedGame && !g.Hidden))
             {
-                // #1392 读数：清空选中之前记一行（logs/launcher-crash.log）——选中的款、是缺席还是 Hidden、目录总款数、当时的出包款与状态
-                var present = catalog.Games.FirstOrDefault(g => g.Id == selectedGame);
-                LauncherCrash.Log(null, $"library.select.clear selected={selectedGame} state={(present is null ? "absent" : "hidden")} catalog={catalog.Games.Count} pack={packGame?.Id ?? "null"}/{(packState == "" ? "null" : packState)} result=cleared");
-                selectedGame = null;
+                ClearSelectedGame(catalog.Games.Any(g => g.Id == selectedGame) ? "hidden" : "absent");
             }
             librarySummary = "library.completed";
             ResumeSGradeWatch();   // S 级批量升级队列还在跑就接着读进度（SGradeUpgrade.cs）

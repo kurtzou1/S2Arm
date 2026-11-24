@@ -8,6 +8,7 @@
 //   （帧缓冲绑定 0、无表面），渲染线程下一笔清除落到 0 号帧缓冲报「没有绘制表面」+ 0x502，随后游戏客体代码读空指针崩
 #include "gl_int.h"
 #include "../nvn/nvn_fps.h"
+#include <math.h>
 #include <pthread.h>
 #include <time.h>
 const char gl_slice_egl = 1;   // 分片锚（gl_core.m 引用：静态链接时整片进来，见 gl_int.h「分片锚」）
@@ -36,7 +37,7 @@ static void snap_ho(const void *p, const char *fmt, ...);   // 文件尾：交�
 static void snap_tb_note(void);
 int nvn_gl_game_fps(void) { return __atomic_load_n(&g_gl_game_fps, __ATOMIC_RELAXED); }
 // 只读计数（单测按事件判、不量墙钟，t_fps_limit）：交换锁自己时钟这一支（没有显示链接）的限帧决定。
-//   [0] 排过节拍的交换次数 [1] 最近一次的节拍周期（ns） [2] 落后超过一拍、从现在重新对齐的次数 [3] 真睡了的次数 [4] 单次要睡的最长时长（ns）。只增不减（[1][4] 记最近 / 最大），不改行为
+//   [0] 排过节拍的交换次数 [1] 最近一次的节拍周期（ns） [2] 帧比周期长、截止时刻多跨过的刻度累计 [3] 真睡了的次数 [4] 单次要睡的最长时长（ns）。只增不减（[1][4] 记最近 / 最大），不改行为
 static uint64_t g_gl_pace[5];
 void s2a_gl_pace_stats(uint64_t out[5]) { for (int i = 0; i < 5; i++) out[i] = __atomic_load_n(&g_gl_pace[i], __ATOMIC_RELAXED); }
 static __thread EGLenum g_api = EGL_OPENGL_ES_API;   // 当前 API 与错误码都按线程（EGL 1.5 §3.1 / §3.7）
@@ -378,8 +379,13 @@ GLB(eglSwapBuffers, EGLBoolean, EGLDisplay d, EGLSurface sf) { @autoreleasepool 
     else if (per > 0) {
         struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); double now = ts.tv_sec + ts.tv_nsec * 1e-9;
         __atomic_fetch_add(&g_gl_pace[0], 1, __ATOMIC_RELAXED); __atomic_store_n(&g_gl_pace[1], (uint64_t)(per * 1e9 + 0.5), __ATOMIC_RELAXED);
-        if (s->next_swap <= 0 || now - s->next_swap > per) { if (s->next_swap > 0) __atomic_fetch_add(&g_gl_pace[2], 1, __ATOMIC_RELAXED); s->next_swap = now; }
-        s->next_swap += per;
+        // 截止时刻按刻度走（真机垂直同步语义）：上次刻度 + k × 周期，k 取让它 ≥ 现在的最小值（≥ 1）。帧比周期长就落到下一个刻度、只等到那一刻，
+        //   不补发、也不再「从现在重新起拍再整睡一周期」（11-23 前的做法：12 ms 的帧在 8.3 ms 周期下被拖到约 24 ms，20 ms 的帧在 60 档被拖到 36.7 ms，真机是 16.7 / 33.3）。
+        //   首帧从现在起拍；停了很久回来同样落到 ≥ 现在的那个刻度，不会一口气补帧
+        if (s->next_swap <= 0) s->next_swap = now;
+        { double k = ceil((now - s->next_swap) / per); if (k < 1) k = 1;
+          if (k > 1) __atomic_fetch_add(&g_gl_pace[2], (uint64_t)(k - 1), __ATOMIC_RELAXED);
+          s->next_swap += k * per; }
         double wait = s->next_swap - now;
         if (wait > 0) { uint64_t w = (uint64_t)(wait * 1e9); __atomic_fetch_add(&g_gl_pace[3], 1, __ATOMIC_RELAXED); if (w > __atomic_load_n(&g_gl_pace[4], __ATOMIC_RELAXED)) __atomic_store_n(&g_gl_pace[4], w, __ATOMIC_RELAXED); }
         if (wait > 0) s2a_sleep_ns((int64_t)(wait * 1e9));   // 不用 nanosleep：游戏线程 utility 下定时器余量放宽、多睡上百毫秒（同 Vulkan 层 vkAcquireNextImageKHR）

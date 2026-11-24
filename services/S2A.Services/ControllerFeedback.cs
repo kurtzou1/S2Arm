@@ -47,6 +47,10 @@ namespace S2A.Services
         private readonly delegate* unmanaged<MotionSample*, int> _readMotionPair;   // 可选：左右两路（Mac Joy-Con HID）
         // 可选（Mac 宿主 s2a_pad_read_motion_slot，#520）：P1 以外的玩家各自的体感；没导出照旧只有 P1
         private readonly delegate* unmanaged<int, MotionSample*, int> _readMotionSlot;
+        // 可选（Mac，补满采样）：0x30 全报告一包 3 组 IMU（相隔 5 ms）。一次取走一拍累积的全部样本，
+        //   逐笔写进游戏，对齐真机 200 Hz。平台装配没登记批量源（Native.MotionBurst = 0）时照旧走单笔接口，行为不变。
+        private readonly delegate* unmanaged<int, int, MotionSample*, int, int> _readMotionBurst;
+        private const int MotionBurstMax = 12;
         private sealed class SlotMotion { public MotionInput Left, Right; public readonly GyroZeroDrift DriftLeft = new(), DriftRight = new(); public readonly float[] Orientation = new float[9], OrientationRight = new float[9]; public ulong Timestamp; public readonly List<SixAxisInput> Last = new(2); }
         private readonly Dictionary<int, SlotMotion> _slotMotion = new();
         private readonly List<SixAxisInput> _p1States = new(2);   // P1 最近一次的六轴（P1 没新样本、别人有时照样带上）
@@ -61,7 +65,7 @@ namespace S2A.Services
         private ulong _motionSession, _motionTimestamp;
         private long _renewAt;
         private VibrationValue _left, _right;
-        private bool _motionEnabled, _motionPublished, _rumbleLogged, _motionLogged;
+        private bool _motionEnabled, _motionPublished, _rumbleLogged, _motionLogged, _burstLogged;
         private bool _rumblePermitted;
         private volatile bool _stopped;
 
@@ -106,12 +110,14 @@ namespace S2A.Services
                     _readMotionSlot = (delegate* unmanaged<int, MotionSample*, int>)slotMotion;
                 if (NativeLibrary.TryGetExport(program, "s2a_pad_read_motion_pair", out nint pair))   // 平台例外：Mac 宿主（macos/front_mac.m，Joy-Con HID 左右两路体感）专有的可选导出，同 s2a_pad_read_motion；iOS / 安卓宿主没有
                     _readMotionPair = (delegate* unmanaged<MotionSample*, int>)pair;
+                if (Native.MotionBurst != 0)   // 补满采样：平台装配登记的批量体感源（Native.RegisterMotionBurst）；没登记走单笔路径
+                    _readMotionBurst = (delegate* unmanaged<int, int, MotionSample*, int, int>)Native.MotionBurst;
             }
             if (NativeLibrary.TryGetExport(program, "s2a_pad_read_mouse_pair", out nint mousePair))   // 平台例外：Mac 宿主（macos/front_mac.m，Joy-Con 2 光学鼠标）专有的可选导出
                 _readMousePair = (delegate* unmanaged<MouseSample*, int>)mousePair;
             if (NativeLibrary.TryGetExport(program, "s2a_pad_read_mouse_slot", out nint mouseSlot))   // 平台例外：同 s2a_pad_read_mouse_pair（Mac 宿主专有）
                 _readMouseSlot = (delegate* unmanaged<int, MouseSample*, int>)mouseSlot;
-            Console.Error.WriteLine($"[输入反馈] hooks rumble_pair={_setRumblePair != null} stop={_stopRumble != null} session={_rumbleSession != null} motion={_readMotion != null} motion_pair={_readMotionPair != null} motion_enable={_setMotionEnabled != null} mouse={_readMousePair != null} player={(int)player} session={_session} permit={_rumblePermitted}");
+            Console.Error.WriteLine($"[输入反馈] hooks rumble_pair={_setRumblePair != null} stop={_stopRumble != null} session={_rumbleSession != null} motion={_readMotion != null} motion_pair={_readMotionPair != null} motion_burst={_readMotionBurst != null} motion_enable={_setMotionEnabled != null} mouse={_readMousePair != null} player={(int)player} session={_session} permit={_rumblePermitted}");
         }
 
         public void Update(PlayerIndex player)
@@ -296,6 +302,9 @@ namespace S2A.Services
                 }
                 return;
             }
+            // 补满采样（可选导出，Mac HID 全报告）：宿主一次把 0x30 一包里的 3 组 IMU 给全，
+            //   逐笔写进游戏（每笔 5 ms），对齐真机 200 Hz。宿主说这一格不是 HID 全报告源时回退单笔路径。
+            if (_readMotionBurst != null && TickMotionBurst(player)) return;
             // P1：有新样本才重算（同改前），没新样本但别的玩家有时照带上一份
             bool fresh = false;
             if (known == 0) { _motion = _motionRight = null; _motionTimestamp = 0; _p1States.Clear(); }
@@ -324,6 +333,67 @@ namespace S2A.Services
             }
             _npads.UpdateSixAxis(_motionStates);
             _motionPublished = true;
+        }
+
+        // 补满采样：宿主一次把 0x30 一包里的 3 组 IMU（相隔 5 ms）给全，逐笔写进游戏。
+        //   单笔路径每帧（约 16 ms）只写一条，而游戏每条六轴记录的 DeltaTime 固定 5 ms —— 时间轴被压成 1/3；
+        //   逐笔写既补回样本密度，也让那条 5 ms 名副其实（真机 200 Hz）。
+        //   返回 true = 这一格由批量源接管（哪怕这拍没有新样本）；false = 宿主说没有批量源，回退单笔路径。
+        private bool TickMotionBurst(PlayerIndex player)
+        {
+            MotionSample* left = stackalloc MotionSample[MotionBurstMax];
+            MotionSample* right = stackalloc MotionSample[MotionBurstMax];
+            int nl = _readMotionBurst(0, 0, left, MotionBurstMax);
+            int nr = _readMotionBurst(0, 1, right, MotionBurstMax);
+            if (nl < 0 && nr < 0) return false;
+            int nLeft = Math.Max(nl, 0), nRight = Math.Max(nr, 0);
+            if (nLeft == 0 && nRight > 0)   // 只有副路有样本时当单路用（正常情况宿主已把主路放在 side 0）
+            {
+                for (int i = 0; i < nRight; i++) left[i] = right[i];
+                nLeft = nRight; nRight = 0;
+            }
+            int count = Math.Max(nLeft, nRight);
+            if (count > 0 && !_burstLogged)
+            {
+                _burstLogged = true;
+                Console.Error.WriteLine($"[输入反馈] 体感补满采样：每拍 {count} 笔（5 ms 间隔，对齐真机 200 Hz）");
+            }
+            if (count == 0)
+            {
+                // 这一拍没有新样本：绝不重放旧姿态。游戏侧 SetSixAxisState 每次调用都会追加一条 5 ms 记录，
+                //   重放只会造出一批「姿态没变但时间照走」的伪样本，把时间轴又压歪（同单笔路径 !fresh 时不写）。
+                _motionStates.Clear();
+                _motionStates.AddRange(_p1States);
+                bool fresh = AddSlotMotion();
+                if (fresh) { _npads.UpdateSixAxis(_motionStates); _motionPublished = true; }
+                else if (_motionStates.Count == 0 && _motionPublished) { _npads.UpdateSixAxis(_motionStates); _motionPublished = false; }
+                return true;
+            }
+            // 其他玩家照旧只走单笔通道：一拍只积分一次，缓存下来逐笔带上。
+            //   不能在循环里每笔都调 AddSlotMotion —— 一对 Joy-Con 的槽位来源时间戳不变却会被重复积分，幅度放大 count 倍；
+            //   又不能不带 —— UpdateSixAxis 会把没出现在列表里的玩家判成掉线。
+            _motionStates.Clear();
+            AddSlotMotion();
+            SixAxisInput[] slotStates = _motionStates.ToArray();
+            bool paired = nRight > 0;
+            for (int i = 0; i < count; i++)
+            {
+                _motionStates.Clear();
+                MotionSample l = left[Math.Min(i, nLeft - 1)];
+                AddMotionState(player, l, ref _motion, _orientation, _driftLeft, imuSensor: paired ? 0 : -1);
+                if (paired)
+                {
+                    MotionSample r = right[Math.Min(i, nRight - 1)];
+                    AddMotionState(player, r, ref _motionRight, _orientationRight, _driftRight, imuSensor: 1);
+                }
+                _p1States.Clear();
+                _p1States.AddRange(_motionStates);
+                _motionTimestamp = l.TimestampUs;
+                _motionStates.AddRange(slotStates);
+                _npads.UpdateSixAxis(_motionStates);
+                _motionPublished = true;
+            }
+            return true;
         }
 
         // P1 以外的玩家按槽位读体感（宿主 s2a_pad_read_motion_slot），加进这一拍的六轴列表；有新样本回 true

@@ -246,7 +246,8 @@ public sealed partial class EnvironmentWindow
         var front = BeginJob(JobKind.Library); librarySummary = "library.working"; Render();
         try
         {
-            connectedFolder = null; libraryId = null; catalog = null; selectedGame = null; ClearCovers();
+            ClearSelectedGame("setup");   // 欢迎页建库 / 选库：整段清空，先记一行（#1392）
+            connectedFolder = null; libraryId = null; catalog = null; ClearCovers();
             PrivateJobRequest.EnsurePrivateRoot(privateRoot);
             var free = freeDefault; freeDefault = false;   // 文件夹由 setup 建（先过库路径规则，不在启动器目录里留空文件夹）
             var accept = new HashSet<string>();

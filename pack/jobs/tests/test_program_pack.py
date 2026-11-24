@@ -236,6 +236,30 @@ with zipfile.ZipFile(src) as zi, zipfile.ZipFile(out, "w") as zo:
             self.assertEqual(dy.read_bytes(), b"UNSIGNED+SIGNED")
 
 
+    def test_win_signer_keeps_plumesign_code(self):
+        # D-39W8（Windows 0.6.9）：导出 / 推送前「准备这款的程序」签程序库时 plumesign 报 Apple 1100 登录过期，install_win 抛的 Fail 带 code=apple_session_expired，
+        #   作业结果却是 job_failed「本地任务失败」——win_signer 原样抛 install_win.Fail，作业层不认这个类。
+        #   期望（手写）：win_signer 转成作业失败，码 = apple_session_expired，上屏是重新登录的办法，plumesign 原文进 internal
+        import errors
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d); shell = make_shell(d) / "root"
+            dy = d / f"S2AImages-{GID}.dylib"; dy.write_bytes(b"UNSIGNED")
+            fake = d / "plumesign"
+            fake.write_text(f"""#!{sys.executable}
+import sys
+print("Error: Developer API error 1100: Your session has expired. Please log in.")
+sys.exit(1)
+""")
+            fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+            c = mock.Mock(engine=ROOT, logs=d, task="t1", device_kind="")
+            run = program_pack.win_signer(c, str(fake), shell)
+            with self.assertRaises(errors.Failure) as e:
+                run(dy, "TEAMX", "io.example.games.teamx")
+            self.assertEqual(e.exception.code, "apple_session_expired")
+            self.assertIn(errors.RECOVERY["apple_session_expired"], str(e.exception))
+            self.assertIn("1100", e.exception.internal)
+
+
 class DevpushMvTests(unittest.TestCase):
     def test_mv_calls_tool(self):
         with tempfile.TemporaryDirectory() as d:

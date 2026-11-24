@@ -5,7 +5,7 @@
 宏开关、告警即错同 Makefile，C 源另预包含本目录 win_posix.h 补 Windows 没有的 asprintf / memmem；Windows 没有 make，这里用 PATH 上的 LLVM clang / clang++（或 S2A_CC / S2A_CXX）直接编。
 COFF 不认 dsx_abi.h 的 visibility("default")，导出表按 C 源码里标 NXGAL_API 的函数名生成（/EXPORT），不改 dsx_abi.h（改它会换 ABI 指纹与 Mac 库字节）。
 输出已存在且比全部输入新就不重编；编在同目录的临时子目录里、用最终文件名链接，再改名过去（并发两路只会有一份完整产物）。
-字节可复现：库整文件哈希进翻译键（graphics/tools/direct/dsh/batch/Build.cs LibFp，PE 不拆节），lld-link 缺省把链接时刻写进文件头与导出表、
+字节可复现：库整文件哈希进翻译键（graphics/tools/direct/dsh/batch/Store.cs ToolLib.Fp，PE 不拆节），lld-link 缺省把链接时刻写进文件头与导出表、
   导出表还记链接时的文件名，原先每编一次字节都不同，Windows 出包机每换一份代码检出全部着色器翻译缓存作废（shader cache: hit 0）。
   /Brepro 让时间戳取内容哈希；在临时子目录里按最终文件名链接，导出表记的名字不带进程号；SPIRV-Cross 的 assert 把 __FILE__（宽字符）编进库，
   -fmacro-prefix-map 把仓库根换成「.」，库里不带检出路径（Windows 出包机按提交号各一份检出）。

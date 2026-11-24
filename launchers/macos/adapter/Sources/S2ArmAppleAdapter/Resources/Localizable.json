@@ -10868,12 +10868,12 @@
   "en": "This game's shader library couldn't be rebuilt this time: the Metal developer tools aren't installed on this computer. Install them in \"Prepare this computer\", then click \"Update this game\" again; \"Update suggested\" stays until then."
  },
  {
-  "source": "这款的着色器库这次没能重编：游戏库里重编要用的游戏文件不在了（比如清理空间时删了已出好的 iPhone 包）。原件还在：在出包页对这款重新出包。",
-  "en": "This game's shader library couldn't be rebuilt this time: the game files needed to rebuild it are no longer in the library (for example, the built iPhone package was removed when freeing up space). The original is still there: rebuild this game on the build page."
+  "source": "这款的着色器库这次没能重编：游戏库里重编要用的游戏文件不在了。原件还在，正在从原件整款重新出包（约几分钟到几十分钟）。",
+  "en": "This game's shader library couldn't be rebuilt this time: the game files needed to rebuild it are no longer in the library. The original is still there, so the whole game is being rebuilt from it (a few minutes to tens of minutes)."
  },
  {
-  "source": "这款的着色器库这次没能重编：游戏库里重编要用的游戏文件和这款的原件都不在了。点「重新添加原件…」选这款的原件，再在出包页对这款重新出包。",
-  "en": "This game's shader library couldn't be rebuilt this time: neither the game files needed to rebuild it nor this game's original file are available. Click \"Re-add original…\" to pick this game's original, then rebuild it on the build page."
+  "source": "这款的着色器库这次没能重编：游戏库里重编要用的游戏文件和这款的原件都不在了。点「重新添加原件…」选这款的原件，找回后会自动从原件整款重新出包。",
+  "en": "This game's shader library couldn't be rebuilt this time: neither the game files needed to rebuild it nor this game's original file are available. Click \"Re-add original…\" to pick this game's original; once it's found, the whole game is rebuilt from it automatically."
  },
  {
   "source": "选的是另一款游戏（{0}），不是这一款（{1}）：这款的记录没有改动，请选这款的原件。",
@@ -10884,8 +10884,12 @@
   "en": "This game is running on this Mac, so the Mac version's shader library was not updated this time. Quit the game and click \"Update this game\" again."
  },
  {
-  "source": "这款要整款重新出包才能更新完（运行环境的约定变了，只换着色器库不够）：在出包页对这款重新出包。",
-  "en": "This game needs a full rebuild to finish updating (the runtime contract changed; replacing the shader library is not enough). Rebuild this game on the build page."
+  "source": "这款要整款重新出包才能更新完（运行环境的约定变了，只换着色器库不够）：正在从原件整款重新出包（约几分钟到几十分钟）。",
+  "en": "This game needs a full rebuild to finish updating (the runtime contract changed; replacing the shader library is not enough): the whole game is being rebuilt from its original (a few minutes to tens of minutes)."
+ },
+ {
+  "source": "这款要整款重新出包才能更新完（运行环境的约定变了，只换着色器库不够），但这款的原件不在了。点「重新添加原件…」选这款的原件，找回后会自动从原件整款重新出包。",
+  "en": "This game needs a full rebuild to finish updating (the runtime contract changed; replacing the shader library is not enough), but its original file is no longer available. Click \"Re-add original…\" to pick this game's original; once it's found, the whole game is rebuilt from it automatically."
  },
  {
   "source": "按黄字里写的补上缺的那一项，再点一次「更新这款」；其余部分这次已经更新好了。",

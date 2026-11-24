@@ -403,10 +403,19 @@ public struct UpdateGameResult: Equatable {
     public let incomplete: [String]
     /// 黄字里有「原件也不在」那句（诊断 facts.action = relinkSource，#1961）：按钮下给「重新添加原件…」
     public let relinkSource: Bool
-    public init(reasons: [String], incomplete: [String], relinkSource: Bool = false) { self.reasons = reasons; self.incomplete = incomplete; self.relinkSource = relinkSource }
+    /// 黄字说要整款重出、原件还在（诊断 facts.action = repack，#1961）：前端接着从原件整款重出
+    public let repack: Bool
+    public init(reasons: [String], incomplete: [String], relinkSource: Bool = false, repack: Bool = false) {
+        self.reasons = reasons; self.incomplete = incomplete; self.relinkSource = relinkSource; self.repack = repack
+    }
     public init(outcome r: [String: Any], diagnostics: [[String: Any]]) {
         reasons = r["reasons"] as? [String] ?? []
-        relinkSource = diagnostics.contains { $0["code"] as? String == "update_incomplete" && ($0["facts"] as? [String: Any])?["action"] as? String == "relinkSource" }
+        // 一次作业只给一条要重出的黄字（作业层 refresh_local），action 二选一：带手机的一步还是先找回原件
+        func hasAction(_ name: String) -> Bool {
+            diagnostics.contains { $0["code"] as? String == "update_incomplete" && ($0["facts"] as? [String: Any])?["action"] as? String == name }
+        }
+        relinkSource = hasAction("relinkSource")
+        repack = hasAction("repack")
         // 玩家句在诊断的 summary（作业层 c.diagnostic 的形状，没有 message 字段；#1961）；suggestion 是通用句，不拼进来（整句才能按翻译表译）
         incomplete = diagnostics.filter { $0["code"] as? String == "update_incomplete" }.compactMap { ($0["summary"] as? String).flatMap { $0.isEmpty ? nil : $0 } }
     }

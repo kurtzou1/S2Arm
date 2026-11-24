@@ -92,35 +92,96 @@ struct InputConfig: Codable, Equatable {
     mutating func restoreTarget(_ target: String, from original: InputConfig) {
         keyboard[target] = original.keyboard[target]; mouse[target] = original.mouse[target]; gamepad[target] = original.gamepad[target]
     }
+
+    /// 是不是同一套键位（#1987，同作业层 _same_input）：没有背键与空的背键一样；其余解码时已按宿主缺省补齐，按值比
+    func same(_ other: InputConfig) -> Bool {
+        var a = self, b = other
+        if a.backButtons?.isEmpty == true { a.backButtons = nil }
+        if b.backButtons?.isEmpty == true { b.backButtons = nil }
+        a.schema = 1; b.schema = 1
+        return a == b
+    }
+
+    /// 导入键位文件（#1987，同 iPad 导入的几道检查）：读不了 / 太大 / 不是 JSON / 不是 schema 1 / 缺项或值不对 / 有重复绑定 → 对应的拒收原因；
+    ///   过了只进弹窗的工作副本，点「保存」时作业层 validate_input 再完整校验一遍
+    enum ImportProblem: String, Error { case read, tooLarge, json, schema, invalid, duplicate }
+    static let importLimit = 64 * 1024
+    static func imported(from url: URL) -> Result<InputConfig, ImportProblem> {
+        if let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, size > importLimit { return .failure(.tooLarge) }
+        guard let data = try? Data(contentsOf: url) else { return .failure(.read) }
+        if data.count > importLimit { return .failure(.tooLarge) }
+        guard let object = try? JSONSerialization.jsonObject(with: data) else { return .failure(.json) }
+        guard let dict = object as? [String: Any], let schema = dict["schema"] as? NSNumber,
+              CFGetTypeID(schema) != CFBooleanGetTypeID(), schema.doubleValue == 1 else { return .failure(.schema) }   // true 也会桥成 NSNumber 1
+        guard let config = try? JSONDecoder().decode(InputConfig.self, from: data) else { return .failure(.invalid) }
+        if !config.conflicts.isEmpty { return .failure(.duplicate) }
+        return .success(config)
+    }
+
+    /// 导出用的文件内容（同 input.json 的格式，iPad 能导入）
+    func exportData() throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try encoder.encode(self)
+    }
 }
 
 /// 读到的键位与出处：读不懂已存的文件时 problem 为真（先显示默认键位，保存会覆盖它）；
 ///   inherited 为真是玩家 2–4 没存过自己的键位、沿用玩家 1 的那份（与起局一致，保存后单独生效）。
-struct LoadedInput { let config: InputConfig; let problem: Bool; var inherited = false }
+///   source 同作业层 effective_input：game（这款单独存的）/ default（所有游戏的默认）/ standard（标准键位）/ player1（沿用玩家 1）
+struct LoadedInput { let config: InputConfig; let problem: Bool; var inherited = false; var source = "standard" }
+
+/// 一次读出的四位玩家键位，加上「所有游戏的默认」（#1987：「恢复默认」回到它；没设过时 = 标准键位，defaultSet 为假）
+struct InputLoad {
+    var players: [Int: LoadedInput] = [:]
+    var allGamesDefault = InputConfig.standard
+    var defaultSet = false
+}
 
 extension S2ArmLauncherModel {
     /// 这款四位玩家实际生效的键位（#2081：读取与「能不能用」交作业层 loadInput，和起局 build.py 同一条规则——
     ///   玩家 1：这款的 input.json → default-input.json → 标准键位，读不出或不合规都往下一份走；玩家 2–4：自己的 input-pN.json 能用就用，否则沿用玩家 1 的）。
     ///   原先这里自己解码文件，只看结构不看 validate_input，弹窗显示的和游戏里实际用的会不是同一套
-    func loadInputs(gameID: String) async throws -> [Int: LoadedInput] {
+    func loadInputs(gameID: String) async throws -> InputLoad {
         guard !provider.client.environment.library.isEmpty else { throw JobClientError(LibraryProvider.noLibraryMessage) }
         let r = try await provider.client.perform("loadInput", extra: ["gameId": gameID]).result
-        var out: [Int: LoadedInput] = [:]
+        func decode(_ object: Any?) -> InputConfig? {
+            guard let object, !(object is NSNull), let data = try? JSONSerialization.data(withJSONObject: object) else { return nil }
+            return try? JSONDecoder().decode(InputConfig.self, from: data)
+        }
+        var out = InputLoad()
         for row in r["players"] as? [[String: Any]] ?? [] {
             guard let player = (row["player"] as? NSNumber)?.intValue else { continue }
-            var config = InputConfig.standard
-            if let object = row["config"], !(object is NSNull), let data = try? JSONSerialization.data(withJSONObject: object),
-               let decoded = try? JSONDecoder().decode(InputConfig.self, from: data) { config = decoded }
-            out[player] = LoadedInput(config: config, problem: row["problem"] as? Bool ?? false, inherited: row["source"] as? String == "player1")
+            let source = row["source"] as? String ?? "standard"
+            out.players[player] = LoadedInput(config: decode(row["config"]) ?? .standard, problem: row["problem"] as? Bool ?? false,
+                                              inherited: source == "player1", source: source)
         }
+        // #1987：所有游戏的默认（default-input.json 能用时的那份；null = 没设过，回到标准键位）
+        if let dflt = decode(r["default"]) { out.allGamesDefault = dflt; out.defaultSet = true }
         return out
     }
 
     /// 存这款的键位（saveInput 作业，player 1–4：1 = input.json，2–4 = input-pN.json，作业层校验后原子写）。
+    /// 玩家 1 和所有游戏的默认一样时作业层删掉这款的 input.json（这款跟着默认走），返回真。
     /// 没配游戏库不起作业；作业层拒收抛 JobFailure，message 是作业层原句。
-    func saveInput(_ config: InputConfig, gameID: String, player: Int = 1) async throws {
+    @discardableResult
+    func saveInput(_ config: InputConfig, gameID: String, player: Int = 1) async throws -> Bool {
         guard !provider.client.environment.library.isEmpty else { throw JobClientError(LibraryProvider.noLibraryMessage) }
         let object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(config))
-        _ = try await provider.client.perform("saveInput", extra: ["config": object, "gameId": gameID, "player": player])
+        let r = try await provider.client.perform("saveInput", extra: ["config": object, "gameId": gameID, "player": player]).result
+        return r["followsDefault"] as? Bool ?? false
+    }
+
+    /// 玩家 2–4 回到沿用玩家 1（resetInput 作业：删掉这位的 input-pN.json）
+    func resetInput(gameID: String, player: Int) async throws {
+        guard !provider.client.environment.library.isEmpty else { throw JobClientError(LibraryProvider.noLibraryMessage) }
+        _ = try await provider.client.perform("resetInput", extra: ["gameId": gameID, "player": player])
+    }
+
+    /// 设为所有游戏的默认（#1987，Mac 上点「保存」时才调）：写 default-input.json（设成标准键位 = 删掉它），这款的 input.json 删掉、跟着默认走
+    func setDefaultInput(_ config: InputConfig, gameID: String) async throws {
+        guard !provider.client.environment.library.isEmpty else { throw JobClientError(LibraryProvider.noLibraryMessage) }
+        let object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(config))
+        _ = try await provider.client.perform("setDefaultInput", extra: ["config": object, "gameId": gameID, "player": 1])
     }
 }

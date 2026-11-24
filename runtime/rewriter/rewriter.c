@@ -4130,7 +4130,9 @@ static void fps_rows(int phase) {
  *   同一点可有多行 p（宽 / 窄两套模板各占一位、互斥开），跳板依次 TBNZ 各位分到各自的补丁路，都不开走原指令；同点各行原字须一致
  *   p 行第 7 列「@k」：这一路先 adrp x16, <本模块键页> 再执行补丁指令（补丁指令以 x16 为基址读键页里的画幅值槽，runtime/src/cpatch.c 按当前屏幕比写），
  *     然后恢复 x16；补丁指令须是 ldr <Rt>, [x16, #imm] 且不写 x16
- *   w 行第 6 列「@k」：新字是 adrp Xd, …，按本点位置改成 adrp Xd, <本模块键页>（填充区补丁代码读键页值槽；同 fps 表 adrp_slot） */
+ *   w 行第 6 列「@k」：新字是 adrp Xd, …，按本点位置改成 adrp Xd, <本模块键页>（填充区补丁代码读键页值槽；同 fps 表 adrp_slot）
+ *   p 行第 7 列「=<十六进制值>」（#1321，pack/cpatch.py literal_pool）：补丁指令是 LDR (literal)，读的是同一份补丁写在原代码上的数据字（补丁自带的字面量池）。
+ *     双路下那块原代码不动、内存里还是原字，照搬 LDR 读到的是原字：这一路改成直接把值装进 Rt（整数 movz / movk；浮点经 x16 中转再 fmov，x16 存取同跳板） */
 #define CP_SLOT 2046
 #define CP_VAR_MAX 8
 static const char* cp_check(uint32_t w, A a) {
@@ -4186,7 +4188,35 @@ typedef struct {
   uint32_t nw[CP_VAR_MAX];
   int bit[CP_VAR_MAX];
   char key[CP_VAR_MAX]; /* 1 = 这一路先 adrp x16 到本模块键页 */
+  char litn[CP_VAR_MAX]; /* 非 0 = 这一路的 LDR (literal) 按 lit 装值（字节数 4 / 8） */
+  uint64_t lit[CP_VAR_MAX];
 } CpRow;
+static void cp_movimm(uint32_t rd, uint64_t v, int x) { /* movz / movk 把 v 装进 Rd（x：64 位） */
+  emit((x ? 0xd2800000u : 0x52800000u) | ((uint32_t)(v & 0xffff) << 5) | rd);
+  for (uint32_t h = 1; h < (x ? 4u : 2u); h++) {
+    uint32_t part = (uint32_t)(v >> (16 * h)) & 0xffff;
+    if (part) emit((x ? 0xf2800000u : 0x72800000u) | (h << 21) | (part << 5) | rd);
+  }
+}
+static int cp_lit_size(uint32_t w) { /* LDR (literal) 读几字节：4 / 8；不是字面量 ldr、PRFM、128 位 q 读 → 0（不认） */
+  if ((w & 0x3b000000u) != 0x18000000u) return 0;
+  uint32_t opc = w >> 30, v = (w >> 26) & 1;
+  if (!v) return opc == 1 ? 8 : opc == 3 ? 0 : 4;
+  return opc == 0 ? 4 : opc == 1 ? 8 : 0;
+}
+static void cp_lit(uint32_t w, uint64_t v) { /* 把 LDR (literal) w 换成「Rt = v」（同宽：w / x / ldrsw 符号扩展 / s / d） */
+  uint32_t opc = w >> 30, vv = (w >> 26) & 1, rt = w & 31;
+  if (!vv) {
+    if (opc == 0) cp_movimm(rt, v & 0xffffffffu, 0);
+    else if (opc == 1) cp_movimm(rt, v, 1);
+    else cp_movimm(rt, (uint64_t)(int64_t)(int32_t)(uint32_t)v, 1);
+    return;
+  }
+  emit(STRPRE(16u, 31u, -16));
+  cp_movimm(16u, opc ? v : (v & 0xffffffffu), opc != 0);
+  emit(opc ? (0x9e670000u | (16u << 5) | rt) : (0x1e270000u | (16u << 5) | rt)); /* fmov d<rt>, x16 / fmov s<rt>, w16 */
+  emit(LDRPOST(16u, 31u, 16));
+}
 static void gen_cpatch(void* q) {
   CpRow* c = q;
   A off = c->off, start = here();
@@ -4197,6 +4227,7 @@ static void gen_cpatch(void* q) {
   for (int i = 0; i < c->n; i++) {
     A p = here();
     if (c->key[i]) { emit(adrp(16, here(), g->key)); emit(c->nw[i]); emit(LDRPOST(16u, 31u, 16)); }
+    else if (c->litn[i]) { emit(LDRPOST(16u, 31u, 16)); cp_lit(c->nw[i], c->lit[i]); }
     else { emit(LDRPOST(16u, 31u, 16)); cp_emit(c->nw[i], off); }
     emit(branch(here(), off + 4));
     int64_t d = (p - (g->po + (A)tb[i] * 4)) >> 2;
@@ -4259,8 +4290,14 @@ static void cpatch_rows(int phase) {
     if (!bits) { gap(off, "cpatch", "p 行缺位号"); continue; }
     int bit = atoi(bits);
     char* bases = strtok(NULL, " \t\r\n");
-    int base = 0;
-    if (bases) {
+    int base = 0, litn = 0;
+    uint64_t lit = 0;
+    if (bases && bases[0] == '=') {
+      char* e = NULL;
+      lit = strtoull(bases + 1, &e, 16);
+      litn = cp_lit_size(nw);
+      if (!litn || !e || *e || e == bases + 1 || (litn == 4 && lit >> 32)) { gap(off, "cpatch", "p 行 =值 的补丁指令不是 4 / 8 字节的字面量 ldr，或值超宽：%08x %s", nw, bases); continue; }
+    } else if (bases) {
       if (!eq(bases, "@k")) { gap(off, "cpatch", "p 行第 7 列不认：%s", bases); continue; }
       base = 1;
     }
@@ -4278,7 +4315,8 @@ static void cpatch_rows(int phase) {
       memset(&cps[ncp], 0, sizeof *cps); cps[ncp].off = off; cps[ncp].orig = orig; ncp++;
     }
     if (cps[j].n == CP_VAR_MAX) { gap(off, "cpatch", "p 点变体超过 %d 个", CP_VAR_MAX); continue; }
-    cps[j].nw[cps[j].n] = nw; cps[j].bit[cps[j].n] = bit; cps[j].key[cps[j].n] = (char)base; cps[j].n++;
+    cps[j].nw[cps[j].n] = nw; cps[j].bit[cps[j].n] = bit; cps[j].key[cps[j].n] = (char)base;
+    cps[j].litn[cps[j].n] = (char)litn; cps[j].lit[cps[j].n] = lit; cps[j].n++;
   }
   fclose(f);
   /* 同点各行收齐后再生成（同点多变体编进同一个跳板） */

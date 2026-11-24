@@ -108,6 +108,12 @@ def main():
                        "--update-export-probe", str(Path(temporary) / "out"), "--data-root=" + str(Path(temporary) / "data")], env)
             if "✓ 更新 / 导出两件事" not in out.stdout:
                 raise RuntimeError("update/export probe did not report success")
+        # D-97FT：坏封面只让那一格用占位图；设置框没画出来时环境检查路径不变空（UI.Snapshots/CoverProbe.cs）
+        with tempfile.TemporaryDirectory(prefix="s2arm-cover-probe-") as temporary:
+            out = run([dotnet, "run", "--project", str(probe), "--no-build", "--configuration", "Release", "--",
+                       "--cover-probe", str(Path(temporary) / "out"), "--data-root=" + str(Path(temporary) / "data")], env)
+            if "✓ 坏封面与没画出的设置框" not in out.stdout:
+                raise RuntimeError("cover probe did not report success")
         # 推游戏遇到手机上旧 App（#1842）：phone_app_outdated 走通用确认「仍然继续」、不兼容的不是确认码（UI.Snapshots/ConfirmProbe.cs）
         with tempfile.TemporaryDirectory(prefix="s2arm-confirm-probe-") as temporary:
             out = run([dotnet, "run", "--project", str(probe), "--no-build", "--configuration", "Release", "--",

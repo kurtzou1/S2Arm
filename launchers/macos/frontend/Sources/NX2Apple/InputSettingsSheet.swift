@@ -4,6 +4,8 @@
 //   玩家 2–4 没单独存过的显示玩家 1 的键位（与起局一致，保存后单独生效）；切玩家不丢没保存的改动（留在弹窗里，保存才写盘）。
 //   保存走 saveInput 作业（S2ArmLauncherModel+Input），成了给一句「已保存」、留着弹窗继续改别的玩家；没成的原因留在弹窗里。
 //   改键下次开始游戏时生效（起局时玩家 2–4 的交给宿主，槽位各照各的映射采样；鼠标选项与背键始终照玩家 1）。
+//   「管理键位」组（#1987，同 iPad 位置与文案）：导入 / 导出键位文件、设为所有游戏的默认；和恢复默认、按玩法套用一样只改工作副本，点「保存」才写。
+//   恢复默认：玩家 1 回到所有游戏的默认，玩家 2–4 回到玩家 1 存着的那套（保存后回到沿用玩家 1）。
 import AppKit
 import SwiftUI
 import NXCore
@@ -33,6 +35,12 @@ struct InputSettingsSheet: View {
     @State private var failure: String?
     /// 刚保存成功（给一句「已保存」反馈；再改任何键就收掉）
     @State private var savedNow = false
+    /// 「管理键位」组（#1987）：所有游戏的默认（「恢复默认」回到它；没设过 = 标准键位）、每位玩家存着的出处（页内标「自定义 / 默认」）、
+    ///   点了「设为所有游戏的默认」还没保存（Mac 弹窗一种规矩：点「保存」时才写，「取消」放弃；只对玩家 1）
+    @State private var allGamesDefault = InputConfig.standard
+    @State private var defaultSet = false
+    @State private var sources: [Int: String] = [:]
+    @State private var pendingDefault = false
 
     init(model: S2ArmLauncherModel, gameID: String) {
         self.model = model
@@ -96,6 +104,7 @@ struct InputSettingsSheet: View {
                         }
                     }
                     options
+                    manage
                 }
                 .padding(.horizontal, LauncherTheme.Space.page).padding(.bottom, LauncherTheme.Space.section)
             }
@@ -111,11 +120,13 @@ struct InputSettingsSheet: View {
         })
         .task {   // #2081：四位玩家的键位交作业层 loadInput 读（同起局的规则），读完才算 loaded
             guard !loaded else { return }
-            let all = (try? await model.loadInputs(gameID: gameID)) ?? [:]
+            let all = (try? await model.loadInputs(gameID: gameID)) ?? InputLoad()
             for p in 1...4 {
-                let input = all[p] ?? LoadedInput(config: .standard, problem: false, inherited: p > 1)
+                let input = all.players[p] ?? LoadedInput(config: .standard, problem: false, inherited: p > 1, source: p > 1 ? "player1" : "standard")
                 configs[p] = input.config; baselines[p] = input.config; inheritedFlags[p] = input.inherited; problems[p] = input.problem
+                sources[p] = input.source
             }
+            allGamesDefault = all.allGamesDefault; defaultSet = all.defaultSet
             config = configs[player] ?? .standard; baseline = baselines[player] ?? .standard
             loadProblem = problems[player] ?? false
             inherited = inheritedFlags[player] ?? false
@@ -153,6 +164,11 @@ struct InputSettingsSheet: View {
             // 这位还没单独保存过：显示的就是玩家 1 的键位（与起局一致），保存后单独生效
             if inherited {
                 Text(t("player.inherit")).font(LauncherTheme.TypeStyle.caption).foregroundStyle(LauncherPalette.building).fixedSize(horizontal: false, vertical: true)
+            }
+            // #1987：页内标玩家 1 这款用的是哪一套（同 iPad 页顶）：单独存过的 = 自定义，跟着所有游戏的默认 = 默认；初始状态（标准键位）不标
+            if player == 1, let tag = sourceTag {
+                Text(tag).font(LauncherTheme.TypeStyle.caption).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("input.source")
             }
             if loadProblem {
                 Text(t("loadProblem")).font(LauncherTheme.TypeStyle.detail).foregroundStyle(LauncherPalette.building)
@@ -334,6 +350,68 @@ struct InputSettingsSheet: View {
         CardRow(title) { Toggle("", isOn: isOn).toggleStyle(LauncherSwitchStyle()).labelsHidden().accessibilityLabel(title) }
     }
 
+    // ---- 管理键位（#1987，同 iPad 位置与文案：导入 / 导出 / 设为所有游戏的默认；都只改弹窗里的工作副本，点「保存」才写）----
+
+    private var sourceTag: String? {
+        switch sources[1] {
+        case "game": return t("source.custom")
+        case "default": return t("source.default")
+        default: return nil
+        }
+    }
+
+    private var manage: some View {
+        CardGroup(t("manage"), footnote: t("manage.note")) {
+            CardRow(t("manage.import"), detail: t("manage.import.detail")) {
+                Button(t("manage.import.button")) { importFile() }
+                    .controllerButtonStyle(LauncherSecondaryButtonStyle()).disabled(!loaded || saving)
+                    .controllerID("input.manage.import")
+            }
+            CardDivider()
+            CardRow(t("manage.export"), detail: t("manage.export.detail")) {
+                Button(t("manage.export.button")) { exportFile() }
+                    .controllerButtonStyle(LauncherSecondaryButtonStyle()).disabled(!loaded || saving)
+                    .controllerID("input.manage.export")
+            }
+            CardDivider()
+            CardRow(t("manage.setDefault"), detail: pendingDefault && player == 1 ? t("manage.setDefault.pending")
+                        : t(player == 1 ? "manage.setDefault.detail" : "manage.setDefault.player1")) {
+                Button(t("manage.setDefault.button")) { pendingDefault = true; savedNow = false; failure = nil; recording = nil }
+                    .controllerButtonStyle(LauncherSecondaryButtonStyle()).disabled(!loaded || saving || player != 1 || pendingDefault)
+                    .controllerID("input.manage.setDefault")
+            }
+        }
+    }
+
+    /// 导入：读进当前玩家的工作副本（同按玩法套用），点「保存」时作业层再完整校验；读不进的原因留在底栏、当前键位不动
+    private func importFile() {
+        let panel = NSOpenPanel()
+        panel.title = t("manage.import")
+        panel.allowedContentTypes = [.json]
+        panel.canChooseFiles = true; panel.canChooseDirectories = false; panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        recording = nil
+        switch InputConfig.imported(from: url) {
+        case .success(let imported): config = imported; failure = nil
+        case .failure(let problem): failure = t("manage.import.err." + problem.rawValue)
+        }
+    }
+
+    /// 导出：把弹窗里当前的键位（含没保存的改动）存成文件，格式同 input.json，iPad 能导入
+    private func exportFile() {
+        let panel = NSSavePanel()
+        panel.title = t("manage.export")
+        panel.allowedContentTypes = [.json]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = t("manage.export.fileName") + ".json"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do { try config.exportData().write(to: url, options: .atomic); failure = nil }
+        catch { failure = t("manage.export.err").replacingOccurrences(of: "{0}", with: error.localizedDescription) }
+    }
+
+    /// 「恢复默认」回到的那一套（#1987）：玩家 1 = 所有游戏的默认（没设过 = 标准键位）；玩家 2–4 = 玩家 1 存着的那套（保存后回到沿用玩家 1）
+    private var restoreTarget: InputConfig { player == 1 ? allGamesDefault : (baselines[1] ?? allGamesDefault) }
+
     // ---- 底栏 ----
 
     private var footer: some View {
@@ -346,8 +424,9 @@ struct InputSettingsSheet: View {
                 Text(failure).font(LauncherTheme.TypeStyle.detail).foregroundStyle(LauncherPalette.danger).fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: 10) {
-                Button(t("restoreDefault")) { config = .standard; recording = nil; failure = nil }
+                Button(t("restoreDefault")) { config = restoreTarget; if player == 1 { pendingDefault = false }; recording = nil; failure = nil }
                     .controllerButtonStyle(LauncherSecondaryButtonStyle()).disabled(saving).controllerShortcut(.secondary)
+                    .controllerID("input.restoreDefault")
                 LauncherDropdown(options: [("", t("preset"))] + InputConfig.Preset.allCases.map { ($0.rawValue, t("preset." + $0.rawValue)) },
                                  selection: "", label: t("preset")) { value in
                     if let p = InputConfig.Preset(rawValue: value) { config = .preset(p); failure = nil }
@@ -357,9 +436,9 @@ struct InputSettingsSheet: View {
                 Spacer(minLength: 8)
                 if saving {
                     Text(t("saving")).font(LauncherTheme.TypeStyle.caption).foregroundStyle(.secondary)
-                } else if savedNow && config == baseline {
+                } else if savedNow && config == baseline && !pendingHere {
                     Text(t("saved")).font(LauncherTheme.TypeStyle.caption).foregroundStyle(.secondary)
-                } else if config != baseline {
+                } else if config != baseline || pendingHere {
                     Text(t("unsaved")).font(LauncherTheme.TypeStyle.caption).foregroundStyle(.secondary)
                 }
                 Button(t("cancel")) { dismiss() }
@@ -372,20 +451,42 @@ struct InputSettingsSheet: View {
         }
     }
 
+    /// 当前这位有没有「设为所有游戏的默认」等着保存（只有玩家 1 有）
+    private var pendingHere: Bool { pendingDefault && player == 1 }
+
     private func save() {
         guard canSave else { return }
         saving = true; failure = nil
         let config = config
         let savedFor = player
+        let asDefault = pendingHere
+        // 玩家 2–4 改成和玩家 1 存着的一样（含「恢复默认」）：删掉自己那份、回到沿用玩家 1（同玩家 1 和所有游戏的默认一样就跟着默认走）
+        let follow = savedFor > 1 && config.same(baselines[1] ?? allGamesDefault)
         Task {
             do {
-                try await model.saveInput(config, gameID: gameID, player: savedFor)
-                baselines[savedFor] = config; configs[savedFor] = config; saving = false
+                var inheritedNow = false
+                if asDefault {
+                    // #1987：点了「设为所有游戏的默认」→ 保存时用当前键位设默认，这款跟着默认走；设成标准键位 = 没设过
+                    try await model.setDefaultInput(config, gameID: gameID)
+                    allGamesDefault = config; defaultSet = !config.same(.standard)
+                    sources[1] = defaultSet ? "default" : "standard"; pendingDefault = false
+                } else if follow {
+                    try await model.resetInput(gameID: gameID, player: savedFor)
+                    sources[savedFor] = "player1"; inheritedNow = true
+                } else {
+                    let follows = try await model.saveInput(config, gameID: gameID, player: savedFor)
+                    sources[savedFor] = savedFor == 1 && follows ? (defaultSet ? "default" : "standard") : "game"
+                }
+                // 玩家 1 存了新的一套：还沿用玩家 1、没动过的玩家 2–4 跟着换成新的（同起局），不然再存它们会把旧的那套单独写下来
+                if savedFor == 1 {
+                    for p in 2...4 where inheritedFlags[p] == true && configs[p] == baselines[1] { configs[p] = config; baselines[p] = config }
+                }
+                baselines[savedFor] = config; configs[savedFor] = config; inheritedFlags[savedFor] = inheritedNow; saving = false
                 // 还停在这一位的话当前基线跟着跟上（不然「未保存」提示一直在、恢复这个键回的是保存前的旧值）；
                 //   给一句「已保存」反馈。成了不关弹窗：键位按玩家分开保存，留着继续给别的玩家改（切玩家用上面的选择器）
                 if player == savedFor {
                     baseline = config
-                    inheritedFlags[savedFor] = false; inherited = false   // 存了就是自己的一份，「沿用玩家 1」的提示收掉
+                    inherited = inheritedNow   // 存了自己的一份就收掉「沿用玩家 1」的提示；回到沿用就留着
                     savedNow = true
                 }
             } catch {

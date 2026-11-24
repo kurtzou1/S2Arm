@@ -54,6 +54,7 @@ __attribute__((weak)) int s2a_front_is_running(void) { return 0; }   // iOS 壳 
 #include "s2a_lan_discovery.h"
 // Hosts without a discovery implementation leave LAN unavailable explicitly.
 __attribute__((weak)) const s2a_lan_discovery_v1 *s2a_ldn_lan_provider(void) { return NULL; }
+__attribute__((weak)) s2a_pad_motion_burst_fn s2a_pad_motion_burst_provider(void) { return NULL; }   // 没有批量体感源的宿主：服务层走单笔路径（Mac 前端 front_mac.m 强定义）
 __attribute__((weak)) void s2a_window_span_arm(void) {}   // vawin.c（Apple）强定义：低区碰底死的局记跨度用的路径先备好（#1143）
 void s2a_crash_install(void); void s2a_term_install(void);
 uint64_t s2a_mem_init(const char *npdm);

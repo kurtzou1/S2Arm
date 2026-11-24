@@ -11,6 +11,7 @@
 //   ⑩ VkLib.Pack 把三键的产物打成离线 Vulkan 库（LibPack 容器）：按宿主格式（graphics/nvn/lib_pack.inc 文件头）自己解析 lib.idx——魔数、版本 1、链号，
 //      12 条记录按 (键, 种类) 升序、_b.json 种类 1 / _b.spv 种类 52、_vg<t>.json 种类 112+t / _vg<t>.spv 种类 120+t，每段字节 = 逐键文件，
 //      头部 36–43 = 完整指纹 VkLib.Fp（u64 小端）、44–47 为 0；同一目录再打一次报红。
+//   ⑪ 跨次复用（--cas，11-24）：同输入二次全命中且产物逐字节同；只改一键记录只重翻那一键；配置档 / 原生工具身份 / 图像读档位 / DMSH_BF 任一变全部重翻。
 // 用法：dsh_vklib_test <spirv-cross> <spirv-val> <工作目录> --dsx <libdsx>
 using S2A.Dsh;
 using S2A.DshVkLib;
@@ -153,6 +154,48 @@ static class Program
                     && pak.AsSpan((int)x.First.Off, (int)x.First.Len).SequenceEqual(File.ReadAllBytes(Path.Combine(outDir, x.Second.Item1 + x.Second.Item3)))));
             var (pb2, _) = VkLib.Pack(outDir, lib, "0123456789ab");
             Check($"⑩ 同一目录再打一次 → 报红（{string.Join("；", pb2)}）", pb2.Count > 0);
+        }
+        // ⑪ 跨次复用（--cas）：期望按输入写死——同输入第二次全命中且产物逐字节同不复用那次；只改一键记录只重翻那一键；
+        //    配置档 / 原生工具身份 / 图像读档位 / DMSH_BF 任一变全部重翻。失败与跳过的键不进仓，命中 + 翻译 = 4（三键 + 真几何）。
+        {
+            string cas = Path.Combine(root, "cas");
+            Dictionary<string, byte[]> Outs(string d) => Directory.GetFiles(d).Where(f => !f.EndsWith("vk_build.tsv", StringComparison.Ordinal))
+                .ToDictionary(f => Path.GetFileName(f), File.ReadAllBytes, StringComparer.Ordinal);
+            bool Same(Dictionary<string, byte[]> x, Dictionary<string, byte[]> y) => x.Count == y.Count && x.All(kv => y.TryGetValue(kv.Key, out var v) && v.AsSpan().SequenceEqual(kv.Value));
+            var baseOut = Outs(outDir);
+            (int H, int M, string Dir) Run(string tag, string pk, string pf, bool raw, string tools)
+            {
+                string o = Path.Combine(root, "c_" + tag); VkLib.Build(pk, pf, o, xc, work, raw, cas, tools); return (VkLib.CacheHits, VkLib.CacheMisses, o);
+            }
+            var r1 = Run("1", pkg, prof, true, "t");
+            Check($"⑪ 空仓首次：命中 {r1.H}、翻译 {r1.M}（期望 0 / 4），产物与不带仓那次逐字节相同", r1.H == 0 && r1.M == 4 && Same(Outs(r1.Dir), baseOut));
+            var r2 = Run("2", pkg, prof, true, "t");
+            Check($"⑪ 同输入再出：命中 {r2.H}、翻译 {r2.M}（期望 4 / 0），产物与 vk_build.tsv 逐字节相同", r2.H == 4 && r2.M == 0 && Same(Outs(r2.Dir), baseOut)
+                && File.ReadAllBytes(Path.Combine(r2.Dir, "vk_build.tsv")).AsSpan().SequenceEqual(File.ReadAllBytes(Path.Combine(outDir, "vk_build.tsv"))));
+            // 只改顶点键的记录（常量偏移 0x110 → 0x114，键名由控制段算、不变）：只重翻它，产物 = 直接现编这份新记录
+            string pkg2 = Path.Combine(root, "pkg2"); Directory.CreateDirectory(pkg2);
+            foreach (var f in Directory.GetFiles(pkg)) File.Copy(f, Path.Combine(pkg2, Path.GetFileName(f)));
+            const uint store = (1u << 16) | (1u << 26);
+            var vs2 = Bundles(Sph(1 | (3 << 5) | (1 << 10) | store, -1), new[] { Ldc(0, 0, 0x114, 5), Ldc(2, 3, 0, 4), Stg32(2, 0, 0), EXIT });
+            File.WriteAllBytes(Path.Combine(pkg2, "vs_0.bin"), Record(vs2, fx[0].Ctl));
+            var r3 = Run("3", pkg2, prof, true, "t"); string vk = Key(fx[0].Ctl), ref2 = Path.Combine(root, "ref2"); Directory.CreateDirectory(ref2);
+            DshVk.CompileWithSpv(vk, "vs", vs2, fx[0].Ctl, ref2, xc, prof, true, work);
+            bool vsNew = File.ReadAllBytes(Path.Combine(r3.Dir, vk + "_b.spv")).AsSpan().SequenceEqual(File.ReadAllBytes(Path.Combine(ref2, vk + "_b.spv")));
+            bool vsDiff = !File.ReadAllBytes(Path.Combine(r3.Dir, vk + "_b.spv")).AsSpan().SequenceEqual(baseOut[vk + "_b.spv"]);
+            Check($"⑪ 只改顶点键记录：命中 {r3.H}、翻译 {r3.M}（期望 3 / 1），顶点产物 = 直接现编新记录、与旧的不同", r3.H == 3 && r3.M == 1 && vsNew && vsDiff);
+            string prof2 = Path.Combine(root, "profile2"); Directory.CreateDirectory(prof2);
+            foreach (var f in Directory.GetFiles(prof)) File.Copy(f, Path.Combine(prof2, Path.GetFileName(f)));
+            File.WriteAllText(Path.Combine(prof2, "extra.tsv"), "x\n");
+            var r4 = Run("4", pkg, prof2, true, "t");
+            Check($"⑪ 配置档多一个文件：命中 {r4.H}、翻译 {r4.M}（期望 0 / 4）", r4.H == 0 && r4.M == 4);
+            var r5 = Run("5", pkg, prof, true, "t2");
+            Check($"⑪ 原生工具身份变：命中 {r5.H}、翻译 {r5.M}（期望 0 / 4）", r5.H == 0 && r5.M == 4);
+            var r6 = Run("6", pkg, prof, false, "t");
+            Check($"⑪ 图像读档位变（true → false）：命中 {r6.H}、翻译 {r6.M}（期望 0 / 4）", r6.H == 0 && r6.M == 4);
+            Environment.SetEnvironmentVariable("DMSH_BF", "1"); var r7 = Run("7", pkg, prof, true, "t"); Environment.SetEnvironmentVariable("DMSH_BF", null);
+            Check($"⑪ DMSH_BF=1：命中 {r7.H}、翻译 {r7.M}（期望 0 / 4）", r7.H == 0 && r7.M == 4);
+            var r8 = Run("8", pkg, prof, true, "t");
+            Check($"⑪ 回到原输入：命中 {r8.H}、翻译 {r8.M}（期望 4 / 0，前面几轮没冲掉原条目）", r8.H == 4 && r8.M == 0 && Same(Outs(r8.Dir), baseOut));
         }
         Console.WriteLine(bad == 0 ? "dsh_vklib 逐键产物：全过" : "dsh_vklib 逐键产物：有不通");
         return bad;

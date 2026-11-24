@@ -450,7 +450,9 @@ def main():
         cache = (native/'gfx_plat/nvk_shader_fact_cache.h').read_text()
         base.append('-I'+str(native/'gfx_plat'))
         for name, before, after in [
-            ('input', ' || t->separate || t->is_buffer) return 0;', ' || t->separate) return 0;'),
+            # 锚点取组合表那一行：事实复用放宽（#2166）后，表后高槽事实的检查里也有一模一样的尾巴（那处由 --fact-wide-mutants 的 tail-buffer-accepted 钉）
+            ('input', 't->handle != 8 + 2 * slot || t->cbuf_slot != -1 || t->separate || t->is_buffer) return 0;',
+                      't->handle != 8 + 2 * slot || t->cbuf_slot != -1 || t->separate) return 0;'),
             ('reflection', 'e->src_kind == NVN_RB_TBUF || ', ''),
         ]:
             assert cache.count(before) == 1, (name, 'mutation anchor')
@@ -647,8 +649,68 @@ def main():
             print(f'{name}: expected assertion failure: {expected}', flush=True)
         print(f'PASS: {len(changes)} negative controls')
         return 0
+    if sys.argv[1:] == ['--fact-wide-mutants']:
+        # 事实复用放宽（#2166）的负对照：头文件里每一道判据、nvk_shader.c 里的开关与计数各撤一次，对应用例必须变红。
+        # 改的是拷贝（nvk_shader.c 与 nvk_shader_fact_cache.h 各拷一份进临时目录），不动仓库里的文件。
+        header = (native/'gfx_plat/nvk_shader_fact_cache.h').read_text(encoding='utf-8')
+        code = original.read_text(encoding='utf-8')
+        wide = 'fact wide: '
+        changes = [
+            # (名字, 改哪份, 原文, 改成, 必须变红的用例, 进程参数)
+            # 完整组合表之后的尾部事实：整道判据撤掉（分离表 / UBO 学来的 / 缓冲贴图事实都被放进复用）；缓冲贴图那一条单独撤；整个放宽撤掉
+            ('tail-accepts-any', 'header', 't->handle < 72 || t->handle > 86 || (t->handle & 1) || t->cbuf_slot != -1 || t->separate || t->is_buffer) return 0;',
+             '0) return 0;', (wide + 'a separate-table fact keeps the exact identity path', wide + 'a trailing buffer-texture fact keeps the exact identity path',
+                              wide + 'a UBO-learned fact keeps the exact identity path')),
+            ('tail-buffer-accepted', 'header', 't->cbuf_slot != -1 || t->separate || t->is_buffer) return 0;\n    }\n    return 1;',
+             't->cbuf_slot != -1 || t->separate) return 0;\n    }\n    return 1;', wide + 'a trailing buffer-texture fact keeps the exact identity path'),
+            ('shape-rejects-trailing', 'header', '(id->texture_count != combined && !fact_wide())', '(id->texture_count != combined)',
+             wide + 'a trailing fs high-slot fact does not split the program'),
+            # 掩码只管完整组合表：越过 96 条时第 4 个字（常量缓冲使用位）会把第 97 条选进键
+            ('hash-unbounded', 'header', 'i < id->texture_count && i < combined', 'i < id->texture_count && i < combined + 64',
+             wide + 'the 97th fact is outside the key although a constant-buffer bit is set'),
+            # 请求开关依赖来源：不认 / 认全部 request:*
+            ('request-flag-not-accepted', 'header', '} else if (fact_wide() && !strcmp(text, "request:requiresLinkedVaryingInterface")) {',
+             '} else if (0 && !strcmp(text, "request:requiresLinkedVaryingInterface")) {',
+             wide + 'vs+fs program naming the request flag reuses for an unqueried slot'),
+            ('request-any-accepted', 'header', '} else if (fact_wide() && !strcmp(text, "request:requiresLinkedVaryingInterface")) {',
+             '} else if (fact_wide() && !strncmp(text, "request:", 8)) {',
+             wide + 'another request:* source keeps the exact identity path'),
+            # 问过高槽句柄（没有这条事实）的程序不进复用
+            ('high-handle-guard-removed', 'header', 'fact_args_high_handle(text)) return 0;', 'fact_args_high_handle(text) && 0) return 0;',
+             wide + 'a handle-72 query is never answered from another identity (unbound'),
+            # 计数与读数
+            ('fact-counter-not-counted', 'source', 'atomic_fetch_add_explicit(&g_n_fact, 1, memory_order_relaxed);', '(void)0;',
+             wide + 'tally counts the 4 new identities served by reuse'),
+            ('fact-tally-not-printed', 'source', 'if (used + 1 < bn) snprintf(b + used, bn - used, "、事实复用 命中 %llu"',
+             'if (0) snprintf(b + used, bn - used, "、事实复用 命中 %llu"', wide + 'tally counts the 4 new identities served by reuse'),
+            # 开关：读了不用（开关关闭态另起进程跑），以及头文件里每处放宽各自不看开关
+            ('flag-ignored', 'source', 'if (v < 0) v = nvn_plat_flag("nvk_fact_wide", NVK_FACT_WIDE_DEFAULT) ? 1 : 0; return v;',
+             'if (v < 0) { (void)nvn_plat_flag("nvk_fact_wide", NVK_FACT_WIDE_DEFAULT); v = 1; } return v;', 'fact wide off: the request-flag source still blocks reuse', ('--fact-wide-off',)),
+            # 生产缺省：出包版只走缺省，缺省值没传到 fact_wide()（取反，与宏当前取值无关）就必红
+            ('default-ignored', 'source', 'nvn_plat_flag("nvk_fact_wide", NVK_FACT_WIDE_DEFAULT)', 'nvn_plat_flag("nvk_fact_wide", !NVK_FACT_WIDE_DEFAULT)',
+             'fact wide default: production default flows into fact_wide()', ('--fact-wide-default',)),
+            ('flag-ignored-request', 'header', '} else if (fact_wide() && !strcmp(text, "request:requiresLinkedVaryingInterface")) {',
+             '} else if (!strcmp(text, "request:requiresLinkedVaryingInterface")) {', 'fact wide off: the request-flag source still blocks reuse', ('--fact-wide-off',)),
+            ('flag-ignored-shape', 'header', '(id->texture_count != combined && !fact_wide())', '(id->texture_count != combined && 0)',
+             'fact wide off: a trailing high-slot fact still blocks reuse', ('--fact-wide-off',)),
+            ('flag-ignored-guard', 'header', 'if (fact_wide() && !s2a_jv_obj_find(item, "arguments", &v)', 'if (!s2a_jv_obj_find(item, "arguments", &v)',
+             'fact wide off: no extra handle guard, old behavior unchanged', ('--fact-wide-off',)),
+        ]
+        for name, where, before, after, expected, *more in changes:
+            assert (header if where == 'header' else code).count(before) == 1, (name, 'mutation anchor')
+            directory = out/('fact-wide-src-' + name)   # 与可执行文件 fact-wide-<名字> 分开，不重名
+            directory.mkdir(exist_ok=True)
+            (directory/'nvk_shader_fact_cache.h').write_text(header.replace(before, after) if where == 'header' else header, encoding='utf-8')
+            shader = directory/'nvk_shader.c'
+            shader.write_text(code.replace(before, after) if where == 'source' else code, encoding='utf-8')
+            result = run('fact-wide-' + name, shader, args=(more[0] if more else ()))
+            expected = (expected,) if isinstance(expected, str) else expected
+            assert result.returncode != 0 and all(e in result.stderr for e in expected), (name, result.stdout, result.stderr)
+            print(f'{name}: expected assertion failure: {" / ".join(expected)}', flush=True)
+        print(f'PASS: {len(changes)} negative controls')
+        return 0
     if sys.argv[1:]:
-        raise ValueError('usage: nvk_shader_pool_test.py [--withdraw | --gs-libpack-mutants | --cs-libpack-mutants | --lp-gate-mutants | --compute-warm-mutants | --diag-mutants | --live-compile-mutants | --graphics-image-mutants | --cs-ubo-sampler-mutants]'
+        raise ValueError('usage: nvk_shader_pool_test.py [--withdraw | --fact-wide-mutants | --gs-libpack-mutants | --cs-libpack-mutants | --lp-gate-mutants | --compute-warm-mutants | --diag-mutants | --live-compile-mutants | --graphics-image-mutants | --cs-ubo-sampler-mutants]'
                          '（其余参数是 gs_compiler_chain_test.py / tbuf_compiler_chain_test.py 的子命令）')
     # 存储图像的声明（数值类 + SPIR-V Image Format）落程序记录：生产 sampled_decl，手搭 SPIR-V
     exe = out/'image-decl'
@@ -693,6 +755,14 @@ def main():
     off = run('test-alias-off', original, args=('--alias-off',))
     sys.stdout.write(off.stdout)
     sys.stderr.write(off.stderr)
+    # 事实复用放宽关闭态（debug.s2a.nvk_fact_wide=0）：同上，开关在进程内只读一次，单独起一个进程
+    fact_off = run('test-fact-wide-off', original, args=('--fact-wide-off',))
+    sys.stdout.write(fact_off.stdout)
+    sys.stderr.write(fact_off.stderr)
+    # 生产缺省档（不强制开关；出包版只走这一档）：同样进程内只读一次，单独起进程；缺省值改动只动 NVK_FACT_WIDE_DEFAULT，用例跟着宏走
+    fact_default = run('test-fact-wide-default', original, args=('--fact-wide-default',))
+    sys.stdout.write(fact_default.stdout)
+    sys.stderr.write(fact_default.stderr)
     with tempfile.TemporaryDirectory(prefix='compute-warm-', dir=out) as td:
         warm_dir = Path(td) / 'manifest'; warm_dir.mkdir()
         cache_on = Path(td) / 'cache-on'; cache_on.mkdir()
@@ -703,7 +773,8 @@ def main():
         env.update(S2A_COMPUTE_WARM='0', S2A_DIRECT_CACHE_DIR=str(cache_off))
         cs_off = run('test-compute-warm-off', original, args=('--compute-warm-off',), env=env)
         sys.stdout.write(cs_off.stdout); sys.stderr.write(cs_off.stderr)
-    return result.returncode or live_rc or gsl.returncode or csl2.returncode or off.returncode or on.returncode or cs_off.returncode
+    return (result.returncode or live_rc or gsl.returncode or csl2.returncode or off.returncode or fact_off.returncode or
+            fact_default.returncode or on.returncode or cs_off.returncode)
 
 if __name__ == '__main__':
     raise SystemExit(main())

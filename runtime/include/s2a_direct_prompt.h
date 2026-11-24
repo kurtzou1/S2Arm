@@ -19,18 +19,18 @@ extern "C" {
 #define S2A_DPROMPT_INPUT_BAD_TITLE_EN "Couldn't read the button settings"
 #define S2A_DPROMPT_INPUT_BAD_MAC      "这局先用默认键位照常开始（%s）。回到 S2Arm 的按键设置里重新保存一次就能恢复。"
 #define S2A_DPROMPT_INPUT_BAD_MAC_EN   "This game starts with the default buttons (%s). Save your button settings again in S2Arm to restore them."
-// 触屏提示（ios/vpad.m，11-04 维护者：脑锻炼标题页只认触屏；11-09 维护者 删掉屏幕上方的「键 / 触」切换钮，切换在齿轮菜单「按键布局」）：首次提示条带「切到触屏」一点就切
+// 触屏提示（ios/vpad.m，11-04 维护者：脑锻炼标题页只认触屏；11-09 维护者 删掉屏幕上方的「键 / 触」切换钮）：首次提示条带「切到触屏」一点就切，只这一局；回按键在齿轮菜单第一项「显示按键」
 #define S2A_DPROMPT_VPAD_TOUCH_TITLE   "这款游戏能用触屏"
 #define S2A_DPROMPT_VPAD_TOUCH_TITLE_EN "This game supports touch"
-#define S2A_DPROMPT_VPAD_TOUCH_BODY    "要点游戏自己的菜单，就切到触屏。左上角齿轮 → 按键布局，随时可以切回按键。"
-#define S2A_DPROMPT_VPAD_TOUCH_BODY_EN "To tap the game's own menus, switch to touch. You can switch back to buttons anytime from the gear in the top-left corner → Button layout."
+#define S2A_DPROMPT_VPAD_TOUCH_BODY    "要点游戏自己的菜单，就切到触屏，只这一局有效；想一直用触屏去设置里改。左上角齿轮 → 显示按键，随时可以切回按键。"
+#define S2A_DPROMPT_VPAD_TOUCH_BODY_EN "To tap the game's own menus, switch to touch. This lasts for this session only; to always use touch, change it in Settings. You can switch back to buttons anytime from the gear in the top-left corner → Show Buttons."
 #define S2A_DPROMPT_VPAD_TOUCH_ACCEPT  "切到触屏"
 #define S2A_DPROMPT_VPAD_TOUCH_ACCEPT_EN "Switch to touch"
 #define S2A_DPROMPT_VPAD_TOUCH_DECLINE "先不用"
 #define S2A_DPROMPT_VPAD_TOUCH_DECLINE_EN "Not now"
-// 游戏声明触屏配置时自动切到仅触屏（ios/touch_config.m，只改本次运行）：提示一条，指齿轮菜单「按键布局」
-#define S2A_DPROMPT_VPAD_TOUCH_AUTO    "已切到触屏操作：这款游戏用触屏点菜单。左上角齿轮 → 按键布局，可以切回按键。"
-#define S2A_DPROMPT_VPAD_TOUCH_AUTO_EN "Switched to touch controls: this game uses touch for its menus. You can switch back to buttons from the gear in the top-left corner → Button layout."
+// 游戏声明触屏配置时自动切到仅触屏（ios/touch_config.m，只改本次运行）：提示一条，指齿轮菜单「显示按键」
+#define S2A_DPROMPT_VPAD_TOUCH_AUTO    "已切到触屏操作：这款游戏用触屏点菜单。左上角齿轮 → 显示按键，可以切回按键。"
+#define S2A_DPROMPT_VPAD_TOUCH_AUTO_EN "Switched to touch controls: this game uses touch for its menus. You can switch back to buttons from the gear in the top-left corner → Show Buttons."
 // 切换游戏（一个进程只跑一款）：iOS 多款容器在局内设置页 / 齿轮菜单点它，确认后照退出流程存档收尾、结束进程，再点开 App 是游戏库（ios/app.m）；
 //   Mac 宿主菜单栏点它（不二次确认，同菜单栏「退出」），收尾后启动器回到游戏库（macos/front_mac.m → pack/jobs/build.py launch → 启动器）。取消按钮用 S2A_DPROMPT_HOME_QUIT_DECLINE
 #define S2A_DPROMPT_SWITCH_GAME_TITLE  "切换游戏"

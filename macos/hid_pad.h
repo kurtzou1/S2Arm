@@ -23,6 +23,9 @@ int s2a_mac_hid_betop_left(uint64_t entry, int16_t left[2]);
 // 兜底手柄的体感（11-16，第三方 Switch 模式手柄：八位堂 / 盖世小鸡等自带陀螺仪、GameController 不认的）：id = s2a_hid_pad.id；
 //   有近 200 ms 内的六轴样本回 1（从 0x30 完整报告的 IMU 解出，同一代 Pro 的 Switch Pro 协议），否则回 0
 int s2a_mac_hid_pad_motion(const void *id, s2a_pad_motion *out);
+// 补满采样：一次取走这一拍累积的全部 IMU 样本（消费式、时间升序，最多 max 条），
+//   返回 >=0 条数；-1 = 这个 id 不是兜底 HID 设备。单笔接口仍读最新一份。
+int s2a_mac_hid_pad_motion_burst(const void *id, s2a_pad_motion *out, int max);
 // 启动设置「体感」开关（S2A_MOTION=0 → front_mac.m s2a_pad_set_motion_enabled 一并调它）：关着时兜底手柄的六轴不交给游戏（#1383：原先只管系统手柄 / NS2 / 一代 Joy-Con，兜底 HID 照交）
 void s2a_mac_hid_pad_set_motion_enabled(int enabled);
 int s2a_mac_hid_pad_motion_enabled(void);   // 当前开关（单测读）

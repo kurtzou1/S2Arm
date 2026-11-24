@@ -3401,6 +3401,20 @@ class JobsTests(unittest.TestCase):
         ctx = Context(dict(self.request, taskId=str(uuid.uuid4()), **request))
         return fn(ctx)
 
+    def test_load_input_reports_all_games_default(self):
+        # #1987 Mac「恢复默认」回到所有游戏的默认：loadInput 带出 default——没设过 / 文件坏了是 None（= 标准键位），设过是那一套
+        gid, _ = self.input_games()
+        load = lambda: self.input_job(lambda c: (setattr(c, "game", lambda: dict(id=gid)), library.load_input(c))[1], gameId=gid)
+        self.assertIsNone(load()["default"])
+        self.input_job(library.set_default_input, config=self.launcher_custom(19))
+        shown = load()
+        self.assertEqual(shown["default"]["keyboard"]["A"]["code"], 19)
+        self.assertEqual(shown["players"][0]["source"], "default")
+        dflt = Context(dict(self.request, taskId=str(uuid.uuid4()))).private / "default-input.json"
+        dflt.write_bytes(b"{\xff not json")
+        self.assertIsNone(load()["default"])
+        self.assertEqual(load()["players"][0]["source"], "standard")
+
     def test_standard_input_matches_launcher_standard(self):
         # 作业层的标准键位与 Mac 启动器 InputConfig.standard 是同一套：读 Swift 原文的键码表、鼠标表、手柄键序与 MouseOptions 缺省逐项比
         swift = (ROOT / "launchers/macos/frontend/Sources/NX2Apple/S2ArmLauncherModel+Input.swift").read_text(encoding="utf-8")

@@ -559,7 +559,16 @@ public sealed partial class EnvironmentWindow
     private void OpenConsoleFromTopBar()
     {
         dynamicAlert = false;
-        selectedGame = ConsoleId;
+        ChangeSelectedGame(ConsoleId, "topBarConsole");
         Navigate("library");
+    }
+
+    /// <summary>不经玩家点那一款、由跳转把选中改到别处（玩家眼里同「选中丢了」，#1392）：改之前在 logs/launcher-crash.log 记一行 library.select.change——
+    /// 从哪款改到哪、原因（rowConsole = 出包 / 装机行内「去 S2Arm 卡」；topBarConsole = 点顶栏动态窗口）、当时的出包款与状态。本来就是它就不记。</summary>
+    private void ChangeSelectedGame(string to, string reason)
+    {
+        if (selectedGame != to)
+            LauncherCrash.Log(null, $"library.select.change from={selectedGame ?? "null"} to={to} reason={reason} pack={packGame?.Id ?? "null"}/{(packState == "" ? "null" : packState)}");
+        selectedGame = to;
     }
 }

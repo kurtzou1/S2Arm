@@ -11,6 +11,8 @@
 //   5 R32UI 缩放（整数格式）：源左半 777、右半 12345 → 32x24 目标 x<16 为 777、其余 12345（整数按纹素读，最近点：目标 x 的中心映射到源 2x+1）
 //   6 2D → 3D 的一片（4 份）：64x48 红拷进 64x48x4 的 3D 第 2 片 → 第 2 片全红，第 1 片保持 0
 //   7 RGBA8_SRGB → R11G11B10F 缩放（jhaizhou-ops/S2Arm#1493）：源白 → 32x24 目标每像素 0x781E03C0（R11 / G11 的 1.0 = 指数 15 尾数 0 = 0x3C0，B10 的 1.0 = 0x1E0）
+//   8 源层超出源贴图（D-4T8M：iPhone 上画法拷贝给只有 1 层的源建第 2 层的 2D 视图，Metal 校验断言整进程 abort）：64x48 一层 2D 源、源区域 z 偏移 1 缩拷到 32x24 →
+//     不 abort、这笔不画，目标保持拷贝前的 0.5 灰（0xff808080）；修前在 newTextureView 上 abort
 #include "nvn.h"
 #include "nvn_protos.h"
 #include <stdio.h>
@@ -86,6 +88,7 @@ static uint32_t w5(int x, int y) { (void)y; return x < 16 ? 777u : 12345u; }
 static uint32_t wred(int x, int y) { (void)x; (void)y; return 0xff0000ffu; }
 static uint32_t wzero(int x, int y) { (void)x; (void)y; return 0; }
 static uint32_t w7(int x, int y) { (void)x; (void)y; return 0x781E03C0u; }
+static uint32_t wgrey(int x, int y) { (void)x; (void)y; return 0xff808080u; }
 static void unimpl_is_zero(uint64_t u0) { printf("  走到「没实现」%llu 次（期望 0）\n", (unsigned long long)(g_t2t_unimpl - u0)); REQUIRE(g_t2t_unimpl == u0); }
 
 int main(void) {
@@ -141,7 +144,14 @@ int main(void) {
       uint64_t u0 = g_t2t_unimpl; copy(&S, full, &D, half); unimpl_is_zero(u0);
       read(&D, 0, W / 2, H / 2, got, sizeof got); cmp32(got, W / 2, H / 2, w7, "目标每像素 0x781E03C0"); }
 
+    phase = "8 源层超出源贴图（D-4T8M）";
+    { NVNtexture S, D; make(&S, NVN_FORMAT_RGBA8, NVN_TEXTURE_TARGET_2D, W, H, 1); make(&D, NVN_FORMAT_RGBA8, NVN_TEXTURE_TARGET_2D, W / 2, H / 2, 1);
+      const float white[4] = {1, 1, 1, 1}, grey[4] = {0.5f, 0.5f, 0.5f, 1};
+      begin(); clear_color(&S, 0, 0, W, H, white); clear_color(&D, 0, 0, W / 2, H / 2, grey); submit();
+      copy(&S, (NVNcopyRegion){0, 0, 1, W, H, 1}, &D, half);
+      read(&D, 0, W / 2, H / 2, got, sizeof got); cmp32(got, W / 2, H / 2, wgrey, "目标保持拷贝前的灰（源第 1 层不存在，这笔不画、不 abort）"); }
+
     if (fails) { printf("✗ t_nvn_copy_fmt：%u 项里 %u 项不通\n", checks, fails); return 1; }
-    printf("✓ t_nvn_copy_fmt：7 组 %u 项全过\n", checks);
+    printf("✓ t_nvn_copy_fmt：8 组 %u 项全过\n", checks);
     return 0;
 }

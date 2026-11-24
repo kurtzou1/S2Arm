@@ -140,9 +140,11 @@ extension S2ArmLauncherModel {
 
     /// 按计划导出：没做好 iPhone 版（或旧格式、不能直接导出）先出 iPhone 包，出完接着走（exportAfterPack → installNextQueued）；
     ///   勾了设备逐台排队导入；没勾导出到文件夹（作业做完打开访达，install 里）
-    func runExportPlan(_ game: GameSummary, _ plan: ExportPlan) {
+    ///   packed：这款刚为这份计划出完 iPhone 包（installNextQueued）。不再看 iphoneExportable——出完那一刻游戏列表还没重读、仍是出包前的「没做好」，
+    ///   原先照它又起一整套出包、从解包重来（D-4V5Q：出完同一秒自动再出一遍）。真没做好由导出 / 导入作业如实报，不再出包
+    func runExportPlan(_ game: GameSummary, _ plan: ExportPlan, packed: Bool = false) {
         let id = game.id
-        guard game.iphoneExportable else {
+        guard packed || game.iphoneExportable else {
             exportAfterPack[id] = plan
             // 出不了（缺文件 / 缺密钥…）：去出包页看原因，不悄悄没反应
             if export(game, platforms: [.ios], mode: plan.devices.isEmpty ? "export" : nil)?.stopsStart == true { exportAfterPack[id] = nil; exportFor = id }

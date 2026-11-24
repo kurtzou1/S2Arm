@@ -1,7 +1,7 @@
 #!/bin/bash
 # 门禁覆盖：graphics/dsx/dsx_win.py translator/spvc_inproc.py tests/win_lib_repro_test.sh
 # Windows 出包机编的直连翻译库 dsx.dll 与 spirv-cross 进程内库 libspvc_cli.dll 字节可复现（整文件哈希进翻译缓存键：graphics/tools/direct/dsh/batch/Build.cs
-#   ToolFingerprint → LibFp，PE 不拆节）。修前 lld-link 写链接时刻、导出表记「dsx.dll.<进程号>.tmp.dll」、assert 的 __FILE__ 带检出路径，
+#   ToolFingerprint → ToolLib.Fp，PE 不拆节）。修前 lld-link 写链接时刻、导出表记「dsx.dll.<进程号>.tmp.dll」、assert 的 __FILE__ 带检出路径，
 #   同一份源码每编一次字节不同：Windows 出包机按提交号各一份检出，每单全部着色器翻译缓存作废（shader cache: hit 0）。
 #   bash tests/win_lib_repro_test.sh（①② 不用编译器、约 1 秒；③ 只在 Windows 上真编两份比字节，约 1 分钟）
 # 期望（手写，不跑被测实现推）：

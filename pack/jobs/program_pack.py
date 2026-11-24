@@ -216,7 +216,13 @@ def win_signer(c, exe, shell_app):
         sys.path.insert(0, root)
     from pack.orch import install_win
     def run(dylib, team, bundle):
-        install_win.sign_dylibs(exe, shell_app, [Path(dylib)], bundle, c.logs / (c.task + "-program-sign.log"))
+        try:
+            install_win.sign_dylibs(exe, shell_app, [Path(dylib)], bundle, c.logs / (c.task + "-program-sign.log"))
+        except install_win.Fail as e:
+            # 同装机那条路（install.win_install_failure）：plumesign 认出的码（e.err，如 Apple 1100 登录过期 apple_session_expired）带进作业失败、
+            #   上屏说人话的办法。原先原样抛 install_win.Fail，作业层不认这个类、按意外记成 job_failed「本地任务失败」（D-39W8：导出 / 推送前按需更新程序时登录过期）
+            from install import win_install_failure
+            raise win_install_failure(e, c) from e
     run.kind = "plumesign"
     return run
 

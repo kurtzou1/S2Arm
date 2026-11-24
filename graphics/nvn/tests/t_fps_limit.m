@@ -41,7 +41,7 @@ uint64_t dm_focus_in_since(void);
 uint64_t now_ns(void);
 uint64_t s2a_nvn_pace_waits_self(void);   // hle_nvn.c 只读计数：本线程进入节拍等待（限帧睡眠 / 等显示链接拍）的次数
 void s2a_nvn_pace_stats(uint64_t *n, uint64_t *period_ns);   // hle_nvn.c 只读计数：取图里节拍器做过决定的次数、最近一次的节拍周期
-void s2a_gl_pace_stats(uint64_t out[5]);   // egl.m 只读计数：交换锁自己时钟一支的排拍次数 / 周期 / 重新对齐 / 真睡 / 单次最长要睡
+void s2a_gl_pace_stats(uint64_t out[5]);   // egl.m 只读计数：交换锁自己时钟一支的排拍次数 / 周期 / 多跨的刻度 / 真睡 / 单次最长要睡
 static uint64_t gl_pace0[5], gl_pace1[5], nv_pace0, nv_pace1, nv_period;   // 计时窗口（第 48 帧到第 48+samples 帧）两端的读数
 
 static int checked, failed, interval, windowed, check_hud, dynamic, return_one, deactivate, samples = 60;
@@ -396,8 +396,17 @@ static void run(void) {
             uint64_t n = gl0 ? gl_pace1[0] - gl_pace0[0] : nv_pace1 - nv_pace0, per = gl0 ? gl_pace1[1] : nv_period;
             CHECK(n == (uint64_t)samples, "%s 限帧器：计时窗口 %d 帧里排过节拍 %llu 帧（期望每帧都排）", frontend, samples, (unsigned long long)n);
             CHECK(per + 1 >= want && per <= want + 1, "%s 限帧器算出的周期 %llu ns，期望 1/%d 秒 = %llu ns", frontend, (unsigned long long)per, cap, (unsigned long long)want);
-            if (gl0) CHECK(gl_pace1[4] * 2 <= per * 3, "GL 限帧器单次最长要睡 %.3f ms，期望 ≤ 1.5 个周期 %.3f ms（重新对齐 %llu 次、真睡 %llu 次）",
-                gl_pace1[4] / 1e6, per * 1.5 / 1e6, (unsigned long long)(gl_pace1[2] - gl_pace0[2]), (unsigned long long)(gl_pace1[3] - gl_pace0[3]));
+            // 截止时刻按刻度走：要睡的永远 ≤ 1 个周期（首帧从现在起拍那一次正好 1 个周期；留 1 µs 取整）
+            if (gl0) CHECK(gl_pace1[4] <= per + 1000, "GL 限帧器单次最长要睡 %.3f ms，期望 ≤ 1 个周期 %.3f ms（多跨刻度 %llu 个、真睡 %llu 次）",
+                gl_pace1[4] / 1e6, per / 1e6, (unsigned long long)(gl_pace1[2] - gl_pace0[2]), (unsigned long long)(gl_pace1[3] - gl_pace0[3]));
+            // 慢机格（帧比周期长）：每帧都该落到下一个刻度——窗口里多跨的刻度 ≥ 帧数（期望按「帧长 > 周期 ⇒ k ≥ 2」独立推，不读实现）。
+            //   11-23 前「从现在重新起拍再整睡一周期」不跨刻度（0 个），12 ms 帧被拖到约 24 ms；帧间隔中位只作读数（墙钟，负载下会变）
+            if (gl0 && slow_ms() && slow_ms() * 1000000.0 > per) {
+                double iv[240]; int ni = 0; for (int k = 1; k <= samples; k++) iv[ni++] = (stamp[k] - stamp[k - 1]) * 1000;
+                for (int a = 1; a < ni; a++) for (int b = a; b > 0 && iv[b - 1] > iv[b]; b--) { double t = iv[b]; iv[b] = iv[b - 1]; iv[b - 1] = t; }
+                CHECK(gl_pace1[2] - gl_pace0[2] >= (uint64_t)samples, "GL 慢帧落到下一个刻度：窗口 %d 帧多跨刻度 %llu 个（期望 ≥ %d：每帧 %d ms > 周期 %.3f ms）；帧间隔中位 %.3f ms（读数，按刻度应约 %.3f ms）",
+                    samples, (unsigned long long)(gl_pace1[2] - gl_pace0[2]), samples, slow_ms(), per / 1e6, iv[ni / 2], ceil(slow_ms() * 1e6 / per) * per / 1e6);
+            }
             CHECK(mean >= target_ms * .90, "%s 真实时钟：%d 周期 %.3f ms、均值 %.3f ms；期望 ≥ %.3f ms 的九成（只判下沿，上沿看限帧器读数）", frontend, samples, elapsed_ms, mean, target_ms);
             // 慢调度注入那一格：先证注入真生效（均值确实超出旧判据的 1.3 倍上沿，旧判据在这里必红），上面的计数判据照样要绿
             if (slow_ms()) CHECK(mean > target_ms * 1.30, "慢调度注入生效：每帧多花 %d ms，均值 %.3f ms > %.3f ms（旧墙钟上沿判据在这里会红）", slow_ms(), mean, target_ms * 1.30);

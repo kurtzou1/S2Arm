@@ -182,12 +182,20 @@ static void par_open_dir(void) {
         NSString *stamp_path = [g_par_dir stringByAppendingPathComponent:@"identity.json"];
         NSData *sd = [NSData dataWithContentsOfFile:stamp_path];
         NSDictionary *stamp = sd ? [NSJSONSerialization JSONObjectWithData:sd options:0 error:nil] : nil;
-        if (![stamp isEqual:par_identity(g_dev)] && [fm fileExistsAtPath:g_par_dir]) {
-            if (stamp) MLOG("pipeline archive: the OS version, GPU or translation chain changed: removed, built again");
+        NSDictionary *now = par_identity(g_dev);
+        if (![stamp isEqual:now] && [fm fileExistsAtPath:g_par_dir]) {
+            if (stamp) {   // which entries differ, old → new: an archive dropped again on the next run with nothing visibly changed needs the values to place it
+                NSMutableString *diff = [NSMutableString string]; NSMutableSet *keys = [NSMutableSet setWithArray:now.allKeys]; [keys addObjectsFromArray:[stamp isKindOfClass:NSDictionary.class] ? stamp.allKeys : @[]];
+                for (NSString *k in [keys.allObjects sortedArrayUsingSelector:@selector(compare:)]) {
+                    id o = [stamp isKindOfClass:NSDictionary.class] ? stamp[k] : nil, n = now[k];
+                    if (!(o == n || [o isEqual:n])) [diff appendFormat:@"%s%@ \"%@\" → \"%@\"", diff.length ? "; " : "", k, o ?: @"(none)", n ?: @"(none)"];
+                }
+                MLOG("pipeline archive: the OS version, GPU or translation chain changed (%s): removed, built again", diff.length ? diff.UTF8String : "stamp unreadable");
+            }
             [fm removeItemAtPath:g_par_dir error:nil];
         }
         [fm createDirectoryAtPath:g_par_dir withIntermediateDirectories:YES attributes:nil error:nil];
-        [[NSJSONSerialization dataWithJSONObject:par_identity(g_dev) options:NSJSONWritingSortedKeys error:nil] writeToFile:stamp_path atomically:YES];
+        [[NSJSONSerialization dataWithJSONObject:now options:NSJSONWritingSortedKeys error:nil] writeToFile:stamp_path atomically:YES];
         g_par_have = [NSMutableSet set]; g_par_open = [NSMutableDictionary dictionary]; uint64_t bytes = 0;
         for (NSString *name in [fm contentsOfDirectoryAtPath:g_par_dir error:nil] ?: @[]) if ([name hasSuffix:@".metalarchive"] && ![name hasPrefix:@"batch-"]) {
             [g_par_have addObject:name.stringByDeletingPathExtension];

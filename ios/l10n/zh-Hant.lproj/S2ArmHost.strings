@@ -195,6 +195,8 @@
 "vpad.layouts.title" = "觸控配置";
 "vpad.layouts.touch.note" = "遊戲本身用觸控操作時選這項；虛擬按鍵會關閉，四指長按 1.5 秒可切換回來";
 "vpad.menu.editDisabled" = "僅觸控操作時沒有按鍵可編輯";
+"vpad.menu.hideKeys" = "隱藏按鍵";
+"vpad.menu.showKeys" = "顯示按鍵";
 "vpad.menu.face.auto" = "手把按鍵：自動";
 "vpad.menu.face.auto.note" = "依手把鍵帽上印的字母：任天堂手把用 Switch 配置，Xbox 手把用 Xbox 配置";
 "vpad.menu.face.switch" = "手把按鍵：Switch 配置";

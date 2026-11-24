@@ -264,7 +264,7 @@ __attribute__((visibility("default"), used)) void s2a_vpad_read_ex(s2a_pad_snaps
 - (int)readTouches:(int32_t *)xy attributes:(uint32_t *)attributes;   // HID 线程调用，内部加锁
 - (void)pointerTouch:(UITouch *)t phase:(int)phase;   // 触控板左键当触屏点（主线程）
 - (void)offerTouchHint;
-- (int)setTouchOnly:(BOOL)on manual:(BOOL)manual why:(NSString *)why;
+- (int)setTouchOnly:(BOOL)on source:(S2AVPadTouchSwitch)source why:(NSString *)why;
 - (BOOL)touchOnly;
 @end
 static __weak S2AVPadView *g_vpad;
@@ -309,7 +309,7 @@ void s2a_dprompt_ask(NSString *title, NSString *body, NSString *accept, NSString
     UIButton *_reportBtn;                   // 故障报修：左上角齿轮右边一颗（11-19 维护者定：从齿轮菜单里拿出来，玩家更容易提交），同样式、同淡出
     UIButton *_snapBtn; NSString *_snapDir; // 0.6.0 快照：右上角和齿轮对称的存档按钮（同样式、同淡出）；单击存、长按出「回到这一刻」。起局没开快照就不建
     BOOL _touchWanted;                      // 游戏启用过触屏（s2a_vpad_touch_wanted）
-    int _autoTouch;                         // 自动切（游戏声明触屏配置，manual=0）的本次运行覆盖：1 = 本次按仅触屏跑、不改持久化选择；0 = 没有覆盖
+    int _autoTouch;                         // 本局覆盖（自动切 / 提示条「切到触屏」，S2AVPadTouchAuto / Session）：1 = 本局按仅触屏跑、不改持久化选择；0 = 没有覆盖
     // 拖动编辑按键位置（11-07 维护者）：编辑期间不向游戏发输入，手指拖哪个键挪哪个键；完成存成本款游戏的「我的布局」并选中
     BOOL _editing;
     UIView *_editBar;
@@ -562,6 +562,10 @@ static NSString *vp_running_gid(void) { const char *g = getenv("S2A_LAUNCH_GAME_
     __weak S2AVPadView *ws = self; S2AVPadLayoutStore *st = _layoutStore; NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
     _menuLive = [NSMutableDictionary dictionary];
     NSMutableArray<UIMenuElement *> *items = [NSMutableArray array];
+    // 显示 / 隐藏按键：第一层第一项，回按键不用进「按键布局」子菜单找。玩家显式选择 = 手动保存（同设置页），清掉本局覆盖（提示条 / 自动切）
+    BOOL touch = _touchOnly;
+    [items addObject:vp_inline(@[vp_act(touch ? S2AL(@"vpad.menu.showKeys") : S2AL(@"vpad.menu.hideKeys"), touch ? @"eye" : @"eye.slash", NO, ^{
+        [ws setTouchOnly:!touch source:S2AVPadTouchSaved why:@"齿轮菜单"]; })])];
     // 0.6.0 快照（起局带了存档开关才有）：「存下这一刻」一点就存、游戏不停；有完整快照时多「回到上次存下的这一刻」
     // 弱链接[lab]：s2a_snap_logging（即时快照：runtime/src/snapsw.c、snapshot.c、session.c 提供；输入工作台不链原生核，取不到菜单就不出这两项）
     // 弱链接[lab]：s2a_snap_dir_for（即时快照：runtime/src/snapsw.c、snapshot.c、session.c 提供；输入工作台不链原生核，取不到菜单就不出这两项）
@@ -1290,27 +1294,22 @@ static NSString *const kSlideSwitchKey = @"S2AVPadSlideSwitch";   // 滑动切�
         [u setBool:YES forKey:kTouchHintKey];
         if (s2a_dprompt_ask) s2a_dprompt_ask(S2APICK(S2A_DPROMPT_VPAD_TOUCH_TITLE), S2APICK(S2A_DPROMPT_VPAD_TOUCH_BODY), S2APICK(S2A_DPROMPT_VPAD_TOUCH_ACCEPT), S2APICK(S2A_DPROMPT_VPAD_TOUCH_DECLINE), 0, 15, ^(BOOL accept) {
             LOG("触屏布局：提示条 %s", accept ? "点了「切到触屏」" : "没切（先不用 / 超时）");
-            if (accept) [weakSelf setTouchOnly:YES manual:YES why:@"提示条"];
+            if (accept) [weakSelf setTouchOnly:YES source:S2AVPadTouchSession why:@"提示条"];   // 只这一局：下次开局仍是存下的方案
         });
         else if (s2a_dprompt_notice) s2a_dprompt_notice(S2APICK(S2A_DPROMPT_VPAD_TOUCH_TITLE), S2APICK(S2A_DPROMPT_VPAD_TOUCH_BODY), 0, 15);
     });
 }
 - (BOOL)touchOnly { return _touchOnly; }
-// 切换方案（切换钮 / 提示条 / s2a_vpad_set_touch_only 共用；主线程）：返回 1 真切了、0 本来就是（或自动切遇到玩家手动选过）、-1 写盘失败（保持原方案）
-//   manual：切换钮 / 提示条 / 设置 = 玩家手动，持久化选择 + 记「手动选过」、清掉自动切的本次覆盖；
-//   自动（游戏声明触屏配置，一次成功线）：玩家手动选过就不切；否则只改本次运行（_autoTouch），不动持久化选择、不记手动
-- (int)setTouchOnly:(BOOL)on manual:(BOOL)manual why:(NSString *)why {
-    BOOL before = _touchOnly; int r;
-    if (manual) {
-        NSError *error; _autoTouch = 0; r = [_layoutStore setTouchOnly:on error:&error];
-        if (r < 0) { LOG("【红】触屏布局：切到%s失败（%s）：%s", on ? "触屏" : "按键", why.UTF8String, error.localizedDescription.UTF8String); [self reloadLayout]; return -1; }
-        [_layoutStore markManual:nil];
-    } else {
-        if (_layoutStore.manualChosen) { LOG("触屏布局：自动切到%s跳过（玩家手动选过方案；%s）", on ? "触屏" : "按键", why.UTF8String); return 0; }
-        _autoTouch = on ? 1 : 0;
-    }
-    [self reloadLayout]; r = _touchOnly != before;
-    if (r) LOG("触屏布局：切到%s（%s，%s）", _touchOnly ? "仅触屏操作" : "按键布局", why.UTF8String, manual ? "手动、已保存" : "自动、只本次运行");
+// 切换方案（齿轮「显示 / 隐藏按键」/ 提示条 / s2a_vpad_set_touch_only 共用；主线程）：返回 1 真切了、0 没变（或自动切遇到玩家手动选过）、-1 写盘失败（保持原方案）
+//   三种来源的判定在 vpad_layout.m switchTouchOnly:source:session:（单测 t_vpad_touch_switch）：Saved 持久化 + 记手动、清本局覆盖；
+//   Session（提示条）只这一局、手动选过也照切；Auto（游戏声明触屏配置）玩家手动选过就不切，否则只这一局
+- (int)setTouchOnly:(BOOL)on source:(S2AVPadTouchSwitch)source why:(NSString *)why {
+    NSError *error; int r = [_layoutStore switchTouchOnly:on source:source session:&_autoTouch error:&error];
+    if (r < 0) { LOG("【红】触屏布局：切到%s失败（%s）：%s", on ? "触屏" : "按键", why.UTF8String, error.localizedDescription.UTF8String); [self reloadLayout]; return -1; }
+    if (!r && source == S2AVPadTouchAuto && _layoutStore.manualChosen) { LOG("触屏布局：自动切到%s跳过（玩家手动选过方案；%s）", on ? "触屏" : "按键", why.UTF8String); return 0; }
+    [self reloadLayout];
+    if (r) LOG("触屏布局：切到%s（%s，%s）", _touchOnly ? "仅触屏操作" : "按键布局", why.UTF8String,
+               source == S2AVPadTouchSaved ? "手动、已保存" : source == S2AVPadTouchSession ? "手动、只这一局" : "自动、只这一局");
     return r;
 }
 - (NSString *)layoutName {
@@ -1693,13 +1692,14 @@ __attribute__((visibility("default"), used)) int s2a_vpad_touch_wanted(void) {
 }
 
 // 切「仅触屏 / 按键」方案（屏角切换钮、提示条、一次成功线「游戏声明触屏配置时自动切」共用一处）：on 1 = 切到仅触屏、0 = 切回按键；
-//   manual 1 = 玩家手动（持久化 + 记「手动选过」），0 = 自动（只改本次运行；玩家手动选过时返回 0 不切）；why 进日志。
+//   manual = S2AVPadTouchSwitch：0 自动（只这一局；玩家手动选过时返回 0 不切）、1 手动保存（持久化 + 记「手动选过」）、2 手动只这一局（不写盘）；其他值按 1；why 进日志。
 //   主线程调：同步执行，返回 1 真切了、0 没切、-1 写盘失败或虚拟手柄没挂。别的线程（如 C# HID 线程）调：派主线程执行、立即返回 2
 //   （不 dispatch_sync：主线程可能正等 HID 线程的锁）。结果看 s2a_vpad_touch_only() 与日志「触屏布局：切到…」
 __attribute__((visibility("default"), used)) int s2a_vpad_set_touch_only(int on, int manual, const char *why) {
     NSString *w = why ? @(why) : @"未注明";
-    if (!NSThread.isMainThread) { dispatch_async(dispatch_get_main_queue(), ^{ S2AVPadView *v = g_vpad; if (v) [v setTouchOnly:on != 0 manual:manual != 0 why:w]; }); return 2; }
-    S2AVPadView *v = g_vpad; return v ? [v setTouchOnly:on != 0 manual:manual != 0 why:w] : -1;
+    S2AVPadTouchSwitch src = manual == S2AVPadTouchAuto || manual == S2AVPadTouchSession ? (S2AVPadTouchSwitch)manual : S2AVPadTouchSaved;
+    if (!NSThread.isMainThread) { dispatch_async(dispatch_get_main_queue(), ^{ S2AVPadView *v = g_vpad; if (v) [v setTouchOnly:on != 0 source:src why:w]; }); return 2; }
+    S2AVPadView *v = g_vpad; return v ? [v setTouchOnly:on != 0 source:src why:w] : -1;
 }
 // 当前是不是「仅触屏」方案（含自动切的本次覆盖）：1 是、0 否、-1 虚拟手柄没挂（任意线程，读原子量）
 __attribute__((visibility("default"), used)) int s2a_vpad_touch_only(void) { return atomic_load(&g_touch_only); }

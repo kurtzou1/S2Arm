@@ -27,7 +27,7 @@ static class DshBatch
             Console.WriteLine(output == source ? "outlined 0" : "outlined 1"); return 0;
         }
         if (argv.Length >= 1 && argv[0] == "--tool-fp") { Console.WriteLine(Build.ToolFpCli(argv[1..])); return 0; }   // 验收：整份工具指纹（翻译键里那一项）
-        if (argv.Length == 2 && argv[0] == "--lib-fp") { Console.WriteLine(Build.LibFp(argv[1])); return 0; }   // 单测：直连库 libdsx 进翻译键的功能身份（tests/nxgal_fp_test.sh）
+        if (argv.Length == 2 && argv[0] == "--lib-fp") { Console.WriteLine(ToolLib.Fp(argv[1])); return 0; }   // 单测：直连库 libdsx 进翻译键的功能身份（tests/nxgal_fp_test.sh）
         if (argv.Length >= 1 && argv[0] == "build") return Build.Entry(argv[1..]);
         if (argv.Length >= 1 && argv[0] == "--c1cb") return C1Cb.Cli(argv[1..]);
         if (argv.Length == 1 && argv[0] == "--c1cb-fp") { Console.WriteLine(Build.C1CbFpPublic()); return 0; }   // 两张表的算法指纹（C1Cb.cs 源码 sha256 前 16 位；t_dmsh_reuse 核）

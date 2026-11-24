@@ -11,7 +11,8 @@
      槽里原值 = 函数在模块里的偏移，只由 DT_RELR 重定位（一个地址项改 FREE 槽、一个位图项第 1 位改紧跟的 MALLOC 槽）：装载基址 0x0800_0000 加上去才跳得对，
      没展开或没加基址就跳到未映射的低地址 → 执行失败；期望同 ①（3 块逐字节相同、退 0）
   ④ 指针认证夹具（#854）：pacibsp / paciza / autiza / blraaz / retab，按不开密钥的 CPU 执行，期望同 ①
-  ⑤ 未定义指令夹具（#854）：服务模式第一个请求 10 秒内回 0 或退出、stdin 关掉后 15 秒内退出（不许挂着不回）"""
+  ⑤ 未定义指令夹具（#854）：服务模式第一个请求 10 秒内回 0 或退出、stdin 关掉后 15 秒内退出（不许挂着不回）
+GAMEDEC_EXE=<预编 gamedec(.exe)>：不现编、直接测这一份（#2135：发版的 NativeAOT 件要在 Windows 上照这套夹具测，JIT 编出的测不到 AOT 缺代码）"""
 import os, struct, subprocess, sys, tempfile
 from pathlib import Path
 
@@ -82,13 +83,14 @@ def nso(relr=False, pac=False, udf=False):
 
 with tempfile.TemporaryDirectory() as t:
     t = Path(t); (t / 'root/exefs').mkdir(parents=True); (t / 'root/exefs/main').write_bytes(nso())
-    b = subprocess.run(['bash', str(R / 'tools/mem_admit.sh'), 'dotnet', 'gamedec_test', '--', 'dotnet', 'build', str(R / 'pack/gamedec/gamedec.csproj'), '-c', 'Release',
+    exe = os.environ.get('GAMEDEC_EXE')
+    b = subprocess.CompletedProcess([], 0) if exe else subprocess.run(['bash', str(R / 'tools/mem_admit.sh'), 'dotnet', 'gamedec_test', '--', 'dotnet', 'build', str(R / 'pack/gamedec/gamedec.csproj'), '-c', 'Release',
                         '-nologo', '-v', 'q', '-o', str(t / 'bin')] if os.name != 'nt' else
                        ['dotnet', 'build', str(R / 'pack/gamedec/gamedec.csproj'), '-c', 'Release', '-nologo', '-v', 'q', '-o', str(t / 'bin')], capture_output=True, text=True,
                        env=dict(os.environ, S2A_MEM_DIR=str(t / 'mem'), S2A_MEM_LOCK=str(t / 'mem.flock')))   # 内存准入记私有账本：门禁步里不许写共享账本（mem_admit ⑯）
     chk('编出 gamedec', 0, b.returncode)
     if b.returncode: print((b.stdout + b.stderr)[-1500:]); sys.exit(1)
-    tool = ['dotnet', str(t / 'bin/gamedec.dll')]
+    tool = [exe] if exe else ['dotnet', str(t / 'bin/gamedec.dll')]
     ref = t / 'ref'; ref.mkdir(); rows = []
     for i, n in enumerate((1, 4096, 100000)):
         c = bytes((k * 7 + i) & 255 for k in range(n)); (ref / f'{i}.c').write_bytes(c); (ref / f'{i}.r').write_bytes(c); rows.append(f'{i}\t{n}\t{n}\t夹具')

@@ -788,6 +788,10 @@ static int query(GLenum p, double v[4]) {
         case 0x88FF: v[0] = 2048; return 1;                                     // MAX_ARRAY_TEXTURE_LAYERS（Metal 纹理数组上限 2048 层）
         case 0x0B11: v[0] = gl_cur->point_size; return 1;                       // POINT_SIZE
         case 0x0B12: case 0x846D: v[0] = 1; v[1] = 511; return 2;               // POINT_SIZE_RANGE（桌面）/ ALIASED_POINT_SIZE_RANGE：Metal [[point_size]] 上限 511
+        // glReadPixels 推荐的读回格式 / 类型（D-S6VQ：一款 GL 前端游戏开局查这两项，原先没实现回 0 并置 INVALID_ENUM，之后一帧不出）：
+        //   RGBA / UNSIGNED_BYTE 是 ES 规范必须支持的那一对，本层 glReadPixels 就按它读
+        case 0x8B9A: v[0] = 0x1401; return 1;                                   // IMPLEMENTATION_COLOR_READ_TYPE = UNSIGNED_BYTE
+        case 0x8B9B: v[0] = 0x1908; return 1;                                   // IMPLEMENTATION_COLOR_READ_FORMAT = RGBA
     }
     if (p == 0x9126 && !gl_es()) { v[0] = 1; return 1; }                        // CONTEXT_PROFILE_MASK：core（本层没有固定管线 / 显示列表这些兼容配置的入口）；ES 没有这个查询
     return 0;

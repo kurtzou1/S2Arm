@@ -29,6 +29,13 @@
 #   本机那份与 gate-host 那份（GATE_PLAN）各用各机器上的缓存。GATE_TEST_CACHE=0 关；算键失败 / 读不到一律当没命中照跑（宁可多跑）
 set -u
 R=$(git rev-parse --show-toplevel) || exit 1; cd "$R"
+# 私有工具自找放最前（11-24：原先在后面「门禁机配置自找」里才从 machine.local 补 S2A_PRIVATE_TOOLS，而拼「门禁显卡：独占 / 共享」
+#   单测命令时就要用它决定套不套显卡锁——各线自检派 gate-host 不带这个变量，present_settings_test 一律裸跑、不拿锁，和开窗口的组同时跑挂起在第 0 帧）
+MCK=$(git rev-parse --path-format=absolute --git-common-dir 2> /dev/null); MCK=${MCK%/.git}
+if [ -z "${S2A_PRIVATE_TOOLS:-}" ]; then
+  for mf in ${S2A_MACHINE_LOCAL:+"$S2A_MACHINE_LOCAL"} "$R/tools/machine.local" "${MCK:+$MCK/tools/machine.local}"; do
+    [ -f "$mf" ] || continue; pt=$(S2A_PRIVATE_TOOLS= bash -c '. "$1" > /dev/null 2>&1; printf %s "${S2A_PRIVATE_TOOLS:-}"' _ "$mf"); [ -n "$pt" ] && { export S2A_PRIVATE_TOOLS=$pt; break; }; done
+fi
 export S2A_ROMFS_SEAL=1   # 门禁出包把 RomFS 共享存储设只读：阶段误写共享份当场 EACCES（玩家机不设，pack/roots.sh 文件头）
 # 停门禁只停本树（11-09：一条线 pkill -f "tools/gate.sh" 停自己的预跑，连别的会话的门禁和列车本机步骤一起杀了）：
 #   本份门禁的 pid 写本工作树自己的 git 目录（git rev-parse --git-dir，每棵工作树一份、不算改动不进提交），退出删掉；
@@ -354,11 +361,7 @@ if [ "$HOST" = gate-host ]; then
   #   ② 门禁机地址：按现有顺序（tools/machine.sh）找不到、又没显式给 S2A_MACHINE_LOCAL → 用私有工具目录里那份；
   #   ③ 派之前核：remote.sh 在、配得出门禁机地址（S2A_REMOTE / S2A_REMOTE_HOSTS / S2A_REMOTE_DEFAULT）。核不过、且真有步要派门禁机 → 【红】门禁机配置缺失、退出 2，一步都不在本机跑
   #   门禁机连不上 / 盘不足等运行时不可用照旧按 GATE_FALLBACK_LOCAL 退回本机补跑（那是环境问题，这里管的是配置漏传）
-  MCK=$(git rev-parse --path-format=absolute --git-common-dir 2> /dev/null); MCK=${MCK%/.git}
-  if [ -z "${S2A_PRIVATE_TOOLS:-}" ]; then
-    for mf in ${S2A_MACHINE_LOCAL:+"$S2A_MACHINE_LOCAL"} "$R/tools/machine.local" "${MCK:+$MCK/tools/machine.local}"; do
-      [ -f "$mf" ] || continue; pt=$(S2A_PRIVATE_TOOLS= bash -c '. "$1" > /dev/null 2>&1; printf %s "${S2A_PRIVATE_TOOLS:-}"' _ "$mf"); [ -n "$pt" ] && { export S2A_PRIVATE_TOOLS=$pt; break; }; done
-  fi
+  # ① 私有工具已在脚本开头自找（见开头「私有工具自找放最前」），这里只核
   miss=; [ -n "${S2A_PRIVATE_TOOLS:-}" ] && [ -f "$S2A_PRIVATE_TOOLS/remote.sh" ] || miss="私有工具 remote.sh（S2A_PRIVATE_TOOLS=${S2A_PRIVATE_TOOLS:-没设}）"
   if [ -z "${S2A_REMOTE:-}" ]; then
     rhost() { bash "$R/tools/machine.sh" get S2A_REMOTE_HOSTS 2> /dev/null; bash "$R/tools/machine.sh" get S2A_REMOTE_DEFAULT 2> /dev/null; }

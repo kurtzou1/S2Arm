@@ -153,6 +153,18 @@ static void t_queries(void) {
     CHECK(!memcmp(&a, &b.formatProperties, sizeof a) && a.optimalTilingFeatures, "① FormatProperties2 与 1.0 一致（optimal %#x）", a.optimalTilingFeatures);
     CHECK(gipa(instance, "vkGetPhysicalDeviceFormatProperties2KHR") == (PFN_vkVoidFunction)vkGetPhysicalDeviceFormatProperties2 && gipa(instance, "vkTrimCommandPoolKHR") == (PFN_vkVoidFunction)vkTrimCommandPool,
           "① 已宣告扩展的 KHR 名字查得到（get_physical_device_properties2、maintenance1）");
+    {   // ① ASTC 全部 14 种块大小 × UNORM / SRGB（VkFormat 157–184）：都报可采样、都能建 2D 图像（D-2R7S：10x5 原先没映射，建图像回 FORMAT_NOT_SUPPORTED）
+        int nosamp = 0, nocreate = 0; VkFormat first_bad = VK_FORMAT_UNDEFINED;
+        for (int f = VK_FORMAT_ASTC_4x4_UNORM_BLOCK; f <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK; f++) {
+            VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(physical, (VkFormat)f, &fp);
+            if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) { nosamp++; if (!first_bad) first_bad = (VkFormat)f; }
+            VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = (VkFormat)f, .extent = {60, 60, 1}, .mipLevels = 1, .arrayLayers = 1,
+                                    .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT};
+            VkImage im = VK_NULL_HANDLE; VkResult r = vkCreateImage(device, &ci, NULL, &im);
+            if (r != VK_SUCCESS || !im) { nocreate++; if (!first_bad) first_bad = (VkFormat)f; }   // 测试进程结束即回收，不逐个销毁
+        }
+        CHECK(!nosamp && !nocreate, "① ASTC 28 种格式：不可采样 %d 种、建图像失败 %d 种（应 0、0；第一个不行的 VkFormat %d）", nosamp, nocreate, first_bad);
+    }
     uint32_t n = 0; vkGetPhysicalDeviceQueueFamilyProperties2(physical, &n, NULL); VkQueueFamilyProperties2 q = {.sType = VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2}; uint32_t one = 1;
     vkGetPhysicalDeviceQueueFamilyProperties2(physical, &one, &q);
     CHECK(n == 1 && one == 1 && (q.queueFamilyProperties.queueFlags & VK_QUEUE_COMPUTE_BIT), "① 队列族 1 个、含计算（flags %#x）", q.queueFamilyProperties.queueFlags);

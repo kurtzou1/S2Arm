@@ -10,6 +10,7 @@
 #include "../../../macos/xbox_gip_relay.h"
 #include "../../../ios/input_config.h"
 #import "../../../macos/front_mac.m"
+#include "../../../macos/imu_burst.h"
 #import "../../../macos/input_guide.m"
 #import "../../../macos/controller_view.m"
 
@@ -1335,6 +1336,36 @@ int main(int argc, const char **argv) {
         expect(s2a_pro_imu(r, 49, &m) && fabsf(m.acceleration_y - 0.999424f) < 1e-5f && fabsf(m.acceleration_x) < 1e-6f && fabsf(m.acceleration_z + 0.999424f) < 1e-5f
                && fabsf(m.gyro_y - 61.03f) < 1e-3f && fabsf(m.gyro_x) < 1e-6f, "HID pad 0x30 report IMU (last sample) maps like the Pro");
         expect(!s2a_pro_imu(r, 48, &m) && !s2a_pro_imu((const uint8_t[64]){0x21}, 64, &m), "HID pad IMU needs a whole 0x30 report");
+    }
+    // 补满采样（#2146，macos/imu_burst.h）：一包 3 组 IMU，交给游戏的条数 × 5 ms 必须等于真实流逝、时间戳严格单调。期望全按包间隔手算：
+    //   15 ms 一包 → 每包 3 条；8 ms 一包 11 包（跨 80 ms）→ 首包 3 + 80/5 = 19 条（照单全收会是 33 条、幅度 ×1.7）；
+    //   1 ms 后扎堆的包 → 0 条，15 ms 处的下一包补满 3 条；断流 1 秒 → 只补 3 条不追帐；取走时比「现在」早 40 ms 以上的丢掉。g[i].gyro_x = 组号作标记
+    {   s2a_imu_burst b = {0}; s2a_pad_motion g[3] = {{.gyro_x = 0}, {.gyro_x = 1}, {.gyro_x = 2}}, out[S2A_IMU_BURST_CAP];
+        const uint64_t t0 = 1000000;
+        expect(s2a_imu_burst_push(&b, g, t0) == 3 && s2a_imu_burst_push(&b, g, t0 + 15000) == 3, "IMU burst: 15 ms packets give 3 samples each");
+        int n = s2a_imu_burst_drain(&b, out, S2A_IMU_BURST_CAP, t0 + 15000), mono = n == 6;
+        for (int i = 0; i < n; i++) mono = mono && out[i].host_timestamp_us == t0 - 10000 + 5000ull * (uint64_t)i;
+        expect(mono, "IMU burst: 15 ms packets are 5 ms apart, newest = receive time");
+        s2a_imu_burst_reset(&b); int total = 0; uint64_t last = 0; mono = 1;
+        for (int p = 0; p <= 10; p++) {
+            total += s2a_imu_burst_push(&b, g, t0 + 8000ull * (uint64_t)p);
+            n = s2a_imu_burst_drain(&b, out, S2A_IMU_BURST_CAP, t0 + 8000ull * (uint64_t)p);
+            for (int i = 0; i < n; i++) { mono = mono && (!last || out[i].host_timestamp_us == last + 5000); last = out[i].host_timestamp_us; }
+        }
+        expect(total == 19 && mono && last == t0 + 80000, "IMU burst: 8 ms packets give elapsed / 5 ms samples, strictly 5 ms apart");
+        s2a_imu_burst_reset(&b);
+        int k0 = s2a_imu_burst_push(&b, g, t0), k1 = s2a_imu_burst_push(&b, g, t0 + 1000), k2 = s2a_imu_burst_push(&b, g, t0 + 15000);
+        s2a_imu_burst_drain(&b, out, S2A_IMU_BURST_CAP, t0 + 15000);
+        int k3 = s2a_imu_burst_push(&b, g, t0 + 25000);
+        n = s2a_imu_burst_drain(&b, out, S2A_IMU_BURST_CAP, t0 + 25000);
+        expect(k0 == 3 && k1 == 0 && k2 == 3 && k3 == 2 && n == 2 && out[0].gyro_x == 1 && out[1].gyro_x == 2 &&
+               out[0].host_timestamp_us == t0 + 20000 && out[1].host_timestamp_us == t0 + 25000, "IMU burst: bunched packet waits, partial packet keeps the newest groups");
+        expect(s2a_imu_burst_push(&b, g, t0 + 1025000) == 3 && s2a_imu_burst_drain(&b, out, S2A_IMU_BURST_CAP, t0 + 1025000) == 3 &&
+               out[0].host_timestamp_us == t0 + 1015000, "IMU burst: after a 1 s gap only the packet's own 15 ms is given");
+        s2a_imu_burst_reset(&b); s2a_imu_burst_push(&b, g, t0); s2a_imu_burst_push(&b, g, t0 + 15000);
+        expect(s2a_imu_burst_drain(&b, out, 2, t0 + 15000) == 2 && b.len == 4, "IMU burst: drain stops at max");
+        expect(s2a_imu_burst_drain(&b, out, S2A_IMU_BURST_CAP, t0 + 15000 + 37000) == 1 && out[0].host_timestamp_us == t0 + 15000 && b.len == 0,
+               "IMU burst: samples older than 40 ms are dropped, not replayed");
     }
     // 兜底手柄（macos/hid_pad.m，#934）：Switch 简易 HID 键号 1 = B（南）、2 = A（东）、3 = Y（西）、4 = X（北）、9 = −、10 = +；13 Home 不进键位
     expect(s2a_hid_pad_switch_button_bit(1) == (1u << 1) && s2a_hid_pad_switch_button_bit(2) == (1u << 0) &&

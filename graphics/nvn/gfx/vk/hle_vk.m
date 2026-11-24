@@ -115,6 +115,18 @@ static const fmt_t g_fmts[] = {
     FB(ASTC_4x4_UNORM_BLOCK, ASTC_4x4_LDR, 16, 4, 4), FB(ASTC_4x4_SRGB_BLOCK, ASTC_4x4_sRGB, 16, 4, 4), FB(ASTC_5x5_UNORM_BLOCK, ASTC_5x5_LDR, 16, 5, 5),
     FB(ASTC_5x5_SRGB_BLOCK, ASTC_5x5_sRGB, 16, 5, 5), FB(ASTC_6x6_UNORM_BLOCK, ASTC_6x6_LDR, 16, 6, 6), FB(ASTC_6x6_SRGB_BLOCK, ASTC_6x6_sRGB, 16, 6, 6),
     FB(ASTC_8x8_UNORM_BLOCK, ASTC_8x8_LDR, 16, 8, 8), FB(ASTC_8x8_SRGB_BLOCK, ASTC_8x8_sRGB, 16, 8, 8),
+    // 其余 10 种 ASTC 块（D-2R7S：一款 Vulkan 前端游戏建 ASTC 10x5 图像，原先表里没有 → vkCreateImage 回 FORMAT_NOT_SUPPORTED，游戏不查返回值、
+    //   拿空图像读 0 崩，3/3）。Apple GPU（A8 起 / Apple 芯片 Mac）全部 14 种块大小都直接采样，每块 16 字节
+    FB(ASTC_5x4_UNORM_BLOCK, ASTC_5x4_LDR, 16, 5, 4), FB(ASTC_5x4_SRGB_BLOCK, ASTC_5x4_sRGB, 16, 5, 4),
+    FB(ASTC_6x5_UNORM_BLOCK, ASTC_6x5_LDR, 16, 6, 5), FB(ASTC_6x5_SRGB_BLOCK, ASTC_6x5_sRGB, 16, 6, 5),
+    FB(ASTC_8x5_UNORM_BLOCK, ASTC_8x5_LDR, 16, 8, 5), FB(ASTC_8x5_SRGB_BLOCK, ASTC_8x5_sRGB, 16, 8, 5),
+    FB(ASTC_8x6_UNORM_BLOCK, ASTC_8x6_LDR, 16, 8, 6), FB(ASTC_8x6_SRGB_BLOCK, ASTC_8x6_sRGB, 16, 8, 6),
+    FB(ASTC_10x5_UNORM_BLOCK, ASTC_10x5_LDR, 16, 10, 5), FB(ASTC_10x5_SRGB_BLOCK, ASTC_10x5_sRGB, 16, 10, 5),
+    FB(ASTC_10x6_UNORM_BLOCK, ASTC_10x6_LDR, 16, 10, 6), FB(ASTC_10x6_SRGB_BLOCK, ASTC_10x6_sRGB, 16, 10, 6),
+    FB(ASTC_10x8_UNORM_BLOCK, ASTC_10x8_LDR, 16, 10, 8), FB(ASTC_10x8_SRGB_BLOCK, ASTC_10x8_sRGB, 16, 10, 8),
+    FB(ASTC_10x10_UNORM_BLOCK, ASTC_10x10_LDR, 16, 10, 10), FB(ASTC_10x10_SRGB_BLOCK, ASTC_10x10_sRGB, 16, 10, 10),
+    FB(ASTC_12x10_UNORM_BLOCK, ASTC_12x10_LDR, 16, 12, 10), FB(ASTC_12x10_SRGB_BLOCK, ASTC_12x10_sRGB, 16, 12, 10),
+    FB(ASTC_12x12_UNORM_BLOCK, ASTC_12x12_LDR, 16, 12, 12), FB(ASTC_12x12_SRGB_BLOCK, ASTC_12x12_sRGB, 16, 12, 12),
     // Vertex-only formats: integers read as unnormalized floats (USCALED / SSCALED, Metal converts the integer formats to the shader's float type) and three components.
     // Super Mario Galaxy's GX vertex data is mostly these (positions as R16G16B16_SSCALED, colours as R8G8B8A8_USCALED…)
     FV(R8_USCALED, UChar, 1), FV(R8_SSCALED, Char, 1), FV(R8G8_USCALED, UChar2, 2), FV(R8G8_SSCALED, Char2, 2),

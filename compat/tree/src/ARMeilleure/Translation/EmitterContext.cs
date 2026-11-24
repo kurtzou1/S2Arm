@@ -97,7 +97,9 @@ namespace ARMeilleure.Translation
 
         public virtual Operand Call(MethodInfo info, params Operand[] callArgs)
         {
-            nint funcPtr = info.MethodHandle.GetFunctionPointer();
+            // 登记过的（全是 [UnmanagedCallersOnly]）取 Delegates 表里编译期 & 出的原生入口：NativeAOT 下 MethodHandle.GetFunctionPointer() 给的是报
+            //   「no code was generated」的桩（#2135）；没登记的照旧
+            nint funcPtr = Delegates.TryGetDelegateFuncPtr(info, out nint registered) ? registered : info.MethodHandle.GetFunctionPointer();
 
             OperandType returnType = GetOperandType(info.ReturnType);
 

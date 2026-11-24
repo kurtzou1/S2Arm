@@ -224,6 +224,8 @@
 "vpad.layouts.title" = "タッチレイアウト";
 "vpad.layouts.touch.note" = "ゲーム独自のタッチ操作を使う場合に有効にします。画面上のボタンがオフになり、4本指で1.5秒長押しすると元に戻ります。";
 "vpad.menu.editDisabled" = "タッチ専用モードでは編集できるボタンがありません";
+"vpad.menu.hideKeys" = "ボタンを隠す";
+"vpad.menu.showKeys" = "ボタンを表示";
 "vpad.menu.face.auto" = "ボタン：自動";
 "vpad.menu.face.auto.note" = "コントローラーのボタンに印字された文字に従います。任天堂コントローラーはSwitchレイアウト、XboxコントローラーはXboxレイアウトを使用します。";
 "vpad.menu.face.switch" = "ボタン：Switchレイアウト";

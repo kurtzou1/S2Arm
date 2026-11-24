@@ -32,7 +32,7 @@ DSH_PROJ = os.path.join(ROOT, 'graphics/tools/direct/dsh/S2A.Dsh.csproj')
 # 翻译器指纹输入只有一份：S2A.Dsh.csproj 的 DshXfpInput（11-02 维护者 / 出包线）。生产的翻译缓存键（dsh_batch ToolFingerprint 里的 DshChain.Xfp）由它在编译期算；
 #   这里用 dotnet msbuild -getItem 取 MSBuild 自己展开的同一份清单、按同一算法（「仓库相对路径 \t sha256 \n」按路径排序拼起来再 sha256 取前 16 位）算，两边相等
 #   （tests/xfp_single_source_test.sh）。改清单外的文件（dsh/batch/Build.cs 等编排、本文件、libnxgal / spirv-cross 源码）不改这个指纹：
-#   库的内容另由 ToolFingerprint 的 LibFp（--dsx / --spvc 动态库各节内容）进键。11-02 前这里是一份手写的 FILES，收了 batch/*.cs 等，却不进任何生产键，
+#   库的内容另由 ToolFingerprint 的 ToolLib.Fp（--dsx / --spvc 动态库各节内容）进键。11-02 前这里是一份手写的 FILES，收了 batch/*.cs 等，却不进任何生产键，
 #   冷改动核查据它报「翻译指纹变」是虚报（docs/坑记录.md）
 _XFP_FILES = None
 def xfp_files():   # → 翻译器指纹输入的仓库相对路径（排好序）

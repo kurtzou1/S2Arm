@@ -140,6 +140,13 @@ var advisory = EnvironmentReport.Parse("""
 """, 0);
 Check(advisory.Ready && !advisory.Checks[0].Blocking, "signing tool is advisory and does not block");
 Check(report.Checks[1].Blocking, "reports without the field still block on anything not ok");
+// D-97FT：设置页输入框还没画出来（Text 为 null）或被清空时，空值不覆盖原路径；原先抄成空串，环境检查 GetFullPath("") 抛异常、界面停在「正在检查」。期望手写
+var defaults = LauncherPaths.Defaults(Path.Combine(Path.GetTempPath(), "s2arm-paths"));
+Check(defaults.Edited(null, null, null) == defaults, "blank settings boxes keep the existing launcher paths");
+Check(defaults.Edited("", "  ", null) == defaults, "empty or whitespace settings never become empty paths");
+var edited = defaults.Edited("D:\\E", null, "D:\\S");
+Check(edited == new LauncherPaths("D:\\E", defaults.Runtime, "D:\\S"), "filled settings boxes replace only their own path");
+Check(!string.IsNullOrEmpty(Path.GetFullPath(defaults.Edited("", "", "").Engine)), "edited paths stay usable by the environment check");
 LibraryJobCases.Run(Check);
 PhoneOverviewCases.Run(Check);
 ExportChoiceCases.Run(Check);
@@ -149,6 +156,7 @@ JsonOutCases.Run(Check);
 LauncherLanguageCases.Run(Check);
 SGradeVersionsCases.Run(Check);
 PackCases.Run(Check);
+UpdateRepackCases.Run(Check);
 BatchCases.Run(Check);
 ExportStreamCases.Run(Check);
 BackendTextCases.Run(Check);

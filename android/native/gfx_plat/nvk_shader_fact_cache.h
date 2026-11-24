@@ -5,11 +5,28 @@
 /* Specialization reuse is restricted to complete, direct combined tables.
  * In this shape HasDirectTextureFact is invariant and TrySeparateC2 is false.
  * Separate tables, buffer facts, arrays and unknown dependency sources retain
- * the exact identity path. Query results select whole facts, not guessed fields. */
+ * the exact identity path. Query results select whole facts, not guessed fields.
+ *
+ * fact_wide() (nvk_shader.c, debug.s2a.nvk_fact_wide, default NVK_FACT_WIDE_DEFAULT) adds two things to that contract:
+ *  - The complete combined table may be followed by high-slot direct facts (c2 words 72..86, cbuf -1; fill_facts'
+ *    high-slot loop). They never reach a masked key. The compiler reads the fact set only through keyed lookups
+ *    (DirectGpuAccessor.FindTexture / HasDirectTextureFact / HasTextureFact, keyed by stage + handle + cbuf):
+ *    a lookup of handle >= 72 is either a recorded query (QuerySamplerType ... RegisterTexture, found or "unbound";
+ *    fact_cache_mask refuses to register such a program) or comes from a reflected binding of that handle
+ *    (fact_cache_mask refuses reflected texture slots >= 32, images and buffer textures). So no registered program
+ *    ever looked at a high-slot fact, and their presence, absence or format cannot change a reused result.
+ *  - request:requiresLinkedVaryingInterface is an accepted dependency source: the request flag is part of the
+ *    identity (version byte 5, input_identity.c), so the base key and every masked key encode it. */
+
+static unsigned fact_cache_stages(const struct s2a_input_identity *id) {
+    return id->stage_mask == 1 ? 1 : id->stage_mask == 3 ? 2 : id->stage_mask == 7 ? 3 : 0;
+}
 
 static int fact_cache_shape(const struct s2a_input_identity *id) {
-    unsigned stages = id->stage_mask == 1 ? 1 : id->stage_mask == 3 ? 2 : id->stage_mask == 7 ? 3 : 0;
-    if (!stages || id->texture_count != (int)(stages * 32)) return 0;
+    const unsigned stages = fact_cache_stages(id);
+    if (!stages) return 0;
+    const int combined = (int)(stages * 32);
+    if (id->texture_count < combined || (id->texture_count != combined && !fact_wide())) return 0;
     for (unsigned st = 0; st < stages; st++) for (unsigned slot = 0; slot < 32; slot++) {
         const struct s2a_compile_texture_src *t = &id->textures[st * 32 + slot];
         if (!t->stage || strcmp(t->stage, (const char *const[]){"vs", "fs", "gs"}[st]) ||
@@ -20,7 +37,21 @@ static int fact_cache_shape(const struct s2a_input_identity *id) {
          * array_length included, is still part of the masked key. Rejecting it here turned reuse off for every
          * program of a title that keeps a 2d-array texture in any of the 64 slots. */
     }
+    /* After the complete table only high-slot direct facts are tolerated. Separate-table facts (cbuf 2), facts learned
+     * from user constant buffers (cbuf >= 3) and buffer textures still send the whole identity down the exact path. */
+    for (int i = combined; i < id->texture_count; i++) {
+        const struct s2a_compile_texture_src *t = &id->textures[i];
+        if (!t->stage || (strcmp(t->stage, "vs") && strcmp(t->stage, "fs") && strcmp(t->stage, "gs")) ||
+            t->handle < 72 || t->handle > 86 || (t->handle & 1) || t->cbuf_slot != -1 || t->separate || t->is_buffer) return 0;
+    }
     return 1;
+}
+
+/* A query whose arguments name a handle ("handle=N,cbufSlot=M") with N >= 72 reads outside the combined table. */
+static int fact_args_high_handle(const char *args) {
+    for (const char *p = args; (p = strstr(p, "handle=")) != NULL; p += 7)
+        if ((p == args || p[-1] == ',') && strtoul(p + 7, NULL, 10) >= 72) return 1;
+    return 0;
 }
 
 static int fact_cache_hash(const struct s2a_input_identity *id, const uint32_t mask[4], uint8_t out[32]) {
@@ -33,7 +64,10 @@ static int fact_cache_hash(const struct s2a_input_identity *id, const uint32_t m
     // Active-stage UBO masks remain strict even when no query is recorded.
     // fill_facts already omits stages not submitted to the compiler.
     selected.texture_count = 0; selected.textures = tex;
-    if (mask) for (int i = 0; i < id->texture_count; i++)
+    /* Only the complete combined table (stages * 32 <= 96 entries) is selectable: trailing high-slot facts never reach
+     * a key, and indexing mask[i / 32] past the table would alias mask[3] (the constant-buffer use bits). */
+    const int combined = (int)(fact_cache_stages(id) * 32);
+    if (mask) for (int i = 0; i < id->texture_count && i < combined; i++)
         if (mask[i / 32] & (1u << (i % 32))) tex[selected.texture_count++] = id->textures[i];
     uint8_t encoded[S2A_INPUT_IDENTITY_MAX]; size_t n;
     if (s2a_input_identity_encode(&selected, encoded, sizeof encoded, &n)) return 0;
@@ -73,6 +107,10 @@ static int fact_cache_mask(const uint8_t *bytes, size_t len, const struct rp_pro
             if (st < 0) return 0;
             mask[3] |= 1u << st;
         }
+        /* The compile named a handle outside the combined table (found or unbound). High-slot facts are in no key, so such a
+         * program must not be reused for identities that differ in them; it keeps the exact identity path. */
+        if (fact_wide() && !s2a_jv_obj_find(item, "arguments", &v) && !s2a_jv_str(v, text, sizeof text) &&
+            fact_args_high_handle(text)) return 0;
         if (s2a_jv_obj_find(item, "source", &v) || s2a_jv_str(v, text, sizeof text)) return 0;
         if (!strncmp(text, "texture-fact:", 13)) {
             char stage[3]; unsigned handle; int cb, consumed = 0;
@@ -81,6 +119,9 @@ static int fact_cache_mask(const uint8_t *bytes, size_t len, const struct rp_pro
             int st = !strcmp(stage, "vs") ? 0 : !strcmp(stage, "fs") ? 1 : !strcmp(stage, "gs") ? 2 : -1;
             if (st < 0) return 0;
             mask[st] |= 1u << ((handle - 8) / 2);
+        } else if (fact_wide() && !strcmp(text, "request:requiresLinkedVaryingInterface")) {
+            /* QueryHostRequiresLinkedVaryingInterface: the request flag is part of the identity (version byte 5), hence of the
+             * base key and every masked key, so a hit carries the same value. Other request:* sources need their own contract. */
         } else if (strncmp(text, "code:sha256:", 12) && strncmp(text, "c1:sha256:", 10) &&
                    strncmp(text, "profile:", 8) && strncmp(text, "direct-v1:", 10) &&
                    strcmp(text, "graphicsState") && strcmp(text, "transformFeedbackEnabled") &&

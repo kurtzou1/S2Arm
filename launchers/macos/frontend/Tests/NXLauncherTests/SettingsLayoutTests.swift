@@ -1620,14 +1620,126 @@ import S2ArmAppleAdapter
                                            ["player": 2, "config": fallback, "source": "player1", "problem": false],
                                            ["player": 3, "config": NSNull(), "source": "standard", "problem": false],
                                            ["player": 4, "config": NSNull(), "source": "standard", "problem": false]]
-        let all = try await fixture.model.loadInputs(gameID: "fixture")
+        let load = try await fixture.model.loadInputs(gameID: "fixture")
+        let all = load.players
         XCTAssertEqual(fixture.runner.requests.filter { $0["operation"] as? String == "loadInput" }.count, 1, "四位玩家一次读")
+        XCTAssertEqual(all[1]?.source, "default")
+        XCTAssertFalse(load.defaultSet, "旧作业层不带 default：当没设过")
+        XCTAssertEqual(load.allGamesDefault, .standard)
         XCTAssertEqual(all[1]?.problem, true)
         XCTAssertEqual(all[1]?.config.keyboard["A"]?.code, 19, "显示回落后的那份（19 ≠ 标准键位的 14，解码失败落回标准会被看出来）")
         XCTAssertEqual(all[2]?.inherited, true)
         XCTAssertEqual(all[2]?.config, all[1]?.config)
         XCTAssertEqual(all[3]?.config, .standard)
         XCTAssertEqual(all[3]?.problem, false)
+    }
+
+    /// #1987 Mac「管理键位」：导入的几道检查（同 iPad：读不了 / 太大 / 不是 JSON / 不是 schema 1 / 缺项 / 重复绑定都拒收）；导出的文件能原样导回来。期望手写
+    func testInputImportChecksAndExportRoundTrip() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("input-import-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        func file(_ name: String, _ data: Data) throws -> URL { let u = dir.appendingPathComponent(name); try data.write(to: u); return u }
+        func problem(_ url: URL) -> InputConfig.ImportProblem? { if case .failure(let p) = InputConfig.imported(from: url) { return p }; return nil }
+        var custom = InputConfig.standard; custom.keyboard["A"] = KeyBinding(code: 19); custom.backButtons = ["GL": "east"]
+        let exported = try file("out.json", custom.exportData())
+        guard case .success(let back) = InputConfig.imported(from: exported) else { return XCTFail("导出的文件导不回来") }
+        XCTAssertEqual(back, custom)
+        XCTAssertEqual(problem(dir.appendingPathComponent("missing.json")), .read)
+        XCTAssertEqual(problem(try file("big.json", Data(repeating: 0x20, count: 64 * 1024 + 1))), .tooLarge)
+        XCTAssertEqual(problem(try file("text.json", Data("{ not json".utf8))), .json)
+        XCTAssertEqual(problem(try file("v2.json", Data(#"{"schema": 2}"#.utf8))), .schema)
+        XCTAssertEqual(problem(try file("bool.json", Data(#"{"schema": true}"#.utf8))), .schema, "true 不是 schema 1")
+        XCTAssertEqual(problem(try file("short.json", Data(#"{"schema": 1, "keyboard": {}}"#.utf8))), .invalid)
+        var dup = InputConfig.standard; dup.keyboard["B"] = KeyBinding(code: 14)   // 和 A 同一个键
+        XCTAssertEqual(problem(try file("dup.json", JSONEncoder().encode(dup))), .duplicate)
+        // 省略 modifiers / invert 等（iPad 导出或手写的 input.json）按缺省读，和标准键位是同一套；空背键与没有背键一样
+        let terse = #"{"schema":1,"keyboard":{"A":{"code":14}},"mouse":{},"gamepad":{},"axes":{},"deadzone":0.15,"mouseOptions":{"mode":"camera","sensitivityX":1,"sensitivityY":1},"backButtons":{}}"#
+        guard case .success(let t) = InputConfig.imported(from: try file("terse.json", Data(terse.utf8))) else { return XCTFail("省略缺省字段的文件应能导入") }
+        var expect = InputConfig(keyboard: ["A": KeyBinding(code: 14)], mouse: [:], gamepad: [:], axes: [:])
+        XCTAssertTrue(t.same(expect)); expect.deadzone = 0.2; XCTAssertFalse(t.same(expect))
+    }
+
+    /// #1987：「恢复默认」回到所有游戏的默认（不是标准键位），点「保存」才写；「设为所有游戏的默认」点了不写，点「保存」时只调 setDefaultInput。期望手写
+    func testInputRestoreAndSetDefaultApplyOnlyOnSave() async throws {
+        func custom(_ code: Int) -> [String: Any] {
+            var c = InputConfig.standard; c.keyboard["A"] = KeyBinding(code: code)
+            return try! JSONSerialization.jsonObject(with: JSONEncoder().encode(c)) as! [String: Any]
+        }
+        func ops(_ fixture: SettingsFixture) -> [String] { fixture.runner.requests.compactMap { $0["operation"] as? String }.filter { $0 != "loadInput" && $0 != "locations" && $0 != "catalog" } }
+        func waitFor(_ fixture: SettingsFixture, _ op: String) async throws {
+            for _ in 0..<100 where !fixture.runner.requests.contains(where: { $0["operation"] as? String == op }) { try await Task.sleep(for: .milliseconds(10)) }
+        }
+        for flow in ["restore", "setDefault"] {
+            let fixture = try SettingsFixture()
+            defer { fixture.remove() }
+            fixture.runner.loadInputDefault = custom(19)
+            fixture.runner.loadInputPlayers = [["player": 1, "config": custom(20), "source": "game", "problem": false]]
+                + (2...4).map { ["player": $0, "config": custom(20), "source": "player1", "problem": false] }
+            let (_, window) = try await render(AnyView(InputSettingsSheet(model: fixture.model, gameID: "fixture")), fixture: fixture, language: .en)
+            fixture.navigation.source.controllers = { [] }; fixture.navigation.attach(window)
+            defer { fixture.navigation.detach(); window.close() }
+            fixture.navigation.focus(flow == "restore" ? "input.restoreDefault" : "input.manage.setDefault"); fixture.navigation.handle(.confirm)
+            try await Task.sleep(for: .milliseconds(100))
+            XCTAssertEqual(ops(fixture), [], "\(flow)：点了先不写")
+            if flow == "setDefault" { try snapshotBottom(window, "input-manage-pending-en") }
+            fixture.navigation.focus("input.save"); fixture.navigation.handle(.confirm)
+            let op = flow == "restore" ? "saveInput" : "setDefaultInput"
+            try await waitFor(fixture, op)
+            XCTAssertEqual(ops(fixture), [op], "\(flow)：保存时只调 \(op)")
+            let request = try XCTUnwrap(fixture.runner.requests.first { $0["operation"] as? String == op })
+            let code = (((request["config"] as? [String: Any])?["keyboard"] as? [String: Any])?["A"] as? [String: Any])?["code"] as? Int
+            XCTAssertEqual(code, flow == "restore" ? 19 : 20, flow == "restore" ? "恢复到所有游戏的默认（19），不是标准键位（14）" : "用弹窗里当前的键位设默认")
+            XCTAssertEqual(request["player"] as? Int, 1)
+            XCTAssertEqual(request["gameId"] as? String, "fixture")
+        }
+    }
+
+    /// #1987：玩家 2–4「设为所有游戏的默认」不可用；还沿用玩家 1、没改就保存 → resetInput（继续沿用玩家 1，不单独写一份）；
+    ///   「恢复默认」回到玩家 1 存着的那套再保存同样回到沿用。期望手写
+    func testInputPlayer2CannotSetDefaultAndFollowsPlayer1() async throws {
+        let fixture = try SettingsFixture()
+        defer { fixture.remove() }
+        var mine = InputConfig.standard; mine.keyboard["A"] = KeyBinding(code: 21)
+        let own = try JSONSerialization.jsonObject(with: JSONEncoder().encode(mine))
+        fixture.runner.loadInputPlayers = [["player": 1, "config": NSNull(), "source": "standard", "problem": false],
+                                           ["player": 2, "config": own, "source": "game", "problem": false],
+                                           ["player": 3, "config": NSNull(), "source": "player1", "problem": false],
+                                           ["player": 4, "config": NSNull(), "source": "player1", "problem": false]]
+        let (host, window) = try await render(AnyView(InputSettingsSheet(model: fixture.model, gameID: "fixture")), fixture: fixture, language: .zh, keyable: false)
+        let navigation = fixture.navigation
+        navigation.source.controllers = { [] }; navigation.attach(window); navigation.source.stop()
+        window.orderFront(nil)
+        defer { navigation.detach(); window.close() }
+        try await settle(window, navigation, fixture.model.gamepad)
+        let players = navigation.controlTargets(in: window).filter { abs($0.frame.height - 30) < 0.5 }.sorted { $0.frame.minX < $1.frame.minX }
+        XCTAssertEqual(players.count, 4)
+        let p2 = window.convertFromScreen(players[1].frame)
+        try click(CGPoint(x: p2.midX, y: p2.midY), in: window)
+        try await Task.sleep(for: .milliseconds(200))
+        try snapshotBottom(window, "input-manage-player2-zh")
+        _ = host
+        XCTAssertTrue(navigation.controlTargets(in: window).contains { $0.id == "input.manage.import" }, "管理键位组已在视野里")
+        XCTAssertFalse(navigation.controlTargets(in: window).contains { $0.id == "input.manage.setDefault" }, "玩家 2 下「设为默认」置灰，手柄也选不到")
+        navigation.focus("input.restoreDefault"); navigation.handle(.confirm)
+        try await Task.sleep(for: .milliseconds(100))
+        navigation.focus("input.save"); navigation.handle(.confirm)
+        for _ in 0..<100 where !fixture.runner.requests.contains(where: { ["resetInput", "saveInput", "setDefaultInput"].contains($0["operation"] as? String ?? "") }) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        let writes = fixture.runner.requests.filter { ["resetInput", "saveInput", "setDefaultInput"].contains($0["operation"] as? String ?? "") }
+        XCTAssertEqual(writes.compactMap { $0["operation"] as? String }, ["resetInput"], "玩家 2 恢复默认 = 回到沿用玩家 1；设为默认点不动")
+        XCTAssertEqual(writes.first?["player"] as? Int, 2)
+    }
+
+    /// 滚到弹窗最底下截图（只在设了 S2A_SETTINGS_SHOTS 时写图）
+    private func snapshotBottom(_ window: NSWindow, _ name: String) throws {
+        guard let host = window.contentView, let scroll = scrollViews(in: host).first(where: { $0.hasVerticalScroller }), let document = scroll.documentView else { return }
+        scroll.contentView.scroll(to: CGPoint(x: 0, y: max(0, document.bounds.height - scroll.contentView.bounds.height)))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        host.layoutSubtreeIfNeeded()
+        try snapshot(host, name)
     }
 
     func testSaveStatusReadsPendingSeed() throws {
@@ -2094,11 +2206,19 @@ import S2ArmAppleAdapter
             defer { window.close() }
             let scroll = try XCTUnwrap(scrollViews(in: host).first { $0.hasVerticalScroller })
             let document = try XCTUnwrap(scroll.documentView)
-            scroll.contentView.scroll(to: CGPoint(x: 0, y: max(0, document.bounds.height - scroll.contentView.bounds.height)))
-            scroll.reflectScrolledClipView(scroll.contentView)
-            host.layoutSubtreeIfNeeded()
+            // 往下滚到四个摇杆的控件都露出来（#1987 起摇杆下面还有「管理键位」组，滚到底时摇杆已经出了视野）
+            let bottom = max(0, document.bounds.height - scroll.contentView.bounds.height)
+            var targets: [LauncherPadTarget] = []
+            for y in stride(from: 0, through: bottom + 40, by: 40) {
+                scroll.contentView.scroll(to: CGPoint(x: 0, y: min(y, bottom)))
+                scroll.reflectScrolledClipView(scroll.contentView)
+                host.layoutSubtreeIfNeeded()
+                try await Task.sleep(for: .milliseconds(30))
+                targets = fixture.navigation.controlTargets(in: window)
+                if InputConfig.axisTargets.allSatisfy({ a in targets.contains { $0.id == "input.axis.source." + a } && targets.contains { $0.id == "input.axis.invert." + a } }) { break }
+            }
             try await Task.sleep(for: .milliseconds(100))
-            let targets = fixture.navigation.controlTargets(in: window)
+            targets = fixture.navigation.controlTargets(in: window)
             for axis in InputConfig.axisTargets {
                 let choice = try XCTUnwrap(targets.first { $0.id == "input.axis.source." + axis })
                 let invert = try XCTUnwrap(targets.first { $0.id == "input.axis.invert." + axis })
@@ -2451,6 +2571,17 @@ private final class SettingsRunner: JobProcessRunner {
         get { lock.withLock { inputRows } }
         set { lock.withLock { inputRows = newValue } }
     }
+    /// loadInput 回的「所有游戏的默认」（#1987）：nil = 不带这个字段（旧作业层）；NSNull = 没设过
+    private var inputDefault: Any? = nil
+    var loadInputDefault: Any? {
+        get { lock.withLock { inputDefault } }
+        set { lock.withLock { inputDefault = newValue } }
+    }
+    private var follows = false
+    var saveInputFollows: Bool {
+        get { lock.withLock { follows } }
+        set { lock.withLock { follows = newValue } }
+    }
     /// 回到上一份存档：savePrevious 回的 trouble；saveRestorePrevious 每次把「已换到上一份」翻转一次（作业层的交换是可逆的）
     var previousTrouble: String {
         get { lock.withLock { trouble } }
@@ -2495,7 +2626,11 @@ private final class SettingsRunner: JobProcessRunner {
         if request["operation"] as? String == "preflight" {
             result = ["checks": preflightChecks]
         }
-        if request["operation"] as? String == "loadInput" { result = ["players": inputRows] }   // #2081：缺省四位标准键位
+        if request["operation"] as? String == "loadInput" {   // #2081：缺省四位标准键位；#1987：设了 loadInputDefault 才带 default
+            result = ["players": inputRows]
+            if let dflt = loadInputDefault { result["default"] = dflt }
+        }
+        if request["operation"] as? String == "saveInput" { result = ["followsDefault": saveInputFollows] }
         if request["operation"] as? String == "savePrevious" { result = ["hasPrevious": true, "saveIds": ["0000000000000001"], "trouble": previousTrouble] }
         if request["operation"] as? String == "saveRestorePrevious" { lock.withLock { swapped.toggle() }; result = ["restored": 1] }
         if request["operation"] as? String == "saveStatus" {

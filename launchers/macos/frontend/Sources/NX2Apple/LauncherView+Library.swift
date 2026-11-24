@@ -357,7 +357,9 @@ struct HeroUpdateLines: View {
         let failure = run.flatMap { $0.running ? nil : $0.failure }
         // 更新只改电脑上这份：这款装到过设备的，做完说一句手机上那份要再导一次（不然玩家以为手机上已经是新的）
         let sendAgain = run.map { !$0.running && $0.failure == nil } == true && game.iphoneInstalledAt != nil
-        if game.iphoneReady, !reasons.isEmpty || !incomplete.isEmpty || failure != nil || sendAgain || run?.running == true {
+        // #1961：要整款重新出包（宿主约定号变了，或上一次更新回的就是要重出）→ 就在按钮下写一句，别让玩家以为点一下就好
+        let repackNote = model.repackNoteNeeded(game)
+        if game.iphoneReady, !reasons.isEmpty || !incomplete.isEmpty || failure != nil || sendAgain || repackNote || run?.running == true {
             VStack(alignment: .leading, spacing: 3) {
                 // 正在更新：当前这一段的计数、速度、还剩多久（重编着色器库一段可能几小时，只看整单百分比分不出卡没卡；11-21）
                 if let run, run.running, run.progress.total != nil {
@@ -378,7 +380,13 @@ struct HeroUpdateLines: View {
                     Label(loc.backend(line), systemImage: "exclamationmark.triangle.fill")
                         .font(.manrope(12, .medium)).foregroundStyle(.yellow).fixedSize(horizontal: false, vertical: true)
                 }
-                // #1961：原料和原件都不在 → 就在黄字下补原件（选错了作业层拒、不改记录）；找回后指去出包页重新出包
+                // #1961：这款要整款重新出包（已排进批量出包）：说清要多久，别让玩家以为再点一下「更新这款」就行
+                if repackNote {
+                    Label(txt("update.repackNote"), systemImage: "shippingbox")
+                        .font(.manrope(12, .medium)).foregroundStyle(.white.opacity(0.85)).fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("update.repackNote." + game.id)
+                }
+                // #1961：原料和原件都不在 → 就在黄字下补原件（选错了作业层拒、不改记录）；找回后自动接着整款重出（见 repackWholeGame）
                 if let run, !run.running, run.relinkSource {
                     Button(txt(run.relinking ? "update.relink.checking" : "update.relink")) { pickSource() }
                         .controllerButtonStyle(LauncherSecondaryButtonStyle()).disabled(run.relinking)

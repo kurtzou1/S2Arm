@@ -31,7 +31,7 @@ void s2a_direct_summary_register(void *fn) { (void)fn; }
 int s2a_far_has(uint64_t a) { (void)a; return 0; }
 void *nvn_dirty_far_fn;
 void nvn2_hdr_snapshot_probe(void *s) { (void)s; }
-void mtl_hybrid_pkg_stats(void) {} void mtl_se_stats(void) {} void mtl_vp_stats(void) {}
+void mtl_hybrid_pkg_stats(void) {} void mtl_se_stats(void) {} void mtl_vp_stats(void) {} void mtl_libact_stats(void) {}
 
 enum { NT = 8, ROUNDS = 40 };
 static _Atomic int g_ready, g_go;   // 起跑线：全部线程就位后同时放行（macOS 没有 pthread_barrier）
