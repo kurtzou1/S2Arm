@@ -13486,6 +13486,7 @@ static __attribute__((noinline, cold)) void p20_note(NvShader *sh, int st, const
 }
 static long g_td_frame;   // DM_NVN_TEXDUMP selected frame (defined with the TEXDUMP code below; < 0 = off): the bind site checks it before noting 3D textures
 static void td_note_3d(id<MTLTexture> t, uint64_t ser);
+static void td_note_bc(id<MTLTexture> t, const tex_t *tt);
 static inline void p20_check(NvShader *sh, int st, const nvn_rbind *b, int tid, void *tv) {
     g_p20_checked++;
     unsigned tt, pf;
@@ -13795,6 +13796,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             if (t && g_fb_n && g_fb_seq == g_draw_seq && nvn_stage == 1) for (int q = 0; q < g_fb_n; q++) if (t == g_fb_src[q]) { t = g_fb_use[q]; trid = g_fb_rid[q]; break; }   // same-pass feedback sampling: read the snapshot instead (see fb_prepare)
             if (t && passdump() && tid < g_ntreg) PD("R %llu st%d ser=%llu", g_stat_pass, nvn_stage, g_treg[tid].t.serial);
             if (__builtin_expect(g_td_frame >= 0, 0) && t && tid < g_ntreg && t.textureType == MTLTextureType3D) td_note_3d(t, g_treg[tid].t.serial);   // TEXDUMP: 3D textures the frame samples (td_dump saves them as slice atlases)
+            if (__builtin_expect(g_td_frame >= 0, 0) && t && tid < g_ntreg && t.textureType != MTLTextureType3D && bcd_fmt((uint32_t)g_treg[tid].t.d.format)) td_note_bc(t, &g_treg[tid].t);   // TEXDUMP: block-compressed textures the frame samples (#2181)
             if (bl) PD("B %llu st%d tex reg%d tid=%d %s ser=%llu fmt=%lu %lux%lux%lu view_lv=%lu+%lu view_sl=%lu array=%lu target=%lu swz=%d%d%d%d mtl=%p", g_stat_pass, nvn_stage, reg, tid, t ? "real" : "dummy", t && tid < g_ntreg ? g_treg[tid].t.serial : 0ull,
                        (unsigned long)t.pixelFormat, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.depth,
                        (unsigned long)(t.parentTexture ? t.parentRelativeLevel : 0), (unsigned long)t.mipmapLevelCount,
@@ -19791,6 +19793,22 @@ static void td_note_3d(id<MTLTexture> t, uint64_t ser) {
     for (NSArray *e in g_td_3d) if ([e[1] unsignedLongLongValue] == ser) return;
     [g_td_3d addObject:@[t.parentTexture && t.parentTexture.textureType == MTLTextureType3D ? t.parentTexture : t, @(ser)]];
 }
+// 诊断局（DM_NVN_TEXDUMP）选中的那一帧采样到的块压缩（BC）2D 贴图：第 0 级缩到 ≤512 存图，并逐张记来历（池 / 偏移 / 块高 / 打包与否）。
+//   #2181 火影第二局起场地条纹：原先只存渲染目标，分不清「贴图内容本身坏了（上传 / 跨局复用）」还是「内容对、采样错了」。
+//   最多 16 张、按边长从大到小留（场地贴图大），总量照诊断包的 diagrun 上限走（每张 ≤512×512 PNG）
+static NSMutableArray *g_td_bc;   // @[texture, serial, 边长, 来历文字]
+static void td_note_bc(id<MTLTexture> t, const tex_t *tt) {
+    if (g_td_done || (long)atomic_load(&g_cur_frame) != g_td_frame || !tt) return;
+    if (!g_td_bc) g_td_bc = [NSMutableArray array];
+    uint64_t ser = tt->serial; for (NSArray *e in g_td_bc) if ([e[1] unsignedLongLongValue] == ser) return;
+    NSUInteger edge = MAX(tt->d.width, tt->d.height);
+    if (g_td_bc.count >= 16) { NSUInteger mi = 0; for (NSUInteger i = 1; i < g_td_bc.count; i++) if ([g_td_bc[i][2] unsignedIntegerValue] < [g_td_bc[mi][2] unsignedIntegerValue]) mi = i;
+        if ([g_td_bc[mi][2] unsignedIntegerValue] >= edge) return; [g_td_bc removeObjectAtIndex:mi]; }
+    id o = serial_get(ser); int pkg = [o isKindOfClass:[NvPkg class]];
+    char info[256]; snprintf(info, sizeof info, "NVN 格式 %#x %ux%ux%u 级 %u 池 %p+%#llx 块高 log2 %u 块深 log2 %u 打包布局 %d 标志 %#x %s", tt->d.format, tt->d.width, tt->d.height, tt->d.depth, tt->d.levels,
+             (const void *)tt->pool, (unsigned long long)tt->off, tt->L.tileH, tt->L.tileD, tt->d.pkg_layout, (unsigned)tt->d.flags, pkg ? "打包贴图（游戏数据）" : "按存储共享");
+    [g_td_bc addObject:@[t.parentTexture ? t.parentTexture : t, @(ser), @(edge), @(info)]];
+}
 static void td_dump(void);
 static void td_path(char *path, size_t n, int index) {
     if (!g_td_frames) { snprintf(path, n, g_td_path, index); return; }   // legacy single-frame / size filenames
@@ -19805,6 +19823,7 @@ static void td_clear(int pending_gpu) {
     for (NSArray *e in g_td_list) if (e.count > 4) { if (pending_gpu) defer_obj_release(e[0]); else res_remove(e[0]); }
     [g_td_list removeAllObjects];
     [g_td_3d removeAllObjects];   // 3D textures are the game's own (no copy): just forget them
+    [g_td_bc removeAllObjects];   // 同上：BC 贴图是游戏自己的
 }
 // DM_NVN_TEXDUMP=size=WxH:path instead picks the frame by content: the first frame that opens a render pass whose first color attachment level is WxH (for one-off work whose frame differs between runs)
 static unsigned g_td_w, g_td_h;
@@ -19971,6 +19990,27 @@ static void td_dump(void) {
             MLOG("[texdump] 3D ser=%llu %lux%lux%lu format %lu (%s) → %lu slices per row", ser, (unsigned long)W, (unsigned long)H, (unsigned long)D, (unsigned long)t.pixelFormat, a ? "alpha" : "rgb", (unsigned long)cols);
             shot(o, path, 0, NULL);
         }
+    }
+    // 采样到的 BC 贴图（td_note_bc）：第 0 级第 0 层，缩到 ≤512 存 <TEXDUMP 路径 %d=0>_vbc_<序号>.png；日志逐张记来历
+    for (NSArray *e in g_td_bc) {
+        id<MTLTexture> t = e[0]; uint64_t ser = [e[1] unsignedLongLongValue];
+        id<MTLTexture> v = [t newTextureViewWithPixelFormat:t.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(0, 1) slices:NSMakeRange(0, 1)];
+        NSUInteger w = t.width, h = t.height, m = MAX(w, h); if (m > 512) { w = MAX(w * 512 / m, 1u); h = MAX(h * 512 / m, 1u); }
+        MTLTextureDescriptor *od = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
+        od.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; od.storageMode = MTLStorageModePrivate;
+        id<MTLTexture> o = [g_dev newTextureWithDescriptor:od];
+        id<MTLCommandBuffer> cb = q_cb();
+        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = o; rp.colorAttachments[0].loadAction = MTLLoadActionDontCare; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
+        [en setRenderPipelineState:ps]; [en setFragmentTexture:v atIndex:0]; [en setFragmentSamplerState:sp atIndex:0];
+        [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [en endEncoding]; if (!cb_run(cb)) continue;
+        char path[1024]; td_path(path, sizeof path, 0); char *dot = strrchr(path, '.'), *slash = strrchr(path, '/'); char ext[16] = "";
+        if (dot && slash && dot < slash) dot = NULL;
+        if (dot) { strlcpy(ext, dot, sizeof ext); *dot = 0; }
+        char tail[64]; snprintf(tail, sizeof tail, "_vbc_%llu%s", (unsigned long long)ser, ext); strlcat(path, tail, sizeof path);
+        MLOG("[texdump] BC ser=%llu Metal 格式 %lu → %lux%lu：%s", ser, (unsigned long)t.pixelFormat, (unsigned long)w, (unsigned long)h, [e[3] UTF8String]);
+        shot(o, path, 0, NULL);
     }
     td_clear(0);
 }

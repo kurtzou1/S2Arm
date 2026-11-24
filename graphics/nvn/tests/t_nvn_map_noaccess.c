@@ -35,12 +35,25 @@ static void one(NVNdevice *dev, int flags, int none, const char *what) {
     API(nvnBufferFinalize)(&buf); API(nvnMemoryPoolFinalize)(&pool); free(mem);
     printf("✓ %s\n", what);
 }
+// 空池（D-B3PR）：游戏拿空池调取值入口，宿主不解引用、回 0 / NULL；空池建缓冲回失败。期望按「宿主不能先崩」手写
+static void null_pool(NVNdevice *dev) {
+    CHECK(API(nvnMemoryPoolGetFlags)(NULL) == 0, "空池 GetFlags 应回 0");
+    CHECK(API(nvnMemoryPoolGetSize)(NULL) == 0, "空池 GetSize 应回 0");
+    CHECK(API(nvnMemoryPoolGetBufferAddress)(NULL) == 0, "空池 GetBufferAddress 应回 0");
+    CHECK(API(nvnMemoryPoolMap)(NULL) == NULL, "空池 Map 应回 NULL");
+    NVNbuffer buf; NVNbufferBuilder bb; memset(&buf, 0, sizeof buf); memset(&bb, 0, sizeof bb);
+    API(nvnBufferBuilderSetDefaults)(&bb); API(nvnBufferBuilderSetDevice)(&bb, dev); API(nvnBufferBuilderSetStorage)(&bb, NULL, 0, 0x170);
+    CHECK(!API(nvnBufferInitialize)(&buf, &bb), "空池建缓冲应回失败");
+    CHECK(API(nvnBufferGetAddress)(&buf) == 0 && API(nvnBufferMap)(&buf) == NULL, "没建成的缓冲取地址 / 映射回空");
+    printf("✓ 空池：取值入口回 0 / NULL，宿主不崩\n");
+}
 int main(void) {
     NVNdevice dev; NVNdeviceBuilder db; memset(&dev, 0, sizeof dev); memset(&db, 0, sizeof db);
     API(nvnDeviceBuilderSetDefaults)(&db); if (!API(nvnDeviceInitialize)(&dev, &db)) { fprintf(stderr, "FAIL 设备初始化\n"); return 1; }
     one(&dev, NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_GPU_CACHED, 1, "CPU 不可访问（0x21，同建池缺省）：两个 Map 都是 NULL");
     one(&dev, NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED, 0, "CPU 带缓存（0x24）：池 Map = 存储、缓冲 Map = 存储 + 偏移");
     one(&dev, NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED, 0, "CPU 不经缓存（0x22）：同上");
+    null_pool(&dev);
     // 池没有存储（建池时没给 Storage）→ BufferInitialize 回 0；游戏不看返回值照样 Map / 取地址（11-14 D-MDVK）。期望：Map 回 NULL、地址回 0、宿主不崩。
     //   反证：去掉 hle_nvn.c 的 buf_dead → 这里解引用空池，进程段错误
     {

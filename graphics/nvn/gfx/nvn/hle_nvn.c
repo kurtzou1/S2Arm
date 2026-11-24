@@ -453,7 +453,16 @@ NVN(nvnMemoryPoolFlushMappedRange, void, const NVNmemoryPool *p, ptrdiff_t off, 
 }
 // Unified memory: the GPU's writes are already in the bytes the CPU reads, so there is nothing to invalidate. nvnBufferInvalidateMappedRange goes through here too
 NVN(nvnMemoryPoolInvalidateMappedRange, void, const NVNmemoryPool *p, ptrdiff_t off, size_t n) { (void)p; (void)off; (void)n; }
-NVN(nvnMemoryPoolGetBufferAddress, NVNbufferAddress, const NVNmemoryPool *p) { return pool_ga((const pool_t *)p); }
+// 空池（D-B3PR，Drag x Drive 040041601D83A000，Mac 0.6.9 三局必现）：游戏用空池建了 0x170 字节的缓冲（BufferInitialize 报红回 0），
+//   随即拿空池查标志位，宿主 nvnMemoryPoolGetFlags 直接读 pool->flags，读 0x4 崩在宿主里。真驱动这里同样会解引用，游戏为什么给空池还没定
+//   （NVN2 语义待核）；宿主先不陪着崩：报红一次带游戏调用位置（下一份诊断据此定根因），回 0 / NULL
+static int pool_null(const void *p, const char *who, uint64_t ra) {
+    if (p) return 0;
+    static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) { module_t *m = module_of((void *)ra);
+        LOG("【红】 %s：池是空指针（游戏从 %s+%#llx 调）：回 0，不解引用", who, m ? m->name : "?", m ? (unsigned long long)(ra - (uint64_t)m->base) : (unsigned long long)ra); }
+    return 1;
+}
+NVN(nvnMemoryPoolGetBufferAddress, NVNbufferAddress, const NVNmemoryPool *p) { if (pool_null(p, "nvnMemoryPoolGetBufferAddress", (uint64_t)__builtin_return_address(0))) return 0; return pool_ga((const pool_t *)p); }
 
 // ---------- Descriptor pools ----------
 // One ID space per pool. In NVN a texture or sampler ID indexes the pool the command buffer has bound (SetTexturePool / SetSamplerPool), and two pools may use the same IDs. The replay keeps
@@ -4477,7 +4486,9 @@ NVN(nvnBufferBuilderGetDevice, const NVNdevice *, const NVNbufferBuilder *b) { r
 NVN(nvnBufferBuilderGetMemoryPool, const NVNmemoryPool *, const NVNbufferBuilder *b) { return (const NVNmemoryPool *)((const buf_builder_t *)b)->pool; }
 NVN(nvnBufferInitialize, NVNboolean, NVNbuffer *buf, const NVNbufferBuilder *b) {
     const buf_builder_t *bb = (const buf_builder_t *)b;
-    if (!bb->pool || (!bb->pool->mem && !(bb->pool->flags & 0x200))) { LOG("【红】 BufferInitialize: pool has no storage (pool %p flags %#x offset %#llx size %#llx)", (const void *)bb->pool, bb->pool ? bb->pool->flags : 0, (unsigned long long)bb->off, (unsigned long long)bb->size); return 0; }
+    if (!bb->pool || (!bb->pool->mem && !(bb->pool->flags & 0x200))) { uint64_t ra = (uint64_t)__builtin_return_address(0); module_t *m = module_of((void *)ra);   // 调用位置：D-B3PR 空池从游戏哪一步来
+        LOG("【红】 BufferInitialize: pool has no storage (pool %p flags %#x offset %#llx size %#llx; called from %s+%#llx)", (const void *)bb->pool, bb->pool ? bb->pool->flags : 0, (unsigned long long)bb->off, (unsigned long long)bb->size,
+            m ? m->name : "?", m ? (unsigned long long)(ra - (uint64_t)m->base) : (unsigned long long)ra); return 0; }
     // 缓冲对象只是「池 + 偏移 + 大小」的视图，建时不分配、真机驱动也不在这里查：越过池尾本身不是错，读写越过池尾才是（10-26 塞尔达按 + 开系统菜单：
     //   0x24000 的池上建 0x40000 的缓冲，菜单画面完整、局到 MARK；原先报红让能玩格判红）。黄字提示，访问时的越界检查另做
     if ((uint64_t)bb->off + bb->size > bb->pool->size) LOG("【黄】 BufferInitialize: buffer object extends past the end of its pool (offset %#llx size %#llx pool %#llx); only an access past the end would be wrong", (unsigned long long)bb->off, (unsigned long long)bb->size, (unsigned long long)bb->pool->size);
@@ -4549,9 +4560,9 @@ NVN(nvnBufferFlushMappedRange, void, const NVNbuffer *buf, ptrdiff_t off, size_t
 NVN(nvnBufferInvalidateMappedRange, void, const NVNbuffer *buf, ptrdiff_t off, size_t n) { if (buf_dead(buf, "nvnBufferInvalidateMappedRange")) return; h_nvnMemoryPoolInvalidateMappedRange((const NVNmemoryPool *)BF(buf)->pool, BF(buf)->off + off, n); }
 
 // Memory pool queries
-NVN(nvnMemoryPoolGetFlags, NVNmemoryPoolFlags, const NVNmemoryPool *p) { return (NVNmemoryPoolFlags)((const pool_t *)p)->flags; }
-NVN(nvnMemoryPoolMap, void *, const NVNmemoryPool *p) { const pool_t *o = (const pool_t *)p; if (pool_cpu_none(o)) { map_none_note(0, o); return NULL; } return o->mem; }   // CPU 不可访问的池给 NULL（见 nvnBufferMap）
-NVN(nvnMemoryPoolGetSize, size_t, const NVNmemoryPool *p) { return (size_t)((const pool_t *)p)->size; }
+NVN(nvnMemoryPoolGetFlags, NVNmemoryPoolFlags, const NVNmemoryPool *p) { if (pool_null(p, "nvnMemoryPoolGetFlags", (uint64_t)__builtin_return_address(0))) return (NVNmemoryPoolFlags)0; return (NVNmemoryPoolFlags)((const pool_t *)p)->flags; }
+NVN(nvnMemoryPoolMap, void *, const NVNmemoryPool *p) { const pool_t *o = (const pool_t *)p; if (pool_null(p, "nvnMemoryPoolMap", (uint64_t)__builtin_return_address(0))) return NULL; if (pool_cpu_none(o)) { map_none_note(0, o); return NULL; } return o->mem; }   // CPU 不可访问的池给 NULL（见 nvnBufferMap）
+NVN(nvnMemoryPoolGetSize, size_t, const NVNmemoryPool *p) { if (pool_null(p, "nvnMemoryPoolGetSize", (uint64_t)__builtin_return_address(0))) return 0; return (size_t)((const pool_t *)p)->size; }
 NVN(nvnMemoryPoolSetDebugLabel, void, NVNmemoryPool *p, const char *s) { (void)p; (void)s; }
 // Debug labels: only for NVN debugging tools, unused by the host
 NVN(nvnWindowSetDebugLabel, void, NVNwindow *w, const char *s) { (void)w; (void)s; }

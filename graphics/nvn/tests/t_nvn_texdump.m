@@ -20,7 +20,8 @@ static char directory[1024];
 static tex_t small, large;
 static NSMutableArray *copies;
 static int replacing, classes;
-static id<MTLTexture> int_u, int_s, vol;   // classes mode: integer targets and a 3D texture, filled by the CPU with values chosen here
+static id<MTLTexture> int_u, int_s, vol;
+static tex_t bc;   // classes mode: a sampled BC1 texture (NVN 0x42) 1024x64, every 4x4 block solid red; td_dump saves it shrunk to 512x32 (#2181)   // classes mode: integer targets and a 3D texture, filled by the CPU with values chosen here
 static void fill_classes(void) {
     MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Uint width:8 height:8 mipmapped:NO];
     int_u = [g_dev newTextureWithDescriptor:d]; d.pixelFormat = MTLPixelFormatRGBA8Sint; int_s = [g_dev newTextureWithDescriptor:d]; REQUIRE(int_u && int_s);
@@ -31,6 +32,15 @@ static void fill_classes(void) {
     vol = [g_dev newTextureWithDescriptor:v]; REQUIRE(vol);
     for (unsigned z = 0; z < 17; z++) { uint8_t c[4] = {(uint8_t)(z*10), (uint8_t)(255-z*10), (uint8_t)z, (uint8_t)(z*5)};
         [vol replaceRegion:MTLRegionMake3D(0,0,z,1,1,1) mipmapLevel:0 slice:0 withBytes:c bytesPerRow:4 bytesPerImage:4]; }
+    memset(&bc,0,sizeof bc); bc.magic=MAGIC('T','E','X',0); bc.serial=nvn_new_serial();
+    bc.d=(nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D,.format=0x42,.width=1024,.height=64,.depth=1,.levels=1};
+    nvn_tex_layout(&bc.d,&bc.L); nvn_be_tex_init(&bc); id<MTLTexture> m=tex_mtl(&bc); REQUIRE(m);
+    // BC1 block: color0 = color1 = 0xF800 (pure red in RGB565), all indices 0 → every texel (255, 0, 0); 256 x 16 blocks of 8 bytes
+    const size_t row=256*8, n=row*16; id<MTLBuffer> src=[g_dev newBufferWithLength:n options:MTLResourceStorageModeShared]; REQUIRE(src);
+    for (size_t i=0;i<n;i+=8) { uint8_t *q=(uint8_t *)src.contents+i; q[0]=0x00; q[1]=0xF8; q[2]=0x00; q[3]=0xF8; q[4]=q[5]=q[6]=q[7]=0; }
+    id<MTLCommandBuffer> cb=q_cb(); id<MTLBlitCommandEncoder> b=[cb blitCommandEncoder];
+    [b copyFromBuffer:src sourceOffset:0 sourceBytesPerRow:row sourceBytesPerImage:n sourceSize:MTLSizeMake(1024,64,1) toTexture:m destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0,0,0)];
+    [b endEncoding]; [cb commit]; [cb waitUntilCompleted]; REQUIRE(cb.status==MTLCommandBufferStatusCompleted);
 }
 
 static void texture(tex_t *t, unsigned side) {
@@ -64,6 +74,8 @@ static void frame(unsigned f) {
         [g_td_list addObject:@[int_u, @901, @0, @0]]; [g_td_list addObject:@[int_s, @902, @0, @0]];
         td_note_3d(vol, 903); td_note_3d(vol, 903);
         CHECK(g_td_3d.count==1,"a 3D texture sampled twice in the frame is noted once");
+        td_note_bc(tex_mtl(&bc), &bc); td_note_bc(tex_mtl(&bc), &bc);
+        CHECK(g_td_bc.count==1,"a BC texture sampled twice in the frame is noted once");
     }
     uint64_t fence=nvn_be_sub_commit(); REQUIRE(nvn_be_wait(fence,10000000000ull)); REQUIRE(!mtl_last_commit_error());
     defer_drain();
@@ -116,6 +128,10 @@ static void classes_saved(void) {
             if (z>=17) { e[0]=64; e[1]=0; e[2]=64; } else if (a) e[0]=e[1]=e[2]=(uint8_t)(z*5); else { e[0]=(uint8_t)(z*10); e[1]=(uint8_t)(255-z*10); e[2]=(uint8_t)z; }
             const uint8_t *p=px+4*(y*16+x); bad+=abs(p[0]-e[0])>1 || abs(p[1]-e[1])>1 || abs(p[2]-e[2])>1; }
         CHECK(got && w==16 && h==2 && !bad,"3D atlas %s: 16x2, every slice in its cell (%u wrong cells)",name,bad); }
+    // BC1 1024x64 → 512x32 (longest edge 512, aspect kept), every pixel the block's red
+    static uint8_t big[512*32*4]; snprintf(name,sizeof name,"capture-0_vbc_%llu.png",(unsigned long long)bc.serial);
+    int got=!pixels(name,&w,&h,big,sizeof big); unsigned bad=0; if (got && w==512 && h==32) for (unsigned i=0;i<w*h;i++) bad+=big[4*i]<250 || big[4*i+1]>5 || big[4*i+2]>5;
+    CHECK(got && w==512 && h==32 && !bad,"sampled BC1 texture %s: 512x32, decoded red everywhere (%u wrong pixels)",name,bad);
 }
 static void raw(const char *name, const uint8_t *want, int texture_raw) {
     char path[1200], header[128]; snprintf(path,sizeof path,"%s/%s",directory,name);
@@ -153,9 +169,10 @@ int main(int argc, char **argv) { @autoreleasepool {
     if (!off) { saved(replacing?8:7,multi); if (multi) { saved(8,1); saved(10,1); } }
     if (classes) classes_saved();
     NSArray *files=[[NSFileManager defaultManager] contentsOfDirectoryAtPath:@(directory) error:nil]; REQUIRE(files);
-    unsigned want_files=off?0:multi?21:classes?13:7;   // classes: + 2 integer targets (PNG + SNAPRAW bytes) + 3D rgb / alpha
+    unsigned want_files=off?0:multi?21:classes?14:7;   // classes: + 2 integer targets (PNG + SNAPRAW bytes) + 3D rgb / alpha + the sampled BC texture
     CHECK(files.count==want_files,"%s: exactly %u files, no unselected-frame output or overwrites (got %lu)",argv[1],want_files,(unsigned long)files.count);
     CHECK(!g_td_3d.count,"no 3D texture retained after the dump");
+    CHECK(!g_td_bc.count,"no BC texture retained after the dump");
     CHECK(copies.count==(off?0:multi?6:replacing?4:2),"%s: independent snapshots for each selected frame/pass (%lu)",argv[1],(unsigned long)copies.count);
     for (id copy in copies) CHECK(![g_res_objects containsObject:copy],"diagnostic copy leaves residency after GPU completion and export");
     CHECK(!g_td_list.count,"no completed frame retained in the dump list");
