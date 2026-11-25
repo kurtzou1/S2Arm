@@ -149,7 +149,7 @@ int main(void) {
       munmap((void *)ro, 0x4000); }
     // ⑦ 写监视（S2A_WRITE_WATCH，#016fde）：子进程对一块可写页里 +0x40 起 16 字节设监视，装好后：写区间内（+0x48）、写同页区间外（+0x200）、
     //   等后台重新设只读后再写区间内（+0x40）。期望按构造写死：三次写都真写进去（子进程核对后退 0，不崩）；区间内两次各记一行（第 1、2 次，
-    //   写的地址照写），区间外那次不记；没有第 3 次
+    //   写的地址照写），区间外那次不记；没有第 3 次。反证：crash.c ww_fault 去掉「同线程同 pc 同地址 = 重执行」那一判 → ⑦b 红（第 2 次记成重执行、多出第 3 次）
     { char path[] = "/tmp/t_crash_ww_XXXXXX"; int fd = mkstemp(path);
       volatile uint64_t *pg = mmap(NULL, 0x4000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
       char env[64]; snprintf(env, sizeof env, "%llx:16", (unsigned long long)(uintptr_t)(pg + 8));
@@ -160,7 +160,7 @@ int main(void) {
           for (int i = 0; i < 30000 && s2a_ww_armed(0) != 1; i++) usleep(1000); pg[9] = 0x1111;
           for (int i = 0; i < 30000 && s2a_ww_armed(0) != 1; i++) usleep(1000); pg[0x40] = 0x2222;
           for (int i = 0; i < 30000 && s2a_ww_armed(0) != 1; i++) usleep(1000); pg[8] = 0x3333;
-          usleep(20000); _exit(pg[9] == 0x1111 && pg[0x40] == 0x2222 && pg[8] == 0x3333 ? 0 : 3);
+          _exit(pg[9] == 0x1111 && pg[0x40] == 0x2222 && pg[8] == 0x3333 ? 0 : 3);   // 不再睡 20 ms 等日志：记次那行在缺页处理里同步写完才放开重执行，「已设只读」那行在 armed 置 1 之前写
       }
       int ws = 0; waitpid(c, &ws, 0);
       static char out[65536]; lseek(fd, 0, SEEK_SET); ssize_t k = read(fd, out, sizeof out - 1); out[k > 0 ? k : 0] = 0; close(fd); unlink(path);
@@ -170,6 +170,29 @@ int main(void) {
       eq("⑦ 区间内第 1 次（+0x48）记下", 1, strstr(out, w1) != NULL);
       eq("⑦ 区间内第 2 次（重新设只读后 +0x40）记下", 1, strstr(out, w2) != NULL);
       eq("⑦ 区间外那次不记、没有第 3 次", 1, strstr(out, "第 3 次被写") == NULL);
+      munmap((void *)pg, 0x4000); }
+    // ⑦b 同 ⑦，注入「放开后这条写还没重执行、后台已重新设只读」（g_ww_test_hold，只一次）：门禁整套并发、负载 50 时 ⑦ 出现过「第 3 次被写」。
+    //   期望同 ⑦（按构造写死）：三次写都进去；区间内两次各记一行；那次被打回的重执行不算新的一次 → 没有第 3 次
+    { char path[] = "/tmp/t_crash_ww3_XXXXXX"; int fd = mkstemp(path);
+      volatile uint64_t *pg = mmap(NULL, 0x4000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+      char env[64]; snprintf(env, sizeof env, "%llx:16", (unsigned long long)(uintptr_t)(pg + 8));
+      pid_t c = fork();
+      if (c == 0) {
+          extern _Atomic int g_ww_test_hold;
+          g_s2a_logfd = fd; setenv("S2A_WRITE_WATCH", env, 1); s2a_crash_install(); atomic_store(&g_ww_test_hold, 1);
+          int s2a_ww_armed(int);
+          for (int i = 0; i < 30000 && s2a_ww_armed(0) != 1; i++) usleep(1000); pg[9] = 0x1111;
+          for (int i = 0; i < 30000 && s2a_ww_armed(0) != 1; i++) usleep(1000); pg[0x40] = 0x2222;
+          for (int i = 0; i < 30000 && s2a_ww_armed(0) != 1; i++) usleep(1000); pg[8] = 0x3333;
+          _exit(pg[9] == 0x1111 && pg[0x40] == 0x2222 && pg[8] == 0x3333 && atomic_load(&g_ww_test_hold) == 0 ? 0 : 3);
+      }
+      int ws = 0; waitpid(c, &ws, 0);
+      static char out[65536]; lseek(fd, 0, SEEK_SET); ssize_t k = read(fd, out, sizeof out - 1); out[k > 0 ? k : 0] = 0; close(fd); unlink(path);
+      char w1[96], w2[96]; snprintf(w1, sizeof w1, "第 1 次被写：写 %#llx", (unsigned long long)(uintptr_t)(pg + 9)); snprintf(w2, sizeof w2, "第 2 次被写：写 %#llx", (unsigned long long)(uintptr_t)(pg + 8));
+      eq("⑦b 注入重执行前已重新设只读：三次写都进去、注入用掉、子进程正常退出", 1, WIFEXITED(ws) && WEXITSTATUS(ws) == 0);
+      eq("⑦b 区间内第 1 次（+0x48）记下", 1, strstr(out, w1) != NULL);
+      eq("⑦b 区间内第 2 次是 +0x40 那次（被打回的重执行不算）", 1, strstr(out, w2) != NULL);
+      eq("⑦b 没有第 3 次", 1, strstr(out, "第 3 次被写") == NULL);
       munmap((void *)pg, 0x4000); }
     // ⑧ 写监视下多线程同时写同一页（区间外）：期望不崩、所有写都进去（iPhone 实测：两条线程同时缺页，后到的那条看到标记已清就落进崩溃路径）。
     //   8 条线程各往同页区间外自己那格写 10 万次、监视线程同时反复重新设只读；期望按构造：子进程正常退出、每格 = 100000

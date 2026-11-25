@@ -16,8 +16,13 @@ void s2a_caps_reset(void);
 // 本局放开出图间隔的来源（S2A_FPS60=1 且：清单 fps60_display 1，或这款不是速度已验证默认开的款）；开关不在这里套（graphics/nvn/host/game_profile.h DM_GAME_PRESENT_DISPLAY）
 int s2a_fps60_display_source(void);
 static inline int s2a_caps_own(void) { const char *e = getenv("S2A_CAPS_OWN"); return e && e[0] == '1' && !e[1]; }   // S2A_CAPS_OWN=1：我方 60 帧那一层（帧率表 / 全引擎放开）照旧用，只给内部对照；缺省 0 = 只用社区补丁
-// 清单 fps60 行算不算「速度已验证正确、默认开」（11-11；11-13 加社区帧率补丁：版本精确命中才进得了包）：值 1 且原因含「fps.tsv」「逻辑速度同局 A/B 绿」「社区帧率补丁」「游戏原生 60 帧」之一。
-//   宿主（caps.c）与 iOS 设置页缺省显示值共用这一份规则；Mac 启动器（pack/jobs/community.py）照抄同三个字样，改字样要两边同步（现四个字样）
+// 清单 fps60 行算不算「速度已验证正确、默认开」：值 1 且原因含「游戏原生 60 帧」，或同时含「社区帧率补丁」与「逻辑速度同局 A/B 绿」（11-23 #2120）；
+//   旧口径（S2A_CAPS_OWN=1）另认「fps.tsv」「逻辑速度同局 A/B 绿」。宿主（caps.c）与 iOS 设置页缺省显示值共用这一份规则；
+//   Mac 启动器（pack/jobs/community.py fps60_default）照抄同一条规则，改要两边同步
 int s2a_caps_fps60_verified(const char *val, const char *why);
+// 清单 fps60 原因含「逻辑速度同局 A/B 红」= 本构建号开 60 帧游戏会加速（tools/caps_policy.py patch_ab，11-24 #2201）；s2a_caps_fps_fast 是本局读到的那行的结论。
+//   档位梯子压回时（ios/app.m、macos/front_mac.m s2a_ios_fps_capped）据此不给「再试 60 帧」：点了游戏就加速，是给玩家一个坏选项
+int s2a_caps_fps60_speeds_up(const char *why);
+int s2a_caps_fps_fast(void);
 
 #endif

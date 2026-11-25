@@ -2207,8 +2207,30 @@ def game_caches(c, gid, *, include_compiler=True):
                    (run / "widen", f"t{low}_*"), (run / "widen" / "auto", f"t{low}_*")):
         out += sorted(d.glob(pat)) if d.is_dir() else []
     if include_compiler:
-        out += [c.work_root / "cache" / "air", c.work_root / "cache" / "pso", c.work_root / "run" / "gal_dl_cache"]
+        out += shared_compiler_caches(c)
     return [p for p in out if p.exists() or p.is_symlink()]
+
+
+def shared_compiler_caches(c):
+    """全体共用的编译缓存（不分款）：着色器编译中间件 air、管线缓存 pso、直连库下载缓存。任何一款出包 / 起局都在读写它们"""
+    return [c.work_root / "cache" / "air", c.work_root / "cache" / "pso", c.work_root / "run" / "gal_dl_cache"]
+
+
+def delete_shared_caches(c, gid):
+    """删除游戏时顺手清共用编译缓存（删除语义一向包含它们）：只在执行锁拿得到独占（没有任何一款在出包 / 在玩）时清，拿不到这次不清、不等——
+    它们不属于被删的这一款，别的款出包正读写着它们（#2191 前删除拿执行锁独占，等于先等所有出包结束）。→ 挪进回收站的 [(根, 路径)]"""
+    from core import trace
+    out = []
+    with c.idle("execution") as free:
+        if not free:
+            trace(c, "删除游戏：有别的款在出包 / 在玩，这次不清共用编译缓存（air / pso / 直连库下载缓存）")  # 非玩家句
+            return out
+        for p in shared_compiler_caches(c):
+            if p.exists() or p.is_symlink():
+                moved = _to_trash(c, c.work_root, p, gid)
+                if moved:
+                    out.append((c.work_root, moved))
+    return out
 
 
 def _direct_base(c, direct):
@@ -2721,9 +2743,13 @@ def drop_from_container(c, gid):
 def delete(c):
     """删除这款游戏（连出包产物与缓存）：iPhone 输出整个目录（IPA / 资源包 / 中间产物）、Mac 构建缓存、game_caches，并从游戏库清单里删掉；
     保留存档（library/saves/<程序号>）与游戏原件（原地导入的不碰；旧版复制进 library/sources 的托管副本另有「删除托管 NSP 副本」）。
-    执行锁可能还被这一款刚被取消的任务占着（启动器发删除前先结束它在跑的任务，收尾要杀子进程组）：执行锁排队最多 DELETE_LOCK_WAIT_S 秒，
-    期间照锁的排队进度说「在等『X』结束」（启动器剃刀 H2：原先锁外再套一层按报错原文每 2 秒重试 120 秒的循环，两层等待语义叠在一起）"""
-    with store_meta_quiet(c), c.lock("execution", wait=DELETE_LOCK_WAIT_S), c.lock():
+    锁（#2191 出包时放开别的款）：执行锁只拿共享（和别的款的出包 / 起局并行，挡清理 / 整库搬家等全库独占动作）+ 这一款的按款锁（这款在出包 /
+    在玩 / 在升级 S 级优化时等它结束）+ 清单锁。这一款刚被取消的任务收尾要杀子进程组：按款锁排队最多 DELETE_LOCK_WAIT_S 秒，
+    期间照锁的排队进度说「在等『X』结束」（启动器剃刀 H2）。原先拿执行锁独占：别的款出包十几分钟里删任何一款都等满 120 秒报忙。
+    三份全体共用的编译缓存（shared_compiler_caches：别的款出包 / 起局正在读写）不在这把锁里动，锁外没人在出包、在玩时才顺手清（delete_shared_caches）"""
+    import sgrade
+    with store_meta_quiet(c), c.lock("execution", shared=True, wait=DELETE_LOCK_WAIT_S), \
+            c.lock(sgrade.game_lock(c.r.get("gameId") or ""), wait=DELETE_LOCK_WAIT_S), c.lock():
         gid = c.game()["id"]
         c.begin("删除游戏与出包产物")
         # 上次删到一半（目录删不空）时 game.json 可能已被删掉、find_game 认不出：按索引找回同一个文件夹接着删，
@@ -2743,7 +2769,10 @@ def delete(c):
                     trashed.append((root, moved))
         # 缓存（game_caches：这款的直连库 / 烘焙 / 补丁 / 宽屏，连同删除语义里一并清的共用编库缓存）同样锁内挪进工具缓存根的 .s2a-trash：
         #   锁一放，别的款出包重建共用缓存、重新加回同一款再出包，都不会和锁外的删除撞在同一个目录上
+        shared = set(shared_compiler_caches(c))
         for p in game_caches(c, gid):
+            if p in shared:
+                continue
             moved = _to_trash(c, c.work_root, p, gid)
             if moved:
                 trashed.append((c.work_root, moved))
@@ -2757,6 +2786,7 @@ def delete(c):
         cat = c.catalog()
         cat["games"] = [g for g in cat["games"] if g["id"] != gid]
         atomic(c.library / "catalog.json", cat)
+    trashed += delete_shared_caches(c, gid)
     # 真正删文件放在锁外（诊断#dab32d：一款 100 GB 级的游戏在慢盘上删了 53 分钟，整段占着执行锁，期间开别的款 6 次全 library_busy）。
     #   上面已经挪进 .s2a-trash、从清单去掉，别的任务看不到也碰不到这堆文件，不需要锁
     left = []
@@ -3154,10 +3184,12 @@ def effective_input(c, gid, player=1):
 
 def load_input(c):
     """作业 loadInput（#2081）：键位弹窗读四位玩家实际生效的键位，规则同起局（effective_input）；config 为 None = 标准键位。
-    default（#1987）：所有游戏的默认，default-input.json 能用时的那份，否则 None（没设过 = 标准键位）；弹窗「恢复默认」回到它"""
+    default（#1987）：所有游戏的默认，default-input.json 能用时的那份，否则 None（没设过 = 标准键位）；弹窗「恢复默认」回到它。
+    defaultProblem：default-input.json 在但读不出或不合规（这时 default 为 None，各款按标准键位走），弹窗提示一行，不再静默退回"""
     gid = c.game()["id"]
+    default, default_problem = _usable_input(c.private / "default-input.json")
     return dict(players=[dict(player=p, **effective_input(c, gid, p)) for p in (1, 2, 3, 4)],
-                default=_usable_input(c.private / "default-input.json")[0])
+                default=default, defaultProblem=default_problem)
 
 
 # 标准键位（#1987）：没设所有游戏的默认时，「生效的缺省」就是它。同 Mac 启动器 InputConfig.standard（S2ArmLauncherModel+Input.swift）
@@ -3798,7 +3830,10 @@ def apply_location(c, game):
 
 
 def move_game(c):
-    with store_meta_quiet(c), c.lock("execution"), c.lock():
+    """搬这一款到别的存放位置。锁（#2191 出包时放开别的款）：执行锁共享 + 这一款的按款锁 + 清单锁——只动这一款的文件夹和它的索引条目
+    （索引写回按条目合并，layout.save_index），别的款出包 / 起局照常；原先拿执行锁独占，别的款出包时搬任何一款都等满报忙"""
+    import sgrade
+    with store_meta_quiet(c), c.lock("execution", shared=True), c.lock(sgrade.game_lock(c.r.get("gameId") or "")), c.lock():
         game = c.game()
         if not c.r.get("location"):
             raise Failure("没有选新的存放位置。", code="job_failed")

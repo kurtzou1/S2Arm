@@ -35,7 +35,7 @@ uint32_t rp_fmt_caps(uint32_t f) { return nvn_gpu_format_caps(f); }
 int rp_origin_lower_left(void) { return g_origin_ll; }
 const p_set_rt *rp_pass_target(void) { return &g_rt; }
 int rp_pass_parked(void) { return 0; }
-void rp_pass_land_reads(nvn_gpu_cmd c, const tex_t *const *ts, int n) { (void)c; (void)ts; (void)n; }
+void rp_pass_land_reads(nvn_gpu_cmd c, const rp_pass_read *ts, int n) { (void)c; (void)ts; (void)n; }
 void rp_view_pin_begin(void) {}
 void rp_view_pin_end(void) {}
 void rp_pass_prepare_draw(nvn_gpu_cmd c, uint32_t m) { (void)c; (void)m; } void rp_pass_want_layered(nvn_gpu_cmd c, int layered) { (void)c; (void)layered; }

@@ -647,8 +647,12 @@ int s2a_ios_low_ram_ask(uint64_t need_mb, uint64_t phys_mb) {
 //   压回时带「再试 60 帧」按钮（#1688）：点了梯子回 60 帧档（s2a_ql_retry60）；下一局本来就从 60 帧起
 void s2a_dprompt_ask(NSString *title, NSString *body, NSString *accept, NSString *decline, double delay, double seconds, void (^cb)(BOOL));   // dprompt.m
 void s2a_ql_retry60(void);   // runtime/src/qladder_host.c
+int s2a_caps_fps_fast(void);   // runtime/src/caps.c
+//   本构建号同局 A/B 红（开 60 帧游戏会加速，runtime/src/caps.c s2a_caps_fps_fast）：不给「再试 60 帧」，照实说明（11-24 #2201 维护者：点了就加速，是坏选项）
 void s2a_ios_fps_capped(int reason) {
     if (reason != 4) { dispatch_async(dispatch_get_main_queue(), ^{ s2a_dprompt_notice(S2AL(@"cpatch.group.fps"), S2AL(@"app.fpsCap.restored"), 0, 6); }); return; }
+    if (s2a_caps_fps_fast()) { LOG("档位梯子：压回原帧率；本构建号同局 A/B 红（开 60 帧会加速），不给再试");
+        dispatch_async(dispatch_get_main_queue(), ^{ s2a_dprompt_notice(S2AL(@"cpatch.group.fps"), S2AL(@"app.fpsCap.fast"), 0, 8); }); return; }
     s2a_dprompt_ask(S2AL(@"cpatch.group.fps"), S2AL(@"app.fpsCap.ladder"), S2AL(@"app.fpsCap.retry"), S2AL(@"common.gotIt"), 0, 15, ^(BOOL accept) {
         if (accept) { LOG("档位梯子：玩家点了再试 60 帧"); s2a_ql_retry60(); } });
 }

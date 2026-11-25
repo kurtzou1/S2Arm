@@ -1172,6 +1172,7 @@ class Context:
                 if not ((bundled_host / "Contents/MacOS/s2arm-host").is_file() and (bundled_host / "Contents/MacOS/libs2a_vaguard.dylib").is_file()):
                     raise Failure("应用内置引擎产物缺失，请重新安装完整应用。")
                 env["S2A_BUNDLED_HOST"] = str(bundled_host / "Contents/MacOS/s2arm-host")
+                self.host_app = bundled_host   # 辅助运行会执行这个 .app、系统随即登记它（#2024）：作业结束时注销（main._run_request）
                 env["DM_GLSLC_HOST"] = str(bundled_host / "Contents/MacOS/s2arm-host")
                 env["DM_OODLE_HOST"] = str(bundled_host / "Contents/MacOS/s2arm-host")  # LZ5 / OodleLZ 解码器（uepak.oodle_host_find，缺省回退 build/s2arm-host 在发版包里不存在）
         else:

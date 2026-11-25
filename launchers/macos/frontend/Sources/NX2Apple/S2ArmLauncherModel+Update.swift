@@ -224,7 +224,7 @@ extension S2ArmLauncherModel {
     var updateRestartImpact: UpdateRestartImpact {
         var r = UpdateRestartImpact()
         if playBusy, let p = playSession { r.game = p.name }   // 一局在游戏槽，可以和出包同时在跑：两样都列
-        if mainBusy, let s = session { r.task = s.name; r.taskResumes = s.kind == .export }
+        if let s = mainJobs.first { r.task = s.name; r.taskResumes = s.kind == .export }   // 主槽优先，其次按款作业槽（删 / 搬别的款）
         if r.task == nil, phoneBusy, let p = phoneSession { r.task = p.name }
         return r
     }

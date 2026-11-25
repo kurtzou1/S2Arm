@@ -185,6 +185,14 @@ int main(int argc, char **argv) {
     CHECK(nvn_gpu_ok(r) && table, "pool sampler 65: expected snapshot, got rc=%d why=%s", r.code, err.why);
     nvn_gpu_pool_table sampler_table = table;
     if (image_table && sampler_table) {
+        CHECK(nvn_gpu_view_texture(view) == tex && nvn_gpu_view_texture(wv) == wrong,
+              "view texture: report the underlying image");
+        CHECK(nvn_gpu_pool_has_texture(image_table, tex) && nvn_gpu_pool_has_texture(image_table, blue),
+              "pool membership: include live images at both ends of the table");
+        CHECK(nvn_gpu_pool_has_texture(image_table, dummy) && !nvn_gpu_pool_has_texture(image_table, wrong) &&
+              !nvn_gpu_pool_has_texture(image_table, integer),
+              "pool membership: find the dummy in place of incompatible dimension and numeric class");
+        CHECK(!nvn_gpu_pool_has_texture(sampler_table, tex), "pool membership: sampler tables contain no images");
         // Seven independently calculated reads: distinct IDs, nearest vs linear,
         // empty slot, wrong image dimension, and out-of-range sentinel.
         nvn_gpu_layout_ent ents[3] = {0};

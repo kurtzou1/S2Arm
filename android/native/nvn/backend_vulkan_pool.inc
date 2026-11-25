@@ -37,6 +37,16 @@ static void pool_build_index(struct nvn_gpu_pool_table_s *t) {
     t->uviews = uv; t->unext = un; t->ikey = ik; t->ihead = ih; t->nuniq = nu; t->idx_cap = cap;
 }
 
+int nvn_gpu_pool_has_texture(nvn_gpu_pool_table t, nvn_gpu_tex tex) {
+    if (!t || t->kind != NVN_GPU_POOL_IMAGE || !tex || !tex->image) return 0;
+    if (t->ikey) return pool_img_first(t, (uint64_t)(uintptr_t)tex->image) != UINT32_MAX;
+    for (uint32_t i = 0; i <= t->count; i++) {
+        const struct nvn_gpu_view_s *v = t->objects[i];
+        if (v && v->tex && v->tex->image == tex->image) return 1;
+    }
+    return 0;
+}
+
 static int pool_view_class(const struct nvn_gpu_view_s *v) {
     nvn_fmt_info info;
     if (!v || !v->tex || !v->view || !nvn_fmt_info_of(v->nvn_format, &info)) return -1;

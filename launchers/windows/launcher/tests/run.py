@@ -120,6 +120,12 @@ def main():
                        "--endjob-probe", str(Path(temporary) / "out"), "--data-root=" + str(Path(temporary) / "data")], env)
             if "✓ 出包异常收尾撤登记" not in out.stdout:
                 raise RuntimeError("endjob probe did not report success")
+        # #2191：出包时只挡正在出的那一款，别的款的金手指 / 删除 / 移动照常（UI.Snapshots/PackMutexProbe.cs）
+        with tempfile.TemporaryDirectory(prefix="s2arm-pack-mutex-probe-") as temporary:
+            out = run([dotnet, "run", "--project", str(probe), "--no-build", "--configuration", "Release", "--",
+                       "--pack-mutex-probe", str(Path(temporary) / "out"), "--data-root=" + str(Path(temporary) / "data")], env)
+            if "✓ 出包只挡正在出的那款" not in out.stdout:
+                raise RuntimeError("pack mutex probe did not report success")
         # 推游戏遇到手机上旧 App（#1842）：phone_app_outdated 走通用确认「仍然继续」、不兼容的不是确认码（UI.Snapshots/ConfirmProbe.cs）
         with tempfile.TemporaryDirectory(prefix="s2arm-confirm-probe-") as temporary:
             out = run([dotnet, "run", "--project", str(probe), "--no-build", "--configuration", "Release", "--",

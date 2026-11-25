@@ -5,7 +5,7 @@
 //   （tensor_sq），原先在第一个 3D 场景里第一次用到时才建；系统编译缓存没命中时（新构建第一次启动、缓存被挤掉）挡在提交线程上（M4 上 24–160 / 74–118 ms）。
 // mtl_init（游戏第一次登记内存池时进来，在第一帧绘制之前）→ 看后台构建有没有起、用的时候还要不要现编。
 //   ① DM_TEST_OUNCE=1（写一份 Switch 2 布局的 NPDM 置平台位，同 t_nvn_gva）：两个后台构建都已起；等它们做完后 ixc_ready / tensor_sq_ready 拿到管线、
-//      且这一下不再现编（< 5 ms）
+//      且这一下不再现编（判据：取用前缓存里已有后台建好的管线、取用拿回的是同一份；耗时只作读数）
 //   ② DM_TEST_OUNCE=0：都不起，Switch 1 游戏不多编两条多半用不上的管线（照旧第一次用到时建）
 // 反证：去掉 mtl_init 里的 ixc_prewarm(); tensor_sq_prewarm(); → ① 红
 #include "nvn_protos.h"
@@ -41,10 +41,15 @@ int main(void) { @autoreleasepool {
         check(g_tsq_pre != NULL, g_tsq_pre ? "① Switch 2：设备初始化后张量核顶替平方核后台构建已起" : "① Switch 2：设备初始化后张量核顶替平方核后台构建没起");
         if (fails) { printf("✗ t_nvn_kern_prewarm（%s）：%d 项不符\n", tag, fails); return 1; }
         dispatch_group_wait(g_ixc_pre, DISPATCH_TIME_FOREVER); dispatch_group_wait(g_tsq_pre, DISPATCH_TIME_FOREVER);
+        // 「不再现编」按事件判（11-25 去墙钟：原判据「取用 < 5 ms」负载高时会漂）：后台构建做完后管线已在缓存里，取用拿回的就是这一份（指针不变）；
+        //   耗时只作读数打出来，不当判据
+        id<MTLComputePipelineState> ix0 = g_ixc_ps[0], ix1 = g_ixc_ps[1], sq0 = g_tsq_ps;
         uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC); int ix = ixc_ready(); double ms = ms_since(t0);
-        char b[160]; snprintf(b, sizeof b, "① 用的时候：换算核%s，取用 %.3f ms（期望 < 5 ms，不再现编）", ix ? "已在" : "没有", ms); check(ix && ms < 5.0, b);
+        char b[200]; snprintf(b, sizeof b, "① 用的时候：换算核%s、取用拿回后台建好的那份%s（读数：取用 %.3f ms）", ix ? "已在" : "没有", ix0 && ix1 && g_ixc_ps[0] == ix0 && g_ixc_ps[1] == ix1 ? "" : "——不是，现编了", ms);
+        check(ix && ix0 && ix1 && g_ixc_ps[0] == ix0 && g_ixc_ps[1] == ix1, b);
         t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC); id<MTLComputePipelineState> sq = tensor_sq_ready(); ms = ms_since(t0);
-        snprintf(b, sizeof b, "① 用的时候：平方核%s，取用 %.3f ms（期望 < 5 ms，不再现编）", sq ? "已在" : "没有", ms); check(sq != nil && ms < 5.0, b);
+        snprintf(b, sizeof b, "① 用的时候：平方核%s、取用拿回后台建好的那份%s（读数：取用 %.3f ms）", sq ? "已在" : "没有", sq0 && sq == sq0 ? "" : "——不是，现编了", ms);
+        check(sq != nil && sq0 != nil && sq == sq0, b);
     } else {
         check(g_ixc_pre == NULL, g_ixc_pre ? "② 非 Switch 2：仍起了换算核后台构建" : "② 非 Switch 2：没起换算核后台构建");
         check(g_tsq_pre == NULL, g_tsq_pre ? "② 非 Switch 2：仍起了平方核后台构建" : "② 非 Switch 2：没起平方核后台构建");

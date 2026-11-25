@@ -1898,31 +1898,29 @@ draw_rebind:   // 出库回退落地：g_prog 已换现编版（pso_dirty 已置
         } else ts[st][i] = rp_samp_for_tex(h ? (int)(h >> 20) : rp_S.samp_base, h ? (int)(h & 0xFFFFF) : rp_S.tex_base);
     }
     DT(RP_PERF_D_TEX);
-    // 这一笔要采样的贴图里，有还挂着待折清除的：先让它落地（rp_pass_land_reads），否则采到的是没清过的旧内容。
-    // 稳态下挂起表是空的（rp_pass_parked() == 0），这条近路不收集、不加锁；只有这一笔真遇到挂起项才走一次。
+    // 按这一笔真正取到的视图和池快照落清除，避免再按槽号推断采样来源。挂起表为空时不收集。
     if (rp_pass_parked()) {
-        static tex_t rdsnap[2 * RP_TEXARR_MAX]; static const tex_t *rd[2 * RP_TEXARR_MAX];
+        // 每阶段至多有一组定长数组，每个其余布局项至多一个视图或池快照。
+        static rp_pass_read rd[RP_PROG_STAGES * (RP_PROG_ENT_MAX + RP_TEXARR_MAX)];
         int nr = 0;
         for (int st = 0; st < RP_PROG_STAGES; st++)
-            for (uint32_t i = 0; i < g_prog->nent[st] && nr < (int)(sizeof rd / sizeof rd[0]); i++) {
+            for (uint32_t i = 0; i < g_prog->nent[st]; i++) {
                 const nvn_gpu_layout_ent *e = &g_prog->ent[st][i];
-                if (e->src_kind == NVN_RB_TEXU) {   // 句柄在用户常量缓冲里：同取视图时的读法
-                    int tid = 0, sid = 0;
-                    if (e->src_reg2 < g_prog->nusrc && !usrc_ids(st, &g_prog->usrc[e->src_reg2], &tid, &sid) && rp_tex_snap_by_id(tid, &rdsnap[nr], NULL, NULL)) { rd[nr] = &rdsnap[nr]; nr++; }
+                if (e->src_kind == NVN_RB_TEXP) {
+                    rd[nr++] = (rp_pass_read){.pool = g_ptd[st][i]};
                     continue;
                 }
-                if (e->src_kind == NVN_RB_IMG) { if (g_gimg[st][i]) { rd[nr] = g_gimg[st][i]; nr++; } continue; }   // 存储图像同样要读到清过的内容
-                if (e->src_kind != NVN_RB_TEX) continue;
-                uint32_t cnt = e->count > 1 ? e->count : 1;
-                for (uint32_t k = 0; k < cnt && nr < (int)(sizeof rd / sizeof rd[0]); k++) {
-                    int slot = (int)e->src_reg + (e->count > 1 ? (int)k - RP_HANDLE_TABLE_FIRST_SLOT : 0);
-                    if (slot < 0 || slot >= (e->count > 1 ? 32 : 40)) continue;
-                    uint64_t h = graphics_tex_handle(st, (unsigned)slot);
-                    if (!rp_tex_snap_by_id(h ? (int)(h & 0xFFFFF) : rp_S.tex_base, &rdsnap[nr], NULL, NULL)) continue;
-                    rd[nr] = &rdsnap[nr]; nr++;
+                if (e->src_kind == NVN_RB_TEX && e->count > 1) {
+                    for (uint32_t k = 0; k < e->count; k++) {
+                        nvn_gpu_tex tex = nvn_gpu_view_texture(g_av[st][k]);
+                        if (tex) rd[nr++] = (rp_pass_read){.tex = tex};
+                    }
+                } else if (tv[st][i]) {
+                    nvn_gpu_tex tex = nvn_gpu_view_texture(tv[st][i]);
+                    if (tex) rd[nr++] = (rp_pass_read){.tex = tex};
                 }
             }
-        if (nr) rp_pass_land_reads(c, rd, nr);
+        rp_pass_land_reads(c, rd, nr);
     }
     if (g_compute_access.n) {
         int need = 0;

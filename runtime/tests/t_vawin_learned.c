@@ -22,10 +22,12 @@ static uint64_t g_test_span;
 __attribute__((used, visibility("default"))) uint64_t s2a_mem_span_learn(void) { return g_test_span; }   // vawin.c 按名字取（dlsym），这里冒充 svc_mem.c
 extern uint64_t s2a_span_seed(uint64_t);
 int main(void) {
-    {   // ⓪ 学跨度的贴顶规则（s2a_span_learn_ok）：跨度 + 512 MB < 窗口才记；贴顶但有越界映射 / 远端缺页照记。期望手算：窗口 62464 MB
+    {   // ⓪ 学跨度的贴顶规则（s2a_span_learn_ok）：跨度 + max(2 GiB, 窗口 10%) < 窗口才记（11-24 起，原 512 MB）；贴顶但有越界映射 / 远端缺页照记。
+        //   期望手算：窗口 62464 MB → 带宽 6246.4 MB，界 56217.6 MB；窗口 14336 MB → 10% = 1433.6 < 2048，带宽 2048，界 12288 MB
         extern int s2a_span_learn_ok(uint64_t, uint64_t, uint64_t, uint64_t);
         CHECK(!s2a_span_learn_ok(62080 * MB, 62464 * MB, 0, 0), "⓪ 异度3 贴顶 62080（窗口末 −384 MB）、没碰窗口外：不记");
-        CHECK(s2a_span_learn_ok(61951 * MB, 62464 * MB, 0, 0) && !s2a_span_learn_ok(61952 * MB, 62464 * MB, 0, 0), "⓪ 边界：61951 + 512 = 62463 < 62464 记，61952 不记");
+        CHECK(s2a_span_learn_ok(56217 * MB, 62464 * MB, 0, 0) && !s2a_span_learn_ok(56218 * MB, 62464 * MB, 0, 0), "⓪ 边界（窗口 10%%）：56217 + 6246.4 < 62464 记，56218 不记");
+        CHECK(s2a_span_learn_ok(12287 * MB, 14336 * MB, 0, 0) && !s2a_span_learn_ok(12288 * MB, 14336 * MB, 0, 0), "⓪ 边界（2 GiB 下限）：窗口 14336 时 12287 记，12288 不记");
         CHECK(s2a_span_learn_ok(62400 * MB, 62464 * MB, 3, 0) && s2a_span_learn_ok(62300 * MB, 62464 * MB, 0, 12), "⓪ 贴顶但越界映射 3 次 / 远端缺页 12 次：记");
         CHECK(!s2a_span_learn_ok(0, 62464 * MB, 5, 5), "⓪ 跨度 0：不记"); }
     CHECK(s2a_window_host_below(64 * GB, 0) == 6 * GB, "① 没学到跨度、空洞 64 GiB：宿主下限 6 GiB（11-22 起；原 3 GiB，宿主峰值 p99 约 5 GB 碰底）");
@@ -99,11 +101,12 @@ int main(void) {
         CHECK(s2a_window_host_below_for_pool(6 * GB, 0, 0) == 3 * GB, "⑯ 不知道池时照旧 3 GiB"); }
     // ⑰ 种子表查表（vawin.c s2a_span_seed，表 = tools/span_seed.py 生成的 span_seed.inc）：表里每一条都查得到原值、程序号严格升序（二分的前提）；
     //   不在表里的号（0、1、全 F、表里相邻两号之间）回 0
-    { static const struct { uint64_t pid; uint32_t mb, n; } T[] = {
+    { static const struct { uint64_t pid; uint32_t mb, n, whole; } T[] = {
 #include "../src/span_seed.inc"
       };
-      extern uint64_t s2a_span_seed(uint64_t); size_t n = sizeof T / sizeof T[0]; int miss = 0, order = 0, gap = 0;
-      for (size_t i = 0; i < n; i++) { if (s2a_span_seed(T[i].pid) != (uint64_t)T[i].mb << 20 || T[i].n < 2) miss++; if (i && T[i - 1].pid >= T[i].pid) order++;
+      extern uint64_t s2a_span_seed(uint64_t); extern int s2a_span_seed_whole(uint64_t); size_t n = sizeof T / sizeof T[0]; int miss = 0, order = 0, gap = 0;
+      for (size_t i = 0; i < n; i++) { if (s2a_span_seed(T[i].pid) != (uint64_t)T[i].mb << 20 || (T[i].n < 2 && !T[i].whole) || s2a_span_seed_whole(T[i].pid) != (int)T[i].whole) miss++;
+          if (i && T[i - 1].pid >= T[i].pid) order++;
           if (i && T[i].pid - T[i - 1].pid > 1 && s2a_span_seed(T[i - 1].pid + 1)) gap++; }
       CHECK(n > 0 && !miss && !order && !gap, "⑰ 种子表 %zu 条：查不到原值或样本 < 2 的 %d 条、不升序 %d 处、相邻号之间查出值 %d 处（期望 0）", n, miss, order, gap);
       CHECK(!s2a_span_seed(0) && !s2a_span_seed(1) && !s2a_span_seed(~0ull), "⑰ 不在表里的号回 0"); }
@@ -144,6 +147,28 @@ int main(void) {
         CHECK(s2a_window_span_seen(B) == s2a_span_seed(B), "⑱ 多款容器的标记不影响旧位置（文档根直下 wire/）的同号");
         setenv("S2A_DOCS", gd, 1); CHECK(s2a_window_span_seen(B) == 0, "⑱ 多款容器选定后（S2A_DOCS = games/<号>）同样不收"); unsetenv("S2A_DOCS");
         char cmd[600]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", d); if (system(cmd)) {}
+    }
+    // ㉑ 「要整个窗口」（快照被关根修 ④）与不来回翻：一局 = 先按 s2a_snap_needwin 定让不让窗口（让 = 3 GiB），局中让掉的那段被碰 f 次就记（s2a_snap_needwin_note）。
+    //   期望手写：正例——第 1 局没记录、让、碰 5 次 → 记；第 2、3 局有记录、不让（squeeze 0）、碰 0 次 → 记录不删、仍不让（不翻回去）。
+    //   反例——另一款第 1 局让、碰 0 次 → 不记；第 2 局照让。快照区放置（s2a_snap_arena_place2）：有记录时已知跨度按整块空洞 64 GiB 算 → 窗口外没地方就关（0），
+    //   窗口外有 3 GiB 照放（1）；没记录、已知跨度 20 GiB → 让（2）
+    {   extern int s2a_snap_needwin(uint64_t), s2a_snap_needwin_note(uint64_t, uint64_t, uint64_t), s2a_snap_needwin_hit(uint64_t, uint64_t);
+        char d[] = "/tmp/s2a_needwin_XXXXXX"; if (!mkdtemp(d)) { CHECK(0, "㉑ 临时目录"); return 1; }
+        char sp[256]; snprintf(sp, sizeof sp, "%s/a/span_peak2", d); { char a[256]; snprintf(a, sizeof a, "%s/a", d); mkdir(a, 0755); }
+        setenv("S2A_WIN_SPAN_PEAK", sp, 1);
+        const uint64_t P = 0x01000000000AB000ull, SQ = 3 * GB, A = 3 * GB, FIT = 64 * GB, HF = 6 * GB;
+        int run[3]; uint64_t sq = 0;
+        for (int r = 0; r < 3; r++) { int nw = s2a_snap_needwin(P); sq = nw ? 0 : SQ; s2a_snap_needwin_note(P, sq, r == 0 ? 5 : 0); run[r] = nw; }
+        CHECK(!run[0] && run[1] && run[2], "㉑ 正例：第 1 局没记录 → 让、碰 5 次 → 记；第 2、3 局有记录 → 不让（%d %d %d，期望 0 1 1）", run[0], run[1], run[2]);
+        { char q[256]; snprintf(q, sizeof q, "%s/a/snap_need_win", d); CHECK(access(q, F_OK) == 0 && s2a_snap_needwin(P), "㉑ 不让窗口、碰 0 次的局之后记录还在（不翻回去）"); }
+        { uint64_t below = HF; CHECK(s2a_snap_arena_place2(0, FIT, &below, A, HF, FIT, 2 * GB) == 0, "㉑ 有记录、窗口外没地方：关快照（0）");
+          below = HF; CHECK(s2a_snap_arena_place2(A, FIT, &below, A, HF, FIT, 2 * GB) == 1, "㉑ 有记录、窗口外有 3 GiB：照放窗口外（1）");
+          below = HF; CHECK(s2a_snap_arena_place2(0, FIT, &below, A, HF, 20 * GB, 2 * GB) == 2 && below == A + HF, "㉑ 没记录、已知跨度 20 GiB：让窗口（2），宿主段加长到 9 GiB"); }
+        snprintf(sp, sizeof sp, "%s/b/span_peak2", d); { char b[256]; snprintf(b, sizeof b, "%s/b", d); mkdir(b, 0755); } setenv("S2A_WIN_SPAN_PEAK", sp, 1);
+        for (int r = 0; r < 2; r++) { int nw = s2a_snap_needwin(P); sq = nw ? 0 : SQ; s2a_snap_needwin_note(P, sq, 0); run[r] = nw; }
+        CHECK(!run[0] && !run[1], "㉑ 反例：让了、碰 0 次 → 不记，第 2 局照让（%d %d，期望 0 0）", run[0], run[1]);
+        CHECK(!s2a_snap_needwin_hit(0, 9) && !s2a_snap_needwin_hit(SQ, 0) && s2a_snap_needwin_hit(SQ, 1), "㉑ 判据：没让窗口不算（碰的是更外面的远端）、让了碰 0 次不算、让了碰 1 次算");
+        unsetenv("S2A_WIN_SPAN_PEAK");
     }
     printf("%s t_vawin_learned：%d 处不符\n", bad ? "✗" : "✓", bad);
     return bad ? 1 : 0;

@@ -14,7 +14,7 @@
 #define SIG(fn, T) _Static_assert(__builtin_types_compatible_p(__typeof__(&fn), T), #fn " 签名与契约表不符")
 #define DISTINCT(A, B) _Static_assert(!__builtin_types_compatible_p(A, B), #A " 与 " #B " 必须是不同的句柄类型")
 
-_Static_assert(NVN_GPU_CONTRACT_VERSION == 20, "契约版本变了：同批更新本签名表");
+_Static_assert(NVN_GPU_CONTRACT_VERSION == 21, "契约版本变了：同批更新本签名表");
 
 // 句柄：指针大小、两两不同
 _Static_assert(sizeof(nvn_gpu_buf) == sizeof(void *), "句柄应为指针");
@@ -101,6 +101,8 @@ SIG(nvn_gpu_set_pipe, void (*)(nvn_gpu_cmd, nvn_gpu_pipe));
 SIG(nvn_gpu_set_dyn, void (*)(nvn_gpu_cmd, const nvn_gpu_dyn *));
 SIG(nvn_gpu_set_vbuf, void (*)(nvn_gpu_cmd, uint32_t, nvn_gpu_buf, uint64_t));
 SIG(nvn_gpu_pool_create, nvn_gpu_rc (*)(const nvn_gpu_pool_desc *, nvn_gpu_pool_table *, nvn_gpu_err *));
+SIG(nvn_gpu_view_texture, nvn_gpu_tex (*)(nvn_gpu_view));
+SIG(nvn_gpu_pool_has_texture, int (*)(nvn_gpu_pool_table, nvn_gpu_tex));
 SIG(nvn_gpu_pool_bind, nvn_gpu_rc (*)(nvn_gpu_cmd, nvn_gpu_stage, uint32_t, nvn_gpu_pool_table, nvn_gpu_err *));
 SIG(nvn_gpu_pool_release, void (*)(nvn_gpu_pool_table));
 SIG(nvn_gpu_bind, void (*)(nvn_gpu_cmd, nvn_gpu_stage, const nvn_gpu_binding *, uint32_t));
@@ -141,7 +143,7 @@ SIG(nvn_vsync_start, int (*)(uint32_t, nvn_vsync_fn, void *, char *, size_t));
 SIG(nvn_vsync_stop, void (*)(void));
 // #968 消费审查定稿 ①（10-30）：组合采样项 view 与 samp 同时装得下、互不重叠（原稿两者在同一个 union 里，只能放一个）
 _Static_assert(offsetof(nvn_gpu_binding, u.ts.samp) >= offsetof(nvn_gpu_binding, u.ts.view) + sizeof(nvn_gpu_view), "TEX_SAMP 的 view 与 samp 重叠");
-#define N_SIG 74   // 上面 SIG 的条数：nvn_gpu_* 72 + nvn_vsync_* 2（.mk 核对声明数）
+#define N_SIG 76   // 上面 SIG 的条数：nvn_gpu_* 74 + nvn_vsync_* 2（.mk 核对声明数）
 
 int main(void) {
     // 运行期只做一件不依赖实现的事：典型调用点的结构体能按契约填出来（零初始化 + 字段可写），证明头文件里的类型完整可用

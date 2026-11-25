@@ -170,6 +170,7 @@ nvn_gpu_rc nvn_gpu_cmd_commit(nvn_gpu_cmd c, uint64_t signal, nvn_gpu_done_fn do
 nvn_gpu_rc nvn_gpu_fence_wait(uint64_t v, uint64_t timeout_ns, nvn_gpu_err *err) { (void)timeout_ns; (void)err; if (g_auto_done && v > g_fdone && g_npend) fake_complete(NVN_GPU_DONE_OK); return (nvn_gpu_rc){v <= g_fdone ? NVN_GPU_OK : NVN_GPU_E_TIMEOUT}; }
 // 贴图 / 视图 / 采样器 / 上传：只记账
 struct nvn_gpu_tex_s { nvn_gpu_tex_desc d; uint64_t access_id; int ord; uint32_t px[4][4]; int views, released; }; struct nvn_gpu_view_s { nvn_gpu_tex of; int has_v; int rid; view_t v; nvn_gpu_buf buf; uint64_t off, bytes; uint32_t format; }; struct nvn_gpu_samp_s { int x; };   // ord：后端贴图的递增序号；px：像素替身（4 个 mip × 4 层各一个 32 位字）；v：建视图时收到的视图记录
+nvn_gpu_tex nvn_gpu_view_texture(nvn_gpu_view v) { return v ? v->of : NULL; }
 static int g_tex_creates, g_tex_releases, g_view_creates, g_view_releases, g_samp_creates, g_samp_releases, g_tex_create_fail, g_tex_ord;
 // 像素替身（视图表按存储认视图的用例用）：每份后端存储有一小块「像素」——4 个 mip × 4 层各一个 32 位字，初值 0。「画」= 往视图指到的（mip，层）那个字里写
 // 一个值；写进去的值要经过视图记录的签名（格式 / 通道映射不同的视图，同一次绘制写进去的字节不同，真 GPU 上也一样）；「读回」= 把存储的 16 个字原样取出。
@@ -462,7 +463,22 @@ nvn_gpu_rc nvn_gpu_view_create_buf(nvn_gpu_buf b, uint64_t off, uint64_t bytes, 
     g_tbuf_created++; g_tbuf_in_pass += g_pass_open; *out = v; return (nvn_gpu_rc){NVN_GPU_OK};
 }
 static nvn_gpu_pass_desc g_pd[8]; static int g_npd, g_pass_ends; static uint32_t g_barrier_bits; static int g_barrier_at;   // g_barrier_at：收到屏障时已开过几个通道
-void nvn_gpu_pass_begin(nvn_gpu_cmd c, const nvn_gpu_pass_desc *d) { (void)c; if (g_npd < 8) g_pd[g_npd] = *d; g_npd++; g_pass_open = 1; }
+// 单像素 RGBA8 夹具：通道开始时执行 LOAD_CLEAR，绘制时按实际绑定复制一个像素。
+static int g_color_sample_test, g_color_sample_index = -1;
+static nvn_gpu_view g_color_target;
+struct nvn_gpu_pool_table_s { uint32_t kind, count; nvn_gpu_view views[]; };
+static nvn_gpu_pool_table g_color_image_table;
+void nvn_gpu_pass_begin(nvn_gpu_cmd c, const nvn_gpu_pass_desc *d) {
+    (void)c; if (g_npd < 8) g_pd[g_npd] = *d; g_npd++; g_pass_open = 1;
+    if (!g_color_sample_test) return;
+    g_color_target = d->color[0].view;
+    CHECK(d->ncolor == 1 && d->w == 1 && d->h == 1 && g_color_target && g_color_target->of->d.d.format == NVN_FORMAT_RGBA8);
+    if (g_color_target && d->color[0].load == NVN_GPU_LOAD_CLEAR) {
+        uint32_t rgba = 0;
+        for (int i = 0; i < 4; i++) rgba |= (uint32_t)(d->color[0].clear.f[i] * 255.0f + 0.5f) << (8 * i);
+        g_color_target->of->px[0][0] = rgba;
+    }
+}
 void nvn_gpu_pass_end(nvn_gpu_cmd c) { (void)c; g_pass_ends++; g_pass_open = 0; }
 static int g_npd_now(void) { return g_npd; } static int g_ends_now(void) { return g_pass_ends; }
 static int g_ndisp_now(void);
@@ -592,6 +608,17 @@ void nvn_gpu_draw(nvn_gpu_cmd c, const nvn_gpu_draw_args *a) {
         else { int i = g_order_n++; g_order_ev[i].seg = g_order_seg; g_order_ev[i].pre = c->is_pre; g_order_ev[i].draw = 1; g_order_ev[i].buf = g_order_vbuf; g_order_ev[i].off = g_order_voff; }
     }
     g_gdraws++; g_last_da = *a; if (!g_pass_open) g_draw_outside++;
+    if (g_color_sample_test) {
+        nvn_gpu_view src = NULL;
+        if (g_color_sample_index >= 0) {
+            if (g_color_image_table && (uint32_t)g_color_sample_index < g_color_image_table->count)
+                src = g_color_image_table->views[g_color_sample_index];
+        } else if (g_nfb[NVN_GPU_SH_FS] == 1 && g_fb[NVN_GPU_SH_FS][0].cls == NVN_GPU_RES_TEX_SAMP) {
+            src = g_fb[NVN_GPU_SH_FS][0].u.ts.view;
+        }
+        CHECK(g_pass_open && g_color_target && src && src->of && src->of->d.d.format == NVN_FORMAT_RGBA8);
+        if (g_pass_open && g_color_target && src && src->of) g_color_target->of->px[0][0] = src->of->px[0][0];
+    }
     if (g_dd_on && g_ndd < 64) { for (int st = 0; st < 2; st++) { g_dd[g_ndd].b[st] = g_fb[st][0].u.b.buf; g_dd[g_ndd].off[st] = g_fb[st][0].u.b.off; } }
     if (g_dd_on) { g_ndd++; if (g_ndd - 1 == g_hz_bump_at) rp_gpu_wr_gen++; }
 }
@@ -2008,17 +2035,22 @@ static void t_samp_mirror_clamp(void) {
 }
 
 // 整池数组的后端替身：记最近一次建表的项（状态与资源）、建表 / 放表 / 绑表次数
-struct nvn_gpu_pool_table_s { uint32_t kind, count; };
 static int g_pool_creates, g_pool_releases, g_pool_binds; static nvn_gpu_pool_item g_pool_last[16]; static uint32_t g_pool_last_n, g_pool_last_kind;
 nvn_gpu_rc nvn_gpu_pool_create(const nvn_gpu_pool_desc *d, nvn_gpu_pool_table *out, nvn_gpu_err *err) {
     (void)err; g_pool_creates++; g_pool_last_n = d->count; g_pool_last_kind = d->kind;
     for (uint32_t i = 0; i < d->count && i < 16; i++) g_pool_last[i] = d->items[i];
-    *out = calloc(1, sizeof **out); (*out)->kind = d->kind; (*out)->count = d->count; return (nvn_gpu_rc){NVN_GPU_OK};
+    size_t nv = d->kind == NVN_GPU_POOL_IMAGE ? d->count : 0;
+    *out = calloc(1, sizeof **out + nv * sizeof(nvn_gpu_view)); (*out)->kind = d->kind; (*out)->count = d->count;
+    for (size_t i = 0; i < nv; i++)
+        if (d->items[i].state == NVN_GPU_POOL_READY) (*out)->views[i] = d->items[i].resource.view;
+    return (nvn_gpu_rc){NVN_GPU_OK};
 }
 // 每次绑表的记录（阶段、布局项号、表指针与它的种类 / 项数）：用例把 g_pool_bind_n 清零后读
 static struct { int st; uint32_t ent, kind, count; nvn_gpu_pool_table t; } g_pool_bind_log[16]; static int g_pool_bind_n;
 nvn_gpu_rc nvn_gpu_pool_bind(nvn_gpu_cmd c, nvn_gpu_stage st, uint32_t ent, nvn_gpu_pool_table t, nvn_gpu_err *err) {
     (void)c; (void)err; g_pool_binds++;
+    if (g_color_sample_test && st == NVN_GPU_SH_FS && ent == 0 && t && t->kind == NVN_GPU_POOL_IMAGE)
+        g_color_image_table = t;
     if (g_pool_bind_n < 16) {
         g_pool_bind_log[g_pool_bind_n].st = (int)st; g_pool_bind_log[g_pool_bind_n].ent = ent; g_pool_bind_log[g_pool_bind_n].t = t;
         g_pool_bind_log[g_pool_bind_n].kind = t ? t->kind : 0; g_pool_bind_log[g_pool_bind_n].count = t ? t->count : 0; g_pool_bind_n++;
@@ -2026,6 +2058,12 @@ nvn_gpu_rc nvn_gpu_pool_bind(nvn_gpu_cmd c, nvn_gpu_stage st, uint32_t ent, nvn_
     return (nvn_gpu_rc){NVN_GPU_OK};
 }
 void nvn_gpu_pool_release(nvn_gpu_pool_table t) { g_pool_releases++; free(t); }
+int nvn_gpu_pool_has_texture(nvn_gpu_pool_table t, nvn_gpu_tex tex) {
+    if (!t || t->kind != NVN_GPU_POOL_IMAGE || !tex) return 0;
+    for (uint32_t i = 0; i < t->count; i++)
+        if (nvn_gpu_view_texture(t->views[i]) == tex) return 1;
+    return 0;
+}
 
 // 整池数组的池快照（rp_pool_table）：
 //   期望（手算）：贴图池起点 0、池长 8，号 2 登记了一张 2D 贴图、其余没登记 → 8 项全 READY（没登记的给声明类型零贴图），号 2 是它自己的视图；
@@ -3457,6 +3495,96 @@ static void t_pass_clear_park_read(void) {   // 被读之前必须落地（正�
     CHECK(g_pd[0].w == 16 && g_pd[0].color[0].load == NVN_GPU_LOAD_CLEAR && g_pd[0].color[0].clear.f[0] == 0.5f);   // 落地通道在绘制通道之前
     CHECK(g_pd[1].w == 64 && g_pd[1].h == 36 && pd_zero_clear(&g_pd[1]) && g_pd[1].color[0].view != NULL);
     CHECK(p1[RP_PERF_P_PARK] == 1 && p1[RP_PERF_P_CLEARONLY] == 1);
+    pass_fresh();
+}
+
+static void put_clear_test_color(stream *s, float r, float g, float b) {
+    p_clear_color *cc = put(s, OP_CLEAR_COLOR, sizeof *cc);
+    cc->mask = 15; cc->rgba[0] = r; cc->rgba[1] = g; cc->rgba[2] = b; cc->rgba[3] = 1;
+}
+
+static void t_pass_clear_park_sample(void) {
+    enum { DIRECT, ALIAS, COLD_TARGET, ALIAS_REPEATED_CLEAR };
+    static const struct { const char *name; int slot, pool, alias, park; } cases[] = {
+        {"low", 5, 0, 0, 1},
+        {"separate-128", 128, 0, 0, 1},
+        {"pool", 0, 1, 0, 1},
+        {"alias", 5, 0, ALIAS, 1},
+        {"alias-unresolved-clear-target", 5, 0, COLD_TARGET, 1},
+        {"alias-repeated-clear", 5, 0, ALIAS_REPEATED_CLEAR, 1},
+        {"separate-128-park-off", 128, 0, 0, 0},
+        {"pool-park-off", 0, 1, 0, 0},
+        {"alias-park-off", 5, 0, ALIAS, 0},
+        {"alias-repeated-clear-park-off", 5, 0, ALIAS_REPEATED_CLEAR, 0},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        pass_fresh();
+        g_flag_clear_park = cases[i].park;
+        g_resolve_rc = 0;
+        g_color_sample_test = 1;
+        g_color_sample_index = cases[i].pool ? 2 : -1;
+        g_color_image_table = NULL;
+        tex_t src = mk_tex(1001, 0x4000, NVN_FORMAT_RGBA8, 1, 1, 1, 0);
+        tex_t alias = src; alias.serial = 1002;
+        tex_t dst = mk_tex(1003, 0x8000, NVN_FORMAT_RGBA8, 1, 1, 1, 0);
+        nvn_be_reg_tex(2, cases[i].alias != DIRECT ? &alias : &src, NULL);
+        samp_par sp = {0}; sp.minf = NVN_MIN_FILTER_NEAREST; sp.magf = NVN_MAG_FILTER_NEAREST;
+        nvn_be_reg_samp(1, &sp);
+        nvn_be_set_tex_pool_n(4);
+
+        stream init = {0};
+        const tex_t *sentinel = cases[i].alias == COLD_TARGET ? &alias : &src;
+        put_set_rt(&init, sentinel, NULL);
+        put_clear_test_color(&init, 1, 0, 0);
+        end(&init); submit1(&init); fake_complete(NVN_GPU_DONE_OK);
+        nvn_gpu_tex storage = rp_tex_backend_by_serial(sentinel->serial);
+        CHECK(storage && storage->px[0][0] == 0xff0000ffu);
+        if (cases[i].alias == COLD_TARGET) CHECK(!rp_tex_backend_by_serial(src.serial));
+
+        stream s = {0}; q_env(&s);
+        p_viewports *vp = put(&s, OP_VIEWPORTS, sizeof *vp);
+        vp->n = 1; vp->v[0][2] = vp->v[0][3] = 1;
+        nvn_gpu_layout_ent *e = &g_fprog.ent[NVN_GPU_SH_FS][0];
+        e->count = 1; e->access = NVN_GPU_ACC_R;
+        g_fprog.nent[NVN_GPU_SH_FS] = 1;
+        g_fprog.dtt[NVN_GPU_SH_FS][0] = NVN_TEXTURE_TARGET_2D + 1;
+        if (cases[i].pool) {
+            rp_S.tex_pool_n = 4;
+            rp_S.samp_pool_n = 2;
+            e->cls = NVN_GPU_RES_TEX; e->src_kind = NVN_RB_TEXP; e->count = 5;
+            nvn_gpu_layout_ent *se = e + 1;
+            se->cls = NVN_GPU_RES_SAMP; se->src_kind = NVN_RB_SAMPP; se->count = 3; se->binding = 1;
+            g_fprog.nent[NVN_GPU_SH_FS] = 2;
+        } else {
+            e->cls = NVN_GPU_RES_TEX_SAMP; e->src_kind = NVN_RB_TEX; e->src_reg = (uint16_t)cases[i].slot;
+            p_bind_handles *tex = put(&s, OP_BIND_TEX, sizeof *tex);
+            tex->stage = NVN_GPU_SH_FS; tex->first = cases[i].slot; tex->n = 1; tex->h[0] = 2;
+            if (cases[i].slot >= 128) {
+                e->src_reg2 = 0;
+                p_bind_handles *sam = put(&s, OP_BIND_SAMP, sizeof *sam);
+                sam->stage = NVN_GPU_SH_FS; sam->n = 1; sam->h[0] = 1u << 20;
+            } else tex->h[0] |= 1u << 20;
+        }
+        put_set_rt(&s, &src, NULL);
+        if (cases[i].alias == ALIAS_REPEATED_CLEAR) {
+            put_clear_test_color(&s, 1, 1, 0);
+            put_set_rt(&s, &alias, NULL);
+            put_clear_test_color(&s, 0, 0, 1);
+            put_set_rt(&s, &src, NULL);
+        }
+        put_clear_test_color(&s, 0, 1, 51.0f / 255.0f);
+        put_set_rt(&s, &dst, NULL); q_draw(&s); end(&s);
+        const int draws = g_gdraws;
+        submit1(&s); fake_complete(NVN_GPU_DONE_OK);
+        CHECK(g_gdraws == draws + 1 && !nvn_unimpl_kinds());
+        if (cases[i].alias) CHECK(rp_tex_backend_by_serial(alias.serial) == storage);
+        nvn_gpu_tex output = rp_tex_backend_by_serial(dst.serial);
+        uint32_t pixel = output ? output->px[0][0] : 0;
+        printf("clear-park sample=%s rgba=%08x expected=ff33ff00\n", cases[i].name, (unsigned)pixel);
+        CHECK(pixel == 0xff33ff00u);
+        g_color_sample_test = 0;
+    }
+    g_flag_clear_park = 1;
     pass_fresh();
 }
 // 逐笔日志读贴图首 8 字节必须经内核读（rp_draw.c dbg_peek）：采样的贴图在「CPU 不可访问 + 虚拟」池里（真机池标 0x2a1 = 虚拟 | 可压缩 |
@@ -7949,6 +8077,7 @@ int main(int argc, char **argv) {
     t_pass_clear_park();
     t_pass_clear_park_tail();
     t_pass_clear_park_read();
+    t_pass_clear_park_sample();
     t_drawlog_unreadable_tex_mem();
     t_fmt_filter_blend();
     t_clear_rect();

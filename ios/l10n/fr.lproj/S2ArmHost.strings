@@ -270,8 +270,9 @@
 "about.mode.unrecorded" = "Inconnu (ce package n'a pas enregistré de mode graphique)";
 "about.unknown" = "Inconnu";
 "app.fpsCap.ladder" = "Cette session ne peut pas maintenir 60 FPS de façon stable ; le jeu revient pour l'instant à sa fréquence native. Il repartira à 60 FPS la prochaine fois que vous ouvrirez le jeu.";
+"app.fpsCap.fast" = "Ce jeu tourne trop vite à 60 FPS ; il reste donc à 30 FPS.";
 "app.fpsCap.restored" = "60 FPS est rétabli.";
-"app.fpsCap.retry" = "Réessayer 60 FPS";
+"app.fpsCap.retry" = "Revenir à 60 FPS, sans baisse auto cette session";
 "app.mic.title" = "Micro";
 "app.mic.denied" = "Le jeu veut utiliser le micro, mais S2Arm n'a pas l'autorisation d'accès au micro : le jeu n'entend que du silence. Activez S2Arm dans Réglages › Confidentialité et sécurité › Micro, puis rouvrez le jeu.";
 "app.mic.failed" = "Le jeu veut utiliser le micro, mais le micro n'a pas pu être ouvert : le jeu n'entend que du silence.";
@@ -615,7 +616,8 @@
 
 /* 0.6.0 快照：游戏中菜单 */
 "vpad.snap.save" = "Sauvegarder cet instant";
-"vpad.snap.offAddress" = "Ce jeu a besoin de plus de plage d'adresses que le système de cet appareil ne peut en donner aux apps : il n'y a pas de place pour les instantanés, ils sont désactivés pour ce jeu ici. Cela n'a rien à voir avec le stockage ; le jeu fonctionne normalement.";
+"vpad.snap.offAddress" = "Cet appareil n'a pas assez de plage d'adresses mémoire pour contenir à la fois ce jeu et un instantané : les instantanés sont désactivés pour ce jeu ici. Cela n'a rien à voir avec le stockage ; le jeu fonctionne normalement.";
+"vpad.snap.offAddressNums" = " (le jeu demande %@ Go, l'instantané %@ Go, cet appareil peut donner %@ Go)";
 "vpad.snap.restore" = "Revenir à l’instant sauvegardé";
 "vpad.snap.saving" = "Sauvegarde de cet instant…";
 "vpad.snap.saved" = "Instant sauvegardé";

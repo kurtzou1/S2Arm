@@ -1695,6 +1695,41 @@ import S2ArmAppleAdapter
         }
     }
 
+    /// #1987 复审建议：所有游戏的默认文件坏了（作业层 defaultProblem）→ 弹窗提示一行，不静默退回标准键位；
+    ///   没坏 / 旧作业层不带这个字段 → 不提示；重新「设为默认」并保存后收掉（点了还没保存时还在）。期望手写
+    func testInputBrokenAllGamesDefaultShowsHintUntilReplaced() async throws {
+        // 提示是纯文字（不是控件），按渲染出来的字认：弹窗顶部有没有这句
+        func shown(_ window: NSWindow) throws -> Bool {
+            let host = try XCTUnwrap(window.contentView)
+            if let scroll = scrollViews(in: host).first(where: { $0.hasVerticalScroller }) {
+                scroll.contentView.scroll(to: CGPoint(x: 0, y: scroll.documentView?.isFlipped == false ? max(0, (scroll.documentView?.bounds.height ?? 0) - scroll.contentView.bounds.height) : 0))
+                scroll.reflectScrolledClipView(scroll.contentView)
+            }
+            host.layoutSubtreeIfNeeded()
+            return try renderedText(host, language: .en).map(\.text).joined(separator: " ").contains("default for all games could not")
+        }
+        for problem in [nil, false, true] as [Bool?] {
+            let fixture = try SettingsFixture()
+            defer { fixture.remove() }
+            fixture.runner.loadInputDefault = NSNull()
+            fixture.runner.loadInputDefaultProblem = problem
+            let (host, window) = try await render(AnyView(InputSettingsSheet(model: fixture.model, gameID: "fixture")), fixture: fixture, language: .en)
+            fixture.navigation.source.controllers = { [] }; fixture.navigation.attach(window)
+            defer { fixture.navigation.detach(); window.close() }
+            try await Task.sleep(for: .milliseconds(100))
+            XCTAssertEqual(try shown(window), problem == true, "defaultProblem=\(String(describing: problem))")
+            guard problem == true else { continue }
+            try snapshot(host, "input-default-problem-en")
+            fixture.navigation.focus("input.manage.setDefault"); fixture.navigation.handle(.confirm)
+            try await Task.sleep(for: .milliseconds(100))
+            XCTAssertTrue(try shown(window), "点了「设为默认」还没保存：默认文件还是坏的，提示留着")
+            fixture.navigation.focus("input.save"); fixture.navigation.handle(.confirm)
+            for _ in 0..<100 where !fixture.runner.requests.contains(where: { $0["operation"] as? String == "setDefaultInput" }) { try await Task.sleep(for: .milliseconds(10)) }
+            try await Task.sleep(for: .milliseconds(100))
+            XCTAssertFalse(try shown(window), "设为默认并保存后默认文件已替换，提示收掉")
+        }
+    }
+
     /// #1987：玩家 2–4「设为所有游戏的默认」不可用；还沿用玩家 1、没改就保存 → resetInput（继续沿用玩家 1，不单独写一份）；
     ///   「恢复默认」回到玩家 1 存着的那套再保存同样回到沿用。期望手写
     func testInputPlayer2CannotSetDefaultAndFollowsPlayer1() async throws {
@@ -2577,6 +2612,12 @@ private final class SettingsRunner: JobProcessRunner {
         get { lock.withLock { inputDefault } }
         set { lock.withLock { inputDefault = newValue } }
     }
+    /// loadInput 回的 defaultProblem（默认文件读不出或不合规）：nil = 不带这个字段（旧作业层）
+    private var inputDefaultProblem: Bool? = nil
+    var loadInputDefaultProblem: Bool? {
+        get { lock.withLock { inputDefaultProblem } }
+        set { lock.withLock { inputDefaultProblem = newValue } }
+    }
     private var follows = false
     var saveInputFollows: Bool {
         get { lock.withLock { follows } }
@@ -2629,6 +2670,7 @@ private final class SettingsRunner: JobProcessRunner {
         if request["operation"] as? String == "loadInput" {   // #2081：缺省四位标准键位；#1987：设了 loadInputDefault 才带 default
             result = ["players": inputRows]
             if let dflt = loadInputDefault { result["default"] = dflt }
+            if let problem = loadInputDefaultProblem { result["defaultProblem"] = problem }
         }
         if request["operation"] as? String == "saveInput" { result = ["followsDefault": saveInputFollows] }
         if request["operation"] as? String == "savePrevious" { result = ["hasPrevious": true, "saveIds": ["0000000000000001"], "trouble": previousTrouble] }

@@ -116,8 +116,8 @@ extension LauncherView {
         Button { displayFor = game.id } label: { Label(txt("library.menu.launchSettings"), systemImage: "gearshape") }.disabled(!reachable)
         Divider()
         Button { model.reveal(game) } label: { Label(txt("library.menu.reveal"), systemImage: "folder") }.disabled(game.location.path.isEmpty)
-        Button { moveGame(game) } label: { Label(txt("library.menu.move"), systemImage: "arrow.right.doc.on.clipboard") }.disabled(!reachable || game.location.state == "none" || model.busy)
-        Button { model.clearCache(game) } label: { Label(txt("library.menu.clearCache"), systemImage: "sparkles") }.disabled(!reachable || model.busy)
+        Button { moveGame(game) } label: { Label(txt("library.menu.move"), systemImage: "arrow.right.doc.on.clipboard") }.disabled(!reachable || game.location.state == "none" || model.gameJobHeld(game.id))   // 这款被占着才灰（出别的款照常搬）
+        Button { model.clearCache(game) } label: { Label(txt("library.menu.clearCache"), systemImage: "sparkles") }.disabled(!reachable || model.busy)   // 整库口径（clearCache 注释）
         Divider()
         Button(role: .destructive) { deleteFor = game } label: { Label(txt("game.delete"), systemImage: "trash") }
     }
@@ -139,7 +139,8 @@ extension LauncherView {
     /// 卡片和大图上的可用状态。设备签名的到期时间在设备操作区显示。
     func statusLine(_ game: GameSummary) -> (text: String, color: Color) {
         if model.playHolds(game.id) { return (loc.t("s2arm.library.running"), LauncherPalette.building) }   // 「运行中」按游戏槽判
-        if model.mainBusy && model.session?.gameID == game.id { return (loc.t("s2arm.job.running"), LauncherPalette.building) }
+        if model.queuedDeletes[game.id] != nil { return (loc.t("s2arm.notice.delete.queued"), LauncherPalette.building) }   // 出包时点了删：等出完就删
+        if model.mainJobs.contains(where: { $0.gameID == game.id }) { return (loc.t("s2arm.job.running"), LauncherPalette.building) }   // 主槽或按款作业槽在动它
         if model.exportQueue.contains(where: { $0.game.id == game.id }) { return (txt("export.status.queued"), LauncherPalette.building) }
         // 存放位置（游戏库结构 v3）：移动硬盘没插 → 灰色「未连接」，插回来自动恢复；文件夹没了 → 红字，点卡片重新指定或移除
         // 未连接给具体路径（同出包页下拉框）：卷名会重名（内置盘一律「系统盘」），看不出是哪个位置没连上

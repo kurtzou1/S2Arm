@@ -161,6 +161,8 @@ struct LaunchSettingsSheet: View {
     private var lang: String { loc.lang.sharedCode }
     private func t(_ id: String) -> String { BackendText.launcherText(id, language: lang) }
     private var gameName: String { model.games.first { $0.id == gameID }?.name ?? gameID }
+    /// 这款的文件正被别的作业占着（S2ArmLauncherModel.gameFilesHeld）：设置项、金手指、mod 先不让改；别的款在出包时照常能改（#2191）
+    private var held: Bool { model.gameFilesHeld(gameID) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -222,7 +224,7 @@ struct LaunchSettingsSheet: View {
             patches: p == nil ? [] : patches.map { SGradeToggle(id: $0.id, label: $0.label, detail: $0.result.isEmpty ? "" : loc.backend($0.result), on: flag("patch." + $0.id, $0.enabled)) },
             cheatsTitle: c?.text(lang) ?? "", cheatsNote: cheats.isEmpty && !cheatsReason.isEmpty ? loc.backend(cheatsReason) : (c?.detail(lang) ?? ""),
             cheats: c == nil ? [] : cheats.map { SGradeToggle(id: $0.id, label: $0.name, detail: cheatDetail($0), on: flag("cheat." + $0.id, $0.enabled), enabled: $0.ok) },
-            importTitle: t("display.cheats.import"), busy: model.busy,
+            importTitle: t("display.cheats.import"), busy: held,
             onPatch: { id, on in submit(["patch." + id: on]) { await load(nil, patches: [id: on]) } },
             onCheat: { id, on in if confirmShared(id, on) { submit(["cheat." + id: on]) { await load(nil, cheats: [id: on]) } } },
             onImport: { importCheats() },
@@ -244,12 +246,12 @@ struct LaunchSettingsSheet: View {
                      note: option?.available == false ? loc.backend(option?.reason ?? "") : note?.text ?? item.detail(lang), dim: note?.disabled == true) {
             if let reenable {
                 Button(t("sgrade.state.reenable")) { submit { await self.reenable(reenable) } }.controllerButtonStyle(LauncherSecondaryButtonStyle())
-                    .accessibilityIdentifier("launch." + item.id + ".reenable").disabled(model.busy)
+                    .accessibilityIdentifier("launch." + item.id + ".reenable").disabled(held)
             } else {
                 Toggle("", isOn: Binding(get: { on }, set: { v in submit(["opt." + item.id: v]) { await load([item.id: v]) } }))
                     .toggleStyle(LauncherSwitchStyle()).labelsHidden().accessibilityLabel(item.text(lang))
                     .accessibilityIdentifier("launch." + item.id)
-                    .disabled(option?.available != true || note?.disabled == true || model.busy)
+                    .disabled(option?.available != true || note?.disabled == true || held)
             }
         }
     }
@@ -287,20 +289,20 @@ struct LaunchSettingsSheet: View {
             ForEach(patches) { p in
                 CardRow("  " + p.label, detail: p.result.isEmpty ? "" : loc.backend(p.result)) {
                     Toggle("", isOn: Binding(get: { flag("patch." + p.id, p.enabled) }, set: { on in submit(["patch." + p.id: on]) { await load(nil, patches: [p.id: on]) } }))
-                        .toggleStyle(LauncherSwitchStyle()).labelsHidden().accessibilityLabel(p.label).disabled(model.busy)
+                        .toggleStyle(LauncherSwitchStyle()).labelsHidden().accessibilityLabel(p.label).disabled(held)
                 }
             }
         case "cheats":
             CardRow(title, detail: cheats.isEmpty && !cheatsReason.isEmpty ? loc.backend(cheatsReason) : item.detail(lang)) {
                 Button(t("display.cheats.import")) { importCheats() }.controllerButtonStyle(LauncherSecondaryButtonStyle())
-                    .accessibilityIdentifier("launch.cheats.import").disabled(model.busy)
+                    .accessibilityIdentifier("launch.cheats.import").disabled(held)
             }
             ForEach(cheats) { ch in
                 CardRow("  " + ch.name, detail: cheatDetail(ch)) {
                     Toggle("", isOn: Binding(get: { flag("cheat." + ch.id, ch.enabled) }, set: { on in if confirmShared(ch.id, on) { submit(["cheat." + ch.id: on]) { await load(nil, cheats: [ch.id: on]) } } }))
                         .toggleStyle(LauncherSwitchStyle()).labelsHidden().accessibilityLabel(ch.name)
                         .accessibilityIdentifier("launch.cheat." + ch.id)
-                        .disabled(!ch.ok || model.busy)
+                        .disabled(!ch.ok || held)
                 }
             }
         case "text":
@@ -312,17 +314,17 @@ struct LaunchSettingsSheet: View {
                 .textFieldStyle(.roundedBorder).frame(width: 150).accessibilityLabel(title)
                 .accessibilityIdentifier("launch." + item.id)
                 .onSubmit { submit { await load([item.id: options[item.id]?.value as? String ?? ""]) } }
-                .disabled(model.busy)
+                .disabled(held)
                 Button(t("input.save")) {
                     submit { await load([item.id: options[item.id]?.value as? String ?? ""]) }
-                }.controllerButtonStyle(LauncherSecondaryButtonStyle()).disabled(model.busy)
+                }.controllerButtonStyle(LauncherSecondaryButtonStyle()).disabled(held)
             }
         case "mods":
             CardRow(title, detail: modsNote(item)) {
                 HStack(spacing: 10) {
                     ModHelpButton(text: t("mods.help"), label: t("mods.help.label"), id: "launch.mods.help")   // mod 格式说明（11-17 维护者：玩家不知道支持什么、去哪找）
                     Button(t("display.mods.import")) { importMods() }.controllerButtonStyle(LauncherSecondaryButtonStyle())
-                        .controllerID("launch.mods.import").disabled(model.busy)
+                        .controllerID("launch.mods.import").disabled(held)
                 }
             }
             ForEach(mods.items) { m in
@@ -330,10 +332,10 @@ struct LaunchSettingsSheet: View {
                             .replacingOccurrences(of: "{1}", with: ByteCountFormatter.string(fromByteCount: m.bytes, countStyle: .file))) {
                     HStack(spacing: 10) {
                         Button(t("display.mods.remove")) { submit { await load(nil, modsRemove: [m.id]) } }.controllerButtonStyle(LauncherSecondaryButtonStyle())
-                            .controllerID("launch.mods.remove." + m.id).disabled(model.busy)
+                            .controllerID("launch.mods.remove." + m.id).disabled(held)
                         Toggle("", isOn: Binding(get: { flag("mod." + m.id, m.enabled) }, set: { on in submit(["mod." + m.id: on]) { await load(nil, modsEnable: [m.id: on]) } }))
                             .toggleStyle(LauncherSwitchStyle()).labelsHidden().accessibilityLabel(m.id)
-                            .accessibilityIdentifier("launch.mods.toggle." + m.id).disabled(model.busy)
+                            .accessibilityIdentifier("launch.mods.toggle." + m.id).disabled(held)
                     }
                 }
             }
@@ -347,19 +349,19 @@ struct LaunchSettingsSheet: View {
                                  selection: current ?? "", label: title,
                                  disabledOptions: Set(option?.blocked ?? [])) { v in submit(["opt." + item.id: v]) { await load([item.id: v]) } }
                 .controllerID("launch." + item.id)
-                .disabled(option?.available != true || model.busy)
+                .disabled(option?.available != true || held)
             }
         default:
             let option = options[item.id], state = stateLine(item.id)
             CardRow(title, detail: option?.available == false ? loc.backend(option?.reason ?? "") : item.detail(lang), detail2: state?.text ?? "") {
                 if let key = state?.reenable {
                     Button(t("sgrade.state.reenable")) { submit { await reenable(key) } }.controllerButtonStyle(LauncherSecondaryButtonStyle())
-                        .accessibilityIdentifier("launch." + item.id + ".reenable").disabled(model.busy)
+                        .accessibilityIdentifier("launch." + item.id + ".reenable").disabled(held)
                 } else if option?.hidden != true {   // 包里没有这一类的补丁：只写为什么，不给开关
                     Toggle("", isOn: Binding(get: { value(item.id) as? Bool ?? false }, set: { on in submit(["opt." + item.id: on]) { await load([item.id: on]) } }))
                         .toggleStyle(LauncherSwitchStyle()).labelsHidden().accessibilityLabel(title)
                         .accessibilityIdentifier("launch." + item.id)
-                        .disabled(option?.available != true || model.busy)
+                        .disabled(option?.available != true || held)
                 }
             }
         }

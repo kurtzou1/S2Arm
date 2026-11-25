@@ -1,0 +1,171 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceDriver.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceDriver.cs
+index 4df8982..8499ed3 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceDriver.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceDriver.cs
+@@ -167,16 +167,24 @@ namespace Ryujinx.Audio.Backends.Apple
+             return ProbeRealChannels(deviceType);
+         }
+ 
+-        // 单测钩子（产品路径恒 null，只有 InternalsVisibleTo 的测试程序集碰得到）：探测发生在构造函数里，
+-        //   注入只能走静态——测试先设它再构造驱动、测完清回 null。四个读数：6 声道队列试建 rc、设备真实
+-        //   声道数、声道读 rc、5.1 布局设置 rc。钉「未选择 = 按设备自动」的缺省语义用（评审 11-16：期望按
+-        //   main 的 #577 判据写，不按新代码推）
++        // 单测钩子（产品路径恒 null，只有 InternalsVisibleTo 的测试程序集碰得到）：注入只替换原生调用结果，
++        //   队列 / 布局计数器由与产品路径同一段流程记录；测试先设它再构造驱动、测完清回 null。
+         internal static (int QueueRc, uint Channels, int ChannelsRc, int LayoutRc)? S2ATestProbe;
++        internal static int S2ATestProbeFirstQueueChannels;
++        internal static int S2ATestProbeSurroundQueueChannels;
++        internal static int S2ATestProbeLayoutCalls;
+ 
+-        // 真实声道判据（#577）：Auto（未显式选择）与 external 共用
++        internal static bool NeedsSurroundProbe(int queueRc, int channelsRc, uint channels) =>
++            queueRc == 0 && channelsRc == 0 && channels >= 6;
++
++        // 真实声道判据（#577）：Auto（未显式选择）与 external 共用。先用 2 声道队列只读设备声道数；
++        //   只有设备确实 ≥6 声道才另建 6 声道队列验布局，避免在 2 声道设备上写 5.1 布局影响自动模式输出。
+         private bool ProbeRealChannels(AppleAudioDeviceType deviceType)
+         {
+             string source = AppleAudioDeviceTypeSelector.DeviceName(deviceType);
++            S2ATestProbeFirstQueueChannels = 0;
++            S2ATestProbeSurroundQueueChannels = 0;
++            S2ATestProbeLayoutCalls = 0;
+ 
+             try
+             {
+@@ -184,30 +192,35 @@ namespace Ryujinx.Audio.Backends.Apple
+                 uint deviceChannels;
+                 int channelsResult;
+                 int layoutResult;
+-
+-                if (S2ATestProbe is { } injected)
+-                {
+-                    (queueRc, deviceChannels, channelsResult, layoutResult) = injected;
+-                }
+-                else
+-                {
+-                    AudioStreamBasicDescription format =
+-                        GetAudioFormat(SampleFormat.PcmFloat, Constants.TargetSampleRate, 6);
+-
+-                    queueRc = AudioQueueNewOutput(
++                nint testQueue = 0;
++                var injected = S2ATestProbe;
++                AudioStreamBasicDescription format =
++                    GetAudioFormat(SampleFormat.PcmFloat, Constants.TargetSampleRate, 2);
++                S2ATestProbeFirstQueueChannels = (int)format.ChannelsPerFrame;
++
++                queueRc = injected.HasValue
++                    ? injected.Value.QueueRc
++                    : AudioQueueNewOutput(
+                         ref format,
+                         Marshal.GetFunctionPointerForDelegate(_probeCallback),
+                         nint.Zero,
+                         nint.Zero,
+                         nint.Zero,
+                         0,
+-                        out nint testQueue);
++                        out testQueue);
+ 
+-                    deviceChannels = 0;
+-                    channelsResult = -1;
+-                    layoutResult = -1;
++                deviceChannels = 0;
++                channelsResult = -1;
++                layoutResult = -1;
+ 
+-                    if (queueRc == 0)
++                if (queueRc == 0)
++                {
++                    if (injected.HasValue)
++                    {
++                        deviceChannels = injected.Value.Channels;
++                        channelsResult = injected.Value.ChannelsRc;
++                    }
++                    else
+                     {
+                         uint size = sizeof(uint);
+                         channelsResult = AudioQueueGetProperty(
+@@ -215,7 +228,27 @@ namespace Ryujinx.Audio.Backends.Apple
+                             kAudioQueueDeviceProperty_NumberChannels,
+                             out deviceChannels,
+                             ref size);
++                        AudioQueueDispose(testQueue, true);
++                    }
++                }
+ 
++                if (NeedsSurroundProbe(queueRc, channelsResult, deviceChannels))
++                {
++                    format = GetAudioFormat(SampleFormat.PcmFloat, Constants.TargetSampleRate, 6);
++                    S2ATestProbeSurroundQueueChannels = (int)format.ChannelsPerFrame;
++                    queueRc = injected.HasValue
++                        ? injected.Value.QueueRc
++                        : AudioQueueNewOutput(
++                            ref format,
++                            Marshal.GetFunctionPointerForDelegate(_probeCallback),
++                            nint.Zero,
++                            nint.Zero,
++                            nint.Zero,
++                            0,
++                            out testQueue);
++
++                    if (queueRc == 0)
++                    {
+                         AudioChannelLayout layout = new AudioChannelLayout
+                         {
+                             AudioChannelLayoutTag = kAudioChannelLayoutTag_MPEG_5_1_A,
+@@ -223,19 +256,26 @@ namespace Ryujinx.Audio.Backends.Apple
+                             NumberChannelDescriptions = 0
+                         };
+ 
+-                        layoutResult = AudioQueueSetProperty(
+-                            testQueue,
+-                            kAudioQueueProperty_ChannelLayout,
+-                            ref layout,
+-                            (uint)Marshal.SizeOf<AudioChannelLayout>());
+-
+-                        AudioQueueDispose(testQueue, true);
++                        S2ATestProbeLayoutCalls = 1;
++                        if (injected.HasValue)
++                        {
++                            layoutResult = injected.Value.LayoutRc;
++                        }
++                        else
++                        {
++                            layoutResult = AudioQueueSetProperty(
++                                testQueue,
++                                kAudioQueueProperty_ChannelLayout,
++                                ref layout,
++                                (uint)Marshal.SizeOf<AudioChannelLayout>());
++                            AudioQueueDispose(testQueue, true);
++                        }
+                     }
+                 }
+ 
+                 if (queueRc != 0)
+                 {
+-                    Console.Error.WriteLine($"[S2A 声音] {source}：试建 6 声道队列失败：{queueRc}（按立体声上报）");
++                    Console.Error.WriteLine($"[S2A 声音] {source}：试建探测队列失败：{queueRc}（按立体声上报）");
+                     return false;
+                 }
+ 
+@@ -245,13 +285,19 @@ namespace Ryujinx.Audio.Backends.Apple
+                     return false;
+                 }
+ 
+-                if (deviceChannels >= 6 && layoutResult == 0)
++                if (deviceChannels < 6)
++                {
++                    Console.Error.WriteLine($"[S2A 声音] {source}：输出设备 {deviceChannels} 声道：上报立体声，由游戏 / 渲染器按自己的系数下混（不建 6 声道队列、不写 5.1 布局）");
++                    return false;
++                }
++
++                if (layoutResult == 0)
+                 {
+                     Console.Error.WriteLine($"[S2A 声音] {source}：输出设备 {deviceChannels} 声道：上报 5.1，运行期 6 声道会话声明 MPEG_5_1_A 布局");
+                     return true;
+                 }
+ 
+-                Console.Error.WriteLine($"[S2A 声音] {source}：输出设备 {deviceChannels} 声道：上报立体声，由游戏 / 渲染器按自己的系数下混（5.1 布局设置 rc={layoutResult}）");
++                Console.Error.WriteLine($"[S2A 声音] {source}：输出设备 {deviceChannels} 声道：5.1 布局设置 rc={layoutResult}（按立体声上报）");
+                 return false;
+             }
+             catch

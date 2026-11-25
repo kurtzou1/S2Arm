@@ -1692,6 +1692,7 @@
   "s2arm.notice.delete.running": "{0} を削除中…",
   "s2arm.notice.delete.done": "{0} を削除しました。セーブデータと元のゲームファイルは保持されています。",
   "s2arm.notice.delete.failed": "{0} を削除できませんでした:{1}",
+  "s2arm.notice.delete.queued": "このゲームのエクスポートが終わったら削除します",
   "s2arm.notice.clearCache.running": "{0} のキャッシュをクリア中…",
   "s2arm.notice.clearCache.done": "{0} のキャッシュをクリアしました。",
   "s2arm.notice.clearCache.failed": "{0} のキャッシュをクリアできませんでした:{1}",

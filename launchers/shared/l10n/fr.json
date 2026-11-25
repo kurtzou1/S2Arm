@@ -62,6 +62,7 @@
   "input.title": "Touches",
   "input.subtitle": "Enregistrez vos modifications ; elles s'appliqueront au prochain démarrage du jeu.",
   "input.loadProblem": "Les touches enregistrées pour ce jeu n'ont pas pu être lues ; les touches par défaut sont affichées. L'enregistrement les remplacera.",
+  "input.defaultProblem": "Les touches par défaut pour tous les jeux n'ont pas pu être lues ; les jeux sans touches propres utilisent les touches standard. Cliquez sur « Définir par défaut » pour le Joueur 1 puis enregistrez pour les remplacer.",
   "input.player": "Joueur",
   "input.player1": "Joueur 1",
   "input.player2": "Joueur 2",

@@ -1452,3 +1452,37 @@ nvn_gpu_tex rp_tex_backend_by_serial(uint64_t serial) {
     pthread_mutex_unlock(&g_rmu);
     return g;
 }
+
+int rp_tex_is_read(const tex_t *t, const rp_pass_read *reads, int n) {
+    if (!t || !t->serial) return 0;
+    pthread_mutex_lock(&g_rmu);
+    struct rp_tex *x = nvn_hm_get(&g_by_serial, &t->serial);
+    if (!x && t->pool) {
+        alias_key key; alias_key_of(&key, t);
+        x = nvn_hm_get(&g_alias, &key);
+        int sparse = 0;
+        if (x && cpu_content(t, &sparse)) x = NULL;
+    }
+    // 持锁查询到结束，期间不能由客体线程 Finalize 底图。
+    int read = 0;
+    if (x) for (int i = 0; i < n && !read; i++)
+        read = reads[i].tex == x->g || (reads[i].pool && nvn_gpu_pool_has_texture(reads[i].pool, x->g));
+    pthread_mutex_unlock(&g_rmu);
+    return read;
+}
+
+int rp_tex_storage_aliases(const tex_t *a, const tex_t *b) {
+    if (!a || !b || !a->serial || !b->serial || a->serial == b->serial ||
+        !a->pool || a->pool != b->pool || a->off != b->off) return 0;
+    alias_key ka, kb;
+    alias_key_of(&ka, a); alias_key_of(&kb, b);
+    if (memcmp(&ka, &kb, sizeof ka)) return 0;
+    pthread_mutex_lock(&g_rmu);
+    const struct rp_tex *x = nvn_hm_get(&g_by_serial, &a->serial);
+    const struct rp_tex *y = nvn_hm_get(&g_by_serial, &b->serial);
+    int sparse = 0;
+    int shared = x && y ? x == y :
+        (x ? x->in_alias : !cpu_content(a, &sparse)) && (y ? y->in_alias : !cpu_content(b, &sparse));
+    pthread_mutex_unlock(&g_rmu);
+    return shared;
+}

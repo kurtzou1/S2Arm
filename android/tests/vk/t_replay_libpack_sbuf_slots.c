@@ -111,7 +111,7 @@ uint64_t rp_write_mark(void) { return 0; }
 int rp_write_touched(uint64_t mark, uint64_t addr, uint64_t len) { (void)mark; (void)addr; (void)len; return 1; }
 void rp_pass_prepare_draw(nvn_gpu_cmd c, uint32_t color_write_mask) { (void)c; (void)color_write_mask; }
 void rp_pass_want_layered(nvn_gpu_cmd c, int layered) { (void)c; (void)layered; }   // main efc48c8b2：rp_draw 每笔绘制都调，直接链 rp_draw.c 的用例要补空替身
-void rp_pass_land_reads(nvn_gpu_cmd c, const tex_t *const *ts, int n) { (void)c; (void)ts; (void)n; }
+void rp_pass_land_reads(nvn_gpu_cmd c, const rp_pass_read *ts, int n) { (void)c; (void)ts; (void)n; }
 int rp_pass_parked(void) { return 0; }
 static int pass_began;   // 现编没有结果 → 没画 → 没开通道：读回与收通道只在开过通道时做
 int rp_pass_begin(nvn_gpu_cmd c) {

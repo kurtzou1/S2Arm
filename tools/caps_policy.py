@@ -394,6 +394,15 @@ def widen_measured(repo, root, pid, bid, target='apple'):
 #   widen（我方满屏层）一律关——社区宽屏补丁走自己的开关（runtime/src/cpatch.c、widen.c ws_yield），不看这一键。
 #   S2A_CAPS_OWN=1 回到旧口径（我方帧率表 / 全引擎放开 / 我方满屏各来源照旧算），只给内部对照用
 def patch_only(): return os.environ.get('S2A_CAPS_OWN') != '1'
+# 社区帧率补丁缺省开要本款本构建号的逻辑速度同局 A/B 绿（11-23 维护者，起因 #2120：01007EF00011E000 带帧率补丁 2 倍速）——补丁版本精确命中只说明字节对得上，
+#   不说明游戏逻辑按真实时间推进。没测过 / 判红的照样进包，缺省原帧率，玩家手动开。只认 11-13 只用社区补丁之后的结论：之前的同局 A/B 切的是我方
+#   60 帧层（放开出图间隔），不是补丁（01007EF00011E000 11-07 那条绿就是这样，不能拿来放开补丁）
+PATCH_AB_SINCE = '2026-11-13'
+def patch_ab_green(repo, pid, bid):   # 本款本构建号的同局 A/B 结论是「绿」且日期 ≥ PATCH_AB_SINCE → 那一行；否则 None
+    return patch_ab(repo, pid, bid, '绿')
+def patch_ab(repo, pid, bid, want):   # 本款本构建号最新一条同局 A/B 结论是 want（绿 / 红）且日期 ≥ PATCH_AB_SINCE → 那一行；否则 None
+    a = ab_row(repo, pid, bid) if pid and bid else None
+    return a if a and a.get('结论') == want and (a.get('日期') or '') >= PATCH_AB_SINCE else None
 
 
 def decide(repo, root, all_caps=False, target='apple'):
@@ -410,7 +419,13 @@ def decide(repo, root, all_caps=False, target='apple'):
             sw = strong(repo, pid, bid, signal_hashes(repo_reader(repo), target))[0]['widen']
         widen = (1, '缺省开：本包在宽屏已验证名单（没有社区满屏补丁时用我方通用满屏，维护者 11-15 两者合成一套）') if wv and not sw else \
             (0, sw or '16:9：没有社区满屏补丁、也不在宽屏已验证名单（维护者 11-15 两者合成一套：验过的才开我方通用满屏）')
-        return {'fps60': (1, '默认开：来源 社区帧率补丁（只用社区补丁）') if fps else (0, '原帧率：没有社区帧率补丁（只用社区补丁，维护者 11-13 撤掉我方 60 帧）'),
+        ab = patch_ab_green(repo, pid, bid) if fps else None
+        # 判红（11-24 #2201 维护者）：原因带「逻辑速度同局 A/B 红」，宿主据此在档位梯子压回时不给「再试 60 帧」（runtime/src/caps.c s2a_caps_fps_fast）
+        red = patch_ab(repo, pid, bid, '红') if fps and not ab else None
+        return {'fps60': (1, f'默认开：来源 社区帧率补丁，逻辑速度同局 A/B 绿（ρ {ab.get("ρ")}、q {ab.get("q")}，{ab.get("日期")}）') if ab else
+                         (0, f'原帧率：有社区帧率补丁、本构建号逻辑速度同局 A/B 红：开 60 帧游戏会加速（ρ {red.get("ρ")}、q {red.get("q")}，{red.get("日期")}；补丁照样进包，玩家可手动开）') if red else
+                         (0, '原帧率：有社区帧率补丁、本构建号没有逻辑速度同局 A/B 绿（补丁照样进包，玩家可手动开）') if fps else
+                         (0, '原帧率：没有社区帧率补丁（只用社区补丁，维护者 11-13 撤掉我方 60 帧）'),
                 'widen': widen, 'fps60_display': 0}
     if pid and bid and native60(repo, pid, bid): src['fps60'].append('游戏原生 60 帧')
     st, stale = ({'fps60': None, 'widen': None}, {'fps60': [], 'widen': []}) if all_caps or not (pid and bid) else strong(repo, pid, bid, signal_hashes(repo_reader(repo), target))

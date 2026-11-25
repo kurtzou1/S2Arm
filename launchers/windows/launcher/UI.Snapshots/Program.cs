@@ -48,7 +48,9 @@ var walkProbe = args.Length > 0 && args[0] == "--walk-probe";
 var coverProbe = args.Length > 0 && args[0] == "--cover-probe";
 // --endjob-probe <目录>：出包客户端抛 catch 列表之外的异常时，收尾照样撤作业登记、按钮恢复（#2191，EndJobProbe.cs）
 var endJobProbe = args.Length > 0 && args[0] == "--endjob-probe";
-if (reportProbe || buildRouteProbe || dismissProbe || installActionProbe || detailsProbe || consoleProbe || updateExportProbe || walkProbe || confirmProbe || coverProbe || endJobProbe) args = args[1..];
+// --pack-mutex-probe <目录>：出包时只挡正在出的那一款（#2191，PackMutexProbe.cs）
+var packMutexProbe = args.Length > 0 && args[0] == "--pack-mutex-probe";
+if (reportProbe || buildRouteProbe || dismissProbe || installActionProbe || detailsProbe || consoleProbe || updateExportProbe || walkProbe || confirmProbe || coverProbe || endJobProbe || packMutexProbe) args = args[1..];
 var outDir = args.Length > 0 ? args[0] : Path.Combine(
     Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
     ".s2arm/run/s2arm/cmdr/evidence/launcher/win");
@@ -75,6 +77,7 @@ if (consoleProbe) { Environment.Exit(ConsoleProbe.Run(outDir)); }
 if (updateExportProbe) { Environment.Exit(UpdateExportProbe.Run(outDir)); }
 if (coverProbe) { Environment.Exit(CoverProbe.Run(outDir)); }
 if (endJobProbe) { Environment.Exit(EndJobProbe.Run(outDir)); }
+if (packMutexProbe) { Environment.Exit(PackMutexProbe.Run(outDir)); }
 if (walkProbe) { Environment.Exit(WalkProbe.Run(outDir)); }
 
 // ── 统一夹具游戏（不用固定游戏名字符串以外的占位）────────────────────

@@ -90,6 +90,8 @@ int rp_tex_snap_by_id(int i,tex_t *t,view_t *v,int *h){(void)i;(void)t;(void)v;(
 uint64_t rp_tex_reg_gen(void){return 1;}uint64_t rp_tex_fact_sig(const uint64_t *h,int n,int b,int c){(void)h;(void)n;(void)b;(void)c;return 0;}
 void rp_tex_mark_gpu_written(const tex_t *t){(void)t;}int rp_tex_debug_state(uint64_t s){(void)s;return 0;}
 nvn_gpu_tex rp_tex_backend_by_serial(uint64_t s){for(int i=0;i<3;i++)if(textures[i].serial==s)return images[i];return NULL;}
+int rp_tex_is_read(const tex_t *t,const rp_pass_read *reads,int n){(void)t;(void)reads;(void)n;REQUIRE(0);return 0;} // 此夹具没有采样或图像绑定。
+int rp_tex_storage_aliases(const tex_t *a,const tex_t *b){(void)a;(void)b;return 0;}
 nvn_gpu_tex rp_tex_resolve(const tex_t *t,nvn_gpu_cmd c){(void)c;REQUIRE(t);nvn_gpu_tex g=rp_tex_backend_by_serial(t->serial);REQUIRE(g);return g;}
 nvn_gpu_view rp_view_for(const tex_t *t,const view_t *v,nvn_gpu_cmd c){(void)c;REQUIRE(t && !v);for(int i=0;i<3;i++)if(textures[i].serial==t->serial)return views[i];REQUIRE(0);return NULL;}
 nvn_gpu_view rp_view_for_attach(const tex_t *t,const view_t *v,nvn_gpu_cmd c){return rp_view_for(t,v,c);}

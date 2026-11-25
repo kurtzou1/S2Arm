@@ -350,7 +350,8 @@ extension LauncherView {
     private func homeReturnSlot(_ game: GameSummary) -> S2ArmLauncherModel.Slot? {
         if game.playable, model.canPlay(game.id) { return nil }
         if model.playBusy, game.playable || model.playHolds(game.id) { return .game }
-        return model.mainBusy ? .main : nil
+        if model.mainBusy { return .main }
+        return model.sideJobs.first { $0.session.phase == .running || $0.session.phase == .stopping }.map { .side($0.id) }   // 主槽出完、别的款还在搬：那一行在页顶
     }
     private func homePrimarySymbol(_ game: GameSummary) -> String {
         if homeReturnSlot(game) != nil { return "arrow.up.forward.app" }
@@ -393,6 +394,7 @@ extension LauncherView {
             model.sessionHidden = false
             if model.batchRunning { model.batchShown = true }
             return
+        case .side?: return   // 按款作业的进度行就在页顶（LauncherView.sideJobsBar），不换页
         case nil: break
         }
         if game.location.state == "missing" { missingFor = game; return }

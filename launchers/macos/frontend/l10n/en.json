@@ -1692,6 +1692,7 @@
   "s2arm.notice.delete.running": "Deleting {0}…",
   "s2arm.notice.delete.done": "Deleted {0}, keeping saves and original game files",
   "s2arm.notice.delete.failed": "Couldn't delete {0}: {1}",
+  "s2arm.notice.delete.queued": "Will delete this game once its export finishes",
   "s2arm.notice.clearCache.running": "Clearing the cache of {0}…",
   "s2arm.notice.clearCache.done": "Cleared the cache of {0}",
   "s2arm.notice.clearCache.failed": "Couldn't clear the cache of {0}: {1}",

@@ -469,11 +469,12 @@ public sealed partial class EnvironmentWindow
         menu.Items.Add(new Separator());
         Add(T("library.menu.revealWindows"), "reveal", () => RevealGame(game), (game.Location?.Path ?? "").Length > 0 && game.LocationState != "offline");
         Add(T("library.menu.move"), "move", () => BeginPicker(() => MoveGameAsync(game)), idle && game.Reachable && game.LocationState != "none");
-        Add(T("library.menu.clearCache"), "clearCache", () => BeginGameJob("clean", game, new() { ["kind"] = "cache" }), idle && game.Reachable);
+        Add(T("library.menu.clearCache"), "clearCache", () => BeginGameJob("clean", game, new() { ["kind"] = "cache" }), idle && game.Reachable && !PackHoldsAll);
         menu.Items.Add(new Separator());
         Add(T("install.remove_game"), "remove", () => { libraryFolder = libraryFolderBox.Text ?? ""; selectedGame = game.Id; Navigate("install"); _ = ConfirmRemoveAsync(game); },
             !libraryBusy && !PhoneQueued(game.Id));
-        Add(T("game.diag"), "diag", () => _ = UploadDiagnosticsAsync(game.Id, null, () => ""), idle);   // 同 Mac「更多 → 上传给开发者」；上传没成在弹窗里退回导出
+        // 上传诊断只读日志：出包这款时照样能传（不看出包作业）
+        Add(T("game.diag"), "diag", () => _ = UploadDiagnosticsAsync(game.Id, null, () => ""), !jobs.Any(j => j.Kind != JobKind.Pack && j.Blocks(game.Id)));   // 同 Mac「更多 → 上传给开发者」；上传没成在弹窗里退回导出
         Add(T("game.delete"), "delete", () => _ = ConfirmDeleteAsync(game), idle);
         return menu;
     }

@@ -187,13 +187,18 @@ def runtime_caps(c, gid):
 
 
 # 60 帧缺省开的来源（11-11 维护者：出包默认游戏原本帧率、玩家手动开；速度已验证正确的款保留默认 60）。
-#   与宿主 runtime/src/caps.c apply_cap 同一条规则、同一组字样：清单 fps60 值 1 且原因含其一，宿主没收到玩家选择时自己开 60 帧
-FPS60_VERIFIED = ("fps.tsv", "逻辑速度同局 A/B 绿", "游戏原生 60 帧", "社区帧率补丁")   # 社区帧率补丁：版本精确命中才进得了包，默认开（11-13）  # 非玩家句
+#   与宿主 runtime/src/caps.c s2a_caps_fps60_verified 同一条规则：清单 fps60 值 1 且原因含「游戏原生 60 帧」，或同时含「社区帧率补丁」与「逻辑速度同局 A/B 绿」
+#   （11-23 #2120：补丁只字节命中不等于逻辑速度对）；旧口径（S2A_CAPS_OWN=1）另认「fps.tsv」「逻辑速度同局 A/B 绿」
+FPS60_NATIVE, FPS60_PATCH, FPS60_AB = "游戏原生 60 帧", "社区帧率补丁", "逻辑速度同局 A/B 绿"  # 非玩家句
 
 
 def fps60_default(rows):
     value, why = rows.get("fps60", ("", ""))
-    return value == "1" and any(mark in why for mark in FPS60_VERIFIED)
+    if value != "1":
+        return False
+    if FPS60_NATIVE in why or (FPS60_PATCH in why and FPS60_AB in why):
+        return True
+    return os.environ.get("S2A_CAPS_OWN") == "1" and ("fps.tsv" in why or FPS60_AB in why)  # 非玩家句
 
 
 NO_FPS60 = "这款游戏没有可用的 60 帧方案。"

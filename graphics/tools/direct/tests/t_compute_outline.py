@@ -13,6 +13,7 @@ import dshfn
 
 HERE = Path(__file__).resolve().parent
 HEADER = "#include <metal_stdlib>\nusing namespace metal;\nstruct Scratch { uint words[32]; };\n"
+ATTR = "[[max_total_threads_per_threadgroup(1024)]]\n"   # what DshCompiler.MaxThreads puts on the line before a large-threadgroup entry (#2118)
 SIGNATURE = "kernel void main0(device uint* dst [[buffer(0)]], uint gid [[thread_position_in_grid]])\n"
 
 
@@ -37,6 +38,7 @@ cases = [
     shader().replace("        dst[gid] = acc;", '        // braces and strings in a comment: " { } return\n        dst[gid] = acc;'),
     shader().replace(SIGNATURE, "constant uint hidden = 7u;\n#define VALUE (hidden)\n" + SIGNATURE).replace("    uint acc = gid + 1u;", "    uint hidden = gid;\n    uint acc = gid + 1u;").replace("        dst[gid] = acc;", "        dst[gid] = VALUE;").replace("    dst[gid] = acc;\n}", "}"),
     shader().replace(SIGNATURE, "/* prefix */ #define VALUE (acc)\n" + SIGNATURE),
+    shader().replace(SIGNATURE, ATTR + SIGNATURE),
 ]
 results = dshfn.batch([("giant_fix", [source]) for source in cases])
 outputs = [result.get("ok", [None])[0] for result in results]
@@ -70,11 +72,14 @@ check("transformation is idempotent", out == again)
 check("line comments do not affect lexical scope or exit detection", outputs[8] is not None and "static __attribute__((noinline)) void s2a_outline_0(" in outputs[8] and '// braces and strings in a comment: " { } return' in outputs[8])
 check("prefix macros hiding local captures leave the entire source unchanged", outputs[9] == cases[9])
 check("comments before preprocessing directives cannot bypass the macro guard", outputs[10] == cases[10])
+attr = outputs[11] or ""
+# D-XZ3X: the helpers used to go between the attribute line and the entry, so the attribute fell on s2a_outline_0 and Metal refused the source
+check("an attribute line before the entry stays directly above it, the helpers above both", ATTR + SIGNATURE in attr and attr.index("s2a_outline_0(") < attr.index(ATTR) and attr.count(ATTR) == 1)
 
 if not bad:
     with tempfile.TemporaryDirectory(prefix="compute_outline_") as temp:
         root = Path(temp)
-        for name, source in (("original", cases[0]), ("outlined", out), ("macro-original", cases[9]), ("macro-guarded", outputs[9])):
+        for name, source in (("original", cases[0]), ("outlined", out), ("macro-original", cases[9]), ("macro-guarded", outputs[9]), ("attr-outlined", attr)):
             path = root / (name + ".metal")
             path.write_text(source)
             for sdk, minimum in (("macosx", "-mmacosx-version-min=15.0"), ("iphoneos", "-mios-version-min=18.0")):

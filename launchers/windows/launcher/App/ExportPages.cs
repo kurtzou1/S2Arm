@@ -1003,6 +1003,7 @@ public sealed partial class EnvironmentWindow
     private void ResetPackView(LibraryGame game)
     {
         packGame = game; packState = "running"; packTrack = new(); packStarted = DateTime.UtcNow;
+        if (packJob is not null) packJob.GameId = game.Id;   // 批量出包换到这一款：作业登记只锁正在出的这款（JobSlots.Blocks）
         packSeconds = null; packSummary = ""; packDiagnostics = ""; packIpa = null;
         packIpaBytes = null; packPackBytes = null; packNotes = []; packBoost = null; packSpace = null; sessionHidden = false; packFailureCode = null;
         exportStepEnded = false; exportChildReport = null;

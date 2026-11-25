@@ -238,6 +238,12 @@ typedef struct { _Atomic uint64_t pc; _Atomic uint64_t n; _Atomic uint32_t cls; 
 static site_t g_site[NSLOT];
 static _Atomic uint64_t g_faults, g_emul, g_skip, g_nsite, g_full, g_fail, g_cls_fail[10];
 uint64_t s2a_far_faults_total(void) { return atomic_load(&g_faults); }
+// 快照区让掉的那段窗口（vawin.c 构造期定：[窗口末, 窗口末 + 让掉的长度)）里的缺页另数一份（快照被关根修 ⑥，11-24）：不让窗口的话这些访问都在窗口里，
+//   它 > 0 = 这款在这台设备上要整个窗口（vawin.c s2a_snap_needwin_hit 记下，下一局快照区不再从窗口里让）。再往外的缺页不让也有，不算
+static uint64_t g_sq_lo, g_sq_hi; static _Atomic uint64_t g_sq_faults;
+void s2a_far_squeeze_band(uint64_t lo, uint64_t hi); uint64_t s2a_far_squeeze_faults(void);
+void s2a_far_squeeze_band(uint64_t lo, uint64_t hi) { g_sq_lo = lo; g_sq_hi = hi; }
+uint64_t s2a_far_squeeze_faults(void) { return atomic_load(&g_sq_faults); }
 // 逐秒账（#442 / D-DX74：Mac 大款玩久了内存池落进远端后掉到个位数帧，「慢在缺页代执行」要有直接读数）：远端开着就每秒醒一次，
 //   这一秒有缺页才打一行（游戏没碰远端时不出行，日志不涨）；和 [longframe] / 心跳同在一份日志里按时间对齐看。S2A_FAR_TICK=0 关
 // 逐秒账已结算到的累计缺页数（每秒醒来记账后存）：单测读口，等它追上 s2a_far_faults_total 再判，不按墙钟对齐秒边界（11-19：原先静 1.2 秒 / 等 2.2 秒，
@@ -383,6 +389,7 @@ int s2a_far_fault(void *ctx, uint64_t fa, int w) {
     ucontext_t *uc = ctx; _STRUCT_ARM_THREAD_STATE64 *ss = &uc->uc_mcontext->__ss; _STRUCT_ARM_NEON_STATE64 *ns = &uc->uc_mcontext->__ns;
     uint64_t pc = ss->__pc, lo, hi; uint32_t insn = *(const uint32_t *)(uintptr_t)pc; int cls = s2a_emul_class(insn);
     atomic_fetch_add(&g_faults, 1);
+    if (fa >= g_sq_lo && fa < g_sq_hi) atomic_fetch_add(&g_sq_faults, 1);
     site_t *s = site_get(pc);
     if (s) { atomic_fetch_add(&s->n, 1); atomic_store(&s->cls, (uint32_t)cls); }
     if (skippable(insn)) { atomic_fetch_add(&g_skip, 1); ss->__pc += 4; return 1; }
@@ -487,6 +494,7 @@ void s2a_far_report(const char *when) {
     LOG("远端 [%s]：影子区用 %llu MB（堆区外 %llu MB）；缺页 %llu 次、代执行 %llu 次、跳过（缓存维护 / 预取）%llu 次、失败 %llu 次%s；游戏代码访存点 %llu 个（触发 %llu 次）、宿主代码点 %llu 个（触发 %llu 次）；点表满 %llu；点表 %s",
         when, (unsigned long long)((g_sh_used + g_ov_used) >> 20), (unsigned long long)(g_ov_used >> 20), (unsigned long long)atomic_load(&g_faults), (unsigned long long)atomic_load(&g_emul), (unsigned long long)atomic_load(&g_skip),
         (unsigned long long)atomic_load(&g_fail), k ? cf : "", (unsigned long long)ng, (unsigned long long)dg, (unsigned long long)nh, (unsigned long long)dh, (unsigned long long)atomic_load(&g_full), f ? out : "（写不出）");
+    if (g_sq_hi > g_sq_lo) LOG("远端 [%s]：快照区让掉的那段窗口 %#llx +%llu MB 被碰 %llu 次（不让的话都在窗口里）", when, (unsigned long long)g_sq_lo, (unsigned long long)((g_sq_hi - g_sq_lo) >> 20), (unsigned long long)atomic_load(&g_sq_faults));
 }
 
 // 所有 guest/fault、服务与 renderer 读者已退出。窗口内影子由 window reset
@@ -513,7 +521,7 @@ int s2a_far_session_reset(void) {
     free(g_dir); g_dir = NULL;
     g_lo = g_hi = g_sh_lo = g_sh_hi = g_sh_used = g_ov_used = g_flush_orig = 0;
     memset(g_mon, 0, sizeof g_mon); memset(g_site, 0, sizeof g_site);
-    atomic_store(&g_faults, 0); atomic_store(&g_emul, 0); atomic_store(&g_skip, 0);
+    atomic_store(&g_faults, 0); atomic_store(&g_emul, 0); atomic_store(&g_skip, 0); atomic_store(&g_sq_faults, 0);
     atomic_store(&g_nsite, 0); atomic_store(&g_full, 0); atomic_store(&g_fail, 0);
     for (unsigned i = 0; i < 10; i++) atomic_store(&g_cls_fail[i], 0);
     return 0;

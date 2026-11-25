@@ -306,7 +306,7 @@ static void pipe_shape(uint32_t cf[8], uint32_t *dfmt, uint32_t *sfmt, uint32_t 
 //（真机每帧 159 个通道里 132.7 个是 0–1 笔，换目标结束 135.4 次）。现在把清除挂起，等下一个把它当附件的通道吃掉（load = CLEAR）：
 // 一个通道可以同时吃掉好几个目标的清除，纯清除通道就没了。
 // 身份 = 贴图序号 + 级 + 层 + 类别（颜色 / 深度模板）：同一张图挂不同视图还是同一份存储，级 / 层取自视图记录。
-// 正确性红线：挂着的图在被读（采样 / 图像 / 拷贝端点 / 上屏）之前必须先落地（rp_pass_land_reads），否则读到没清过的旧内容。
+// 绘制前按宿主底图落地采样和图像依赖（rp_pass_land_reads）；通道外操作通过 rp_pass_flush 兑现剩余项。
 enum { PK_COLOR = 0, PK_DEPTH = 1 };   // 类别：颜色槽 / 深度模板
 enum { PK_ENT = 16, PK_GRP = 8 };      // 挂起项 / 目标组（一组 = 一次 SET_RT 的附件表；落地时一组开一个只做清除的通道）
 static struct {                        // 挂起项
@@ -424,33 +424,52 @@ static void park_land_group(nvn_gpu_cmd c, int g) {
     for (int e = 0; e < PK_ENT; e++) if (g_pk[e].used && g_pk[e].grp == g) g_pk[e].used = 0;
     g_pkg[g].used = 0;
 }
-// 还挂着的清除全部落地（提交收尾 / 开关关着时换目标）：一组一个只做清除的通道，按挂起先后
-static void park_land_all(nvn_gpu_cmd c) {
+static void park_land_selected(nvn_gpu_cmd c, unsigned groups) {
     for (;;) {
         int g = -1;
-        for (int k = 0; k < PK_GRP; k++) if (g_pkg[k].used && (g < 0 || g_pkg[k].seq < g_pkg[g].seq)) g = k;
+        for (int k = 0; k < PK_GRP; k++)
+            if ((groups & (1u << k)) && g_pkg[k].used && (g < 0 || g_pkg[k].seq < g_pkg[g].seq)) g = k;
         if (g < 0) return;
         park_land_group(c, g);
     }
 }
+// 提交收尾 / 开关关着时换目标：所有还挂着的组按先后落地。
+static void park_land_all(nvn_gpu_cmd c) { park_land_selected(c, (1u << PK_GRP) - 1); }
 static void park_drop_all(void) { memset(g_pk, 0, sizeof g_pk); memset(g_pkg, 0, sizeof g_pkg); g_pk_seq = 0; }
-// 被读之前必须落地（正确性红线）：这些贴图要以「采样贴图 / 图像 / 拷贝端点 / 上屏」身份被用到之前先调一次。
-// 按序号匹配：读的是整张图，同一序号的级 / 层全部落地。
-void rp_pass_land_reads(nvn_gpu_cmd c, const tex_t *const *ts, int n) {
-    if (!c || n <= 0) return;
-    for (int k = 0; k < n; k++) {
-        if (!ts[k] || !ts[k]->serial) continue;
-        for (int g = 0; g < PK_GRP; g++) {
-            if (!g_pkg[g].used) continue;
-            int hit = 0;
-            for (int e = 0; e < PK_ENT && !hit; e++) {
-                if (!g_pk[e].used || g_pk[e].grp != g) continue;
-                uint64_t ser; uint32_t lv, ly; pk_id(e, &ser, &lv, &ly);
-                if (ser == ts[k]->serial) hit = 1;
+static const tex_t *park_texture(int e) {
+    const p_set_rt *rt = &g_pkg[g_pk[e].grp].rt;
+    return g_pk[e].kind == PK_DEPTH ? rt->depth : rt->color[g_pk[e].slot];
+}
+
+static void park_land_alias_targets(nvn_gpu_cmd c, const p_set_rt *next) {
+    if (!c) return;
+    unsigned groups = 0;
+    for (int e = 0; e < PK_ENT; e++) {
+        if (!g_pk[e].used) continue;
+        const unsigned group = 1u << g_pk[e].grp;
+        if (groups & group) continue;
+        const tex_t *target = park_texture(e);
+        for (int i = 0; i < next->n && i < 8; i++) {
+            if (rp_tex_storage_aliases(target, next->color[i])) {
+                groups |= group;
+                break;
             }
-            if (hit) park_land_group(c, g);
         }
+        if (!(groups & group) && rp_tex_storage_aliases(target, next->depth)) groups |= group;
     }
+    if (groups) park_land_selected(c, groups);
+}
+
+void rp_pass_land_reads(nvn_gpu_cmd c, const rp_pass_read *reads, int n) {
+    if (!c || n <= 0) return;
+    unsigned groups = 0;
+    for (int e = 0; e < PK_ENT; e++) {
+        if (!g_pk[e].used) continue;
+        const unsigned group = 1u << g_pk[e].grp;
+        if (groups & group) continue;
+        if (rp_tex_is_read(park_texture(e), reads, n)) groups |= group;
+    }
+    if (groups) park_land_selected(c, groups);
 }
 
 // 仅内部余区重开路径使用可见拷回失败；不把此结果当作后端执行成功。
@@ -733,7 +752,12 @@ void rp_pass_set_rt(nvn_gpu_cmd c, const p_set_rt *r) {
     rp_perf_add(RP_PERF_SETRT_N, 1);
     { struct timespec ts0; clock_gettime(CLOCK_MONOTONIC, &ts0); uint64_t s0 = (uint64_t)ts0.tv_sec * 1000000000ull + (uint64_t)ts0.tv_nsec;
       // 开关开着（缺省）：只收当前通道，待折清除挂起（等下一个把它当附件的通道吃掉，见 park 段）；关着 = 旧行为：先落地再换目标
-      if (park_on()) rp_pass_end(c); else rp_pass_flush(c);
+      if (park_on()) {
+          rp_pass_end(c);
+          // 换到共用底图的另一个序号：先用旧附件视图兑现清除。否则 A→B→A 的最后一次清色可能被 B 的旧组盖掉；
+          // 直接把旧清色折进 B 的通道，也可能按 B 的其它视图格式换算。
+          park_land_alias_targets(c, r);
+      } else rp_pass_flush(c);
       struct timespec ts1; clock_gettime(CLOCK_MONOTONIC, &ts1); uint64_t s1 = (uint64_t)ts1.tv_sec * 1000000000ull + (uint64_t)ts1.tv_nsec;
       rp_perf_add(RP_PERF_SETRT_END_NS, s1 - s0); }
     P.rt = *r; P.has_rt = 1;

@@ -629,6 +629,7 @@ namespace S2A.Services
                 }
                 SaveSyncpoints(Path.Combine(Path.GetDirectoryName(p) ?? ".", "syncpt.bin"));
                 SaveAppletMessages(Path.Combine(Path.GetDirectoryName(p) ?? ".", "applet.bin"));
+                SaveHidRings(Path.Combine(Path.GetDirectoryName(p) ?? ".", "hid.bin"));
                 var sb = new StringBuilder();
                 foreach (var kv in _dropBy) sb.Append(kv.Key).Append('×').Append(kv.Value).Append(' ');
                 Console.Error.WriteLine($"[s2a] 即时存档：服务请求日志 活着的 {_tab.Count} 条（历来记过 {_kept} 条，其余随对象关闭收掉）、原始 {_savedRaw / 1024} KB、压后 {_savedZ / 1024} KB；不记的 {_dropped} 条（{sb}）");
@@ -677,6 +678,23 @@ namespace S2A.Services
             using var r = new BinaryReader(File.OpenRead(file));
             int n = Ryujinx.HLE.S2AAppletSnap.Restore(dev, r);
             Console.Error.WriteLine(n < 0 ? "[s2a] 【红】即时存档恢复：小程序消息队列格式不对，没接上" : $"[s2a] 即时存档恢复：小程序消息队列接回快照那一刻（{n} 条）");
+        }
+
+        // HID 共享内存的触屏 / 鼠标 / 键盘 / 手势环（hid.bin）：恢复时共享内存由重放新建、采样号从 0 重数，游戏按快照里记的采样号判新旧，
+        //   触屏全被当旧数据丢掉（#2199）。存档存四个环、重放后放回（Ryujinx.HLE.S2AHidSnap）。旧快照没有：照旧恢复、记一行黄
+        private static void SaveHidRings(string file)
+        {
+            if (Host.Device is not Ryujinx.HLE.Switch dev) return;
+            using var w = new BinaryWriter(File.Create(file));
+            Ryujinx.HLE.S2AHidSnap.Save(dev, w);
+        }
+        private static void RestoreHidRings(string file)
+        {
+            if (Host.Device is not Ryujinx.HLE.Switch dev) return;
+            if (!File.Exists(file)) { Console.Error.WriteLine("[s2a] 【黄】即时存档恢复：快照没有 HID 环（旧快照），触屏 / 手势采样号从 0 重数，按采样号判新输入的游戏恢复后触屏可能没反应"); return; }
+            using var r = new BinaryReader(File.OpenRead(file));
+            int n = Ryujinx.HLE.S2AHidSnap.Restore(dev, r);
+            Console.Error.WriteLine(n < 0 ? "[s2a] 【红】即时存档恢复：HID 环格式不对，没接上" : $"[s2a] 即时存档恢复：HID 触屏 / 鼠标 / 键盘 / 手势 {n} 个环接回快照那一刻，采样号接着数");
         }
 
         // ---------- 恢复：重放 ----------
@@ -762,6 +780,7 @@ namespace S2A.Services
                 Console.Error.WriteLine($"[s2a] 即时存档恢复：服务请求重放 {n} 条，{ms:F1} ms，异常 {bad} 条（当时失败、不重放 {skipped} 条；A 成功这里失败 {diverged} 条）");
                 RestoreSyncpoints(Path.Combine(Path.GetDirectoryName(Marshal.PtrToStringUTF8((IntPtr)path)) ?? ".", "syncpt.bin"));
                 RestoreAppletMessages(Path.Combine(Path.GetDirectoryName(Marshal.PtrToStringUTF8((IntPtr)path)) ?? ".", "applet.bin"));
+                RestoreHidRings(Path.Combine(Path.GetDirectoryName(Marshal.PtrToStringUTF8((IntPtr)path)) ?? ".", "hid.bin"));
                 if (bad == 0 && SnapSwitch.CanSave)
                 {   // 恢复局接着记：快照里的日志整份当开头，序号接着编（同原生层的句柄日志接续，thread.c s2a_snap_hlog_continue）
                     lock (_lock) { RebuildTable(all); _seq = _maxSeq + 1; _kept = n; }

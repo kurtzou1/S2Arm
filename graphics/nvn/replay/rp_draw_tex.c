@@ -78,13 +78,14 @@ void rp_op_draw_tex(nvn_gpu_cmd c, const p_draw_tex *o, const void *rec) {
     d.dst[0] = fminf(x0, x1); d.dst[1] = fminf(y0, y1); d.dst[2] = fabsf(x1 - x0); d.dst[3] = fabsf(y1 - y0);
     d.origin_ll = (uint8_t)(rp_origin_lower_left() != 0);
 
-    // 读之前先落地挂着的待折清除（同 rp_draw），再取视图与采样器：取视图可能要在前置段里上传内容，必须在开通道之前
-    const tex_t *rd = &st;
-    if (rp_pass_parked()) rp_pass_land_reads(c, &rd, 1);
     rp_view_pin_begin();
     d.src = rp_view_by_id_decl(tid, NVN_TEXTURE_TARGET_2D + 1, 0, 0, c, NULL);   // 数组按声明的二维取第 0 层（iOS 同）
     d.samp = d.src ? rp_samp_for_tex(sid, tid) : NULL;
     if (!d.src || !d.samp) { rp_view_pin_end(); nvn_unimpl("draw_tex", d.src ? "sampler_unresolved" : "texture_view", rec); return; }
+    if (rp_pass_parked()) {
+        const rp_pass_read read = {.tex = nvn_gpu_view_texture(d.src)};
+        rp_pass_land_reads(c, &read, 1);
+    }
 
     rp_pass_want_layered(c, 0);   // 我们自己的拷贝程序不写层号：不进分层通道
     rp_pass_prepare_draw(c, cmask);   // 只写颜色 0：通道按这一槽开（同 rp_draw 的有效写掩码口径）

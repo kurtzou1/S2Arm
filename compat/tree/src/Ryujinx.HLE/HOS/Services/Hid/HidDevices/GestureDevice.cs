@@ -14,8 +14,13 @@ namespace Ryujinx.HLE.HOS.Services.Hid
         public GestureDevice(Switch device)
         {
             _device = device;
+            // S2A（#2199）：采样号接着环里最后一条往下数，不从 0 起。即时存档恢复把快照那一刻的手势环放回（S2AHidSnap），游戏内存里记着当时读到的
+            //   采样号；从 0 起的新手势采样号都比它小，被当旧数据丢掉。没写过的环最后一条是 0，同原来
+            _samplingNumber = StartSampling(ref _device.Hid.SharedMemory.Gesture);
             _device.Hid.SharedMemory.Gesture = RingLifo<GestureState>.Create();
         }
+
+        internal static ulong StartSampling(ref RingLifo<GestureState> ring) => ring.GetCurrentEntryRef().SamplingNumber;
 
         internal static void Write(ref RingLifo<GestureState> ring, ref ulong samplingNumber, in GestureInput input)
         {

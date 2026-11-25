@@ -131,11 +131,13 @@ struct InputConfig: Codable, Equatable {
 ///   source 同作业层 effective_input：game（这款单独存的）/ default（所有游戏的默认）/ standard（标准键位）/ player1（沿用玩家 1）
 struct LoadedInput { let config: InputConfig; let problem: Bool; var inherited = false; var source = "standard" }
 
-/// 一次读出的四位玩家键位，加上「所有游戏的默认」（#1987：「恢复默认」回到它；没设过时 = 标准键位，defaultSet 为假）
+/// 一次读出的四位玩家键位，加上「所有游戏的默认」（#1987：「恢复默认」回到它；没设过时 = 标准键位，defaultSet 为假）。
+///   defaultProblem：默认文件在但读不出或不合规（这时按没设过算），弹窗提示一行
 struct InputLoad {
     var players: [Int: LoadedInput] = [:]
     var allGamesDefault = InputConfig.standard
     var defaultSet = false
+    var defaultProblem = false
 }
 
 extension S2ArmLauncherModel {
@@ -158,6 +160,7 @@ extension S2ArmLauncherModel {
         }
         // #1987：所有游戏的默认（default-input.json 能用时的那份；null = 没设过，回到标准键位）
         if let dflt = decode(r["default"]) { out.allGamesDefault = dflt; out.defaultSet = true }
+        out.defaultProblem = r["defaultProblem"] as? Bool ?? false
         return out
     }
 

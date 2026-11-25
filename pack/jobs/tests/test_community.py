@@ -378,13 +378,23 @@ class MacDisplayTests(unittest.TestCase):
         self.assertEqual(community.launch_env(self.c, GID), {})
 
     def test_fps60_default_follows_the_verified_reason_like_the_host(self):
-        # 同宿主 runtime/src/caps.c：清单 fps60 1 且原因含「fps.tsv」「逻辑速度同局 A/B 绿」「游戏原生 60 帧」「社区帧率补丁」之一才缺省开；值 0 / 别的原因都是原帧率
-        for line, want in (("fps60\t1\t# fps.tsv 登记 60 帧\n", True), ("fps60\t1\t# 逻辑速度同局 A/B 绿\n", True),
-                           ("fps60\t1\t# 游戏原生 60 帧\n", True), ("fps60\t1\t# 默认开：来源 社区帧率补丁\n", True), ("fps60\t1\t# 全引擎档\n", False), ("fps60\t0\t# fps.tsv 判红\n", False)):
-            with self.subTest(line=line):
-                self.caps(line + "direct\t1\n")
-                self.assertEqual(self.mac()["fps60"]["value"], want)
-                self.assertEqual(community.launch_env(self.c, GID), {})   # 没选过：不写，宿主自己按同一条规则开 / 不开
+        # 同宿主 runtime/src/caps.c s2a_caps_fps60_verified：清单 fps60 1 且原因含「游戏原生 60 帧」，或同时含「社区帧率补丁」与「逻辑速度同局 A/B 绿」才缺省开
+        #   （11-23 #2120：只写「社区帧率补丁」的不再缺省开）；我方来源 fps.tsv / A/B 绿只在旧口径 S2A_CAPS_OWN=1 算；值 0 / 别的原因都是原帧率
+        os.environ.pop("S2A_CAPS_OWN", None)
+        for line, want, own in (("fps60\t1\t# fps.tsv 登记 60 帧\n", False, False), ("fps60\t1\t# 逻辑速度同局 A/B 绿\n", False, False),
+                                ("fps60\t1\t# 游戏原生 60 帧\n", True, False), ("fps60\t1\t# 默认开：来源 社区帧率补丁\n", False, False),
+                                ("fps60\t1\t# 默认开：来源 社区帧率补丁，逻辑速度同局 A/B 绿（ρ 1.00、q 1.00，2026-11-20）\n", True, False),
+                                ("fps60\t0\t# 原帧率：有社区帧率补丁、本构建号没有逻辑速度同局 A/B 绿\n", False, False),
+                                ("fps60\t1\t# 全引擎档\n", False, False), ("fps60\t0\t# fps.tsv 判红\n", False, False),
+                                ("fps60\t1\t# fps.tsv 登记 60 帧\n", True, True), ("fps60\t1\t# 默认开：来源 社区帧率补丁\n", False, True)):
+            with self.subTest(line=line, own=own):
+                if own: os.environ["S2A_CAPS_OWN"] = "1"
+                try:
+                    self.caps(line + "direct\t1\n")
+                    self.assertEqual(self.mac()["fps60"]["value"], want)
+                    self.assertEqual(community.launch_env(self.c, GID), {})   # 没选过：不写，宿主自己按同一条规则开 / 不开
+                finally:
+                    os.environ.pop("S2A_CAPS_OWN", None)
 
     def test_without_patches_fps60_and_widescreen_are_hidden(self):
         # 只用社区补丁（11-13 维护者撤掉我方 60 帧与通用满屏）：清单读得到时，没有帧率补丁 → 「60 帧」hidden；包里 cpatch.tsv 没有宽屏 / 自适应满屏补丁 → 「满屏」hidden

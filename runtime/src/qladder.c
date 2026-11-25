@@ -8,7 +8,8 @@
 //   升档的前提是「GPU 是瓶颈」：在 60 帧档 GPU 没跑满（< 70%，与升档预估同一条线）还达不到目标，就是 CPU 跟不上，GPU 余量说明不了升回去撑得住。
 //     这样降下来的，本局不再按 GPU 余量升回（11-17 一款派对游戏 iPad：60 帧档 46–58 帧、GPU 忙 15–49%，60 / 30 每 5 分钟来回切，玩家感觉是卡）。
 //   不跨局记：每局从 60 帧起（玩家开的就是 60 帧；#1688 一局掉帧记成底档、之后每局都从底档起，开关像没用）。
-//   玩家点「再试 60 帧」/ 局中重开 60 帧：s2a_ql_retry 回 60 帧档，清掉 CPU 跟不上的记号。
+//   玩家点「再试 60 帧」/ 局中重开 60 帧：s2a_ql_retry 回 60 帧档，清掉 CPU 跟不上的记号，并且本局不再自动降（11-24 #2201 维护者「玩家自选优先」：
+//     点了就是表了态——稳在 48–55 帧的室外，原先每 30 秒必降一次，玩家 82 分钟里点了 30 次）。下一局照旧从头判
 #include "s2a_qladder.h"
 #include <stdlib.h>
 #include <string.h>
@@ -20,7 +21,7 @@
 #define QL_RING 8192                    // 30 秒窗口最多帧数（≥ 120 帧/秒 × 30 秒 = 3600）
 
 static struct {
-    int on, tier, why, cpu_bound, no_up;   // no_up：本局因 CPU 跟不上从 60 帧降下来过，不再按 GPU 余量升回
+    int on, tier, why, cpu_bound, no_up, stick;   // no_up：本局因 CPU 跟不上从 60 帧降下来过，不再按 GPU 余量升回；stick：玩家本局点过再试 60 帧，不再自动降
     uint64_t win_ns, up_ns, last_change, gpu_t0, settle_until; double gpu0; double vsync_us;   // vsync_us：屏幕刷新一拍（0 = 不知道）   // settle_until：回前台后到这一刻之前的帧不进窗口
     uint32_t dt_us[QL_RING]; int nd;
     double l_fps, l_slow, l_gpu; int l_th;
@@ -49,7 +50,8 @@ static int go(uint64_t now, int t, int why) {
 }
 // #1949：不在前台的时段整段不算（系统降速不是跑不动）；回前台后空等 S2A_QL_SETTLE_NS，窗口从那之后重新计时。前台真实掉帧照常判
 void s2a_ql_away(uint64_t now) { if (!q.on) return; q.win_ns = 0; q.nd = 0; q.gpu0 = -1; q.settle_until = now + S2A_QL_SETTLE_NS; }
-void s2a_ql_retry(uint64_t now) { if (!q.on) return; q.no_up = 0; go(now, 0, S2A_QL_WHY_RETRY); }
+void s2a_ql_retry(uint64_t now) { if (!q.on) return; q.no_up = 0; q.stick = 1; go(now, 0, S2A_QL_WHY_RETRY); }
+int s2a_ql_stick(void) { return q.stick; }
 int s2a_ql_frame(uint64_t now, int game, uint64_t dt, double gpu_ms, int thermal, int game_itv) {
     if (!q.on) return -1;
     if (!game || !dt || dt >= QL_GAP_NS) return -1;
@@ -73,7 +75,7 @@ int s2a_ql_frame(uint64_t now, int game, uint64_t dt, double gpu_ms, int thermal
     if (gpu_pct < 0) { q.up_ns = 0; return -1; }   // 没有 GPU 读数：不降不升
     if (slow_pct > 5.0 || med > target_us * 1.05) {
         q.up_ns = 0;
-        if (q.tier == 1) return -1;
+        if (q.tier == 1 || q.stick) return -1;   // stick：玩家本局要 60 帧，达不到也照跑（读数照记，s2a_ql_last）
         go(now, 1, S2A_QL_WHY_FPS);
         if (gpu_pct < 70.0) q.no_up = q.cpu_bound = 1;
         return 1;

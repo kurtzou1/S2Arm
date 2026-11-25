@@ -28,6 +28,8 @@ struct InputSettingsSheet: View {
     @State private var problems: [Int: Bool] = [:]
     @State private var loaded = false
     @State private var loadProblem = false
+    /// 所有游戏的默认（default-input.json）读不出或不合规：按没设过算，提示一行；重新设为默认并保存后收掉
+    @State private var defaultProblem = false
     @State private var inherited = false
     @State private var selected = "A"
     @State private var recording: String?
@@ -126,7 +128,7 @@ struct InputSettingsSheet: View {
                 configs[p] = input.config; baselines[p] = input.config; inheritedFlags[p] = input.inherited; problems[p] = input.problem
                 sources[p] = input.source
             }
-            allGamesDefault = all.allGamesDefault; defaultSet = all.defaultSet
+            allGamesDefault = all.allGamesDefault; defaultSet = all.defaultSet; defaultProblem = all.defaultProblem
             config = configs[player] ?? .standard; baseline = baselines[player] ?? .standard
             loadProblem = problems[player] ?? false
             inherited = inheritedFlags[player] ?? false
@@ -173,6 +175,11 @@ struct InputSettingsSheet: View {
             if loadProblem {
                 Text(t("loadProblem")).font(LauncherTheme.TypeStyle.detail).foregroundStyle(LauncherPalette.building)
                     .fixedSize(horizontal: false, vertical: true).padding(.top, 4)
+            }
+            if defaultProblem {
+                Text(t("defaultProblem")).font(LauncherTheme.TypeStyle.detail).foregroundStyle(LauncherPalette.building)
+                    .fixedSize(horizontal: false, vertical: true).padding(.top, 4)
+                    .accessibilityIdentifier("input.defaultProblem")
             }
         }
         .padding(.horizontal, LauncherTheme.Space.page).padding(.top, LauncherTheme.Space.page).padding(.bottom, LauncherTheme.Space.section)
@@ -469,7 +476,7 @@ struct InputSettingsSheet: View {
                     // #1987：点了「设为所有游戏的默认」→ 保存时用当前键位设默认，这款跟着默认走；设成标准键位 = 没设过
                     try await model.setDefaultInput(config, gameID: gameID)
                     allGamesDefault = config; defaultSet = !config.same(.standard)
-                    sources[1] = defaultSet ? "default" : "standard"; pendingDefault = false
+                    sources[1] = defaultSet ? "default" : "standard"; pendingDefault = false; defaultProblem = false
                 } else if follow {
                     try await model.resetInput(gameID: gameID, player: savedFor)
                     sources[savedFor] = "player1"; inheritedNow = true

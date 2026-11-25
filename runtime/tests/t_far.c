@@ -53,6 +53,14 @@ int main(void) {
     { memset(h0 + 0x80, 0xFF, 64); __asm__ volatile("dc zva, %0" :: "r"(G + 0x80) : "memory");
       uint64_t z = 0; for (int i = 0; i < 64; i++) z |= h0[0x80 + i]; EQ("DC ZVA 清影子 64 字节", 0, z); }
     __asm__ volatile("dc civac, %0" :: "r"(G + 0x100) : "memory"); EQ("DC CIVAC 跳过不崩", 0, g_refused);
+    {   // 快照区让掉的那段窗口另数缺页（快照被关根修 ⑥，far.c s2a_far_squeeze_band / s2a_far_squeeze_faults）：段 = [G, G + 16K)。
+        //   期望：段外（G + 2M）读一次 → 段内计数不变；段内（G + 0x200）读一次 → +1；段的上界不含（G + 16K）→ 不变
+        void s2a_far_squeeze_band(uint64_t, uint64_t); uint64_t s2a_far_squeeze_faults(void);
+        s2a_far_squeeze_band(G, G + 0x4000); uint64_t q0 = s2a_far_squeeze_faults(), v;
+        __asm__ volatile("ldr %0, [%1]" : "=r"(v) : "r"(G + 2 * MB) : "memory"); EQ("让掉段外读：段内计数不变", q0, s2a_far_squeeze_faults());
+        __asm__ volatile("ldr %0, [%1]" : "=r"(v) : "r"(G + 0x200) : "memory"); EQ("让掉段内读：段内计数 +1", q0 + 1, s2a_far_squeeze_faults());
+        __asm__ volatile("ldr %0, [%1]" : "=r"(v) : "r"(G + 0x4000) : "memory"); EQ("让掉段上界（不含）读：不变", q0 + 1, s2a_far_squeeze_faults());
+        (void)v; s2a_far_squeeze_band(0, 0); }
     {   // 11-14 D-52P7：跨窗口末尾的访存（前半在窗口最后一页、后半在远端首页影子）：窗口里游戏地址 = 宿主地址，与远端首页影子并排进槽代执行。
         //   期望从两边各写了什么直接推：窗口页末 4 字节 11 22 33 44、影子首 4 字节 55 66 77 88 → 8 字节读 = 0x8877665544332211；
         //   写 8 字节 0xA1..A8 → 窗口页末 4 字节 A1 A2 A3 A4、影子首 4 字节 A5 A6 A7 A8。反证：去掉 far.c 窗口末页那行，两项都被拒绝（走崩溃老路）

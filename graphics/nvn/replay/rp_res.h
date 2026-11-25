@@ -112,6 +112,11 @@ void rp_tex_mark_gpu_written(const tex_t *t);
 int rp_tex_cpu_written(uint64_t serial);
 // 调试：序号 → 后端贴图（没建过 = NULL）。
 nvn_gpu_tex rp_tex_backend_by_serial(uint64_t serial);
+// 本笔已解析的绑定是否会访问底图。序号尚未建图时也查可复用的共用存储，不分配、不上传。
+struct rp_pass_read;
+int rp_tex_is_read(const tex_t *t, const struct rp_pass_read *reads, int n);
+// 不同对象是否按资源表规则共用一张底图；两者尚未建图时也按相同的别名准入判断。
+int rp_tex_storage_aliases(const tex_t *a, const tex_t *b);
 // 会话收尾：放掉全部后端对象、清表。
 void rp_res_reset(void);
 // 读数（单测 / 内存账）

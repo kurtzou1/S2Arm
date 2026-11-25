@@ -62,6 +62,7 @@
   "input.title": "Controles",
   "input.subtitle": "Guarda tus cambios y se aplicarán la próxima vez que inicies el juego.",
   "input.loadProblem": "No se pudieron leer los controles guardados para este juego, por lo que se muestran los predeterminados. Al guardar, se reemplazan.",
+  "input.defaultProblem": "No se pudo leer la configuración predeterminada de todos los juegos, así que los juegos sin controles propios usan los estándar. Pulsa «Usar como predeterminada» en el Jugador 1 y guarda para reemplazarla.",
   "input.player": "Jugador",
   "input.player1": "Jugador 1",
   "input.player2": "Jugador 2",

@@ -275,8 +275,9 @@
 
 /* 宿主其余界面（#316 第二轮）：设置页、提示页 / 加载页、存档管理、手柄连接、诊断、联机、文字输入等 */
 "app.fpsCap.ladder" = "This session can't hold 60 FPS steadily, so the game is back at its native frame rate for now. It starts at 60 FPS again the next time you open the game.";
+"app.fpsCap.fast" = "This game runs too fast at 60 FPS, so it stays at 30 FPS.";
 "app.fpsCap.restored" = "60 FPS is back.";
-"app.fpsCap.retry" = "Try 60 FPS again";
+"app.fpsCap.retry" = "Back to 60 FPS, no auto-drop this session";
 "app.mic.title" = "Microphone";
 "app.mic.denied" = "The game wants the microphone, but S2Arm has no microphone permission, so the game only hears silence. Turn on S2Arm in Settings › Privacy & Security › Microphone, then reopen the game.";
 "app.mic.failed" = "The game wants the microphone, but the microphone couldn't be opened, so the game only hears silence.";
@@ -621,7 +622,8 @@
 
 /* 0.6.0 快照：游戏中菜单 */
 "vpad.snap.save" = "Save this moment";
-"vpad.snap.offAddress" = "This game needs more address range than the system on this device can give apps, so there's no room for snapshots and they're off for this game on this device. This has nothing to do with storage space; the game plays as usual.";
+"vpad.snap.offAddress" = "This device doesn't have enough memory address range to hold both this game and a snapshot, so snapshots are off for this game on this device. This has nothing to do with storage space; the game plays as usual.";
+"vpad.snap.offAddressNums" = " (game needs %@ GB, snapshot needs %@ GB, this device can give %@ GB)";
 "vpad.snap.restore" = "Go back to the saved moment";
 "vpad.snap.saving" = "Saving this moment…";
 "vpad.snap.saved" = "Moment saved";

@@ -588,6 +588,11 @@ static NSString *vp_running_gid(void) { const char *g = getenv("S2A_LAUNCH_GAME_
           if (s2a_snap_off_reason && s2a_snap_off_reason() == 1) {
               UIAction *off = vp_act(S2AL(@"vpad.snap.save"), @"record.circle", NO, ^{});
               off.attributes = UIMenuElementAttributesDisabled; off.subtitle = S2AL(@"vpad.snap.offAddress");
+              // 弱链接[lab]：s2a_snap_off_numbers（runtime/src/vawin.c；快照被关根修 ⑤：置灰写原因带数字——游戏要多少、快照要多少、这台设备能给多少，游戏那项不知道写「?」）
+              int s2a_snap_off_numbers(uint64_t *, uint64_t *, uint64_t *) __attribute__((weak)); uint64_t gm = 0, sn = 0, hv = 0;
+              if (s2a_snap_off_numbers && s2a_snap_off_numbers(&gm, &sn, &hv)) {
+                  NSString *(^gb)(uint64_t) = ^NSString *(uint64_t b) { return [NSString localizedStringWithFormat:@"%.1f", b / 1073741824.0]; };
+                  off.subtitle = [off.subtitle stringByAppendingString:[NSString stringWithFormat:S2AL(@"vpad.snap.offAddressNums"), gm ? gb(gm) : @"?", gb(sn), gb(hv)]]; }
               [items addObject:vp_inline(@[off])];
           } } }
     [items addObject:[self sgradeSection]];

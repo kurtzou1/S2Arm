@@ -690,3 +690,5 @@
 20261123-2031-audsmx-stream-setgain.patch
 20261124-0303-armeilleure-uco-funcptr.patch
 20261124-0911-audout-flush-keep-released-absorb-appended.patch
+20261124-1328-apple-audio-stereo-only-probe.patch
+20261124-1630-snap-hid-sampling.patch

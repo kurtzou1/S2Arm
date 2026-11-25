@@ -62,6 +62,7 @@
   "input.title": "鍵位設定",
   "input.subtitle": "改好後點儲存，下次開始遊戲時生效。",
   "input.loadProblem": "這款遊戲之前存的鍵位讀不出來，下面先顯示預設鍵位；儲存後會替換掉它。",
+  "input.defaultProblem": "之前設的「所有遊戲的預設」讀不出來，沒有單獨存鍵位的遊戲現在用標準鍵位；在玩家 1 下點「設為預設」再儲存會替換掉它。",
   "input.player": "玩家",
   "input.player1": "玩家 1",
   "input.player2": "玩家 2",

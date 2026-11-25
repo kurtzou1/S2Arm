@@ -15,6 +15,7 @@ namespace S2A.Dsh
         const int KernelLines = 8192, MinLines = 128, MaxLines = 6000;
         const string Id = @"[A-Za-z_]\w*";
         static readonly Regex Entry = new(@"^kernel void main0\((.*)\)$", RegexOptions.CultureInvariant);
+        static readonly Regex AttrLine = new(@"^\s*\[\[[^\n]*\]\]\s*$", RegexOptions.CultureInvariant);   // a line holding only attributes: they belong to the function after it
         static readonly Regex Decl = new(@"^(?<type>(?:(?:constant|device|threadgroup|thread|const)\s+)*" + Id + @"(?:<[^<>;{}]+>)?\s*[*&]?)\s+(?<name>" + Id + @")\s*(?<end>=|;|$)", RegexOptions.CultureInvariant);
         static readonly Regex Word = new(@"\b" + Id + @"\b", RegexOptions.CultureInvariant);
         static readonly Regex Exit = new(@"\b(return|break|continue|goto|discard_fragment|threadgroup_barrier|simdgroup_barrier|simd_\w*|quad_\w*)\b", RegexOptions.CultureInvariant);
@@ -165,10 +166,13 @@ namespace S2A.Dsh
                 string indent = lines[b.Start][..(lines[b.Start].Length - lines[b.Start].TrimStart().Length)];
                 calls[b.Start + 1] = (b.End, indent + "    " + name + "(" + string.Join(", ", captures.Select(v => v.Name)) + ");");
             }
+            // Helpers go above the entry's own attribute lines (MaxThreads puts [[max_total_threads_per_threadgroup(N)]] on the line before it): between them the attribute
+            //   would belong to the first helper, and Metal rejects it on a non-kernel function (D-XZ3X: "only applies to kernel, mesh, and object functions", every OS version)
+            int at = entry; while (at > 0 && AttrLine.IsMatch(code[at - 1])) at--;
             var output = new StringBuilder();
             for (int i = 0; i < lines.Length; i++)
             {
-                if (i == entry) output.Append(helpers);
+                if (i == at) output.Append(helpers);
                 if (calls.TryGetValue(i, out var edit)) { output.Append(edit.Call).Append('\n'); i = edit.End - 1; continue; }
                 output.Append(lines[i]); if (i + 1 < lines.Length) output.Append('\n');
             }

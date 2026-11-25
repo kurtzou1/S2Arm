@@ -1692,6 +1692,7 @@
   "s2arm.notice.delete.running": "Suppression de {0}…",
   "s2arm.notice.delete.done": "Jeu {0} supprimé. Les sauvegardes et les fichiers d'origine du jeu sont conservés.",
   "s2arm.notice.delete.failed": "Impossible de supprimer {0} : {1}",
+  "s2arm.notice.delete.queued": "Ce jeu sera supprimé une fois l'export terminé",
   "s2arm.notice.clearCache.running": "Effacement du cache de {0}…",
   "s2arm.notice.clearCache.done": "Cache de {0} effacé.",
   "s2arm.notice.clearCache.failed": "Impossible d'effacer le cache de {0} : {1}",

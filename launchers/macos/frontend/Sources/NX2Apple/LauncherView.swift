@@ -76,6 +76,7 @@ struct LauncherView: View {
             noticeBar
             phoneUpdateBar
             libraryNoticeBar
+            sideJobsBar
             if model.batchShown {
                 BatchExportView(model: model, covers: covers, install: { model.openExportSheet($0) }, freeSpace: { spaceFor = $0 }, uiLanguage: uiLanguage)
             } else if let result = model.viewingResult, let run = result.export {
@@ -241,17 +242,21 @@ struct LauncherView: View {
     /// 删除游戏 / 清除缓存的进行中与结果。
     @ViewBuilder private var libraryNoticeBar: some View {
         if let n = model.libraryNotice {
-            let text = loc.t(n.key + "." + { switch n.kind { case .running: "running"; case .done: "done"; case .failed: "failed" } }())
+            let text = loc.t(n.key + "." + { switch n.kind { case .running: "running"; case .done: "done"; case .failed: "failed"; case .queued: "queued" } }())
                 .replacingOccurrences(of: "{0}", with: n.name).replacingOccurrences(of: "{1}", with: loc.backend(n.detail))
             HStack(spacing: 10) {
                 switch n.kind {
                 case .running: ProgressView().controlSize(.small)
                 case .done: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
                 case .failed: Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(LauncherPalette.danger)
+                case .queued: Image(systemName: "clock").foregroundStyle(.secondary)
                 }
                 Text(text).font(.manrope(13, .semibold)).fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 8)
-                if n.kind != .running {
+                if n.kind == .queued {   // 排着等出完包再删：能取消（不删了）
+                    Button(loc.t("s2arm.job.cancel")) { model.cancelQueuedDelete() }.controllerButtonStyle(.plain).foregroundStyle(.secondary)
+                        .accessibilityIdentifier("notice.library.cancel")
+                } else if n.kind != .running {
                     Button { model.libraryNotice = nil } label: { Image(systemName: "xmark") }.controllerButtonStyle(.plain).foregroundStyle(.secondary)
                         .accessibilityIdentifier("notice.library.close")
                 }
@@ -260,6 +265,35 @@ struct LauncherView: View {
             .background((n.kind == .failed ? LauncherPalette.danger : LauncherPalette.cream).opacity(0.10))
             .accessibilityIdentifier("notice.library")
             .task(id: n) { if n.kind == .done { try? await Task.sleep(nanoseconds: 6_000_000_000); if model.libraryNotice == n { model.libraryNotice = nil } } }
+        }
+    }
+
+    /// 按款作业槽（主槽出包时同时跑的别的款的搬家；删除的进度与结果走上面那条提示）：每条一行，各自的阶段、进度、取消 / 关闭，互不覆盖
+    @ViewBuilder private var sideJobsBar: some View {
+        ForEach(model.sideJobs.filter { !model.isInline($0.session) }) { side in
+            let s = side.session
+            let running = s.phase == .running || s.phase == .stopping
+            HStack(spacing: 10) {
+                switch s.phase {
+                case .running, .stopping: ProgressView().controlSize(.small)
+                case .finished(.completed): Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                case .finished: Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(LauncherPalette.danger)
+                }
+                Text(s.name + " · " + (running ? loc.t(s.phase == .stopping ? "s2arm.job.stopping" : "s2arm.job.running")
+                                       : JobSessionView.text(loc, "s2arm.job.done." + s.kind.rawValue, fallback: "s2arm.job.done"))
+                     + (s.message.isEmpty ? "" : " · " + loc.backend(s.message)))
+                    .font(.manrope(13, .semibold)).lineLimit(2)
+                Spacer(minLength: 8)
+                if let f = s.progress.fraction, running { ProgressView(value: f).frame(width: 120) }
+                if running {
+                    Button(loc.t("s2arm.job.cancel")) { model.stopSide(side.id) }.controllerButtonStyle(.plain).disabled(s.phase == .stopping)
+                } else {
+                    Button { model.dismissSide(side.id) } label: { Image(systemName: "xmark") }.controllerButtonStyle(.plain).foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, LauncherTheme.Metrics.libraryInset).padding(.vertical, 10)
+            .background(LauncherPalette.cream.opacity(0.10))
+            .accessibilityIdentifier("side.job")
         }
     }
 

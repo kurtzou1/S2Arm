@@ -241,6 +241,20 @@ def _run_request(request_path, *, context_class=Context, operation_overrides=Non
     finally:
         ended.set()
         _drop_job_tmp(c)
+        forget_host_registrations(c)
+
+
+def forget_host_registrations(c):
+    """#2024：出包、准备、导入这类作业把内置宿主 S2ArmGame.app 当辅助工具执行（GLSLC / Oodle 工具模式、管线归档），
+    系统一执行带 Info.plist 的 .app 就登记它，「App」启动器里随即多一个 S2ArmGame。原先只有起局收尾注销（build.launch），
+    这些作业结束后登记一直留着。作业环境给过内置宿主（core.Context.env 记 host_app）就在结束时注销一遍；注销失败不影响作业结果"""
+    app = getattr(c, "host_app", None)
+    if app is None:
+        return
+    try:
+        host_update.forget_registrations(app=app)
+    except OSError as error:
+        print(f"[s2a] 【黄】作业结束注销宿主登记没做成：{error}", file=sys.stderr, flush=True)
 
 
 def integrity_note(c):

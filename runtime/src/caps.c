@@ -10,6 +10,10 @@
 // 清单里 fps60 / fps60_display 的值（-1 = 没读到）：只记下来，读的时候判（审计 P1-80：原先 fps60_display 写 DM_PRESENT_INTERVAL=display 进进程环境，
 //   图形层见到这个变量就不再套 60 帧开关，设置里关 60 帧再进程内重启仍每个显示节拍出一帧；环境变量只留给启动时显式指定的人）
 static int g_caps_fps60 = -1, g_caps_fps60_display;
+// 清单 fps60 原因说本构建号同局 A/B 红（开 60 帧游戏会加速，tools/caps_policy.py patch_ab）：档位梯子压回时横幅不给「再试 60 帧」，照实说明（11-24 #2201）
+static int g_caps_fps_fast;
+int s2a_caps_fps60_speeds_up(const char *why) { return why && strstr(why, "逻辑速度同局 A/B 红") != NULL; }
+int s2a_caps_fps_fast(void) { return g_caps_fps_fast; }
 // 本局要不要放开出图间隔的「来源」（不含开关；开关由 s2a_present_fps60_gate 按当局 S2A_FPS60 套）：清单 fps60_display 1（引擎通用全引擎档：没有帧率表 / 社区补丁 / Unity·UE 推导的款），
 //   或清单 fps60 0、玩家在设置页手动开了（ios/settings.m 写 S2A_FPS60=1，清单那行因此没改环境）
 // 11-11 维护者：出包默认原帧率、60 帧玩家手动开——清单里的 fps60 1 / fps60_display 1（含全引擎档）不再替玩家开 60 帧；
@@ -38,12 +42,14 @@ void s2a_caps_reset(void) {
         const char *cur = getenv(g_caps_env[i].name);
         if (cur && !strcmp(cur, g_caps_env[i].val)) unsetenv(g_caps_env[i].name);
     }
-    g_ncaps_env = 0; g_caps_fps60 = -1; g_caps_fps60_display = 0; g_npkeys = 0;
+    g_ncaps_env = 0; g_caps_fps60 = -1; g_caps_fps60_display = 0; g_caps_fps_fast = 0; g_npkeys = 0;
 }
 
 int s2a_caps_fps60_verified(const char *val, const char *why) {
     if (!(val && val[0] == '1' && why)) return 0;
-    if (strstr(why, "游戏原生 60 帧") || strstr(why, "社区帧率补丁")) return 1;
+    if (strstr(why, "游戏原生 60 帧")) return 1;
+    // 社区帧率补丁要同时带「逻辑速度同局 A/B 绿」（11-23，#2120：只字节命中不等于逻辑速度对；tools/caps_policy.py patch_ab_green）。只写「社区帧率补丁」的老包清单不再算已验证
+    if (strstr(why, "社区帧率补丁") && strstr(why, "逻辑速度同局 A/B 绿")) return 1;
     return s2a_caps_own() && (strstr(why, "fps.tsv") || strstr(why, "逻辑速度同局 A/B 绿"));   // 我方来源：只在旧口径（S2A_CAPS_OWN=1）算
 }
 
@@ -64,7 +70,7 @@ static void apply_cap(const char *cap, const char *v, const char *why, const cha
             //   全引擎档 / Unity·UE 推导不算：清单写 1 也不替玩家开。
             //   社区帧率补丁算（11-13 维护者「版本精确命中的默认打上」）：补丁要逐字节核对上这个构建的原字节才编得进包，进了包就是精确命中，自带速度修正
             int verified = s2a_caps_fps60_verified(v, why);
-            g_caps_fps60 = verified;
+            g_caps_fps60 = verified; g_caps_fps_fast = s2a_caps_fps60_speeds_up(why);
             if (verified && !getenv("S2A_FPS60")) caps_setenv("S2A_FPS60", "1");
             const char *e = getenv("S2A_FPS60"); int on = e && !strcmp(e, "1");
             LOG("%s：60 帧清单值 %s（原因：%s）——%s，本局 60 帧%s", src, v, why, verified ? "速度已验证正确，默认开" : "不替玩家开",

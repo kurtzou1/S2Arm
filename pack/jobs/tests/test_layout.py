@@ -440,6 +440,20 @@ class LocationTests(JobCase):
         self.assertEqual((back / "saves" / "s.dat").read_text(), "存档"); self.assertFalse(moved.exists())
         self.assertEqual(layout.find_game(self.fresh(), A), back)
 
+    def test_move_job_while_other_game_packs(self):
+        """#2191：出包 B 时搬 A（作业 moveGame）。期望（手写）：不等 B 出完，A 搬到新位置、索引指向新位置；
+        出包锁组（执行锁共享 + 出包锁 + B 的按款锁）用另开的描述符拿着。旧码拿执行锁独占：等满上限报 library_busy"""
+        import contextlib, filelock, library, sgrade
+        d = layout.game_dir(self.c, A); (d / "saves").mkdir(); (d / "saves" / "s.dat").write_text("存档")
+        self.c.r.update(gameId=A, location=str(self.disk)); self.c.lock_wait = 1
+        with contextlib.ExitStack() as stack:
+            for name, shared in (("execution", True), ("produce", False), (sgrade.game_lock(B), False)):
+                stack.enter_context(filelock.held(self.c.library / f".{name}.lock", wait_s=0, holder=dict(operation="ipa", gameId=B), shared=shared))
+            got = library.move_game(self.c)
+        moved = Path(got["folder"])
+        self.assertEqual(moved.parent.parent, self.disk); self.assertEqual((moved / "saves" / "s.dat").read_text(), "存档")
+        self.assertEqual(layout.find_game(self.fresh(), A), moved)
+
     def test_cross_volume_move_tolerates_appledouble_vanishing(self):
         """#1720（诊断#5d659a，exFAT 盘）：删旧文件夹时删本体，系统顺带删掉它的 AppleDouble 伴随文件 ._<名>，rmtree 再删 ._<名> 就找不到。
         期望：照样搬完、旧文件夹删干净、链接改指（修前整个任务报失败、旧夹删一半）；别的删除错误照报。

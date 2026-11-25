@@ -441,16 +441,29 @@ static void crash_reraise(int sig) {
 //   后台线程约 1 ms 后重新设只读（窗口里别的写会漏，析构 / 重置这类少见写照抓）。页还没映射时后台每 1 ms 试一次。
 //   用途：游戏堆分配确定的款，把「谁、在哪条指令上改了这个对象」直接抓出来（织梦岛 0x70f78af0c8 的包装对象被提前析构）
 enum { WW_MAX = 4, WW_LOG = 32 };
+// armed：0 = 放开着（可写），2 = 后台正在设只读，1 = 已设只读。缺页处理见到 1 或 2 都算「页拦着」（mprotect 已经或正在生效，这次缺页是真的）；
+//   后台 0 → 2 → mprotect → 2 → 1，中途被缺页处理放开（置 0）就作废这一轮、下一轮重来——原先先 mprotect 再置 1，这一窗里的缺页按「别人刚放开」漏记
 static struct { uint64_t a, n; _Atomic int armed, said; _Atomic uint64_t hits, other; } g_ww[WW_MAX]; static int g_nww;
+// 放开后的重执行（11-24 门禁 t_crash ⑦ 多出「第 3 次被写」）：缺页处理放开这页、返回让这条写重执行，后台约 1 ms 后重新设只读；
+//   负载高时这条线程被调度晚了，重执行前页已经又只读，同一次写再缺页一次，原先按新的一次记。每条线程记下自己最近一次放开的（pc、地址）：
+//   下一次缺页还是同一 pc、同一地址，就是那次重执行——照样放开、不再计数不记行。表满（线程 > WW_TT）时照旧计数
+enum { WW_TT = 64 };
+static struct { _Atomic uint64_t tid; uint64_t pc, fa; } g_ww_t[WW_TT];
+static int ww_tslot(uint64_t tid) {   // 本线程那一格（信号处理里用：无锁、不分配）；满了返回 -1
+    for (int j = 0; j < WW_TT; j++) if (atomic_load(&g_ww_t[j].tid) == tid) return j;
+    for (int j = 0; j < WW_TT; j++) { uint64_t z = 0; if (atomic_compare_exchange_strong(&g_ww_t[j].tid, &z, tid)) return j; }
+    return -1;
+}
 static void *ww_thread(void *arg) {
     (void)arg; pthread_setname_np("s2a-write-watch");
     for (;;) {
         for (int i = 0; i < g_nww; i++) {
-            if (atomic_load(&g_ww[i].armed)) continue;
+            int z = 0; if (!atomic_compare_exchange_strong(&g_ww[i].armed, &z, 2)) continue;
             uint64_t pg = g_ww[i].a & ~0x3FFFull; uint8_t b;
-            if (!mem_read(pg, &b, 1) || mprotect((void *)(uintptr_t)pg, 0x4000, PROT_READ)) continue;
-            atomic_store(&g_ww[i].armed, 1);
-            if (!atomic_exchange(&g_ww[i].said, 1)) LOG("写监视：%#llx（%llu 字节）所在页已设只读", (unsigned long long)g_ww[i].a, (unsigned long long)g_ww[i].n);
+            if (!mem_read(pg, &b, 1) || mprotect((void *)(uintptr_t)pg, 0x4000, PROT_READ)) { int two = 2; atomic_compare_exchange_strong(&g_ww[i].armed, &two, 0); continue; }
+            // 「已设只读」那行先写、再置 1：读 s2a_ww_armed 等到 1 的人（单测）这时一定已看得到这一行，不用另睡等日志落盘
+            if (!atomic_load(&g_ww[i].said)) { atomic_store(&g_ww[i].said, 1); LOG("写监视：%#llx（%llu 字节）所在页已设只读", (unsigned long long)g_ww[i].a, (unsigned long long)g_ww[i].n); }
+            int two = 2; atomic_compare_exchange_strong(&g_ww[i].armed, &two, 1);   // 这一轮中途被缺页处理放开（已是 0）就不改，下一轮重来
         }
         usleep(1000);
     }
@@ -467,6 +480,11 @@ static void ww_start(void) {
     }
     pthread_t t; if (g_nww && !pthread_create(&t, NULL, ww_thread, NULL)) pthread_detach(t);
 }
+#ifdef S2A_UNIT_TEST
+// 单测注入（t_crash ⑦b）：> 0 时，计了数的那次放开之后先在信号里等后台把页重新设只读、再返回（只一次）——即「放开后这条写还没来得及重执行，
+//   后台已经重新设只读」，负载高时被调度晚了就是这样；重执行必然再缺页一次
+_Atomic int g_ww_test_hold;
+#endif
 static int ww_fault(void *ctx, uint64_t fa, int w) {
     if (!g_nww || !w) return 0;
     for (int i = 0; i < g_nww; i++) {
@@ -474,8 +492,12 @@ static int ww_fault(void *ctx, uint64_t fa, int w) {
         if ((fa & ~0x3FFFull) != pg) continue;
         // 别的线程刚在这一页缺页、正在放开（armed 已清）：同样放开、重执行，不能当成「不是我的页」交给崩溃路径
         //   （iPhone 实测：被监视对象与对象池自旋锁同页，两条线程同时写，后到的一条 stlxr 落空成 SIGBUS）
-        if (atomic_load(&g_ww[i].armed) && fa + 8 > g_ww[i].a && fa < g_ww[i].a + g_ww[i].n) {
-            uint64_t k = atomic_fetch_add(&g_ww[i].hits, 1) + 1;
+        int counted = 0;
+        uint64_t tid = 0, pc0 = ((ucontext_t *)ctx)->uc_mcontext->__ss.__pc; pthread_threadid_np(NULL, &tid);
+        int ts = ww_tslot(tid), retry = ts >= 0 && g_ww_t[ts].pc == pc0 && g_ww_t[ts].fa == fa;   // 上一次放开的那条写在重执行
+        if (ts >= 0) { g_ww_t[ts].pc = pc0; g_ww_t[ts].fa = fa; }
+        if (!retry && atomic_load(&g_ww[i].armed) && fa + 8 > g_ww[i].a && fa < g_ww[i].a + g_ww[i].n) {
+            uint64_t k = atomic_fetch_add(&g_ww[i].hits, 1) + 1; counted = 1;
             if (k <= WW_LOG) {
                 ucontext_t *uc = ctx; uint64_t pc = uc->uc_mcontext->__ss.__pc, lr = uc->uc_mcontext->__ss.__lr, cur[2] = {0, 0};
                 char bp[160], bl[160], tn[32] = ""; where(pc, bp, sizeof bp); where(lr, bl, sizeof bl); mem_read(g_ww[i].a, cur, sizeof cur); pthread_getname_np(pthread_self(), tn, sizeof tn);
@@ -483,9 +505,15 @@ static int ww_fault(void *ctx, uint64_t fa, int w) {
                     (unsigned long long)fa, tn[0] ? tn : "?", bp, bl, (unsigned long long)cur[0], (unsigned long long)cur[1]);
                 s2a_backtrace(uc->uc_mcontext->__ss.__fp);
             }
-        } else atomic_fetch_add(&g_ww[i].other, 1);
+        } else if (!retry) atomic_fetch_add(&g_ww[i].other, 1);
         atomic_store(&g_ww[i].armed, 0);
         mprotect((void *)(uintptr_t)pg, 0x4000, PROT_READ | PROT_WRITE);
+#ifdef S2A_UNIT_TEST
+        { int h = atomic_load(&g_ww_test_hold); if (counted && h > 0 && atomic_compare_exchange_strong(&g_ww_test_hold, &h, h - 1))
+              for (int t = 0; t < 5000 && atomic_load(&g_ww[i].armed) != 1; t++) usleep(1000); }
+#else
+        (void)counted;
+#endif
         return 1;
     }
     return 0;

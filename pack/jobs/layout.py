@@ -82,7 +82,7 @@ def load_index(c):
     if fresh:
         idx = read(_index_path(c), {}) or {}
         idx.setdefault("schema", 1); idx.setdefault("locations", []); idx.setdefault("games", {})
-        c._layout_idx = idx
+        c._layout_idx, c._layout_idx_base = idx, json.loads(json.dumps(idx))   # base：读进来时的样子，save_index 按它分出本作业改了哪些
     want = default_id(c)   # 默认位置总在表里、排第一；它的号以库里的标识文件为准（迁移写标识后，旧的 "default" 引用跟着改）
     old = next((l for l in idx["locations"] if l.get("path") == str(c.library)), None)
     changed = old is None or old.get("id") != want
@@ -127,8 +127,62 @@ def default_id(c):
     return location_id(c.library) or "default"
 
 
+INDEX_LOCK_WAIT_S = 10   # 写回索引的短锁：锁里只做「重读 + 合并 + 原子写」，毫秒级
+
+
 def save_index(c):
-    atomic(_index_path(c), load_index(c))
+    """写回索引表：在短锁里重读盘上那份，只把本作业改过的条目（相对读进来时的 base）合并进去再写，别的作业同时改的条目照留。
+    原先整份覆盖：两个作业各自读进内存、先后写回，后写的盖掉先写的（出包时搬另一款、导入与带位置的出包同时跑，都会丢掉一方的游戏记录，
+    那款随后显示「找不到」）。出包时放开别的款的删除 / 搬家（#2191）以后同时写的机会更多，这里根修"""
+    import filelock
+    mine = load_index(c)
+    path = _index_path(c)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with filelock.held(path.parent / ".library-index.lock", wait_s=INDEX_LOCK_WAIT_S):
+        disk = read(path, {}) or {}
+        merged = merge_index(getattr(c, "_layout_idx_base", None) or {}, mine, disk)
+        atomic(path, merged)
+    mine.clear(); mine.update(merged)   # 原地换内容：调用方手里拿着的 load_index 返回值接着能用（先改再写、再改再写）
+    c._layout_idx_base = json.loads(json.dumps(merged))
+
+
+def merge_index(base, mine, disk):
+    """三方合并（纯函数，单测直接测）：顶层键、games 按游戏号、locations 按位置号逐条比——本作业改过（mine 与 base 不同，含新增 / 删掉）的取 mine，
+    没改过的取 disk（别的作业可能刚写过）。locations 的顺序以 disk 为准、本作业新加的接在后面，默认位置（library）挪回第一"""
+    out = {k: v for k, v in disk.items() if k not in ("games", "locations")}
+    for k in set(base) | set(mine):
+        if k in ("games", "locations") or base.get(k) == mine.get(k):
+            continue
+        if k in mine:
+            out[k] = mine[k]
+        else:
+            out.pop(k, None)
+    games = dict(disk.get("games") or {})
+    bg, mg = base.get("games") or {}, mine.get("games") or {}
+    for g in set(bg) | set(mg):
+        if bg.get(g) == mg.get(g):
+            continue
+        if g in mg:
+            games[g] = mg[g]
+        else:
+            games.pop(g, None)
+    out["games"] = games
+    by = lambda rows: {r.get("id"): r for r in rows or []}
+    bl, ml, dl = by(base.get("locations")), by(mine.get("locations")), by(disk.get("locations"))
+    locs = dict(dl)
+    for i in set(bl) | set(ml):
+        if bl.get(i) == ml.get(i):
+            continue
+        if i in ml:
+            locs[i] = ml[i]
+        else:
+            locs.pop(i, None)
+    order = [i for i in dl if i in locs] + [i for i in ml if i in locs and i not in dl]
+    rows = [locs[i] for i in order]
+    rows.sort(key=lambda r: not r.get("library"))   # 稳定排序：默认位置在前，其余保持原序
+    out["locations"] = rows
+    out.setdefault("schema", 1)
+    return out
 
 
 def location_id(root):

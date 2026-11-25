@@ -74,7 +74,7 @@ public sealed partial class EnvironmentWindow
 
     private async Task FreeAsync(string gameId, string name, IReadOnlyList<string> parts, long bytes)
     {
-        if (jobs.Any(j => j.Blocks(gameId))) { freeNote = T("space.busy"); Render(); return; }
+        if (jobs.Any(j => j.Blocks(gameId)) || PackHoldsAll) { freeNote = T("space.busy"); Render(); return; }   // 出包时不论哪款都挡：见 PackHoldsAll
         var body = T("space.free_body").Replace("{0}", string.Join("、", parts.Select(p => T("space.part." + p)))).Replace("{1}", name);
         if (!await ConfirmInstallActionAsync("space.free", body.Replace("{2}", FormatBytes(bytes)))) return;
         var front = BeginJob(JobKind.Space, gameId); freeNote = ""; Render();

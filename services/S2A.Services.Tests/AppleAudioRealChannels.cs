@@ -5,6 +5,7 @@ using Ryujinx.Audio.Common;
 using System;
 using System.Runtime.InteropServices;
 using static Ryujinx.Audio.Backends.Apple.Native.AudioToolbox;   // 平台例外：本用例只测 Apple 音频后端（#189），只在 macOS 上跑
+using DriverProbe = Ryujinx.Audio.Backends.Apple.AppleHardwareDeviceDriver;   // 平台例外：本用例只测 Apple 音频后端探测，只在 macOS 上跑
 
 namespace S2A.Services.Tests
 {
@@ -105,6 +106,11 @@ namespace S2A.Services.Tests
                     Check("缺省（未显式选择）按设备判：上报 6 ⇔ 设备 ≥ 6 声道",
                         autoDriver.SupportsChannelCount(6) == (deviceChannels >= 6),
                         $"设备 {deviceChannels} 声道（与 external 同一支判据，保住 5.1 缺省直通）");
+                    Check("Auto 实测探测先建 2 声道队列", DriverProbe.S2ATestProbeFirstQueueChannels == 2,
+                        $"首队列 {DriverProbe.S2ATestProbeFirstQueueChannels} 声道");
+                    Check("Auto 只为 ≥6 声道设备建布局队列", DriverProbe.S2ATestProbeSurroundQueueChannels == (deviceChannels >= 6 ? 6 : 0) &&
+                        DriverProbe.S2ATestProbeLayoutCalls == (deviceChannels >= 6 ? 1 : 0),
+                        $"布局队列 {DriverProbe.S2ATestProbeSurroundQueueChannels}、布局调用 {DriverProbe.S2ATestProbeLayoutCalls}、设备 {deviceChannels} 声道");
 
                     // ⑤ S2A_AUDIO_CH2=1 仍强制立体声（既有减法开关不受影响；显式下混也让位于它）
                     Environment.SetEnvironmentVariable("S2A_AUDIO_DEVICE", "external");

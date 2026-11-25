@@ -13,17 +13,25 @@ public partial class EnvironmentWindow
     internal sealed class FrontJob(JobKind kind, string? gameId) : IDisposable
     {
         public JobKind Kind { get; } = kind;
-        public string? GameId { get; } = gameId;
+        /// <summary>这条作业动的是哪款；批量出包一步换一款，编排作业换款时改成正在出的那款（ExportPages.ResetPackView）</summary>
+        public string? GameId { get; set; } = gameId;
         /// <summary>当前这一步后端作业的任务号（一个前端动作可能先后跑几个后端作业，如 setup → catalog）；控制口 /cancel 按它核对</summary>
         public string TaskId { get; private set; } = "";
         public CancellationTokenSource Cancellation { get; } = new();
         public CancellationToken Token => Cancellation.Token;
         /// <summary>起下一个后端作业前取新任务号（写进请求的 jobId，后端任务记录里就是这个号）</summary>
         public string Next() => TaskId = "win-" + Guid.NewGuid().ToString("N");
-        /// <summary>这条作业在跑时，这款游戏能不能动：装机只锁正在装的那款（装一款大游戏的十几分钟里别的照常用）；环境检查不碰游戏库；其余都占着游戏库</summary>
+        /// <summary>这条作业在跑时，这款游戏能不能动：装机只锁正在装的那款（装一款大游戏的十几分钟里别的照常用）；环境检查不碰游戏库；其余都占着游戏库。
+        /// 出包只锁正在出的那款（#2191，维护者 11-16「出包、装机这类互斥纯属多余」：只在真有冲突时互斥）。出包时这款会冲突的读写：
+        ///   金手指 / mod / 启动设置——出包读这款的 cheats/、mods/、launch.json 并抓取金手指（patches.prepare → cheats.fetch / mods.code_index），communitySave 不拿锁；
+        ///   删除 / 搬家 / 清缓存——要这款的按款锁（library.delete / move_game，sgrade.game_lock），出包整段拿着它；
+        ///   改名 / 换封面——导出独立 App 时出包编排接着组装这一款，读它的 custom.json 与封面（ipa.assemble → container_custom），换封面会删掉旧图。
+        /// 别的款对出包没有这些冲突：它们的查看、导入、删除、移动照常（后端删除 / 搬家只拿执行锁共享 + 那一款的按款锁）。
+        /// 和别的款也冲突、出包时仍对所有游戏挡住的，在各入口单独判（PackHoldsAll）</summary>
         public bool Blocks(string gameId) => Kind switch
         {
             JobKind.Phone => GameId == gameId,
+            JobKind.Pack => GameId == gameId,
             JobKind.Update => GameId == gameId,   // 「更新这款」（作业 updateGame）只在电脑上重做这一款：别的款照常用
             JobKind.Environment => false,
             _ => true
@@ -83,6 +91,10 @@ public partial class EnvironmentWindow
     private bool libraryBusy => JobOf(JobKind.Library) is not null;
     private bool importBusy => JobOf(JobKind.Import) is not null;
     private bool packRunning => JobOf(JobKind.Pack) is not null;
+    /// <summary>出包在跑（不论哪款）时、对所有游戏都挡的动作（后端拿执行锁独占，出包整段拿着共享：等满上限只会报忙）：
+    ///   清缓存——library.clean，还清全体共用的编译缓存 cache/air、cache/pso 与工具缓存旧键（prune_build retain_compiler=False、prune_tool_keys），出包正读写它们；
+    ///   释放空间——library.space_free（存储页 FreeAsync）</summary>
+    private bool PackHoldsAll => packRunning;
     private bool installBusy => JobOf(JobKind.Phone) is not null;
     private bool busy => JobOf(JobKind.Environment) is not null;
     private bool freeing => JobOf(JobKind.Space) is not null;

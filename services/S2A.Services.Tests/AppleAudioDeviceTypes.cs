@@ -11,6 +11,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using static Ryujinx.Audio.Backends.Apple.Native.AudioToolbox;   // 平台例外：本用例只测 Apple 音频后端（#189 后续），只在 macOS 上跑
+using DriverProbe = Ryujinx.Audio.Backends.Apple.AppleHardwareDeviceDriver;   // 平台例外：本用例只测 Apple 音频后端探测，只在 macOS 上跑
 
 namespace S2A.Services.Tests
 {
@@ -124,11 +125,21 @@ namespace S2A.Services.Tests
 
                 // ② 驱动上报矩阵：缺省（未显式选择）按设备真实声道判——期望按 main 的 #577 判据写死（评审 11-16），
                 //   用注入的探测读数模拟设备（产品路径不走注入）；显式 builtin / headphones 才看各自 VS 开关
+                Check("NeedsSurroundProbe 共用判据：队列成功 + 声道读取成功 + ≥6 才建布局队列",
+                    DriverProbe.NeedsSurroundProbe(0, 0, 6) && DriverProbe.NeedsSurroundProbe(0, 0, 8) &&
+                    !DriverProbe.NeedsSurroundProbe(-50, 0, 6) && !DriverProbe.NeedsSurroundProbe(0, 5, 6) &&
+                    !DriverProbe.NeedsSurroundProbe(0, 0, 2));
                 Set(null, null, null);
                 AppleHardwareDeviceDriver.S2ATestProbe = (0, 6, 0, 0);   // 平台例外：注入试建读数，模拟 6 声道设备
                 Check("未显式选择 + 设备 6 声道 → 上报 5.1（main 的 #577 判据）", Reports6());
+                Check("6 声道探测：先用 2 声道队列读数，再试 6 声道布局", DriverProbe.S2ATestProbeFirstQueueChannels == 2 &&
+                    DriverProbe.S2ATestProbeSurroundQueueChannels == 6 && DriverProbe.S2ATestProbeLayoutCalls == 1,
+                    $"首队列 {DriverProbe.S2ATestProbeFirstQueueChannels}、布局队列 {DriverProbe.S2ATestProbeSurroundQueueChannels}、布局调用 {DriverProbe.S2ATestProbeLayoutCalls}");
                 AppleHardwareDeviceDriver.S2ATestProbe = (0, 2, 0, 0);   // 平台例外：模拟 2 声道设备
                 Check("未显式选择 + 设备 2 声道 → 上报 2", !Reports6());
+                Check("2 声道设备不建 6 声道队列、不设置 5.1 布局", DriverProbe.S2ATestProbeFirstQueueChannels == 2 &&
+                    DriverProbe.S2ATestProbeSurroundQueueChannels == 0 && DriverProbe.S2ATestProbeLayoutCalls == 0,
+                    $"首队列 {DriverProbe.S2ATestProbeFirstQueueChannels}、布局队列 {DriverProbe.S2ATestProbeSurroundQueueChannels}、布局调用 {DriverProbe.S2ATestProbeLayoutCalls}");
                 AppleHardwareDeviceDriver.S2ATestProbe = (0, 6, 5, 0);   // 平台例外：模拟声道数读失败
                 Check("未显式选择 + 读声道失败 → 上报 2（【红】后保守）", !Reports6());
                 AppleHardwareDeviceDriver.S2ATestProbe = (-50, 0, -1, -1);   // 平台例外：模拟试建队列失败（macOS 27 的 NULL callback 坑）

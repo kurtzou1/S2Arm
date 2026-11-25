@@ -2338,6 +2338,76 @@ class JobsTests(unittest.TestCase):
         self.assertEqual(list((self.c.work_root / library.TRASH).iterdir()), [])
         self.assertTrue(all(f.exists() for f in other))
 
+    def _other_game_packing(self, stack, gid="0100AAAAAAAAA000"):
+        """模拟别的款正在出包（build.produce_locks 同一组锁：执行锁共享 + 出包锁 + 那一款的按款锁），用另开的文件描述符拿（flock 按描述符互斥）"""
+        import filelock, sgrade
+        for name, shared in (("execution", True), ("produce", False), (sgrade.game_lock(gid), False)):
+            stack.enter_context(filelock.held(self.c.library / f".{name}.lock", wait_s=0, holder=dict(operation="ipa", gameId=gid), shared=shared))
+
+    def test_delete_while_other_game_packs(self):
+        # #2191：出包 A 时删 B。期望（手写）：不等出包结束，删除照常做完——B 的产物、B 自己的缓存都删掉，清单里没有 B；
+        #   全体共用的编译缓存（cache/air）A 的出包正在读写，这次不动；A 出完以后再删一款，共用缓存照旧清掉（删除语义不变）。
+        #   旧码拿执行锁独占：等满上限报 library_busy
+        import contextlib
+        package = self.package(); game = self.game(packages=[package]); self.catalogue([game])
+        keep, gone, other = self._build_leftovers(game["id"])
+        shared_air = self.c.work_root / "cache" / "air" / "ios" / "x.air"
+        self.c.r["gameId"] = game["id"]
+        with unittest.mock.patch.object(library, "DELETE_LOCK_WAIT_S", 1), contextlib.ExitStack() as stack:
+            self._other_game_packing(stack)
+            library.delete(self.c)
+        self.assertEqual([f for f in keep + gone if f.exists() and f != shared_air], [])
+        self.assertTrue(shared_air.exists(), "别的款在出包：共用编译缓存不动")
+        self.assertEqual([g["id"] for g in self.c.catalog()["games"]], [])
+        self.assertTrue(all(f.exists() for f in other))
+        game2 = self.game(tid="0100000000010000", packages=[self.package(tid="0100000000010000", sha="b" * 64)]); self.catalogue([game2])
+        self.c.r["gameId"] = game2["id"]
+        library.delete(self.c)
+        self.assertFalse(shared_air.exists(), "没人在出包：删除照旧顺手清共用编译缓存")
+
+    def test_delete_waits_for_same_game_pack(self):
+        # 出包 A 时删 A 自己：真冲突（出包正写 A 的文件），按款锁排队等它，到上限报忙、什么都不删（期望手写）
+        import contextlib
+        package = self.package(); game = self.game(packages=[package]); self.catalogue([game])
+        keep, gone, other = self._build_leftovers(game["id"])
+        self.c.r["gameId"] = game["id"]
+        with unittest.mock.patch.object(library, "DELETE_LOCK_WAIT_S", 1), contextlib.ExitStack() as stack:
+            self._other_game_packing(stack, gid=game["id"])
+            with self.assertRaises(Failure) as e:
+                library.delete(self.c)
+        self.assertEqual(e.exception.code, "library_busy")
+        self.assertTrue(all(f.exists() for f in keep + gone))
+        self.assertEqual([g["id"] for g in self.c.catalog()["games"]], [game["id"]])
+
+    def test_index_writes_from_two_jobs_merge(self):
+        # 两个作业各自读进索引、各改一款、先后写回（出包 A 时搬 B、导入与带位置的出包同时跑）。期望（手写）：两款的记录都在，
+        #   后写的不盖掉先写的；同一款两边都改，后写的赢。旧码整份覆盖：先写的那款丢了
+        import copy
+        a, b = copy.copy(self.c), copy.copy(self.c)
+        a._layout_idx = b._layout_idx = None
+        ia, ib = layout.load_index(a), layout.load_index(b)
+        ia["games"]["0100000000A00000"] = dict(location="default", folder="A")
+        ib["games"]["0100000000B00000"] = dict(location="default", folder="B")
+        layout.save_index(a); layout.save_index(b)
+        self.c._layout_idx = None
+        got = layout.load_index(self.c)["games"]
+        self.assertEqual((got.get("0100000000A00000"), got.get("0100000000B00000")),
+                         (dict(location="default", folder="A"), dict(location="default", folder="B")))
+        ia["games"]["0100000000B00000"] = dict(location="default", folder="B2")   # a 读到过 b 的写入后再改它：a 的版本赢
+        layout.save_index(a)
+        self.c._layout_idx = None
+        self.assertEqual(layout.load_index(self.c)["games"]["0100000000B00000"]["folder"], "B2")
+
+    def test_merge_index_rules(self):
+        # 纯函数（期望手写）：本作业没改的条目取盘上的；改了 / 新加的取本作业的；本作业删掉的删；位置按盘上顺序、新加的接后面、默认位置第一
+        base = dict(schema=1, last="L1", games={"G1": {"f": 1}, "G2": {"f": 2}}, locations=[dict(id="D", library=True), dict(id="L1")])
+        mine = dict(schema=1, last="L2", games={"G1": {"f": 1}, "G3": {"f": 3}}, locations=[dict(id="D", library=True), dict(id="L1"), dict(id="L2")])
+        disk = dict(schema=1, last="L1", games={"G1": {"f": 9}, "G2": {"f": 2}, "G4": {"f": 4}}, locations=[dict(id="D", library=True), dict(id="L1"), dict(id="L9")])
+        got = layout.merge_index(base, mine, disk)
+        self.assertEqual(got["last"], "L2")
+        self.assertEqual(got["games"], {"G1": {"f": 9}, "G3": {"f": 3}, "G4": {"f": 4}})
+        self.assertEqual([l["id"] for l in got["locations"]], ["D", "L1", "L9", "L2"])
+
     def test_sweep_trash_also_clears_tool_cache_trash(self):
         # 删除时挪进工具缓存根 .s2a-trash 的缓存当时没删掉（被占用 / 进程被杀）：期望下次启动 sweep_trash 一并清掉
         left = self.c.work_root / library.TRASH / "0100AAAAAAAAA000-1-bake" / "ok"; left.parent.mkdir(parents=True); left.write_text("x")
@@ -3406,14 +3476,21 @@ class JobsTests(unittest.TestCase):
         gid, _ = self.input_games()
         load = lambda: self.input_job(lambda c: (setattr(c, "game", lambda: dict(id=gid)), library.load_input(c))[1], gameId=gid)
         self.assertIsNone(load()["default"])
+        self.assertFalse(load()["defaultProblem"], "没设过不是问题")
         self.input_job(library.set_default_input, config=self.launcher_custom(19))
         shown = load()
         self.assertEqual(shown["default"]["keyboard"]["A"]["code"], 19)
         self.assertEqual(shown["players"][0]["source"], "default")
+        self.assertFalse(shown["defaultProblem"])
         dflt = Context(dict(self.request, taskId=str(uuid.uuid4()))).private / "default-input.json"
         dflt.write_bytes(b"{\xff not json")
         self.assertIsNone(load()["default"])
         self.assertEqual(load()["players"][0]["source"], "standard")
+        self.assertTrue(load()["defaultProblem"], "默认文件坏了要报出来，弹窗提示一行，不静默退回标准键位")
+        # 合规性也算：是 JSON 但过不了 validate_input
+        dflt.write_text('{"schema": 1, "keyboard": {}}', encoding="utf-8")
+        self.assertIsNone(load()["default"])
+        self.assertTrue(load()["defaultProblem"])
 
     def test_standard_input_matches_launcher_standard(self):
         # 作业层的标准键位与 Mac 启动器 InputConfig.standard 是同一套：读 Swift 原文的键码表、鼠标表、手柄键序与 MouseOptions 缺省逐项比

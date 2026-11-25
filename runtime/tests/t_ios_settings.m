@@ -450,7 +450,7 @@ int main(int argc, char **argv) {
         //   ⓑ 用户在设置里关了 60 帧与宽屏（审计 #854 F-caps-beats-settings）→ 设置赢：S2A_FPS60=0、S2A_WIDESCREEN=0（widen.c 设置关先于清单判）
         {
             NSString *caps = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"s2a_caps.tsv"];
-            check([@"widen\t1\t# 单测\nfps60\t1\t# 默认开：来源 社区帧率补丁\n" writeToFile:caps atomically:YES encoding:NSUTF8StringEncoding error:nil], @"能力清单写进包目录");   // 11-11：原因是速度已验证的来源（11-14 起我方帧率表不算，用社区帧率补丁），清单才替玩家开
+            check([@"widen\t1\t# 单测\nfps60\t1\t# 默认开：来源 社区帧率补丁，逻辑速度同局 A/B 绿（ρ 1.00、q 1.00，2026-11-20）\n" writeToFile:caps atomically:YES encoding:NSUTF8StringEncoding error:nil], @"能力清单写进包目录");   // 11-11：原因是速度已验证的来源（11-14 起我方帧率表不算，用社区帧率补丁），清单才替玩家开
             NSUserDefaults *std = NSUserDefaults.standardUserDefaults;
             for (int k = 0; k < 2; k++) {
                 [std removeObjectForKey:@"S2AFps60"]; [std removeObjectForKey:@"S2AWidescreen"];
@@ -492,20 +492,22 @@ int main(int argc, char **argv) {
             check(s2a_ios_caps_value("fps60") == -1, @"没有清单读到 -1");
         }
         // 60 帧开关如实显示（11-13：清单写 1 但来源没验证速度时，开关原先缺省显示开、起局却按原帧率，玩家以为开了）。期望按 settings.m 口径手写：
-        //   ① 清单原因「社区帧率补丁」、没选过 → 显示开（11-13 起：补丁要逐字节对上这个构建才进包，进了包就默认开）；①b 原因「引擎通用」、没选过 → 显示关；② 原因「fps.tsv」（速度已验证）、没选过 → 显示开；
+        //   ① 清单原因「社区帧率补丁 + 逻辑速度同局 A/B 绿」、没选过 → 显示开（11-23 #2120 起：只写补丁的老清单不再默认开，caps.c s2a_caps_fps60_verified）；①b 原因「引擎通用」、没选过 → 显示关；② 原因「fps.tsv」（速度已验证）、没选过 → 显示开；
         //   ③ 社区来源、玩家拨开（s2a_ios_set_fps60）→ 显示开、起局 S2A_FPS60=1；④ 再拨关 → 显示关、起局 S2A_FPS60=0
         {
             NSString *caps = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"s2a_caps.tsv"];
             NSUserDefaults *std = NSUserDefaults.standardUserDefaults;
             NSString *(^val)(void) = ^{ const char *e = getenv("S2A_FPS60"); return e ? @(e) : @"未设"; };
-            [@"fps60\t1\t# 默认开：来源 社区帧率补丁\n" writeToFile:caps atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            [@"fps60\t1\t# 默认开：来源 社区帧率补丁，逻辑速度同局 A/B 绿（ρ 1.00、q 1.00，2026-11-20）\n" writeToFile:caps atomically:YES encoding:NSUTF8StringEncoding error:nil];
             [std removeObjectForKey:@"S2AFps60"]; [std removeObjectForKey:@"S2AFps60Manual"];
-            check(s2a_ios_fps60_on(), @"60 帧显示①社区帧率补丁没选过（11-13：版本精确命中才进得了包，默认开）：期望开");
+            check(s2a_ios_fps60_on(), @"60 帧显示①社区帧率补丁 + 同局 A/B 绿没选过（11-23 #2120：A/B 绿才默认开）：期望开");
             [@"fps60\t1\t# 默认开：来源 引擎通用第一层（Unity / UE4 放开交换间隔）\n" writeToFile:caps atomically:YES encoding:NSUTF8StringEncoding error:nil];
             check(!s2a_ios_fps60_on(), @"60 帧显示①b 引擎通用来源没选过（速度没验证）：期望关");
             [@"fps60\t1\t# 默认开：来源 社区帧率补丁\n" writeToFile:caps atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            check(!s2a_ios_fps60_on(), @"60 帧显示①c 只写「社区帧率补丁」的老清单没选过（11-23 #2120：只字节命中不算速度验过）：期望关");
+            [@"fps60\t1\t# 默认开：来源 社区帧率补丁，逻辑速度同局 A/B 绿（ρ 1.00、q 1.00，2026-11-20）\n" writeToFile:caps atomically:YES encoding:NSUTF8StringEncoding error:nil];
             check(s2a_ios_fps60_on(), @"60 帧显示②速度已验证来源没选过：期望开");
-            [@"fps60\t1\t# 默认开：来源 社区帧率补丁\n" writeToFile:caps atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            [@"fps60\t1\t# 默认开：来源 社区帧率补丁，逻辑速度同局 A/B 绿（ρ 1.00、q 1.00，2026-11-20）\n" writeToFile:caps atomically:YES encoding:NSUTF8StringEncoding error:nil];
             s2a_ios_set_fps60(YES); clear_environment(); s2a_ios_load_graphics_settings();
             check(s2a_ios_fps60_on() && [val() isEqual:@"1"], [@"60 帧显示③玩家拨开：期望 显示开、S2A_FPS60=1 → 真结果 " stringByAppendingString:val()]);
             s2a_ios_set_fps60(NO); clear_environment(); s2a_ios_load_graphics_settings();
@@ -531,7 +533,7 @@ int main(int argc, char **argv) {
         //   旧实现第 2 项红（重读只撤设置页登记的名字，清单写的 1 留着，设置那条「未设才写」写不进）
         {
             NSString *caps = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"s2a_caps.tsv"];
-            check([@"fps60\t1\t# 默认开：来源 社区帧率补丁\n" writeToFile:caps atomically:YES encoding:NSUTF8StringEncoding error:nil], @"fps60 1 清单写进包目录");   // 11-11：验证过的来源清单才写 1，立刻重启才有东西可撤
+            check([@"fps60\t1\t# 默认开：来源 社区帧率补丁，逻辑速度同局 A/B 绿（ρ 1.00、q 1.00，2026-11-20）\n" writeToFile:caps atomically:YES encoding:NSUTF8StringEncoding error:nil], @"fps60 1 清单写进包目录");   // 11-11：验证过的来源清单才写 1，立刻重启才有东西可撤
             NSUserDefaults *std = NSUserDefaults.standardUserDefaults; [std removeObjectForKey:@"S2AFps60"]; [std removeObjectForKey:@"S2AFps60Manual"];
             // 先清空设置页的登记表（进程级，前面 ⓓ 登记过 S2A_FPS60=1）：否则旧实现②会因为登记表里恰好是 1 被撤掉而碰巧过
             NSString *empty = [@"local.s2arm.settings-p180." stringByAppendingString:NSUUID.UUID.UUIDString];

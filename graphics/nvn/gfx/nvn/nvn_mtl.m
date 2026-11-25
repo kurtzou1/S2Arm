@@ -1366,6 +1366,9 @@ static int big_new(big_pool *b, uintptr_t lo, uintptr_t hi, uintptr_t end) {   /
     [g_keep addObject:buf]; g_big_chunks++; b->made += end - lo;
     (void)hi; return g_npool - 1;
 }
+// 大池改整池的门槛（big_lookup）：设备 GPU 已分配不越过建议上限的 90%。g_big_budget_test 非 0 时用它（单测按手算的切换点设，t_nvn_big_pool ㉒ ㉓ ㉖）
+static uint64_t g_big_budget_test;
+static uint64_t big_budget(void) { return g_big_budget_test ? g_big_budget_test : (uint64_t)g_dev.recommendedMaxWorkingSetSize / 10 * 9; }
 // 大池里 [addr, addr + len) 的条目：所在步长的块，没有就建、不够长就加长（加长：旧块已经编进去的命令照用，旧缓冲随池走）；超出池尾 -1。调用方持 g_mu
 static int big_lookup(big_pool *b, uint64_t addr, uint64_t len) {
     if (addr + len > b->hi) return -1;
@@ -1377,10 +1380,13 @@ static int big_lookup(big_pool *b, uint64_t addr, uint64_t len) {
     // 一个大池的缓冲合计有上限。块互相重叠（每块盖到要读的末尾再多一个步长，不知道读多远的给 64 MB：一块 32～96 MB，步长才 16 MB），加长替下的旧块也活到池走；
     //   设备的 GPU 已分配对每个缓冲按整块长度记，重叠的部分记多次。896 MB 的池 56 个步长各查一次（长度 1）记 5136 MB；同一步长读 16、32 … 480 MB 记 3840 MB（t_nvn_big_pool ㉒ ㉓）。
     //   iPad Pro M4（建议上限 5461 MB）读档后玩 520 秒，驻留的内存池 1249 → 3979 MB、GPU 已分配 2381 → 5353 MB（98%），下一条命令缓冲报内存不足、整局安全停。
-    //   再建这一块就超过池长的一半时，改包整池一个缓冲（同 gmem_map 那条 full）：之后所有查找都落到它，不再建块。合计 ≤ 池长的 1.5 倍。
+    //   改包整池一个缓冲（同 gmem_map 那条 full）只在逼近设备上限时：再建这一块、再加上整池缓冲（改的那一刻块还没走，两次提交后才放）会让设备 GPU 已分配越过建议上限的
+    //   90%（big_budget）时才改，之后所有查找都落到它，不再建块；到期后这个池只剩整池一个缓冲。
+    //   原先「这个池的块合计过池长一半就改」：#2194 Mac M2 8 GB（建议上限 5461 MB）猎天使魔女 3 改整池前 GPU 已分配 2973 MB、60 帧，改整池后 4357 MB、42–45 帧、本局不回——
+    //   整池缓冲把整池锁页，离上限还远时块只锁用到的，内存小的机器上更顺；只有块的重复计数真要顶到上限（D-3N8R / iPad 98%）时整池才划算。
     //   不改的三种：整池超过单个缓冲上限（包不住）；游戏已释放、等回收的池（至多再活两次提交）；整池缓冲建不出来过（只试一次，记一条红，之后照旧建块、没有上限）
-    if (!b->nofull && !b->dead && b->made + (end - lo) > (uint64_t)(b->b - b->a) / 2 && (uint64_t)(b->b - b->a) <= ((uint64_t)g_dev.maxBufferLength & ~(uint64_t)(getpagesize() - 1))) {
-        uint64_t had = b->made; int w = big_new(b, b->a, b->b, b->b);
+    if (!b->nofull && !b->dead && (uint64_t)g_dev.currentAllocatedSize + (end - lo) + (uint64_t)(b->b - b->a) > big_budget() && (uint64_t)(b->b - b->a) <= ((uint64_t)g_dev.maxBufferLength & ~(uint64_t)(getpagesize() - 1))) {
+        uint64_t had = b->made, cur0 = (uint64_t)g_dev.currentAllocatedSize; int w = big_new(b, b->a, b->b, b->b);
         if (w >= 0) {
             // 改整池之后块与旧块不再有人查（查找都落到整池那个）：块条目按池注销同一口径到期（dead = 下下次提交，pool_reap 走延后释放），旧块同时到期（old_dead）。
             //   已编进之前提交的命令照用它们到那时为止。原先它们活到整池释放：合计到池长 1.5 倍、一直记在 GPU 已分配里（D-3N8R iPhone 17 Pro 5 个池 4988 MB，
@@ -1388,7 +1394,7 @@ static int big_lookup(big_pool *b, uint64_t addr, uint64_t len) {
             size_t nk = ((b->b - b->a) >> 24) + 1;
             for (size_t q = 0; q < nk; q++) { int c = b->chunk[q] - 1; if (c >= 0 && c != w) g_pools[c].dead = g_sub_serial + 2; b->chunk[q] = 0; }
             if (b->old.count) b->old_dead = g_sub_serial + 2;
-            b->full = w + 1; MLOG("memory pool %p+%llu MB: its chunks came to %llu MB (they overlap and each counts in full), one buffer over the whole pool from here on (the chunks and old buffers go after two more submissions)", b->mem, (unsigned long long)((b->hi - b->lo) >> 20), (unsigned long long)(had >> 20)); return w; }
+            b->full = w + 1; MLOG("memory pool %p+%llu MB: its chunks came to %llu MB (they overlap and each counts in full) and GPU allocated was nearing the device limit (%llu MB before this, switch point %llu MB = 90%% of the recommended working set), one buffer over the whole pool from here on (the chunks and old buffers go after two more submissions)", b->mem, (unsigned long long)((b->hi - b->lo) >> 20), (unsigned long long)(had >> 20), (unsigned long long)(cur0 >> 20), (unsigned long long)(big_budget() >> 20)); return w; }
         b->nofull = 1;
         MLOG("【红】 memory pool %p+%llu MB: its chunks came to %llu MB and the one buffer over the whole pool could not be made: chunks go on without a cap (GPU allocated counts each of them in full)", b->mem, (unsigned long long)((b->hi - b->lo) >> 20), (unsigned long long)(had >> 20));
     }
@@ -21343,6 +21349,8 @@ nvn_gpu_rc nvn_gpu_pool_bind(nvn_gpu_cmd c, nvn_gpu_stage st, uint32_t ent, nvn_
     return rc;
 }
 void nvn_gpu_pool_release(nvn_gpu_pool_table table) { (void)table; }
+int nvn_gpu_pool_has_texture(nvn_gpu_pool_table table, nvn_gpu_tex tex) { (void)table; (void)tex; return 0; }
+nvn_gpu_tex nvn_gpu_view_texture(nvn_gpu_view v) { (void)v; return NULL; }
 
 // Contract v12 compatibility entries. Metal still replays through nvn_be_*;
 // it has no nvn_gpu_buf/view wrapper or lifetime-ID registry. A legacy object

@@ -8155,6 +8155,7 @@ int nvn_gpu_buf_access_span(nvn_gpu_buf b, uint64_t off, uint64_t bytes, nvn_gpu
     out->storage = access_id(&b->access_id); out->off = off; out->bytes = bytes;
     return out->storage != 0;
 }
+nvn_gpu_tex nvn_gpu_view_texture(nvn_gpu_view v) { return v ? v->tex : NULL; }
 int nvn_gpu_view_access_span(nvn_gpu_view v, nvn_gpu_access_span *out) {
     if (!out) return 0;
     memset(out, 0, sizeof *out);

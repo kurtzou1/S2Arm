@@ -48,8 +48,10 @@ extern "C" {
 #define S2A_DPROMPT_FPS_CAP_TITLE_EN "60 FPS"
 #define S2A_DPROMPT_FPS_CAP_BODY    "这一局跑不稳 60 帧，已先回到原生帧率；下次开游戏会重新从 60 帧开始。"
 #define S2A_DPROMPT_FPS_CAP_BODY_EN "This session can't hold 60 FPS steadily, so the game is back at its native frame rate for now. It starts at 60 FPS again the next time you open the game."
-#define S2A_DPROMPT_FPS_CAP_RETRY   "再试 60 帧"
-#define S2A_DPROMPT_FPS_CAP_RETRY_EN "Try 60 FPS again"
+#define S2A_DPROMPT_FPS_CAP_RETRY   "改回 60 帧，本局不再自动降"
+#define S2A_DPROMPT_FPS_CAP_RETRY_EN "Back to 60 FPS, no auto-drop this session"
+#define S2A_DPROMPT_FPS_CAP_FAST    "这款游戏开 60 帧会加速，已保持 30 帧。"
+#define S2A_DPROMPT_FPS_CAP_FAST_EN "This game runs too fast at 60 FPS, so it stays at 30 FPS."
 #define S2A_DPROMPT_FPS_CAP_BACK    "60 帧已恢复。"
 #define S2A_DPROMPT_FPS_CAP_BACK_EN "60 FPS is back."
 // 麦克风不可用（#2151，macos/front_mac.m s2a_mic_notice；iOS 用 ios/l10n 的 app.mic.*）：游戏要用麦克风（如吹奏 / 哼唱识别），收不到声音时说清原因与去处

@@ -270,8 +270,9 @@
 "about.mode.unrecorded" = "Desconocido (este paquete no registró un modo gráfico)";
 "about.unknown" = "Desconocido";
 "app.fpsCap.ladder" = "En esta partida no se pueden mantener 60 FPS de forma estable, así que el juego vuelve por ahora a su velocidad de fotogramas nativa. La próxima vez que abras el juego empezará de nuevo a 60 FPS.";
+"app.fpsCap.fast" = "Este juego va demasiado rápido a 60 FPS, así que se mantiene a 30 FPS.";
 "app.fpsCap.restored" = "60 FPS restablecidos.";
-"app.fpsCap.retry" = "Probar 60 FPS de nuevo";
+"app.fpsCap.retry" = "Volver a 60 FPS sin bajar más en esta partida";
 "app.mic.title" = "Micrófono";
 "app.mic.denied" = "El juego quiere usar el micrófono, pero S2Arm no tiene permiso de micrófono, así que el juego solo oye silencio. Activa S2Arm en Ajustes › Privacidad y seguridad › Micrófono y vuelve a abrir el juego.";
 "app.mic.failed" = "El juego quiere usar el micrófono, pero no se pudo abrir el micrófono, así que el juego solo oye silencio.";
@@ -615,7 +616,8 @@
 
 /* 0.6.0 快照：游戏中菜单 */
 "vpad.snap.save" = "Guardar este momento";
-"vpad.snap.offAddress" = "Este juego necesita más rango de direcciones del que el sistema de este dispositivo puede dar a las apps, así que no caben las instantáneas y están desactivadas para este juego aquí. No tiene nada que ver con el almacenamiento; el juego funciona con normalidad.";
+"vpad.snap.offAddress" = "Este dispositivo no tiene suficiente rango de direcciones de memoria para este juego y una instantánea a la vez, así que las instantáneas están desactivadas para este juego aquí. No tiene nada que ver con el almacenamiento; el juego funciona como siempre.";
+"vpad.snap.offAddressNums" = " (el juego necesita %@ GB, la instantánea %@ GB, este dispositivo puede dar %@ GB)";
 "vpad.snap.restore" = "Volver al momento guardado";
 "vpad.snap.saving" = "Guardando este momento…";
 "vpad.snap.saved" = "Momento guardado";

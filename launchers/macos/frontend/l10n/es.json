@@ -1692,6 +1692,7 @@
   "s2arm.notice.delete.running": "Eliminando {0}…",
   "s2arm.notice.delete.done": "Se eliminó {0}. Las partidas guardadas y los archivos originales del juego se conservan.",
   "s2arm.notice.delete.failed": "No se pudo eliminar {0}: {1}",
+  "s2arm.notice.delete.queued": "Se eliminará este juego cuando termine la exportación",
   "s2arm.notice.clearCache.running": "Limpiando la caché de {0}…",
   "s2arm.notice.clearCache.done": "Se limpió la caché de {0}.",
   "s2arm.notice.clearCache.failed": "No se pudo limpiar la caché de {0}: {1}",

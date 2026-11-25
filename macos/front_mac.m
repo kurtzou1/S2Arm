@@ -2022,6 +2022,7 @@ static __weak S2AMacDelegate *g_delegate;
 // 档位梯子压回 30 帧 / 放开（runtime/src/qladder_host.c 调，任意线程；runtime/src/fps.c 弱定义）：#1688 原先 Mac 不提示，玩家只看到帧率补丁「全关」、以为 60 帧开关没用。
 //   压回时横幅说清原因、带「再试 60 帧」（s2a_ql_retry60，梯子下一帧回 60 帧档）；横幅被别的提示占着就 5 秒后再试
 void s2a_ql_retry60(void);
+int s2a_caps_fps_fast(void);   // runtime/src/caps.c
 void s2a_ios_fps_capped(int reason) {
     dispatch_async(dispatch_get_main_queue(), ^{
         S2APromptBanner *b = g_delegate.banner; if (!b) return;
@@ -2029,6 +2030,9 @@ void s2a_ios_fps_capped(int reason) {
         int zh = s2a_ui_zh();   // 按界面语言取中英文（同本文件菜单的取法）
         NSString *title = zh ? @S2A_DPROMPT_FPS_CAP_TITLE : @S2A_DPROMPT_FPS_CAP_TITLE_EN;
         if (reason != 4) { b.onAnswer = nil; [b showTitle:title body:zh ? @S2A_DPROMPT_FPS_CAP_BACK : @S2A_DPROMPT_FPS_CAP_BACK_EN accept:nil decline:nil seconds:6]; return; }
+        // 本构建号同局 A/B 红（开 60 帧游戏会加速，runtime/src/caps.c）：不给「再试 60 帧」，照实说明（11-24 #2201，同 iOS）
+        if (s2a_caps_fps_fast()) { b.onAnswer = nil; fprintf(stderr, "[s2a] 档位梯子：压回原帧率；本构建号同局 A/B 红（开 60 帧会加速），不给再试\n");
+            [b showTitle:title body:zh ? @S2A_DPROMPT_FPS_CAP_FAST : @S2A_DPROMPT_FPS_CAP_FAST_EN accept:nil decline:nil seconds:8]; return; }
         b.onAnswer = ^(BOOL accept) { if (accept) { fprintf(stderr, "[s2a] 档位梯子：玩家点了再试 60 帧\n"); s2a_ql_retry60(); } };
         [b showTitle:title body:zh ? @S2A_DPROMPT_FPS_CAP_BODY : @S2A_DPROMPT_FPS_CAP_BODY_EN accept:zh ? @S2A_DPROMPT_FPS_CAP_RETRY : @S2A_DPROMPT_FPS_CAP_RETRY_EN
               decline:zh ? @S2A_DPROMPT_OK : @S2A_DPROMPT_OK_EN seconds:15]; });

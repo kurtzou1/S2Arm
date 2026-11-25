@@ -1693,6 +1693,7 @@
   "s2arm.notice.delete.running": "正在删除「{0}」…",
   "s2arm.notice.delete.done": "已删除「{0}」，存档与原始游戏文件均保留",
   "s2arm.notice.delete.failed": "删除「{0}」没成功：{1}",
+  "s2arm.notice.delete.queued": "等这款出完包就删除",
   "s2arm.notice.clearCache.running": "正在清除「{0}」的缓存…",
   "s2arm.notice.clearCache.done": "已清除「{0}」的缓存",
   "s2arm.notice.clearCache.failed": "清除「{0}」的缓存没成功：{1}",

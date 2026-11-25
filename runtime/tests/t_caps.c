@@ -76,7 +76,7 @@ int main(void) {
       int ws = 0; waitpid(p, &ws, 0);
       expect("⑥ 启动环境 S2A_FPS60=1 时清单的 0 不覆盖", "0", WIFEXITED(ws) ? (WEXITSTATUS(ws) ? "1" : "0") : "崩"); }
     // ⑥b 11-11 速度已验证正确的款保留默认 60（清单原因认来源）：期望手算——fps.tsv / A/B 绿 / 原生 60 → 玩家没设时设 1；
-    //   全引擎档 / Unity·UE 推导 → 不设；玩家显式 0 → 照旧 0；社区帧率补丁（11-13）→ 设 1、玩家显式 0 照旧 0
+    //   全引擎档 / Unity·UE 推导 → 不设；玩家显式 0 → 照旧 0；社区帧率补丁要同时带「逻辑速度同局 A/B 绿」才设 1（11-23 #2120），只写补丁的不设
     //   11-14 撤我方 60 帧：缺省（没设 S2A_CAPS_OWN）我方来源 fps.tsv / A/B 绿也不设（老包清单还写着这些原因）；原生 60 / 社区帧率补丁照旧设 1；S2A_CAPS_OWN=1 回旧口径
     { static const struct { const char *why, *env, *want; int own; } vc[] = {
           {"默认开：来源 fps.tsv", NULL, "1", 1},
@@ -85,12 +85,14 @@ int main(void) {
           {"默认开：来源 引擎通用：放开出图间隔（全引擎，同局 A/B 判红才关）", NULL, NULL, 1},
           {"默认开：来源 引擎通用第一层（Unity / UE4 放开交换间隔）", NULL, NULL, 1},
           {"默认开：来源 fps.tsv", "0", "0", 1},
-          {"默认开：来源 社区帧率补丁", NULL, "1", 1},          // 11-13：社区帧率补丁版本精确命中才进得了包，默认开
-          {"默认开：来源 社区帧率补丁", "0", "0", 1},          // 玩家关了照旧关
+          {"默认开：来源 社区帧率补丁", NULL, NULL, 1},        // 11-23 #2120：只字节命中不算逻辑速度验过，不替玩家开（老包清单）
+          {"默认开：来源 社区帧率补丁，逻辑速度同局 A/B 绿（ρ 1.00、q 1.00，2026-11-20）", NULL, "1", 1},   // 补丁 + 同局 A/B 绿 → 开
+          {"默认开：来源 社区帧率补丁，逻辑速度同局 A/B 绿（ρ 1.00、q 1.00，2026-11-20）", "0", "0", 1},   // 玩家关了照旧关
           {"默认开：来源 fps.tsv", NULL, NULL, 0},             // 缺省口径：我方帧率表不替玩家开
           {"默认开：来源 逻辑速度同局 A/B 绿（ρ 1.01、q 0.99，放开出图间隔）", NULL, NULL, 0},
           {"默认开：来源 游戏原生 60 帧", NULL, "1", 0},
-          {"默认开：来源 社区帧率补丁", NULL, "1", 0}};
+          {"默认开：来源 社区帧率补丁", NULL, NULL, 0},        // 缺省口径同样：只有补丁不替玩家开
+          {"默认开：来源 社区帧率补丁，逻辑速度同局 A/B 绿（ρ 1.00、q 1.00，2026-11-20）", NULL, "1", 0}};
       for (int i = 0; i < (int)(sizeof vc / sizeof *vc); i++) {
           f = fopen(path, "w"); fprintf(f, "fps60\t1\t# %s\n", vc[i].why); fclose(f);
           fflush(stdout); pid_t p = fork(); if (p < 0) return 1;
@@ -101,6 +103,20 @@ int main(void) {
           int ws = 0; waitpid(p, &ws, 0); char what[256];
           snprintf(what, sizeof what, "⑥b%s 清单 fps60 1「%s」、玩家%s → S2A_FPS60 %s", vc[i].own ? "（旧口径）" : "（缺省）", vc[i].why, vc[i].env ? "设了 0" : "没设", vc[i].want ? vc[i].want : "不设");
           expect(what, "0", WIFEXITED(ws) ? (WEXITSTATUS(ws) ? "1" : "0") : "崩"); } }
+    // ⑥c 11-24 #2201：清单 fps60 原因带「逻辑速度同局 A/B 红」（tools/caps_policy.py 判红那一档）→ s2a_caps_fps_fast 1（压回时不给「再试 60 帧」）；
+    //   绿 / 只写补丁 / 没读清单 → 0；s2a_caps_reset 清回 0。期望手算：只看原因里有没有「A/B 红」这几个字
+    { static const struct { const char *line; int want; } fc[] = {
+          {"fps60\t0\t# 原帧率：有社区帧率补丁、本构建号逻辑速度同局 A/B 红：开 60 帧游戏会加速（ρ 2.68、q 2.00，2026-11-24）\n", 1},
+          {"fps60\t1\t# 默认开：来源 社区帧率补丁，逻辑速度同局 A/B 绿（ρ 1.00、q 1.00，2026-11-20）\n", 0},
+          {"fps60\t0\t# 原帧率：有社区帧率补丁、本构建号没有逻辑速度同局 A/B 绿\n", 0}};
+      for (int i = 0; i < (int)(sizeof fc / sizeof *fc); i++) {
+          f = fopen(path, "w"); fputs(fc[i].line, f); fclose(f);
+          s2a_caps_reset(); unsetenv("S2A_FPS60"); s2a_caps_apply(T);
+          char want[4], got[4], what[300]; snprintf(want, sizeof want, "%d", fc[i].want); snprintf(got, sizeof got, "%d", s2a_caps_fps_fast());
+          snprintf(what, sizeof what, "⑥c 清单「%.*s」→ s2a_caps_fps_fast", (int)strcspn(fc[i].line + 10, "\n"), fc[i].line + 10);
+          expect(what, want, got); }
+      s2a_caps_reset(); char got[4]; snprintf(got, sizeof got, "%d", s2a_caps_fps_fast());
+      expect("⑥c s2a_caps_reset 后 s2a_caps_fps_fast 清回 0", "0", got); unsetenv("S2A_FPS60"); }
     f = fopen(path, "w"); fprintf(f, "fps60\t0\t# 未验：无登记\n"); fclose(f);
     // ⑦ 普查同局 A/B 模式（S2A_FPS_AB=1）：清单 fps60 0 → 另设 DM_PRESENT_INTERVAL=display（平时由 fps.c 降档原因 3 退回原帧率）；没开 A/B 模式、或已显式给了间隔都不设
     { pid_t p = fork(); if (p < 0) return 1;

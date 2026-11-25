@@ -5,7 +5,7 @@ ifeq ($(S2A_UNAME),Darwin)
 .PHONY: native-test-vawin_learned
 native-test-vawin_learned: $(TEST_VAGUARD)
 	@mkdir -p $(BUILD)/tests
-	$(CC) $(CFLAGS) $(NATIVE_INC) -DS2A_UNIT_TEST -o $(BUILD)/tests/t_vawin_learned runtime/tests/t_vawin_learned.c runtime/src/vawin.c -Wl,-weak_library,$(TEST_VAGUARD)
+	$(CC) $(CFLAGS) $(NATIVE_INC) -DS2A_UNIT_TEST -o $(BUILD)/tests/t_vawin_learned runtime/tests/t_vawin_learned.c runtime/src/vawin.c runtime/src/layout.c -Wl,-weak_library,$(TEST_VAGUARD)
 	$(BUILD)/tests/t_vawin_learned
 TEST_TARGETS += native-test-vawin_learned
 endif

@@ -144,14 +144,17 @@ run_groups() {   # run_groups <键…>：前置建一次 → 非 SER 组按上�
 }
 depskip() {   # depskip <键…>：可跳过的组（空格分隔）；不跳就什么都不打。见上方「按源文件跳组」
   [ -n "${GATE_CHANGED:-}" ] && [ "${NATIVE_GATE_DEPSKIP:-1}" != 0 ] || return 0
-  local f c=() st day key cd b k
+  local f c=() h=() st day key cd b k bo=; [ "${GATE_BUILD_ONLY:-}" = 1 ] && bo=1
   for f in $GATE_CHANGED; do case $f in
     runtime/*.c|runtime/*.m|runtime/*.mm|runtime/*.cpp|runtime/*.cc|runtime/*.S|runtime/*.s|graphics/*.c|graphics/*.m|graphics/*.mm|graphics/*.cpp|graphics/*.cc|graphics/*.S|graphics/*.s) c+=("$f");;
+    # 只编（11-24 收窄）：头文件也收窄——按 #include / #import 静态闭包（tools/include_closure.py）求出受影响的源文件，并进 c；跑的组只看编不编得过
+    runtime/*.h|runtime/*.inc|runtime/*.hpp|graphics/*.h|graphics/*.inc|graphics/*.hpp) [ -n "$bo" ] && h+=("$f") || return 0;;
     runtime/*|graphics/*|Makefile|*/build.mk|tests/autoplay/*|tests/build.mk|compat/*) return 0;;   # 非 C 源落在本钩子管的路径下：全跑
   esac; done
-  [ ${#c[@]} -gt 0 ] || return 0
+  if [ ${#h[@]} -gt 0 ]; then local x; while IFS= read -r x; do [ -n "$x" ] && c+=("$x"); done < <(python3 -B tools/include_closure.py "${h[@]}" 2> /dev/null) || return 0; fi
+  [ ${#c[@]} -gt 0 ] || { [ -n "$bo" ] && [ ${#h[@]} -gt 0 ] && echo "$*"; return 0; }   # 只编：改的头文件没有源用到 → 一组都不用编
   st=${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/gate_depskip; day=$(date +%Y%m%d); mkdir -p "$st" 2> /dev/null || return 0
-  [ -f "$st/full.$day" ] || { : > "$st/full.$day"; return 0; }   # 每天这台机器第一次：全跑
+  [ -n "$bo" ] || [ -f "$st/full.$day" ] || { : > "$st/full.$day"; return 0; }   # 每天这台机器第一次：全跑（只编不做这一步：编译结果不随天变）
   key=$(cat Makefile */build.mk runtime/tests/mk/*.mk 2> /dev/null | shasum | cut -c1-16); cd=$st/src.$key
   if [ ! -f "$cd/.done" ]; then b=$(mktemp -d "${TMPDIR:-/tmp}/s2a_depskip_XXXXXX"); mkdir -p "$cd"
     # 并行算（J 路，同组并行数）：串行 345 组约 400 秒，mk 一变就要重算，不并行会把省下的时间吃回去
@@ -160,7 +163,8 @@ depskip() {   # depskip <键…>：可跳过的组（空格分隔）；不跳就
   # 规则里自己再调 $(MAKE) 的组（graphics_session 编整个带 S2A_CS 的宿主、nvn_abba、input_config_apple）：干跑列不全它们的源（11-14 实测
   #   graphics_session 串行干跑 0 个源、并行干跑 2 个），一律照跑。按规则文本静态认，不靠干跑输出
   local rec; rec=" $(grep -l '\$(MAKE)' runtime/tests/mk/*.mk 2> /dev/null | sed 's#.*/##; s#\.mk$##' | tr '\n' ' ') $(awk '/^native-test-[a-z_0-9]+:/{t=substr($1, 13); sub(/:$/, "", t)} /\$\(MAKE\)/{if (t) print t}' Makefile */build.mk 2> /dev/null | tr '\n' ' ') "
-  local out=; for k in "$@"; do case $rec in *" $k "*) continue;; esac; [ -s "$cd/$k.txt" ] || continue; grep -qxFf <(printf '%s\n' "${c[@]}") "$cd/$k.txt" || out="$out $k"; done
+  # 只编：这几组自己再编整个宿主（graphics_session 一组 776 秒），宿主本身合入前已由「宿主构建」那段编过；拿出只编、留给合入后完整门禁
+  local out=; for k in "$@"; do case $rec in *" $k "*) [ -n "$bo" ] && out="$out $k"; continue;; esac; [ -s "$cd/$k.txt" ] || continue; grep -qxFf <(printf '%s\n' "${c[@]}") "$cd/$k.txt" || out="$out $k"; done
   echo "${out# }"
 }
 summary() { local b=; [ "$BON" -gt 0 ] && b="；只编判不了 $BON 组"; [ $R = 0 ] && echo "绿 $G 组$b" || echo "绿 $G 组、红 $R 组（${WHY#、}）$b"; }

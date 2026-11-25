@@ -44,6 +44,7 @@ static uint64_t g_ca_base, g_va_cap = 64ull << 30; static int g_ca_cut;   // 命
 static uint64_t g_snap_below;   // 即时存档（iOS）：命令记录区放在窗口下方宿主保留段底部时的长度（0 = 没放那里）。11-20 起不再为它从窗口里让、不扩宿主段，只在宿主段本来就够大时切（s2a_snap_arena_place）
 static uint64_t g_snap_out;     // 即时存档（iOS）、窗口放不下标准布局：命令记录区 + 虚拟池区放在窗口所在空洞之外的这处（0 = 没放）
 #endif
+static uint64_t g_snap_squeeze;   // 即时存档（iOS；Mac 不让，恒 0）：快照区让窗口时窗口少了多少（0 = 没让）。被让掉的那段 = [窗口末, 窗口末 + 它)，见 s2a_snap_needwin_hit
 static uint64_t g_keep_lo;   // 放不下标准布局时窗口下方留给宿主的那段起点（0 = 没有）：Mac 复现 iPhone 约束时不占它（iphone_va_fence）
 static uint64_t g_res;       // 起局时预留的大小（收尾部前的 g_size）：「还给系统 / 交尾部分配的那段」= [g_base + g_size, g_base + g_res)
 // 客体内存改文件后备（S2A_GUEST_FILE；11-05 时之笛 Switch 2 iPhone 读档进场景被单进程上限 8192 MB 杀）。开不开见 s2a_guest_file_wanted：
@@ -410,15 +411,41 @@ static int span_path(char *out, size_t n, uint64_t pid) {   // pid = 0：按局�
     char *sl = strrchr(out, '/'); if (!sl) return 0; snprintf(sl + 1, n - (size_t)(sl + 1 - out), SPAN_FILE); return 1;
 }
 // 各款实测最高地址的种子表（tools/span_seed.py 从诊断报告生成，随宿主下发）：本机还没玩过 / 没记下的款，第一局就按别人设备上碰到过的最高值判
-//   （窗口给多大、快照区放不放得下、弹不弹「地址空间不够」）。只收放不下标准布局的局，每款取最大值、样本 ≥ 2
-static const struct { uint64_t pid; uint32_t mb, n; } g_span_seed[] = {
+//   （窗口给多大、快照区放不放得下、弹不弹「地址空间不够」）。只收 #1441 起的版本（0.5.3+）、放不下标准布局、不贴顶的局，每款取 p99、样本 ≥ 2
+//   （11-24 快照被关根修：原先取最大，一份 #1441 前的老局（远端缺页 1534 万次）把一款 Switch 2 大作（0400486024DEC000）顶到 62495 MB，iOS 上 183 局因此关了快照；重生成后 21961）。
+//   whole = 这款开着快照时快照区挤掉的那段被游戏碰过（见 s2a_snap_needwin_hit），样本里够多（≥ 2 局且 ≥ 5%）：快照区不再从窗口里让
+static const struct { uint64_t pid; uint32_t mb, n, whole; } g_span_seed[] = {
 #include "span_seed.inc"
 };
-uint64_t s2a_span_seed(uint64_t pid) {
+static int seed_at(uint64_t pid) {
     size_t a = 0, b = sizeof g_span_seed / sizeof g_span_seed[0];
     while (a < b) { size_t m = (a + b) / 2; if (g_span_seed[m].pid < pid) a = m + 1; else b = m; }
-    return a < sizeof g_span_seed / sizeof g_span_seed[0] && g_span_seed[a].pid == pid ? (uint64_t)g_span_seed[a].mb << 20 : 0;
+    return a < sizeof g_span_seed / sizeof g_span_seed[0] && g_span_seed[a].pid == pid ? (int)a : -1;
 }
+uint64_t s2a_span_seed(uint64_t pid) { int i = seed_at(pid); return i >= 0 ? (uint64_t)g_span_seed[i].mb << 20 : 0; }
+int s2a_span_seed_whole(uint64_t pid) { int i = seed_at(pid); return i >= 0 && g_span_seed[i].whole; }
+// 这款在这台设备上「要整个窗口」（快照被关根修 ④，11-24）：开着快照、快照区从窗口里让了 squeeze 字节的一局，游戏碰到了被让掉的那段
+//   （远端缺页落在 [窗口末, 窗口末 + squeeze)，far.c s2a_far_squeeze_faults）——不让的话这些访问都在窗口里，让了就每次走远端代执行。
+//   记一个文件 wire/<号>/snap_need_win（内容 = 那局碰了几次），之后这款快照区不再从窗口里让（窗口外 / 宿主段本来够大照放），快照按地址不够关、齿轮里置灰写原因。
+//   只看被让掉的那段：再往外的远端缺页不让也有，与快照无关。不会来回翻：关了快照的局不让窗口、squeeze = 0，判不出「没碰」，文件不删（t_vawin_learned ㉑ 循环正反例）
+#define NEEDWIN_FILE "snap_need_win"
+int s2a_snap_needwin_hit(uint64_t squeeze, uint64_t sq_faults) { return squeeze && sq_faults; }   // 纯函数
+static int needwin_path(char *out, size_t n, uint64_t pid) {
+    if (!span_path(out, n, pid)) return 0;
+    char *sl = strrchr(out, '/'); if (!sl) return 0; snprintf(sl + 1, n - (size_t)(sl + 1 - out), NEEDWIN_FILE); return 1;
+}
+static int needwin_local(const char *p) { return p && !access(p, F_OK); }
+// 这局让了 squeeze、让掉的那段被碰 faults 次：该记就写 snap_need_win（pid = 0 按局中当前程序号），回 1 = 写了。只写不删：关了快照的局判不出「没碰」（t_vawin_learned ㉑）
+int s2a_snap_needwin_note(uint64_t pid, uint64_t squeeze, uint64_t faults) {
+    char q[1024]; if (!s2a_snap_needwin_hit(squeeze, faults) || !needwin_path(q, sizeof q, pid)) return 0;
+    { char d[1024]; snprintf(d, sizeof d, "%s", q); char *sl = strrchr(d, '/'); if (sl) { *sl = 0; mkdir(d, 0755); } }
+    FILE *f = fopen(q, "w"); if (!f) return 0;
+    fprintf(f, "%llu\n", (unsigned long long)faults); fclose(f);
+    LOG("【黄】即时存档：快照区让掉的那段窗口（%llu MB）游戏碰了 %llu 次（每次走远端代执行）——记下这款要整个窗口（%s），下一局起快照区不再从窗口里让",
+        (unsigned long long)(squeeze >> 20), (unsigned long long)faults, q);
+    return 1;
+}
+int s2a_snap_needwin(uint64_t pid) { char p[1024]; return pid && ((needwin_path(p, sizeof p, pid) && needwin_local(p)) || s2a_span_seed_whole(pid)); }
 // 收窄后没到首帧的自愈（D-PR33，11-21 iOS 26.7、0.6.7）：按已知跨度（本机记录 / 种子表）收窄窗口的一局，起局时写 <前缀>wire/<号>/span_cap_try（内容 = 这次按的跨度），
 //   首帧上屏删掉（s2a_window_cap_ok，ap_host.c）；下一局起局还看见它 = 上一局收窄后没到首帧（开局就停 / 崩 / 被杀），改名 span_cap_bad，
 //   之后这款已知跨度不超过它就不按跨度收、窗口照缺省给；跨度长大（本机记下更高的）超过它再试。种子表随宿主下发、本机删不掉，
@@ -469,12 +496,18 @@ int s2a_window_span_worth(uint64_t presents) { return presents >= SPAN_MIN_PRESE
 // 学跨度只记「游戏真要的」（11-22 宿主下限复核，同 tools/span_seed.py 贴顶规则）：跨度离窗口末不到 512 MB = 贴顶——别名区报到窗口末、游戏的静态大区
 //   贴着顶映射，跨度跟着窗口走（异度神剑3 窗口 62464 时记 62080、53248 时远端缺页 0 次），记下来下一局窗口更小时会误弹「地址空间不够」、快照区判反。
 //   例外：本局有越界映射（映射落到宿主没占到的地址）或远端缺页——游戏真碰到了窗口外，贴顶也记。纯函数，t_vawin_learned 测
-#define SPAN_TOP_MARGIN (512ull << 20)
-int s2a_span_learn_ok(uint64_t span, uint64_t win_size, uint64_t oob, uint64_t far) { return span && (span + SPAN_TOP_MARGIN < win_size || oob || far); }
+//   贴顶带 11-24 从 512 MB 放宽到 max(2 GiB, 窗口 10%)（快照被关根修 ②，同 tools/span_seed.py）：窗口末前 512 MB 以外仍有跟着窗口走的跨度，
+//   收进来把种子顶高、下一局判「快照放不下」
+uint64_t s2a_span_top_margin(uint64_t win) { uint64_t m = win / 10; return m > (2ull << 30) ? m : 2ull << 30; }
+int s2a_span_learn_ok(uint64_t span, uint64_t win_size, uint64_t oob, uint64_t far) { return span && (span + s2a_span_top_margin(win_size) < win_size || oob || far); }
 static void span_note(void) {   // s2a_mem_span_learn 在 svc_mem.c、mtl_present_count 在直连图形层：按名字取（只链 vawin.c 的单测没有它们；取不到 = 不记）
     static uint64_t (*spanf)(void), (*presf)(void); static int looked;
     if (!looked) { spanf = (uint64_t (*)(void))dlsym(RTLD_DEFAULT, "s2a_mem_span_learn"); presf = (uint64_t (*)(void))dlsym(RTLD_DEFAULT, "mtl_present_count"); looked = 1; }
     if (!presf || !s2a_window_span_worth(presf())) return;
+    if (g_snap_squeeze) {   // 快照区让了窗口：被让掉的那段游戏碰过就记「要整个窗口」（快照被关根修 ④），一局记一次
+        static uint64_t (*sqf)(void); static int sl, wrote; if (!sl) { sqf = (uint64_t (*)(void))dlsym(RTLD_DEFAULT, "s2a_far_squeeze_faults"); sl = 1; }
+        if (!wrote) wrote = s2a_snap_needwin_note(0, g_snap_squeeze, sqf ? sqf() : 0);
+    }
     uint64_t now = spanf ? spanf() : 0; if (!now) return;
     char p[1024], t[1100]; if (!span_path(p, sizeof p, 0)) return;
     static uint64_t rec; static int loaded; if (!loaded) { rec = read_u64(p); if (!s2a_window_span_rec_ok(rec, g_fit)) rec = 0; loaded = 1; }
@@ -1084,6 +1117,10 @@ int s2a_process_prewarmed(void) {
 #define TL_SMALL (256ull << 20)
 #define MIN_WIN (2ull << 30)
 #define SNAP_SPAN_MARGIN (2ull << 30)   // 快照区让窗口时，已知最高跨度之上至少还留这么多窗口（游戏后面还可能碰得更高）
+// 这一局因地址关快照时的三个数（齿轮菜单置灰那一项写给玩家，ios/vpad.m）：游戏要多少（已知跨度 + 余量；要整个窗口 = 能给的全部；0 = 不知道）、
+//   快照区要多少、这台设备除宿主下限外能给游戏 + 快照多少。窗口外 / 宿主段两条路都放不下时才填（vawin_reserve）；回 0 = 没填（别的原因关的）
+static uint64_t g_snap_off_game, g_snap_off_snap, g_snap_off_have;
+int s2a_snap_off_numbers(uint64_t *game, uint64_t *snap, uint64_t *have) { *game = g_snap_off_game; *snap = g_snap_off_snap; *have = g_snap_off_have; return g_snap_off_have != 0; }
 #define HOST_BELOW (3ull << 30)   // 放不下标准布局时窗口下方留给宿主的地址（11-06：1 GB → 3 GB。iOS 上宿主可用地址 = 低区约 1.8 GB + 这一段；时之笛 Switch 2 版宿主峰值 1.7–2.1 GB，1 GB 时低区碰底在上屏路径崩。时之笛游戏最高只碰到窗口 +17.6 GB、异度3 碰到 +60.6 GB，3 GB 两者都装得下；≥3712 MB 会让 GC 上限改选分堆档吃掉收益）   // 窗口最少要这么多（模块 + 栈 + 堆前段放得下与否由布局判，layout.c）   // 窗口顶到空洞末尾时只接管这么多（九款尾部峰值 ≤ 202 MB，见 s2a_window_trim）
 // 放不下标准布局时窗口下方留给宿主多少（#783，纯函数，t_vawin_learned 测）：没学到跨度（learned = 0）→ HOST_BELOW；学到了 → 窗口只给
 //   learned × 1.25 + 2 GiB（1 GiB 向上取整，游戏后面还会碰得更高、留余量），这块空洞里其余都给宿主，至少 HOST_BELOW。
@@ -1222,6 +1259,7 @@ void s2a_window_fatal_msg(char *out, size_t cap, uint64_t need, uint64_t fit, ui
         (unsigned long long)(need >> 20), (unsigned long long)hole_top, (unsigned long long)(fit >> 20));
 }
 static char g_npdm[1100];   // 本款 main.npdm 路径（找不到可执行文件目录 / 模块目录时为空）：跨度算不出时按它说清原因
+static int g_ctr_needwin;   // 多款容器：包内有一款「要整个窗口」（s2a_snap_needwin），构造期还不知道玩哪款，快照区不从窗口里让
 static int g_ctr, g_ctr_astype = -1;   // 多款容器构造期（launchctx.c ③）：g_ctr = 1；g_ctr_astype = 包内各款一致的地址空间类型（不一致 / 读不到 = -1）
 // 多款容器构造期一款游戏都没有（全新安装后才导入、或删光了再导入）：原先不占窗口，起宿主前才补占（s2a_window_reserve_late）——那时宿主已用了一阵
 //   地址空间（Metal / malloc / 游戏库界面），2^39 以下最大一块从 65536 MB 碎到 37888 MB（#1903 D-D2YQ：iPhone 16 Pro 导入后第一局窗口只有 31744 MB，
@@ -1343,6 +1381,8 @@ uint64_t s2a_window_container_need(const char *bundle, const char *home) {
           { char pre[64]; snprintf(pre, sizeof pre, "games/%s/", gid); sl = s2a_window_span_trust(pre, pid, sl); }   // 这款收窄过、那局没到首帧：按不知道（选定后 svc_mem.c 同样不收）
           // 这款本机没记录、种子表也没有：跨度不知道。不再拿整份标准布局 ni 顶（必然不小于空洞、被当成「学到的跨度不对」作废，日志还说成旧版记错）：
           //   记一笔「不知道」，整容器按不知道处理（窗口不按跨度收、快照区照放、不弹「地址空间不够」）
+          { char nw[1400]; if (pid) s2a_docs_path(nw, sizeof nw, "games/%s/wire/%016llX/" NEEDWIN_FILE, gid, (unsigned long long)pid);
+            if (pid && (needwin_local(nw) || s2a_span_seed_whole(pid))) { g_ctr_needwin = 1; LOG("地址窗口：多款容器 %s 记过「要整个窗口」（开快照时被让掉的那段窗口游戏碰过）：快照区不从窗口里让", gid); } }
           if (!sl) { span_unknown = 1; LOG("地址窗口：多款容器 %s 本机没记下跨度、种子表也没有：这款跨度不知道，按需起局、边玩边学", gid); }
           if (sl > span_max) span_max = sl; }
         if (ni > top) top = ni;
@@ -1476,6 +1516,7 @@ static void vawin_reserve(void) {
     int snap_win = s2a_snap_restoring() && !s2a_snap_manifest_win(&sw_b, &sw_s);
     if (snap_win && g_span_learned) { LOG("即时存档恢复：不用本机学到的跨度 %llu MB，窗口按快照原样占", (unsigned long long)(g_span_learned >> 20)); g_span_learned = 0; }
     uint64_t span_known = g_span_learned;   // 本款已知的最高跨度（本机记录 / 种子表，0 = 不知道）：快照区放不放得下按它判（下面）
+    int needwin = g_ctr ? g_ctr_needwin : s2a_snap_needwin(g_ctor_pid); (void)needwin;   // 这款要整个窗口（s2a_snap_needwin）：快照区不从窗口里让
     (void)span_known;   // Mac 不走快照区那段
     if (g_span_learned && !s2a_window_span_rec_ok(g_span_learned, g_fit)) {
         LOG("【黄】地址窗口：本款已知碰到过的最高跨度 %llu MB（本机记录或种子表）不小于这块空洞 %llu MB：窗口不按跨度收，照缺省给", (unsigned long long)(g_span_learned >> 20), (unsigned long long)(g_fit >> 20));
@@ -1497,7 +1538,11 @@ static void vawin_reserve(void) {
           if (!(rec && *rec) && s2a_snap_mode() && !s2a_snap_restoring()) {
               uint64_t oa = 0, os = 0, of = 0, ofa = 0, ol = 0;
               pick_hole_in(0x100000000ull, fat, A, &oa, &os, &of, &ofa, 0, &ol);
-              uint64_t below0 = below; int where = s2a_snap_arena_place2(os, g_fit, &below, A, s2a_window_host_floor(g_fit), span_known, SNAP_SPAN_MARGIN);
+              // 要整个窗口：已知跨度按整块空洞算（必然放不进「空洞 − 宿主 − 快照」），只剩窗口外 / 宿主段本来够大两条路
+              uint64_t below0 = below; int where = s2a_snap_arena_place2(os, g_fit, &below, A, s2a_window_host_floor(g_fit), needwin ? g_fit : span_known, SNAP_SPAN_MARGIN);
+              if (where == 2 && below != below0) { g_snap_squeeze = below - below0;   // 窗口末不变（fat + g_fit）、起点上移：游戏地址整体上移这么多，[窗口末, 窗口末 + 它) 不让的话在窗口里
+                  void (*band)(uint64_t, uint64_t) = (void (*)(uint64_t, uint64_t))dlsym(RTLD_DEFAULT, "s2a_far_squeeze_band");
+                  if (band) band(fat + g_fit, fat + g_fit + g_snap_squeeze); }
               if (where == 2 && below != below0) LOG("即时存档：宿主保留段 %llu MB 加长到 %llu MB 放命令记录区与虚拟池区，窗口少 %llu MB（本款已知最高跨度 %llu MB，0 = 还不知道、按需起局）",
                   (unsigned long long)(below0 >> 20), (unsigned long long)(below >> 20), (unsigned long long)((below - below0) >> 20), (unsigned long long)(span_known >> 20));
               if (where == 1) { g_snap_out = oa + os - A;
@@ -1506,6 +1551,9 @@ static void vawin_reserve(void) {
                   LOG("即时存档：窗口放不下标准布局，窗口外没有整块 %llu MB 的空洞（最大 %llu MB）；窗口下方宿主保留段 %llu MB 够大，命令记录区与虚拟池区放在它底部，宿主还剩 %llu MB",
                       (unsigned long long)(A >> 20), (unsigned long long)(of >> 20), (unsigned long long)(below >> 20), (unsigned long long)((below - A) >> 20)); }
               else { s2a_snap_disable(S2A_SNAP_OFF_ADDRESS);
+                  { uint64_t fl = s2a_window_host_floor(g_fit); g_snap_off_have = g_fit > fl ? g_fit - fl : 0; g_snap_off_snap = A;
+                    g_snap_off_game = needwin ? g_snap_off_have : span_known ? span_known + SNAP_SPAN_MARGIN : 0; }
+                  if (needwin) LOG("【黄】即时存档：这款在这台设备上记过「要整个窗口」（开快照时被让掉的那段窗口游戏碰过），快照区不从窗口里让");
                   LOG("【黄】即时存档：本款已知最高跨度 %llu MB 加余量 %llu MB 放不进空洞 %llu MB 减去宿主与快照区的 %llu MB，窗口外也没有整块 %llu MB 的空洞（最大 %llu MB）——这台设备的地址空间不够同时放下这款与快照，这一局不开快照，游戏照常玩",
                       (unsigned long long)(span_known >> 20), (unsigned long long)(SNAP_SPAN_MARGIN >> 20), (unsigned long long)(g_fit >> 20), (unsigned long long)((A + s2a_window_host_floor(g_fit)) >> 20),
                       (unsigned long long)(A >> 20), (unsigned long long)(of >> 20)); } } }

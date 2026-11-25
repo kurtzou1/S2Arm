@@ -1695,6 +1695,7 @@
   "s2arm.notice.delete.running": "正在刪除「{0}」…",
   "s2arm.notice.delete.done": "已刪除「{0}」。存檔和原始遊戲檔案都還在。",
   "s2arm.notice.delete.failed": "刪除「{0}」沒成功：{1}",
+  "s2arm.notice.delete.queued": "等這款出完包就刪除",
   "s2arm.notice.clearCache.running": "正在清除「{0}」的快取…",
   "s2arm.notice.clearCache.done": "已清除「{0}」的快取。",
   "s2arm.notice.clearCache.failed": "清除「{0}」的快取沒成功：{1}",

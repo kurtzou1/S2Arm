@@ -39,7 +39,7 @@
 extern "C" {
 #endif
 
-#define NVN_GPU_CONTRACT_VERSION 20   // 改任何签名或语义 +1；两个后端与核心同批改，t_nvn_backend.c 的签名表同批改
+#define NVN_GPU_CONTRACT_VERSION 21   // 改任何签名或语义 +1；两个后端与核心同批改，t_nvn_backend.c 的签名表同批改
 /* 定稿 #1（调用形式）：链接期直接调用 nvn_gpu_*。每个平台构建只链一个后端，Metal 3 / 4 的选择留在 Metal 后端内部。
    理由：零间接、可内联；同进程 A/B 对照没有真实消费者，不为它新增注册实体（vickwv 同意）。 */
 
@@ -235,6 +235,8 @@ nvn_gpu_rc nvn_gpu_view_create(nvn_gpu_tex t, const view_t *v, nvn_gpu_view *out
 //   出错：缺能力 → NVN_GPU_E_UNSUPPORTED；越界 / 不对齐 → NVN_GPU_E_ARG；不许悄悄换格式或截断。线程：[任意]
 nvn_gpu_rc nvn_gpu_view_create_buf(nvn_gpu_buf b, uint64_t off, uint64_t bytes, uint32_t nvn_format, nvn_gpu_view *out, nvn_gpu_err *err);
 void nvn_gpu_view_release(nvn_gpu_view v);
+// v21：取视图实际引用的贴图。借用到视图释放为止；缓冲视图和空句柄返回 NULL。
+nvn_gpu_tex nvn_gpu_view_texture(nvn_gpu_view v);
 // 采样器：samp_par 原样。归约 / LOD 偏置不原生时照建一个不带它们的采样器——模拟在核心选的 _se 变体里（能力位已如实报），去重缓存在核心。
 nvn_gpu_rc nvn_gpu_samp_create(const samp_par *p, nvn_gpu_samp *out, nvn_gpu_err *err);
 void nvn_gpu_samp_release(nvn_gpu_samp s);
@@ -420,6 +422,8 @@ typedef struct {
 nvn_gpu_rc nvn_gpu_pool_create(const nvn_gpu_pool_desc *d, nvn_gpu_pool_table *out, nvn_gpu_err *err);
 nvn_gpu_rc nvn_gpu_pool_bind(nvn_gpu_cmd c, nvn_gpu_stage st, uint32_t ent, nvn_gpu_pool_table table, nvn_gpu_err *err);
 void nvn_gpu_pool_release(nvn_gpu_pool_table table);
+// v21：已建的图像快照是否引用这份贴图（任意子资源）。查实际描述符，包含已替换进去的占位视图。
+int nvn_gpu_pool_has_texture(nvn_gpu_pool_table table, nvn_gpu_tex tex);
 
 // 给某阶段一次给全本笔的绑定（替换整张表；没给到的项按布局给空资源）。表项引用的句柄须活到本 cmd 完成（核心保证）。
 // 线程：[提交]。出错：粘滞 NVN_GPU_E_LAYOUT（ent 越界 / cls 不符）。
