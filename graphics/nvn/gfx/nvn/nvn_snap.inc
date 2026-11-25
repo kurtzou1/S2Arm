@@ -14,7 +14,7 @@ typedef struct { uint32_t magic, ver; uint64_t fence, done, pq_in, pq_done, pq_r
 
 // 预排布资产贴图（NvPkg）：全部存显卡内容（一款游戏 531 张 95 MB）。只存 GPU 写过的不够：载入时 GPU 拷贝写进去的、稀疏池里的，内容都只在显卡里
 static void snap_up_sync(void);
-static int snap_dump_tex(FILE *f, uint64_t ser, id<MTLTexture> t, uint64_t *bytes) {
+static int snap_dump_tex(FILE *f, uint64_t ser, id<MTLTexture> t, uint64_t *bytes) { @autoreleasepool {   // 每张一个自动释放池：建读回缓冲时 Metal 内部的自动释放对象当场放（原先挂在 nvn_snap_save 外层池，整个图形层存完才放，iPhone 实测涨 1.8 GB）
     fr_tex_hd hd = {ser, (uint32_t)t.textureType, (uint32_t)t.pixelFormat, (uint32_t)t.width, (uint32_t)t.height, (uint32_t)t.depth, (uint32_t)fr_slices(t), (uint32_t)t.mipmapLevelCount, FR_TK_PLAIN, (uint32_t)t.sampleCount};
     if (t.sampleCount > 1) return 0;
     hd.nplane = (uint32_t)fr_planes(t.pixelFormat, hd.pl); if (!hd.nplane) return 0;
@@ -24,8 +24,9 @@ static int snap_dump_tex(FILE *f, uint64_t ser, id<MTLTexture> t, uint64_t *byte
     if (FR_READ_STOPPED) return 0;
     id<MTLBuffer> b = [g_dev newBufferWithLength:tot options:MTLResourceStorageModeShared]; if (!b) fr_read_lost("读回缓冲建不出来"); if (!b || !fr_blit_planes(t, &hd, b, 1)) return 0;
     if (!fr_w_tex(f, &hd, b.contents, tot)) return -1;
+    if (s2a_snap_progress) s2a_snap_progress(NULL);   // 逐张回读：看门狗心跳 + 逐层实占采样（声明在 nvn_frame_rec.inc）
     *bytes += tot; return 1;
-}
+} }
 // 显卡内容已经没了的打包贴图不存。切后台瘦身（nvn_mtl.m nvn_be_background_purge）把能从客体内存重建的打包贴图标成可清除，系统清掉后回前台只登记
 //   （g_up_lost），等下次取用才整张重传；没再取用过的那些读出来是全零，存进快照后恢复时写回并整张标成「GPU 刚写过」，从此不再从客体内存重传。
 //   不存的那些恢复后没有记录，第一次取用走正常路径从客体内存上传（瘦身只标这一类，本来就靠这条路径重建）。
@@ -223,7 +224,7 @@ static void snap_up_sync(void) {
     up_flush(); rec_drain(); up_wait_zero(&g_up_pending);
 }
 typedef struct { uint64_t usage, smode, swz; } snap_al_x;
-static int snap_al_dump(FILE *f, id<MTLTexture> t, uint64_t *bytes) {   // 1 存了，0 不存（多重采样 / 格式不认 / 太大），-1 写失败
+static int snap_al_dump(FILE *f, id<MTLTexture> t, uint64_t *bytes) { @autoreleasepool {   // 每张一个自动释放池：建读回缓冲时 Metal 内部的自动释放对象当场放（原先挂在 nvn_snap_save 外层池，整个图形层存完才放，iPhone 实测涨 1.8 GB）   // 1 存了，0 不存（多重采样 / 格式不认 / 太大），-1 写失败
     snap_al_x x = {t.usage, t.storageMode, 0}; MTLTextureSwizzleChannels sw = t.swizzle; memcpy(&x.swz, &sw, sizeof sw);
     fr_tex_hd hd = {0, (uint32_t)t.textureType, (uint32_t)t.pixelFormat, (uint32_t)t.width, (uint32_t)t.height, (uint32_t)t.depth, (uint32_t)fr_slices(t), (uint32_t)t.mipmapLevelCount, FR_TK_PLAIN, (uint32_t)t.sampleCount};
     if (t.sampleCount > 1 || t.buffer || t.parentTexture) return 0;
@@ -234,8 +235,9 @@ static int snap_al_dump(FILE *f, id<MTLTexture> t, uint64_t *bytes) {   // 1 存
     if (FR_READ_STOPPED) return 0;
     id<MTLBuffer> b = [g_dev newBufferWithLength:tot options:MTLResourceStorageModeShared]; if (!b) fr_read_lost("读回缓冲建不出来"); if (!b || !fr_blit_planes(t, &hd, b, 1)) return 0;
     if (!fr_w(f, &x, sizeof x) || !fr_w_tex(f, &hd, b.contents, tot)) return -1;
+    if (s2a_snap_progress) s2a_snap_progress(NULL);   // 逐张回读：看门狗心跳 + 逐层实占采样（声明在 nvn_frame_rec.inc）
     *bytes += tot; return 1;
-}
+} }
 static int g_snap_al_zero;   // 上一次 snap_al_load_x 读到的内容是不是全零（snap_alias_restore kind 3 用）
 static id<MTLTexture> snap_al_load_x(FILE *f, int res);
 static id<MTLTexture> snap_al_load(FILE *f) { return snap_al_load_x(f, 1); }

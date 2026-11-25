@@ -22,6 +22,13 @@ void s2a_ios_set_fps60(BOOL on);
 // 同上，指定哪一款（游戏库里还没进游戏的款；nil = 正在跑的这款 / 单款壳）
 BOOL s2a_ios_fps60_on_for(NSString *gid);
 void s2a_ios_set_fps60_for(NSString *gid, BOOL on);
+// S4「SDR 转 HDR」（#625 第二阶段 PR-B；按款存 S2AHdrSdrMap，评审终稿：只放游戏库每款设置页）：此刻开没开；
+//   拨开关写按款（起局 s2a_ios_apply_graphics_settings 只落 S2A_HDR_SDR_MAP——不联动 S2A_HDR，PQ 层载体由引擎侧
+//   层视角开关 nvn2_hdr_layer_sw 补，vi 照玩家 S2A_HDR 口径回答）；没拨过 = 关（缺省关，字节级回现状）
+BOOL s2a_ios_hdr_sdr_map_on(void);
+void s2a_ios_set_hdr_sdr_map(BOOL on);
+BOOL s2a_ios_hdr_sdr_map_on_for(NSString *gid);
+void s2a_ios_set_hdr_sdr_map_for(NSString *gid, BOOL on);
 // 满屏（自适应）此刻生效没有：*on = 实际开关；返回 1 = 包内清单判这款满屏坏、改不动（如实显示关、置灰），0 = 可改
 int s2a_ios_fullscreen_state(NSString *gid, BOOL *on);
 void s2a_ios_set_fullscreen(NSString *gid, BOOL on);

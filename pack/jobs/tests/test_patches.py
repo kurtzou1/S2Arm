@@ -56,6 +56,17 @@ class PatchesTests(unittest.TestCase):
         else: os.environ["S2A_PATCH_BASE"] = self._base_was
         shutil.rmtree(self.t, ignore_errors=True)
 
+    def test_index_dirs_without_job_context(self):
+        # 期望手写：维护方出包机道（pack/orch/oneclick_win.py --patches）只给缓存根、不带作业层（没有游戏库 / 资源目录），收到的类与作业层 fetch 相同（fps / gfx / widescreen；
+        #   gfx 那条内容与条目不符不收，类目录仍按收下的条目建）；fps 索引里就是按主程序构建号要来的那份
+        import types
+        bare = types.SimpleNamespace(private=str(self.t / "lane"), r={})
+        dirs = patches.index_dirs(bare, dict(id=GID), str(self.exefs))
+        self.assertEqual(sorted(Path(d).name for d in dirs), sorted(Path(d).name for d in patches.fetch(self.c, dict(id=GID), str(self.exefs))))
+        fps = next(Path(d) for d in dirs if Path(d).name == "fps")
+        self.assertIn(hashlib.sha256(self.fps).hexdigest(), (fps / "INDEX.tsv").read_text(encoding="utf-8"))
+        self.assertTrue(str(fps).startswith(str(self.t / "lane")))
+
     def test_ios_package_leaves_out_graphics_patches(self):
         # 期望手写：同一份统一包，Mac 收 fps / widescreen / gfx 三类，iPhone（target="ios"）不收没写方向的 gfx（11-13「画面补丁 iOS 不进包」，旧包条目都没有 dir）
         self.bundles[f"g/{GID}"].append(it(b"lod", "pchtxt", "gfx", "lod.pchtxt", [GID], []))

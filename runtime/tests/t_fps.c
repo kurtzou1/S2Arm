@@ -16,6 +16,9 @@ static float fs_f32(int off) { float x; uint32_t b = *(uint32_t *)(dm_fps_state 
 static int fails;
 static int g_follow_n, g_follow_last = -1;   // 社区帧率补丁跟随钩子的强定义桩：记调用次数和最后一次的值
 void s2a_cpatch_fps_follow(int on) { g_follow_n++; g_follow_last = on; }
+static int g_cp_n, g_cp_tier;   // 社区帧率补丁份数 / 有没有一档能开（cpatch.c 强定义的桩；缺省 0 = 同没链 cpatch）
+int s2a_cpatch_fps_count(void) { return g_cp_n; }
+int s2a_cpatch_fps_tier_ok(void) { return g_cp_tier; }
 // 等写入线程在「现在」之后再转满 2 整圈（正在转的那圈可能在改动前已读过状态）：按圈数同步，不按墙钟睡（11-19：原先固定睡 250 ms，负载高时没转到 → 读到旧值）。30 秒兜底
 uint64_t s2a_fps_writer_rounds(void);
 static void wait_round(void) { uint64_t r0 = s2a_fps_writer_rounds(); for (int i = 0; i < 3000 && s2a_fps_writer_rounds() < r0 + 2; i++) usleep(10000); }
@@ -53,6 +56,12 @@ int main(void) {
             memcpy(&f2, img + 0x4000 + 2040 * 8, 4); expect("缺省口径：游戏跑到 60（16.7 ms）→ 速度槽 0.5（×100）", 50, lroundf(f2 * 100));
             s2a_fps_present_at(1000000000ull + 50000000); memcpy(&f2, img + 0x4000 + 2040 * 8, 4); expect("缺省口径：游戏自己限 30（33.3 ms）→ 速度槽 1.0（×100）", 100, lroundf(f2 * 100));
             { int s2a_fps_real_source(void); expect("缺省口径：我方帧率表不算真帧率来源", 0, s2a_fps_real_source()); }
+            // 11-25：社区帧率补丁算真帧率来源，要「有一档能开」，不看收了几份。期望手算（60 帧开）：收 1 份但没有能开的档（只带 120 档、自动档）→ 来源 1（补帧可补）；
+            //   有一档能开 → 2（补帧让路）。旧实现按份数判，第一项得 2（补帧也让路，60 帧开关什么都不生效）→ 红
+            {   int s2a_fps_real_source(void), s2a_fps_source(void);
+                g_cp_n = 1; g_cp_tier = 0; expect("只带 120 档、自动档不开：帧率来源 1（补帧可补）", 1, s2a_fps_source());
+                g_cp_tier = 1; expect("有一档能开：帧率来源 2（补帧让路）", 2, s2a_fps_source());
+                g_cp_n = 0; g_cp_tier = 0; }
             _exit(fails);
         }
         int st = 0; waitpid(p, &st, 0); expect("缺省口径子进程：不符项数", 0, WIFEXITED(st) ? WEXITSTATUS(st) : 99);

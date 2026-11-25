@@ -201,7 +201,7 @@ void s2a_hdr_screen_publish(double potential_edr, double current_headroom) {
         p_log = potential_edr; sr_log = s1_ready;
         int sw = nvn2_hdr_switch();
         LOG("直连：HDR 策略快照发布：potentialEDR %.3f / currentEDR %.3f / s1_ready %d（G1 大面积烟囱口径）/ 纸白 100（S2A_HDR=%d：%s）", potential_edr, current_headroom, s1_ready, sw,
-            sw == HDR_OFF ? "off，恒 S0 直通" : sw == HDR_AUTO ? "auto，按快照" : "on，强制 HDR 管线（can 不行走 S3 映射）");
+            sw == HDR_OFF ? (nvn2_hdr_layer_sw() != HDR_OFF ? "off＋SDR 转 HDR：层按快照进 PQ（vi 照 off 口径回答——S4 只让出图层持 PQ）" : "off，恒 S0 直通") : sw == HDR_AUTO ? "auto，按快照" : "on，强制 HDR 管线（can 不行走 S3 映射）");   // PR-B 终稿：S4 开而玩家 off 时层照进 PQ，off 分支文案如实带出（仍是同一行，无新增日志行）
     }
 }
 // ---------- PR4：层配置与层状态机接线（评审稿 v3 §2.3 S0/S1 行 + §4 PR4 ①②③④；实现在本文件 front_metal_layer 之后——apply 要取层）----------
@@ -425,7 +425,7 @@ void *front_metal_layer(void) {
 //   调用方口径：iOS mk() 主线程、Mac 取用首帧可能 present 线程（先于任何 drawable 的属性直设，同块内 l.device / pixelFormat 先例）；
 //   applied 态原子持有，跨线程并发 apply 最坏重复一次幂等赋值。色彩空间对象进程内各建一次常驻（层属性 retain，量级 = 转换次数）。
 static void s2a_hdr_layer_apply_to(CAMetalLayer *l) {
-    if (!l || nvn2_hdr_switch() == HDR_OFF) return;   // off 缺省不碰出图层（不设色彩空间标签）：层属性与改前逐项相同
+    if (!l || nvn2_hdr_layer_sw() == HDR_OFF) return;   // 缺省（玩家 off 且 S4 关）不碰出图层（不设色彩空间标签）：层属性与改前逐项相同。PR-B 终稿：门读层视角开关——S4 开而玩家 off 时层配置照跑（出图层持 PQ 是 S4 的生效面；vi 答询不经这里）
     hdr_snapshot s; nvn2_hdr_snapshot_probe(&s);
     hdr_layer_cfg c = hdr_layer_config(s.layer_pq);
     static _Atomic int applied = -1;
@@ -476,10 +476,10 @@ void s2a_hdr_tick_host(double potential_edr, double current_headroom) {
         p_last = potential_edr; c_last = current_headroom;
         s2a_hdr_screen_publish(potential_edr, current_headroom);
     }
-    if (nvn2_hdr_switch() == HDR_OFF) return;   // off 缺省：层状态机不动、不取层（Mac 通用模式的窗口层也不碰）
+    if (nvn2_hdr_layer_sw() == HDR_OFF) return;   // 缺省（玩家 off 且 S4 关）：层状态机不动、不取层（Mac 通用模式的窗口层也不碰）。PR-B 终稿：门读层视角开关——S4 开而玩家 off 时层状态机照跑（出图层持 PQ；vi 答询照玩家开关，不在此层）
     static _Atomic int pre;
-    if (!atomic_exchange(&pre, 1)) s2a_hdr_preattach(potential_edr);   // 首探即预挂（赶在首查询前）；非 Switch 2 / off / SDR 屏在预挂链路里各自让位
-    nvn2_hdr_tick(nvn2_hdr_switch(), potential_edr > 1.0, hdr_now_ms());   // raw can = potentialEDR>1.0（调用方口径）
+    if (!atomic_exchange(&pre, 1)) s2a_hdr_preattach(potential_edr);   // 首探即预挂（赶在首查询前）；非 Switch 2 / 层视角 off / SDR 屏在预挂链路里各自让位（S4 开而玩家 off 也预挂——S4 只让出图层持 PQ）
+    nvn2_hdr_tick(nvn2_hdr_layer_sw(), potential_edr > 1.0, hdr_now_ms());   // raw can = potentialEDR>1.0（调用方口径）；sw = 层视角开关（玩家设置优先，S4 只在玩家没开时补 auto）
     s2a_hdr_layer_apply();
 }
 

@@ -161,6 +161,46 @@
         }
       }
     },
+    "SDR to HDR": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SDR to HDR"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SDR a HDR"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SDR vers HDR"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SDR から HDR へ"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SDR 转 HDR"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SDR 轉 HDR"
+          }
+        }
+      }
+    },
     "This game is in a game source folder S2Arm can’t reach right now, such as an external drive that isn’t connected. Connect the drive or put the folder back, and the game is ready again by itself. Your saves are in this app and aren’t affected. To stop using that folder, remove it under Game sources in Settings.": {
       "localizations": {
         "en": {

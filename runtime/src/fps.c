@@ -101,6 +101,7 @@ static void slots_apply(int on) {   // 槽按开关写：slot 行开 / 关时值
 //   弱定义缺省空实现 / 0 份：cpatch 运行时给强定义就覆盖（静态链接选强定义）。维护者 10-27：设置里一个开关管 60 帧
 __attribute__((weak)) void s2a_cpatch_fps_follow(int on) { (void)on; }
 __attribute__((weak)) int s2a_cpatch_fps_count(void) { return 0; }   // 本包收下的社区帧率补丁份数（设置页据此也显示开关）
+__attribute__((weak)) int s2a_cpatch_fps_tier_ok(void) { return 0; }   // 有一档能开（cpatch.c fps_pick；只带 120 档的款自动档不开 → 0）
 __attribute__((weak)) int s2a_cpatch_fps_engaged(void) { return 0; }
 // 帧率被抬高了没有（graphics/nvn/gfx/nvn/nvn_fps.c 问：玩家帧率上限只压补丁抬上去的那部分，11-25 #502）：我方帧率表开着，或社区帧率补丁的位真开着
 static int eff_table(void);
@@ -151,7 +152,7 @@ void s2a_fps_ab_set(int phase) {
 int s2a_fps_available(void) { return atomic_load(&g_have) || s2a_cpatch_fps_count() > 0; }
 // 有能真改游戏帧率的来源：表里除 present display 外还有行（w / slot / speed / word 改指令），或社区帧率补丁。只有 present display（含引擎通用第一层）时，
 //   游戏自己设交换间隔 1 就已是 60 帧、没东西可放开（撑不住就问玩家 / 设置页「本款原生 60 帧」，runtime/src/qprompt_host.c）
-int s2a_fps_real_source(void) { return (g_own && atomic_load(&g_have) && (g_nfw > 0 || g_nsl > 0 || g_spd_slot >= 0 || g_word_rows > 0)) || s2a_cpatch_fps_count() > 0; }
+int s2a_fps_real_source(void) { return (g_own && atomic_load(&g_have) && (g_nfw > 0 || g_nsl > 0 || g_spd_slot >= 0 || g_word_rows > 0)) || (s2a_cpatch_fps_count() > 0 && s2a_cpatch_fps_tier_ok()); }
 int s2a_fps_enabled(void) { return atomic_load(&g_on); }
 // 本帧帧率来源（11-14，补帧进主线）：2 = 真帧率来源开着（社区帧率补丁；S2A_CAPS_OWN=1 时也含我方帧率表）——出图补帧这一帧让路，游戏自己跑 60；
 //   1 = 没有，补帧可补（graphics/nvn/gfx/nvn/nvn_present_fi.inc fi_wanted 每帧读，弱定义恒 1）。优先级：社区帧率补丁 > 补帧 > 原帧率；60 帧开关局中切换随即跟上

@@ -329,6 +329,24 @@ def nx_unpack(run):
     return exe
 
 
+def community_patches(run, x, tid, target):
+    """--patches：解包后按 exefs 各模块真构建号向下载站取这一款的统一包（pack/jobs/patches.index_dirs，同启动器作业层 patches.prepare 用的那份），
+    索引目录交改写阶段（S2A_CPATCH_DIRS，stages.py community 认）。11-25：维护方的 Windows 出包机道直接调本脚本，不经作业层，原先包里一条社区补丁都没有，
+    判帧率补丁效果的批全部「判不出」。启动器作业层自己取过（已设 S2A_CPATCH_DIRS）或这次不带（S2A_CPATCH=none）就不再取；取不到只记一行，照常出包"""
+    if os.environ.get('S2A_CPATCH_DIRS') or os.environ.get('S2A_CPATCH') == 'none':
+        return run.say('社区补丁：已由调用方给定（S2A_CPATCH_DIRS / S2A_CPATCH=none），--patches 不再取')
+    sys.path.insert(0, str(R / 'pack/jobs'))
+    import types
+    import patches
+    try:
+        dirs = patches.index_dirs(types.SimpleNamespace(private=str(run.out / 'community'), r={}), {'id': tid}, str(x / 'exefs'), 'ios' if target == 'ios' else 'mac')
+    except Exception as e:   # 查库是附加：任何意外都不挡出包（同 patches.prepare）
+        return run.say(f'【黄】社区补丁：取统一包出错，这次不带：{type(e).__name__}: {e}')
+    if dirs:
+        os.environ['S2A_CPATCH_DIRS'] = os.pathsep.join(dirs)
+    run.say(f'社区补丁：统一包 {len(dirs)} 类索引' + (f'（{"、".join(Path(d).name for d in dirs)}）交改写阶段' if dirs else '，这一款没有对得上本包构建号的条目'))
+
+
 def from_extract(run, d):   # --from-extract：已解好的目录 → (x, 程序号, 原件目录)；原件目录指向不存在的路径（同 Mac：追加内容阶段按「本机没原件」跳过）
     x = Path(d).resolve()
     if not ((x / 'exefs' / 'main').is_file() and (x / 'unpack.tsv').is_file()): raise Fail(f'解包目录 {x} 要有 exefs/main 与 unpack.tsv（--from-extract）')
@@ -870,6 +888,7 @@ def main(argv=None):
     ap.add_argument('--rt-shaders', metavar='DIR')   # 内部验证包：真机转储的着色器并进解包目录（put_rt）；不给 = 不带（缺省行为不变）
     ap.add_argument('--install', metavar='UDID'); ap.add_argument('--name'); ap.add_argument('--suffix'); ap.add_argument('--plumesign'); ap.add_argument('--devpush')
     ap.add_argument('--install-serial', metavar='SERIAL')   # 安卓：出好装到这台手机（adb 序列号）
+    ap.add_argument('--patches', action='store_true')   # 维护方出包机道：解包后按真构建号取统一包的社区补丁（community_patches），同启动器作业层 patches.prepare
     a = ap.parse_args(argv)
     if a.install and a.target != 'ios': ap.error('--install 只用于 --target ios')
     if a.install_serial and a.target != 'android': ap.error('--install-serial 只用于 --target android')
@@ -905,6 +924,7 @@ def main(argv=None):
             if a.from_extract: raise Fail('--rt-shaders 不和 --from-extract 同用（那是别人的解包目录，不往里写）：把转储放进解包目录的 rt_shaders/')
             run.say(f'现编转储 {put_rt(x, a.rt_shaders)} 支并进解包目录 rt_shaders/（内部验证包；转储是游戏内容、不分发）')
         if WIN: host_decoder_gate(run, x); glslc_gate(run, x)
+        if a.patches: community_patches(run, x, tid, a.target)
         game = 't' + tid.lower()
         cur = stages(run, game, x, src_dir, own=not a.from_extract)   # 本单自己解的包（下次解包整目录重建）：播种整目录搬 RomFS；--from-extract 是别人的目录，照旧克隆
         if a.target == 'android':

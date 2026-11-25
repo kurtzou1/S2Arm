@@ -7,7 +7,7 @@
 //      · 读的值：只钳位、不改值（11-01 维护者定，#1204 T1）——越界读拿到钳到的末元素。依据：Vulkan robustBufferAccess 允许越界读返回缓冲内任意值或 0，
 //        钳到界内正符合 Ryujinx 翻译器依赖的语义，地址不出本分配、GPU 不缺页。原「越界读回 0」（值 & 界内掩码）在直连上量过代价太大：
 //        异度3 10 支重片元 GPU 时间合计 +52%、怪猎 16 支 +38%（每支几百到近三千处读，11-01 微基准），撤掉；
-//      · 写与原子：下标同样钳，另外拆块「在界内才执行」，越界的原子返回 0；
+//      · 写与原子：下标同样钳，另外拆块「在界内才执行」，越界的原子返回钳到的元素的当前值（与越界读同值，读改写重试循环才退得出）；
 //      · 长度来源：定长数组 / 向量用编译期常量；存储缓冲的运行时数组用 OpArrayLength（SPIRV-Cross 走现成的缓冲长度表 GAL_ARG_SIZES）；
 //        常量缓冲（Ryujinx：Block 结构体里唯一成员 vec4 data[4096]）按游戏实际绑定的字节数：本改写在同一描述符集里新增一个只读存储缓冲
 //        gal_ubo_len（绑定号 GAL_UBOLEN_BINDING），内容 uint[常量缓冲绑定号] = 绑定的 vec4 个数，由 gal_draw.m 按当前绑定写（GAL_ARG_UBOLEN）。
@@ -89,7 +89,6 @@ typedef struct {
     uint32_t *ptrs; int nptr;   // 现有 OpTypePointer 的 id
     wbuf glob, deco_add;        // 新增的类型 / 常量 / 变量、新增的修饰
     uint32_t cst_v[512], cst_id[512]; int ncst;
-    uint32_t null_t[32], null_id[32]; int nnull;
     // 常量缓冲长度表（每集一个）
     uint32_t ubo_n[GAL_MAX_SETS], ulen_var[GAL_MAX_SETS], ulen_ptr_u32;
     int direct; uint8_t *cslot; uint32_t name_end, ann_beg; wbuf names;   // 直连口径（见文件头 ①）：cslot[变量] = 名字 <阶段>_c<N> 的 N + 1（0 = 不是）；新增 OpName 插在原名字段末尾（没有就在首条注解前）
@@ -101,12 +100,6 @@ static uint32_t sx_cst(sx *s, uint32_t v) {
     for (int i = 0; i < s->ncst; i++) if (s->cst_v[i] == v) return s->cst_id[i];
     uint32_t id = s->nb++; W(&s->glob, OPW(SpvOpConstant, 4), s->tu32, id, v);
     if (s->ncst < 512) { s->cst_v[s->ncst] = v; s->cst_id[s->ncst++] = id; }
-    return id;
-}
-static uint32_t sx_null(sx *s, uint32_t t) {
-    for (int i = 0; i < s->nnull; i++) if (s->null_t[i] == t) return s->null_id[i];
-    uint32_t id = s->nb++; W(&s->glob, OPW(SpvOpConstantNull, 3), t, id);
-    if (s->nnull < 32) { s->null_t[s->nnull] = t; s->null_id[s->nnull++] = id; }
     return id;
 }
 static uint32_t sx_ptr(sx *s, uint32_t sc, uint32_t t) {   // 找现有指针类型（非聚合类型不许重复声明），没有就新建
@@ -365,12 +358,17 @@ static uint32_t *spv_bounds(const uint32_t *in, uint32_t nw, uint32_t *onw, uint
         int aw = atomic_ptr_word(op); uint32_t ptr = op == SpvOpStore ? p[1] : aw ? p[aw] : 0;
         if (in_fn && ptr && ptr < B && s->inb[ptr]) {
             if (s->lm_block[in_lab]) { red(s, GAL_SPVX_SKIP, "循环头块里的写 / 原子（拆块会移走循环合并指令）"); wb_put(&body, p, n); i += n; continue; }
-            uint32_t T = s->nb++, M = s->nb++, prev = out_lab;
-            W(&body, OPW(SpvOpSelectionMerge, 3), M, 0); W(&body, OPW(SpvOpBranchConditional, 4), s->inb[ptr], T, M); W(&body, OPW(SpvOpLabel, 2), T);
+            // 越界的原子不执行，返回钳到的那个元素的当前值（与越界读同值）。原先返回 0：读改写重试循环（do { v = a[k]; r = CAS(a[k], v, f(v)); } while (r != v)，
+            //   16 位存储就是这样模拟的）越界时读到钳到的末元素、原子却回 0，末元素不为 0 就永远对不上，GPU 在循环里空转不退（直连没有循环上限）。
+            //   11-23 D-WZCF：一款游戏的几何着色器剔除后写压缩下标，写过游戏给的 32 字节，过场一开 GPU 就挂死
             int res = op != SpvOpStore && op != SpvOpAtomicStore; uint32_t rid = res ? p[2] : 0, r2 = res ? s->nb++ : 0;
+            uint32_t T = s->nb++, M = s->nb++, E = res ? s->nb++ : M;
+            W(&body, OPW(SpvOpSelectionMerge, 3), M, 0); W(&body, OPW(SpvOpBranchConditional, 4), s->inb[ptr], T, E); W(&body, OPW(SpvOpLabel, 2), T);
             uint32_t at = body.n; wb_put(&body, p, n); if (res) body.w[at + 2] = r2;
-            W(&body, OPW(SpvOpBranch, 2), M); W(&body, OPW(SpvOpLabel, 2), M);
-            if (res) W(&body, OPW(SpvOpPhi, 7), p[1], rid, r2, T, sx_null(s, p[1]), prev);   // 越界的原子返回 0
+            W(&body, OPW(SpvOpBranch, 2), M);
+            uint32_t r3 = 0; if (res) { r3 = s->nb++; W(&body, OPW(SpvOpLabel, 2), E); W(&body, OPW(SpvOpLoad, 4), p[1], r3, ptr); W(&body, OPW(SpvOpBranch, 2), M); }
+            W(&body, OPW(SpvOpLabel, 2), M);
+            if (res) W(&body, OPW(SpvOpPhi, 7), p[1], rid, r2, T, r3, E);
             out_lab = M; s->rename[in_lab] = M;
             s->st[res || op == SpvOpAtomicStore ? GAL_SPVX_ATOMIC : GAL_SPVX_STORE]++;
             i += n; continue;

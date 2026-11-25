@@ -20,6 +20,8 @@ public enum S2ArmGameSettings {
     public static let splitScreen = "splitScreen", screenOrientation = "screenOrientation"
     /// 输出设备类型 + 两个虚拟环绕开关（#189 后续，5.1 虚拟环绕第二片；定义表 game_settings.v1.json 的同 id 项，本文件不另写文案与缺省）
     public static let audioDevice = "audioDevice", vsSpeakers = "vsSpeakers", vsHeadphones = "vsHeadphones"
+    /// S4「SDR 转 HDR」（#625 第二阶段 PR-B 评审终稿；定义表 game_settings.v1.json 的同 id 项，iOS 独有、只放每款游戏的设置页——Mac v1 只有环境开关 S2A_HDR_SDR_MAP）
+    public static let hdrSdrMap = "hdrSdrMap"
 
     /// 宿主给的这款画面与金手指选项（ios/game_options.m 的 JSON）
     public struct Options: Equatable, Sendable {
@@ -40,7 +42,9 @@ public enum S2ArmGameSettings {
         ///   两个开关各存各的、只在对应类型下生效（驱动侧判），没拨过按关。宿主没给 = nil，这三行不出
         public struct Audio: Equatable, Sendable { public var device: String; public var vsSpeakers: Bool; public var vsHeadphones: Bool }
         public var audio: Audio? = nil
-        public init(fps: Switch, fullscreen: Switch, patches: [Item] = [], cheats: [Item] = [], audio: Audio? = nil) { self.fps = fps; self.fullscreen = fullscreen; self.patches = patches; self.cheats = cheats; self.audio = audio }
+        /// S4「SDR 转 HDR」（#625 第二阶段 PR-B 评审终稿；按款存 S2AHdrSdrMap，宿主 ios/game_options.m 给标题与说明——值照宿主给的）。宿主没给 = nil，不出这一行
+        public var hdrSdrMap: Switch? = nil
+        public init(fps: Switch, fullscreen: Switch, patches: [Item] = [], cheats: [Item] = [], audio: Audio? = nil, hdrSdrMap: Switch? = nil) { self.fps = fps; self.fullscreen = fullscreen; self.patches = patches; self.cheats = cheats; self.audio = audio; self.hdrSdrMap = hdrSdrMap }
         static func parse(_ json: String) -> Options? {
             guard let o = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any] else { return nil }
             func sw(_ v: Any?) -> Switch {
@@ -62,6 +66,7 @@ public enum S2ArmGameSettings {
                 let device = (a["device"] as? String).flatMap { ["auto", "builtin", "headphones", "external"].contains($0) ? $0 : nil } ?? "auto"
                 out.audio = Audio(device: device, vsSpeakers: (a["vsSpeakers"] as? Bool) ?? false, vsHeadphones: (a["vsHeadphones"] as? Bool) ?? false)
             }
+            if let h = o["hdrSdrMap"] as? [String: Any] { out.hdrSdrMap = sw(h) }   // S4「SDR 转 HDR」（#625 第二阶段 PR-B 评审终稿）：宿主按款给的布尔行
             return out
         }
     }
@@ -144,6 +149,8 @@ public enum S2ArmGameSettings {
                                           kind: .choice(o.fps.levels.map { SettingOption($0.value, $0.label) }), value: o.fps.levels.contains { $0.value == o.fps.pick } ? o.fps.pick : "0"))
             }
             if !o.fullscreen.hidden { picture.append(toggle(fullscreen, o.fullscreen.title.isEmpty ? "Full screen" : o.fullscreen.title, o.fullscreen)) }
+            // S4「SDR 转 HDR」（#625 第二阶段 PR-B 评审终稿：只放每款游戏的设置页）：宿主给了才出（老宿主 / 这款读不到不给，不拿猜的缺省冒充实际状态）；标题 / 说明宿主已按语言给好
+            if let h = o.hdrSdrMap { picture.append(toggle(hdrSdrMap, h.title.isEmpty ? "SDR to HDR" : h.title, h)) }
         }
         if !picture.isEmpty { out.append(SettingSection(id: "s2a.picture", title: "Picture", rows: picture)) }
         if let o {
@@ -218,6 +225,7 @@ public enum S2ArmGameSettings {
         case vsHeadphones: _ = stores.setOption(id, "audiovs", "headphones", value == "on")
         case gameLanguage: _ = stores.setOption(id, "language", value, true)
         case fullscreen: _ = stores.setOption(id, "fullscreen", "", value == "on")
+        case hdrSdrMap: _ = stores.setOption(id, "hdrsdrmap", "", value == "on")   // S4「SDR 转 HDR」（#625 第二阶段 PR-B 评审终稿）：按款布尔行，下次起局生效
         case _ where setting.hasPrefix(patchPrefix): _ = stores.setOption(id, "patch", String(setting.dropFirst(patchPrefix.count)), value == "on")
         case _ where setting.hasPrefix(cheatPrefix): _ = stores.setOption(id, "cheat", String(setting.dropFirst(cheatPrefix.count)), value == "on")
         case opacity: if let v = Double(value) { stores.app.set(min(1, max(0.1, v / 100)), forKey: "S2AVPadOpacity") }

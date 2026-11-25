@@ -115,6 +115,7 @@ static fj_src tex_src(id<MTLTexture> t) { return (fj_src){(int)t.width, (int)t.h
 //   无 HDR = 现状行为；宿主里直连图形层与 gal 静态链进同一可执行文件（graphics/build.mk），符号恒在。
 static struct {
     int (*hdr_switch)(void);
+    int (*hdr_layer_sw)(void);
     int (*hdr_present)(float p[8], int src_pf, int dst_pt);
     void (*hdr_snapshot_probe)(hdr_snapshot *out);
     void (*hdr_tick_frame)(int sw, int frame_is_pq);
@@ -123,10 +124,11 @@ static int hdr_api(void) {
     if (!g_hdr_look) {
         g_hdr_look = 1;
         g_hdr.hdr_switch = (int (*)(void))dlsym(RTLD_DEFAULT, "nvn2_hdr_switch");
+        g_hdr.hdr_layer_sw = (int (*)(void))dlsym(RTLD_DEFAULT, "nvn2_hdr_layer_sw");   // PR-B 终稿：层视角开关（排空喂入用）——与 hdr_switch 同源同宿主，整组同进同出
         g_hdr.hdr_present = (int (*)(float *, int, int))dlsym(RTLD_DEFAULT, "nvn2_hdr_present");
         g_hdr.hdr_snapshot_probe = (void (*)(hdr_snapshot *))dlsym(RTLD_DEFAULT, "nvn2_hdr_snapshot_probe");
         g_hdr.hdr_tick_frame = (void (*)(int, int))dlsym(RTLD_DEFAULT, "nvn2_hdr_tick_frame");
-        if (!g_hdr.hdr_switch || !g_hdr.hdr_present || !g_hdr.hdr_snapshot_probe || !g_hdr.hdr_tick_frame)
+        if (!g_hdr.hdr_switch || !g_hdr.hdr_layer_sw || !g_hdr.hdr_present || !g_hdr.hdr_snapshot_probe || !g_hdr.hdr_tick_frame)
             g_hdr.hdr_present = NULL;   // 整组要不全有要不全无：直连层是一整体，部分缺失 = 不认识的宿主——按无 HDR
     }
     return g_hdr.hdr_present != NULL;
@@ -917,7 +919,7 @@ NXGAL_API void nxgal_present(uint32_t tex, const nxgal_crop *crop) { nxgal_pool_
                 //   （层持 PQ 才可能要排空——门在层格式上，SDR 层缺省路径零新增开销，同直连路径 nvn_mtl.m 形态；
                 //   PQ 窗口 = 游戏出图源是 RGB10A2：排空途中又见清零重等——无 HDR 帧落进 SDR 层）
                 pr_hdr_pso_get(MTLPixelFormatRGB10A2Unorm, 1);
-                if (hdr_api()) g_hdr.hdr_tick_frame(g_hdr.hdr_switch(), t->tex.pixelFormat == MTLPixelFormatRGB10A2Unorm);
+                if (hdr_api()) g_hdr.hdr_tick_frame(g_hdr.hdr_layer_sw(), t->tex.pixelFormat == MTLPixelFormatRGB10A2Unorm);   // sw = 层视角开关（PR-B 终稿）：S4 开而玩家 off 时喂玩家开关会把 SDR 帧两帧排空、层掉回 S0（gal 源恒 8 位 SDR），S4 失载体——故喂层视角
             }
         }
         pthread_mutex_lock(&g_mu);

@@ -40,7 +40,7 @@ FPS_HIGH_REFRESH=1 FPS_WIDEN_LIB=/绝对路径/S2Arm.Gfx.Widen.dylib \
   bash graphics/nvn/tests/t_fps_limit.sh
 ```
 
-高刷子矩阵保留原14项，加两后端 × interval3 × 四个上限，以及两后端普通/回到1的动态切换，共26项。原高刷场景核实际120Hz，自动interval3核真实50ms及20Hz；动态稳定阶段期望30→20→30Hz。逐帧2↔3的内容平均帧率是24，但异步变频提示不能保证callback平均24Hz；该阶段记录实际频率并核20..30Hz请求区间，沿用10%测量容差，出帧周期及显示数量阈值保持。cap30的3→1恢复30Hz并核33.3ms。窗口所属NSScreen能力或高刷场景实际链接达不到120时明确`UNTESTED`、退出2，不能计通过；完整成功须为`fps limit 120 Hz matrix: 26/26 passed, 0 untested`。两套都实际通过才能合并报告82项，默认56项不能写成82/82。
+高刷子矩阵保留原14项，加两后端 × interval3 × 四个上限，以及两后端普通/回到1的动态切换，共26项。原高刷场景核实际120Hz，自动interval3核真实50ms及20Hz；动态稳定阶段期望30→20→30Hz。逐帧2↔3的内容平均帧率是24，但异步变频提示不能保证callback平均24Hz；该阶段记录实际频率并核20..30Hz请求区间，沿用10%测量容差，出帧周期及显示数量阈值保持。cap30的3→1：本测游戏没被补丁 / 帧率表抬高，上限不压原生间隔1，回60Hz并核16.7ms（11-25 #502）。窗口所属NSScreen能力或高刷场景实际链接达不到120时明确`UNTESTED`、退出2，不能计通过；完整成功须为`fps limit 120 Hz matrix: 26/26 passed, 0 untested`。两套都实际通过才能合并报告82项，默认56项不能写成82/82。
 
 测试只读使用预先准备的生产 Widen，不发布、不还原 NuGet。缺失依赖退出 2。NVN/GAL、完整原生宿主与 Mac 前端均从被测树编译；通过生产静态库和真实入口调用三前端，不提供宿主、链接或图形替身。核心默认产物在 `build/tests/fps-limit`，高刷新率默认在 `build/tests/fps-limit-high-refresh`；`FPS_LIMIT_BUILD` 可指定私有输出目录，`link-inputs.sha256` 记录实际链接身份。
 

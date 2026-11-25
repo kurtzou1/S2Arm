@@ -2,7 +2,7 @@
 // Copyright 2026 S2Arm contributors
 // Mac 出图层首次取用的多线程竞争（graphics/nvn/host_adapt.m front_metal_layer）：出图线程、游戏线程、主线程同时首调。
 //   判据（期望值手写，不跑被测实现推）：8 个线程同起跑线首调，每轮一个新进程（层配置是进程级一次性状态），共 40 轮：
-//   ① 配置块只进一次：层配置入口（nvn2_hdr_switch）恰 1 次
+//   ① 配置块只进一次：层配置入口（PR-B 起经层视角开关 nvn2_hdr_layer_sw 转调 nvn2_hdr_switch，计数落在后者）恰 1 次
 //   ② 每个线程拿回的都是同一块层，返回时层已配好 device
 //   ③ 进程不崩（改前两个线程同时给静态强引用赋值，objc_storeStrong 的哨兵被另一线程 release，崩在 objc_release）
 #import <Metal/Metal.h>
@@ -22,7 +22,8 @@ static CAMetalLayer *g_layer;
 __attribute__((used, visibility("default"))) void *s2a_mac_front_layer(void) { return (__bridge void *)g_layer; }
 
 static _Atomic int g_cfg_calls;
-int nvn2_hdr_switch(void) { atomic_fetch_add(&g_cfg_calls, 1); return 0; }   // 配置块每进一次调一次（s2a_hdr_layer_apply_to 第一句）；返回 HDR_OFF，层配置到此为止
+int nvn2_hdr_switch(void) { atomic_fetch_add(&g_cfg_calls, 1); return 0; }   // 配置块每进一次调一次（PR-B 起 s2a_hdr_layer_apply_to 第一句经层视角开关转到这里）；返回 HDR_OFF，层配置到此为止
+int nvn2_hdr_layer_sw(void) { return nvn2_hdr_switch(); }   // PR-B 终稿（PR #2162 评审第 2 轮）：层视角开关替身——本组只编 host_adapt.m（nvn2.c 不进），s2a_hdr_layer_apply_to / s2a_hdr_tick_host 的层侧门点改调它；替身照真身形态转调（真身 nvn2.c：sw==HDR_OFF && nvn2_hdr_sdr_map() ? HDR_AUTO : sw——本测 S4 缺省关，恒转调等价）：计数仍落在 nvn2_hdr_switch 替身、①「恰 1 次」口径不变，HDR_OFF 早退行为与基线一致
 // host_adapt.m 构造函数与死代码剔除后仍留着的引用（本测不走到的统计 / 远区入口）：名字对上即可
 #include <time.h>
 uint64_t now_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }

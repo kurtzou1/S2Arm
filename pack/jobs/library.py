@@ -1961,6 +1961,12 @@ def import_games(c):
 
 JOB_LIST_LIMIT = 200
 DIAG_JOBS = 50   # 诊断包只带最近这么多个任务（记录 + 各自的日志），外加还没结束的（上传服务单包 1000 个文件上限；11-13）
+# 另留名额（11-25 #2229 / #2206 D-7P56）：最近 50 个常被 phoneKeptPull 这类轮询任务占满，玩家报的那次失败 / 那款最近一次出包早于它们就带不上
+#   （870 个任务里只收到最近 50 个、两次失败都不在；11-22 那次出包的完整日志也没进包）。最近 DIAG_FAILED 个失败任务、每款最近一次出包类任务
+#   （至多 DIAG_PACK_GAMES 款）不跟最近 50 个抢名额，一律收（记录 + 各自的日志；整包预算照旧由 DIAGNOSTIC_ZIP_BUDGET 管）
+DIAG_FAILED = 20
+DIAG_PACK_GAMES = 20
+DIAG_PACK_OPS = ("ipa", "updateGame", "install", "pushSelected", "sgradeUpgradeGame", "sgradeMac", "android", "tvInstall", "tvExport")
 
 
 def _mtime(path):
@@ -3477,9 +3483,21 @@ def diagnostics(c):
                             records.append((info.st_mtime, name))
                     records.sort(reverse=True)
                     job_total = len(records)
+                    failed_kept, pack_games = 0, set()
                     for rank, (_, name) in enumerate(records):
                         task = name[:-5]
-                        if rank < DIAG_JOBS or (read(c.jobpath.parent / name, {}) or {}).get("state") in ("queued", "running"):
+                        try:   # 坏的任务记录（空 / 半截 / 非 UTF-8）不拖垮整个导出：读不出当空记录，只按排名定收不收（原先只给 50 名之后的读，现在每份都读）
+                            record = read(c.jobpath.parent / name, {}) or {}
+                        except (OSError, ValueError):
+                            record = {}
+                        if not isinstance(record, dict): record = {}
+                        keep = rank < DIAG_JOBS or record.get("state") in ("queued", "running")
+                        if record.get("state") == "failed" and failed_kept < DIAG_FAILED:   # 最近的失败（新的在前）：不论排在第几
+                            failed_kept += 1; keep = True
+                        game = record.get("gameId")
+                        if record.get("operation") in DIAG_PACK_OPS and game and game not in pack_games and len(pack_games) < DIAG_PACK_GAMES:
+                            pack_games.add(game); keep = True   # 这款最近一次出包类任务（记录按改动时间新的在前，第一次碰到的就是最近的）
+                        if keep:
                             picked.add(task.lower()); included += 1
                             write_file(roots["jobs"], name, "jobs/" + task + ".txt", job=True)
                 picked.add(c.task.lower())   # 本次导出自己
@@ -3755,7 +3773,7 @@ def diagnostics(c):
                     manifest["budget"] = dict(limit=DIAGNOSTIC_ZIP_BUDGET, skipped=budget_skipped)
                 manifest["truncated"] = truncated   # 超过单份上限被截的日志 / 任务记录：原长、留下、截掉的字节（空 = 全部整份）
                 manifest["changed"] = changed   # 导出期间一直在被替换、没收进来的（#917；空 = 全收到）
-                manifest["jobs"] = dict(total=job_total, included=included, limit=DIAG_JOBS, omittedLogs=skipped_logs[0])   # 任务记录共几个、收了几个（含没结束的）、省掉的任务日志数
+                manifest["jobs"] = dict(total=job_total, included=included, limit=DIAG_JOBS, failedLimit=DIAG_FAILED, packGamesLimit=DIAG_PACK_GAMES, omittedLogs=skipped_logs[0])   # 任务记录共几个、收了几个（含没结束的）、省掉的任务日志数
                 archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
             # 身份在写完、落盘后再取（仍握着句柄，防调包不变）：exFAT / FAT 上新文件写入数据分到存储后 inode 号会变，
             #   建文件时取的身份必然对不上（诊断包存到 exFAT 盘上一律报「临时文件在导出期间发生变化」）

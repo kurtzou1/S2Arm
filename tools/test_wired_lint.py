@@ -432,8 +432,9 @@ def _shell_references(p, text, make, cwd):   # make=True：text 是 make 配方�
             while rest and rest[0].startswith('-'):
                 rest = rest[2:] if rest[0] in ('-k', '-s', '--kill-after', '--signal') else rest[1:]
             if len(rest) > 1 and re.fullmatch(r'[0-9.]+[smhd]?|"?\$\{?[A-Za-z_]\w*\}?"?', rest[0]): command = rest[1:]
-        # 无进展看门狗包装（tools/nostall.py <秒> [--watch …] -- <命令…>，钩子判挂死的标准写法）：被测命令在 -- 之后
-        if len(command) > 2 and os.path.basename(path_word(command[1], variables, here) or '') == 'nostall.py' and '--' in command[2:]:
+        # 无进展看门狗包装（tools/nostall.py <秒> [--watch …] -- <命令…>、bash tools/idle_timeout.sh <无进展秒> <硬上限秒> <盯的文件>… -- <命令…>，
+        #   钩子判挂死的标准写法）：被测命令在 -- 之后（11-25 dsh 改用 idle_timeout 后 t_dsh.sh 调的 t_push / t_uvx 被判没接线）
+        if len(command) > 2 and os.path.basename(path_word(command[1], variables, here) or '') in ('nostall.py', 'idle_timeout.sh') and '--' in command[2:]:
             command = command[command.index('--', 2) + 1:]
         if command and command[0] == 'env':
             command = command[1:]

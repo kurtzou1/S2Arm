@@ -173,6 +173,8 @@ void rp_pool_stats_end(void) {
 // 逐帧帧日志（android/native/nvn/nvn_vk_frame_log.c，debug.s2a.frame_log，缺省关；#1501 D①）：成功上屏记一条，带取图 / 交上屏的 CPU 耗时。
 //   原先只有旧层（mtl_vk_shim.c）在上屏点调，新回放层这里不调，nvk 直连下帧日志整份是空的。
 //   弱引用：回放核心宿主单测与鸿蒙不链帧日志，地址为空就不调；开关关着时函数里只判一次缓存标志。
+// 弱链接[replay]：nvn_gpu_land_auto_present
+void nvn_gpu_land_auto_present(uint64_t now, uint64_t acquire, uint64_t present, uint64_t draws, int target, double period_s) __attribute__((weak));
 // 弱链接[replay]：s2a_frame_log_present_timed
 void s2a_frame_log_present_timed(uint64_t acquire_ns, uint64_t present_ns) __attribute__((weak));
 // ADPF 帧负载上报（android/native/adpf_hint.c；原先只接在旧层 mtl_vk_shim.c，缺省的新回放层构建不编它，CPU 调度器一直拿不到帧负载）：
@@ -201,7 +203,6 @@ uint64_t nvn_be_present(const tex_t *t, double period_s, const int crop[4]) {
     return ticket;
 }
 static uint64_t present_impl(const tex_t *t, double period_s, const int crop[4]) {
-    (void)period_s;
     rp_pool_stats_frame();   // 池统计（开关 pool_stats；关着每帧只读一次开关，回放与池查找路径不动）
     rp_tm_frame_end();   // 一帧结束：刚结束的是采样帧就记一帧，再定下一帧要不要逐步计时（分时抽样，#1103）
     pthread_mutex_lock(&g_pmu);
@@ -270,6 +271,10 @@ static uint64_t present_impl(const tex_t *t, double period_s, const int crop[4])
         }
         {   // 分时读数：每 5 秒一行（帧率低的时候「每 600 帧」等不到）
             static uint64_t t_last, n_last, d_last; struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+            if (nvn_gpu_land_auto_present) {
+                nvn_gpu_land_auto_present(now, acquire_ns, present_ns, rp_present_draw_count(),
+                                          atomic_load_explicit(&g_tgt_itv, memory_order_relaxed), period_s);
+            }
             if (!t_last) t_last = now;
             { const uint64_t cpu = tc_thread_cpu_ns(); if (cpu) rp_present_tc_note(now, cpu); }
             fseg_frame(&g_fseg, now, atomic_load_explicit(&g_tgt_itv, memory_order_relaxed), atomic_load_explicit(&g_tgt_set_ns, memory_order_relaxed));
@@ -369,7 +374,7 @@ static uint64_t present_impl(const tex_t *t, double period_s, const int crop[4])
                     snprintf(b + strlen(b), sizeof b - strlen(b), "；显卡写登记 %.0f 条共 %.0f KB、同段合并 %.0f 条省 %.0f KB",
                              (double)pf[RP_PERF_GW_REG_N] / f, (double)pf[RP_PERF_GW_REG_KB] / f, (double)pf[RP_PERF_GW_MERGED_N] / f, (double)pf[RP_PERF_GW_MERGED_KB] / f);
                 nvn_plat_log(NVN_PLAT_LOG_INFO, "present", b);
-                snprintf(b, sizeof b, "分时（回写，每帧）：Finish 没等的提交 %.1f 次；做完要写回的提交 %.1f 次；事件 %.1f、计数器报告 %.1f（类型位图 %#llx）、遮挡事件 %.1f、显卡写缓冲 %.1f；这一窗口新建贴图的宽高 %d 种", (double)pf[RP_PERF_FIN_SKIP] / f, (double)pf[RP_PERF_FX_SUBS] / f, (double)pf[RP_PERF_FX_EVENT] / f, (double)pf[RP_PERF_FX_REPORT] / f, (unsigned long long)rp_fx_report_types(), (double)pf[RP_PERF_FX_OCC] / f, (double)pf[RP_PERF_FX_GW] / f, rp_res_new_sizes_take());
+                snprintf(b, sizeof b, "分时（回写，每帧）：Finish 没等的提交 %.1f 次；做完要写回的提交 %.1f 次；事件 %.1f、计数器报告 %.1f（类型位图 %#llx）、遮挡事件 %.1f、显卡写缓冲 %.1f；这一窗口新建贴图的宽高 %d 种；本可放行、因回写改成真等的同步：所等区间带时间戳 %.1f、带事件或别的计数器或遮挡 %.1f、带显卡写缓冲 %.1f、只有之后的提交带回写 %.1f", (double)pf[RP_PERF_FIN_SKIP] / f, (double)pf[RP_PERF_FX_SUBS] / f, (double)pf[RP_PERF_FX_EVENT] / f, (double)pf[RP_PERF_FX_REPORT] / f, (unsigned long long)rp_fx_report_types(), (double)pf[RP_PERF_FX_OCC] / f, (double)pf[RP_PERF_FX_GW] / f, rp_res_new_sizes_take(), (double)pf[RP_PERF_WAIT_EFX_TS] / f, (double)pf[RP_PERF_WAIT_EFX_FX] / f, (double)pf[RP_PERF_WAIT_EFX_GW] / f, (double)pf[RP_PERF_WAIT_EFX_LATER] / f);
                 nvn_plat_log(NVN_PLAT_LOG_INFO, "present", b);
                 {   // 写跟踪的开销：游戏写到被保护的页要走一次缺页处理，改保护要进内核
                     static uint64_t f0, p0, c0, g0, n0; uint64_t fl = 0, pr = 0, mc = 0, mpg = 0, mns = 0; nvn_dirty_stats(&fl, &pr); nvn_dirty_mp_stats(&mc, &mpg, &mns);

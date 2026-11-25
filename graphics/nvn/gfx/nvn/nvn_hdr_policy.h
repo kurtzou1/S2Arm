@@ -229,6 +229,7 @@ static inline int hdr_present_rolloff(double *knee, double *target, double *sour
 //   ⇒ 着色器守卫短路 ⇒ 纯 mode 2（off 不变量结构性成立）。PR-A 期生产调用方（nvn2_hdr_present）恒传 0,0——
 //   开关解析在 PR-B（S2A_HDR_SDR_MAP 族），无 setter 即无扩张。
 #define HDR_SDR_MAP_FILL 1   // 本组扩张入参在位标记：单测特征检测（t_present_hdr——红态无此宏 → 门用例显式红）
+#define NVN2_HDR_SDR_MAP_SWITCH 1   // PR-B 开关解析族在位标记（nvn2_hdr_sdr_map 族 + 层视角开关 nvn2_hdr_layer_sw）：单测特征检测（t_hdr_sdr_map——红态无此宏 → 显式红；HDR_SDR_MAP_FILL 同款口径）
 
 // present 出图参数包（UV 常量缓冲 p[0..7]，照 nxnative present.metal 的 mode/xf 两组并一行）：
 //   p[0] = 着色器模式号（0–4；平凡直通与 PQ 直通都 0）；p[1] = 纸白（nit，mode 1/2/3 的 PQ/SDR 白锚）；
@@ -290,9 +291,13 @@ static inline int hdr_bypass_upscale(int sw, int src_pf, int vi_answered) {
 void nvn2_hdr_snapshot_publish(const hdr_snapshot *s);   // 平台侧（host_adapt.m 挂层块 / front_mac.m screen_edr_note）发布环境读数；只刷 potential_edr / current_headroom / s1_ready / paper_white，层簿记不回卷；空指针忽略
 void nvn2_hdr_snapshot_probe(hdr_snapshot *out);         // 读回整份（含层簿记；出图 / 门控 / 单测只读）；空指针忽略
 int  nvn2_hdr_switch(void);                              // S2A_HDR 三态解析：不设 / off / 看不懂 = off 缺省（缺省关，字节级回现状；看不懂打一次红行）
-void nvn2_hdr_tick(int sw, int raw_can, unsigned long long now_ms);      // 层 tick——can 滞回 + 进层，对存储快照（事件档：250ms timer / 换屏通知，PR4 接线）
-void nvn2_hdr_tick_frame(int sw, int frame_is_pq);                       // 层 tick——排空喂入，对存储快照（每帧，PR4 接线）
-void nvn2_hdr_preattach(int raw_can, unsigned long long now_ms);         // PR4 开机预挂的存储侧：识别 Switch 2 游戏即进层——不滞回（开机无翻屏史），赶在首查询前（§4 PR4 ③）；SDR 屏 / off / 已在层内各自让位
-hdr_decision nvn2_hdr_answer(int src_hdr, unsigned long long now_ms);    // 同源答案入口：三态开关 + 已发布快照 + 存储的 peak 状态进 choose_mode——vi 门控 / 出图都从这读，不各自判
-int nvn2_hdr_present(float p[8], int src_pf, int dst_pt);   // PR3b 出图热路径读已算好的结果：返回六态模式（HDR_PV_*）并填 UV 常量缓冲 p[0..7]（hdr_present_fill 喂存储态：vi 答过 latch + 已告知 peak + PR1 声明的范围 hi + 快照净空）
+int  nvn2_hdr_layer_sw(void);                            // PR-B（#625 第二阶段）终稿口径（PR #2162 评审）：层视角开关——出图层与层状态机专用（层配置应用 / tick / 开机预挂 / 管线预热 / 排空喂入）：S4 开而玩家 S2A_HDR 未设 / 显式 off ⇒ 按 auto 进 / 持 PQ（S4 只让出图层持 PQ、对 SDR 窗口做扩张）；玩家设了 auto/on ⇒ 原样带过（以玩家为准，S4 不覆盖）。vi 答询（nvn2_hdr_answer / vi_paper_white）不读它——照玩家开关回答，off 恒不答 on=1（hdr_choose_mode 的 off 分支原样，:123–142）
+void nvn2_hdr_tick(int sw, int raw_can, unsigned long long now_ms);      // 层 tick——can 滞回 + 进层，对存储快照（事件档：250ms timer / 换屏通知，PR4 接线；PR-B 起层侧调用方传层视角开关 nvn2_hdr_layer_sw）
+void nvn2_hdr_tick_frame(int sw, int frame_is_pq);                       // 层 tick——排空喂入，对存储快照（每帧，PR4 接线；PR-B 起层侧调用方传层视角开关 nvn2_hdr_layer_sw）
+void nvn2_hdr_preattach(int raw_can, unsigned long long now_ms);         // PR4 开机预挂的存储侧：识别 Switch 2 游戏即进层——不滞回（开机无翻屏史），赶在首查询前（§4 PR4 ③）；SDR 屏 / s1_ready 未过 / 已在层内各自让位；PR-B 起开关判层视角（S4 开而玩家 off 也进层）
+hdr_decision nvn2_hdr_answer(int src_hdr, unsigned long long now_ms);    // 同源答案入口：三态开关 + 已发布快照 + 存储的 peak 状态进 choose_mode——vi 门控 / 出图都从这读，不各自判（开关照玩家的，不看层视角——vi 答询以玩家设置为准）
+int nvn2_hdr_present(float p[8], int src_pf, int dst_pt);   // PR3b 出图热路径读已算好的结果：返回六态模式（HDR_PV_*）并填 UV 常量缓冲 p[0..7]（hdr_present_fill 喂存储态：vi 答过 latch + 已告知 peak + PR1 声明的范围 hi + 快照净空）；PR-B（#625 第二阶段）起读 S4 开关缓存传 sdr/target nits 双参（关 ⇒ 0,0 纯 mode 2；开 ∧ engage 门过 ⇒ p[2]=sdr、p[3]=effective target），首次 engage 打一行 host.log 生效行
+int nvn2_hdr_sdr_map(void);                                 // PR-B：S4「SDR 转 HDR」总开关（S2A_HDR_SDR_MAP，1/0 照 S2A_FPS60 启动翻译形态；未设/空串 = 0 缺省关、字节级回现状；看不懂打一次红行按 0）——一次缓存静态（出图热路径不逐帧读环境，nvn2_hdr_sdr_gamma 同款口径）
+double nvn2_hdr_sdr_map_nits(void);                         // PR-B：S4 sdr nits 校准位（S2A_HDR_SDR_MAP_NITS，诊断/调校用、非按款开关）：缺省 100（BT.2446-1 §4.2 设计点）、域 [80,1000]；域外/垃圾值红行一次按缺省——一次缓存静态
+double nvn2_hdr_sdr_map_target_nits(void);                  // PR-B：S4 target nits 校准位（S2A_HDR_SDR_MAP_TARGET_NITS）：缺省 400（业界甜点下沿）、域 [100,10000]（gamescope --hdr-itm-target-nits 顶帽形态，与 HDR_PEAK_CAP_NITS 同值）；域外/垃圾值红行一次按缺省——一次缓存静态
 int nvn2_hdr_bypass_upscale(int src_pf);                    // PR3d 出图热路径旁路判定（AA/FX/FSR/补帧，§4 PR3d）：窗口格式进、bool 出——非 HDR10 窗零开销直返（连原子读都不进），HDR10 窗一次宽松原子读 latch，vi 答过才读 S2A_HDR（getenv 只发生在 HDR 管线已接手的局）

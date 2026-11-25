@@ -1414,10 +1414,30 @@ int main(int argc, const char **argv) {
         //   右 = 中心 (0x800, 0x7E0)、下行程 (0x600, 0x610)、上行程 (0x620, 0x630)
         const uint8_t cal[18] = {0xA0, 0x05, 0x5B, 0xF0, 0x07, 0x81, 0xC0, 0x05, 0x5D, 0x00, 0x08, 0x7E, 0x00, 0x06, 0x61, 0x20, 0x06, 0x63};
         s2a_pro_cal l, r; int ok = s2a_pro_cal_parse(cal, &l, &r);
-        expect(ok && l.cx == 0x7F0 && l.cy == 0x810 && l.xmax == 0x5A0 && l.ymax == 0x5B0 && l.xmin == 0x5C0 && l.ymin == 0x5D0 &&
+        expect(ok && l.calibrated && r.calibrated && l.cx == 0x7F0 && l.cy == 0x810 && l.xmax == 0x5A0 && l.ymax == 0x5B0 && l.xmin == 0x5C0 && l.ymin == 0x5D0 &&
                r.cx == 0x800 && r.cy == 0x7E0 && r.xmax == 0x620 && r.ymax == 0x630 && r.xmin == 0x600 && r.ymin == 0x610, "Pro factory stick calibration (left / right field orders differ)");
         uint8_t blank[18]; memset(blank, 0xFF, sizeof blank); s2a_pro_cal keep; s2a_pro_cal_default(&keep);
-        expect(!s2a_pro_cal_parse(blank, &keep, &keep) && keep.cx == 2048, "Pro calibration left unwritten keeps the default");
+        expect(!s2a_pro_cal_parse(blank, &keep, &keep) && keep.cx == 2048 && !keep.calibrated, "Pro calibration left unwritten keeps the default");
+        uint8_t bad_cal[18]; memcpy(bad_cal, cal, sizeof bad_cal); bad_cal[3] = 0x00; bad_cal[4] = 0x01;   // 左 X 中心改成 0x100，超出合理范围
+        s2a_pro_cal bad_left, bad_right; s2a_pro_cal_default(&bad_left); s2a_pro_cal_default(&bad_right);
+        expect(!s2a_pro_cal_parse(bad_cal, &bad_left, &bad_right) && !bad_left.calibrated && bad_left.cx == 2048,
+               "Pro unreasonable factory calibration falls back to growing defaults");
+        // 先来一帧 +1800 尖峰（0x7F0 + 0x708 = 0xDF8），再推到出厂满行程 +1440（0xD90）。
+        // 改后：尖峰截到 +32767、行程仍 0x5A0；随后满行程也是 +32767。改前：尖峰把行程撑到 1800，满行程只有 1440/1800×32767 = 26213。
+        const uint8_t spike_rep[12] = {0x30, 0, 0, 0, 0, 0, 0xF8, 0x0D, 0x81, 0x00, 0xE8, 0x7E};
+        const uint8_t full_rep[12] = {0x30, 0, 0, 0, 0, 0, 0x90, 0x0D, 0x81, 0x00, 0xE8, 0x7E};
+        uint32_t factory_bt = 0; int16_t factory_ax[4] = {0};
+        expect(s2a_pro_parse(spike_rep, sizeof spike_rep, &l, &r, &factory_bt, factory_ax) == 1 &&
+               factory_ax[0] == 32767 && l.xmax == 0x5A0 && l.xmin == 0x5C0,
+               "Pro factory X calibration is fixed and never grows from a spike");
+        expect(s2a_pro_parse(full_rep, sizeof full_rep, &l, &r, &factory_bt, factory_ax) == 1 &&
+               factory_ax[0] == 32767 && l.xmax == 0x5A0,
+               "Pro factory X full travel stays full after an earlier spike");
+        // cx != cy：左 Y 中心 0x810 + 半行程 0x2D8 = 0xAE8，正确应为 16383；误用 X 中心 / 行程会得到约 23093。
+        const uint8_t y_half_rep[12] = {0x30, 0, 0, 0, 0, 0, 0xF0, 0x8F, 0xAE, 0x00, 0xE8, 0x7E};
+        expect(s2a_pro_parse(y_half_rep, sizeof y_half_rep, &l, &r, &factory_bt, factory_ax) == 1 &&
+               factory_ax[1] == 16383 && l.ymax == 0x5B0 && l.ymin == 0x5D0,
+               "Pro factory Y calibration uses Y center and travel when cx differs from cy");
         //   0x30 报告：A + ZR（字节 3 = 0x88）、+（字节 4 = 0x02）、上 + L（字节 5 = 0x42）；左摇杆 (3648, 2048) = 40 0E 80，右摇杆 (448, 3648) = C0 01 E4
         const uint8_t rep[12] = {0x30, 0, 0, 0x88, 0x02, 0x42, 0x40, 0x0E, 0x80, 0xC0, 0x01, 0xE4};
         s2a_pro_cal d; s2a_pro_cal_default(&d); uint32_t bt = 0; int16_t ax[4] = {0};

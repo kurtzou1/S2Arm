@@ -151,7 +151,8 @@ NXGAL_API uint32_t nxgal_prog_load_binary(const void *data, int32_t len, int32_t
 // 22（10-29 画面线 wire-c/samp-emu2，#800）：边框表项 pad → lb（着色器加的 LOD 偏置），s2a_bsample / s2a_lbsample 带 LOD 偏置模拟（本机 GPU 原生采样器偏置不生效时用）
 // 23（10-30 wire-c/rm-gal-linked）：删通用链接版，记录位 15 不再置、片元记录不再带 43 字节桩种类尾
 // 24（11-01 #1204 T1，维护者定）：加固的常量 / 存储缓冲越界读不再「读回 0」（值 & 界内掩码），只钳下标（读到钳到的末元素）；越界写 / 原子不落、循环上限不变
-#define NXGAL_XC_VERSION 24u
+// 25（11-23 D-WZCF）：加固后越界的原子返回钳到元素的当前值（原先回 0，读改写重试循环越界时空转不退）
+#define NXGAL_XC_VERSION 25u
 // 离线索引文件 gal.idx（小端）：u32 魔数 "GALI"(0x494c4147)、u32 版本 1、u32 NXGAL_XC_VERSION、u32 平台（0 iOS 1 macOS）、u32 条数 n、u32 0；
 //   n × { u64 键, u32 记录偏移（从文件头起）, u32 记录长 }（按键升序）；之后是着色器记录（格式见 gal_prog.m rec_write）。
 // 离线库目录（graphics/metal/tools/gal_offline.py 产出）：gal.idx + gal.shards（每行「首键 16 位十六进制<TAB>文件名」，键升序）+ 各片 gal.<片号>.metallib（每片 ≤64 MB，一段连续键区间）。

@@ -8,8 +8,26 @@
 #undef main
 
 static int wait_calls;
+static uint64_t fail_on_wait, first_failed;
+static int wait_error = NVN_GPU_E_FAILED;
+static int stage_readback;
+int nvn_gpu_readback_cmd_enabled(nvn_gpu_cmd c) { (void)c; return stage_readback; }
+uint64_t nvn_gpu_readback_record(nvn_gpu_cmd c, nvn_gpu_readback_span *spans, uint32_t count) {
+    (void)c;
+    CHECK(count == 1 && spans[0].src && spans[0].bytes == 4);
+    spans[0].readback_offset = 0;
+    return spans[0].bytes;
+}
 nvn_gpu_rc nvn_gpu_fence_wait(uint64_t v, uint64_t ns, nvn_gpu_err *err) {
     wait_calls++;
+    if (v <= g_fdone) return (nvn_gpu_rc){NVN_GPU_OK};
+    if (ns && fail_on_wait == v) {
+        // 后端先发布失败值，再执行一次失败回调，最后唤醒正在等的调用者。
+        first_failed = v;
+        fail_on_wait = 0;
+        fake_complete(NVN_GPU_DONE_FAILED);
+    }
+    if (first_failed && v >= first_failed) return (nvn_gpu_rc){wait_error};
     return fixture_fence_wait(v, ns, err);
 }
 static void put_sync(stream *s, uint32_t op, const sync_t *sync) {
@@ -58,8 +76,73 @@ static void wait_invalid_or_external(void) {
     CHECK(wait_calls == 0 && rp_S.alpha_ref == 0.75f);
     fake_complete(NVN_GPU_DONE_OK);
 }
+static void wait_failed_submission(void) {
+    stream prior = {0}, failing = {0};
+    end(&prior); submit1(&prior);
+    const uint64_t completed = nvn_be_last_fence();
+    fake_complete(NVN_GPU_DONE_OK);
+
+    volatile uint32_t event = 19;
+    volatile uint32_t *ptr = &event;
+    const uint32_t value = 20;
+    uint8_t *op = put(&failing, OP_SIGNAL_EVENT, 16);
+    // 有回写副作用，禁止未完成时提前放行。put 已把 mode 清为 0。
+    memcpy(op, &ptr, sizeof ptr);
+    memcpy(op + 12, &value, sizeof value);
+    sync_t sync = {0};
+    put_sync(&failing, OP_FENCE_SYNC, &sync);
+    end(&failing); submit1(&failing);
+    uint64_t f = 0;
+    CHECK(sync_published(&sync, &f) && f > completed);
+    fail_on_wait = f;
+    CHECK(nvn_be_wait(f, 0) == 0);
+    CHECK(nvn_be_wait(f, 1000) == 1);
+    CHECK(first_failed == f && event == 19);
+    CHECK(nvn_be_wait(f, 0) == 1);
+    CHECK(rp_fence_done(f));
+    CHECK(nvn_be_wait(completed, 0) == 1);
+    first_failed = 0;
+}
+static void wait_incomplete_readback(void) {
+    const uint64_t base = (uint64_t)(uintptr_t)g_pmem;
+    nvn_gpu_buf mirror = NULL;
+    g_buf_cpu_auto = 1;
+    stage_readback = 1;
+    memset(g_pmem, 0x11, sizeof g_pmem);
+    nvn_be_pool_add(g_pmem, sizeof g_pmem);
+    nvn_be_sub_begin();
+    CHECK(rp_buf_resolve(&g_fake_cmd, base, PG, &mirror, NULL) && mirror && mirror->cpu);
+    if (!mirror || !mirror->cpu) return;
+    memset(mirror->cpu, 0xaa, 4);
+    CHECK(rp_post_gpu_write(base, 4));
+    const uint64_t fence = nvn_be_sub_commit();
+    const int before = g_red_lines;
+    fake_complete(NVN_GPU_DONE_OK);  // record 承诺 4 字节，回调故意不交付。
+    CHECK(g_red_lines == before + 1 && strstr(g_last_red, "回写暂存"));
+    CHECK(rp_fence_done(fence) && nvn_be_wait(fence, 0) == 1);
+    CHECK(g_pmem[0] == 0x11 && rp_buf_gpu_write_pending(base, 4) == 0);
+
+    volatile uint32_t event = 19;
+    volatile uint32_t *ptr = &event;
+    uint32_t value = 20;
+    stream later = {0};
+    uint8_t *op = put(&later, OP_SIGNAL_EVENT, 16);
+    memcpy(op, &ptr, sizeof ptr);
+    memcpy(op + 12, &value, sizeof value);
+    end(&later); submit1(&later); fake_complete(NVN_GPU_DONE_OK);
+    CHECK(event == 19 && g_red_lines == before + 1);
+    CHECK(nvn_be_wait(nvn_be_last_fence(), 0) == 1);
+    nvn_be_pool_del(g_pmem);
+    nvn_be_shutdown_session();
+    stage_readback = 0;
+    submit1(&later); fake_complete(NVN_GPU_DONE_OK);
+    CHECK(event == 20 && g_red_lines == before + 1);
+}
 int main(void) {
     wait_prior_submission(); wait_same_submission(); wait_invalid_or_external();
+    wait_failed_submission();
+    wait_error = NVN_GPU_E_DEVICE; wait_failed_submission();
+    wait_incomplete_readback();
     printf("%s t_nvn_wait_sync：%d 项检查，%d 项不通\n", g_fail ? "✗" : "✓", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

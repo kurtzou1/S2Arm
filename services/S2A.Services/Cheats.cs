@@ -101,7 +101,7 @@ namespace S2A.Services
             _thread = null; _stop = null; _native.Clear(); seenNative = new HashSet<string>(StringComparer.Ordinal);
         }
 
-        private sealed class Item
+        internal sealed class Item
         {
             public Entry Entry; public ITamperProgram Code; public string Status; public bool Off;
             public bool Shipped;   // 文件是电脑出包时随包带来的（文档根 cheats/.packed 记着，runtime/src/cpatch.c seed_cheats）：改代码的条目没编进包 ≠ 手机上导入的
@@ -126,41 +126,52 @@ namespace S2A.Services
                         if (programs.Exists(p => p.Status == "游戏未装载")) seen = null;
                     }
                 }
-                bool any = false, changed = false;
-                var keys = (ControllerKeys)Volatile.Read(ref _keys);
-                foreach (Item p in programs)
-                {
-                    if (p.Off || p.Code == null || !p.Code.IsEnabled) continue;
-                    any = true;
-                    try
-                    {
-                        p.Code.Process.TamperedCodeMemory = false;
-                        p.Code.Execute(keys);
-                    }
-                    catch (TamperExecutionException e) when (!p.Code.Process.TamperedCodeMemory)
-                    {
-                        // 起局早期游戏还没分配到目标地址，读写落空属正常：只记状态，不停用
-                        if (p.Status != "地址未就绪") { p.Status = "地址未就绪"; changed = true; Console.Error.WriteLine($"金手指：{p.Entry.Key} {e.Message}"); }
-                        continue;
-                    }
-                    catch (TamperExecutionException) { }   // 写到不可写页：下面按「改代码」停用
-                    catch (Exception e)
-                    {
-                        p.Off = true; p.Status = "执行出错"; changed = true;
-                        Console.Error.WriteLine($"【红】金手指：{p.Entry.Key} 执行出错，已停用：{e.GetType().Name}: {e.Message}");
-                    }
-                    if (p.Code.Process.TamperedCodeMemory)
-                    {
-                        // #1321：随包带来、却没编进包的（槽 2046 位用尽 / 同点变体超 8 路等，原因在电脑出包完成页）与手机上自己导入的分开说
-                        p.Off = true; p.Status = p.Shipped ? "改代码，没编进包" : "改代码，不支持"; changed = true;
-                        Console.Error.WriteLine($"金手指：{p.Entry.Key} 要改代码页（苹果上是签名只读页），已停用");
-                    }
-                    else if (p.Status == "地址未就绪") { p.Status = "生效中"; changed = true; }
-                }
+                var (any, changed) = Tick(programs, (ControllerKeys)Volatile.Read(ref _keys));
                 if (changed) WriteStatus(dir, programs);
                 if (stop.WaitHandle.WaitOne(any ? TickMs : TickMs * ReloadEveryTicks / 2)) return;
                 if (!any) tick += ReloadEveryTicks / 2 - 1;
             }
+        }
+
+        // 一轮执行（约 83 ms 一次）。游戏出第一帧之前不执行内存类条目（#d47988）：起局时游戏对象还没建好，金手指的指针链读到的是初值
+        //   （一款的分辨率金手指读 [main+0x4725488] 时它还指着自己），写宽高落进主程序数据区、把旁边一个指针的高半改成 1920.0，游戏稍后解引用崩溃，
+        //   四台设备、0.5.8 起都是这样。开关、状态、装载都照旧，只推迟开始执行的时刻；进程内重建开新一局帧数清零，重新等第一帧。
+        //   改代码的条目在出包时已编进游戏（s2a_cpatch_cheat 开关），不走这里，不受影响
+        internal static (bool any, bool changed) Tick(List<Item> programs, ControllerKeys keys)
+        {
+            bool any = false, changed = false; int ready = -1;   // 帧数只在有开着的条目时问（没开任何条目不碰原生层）
+            foreach (Item p in programs)
+            {
+                if (p.Off || p.Code == null || !p.Code.IsEnabled) continue;
+                any = true;
+                if (ready < 0) ready = Frames() > 0 ? 1 : 0;
+                if (ready == 0) continue;
+                try
+                {
+                    p.Code.Process.TamperedCodeMemory = false;
+                    p.Code.Execute(keys);
+                }
+                catch (TamperExecutionException e) when (!p.Code.Process.TamperedCodeMemory)
+                {
+                    // 起局早期游戏还没分配到目标地址，读写落空属正常：只记状态，不停用
+                    if (p.Status != "地址未就绪") { p.Status = "地址未就绪"; changed = true; Console.Error.WriteLine($"金手指：{p.Entry.Key} {e.Message}"); }
+                    continue;
+                }
+                catch (TamperExecutionException) { }   // 写到不可写页：下面按「改代码」停用
+                catch (Exception e)
+                {
+                    p.Off = true; p.Status = "执行出错"; changed = true;
+                    Console.Error.WriteLine($"【红】金手指：{p.Entry.Key} 执行出错，已停用：{e.GetType().Name}: {e.Message}");
+                }
+                if (p.Code.Process.TamperedCodeMemory)
+                {
+                    // #1321：随包带来、却没编进包的（槽 2046 位用尽 / 同点变体超 8 路等，原因在电脑出包完成页）与手机上自己导入的分开说
+                    p.Off = true; p.Status = p.Shipped ? "改代码，没编进包" : "改代码，不支持"; changed = true;
+                    Console.Error.WriteLine($"金手指：{p.Entry.Key} 要改代码页（苹果上是签名只读页），已停用");
+                }
+                else if (p.Status == "地址未就绪") { p.Status = "生效中"; changed = true; }
+            }
+            return (any, changed);
         }
 
         // 玩家可改的文件（*.txt，不含本线程自己写的 status.txt）的名字 + 改动时间签名：增删改任一份都变；目录不在 = 空串。
@@ -278,6 +289,8 @@ namespace S2A.Services
         //   虚拟区间在 2^56 起，远高于任何真实用户态地址（< 2^47）；从游戏内存读出来的指针都是真实地址，不会落进虚拟区间被误换
         internal const ulong MainVirtual = 1UL << 56, MainSpan = 1UL << 40;   // Atmosphere 偏移 40 位
         internal static Func<ulong, ulong> MainVa = off => Imports.s2a_main_region_va(off);   // 单测换成假排布
+        // 本局已上屏帧数（各出图后端共用的上屏点 runtime/src/ap_host.c s2a_frame_presented 计数，进程内重建开新一局清零）；单测换成假的
+        internal static Func<ulong> Frames = () => Imports.s2a_ap_frames();
 
         // 游戏内存适配：只读已映射页、只写可写页（MemoryPermission 位：1 读、2 写、4 执行）
         internal sealed class GameProcess : ITamperedProcess
@@ -347,6 +360,7 @@ namespace S2A.Services
             [DllImport(Lib)] public static extern Layout* s2a_layout_get();
             [DllImport(Lib)] public static extern ulong s2a_main_base();
             [DllImport(Lib)] public static extern ulong s2a_main_region_va(ulong off);
+            [DllImport(Lib)] public static extern ulong s2a_ap_frames();
             [DllImport(Lib)] public static extern byte* s2a_main_build_id();
             [DllImport(Lib)] public static extern byte* s2a_cheats_dir();
             [DllImport(Lib)] public static extern int s2a_cpatch_cheat(byte* file, byte* name, int on);

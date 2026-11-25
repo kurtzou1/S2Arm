@@ -43,12 +43,15 @@ void nvn_fps_session_reset(void) {
 int s2a_fps_raised(void) __attribute__((weak));
 int nvn_fps_limit_set(void) { pthread_once(&g_once, fps_init); return atomic_load_explicit(&g_limit, memory_order_relaxed); }
 int nvn_fps_limit(void) { int v = nvn_fps_limit_set(); return v && s2a_fps_raised && !s2a_fps_raised() ? 0 : v; }
+// 有原生节拍（period > 0：游戏交换间隔 / 刷新率给得出周期）才谈「不压游戏原生出图率」；没有原生节拍（DM_PRESENT_HZ=0、GL 交换间隔 0）游戏出图不受约束，
+//   上限照常生效（11-25：4eaa26da6 把这格也放开了，无节拍时游戏空转到每帧 0.009 ms，graphics/nvn/tests/t_fps_limit.sh hz0 格）
+static int limit_for(int has_beat) { return has_beat ? nvn_fps_limit() : nvn_fps_limit_set(); }
 double nvn_fps_period(double period) {
-    int fps = nvn_fps_limit(); double limit = fps ? 1.0 / fps : 0;
+    int fps = limit_for(period > 0); double limit = fps ? 1.0 / fps : 0;
     return period < limit ? limit : period;
 }
 uint64_t nvn_fps_period_ns(uint64_t period) {
-    int fps = nvn_fps_limit(); uint64_t limit = fps ? (1000000000ull + fps - 1) / fps : 0;
+    int fps = limit_for(period > 0); uint64_t limit = fps ? (1000000000ull + fps - 1) / fps : 0;
     return period < limit ? limit : period;
 }
 // 用户帧率设置只加上限；不改游戏的交换间隔，也不解除游戏原有的锁帧。

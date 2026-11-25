@@ -1,9 +1,9 @@
 {
   "schema": 1,
   "contract": "s2a.game-settings.v1",
-  "revision": 9,
+  "revision": 10,
   "languages": ["zh-Hans", "en"],
-  "coverage": "对应维护者 11-09 清单 18 行：fps60 / widescreen（满屏；App 级旧开关并入按款，11-13 并入原 widenForce「宽屏强制启用」）/ docked / rumble / rumbleLevel / touchHaptics / ns2ProAdapter / motion（S2APhoneGyro）/ phoneHaptics / hud（S2ADevHUD）/ metalHud / touchOpacity / slideSwitch / input（按键布局、逐键大小透明度配色、固定摇杆灵敏度死区都在虚拟手柄编辑页，iOS 独有，不逐项进表）/ holdLock / patches；另加 quality（画质提升，11-15 取代 Mac 独有的 enhance「画面增强模式」：开 = MetalFX；iOS 键 S2AScalingFilter）；另加 audioDevice / vsSpeakers / vsHeadphones（输出设备类型 + 两个虚拟环绕开关，#189 后续 5.1 虚拟环绕第二片：按游戏存，iOS 起局 ios/settings.m 落成 S2A_AUDIO_*）。",
+  "coverage": "对应维护者 11-09 清单 18 行：fps60 / widescreen（满屏；App 级旧开关并入按款，11-13 并入原 widenForce「宽屏强制启用」）/ docked / rumble / rumbleLevel / touchHaptics / ns2ProAdapter / motion（S2APhoneGyro）/ phoneHaptics / hud（S2ADevHUD）/ metalHud / touchOpacity / slideSwitch / input（按键布局、逐键大小透明度配色、固定摇杆灵敏度死区都在虚拟手柄编辑页，iOS 独有，不逐项进表）/ holdLock / patches；另加 quality（画质提升，11-15 取代 Mac 独有的 enhance「画面增强模式」：开 = MetalFX；iOS 键 S2AScalingFilter）；另加 audioDevice / vsSpeakers / vsHeadphones（输出设备类型 + 两个虚拟环绕开关，#189 后续 5.1 虚拟环绕第二片：按游戏存，iOS 起局 ios/settings.m 落成 S2A_AUDIO_*）；另加 hdrSdrMap（S4「SDR 转 HDR」，#625 第二阶段 PR-B 评审终稿：iOS 独有按款开关、只放游戏库每款设置页（App 设置页不出行），技术细节在 docs/画面设置.md；Mac v1 只有环境开关 S2A_HDR_SDR_MAP——见 docs/画面设置.md）。",
   "note": "游戏设置项的唯一定义：Mac 启动设置页、iOS 游戏内齿轮菜单、iOS 游戏库长按设置都按这张表画，不各写文案和缺省。scope=game 的项存这款游戏文件夹的 launch.json（Mac：游戏文件夹；iOS：Documents/games/<游戏号>/launch.json），scope=app 的全游戏共用、留各端 App 偏好（Mac：数据目录 game-settings.json，同 launch.json 格式）。launch.json 只存玩家明确选过的项，没选的按 default；default 为对象时按平台取，为 \"caps\" 时按这款的能力清单 s2a_caps.tsv。apply：live = 改完立刻生效，restart = 下一局生效。ios_key 是 iOS 旧 UserDefaults 键，只给一次性迁移用，迁完删旧键。",
   "launch_file": {
     "name": "launch.json",
@@ -45,6 +45,9 @@
     {"id": "widescreen", "type": "bool", "default": "caps", "scope": "game", "apply": "restart", "platforms": ["ios", "mac"], "group": "display", "ios_key": "S2AWidescreen",
      "label": {"zh-Hans": "满屏", "en": "Full screen"},
      "note": {"zh-Hans": "开启后按屏幕比例铺满，画面拉伸时自动退回 16:9；关闭后保持 16:9", "en": "Fills your screen and falls back to 16:9 if stretched; off keeps the original 16:9 ratio"}},
+    {"id": "hdrSdrMap", "type": "bool", "default": false, "scope": "game", "apply": "restart", "platforms": ["ios"], "group": "display", "ios_key": "S2AHdrSdrMap",
+     "label": {"zh-Hans": "SDR 转 HDR", "en": "SDR to HDR"},
+     "note": {"zh-Hans": "把普通画面提亮成 HDR 效果；需要 HDR 屏幕；画面里的白色文字也会变亮；下次进游戏生效。对所有游戏都按普通画面提亮；想用游戏自带的 HDR，请关掉这一项。", "en": "Brightens the plain picture into an HDR look; needs an HDR screen; white text in the picture also gets brighter; takes effect next time you start the game. Applies this brightening to every game's plain picture; to use a game's own HDR, turn this off."}},
     {"id": "docked", "type": "choice", "default": "handheld", "scope": "game", "apply": "restart", "platforms": ["ios", "mac"], "group": "display", "ios_key": "S2ADockedMode",
      "options": [{"value": "docked", "label": {"zh-Hans": "主机模式", "en": "Docked"}}, {"value": "handheld", "label": {"zh-Hans": "掌机模式", "en": "Handheld"}}],
      "label": {"zh-Hans": "运行模式", "en": "Console mode"},

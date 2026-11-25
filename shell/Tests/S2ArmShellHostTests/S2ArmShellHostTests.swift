@@ -306,6 +306,15 @@ nonisolated(unsafe) private var lastPlayed = ""
                         patches: [.init(id: "p", title: "T", on: true)], cheats: [.init(id: "f/n", title: "N", note: "fixed", on: false)]))
     // 选「调整位置…」= 打开编辑页，不存值
     #expect(S2ArmGameSettings.apply(id: "G1", setting: "vpadLayout", value: "edit", stores: stores))
+    // S4「SDR 转 HDR」（#625 第二阶段 PR-B）：宿主按款给的 hdrSdrMap 开关在画面组出这一行（值 / 说明照宿主给的），
+    //   改动经宿主 setOption（hdrsdrmap）；宿主没给（老宿主 / 这款读不到）不出——不拿猜的缺省冒充实际状态
+    opts["G1"] = O(fps: .init(on: true, hidden: true), fullscreen: .init(on: false, hidden: true), hdrSdrMap: .init(on: true, note: "SDR note"))
+    opts["G2"] = O(fps: .init(on: false, hidden: true), fullscreen: .init(on: false, hidden: true))   // 没给 hdrSdrMap：不出
+    let s7 = S2ArmGameSettings.sections(for: "G1", stores: stores, state: .init(selected: "default", hasMine: false))
+    #expect(row(s7, "hdrSdrMap")?.value == "on" && row(s7, "hdrSdrMap")?.label == "SDR to HDR" && row(s7, "hdrSdrMap")?.note == "SDR note" && (row(s7, "hdrSdrMap")?.enabled ?? false))
+    #expect(row(S2ArmGameSettings.sections(for: "G2", stores: stores, state: .init(selected: "default", hasMine: false)), "hdrSdrMap") == nil)
+    S2ArmGameSettings.apply(id: "G1", setting: "hdrSdrMap", value: "off", stores: stores)
+    #expect(sets.last == "G1 hdrsdrmap  false")
     _ = opts
 }
 

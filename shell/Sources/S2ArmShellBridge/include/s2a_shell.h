@@ -26,7 +26,7 @@ int s2a_shell_play(const char *game_id);
 void *s2a_shell_library_vc(const char *catalogue_json_path);
 
 // 本款装机阶段（11-07 Duo「游戏没能启动」：库里对资源包不在机上的款仍给 Play；v0.2.3 装机蒙版：传着的款要显示进度）：
-//   s2a_shell_game_install_state：1 就绪 / 2 传完了只等解开 / 3 传输中（推送没完：有 资源包/.transfer 按它画进度，没有按文件改动判传断了）/ 5 外部来源离线（本体是指向游戏来源文件夹的软链接、打不开）/ 0 没有（资源包不在或是空的，库里不显示）。
+//   s2a_shell_game_install_state：1 就绪 / 2 传完了只等解开 / 3 传输中（推送没完：有 资源包/.transfer 按它画进度，没有按文件改动判传断了）/ 5 外部来源离线（本体是指向游戏来源文件夹的软链接、打不开）/ 0 没有本体（资源包不在或是空的，或清单写着本体 game.img 而它不在——两件套导入 .s2arm 先到时就是这样，D-84EQ）：库里显示「需要游戏数据」，玩家删过的不显示。
 //     实现在宿主 ios/app.m（按 Documents/games/<游戏号> 跑 pack_apply.c s2a_game_install_state，同起局导入闸门判据）；本包弱定义缺省 1（Swift 单测不链宿主）
 //   s2a_shell_install_game：库在后台解开阶段 2 的那款，解完宿主调 s2a_shell_refresh；同时只解一款，正在解（或游戏号不对）返回 0。弱缺省 0
 //   s2a_shell_install_progress：正在解的是这款 → 写已解开包数 / 总包数、返回 1；否则 0。弱缺省 0
@@ -115,6 +115,8 @@ void s2a_shell_report_problem(void);
 const char *s2a_shell_cert_status(void);
 void s2a_shell_cert_p12(void);
 void s2a_shell_cert_sidestore(void);
+// 「从 SideStore 获取」给不给：0 = S2Arm 在 LiveContainer 里（切过去会结束 S2Arm、证书回不来，#2226），设置里不出这一项。弱缺省 1
+int s2a_shell_cert_sidestore_ok(void);
 // 库卡片「需要签名证书」的主按钮：这台手机装了 SideStore 走 SideStore 取证书，否则开文件选择器选 .p12（宿主 ios/cert_import.m；弱缺省什么也不做）
 void s2a_shell_cert_get(void);
 /// Instant snapshot (0.6.0): 1 = the game has a complete snapshot to go back to (host ios/app.m; the shell's weak stub says 0).

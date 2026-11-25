@@ -33,6 +33,8 @@
 #include "nvn/nvn_vk_program_result.h"
 #include "nvn/nvn_vk_compute_request.h"
 #include "nvn/nvn_vk_warm_options.h"
+#include "nvn/nvn_vk_cold_asset.h"
+#include "nvn/nvn_vk_cold_guard.h"
 #include "nvn/nvn_vk_prog_warm.h"   // 跨会话程序清单（note / stats；build 与 quiesce 在本文件实现）
 #include <pthread.h>
 #include <stdarg.h>
@@ -113,7 +115,7 @@ static int shader_compile_admit(void) {
     }
 }
 
-struct entry { struct rp_prog prog; int failed; int warm; int warm_hit; uint8_t nowindow_seed; uint8_t numeric_checked; struct s2a_frag_outputs outputs; uint8_t outputs_unknown; uint8_t fact_ok; uint32_t fact_mask[4]; uint8_t res_ok; uint8_t res_key[32]; uint8_t seen; };   // res_key：这份程序的结果合并比对键（结果摘要 / 负载长度 / 阶段数 / c1 的 SHA-256，见 alias_key_hash；结果合并 #1355）；seen：rp_shader_reset 按「同一 entry 只释放一次」去重时的临时标记   // fact_*：结果字节里读出的「编译器实际读了哪些绑定事实」（nvk_shader_fact_cache.h），work_run 里算好，发布后由提交线程入表   // warm：预热带发布；warm_hit：已被真实 draw 采用过一次（验收计数口径）
+struct entry { struct rp_prog prog; int failed; int warm; int warm_hit; uint8_t nowindow_seed; uint8_t nowindow_reused; uint8_t numeric_checked; struct s2a_frag_outputs outputs; uint8_t outputs_unknown; uint8_t fact_ok; uint32_t fact_mask[4]; uint8_t res_ok; uint8_t res_key[32]; uint8_t seen; };   // res_key：这份程序的结果合并比对键（结果摘要 / 负载长度 / 阶段数 / c1 的 SHA-256，见 alias_key_hash；结果合并 #1355）；seen：rp_shader_reset 按「同一 entry 只释放一次」去重时的临时标记   // fact_*：结果字节里读出的「编译器实际读了哪些绑定事实」（nvk_shader_fact_cache.h），work_run 里算好，发布后由提交线程入表   // warm：预热带发布；warm_hit：已被真实 draw 采用过一次（验收计数口径）
 static nvn_hmap g_progs = {.klen = 32};   // 内容身份（SHA-256）→ struct entry *。结果合并后，同一份结果的多个身份指向同一个 entry（拥有者只有一个，见 rp_shader_reset）
 // 结果合并（#1355）：比对键（见 alias_key_hash：缓存文件头里的结果摘要 + 负载长度 + 阶段数 + c1）→ struct entry *（只借用；g_progs_mu 下读写；整表随 rp_shader_reset 清）。
 // 同一份编译结果的不同身份共用一个 entry（一份着色器句柄，管线缓存按句柄比，所以管线也合并）。缺省打开；debug.s2a.nvk_alias=0 关闭（只有调试包读，出包版恒走缺省）。
@@ -219,6 +221,10 @@ static uint64_t mono_ms(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONI
 static void entry_free(struct entry *e) {
     if (!e) return;
     for (int st = 0; st < RP_PROG_STAGES; st++) if (e->prog.sh[st]) { nvn_gpu_shader_release(e->prog.sh[st]); e->prog.sh[st] = NULL; }
+    if (e->prog.cold) {
+        nvn_gpu_shader_release(e->prog.cold->fragment);
+        free((void *)e->prog.cold);
+    }
     for (int st = 0; st < RP_PROG_STAGES; st++) free((void *)e->prog.c1[st]);
     free(e);
 }
@@ -604,6 +610,7 @@ struct img_miss { uint8_t why; int32_t id; uint32_t handle, fmt, target, layers;
 struct facts {
     struct s2a_compile_graphics_src gfx;
     uint32_t color_writes; // channel masks of bound attachments only
+    int unused_unaligned_ssbo;  // 旧口径有非对齐绑定，槽证明后才清掉
     struct s2a_compile_texture_src tex[S2A_COMPILE_TEXTURE_MAX]; int ntex;
     char tfmt[S2A_COMPILE_TEXTURE_MAX][S2A_TEX_FORMAT_MAX], tsmp[S2A_COMPILE_TEXTURE_MAX][S2A_TEX_SAMPLER_MAX];
     uint32_t ubo_use[6];
@@ -737,7 +744,7 @@ static uint64_t ubo_fact_sig(int st) {
 }
 
 static int depth_clip_cap(void);
-static void gfx_ssbo_align(const struct rp_shader_req *q, const struct s2a_direct_compile_context *pc, int nst, int count, int *any, int *un);
+static int gfx_ssbo_align(const struct rp_shader_req *q, const struct s2a_direct_compile_context *pc, int nst, int count, int *any, int *un);
 static void fill_facts(const struct rp_shader_req *q, const struct s2a_direct_compile_context *pc, struct facts *f, int nst) {
     memset(f, 0, sizeof *f);
     struct s2a_compile_graphics_src *g = &f->gfx;
@@ -761,7 +768,7 @@ static void fill_facts(const struct rp_shader_req *q, const struct s2a_direct_co
     // 参考值是绘制时的状态（OP_ALPHA_REF）。测试没开（函数是 ALWAYS）时固定给 0：不让同一个程序因为一个用不到的数拆成多份
     g->has_alpha_test_reference = 1; g->alpha_test_reference = rp_S.color.alpha_func >= 1 && rp_S.color.alpha_func <= 7 ? rp_S.alpha_ref : 0.0f;
     int any_ssbo = 0, unaligned = 0;
-    gfx_ssbo_align(q, pc, nst, 1, &any_ssbo, &unaligned);   // 非对齐只看这个程序真用到的槽（口径见 gfx_ssbo_align）；input_sig 读同一份答案
+    f->unused_unaligned_ssbo = gfx_ssbo_align(q, pc, nst, 1, &any_ssbo, &unaligned);   // 非对齐只看这个程序真用到的槽（口径见 gfx_ssbo_align）；input_sig 读同一份答案
     if (!any_ssbo || pc->storage_buffer_offset_alignment) { g->has_unaligned_ssbo = 1; g->unaligned_ssbo = unaligned; }
     for (int i = 0; i < 32; i++) g->attribute_types[i] = num_type(i < rp_S.nattr && i < 16 ? rp_S.attr[i].fmt : 0, 1);
     for (int i = 0; i < 8; i++) g->fragment_output_types[i] = i < q->rt_count && q->rt_format[i] ? num_type(q->rt_format[i], 0) : "Float";
@@ -1049,6 +1056,65 @@ failed:
 }
 #endif
 
+// Android APK AssetManager 在隔离宿主用例里没有实现。
+int s2a_android_read_native_asset(const char *, size_t, void **, size_t *) __attribute__((weak));
+int nvn_vk_cold_guard_mode(void) __attribute__((weak));
+int nvn_vk_cold_shader_digest(nvn_gpu_shader, uint8_t[32]) __attribute__((weak));
+
+static void load_cold_fragment(struct rp_prog *p, const nvn_gpu_shader_src *source) {
+    if (!s2a_android_read_native_asset || !nvn_vk_cold_guard_mode || !nvn_vk_cold_shader_digest) return;
+    const int mode = nvn_vk_cold_guard_mode();
+    if (!mode) return;
+    uint8_t original_sha[32], raw_sha[32];
+    if (!nvn_vk_cold_shader_digest(p->sh[NVN_GPU_SH_FS], original_sha)) return;
+    cold_asset_digest(source->blob, source->bytes, raw_sha);
+    if (memcmp(original_sha, raw_sha, sizeof raw_sha)) return;  // backend rewrote the module
+    char identity[65], path[96];
+    s2a_sha256_hex(p->identity, identity);
+    snprintf(path, sizeof path, "s2a-cold-guard-v1/%s.bin", identity);
+    void *buf = NULL;
+    size_t bytes = 0;
+    if (!s2a_android_read_native_asset(path, COLD_ASSET_MAX, &buf, &bytes)) return;
+    struct nvk_cold_asset file;
+    if (!nvk_cold_asset_parse(buf, bytes, p->identity, original_sha, source->layout, &file)) {
+        free(buf);
+        return;
+    }
+    struct rp_cold_proof *cold = calloc(1, sizeof *cold);
+    if (!cold) { free(buf); return; }
+    nvn_gpu_shader_src variant = *source;
+    if (mode == 1) {
+        variant.blob = file.variant;
+        variant.bytes = file.variant_size;
+    }
+    const uint8_t *expected_sha = mode == 1 ? file.variant_sha : original_sha;
+    nvn_gpu_err err = {0};
+    uint8_t variant_sha[32];
+    if (nvn_gpu_ok(nvn_gpu_shader_load(&variant, &cold->fragment, &err)) &&
+        nvn_vk_cold_shader_digest(cold->fragment, variant_sha) &&
+        !memcmp(variant_sha, expected_sha, sizeof variant_sha)) {
+        memcpy(cold->variant_sha, variant_sha, sizeof variant_sha);
+        cold->fragment_ent = file.recipe.fragment_ent;
+        cold->first_word = file.recipe.first_word;
+        cold->stride_words = file.recipe.stride_words;
+        cold->count = file.recipe.count;
+        cold->prefix_ent = file.recipe.prefix_ent;
+        cold->prefix_byte = file.recipe.prefix_byte;
+        cold->prefix_mask = file.recipe.prefix_mask;
+        p->cold = cold;
+        char original[65], modified[65], line[272];
+        s2a_sha256_hex(original_sha, original);
+        s2a_sha256_hex(variant_sha, modified);
+        snprintf(line, sizeof line, "nvk-cold-guard asset mode=%d program=%s original=%s variant=%s",
+                 mode, identity, original, modified);
+        nvn_plat_log(NVN_PLAT_LOG_INFO, "shader", line);
+    } else {
+        if (cold->fragment) nvn_gpu_shader_release(cold->fragment);
+        free(cold);
+    }
+    free(buf);
+}
+
 // lib = 这份结果字节来自出包预编库（shader_src.precompiled=1）：装载闸对表外声明按拒收，
 //   调用方照旧 mark_bad 退回现编。离线库 / 跨局缓存 / 现编结果传 0。
 static _Atomic uint64_t g_lp_link_refused;   // 出包预编程序因两段接口对不上退回现编的份数（本局）
@@ -1146,6 +1212,7 @@ static struct entry *build(const uint8_t *bytes, size_t len, const struct s2a_so
         nvn_gpu_err err = {0};
         nvn_gpu_rc lr = nvn_gpu_shader_load(&src, &e->prog.sh[st], &err);
         if (!nvn_gpu_ok(lr)) { red_load(lr, &src, "shader_load_failed", err.why); e->failed = 1; }
+        else if (st == NVN_GPU_SH_FS && nst == 2) load_cold_fragment(&e->prog, &src);
         prog_c1_take(&e->prog, st, views[st].c1, views[st].c1_bytes);
     }
     nvn_vk_program_free(&fp);
@@ -1507,7 +1574,7 @@ static void lp_gate_probe(const struct work_snap *s) {
 //   用到的槽取自出包预编库里这个阶段键的 _b.json（s2a_libpack_stage_sbuf_slots）。任何一段说不准（库里没有这个键 / 读不出 / 有别的存储种类 /
 //   几何输入图元没有那一份 / 这一段的 SPIR-V 带 PhysicalStorageBufferAddresses 能力（按地址直接访问内存，不经槽）/ 库被关掉）就退回旧口径——不猜。
 //   只有真有非对齐绑定的阶段才查：这个阶段的绑定全对齐，它用哪些槽都不受影响。
-//   用到的槽是阶段键的函数（同键同槽集），哪些槽对齐则进了程序身份的事实位，所以「身份」仍然唯一决定「这一笔该用现编码还是库件」。
+//   槽集按阶段键取，归一后的非对齐位进编译身份。快路还记是否因槽证明清位，以区分旧种采用和真正对齐。
 //   只在旧口径说「有非对齐」时才查（其余情形答案本来就是「没有」）。开关 debug.s2a.nvk_lp_used_slots 缺省关（= 旧口径，玩家包就是这样）；
 //   调试包设 1 才走新口径。缺省开要等 Mali 9000 / 9400 整局零致命读数到齐（#2145 条件 (c)）。
 // 提交线程独占（同 g_comb_sig 的约定）：缓存不加锁；读库那一下在 g_lp_mu 下（和工作线程共用容器句柄）。
@@ -1575,7 +1642,8 @@ static int ssbo_used_slots_on(void) {
 }
 // any = 阶段 0..4 里有没有绑过存储缓冲；un = 这个程序的编译结果会不会受存储缓冲非对齐影响（口径见上）。
 // nst = 程序的图形阶段数（vs / vs+fs / vs+fs+gs），阶段号即 NVN 阶段号；count 非 0 时记读数（只有 fill_facts 记）。
-static void gfx_ssbo_align(const struct rp_shader_req *q, const struct s2a_direct_compile_context *pc, int nst, int count, int *any_out, int *un_out) {
+// 返回 1 表示非对齐位因槽证明而清除，前台用它区分真正对齐的请求。
+static int gfx_ssbo_align(const struct rp_shader_req *q, const struct s2a_direct_compile_context *pc, int nst, int count, int *any_out, int *un_out) {
     const uint32_t al = pc->storage_buffer_offset_alignment;
     int any = 0, un = 0; uint32_t um[5] = {0, 0, 0, 0, 0};   // um[阶段]：这个阶段上地址非 0 又不对齐的槽位集合
     for (int st = 0; st < 5; st++) for (int i = 0; i < 16; i++) if (rp_S.ssbo[st][i].addr) {
@@ -1583,6 +1651,7 @@ static void gfx_ssbo_align(const struct rp_shader_req *q, const struct s2a_direc
         if (al && rp_S.ssbo[st][i].addr % al) { un = 1; um[st] |= 1u << i; }
     }
     *any_out = any;
+    const int was_unaligned = un;
     if (un && ssbo_used_slots_on()) {
         int used_unaligned = 0, unknown = 0, by_addr = 0;
         for (int st = 0; st < nst && st < 3 && !used_unaligned && !unknown; st++) {
@@ -1604,6 +1673,7 @@ static void gfx_ssbo_align(const struct rp_shader_req *q, const struct s2a_direc
         }
     }
     *un_out = un;
+    return was_unaligned && !un;
 }
 // 读数一行（与「状态闸」同一节拍；没有一份「旧口径说有非对齐」的新程序就不打）：返回 0 = 没有读数。
 static uint64_t lp_ssbo_text(char *b, size_t bn) {
@@ -1792,6 +1862,8 @@ static int live_worker(void *ctx, uint64_t session, uint64_t generation, const c
 }
 
 enum live_status { LIVE_OK, LIVE_REJECTED, LIVE_PENDING, LIVE_ABORT };
+uint64_t nvk_shader_live_compile_total(void) { return atomic_load_explicit(&g_n_compiled,memory_order_relaxed); }
+
 void rp_shader_live_compile_take(struct rp_shader_live_compile_stats *s) {
     s->enqueued = atomic_exchange_explicit(&g_live_enqueued, 0, memory_order_relaxed);
     s->wait_ns = atomic_exchange_explicit(&g_live_wait_ns, 0, memory_order_relaxed);
@@ -2377,7 +2449,9 @@ static uint64_t input_sig(const struct rp_shader_req *q, const struct s2a_direct
     MIX(rp_S.ms.a2c ? 1 : 0); MIX(rp_S.ms.a2c_dither ? 1 : 0);
     { int dual = 0; for (int i = 0; i < 8; i++) if (src1(rp_S.blend[i].src_rgb) || src1(rp_S.blend[i].dst_rgb) || src1(rp_S.blend[i].src_a) || src1(rp_S.blend[i].dst_a)) dual = 1; MIX(dual); }
     MIX(rp_depth_zero()); MIX(rp_origin_lower_left()); MIX(pc->shader_draw_parameters);
-    { int any = 0, un = 0; gfx_ssbo_align(q, pc, stages == 7u ? 3 : stages == 3u ? 2 : 1, 0, &any, &un); MIX(any); MIX(un); MIX(pc->storage_buffer_offset_alignment); }   // 与 fill_facts 同一份答案（快路摘要不许和程序身份各算各的）
+    { int any = 0, un = 0;
+      const int unused = gfx_ssbo_align(q, pc, stages == 7u ? 3 : stages == 3u ? 2 : 1, 0, &any, &un);
+      MIX(any); MIX(un | (unused << 1)); MIX(pc->storage_buffer_offset_alignment); }   // 真对齐与未用槽放行可能选用不同程序
     MIX(rp_S.nattr); for (int i = 0; i < 16; i++) MIX(i < rp_S.nattr ? rp_S.attr[i].fmt : 0);
     for (int st = 0; st < 3; st++) if (stages & (1u << st)) { uint32_t m = 0; for (int i = 0; i < 16; i++) if (rp_S.ubo[st][i].size) m |= 1u << i; MIX(m); }
     MIX(rp_S.tex_pool_n); MIX(rp_S.samp_pool_n); MIX(rp_S.tf_on); MIX(rp_S.tex_base);
@@ -2521,8 +2595,8 @@ static struct entry *alias_try_fg(const uint8_t sha[32], const struct s2a_input_
 // 清单里这条就永远 c1_ok=0；下一局预热按它建出来的程序也 c1_ok=0，而 rp_draw 对带 C1 绑定的绘制
 // （火把/粒子等用 BRX 跳表的着色器）直接跳过 → 光消失、画面发黑。程序对象里就有 c1，直接抄过来即可。
 // 「已发布命中」与「结果合并命中」（#1355）共用这一份。
-static void prog_note_use(const uint8_t sha[32], uint32_t stages, int nst, const struct s2a_input_identity *id, const struct facts *f, const struct rp_prog *prog) {
-    struct nvk_prog_rec rec; memset(&rec, 0, sizeof rec); memcpy(rec.identity, sha, 32); rec.stage_mask = stages; rec.lp_ok = libpack_state_ok(&f->gfx) ? 2 : 0;
+static void prog_note_use(const uint8_t sha[32], uint32_t stages, int nst, const struct s2a_input_identity *id, const struct rp_prog *prog) {
+    struct nvk_prog_rec rec; memset(&rec, 0, sizeof rec); memcpy(rec.identity, sha, 32); rec.stage_mask = stages; rec.lp_ok = libpack_state_ok(id->gfx) ? 2 : 0;
     for (int st = 0; st < nst; st++) memcpy(rec.keys[st], id->keys[st], 8);
     for (int st = 0; st < nst; st++)
         if (prog->c1_ok & (1u << st)) (void)rec_c1_put(&rec, st, prog->c1[st], prog->c1_len[st]);
@@ -2541,6 +2615,54 @@ static void prog_note_use(const uint8_t sha[32], uint32_t stages, int nst, const
     }
     nvk_prog_warm_note(&rec);
     for (int st = 0; st < RP_PROG_STAGES; st++) if (held[st]) s2a_source_release(v[st].ref);
+}
+
+// 暖种的 c1 来自清单。采用前把清单带的整段与本笔源快照核对；缺少必需 c1 的种子在发布前已拒收。
+static int nowindow_c1_matches(const struct rp_prog *prog, const struct s2a_input_identity *id, int nst) {
+    for (int st = 0; st < nst; st++) {
+        if (!(prog->c1_ok & (1u << st))) continue;
+        struct s2a_source_entry_view src;
+        if (!s2a_source_acquire(id->keys[st], &src)) return 0;
+        const int same = src.complete && !memcmp(src.content_sha, id->source_sha[st], 32) &&
+            src.c1 && src.c1_bytes == prog->c1_len[st] && !memcmp(src.c1, prog->c1[st], src.c1_bytes);
+        s2a_source_release(src.ref);
+        if (!same) return 0;
+    }
+    return 1;
+}
+
+// 槽证明只改了一个编译事实。随包 nowindow 程序及管线仍按旧的保守身份预建，
+// 用同一快照恢复该位即可定位整份旧身份。前台先遇、旧种尚未就绪时，照旧走归一身份。
+static const struct rp_prog *nowindow_for_unused_ssbo(const struct s2a_input_identity *id, const uint8_t sha[32],
+        int nst, uint8_t idbuf[S2A_INPUT_IDENTITY_MAX]) {
+    struct s2a_compile_graphics_src gfx = *id->gfx;
+    gfx.unaligned_ssbo = 1;
+    struct s2a_input_identity old = *id;
+    old.gfx = &gfx;
+    size_t len;
+    uint8_t old_sha[32];
+    if (s2a_input_identity_encode(&old, idbuf, S2A_INPUT_IDENTITY_MAX, &len)) return NULL;
+    sha256(idbuf, len, old_sha);
+
+    // 真对齐的请求仍可单独发布归一身份。这个槽情形一旦采用旧种，就保留该选择，避免后来另一次描述命中而换管线。
+    const struct rp_prog *alias = nvn_hm_get(&g_fact_aliases, sha);
+    pthread_mutex_lock(&g_progs_mu);
+    struct entry *seed = progs_get_locked(old_sha);
+    const int reused = seed && seed->nowindow_reused;
+    const int eligible = seed && seed->nowindow_seed && !seed->failed && !seed->prog.lib_sourced &&
+        !memcmp(seed->prog.identity, old_sha, sizeof old_sha) &&
+        (reused || (!progs_get_locked(sha) && !inflight_find_locked(sha) && (!alias || alias->lib_bad)));
+    pthread_mutex_unlock(&g_progs_mu);
+    if (!eligible || (!reused && !nowindow_c1_matches(&seed->prog, &old, nst))) return NULL;
+
+    int adopted;
+    pthread_mutex_lock(&g_progs_mu);
+    seed->nowindow_reused = 1;
+    (void)progs_get_adopted_locked(old_sha, NULL, &adopted);
+    pthread_mutex_unlock(&g_progs_mu);
+    if (adopted) note_warm_adoption(seed, old_sha);
+    prog_note_use(old_sha, old.stage_mask, nst, &old, &seed->prog);
+    return &seed->prog;
 }
 
 // [提交线程] 三段式的第二、三段：先查已发布与在途（不重复准备），否则捕获快照 → 工作 → 发布。
@@ -2570,6 +2692,11 @@ static int resolve_candidate(const struct rp_shader_req *q, const struct rp_prog
     sha256(idbuf, idlen, sha);
     idg_note_ident(group, sha);   // 身份粒度诊断：这份身份第一次被用到（group=0 时空转）
 
+    if (f->unused_unaligned_ssbo) {
+        *out = nowindow_for_unused_ssbo(&id, sha, nst, idbuf);
+        if (*out) return 0;
+    }
+
     // 1) 已发布：直接命中。命中路径只多一次锁和一次热点 ++（不填快照、不 pin 源）。
     int e_failed = 0, e_adopted = 0;
     pthread_mutex_lock(&g_progs_mu);
@@ -2580,7 +2707,7 @@ static int resolve_candidate(const struct rp_shader_req *q, const struct rp_prog
     if (e) {
         if (e_failed) return -1;
         *out = &e->prog;
-        prog_note_use(sha, stages, nst, &id, f, &e->prog);
+        prog_note_use(sha, stages, nst, &id, &e->prog);
         return 0;
     }
     // 1b) 事实复用（#1187）：编译器只读了一部分绑定事实，事实相同的另一份身份可以直接用同一个程序。
@@ -2605,7 +2732,7 @@ static int resolve_candidate(const struct rp_shader_req *q, const struct rp_prog
             // 与下面「正常发布后」同一处登记：合并命中的身份也进事实复用表。否则只靠前台建过的程序登记事实，合并之后前台几乎不建了，
             // 「只差编译器没读的贴图事实」的新身份（盘上没有它的文件）就失去复用、退回现场编（真机一局 3 → 198 次）。
             if (reusable && ae->fact_ok) fact_cache_keep_mask(&id, fact_base, ae->fact_mask, &ae->prog);
-            prog_note_use(sha, stages, nst, &id, f, &ae->prog);
+            prog_note_use(sha, stages, nst, &id, &ae->prog);
             prog_tally_log();
             return 0;
         }

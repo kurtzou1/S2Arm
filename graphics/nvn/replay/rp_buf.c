@@ -161,6 +161,10 @@ static int log_arm(struct shadow *s, struct mirror *m) {
 }
 // 日志不可用且重建不了：这份镜像改走逐页路径（synced 一直按同步时刻记着，逐页路径接得上；checked 没维护，关掉它的快路一次）
 static void log_drop(struct mirror *m) { free(m->stale); free(m->stale_sum); m->stale = m->stale_sum = NULL; m->path = MP_PLAIN; m->seen_ok = 0; }
+// 弱链接[replay]：nvn_vk_cold_mirror_track
+// 弱链接[replay]：nvn_vk_cold_mirror_host_write
+void nvn_vk_cold_mirror_track(nvn_gpu_buf) __attribute__((weak));
+void nvn_vk_cold_mirror_host_write(nvn_gpu_buf, uint64_t, uint64_t) __attribute__((weak));
 static int mirror_make(struct shadow *s, int i) {
     struct mirror *m = &s->m[i];
     nvn_gpu_buf b = NULL; nvn_gpu_err err = {0};
@@ -176,6 +180,7 @@ static int mirror_make(struct shadow *s, int i) {
             nvn_plat_log(NVN_PLAT_LOG_RED, "gpu", t); }
         return 0; }
     m->buf = b;
+    if (nvn_vk_cold_mirror_track) nvn_vk_cold_mirror_track(b);
     rp_perf_add(RP_PERF_MIRROR_N, 1);
     m->synced = calloc(s->npages ? s->npages : 1, sizeof *m->synced);
     m->sub = calloc(s->npages ? s->npages : 1, sizeof *m->sub);
@@ -288,9 +293,11 @@ static void sync_write(nvn_gpu_cmd xc, uint8_t *direct, struct shadow *s, struct
             if (g0 <= a && a < g1) { inside = 1; if (g1 > skip_to) skip_to = g1; }
             else if (g0 > a && g0 < stop) stop = g0; }
         if (inside) { a = skip_to; continue; }
+        const uint64_t begin = a;
         if (direct) memcpy(direct + a, s->mem + a, (size_t)(stop - a));
         else nvn_gpu_buf_write(xc, m->buf, a, s->mem + a, stop - a);
         a = stop;
+        if (direct && nvn_vk_cold_mirror_host_write) nvn_vk_cold_mirror_host_write(m->buf, begin, stop - begin);
     }
 }
 
@@ -376,7 +383,34 @@ static void land_restale(struct shadow *s, int mi, uint64_t off, uint64_t len) {
     const uint64_t lo = (uintptr_t)(s->mem + off) - s->page0;
     stale_set(m, lo / ps, (lo + len - 1) / ps);
 }
-void rp_buf_gpu_write_land(uint64_t pool_key, uint64_t id, int ok) {   // 线程：[完成回调]
+// refs 按池和登记号排序。同一池只走一趟账本；已合并撤销的登记留空。
+void rp_buf_gpu_write_snapshot(const struct rp_gpu_write_ref *refs, uint32_t count, nvn_gpu_readback_span *spans) {
+    for (uint32_t first = 0; first < count;) {
+        const uint64_t key = refs[first].pool_key;
+        uint32_t end = first + 1;
+        while (end < count && refs[end].pool_key == key) end++;
+        pthread_mutex_lock(&g_bmu);
+        const struct shadow *s = nvn_hm_get(&g_shadow, &key);
+        for (int i = 0; s && i < s->ngw; i++) {
+            const struct gpu_write *w = &s->gw[i];
+            if (w->sub != rp_sub_serial() || w->landing) continue;
+            uint32_t lo = first, hi = end;
+            while (lo < hi) {
+                const uint32_t mid = lo + (hi - lo) / 2;
+                if (refs[mid].id < w->id) lo = mid + 1;
+                else hi = mid;
+            }
+            if (lo < end && refs[lo].id == w->id)
+                spans[refs[lo].index] = (nvn_gpu_readback_span){s->m[w->mi].buf, w->off, w->len, UINT64_MAX};
+        }
+        pthread_mutex_unlock(&g_bmu);
+        first = end;
+    }
+}
+void rp_buf_gpu_write_land(uint64_t pool_key, uint64_t id, int ok) {
+    rp_buf_gpu_write_land_from(pool_key, id, ok, NULL);
+}
+void rp_buf_gpu_write_land_from(uint64_t pool_key, uint64_t id, int ok, const uint8_t *staged) {   // 线程：[完成回调]
     // 登记保留到锁外拷贝结束：同步和镜像选择都必须避开尚未完整落地的区间。
     // 锁内只标记正在拷，13 MB 的拷贝放到锁外做：这一段原来持锁拷贝，
     // 与提交线程的缓冲解析抢同一把锁，重叠档实测「锁等待」11.1–21.2 毫秒/帧（见坑记录续 25）。
@@ -384,8 +418,9 @@ void rp_buf_gpu_write_land(uint64_t pool_key, uint64_t id, int ok) {   // 线程
     pthread_mutex_lock(&g_bmu);
     s = nvn_hm_get(&g_shadow, &pool_key);
     if (s) for (int i = 0; i < s->ngw; i++) if (s->gw[i].id == id && !s->gw[i].landing) {
-        src = ok ? nvn_gpu_buf_cpu(s->m[s->gw[i].mi].buf) : NULL;
         mem = s->mem; off = s->gw[i].off; len = s->gw[i].len; wmi = s->gw[i].mi;
+        const uint8_t *mirror = ok && !staged ? nvn_gpu_buf_cpu(s->m[wmi].buf) : NULL;
+        if (ok) src = staged ? staged : (mirror ? mirror + off : NULL);
         rp_perf_add(RP_PERF_LAND_N, 1); rp_perf_add(RP_PERF_LAND_KB, len / 1024);
         s->gw[i].landing = 1; found = 1;
         s->landing++;
@@ -395,9 +430,9 @@ void rp_buf_gpu_write_land(uint64_t pool_key, uint64_t id, int ok) {   // 线程
     if (!found) return;
 #ifdef S2A_GPU_LAND_TEST
     extern void rp_test_land_copy(void *, const void *, size_t);
-    if (src) rp_test_land_copy((uint8_t *)(uintptr_t)(mem + off), src + off, (size_t)len);
+    if (src) rp_test_land_copy((uint8_t *)(uintptr_t)(mem + off), src, (size_t)len);
 #else
-    if (src) memcpy((uint8_t *)(uintptr_t)(mem + off), src + off, (size_t)len);   // 游戏内存是真值：GPU 的结果回到它那里
+    if (src) memcpy((uint8_t *)(uintptr_t)(mem + off), src, (size_t)len);   // 游戏内存是真值：GPU 的结果回到它那里
 #endif
     pthread_mutex_lock(&g_bmu);
     for (int i = 0; i < s->ngw; i++) if (s->gw[i].id == id) { s->gw[i] = s->gw[--s->ngw]; break; }

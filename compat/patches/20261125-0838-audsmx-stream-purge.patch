@@ -1,0 +1,81 @@
+diff --git a/src/Ryujinx.Horizon/Sdk/Audio/Detail/AudioSystemMixer.cs b/src/Ryujinx.Horizon/Sdk/Audio/Detail/AudioSystemMixer.cs
+index a3e519e51366b1ec6c597fbdc5181636f093939a..310722bf8e9f00335fe6ee41ecf599a0471732fd 100644
+--- a/src/Ryujinx.Horizon/Sdk/Audio/Detail/AudioSystemMixer.cs
++++ b/src/Ryujinx.Horizon/Sdk/Audio/Detail/AudioSystemMixer.cs
+@@ -48,6 +48,7 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+         AudioEvent DataEvent { get; set; }
+         void Open(StreamFormat format, int frameCount);
+         void SetGain(float gain, long fadeNs);
++        int Purge(int frameCount);
+         void Attach();
+         void Detach();
+         void Close();
+@@ -216,6 +217,32 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+         }
+ 
+         // SetGain：从此刻的增益起，fadeNs 内线性走到 gain（0 = 立即）。客户端（sysmix::SetStreamGain）已限定 0 ≤ gain ≤ 128、fade ≤ 5 秒
++        // 清掉还没播的帧（IExternalStreamSession 11 PurgeStream）：读指针推到客户端写指针（frameCount = 0 全清，否则至多清这么多），
++        //   已交给宿主、还没播完的块一并作废（同 Detach），回写读指针、触发数据事件；返回清掉的帧数
++        public int Purge(int frameCount)
++        {
++            lock (_lock)
++            {
++                if (_attached)
++                {
++                    CollectReleased();
++                    _output.FlushBuffers();
++                    _output.GetReleasedBuffer(_released, out _);
++                    _inFlight.Clear();
++                }
++
++                uint write = _memory.Read<uint>(Buffer + ClientBlockOffset + IndexOffset);
++                int filled = write < (uint)_capacity ? ((int)write - _read + _capacity) % _capacity : 0;
++                int purged = frameCount > 0 ? Math.Min(frameCount, filled) : filled;
++                _read = (_read + purged) % _capacity;
++                _queued = _read;
++                _memory.Write(Buffer + ServerBlockOffset + IndexOffset, (uint)_read);
++                DataEvent?.Signal();
++
++                return purged;
++            }
++        }
++
+         public void SetGain(float gain, long fadeNs)
+         {
+             lock (_lock)
+@@ -502,6 +529,12 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+             }
+         }
+ 
++        // 输入流的清空在客户端本地推读指针（PurgeInputStream），不走 IPC；真走到这里语义不知道，报红
++        public int Purge(int frameCount)
++        {
++            throw new NotImplementedException($"audsmx:u IExternalStreamSession 11（输入流）：清 {frameCount} 帧（输入流清空在客户端本地做，不该走到这里）");
++        }
++
+         // 输入流的 SetGain：SDK 里只见输出流调（OutputStreamImpl::SetGain → sysmix::SetStreamGain）；输入流语义不知道，报红
+         public void SetGain(float gain, long fadeNs)
+         {
+@@ -859,6 +892,22 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+             return Result.Success;
+         }
+ 
++        // 11 PurgeStream：in s32 帧数 @0（OutputStreamImpl::Purge 传 0 = 全清）；out s32 清掉的帧数 @0。sysmix::PurgeStream → PurgeStreamImpl
++        //   经代理 vtable +0x78 发（Switch 2 sdk 反汇编：0x26e390，vtable 偏移 = 0x20 + 8 × 命令号，与命令 4 的 +0x40、命令 7 的 +0x58 同一规律）；
++        //   客户端核「0 ≤ 清掉 ≤ 帧数（0 时按环容量）」，不符就 Abort。原先未实现、回错，游戏中止（D-BPWY）
++        [CmifCommand(11)]
++        public Result PurgeStream(out int purgedFrames, int frameCount)
++        {
++            if (!_impl.IsOpen || frameCount < 0)
++            {
++                throw new NotImplementedException($"audsmx:u IExternalStreamSession 11：{(_impl.IsOpen ? $"帧数 {frameCount} 为负" : "流没打开")}（不知道真机回哪个结果码）");
++            }
++
++            purgedFrames = _impl.Purge(frameCount);
++
++            return Result.Success;
++        }
++
+         // 8 ReleaseStreamDataEvent：无入参，只回结果码
+         [CmifCommand(8)]
+         public Result ReleaseStreamDataEvent()

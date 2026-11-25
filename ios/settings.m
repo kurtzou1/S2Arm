@@ -66,7 +66,8 @@ NSArray *s2a_ios_per_game_keys(void) {
              @"S2AFps60Manual", @"S2ADockedMode", @"S2ACommunityPatches", @"S2AWidescreenAsked", @"S2AFps60Asked", @"S2AFpsNative60", @"S2AFpsPick", S2AGameLanguageKey, @"S2AFrameInterp", @"S2AGameVolume",
              @"S2AAudioDevice", @"S2AAudioVsSpeakers", @"S2AAudioVsHeadphones",   // 输出设备类型 + 两个虚拟环绕开关（#189 后续，5.1 虚拟环绕第二片，按游戏存）
              @"S2AKeyboardMap",   // 外接键盘键位（ios/keyboard_settings.m，#1869）：按款存，同 Mac 启动器每款一份 input.json
-             @"S2AMouseOff"];     // 改键页「使用鼠标 / 触控板」关掉（#2072）：按款存，同键位一起设为所有游戏的默认
+             @"S2AMouseOff",     // 改键页「使用鼠标 / 触控板」关掉（#2072）：按款存，同键位一起设为所有游戏的默认
+             @"S2AHdrSdrMap"];    // S4「SDR 转 HDR」按款开关（#625 第二阶段 PR-B，评审终稿：只放游戏库每款设置页）：按款存（缺省关 = 字节级回现状，起局只转玩家明确拨过的开 1 / 关 0——不联动 S2A_HDR）
 }
 NSArray<NSString *> *s2a_ios_game_languages(void) {
     return @[@"system", @"SimplifiedChinese", @"TraditionalChinese", @"AmericanEnglish", @"BritishEnglish", @"Japanese", @"Korean", @"French", @"CanadianFrench", @"German",
@@ -223,6 +224,14 @@ void s2a_ios_set_fps60_for(NSString *gid, BOOL on) {
     [d setBool:on forKey:@"S2AFps60"]; [d setBool:on forKey:@"S2AFps60Manual"];
 }
 BOOL s2a_ios_fps60_on(void) { return s2a_ios_fps60_on_for(current_gid()); }
+
+// S4「SDR 转 HDR」（#625 第二阶段 PR-B，按款存 S2AHdrSdrMap，评审终稿）：缺省关（没拨过 = 字节级回现状——末帧扩张不生效）；
+//   读写照 S2AFps60 的读写族形态（游戏库每款设置页行经它；起局翻译在 s2a_ios_apply_graphics_settings 只落 S2A_HDR_SDR_MAP，
+//   不联动 S2A_HDR——终稿口径：PQ 层载体由引擎侧层视角开关（nvn2_hdr_layer_sw）补，vi 答询照玩家 S2A_HDR 口径回答）
+BOOL s2a_ios_hdr_sdr_map_on_for(NSString *gid) { return [s2a_ios_settings_defaults_for(gid) boolForKey:@"S2AHdrSdrMap"]; }
+void s2a_ios_set_hdr_sdr_map_for(NSString *gid, BOOL on) { [s2a_ios_settings_defaults_for(gid) setBool:on forKey:@"S2AHdrSdrMap"]; }
+BOOL s2a_ios_hdr_sdr_map_on(void) { return s2a_ios_hdr_sdr_map_on_for(current_gid()); }
+void s2a_ios_set_hdr_sdr_map(BOOL on) { s2a_ios_set_hdr_sdr_map_for(current_gid(), on); }
 // 补帧开关（按游戏存，S2AFrameInterp；没设过 = 开）：有社区帧率补丁时补帧自己让路（runtime/src/fps.c s2a_fps_source），开关不用管
 // 补帧开不开（11-15 维护者：帧率解锁一个开关——有社区帧率补丁用补丁，没有就用补帧）：帧率解锁明确关（S2AFps60 = NO）= 回游戏原帧率，补帧也关；
 //   没选过 / 开着 = 补帧照今天缺省开（补丁开着时补帧每帧让路，nvn_present_fi.inc fi_wanted）。旧的单独「补帧」开关（S2AFrameInterp）关过的照旧关
@@ -513,6 +522,17 @@ void s2a_ios_apply_graphics_settings(NSUserDefaults *defaults) {
         if (pick) {
             apply_environment("S2A_FPS60", pick);
             fprintf(stderr, "[S2A 画面设置] S2A_FPS60=%s（玩家选了 60 帧%s）\n", pick.UTF8String, [pick isEqualToString:@"1"] ? "开" : "关");
+        }
+    }
+    // S4「SDR 转 HDR」（#625 第二阶段 PR-B，评审终稿；按款存 S2AHdrSdrMap，读写族见上）：只转玩家明确拨过的（开 1 / 关 0，
+    //   没拨过不写——缺省关，字节级回现状）；启动环境显式给的优先（同 60 帧块口径）。不联动 S2A_HDR——终稿口径：
+    //   PQ 层载体由引擎侧层视角开关（nvn2_hdr_layer_sw：S4 开而玩家 S2A_HDR 未设 ⇒ 层按 auto 进/持 PQ）补，
+    //   vi 答询照玩家 S2A_HDR 口径回答（off 恒不答 on=1）；玩家自己设了 S2A_HDR=auto/on 时以玩家为准
+    if (!getenv("S2A_HDR_SDR_MAP")) {
+        NSString *pick = [defaults objectForKey:@"S2AHdrSdrMap"] ? ([defaults boolForKey:@"S2AHdrSdrMap"] ? @"1" : @"0") : nil;
+        if (pick) {
+            apply_environment("S2A_HDR_SDR_MAP", pick);
+            fprintf(stderr, "[S2A 画面设置] S2A_HDR_SDR_MAP=%s（本款设置：SDR 转 HDR——技术细节见 docs/画面设置.md）\n", pick.UTF8String);
         }
     }
     // 开发浮层 / Metal 性能浮层：建视图之前 app.m prepareGameView 已先调 s2a_ios_apply_overlay_settings 落环境变量，

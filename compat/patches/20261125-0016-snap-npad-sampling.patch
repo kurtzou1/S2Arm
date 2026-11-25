@@ -1,0 +1,88 @@
+diff --git a/src/Ryujinx.HLE/S2AHidSnap.cs b/src/Ryujinx.HLE/S2AHidSnap.cs
+index 850e0038f026781316a5b561c3fe018b13a11524..53f11109d79803112244757e364a6fb09d5f0e89 100644
+--- a/src/Ryujinx.HLE/S2AHidSnap.cs
++++ b/src/Ryujinx.HLE/S2AHidSnap.cs
+@@ -1,6 +1,7 @@
+ // S2A: 本文件为 S2A 新增（非 Ryujinx 原版）。
+ using Ryujinx.HLE.HOS.Services.Hid.Types.SharedMemory;
+ using Ryujinx.HLE.HOS.Services.Hid.Types.SharedMemory.Common;
++using Ryujinx.HLE.HOS.Services.Hid.Types.SharedMemory.Npad;
+ using System;
+ using System.IO;
+ using System.Runtime.InteropServices;
+@@ -12,11 +13,19 @@ namespace Ryujinx.HLE
+     /// 环的采样号从 0 重新数；游戏内存里记着的「上次读到的采样号」是快照那一刻的大数，按「采样号比上次大才是新输入」判的游戏
+     /// 把恢复后的每次触摸都当旧数据丢掉（#2199 陷阵之志：回到这一刻后触屏必失效，摇杆按当前状态读、不看采样号，所以正常）。
+     /// 这四个环只是采样历史、不含设置，原样放回后各设备按环里最后一条的采样号 + 1 接着写（TouchDevice / MouseDevice / KeyboardDevice，
+-    /// 手势见 GestureDevice 的起始采样号）。手柄那几块带接法 / 样式等设置，由请求重放按当前手柄建，不在这里动。恢复在请求重放之后
++    /// 手势见 GestureDevice 的起始采样号）。手柄那几块带接法 / 样式等设置，由请求重放按当前手柄建，不在这里整块放回。恢复在请求重放之后
++    /// 手柄只接采样号（11-24：一款开放世界游戏 60 帧开着存的快照，恢复后 10 局 5 局人物不吃摇杆、画面在走——游戏同样按采样号判新旧，
++    ///   「摇杆按当前状态读」那句只对 #2199 那款成立）：存每只手柄 14 个输入环（7 种按键样式 + 6 种体感 + GC 扳机）各自最后一条的采样号，
++    ///   恢复时环里最后一条比它小的，用这一条当前内容、采样号记成快照的数写一条（不改按键 / 摇杆内容），之后 NpadDevices 按 + 1 接着写。
++    ///   不接时恢复局的采样号从小数重数，要追上快照那一刻的数才被当新输入，追上前摇杆没反应（存的那局越晚、恢复后越久没反应）
+     /// </summary>
+     public static class S2AHidSnap
+     {
++        /// <summary>最近一次 Restore 接上采样号的手柄数（0 = 旧快照没有这段，-1 = 格式不对）；日志用</summary>
++        public static int NpadsRestored { get; private set; }
+         private const uint Magic = 0x31444948u;   // "HID1"
++        private const uint NpadMagic = 0x3244504Eu;   // "NPD2"：手柄采样号段（接在四个环后面；旧快照没有）
++        private const int NpadRings = 14;
+ 
+         public static void Save(Switch device, BinaryWriter w) => Save(ref device.Hid.SharedMemory, w);
+ 
+@@ -27,14 +36,54 @@ namespace Ryujinx.HLE
+         {
+             w.Write(Magic);
+             Put(w, ref m.TouchScreen); Put(w, ref m.Mouse); Put(w, ref m.Keyboard); Put(w, ref m.Gesture);
++            Span<NpadState> pads = m.Npads.AsSpan();
++            w.Write(NpadMagic); w.Write(pads.Length); w.Write(NpadRings);
++            for (int i = 0; i < pads.Length; i++) foreach (ulong v in NpadSampling(ref pads[i].InternalState)) w.Write(v);
++        }
++
++        // 一只手柄 14 个输入环最后一条的采样号（顺序固定，存取同一份）
++        private static ulong[] NpadSampling(ref NpadInternalState s) => new[] {
++            Last(ref s.FullKey), Last(ref s.Handheld), Last(ref s.JoyDual), Last(ref s.JoyLeft), Last(ref s.JoyRight), Last(ref s.Palma), Last(ref s.SystemExt),
++            Last6(ref s.FullKeySixAxisSensor), Last6(ref s.HandheldSixAxisSensor), Last6(ref s.JoyDualSixAxisSensor), Last6(ref s.JoyDualRightSixAxisSensor),
++            Last6(ref s.JoyLeftSixAxisSensor), Last6(ref s.JoyRightSixAxisSensor), s.GcTrigger.GetCurrentEntryRef().SamplingNumber };
++        private static ulong Last(ref RingLifo<NpadCommonState> r) => r.GetCurrentEntryRef().SamplingNumber;
++        private static ulong Last6(ref RingLifo<SixAxisSensorState> r) => r.GetCurrentEntryRef().SamplingNumber;
++
++        // 环里最后一条比快照的采样号小：同内容、采样号记成快照的数写一条（Write 同时写原子存储里的采样号，读侧的一致性校验照过）
++        private static void Bump(ref RingLifo<NpadCommonState> r, ulong v) { NpadCommonState c = r.GetCurrentEntryRef(); if (c.SamplingNumber >= v) return; c.SamplingNumber = v; r.Write(ref c); }
++        private static void Bump6(ref RingLifo<SixAxisSensorState> r, ulong v) { SixAxisSensorState c = r.GetCurrentEntryRef(); if (c.SamplingNumber >= v) return; c.SamplingNumber = v; r.Write(ref c); }
++        private static void BumpGc(ref RingLifo<NpadGcTriggerState> r, ulong v) { NpadGcTriggerState c = r.GetCurrentEntryRef(); if (c.SamplingNumber >= v) return; c.SamplingNumber = v; r.Write(ref c); }
++
++        /// <returns>接上的手柄数；没有这一段（旧快照）回 0；格式不对回 -1（不动）</returns>
++        internal static int RestoreNpadSampling(ref SharedMemory m, BinaryReader r)
++        {
++            if (r.BaseStream.Position >= r.BaseStream.Length) return 0;
++            if (r.ReadUInt32() != NpadMagic) return -1;
++            Span<NpadState> pads = m.Npads.AsSpan();
++            int n = r.ReadInt32(), k = r.ReadInt32();
++            if (n != pads.Length || k != NpadRings || r.BaseStream.Length - r.BaseStream.Position < (long)n * k * 8) return -1;
++            ulong[] v = new ulong[n * k];
++            for (int i = 0; i < v.Length; i++) v[i] = r.ReadUInt64();
++            for (int i = 0; i < n; i++)
++            {
++                ref NpadInternalState s = ref pads[i].InternalState; int b = i * k;
++                Bump(ref s.FullKey, v[b]); Bump(ref s.Handheld, v[b + 1]); Bump(ref s.JoyDual, v[b + 2]); Bump(ref s.JoyLeft, v[b + 3]);
++                Bump(ref s.JoyRight, v[b + 4]); Bump(ref s.Palma, v[b + 5]); Bump(ref s.SystemExt, v[b + 6]);
++                Bump6(ref s.FullKeySixAxisSensor, v[b + 7]); Bump6(ref s.HandheldSixAxisSensor, v[b + 8]); Bump6(ref s.JoyDualSixAxisSensor, v[b + 9]);
++                Bump6(ref s.JoyDualRightSixAxisSensor, v[b + 10]); Bump6(ref s.JoyLeftSixAxisSensor, v[b + 11]); Bump6(ref s.JoyRightSixAxisSensor, v[b + 12]);
++                BumpGc(ref s.GcTrigger, v[b + 13]);
++            }
++            return n;
+         }
+ 
+         internal static int Restore(ref SharedMemory m, BinaryReader r)
+         {
++            NpadsRestored = 0;
+             if (r.ReadUInt32() != Magic) return -1;
+             byte[] t = Take(r, ref m.TouchScreen), mo = Take(r, ref m.Mouse), k = Take(r, ref m.Keyboard), g = Take(r, ref m.Gesture);
+             if (t == null || mo == null || k == null || g == null) return -1;   // 先全读完、长度都对上再写：格式不对时一块都不改
+             Set(t, ref m.TouchScreen); Set(mo, ref m.Mouse); Set(k, ref m.Keyboard); Set(g, ref m.Gesture);
++            NpadsRestored = RestoreNpadSampling(ref m, r);
+             return 4;
+         }
+ 

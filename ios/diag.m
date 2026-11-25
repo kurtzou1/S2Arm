@@ -173,6 +173,8 @@ static NSURL *build_zip(NSUInteger cap, BOOL slim, NSString **err) {
     BOOL copyFailed = !s2a_diag_collect(D, W, cap, slim, ^NSString *(NSString *s) { return redact(s); },
                                         ^NSDictionary *(NSString *path, NSString *name, BOOL current) { return session_summary(path, name, current); },
                                         files, sessions, &crash, &hang, &exits);
+    // 出问题那款的资源包索引（本局的游戏；还没选游戏时是上次在库里选的那款，同 pack_root）：每份至多 8 MB（10 万文件的款约 9 MB，超了截头尾）
+    if (!copyFailed) copyFailed = !s2a_diag_collect_index(pack_root(), title_id(), W, 8u << 20, ^NSString *(NSString *s) { return redact(s); }, files);
     if (copyFailed) {
         [fm removeItemAtPath:W error:nil];
         if (err) *err = S2AL(@"diag.error.redact");

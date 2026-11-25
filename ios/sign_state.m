@@ -68,17 +68,26 @@ int s2a_lc_cert(NSData **p12, NSString **pw) { return g_lc_cert(p12, pw); }
 //   -2 = 导入了、S2Arm 解不开（#502 / D-D8F4 的 -26275：起局改用导入进 S2Arm 的那张，游戏库就按那张判，不再当「有能用的证书」）
 #include <Security/Security.h>
 int s2a_selfsign_identity(const void *p12, size_t n, const char *password, SecKeyRef *key, CFArrayRef *chain);
+// 结果变了记一行（D-PS9W：日志分不出 LC 是没导入 -1 还是解不开 -2，签名状态 1 的单子没法往下判）
+static void lc_usable_note(int v, int rc) {
+    static int last = 99; if (v == last) return; last = v;
+    fprintf(stderr, "[S2A 签名] LiveContainer 证书：%s\n", v == 1 ? "在里面、解得开（起局用它重签）" : v == 0 ? "不在 LiveContainer 里" :
+            v == -1 ? "在 LiveContainer 里、它没导入证书（-1）" : "LiveContainer 导入了证书、S2Arm 解不开（-2），改看导入进 S2Arm 的");
+    if (v == -2) fprintf(stderr, "[S2A 签名] LiveContainer 证书解不开：s2a_selfsign_identity 返回 %d\n", rc);
+}
 static int lc_usable(void) {
-    static NSData *seen; static int ok;   // 只在 p12 换了时重解（游戏库每款判一次，解一次几十毫秒）
+    static NSData *seen; static int ok, rc;   // 只在 p12 换了时重解（游戏库每款判一次，解一次几十毫秒）
     NSData *p12 = nil; NSString *pw = nil; int r = s2a_lc_cert(&p12, &pw);
-    if (r <= 0) return r;
+    if (r <= 0) { lc_usable_note(r, 0); return r; }
     if (![p12 isEqualToData:seen]) {
         SecKeyRef key = NULL; CFArrayRef chain = NULL;
-        ok = !s2a_selfsign_identity(p12.bytes, p12.length, pw.UTF8String, &key, &chain) && chain && CFArrayGetCount(chain) > 0;
+        rc = s2a_selfsign_identity(p12.bytes, p12.length, pw.UTF8String, &key, &chain);
+        ok = !rc && chain && CFArrayGetCount(chain) > 0;
         if (key) CFRelease(key);
         if (chain) CFRelease(chain);
         seen = p12;
     }
+    lc_usable_note(ok ? 1 : -2, rc);
     return ok ? 1 : -2;
 }
 

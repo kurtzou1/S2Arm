@@ -1,0 +1,69 @@
+; t_prog 越界原子与读改写重试循环（gal_spvx.c）：16 位存储的模拟形态 do { v = a[k]; r = CAS(a[k], v | 1, v); n++; } while (r != v)，k = i + 8 越界
+; 等价 GLSL（线程组 4，i = gl_GlobalInvocationID.x；a 绑定 16 字节 = 4 个，a[3] = 13）：
+;   n = 0; do { v = a[i+8]; r = atomicCompSwap(a[i+8], v, v | 1); n++; } while (r != v); o[i] = n
+; 越界读钳到 a[3] 读 13；越界的原子不执行、返回钳到元素的当前值 13 → 第一圈就 r == v，n = 1。
+; 旧口径（越界原子返回 0）：r = 0 ≠ 13，一直转到循环上限（直连没有上限，GPU 就挂死在这里，11-23 D-WZCF）
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %gid
+               OpExecutionMode %main LocalSize 4 1 1
+               OpDecorate %gid BuiltIn GlobalInvocationId
+               OpDecorate %arru ArrayStride 4
+               OpMemberDecorate %SA 0 Offset 0
+               OpDecorate %SA BufferBlock
+               OpMemberDecorate %SO 0 Offset 0
+               OpDecorate %SO BufferBlock
+               OpDecorate %sa DescriptorSet 1
+               OpDecorate %sa Binding 0
+               OpDecorate %so DescriptorSet 1
+               OpDecorate %so Binding 1
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+       %bool = OpTypeBool
+       %uint = OpTypeInt 32 0
+        %int = OpTypeInt 32 1
+        %v3u = OpTypeVector %uint 3
+      %int_0 = OpConstant %int 0
+     %uint_0 = OpConstant %uint 0
+     %uint_1 = OpConstant %uint 1
+     %uint_8 = OpConstant %uint 8
+       %arru = OpTypeRuntimeArray %uint
+         %SA = OpTypeStruct %arru
+         %SO = OpTypeStruct %arru
+      %ptrSA = OpTypePointer Uniform %SA
+      %ptrSO = OpTypePointer Uniform %SO
+         %sa = OpVariable %ptrSA Uniform
+         %so = OpVariable %ptrSO Uniform
+       %ptru = OpTypePointer Uniform %uint
+      %ptrfu = OpTypePointer Function %uint
+     %ptrv3i = OpTypePointer Input %v3u
+        %gid = OpVariable %ptrv3i Input
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+          %n = OpVariable %ptrfu Function
+               OpStore %n %uint_0
+          %g = OpLoad %v3u %gid
+          %i = OpCompositeExtract %uint %g 0
+         %i8 = OpIAdd %uint %i %uint_8
+               OpBranch %hdr
+        %hdr = OpLabel
+               OpLoopMerge %mrg %cont None
+               OpBranch %body
+       %body = OpLabel
+         %pa = OpAccessChain %ptru %sa %int_0 %i8
+          %v = OpLoad %uint %pa
+         %v1 = OpBitwiseOr %uint %v %uint_1
+          %r = OpAtomicCompareExchange %uint %pa %uint_1 %uint_0 %uint_0 %v1 %v
+         %nv = OpLoad %uint %n
+         %n1 = OpIAdd %uint %nv %uint_1
+               OpStore %n %n1
+         %ne = OpINotEqual %bool %r %v
+               OpBranch %cont
+       %cont = OpLabel
+               OpBranchConditional %ne %hdr %mrg
+        %mrg = OpLabel
+         %nf = OpLoad %uint %n
+         %po = OpAccessChain %ptru %so %int_0 %i
+               OpStore %po %nf
+               OpReturn
+               OpFunctionEnd

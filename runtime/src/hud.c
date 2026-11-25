@@ -57,12 +57,15 @@ static int cap_fps(void) {
 // 目标 = 实际生效周期 max(游戏间隔周期, 1/上限) 对应的帧率，即 min(游戏帧率, 上限)（#619 审计 F-hud-cap-above-game）。
 //   游戏帧率：GL 前端回报它自己的（nvn_gl_game_fps，graphics/nvn/gfx/gl/egl.m：交换间隔折成帧率，0 = 交换间隔 0、游戏不锁垂直同步；-1 = 本局没走 GL），
 //   其余直连前端取 nvn_game_fps；通用模式读不到游戏帧率。没有原生锁 / 读不到时目标就是上限（GL 交换间隔 0 + 上限 120 = 120，不是缺省 60）；上限也没有 = 0「未取得」
+// 帧率被补丁 / 我方帧率表抬高了没有：runtime/src/fps.c 强定义覆盖；只链本文件的单测用缺省 1 = 当作抬高了（上限照常算进目标）
+__attribute__((weak)) int s2a_fps_raised(void) { return 1; }
 static int hud_target(void) {
     int cap = cap_fps(), game = 0;
     if (s2a_gfx_mode() == S2A_GFX_DIRECT) {
         int (*gl)(void) = (int (*)(void))dlsym(RTLD_DEFAULT, "nvn_gl_game_fps"), (*nv)(void) = (int (*)(void))dlsym(RTLD_DEFAULT, "nvn_game_fps");
         int g = gl ? gl() : -1; game = g >= 0 ? g : nv ? nv() : 0;
     }
+    if (game > 0 && !s2a_fps_raised()) return game;   // 帧率没被抬高：上限不压游戏原生出图率（graphics/nvn/gfx/nvn/nvn_fps.c，11-25 #502），目标就是游戏帧率
     return game <= 0 ? cap : cap && cap < game ? cap : game;
 }
 static int cmp_u64(const void *a, const void *b) { uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b; return (x > y) - (x < y); }

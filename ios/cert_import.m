@@ -100,10 +100,28 @@ void s2a_shell_cert_p12(void) {   // 游戏库设置「签名证书」→「导�
 void s2a_shell_cert_p12(void) {}
 #endif
 
-// 库卡片「需要签名证书」的主按钮（s2a_shell.h）：装了 SideStore 就向它要（一步拿到），否则选 .p12（AltStore 等导出的文件）。
+// 在 LiveContainer 里（#2226 / D-PS9W）：切到 SideStore 时 LiveContainer 先问「切换将终止当前 App」、随即结束 S2Arm，
+//   SideStore 的回调回不到这一个进程，「在等」的状态也跟着没了——向 SideStore 要证书这条路在 LC 里走不通（玩家点约 20 次只记到 2 次「没收到」）。
+//   LC 里只认装 LiveContainer 那个 Apple ID 的证书：直说这一点，给「导入 .p12…」（从装 LC 的 SideStore / AltStore 导出），不拉 SideStore。
+//   s2a_lc_cert：0 = 不在 LiveContainer 里，-1 = 在、它没导入证书，1 = 在、导入了（sign_state.m）
+int s2a_lc_cert(NSData **p12, NSString **pw);
+static int in_lc(void) { return s2a_lc_cert(NULL, NULL) != 0; }
+int s2a_shell_cert_sidestore_ok(void) { return !in_lc(); }   // 游戏库设置「从 SideStore 获取」那一项：LC 里不给（s2a_shell.h）
+static void lc_p12_explain(void) {
+    UIViewController *vc = top_vc(); if (!vc) { s2a_shell_cert_p12(); return; }
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:S2AL(@"cert.lc.title") message:S2AL(@"cert.lc.message") preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:S2AL(@"common.cancel") style:UIAlertActionStyleCancel handler:nil]];
+    UIAlertAction *pick = [UIAlertAction actionWithTitle:S2AL(@"cert.pickP12") style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *x) { s2a_shell_cert_p12(); }];
+    [a addAction:pick]; a.preferredAction = pick;
+    [vc presentViewController:a animated:YES completion:nil];
+}
+
+// 库卡片「需要签名证书」的主按钮（s2a_shell.h）：装了 SideStore 就向它要（一步拿到），否则选 .p12（AltStore 等导出的文件）；LiveContainer 里见上
 //   canOpenURL 要 Info.plist 声明 LSApplicationQueriesSchemes sidestore（runtime/build.mk），没声明一律答没装
 void s2a_shell_cert_sidestore(void);
 void s2a_shell_cert_get(void) {
+    int lc = s2a_lc_cert(NULL, NULL);
+    if (lc) { LOG("签名证书：游戏库卡片「获取签名证书」→ LiveContainer 里（它%s），说明后选 .p12，不拉 SideStore", lc > 0 ? "导入了证书但这款用不上" : "没导入证书"); lc_p12_explain(); return; }
     BOOL ss = [UIApplication.sharedApplication canOpenURL:[NSURL URLWithString:@"sidestore://"]];
     LOG("签名证书：游戏库卡片「获取签名证书」→ %s", ss ? "SideStore" : "选 .p12");
     if (ss) s2a_shell_cert_sidestore(); else s2a_shell_cert_p12();
@@ -133,6 +151,7 @@ static void sidestore_watch(void) {
     }];
 }
 void s2a_shell_cert_sidestore(void) {   // 游戏库设置「签名证书」→「从 SideStore 获取」
+    if (in_lc()) { LOG("签名证书：LiveContainer 里不拉 SideStore（会结束 S2Arm、回调回不来），说明后选 .p12"); lc_p12_explain(); return; }
     NSURL *u = s2a_cert_sidestore_request(); LOG("签名证书：打开 SideStore 取证书");
     sidestore_watch();
     [UIApplication.sharedApplication openURL:u options:@{} completionHandler:^(BOOL ok) {

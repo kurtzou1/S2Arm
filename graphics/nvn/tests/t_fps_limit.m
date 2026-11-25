@@ -92,14 +92,15 @@ static double median10(const double *v) {   // 10 个数的中位数（第 5、6
 }
 static void dynamic_result(int phase, const double *times, uint64_t first, double hz) {
     // 期望来自60Hz游戏vsync：2/60、3/60，以及逐帧2↔3的均值，不从被测实现反推。
-    const double expected[] = {1000.0 / 30, 50, 1000.0 / 30, 1000.0 / 24};
+    // 回 1 场景阶段 2 游戏间隔 1：没被抬高，上限 30 不压到原生 60 以下（11-25 #502），按 1/60
+    const double expected[] = {1000.0 / 30, 50, return_one ? 1000.0 / 60 : 1000.0 / 30, 1000.0 / 24};
     double mean = (times[60] - times[0]) * 1000 / 60;
     // 阶段 3（逐帧 2↔3）：30 / 20 Hz 链路给不出 50 / 33.3 ms 的整刻度，链路回 60 Hz，2、3 个 60 Hz 刻度交替，均值 41.7 ms；
     //   11-04 金刚真机：原先链路留在 30 Hz、间隔 3 取整成 2 刻度，均值 50 ms（1.2 倍）也落在旧的 1.3 倍容差里，所以本阶段上限收到 1.1 倍
     double hi = phase == 3 ? 1.10 : 1.30;
     CHECK(mean >= expected[phase] * .90 && mean <= expected[phase] * hi,
         "NVN动态阶段%d真实取图周期 %.3f ms，期望 %.3f ms（上限 %.2f 倍）", phase, mean, expected[phase], hi);
-    const double rates[] = {30, 20, 30};
+    const double rates[] = {30, 20, return_one ? 60 : 30};
     // Per-frame changes are asynchronous hints, not an instantaneous 24 Hz
     // callback clock. Keep exact stable rates and bound the mixed phase by
     // its two requested rates, with the same 10% measurement tolerance.
@@ -246,8 +247,10 @@ static void nvn_frames(void) {
         //   不再「首 10 帧仍按原 30 Hz 等 2 拍（66.7 ms）/ 原 20 Hz 等 1 拍（50 ms）」
         CHECK(to20 >= 50 * .90 && to20 <= 50 * 1.10,
             "50ms新周期首10帧立即按60Hz等3拍（单帧中位）：%.3f ms，期望50ms", to20);
-        CHECK(to30 >= (1000.0 / 30) * .90 && to30 <= (1000.0 / 30) * 1.10,
-            "33.3ms恢复首10帧立即按60Hz等2拍（单帧中位）：%.3f ms，期望33.333ms", to30);
+        // 回 1 场景阶段 2 是间隔 1：没被抬高，上限 30 不压（11-25 #502），首帧起按 60 Hz 等 1 拍
+        double want2 = return_one ? 1000.0 / 60 : 1000.0 / 30;
+        CHECK(to30 >= want2 * .90 && to30 <= want2 * 1.10,
+            "阶段2新周期首10帧立即按60Hz刻度（单帧中位）：%.3f ms，期望%.3fms", to30, want2);
     }
     if (dynamic) for (int phase = 0; phase < 4; phase++) {
         // 不丢过渡证据：SetInterval先于acquire，而link_sync仍在后面的present入口。
@@ -270,8 +273,9 @@ static void nvn_frames(void) {
         double start = clock_s();
         for (int i = 0; i < 20; i++) CHECK(nvn_be_link_wait_tick(1, 30000000000ull), "cap30直接真实tick%d", i);
         double mean = (clock_s() - start) * 1000 / 20;
-        CHECK(mean >= 30 && mean <= 1000.0 / 30 * 1.3,
-            "cap30无队列反压直接wait_tick(1)均值 %.3f ms，期望33.333ms", mean);
+        // 没被抬高：上限 30 不压原生间隔 1（11-25 #502），直接等拍按 60 Hz 链路
+        CHECK(mean >= 1000.0 / 60 * .9 && mean <= 1000.0 / 60 * 1.3,
+            "cap30无队列反压直接wait_tick(1)均值 %.3f ms，期望16.667ms（未抬高不压原生）", mean);
     }
     for (int i = 0; i < 3; i++) NV(nvnTextureFinalize)(&textures[i]);
     NV(nvnMemoryPoolFinalize)(&pool); NV(nvnDeviceFinalize)(&device); free(storage);
@@ -323,7 +327,7 @@ static void vk_frames(void) {
 static void hud_result(void) {
     // 只读真实生产者ap_host的上屏时间戳；不写环、不伪造时钟。此局不到10秒，全部109次真实帧边界都应仍在窗内。
     extern _Atomic uint64_t g_s2a_hud_ft[2048], g_s2a_hud_fn;
-    // 期望目标由脚本按场景给（FPS_TEST_HUD_TARGET = 上限：原生 60 + 上限 30 → 30；GL 交换间隔 0 + 上限 120 → 120），慢帧阈值 1.5 × 1/目标独立手算
+    // 期望目标由脚本按场景给（FPS_TEST_HUD_TARGET：本测游戏没被抬高，有原生节拍时 = 游戏帧率（原生 60 + 上限 30 → 60，11-25 #502）；GL 交换间隔 0 + 上限 120 → 120），慢帧阈值 1.5 × 1/目标独立手算
     const char *te = getenv("FPS_TEST_HUD_TARGET"); int want = te ? atoi(te) : 30;
     CHECK(want == 30 || want == 60 || want == 120, "FPS_TEST_HUD_TARGET=%s 只接受 30/60/120", te ? te : "");
     if (want != 30 && want != 60 && want != 120) return;

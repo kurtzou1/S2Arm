@@ -692,3 +692,5 @@
 20261124-0911-audout-flush-keep-released-absorb-appended.patch
 20261124-1328-apple-audio-stereo-only-probe.patch
 20261124-1630-snap-hid-sampling.patch
+20261125-0838-audsmx-stream-purge.patch
+20261125-0016-snap-npad-sampling.patch

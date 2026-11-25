@@ -346,6 +346,18 @@ static void gva_free(uint64_t g) {
     for (int i = 0; i < g_ngva; i++) if (g_gva[i].g == g) { memmove(g_gva + i, g_gva + i + 1, (size_t)(g_ngva - i - 1) * sizeof *g_gva); g_ngva--; break; }
     pthread_rwlock_unlock(&g_gva_lk);
 }
+// 池的 GPU 地址段扩到 n 字节（D-6VG6：池上伸出池尾的缓冲对象，尾部的缓冲区地址也要换得回 CPU 地址）。不碰下一段才扩（段间留的 64 KB 间隔够大多数情况）；
+//   碰了就不扩、返回 0（调用方记一行）
+static int gva_extend(uint64_t g, uint64_t n) {
+    int ok = 0;
+    pthread_rwlock_wrlock(&g_gva_lk);
+    for (int i = 0; i < g_ngva; i++) if (g_gva[i].g == g) {
+        if (n <= g_gva[i].n) ok = 1;
+        else if (i + 1 >= g_ngva || g + n < g_gva[i + 1].g) { g_gva[i].n = n; ok = 1; }
+        break; }
+    pthread_rwlock_unlock(&g_gva_lk);
+    return ok;
+}
 uint64_t nvn_ga2ca(uint64_t a) {
     if (a < GVA_LO || a >= GVA_HI) return a;
     uint64_t r = a; int lo = 0, hi;
@@ -4554,7 +4566,16 @@ NVN(nvnBufferInitialize, NVNboolean, NVNbuffer *buf, const NVNbufferBuilder *b) 
             m ? m->name : "?", m ? (unsigned long long)(ra - (uint64_t)m->base) : (unsigned long long)ra); return 0; }
     // 缓冲对象只是「池 + 偏移 + 大小」的视图，建时不分配、真机驱动也不在这里查：越过池尾本身不是错，读写越过池尾才是（10-26 塞尔达按 + 开系统菜单：
     //   0x24000 的池上建 0x40000 的缓冲，菜单画面完整、局到 MARK；原先报红让能玩格判红）。黄字提示，访问时的越界检查另做
-    if ((uint64_t)bb->off + bb->size > bb->pool->size) LOG("【黄】 BufferInitialize: buffer object extends past the end of its pool (offset %#llx size %#llx pool %#llx); only an access past the end would be wrong", (unsigned long long)bb->off, (unsigned long long)bb->size, (unsigned long long)bb->pool->size);
+    //   D-6VG6（11-25 旷野之息拍照：0x195000 的池上建 0x1b0000 的缓冲，第二张存完 GPU 缺页）：访问越过池尾在真机上落在池存储之后同一处内存，这边原先没有任何后备——
+    //   池的 Metal 缓冲只盖到池尾、GPU 地址段也只到池尾。建缓冲对象时把两者都扩到缓冲对象的末尾（nvn_be_pool_cover / gva_extend），整段都可寻址
+    if ((uint64_t)bb->off + bb->size > bb->pool->size) {
+        uint64_t need = (uint64_t)bb->off + bb->size;
+        LOG("【黄】 BufferInitialize: buffer object extends past the end of its pool (offset %#llx size %#llx pool %#llx); the pool's backing is extended to cover it", (unsigned long long)bb->off, (unsigned long long)bb->size, (unsigned long long)bb->pool->size);
+        if (bb->pool->mem && !(bb->pool->flags & 0x200)) {
+            nvn_be_pool_cover(bb->pool->mem, bb->pool->size, need);
+            if (bb->pool->gva && !gva_extend(bb->pool->gva, need)) LOG("【红】 BufferInitialize: the pool's GPU address range cannot grow to %#llx (the next pool's range starts too close): buffer addresses past the pool end stay unresolved", (unsigned long long)need);
+        }
+    }
     *(buf_t *)buf = (buf_t){MAGIC('B', 'U', 'F', 0), bb->pool, bb->off, bb->size};
     if (bb->pool->mem) buf_reg_put((uint64_t)(uintptr_t)(bb->pool->mem) + (uint64_t)bb->off, bb->size);
     pool_mark_addressed(bb->pool);   // 缓冲一建好，它的地址就可能被游戏算出来（池地址 + 偏移）

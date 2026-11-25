@@ -1614,7 +1614,10 @@ int s2a_import_state_game_quick(const char *proc_docs, const char *gid) {
 //     库在后台跑 s2a_pack_apply 解开（没有待解包时它只核对、写 .applied：只直写了镜像的推送、访达拷进来的也一样），显示「安装中」；核对不过报「安装没完成」；
 //   3 传输中——这次推送没完（清单还没写回，或还有包没写完）：有 .transfer 时库按它画进度，没有（老电脑端推的、被删了）时库按资源包里文件的改动判传断了；
 //   5 外部来源离线——本体是指向外部游戏来源的软链接、打不开（ext_offline）；
-//   0 没有（不显示）——只给「资源包」不在或是空的。原先清单读不出 / 在传又没有 .transfer 也给 0，有数据的款从库里静默消失（iOS 装机剃刀 #26 / #45）
+//   0 没有本体——清单写着本体是 game.img、本体不在（D-84EQ 11-25：两件套导入 .s2arm 先到、game.img 还在往「放这里导入」拷，
+//     原先判 2 去解开，核对报 -8「手机上的游戏文件不全，从电脑重新装」，等 game.img 认领后又自己好了；推送是先写 game.img 后写清单，
+//     推送中照旧判 3）。库按「需要游戏数据」显示、点开给放 game.img 的说明，本体放好后回到 2 再解开；
+//   0 没有（不显示）——「资源包」不在或是空的。原先清单读不出 / 在传又没有 .transfer 也给 0，有数据的款从库里静默消失（iOS 装机剃刀 #26 / #45）
 int s2a_game_install_state(const char *proc_docs, const char *gid) {
     if (!proc_docs || !*proc_docs || !gid || !*gid || strchr(gid, '/') || gid[0] == '.') return 0;
     char root[2200], mf[2300], want[200], why[256], gdocs[1200];
@@ -1626,6 +1629,10 @@ int s2a_game_install_state(const char *proc_docs, const char *gid) {
         DIR *d = opendir(root); int any = 0;   // 资源包里有没有东西（. 开头的也算：.incoming / .transfer / .applied）
         if (d) { struct dirent *e; while (!any && (e = readdir(d))) any = strcmp(e->d_name, ".") && strcmp(e->d_name, ".."); closedir(d); }
         return any ? 3 : 0;
+    }
+    if (manifest_names_img(root)) {   // 本体还没到（两件套的另一件 / 之后丢了）：等本体，不解开（见上 0）
+        char ip[2300]; struct stat is; snprintf(ip, sizeof ip, "%s/game.img", root);
+        if (lstat(ip, &is) && errno == ENOENT) return 0;
     }
     return 2;
 }

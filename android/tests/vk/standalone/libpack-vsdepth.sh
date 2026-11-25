@@ -44,7 +44,7 @@ src=("$repo/android/tests/vk/t_replay_libpack_vsdepth.c" "$repo/graphics/nvn/rep
      "$repo/android/native/direct/source_store.c" "$repo/android/native/direct/control.c" "$repo/android/native/direct/input_identity.c" "$repo/android/native/direct/texture_facts.c"
      "$repo/android/native/direct/sha256.c" "$repo/android/native/direct/json.c" "$repo/android/native/direct/jv.c" "$repo/android/native/direct/compile_request.c" "$repo/android/native/direct/compile_worker.c"
      "$repo/android/native/direct/offline_library.c" "$repo/android/native/direct/program_cache.c" "$repo/runtime/src/direct_host.c"
-     "$repo/graphics/nvn/gfx/nvn/nvn_tex.c" "$repo/graphics/nvn/gfx/tex/nvn_deswizzle.c")
+     "$repo/graphics/nvn/gfx/nvn/nvn_tex.c" "$repo/graphics/nvn/gfx/tex/nvn_deswizzle.c" "$repo/android/native/nvn/nvn_vk_pipe_warm.c")
 binary="$out/test"; log="$out/run.log"
 args=()
 if [ -n "$mode" ]; then
@@ -76,7 +76,7 @@ PY
     binary="$out/test-${mode#--}"; log="$out/${mode#--}.log"
 fi
 cc -D_POSIX_C_SOURCE=200809L -std=c11 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter -ffunction-sections -fdata-sections \
-    -DS2A_ANDROID_VK_BACKEND_NVN_VK=1 "${inc[@]}" "${src[@]}" -Wl,--gc-sections -lvulkan -lpthread -lm -o "$binary"
+    -DS2A_ANDROID_VK_BACKEND_NVN_VK=1 "${inc[@]}" "${src[@]}" -Wl,--gc-sections -Wl,--wrap=vkCreateGraphicsPipelines -lvulkan -lpthread -lm -o "$binary"
 export VK_ICD_FILENAMES="$S2A_LAVAPIPE_ICD" VK_DRIVER_FILES="$S2A_LAVAPIPE_ICD"
 export VK_LAYER_PATH="$S2A_VK_LAYER_DIR" VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation VK_LAYER_ENABLES=VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
 set +e
@@ -112,5 +112,26 @@ for kind in float uint; do
     timeout 120 "$binary" "$out/shaders" "mrt-$kind" > "$log" 2>&1 || { cat "$log"; exit 1; }
     if grep -qE 'Validation Error|VUID-|SYNC-HAZARD-' "$log"; then cat "$log"; exit 1; fi
     grep '^libpack MRT .*integer_pixels=48 failures=0$' "$log"
+done
+work=$(mktemp -d "$out/warm.XXXXXX")
+cp "$out/shaders/libpack_depth.vert.spv" "$out/shaders/libpack_support.frag.spv" "$work"
+python3 - "$work" <<'PYWARM'
+import base64
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+spirv = base64.b64encode((root / 'libpack_depth.vert.spv').read_bytes()).decode()
+identity = dict(directABI=1, translatorClosure='libpack-c0-test', profileHash='sha256-'+'a'*64)
+program = dict(contract='s2a-direct-program-content-v1', kind='graphics', identity=identity,
+               stages=[dict(stage='vs', spirv=spirv)], bindings=[], c0Reads=[], supportReads=[])
+(root / 'warm-ordinary.json').write_text(json.dumps(dict(schema='s2a-direct-program-v1', content=program)))
+PYWARM
+for arm in donor late aligned different reuse; do
+    log="$out/warm-$arm.log"
+    timeout 120 "$binary" "$work" "warm-$arm" > "$log" 2>&1 || { cat "$log"; exit 1; }
+    if grep -qE 'Validation Error|VUID-|SYNC-HAZARD-|resolve_fast_path_mismatch|快路径给的程序与慢路径不一致' "$log"; then cat "$log"; exit 1; fi
+    grep '^libpack warm .*depth_pixels=16 failures=0$' "$log"
 done
 for mutant in synth fetch output clip-control; do bash "$0" "--negative-$mutant"; done

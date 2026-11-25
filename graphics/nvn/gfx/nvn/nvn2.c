@@ -689,6 +689,16 @@ int nvn2_hdr_switch(void) {   // S2A_HDR 三态（§2.5）：不设 / off / 看�
     }
     return HDR_OFF;
 }
+// PR-B（#625 第二阶段）终稿口径（PR #2162 评审 04:33:24/48）：出图层与层状态机的开关视角——S4 开而玩家 S2A_HDR 未设 / 显式 off
+//   （nvn2_hdr_switch 里同一个解析值）⇒ 层按 auto 进 / 持 PQ（S4 只让出图层持 PQ、对 SDR 窗口做扩张——原生 HDR 游戏此时
+//   看到 SDR 屏、输出 SDR、再被 mode 2 上扩）；玩家设了 auto / on ⇒ 原样带过（以玩家为准，S4 不覆盖）。
+//   vi 答询侧（nvn2_hdr_answer / vi_paper_white）不读本函数——照玩家开关回答，off 恒不答 on=1（hdr_choose_mode 的
+//   off 分支原样，nvn_hdr_policy.h:123–142——维护者读码推定的依据）。事件档频率（tick / 答询旁的层侧调用），PQ 层帧内
+//   一次静态整型读 + getenv（S4 缓存后只读环境未设的那一路）——同 nvn2_hdr_switch 的读环境口径。
+int nvn2_hdr_layer_sw(void) {
+    int sw = nvn2_hdr_switch();
+    return sw == HDR_OFF && nvn2_hdr_sdr_map() ? HDR_AUTO : sw;
+}
 void nvn2_hdr_tick(int sw, int raw_can, unsigned long long now_ms) {   // 层 tick——can 滞回 + 进层（事件档，PR4 接线）
     pthread_mutex_lock(&g_hdr_snap_mu);
     hdr_layer_tick_can(&g_hdr_snap, sw, raw_can, now_ms);
@@ -701,7 +711,7 @@ void nvn2_hdr_tick_frame(int sw, int frame_is_pq) {   // 层 tick——排空喂
 }
 void nvn2_hdr_preattach(int raw_can, unsigned long long now_ms) {   // PR4 开机预挂的存储侧（§4 PR4 ③：识别 Switch 2 游戏即进层，赶在首查询前——Bananza 首查询即定窗口，nxnative dm_hdr_boot 形态）。
     pthread_mutex_lock(&g_hdr_snap_mu);   // 开机无翻屏史，滞回防的是运行中拖窗沿两屏边缘的 flap——这里 can 直接按持稳记，后续 tick 无缝衔接；
-    if (raw_can && g_hdr_snap.s1_ready && !g_hdr_snap.layer_pq && nvn2_hdr_switch() != HDR_OFF) {   // SDR 屏 / s1_ready 未过 / 已在层内 / off 各自让位（off ⇒ 层恒 S0）
+    if (raw_can && g_hdr_snap.s1_ready && !g_hdr_snap.layer_pq && nvn2_hdr_layer_sw() != HDR_OFF) {   // SDR 屏 / s1_ready 未过 / 已在层内 / 层视角 off 各自让位（PR-B 终稿：开关判层视角——S4 开而玩家 off 也进层，S4 只让出图层持 PQ；玩家 off 且 S4 关 ⇒ 层恒 S0）
         g_hdr_snap.last_can_raw = raw_can;
         g_hdr_snap.can_chg_ms = now_ms;
         g_hdr_snap.can_settled = raw_can;
@@ -759,6 +769,48 @@ static double nvn2_hdr_sdr_gamma(void) {
     }
     return g;
 }
+// ---------- PR-B（#625 第二阶段）：S4「SDR 转 HDR」开关解析族（设计稿 §3.1；产品名照维护者 2026-11-21 已定口径「SDR 转 HDR」——末帧扩张）----------
+//   按款总开关 + 两个诊断/调校位，全部一次缓存静态（出图热路径不逐帧读环境——nvn_hdr_policy.h 头注口径，nvn2_hdr_sdr_gamma 同款）；
+//   vi 侧不接（S4 不经 vi、不改任何回答——终稿口径下层载体由 nvn2_hdr_layer_sw 补，终稿不联动 S2A_HDR）。开关关 ⇒ nvn2_hdr_present 传 0,0
+//   ⇒ fill 门不过 ⇒ p[2]=p[3]=0 ⇒ 纯 mode 2——off 缺省字节级回现状（off 不变量结构性成立）。
+int nvn2_hdr_sdr_map(void) {   // S2A_HDR_SDR_MAP：1/0（照 S2A_FPS60 的启动翻译形态）；未设/空串 = 0（缺省关，字节级回现状）；看不懂打一次红行按 0（nvn2_hdr_switch 红行先例，不静默吞拼写错误）
+    static int on; static int initialized;
+    if (!initialized) {
+        const char *v = getenv("S2A_HDR_SDR_MAP");
+        if (v && *v) {
+            if (!strcmp(v, "1")) on = 1;
+            else if (strcmp(v, "0")) { static _Atomic int said; if (!atomic_exchange(&said, 1)) LOG("【红】S2A_HDR_SDR_MAP=%s 看不懂（要 1 / 0），按 0（缺省关，字节级回现状）", v); }
+        }
+        initialized = 1;
+    }
+    return on;
+}
+double nvn2_hdr_sdr_map_nits(void) {   // S2A_HDR_SDR_MAP_NITS（sdr nits，SDR 参考白校准位、非按款开关）：缺省 100（BT.2446-1 §4.2 设计点），域 [80,1000]（纸白基准 80/100/203 业界并存）；域外/垃圾值红行一次按缺省（nvn2_hdr_sdr_gamma 形态）
+    static double nits = 100.0; static int initialized;
+    if (!initialized) {
+        const char *e = getenv("S2A_HDR_SDR_MAP_NITS");
+        if (e && *e) {
+            char *end = NULL; double v = strtod(e, &end);
+            if (end == e || *end || !(v >= 80.0 && v <= 1000.0)) { static _Atomic int said; if (!atomic_exchange(&said, 1)) LOG("【红】S2A_HDR_SDR_MAP_NITS=%s 看不懂（要 80..1000 的 SDR 参考白 nit 值），按缺省 100", e); }
+            else nits = v;
+        }
+        initialized = 1;
+    }
+    return nits;
+}
+double nvn2_hdr_sdr_map_target_nits(void) {   // S2A_HDR_SDR_MAP_TARGET_NITS（target nits）：缺省 400（业界甜点下沿，设计稿 §2.3），域 [100,10000]（gamescope --hdr-itm-target-nits 顶帽形态，与 HDR_PEAK_CAP_NITS 同值）；域外/垃圾值红行一次按缺省
+    static double target = 400.0; static int initialized;
+    if (!initialized) {
+        const char *e = getenv("S2A_HDR_SDR_MAP_TARGET_NITS");
+        if (e && *e) {
+            char *end = NULL; double v = strtod(e, &end);
+            if (end == e || *end || !(v >= 100.0 && v <= 10000.0)) { static _Atomic int said; if (!atomic_exchange(&said, 1)) LOG("【红】S2A_HDR_SDR_MAP_TARGET_NITS=%s 看不懂（要 100..10000 的 target nit 值），按缺省 400", e); }
+            else target = v;
+        }
+        initialized = 1;
+    }
+    return target;
+}
 int nvn2_hdr_present(float p[8], int src_pf, int dst_pt) {   // PR3b 出图热路径：读已算好的结果（快路径 = 一次宽松原子读；非 PQ 目标上只有「vi 答过 ∧ HDR10 源」出 mode 1，其余恒平凡直通——与 hdr_present_mode 同判）
     if (!p) return hdr_present_mode(src_pf, dst_pt, 0);
     int answered = atomic_load_explicit(&g_hdr_vi_answered, memory_order_relaxed);
@@ -771,7 +823,17 @@ int nvn2_hdr_present(float p[8], int src_pf, int dst_pt) {   // PR3b 出图热�
     pthread_mutex_lock(&g_hdr_mu); declared = g_hdr.hi; pthread_mutex_unlock(&g_hdr_mu);   // PR1 存储的声明范围 hi（同一把锁）
     double headroom = 0;
     pthread_mutex_lock(&g_hdr_snap_mu); headroom = g_hdr_snap.current_headroom; pthread_mutex_unlock(&g_hdr_snap_mu);   // mode 4 的 target = 纸白 × 当前净空
-    return hdr_present_fill(p, src_pf, dst_pt, answered, headroom, (int)declared, told, nvn2_hdr_sdr_gamma(), 0.0, 0.0);   // PR-A（#625 第二阶段）：S4 扩张双参恒 0,0——开关解析在 PR-B（S2A_HDR_SDR_MAP 族）；无 setter ⇒ 门不过 ⇒ p[2]=p[3]=0，off 不变量结构性成立（直连与 gal 两路都经本入口取参）
+    // PR-B（#625 第二阶段）：S4 开关关 ⇒ 双参 0,0（关的语义收口在调用侧——设计稿 §2.4 填充落点）⇒ fill 门不过 ⇒ p[2]=p[3]=0 纯 mode 2
+    //   （off 不变量；缺省局走上面的快路径，这里只多一次静态整型读）。直连与 gal 两路都经本入口取参（gal_present.m present_hdr_uv 经 dlsym），接线对两条路径同时生效
+    double sdr_map = 0.0, sdr_target = 0.0;
+    if (nvn2_hdr_sdr_map()) { sdr_map = nvn2_hdr_sdr_map_nits(); sdr_target = nvn2_hdr_sdr_map_target_nits(); }
+    int pv = hdr_present_fill(p, src_pf, dst_pt, answered, headroom, (int)declared, told, nvn2_hdr_sdr_gamma(), sdr_map, sdr_target);
+    if (sdr_map > 0.0 && pv == HDR_PV_TO_PQ && p[2] > 0.0f && p[3] > 0.0f) {   // 首次 engage 打一行（探针口径设计稿 §3.5；数值 %.0f/%.0f/%.1f 现打；不打「直连：」前缀——本入口两路共用，前缀对 gal 局误导）
+        static _Atomic int said_engage;   // atomic_exchange 一次性先例（nvn2_hdr_switch 红行同款）；每帧先宽松读、engage 后不再有原子交换（present 热路径零新增每帧成本）
+        if (!atomic_load_explicit(&said_engage, memory_order_relaxed) && !atomic_exchange(&said_engage, 1))
+            LOG("SDR 转 HDR 生效（mode 2 上扩：BT.2446A 逆映射 sdr=%.0f nit、target=%.0f nit（逐帧随净空）、gamma=%.1f；S2A_HDR_SDR_MAP=1——末帧扩张非场景级，docs/画面设置.md）", sdr_map, (double)p[3], nvn2_hdr_sdr_gamma());
+    }
+    return pv;
 }
 
 // PR3d：AA/FX/FI 旁路判定的存储侧（评审稿 v3 §2.5 / §3 A3 / §4 PR3d）：出图热路径（nvn_mtl.m present 族）经它读已算好的

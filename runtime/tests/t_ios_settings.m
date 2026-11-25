@@ -658,6 +658,73 @@ int main(int argc, char **argv) {
             [game removePersistentDomainForName:[@"S2AGame." stringByAppendingString:gid]];
             unsetenv("S2A_LAUNCH_GAME_ID"); clear_environment();
         }
+        // S4「SDR 转 HDR」（#625 第二阶段 PR-B；评审终稿：不联动 S2A_HDR——PQ 层载体由引擎侧层视角开关补
+        //   （nvn2_hdr_layer_sw，S4 开而玩家未设 ⇒ 层按 auto 进/持 PQ），设置面只落 S2A_HDR_SDR_MAP）：
+        //   按款键 S2AHdrSdrMap（s2a_ios_per_game_keys）只转玩家明确拨过的（开 1 / 关 0，没拨过不设——缺省关，字节级回现状）；
+        //   读写族按款（s2a_ios_hdr_sdr_map_on_for / s2a_ios_set_hdr_sdr_map_for，游戏库每款设置页行同款）；
+        //   S2A_HDR 不被本翻译设置或覆盖（玩家显式给的照旧）。期望按规则手写
+        {   clear_environment(); unsetenv("S2A_LAUNCH_GAME_ID"); unsetenv("S2A_HDR"); unsetenv("S2A_HDR_SDR_MAP");
+            NSUserDefaults *app = NSUserDefaults.standardUserDefaults;
+            [app removeObjectForKey:@"S2AHdrSdrMap"];
+            NSString *gid = [@"01000000000" stringByAppendingString:[NSUUID.UUID.UUIDString substringToIndex:5]];
+            NSUserDefaults *game = [[NSUserDefaults alloc] initWithSuiteName:[@"S2AGame." stringByAppendingString:gid]];
+            NSString *gid2 = [@"01000000001" stringByAppendingString:[NSUUID.UUID.UUIDString substringToIndex:5]];
+            NSUserDefaults *game2 = [[NSUserDefaults alloc] initWithSuiteName:[@"S2AGame." stringByAppendingString:gid2]];
+            [game removePersistentDomainForName:[@"S2AGame." stringByAppendingString:gid]];
+            [game2 removePersistentDomainForName:[@"S2AGame." stringByAppendingString:gid2]];
+            setenv("S2A_LAUNCH_GAME_ID", gid.UTF8String, 1);
+            NSUserDefaults *d = s2a_ios_settings_defaults();
+            s2a_ios_apply_graphics_settings(d);
+            check(getenv("S2A_HDR_SDR_MAP") == NULL && getenv("S2A_HDR") == NULL,
+                  @"S4 没拨过：不设 S2A_HDR_SDR_MAP、不碰 S2A_HDR（缺省关，字节级回现状）");
+            [d setBool:YES forKey:@"S2AHdrSdrMap"];   // 按款写只写这款（游戏库每款设置页行同款）
+            clear_environment(); unsetenv("S2A_HDR"); unsetenv("S2A_HDR_SDR_MAP");
+            s2a_ios_apply_graphics_settings(d);
+            check(getenv("S2A_HDR_SDR_MAP") && !strcmp(getenv("S2A_HDR_SDR_MAP"), "1") && getenv("S2A_HDR") == NULL,
+                  @"S4 开：S2A_HDR_SDR_MAP=1，S2A_HDR 不被设置（终稿不联动——层载体由引擎层视角开关补，vi 照玩家 off 口径回答）");
+            check([game boolForKey:@"S2AHdrSdrMap"] && ![app boolForKey:@"S2AHdrSdrMap"],
+                  @"S4 按款写只写这款（S2AGame.<游戏号> 层，App 级不串）");
+            check(s2a_ios_hdr_sdr_map_on_for(gid) && !s2a_ios_hdr_sdr_map_on_for(gid2),
+                  @"S4 读写族按款：这款开、另一款没拨过（按款隔离）");
+            [d setBool:NO forKey:@"S2AHdrSdrMap"];
+            clear_environment(); unsetenv("S2A_HDR"); unsetenv("S2A_HDR_SDR_MAP");
+            s2a_ios_apply_graphics_settings(d);
+            check(getenv("S2A_HDR_SDR_MAP") && !strcmp(getenv("S2A_HDR_SDR_MAP"), "0") && getenv("S2A_HDR") == NULL,
+                  @"S4 关：S2A_HDR_SDR_MAP=0、不碰 S2A_HDR");
+            [d setBool:YES forKey:@"S2AHdrSdrMap"];
+            clear_environment(); unsetenv("S2A_HDR_SDR_MAP"); setenv("S2A_HDR", "off", 1);
+            s2a_ios_apply_graphics_settings(d);
+            check(getenv("S2A_HDR") && !strcmp(getenv("S2A_HDR"), "off") &&
+                  getenv("S2A_HDR_SDR_MAP") && !strcmp(getenv("S2A_HDR_SDR_MAP"), "1"),
+                  @"显式 S2A_HDR=off 原样保留（翻译不碰 S2A_HDR）；这款 S4 选择照转");
+            setenv("S2A_HDR", "auto", 1);
+            s2a_ios_apply_graphics_settings(d);
+            check(getenv("S2A_HDR") && !strcmp(getenv("S2A_HDR"), "auto") &&
+                  getenv("S2A_HDR_SDR_MAP") && !strcmp(getenv("S2A_HDR_SDR_MAP"), "1"),
+                  @"显式 S2A_HDR=auto 原样保留（以玩家为准）；这款 S4 选择照转");
+            unsetenv("S2A_HDR");
+            setenv("S2A_HDR_SDR_MAP", "1", 1); [d setBool:NO forKey:@"S2AHdrSdrMap"];
+            s2a_ios_apply_graphics_settings(d);
+            check(!strcmp(getenv("S2A_HDR_SDR_MAP"), "1") && getenv("S2A_HDR") == NULL,
+                  @"显式启动环境 S2A_HDR_SDR_MAP=1 优先于这款的选择（关）；S2A_HDR 仍不被碰");
+            unsetenv("S2A_HDR_SDR_MAP"); unsetenv("S2A_HDR");
+            setenv("S2A_LAUNCH_GAME_ID", gid2.UTF8String, 1);   // 另一款：没拨过不受这款影响
+            NSUserDefaults *d2 = s2a_ios_settings_defaults();
+            s2a_ios_apply_graphics_settings(d2);
+            check(getenv("S2A_HDR_SDR_MAP") == NULL && getenv("S2A_HDR") == NULL,
+                  @"S4 按款隔离：另一款没拨过不受这款影响");
+            s2a_ios_set_hdr_sdr_map_for(gid2, YES);   // 写族按款（游戏库每款设置页行同款写法）
+            check(s2a_ios_hdr_sdr_map_on_for(gid2) && [game2 boolForKey:@"S2AHdrSdrMap"] && ![app boolForKey:@"S2AHdrSdrMap"],
+                  @"S4 写族按款写这款（S2AGame.<另一款> 层）");
+            s2a_ios_set_hdr_sdr_map(NO);   // 无款号读写族（当前款写法）：定义经本单测链进（无款号形态只有工作台编链才链得到——R3 实测定义缺失只有 ios_lab_link_test 抓到，本套件补上）
+            check(!s2a_ios_hdr_sdr_map_on() && ![game2 boolForKey:@"S2AHdrSdrMap"], @"S4 无款号读写族：关当前款（S2A_LAUNCH_GAME_ID=另一款）");
+            s2a_ios_set_hdr_sdr_map(YES);
+            check(s2a_ios_hdr_sdr_map_on(), @"S4 无款号读写族：重新开当前款");
+            [game removePersistentDomainForName:[@"S2AGame." stringByAppendingString:gid]];
+            [game2 removePersistentDomainForName:[@"S2AGame." stringByAppendingString:gid2]];
+            [app removeObjectForKey:@"S2AHdrSdrMap"];
+            unsetenv("S2A_LAUNCH_GAME_ID"); unsetenv("S2A_HDR"); unsetenv("S2A_HDR_SDR_MAP"); clear_environment();
+        }
         // 满屏（11-13 合并「宽屏」与「宽屏强制启用」；自适应满屏补丁跟开关）：期望按规则手写——
         //   没选过：清单 widen 1 / 验证名单 / 表里缺省开的 wsauto: 补丁 → 开，否则关；明确开 = 没验证过也铺满；清单原因「强信号」= 改不动
         {

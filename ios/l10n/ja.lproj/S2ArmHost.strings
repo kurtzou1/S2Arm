@@ -116,6 +116,7 @@
 "settings.patchNote" = "コミュニティパッチ";
 "settings.fullscreen.patchNote" = "コミュニティ全画面パッチ";
 "game.fps.note" = "ゲームが対応している場合は 60 FPS で動作し、維持できない場合は元に戻ります。次回のゲーム起動時に有効になります";
+"game.hdrSdrMap.note" = "通常の映像を明るくして HDR 見た目にします。HDR 対応画面が必要です。映像内の白い文字も明るくなります。次回のゲーム起動時に有効になります。すべてのゲームで通常映像として明るくします。ゲーム本体の HDR を使いたい場合はこの項目をオフにしてください";
 "game.fullscreen.note" = "このデバイスの画面のアスペクト比で画面を埋めます。画像が引き伸ばされる場合は 16:9 に戻ります。次回のゲーム起動時に有効になります";
 "vpad.a11y.locked" = "ロック中";
 "vpad.a11y.selected" = "選択済み";
@@ -408,6 +409,7 @@
 "gfx.filter.fsr" = "FSR";
 "gfx.filter.fsr.noDirect" = "FSR も利用できません。";
 "gfx.hdrUpscaleBypass.note" = "HDR オン（S2A_HDR）の場合、HDR ウィンドウ（RGB10A2 PQ コード値）ではアンチエイリアス、スケーリングフィルター（MetalFX / FSR）、フレーム補間をバイパスします——8 ビットの知覚的スケーリングは PQ コード値に適合しないためです（製品上の制限）。SDR ウィンドウには影響しません。";
+"gfx.hdrSdrMap" = "SDR から HDR へ";
 "gfx.filter.nearest" = "2D ゲーム向け";
 "gfx.fpsLimit" = "フレームレート上限";
 "gfx.fpsLimit.none" = "無制限";
@@ -655,6 +657,8 @@
 "cert.sidestore.empty" = "SideStore から証明書が返ってきませんでした。SideStore で「Export」をタップしてからもう一度お試しください。";
 "cert.sidestore.noReply" = "SideStore から証明書が返ってきませんでした。キャンセルしたか、この SideStore が古くてほかのアプリに証明書を渡せない可能性があります。SideStore をアップデートしてもう一度試すか、証明書を .p12 ファイルとして書き出して読み込んでください。";
 "cert.pickP12" = ".p12 を読み込む…";
+"cert.lc.title" = "LiveContainer の証明書を読み込む";
+"cert.lc.message" = "S2Arm は LiveContainer の中で動いています。SideStore に切り替えると S2Arm が終了し、証明書を受け取れません。LiveContainer をインストールした SideStore または AltStore で署名証明書を .p12 として書き出し（同じ Apple ID のもの）、ここで読み込んでください。";
 "cert.status" = "チーム %1$@ · %2$@";
 "cert.status.otherTeam" = "S2Arm と別の Apple ID";
 "cert.status.replaced" = "無効になりました";

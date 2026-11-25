@@ -222,6 +222,20 @@ static void run_cap(const char *name, int bit, const char *data, const char *cap
     }
     close(pp[1]); ssize_t r = read(pp[0], out, n - 1); out[r > 0 ? r : 0] = 0; close(pp[0]); waitpid(c, NULL, 0); unlink(p); rmdir(dir);
 }
+// ⑮ 有没有一档能开（s2a_cpatch_fps_tier_ok，帧率来源 fps.c 据此判补丁占不占着补帧）：装载后、跟随开之后各读一次
+int s2a_cpatch_fps_tier_ok(void);
+static void run_tier(const char *dir, int pick120, char *out, size_t n) {
+    int pp[2]; pipe(pp); pid_t c = fork();
+    if (c == 0) {
+        close(pp[0]); unsetenv("DM_PRESENT_LINK"); unsetenv("DM_PRESENT_HZ"); unsetenv("S2A_CPATCH_ON"); unsetenv("DM_PRESENT_FI");
+        if (pick120) setenv("S2A_FPS_PICK", "120", 1); else unsetenv("S2A_FPS_PICK");
+        module_t m; memset(&m, 0, sizeof m); snprintf(m.name, sizeof m.name, "%s", "main");
+        m.size = 0x8000; m.base = mmap(NULL, m.size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0); m.key_page_off = 0x4000; m.key_page_size = 0x4000;
+        s2a_cpatch_load(&m, dir); char b[64]; int a = s2a_cpatch_fps_tier_ok(); s2a_cpatch_fps_follow(1);
+        int k = snprintf(b, sizeof b, "装载 %d 开 %d", a, s2a_cpatch_fps_tier_ok()); write(pp[1], b, (size_t)k); _exit(0);
+    }
+    close(pp[1]); ssize_t r = read(pp[0], out, n - 1); out[r > 0 ? r : 0] = 0; close(pp[0]); waitpid(c, NULL, 0);
+}
 int main(void) {
     char dir[] = "/tmp/t_cpatch_levels.XXXXXX"; if (!mkdtemp(dir)) return 1;
     char p[256]; snprintf(p, sizeof p, "%s/cpatch.tsv", dir); FILE *f = fopen(p, "w");
@@ -270,6 +284,24 @@ int main(void) {
     CHECK(!strcmp(got, "0 00 封0 份0 抬0"), "⑭ 上限 30 + 普通帧率补丁：期望 0 00 封0 份0 抬0，实得 %s", got);
     run_cap("60 帧", 6, "40:00:55", NULL, got, sizeof got);
     CHECK(!strcmp(got, "40 55 封0 份60 抬1"), "⑭ 不设上限 + 普通帧率补丁：期望 40 55 封0 份60 抬1，实得 %s", got);
+    // ⑮ 只带 120 档的款（11-25 #502 重判：原生 60 的游戏只有 120 帧补丁，自动档原先按「都超过取最低一档」开了 120，60 Hz 屏上游戏快一倍）。
+    //   表只有 fps:H（目标 120）。期望（手算）：可选档 [120]；自动跟随开 → 不开补丁（位 7 清、0x40 = 00），包里有高于 60 的档、出图链归补丁管 → 链 1、节拍 60；
+    //   玩家选 120 → 开 H（80 77 2 120）；玩家选 60 而各份都超过 → 取最低一档 H（设置页只列 120，玩家选得到的就是它）；关 → 0 00。
+    //   S2A_FPS_PICK=120 起局 → 开 H，按份问 fps:L 不存在 0、fps:H 120
+    {   char d120[] = "/tmp/t_cpatch_120.XXXXXX"; if (!mkdtemp(d120)) return 1;
+        char q[256]; snprintf(q, sizeof q, "%s/cpatch.tsv", d120); FILE *g = fopen(q, "w");
+        fprintf(g, "编号\t模块\t位\t类别\t段名\t许可\t来源\t数据写入\t缺省开\t目标帧率\t画幅\t模式\n");
+        fprintf(g, "fps:H\tmain\t7\t60fps\t120 帧\t\th.pchtxt\t40:00:77\t1\t120\t\t\n");
+        fclose(g);
+        run(d120, 0, got, sizeof got);
+        CHECK(!strcmp(got, "档 1:120 开 0 00 1 60 选120 80 77 2 120 选60 80 77 2 120 关 0 00"), "⑮ 只有 120 档、自动不开：期望 档 1:120 开 0 00 1 60 选120 80 77 2 120 选60 80 77 2 120 关 0 00，实得 %s", got);
+        run(d120, 1, got, sizeof got);
+        CHECK(!strcmp(got, "档 1:120 开 80 77 2 120 份 0 120 关 0 00 份 0 0"), "⑮ 只有 120 档、玩家设置 120 起局：期望 档 1:120 开 80 77 2 120 份 0 120 关 0 00 份 0 0，实得 %s", got);
+        //   有没有一档能开（期望手算）：只有 120 档、自动 → 0 / 0（帧率来源判没有补丁，60 帧开关走补帧）；只有 120 档、玩家选 120 → 1 / 1；60 + 120 两档、自动 → 1 / 1（开 60 档）
+        run_tier(d120, 0, got, sizeof got); CHECK(!strcmp(got, "装载 0 开 0"), "⑮ 只有 120 档、自动：有档能开 期望 装载 0 开 0，实得 %s", got);
+        run_tier(d120, 1, got, sizeof got); CHECK(!strcmp(got, "装载 1 开 1"), "⑮ 只有 120 档、玩家选 120：有档能开 期望 装载 1 开 1，实得 %s", got);
+        run_tier(dir, 0, got, sizeof got); CHECK(!strcmp(got, "装载 1 开 1"), "⑮ 60 + 120 两档、自动：有档能开 期望 装载 1 开 1，实得 %s", got);
+        unlink(q); rmdir(d120); }
     run_snap(dir, got, sizeof got);
     const char *want6 = "关→关 对 关→开 对 开→关 对 开→开 对 非帧率位 对";
     CHECK(!strcmp(got, want6), "⑩ 即时存档恢复后按本进程开关重写：期望 %s，实得 %s", want6, got);

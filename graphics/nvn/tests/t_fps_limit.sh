@@ -62,12 +62,15 @@ run_case() {
     if [[ "$split" == 1 ]]; then name="$name-split"; fi
     if [[ "$flap" == 1 ]]; then name="$name-flap"; fi
     if [[ -n ${FPS_TEST_SLOW_MS:-} ]]; then name="$name-slow${FPS_TEST_SLOW_MS}"; fi
+    # 浮层目标：本测游戏没被抬高，有原生节拍（交换间隔 ≥1、刷新率 >0）时上限不压，目标 = 游戏帧率 hz / 间隔；没有原生节拍时目标 = 上限（11-25 #502）
+    local hud_target=$fps
+    if [[ "$interval" -gt 0 && "$hz" -gt 0 ]]; then hud_target=$((hz / interval)); fi
     local runtime="$out/$name" status=0
     mkdir -p "$runtime"
     local run_env=(env -u NXGAL_BE -u DM_FPS -u DM_DETCLOCK -u DM_DETCLOCK_PACE -u S2A_INPUT_CONFIG -u FPS_TEST_DYNAMIC -u FPS_TEST_RETURN_ONE -u FPS_TEST_DEACTIVATE -u FPS_TEST_FOCUS -u FPS_TEST_STALL -u FPS_TEST_SPLIT -u DM_TEST_LINK_STALL \
         -u MTL_SHADER_VALIDATION -u MTL_SHADER_VALIDATION_DEFAULT_STATE -u MTL_SHADER_VALIDATION_ENABLE_ERROR_REPORTING \
         S2A_GFX=direct S2A_WIDEN_DIRECT=0 S2A_FPS="$fps" S2A_FPS60=0 S2A_GAME_DATA="$runtime" S2A_DOCS="$runtime" \
-        S2A_HUD="$hud" FPS_TEST_HUD="$hud" FPS_TEST_HUD_TARGET="$fps" \
+        S2A_HUD="$hud" FPS_TEST_HUD="$hud" FPS_TEST_HUD_TARGET="$hud_target" \
         S2A_GAME_NAME="S2Arm #604 $name" S2A_INPUT_GUIDE_PREFS="$runtime/input-guide.json" \
         DM_PRESENT_LINK="$link" DM_PRESENT_HZ="$hz" DM_PRESENT_INTERVAL=game MTL_DEBUG_LAYER=1 MTL_DEBUG_LAYER_ERROR_MODE=assert)
     if [[ "$backend" == mtl3 ]]; then run_env+=(NXGAL_BE=mtl3); fi
@@ -83,10 +86,12 @@ run_case() {
         local switches
         switches=$(awk '/present pacing mode/ { frame=$NF; gsub(/[^0-9]/,"",frame); frame+=0; if (frame >= 327 && frame < 436) n++ } END {print n+0}' "$out/$name.log")
         # 逐帧 2↔3：30 Hz 表示不了 50 ms，进阶段立即回 60 Hz 一次，之后不逐帧换档（11-04，原期望 0 次 = 留在 30 Hz）
-        if [[ "$switches" == 1 ]]; then
-            printf 'PASS 逐帧2/3只回60Hz一次：范围setter次数1\n' >> "$out/$name.log"
+        #   回 1 场景：阶段 2 游戏回间隔 1、没被抬高，上限 30 不压（11-25 #502），链路已在 60 Hz，进阶段 3 不用再换档
+        local want_sw=1; [[ "$return_one" != 1 ]] || want_sw=0
+        if [[ "$switches" == "$want_sw" ]]; then
+            printf 'PASS 逐帧2/3换档次数符合：范围setter次数%s\n' "$switches" >> "$out/$name.log"
         else
-            printf 'FAIL 逐帧2/3触发范围setter %s 次，期望1（回60Hz一次）\n' "$switches" >> "$out/$name.log"; status=1
+            printf 'FAIL 逐帧2/3触发范围setter %s 次，期望%s\n' "$switches" "$want_sw" >> "$out/$name.log"; status=1
         fi
     fi
     if [[ "$flap" == 1 ]]; then
@@ -164,8 +169,9 @@ elif [[ ${FPS_STALL_ONLY:-0} == 1 ]]; then
 elif [[ "$high" == 0 ]]; then
     if [[ ${FPS_INTERVAL3_ONLY:-0} != 1 ]]; then
     # 核心24个无窗口场景：原生60/30不被较高上限解除，诊断无锁时分别限制30/60/120。
+    #   上限只压补丁 / 我方帧率表抬上去的那部分（11-25 #502：按帧推进的款压到原生以下就是慢动作）：本测游戏没被抬高，原生 60 + 上限 30 仍按 60
     for cap in 0 30 60 120; do
-        period=16.666667; [[ "$cap" != 30 ]] || period=33.333333
+        period=16.666667
         run_case mtl4 0 nvn "$cap" 1 60 "$period" 0
         run_case mtl4 0 vk "$cap" 1 60 "$period" 0
         period=0; [[ "$cap" == 0 ]] || period=$(awk -v cap="$cap" 'BEGIN { printf "%.6f", 1000 / cap }')
@@ -182,15 +188,16 @@ elif [[ "$high" == 0 ]]; then
     # 取图与上屏分在两个线程（11-02 牧场物语：主线程取图、渲染线程上屏）：节拍跟着出帧的取图线程，原生 60 帧不解除
     run_case mtl4 0 nvn 0 1 60 16.666667 0 0 0 0 0 0 0 1
     # 10个真实30Hz链接场景：interval1/2不叠加成15帧。
+    #   interval1 + 上限 30：本测游戏没被补丁 / 帧率表抬高，上限不压原生 60（11-25 #502），按 16.7 ms；interval2 仍走真实 30 Hz 链接
     for backend in mtl4 mtl3; do
         for api in nvn gl vk; do
-            run_case "$backend" 1 "$api" 30 1 60 33.333333 1
+            run_case "$backend" 1 "$api" 30 1 60 16.666667 1
             if [[ "$api" != vk ]]; then run_case "$backend" 1 "$api" 30 2 60 33.333333 1; fi
         done
     done
-    # 6个HUD场景：真实200ms停顿，目标30、慢帧分子/108个真实间隔。
+    # 6个HUD场景：真实200ms停顿，慢帧分子/108个真实间隔（游戏间隔 1 没被抬高，上限 30 不压，按 16.7 ms，11-25 #502）。
     for backend in mtl4 mtl3; do
-        for api in nvn gl vk; do run_case "$backend" 1 "$api" 30 1 60 33.333333 1 1; done
+        for api in nvn gl vk; do run_case "$backend" 1 "$api" 30 1 60 16.666667 1 1; done
     done
     fi
     # interval3原生20fps不被自动30Hz取整为两拍(66.7ms)，30上限也不能改变50ms。

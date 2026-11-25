@@ -62,6 +62,9 @@ touched() { local f p; [ -z "${GATE_CHANGED:-}" ] && return 0; for f in $GATE_CH
 #   只在本批改到它们或它们调的远端分发脚本时跑；GATE_CHANGED 为空（全跑 / 合入后钩子）照旧跑
 need_shdist() { touched graphics/tools/shbake/ graphics/metal/tools/unity_check.py tools/remote.sh tools/machine.sh tools/safe_killpg.sh tools/toolchain.sh tools/tt_env.; }   # tools/tt_env.*：metal-tt 查询缓存后缀入口（pso_chunk 用）
 need_dsh() { touched graphics/tools/direct/ translator/ graphics/nvn/gfx/nvn/dmsh_chain.h; }   # 10-25 起考卷由被测树的离线链现出：改离线链也要对拍（原先离线链改了不跑，等下次出库把生产缓存里的考卷换掉才在别人的批里红）
+# dsh 收卡死按进展、不按固定墙钟（11-25）：原先 timeout 300，空闲门禁主机均 136 秒，本机门禁（taskpolicy -c utility + 高负载）11-22 起 6 次在 495–726 秒的
+#   钩子里被掐在不同位置（日志停在 ⑥ / ⑦ / ⑩ / ⑫，前面全 ✓、没有结论行），换空闲主机复跑绿。改为 dsh.log DSH_IDLE_S 秒不长才收、总时长 DSH_HARD_S 封顶（退出码同 timeout 的 124）。
+#   无进展上限 600：本机负载 17、utility 下实测整份 215 秒、最长一段 177 秒不出新行（一段里编几百键才打一行），负载 50 时同一段可到三倍
 need_dsh_vk() { touched graphics/tools/direct/dsh/ graphics/tools/direct/tests/dsh_vk/ graphics/tools/direct/tests/t_dsh_vk.sh translator/dmsh_xlate/ graphics/third_party/spirv_cross/ compat/tree/src/Ryujinx.Graphics.Shader/ graphics/dsx/gal_colorround. graphics/dsx/gal_spvx. graphics/dsx/gal_spill. graphics/dsx/gal_log.h graphics/metal/gal_abi.h graphics/metal/Makefile graphics/gate.sh; }   # 出包 Vulkan 产物单测（#783）：要编 S2A.Dsh，只在改到它 / 翻译器 / SPIRV-Cross 时跑
 need_dsh_vklib() { need_dsh_vk || touched graphics/tools/direct/vklib/ graphics/tools/direct/tests/dsh_vklib/ graphics/tools/direct/tests/t_dsh_vklib.sh graphics/tools/direct/tests/t_vklib_exit.py translator/dmsh_chain.py pack/stage_inputs/direct.tsv; }   # 出包 Vulkan 独立入口单测（#783）：同 dsh_vk 的条件，外加改到 vklib 工程与它的单测；它还核苹果侧指纹不含 vklib/，改 xlate_fp 清单 / 直连阶段键时也跑
 need_gl() { touched graphics/nvn/gfx/gl/ graphics/nvn/tests/gl/ translator/gl_shaders.py translator/mbundle.py graphics/third_party/glslang/ graphics/third_party/spirv_cross/; }
@@ -293,7 +296,7 @@ if [ -n "${GATE_ONLY:-}" ]; then
   if has "$GATE_ONLY" shared_gpu_contract; then run_shared_gpu_contract; r=$?; out="${out:+$out / }共享 GPU 合同 $(tail -1 "$LOG/shared_gpu_contract.log")（退出 ${r}）"; [ "$r" = 0 ] || ok=0; fi
   if has "$GATE_ONLY" vulkan_diag; then run_vulkan_diag; r=$?; out="${out:+$out / }Vulkan 诊断默认值 $(tail -1 "$LOG/vulkan_diag.log")（退出 ${r}）"; [ "$r" = 0 ] || ok=0; fi
   if has "$GATE_ONLY" dsh && ! need_dsh; then out="${out:+$out / }直连兜底现编对拍：本批没改到 graphics/tools/direct，不跑"
-  elif has "$GATE_ONLY" dsh; then gpu_share dsh timeout 300 bash graphics/tools/direct/tests/t_dsh.sh > "$LOG/dsh.log" 2>&1; d=$?; out="${out:+$out / }直连兜底现编对拍 $(tail -1 "$LOG/dsh.log")（退出 ${d}）"; ev $d "$LOG/dsh.log" || ok=0; fi
+  elif has "$GATE_ONLY" dsh; then gpu_share dsh bash tools/idle_timeout.sh "${DSH_IDLE_S:-600}" "${DSH_HARD_S:-1800}" "$LOG/dsh.log" -- bash graphics/tools/direct/tests/t_dsh.sh > "$LOG/dsh.log" 2>&1; d=$?; out="${out:+$out / }直连兜底现编对拍 $(tail -1 "$LOG/dsh.log")（退出 ${d}）"; ev $d "$LOG/dsh.log" || ok=0; fi
   if has "$GATE_ONLY" gl && ! need_gl; then out="${out:+$out / }OpenGL 前端最小绘制：本批没改到 GL 前端，不跑"
   elif has "$GATE_ONLY" gl; then
     gpu_share gl timeout 120 bash graphics/nvn/tests/gl/t_gl_min.sh > "$LOG/gl.log" 2>&1; g=$?; out="${out:+$out / }OpenGL 前端最小绘制 $(tail -1 "$LOG/gl.log")（退出 ${g}）"; ev $g "$LOG/gl.log" || ok=0
@@ -378,7 +381,7 @@ vk_job() { run_vk; local r=$?; printf '%s\n' "$FNRED" > "$JOBD/vk.fnred"; echo "
 lane_native() {
   LANE=native
   [ "$DSXPRE" = 1 ] && waitfor dsx_prebuild   # build/dsx 编齐之后本道的 make 才是空转（见金属道开头）
-  ! has "${GATE_SKIP:-}" dsh && need_dsh && job dsh timeout 300 bash graphics/tools/direct/tests/t_dsh.sh
+  ! has "${GATE_SKIP:-}" dsh && need_dsh && job dsh bash tools/idle_timeout.sh "${DSH_IDLE_S:-600}" "${DSH_HARD_S:-1800}" "$LOG/dsh.log" -- bash graphics/tools/direct/tests/t_dsh.sh
   need_dsh_vk && job dsh_vk timeout 300 bash graphics/tools/direct/tests/t_dsh_vk.sh
   need_dsh_vklib && job dsh_vklib timeout 300 bash graphics/tools/direct/tests/t_dsh_vklib.sh
   if has "$RUNG" direct_link; then

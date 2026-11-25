@@ -49,6 +49,7 @@ uint64_t s2a_program_id(void);
 uint64_t s2a_process_id(void);
 const s2a_layout *s2a_layout_get(void);
 uint64_t s2a_main_base(void);          // 主程序模块装载基址（未装载 = 0）：金手指 main 区
+uint64_t s2a_ap_frames(void);          // 本局已上屏帧数（runtime/src/ap_host.c；进程内重建开新一局清零）：金手指首帧后才执行（Cheats.cs）
 uint64_t s2a_main_region_va(uint64_t off);   // 金手指 main 区偏移按 Horizon 模块排布换成真实地址（超出起局模块 = 0）：Cheats.cs
 const char *s2a_main_build_id(void);   // 主程序构建号（十六进制串，没有 = 空串）
 void s2a_cheats_host_enable(void);     // 宿主有金手指界面（ios/vpad_cheats.m）时装载期登记

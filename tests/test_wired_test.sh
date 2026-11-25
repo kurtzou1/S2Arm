@@ -79,6 +79,9 @@ ck "⑤ 门禁摘要包装的真调用仍接线" '[ $r2 = 0 ] && grep -Fq "扫 1
 printf '"${S2A_PY:-python3}" tools/nostall.py 300 -- python3 graphics/a/tests/t_alpha.py\n' > "$Q/graphics/gate.sh"
 o2=$(fixture_lint "$H/tools/test_wired_lint.py" "$Q" 2>&1); r2=$?
 ck "⑤ 无进展看门狗包装的真调用仍接线" '[ $r2 = 0 ] && grep -Fq "扫 1 支单测：门禁调到 1、白名单 0、没接线 0" <<< "$o2"'
+printf 'bash tools/idle_timeout.sh "${X_IDLE_S:-600}" 1800 "$LOG/x.log" -- python3 graphics/a/tests/t_alpha.py\n' > "$Q/graphics/gate.sh"
+o2=$(fixture_lint "$H/tools/test_wired_lint.py" "$Q" 2>&1); r2=$?
+ck "⑤ idle_timeout 包装的真调用仍接线" '[ $r2 = 0 ] && grep -Fq "扫 1 支单测：门禁调到 1、白名单 0、没接线 0" <<< "$o2"'
 printf 's2a_gate_step echo python3 graphics/a/tests/t_alpha.py\n' > "$Q/graphics/gate.sh"
 o2=$(fixture_lint "$H/tools/test_wired_lint.py" "$Q" 2>&1); r2=$?
 ck "⑤ 包装的文字提及不是调用" '[ $r2 = 1 ] && grep -Fq "graphics/a/tests/t_alpha.py 没有门禁脚本调它" <<< "$o2"'

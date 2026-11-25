@@ -67,6 +67,16 @@ static NSString *file_safe(NSString *s) {
     return o.length ? o : @"s2arm";
 }
 
+BOOL s2a_diag_collect_index(NSString *root, NSString *gid, NSString *W, NSUInteger cap, NSString *(^redact)(NSString *), NSMutableArray *files) {
+    NSString *src = [root stringByAppendingPathComponent:@"index.tsv"];
+    if (!root.length || ![NSFileManager.defaultManager fileExistsAtPath:src]) return YES;
+    NSString *rel = gid.length ? [NSString stringWithFormat:@"logs/index_%@.tsv", file_safe(gid)] : @"logs/index.tsv";
+    [NSFileManager.defaultManager createDirectoryAtPath:[W stringByAppendingPathComponent:@"logs"] withIntermediateDirectories:YES attributes:nil error:nil];
+    NSDictionary *r = copy_text(src, [W stringByAppendingPathComponent:rel], cap, redact); if (!r) return NO;
+    [files addObject:@{@"path": rel, @"bytes": r[@"bytes"], @"truncated": r[@"truncated"]}];
+    return YES;
+}
+
 // ---------- 收成员 ----------
 // D：Documents 根；W：工作目录（调用方已建好 W/logs）；cap：每份日志上限（字节）；slim：去掉 frames.tsv / threads.txt / 最早那次会话（超 30 MB 时退一档）
 BOOL s2a_diag_collect(NSString *D, NSString *W, NSUInteger cap, BOOL slim, NSString *(^redact)(NSString *),

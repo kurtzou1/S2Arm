@@ -130,6 +130,11 @@ char *s2a_shell_game_options_json(const char *game_id) {
             for (NSString *l in [caps componentsSeparatedByString:@"\n"]) if ([l hasPrefix:@"fps60\t0"]) fps[@"note"] = S2AL(@"settings.fps.knownIssue");
         }
         BOOL fs = NO; int blocked = s2a_ios_fullscreen_state(gid, &fs);
+        // S4「SDR 转 HDR」（#625 第二阶段 PR-B，评审终稿：只放这一处——App 设置页不出行；#1252「开局前选好进游戏直接生效」
+        //   先例口径，布尔行类型照 fps60 行同款接入）：没拨过 = 关（缺省关，字节级回现状）；title / note 都在这边给
+        //   （已按当前语言，note = 维护者终稿整句——技术细节在 docs/画面设置.md），Swift 壳只画不译
+        NSMutableDictionary *hdrSdrMap = [@{@"on": @(s2a_ios_hdr_sdr_map_on_for(gid)), @"enabled": @YES,
+                                             @"title": S2AL(@"gfx.hdrSdrMap"), @"note": S2AL(@"game.hdrSdrMap.note")} mutableCopy];
         NSMutableDictionary *full = [@{@"on": @(fs), @"enabled": @(!blocked), @"note": blocked ? S2AL(@"settings.widen.blocked") : S2AL(@"game.fullscreen.note")} mutableCopy];   // 下面补丁结果可能追加
         NSArray<S2ACPatchGroup *> *groups = patch_groups(gid);
         // 补丁优先（11-13 维护者，同整页设置 app_settings.m）：带帧率补丁的款「60 帧」改名「帧率」、写补丁目标，原生 60 帧也不再锁死（补丁可以到 120）；
@@ -180,16 +185,18 @@ char *s2a_shell_game_options_json(const char *game_id) {
         NSString *device = [ad isKindOfClass:NSString.class] && [@[@"builtin", @"headphones", @"external"] containsObject:ad] ? ad : @"auto";
         id vsS = [d objectForKey:@"S2AAudioVsSpeakers"], vsH = [d objectForKey:@"S2AAudioVsHeadphones"];
         return dup_json(@{@"fps": fps, @"fullscreen": full, @"patches": patches, @"cheats": cheats, @"volume": @(volume), @"language": game_language_json(gid, d),
-                          @"audio": @{@"device": device, @"vsSpeakers": @([vsS boolValue]), @"vsHeadphones": @([vsH boolValue])}});
+                          @"audio": @{@"device": device, @"vsSpeakers": @([vsS boolValue]), @"vsHeadphones": @([vsH boolValue])},
+                          @"hdrSdrMap": hdrSdrMap});
     }
 }
 
-// kind = fps / fpspick / fullscreen / patch / cheat / volume / language / audiodevice / audiovs；key = 补丁编号 / 「文件名/条目名」（fps、fullscreen 不看）。返回 1 存成 / 0 没存成
+// kind = fps / fpspick / fullscreen / patch / cheat / volume / language / audiodevice / audiovs / hdrsdrmap；key = 补丁编号 / 「文件名/条目名」（fps、fullscreen、hdrsdrmap 不看）。返回 1 存成 / 0 没存成
 int s2a_shell_game_option_set(const char *game_id, const char *kind, const char *key, int on) {
     @autoreleasepool {
         if (!gid_ok(game_id) || !kind) return 0;
         NSString *gid = @(game_id), *k = @(kind), *item = key ? @(key) : @"";
         if ([k isEqual:@"fps"]) { s2a_ios_set_fps60_for(gid, on != 0); return 1; }
+        if ([k isEqual:@"hdrsdrmap"]) { s2a_ios_set_hdr_sdr_map_for(gid, on != 0); return 1; }   // S4「SDR 转 HDR」（#625 第二阶段 PR-B，评审终稿：只放每款设置页）：按款布尔行，同 fps 行形态；下次起局 settings.m 只落 S2A_HDR_SDR_MAP（不联动 S2A_HDR）
         if ([k isEqual:@"volume"]) { [s2a_ios_settings_defaults_for(gid) setInteger:MAX(0, MIN(100, item.integerValue)) forKey:@"S2AGameVolume"]; return 1; }   // 游戏音量：key = 百分比，on 不看（#1186）
         if ([k isEqual:@"audiodevice"]) {   // 输出设备类型：key = builtin / headphones / external，"auto" = 未选择（删掉这款的值），on 不看（#189 后续，5.1 虚拟环绕第二片）
             if (![item isEqual:@"auto"] && ![item isEqual:@"builtin"] && ![item isEqual:@"headphones"] && ![item isEqual:@"external"]) return 0;

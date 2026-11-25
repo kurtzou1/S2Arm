@@ -49,6 +49,12 @@ struct cp_cheat { module_t *m; _Atomic uint64_t *slot; char *file, *name, *spec;
 static struct cp_cheat *g_ch; static int g_nch, g_cch;
 static pthread_mutex_t g_ch_lock = PTHREAD_MUTEX_INITIALIZER;
 int s2a_cpatch_fps_count(void) { return atomic_load(&g_nfps); }
+// 有没有一档能开（fps_pick > 0）：帧率来源（runtime/src/fps.c s2a_fps_real_source）按它判「社区帧率补丁是真帧率来源」，不按收了几份——
+//   11-25：只带 120 档的款自动档不开补丁，原先按份数判成「补丁占着」，补帧每帧让路，60 帧开关什么都不生效。装载、跟随、切档、屏幕变化时重算
+static _Atomic int g_tier_ok;
+int s2a_cpatch_fps_tier_ok(void) { return atomic_load(&g_tier_ok); }
+static int fps_pick(void);
+static void tier_note(void) { atomic_store(&g_tier_ok, fps_pick() > 0); }
 // 自适应画幅（编号 wsauto:<族>:w / :n，pack/cpatch.py adapt_families；11-12 夜）：一族按画幅生成的宽屏补丁合成的宽 / 窄两套模板。开关按族（S2A_CPATCH_ON 里写 wsauto:<族>），
 //   当前画幅 A（宽 ÷ 高）比 16:9 宽开宽模板、窄开窄模板、正好 16:9 两份都关；数据写入里「@<式><字节数>」按 A 算（a = A、w = A÷(16/9)、n = (16/9)÷A、i = 1÷A，4 字节单精度 / 8 字节双精度；
 //   x = 渲染宽度整数 CP_RES_H × A 取偶，只 4 字节），
@@ -87,7 +93,7 @@ void s2a_cpatch_session_reset(void) {
     free(g_fx); g_fx = NULL; g_nfx = g_cfx = 0; g_fx_aspect = 0;
     pthread_mutex_unlock(&g_ad_lock);
     for (int i = 0; i < g_nfu; i++) free(g_fu[i].spec);
-    memset(g_fu, 0, sizeof g_fu); g_nfu = g_nfud = 0; atomic_store(&g_nfps, 0); g_fps_target = 0; g_fps_on = -1; g_fps_want = 0;
+    memset(g_fu, 0, sizeof g_fu); g_nfu = g_nfud = 0; atomic_store(&g_nfps, 0); atomic_store(&g_tier_ok, 0); g_fps_target = 0; g_fps_on = -1; g_fps_want = 0;
     memset(g_slotm, 0, sizeof g_slotm); g_nslotm = 0; g_fl30 = 0;
 }
 
@@ -426,6 +432,7 @@ static void cpatch_load_stream(module_t *m, FILE *f) {
     }
     if (cheat_mods) LOG("金手指：%s 编进包 %d 条（缺省关，局内逐条开关）", m->name, cheat_mods);
     for (int i = fu0; i < g_nfu; i++) g_fu[i].slot = (_Atomic uint64_t *)((uint64_t *)page + CP_SLOT);
+    tier_note();   // 帧率类分到槽位后才算能开（fps_pick 只认有槽的）
 }
 void s2a_cpatch_load(module_t *m, const char *dir) {
     if (!g_tables_dir[0] && dir) { snprintf(g_tables_dir, sizeof g_tables_dir, "%s", dir); seed_cheats(dir); }   // 主程序（第一个装载的模块）的表目录
@@ -555,9 +562,12 @@ static void fps_link(int on) {   // on = 选中档高于 60（开高刷）；包
     LOG("社区补丁：帧率补丁目标 %d 帧，%s", g_fps_target, on ? "出图链放开到 60–120 Hz、出图节拍跟到补丁目标（补丁优先，盖过我方 60 帧）" : "关了，出图链与出图节拍回 60 Hz");
 }
 // 选档（11-13 维护者：60 / 120 都带进去，玩家自己切）：能开的各份里，玩家选了档（S2A_FPS_PICK / s2a_cpatch_fps_pick）就取它，没有这一档取不超过它的最高一档；
-//   没选（自动）取不超过 60 的最高一档（屏幕不到 60 Hz 按屏幕）；都超过就取最低一档。取不到目标的（0）当 60 档。→ 选中的目标帧率；没有能开的 → 0
+//   没选（自动）取不超过 60 的最高一档（屏幕不到 60 Hz 按屏幕），都超过就不开（0）；玩家选了档而各份都超过它，取最低一档。取不到目标的（0）当 60 档。
+//   → 选中的目标帧率；没有能开的 → 0
 //   自动不上 120（11-16 #1285）：原先自动取「不超过屏幕刷新率的最高一档」，120 Hz 的 iPhone 上织梦岛自动开了 120 帧补丁（作者标 WIP），
-//   游戏逻辑按 120 帧推进、机器只跑得到 59.5 帧，玩家看到的是半速慢动作。120 档要机器真跑得满 120，交给玩家自己选
+//   游戏逻辑按 120 帧推进、机器只跑得到 59.5 帧，玩家看到的是半速慢动作。120 档要机器真跑得满 120，交给玩家自己选。
+//   11-25 #502 重判：只带 120 档补丁的款（原生 60 的派对游戏、重制版射击游戏），自动档原先按「都超过取最低一档」照样开了 120——60 Hz 屏上出图 60 → 120、
+//   游戏逻辑跟着快一倍。自动档不再兜底到高于上限的档：不开补丁，60 帧开关照常走补帧（fi_wanted）
 __attribute__((weak)) int front_screen_max_fps(void) { return 0; }   // macos/front_mac.m 强定义（只 Mac 宿主有）；单测 / iOS 用这个弱的（0 = 不知道，按 60）
 #if defined(__APPLE__) && TARGET_OS_IPHONE
 int s2a_ios_screen_max_fps(void);
@@ -580,7 +590,7 @@ static int fps_pick(void) {
         if (t <= cap && t > best) best = t;
         if (!low || t < low) low = t;
     }
-    return best ? best : low;
+    return best ? best : want > 0 ? low : 0;
 }
 // 可选档位（设置页列「帧率」档用）：能开的各份的目标帧率，去重升序写进 out（最多 n 个）→ 个数；cur 填当前选中档（没跟随过按默认算）
 int s2a_cpatch_fps_levels(int *out, int n, int *cur) {
@@ -623,6 +633,7 @@ static int cap30(void) { const char *e = getenv("S2A_FPS"); int v = e && *e ? at
 // 帧率被补丁抬高了没有（直连层 nvn_fps.c 据此决定玩家上限管不管用：没抬高时不压游戏自己请求的出图率，压下去按帧推进的款就慢）：有帧率补丁的位真开着
 int s2a_cpatch_fps_engaged(void) { for (int i = 0; i < g_nfu; i++) if (g_fu[i].slot && (atomic_load(g_fu[i].slot) & g_fu[i].bits) == g_fu[i].bits) return 1; return 0; }
 void s2a_cpatch_fps_follow(int on) {
+    tier_note();
     int force = on && cap30(), tier = force ? fps_pick() : 0; const char *tgrp = force ? fps_group_pick(tier) : NULL;
     if (force) { on = 0; if (g_fps_on != 0 || !g_fl30) LOG("社区补丁：帧率上限 30 且 60 帧开，这局按 30 帧档跑（FPSLocker 配置开着按 30 写；别的帧率补丁不开）"); }
     int force_fl = 0; for (int i = 0; force && i < g_nfu; i++) if (g_fu[i].slot && g_fu[i].fl && fps_chosen(&g_fu[i], 1, tier, tgrp)) force_fl = 1;   // 上限 30：选中档里有 FPSLocker 配置才按 30 帧档跑，没有就是原版
@@ -670,6 +681,8 @@ void s2a_cpatch_fps_follow(int on) {
     // 60 帧开关开着、包里却没有可用的帧率补丁（11-15 #934：日志「本局 60 帧开」只说明开关，玩家据此以为在 60 帧）：写明实际怎么跑
     if (!g_nfu && on) { static int said; const char *fi = getenv("DM_PRESENT_FI");
         if (!said++) LOG("社区补丁：60 帧开关开着，但包里没有可用的帧率补丁——%s", fi && !strcmp(fi, "1") ? "改用补帧（画面插帧到 60，游戏逻辑仍按原帧率）" : "按游戏原帧率跑"); }
+    if (g_nfu && on && !pick) { int lv[8], n = s2a_cpatch_fps_levels(lv, 8, NULL); LOG("社区补丁：帧率补丁只有高于 60 帧的档（最低 %d 帧），自动档不开（120 档要玩家自己选）——%s",
+        n > 0 ? lv[0] : 0, getenv("DM_PRESENT_FI") && !strcmp(getenv("DM_PRESENT_FI"), "1") ? "改用补帧（画面插帧到 60，游戏逻辑仍按原帧率）" : "按游戏原帧率跑"); }
     if (g_nfu && on && pick) LOG("社区补丁：帧率档 %d 帧（%s；屏幕最高 %d Hz）", pick, g_fps_want || getenv("S2A_FPS_PICK") ? "玩家选的" : "自动：不超过 60 帧的最高一档（120 档要玩家自己选）", screen_max_hz());
     if (g_nfu && on && pick && grp) LOG("社区补丁：这一档只开一组（组 %s，同档别的上游补丁不叠开）", grp);
     pthread_mutex_lock(&g_st_lock); int any = 0;
@@ -733,12 +746,13 @@ int s2a_cpatch_stall_rescue(void) {
 }
 // 玩家切档（设置页 / 局内菜单）：记下选的档；已在跟随（帧率补丁开着）就当场重选并切换，下一帧生效
 void s2a_cpatch_fps_pick(int target) {
-    g_fps_want = target > 0 ? target : 0;
+    g_fps_want = target > 0 ? target : 0; tier_note();
     if (g_fps_on > 0) s2a_cpatch_fps_follow(1);
 }
 // 屏幕最高刷新率刚知道 / 变了（Mac 宿主 macos/front_mac.m screen_fps_note：建窗、换屏时调）：自动档（玩家没选、起局也没给 S2A_FPS_PICK）按新屏幕重挑。
 //   起局选档早于建窗，那时屏幕刷新率还不知道按 60 算，120 Hz 的 Mac 自动档永远落在 60（11-15 v0.4.0 自测：「帧率档 60 帧（默认…屏幕最高 60 Hz）」之后才「窗口所在屏最高刷新 120 Hz」）
 void s2a_cpatch_screen_changed(void) {
+    tier_note();
     if (g_fps_on <= 0 || g_fps_want || getenv("S2A_FPS_PICK")) return;
     if (fps_pick() != g_fps_target) s2a_cpatch_fps_follow(1);
 }

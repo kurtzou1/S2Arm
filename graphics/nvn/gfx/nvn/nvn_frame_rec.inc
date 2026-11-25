@@ -297,6 +297,7 @@ static int fr_blit_planes(id<MTLTexture> t, const fr_tex_hd *hd, id<MTLBuffer> b
 } }
 static NSUInteger fr_slices(id<MTLTexture> t) { NSUInteger s = t.arrayLength ? t.arrayLength : 1; return t.textureType == MTLTextureTypeCube || t.textureType == MTLTextureTypeCubeArray ? s * 6 : s; }
 // gpu.bin：[FR_GPU_MAGIC][fr_tex_hd, 内容]…；返回存了几张。*skipped 只剩：缓冲 / 父贴图视图之外、确实存不了的（含模板的多重采样、多重采样数组、没有 ShaderRead 的多重采样、> 256 MB、不认的格式）
+void s2a_snap_progress(const char *layer) __attribute__((weak));   // runtime/src/snapshot.c（nvn_snap.inc 同声明）
 static int fr_dump_gpu(const char *path, uint64_t *bytes, int *skipped) {
     FILE *f = fopen(path, "wb"); if (!f) return -1;
     uint32_t mg = FR_GPU_MAGIC; if (!fr_w(f, &mg, 4)) { fclose(f); return -1; }
@@ -306,7 +307,7 @@ static int fr_dump_gpu(const char *path, uint64_t *bytes, int *skipped) {
     pthread_mutex_unlock(&g_smu);
     size_t n = objs.count;
     int saved = 0; *bytes = 0; *skipped = 0;
-    for (size_t k = 0; k < n; k++) {
+    for (size_t k = 0; k < n; k++) { @autoreleasepool {   // 每张一个自动释放池（同 nvn_snap.inc snap_dump_tex）
         id o = objs[k]; if (![o conformsToProtocol:@protocol(MTLTexture)]) continue;
         id<MTLTexture> t = o;
         if (!(t.usage & (MTLTextureUsageRenderTarget | MTLTextureUsageShaderWrite)) || t.buffer || t.parentTexture) continue;
@@ -328,8 +329,9 @@ static int fr_dump_gpu(const char *path, uint64_t *bytes, int *skipped) {
         int ok = hd.kind == FR_TK_MS ? fr_ms_read(t, b) : fr_blit_planes(t, &hd, b, 1);
         if (!ok) { (*skipped)++; continue; }
         if (!fr_w_tex(f, &hd, b.contents, tot)) { fclose(f); return -1; }
+        if (s2a_snap_progress) s2a_snap_progress(NULL);   // 存档看门狗心跳 + 逐层实占采样（逐张回读的长循环；帧录调到时无副作用）
         *bytes += tot; saved++;
-    }
+    } }
     return fclose(f) == 0 ? saved : -1;
 }
 

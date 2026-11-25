@@ -19,6 +19,8 @@ void rp_buf_reset(void);
 void rp_shader_reset(void);            // 着色器来源（核心外）
 #include <pthread.h>
 #include <stdatomic.h>
+#include <sys/mman.h>   // mincore：池尾之后那段在不在映射里（nvn_be_pool_cover）
+#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -160,6 +162,18 @@ void nvn_be_pool_add(const void *mem, uint64_t size) {
         __atomic_add_fetch(&g_pool_epoch, 1, __ATOMIC_RELEASE);
     }
     else { pthread_mutex_unlock(&g_mu); nvn_unimpl("limit", "pool_table_full_4096", mem); return; }
+    pthread_mutex_unlock(&g_mu);
+}
+// 池上伸出池尾的缓冲对象（D-6VG6，同 nvn_mtl.m nvn_be_pool_cover）：把这个池在本后端的登记扩到 [mem, mem + need)，越过池尾的访问落在池存储之后同一处内存（真机语义）。
+//   本表注销只删第一个同起点的条目，所以原地加长那一条，不另登记。池尾之后那段须整段映射着（mincore 每页都认），否则不扩、记一笔（读写会 SIGSEGV）
+void nvn_be_pool_cover(const void *mem, uint64_t size, uint64_t need) {
+    if (!mem || need <= size) return;
+    uintptr_t pg = (uintptr_t)getpagesize(), a = ((uintptr_t)mem + size) & ~(pg - 1), e = ((uintptr_t)mem + need + pg - 1) & ~(pg - 1);
+    for (uintptr_t p = a; p < e; p += pg) { unsigned char v[1]; if (mincore((void *)p, pg, (void *)v)) { nvn_unimpl("limit", "pool_cover_tail_unmapped", mem); return; } }
+    pthread_mutex_lock(&g_mu);
+    for (int i = 0; i < g_npool; i++) if (g_pool[i].mem == mem) {
+        if (g_pool[i].size < need) { g_pool[i].size = need; pool_maxend_recompute(); __atomic_add_fetch(&g_pool_epoch, 1, __ATOMIC_RELEASE); }
+        break; }
     pthread_mutex_unlock(&g_mu);
 }
 void nvn_be_pool_del(const void *mem) {

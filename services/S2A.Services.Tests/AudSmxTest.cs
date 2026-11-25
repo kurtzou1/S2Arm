@@ -191,6 +191,22 @@ namespace S2A.Services.Tests
                 Check("audsmx OpenStream PcmFloat / 2 声道 / 48 kHz / 960 帧；CloseStream", "结果 0x0；0x0", $"结果 0x{os3:X}；0x{cl3:X}");
                 Msg del3 = Msg.Cmif(0); del3.DomainRequestType = 2; D(del3, stream3);
 
+                // 外部流 11 PurgeStream（in s32 帧数 @0，0 = 全清；out s32 清掉的帧数 @0）：D-BPWY 生化危机 4 GOLD 调它，原先未实现回错就 Abort。
+                //   期望按环手算（容量 961）：写 300 清全部 → 300、读指针 300；再写 500（写指针 800）清 200 → 200、读指针 500；清全部 → 300、读指针 800；空了清 50 → 0
+                byte* work4 = SmxWorkBuffer();
+                Msg cs4 = Msg.Cmif(1, Bytes(1u, 0x24u, 0x1234UL, (ulong)work4, (ulong)SmxWorkSize)); cs4.SendPid = true; cs4.A.Add(((ulong)buf, (ulong)nameLen));
+                int stream4 = *(int*)(D(cs4, userSession).Data + 4);
+                uint os4 = D(Msg.Cmif(0, Bytes(2u, 2, 48000, SmxFrames, 0, 0u)), stream4).Result;
+                string Purge(int frames) { Reply r = D(Msg.Cmif(11, Bytes(frames)), stream4); return $"0x{r.Result:X}/{(r.Result == 0 ? *(int*)r.Data : -1)}/{*(uint*)(work4 + 0x44)}"; }
+                SmxClientWrite(work4, 0, 300, Pattern);
+                string p1 = Purge(0);
+                SmxClientWrite(work4, 300, 500, Pattern);
+                string p2 = Purge(200), p3 = Purge(0), p4 = Purge(50);
+                uint cl4 = D(Msg.Cmif(1), stream4).Result;
+                Check("audsmx IExternalStreamSession 11 PurgeStream（结果/清掉帧数/读指针）：写 300 清全部；再写 500 清 200；清全部；空了清 50",
+                    $"开 0x0；0x0/300/300；0x0/200/500；0x0/300/800；0x0/0/800；关 0x0", $"开 0x{os4:X}；{p1}；{p2}；{p3}；{p4}；关 0x{cl4:X}");
+                Msg del4 = Msg.Cmif(0); del4.DomainRequestType = 2; D(del4, stream4);
+
                 // 负例：SDK 输出路径从不发的取值、开局路径不走的命令，一律报红、回未知命令
                 byte* work2 = SmxWorkBuffer();
                 Msg cs2 = Msg.Cmif(1, Bytes(1u, 0x24u, 0x1234UL, (ulong)work2, (ulong)SmxWorkSize)); cs2.SendPid = true; cs2.A.Add(((ulong)buf, (ulong)nameLen));

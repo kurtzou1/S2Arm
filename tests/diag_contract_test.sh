@@ -17,7 +17,7 @@ cat > "$T/main.m" <<'M'
 #include "diagzip.h"
 #include "diagredact.h"
 int main(int argc, char **argv) { @autoreleasepool {
-    if (argc != 4) return 2;
+    if (argc != 4 && argc != 6) return 2;
     NSString *D = @(argv[1]), *W = @(argv[2]);
     [NSFileManager.defaultManager createDirectoryAtPath:[W stringByAppendingPathComponent:@"logs"] withIntermediateDirectories:YES attributes:nil error:nil];
     NSMutableArray *files = [NSMutableArray array], *sessions = [NSMutableArray array]; int crash = 0, hang = 0, exits = 0;
@@ -27,6 +27,9 @@ int main(int argc, char **argv) { @autoreleasepool {
         ^NSDictionary *(NSString *p, NSString *n, BOOL cur) { (void)p; (void)n; (void)cur; return (NSDictionary *)nil; },
         files, sessions, &crash, &hang, &exits);
     if (!ok) { fprintf(stderr, "s2a_diag_collect 失败\n"); return 1; }
+    // 出问题那款的资源包索引（diag.m 按 pack_root / title_id 调；资源包根不在 Documents 下，多款容器 v0.3.0 起在 Library）
+    if (argc == 6 && !s2a_diag_collect_index(@(argv[4]), @(argv[5]), W, 8u << 20,
+        ^NSString *(NSString *s) { char *c = s2a_diag_redact(s.UTF8String); if (!c) return (NSString *)nil; NSString *r = @(c); free(c); return r; }, files)) { fprintf(stderr, "s2a_diag_collect_index 失败\n"); return 1; }
     // manifest.json 由 diag.m 写（要 UIKit / Bundle）：这里放收件要的最小一份
     [@"{\"schema\": 1}" writeToFile:[W stringByAppendingPathComponent:@"manifest.json"] atomically:NO encoding:NSUTF8StringEncoding error:nil];
     return s2a_write_zip(W, @(argv[3])) ? 0 : 1;
@@ -106,17 +109,26 @@ ios_want = ["manifest.json", "logs/host.log", "logs/host-20261116-120000.log", "
             "logs/unpack.log", "logs/far_sites.tsv", f"logs/far_sites_{A}.tsv", f"logs/unpack_{A}.log", "metrickit/crash-1.json", "metrickit/hang-2.json", "metrickit/x-exit.json",
             f"shaders/{A}_aaaaaaaaaaaaaaaa.inflight.ctl", f"shaders/{A}_aaaaaaaaaaaaaaaa.inflight.code", f"shaders/{A}_bbbbbbbbbbbbbbbb.fail.ctl",
             f"shaders/{A}_bbbbbbbbbbbbbbbb.fail.code", f"shaders/{A}_cccccccccccccccc_b.slow.metal", f"shaders/{B}_dddddddddddddddd_b.slow.metal",
-            "diagrun/app_shot.png", f"diagrun/{A}_frame.PNG", f"pso/{A}.tsv", f"pso/{B}.tsv", f"shader_miss/{A}.tar", f"shader_miss/{B}.tar"]
+            "diagrun/app_shot.png", f"diagrun/{A}_frame.PNG", f"pso/{A}.tsv", f"pso/{B}.tsv", f"shader_miss/{A}.tar", f"shader_miss/{B}.tar",
+            f"logs/index_{A}.tsv"]
+# 出问题那款的资源包索引（D-JZRD）：资源包根在 Documents 外（Library/Application Support/S2Arm/games/<号>/资源包），index.tsv 的行 = 路径 \t 字节 \t sha256。
+#   期望（手写）：包里 logs/index_<号>.tsv 与机上那份逐字节一致（哈希、路径都不被脱敏改掉）；同一资源包根下的存档目录不进包
+PK = T / "ios_lib" / "games" / A / "资源包"
+IDX = ("game.img\t25074000000\t" + "ab" * 32 + "\n" + "shaders/direct/b-0be3f28548fd/lib.000.pak\t66943722\t" + "0f" * 32 + "\n"
+       + "exefs/main.npdm\t1234\t" + "9c" * 32 + "\naoc/1/data.arc\t5\t" + "e1" * 32 + "\n").encode()
+(PK / "S2A").mkdir(parents=True, exist_ok=True); (PK / "index.tsv").write_bytes(IDX); (PK / "S2A" / "save.bin").write_bytes(b"save")
 # 往局日志里一行被按字节截在汉字中间（宿主直连层统计行截进定长缓冲，现场「写回原\xe5\x80」）：原先一个坏字节就让整份按 Latin-1 解、中文全成二次编码乱码。
 #   期望（手写）：别的行逐字节不变，坏的那截换成一个 U+FFFD
 cn_ok1, cn_bad, cn_ok2 = "[s2a] 开发设施：关（玩家口径）\n".encode(), b"[dm] \xe5\x86\x99\xe5\x9b\x9e\xe5\x8e\x9f\xe5\x80\n", "[s2a] 地址窗口：多款容器 要 70124 MB\n".encode()
 put("logs/host-20261115-090000.log", cn_ok1 + cn_bad + cn_ok2)
-r = subprocess.run([str(T / "collect"), str(D), str(T / "ios_work"), str(T / "ios.zip")], capture_output=True, text=True)
+r = subprocess.run([str(T / "collect"), str(D), str(T / "ios_work"), str(T / "ios.zip"), str(PK), A], capture_output=True, text=True)
 ck("② iOS 收成员 + 写 zip 成功", r.returncode == 0, r.stderr.strip())
 if r.returncode == 0:
     judge_zip("② iOS（ios/diagcollect.m）", (T / "ios.zip").read_bytes(), ios_want)
     with zipfile.ZipFile(T / "ios.zip") as z:
         got_cn = z.read("logs/host-20261115-090000.log")
+        got_idx = z.read(f"logs/index_{A}.tsv") if f"logs/index_{A}.tsv" in z.namelist() else b""
+    ck("② 出问题那款的 index.tsv：包里 logs/index_<号>.tsv 与资源包根那份逐字节一致", got_idx == IDX, repr(got_idx[:200]))
     ck("② 中文日志带一处截断的半个汉字：其余行逐字节不变、坏的那截换成一个 U+FFFD（不再整份二次编码）",
        got_cn == cn_ok1 + "[dm] 写回原\ufffd\n".encode() + cn_ok2, repr(got_cn[:160]))
 

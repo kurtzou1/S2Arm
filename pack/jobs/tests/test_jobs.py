@@ -2736,6 +2736,36 @@ class JobsTests(unittest.TestCase):
         self.assertEqual(self.c.redact(text), complete[-3000:])
         self.assertGreater(len(complete), 4000)
 
+    def test_diagnostics_keeps_old_failed_and_last_pack_jobs(self):
+        """#2229 / #2206 D-7P56（11-25）：最近 50 个全是 phoneKeptPull 轮询任务，玩家报的那次失败出包、那款最近一次出包早于它们就带不上。
+        造 300 个已结束的任务：最新 200 个是 phoneKeptPull；第 230 个是游戏 X 失败的 ipa；第 260 个是游戏 Y 成功的 ipa、第 280 个是游戏 Y 更早的 ipa；其余 catalog。
+        期望（手写）：X 的失败任务、Y 最近那次出包的记录与日志进包；Y 更早那次、中间的轮询 / catalog 不进；任务记录 ≤ 50 + 20 + 20 + 1"""
+        import zipfile, uuid, time as t
+        jobs = self.c.jobpath.parent; jobs.mkdir(parents=True, exist_ok=True)
+        now = t.time(); ids = []
+        X, Y = "0100000000010000", "0100000000020000"
+        for i in range(300):
+            tid = str(uuid.UUID(int=i + 1)); ids.append(tid)
+            rec = dict(id=tid, operation="phoneKeptPull" if i < 200 else "catalog", state="completed", ended=now)
+            if i == 230: rec.update(operation="ipa", gameId=X, state="failed")
+            if i in (260, 280): rec.update(operation="ipa", gameId=Y)
+            (jobs / f"{tid}.json").write_text(json.dumps(rec)); (self.c.logs / f"{tid}.log").write_text("x\n")
+            stamp = now - i * 60
+            for f in (jobs / f"{tid}.json", self.c.logs / f"{tid}.log"):
+                os.utime(f, (stamp, stamp))
+        destination = self.root / "diag-keep.zip"; self.c.r["path"] = str(destination)
+        library.diagnostics(self.c)
+        with zipfile.ZipFile(destination) as archive:
+            names = archive.namelist(); manifest = json.loads(archive.read("manifest.json"))
+        for i in (230, 260):
+            self.assertIn(f"jobs/{ids[i]}.txt", names); self.assertIn(f"logs/{ids[i]}.log", names)
+        self.assertNotIn(f"jobs/{ids[280]}.txt", names)   # 同款更早那次出包不另收
+        self.assertNotIn(f"jobs/{ids[120]}.txt", names); self.assertNotIn(f"jobs/{ids[240]}.txt", names)   # 中间的轮询 / catalog 不收
+        self.assertIn(f"jobs/{ids[0]}.txt", names)   # 最近 50 个照收
+        in_jobs = [n for n in names if n.startswith("jobs/")]
+        self.assertLessEqual(len(in_jobs), library.DIAG_JOBS + library.DIAG_FAILED + library.DIAG_PACK_GAMES + 1)
+        self.assertEqual((manifest["jobs"]["failedLimit"], manifest["jobs"]["packGamesLimit"]), (library.DIAG_FAILED, library.DIAG_PACK_GAMES))
+
     def test_diagnostics_and_rotation_bounded_with_2000_jobs(self):
         """11-13 玩家反馈「文件数超过 1000 个」：任务记录和各任务日志原先整目录打包、从不清。造 2000 个已结束的任务（各带记录 / 请求 / 事件 + 两份日志）：
         期望包内任务记录 ≤ DIAG_JOBS + 1（本次导出）、包内文件 < 1000，没结束的那个照收；轮转后磁盘上任务 ≤ KEEP_TOTAL，被清任务的日志一起没了"""

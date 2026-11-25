@@ -31,6 +31,8 @@ static void run(const char *dir, const char *on) {
         unsetenv("DM_PRESENT_LINK"); unsetenv("DM_PRESENT_HZ");   // ⑤ 核出图链与出图节拍：从没设过开始
         if (on && !strcmp(on, "fixed")) on = "widescreen:auto";
         int followlist = on && !strcmp(on, "followlist"); if (followlist) on = "gfx:A";   // ⑨ 的标记：玩家动过补丁开关、列表里没有帧率补丁（iOS 设置页从不写它），再跟 60 帧开关   // ⑧ 的标记：只开定画幅变体的总编号（自适应一族不开，上屏画幅只看变体）
+        // ⑤ ⑨ 的 F 只有 120 一档：11-25 起自动档不兜底到高于 60 的档（cpatch.c fps_pick），这两项核「补丁目标 120 开起来时出图链 / 节拍跟到 120」，按玩家选了 120 档跑
+        if (followlist || (on && !strcmp(on, "follow"))) setenv("S2A_FPS_PICK", "120", 1); else unsetenv("S2A_FPS_PICK");
         if (on && strcmp(on, "follow") && strcmp(on, "cheat") && strcmp(on, "adapt") && strcmp(on, "adaptfx")) setenv("S2A_CPATCH_ON", on, 1); else unsetenv("S2A_CPATCH_ON");   // follow：⑤ 的标记，按表缺省开装载
         module_t m; memset(&m, 0, sizeof m); snprintf(m.name, sizeof m.name, "%s", "main");
         m.size = 0x8000; m.base = mmap(NULL, m.size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);

@@ -64,6 +64,23 @@ namespace S2A.Services.Tests
                 check($"金手指 条件：+0x10 = {v} 时 > 3 {(writes == 1 ? "成立、写 +0x20" : "不成立、不写")}", writes == 1 ? "8000000020=1" : "不写",
                     f.Writes.Count == 1 ? $"{f.Writes[0].va:X}={f.Writes[0].v}" : f.Writes.Count == 0 ? "不写" : $"写了 {f.Writes.Count} 次");
             }
+            // 首帧后才执行（#d47988）：游戏出第一帧之前一轮执行不写游戏内存、条目仍算开着（开关 / 状态不动）；出了第一帧照常写。
+            //   期望按「04000000 00000010 0000002A」手算：写主程序基址 + 0x10、值 42。旧写法不看帧数，首帧前那轮就写 → 第一项红
+            {
+                var oldFrames = Cheats.Frames; ulong frames = 0; Cheats.Frames = () => frames;
+                var ff = new Fake();
+                ITamperProgram fp = new AtmosphereCompiler(exe, 0x9000000000UL, 0, 0, ff).Compile("ff", e[1].Lines); fp.IsEnabled = true;
+                var items = new List<Cheats.Item> { new Cheats.Item { Entry = e[1], Code = fp, Status = "生效中" } };
+                var before = Cheats.Tick(items, (ControllerKeys)0);
+                check("金手指 首帧前：不写游戏内存、条目仍开着、状态不变", (0, true, false, "生效中"), (ff.Writes.Count, before.any, items[0].Off, items[0].Status));
+                frames = 1;
+                Cheats.Tick(items, (ControllerKeys)0);
+                check("金手指 首帧后：照常写主程序基址 + 0x10、值 42", "8000000010=42", ff.Writes.Count == 1 ? $"{ff.Writes[0].va:X}={ff.Writes[0].v}" : $"写了 {ff.Writes.Count} 次");
+                frames = 0;   // 进程内重建开新一局：帧数清零（ap_host.c s2a_ap_session_reset），重新等第一帧
+                Cheats.Tick(items, (ControllerKeys)0);
+                check("金手指 新一局首帧前：又不写", 1, ff.Writes.Count);
+                Cheats.Frames = oldFrames;
+            }
             // 游戏内存适配：写到不可写页 → 异常过滤（Run 里 when (!TamperedCodeMemory)）求值时标志已置上，才判得出「改代码，不支持」而不是「地址未就绪」
             {
                 var oldMapped = Native.MemMapped; var oldQuery = Native.MemQuery;

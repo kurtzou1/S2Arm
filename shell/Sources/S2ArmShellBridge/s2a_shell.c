@@ -57,6 +57,7 @@ __attribute__((weak)) void s2a_shell_report_problem(void) {}
 __attribute__((weak)) const char *s2a_shell_cert_status(void) { return ""; }
 __attribute__((weak)) void s2a_shell_cert_p12(void) {}
 __attribute__((weak)) void s2a_shell_cert_sidestore(void) {}
+__attribute__((weak)) int s2a_shell_cert_sidestore_ok(void) { return 1; }
 __attribute__((weak)) void s2a_shell_cert_get(void) {}
 __attribute__((weak)) void s2a_shell_pick_s2arm(const char *game_id) { (void)game_id; }
 __attribute__((weak)) void s2a_shell_export_game(const char *game_id) { (void)game_id; }

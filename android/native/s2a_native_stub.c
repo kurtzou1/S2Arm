@@ -107,6 +107,7 @@ int s2a_nro_keep(const uint8_t sha[32], const uint8_t *data, uint64_t size) { (v
 // 金手指（services Cheats.cs）取主程序基址 / 构建号（runtime/src/loader.c）：诊断目标没有装载器，回「未装载」
 uint64_t s2a_main_base(void) { unbacked(__func__); return 0; }
 uint64_t s2a_main_region_va(uint64_t off) { (void)off; unbacked(__func__); return 0; }
+uint64_t s2a_ap_frames(void) { return 0; }   // 只有金手指线程调；安卓 s2a_cheats_dir 回空串、线程不起（不是缺口，不报 unbacked）
 const char *s2a_main_build_id(void) { unbacked(__func__); return ""; }
 const s2a_layout *s2a_layout_get(void) { return NULL; }   // 诊断目标不跑原生核心、没有区域表（svc_mem.c 是游戏目标的强定义）；金手指等读者拿到空就当没装载
 const char *s2a_cheats_dir(void) { return ""; }   // 安卓没有金手指界面：空串 = 不起线程（不是缺口，不报 unbacked）

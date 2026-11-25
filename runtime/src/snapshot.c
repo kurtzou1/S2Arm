@@ -428,6 +428,8 @@ static FILE *open_in(const char *dir, const char *name, const char *mode) { char
 static int close_sync(FILE *f) { int e = fflush(f) || fsync(fileno(f)); return fclose(f) || e ? -1 : 0; }
 #include <fts.h>
 void s2a_snap_rmtree(const char *path);   // snapdel.c：删整棵目录（快照的临时 / 旧目录）；不存在不算错
+int s2a_snap_swap_in(const char *neu, const char *final);   // snapdel.c：新快照原子换上（0 换上了 / -1 没换上、旧的原样）
+int s2a_snap_recover(const char *final);   // snapdel.c：换上没走完留下的 .old 改回正式目录 / 两个都在删 .old（回 1 = 恢复了一份）
 static void rmtree(const char *path) { s2a_snap_rmtree(path); }
 // 新快照先写进 <目录>.new，全部写完、清单标「完整」后才原子换上；中途失败旧快照原样留着（存一次失败不能把玩家上一份好快照弄坏）
 typedef snap_fp_cb fp_cb;
@@ -446,7 +448,24 @@ void s2a_snap_thaw(void);   // thread.c
 static _Atomic(const char *) g_snap_layer;
 static _Atomic uint64_t g_snap_tick;
 static _Atomic int g_snap_done_once, g_snap_abandoned, g_snap_dog_on;
+// 逐层实占（存档途中被系统按内存收掉的诊断，玩家包也开）：每层一行「进入时实占 / 层内峰值 / 层内离上限最少」，层内长循环的进度报点顺手采样。
+//   一次存档约 20 行。离上限 = s2a_host_mem_avail（iPhone：os_proc_available_memory；Mac：系统随时能收回给本进程的部分）。只在存档线程上调
+uint64_t s2a_host_mem_avail(void);   // hostmem_apple.c
+static const char *g_fp_layer; static uint64_t g_fp_in, g_fp_peak, g_fp_minav;
+static void snap_fp_sample(uint64_t *fp, uint64_t *av) {
+    task_vm_info_data_t vi; mach_msg_type_number_t c = TASK_VM_INFO_COUNT;
+    *fp = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &c) == KERN_SUCCESS ? vi.phys_footprint >> 20 : 0;
+    *av = s2a_host_mem_avail() >> 20;
+}
+static void snap_fp_flush(void) {
+    if (g_fp_layer) LOG("即时存档实占：「%s」进入 %llu MB、层内峰值 %llu MB、层内离上限最少 %llu MB", g_fp_layer,
+                        (unsigned long long)g_fp_in, (unsigned long long)g_fp_peak, (unsigned long long)g_fp_minav);
+    g_fp_layer = NULL;
+}
 void s2a_snap_progress(const char *layer) {
+    { uint64_t fp, av; snap_fp_sample(&fp, &av);
+      if (layer) { snap_fp_flush(); g_fp_layer = layer; g_fp_in = g_fp_peak = fp; g_fp_minav = av; }
+      else if (g_fp_layer) { if (fp > g_fp_peak) g_fp_peak = fp; if (av < g_fp_minav) g_fp_minav = av; } }
     if (layer) atomic_store(&g_snap_layer, layer);
     atomic_store(&g_snap_tick, clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
     const char *st = layer ? getenv("S2A_SNAP_TEST_STALL") : NULL;   // 看门狗实测用：存档走到这一层时停 20 秒（模拟卡住）
@@ -455,6 +474,7 @@ void s2a_snap_progress(const char *layer) {
 static void snap_finish(int ok, const char *dir, int exit_after);
 // 这次存档只收尾一次：看门狗放弃了的，存档线程后来走到收尾时只放开「正在存」
 static void snap_finish_once(int ok, const char *dir, int exit_after) {
+    snap_fp_flush();   // 最后一层的实占行
     atomic_store(&g_snap_dog_on, 0);
     if (atomic_exchange(&g_snap_done_once, 1)) { atomic_store(&g_snap_busy, 0); LOG("即时存档：看门狗放弃过的那次存档线程现在才走完（结果作废），之后可以再存"); return; }
     snap_finish(ok, dir, exit_after);
@@ -495,7 +515,9 @@ static void *snap_dog(void *arg) {
     snap_dog_arg *a = arg; pthread_setname_np("s2a-存档看门狗");
     while (atomic_load(&g_snap_dog_on)) {
         usleep(200000);
-        uint64_t idle = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - atomic_load(&g_snap_tick);
+        // 先取存档线程报的时刻、再取现在：反过来的话存档线程恰在两次读之间报一次（层内长循环报得很密），报的时刻晚于「现在」，
+        //   无符号相减下溢成约 1.8e10 秒，好好的存档被当成卡住放弃（玩家诊断包 7 次「存档卡在「游戏内存」18446744073.7 秒」）。饱和减兜底
+        uint64_t tick = atomic_load(&g_snap_tick), now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW), idle = now > tick ? now - tick : 0;
         if (!atomic_load(&g_snap_dog_on) || idle < SNAP_DOG_NS) continue;
         const char *ly = atomic_load(&g_snap_layer);
         LOG("【红】即时存档：存档卡在「%s」%.1f 秒没前进，放弃这次存档、游戏照常跑；下面是各线程现场（报修用）", ly ? ly : "?", idle / 1e9);
@@ -529,6 +551,7 @@ static void snap_take_(const char *final_dir, int exit_after);
 static void snap_take(const char *final_dir) { const char *x = getenv("S2A_SNAP_EXIT"); snap_take_(final_dir, x && *x == '1'); }   // 测试定时器：缺省同产品（存完接着玩），S2A_SNAP_EXIT=1 存完退出
 static void snap_take_(const char *final_dir, int exit_after) {
     double t0 = now_s();
+    if (s2a_snap_recover(final_dir)) LOG("即时存档：上次换上没走完，旧快照已从 %s.old 恢复", final_dir);   // 先恢复再存：.old 只在正式目录在时才删
     static char tmpd[2048]; snprintf(tmpd, sizeof tmpd, "%s.new", final_dir); rmtree(tmpd);
     const char *dir = tmpd;
     if (mkdir(dir, 0755)) { LOG("【红】即时存档：建不了快照临时目录 %s（errno %d），不存", dir, errno); snap_finish_once(0, final_dir, 0); return; }
@@ -610,11 +633,9 @@ static void snap_take_(const char *final_dir, int exit_after) {
         e ? "【红】" : "", dir, us, nthr, nst[1], nst[2], nst[3], nst[4], nst[5], nst[6], raw / 1048576.0, comp / 1048576.0, t1 - t0, t2 - t1, t3 - t2, t4 - t3, id.save_n, id.save);
     if (!e && atomic_load(&g_snap_abandoned)) { e = 1; LOG("【红】即时存档：看门狗已放弃这次存档，写完的不换上"); }
     s2a_snap_progress("换上新快照");
-    if (!e) {   // 换上：旧的挪开 → 新的改名到位 → 删旧的（改名在同一目录下，原子）
-        char old[2100]; snprintf(old, sizeof old, "%s.old", final_dir); rmtree(old);
-        if (rename(final_dir, old) && errno != ENOENT) { LOG("【红】即时存档：旧快照挪不开（errno %d），新快照留在 %s", errno, dir); e = 1; }
-        else if (rename(dir, final_dir)) { LOG("【红】即时存档：新快照换不上（errno %d），旧快照放回", errno); rename(old, final_dir); e = 1; }
-        else { rmtree(old); LOG("即时存档：新快照已换上 %s", final_dir); }
+    if (!e) {   // 换上：新旧目录一次原子交换、删换下来的旧的（snapdel.c s2a_snap_swap_in；进程死在任何时刻，final 不是旧的就是新的）
+        if (s2a_snap_swap_in(dir, final_dir)) { LOG("【红】即时存档：新快照换不上（errno %d），旧快照原样保留", errno); rmtree(dir); e = 1; }
+        else LOG("即时存档：新快照已换上 %s", final_dir);
     } else { rmtree(dir); LOG("【红】即时存档：这次没存成，临时目录已删，旧快照（如有）原样保留"); }
     snap_finish_once(!e, final_dir, exit_after);
     return;
@@ -661,7 +682,7 @@ int s2a_snap_save_changed(const char *dir) {
     if (!g_root_hint[0] && !man_get(dir, "数据根", g_root_hint_v, sizeof g_root_hint_v) && g_root_hint_v[0]) root_expand(g_root_hint_v, g_root_hint, sizeof g_root_hint);
     save_dir_hash(cur, &n); return strcmp(want, cur) != 0; }
 // 这一款有没有能用的快照：清单在、且「完整 1」
-int s2a_snap_exists(const char *dir) { char v[16]; return dir && *dir && !man_get(dir, "完整", v, sizeof v) && !strcmp(v, "1"); }
+int s2a_snap_exists(const char *dir) { char v[16]; if (dir && *dir && s2a_snap_recover(dir)) LOG("即时存档：上次换上没走完，旧快照已从 %s.old 恢复", dir); return dir && *dir && !man_get(dir, "完整", v, sizeof v) && !strcmp(v, "1"); }
 static void *snap_req_main(void *a) { snap_take_((const char *)a, 0); free(a); return NULL; }
 int s2a_snap_request_save(const char *dir) {
     if (!s2a_snap_logging() || !dir || !*dir) return -1;

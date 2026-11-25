@@ -216,7 +216,19 @@ def cheat_rows(c, gid, bids):
 
 
 def fetch(c, game, exefs, target="mac"):
-    """→ 交 S2A_CPATCH_DIRS 的索引目录列表（每类一个：fps / widescreen / gfx）；什么都没取到 = []。
+    """→ 交 S2A_CPATCH_DIRS 的索引目录列表：统一包的各类索引（index_dirs）+ 玩家导入的 mod 代码补丁；什么都没取到 = []"""
+    dirs = index_dirs(c, game, exefs, target)
+    import mods   # 玩家导入的 mod 带的代码补丁（11-15 维护者：出包 / S 级升级时编进程序，运行时跟 mod 开关走）
+    md = mods.code_index(c, game)
+    if md:
+        dirs.append(md)
+        print(f"补丁：{game['id'].upper()} 玩家导入的 mod 代码补丁一并编入（{md}）", file=sys.stderr)
+    return dirs
+
+
+def index_dirs(c, game, exefs, target="mac"):
+    """统一包这一款的条目 → 交 S2A_CPATCH_DIRS 的索引目录列表（每类一个：fps / widescreen / gfx）；什么都没取到 = []。
+    c 只用 private（缓存根）与 r（启动器资源目录，取随包快照；没有 = 只用云端）：维护方出包机道（pack/orch/oneclick_win.py --patches）不带作业层也能调。
     target = "ios" 时画面类（gfx）只带降负载的（条目 dir = load，tools/patch_index.py gfx_dir：关后处理 / 降阴影 / ≤720p 等；11-16 维护者拍板，
     取代 11-13「画面补丁 iOS 不进包」）。提画质与认不出的照旧不带：多是主机模式分辨率（1080p / 4K 底座），手机上用不着、可能被系统杀。
     和满屏补丁改同一处时满屏优先（pack/cpatch.py plan 排序：画面类最后占位，落选的在结果页写「和别的补丁改同一处」）"""
@@ -257,11 +269,6 @@ def fetch(c, game, exefs, target="mac"):
         dirs.append(str(d))
     if rows:
         print(f"补丁：{gid} 统一包 {len(rows)} 份（{'、'.join(f'{k} {len(v)}' for k, v in sorted(out.items()))}）", file=sys.stderr)
-    import mods   # 玩家导入的 mod 带的代码补丁（11-15 维护者：出包 / S 级升级时编进程序，运行时跟 mod 开关走）
-    md = mods.code_index(c, game)
-    if md:
-        dirs.append(md)
-        print(f"补丁：{gid} 玩家导入的 mod 代码补丁一并编入（{md}）", file=sys.stderr)
     return dirs
 
 

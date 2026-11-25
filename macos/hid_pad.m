@@ -35,13 +35,19 @@ int16_t s2a_hid_pad_axis(long v, long min, long max, int invert) { return s2a_hp
 //   手柄实际推满不到 1600 时推到底也只算推了一部分（移动慢、菜单上下够不到门槛）
 void s2a_pro_cal_default(s2a_pro_cal *c) { s2a_hpp_cal_default(c); }
 static int cal12(const uint8_t *d, int i) { return i & 1 ? (d[i / 2 * 3 + 1] >> 4) | (d[i / 2 * 3 + 2] << 4) : d[i / 2 * 3] | ((d[i / 2 * 3 + 1] & 0xF) << 8); }   // 9 字节 = 6 个 12 位值
+static int cal12_ok(int v, int lo, int hi) { return v >= lo && v <= hi; }
 int s2a_pro_cal_parse(const uint8_t d[18], s2a_pro_cal *l, s2a_pro_cal *r) {
     int v[12]; for (int i = 0; i < 6; i++) { v[i] = cal12(d, i); v[6 + i] = cal12(d + 9, i); }
     int blank = 1; for (int i = 0; i < 12; i++) if (v[i] != 0xFFF && v[i] != 0) blank = 0;
     if (blank) return 0;
+    // 中心 0x400–0xC00、上下行程 0x200–0xC00；坏校准按未读到处理，保留调用方缺省值，之后仍可随读数扩程。
+    if (!cal12_ok(v[2], 0x400, 0xC00) || !cal12_ok(v[3], 0x400, 0xC00) ||
+        !cal12_ok(v[6], 0x400, 0xC00) || !cal12_ok(v[7], 0x400, 0xC00)) return 0;
+    const int travel[8] = {0, 1, 4, 5, 8, 9, 10, 11};
+    for (int i = 0; i < 8; i++) if (!cal12_ok(v[travel[i]], 0x200, 0xC00)) return 0;
     // 左：上行程 x y、中心 x y、下行程 x y；右：中心 x y、下行程 x y、上行程 x y（字段次序两边不同，照协议文档）
-    *l = (s2a_pro_cal){(uint16_t)v[2], (uint16_t)v[3], (uint16_t)v[0], (uint16_t)v[1], (uint16_t)v[4], (uint16_t)v[5]};
-    *r = (s2a_pro_cal){(uint16_t)v[6], (uint16_t)v[7], (uint16_t)v[10], (uint16_t)v[11], (uint16_t)v[8], (uint16_t)v[9]};
+    *l = (s2a_pro_cal){(uint16_t)v[2], (uint16_t)v[3], (uint16_t)v[0], (uint16_t)v[1], (uint16_t)v[4], (uint16_t)v[5], 1};
+    *r = (s2a_pro_cal){(uint16_t)v[6], (uint16_t)v[7], (uint16_t)v[10], (uint16_t)v[11], (uint16_t)v[8], (uint16_t)v[9], 1};
     return 1;
 }
 int16_t s2a_pro_axis(int v, int center, int above, int below) { return s2a_hpp_pro_axis(v, center, above, below); }
@@ -59,6 +65,7 @@ typedef struct { IOHIDDeviceRef dev; uint32_t buttons, hat; int16_t ax[4]; char 
     int full; uint8_t cnt, rep[64]; s2a_pro_cal cl, cr;
     int betop_ns, betop_left_logged; int16_t betop_left[2]; uint64_t betop_left_us;
     s2a_pad_motion motion; uint64_t motion_us; int imu_said; uint32_t logged;
+    uint32_t stick_extreme_logged;   // S2A_HID_LOG=1：每根轴正 / 负极值只记一次
     s2a_imu_burst burst;   // 补满采样：0x30 报告一包 3 组 IMU 按记账时钟入队（macos/imu_burst.h），服务层一拍取走逐笔写进游戏
 } hp_dev;   // motion：0x30 报告里的最后一组 IMU（motion_us = 收到时刻，0 = 没有）   // full：已收到 0x30 报告（之后不再用 HID 元素那一路）；cnt：子命令包序号
 static hp_dev g_dev[S2A_HID_PAD_MAX];
@@ -145,12 +152,23 @@ static void report_cb(void *ctx, IOReturn r, void *sender, IOHIDReportType type,
     hp_dev *d = ctx;
     if (d->dev) {
         if (id == 0x21 && m >= 20 + 18 && b[14] == 0x10 && b[15] == 0x3D && b[16] == 0x60) {   // SPI 读 0x603D 应答：出厂摇杆校准
-            s2a_pro_cal l, rc; if (s2a_pro_cal_parse(b + 20, &l, &rc)) { d->cl = l; d->cr = rc;
-                fprintf(stderr, "[输入] 兜底手柄 %s：出厂摇杆校准 左 中心 %u/%u 行程 +%u/-%u +%u/-%u，右 中心 %u/%u\n", d->name, l.cx, l.cy, l.xmax, l.xmin, l.ymax, l.ymin, rc.cx, rc.cy); } }
+            s2a_pro_cal l, rc; s2a_pro_cal_default(&l); s2a_pro_cal_default(&rc);
+            int accepted = s2a_pro_cal_parse(b + 20, &l, &rc);
+            if (accepted) { d->cl = l; d->cr = rc; }
+            fprintf(stderr, "[输入] 兜底手柄 %s：出厂摇杆校准 左 中心 %u/%u 行程 +%u/-%u +%u/-%u，右 中心 %u/%u 行程 +%u/-%u +%u/-%u，calibrated=%s\n",
+                    d->name, l.cx, l.cy, l.xmax, l.xmin, l.ymax, l.ymin, rc.cx, rc.cy, rc.xmax, rc.xmin, rc.ymax, rc.ymin, accepted ? "是" : "否"); }
         uint32_t bt; int16_t ax[4];
         if (s2a_pro_parse(b, m, &d->cl, &d->cr, &bt, ax)) {
             if (id == 0x30 && !d->full) { d->full = 1; d->hat = 0; fprintf(stderr, "[输入] 兜底手柄 %s：收到完整报告 0x30，改按 Switch Pro 协议读（摇杆 12 位、按校准换算）\n", d->name); }
             if (d->full) { d->buttons = bt; memcpy(d->ax, ax, sizeof ax); }
+            if (id == 0x30 && g_hid_log) {
+                static const char *const sticks[2] = {"左", "右"}, *const axes[2] = {"X", "Y"};
+                for (int i = 0; i < 4; i++) if (ax[i] == 32767 || ax[i] == -32767) {
+                    uint32_t bit = 1u << (i * 2 + (ax[i] > 0 ? 0 : 1));
+                    if (!(d->stick_extreme_logged & bit)) { d->stick_extreme_logged |= bit;
+                        fprintf(stderr, "[输入] 兜底手柄 %s：%s摇杆 %s 到 %+d\n", d->name, sticks[i / 2], axes[i % 2], ax[i]); }
+                }
+            }
             if (d->betop_ns && id == 0x30) {
                 memcpy(d->betop_left, ax, sizeof d->betop_left);
                 d->betop_left_us = hp_now_us();

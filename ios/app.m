@@ -1,6 +1,7 @@
 // iOS App 壳：UIKit 占主线程（s2a_front_run 覆盖 host_main.c 的弱缺省）。窗口与根视图在这里建；Metal 层与触屏 / 手柄由帧率能耗线、服务接入线挂到 s2a_ios_root_view()。
 #include "s2a_loadprog.h"   // 前台激活门
 #include "os_notice.h"   // 系统版本提示（library_play）
+#include "cloud_seed.h"   // 云端管线种子（s2arm_open / library_play_now）
 #include <dlfcn.h>
 #import "s2a_l10n.h"
 #import <UIKit/UIKit.h>
@@ -1079,6 +1080,7 @@ void s2a_shell_restore_snapshot(const char *gid) {   // 主线程
 extern NSString *g_s2a_prev_last_game;   // ios/save_transfer.m 定义。多款容器：这次点开始之前上一局是哪款（library_play_go 覆盖 S2ALastGameId 前记下）；单款 App 一直 nil
 static void library_play_now(const char *gid, S2ASceneDelegate *sd) {
     if (!atomic_load(&g_game_picked)) crash_auto_off(gid);
+    { char d[1024]; s2a_container_docs(d, sizeof d); s2a_cloud_seed_fetch(d, gid, 0); }   // 首次开这一款（别的路子导入的、导入时没取到的）：后台补取云端管线种子，不等它
     library_play_go(gid, sd);
 }
 static void library_play(const char *gid, void *ctx) {   // 主线程（s2a_shell.h 约定）
@@ -1512,6 +1514,7 @@ static void s2arm_open(NSURL *url) {
         if (scoped) [url stopAccessingSecurityScopedResource];
         if (!r && [url.path containsString:@"/Documents/Inbox/"]) [NSFileManager.defaultManager removeItemAtURL:url error:nil];
         LOG(".s2arm 打开：%s → %s", url.lastPathComponent.UTF8String, !r ? gid : r > 0 ? "还没拷完，稍后再打开一次" : code.UTF8String);
+        if (!r) s2a_cloud_seed_fetch(d, gid, 1);   // 手机直导不经电脑出包：补取云端管线种子（ios/cloud_seed.m）
         dispatch_async(dispatch_get_main_queue(), ^{
             if (!r) { if (s2a_shell_refresh) s2a_shell_refresh(); return; }
             if (r < 0 && g_lib_window) top_alert(g_lib_window, S2AL(@"img.scanFailed.title"), install_error_text(code.UTF8String));

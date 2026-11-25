@@ -148,7 +148,9 @@ namespace S2A.Services
         {
             if (physical != ControllerType.None && (styles & physical) != 0 && pads == 1)
                 return current == physical ? (PlayerIndex.Unknown, ControllerType.None) : (PlayerIndex.Player1, physical);
-            if (before != ControllerType.None && current is ControllerType.JoyconLeft or ControllerType.JoyconRight or ControllerType.JoyconPair)
+            // 换回改之前的样式只在游戏收它时（#2225 / D-Q5F2 / D-BS3T / D-VVDV）：游戏只收 掌机 / 双 Joy-Con，手柄设置小程序应答成双 Joy-Con 后，
+            //   这里按「实体不是 Joy-Con」换回改之前的 Pro——游戏不收 Pro、又弹手柄设置小程序，应答又配回双 Joy-Con，来回打转、游戏一直等不到画面（黑屏）
+            if (before != ControllerType.None && (styles & before) != 0 && current is ControllerType.JoyconLeft or ControllerType.JoyconRight or ControllerType.JoyconPair)
                 return (playerBefore, before);
             return (PlayerIndex.Unknown, ControllerType.None);
         }

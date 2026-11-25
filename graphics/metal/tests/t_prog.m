@@ -305,7 +305,7 @@ static void t_layer(const char *dir) {
 }
 
 // ---------- C：计算 ----------
-// 越界（gal_spvx.m）：静态计数按手写 SPIR-V 逐条数出；GPU 结果按「常量 / 存储缓冲越界读钳到末元素、共享内存钳到末元素、越界写与原子不执行 / 原子返回 0、循环按工作量截断」手算；
+// 越界（gal_spvx.m）：静态计数按手写 SPIR-V 逐条数出；GPU 结果按「常量 / 存储缓冲越界读钳到末元素、共享内存钳到末元素、越界写与原子不执行 / 原子返回钳到元素的当前值、循环按工作量截断」手算；
 // 循环上限手算：循环头标签到回边分支 = 头块 3 条 + 判断块 8 条（读 a[0] 的越界处理另加若干条，总数仍在 18–32）+ 循环体 4 条 + 续块 2 条 → 权重向上取 2 的幂 = 32；
 // 单线程上限 = clamp(2^31 / 线程组数 / 4 线程, ≤ 2^18) × 16、下限 2^14：1 组 → 2^22 → 循环 2^17 次。按派发缩小 / 权重下限另用 csl.spv / csw.spv（见其文件头）
 // 计数格按「4 个线程各有越界、各到过循环上限」手算（--count）；缺省（NXGAL_BOUNDS_COUNT=0，出包口径）：翻译不插计数收尾、输出不变、计数格不建
@@ -352,12 +352,12 @@ static void t_bounds(const char *dir) {
     } else CHECK(!have && nxgal_bounds_report() == 0, "计数关：期望不建计数格、报数 0（实得 有格 %d）", have);
     const uint32_t *o = ob.contents; int bad = 0;
     for (int i = 0; i < 4; i++) {
-        const uint32_t want[8][2] = {{0, 13}, {4, 1002}, {8, 0}, {12, 0xeeeeeef3u}, {16, 23}, {20, 1u << 17}, {24, 0xeeeeeeeeu}, {28, i == 0 ? 1000u : 0u}};
+        const uint32_t want[8][2] = {{0, 13}, {4, 1002}, {8, 13}, {12, 0xeeeeeef3u}, {16, 23}, {20, 1u << 17}, {24, 0xeeeeeeeeu}, {28, i == 0 ? 1000u : 0u}};
         for (int k = 0; k < 8; k++) if (o[want[k][0] + i] != want[k][1] && bad++ < 6) printf("  ✗ o[%u] 期望 %u 实得 %u\n", want[k][0] + i, want[k][1], o[want[k][0] + i]);
     }
     for (int i = 0; i < 16; i++) { uint32_t w = i < 4 ? (uint32_t)(10 + i) : 77u; if (av[i] != w && bad++ < 8) printf("  ✗ a[%d]（%s）期望 %u 实得 %u\n", i, i < 4 ? "绑定区间" : "哨兵", w, av[i]); }
     g_checks++; if (bad) { g_fail++; printf("  ✗ 共 %d 处不符\n", bad); }
-    else printf("  32/32 输出与手算一致（存储越界读钳到 a[3] 13 / 常量越界钳到 d[2] 1002 / 越界原子 0 / 共享 23 / 循环 %u / 掩码分量 1000），哨兵 12/12 未被写\n", o[20]);
+    else printf("  32/32 输出与手算一致（存储越界读钳到 a[3] 13 / 常量越界钳到 d[2] 1002 / 越界原子回 a[3] 13 / 共享 23 / 循环 %u / 掩码分量 1000），哨兵 12/12 未被写\n", o[20]);
     // 整次派发封顶（csl.spv）：线程组数越多单线程上限越小；权重下限（csw.spv）：轻循环体允许的次数不超过旧口径 2^18。
     // 所有线程同样跑到上限，原子最大 = 最小 = 手算次数（手算见两支 .spvasm 文件头）
     {
@@ -387,6 +387,39 @@ static void t_bounds(const char *dir) {
         }
     }
     gal_release_later(ab, 1); gal_release_later(ob, 1); gal_release_later(ub, 1);
+    nxgal_prog_release(prog);
+}
+// 越界原子与读改写重试循环（csx.spv，手算见文件头）：越界读钳到 a[3] 读 13，越界的比较交换不执行、返回同一钳到元素的当前值 13 → 每线程第一圈退出，o[i] = 1；
+//   a 的 4 个绑定元素与其后哨兵不变。反例（越界原子回 0 的旧口径）：r 永远 ≠ v，转到循环上限（直连无上限 = GPU 挂死，11-23 D-WZCF）
+static void t_oob_cas(const char *dir) {
+    printf("· D3 越界原子不让读改写重试循环空转：比较交换越界时返回钳到元素的当前值\n");
+    char p[1024]; uint32_t len; snprintf(p, sizeof p, "%s/csx.spv", dir); void *cs = slurp(p, &len);
+    if (!cs) { CHECK(0, "读不了 csx.spv"); return; }
+    nxgal_shader sh = {cs, len, 0};
+    nxgal_res_desc d[] = {{1, 0, 1, 1, 1}, {1, 1, 1, 1, 1}};
+    uint32_t prog = nxgal_prog_create(&sh, 1, d, 2, -1); free(cs);
+    gal_prog *g = prog ? gal_prog_get(prog) : NULL;
+    CHECK(g && !g->status, "建 csx 计算程序失败：%s", nxgal_prog_last_error()); if (!g || g->status) return;
+    MTL4ComputePipelineDescriptor *cd = [MTL4ComputePipelineDescriptor new]; cd.computeFunctionDescriptor = g->fn[0];
+    NSError *e = nil; id<MTLComputePipelineState> ps = [g_gcomp newComputePipelineStateWithDescriptor:cd compilerTaskOptions:nil error:&e];
+    CHECK(ps, "建 csx 计算管线失败：%s", e.localizedDescription.UTF8String); if (!ps) { nxgal_prog_release(prog); return; }
+    id<MTLBuffer> ab = [g_gdev newBufferWithLength:64 options:MTLResourceStorageModeShared], ob = [g_gdev newBufferWithLength:16 options:MTLResourceStorageModeShared];
+    gal_res_add(ab); gal_res_add(ob);
+    uint32_t *av = ab.contents; for (int i = 0; i < 16; i++) av[i] = i < 4 ? (uint32_t)(10 + i) : 77u;
+    memset(ob.contents, 0xee, 16);
+    binds b; memset(&b, 0, sizeof b); b.ssbo[0] = ab.gpuAddress; b.ssbo[1] = ob.gpuAddress;
+    uint32_t *sz = gal_transient(8, 16, &b.sizes_tab); sz[0] = 16; sz[1] = 16;
+    id<MTL4ComputeCommandEncoder> enc = gal_blit_enc();
+    bind_stage(g, 0, g_ct, &b);
+    [enc setArgumentTable:g_ct]; [enc setComputePipelineState:ps];
+    [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:g->threadgroup];
+    gal_finish();
+    const uint32_t *o = ob.contents; int bad = 0;
+    for (int i = 0; i < 4; i++) if (o[i] != 1 && bad++ < 4) printf("  ✗ 线程 %d 循环 %u 圈（期望 1）\n", i, o[i]);
+    for (int i = 0; i < 16; i++) { uint32_t w = i < 4 ? (uint32_t)(10 + i) : 77u; if (av[i] != w && bad++ < 8) printf("  ✗ a[%d] 期望 %u 实得 %u\n", i, w, av[i]); }
+    g_checks++; if (bad) { g_fail++; printf("  ✗ 共 %d 处不符\n", bad); }
+    else printf("  4/4 线程各转 1 圈退出，a 的绑定区间与哨兵 16/16 未被写\n");
+    gal_release_later(ab, 1); gal_release_later(ob, 1);
     nxgal_prog_release(prog);
 }
 // 循环上限的整次派发取值（gal_spvx.m spv_loop_guard）：由 NumWorkgroups 算出的值不得活过入口——只许在入口首块算完、写进共享内存、组内栅栏后读回再用。
@@ -821,6 +854,7 @@ int main(int argc, char **argv) {
         t_graphics(argv[1]);
         t_compute(argv[1]);
         t_bounds(argv[1]);
+        t_oob_cas(argv[1]);
         t_nwg_launder(argv[1]);
         t_fragin(argv[1]);
         t_layer(argv[1]);

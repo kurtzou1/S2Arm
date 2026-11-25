@@ -627,8 +627,15 @@ int main(void) {
           // D-FQ5H（诊断#6470b4，iOS 0.6.7）：IMG 形态（清单 imgFile = game.img）解开过、.applied 等于清单，之后本体 game.img 不在了。
           //   期望：快判、装机阶段都不判就绪（本体是核心件，起局物理上读不到 RomFS）。改前：「没有 game.img」一律当散文件老包放行，起局报「游戏数据缺 romfs/」后游戏 Break
           snprintf(qc, sizeof qc, "printf '{\"version\": 3, \"format\": \"img\", \"imgFile\": \"game.img\", \"index_sha256\": \"abc123\"}' > '%s/manifest.json'", qr); sh(qc);
-          IS(2, "D-FQ5H：清单说本体是 game.img、本体不在 → 不就绪，落到 2 由库重新解开核对（报缺 game.img）");
+          IS(0, "D-FQ5H / D-84EQ：清单说本体是 game.img、本体不在 → 0（库显示「需要游戏数据」、给放 game.img 的说明），不落到 2 去解开、报「从电脑重装」");
           CHECK(s2a_import_state_game_quick(pd, "0100FD70134FA000") != 0, "D-FQ5H：快判也不判就绪（实际 %d）", s2a_import_state_game_quick(pd, "0100FD70134FA000"));
+          // D-84EQ（11-25 iPhone LiveContainer 0.6.9）：两件套导入，.s2arm 先到（清单写 imgFile = game.img、还没解开过、没有 .applied），game.img 还在往「放这里导入」拷。
+          //   期望：0「需要游戏数据」；本体放好后 2 由库解开。改前：2 → 库解开核对报 -8「index.tsv 里 2101 个文件机上缺」、卡片写「从电脑重新装」
+          snprintf(qc, sizeof qc, "mv '%s/.applied' '%s/.applied.keep'", qr, qr); sh(qc);
+          IS(0, "D-84EQ：.s2arm 先到、game.img 未到、没有 .applied → 0 等本体，不去解开");
+          snprintf(qc, sizeof qc, "{ printf S2AIMG01; head -c 120 /dev/zero; printf '\\210\\0\\0\\0\\0\\0\\0\\0'; } > '%s/game.img'", qr); sh(qc);
+          IS(2, "D-84EQ：game.img 认领到位、没有 .applied → 2 由库解开");
+          snprintf(qc, sizeof qc, "rm '%s/game.img' && mv '%s/.applied.keep' '%s/.applied'", qr, qr, qr); sh(qc);
           snprintf(qc, sizeof qc, "{ printf S2AIMG01; head -c 120 /dev/zero; printf '\\210\\0\\0\\0\\0\\0\\0\\0'; } > '%s/game.img'", qr); sh(qc);
           IS(1, "D-FQ5H：本体放回（完整）→ 1 就绪");
           snprintf(qc, sizeof qc, "rm '%s/game.img' && printf '{\"version\":2,\"index_sha256\":\"abc123\"}' > '%s/manifest.json'", qr, qr); sh(qc);

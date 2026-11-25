@@ -76,6 +76,27 @@ int main(void) {
             CHECK(copied && v && v.textureType == MTLTextureType2DMultisample && c2.status == MTLCommandBufferStatusCompleted && !wrong,
                 "⑦ 多重采样深度清成 0.375 拷进快照、按采样 0 读回：拷贝完成 %d、视图类型 %lu、不等于 0.375 的像素 %d（期望 0）、首像素 %.4f", copied, (unsigned long)v.textureType, wrong, f[0]);
         }
+        {   // ⑧ 颜色自采样快照（fb_snap_shape）同槽位多种形状交替取 50 轮不重建，且不同槽位不共享存储
+            id<MTLTexture> f0 = fb_snap_shape(MTLTextureType2D, MTLPixelFormatRGBA16Float, 1440, 810, 0, 1, 1, 0);
+            id<MTLTexture> f1 = fb_snap_shape(MTLTextureType2D, MTLPixelFormatRGBA16Float, 720, 405, 0, 1, 1, 0);
+            id<MTLTexture> f2 = fb_snap_shape(MTLTextureType2D, MTLPixelFormatRGBA16Float, 1440, 810, 0, 1, 1, 1);
+            int chg = 0;
+            for (int r = 0; r < 50; r++) {
+                chg += fb_snap_shape(MTLTextureType2D, MTLPixelFormatRGBA16Float, 1440, 810, 0, 1, 1, 0) != f0;
+                chg += fb_snap_shape(MTLTextureType2D, MTLPixelFormatRGBA16Float, 720, 405, 0, 1, 1, 0) != f1;
+            }
+            CHECK(f0 && f1 && f2 && f0 != f1 && f0 != f2 && chg == 0,
+                "⑧ fb_snap_shape 同槽位交替 1440x810 / 720x405 50 轮不重建（换了 %d 次，期望 0），不同槽位隔离", chg);
+        }
+        {   // ⑨ 快照池合计上限（PR #2230 复审）：4 槽 × 4 种 1080p RGBA16F（每张约 16.6 MB，16 张约 265 MB），每次取当一笔新绘制。
+            //   期望（手算）：合计保留 ≤ FB_SNAP_CAP（96 MB，最多容 5 张）→ 因上限放掉 ≥ 11 张；刚取的那张留着（同参数再取是同一张）；改前合计约 265 MB、放掉 0
+            uint64_t ev0 = g_fbsnap_cap_evict; id<MTLTexture> last = nil;
+            for (int sl = 0; sl < 4; sl++) for (int w = 0; w < 4; w++) { g_draw_seq++; last = fb_snap_shape(MTLTextureType2D, MTLPixelFormatRGBA16Float, 1920, 1080 - (NSUInteger)w, 0, 1, 1, sl); }
+            id<MTLTexture> again = fb_snap_shape(MTLTextureType2D, MTLPixelFormatRGBA16Float, 1920, 1077, 0, 1, 1, 3);
+            uint64_t ev = g_fbsnap_cap_evict - ev0;
+            CHECK(last && again == last && g_fbsnap_bytes <= FB_SNAP_CAP && ev >= 11,
+                "⑨ 快照池合计 %.1f MB（上限 %u MB）、因上限放掉 %llu 张（期望 ≥ 11）、刚取的那张还在 %d", g_fbsnap_bytes / 1048576.0, FB_SNAP_CAP >> 20, (unsigned long long)ev, again == last);
+        }
         unlink(map); unlink(user);
     }
     printf("%s t_nvn_dsnap_slots: %u checks %u failures\n", failures ? "✗" : "✓", checks, failures);

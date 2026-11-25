@@ -116,6 +116,7 @@
 "settings.patchNote" = "Parche de la comunidad";
 "settings.fullscreen.patchNote" = "Parche de pantalla completa de la comunidad";
 "game.fps.note" = "Se ejecuta a 60 FPS cuando el juego lo admite y regresa a la velocidad original cuando no puede mantenerlo. Tiene efecto la próxima vez que inicies el juego";
+"game.hdrSdrMap.note" = "Aclara la imagen normal con un efecto HDR; necesita una pantalla HDR; el texto blanco de la imagen también se ve más brillante; surte efecto la próxima vez que inicies el juego. Se aplica a todos los juegos como aclarado de imagen normal; para usar el HDR propio del juego, desactiva esta opción";
 "game.fullscreen.note" = "Llena la pantalla de este dispositivo en su propia relación de aspecto, y regresa a 16:9 si la imagen se estira. Tiene efecto la próxima vez que inicies el juego";
 "vpad.a11y.locked" = "Bloqueado";
 "vpad.a11y.selected" = "Seleccionado";
@@ -408,6 +409,7 @@
 "gfx.filter.fsr" = "FSR";
 "gfx.filter.fsr.noDirect" = "FSR tampoco está disponible.";
 "gfx.hdrUpscaleBypass.note" = "Con HDR activado (S2A_HDR): las ventanas HDR omiten el antialiasing en pantalla, el filtro de escalado (MetalFX / FSR) y la interpolación de fotogramas: el escalado perceptual de 8 bits no encaja con valores de código PQ (limitación del producto); las ventanas SDR no se ven afectadas.";
+"gfx.hdrSdrMap" = "SDR a HDR";
 "gfx.filter.nearest" = "Para juegos 2D";
 "gfx.fpsLimit" = "Límite de velocidad de fotogramas";
 "gfx.fpsLimit.none" = "Sin límite";
@@ -655,6 +657,8 @@
 "cert.sidestore.empty" = "SideStore no devolvió ningún certificado. Toca «Export» en SideStore e inténtalo de nuevo.";
 "cert.sidestore.noReply" = "SideStore no ha devuelto ningún certificado. Puede que tocaras Cancelar o que esta versión de SideStore sea demasiado antigua para compartir su certificado con otras apps. Actualiza SideStore y vuelve a intentarlo, o exporta el certificado como archivo .p12 e impórtalo.";
 "cert.pickP12" = "Importar .p12…";
+"cert.lc.title" = "Importa el certificado de LiveContainer";
+"cert.lc.message" = "S2Arm se está ejecutando dentro de LiveContainer. Cambiar a SideStore cerraría S2Arm, así que el certificado no podría volver. Exporta el certificado de firma como .p12 desde el SideStore o AltStore que instaló LiveContainer (debe ser el mismo Apple ID) e impórtalo aquí.";
 "cert.status" = "Equipo %1$@ · %2$@";
 "cert.status.otherTeam" = "otro Apple ID distinto del de S2Arm";
 "cert.status.replaced" = "ya no es válido";

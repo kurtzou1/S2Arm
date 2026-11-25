@@ -227,7 +227,7 @@ $(OUT)/t_prog_fin/%.spv: tests/t_prog_%.spvasm
 	@mkdir -p $(OUT)/t_prog_fin
 	spirv-as --target-env vulkan1.0 $< -o $@ && spirv-val --target-env vulkan1.0 $@
 T_FIN := $(OUT)/t_prog_fin/fs32r4.spv $(OUT)/t_prog_fin/fs32r32.spv
-T_SPV := $(OUT)/t_prog_in/vs.spv $(OUT)/t_prog_in/fs.spv $(OUT)/t_prog_in/cs.spv $(OUT)/t_prog_in/vsl.spv $(OUT)/t_prog_in/cso.spv $(OUT)/t_prog_in/csspill.spv $(OUT)/t_prog_in/csl.spv $(OUT)/t_prog_in/csw.spv
+T_SPV := $(OUT)/t_prog_in/vs.spv $(OUT)/t_prog_in/fs.spv $(OUT)/t_prog_in/cs.spv $(OUT)/t_prog_in/vsl.spv $(OUT)/t_prog_in/cso.spv $(OUT)/t_prog_in/csspill.spv $(OUT)/t_prog_in/csl.spv $(OUT)/t_prog_in/csw.spv $(OUT)/t_prog_in/csx.spv
 $(OUT)/t_prog_in/lib/gal.shards: $(T_SPV) $(OUT)/gal_xc tools/gal_offline.py
 	GAL_SHARD_MB=0.001 python3 tools/gal_offline.py $(OUT)/t_prog_in $(OUT)/t_prog_in/lib macos   # 每片约 1 KB：每支各一片，单测走多片按键取片
 # 语料（acnh 467 支着色器，约 2 分钟）：只在 make test-corpus 时生成；CORPUS_SRC 缺省取旧库只读产物，新库出包产物到位后改指新根

@@ -44,6 +44,10 @@ namespace S2A.Services.Tests
             Row("没改过", "Unknown None", InputPump.JoyconPick(R, None, 1, R, None, PlayerIndex.Unknown));
             Row("掌机模式接上双 Joy-Con", "Player1 JoyconPair", InputPump.JoyconPick(all, Pair, 1, HH, None, PlayerIndex.Unknown));
             Row("双 Joy-Con 断开后换回掌机格", "Handheld Handheld", InputPump.JoyconPick(all, None, 1, Pair, HH, PlayerIndex.Handheld));
+            // ⑮ #2225：游戏只收 掌机 / 双 Joy-Con、小程序应答成双 Joy-Con、实体不是 Joy-Con、改之前是 Pro：不换回 Pro（游戏不收它，换回去会再弹小程序、来回打转）
+            Row("游戏不收改之前的 Pro：不换回", "Unknown None", InputPump.JoyconPick(HH | Pair, None, 1, Pair, Pro, PlayerIndex.Player1));
+            // ⑯ 同上但游戏收 Pro：照旧换回（⑦ 的样式集缩到 Pro / 双 Joy-Con）
+            Row("游戏收改之前的 Pro：换回", "Player1 ProController", InputPump.JoyconPick(Pro | Pair, None, 1, Pair, Pro, PlayerIndex.Player1));
             // 告诉宿主的样式（ReportedStyle）：期望按「Pro / 双 Joy-Con 这一对看游戏收不收 Pro」手写
             void Rep(string what, string expect, ControllerType got)
             {
@@ -57,7 +61,7 @@ namespace S2A.Services.Tests
             // ⑭ 单只样式、掌机、游戏还没声明：原样
             Rep("单只右", "JoyconRight", InputPump.ReportedStyle(all, R));
             Rep("游戏没声明", "ProController", InputPump.ReportedStyle(None, Pro));
-            Console.WriteLine($"{(bad == 0 ? "🟢" : "🔴")} Joy-Con 样式单测：17 项，不符 {bad}");
+            Console.WriteLine($"{(bad == 0 ? "🟢" : "🔴")} Joy-Con 样式单测：19 项，不符 {bad}");
             return bad == 0 ? 0 : 1;
         }
     }

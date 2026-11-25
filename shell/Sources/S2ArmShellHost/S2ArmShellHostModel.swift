@@ -494,7 +494,7 @@ public final class S2ArmShellHostModel {
         #if !os(tvOS)
         actions.signingCertStatus = { String(cString: s2a_shell_cert_status()) }   // 签名证书（0.6.0，宿主 ios/cert_import.m）：手机上自己签导入的游戏用哪张
         actions.onImportSigningCert = { s2a_shell_cert_p12() }
-        actions.onSideStoreSigningCert = { s2a_shell_cert_sidestore() }
+        actions.onSideStoreSigningCert = s2a_shell_cert_sidestore_ok() != 0 ? { s2a_shell_cert_sidestore() } : nil   // LiveContainer 里不给（#2226）
         actions.onGetSigningCert = { s2a_shell_cert_get() }   // 库卡片「需要签名证书」的主按钮
         actions.onImportProgram = { id in s2a_shell_pick_s2arm(id) }   // 库卡片「导入 .s2arm…」：还缺 .s2arm 的款、0.5 老款
         actions.onExportGame = { id in s2a_shell_export_game(id) }   // 长按「导出这一款…」（0.6.3）：生成 .s2arm + .img 交「文件」App

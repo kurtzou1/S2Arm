@@ -695,6 +695,10 @@ namespace S2A.Services
             using var r = new BinaryReader(File.OpenRead(file));
             int n = Ryujinx.HLE.S2AHidSnap.Restore(dev, r);
             Console.Error.WriteLine(n < 0 ? "[s2a] 【红】即时存档恢复：HID 环格式不对，没接上" : $"[s2a] 即时存档恢复：HID 触屏 / 鼠标 / 键盘 / 手势 {n} 个环接回快照那一刻，采样号接着数");
+            int p = Ryujinx.HLE.S2AHidSnap.NpadsRestored;
+            if (n >= 0) Console.Error.WriteLine(p > 0 ? $"[s2a] 即时存档恢复：{p} 只手柄的输入环采样号接回快照那一刻，接着数"
+                : p == 0 ? "[s2a] 【黄】即时存档恢复：快照没有手柄采样号（旧快照），按采样号判新输入的游戏恢复后摇杆可能要过一阵才有反应"
+                : "[s2a] 【红】即时存档恢复：手柄采样号段格式不对，没接上");
         }
 
         // ---------- 恢复：重放 ----------

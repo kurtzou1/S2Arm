@@ -10,7 +10,7 @@
 enum { S2A_HPB_EAST = 1u << 0, S2A_HPB_SOUTH = 1u << 1, S2A_HPB_NORTH = 1u << 2, S2A_HPB_WEST = 1u << 3, S2A_HPB_LSTICK = 1u << 4, S2A_HPB_RSTICK = 1u << 5,
        S2A_HPB_L = 1u << 6, S2A_HPB_R = 1u << 7, S2A_HPB_ZL = 1u << 8, S2A_HPB_ZR = 1u << 9, S2A_HPB_PLUS = 1u << 10, S2A_HPB_MINUS = 1u << 11,
        S2A_HPB_LEFT = 1u << 12, S2A_HPB_UP = 1u << 13, S2A_HPB_RIGHT = 1u << 14, S2A_HPB_DOWN = 1u << 15 };
-typedef struct { uint16_t cx, cy, xmax, ymax, xmin, ymin; } s2a_pro_cal;   // xmax / ymax：中心以上的行程；xmin / ymin：中心以下的行程
+typedef struct { uint16_t cx, cy, xmax, ymax, xmin, ymin, calibrated; } s2a_pro_cal;   // xmax / ymax：中心以上的行程；xmin / ymin：中心以下的行程；calibrated：是否读到有效厂校
 
 // Switch Pro 简单 HID 报告（0x3F，元素直读）的按键号 → Npad 位
 static inline uint32_t s2a_hpp_button_bit(int usage) {
@@ -31,7 +31,7 @@ static inline int16_t s2a_hpp_axis(long v, long min, long max, int invert) {
 }
 // 读不到出厂校准（第三方「… Pro Controller」常不回 SPI 0x603D，#1264 PowerA）：中心 2048、行程起点 1003，之后按实际推到的最远处放大
 //   （同参考实现 SDL3 hidapi_switch.c：缺省行程 = 中心 × 0.7，摇杆范围再从它的 0.7 起、随读数扩大）
-static inline void s2a_hpp_cal_default(s2a_pro_cal *c) { c->cx = c->cy = 2048; c->xmax = c->ymax = c->xmin = c->ymin = 1003; }
+static inline void s2a_hpp_cal_default(s2a_pro_cal *c) { c->cx = c->cy = 2048; c->xmax = c->ymax = c->xmin = c->ymin = 1003; c->calibrated = 0; }
 static inline int16_t s2a_hpp_pro_axis(int v, int center, int above, int below) {
     int dv = v - center; double f = dv > 0 ? (above > 0 ? (double)dv / above : 0) : (below > 0 ? (double)dv / below : 0);
     if (f > 1) f = 1; if (f < -1) f = -1;
@@ -44,6 +44,10 @@ static inline int16_t s2a_hpp_pro_axis_grow(int v, int center, uint16_t *above, 
     if (-dv > *below) *below = (uint16_t)-dv;
     return s2a_hpp_pro_axis(v, center, *above, *below);
 }
+// 有效厂校固定行程（尖峰不撑大行程，推满仍是满量程）；只有缺厂校的缺省校准随读数扩大
+static inline int16_t s2a_hpp_pro_axis_report(const s2a_pro_cal *c, int v, int center, uint16_t *above, uint16_t *below) {
+    return c->calibrated ? s2a_hpp_pro_axis(v, center, *above, *below) : s2a_hpp_pro_axis_grow(v, center, above, below);
+}
 // 0x30 完整报告 / 0x21 子命令应答（报告号在首字节）：按键 3 字节 + 12 位摇杆；ax 顺序 左 x y、右 x y，Y 向上为正（同 GameController）
 static inline int s2a_hpp_pro_parse(const uint8_t *r, size_t n, s2a_pro_cal *l, s2a_pro_cal *rc, uint32_t *buttons, int16_t ax[4]) {
     if (n < 12 || (r[0] != 0x30 && r[0] != 0x21)) return 0;
@@ -53,8 +57,8 @@ static inline int s2a_hpp_pro_parse(const uint8_t *r, size_t n, s2a_pro_cal *l, 
     if (b & 0x01) o |= S2A_HPB_DOWN; if (b & 0x02) o |= S2A_HPB_UP; if (b & 0x04) o |= S2A_HPB_RIGHT; if (b & 0x08) o |= S2A_HPB_LEFT; if (b & 0x40) o |= S2A_HPB_L; if (b & 0x80) o |= S2A_HPB_ZL;
     *buttons = o;
     int lx = r[6] | ((r[7] & 0xF) << 8), ly = (r[7] >> 4) | (r[8] << 4), rx = r[9] | ((r[10] & 0xF) << 8), ry = (r[10] >> 4) | (r[11] << 4);
-    ax[0] = s2a_hpp_pro_axis_grow(lx, l->cx, &l->xmax, &l->xmin); ax[1] = s2a_hpp_pro_axis_grow(ly, l->cy, &l->ymax, &l->ymin);
-    ax[2] = s2a_hpp_pro_axis_grow(rx, rc->cx, &rc->xmax, &rc->xmin); ax[3] = s2a_hpp_pro_axis_grow(ry, rc->cy, &rc->ymax, &rc->ymin);
+    ax[0] = s2a_hpp_pro_axis_report(l, lx, l->cx, &l->xmax, &l->xmin); ax[1] = s2a_hpp_pro_axis_report(l, ly, l->cy, &l->ymax, &l->ymin);
+    ax[2] = s2a_hpp_pro_axis_report(rc, rx, rc->cx, &rc->xmax, &rc->xmin); ax[3] = s2a_hpp_pro_axis_report(rc, ry, rc->cy, &rc->ymax, &rc->ymin);
     return 1;
 }
 #endif
