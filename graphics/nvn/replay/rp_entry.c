@@ -2,6 +2,7 @@
 // 有真实语义而新层还没接的入口，一律经 nvn_unimpl("be", 名字) 记账后返回「没有 / 没做」，不返回假成功；
 // 只是 Metal 侧诊断读数的入口返回 0。接上一个就把对应的 nvn_unimpl 换成实现，并在单测里加用例。
 #include "rp_exec.h"
+#include "rp_shader.h"
 #include "rp_state.h"
 #include "rp_res.h"
 #include "nvn_deswizzle.h"
@@ -328,6 +329,12 @@ int nvn_be_drain_session(void) { nvn_be_finish(); return 0; }
 void rp_exec_reset(void);
 int nvn_be_shutdown_session(void) { rp_pool_stats_end(); rp_exec_reset(); rp_draw_reset(); rp_shader_reset(); rp_pass_reset(); rp_res_reset(); rp_buf_reset(); rp_state_reset(); return 0; }   // 上屏面由平台件摘（rp_present_set_surface）
 
+// 长帧行在呈现线程作差，两个来源都按进程累计，读取不清零。
+void nvn_be_create_stats(uint64_t *lib, uint64_t *pso) {
+    if (lib) *lib = rp_shader_compiled_programs();
+    if (pso) *pso = rp_sync_pipelines_created();
+}
+
 // ---------- Metal 侧诊断读数：新层没有对应账本，报 0 ----------
 double nvn_be_gpu_ms(uint64_t f) { (void)f; return 0; }
 int nvn_be_gpu_span(uint64_t f, uint64_t *t0, uint64_t *t1) { (void)f; if (t0) *t0 = 0; if (t1) *t1 = 0; return 0; }
@@ -338,10 +345,8 @@ uint64_t nvn_be_ds_omit(void) { return 0; }
 uint64_t nvn_be_drawable_ns_take(void) { return 0; }
 void nvn_be_bw(uint64_t *load, uint64_t *store, uint64_t *full) { if (load) *load = 0; if (store) *store = 0; if (full) *full = 0; }
 uint64_t nvn_be_udc_saved_bytes(void) { return 0; }
-void nvn_be_pkg_stats(uint64_t *uploads, uint64_t *reuploads) { if (uploads) *uploads = 0; if (reuploads) *reuploads = 0; }
 uint64_t nvn_be_upload_ns_take(void) { return 0; }
 uint64_t nvn_be_upload_gpu_ns_take(void) { return 0; }
-void nvn_be_create_stats(uint64_t *lib, uint64_t *pso) { if (lib) *lib = 0; if (pso) *pso = 0; }
 void nvn_be_vbuf_stats(uint64_t *resolve, uint64_t *reuse, uint64_t *set, uint64_t *skip) { if (resolve) *resolve = 0; if (reuse) *reuse = 0; if (set) *set = 0; if (skip) *skip = 0; }
 void mtl_res_counts(uint32_t tick, const char *why) { (void)tick; (void)why; }
 void mtl_res_snapshot(mtl_res_count *out) { if (out) memset(out, 0, sizeof *out); }

@@ -135,6 +135,26 @@ typedef void (*f_spv)(uint32_t *);
 typedef void (*f_spr)(uint32_t *, const sync_h *);
 typedef void (*f_sph)(void *, uint32_t *);
 typedef int (*f_gstw)(const sync_h *);
+typedef Result (*f_enc_init)(uint64_t *, void *, uintptr_t, uint64_t, uint32_t, uint32_t, int32_t, int32_t,
+                              uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+typedef Result (*f_enc_reg)(void *, uint32_t, void *, uint32_t);
+typedef void (*f_enc_unreg)(void *, uint32_t);
+typedef Result (*f_enc_start)(void *);
+typedef void (*f_enc_stop)(void *);
+typedef Result (*f_enc_acq)(uint32_t *, sync_h *, void *);
+typedef Result (*f_enc_sub)(void *, uint32_t, sync_h, int64_t, uint64_t);
+typedef Result (*f_enc_sub_rect)(void *, uint32_t, sync_h, int64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+typedef Result (*f_enc_blank)(void *, int64_t, uint64_t);
+typedef Result (*f_enc_event_old)(void **, void *);
+typedef void *(*f_enc_event_new)(void *);
+typedef Result (*f_enc_out)(uint64_t *, uint64_t *, uint64_t *, void *, void *, uint64_t);
+typedef Result (*f_enc_out_ts)(uint64_t *, uint64_t *, uint64_t *, int64_t *, void *, void *, uint64_t);
+typedef Result (*f_enc_props_short)(void *, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, uint64_t);
+typedef Result (*f_enc_props_full)(void *, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, uint64_t, uint64_t, uint64_t);
+typedef Result (*f_write_rgba)(const void *, uint32_t, const void *, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+typedef Result (*f_write_nv12)(const void *, uint32_t, const void *, uint64_t, uint64_t, const void *, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+typedef Result (*f_enc_handle_old)(uint32_t *, const void *);
+typedef uint32_t (*f_enc_handle_new)(const void *, uint32_t);
 
 struct codec { const char *init, *fini, *reg, *start, *ready, *sub, *acq, *rel, *props; };
 #define CODEC(C, L) { "_ZN2nn5codec" L "Initialize" C "DecoderByTransferMemoryEPNS0_14" C "DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE", \
@@ -203,6 +223,7 @@ static uint32_t take(rig *r, const struct codec *c, uint32_t *spev, sync_h *hout
     return idx;
 }
 static void px(rig *r, uint32_t img, uint8_t out[4]) { CHECK(((f_rgba)E(READ_RGBA))(r->pool[img], 0, 3, 5, 1, 1, out, 4, 4) == 0); }
+static int enc_wait(void *sev) { for (int t = 0; t < 30000; t++) { if (g_trywait(sev)) return 1; usleep(1000); } return 0; }
 
 // ---------- 合成码流逐帧对拍（tests/data/vp9_synth/*.ivf，与 #313 同一批码流）：libvpx 与系统后端整幅 RGBA MD5 逐帧相同 ----------
 typedef struct { uint8_t *p; size_t n, off; uint32_t count, w, h; } ivf_s;
@@ -574,22 +595,131 @@ int main(int argc, char **argv) {
         CHECK(a == &A && f == &F && rr == &R && na == &A && nu == &U);
         ((void (*)(void))E("_ZN2nn2gs8FinalizeEv"))(); CHECK(!nvn2_gs_booted());
     }
+    // ---------- H.264 编码（VideoToolbox）：SDK 20 真实导入名、0x140 字节客体、图像池 → 输入同步句柄 → 输出事件 → AVCC → 解码往返 ----------
+    {
+        static const char *const pool_size = "_ZN2nn5codec31CalculateEncoderImagePoolBufferEPmS1_RKNS0_27VideoEncoderImagePreferenceEj";
+        static const char *const pool_init = "_ZN2nn5codec26InitializeEncoderImagePoolEPNS0_25VideoEncoderImagePoolTypeEPvmRKNS0_27VideoEncoderImagePreferenceEj";
+        static const char *const pool_fini = "_ZN2nn5codec24FinalizeEncoderImagePoolEPNS0_25VideoEncoderImagePoolTypeE";
+        static const char *const handle_old = "_ZN2nn5codec36GetEncoderImagePoolNativeImageHandleEPNS_2gs17NativeImageHandleEPKNS0_25VideoEncoderImagePoolTypeE";
+        static const char *const handle_new = "_ZN2nn5codec36GetEncoderImagePoolNativeImageHandleEPKNS0_25VideoEncoderImagePoolTypeEj";
+        static const char *const write_rgba = "_ZN2nn5codec26WriteEncoderInputImageRgbaEPKNS0_25VideoEncoderImagePoolTypeEjPKvmmtttt";
+        static const char *const init = "_ZN2nn5codec21InitializeH264EncoderEPmPNS0_15H264EncoderTypeEPvmttiNS_5movie11BitRateModeENS5_10AvcProfileENS5_8AvcLevelEiiiiibbibNS0_15HardwareProfileEi";
+        static const char *const init_new = "_ZN2nn5codec21InitializeH264EncoderEPmPNS0_15H264EncoderTypeEPvmttiNS_5movie11BitRateModeENS5_10AvcProfileENS5_8AvcLevelEiiiiibbibNS0_27VideoEncoderHardwareProfileEi";
+        static const char *const fini = "_ZN2nn5codec19FinalizeH264EncoderEPNS0_15H264EncoderTypeE";
+        static const char *const reg = "_ZN2nn5codec25RegisterH264EncoderBufferEPNS0_15H264EncoderTypeEjPNS0_25VideoEncoderImagePoolTypeEj";
+        static const char *const unreg = "_ZN2nn5codec27UnregisterH264EncoderBufferEPNS0_15H264EncoderTypeEj";
+        static const char *const start = "_ZN2nn5codec16StartH264EncoderEPNS0_15H264EncoderTypeE";
+        static const char *const stop = "_ZN2nn5codec15StopH264EncoderEPNS0_15H264EncoderTypeE";
+        static const char *const acq = "_ZN2nn5codec29AcquireH264EncoderInputBufferEPjPNS_2gs16NativeSyncHandleEPNS0_15H264EncoderTypeE";
+        static const char *const sub = "_ZN2nn5codec28SubmitH264EncoderInputBufferEPNS0_15H264EncoderTypeEjNS_2gs16NativeSyncHandleENS_8TimeSpanEb";
+        static const char *const sub_rect = "_ZN2nn5codec28SubmitH264EncoderInputBufferEPNS0_15H264EncoderTypeEjNS_2gs16NativeSyncHandleENS_8TimeSpanEbtttt";
+        static const char *const blank = "_ZN2nn5codec16BlankH264EncoderEPNS0_15H264EncoderTypeENS_8TimeSpanEb";
+        static const char *const event_old = "_ZN2nn5codec30GetH264EncoderOutputReadyEventEPPNS_2os15SystemEventTypeEPNS0_15H264EncoderTypeE";
+        static const char *const event_new = "_ZN2nn5codec30GetH264EncoderOutputReadyEventEPNS0_15H264EncoderTypeE";
+        static const char *const out = "_ZN2nn5codec26GetH264EncoderOutputBufferEPmS1_S1_PNS0_15H264EncoderTypeEPvm";
+        static const char *const out_ts = "_ZN2nn5codec26GetH264EncoderOutputBufferEPmS1_S1_PNS_8TimeSpanEPNS0_15H264EncoderTypeEPvm";
+        static const char *const props_short = "_ZN2nn5codec24SetH264EncoderPropertiesEPNS0_15H264EncoderTypeEiiiiiiib";
+        static const char *const props_full = "_ZN2nn5codec24SetH264EncoderPropertiesEPNS0_15H264EncoderTypeEiiiiiiiiib";
+        _Alignas(16) uint8_t enc[0x140], pool[2][0x20];
+        uint8_t *mem[2]; uint64_t size = 0, align = 0, out_size = 0;
+        uint32_t pref[16] = {0, 2, 63 | 63 << 16};
+        CHECK(((f_psize)E(pool_size))(&size, &align, pref, 2) == 0 && align >= 0x1000 && size >= 2ull * 64 * 64 * 4);
+        for (int i = 0; i < 2; i++) { CHECK(!posix_memalign((void **)&mem[i], (size_t)align, (size_t)size)); CHECK(((f_pinit)E(pool_init))(pool[i], mem[i], size, pref, 1) == 0); }
+        uint32_t h0 = 0;
+        CHECK(((f_enc_handle_old)E(handle_old))(&h0, pool[0]) == 0 && h0 != 0);
+        CHECK(((f_enc_handle_new)E(handle_new))(pool[0], 0) == h0 && ((f_enc_handle_new)E(handle_new))(pool[0], 1) == 0);
+        CHECK(((f_enc_init)E(init))(&out_size, enc, 0, 0, 64, 64, 30, 0, 0, 0, 2000000, 30, 0, 0, 1, 0, 0, 0, 1, 0, 1) == 0 && out_size >= 4096);
+        CHECK(E(init_new) == E(init));
+        void *ev = NULL;
+        CHECK(((f_enc_event_old)E(event_old))(&ev, enc) == 0 && ev == enc + 8);
+        CHECK(((f_enc_event_new)E(event_new))(enc) == enc + 8);
+        CHECK(((f_enc_reg)E(reg))(enc, 0, pool[0], 0) == 0 && ((f_enc_reg)E(reg))(enc, 1, pool[1], 0) == 0);
+        CHECK(((f_enc_reg)E(reg))(enc, 0, pool[0], 0) == 0xfa26f);
+        CHECK(((f_enc_start)E(start))(enc) == 0);
+        CHECK(((f_enc_props_short)E(props_short))(enc, 2000000, 30, 30, 0, 0, 1, 1, 0) == 0);
+        CHECK(((f_enc_props_full)E(props_full))(enc, 2000000, 30, 30, 0, 0, 1, 1, 0, 50, 0) == 0);
+        uint8_t *rgba[2];
+        for (int i = 0; i < 2; i++) { rgba[i] = malloc(64 * 64 * 4); CHECK(rgba[i]); for (int p = 0; p < 64 * 64; p++) { rgba[i][4*p] = i ? 0 : 255; rgba[i][4*p+1] = i ? 255 : 0; rgba[i][4*p+2] = 0; rgba[i][4*p+3] = 255; }
+            CHECK(((f_write_rgba)E(write_rgba))(pool[i], 0, rgba[i], 64 * 64 * 4, 64 * 4, 0xaaaa0000ull, 0xbbbb0000ull, 0xcccc0000ull | 64, 0xdddd0000ull | 64) == 0); }
+        uint8_t *encoded = malloc((size_t)out_size); CHECK(encoded);
+        rig dec; rig_up(&dec, &H264, 64, 64);
+        for (int frame = 0; frame < 2; frame++) {
+            uint32_t idx = 99; sync_h sh;
+            CHECK(((f_enc_acq)E(acq))(&idx, &sh, enc) == 0 && idx == (uint32_t)frame);
+            if (frame) CHECK(((f_gstw)E(GS_TRYWAIT))(&sh));
+            if (frame) CHECK(((f_enc_sub_rect)E(sub_rect))(enc, idx, sh, (int64_t)frame * 33333000, frame == 0, 0xaaaa0000ull, 0xbbbb0000ull, 0xcccc0000ull | 64, 0xdddd0000ull | 64) == 0);
+            else CHECK(((f_enc_sub)E(sub))(enc, idx, sh, 0, 1) == 0);
+            CHECK(enc_wait(ev));
+            uint64_t off = ~0ull, n = 0, flags = 0; int64_t pts = -1;
+            uint64_t short_off = 0, short_n = 0, short_flags = 0;
+            CHECK(((f_enc_out_ts)E(out_ts))(&short_off, &short_n, &short_flags, &pts, enc, encoded, 1) != 0 && g_trywait(ev));
+            CHECK(((f_enc_out_ts)E(out_ts))(&off, &n, &flags, &pts, enc, encoded, out_size) == 0 && off == 0 && n > 0 && n <= out_size && pts == frame * 33333000);
+            CHECK(frame != 0 || (flags & 1));
+            uint64_t id = 0; CHECK(((f_sub)E(H264.sub))(&id, dec.obj, encoded, n, (int64_t)frame * 33333000, 0) == 0);
+            sync_h dh; uint32_t di = take(&dec, &H264, &spev, &dh); uint8_t p[4]; px(&dec, di, p);
+            printf("H.264 编码第 %d 帧：%llu 字节 flags=%llu，解码像素 (%u,%u,%u,%u)\n", frame, (unsigned long long)n, (unsigned long long)flags, p[0], p[1], p[2], p[3]);
+            CHECK(frame ? (p[1] >= 220 && p[0] <= 32 && p[2] <= 32) : (p[0] >= 220 && p[1] <= 32 && p[2] <= 32));
+            ((f_rel)E(H264.rel))(dec.obj, di, 0, 0);
+        }
+        uint64_t off = 0, n = 0, flags = 0;
+        uint32_t mi[2]; sync_h mh[2];
+        for (int i = 0; i < 2; i++) {
+            CHECK(((f_enc_acq)E(acq))(&mi[i], &mh[i], enc) == 0 && ((f_gstw)E(GS_TRYWAIT))(&mh[i]));
+            CHECK(((f_enc_sub)E(sub))(enc, mi[i], mh[i], 100000000 + (int64_t)i * 33333000, 0) == 0);
+        }
+        sync_h *guest_sync0 = (sync_h *)((uint8_t *)enc + 0xc0 + (size_t)mi[0] * 16), *guest_sync1 = (sync_h *)((uint8_t *)enc + 0xc0 + (size_t)mi[1] * 16);
+        CHECK(guest_sync1->value == guest_sync0->value + 1);
+        for (int i = 0; i < 2; i++) { CHECK(enc_wait(ev)); CHECK(((f_enc_out)E(out))(&off, &n, &flags, enc, encoded, out_size) == 0 && n > 0); }
+        CHECK(((f_enc_blank)E(blank))(enc, 66666000, 0) == 0 && enc_wait(ev));
+        CHECK(((f_enc_out)E(out))(&off, &n, &flags, enc, encoded, out_size) == 0 && n > 0);
+        uint32_t blocked_idx = 99; sync_h blocked;
+        CHECK(((f_enc_acq)E(acq))(&blocked_idx, &blocked, enc) == 0 && blocked_idx < 2);
+        blocked.value += 100; uint64_t wait0 = now_ns();
+        CHECK(((f_enc_sub)E(sub))(enc, blocked_idx, blocked, 99999000, 0) != 0 && now_ns() - wait0 >= 90000000ull);
+        uint32_t alien_idx = 99; sync_h alien_sh, alien = {~77u, 1, 5};
+        CHECK(((f_enc_acq)E(acq))(&alien_idx, &alien_sh, enc) == 0);
+        wait0 = now_ns(); CHECK(((f_enc_sub)E(sub))(enc, alien_idx, alien, 99999000, 0) != 0 && now_ns() - wait0 < 500000000ull);
+        ((f_enc_unreg)E(unreg))(enc, 1); CHECK(((f_enc_reg)E(reg))(enc, 1, pool[1], 0) == 0);
+        ((f_enc_stop)E(stop))(enc);
+        int d0 = g_destroys; ((f_v)E(fini))(enc); CHECK(g_destroys == d0 + 1 && ((fake_sev *)ev)->destroyed);
+        rig_down(&dec, &H264);
+        uint32_t npref[16] = {0, 4, 63 | 63 << 16}; uint64_t nsize = 0, nalign = 0; uint8_t npool[0x20], nenc[0x140], *nvmem = NULL; void *nev = NULL;
+        CHECK(((f_psize)E(pool_size))(&nsize, &nalign, npref, 1) == 0 && !posix_memalign((void **)&nvmem, (size_t)nalign, (size_t)nsize));
+        CHECK(((f_pinit)E(pool_init))(npool, nvmem, nsize, npref, 1) == 0);
+        CHECK(((f_enc_init)E(init_new))(&out_size, nenc, 0, 0, 64, 64, 30, 0, 0, 0, 2000000, 30, 0, 0, 1, 0, 0, 0, 1, 0, 1) == 0);
+        CHECK(((f_enc_event_old)E(event_old))(&nev, nenc) == 0 && ((f_enc_reg)E(reg))(nenc, 0, npool, 0) == 0 && ((f_enc_start)E(start))(nenc) == 0);
+        uint8_t y[64 * 64], uv[32 * 64]; memset(y, 145, sizeof y); for (int i = 0; i < 32 * 32; i++) { uv[2*i] = 54; uv[2*i+1] = 34; }
+        CHECK(((f_write_nv12)E("_ZN2nn5codec26WriteEncoderInputImageNv12EPKNS0_25VideoEncoderImagePoolTypeEjPKvmmS5_mmtttt"))(npool, 0, y, sizeof y, 64, uv, sizeof uv, 64, 0, 0, 64, 64) == 0);
+        uint8_t ry[48 * 48], ruv[24 * 48]; memset(ry, 81, sizeof ry); for (int i = 0; i < 24 * 24; i++) { ruv[2*i] = 90; ruv[2*i+1] = 240; }
+        CHECK(((f_write_nv12)E("_ZN2nn5codec26WriteEncoderInputImageNv12EPKNS0_25VideoEncoderImagePoolTypeEjPKvmmS5_mmtttt"))(npool, 0, ry, sizeof ry, 48, ruv, sizeof ruv, 48, 8, 8, 48, 48) == 0);
+        uint32_t ni = 99; sync_h nsh; CHECK(((f_enc_acq)E(acq))(&ni, &nsh, nenc) == 0 && ni == 0);
+        CHECK(((f_enc_sub_rect)E(sub_rect))(nenc, ni, nsh, 0, 1, 8, 8, 48, 48) == 0 && enc_wait(nev));
+        CHECK(((f_enc_out)E(out))(&off, &n, &flags, nenc, encoded, out_size) == 0 && n > 0);
+        rig ndec; rig_up(&ndec, &H264, 64, 64); uint64_t nid = 0; CHECK(((f_sub)E(H264.sub))(&nid, ndec.obj, encoded, n, 0, 0) == 0);
+        sync_h ndh; uint32_t ndi = take(&ndec, &H264, &spev, &ndh); uint8_t np[4]; px(&ndec, ndi, np);
+        printf("H.264 NV12 编码：%llu 字节，解码像素 (%u,%u,%u,%u)\n", (unsigned long long)n, np[0], np[1], np[2], np[3]);
+        CHECK(np[0] >= 220 && np[1] <= 32 && np[2] <= 32 && np[3] == 255);
+        ((f_v)E(fini))(nenc); rig_down(&ndec, &H264); ((f_pfini)E(pool_fini))(npool); free(nvmem);
+        free(encoded); free(rgba[0]); free(rgba[1]);
+        for (int i = 0; i < 2; i++) { ((f_pfini)E(pool_fini))(pool[i]); free(mem[i]); }
+    }
+
     // ---------- 族内宿主做不到的：红桩（装载打红行，调用即中止点名）；族内纯函数 / 数据符号 / 族外：照原路径 ----------
     {
         // 红桩只给有实证的：gs 未启动模拟执行进了 gsv 会话（编码器图像池、别名池、gsv 视频服务会话）或经 syncpt 库表跳空（库表转发、NvRm 栅栏转同步句柄）
         static const char *const red[] = {
-            "_ZN2nn5codec26InitializeEncoderImagePoolEPNS0_25VideoEncoderImagePoolTypeEPvmRKNS0_27VideoEncoderImagePreferenceEj",   // Pokopia subsdk0 导入
             "_ZN2nn5codec31InitializeDecoderAliasImagePoolEPNS0_25VideoDecoderImagePoolTypeENS_2gs17NativeImageHandleEj",
+            "_ZN2nn5codec31InitializeEncoderAliasImagePoolEPNS0_25VideoEncoderImagePoolTypeENS_2gs17NativeImageHandleEj",
+            "_ZN2nn5codec26InitializeEncoderImagePoolEPNS0_25VideoEncoderImagePoolTypeENS_5gsdrv16WeakNativeHandleEmRKNS0_27VideoEncoderImagePreferenceEj",
             "_ZN2nn6syncpt3sdk19MakeSyncPointHandleENS1_13SyncCounterIdEmNS1_13SyncValueModeE",
             "_ZN2nn6syncpt3sdk21CreateDebugSyncDeviceEPNS1_19DebugSyncDeviceTypeE",
             "_ZN2nn2gs8external32GetNativeSyncHandleFromNvRmFenceERKNS1_12NvRmFenceRecE",   // Pokopia subsdk0 导入
             "_ZN2nn5codec5video6detail17ShimLibraryGlobal10InitializeEv",
         };
-        static const char *const why[] = { "编码", "别名", "库表", "调试", "NvRm", "gsv" };
+        static const char *const why[] = { "别名", "别名", "远程", "库表", "调试", "NvRm", "gsv" };
         for (unsigned i = 0; i < sizeof red / sizeof *red; i++) { void *f = s2a_codec_entry(red[i]); CHECK(f && nvn2_red_of(f) && strstr(nvn2_red_of(f), why[i])); }
-        // 族内没接、但没有原路径必中止实证的：照原路径（H.264 编码器初始化 / 加密输入 / 原生窗口 / nvnSync 由原生同步句柄初始化）
-        CHECK(!s2a_codec_entry("_ZN2nn5codec21InitializeH264EncoderEPmPNS0_15H264EncoderTypeEPvmttiNS_5movie11BitRateModeENS4_12EncoderLevelENS0_23VideoEncoderInputFormatE")
-              && !s2a_codec_entry("_ZN2nn5codec36SubmitEncryptedVp9DecoderInputBufferEPmPNS0_14Vp9DecoderTypeEPKNS0_18EncryptionPropertyEPKvmNS_8TimeSpanEb")
+        // 族内没接、但没有原路径必中止实证的：照原路径（加密输入 / 原生窗口 / nvnSync 由原生同步句柄初始化）
+        CHECK(!s2a_codec_entry("_ZN2nn5codec36SubmitEncryptedVp9DecoderInputBufferEPmPNS0_14Vp9DecoderTypeEPKNS0_18EncryptionPropertyEPKvmNS_8TimeSpanEb")
               && !s2a_codec_entry("_ZN2nn2gs3sdk19ConnectNativeWindowEPvPKcNS1_21NativeWindowAttributeE")
               && !s2a_codec_entry("_Z37nvnSyncInitializeFromNativeSyncHandleP7NVNsyncP9NVNdeviceN2nn2gs16NativeSyncHandleE"));
         CHECK(dies1(s2a_codec_entry(red[0]), 0, 0));

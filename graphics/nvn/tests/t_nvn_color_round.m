@@ -22,7 +22,14 @@ static NSString *const source=@"#include <metal_stdlib>\nusing namespace metal;\
 "struct T { float4 a [[color(0)]]; float4 b [[color(1)]]; float4 observe [[color(2)]]; };\n"
 "fragment T multiple(constant uint &mask [[buffer(27)]]) { return {float4(1.0007f),float4(1.0007f),float4(float(mask),mask&1u?1.0f:1.0007f,0,1)}; }\n"
 "struct W { float4 observe [[color(1)]]; };\n"
-"fragment W unwritten(constant uint &mask [[buffer(27)]]) { return {float4(float(mask),mask&1u?1.0f:1.0007f,0,1)}; }\n";
+"fragment W unwritten(constant uint &mask [[buffer(27)]]) { return {float4(float(mask),mask&1u?1.0f:1.0007f,0,1)}; }\n"
+"static inline float4 s2a_blend_zero_rgb(float4 x) { if (x.w == 0.0f) x.xyz = select(x.xyz, float3(0.0f), (as_type<uint3>(x.xyz) & 0x7f800000u) == 0x7f800000u); return x; }\n"
+"fragment O blend_nan(float4 pos [[position]], constant uint &mask [[buffer(27)]]) {\n"
+"  O o; float n = as_type<float>(0x7fc00000u);\n"
+"  o.c = (int(pos.x) == 0) ? float4(n, n, n, 0.0f) : float4(1.0f, 0.5f, 0.25f, 0.5f);\n"
+"  if (mask & 256u) o.c = s2a_blend_zero_rgb(o.c);\n"
+"  o.observe = float4(float(mask), 0, 0, 1); return o;\n"
+"}\n";
 
 static NvShader *shader(id<MTLLibrary> lib, NSString *name, int stage) {
     NvShader *s=[NvShader new]; s->stage=stage; s->fn=[lib newFunctionWithName:name]; REQUIRE(s->fn);
@@ -101,5 +108,29 @@ int main(void) { @autoreleasepool {
     nvn_be_sub_begin(); state_reset(); S.prog=&p; rp_flush(); memset(&R.rt,0,sizeof R.rt);
     R.rt.n=3; R.rt.color[0]=&half; R.rt.color[1]=&rghalf; R.rt.color[2]=&observe; R.has_rt=1; args_dirty_all();
     emit(0); finish(); const unsigned both[]={3}; readback(&observe,both,1,"two half outputs use persistent table entry3");
+    // #674: SRC_ALPHA blending on float target sets bit 8+l so alpha==0 NaN RGB does not poison dst via 0 * NaN = NaN
+    program->sh[1]=shader(lib,@"blend_nan",1);
+    nvn_be_sub_begin(); state_reset(); S.prog=&p; targets(&half,&observe);
+    { id<MTLTexture> ht = tex_mtl(&half);
+      MTLRenderPassDescriptor *clr = [MTLRenderPassDescriptor renderPassDescriptor];
+      clr.colorAttachments[0].texture = ht; clr.colorAttachments[0].loadAction = MTLLoadActionClear;
+      clr.colorAttachments[0].storeAction = MTLStoreActionStore; clr.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+      id<MTLCommandQueue> cq = [g_dev newCommandQueue]; id<MTLCommandBuffer> ccb = [cq commandBuffer];
+      id<MTLRenderCommandEncoder> cre = [ccb renderCommandEncoderWithDescriptor:clr]; [cre endEncoding];
+      [ccb commit]; [ccb waitUntilCompleted]; REQUIRE(ccb.status == MTLCommandBufferStatusCompleted); }
+    S.color.blend_en = 1;
+    S.blend[0] = (blend_st){.target=0, .src_rgb=NVN_BLEND_FUNC_SRC_ALPHA, .dst_rgb=NVN_BLEND_FUNC_ONE_MINUS_SRC_ALPHA, .src_a=NVN_BLEND_FUNC_ZERO, .dst_a=NVN_BLEND_FUNC_ONE_MINUS_SRC_ALPHA, .eq_rgb=NVN_BLEND_EQUATION_ADD, .eq_a=NVN_BLEND_EQUATION_ADD};
+    emit(0); emit(1); finish();
+    { id<MTLBuffer> b=[g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared]; REQUIRE(b);
+      id<MTLCommandQueue> q=[g_dev newCommandQueue]; id<MTLCommandBuffer> cb=[q commandBuffer];
+      id<MTLBlitCommandEncoder> e=[cb blitCommandEncoder];
+      [e copyFromTexture:tex_mtl(&half) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(2,1,1)
+          toBuffer:b destinationOffset:0 destinationBytesPerRow:256 destinationBytesPerImage:256];
+      [e endEncoding]; [cb commit]; [cb waitUntilCompleted]; REQUIRE(cb.status==MTLCommandBufferStatusCompleted);
+      const uint16_t *h16 = (const uint16_t *)b.contents;
+      CHECK(h16[0]==0x0000 && h16[1]==0x0000 && h16[2]==0x0000 && h16[3]==0x3c00,
+            "SRC_ALPHA blend with alpha==0 NaN RGB preserves (0,0,0,1): got %04x %04x %04x %04x", h16[0], h16[1], h16[2], h16[3]);
+      CHECK(h16[4]==0x3800 && h16[5]==0x3400 && h16[6]==0x3000 && h16[7]==0x3800,
+            "SRC_ALPHA blend with alpha==0.5 finite RGB blends normally: got %04x %04x %04x %04x", h16[4], h16[5], h16[6], h16[7]); }
     unlink(map); unlink(user);
 } printf("%s t_nvn_color_round: %u checks, %u failures\n",failures?"✗":"✓",checks,failures); return failures?1:0; }

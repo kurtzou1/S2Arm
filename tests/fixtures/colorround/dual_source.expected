@@ -22,14 +22,62 @@ static inline float s2a_half_rtz(float x) {
 static inline float4 s2a_half_rtz(float4 x) {
     return float4(s2a_half_rtz(x.x), s2a_half_rtz(x.y), s2a_half_rtz(x.z), s2a_half_rtz(x.w));
 }
+static inline float4 s2a_blend_zero_rgb(float4 x) {
+    if (x.w == 0.0f) x.xyz = select(x.xyz, float3(0.0f), (as_type<uint3>(x.xyz) & 0x7f800000u) == 0x7f800000u);
+    return x;
+}
 #endif
-fragment main0_out main0(constant uint& s2a_half_mask [[buffer(27)]])
+#ifndef S2A_PBLEND
+#define S2A_PBLEND
+struct S2APBlend { uint mask; uint pad0, pad1, pad2; float4 k; uint4 f[8][2]; };
+static inline float4 s2a_pb_mul(float4 x, float4 y) { return select(x * y, float4(0.0f), x == 0.0f || y == 0.0f); }
+static inline float4 s2a_pb_factor(uint f, float4 s, float4 s1, float4 d, float4 k) {
+    switch (f) {
+    case 0x1u: return float4(0.0f);
+    case 0x2u: return float4(1.0f);
+    case 0x3u: return s;
+    case 0x4u: return 1.0f - s;
+    case 0x5u: return float4(s.w);
+    case 0x6u: return float4(1.0f - s.w);
+    case 0x7u: return float4(d.w);
+    case 0x8u: return float4(1.0f - d.w);
+    case 0x9u: return d;
+    case 0xAu: return 1.0f - d;
+    case 0xBu: return float4(float3(precise::fmin(s.w, 1.0f - d.w)), 1.0f);
+    case 0x10u: return s1;
+    case 0x11u: return 1.0f - s1;
+    case 0x12u: return float4(s1.w);
+    case 0x13u: return float4(1.0f - s1.w);
+    case 0x61u: return k;
+    case 0x62u: return 1.0f - k;
+    case 0x63u: return float4(k.w);
+    case 0x64u: return float4(1.0f - k.w);
+    default: return float4(0.0f);
+    }
+}
+static inline float4 s2a_pb_eq(uint4 st, float4 s, float4 s1, float4 d, float4 k) {
+    if (st.x == 0x4u) return precise::fmin(s, d);
+    if (st.x == 0x5u) return precise::fmax(s, d);
+    float4 ps = s2a_pb_mul(s2a_pb_factor(st.y, s, s1, d, k), s), pd = s2a_pb_mul(s2a_pb_factor(st.z, s, s1, d, k), d);
+    if (st.x == 0x2u) return ps - pd;
+    if (st.x == 0x3u) return pd - ps;
+    return ps + pd;
+}
+static inline float4 s2a_pblend(float4 s, float4 d, float4 s1, constant S2APBlend &b, uint i) {
+    float4 rgb = s2a_pb_eq(b.f[i][0], s, s1, d, b.k), a = s2a_pb_eq(b.f[i][1], s, s1, d, b.k);
+    return float4(rgb.xyz, a.w);
+}
+#endif
+constant bool s2a_pb0_c [[function_constant(110)]]; constant bool s2a_pb0 = is_function_constant_defined(s2a_pb0_c) && s2a_pb0_c;
+fragment main0_out main0(constant S2APBlend& s2a_pb [[buffer(27)]], float4 s2a_dst0 [[color(0), function_constant(s2a_pb0)]])
 {
     main0_out out = {};
     out.out_attr0 = float4(1.0);
     out.out_attr1 = float4(0.5);
     {
-        if (s2a_half_mask & 1u) out.out_attr0 = s2a_half_rtz(out.out_attr0);
+        if (s2a_pb0) out.out_attr0 = s2a_pblend(out.out_attr0, s2a_dst0, float4(0.0f), s2a_pb, 0u);
+        if (s2a_pb.mask & 1u) out.out_attr0 = s2a_half_rtz(out.out_attr0);
+        if (s2a_pb.mask & 256u) out.out_attr0 = s2a_blend_zero_rgb(out.out_attr0);
         return out;
     }
 }

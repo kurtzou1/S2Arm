@@ -25,28 +25,15 @@ enum { B_EAST = 1u << 0, B_SOUTH = 1u << 1, B_NORTH = 1u << 2, B_WEST = 1u << 3,
        B_L = 1u << 6, B_R = 1u << 7, B_ZL = 1u << 8, B_ZR = 1u << 9, B_PLUS = 1u << 10, B_MINUS = 1u << 11,
        B_LEFT = 1u << 12, B_UP = 1u << 13, B_RIGHT = 1u << 14, B_DOWN = 1u << 15 };
 
-uint32_t s2a_hid_pad_switch_button_bit(int usage) {
-    static const uint32_t map[] = {0, B_SOUTH, B_EAST, B_WEST, B_NORTH, B_L, B_R, B_ZL, B_ZR, B_MINUS, B_PLUS, B_LSTICK, B_RSTICK};
-    return usage > 0 && usage < (int)(sizeof map / sizeof *map) ? map[usage] : 0;   // 13 Home、14 截图不进游戏键位
-}
-uint32_t s2a_hid_pad_hat_bits(long v, long min, long max) {
-    static const uint32_t dir[8] = {B_UP, B_UP | B_RIGHT, B_RIGHT, B_DOWN | B_RIGHT, B_DOWN, B_DOWN | B_LEFT, B_LEFT, B_UP | B_LEFT};
-    if (v < min || v > max || max - min < 7) return 0;
-    long i = v - min; return i < 8 ? dir[i] : 0;
-}
-int16_t s2a_hid_pad_axis(long v, long min, long max, int invert) {
-    if (max <= min) return 0;
-    double f = 2.0 * (double)(v - min) / (double)(max - min) - 1.0;
-    if (f < -1) f = -1; if (f > 1) f = 1;
-    if (invert) f = -f;
-    return (int16_t)(f * 32767.0);
-}
+uint32_t s2a_hid_pad_switch_button_bit(int usage) { return s2a_hpp_button_bit(usage); }
+uint32_t s2a_hid_pad_hat_bits(long v, long min, long max) { return s2a_hpp_hat_bits(v, min, max); }
+int16_t s2a_hid_pad_axis(long v, long min, long max, int invert) { return s2a_hpp_axis(v, min, max, invert); }
 
 // ---- Switch Pro 协议（#934 11-15）----
 // 读不到出厂校准（第三方「… Pro Controller」常不回 SPI 0x603D，#1264 PowerA）：中心 2048、行程起点 1003，之后按实际推到的最远处放大
 //   （同参考实现 SDL3 hidapi_switch.c：缺省行程 = 中心 × 0.7，摇杆范围再从它的 0.7 起、随读数扩大）。原先死用 1600 不放大，
 //   手柄实际推满不到 1600 时推到底也只算推了一部分（移动慢、菜单上下够不到门槛）
-void s2a_pro_cal_default(s2a_pro_cal *c) { c->cx = c->cy = 2048; c->xmax = c->ymax = c->xmin = c->ymin = 1003; }
+void s2a_pro_cal_default(s2a_pro_cal *c) { s2a_hpp_cal_default(c); }
 static int cal12(const uint8_t *d, int i) { return i & 1 ? (d[i / 2 * 3 + 1] >> 4) | (d[i / 2 * 3 + 2] << 4) : d[i / 2 * 3] | ((d[i / 2 * 3 + 1] & 0xF) << 8); }   // 9 字节 = 6 个 12 位值
 int s2a_pro_cal_parse(const uint8_t d[18], s2a_pro_cal *l, s2a_pro_cal *r) {
     int v[12]; for (int i = 0; i < 6; i++) { v[i] = cal12(d, i); v[6 + i] = cal12(d + 9, i); }
@@ -57,30 +44,9 @@ int s2a_pro_cal_parse(const uint8_t d[18], s2a_pro_cal *l, s2a_pro_cal *r) {
     *r = (s2a_pro_cal){(uint16_t)v[6], (uint16_t)v[7], (uint16_t)v[10], (uint16_t)v[11], (uint16_t)v[8], (uint16_t)v[9]};
     return 1;
 }
-int16_t s2a_pro_axis(int v, int center, int above, int below) {
-    int dv = v - center; double f = dv > 0 ? (above > 0 ? (double)dv / above : 0) : (below > 0 ? (double)dv / below : 0);
-    if (f > 1) f = 1; if (f < -1) f = -1;
-    return (int16_t)(f * 32767.0);
-}
-// 行程随读数扩大：这一拍离中心比记下的行程还远，就把它当新的行程（推到底就是满量程），再按行程换算
-int16_t s2a_pro_axis_grow(int v, int center, uint16_t *above, uint16_t *below) {
-    int dv = v - center;
-    if (dv > *above) *above = (uint16_t)dv;
-    if (-dv > *below) *below = (uint16_t)-dv;
-    return s2a_pro_axis(v, center, *above, *below);
-}
-int s2a_pro_parse(const uint8_t *r, size_t n, s2a_pro_cal *l, s2a_pro_cal *rc, uint32_t *buttons, int16_t ax[4]) {
-    if (n < 12 || (r[0] != 0x30 && r[0] != 0x21)) return 0;
-    uint8_t a = r[3], m = r[4], b = r[5]; uint32_t o = 0;
-    if (a & 0x01) o |= B_WEST; if (a & 0x02) o |= B_NORTH; if (a & 0x04) o |= B_SOUTH; if (a & 0x08) o |= B_EAST; if (a & 0x40) o |= B_R; if (a & 0x80) o |= B_ZR;
-    if (m & 0x01) o |= B_MINUS; if (m & 0x02) o |= B_PLUS; if (m & 0x04) o |= B_RSTICK; if (m & 0x08) o |= B_LSTICK;
-    if (b & 0x01) o |= B_DOWN; if (b & 0x02) o |= B_UP; if (b & 0x04) o |= B_RIGHT; if (b & 0x08) o |= B_LEFT; if (b & 0x40) o |= B_L; if (b & 0x80) o |= B_ZL;
-    *buttons = o;
-    int lx = r[6] | ((r[7] & 0xF) << 8), ly = (r[7] >> 4) | (r[8] << 4), rx = r[9] | ((r[10] & 0xF) << 8), ry = (r[10] >> 4) | (r[11] << 4);
-    ax[0] = s2a_pro_axis_grow(lx, l->cx, &l->xmax, &l->xmin); ax[1] = s2a_pro_axis_grow(ly, l->cy, &l->ymax, &l->ymin);   // 0x30 报告里 Y 向上为正，与 GameController 同向
-    ax[2] = s2a_pro_axis_grow(rx, rc->cx, &rc->xmax, &rc->xmin); ax[3] = s2a_pro_axis_grow(ry, rc->cy, &rc->ymax, &rc->ymin);
-    return 1;
-}
+int16_t s2a_pro_axis(int v, int center, int above, int below) { return s2a_hpp_pro_axis(v, center, above, below); }
+int16_t s2a_pro_axis_grow(int v, int center, uint16_t *above, uint16_t *below) { return s2a_hpp_pro_axis_grow(v, center, above, below); }
+int s2a_pro_parse(const uint8_t *r, size_t n, s2a_pro_cal *l, s2a_pro_cal *rc, uint32_t *buttons, int16_t ax[4]) { return s2a_hpp_pro_parse(r, n, l, rc, buttons, ax); }   // 解析在 hid_pro_parse.h（启动器共用）
 uint8_t s2a_pro_player_lights(int slot) { return slot < 0 ? 0x1 : slot >= 3 ? 0xF : (uint8_t)((1u << (slot + 1)) - 1); }
 
 // ---- Xbox 有线手柄 GIP 协议（#1406，实现收敛在 xbox_gip_relay.h 与启动器中继共用）----

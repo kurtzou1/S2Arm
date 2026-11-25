@@ -1190,7 +1190,9 @@ void gal_gpu_stall_exit(id<MTLSharedEvent> ev, const char *what, uint64_t want, 
 static char g_err_head[1200];
 static void *gpu_victim_wait(void *a) {
     (void)a; extern atomic_int g_gpu_errs;
-    for (int i = 0; i < 20 && atomic_load(&g_gpu_errs) < 2; i++) usleep(50000);
+    // 按单调钟截止判「1 秒」，不按次数（11-25：原先 20 × usleep(50 ms)，低 QoS（门禁 taskpolicy -c utility）下系统给每次睡眠加定时器松弛，
+    //   20 次叠加把 1 秒拉到 2–3 秒，本机门禁 metal 子项 t_buf「连坐丢弃、本进程无肇事者」13 次全红（实得 3.01–3.71 秒）；截止判法松弛至多叠一次）
+    for (uint64_t end = clock_gettime_nsec_np(CLOCK_MONOTONIC) + 1000000000ull; atomic_load(&g_gpu_errs) < 2 && clock_gettime_nsec_np(CLOCK_MONOTONIC) < end; ) usleep(50000);
     if (atomic_load(&g_gpu_errs) < 2) GLOG("【红】GPU 连坐丢弃后 1 秒内没收到本进程别的命令缓冲出错回执：肇事者不在主队列 / 上屏队列（别的进程或系统组件）");
     gal_gpu_exit(g_err_head); return NULL;
 }

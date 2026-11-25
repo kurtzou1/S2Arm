@@ -1167,6 +1167,8 @@ static void t_tex_linear_dirty_rows(void) {
     CHECK(t.L.size == 4096u * 64u);
     for (uint32_t y = 0; y < 64; y++) memset(g_block_mem + (size_t)y * 4096, (int)(y + 1), 4096);
     nvn_be_tex_init(&t);
+    uint64_t first0, repeat0, first, repeat;
+    nvn_be_pkg_stats(&first0, &repeat0);
     uint64_t u0 = rp_res_uploads();
     CHECK(rp_tex_resolve(&t, &g_fake_cmd) != NULL && rp_res_uploads() - u0 == 1 && g_nup == 1 && g_up[0].y == 0 && g_up[0].h == 64);   // 第一次：整张
     g_wp_on = 1; g_wp_dirty[10] = g_wp_dirty[11] = g_wp_dirty[40] = 1;
@@ -1174,6 +1176,8 @@ static void t_tex_linear_dirty_rows(void) {
     g_nup = 0; g_dirty_written = g_dirty_now + 1; g_dirty_now += 2;
     g_block_gen[10] = g_block_gen[11] = g_block_gen[40] = g_dirty_written;   // 真写同时推进被写页的代号（脏页日志按它出事件）
     CHECK(rp_tex_resolve(&t, &g_fake_cmd) != NULL && rp_res_uploads() - u0 == 2);
+    nvn_be_pkg_stats(&first, &repeat);
+    CHECK(first - first0 == 1 && repeat - repeat0 == 1);   // 两个脏行区间是同一次重传
     CHECK(g_nup == 2);
     CHECK(g_nup >= 1 && g_up[0].y == 10 && g_up[0].h == 2 && g_up[0].w == 4096 && g_up[0].pitch == 4096 && g_up[0].first[0] == 0xA1);
     CHECK(g_nup >= 2 && g_up[1].y == 40 && g_up[1].h == 1 && g_up[1].first[0] == 0xB2);
@@ -1751,6 +1755,22 @@ static void t_read_texels_gpu(void) {
     g_buf_cpu_auto = cpu_auto; g_auto_done = 0; g_tb_fill = 0;
 }
 
+// 成帧时读取累计数取差；同一帧会有多个读者，查询不能清零。
+static uint64_t fake_compiled, fake_created;
+uint64_t rp_shader_compiled_programs(void) { return fake_compiled; }
+uint64_t rp_sync_pipelines_created(void) { return fake_created; }
+
+static void t_create_stats(void) {
+    uint64_t programs, pipelines;
+    fake_compiled = 3; fake_created = 7;
+    nvn_be_create_stats(&programs, &pipelines);
+    CHECK(programs == 3 && pipelines == 7);
+    fake_created++;
+    nvn_be_create_stats(&programs, NULL);
+    nvn_be_create_stats(NULL, &pipelines);
+    CHECK(programs == 3 && pipelines == 8);
+}
+
 static void t_cpu_upload(void) {   // 存储里是 CPU 写的数据：首次使用上传，之后只在脏了时重传；内容交 GPU 后不再传
     nvn_be_sub_begin();
     res_fresh();
@@ -1758,6 +1778,8 @@ static void t_cpu_upload(void) {   // 存储里是 CPU 写的数据：首次使�
     uint8_t lin0[8 * 8 * 4], lin1[4 * 4 * 4]; for (unsigned i = 0; i < sizeof lin0; i++) lin0[i] = (uint8_t)(i * 7 + 1); for (unsigned i = 0; i < sizeof lin1; i++) lin1[i] = (uint8_t)(200 - i);
     CHECK(nvn_swizzle(&t.d, 0, 0, lin0, 32, t.mem) == 0 && nvn_swizzle(&t.d, 1, 0, lin1, 16, t.mem) == 0);
     int c0 = g_tex_creates, r0 = g_tex_releases, p0 = g_protects; uint64_t u0 = rp_res_uploads();
+    uint64_t first0, repeat0, first, repeat;
+    nvn_be_pkg_stats(&first0, &repeat0);
     CHECK(rp_tex_resolve(&t, &g_fake_cmd) != NULL);
     CHECK(g_tex_creates - c0 == 1 && (g_last_usage & NVN_GPU_TEX_CPU_UPLOAD));
     CHECK(rp_res_uploads() - u0 == 1 && g_nup == 2 && g_protects - p0 == 1 && g_up[0].pre == 1);   // 上传是传输：录进前置段
@@ -1772,6 +1794,8 @@ static void t_cpu_upload(void) {   // 存储里是 CPU 写的数据：首次使�
     CHECK(nvn_be_tex_gpu_owned(5) == 1);
     nvn_be_tex_cpu_written(&t);                                                     // 游戏又 WriteTexels 了
     CHECK(rp_tex_resolve(&t, &g_fake_cmd) != NULL && rp_res_uploads() - u0 == 3 && nvn_be_tex_gpu_owned(5) == 0);
+    nvn_be_pkg_stats(&first, &repeat);
+    CHECK(first - first0 == 1 && repeat - repeat0 == 2);   // 两级首传一次，脏写与 WriteTexels 后各重传一次
     nvn_be_tex_release(&t);
     CHECK(g_tex_releases - r0 == 1 && rp_res_tex_built() == 0);                     // CPU 内容贴图不进共用表：对象 Finalize 即放
     nvn_be_sub_commit(); fake_complete(NVN_GPU_DONE_OK);
@@ -1892,10 +1916,14 @@ static void t_cpu_rules(void) {   // 首用判定的三条分支
     res_fresh();
     tex_t a = mk_tex(21, 0, NVN_FORMAT_RGBA8, 8, 8, 1, 0); memset(a.mem, 0x55, a.L.size);
     nvn_be_pool_gpu_written(&g_tp);                                 // GPU 写过的池里的未压缩贴图：当渲染目标，不当 CPU 贴图；建图时存储里现有的内容只取这一次
+    uint64_t first0, repeat0, first, repeat;
+    nvn_be_pkg_stats(&first0, &repeat0);
     { uint64_t u0 = rp_res_uploads(); int p0 = g_protects;
       CHECK(rp_tex_resolve(&a, &g_fake_cmd) != NULL && g_nup == 1 && g_up[0].first[0] == 0x55 && rp_res_uploads() == u0 && g_protects == p0);
       memset(a.mem, 0x56, a.L.size); g_dirty_written = g_dirty_now + 1; g_dirty_now += 2;
       CHECK(rp_tex_resolve(&a, &g_fake_cmd) != NULL && g_nup == 1); }   // 之后内存再变也不重传（不跟踪写）
+    nvn_be_pkg_stats(&first, &repeat);
+    CHECK(first - first0 == 1 && repeat == repeat0);   // 随存储初始化实际上传一次，随后读同一张不重复记
     tex_t b = mk_tex(22, 0x2000, NVN_FORMAT_RGBA8, 8, 8, 1, 0); memset(b.mem, 0x66, b.L.size);
     nvn_be_tex_cpu_written(&b);                                     // 但游戏明确 WriteTexels 写过的：取存储
     CHECK(rp_tex_resolve(&b, &g_fake_cmd) != NULL && g_nup == 2 && g_up[1].first[0] == 0x66);
@@ -3452,24 +3480,31 @@ static void t_fmt_filter_blend(void) {
     pass_fresh();
 }
 
-// 图形片元采样（真机出事的那条路）：库版声明二维、实绑三维 → 标坏换现编版同一笔画出去，片元绑的是这张贴图，不记「类型不符」
-static void t_draw_tex_lib_fallback(void) {
+static void t_draw_tex_lib_fallback(int target, int format, int lib_cls, int actual_cls, int fallback_missing) {
     pass_fresh(); g_resolve_rc = g_cresolve_rc = 0; g_gresolve_next = NULL; g_lib_reject_calls = 0;
     int g0 = g_gdraws; uint64_t mm0 = nvn_unimpl_count("tex", "decl_type_mismatch");
-    tex_t a = mk_tex(673, 0, NVN_FORMAT_RGBA8, 16, 16, 4, 0); a.d.target = NVN_TEXTURE_TARGET_3D;
+    tex_t a = mk_tex(673, 0, format, 16, 16, target == NVN_TEXTURE_TARGET_3D ? 4 : 1, 0); a.d.target = target;
     samp_par sp; memset(&sp, 0, sizeof sp); nvn_be_reg_tex(7, &a, NULL); nvn_be_reg_samp(3, &sp);
     stream s = {0}; q_env(&s);
     g_fprog.nent[1] = 1; g_fprog.ent[1][0].cls = NVN_GPU_RES_TEX_SAMP; g_fprog.ent[1][0].src_kind = NVN_RB_TEX; g_fprog.ent[1][0].src_reg = 5;
-    g_fprog.dtt[1][0] = NVN_TEXTURE_TARGET_2D + 1; g_fprog.lib_sourced = 1;                    // 库版声明二维
-    memcpy(&g_gprog2, &g_fprog, sizeof g_fprog); g_gprog2.lib_sourced = 0; g_gprog2.dtt[1][0] = NVN_TEXTURE_TARGET_3D + 1;   // 现编版声明三维
+    g_fprog.dtt[1][0] = NVN_TEXTURE_TARGET_2D + 1; g_fprog.lib_sourced = 1; g_fprog.dcls[1][0] = lib_cls;
+    memcpy(&g_gprog2, &g_fprog, sizeof g_fprog); g_gprog2.lib_sourced = 0; g_gprog2.dtt[1][0] = target + 1; g_gprog2.dcls[1][0] = actual_cls;
     p_bind_handles *bh = put(&s, OP_BIND_TEX, sizeof *bh); bh->stage = 1; bh->first = 5; bh->n = 1; bh->h[0] = 7 | 3 << 20;
     q_draw(&s); end(&s);
+    if (fallback_missing) {
+        g_resolve_seq[0] = &g_fprog; g_resolve_seq[1] = NULL;
+        g_resolve_seq_i = 0; g_resolve_seq_n = 2;
+    }
     submit1(&s); fake_complete(NVN_GPU_DONE_OK);
-    CHECK(g_lib_reject_calls == 1 && g_fprog.lib_bad && g_gdraws == g0 + 1);
-    CHECK(g_nfb[1] == 1 && g_fb[1][0].u.ts.view && ((const struct nvn_gpu_view_s *)g_fb[1][0].u.ts.view)->of->d.d.target == NVN_TEXTURE_TARGET_3D &&
+    g_resolve_seq_n = 0;
+    const int retry = target != NVN_TEXTURE_TARGET_2D || lib_cls != actual_cls;
+    CHECK(g_lib_reject_calls == retry && g_fprog.lib_bad == retry && g_gdraws == g0 + !fallback_missing);
+    CHECK(nvn_unimpl_count("tex", "sampled_single_numeric_mismatch") == (uint64_t)(lib_cls != actual_cls));
+    CHECK(nvn_unimpl_count("draw", "sampled_numeric_fallback_failed") == (uint64_t)fallback_missing);
+    if (!fallback_missing) CHECK(g_nfb[1] == 1 && g_fb[1][0].u.ts.view && ((const struct nvn_gpu_view_s *)g_fb[1][0].u.ts.view)->of->d.d.target == target &&
           ((const struct nvn_gpu_view_s *)g_fb[1][0].u.ts.view)->of->d.d.width == 16);
     CHECK(nvn_unimpl_count("tex", "decl_type_mismatch") == mm0);
-    g_gresolve_next = NULL; g_lib_reject_calls = 0; g_fprog.lib_sourced = 0; g_fprog.lib_bad = 0; pass_fresh();
+    g_gresolve_next = NULL; g_lib_reject_calls = 0; g_fprog.lib_sourced = 0; g_fprog.lib_bad = 0; g_fprog.dcls[1][0] = 0; pass_fresh();
 }
 
 static void t_pass_clear_park_read(void) {   // 被读之前必须落地（正确性红线）：清 A 后把 A 当采样贴图用，绘制路径先落地再开通道
@@ -8021,6 +8056,7 @@ int main(int argc, char **argv) {
     t_read_texels_guest();
     t_read_texels_gpu_owned();
     t_read_texels_gpu();
+    t_create_stats();
     t_cpu_upload();
     t_gpu_deswizzle_route();
     t_gpu_deswizzle_pending();
@@ -8098,7 +8134,13 @@ int main(int argc, char **argv) {
     t_compute_image_class();
     t_compute_image_lib_fallback();
     t_compute_tex_lib_fallback();
-    t_draw_tex_lib_fallback();
+    t_draw_tex_lib_fallback(NVN_TEXTURE_TARGET_3D, NVN_FORMAT_RGBA8, 0, 0, 0);
+    t_draw_tex_lib_fallback(NVN_TEXTURE_TARGET_2D, NVN_FORMAT_RGBA8UI, 0, 1, 0);
+    t_draw_tex_lib_fallback(NVN_TEXTURE_TARGET_2D, NVN_FORMAT_RGBA8I, 1, 2, 0);
+    t_draw_tex_lib_fallback(NVN_TEXTURE_TARGET_2D, NVN_FORMAT_RGBA8, 2, 0, 0);
+    t_draw_tex_lib_fallback(NVN_TEXTURE_TARGET_2D, NVN_FORMAT_RGBA8UI, 1, 1, 0);
+    t_draw_tex_lib_fallback(NVN_TEXTURE_TARGET_2D, NVN_FORMAT_DEPTH32F, 3, 3, 0);
+    t_draw_tex_lib_fallback(NVN_TEXTURE_TARGET_2D, NVN_FORMAT_RGBA8UI, 0, 1, 1);
     t_graphics_image();
     t_compute_tex_from_image();
     t_drv2_table();

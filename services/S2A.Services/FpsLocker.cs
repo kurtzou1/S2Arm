@@ -100,7 +100,12 @@ namespace S2A.Services
             foreach (var e in entries) { if (!units.TryGetValue(e.Unit, out var l)) units[e.Unit] = l = new(); l.Add(e); }
             var was = new Dictionary<string, int>();
             var process = new Cheats.GameProcess();
+            int gen = 0;   // 从 0 起：冷起恢复局的写回发生在本线程进 Run 之前，起来时代数已是 1，也要按当前选档重写一遍
             while (!stop.WaitHandle.WaitOne(1000))
+            {
+                // 即时存档恢复后游戏内存是存档那一刻的（存时开着 = 里面是 60 帧的值）：各份当作状态未知，按当前选档重写一遍（没选中 = 按 30 帧写回）
+                int g = Imports.s2a_cpatch_snap_gen();
+                if (g != gen) { gen = g; foreach (var u in units.Keys) was[u] = -1; }
                 foreach (var (unit, list) in units)
                 {
                     int pick;
@@ -117,6 +122,7 @@ namespace S2A.Services
                     if (pick != last) Console.Error.WriteLine($"FPSLocker：{unit} 按 {target} 帧写 {ok} 条（{skip} 条地址未就绪）");
                     was[unit] = pick;
                 }
+            }
         }
 
         // 这份选中 → 选中档的目标帧率；刚从选中变成没选中 → 30（写回原帧率，见类说明）
@@ -293,6 +299,7 @@ namespace S2A.Services
             private const string Lib = "s2a_native";
             [DllImport(Lib)] public static extern byte* s2a_cpatch_tables_dir();
             [DllImport(Lib)] public static extern int s2a_cpatch_fps_unit([MarshalAs(UnmanagedType.LPUTF8Str)] string id);   // runtime/src/cpatch.c：这份选中档的目标帧率，没选中 0
+            [DllImport(Lib)] public static extern int s2a_cpatch_snap_gen();   // runtime/src/cpatch.c：即时存档恢复次数
         }
     }
 }

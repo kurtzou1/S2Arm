@@ -34,6 +34,7 @@
 #include "spirv_storage.h"   // s2a_spirv_declares_cap（C1340）
 #include "nvn_plat_vk.h"
 #include "nvn_vk_pipe_warm.h"
+#include "nvn_vk_pipe_demand.h"
 
 // 平台件替身：无头表面（lavapipe 没有窗口系统）。交换链、取图、呈现段、信号量与布局都是真的，校验层照查。
 const char *const *nvn_plat_vk_instance_exts(uint32_t *n) {
@@ -8887,6 +8888,12 @@ static void c88_make_pipes(const char *sdir) {
     nvn_gpu_pipe_desc pd, pd2; nvn_gpu_pipe p1 = NULL, p2 = NULL, cp = NULL;
     fill_gpipe_desc(&pd, vs, fs, 0); fill_gpipe_desc(&pd2, vs2, fs2, 0);
     CHECK(OK(nvn_gpu_pipe_get(&pd, NVN_GPU_PIPE_SYNC, &p1, &e)), "C88 图形管线 1：%d %s", e.rc.code, e.why);
+#ifdef S2A_PIPE_CREATION_FEEDBACK_TEST
+    if (g_inspect_creation_feedback) {
+        nvn_gpu_pipe cached = NULL;
+        CHECK(OK(nvn_gpu_pipe_get(&pd, NVN_GPU_PIPE_SYNC, &cached, &e)) && cached == p1, "same graphics pipeline reused");
+    }
+#endif
     CHECK(OK(nvn_gpu_pipe_get(&pd2, NVN_GPU_PIPE_SYNC, &p2, &e)), "C88 图形管线 2：%d %s", e.rc.code, e.why);
     char path[512]; size_t csz = 0;
     snprintf(path, sizeof path, "%s/comp.comp.spv", sdir);
@@ -8910,6 +8917,12 @@ static void c88_make_pipes(const char *sdir) {
 }
 
 #ifdef S2A_PIPE_CREATION_FEEDBACK_TEST
+static void *create_demand_pipelines(void *sdir) {
+    nvk_pipe_demand_worker_enter();
+    c88_make_pipes(sdir);
+    return NULL;
+}
+
 static void creation_feedback_arm(const char *sdir, struct s2a_vk_device *dev, enum nvk_pipe_feedback_mode mode) {
     const int expected = mode == NVK_PIPE_FEEDBACK_ON;
     g_desc.host_device = dev;
@@ -8920,10 +8933,13 @@ static void creation_feedback_arm(const char *sdir, struct s2a_vk_device *dev, e
         memset(g_creation_feedback_chained, 0, sizeof g_creation_feedback_chained);
         memset(g_creation_feedback_real_valid, 0, sizeof g_creation_feedback_real_valid);
         g_inspect_creation_feedback = 1;
+        const uint64_t before = rp_sync_pipelines_created();
         nvn_gpu_pipe_warm_scope(1);
         c88_make_pipes(sdir);
         nvn_gpu_pipe_warm_scope(0);
+        CHECK(rp_sync_pipelines_created() == before, "warm pipelines excluded from long-frame counts");
         c88_make_pipes(sdir);
+        CHECK(rp_sync_pipelines_created() - before == 3, "long frame counts two foreground graphics pipelines and one compute");
         g_inspect_creation_feedback = 0;
         const char *arm = expected ? "supported" : g_creation_feedback_off ? "switch-off" : "unavailable";
         printf("PSO feedback arm=%s chained gfx=%u compute=%u (expected %u/%u), real valid=%u/%u\n",
@@ -8952,6 +8968,11 @@ static void creation_feedback_arm(const char *sdir, struct s2a_vk_device *dev, e
                   (unsigned long long)got.driver_p95_le_ns, (unsigned long long)got.wall_ns);
         }
         nvn_gpu_err e = {0};
+        pthread_t worker;
+        const int started = pthread_create(&worker, NULL, create_demand_pipelines, (void *)sdir) == 0;
+        CHECK(started, "start demand build thread");
+        if (started) pthread_join(worker, NULL);
+        CHECK(rp_sync_pipelines_created() - before == 3, "background demand builds excluded from long-frame counts");
         CHECK(OK(nvn_gpu_close(5000000000ull, &e)), "PSO feedback close: %s", e.why);
     }
     g_creation_feedback_off = 0;

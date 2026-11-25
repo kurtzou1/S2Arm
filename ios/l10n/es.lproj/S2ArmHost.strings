@@ -411,6 +411,7 @@
 "gfx.filter.nearest" = "Para juegos 2D";
 "gfx.fpsLimit" = "Límite de velocidad de fotogramas";
 "gfx.fpsLimit.none" = "Sin límite";
+"gfx.fpsLimit.native.note" = "Este juego no usa un parche de 60 FPS, así que va a su propia tasa de fotogramas: el límite de 30 no se aplica en esta sesión (limitarlo ralentizaría el juego).";
 "gfx.resolution" = "Resolución de renderizado";
 "gfx.brightness" = "Brillo";
 "gfx.brightness.system" = "Seguir el sistema";

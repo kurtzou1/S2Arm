@@ -59,6 +59,7 @@ int rp_shader_stage_key(unsigned st, uint8_t key[8]);   // 1 = 该阶段已绑�
 int rp_shader_resolve(const struct rp_shader_req *q, const struct rp_prog **out);
 // 取当前回放状态下计算阶段（NVN 阶段 5）绑着的程序。返回值同上。
 int rp_shader_resolve_compute(const struct rp_prog **out);
+uint64_t rp_shader_compiled_programs(void);   // 前台解析取得的设备现编程序，含等 worker 的结果；每份程序一笔
 struct rp_shader_live_compile_stats {
     uint64_t enqueued, wait_ns, pending, fallback, timeout;
     uint64_t compiled, compile_ns, compile_max_ns;   // 编译线程这段时间跑完的份数（成败都算）/ 合计耗时 / 最长一份（排队等候不算）

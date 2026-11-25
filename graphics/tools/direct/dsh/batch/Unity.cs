@@ -203,7 +203,8 @@ static class Unity
     }
 
     // ================= unity_src =================
-    static readonly Regex UG = PyRe(@"^\s*(#\s*include\s*<[^>]+>|#\s*pragma\s+(?:METAL|clang)\b.*|using\s+namespace\s+metal\s*;|constant int S2A_AT \[\[function_constant\(100\)\]\];.*)\s*$", RegexOptions.Multiline);
+    // 全局行：头文件 / pragma / using，以及函数常量声明（同编号各键只能声明一次）：S2A_AT 那一行（FsAlphaMs / FsFout）、可编程混合开关 s2a_pb<n>_c 那一行（gal_colorround.c，#674）
+    static readonly Regex UG = PyRe(@"^\s*(#\s*include\s*<[^>]+>|#\s*pragma\s+(?:METAL|clang)\b.*|using\s+namespace\s+metal\s*;|constant int S2A_AT \[\[function_constant\(100\)\]\];.*|constant bool s2a_pb\d_c \[\[function_constant\(11\d\)\]\];.*)\s*$", RegexOptions.Multiline);
     // 入口：fragment / vertex / kernel，以及任务 / 网格着色器的 [[object]] void / [[mesh]] void（MeshStage.cs 出的形式；11-05 时之笛第十二版批量合编不认，抛 no entry point）
     static readonly Regex UE = PyRe(@"^((?:\[\[[^\]]*\]\]\s*)*(?:fragment|vertex|kernel|\[\[(?:object|mesh)\]\])\s+.*?\b)(main0\w*)(\s*\()", RegexOptions.Multiline);
     static readonly Regex Define = PyRe(@"^\s*#\s*define\s+(\w+)", RegexOptions.Multiline);

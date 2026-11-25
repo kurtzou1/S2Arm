@@ -14,6 +14,20 @@ out=${PRESENT_SETTINGS_BUILD:-$root/build/tests/present-settings}
 list=${PRESENT_SETTINGS_LIST:-$root/graphics/nvn/tests/t_present_settings.link.txt}
 gen=${PRESENT_SETTINGS_GEN:-0}
 rm -rf "$out/host"; mkdir -p "$out/host"   # 旧清单留下的目标文件不许混进来
+common=(-O1 -g -Wall -Wextra -Wno-unused-parameter -mmacosx-version-min="$MACOSX_DEPLOYMENT_TARGET" -I"$root/runtime/include" -I"$root/runtime/ns2pro/include" -DNS2_SCAN_SECONDS=60)   # Mac 前端源文件含 Switch 2 Pro 连接（macos/ns2_controller.c、runtime/ns2pro，#277），同 launchers/macos/build.mk
+srcs=(); while IFS= read -r rel; do srcs+=("$rel"); done < <(python3 graphics/nvn/tests/t_present_settings.py sources "$list")
+# 只核依赖（PRESENT_SETTINGS_DEPS_ONLY=1，入车快检查用）：同一份编译参数只做预处理（-M，不编不链），把实读头文件交给 depcheck 比清单；
+#   新 include 了清单外的头当场报「清单过期」（11-23、11-24 两次合进 main 后才被门禁查出）。不核链接闭包与运行期查找（那两项要整编整链，留给门禁）
+if [[ ${PRESENT_SETTINGS_DEPS_ONLY:-0} = 1 ]]; then
+    [[ ${#srcs[@]} -gt 0 ]] || { printf 'Link list is empty: %s\n' "$list" >&2; exit 2; }
+    printf '%s\n' "${srcs[@]}" | xargs -P "$(sysctl -n hw.ncpu)" -I{} bash -c 'out=$1 root=$2 rel=$3; shift 3; arc=(); [[ "$rel" != *.m ]] || arc=(-fobjc-arc)
+        exec xcrun --sdk macosx clang "$@" ${arc[@]+"${arc[@]}"} -M -MF "$out/host/${rel//\//_}.o.d" "$root/$rel"' _ "$out" "$root" {} "${common[@]}" \
+        || { echo 'host source preprocess failed' >&2; exit 1; }
+    xcrun --sdk macosx clang "${common[@]}" -std=gnu11 -fobjc-arc -M -MF "$out/host/t_present_settings.m.o.d" \
+        -I"$root/graphics/nvn/gfx/nvn" -I"$root/graphics/nvn/gfx/nvn/include" -I"$root/graphics/nvn/host" "$root/graphics/nvn/tests/t_present_settings.m"
+    ds=(); for rel in "${srcs[@]}"; do ds+=("$out/host/${rel//\//_}.o.d"); done
+    exec python3 graphics/nvn/tests/t_present_settings.py depcheck "$list" "$root" "${ds[@]}" "$out/host/t_present_settings.m.o.d"
+fi
 if [[ -n ${PRESENT_WIDEN_LIB:-} ]]; then
     widen=$PRESENT_WIDEN_LIB
     [[ "$widen" = /* ]] || widen="$root/$widen"
@@ -28,8 +42,6 @@ make -j1 -C "$root/graphics/dsx" mac OUT="$out/dsx"   # 直连翻译库（翻译
 nvn="$root/build/nvn/mac/libnvn.a"
 gal="$out/gal/mac/libnxgal.a"
 dsx="$out/dsx/mac/libdsx.a"
-common=(-O1 -g -Wall -Wextra -Wno-unused-parameter -mmacosx-version-min="$MACOSX_DEPLOYMENT_TARGET" -I"$root/runtime/include" -I"$root/runtime/ns2pro/include" -DNS2_SCAN_SECONDS=60)   # Mac 前端源文件含 Switch 2 Pro 连接（macos/ns2_controller.c、runtime/ns2pro，#277），同 launchers/macos/build.mk
-srcs=(); while IFS= read -r rel; do srcs+=("$rel"); done < <(python3 graphics/nvn/tests/t_present_settings.py sources "$list")
 [[ ${#srcs[@]} -gt 0 ]] || { printf 'Link list is empty: %s\n' "$list" >&2; exit 2; }
 objects=()
 for rel in "${srcs[@]}"; do objects+=("$out/host/${rel//\//_}.o"); done

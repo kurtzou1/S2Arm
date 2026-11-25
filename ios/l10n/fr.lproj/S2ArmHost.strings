@@ -411,6 +411,7 @@
 "gfx.filter.nearest" = "Pour les jeux 2D";
 "gfx.fpsLimit" = "Limite de fréquence d'images";
 "gfx.fpsLimit.none" = "Illimitée";
+"gfx.fpsLimit.native.note" = "Ce jeu n'utilise pas de correctif 60 FPS : il tourne à sa propre fréquence. La limite de 30 ne s'applique pas pour cette session (la brider ralentirait le jeu).";
 "gfx.resolution" = "Résolution de rendu";
 "gfx.brightness" = "Luminosité";
 "gfx.brightness.system" = "Suivre le système";

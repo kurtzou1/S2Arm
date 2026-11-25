@@ -14,7 +14,7 @@
 //   ⑧ 换文件不抹已有内容：块 D 定之前先在里面直接映射一段有内容的匿名可写页（同装载器映射模块数据），预算已用完 → D 进文件；那段内容还在、仍不在文件里，D 别处写入在文件里
 //   ⑨ 挖区（S2A_GUEST_FILE_CARVE=1）：整块落在挖区里的块预算已用完也是匿名（写入文件里读不到）；in_file 0
 //   ⑩ 窗口重置（s2a_window_session_reset）后块状态清回未定、累计清零：原是文件的块 C 再放开 → 匿名（累计 0 < 64）
-//   ⑪ iOS 下一局预算（s2a_guest_next_budget，只用实测量）：显式最优先；上局死掉 → 0；有记录 → B + (Hmin − 余量) − 32 MB，限 [0, 剩余 − 余量]；首局 → 剩余 − 余量 − 4096。
+//   ⑪ iOS 下一局预算（s2a_guest_next_budget，只用实测量）：显式最优先；上局死掉不另算；有记录 → B + (Hmin − 余量) − 32 MB，限 [0, 剩余 − 余量]；首局 → 剩余 − 余量 − 4096。
 //      D-JETP（剩余 6141、余量 512）：首局 6141 − 512 − 4096 = 1533；设那局 Hmin 2600 → 第二局 1533 + 2088 − 32 = 3589；
 //      收紧 3589 + (300 − 512) − 32 = 3345；下限 100 + (0 − 512) − 32 < 0 → 0；上限 5000 + 3488 − 32 = 8456 > 6141 − 512 = 5629 → 5629；
 //      12 GB 机（剩余 8189）首局 8189 − 512 − 4096 = 3581；剩余 4000 首局不够 → 0；上局整段（B 0）Hmin 3000 → 3000 − 512 − 32 = 2456
@@ -38,6 +38,12 @@ __attribute__((constructor(100))) static void need(void) {   // 先于 vawin.c �
 }
 uint64_t s2a_guest_anon_budget(const char *e, uint64_t room, uint64_t margin, uint64_t host);
 uint64_t s2a_guest_next_budget(const char *e, uint64_t room, uint64_t margin, uint64_t first_host, int died, int have, uint64_t prev_b, uint64_t hmin, int long_run, uint64_t ceil, int *src);
+void s2a_heat_count(const unsigned char *vec, size_t np, uint64_t *dirty, uint64_t *out);
+int s2a_guest_heat_scan(uint64_t r[10], uint64_t top[3], uint64_t topi[3]);
+int s2a_heat_log_due(uint64_t last[10], const uint64_t r[10], int *logged);
+// 单测不链图形层：强定义一份，按 g_alias_lo / g_alias_hi 假装这段被 GPU 缓冲指着（验证别名块不进换位上限）
+static uint64_t g_alias_lo, g_alias_hi;
+uint64_t nvn_be_pool_host_overlap(uint64_t lo, uint64_t hi) { uint64_t a = lo > g_alias_lo ? lo : g_alias_lo, c = hi < g_alias_hi ? hi : g_alias_hi; return c > a ? c - a : 0; }
 uint64_t s2a_guest_overflow_budget_ios(const char *e, uint64_t room, uint64_t margin, int died, int *src, uint64_t *pb, uint64_t *ph);
 int s2a_guest_budget_rec_read(uint64_t *b, uint64_t *hmin); void s2a_guest_budget_note(uint64_t avail);
 void s2a_guest_commit(uint64_t a, uint64_t n); void s2a_guest_file_carve(uint64_t a, uint64_t n); int s2a_window_session_reset(void); void s2a_guest_backing_log(void); void s2a_guest_backing_sum(uint64_t sum[4]); void s2a_window_trim(uint64_t size);
@@ -84,6 +90,37 @@ int main(void) {
         long long f0 = fp(); for (uint64_t o = 0; o < 32 * MB; o += 64) ((uint8_t *)(uintptr_t)C)[o] = (uint8_t)(o >> 6) | 1; long long df = fp() - f0;
         CHECK(df < (8ll << 20), "⑤ 文件块写满 32 MB：实占 +%lld KB（期望 < 8192 KB）", df >> 10);
     }
+    {   // ⑤b 冷热读数（#1268）：纯函数按 mincore 位数页；实扫：刚写满的文件块 C 是热块、脏页约 32 MB，匿名块 A / B 计进匿名块数
+        unsigned char v[8] = {MINCORE_INCORE | MINCORE_MODIFIED, MINCORE_INCORE, MINCORE_PAGED_OUT, 0, MINCORE_INCORE | MINCORE_MODIFIED | MINCORE_REFERENCED, MINCORE_PAGED_OUT, MINCORE_MODIFIED, MINCORE_INCORE};
+        uint64_t d = 9, o = 9; s2a_heat_count(v, 8, &d, &o);
+        CHECK(d == 2 && o == 2, "⑤b 纯函数：在内存且改过 2 页、已换出 2 页（不在内存的 MODIFIED 不算脏）：脏 %llu / 换出 %llu", (unsigned long long)d, (unsigned long long)o);
+        uint64_t r[10], top[3], topi[3]; int ok = s2a_guest_heat_scan(r, top, topi);
+        CHECK(ok && r[0] >= 1 && r[1] >= 24 * MB && r[2] >= 1 && r[4] >= 2 && top[0] >= 24 * MB && topi[0] == (C - b) / GCH,
+              "⑤b 实扫：文件块 %llu、脏 %llu MB、热块 %llu、匿名块 %llu、最脏块 #%llu %llu MB（期望 ≥1、≥24、≥1、≥2、#%llu ≥24）",
+              (unsigned long long)r[0], (unsigned long long)(r[1] / MB), (unsigned long long)r[2], (unsigned long long)r[4],
+              (unsigned long long)topi[0], (unsigned long long)(top[0] / MB), (unsigned long long)((C - b) / GCH));
+        s2a_guest_heat_scan(r, top, topi); s2a_guest_heat_scan(r, top, topi);
+        CHECK(r[3] >= 1 && r[8] == 0, "⑤b 连扫 3 次 C 仍脏 → 常热块 %llu（期望 ≥ 1）、被别名 %llu（期望 0）", (unsigned long long)r[3], (unsigned long long)r[8]);
+        // 硬约束：被 GPU 零拷贝缓冲指着的块不能换位——让 C 那块被「指着」，常热照数、算进被别名，换位上限不算它
+        g_alias_lo = C + 4096; g_alias_hi = C + 8192; s2a_guest_heat_scan(r, top, topi);
+        CHECK(r[3] >= 1 && r[8] == r[3] && r[7] == 0, "⑤b C 被 GPU 缓冲指着：常热 %llu、其中被别名 %llu（期望相等）、换位上限 %llu MB（期望 0）",
+              (unsigned long long)r[3], (unsigned long long)r[8], (unsigned long long)(r[7] >> 20));
+        g_alias_lo = g_alias_hi = 0;
+        {   // ⑤c 冷热行有界：同读数不打、脏页差 < 16 MB 不打、块数一变就打；一局最多 40 条（期望手算：1000 次心跳、每次都变 → 40）
+            uint64_t last[10] = {0}, q[10] = {0}; int lg = 0, n = 0;
+            q[0] = 5; q[1] = 100 * MB; n += s2a_heat_log_due(last, q, &lg);
+            n += s2a_heat_log_due(last, q, &lg);
+            q[1] = 110 * MB; n += s2a_heat_log_due(last, q, &lg);
+            q[1] = 120 * MB; n += s2a_heat_log_due(last, q, &lg);
+            q[2] = 1; n += s2a_heat_log_due(last, q, &lg);
+            CHECK(n == 3 && lg == 3, "⑤c 首条打、同值不打、差 10 MB 不打、差 20 MB 打、热块数变打：打了 %d 条（期望 3）", n);
+            for (int i = 0; i < 1000; i++) { q[0] = 100 + i; n += s2a_heat_log_due(last, q, &lg); }
+            CHECK(lg == 40 && n == 40, "⑤c 1000 次心跳每次都变：总共打 %d 条（期望 40，上限）", n);
+        }
+        // 「脏」的语义是「上次写回后又写过」：单测里手动写回（内核回收时做的就是这一步），C 的脏页应归零、常热断掉
+        int ms = msync((void *)(uintptr_t)C, 32 * MB, MS_SYNC); s2a_guest_heat_scan(r, top, topi);
+        CHECK(ms == 0 && r[1] < 1 * MB && r[3] == 0, "⑤b 写回后：脏 %llu KB（期望 < 1024）、常热块 %llu（期望 0）", (unsigned long long)(r[1] >> 10), (unsigned long long)r[3]);
+    }
     {   // ⑥
         uint8_t keep = ((uint8_t *)(uintptr_t)C)[16 * MB + 64];
         CHECK(s2a_guest_zero(C, 16 * MB) == 1, "⑥ 文件块还页 16 MB 回 1（打洞 + 重映射）");
@@ -129,7 +166,9 @@ int main(void) {
 #define NB2(room, have, pb, ph, lr, ceil) s2a_guest_next_budget(NULL, (room) * MB, M, H, 0, have, (pb) * MB, (ph) * MB, lr, (ceil) * MB, &src)
         uint64_t v;
         v = NB("100", 6141, 1, 1, 1533, 2600); CHECK(v == 100 * MB && src == 0, "⑪ 显式 100 最优先（哪怕上局死掉）：%llu MB", (unsigned long long)(v / MB));
-        v = NB(NULL, 6141, 1, 1, 1533, 2600); CHECK(v == 0 && src == 1, "⑪ 上局死掉 → 0（整段进文件）：%llu MB", (unsigned long long)(v / MB));
+        v = NB(NULL, 6141, 1, 1, 1533, 2600); CHECK(v == 2557 * MB && src == 2, "⑪ 上局死掉不另算、照记录 1533 / 2600 → 2557（原先 0 整段）：%llu MB", (unsigned long long)(v / MB));
+        v = NB(NULL, 4085, 1, 1, 2214, 2263); CHECK(v == 3238 * MB && src == 2, "⑪ #1268 D-PEM9 溢出局 2214 / 2263 死掉：照记录 2214 + 1024 = 3238（不退整段）：%llu MB", (unsigned long long)(v / MB));
+        v = NB(NULL, 6141, 1, 0, 0, 0); CHECK(v == 1533 * MB && src == 3, "⑪ 上局死掉、没记录：按首局估计 1533：%llu MB", (unsigned long long)(v / MB));
         v = NB(NULL, 6141, 0, 0, 0, 0); CHECK(v == 1533 * MB && src == 3, "⑪ D-JETP 首局 6141 − 512 − 4096 = 1533：%llu MB", (unsigned long long)(v / MB));
         v = NB(NULL, 6141, 0, 1, 1533, 2600); CHECK(v == 2557 * MB && src == 2, "⑪ D-JETP 第二局（Hmin 2600、够长）1533 + 2056 超一步 → 1533 + 1024 = 2557：%llu MB", (unsigned long long)(v / MB));
         v = NB(NULL, 6141, 0, 1, 3589, 300); CHECK(v == 3345 * MB, "⑪ Hmin 300 < 余量 收紧 3589 − 212 − 32 = 3345：%llu MB", (unsigned long long)(v / MB));
@@ -162,7 +201,8 @@ int main(void) {
             uint64_t pb, ph, v = s2a_guest_overflow_budget_ios(NULL, 6141 * MB, 512 * MB, 0, &src, &pb, &ph);
             CHECK(v == 64 * MB && src == 2 && pb == 64 * MB && ph == 2600 * MB, "⑫ 起局按上局实测：64 + 2088 − 32 = 2120 往上抬，但上局只 3 次心跳（短局）→ 持平 64（得 %llu MB，来源 %d）", (unsigned long long)(v / MB), src);
             v = s2a_guest_overflow_budget_ios(NULL, 6141 * MB, 512 * MB, 1, &src, &pb, &ph);
-            CHECK(v == 0 && src == 1 && access(rp, F_OK) != 0, "⑫ 上局死掉 → 0、记录已删（得 %llu MB，记录%s）", (unsigned long long)(v / MB), access(rp, F_OK) ? "没了" : "还在");
+            CHECK(v == 64 * MB && src == 2 && access(rp, F_OK) == 0, "⑫ 上局死掉不另算：照记录持平 64、记录不删（原先 0 并删记录；得 %llu MB，记录%s）", (unsigned long long)(v / MB), access(rp, F_OK) ? "没了" : "还在");
+            unlink(rp);
             v = s2a_guest_overflow_budget_ios(NULL, 6141 * MB, 512 * MB, 0, &src, &pb, &ph);
             CHECK(v == 1533 * MB && src == 3, "⑫ 没记录 → 首局估计 1533（得 %llu MB，来源 %d）", (unsigned long long)(v / MB), src);
             setenv("S2A_GUEST_FILE_OVERFLOW_HOST_MB", "3000", 1); v = s2a_guest_overflow_budget_ios(NULL, 6141 * MB, 512 * MB, 0, &src, &pb, &ph); unsetenv("S2A_GUEST_FILE_OVERFLOW_HOST_MB");
@@ -191,10 +231,9 @@ int main(void) {
                 f = fopen(rp, "w"); fprintf(f, "7676 6012 8188 6 0\n"); fclose(f);
                 uint64_t v1 = s2a_guest_overflow_budget_ios(NULL, 8188 * MB, 512 * MB, 1, &src, &pb, &ph);
                 f = fopen(rp, "r"); n5 = f ? fscanf(f, "%llu %llu %llu %llu %llu", &r[0], &r[1], &r[2], &r[3], &r[4]) : 0; if (f) fclose(f);
-                CHECK(v1 == 0 && src == 1 && n5 == 5 && r[0] == 0 && r[1] == 0 && r[2] == 8188 && r[3] == 0 && r[4] == 6652,
-                      "⑫c 被收掉：预算 %llu（期望 0）、记录「%llu %llu %llu %llu %llu」（期望 0 0 8188 0 6652）", (unsigned long long)(v1 / MB), r[0], r[1], r[2], r[3], r[4]);
-                v1 = s2a_guest_overflow_budget_ios(NULL, 8188 * MB, 512 * MB, 0, &src, &pb, &ph);
-                CHECK(v1 == 0 && src == 2, "⑫c 死后下一局读到 0 / 0：%llu（期望 0）", (unsigned long long)(v1 / MB));
+                CHECK(v1 == 6652 * MB && src == 2 && n5 == 5 && r[0] == 7676 && r[1] == 6012,
+                      "⑫c 被收掉：预算 %llu（期望照记录、夹到天花板 7676 − 1024 = 6652，原先 0）、记录不清「%llu %llu …」（期望 7676 6012）", (unsigned long long)(v1 / MB), r[0], r[1]);
+
                 f = fopen(rp, "w"); fprintf(f, "6000 4000 8188 30 6652\n"); fclose(f);
                 v1 = s2a_guest_overflow_budget_ios(NULL, 8188 * MB, 512 * MB, 0, &src, &pb, &ph);
                 CHECK(v1 == 6652 * MB, "⑫c 够长局夹到天花板：%llu（期望 6652）", (unsigned long long)(v1 / MB));

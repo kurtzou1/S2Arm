@@ -116,6 +116,13 @@ enum LauncherPadSpatial {
     func controlTargets(in window: NSWindow) -> [LauncherPadTarget] {
         registeredControls(in: window).compactMap { controlTarget($0) }.sorted(by: Self.order)
     }
+    /// 单测失败时的现场：这个窗口登记的全部控件（含被筛掉的）与筛掉原因，按 id 排序一行一个
+    func registrationReport(in window: NSWindow) -> String {
+        controls.values.filter { $0.view.window === window }.sorted { $0.id < $1.id }.map { c in
+            let full = Self.screenFrame(c.view), clip = Self.clippingFrame(c.view)
+            return "\(c.id) scope=\(c.scope) enabled=\(c.enabled) shortcutOnly=\(c.shortcutOnly) hidden=\(c.view.isHiddenOrHasHiddenAncestor) frame=\(full) visible=\(full.intersection(clip))"
+        }.joined(separator: "\n")
+    }
     func shortcutTargets(in window: NSWindow) -> [PadShortcut: [String]] {
         var result: [PadShortcut: [String]] = [:]
         for control in controls.values where control.view.window === window && !control.view.isHiddenOrHasHiddenAncestor && controlTarget(control) != nil {

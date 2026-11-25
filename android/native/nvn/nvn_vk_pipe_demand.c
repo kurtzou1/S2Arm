@@ -116,6 +116,7 @@ static void dem_build(int h) {
 }
 
 static void *dem_main(void *arg) {
+    nvk_pipe_demand_worker_enter();
     const uint64_t mine = (uint64_t)(uintptr_t)arg;
     for (;;) {
         pthread_mutex_lock(&g_q_mu);

@@ -1231,6 +1231,14 @@ import S2ArmAppleAdapter
                         previous = frame
                         return stable >= 8
                     }
+                    if !navigation.controlTargets(in: window).contains(where: { $0.id == "home.search" }) {
+                        XCTFail("""
+                            \(language)/\(width): 没有 home.search；游戏 \(fixture.model.games.count) 款，窗口可见 \(window.isVisible) 焦点 \(window.isKeyWindow)，App 前台 \(NSApp.isActive)
+                            可用控件：\(navigation.controlTargets(in: window).map(\.id))
+                            登记：
+                            \(navigation.registrationReport(in: window))
+                            """)
+                    }
                 }
                 // 点搜索按钮，按事件等它切换：看「展开的输入框在不在」翻没翻，没翻（负载高时合成点击偶尔被吞，门禁 b0f9f16b3c5e49a2 等满 30 秒假红）
                 //   就重新取位置再点，不靠等时间；最多 5 次，真点不开照样红

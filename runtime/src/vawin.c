@@ -82,10 +82,12 @@ uint64_t s2a_guest_anon_budget(const char *e, uint64_t room, uint64_t margin, ui
 }
 // iOS 下一局的匿名预算（纯函数，t_guest_file_overflow 测；11-16 审）：宿主开销不能写死——全库文件后备局进程实占（≈宿主开销）中位约 2.1 GB、P90 约 3.8 GB、最大 5.8 GB，
 //   按 2048 估，12 GB 机（剩余 8189）上的大款预算给到约 5.6 GB 匿名，再加 3–4 GB 宿主就超上限被系统结束，下一局同样预算再被结束。改成只用实测量：
-//   ① e = S2A_GUEST_FILE_ANON_BUDGET_MB 设了按设的（最优先）；② 上一局在前台死掉（died）→ 0 = 整段进文件（旧行为；调用方同时清记录），被结束一次马上退回、不会连着被结束；
+//   ① e = S2A_GUEST_FILE_ANON_BUDGET_MB 设了按设的（最优先）；② 上一局在前台死掉（died）不另算：同样按记录走 ③ / ④（天花板由调用方按死掉那局压低）。
+//      （#1268 D-PEM9，11-24：原先 died → 0 整段进文件并清记录、占位「0 0」，下一局再算还是 0。6 GB iPhone 一款要约 3.6 GB 的游戏，整段局每 10 秒写闪存
+//       0.9–2.4 GB，6 / 9 局在前台没了：死 → 整段 → 写盘卡死再死 → 又整段，越死越狠。溢出模式那局每 10 秒 0.36 GB）
 //   ③ 有本机记录（上局预算 prev_b、上局溢出模式下心跳读到的离上限剩余最小值 hmin）→ prev_b + (hmin − margin) − GCHUNK，限在 [0, room − margin]：
 //      hmin < 余量就收紧，> 余量就放宽（每局最多放宽 hmin − margin − 一块）；④ 没有记录（首局）→ room − margin − first_host（首局宿主开销，缺省 4096 = 全库 P90）。
-//   *src：0 显式 / 1 上局死掉 / 2 按上局实测 / 3 首局估计
+//   *src：0 显式 / 2 按上局实测 / 3 首局估计（1 = 旧的「上局死掉」，已不再返回）
 // 11-22 往上抬要有证据（一台 iPhone，池 9216 MB 的 Switch 2 大款）：上局 61 秒就停、剩余最小 6012 MB 是开局那段的读数，预算 3521 → 7676 一次抬了一倍多，
 //   下一局约 5.8 分钟（帧 10622）进场景剩余从 2797 掉到 930、帧 18226 掉到 183 MB 被系统收掉。剩余最小只会随局变长而变小，短局读到的是上界：
 //   只能证明「该收紧」，不能证明「能放宽」。所以：long_run（上局溢出模式心跳 ≥ GMEM_BEATS_MIN 次 = 5 分钟）才许往上抬，每局最多抬 BUDGET_STEP；
@@ -93,7 +95,7 @@ uint64_t s2a_guest_anon_budget(const char *e, uint64_t room, uint64_t margin, ui
 #define BUDGET_STEP (1024ull << 20)
 uint64_t s2a_guest_next_budget(const char *e, uint64_t room, uint64_t margin, uint64_t first_host, int died, int have, uint64_t prev_b, uint64_t hmin, int long_run, uint64_t ceil, int *src) {
     if (e && *e) { *src = 0; return strtoull(e, NULL, 10) << 20; }
-    if (died) { *src = 1; return 0; }
+    (void)died;
     uint64_t cap = room > margin ? room - margin : 0, v;
     if (ceil && ceil < cap) cap = ceil;
     if (have) {
@@ -167,7 +169,7 @@ uint64_t s2a_guest_need(uint64_t pool, uint64_t host, uint64_t seen) { return se
 // 判开的这一局池本身是不是装得下（Switch 1 款；纯函数，t_guest_file_auto 测）：是 → 溢出模式首局预算按宿主估计（S2A_GUEST_FILE_HOST_MB）算，
 //   不按首局宿主开销 4096 算——4096 是全库文件后备局（Switch 2 大款为主）的 P90，6 GB 机 剩余约 4090 − 512 − 4096 不到 0 = 整段进文件：
 //   D-D4AK（没实测、池 + 宿主估计 + 余量超剩余）首局就整段；D-F5PT（6 GB iPhone，一款 Switch 1 游戏实测 3874 + 512 > 剩余 4085）每局整段进文件，
-//   进程实占只有 0.5–1.2 GB，却 10 秒写盘约 3 GB、帧时 p99 0.2–2 秒。上局在前台死掉照旧整段（s2a_guest_next_budget ②）；坏记录也不算这档
+//   进程实占只有 0.5–1.2 GB，却 10 秒写盘约 3 GB、帧时 p99 0.2–2 秒。上局在前台死掉不进这档；坏记录也不算这档
 int s2a_guest_soft_tier(int on, const char *e, uint64_t pool, uint64_t room, uint64_t seen, int died) {
     return on && !(e && *e) && room && !died && seen != UINT64_MAX && pool <= room;
 }
@@ -363,7 +365,6 @@ uint64_t s2a_guest_budget_rec_room(void) {   // 记录第三项（字节）；�
     unsigned long long x = 0, y = 0, z = 0; int ok = fscanf(f, "%llu %llu %llu", &x, &y, &z) == 3; fclose(f);
     return ok ? (uint64_t)z << 20 : 0;
 }
-static void budget_rec_clear(void) { char p[1100]; if (budget_rec_path(p, sizeof p)) unlink(p); }
 static int budget_rec_write(uint64_t b, uint64_t hmin) {
     char p[1100], t[1200]; if (!budget_rec_path(p, sizeof p)) return 0;
     { char d[1100]; snprintf(d, sizeof d, "%s", p); char *sl = strrchr(d, '/'); if (sl) { *sl = 0; mkdir(d, 0755); } }
@@ -374,15 +375,15 @@ static int budget_rec_write(uint64_t b, uint64_t hmin) {
 }
 // 起局（iOS）定溢出模式预算：读记录、上一局死掉就清，交 s2a_guest_next_budget；*pb / *ph 回读到的上局记录（日志用）。单测在 Mac 上直接调
 uint64_t s2a_guest_overflow_budget_ios(const char *e, uint64_t room, uint64_t margin, int died, int *src, uint64_t *pb, uint64_t *ph) {
-    *pb = *ph = 0; uint64_t rb = 0, rh = 0, beats = 0; int rec = s2a_guest_budget_rec_read(&rb, &rh), have = !died && rec;
+    *pb = *ph = 0; uint64_t rb = 0, rh = 0, beats = 0; int rec = s2a_guest_budget_rec_read(&rb, &rh), have = rec;
     budget_rec_ext(&beats, &g_budget_ceil);
     if (have) { *pb = rb; *ph = rh; }
     uint64_t pr = have ? s2a_guest_budget_rec_room() : 0;
     if (have && pr > room) *ph = *ph > pr - room ? *ph - (pr - room) : 0;   // 这局上限比上局低：上局的剩余最小值按差额扣（*ph 回扣过的值，日志用）
     g_budget_room = room; g_bbeats = 0;
-    if (died) {   // 上局按 rb 的预算被系统收掉：rb − 一步记成天花板（只降不升）；rb 不到一步（整段 / 预算很小时死掉，不是预算的事）不动天花板
+    if (died) {   // 上局按 rb 的预算被系统收掉：rb − 一步记成天花板（只降不升）；rb 不到一步（整段 / 预算很小时死掉，不是预算的事）不动天花板。
+        //   记录不清、不写「0 0」占位：这局照记录算（天花板夹住），心跳照常更新记录
         if (rec && rb >= BUDGET_STEP && (!g_budget_ceil || rb - BUDGET_STEP < g_budget_ceil)) g_budget_ceil = rb - BUDGET_STEP;
-        budget_rec_clear(); if (g_budget_ceil) budget_rec_write(0, 0);
     }
     { const char *v = getenv("S2A_GUEST_FILE_OVERFLOW_HOST_MB"); uint64_t fh = v && *v ? strtoull(v, NULL, 10) << 20 : g_soft_host ? g_soft_host : 4096ull << 20;
       return s2a_guest_next_budget(e, room, margin, fh, died, have, *pb, *ph, beats >= GMEM_BEATS_MIN, g_budget_ceil, src); }
@@ -390,7 +391,7 @@ uint64_t s2a_guest_overflow_budget_ios(const char *e, uint64_t room, uint64_t ma
 static uint64_t g_hmin = UINT64_MAX;   // 本局开着文件后备时心跳读到的离上限剩余最小值
 static int g_rec_off;   // 1 = 显式设 S2A_GUEST_FILE_ANON_BUDGET_MB=0 的对照局：不写记录
 // 心跳调（iOS，s2a_guest_backing_log 里，avail = os_proc_available_memory()）：开着文件后备时比小，变小才写记录（预算 = 本局的）。
-//   整段模式（预算 0）也写（B 记 0）：上局死掉清了记录、这局整段，照写 B = 0 与 Hmin，下一局按整段模式下的实测余量回升（0 + Hmin − 余量 − 一块）；
+//   整段模式（预算 0）也写（B 记 0）：预算算出 0、这局整段，照写 B = 0 与 Hmin，下一局按整段模式下的实测余量回升（0 + Hmin − 余量 − 一块）；
 //   否则算出 0 后不再有新记录，永远卡在整段。显式设 0 的对照局不写
 void s2a_guest_budget_note(uint64_t avail) {
     if (g_gfd < 0 || !g_gchunk || g_rec_off) return;
@@ -589,6 +590,21 @@ static void guest_file_map(uint64_t room);
 static int g_gfile_pending;
 // 多款容器起局时还没选游戏（程序号 0，读不到本款实测 / 「在跑」标记）：先用匿名内存、记下起局时的剩余，装游戏模块前按本款再判一次（s2a_guest_file_retry，#783）
 static int g_gfile_late; static uint64_t g_gfile_room0;
+static uint64_t g_gfile_lim0;   // 多款容器起局时读剩余那一刻的「系统给本 App 的上限」= 占用 + 剩余（0 = 没读）；装游戏前按前台上限补差（s2a_guest_room_fg）
+// 起局时的剩余按前台上限补回（纯函数，t_guest_file_auto 测；#674 对照 11-25）：多款容器起局时 App 常还是预热进程 / 后台档，上限比前台小约 2 GB——
+//   同一局开头读到「还剩 6140 MB」、自检时已是 8122；装游戏前沿用起局那一刻的 6140，上局的剩余最小值按两局差 2048 扣成 0，匿名预算压到 480 MB、
+//   物理映射区「剩余不到门槛」进了文件，进局约 100 秒卡在 11–14 帧、写盘 11 GB（修前同款同机 316 MB）。
+//   room0 = 起局时剩余、lim0 = 起局时上限、lim1 = 此刻上限：上限变大（后台档 → 前台档）就把差额补给起局时的剩余；变小或读不到照旧（只补不扣）
+uint64_t s2a_guest_room_fg(uint64_t room0, uint64_t lim0, uint64_t lim1) { return lim0 && lim1 > lim0 ? room0 + (lim1 - lim0) : room0; }
+static uint64_t proc_limit(void) {   // 系统给本 App 的上限 = phys_footprint + os_proc_available_memory（同 selfcheck.c / hud.c）；Mac 回 0
+#ifdef __IPHONE_OS_VERSION_MIN_REQUIRED
+    task_vm_info_data_t vi; mach_msg_type_number_t c = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &c) != KERN_SUCCESS) return 0;
+    return (uint64_t)vi.phys_footprint + (uint64_t)os_proc_available_memory();
+#else
+    return 0;
+#endif
+}
 static int g_gfile_died;   // 这一局判定时「上一局在前台死掉」（iOS；溢出模式预算按它退回整段进文件）
 static uint64_t g_gfile_room;   // 文件后备判定时离单进程上限的剩余（s2a_guest_file_carve 按它决定挖不挖物理映射区）
 static void guest_file_attach_(void);
@@ -643,7 +659,14 @@ static void guest_file_attach_(void) {
         (unsigned long long)(seen == UINT64_MAX ? 0 : seen >> 20), s2a_process_prewarmed() ? "；预热进程" : "");
     if (low && !late) low_ram_notice(phys, s2a_guest_need(pool, host, seen));
     g_gfile_room = room; g_gfile_died = died; g_soft_host = s2a_guest_soft_tier(on && !late, e, pool, room, seen, died) ? host : 0;
-    if (late) { g_gfile_late = 1; g_gfile_room0 = room; return; }
+    // 自动判成「开」的也等装模块前再定（单款与多款容器同一个根，11-25）：此刻 App 可能还是预热进程 / 后台档，上限比前台小约 2 GB，按它定的预算 / 物理映射区门槛偏紧；
+    //   装模块前（s2a_guest_file_retry，host_main.c load_session_modules）已到前台，按前台上限补回差额（s2a_guest_room_fg）再判开、定预算。窗口那时还原封不动，换文件照旧可行
+    int defer = late || (on && !(e && *e));
+    if (defer) {
+        g_gfile_late = 1; g_gfile_room0 = room; g_gfile_lim0 = proc_limit();
+        if (!late) LOG("客体内存文件后备：自动判开，先用匿名内存，装模块前到前台按此刻上限再定（起局时上限 %llu MB）", (unsigned long long)(g_gfile_lim0 >> 20));
+        return;
+    }
     if (!on) return;
     guest_file_map(room);
 #else
@@ -691,7 +714,6 @@ static void guest_file_map(uint64_t room) {
 #ifdef __IPHONE_OS_VERSION_MIN_REQUIRED   // iOS 有单进程上限：按本机本款实测定（s2a_guest_next_budget）
     { int src = 0; uint64_t pb = 0, ph = 0; budget = s2a_guest_overflow_budget_ios(be, room, margin, g_gfile_died, &src, &pb, &ph);
       if (src == 0) snprintf(why, sizeof why, "按 S2A_GUEST_FILE_ANON_BUDGET_MB 显式设定");
-      else if (src == 1) snprintf(why, sizeof why, "上一局在前台死掉：退回整段进文件，清掉本款预算记录，天花板 %llu MB（0 = 没有）", (unsigned long long)(g_budget_ceil >> 20));
       else if (src == 2) snprintf(why, sizeof why, "按上局实测余量：上局预算 %llu MB + (上局离上限剩余最小 %llu MB（已按两局起局剩余之差扣过）− 余量 %llu MB) − 一块 %llu MB，上限 剩余 %llu − 余量；"
                                   "上局不到 5 分钟只许收紧、够长每局最多抬 1024 MB，天花板 %llu MB（0 = 没有）",
                                   (unsigned long long)(pb >> 20), (unsigned long long)(ph >> 20), (unsigned long long)(margin >> 20), (unsigned long long)(GCHUNK >> 20), (unsigned long long)(room >> 20),
@@ -730,9 +752,18 @@ void s2a_guest_file_test_pending(void) { g_gfile_pending = 1; }
 void s2a_guest_file_test_late(void) { g_gfile_late = 1; }   // 单测（t_guest_file_retry ④）：造「多款容器、已选定游戏、要按本款再判」的状态   // 单测（t_guest_file_retry）：造「装游戏前要换成文件」的状态（真机只由多款容器按本款再判置位，Mac 上 room 0 走不到）
 #endif
 int s2a_guest_file_retry(void) {
-    if (g_gfile_late && g_gfd < 0 && g_ok) {   // 多款容器：此刻已选定游戏，按本款实测 / 「在跑」标记再判（剩余用起局时那一刻的，和单款同口径）
+    if (g_gfile_late && g_gfd < 0 && g_ok) {   // 多款容器（已选定游戏）/ 自动判开的单款（等到前台）：按本款实测 / 「在跑」标记再判，剩余按前台上限补过的
         g_gfile_late = 0;
         uint64_t margin = env_mb("S2A_GUEST_FILE_MARGIN_MB", 512), host = env_mb("S2A_GUEST_FILE_HOST_MB", 2048), phys = phys_mem();
+        {   // 起局时若是后台档上限，按此刻（前台、已选定游戏）的上限补回差额，判开 / 预算 / 物理映射区门槛 / 预算记录第三项都按补后的剩余
+            uint64_t lim1 = proc_limit(), r1 = s2a_guest_room_eff(s2a_guest_room_fg(g_gfile_room0, g_gfile_lim0, lim1), phys, margin);
+            static int said;
+            if (r1 != g_gfile_room0) {
+                if (!said++) LOG("客体内存文件后备：起局时的上限 %llu MB 比此刻 %llu MB 小（起局时是预热 / 后台档），起局剩余 %llu MB 按前台补成 %llu MB",
+                    (unsigned long long)(g_gfile_lim0 >> 20), (unsigned long long)(lim1 >> 20), (unsigned long long)(g_gfile_room0 >> 20), (unsigned long long)(r1 >> 20));
+                g_gfile_room0 = g_gfile_room = r1;
+            }
+        }
         { const char *st = s2a_guest_mem_settle(s2a_guest_run_died(), g_gfile_room0, margin); if (st) LOG("客体内存实测记录：%s", st); }
         uint64_t seen = s2a_guest_mem_seen();
         // 此刻已选定游戏、模块目录已是这一款，但布局还没按本款排（s2a_app_pool 仍是容器缺省）：按本款 main.npdm 取池（Switch 2 9 GiB），读不到退回 s2a_app_pool
@@ -993,6 +1024,80 @@ uint64_t s2a_guest_file_live(void) {
     }
     return got;
 }
+// 冷热读数（#1268，11-24）：文件后备的写盘全是内核回收 MAP_SHARED 脏页时的写回（本文件与 svc_mem.c 没有 msync / fsync），
+//   物理内存装不下时总要有页进闪存，写量取决于进闪存的是不是热页。溢出模式按「首次放开先后」定块的后备，后碰的块（常是流式 / 帧间缓冲）进文件。
+//   这里只读不改：每次心跳对已放开的文件块、匿名块各 mincore 一遍，按块数页——
+//   文件块：此刻的脏页（MINCORE_MODIFIED：上次写回后又被写过，下次回收要再写一遍）；脏页 ≥ 块的 1/8 算热块，连续 3 次心跳都是热块算常热；
+//   匿名块：已被系统压缩换出的页（MINCORE_PAGED_OUT：系统判它冷）；≥ 块的一半算冷块。
+//   GPU 别名：块里有字节被物理池零拷贝 Metal 缓冲指着（nvn_mtl.m nvn_be_pool_host_overlap，没链图形层 = 0）的块换不得——缓冲按建时的宿主页记账，
+//   底下的映射一换就指到旧页上。常热文件块 / 冷匿名块各数一份「被别名」的，换位上限只算没被别名的两边。
+//   「可换位上限」= min(常热且没被别名的文件块, 冷且没被别名的匿名块) × 32 MB：冷热换位最多能把这么多热页从文件挪回匿名，用来判换位值不值得做
+// 纯函数（t_guest_file_overflow ⑤b 测）：一块的 mincore 向量 → 脏页数 / 换出页数
+void s2a_heat_count(const unsigned char *vec, size_t np, uint64_t *dirty, uint64_t *out) {
+    uint64_t d = 0, o = 0;
+    for (size_t k = 0; k < np; k++) { if (vec[k] & MINCORE_INCORE) { if (vec[k] & MINCORE_MODIFIED) d++; } else if (vec[k] & MINCORE_PAGED_OUT) o++; }
+    *dirty = d; *out = o;
+}
+__attribute__((weak)) uint64_t nvn_be_pool_host_overlap(uint64_t lo, uint64_t hi) { (void)lo; (void)hi; return 0; }   // 弱定义：没链图形层（单测 / 安卓）= 没有 GPU 别名；宿主里 nvn_mtl.m 的强定义盖掉它
+static int g_heat_sync = -1;   // S2A_GUEST_HEAT_SYNC，首扫读一次
+static uint8_t *g_heat_hist; static uint64_t g_heat_n;   // 每块一字节：低 3 位 = 最近 3 次心跳是不是热块（文件块用）；块表重建（块数变）时重分配
+// 扫一遍：r[0] 文件块数、r[1] 文件脏字节、r[2] 热块、r[3] 常热块、r[4] 匿名块数、r[5] 已换出字节、r[6] 冷块、r[7] 可换位上限字节、
+//   r[8] 常热块里被 GPU 别名的、r[9] 冷块里被 GPU 别名的；top / topi 最脏三块的脏字节与块号。没开文件后备回 0
+int s2a_guest_heat_scan(uint64_t r[10], uint64_t top[3], uint64_t topi[3]) {
+    memset(r, 0, 10 * sizeof *r); memset(top, 0, 3 * sizeof *top); memset(topi, 0, 3 * sizeof *topi);
+    if (g_gfd < 0 || !g_gchunk || !g_gtouch) return 0;
+    if (g_heat_n != g_gchunk_n) { free(g_heat_hist); g_heat_hist = calloc(g_gchunk_n ? g_gchunk_n : 1, 1); g_heat_n = g_heat_hist ? g_gchunk_n : 0; }
+    if (!g_heat_hist) return 0;
+    if (g_heat_sync < 0) { const char *e = getenv("S2A_GUEST_HEAT_SYNC"); g_heat_sync = e && *e && strcmp(e, "0"); }
+    size_t pg = (size_t)getpagesize(); static unsigned char vec[GCHUNK / 4096];   // 心跳在后台串行队列里调，不并发
+    uint64_t nf = 0, fdirty = 0, fhot = 0, fsteady = 0, na = 0, aout = 0, acold = 0, fs_alias = 0, ac_alias = 0;
+    for (uint64_t i = 0; i < g_gchunk_n; i++) {
+        uint8_t st = gc_get(i) & 3; if (st != GC_FILE && st != GC_ANON) continue;
+        if (!__atomic_load_n(&g_gtouch[i], __ATOMIC_RELAXED)) { g_heat_hist[i] = 0; continue; }
+        uint64_t cl, ch; gchunk_span(i, &cl, &ch); size_t np = (size_t)((ch - cl + pg - 1) / pg);
+        if (mincore((void *)(uintptr_t)cl, (size_t)(ch - cl), (char *)vec)) continue;
+        uint64_t d, o; s2a_heat_count(vec, np, &d, &o);
+        // S2A_GUEST_HEAT_SYNC=1（量冷热的对照局用，缺省关）：扫完把这块的脏页写回。物理内存宽裕的机器（Mac）上内核不回收，脏位一直挂着、
+        //   看不出谁在反复写；每 10 秒写回一次，下一次扫到的脏页就是这 10 秒里重新写过的——即「内核每 10 秒回收一遍」时的写回量上界。会多写盘，玩家局不开
+        if (st == GC_FILE && g_heat_sync && d) msync((void *)(uintptr_t)cl, (size_t)(ch - cl), MS_ASYNC);
+        if (st == GC_FILE) {
+            nf++; fdirty += d; int hot = d * 8 >= np; fhot += hot;
+            g_heat_hist[i] = (uint8_t)(((g_heat_hist[i] << 1) | hot) & 7);
+            if (g_heat_hist[i] == 7) { fsteady++; fs_alias += nvn_be_pool_host_overlap(cl, ch) > 0; }
+            for (int t = 0; t < 3; t++) if (d > top[t]) { for (int u = 2; u > t; u--) { top[u] = top[u - 1]; topi[u] = topi[u - 1]; } top[t] = d; topi[t] = i; break; }
+        } else { na++; aout += o; if (o * 2 >= np) { acold++; ac_alias += nvn_be_pool_host_overlap(cl, ch) > 0; } }
+    }
+    uint64_t fs_free = fsteady - fs_alias, ac_free = acold - ac_alias, swap = fs_free < ac_free ? fs_free : ac_free;
+    r[0] = nf; r[1] = fdirty * pg; r[2] = fhot; r[3] = fsteady; r[4] = na; r[5] = aout * pg; r[6] = acold; r[7] = swap * GCHUNK; r[8] = fs_alias; r[9] = ac_alias;
+    for (int t = 0; t < 3; t++) top[t] *= pg;
+    return 1;
+}
+// 日志有界（不随局长涨）：和上一条打出的比，块数一样、脏页 / 换出 / 换位上限差不到 16 MB 就不打；一局最多 HEAT_LOG_MAX 条，到上限后不再打
+enum { HEAT_LOG_MAX = 40 };
+// 纯函数（t_guest_file_overflow ⑤c 测）：这次要不要打；要打就把 r 记成 last、*logged + 1
+int s2a_heat_log_due(uint64_t last[10], const uint64_t r[10], int *logged) {
+    if (*logged >= HEAT_LOG_MAX) return 0;
+    int same = *logged > 0;
+    for (int k = 0; k < 10 && same; k++) {
+        uint64_t a = r[k], b = last[k], d = a > b ? a - b : b - a;
+        same = (k == 1 || k == 5 || k == 7) ? d < (16ull << 20) : d == 0;
+    }
+    if (same) return 0;
+    memcpy(last, r, 10 * sizeof *last); (*logged)++;
+    return 1;
+}
+void s2a_guest_heat_log(void) {
+    uint64_t r[10], top[3], topi[3]; if (!s2a_guest_heat_scan(r, top, topi)) return;
+    static uint64_t last[10]; static int logged;
+    if (!s2a_heat_log_due(last, r, &logged)) return;
+    LOG("[客体冷热] 文件块 %llu 块：此刻脏页 %llu MB、热块（脏 ≥ 1/8）%llu 块、连续 3 次心跳都热 %llu 块（其中被 GPU 缓冲指着 %llu 块），最脏三块 #%llu %llu MB / #%llu %llu MB / #%llu %llu MB；"
+        "匿名块 %llu 块：已压缩换出 %llu MB、冷块（换出 ≥ 一半）%llu 块（其中被 GPU 缓冲指着 %llu 块）；可换位上限（两边都不算被指着的）%llu MB",
+        (unsigned long long)r[0], (unsigned long long)(r[1] >> 20), (unsigned long long)r[2], (unsigned long long)r[3], (unsigned long long)r[8],
+        (unsigned long long)topi[0], (unsigned long long)(top[0] >> 20), (unsigned long long)topi[1], (unsigned long long)(top[1] >> 20),
+        (unsigned long long)topi[2], (unsigned long long)(top[2] >> 20),
+        (unsigned long long)r[4], (unsigned long long)(r[5] >> 20), (unsigned long long)r[6], (unsigned long long)r[9], (unsigned long long)(r[7] >> 20));
+    if (logged == HEAT_LOG_MAX) LOG("[客体冷热] 本局已打满 %d 条，之后不再打（读数只在变化时打）", HEAT_LOG_MAX);
+}
 void s2a_guest_backing_log(void) {
     if (g_gfd < 0 || !g_gchunk) return;
 #ifdef __IPHONE_OS_VERSION_MIN_REQUIRED
@@ -1002,6 +1107,7 @@ void s2a_guest_backing_log(void) {
     LOG("[客体后备] %s：匿名块 %llu MB（已计 %llu MB / 预算 %llu MB）、文件块 %llu MB、挖区未放开 %llu MB、未定 %llu MB；本局离上限剩余最小 %lld MB（-1 = 没读过）", g_gwhole ? "整段进文件" : "溢出模式",
         (unsigned long long)(sum[GC_ANON] >> 20), (unsigned long long)(g_anon_used >> 20), (unsigned long long)(g_anon_budget >> 20),
         (unsigned long long)(sum[GC_FILE] >> 20), (unsigned long long)(sum[GC_CARVE] >> 20), (unsigned long long)(sum[GC_UNDEC] >> 20), g_hmin == UINT64_MAX ? -1ll : (long long)(g_hmin >> 20));
+    s2a_guest_heat_log();
 }
 int s2a_window_ok(void) { return g_ok; }
 void s2a_window_get(uint64_t *base, uint64_t *size) { *base = g_base; *size = g_size; }

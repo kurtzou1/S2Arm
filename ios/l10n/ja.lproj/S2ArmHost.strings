@@ -411,6 +411,7 @@
 "gfx.filter.nearest" = "2D ゲーム向け";
 "gfx.fpsLimit" = "フレームレート上限";
 "gfx.fpsLimit.none" = "無制限";
+"gfx.fpsLimit.native.note" = "このゲームは60fpsパッチを使っていないため、ゲーム本来のフレームレートで動作します。今回の30上限は適用されません（30に抑えるとゲームが遅くなります）。";
 "gfx.resolution" = "レンダリング解像度";
 "gfx.brightness" = "明るさ";
 "gfx.brightness.system" = "システムに従う";

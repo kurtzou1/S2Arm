@@ -25,6 +25,7 @@ extern "C" {
 
 enum { NVK_DEMAND_NONE = 0, NVK_DEMAND_PENDING = 1, NVK_DEMAND_READY = 2, NVK_DEMAND_FAILED = 3 };
 
+void nvk_pipe_demand_worker_enter(void);   // 标记本线程后续创建为后台首用，和预热分开
 void nvn_vk_pipe_demand_start(void);
 void nvn_vk_pipe_demand_stop(void);
 /* Private session guard: returns false conservatively when lifecycle locks are busy; only reaps a worker already marked done, never waits for an active worker. */

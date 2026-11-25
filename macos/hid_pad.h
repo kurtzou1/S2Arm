@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include "s2a_pad.h"
 #include "hid_generic.h"
+#include "hid_pro_parse.h"   // s2a_pro_cal 与纯解析（启动器共用）
 
 enum { S2A_HID_PAD_MAX = 8 };   // 设备表：GameController 已列出（让位）的通用手柄也占一格，比玩家数留宽
 // buttons 位序 = front_mac.m sample_coded_state 的键名表：east south north west leftStick rightStick leftShoulder rightShoulder
@@ -44,7 +45,6 @@ int16_t s2a_hid_pad_axis(long v, long min, long max, int invert);
 // Switch Pro 协议（#934 11-15：PowerA 授权手柄在简易 HID 模式下声明的摇杆量程远大于实际值，换算后只有满量程的几分之一、摇杆慢五六倍；
 //   灯一直闪是没人发点灯子命令）：连上时像 Steam 一样发子命令切完整报告（0x30）、点玩家灯、读出厂摇杆校准，之后按 0x30 报告直读。
 //   校准：中心与上 / 下行程（12 位）；读不到出厂校准用缺省（中心 2048、行程起点 1003，随读数放大，#1264）
-typedef struct { uint16_t cx, cy, xmax, ymax, xmin, ymin; } s2a_pro_cal;   // xmax / ymax：中心以上的行程；xmin / ymin：中心以下的行程
 void s2a_pro_cal_default(s2a_pro_cal *c);
 // 纯函数（单测用）：SPI 0x603D 起 18 字节（左 9 + 右 9，两边字段次序不同）→ 左 / 右摇杆校准；字段全是 0x000 / 0xFFF 时视为没写过，回 0 不改
 int s2a_pro_cal_parse(const uint8_t d[18], s2a_pro_cal *l, s2a_pro_cal *r);

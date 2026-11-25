@@ -125,6 +125,15 @@ int main(void) { alarm(120); @autoreleasepool {
         CHECK(bok == 0 && !strncmp(logb, "翻译失败", strlen("翻译失败")) && bl == 0 && bad1 == 1 && gl_bad_err == err0 + 1, "编译 %d、日志「%.60s…」、链接 %d、坏 %llu、直连异常 +%llu", bok, logb, bl, (unsigned long long)bad1, (unsigned long long)(gl_bad_err - err0));
         GLint bok2 = 1; shader_src(0x8B30, junk, &bok2); stats();
         CHECK(bok2 == 0 && st[2] == bad1, "同一源码再编：编译 %d、不重翻（坏计数仍 %llu）", bok2, (unsigned long long)st[2]);
+        {   // 翻译失败的源码进日志（D-YYEQ）：上面那支坏的写了一段（计数 1）；纯函数：两行源码 → 「   1| a\n   2| bb\n」；超长行截到 200 字加「…」；容量不够时截断不越界
+            extern uint64_t gl_rt_src_logged; size_t s2a_gl_src_numbered(const char *, size_t, char *, size_t);
+            char nb[64]; size_t w = s2a_gl_src_numbered("a\nbb", 4, nb, sizeof nb);
+            char longl[300]; memset(longl, 'x', sizeof longl); char lb[400]; size_t lw = s2a_gl_src_numbered(longl, sizeof longl, lb, sizeof lb);
+            char tiny[20]; size_t tw = s2a_gl_src_numbered("abcdefghijklmnopqrstuvwxyz\n2\n", 29, tiny, sizeof tiny);
+            CHECK(gl_rt_src_logged >= 1 && !strcmp(nb, "   1| a\n   2| bb\n") && w == strlen(nb) && lw == 6 + 200 + strlen("…") + 1 && tw < sizeof tiny && tiny[tw] == 0,
+                  "失败源码进日志 %llu 支（期望 ≥1）；编号「%s」；长行 %zu 字节（期望 %zu）；小缓冲写 %zu 字节不越界",
+                  (unsigned long long)gl_rt_src_logged, nb, lw, (size_t)(6 + 200 + strlen("…") + 1), tw);
+        }
         printf("F 结构体数组 uniform\n");
         uint64_t m0 = st[0]; GLuint sa = program("api_es300.vert", "api_structarr.frag", &vok, &fok, &lok); stats();
         GLint l1 = glGetUniformLocation(sa, "Lights[1].color"), l2 = glGetUniformLocation(sa, "Lights[2].color");

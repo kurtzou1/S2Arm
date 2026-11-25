@@ -17,6 +17,7 @@ int s2a_hud_text(char *out, size_t n, const s2a_hud_host *h);
 // 简版性能浮层（齿轮菜单「性能浮层」）：s2a_hud_brief_set 开关上屏计时（ap_host.c），s2a_hud_brief 出一行「NN 帧 · X.X GB」
 void s2a_hud_brief_set(int on);
 int s2a_hud_brief(char *out, size_t n);
+int s2a_hud_brief_fps(char *out, size_t n);   // 同上只出帧数「NN 帧」（Mac「显示」菜单可选只看帧率，#2207）
 #ifdef __cplusplus
 }
 #endif

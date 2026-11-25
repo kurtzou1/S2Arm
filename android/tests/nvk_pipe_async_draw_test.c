@@ -27,6 +27,7 @@
 #include "nvn_first_use.h"
 
 int nvn_plat_flag(const char *name, int dflt);
+void nvk_pipe_demand_worker_enter(void) {}
 nvn_gpu_rc nvn_gpu_pipe_get(const nvn_gpu_pipe_desc *d, int mode, nvn_gpu_pipe *out, nvn_gpu_err *err);
 void nvn_gpu_set_pipe(nvn_gpu_cmd c, nvn_gpu_pipe p);
 void nvn_gpu_draw(nvn_gpu_cmd c, const nvn_gpu_draw_args *a);

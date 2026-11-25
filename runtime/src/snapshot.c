@@ -1035,13 +1035,26 @@ static int load_mem(const char *dir, uint64_t *raw_out) {
 }
 // 起好服务层之后、本该起游戏主线程的位置调：成功回 0（游戏线程已按快照续跑）；失败回 -1（调用方当场退出：此时还没有游戏线程在跑、没写过存档目录）
 int nvn_snap_redump(const char *dir) __attribute__((weak_import));   // 诊断：恢复后 5 秒重存一遍显卡内容，和快照逐张对比（S2A_SNAP_REDUMP=1）
+// 自动玩家闸（11-25，tests/autoplay/autoplay.c 读）：恢复期间（进程内重建 / 恢复局）自动玩家不许按键，等恢复后验证截图存完再放开；
+//   gen 每次恢复 +1，自动玩家据此作废恢复前已定、还没按出去的那一下（v0.6.10 ⑨a restart 局：恢复后 0.6 秒补按了重启前定的 A，验证截图拍到下一页）
+__attribute__((visibility("default"), used)) volatile int s2a_snap_ap_hold, s2a_snap_ap_gen;
 static void *grab_thread(void *arg) {
     const char *d = arg; static const int at[4] = {1, 5, 20, 60}; int prev = 0;   // 60：「恢复后一分钟画面正常」的验收看这张
     for (int i = 0; i < 4; i++) { sleep((unsigned)(at[i] - prev)); prev = at[i]; char g[2200]; snprintf(g, sizeof g, "%s/b_after_%02ds.png", d, at[i]); if (nvn_snap_grab) nvn_snap_grab(g);
         if (at[i] == 5 && getenv("S2A_SNAP_REDUMP") && nvn_snap_redump) nvn_snap_redump(d); }
+    s2a_snap_ap_hold = 0;   // 验证截图存完：放开自动玩家
     LOG("即时存档恢复：验证截图已存（%s/b_after_*.png）", d); return NULL;
 }
+static int restore_body(const char *dir);
 int s2a_snap_restore(const char *dir) {
+    // 自动玩家闸：恢复开始即停手、恢复前定的那一下作废（gen+1）；失败一律放开——进程内重建失败不退出进程，而是不带快照重新开局
+    //   （host_main.c s2a_session_fresh_restart），hold 不清的话新开的那局自动玩家要干等 300 秒
+    s2a_snap_ap_gen++; s2a_snap_ap_hold = 1;
+    int r = restore_body(dir);
+    if (r) s2a_snap_ap_hold = 0;
+    return r;
+}
+static int restore_body(const char *dir) {
     {   // 动态装载的 NRO：先按快照顺序重新装（落点与存档时相同），再核模块落点、写回游戏内存
         int s2a_snap_nro_preload(FILE *); FILE *nf = open_in(dir, "nro.bin", "rb");
         if (!nf) { LOG("【红】即时存档恢复：快照缺动态模块表（nro.bin）"); return -1; }
@@ -1065,7 +1078,12 @@ int s2a_snap_restore(const char *dir) {
     { int s2a_snap_far_load(FILE *); f = open_in(dir, "far.bin", "rb"); if (!f || s2a_snap_far_load(f)) { if (f) fclose(f); return -1; } fclose(f); }
     double t1 = now_s(); uint64_t raw = 0;
     int s2a_snap_keypages_reapply(void);
+    // 社区补丁开关槽 / 帧率表槽在模块键页里，load_mem 会把它们盖回存档那一刻：写回前记下本进程的，写回后按当前开关重写（11-24 一款开放世界大作：
+    //   60 帧关时存、开着恢复约 2 倍速；开时存、关着恢复画面冻住）
+    void s2a_cpatch_snap_hold(void), s2a_cpatch_snap_reapply(void), s2a_fps_snap_reapply(void), s2a_widen_snap_hold(void), s2a_widen_snap_reapply(void);
+    s2a_cpatch_snap_hold(); s2a_widen_snap_hold();
     if (load_mem(dir, &raw) || s2a_snap_hostslots_reapply() || s2a_snap_keypages_reapply()) return -1;
+    s2a_cpatch_snap_reapply(); s2a_widen_snap_reapply(); s2a_fps_snap_reapply();
     double t2 = now_s();
     f = open_in(dir, "hlog.bin", "rb"); if (!f || s2a_snap_hlog_load(f)) { if (f) fclose(f); LOG("【红】即时存档恢复：读不了句柄日志"); return -1; } fclose(f);
     f = open_in(dir, "kernel.bin", "rb"); if (!f || s2a_snap_kernel_load(f, s2a_snap_skip_cs)) { if (f) fclose(f); return -1; } fclose(f);
@@ -1102,7 +1120,7 @@ int s2a_snap_restore(const char *dir) {
     s2a_snap_unfreeze();
     {   // 验证用：恢复后第 1 / 5 / 20 秒的画面（另起线程，不挡游戏）
         static char gdir[2048]; s2a_docs_root(gdir, sizeof gdir);
-        pthread_t th; pthread_create(&th, NULL, grab_thread, gdir); pthread_detach(th);
+        pthread_t th; if (pthread_create(&th, NULL, grab_thread, gdir) == 0) pthread_detach(th); else s2a_snap_ap_hold = 0;   // 截图线程起不来：没人放开自动玩家，这里放
     }
     LOG("即时存档恢复：完成，合计 %.2f s（内存账 %.2f、页内容 %.0f MB %.2f、内核账 %.2f、服务重放 %.2f（异常 %d 条）、核对 %.2f、起线程 %.2f）；存档目录前后一致（%d 个文件 %.12s…）",
         t6 - t0, t1 - t0, raw / 1048576.0, t2 - t1, t3 - t2, t4 - t3, rbad, t5 - t4, t6 - t5, sn1, st1);

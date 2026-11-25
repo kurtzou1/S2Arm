@@ -51,6 +51,7 @@ int s2a_screen_h(void) { int w, h; return s2a_android_screen_metrics(&w, &h) ? h
 void s2a_boot_mark(const char *stage) { strncpy(g_boot_mark, stage ? stage : "", sizeof g_boot_mark - 1); }
 
 int s2a_cpatch_fps_unit(const char *id) { (void)id; unbacked(__func__); return 0; }   // runtime/src/cpatch.c：这份帧率补丁选中档（FpsLocker.cs 按份问）；诊断库 = 没选中
+int s2a_cpatch_snap_gen(void) { unbacked(__func__); return 0; }   // runtime/src/cpatch.c：即时存档恢复次数（FpsLocker.cs 见它变了重写）；诊断库不恢复快照 = 0
 const char *s2a_cpatch_tables_dir(void) { unbacked(__func__); return ""; }   // runtime/src/cpatch.c：随包补丁表目录（FpsLocker.cs 找帧率配置）；诊断库没有 = 空串，服务层照常跳过
 int s2a_cpatch_cheat(const char *file, const char *name, int on) { (void)file; (void)name; (void)on; unbacked(__func__); return 0; }   // runtime/src/cpatch.c：编进包的金手指开关（Cheats.cs）；0 = 包里没有，交运行时 Tamper   // runtime/src/fps.c：60 帧此刻是否真在生效（服务层 FpsLocker.cs 每秒问）；诊断库里不跑核心 = 不生效
 uint32_t s2a_handle_new(uint32_t kind, uint64_t cookie) { (void)kind; (void)cookie; unbacked(__func__); return 0; }

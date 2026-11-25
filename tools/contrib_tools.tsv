@@ -26,6 +26,7 @@ iOS 全量编译	Xcode
 单测 dmsh_sc_identity_test	Xcode
 单测 macos_native_input_test	Xcode
 单测 macos_pro_motion_test	Xcode
+单测 macos_perf_brief_test	Xcode
 # Mac 出包 / 普查链：真实调用 Apple 工具链、BSD 工具或 APFS 克隆；非 Mac 宿主交 Mac 门禁验证，不记为本机通过。
 单测 app_only_test	Xcode
 单测 census_test	Xcode

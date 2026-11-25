@@ -157,6 +157,8 @@ struct LaunchSettingsSheet: View {
     @State private var inflight = 0
     @State private var queue: Task<Void, Never>?
     @State private var loaded = false
+    /// 待确认的玩家分享金手指 id（改走 SwiftUI .alert 挂在当前 sheet 上，避免在 Toggle 回调里同步 NSAlert.runModal() 导致 macOS 26/27 Liquid Glass 按钮文字空白）
+    @State private var pendingSharedCheat: String?
 
     private var lang: String { loc.lang.sharedCode }
     private func t(_ id: String) -> String { BackendText.launcherText(id, language: lang) }
@@ -202,6 +204,18 @@ struct LaunchSettingsSheet: View {
             }
         }
         .launcherSheet()
+        .alert(t("display.cheats.shared.warn.title"),
+               isPresented: Binding(get: { pendingSharedCheat != nil }, set: { if !$0 { pendingSharedCheat = nil } })) {
+            Button(t("display.cheats.shared.warn.on")) {
+                if let id = pendingSharedCheat {
+                    pendingSharedCheat = nil
+                    submit(["cheat." + id: true]) { await load(nil, cheats: [id: true]) }
+                }
+            }
+            Button(t("action.cancel"), role: .cancel) { pendingSharedCheat = nil }
+        } message: {
+            Text(t("display.cheats.shared.warn.message"))
+        }
         .onExitCommand { dismiss() }
         .task { if !loaded { await load(nil) } }
     }
@@ -226,7 +240,7 @@ struct LaunchSettingsSheet: View {
             cheats: c == nil ? [] : cheats.map { SGradeToggle(id: $0.id, label: $0.name, detail: cheatDetail($0), on: flag("cheat." + $0.id, $0.enabled), enabled: $0.ok) },
             importTitle: t("display.cheats.import"), busy: held,
             onPatch: { id, on in submit(["patch." + id: on]) { await load(nil, patches: [id: on]) } },
-            onCheat: { id, on in if confirmShared(id, on) { submit(["cheat." + id: on]) { await load(nil, cheats: [id: on]) } } },
+            onCheat: { id, on in toggleCheat(id, on) },
             onImport: { importCheats() },
             summary: { on, all in t("display.cheats.summary").replacingOccurrences(of: "{0}", with: String(on)).replacingOccurrences(of: "{1}", with: String(all)) },
             searchPrompt: t("display.cheats.search"), clearSearchTitle: loc.t("home.clearSearch"),
@@ -299,7 +313,7 @@ struct LaunchSettingsSheet: View {
             }
             ForEach(cheats) { ch in
                 CardRow("  " + ch.name, detail: cheatDetail(ch)) {
-                    Toggle("", isOn: Binding(get: { flag("cheat." + ch.id, ch.enabled) }, set: { on in if confirmShared(ch.id, on) { submit(["cheat." + ch.id: on]) { await load(nil, cheats: [ch.id: on]) } } }))
+                    Toggle("", isOn: Binding(get: { flag("cheat." + ch.id, ch.enabled) }, set: { on in toggleCheat(ch.id, on) }))
                         .toggleStyle(LauncherSwitchStyle()).labelsHidden().accessibilityLabel(ch.name)
                         .accessibilityIdentifier("launch.cheat." + ch.id)
                         .disabled(!ch.ok || held)
@@ -410,11 +424,12 @@ struct LaunchSettingsSheet: View {
     }
 
     /// 打开玩家分享、未验证的条目前提示一句（可能坏存档），不拦：玩家点「仍然打开」照开
-    private func confirmShared(_ id: String, _ on: Bool) -> Bool {
-        guard on, cheats.first(where: { $0.id == id })?.shared == true else { return true }
-        let a = NSAlert(); a.messageText = t("display.cheats.shared.warn.title"); a.informativeText = t("display.cheats.shared.warn.message")
-        a.addButton(withTitle: t("display.cheats.shared.warn.on")); a.addButton(withTitle: t("action.cancel"))
-        return a.runModal() == .alertFirstButtonReturn
+    private func toggleCheat(_ id: String, _ on: Bool) {
+        if on, cheats.first(where: { $0.id == id })?.shared == true {
+            pendingSharedCheat = id
+        } else {
+            submit(["cheat." + id: on]) { await load(nil, cheats: [id: on]) }
+        }
     }
 
     /// 刚导入的说明（导入了哪几份、哪些没收及原因，作业层 mods.import_paths notes）优先，否则定义表的说明

@@ -48,6 +48,8 @@
     <!-- 加固算法（#1204 T1）：Compile 交 SPIRV-Cross 前经 libnxgal 调它改写 SPIR-V，改了它出库结果就变 -->
     <!-- 11-02 #783：加固代码挪进不引 Metal 的 gal_spvx.c（+ gal_spvx.h），gal_spvx.m 只剩 #include；三份都进指纹，改哪份都刷新 -->
     <DshXfpInput Include="$(Nx)../dsx/gal_spvx.c;$(Nx)../dsx/gal_spvx.h" />
+    <!-- 颜色出口改写（gal_colorround.c，经 libdsx 的 nxgal_dmsh_color_round 被 SpvCross.ColorRound 调）同样改变每支片元的翻译输出：进指纹（#674 可编程混合） -->
+    <DshXfpInput Include="$(Nx)../dsx/gal_colorround.c;$(Nx)../dsx/gal_colorround.h" />
     <DshXfpInput Include="$(Ryu)Ryujinx.Graphics.Shader/**/*;$(Ryu)Spv.Generator/**/*;$(Nx)../widen/shader/**/*" Exclude="$(Ryu)Ryujinx.Graphics.Shader/bin/**;$(Ryu)Ryujinx.Graphics.Shader/obj/**;$(Ryu)Spv.Generator/bin/**;$(Ryu)Spv.Generator/obj/**;$(Nx)../widen/shader/bin/**;$(Nx)../widen/shader/obj/**;$(Ryu)Ryujinx.Graphics.Shader/**/.*;$(Ryu)Spv.Generator/**/.*;$(Nx)../widen/shader/**/.*" />
   </ItemGroup>
   <UsingTask TaskName="DshXfpHash" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)/Microsoft.Build.Tasks.Core.dll">

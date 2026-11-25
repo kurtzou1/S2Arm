@@ -43,6 +43,7 @@ __attribute__((constructor)) static void cheats_register_host(void) { void (*f)(
 #include "../runtime/include/s2a_direct_prompt.h"
 #include "../runtime/include/s2a_gfx_mode.h"
 #include "../runtime/include/s2a_hud.h"
+#import "perf_brief.h"
 #include "../runtime/include/s2a_home_quit.h"
 #include "../runtime/include/s2a_mac_focus.h"
 #include "../runtime/include/s2a_ui_text.h"
@@ -240,14 +241,46 @@ static _Atomic int mouse_hold;   // 1 = 不回中；配置装好时由 apply_mou
 static _Atomic int64_t hold_x, hold_y;
 static void apply_mouse_options(void) { atomic_store(&mouse_hold, [config[@"mouseOptions"][@"recenter"] isEqual:@NO]); }
 static int64_t clamp_stick(int64_t v) { return MAX(-32767, MIN(32767, v)); }
-// 鼠标位移由 HID 读取线程消费一次；s2a_vpad_read（旧 ABI）与 s2a_vpad_read_ex（事件驱动 ABI）共用这一份。
+// 回中模式按时间窗换算（#2131，D-5VS4 / D-KHYM）：原先每次 HID 读把攒下的位移一次加进右摇杆、读完清零。InputPump 每 5 ms 写一条 HID
+//   （HidSamplePeriodUs，D-2T9N 从 16 ms 改快），30 帧的游戏每帧只看最新一条，看到的只是最后 5 ms 里的位移：鼠标事件落进哪一格看运气，
+//   游戏这帧满偏、下帧 0，转视角一顿一顿；方向键是持续量，同一局里平滑（D-KHYM）。
+//   改：鼠标事件带时间记进环，读时取最近 MOUSE_WIN_NS（33 ms，盖住 30 帧游戏的一帧）里的位移和，按 MOUSE_REF_NS / MOUSE_WIN_NS 缩放——
+//   匀速移动时摇杆量 = 每 16 ms 的位移（与 1500 × 灵敏度当初按 16 ms 一读调的手感一致），不随 HID 读多快、游戏多久读一次变；停手后 33 ms 内回中。
+//   不回中模式照旧按次累进（保持量是位移总和，与读的节拍无关）
+#define MOUSE_WIN_NS (33ull * 1000000ull)
+#define MOUSE_REF_NS (16ull * 1000000ull)
+enum { MOUSE_RING = 512 };   // 33 ms 里最多存这么多个事件（8 kHz 鼠标约 264 个）
+static struct { uint64_t t; int64_t dx, dy; } mouse_ring[MOUSE_RING];
+static uint64_t mouse_ring_n;   // 累计写入数（下标 = n % MOUSE_RING）；mouse_mu 下读写
+static pthread_mutex_t mouse_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t mouse_clock(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
+static uint64_t (*mouse_now)(void) = mouse_clock;   // 单测换成假时钟
+static void mouse_push(int64_t dx, int64_t dy) {
+    uint64_t t = mouse_now(); pthread_mutex_lock(&mouse_mu);
+    mouse_ring[mouse_ring_n % MOUSE_RING].t = t; mouse_ring[mouse_ring_n % MOUSE_RING].dx = dx; mouse_ring[mouse_ring_n % MOUSE_RING].dy = dy; mouse_ring_n++;
+    pthread_mutex_unlock(&mouse_mu);
+}
+static void mouse_ring_clear(void) { pthread_mutex_lock(&mouse_mu); mouse_ring_n = 0; pthread_mutex_unlock(&mouse_mu); }
+// 最近一个时间窗里的位移和，按参考间隔缩放成摇杆量（未夹到 ±32767）
+static void mouse_window(int64_t *x, int64_t *y) {
+    uint64_t now = mouse_now(); int64_t sx = 0, sy = 0;
+    pthread_mutex_lock(&mouse_mu);
+    for (uint64_t k = 0; k < mouse_ring_n && k < MOUSE_RING; k++) {
+        uint64_t i = (mouse_ring_n - 1 - k) % MOUSE_RING;
+        if (now - mouse_ring[i].t >= MOUSE_WIN_NS) break;   // 环按时间先后写：再往前的都更旧
+        sx += mouse_ring[i].dx; sy += mouse_ring[i].dy;
+    }
+    pthread_mutex_unlock(&mouse_mu);
+    *x = sx * (int64_t)MOUSE_REF_NS / (int64_t)MOUSE_WIN_NS; *y = sy * (int64_t)MOUSE_REF_NS / (int64_t)MOUSE_WIN_NS;
+}
+// 鼠标位移在 HID 读取线程上换成右摇杆；s2a_vpad_read（旧 ABI）与 s2a_vpad_read_ex（事件驱动 ABI）共用这一份。
 static void take_mouse_delta(int32_t sticks[4]) {
     int64_t dx = atomic_exchange_explicit(&mouse_dx, 0, memory_order_relaxed);
     int64_t dy = atomic_exchange_explicit(&mouse_dy, 0, memory_order_relaxed);
     if (atomic_load(&mouse_hold)) {
         int64_t x = clamp_stick(atomic_load(&hold_x) + dx), y = clamp_stick(atomic_load(&hold_y) + dy);   // 只有 HID 读线程写保持量；复位在主线程清零
         atomic_store(&hold_x, x); atomic_store(&hold_y, y); dx = x; dy = y;
-    }
+    } else mouse_window(&dx, &dy);
     sticks[2] = (int32_t)clamp_stick((int64_t)sticks[2] + dx);
     sticks[3] = (int32_t)clamp_stick((int64_t)sticks[3] + dy);
 }
@@ -291,7 +324,7 @@ static void reset_input(void) {
     [mouse_up_polls removeAllObjects]; [stale_mouse removeAllObjects];
     atomic_store_explicit(&mouse_dx, 0, memory_order_relaxed);
     atomic_store_explicit(&mouse_dy, 0, memory_order_relaxed);
-    atomic_store(&hold_x, 0); atomic_store(&hold_y, 0);
+    atomic_store(&hold_x, 0); atomic_store(&hold_y, 0); mouse_ring_clear();
     int32_t sticks[4] = {0};
     pthread_mutex_lock(&g_compose_mu);   // publish 的序号快照只有一个写者：reset 也走同一把锁（另一路是手柄快速路径）
     publish_input(0, sticks);
@@ -306,7 +339,7 @@ static void reset_mouse_input(void) {
     [mouse removeAllObjects]; [mouse_up_polls removeAllObjects]; [stale_mouse removeAllObjects];
     atomic_store_explicit(&mouse_dx, 0, memory_order_relaxed);
     atomic_store_explicit(&mouse_dy, 0, memory_order_relaxed);
-    atomic_store(&hold_x, 0); atomic_store(&hold_y, 0);
+    atomic_store(&hold_x, 0); atomic_store(&hold_y, 0); mouse_ring_clear();
     sample_input();
 }
 static BOOL camera_mouse(void) { return [config[@"mouseOptions"][@"mode"] isEqualToString:@"camera"]; }
@@ -1934,8 +1967,11 @@ static void esc_hold_start(NSWindow *window) {
 - (void)mouseMoved:(NSEvent *)e {
     if (!focused || !mouse_captured || !camera_mouse()) return;
     NSDictionary *o = config[@"mouseOptions"];
-    atomic_fetch_add_explicit(&mouse_dx, (int64_t)llround(e.deltaX * 1500 * [o[@"sensitivityX"] doubleValue] * ([o[@"invertX"] boolValue] ? -1 : 1)), memory_order_relaxed);
-    atomic_fetch_add_explicit(&mouse_dy, (int64_t)llround(-e.deltaY * 1500 * [o[@"sensitivityY"] doubleValue] * ([o[@"invertY"] boolValue] ? -1 : 1)), memory_order_relaxed);
+    int64_t dx = (int64_t)llround(e.deltaX * 1500 * [o[@"sensitivityX"] doubleValue] * ([o[@"invertX"] boolValue] ? -1 : 1));
+    int64_t dy = (int64_t)llround(-e.deltaY * 1500 * [o[@"sensitivityY"] doubleValue] * ([o[@"invertY"] boolValue] ? -1 : 1));
+    atomic_fetch_add_explicit(&mouse_dx, dx, memory_order_relaxed);   // 不回中模式按次累进用
+    atomic_fetch_add_explicit(&mouse_dy, dy, memory_order_relaxed);
+    mouse_push(dx, dy);   // 回中模式按时间窗用（take_mouse_delta）
 }
 - (void)mouseDragged:(NSEvent *)e {
     if (touch_owner) { touch_move(self.bounds.size, self.window.backingScaleFactor ?: 1, [self convertPoint:e.locationInWindow fromView:nil]); return; }
@@ -2201,7 +2237,14 @@ static void snap_mac_restart(int result, const char *detail, void *ctx) {
     [a beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) { if (r == NSAlertFirstButtonReturn) [ws snapRestoreNow:dir rollback:YES]; }];
 }
 - (void)toggleFullScreenItem:(id)sender { (void)sender; fullscreen_toggle(self.window); }
+// 帧率浮层（#2207，perf_brief.m）：偏好 S2APerfHUD 开关（跨局记住，与 iPhone 齿轮「性能浮层」同一个键）、S2APerfHUDMem 帧率旁带内存（缺省只看帧率）
+- (void)perfApply { NSUserDefaults *d = NSUserDefaults.standardUserDefaults; s2a_perf_brief_apply(self.window.contentView, [d boolForKey:@"S2APerfHUD"], [d boolForKey:@"S2APerfHUDMem"]); }
+- (void)togglePerfItem:(id)sender { (void)sender; NSUserDefaults *d = NSUserDefaults.standardUserDefaults; [d setBool:![d boolForKey:@"S2APerfHUD"] forKey:@"S2APerfHUD"]; [self perfApply]; }
+- (void)togglePerfMemItem:(id)sender { (void)sender; NSUserDefaults *d = NSUserDefaults.standardUserDefaults; [d setBool:![d boolForKey:@"S2APerfHUDMem"] forKey:@"S2APerfHUDMem"]; [self perfApply]; }
 - (BOOL)validateMenuItem:(NSMenuItem *)item {
+    NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+    if (item.action == @selector(togglePerfItem:)) item.state = [d boolForKey:@"S2APerfHUD"] ? NSControlStateValueOn : NSControlStateValueOff;
+    if (item.action == @selector(togglePerfMemItem:)) { item.state = [d boolForKey:@"S2APerfHUDMem"] ? NSControlStateValueOn : NSControlStateValueOff; return [d boolForKey:@"S2APerfHUD"]; }   // 浮层关着时不可选
     if (item.action == @selector(toggleFullScreenItem:))
         item.title = window_fullscreen(self.window) ? (s2a_ui_zh() ? @"退出全屏幕" : @"Exit Full Screen") : (s2a_ui_zh() ? @"进入全屏幕" : @"Enter Full Screen");
     return YES;
@@ -2347,6 +2390,10 @@ void s2a_front_run(void (*guest_main)(void)) {
         fullScreen.keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand; fullScreen.target = delegate;
         NSMenuItem *escHint = [viewMenu addItemWithTitle:s2a_ui_zh() ? @"全屏时 Esc 退出（Esc 映射了游戏按键时按住 1 秒）" : @"In full screen, Esc exits (hold 1 s if Esc is mapped to a game button)" action:NULL keyEquivalent:@""];
         escHint.enabled = NO;
+        [viewMenu addItem:NSMenuItem.separatorItem];
+        NSMenuItem *perf = [viewMenu addItemWithTitle:s2a_ui_zh() ? @"显示帧率" : @"Show Frame Rate" action:@selector(togglePerfItem:) keyEquivalent:@"p"];
+        perf.keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand; perf.target = delegate;
+        [viewMenu addItemWithTitle:s2a_ui_zh() ? @"帧率旁显示内存占用" : @"Show Memory Use Next to Frame Rate" action:@selector(togglePerfMemItem:) keyEquivalent:@""].target = delegate;
         viewRoot.submenu = viewMenu; [menu addItem:viewRoot]; app.mainMenu = menu;
         NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1280, 720)
             styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
@@ -2402,6 +2449,7 @@ void s2a_front_run(void (*guest_main)(void)) {
             };
             tick(); [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *t) { (void)t; tick(); }];
         }
+        [delegate perfApply];   // 帧率浮层上局开着就接着显示（#2207）
         [view setNeedsLayout:YES]; [window center]; [window makeKeyAndOrderFront:nil]; [window makeFirstResponder:view];
         // 窗口遮挡（D-JSGK 11-22：Mac 局整局线程在等、性能核几乎没用，判不了是不是窗口被挡 / 最小化后系统节流）：主线程上跟遮挡通知记下，心跳在后台队列只读原子量
         { __weak NSWindow *w = window; void (^occ)(void) = ^{ int v = (w.occlusionState & NSWindowOcclusionStateVisible) ? 1 : 0; if (atomic_exchange(&g_win_visible, v) != v && !v) atomic_fetch_add(&g_win_hidden_n, 1); };

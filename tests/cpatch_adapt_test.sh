@@ -17,6 +17,7 @@
 #   ⑤ movz / movk 拼单精度的一族（11-13 荒野大镖客式；目录名用撇号 21'9、段名写 21:9）：0x110 movz w10,#lo / 0x114 movk w10,#hi 拼 A；
 #      宽 21'9 / 32'9 / 43'18 三种、窄只有 16'10 一种（借宽侧认出的式 a，16:10 的值 1.6 也落在 a 上才收）。0x110 / 0x114 原是我方宽屏候选 asp 点，产物根没有我方宽屏表 → 让给补丁：
 #      两份都是 p 110 5291c72a → ldr w10,[x16,#1016×8] = 0xB9400000 | 2032<<10 | 16<<5 | 10 = b95fc20a「@k」、p 114 72a7fc6a → nop d503201f；数据写入 k1016::@a4
+#   ㉓ 只写了宽、高留在程序里：去程序里配上高（#2193）；㉔ 自适应模板取写死最少的一份、同侧别家定画幅不进包（#2193），期望见各项注释
 #   ⑥ 同 ⑤ 但产物根有我方整套放宽表 widen_full.handheld.tsv → 两份照收、出表与 ⑤ 相同（11-13 补丁优先：社区宽屏类不让我方宽屏候选点，运行时我方满屏让位）
 #   ⑧ 宽屏补丁写死的渲染尺寸（PC 模拟器用的 3440×1440）按手机口径缩成高 1080、宽等比；不超过 1080 的不动
 #   ⑦ 定画幅变体（11-13 起单份参数化）：2:1、5:2 两份只改 main+0x100（fmov 立即数）与数据 0x5100，再加一份同 2:1 的别家（数据 1.75，不在画幅式上）：
@@ -345,6 +346,41 @@ open(idx22 + '/INDEX.tsv', 'w').write('game\ttitle_id\tpath\ttype\tsource\tlicen
 cpatch.plan(r22, '', [idx22])
 g22 = {c[6].split('/')[1]: (c[12] if len(c) > 12 else '') for c in (l.split('\t') for l in open(r22 + '/cpatch.tsv', encoding='utf-8').read().splitlines()[1:]) if c[0].startswith('fps:')}
 ck(f'㉒ IPS 与同包 pchtxt 同组（实得 {g22}）', set(g22) == {'3', '4'} and g22['3'] == g22['4'] and len(g22['3']) == 8)
+def prog(dst, words):   # root 的一份拷贝，代码段按 {偏移: 字} 改（未压缩 NSO：文件偏移 = 0x100 + 段内偏移）
+    shutil.copytree(root, dst, ignore=shutil.ignore_patterns('cpatch*')); b = bytearray(open(dst + '/exefs/main', 'rb').read())
+    for o, x in words.items(): struct.pack_into('<I', b, 0x100 + o, x)
+    open(dst + '/exefs/main', 'wb').write(bytes(b))
+def one_idx(idx, items):   # [(补丁正文, 画幅, 上游路径)] → 索引目录
+    os.makedirs(idx); rows = ['game\ttitle_id\tpath\ttype\tsource\tlicense\tin_pack\tsha256\taspect\torigin']
+    for i, (body, asp, org) in enumerate(items):
+        os.makedirs(f'{idx}/f/{i}'); open(f'{idx}/f/{i}/1.0.pchtxt', 'w').write(body)
+        rows.append(f'\t0100A3501946E000\tf/{i}/1.0.pchtxt\tpchtxt\to/r\tMIT\tyes\t\t{asp}\t{org}')
+    open(idx + '/INDEX.tsv', 'w').write('\n'.join(rows) + '\n')
+# ㉓ 只写了宽、高留在程序里（#2193 一款网球游戏）：程序 0x180 movz w9,#1920（0x5280F009）、0x184 movz w10,#1080（0x5280870A）；
+#    补丁只把 0x180 改成 movz w9,#2580（0x52814289，= 1080 × 43/18）。期望手算：0x180 改读值槽 ldr w9,[x16,#1016×8] = 0xB9400000 | 2032<<10 | 16<<5 | 9 = b95fc209，
+#    值槽 1016 按渲染宽算（k1016::@x4）；旧实现认不出（渲染尺寸要宽高两条都在补丁里）→ 照原样当定画幅变体（第 11 列画幅 2.333）
+r23 = T + '/root23'; prog(r23, {0x180: 0x5280F009, 0x184: 0x5280870A})
+one_idx(T + '/e23/widescreen', [(f'@nsobid-{BID}\n@flag offset_shift 0x100\n// 21:9 Ultrawide\n@enabled\n00000180 {(0x52814289).to_bytes(4, "little").hex().upper()}\n@stop\n',
+                                 '21:9', 'o/r/G [mods].zip/[21.9 Ultrawide v3.1.0]/exefs/1.0.pchtxt')])
+cpatch.plan(r23, '', [T + '/e23/widescreen'])
+t23 = sorted((c[0].split(':')[0], c[7], c[10]) for c in (l.split('\t') for l in open(r23 + '/cpatch.tsv', encoding='utf-8').read().splitlines()[1:]))
+p23 = sorted((c[2], c[4]) for c in (l.split('\t# ')[0].split('\t') for l in open(r23 + '/cpatch_rows.tsv').read().splitlines()) if c[0] == 'p' and c[2] == '180')
+ck(f'㉓ 只写了宽：去程序里配上高、宽读值槽按画幅算（实得 表 {t23}、p 180 {p23}）',
+   ('wsauto', 'k1016::@x4', '') in t23 and not any(c[0] == 'widescreen' for c in t23) and p23 and all(x[1] == 'b95fc209' for x in p23))
+# ㉔ 挑模板与同侧不进包（#2193 一款平台游戏）：同为 2:1 的两份、改不同位置——P1（排前）改 0x100 fmov s0,#2.0 外加 0x104 / 0x108 两处写死（nop），
+#    P2 只改 0x120 fmov s1,#2.0（程序原是 nop）。期望：模板取写死最少的 P2（0 字 < P1 的 2 字）→ p 120 改读值槽 ldr s1 = 0xBD400000 | 2032<<10 | 16<<5 | 1 = bd5fc201；
+#    P1 改的位置与 P2 不重叠，但同在宽侧 → 「已覆盖 … 同侧有」不进包；表里只剩 wsauto 两份（宽 / 窄外推），没有定画幅行。旧实现取排前的 P1、P2 照样当定画幅进包
+r24 = T + '/root24'; prog(r24, {0x120: 0xD503201F})
+f20 = lambda rt: (0x1E201000 | rt).to_bytes(4, 'little').hex().upper()
+one_idx(T + '/e24/widescreen', [
+    (f'@nsobid-{BID}\n@flag offset_shift 0x100\n// 2:1 HUD\n@enabled\n00000100 {f20(0)}\n00000104 1F2003D5\n00000108 1F2003D5\n@stop\n', '2:1', 'a/b/[2:1 HUD]/exefs/1.0.pchtxt'),
+    (f'@nsobid-{BID}\n@flag offset_shift 0x100\n// 2:1 plain\n@enabled\n00000120 {f20(1)}\n@stop\n', '2:1', 'c/d/[2:1 plain]/exefs/1.0.pchtxt')])
+cpatch.plan(r24, '', [T + '/e24/widescreen'])
+t24 = sorted(c[0].split(':')[0] for c in (l.split('\t') for l in open(r24 + '/cpatch.tsv', encoding='utf-8').read().splitlines()[1:]))
+p24 = sorted({c[4] for c in (l.split('\t# ')[0].split('\t') for l in open(r24 + '/cpatch_rows.tsv').read().splitlines()) if c[0] == 'p' and c[2] == '120'})
+lg24 = open(r24 + '/cpatch_plan.log', encoding='utf-8').read()
+ck(f'㉔ 模板取写死最少的、同侧别家不进包（实得 表 {t24}、p 120 {p24}、选模板 2:1 plain {"选模板" in lg24 and "2:1 plain" in lg24.split("选模板")[1][:200]}、同侧不进包 {lg24.count("同侧有")}）',
+   t24 == ['wsauto', 'wsauto'] and p24 == ['bd5fc201'] and lg24.count('同侧有') == 1)
 sys.exit(bad)
 EOF
 rc=$?; [ $rc = 0 ] && echo "✅ cpatch_adapt_test 全过" || { echo "🔴 cpatch_adapt_test 有不通项"; exit 1; }

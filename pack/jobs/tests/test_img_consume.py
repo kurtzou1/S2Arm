@@ -128,3 +128,43 @@ class ImgConsume(JobCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ImgFullNote(unittest.TestCase):
+    """#2164：写 game.img 时盘满，玩家只看到「准备这个游戏需要更多空余空间」，不知道要留多少。
+    pack/img.py copy_std 写满当场打「【写满】」事实（tools/fullnote.py，行格式同 tools/clonedir.py），失败归因（errors.player_words）据此给带数字的两句。
+    期望手算：镜像 6.5 GB、已写 1 GB → 这一步还要 5.5 GB；盘剩 2.0 GB → 腾出至少 ⌈5.5 − 2.0⌉ = 4 GB"""
+    def setUp(self):
+        import importlib.util, sys as _sys
+        root = Path(__file__).resolve().parents[3]
+        _sys.path.insert(0, str(root / "tools"))
+        spec = importlib.util.spec_from_file_location("s2a_img", root / "pack/img.py")
+        self.img = importlib.util.module_from_spec(spec); spec.loader.exec_module(self.img)
+
+    def note_line(self, consume, left_after):
+        import errno, io, tempfile
+        GiB = 1 << 30
+        d = tempfile.mkdtemp(); std = os.path.join(d, "romfs.std"); part = os.path.join(d, "game.img.part")
+        Path(std).write_bytes(b"x"); Path(part).write_bytes(b"")
+        def fake(real, std_, part_, at, step, consume_, size):
+            step(1 * GiB); raise OSError(errno.ENOSPC, "No space left on device")
+        sizes = iter([int(6.5 * GiB), left_after])   # 第一次：开工时镜像大小；第二次（边写边腾）：写满时镜像剩下的
+        err = io.StringIO()
+        with patch.object(self.img, "_copy_std", fake), patch.object(self.img.os.path, "getsize", lambda p: next(sizes)), \
+             patch.object(self.img.fullnote.shutil, "disk_usage", lambda p: type("U", (), {"free": 2 * GiB})()), \
+             patch.object(self.img.fullnote, "volume_name", lambda p: "Ext"), patch("sys.stderr", err):
+            with self.assertRaises(OSError):
+                self.img.copy_std(std, part, 0, lambda n: None, consume)
+        return err.getvalue().strip()
+
+    def test_disk_full_writing_img_names_numbers(self):
+        import errors
+        line = self.note_line(consume=False, left_after=0)
+        self.assertTrue(line.startswith("【写满】") and "（盘「Ext」）所在盘剩 2.0 GB，game.img 要 5.5 GB" in line, line)
+        reason, advice = errors.player_words("disk_full", None, [line])
+        self.assertEqual(reason, "「Ext」空间不够：这一步还要约 5.5 GB，盘上只剩 2.0 GB。")
+        self.assertEqual(advice, "在「Ext」上腾出至少 4 GB 后重试；游戏原件、存档和上次成功的运行版本别删。")
+
+    def test_disk_full_consume_counts_what_is_left_of_the_image(self):
+        line = self.note_line(consume=True, left_after=int(3.0 * (1 << 30)))   # 边写边腾：镜像已截到只剩 3.0 GB 没拷
+        self.assertIn("game.img 要 3.0 GB", line)

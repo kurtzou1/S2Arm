@@ -20,6 +20,9 @@
 #include <sys/mman.h>
 #include "s2a_docs.h"
 #define CP_SLOT 2046
+// 开关槽所在模块（即时存档恢复前后保持 / 重写用，见 s2a_cpatch_snap_hold）：v = 恢复写回前本进程槽里的值
+static struct { module_t *m; uint64_t v; } g_slotm[16]; static int g_nslotm;
+static int g_fl30;   // 局中关 60 帧、FPSLocker 配置保持按 30 帧档跑（见 s2a_cpatch_fps_follow）
 static _Thread_local FILE *g_boot_file;
 void s2a_cpatch_abort_boot_inputs(void) {
     FILE *file = g_boot_file; g_boot_file = NULL;
@@ -85,6 +88,7 @@ void s2a_cpatch_session_reset(void) {
     pthread_mutex_unlock(&g_ad_lock);
     for (int i = 0; i < g_nfu; i++) free(g_fu[i].spec);
     memset(g_fu, 0, sizeof g_fu); g_nfu = g_nfud = 0; atomic_store(&g_nfps, 0); g_fps_target = 0; g_fps_on = -1; g_fps_want = 0;
+    memset(g_slotm, 0, sizeof g_slotm); g_nslotm = 0; g_fl30 = 0;
 }
 
 static int in_list(const char *list, const char *id) {
@@ -405,6 +409,7 @@ static void cpatch_load_stream(module_t *m, FILE *f) {
     uint8_t *page = m->base + m->key_page_off;   // 键页（宽屏点同样把它改成可写：命中槽要写）
     if (mprotect(page, m->key_page_size, PROT_READ | PROT_WRITE)) die("%s 键页改可写失败（社区补丁槽）", m->name);
     ((uint64_t *)page)[CP_SLOT] = mask;
+    if (g_nslotm < (int)(sizeof g_slotm / sizeof *g_slotm)) g_slotm[g_nslotm++].m = m; else LOG("【红】社区补丁：开关槽模块超过 %d 个，%s 即时存档恢复后不重写", (int)(sizeof g_slotm / sizeof *g_slotm), m->name);
     for (int i = ch0; i < g_nch; i++) g_ch[i].slot = (_Atomic uint64_t *)((uint64_t *)page + CP_SLOT);
     pthread_mutex_lock(&g_ad_lock);
     int nad = 0;
@@ -606,7 +611,24 @@ static const char *fps_group_pick(int pick) {
 static int fps_chosen(const struct cp_fu *u, int on, int pick, const char *grp) {
     return on && u->allow && tgt(u) == pick && (!grp || !strcmp(u->grp, grp));
 }
+// 局中从开切到关（档位梯子压回 / 设置页热切 / 快照开存关恢复后）且选中的是 FPSLocker 配置：补丁保持、改按 30 帧档（交帧间隔封 2，服务层按 30 写），
+//   不撤补丁。FPSLocker 配置的改动里有游戏启动时才读的设定（一款开放世界大作：去双缓冲 ldrb → mov w1,1），游戏在 60 帧期间据此缓存了自己的帧间隔状态，
+//   撤掉补丁后原速度函数仍按 60 帧口径给步长，30 帧下半速（11-24 实测：局内 60 开 → 关，走到同一处时刻比 0.511）；补丁自带按真实帧间隔算步长的代码，
+//   按 30 帧档跑速度就对。起局就关的才是撤补丁的原版；下次按关起局即撤
+static int fl_engaged(void) { for (int i = 0; i < g_nfu; i++) if (g_fu[i].fl && g_fu[i].slot && (atomic_load(g_fu[i].slot) & g_fu[i].bits) == g_fu[i].bits) return 1; return 0; }
+// 玩家设的帧率上限（App 设置 S2A_FPS，档位 30 / 60 / 120 / 不限）≤ 30 且 60 帧开：这局按 30 帧档跑（11-25 #502）——
+//   FPSLocker 配置开着、按 30 写、交帧间隔封 2（补丁自带按目标帧率 / 真实帧间隔算步长，速度对）；其余帧率补丁不开（原版 30）。
+//   原先补丁按 60 档开着、直连层再把出图压到 30：按帧推进的款每帧步长按 60 算、只出 30 帧，半速慢动作
+static int cap30(void) { const char *e = getenv("S2A_FPS"); int v = e && *e ? atoi(e) : 0; return v > 0 && v <= 30; }
+// 帧率被补丁抬高了没有（直连层 nvn_fps.c 据此决定玩家上限管不管用：没抬高时不压游戏自己请求的出图率，压下去按帧推进的款就慢）：有帧率补丁的位真开着
+int s2a_cpatch_fps_engaged(void) { for (int i = 0; i < g_nfu; i++) if (g_fu[i].slot && (atomic_load(g_fu[i].slot) & g_fu[i].bits) == g_fu[i].bits) return 1; return 0; }
 void s2a_cpatch_fps_follow(int on) {
+    int force = on && cap30(), tier = force ? fps_pick() : 0; const char *tgrp = force ? fps_group_pick(tier) : NULL;
+    if (force) { on = 0; if (g_fps_on != 0 || !g_fl30) LOG("社区补丁：帧率上限 30 且 60 帧开，这局按 30 帧档跑（FPSLocker 配置开着按 30 写；别的帧率补丁不开）"); }
+    int force_fl = 0; for (int i = 0; force && i < g_nfu; i++) if (g_fu[i].slot && g_fu[i].fl && fps_chosen(&g_fu[i], 1, tier, tgrp)) force_fl = 1;   // 上限 30：选中档里有 FPSLocker 配置才按 30 帧档跑，没有就是原版
+    int fl30 = !on && (force ? force_fl : (g_fps_on > 0 || g_fl30) && fl_engaged());
+    if (fl30 && !g_fl30) LOG("社区补丁：局中关 60 帧，FPSLocker 配置保持开着、改按 30 帧档跑（撤补丁游戏会半速；下次按关起局才撤）");
+    g_fl30 = fl30;
     g_fps_on = on;
     int pick = on ? fps_pick() : 0;
     g_fps_target = pick;
@@ -615,8 +637,15 @@ void s2a_cpatch_fps_follow(int on) {
     for (int i = 0; i < g_nfu; i++) {   // 先关不选的（写回原值、清位），再开选中的：几档改同一处，顺序不能反
         struct cp_fu *u = &g_fu[i];
         if (!u->slot || fps_chosen(u, on, pick, grp)) continue;
+        if (g_fl30 && u->fl && (atomic_load(u->slot) & u->bits) == u->bits) continue;   // 局中关：FPSLocker 配置保持（见 g_fl30）
         atomic_fetch_and(u->slot, ~u->bits);
         if (u->spec && data_writes(u->m, u->spec, 2)) die("社区帧率补丁已准入的数据写入失败");
+    }
+    for (int i = 0; force && i < g_nfu; i++) {   // 上限 30：选中档里的 FPSLocker 配置开着（起局时还没开过，补上）
+        struct cp_fu *u = &g_fu[i];
+        if (!u->slot || !u->fl || !fps_chosen(u, 1, tier, tgrp) || (atomic_load(u->slot) & u->bits) == u->bits) continue;
+        if (u->spec && data_writes(u->m, u->spec, 1)) die("社区帧率补丁已准入的数据写入失败");
+        atomic_fetch_or(u->slot, u->bits);
     }
     for (int i = 0; on && i < g_nfu; i++) {
         struct cp_fu *u = &g_fu[i];
@@ -635,7 +664,7 @@ void s2a_cpatch_fps_follow(int on) {
         if (g_fu[i].slot && !strcmp(g_fu[i].m->name, "sdk")) sdk = 1;
         if (g_fu[i].fl) fl = 1;
     }
-    g_itv_cap = sdk ? 1 : fl && pick > 0 ? (pick >= 60 ? 1 : 60 / pick) : 0;
+    g_itv_cap = sdk ? 1 : fl && pick > 0 ? (pick >= 60 ? 1 : 60 / pick) : g_fl30 ? 2 : 0;   // 局中关、FPSLocker 保持：按 30 帧档封到 2
     void (*itv_cap)(int) = (void (*)(int))dlsym(RTLD_DEFAULT, "nvn_present_itv_cap");
     if (itv_cap) itv_cap(g_itv_cap);
     // 60 帧开关开着、包里却没有可用的帧率补丁（11-15 #934：日志「本局 60 帧开」只说明开关，玩家据此以为在 60 帧）：写明实际怎么跑
@@ -650,6 +679,29 @@ void s2a_cpatch_fps_follow(int on) {
         snprintf(g_st[j].st, sizeof g_st[j].st, "%s", lit ? "开" : "关"); if (!lit) g_st[j].eff[0] = 0; any = 1; }
     if (any) st_flush_locked();
     pthread_mutex_unlock(&g_st_lock);
+}
+// 即时存档恢复（runtime/src/snapshot.c 写回游戏内存前后各调一次）：快照整页写回模块内存，键页里的开关槽（2046：帧率 / 宽屏 / 金手指的位）
+//   和补丁写进数据段的值都变回存档那一刻，本进程起局 / 局中按当前开关写好的被盖掉。11-24 一款开放世界大作实测：60 帧关时存的快照开着 60 帧恢复，
+//   补丁的步长代码不执行（步长恒 0），游戏约 2 倍速；60 帧开时存、关着恢复，画面冻住。
+//   hold：写回前记下各模块开关槽（本进程真值）；reapply：写回后还原，再按当前画幅、当前 60 帧开关把已开补丁的数据写入重做（mode 1 / 2 不校验原值）
+static _Atomic int g_snap_gen;   // 即时存档恢复次数：服务层 FpsLocker.cs 见它变了就按当前选档把 FPSLocker 写入重做一遍（游戏内存是存档那一刻的）
+int s2a_cpatch_snap_gen(void) { return atomic_load(&g_snap_gen); }
+void s2a_cpatch_snap_hold(void) { for (int i = 0; i < g_nslotm; i++) g_slotm[i].v = ((uint64_t *)(g_slotm[i].m->base + g_slotm[i].m->key_page_off))[CP_SLOT]; }
+void s2a_cpatch_snap_reapply(void) {
+    int fix = 0, snap_fl = 0;
+    for (int i = 0; i < g_nfu; i++) if (g_fu[i].fl && g_fu[i].slot && (atomic_load(g_fu[i].slot) & g_fu[i].bits) == g_fu[i].bits) snap_fl = 1;   // 还原前槽里是快照的值
+    for (int i = 0; i < g_nslotm; i++) { _Atomic uint64_t *sl = (_Atomic uint64_t *)((uint64_t *)(g_slotm[i].m->base + g_slotm[i].m->key_page_off) + CP_SLOT);
+        if (atomic_exchange(sl, g_slotm[i].v) != g_slotm[i].v) fix++; }
+    int nd = 0;
+    pthread_mutex_lock(&g_ad_lock);
+    for (int i = 0; i < g_nad; i++) if (g_ad[i].slot && g_ad[i].on && g_ad[i].spec[0]) { if (data_writes(g_ad[i].m, g_ad[i].spec, 1)) die("自适应画幅已校验的数据写入失败（即时存档恢复后重写）"); nd++; }
+    for (int i = 0; i < g_nfx; i++) if (g_fx[i].slot && g_fx[i].on && g_fx[i].spec[0]) { if (data_writes(g_fx[i].m, g_fx[i].spec, 1)) die("宽屏变体已校验的数据写入失败（即时存档恢复后重写）"); nd++; }
+    pthread_mutex_unlock(&g_ad_lock);
+    // 存档那一刻 FPSLocker 配置开着（快照里的槽有它的位）、当前关：游戏内存里是 60 帧期间缓存的状态，撤补丁会半速 → 先按开接上，再走一次局中关（补丁保持、30 帧档）
+    if (g_fps_on == 0 && snap_fl) { s2a_cpatch_fps_follow(1); s2a_cpatch_fps_follow(0); }
+    else if (g_fps_on >= 0) s2a_cpatch_fps_follow(g_fps_on);
+    atomic_fetch_add(&g_snap_gen, 1);
+    if (g_nslotm) LOG("即时存档恢复：社区补丁开关槽 %d 个按本进程还原（与快照不同 %d 个），画面补丁数据重写 %d 份，帧率补丁按当前开关（%s）重跟", g_nslotm, fix, nd, g_fps_on > 0 ? "开" : g_fps_on == 0 ? "关" : "没跟过");
 }
 // 这一份帧率补丁此刻是否被选中开着（服务层 FpsLocker.cs 每秒按份问）：选中 → 选中档的目标帧率；没选中 / 帧率关 / 包里没有这份 → 0。
 //   FPSLocker 的定期写入只该写选中那一份、按选中的档求值（审计 P1-184：原先跟 s2a_fps_live 一律按 60 写进每一份，选 120 档时和已开的 120 补丁抢同一处）

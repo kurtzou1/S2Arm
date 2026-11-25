@@ -92,6 +92,13 @@ int main(void) {
         int ok3 = strstr(b, "· 0.1 GB") && !strstr(b, "GPU");
         printf("没有直连层：简版期望只写「0.1 GB」→ %s\n", b); if (!ok3) fails++;
     }
+    {   // 只看帧率（#2207），没补帧：期望手写——帧环里 3 帧都在 1 秒内 → 「3 帧」
+        char b[64]; mach_timebase_info_data_t tb; mach_timebase_info(&tb); uint64_t now = mach_absolute_time() * tb.numer / tb.denom;
+        int s2a_hud_brief_fps(char *, size_t);
+        for (int i = 0; i < 3; i++) atomic_store(&g_s2a_hud_ft[i], now - (uint64_t)i * 1000000ull);
+        atomic_store(&g_s2a_hud_fn, 3); s2a_hud_brief_fps(b, sizeof b);
+        printf("只看帧率：帧环 3 帧（1 秒内），期望「3 帧」→ %s\n", b); if (strcmp(b, "3 帧")) fails++;
+    }
     {   // 补帧（11-14）：补出的帧真上了屏就算进屏上帧率。期望手写：1 秒内补出 24 帧、游戏帧环里 1 帧 → 「屏上 25 帧（游戏 1）」；没补帧时不出「屏上」（上一段已核）
         void s2a_hud_mid_frame(void); char b[256];
         mach_timebase_info_data_t tb; mach_timebase_info(&tb);
@@ -99,6 +106,9 @@ int main(void) {
         for (int i = 0; i < 24; i++) s2a_hud_mid_frame();
         s2a_hud_brief(b, sizeof b); int ok = strstr(b, "屏上 25 帧（游戏 1）") != NULL;
         printf("补帧：补出 24 帧 + 游戏 1 帧，简版期望含「屏上 25 帧（游戏 1）」→ %s\n", b); if (!ok) fails++;
+        // 只看帧率（#2207）：同一帧环，期望「屏上 25 帧（游戏 1）」且不带内存（没有「GB」、没有「·」）
+        int s2a_hud_brief_fps(char *, size_t); s2a_hud_brief_fps(b, sizeof b); ok = !strcmp(b, "屏上 25 帧（游戏 1）");
+        printf("只看帧率（补帧）：期望「屏上 25 帧（游戏 1）」→ %s\n", b); if (!ok) fails++;
     }
     if (fails) printf("✗ t_hud：%d 项不符\n", fails); else printf("✓ t_hud：浮层目标 = min(游戏帧率, 上限)，GL 不锁时 = 上限，非法上限不进浮层，全过\n");
     return fails != 0;

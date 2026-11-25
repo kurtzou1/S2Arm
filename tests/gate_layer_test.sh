@@ -16,8 +16,8 @@ export GATE_NO_LOADQ=1 HOME=$T/home
 mkdir -p $T/home $T/repo/tools $T/repo/tests $T/repo/a $T/repo/b; cd $T/repo || exit 1
 git init -q; git config user.email t@t; git config user.name t
 cp "$GS" tools/gate.sh; cp $H/tools/gate_decl.py tools/
-printf '#!/bin/bash\necho x >> %s/trace\n' "$T" > tests/x_test.sh
-printf '#!/bin/bash\n# 门禁层：合入后\necho y >> %s/trace\n' "$T" > tests/y_test.sh
+printf '#!/bin/bash\necho x >> %s/trace; echo x 过\n' "$T" > tests/x_test.sh
+printf '#!/bin/bash\n# 门禁层：合入后\necho y >> %s/trace; echo y 过\n' "$T" > tests/y_test.sh
 printf '#!/bin/bash\n# 门禁层：合入后\necho a >> %s/trace; echo a 过\n' "$T" > a/gate.sh
 printf '#!/bin/bash\necho b >> %s/trace; echo b 过\n' "$T" > b/gate.sh
 git add -A; git commit -qm 1
@@ -37,12 +37,12 @@ ck "⑤ GATE_LAYER 写错 → 退出 1（rc=${r}）" '[ $r = 1 ]'
 d=$(cd "$H" && python3 tools/gate_decl.py layer | tr '\n' '|')
 ck "⑥ 本仓库合入后声明（${d}）" '[ "$d" = "钩子 android/gate.sh	合入后|钩子 graphics/gate.sh	合入后|钩子 launchers/macos/gate.sh	合入后|钩子 tests/visual/gate.sh	合入后|iOS 全量编译	合入后	路由|" ]'
 # ⑦ 显卡独占：单测文件头「# 门禁显卡：独占」→ 经 维护方工具 prio 跑（桩记 prio 名），普通单测不经（11-06 present_settings 被并行窗口抢焦点）
-printf '#!/bin/bash\n# 门禁显卡：独占\necho z >> %s/trace\n' "$T" > tests/z_test.sh
+printf '#!/bin/bash\n# 门禁显卡：独占\necho z >> %s/trace; echo z 过\n' "$T" > tests/z_test.sh
 mkdir -p $T/priv; printf '#!/bin/bash\ncase $1 in prio) echo "prio $2" >> %s/prio; shift 4;; share) echo "share $2" >> %s/prio; shift 3;; esac; exec "$@"\n' "$T" "$T" > $T/priv/mac_slot_frozen.sh; chmod +x $T/priv/mac_slot_frozen.sh; export S2A_PRIVATE_TOOLS=$T/priv
 git add -A; git commit -qm 2; : > $T/prio; r=$(g o7); t=$(tr1); pr=$(tr '\n' '|' < $T/prio)
 ck "⑦ 显卡独占单测经 prio 锁跑、普通单测不经（trace ${t}，prio ${pr}，rc=${r}）" '[ $r = 0 ] && [ "$t" = "a b x y z " ] && [ "$pr" = "prio 单测 z_test|" ]'
 # ⑦b 显卡共享（11-20 读写锁）：单测文件头「# 门禁显卡：共享」→ 经 维护方工具 share 跑（桩记 share 名）
-printf '#!/bin/bash\n# 门禁显卡：共享\necho w >> %s/trace\n' "$T" > tests/w_test.sh
+printf '#!/bin/bash\n# 门禁显卡：共享\necho w >> %s/trace; echo w 过\n' "$T" > tests/w_test.sh
 git add -A; git commit -qm 2b; : > $T/prio; r=$(g o7b); t=$(tr1); pr=$(sort $T/prio | tr '\n' '|')
 ck "⑦b 显卡共享单测经 share 跑、独占经 prio、普通不经（trace ${t}，锁 ${pr}，rc=${r}）" '[ $r = 0 ] && [ "$t" = "a b w x y z " ] && [ "$pr" = "prio 单测 z_test|share 单测 w_test|" ]'
 ck "⑧ 本仓库声明显卡独占的单测含 present_settings_test" 'head -6 $H/tests/present_settings_test.sh | grep -q "^# 门禁显卡：独占"'

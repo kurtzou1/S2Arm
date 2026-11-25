@@ -26,7 +26,7 @@ case ${2:-} in --key) echo "$K"; exit 0;; esac   # 单测用：只算键、不�
 O=$B/$RID-$K
 # 锁按键（10-21 测试出包线：原先整机一把锁、且先拿锁再算键——门禁编 iOS 的几分钟里，所有命中缓存的出包 / Mac 局全排着，出包槽持有者干等 8 分钟）：
 #   命中不拿锁（成品目录 mv 原子到位，看见就是完整的）；没命中才拿本键的锁，拿到后再看一次（别人刚编完就直接用）。持锁进程死了接管
-hit() { [ -s "$O/libs2a_cs.a" ] && [ -s "$O/ldflags.txt" ]; }
+hit() { [ -s "$O/libs2a_cs.a" ] && [ -s "$O/ldflags.txt" ] && [ -d "$O/rt" ]; }   # 缺 rt/ = 11-25 前的旧式条目（链接参数写死编译者 HOME 下 NuGet 包的绝对路径），按没命中重编
 if ! hit; then
   until mkdir "$B/.lock-$RID-$K" 2>/dev/null; do p=$(cat "$B/.lock-$RID-$K/pid" 2>/dev/null || true); [ -n "$p" ] && ! kill -0 "$p" 2>/dev/null && rm -rf "$B/.lock-$RID-$K"; sleep 0.5; done
   echo $$ > "$B/.lock-$RID-$K/pid"; trap 'rm -rf "$B/.lock-$RID-$K"' EXIT
@@ -65,15 +65,18 @@ print(next((d['version'].strip('[]').split(',')[0] for fw in j['project']['frame
         && libtool -static -o libs2a_cs.a all.o 2>/dev/null && rm -f S2A.Aot.o all.o) || { say "🔴 nxaot：合成 libs2a_cs.a 失败"; exit 1; }
     n=$(nm -gU "$O.tmp/libs2a_cs.a" 2>/dev/null | grep -c ' _S2A_Init$' || true)
     [ "$n" -eq 1 ] || { say "🔴 nxaot：libs2a_cs.a 里没有 S2A_Init 导出"; exit 1; }
-    L="$O/libs2a_cs.a"
-    # 运行时包目录会原样进 make 的链接参数：NuGet 包目录带空格（启动器缓存在 Application Support 下）就被拆开，写无空格别名（tools/nospace.sh；10-26 冷缓存带空格实跑 clang no such file '空格'）
-    source "$ROOT/tools/nospace.sh"; RPN=$(s2a_nospace "$RP")
+    # 运行时静态库拷进本条目 rt/（约 11 MB，APFS 上 cp -c 是克隆不占盘），ldflags.txt 只记相对路径：缓存条目自带链接所需的一切。
+    #   11-25 门禁 iOS 全量编译红：共用缓存（S2A_CS_CACHE）的 ldflags 写死了编译那个槽位 HOME 下 NuGet 包的绝对路径，槽位根挪盘删掉后，
+    #   别的槽位命中这份就链接报 clang no such file（46 份里 31 份指向已删目录）；条目自包含后与谁编的、那个 HOME 还在不在无关
+    mkdir -p "$O.tmp/rt"; L=
     for l in Runtime.WorkstationGC eventpipe-disabled standalonegc-disabled aotminipal stdc++compat System.Native System.Globalization.Native System.IO.Compression.Native System.Security.Cryptography.Native.Apple System.Net.Security.Native brotlienc brotlidec brotlicommon; do
-        [ -f "$RP/lib$l.a" ] && L="$L $RPN/lib$l.a"
+        [ -f "$RP/lib$l.a" ] || continue
+        cp -c "$RP/lib$l.a" "$O.tmp/rt/" 2> /dev/null || cp "$RP/lib$l.a" "$O.tmp/rt/" || { say "🔴 nxaot：拷运行时库 lib$l.a 进缓存失败"; exit 1; }
+        L="$L rt/lib$l.a"
     done
     FW="-lc++ -lz -lcompression -framework Security -framework AudioToolbox -framework Network -framework Foundation -framework CoreFoundation -lobjc"
     case $RID in tvos-arm64) ;; *) FW="$FW -framework GSS";; esac; case $RID in osx-arm64) FW="$FW -framework CryptoKit";; esac   # Net.Security.Native 在 Mac / iOS 引 GSS；tvOS 没有 GSS 框架（tvOS 运行时包也不带 Net.Security.Native）
-    echo "$L $FW" > "$O.tmp/ldflags.txt"
+    echo "${L# } $FW" > "$O.tmp/ldflags.txt"
     echo "运行时包 ${RV}；用时 $(( $(date +%s) - t0 )) 秒" > "$O.tmp/info.txt"
     rm -rf "$O"; mv "$O.tmp" "$O"
 fi
@@ -86,5 +89,7 @@ touch "$O"   # 取用即续租：gc 按目录时间判「30 分钟内用过」�
 RR=${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm
 if [ "$B" = "$RR/cache/nxaot" ]; then python3 "$ROOT/pack/jobs/cache_retention.py" trim "$RR" > /dev/null 2>&1; else python3 "$ROOT/pack/jobs/cache_retention.py" trim "$RR" "$B" > /dev/null 2>&1; fi
 say "🟢 nxaot（${RID}）：$(cat "$O/info.txt")，libs2a_cs.a $(( $(stat -f %z "$O/libs2a_cs.a") >> 20 )) MB（键 ${K}）"
-IFS= read -r LN < "$O/ldflags.txt"; REST=${LN#*/libs2a_cs.a }; echo "$O/libs2a_cs.a $REST"   # 库路径按缓存当前位置拼：ldflags.txt 里写的是编译时的绝对路径，缓存挪过位置（10-20 从各树 build/cs 迁到整机缓存）就指错
-#   去掉第一项按「…/libs2a_cs.a 」切，不按空白切（11-01：缓存在「Application Support」下且编译时没换别名，记下的库路径带空格，按空白切只去掉半截，make 链接报 no such file 'Support/…/libs2a_cs.a'）
+# 链接参数按缓存当前位置拼：rt/ 相对项前缀条目目录。条目目录带空格（缓存在「Application Support」下）时 rt/ 项用无空格别名——会原样进 make 的链接参数，
+#   make 按空格拆（tools/nospace.sh；10-26 冷缓存带空格实跑 clang no such file '空格'）；ldflags.txt 本身不含空格，按空白切安全
+source "$ROOT/tools/nospace.sh"; ON=$(s2a_nospace "$O"); IFS= read -r LN < "$O/ldflags.txt"; OUT="$O/libs2a_cs.a"
+for w in $LN; do case $w in rt/*) OUT="$OUT $ON/$w";; *) OUT="$OUT $w";; esac; done; echo "$OUT"

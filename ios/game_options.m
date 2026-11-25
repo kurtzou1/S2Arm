@@ -138,8 +138,8 @@ char *s2a_shell_game_options_json(const char *game_id) {
             NSInteger target = 0; BOOL fpsP = NO, wsP = NO;
             for (S2ACPatchGroup *g in groups) for (S2ACPatchItem *it in g.items) { if (it.followsFps60) { fpsP = YES; target = MAX(target, it.targetFps); } if ([g.kind isEqual:@"widescreen"] || it.followsFullscreen) wsP = YES; }
             // 只用社区补丁（11-13 维护者撤掉我方 60 帧与通用满屏，tools/caps_policy.py patch_only）：没有对应补丁的款不出这一行，玩家拿到的就是原生游戏
+            //   满屏例外（11-15 维护者「没补丁的游戏手动打开满屏就走咱们通用方案」，#2205）：没有宽屏补丁也出这一行，缺省关、玩家明确开 = 我方通用满屏
             if (!fpsP) fps[@"hidden"] = @YES;
-            if (!wsP) full[@"hidden"] = @YES;
             if (fpsP) {
                 fps[@"title"] = S2AL(@"settings.fps.patchTitle"); fps[@"enabled"] = @YES; fps[@"on"] = @(s2a_ios_fps60_on_for(gid));
                 fps[@"note"] = target > 0 ? [NSString stringWithFormat:S2AL(@"settings.fps.patchNote"), (long)target] : S2AL(@"settings.patchNote");
@@ -232,14 +232,15 @@ NSArray<NSDictionary *> *s2a_ios_crash_suspects_for(NSString *gid) {
     for (NSDictionary *e in s2a_ios_cheat_entries(dir)) if ([con containsObject:e[@"key"]]) [out addObject:@{@"kind": @"cheat", @"key": e[@"key"], @"name": e[@"name"]}];
     // 社区补丁：开着的都算（11-13 起没选过 = 默认开，不再只算玩家自己开的）；帧率补丁跟 60 帧开关，开着就把「60 帧」算进去（关掉 = 关 60 帧）
     NSUserDefaults *d = s2a_ios_settings_defaults_for(gid);
-    NSArray<S2ACPatchGroup *> *groups = patch_groups(gid); NSSet *pon = S2ACPatchEnabled(groups, d); BOOL fps = NO, fpsVerified = NO, fam = NO, famVerified = NO;
+    NSArray<S2ACPatchGroup *> *groups = patch_groups(gid); NSSet *pon = S2ACPatchEnabled(groups, d); BOOL fps = NO, fpsVerified = NO, famVerified = NO;
     for (S2ACPatchGroup *g in groups) for (S2ACPatchItem *it in g.items) {
         if (it.followsFps60) { fps = YES; fpsVerified |= it.defaultOn; }
-        else if (it.followsFullscreen) { fam = YES; famVerified |= it.defaultOn; }   // 自适应满屏一族跟满屏开关：并成一条「满屏」，关 = 关开关（原先逐份从列表里删，开关仍显示开）
+        else if (it.followsFullscreen) famVerified |= it.defaultOn;   // 自适应满屏一族跟满屏开关：并成一条「满屏」，关 = 关开关（原先逐份从列表里删，开关仍显示开）
         else if ([pon containsObject:it.ident]) [out addObject:@{@"kind": @"patch", @"key": it.ident, @"name": it.title, @"verified": @(it.defaultOn)}];
     }
     if (fps && s2a_ios_fps60_on_for(gid)) [out addObject:@{@"kind": @"fps", @"key": @"fps60", @"name": S2AL(@"cpatch.group.fps"), @"verified": @(fpsVerified)}];
-    BOOL fsOn = NO; if (fam && !s2a_ios_fullscreen_state(gid, &fsOn) && fsOn)
+    // 满屏开着就算一条：自适应满屏一族跟开关，或没有补丁、玩家明确开的我方通用满屏（11-15；同 Mac pack/jobs/cheats.py），崩了下一局关满屏
+    BOOL fsOn = NO; if (!s2a_ios_fullscreen_state(gid, &fsOn) && fsOn)
         [out addObject:@{@"kind": @"fs", @"key": @"fullscreen", @"name": S2AL(@"cpatch.group.widescreen"), @"verified": @(famVerified)}];
     return out;
 }

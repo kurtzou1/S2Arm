@@ -491,6 +491,7 @@ namespace S2A.Dsh
                     refl["pos_ubo"] = pu;
                 }
                 if (stage == "ps" && res["uses_frag_coord"] is JsonNode ufc && (bool)ufc) refl["frag_coord"] = true;   // 宽屏：读片元坐标（同 dmsh_build.py，宿主按它写 render_scale[0]）
+                if (stage == "ps" && FragZ(src)) refl["frag_z"] = true;   // 读片元深度 gl_FragCoord.z（分量级，frag_coord 连只读 .xy 也算）：宿主据此给「拿它和深度贴图比」的绘制补 Apple GPU 的 1 ULP 差（nvn_mtl.m draw_pass_state）
                 if (res["cbuf_use"] is JsonNode cu) refl["cbuf_use"] = (string)cu;   // 宽屏：每个常量寄存器读哪些 vec4（同 dmsh_build.py，宿主交给 s2a_widen_shader）
                 foreach (var field in ScaleMetadata(res)) refl[field.Key] = field.Value;
                 SaveJson(Key + "_b.json", refl);
@@ -1689,6 +1690,8 @@ namespace S2A.Dsh
             }
         }
 
+        // 片元着色器读不读 gl_FragCoord.z：SPIRV-Cross 的 MSL 里片元坐标就叫 gl_FragCoord（入口参数和传进辅助函数的形参同名），按分量访问；带 z 的分量 / 混洗（.z、.zw、.xyz）算读
+        internal static bool FragZ(string src) => Search(@"\bgl_FragCoord\.[xyzw]*z", src).Success;
         internal static PyDict RasterFacts(string stage, string src)
         {
             if (stage == "ps")

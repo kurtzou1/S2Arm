@@ -1015,6 +1015,16 @@ static void t_precision(void) {
     CHECK(glGetError() == INVALID_ENUM && r[0] == -1 && pr == -1, "未知精度类型 → INVALID_ENUM、不写输出");
     GLint fmt = 0, typ = 0; glGetIntegerv(0x8B9B, &fmt); glGetIntegerv(0x8B9A, &typ);
     CHECK(fmt == 0x1908 && typ == 0x1401 && !glGetError(), "IMPLEMENTATION_COLOR_READ_FORMAT / TYPE = RGBA / UNSIGNED_BYTE（%#x / %#x）、不置错", fmt, typ);
+    {   // D-5MW2：游戏按 NUM_COMPRESSED_TEXTURE_FORMATS = 0 开空缓冲（空指针）再查 COMPRESSED_TEXTURE_FORMATS——清单类一个都不写、不置错（传空指针也不崩）；
+        //   统一块上限有值（每程序 8 块、32 个绑定点、64 KB）；查不到的 pname 置 INVALID_ENUM 且不动输出（原先写 0）
+        GLint nf = -1, nb = -1, vb = -1, fb2 = -1, bb = -1, bs = -1; glGetIntegerv(0x86A2, &nf); glGetIntegerv(0x87FE, &nb);
+        glGetIntegerv(0x86A3, NULL); glGetIntegerv(0x87FF, NULL); GLfloat ff = 7; glGetFloatv(0x86A3, &ff); GLenum e0 = glGetError();
+        glGetIntegerv(0x8A2B, &vb); glGetIntegerv(0x8A2D, &fb2); glGetIntegerv(0x8A2F, &bb); glGetIntegerv(0x8A30, &bs); GLenum e1 = glGetError();
+        GLint keep = 12345; glGetIntegerv(0x7FFF, &keep); GLenum e2 = glGetError();
+        CHECK(nf == 0 && nb == 0 && ff == 7 && e0 == 0 && vb == 8 && fb2 == 8 && bb == 32 && bs == 65536 && e1 == 0 && keep == 12345 && e2 == 0x0500,
+              "格式清单数 %d / 程序二进制格式数 %d、清单查询传空指针不崩不置错（%#x、浮点输出仍 %.0f）；统一块 %d / %d / 绑定点 %d / 块大小 %d（%#x）；查不到的置 %#x、输出仍 %d",
+              nf, nb, e0, ff, vb, fb2, bb, bs, e1, e2, keep);
+    }
 }
 int main(void) { alarm(120); @autoreleasepool {
 #define LOAD(name, ret, ...) name = (ret (*)(__VA_ARGS__))gpa(#name); if (!name) { printf("✗ 取不到已有入口 %s\n", #name); return 1; }

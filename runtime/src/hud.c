@@ -271,13 +271,17 @@ static uint64_t mids_last_second(uint64_t now) {
     for (uint64_t i = end; i > 0 && end - i < MR - 1; i--) { uint64_t t = atomic_load_explicit(&g_mt[(i - 1) % MR], memory_order_relaxed); if (!t || now - t > 1000000000ull) break; c++; }
     return c;
 }
-int s2a_hud_brief(char *out, size_t n) {
-    uint64_t end = atomic_load_explicit(&g_fn, memory_order_acquire), now = mono_ns(), f1 = 0;
+static uint64_t frames_last_second(uint64_t now) {
+    uint64_t end = atomic_load_explicit(&g_fn, memory_order_acquire), f1 = 0;
     for (uint64_t i = end; i > 0 && end - i < HR - 1; i--) {
         uint64_t t = atomic_load_explicit(&g_ft[(i - 1) % HR], memory_order_relaxed);
         if (!t || now - t > 1000000000ull) break;
         f1++;
     }
+    return f1;
+}
+int s2a_hud_brief(char *out, size_t n) {
+    uint64_t now = mono_ns(), f1 = frames_last_second(now);
     task_vm_info_data_t vi; mach_msg_type_number_t c = TASK_VM_INFO_COUNT;
     double gb = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &c) == KERN_SUCCESS ? vi.phys_footprint / 1073741824.0 : -1;
     char m[64]; snprintf(m, sizeof m, "%s", S2A_UI(S2A_UI_HUD_MEM_FAIL)); uint64_t g = s2a_gpu_alloc_bytes();
@@ -285,6 +289,12 @@ int s2a_hud_brief(char *out, size_t n) {
     uint64_t mid = mids_last_second(now);
     if (mid) return snprintf(out, n, S2A_UI(S2A_UI_HUD_BRIEF_FI), (unsigned long long)(f1 + mid), (unsigned long long)f1, m);
     return snprintf(out, n, S2A_UI(S2A_UI_HUD_BRIEF), (unsigned long long)f1, m);
+}
+// 只看帧率（#2207 Mac「显示」菜单）：同简版的帧数，不带内存
+int s2a_hud_brief_fps(char *out, size_t n) {
+    uint64_t now = mono_ns(), f1 = frames_last_second(now), mid = mids_last_second(now);
+    if (mid) return snprintf(out, n, S2A_UI(S2A_UI_HUD_FPS_FI), (unsigned long long)(f1 + mid), (unsigned long long)f1);
+    return snprintf(out, n, S2A_UI(S2A_UI_HUD_FPS), (unsigned long long)f1);
 }
 
 int s2a_hud_text(char *out, size_t n, const s2a_hud_host *h) {

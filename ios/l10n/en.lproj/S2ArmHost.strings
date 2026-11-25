@@ -416,6 +416,7 @@
 "gfx.filter.nearest" = "For 2D games";
 "gfx.fpsLimit" = "Frame rate limit";
 "gfx.fpsLimit.none" = "Unlimited";
+"gfx.fpsLimit.native.note" = "This game is not using a 60 FPS patch, so it runs at its own frame rate: the 30 limit has no effect this session (capping it would slow the game down).";
 "gfx.resolution" = "Render resolution";
 "gfx.brightness" = "Brightness";
 "gfx.brightness.system" = "Follow system";

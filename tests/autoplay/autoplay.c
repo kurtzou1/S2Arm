@@ -31,6 +31,8 @@
 // 弱链接[autoplay]：s2a_ap_passes（渲染器提供；没登记时进局读数只用绘制数）
 // 弱链接[autoplay]：s2a_ap_audio_mark（声音层提供；没登记时 MARK 处报红）
 // 弱链接[autoplay]：s2a_thread_dump（原生层 thread.c 提供；单测假宿主 / 真值垫片没有）
+// 弱链接[autoplay]：s2a_snap_ap_hold（即时存档 snapshot.c 提供；没有 = 不停手，同原行为）
+// 弱链接[autoplay]：s2a_snap_ap_gen（即时存档 snapshot.c 提供；没有 = 不作废）
 // 弱链接[autoplay]：s2a_dump_threads（渲染器 gal_core.m 提供；同上）
 // 弱链接[autoplay]：s2a_widen_game（runtime/src/widen.c 提供：游戏自己出宽图 = 第二层；没登记按游戏不知道宽屏、触点画布 1280×720）
 #pragma weak s2a_ap_passes       // 没登记（老宿主 / 单测假宿主 / 通用模式）：进局读数只用绘制数这一路
@@ -695,7 +697,22 @@ static void settle(double wait_real_s) {
     while (real_ns() < dl) { if (!poll_digest(0.3)) continue; st = ddiff(g_cur, last) < STAB ? st + 1 : 0; memcpy(last, g_cur, sizeof last); if (st >= 3) return; }
 }
 // 按一键：按住到「新出 ≥ 2 帧且 ≥ hold 秒」再松；松开等新出 2 帧；之后每新帧比按前摘要：变了且连续 3 帧稳定 → 1；连续 30 新帧没变 → 0。墙钟上限 15 真秒
+// 即时存档恢复闸（11-25）：runtime/src/snapshot.c 恢复开始置 hold、验证截图（b_after_01s…60s）存完清掉；gen 每次恢复 +1。
+//   按键前：hold 着就等（不写死秒数，看截图存完；最多 300 秒防卡死）；gen 变过 = 这一下是恢复前定的（进程内重建不重置自动玩家），作废不按、交回去重新看画面
+extern volatile int s2a_snap_ap_hold __attribute__((weak)), s2a_snap_ap_gen __attribute__((weak));
+static int g_snap_gen_seen;
+static int snap_gate(const vkey *k) {   // 1 = 这一下作废
+    if (!&s2a_snap_ap_hold || !&s2a_snap_ap_gen) return 0;
+    if (s2a_snap_ap_hold) {
+        LOG("自动玩家：即时存档恢复中，等验证截图存完再按（%s）", k->n); uint64_t t = real_ns();
+        while (s2a_snap_ap_hold && real_ns() - t < 300000000000ull) usleep(100000);
+        LOG("自动玩家：%s（等了 %.1f 秒）", s2a_snap_ap_hold ? "【黄】等验证截图超过 300 秒，照常往下" : "验证截图已存，放开", (real_ns() - t) / 1e9); }
+    if (s2a_snap_ap_gen != g_snap_gen_seen) { g_snap_gen_seen = s2a_snap_ap_gen;
+        LOG("自动玩家：即时存档恢复过（第 %d 次），恢复前定的这一下 %s 作废，重新看画面", g_snap_gen_seen, k->n); return 1; }
+    return 0;
+}
 static int inject(const vkey *k, float pre[NG], float *pre_e_out) {   // pre_e_out（可空）= 按前那一刻的细节摘要
+    if (snap_gate(k)) { memcpy(pre, g_cur, sizeof g_cur); if (pre_e_out) memcpy(pre_e_out, g_cur_e, sizeof g_cur_e); return 0; }
     // 按前先刷一张：过场在问模型那几秒还在播，「按前画面」要是按键那一刻的
     poll_digest(0.1); pix_snap(); memcpy(pre, g_cur, sizeof g_cur); float pre_e[NG]; memcpy(pre_e, g_cur_e, sizeof pre_e); if (pre_e_out) memcpy(pre_e_out, pre_e, sizeof pre_e); const uint64_t cap_ns = 15000000000ull; uint64_t t0 = real_ns(), f0 = s2a_ap_frames(); g_presses++;
     if (k->tx >= 0) { tc_set(k->tx, k->ty, 8); while (atomic_load(&g_tc_st) != TC_IDLE && real_ns() - t0 < cap_ns) usleep(5000); }

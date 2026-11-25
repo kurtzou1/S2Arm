@@ -39,6 +39,7 @@ static class Fn
                     "mesh_own_shared" => MeshStage.OwnShared(H(0)),
                     "mesh_guard_loops" => MeshStage.GuardLoops(S(0)),
                     "raster_facts" => DshCompiler.RasterFacts(S(0), S(1)),
+                    "frag_z" => DshCompiler.FragZ(S(0)),   // 读不读 gl_FragCoord.z（t_frag_z.py）
                     "int_inputs" => DshCompiler.IntInputs(S(0)),
                     "vs_init" => DshCompiler.VsInit(S(0)),
                     "vs_pad_mask" => DshCompiler.VsPadMask(S(0), (uint)a[1]) is var (vp, vm) ? new List<object> { vp, vm.Cast<object>().ToList() } : null,

@@ -214,7 +214,7 @@ def _default(item, caps, platform="mac", rows=None):
         d = d.get(platform)
     if d == "caps":   # 按能力清单：60 帧看值和原因（fps60_default，同宿主）；满屏看 widen（发布包只有真机验过的款是 1，同 iPhone），没给原因按值
         if item["id"] == "widescreen":
-            return caps.get("widen") == "1"
+            return False   # 没选过的满屏看 fullscreen_state（只有自适应满屏补丁才默认开），不按清单 widen（#2205）
         return fps60_default(rows) if item["id"] == "fps60" and rows is not None else caps.get(item["id"]) == "1"
     return d
 
@@ -226,7 +226,7 @@ def mac_settings(c, gid):
     caps = {k: v for k, (v, _) in rows.items()}
     picked = chosen(c, gid, table)
     # 满屏改不动只认强信号（tools/caps_policy.py 原因写「强信号：…」）；「发布缺省关」只是没验证过，玩家可以明确开（同 iPhone settings.m s2a_ios_fullscreen_state）
-    strong = caps.get("widen") == "0" and "强信号" in rows.get("widen", ("", ""))[1]  # 非玩家句
+    full, strong, _ = fullscreen_state(c, gid, picked, rows)
     need = {"fps60": ("fps60" in caps, NO_FPS60), "widescreen": (not strong, NO_WIDEN)}
     out = {}
     for key, item in table.items():
@@ -236,8 +236,8 @@ def mac_settings(c, gid):
         #   清单明说没有 60 帧方案 / 没走直连的，才是物理上用不了
         ok, why = need.get(key, (True, "")) if caps else (True, "")
         value = picked.get(key, _default(item, caps, rows=rows))
-        if key == "widescreen" and key not in picked and adaptive_patches(c, gid)[0]:
-            value = True   # 没选过、包里有自适应满屏补丁：显示开（11-13 命中就默认开，同 iPhone）
+        if key == "widescreen":
+            value = full   # 显示起局真生效的那个值（fullscreen_state，同 launch_env）
         out[key] = dict(available=ok, value=value if ok else _default(item, caps, rows=rows), reason="" if ok else why)
         if key == "language":
             out[key].update(language_state(c, gid, item, out[key]["value"]))
@@ -249,8 +249,8 @@ def mac_settings(c, gid):
     #   （读到了能力清单才判：还没出 Mac 版时照旧都列、先存偏好）
     if caps:
         fps_p = "社区帧率补丁" in rows.get("fps60", ("", ""))[1]  # 非玩家句
-        ws_p = any((r.get("编号") or "").startswith(("widescreen:", "wsauto:")) for r in _rows(layout.image_mac(c, gid, create=False) / "cpatch.tsv"))  # 非玩家句
-        for key, has in (("fps60", fps_p), ("widescreen", ws_p), ("fpsPick", len(fps_levels(c, gid)) > 1)):
+        #   满屏例外（11-15 维护者「没补丁的游戏手动打开满屏就走咱们通用方案」，#2205）：没有宽屏补丁也列，缺省关、明确开 = 我方通用满屏
+        for key, has in (("fps60", fps_p), ("fpsPick", len(fps_levels(c, gid)) > 1)):
             if key in out and not has:
                 out[key]["hidden"] = True
     # 两个虚拟环绕开关只在对应设备类型下生效（#189 后续，5.1 虚拟环绕第二片）：设备类型 = builtin / headphones 时各自的开关才
@@ -414,6 +414,19 @@ def adaptive_patches(c, gid):
                 fams.append(fam)
             default_on = default_on or (r.get("缺省开") or "") == "1"  # 非玩家句
     return fams, default_on
+
+
+def fullscreen_state(c, gid, picked=None, rows=None):
+    """满屏此刻的生效值（设置页显示与起局环境变量读同一个，#2205：原先两处各判一套，显示开、实际 16:9；同 iPhone settings.m s2a_ios_fullscreen_state）：
+    返回 (开否, 改不动, 自适应满屏补丁族)。清单原因「强信号」= 判过坏，改不动、一律关；玩家明确选过 = 照选的；
+    没选过 = 只有带自适应满屏补丁的款开（11-13 命中就默认开）。清单 widen 1 / 已验证名单不算：我方通用满屏缺省不开（11-15 维护者「手动打开满屏走通用方案」，runtime/src/widen.c 名单门）"""
+    rows = runtime_caps_rows(c, gid) if rows is None else rows
+    picked = chosen(c, gid) if picked is None else picked
+    strong = rows.get("widen", ("", ""))[0] == "0" and "强信号" in rows.get("widen", ("", ""))[1]  # 非玩家句
+    fams = adaptive_patches(c, gid)[0]
+    if strong:
+        return False, True, fams
+    return (picked["widescreen"] if isinstance(picked.get("widescreen"), bool) else bool(fams)), False, fams
 
 
 def patch_status(c, gid):
@@ -658,12 +671,10 @@ def launch_env(c, gid, existing=None):
     # 满屏（11-13 合并「宽屏」与「宽屏强制启用」，同 iPhone settings.m）：明确开 = 没验证过也铺满（画面被拉伸会自动退回 16:9）；明确关 = 16:9；
     #   没选过 = 清单 widen 1 或包里有我方验过的自适应满屏补丁才开。有自适应满屏补丁的款由补丁铺满（下面写进 S2A_CPATCH_ON，S2Arm 满屏让开）；
     #   清单原因「强信号」= 判过坏，一律不开
-    strong = caps.get("widen") == "0" and "强信号" in runtime_caps_rows(c, gid).get("widen", ("", ""))[1]  # 非玩家句
-    fams, fam_default = adaptive_patches(c, gid)
-    full = False if strong else s["widescreen"] if isinstance(s.get("widescreen"), bool) else (caps.get("widen") == "1" or bool(fams))   # 有自适应满屏补丁 = 默认开（11-13）
-    # 11-15 维护者「没补丁的游戏手动打开满屏就走咱们通用方案」：玩家明确开满屏、没有自适应满屏补丁 → 我方通用满屏（第三层整套放宽，不看已验证名单）。
+    full, strong, fams = fullscreen_state(c, gid, s)   # 与设置页同一个生效值（#2205）
+    # 11-15 维护者「没补丁的游戏手动打开满屏就走咱们通用方案」：生效值开、又没有自适应满屏补丁 = 玩家明确开了 → 我方通用满屏（第三层整套放宽，不看已验证名单）。
     #   原先这里还要 S2A_CAPS_OWN=1（v0.4.0 撤通用满屏时加的），手动开也不生效。没选过照旧不开（宿主缺省关，runtime/src/widen.c）
-    if s.get("widescreen") is True and not strong and not fams:
+    if full and not fams:
         env["S2A_WIDEN_VERIFIED"] = "1"
         env["S2A_WIDESCREEN"] = "1"
     elif s.get("widescreen") is False:

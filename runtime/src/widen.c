@@ -660,6 +660,21 @@ void s2a_widen_gate(int idx, uint64_t *regs, uint64_t orig) {
         }
     } else die("宽屏门：%s+%#x 种类 %s 不走门", m->name, s->off, kname(s->kind));
 }
+// 即时存档恢复（runtime/src/snapshot.c 写回游戏内存前后各调一次）：第二层宽屏点的槽值（键页 WSLOT 起）是本局装载时按本局屏幕宽 / 高与启用表算定的宿主值，
+//   快照整页写回会把它变成存档那一局的（Mac 窗口大小不同、Duo 合上 / 展开、换机恢复就错）。写回前记下、写回后原样还回；命中标记（WHIT 起）是跳板写的运行记录，留快照里的
+static uint64_t *g_wsnap; static size_t g_wsnap_n;
+void s2a_widen_snap_hold(void) {
+    free(g_wsnap); g_wsnap = NULL; g_wsnap_n = 0; size_t n = 0;
+    for (int i = 0; g_w && i < g_nmod; i++) n += (size_t)g_w[i].n;
+    if (!n || !(g_wsnap = malloc(n * sizeof *g_wsnap))) return;
+    for (int i = 0; i < g_nmod; i++) for (int j = 0; j < g_w[i].n; j++) g_wsnap[g_wsnap_n++] = g_w[i].page[WSLOT + j];
+}
+void s2a_widen_snap_reapply(void) {
+    size_t k = 0; int fix = 0;
+    for (int i = 0; g_wsnap && g_w && i < g_nmod; i++) for (int j = 0; j < g_w[i].n && k < g_wsnap_n; j++, k++) if (g_w[i].page[WSLOT + j] != g_wsnap[k]) { g_w[i].page[WSLOT + j] = g_wsnap[k]; fix++; }
+    if (g_wsnap_n) LOG("即时存档恢复：宽屏点槽 %zu 个按本局装载值还原（与快照不同 %d 个）", g_wsnap_n, fix);
+    free(g_wsnap); g_wsnap = NULL; g_wsnap_n = 0;
+}
 // 扫命中槽（跳板点）；收局前也调
 void s2a_widen_scan(void) {
     for (int i = 0; g_w && i < g_nmod; i++) { wmod_t *w = &g_w[i];

@@ -77,6 +77,7 @@ static _Atomic int g_hold;
 //   （11-14 撤我方 60 帧）。表照装：改写器打进游戏代码的读槽指令一直在，槽必须有 30 帧口径的值——11-14 起初整张表不装，槽留 0，
 //   带表的包起局后游戏步长读到 0、停在加载黑屏（iPhone 实机同包同局：纯主线进局、不装表的一直黑屏）。60 帧开关此后只管社区帧率补丁（cpatch_follow 照跟 eff）
 static int g_own;
+static _Atomic int g_snap_off;   // 即时存档恢复过（s2a_fps_snap_reapply）：关着时有关值的 w 行也写关值
 static int eff(void) { return atomic_load(&g_on) && atomic_load(&g_ab) != 1 && !atomic_load(&g_hold); }   // 60 帧实际生效 = 用户开着、不在同局 A/B 的原帧率段、档位梯子没压
 int s2a_fps_cap_reason(void) {
     int ab = atomic_load(&g_ab);
@@ -100,6 +101,10 @@ static void slots_apply(int on) {   // 槽按开关写：slot 行开 / 关时值
 //   弱定义缺省空实现 / 0 份：cpatch 运行时给强定义就覆盖（静态链接选强定义）。维护者 10-27：设置里一个开关管 60 帧
 __attribute__((weak)) void s2a_cpatch_fps_follow(int on) { (void)on; }
 __attribute__((weak)) int s2a_cpatch_fps_count(void) { return 0; }   // 本包收下的社区帧率补丁份数（设置页据此也显示开关）
+__attribute__((weak)) int s2a_cpatch_fps_engaged(void) { return 0; }
+// 帧率被抬高了没有（graphics/nvn/gfx/nvn/nvn_fps.c 问：玩家帧率上限只压补丁抬上去的那部分，11-25 #502）：我方帧率表开着，或社区帧率补丁的位真开着
+static int eff_table(void);
+int s2a_fps_raised(void) { return eff_table() || s2a_cpatch_fps_engaged(); }
 static void cpatch_follow(int on) { s2a_cpatch_fps_follow(on); }
 // 宿主帧步（10-29 维护者，调研 the reference port FRAME_STEP：维护者「高帧率时同时低功耗，而不是高帧率高功耗这个能力就不给玩家了」）：表里有 speed 行（按帧推进、游戏速度改读步长槽的款）
 //   就把直连宿主的帧步状态页接上（graphics/nvn hle_nvn.c fstep_tick + nvn_fstep.h：每帧定「这一帧在屏上保持几个 vsync」，60 撑不住连续 3 帧迟到就稳定落到 30，
@@ -117,6 +122,16 @@ static int fs_step(void) { return dm_fps_state ? (int)plat_guest_load32((uintptr
 // 生效状态一变（用户开关或降档原因）：槽与社区帧率补丁按生效值写；w 行由写入线程每 100 ms 按 eff() 写
 static int eff_table(void) { return g_own && eff(); }   // 我方帧率表此刻按「开」写
 static void apply(void) { int e = eff(); slots_apply(g_own && e); cpatch_follow(e); fs_target(g_own && e); }
+// 即时存档恢复（runtime/src/snapshot.c 写回游戏内存后调，同 cpatch.c s2a_cpatch_snap_reapply）：键页随快照变回存档那一刻，
+//   按开关取值的槽（开 / 关时值不同的 slot 行、速度槽、帧步目标）按本进程当前生效值重写；开关时值相同的槽（如游戏自己记的过场标记）是游戏状态，留快照里的
+void s2a_fps_snap_reapply(void) {
+    if (!g_fm) return;
+    int on = eff_table(), n = 0;
+    for (int i = 0; i < g_nsl; i++) if (g_sl[i].on != g_sl[i].off) { host_store32(key_slot(g_sl[i].sl), on ? g_sl[i].on : g_sl[i].off); n++; }
+    if (g_spd_slot >= 0 && !on) spd_store(1.0f);
+    fs_target(on); atomic_store(&g_snap_off, 1);   // w 行由写入线程下一圈按生效值写（关着的写关值）
+    LOG("即时存档恢复：帧率表按当前生效值（%s）重写键页槽 %d 个，w 行 %d 条交写入线程按生效值重写", on ? "开" : "关", n + (g_spd_slot >= 0 && !on), g_nfw);
+}
 // 帧率表键页槽的当前值（graphics/nvn hle_nvn.c 每 300 帧「render targets」那行带出；11-02 塞尔达户外落 30 看动态分辨率系数 / 步长）：「2041=200 (0x43480000)」；类型表里没记，浮点与原始字都给
 void s2a_fps_slots_note(char *buf, size_t n) {
     size_t o = 0; buf[0] = 0; if (!g_fm) return;
@@ -180,7 +195,7 @@ static void *writer(void *a) { s2a_thread_name("s2a-fps-writer");
         for (int i = 0; i < g_nfw; i++) { fps_w *w = &g_fw[i]; uint32_t old;
             // 关时只写表里明写的关值（off）。不写回第一次读到的「原值」（11-02 原生崩溃线：那是游戏还没初始化时的快照——八方2 t.MaxFPS 0、
             //   巫师3 LimitFPS 0、怪猎上限 6000，写回去等于解除限帧；异度3 写回 −1 也退不回 30）。没有关值的行运行中关不了，重启后生效（s2a_fps_hot_revert_ok）
-            if (!on && (!w->has_orig || !w->has_off)) continue;   // 起局就关（开时从没写过）：游戏自己的值没人动过，不碰
+            if (!on && (!w->has_off || (!w->has_orig && !atomic_load(&g_snap_off)))) continue;   // 起局就关（开时从没写过）：游戏自己的值没人动过，不碰；即时存档恢复过（g_snap_off）：游戏内存是存档那一刻的、可能是开时写的值，有关值的行照写关值
             uint32_t want = on ? w->bits : w->offbits;
             // 条件只管开时写哪个值；关值无条件
             if (on && w->cm) { const void *cp = w->cm->base + w->coff;

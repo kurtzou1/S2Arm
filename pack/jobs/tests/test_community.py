@@ -396,11 +396,40 @@ class MacDisplayTests(unittest.TestCase):
                 finally:
                     os.environ.pop("S2A_CAPS_OWN", None)
 
-    def test_without_patches_fps60_and_widescreen_are_hidden(self):
-        # 只用社区补丁（11-13 维护者撤掉我方 60 帧与通用满屏）：清单读得到时，没有帧率补丁 → 「60 帧」hidden；包里 cpatch.tsv 没有宽屏 / 自适应满屏补丁 → 「满屏」hidden
+    def test_fullscreen_state_four_states(self):
+        # 生效值四态（#2205，期望按口径手写）：选开 → 开；选关 → 关；没选 + 有自适应满屏补丁 → 开；没选 + 没补丁 → 关（清单 widen 1 也关）
+        self.caps("widen\t1\t# 默认开：widen_verified.tsv\ndirect\t1\n")
+        fam = "编号\t模块\t位\t类别\t段名\t许可\t来源\t数据写入\t缺省开\nwsauto:fam:w\tmain\t0\tultrawide\tAuto\t\tsrc\t\t1\n"
+        for pick, patch, want in ((True, False, True), (False, False, False), (None, True, True), (None, False, False)):
+            with self.subTest(pick=pick, patch=patch):
+                tsv = layout.image_mac(self.c, GID) / "cpatch.tsv"
+                if patch: write(tsv, fam)
+                elif tsv.exists(): tsv.unlink()
+                self.save(widescreen=pick)   # None = 清掉选择（没选过）
+                self.assertEqual(community.fullscreen_state(self.c, GID)[:2], (want, False))
+
+    def test_fullscreen_shown_value_is_what_the_launch_applies(self):
+        # #2205：满屏设置页显示的值必须是起局真生效的。我方通用满屏缺省不开（11-15「手动打开满屏走通用方案」）：
+        #   清单 widen 1（老包 / 已验证）没选过 → 显示关、起局不写 S2A_WIDEN_VERIFIED；明确开 → 显示开、起局写 1；明确关 → 显示关、写 S2A_WIDESCREEN=0；
+        #   强信号 widen 0 → 改不动、显示关、明确开也不写。期望按口径手写
+        for caps, pick, shown, env in (("widen\t1\t# 已验证名单\n", None, False, {}),
+                                       ("widen\t1\t# 已验证名单\n", True, True, {"S2A_WIDEN_VERIFIED": "1", "S2A_WIDESCREEN": "1"}),
+                                       ("widen\t0\t# 缺省关\n", True, True, {"S2A_WIDEN_VERIFIED": "1", "S2A_WIDESCREEN": "1"}),
+                                       ("widen\t1\t# 已验证名单\n", False, False, {"S2A_WIDESCREEN": "0"}),
+                                       ("widen\t0\t# 强信号：宽屏画面坏\n", True, False, {})):
+            with self.subTest(caps=caps, pick=pick):
+                self.caps(caps + "direct\t1\n")
+                self.save(widescreen=pick)   # None = 清掉选择（没选过）
+                self.assertEqual(self.mac()["widescreen"]["value"], shown)
+                self.assertEqual({k: v for k, v in community.launch_env(self.c, GID).items() if k.startswith("S2A_WIDE")}, env)
+
+    def test_without_patches_fps60_is_hidden_but_fullscreen_stays(self):
+        # 只用社区补丁（11-13 维护者撤掉我方 60 帧）：清单读得到时，没有帧率补丁 → 「60 帧」hidden；
+        #   满屏没有宽屏补丁也列、缺省关（11-15 维护者「没补丁的游戏手动打开满屏就走咱们通用方案」，#2205：原先 hidden，玩家没处开）
         self.caps("fps60\t1\t# fps.tsv 登记 60 帧\nwiden\t0\ndirect\t1\n")
         m = self.mac()
-        self.assertEqual((m["fps60"].get("hidden"), m["widescreen"].get("hidden"), m["docked"].get("hidden")), (True, True, None))
+        self.assertEqual((m["fps60"].get("hidden"), m["widescreen"].get("hidden"), m["widescreen"]["value"], m["widescreen"]["available"], m["docked"].get("hidden")),
+                         (True, None, False, True, None))
         self.caps("fps60\t1\t# 默认开：来源 社区帧率补丁\nwiden\t0\ndirect\t1\n")
         write(layout.image_mac(self.c, GID) / "cpatch.tsv", "编号\t缺省开\nwidescreen:abc\t1\n")
         m = self.mac()
@@ -531,7 +560,7 @@ class MacDisplayTests(unittest.TestCase):
         self.assertEqual(community.launch_env(self.c, GID), {"S2A_WIDESCREEN": "0"})
         self.caps("widen\t1\t# 默认开：widen_verified.tsv\ndirect\t1\n")
         self.save(widescreen=None)
-        self.assertTrue(self.mac()["widescreen"]["value"])                           # 验过的款没选过：显示开
+        self.assertFalse(self.mac()["widescreen"]["value"])                          # 验过的款没选过：起局不开（我方通用满屏缺省不开），显示也关（#2205：原先显示开）
         self.assertEqual(community.launch_env(self.c, GID), {})
         self.caps("widen\t0\t# 强信号：崩溃归因\ndirect\t1\n")
         write(community.launch_path(self.c, GID), json.dumps({"schema": 1, "settings": {"widescreen": True}, "patches": {}}))

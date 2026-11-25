@@ -411,8 +411,8 @@ tc_keys() {   # tc_keys <步号…>：给其中的单测步一次算好键（too
   while IFS= read -r k; do [ $j -lt ${#ix[@]} ] || break; case $k in [0-9a-f]*) TK[${ix[$j]}]=$k;; esac; j=$((j + 1)); done < <(printf '%s\n' "$ks"); }
 tcw() {   # tcw <步号> <命令>：有键就包一层：命中 → 不跑、记命中标记；没命中照跑，绿了记缓存
   local k=${TK[$1]:-}; [ -n "$k" ] || { printf '%s' "$2"; return; }
-  printf 'if python3 tools/test_cache.py hit %q %q; then : > %q; echo "输入与工具链没变，沿用上次的绿"; exit 0; fi; ( %s ); _tr=$?; [ $_tr = 0 ] && python3 tools/test_cache.py put %q %q; exit $_tr' \
-    "$TCD" "$k" "$L/$1.hit" "$2" "$TCD" "$k"; }
+  printf 'if python3 tools/test_cache.py hit %q %q; then : > %q; echo "输入与工具链没变，沿用上次的绿"; exit 0; fi; ( %s ); _tr=$?; [ $_tr = 0 ] && grep -aq "[^[:space:]]" %q && python3 tools/test_cache.py put %q %q; exit $_tr' \
+    "$TCD" "$k" "$L/$1.hit" "$2" "$L/$1.log" "$TCD" "$k"; }   # 空跑（退 0、一行输出都没有）不进缓存：否则下次命中「沿用上次的绿」，空跑又绿回来（11-24）
 LI=(); for i in $(seq 1 $N); do [ "${WH[$i]}" = 本机 ] && LI+=("$i"); done; tc_keys ${LI[@]+"${LI[@]}"}
 # 本机预跑整份令牌（tools/run_token.sh，11-09）11-10 撤：门禁拿着整份令牌再排步令牌 = 持有并等待（21:2x 一份拿着名额 68 分钟一步没跑）；
 #   同机同时在跑的步本来就受步令牌（GATE_STEP_PAR）限，整份令牌只多一层等。手工命令（bash tools/run_token.sh …）改排步令牌、级 3（手工）
@@ -517,6 +517,9 @@ show() {   # show <行首> <结果文件（$L 下，不带后缀）> <显示名>
   # 宿主项（10-30 维护者：与「待 Mac 证」对称）：步 / 子项在本宿主做不了的项打「待宿主证<TAB>类别<TAB>项」、在具备的宿主上做过且绿打「已证宿主项<TAB>类别<TAB>项」，
   #   不影响本步红绿；这里按「类别<TAB>项<TAB>步名」收进 $L/hostlines，结论里列出（列车凭它核宿主证明，见 tools/train.sh hostproof）
   grep -a '^\(待宿主证\|已证宿主项\)	' "$f.log" 2> /dev/null | awk -F'\t' -v n="$CUR" 'NF >= 3 { print $1 "\t" $2 "\t" $3 "\t" n }' >> "$L/hostlines"
+  # 空跑（11-24）：退 0 却一行输出都没有 = 没跑任何子项（一台门禁机的 Mac 局槽旧副本不认 share、命令没跑就退 0，门禁显卡步 3 天 210 次记成绿）→ 判红并点名
+  if [ "$rc" = 0 ] && ! grep -aq '[^[:space:]]' "$f.log" 2> /dev/null; then
+    echo "${1}🔴 $3 $sec 秒（空跑：退出 0 却一行输出都没有，没跑任何子项；查包这一步的外层（锁 / 仲裁脚本）有没有吞掉命令）："; return 1; fi
   if [ "$rc" = 0 ]; then echo "${1}🟢 $3$([ -f "$f.hit" ] && printf （缓存命中） || printf ' ')$sec 秒：$last"; return 0; fi
   # 被早停 TERM 掉的步（确定性步骤已红）：记没跑完，不进红步清单
   if [ "$rc" = 143 ] && [ -f "$(dirname "$f")/stop" ]; then echo "${1}⏹ ${3}：没跑完（确定性步骤「$(cat "$(dirname "$f")/stop")」已红，早停）"; return 4; fi

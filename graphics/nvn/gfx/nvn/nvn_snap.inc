@@ -83,6 +83,15 @@ static int snap_dump_plain(const char *path, uint64_t *bytes, int *skipped) {
 //   之后再存的快照照样带着。不写回：上面 tex_mtl 刚按客体内存建好这张，留着就是对的。ver ≥ 2 的快照不存内容没了的，全零记录就是真的全零，照常写回。
 //   已销毁环里的同样处理（snap_alias_restore kind 3）
 static int g_snap_pkg_old;   // 正在恢复的快照是修好之前存的（nvn_snap_restore_body 读 gfx_live.bin 时定）
+// 恢复时给存档里记下的贴图建宿主贴图之前，先看它的内存池还在不在（D-S68N，iPhone 0.6.9 时之笛两局同址 SIGBUS：tex_mtl → tex_rd_size 读 t->pool->mem，
+//   池对象所在的游戏内存页已被撤成不可访问）。平时贴图按需才建，池已释放的贴图游戏不会再用、永远不建；恢复是一次把记下的全建，才碰到它们。
+//   判活只看游戏侧：池对象可读、magic 仍是 POOL（nvnMemoryPoolFinalize 清 magic）。不活的跳过、计数（g_snap_dead_tex，恢复日志报）；不在池里的贴图照旧交给 tex_mtl
+static int g_snap_dead_tex;
+static int snap_tex_live(const tex_t *t) {
+    if (!t->pool) return 1;
+    if (span_readable(t->pool, sizeof *t->pool) && t->pool->magic == MAGIC('P', 'O', 'O', 'L')) return 1;
+    g_snap_dead_tex++; return 0;
+}
 static int snap_all_zero(const uint8_t *p, uint64_t n) { return n && !p[0] && !memcmp(p, p + 1, n - 1); }
 static int g_snap_pkg_zero;   // 上一次 snap_put_pkg 里这样处理的张数（日志）
 static void snap_put_pkg(const char *path, nvn_hmap *addr, int *put, int *miss) {
@@ -92,7 +101,7 @@ static void snap_put_pkg(const char *path, nvn_hmap *addr, int *put, int *miss) 
     pend_t *pv = NULL; int np = 0, cap = 0;
     while (snap_fread(&hd, sizeof hd, 1, f, "mtl.tex_hd")) {
         const tex_t *t = nvn_hm_get(addr, &hd.ser);
-        if (!t || t->serial != hd.ser || !tex_mtl(t)) { fr_skip_tex(f, &hd); (*miss)++; continue; }
+        if (!t || t->serial != hd.ser || !snap_tex_live(t) || !tex_mtl(t)) { fr_skip_tex(f, &hd); (*miss)++; continue; }
         __unsafe_unretained id o = tex_get(hd.ser); NvPkg *pk = [o isKindOfClass:[NvPkg class]] ? (NvPkg *)o : nil; id<MTLTexture> mt = pk ? pk->tex : nil;
         if (!mt || mt.width != hd.w || mt.height != hd.h || (uint32_t)mt.pixelFormat != hd.fmt || mt.mipmapLevelCount != hd.levels) { fr_skip_tex(f, &hd); (*miss)++; continue; }
         id<MTLBuffer> b = [g_dev newBufferWithLength:hd.bytes options:MTLResourceStorageModeShared];
@@ -501,14 +510,14 @@ static int nvn_snap_restore_body(const char *dir) {
     { snprintf(p, sizeof p, "%s/gfx_alias.bin", dir); if (snap_alias_restore(p)) { MLOG("【红】 即时存档恢复：共享存储贴图读不了"); return -1; } }
     SNAP_TG();
     {   // GPU 私有贴图：gpu.bin 里每张按序号找游戏里的贴图对象，先建出 Metal 贴图，再整份写回内容
-        nvn_hmap addr = {0}; nvn_hm_init(&addr, 8); uint64_t r[2]; int na = 0, made = 0, put = 0, miss = 0;
+        nvn_hmap addr = {0}; nvn_hm_init(&addr, 8); uint64_t r[2]; int na = 0, made = 0, put = 0, miss = 0; g_snap_dead_tex = 0;
         snprintf(p, sizeof p, "%s/gfx_texaddr.bin", dir); FILE *f = fopen(p, "rb");
         while (f && fr_r(f, r, sizeof r)) { nvn_hm_put(&addr, &r[0], (void *)(uintptr_t)r[1]); na++;
             if (snap_on()) { pthread_mutex_lock(&g_smu); if (!g_snap_texaddr.klen) nvn_hm_init(&g_snap_texaddr, 8); nvn_hm_put(&g_snap_texaddr, &r[0], (void *)(uintptr_t)r[1]); pthread_mutex_unlock(&g_smu); } }   // 恢复局里再存：快照前建的贴图也要在表里
         if (f) fclose(f);
         snprintf(p, sizeof p, "%s/gfx_gpu.bin", dir); f = fopen(p, "rb"); uint32_t mg = 0;
         if (f && fr_r(f, &mg, 4) && mg == FR_GPU_MAGIC) { fr_tex_hd hd;
-            while (snap_fread(&hd, sizeof hd, 1, f, "mtl.tex_hd")) { const tex_t *t = nvn_hm_get(&addr, &hd.ser); if (t && t->serial == hd.ser && tex_mtl(t)) made++; fr_skip_tex(f, &hd); } }
+            while (snap_fread(&hd, sizeof hd, 1, f, "mtl.tex_hd")) { const tex_t *t = nvn_hm_get(&addr, &hd.ser); if (t && t->serial == hd.ser && snap_tex_live(t) && tex_mtl(t)) made++; fr_skip_tex(f, &hd); } }
         if (f) fclose(f);
         snap_up_sync();
         fr_restore_gpu(p, &put, &miss);
@@ -516,7 +525,7 @@ static int nvn_snap_restore_body(const char *dir) {
         SNAP_TG();
         {   int qp = 0, qm = 0, qmade = 0; snprintf(p, sizeof p, "%s/gfx_plain.bin", dir); FILE *pf = fopen(p, "rb"); fr_tex_hd hd;
             while (pf && snap_fread(&hd, sizeof hd, 1, pf, "mtl.tex_hd")) {
-                const tex_t *tt = nvn_hm_get(&addr, &hd.ser); if (tt && tt->serial == hd.ser && tex_mtl(tt)) qmade++;
+                const tex_t *tt = nvn_hm_get(&addr, &hd.ser); if (tt && tt->serial == hd.ser && snap_tex_live(tt) && tex_mtl(tt)) qmade++;
                 id o = tex_get(hd.ser); id<MTLTexture> mt = [o conformsToProtocol:@protocol(MTLTexture)] ? o : nil;
                 if (!mt || mt.width != hd.w || mt.height != hd.h || (uint32_t)mt.pixelFormat != hd.fmt || mt.mipmapLevelCount != hd.levels) { fr_skip_tex(pf, &hd); qm++; continue; }
                 id<MTLBuffer> b = [g_dev newBufferWithLength:hd.bytes options:MTLResourceStorageModeShared];
@@ -529,6 +538,7 @@ static int nvn_snap_restore_body(const char *dir) {
         g_snap_addr_lk = &addr; hle_snap_ft_restore(snap_addr_lookup); g_snap_addr_lk = NULL;
         int pp = 0, pm = 0; snprintf(p, sizeof p, "%s/gfx_pkg.bin", dir); snap_put_pkg(p, &addr, &pp, &pm);
         MLOG("即时存档恢复：GPU 写过的预排布贴图 写回 %d 张、没写回 %d 张", pp, pm);
+        if (g_snap_dead_tex) MLOG("即时存档恢复：存档里记下的贴图有 %d 张的内存池已被游戏释放（池对象不可读或已收尾），跳过不建（游戏不会再用它们；原先照建，读池对象 SIGBUS，D-S68N）", g_snap_dead_tex);
         if (g_snap_pkg_zero) MLOG("即时存档恢复：旧快照里预排布贴图 %d 张的记录内容全零（存的时候显卡内容已被系统清掉），不写回，用按客体内存建的那张", g_snap_pkg_zero);
     }
     SNAP_TG();

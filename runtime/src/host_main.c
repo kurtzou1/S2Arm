@@ -4,6 +4,7 @@
 // 弱链接[host,ios]：S2A_Init（C# 服务层（S2A.Aot）提供；原生层单独构建没有；链接行按这行放行未定义，runtime/build.mk 自动收）
 // 弱链接[host]：S2A_InitSession（C# 服务层（S2A.Aot）提供；同上）
 // 弱链接[host]：nvn_pso_harvest（直连层 graphics/nvn 提供；链接行按这行放行未定义，runtime/build.mk 自动收）
+// 弱链接[host]：nvn_fps_session_reset（直连层 graphics/nvn/gfx/nvn/nvn_fps.c 提供；同上）
 // 弱链接[host,ios,nvntest,touchtest]：s2a_autoplay_on（自动玩家（C#）提供；链接行按这行放行未定义，runtime/build.mk 自动收）
 // 弱链接[host,ios,nvntest,touchtest]：s2a_autoplay_wait_s（自动玩家累计等模型秒数；同上）
 #include "s2a_selfcheck_page.h"   // 自检「仍要启动」按钮文案
@@ -219,6 +220,8 @@ int s2a_host_rebuild(void) {
 #if TARGET_OS_IPHONE
     if (s2a_ios_reload_graphics_settings()) return -1;
 #endif
+    // 帧率上限跟着重放后的 S2A_FPS 重读（直连层原先进程里只读一次，「立即重启」后仍按旧上限，#502）
+    { void nvn_fps_session_reset(void) __attribute__((weak)); if (nvn_fps_session_reset) nvn_fps_session_reset(); }
     // 审计 P2-15：设置里的立刻重启不经过进后台，上一局按着的键 / 摇杆不能带进新局第一次读
     s2a_pad_session_reset();
     void s2a_gfx_mode_session_reset(void); s2a_gfx_mode_session_reset();

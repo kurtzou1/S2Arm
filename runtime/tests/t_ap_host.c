@@ -43,7 +43,7 @@ static void hook_exit(int code) {
     char b[3] = { (char)code, (char)atomic_load(&g_ndump), (char)atomic_load(&g_nnotice) };
     ssize_t w = write(g_rep_fd, b, 3); (void)w; _exit(0);
 }
-void s2a_ap_set_exit_hook(void (*fn)(int));
+void s2a_ap_set_exit_hook(void (*fn)(int)); int s2a_ap_session_reset(void); int s2a_ap_session_stop(void);
 void s2a_ap_set_notice_hook(void (*fn)(const char *));
 void s2a_thread_dump(void) { g_ndump++; }          // 桩：看门经 dlsym 取到它
 static _Atomic int g_dev = 1;   // ⑧ 开发设施开关桩（os.c s2a_dev_on）：缺省 1 = 开发包，原有 ④ ⑦ 照旧
@@ -57,7 +57,8 @@ int s2a_host_sleeping(void) { return atomic_load(&g_host_sleeping); }
 static _Atomic int g_applet;   // ④c 系统小程序开着的个数（os.c s2a_applet_open 的桩）
 int s2a_applet_open(void) { return atomic_load(&g_applet); }
 static _Atomic int g_nhost;
-int s2a_dump_threads(const char *why) { (void)why; g_nhost++; return 0; }   // 桩：宿主线程栈
+static _Atomic int g_nshort;   // ⑨：只数短停顿现场打的份数（原 1 秒停住看门同进程也在跑，负载高时等待睡过 1 秒它也会打一份，共用 g_ndump 会多数）
+int s2a_dump_threads(const char *why) { if (why && strstr(why, "短停顿现场")) g_nshort++; g_nhost++; return 0; }   // 桩：宿主线程栈
 // 等看门线程在「现在」之后再走满 k 格（s2a_ap_stall_ticks 圈首计）：按看门自己的格数同步，不按墙钟睡（11-19：负载高时固定睡 1.6 秒格数不够，
 //   ④ ⑦ 份数对不上、测的是机器负载）。期望格数按看门规则手算：看到帧变 1 格 + 停满 lim=4 格打现场 → 取 7 格。60 秒兜底只防线程没起来，到了判红
 static int wait_ticks(int k) {
@@ -303,5 +304,24 @@ int main(void) {
     bad += nominal_case(60, 60, 0, NULL);
     bad += nominal_case(30, 30, 1, "标称帧率：30 帧/秒（出图实际跟的节拍，运行中变了");
     bad += nominal_case(-5, 30, 0, NULL);
+    {   // ⑨ 短停顿现场（DM_STALL_SHORT_MS=150、DM_STALL_SHORT_N=3，fork 子进程从零开始；阈值是首次调用时缓存的 static）：
+        //   期望（手算）停 600 ms → 1 份；上屏一帧后冻结中停 600 ms → 仍 1；解冻后停 600 ms → 2；上屏后停 → 3；再上屏再停 → 仍 3（一局至多 3 份）
+        int pfd[2]; if (pipe(pfd)) { printf("✗ ⑨ pipe 失败\n"); bad++; }
+        s2a_ap_session_reset();   // 父进程里先停掉看门线程、帧数清零再 fork（子进程只继承标记、不继承线程，在子进程里 reset 会 join 一个不存在的线程）
+        pid_t pid = fork();
+        if (pid == 0) {
+            close(pfd[0]); unsetenv("S2A_STALL_DUMP_S"); setenv("DM_STALL_SHORT_MS", "150", 1); setenv("DM_STALL_SHORT_N", "3", 1);
+            atomic_store(&g_nshort, 0); atomic_store(&g_fz, 0); atomic_store(&g_host_focused, 1);
+            char r[64]; int k = 0;
+            s2a_frame_presented(); usleep(600000); k += snprintf(r + k, sizeof r - (size_t)k, "%d", (int)g_nshort);
+            s2a_frame_presented(); atomic_store(&g_fz, 1); usleep(600000); k += snprintf(r + k, sizeof r - (size_t)k, " %d", (int)g_nshort);
+            atomic_store(&g_fz, 0); usleep(600000); k += snprintf(r + k, sizeof r - (size_t)k, " %d", (int)g_nshort);
+            s2a_frame_presented(); usleep(600000); k += snprintf(r + k, sizeof r - (size_t)k, " %d", (int)g_nshort);
+            s2a_frame_presented(); usleep(600000); k += snprintf(r + k, sizeof r - (size_t)k, " %d", (int)g_nshort);
+            s2a_ap_session_stop(); ssize_t w = write(pfd[1], r, (size_t)k); (void)w; _exit(0);
+        }
+        close(pfd[1]); char got[64] = {0}; ssize_t rd = read(pfd[0], got, sizeof got - 1); (void)rd; close(pfd[0]); waitpid(pid, NULL, 0);
+        if (strcmp(got, "1 1 2 3 3")) { printf("✗ ⑨ 短停顿现场：期望 1 1 2 3 3，实得 %s\n", got); bad++; } else printf("✓ ⑨ 短停顿现场 停满阈值打、冻结不打、一局至多 N 份：%s\n", got);
+    }
     printf("%s t_ap_host：%d 处不符\n", bad ? "✗" : "✓", bad); return bad;
 }

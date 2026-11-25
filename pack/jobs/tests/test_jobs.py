@@ -1499,15 +1499,21 @@ class JobsTests(unittest.TestCase):
         import toolchain, unittest.mock as um, core
         self.assertEqual(toolchain.default_app_dirs(), ("/Applications", str(Path.home() / "Applications")))
         touched = []
+        # 本单测自己的临时目录不算外接卷：门禁机把 TMPDIR 放在外接盘时（本机 gate2 沙箱在 /Volumes 下），夹具 no-xcode 也落在 /Volumes
+        mine = str(self.root.resolve())
+        # 门禁机的沙箱 HOME 也可能在外接盘（本机 gate2 homes/<n> 在 /Volumes 下）：~/Applications 正是被测的两个默认位置之一，不算翻外接卷
+        own = [mine] + [str(d) for d in toolchain.default_app_dirs()]
+        def outside(p):
+            s = str(p); return s.startswith("/Volumes") and not any(s == o or s.startswith(o + "/") for o in own)
         def guard(real):
             def f(p=".", *a, **k):
-                if str(p).startswith("/Volumes"):
+                if outside(p):
                     touched.append(str(p)); raise AssertionError("碰了 /Volumes：" + str(p))
                 return real(p, *a, **k)
             return f
         real_iterdir = Path.iterdir
         def iterdir(self_):
-            if str(self_).startswith("/Volumes"):
+            if outside(self_):
                 touched.append(str(self_)); raise AssertionError("碰了 /Volumes：" + str(self_))
             return real_iterdir(self_)
         with um.patch.object(core.os, "listdir", guard(os.listdir)), um.patch.object(core.os, "scandir", guard(os.scandir)), \

@@ -29,6 +29,8 @@ int nvn_gpu_pipe_lookup(const nvn_gpu_pipe_desc *d, nvn_gpu_pipe *out) {
     pthread_mutex_unlock(&g_mu);
     return hit;
 }
+static _Thread_local int demand_worker;
+void nvk_pipe_demand_worker_enter(void) { demand_worker = 1; }
 nvn_gpu_rc nvn_gpu_pipe_get(const nvn_gpu_pipe_desc *d, int mode, nvn_gpu_pipe *out, nvn_gpu_err *err) {
     (void)mode;
     pthread_mutex_lock(&g_mu);
@@ -38,7 +40,7 @@ nvn_gpu_rc nvn_gpu_pipe_get(const nvn_gpu_pipe_desc *d, int mode, nvn_gpu_pipe *
         pthread_cond_broadcast(&g_cv);
         pthread_cond_wait(&g_cv, &g_mu);
     }
-    int fail = g_fail_next;
+    int fail = g_fail_next || !demand_worker;
     nvn_gpu_pipe built = (nvn_gpu_pipe)(uintptr_t)(0x9000 + g_build_calls);
     if (!fail) { g_inst_desc = *d; g_installed = built; g_has_inst = 1; }
     if (out) *out = fail ? NULL : built;

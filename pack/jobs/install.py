@@ -646,6 +646,13 @@ def ios_pack(c, gid):
     return pack
 
 
+def seed_fill(c, gid, pack):
+    """推送 / 导出前补这一款的管线预热表（pack/jobs/seed_refresh.py；11-25 #1842 维护者批：玩家对这一款操作时前台做、只写这一张表、
+    联网失败照推只记日志，不后台批量扫）"""
+    import seed_refresh
+    seed_refresh.refresh(c, gid, pack)
+
+
 def pack_id(pack):
     """资源包号：清单的 index_sha256；清单没写就按推送实际用的 index.tsv 现算（原先缺这个字段就整单不装，预检清单 #16：推送本来不读它）"""
     pid = read(Path(pack) / "manifest.json", {}).get("index_sha256") or ""
@@ -1473,6 +1480,7 @@ def export_s2arm(c, gid, *, folder=None, sign=True, step=0, total=3):
     gid = gid.upper()
     c.begin("准备这款的程序（按需更新）", step + 1, total)
     pack = ios_pack(c, gid)
+    seed_fill(c, gid, pack)   # 推送 / 导出前补这一款的管线预热表（只写这一张表，出错照推）
     with packer.program_locks(c, [gid]):
         refresh_local(c, gid)   # 同「更新这款」：着色器库一起补到本版（#1162：原先只重核程序、不重编着色器库，导出装好后电脑上「建议更新」照亮）
         pkg = Path(program_pack.build(c, gid))
@@ -3579,6 +3587,7 @@ def push_game(c, gid, ph, steps=True):
     import ipa as packer
     gid = gid.upper()
     pack = ios_pack(c, gid)
+    seed_fill(c, gid, pack)   # 推送 / 导出前补这一款的管线预热表（只写这一张表，出错照推）
     rec = layout.load_device(c, ph.key)
     ext = getattr(ph, "external", False)   # 别的工具装的 S2Arm（push_phone）：不查启动器的壳号、不签名、不交身份，推进它自己的包名
     if ext:   # 不查壳号，但比 App 版本（#1842）：接口不兼容拦；只是旧就提示一次，玩家确认（acceptOldApp）后照推
@@ -3790,6 +3799,7 @@ def put_app(c, gid, ph, steps=True):
     import ipa as packer
     gid = gid.upper()
     pack = ios_pack(c, gid)
+    seed_fill(c, gid, pack)   # 推送 / 导出前补这一款的管线预热表（只写这一张表，出错照推）
     bid, team, fixed = app_bundle(c, ph, gid)
     if fixed:
         bundle_replace_check(c, ph, gid, bid)

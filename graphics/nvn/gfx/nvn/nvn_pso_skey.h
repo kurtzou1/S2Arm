@@ -28,6 +28,18 @@ static inline int pso_dual_source(const pso_key *k, int merged) {
     return pso_blend_src1(b->src_rgb) || pso_blend_src1(b->dst_rgb) || pso_blend_src1(b->src_a) || pso_blend_src1(b->dst_a);
 }
 
+// Programmable blending (#674): Maxwell's SET_BLEND_FLOAT_OPTION.ZERO_TIMES_ANYTHING_IS_ZERO, which the NVN driver sets at init, makes every factor × colour product in the blender 0 when
+//   either factor is 0 (0 × NaN / ±Inf = 0); Metal's fixed-function blender follows IEEE (0 × NaN = NaN). The targets a pipeline wants blended by the fragment shader instead: floating-point,
+//   blending on, some channel written; not on a merged pass (lmap) or a multisampled one. The shader side (graphics/dsx/gal_colorround.c) gives each float4 output n a function constant
+//   s2a_pb<n>_c (GAL_PB_FC0 + n) that turns on reading the target and blending from the state in slot 27; nvn_mtl.m pso_pb_eff narrows this to what the fragment shader can do
+static inline int pso_pb_fmt(uint32_t f) { return f == 25 || f == 65 || f == 115 || f == 92 || f == 55 || f == 105 || f == 125; }   // MTLPixelFormat R16 / RG16 / RGBA16Float, RG11B10Float, R32 / RG32 / RGBA32Float
+static inline uint32_t pso_pb_want(const pso_key *k, int merged) {
+    if (merged || k->samples > 1) return 0;
+    uint32_t m = 0;
+    for (int i = 0; i < 8; i++) if (k->cfmt[i] && (k->blend_en >> i & 1) && (k->chmask >> (4 * i) & 15u) && pso_pb_fmt(k->cfmt[i])) m |= 1u << i;
+    return m;
+}
+
 typedef struct {
     uint8_t kind, fbmask;
     int8_t fx[32];

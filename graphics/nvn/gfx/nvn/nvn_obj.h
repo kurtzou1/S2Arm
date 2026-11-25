@@ -356,7 +356,9 @@ uint64_t nvn_be_pkg_same(void);
 void nvn_be_pkg_gpu_stats(uint64_t *writes, uint64_t *kept, uint64_t *partial);
 uint64_t nvn_be_upload_ns_take(void);   // Take and zero: time spent uploading packaged textures on the submit thread since last time   // DM_NVN_DIRTYCHECK diagnostic: number of missed detections   // Packaged textures: number of first uploads, number of re-uploads due to pool content changes
 uint64_t nvn_be_upload_gpu_ns_take(void);   // Take and zero: GPU execution time of upload command buffers (sum of GPUEndTime − GPUStartTime)
-void nvn_be_create_stats(uint64_t *lib, uint64_t *pso);   // Cumulative: number of shader libraries loaded synchronously on the submit thread, number of render + compute pipelines created synchronously (those taken from warm-up do not count)
+uint64_t rp_sync_pipelines_created(void);   // 新回放层后端：前台成功创建的图形和计算管线，进程累计
+// 进程累计。Metal 数提交时现场加载的库，新回放层数提交时取用的现编程序（含 worker 交付）；图形 + 计算管线只数前台现场创建。
+void nvn_be_create_stats(uint64_t *lib, uint64_t *pso);
 // CPU texture read: starting at level / layer0, written into dst with row / img byte strides
 void nvn_be_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, uint8_t *dst, size_t row, size_t img);
 // Descriptor pool registration (texture ID / sampler ID → object snapshot), program release

@@ -673,6 +673,13 @@ int main(int argc, char **argv) {
             check(r == 0 && on && [g9 boolForKey:@"S2AWidescreen"], @"满屏：明确开 → 开（写这款的 S2AWidescreen）");
             [strong writeToFile:[gdir stringByAppendingPathComponent:@"s2a_caps.tsv"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
             r = s2a_ios_fullscreen_state(@"G9", &on); check(r == 1 && !on, @"满屏：清单原因强信号 → 改不动、显示关");
+            // #2205：清单 widen 1、包里带 widen_verified.tsv（已验证名单）、没选过 → 关：我方通用满屏缺省不开（11-15「手动打开满屏走通用方案」），
+            //   起局也不设 S2A_WIDEN_VERIFIED（下面起局段 k 3），显示必须和起局一致（原先这里显示开、实际 16:9）
+            [@"widen\t1\t# 默认开：widen_verified.tsv\n" writeToFile:[gdir stringByAppendingPathComponent:@"s2a_caps.tsv"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            [@"x\n" writeToFile:[gdir stringByAppendingPathComponent:@"widen_verified.tsv"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            [g9 removeObjectForKey:@"S2AWidescreen"];
+            r = s2a_ios_fullscreen_state(@"G9", &on); check(r == 0 && !on, @"满屏：清单 widen 1 + 已验证名单、没选过 → 关（同起局，#2205）");
+            [NSFileManager.defaultManager removeItemAtPath:[gdir stringByAppendingPathComponent:@"widen_verified.tsv"] error:nil];
             [plain writeToFile:[gdir stringByAppendingPathComponent:@"s2a_caps.tsv"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
             [tsv writeToFile:[gdir stringByAppendingPathComponent:@"cpatch.tsv"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
             [g9 removeObjectForKey:@"S2AWidescreen"];
@@ -691,9 +698,13 @@ int main(int argc, char **argv) {
             setenv("S2A_LAUNCH_GAME_ID", "G9", 1);
             // 11-15 维护者「没补丁的游戏手动打开满屏就走咱们通用方案」：旧键转成满屏明确开、没有自适应满屏补丁 → 我方通用满屏（VERIFIED / WIDESCREEN 都是 1），
             //   不再看 S2A_CAPS_OWN（k 0 没设、k 2 设了，结果一样）；k 1 有自适应满屏补丁 → 补丁铺满、S2Arm 让开
-            for (int k = 0; k < 3; k++) {
+            NSString *wv = [bundle stringByAppendingPathComponent:@"widen_verified.tsv"];
+            for (int k = 0; k < 5; k++) {
                 [g9 removePersistentDomainForName:@"S2AGame.G9"];
                 if (k == 1) { [tsv writeToFile:ctsv atomically:YES encoding:NSUTF8StringEncoding error:nil]; s2a_ios_set_fullscreen(nil, YES); }
+                else if (k == 3) { [@"widen\t1\t# 默认开：widen_verified.tsv\n" writeToFile:caps atomically:YES encoding:NSUTF8StringEncoding error:nil]; [@"x\n" writeToFile:wv atomically:YES encoding:NSUTF8StringEncoding error:nil]; }
+                else if (k == 4) { [plain writeToFile:caps atomically:YES encoding:NSUTF8StringEncoding error:nil]; [NSFileManager.defaultManager removeItemAtPath:wv error:nil];
+                                   unsetenv("S2A_LAUNCH_GAME_ID"); [NSUserDefaults.standardUserDefaults setBool:YES forKey:@"S2AWidescreen"]; }
                 else [g9 setBool:YES forKey:@"S2AWidenForce"];
                 clear_environment(); unsetenv("S2A_WIDEN_VERIFIED"); unsetenv("S2A_WIDEN_CAPS");
                 if (k == 2) setenv("S2A_CAPS_OWN", "1", 1); else unsetenv("S2A_CAPS_OWN");
@@ -702,10 +713,16 @@ int main(int argc, char **argv) {
                 const char *v = getenv("S2A_WIDEN_VERIFIED"), *ws = getenv("S2A_WIDESCREEN"), *cpo = getenv("S2A_CPATCH_ON");
                 NSString *(^val)(const char *) = ^(const char *e) { return e ? @(e) : @"未设"; };
                 NSString *got = [NSString stringWithFormat:@"VERIFIED=%@ WIDESCREEN=%@ CPATCH_ON=%@", val(v), val(ws), val(cpo)];
-                NSString *want = k == 1 ? @"VERIFIED=未设 WIDESCREEN=0 CPATCH_ON=wsauto:fam" : k == 2 ? @"VERIFIED=1 WIDESCREEN=1 CPATCH_ON=未设" : @"VERIFIED=1 WIDESCREEN=1 CPATCH_ON=未设";
-                check([got isEqual:want] && (k == 1 || ([g9 boolForKey:@"S2AWidescreen"] && ![g9 objectForKey:@"S2AWidenForce"])),
-                      [NSString stringWithFormat:@"起局满屏%@：期望 %@ → 真结果 %@", k == 1 ? @"（有自适应满屏补丁）" : k == 2 ? @"（旧键宽屏强制启用，旧口径）" : @"（旧键宽屏强制启用，没设旧口径径不强开）", want, got]);
+                NSString *want = k == 1 ? @"VERIFIED=未设 WIDESCREEN=0 CPATCH_ON=wsauto:fam" : k == 3 ? @"VERIFIED=未设 WIDESCREEN=未设 CPATCH_ON=未设" : @"VERIFIED=1 WIDESCREEN=1 CPATCH_ON=未设";
+                BOOL shown = NO; int sr = s2a_ios_fullscreen_state(nil, &shown);
+                BOOL keys = k == 1 || k == 3 || k == 4 || ([g9 boolForKey:@"S2AWidescreen"] && ![g9 objectForKey:@"S2AWidenForce"]);
+                // 显示 = 起局（#2205）：设置页读到的生效值开 ⇔ 起局设了 VERIFIED=1 或由自适应满屏补丁铺满
+                BOOL same = sr == 0 && shown == ((v && !strcmp(v, "1")) || (cpo && strstr(cpo, "wsauto:")));
+                check([got isEqual:want] && keys && same,
+                      [NSString stringWithFormat:@"起局满屏%@：期望 %@、显示与起局一致 → 真结果 %@、显示 %@", k == 1 ? @"（有自适应满屏补丁）" : k == 2 ? @"（旧键宽屏强制启用，旧口径）" : k == 3 ? @"（清单 widen 1 + 已验证名单、没选过，#2205）" : k == 4 ? @"（单款壳 App 级明确开）" : @"（旧键宽屏强制启用，没设旧口径径不强开）", want, got, shown ? @"开" : @"关"]);
+                if (k == 4) { [NSUserDefaults.standardUserDefaults removeObjectForKey:@"S2AWidescreen"]; setenv("S2A_LAUNCH_GAME_ID", "G9", 1); }
             }
+            [NSFileManager.defaultManager removeItemAtPath:wv error:nil];
             [g9 removePersistentDomainForName:@"S2AGame.G9"]; unsetenv("S2A_LAUNCH_GAME_ID"); unsetenv("S2A_WIDEN_VERIFIED"); unsetenv("S2A_WIDEN_CAPS");
             [NSFileManager.defaultManager removeItemAtPath:caps error:nil]; [NSFileManager.defaultManager removeItemAtPath:ctsv error:nil];
         }

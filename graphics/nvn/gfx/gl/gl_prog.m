@@ -155,6 +155,29 @@ static void rt_preload(void) {
     pthread_mutex_unlock(&g_rt_mu); closedir(dp);
     if (n) GLOG("现编：开机预编上次缓存的 %d 支（%s）", n, d);
 }
+// 翻译失败的源码进日志（D-YYEQ 11-25：暗黑地牢片元报「0:54: 'sampler/image' : cannot construct this type」，日志只有报错行、没有源码，
+//   本机没有这款，定不了第 54 行写的是什么）。按行编号「  54| …」写成一段，诊断包里的日志就带着；有界：一局最多 GL_SRC_LOG_MAX 支、每支最多 6 KB、
+//   每行最多 200 字。纯函数（t_gl_rt C 测）：把 src 写成带行号的文本，回写入字节数（不含结尾 0）
+enum { GL_SRC_LOG_MAX = 8 };
+uint64_t gl_rt_src_logged;   // 已写进日志的失败源码支数（单测读）
+size_t s2a_gl_src_numbered(const char *src, size_t len, char *out, size_t cap) {
+    size_t o = 0; int line = 1; const char *p = src, *end = src + len;
+    if (!cap) return 0;
+    while (p < end && o + 16 < cap) {
+        const char *nl = memchr(p, '\n', (size_t)(end - p)); size_t n = nl ? (size_t)(nl - p) : (size_t)(end - p);
+        int w = snprintf(out + o, cap - o, "%4d| %.*s%s\n", line++, (int)(n > 200 ? 200 : n), p, n > 200 ? "…" : "");
+        if (w < 0 || (size_t)w >= cap - o) { o = cap - 1; break; }
+        o += (size_t)w; p = nl ? nl + 1 : end;
+    }
+    out[o] = 0; return o;
+}
+static void rt_log_src(const char *key, int frag, const char *src, size_t len) {
+    if (__atomic_fetch_add(&gl_rt_src_logged, 1, __ATOMIC_RELAXED) >= GL_SRC_LOG_MAX) return;
+    char *buf = malloc(6144); if (!buf) return;
+    s2a_gl_src_numbered(src, len, buf, 6144);
+    GLOG("现编：%s %s 翻译失败的源码（%zu 字节，按行编号）：\n%s", key, frag ? "片元" : "顶点", len, buf);
+    free(buf);
+}
 // 库里没有的一支：有就复用（同源码同阶段只翻一次），没有先读缓存、再交后台翻译 + Metal 编译
 static struct gl_rt *rt_get(const gl_shader *s) {
     int frag = s->type == GL_FRAGMENT_SHADER;
@@ -172,9 +195,11 @@ static struct gl_rt *rt_get(const gl_shader *s) {
     char *src = strdup(s->src); size_t n = s->len;   // 游戏随后可能改源码：拷一份交后台
     dispatch_async(rt_queue(), ^{
         char *msl = NULL, *fields = NULL, err[600] = ""; uint64_t t0 = mach_absolute_time();
-        int rc = s2a_gl_xlate(src, n, frag, e->key, &msl, &fields, err, sizeof err); free(src);
+        int rc = s2a_gl_xlate(src, n, frag, e->key, &msl, &fields, err, sizeof err);
         double ms_x = rt_ms(t0, mach_absolute_time());
-        if (rc) { snprintf(e->why, sizeof e->why, "翻译失败：%.560s", err); GLOG("【红】 现编：%s %s %s", e->key, frag ? "片元" : "顶点", e->why); gl_bad_err++; g_rt_bad++; free(msl); free(fields); rt_set(e, 3); return; }
+        if (rc) { snprintf(e->why, sizeof e->why, "翻译失败：%.560s", err); GLOG("【红】 现编：%s %s %s", e->key, frag ? "片元" : "顶点", e->why); rt_log_src(e->key, frag, src, n); free(src);
+            gl_bad_err++; g_rt_bad++; free(msl); free(fields); rt_set(e, 3); return; }
+        free(src);
         e->fields = fields; rt_set(e, 1);
         rt_metal(e, msl, 0, ms_x);
     });

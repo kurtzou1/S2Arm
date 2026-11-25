@@ -36,7 +36,7 @@ git add -A; git commit -qm 1
 g() { local o=$1; shift; : > $T/trace; : > $CALLS; env GATE_TIER=full "$@" bash tools/gate.sh > "$T/$o" 2>&1; echo $?; }
 tr1() { sort $T/trace | tr '\n' ' '; }
 cl() { tr '\n' '|' < $CALLS; }
-steps() { grep -E '^(🟢|🔴)' "$T/$1" | sed -E 's/ [0-9]+ 秒：/ N 秒：/'; tail -1 "$T/$1"; }
+steps() { grep -E '^(🟢|🔴)' "$T/$1" | sed -E 's/ [0-9]+ 秒([：（])/ N 秒\1/'; tail -1 "$T/$1"; }   # 红步行是「N 秒（rc=1）：」，秒数也抹掉（负载下两次 0 / 1 秒不同就误判）
 
 r=$(g o1 GATE_FAST=1 GATE_RERUN="单测 x_test" GATE_CHANGED=tests/x_test.sh); t=$(tr1); c=$(cl)
 ck "① 快路：只跑 x、1 / 1 绿、不调路由与声明（trace ${t}，calls ${c}，rc=${r}）" '[ $r = 0 ] && [ "$t" = "x " ] && [ -z "$c" ] && tail -1 $T/o1 | grep -qF "跑了 1 步 / 应跑 1 步" && grep -q "^快路：" $T/o1'

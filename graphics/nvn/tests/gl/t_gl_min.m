@@ -806,7 +806,7 @@ static int second_batch(gpa_t gpa, EGLDisplay dpy, EGLSurface sf) {
     enum { CUBE = 0x8513, PX = 0x8515, TEX2D = 0x0DE1, RGBA = 0x1908, UB = 0x1401, FB = 0x8D40, RB = 0x8D41, STENCIL = 0x0B90, COLOR_BIT = 0x4000, STENCIL_BIT = 0x400 };
     const GLchar *ver = glGetString(0x1F02); GLint maxtex = 0; glGetIntegerv(0x0D33, &maxtex);
     CHECK(ver && !strncmp(ver, "OpenGL ES 3.2", 13) && maxtex == 16384 && glGetStringi(0x1F03, 0) && glGetError() == 0, "⑧ glGetString / glGetStringi / glGetIntegerv：ES 上下文版本 %s、最大纹理 %d", ver ? ver : "(空)", maxtex);
-    glGetIntegerv(0xDEAD, &maxtex); CHECK(glGetError() == 0x0500 && maxtex == 0, "⑧ 没实现的查询：INVALID_ENUM 回 0");
+    glGetIntegerv(0xDEAD, &maxtex); CHECK(glGetError() == 0x0500 && maxtex == 16384, "⑧ 没实现的查询：INVALID_ENUM、不动输出（GLES §2.3.1；D-5MW2 前写 0，空指针上崩）：%d", maxtex);
     GLuint prog = glCreateProgram(); GLint ok;
     for (int i = 0; i < 2; i++) {
         char path[1024]; snprintf(path, sizeof path, "%s/cube.%s", getenv("T_GL_DIR"), i ? "frag" : "vert");

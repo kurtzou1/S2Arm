@@ -12,7 +12,7 @@ ck "取到本树的缓存键（${K}）" '[ ${#K} = 16 ]'
 PYC=$H/graphics/widen/scan/__pycache__/nxaot_lock_probe.cpython-314.pyc; mkdir -p "$(dirname "$PYC")"; echo x > "$PYC"
 K2=$(bash "$H/services/nxaot.sh" osx-arm64 2>&1 | grep -oE '键 [0-9a-f]{16}' | head -1 | cut -d' ' -f2); rm -f "$PYC"; rmdir "$(dirname "$PYC")" 2> /dev/null
 ck "键目录里多出 __pycache__/*.pyc 不改键（${K} / ${K2}）" '[ "$K2" = "$K" ]'
-mkdir -p $T/c/osx-arm64-$K; echo lib > $T/c/osx-arm64-$K/libs2a_cs.a; echo "/x/libs2a_cs.a -lc++" > $T/c/osx-arm64-$K/ldflags.txt; echo 假 > $T/c/osx-arm64-$K/info.txt
+mkdir -p $T/c/osx-arm64-$K/rt; echo lib > $T/c/osx-arm64-$K/libs2a_cs.a; echo "-lc++" > $T/c/osx-arm64-$K/ldflags.txt; echo 假 > $T/c/osx-arm64-$K/info.txt
 # 命中不等锁：判「锁的持有者还活着时就已返回」，不判墙钟（11-01 gate-host 无缓存全套：算键要哈希 compat/tree 等全部源，高负载下单这一步就超原 5 秒线，rc=124 误红）。
 #   持有者活到单测亲手杀它为止（sleep 600 只是寿命上界）；timeout 300 只防挂死——错的写法（命中也等锁）要等持有者死，到 300 秒被杀判红
 sleep 600 & LIVE=$!

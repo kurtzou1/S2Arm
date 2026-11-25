@@ -11,6 +11,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+// 桩（11-25 #502）：帧率被补丁抬高了没有——子进程环境 T_RAISED=0 / 1，缺省 1（原有 ② 判上限本身，照旧按抬高了算）
+int s2a_fps_raised(void) { const char *e = getenv("T_RAISED"); return !e || *e != '0'; }
 static int g_bad, g_n;
 #define CHECK(c, ...) do { g_n++; if (!(c)) { g_bad++; printf("✗ "); printf(__VA_ARGS__); printf("\n"); } } while (0)
 static char g_exe[4096];
@@ -47,6 +49,15 @@ static void env_dies(const char *v) {
 int main(int argc, char **argv) {
     if (!realpath(argv[0], g_exe)) snprintf(g_exe, sizeof g_exe, "%s", argv[0]);
     if (argc >= 2 && !strcmp(argv[1], "--env")) return env_self(argc >= 3 ? argv[2] : NULL);
+    if (argc >= 4 && !strcmp(argv[1], "--mx")) {   // ③ 子进程：S2A_FPS=<argv2>、T_RAISED=<argv3>，打印游戏周期 1/30、1/60 的生效周期
+        if (strcmp(argv[2], "-")) setenv("S2A_FPS", argv[2], 1); else unsetenv("S2A_FPS");
+        setenv("T_RAISED", argv[3], 1); printf("%.9f %.9f\n", nvn_fps_period(1.0 / 30), nvn_fps_period(1.0 / 60)); return 0; }
+    if (argc >= 2 && !strcmp(argv[1], "--rs")) {   // ④ 子进程：同一进程里起局 30，再三次「进程内重启」各换一次环境后重读，打印四次读数
+        setenv("S2A_FPS", "30", 1); int a0 = nvn_fps_limit_set();
+        setenv("S2A_FPS", "0", 1); nvn_fps_session_reset(); int a1 = nvn_fps_limit_set();
+        setenv("S2A_FPS", "60", 1); nvn_fps_session_reset(); int a2 = nvn_fps_limit_set();
+        unsetenv("S2A_FPS"); nvn_fps_session_reset(); int a3 = nvn_fps_limit_set();
+        printf("%d %d %d %d\n", a0, a1, a2, a3); return 0; }
 
     // ①
     static const struct { const char *v; int e; } P[] = {
@@ -71,6 +82,31 @@ int main(int argc, char **argv) {
     env_dies("30abc");
     env_dies("1001");
 
-    printf("%s t_nvn_fps：帧率上限取值 %d 项 → %s\n", g_bad ? "✗" : "✓", g_n, g_bad ? "有不符合项" : "全过");
+        // ③ 玩家上限只压补丁抬上去的那部分（11-25 #502：原生 60、无补丁的款，上限 30 → 半速慢动作）。期望（手算，秒）：
+    //   原生 30（没抬高、游戏周期 1/30）：上限 30 → 1/30，不限 → 1/30；原生 60（没抬高、1/60）：上限 30 → 1/60（不压），不限 → 1/60；
+    //   补丁 60（抬高了、1/60）：上限 30 → 1/30，不限 → 1/60。旧码（不看抬高）原生 60 × 上限 30 得 1/30 = 慢
+    { static const struct { const char *cls; int game; const char *raised, *cap; double want; } M[] = {
+        {"原生30", 30, "0", "30", 1.0 / 30}, {"原生30", 30, "0", "-", 1.0 / 30}, {"原生60", 60, "0", "30", 1.0 / 60}, {"原生60", 60, "0", "-", 1.0 / 60},
+        {"补丁60", 60, "1", "30", 1.0 / 30}, {"补丁60", 60, "1", "-", 1.0 / 60} };
+      for (size_t i = 0; i < sizeof M / sizeof *M; i++) {
+        int fd[2]; if (pipe(fd)) { CHECK(0, "③ pipe"); continue; }
+        pid_t pid = fork();
+        if (pid == 0) { close(fd[0]); dup2(fd[1], STDOUT_FILENO); close(fd[1]); int null = open("/dev/null", O_WRONLY); if (null >= 0) dup2(null, STDERR_FILENO);
+            char *a[5] = {"t_nvn_fps", "--mx", (char *)M[i].cap, (char *)M[i].raised, NULL}; execv(g_exe, a); _exit(97); }
+        close(fd[1]); char buf[128] = {0}; ssize_t n = read(fd[0], buf, sizeof buf - 1); close(fd[0]); int st = 0; waitpid(pid, &st, 0);
+        double p30 = -1, p60 = -1; if (n > 0) sscanf(buf, "%lf %lf", &p30, &p60);
+        double got = M[i].game == 30 ? p30 : p60;
+        CHECK(fabs(got - M[i].want) < 1e-9, "③ %s × 上限 %s：期望周期 %.6f，实得 %.6f", M[i].cls, strcmp(M[i].cap, "-") ? M[i].cap : "不限", M[i].want, got);
+      } }
+    // ④ 进程内重启重读（#502 D-XTV7：设置 30 → 60 → 不限各点一次「立即重启」，旧码整个进程仍按 30）。期望（手算）：30 0 60 0；旧码（只读一次）30 30 30 30
+    { int fd[2]; if (pipe(fd)) CHECK(0, "④ pipe"); else {
+        pid_t pid = fork();
+        if (pid == 0) { close(fd[0]); dup2(fd[1], STDOUT_FILENO); close(fd[1]); int null = open("/dev/null", O_WRONLY); if (null >= 0) dup2(null, STDERR_FILENO);
+            char *a[3] = {"t_nvn_fps", "--rs", NULL}; execv(g_exe, a); _exit(97); }
+        close(fd[1]); char buf[128] = {0}; ssize_t n = read(fd[0], buf, sizeof buf - 1); close(fd[0]); int st = 0; waitpid(pid, &st, 0);
+        int r[4] = {-1, -1, -1, -1}; if (n > 0) sscanf(buf, "%d %d %d %d", &r[0], &r[1], &r[2], &r[3]);
+        CHECK(r[0] == 30 && r[1] == 0 && r[2] == 60 && r[3] == 0, "④ 进程内重启重读：期望 30 0 60 0，实得 %d %d %d %d", r[0], r[1], r[2], r[3]);
+    } }
+    printf("%s t_nvn_fps：帧率上限取值 %d 项 → %s\n", g_bad ? "✗" : "✓", g_n, g_bad ? "有不符合项" : "全过");   // 放最后：③ ④ 也算进来（原先在 ③ 之前打，后面红了这行仍是「全过」）
     return g_bad != 0;
 }

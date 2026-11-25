@@ -721,7 +721,8 @@ static int draw_samples(void) {
     for (int k = 0; k < ATT_N; k++) if (f->att[k].kind == 2) { gl_renderbuffer *r = gl_name_get(&renderbuffers, f->att[k].name); if (r && r->tex) return (int)r->tex.sampleCount; }
     return 1;   // 纹理附件：本层没有多采样纹理
 }
-// 整数与浮点查询共用一张表：返回分量个数（0 = 没实现），值写进 v（double 不丢 uint32 掩码精度）
+// 整数与浮点查询共用一张表：返回分量个数（0 = 没实现；QUERY_EMPTY = 认得、清单长度 0、一个都不写），值写进 v（double 不丢 uint32 掩码精度）
+enum { QUERY_EMPTY = -1 };
 static int query(GLenum p, double v[4]) {
     int n = color_query(p, 0, v); if (n) return n;
     if (p == 0x0C01 || (p >= 0x8825 && p < 0x8825 + GL_COLOR_TARGETS)) {   // DRAW_BUFFER / DRAW_BUFFERi
@@ -777,6 +778,14 @@ static int query(GLenum p, double v[4]) {
         case 0x0D50: v[0] = 8; return 1; case 0x0D51: v[0] = 0; return 1;       // SUBPIXEL_BITS / INDEX_BITS（RGBA 模式没有颜色索引）
         case 0x0D56: v[0] = 24; return 1; case 0x0D57: v[0] = 8; return 1;      // DEPTH_BITS / STENCIL_BITS
         case 0x86A2: v[0] = 0; return 1;                                        // NUM_COMPRESSED_TEXTURE_FORMATS（逐个格式按扩展认）
+        // D-5MW2（一款 GL 款游戏 1.3.1，iPad，起局 3/3 崩）：开局逐个查统一块上限与格式清单，原先没实现、置 INVALID_ENUM 且往 *v 写 0——
+        //   游戏按 NUM_COMPRESSED_TEXTURE_FORMATS = 0 开了个空缓冲（空指针）再查 COMPRESSED_TEXTURE_FORMATS，写 0 正好写到空指针上崩。
+        //   统一块：本层每个程序最多 8 个命名块（gl_int.h blk[8]）、绑定点 32 个（gl_buf.m）；块大小按 64 KB（Metal 常量缓冲在这以内无额外限制）
+        case 0x8A2B: case 0x8A2D: case 0x8A2E: v[0] = 8; return 1;              // MAX_VERTEX / FRAGMENT / COMBINED_UNIFORM_BLOCKS
+        case 0x8A2F: v[0] = 32; return 1;                                       // MAX_UNIFORM_BUFFER_BINDINGS
+        case 0x8A30: v[0] = 65536; return 1;                                    // MAX_UNIFORM_BLOCK_SIZE
+        case 0x87FE: case 0x8DF9: v[0] = 0; return 1;                           // NUM_PROGRAM_BINARY_FORMATS / NUM_SHADER_BINARY_FORMATS：都不支持
+        case 0x86A3: case 0x87FF: case 0x8DF8: return QUERY_EMPTY;              // COMPRESSED_TEXTURE / PROGRAM_BINARY / SHADER_BINARY_FORMATS：清单长度是上面的 0，一个都不写
         case 0x826E: v[0] = 1024; return 1;                                     // MAX_UNIFORM_LOCATIONS
         case 0x82DA: v[0] = 16; return 1;                                       // MAX_VERTEX_ATTRIB_BINDINGS
         case 0x8A34: v[0] = 256; return 1;                                      // UNIFORM_BUFFER_OFFSET_ALIGNMENT（Metal 常量缓冲偏移按 256 对齐；NVIDIA 同值）
@@ -802,20 +811,24 @@ static void query_red(const char *fn, GLenum p) {
     if (!known && n < 64) { seen[n++] = p; GLOG("【红】 %s(%#x) 没实现（回 0）", fn, p); }
     pthread_mutex_unlock(&mu);
 }
+// 查不到的 pname：置 INVALID_ENUM、不写输出（GLES 3.2 §2.3.1：出错的命令除置错外没有别的作用；原先写 *v = 0，D-5MW2 空指针上崩）
 GL(glGetIntegerv, void, GLenum p, GLint *v) {
     CTX(); double d[4]; int n = query(p, d);
-    if (!n) { query_red("glGetIntegerv", p); gl_set_error(GL_INVALID_ENUM); *v = 0; return; }
+    if (n == QUERY_EMPTY) return;
+    if (!n) { query_red("glGetIntegerv", p); gl_set_error(GL_INVALID_ENUM); return; }
     // 颜色 / 深度类浮点值按规范线性映射到整数全域；其余取整
     int norm = p == 0x0C22 || p == 0x0B73 || p == 0x0B70 || p == 0x8005;
     for (int i = 0; i < n; i++) v[i] = norm ? (GLint)llround(d[i] * 2147483647.0) : (GLint)(int64_t)d[i];
 }
 GL(glGetFloatv, void, GLenum p, GLfloat *v) {
     CTX(); double d[4]; int n = query(p, d);
-    if (!n) { query_red("glGetFloatv", p); gl_set_error(GL_INVALID_ENUM); *v = 0; return; }
+    if (n == QUERY_EMPTY) return;
+    if (!n) { query_red("glGetFloatv", p); gl_set_error(GL_INVALID_ENUM); return; }
     for (int i = 0; i < n; i++) v[i] = (GLfloat)d[i];
 }
 GL(glGetBooleanv, void, GLenum p, GLboolean *v) {
     CTX(); double d[4]; int n = query(p, d);
+    if (n == QUERY_EMPTY) return;
     if (!n) { query_red("glGetBooleanv", p); gl_set_error(GL_INVALID_ENUM); return; }
     for (int i = 0; i < n; i++) v[i] = d[i] != 0;
 }

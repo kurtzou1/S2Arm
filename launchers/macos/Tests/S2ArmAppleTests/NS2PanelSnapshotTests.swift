@@ -428,12 +428,21 @@ import XCTest
         XCTAssertEqual(keep.slots, [nil, .system(name: "Xbox", index: 0)], "P1 断开时 P2 保持在原槽 1")
         XCTAssertEqual(keep.systemPlayers()[k2], 2, "P2 玩家灯仍为 P2")
         XCTAssertEqual((keep.orderFile()["order"] as? [[String: Any]])?.map { $0["type"] as? String }, ["empty", "system"])
-        // 新手柄 P3 接入：不抢 P1 预留槽 0，排进槽 2
+        // 新手柄接入：占最小空槽 0，单人游戏从 P1 读到它；旧手柄之后重连排到空槽 2
         keep.reconcile(devices: [], mergedPair: false, system: [k2, k3])
-        XCTAssertEqual(keep.slots, [nil, .system(name: "Xbox", index: 0), .system(name: "Pro Controller", index: 0)], "新手柄不抢断连手柄的预留槽")
-        // P1 重连：回到原槽 0
+        XCTAssertEqual(keep.slots, [.system(name: "Pro Controller", index: 0), .system(name: "Xbox", index: 0)], "新手柄占最小空槽，不保留断连槽位")
+        XCTAssertEqual(keep.systemPlayers()[k3], 1, "新手柄是玩家 1")
+        XCTAssertEqual((keep.orderFile()["order"] as? [[String: Any]])?.map { $0["type"] as? String }, ["system", "system"], "顺序表不写 empty 稀疏槽")
+        // 旧手柄重连：原槽已被新手柄占用，改选空槽 2
         keep.reconcile(devices: [], mergedPair: false, system: [k2, k3, k1])
-        XCTAssertEqual(keep.slots, [.system(name: "DualSense", index: 0), .system(name: "Xbox", index: 0), .system(name: "Pro Controller", index: 0)], "P1 重连恢复到原槽 0")
+        XCTAssertEqual(keep.slots, [.system(name: "Pro Controller", index: 0), .system(name: "Xbox", index: 0), .system(name: "DualSense", index: 0)], "旧手柄重连不抢新手柄的 P1，排到空槽 P3")
+
+        // 同一身份重连仍回原槽，不因本次修复退化成永远追加
+        var same = PlayerAssignment()
+        same.reconcile(devices: [], mergedPair: false, system: [k1, k2])
+        same.reconcile(devices: [], mergedPair: false, system: [k2])
+        same.reconcile(devices: [], mergedPair: false, system: [k2, k1])
+        XCTAssertEqual(same.slots, [.system(name: "DualSense", index: 0), .system(name: "Xbox", index: 0)], "同一手柄重连回原槽")
 
         // 指定空槽分配（例如点选 P8，中间 P4 等为空时 slots.count 仍为 8，不隐藏 P8；P8 移除后尾部空槽自动省略）
         var target = PlayerAssignment()

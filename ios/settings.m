@@ -264,8 +264,9 @@ int s2a_ios_fullscreen_state(NSString *gid, BOOL *on) {
     if (g && [g objectForKey:@"S2AWidescreen"]) { *on = [g boolForKey:@"S2AWidescreen"]; return 0; }
     if (!g && [app objectForKey:@"S2AWidescreen"]) { *on = [app boolForKey:@"S2AWidescreen"]; return 0; }   // 单款壳：App 级就是这款
     if ([app objectForKey:@"S2AWidescreen"] && ![app boolForKey:@"S2AWidescreen"]) { *on = NO; return 0; }
-    *on = caps_value_in(dir, "widen") == 1 || [NSFileManager.defaultManager fileExistsAtPath:[dir stringByAppendingPathComponent:@"widen_verified.tsv"]]
-        || adaptive_items(dir, NULL).count > 0;   // 有自适应满屏补丁（11-13 起命中就默认开）
+    // 没选过：只有带自适应满屏补丁的款开（11-13 起命中就默认开，补丁铺满）。清单 widen 1 / widen_verified.tsv 不算：
+    //   我方通用满屏缺省不开（11-15 维护者「手动打开满屏走通用方案」，runtime/src/widen.c 名单门），这里显示的必须是起局真生效的（#2205：原先显示开、实际 16:9）
+    *on = adaptive_items(dir, NULL).count > 0;
     return 0;
 }
 void s2a_ios_set_fullscreen(NSString *gid, BOOL on) {
@@ -456,11 +457,13 @@ void s2a_ios_apply_graphics_settings(NSUserDefaults *defaults) {
         // 旧键 S2AWidenForce（「宽屏强制启用」，11-13 并进满屏开关）：开着的一次性转成这款满屏明确开
         if ([game boolForKey:@"S2AWidenForce"]) [game setBool:YES forKey:@"S2AWidescreen"];
         [game removeObjectForKey:@"S2AWidenForce"];
-        BOOL fs = NO;
-        // 有自适应满屏补丁的款由补丁铺满（下面社区补丁那段让 S2Arm 满屏让开），这里不强开 S2Arm 满屏，免得拉宽两次
-        // 11-15 维护者「没补丁的游戏手动打开满屏就走咱们通用方案」：玩家明确开满屏、没有自适应满屏补丁 → 我方通用满屏（第三层整套放宽，不看已验证名单）。
-        //   原先还要 S2A_CAPS_OWN=1（v0.4.0 撤通用满屏时加的），手动开也不生效；没选过照旧不开（宿主缺省关，runtime/src/widen.c）
-        if ([game objectForKey:@"S2AWidescreen"] && [game boolForKey:@"S2AWidescreen"] && s2a_ios_fullscreen_state(@(gid), &fs) == 0 && fs && !adaptive_items(s2a_ios_game_dir(@(gid)), NULL).count) {
+    }
+    // 满屏：起局与设置页读同一个生效值（s2a_ios_fullscreen_state），不另判（#2205：两处各判一套，显示开、实际 16:9）。
+    //   生效值开、又没有自适应满屏补丁 = 玩家明确开了 → 我方通用满屏（11-15 维护者「没补丁的游戏手动打开满屏就走咱们通用方案」：第三层整套放宽，不看已验证名单）；
+    //   有自适应满屏补丁的款由补丁铺满（下面社区补丁那段让 S2Arm 满屏让开），这里不强开，免得拉宽两次。单款壳（没有游戏号）同样走这里
+    {
+        NSString *g = game ? @(gid) : nil; BOOL fs = NO;
+        if (s2a_ios_fullscreen_state(g, &fs) == 0 && fs && !adaptive_items(s2a_ios_game_dir(g), NULL).count) {
             if (!getenv("S2A_WIDEN_VERIFIED")) apply_environment("S2A_WIDEN_VERIFIED", @"1");
             if (!getenv("S2A_WIDESCREEN")) apply_environment("S2A_WIDESCREEN", @"1");
             fprintf(stderr, "[S2A 画面设置] 满屏：这款明确开（没进已验证名单也铺满，自检兜底）\n");

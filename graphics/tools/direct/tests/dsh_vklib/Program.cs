@@ -12,6 +12,7 @@
 //      12 条记录按 (键, 种类) 升序、_b.json 种类 1 / _b.spv 种类 52、_vg<t>.json 种类 112+t / _vg<t>.spv 种类 120+t，每段字节 = 逐键文件，
 //      头部 36–43 = 完整指纹 VkLib.Fp（u64 小端）、44–47 为 0；同一目录再打一次报红。
 //   ⑪ 跨次复用（--cas，11-24）：同输入二次全命中且产物逐字节同；只改一键记录只重翻那一键；配置档 / 原生工具身份 / 图像读档位 / DMSH_BF 任一变全部重翻。
+//   ⑫ 并行（jobs = 4，11-24）：不带仓与带仓命中两种，产物与 vk_build.tsv 都与单路逐字节相同。
 // 用法：dsh_vklib_test <spirv-cross> <spirv-val> <工作目录> --dsx <libdsx>
 using S2A.Dsh;
 using S2A.DshVkLib;
@@ -196,6 +197,18 @@ static class Program
             Check($"⑪ DMSH_BF=1：命中 {r7.H}、翻译 {r7.M}（期望 0 / 4）", r7.H == 0 && r7.M == 4);
             var r8 = Run("8", pkg, prof, true, "t");
             Check($"⑪ 回到原输入：命中 {r8.H}、翻译 {r8.M}（期望 4 / 0，前面几轮没冲掉原条目）", r8.H == 4 && r8.M == 0 && Same(Outs(r8.Dir), baseOut));
+        }
+        // ⑫ 并行（jobs = 4）：不带仓与带仓命中两种，产物与 vk_build.tsv 都与单路（上面 outDir）逐字节相同
+        {
+            Dictionary<string, byte[]> All(string d) => Directory.GetFiles(d).ToDictionary(f => Path.GetFileName(f), File.ReadAllBytes, StringComparer.Ordinal);
+            bool Eq(Dictionary<string, byte[]> x, Dictionary<string, byte[]> y) => x.Count == y.Count && x.All(kv => y.TryGetValue(kv.Key, out var v) && v.AsSpan().SequenceEqual(kv.Value));
+            var single = All(outDir);
+            string p1 = Path.Combine(root, "par1"), p2 = Path.Combine(root, "par2"), pc = Path.Combine(root, "parcas");
+            var pr = VkLib.Build(pkg, prof, p1, xc, work, true, null, null, jobs: 4);
+            Check($"⑫ 并行 4 路不带仓：{pr.Count} 行，产物与 vk_build.tsv 与单路逐字节相同", pr.Count == rows.Count && Eq(All(p1), single));
+            VkLib.Build(pkg, prof, Path.Combine(root, "parfill"), xc, work, true, pc, "t", jobs: 4);
+            VkLib.Build(pkg, prof, p2, xc, work, true, pc, "t", jobs: 4);
+            Check($"⑫ 并行 4 路带仓再出：命中 {VkLib.CacheHits}、翻译 {VkLib.CacheMisses}（期望 4 / 0），与单路逐字节相同", VkLib.CacheHits == 4 && VkLib.CacheMisses == 0 && Eq(All(p2), single));
         }
         Console.WriteLine(bad == 0 ? "dsh_vklib 逐键产物：全过" : "dsh_vklib 逐键产物：有不通");
         return bad;

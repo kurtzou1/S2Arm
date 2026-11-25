@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 import romfs_list  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'tools'))
 from progress import Ticker  # noqa: E402
+import fullnote  # noqa: E402   # 写满当场量一次（#2164）
 
 MAGIC, FORMAT, PAGE = b'S2AIMG01', 1, 16384
 HDR = struct.Struct('<8sII16s64s5Q')
@@ -141,8 +142,24 @@ def copy_std(std, part, at, progress, consume):
     """标准 RomFS 镜像 std 整份写进 part 的 at 处（IMG 的 RomFS 段就是这段字节：RomFS 内部偏移相对段起点，搬到哪都不用改）→ 段长。
     progress(已写字节)。consume（#746 边写边腾）：从尾往前一块块搬、每搬完一块就把镜像截短到那里，峰值只多一块；
     镜像还有别的硬链接（截短会连带改掉别处那份）时照常从头拷，拷完只删这个名字。写到一半失败 = 镜像已残缺，调用方清掉整个出包工作目录重解"""
+    import errno
+    real = os.path.realpath(std); size = os.path.getsize(real); wrote = [0]
+    def step(n):
+        wrote[0] = n; progress(n)
+    try:
+        return _copy_std(real, std, part, at, step, consume, size)
+    except OSError as e:
+        # 写满当场量一次、打「【写满】」事实（tools/fullnote.py）：失败后出包工作目录一清空间就回来，事后再量说不清差多少（#2164：
+        #   出包写 game.img 时盘满，玩家只看到「准备这个游戏需要更多空余空间」，不知道要留多少）。这一步还要写的量 = 镜像剩下没拷的部分
+        if e.errno in (errno.ENOSPC, errno.EDQUOT):
+            left = os.path.getsize(real) if consume and os.path.exists(real) else size - wrote[0]   # 边写边腾时镜像已截到只剩没拷的
+            fullnote.note(os.path.dirname(os.path.abspath(part)), 'game.img', left)
+        raise
+
+
+def _copy_std(real, std, part, at, progress, consume, size):
     import stat
-    real = os.path.realpath(std); size = os.path.getsize(real); done = 0
+    done = 0
     with open(part, 'r+b') as w:
         if consume and os.stat(real).st_nlink == 1:
             os.chmod(real, os.stat(real).st_mode | stat.S_IWUSR)

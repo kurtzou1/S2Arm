@@ -416,6 +416,7 @@
 "gfx.filter.nearest" = "2D 游戏专用";
 "gfx.fpsLimit" = "帧率上限";
 "gfx.fpsLimit.none" = "不限";
+"gfx.fpsLimit.native.note" = "这款没有开 60 帧补丁，按游戏自己的帧率跑：上限 30 这一局不生效（压到 30 游戏会变慢）。";
 "gfx.resolution" = "渲染分辨率";
 "gfx.brightness" = "画面亮度";
 "gfx.brightness.system" = "跟随系统";

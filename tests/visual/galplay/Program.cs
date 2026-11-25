@@ -130,6 +130,7 @@ static class P
         // 录像原始出图参数（宽屏门禁期望用，只读录像、不经包装层）：上屏贴图的客体尺寸 + 裁剪（与 gal_present.m 同口径：左右都 0 = 整宽）+ 拉伸 + 宽高比，变化次数与首几次所在出图号
         (int, int, int, int, int, int, bool, float, float) rawLast = default; long rawChg = 0; var rawChgAt = new List<long>();
         long until = Opt(a, "--until") is string us ? long.Parse(us) : -1;
+        string? progress = Environment.GetEnvironmentVariable("GALPLAY_PROGRESS") is string gp && gp.Length > 0 ? gp : null;   // 每次上屏把序号写这里（进展心跳）
         // --trace <帧>：该帧每次绘制记一行（记录号、程序、颜色目标 0 与尺寸、包装层换算方式、视口 0 / 裁剪 0 换算前 → 后）写 trace.tsv（要配 --widen）
         long traceFrame = Opt(a, "--trace") is string tfs ? long.Parse(tfs) : -1; var trace = new StringBuilder("记录\t程序\t目标\t方式\t\t目标状态\t视口\t裁剪\t外推\t采样\n");
         // --cbuf <程序,…>:<绑定>（-1 = 全部已绑的）：配 --trace，该帧这些程序的每次绘制把该常量绑定的内容（前 4096 字节）按 vec4 写进 cbuf.tsv，并记采样贴图（号:宽x高）
@@ -320,6 +321,7 @@ static class P
             if (r.Op == 0x029) fRts++;
             if (r.Op != 0x201) continue;
             presents++;
+            if (progress != null) File.WriteAllText(progress, presents.ToString());   // 进展心跳：门禁按「多久没新上屏」收卡死，不按固定墙钟（见 tests/visual/widen_gate.sh）
             if (dbT != 0 && presents == traceFrame && dbRec >= 0) { DbStep(); dbRec = -1; }
             if (wr != null) bands.Append(bands.Length > 0 ? " " : "").Append(wr.LastPillar);
             ImageCrop rc0 = pl.Length >= 4 + System.Runtime.CompilerServices.Unsafe.SizeOf<ImageCrop>() ? System.Runtime.InteropServices.MemoryMarshal.Read<ImageCrop>(pl[4..]) : default;

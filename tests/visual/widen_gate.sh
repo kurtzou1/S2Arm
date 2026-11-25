@@ -126,14 +126,18 @@ tz=$((SECONDS - t0))
 ENVS=(NXGAL_BOUNDS_COUNT=0 NXGAL_SHADER_CACHE_DIR=$C/sh SW_GAL_SPV_DUMP=$C/spv); [ -f "$LIB/gal.shards" ] && { ENVS+=(NXGAL_SHLIB_DIR=$LIB); touch "$LIB"; }
 
 # 回放：每款 不放宽（A）+ 放宽（W / G）各一次，全部并行；只放到表里最后一帧
+# 收卡死按进展、不按固定墙钟（11-25）：galplay 每次上屏写进展文件，RIDLE 秒没有新上屏或总时长到 RHARD 才收（退出码同 timeout 的 124）。
+#   原先每遍 timeout 150：门禁步骤一律 taskpolicy -c utility 跑，18 遍并行回放在高负载门禁主机上最重的两款放到 150 秒被杀、
+#   判「回放没放完」，同提交换空闲主机复跑绿（11-24 21:16、11-25 00:32 / 00:51 三次）——慢不是错，卡住才是
+RIDLE=${WIDEN_REPLAY_IDLE_S:-120}; RHARD=${WIDEN_REPLAY_HARD_S:-900}
 TPLAY=$(date +%s)   # 回放开局时刻：崩溃留证只收这之后的报告
 for row in "${GAMES[@]}"; do
   IFS=$'\t' read -r g mode fr _ <<< "$row"
   last=${fr##*,}; ex=(--widen 2.1727 --widen-check); [ "$mode" = G ] && ex+=(--game-wide)
   # 同产品 s2a_widen_layout()：第二层启用了界面布局尺寸点（lytsz）= 游戏界面布局也是宽的
   [ "$mode" = G ] && [ "$(cat graphics/widen/tables/"${g}"_*/widen_enable.handheld.tsv 2> /dev/null | awk -F'\t' 'NR > 1 && $4 == 1 && $3 == "lytsz"' | wc -l | tr -d ' ')" -gt 0 ] && ex+=(--layout-wide)
-  ( env "${ENVS[@]}" NXGAL_XC_LOG="$T/$g.A.xc" timeout 150 "$PLAY/galplay" "$T/rec/$g.rec" "$T/$g/A" --frames "$fr" --until $((last + 1)) > "$T/$g.A.log" 2>&1; echo $? > "$T/$g.A.rc" ) &
-  ( env "${ENVS[@]}" NXGAL_XC_LOG="$T/$g.W.xc" timeout 150 "$PLAY/galplay" "$T/rec/$g.rec" "$T/$g/W" --frames "$fr" --until $((last + 1)) "${ex[@]}" > "$T/$g.W.log" 2>&1; echo $? > "$T/$g.W.rc" ) &
+  ( bash tools/idle_timeout.sh "$RIDLE" "$RHARD" "$T/$g.A.prog" -- env "${ENVS[@]}" NXGAL_XC_LOG="$T/$g.A.xc" GALPLAY_PROGRESS="$T/$g.A.prog" "$PLAY/galplay" "$T/rec/$g.rec" "$T/$g/A" --frames "$fr" --until $((last + 1)) > "$T/$g.A.log" 2>&1; echo $? > "$T/$g.A.rc" ) &
+  ( bash tools/idle_timeout.sh "$RIDLE" "$RHARD" "$T/$g.W.prog" -- env "${ENVS[@]}" NXGAL_XC_LOG="$T/$g.W.xc" GALPLAY_PROGRESS="$T/$g.W.prog" "$PLAY/galplay" "$T/rec/$g.rec" "$T/$g/W" --frames "$fr" --until $((last + 1)) "${ex[@]}" > "$T/$g.W.log" 2>&1; echo $? > "$T/$g.W.rc" ) &
 done
 wait
 tr=$((SECONDS - t0))

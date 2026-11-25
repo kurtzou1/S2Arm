@@ -1,3 +1,4 @@
+#include <stdarg.h>
 // Tests the actual Mac input adapter, including atomic cross-thread snapshots.
 #include <pthread.h>
 #include <stdio.h>
@@ -51,6 +52,9 @@ static int fit_w, fit_h;
 int s2a_screen_fit(int pw, int ph) { fit_w = pw; fit_h = ph; return 0; }   // 宽屏跟窗口比例（runtime/src/widen.c）：只记前端交出的像素尺寸
 int s2a_hud_on(void) { return 0; }   // 开发浮层（runtime/src/hud.c）在这里不测，关着
 int s2a_hud_text(char *out, size_t n, const s2a_hud_host *h) { (void)h; return snprintf(out, n, "%s", ""); }
+int s2a_hud_brief(char *out, size_t n) { return snprintf(out, n, "%s", ""); }   // 帧率浮层（macos/perf_brief.m，#2207）在这里不测
+int s2a_hud_brief_fps(char *out, size_t n) { return snprintf(out, n, "%s", ""); }
+void s2a_hud_brief_set(int on) { (void)on; }
 // 存档原子提交判定（runtime/src/direct_prompt.c s2a_save_atomic_poll，判定本身由 runtime/tests/t_direct_prompt.c 测）：这里只给读数，测 Mac 横幅接线
 static int fake_atomic;
 int s2a_save_atomic_poll(void) { int bits = fake_atomic; fake_atomic = 0; return bits; }
@@ -65,6 +69,9 @@ int s2a_widen_full(void) { return fake_widen_full; }
 int s2a_screen_w(void) { return fake_screen_w; }
 int s2a_screen_h(void) { return fake_screen_h; }
 static void expect(int ok, const char *what) { if (!ok) { fprintf(stderr, "FAIL: %s\n", what); exit(1); } }
+static uint64_t g_fake_mouse_ns;   // #2131 鼠标时间窗的假时钟
+static uint64_t fake_mouse_now(void) { return g_fake_mouse_ns; }
+static void expectf(int ok, const char *fmt, ...) { if (!ok) { va_list a; va_start(a, fmt); fputs("FAIL: ", stderr); vfprintf(stderr, fmt, a); fputc('\n', stderr); va_end(a); exit(1); } }
 static NSEvent *key_event(NSEventType type, unsigned short code, BOOL repeat) {
     return [NSEvent keyEventWithType:type location:NSZeroPoint modifierFlags:0 timestamp:0
         windowNumber:0 context:nil characters:@"" charactersIgnoringModifiers:@"" isARepeat:repeat keyCode:code];
@@ -620,11 +627,13 @@ static void test_event_input(void) {
     apply_mouse_options(); mouse_captured = YES; focused = YES;
     TestMotion *motion = [TestMotion new]; motion.deltaX = 2;
     S2AMetalView *motionView = [S2AMetalView new];
+    mouse_now = fake_mouse_now; g_fake_mouse_ns = 500000000ull;
     [motionView mouseMoved:(NSEvent *)motion];
     s2a_pad_snapshot moved; read_ex(&moved);
-    expect(moved.axes[2] == 3000, "read_ex applies pending mouse delta once");
-    read_ex(&moved);
-    expect(moved.axes[2] == 0, "read_ex consumes the mouse delta");
+    expectf(moved.axes[2] == 1454, "read_ex applies the mouse window (3000 × 16 / 33 = 1454): %d", moved.axes[2]);
+    g_fake_mouse_ns += 40000000; read_ex(&moved);
+    expect(moved.axes[2] == 0, "read_ex centers once the window has passed");
+    mouse_now = mouse_clock; reset_input();
     mouse_captured = NO;
     config = default_config(); focused = YES; s2a_pad_set_active(0); reset_input();
     puts("Mac input: event-driven snapshot, wait wake, idle-hold persistence and latency recording passed");
@@ -1863,15 +1872,19 @@ int main(int argc, const char **argv) {
         S2AMetalView *motionView = [S2AMetalView new];
         mouse_captured = YES; // Handler precondition only; do not call the OS capture API in unit tests.
         TestMotion *motion = [TestMotion new]; motion.deltaX = 1; motion.deltaY = -1;
+        // #2131 回中模式按 33 ms 时间窗换算：摇杆量 = 窗内位移和 × 16 / 33（假时钟，期望手算：1 点 = 1500）
+        mouse_now = fake_mouse_now; g_fake_mouse_ns = 1000000000ull; reset_input();
         for (int i = 0; i < 8; i++) [motionView mouseMoved:(NSEvent *)motion];
-        sample_input(); sample_input(); // 120 Hz frontend may publish twice before the 60 Hz HID read.
-        s2a_vpad_read(sticks);
-        expect(sticks[2] == 12000 && sticks[3] == 12000, "all mouse deltas survive frontend polls until HID consumes them");
-        s2a_vpad_read(sticks); expect(!sticks[2] && !sticks[3], "mouse deltas consumed exactly once");
+        sample_input(); sample_input(); // 120 Hz frontend may publish twice before the HID read.
+        g_fake_mouse_ns += 1000000; s2a_vpad_read(sticks);
+        expectf(sticks[2] == 5818 && sticks[3] == 5818, "8 deltas inside the window: 12000 × 16 / 33 = 5818 (%d, %d)", sticks[2], sticks[3]);
+        g_fake_mouse_ns += 5000000; s2a_vpad_read(sticks);
+        expectf(sticks[2] == 5818, "a second HID read 5 ms later inside the window sees the same deflection (not consumed once): %d", sticks[2]);
+        g_fake_mouse_ns += 30000000; s2a_vpad_read(sticks); expect(!sticks[2] && !sticks[3], "36 ms after the last movement the stick is centered");
         motion.deltaX = 4; motion.deltaY = 0; [motionView mouseMoved:(NSEvent *)motion];
         motion.deltaX = -4; [motionView mouseMoved:(NSEvent *)motion];
-        s2a_vpad_read(sticks); expect(!sticks[2], "opposite mouse deltas cancel within one HID interval");
-        motion.deltaX = 100; [motionView mouseMoved:(NSEvent *)motion];
+        s2a_vpad_read(sticks); expect(!sticks[2], "opposite mouse deltas cancel within the window");
+        g_fake_mouse_ns += 40000000; motion.deltaX = 100; [motionView mouseMoved:(NSEvent *)motion];
         s2a_vpad_read(sticks); expect(sticks[2] == 32767, "mouse stick clamps only at HID read");
         [motionView mouseMoved:(NSEvent *)motion]; reset_input();
         s2a_vpad_read(sticks); expect(!sticks[2], "focus reset discards pending mouse movement");
@@ -1879,6 +1892,23 @@ int main(int argc, const char **argv) {
         s2a_vpad_read(sticks); expect(!sticks[2], "uncaptured cursor does not rotate the camera");
         mouse_captured = YES; focused = NO; [motionView mouseMoved:(NSEvent *)motion];
         s2a_vpad_read(sticks); expect(!sticks[2], "unfocused mouse motion is ignored");
+        focused = YES;
+        {   // #2131 的现场：鼠标每 8 ms 一个 1 点事件，HID 每 5 ms 读一次，30 帧的游戏每 33 ms 只看最新一条。
+            //   期望：游戏每帧看到的量都在 16 ms 的位移附近（1500 × 16 / 8 = 3000，窗内 4–5 个事件 → 2909–3636），不出现 0；
+            //   原先（读完清零）游戏看到的是最后 5 ms 里有没有事件，0 和 1500 交替
+            reset_input(); g_fake_mouse_ns = 2000000000ull; motion.deltaX = 1; motion.deltaY = 0;
+            uint64_t next_ev = g_fake_mouse_ns, next_game = g_fake_mouse_ns + 40000000; int frames = 0, zero = 0, lo = 1 << 30, hi = 0;
+            for (uint64_t t = g_fake_mouse_ns; frames < 30; t += 1000000) {
+                g_fake_mouse_ns = t;
+                if (t >= next_ev) { [motionView mouseMoved:(NSEvent *)motion]; next_ev += 8000000; }
+                if ((t - 2000000000ull) % 5000000 == 0) s2a_vpad_read(sticks);   // InputPump 的 5 ms 一格
+                if (t >= next_game) { frames++; zero += !sticks[2]; lo = MIN(lo, sticks[2]); hi = MAX(hi, sticks[2]); next_game += 33333333; }
+            }
+            expectf(!zero && lo >= 2909 && hi <= 3636, "steady mouse at 30 fps: no zero frames, every frame 2909..3636 (zero %d, %d..%d)", zero, lo, hi);
+            g_fake_mouse_ns += 40000000; s2a_vpad_read(sticks); expect(!sticks[2], "steady mouse stops: centered within the window");
+            reset_input();
+        }
+        mouse_now = mouse_clock;
         // 审计 P2-62：recenter = false（赛车预设）→ 停手后右摇杆停在原处；复位清零；recenter 缺省 / true → 下一拍回中。期望按 1500 × 灵敏度手算
         config = @{@"keyboard": @{}, @"mouse": @{}, @"gamepad": @{}, @"axes": @{}, @"deadzone": @0.15,
                    @"mouseOptions": @{@"mode": @"camera", @"sensitivityX": @1, @"sensitivityY": @1, @"recenter": @NO}};
@@ -1890,9 +1920,11 @@ int main(int argc, const char **argv) {
         s2a_vpad_read(sticks); expect(sticks[2] == 6000, "no-recenter stick accumulates further movement");
         reset_input(); s2a_vpad_read(sticks); expect(!sticks[2], "focus reset recenters a held stick");
         config = default_config(); apply_mouse_options();
+        mouse_now = fake_mouse_now; g_fake_mouse_ns = 3000000000ull;
         [motionView mouseMoved:(NSEvent *)motion];
-        s2a_vpad_read(sticks); expect(sticks[2] == 3000, "default recenter moves the stick");
-        s2a_vpad_read(sticks); expect(!sticks[2], "default recenter returns to center after the mouse stops");
+        s2a_vpad_read(sticks); expectf(sticks[2] == 1454, "default recenter moves the stick (3000 × 16 / 33 = 1454): %d", sticks[2]);
+        g_fake_mouse_ns += 40000000; s2a_vpad_read(sticks); expect(!sticks[2], "default recenter returns to center after the mouse stops");
+        mouse_now = mouse_clock;
         mouse_captured = NO; focused = YES;
         config = @{@"keyboard": @{@"A": @{@"code": @14, @"modifiers": @1}, @"B": @{@"code": @56}},
                    @"mouse": @{}, @"gamepad": @{}, @"axes": @{}, @"deadzone": @0.15};

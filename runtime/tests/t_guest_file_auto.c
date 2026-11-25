@@ -198,6 +198,14 @@ int main(void) {
         int on = s2a_guest_file_wanted6(NULL, S1, 4085 * MB, 5670 * MB, 3874 * MB, H2, G, 0, &low);
         CHECK(on == 1 && low == 0 && s2a_guest_soft_tier(on, NULL, S1, 4085 * MB, 3874 * MB, 0) == 1, "73 D-F5PT：开（%d）、不提示（low %d）、池装得下按宿主估计", on, low);
         CHECK(s2a_guest_next_budget(NULL, 4085 * MB, G, H2, 0, 0, 0, 0, 0, 0, &src) == 1525 * MB && src == 3, "73 首局预算 4085 − 512 − 2048 = 1525 MB（原先 0 = 整段）"); }
+    {   // 74 起局剩余按前台上限补回（s2a_guest_room_fg，#674 对照 11-25：多款容器起局时是预热 / 后台档，读到剩余 6140、上限 6140 + 占用 1000；
+        //   装游戏前此刻上限 8122 + 1000 → 补 1982 = 8122）。期望手算：上限变大补差、变小 / 起局没读到（0）照旧（只补不扣）
+        uint64_t s2a_guest_room_fg(uint64_t, uint64_t, uint64_t);
+        CHECK(s2a_guest_room_fg(6140 * MB, 7140 * MB, 9122 * MB) == 8122 * MB, "74 后台档 6140、上限 7140 → 9122：补成 8122 MB");
+        CHECK(s2a_guest_room_fg(8188 * MB, 9188 * MB, 9000 * MB) == 8188 * MB && s2a_guest_room_fg(6140 * MB, 0, 9122 * MB) == 6140 * MB,
+              "74 上限变小不扣（8188 照旧）；起局没读到上限不补（6140 照旧）");
+        uint64_t s2a_guest_room_eff(uint64_t, uint64_t, uint64_t);
+        CHECK(s2a_guest_room_eff(s2a_guest_room_fg(6140 * MB, 7140 * MB, 9122 * MB), 7536 * MB, 512 * MB) == 7024 * MB, "74 补后仍按物理内存封顶：7536 − 512 = 7024 MB"); }
     {   // 67 「内存可能不够」只问一次（s2a_guest_lowram_once）：记号在 mem_peak_anon 同目录 lowram_asked；第一次 0（要问）、之后 1
         int s2a_guest_lowram_once(void); char d[] = "/tmp/t_lowram_XXXXXX"; if (!mkdtemp(d)) { CHECK(0, "67 建临时目录"); return 1; }
         char pk[256]; snprintf(pk, sizeof pk, "%s/w/mem_peak_anon", d); setenv("S2A_GUEST_MEM_PEAK", pk, 1);

@@ -21,4 +21,16 @@ import XCTest
         _ = a.reconcile(devices: [], mergedPair: false, system: SystemControllers.assignmentKeys(pads: [pad(ds)], hidNames: [powerA]))
         XCTAssertEqual(a.units, [.system(name: powerA, index: 0), .system(name: ds, index: 0)], "再连 DualSense 排 P2，PowerA 仍是 P1")
     }
+    /// #1151 玩家实测序列（PR #2171）：先连 DualSense（P1）→ 关掉它 → 连 PowerA，PowerA 要占 P1（单人游戏只读 P1）。
+    ///   旧规则把 P1 留给断开的 DualSense，PowerA 排到 P2；之后 DualSense 回来不抢 PowerA 的 P1，排到 P2
+    func testNewPadTakesP1AfterTheOldOneLeft() {
+        var a = PlayerAssignment()
+        _ = a.reconcile(devices: [], mergedPair: false, system: SystemControllers.assignmentKeys(pads: [pad(ds)], hidNames: []))
+        XCTAssertEqual(a.slots, [.system(name: ds, index: 0)], "先连 DualSense：P1")
+        _ = a.reconcile(devices: [], mergedPair: false, system: SystemControllers.assignmentKeys(pads: [], hidNames: []))
+        _ = a.reconcile(devices: [], mergedPair: false, system: SystemControllers.assignmentKeys(pads: [], hidNames: [powerA]))
+        XCTAssertEqual(a.slots.first ?? nil, .system(name: powerA, index: 0), "DualSense 关掉后连 PowerA：PowerA 是 P1（旧规则排到 P2）")
+        _ = a.reconcile(devices: [], mergedPair: false, system: SystemControllers.assignmentKeys(pads: [pad(ds)], hidNames: [powerA]))
+        XCTAssertEqual(a.slots, [.system(name: powerA, index: 0), .system(name: ds, index: 0)], "DualSense 回来排 P2，不抢 PowerA 的 P1")
+    }
 }

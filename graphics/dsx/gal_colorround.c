@@ -1,4 +1,4 @@
-// 片元颜色出口 half 舍入改写（翻译期）：片元主入口的 float4 color 输出按附件位图（s2a_half_mask，[[buffer(GAL_COLOR_ROUND_SLOT)]]）在 return 前做 RTZ 量化，
+// 片元颜色出口 half 舍入改写（翻译期）：片元主入口的 float4 color 输出按附件位图（[[buffer(GAL_COLOR_ROUND_SLOT)]]）在 return 前做 RTZ 量化（直连链另加可编程混合，见 k_pblend），
 //   绘制处按附件格式及混合状态填位图（gal_state.m pso_color_round_mask）。原 MSL 其余部分一字不改；记录位 GAL_REC_COLOR_ROUND（gal_prog.m）。
 //   纯 C、不引 Metal 头（#783）：编进直连翻译库 libdsx（graphics/dsx/Makefile，11-08；渲染器另链它），
 //   Linux / Windows 出包机同编（Makefile 的 linux 目标、dsx_win.py），S2A.Dsh 的 NxgalSpvCross.ColorRound 经 DllImport("dsx") 调。
@@ -12,7 +12,7 @@
 // 直连离线链和设备现编共用颜色出口规则；失败不生成未量化的新链产物。
 // *out 与 nxgal_dmsh_xc_free 使用相同的 malloc/free 所有权。
 NXGAL_API int32_t nxgal_dmsh_color_round(const char *msl, const char *entry, char **out, char *err, uint64_t errlen) {
-    char why[256] = ""; *out = gal_color_round_msl(msl, entry, why);
+    char why[256] = ""; *out = gal_color_round_pb_msl(msl, entry, why);   // 直连链（S2A.Dsh SpvCross.ColorRound）：带可编程混合开关（#674）
     if (!*out) { if (errlen) snprintf(err, errlen, "%s", why); return 1; }
     if (errlen) err[0] = 0;
     return 0;
@@ -38,8 +38,62 @@ static const char k_half_round[] =
 "static inline float4 s2a_half_rtz(float4 x) {\n"
 "    return float4(s2a_half_rtz(x.x), s2a_half_rtz(x.y), s2a_half_rtz(x.z), s2a_half_rtz(x.w));\n"
 "}\n"
+"static inline float4 s2a_blend_zero_rgb(float4 x) {\n"
+"    if (x.w == 0.0f) x.xyz = select(x.xyz, float3(0.0f), (as_type<uint3>(x.xyz) & 0x7f800000u) == 0x7f800000u);\n"
+"    return x;\n"
+"}\n"
 "#endif\n";
 const char *gal_color_round_helpers(void) { return k_half_round; }
+
+// 可编程混合（#674 通用根修）：Maxwell 的 SET_BLEND_FLOAT_OPTION.ZERO_TIMES_ANYTHING_IS_ZERO（NVN 驱动初始化置 TRUE）——混合里每次「系数 × 颜色」
+//   只要一个因子为 0 积就是 0（NaN / ±Inf 乘 0 得 0）；Metal 固定混合按 IEEE（0 × NaN = NaN），#674 时之笛地形黑块即此。每个 float4 颜色输出 n 带一个
+//   函数常量 s2a_pb<n>_c（编号 GAL_PB_FC0 + n）：宿主给浮点附件开了混合的管线把它置真、把这个附件的固定混合关掉，入口就读目标像素（帧缓冲读取，
+//   读入参数随常量门控：常量为假时参数不存在、不读帧缓冲）并按 27 号槽里的混合状态自己混合。27 号槽是 S2APBlend：第一个字仍是 RTZ / 清 NaN 位图
+//   （只开位图时宿主照旧只绑 4 字节表项），其后是常量色与各附件的 (方程, 源系数, 目标系数) ×（RGB, A），取值即 NVN 枚举（nvn.h；期望值来源
+//   graphics/nvn/tests/maxwell_blend_ref.py）。MIN / MAX 不乘系数，遇 NaN 取另一方（precise::，运行时是宽松数学）。第二源系数（SRC1_*）用输出 1 的值：
+//   片元自己算，不需要双源硬件；只对附件 0（Maxwell 双源只在附件 0）
+static const char k_pblend[] =
+"#ifndef S2A_PBLEND\n"
+"#define S2A_PBLEND\n"
+"struct S2APBlend { uint mask; uint pad0, pad1, pad2; float4 k; uint4 f[8][2]; };\n"
+"static inline float4 s2a_pb_mul(float4 x, float4 y) { return select(x * y, float4(0.0f), x == 0.0f || y == 0.0f); }\n"
+"static inline float4 s2a_pb_factor(uint f, float4 s, float4 s1, float4 d, float4 k) {\n"
+"    switch (f) {\n"
+"    case 0x1u: return float4(0.0f);\n"
+"    case 0x2u: return float4(1.0f);\n"
+"    case 0x3u: return s;\n"
+"    case 0x4u: return 1.0f - s;\n"
+"    case 0x5u: return float4(s.w);\n"
+"    case 0x6u: return float4(1.0f - s.w);\n"
+"    case 0x7u: return float4(d.w);\n"
+"    case 0x8u: return float4(1.0f - d.w);\n"
+"    case 0x9u: return d;\n"
+"    case 0xAu: return 1.0f - d;\n"
+"    case 0xBu: return float4(float3(precise::fmin(s.w, 1.0f - d.w)), 1.0f);\n"
+"    case 0x10u: return s1;\n"
+"    case 0x11u: return 1.0f - s1;\n"
+"    case 0x12u: return float4(s1.w);\n"
+"    case 0x13u: return float4(1.0f - s1.w);\n"
+"    case 0x61u: return k;\n"
+"    case 0x62u: return 1.0f - k;\n"
+"    case 0x63u: return float4(k.w);\n"
+"    case 0x64u: return float4(1.0f - k.w);\n"
+"    default: return float4(0.0f);\n"
+"    }\n"
+"}\n"
+"static inline float4 s2a_pb_eq(uint4 st, float4 s, float4 s1, float4 d, float4 k) {\n"
+"    if (st.x == 0x4u) return precise::fmin(s, d);\n"
+"    if (st.x == 0x5u) return precise::fmax(s, d);\n"
+"    float4 ps = s2a_pb_mul(s2a_pb_factor(st.y, s, s1, d, k), s), pd = s2a_pb_mul(s2a_pb_factor(st.z, s, s1, d, k), d);\n"
+"    if (st.x == 0x2u) return ps - pd;\n"
+"    if (st.x == 0x3u) return pd - ps;\n"
+"    return ps + pd;\n"
+"}\n"
+"static inline float4 s2a_pblend(float4 s, float4 d, float4 s1, constant S2APBlend &b, uint i) {\n"
+"    float4 rgb = s2a_pb_eq(b.f[i][0], s, s1, d, b.k), a = s2a_pb_eq(b.f[i][1], s, s1, d, b.k);\n"
+"    return float4(rgb.xyz, a.w);\n"
+"}\n"
+"#endif\n";
 
 typedef struct { char *s; size_t n, cap; int bad; } lsb;
 // 追加 n 字节。n 都是同一段 MSL 里的指针差 / 串长，不会大到回绕；仍先挡住：n + 1 回绕会跳过扩容，GCC 14 的 -Wstringop-overflow
@@ -135,7 +189,12 @@ static int lentry_find(const char *msl, const char *entry, int stage, lentry *o,
 }
 
 // 只改原 fragment 入口；动态 mask 由绘制处按附件格式及混合状态填写；本层仅对 float4 color 成员处理，不改变整数 / 深度输出。
-char *gal_color_round_msl(const char *msl, const char *entry, char *why) {
+//   pb = 1（直连链，宿主 nvn_mtl.m 按管线特化 s2a_pb<n>_c）：加可编程混合开关；pb = 0（gal 渲染器 gal_prog.m：宿主不做可编程混合）：与 #674 之前逐字节相同。
+//   开关常量的声明写成一行：直连合编（S2A.Dsh batch/Unity.cs UG）把这种行提到全局、只留一份（各键放进自己的命名空间，同编号声明两次编不过）
+static char *color_round_impl(const char *msl, const char *entry, int pb, char *why);
+char *gal_color_round_msl(const char *msl, const char *entry, char *why) { return color_round_impl(msl, entry, 0, why); }
+char *gal_color_round_pb_msl(const char *msl, const char *entry, char *why) { return color_round_impl(msl, entry, 1, why); }
+static char *color_round_impl(const char *msl, const char *entry, int pb, char *why) {
     lentry en; if (!lentry_find(msl, entry, 5, &en, why)) return NULL;
     if (!strcmp(en.ret, "void")) return strdup(msl);
     const char *b, *e;
@@ -171,9 +230,18 @@ char *gal_color_round_msl(const char *msl, const char *entry, char *why) {
         p = pe < en.rp ? pe + 1 : en.rp;
     }
     lsb o = {0}; lput(&o, msl, (size_t)(en.ls - msl)); lstr(&o, k_half_round);
+    if (pb) {
+        lstr(&o, k_pblend);
+        for (int i = 0; i < 8; i++) if (floats >> i & 1)
+            lfmt(&o, "constant bool s2a_pb%d_c [[function_constant(%d)]]; constant bool s2a_pb%d = is_function_constant_defined(s2a_pb%d_c) && s2a_pb%d_c;\n", i, GAL_PB_FC0 + i, i, i, i);
+    }
     lput(&o, en.ls, (size_t)(en.rp - en.ls));
     const char *p = en.lp + 1; while (p < en.rp && isspace((unsigned char)*p)) p++;
-    lfmt(&o, "%sconstant uint& s2a_half_mask [[buffer(%d)]]", p < en.rp ? ", " : "", LS_HALF_SLOT);
+    if (pb) {
+        lfmt(&o, "%sconstant S2APBlend& s2a_pb [[buffer(%d)]]", p < en.rp ? ", " : "", LS_HALF_SLOT);
+        for (int i = 0; i < 8; i++) if (floats >> i & 1) lfmt(&o, ", float4 s2a_dst%d [[color(%d), function_constant(s2a_pb%d)]]", i, i, i);
+    } else lfmt(&o, "%sconstant uint& s2a_half_mask [[buffer(%d)]]", p < en.rp ? ", " : "", LS_HALF_SLOT);
+    const char *mask = pb ? "s2a_pb.mask" : "s2a_half_mask";
     lput(&o, en.rp, (size_t)(en.body - en.rp));
     p = en.body; int nr = 0;
     for (const char *q = strstr(p, "return"); q && q < en.be; q = strstr(p, "return")) {
@@ -194,8 +262,19 @@ char *gal_color_round_msl(const char *msl, const char *entry, char *why) {
         lput(&o, p, (size_t)(q - p)); lstr(&o, "{\n");
         for (int i = 0; i < 8; i++) if (floats >> i & 1) {
             const ldecl *c = &colors[i];
+            // 先混合再量化（同硬件：混合结果写进附件时才舍入）；附件 0 的第二源 = 输出 1 的原值（附件 0 先做，附件 1 还没改它）
+            if (pb) {
+                char s1[200] = "float4(0.0f)";
+                if (i == 0 && (floats & 2)) snprintf(s1, sizeof s1, "%.*s.%.*s", (int)(ve - v), v, (int)(colors[1].ne - colors[1].nb), colors[1].nb);
+                lput(&o, line, indentation);
+                lfmt(&o, "    if (s2a_pb%d) %.*s.%.*s = s2a_pblend(%.*s.%.*s, s2a_dst%d, %s, s2a_pb, %du);\n", i,
+                     (int)(ve - v), v, (int)(c->ne - c->nb), c->nb, (int)(ve - v), v, (int)(c->ne - c->nb), c->nb, i, s1, i);
+            }
             lput(&o, line, indentation);
-            lfmt(&o, "    if (s2a_half_mask & %uu) %.*s.%.*s = s2a_half_rtz(%.*s.%.*s);\n", 1u << i,
+            lfmt(&o, "    if (%s & %uu) %.*s.%.*s = s2a_half_rtz(%.*s.%.*s);\n", mask, 1u << i,
+                 (int)(ve - v), v, (int)(c->ne - c->nb), c->nb, (int)(ve - v), v, (int)(c->ne - c->nb), c->nb);
+            lput(&o, line, indentation);
+            lfmt(&o, "    if (%s & %uu) %.*s.%.*s = s2a_blend_zero_rgb(%.*s.%.*s);\n", mask, 256u << i,
                  (int)(ve - v), v, (int)(c->ne - c->nb), c->nb, (int)(ve - v), v, (int)(c->ne - c->nb), c->nb);
         }
         lput(&o, line, indentation); lstr(&o, "    "); lput(&o, q, (size_t)(se + 1 - q));

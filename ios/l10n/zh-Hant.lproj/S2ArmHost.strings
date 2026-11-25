@@ -386,6 +386,7 @@
 "gfx.filter.nearest" = "2D 遊戲專用";
 "gfx.fpsLimit" = "幀率上限";
 "gfx.fpsLimit.none" = "不限";
+"gfx.fpsLimit.native.note" = "這款沒有開 60 幀補丁，按遊戲自己的幀率跑：上限 30 這一局不生效（壓到 30 遊戲會變慢）。";
 "gfx.resolution" = "渲染解析度";
 "gfx.brightness" = "畫面亮度";
 "gfx.brightness.system" = "跟隨系統";

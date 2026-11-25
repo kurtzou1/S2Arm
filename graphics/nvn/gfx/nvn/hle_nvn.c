@@ -3219,7 +3219,6 @@ static const char *const g_nops[] = {
     "nvnCommandBufferPushDebugGroupStatic",
     "nvnCommandBufferPopDebugGroupId",
     "nvnCommandBufferInsertDebugMarkerStatic",
-    "nvnWindowFinalize",
     "nvnCommandBufferSetStencilCullCriteria",
     "nvnCommandBufferResolveDepthBuffer",
     // NVN2 (Switch 2): the new names Pokopia calls (pokopia-recomp nvn2_abi.md §2, checked there in assembly). Debug groups per engine: (cmdbuf, u32 domain[, const char *]);
@@ -3376,9 +3375,10 @@ NVN(nvnWindowBuilderGetTexture, NVNtexture *, const NVNwindowBuilder *b, int i) 
     return i >= 0 && i < o->ntex ? o->tex[i] : NULL;
 }
 static void nvn2_win_init(NVNwindow *w, const NVNwindowBuilder *b);
+static void acq_lease_reset(const win_t *o);
 NVN(nvnWindowInitialize, NVNboolean, NVNwindow *w, const NVNwindowBuilder *b) {
     const win_builder_t *s = (const win_builder_t *)b; win_t *o = (win_t *)w;
-    memset(o, 0, sizeof *o); o->magic = MAGIC('W', 'I', 'N', 'D'); o->native = s->native; o->ntex = s->ntex; o->interval = s->interval;
+    memset(o, 0, sizeof *o); acq_lease_reset(o); o->magic = MAGIC('W', 'I', 'N', 'D'); o->native = s->native; o->ntex = s->ntex; o->interval = s->interval;
     o->nactive = s->nactive > 0 ? (s->nactive < s->ntex ? s->nactive : s->ntex) : s->ntex;   // 未显式设过就按全部纹理可用
     memcpy(o->tex, s->tex, sizeof o->tex);
     // SDK initializes the crop to the full first window texture (see docs/window_queries.md).
@@ -3397,6 +3397,7 @@ NVN(nvnWindowInitialize, NVNboolean, NVNwindow *w, const NVNwindowBuilder *b) {
         o->ntex ? (int)CTX(o->tex[0])->d.width : 0, o->ntex ? (int)CTX(o->tex[0])->d.height : 0, o->ntex ? CTX(o->tex[0])->d.format : 0);
     return 1;
 }
+NVN(nvnWindowFinalize, void, NVNwindow *w) { acq_lease_reset((const win_t *)w); }
 NVN(nvnWindowGetNativeWindow, NVNnativeWindow, const NVNwindow *w) { return ((const win_t *)w)->native; }
 // 原生窗口的交换间隔（11-13）：真机驱动 nvnWindowSetPresentInterval / 建窗口时把间隔写进系统原生窗口对象（构建器 SetNativeWindow 给的那个，+0xF14，
 //   sdk 里的显示层代码就读写这一处），出图时按它走。直连层不走系统显示层，原先只记在自己的 win_t 里：公开库常见的帧率金手指（指针链落到原生窗口 +0xF14 写 1）
@@ -3493,12 +3494,67 @@ static _Atomic(uintptr_t) g_present_thr;   // 节拍主人（出帧的取图线�
 static _Atomic(uintptr_t) g_acq_thr[4];    // 交换链各图号最近一次的取图线程
 static uintptr_t g_pace_cand; static int g_pace_run;   // 上屏侧：候选主人与它连续出帧的次数（只在上屏线程里改）
 // #141：取图撞上还在屏上的那张时等下一次呈现翻走（present 存 shown 后广播）。取图线程等的是别的线程的呈现；
-//   节拍主人 / 最近一次呈现那张的取图线程就是本线程时不进入等待（下一次呈现多半由本线程自己发出），直接按原行为交出并报红
+//   同线程撞图或等翻走超时后，优先认领另一张未被租用的活跃图；公共尾部仍按最终下标等它的 ticket / avail，返回时那张图才真正归还。
+//   租约放在窗口旁挂表，不改游戏内 win_t 布局；与 shown / 翻走广播共用 g_flip_mu，候选扫描与呈交换图原子串行。
 static pthread_mutex_t g_flip_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_flip_cv = PTHREAD_COND_INITIALIZER;
+typedef struct { const void *w; uint32_t leased; } acq_lease_t;
+static acq_lease_t g_acq_lease[64];
+static int acq_lease_slot_locked(const win_t *o) {
+    unsigned at = (unsigned)(((uintptr_t)o >> 4) & 63);
+    for (unsigned n = 0; n < 64; n++) {
+        acq_lease_t *e = &g_acq_lease[(at + n) & 63];
+        if (e->w == o) return (int)((at + n) & 63);
+        if (!e->w) { e->w = o; return (int)((at + n) & 63); }
+    }
+    return -1;
+}
+static void acq_lease_reset(const win_t *o) {
+    pthread_mutex_lock(&g_flip_mu);
+    for (int i = 0; i < 64; i++) if (g_acq_lease[i].w == o) { g_acq_lease[i].w = NULL; g_acq_lease[i].leased = 0; }
+    pthread_mutex_unlock(&g_flip_mu);
+}
+static void acq_lease_force(const win_t *o, int idx) {
+    if (idx < 0 || idx >= 4) return;
+    pthread_mutex_lock(&g_flip_mu); int slot = acq_lease_slot_locked(o);
+    if (slot >= 0) g_acq_lease[slot].leased |= 1u << idx;
+    pthread_mutex_unlock(&g_flip_mu);
+}
+static void acq_lease_release_locked(const win_t *o, int idx) {
+    if (idx < 0 || idx >= 4) return;
+    int slot = acq_lease_slot_locked(o); if (slot >= 0) g_acq_lease[slot].leased &= ~(1u << idx);
+}
+static int acquire_claim_idx(win_t *o, int preferred, int visible, int nact) {
+    int pick = -1;
+    pthread_mutex_lock(&g_flip_mu); int slot = acq_lease_slot_locked(o);
+    if (slot >= 0) {
+        uint32_t *leased = &g_acq_lease[slot].leased;
+        if (preferred >= 0 && preferred < nact && preferred != visible && !(*leased & (1u << preferred))) pick = preferred;
+        for (int pass = 0; pick < 0 && pass < 2; pass++) {
+            for (int i = 0; i < nact; i++) {
+                if (i == visible || i == preferred || (*leased & (1u << i))) continue;
+                if (!pass && o->ticket[i]) continue;
+                pick = i; *leased |= 1u << i; break;
+            }
+        }
+        if (pick >= 0) *leased |= 1u << pick;
+        if (pick >= 0 && pick != preferred) {
+            static _Atomic uint64_t n; uint64_t k = atomic_fetch_add(&n, 1) + 1;
+            if (k <= 20 || !(k & (k - 1))) LOG("[nvn] WindowAcquireTexture 撞上已占用 / 在屏图 %d：改交已归还的活跃图 %d，保持 SUCCESS，累计 %llu 次", preferred, pick, (unsigned long long)k);
+        }
+    }
+    pthread_mutex_unlock(&g_flip_mu);
+    return pick;
+}
 // 只读计数（单测按事件判、不量墙钟，t_nvn_win_shown）：[0] 进入 #141 翻走等待的次数，[1] 借帧线程立即交出的次数，[2] 没等就交出还在屏上那张的次数。只增不减，不改行为
 static _Atomic uint64_t g_acq_cnt[3];
 void s2a_nvn_acq_counts(uint64_t c[3]) { for (int i = 0; i < 3; i++) c[i] = atomic_load_explicit(&g_acq_cnt[i], memory_order_relaxed); }
+static void acquire_visible_legacy(win_t *o, int idx, int nact, const char *why) {
+    atomic_fetch_add_explicit(&g_acq_cnt[2], 1, memory_order_relaxed);
+    static _Atomic uint64_t n; uint64_t k = atomic_fetch_add(&n, 1) + 1;
+    if (k <= 20 || !(k & (k - 1))) LOG("【红】 [nvn] WindowAcquireTexture 交出了还在屏上的那张：图 %d 是最近一次呈现的、还没被下一次呈现翻走（真机不会交出；原因：%s），累计 %llu 次；活跃 %d / %d 张、间隔 %d、已呈现 %llu 次",
+                                       idx, why, (unsigned long long)k, nact, o->ntex, o->interval, (unsigned long long)o->presents);
+}
 // 审计 #1534 P1-24：按活跃张数轮换（NVN 语义：SetNumActiveTextures 之后只轮换前 nactive 张，未设时 = 全部）。11-04 普查 485 份日志里超级马力欧兄弟 惊奇
 //   （010015100B514000）设 2 of 3，原先仍按 3 张轮换、交出被排除的第 3 张。活跃张数为 0（窗口没有纹理，或 SetNumActiveTextures(0)）没有可交的纹理：回 NATIVE_ERROR
 // 取图时定、上屏时用的「这一帧是不是显示链路的节拍控的」（nvn_pace_follow）：按窗口对象放一张旁挂小表，不放进 win_t——
@@ -3559,6 +3615,7 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     uintptr_t pt0 = atomic_load_explicit(&g_present_thr, memory_order_relaxed);
     if (pt0 && pt0 != (uintptr_t)pthread_self()) {
         int sh = __atomic_load_n(&o->shown, __ATOMIC_RELAXED);
+        acq_lease_force(o, *idx);
         if (*idx < 4) atomic_store_explicit(&g_acq_thr[*idx], (uintptr_t)pthread_self(), memory_order_relaxed);
         atomic_fetch_add_explicit(&g_acq_cnt[1], 1, memory_order_relaxed);
         { static _Atomic uint64_t bn; uint64_t bk = atomic_fetch_add(&bn, 1) + 1;
@@ -3569,22 +3626,22 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     {   // #141（伊苏 8 闪退）：真机只交已归还的图——最近一次呈现的那张还在屏上（等下一次呈现翻走才归还），绝不会被取到。
         //   撞上就等下一次呈现把它翻走再交（真机的取图阻塞点：全链在等显示时等下一张放还，与下面的节拍等待、ticket 等待各管一段）。
         //   活跃 1 张不适用：真机也没有第二张可交，取图等它自己那笔呈现处理完（下面的 ticket 等待）即是。
-        //   等的是别人的呈现，上限 2 个呈现周期：超时按原行为交出并照旧报红（那笔呈现迟迟不来——真机这种局面本就卡死在
-        //   取图，这里不把红着能跑变成卡死）。截图门（DM_DETCLOCK）不适用：定时等 + 超时兜底是墙上时钟竞态，门图确定性优先。
-        //   交出还在屏上那张的次数（同线程不等 / 超时兜底 / 单张 / 门图）：前 20 次逐次报，之后每到 2 的幂报一次（带累计），修前修后比这个数
+        //   等的是别人的呈现，上限 500 ms：超时不能把仍在屏上的 drawable 交回去继续写；改交另一张已归还的活跃图，没有才保持旧行为并报红。
+        //   单张活跃 / 截图门没有可替换的确定性路径，保留原行为。截图门（DM_DETCLOCK）不适用：定时等 + 超时兜底是墙上时钟竞态，门图确定性优先。
+        //   交出还在屏上那张的次数（单张 / 门图）：前 20 次逐次报，之后每到 2 的幂报一次（带累计），修前修后比这个数
         int sh = __atomic_load_n(&o->shown, __ATOMIC_RELAXED);
         if (sh && *idx == sh - 1) {
             int waited = 0;
-            // 节拍主人（出帧的取图线程）或最近一次呈现那张的取图线程就是本线程时，下一次呈现多半由本线程自己发出、
-            //   等它等于等自己：直接按原行为交出并报红，不进入等待（否则单线程引擎每撞一次白等 2 个呈现周期，帧率直接掉半）。
+            // 节拍主人（出帧的取图线程）或最近一次呈现那张的取图线程就是本线程时，下一次呈现由本线程自己发出，
+            //   等它等于等自己：不进入等待；直接从已归还的活跃图里认领另一张，绝不交出在屏 drawable。
             //   「最近一次呈现的线程」按被上屏那张的取图线程记（g_acq_thr，1:1 引擎里取图与上屏同线程）。
             uintptr_t self = (uintptr_t)pthread_self();
             int mine = atomic_load_explicit(&g_present_thr, memory_order_relaxed) == self ||
                        (sh - 1 >= 0 && sh - 1 < 4 && atomic_load_explicit(&g_acq_thr[sh - 1], memory_order_relaxed) == self);
-            const char *why = nact < 2 ? "只有 1 张活跃" : dm_detclock_enabled() ? "截图门确定性时钟" : mine ? "取图的就是出帧线程（不等自己）" : "等满 500 ms 上限没被翻走";   // 交出时红行带上走的是哪一支
+            const char *why = nact < 2 ? "只有 1 张活跃" : dm_detclock_enabled() ? "截图门确定性时钟" : mine ? "本线程负责下一次呈现，不能等自己" : "等满 500 ms 上限没被翻走";   // 交出时红行带上走的是哪一支
             if (nact >= 2 && !dm_detclock_enabled() && !mine) {
                 // 上限 500 ms（原 2 个呈现周期 ≈ 33 ms）：D-9EQT（0100BB8017F24000，Mac）这款取图线程连取两张、上屏在别的线程，那笔呈现慢过 33 ms 就兜底交出在屏那张，
-                //   崩局 3/3 紧随其后（游戏按图号取的对象为空，读 +0x40），不崩的 17 局 0 次。真机这里一直阻塞到翻走；500 ms 只兜「真没有呈现方」的局，不卡死
+                //   崩局 3/3 紧随其后（游戏按图号取的对象为空，读 +0x40），不崩的 17 局 0 次。真机这里一直阻塞到翻走；500 ms 只兜「真没有呈现方」的局，超时不交出在屏图。
                 uint64_t bound = 500000000ull; (void)present_period;
                 atomic_fetch_add_explicit(&g_acq_cnt[0], 1, memory_order_relaxed);
                 struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_nsec += (long)(bound % 1000000000ull); dl.tv_sec += (time_t)(bound / 1000000000ull);
@@ -3600,10 +3657,16 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
                 if (flip) { waited = 1; static _Atomic uint64_t wn; uint64_t wk = atomic_fetch_add(&wn, 1) + 1;
                     if (wk <= 20 || !(wk & (wk - 1))) LOG("[nvn] WindowAcquireTexture 撞上还在屏上的那张：图 %d 等了 %.1f ms 等到下一次呈现翻走才交出（真机语义），累计 %llu 次",
                                                            *idx, (now_ns() - w0) / 1e6, (unsigned long long)wk); } }
-            if (!waited) { atomic_fetch_add_explicit(&g_acq_cnt[2], 1, memory_order_relaxed);
-                static _Atomic uint64_t n; uint64_t k = atomic_fetch_add(&n, 1) + 1;
-                if (k <= 20 || !(k & (k - 1))) LOG("【红】 [nvn] WindowAcquireTexture 交出了还在屏上的那张：图 %d 是最近一次呈现的、还没被下一次呈现翻走（真机不会交出；原因：%s），累计 %llu 次；活跃 %d / %d 张、间隔 %d、已呈现 %llu 次",
-                                                   *idx, why, (unsigned long long)k, nact, o->ntex, o->interval, (unsigned long long)o->presents); } } }
+            if (!waited && (nact < 2 || dm_detclock_enabled()))
+                acquire_visible_legacy(o, *idx, nact, why); } }
+    if (nact >= 2 && !dm_detclock_enabled()) {
+        int visible = __atomic_load_n(&o->shown, __ATOMIC_RELAXED) - 1;
+        int pick = acquire_claim_idx(o, *idx, visible, nact);
+        if (pick < 0) {
+            acquire_visible_legacy(o, *idx, nact, "没有未被租用的已归还活跃图，保持旧行为");
+            acq_lease_force(o, *idx);
+        } else *idx = pick;
+    } else acq_lease_force(o, *idx);
     if (*idx >= 0 && *idx < 4) atomic_store_explicit(&g_acq_thr[*idx], (uintptr_t)pthread_self(), memory_order_relaxed);
     // Vsync blocks here (real-device NVN: when all textures in the swapchain are waiting for display, wait for the next one to be released), not in present -- the game often calls present while holding a lock
     uint64_t at = *idx < 4 ? o->avail[*idx] : 0, now = dm_detclock_enabled() ? guest_ns() : now_ns(), wait = at > now ? at - now : 0, pace_ns = 0;
@@ -3747,7 +3810,7 @@ static void power_line(uint64_t frame) {
         double nf = frame > pf ? (double)(frame - pf) : 1;   // per frame: the fair comparison when one build holds the frame rate better than another
         LOG("[nvn] power up to frame %llu: CPU energy %.2f W, %.1f mJ per frame (%.1f fps); CPU %.0f%% (100 = one core), %.0f%% of it on performance cores; wakeups %.0f/s (out of platform idle %.0f); GPU busy %.1f ms/s (time, not energy); thermal %d; top yielders: %s", frame,
             (e - pe) / 1e9 / s, (e - pe) / 1e6 / nf, nf / s, (cpu - pcpu) / 1e7 / s, cpu > pcpu ? 100.0 * (double)(p - pp) / (double)(cpu - pcpu) : 0, (iw - piw) / s, (idw - ppw) / s, (g - pg) / 1e6 / s, dm_thermal_now(), yt);
-        char rs[900]; nvn_be_res_stats(rs, sizeof rs); static uint64_t pbs, pbf; uint64_t bs, bf; nvn_be_barrier_stats(&bs, &bf);
+        char rs[1200]; nvn_be_res_stats(rs, sizeof rs); static uint64_t pbs, pbf; uint64_t bs, bf; nvn_be_barrier_stats(&bs, &bf);
         uint64_t nvn_be_cut_count(void), nvn_be_copy_cut_count(void), nvn_be_pass_cut_count(void), nvn_be_blit_splits(void); void nvn_be_ubd_stats(uint64_t *, uint64_t *); static uint64_t pcut, pccut, ppcut, pbsp, pud, puc; uint64_t cut = nvn_be_cut_count(), ccut = nvn_be_copy_cut_count(), pcutn = nvn_be_pass_cut_count(), bsp = nvn_be_blit_splits(), ud, uc; nvn_be_ubd_stats(&ud, &uc);
         void nvn_be_ubp_stats(uint64_t *, uint64_t *, uint64_t *); static uint64_t ppm, ppr, ppf; uint64_t pm, pr, pf_; nvn_be_ubp_stats(&pm, &pr, &pf_);
         void nvn_be_lc_stats(uint64_t *, uint64_t *); static uint64_t plt, pll; uint64_t lt, ll; nvn_be_lc_stats(&lt, &ll);
@@ -4299,7 +4362,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     nvn_be_present_target(o->interval, atomic_load(&g_itv_set_ns));   // 游戏此刻申请的交换间隔（只给「分时」分段记账，不改上屏节拍）
     if (idx >= 0 && idx < o->ntex && idx < 4) o->ticket[idx] = nvn_be_present(CTX(o->tex[idx]), present_period(o) / 1e9, crop);   // enqueue only, return immediately
     if (idx >= 0 && idx < o->ntex) __atomic_store_n(&o->shown, idx + 1, __ATOMIC_RELAXED);   // 屏上换成这张：上一张归还（AcquireTexture 的 #141 报红看它）
-    pthread_mutex_lock(&g_flip_mu); pthread_cond_broadcast(&g_flip_cv); pthread_mutex_unlock(&g_flip_mu);   // 撞上还在屏上那张的取图（#141）等这次呈现翻走；每帧一次锁内广播，无等者时开销可不计
+    pthread_mutex_lock(&g_flip_mu); acq_lease_release_locked(o, idx); pthread_cond_broadcast(&g_flip_cv); pthread_mutex_unlock(&g_flip_mu);   // 撞上还在屏上那张的取图（#141）等这次呈现翻走；每帧一次锁内广播，无等者时开销可不计
     gfx_leave();
     atomic_fetch_add(&g_nvn_ns, now_ns() - t0);
     uint64_t f = g_frame, ps, dr; nvn_be_stats(&ps, &dr);

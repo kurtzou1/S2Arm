@@ -3,7 +3,7 @@ ifeq ($(S2A_MAC_FRONTEND),1)
 CFLAGS += -fobjc-arc
 # 玩家入口：自动玩家缺省关（tests/autoplay/ap_default.h）
 CFLAGS += -DS2A_MAC_FRONTEND=1
-HOST_SRCS += macos/heartbeat_mac.c macos/front_mac.m macos/joycon_imu.m macos/hid_pad.m macos/input_guide.m macos/controller_view.m macos/textinput_mac.m
+HOST_SRCS += macos/heartbeat_mac.c macos/front_mac.m macos/joycon_imu.m macos/hid_pad.m macos/input_guide.m macos/controller_view.m macos/textinput_mac.m macos/perf_brief.m
 HOST_SRCS += macos/ns2_controller.c $(wildcard runtime/ns2pro/*.c) runtime/ns2pro/NS2Transport.m
 # 本地联机·同一 Wi-Fi：共用 iOS 的 Bonjour 发现（只依赖 Foundation），Mac 版权限提示在 macos/lan_permission.m（原先只链 host_main.c 的空实现，Mac 与 iPhone 互相搜不到）
 HOST_SRCS += ios/ldn_lan.m macos/lan_permission.m

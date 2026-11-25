@@ -125,7 +125,7 @@ struct PlayerAssignment: Equatable, Codable {
         // 该槽已被新的在线单元占用：清掉占着同槽的旧断连记忆（其他槽不动）
         disconnectedSlots = disconnectedSlots.filter { $0.value != index }
     }
-    /// 放进玩家槽：优先回到断开前的原槽；否则挑最小空闲且未被断开手柄预留的槽；全满再复用空槽
+    /// 放进玩家槽：同一身份优先回到断开前的原槽；新身份选最小空槽，全满不分配
     private mutating func place(_ unit: Unit) {
         for id in Self.identities(of: unit) {
             if let preferred = disconnectedSlots[id], preferred >= 0, preferred < Self.maxPlayers,
@@ -133,11 +133,6 @@ struct PlayerAssignment: Equatable, Codable {
                 setSlot(preferred, unit)
                 return
             }
-        }
-        let reserved = Set(disconnectedSlots.values)
-        if let free = (0..<Self.maxPlayers).first(where: { ($0 >= slots.count || slots[$0] == nil) && !reserved.contains($0) }) {
-            setSlot(free, unit)
-            return
         }
         if let free = (0..<Self.maxPlayers).first(where: { $0 >= slots.count || slots[$0] == nil }) {
             setSlot(free, unit)

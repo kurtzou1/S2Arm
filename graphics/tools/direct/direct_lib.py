@@ -704,7 +704,7 @@ class Lib:
         L = f'{OS}/b-{V}-vk'; K = W + '/vk/keys'; rmtree(L); rmtree(K); os.makedirs(W + '/vk', exist_ok=True)
         brc = self.nostall([W + '/vk', OS], vcmd := [PY, R + '/graphics/tools/direct/vklib/dsh_vklib.py', 'build', '--pkg', W + '/merged/pkg', '--profile', P, '--out', K,
                                              '--lib', L, '--chain', V, '--dsx', os.environ.get('DSX_LIB') or R + '/build/dsx/libdsx.dylib', '--work', W + '/vk/work',
-                                             '--cas', self.cache_dir() + '/store'], W + '/build.log')
+                                             '--cas', self.cache_dir() + '/store', '--jobs', self.J], W + '/build.log')
         if not (brc == 0 and os.path.isfile(K + '/vk_build.tsv') and nonempty(L + '/lib.idx')):
             red(f'安卓 Vulkan 库出库失败 rc={brc}', vcmd, brc, log_text(W + '/build.log'), W + '/build.log')
         try: shutil.copy(K + '/vk_build.tsv', OS + '/vk_build.tsv')

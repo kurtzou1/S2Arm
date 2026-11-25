@@ -40,7 +40,7 @@ STUB = textwrap.dedent('''
     if what == "slow":
         stop = []
         signal.signal(signal.SIGTERM, lambda *_: stop.append(1))
-        (here / "slow.pid").write_text(str(os.getpid()))
+        (here / "slow.pid.tmp").write_text(str(os.getpid())); os.replace(here / "slow.pid.tmp", here / "slow.pid")   # 原子写：读方见到文件就有内容（负载下读到空串）
         for _ in range(600):
             if stop: break
             time.sleep(0.05)

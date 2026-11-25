@@ -386,7 +386,7 @@ lane_native() {
     job direct_link_dsx make -s -C graphics/dsx "$(pwd -P)/build/dsx/libdsx.dylib"
     job dmsh_tess timeout 60 python3 graphics/tools/direct/tests/t_dmsh_tess.py build/dsx/libdsx.dylib build/gal/t_tess
     job dmsh_spill timeout 300 python3 graphics/tools/direct/tests/t_dmsh_spill.py build/dsx/libdsx.dylib
-    job dmsh_reuse timeout 180 python3 graphics/tools/direct/tests/t_dmsh_reuse.py
+    job dmsh_reuse "${S2A_PY:-python3}" tools/nostall.py 300 -- python3 graphics/tools/direct/tests/t_dmsh_reuse.py   # 按无进展判挂死（原墙钟 180 秒：本机负载下超时退 124 判红，11-23 / 11-24 两次环境红、一次疑误撤）
   fi
   py_items
 }
@@ -444,6 +444,7 @@ py_items() {
   need_dmsh_giant && job dmsh_giant timeout 300 python3 graphics/tools/direct/tests/t_dmsh_giant.py
   if has "$RUNG" direct_link; then
     job alpha_ms timeout 300 python3 graphics/tools/direct/tests/t_alpha_ms.py
+    job pblend_unity timeout 300 python3 graphics/tools/direct/tests/t_pblend_unity.py   # 可编程混合开关常量进成批合编只声明一次、批编得过（#674）
     job vs_pull timeout 300 python3 graphics/tools/direct/tests/t_vs_pull.py   # 拉取式顶点输入变体 _bp：形状 + GPU 逐格式与 Metal 顶点抓取逐位同
     job fout_fc timeout 300 python3 graphics/tools/direct/tests/t_fout_fc.py
     job se_want timeout 60 python3 tests/se_want_test.py

@@ -704,21 +704,33 @@ def adapt_families(cands, exefs, log, root=None):
     for mod in sorted({c['module'] for c in rest}):
         mc = [c for c in rest if c['module'] == mod]; made, fid = {}, None
         for side, sel, goal in (('w', lambda A: A > ADAPT_R * 1.001, 2.17), ('n', lambda A: A < ADAPT_R * 0.999, 4 / 3)):
+            # 每份都试，取写死的字最少的一份做模板，平手按画幅离 goal 近（#2193 一款游戏：21:9 里排第一的那份带 22 处按 21:9 写死的界面调整，
+            #   只剩渲染尺寸能随画幅变；另一份只改比例常数、写死的只有 1 条 nop。原先取排第一个成功的，写死的那 22 处在别的画幅上照样是 21:9）
+            best = None
             for c in sorted((c for c in mc if sel(A0(c))), key=lambda c: abs(math.log(A0(c) / goal))):
-                u = _adapt_single(c, exefs, log, root, side, fid)
-                if u: made[side] = (c, u); fid = u['id'].split(':')[1]; break
+                lg = []; u = _adapt_single(c, exefs, lg, root, side, fid)
+                if u and (best is None or u['_fixed'] < best[1]['_fixed']): best = (c, u, lg)
+            if best:
+                made[side] = best[:2]; log.extend(best[2]); fid = best[1]['id'].split(':')[1]
+                log.append(f'选模板\twsauto:{fid}:{side}\t{mod}\t{best[0]["name"][:40]}\t写死 {best[1]["_fixed"]} 字（同侧候选里最少）')
         for side, other in (('w', 'n'), ('n', 'w')):   # 缺的一侧用另一侧的代表外推
             if side not in made and other in made:
                 u = _adapt_single(made[other][0], exefs, log, root, side, fid)
                 if u: made[side] = (made[other][0], u)
         if not made: continue
+        for u in (u for _, u in made.values()): u.pop('_fixed', None)
         out += [u for _, u in made.values()]
         cov = set()
         for c, _ in made.values(): cov |= {(off + k) & ~3 for off, b in c['writes'] for k in range(len(b))}
+        sides = {'w': lambda A: A > ADAPT_R * 1.001, 'n': lambda A: A < ADAPT_R * 0.999}
         for c in mc:
             if any(c is x for x, _ in made.values()): drop.add(id(c)); continue
             if {(off + k) & ~3 for off, b in c['writes'] for k in range(len(b))} & cov:
-                drop.add(id(c)); log.append(f'已覆盖\t{c["id"]}\t{mod}\t{c["name"][:40]}\t与 wsauto:{fid} 改同几处，由它按屏幕比例自适应')
+                drop.add(id(c)); log.append(f'已覆盖\t{c["id"]}\t{mod}\t{c["name"][:40]}\t与 wsauto:{fid} 改同几处，由它按屏幕比例自适应'); continue
+            # 同侧已有自适应模板：别家按单一画幅做的另一套宽屏实现也不进包（#2193：改的位置不同、不算「改同几处」，原先照样进包，
+            #   运行时定画幅那份按最近一档（21:9）开、与自适应同时生效，相机比例写死 21:9 → 2.17 的屏上下留边）
+            if any(sel(A0(c)) for sd, sel in sides.items() if sd in made):
+                drop.add(id(c)); log.append(f'已覆盖\t{c["id"]}\t{mod}\t{c["name"][:40]}\t同侧有 wsauto:{fid}（任何画幅都铺满），定画幅这份不进包')
     return [c for c in cands if id(c) not in drop] + out
 
 
@@ -857,6 +869,9 @@ def port_writes(writes, A, im, text_end):
     return [(moved[o], ww[o].to_bytes(4, 'little')) for o in sorted(moved)], rep
 
 
+RES_PARTNER_GAP = 16   # 只写了宽的渲染尺寸：高在程序里离它最多 16 字节（前后各 4 条；#2193 那款紧挨着下一条）
+
+
 def _adapt_single(c, exefs, log, root, side, fid=None):
     """一份定画幅宽屏补丁 → 它那一侧（side：w 比 16:9 宽 / n 比 16:9 窄）的自适应模板一份（编号 wsauto:<族号>:<侧>，族号缺省取份号）；一处画幅值也认不出 → None"""
     As = single_aspects(c)
@@ -880,6 +895,13 @@ def _adapt_single(c, exefs, log, root, side, fid=None):
             if a[2] or a[1] < 160 or o in rec: continue
             for p, b in sorted(mv.items()):
                 if p != o and p not in rec and _res_ok(a, b, A): rec[o] = ('x', None); rec[p] = ('h', None); break
+        # 只写了宽、高留在程序里的（#2193 一款网球游戏：补丁只把 orr w9,#1920 换成 movz w9,#2580，下一条 movz w10,#1080 是程序原来的）：
+        #   程序里前后 RES_PARTNER_GAP 字节内、补丁没写的位置找同形的高，宽 ÷ 高 = 画幅（_res_ok）才成对；高那条照「h」改成手机口径的高（同补丁自带一对时）
+        for o, a in sorted(mv.items()):
+            if a[2] or a[1] < 160 or o in rec or o >= text_end or isfill(o): continue
+            for p in sorted(range(o - RES_PARTNER_GAP, o + RES_PARTNER_GAP + 4, 4), key=lambda q: (abs(q - o), q)):
+                if p == o or p in wm or p in rec or not 0 <= p < text_end or isfill(p): continue
+                if _res_ok(a, _mov_imm(int.from_bytes(im[p:p + 4], 'little')), A): rec[o] = ('x', None); rec[p] = ('h', None); break
         for o, x in sorted(wm.items()):
             if o in rec: continue
             pr = _movpair_at(wm.get, o)
@@ -925,7 +947,8 @@ def _adapt_single(c, exefs, log, root, side, fid=None):
     if len(slots) > ADAPT_NSLOT: log.append(f'不参数化\t{c["id"]}\t{mod}\t{c["name"][:40]}\t值槽不够'); return None
     sl = [(f'k{s}', f'4/{k[1:]}' if k.startswith('y') else 8 if prec == 'd' else 4, k[:1]) for (k, prec), s in sorted(slots.items(), key=lambda x: x[1])]
     log.append(f'单份参数化\twsauto:{fid}\t{mod}\t{c["name"][:40]}\t画幅 {A:.4f}：' + '、'.join(f'+{o:#x} {v[0]}{"=" + v[1] if v[1] else ""}' for o, v in sorted(rec.items()) if v[0] != 'nop'))
-    return dict(module=mod, cat=c['cat'], name=f'自适应满屏（单份补丁参数化 · {"宽" if side == "w" else "窄"}屏模板）',
+    fixed = sum(1 for o in words if o not in rec)   # 写死、不随画幅变的字数（挑模板用：越少越好，见 adapt_families）
+    return dict(_fixed=fixed, module=mod, cat=c['cat'], name=f'自适应满屏（单份补丁参数化 · {"宽" if side == "w" else "窄"}屏模板）',
                  writes=sorted((o, x.to_bytes(4, 'little')) for o, x in words.items()), license=c['license'], path=c.get('origin') or c['path'], base=c['base'],
                  id=f'wsauto:{fid}:{side}', meta=dict(c['meta'], aspect=None, adapt=dict(side=side, marks=marks, adata=adata + sl)))
 
