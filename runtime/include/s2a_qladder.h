@@ -13,9 +13,15 @@ int s2a_ql_tier(void);                   // 当前档
 int s2a_ql_fps60(int tier);              // 这一档 60 帧补丁开不开
 // 每次上屏调一次：now 纳秒；game = 这一帧是局内游戏画面（菜单 / 加载 / 视频 / 过场不算，s2a_qp_game）；dt = 与上一帧的间隔纳秒；
 //   gpu_ms = GPU 忙累计毫秒（s2a_gpu_busy_ms，< 0 = 没有读数：不降不升）；thermal = 热状态 0 正常 / 1 一般 / 2 严重 / 3 危急（-1 = 没有读数，只记日志）；
-//   game_itv = 游戏自己设的交换间隔（目标帧时长不低于 itv × 1/60 秒）。
+//   game_itv = 游戏自己设的交换间隔（目标帧时长不低于 itv × 1/60 秒）；
+//   hitch = 这一帧有首遇现编（新管线 / 着色器库）或首次上传贴图（宿主 s2a_frame_hitch_take）：一次性加载卡顿，窗口里这类帧不多（≤ S2A_QL_HITCH_MAX_PERMILLE）时
+//   不算慢帧；多了说明这款一直在现编 / 传贴图，照常算（11-26 D-CCAG：一款双人游戏 iPad 帧时中位 16.7 ms，30 秒窗口里 4 帧现编 + 9 帧首传贴图把慢帧顶到 5.1%，
+//   判成 CPU 跟不上压回 30 帧、整局不升回）。
 //   返回 -1 = 不换档；否则返回新档（调用方去切），s2a_ql_why() 说原因
-int s2a_ql_frame(uint64_t now, int game, uint64_t dt, double gpu_ms, int thermal, int game_itv);
+#define S2A_QL_HITCH_MAX_PERMILLE 25   // 窗口里一次性卡顿帧占比上限 2.5%（慢帧门槛 5% 的一半）：超过就不当一次性
+int s2a_ql_frame(uint64_t now, int game, uint64_t dt, double gpu_ms, int thermal, int game_itv, int hitch);
+// 最近一次判定窗口里不计的一次性卡顿慢帧数（-1 = 卡顿帧太多、照常算了；换档日志用）
+int s2a_ql_last_hitch(void);
 int s2a_ql_why(void);
 // 刚才那次降档是 CPU 跟不上（GPU 没跑满仍达不到目标）：本局不再按 GPU 余量升回 60 帧（换档日志用）
 int s2a_ql_cpu_bound(void);

@@ -169,7 +169,10 @@ final class EngineProviderBuildTests: XCTestCase {
         let provider = S2ArmEngineProvider(client: client(box, runner), xcodeLocator: { nil })
         let log = EventLog()
         let task = Task { try await provider.build(BuildJob(gameId: "0100A", target: .mac), events: log.sink) }
-        while log.events.isEmpty { try await Task.sleep(nanoseconds: 5_000_000) }
+        // 等第一条事件有上限（11-26 门禁挂死：原先无上限死等，事件没来就一直挂到无进展看门狗来停，日志里没有用例名、没有现场）
+        var waited = 0
+        while log.events.isEmpty && waited < 12_000 { try await Task.sleep(nanoseconds: 5_000_000); waited += 1 }
+        guard !log.events.isEmpty else { task.cancel(); XCTFail("60 秒内没收到作业的第一条事件（脚本 stage 行），没法测取消"); return }
         task.cancel()
         do { _ = try await task.value; XCTFail("取消了还成功") }
         catch let f as JobFailure { XCTAssertEqual(f.state, .cancelled) }

@@ -127,6 +127,9 @@ namespace Ryujinx.HLE
         // S2A switches the configuration to LAN multiplayer on demand here (hosts the relay, starts Bonjour discovery), so that
         // only games that use local wireless ever touch the network or ask for the local-network permission
         public static System.Action LdnInitializing;
+        // Asked when the game initializes ldn:u: true = do not touch the network now (the host's automatic mode), Initialize succeeds with no
+        // neighbours and LdnInitializing runs on the game's first Scan / OpenAccessPoint / OpenStation instead (null / false = upstream timing)
+        public static System.Func<bool> LdnDeferInit;
 
         // TCP port of the RyuLDN server the ldn:u client connects to (S2A hosts its relay on the same port).
         // Upstream's fixed LanPlayPort; tests point it at a free port so they never meet a real relay on 30456

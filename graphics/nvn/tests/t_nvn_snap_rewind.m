@@ -70,6 +70,34 @@ int main(void) {
         VERIFY(ok && atomic_load(&g_tk_ret) == 1, "倒回后同槽 12 号票 %.0f ms 交掉（2 s 内 %d，返回 %d；不清占用号则等 g_pq_done 追到 900）", (now_ns() - t0) / 1e6, ok, atomic_load(&g_tk_ret));
         if (!ok) { pthread_mutex_lock(&g_pq_mu); g_pq_done = 900; pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu); }   // 放开卡住的线程，单测照常收尾
         pthread_join(tt, NULL); wait_idle(2000000000ull);
+        // ③ ifw_put 分块（>64 B 跨页内联常量更新）：256 B 跨页写入 + 中间 64 B 覆盖，ifw_get 按时间序拼回全字节；>1024 B 整笔拒收不留残块
+        {
+            uint64_t clo = 0x30000fc0ull;   // 距 4 KB 页尾 64 B，256 B 跨两页
+            uint8_t src256[256], ov64[64], out[256];
+            for (int i = 0; i < 256; i++) src256[i] = (uint8_t)(i ^ 0x5a);
+            for (int i = 0; i < 64; i++) ov64[i] = (uint8_t)(0xc0 + i);
+            uint64_t f_live = g_done + 50;
+            int p1 = ifw_put(clo, clo + 256, src256, f_live, g_done);
+            int p2 = ifw_put(clo + 96, clo + 160, ov64, f_live + 1, g_done);
+            uint64_t cl[COVN], ch[COVN]; int nc = 0, exact = 1; ifw_ent *hits[IFW_HITS];
+            int nh = ifw_get(clo, clo + 256, cl, ch, &nc, &exact, hits);
+            memset(out, 0, sizeof out);
+            for (int i = nh - 1; i >= 0; i--) {
+                uint64_t x = MAX(hits[i]->lo, clo), y = MIN(hits[i]->hi, clo + 256);
+                memcpy(out + (x - clo), hits[i]->b + (x - hits[i]->lo), (size_t)(y - x));
+            }
+            int diff = 0;
+            for (int i = 0; i < 256; i++) {
+                uint8_t want = (i >= 96 && i < 160) ? ov64[i - 96] : src256[i];
+                diff += out[i] != want;
+            }
+            uint8_t big[1200]; memset(big, 0x33, sizeof big);
+            uint64_t seq_before = g_ifw_seq;
+            int pbig = ifw_put(0x31000000ull, 0x31000000ull + sizeof big, big, f_live + 2, g_done);
+            VERIFY(p1 && p2 && nh > 0 && diff == 0 && !pbig && g_ifw_seq == seq_before,
+                   "ifw_put 256 B 跨页分块 + 中间覆盖重建（p1=%d p2=%d nh=%d diff=%d）且 >1024 B 整笔拒收无残块（pbig=%d seq_delta=%llu）",
+                   p1, p2, nh, diff, pbig, (unsigned long long)(g_ifw_seq - seq_before));
+        }
         unlink(map);
     }
     return S2A_T_RESULT("t_nvn_snap_rewind", bad);

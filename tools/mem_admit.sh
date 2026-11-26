@@ -223,10 +223,13 @@ mem_admit() {
   MA_USE=$MA_DIR/use.$MA_ME; MA_TK=$MA_DIR/q.$MA_PRIO$(_ma_ns).$MA_ME
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$MA_ME" "$MA_NEED10" "$cls" "$key" "$(date +%s)" "$MA_CORES" > "$MA_TK"
   while :; do
-    plock_take "$MA_LOCK" 60; rc=$?
-    [ $rc = 0 ] || { rm -f "$MA_TK"; _ma_wait_clear; _ma_say "【红】mem_admit：账锁 $MA_LOCK 取不到（rc=${rc}），$cls/$key 不起"; return 125; }
-    lp=$PLOCK_PID; _ma_try; r=$?; plock_release "$lp"
-    [ $r = 0 ] && break
+    # 账锁只护一次判账的临界区。被占满 S2A_MEM_LOCK_S 秒（rc 1）= 别的作业在判账、本单这几轮没抢到（#2241：玩家一次更新十几款、10 核机每单占满核
+    #   串着跑，十几张票各自每 2 秒进锁判一次，有一单连续 60 秒没抢到就报 125 不起）——不是故障，当这一轮没轮到、接着排（总时长仍受 S2A_MEM_WAIT_S）；
+    #   只有持锁小进程起不来 / 锁文件打不开（rc 2）才报红不起
+    plock_take "$MA_LOCK" "${S2A_MEM_LOCK_S:-60}"; rc=$?
+    [ $rc = 0 ] || [ $rc = 1 ] || { rm -f "$MA_TK"; _ma_wait_clear; _ma_say "【红】mem_admit：账锁 $MA_LOCK 取不到（rc=${rc}），$cls/$key 不起"; return 125; }
+    if [ $rc = 0 ]; then lp=$PLOCK_PID; _ma_try; r=$?; plock_release "$lp"; [ $r = 0 ] && break
+    else MA_WHY="账锁 $MA_LOCK 连续 ${S2A_MEM_LOCK_S:-60} 秒轮不到（同时排队的作业都在进锁判账），接着排"; fi
     if [ "$MA_WHY" != "$said" ] || [ $((SECONDS - tsay)) -ge "${S2A_MEM_SAY_S:-300}" ]; then
       _ma_say "【排队】mem_admit $cls/${key}：$MA_WHY"; _ma_wait_note "【排队】mem_admit $cls/${key}：$MA_WHY"; said=$MA_WHY; tsay=$SECONDS
     fi

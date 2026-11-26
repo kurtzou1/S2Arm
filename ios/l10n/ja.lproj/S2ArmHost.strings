@@ -748,3 +748,31 @@
 "assign.ns2pro" = "Switch 2 Pro コントローラー";
 "assign.saveFailed" = "割り当てを保存できませんでした。もう一度お試しください。";
 "assign.ok" = "OK";
+
+/* D2R-Mobile library backend and local saves. */
+"d2r.load" = "Diablo II のタッチ操作バックエンドを読み込めません。同じチームが署名した S2AD2R フレームワークがアプリに含まれているか確認してください。";
+"d2r.abi" = "Diablo II のタッチ操作バックエンドは、この S2Arm ホストと互換性がありません。";
+"d2r.os" = "この Diablo II タッチ操作バックエンドには iPadOS 26 以降が必要です。";
+"d2r.reopen" = "Diablo II はすでに起動しています。保存して終了し、S2Arm を開き直してください。";
+"d2r.gpu" = "この Diablo II バックエンドには Metal 4 と BC テクスチャに対応したデバイスが必要です。";
+"d2r.resources" = "Diablo II のリソースを S2Arm の D2R Mobile フォルダに入れてください。\n\n%s";
+"d2r.metal" = "Diablo II のタッチ画面で Metal レイヤーを作成できませんでした。";
+"d2r.simulator" = "シミュレータではタッチ画面の接続確認のみ対応しています。";
+"d2r.title" = "Diablo II";
+"d2r.manage" = "Diablo II セーブ管理";
+"d2r.location" = "ファイル → この iPad 内 → S2Arm";
+"d2r.import" = "キャラクターフォルダを読み込む…";
+"d2r.export" = "セーブフォルダを書き出す…";
+"d2r.play" = "プレイ";
+"d2r.empty" = "キャラクターなし";
+"d2r.saves" = "Diablo II セーブ";
+"d2r.added" = "キャラクターを追加しました。";
+"d2r.failed" = "読み込みに失敗しました。";
+"d2r.directory" = "セーブ先には通常のフォルダが必要です。";
+"d2r.unreadable" = "セーブフォルダを読み取れません。";
+"d2r.special" = "セーブにリンクまたは特殊ファイルが含まれています。";
+"d2r.missing" = "ファイル内に Diablo II の save フォルダが見つかりません。バックアップを元の場所に戻して再度開いてください。";
+"d2r.conflict" = "新旧の場所に異なる Diablo II セーブがあります。両方をバックアップして比較してください。";
+"d2r.character" = "同名の .d2s セーブが入ったキャラクターのフォルダを選択してください。";
+"d2r.duplicate" = "同名のキャラクターがすでに存在します。現在のセーブを保持しました。";
+"d2r.docs" = "S2Arm のセーブディレクトリを読み取れません。";

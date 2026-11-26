@@ -18,6 +18,7 @@ __attribute__((weak)) int dm_thermal_now(void) { return -1; }        // iOS ios/
 __attribute__((weak)) int nvn_be_display_hz(void) { return 0; }      // 直连后端 graphics/nvn/gfx/nvn/nvn_mtl.m 强定义：有窗口时屏幕最高刷新率
 __attribute__((weak)) int s2a_host_focused(void) { return 1; }       // runtime/src/os.c 强定义（平台壳写：iOS 前后台、Mac 失焦）
 __attribute__((weak)) int s2a_host_sleeping(void) { return 0; }      // runtime/src/os.c 强定义（iOS 后台、Mac 系统睡眠）
+__attribute__((weak)) int s2a_frame_hitch_take(void) { return 0; }   // 直连层 graphics/nvn hle_nvn.c 强定义：刚上屏这一帧有首遇现编 / 首传贴图
 
 static int g_on = -1;
 static int ladder_on(void) {
@@ -48,11 +49,13 @@ void s2a_ql_host_frame(uint64_t now, int game, uint64_t dt, int game_itv) {
     static unsigned rf; if (rf++ % 300 == 0) s2a_ql_set_refresh_hz(nvn_be_display_hz());   // #1857 慢帧按刷新拍取整（换屏 / 外接显示器时 300 帧内跟上）
     double gpu = s2a_gpu_busy_ms();
     if (gpu < 0 && !g_nogpu_said) { g_nogpu_said = 1; LOG("档位梯子：这一局没有 GPU 读数，判不了是不是跑不动，不降档，照玩家选的 60 帧跑"); }
-    int t = s2a_ql_frame(now, game, dt, gpu, dm_thermal_now(), game_itv);
+    int t = s2a_ql_frame(now, game, dt, gpu, dm_thermal_now(), game_itv, s2a_frame_hitch_take());
     if (t < 0) return;
     double fps, slow, gp; int th; s2a_ql_last(&fps, &slow, &gp, &th); int why = s2a_ql_why();
-    LOG("档位梯子：换到 %s（%s；上个窗口 %.1f 帧/秒、慢帧 %.1f%%、GPU 忙 %.0f%%、热状态 %d）%s", tier_name(t),
-        why == S2A_QL_WHY_FPS ? "局内帧率达不到本档目标" : "GPU 余量够 2 分钟，升一档", fps, slow, gp, th,
+    int hx = s2a_ql_last_hitch(); char hs[96] = "";
+    if (hx > 0) snprintf(hs, sizeof hs, "，不计首遇现编 / 首传贴图慢帧 %d", hx); else if (hx < 0) snprintf(hs, sizeof hs, "，首遇现编 / 首传贴图帧太多、照常算");
+    LOG("档位梯子：换到 %s（%s；上个窗口 %.1f 帧/秒、慢帧 %.1f%%%s、GPU 忙 %.0f%%、热状态 %d）%s", tier_name(t),
+        why == S2A_QL_WHY_FPS ? "局内帧率达不到本档目标" : "GPU 余量够 2 分钟，升一档", fps, slow, hs, gp, th,
         s2a_ql_cpu_bound() ? "；GPU 没跑满，是 CPU 跟不上：本局不再按 GPU 余量升回 60 帧" : "");
     apply(t, 0);
 }

@@ -951,6 +951,14 @@ def prune_runtime_extras(root):
             _rmtree(extra)   # 走统一删除：pkg/pack/romfs 克隆自产物根，可能带只读目录；删不掉要报出来，不能悄悄留半棵进运行版本
 
 
+def prepare_sub_programs(c, root, current, extraction, source, logs, env, game_id):
+    c.run([sys.executable, c.engine / "pack/multi_program.py",
+           "--extract", extraction, "--work", root, "--logs", logs, "--product", current,
+           "--game", game_id, "--source-dir", source, "--platform", "macos"],
+          logs / "sub_programs.log", env)
+    return layout.current_root(c, root / "roots" / (game_id + layout.CURRENT))
+
+
 @contextlib.contextmanager
 def produce_locks(c):
     """出包（Mac prepare、iPhone ipa.build）拿的锁（执行锁读写化，11-19）：执行锁共享（和起局并行，挡全库独占动作）+ 出包锁独占（两次出包照旧
@@ -1033,12 +1041,16 @@ def prepare(c):
         try:
             with ms.DirectWatcher(c, root / "roots", game["id"]):
                 c.run(["bash", c.engine / "pack/refresh.sh", game["id"]], logs / "refresh.log", env)
+            current = layout.current_root(c, root / "roots" / (game["id"] + layout.CURRENT))
+            current = current and contained(root, current)
+            if current is None or not (current / "shaders/direct/keys.tsv").is_file():   # 只有直连：refresh.sh 退 0 却没有直连库就是出包出错（11-07 拆通用模式）
+                raise Failure("直连着色器库不完整。")
+            current = prepare_sub_programs(c, root, current, extraction, src, logs, env, game["id"])
+            current = current and contained(root, current)
+            if current is None:
+                raise Failure("多程序合集构建后没有现行产物根。")   # 非玩家句
         finally:
             shutil.rmtree(src, ignore_errors=True)
-        current = layout.current_root(c, root / "roots" / (game["id"] + layout.CURRENT))
-        current = current and contained(root, current)
-        if current is None or not (current / "shaders/direct/keys.tsv").is_file():   # 只有直连：refresh.sh 退 0 却没有直连库就是出包出错（11-07 拆通用模式）
-            raise Failure("直连着色器库不完整。")
         warn_offline_empty(c, current)
         notes = collect_degrade(c, current)   # 降级继续的玩家提示：随结果交给完成卡（v0.3.1）
         ms.enter(c, "host")

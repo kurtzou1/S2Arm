@@ -887,18 +887,18 @@ int s2a_dev_profile_store(const char *files_dir, const char *json, size_t len, c
         while ((e = readdir(d))) {
             if (!is_generation_name(e->d_name) || !strcmp(e->d_name, name)) continue;
             char old[600]; struct stat os;
-            snprintf(old, sizeof old, "%s/%s", dir, e->d_name);
+            snprintf(old, sizeof old, "%s/%.21s", dir, e->d_name);   // 代名已核为 21 字符（is_generation_name）：精度写明上限，编译器可证不截断
             if (stat(old, &os) != 0) continue;
             int newer = !keep[0] || os.ST_MTIM.tv_sec > keep_t.tv_sec ||
                         (os.ST_MTIM.tv_sec == keep_t.tv_sec && os.ST_MTIM.tv_nsec > keep_t.tv_nsec);
             const char *drop = e->d_name;
-            if (newer) { if (keep[0] && n_doomed < 16) snprintf(doomed[n_doomed++], 32, "%s", keep); snprintf(keep, sizeof keep, "%s", e->d_name); keep_t = os.ST_MTIM; drop = NULL; }
-            if (drop && n_doomed < 16) snprintf(doomed[n_doomed++], 32, "%s", drop);
+            if (newer) { if (keep[0] && n_doomed < 16) snprintf(doomed[n_doomed++], 32, "%.21s", keep); snprintf(keep, sizeof keep, "%.21s", e->d_name); keep_t = os.ST_MTIM; drop = NULL; }
+            if (drop && n_doomed < 16) snprintf(doomed[n_doomed++], 32, "%.21s", drop);
         }
         closedir(d);
         for (int i = 0; i < n_doomed; i++) {
             char old[600];
-            snprintf(old, sizeof old, "%s/%s", dir, doomed[i]);
+            snprintf(old, sizeof old, "%s/%.21s", dir, doomed[i]);
             if (unlink(old) == 0 && removed) (*removed)++;
         }
     }

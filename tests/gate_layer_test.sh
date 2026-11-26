@@ -45,6 +45,11 @@ ck "⑦ 显卡独占单测经 prio 锁跑、普通单测不经（trace ${t}，pr
 printf '#!/bin/bash\n# 门禁显卡：共享\necho w >> %s/trace; echo w 过\n' "$T" > tests/w_test.sh
 git add -A; git commit -qm 2b; : > $T/prio; r=$(g o7b); t=$(tr1); pr=$(sort $T/prio | tr '\n' '|')
 ck "⑦b 显卡共享单测经 share 跑、独占经 prio、普通不经（trace ${t}，锁 ${pr}，rc=${r}）" '[ $r = 0 ] && [ "$t" = "a b w x y z " ] && [ "$pr" = "prio 单测 z_test|share 单测 w_test|" ]'
+# ⑦c 启动器钩子 launchers/macos/gate.sh 开真窗口（XCTest）→ 整钩子经 prio 独占跑，与 Mac 游戏局互斥（11-25：与同机 Mac 局重叠失焦卡死）；别的钩子不经
+mkdir -p launchers/macos; printf '#!/bin/bash\necho L >> %s/trace; echo L 过\n' "$T" > launchers/macos/gate.sh
+git add -A; git commit -qm 2c; : > $T/prio; r=$(g o7c); pr=$(sort $T/prio | tr '\n' '|')
+ck "⑦c 启动器钩子经 prio 独占、a / b 钩子不经（锁 ${pr}，rc=${r}）" '[ $r = 0 ] && grep -qx L $T/trace && [ "$pr" = "prio 单测 z_test|prio 钩子 launchers/macos/gate.sh|share 单测 w_test|" ]'
+git rm -q -r launchers; git commit -qm 2c-undo
 ck "⑧ 本仓库声明显卡独占的单测含 present_settings_test" 'head -6 $H/tests/present_settings_test.sh | grep -q "^# 门禁显卡：独占"'
 # ⑨ 「合入后（路由命中时合入前也跑）」（11-10：安卓支 / ios 头改动合入前不跑对应钩子，一天叠多处 main 红）：钩子 c 这样声明、路由 c/。
 #   期望（按规则手写）：pre + 改动路由到 c → c 跑；pre + 改动没路由到 c → c 不跑；post + 路由到 c → c 跑；

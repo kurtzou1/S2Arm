@@ -754,3 +754,31 @@
 "assign.ns2pro" = "Switch 2 Pro 手把";
 "assign.saveFailed" = "沒能儲存分配結果，請再試一次。";
 "assign.ok" = "好";
+
+/* D2R-Mobile library backend and local saves. */
+"d2r.load" = "無法載入暗黑2觸控後端。請檢查安裝包是否包含同一團隊簽署的 S2AD2R 框架。";
+"d2r.abi" = "暗黑2觸控後端與目前 S2Arm 主程式的版本不相容。";
+"d2r.os" = "此暗黑2觸控後端需要 iPadOS 26 或更新版本。";
+"d2r.reopen" = "暗黑2已經啟動。請儲存並退出，再重新開啟 S2Arm。";
+"d2r.gpu" = "此暗黑2後端需要支援 Metal 4 和 BC 紋理的裝置。";
+"d2r.resources" = "請將暗黑2資源目錄放入 S2Arm 的 D2R Mobile 資料夾。\n\n%s";
+"d2r.metal" = "暗黑2觸控畫面無法建立 Metal 圖層。";
+"d2r.simulator" = "模擬器僅支援觸控畫面接線檢查。";
+"d2r.title" = "暗黑2";
+"d2r.manage" = "暗黑2存檔管理";
+"d2r.location" = "檔案 → 我的 iPad → S2Arm";
+"d2r.import" = "匯入角色資料夾…";
+"d2r.export" = "匯出存檔資料夾…";
+"d2r.play" = "開始遊戲";
+"d2r.empty" = "尚無角色";
+"d2r.saves" = "暗黑2存檔";
+"d2r.added" = "已新增角色。";
+"d2r.failed" = "匯入失敗。";
+"d2r.directory" = "存檔位置必須是一般資料夾。";
+"d2r.unreadable" = "無法讀取存檔資料夾。";
+"d2r.special" = "存檔含有連結或特殊檔案。";
+"d2r.missing" = "在「檔案」中找不到暗黑2 save 資料夾。請將存檔備份放回原位置後重試。";
+"d2r.conflict" = "新舊位置含有不同的暗黑2存檔，請先分別備份並核對。";
+"d2r.character" = "請選擇角色本人的資料夾，其中應有同名的 .d2s 存檔。";
+"d2r.duplicate" = "已有同名角色，原存檔已保留。";
+"d2r.docs" = "無法讀取 S2Arm 的存檔目錄。";

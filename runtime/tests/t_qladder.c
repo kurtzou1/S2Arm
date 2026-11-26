@@ -5,13 +5,19 @@
 #include <stdio.h>
 static int bad;
 #define CHECK(c, ...) do { if (!(c)) { printf("✗ " __VA_ARGS__); printf("\n"); bad++; } else { printf("✓ " __VA_ARGS__); printf("\n"); } } while (0)
-static double T, G;   // 当前时刻（秒）、GPU 忙累计（毫秒）
+static double T, G; static int HIT;   // 当前时刻（秒）、GPU 忙累计（毫秒）、feed 喂的帧是不是首遇现编 / 首传贴图（hitch；现有各项都喂 0）
 // 喂 sec 秒、每帧 ms 毫秒；game 局内画面；gpu GPU 忙占比（< 0 = 没有读数，喂 -1）；th 热状态；itv 游戏自设间隔。返回第一次换到的档（-1 没换），*at 换档时刻
 static int feed(double sec, double ms, int game, double gpu, int th, int itv, double *at) {
     int got = -1;
     for (double end = T + sec; T < end - 1e-9; ) { T += ms / 1000; if (gpu >= 0) G += ms * gpu;
-        int r = s2a_ql_frame((uint64_t)(T * 1e9), game, (uint64_t)(ms * 1e6), gpu >= 0 ? G : -1, th, itv);
+        int r = s2a_ql_frame((uint64_t)(T * 1e9), game, (uint64_t)(ms * 1e6), gpu >= 0 ? G : -1, th, itv, HIT);
         if (r >= 0 && got < 0) { got = r; if (at) *at = T; } }
+    return got;
+}
+// 按帧数喂（一次性卡顿两项用：按秒喂时浮点累加会让 0.3 秒有时出 4 帧，卡顿帧占比漂过 2.5% 门槛）
+static int feedn(int n, double ms, double gpu, int hit) {
+    int got = -1;
+    for (int i = 0; i < n; i++) { T += ms / 1000; G += ms * gpu; int r = s2a_ql_frame((uint64_t)(T * 1e9), 1, (uint64_t)(ms * 1e6), G, 0, 1, hit); if (r >= 0 && got < 0) got = r; }
     return got;
 }
 static void fresh(void) { s2a_ql_setup(); T = 1000; G = 0; }
@@ -41,6 +47,14 @@ int main(void) {
     fresh(); CHECK(feed(120, 33.333, 0, 0.9, 0, 1, 0) < 0, "菜单 / 加载（非局内画面）30 帧 2 分钟：不降");
     fresh(); CHECK(feed(120, 33.333, 1, 0.17, 0, 2, 0) < 0, "60 帧档、游戏自设间隔 2（标题 / 过场自己锁 30 帧）、30 帧 2 分钟：不降（游戏自己限的帧，不是跑不动）");
     fresh(); r = feed(40, 50, 1, 0.9, 0, 2, 0); CHECK(r == 1, "60 帧档、游戏自设间隔 2 但只跑出 20 帧（目标 33.3 ms）：照常降（实 %d）", r);
+    // 11-26 一次性卡顿（D-CCAG）：每 3 秒 159 帧 = 150 帧 16.7 ms + 6 帧 33.3 ms（真慢）+ 3 帧 100 ms 首遇现编（hitch），GPU 30%；30 秒窗口正好 10 段。
+    //   慢帧 9 / 159 = 5.7% > 5%；卡顿帧 3 / 159 = 1.9% ≤ 2.5% → 扣掉，慢帧 6 / 159 = 3.8% → 2 分钟不降。旧：不分卡顿帧，第一个窗口满就压回 30 帧（记成 CPU 跟不上）
+    fresh(); r = -1; for (int i = 0; i < 40 && r < 0; i++) { r = feedn(150, 16.667, 0.3, 0); if (r < 0) r = feedn(6, 33.333, 0.3, 0); if (r < 0) r = feedn(3, 100, 0.3, 1); }
+    CHECK(r < 0 && s2a_ql_tier() == 0 && s2a_ql_last_hitch() == 30, "一次性卡顿：首遇现编帧 1.9%% 占窗口、扣掉 30 帧后慢帧 3.8%%：不降（实 换档 %d、档 %d、扣 %d）", r, s2a_ql_tier(), s2a_ql_last_hitch());
+    // 【负对照开始】一直在现编：每 107 帧 = 100 帧 16.7 ms + 3 帧 33.3 ms + 4 帧 100 ms hitch → 卡顿帧 3.7% > 2.5%，照常算，慢帧 6.5% → 降
+    fresh(); r = -1; for (int i = 0; i < 40 && r < 0; i++) { r = feedn(100, 16.667, 0.3, 0); if (r < 0) r = feedn(3, 33.333, 0.3, 0); if (r < 0) r = feedn(4, 100, 0.3, 1); }
+    CHECK(r == 1 && s2a_ql_last_hitch() == -1, "一直在现编：卡顿帧 3.7%% > 2.5%%，照常算慢帧 → 压回 30 帧、读数记「卡顿帧太多」（实 档 %d、last_hitch %d）", r, s2a_ql_last_hitch());
+    // 【负对照结束】
     // 11-25 局中游戏把自设间隔从 2 改成 1（帧率补丁局中才武装）：前 20 秒 33.3 ms（间隔 2），后 60 秒稳 16.7 ms（间隔 1）。窗口在改间隔那一帧重开 → 不降。
     //   旧：改后 10 秒窗口满，按间隔 1 的目标判，前 600 帧 33.3 ms 全是慢帧（> 25 ms），慢帧 50% → 压回 30 帧
     fresh(); feed(20, 33.333, 1, 0.17, 0, 2, 0); r = feed(60, 16.667, 1, 0.3, 0, 1, 0);

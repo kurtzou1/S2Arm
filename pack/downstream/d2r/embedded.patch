@@ -1,0 +1,58 @@
+--- a/dm/ios/Sources/main.m
++++ b/dm/ios/Sources/main.m
+@@ -640,7 +640,11 @@
+ // boot prerequisites (done at the start of main(), before UIApplicationMain): save replacement / directories / environment variables / cwd -- the host's early load (dm_host_preload_start) needs to read these
+ static void boot_prepare(void) {
+     NSString *res = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"dm"];
++#if defined(DM_S2ARM_EMBEDDED)
++    NSString *doc = g_embedded_docs;
++#else
+     NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0];
++#endif
+     NSString *support = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES)[0];
+     NSString *romfs = [support stringByAppendingPathComponent:@"romfs"];
+     NSFileManager *fm = NSFileManager.defaultManager;
+@@ -735,7 +739,9 @@
+       plog("boot: 前端给游戏的输出分辨率 主机 %llux%llu / 掌机 %llux%llu", r & 0xffffffff, r >> 32, r0 & 0xffffffff, r0 >> 32); }
+     g_T[6] = since_start();
+     plog("启动计时 T5 boot_thread 入口 %.1f ms · T6 dm_main 前 %.1f ms", g_T[5], g_T[6]);
++#if !defined(DM_S2ARM_EMBEDDED)
+     { void dm_cloud_boot(void); dm_cloud_boot(); }   // iCloud 同步：挂存档之前把云端更新的角色 / 共享仓库换进来（最多等 5 秒；cloud_ios.m） | iCloud sync: before mounting saves, swap in the characters / shared stash that are newer in the cloud (wait at most 5 seconds; cloud_ios.m)
++#endif
+     plog("boot: dm_main %s", argv[1]);
+     int rc = dm_main(g_boot_argc, argv);
+     plog("boot: dm_main 返回 %d", rc);
+--- a/dm/host/dm_sect.h
++++ b/dm/host/dm_sect.h
+@@ -9,10 +9,15 @@
+ #include <mach-o/getsect.h>
+ #include <mach-o/ldsyms.h>
+ #define DM_SECT(name) __attribute__((used, section("__DATA," #name)))
++#ifdef DM_S2ARM_EMBEDDED
++#define DM_REGISTRATION_IMAGE (&_mh_dylib_header)
++#else
++#define DM_REGISTRATION_IMAGE (&_mh_execute_header)
++#endif
+ // 取段 name 的首址与字节数（找不到段时 p = NULL、bytes = 0）
+ // Fetch the start address and byte count of section name (p = NULL, bytes = 0 when the section is missing)
+ #define DM_SECT_GET(name, type, p, bytes) do { unsigned long dm_sz_ = 0; \
+-    (p) = (type *)getsectiondata(&_mh_execute_header, "__DATA", #name, &dm_sz_); (bytes) = (p) ? dm_sz_ : 0; } while (0)
++    (p) = (type *)getsectiondata(DM_REGISTRATION_IMAGE, "__DATA", #name, &dm_sz_); (bytes) = (p) ? dm_sz_ : 0; } while (0)
+ #else
+ #define DM_SECT(name) __attribute__((used, retain, section(#name)))
+ #define DM_SECT_GET(name, type, p, bytes) do { \
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -55,7 +55,11 @@
+ #include "nvn_dirty.h"
+ #include "nvn_refl.h"
+ #include "nvn_cover.h"
+-#include "dmsh_chain.h"   // DMSH_CHAIN：本源码树期望的 B 着色器库翻译链版本 | DMSH_CHAIN: the translation chain version of the B shader library expected by this source tree
++#ifdef DM_S2ARM_SHADER_CHAIN
++#define DMSH_CHAIN DM_S2ARM_SHADER_CHAIN
++#else
++#include "dmsh_chain.h"
++#endif
+ #include "nvn_hmap.h"
+ #include "../../host/dm.h"
+ #import <CommonCrypto/CommonDigest.h>

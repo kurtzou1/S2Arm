@@ -224,6 +224,15 @@ static int child(int m3) {
                 while (mtl_grab_inflight()) sched_yield();
                 if (judge && ctok) mtl_fit_judge_shot(ctok, cp, cw, ch, cw * 4);
                 ctok = 0; } };
+        // 11-26：同一次出图前挂了两个取图请求（自动玩家截图 + 即时存档验证截图），两个回调都拿到这一帧。旧：一个槽，后来的把前面的盖掉、前面的回调永远不来
+        { __block int na = 0, nb = 0; dispatch_semaphore_t g2 = dispatch_semaphore_create(0); uint64_t s2 = mtl_ext_tex((__bridge void *)mk(208, 96, 0));
+          mtl_grab_next_present(^(const uint8_t *b, size_t w, size_t h, size_t r) { (void)r; if (b && w == 208 && h == 96) na++; dispatch_semaphore_signal(g2); });
+          mtl_grab_next_present(^(const uint8_t *b, size_t w, size_t h, size_t r) { (void)r; if (b && w == 208 && h == 96) nb++; dispatch_semaphore_signal(g2); });
+          nvn_be_present_wait(mtl_present_ext(s2, 0, (__bridge void *)xev, 1, NULL));
+          long t1 = dispatch_semaphore_wait(g2, dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_SEC)), t2 = t1 ? 1 : dispatch_semaphore_wait(g2, dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_SEC));
+          while (mtl_grab_inflight()) sched_yield();
+          CHECK(!t1 && !t2 && na == 1 && nb == 1, "取图：一次出图前挂两个请求，两个回调各拿到这一帧 208x96 → %d / %d（期望 1 / 1，等待 %ld / %ld）", na, nb, t1, t2);
+          if (t1 || t2) mtl_grab_next_present(nil); }
         run(mk(208, 96, 18), 0); int a0 = mtl_fit_bad(1);
         CHECK(!a0, "满屏判据：取图方不判时上屏线程不判 → 内容 %d（期望 0）", a0);
         run(mk(208, 96, 18), 1); int a = mtl_fit_bad(1);

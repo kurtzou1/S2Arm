@@ -30,6 +30,11 @@ namespace S2A.Services.Tests
 
         [DynamicDependency(DynamicallyAccessedMemberTypes.NonPublicFields,
             "Ryujinx.Audio.Backends.Apple.AppleHardwareDeviceSession", "Ryujinx.Audio.Backends.Apple")]   // 平台例外：本用例只测 Apple 音频后端的会话接线（#189 后续），只在 macOS 上跑
+        // 本线程 CPU 时间（纳秒）：CLOCK_THREAD_CPUTIME_ID = 16（<time.h>），按线程计，被抢占的时间不算
+        [DllImport("/usr/lib/libSystem.dylib")]   // 平台例外：苹果音频后端单测，只在 macOS 跑
+        private static extern ulong clock_gettime_nsec_np(int clock);
+        private static ulong ThreadCpuNs() => clock_gettime_nsec_np(16);
+
         // 读回我方设给 AUSM 的属性（只读；判据只核我方输入，见 ⑥）
         [DllImport("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox", EntryPoint = "AudioUnitGetProperty")]   // 平台例外：本用例只测 Apple 音频后端（读回我方设给 AUSM 的属性），只在 macOS 上跑
         private static extern int AudioUnitGetPropertyRaw(nint unit, uint id, uint scope, uint element, nint data, ref uint size);
@@ -417,17 +422,21 @@ namespace S2A.Services.Tests
                         CheckOwnInput("耳机档", headphones, AudioUnitInterop.kSpatialMixerOutputType_Headphones);
 
                         // ⑦ 性能读数：ConvertSpatial 在交缓冲的生产方线程上同步跑（评审 11-16），典型片长给
-                        //   中位 / 最大；4800 帧一片（50 ms 设备缓冲，两片 2400）有门限 150 µs
+                        //   中位 / 最大；4800 帧一片（50 ms 设备缓冲，两片 2400）有门限 150 µs。
+                        //   按本线程 CPU 时间判（AUSM 渲染在调用线程上同步跑）：要守的是混音本身够快、真机上不欠载；
+                        //   原先按墙钟，门禁满载时线程被抢占也算进去（11-26 main 实测 493.8 µs，近 40 次钩子红占 6 次），判的是机器忙不忙。墙钟照打不判
                         byte[] bigSlice = new byte[frames * 6 * sizeof(short)];
                         long start = Stopwatch.GetTimestamp();
+                        ulong cpu0 = ThreadCpuNs();
 
                         for (int i = 0; i < 100; i++)
                         {
                             headphones.Process(bigSlice, output);
                         }
 
+                        double cpuMicroseconds = (ThreadCpuNs() - cpu0) / 1e3 / 100;
                         double microseconds = (Stopwatch.GetTimestamp() - start) * 1e6 / Stopwatch.Frequency / 100;
-                        Check("AUSM 一片 4800 帧 < 150 µs", microseconds < 150, $"{microseconds:F1} µs（100 ms 音频）");
+                        Check("AUSM 一片 4800 帧 < 150 µs（线程 CPU）", cpuMicroseconds < 150, $"CPU {cpuMicroseconds:F1} µs、墙钟 {microseconds:F1} µs（100 ms 音频）");
 
                         foreach (int sliceFrames in new[] { 240, 480, 1024, 2400 })
                         {

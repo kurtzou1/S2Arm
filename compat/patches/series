@@ -695,3 +695,5 @@
 20261125-0838-audsmx-stream-purge.patch
 20261125-0016-snap-npad-sampling.patch
 20261125-0511-audio-ns2-mic-device-name.patch
+20261125-2109-direct-uniform-bindless-handles.patch
+20261126-0032-ldn-defer-network-to-first-use.patch

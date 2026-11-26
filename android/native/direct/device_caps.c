@@ -9,7 +9,7 @@
 
 #define PUT(...) do { \
     int n = snprintf(out + used, used < cap ? cap - used : 0, __VA_ARGS__); \
-    if (n < 0) return -1; used += (size_t)n; if (used >= cap) return -1; } while (0)
+    if (n < 0) { return -1; } used += (size_t)n; if (used >= cap) { return -1; } } while (0)
 
 // driver/device 名进 JSON：只保留可打印 ASCII，引号/反斜杠转义；非 ASCII 写成 '?'，
 // 让 managed 的严格解析永远拿到合法 JSON（不因某个驱动的名字带引号而整份失败）。

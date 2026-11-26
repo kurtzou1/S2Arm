@@ -90,6 +90,7 @@ static uint8_t noise(int x, int y) { uint32_t h = (uint32_t)(x * 374761393 + y *
 static uint8_t blur5(int x, int y) { int s = 0; for (int dy = -2; dy <= 2; dy++) for (int dx = -2; dx <= 2; dx++) s += noise(x + dx, y + dy); return (uint8_t)(s / 25); }   // pauseb 暂停页：局内画面模糊
 int32_t nxgal_screenshot(void *out, int32_t cap, int32_t *w, int32_t *h) {
     *w = W; *h = H; if (!out) return W * H * 4; if (cap < W * H * 4) return 0;
+    if (!strcmp(g_scn, "noshot")) return 0;   // 出图在涨、截图一直拿不到（取图请求丢了）
     pthread_mutex_lock(&g_fm); t_shot_ns = atomic_load(&g_gns);
     int st = atomic_load(&g_state), cam = atomic_load(&g_cam); uint8_t *p = out;
     for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) {

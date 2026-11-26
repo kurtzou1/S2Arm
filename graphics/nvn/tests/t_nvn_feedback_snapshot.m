@@ -314,6 +314,14 @@ int main(int argc, char **argv) {
         pixels("pending ClearColor lands before feedback snapshot",&first,48,176,80);
         }
         storage_alias_cases(&p,&a,&b,&first,pool,&triangle,all);
+        // Verify fb_prepare's per-shader fb_tex cache: textured FS caches 2, untextured FS caches 1 and fast-exits
+        NvProg *notex=[NvProg new]; notex->sh[0]=program->sh[0]; notex->sh[1]=[NvShader new];
+        notex->sh[1]->rf.nb=0; notex->sh[1]->fb_tex=0;
+        R.rt.n=1; R.rt.color[0]=&a; R.has_rt=1;
+        fb_prepare(notex);
+        CHECK(program->sh[1]->fb_tex==2 && notex->sh[1]->fb_tex==1 && g_fb_n==0,
+              "fb_prepare fb_tex cache: textured=%u (expect 2), untextured=%u (expect 1)",
+              program->sh[1]->fb_tex, notex->sh[1]->fb_tex);
         unlink(map); unlink(user);
     }
     printf("%s t_nvn_feedback_snapshot %s: %u checks, %u failures\n",failures?"✗":"✓",all?"snap-all":"default",checks,failures);

@@ -437,6 +437,31 @@ int main(void) { @autoreleasepool {
         VERIFY(rid_old != dum && b_new != b_old_keep && rid_old_after == rid_old && rid_new_after == dum,
                "⑯b 在途池表写时拷贝：旧表保留真图(%d) 新表换缓冲(%d) 新表为哑图(%d)",
                rid_old_after == rid_old, b_new != b_old_keep, rid_new_after == dum);
+        // ⑰ pool_seen_scan 快速重查：仅 guest 脏代号变化（dg != g_seen_dirty, sg == g_seen_ser）时跳过非 CPU 写入贴图（view_pkg == 0）；g_ser_gen 变化时照常全量重查
+        os_unfair_lock_lock(&g_rmu);
+        pool_seen_scan();   // 同步 g_seen_sub / g_seen_dirty / g_seen_ser
+        int gpu_seen = 0, pkg_seen = 0, total_seen = 0;
+        // 找一个已读贴图，强制设一个为 view_pkg=0（GPU 独占），统计当前所有已读 ID 中会被 dg-only 重查的数量
+        int gpu_id = -1;
+        for (int i = 1; i < g_ntreg; i++) {
+            if (!g_treg[i].ok || !pool_seen(i) || (g_seen_todo[(unsigned)i >> 5] >> (i & 31) & 1)) continue;
+            if (gpu_id < 0 && g_treg[i].view && g_treg[i].view_ser == g_ser_gen) { gpu_id = i; g_treg[i].view_pkg = 0; }
+            total_seen++;
+            if (g_treg[i].view && g_treg[i].view_ser == g_ser_gen && !g_treg[i].view_pkg) gpu_seen++; else pkg_seen++;
+        }
+        uint64_t u0 = g_pool_upd_seen;
+        g_seen_dirty--;   // 模拟仅 guest 脏代号前进（同提交内 !new_sub && dg_chg && !sg_chg）
+        pool_seen_scan();
+        uint64_t du_dg = g_pool_upd_seen - u0;
+        uint64_t u1 = g_pool_upd_seen;
+        g_seen_ser--;     // 模拟 g_ser_gen 前进（同提交内 !new_sub && sg_chg）
+        pool_seen_scan();
+        uint64_t du_sg = g_pool_upd_seen - u1;
+        uint32_t nw = g_nseen_words;
+        os_unfair_lock_unlock(&g_rmu);
+        VERIFY(gpu_seen > 0 && nw > 0 && (int)du_dg == pkg_seen && (int)du_sg == total_seen,
+               "⑰ pool_seen_scan 紧凑重查：active_words=%u，dg-only 重查 %llu（期望仅 view_pkg=%d，跳过 gpu_only=%d），sg 重查 %llu（期望全量=%d）",
+               nw, (unsigned long long)du_dg, pkg_seen, gpu_seen, (unsigned long long)du_sg, total_seen);
     }
     printf("%s t_nvn_pool_tex：%u 项，%u 项失败（追不到槽的句柄按编号读池：池表 + 已读位图 + 未写渲染目标不建 + 小贴图预建 + 表复用）\n", fails ? "✗" : "✓", checks, fails);
     return fails != 0;

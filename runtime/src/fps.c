@@ -176,6 +176,9 @@ void s2a_fps_set_enabled(int on) {
     pthread_mutex_unlock(&g_control_mu);
 }
 static module_t *mod_named(const char *n) { for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, n)) return &g_mod[i]; return NULL; }
+// 测试读数（tests/autoplay 固定路线录像记游戏自己的步长，11-25 测速校准）：<模块>+<偏移> 处的 f32；模块没装 / 越界回 -1
+float s2a_guest_f32(const char *mod, uint64_t off) { module_t *m = mod_named(mod); if (!m || off + 4 > m->size) return -1.0f;
+    uint32_t b = plat_guest_load32((uintptr_t)(m->base + off)); float v; memcpy(&v, &b, 4); return v; }
 // 原值按地址只记一次（同一地址可有多条互斥的条件行；后读到的那条读的是前一条写进去的值，不是游戏原值）
 static void note_orig(fps_w *w, uint32_t old) {
     for (int j = 0; j < g_nfw; j++) { fps_w *o = &g_fw[j];

@@ -13,6 +13,7 @@
 # 普查用（10-25 运维线：285 款泛化普查，本机解包、rsync 到 gate-host / Spare-host 往下出；Spare-host 没有 prod.keys）：
 #   --from-extract <解包目录>（放在第一个参数位置，代替源包文件夹）：跳过 ① 认包 / ③ 解包，直接用已解好的目录（exefs/ romfs/ ctl/ aoc/ unpack.tsv，
 #     一键出包 <输出>/extract 或 pack/stages/unpack.sh extract 的产物）往下播种；认游戏读 unpack.tsv，不要 prod.keys / 原始包。--out 缺省 <解包目录>/../s2arm_<款>
+#     多程序合集还需 S2A_SUBPROGRAM_SOURCES 指向原件目录与 --keys（启动器已提供）；只给序号 0 的解包目录时明确报红，不交缺程序的包。
 # --target（10-25 维护者：一个入口出各平台；公共阶段 认游戏 / 解包 / 私有根 / 改写 / 系统数据 只跑一次，平台段各走各的）：
 #   ios（缺省）：iPhone / iPad 同一个 IPA，平台段 = ipa.sh；
 #   mac：只出 Mac 能跑的私有产物根（刷新按 S2A_PACK_PLAT=macos，直连库出 Mac 侧；不起宽屏自动出表），跳过 ④ 出包（iOS 编译 / 签名 / 资源包）与 ⑤ 交付；
@@ -300,6 +301,14 @@ rfc=0; S2A_WIDEN_PKG=$([ "$MAC" = 1 ] || [ "$TGT" = android ] && echo 0 || echo 
 [ $rfc = 0 ] && export S2A_REFRESHED=$(basename "$(root_cur "$G")")   # 交给 ipa.sh：刚刷过、现行没变就不再刷（一键流程 refresh 只跑一次）
 [ $rfc = 0 ] || die "刷新停在：$(grep '【红】' "$OUT/logs/refresh.log" | grep -v '刷新停在' | tail -1 | cut -c1-300)（$OUT/logs/refresh.log）"
 t "   $(tail -1 "$OUT/logs/refresh.log" | cut -c1-1200)"
+if [ "$TGT" != android ]; then
+  cur=$(root_cur "$G"); beat 多程序合集 "$OUT/logs/sub_programs.log"
+  "$PY" "$P/multi_program.py" --extract "$X" --work "$OUT" --logs "$OUT/logs" --product "$cur" \
+    --game "$G" --source-dir "${S2A_SUBPROGRAM_SOURCES:-$S2A_GAME_SRC}" --platform "$([ "$MAC" = 1 ] && echo macos || echo ios)" \
+    > "$OUT/logs/sub_programs.log" 2>&1 || { unbeat; die "多程序合集构建失败：$(tail -1 "$OUT/logs/sub_programs.log" | cut -c1-300)"; }
+  unbeat; cur=$(root_cur "$G"); export S2A_REFRESHED=$(basename "$cur")
+  [ ! -s "$OUT/logs/sub_programs.log" ] || t "   $(tail -1 "$OUT/logs/sub_programs.log" | cut -c1-1200)"
+fi
 if [ "$TGT" = android ]; then
   # 刷新那行「🟢 … Android 共享资源已刷新：…；🟡 <n> 项：…」带的黄项（直连库段没出等，#783 合入线 11-03 答 ③）进出包汇总：这里打一行，完成行与 result 事件也带上
   AW=$(sed -n 's/^🟢 .*Android 共享资源已刷新：[^；]*；\(🟡 .*\)$/\1/p' "$OUT/logs/refresh.log" | tail -1)

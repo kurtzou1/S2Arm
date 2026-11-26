@@ -401,6 +401,16 @@ refl('追不到槽的句柄读整个池（Switch2 线 63）', True,
      [LDC64(8, 0x510), LDG(6, 8), MOVC(4, 2), MOVC(5, 3), TEXR(6, lod=(87, 1)), MOVI(1, 0), MOVI(2, 0), MOVI(3, 0)],
      pool_read, '句柄 = 存储缓冲 0 的第 0 个字：池指针 + 置位，Metal 能编（修前 32 项数组）')
 
+LDC3 = lambda rd, ra, off: inst(0xb82, rd=(16, rd), ra=(24, ra), off=(38, off), bank=(54, 3), size=(73, 4))
+refl('Ampere 动态材质句柄在常量缓冲第 32 项以后（#1956）', True,
+     [MOVC(7, 0), LDC3(6, 7, 224), MOVC(4, 1), MOVC(5, 2), TEXR(6, lod=(87, 1)), MOVI(1, 0), MOVI(2, 0), MOVI(3, 0)],
+     pool_read, '例如动态偏移 256，硬件从 c[3][480] 读第 60 项的句柄，不能取第 31 项代替')
+maxwell_ldc3 = 0xef90000000000000 | 4 << 48 | 3 << 36 | 224 << 20 | 7 << 16 | 7 << 8 | 6  # LDC R6, c[3][R7 + 224]
+maxwell_texb = 0xde80000000000000 | 2 << 28 | 0xf << 31 | 6 << 20 | 7 << 16 | 4 << 8  # TEX.B R0, R4, R6 (2D RGBA)
+refl('Maxwell 动态材质句柄在常量缓冲第 32 项以后（#1956）', True,
+     maxwell_shader([maxwell_load(7, 0), maxwell_ldc3, maxwell_load(4, 1), maxwell_load(5, 2), maxwell_texb]),
+     pool_read, '同一动态常量缓冲读取在 Maxwell 上也保留实读的句柄')
+
 # 无绑定 TMML（11-06，上游参考实现（MIT）8feddfee）：0xf69 句柄在统一寄存器（其余字段同 0xb69）、0x36a 句柄在 Rb（同 0x367 / 0x364 一族）。TMML = 取样会用的细节层级，
 #   Metal 是 calculate_(un)clamped_lod。修前两种编码都不认（「unknown opcode」拒翻整支）
 def has_lod(msl, j): return None if re.search(r'\.calculate_(?:un)?clamped_lod\(', msl) else 'MSL 里没有细节层级查询 calculate_*_lod'

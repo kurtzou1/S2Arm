@@ -748,3 +748,31 @@
 "assign.ns2pro" = "Manette Pro Switch 2";
 "assign.saveFailed" = "Impossible d’enregistrer l’attribution. Réessayez.";
 "assign.ok" = "OK";
+
+/* D2R-Mobile library backend and local saves. */
+"d2r.load" = "Impossible de charger le moteur tactile de Diablo II. Vérifiez que l’app contient le framework S2AD2R signé par la même équipe.";
+"d2r.abi" = "Le moteur tactile de Diablo II est incompatible avec cette version de S2Arm.";
+"d2r.os" = "Ce moteur tactile de Diablo II nécessite iPadOS 26 ou une version ultérieure.";
+"d2r.reopen" = "Diablo II a déjà démarré. Sauvegardez et quittez, puis rouvrez S2Arm.";
+"d2r.gpu" = "Ce moteur de Diablo II nécessite un appareil compatible avec Metal 4 et les textures BC.";
+"d2r.resources" = "Placez les ressources de Diablo II dans le dossier D2R Mobile de S2Arm.\n\n%s";
+"d2r.metal" = "La vue tactile de Diablo II n’a pas pu créer de couche Metal.";
+"d2r.simulator" = "Le simulateur permet uniquement de vérifier le raccordement de la vue tactile.";
+"d2r.title" = "Diablo II";
+"d2r.manage" = "Gestion des sauvegardes de Diablo II";
+"d2r.location" = "Fichiers → Sur mon iPad → S2Arm";
+"d2r.import" = "Importer un dossier de personnage…";
+"d2r.export" = "Exporter le dossier de sauvegarde…";
+"d2r.play" = "Jouer";
+"d2r.empty" = "Aucun personnage";
+"d2r.saves" = "Sauvegardes de Diablo II";
+"d2r.added" = "Personnage ajouté.";
+"d2r.failed" = "Échec de l’importation.";
+"d2r.directory" = "L’emplacement des sauvegardes doit être un dossier ordinaire.";
+"d2r.unreadable" = "Impossible de lire le dossier de sauvegarde.";
+"d2r.special" = "La sauvegarde contient des liens ou des fichiers spéciaux.";
+"d2r.missing" = "Le dossier save de Diablo II est introuvable dans Fichiers. Restaurez votre copie de sauvegarde à son emplacement initial et réessayez.";
+"d2r.conflict" = "Les anciens et nouveaux emplacements contiennent des sauvegardes différentes de Diablo II. Sauvegardez et comparez les deux dossiers.";
+"d2r.character" = "Sélectionnez le dossier du personnage contenant un fichier .d2s du même nom.";
+"d2r.duplicate" = "Un personnage porte déjà ce nom. La sauvegarde actuelle a été conservée.";
+"d2r.docs" = "Impossible de lire le dossier des sauvegardes de S2Arm.";

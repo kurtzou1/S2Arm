@@ -289,6 +289,43 @@ static void test_storage_upload_gpw_and_nvpkg_ph(void) {
     API(nvnTextureFinalize)(&tp);
 }
 
+static void test_draw_img_prescan_int_as_float(void) {
+    size_t off = 9 << 20;
+    NVNtextureBuilder b; API(nvnTextureBuilderSetDefaults)(&b); API(nvnTextureBuilderSetDevice)(&b, &device);
+    API(nvnTextureBuilderSetTarget)(&b, NVN_TEXTURE_TARGET_2D);
+    API(nvnTextureBuilderSetSize2D)(&b, 8, 8);
+    API(nvnTextureBuilderSetLevels)(&b, 1);
+    API(nvnTextureBuilderSetFormat)(&b, NVN_FORMAT_R32UI);
+    API(nvnTextureBuilderSetFlags)(&b, NVN_TEXTURE_FLAGS_COMPRESSIBLE);   // 无 IMAGE：初始无 ShaderWrite / PixelFormatView
+    API(nvnTextureBuilderSetStorage)(&b, &pool, (ptrdiff_t)off);
+    NVNtexture t = {0}; REQUIRE(API(nvnTextureInitialize)(&t, &b));
+    nvn_be_reg_tex(30, (const tex_t *)&t, NULL);
+
+    nvn_be_sub_begin();
+    id<MTLTexture> m0 = tex_mtl((const tex_t *)&t);
+    REQUIRE(m0 != nil);
+    S.img[1][0] = 30;
+    NvShader *fs = [NvShader new]; fs->stage = 1; fs->rf.nb = 1; fs->rf.b = calloc(1, sizeof *fs->rf.b);
+    fs->rf.b[0] = (nvn_rbind){.kind = NVN_RB_IMG, .reg = 0, .dtt = (uint8_t)MTLTextureType2D, .dpf = NVN_DPF_FLOAT, .rw = 1};
+    NvShader *noimg = [NvShader new]; noimg->stage = 1; noimg->rf.nb = 0;
+
+    img_wr_prescan(noimg, 1);
+    img_wr_prescan(fs, 1);
+    int had_wr = g_imwr_npend > 0, had_fit = g_imfit_npend > 0;
+    if (g_imwr_npend) img_wr_upgrade();
+    if (g_imfit_npend) img_fit_upgrade();
+    id<MTLTexture> m1 = tex_mtl((const tex_t *)&t);
+    uint64_t f = nvn_be_sub_commit(); REQUIRE(nvn_be_wait(f, 10000000000ull));
+
+    CHECK(noimg->has_img == 1 && fs->has_img == 2,
+          "⑦a img_wr_prescan has_img 缓存：无图像=%u（期望 1）、有图像=%u（期望 2）", noimg->has_img, fs->has_img);
+    CHECK(had_wr && had_fit && m1 != nil && (m1.usage & MTLTextureUsageShaderWrite) && (m1.usage & MTLTextureUsagePixelFormatView),
+          "⑦b 片元 NVN_RB_IMG R32UI→float 预检升级：queued wr=%d fit=%d，升级后 usage=%#lx",
+          had_wr, had_fit, (unsigned long)m1.usage);
+    S.img[1][0] = 0;
+    API(nvnTextureFinalize)(&t);
+}
+
 int main(void) { @autoreleasepool {
     setvbuf(stdout, NULL, _IOLBF, 0);
     struct sigaction sa = {0}; sa.sa_sigaction = fault; sa.sa_flags = SA_SIGINFO;
@@ -311,6 +348,7 @@ int main(void) { @autoreleasepool {
     test_tbuf_int_as_float_fit();
     test_dual_nvpkg_ft_flush();
     test_storage_upload_gpw_and_nvpkg_ph();
+    test_draw_img_prescan_int_as_float();
 
     API(nvnCommandBufferFinalize)(&commands); API(nvnQueueFinalize)(&queue);
     API(nvnMemoryPoolFinalize)(&pool); API(nvnDeviceFinalize)(&device); free(memory);

@@ -105,7 +105,7 @@ def main():
         # 开关口径 Apple / Android 相同（#48 D2：不设 S2A_CPATCH_ON 按表缺省开），一份宿主单测覆盖目录与 APK 内存表两条装载路
         exe = temp / 't_cpatch'
         run([*host_cc, '-std=gnu11', '-I', ROOT / 'runtime/include',
-             ROOT / 'runtime/tests/t_cpatch.c', ROOT / 'runtime/src/cpatch.c', '-o', exe])
+             ROOT / 'runtime/tests/t_cpatch.c', ROOT / 'runtime/src/cpatch.c', '-o', exe, '-lm'])   # cpatch.c 用 lround / log：Linux 宿主要显式链 libm（macOS 在 libSystem 里，-lm 照样认）
         print(run([exe]).strip())
     return 0
 

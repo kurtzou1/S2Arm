@@ -1,5 +1,5 @@
 #!/bin/bash
-# 门禁覆盖：tools/mem_admit.sh translator/dsh_batch.py pack/refresh.sh tools/mem_peak_sample.py tools/mem_peak.tsv tools/plock.sh tools/phys_footprint.py
+# 门禁覆盖：tools/mem_admit.sh translator/dsh_batch.py pack/refresh.sh tools/mem_peak_sample.py tools/mem_peak.tsv tools/plock.sh tools/phys_footprint.py tools/flock_hold.py
 # 内存准入单测（tools/mem_admit.sh，11-04 维护者第 4 项）：约 30 秒，退出 0 = 全过。上限固定 10 GB（S2A_MEM_TOTAL_GB），三款各估 4 GB，期望按规则手算：
 #   ① 4 + 4 = 8 ≤ 10：前两个放行；第 3 个 8 + 4 = 12 > 10 → 排队，admit.log 有【排队】行写明等谁（dsh/a、dsh/b）和差 2.0 GB，且命令没起
 #   ② 第 1 个结束后账内 4 GB，4 + 4 = 8 ≤ 10 → 第 3 个放行
@@ -25,6 +25,7 @@
 #   ⑩b 测试进程被 KILL（收尾 trap 不跑、目录还在）→ 夹具 3 秒内也退出（11-11 本机两个夹具空转 41 小时）
 #   ⑪ dsh_batch.py build 直接调用也过准入：账本出现 dsh/<键> 的 use 行、核数 = -j，且只有这一行（不重复记账）
 #   ㉓ 按此刻可用内存放（S2A_MEM_AVAIL_MB）：本单 + 账内各单还没用到的预留 > 可用 → 排队；负控给大可用直接放行
+#   ㉔ 账锁被别的作业占着、一轮等不到（S2A_MEM_LOCK_S）→ 接着排，锁放了就放行，不报 125（#2241）
 #   ④ 负控：S2A_MEM_ADMIT=0（去掉准入）同样三个申请，第 3 个不排队直接起 → 用例 ① 的「第 3 个被挡」在此红，证明用例 ① 测的是准入本身
 set -u; unset J S2A_CPU_BAKE S2A_MEM_KEY; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); trap 'kill $(jobs -p) 2> /dev/null; rm -rf "$T"' EXIT; bad=0
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
@@ -251,4 +252,12 @@ R=$T/reapk; mkdir -p "$R"
 bash -c "H='$H'; $(declare -f hold); hold '$R' y; sleep 60" & sp=$!; waitf "$R/y.in"; fp=$(pgrep -f "^bash -c touch .* $R y$" | head -1)
 kill -KILL $sp; for i in $(seq 1 30); do { [ -n "$fp" ] && kill -0 "$fp" 2> /dev/null; } || break; sleep 0.1; done
 ck "⑩b 测试进程被 KILL、目录还在 → 夹具（pid ${fp:-没找到}）3 秒内退出" '[ -n "$fp" ] && [ -d "$R" ] && ! kill -0 "$fp" 2> /dev/null'
+# ㉔ 账锁一时轮不到不是故障（#2241：十几单同时排队、各自每 2 秒进锁判账，有一单连续 60 秒没抢到账锁就报 125 不起）：
+#   外面占住账锁 3 秒（S2A_MEM_LOCK_S=1 = 每次只等 1 秒），mem_admit 应接着排、锁放了就放行，命令照常起；期望手算：等待 ≥ 2 秒、退出 0、命令跑过
+K=$T/lockbusy; mkdir -p "$K"; export S2A_MEM_DIR=$K/mem S2A_MEM_LOCK=$K/mem.flock
+sleep 30 & kp=$!; kh=$(python3 "$H/tools/flock_hold.py" "$K/mem.flock" "$kp" take lockbusy_test)
+( sleep 3; kill "$kh" 2> /dev/null ) & t0=$SECONDS
+S2A_MEM_LOCK_S=1 bash "$H/tools/mem_admit.sh" dsh d -- touch "$K/ran" > /dev/null 2> "$K/err"; krc=$?; kdt=$((SECONDS - t0)); kill $kp 2> /dev/null
+ck "㉔ 账锁被占 3 秒（每次只等 1 秒）：接着排、锁放后放行（退出 ${krc}、等了 ${kdt} 秒、命令$([ -e "$K/ran" ] && echo 跑过 || echo 没跑)）" '[ $krc = 0 ] && [ -e "$K/ran" ] && [ $kdt -ge 2 ]'
+ck "㉔ 轮不到账锁时排队行写明原因（账锁轮不到），不报红" 'grep -q "【排队】mem_admit dsh/d：账锁" "$K/mem/admit.log" && ! grep -q "【红】" "$K/err"'
 [ $bad = 0 ] && echo "✓ mem_admit_test：全部通过" || { echo "✗ mem_admit_test：有不通"; exit 1; }

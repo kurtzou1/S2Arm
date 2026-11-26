@@ -204,7 +204,12 @@ fi
     #   不占钩子自己的上限——钩子上限交给 维护方工具 在拿齐后才计时；本步外层上限 = 钩子上限 + 排队上限 + 30 秒收尾
     case $hk in graphics/gate.sh|tests/visual/gate.sh) hl=${bl:-${GATE_HOOK_S:-600}}; pl=$(( hl + ${S2A_GATE_GPU_QUEUE_S:-1800} + 30 )); [ "$pl" -gt "${BMAX:-0}" ] && BMAX=$pl
       # visual 钩子全是离屏真显卡回放对拍：整钩子取共享显卡锁（11-20 读写锁）；graphics 钩子在自己的子项上分别取共享 / 独占
-      [ "$hk" = tests/visual/gate.sh ] && add "钩子 $hk" "${S2A_PRIVATE_TOOLS:+bash $S2A_PRIVATE_TOOLS/mac_slot_frozen.sh share '钩子 $hk' -- }bash $hk" $pl || add "钩子 $hk" "bash $hk" $pl;; *) add "钩子 $hk" "bash $hk" $bl;; esac; done   # 11-14：不再整钩子套显卡锁——graphics 钩子只在开窗口 / 按显示时钟判的子项上自己拿（graphics/gate.sh gpu_excl），visual 钩子全是离屏对拍、不拿；外层上限仍留排队余量
+      [ "$hk" = tests/visual/gate.sh ] && add "钩子 $hk" "${S2A_PRIVATE_TOOLS:+bash $S2A_PRIVATE_TOOLS/mac_slot_frozen.sh share '钩子 $hk' -- }bash $hk" $pl || add "钩子 $hk" "bash $hk" $pl;;
+    # 启动器钩子的 XCTest 开真窗口、要前台焦点：同「门禁显卡：独占」单测走显卡独占锁（维护方工具 prio = 全机共用的 Mac 局槽，与 Mac 游戏局互斥）。
+    #   11-25：本机门禁启动器 UI 用例与同机 Mac 游戏局（拿 Mac 局槽、窗口到前台）重叠时失焦、等前台卡死，看门狗 300 秒无进展停掉，换空闲主机复跑绿
+    launchers/macos/gate.sh) hl=${bl:-${GATE_HOOK_S:-600}}; pl=$(( hl + ${S2A_GATE_GPU_QUEUE_S:-1800} + 30 )); [ "$pl" -gt "${BMAX:-0}" ] && BMAX=$pl
+      add "钩子 $hk" "${S2A_PRIVATE_TOOLS:+bash $S2A_PRIVATE_TOOLS/mac_slot_frozen.sh prio '钩子 $hk' $hl -- }bash $hk" $pl;;
+    *) add "钩子 $hk" "bash $hk" $bl;; esac; done   # 11-14：不再整钩子套显卡锁——graphics 钩子只在开窗口 / 按显示时钟判的子项上自己拿（graphics/gate.sh gpu_excl），visual 钩子全是离屏对拍、不拿；外层上限仍留排队余量
 fi   # 非 doc 档的语法 / 单测 / 平台钩子
 # 预算查询（列车起门禁前问）：GATE_BUDGET_Q=1 bash tools/gate.sh → 打本次要跑的钩子里自报的最大预算（秒）后退出、什么都不跑
 #   只算钩子自报的预算（没人自报 = 0，列车照缺省上限）；iOS 编译那一步的 3600 秒含排队、不算

@@ -619,8 +619,9 @@ static class C1Cb
         return null;
     }
 
-    /// <summary>cb_extent.extents：{reg: 字节}</summary>
-    static SortedDictionary<long, BigInteger> Extents(Ctx c, List<Binding> bindings)
+    /// <summary>cb_extent.extents：{reg: 字节}；cext 收「有动态下标、整槽界不住」的槽里常量下标最多读到哪（c&lt;reg&gt;:字节，只给宿主补零用，不进 cb_len）</summary>
+    static SortedDictionary<long, BigInteger> Extents(Ctx c, List<Binding> bindings) => Extents(c, bindings, null);
+    static SortedDictionary<long, BigInteger> Extents(Ctx c, List<Binding> bindings, SortedDictionary<long, BigInteger> cext)
     {
         var o = new SortedDictionary<long, BigInteger>();
         string source = c.Source;
@@ -633,14 +634,17 @@ static class C1Cb
             foreach (Match m in rx[1].Matches(source)) reads.Add(m.Groups[1].Value);
             int declared = rx[2].Count(source);
             if (uses != reads.Count + declared) continue;
-            BigInteger? high = -1;
+            BigInteger? high = -1; BigInteger known = -1;
             foreach (var index in new HashSet<string>(reads))
             {
                 var v = c.Eval(index, PyBaseCb);
-                if (!Known(v.L, v.H) || v.L < 0) { high = null; break; }
-                high = Max(high.Value, v.H.Value);
+                if (!Known(v.L, v.H) || v.L < 0) { high = null; continue; }   // 动态下标：整槽界不住（宿主按 gal_ubo_len 钳），接着看别的下标里常量能读多远
+                known = Max(known, v.H.Value);
+                if (high != null) high = Max(high.Value, v.H.Value);
             }
-            if (high == null || 16 * (high + 1) >= MAX) continue;
+            // #1763 / #2237：同一槽里常量下标读到绑定之外（硬件读 0），而它又有动态下标所以不出整槽界：记下常量下标的上界，宿主绑定短于它时补零
+            if (high == null) { if (cext != null && known >= 0 && 16 * (known + 1) < MAX) cext[b.Reg.Value] = 16 * (known + 1); continue; }
+            if (16 * (high + 1) >= MAX) continue;
             o[b.Reg.Value] = 16 * (high.Value + 1);
         }
         return o;
@@ -681,7 +685,8 @@ static class C1Cb
         var c = new Ctx(msl);
         string c1 = JudgeSource(name, c, span);
         if (bindings == null || bindings.Count == 0) return (c1, null);
-        var toks = Extents(c, bindings).Select(kv => $"{kv.Key}:{kv.Value}").Concat(Unwritten(msl, bindings).Select(r => $"s{r}")).ToList();
+        var cext = new SortedDictionary<long, BigInteger>();
+        var toks = Extents(c, bindings, cext).Select(kv => $"{kv.Key}:{kv.Value}").Concat(cext.Select(kv => $"c{kv.Key}:{kv.Value}")).Concat(Unwritten(msl, bindings).Select(r => $"s{r}")).ToList();
         return (c1, toks.Count > 0 ? name[..^"_b.metal".Length] + "\t" + string.Join(" ", toks) : null);
     }
 
@@ -708,7 +713,7 @@ static class C1Cb
         long slots = rows.Sum(r => (long)r.Count(ch => ch == ':')), ro = rows.Sum(r => (long)SlotRo.Count(r.Split('\t', 2)[1]));
         sb.Clear();
         sb.Append(head).Append(' ').Append(stamp).Append('\n');
-        sb.Append("# shader key, then reg:bytes for each uniform slot whose reads stay inside its first bytes, and s<reg> for each storage slot it never writes (cb_extent.py)\n");
+        sb.Append("# shader key, then reg:bytes for each uniform slot whose reads stay inside its first bytes, c<reg>:bytes for a slot with dynamic reads whose constant reads stay inside them (host zero-pads a shorter binding), and s<reg> for each storage slot it never writes (cb_extent.py)\n");
         foreach (var r in rows) sb.Append(r).Append('\n');
         WriteFile(cbOut, sb.ToString());
         return new[] { $"not proven bounded: {keys.Count} shaders", $"bounded uniform reads: {slots} slots; storage slots never written: {ro}; {rows.Count} shaders" };

@@ -19,6 +19,7 @@ SCN=lowdraw run low     FAKE_MAP=$MAP_OK S2A_AP_MAX_STEPS=6 &
 SCN=lowdraw run lowesc  FAKE_MAP='TITLE=A;MENU=A;GAME=LS_RIGHT:play55' FAKE_ESC_PLAY=1 S2A_AP_MAX_STEPS=8 &
 SCN=lowdraw run lowno   FAKE_MAP='TITLE=A;MENU=A;GAME=LS_RIGHT:play55' S2A_AP_MAX_STEPS=6 &
 SCN=stuck   run stuck   FAKE_MAP='TITLE=A/B/X/Y' S2A_AP_MAX_STEPS=4 &
+SCN=noshot  run noshot  FAKE_MAP=$MAP_OK S2A_SNAP_RESTORE=/nonexistent S2A_AP_NOSHOT_S=2 &   # 即时存档恢复局：出帧在涨、截图一直拿不到
 SCN=titlex  run tx      FAKE_MAP='TITLE=A/X;MENU=A;GAME=LS_RIGHT:play' S2A_AP_LEARN_DIR=$T/learn_x S2A_AP_PROGRAM_ID=0100000000ab0002 &
 SCN=ok      run learn1  FAKE_MAP=$MAP_OK S2A_AP_LEARN_DIR=$T/learn S2A_AP_PROGRAM_ID=0100000000ab0001 &
 SCN=pingpong run pp    FAKE_MAP='TITLE=A;MENU=B/X;GAME=LS_RIGHT:play' &
@@ -128,6 +129,7 @@ ck "④ 局内段截图请求 0 次、导航期 > 0（实为 总 / 局内段 = $
 # ⑤
 ck "⑤ 低帧（一帧 100 ms）：仍按 A A 进局打 MARK、翻页 2（实为 $(J slow presses_changed)）" 'L slow | grep -q "S2A 标记 MARK" && [ "$(J slow presses_changed)" = 2 ]'
 # ⑥
+ck "⑥b 恢复局出帧在涨、截图一直拿不到：2 秒报红收局，结论「出图在涨、截图拿不到」（旧：首帧兜底 900 秒，比局时长，整局不报）" 'L noshot | grep -q "【红】自动玩家：出图帧数在涨" && L noshot | grep -q "^自动玩家结论：没到 MARK；出图在涨、截图拿不到（2 秒）"'
 ck "⑥ 步数上限 4：结论「导航卡住（步数上限 4 步）」、ap_stuck.png、marked=False" 'L stuck | grep -q "^自动玩家结论：没到 MARK；导航卡住（步数上限 4 步）" && [ -s $T/stuck/ap_stuck.png ] && [ "$(J stuck marked)" = False ]'
 # ⑦
 lf=$T/learn/0100000000ab0001.tsv

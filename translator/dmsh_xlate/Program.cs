@@ -80,6 +80,7 @@ static class SwshXlate
         public int QuerySamplerArrayLengthFromPool() => 1 << 12;
         public int QueryTextureArrayLengthFromBuffer(int slot) => 32;
         public int QueryTextureArrayLengthFromPool() => 1 << 20;
+        public bool QueryHostSupportsBindlessUniformHandles() => _job["bindless_uniform_handles"] is JsonNode enabled && (bool)enabled;
 
         string Get(string table, int slot) => _job[table] is JsonObject t && t[slot.ToString()] is JsonNode n ? (n is JsonObject o ? (string)o["type"] : (string)n) : null;
         // A handle's texture or image slot, numbered as dmsh_build.py decode_tex numbers the reflection's (so an answer table row names the slot the reflection shows): the handle ORs two

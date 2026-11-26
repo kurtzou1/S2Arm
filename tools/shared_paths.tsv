@@ -2,6 +2,7 @@
 # 列：路径前缀	归属线	用途	并发规则。缺省一律局目录私有；只有确实要跨局共享的才登记，并写清谁能写、怎么防撞。
 # 运行时缺省（iOS 是 App 容器私有；Mac 上是整台机器共用，Mac 局一律由 runtime/run_mac.sh / tools/mac_health.sh 显式给局目录，不许落到这里）
 ~/.s2arm/run/s2arm/ab_pair	画幅线	能力 A/B 对照局目录（tools/ab_pair.sh）	每局一个带时间戳的子目录，不共写
+~/.s2arm/run/s2arm/ab_fixed	测试出包	对照局目录（tools/ab_fixed.sh：同一即时存档起点 + 固定输入）	每次对照一个带时间戳的子目录，不共写
 ~/.s2arm/run/s2arm/cache/direct	出包	直连库按程序号的缓存（计算管线归档逐支缓存 store/cpso/，pack/stage_direct_cpso.sh；S2A_DIRECT_CACHE 可改）	内容寻址；写临时文件再原子改名，同键并发写结果相同；按最近使用回收（pack/jobs/cache_retention.py）
 ~/.s2arm/run/s2arm/cache/ccache	构建工具	编译缓存（tools/cc_cache.sh）	ccache 自身并发安全
 ~/.s2arm/run/s2arm/cache/native_gate_times	构建工具	runtime 钩子各组上次耗时（runtime/gate.sh，派发排序用，S2A_NATIVE_GATE_TIMES 可改）	写临时文件再原子 mv，多树并发写最后一个为准；只影响派发顺序，删了下次重学

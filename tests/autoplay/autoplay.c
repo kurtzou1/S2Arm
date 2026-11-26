@@ -35,6 +35,10 @@
 // 弱链接[autoplay]：s2a_snap_ap_gen（即时存档 snapshot.c 提供；没有 = 不作废）
 // 弱链接[autoplay]：s2a_dump_threads（渲染器 gal_core.m 提供；同上）
 // 弱链接[autoplay]：s2a_widen_game（runtime/src/widen.c 提供：游戏自己出宽图 = 第二层；没登记按游戏不知道宽屏、触点画布 1280×720）
+// 弱链接[autoplay]：s2a_fps_hold（runtime/src/fps.c 提供：对照局 S2A_AP_ROUTE_HOLD 录前切回原帧率；没有时报红不切）
+// 弱链接[autoplay]：s2a_guest_f32（runtime/src/fps.c 提供：对照局 S2A_AP_ROUTE_F32 逐张读游戏 f32；没有时不读）
+// 弱链接[autoplay]：s2a_snap_request_save（即时存档提供：对照局 S2A_AP_ROUTE_SNAP 存起点；没有时报红「未实现」）
+// 弱链接[autoplay]：s2a_snap_exists（即时存档提供：同上，等起点快照存完）
 #pragma weak s2a_ap_passes       // 没登记（老宿主 / 单测假宿主 / 通用模式）：进局读数只用绘制数这一路
 #pragma weak s2a_ap_audio_mark   // 声音层没登记时不挡链接：MARK 时报红
 // 原生层现场导出（runtime/include/s2a_native.h）：没进可玩就收局时打一份。弱引用：单测假宿主没有
@@ -292,8 +296,66 @@ static double sp_push(uint32_t key, int *samples) {
 static int speed_probe_once(void); static void settle(double wait_real_s);
 static int speed_ab(void);
 static int g_ab_retry;   // 1 = 第一轮同局 A/B 帧率涨了却量不出画面运动，局内段跑一阵后再测一轮（见 speed_ab 末尾）
+// 固定路线录像（S2A_AP_SPEED=route，11-24 #2201 测法根修；判据 tools/route_speed.py）：两局从同一份即时存档恢复（S2A_SNAP_RESTORE），
+//   一局原帧率、一局 60 帧，MARK 后各自稳 2 秒、推住左摇杆向前 S2A_AP_ROUTE_S（缺省 8）秒，按真实时间每 100 ms 存一张 SPW×SPH 亮度缩略图到
+//   S2A_AP_ROUTE_OUT（S2RT 格式：'S2RT' + u16 宽 + u16 高，每张 u64 推杆起算纳秒 + 宽×高字节）。比的是「走到同一处的现实时刻」，
+//   景深与构图两局一样、一起约掉——画面平均位移按景深差几倍（#2201 被推翻的 ρ 测法），这里不量位移。录完照常往下跑
+#pragma weak s2a_guest_f32
+#pragma weak s2a_fps_hold
+void s2a_fps_hold(int hold);
+float s2a_guest_f32(const char *mod, uint64_t off);
+static void route_record(void) {
+    const char *out = getenv("S2A_AP_ROUTE_OUT"), *se = getenv("S2A_AP_ROUTE_S");
+    if (!out || !*out) { LOG("固定路线录像：没给 S2A_AP_ROUTE_OUT，不录"); return; }
+    double secs = se && *se ? atof(se) : 8.0; if (secs < 2 || secs > 60) secs = 8.0;
+    FILE *f = fopen(out, "wb"); if (!f) { LOG("【红】固定路线录像：写不开 %s", out); return; }
+    uint16_t wh[2] = {SPW, SPH}; fwrite("S2RT", 1, 4, f); fwrite(wh, 2, 2, f);
+    // S2A_AP_ROUTE_HOLD=1：录之前局内实时把 60 帧切到原帧率（档位梯子 s2a_fps_hold，与设置页切换同一条 apply 路径），等 5 秒再录——
+    //   验「局中开 → 关游戏自己能不能适应」（快照开存关恢复半速的对照，11-24）
+    { const char *h = getenv("S2A_AP_ROUTE_HOLD"); if (h && *h == '1') { if (s2a_fps_hold) { s2a_fps_hold(1); LOG("固定路线录像：局内实时切到原帧率（档位梯子），等 5 秒再录"); settle(5.0); } else LOG("【红】固定路线录像：没有 s2a_fps_hold"); } }
+    // S2A_AP_ROUTE_WAIT60=<最多等的真秒>：录之前等标称帧率到 60（游戏把自设交换间隔改成 1）。有的帧率补丁要游戏先测到一次慢帧才生效，
+    //   开局后什么时候升到 60 不定（11-25 一款开放世界游戏三局 85 / 127 / 218 秒）；等不到照录，等了多久、到没到记进日志，判据照常按录像期间出图帧率算 q
+    { const char *w = getenv("S2A_AP_ROUTE_WAIT60"); double mx = w && *w ? atof(w) : 0;
+      if (mx > 0) { uint64_t w0 = real_ns(); while (s2a_ap_nominal_fps() < 60 && real_ns() - w0 < (uint64_t)(mx * 1e9)) usleep(100000);
+        LOG("固定路线录像：等标称 60 帧 %.1f 秒（%s，帧 %llu）", (real_ns() - w0) / 1e9, s2a_ap_nominal_fps() >= 60 ? "到了" : "没等到，照录", (unsigned long long)s2a_ap_frames()); } }
+    settle(2.0);
+    static float lum[SPW * SPH]; static uint8_t b8[SPW * SPH]; int n = 0, miss = 0;
+    // S2A_AP_ROUTE_F32=<main 偏移，十六进制>：每张同时读游戏里这个 f32（如 FPSLocker 的游戏步长：60 帧正常应 ≈0.5、没生效恒 1.0），录完记均值 / 范围
+    const char *ge = getenv("S2A_AP_ROUTE_F32"); uint64_t gs_off = ge && *ge && s2a_guest_f32 ? strtoull(ge, NULL, 16) : 0; double gs_sum = 0; int gs_n = 0; float gs_lo = 1e9f, gs_hi = -1e9f;
+    uint64_t f0 = s2a_ap_frames(), t0 = real_ns(); atomic_store(&g_mask, S2A_AP_LS_UP);
+    for (int i = 0; ; i++) {
+        uint64_t due = t0 + (uint64_t)i * 100000000ull; if (due > t0 + (uint64_t)(secs * 1e9)) break;
+        while (real_ns() < due) usleep(1000);
+        if (!grab()) { miss++; continue; }
+        uint64_t t = real_ns() - t0; sp_luma(lum);
+        if (gs_off) { float v = s2a_guest_f32("main", gs_off); gs_sum += v; gs_n++; if (v < gs_lo) gs_lo = v; if (v > gs_hi) gs_hi = v; }
+        for (int k = 0; k < SPW * SPH; k++) b8[k] = (uint8_t)(lum[k] < 0 ? 0 : lum[k] > 255 ? 255 : lum[k]);
+        fwrite(&t, 8, 1, f); fwrite(b8, 1, sizeof b8, f); n++;
+    }
+    atomic_store(&g_mask, 0); fclose(f);
+    double fps = (s2a_ap_frames() - f0) / ((real_ns() - t0) / 1e9);
+    LOG("固定路线录像：推左摇杆向前 %.1f 秒，存 %d 张（拍空 %d），录像期间出图 %.1f 帧/秒 → %s", secs, n, miss, fps, out);
+    if (gs_n) LOG("固定路线录像：main+0x%llx（f32）%d 次读数 均值 %.3f、范围 %.3f–%.3f", (unsigned long long)gs_off, gs_n, gs_sum / gs_n, gs_lo, gs_hi);
+}
+// 固定路线的起点快照（S2A_AP_ROUTE_SNAP=<目录>）：画面稳了原地存一份即时存档、等存完，之后的对照局都从它恢复——
+//   非恢复局（after_replay 0）：MARK 后存，起点就是自动玩家判过可操控的游戏场景，不靠起局后定时（MARK 早晚每局差几十秒）；
+//   恢复局（after_replay 1，docs/对照局模板.md「挪起点」）：从旧起点恢复、手柄录像放完后在走到的地方存新起点（旧起点不合适时：社区存档只有一份、落在水面上之类）。
+//   存了回 1（这局不录），没设回 0
+#pragma weak s2a_snap_request_save
+#pragma weak s2a_snap_exists
+int s2a_snap_request_save(const char *dir); int s2a_snap_exists(const char *dir);
+static int route_snap_save(int after_replay) {
+    const char *d = getenv("S2A_AP_ROUTE_SNAP"); if (!d || !*d || (getenv("S2A_SNAP_RESTORE") && !after_replay)) return 0;
+    if (!s2a_snap_request_save || !s2a_snap_exists) { LOG("【红】未实现：固定路线起点快照（宿主没有即时存档接口）"); return 1; }
+    settle(2.0); int rc = s2a_snap_request_save(d); uint64_t t0 = real_ns();
+    if (rc) { LOG("【红】固定路线起点快照：请求被拒 %d → %s", rc, d); return 1; }
+    while (!s2a_snap_exists(d) && (real_ns() - t0) / 1e9 < 300) usleep(200000);
+    LOG("%s固定路线起点快照：%s（%.1f 秒）→ %s", s2a_snap_exists(d) ? "" : "【红】", s2a_snap_exists(d) ? "存好" : "300 秒没存完", (real_ns() - t0) / 1e9, d);
+    return 1;
+}
 static void speed_probe(void) {
     const char *e = getenv("S2A_AP_SPEED"); if (!e) return;
+    if (!strcmp(e, "route")) { int sg = s2a_ap_seg_open("固定路线录像", 1); if (!route_snap_save(0)) route_record(); s2a_ap_seg_close(sg); return; }
     if (!strcmp(e, "ab")) { int sg = s2a_ap_seg_open("逻辑速度同局 A/B", 1); g_ab_retry = speed_ab(); s2a_ap_seg_close(sg); return; }
     if (strcmp(e, "1")) return;
     if (speed_probe_once()) return;
@@ -1076,9 +1138,30 @@ static void *ap_main(void *a) {
     const char *stage = "等首帧"; char fin_why[400] = ""; int marked = 0, steps = 0, replayed = 0; uint64_t t_first = 0, t_mark = 0, f_mark = 0;
     // 等首帧（首帧前按键会把游戏弄卡）：出图停 / 墙钟按 run_left 兜底
     g_last_new_f_t = real_ns();
-    while (!poll_digest(0.5)) { if (run_left_s() < end_left) { snprintf(fin_why, sizeof fin_why, "导航卡住（离收局只剩 %.0f 秒还没出首帧）", run_left_s()); goto finish; }
-        if ((real_ns() - g_last_new_f_t) / 1e9 > (getenv("S2A_SNAP_RESTORE") ? 900 : 120)) { snprintf(fin_why, sizeof fin_why, "120 秒没出首帧"); goto finish; } }   // 即时存档恢复局：进程要先排显卡局槽，首帧可能很晚
+    // 出图帧数在涨、截图却一直拿不到（11-26：上屏取图请求被别的请求盖掉后再也不来，游戏照常出帧、自动玩家永远等首帧；即时存档恢复局的首帧兜底是 900 秒，
+    //   比局时还长，整局连红都不报）：宿主已出 ≥ 30 帧、S2A_AP_NOSHOT_S（缺省 30）真秒一张截图都没拿到，当场报红收局
+    const uint64_t f_wait0 = s2a_ap_frames(); const char *nse = getenv("S2A_AP_NOSHOT_S"); const double noshot_s = nse && atof(nse) > 0 ? atof(nse) : 30;
+    while (!poll_digest(0.5)) {
+        if (s2a_ap_frames() - f_wait0 >= 30 && (real_ns() - g_last_new_f_t) / 1e9 > noshot_s) {
+            LOG("【红】自动玩家：出图帧数在涨（等首帧期间出了 %llu 帧）、截图 %.0f 秒一张没拿到", (unsigned long long)(s2a_ap_frames() - f_wait0), noshot_s);
+            snprintf(fin_why, sizeof fin_why, "出图在涨、截图拿不到（%.0f 秒）", noshot_s); goto finish; }
+        if (run_left_s() < end_left) { snprintf(fin_why, sizeof fin_why, "导航卡住（离收局只剩 %.0f 秒还没出首帧）", run_left_s()); goto finish; }
+        { const int lim = getenv("S2A_SNAP_RESTORE") ? 900 : 120; if ((real_ns() - g_last_new_f_t) / 1e9 > lim) { snprintf(fin_why, sizeof fin_why, "%d 秒没出首帧", lim); goto finish; } } }   // 即时存档恢复局：进程要先排显卡局槽，首帧可能很晚
     t_first = now_ns(); LOG("自动玩家：首帧（帧 %llu，%.1f 秒）", (unsigned long long)g_cur_f, secs(t_first));
+    // 对照局（docs/对照局模板.md）：从同一份即时存档恢复（S2A_SNAP_RESTORE）的局恢复完就在局内、各局起点同一刻，不走导航、不问视觉模型
+    //   （导航 / 学过的路线回放会把人挪走，起点就不同了）。首帧后等画面稳 5 秒记 MARK，然后按下面两种之一喂固定输入，喂完收局（按进度结束，不按墙钟）：
+    //   S2A_AP_SPEED=route：推住左摇杆向前、按真实时间存路线缩略图（route_record，判据 tools/route_speed.py：两局走到同一处的现实时刻比 = 游戏速度比）
+    //   S2A_AP_PADREC=<录手柄 tsv>@<起始帧>：按 MARK 后的上屏帧数逐行重放（padrec_play）——同一段输入、同样多的游戏帧，性能 / 内存对照比的是同一段游戏过程
+    if (getenv("S2A_SNAP_RESTORE") && ((getenv("S2A_AP_SPEED") && !strcmp(getenv("S2A_AP_SPEED"), "route")) || (getenv("S2A_AP_PADREC") && *getenv("S2A_AP_PADREC")))) {
+        int route = getenv("S2A_AP_SPEED") && !strcmp(getenv("S2A_AP_SPEED"), "route");
+        settle(5.0); marked = 1; stage = "局内段"; t_mark = now_ns(); f_mark = s2a_ap_frames();
+        LOG("S2A 标记 MARK：帧 %llu", (unsigned long long)f_mark);
+        int sg = s2a_ap_seg_open(route ? "固定路线录像" : "固定输入回放", 1);
+        int played = route ? (route_record(), 1) : padrec_play(getenv("S2A_AP_PADREC"), now_ns() + 3600ull * 1000000000ull);
+        uint64_t f_end = s2a_ap_frames(); s2a_ap_seg_close(sg);
+        if (!route && played) route_snap_save(1);   // 挪起点：放完手柄录像、原地存新起点（没设 S2A_AP_ROUTE_SNAP 时不存）
+        LOG("对照局：%s段 帧 %llu–%llu（%llu 帧）%s", route ? "路线录像" : "固定输入回放", (unsigned long long)f_mark, (unsigned long long)f_end, (unsigned long long)(f_end - f_mark), played ? "" : "；【红】回放没放成");
+        snprintf(fin_why, sizeof fin_why, "对照局（即时存档恢复）：%s", played ? "固定输入喂完" : "回放没放成"); goto finish; }
     // 基线：首帧后 3 秒、每秒一窗
     { uint32_t d[3], p[3]; for (int i = 0; i < 3; i++) window_med(&d[i], &p[i]); qsort(d, 3, sizeof *d, cmpu); qsort(p, 3, sizeof *p, cmpu); g_base_d = d[1]; g_base_p = p[1];
       LOG("自动玩家：开局基线 每帧绘制 %u、渲染遍数 %u（进局要 绘制 ≥ %u 或 遍数 ≥ %u）", g_base_d, g_base_p, 3 * (g_base_d > 8 ? g_base_d : 8), 2 * (g_base_p > 2 ? g_base_p : 2)); }

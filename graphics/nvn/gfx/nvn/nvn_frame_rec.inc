@@ -560,7 +560,7 @@ static void fr_restore_gpu(const char *path, int *put, int *miss) {
     FILE *f = fopen(path, "rb"); if (!f) return;
     uint32_t mg = 0; if (!fr_r(f, &mg, 4) || mg != FR_GPU_MAGIC) { MLOG("【红】 回放：gpu.bin 是旧录法（不存深度模板 / 多重采样 / 压缩贴图），整份不写回：用本宿主重录"); fclose(f); return; }
     fr_tex_hd hd;
-    while (fr_r(f, &hd, sizeof hd)) {
+    while (fr_r(f, &hd, sizeof hd)) { @autoreleasepool {   // 每张一个自动释放池（同 snap_put_pkg）
         id o = tex_get(hd.ser); id<MTLTexture> t = [o conformsToProtocol:@protocol(MTLTexture)] ? o : nil;
         if (!t || t.width != hd.w || t.height != hd.h || t.depth != hd.depth || (uint32_t)t.pixelFormat != hd.fmt || fr_slices(t) != hd.layers || t.mipmapLevelCount != hd.levels || t.sampleCount != hd.samples) {
             if (*miss < 32) MLOG("回放：贴图 ser=%llu 没写回：录时 %ux%ux%u 格式 %u 级 %u 层 %u 采样 %u，回放存储 %s%lux%lux%lu 格式 %lu 级 %lu", (unsigned long long)hd.ser, hd.w, hd.h, hd.depth, hd.fmt, hd.levels, hd.layers, hd.samples,
@@ -569,7 +569,8 @@ static void fr_restore_gpu(const char *path, int *put, int *miss) {
         id<MTLBuffer> b = [g_dev newBufferWithLength:hd.bytes options:MTLResourceStorageModeShared];
         if (!b || !fr_r_tex(f, &hd, b.contents)) { (*miss)++; break; }
         if (hd.kind == FR_TK_MS ? fr_ms_write(t, b) : fr_blit_planes(t, &hd, b, 0)) (*put)++; else (*miss)++;
-    }
+        if (s2a_snap_progress) s2a_snap_progress(NULL);   // 恢复局：逐层实占采样（帧回放调到时无副作用）
+    } }
     fclose(f);
 }
 static const char *fr_man(const char *man, const char *key, char *out, size_t n) {   // manifest.tsv 里 key 的值

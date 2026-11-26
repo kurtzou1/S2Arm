@@ -30,6 +30,9 @@ void s2a_brightness_hold_log(void);   // 亮度保持（S2A_BRIGHTNESS）：心�
 #include "s2a_pad.h"
 #include "s2a_boot.h"
 #include "s2a_launch_ctx.h"
+#if !TARGET_OS_TV
+#import "d2r_route.h"
+#endif
 #include <sys/stat.h>   // 程序包清单修改时间（s2a_shell_game_sign_state）
 #include <sys/mount.h>   // statfs（free_note）
 #include "s2a_docs.h"   // s2a_container_docs：游戏库按款核资源包的进程级 Documents
@@ -929,6 +932,9 @@ void s2a_mic_notice(int reason) {
 - (UIInterfaceOrientationMask)application:(UIApplication *)app supportedInterfaceOrientationsForWindow:(UIWindow *)w { return UIInterfaceOrientationMaskAll; }
 #endif
 - (void)applicationWillTerminate:(UIApplication *)app {
+#if !TARGET_OS_TV
+    if (s2a_d2r_is_active()) { s2a_d2r_stop(); return; }
+#endif
     s2a_guest_run_mark(0);   // 正常终止不算「前台死掉」
     if (s2a_host_boot_pending()) return;
     s2a_controller_set_foreground(0); s2a_host_shutdown("iOS 终止回调");
@@ -1122,6 +1128,9 @@ static void sign_watch_certs(void) {
     }];
 }
 int s2a_shell_game_sign_state(const char *gid) {
+#if !TARGET_OS_TV
+    if (s2a_d2r_matches(gid)) return 0;
+#endif
     if (!gid || !*gid) return 0;
     sign_watch_certs();
     long long mt = program_cat_mtime(gid); NSNumber *rj = g_reinstall[@(gid)];
@@ -1142,6 +1151,17 @@ static void library_play_go(const char *gid, S2ASceneDelegate *sd) {
         LOG("游戏库：同一进程第二次 Play %s，拒绝（一进程一款）", gid);
         top_alert(sd.window, S2AL(@"app.library.reopen.title"), S2AL(@"app.library.reopen.message")); return;
     }
+#if !TARGET_OS_TV
+    if (s2a_d2r_matches(gid)) {
+        NSString *reason = nil;
+        if (s2a_d2r_open(sd.window, &reason)) {
+            atomic_store(&g_game_picked, 1);
+        } else {
+            top_alert(sd.window, @"D2R-Mobile", reason);
+        }
+        return;
+    }
+#endif
     const char *why = s2a_launch_ctx_select(gid);
     // why 是 launchctx.c 的内部原因（路径 / errno，已进 host.log「选游戏…被拒」）：屏上按类别说人话 + 下一步，原文只进日志 / 诊断（v0.3.1）
     if (why) {
@@ -1180,13 +1200,23 @@ static int game_pack_state(const char *gid) { char d[1024]; s2a_container_docs(d
 static void test_picker(void);
 void s2a_shell_library_appeared(void) { static int once; if (!once++) { BOOT_MARK("游戏库界面可操作"); test_picker(); } }
 int s2a_game_install_state(const char *proc_docs, const char *gid);   // pack_apply.c
-int s2a_shell_game_install_state(const char *gid) { char d[1024]; s2a_container_docs(d, sizeof d); return s2a_game_install_state(d, gid); }
+int s2a_shell_game_install_state(const char *gid) {
+#if !TARGET_OS_TV
+    if (s2a_d2r_matches(gid)) return 1;
+#endif
+    char docs[1024];
+    s2a_container_docs(docs, sizeof docs);
+    return s2a_game_install_state(docs, gid);
+}
 int s2a_img_scan_source(const char *proc_docs, const char *dir, const char *srcid, const char *skip); int s2a_pack_source_forget(const char *proc_docs, const char *srcid);   // pack_apply.c
 int s2a_shell_scan_game_source(const char *dir, const char *source_id, const char *skip) { char d[1024]; s2a_container_docs(d, sizeof d); return s2a_img_scan_source(d, dir, source_id, skip); }
 int s2a_shell_forget_game_source(const char *source_id) { char d[1024]; s2a_container_docs(d, sizeof d); return s2a_pack_source_forget(d, source_id); }
 // 程序约定号对不上本宿主（runtime s2a_launch_ctx_game_needs_update）：每款读一次清单后记下，点开被拒的（S2A_SELECT_NEEDS_UPDATE）也记上；
 //   库每秒重判只查这里。主线程（s2a_shell.h）
 int s2a_shell_game_needs_host_update(const char *gid) {
+#if !TARGET_OS_TV
+    if (s2a_d2r_matches(gid)) return 0;
+#endif
     if (!gid || !*gid) return 0;
     if (!g_host_update) g_host_update = [NSMutableDictionary dictionary];
     NSString *k = @(gid); NSNumber *v = g_host_update[k];
@@ -1756,17 +1786,32 @@ static void widget_open(NSURL *url, void *ctx) {
 // 游戏进行中切到后台：开了云存档、本机进度比云端新就上传（S2ArmShellHost 要后台收尾时间、只上传不下载；云端更新 / 冲突留给下次起局前同步）。
 //   宿主还没起（游戏库 / 起局前同步页 / 存档管理页）不传：那时存档没动过
 - (void)sceneDidEnterBackground:(UIScene *)scene {
+#if !TARGET_OS_TV
+    if (s2a_d2r_is_active()) { s2a_d2r_focus(1); return; }
+#endif
     (void)scene;
     if (s2a_host_boot_pending() || self.cloudSyncing || self.managingSaves || !s2a_shell_cloud_upload_background) return;
     const s2a_launch_ctx *lc = s2a_launch_ctx_get();
     s2a_shell_cloud_upload_background(lc && lc->game_id[0] ? lc->game_id : "");
 }
 // 场景进前台（还没激活：系统弹框可能盖着）就开始起宿主：加载照做，起游戏主线程前由前台激活门（loadprog.c s2a_load_front_wait）等激活
+#if !TARGET_OS_TV
+- (void)sceneWillResignActive:(UIScene *)scene {
+    (void)scene;
+    s2a_d2r_focus(0);
+}
+#endif
 - (void)sceneWillEnterForeground:(UIScene *)scene {
+#if !TARGET_OS_TV
+    if (s2a_d2r_is_active()) { s2a_d2r_focus(2); return; }
+#endif
     s2a_load_front_state(((UIWindowScene *)scene).activationState == UISceneActivationStateForegroundActive ? 2 : 1);
     [self bootFromScene];
 }
 - (void)sceneDidBecomeActive:(UIScene *)scene {
+#if !TARGET_OS_TV
+    if (s2a_d2r_is_active()) { s2a_d2r_focus(3); return; }
+#endif
     (void)scene;
     s2a_load_front_state(2);
     [self bootFromScene];

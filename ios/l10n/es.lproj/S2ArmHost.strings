@@ -748,3 +748,31 @@
 "assign.ns2pro" = "Mando Pro de Switch 2";
 "assign.saveFailed" = "No se pudo guardar la asignación. Inténtalo de nuevo.";
 "assign.ok" = "Aceptar";
+
+/* D2R-Mobile library backend and local saves. */
+"d2r.load" = "No se puede cargar el motor táctil de Diablo II. Comprueba que la app incluya el framework S2AD2R firmado por el mismo equipo.";
+"d2r.abi" = "El motor táctil de Diablo II es incompatible con esta versión de S2Arm.";
+"d2r.os" = "Este motor táctil de Diablo II requiere iPadOS 26 o posterior.";
+"d2r.reopen" = "Diablo II ya se ha iniciado. Guarda y sal, y vuelve a abrir S2Arm.";
+"d2r.gpu" = "Este motor de Diablo II requiere un dispositivo compatible con Metal 4 y texturas BC.";
+"d2r.resources" = "Coloca los recursos de Diablo II en la carpeta D2R Mobile de S2Arm.\n\n%s";
+"d2r.metal" = "La vista táctil de Diablo II no ha podido crear una capa Metal.";
+"d2r.simulator" = "El simulador solo permite comprobar la conexión de la vista táctil.";
+"d2r.title" = "Diablo II";
+"d2r.manage" = "Gestión de partidas de Diablo II";
+"d2r.location" = "Archivos → En mi iPad → S2Arm";
+"d2r.import" = "Importar carpeta de personaje…";
+"d2r.export" = "Exportar carpeta de partidas…";
+"d2r.play" = "Jugar";
+"d2r.empty" = "Sin personajes";
+"d2r.saves" = "Partidas de Diablo II";
+"d2r.added" = "Personaje añadido.";
+"d2r.failed" = "Error al importar.";
+"d2r.directory" = "La ubicación de las partidas debe ser una carpeta normal.";
+"d2r.unreadable" = "No se puede leer la carpeta de partidas.";
+"d2r.special" = "La partida contiene enlaces o archivos especiales.";
+"d2r.missing" = "Falta la carpeta save de Diablo II en Archivos. Restaura la copia de seguridad en su ubicación original y vuelve a intentarlo.";
+"d2r.conflict" = "Las ubicaciones antigua y nueva contienen partidas distintas de Diablo II. Haz una copia de ambas carpetas y compáralas primero.";
+"d2r.character" = "Selecciona la carpeta del personaje que contenga un archivo .d2s con el mismo nombre.";
+"d2r.duplicate" = "Ya existe un personaje con ese nombre. Se ha conservado la partida actual.";
+"d2r.docs" = "No se puede leer el directorio de partidas de S2Arm.";

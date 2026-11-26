@@ -812,14 +812,28 @@ def install_app(c, dev_id, app):
 SHELL_FRESH = (3 * 86400, 30 * 86400)   # 电视上的壳签名多新就不重签重装：免费账号描述文件 7 天到期，签了不到 3 天才跳过；付费 30 天（同 iPhone install.SAME_APP_FRESH）
 
 
-def shell_fresh(c, rec, bid, sid, eva=False):
-    """电视上已是本版壳、同一个包名、签名离到期还早、请求没要求重装、要「扩展虚拟寻址」时现装的带着 → 不重签重装 App，只推这款"""
+def shell_fresh(c, rec, bid, sid, eva=False, team_id=None):
+    """电视上已是本版壳、同一个包名、签名离到期还早、请求没要求重装、要「扩展虚拟寻址」时现装的带着、本机还有签程序包能用的描述文件 → 不重签重装 App，只推这款"""
     signed = rec.get("signed") or {}
     if c.r.get("forceInstall") or rec.get("bundleId") != bid or rec.get("shellId") != sid or not isinstance(signed.get("at"), (int, float)):
         return False
     if eva and not rec.get("eva"):
         return False
-    return time.time() - signed["at"] < SHELL_FRESH[0 if signed.get("free", True) else 1]
+    if time.time() - signed["at"] >= SHELL_FRESH[0 if signed.get("free", True) else 1]:
+        return False
+    # 11-26 #1758 / D-2KTD：签名时刻还新，签它用的描述文件却可能是早先申请的、一天内就到期（免费账号 7 天，签壳那天离到期只剩一天）。
+    #   只按签名时刻判就跳过重签，接着签程序包（dev_sign --dylib，同一套挑法）退 3「没有能用的描述文件（一天内到期）」，推不进去；描述文件一过期电视上的壳也打不开。
+    #   问 dev_sign 同一套挑法：挑不出就当不新，走重签重装（先申请描述文件）
+    return team_id is None or profile_usable(c, bid, team_id)
+
+
+def profile_usable(c, bid, team_id):
+    """本机有没有签这个包名的 Apple TV 程序包能用的开发描述文件（pack/dev_sign.py --check：挑法同 --dylib）"""
+    r = subprocess.run([sys.executable, str(Path(c.engine) / "pack/dev_sign.py"), "--check", bid, team_id], capture_output=True, text=True,
+                       env=dict(c.env(), S2A_SIGN_PLATFORM=PLATFORM), timeout=60)
+    if r.returncode not in (0, 3):
+        install.note(c, f"核描述文件没核成（dev_sign --check 退出 {r.returncode}：{(r.stdout + r.stderr).strip()[-200:]}），按要重签处理")  # 非玩家句
+    return r.returncode == 0
 
 
 def assemble_shell(c, shell):
@@ -928,7 +942,7 @@ def install_tv(c):
     npdms = [Path(k) / "main.npdm" for k in kits.values() if k is not None]
     eva = any(is_switch2(n) for n in npdms)
     installed = False
-    if not shell_fresh(c, rec, bid, sid, eva):
+    if not shell_fresh(c, rec, bid, sid, eva, team["id"]):
         c.begin("组 Apple TV 上的 S2Arm（不带游戏）", 2, 6)
         out, app = assemble_shell(c, shell)
         log = c.logs / (c.task + "-install.log")

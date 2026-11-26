@@ -37,6 +37,7 @@ class PackagedNoSdk(unittest.TestCase):
             if not any("oneclick" in str(a) for a in args):   # 出包收尾组库根 S2Arm.ipa（refresh_library_ipa）：这条不测它，组装失败按设计只警告
                 raise Failure("这条测试不组装容器")
             seen.update(args=[str(a) for a in args], env=env)
+            seen["subprogram_sources_existed"] = Path(env["S2A_SUBPROGRAM_SOURCES"]).is_dir()
             out = Path(args[args.index("--out") + 1]); (out / "x.ipa").write_bytes(b"ipa")
             oneclick_done(args, out / "x.ipa", build_id="b", graphics_mode="direct")
 
@@ -59,6 +60,9 @@ class PackagedNoSdk(unittest.TestCase):
         self.assertEqual(env["S2A_SHELL"], str(res / "Shell"))
         # 读取器是发版预编的自包含单文件（NativeAOT），直接交给链上：不再包 dotnet 壳、不再要 .NET 运行时
         self.assertEqual(env["S2A_NX_UNPACK"], "/App/Engine/Binaries/Reader/nx_unpack")
+        self.assertTrue(seen["subprogram_sources_existed"])
+        self.assertFalse(Path(env["S2A_SUBPROGRAM_SOURCES"]).exists(), "子程序原件目录出包结束即清理")
+        self.assertNotEqual(env.get("S2A_GAME_SRC"), env["S2A_SUBPROGRAM_SOURCES"], "主刷新仍按 --from-extract 无原件口径运行")
         self.assertEqual(env.get("DOTNET_ROOT"), before, "不换成外部 SDK")
         self.assertTrue((Path(r["outputPath"]) / ".pack" / "manifest.json").is_file())   # 资源包进了这款的 image/ios（不再留单款 ipa）
         self.assertTrue(any((p / "recipe.tar.zst").is_file() for p in (self.c.library / ".programs").iterdir()))   # 程序件的配方进了程序常驻

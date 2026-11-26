@@ -259,7 +259,7 @@ def _build(c):
     size_gb = sum(p.get("size", 0) for p in {p["sha256"]: p for p in selected_packages(game)}.values()) / 1e9
     ms.plan(c, size_gb, "ipa_dual")
     ms.enter(c, "unpack")
-    watcher = early = None
+    watcher = early = source_stage = None
     ipa_log = c.logs / (c.task + "-ipa.log")   # 失败报告认这份（早装线程也调 Context.run，会改 c.last_log）
     try:
         env = c.env()
@@ -341,6 +341,10 @@ def _build(c):
                 win_oneclick(c, oneclick, extraction, fonts, out, events, ipa_log, env, line,
                              sources=list(dict.fromkeys(source_path(c, p) for p in selected_packages(game))), gid=gid)
             else:
+                from library import stage_sources
+                source_stage = Path(tempfile.mkdtemp(prefix=".oneclick-src-", dir=out))
+                stage_sources(c, selected_packages(game), source_stage)
+                env["S2A_SUBPROGRAM_SOURCES"] = str(source_stage)
                 c.run(["bash", oneclick, "--from-extract", extraction, "--fonts", fonts, "--out", out, "--events", events],
                       ipa_log, env, on_line=line)
         except Failure as error:
@@ -356,6 +360,8 @@ def _build(c):
     finally:
         if watcher:
             watcher.__exit__(None, None, None)
+        if source_stage is not None:
+            shutil.rmtree(source_stage, ignore_errors=True)
     # 不在输出目录里按修改时间挑：目录里留着别的 / 更「新」的旧 IPA 时会把旧包当成本轮结果，配上本轮包号（#67 qidian99 反证）
     res = state.get("result") or {}
     if res.get("ok") is False:

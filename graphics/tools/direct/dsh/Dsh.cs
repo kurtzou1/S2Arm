@@ -82,7 +82,7 @@ namespace S2A.Dsh
 
         public const string AstMemKept = "_astmem_kept";   // #1429 验收计数在出包产物（PackFiles）里的后缀
         /// <summary>出一个键：成功返回写出的文件名；失败抛 DshError。tablesDir = 答案表 / 配对表所在目录（运行时 $S2A_GAME_DATA/shaders/direct）</summary>
-        public static List<string> Compile(string key, string stage, byte[] code, byte[] ctl, string outDir, ISpvCross xc, string tablesDir, string workRoot = null)
+        public static List<string> Compile(string key, string stage, byte[] code, byte[] ctl, string outDir, ISpvCross xc, string tablesDir, string workRoot = null, bool bindlessUniformHandles = true)
         {
             if (!Regex.IsMatch(key ?? "", @"\A[0-9a-f]{16}\z")) throw new DshError("bad key", "键不是 16 位小写十六进制：" + key);
             if (Array.IndexOf(Stages, stage) < 0 && !(PackOut && (stage == "hs" || stage == "ds")))   // 曲面外壳 / 域只在出包（dsh_batch）翻：设备首遇现编不支持曲面阶段（宿主没有曲面现编路径）
@@ -98,6 +98,7 @@ namespace S2A.Dsh
             {
                 if (!PackOut) foreach (var n in OutNames(key)) { try { File.Delete(Path.Combine(outDir, n)); } catch { } }   // 这次出的就是留下的（离线链部分重建先删这些键的产物）
                 var (j, c1) = c.JobFor(stage, code, ctl);
+                j["bindless_uniform_handles"] = bindlessUniformHandles;
                 c.TranslateFirst(j);
                 c.Finish(j, c1);
                 // #1429 验收：本键各次翻译里 #1414 规则保留下来的定义数（每线程计数，本线程刚翻完本键），随产物进出库缓存，dsh_batch 汇总行「ast mem order kept」读它

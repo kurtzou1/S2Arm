@@ -371,7 +371,9 @@ namespace S2A.Dsh
         {
             if (stage is "gs" or "hs" or "ds") throw new DshError("export failed", $"{stage} 着色器不走 CompileWithSpv（vs / ps / cs 在这里，几何走 CompileGeometry，曲面不出）");
             PackSpv = DshCompiler.PackOut ? new Dictionary<string, byte[]>() : null;
-            var written = DshCompiler.Compile(key, stage, code, ctl, outDir, xc, tablesDir, workRoot);
+            // Keep reflection on the same binding contract as VulkanSpv. Only Metal uses
+            // the descriptor-pool pointer ABI for dynamic handles read from guest uniforms.
+            var written = DshCompiler.Compile(key, stage, code, ctl, outDir, xc, tablesDir, workRoot, bindlessUniformHandles: false);
             string jsonName = key + "_b.json", spvName = key + "_b.spv";
             string jsonText = !DshCompiler.PackOut ? File.ReadAllText(Path.Combine(outDir, jsonName))
                 : DshCompiler.PackFiles != null && DshCompiler.PackFiles.TryGetValue(jsonName, out var t) ? t

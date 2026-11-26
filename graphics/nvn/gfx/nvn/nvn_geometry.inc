@@ -507,7 +507,7 @@ static int mtk_emu_prep(const p_draw *dw, NvShader *ts, NvShader *ms, uint64_t i
     NSString *nk = [NSString stringWithFormat:@"%s/%s", ts ? ts->key : "-", ms->key]; uint32_t sawT, sawM; mtk_emu_need(nk, &sawT, &sawM);
     // no task stage (#1542): no task workgroups, payloads or scan; the mesh workgroups are the draw's own (direct: its count; indirect: as many as seen before, mxe_monly clamps)
     uint32_t capT = !ts ? 0 : ind ? MIN(MAX(sawT + sawT / 4 + 16, 64u), MXE_TASK_CAP) : (uint32_t)MIN((uint32_t)dw->count, 65536u), pw = ts ? MAX(((uint32_t)ts->mesh_payload + 3) / 4, 1u) : 0;
-    uint32_t capM = ts ? MIN(capT * 32u, MAX(sawM + sawM / 4 + 32, 64u))   // a task workgroup derives at most its thread count of mesh workgroups in these games (ballot + popcount); more were seen: sawM says
+    uint32_t capM = ts ? MIN(capT * 32u, MAX(sawM + sawM / 2 + 64, 256u))   // a task workgroup derives at most its thread count of mesh workgroups in these games (ballot + popcount); raise first-draw floor above 64 so MKW/similar task->mesh draws do not truncate on first sight
                        : ind ? MAX(sawM + sawM / 4 + 32, 64u) : (uint32_t)MAX(MIN((uint32_t)dw->count, 65536u), 1u);
     if (dsw && !mxd_fits(capM, budget, (uint64_t)maxv * vs + (uint64_t)maxp * 12, dsw)) { dsw = 0; mp = mp0; }
     uint64_t sw = ms->mesh_relay ? ms->mesh_relay_sw : dsw;   // relayed payload: one stage-memory slice a mesh workgroup (its stage memory is past Metal's 32 KB of threadgroup memory)

@@ -236,6 +236,9 @@ namespace S2A.DirectCompiler
         // 句柄经多层 phi 汇合（循环 / 分支里每条路各算一次同一个 c2 字 OR）时按值逐层比叶子，认出唯一句柄。
         //   同 iOS 翻译器 translator/dmsh_xlate/Program.cs（QueryBindlessPhiSeeThrough => true），两端不再分叉。
         public bool QueryBindlessPhiSeeThrough() => Record("QueryBindlessPhiSeeThrough", "", true, "translator:phi-see-through (same as dmsh_xlate)");
+        // #2234 新加：从客体常量缓冲动态取出的句柄保留给宿主按描述符池查（Metal 直连的池指针 ABI）。安卓 Vulkan 直连宿主没有这份合同，
+        //   绑定按 VulkanSpv 口径（同 dsh DshVk.cs 传 bindlessUniformHandles: false），显式答假 = 接口缺省，SPIR-V 不变。
+        public bool QueryHostSupportsBindlessUniformHandles() => Record("QueryHostSupportsBindlessUniformHandles", "", false, "direct-v1:no descriptor-pool pointer ABI (Metal only)");
         // 0 = 回退数组一律按池长（上游原样）：安卓宿主 textureArrayLength / samplerArrayLength 就是真实描述符池容量（vk_record.c OP_SET_TEX_POOL），
         //   贴图缓冲 / 图像也按池编号取；没有 nvn_mtl.m TEXD 那种按槽绑的约定，答 32 会把编号 ≥ 32 的贴图缓冲 / 图像夹到第 31 项读错图
         public bool QueryS2ARuntimeState() => Record("QueryS2ARuntimeState", "", false, "direct-v1:host does not fill s2a_flags / s2a_point");

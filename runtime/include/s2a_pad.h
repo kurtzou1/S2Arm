@@ -51,6 +51,13 @@ int s2a_slot_plan(const void *const *prev, const void *const *live, int count, i
 // 顺序表登记了第 r 位（rank = s2a_pad_order_rank，0 起）的手柄钉在第 r 格：面板写它是 P1，游戏读的玩家 1 就是它（#1264）。
 //   在 s2a_slot_plan 之前改 prev：它原在别格就挪过来，被挤掉的没登记手柄由 s2a_slot_plan 另找空格；没登记的照旧「留原槽」
 void s2a_slot_pin(const void **prev, const void *const *live, const int *rank, int count, int max);
+// 游戏限人数时压缩名次（D-VYNF / D-BS3T：顺序表「P1 空、P2 空、P3 手柄」，游戏只收 1 人 → 手柄被钉在第 3 格、一个都没配给游戏，
+//   手柄设置小程序无限重弹黑屏）：cap > 0 且有登记过的在线手柄名次 ≥ cap 时，登记过的按名次先后改写成 0、1、2…（玩家排的先后照旧，空位不占名额）；
+//   没限（cap = 0）或都在名额以内不动。在 s2a_slot_pin 之前调；cap 取 s2a_pad_cap()（服务层经 s2a_vpad_set_cap 设）
+void s2a_slot_rank_cap(int *rank, int count, int cap);
+int s2a_pad_cap(void);
+void s2a_vpad_set_cap(int n);
+extern void (*volatile s2a_pad_cap_hook)(void);   // 上限变化时调（可为空）
 
 // 分配玩家的顺序表（#520 E；启动器写 ~/Library/Application Support/S2Arm/pad-order.json，宿主读）：
 //   entry 依次是 P1、P2…——NS2 手柄写通道玩家号（ns2_player ≥ 0），系统手柄写名字 + 同名第几只（ns2_player = -1）；

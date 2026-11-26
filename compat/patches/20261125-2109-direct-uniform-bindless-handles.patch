@@ -1,0 +1,32 @@
+diff --git a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+index 757e632973058dab7db325b40bddcebf859e2791..6ae1d4fcd7a7b31477b4794c24cb04629999fc61 100644
+--- a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
++++ b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+@@ -39,6 +39,9 @@ namespace Ryujinx.Graphics.Shader
+         /// </summary>
+         bool QueryBindlessPhiSeeThrough() => false;
+ 
++        /// <summary>Whether the host can look up a dynamically loaded guest uniform handle in the descriptor pools.</summary>
++        bool QueryHostSupportsBindlessUniformHandles() => false;
++
+         /// <summary>
+         /// S2A：特化状态运行时化（点大小、DepthMode、alpha 测试、绘制参数来源、贴图坐标归一化改读支持缓冲 s2a_flags / s2a_point）。缺省 = 进程开关
+         /// TranslatorContext.S2ARuntimeState（通用模式，S2A_RUNTIME_STATE=0 关）；直连翻译器答假：直连宿主不填这几个字段，编成运行时判断只会多读多分支。
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/BindlessToArray.cs b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/BindlessToArray.cs
+index e95901c871821d74c412ed73917438f17547ac4b..b324e790fb4d6daf9e925268f43efa5c6c806a41 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/BindlessToArray.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/BindlessToArray.cs
+@@ -173,6 +173,13 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+                     continue;
+                 }
+ 
++                // Guest uniforms can hold tables of arbitrary layout and length. Keep the
++                // loaded handle for the pool lookup instead of clamping its buffer offset (#1956).
++                if (src0CbufSlot > NvnTextureBufferIndex && gpuAccessor.QueryHostSupportsBindlessUniformHandles())
++                {
++                    continue;
++                }
++
+                 Operand ldcSrc1 = handleAsgOp.GetSource(1);
+ 
+                 // We expect field index 0 to be accessed.

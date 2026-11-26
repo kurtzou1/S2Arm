@@ -59,6 +59,26 @@ int main(void) { @autoreleasepool {
     e0 = g_stat_args_enc; p0 = g_stat_args_patch;
     bind_cb0((uint64_t)(uintptr_t)pool + 16384, 256); g_args_dirty[1] = 1; encode_args(nil, sh, 1, 0);
     VERIFY(g_stat_args_enc == e0 + 1 && g_stat_args_patch == p0 && slot(sh, 0) == A + 16384, "⑥ 换 cb0 同时别的绑定也变：整块 +%llu、打补丁 +%llu（期望 1 / 0）、参数 0 = A + 16384", (unsigned long long)(g_stat_args_enc - e0), (unsigned long long)(g_stat_args_patch - p0));
+    // ⑦ DRV0 / DRV2 驱动常量段按暂存代号缓存：SSBO/句柄未变时强制重编直接复用原 GPU 指针，变更或换暂存代号时立刻失效重建
+    NvShader *ds = [NvShader new]; ds->stage = 1; ds->arg_len = 16; strcpy(ds->key, "t_drv_cache");
+    ds->rf.nb = 2; ds->rf.b = calloc(2, sizeof *ds->rf.b);
+    ds->rf.b[0].kind = NVN_RB_DRV0; ds->rf.b[0].aid = 0; ds->rf.drv_read[0] = 1;
+    ds->rf.b[1].kind = NVN_RB_DRV2; ds->rf.b[1].aid = 1; ds->rf.drv_read[2] = 1;
+    uint64_t h0 = g_drv_cache_hits;
+    args_dirty_all(); encode_args(nil, ds, 1, 0);
+    uint64_t d0 = slot(ds, 0), d2 = slot(ds, 1);
+    VERIFY(g_drv_cache_hits == h0 && d0 && d2, "⑦a 首次编 DRV0/DRV2：未命中缓存（+%llu）、地址非空", (unsigned long long)(g_drv_cache_hits - h0));
+    h0 = g_drv_cache_hits;
+    args_dirty_all(); encode_args(nil, ds, 1, 0);
+    VERIFY(g_drv_cache_hits == h0 + 2 && slot(ds, 0) == d0 && slot(ds, 1) == d2, "⑦b 绑定未变强制重编：命中缓存 +%llu（期望 2）、复用同一 DRV0/DRV2 地址", (unsigned long long)(g_drv_cache_hits - h0));
+    S.ssbo[1][0].addr = (uint64_t)(uintptr_t)pool; S.ssbo[1][0].size = 256; S.tex[1][0] = 42;
+    h0 = g_drv_cache_hits;
+    args_dirty_all(); encode_args(nil, ds, 1, 0);
+    uint64_t d0_new = slot(ds, 0), d2_new = slot(ds, 1);
+    VERIFY(g_drv_cache_hits == h0 && d0_new != d0 && d2_new != d2, "⑦c SSBO 与句柄变更后重编：缓存失效（+%llu）、分配新 DRV0/DRV2 地址", (unsigned long long)(g_drv_cache_hits - h0));
+    arena_begin(); h0 = g_drv_cache_hits;
+    args_dirty_all(); encode_args(nil, ds, 1, 0);
+    VERIFY(g_drv_cache_hits == h0, "⑦d 换暂存代号（arena_begin）后重编：缓存失效（+%llu）", (unsigned long long)(g_drv_cache_hits - h0));
   }
     printf("%s t_nvn_args_patch：%u 项，失败 %u\n", failures ? "✗" : "✓", checks, failures); return failures ? 1 : 0;
 }

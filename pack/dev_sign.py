@@ -11,8 +11,13 @@ dev_sign.py <NxIOS.app> <包名> <团队号> <基础权限 Gen/NxIOS.entitlement
 import datetime, glob, hashlib, os, plistlib, shutil, subprocess, sys, tempfile
 # 只签一个程序 dylib（通用壳程序包，pack/jobs/program_pack.py mac_signer，11-16）：dev_sign.py --dylib <文件> <包名> <团队>
 #   挑描述文件与身份同签 App（这台手机上装的 S2Arm 用的那一个，库校验要同团队），只签这个文件、不嵌描述文件、不核权限；末行打印完整身份 SHA-1
-DYLIB = sys.argv[1:2] == ['--dylib']
-if DYLIB: (dylib, bid, team), app, base = sys.argv[2:5], None, None
+# 只核不签（11-26 #1758 / D-2KTD）：dev_sign.py --check <包名> <团队>：挑描述文件同 --dylib（这个包名、平台、没过期、一天内不到期、本机有身份），
+#   挑得出退 0、挑不出退 3，什么都不签。Apple TV 推游戏前问「电视上的壳还新不新」用它：壳签名还新、可签程序的描述文件已经一天内到期时，原先跳过重签重装、
+#   签程序包时才退 3，推不进去
+CHECK = sys.argv[1:2] == ['--check']
+DYLIB = sys.argv[1:2] == ['--dylib'] or CHECK
+if CHECK: (bid, team), app, base, dylib = sys.argv[2:4], None, None, None
+elif DYLIB: (dylib, bid, team), app, base = sys.argv[2:5], None, None
 else: app, bid, team, base = sys.argv[1:5]
 EXTENSION = '--extension' in sys.argv[5:]
 NEED = ['com.apple.developer.kernel.increased-memory-limit']   # 10-19 维护者定案（docs/研究/免费账号.md）：只带这一项就有整块 64 GB 窗口 + 6144 MB 内存上限；扩展寻址多余且免费账号签不了
@@ -73,6 +78,7 @@ if not best and unread:
     print(f'【红】读不出本机描述文件 {len(unread)} 个（security cms -D 失败，系统安全服务 trustd / securityd 不可用或内存耗尽被杀？如 {unread[0]}）：不当作「没有描述文件」'); sys.exit(4)
 if not best: print(f'没有能用的 {team}.{bid} 开发描述文件' + (f'（{"；".join(why[:4])}）' if why else '')); sys.exit(3)
 pf, prof, ident = best
+if CHECK: print(f'能用：{os.path.basename(pf)}（到期 {prof["ExpirationDate"]:%Y-%m-%d}）'); sys.exit(0)
 if os.environ.get('S2A_DEV_SIGN_PICKED'):   # 调用方（install.sign_and_install）记下这次用了哪份：手机仍拒（0xe8008015）就把它挪开再重申
     with open(os.environ['S2A_DEV_SIGN_PICKED'], 'a', encoding='utf-8') as pk: pk.write(pf + '\n')
 if DYLIB:

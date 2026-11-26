@@ -95,12 +95,35 @@ static int snap_tex_live(const tex_t *t) {
 }
 static int snap_all_zero(const uint8_t *p, uint64_t n) { return n && !p[0] && !memcmp(p, p + 1, n - 1); }
 static int g_snap_pkg_zero;   // 上一次 snap_put_pkg 里这样处理的张数（日志）
+// 分批写回（iPhone 恢复局在这一层被系统按内存收掉：原先整个文件 655 MB 先全部读进暂存缓冲、建完全部贴图才开始拷，暂存缓冲与 Metal 自动释放对象同时常驻）：
+//   读满 128 MB 就把这一批拷进贴图、放掉暂存缓冲；每张一个自动释放池（同存档侧 snap_dump_tex，e6fe7194b）
+typedef struct { __unsafe_unretained NvPkg *pk; __unsafe_unretained id<MTLTexture> mt; __unsafe_unretained id<MTLBuffer> b; fr_tex_hd hd; } snap_pend_t;   // 对象由 keep 持住
+static void snap_put_pkg_flush(NSMutableArray *keep, snap_pend_t *pv, int *np, int *synced, int *put, int *miss) {
+    if (!*np) return;
+    @autoreleasepool {
+        if (!*synced) { snap_up_sync(); *synced = 1; }
+        int ok = 1; uint64_t inflight = 0; id<MTLCommandBuffer> cb = nil; id<MTLBlitCommandEncoder> be = nil;
+        for (int i = 0; i < *np && ok; i++) {
+            if (!cb) { cb = [g_q commandBuffer]; be = [cb blitCommandEncoder]; }
+            fr_blit_planes_enc(be, pv[i].mt, &pv[i].hd, pv[i].b, 0); inflight += pv[i].hd.bytes;
+            if (inflight >= (128ull << 20) || i == *np - 1) { [be endEncoding]; ok = cb_run(cb) && !cb.error; cb = nil; be = nil; inflight = 0; }
+        }
+        for (int i = 0; i < *np; i++) {
+            if (!ok) { (*miss)++; continue; }
+            NvPkg *pk = pv[i].pk;
+            // 整张标成「GPU 刚写过」：之后内存池有变动时只按 CPU 后写的页重传，不拿池里的旧内容盖掉写回的显卡内容
+            if (pk->nph) { if (!pk->pgpu) pk->pgpu = calloc(pk->nph, sizeof *pk->pgpu); uint64_t now = nvn_dirty_now(); for (uint32_t q = 0; pk->pgpu && q < pk->nph; q++) pk->pgpu[q] = now; }
+            (*put)++;
+        }
+        [keep removeAllObjects]; *np = 0;
+    }
+    if (s2a_snap_progress) s2a_snap_progress(NULL);   // 逐层实占采样
+}
 static void snap_put_pkg(const char *path, nvn_hmap *addr, int *put, int *miss) {
     *put = *miss = 0; g_snap_pkg_zero = 0; FILE *f = fopen(path, "rb"); if (!f) return; fr_tex_hd hd;
-    typedef struct { __unsafe_unretained NvPkg *pk; __unsafe_unretained id<MTLTexture> mt; __unsafe_unretained id<MTLBuffer> b; fr_tex_hd hd; } pend_t;   // 对象由 keep 持住
-    NSMutableArray *keep = [NSMutableArray array];   // 持住暂存缓冲与贴图，等这一批命令做完
-    pend_t *pv = NULL; int np = 0, cap = 0;
-    while (snap_fread(&hd, sizeof hd, 1, f, "mtl.tex_hd")) {
+    NSMutableArray *keep = [NSMutableArray array];   // 持住这一批的暂存缓冲与贴图，等这一批命令做完
+    snap_pend_t *pv = NULL; int np = 0, cap = 0, synced = 0; uint64_t batch = 0;
+    while (snap_fread(&hd, sizeof hd, 1, f, "mtl.tex_hd")) { @autoreleasepool {
         const tex_t *t = nvn_hm_get(addr, &hd.ser);
         if (!t || t->serial != hd.ser || !snap_tex_live(t) || !tex_mtl(t)) { fr_skip_tex(f, &hd); (*miss)++; continue; }
         __unsafe_unretained id o = tex_get(hd.ser); NvPkg *pk = [o isKindOfClass:[NvPkg class]] ? (NvPkg *)o : nil; id<MTLTexture> mt = pk ? pk->tex : nil;
@@ -110,26 +133,12 @@ static void snap_put_pkg(const char *path, nvn_hmap *addr, int *put, int *miss) 
         if (g_snap_pkg_old && snap_all_zero(b.contents, hd.bytes)) { g_snap_pkg_zero++; continue; }
         if (np == cap) { cap = cap ? cap * 2 : 256; pv = realloc(pv, sizeof *pv * (size_t)cap); }
         memset(&pv[np], 0, sizeof pv[np]); pv[np].hd = hd; [keep addObject:pk]; [keep addObject:mt]; [keep addObject:b];
-        pv[np].pk = pk; pv[np].mt = mt; pv[np].b = b; np++;
-    }
+        pv[np].pk = pk; pv[np].mt = mt; pv[np].b = b; np++; batch += hd.bytes;
+        if (batch >= (128ull << 20)) { snap_put_pkg_flush(keep, pv, &np, &synced, put, miss); batch = 0; }
+    } }
     fclose(f);
-    if (np) {
-        snap_up_sync();
-        int ok = 1; uint64_t inflight = 0; id<MTLCommandBuffer> cb = nil; id<MTLBlitCommandEncoder> be = nil;
-        for (int i = 0; i < np && ok; i++) {
-            if (!cb) { cb = [g_q commandBuffer]; be = [cb blitCommandEncoder]; }
-            fr_blit_planes_enc(be, pv[i].mt, &pv[i].hd, pv[i].b, 0); inflight += pv[i].hd.bytes;
-            if (inflight >= (128ull << 20) || i == np - 1) { [be endEncoding]; ok = cb_run(cb) && !cb.error; cb = nil; be = nil; inflight = 0; }
-        }
-        for (int i = 0; i < np; i++) {
-            if (!ok) { (*miss)++; continue; }
-            NvPkg *pk = pv[i].pk;
-            // 整张标成「GPU 刚写过」：之后内存池有变动时只按 CPU 后写的页重传，不拿池里的旧内容盖掉写回的显卡内容
-            if (pk->nph) { if (!pk->pgpu) pk->pgpu = calloc(pk->nph, sizeof *pk->pgpu); uint64_t now = nvn_dirty_now(); for (uint32_t q = 0; pk->pgpu && q < pk->nph; q++) pk->pgpu[q] = now; }
-            (*put)++;
-        }
-    }
-    free(pv); [keep removeAllObjects];
+    snap_put_pkg_flush(keep, pv, &np, &synced, put, miss);
+    free(pv);
 }
 
 // ---------- 后端跨提交延续的状态（报告 15 节 4、5、8、10、12、13）----------
@@ -241,7 +250,13 @@ static int snap_al_dump(FILE *f, id<MTLTexture> t, uint64_t *bytes) { @autorelea
 static int g_snap_al_zero;   // 上一次 snap_al_load_x 读到的内容是不是全零（snap_alias_restore kind 3 用）
 static id<MTLTexture> snap_al_load_x(FILE *f, int res);
 static id<MTLTexture> snap_al_load(FILE *f) { return snap_al_load_x(f, 1); }
-static id<MTLTexture> snap_al_load_x(FILE *f, int res) {   // 读一张：建同描述的贴图、写回内容；读坏返回 nil 且 errno = EIO。res：登记进本层常驻集（GL 出图层的贴图不登记）
+static id<MTLTexture> snap_al_load_y(FILE *f, int res);
+static id<MTLTexture> snap_al_load_x(FILE *f, int res) {   // 每张一个自动释放池（建暂存缓冲 / 拷贝命令时 Metal 内部的自动释放对象当场放；返回值在池外持住）
+    id<MTLTexture> t = nil; int e = 0; @autoreleasepool { t = snap_al_load_y(f, res); e = errno; }
+    if (s2a_snap_progress) s2a_snap_progress(NULL);   // 逐层实占采样
+    errno = e; return t;
+}
+static id<MTLTexture> snap_al_load_y(FILE *f, int res) {   // 读一张：建同描述的贴图、写回内容；读坏返回 nil 且 errno = EIO。res：登记进本层常驻集（GL 出图层的贴图不登记）
     snap_al_x x; fr_tex_hd hd; errno = 0;
     if (!fr_r(f, &x, sizeof x) || !snap_fread(&hd, sizeof hd, 1, f, "mtl.tex_hd")) { errno = EIO; return nil; }
     MTLTextureDescriptor *d = [MTLTextureDescriptor new];
@@ -470,6 +485,11 @@ static nvn_hmap *g_snap_addr_lk;
 static const void *snap_addr_lookup(uint64_t ser) { return g_snap_addr_lk ? nvn_hm_get(g_snap_addr_lk, &ser) : NULL; }
 // 恢复里建的 Metal 对象（放回贴图用的拷贝编码器、命令缓冲、暂存缓冲）多是自动释放的，调用线程是长活的会话线程、没有自己的池：
 //   不包一层的话它们连同引用的贴图一直不放，每在游戏中回一次快照图形内存涨一份（Mac 11-21：IOAccelerator 661 → 1229 → 1843 → 2458 MB）
+// 恢复的逐层实占（同存档侧 snapshot.c 的逐层行；iPhone 恢复局图形阶段被系统按内存收掉时看是哪一层涨上去的）：分步计时点就是层边界
+static void snap_restore_layer(int ng) {
+    static const char *const nm[] = {"恢复：命令块", "恢复：回放层表", "恢复：共享存储贴图", "恢复：GPU 私有贴图", "恢复：只读普通贴图与预排布贴图", "恢复：后端状态与视频", "恢复：图形收尾", "恢复：图形收尾", "恢复：图形收尾"};
+    if (s2a_snap_progress) s2a_snap_progress(nm[ng < 9 ? ng - 1 : 8]);
+}
 static int nvn_snap_restore_body(const char *dir);
 int nvn_snap_restore(const char *dir) { @autoreleasepool { return nvn_snap_restore_body(dir); } }
 static int nvn_snap_restore_body(const char *dir) {
@@ -477,8 +497,8 @@ static int nvn_snap_restore_body(const char *dir) {
     char p[1200]; nvn_snap_live lv; int ok = 1;
     // 分步计时（11-17 iPhone 大金刚「核对」1.09 s，其中图形一段要拆开看）：命令块 / 回放层表 / 共享存储贴图 / GPU 私有贴图 / 只读普通贴图 / 预排布贴图 / 后端状态 + 视频
     double tg[9]; int ng = 0; tg[ng++] = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1e9;
-#define SNAP_TG() (tg[ng < 9 ? ng++ : 8] = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1e9)
-    g_snap_newtex_log = 600;
+#define SNAP_TG() (tg[ng < 9 ? ng++ : 8] = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1e9, snap_restore_layer(ng))
+    g_snap_newtex_log = 600; snap_restore_layer(1);
     if (s2a_gl_first_use) s2a_gl_first_use(); else MLOG("【红】 即时存档恢复：宿主没有着色器路径初始化入口");
     { snprintf(p, sizeof p, "%s/gfx_live.bin", dir); FILE *f = fopen(p, "rb"); ok = f && snap_fread(&lv, sizeof lv, 1, f, "mtl.live") && lv.magic == 0x31534E4Eu; if (f) fclose(f); }
     if (!ok) { MLOG("【红】 即时存档恢复：图形计数器读不了"); return -1; }
@@ -526,14 +546,15 @@ static int nvn_snap_restore_body(const char *dir) {
         MLOG("即时存档恢复：GPU 私有贴图 按地址建 %d 张（地址表 %d 项），内容写回 %d 张、没写回 %d 张", made, na, put, miss);
         SNAP_TG();
         {   int qp = 0, qm = 0, qmade = 0; snprintf(p, sizeof p, "%s/gfx_plain.bin", dir); FILE *pf = fopen(p, "rb"); fr_tex_hd hd;
-            while (pf && snap_fread(&hd, sizeof hd, 1, pf, "mtl.tex_hd")) {
+            while (pf && snap_fread(&hd, sizeof hd, 1, pf, "mtl.tex_hd")) { @autoreleasepool {   // 每张一个自动释放池
                 const tex_t *tt = nvn_hm_get(&addr, &hd.ser); if (tt && tt->serial == hd.ser && snap_tex_live(tt) && tex_mtl(tt)) qmade++;
                 id o = tex_get(hd.ser); id<MTLTexture> mt = [o conformsToProtocol:@protocol(MTLTexture)] ? o : nil;
                 if (!mt || mt.width != hd.w || mt.height != hd.h || (uint32_t)mt.pixelFormat != hd.fmt || mt.mipmapLevelCount != hd.levels) { fr_skip_tex(pf, &hd); qm++; continue; }
                 id<MTLBuffer> b = [g_dev newBufferWithLength:hd.bytes options:MTLResourceStorageModeShared];
                 if (!b || !fr_r_tex(pf, &hd, b.contents)) { qm++; break; }
                 snap_up_sync(); if (fr_blit_planes(mt, &hd, b, 0)) qp++; else qm++;
-            }
+                if (s2a_snap_progress) s2a_snap_progress(NULL);
+            } }
             if (pf) fclose(pf);
             MLOG("即时存档恢复：只读的显卡私有普通贴图 按地址建 %d 张，写回 %d 张、没写回 %d 张", qmade, qp, qm); }
         SNAP_TG();
@@ -605,8 +626,8 @@ int nvn_snap_thumb(const char *src, const char *dst, int w, int h) {
     MLOG("%s即时存档：缩略图 %d×%d %s %s", ok ? "" : "【黄】 ", w, h, ok ? "存到" : "没存成", dst);
     return ok ? 0 : -1;
 }
-// 验证截图：取「下一次出图」的画面。取图钩子只有一个槽，自动玩家截图等也用它，后来的请求会把前面的回调盖掉（11-17：iPhone 上第 5 / 20 秒两张逐字节相同、
-//   Mac 上第 20 秒那张等不到）：3 秒没等到就重新请求，最多 3 次；回调里记下截自第几帧
+// 验证截图：取「下一次出图」的画面（mtl_grab_next_present）。取图请求原先只有一个槽，后来的把前面的回调盖掉（11-17：iPhone 上第 5 / 20 秒两张逐字节相同、
+//   Mac 上第 20 秒那张等不到）；11-26 起多个请求一起等下一次出图、各自都拿到。3 秒没等到就重新请求（最多 3 次）留着兜出图停住的局；回调里记下截自第几帧
 int nvn_snap_grab(const char *path) {
     for (int attempt = 1; attempt <= 3; attempt++) {
         __block int done = 0; char *pp = strdup(path); int at = attempt;

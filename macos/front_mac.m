@@ -1589,7 +1589,7 @@ static void sample_input(void) {
     int slot_of[S2A_LIVE_MAX];
     // 面板里登记成第几位就是游戏里的第几位（#1264：中途连上 DualSense、面板 P1 是它，宿主却照「已在玩的留原位」把玩家 1 留给原手柄，
     //   原手柄关掉后 DualSense 还在二号位，单人游戏读不到）；没登记的手柄照旧留原槽
-    if (g_order_loaded) s2a_slot_pin(pad_id, live_ids, live_rank, n, S2A_MAX_PADS);
+    if (g_order_loaded) { s2a_slot_rank_cap(live_rank, n, s2a_pad_cap()); s2a_slot_pin(pad_id, live_ids, live_rank, n, S2A_MAX_PADS); }   // 游戏限人数：空位不占名额（D-VYNF）
     int live = s2a_slot_plan(pad_id, live_ids, n, S2A_MAX_PADS, slot_of);
     // 断开清槽：整表重建，只有本轮还在的才写回（强引用随之释放，不会留悬空指针）
     GCController *owner_before[S2A_MAX_PADS];

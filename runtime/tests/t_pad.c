@@ -394,6 +394,31 @@ int main(void) {
                slot_of[3] == 3 && slot_of[4] == -1);   // 第 5 只丢弃
         assert(s2a_slot_plan(none, five, 0, 4, slot_of) == 1);   // 没有手柄：1 格（触屏 / 键盘）
     }
+    // 游戏限人数时压缩名次（s2a_slot_rank_cap → s2a_slot_pin → s2a_slot_plan，Mac / iOS 同一串）。期望值手算：
+    //   ① D-VYNF：顺序表「P1 空、P2 空、P3 手柄」，只连这一只（名次 2），游戏限 1 人 → 手柄落槽 0（改前钉在槽 2，游戏一个手柄都没有）
+    //   ② 表「P1 X、P2 空、P3 Y、P4 Z」，三只都在，限 2 人 → X 槽 0、Y 槽 1（按表先后取前两个，空位不占名额），Z 排到槽 2（超名额不给游戏）
+    //   ③ 不限（cap 0）、或都在名额以内（限 4 人、名次 0 / 2）→ 名次不动，照表原位（玩家排的空位在多人游戏里照旧保留）
+    {
+        static const char X, Y, Z;
+        int slot_of[4];
+        {   // ①
+            const void *prev[4] = {0}, *live[1] = {&X}; int rank[1] = {2};
+            s2a_slot_rank_cap(rank, 1, 1); s2a_slot_pin(prev, live, rank, 1, 4);
+            assert(rank[0] == 0 && s2a_slot_plan(prev, live, 1, 4, slot_of) == 1 && slot_of[0] == 0);
+        }
+        {   // ②
+            const void *prev[4] = {0}, *live[3] = {&Y, &X, &Z}; int rank[3] = {2, 0, 3};
+            s2a_slot_rank_cap(rank, 3, 2); s2a_slot_pin(prev, live, rank, 3, 4);
+            assert(rank[0] == 1 && rank[1] == 0 && rank[2] == 2);
+            assert(s2a_slot_plan(prev, live, 3, 4, slot_of) == 3 && slot_of[1] == 0 && slot_of[0] == 1 && slot_of[2] == 2);
+        }
+        {   // ③
+            int r0[2] = {0, 2}; s2a_slot_rank_cap(r0, 2, 0); assert(r0[0] == 0 && r0[1] == 2);
+            int r1[2] = {0, 2}; s2a_slot_rank_cap(r1, 2, 4); assert(r1[0] == 0 && r1[1] == 2);
+            int r2[2] = {S2A_PAD_ORDER_UNLISTED, 2}; s2a_slot_rank_cap(r2, 2, 1); assert(r2[0] == S2A_PAD_ORDER_UNLISTED && r2[1] == 0);   // 没登记的不动
+        }
+        s2a_vpad_set_cap(1); assert(s2a_pad_cap() == 1); s2a_vpad_set_cap(0); assert(s2a_pad_cap() == 0); s2a_vpad_set_cap(-3); assert(s2a_pad_cap() == 0);
+    }
     // 按顺序表排在线手柄（s2a_pad_order_arrange，Mac / iOS 共用）：期望值按「表里的按表顺序在前、没列的照原顺序接在后、没分配的去掉、系统手柄按名字 + 同名第几只认」手算
     {
         s2a_pad_order order = {0};

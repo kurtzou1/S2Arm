@@ -284,6 +284,7 @@ static int hlog_last_create(uint32_t h) { for (int i = g_nhlog - 1; i >= 0; i--)
 static void hlog_del(int i) { memmove(&g_hlog[i], &g_hlog[i + 1], sizeof *g_hlog * (size_t)(g_nhlog - i - 1)); g_nhlog--; }
 static __thread int t_cs_h, t_snap_ctx = -2;
 static __thread int t_close_cs;   // 本线程这次关句柄是服务层（C#，s2a_handle_close）关的：关的那条日志记 cs = 1，恢复重放时留给服务自己关（snap_apply_closes）
+static uint32_t g_proxy_closed[256]; static int g_nproxy;   // 即时存档恢复替服务关掉的句柄（snap_apply_closes，苹果端）：服务之后自己再关（异步收尾）时当已关、不报红（s2a_handle_close）；别的平台恒空
 static __thread const uint32_t *t_force; static __thread int t_nforce, t_iforce;
 int s2a_snap_mode(void); int s2a_snap_logging(void);
 // 单独链本文件的线程单测（t_thread / t_thread_plat / t_thread_wait_diag，含安卓适配层那份）没有快照引擎：弱缺省 = 快照关、不记；
@@ -2590,6 +2591,7 @@ static snap_hlog_t *g_rhlog; static int g_nrhlog;
 static int snap_last_create_cs(uint32_t h);
 static struct { uint32_t idx, kind; uint16_t gen; int signaled; uint64_t aobj; } *g_skip;
 static struct { uint32_t idx, kind; uint16_t gen; void *obj; uint64_t cookie; int placed; } *g_defer; static int g_ndefer, g_capdefer;
+static void snap_closes_upto(int hi);   // 执行到第 hi 条之后的句柄关闭（下面重放一节）
 static uint32_t g_temp[64]; static int g_ntemp;   // 重放临时造的游戏句柄（请求后摘掉）
 static int defer_place(int j) {   // 持 G
     if (g_defer[j].placed) return 0;
@@ -2613,7 +2615,7 @@ int s2a_snap_need_handle(uint32_t h) {
     return r;
 }
 // 重放结束后：放剩下的游戏句柄
-int s2a_snap_defer_finish(void) { int bad = 0, n = 0; glock(); for (int j = 0; j < g_ndefer; j++) if (!g_defer[j].placed) { bad += defer_place(j) != 0; n++; } pthread_mutex_unlock(&G);
+int s2a_snap_defer_finish(void) { snap_closes_upto(INT_MAX); int bad = 0, n = 0; glock(); for (int j = 0; j < g_ndefer; j++) if (!g_defer[j].placed) { bad += defer_place(j) != 0; n++; } pthread_mutex_unlock(&G);
     LOG("%s即时存档恢复：游戏句柄放回 %d 个，失败 %d", bad ? "【红】" : "", n, bad); return bad ? -1 : 0; } static int g_nskip, g_capskip;   // 交给服务重放的句柄（重放后核对、补事件状态）
 // 重放之后：服务层重建的句柄必须与 A 同格同代同种；事件按 A 的已触发位补上
 int s2a_snap_kernel_post(void) {
@@ -2756,34 +2758,43 @@ int s2a_snap_hlog_load(FILE *f) {
 int s2a_snap_skip_cs(uint32_t h, uint32_t kind) { (void)kind; return snap_last_create_cs(h) == 1; }
 // 重放第 seq 条之前：把 A 里这条请求建的句柄按顺序装成本线程的强制分配串
 int s2a_snap_replay_begin(int seq) {
+    snap_closes_upto(seq - 1);   // 上一条重放到这条之间、记在已收掉的请求之后的关闭（见 snap_apply_closes）
     g_nrforce = 0;
     for (int i = 0; i < g_nrhlog; i++) if (g_rhlog[i].op == 0 && g_rhlog[i].cs && g_rhlog[i].ctx == seq) g_rforce[g_nrforce++] = g_rhlog[i].h;
     s2a_snap_force(g_rforce, g_nrforce); return g_nrforce;
 }
-// 首条之前（seq = -1）与每条之后：按日志执行「此后、下一条之前」发生的关闭——只关服务层建的、在 B 里此刻还在的句柄
-static int snap_apply_closes(int after) {
+// 按日志执行记在 (lo, hi] 之间各条之后的关闭（首条之前 lo = INT_MIN、hi = -1）——只关服务层建的、在 B 里此刻还在的句柄。
+//   按区间而不是「等于这条」：关闭记在哪条之后，那条可能已不在请求日志里（随它的对象关闭从日志收掉了、不重放）。原先只在重放到「等于」的那条时关，
+//   这些关闭永远不执行：A 里同格复用的下一个句柄按原号强制分配时格还被旧句柄占着，改按常规分配抢走游戏句柄的格，恢复失败重开局
+//   （真机快照（程序号 0400486024DEC000）：第 340 条建的一对事件服务在第 343 条里关掉，343 已收掉；第 344 条在同两格建新的一对 → 撞格。玩家诊断 0.6.0–0.6.10 两款六份）
+static int g_close_upto = INT_MIN;   // 已执行到哪条之后的关闭
+static int snap_apply_closes(int lo, int hi) {
     int n = 0;
     for (int i = 0; i < g_nrhlog; i++) {
-        snap_hlog_t *x = &g_rhlog[i]; if (!x->op || x->after != after) continue;
-        // 服务自己关的（Dispose / 关会话时级联释放的对象）：重放引发它的那件事（请求、或游戏关会话）时服务会再关一次，这里替它关就成了关两次
-        //   （一款大游戏：先按日志关掉 AudioDevice 的事件句柄，再关它的会话时 Dispose 又关一遍 → InvalidHandle，收局 Horizon 服务停止也报错）
-        if (x->cs) continue;
+        snap_hlog_t *x = &g_rhlog[i]; if (!x->op || x->after <= lo || x->after > hi) continue;
         // 这条关闭之前、同值最后一次建是不是服务层建的
         int cs = -1; for (int j = i - 1; j >= 0; j--) if (g_rhlog[j].op == 0 && g_rhlog[j].h == x->h) { cs = g_rhlog[j].cs; break; }
         if (cs != 1) continue;
+        // 服务自己关的（x->cs：Dispose / 关会话时级联释放的对象）：重放引发它的那件事（请求、或游戏关会话）时服务已再关过一次的，此刻不在了、跳过
+        //   （一款大游戏：先按日志关掉 AudioDevice 的事件句柄，再关它的会话时 Dispose 又关一遍 → InvalidHandle）。此刻还在 = 引发它的那条没重放（已收掉）
+        //   或服务的收尾还没到：替它关、记下，服务之后再关同一个值时当已关
         glock(); int alive = h_idx(x->h) != 0; pthread_mutex_unlock(&G);
-        if (alive) { close_handle(x->h); n++; }
+        if (!alive) continue;
+        close_handle(x->h); n++;
+        if (x->cs) { glock(); if (g_nproxy < (int)(sizeof g_proxy_closed / sizeof *g_proxy_closed)) g_proxy_closed[g_nproxy++] = x->h; pthread_mutex_unlock(&G); }
     }
+    if (hi > g_close_upto) g_close_upto = hi;
     return n;
 }
+static void snap_closes_upto(int hi) { if (hi > g_close_upto) snap_apply_closes(g_close_upto, hi); }
 int s2a_snap_replay_end(int seq) {
     if (g_ntemp) { glock(); for (int i = 0; i < g_ntemp; i++) { int ix = h_idx(g_temp[i]); if (ix) { free(g_h[ix].obj); memset(&g_h[ix], 0, sizeof g_h[ix]); } } g_ntemp = 0; pthread_mutex_unlock(&G); }
     int left = s2a_snap_force_left(); s2a_snap_force(NULL, 0);
     if (left) LOG("【红】即时存档恢复：重放第 %d 条后还有 %d 个句柄没按 A 的值建出来（这条请求在 B 里少建了句柄）", seq, left);
-    snap_apply_closes(seq);
+    snap_closes_upto(seq);
     return left ? -1 : 0;
 }
-int s2a_snap_replay_prelude(void) { return snap_apply_closes(-1); }
+int s2a_snap_replay_prelude(void) { g_close_upto = INT_MIN; g_nproxy = 0; return snap_apply_closes(INT_MIN, -1); }
 uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs);
 void *sw_xstack_slot(void);
 void sw_snap_resume(void *frame) __attribute__((noreturn));
@@ -3576,7 +3587,8 @@ int s2a_handle_close(uint32_t h) {
     if (trace_on()) LOG("[句柄] C# 关 %#x", h);
     int was = t_close_cs; t_close_cs = 1; uint32_t r = close_handle(h); t_close_cs = was;
     if (r == 0) return 1;
-    glock(); unsigned i = h & 0x7fff, gen = h >> 15; int used = i && i < MAX_H, live = used && g_h[i].kind; unsigned cur = used ? g_h[i].gen : 0; pthread_mutex_unlock(&G);
+    glock(); for (int k = 0; k < g_nproxy; k++) if (g_proxy_closed[k] == h) { g_proxy_closed[k] = g_proxy_closed[--g_nproxy]; pthread_mutex_unlock(&G); return 1; }   // 恢复已替服务关掉的（snap_apply_closes）
+    unsigned i = h & 0x7fff, gen = h >> 15; int used = i && i < MAX_H, live = used && g_h[i].kind; unsigned cur = used ? g_h[i].gen : 0; pthread_mutex_unlock(&G);
     LOG("【红】s2a_handle_close：C# 关不存在的句柄 %#x（%s）", h, !h ? "句柄 0：从没建过" : !used ? "格子越界：不是原生句柄" : live ? "格子已被别的对象复用（这个句柄早已被关）" : cur == gen ? "已被关掉（游戏或服务先关了）" : "已被关掉、格子空着");
     return 0;
 }
@@ -3904,18 +3916,27 @@ void s2a_thread_dump(void) {
             uint64_t at[2] = {pc, lr};
             for (int k = 0; k < 2; k++) { module_t *rm = at[k] ? module_of((void *)at[k]) : NULL;   // 宿主代码里（门、桩）的 pc / lr 不在游戏模块内，略过
                 if (rm && s2a_guest_where(at[k], w, sizeof w)) bn += snprintf(bt + bn, sizeof bt - bn, " %s%s", k ? "lr " : "pc ", w); }
-            for (int d = 0; d < 8 && fp && !(fp & 0xF); d++) {
+            // 宿主帧也往上走（诊断#085d7e：游戏线程停在宿主条件变量上，原先碰到第一个宿主帧就停，只剩 pc / lr 两个系统库地址，
+            //   定不了是 S2Arm 哪个函数在等）：游戏帧打导出名，宿主帧按 dladdr 打「库:符号+偏移」。这时目标已恢复（上面 thread_resume），dladdr 拿 dyld 锁无妨
+            char hb[1536]; int hn = 0; uint64_t fp0 = fp; int hosted = 0;
+            if (run && (pc || lr)) for (int k = 0; k < 2; k++) { if (!at[k] || module_of((void *)at[k])) continue;
+                Dl_info di = {0}; if (dladdr((void *)at[k], &di) && hn < (int)sizeof hb - 160) { const char *lib = di.dli_fname ? strrchr(di.dli_fname, '/') : NULL;
+                    hn += snprintf(hb + hn, sizeof hb - hn, " %s%s:%s+%#llx", k ? "lr " : "pc ", lib ? lib + 1 : "?", di.dli_sname ? di.dli_sname : "?", (unsigned long long)(at[k] - (uint64_t)(di.dli_saddr ? di.dli_saddr : di.dli_fbase))); } }
+            for (int d = 0; d < 16 && fp && !(fp & 0xF); d++) {
                 uint64_t fr[2]; vm_size_t got = 0;
                 if (vm_read_overwrite(mach_task_self(), (vm_address_t)fp, sizeof fr, (vm_address_t)fr, &got) != KERN_SUCCESS || got != sizeof fr) break;
-                if (!s2a_guest_where(fr[1], w, sizeof w)) break;
-                bn += snprintf(bt + bn, sizeof bt - bn, " ← %s", w);
+                uint64_t ra = fr[1] & 0x0000007fffffffffull;   // 去掉指针认证位
+                if (s2a_guest_where(ra, w, sizeof w)) bn += snprintf(bt + bn, sizeof bt - bn, " ← %s", w);
+                else if (run) { Dl_info di = {0}; if (!dladdr((void *)ra, &di)) break; const char *lib = di.dli_fname ? strrchr(di.dli_fname, '/') : NULL; hosted = 1;
+                    bn += snprintf(bt + bn, sizeof bt - bn, " ← 宿主 %s:%s+%#llx", lib ? lib + 1 : "?", di.dli_sname ? di.dli_sname : "?", (unsigned long long)(ra - (uint64_t)(di.dli_saddr ? di.dli_saddr : di.dli_fbase))); }
+                else break;
                 if (fr[0] <= fp || bn >= (int)sizeof bt - 256) break;
                 fp = fr[0];
             }
-            if (bn) LOG("    客体回溯%s%s", run ? "（在跑，采样）" : "", bt);
+            if (bn) LOG("    客体回溯%s%s%s", run ? "（在跑，采样）" : "", hosted ? hb : "", bt);
             // 采样到的 pc / lr 落在宿主代码（core_acquire 里等核、宿主层阻塞）时上面一行打不出任何帧——
             //   而「持核者在哪」正是判「等核是不是被持核者卡住」的唯一线索，所以原样把地址打出来
-            else if (run && (pc || lr)) LOG("    客体回溯（在跑，采样）：pc %#llx lr %#llx 不在游戏模块内（宿主代码），fp %#llx", (unsigned long long)pc, (unsigned long long)lr, (unsigned long long)fp);
+            else if (run && (pc || lr)) LOG("    客体回溯（在跑，采样）：pc %#llx lr %#llx 不在游戏模块内（宿主代码），fp %#llx%s", (unsigned long long)pc, (unsigned long long)lr, (unsigned long long)fp0, hn ? hb : "");
         }
 #endif
         if (t->tlr && !t->exited) { uint64_t tt = *(uint64_t *)((uint8_t *)t->tlr + 0x1f8);   // SDK 线程对象里的句柄字段（锁标签来源）与线程句柄不一致时打出

@@ -63,6 +63,8 @@ namespace S2A.Services
         //   而只接一只、自动玩家接管二号）照旧配上——那时第二格镜像一号 / 收自动玩家的键，拆掉就过不了那道界面
         private static int _everLive;
         internal static delegate* unmanaged<int> PlayerMask;
+        private static delegate* unmanaged<int, void> _vpadSetCap;   // 宿主分槽按游戏人数上限压缩名次（runtime/src/pad.c s2a_vpad_set_cap；没导出的宿主为空）
+        private static void PublishCap() { if (_vpadSetCap != null) _vpadSetCap(_padCap < MaxPads ? _padCap : 0); }
         private static volatile int _pads = EnvPads;
         private static volatile PlayerIndex _second = PlayerIndex.Unknown;
         // 手柄设置小程序最近一次给的人数上限（缺省 MaxPads）：真机上多连的手柄不分给游戏，直到下次小程序放宽或这局结束。
@@ -279,7 +281,18 @@ namespace S2A.Services
         public static void CapPads(Switch device, int max)
         {
             _padCap = max <= 0 ? MaxPads : Math.Min(max, MaxPads);
-            if (_pads <= _padCap) return;
+            PublishCap();   // 宿主下一次分槽按它压缩名次（Mac 下一拍、iOS 当场重排）；没超也要发：上限从小放大时要撤掉压缩
+            // 在线手柄还有落在名额外的格：等宿主按新上限重排（最多 200 ms，Mac 采样一拍约 8 ms），再按重排后的位图配——
+            //   否则这一次小程序应答配的是旧位图（名额内全空），游戏重验不过还得再弹一次
+            if (_vpadSetCap != null && PlayerMask != null && _padCap < MaxPads)
+            {
+                int outside = ~((1 << _padCap) - 1);
+                for (int i = 0; i < 40 && (PlayerMask() & outside) != 0; i++) Thread.Sleep(5);
+                int live = ClampMask(PlayerMask(), _padCap);
+                if (live > 0) _everLive |= live;
+                _physicalMask = ConfiguredMask(_pads, live, _everLive);
+            }
+            if (_pads <= _padCap) return;   // 没超：小程序应答随后自己 SetPrimary（按上面更新过的位图）
             Console.Error.WriteLine($"S2A 虚拟手柄：游戏这次最多收 {_padCap} 人，从 {_pads} 个收回到 {_padCap} 个（多连的手柄不分给游戏）");
             _pads = _padCap;
             SetPrimary(device, _player, _type);
@@ -404,6 +417,9 @@ namespace S2A.Services
                     _vpadPadCount = (delegate* unmanaged<int>)vpc;
                 if (NativeLibrary.TryGetExport(NativeLibrary.GetMainProgramHandle(), "s2a_vpad_player_mask", out nint vpm))   // 平台例外：同上
                     PlayerMask = (delegate* unmanaged<int>)vpm;
+                // 游戏人数上限告诉宿主：顺序表里的空位不占名额（D-VYNF：「P1 空、P2 空、P3 手柄」+ 游戏只收 1 人 → 一个手柄都没配上，手柄设置小程序无限重弹黑屏）
+                if (NativeLibrary.TryGetExport(NativeLibrary.GetMainProgramHandle(), "s2a_vpad_set_cap", out nint vcap))   // 平台例外：宿主（runtime/src/pad.c）导出，Mac / iOS 同一份
+                    _vpadSetCap = (delegate* unmanaged<int, void>)vcap;
                 // 触屏直通：iOS 壳（ios/vpad.m，仅触屏方案的手指）与 Mac 游戏窗口（macos/front_mac.m，鼠标左键点画面）导出 s2a_vpad_read_touch；没导出的宿主保持为空、不碰触摸屏。
                 if (NativeLibrary.TryGetExport(NativeLibrary.GetMainProgramHandle(), "s2a_vpad_read_touch", out nint vtouch))
                     _vpadTouch = (delegate* unmanaged<int*, uint*, int>)vtouch;
@@ -469,6 +485,7 @@ namespace S2A.Services
             _everLive = 0;
             _pads = EnvPads;
             _padCap = MaxPads;   // 上一局小程序给的上限不带进下一局
+            PublishCap();
             _second = PlayerIndex.Unknown;
             _lastSticks = default;
             _movedOffHandheld = false;   // 审计 P1-94：上一局「挪出掌机格」不带进下一局（同进程重启）

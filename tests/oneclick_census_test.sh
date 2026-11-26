@@ -15,25 +15,27 @@
 #   ⑨ --lite（普查精简档，11-07 随通用模式拆掉）：已不是参数 → 报「不认得的参数 --lite」、非零退出、一个阶段都不跑
 #   ⑩b 解包目录只换了 romfs 里的文件 / 只多了追加内容 → 要重播种（审计 #1534 P1-54）
 #   ⑧ 不认得的目标（--target windows）→ 报红、退出 2，一个阶段都不跑；旧的 --mac 不再认（报「不认得的参数」、退出非 0）
+#   ⑪ 多程序合集：Mac 运行版与 iPhone 包都解序号 1、物化 programs/1/，title_id 为 …8001；只给序号 0 的解包目录且无原件 → 报红
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); bad=0; trap 'rm -rf "$T"' EXIT
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
 R=$T/repo; mkdir -p $R/pack/oneclick $R/tools $R/x/exefs
 cp "$H/pack/oneclick/oneclick.sh" "$H/pack/oneclick/cachehits.py" "$H/pack/oneclick/titles.tsv" "$H/pack/oneclick/ipa_mode.py" "$H/pack/oneclick/deliver_pack.py" $R/pack/oneclick/
 cp "$H/pack/direct_profile_input.py" $R/pack/   # 一键出包写直连版本旁注调它（算法只一份，解包阶段也调它）
 mkdir -p "$R/pack/jobs" "$R/compat/tree"; cp "$H"/pack/jobs/*.py "$R/pack/jobs/"; cp "$H/compat/tree/global.json" "$R/compat/tree/"   # 一键出包判 .NET SDK 调 pack/jobs/ipa.py dotnet_sdk()（版本按 global.json，全仓一处判法）
-cp "$H/pack/roots.sh" "$H/pack/srcs.sh" "$H/pack/build_id.sh" $R/pack/
+cp "$H/pack/roots.sh" "$H/pack/srcs.sh" "$H/pack/build_id.sh" "$H/pack/multi_program.py" $R/pack/
 mkdir -p "$R/pack/orch" && cp "$H/pack/orch/current.py" "$R/pack/orch/"   # roots.sh 写现行指针 / 迁移老库（pack/orch/current.py）
 mkdir -p $R/graphics/nvn/tools; cp "$H/graphics/nvn/tools/romfs_list.py" $R/graphics/nvn/tools/   # 播种键盘点 romfs/ 与 aoc/（审计 #1534 P1-54）
-mkdir -p "$R/tools"; cp "$H/tools/pool_workers.py" "$R/tools/"   # romfs_list / pak_crypto 经它取核数（#1332：核数唯一来源）
+mkdir -p "$R/tools"; cp "$H/tools/pool_workers.py" "$H/tools/clonedir.py" "$H/tools/plock.sh" "$H/tools/flock_hold.py" "$R/tools/"   # romfs_list / 多程序物化与产物根锁
 for f in cores.sh progress.sh machine.sh; do cp "$H/tools/$f" $R/tools/; done
 cat > $R/pack/seed_root.sh <<'EOF'
 #!/bin/bash
 echo $(( $(cat "$(dirname "$S2A_ROOTS")/../seed.n" 2> /dev/null || echo 0) + 1 )) > "$(dirname "$S2A_ROOTS")/../seed.n"   # 播种次数（⑩）：S2A_ROOTS = $T/<输出>/roots
-r=$S2A_ROOTS/$1@$2; mkdir -p "$r" && cp -R "$3/exefs" "$r/" && cp "$3"/*.tsv "$3"/*.json "$r/" 2> /dev/null; printf '%s\n' "$1@$2" > "$S2A_ROOTS/$1@现行"; echo "🟢 播种桩 $r"
+r=$S2A_ROOTS/$1@$2; mkdir -p "$r" && cp -R "$3/exefs" "$r/" && cp "$3"/*.tsv "$3"/*.json "$r/" 2> /dev/null; [ ! -d "$3/romfs" ] || cp -R "$3/romfs" "$r/"; printf '%s\n' "$1@$2" > "$S2A_ROOTS/$1@现行"; echo "🟢 播种桩 $r"
 EOF
 cat > $R/pack/refresh.sh <<EOF
 #!/bin/bash
-[ -z "\${FAKE_AOC_MISS:-}" ] || printf '追加内容缺\t%s\t假原因\n' "\$FAKE_AOC_MISS" > "\$S2A_ROOTS/\$(cat "\$S2A_ROOTS/\$1@现行")/aoc.log"   # 追加内容阶段记下没解出的包（审计 P2-30）
+cur="\$S2A_ROOTS/\$(cat "\$S2A_ROOTS/\$1@现行")"; [ -z "\${FAKE_AOC_MISS:-}" ] || printf '追加内容缺\t%s\t假原因\n' "\$FAKE_AOC_MISS" > "\$cur/aoc.log"   # 追加内容阶段记下没解出的包（审计 P2-30）
+mkdir -p "\$cur/shaders/direct"; printf 'keys.tsv\n' > "\$cur/shaders/direct/keys.tsv"; cp "\$cur/exefs/main.npdm" "\$cur/main.npdm"; cp "\$cur/exefs/main" "\$cur/main"
 echo "PLAT=\${S2A_PACK_PLAT:-无} WPKG=\${S2A_WIDEN_PKG:-无} WAUTO=\${S2A_WIDEN_AUTO_RUN:-无}" >> $T/refresh.log; echo "LITE=\${S2A_PACK_LITE:-无}" >> $T/lite.log; echo "🟢 刷新桩"
 EOF
 cat > $R/pack/ipa.sh <<EOF
@@ -157,4 +159,29 @@ printf 'BBBB' > $R/x/romfs/a.bin; OC --from-extract $R/x --target mac --out $T/o
 OC --from-extract $R/x --target mac --out $T/o10b > /dev/null; k3=$(cat $T/o10b/.seeded)
 mkdir -p $R/x/aoc/0; printf 'dlc' > $R/x/aoc/0/d.bin; OC --from-extract $R/x --target mac --out $T/o10b > /dev/null; k4=$(cat $T/o10b/.seeded); rm -rf $R/x/romfs $R/x/aoc
 ck "⑩b 只换 romfs 文件 / 只多追加内容要重播种：播种桩 $(cat $T/seed.n 2> /dev/null || echo 0) 次（期望 3）、键 ${k1} → 换 romfs ${k2} → 不变 ${k3} → 加 aoc ${k4}" '[ "$(cat $T/seed.n)" = 3 ] && [ "$k1" != "$k2" ] && [ "$k2" = "$k3" ] && [ "$k3" != "$k4" ]'
+# ⑪ 多程序合集：两条苹果交付路都调用共享构建器；假读取器按 --program-index 写序号 1 的合成 NSO。
+mkdir -p "$T/multi-src" "$T/multi-x"; cp -R "$R/x/exefs" "$T/multi-x/"; printf 'synthetic' > "$T/multi-src/game.nsp"; printf 'header_key = %064d\n' 0 > "$T/multi.keys"
+printf 'title_id\t0100C6F01C4F8000\nname\tMulti Fixture\ndisplay_version\t1.3.0\nbase\t4096\nprograms\t2\nprogram_index\t0\n' > "$T/multi-x/unpack.tsv"
+cat > "$T/multi-nxu" <<'PY'
+#!/usr/bin/env python3
+import os, pathlib, sys
+a=sys.argv[1:]
+if a[0]=='--npdm-isa': print('aarch64'); raise SystemExit(0)
+out=pathlib.Path(a[1]); out.mkdir(parents=True, exist_ok=True)
+i=int(next(x.split('=',1)[1] for x in a if x.startswith('--program-index=')))
+tid=f'{int(os.environ["FAKE_MAIN_TID"],16)+i:016X}'
+for d in ('exefs','ctl','romfs'): (out/d).mkdir(exist_ok=True)
+(out/'exefs/main').write_bytes(f'main-{i}'.encode()); (out/'exefs/main.npdm').write_bytes(f'META-{i}'.encode())
+(out/'ctl/control.nacp').write_bytes(f'nacp-{i}'.encode()); (out/'romfs/data').write_bytes(f'romfs-{i}'.encode())
+(out/'unpack.tsv').write_text(f'title_id\t{tid}\nname\tMulti Fixture\ndisplay_version\t1.3.0\nbase\t4096\nprograms\t2\nprogram_index\t{i}\n')
+PY
+chmod +x "$T/multi-nxu"
+MOC() { local target=$1 out=$2; shift 2; env FAKE_MAIN_TID=0100C6F01C4F8000 S2A_SUBPROGRAM_SOURCES="$T/multi-src" S2A_NX_UNPACK="$T/multi-nxu" \
+  bash "$R/pack/oneclick/oneclick.sh" --from-extract "$T/multi-x" --keys "$T/multi.keys" --out "$out" --target "$target" "$@" 2>&1; }
+rm -f "$T/refresh.log" "$T/ipa.log"; o11m=$(MOC mac "$T/o11m"); r11m=$?; root11m=$(cat "$T/o11m/logs/mac_root.txt" 2>/dev/null)
+ck "⑪ Mac 多程序：rc=${r11m}、序号 1 的 title_id …8001、RomFS 已物化" '[ $r11m = 0 ] && [ -f "$root11m/programs/1/main.npdm" ] && grep -q "title_id.*0100C6F01C4F8001" "$root11m/programs/1/unpack.tsv" && [ ! -L "$root11m/programs/1/romfs" ]'
+rm -f "$T/refresh.log" "$T/ipa.log"; o11i=$(MOC ios "$T/o11i"); r11i=$?; root11i=$(cat "$T/o11i/roots/t0100c6f01c4f8000@现行" 2>/dev/null)
+ck "⑪ iPhone 多程序：rc=${r11i}、出包前已有 programs/1、IPA 桩调用 1 次" '[ $r11i = 0 ] && [ -f "$T/o11i/roots/$root11i/programs/1/main.npdm" ] && [ "$(grep -c . "$T/ipa.log")" = 1 ]'
+o11x=$(env -u S2A_SUBPROGRAM_SOURCES FAKE_MAIN_TID=0100C6F01C4F8000 S2A_NX_UNPACK="$T/multi-nxu" bash "$R/pack/oneclick/oneclick.sh" --from-extract "$T/multi-x" --keys "$T/multi.keys" --out "$T/o11x" --target mac 2>&1); r11x=$?
+ck "⑪ 只给序号 0 的解包目录且无原件：rc=${r11x}、明确报红、不交缺程序包" '[ $r11x != 0 ] && [[ "$o11x" == *"原件没一起给"* ]] && [ ! -e "$T/o11x/logs/mac_root.txt" ]'
 [ $bad = 0 ] && echo "oneclick_census 单测全过" || { echo "oneclick_census 单测有不通"; exit 1; }

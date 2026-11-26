@@ -754,3 +754,31 @@
 "assign.ns2pro" = "Switch 2 Pro Controller";
 "assign.saveFailed" = "Couldn’t save the assignment. Please try again.";
 "assign.ok" = "OK";
+
+/* D2R-Mobile library backend and local saves. */
+"d2r.load" = "Unable to load the Diablo II touch backend. Check that the app includes the S2AD2R framework signed by the same team.";
+"d2r.abi" = "The Diablo II touch backend is incompatible with this S2Arm host.";
+"d2r.os" = "This Diablo II touch backend requires iPadOS 26 or later.";
+"d2r.reopen" = "Diablo II has already started. Save and exit, then reopen S2Arm.";
+"d2r.gpu" = "This Diablo II backend requires a device with Metal 4 and BC texture support.";
+"d2r.resources" = "Place the Diablo II resources in S2Arm’s D2R Mobile folder.\n\n%s";
+"d2r.metal" = "The Diablo II touch view could not create a Metal layer.";
+"d2r.simulator" = "The simulator supports touch-view wiring checks only.";
+"d2r.title" = "Diablo II";
+"d2r.manage" = "Diablo II Save Management";
+"d2r.location" = "Files → On My iPad → S2Arm";
+"d2r.import" = "Import Character Folder…";
+"d2r.export" = "Export Save Folder…";
+"d2r.play" = "Play";
+"d2r.empty" = "No characters";
+"d2r.saves" = "Diablo II Saves";
+"d2r.added" = "Character added.";
+"d2r.failed" = "Import failed.";
+"d2r.directory" = "The save location must be a regular folder.";
+"d2r.unreadable" = "The save folder could not be read.";
+"d2r.special" = "The save contains links or special files.";
+"d2r.missing" = "The Diablo II save folder is missing from Files. Restore your backup to its original location and try again.";
+"d2r.conflict" = "The old and new locations contain different Diablo II saves. Back up and compare both folders first.";
+"d2r.character" = "Select the character’s folder containing a .d2s save with the same name.";
+"d2r.duplicate" = "A character with that name already exists. Your current save was kept.";
+"d2r.docs" = "S2Arm’s save directory could not be read.";

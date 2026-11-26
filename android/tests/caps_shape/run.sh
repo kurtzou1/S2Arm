@@ -68,7 +68,7 @@ for shape in $shapes; do
 done
 [ $rc = 0 ] || { echo "【红】整台设备能力形态档：有档红（上面 FAIL 行）"; exit 1; }
 echo "PASS: 形态档 $(echo $shapes | wc -w | tr -d ' ') 档 × ${#SHAPE_TESTS[@]} 项 = $n 次全绿（${shapes}）"
-grep -h "【事实】" "$out"/caps-*.json.log | head -1 | sed "s/^/  摘要样例：/"
+awk '/【事实】/ { print "  摘要样例：" $0; exit }' "$out"/caps-*.json.log   # 不用 grep | head：pipefail 下 head 先退，grep 吃 SIGPIPE 整步退 141（Linux 上必现）
 
 "${PY:-python3}" "$here/shapes.py" policy-header "$out/policy_archives_gen.h"
 build policy "$out" "$here/t_dev_policy.c"

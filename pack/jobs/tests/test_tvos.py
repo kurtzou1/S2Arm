@@ -83,7 +83,7 @@ class InstallTest(TvCase):
             (image / ".pack/index.tsv").write_text("x"); (image / ".pack/game.img").write_bytes(b"i" * size)
         self.calls = []
 
-    def run_install(self, install_replies, pack_sizes=None, rec=None, switch2=()):
+    def run_install(self, install_replies, pack_sizes=None, rec=None, switch2=(), profile_ok=True):
         """install_replies：每次 devicectl device install app 的 (退出码, 原文)；pack_sizes：电视上资源包根列出的 {文件: 大小}（缺省 = 和 Mac 上一样）；
         switch2：哪几款当 Switch 2（要扩展虚拟寻址）"""
         replies = list(install_replies)
@@ -125,7 +125,8 @@ class InstallTest(TvCase):
              um.patch.object(tvos, "sign", sign), um.patch.object(tvos, "tv_shell", return_value=(self.root, "SID")), \
              um.patch.object(tvos, "push_programs", push_programs), um.patch.object(tvos, "usable_kit", usable_kit), \
              um.patch.object(tvos, "is_switch2", lambda n: any(Path(n).parent == usable_kit(self.c, g, "SID") for g in switch2)), \
-             um.patch.object(install, "push_pack", push_pack), um.patch.object(install, "xcode_teams", return_value=[TEAM]):
+             um.patch.object(install, "push_pack", push_pack), um.patch.object(install, "xcode_teams", return_value=[TEAM]), \
+             um.patch.object(tvos, "profile_usable", lambda c, bid, team_id: (self.calls.append(("profile?", bid, team_id)), profile_ok)[1]):
             return tvos.install_tv(self.c)
 
     def test_command_sequence_with_transient_retry(self):
@@ -165,6 +166,15 @@ class InstallTest(TvCase):
             self.run_install([(0, "")], rec=rec)
             self.assertIn(("assemble",), self.calls)
         self.c.r.pop("forceInstall")
+
+    def test_fresh_shell_but_profile_expiring_reinstalls(self):
+        # 期望（手写，#1758 / D-2KTD）：壳签了 1 小时（按时刻算新），但本机已没有能签程序包的描述文件（dev_sign --check 挑不出：一天内到期）→ 当不新，
+        #   组、签（先申请描述文件）、装，再推；旧代码只按签名时刻判、跳过重签，签程序包时才退 3
+        fresh = dict(bundleId="io.s2arm.tv.abcde12345", shellId="SID", signed=dict(at=tvos.time.time() - 3600, free=True))
+        r = self.run_install([(0, "")], rec=fresh, profile_ok=False)
+        self.assertEqual([c[0] for c in self.calls if c[0] in ("assemble", "sign", "install")], ["assemble", "sign", "install"])
+        self.assertIn(("profile?", "io.s2arm.tv.abcde12345", TEAM["id"]), self.calls)
+        self.assertTrue(r["installed"])
 
     def test_switch2_needs_eva_shell(self):
         # 期望（手写）：现装的壳没带扩展虚拟寻址（eva 没记），这次要放的 G 是 Switch 2 → 壳新鲜也重签重装，记 eva=True；再装一次就不重装

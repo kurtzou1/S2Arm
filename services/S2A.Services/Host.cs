@@ -117,6 +117,11 @@ namespace S2A.Services
             LdnServer == null &&
             !string.Equals(Environment.GetEnvironmentVariable("S2A_LDN_AUTO"), "0", StringComparison.Ordinal);
 
+        // 游戏初始化 ldn:u 时要不要先不碰网络（自动模式、这一局还没起过）：很多游戏开局就初始化 ldn:u、根本不进本地联机（动森标题画面前），
+        //   原先在这一刻起局域网发现 / 中继 / ldn_mitm 套接字，所有玩家一开游戏就被弹「本地网络」授权框。推迟到游戏第一次扫描 / 建房 / 进站点
+        //   （IUserLocalCommunicationService.S2AActivateLan 调 OnLdnInitializing）。显式给了中继地址 / ldn_mitm 的开发局照旧在初始化时起
+        internal static bool LdnDeferInit() { lock (_lanLock) return LdnAutoRequested && !_lanSessionStopped && !LdnAutoTried; }
+
         // 游戏初始化 ldn:u：按需启动已登记的平台发现；显式中继地址不自动发现。
         internal static unsafe void OnLdnInitializing()
         {
@@ -729,6 +734,7 @@ namespace S2A.Services
 
             Ryujinx.HLE.S2AHooks.Red = static what => Red.Report(what);
             Ryujinx.HLE.S2AHooks.LdnInitializing = OnLdnInitializing;   // 游戏第一次初始化 ldn:u → 按需进局域网模式（见 OnLdnInitializing）
+            Ryujinx.HLE.S2AHooks.LdnDeferInit = LdnDeferInit;   // 自动模式：初始化不碰网络，游戏第一次扫描 / 建房 / 进站点才跑 OnLdnInitializing
             // fs 命令失败（上游原样把结果回给游戏、不打日志；游戏不查结果就会在远处崩，如 10-26 普查双点医院开文件失败后拿空文件对象写存档）
             Ryujinx.HLE.S2AHooks.FsFailed = static (what, detail, red) =>
             {

@@ -449,9 +449,9 @@ static _Atomic(const char *) g_snap_layer;
 static _Atomic uint64_t g_snap_tick;
 static _Atomic int g_snap_done_once, g_snap_abandoned, g_snap_dog_on;
 // 逐层实占（存档途中被系统按内存收掉的诊断，玩家包也开）：每层一行「进入时实占 / 层内峰值 / 层内离上限最少」，层内长循环的进度报点顺手采样。
-//   一次存档约 20 行。离上限 = s2a_host_mem_avail（iPhone：os_proc_available_memory；Mac：系统随时能收回给本进程的部分）。只在存档线程上调
+//   一次存档约 20 行。离上限 = s2a_host_mem_avail（iPhone：os_proc_available_memory；Mac：系统随时能收回给本进程的部分）。只在存档 / 恢复线程上调（两者不同时跑）
 uint64_t s2a_host_mem_avail(void);   // hostmem_apple.c
-static const char *g_fp_layer; static uint64_t g_fp_in, g_fp_peak, g_fp_minav;
+static const char *g_fp_layer; static uint64_t g_fp_in, g_fp_peak, g_fp_minav, g_fp_said;   // g_fp_said：本层上次「涨到」行的实占
 static void snap_fp_sample(uint64_t *fp, uint64_t *av) {
     task_vm_info_data_t vi; mach_msg_type_number_t c = TASK_VM_INFO_COUNT;
     *fp = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &c) == KERN_SUCCESS ? vi.phys_footprint >> 20 : 0;
@@ -464,8 +464,10 @@ static void snap_fp_flush(void) {
 }
 void s2a_snap_progress(const char *layer) {
     { uint64_t fp, av; snap_fp_sample(&fp, &av);
-      if (layer) { snap_fp_flush(); g_fp_layer = layer; g_fp_in = g_fp_peak = fp; g_fp_minav = av; }
-      else if (g_fp_layer) { if (fp > g_fp_peak) g_fp_peak = fp; if (av < g_fp_minav) g_fp_minav = av; } }
+      if (layer) { snap_fp_flush(); g_fp_layer = layer; g_fp_in = g_fp_peak = g_fp_said = fp; g_fp_minav = av; }
+      else if (g_fp_layer) { if (fp > g_fp_peak) g_fp_peak = fp; if (av < g_fp_minav) g_fp_minav = av;
+          // 层内每涨 512 MB 当场记一行：层行要等出层才打，在层里被系统按内存收掉时（iPhone 恢复局图形阶段）一行都留不下
+          if (fp >= g_fp_said + 512) { g_fp_said = fp; LOG("即时存档实占：「%s」层内涨到 %llu MB、离上限 %llu MB", g_fp_layer, (unsigned long long)fp, (unsigned long long)av); } } }
     if (layer) atomic_store(&g_snap_layer, layer);
     atomic_store(&g_snap_tick, clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
     const char *st = layer ? getenv("S2A_SNAP_TEST_STALL") : NULL;   // 看门狗实测用：存档走到这一层时停 20 秒（模拟卡住）
@@ -698,9 +700,12 @@ const char *s2a_snap_path(const char *v) {
     s2a_docs_path(o, sizeof buf[0], "%s", v); return o;
 }
 static void *snap_timer(void *arg) {
-    (void)arg; long sec = atol(getenv("S2A_SNAP_AT")); const char *dir = s2a_snap_path(getenv("S2A_SNAP_DIR"));
+    (void)arg; long sec = atol(getenv("S2A_SNAP_AT"));
     int s2a_thread_alive_count(void);
     while (s2a_thread_alive_count() == 0) usleep(200000);   // 从游戏线程起来算（进程可能先排很久显卡局槽）
+    // 相对路径等游戏起来后再按文档根解析：本线程由构造函数在进程一开始就起，那时多款容器还没冻结启动上下文（S2A_DOCS = Documents/games/<号>），
+    //   早解析会落到 Documents 根下，而恢复局按 games/<号> 找，存下的快照永远找不到（11-25 iPhone 实测三局全拒）
+    const char *dir = s2a_snap_path(getenv("S2A_SNAP_DIR"));
     sleep((unsigned)sec);
     LOG("即时存档：游戏起来后 %ld 秒到点，开始存档 → %s", sec, dir);
     { int z = 0; if (!atomic_compare_exchange_strong(&g_snap_busy, &z, 1)) { LOG("【黄】即时存档：定时到点时正在存，跳过"); return NULL; } }
@@ -711,8 +716,9 @@ static void *snap_timer(void *arg) {
 #include "s2a_session.h"
 static void snap_restart_cb(int rc, const char *why, void *ctx) { (void)ctx; LOG("即时存档：进程内重启%s%s%s", rc ? "没成：" : "已开始", rc && why ? why : "", ""); }
 static void *snap_restart_timer(void *arg) {
-    (void)arg; long sec = atol(getenv("S2A_SNAP_RESTART_AT")); const char *dir = strdup(s2a_snap_path(getenv("S2A_SNAP_RESTART_DIR")));   // 留一份（s2a_snap_path 回的是轮转的静态缓冲，连着几次要跨几分钟）
+    (void)arg; long sec = atol(getenv("S2A_SNAP_RESTART_AT"));
     int s2a_thread_alive_count(void); while (s2a_thread_alive_count() == 0) usleep(200000);
+    const char *dir = strdup(s2a_snap_path(getenv("S2A_SNAP_RESTART_DIR")));   // 游戏起来后再解析（同 snap_timer：启动上下文冻结前文档根还不是这一款的）；留一份（s2a_snap_path 回的是轮转的静态缓冲，连着几次要跨几分钟）
     // S2A_SNAP_RESTART_REPEAT=<次数>（缺省 1）：连着回到快照几次，每次都等上一次重建完、再过同样的秒数（量连续恢复的内存 / 残留用）
     long rep = 1; { const char *r = getenv("S2A_SNAP_RESTART_REPEAT"); if (r && atol(r) > 1) rep = atol(r); }
     for (long i = 0; i < rep; i++) {

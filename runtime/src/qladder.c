@@ -23,8 +23,8 @@
 static struct {
     int on, tier, why, cpu_bound, no_up, stick, itv;   // itv：窗口里这些帧对应的游戏自设交换间隔（0 = 还没帧）   // no_up：本局因 CPU 跟不上从 60 帧降下来过，不再按 GPU 余量升回；stick：玩家本局点过再试 60 帧，不再自动降
     uint64_t win_ns, up_ns, last_change, gpu_t0, settle_until; double gpu0; double vsync_us;   // vsync_us：屏幕刷新一拍（0 = 不知道）   // settle_until：回前台后到这一刻之前的帧不进窗口
-    uint32_t dt_us[QL_RING]; int nd;
-    double l_fps, l_slow, l_gpu; int l_th;
+    uint32_t dt_us[QL_RING]; uint8_t hit[QL_RING]; int nd;
+    double l_fps, l_slow, l_gpu; int l_th, l_hitch;
 } q;
 
 void s2a_ql_setup(void) { double v = q.vsync_us; memset(&q, 0, sizeof q); q.on = 1; q.gpu0 = -1; q.vsync_us = v; }
@@ -41,6 +41,7 @@ int s2a_ql_fps60(int tier) { return tier == 0; }
 int s2a_ql_why(void) { return q.why; }
 int s2a_ql_cpu_bound(void) { return q.cpu_bound; }
 void s2a_ql_last(double *fps, double *slow, double *gpu, int *th) { *fps = q.l_fps; *slow = q.l_slow; *gpu = q.l_gpu; *th = q.l_th; }
+int s2a_ql_last_hitch(void) { return q.l_hitch; }
 static int cmpu(const void *a, const void *b) { uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b; return x < y ? -1 : x > y; }
 // 换到 t（why 原因），清窗口与累计
 static int go(uint64_t now, int t, int why) {
@@ -52,7 +53,7 @@ static int go(uint64_t now, int t, int why) {
 void s2a_ql_away(uint64_t now) { if (!q.on) return; q.win_ns = 0; q.nd = 0; q.gpu0 = -1; q.settle_until = now + S2A_QL_SETTLE_NS; }
 void s2a_ql_retry(uint64_t now) { if (!q.on) return; q.no_up = 0; q.stick = 1; go(now, 0, S2A_QL_WHY_RETRY); }
 int s2a_ql_stick(void) { return q.stick; }
-int s2a_ql_frame(uint64_t now, int game, uint64_t dt, double gpu_ms, int thermal, int game_itv) {
+int s2a_ql_frame(uint64_t now, int game, uint64_t dt, double gpu_ms, int thermal, int game_itv, int hitch) {
     if (!q.on) return -1;
     if (!game || !dt || dt >= QL_GAP_NS) return -1;
     if (now < q.settle_until) return -1;   // 刚回前台：这几秒的帧（含后台留下的慢帧）不进窗口；GPU 起点从第一帧计时帧起
@@ -60,7 +61,7 @@ int s2a_ql_frame(uint64_t now, int game, uint64_t dt, double gpu_ms, int thermal
     //   前半段 33.3 ms 的帧按 16.7 ms 的目标全算慢帧，刚放开的 60 帧随即被判「达不到」整局关掉（11-25 一款开放世界游戏：间隔 2→1 后 15 秒窗口满，44.9 帧/秒、慢帧 32.7%，补丁全关）
     { int iv = game_itv >= 1 ? game_itv : 1; if (iv != q.itv) { if (q.itv) { q.win_ns = 0; q.nd = 0; q.gpu0 = -1; } q.itv = iv; } }
     if (q.gpu0 < 0 && gpu_ms >= 0) { q.gpu0 = gpu_ms; q.gpu_t0 = now; }
-    if (q.nd < QL_RING) q.dt_us[q.nd++] = (uint32_t)(dt / 1000);
+    if (q.nd < QL_RING) { q.hit[q.nd] = hitch != 0; q.dt_us[q.nd++] = (uint32_t)(dt / 1000); }
     q.win_ns += dt;
     if (q.win_ns < QL_WIN_NS) return -1;
     // 判一个窗口：目标帧时长 60 帧档 16.7 ms、30 帧档 33.3 ms，都不低于游戏自设间隔对应的帧时长（11-15 v0.4.0 自测）：
@@ -69,7 +70,9 @@ int s2a_ql_frame(uint64_t now, int game, uint64_t dt, double gpu_ms, int thermal
     double target_us = q.tier == 0 ? 1e6 / 60 : 1e6 / 30;
     if (target_us < itv_us) target_us = itv_us;
     double slow_us = s2a_ql_slow_us(target_us, q.vsync_us);
-    int slow = 0; for (int i = 0; i < q.nd; i++) slow += q.dt_us[i] > slow_us;
+    // 一次性卡顿（首遇现编 / 首传贴图）的慢帧不算：卡顿帧占窗口 ≤ S2A_QL_HITCH_MAX_PERMILLE 时扣掉，多了照常算（这款一直在现编，不是一次性）
+    int slow = 0, slow_h = 0, nh = 0; for (int i = 0; i < q.nd; i++) { int sl = q.dt_us[i] > slow_us; slow += sl; slow_h += sl && q.hit[i]; nh += q.hit[i]; }
+    if (q.nd && nh * 1000 <= q.nd * S2A_QL_HITCH_MAX_PERMILLE) { slow -= slow_h; q.l_hitch = slow_h; } else q.l_hitch = nh ? -1 : 0;
     qsort(q.dt_us, (size_t)q.nd, sizeof q.dt_us[0], cmpu);
     double med = q.nd ? q.dt_us[q.nd / 2] : 0, slow_pct = q.nd ? 100.0 * slow / q.nd : 0;
     double gpu_pct = q.gpu0 >= 0 && gpu_ms >= q.gpu0 && now > q.gpu_t0 ? 100.0 * (gpu_ms - q.gpu0) / ((double)(now - q.gpu_t0) / 1e6) : -1;

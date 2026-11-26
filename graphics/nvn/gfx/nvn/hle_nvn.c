@@ -4328,6 +4328,10 @@ static void fstep_tick(const win_t *o) {
         t0 = t; v0 = vs; memset(held, 0, sizeof held);
     }
 }
+// 首遇现编 / 首传贴图的帧（档位梯子不把这类一次性卡顿算慢帧，runtime/src/qladder_host.c）：有就记成 2、每次取减 1——
+//   梯子在上屏回调里取，现编可能落在这次上屏之前或之后一帧，记两次上屏覆盖这一前一后
+static _Atomic int g_frame_hitch;
+int s2a_frame_hitch_take(void) { int v = atomic_load(&g_frame_hitch); while (v > 0 && !atomic_compare_exchange_weak(&g_frame_hitch, &v, v - 1)) {} return v > 0; }
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     if (dm_gfx_session_stopping()) return;
     win_t *o = (win_t *)w; o->presents++; nat_itv_sync(o);
@@ -4446,6 +4450,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
             lf_rec *r = &g_lf[f % LFN]; r->f = f; r->fr = fr; r->nv = nv; r->t_s = (now_ns() - g_t0_ns) / 1e9; r->pso = (unsigned)(pso_ - ppso); r->lib = (unsigned)(lib_ - plib);
             nvn_be_stall_take(r->stl, sizeof r->stl); r->make_ms = ((lns - plns) + (pns - ppns)) / 1e6; r->up = (unsigned)(up - pup); r->rup = (unsigned)(rup - prup); r->up_mb = (ub - pub) / 1048576.0; r->up_ms = up_ms;
             plns = lns; ppns = pns; pup = up; prup = rup; pub = ub;
+            if (r->pso || r->lib || r->up) atomic_store(&g_frame_hitch, 2);   // 档位梯子（runtime/src/qladder.c）：这一帧有首遇现编 / 首传贴图，记到它和下一次上屏
         }
         plib = lib_; ppso = pso_;
         trow(f, "@t_s", (now_ns() - g_t0_ns) / 1e9);

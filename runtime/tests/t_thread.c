@@ -17,7 +17,7 @@ static char g_cap[65536]; static size_t g_capn; static _Atomic int g_cap_on;
 #ifndef S2A_LOG_OUT_WEAK   // 安卓暂停夹具（runtime/tests/support/run_pause_wait_host.py）把 thread.c 与本文件拼进同一单元、thread.c 先带进了弱定义：那里不跑 ㉙，不再定义
 void s2a_log_out(int fd, const char *p, size_t n) {
     ssize_t w = write(fd, p, n); (void)w;
-    if (atomic_load(&g_cap_on) && (strstr(p, "同步调用") || strstr(p, "寄存器 x") || strstr(p, "键周围内存")) && g_capn + n < sizeof g_cap) { memcpy(g_cap + g_capn, p, n); g_capn += n; g_cap[g_capn] = 0; }
+    if (atomic_load(&g_cap_on) && (strstr(p, "同步调用") || strstr(p, "寄存器 x") || strstr(p, "键周围内存") || strstr(p, "客体回溯")) && g_capn + n < sizeof g_cap) { memcpy(g_cap + g_capn, p, n); g_capn += n; g_cap[g_capn] = 0; }
 }
 #endif
 #include <stdatomic.h>
@@ -216,6 +216,10 @@ static void kw_waiter(uint64_t arg) { (void)arg;
     atomic_store(&g_kw[5], s2a_thread_current());   // 持锁进 0x1C（SDK 条件变量协议：等之前锁在自己手里）
     uint64_t r[31] = {(uint64_t)(uintptr_t)&g_kw[5], (uint64_t)(uintptr_t)&g_kw[6], s2a_thread_current(), (uint64_t)-1}; svc_thread(0x1C, r);
     atomic_store(&g_kw_done, 1); uint64_t e[31] = {0}; svc_thread(0x0A, e); }
+// ㉜ 夹具（定义在文件末尾：离开上面 module_of 替身按函数 ±0x400 认作「游戏代码」的范围，否则宿主函数会被当成游戏帧）
+#include <pthread.h>
+static pthread_mutex_t g_hc_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_hc_cv = PTHREAD_COND_INITIALIZER; static _Atomic int g_hc_in, g_hc_go, g_hc_exit;
+static void hc_caller(uint64_t arg);
 static void sv_spinner(uint64_t arg) { (void)arg;   // ㉙：3 次 SignalToAddress 后在游戏代码里空转（不进系统调用 → 线程表里是「在跑」）
     for (int i = 0; i < 3; i++) { uint64_t r[31] = {(uint64_t)&g_sv, 0, 7, 1}; svc_thread(0x35, r); }
     atomic_store(&g_sv_done, 1); while (!atomic_load(&g_sv_go)) { }
@@ -1187,6 +1191,19 @@ int main(void) {
         uint64_t sg[31] = {(uint64_t)(uintptr_t)&g_kw[6], 1}; svc_thread(0x1D, sg); wait_flag(&g_kw_done, WAIT_LONG);   // 放它走：拿回锁、退出
     }
 
+    {   // ㉜ 停帧现场：游戏线程卡在宿主条件变量上（不在系统调用里 → 线程表算「在跑」，pc / lr 在系统库里），帧回溯要沿帧链走过宿主帧、
+        //   打出调进来的那个宿主函数名（t_host_cond_block_085d7e）。期望手写：截到的现场含「宿主 」且含这个函数名。
+        //   反证：thread.c 帧回溯碰到宿主帧就停（改前）→ 只打 pc / lr 两个地址，不含函数名
+        g_case = "㉜ 停帧现场的宿主帧回溯";
+        atomic_store(&g_hc_in, 0); atomic_store(&g_hc_go, 0); atomic_store(&g_hc_exit, 0);
+        void s2a_core_leave(void);
+        spawn(hc_caller, 0, NULL); s2a_core_leave();
+        int in = wait_flag(&g_hc_in, WAIT_LONG); usleep(20000);   // 进了函数再给它一点时间睡进条件变量
+        g_capn = 0; g_cap[0] = 0; atomic_store(&g_cap_on, 1); void s2a_thread_dump(void); s2a_thread_dump(); atomic_store(&g_cap_on, 0);
+        CHECK(in && strstr(g_cap, "宿主 ") && strstr(g_cap, "t_host_cond_block_085d7e"), "㉜ 停帧现场没沿宿主帧打出调进来的宿主函数名（期望含「宿主 」与 t_host_cond_block_085d7e；进函数 %d），截到：%s", in, g_cap);
+        pthread_mutex_lock(&g_hc_mu); atomic_store(&g_hc_go, 1); pthread_cond_broadcast(&g_hc_cv); pthread_mutex_unlock(&g_hc_mu);
+        wait_flag(&g_hc_exit, WAIT_LONG);
+    }
     {   // ⑦
         g_case = "⑦ 暂停空转线程放核";
         void s2a_core_leave(void);
@@ -1980,3 +1997,10 @@ int main(void) {
     printf("%s t_thread：%d 处不符（争锁 %d×%d 次 %.0f ms 重叠 0；反例不加锁重叠 %d 次；按时醒定时器判过 %d / 3 项）\n", bad ? "✗" : "✓", bad, NTH, NIT, ms5, ov0, g_ontime_ok);
     fflush(stdout); _exit(bad != 0);
 }
+
+// ㉜：游戏线程调进宿主函数、在宿主条件变量上等（诊断#085d7e 的现场形状）。宿主函数取独特名字、不内联、导出，停帧现场的帧回溯要把它打出来
+__attribute__((noinline, visibility("default"))) void t_host_cond_block_085d7e(void) {
+    pthread_mutex_lock(&g_hc_mu); atomic_store(&g_hc_in, 1);
+    while (!atomic_load(&g_hc_go)) pthread_cond_wait(&g_hc_cv, &g_hc_mu);
+    pthread_mutex_unlock(&g_hc_mu); __asm__ volatile("" ::: "memory"); }
+static void hc_caller(uint64_t arg) { (void)arg; t_host_cond_block_085d7e(); atomic_store(&g_hc_exit, 1); uint64_t e[31] = {0}; svc_thread(0x0A, e); }

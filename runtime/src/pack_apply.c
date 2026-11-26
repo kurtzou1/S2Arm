@@ -1678,7 +1678,10 @@ static void gate_show(int act, int again) {
     s2a_ios_show_pack_help(help_title(st), d, g_imp_name, gate_recheck);
 }
 static void *gate_thread(void *a) { (void)a;
-    static const char *const act_name[] = {"就绪", "导入", "等包稳住", "资源还在传", "资源传输停住了", "没有游戏资源", "资源包不完整"};
+    // 按枚举下标对名字（f76fc5942 删掉「等包稳住」那一档后这张表没跟着删，往后每档错一位：「没有游戏资源」印成「资源传输停住了」，诊断单 D-EWR5 被误读成推送断了）
+    static const char *const act_name[] = {[S2A_GATE_READY] = "就绪", [S2A_GATE_IMPORT] = "导入", [S2A_GATE_WAIT] = "资源还在传", [S2A_GATE_STALLED] = "资源传输停住了",
+                                           [S2A_GATE_NONE] = "没有游戏资源", [S2A_GATE_BROKEN] = "资源包不完整"};
+    _Static_assert(sizeof act_name / sizeof *act_name == S2A_GATE_BROKEN + 1, "闸门档位名与枚举数不符");
     struct s2a_gate_watch w = {0}; int last = -1, poked = 0;
     for (;;) {
         char why[600]; int act = s2a_import_decide(g_imp_docs, &w, time(NULL), why, sizeof why);
